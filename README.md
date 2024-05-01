@@ -23,3 +23,19 @@ Initialize the **West** workspace:
 Update the **West** workspace:
 
     west update
+
+Build application:
+
+    west build -b sticker
+
+Start RTT logging:
+
+    JLinkRTTLogger -Device STM32WLE5CC -If SWD -Speed 4000 -RTTChannel 1 ~/.sticker.log
+
+Connect to shell:
+
+    nc localhost 19021
+
+Determine RTT block address:
+
+    readelf -s build/zephyr/zephyr.elf | grep _SEGGER_RTT

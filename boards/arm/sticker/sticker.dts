@@ -1,0 +1,178 @@
+/*
+ * Copyright (c) 2024 HARDWARIO a.s.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+
+#include <st/wl/stm32wle5Xc.dtsi>
+#include <st/wl/stm32wle5ccux-pinctrl.dtsi>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/ {
+	model = "HARDWARIO STICKER";
+	compatible = "hardwario,sticker";
+
+	chosen {
+		/*
+		zephyr,console = &rtt0;
+		zephyr,shell-uart = &rtt1;
+		*/
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_r: led_r {
+			gpios = <&gpioa 5 GPIO_ACTIVE_LOW>;
+		};
+
+		led_g: led_g {
+			gpios = <&gpioa 6 GPIO_ACTIVE_LOW>;
+		};
+
+		led_y: led_y {
+			gpios = <&gpioa 4 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	aliases {
+		led0 = &led_r;
+		led1 = &led_g;
+		led2 = &led_y;
+		//lora0 = &lora;
+		watchdog0 = &iwdg;
+	};
+
+	/*
+	rtt0: rtt_chan0 {
+		compatible = "segger,rtt-uart";
+		status = "okay";
+	};
+
+	rtt1: rtt_chan1 {
+		compatible = "segger,rtt-uart";
+		status = "okay";
+		tx-buffer-size = <1024>;
+		rx-buffer-size = <1024>;
+	};
+	*/
+};
+
+stm32_lp_tick_source: &lptim1 {
+	clocks = <&rcc STM32_CLOCK_BUS_APB1 0x80000000>, <&rcc STM32_SRC_LSI LPTIM1_SEL(1)>;
+	status = "okay";
+};
+
+&clk_lsi {
+	status = "okay";
+};
+/*
+&pll {
+	div-m = <1>;
+	mul-n = <6>;
+	div-r = <2>;
+	div-q = <2>;
+	clocks = <&clk_hsi>;
+	status = "okay";
+};
+
+&rcc {
+	clocks = <&pll>;
+	clock-frequency = <DT_FREQ_M(48)>;
+	cpu1-prescaler = <1>;
+	ahb3-prescaler = <1>;
+	apb1-prescaler = <1>;
+	apb2-prescaler = <1>;
+};
+*/
+
+&clk_msi {
+	status = "okay";
+	msi-range = <11>;
+};
+
+&rcc {
+	clocks = <&clk_msi>;
+	clock-frequency = <DT_FREQ_M(48)>;
+	cpu1-prescaler = <1>;
+	ahb3-prescaler = <1>;
+	apb1-prescaler = <1>;
+	apb2-prescaler = <1>;
+};
+
+&rtc {
+	clocks = <&rcc STM32_CLOCK_BUS_APB1 0x00000400>, <&rcc STM32_SRC_LSI RTC_SEL(2)>;
+	status = "okay";
+};
+
+&iwdg {
+	status = "okay";
+};
+
+&aes {
+	status = "okay";
+};
+
+&rng {
+	status = "okay";
+};
+
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x00000000 DT_SIZE_K(32)>;
+			read-only;
+		};
+
+		slot0_partition: partition@8000 {
+			label = "image-0";
+			reg = <0x00008000 DT_SIZE_K(108)>;
+		};
+
+		slot1_partition: partition@23000 {
+			label = "image-1";
+			reg = <0x00023000 DT_SIZE_K(108)>;
+		};
+
+		storage_partition: partition@3e000 {
+			label = "storage";
+			reg = <0x0003e000 DT_SIZE_K(8)>;
+		};
+	};
+};
+
+/*
+&clk_hse {
+	clock-frequency = <DT_FREQ_M(32)>;
+	hse-tcxo;
+};
+*/
+
+&clk_lse {
+	clock-frequency = <32768>;
+};
+
+/*
+&subghzspi {
+	status = "okay";
+	lora: radio@0 {
+		status = "okay";
+		tx-enable-gpios = <&gpioa 0 GPIO_ACTIVE_LOW>;
+		rx-enable-gpios = <&gpioa 8 GPIO_ACTIVE_LOW>;
+		dio3-tcxo-voltage = <SX126X_DIO3_TCXO_1V7>;
+		tcxo-power-startup-delay-ms = <5>;
+		power-amplifier-output = "rfo-lp";
+		rfo-lp-max-power = <14>;
+	};
+};
+*/
