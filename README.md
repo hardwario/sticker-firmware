@@ -32,9 +32,21 @@ Install required Python packages:
 
     pip install -r zephyr/scripts/requirements.txt -r bootloader/mcuboot/scripts/requirements.txt
 
-Build application:
+Build the application in production mode:
 
-    west build -b sticker
+    make
+
+Build the application in debug mode:
+
+    make debug
+
+Flash the application:
+
+    make flash
+
+Clean build outputs:
+
+    make clean
 
 Start RTT logging:
 
