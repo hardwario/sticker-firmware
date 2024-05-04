@@ -24,10 +24,6 @@ Initialize the **West** workspace:
 
     west init -m git@github.com:hardwario/sticker.git
 
-Set default board name:
-
-    west config build.board sticker
-
 Update the **West** workspace:
 
     west update
@@ -47,6 +43,10 @@ Start RTT logging:
 Connect to shell:
 
     nc localhost 19021
+
+Read logs:
+
+    tail -f tail -f ~/.sticker.log
 
 Determine RTT block address:
 
