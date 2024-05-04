@@ -16,13 +16,25 @@ Activate the virtual environment:
 
     source .venv/bin/activate
 
+Install the **West** tool:
+
+    pip install west
+
 Initialize the **West** workspace:
 
     west init -m git@github.com:hardwario/sticker.git
 
+Set default board name:
+
+    west config build.board sticker
+
 Update the **West** workspace:
 
     west update
+
+Install required Python packages:
+
+    pip install -r zephyr/scripts/requirements.txt -r bootloader/mcuboot/scripts/requirements.txt
 
 Build application:
 
