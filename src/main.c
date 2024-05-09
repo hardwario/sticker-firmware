@@ -1,10 +1,13 @@
-#include <zephyr/kernel.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/logging/log.h>
-
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+
+#include "app_ds18b20.h"
+
+#include <stdint.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
@@ -63,17 +66,93 @@ int hygro_read(float *temperature, float *humidity)
 	return 0;
 }
 
+#if 0
+
+void w1_search_callback(struct w1_rom rom, void *user_data)
+{
+	LOG_INF("Device found; family: 0x%02x, serial: 0x%016llx", rom.family,
+		w1_rom_to_uint64(&rom));
+}
+
+int w1_scan(void)
+{
+	int ret;
+	int res = 0;
+
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
+
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
+	}
+
+	ret = w1_lock_bus(dev);
+	if (ret) {
+		LOG_ERR("Call `w1_lock_bus` failed: %d", ret);
+		res = ret;
+		goto error;
+	}
+
+	ret = pm_device_action_run(dev, PM_DEVICE_ACTION_RESUME);
+	if (ret && ret != -EALREADY) {
+		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
+		res = ret;
+		goto error;
+	}
+
+	k_sleep(K_MSEC(3));
+
+	int num_devices = w1_search_rom(dev, w1_search_callback, NULL);
+
+	LOG_INF("Number of devices found on bus: %d", num_devices);
+
+	ret = pm_device_action_run(dev, PM_DEVICE_ACTION_SUSPEND);
+	if (ret && ret != -EALREADY) {
+		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
+		res = ret;
+		goto error;
+	}
+
+	ret = w1_unlock_bus(dev);
+	if (ret) {
+		LOG_ERR("Call `w1_unlock_bus` failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
+
+error:
+	ret = w1_unlock_bus(dev);
+	if (ret) {
+		LOG_ERR("Call `w1_unlock_bus` failed: %d", ret);
+		res = res ? res : ret;
+	}
+
+	return res;
+}
+#endif
+
 int main(void)
 {
 	int ret;
 	bool led_state = true;
 
+	LOG_INF("Build time: " __DATE__ " " __TIME__);
+
 	if (!gpio_is_ready_dt(&led)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT);
+	if (ret) {
+		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
 		return 0;
 	}
 
-	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_ACTIVE);
-	if (ret < 0) {
+	ret = app_ds18b20_scan();
+	if (ret) {
+		LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
 		return 0;
 	}
 
@@ -88,6 +167,21 @@ int main(void)
 		}
 
 		led_state = !led_state;
+
+		int count = app_ds18b20_get_count();
+
+		for (int i = 0; i < count; i++) {
+			uint64_t serial_number;
+			double temperature;
+			ret = app_ds18b20_read(i, &serial_number, &temperature);
+			if (ret) {
+				LOG_ERR("Call `app_ds18b20_read` failed: %d", ret);
+			} else {
+				LOG_INF("Serial number: %llu / Temperature: %.2f C", serial_number,
+					temperature);
+			}
+		}
+
 		k_msleep(SLEEP_TIME_MS);
 	}
 
