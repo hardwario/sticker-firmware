@@ -11,10 +11,9 @@
 
 /* Standard includes */
 #include <stdint.h>
+#include <errno.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
-
-#define SLEEP_TIME_MS 1000
 
 #define LED0_NODE DT_ALIAS(led0)
 
@@ -35,13 +34,13 @@ int main(void)
 	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT);
 	if (ret) {
 		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
-		return 0;
+		return ret;
 	}
 
 	ret = app_ds18b20_scan();
 	if (ret) {
 		LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
-		return 0;
+		return ret;
 	}
 
 	for (;;) {
@@ -51,7 +50,8 @@ int main(void)
 
 		ret = gpio_pin_toggle_dt(&led);
 		if (ret < 0) {
-			return 0;
+			LOG_ERR("Call `gpio_pin_toggle_dt` failed: %d", ret);
+			return ret;
 		}
 
 		led_state = !led_state;
@@ -70,7 +70,7 @@ int main(void)
 			}
 		}
 
-		k_msleep(SLEEP_TIME_MS);
+		k_sleep(K_SECONDS(1));
 	}
 
 	return 0;
