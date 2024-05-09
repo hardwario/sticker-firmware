@@ -88,8 +88,8 @@ stm32_lp_tick_source: &lptim1 {
 */
 
 &clk_msi {
-	status = "okay";
 	msi-range = <11>;
+	status = "okay";
 };
 
 &rcc {
@@ -102,24 +102,23 @@ stm32_lp_tick_source: &lptim1 {
 };
 
 &i2c1 {
-	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
-	pinctrl-names = "default";
-	status = "okay";
 	clock-frequency = <I2C_BITRATE_STANDARD>;
+	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
+	pinctrl-1 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
+	pinctrl-names = "default", "sleep";
+	status = "okay";
 
 	sht40: sht40@44 {
 		compatible = "sensirion,sht4x";
 		reg = <0x44>;
 		repeatability = <2>;
-		status = "okay";
 	};
 
 	ds2484: ds2484@18 {
 		compatible = "maxim,ds2484";
 		reg = <0x18>;
-		slpz-gpios = <&gpiob 8 GPIO_ACTIVE_HIGH>;
+		slpz-gpios = <&gpiob 8 GPIO_ACTIVE_LOW>;
 		active-pullup;
-		status = "okay";
 
 		ds18b20_0: ds18b20_0 {
 			compatible = "maxim,ds18b20";
