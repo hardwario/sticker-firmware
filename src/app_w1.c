@@ -161,7 +161,7 @@ int app_w1_scan(struct app_w1 *w1, const struct device *dev,
 	struct scan_item *item;
 	struct scan_item *item_safe;
 
-	SYS_SLIST_FOR_EACH_CONTAINER_SAFE (&w1->scan_list, item, item_safe, node) {
+	SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&w1->scan_list, item, item_safe, node) {
 		if (user_cb) {
 			ret = user_cb(item->rom, user_data);
 			if (ret) {
@@ -171,7 +171,7 @@ int app_w1_scan(struct app_w1 *w1, const struct device *dev,
 	}
 
 error:
-	SYS_SLIST_FOR_EACH_CONTAINER_SAFE (&w1->scan_list, item, item_safe, node) {
+	SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&w1->scan_list, item, item_safe, node) {
 		sys_slist_remove(&w1->scan_list, NULL, &item->node);
 		k_free(item);
 	}

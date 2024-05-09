@@ -12,6 +12,7 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(blinky)
 
 target_sources(app PRIVATE src/app_ds18b20.c)
+target_sources(app PRIVATE src/app_sht40.c)
 target_sources(app PRIVATE src/app_w1.c)
 target_sources(app PRIVATE src/main.c)
 
