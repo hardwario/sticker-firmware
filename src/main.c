@@ -1,4 +1,4 @@
-#if 0
+#if 1
 
 #include "app_ds18b20.h"
 #include "app_sht40.h"
@@ -19,8 +19,6 @@
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
-#define LED0_NODE DT_ALIAS(led0)
-
 /* Customize based on network configuration */
 #define LORAWAN_DEV_EUI                                                                            \
 	{                                                                                          \
@@ -36,7 +34,7 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 			0xAA, 0x24, 0x13                                                           \
 	}
 
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 
 char data[] = {'h', 'e', 'l', 'l', 'o', 'w', 'o', 'r', 'l', 'd'};
 
@@ -103,13 +101,15 @@ int main(void)
 		return ret;
 	}
 
+	k_sleep(K_SECONDS(1));
+
 	ret = app_ds18b20_scan();
 	if (ret) {
 		LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
 		return ret;
 	}
 
-#if 0
+#if 1
 	struct lorawan_join_config join_cfg;
 	uint8_t dev_eui[] = LORAWAN_DEV_EUI;
 	uint8_t join_eui[] = LORAWAN_JOIN_EUI;

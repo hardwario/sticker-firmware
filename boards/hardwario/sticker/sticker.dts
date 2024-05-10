@@ -73,6 +73,14 @@ stm32_lp_tick_source: &lptim1 {
 	apb2-prescaler = <1>;
 };
 
+&gpioa {
+	lpd {
+		gpio-hog;
+		gpios = <1 GPIO_ACTIVE_HIGH>;
+		output-high;
+	};
+};
+
 &i2c1 {
 	clock-frequency = <I2C_BITRATE_STANDARD>;
 	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;

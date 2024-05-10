@@ -1,4 +1,6 @@
-all:
+all: release
+
+release:
 	@west build -b sticker
 
 debug:
@@ -6,6 +8,9 @@ debug:
 
 flash:
 	@west flash
+
+gdb:
+	@west debug
 
 clean:
 	@rm -rf build
