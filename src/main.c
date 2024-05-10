@@ -1,3 +1,5 @@
+#if 0
+
 #include "app_ds18b20.h"
 #include "app_sht40.h"
 
@@ -22,7 +24,7 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 /* Customize based on network configuration */
 #define LORAWAN_DEV_EUI                                                                            \
 	{                                                                                          \
-		0xDD, 0xEE, 0xAA, 0xDD, 0xBB, 0xEE, 0xEE, 0xFF                                     \
+		0x70, 0xB3, 0xD5, 0x7E, 0xD0, 0x06, 0x76, 0x0E                                     \
 	}
 #define LORAWAN_JOIN_EUI                                                                           \
 	{                                                                                          \
@@ -30,8 +32,8 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 	}
 #define LORAWAN_APP_KEY                                                                            \
 	{                                                                                          \
-		0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09,      \
-			0xCF, 0x4F, 0x3C                                                           \
+		0xC5, 0x87, 0x56, 0xD7, 0x08, 0xCD, 0x99, 0x44, 0x32, 0xFC, 0x9B, 0x46, 0x94,      \
+			0xAA, 0x24, 0x13                                                           \
 	}
 
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
@@ -107,6 +109,7 @@ int main(void)
 		return ret;
 	}
 
+#if 0
 	struct lorawan_join_config join_cfg;
 	uint8_t dev_eui[] = LORAWAN_DEV_EUI;
 	uint8_t join_eui[] = LORAWAN_JOIN_EUI;
@@ -136,6 +139,7 @@ int main(void)
 		LOG_ERR("lorawan_join_network failed: %d", ret);
 		return 0;
 	}
+#endif
 
 	for (;;) {
 		LOG_INF("Alive");
@@ -164,8 +168,69 @@ int main(void)
 			}
 		}
 
+		k_sleep(K_SECONDS(2));
+	}
+
+	return 0;
+}
+
+#else
+
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
+
+#include <errno.h>
+
+LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
+
+int main(void)
+{
+	int ret;
+
+	bool led_state = true;
+
+	LOG_INF("Build time: " __DATE__ " " __TIME__);
+
+	struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+
+	if (!gpio_is_ready_dt(&led)) {
+		LOG_ERR("Port not ready");
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT);
+	if (ret) {
+		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		return ret;
+	}
+
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
+
+	ret = pm_device_action_run(dev, PM_DEVICE_ACTION_SUSPEND);
+	if (ret && ret != -EALREADY) {
+		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
+		return ret;
+	}
+
+	for (;;) {
+		LOG_INF("Alive");
+
+		ret = gpio_pin_toggle_dt(&led);
+		if (ret) {
+			LOG_ERR("Call `gpio_pin_toggle_dt` failed: %d", ret);
+			return ret;
+		}
+
+		led_state = !led_state;
+
 		k_sleep(K_SECONDS(1));
 	}
 
 	return 0;
 }
+
+#endif

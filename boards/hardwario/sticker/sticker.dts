@@ -46,32 +46,27 @@
 };
 
 stm32_lp_tick_source: &lptim1 {
-	clocks = <&rcc STM32_CLOCK_BUS_APB1 0x80000000>, <&rcc STM32_SRC_LSI LPTIM1_SEL(1)>;
+	clocks = <&rcc STM32_CLOCK_BUS_APB1 0x80000000>, <&rcc STM32_SRC_LSE LPTIM1_SEL(3)>;
 	status = "okay";
-};
-
-&clk_hse {
-	clock-frequency = <DT_FREQ_M(32)>;
-	hse-tcxo;
 };
 
 &clk_lse {
 	clock-frequency = <32768>;
+	driving-capability = <1>;
+	status = "okay";
 };
 
 &clk_lsi {
 	status = "okay";
 };
 
-
-&clk_msi {
-	msi-range = <11>;
+&clk_hsi {
 	status = "okay";
 };
 
 &rcc {
-	clocks = <&clk_msi>;
-	clock-frequency = <DT_FREQ_M(48)>;
+	clocks = <&clk_hsi>;
+	clock-frequency = <DT_FREQ_M(16)>;
 	cpu1-prescaler = <1>;
 	ahb3-prescaler = <1>;
 	apb1-prescaler = <1>;
@@ -113,7 +108,7 @@ stm32_lp_tick_source: &lptim1 {
 
 &rtc {
 	clocks = <&rcc STM32_CLOCK_BUS_APB1 0x00000400>,
-		 <&rcc STM32_SRC_LSI RTC_SEL(2)>;
+		 <&rcc STM32_SRC_LSE RTC_SEL(1)>;
 	status = "okay";
 };
 
@@ -139,6 +134,7 @@ stm32_lp_tick_source: &lptim1 {
 		tcxo-power-startup-delay-ms = <5>;
 		power-amplifier-output = "rfo-lp";
 		rfo-lp-max-power = <14>;
+		spi-max-frequency = <1000000>;
 	};
 };
 
