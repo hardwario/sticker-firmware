@@ -11,6 +11,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#include <zephyr/init.h>
 #include <zephyr/lorawan/lorawan.h>
 
 /* Standard includes */
@@ -18,6 +19,8 @@
 #include <errno.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
+
+int error_code = 0;
 
 /* Customize based on network configuration */
 #define LORAWAN_DEV_EUI                                                                            \
@@ -34,7 +37,9 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 			0xAA, 0x24, 0x13                                                           \
 	}
 
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+static const struct gpio_dt_spec led_r = GPIO_DT_SPEC_GET(DT_NODELABEL(led_r), gpios);
+static const struct gpio_dt_spec led_g = GPIO_DT_SPEC_GET(DT_NODELABEL(led_g), gpios);
+static const struct gpio_dt_spec led_y = GPIO_DT_SPEC_GET(DT_NODELABEL(led_y), gpios);
 
 char data[] = {'h', 'e', 'l', 'l', 'o', 'w', 'o', 'r', 'l', 'd'};
 
@@ -90,26 +95,40 @@ int main(void)
 
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
 
-	if (!gpio_is_ready_dt(&led)) {
+	if (!gpio_is_ready_dt(&led_r) || !gpio_is_ready_dt(&led_g) || !gpio_is_ready_dt(&led_y)) {
 		LOG_ERR("Device not ready");
-		return -ENODEV;
+		goto error;
 	}
 
-	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT);
+	ret = gpio_pin_configure_dt(&led_r, GPIO_OUTPUT_INACTIVE);
 	if (ret) {
 		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
-		return ret;
+		goto error2;
+	}
+
+	ret = gpio_pin_configure_dt(&led_g, GPIO_OUTPUT_INACTIVE);
+	if (ret) {
+		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		goto error2;
+	}
+
+	ret = gpio_pin_configure_dt(&led_y, GPIO_OUTPUT_INACTIVE);
+	if (ret) {
+		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		goto error2;
 	}
 
 	k_sleep(K_SECONDS(1));
 
+#if defined(CONFIG_W1)
 	ret = app_ds18b20_scan();
 	if (ret) {
 		LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
-		return ret;
+		goto error3;
 	}
+#endif
 
-#if 1
+#if defined(CONFIG_LORAWAN)
 	struct lorawan_join_config join_cfg;
 	uint8_t dev_eui[] = LORAWAN_DEV_EUI;
 	uint8_t join_eui[] = LORAWAN_JOIN_EUI;
@@ -120,7 +139,7 @@ int main(void)
 	ret = app_lrw_init();
 	if (ret) {
 		LOG_ERR("Call `app_lrw_init` failed: %d", ret);
-		return ret;
+		goto error;
 	}
 
 	lorawan_register_downlink_callback(&downlink_cb);
@@ -136,8 +155,7 @@ int main(void)
 	LOG_INF("Joining network over OTAA");
 	ret = lorawan_join(&join_cfg);
 	if (ret < 0) {
-		LOG_ERR("lorawan_join_network failed: %d", ret);
-		return 0;
+		LOG_WRN("lorawan_join_network failed: %d", ret);
 	}
 #endif
 
@@ -146,14 +164,15 @@ int main(void)
 
 		app_sht40_read(NULL, NULL);
 
-		ret = gpio_pin_toggle_dt(&led);
+		ret = gpio_pin_toggle_dt(&led_g);
 		if (ret < 0) {
 			LOG_ERR("Call `gpio_pin_toggle_dt` failed: %d", ret);
-			return ret;
+			goto error;
 		}
 
 		led_state = !led_state;
 
+#if defined(CONFIG_W1)
 		int count = app_ds18b20_get_count();
 
 		for (int i = 0; i < count; i++) {
@@ -167,11 +186,61 @@ int main(void)
 					temperature);
 			}
 		}
+#endif
 
-		k_sleep(K_SECONDS(2));
+		k_sleep(K_SECONDS(1));
 	}
 
 	return 0;
+
+error:
+
+	for (;;) {
+		LOG_ERR("Error loop");
+
+		ret = gpio_pin_toggle_dt(&led_r);
+		if (ret < 0) {
+			LOG_ERR("Call `gpio_pin_toggle_dt` failed: %d", ret);
+			return ret;
+		}
+
+		k_sleep(K_MSEC(50));
+	}
+
+	return 1;
+
+error2:
+
+	for (;;) {
+		LOG_ERR("Error loop");
+
+		ret = gpio_pin_toggle_dt(&led_r);
+		if (ret < 0) {
+			LOG_ERR("Call `gpio_pin_toggle_dt` failed: %d", ret);
+			return ret;
+		}
+
+		k_sleep(K_MSEC(3250));
+	}
+
+	return 1;
+
+error3:
+
+	for (;;) {
+		LOG_ERR("Error loop");
+
+		for (int i = 0; i < error_code; i++) {
+			gpio_pin_set_dt(&led_y, 1);
+			k_sleep(K_MSEC(200));
+			gpio_pin_set_dt(&led_y, 0);
+			k_sleep(K_MSEC(200));
+		}
+
+		k_sleep(K_MSEC(1250));
+	}
+
+	return 1;
 }
 
 #else
@@ -234,3 +303,12 @@ int main(void)
 }
 
 #endif
+
+static int boot_delay(void)
+{
+	k_sleep(K_MSEC(500));
+
+	return 0;
+}
+
+SYS_INIT(boot_delay, POST_KERNEL, 0);
