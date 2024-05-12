@@ -63,3 +63,11 @@ Read logs:
 Determine RTT block address:
 
     readelf -s build/zephyr/zephyr.elf | grep _SEGGER_RTT
+
+I2C:
+https://github.com/zephyrproject-rtos/zephyr/issues/37414
+https://github.com/dinuxbg/zephyr/commit/aaf9c4ee246ee306f758ba0055c3c367a8ca53be
+
+ADC:
+https://github.com/sense-Jo/zephyr/commit/5c476cc087cc685f4b85a0f15dc395b53154340c
+https://github.com/sense-Jo/zephyr/commit/a1cf2447696f5d76f85445362af07abf03afc24d

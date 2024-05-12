@@ -88,10 +88,11 @@ int app_lrw_init(void)
 	return 0;
 }
 
+extern uint32_t serial_number;
+
 int main(void)
 {
 	int ret;
-	bool led_state = true;
 
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
 
@@ -162,15 +163,19 @@ int main(void)
 	for (;;) {
 		LOG_INF("Alive");
 
-		app_sht40_read(NULL, NULL);
+		gpio_pin_set_dt(&led_g, 1);
+		k_sleep(K_MSEC(50));
+		gpio_pin_set_dt(&led_g, 0);
 
-		ret = gpio_pin_toggle_dt(&led_g);
+		float temperature, humidity;
+		ret = app_sht40_read(&temperature, &humidity);
 		if (ret < 0) {
-			LOG_ERR("Call `gpio_pin_toggle_dt` failed: %d", ret);
+			LOG_ERR("Call `app_sht40_read` failed: %d", ret);
 			goto error;
 		}
 
-		led_state = !led_state;
+		printk("Serial number: %010u / Temperature: %.2f C / Humidity: %.1f %%\n",
+		       serial_number, (double)temperature, (double)humidity);
 
 #if defined(CONFIG_W1)
 		int count = app_ds18b20_get_count();
@@ -260,8 +265,6 @@ int main(void)
 {
 	int ret;
 
-	bool led_state = true;
-
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
 
 	struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
@@ -293,8 +296,6 @@ int main(void)
 			LOG_ERR("Call `gpio_pin_toggle_dt` failed: %d", ret);
 			return ret;
 		}
-
-		led_state = !led_state;
 
 		k_sleep(K_SECONDS(1));
 	}

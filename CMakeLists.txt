@@ -11,6 +11,7 @@ list(APPEND BOARD_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sticker)
 
+target_sources_ifdef(CONFIG_SHELL app PRIVATE src/app_shell.c)
 target_sources(app PRIVATE src/app_ds18b20.c)
 target_sources(app PRIVATE src/app_sht40.c)
 target_sources(app PRIVATE src/app_w1.c)
