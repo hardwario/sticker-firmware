@@ -108,13 +108,18 @@ stm32_lp_tick_source: &lptim1 {
 		};
 	};
 
-	lis2dh: lis2dh@19 {
+	lis2dh12: lis2dh12@19 {
 		compatible = "st,lis2dh";
 		reg = <0x19>;
 		anym-mode = <LIS2DH_DT_ANYM_6D_MOVEMENT>;
 		irq-gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>,
 			    <&gpioa 2 GPIO_ACTIVE_HIGH>;
 		disconnect-sdo-sa0-pull-up;
+	};
+
+	opt3001: opt3001@45 {
+		compatible = "ti,opt3001";
+		reg = <0x45>;
 	};
 
 	sht40: sht40@44 {

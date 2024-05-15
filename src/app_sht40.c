@@ -41,9 +41,9 @@ int app_sht40_read(float *temperature, float *humidity)
 		return ret;
 	}
 
-	double temperature_ = sensor_value_to_double(&t);
+	float temperature_ = sensor_value_to_float(&t);
 
-	LOG_DBG("Temperature: %.2f C", temperature_);
+	LOG_DBG("Temperature: %.2f C", (double)temperature_);
 
 	if (temperature) {
 		*temperature = temperature_;
@@ -56,9 +56,9 @@ int app_sht40_read(float *temperature, float *humidity)
 		return ret;
 	}
 
-	double humidity_ = sensor_value_to_double(&h);
+	float humidity_ = sensor_value_to_float(&h);
 
-	LOG_DBG("Humidity: %.1f %%", humidity_);
+	LOG_DBG("Humidity: %.1f %%", (double)humidity_);
 
 	if (humidity) {
 		*humidity = humidity_;

@@ -2,6 +2,7 @@
 
 #include "app_accel.h"
 #include "app_ds18b20.h"
+#include "app_opt3001.h"
 #include "app_sht40.h"
 
 /* Zephyr includes */
@@ -173,10 +174,18 @@ int main(void)
 			goto error;
 		}
 
-		float accel_x, accel_y, accel_z, orientation;
+		float accel_x, accel_y, accel_z;
+		int orientation;
 		ret = app_accel_read(&accel_x, &accel_y, &accel_z, &orientation);
 		if (ret < 0) {
 			LOG_ERR("Call `app_accel_read` failed: %d", ret);
+			goto error;
+		}
+
+		float illuminance;
+		ret = app_opt3001_read(&illuminance);
+		if (ret < 0) {
+			LOG_ERR("Call `app_opt3001_read` failed: %d", ret);
 			goto error;
 		}
 
@@ -185,13 +194,13 @@ int main(void)
 
 		for (int i = 0; i < count; i++) {
 			uint64_t serial_number;
-			double temperature;
+			float temperature;
 			ret = app_ds18b20_read(i, &serial_number, &temperature);
 			if (ret) {
 				LOG_ERR("Call `app_ds18b20_read` failed: %d", ret);
 			} else {
 				LOG_INF("Serial number: %llu / Temperature: %.2f C", serial_number,
-					temperature);
+					(double)temperature);
 			}
 		}
 #endif

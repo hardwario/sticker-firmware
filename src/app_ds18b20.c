@@ -135,7 +135,7 @@ int app_ds18b20_get_count(void)
 	return count;
 }
 
-int app_ds18b20_read(int index, uint64_t *serial_number, double *temperature)
+int app_ds18b20_read(int index, uint64_t *serial_number, float *temperature)
 {
 	int ret;
 	int res = 0;
@@ -190,9 +190,12 @@ int app_ds18b20_read(int index, uint64_t *serial_number, double *temperature)
 		res = ret;
 	}
 
+	float temperature_ = val.val1 + val.val2 / 1000000.f;
+
+	LOG_DBG("Temperature: %.2f C", (double)temperature_);
+
 	if (temperature) {
-		*temperature = (float)val.val1 + (float)val.val2 / 1000000.f;
-		LOG_DBG("Temperature: %.2f C", *temperature);
+		*temperature = temperature_;
 	}
 
 error:

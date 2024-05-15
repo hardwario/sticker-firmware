@@ -78,7 +78,7 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 
-	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(lis2dh));
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(lis2dh12));
 
 	if (!device_is_ready(dev)) {
 		LOG_ERR("Device not ready");

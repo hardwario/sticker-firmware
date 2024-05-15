@@ -16,7 +16,7 @@ extern "C" {
 
 int app_ds18b20_scan(void);
 int app_ds18b20_get_count(void);
-int app_ds18b20_read(int index, uint64_t *serial_number, double *temperature);
+int app_ds18b20_read(int index, uint64_t *serial_number, float *temperature);
 
 #ifdef __cplusplus
 }

@@ -7,9 +7,6 @@
 #ifndef APP_SHT40_H_
 #define APP_SHT40_H_
 
-/* Standard includes */
-#include <stdint.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
