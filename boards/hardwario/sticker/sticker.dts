@@ -9,6 +9,7 @@
 #include <st/wl/stm32wle5Xc.dtsi>
 #include <st/wl/stm32wle5ccux-pinctrl.dtsi>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/sensor/lis2dh.h>
 
 / {
 	model = "HARDWARIO STICKER";
@@ -88,12 +89,6 @@ stm32_lp_tick_source: &lptim1 {
 	pinctrl-names = "default", "sleep";
 	status = "okay";
 
-	sht40: sht40@44 {
-		compatible = "sensirion,sht4x";
-		reg = <0x44>;
-		repeatability = <2>;
-	};
-
 	ds2484: ds2484@18 {
 		compatible = "maxim,ds2484";
 		reg = <0x18>;
@@ -111,6 +106,21 @@ stm32_lp_tick_source: &lptim1 {
 			resolution = <12>;
 			family-code = <0x28>;
 		};
+	};
+
+	lis2dh: lis2dh@19 {
+		compatible = "st,lis2dh";
+		reg = <0x19>;
+		anym-mode = <LIS2DH_DT_ANYM_6D_MOVEMENT>;
+		irq-gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>,
+			    <&gpioa 2 GPIO_ACTIVE_HIGH>;
+		disconnect-sdo-sa0-pull-up;
+	};
+
+	sht40: sht40@44 {
+		compatible = "sensirion,sht4x";
+		reg = <0x44>;
+		repeatability = <2>;
 	};
 };
 

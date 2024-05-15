@@ -1,5 +1,6 @@
 #if 1
 
+#include "app_accel.h"
 #include "app_ds18b20.h"
 #include "app_sht40.h"
 
@@ -88,8 +89,6 @@ int app_lrw_init(void)
 	return 0;
 }
 
-extern uint32_t serial_number;
-
 int main(void)
 {
 	int ret;
@@ -174,8 +173,12 @@ int main(void)
 			goto error;
 		}
 
-		printk("Serial number: %010u / Temperature: %.2f C / Humidity: %.1f %%\n",
-		       serial_number, (double)temperature, (double)humidity);
+		float accel_x, accel_y, accel_z, orientation;
+		ret = app_accel_read(&accel_x, &accel_y, &accel_z, &orientation);
+		if (ret < 0) {
+			LOG_ERR("Call `app_accel_read` failed: %d", ret);
+			goto error;
+		}
 
 #if defined(CONFIG_W1)
 		int count = app_ds18b20_get_count();
