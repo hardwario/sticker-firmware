@@ -18,6 +18,7 @@
 #include <zephyr/sys/byteorder.h>
 
 /* Standard includes */
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 
