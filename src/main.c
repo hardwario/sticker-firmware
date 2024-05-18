@@ -1,10 +1,7 @@
 #if 1
 
-#include "app_accel.h"
-#include "app_ds18b20.h"
 #include "app_lrw.h"
-#include "app_opt3001.h"
-#include "app_sht40.h"
+#include "app_sensor.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -13,6 +10,7 @@
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 
 /* Standard includes */
 #include <stdint.h>
@@ -23,6 +21,42 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 static const struct gpio_dt_spec led_r = GPIO_DT_SPEC_GET(DT_NODELABEL(led_r), gpios);
 static const struct gpio_dt_spec led_g = GPIO_DT_SPEC_GET(DT_NODELABEL(led_g), gpios);
 static const struct gpio_dt_spec led_y = GPIO_DT_SPEC_GET(DT_NODELABEL(led_y), gpios);
+
+static void send_work_handler(struct k_work *work)
+{
+	int ret;
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	float temperature = g_app_sensor_data.temperature;
+	float humidity = g_app_sensor_data.humidity;
+	float illuminance = g_app_sensor_data.illuminance;
+	int orientation = g_app_sensor_data.orientation;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+
+	/*
+	uint8_t buf[16];
+	size_t len = 0;
+
+	buf[len++] = (uint8_t)(temperature * 10);
+	buf[1] = (uint8_t)(humidity * 2);
+	buf[6] = (uint8_t)(illuminance * 10);
+	buf[5] = (uint8_t)(orientation & 0xff);
+
+	ret = app_lrw_send(buf, len);
+	if (ret) {
+		LOG_ERR("Call `app_lrw_send` failed: %d", ret);
+	}
+	*/
+}
+
+static K_WORK_DEFINE(m_send_work, send_work_handler);
+
+static void send_timer_handler(struct k_timer *timer)
+{
+	k_work_submit(&m_send_work);
+}
+
+static K_TIMER_DEFINE(m_send_timer, send_timer_handler, NULL);
 
 int main(void)
 {
@@ -55,71 +89,23 @@ int main(void)
 
 	k_sleep(K_SECONDS(1));
 
-#if defined(CONFIG_W1)
-	ret = app_ds18b20_scan();
-	if (ret) {
-		LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
-		return ret;
-	}
-#endif
 	/*
-	#if defined(CONFIG_LORAWAN)
-		ret = app_lrw_join();
-		if (ret) {
-			LOG_ERR("Call `app_lrw_join` failed: %d", ret);
-			return ret;
-		}
-	#endif
+	k_sleep(K_SECONDS(3));
+	LOG_INF("Oopsing");
+	k_sleep(K_SECONDS(1));
+	k_oops();
 	*/
 
 	for (;;) {
 		LOG_INF("Alive");
 
+		int32_t random = (int32_t)sys_rand32_get();
+
+		LOG_INF("Random: %d", random);
+
 		gpio_pin_set_dt(&led_g, 1);
 		k_sleep(K_MSEC(50));
 		gpio_pin_set_dt(&led_g, 0);
-
-		float temperature, humidity;
-		ret = app_sht40_read(&temperature, &humidity);
-		if (ret < 0) {
-			LOG_ERR("Call `app_sht40_read` failed: %d", ret);
-			return ret;
-		}
-
-		float accel_x, accel_y, accel_z;
-		int orientation;
-		ret = app_accel_read(&accel_x, &accel_y, &accel_z, &orientation);
-		if (ret < 0) {
-			LOG_ERR("Call `app_accel_read` failed: %d", ret);
-			return ret;
-		}
-
-		float illuminance;
-		ret = app_opt3001_read(&illuminance);
-		if (ret < 0) {
-			LOG_ERR("Call `app_opt3001_read` failed: %d", ret);
-			return ret;
-		}
-
-#if defined(CONFIG_W1)
-		int count = app_ds18b20_get_count();
-
-		for (int i = 0; i < count; i++) {
-			uint64_t serial_number;
-			float temperature;
-			ret = app_ds18b20_read(i, &serial_number, &temperature);
-			if (ret) {
-				LOG_ERR("Call `app_ds18b20_read` failed: %d", ret);
-			} else {
-				LOG_INF("Serial number: %llu / Temperature: %.2f C", serial_number,
-					(double)temperature);
-
-				gpio_pin_set_dt(&led_r, 1);
-				k_sleep(K_MSEC(50));
-				gpio_pin_set_dt(&led_r, 0);
-			}
-		}
-#endif
 
 		k_sleep(K_SECONDS(1));
 	}

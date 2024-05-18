@@ -61,13 +61,14 @@ stm32_lp_tick_source: &lptim1 {
 	status = "okay";
 };
 
-&clk_hsi {
+&clk_msi {
 	status = "okay";
+	msi-range = <11>;
 };
 
 &rcc {
-	clocks = <&clk_hsi>;
-	clock-frequency = <DT_FREQ_M(16)>;
+	clocks = <&clk_msi>;
+	clock-frequency = <DT_FREQ_M(48)>;
 	cpu1-prescaler = <1>;
 	ahb3-prescaler = <1>;
 	apb1-prescaler = <1>;
@@ -145,6 +146,8 @@ stm32_lp_tick_source: &lptim1 {
 
 &rng {
 	status = "okay";
+	clocks = <&rcc STM32_CLOCK_BUS_AHB3 0x00040000>,
+		 <&rcc STM32_SRC_MSI RNG_SEL(3)>;
 };
 
 &subghzspi {
