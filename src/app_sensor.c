@@ -26,10 +26,10 @@
 LOG_MODULE_REGISTER(app_sensor, LOG_LEVEL_DBG);
 
 struct app_sensor_data g_app_sensor_data = {
+	.orientation = INT_MAX,
 	.temperature = NAN,
 	.humidity = NAN,
 	.illuminance = NAN,
-	.orientation = INT_MAX,
 	.ext_temperature_1 = NAN,
 	.ext_temperature_2 = NAN,
 };
@@ -43,10 +43,17 @@ static void sensor_work_handler(struct k_work *work)
 {
 	int ret;
 
+	int orientation = INT_MAX;
 	float temperature = NAN;
 	float humidity = NAN;
 	float illuminance = NAN;
-	int orientation = INT_MAX;
+	float ext_temperature_1 = NAN;
+	float ext_temperature_2 = NAN;
+
+	ret = app_accel_read(NULL, NULL, NULL, &orientation);
+	if (ret) {
+		LOG_ERR("Call `app_accel_read` failed: %d", ret);
+	}
 
 	ret = app_sht40_read(&temperature, &humidity);
 	if (ret) {
@@ -58,11 +65,6 @@ static void sensor_work_handler(struct k_work *work)
 		LOG_ERR("Call `app_opt3001_read` failed: %d", ret);
 	}
 
-	ret = app_accel_read(NULL, NULL, NULL, &orientation);
-	if (ret) {
-		LOG_ERR("Call `app_accel_read` failed: %d", ret);
-	}
-
 #if defined(CONFIG_W1)
 	int count = app_ds18b20_get_count();
 
@@ -72,18 +74,27 @@ static void sensor_work_handler(struct k_work *work)
 		ret = app_ds18b20_read(i, &serial_number, &temperature);
 		if (ret) {
 			LOG_ERR("Call `app_ds18b20_read` failed: %d", ret);
-		} else {
-			LOG_INF("Serial number: %llu / Temperature: %.2f C", serial_number,
-				(double)temperature);
+			continue;
+		}
+
+		LOG_INF("Serial number: %llu / Temperature: %.2f C", serial_number,
+			(double)temperature);
+
+		if (i == 0) {
+			ext_temperature_1 = temperature;
+		} else if (i == 1) {
+			ext_temperature_2 = temperature;
 		}
 	}
 #endif
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	g_app_sensor_data.orientation = orientation;
 	g_app_sensor_data.temperature = temperature;
 	g_app_sensor_data.humidity = humidity;
 	g_app_sensor_data.illuminance = illuminance;
-	g_app_sensor_data.orientation = orientation;
+	g_app_sensor_data.ext_temperature_1 = ext_temperature_1;
+	g_app_sensor_data.ext_temperature_2 = ext_temperature_2;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }
 

@@ -14,10 +14,10 @@ extern "C" {
 #endif
 
 struct app_sensor_data {
+	int orientation;
 	float temperature;
 	float humidity;
 	float illuminance;
-	int orientation;
 	float ext_temperature_1;
 	float ext_temperature_2;
 };
