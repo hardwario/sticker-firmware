@@ -18,6 +18,8 @@ struct app_sensor_data {
 	float humidity;
 	float illuminance;
 	int orientation;
+	float ext_temperature_1;
+	float ext_temperature_2;
 };
 
 extern struct app_sensor_data g_app_sensor_data;

@@ -13,7 +13,6 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/lorawan/lorawan.h>
-#include <zephyr/shell/shell.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -59,7 +58,7 @@ int app_lrw_join(void)
 {
 	int ret;
 
-	struct lorawan_join_config config = {0};
+	static struct lorawan_join_config config = {0};
 
 	config.mode = LORAWAN_ACT_ABP;
 	config.dev_eui = dev_eui;
@@ -113,7 +112,7 @@ static int init(void)
 		return ret;
 	}
 
-	struct lorawan_downlink_cb cb = {
+	static struct lorawan_downlink_cb cb = {
 		.port = LW_RECV_PORT_ANY,
 		.cb = downlink_cb,
 	};
@@ -126,38 +125,3 @@ static int init(void)
 }
 
 SYS_INIT(init, APPLICATION, 0);
-
-static int cmd_join(const struct shell *shell, size_t argc, char **argv)
-{
-	int ret;
-
-	ret = app_lrw_join();
-	if (ret) {
-		LOG_ERR("Call `app_lrw_join` failed: %d", ret);
-		shell_print(shell, "command failed: %d", ret);
-		return ret;
-	}
-
-	shell_print(shell, "command succeeded");
-
-	return 0;
-}
-
-static int cmd_send(const struct shell *shell, size_t argc, char **argv)
-{
-	int ret;
-
-	ret = app_lrw_send("Hello", 5);
-	if (ret) {
-		LOG_ERR("Call `app_lrw_send` failed: %d", ret);
-		shell_print(shell, "command failed: %d", ret);
-		return ret;
-	}
-
-	shell_print(shell, "command succeeded");
-
-	return 0;
-}
-
-SHELL_CMD_REGISTER(join, NULL, "Join LoRaWAN network.", cmd_join);
-SHELL_CMD_REGISTER(send, NULL, "Send LoRaWAN data.", cmd_send);

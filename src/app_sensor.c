@@ -30,9 +30,14 @@ struct app_sensor_data g_app_sensor_data = {
 	.humidity = NAN,
 	.illuminance = NAN,
 	.orientation = INT_MAX,
+	.ext_temperature_1 = NAN,
+	.ext_temperature_2 = NAN,
 };
 
 K_MUTEX_DEFINE(g_app_sensor_data_lock);
+
+static K_THREAD_STACK_DEFINE(m_sensor_work_stack, 4096);
+static struct k_work_q m_sensor_work_q;
 
 static void sensor_work_handler(struct k_work *work)
 {
@@ -86,7 +91,7 @@ static K_WORK_DEFINE(m_sensor_work, sensor_work_handler);
 
 static void sensor_timer_handler(struct k_timer *timer)
 {
-	k_work_submit(&m_sensor_work);
+	k_work_submit_to_queue(&m_sensor_work_q, &m_sensor_work);
 }
 
 static K_TIMER_DEFINE(m_sensor_timer, sensor_timer_handler, NULL);
@@ -102,6 +107,12 @@ static int init(void)
 		return ret;
 	}
 #endif /* defined(CONFIG_W1) */
+
+	k_work_queue_init(&m_sensor_work_q);
+
+	k_work_queue_start(&m_sensor_work_q, m_sensor_work_stack,
+			   K_THREAD_STACK_SIZEOF(m_sensor_work_stack),
+			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
 
 	k_timer_start(&m_sensor_timer, K_SECONDS(1), K_SECONDS(10));
 

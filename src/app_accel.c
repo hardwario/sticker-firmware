@@ -16,6 +16,7 @@
 /* Standard includes */
 #include <errno.h>
 #include <math.h>
+#include <stddef.h>
 
 LOG_MODULE_REGISTER(app_accel, LOG_LEVEL_DBG);
 
