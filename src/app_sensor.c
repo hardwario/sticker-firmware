@@ -101,7 +101,7 @@ static int init(void)
 		LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
 		return ret;
 	}
-#endif
+#endif /* defined(CONFIG_W1) */
 
 	k_timer_start(&m_sensor_timer, K_SECONDS(1), K_SECONDS(10));
 

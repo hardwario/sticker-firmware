@@ -22,6 +22,8 @@ int app_sht40_read(float *temperature, float *humidity)
 {
 	int ret;
 
+	struct sensor_value val;
+
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(sht40));
 	if (!device_is_ready(dev)) {
 		LOG_ERR("Device not ready");
@@ -34,14 +36,13 @@ int app_sht40_read(float *temperature, float *humidity)
 		return ret;
 	}
 
-	struct sensor_value t;
-	ret = sensor_channel_get(dev, SENSOR_CHAN_AMBIENT_TEMP, &t);
+	ret = sensor_channel_get(dev, SENSOR_CHAN_AMBIENT_TEMP, &val);
 	if (ret) {
 		LOG_ERR("Call `sensor_channel_get` failed: %d", ret);
 		return ret;
 	}
 
-	float temperature_ = sensor_value_to_float(&t);
+	float temperature_ = sensor_value_to_float(&val);
 
 	LOG_DBG("Temperature: %.2f C", (double)temperature_);
 
@@ -49,14 +50,13 @@ int app_sht40_read(float *temperature, float *humidity)
 		*temperature = temperature_;
 	}
 
-	struct sensor_value h;
-	ret = sensor_channel_get(dev, SENSOR_CHAN_HUMIDITY, &h);
+	ret = sensor_channel_get(dev, SENSOR_CHAN_HUMIDITY, &val);
 	if (ret) {
 		LOG_ERR("Call `sensor_channel_get` failed: %d", ret);
 		return ret;
 	}
 
-	float humidity_ = sensor_value_to_float(&h);
+	float humidity_ = sensor_value_to_float(&val);
 
 	LOG_DBG("Humidity: %.1f %%", (double)humidity_);
 
