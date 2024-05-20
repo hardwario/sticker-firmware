@@ -4,6 +4,7 @@
 #include "app_led.h"
 #include "app_lrw.h"
 #include "app_sensor.h"
+#include "app_wdog.h"
 
 /* Zephyr includes */
 #include <zephyr/init.h>
@@ -111,6 +112,14 @@ int main(void)
 
 	for (;;) {
 		LOG_INF("Alive");
+
+#if defined(CONFIG_WATCHDOG)
+		ret = app_wdog_feed();
+		if (ret) {
+			LOG_ERR("Call `app_wdog_feed` failed: %d", ret);
+			return ret;
+		}
+#endif /* defined(CONFIG_WATCHDOG) */
 
 		if (app_alarm_is_active()) {
 			app_led_set(APP_LED_CHANNEL_R, 1);
