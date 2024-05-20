@@ -42,6 +42,7 @@ static struct k_work_q m_sensor_work_q;
 void app_sensor_sample(void)
 {
 	int ret;
+	UNUSED(ret);
 
 	int orientation = INT_MAX;
 	float temperature = NAN;
@@ -50,20 +51,26 @@ void app_sensor_sample(void)
 	float ext_temperature_1 = NAN;
 	float ext_temperature_2 = NAN;
 
+#if defined(CONFIG_LIS2DH)
 	ret = app_accel_read(NULL, NULL, NULL, &orientation);
 	if (ret) {
 		LOG_ERR("Call `app_accel_read` failed: %d", ret);
 	}
+#endif /* defined(CONFIG_LIS2DH) */
 
+#if defined(CONFIG_SHT4X)
 	ret = app_sht40_read(&temperature, &humidity);
 	if (ret) {
 		LOG_ERR("Call `app_sht40_read` failed: %d", ret);
 	}
+#endif /* defined(CONFIG_SHT4X) */
 
+#if defined(CONFIG_OPT3001)
 	ret = app_opt3001_read(&illuminance);
 	if (ret) {
 		LOG_ERR("Call `app_opt3001_read` failed: %d", ret);
 	}
+#endif /* defined(CONFIG_OPT3001) */
 
 #if defined(CONFIG_W1)
 	int count = app_ds18b20_get_count();
@@ -86,7 +93,7 @@ void app_sensor_sample(void)
 			ext_temperature_2 = temperature;
 		}
 	}
-#endif
+#endif /* defined(CONFIG_W1) */
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 	g_app_sensor_data.orientation = orientation;
@@ -117,8 +124,10 @@ static K_TIMER_DEFINE(m_sensor_timer, sensor_timer_handler, NULL);
 static int init(void)
 {
 	int ret;
+	UNUSED(ret);
 
 #if defined(CONFIG_W1)
+
 	ret = app_ds18b20_scan();
 	if (ret) {
 		LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
