@@ -1,5 +1,3 @@
-#if 1
-
 #include "app_alarm.h"
 #include "app_compose.h"
 #include "app_config.h"
@@ -129,63 +127,6 @@ int main(void)
 
 	return 0;
 }
-
-#else
-
-#include <zephyr/device.h>
-#include <zephyr/devicetree.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/kernel.h>
-#include <zephyr/logging/log.h>
-#include <zephyr/pm/device.h>
-
-#include <errno.h>
-
-LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
-
-int main(void)
-{
-	int ret;
-
-	LOG_INF("Build time: " __DATE__ " " __TIME__);
-
-	struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
-
-	if (!gpio_is_ready_dt(&led)) {
-		LOG_ERR("Port not ready");
-		return -ENODEV;
-	}
-
-	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT);
-	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
-		return ret;
-	}
-
-	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
-
-	ret = pm_device_action_run(dev, PM_DEVICE_ACTION_SUSPEND);
-	if (ret && ret != -EALREADY) {
-		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
-		return ret;
-	}
-
-	for (;;) {
-		LOG_INF("Alive");
-
-		ret = gpio_pin_toggle_dt(&led);
-		if (ret) {
-			LOG_ERR("Call `gpio_pin_toggle_dt` failed: %d", ret);
-			return ret;
-		}
-
-		k_sleep(K_SECONDS(1));
-	}
-
-	return 0;
-}
-
-#endif
 
 static int init(void)
 {
