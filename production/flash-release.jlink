@@ -1,0 +1,9 @@
+selectinterface SWD
+speed 1000
+device STM32WLE5CC
+connect
+erase
+loadfile ../deploy/sticker-release.hex
+reset
+go
+exit

@@ -1,4 +1,16 @@
+.PHONY: all deploy release debug flash gdb init clean
+
 all: release
+
+deploy:
+	@rm -rf deploy
+	@mkdir deploy
+	@rm -rf build
+	@$(MAKE) debug
+	@cp build/zephyr/zephyr.hex deploy/sticker-debug.hex
+	@rm -rf build
+	@$(MAKE) release
+	@cp build/zephyr/zephyr.hex deploy/sticker-release.hex
 
 release:
 	@west build -p always -b sticker
