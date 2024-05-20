@@ -24,6 +24,7 @@ struct app_config {
 	float corr_temperature;
 	float corr_ext_temperature_1;
 	float corr_ext_temperature_2;
+	uint32_t serial_number;
 };
 
 extern struct app_config g_app_config;

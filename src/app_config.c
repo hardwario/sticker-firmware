@@ -73,6 +73,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.corr_ext_temperature_1));
 	SETTINGS_SET("corr-ext-temperature-2", &m_app_config.corr_ext_temperature_2,
 		     sizeof(m_app_config.corr_ext_temperature_2));
+	SETTINGS_SET("serial-number", &m_app_config.serial_number,
+		     sizeof(m_app_config.serial_number));
 
 #undef SETTINGS_SET
 
@@ -108,6 +110,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.corr_ext_temperature_1));
 	EXPORT_FUNC("corr-ext-temperature-2", &m_app_config.corr_ext_temperature_2,
 		    sizeof(m_app_config.corr_ext_temperature_2));
+	EXPORT_FUNC("serial-number", &m_app_config.serial_number,
+		    sizeof(m_app_config.serial_number));
 
 #undef EXPORT_FUNC
 
@@ -304,6 +308,11 @@ static void print_corr_ext_temperature_2(const struct shell *shell)
 		    (double)m_app_config.corr_ext_temperature_2);
 }
 
+static void print_serial_number(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " serial-number %010u", m_app_config.serial_number);
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_interval_sample(shell);
@@ -315,6 +324,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_corr_temperature(shell);
 	print_corr_ext_temperature_1(shell);
 	print_corr_ext_temperature_2(shell);
+	print_serial_number(shell);
 
 	return 0;
 }
@@ -599,6 +609,37 @@ static int cmd_corr_ext_temperature_2(const struct shell *shell, size_t argc, ch
 	return 0;
 }
 
+static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_serial_number(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	size_t len = strlen(argv[1]);
+
+	if (len != 10) {
+		shell_error(shell, "invalid argument format");
+		return -EINVAL;
+	}
+
+	for (size_t i = 0; i < len; i++) {
+		if (!isdigit((int)argv[1][i])) {
+			shell_error(shell, "invalid argument format");
+			return -EINVAL;
+		}
+	}
+
+	m_app_config.serial_number = strtoul(argv[1], NULL, 10);
+
+	return 0;
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -646,11 +687,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_lrw_devaddr, 1, 1),
 
 	SHELL_CMD_ARG(lrw-nwkskey, NULL,
-	              "Get/Set LoRaWAN NwkSKey (32 hex digits).",
+	              "Get/Set LoRaWAN NwkSKey (32 hexadecimal digits).",
 	              cmd_lrw_nwkskey, 1, 1),
 
 	SHELL_CMD_ARG(lrw-appskey, NULL,
-	              "Get/Set LoRaWAN AppSKey (32 hex digits).",
+	              "Get/Set LoRaWAN AppSKey (32 hexadecimal digits).",
 	              cmd_lrw_appskey, 1, 1),
 
 	SHELL_CMD_ARG(corr-temperature, NULL,
@@ -664,6 +705,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(corr-ext-temperature-2, NULL,
 	              "Get/Set external temperature 2 correction (range -5.0 to +5.0 degrees of Celsius).",
 	              cmd_corr_ext_temperature_2, 1, 1),
+
+	SHELL_CMD_ARG(serial-number, NULL,
+	              "Get/Set device serial number (10 decimal digits).",
+	              cmd_serial_number, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );
