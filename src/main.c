@@ -1,14 +1,13 @@
 #if 1
 
+#include "app_alarm.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_led.h"
 #include "app_lrw.h"
 #include "app_sensor.h"
 
 /* Zephyr includes */
-#include <zephyr/device.h>
-#include <zephyr/devicetree.h>
-#include <zephyr/drivers/gpio.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -19,13 +18,10 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <math.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
-static const struct gpio_dt_spec led_r = GPIO_DT_SPEC_GET(DT_NODELABEL(led_r), gpios);
-static const struct gpio_dt_spec led_g = GPIO_DT_SPEC_GET(DT_NODELABEL(led_g), gpios);
-static const struct gpio_dt_spec led_y = GPIO_DT_SPEC_GET(DT_NODELABEL(led_y), gpios);
+#define BLINK_INTERVAL_SECONDS 3
 
 static struct k_timer m_send_timer;
 
@@ -58,7 +54,6 @@ static void send_work_handler(struct k_work *work)
 		return;
 	}
 
-#if 1
 	LOG_INF("Sending data...");
 
 	ret = app_lrw_send(buf, len);
@@ -68,7 +63,6 @@ static void send_work_handler(struct k_work *work)
 	}
 
 	LOG_INF("Data sent");
-#endif
 }
 
 static K_WORK_DEFINE(m_send_work, send_work_handler);
@@ -80,81 +74,19 @@ static void send_timer_handler(struct k_timer *timer)
 
 static K_TIMER_DEFINE(m_send_timer, send_timer_handler, NULL);
 
-#define ALARM_TEMPERATURE_THR_LO 15.f
-#define ALARM_TEMPERATURE_THR_HI 25.f
-#define ALARM_TEMPERATURE_HST    0.5f
-
-#define ALARM_EXT_TEMPERATURE_1_THR_LO 2.f
-#define ALARM_EXT_TEMPERATURE_1_THR_HI 8.f
-#define ALARM_EXT_TEMPERATURE_1_HST    0.5f
-
-#define ALARM_EXT_TEMPERATURE_2_THR_LO 2.f
-#define ALARM_EXT_TEMPERATURE_2_THR_HI 8.f
-#define ALARM_EXT_TEMPERATURE_2_HST    0.5f
-
-static bool is_alarm(void)
+static void carousel(void)
 {
-	static bool alarm_temperature = false;
-
-	if (isnan(g_app_sensor_data.temperature)) {
-		alarm_temperature = false;
-	} else if (alarm_temperature) {
-		if (g_app_sensor_data.temperature >
-			    (ALARM_TEMPERATURE_THR_LO + ALARM_TEMPERATURE_HST) &&
-		    g_app_sensor_data.temperature <
-			    (ALARM_TEMPERATURE_THR_HI - ALARM_TEMPERATURE_HST)) {
-			alarm_temperature = false;
-		}
-	} else {
-		if (g_app_sensor_data.temperature <
-			    (ALARM_TEMPERATURE_THR_LO - ALARM_TEMPERATURE_HST) ||
-		    g_app_sensor_data.temperature >
-			    (ALARM_TEMPERATURE_THR_HI + ALARM_TEMPERATURE_HST)) {
-			alarm_temperature = true;
-		}
-	}
-
-	static bool alarm_ext_temperature_1 = false;
-
-	if (isnan(g_app_sensor_data.ext_temperature_1)) {
-		alarm_ext_temperature_1 = false;
-	} else if (alarm_ext_temperature_1) {
-		if (g_app_sensor_data.ext_temperature_1 >
-			    (ALARM_EXT_TEMPERATURE_1_THR_LO + ALARM_EXT_TEMPERATURE_1_HST) &&
-		    g_app_sensor_data.ext_temperature_1 <
-			    (ALARM_EXT_TEMPERATURE_1_THR_HI - ALARM_EXT_TEMPERATURE_1_HST)) {
-			alarm_ext_temperature_1 = false;
-		}
-	} else {
-		if (g_app_sensor_data.ext_temperature_1 <
-			    (ALARM_EXT_TEMPERATURE_1_THR_LO - ALARM_EXT_TEMPERATURE_1_HST) ||
-		    g_app_sensor_data.ext_temperature_1 >
-			    (ALARM_EXT_TEMPERATURE_1_THR_HI + ALARM_EXT_TEMPERATURE_1_HST)) {
-			alarm_ext_temperature_1 = true;
-		}
-	}
-
-	static bool alarm_ext_temperature_2 = false;
-
-	if (isnan(g_app_sensor_data.ext_temperature_2)) {
-		alarm_ext_temperature_2 = false;
-	} else if (alarm_ext_temperature_2) {
-		if (g_app_sensor_data.ext_temperature_2 >
-			    (ALARM_EXT_TEMPERATURE_2_THR_LO + ALARM_EXT_TEMPERATURE_2_HST) &&
-		    g_app_sensor_data.ext_temperature_2 <
-			    (ALARM_EXT_TEMPERATURE_2_THR_HI - ALARM_EXT_TEMPERATURE_2_HST)) {
-			alarm_ext_temperature_2 = false;
-		}
-	} else {
-		if (g_app_sensor_data.ext_temperature_2 <
-			    (ALARM_EXT_TEMPERATURE_2_THR_LO - ALARM_EXT_TEMPERATURE_2_HST) ||
-		    g_app_sensor_data.ext_temperature_2 >
-			    (ALARM_EXT_TEMPERATURE_2_THR_HI + ALARM_EXT_TEMPERATURE_2_HST)) {
-			alarm_ext_temperature_2 = true;
-		}
-	}
-
-	return alarm_temperature || alarm_ext_temperature_1 || alarm_ext_temperature_2;
+	app_led_set(APP_LED_CHANNEL_R, 1);
+	k_sleep(K_MSEC(500));
+	app_led_set(APP_LED_CHANNEL_R, 0);
+	k_sleep(K_MSEC(250));
+	app_led_set(APP_LED_CHANNEL_Y, 1);
+	k_sleep(K_MSEC(500));
+	app_led_set(APP_LED_CHANNEL_Y, 0);
+	k_sleep(K_MSEC(250));
+	app_led_set(APP_LED_CHANNEL_G, 1);
+	k_sleep(K_MSEC(1500));
+	app_led_set(APP_LED_CHANNEL_G, 0);
 }
 
 int main(void)
@@ -163,37 +95,7 @@ int main(void)
 
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
 
-	if (!gpio_is_ready_dt(&led_r) || !gpio_is_ready_dt(&led_g) || !gpio_is_ready_dt(&led_y)) {
-		LOG_ERR("Device not ready");
-		return -ENODEV;
-	}
-
-	ret = gpio_pin_configure_dt(&led_r, GPIO_OUTPUT_INACTIVE);
-	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
-		return ret;
-	}
-
-	ret = gpio_pin_configure_dt(&led_g, GPIO_OUTPUT_INACTIVE);
-	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
-		return ret;
-	}
-
-	ret = gpio_pin_configure_dt(&led_y, GPIO_OUTPUT_INACTIVE);
-	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
-		return ret;
-	}
-
-	k_sleep(K_SECONDS(1));
-
-	/*
-	k_sleep(K_SECONDS(3));
-	LOG_INF("Oopsing");
-	k_sleep(K_SECONDS(1));
-	k_oops();
-	*/
+	carousel();
 
 	ret = app_lrw_join();
 	if (ret) {
@@ -212,17 +114,17 @@ int main(void)
 	for (;;) {
 		LOG_INF("Alive");
 
-		if (is_alarm()) {
-			gpio_pin_set_dt(&led_r, 1);
+		if (app_alarm_is_active()) {
+			app_led_set(APP_LED_CHANNEL_R, 1);
 			k_sleep(K_MSEC(5));
-			gpio_pin_set_dt(&led_r, 0);
+			app_led_set(APP_LED_CHANNEL_R, 0);
 		} else {
-			gpio_pin_set_dt(&led_g, 1);
+			app_led_set(APP_LED_CHANNEL_G, 1);
 			k_sleep(K_MSEC(5));
-			gpio_pin_set_dt(&led_g, 0);
+			app_led_set(APP_LED_CHANNEL_G, 0);
 		}
 
-		k_sleep(K_SECONDS(3));
+		k_sleep(K_SECONDS(BLINK_INTERVAL_SECONDS));
 	}
 
 	return 0;
@@ -285,14 +187,14 @@ int main(void)
 
 #endif
 
-static int boot_delay(void)
+static int init(void)
 {
 	k_sleep(K_MSEC(500));
 
 	return 0;
 }
 
-SYS_INIT(boot_delay, POST_KERNEL, 0);
+SYS_INIT(init, POST_KERNEL, 0);
 
 static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 {
