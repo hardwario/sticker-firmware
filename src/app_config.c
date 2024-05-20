@@ -148,6 +148,8 @@ static int init(void)
 
 SYS_INIT(init, APPLICATION, 0);
 
+#if defined(CONFIG_SHELL)
+
 static int save(bool reboot)
 {
 	int ret;
@@ -669,3 +671,5 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 /* clang-format on */
 
 SHELL_CMD_REGISTER(config, &sub_config, "Configuration commands.", print_help);
+
+#endif /* defined(CONFIG_SHELL) */

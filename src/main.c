@@ -196,6 +196,8 @@ static int init(void)
 
 SYS_INIT(init, POST_KERNEL, 0);
 
+#if defined(CONFIG_SHELL)
+
 static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 {
 	int ret;
@@ -223,3 +225,5 @@ static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 
 SHELL_CMD_REGISTER(join, NULL, "Join LoRaWAN network.", cmd_join);
 SHELL_CMD_REGISTER(send, NULL, "Send LoRaWAN data.", cmd_send);
+
+#endif /* defined(CONFIG_SHELL) */
