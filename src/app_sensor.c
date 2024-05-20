@@ -7,6 +7,7 @@
 #include "app_sensor.h"
 
 #include "app_accel.h"
+#include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_opt3001.h"
 #include "app_sht40.h"
@@ -90,11 +91,13 @@ static void sensor_work_handler(struct k_work *work)
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 	g_app_sensor_data.orientation = orientation;
-	g_app_sensor_data.temperature = temperature;
+	g_app_sensor_data.temperature = temperature + g_app_config.corr_temperature;
 	g_app_sensor_data.humidity = humidity;
 	g_app_sensor_data.illuminance = illuminance;
-	g_app_sensor_data.ext_temperature_1 = ext_temperature_1;
-	g_app_sensor_data.ext_temperature_2 = ext_temperature_2;
+	g_app_sensor_data.ext_temperature_1 =
+		ext_temperature_1 + g_app_config.corr_ext_temperature_1;
+	g_app_sensor_data.ext_temperature_2 =
+		ext_temperature_2 + g_app_config.corr_ext_temperature_2;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }
 

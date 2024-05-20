@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_config.h"
 #include "app_lrw.h"
 
 /* Zephyr includes */
@@ -13,6 +14,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/lorawan/lorawan.h>
+#include <zephyr/sys/byteorder.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -47,13 +49,6 @@ static void datarate_changed_cb(enum lorawan_datarate dr)
 	LOG_INF("New datarate: DR_%d / Max payload size: %d", dr, max_payload_size);
 }
 
-static uint8_t dev_eui[] = {0x70, 0xB3, 0xD5, 0x7E, 0xD0, 0x06, 0x79, 0x2D};
-static uint32_t dev_addr = 0x260BAC89;
-static uint8_t app_skey[] = {0xD4, 0xFD, 0x2F, 0x28, 0x1C, 0xF9, 0x50, 0x96,
-			     0xC7, 0xA4, 0x88, 0x6E, 0xE7, 0x48, 0x4E, 0x55};
-static uint8_t nwk_skey[] = {0x8D, 0x65, 0x49, 0x48, 0xC1, 0xB1, 0x30, 0xA2,
-			     0x7F, 0x77, 0x53, 0x6D, 0x7D, 0xD4, 0x1B, 0x6D};
-
 int app_lrw_join(void)
 {
 	int ret;
@@ -61,10 +56,10 @@ int app_lrw_join(void)
 	static struct lorawan_join_config config = {0};
 
 	config.mode = LORAWAN_ACT_ABP;
-	config.dev_eui = dev_eui;
-	config.abp.dev_addr = dev_addr;
-	config.abp.app_skey = app_skey;
-	config.abp.nwk_skey = nwk_skey;
+	config.dev_eui = g_app_config.lrw_deveui;
+	config.abp.dev_addr = sys_get_be32(g_app_config.lrw_devaddr);
+	config.abp.nwk_skey = g_app_config.lrw_nwkskey;
+	config.abp.app_skey = g_app_config.lrw_appskey;
 
 	ret = lorawan_join(&config);
 	if (ret) {

@@ -13,6 +13,7 @@ project(sticker)
 
 target_sources_ifdef(CONFIG_SHELL app PRIVATE src/app_shell.c)
 target_sources(app PRIVATE src/app_accel.c)
+target_sources(app PRIVATE src/app_config.c)
 target_sources(app PRIVATE src/app_compose.c)
 target_sources(app PRIVATE src/app_ds18b20.c)
 target_sources(app PRIVATE src/app_lrw.c)
