@@ -45,9 +45,8 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		header |= BIT(14);
 	}
 
-	/* TODO Implement */
-	if (0) {
-		voltage = 150;
+	if (!isnan(g_app_sensor_data.voltage)) {
+		voltage = (uint8_t)(g_app_sensor_data.voltage * 50);
 		header |= BIT(13);
 	}
 

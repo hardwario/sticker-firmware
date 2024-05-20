@@ -5,6 +5,7 @@
  */
 
 #include "app_accel.h"
+#include "app_battery.h"
 #include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_opt3001.h"
@@ -27,6 +28,7 @@ LOG_MODULE_REGISTER(app_sensor, LOG_LEVEL_DBG);
 
 struct app_sensor_data g_app_sensor_data = {
 	.orientation = INT_MAX,
+	.voltage = NAN,
 	.temperature = NAN,
 	.humidity = NAN,
 	.illuminance = NAN,
@@ -45,11 +47,19 @@ void app_sensor_sample(void)
 	UNUSED(ret);
 
 	int orientation = INT_MAX;
+	float voltage = NAN;
 	float temperature = NAN;
 	float humidity = NAN;
 	float illuminance = NAN;
 	float ext_temperature_1 = NAN;
 	float ext_temperature_2 = NAN;
+
+#if defined(CONFIG_ADC)
+	ret = app_battery_measure(&voltage);
+	if (ret) {
+		LOG_ERR("Call `app_battery_measure` failed: %d", ret);
+	}
+#endif /* defined(CONFIG_ADC) */
 
 #if defined(CONFIG_LIS2DH)
 	ret = app_accel_read(NULL, NULL, NULL, &orientation);
@@ -96,7 +106,9 @@ void app_sensor_sample(void)
 #endif /* defined(CONFIG_W1) */
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+
 	g_app_sensor_data.orientation = orientation;
+	g_app_sensor_data.voltage = voltage;
 	g_app_sensor_data.temperature = temperature + g_app_config.corr_temperature;
 	g_app_sensor_data.humidity = humidity;
 	g_app_sensor_data.illuminance = illuminance;
@@ -104,6 +116,7 @@ void app_sensor_sample(void)
 		ext_temperature_1 + g_app_config.corr_ext_temperature_1;
 	g_app_sensor_data.ext_temperature_2 =
 		ext_temperature_2 + g_app_config.corr_ext_temperature_2;
+
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }
 

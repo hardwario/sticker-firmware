@@ -15,6 +15,7 @@ extern "C" {
 
 struct app_sensor_data {
 	int orientation;
+	float voltage;
 	float temperature;
 	float humidity;
 	float illuminance;
