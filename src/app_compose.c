@@ -46,7 +46,7 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	/* TODO Implement */
-	if (1) {
+	if (0) {
 		voltage = 150;
 		header |= BIT(13);
 	}
