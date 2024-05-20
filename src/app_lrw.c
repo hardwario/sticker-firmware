@@ -46,7 +46,8 @@ static void datarate_changed_cb(enum lorawan_datarate dr)
 	uint8_t max_payload_size;
 	lorawan_get_payload_sizes(&max_next_payload_size, &max_payload_size);
 
-	LOG_INF("New datarate: DR_%d / Max payload size: %d", dr, max_payload_size);
+	LOG_INF("New data rate: DR%d", dr);
+	LOG_INF("Maximum payload size: %d", max_payload_size);
 }
 
 int app_lrw_join(void)

@@ -31,7 +31,10 @@ LOG_MODULE_REGISTER(app_config, LOG_LEVEL_DBG);
 #define SETTINGS_PFX "config"
 
 struct app_config g_app_config;
-static struct app_config m_app_config;
+
+static struct app_config m_app_config = {
+	.interval_report = 900,
+};
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
@@ -56,6 +59,10 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		}                                                                                  \
 	} while (0)
 
+	SETTINGS_SET("interval-sample", &m_app_config.interval_sample,
+		     sizeof(m_app_config.interval_sample));
+	SETTINGS_SET("interval-report", &m_app_config.interval_report,
+		     sizeof(m_app_config.interval_report));
 	SETTINGS_SET("lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
 	SETTINGS_SET("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	SETTINGS_SET("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
@@ -87,6 +94,10 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
 	} while (0)
 
+	EXPORT_FUNC("interval-sample", &m_app_config.interval_sample,
+		    sizeof(m_app_config.interval_sample));
+	EXPORT_FUNC("interval-report", &m_app_config.interval_report,
+		    sizeof(m_app_config.interval_report));
 	EXPORT_FUNC("lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
 	EXPORT_FUNC("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	EXPORT_FUNC("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
@@ -135,7 +146,7 @@ static int init(void)
 	return 0;
 }
 
-SYS_INIT(init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+SYS_INIT(init, APPLICATION, 0);
 
 static int save(bool reboot)
 {
@@ -201,6 +212,16 @@ static int reset(bool reboot)
 	}
 
 	return 0;
+}
+
+static void print_interval_sample(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " interval-sample %d", m_app_config.interval_sample);
+}
+
+static void print_interval_report(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " interval-report %d", m_app_config.interval_report);
 }
 
 static void print_lrw_deveui(const struct shell *shell)
@@ -283,6 +304,8 @@ static void print_corr_ext_temperature_2(const struct shell *shell)
 
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
+	print_interval_sample(shell);
+	print_interval_report(shell);
 	print_lrw_deveui(shell);
 	print_lrw_devaddr(shell);
 	print_lrw_nwkskey(shell);
@@ -318,6 +341,54 @@ static int cmd_reset(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "command failed");
 		return ret;
 	}
+
+	return 0;
+}
+
+static int cmd_interval_sample(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_interval_sample(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	int a = strtol(argv[1], NULL, 10);
+
+	if (a != 0 && (a < 5 || a > 3600)) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.interval_sample = a;
+
+	return 0;
+}
+
+static int cmd_interval_report(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_interval_report(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	int a = strtol(argv[1], NULL, 10);
+
+	if (a < 60 || a > 86400) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.interval_report = a;
 
 	return 0;
 }
@@ -556,6 +627,14 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Reset all configuration.",
 	              cmd_reset, 1, 0),
 
+	SHELL_CMD_ARG(interval-sample, NULL,
+	              "Get/Set sample interval (range 5 to 3600 seconds; 0 = precede report).",
+	              cmd_interval_sample, 1, 1),
+
+	SHELL_CMD_ARG(interval-report, NULL,
+	              "Get/Set report interval (range 60 to 86400 seconds).",
+	              cmd_interval_report, 1, 1),
+
 	SHELL_CMD_ARG(lrw-deveui, NULL,
 	              "Get/Set LoRaWAN DevEUI (16 hex digits).",
 	              cmd_lrw_deveui, 1, 1),
@@ -573,15 +652,15 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_lrw_appskey, 1, 1),
 
 	SHELL_CMD_ARG(corr-temperature, NULL,
-	              "Get/Set temperature correction (range -5.0 to +5.0).",
+	              "Get/Set temperature correction (range -5.0 to +5.0 degrees of Celsius).",
 	              cmd_corr_temperature, 1, 1),
 
 	SHELL_CMD_ARG(corr-ext-temperature-1, NULL,
-	              "Get/Set external temperature 1 correction (range -5.0 to +5.0).",
+	              "Get/Set external temperature 1 correction (range -5.0 to +5.0 degrees of Celsius).",
 	              cmd_corr_ext_temperature_1, 1, 1),
 
 	SHELL_CMD_ARG(corr-ext-temperature-2, NULL,
-	              "Get/Set external temperature 2 correction (range -5.0 to +5.0).",
+	              "Get/Set external temperature 2 correction (range -5.0 to +5.0 degrees of Celsius).",
 	              cmd_corr_ext_temperature_2, 1, 1),
 
 	SHELL_SUBCMD_SET_END

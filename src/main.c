@@ -1,6 +1,7 @@
 #if 1
 
 #include "app_compose.h"
+#include "app_config.h"
 #include "app_lrw.h"
 #include "app_sensor.h"
 
@@ -22,8 +23,6 @@
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
-#define REPORT_INTERVAL_SECONDS 30
-
 static const struct gpio_dt_spec led_r = GPIO_DT_SPEC_GET(DT_NODELABEL(led_r), gpios);
 static const struct gpio_dt_spec led_g = GPIO_DT_SPEC_GET(DT_NODELABEL(led_g), gpios);
 static const struct gpio_dt_spec led_y = GPIO_DT_SPEC_GET(DT_NODELABEL(led_y), gpios);
@@ -37,17 +36,21 @@ static void send_work_handler(struct k_work *work)
 {
 	int ret;
 
-	int timeout = REPORT_INTERVAL_SECONDS;
+	int timeout = g_app_config.interval_report;
 
 #if defined(CONFIG_ENTROPY_GENERATOR)
-	timeout += (int32_t)sys_rand32_get() % (REPORT_INTERVAL_SECONDS / 10);
+	timeout += (int32_t)sys_rand32_get() % (g_app_config.interval_report / 10);
 #endif /* defined(CONFIG_ENTROPY_GENERATOR) */
 
 	LOG_INF("Scheduling next timeout in %d seconds", timeout);
 
 	k_timer_start(&m_send_timer, K_SECONDS(timeout), K_FOREVER);
 
-	uint8_t buf[12];
+	if (!g_app_config.interval_sample) {
+		app_sensor_sample();
+	}
+
+	uint8_t buf[51];
 	size_t len;
 	ret = app_compose(buf, sizeof(buf), &len);
 	if (ret) {

@@ -15,6 +15,8 @@ extern "C" {
 #endif
 
 struct app_config {
+	int interval_sample;
+	int interval_report;
 	uint8_t lrw_deveui[8];
 	uint8_t lrw_devaddr[4];
 	uint8_t lrw_nwkskey[16];

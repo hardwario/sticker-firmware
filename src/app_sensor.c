@@ -4,12 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "app_sensor.h"
-
 #include "app_accel.h"
 #include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_opt3001.h"
+#include "app_sensor.h"
 #include "app_sht40.h"
 
 /* Zephyr includes */
@@ -40,7 +39,7 @@ K_MUTEX_DEFINE(g_app_sensor_data_lock);
 static K_THREAD_STACK_DEFINE(m_sensor_work_stack, 4096);
 static struct k_work_q m_sensor_work_q;
 
-static void sensor_work_handler(struct k_work *work)
+void app_sensor_sample(void)
 {
 	int ret;
 
@@ -101,6 +100,11 @@ static void sensor_work_handler(struct k_work *work)
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }
 
+static void sensor_work_handler(struct k_work *work)
+{
+	app_sensor_sample();
+}
+
 static K_WORK_DEFINE(m_sensor_work, sensor_work_handler);
 
 static void sensor_timer_handler(struct k_timer *timer)
@@ -128,7 +132,10 @@ static int init(void)
 			   K_THREAD_STACK_SIZEOF(m_sensor_work_stack),
 			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
 
-	k_timer_start(&m_sensor_timer, K_SECONDS(1), K_SECONDS(10));
+	if (g_app_config.interval_sample) {
+		k_timer_start(&m_sensor_timer, K_SECONDS(1),
+			      K_SECONDS(g_app_config.interval_sample));
+	}
 
 	return 0;
 }

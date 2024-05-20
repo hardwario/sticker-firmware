@@ -25,6 +25,8 @@ struct app_sensor_data {
 extern struct app_sensor_data g_app_sensor_data;
 extern struct k_mutex g_app_sensor_data_lock;
 
+void app_sensor_sample(void);
+
 #ifdef __cplusplus
 }
 #endif
