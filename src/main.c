@@ -15,9 +15,10 @@
 #include <zephyr/shell/shell.h>
 
 /* Standard includes */
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <errno.h>
+#include <math.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
@@ -76,6 +77,83 @@ static void send_timer_handler(struct k_timer *timer)
 
 static K_TIMER_DEFINE(m_send_timer, send_timer_handler, NULL);
 
+#define ALARM_TEMPERATURE_THR_LO 15.f
+#define ALARM_TEMPERATURE_THR_HI 25.f
+#define ALARM_TEMPERATURE_HST    0.5f
+
+#define ALARM_EXT_TEMPERATURE_1_THR_LO 2.f
+#define ALARM_EXT_TEMPERATURE_1_THR_HI 8.f
+#define ALARM_EXT_TEMPERATURE_1_HST    0.5f
+
+#define ALARM_EXT_TEMPERATURE_2_THR_LO 2.f
+#define ALARM_EXT_TEMPERATURE_2_THR_HI 8.f
+#define ALARM_EXT_TEMPERATURE_2_HST    0.5f
+
+static bool is_alarm(void)
+{
+	static bool alarm_temperature = false;
+
+	if (isnan(g_app_sensor_data.temperature)) {
+		alarm_temperature = false;
+	} else if (alarm_temperature) {
+		if (g_app_sensor_data.temperature >
+			    (ALARM_TEMPERATURE_THR_LO + ALARM_TEMPERATURE_HST) &&
+		    g_app_sensor_data.temperature <
+			    (ALARM_TEMPERATURE_THR_HI - ALARM_TEMPERATURE_HST)) {
+			alarm_temperature = false;
+		}
+	} else {
+		if (g_app_sensor_data.temperature <
+			    (ALARM_TEMPERATURE_THR_LO - ALARM_TEMPERATURE_HST) ||
+		    g_app_sensor_data.temperature >
+			    (ALARM_TEMPERATURE_THR_HI + ALARM_TEMPERATURE_HST)) {
+			alarm_temperature = true;
+		}
+	}
+
+	static bool alarm_ext_temperature_1 = false;
+
+	if (isnan(g_app_sensor_data.ext_temperature_1)) {
+		alarm_ext_temperature_1 = false;
+	} else if (alarm_ext_temperature_1) {
+		if (g_app_sensor_data.ext_temperature_1 >
+			    (ALARM_EXT_TEMPERATURE_1_THR_LO + ALARM_EXT_TEMPERATURE_1_HST) &&
+		    g_app_sensor_data.ext_temperature_1 <
+			    (ALARM_EXT_TEMPERATURE_1_THR_HI - ALARM_EXT_TEMPERATURE_1_HST)) {
+			alarm_ext_temperature_1 = false;
+		}
+	} else {
+		if (g_app_sensor_data.ext_temperature_1 <
+			    (ALARM_EXT_TEMPERATURE_1_THR_LO - ALARM_EXT_TEMPERATURE_1_HST) ||
+		    g_app_sensor_data.ext_temperature_1 >
+			    (ALARM_EXT_TEMPERATURE_1_THR_HI + ALARM_EXT_TEMPERATURE_1_HST)) {
+			alarm_ext_temperature_1 = true;
+		}
+	}
+
+	static bool alarm_ext_temperature_2 = false;
+
+	if (isnan(g_app_sensor_data.ext_temperature_2)) {
+		alarm_ext_temperature_2 = false;
+	} else if (alarm_ext_temperature_2) {
+		if (g_app_sensor_data.ext_temperature_2 >
+			    (ALARM_EXT_TEMPERATURE_2_THR_LO + ALARM_EXT_TEMPERATURE_2_HST) &&
+		    g_app_sensor_data.ext_temperature_2 <
+			    (ALARM_EXT_TEMPERATURE_2_THR_HI - ALARM_EXT_TEMPERATURE_2_HST)) {
+			alarm_ext_temperature_2 = false;
+		}
+	} else {
+		if (g_app_sensor_data.ext_temperature_2 <
+			    (ALARM_EXT_TEMPERATURE_2_THR_LO - ALARM_EXT_TEMPERATURE_2_HST) ||
+		    g_app_sensor_data.ext_temperature_2 >
+			    (ALARM_EXT_TEMPERATURE_2_THR_HI + ALARM_EXT_TEMPERATURE_2_HST)) {
+			alarm_ext_temperature_2 = true;
+		}
+	}
+
+	return alarm_temperature || alarm_ext_temperature_1 || alarm_ext_temperature_2;
+}
+
 int main(void)
 {
 	int ret;
@@ -126,16 +204,22 @@ int main(void)
 			   K_THREAD_STACK_SIZEOF(m_send_work_stack),
 			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
 
-	k_timer_start(&m_send_timer, K_SECONDS(1), K_FOREVER);
+	k_timer_start(&m_send_timer, K_SECONDS(5), K_FOREVER);
 
 	for (;;) {
 		LOG_INF("Alive");
 
-		gpio_pin_set_dt(&led_g, 1);
-		k_sleep(K_MSEC(10));
-		gpio_pin_set_dt(&led_g, 0);
+		if (is_alarm()) {
+			gpio_pin_set_dt(&led_r, 1);
+			k_sleep(K_MSEC(5));
+			gpio_pin_set_dt(&led_r, 0);
+		} else {
+			gpio_pin_set_dt(&led_g, 1);
+			k_sleep(K_MSEC(5));
+			gpio_pin_set_dt(&led_g, 0);
+		}
 
-		k_sleep(K_SECONDS(5));
+		k_sleep(K_SECONDS(3));
 	}
 
 	return 0;

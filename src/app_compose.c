@@ -30,63 +30,49 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 
 	boot = false;
 
-	uint8_t voltage;
-	uint8_t orientation;
-	uint16_t temperature;
-	uint8_t humidity;
-	uint16_t illuminance;
-	uint16_t ext_temperature_1;
-	uint16_t ext_temperature_2;
+	uint8_t orientation = 0xff;
+	uint8_t voltage = 0xff;
+	int16_t temperature = 0x7fff;
+	uint8_t humidity = 0xff;
+	uint16_t illuminance = 0xffff;
+	int16_t ext_temperature_1 = 0x7fff;
+	int16_t ext_temperature_2 = 0x7fff;
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
-	/* TODO Implement */
-	if (1) {
-		voltage = 0xff;
-	} else {
-		voltage = 0xff;
+	if (g_app_sensor_data.orientation != INT_MAX) {
+		orientation = g_app_sensor_data.orientation & 0xf;
 		header |= BIT(14);
 	}
 
-	if (g_app_sensor_data.orientation == INT_MAX) {
-		orientation = 0xf;
-	} else {
-		orientation = g_app_sensor_data.orientation & 0xf;
+	/* TODO Implement */
+	if (1) {
+		voltage = 150;
 		header |= BIT(13);
 	}
 
-	if (isnan(g_app_sensor_data.temperature)) {
-		temperature = 0x7fff;
-	} else {
-		temperature = (uint16_t)(g_app_sensor_data.temperature * 100);
+	if (!isnan(g_app_sensor_data.temperature)) {
+		temperature = (int16_t)(g_app_sensor_data.temperature * 100);
 		header |= BIT(12);
 	}
 
-	if (isnan(g_app_sensor_data.humidity)) {
-		humidity = 0xff;
-	} else {
+	if (!isnan(g_app_sensor_data.humidity)) {
 		humidity = (uint8_t)(g_app_sensor_data.humidity * 2);
 		header |= BIT(11);
 	}
 
-	if (isnan(g_app_sensor_data.illuminance)) {
-		illuminance = 0xffff;
-	} else {
+	if (!isnan(g_app_sensor_data.illuminance)) {
 		illuminance = (uint16_t)(g_app_sensor_data.illuminance * 2);
 		header |= BIT(10);
 	}
 
-	if (isnan(g_app_sensor_data.ext_temperature_1)) {
-		ext_temperature_1 = 0x7fff;
-	} else {
-		ext_temperature_1 = (uint16_t)(g_app_sensor_data.ext_temperature_1 * 100);
+	if (!isnan(g_app_sensor_data.ext_temperature_1)) {
+		ext_temperature_1 = (int16_t)(g_app_sensor_data.ext_temperature_1 * 100);
 		header |= BIT(9);
 	}
 
-	if (isnan(g_app_sensor_data.ext_temperature_2)) {
-		ext_temperature_2 = 0x7fff;
-	} else {
-		ext_temperature_2 = (uint16_t)(g_app_sensor_data.ext_temperature_2 * 100);
+	if (!isnan(g_app_sensor_data.ext_temperature_2)) {
+		ext_temperature_2 = (int16_t)(g_app_sensor_data.ext_temperature_2 * 100);
 		header |= BIT(8);
 	}
 
@@ -108,16 +94,34 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 
 	APPEND_BYTE(header >> 8);
 	APPEND_BYTE(header);
-	APPEND_BYTE(voltage);
-	APPEND_BYTE(temperature >> 8);
-	APPEND_BYTE(temperature);
-	APPEND_BYTE(humidity);
-	APPEND_BYTE(illuminance >> 8);
-	APPEND_BYTE(illuminance);
-	APPEND_BYTE(ext_temperature_1 >> 8);
-	APPEND_BYTE(ext_temperature_1);
-	APPEND_BYTE(ext_temperature_2 >> 8);
-	APPEND_BYTE(ext_temperature_2);
+
+	if (header & BIT(13)) {
+		APPEND_BYTE(voltage);
+	}
+
+	if (header & BIT(12)) {
+		APPEND_BYTE(temperature >> 8);
+		APPEND_BYTE(temperature);
+	}
+
+	if (header & BIT(11)) {
+		APPEND_BYTE(humidity);
+	}
+
+	if (header & BIT(10)) {
+		APPEND_BYTE(illuminance >> 8);
+		APPEND_BYTE(illuminance);
+	}
+
+	if (header & BIT(9)) {
+		APPEND_BYTE(ext_temperature_1 >> 8);
+		APPEND_BYTE(ext_temperature_1);
+	}
+
+	if (header & BIT(8)) {
+		APPEND_BYTE(ext_temperature_2 >> 8);
+		APPEND_BYTE(ext_temperature_2);
+	}
 
 #undef APPEND
 
