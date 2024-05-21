@@ -10,9 +10,10 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/adc.h>
+#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/init.h>
+#include <zephyr/pm/device.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -41,6 +42,12 @@ int app_battery_measure(float *voltage)
 	if (!device_is_ready(m_dev)) {
 		LOG_ERR("Device not ready");
 		return -ENODEV;
+	}
+
+	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_RESUME);
+	if (ret && ret != -EALREADY) {
+		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
+		return ret;
 	}
 
 	int16_t sample;
@@ -75,6 +82,12 @@ int app_battery_measure(float *voltage)
 
 	LOG_DBG("Battery voltage: %.2f V", (double)*voltage);
 
+	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_SUSPEND);
+	if (ret && ret != -EALREADY) {
+		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
+		return ret;
+	}
+
 	return 0;
 }
 
@@ -90,6 +103,12 @@ static int init(void)
 	ret = adc_channel_setup(m_dev, &m_channel_cfg);
 	if (ret) {
 		LOG_ERR("Call `adc_channel_setup` failed: %d", ret);
+		return ret;
+	}
+
+	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_SUSPEND);
+	if (ret && ret != -EALREADY) {
+		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
 		return ret;
 	}
 
