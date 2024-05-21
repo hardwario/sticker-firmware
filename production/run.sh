@@ -2,35 +2,41 @@
 
 set -eu
 
-###############################################################################
-
-echo "Please scan the serial number..."
+echo "*******************************************************************************"
+echo "Scan serial number..."
 read serial_number
 echo "Serial number read: $serial_number"
 
-###############################################################################
+echo "*******************************************************************************"
+echo "Connect J-Link and insert batteries..."
+echo "*******************************************************************************"
 
-echo "Please insert the batteries..."
 read
 
-###############################################################################
-
+echo "*******************************************************************************"
 echo "Flashing the device (debug)..."
+echo "*******************************************************************************"
+
 JLinkExe -commanderscript flash-debug.jlink
+
+echo "*******************************************************************************"
 echo "Recycle power..."
+echo "*******************************************************************************"
+
 read
 
-###############################################################################
-
+echo "*******************************************************************************"
 echo "Starting RTT session..."
+echo "*******************************************************************************"
+
 tmux kill-session -t rttlogger || true
 tmux new-session -d -s rttlogger "JLinkRTTLogger -Device STM32WLE5CC -If SWD -Speed 1000 -RTTAddress 0x20000800 -RTTChannel 1 ~/.sticker.log"
 trap "echo 'Terminating background process'; tmux kill-session -t rttlogger" EXIT
 sleep 2
 
-###############################################################################
-
+echo "*******************************************************************************"
 echo "Programming parameters..."
+echo "*******************************************************************************"
 
 echo "config serial-number $serial_number" | socat - TCP:localhost:19021
 
@@ -83,21 +89,47 @@ fi
 echo "config save" | socat - TCP:localhost:19021
 sleep 0.2
 
-###############################################################################
-
+echo "*******************************************************************************"
 echo "Terminating RTT session..."
+echo "*******************************************************************************"
+
 tmux kill-session -t rttlogger
 
-###############################################################################
-
+echo "*******************************************************************************"
 echo "Hit <ENTER> to continue..."
+echo "*******************************************************************************"
+
 read
 
-###############################################################################
-
+echo "*******************************************************************************"
 echo "Flashing the device (release)..."
+echo "*******************************************************************************"
 JLinkExe -commanderscript flash-release.jlink
 
-###############################################################################
+echo "*******************************************************************************"
+echo "Serial number read: $serial_number"
+
+if [ -n "$offset_temp" ]; then
+    echo "Offset / Temperature: $offset_temp"
+fi
+if [ -n "$offset_ext_temp1" ]; then
+    echo "Offset / Ext. temperature 1: $offset_ext_temp1"
+fi
+if [ -n "$offset_ext_temp2" ]; then
+    echo "Offset / Ext. temperature 2: $offset_ext_temp2"
+fi
+if [ -n "$dev_eui" ]; then
+    echo "LoRaWAN / DevEUI: $dev_eui"
+fi
+if [ -n "$dev_addr" ]; then
+    echo "LoRaWAN / DevAddr: $dev_addr"
+fi
+if [ -n "$nwk_skey" ]; then
+    echo "LoRaWAN / NwkSKey: $nwk_skey"
+fi
+if [ -n "$app_skey" ]; then
+    echo "LoRaWAN / AppSKey: $app_skey"
+fi
+echo "*******************************************************************************"
 
 echo "Successfully finished"
