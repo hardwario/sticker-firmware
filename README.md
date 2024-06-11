@@ -67,6 +67,7 @@ Determine RTT block address:
 I2C:
 https://github.com/zephyrproject-rtos/zephyr/issues/37414
 https://github.com/dinuxbg/zephyr/commit/aaf9c4ee246ee306f758ba0055c3c367a8ca53be
+https://github.com/zephyrproject-rtos/zephyr/pull/72805
 
 ADC:
 https://github.com/sense-Jo/zephyr/commit/5c476cc087cc685f4b85a0f15dc395b53154340c
