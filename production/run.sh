@@ -38,9 +38,6 @@ echo
 echo "All good?"
 read
 
-#tmux kill-session -t rttlogger || true
-#tmux new-session -d -s rttlogger "JLinkRTTLogger -Device STM32WLE5CC -If SWD -Speed 1000 -RTTAddress 0x20000800 -RTTChannel 1 ~/.sticker.log"
-#trap "echo 'Terminating background process'; tmux kill-session -t rttlogger" EXIT
 sleep 2
 
 echo "*******************************************************************************"
