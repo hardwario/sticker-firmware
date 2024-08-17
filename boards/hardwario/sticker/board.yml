@@ -1,5 +1,0 @@
-board:
-  name: sticker
-  vendor: hardwario
-  socs:
-    - name: stm32wle5xx
