@@ -5,15 +5,6 @@
 #
 
 menu "Application"
-
-config SEGGER_RTT_SECTION_CUSTOM
-	bool "Place RTT buffer in custom section"
-	default n
-
-config SEGGER_RTT_SECTION_CUSTOM_NAME
-	string "Custom section name for RTT buffer"
-	default ".rtt_buffer"
-
 endmenu
 
 menu "Zephyr Kernel"

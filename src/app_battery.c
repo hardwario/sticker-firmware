@@ -44,11 +44,13 @@ int app_battery_measure(float *voltage)
 		return -ENODEV;
 	}
 
+#if defined(CONFIG_PM_DEVICE)
 	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_RESUME);
 	if (ret && ret != -EALREADY) {
 		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
 		return ret;
 	}
+#endif /* defined(CONFIG_PM_DEVICE) */
 
 	int16_t sample;
 
@@ -82,11 +84,13 @@ int app_battery_measure(float *voltage)
 
 	LOG_DBG("Battery voltage: %.2f V", (double)*voltage);
 
+#if defined(CONFIG_PM_DEVICE)
 	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_SUSPEND);
 	if (ret && ret != -EALREADY) {
 		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
 		return ret;
 	}
+#endif /* defined(CONFIG_PM_DEVICE) */
 
 	return 0;
 }
@@ -106,11 +110,13 @@ static int init(void)
 		return ret;
 	}
 
+#if defined(CONFIG_PM_DEVICE)
 	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_SUSPEND);
 	if (ret && ret != -EALREADY) {
 		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
 		return ret;
 	}
+#endif /* defined(CONFIG_PM_DEVICE) */
 
 	return 0;
 }
