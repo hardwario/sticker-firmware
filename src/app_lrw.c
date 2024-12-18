@@ -24,13 +24,13 @@
 
 LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
 
-static void downlink_cb(uint8_t port, bool data_pending, int16_t rssi, int8_t snr, uint8_t len,
-			const uint8_t *hex_data)
+static void downlink_cb(uint8_t port, uint8_t flags, int16_t rssi, int8_t snr, uint8_t len,
+		   const uint8_t *data)
 {
-	LOG_INF("Port %d, Pending %d, RSSI %d dB, SNR %d dBm", port, data_pending, rssi, snr);
+	LOG_INF("Port %d, Flags 0x%02x, RSSI %d dB, SNR %d dBm", port, flags, rssi, snr);
 
-	if (hex_data) {
-		LOG_HEXDUMP_INF(hex_data, len, "Payload: ");
+	if (data) {
+		LOG_HEXDUMP_INF(data, len, "Payload: ");
 	}
 }
 
