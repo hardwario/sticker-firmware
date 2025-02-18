@@ -50,36 +50,43 @@ void cmd_led_cycle(void)
 
 static void cmd_print_voltage(const struct shell *shell)
 {
+    app_sensor_sample();
     shell_print(shell, SETTINGS_PFX " voltage %.2f", (double)g_app_sensor_data.voltage);
 }
 
 static void cmd_print_orientation(const struct shell *shell)
 {
-    shell_print(shell, SETTINGS_PFX " orientation %.2f", (double)g_app_sensor_data.orientation);
+    app_sensor_sample();
+    shell_print(shell, SETTINGS_PFX " orientation %d", (int)g_app_sensor_data.orientation);
 }
 
 static void cmd_print_temperature(const struct shell *shell)
 {
+    app_sensor_sample();
     shell_print(shell, SETTINGS_PFX " temperature %.2f", (double)g_app_sensor_data.temperature);
 }
 
 static void cmd_print_humidity(const struct shell *shell)
 {
+    app_sensor_sample();
     shell_print(shell, SETTINGS_PFX " humidity %.2f", (double)g_app_sensor_data.humidity);
 }
 
 static void cmd_print_illuminance(const struct shell *shell)
 {
+    app_sensor_sample();
     shell_print(shell, SETTINGS_PFX " illuminance %.2f", (double)g_app_sensor_data.illuminance);
 }
 
 static void cmd_print_ext_temperature_1(const struct shell *shell)
 {
+    app_sensor_sample();
     shell_print(shell, SETTINGS_PFX " ext_temperature_1 %.2f", (double)g_app_sensor_data.ext_temperature_1);
 }
 
 static void cmd_print_ext_temperature_2(const struct shell *shell)
 {
+    app_sensor_sample();
     shell_print(shell, SETTINGS_PFX " ext_temperature_2 %.2f", (double)g_app_sensor_data.ext_temperature_2);
 }
 
