@@ -38,14 +38,48 @@ LOG_MODULE_REGISTER(app_tester, LOG_LEVEL_DBG);
 void cmd_led_cycle(void)
 {
     app_led_set(APP_LED_CHANNEL_R, 1);
-    k_sleep(K_MSEC(800));
+    k_sleep(K_MSEC(1000));
     app_led_set(APP_LED_CHANNEL_R, 0);
+    k_sleep(K_MSEC(200));
     app_led_set(APP_LED_CHANNEL_Y, 1);
-    k_sleep(K_MSEC(800));
+    k_sleep(K_MSEC(1000));
     app_led_set(APP_LED_CHANNEL_Y, 0);
+    k_sleep(K_MSEC(200));
     app_led_set(APP_LED_CHANNEL_G, 1);
-    k_sleep(K_MSEC(800));
+    k_sleep(K_MSEC(1000));
     app_led_set(APP_LED_CHANNEL_G, 0);
+}
+
+static void cmd_led_switch(const struct shell *shell, size_t argc, char **argv)
+{
+	enum app_led_channel channel;
+
+	if (strcmp(argv[1], "red") == 0) {
+		channel = APP_LED_CHANNEL_R;
+
+	} else if (strcmp(argv[1], "green") == 0) {
+		channel = APP_LED_CHANNEL_G;
+
+	} else if (strcmp(argv[1], "yellow") == 0) {
+		channel = APP_LED_CHANNEL_Y;
+
+	} else {
+		shell_error(shell, "invalid channel name");
+		shell_help(shell);
+        return;		
+	}
+
+	if (strcmp(argv[2], "on") == 0) {
+		app_led_set(channel, true);
+
+	} else if (strcmp(argv[2], "off") == 0) {
+		app_led_set(channel, false);
+
+	} else {
+		shell_error(shell, "invalid command");
+		shell_help(shell);
+	}
+
 }
 
 static void cmd_print_voltage(const struct shell *shell)
@@ -95,6 +129,7 @@ static void cmd_print_ext_temperature_2(const struct shell *shell)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_test,
     SHELL_CMD_ARG(led_cycle, NULL, "Led cycle. R-Y-G", cmd_led_cycle, 1, 0),
+    SHELL_CMD_ARG(led_switch, NULL, "Switch LED channel (format red|yellow|green on|off).",cmd_led_switch, 3, 0),
     SHELL_CMD_ARG(voltage, NULL, "Get voltage.", cmd_print_voltage, 1, 0),
     SHELL_CMD_ARG(orientation, NULL, "Get orientation.", cmd_print_orientation, 1, 0),
     SHELL_CMD_ARG(temperature, NULL, "Get temperature.", cmd_print_temperature, 1, 0),
