@@ -8,7 +8,9 @@
 #include "app_battery.h"
 #include "app_config.h"
 #include "app_ds18b20.h"
+#include "app_led.h"
 #include "app_opt3001.h"
+#include "app_pyq1648.h"
 #include "app_sensor.h"
 #include "app_sht40.h"
 
@@ -134,13 +136,33 @@ static void sensor_timer_handler(struct k_timer *timer)
 
 static K_TIMER_DEFINE(m_sensor_timer, sensor_timer_handler, NULL);
 
+#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
+
+static void pyq1648_event_handler(void *user_data)
+{
+	LOG_INF("Motion detected");
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	g_app_sensor_data.motion_count++;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+
+	app_led_set(APP_LED_CHANNEL_Y, 1);
+	k_sleep(K_MSEC(5));
+	app_led_set(APP_LED_CHANNEL_Y, 0);
+}
+
+#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
+
 static int init(void)
 {
 	int ret;
 	UNUSED(ret);
 
-#if defined(CONFIG_W1)
+#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
+	app_pyq1648_set_callback(pyq1648_event_handler, NULL);
+#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
+#if defined(CONFIG_W1)
 	ret = app_ds18b20_scan();
 	if (ret) {
 		LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);

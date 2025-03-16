@@ -38,6 +38,10 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	int16_t ext_temperature_1 = 0x7fff;
 	int16_t ext_temperature_2 = 0x7fff;
 
+#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
+	uint32_t motion_count = 0xffffffff;
+#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
+
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
 	if (g_app_sensor_data.orientation != INT_MAX) {
@@ -74,6 +78,11 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		ext_temperature_2 = (int16_t)(g_app_sensor_data.ext_temperature_2 * 100);
 		header |= BIT(8);
 	}
+
+#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
+	motion_count = g_app_sensor_data.motion_count;
+	header |= BIT(7);
+#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
@@ -121,6 +130,15 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		APPEND_BYTE(ext_temperature_2 >> 8);
 		APPEND_BYTE(ext_temperature_2);
 	}
+
+#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
+	if (header & BIT(7)) {
+		APPEND_BYTE(motion_count >> 24);
+		APPEND_BYTE(motion_count >> 16);
+		APPEND_BYTE(motion_count >> 8);
+		APPEND_BYTE(motion_count);
+	}
+#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
 #undef APPEND
 
