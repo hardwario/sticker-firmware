@@ -30,10 +30,9 @@ init:
 clean:
 	@rm -rf build
 
-.PHONY: Version input where is acitaved in prj.conf CONFIG_W1=y
-v_input:
-	@sed -i 's/^CONFIG_W1=n/CONFIG_W1=y/' prj.conf
-.PHONY: Version Clime where is acitaved in prj.conf CONFIG_W1=n
-v_clime:
-	@sed -i 's/^CONFIG_W1=y/CONFIG_W1=n/' prj.conf
+config:
+	@west build -t menuconfig -b sticker -p always
+
+config_debug:
+	@west build -t menuconfig -b sticker -- -DEXTRA_CONF_FILE=debug.conf
 
