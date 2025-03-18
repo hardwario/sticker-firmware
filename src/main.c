@@ -5,6 +5,7 @@
 #include "app_lrw.h"
 #include "app_sensor.h"
 #include "app_wdog.h"
+#include "app_tester.h"
 
 /* Zephyr includes */
 #include <zephyr/init.h>
