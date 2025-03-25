@@ -124,11 +124,13 @@ static void cmd_print_ext_temperature_2(const struct shell *shell)
     shell_print(shell, SETTINGS_PFX " ext_temperature_2 %.2f", (double)g_app_sensor_data.ext_temperature_2);
 }
 
+#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
 static void cmd_print_motion_count(const struct shell *shell)
 {
     app_sensor_sample();
     shell_print(shell, SETTINGS_PFX " motion_count %d", (int)g_app_sensor_data.motion_count);
 }
+#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
 
 //SYS_INIT(init, APPLICATION, 0);
@@ -143,7 +145,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_test,
     SHELL_CMD_ARG(illuminance, NULL, "Get illuminance.", cmd_print_illuminance, 1, 0),
     SHELL_CMD_ARG(ext_temperature_1, NULL, "Get ext_temperature_1.", cmd_print_ext_temperature_1, 1, 0),
     SHELL_CMD_ARG(ext_temperature_2, NULL, "Get ext_temperature_2.", cmd_print_ext_temperature_2, 1, 0),
+    #if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
     SHELL_CMD_ARG(motion, NULL, "Get count of motions", cmd_print_motion_count, 1, 0),
+    #endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
     SHELL_SUBCMD_SET_END
 );
 

@@ -36,6 +36,9 @@ struct app_sensor_data g_app_sensor_data = {
 	.illuminance = NAN,
 	.ext_temperature_1 = NAN,
 	.ext_temperature_2 = NAN,
+	#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
+	.motion_count = 0,
+	#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 };
 
 K_MUTEX_DEFINE(g_app_sensor_data_lock);
