@@ -10,11 +10,11 @@ menuconfig MPL3115A2
 	help
 	  Enable the driver for NXP MPL3115A2 Barometric Pressure/Altitude/Temperature Sensor
 
+if MPL3115A2
+
 config MPL3115A2_SHELL
 	bool "MPL3115A2 Shell Commands"
-	default y if MPL3115A2
-	depends on MPL3115A2
-
-if MPL3115A2
+	default y
+	depends on SHELL
 
 endif # MPL3115A2
