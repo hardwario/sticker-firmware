@@ -122,7 +122,7 @@ static void cmd_print_motion_count(const struct shell *shell)
 #endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_test, SHELL_CMD_ARG(led_cycle, NULL, "Cycle LED (R/G/Y)", cmd_cycle_led, 1, 0),
+	sub_test, SHELL_CMD_ARG(led_cycle, NULL, "Cycle LED (R/G/Y).", cmd_cycle_led, 1, 0),
 	SHELL_CMD_ARG(led_switch, NULL, "Switch LED channel (format red|yellow|green on|off).",
 		      cmd_switch_led, 3, 0),
 	SHELL_CMD_ARG(voltage, NULL, "Print voltage.", cmd_print_voltage, 1, 0),
