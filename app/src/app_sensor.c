@@ -9,6 +9,7 @@
 #include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_led.h"
+#include "app_mpl3115a2.h"
 #include "app_opt3001.h"
 #include "app_pyq1648.h"
 #include "app_sensor.h"
@@ -36,9 +37,13 @@ struct app_sensor_data g_app_sensor_data = {
 	.illuminance = NAN,
 	.ext_temperature_1 = NAN,
 	.ext_temperature_2 = NAN,
+
 #if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
 	.motion_count = 0,
 #endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
+
+	.altitude = NAN,
+	.pressure = NAN,
 };
 
 K_MUTEX_DEFINE(g_app_sensor_data_lock);
@@ -58,6 +63,8 @@ void app_sensor_sample(void)
 	float illuminance = NAN;
 	float ext_temperature_1 = NAN;
 	float ext_temperature_2 = NAN;
+	float altitude = NAN;
+	float pressure = NAN;
 
 #if defined(CONFIG_ADC)
 	ret = app_battery_measure(&voltage);
@@ -110,6 +117,13 @@ void app_sensor_sample(void)
 	}
 #endif /* defined(CONFIG_W1) */
 
+#if defined(CONFIG_MPL3115A2)
+	ret = app_mpl3115a2_read(&altitude, &pressure, NULL);
+	if (ret) {
+		LOG_ERR("Call `app_mpl3115a2_read` failed: %d", ret);
+	}
+#endif /* defined(CONFIG_MPL3115A2) */
+
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
 	g_app_sensor_data.orientation = orientation;
@@ -121,6 +135,8 @@ void app_sensor_sample(void)
 		ext_temperature_1 + g_app_config.corr_ext_temperature_1;
 	g_app_sensor_data.ext_temperature_2 =
 		ext_temperature_2 + g_app_config.corr_ext_temperature_2;
+	g_app_sensor_data.altitude = altitude;
+	g_app_sensor_data.pressure = pressure;
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }

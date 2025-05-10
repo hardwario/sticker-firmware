@@ -42,6 +42,9 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	uint32_t motion_count = 0xffffffff;
 #endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
+	int16_t altitude = 0x7fff;
+	uint32_t pressure = 0xffffffff;
+
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
 	if (g_app_sensor_data.orientation != INT_MAX) {
@@ -65,7 +68,7 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	if (!isnan(g_app_sensor_data.illuminance)) {
-		illuminance = (uint16_t)(g_app_sensor_data.illuminance * 2);
+		illuminance = (uint16_t)(g_app_sensor_data.illuminance / 2);
 		header |= BIT(10);
 	}
 
@@ -83,6 +86,16 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	motion_count = g_app_sensor_data.motion_count;
 	header |= BIT(7);
 #endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
+
+	if (!isnan(g_app_sensor_data.altitude)) {
+		altitude = (int16_t)(g_app_sensor_data.altitude * 10);
+		header |= BIT(6);
+	}
+
+	if (!isnan(g_app_sensor_data.pressure)) {
+		pressure = (uint32_t)g_app_sensor_data.pressure;
+		header |= BIT(5);
+	}
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
@@ -139,6 +152,18 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		APPEND_BYTE(motion_count);
 	}
 #endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
+
+	if (header & BIT(6)) {
+		APPEND_BYTE(altitude >> 8);
+		APPEND_BYTE(altitude);
+	}
+
+	if (header & BIT(5)) {
+		APPEND_BYTE(pressure >> 24);
+		APPEND_BYTE(pressure >> 16);
+		APPEND_BYTE(pressure >> 8);
+		APPEND_BYTE(pressure);
+	}
 
 #undef APPEND
 
