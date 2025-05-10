@@ -48,17 +48,9 @@ Clean build outputs:
 
     make clean
 
-Start RTT logging:
+Start RTT terminal:
 
-    JLinkRTTLogger -Device STM32WLE5CC -If SWD -Speed 4000 -RTTAddress 0x20000800 -RTTChannel 1 ~/.sticker.log
-
-Connect to shell:
-
-    nc localhost 19021
-
-Read logs:
-
-    tail -f tail -f ~/.sticker.log
+    make rttt
 
 Determine RTT block address:
 

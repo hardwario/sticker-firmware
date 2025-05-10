@@ -24,6 +24,9 @@ flash:
 gdb:
 	@west debug
 
+rttt:
+	@rttt --device STM32WLE5CC --address 0x20000800
+
 init:
 	@west build -p always -t initlevels -b sticker
 
