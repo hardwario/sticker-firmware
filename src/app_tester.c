@@ -1,25 +1,18 @@
 #include "app_led.h"
 #include "app_sensor.h"
-#include "app_tester.h"
 
 /* Zephyr includes */
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/settings/settings.h>
 #include <zephyr/shell/shell.h>
 
 /* Standard includes */
-#include <ctype.h>
-#include <errno.h>
-#include <stdbool.h>
 #include <stddef.h>
-#include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(app_tester, LOG_LEVEL_DBG);
 
-#define SETTINGS_PFX "tester"
+#define SHELL_PFX "tester"
 
 void cmd_cycle_led(void)
 {
@@ -70,44 +63,44 @@ static void cmd_switch_led(const struct shell *shell, size_t argc, char **argv)
 static void cmd_print_voltage(const struct shell *shell)
 {
 	app_sensor_sample();
-	shell_print(shell, SETTINGS_PFX " voltage %.2f", (double)g_app_sensor_data.voltage);
+	shell_print(shell, SHELL_PFX " voltage %.2f", (double)g_app_sensor_data.voltage);
 }
 
 static void cmd_print_orientation(const struct shell *shell)
 {
 	app_sensor_sample();
-	shell_print(shell, SETTINGS_PFX " orientation %d", (int)g_app_sensor_data.orientation);
+	shell_print(shell, SHELL_PFX " orientation %d", (int)g_app_sensor_data.orientation);
 }
 
 static void cmd_print_temperature(const struct shell *shell)
 {
 	app_sensor_sample();
-	shell_print(shell, SETTINGS_PFX " temperature %.2f", (double)g_app_sensor_data.temperature);
+	shell_print(shell, SHELL_PFX " temperature %.2f", (double)g_app_sensor_data.temperature);
 }
 
 static void cmd_print_humidity(const struct shell *shell)
 {
 	app_sensor_sample();
-	shell_print(shell, SETTINGS_PFX " humidity %.2f", (double)g_app_sensor_data.humidity);
+	shell_print(shell, SHELL_PFX " humidity %.2f", (double)g_app_sensor_data.humidity);
 }
 
 static void cmd_print_illuminance(const struct shell *shell)
 {
 	app_sensor_sample();
-	shell_print(shell, SETTINGS_PFX " illuminance %.2f", (double)g_app_sensor_data.illuminance);
+	shell_print(shell, SHELL_PFX " illuminance %.2f", (double)g_app_sensor_data.illuminance);
 }
 
 static void cmd_print_ext_temperature_1(const struct shell *shell)
 {
 	app_sensor_sample();
-	shell_print(shell, SETTINGS_PFX " ext_temperature_1 %.2f",
+	shell_print(shell, SHELL_PFX " ext_temperature_1 %.2f",
 		    (double)g_app_sensor_data.ext_temperature_1);
 }
 
 static void cmd_print_ext_temperature_2(const struct shell *shell)
 {
 	app_sensor_sample();
-	shell_print(shell, SETTINGS_PFX " ext_temperature_2 %.2f",
+	shell_print(shell, SHELL_PFX " ext_temperature_2 %.2f",
 		    (double)g_app_sensor_data.ext_temperature_2);
 }
 
@@ -116,7 +109,7 @@ static void cmd_print_ext_temperature_2(const struct shell *shell)
 static void cmd_print_motion_count(const struct shell *shell)
 {
 	app_sensor_sample();
-	shell_print(shell, SETTINGS_PFX " motion_count %d", (int)g_app_sensor_data.motion_count);
+	shell_print(shell, SHELL_PFX " motion_count %d", (int)g_app_sensor_data.motion_count);
 }
 
 #endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
