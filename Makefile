@@ -38,3 +38,6 @@ config:
 
 config_debug:
 	@west build -t menuconfig -b sticker -- -DEXTRA_CONF_FILE=debug.conf
+
+format:
+	@find . -iname '*.h' -o -iname '*.c' | xargs clang-format -i --style=file:.clang-format
