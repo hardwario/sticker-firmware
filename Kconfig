@@ -1,72 +1,7 @@
 #
-# Copyright (c) 2024 HARDWARIO a.s.
+# Copyright (c) 2025 HARDWARIO a.s.
 #
-# SPDX-License-Identifier: LicenseRef-HARDWARIO-5-Clause
+# SPDX-License-Identifier: Apache-2.0
 #
 
-menu "Application"
-
-choice APP_PROFILE_STICKER
-	prompt "Application profile STICKER"
-
-config APP_PROFILE_STICKER_CLIME
-	bool "Application profile STICKER Clime"
-
-config APP_PROFILE_STICKER_INPUT
-	bool "Application profile STICKER Input"
-	select W1
-
-config APP_PROFILE_STICKER_MOTION
-	bool "Application profile STICKER Motion"
-
-endchoice # APP_PROFILE_STICKER
-
-config APP_ALARM_INT_TEMP
-	bool "Enable alarm for internal temperature"
-	default y
-
-config APP_ALARM_EXT_TEMP
-	bool "Enable alarm for external temperature"
-	default y
-
-config APP_ALARM_INT_TEMP_THR_LO_MUL_100
-	int "Alarm internal temperature threshold low multiplied by 100"
-	default 200
-
-config APP_ALARM_INT_TEMP_THR_HI_MUL_100
-	int "Alarm internal temperature threshold high multiplied by 100"
-	default 800
-
-config APP_ALARM_INT_TEMP_HST_MUL_100
-	int "Alarm internal temperature hysteresis multiplied by 100"
-	default 50
-
-config APP_ALARM_EXT_TEMP_1_THR_LO_MUL_100
-	int "Alarm external temperature 1 threshold low multiplied by 100"
-	default 200
-
-config APP_ALARM_EXT_TEMP_1_THR_HI_MUL_100
-	int "Alarm external temperature 1 threshold high multiplied by 100"
-	default 800
-
-config APP_ALARM_EXT_TEMP_1_HST_MUL_100
-	int "Alarm external temperature 1 hysteresis multiplied by 100"
-	default 50
-
-config APP_ALARM_EXT_TEMP_2_THR_LO_MUL_100
-	int "Alarm external temperature 2 low multiplied by 100"
-	default 200
-
-config APP_ALARM_EXT_TEMP_2_THR_HI_MUL_100
-	int "Alarm external temperature 2 threshold high multiplied by 100"
-	default 800
-
-config APP_ALARM_EXT_TEMP_2_HST_MUL_100
-	int "Alarm external temperature 2 hysteresis multiplied by 100"
-	default 50
-
-endmenu
-
-menu "Zephyr Kernel"
-source "Kconfig.zephyr"
-endmenu
+rsource "drivers/Kconfig"

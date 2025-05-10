@@ -32,6 +32,14 @@ Install required Python packages:
 
     pip install -r zephyr/scripts/requirements.txt -r bootloader/mcuboot/scripts/requirements.txt
 
+Install the **RTTT** tool:
+
+    pip install rttt
+
+Switch to the `app` directory:
+
+    cd app
+
 Build the application in production mode:
 
     make
@@ -48,13 +56,19 @@ Clean build outputs:
 
     make clean
 
-Start RTT terminal:
+Start the RTT terminal:
 
     make rttt
 
 Determine RTT block address:
 
     readelf -s build/zephyr/zephyr.elf | grep _SEGGER_RTT
+
+Format the source codes:
+
+    make format
+
+# Remarks
 
 I2C:
 https://github.com/zephyrproject-rtos/zephyr/issues/37414

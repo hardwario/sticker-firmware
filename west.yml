@@ -10,4 +10,4 @@ manifest:
       path: zephyr
       import: true
   self:
-    path: application
+    path: sticker

@@ -1,0 +1,22 @@
+# NXP MPL3115A2 Barometric Pressure/Altitude/Temperature Sensor
+
+#
+# Copyright (c) 2025 HARDWARIO a.s.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+menuconfig MPL3115A2
+	bool "MPL3115A2 Pressure Sensor"
+	depends on I2C
+	help
+	  Enable the driver for NXP MPL3115A2 Barometric Pressure/Altitude/Temperature Sensor
+
+config MPL3115A2_SHELL
+	bool "MPL3115A2 Shell Commands"
+	default y if MPL3115A2
+	depends on MPL3115A2
+
+if MPL3115A2
+
+endif # MPL3115A2
