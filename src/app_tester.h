@@ -1,5 +1,5 @@
-#ifndef APP_TESTER_H
-#define APP_TESTER_H
+#ifndef APP_TESTER_H_
+#define APP_TESTER_H_
 
 /* Standard includes */
 #include <stdint.h>
@@ -8,10 +8,8 @@
 extern "C" {
 #endif
 
-void cmd_led_cycle(void);
-
 #ifdef __cplusplus
 }
 #endif
 
-#endif // APP_TESTER_H
+#endif /* APP_TESTER_H_ */
