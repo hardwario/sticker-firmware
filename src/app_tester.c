@@ -23,17 +23,17 @@ LOG_MODULE_REGISTER(app_tester, LOG_LEVEL_DBG);
 
 void cmd_cycle_led(void)
 {
-    app_led_set(APP_LED_CHANNEL_R, 1);
-    k_sleep(K_MSEC(1000));
-    app_led_set(APP_LED_CHANNEL_R, 0);
-    k_sleep(K_MSEC(200));
-    app_led_set(APP_LED_CHANNEL_Y, 1);
-    k_sleep(K_MSEC(1000));
-    app_led_set(APP_LED_CHANNEL_Y, 0);
-    k_sleep(K_MSEC(200));
-    app_led_set(APP_LED_CHANNEL_G, 1);
-    k_sleep(K_MSEC(1000));
-    app_led_set(APP_LED_CHANNEL_G, 0);
+	app_led_set(APP_LED_CHANNEL_R, 1);
+	k_sleep(K_MSEC(1000));
+	app_led_set(APP_LED_CHANNEL_R, 0);
+	k_sleep(K_MSEC(200));
+	app_led_set(APP_LED_CHANNEL_Y, 1);
+	k_sleep(K_MSEC(1000));
+	app_led_set(APP_LED_CHANNEL_Y, 0);
+	k_sleep(K_MSEC(200));
+	app_led_set(APP_LED_CHANNEL_G, 1);
+	k_sleep(K_MSEC(1000));
+	app_led_set(APP_LED_CHANNEL_G, 0);
 }
 
 static void cmd_switch_led(const struct shell *shell, size_t argc, char **argv)
@@ -52,7 +52,7 @@ static void cmd_switch_led(const struct shell *shell, size_t argc, char **argv)
 	} else {
 		shell_error(shell, "invalid channel name");
 		shell_help(shell);
-        	return;
+		return;
 	}
 
 	if (strcmp(argv[2], "on") == 0) {
@@ -69,72 +69,77 @@ static void cmd_switch_led(const struct shell *shell, size_t argc, char **argv)
 
 static void cmd_print_voltage(const struct shell *shell)
 {
-    app_sensor_sample();
-    shell_print(shell, SETTINGS_PFX " voltage %.2f", (double)g_app_sensor_data.voltage);
+	app_sensor_sample();
+	shell_print(shell, SETTINGS_PFX " voltage %.2f", (double)g_app_sensor_data.voltage);
 }
 
 static void cmd_print_orientation(const struct shell *shell)
 {
-    app_sensor_sample();
-    shell_print(shell, SETTINGS_PFX " orientation %d", (int)g_app_sensor_data.orientation);
+	app_sensor_sample();
+	shell_print(shell, SETTINGS_PFX " orientation %d", (int)g_app_sensor_data.orientation);
 }
 
 static void cmd_print_temperature(const struct shell *shell)
 {
-    app_sensor_sample();
-    shell_print(shell, SETTINGS_PFX " temperature %.2f", (double)g_app_sensor_data.temperature);
+	app_sensor_sample();
+	shell_print(shell, SETTINGS_PFX " temperature %.2f", (double)g_app_sensor_data.temperature);
 }
 
 static void cmd_print_humidity(const struct shell *shell)
 {
-    app_sensor_sample();
-    shell_print(shell, SETTINGS_PFX " humidity %.2f", (double)g_app_sensor_data.humidity);
+	app_sensor_sample();
+	shell_print(shell, SETTINGS_PFX " humidity %.2f", (double)g_app_sensor_data.humidity);
 }
 
 static void cmd_print_illuminance(const struct shell *shell)
 {
-    app_sensor_sample();
-    shell_print(shell, SETTINGS_PFX " illuminance %.2f", (double)g_app_sensor_data.illuminance);
+	app_sensor_sample();
+	shell_print(shell, SETTINGS_PFX " illuminance %.2f", (double)g_app_sensor_data.illuminance);
 }
 
 static void cmd_print_ext_temperature_1(const struct shell *shell)
 {
-    app_sensor_sample();
-    shell_print(shell, SETTINGS_PFX " ext_temperature_1 %.2f", (double)g_app_sensor_data.ext_temperature_1);
+	app_sensor_sample();
+	shell_print(shell, SETTINGS_PFX " ext_temperature_1 %.2f",
+		    (double)g_app_sensor_data.ext_temperature_1);
 }
 
 static void cmd_print_ext_temperature_2(const struct shell *shell)
 {
-    app_sensor_sample();
-    shell_print(shell, SETTINGS_PFX " ext_temperature_2 %.2f", (double)g_app_sensor_data.ext_temperature_2);
+	app_sensor_sample();
+	shell_print(shell, SETTINGS_PFX " ext_temperature_2 %.2f",
+		    (double)g_app_sensor_data.ext_temperature_2);
 }
 
 #if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
 
 static void cmd_print_motion_count(const struct shell *shell)
 {
-    app_sensor_sample();
-    shell_print(shell, SETTINGS_PFX " motion_count %d", (int)g_app_sensor_data.motion_count);
+	app_sensor_sample();
+	shell_print(shell, SETTINGS_PFX " motion_count %d", (int)g_app_sensor_data.motion_count);
 }
 
 #endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
-SHELL_STATIC_SUBCMD_SET_CREATE(sub_test,
-    SHELL_CMD_ARG(led_cycle, NULL, "Cycle LED (R/G/Y)", cmd_cycle_led, 1, 0),
-    SHELL_CMD_ARG(led_switch, NULL, "Switch LED channel (format red|yellow|green on|off).", cmd_switch_led, 3, 0),
-    SHELL_CMD_ARG(voltage, NULL, "Print voltage.", cmd_print_voltage, 1, 0),
-    SHELL_CMD_ARG(orientation, NULL, "Print orientation.", cmd_print_orientation, 1, 0),
-    SHELL_CMD_ARG(temperature, NULL, "Print temperature.", cmd_print_temperature, 1, 0),
-    SHELL_CMD_ARG(humidity, NULL, "Print humidity.", cmd_print_humidity, 1, 0),
-    SHELL_CMD_ARG(illuminance, NULL, "Print illuminance.", cmd_print_illuminance, 1, 0),
-    SHELL_CMD_ARG(ext_temperature_1, NULL, "Print ext. temperature 1.", cmd_print_ext_temperature_1, 1, 0),
-    SHELL_CMD_ARG(ext_temperature_2, NULL, "Print ext. temperature 2.", cmd_print_ext_temperature_2, 1, 0),
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_test, SHELL_CMD_ARG(led_cycle, NULL, "Cycle LED (R/G/Y)", cmd_cycle_led, 1, 0),
+	SHELL_CMD_ARG(led_switch, NULL, "Switch LED channel (format red|yellow|green on|off).",
+		      cmd_switch_led, 3, 0),
+	SHELL_CMD_ARG(voltage, NULL, "Print voltage.", cmd_print_voltage, 1, 0),
+	SHELL_CMD_ARG(orientation, NULL, "Print orientation.", cmd_print_orientation, 1, 0),
+	SHELL_CMD_ARG(temperature, NULL, "Print temperature.", cmd_print_temperature, 1, 0),
+	SHELL_CMD_ARG(humidity, NULL, "Print humidity.", cmd_print_humidity, 1, 0),
+	SHELL_CMD_ARG(illuminance, NULL, "Print illuminance.", cmd_print_illuminance, 1, 0),
+	SHELL_CMD_ARG(ext_temperature_1, NULL, "Print ext. temperature 1.",
+		      cmd_print_ext_temperature_1, 1, 0),
+	SHELL_CMD_ARG(ext_temperature_2, NULL, "Print ext. temperature 2.",
+		      cmd_print_ext_temperature_2, 1, 0),
 
-    #if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
-    SHELL_CMD_ARG(motion, NULL, "Print number of PIR activations", cmd_print_motion_count, 1, 0),
-    #endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
+#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
+	SHELL_CMD_ARG(motion, NULL, "Print number of PIR activations", cmd_print_motion_count, 1,
+		      0),
+#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
-    SHELL_SUBCMD_SET_END
-);
+	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(tester, &sub_test, "Tester commands.", NULL);

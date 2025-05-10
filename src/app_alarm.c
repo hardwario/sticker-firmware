@@ -35,19 +35,15 @@ bool app_alarm_is_active(void)
 	if (isnan(g_app_sensor_data.temperature)) {
 		alarm_int_temp = false;
 	} else if (alarm_int_temp) {
-		if (g_app_sensor_data.temperature >
-			    (ALARM_INT_TEMP_THR_LO + ALARM_INT_TEMP_HST) &&
-		    g_app_sensor_data.temperature <
-			    (ALARM_INT_TEMP_THR_HI - ALARM_INT_TEMP_HST)) {
+		if (g_app_sensor_data.temperature > (ALARM_INT_TEMP_THR_LO + ALARM_INT_TEMP_HST) &&
+		    g_app_sensor_data.temperature < (ALARM_INT_TEMP_THR_HI - ALARM_INT_TEMP_HST)) {
 			LOG_INF("Deactivated alarm for internal temperature");
 
 			alarm_int_temp = false;
 		}
 	} else {
-		if (g_app_sensor_data.temperature <
-			    (ALARM_INT_TEMP_THR_LO - ALARM_INT_TEMP_HST) ||
-		    g_app_sensor_data.temperature >
-			    (ALARM_INT_TEMP_THR_HI + ALARM_INT_TEMP_HST)) {
+		if (g_app_sensor_data.temperature < (ALARM_INT_TEMP_THR_LO - ALARM_INT_TEMP_HST) ||
+		    g_app_sensor_data.temperature > (ALARM_INT_TEMP_THR_HI + ALARM_INT_TEMP_HST)) {
 			LOG_INF("Activated alarm for internal temperature");
 
 			alarm_int_temp = true;
