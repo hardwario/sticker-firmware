@@ -8,6 +8,7 @@
 #define APP_CONFIG_H_
 
 /* Standard includes */
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -25,6 +26,7 @@ struct app_config {
 	float corr_ext_temperature_1;
 	float corr_ext_temperature_2;
 	uint32_t serial_number;
+	bool has_mpl3115a2;
 };
 
 extern struct app_config g_app_config;

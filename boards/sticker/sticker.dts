@@ -129,6 +129,7 @@ stm32_lp_tick_source: &lptim1 {
 	mpl3115a2: mpl3115a2@60 {
 		compatible = "nxp,mpl3115a2";
 		reg = <0x60>;
+		zephyr,deferred-init;
 	};
 
 	opt3001: opt3001@45 {

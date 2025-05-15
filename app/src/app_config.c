@@ -75,6 +75,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.corr_ext_temperature_2));
 	SETTINGS_SET("serial-number", &m_app_config.serial_number,
 		     sizeof(m_app_config.serial_number));
+	SETTINGS_SET("has-mpl3115a2", &m_app_config.has_mpl3115a2,
+		     sizeof(m_app_config.has_mpl3115a2));
 
 #undef SETTINGS_SET
 
@@ -112,6 +114,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.corr_ext_temperature_2));
 	EXPORT_FUNC("serial-number", &m_app_config.serial_number,
 		    sizeof(m_app_config.serial_number));
+	EXPORT_FUNC("has-mpl3115a2", &m_app_config.has_mpl3115a2,
+		    sizeof(m_app_config.has_mpl3115a2));
 
 #undef EXPORT_FUNC
 
@@ -313,6 +317,12 @@ static void print_serial_number(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " serial-number %010u", m_app_config.serial_number);
 }
 
+static void print_has_mpl3115a2(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " has-mpl3115a2 %s",
+		    m_app_config.has_mpl3115a2 ? "true" : "false");
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_interval_sample(shell);
@@ -325,6 +335,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_corr_ext_temperature_1(shell);
 	print_corr_ext_temperature_2(shell);
 	print_serial_number(shell);
+	print_has_mpl3115a2(shell);
 
 	return 0;
 }
@@ -640,6 +651,30 @@ static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv
 	return 0;
 }
 
+static int cmd_has_mpl3115a2(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_has_mpl3115a2(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.has_mpl3115a2 = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.has_mpl3115a2 = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -709,6 +744,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(serial-number, NULL,
 	              "Get/Set device serial number (10 decimal digits).",
 	              cmd_serial_number, 1, 1),
+
+	SHELL_CMD_ARG(has-mpl3115a2, NULL,
+	              "Get/Set capability MPL3115A2 (true/false).",
+	              cmd_has_mpl3115a2, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );

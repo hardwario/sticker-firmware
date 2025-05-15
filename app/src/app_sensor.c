@@ -117,12 +117,12 @@ void app_sensor_sample(void)
 	}
 #endif /* defined(CONFIG_W1) */
 
-#if defined(CONFIG_MPL3115A2)
-	ret = app_mpl3115a2_read(&altitude, &pressure, NULL);
-	if (ret) {
-		LOG_ERR("Call `app_mpl3115a2_read` failed: %d", ret);
+	if (g_app_config.has_mpl3115a2) {
+		ret = app_mpl3115a2_read(&altitude, &pressure, NULL);
+		if (ret) {
+			LOG_ERR("Call `app_mpl3115a2_read` failed: %d", ret);
+		}
 	}
-#endif /* defined(CONFIG_MPL3115A2) */
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 

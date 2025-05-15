@@ -7,6 +7,8 @@
 #include "app_wdog.h"
 
 /* Zephyr includes */
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -93,6 +95,16 @@ int main(void)
 	int ret;
 
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
+
+	if (g_app_config.has_mpl3115a2) {
+		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(mpl3115a2));
+
+		ret = device_init(dev);
+		if (ret) {
+			LOG_ERR("Call `device_init` failed (mpl3115a2): %d", ret);
+			return ret;
+		}
+	}
 
 	carousel();
 
