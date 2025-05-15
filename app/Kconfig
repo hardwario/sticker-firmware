@@ -21,6 +21,10 @@ config APP_PROFILE_STICKER_MOTION
 
 endchoice # APP_PROFILE_STICKER
 
+config CONFIG_LORAWAN_PUBLIC_NETWORK
+	bool "LoRaWAN public network"
+	default n
+
 config APP_ALARM_INT_TEMP
 	bool "Enable alarm for internal temperature"
 	default y
