@@ -27,6 +27,12 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 #define ALARM_EXT_TEMP_2_THR_LO (CONFIG_APP_ALARM_EXT_TEMP_2_THR_LO_MUL_100 / 100.f)
 #define ALARM_EXT_TEMP_2_THR_HI (CONFIG_APP_ALARM_EXT_TEMP_2_THR_HI_MUL_100 / 100.f)
 #define ALARM_EXT_TEMP_2_HST    (CONFIG_APP_ALARM_EXT_TEMP_2_HST_MUL_100 / 100.f)
+#define ALARM_HUMIDITY_THR_LO   (CONFIG_APP_ALARM_HUMIDITY_THR_LO_MUL_10 / 10.f)
+#define ALARM_HUMIDITY_THR_HI   (CONFIG_APP_ALARM_HUMIDITY_THR_HI_MUL_10 / 10.f)
+#define ALARM_HUMIDITY_HST      (CONFIG_APP_ALARM_HUMIDITY_HST_MUL_10 / 10.f)
+#define ALARM_PRESSURE_THR_LO   (CONFIG_APP_ALARM_PRESSURE_THR_LO)
+#define ALARM_PRESSURE_THR_HI   (CONFIG_APP_ALARM_PRESSURE_THR_HI)
+#define ALARM_PRESSURE_HST      (CONFIG_APP_ALARM_PRESSURE_HST)
 
 bool app_alarm_is_active(void)
 {
@@ -98,6 +104,46 @@ bool app_alarm_is_active(void)
 		}
 	}
 
+	static bool alarm_humidity = false;
+
+	if (isnan(g_app_sensor_data.humidity)) {
+		alarm_humidity = false;
+	} else if (alarm_humidity) {
+		if (g_app_sensor_data.humidity > (ALARM_HUMIDITY_THR_LO + ALARM_HUMIDITY_HST) &&
+		    g_app_sensor_data.humidity < (ALARM_HUMIDITY_THR_HI - ALARM_HUMIDITY_HST)) {
+			LOG_INF("Deactivated alarm for humidity");
+
+			alarm_humidity = false;
+		}
+	} else {
+		if (g_app_sensor_data.humidity < (ALARM_HUMIDITY_THR_LO - ALARM_HUMIDITY_HST) ||
+		    g_app_sensor_data.humidity > (ALARM_HUMIDITY_THR_HI + ALARM_HUMIDITY_HST)) {
+			LOG_INF("Activated alarm for humidity");
+
+			alarm_humidity = true;
+		}
+	}
+
+	static bool alarm_pressure = false;
+
+	if (isnan(g_app_sensor_data.pressure)) {
+		alarm_pressure = false;
+	} else if (alarm_pressure) {
+		if (g_app_sensor_data.pressure / 100.f > (ALARM_PRESSURE_THR_LO + ALARM_PRESSURE_HST) &&
+		    g_app_sensor_data.pressure / 100.f < (ALARM_PRESSURE_THR_HI - ALARM_PRESSURE_HST)) {
+			LOG_INF("Deactivated alarm for pressure");
+
+			alarm_pressure = false;
+		}
+	} else {
+		if (g_app_sensor_data.pressure / 100.f < (ALARM_PRESSURE_THR_LO - ALARM_PRESSURE_HST) ||
+		    g_app_sensor_data.pressure / 100.f > (ALARM_PRESSURE_THR_HI + ALARM_PRESSURE_HST)) {
+			LOG_INF("Activated alarm for pressure");
+
+			alarm_pressure = true;
+		}
+	}
+
 	bool alarm = false;
 
 #if defined(CONFIG_APP_ALARM_INT_TEMP)
@@ -108,6 +154,14 @@ bool app_alarm_is_active(void)
 	alarm = alarm_ext_temp_1 ? true : alarm;
 	alarm = alarm_ext_temp_2 ? true : alarm;
 #endif /* defined(CONFIG_APP_ALARM_EXT_TEMP) */
+
+#if defined(CONFIG_APP_ALARM_HUMIDITY)
+	alarm = alarm_humidity ? true : alarm;
+#endif /* defined(CONFIG_APP_ALARM_HUMIDITY) */
+
+#if defined(CONFIG_APP_ALARM_PRESSURE)
+	alarm = alarm_pressure ? true : alarm;
+#endif /* defined(CONFIG_APP_ALARM_PRESSURE) */
 
 	return alarm;
 }
