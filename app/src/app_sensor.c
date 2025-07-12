@@ -9,6 +9,7 @@
 #include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_led.h"
+#include "app_machine_probe.h"
 #include "app_mpl3115a2.h"
 #include "app_opt3001.h"
 #include "app_pyq1648.h"
@@ -187,6 +188,37 @@ static int init(void)
 		LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
 		return ret;
 	}
+
+#if defined(CONFIG_DS28E17)
+	ret = app_machine_probe_scan();
+	if (ret) {
+		LOG_ERR("Call `app_machine_probe_scan` failed: %d", ret);
+		return ret;
+	}
+
+	int count = app_machine_probe_get_count();
+
+	for (int i = 0; i < count; i++) {
+		uint64_t serial_number;
+		float hygrometer_temperature;
+		float hygrometer_humidity;
+		ret = app_machine_probe_read_hygrometer(i, &serial_number, &hygrometer_temperature,
+							&hygrometer_humidity);
+		if (ret) {
+			LOG_ERR("Call `app_machine_probe_read_hygrometer` failed: "
+				"%d",
+				ret);
+		} else {
+			LOG_INF("Serial number: %llu / Hygrometer / Temperature: "
+				"%.2f C",
+				serial_number, (double)hygrometer_temperature);
+			LOG_INF("Serial number: %llu / Hygrometer / Humidity: %.1f "
+				"%%",
+				serial_number, (double)hygrometer_humidity);
+		}
+	}
+#endif /* defined(CONFIG_DS28E17) */
+
 #endif /* defined(CONFIG_W1) */
 
 	k_work_queue_init(&m_sensor_work_q);

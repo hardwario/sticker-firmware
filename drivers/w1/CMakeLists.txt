@@ -4,6 +4,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
-add_subdirectory(drivers)
+zephyr_library()
 
-zephyr_include_directories(include)
+zephyr_library_sources_ifdef(CONFIG_DS28E17 w1_ds28e17.c)

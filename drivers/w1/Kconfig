@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
-add_subdirectory(drivers)
+if W1
 
-zephyr_include_directories(include)
+rsource "Kconfig.ds28e17"
+
+endif # W1

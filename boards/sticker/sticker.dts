@@ -115,6 +115,16 @@ stm32_lp_tick_source: &lptim1 {
 			resolution = <12>;
 			family-code = <0x28>;
 		};
+
+		machine_probe_0: machine_probe_0 {
+			compatible = "maxim,ds28e17";
+			family-code = <0x19>;
+		};
+
+		machine_probe_1: machine_probe_1 {
+			compatible = "maxim,ds28e17";
+			family-code = <0x19>;
+		};
 	};
 
 	lis2dh12: lis2dh12@19 {
