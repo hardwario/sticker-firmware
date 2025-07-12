@@ -129,15 +129,19 @@ bool app_alarm_is_active(void)
 	if (isnan(g_app_sensor_data.pressure)) {
 		alarm_pressure = false;
 	} else if (alarm_pressure) {
-		if (g_app_sensor_data.pressure / 100.f > (ALARM_PRESSURE_THR_LO + ALARM_PRESSURE_HST) &&
-		    g_app_sensor_data.pressure / 100.f < (ALARM_PRESSURE_THR_HI - ALARM_PRESSURE_HST)) {
+		if (g_app_sensor_data.pressure / 100.f >
+			    (ALARM_PRESSURE_THR_LO + ALARM_PRESSURE_HST) &&
+		    g_app_sensor_data.pressure / 100.f <
+			    (ALARM_PRESSURE_THR_HI - ALARM_PRESSURE_HST)) {
 			LOG_INF("Deactivated alarm for pressure");
 
 			alarm_pressure = false;
 		}
 	} else {
-		if (g_app_sensor_data.pressure / 100.f < (ALARM_PRESSURE_THR_LO - ALARM_PRESSURE_HST) ||
-		    g_app_sensor_data.pressure / 100.f > (ALARM_PRESSURE_THR_HI + ALARM_PRESSURE_HST)) {
+		if (g_app_sensor_data.pressure / 100.f <
+			    (ALARM_PRESSURE_THR_LO - ALARM_PRESSURE_HST) ||
+		    g_app_sensor_data.pressure / 100.f >
+			    (ALARM_PRESSURE_THR_HI + ALARM_PRESSURE_HST)) {
 			LOG_INF("Activated alarm for pressure");
 
 			alarm_pressure = true;
