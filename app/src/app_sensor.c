@@ -176,10 +176,8 @@ void app_sensor_sample(void)
 		ext_temperature_2 + g_app_config.corr_ext_temperature_2;
 	g_app_sensor_data.altitude = altitude;
 	g_app_sensor_data.pressure = pressure;
-	g_app_sensor_data.machine_probe_temperature_1 =
-		machine_probe_temperature_1;
-	g_app_sensor_data.machine_probe_temperature_2 =
-		machine_probe_temperature_2;
+	g_app_sensor_data.machine_probe_temperature_1 = machine_probe_temperature_1;
+	g_app_sensor_data.machine_probe_temperature_2 = machine_probe_temperature_2;
 	g_app_sensor_data.machine_probe_humidity_1 = machine_probe_humidity_1;
 	g_app_sensor_data.machine_probe_humidity_2 = machine_probe_humidity_2;
 
