@@ -25,10 +25,14 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 LOG_MODULE_REGISTER(app_sensor, LOG_LEVEL_DBG);
+
+#define TILT_THRESHOLD 7
+#define TILT_DURATION  1
 
 struct app_sensor_data g_app_sensor_data = {
 	.orientation = INT_MAX,
@@ -71,6 +75,8 @@ void app_sensor_sample(void)
 	float machine_probe_temperature_2 = NAN;
 	float machine_probe_humidity_1 = NAN;
 	float machine_probe_humidity_2 = NAN;
+	bool machine_probe_is_tilt_alert_1 = false;
+	bool machine_probe_is_tilt_alert_2 = false;
 
 #if defined(CONFIG_ADC)
 	ret = app_battery_measure(&voltage);
@@ -130,6 +136,7 @@ void app_sensor_sample(void)
 		uint64_t serial_number;
 		float hygrometer_temperature;
 		float hygrometer_humidity;
+		bool is_tilt_alert;
 		ret = app_machine_probe_read_hygrometer(i, &serial_number, &hygrometer_temperature,
 							&hygrometer_humidity);
 		if (ret) {
@@ -139,19 +146,32 @@ void app_sensor_sample(void)
 			continue;
 		}
 
+		ret = app_machine_probe_get_tilt_alert(i, &serial_number, &is_tilt_alert);
+		if (ret) {
+			LOG_ERR("Call `app_machine_probe_get_tilt_alert` failed: "
+				"%d",
+				ret);
+
+			continue;
+		}
+
 		LOG_INF("Serial number: %llu / Hygrometer / Temperature: "
 			"%.2f C",
 			serial_number, (double)hygrometer_temperature);
 		LOG_INF("Serial number: %llu / Hygrometer / Humidity: %.1f "
 			"%%",
 			serial_number, (double)hygrometer_humidity);
+		LOG_INF("Serial number: %llu / Tilt alert is %sactive",
+			serial_number, is_tilt_alert ? "" : "not ");
 
 		if (i == 0) {
 			machine_probe_temperature_1 = hygrometer_temperature;
 			machine_probe_humidity_1 = hygrometer_humidity;
+			machine_probe_is_tilt_alert_1 = is_tilt_alert;
 		} else if (i == 1) {
 			machine_probe_temperature_2 = hygrometer_temperature;
 			machine_probe_humidity_2 = hygrometer_humidity;
+			machine_probe_is_tilt_alert_2 = is_tilt_alert;
 		}
 	}
 #endif /* defined(CONFIG_DS28E17) */
@@ -180,6 +200,10 @@ void app_sensor_sample(void)
 	g_app_sensor_data.machine_probe_temperature_2 = machine_probe_temperature_2;
 	g_app_sensor_data.machine_probe_humidity_1 = machine_probe_humidity_1;
 	g_app_sensor_data.machine_probe_humidity_2 = machine_probe_humidity_2;
+	g_app_sensor_data.machine_probe_is_tilt_alert_1 =
+		machine_probe_is_tilt_alert_1;
+	g_app_sensor_data.machine_probe_is_tilt_alert_2 =
+		machine_probe_is_tilt_alert_2;
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }
@@ -237,6 +261,19 @@ static int init(void)
 	if (ret) {
 		LOG_ERR("Call `app_machine_probe_scan` failed: %d", ret);
 		return ret;
+	}
+
+	int count = app_machine_probe_get_count();
+
+	for (int i = 0; i < count; i++) {
+		uint64_t serial_number;
+		ret = app_machine_probe_enable_tilt_alert(i, &serial_number,
+						 TILT_THRESHOLD, TILT_DURATION);
+		if (ret) {
+			LOG_ERR("Call `app_machine_probe_enable_tilt_alert` failed: %d",
+				ret);
+			return ret;
+		}
 	}
 #endif /* defined(CONFIG_DS28E17) */
 

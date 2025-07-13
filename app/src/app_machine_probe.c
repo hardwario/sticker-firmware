@@ -44,6 +44,18 @@ LOG_MODULE_REGISTER(app_machine_probe, LOG_LEVEL_DBG);
 
 #define LIS2DH12_I2C_ADDR 0x19
 
+#define LIS2DH12_CTRL_REG1 0x20
+#define LIS2DH12_CTRL_REG2 0x21
+#define LIS2DH12_CTRL_REG3 0x22
+#define LIS2DH12_CTRL_REG4 0x23
+#define LIS2DH12_CTRL_REG5 0x24
+#define LIS2DH12_REFERENCE 0x26
+#define LIS2DH12_STATUS_REG 0x27
+#define LIS2DH12_INT1_CFG 0x30
+#define LIS2DH12_INT1_SRC 0x31
+#define LIS2DH12_INT1_THS 0x32
+#define LIS2DH12_INT1_DURATION 0x33
+
 struct sensor {
 	uint64_t serial_number;
 	const struct device *dev;
@@ -341,24 +353,24 @@ static int lis2dh12_init(const struct device *dev)
 	} while (0)
 
 	/* Reboot memory content */
-	LIS2DH12_WRITE_REG(0x24, 0x80);
+	LIS2DH12_WRITE_REG(LIS2DH12_CTRL_REG5, 0x80);
 
 	k_sleep(K_MSEC(10));
 
 	/* Enable block data update and set scale to +/-4g */
-	LIS2DH12_WRITE_REG(0x23, 0x90);
+	LIS2DH12_WRITE_REG(LIS2DH12_CTRL_REG4, 0x90);
 
 	/* High-pass filter enabled for INT1 */
-	LIS2DH12_WRITE_REG(0x21, 0x01);
+	LIS2DH12_WRITE_REG(LIS2DH12_CTRL_REG2, 0x01);
 
 	/* Enable IA1 interrupt on INT1 pin */
-	LIS2DH12_WRITE_REG(0x22, 0x40);
+	LIS2DH12_WRITE_REG(LIS2DH12_CTRL_REG3, 0x40);
 
 	/* Latch INT1 interrupt request */
-	LIS2DH12_WRITE_REG(0x24, 0x08);
+	LIS2DH12_WRITE_REG(LIS2DH12_CTRL_REG5, 0x08);
 
 	/* 10 Hz, normal mode, X/Y/Z enabled */
-	LIS2DH12_WRITE_REG(0x20, 0x27);
+	LIS2DH12_WRITE_REG(LIS2DH12_CTRL_REG1, 0x27);
 
 #undef LIS2DH12_WRITE_REG
 
@@ -374,7 +386,7 @@ static int lis2dh12_read(const struct device *dev, float *accel_x, float *accel_
 	uint8_t write_buf[1];
 	uint8_t read_buf[7];
 
-	write_buf[0] = 0xa7;
+	write_buf[0] = 0x80 | LIS2DH12_STATUS_REG;
 
 	ret = ds28e17_i2c_write_read(dev, LIS2DH12_I2C_ADDR, write_buf, 1, read_buf, 7);
 	if (ret) {
@@ -409,20 +421,28 @@ static int lis2dh12_enable_alert(const struct device *dev, int threshold, int du
 {
 	int ret;
 
-	uint8_t write_buf[3];
+	uint8_t write_buf[2];
 	uint8_t read_buf[1];
 
-	write_buf[0] = 0x32;
+	write_buf[0] = LIS2DH12_INT1_THS;
 	write_buf[1] = threshold & BIT_MASK(7);
-	write_buf[2] = duration & BIT_MASK(7);
 
-	ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 3);
+	ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 2);
 	if (ret) {
 		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
 		return ret;
 	}
 
-	write_buf[0] = 0x26;
+	write_buf[0] = LIS2DH12_INT1_DURATION;
+	write_buf[1] = duration & BIT_MASK(7);
+
+	ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 2);
+	if (ret) {
+		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		return ret;
+	}
+
+	write_buf[0] = LIS2DH12_REFERENCE;
 
 	ret = ds28e17_i2c_write_read(dev, LIS2DH12_I2C_ADDR, write_buf, 1, read_buf, 1);
 	if (ret) {
@@ -430,7 +450,7 @@ static int lis2dh12_enable_alert(const struct device *dev, int threshold, int du
 		return ret;
 	}
 
-	write_buf[0] = 0x30;
+	write_buf[0] = LIS2DH12_INT1_CFG;
 	write_buf[1] = 0x2a;
 
 	ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 2);
@@ -448,7 +468,7 @@ static int lis2dh12_disable_alert(const struct device *dev)
 
 	uint8_t write_buf[2];
 
-	write_buf[0] = 0x30;
+	write_buf[0] = LIS2DH12_INT1_CFG;
 	write_buf[1] = 0x00;
 
 	ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 2);
@@ -467,7 +487,7 @@ static int lis2dh12_get_interrupt(const struct device *dev, bool *is_active)
 	uint8_t write_buf[1];
 	uint8_t read_buf[1];
 
-	write_buf[0] = 0x31;
+	write_buf[0] = LIS2DH12_INT1_SRC;
 
 	ret = ds28e17_i2c_write_read(dev, LIS2DH12_I2C_ADDR, write_buf, 1, read_buf, 1);
 	if (ret) {

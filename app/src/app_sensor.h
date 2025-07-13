@@ -11,6 +11,7 @@
 #include <zephyr/kernel.h>
 
 /* Standard includes */
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -32,6 +33,8 @@ struct app_sensor_data {
 	float machine_probe_temperature_2;
 	float machine_probe_humidity_1;
 	float machine_probe_humidity_2;
+	bool machine_probe_is_tilt_alert_1;
+	bool machine_probe_is_tilt_alert_2;
 };
 
 extern struct app_sensor_data g_app_sensor_data;

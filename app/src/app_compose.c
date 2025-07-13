@@ -28,6 +28,9 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 
 	uint32_t header = boot ? BIT(31) : 0;
 
+	/* For compatibility reasons (indicates header extension from 16 bits to 32 bits) */
+	header |= BIT(20);
+
 	boot = false;
 
 	uint8_t orientation = 0xff;
@@ -97,9 +100,6 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		header |= BIT(21);
 	}
 
-	/* For compatibility reasons (indicates header extension from 16 bits to 32 bits) */
-	header |= BIT(20);
-
 	if (!isnan(g_app_sensor_data.machine_probe_temperature_1)) {
 		machine_probe_temperature_1 =
 			(int16_t)(g_app_sensor_data.machine_probe_temperature_1 * 100);
@@ -122,6 +122,14 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		machine_probe_humidity_2 =
 			(uint8_t)(g_app_sensor_data.machine_probe_humidity_2 * 2);
 		header |= BIT(16);
+	}
+
+	if (g_app_sensor_data.machine_probe_is_tilt_alert_1) {
+		header |= BIT(15);
+	}
+
+	if (g_app_sensor_data.machine_probe_is_tilt_alert_2) {
+		header |= BIT(14);
 	}
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
