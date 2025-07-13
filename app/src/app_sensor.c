@@ -161,8 +161,8 @@ void app_sensor_sample(void)
 		LOG_INF("Serial number: %llu / Hygrometer / Humidity: %.1f "
 			"%%",
 			serial_number, (double)hygrometer_humidity);
-		LOG_INF("Serial number: %llu / Tilt alert is %sactive",
-			serial_number, is_tilt_alert ? "" : "not ");
+		LOG_INF("Serial number: %llu / Tilt alert is %sactive", serial_number,
+			is_tilt_alert ? "" : "not ");
 
 		if (i == 0) {
 			machine_probe_temperature_1 = hygrometer_temperature;
@@ -200,10 +200,8 @@ void app_sensor_sample(void)
 	g_app_sensor_data.machine_probe_temperature_2 = machine_probe_temperature_2;
 	g_app_sensor_data.machine_probe_humidity_1 = machine_probe_humidity_1;
 	g_app_sensor_data.machine_probe_humidity_2 = machine_probe_humidity_2;
-	g_app_sensor_data.machine_probe_is_tilt_alert_1 =
-		machine_probe_is_tilt_alert_1;
-	g_app_sensor_data.machine_probe_is_tilt_alert_2 =
-		machine_probe_is_tilt_alert_2;
+	g_app_sensor_data.machine_probe_is_tilt_alert_1 = machine_probe_is_tilt_alert_1;
+	g_app_sensor_data.machine_probe_is_tilt_alert_2 = machine_probe_is_tilt_alert_2;
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }
@@ -267,11 +265,10 @@ static int init(void)
 
 	for (int i = 0; i < count; i++) {
 		uint64_t serial_number;
-		ret = app_machine_probe_enable_tilt_alert(i, &serial_number,
-						 TILT_THRESHOLD, TILT_DURATION);
+		ret = app_machine_probe_enable_tilt_alert(i, &serial_number, TILT_THRESHOLD,
+							  TILT_DURATION);
 		if (ret) {
-			LOG_ERR("Call `app_machine_probe_enable_tilt_alert` failed: %d",
-				ret);
+			LOG_ERR("Call `app_machine_probe_enable_tilt_alert` failed: %d", ret);
 			return ret;
 		}
 	}
