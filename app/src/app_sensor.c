@@ -38,11 +38,10 @@ struct app_sensor_data g_app_sensor_data = {
 	.illuminance = NAN,
 	.ext_temperature_1 = NAN,
 	.ext_temperature_2 = NAN,
-
-#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
-	.motion_count = 0,
-#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
-
+	.machine_probe_temperature_1 = NAN,
+	.machine_probe_temperature_2 = NAN,
+	.machine_probe_humidity_1 = NAN,
+	.machine_probe_humidity_2 = NAN,
 	.altitude = NAN,
 	.pressure = NAN,
 };
@@ -55,7 +54,9 @@ static struct k_work_q m_sensor_work_q;
 void app_sensor_sample(void)
 {
 	int ret;
+	int count;
 	UNUSED(ret);
+	UNUSED(count);
 
 	int orientation = INT_MAX;
 	float voltage = NAN;
@@ -66,6 +67,10 @@ void app_sensor_sample(void)
 	float ext_temperature_2 = NAN;
 	float altitude = NAN;
 	float pressure = NAN;
+	float machine_probe_temperature_1 = NAN;
+	float machine_probe_temperature_2 = NAN;
+	float machine_probe_humidity_1 = NAN;
+	float machine_probe_humidity_2 = NAN;
 
 #if defined(CONFIG_ADC)
 	ret = app_battery_measure(&voltage);
@@ -95,8 +100,8 @@ void app_sensor_sample(void)
 	}
 #endif /* defined(CONFIG_OPT3001) */
 
-#if defined(CONFIG_W1)
-	int count = app_ds18b20_get_count();
+#if defined(CONFIG_DS18B20)
+	count = app_ds18b20_get_count();
 
 	for (int i = 0; i < count; i++) {
 		uint64_t serial_number;
@@ -116,7 +121,40 @@ void app_sensor_sample(void)
 			ext_temperature_2 = temperature;
 		}
 	}
-#endif /* defined(CONFIG_W1) */
+#endif /* defined(CONFIG_DS18B20) */
+
+#if defined(CONFIG_DS28E17)
+	count = app_machine_probe_get_count();
+
+	for (int i = 0; i < count; i++) {
+		uint64_t serial_number;
+		float hygrometer_temperature;
+		float hygrometer_humidity;
+		ret = app_machine_probe_read_hygrometer(i, &serial_number, &hygrometer_temperature,
+							&hygrometer_humidity);
+		if (ret) {
+			LOG_ERR("Call `app_machine_probe_read_hygrometer` failed: "
+				"%d",
+				ret);
+			continue;
+		}
+
+		LOG_INF("Serial number: %llu / Hygrometer / Temperature: "
+			"%.2f C",
+			serial_number, (double)hygrometer_temperature);
+		LOG_INF("Serial number: %llu / Hygrometer / Humidity: %.1f "
+			"%%",
+			serial_number, (double)hygrometer_humidity);
+
+		if (i == 0) {
+			machine_probe_temperature_1 = hygrometer_temperature;
+			machine_probe_humidity_1 = hygrometer_humidity;
+		} else if (i == 1) {
+			machine_probe_temperature_2 = hygrometer_temperature;
+			machine_probe_humidity_2 = hygrometer_humidity;
+		}
+	}
+#endif /* defined(CONFIG_DS28E17) */
 
 	if (g_app_config.has_mpl3115a2) {
 		ret = app_mpl3115a2_read(&altitude, &pressure, NULL);
@@ -138,6 +176,12 @@ void app_sensor_sample(void)
 		ext_temperature_2 + g_app_config.corr_ext_temperature_2;
 	g_app_sensor_data.altitude = altitude;
 	g_app_sensor_data.pressure = pressure;
+	g_app_sensor_data.machine_probe_temperature_1 =
+		machine_probe_temperature_1;
+	g_app_sensor_data.machine_probe_temperature_2 =
+		machine_probe_temperature_2;
+	g_app_sensor_data.machine_probe_humidity_1 = machine_probe_humidity_1;
+	g_app_sensor_data.machine_probe_humidity_2 = machine_probe_humidity_2;
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }
@@ -182,12 +226,13 @@ static int init(void)
 	app_pyq1648_set_callback(pyq1648_event_handler, NULL);
 #endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
-#if defined(CONFIG_W1)
+#if defined(CONFIG_DS18B20)
 	ret = app_ds18b20_scan();
 	if (ret) {
 		LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
 		return ret;
 	}
+#endif /* defined(CONFIG_DS18B20) */
 
 #if defined(CONFIG_DS28E17)
 	ret = app_machine_probe_scan();
@@ -195,31 +240,7 @@ static int init(void)
 		LOG_ERR("Call `app_machine_probe_scan` failed: %d", ret);
 		return ret;
 	}
-
-	int count = app_machine_probe_get_count();
-
-	for (int i = 0; i < count; i++) {
-		uint64_t serial_number;
-		float hygrometer_temperature;
-		float hygrometer_humidity;
-		ret = app_machine_probe_read_hygrometer(i, &serial_number, &hygrometer_temperature,
-							&hygrometer_humidity);
-		if (ret) {
-			LOG_ERR("Call `app_machine_probe_read_hygrometer` failed: "
-				"%d",
-				ret);
-		} else {
-			LOG_INF("Serial number: %llu / Hygrometer / Temperature: "
-				"%.2f C",
-				serial_number, (double)hygrometer_temperature);
-			LOG_INF("Serial number: %llu / Hygrometer / Humidity: %.1f "
-				"%%",
-				serial_number, (double)hygrometer_humidity);
-		}
-	}
 #endif /* defined(CONFIG_DS28E17) */
-
-#endif /* defined(CONFIG_W1) */
 
 	k_work_queue_init(&m_sensor_work_q);
 

@@ -25,13 +25,13 @@ struct app_sensor_data {
 	float illuminance;
 	float ext_temperature_1;
 	float ext_temperature_2;
-
-#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
 	uint32_t motion_count;
-#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
-
 	float altitude;
 	float pressure;
+	float machine_probe_temperature_1;
+	float machine_probe_temperature_2;
+	float machine_probe_humidity_1;
+	float machine_probe_humidity_2;
 };
 
 extern struct app_sensor_data g_app_sensor_data;

@@ -26,7 +26,7 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 {
 	static bool boot = true;
 
-	uint16_t header = boot ? BIT(15) : 0;
+	uint32_t header = boot ? BIT(31) : 0;
 
 	boot = false;
 
@@ -37,69 +37,98 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	uint16_t illuminance = 0xffff;
 	int16_t ext_temperature_1 = 0x7fff;
 	int16_t ext_temperature_2 = 0x7fff;
-
-#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
 	uint32_t motion_count = 0xffffffff;
-#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
-
 	int16_t altitude = 0x7fff;
 	uint32_t pressure = 0xffffffff;
+	int16_t machine_probe_temperature_1 = 0x7fff;
+	int16_t machine_probe_temperature_2 = 0x7fff;
+	uint8_t machine_probe_humidity_1 = 0xff;
+	uint8_t machine_probe_humidity_2 = 0xff;
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
 	if (g_app_sensor_data.orientation != INT_MAX) {
 		orientation = g_app_sensor_data.orientation & 0xf;
-		header |= BIT(14);
+		header |= BIT(30);
 	}
 
 	if (!isnan(g_app_sensor_data.voltage)) {
 		voltage = (uint8_t)(g_app_sensor_data.voltage * 50);
-		header |= BIT(13);
+		header |= BIT(29);
 	}
 
 	if (!isnan(g_app_sensor_data.temperature)) {
 		temperature = (int16_t)(g_app_sensor_data.temperature * 100);
-		header |= BIT(12);
+		header |= BIT(28);
 	}
 
 	if (!isnan(g_app_sensor_data.humidity)) {
 		humidity = (uint8_t)(g_app_sensor_data.humidity * 2);
-		header |= BIT(11);
+		header |= BIT(27);
 	}
 
 	if (!isnan(g_app_sensor_data.illuminance)) {
 		illuminance = (uint16_t)(g_app_sensor_data.illuminance / 2);
-		header |= BIT(10);
+		header |= BIT(26);
 	}
 
 	if (!isnan(g_app_sensor_data.ext_temperature_1)) {
 		ext_temperature_1 = (int16_t)(g_app_sensor_data.ext_temperature_1 * 100);
-		header |= BIT(9);
+		header |= BIT(25);
 	}
 
 	if (!isnan(g_app_sensor_data.ext_temperature_2)) {
 		ext_temperature_2 = (int16_t)(g_app_sensor_data.ext_temperature_2 * 100);
-		header |= BIT(8);
+		header |= BIT(24);
 	}
 
 #if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
 	motion_count = g_app_sensor_data.motion_count;
-	header |= BIT(7);
+	header |= BIT(23);
 #endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
 	if (!isnan(g_app_sensor_data.altitude)) {
 		altitude = (int16_t)(g_app_sensor_data.altitude * 10);
-		header |= BIT(6);
+		header |= BIT(22);
 	}
 
 	if (!isnan(g_app_sensor_data.pressure)) {
 		pressure = (uint32_t)g_app_sensor_data.pressure;
-		header |= BIT(5);
+		header |= BIT(21);
+	}
+
+	/* For compatibility reasons (indicates header extension from 16 bits to 32 bits) */
+	header |= BIT(20);
+
+	if (!isnan(g_app_sensor_data.machine_probe_temperature_1)) {
+		machine_probe_temperature_1 =
+			(int16_t)(g_app_sensor_data.machine_probe_temperature_1 * 100);
+		header |= BIT(19);
+	}
+
+	if (!isnan(g_app_sensor_data.machine_probe_temperature_2)) {
+		machine_probe_temperature_2 =
+			(int16_t)(g_app_sensor_data.machine_probe_temperature_2 * 100);
+		header |= BIT(18);
+	}
+
+	if (!isnan(g_app_sensor_data.machine_probe_humidity_1)) {
+		machine_probe_humidity_1 =
+			(uint8_t)(g_app_sensor_data.machine_probe_humidity_1 * 2);
+		header |= BIT(17);
+	}
+
+	if (!isnan(g_app_sensor_data.machine_probe_humidity_2)) {
+		machine_probe_humidity_2 =
+			(uint8_t)(g_app_sensor_data.machine_probe_humidity_2 * 2);
+		header |= BIT(16);
 	}
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	header |= orientation;
+
+	LOG_DBG("Header: 0x%08x", header);
 
 #define APPEND_BYTE(exp)                                                                           \
 	if (*len >= size) {                                                                        \
@@ -113,56 +142,74 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 
 	memset(buf, 0, size);
 
+	APPEND_BYTE(header >> 24);
+	APPEND_BYTE(header >> 16);
 	APPEND_BYTE(header >> 8);
 	APPEND_BYTE(header);
 
-	if (header & BIT(13)) {
+	if (header & BIT(29)) {
 		APPEND_BYTE(voltage);
 	}
 
-	if (header & BIT(12)) {
+	if (header & BIT(28)) {
 		APPEND_BYTE(temperature >> 8);
 		APPEND_BYTE(temperature);
 	}
 
-	if (header & BIT(11)) {
+	if (header & BIT(27)) {
 		APPEND_BYTE(humidity);
 	}
 
-	if (header & BIT(10)) {
+	if (header & BIT(26)) {
 		APPEND_BYTE(illuminance >> 8);
 		APPEND_BYTE(illuminance);
 	}
 
-	if (header & BIT(9)) {
+	if (header & BIT(25)) {
 		APPEND_BYTE(ext_temperature_1 >> 8);
 		APPEND_BYTE(ext_temperature_1);
 	}
 
-	if (header & BIT(8)) {
+	if (header & BIT(24)) {
 		APPEND_BYTE(ext_temperature_2 >> 8);
 		APPEND_BYTE(ext_temperature_2);
 	}
 
-#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
-	if (header & BIT(7)) {
+	if (header & BIT(23)) {
 		APPEND_BYTE(motion_count >> 24);
 		APPEND_BYTE(motion_count >> 16);
 		APPEND_BYTE(motion_count >> 8);
 		APPEND_BYTE(motion_count);
 	}
-#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
-	if (header & BIT(6)) {
+	if (header & BIT(22)) {
 		APPEND_BYTE(altitude >> 8);
 		APPEND_BYTE(altitude);
 	}
 
-	if (header & BIT(5)) {
+	if (header & BIT(21)) {
 		APPEND_BYTE(pressure >> 24);
 		APPEND_BYTE(pressure >> 16);
 		APPEND_BYTE(pressure >> 8);
 		APPEND_BYTE(pressure);
+	}
+
+	if (header & BIT(19)) {
+		APPEND_BYTE(machine_probe_temperature_1 >> 8);
+		APPEND_BYTE(machine_probe_temperature_1);
+	}
+
+	if (header & BIT(18)) {
+		APPEND_BYTE(machine_probe_temperature_2 >> 8);
+		APPEND_BYTE(machine_probe_temperature_2);
+	}
+
+	if (header & BIT(17)) {
+		APPEND_BYTE(machine_probe_humidity_1);
+	}
+
+	if (header & BIT(16)) {
+		APPEND_BYTE(machine_probe_humidity_2);
 	}
 
 #undef APPEND
