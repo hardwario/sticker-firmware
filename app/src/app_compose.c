@@ -28,10 +28,10 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 
 	uint32_t header = boot ? BIT(31) : 0;
 
+	boot = false;
+
 	/* For compatibility reasons (indicates header extension from 16 bits to 32 bits) */
 	header |= BIT(20);
-
-	boot = false;
 
 	uint8_t orientation = 0xff;
 	uint8_t voltage = 0xff;
