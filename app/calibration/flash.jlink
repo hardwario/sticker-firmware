@@ -1,9 +1,0 @@
-selectinterface SWD
-speed 1000
-device STM32WLE5CC
-connect
-erase
-loadfile firmware.hex
-reset
-go
-exit
