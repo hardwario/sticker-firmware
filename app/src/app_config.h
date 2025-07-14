@@ -16,6 +16,7 @@ extern "C" {
 #endif
 
 struct app_config {
+	bool calibration;
 	int interval_sample;
 	int interval_report;
 	uint8_t lrw_deveui[8];

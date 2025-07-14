@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2025 HARDWARIO a.s.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "app_led.h"
 #include "app_sensor.h"
 

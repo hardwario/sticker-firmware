@@ -59,6 +59,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		}                                                                                  \
 	} while (0)
 
+	SETTINGS_SET("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
 	SETTINGS_SET("interval-sample", &m_app_config.interval_sample,
 		     sizeof(m_app_config.interval_sample));
 	SETTINGS_SET("interval-report", &m_app_config.interval_report,
@@ -98,6 +99,7 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
 	} while (0)
 
+	EXPORT_FUNC("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
 	EXPORT_FUNC("interval-sample", &m_app_config.interval_sample,
 		    sizeof(m_app_config.interval_sample));
 	EXPORT_FUNC("interval-report", &m_app_config.interval_report,
@@ -224,6 +226,12 @@ static int reset(bool reboot)
 	return 0;
 }
 
+static void print_calibration(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " calibration %s",
+		    m_app_config.calibration ? "true" : "false");
+}
+
 static void print_interval_sample(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " interval-sample %d", m_app_config.interval_sample);
@@ -325,6 +333,7 @@ static void print_has_mpl3115a2(const struct shell *shell)
 
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
+	print_calibration(shell);
 	print_interval_sample(shell);
 	print_interval_report(shell);
 	print_lrw_deveui(shell);
@@ -363,6 +372,30 @@ static int cmd_reset(const struct shell *shell, size_t argc, char **argv)
 		LOG_ERR("Call `reset` failed: %d", ret);
 		shell_error(shell, "command failed");
 		return ret;
+	}
+
+	return 0;
+}
+
+static int cmd_calibration(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_calibration(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.calibration = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.calibration = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
 	}
 
 	return 0;
@@ -704,6 +737,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(reset, NULL,
 	              "Reset all configuration.",
 	              cmd_reset, 1, 0),
+
+	SHELL_CMD_ARG(calibration, NULL,
+	              "Get/Set calibration mode (true/false).",
+	              cmd_calibration, 1, 1),
 
 	SHELL_CMD_ARG(interval-sample, NULL,
 	              "Get/Set sample interval (range 5 to 3600 seconds; 0 = precede report).",
