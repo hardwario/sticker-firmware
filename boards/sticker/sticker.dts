@@ -37,6 +37,20 @@
 		};
 	};
 
+	gpio_keys {
+		compatible = "gpio-keys";
+
+		hall_l: hall_l {
+			gpios = <&gpioa 3 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_LEFT>;
+		};
+
+		hall_r: hall_r {
+			gpios = <&gpioa 7 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_RIGHT>;
+		};
+	};
+
 	aliases {
 		led0 = &led_r;
 		led1 = &led_g;

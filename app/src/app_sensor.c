@@ -18,6 +18,7 @@
 
 /* Zephyr includes */
 #include <zephyr/init.h>
+#include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -54,6 +55,13 @@ K_MUTEX_DEFINE(g_app_sensor_data_lock);
 
 static K_THREAD_STACK_DEFINE(m_sensor_work_stack, 4096);
 static struct k_work_q m_sensor_work_q;
+
+static void hall_switch_cb(struct input_event *evt, void *user_data)
+{
+	LOG_INF("Hall switch event: %x %d\n", evt->code, evt->value);
+}
+
+INPUT_CALLBACK_DEFINE(NULL, hall_switch_cb, NULL);
 
 void app_sensor_sample(void)
 {
