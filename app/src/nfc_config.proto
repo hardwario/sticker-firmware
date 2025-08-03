@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+import "nanopb.proto";
+
+message NfcConfigMessage {
+    message Lorawan {
+        enum Region {
+            EU868 = 0;
+            US915 = 1;
+            AU915 = 2;
+        }
+
+        enum Activation {
+            ABP = 0;
+            OTAA = 1;
+        }
+
+        enum Network {
+            PUBLIC = 0;
+            PRIVATE = 1;
+        }
+
+        optional Region region = 1;
+        optional Network network = 3;
+        optional bool adr = 4;
+        optional Activation activation = 2;
+        optional string deveui = 5 [(nanopb).max_length = 16];
+        optional string joineui = 6 [(nanopb).max_length = 16];
+        optional string nwkkey = 7 [(nanopb).max_length = 16];
+        optional string appkey = 8 [(nanopb).max_length = 32];
+        optional string devaddr = 9 [(nanopb).max_length = 8];
+        optional string nwkskey = 10 [(nanopb).max_length = 32];
+        optional string appskey = 11 [(nanopb).max_length = 32];
+    }
+
+    message Application {
+        optional bool calibration = 1;
+        optional uint32 interval_sample = 2;
+        optional uint32 interval_aggreg = 3;
+        optional uint32 interval_report = 4;
+        optional float alarm_int_temp_lo = 5;
+        optional float alarm_int_temp_hi = 6;
+        optional float alarm_int_temp_hst = 7;
+        optional float alarm_t1_temp_lo = 8;
+        optional float alarm_t1_temp_hi = 9;
+        optional float alarm_t1_temp_hst = 10;
+        optional float alarm_t2_temp_lo = 11;
+        optional float alarm_t2_temp_hi = 12;
+        optional float alarm_t2_temp_hst = 13;
+    }
+
+    uint32 version = 1;
+    optional bool factory = 2;
+    Lorawan lorawan = 3;
+    Application application = 4;
+}

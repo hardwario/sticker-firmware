@@ -101,7 +101,7 @@ stm32_lp_tick_source: &lptim1 {
 	lpd {
 		gpio-hog;
 		gpios = <1 GPIO_ACTIVE_HIGH>;
-		output-high;
+		output-low;
 	};
 };
 
