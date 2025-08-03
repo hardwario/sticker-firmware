@@ -16,6 +16,10 @@ Activate the virtual environment:
 
     source .venv/bin/activate
 
+Upgrade `pip` tool:
+
+    pip install --upgrade pip
+
 Install the **West** tool:
 
     pip install west
@@ -28,13 +32,25 @@ Update the **West** workspace:
 
     west update
 
-Install required Python packages:
+Export a **Zephyr CMake package**:
 
-    pip install -r zephyr/scripts/requirements.txt -r bootloader/mcuboot/scripts/requirements.txt
+    west zephyr-export
+
+Install required **Python packages**:
+
+    west packages pip --install
 
 Install the **RTTT** tool:
 
     pip install rttt
+
+Install the **Protocol Buffers** dependencies:
+
+    pip install protobuf grpcio-tools
+
+Install the appropriate version of the **Zephyr SDK**:
+
+    west sdk install
 
 Switch to the `app` directory:
 
