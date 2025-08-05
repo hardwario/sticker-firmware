@@ -1,0 +1,7 @@
+NfcConfigMessage.Lorawan.deveui max_length:16
+NfcConfigMessage.Lorawan.joineui max_length:16
+NfcConfigMessage.Lorawan.nwkkey max_length:16
+NfcConfigMessage.Lorawan.appkey max_length:32
+NfcConfigMessage.Lorawan.devaddr max_length:8
+NfcConfigMessage.Lorawan.nwkskey max_length:32
+NfcConfigMessage.Lorawan.appskey max_length:32
