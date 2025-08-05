@@ -19,6 +19,9 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
 
+/* PSA Crypto includes */
+#include <psa/crypto.h>
+
 /* Standard includes */
 #include <errno.h>
 #include <stdbool.h>
@@ -58,6 +61,65 @@ static int read_mem(uint16_t reg, void *buf, size_t len)
 	return 0;
 }
 
+static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size, size_t *out_len)
+{
+	int res = 0;
+
+	if (in_len < 8) {
+		LOG_ERR("Buffer too short for decryption: %zu byte(s)", in_len);
+		return -EINVAL;
+	}
+
+	/* TODO Verify nonce */
+
+	psa_status_t status;
+	psa_status_t destroy_status;
+
+	status = psa_crypto_init();
+	if (status != PSA_SUCCESS) {
+		LOG_ERR("Call `psa_crypto_init` failed: %d", status);
+		return -EIO;
+	}
+
+	/* TODO Replace with real key */
+	const uint8_t key[16] = {
+		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+	};
+
+	psa_key_attributes_t key_attributes = PSA_KEY_ATTRIBUTES_INIT;
+	psa_set_key_usage_flags(&key_attributes, PSA_KEY_USAGE_DECRYPT);
+	psa_set_key_algorithm(&key_attributes, PSA_ALG_CCM);
+	psa_set_key_type(&key_attributes, PSA_KEY_TYPE_AES);
+	psa_set_key_bits(&key_attributes, PSA_BYTES_TO_BITS(sizeof(key)));
+
+	psa_key_id_t key_id;
+	status = psa_import_key(&key_attributes, key, sizeof(key), &key_id);
+	if (status != PSA_SUCCESS) {
+		LOG_ERR("Call `psa_import_key` failed: %d", status);
+		return -EIO;
+	}
+
+	psa_reset_key_attributes(&key_attributes);
+
+	status = psa_aead_decrypt(key_id, PSA_ALG_CCM, &in[0], 8, NULL, 0, &in[8], in_len - 8, out,
+				  out_size, out_len);
+
+	destroy_status = psa_destroy_key(key_id);
+
+	if (status != PSA_SUCCESS) {
+		LOG_ERR("Call `psa_aead_decrypt` failed: %d", status);
+		res = -EIO;
+	}
+
+	if (destroy_status != PSA_SUCCESS) {
+		LOG_ERR("Call `psa_destroy_key` failed: %d", destroy_status);
+		res = -EIO;
+	}
+
+	return res;
+}
+
 static void ingest_message(const NfcConfigMessage *message)
 {
 	if (message->has_lorawan) {
@@ -73,7 +135,7 @@ static void ingest_message(const NfcConfigMessage *message)
 
 static int parser_callback(const struct app_ndef_parser_record_info *record_info, void *user_data)
 {
-	LOG_INF("TNF: %u", record_info->tnf);
+	int ret;
 
 	/* Check if TNF type is MIME */
 	if (record_info->tnf != NDEF_TNF_MIME) {
@@ -88,15 +150,19 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 		return 0;
 	}
 
-	LOG_INF("Found supported MIME record; Length: %u byte(s)", record_info->payload_len);
+	LOG_INF("Found supported MIME record - length: %u byte(s)", record_info->payload_len);
 
+	uint8_t buf[448];
+	size_t len;
+	ret = decrypt(record_info->payload, record_info->payload_len, buf, sizeof(buf), &len);
+	if (ret) {
+		LOG_ERR("Call `decrypt` failed: %d", ret);
+		return ret;
+	}
+
+	pb_istream_t stream = pb_istream_from_buffer(buf, len);
 	NfcConfigMessage message = NfcConfigMessage_init_zero;
-
-	pb_istream_t stream =
-		pb_istream_from_buffer(record_info->payload, record_info->payload_len);
-
-	bool status = pb_decode(&stream, NfcConfigMessage_fields, &message);
-	if (!status) {
+	if (!pb_decode(&stream, NfcConfigMessage_fields, &message)) {
 		LOG_ERR("Failed to decode Protobuf message: %s", PB_GET_ERROR(&stream));
 		return -EIO;
 	}
@@ -106,15 +172,31 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 	return 0;
 }
 
+static bool is_buffer_zero(const void *buf, size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		if (((const uint8_t *)buf)[i] != 0) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 static int init(void)
 {
 	int ret;
+	int res = 0;
 
 	uint8_t buf[512];
 	ret = read_mem(0, buf, sizeof(buf));
 	if (ret) {
 		LOG_ERR("Call `read_mem` failed: %d", ret);
 		return ret;
+	}
+
+	if (is_buffer_zero(buf, sizeof(buf))) {
+		return 0;
 	}
 
 	/*
@@ -136,10 +218,16 @@ static int init(void)
 	ret = app_ndef_parser_run(buf, sizeof(buf), parser_callback, NULL);
 	if (ret) {
 		LOG_ERR("Call `app_ndef_parser_run` failed: %d", ret);
-		return ret;
+		res = ret;
 	}
 
-	return 0;
+	LOG_INF("Clearing memory...");
+
+	memset(buf, 0, sizeof(buf));
+
+	/* TODO Implement */
+
+	return res;
 }
 
 SYS_INIT(init, APPLICATION, 99);
