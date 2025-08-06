@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_config.h"
 #include "app_ndef_parser.h"
 
 /* Nanopb includes */
@@ -70,7 +71,24 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 		return -EINVAL;
 	}
 
-	/* TODO Verify nonce */
+	/* Verify serial number (part of nonce) */
+	uint32_t serial_number = sys_get_be32(&in[0]);
+	LOG_INF("Serial number: %u", serial_number);
+
+	if (g_app_config.serial_number != serial_number) {
+		LOG_ERR("Serial number does not match: %u != %u", serial_number, g_app_config.serial_number);
+		return -EACCES;
+	}
+
+	/* Verify nonce counter (part of nonce) */
+	uint32_t nonce_counter = sys_get_be32(&in[4]);
+	LOG_INF("Nonce counter: %u", nonce_counter);
+
+	if (g_app_config.nonce_counter >= nonce_counter) {
+		LOG_ERR("Nonce counter is not greater than the last used nonce: %u >= %u",
+				nonce_counter, g_app_config.nonce_counter);
+		return -EACCES;
+	}
 
 	psa_status_t status;
 	psa_status_t destroy_status;
@@ -81,20 +99,14 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 		return -EIO;
 	}
 
-	/* TODO Replace with real key */
-	const uint8_t key[16] = {
-		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-	};
-
 	psa_key_attributes_t key_attributes = PSA_KEY_ATTRIBUTES_INIT;
 	psa_set_key_usage_flags(&key_attributes, PSA_KEY_USAGE_DECRYPT);
 	psa_set_key_algorithm(&key_attributes, PSA_ALG_CCM);
 	psa_set_key_type(&key_attributes, PSA_KEY_TYPE_AES);
-	psa_set_key_bits(&key_attributes, PSA_BYTES_TO_BITS(sizeof(key)));
+	psa_set_key_bits(&key_attributes, PSA_BYTES_TO_BITS(sizeof(g_app_config.secret_key)));
 
 	psa_key_id_t key_id;
-	status = psa_import_key(&key_attributes, key, sizeof(key), &key_id);
+	status = psa_import_key(&key_attributes, g_app_config.secret_key, sizeof(g_app_config.secret_key), &key_id);
 	if (status != PSA_SUCCESS) {
 		LOG_ERR("Call `psa_import_key` failed: %d", status);
 		return -EIO;
@@ -198,22 +210,6 @@ static int init(void)
 	if (is_buffer_zero(buf, sizeof(buf))) {
 		return 0;
 	}
-
-	/*
-	 * e1 40 40 01 03 99 d2 2b 6b 61 70 70 6c 69 63 61
-	 * 74 69 6f 6e 2f 76 6e 64 2e 68 61 72 64 77 61 72
-	 * 69 6f 2e 73 74 69 63 6b 65 72 2d 63 6f 6e 66 69
-	 * 67 2e 76 31 08 01 10 00 1a 2c 08 00 10 01 18 00
-	 * 20 01 2a 10 37 32 66 64 36 31 31 63 30 65 35 34
-	 * 64 32 34 34 32 10 38 61 34 37 63 39 65 36 38 62
-	 * 63 65 62 66 32 61 22 37 08 00 10 1e 18 ac 02 20
-	 * 84 07 2d 00 00 70 41 35 00 00 c8 41 3d 00 00 00
-	 * 3f 45 00 00 70 41 4d 00 00 c8 41 55 00 00 00 3f
-	 * 5d 00 00 70 41 65 00 00 c8 41 6d 00 00 00 3f 00
-	 * fe
-	 */
-
-	/* LOG_HEXDUMP_DBG(buf, sizeof(buf), "Memory:"); */
 
 	ret = app_ndef_parser_run(buf, sizeof(buf), parser_callback, NULL);
 	if (ret) {
