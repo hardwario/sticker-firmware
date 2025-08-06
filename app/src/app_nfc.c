@@ -76,7 +76,8 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 	LOG_INF("Serial number: %u", serial_number);
 
 	if (g_app_config.serial_number != serial_number) {
-		LOG_ERR("Serial number does not match: %u != %u", serial_number, g_app_config.serial_number);
+		LOG_ERR("Serial number does not match: %u != %u", serial_number,
+			g_app_config.serial_number);
 		return -EACCES;
 	}
 
@@ -86,7 +87,7 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 
 	if (g_app_config.nonce_counter >= nonce_counter) {
 		LOG_ERR("Nonce counter is not greater than the last used nonce: %u >= %u",
-				nonce_counter, g_app_config.nonce_counter);
+			nonce_counter, g_app_config.nonce_counter);
 		return -EACCES;
 	}
 
@@ -106,7 +107,8 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 	psa_set_key_bits(&key_attributes, PSA_BYTES_TO_BITS(sizeof(g_app_config.secret_key)));
 
 	psa_key_id_t key_id;
-	status = psa_import_key(&key_attributes, g_app_config.secret_key, sizeof(g_app_config.secret_key), &key_id);
+	status = psa_import_key(&key_attributes, g_app_config.secret_key,
+				sizeof(g_app_config.secret_key), &key_id);
 	if (status != PSA_SUCCESS) {
 		LOG_ERR("Call `psa_import_key` failed: %d", status);
 		return -EIO;
