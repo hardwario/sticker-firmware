@@ -62,6 +62,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("serial-number", &m_app_config.serial_number,
 		     sizeof(m_app_config.serial_number));
 	SETTINGS_SET("secret", m_app_config.secret, sizeof(m_app_config.secret));
+	SETTINGS_SET("nonce-counter", &m_app_config.nonce_counter,
+		     sizeof(m_app_config.nonce_counter));
 	SETTINGS_SET("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
 	SETTINGS_SET("interval-sample", &m_app_config.interval_sample,
 		     sizeof(m_app_config.interval_sample));
@@ -103,6 +105,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("serial-number", &m_app_config.serial_number,
 		    sizeof(m_app_config.serial_number));
 	EXPORT_FUNC("secret", m_app_config.secret, sizeof(m_app_config.secret));
+	EXPORT_FUNC("nonce-counter", &m_app_config.nonce_counter,
+		    sizeof(m_app_config.nonce_counter));
 	EXPORT_FUNC("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
 	EXPORT_FUNC("interval-sample", &m_app_config.interval_sample,
 		    sizeof(m_app_config.interval_sample));
@@ -246,6 +250,11 @@ static void print_secret(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " secret %s", buf);
 }
 
+static void print_nonce_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " nonce-counter %u", m_app_config.nonce_counter);
+}
+
 static void print_calibration(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " calibration %s",
@@ -350,6 +359,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_serial_number(shell);
 	print_secret(shell);
+	print_nonce_counter(shell);
 	print_calibration(shell);
 	print_interval_sample(shell);
 	print_interval_report(shell);
@@ -450,6 +460,23 @@ static int cmd_secret(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "command failed");
 		return ret;
 	}
+
+	return 0;
+}
+
+static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_nonce_counter(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	m_app_config.nonce_counter = strtoul(argv[1], NULL, 10);
 
 	return 0;
 }
@@ -791,6 +818,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(secret, NULL,
 	              "Get/Set device secret (32 hexadecimal digits).",
 	              cmd_secret, 1, 1),
+
+	SHELL_CMD_ARG(nonce-counter, NULL,
+	              "Get/Set nonce counter (unsigned integer).",
+	              cmd_nonce_counter, 1, 1),
 
 	SHELL_CMD_ARG(calibration, NULL,
 	              "Get/Set calibration mode (true/false).",
