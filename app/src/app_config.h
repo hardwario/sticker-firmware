@@ -16,6 +16,8 @@ extern "C" {
 #endif
 
 struct app_config {
+	uint32_t serial_number;
+	uint8_t secret[32];
 	bool calibration;
 	int interval_sample;
 	int interval_report;
@@ -26,7 +28,6 @@ struct app_config {
 	float corr_temperature;
 	float corr_ext_temperature_1;
 	float corr_ext_temperature_2;
-	uint32_t serial_number;
 	bool has_mpl3115a2;
 };
 

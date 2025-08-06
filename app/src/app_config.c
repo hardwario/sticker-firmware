@@ -59,6 +59,9 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		}                                                                                  \
 	} while (0)
 
+	SETTINGS_SET("serial-number", &m_app_config.serial_number,
+		     sizeof(m_app_config.serial_number));
+	SETTINGS_SET("secret", m_app_config.secret, sizeof(m_app_config.secret));
 	SETTINGS_SET("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
 	SETTINGS_SET("interval-sample", &m_app_config.interval_sample,
 		     sizeof(m_app_config.interval_sample));
@@ -74,8 +77,6 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.corr_ext_temperature_1));
 	SETTINGS_SET("corr-ext-temperature-2", &m_app_config.corr_ext_temperature_2,
 		     sizeof(m_app_config.corr_ext_temperature_2));
-	SETTINGS_SET("serial-number", &m_app_config.serial_number,
-		     sizeof(m_app_config.serial_number));
 	SETTINGS_SET("has-mpl3115a2", &m_app_config.has_mpl3115a2,
 		     sizeof(m_app_config.has_mpl3115a2));
 
@@ -99,6 +100,9 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
 	} while (0)
 
+	EXPORT_FUNC("serial-number", &m_app_config.serial_number,
+		    sizeof(m_app_config.serial_number));
+	EXPORT_FUNC("secret", m_app_config.secret, sizeof(m_app_config.secret));
 	EXPORT_FUNC("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
 	EXPORT_FUNC("interval-sample", &m_app_config.interval_sample,
 		    sizeof(m_app_config.interval_sample));
@@ -114,8 +118,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.corr_ext_temperature_1));
 	EXPORT_FUNC("corr-ext-temperature-2", &m_app_config.corr_ext_temperature_2,
 		    sizeof(m_app_config.corr_ext_temperature_2));
-	EXPORT_FUNC("serial-number", &m_app_config.serial_number,
-		    sizeof(m_app_config.serial_number));
 	EXPORT_FUNC("has-mpl3115a2", &m_app_config.has_mpl3115a2,
 		    sizeof(m_app_config.has_mpl3115a2));
 
@@ -226,6 +228,24 @@ static int reset(bool reboot)
 	return 0;
 }
 
+static void print_serial_number(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " serial-number %010u", m_app_config.serial_number);
+}
+
+static void print_secret(const struct shell *shell)
+{
+	char buf[2 * sizeof(m_app_config.secret) + 1];
+
+	int ret = bin2hex(m_app_config.secret, sizeof(m_app_config.secret), buf, sizeof(buf));
+	if (ret == 0) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " secret %s", buf);
+}
+
 static void print_calibration(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " calibration %s",
@@ -320,11 +340,6 @@ static void print_corr_ext_temperature_2(const struct shell *shell)
 		    (double)m_app_config.corr_ext_temperature_2);
 }
 
-static void print_serial_number(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " serial-number %010u", m_app_config.serial_number);
-}
-
 static void print_has_mpl3115a2(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " has-mpl3115a2 %s",
@@ -333,6 +348,8 @@ static void print_has_mpl3115a2(const struct shell *shell)
 
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
+	print_serial_number(shell);
+	print_secret(shell);
 	print_calibration(shell);
 	print_interval_sample(shell);
 	print_interval_report(shell);
@@ -343,7 +360,6 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_corr_temperature(shell);
 	print_corr_ext_temperature_1(shell);
 	print_corr_ext_temperature_2(shell);
-	print_serial_number(shell);
 	print_has_mpl3115a2(shell);
 
 	return 0;
@@ -370,6 +386,67 @@ static int cmd_reset(const struct shell *shell, size_t argc, char **argv)
 	ret = reset(true);
 	if (ret) {
 		LOG_ERR("Call `reset` failed: %d", ret);
+		shell_error(shell, "command failed");
+		return ret;
+	}
+
+	return 0;
+}
+
+
+static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_serial_number(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	size_t len = strlen(argv[1]);
+
+	if (len != 10) {
+		shell_error(shell, "invalid argument format");
+		return -EINVAL;
+	}
+
+	for (size_t i = 0; i < len; i++) {
+		if (!isdigit((int)argv[1][i])) {
+			shell_error(shell, "invalid argument format");
+			return -EINVAL;
+		}
+	}
+
+	m_app_config.serial_number = strtoul(argv[1], NULL, 10);
+
+	return 0;
+}
+
+static int cmd_secret(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_secret(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.secret)) {
+		shell_error(shell, "invalid argument length");
+		return -EINVAL;
+	}
+
+	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.secret, sizeof(m_app_config.secret));
+	if (ret == 0) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "command failed");
 		return ret;
 	}
@@ -653,37 +730,6 @@ static int cmd_corr_ext_temperature_2(const struct shell *shell, size_t argc, ch
 	return 0;
 }
 
-static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_serial_number(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	size_t len = strlen(argv[1]);
-
-	if (len != 10) {
-		shell_error(shell, "invalid argument format");
-		return -EINVAL;
-	}
-
-	for (size_t i = 0; i < len; i++) {
-		if (!isdigit((int)argv[1][i])) {
-			shell_error(shell, "invalid argument format");
-			return -EINVAL;
-		}
-	}
-
-	m_app_config.serial_number = strtoul(argv[1], NULL, 10);
-
-	return 0;
-}
-
 static int cmd_has_mpl3115a2(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -738,6 +784,14 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Reset all configuration.",
 	              cmd_reset, 1, 0),
 
+	SHELL_CMD_ARG(serial-number, NULL,
+	              "Get/Set device serial number (10 decimal digits).",
+	              cmd_serial_number, 1, 1),
+
+	SHELL_CMD_ARG(secret, NULL,
+	              "Get/Set device secret (32 hexadecimal digits).",
+	              cmd_secret, 1, 1),
+
 	SHELL_CMD_ARG(calibration, NULL,
 	              "Get/Set calibration mode (true/false).",
 	              cmd_calibration, 1, 1),
@@ -777,10 +831,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(corr-ext-temperature-2, NULL,
 	              "Get/Set external temperature 2 correction (range -5.0 to +5.0 degrees of Celsius).",
 	              cmd_corr_ext_temperature_2, 1, 1),
-
-	SHELL_CMD_ARG(serial-number, NULL,
-	              "Get/Set device serial number (10 decimal digits).",
-	              cmd_serial_number, 1, 1),
 
 	SHELL_CMD_ARG(has-mpl3115a2, NULL,
 	              "Get/Set capability MPL3115A2 (true/false).",
