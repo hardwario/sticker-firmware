@@ -2,8 +2,13 @@ syntax = "proto3";
 
 message NfcConfigMessage {
     optional bool factory = 1;
-    optional Lorawan lorawan = 2;
-    optional Application application = 3;
+
+    optional string secret_key = 2;
+    optional uint32 serial_number = 3;
+    optional uint32 nonce_counter = 4;
+
+    optional Lorawan lorawan = 5;
+    optional Application application = 6;
 
     message Lorawan {
         enum Region {
