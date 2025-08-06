@@ -59,9 +59,9 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		}                                                                                  \
 	} while (0)
 
+	SETTINGS_SET("secret-key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
 	SETTINGS_SET("serial-number", &m_app_config.serial_number,
 		     sizeof(m_app_config.serial_number));
-	SETTINGS_SET("secret_key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
 	SETTINGS_SET("nonce-counter", &m_app_config.nonce_counter,
 		     sizeof(m_app_config.nonce_counter));
 	SETTINGS_SET("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
@@ -102,9 +102,9 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
 	} while (0)
 
+	EXPORT_FUNC("secret-key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
 	EXPORT_FUNC("serial-number", &m_app_config.serial_number,
 		    sizeof(m_app_config.serial_number));
-	EXPORT_FUNC("secret_key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
 	EXPORT_FUNC("nonce-counter", &m_app_config.nonce_counter,
 		    sizeof(m_app_config.nonce_counter));
 	EXPORT_FUNC("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
@@ -232,22 +232,23 @@ static int reset(bool reboot)
 	return 0;
 }
 
-static void print_serial_number(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " serial-number %010u", m_app_config.serial_number);
-}
-
 static void print_secret_key(const struct shell *shell)
 {
 	char buf[2 * sizeof(m_app_config.secret_key) + 1];
 
-	int ret = bin2hex(m_app_config.secret_key, sizeof(m_app_config.secret_key), buf, sizeof(buf));
+	int ret =
+		bin2hex(m_app_config.secret_key, sizeof(m_app_config.secret_key), buf, sizeof(buf));
 	if (ret == 0) {
 		LOG_ERR("Call `bin2hex` failed: %d", ret);
 		return;
 	}
 
 	shell_print(shell, SETTINGS_PFX " secret-key %s", buf);
+}
+
+static void print_serial_number(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " serial-number %010u", m_app_config.serial_number);
 }
 
 static void print_nonce_counter(const struct shell *shell)
@@ -357,8 +358,8 @@ static void print_has_mpl3115a2(const struct shell *shell)
 
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
-	print_serial_number(shell);
 	print_secret_key(shell);
+	print_serial_number(shell);
 	print_nonce_counter(shell);
 	print_calibration(shell);
 	print_interval_sample(shell);
@@ -403,6 +404,35 @@ static int cmd_reset(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_secret_key(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_secret_key(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.secret_key)) {
+		shell_error(shell, "invalid argument length");
+		return -EINVAL;
+	}
+
+	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.secret_key,
+		      sizeof(m_app_config.secret_key));
+	if (ret == 0) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "command failed");
+		return ret;
+	}
+
+	return 0;
+}
 
 static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv)
 {
@@ -431,35 +461,6 @@ static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv
 	}
 
 	m_app_config.serial_number = strtoul(argv[1], NULL, 10);
-
-	return 0;
-}
-
-static int cmd_secret_key(const struct shell *shell, size_t argc, char **argv)
-{
-	int ret;
-
-	if (argc == 1) {
-		print_secret_key(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.secret_key)) {
-		shell_error(shell, "invalid argument length");
-		return -EINVAL;
-	}
-
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.secret_key, sizeof(m_app_config.secret_key));
-	if (ret == 0) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "command failed");
-		return ret;
-	}
 
 	return 0;
 }
@@ -811,13 +812,13 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Reset all configuration.",
 	              cmd_reset, 1, 0),
 
+	SHELL_CMD_ARG(secret-key, NULL,
+			"Get/Set device secret key (32 hexadecimal digits).",
+			cmd_secret_key, 1, 1),
+
 	SHELL_CMD_ARG(serial-number, NULL,
 	              "Get/Set device serial number (10 decimal digits).",
 	              cmd_serial_number, 1, 1),
-
-	SHELL_CMD_ARG(secret-key, NULL,
-	              "Get/Set device secret key (32 hexadecimal digits).",
-	              cmd_secret_key, 1, 1),
 
 	SHELL_CMD_ARG(nonce-counter, NULL,
 	              "Get/Set nonce counter (unsigned integer).",

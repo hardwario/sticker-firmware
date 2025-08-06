@@ -16,8 +16,8 @@ extern "C" {
 #endif
 
 struct app_config {
-	uint32_t serial_number;
 	uint8_t secret_key[16];
+	uint32_t serial_number;
 	uint32_t nonce_counter;
 	bool calibration;
 	int interval_sample;
