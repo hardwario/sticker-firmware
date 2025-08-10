@@ -34,6 +34,10 @@ LOG_MODULE_REGISTER(app_nfc, LOG_LEVEL_DBG);
 #define ST25DV_I2C_ADDR_E0 0x53
 #define ST25DV_I2C_ADDR_E1 0x55
 
+#define ST25DV_MAX_SEQ_WRITE_BYTES 256
+#define ST25DV_INT_PAGE_BYTES      4
+#define ST25DV_TW_MS_PER_PAGE      5
+
 #define NDEF_TNF_MIME       0x02
 #define NDEF_SUPPORTED_TYPE "application/vnd.hardwario.sticker-config.v1"
 
@@ -57,6 +61,60 @@ static int read_mem(uint16_t reg, void *buf, size_t len)
 	if (ret) {
 		LOG_ERR("Call `i2c_write_read` failed: %d", ret);
 		return ret;
+	}
+
+	return 0;
+}
+
+static inline uint32_t calc_prog_time_ms(uint16_t reg, size_t len)
+{
+	size_t off_in_page = reg & (ST25DV_INT_PAGE_BYTES - 1);
+	size_t total = off_in_page + len;
+	size_t pages = DIV_ROUND_UP(total, ST25DV_INT_PAGE_BYTES);
+	return pages * ST25DV_TW_MS_PER_PAGE;
+}
+
+static int write_mem(uint16_t reg, const void *buf, size_t len)
+{
+	int ret;
+
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
+	}
+
+	const uint8_t *p = buf;
+	size_t remaining = len;
+
+	while (remaining) {
+		size_t within_256 =
+			ST25DV_MAX_SEQ_WRITE_BYTES - (reg & (ST25DV_MAX_SEQ_WRITE_BYTES - 1));
+
+		size_t chunk = MIN(remaining, within_256);
+
+		if (chunk > ST25DV_MAX_SEQ_WRITE_BYTES) {
+			chunk = ST25DV_MAX_SEQ_WRITE_BYTES;
+		}
+
+		uint8_t frame[2 + ST25DV_MAX_SEQ_WRITE_BYTES];
+		sys_put_be16(reg, frame);
+		memcpy(&frame[2], p, chunk);
+
+		ret = i2c_write(dev, frame, 2 + chunk, ST25DV_I2C_ADDR_E0);
+		if (ret) {
+			LOG_ERR("Call `i2c_write` failed: %d", ret);
+			return ret;
+		}
+
+		uint32_t wait_ms = calc_prog_time_ms(reg, chunk);
+		if (wait_ms) {
+			k_msleep(wait_ms);
+		}
+
+		reg += chunk;
+		p += chunk;
+		remaining -= chunk;
 	}
 
 	return 0;
@@ -131,6 +189,8 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 		res = -EIO;
 	}
 
+	app_config()->nonce_counter = nonce_counter;
+
 	return res;
 }
 
@@ -150,6 +210,8 @@ static void ingest_message(const NfcConfigMessage *message)
 static int parser_callback(const struct app_ndef_parser_record_info *record_info, void *user_data)
 {
 	int ret;
+
+	bool *save_config = (bool *)user_data;
 
 	/* Check if TNF type is MIME */
 	if (record_info->tnf != NDEF_TNF_MIME) {
@@ -174,10 +236,12 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 		return ret;
 	}
 
+	*save_config = true;
+
 	pb_istream_t stream = pb_istream_from_buffer(buf, len);
 	NfcConfigMessage message = NfcConfigMessage_init_zero;
 	if (!pb_decode(&stream, NfcConfigMessage_fields, &message)) {
-		LOG_ERR("Failed to decode Protobuf message: %s", PB_GET_ERROR(&stream));
+		LOG_ERR("Call `pb_decode` failed: %s", PB_GET_ERROR(&stream));
 		return -EIO;
 	}
 
@@ -213,7 +277,8 @@ static int init(void)
 		return 0;
 	}
 
-	ret = app_ndef_parser_run(buf, sizeof(buf), parser_callback, NULL);
+	bool save_config = false;
+	ret = app_ndef_parser_run(buf, sizeof(buf), parser_callback, &save_config);
 	if (ret) {
 		LOG_ERR("Call `app_ndef_parser_run` failed: %d", ret);
 		res = ret;
@@ -223,7 +288,19 @@ static int init(void)
 
 	memset(buf, 0, sizeof(buf));
 
-	/* TODO Implement */
+	ret = write_mem(0, buf, sizeof(buf));
+	if (ret) {
+		LOG_ERR("Call `write_mem` failed: %d", ret);
+		res = ret;
+	}
+
+	if (save_config) {
+		ret = app_config_save();
+		if (ret) {
+			LOG_ERR("Call `app_config_save` failed: %d", ret);
+			res = ret;
+		}
+	}
 
 	return res;
 }

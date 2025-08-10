@@ -876,3 +876,21 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 SHELL_CMD_REGISTER(config, &sub_config, "Configuration commands.", print_help);
 
 #endif /* defined(CONFIG_SHELL) */
+
+struct app_config *app_config(void)
+{
+	return &m_app_config;
+}
+
+int app_config_save(void)
+{
+	int ret;
+
+	ret = save(true);
+	if (ret) {
+		LOG_ERR("Call `save` failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
