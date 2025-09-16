@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_nfc.h"
 #include "app_config.h"
 #include "app_ndef_parser.h"
 
@@ -14,6 +15,7 @@
 /* Zephyr includes */
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
@@ -211,7 +213,7 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 {
 	int ret;
 
-	bool *save_config = (bool *)user_data;
+	enum app_nfc_action *action = (enum app_nfc_action *)user_data;
 
 	/* Check if TNF type is MIME */
 	if (record_info->tnf != NDEF_TNF_MIME) {
@@ -236,8 +238,6 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 		return ret;
 	}
 
-	*save_config = true;
-
 	pb_istream_t stream = pb_istream_from_buffer(buf, len);
 	NfcConfigMessage message = NfcConfigMessage_init_zero;
 	if (!pb_decode(&stream, NfcConfigMessage_fields, &message)) {
@@ -246,6 +246,8 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 	}
 
 	ingest_message(&message);
+
+	*action = APP_NFC_ACTION_SAVE;
 
 	return 0;
 }
@@ -261,24 +263,53 @@ static bool is_buffer_zero(const void *buf, size_t len)
 	return true;
 }
 
-static int init(void)
+int app_nfc_check(enum app_nfc_action *action)
 {
 	int ret;
 	int res = 0;
+
+	const struct gpio_dt_spec lpd_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
+
+	if (!gpio_is_ready_dt(&lpd_spec)) {
+		LOG_ERR("GPIO device not ready (LPD)");
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_set_dt(&lpd_spec, 0);
+	if (ret) {
+		LOG_ERR("Call `gpio_pin_set_dt` failed: %d", ret);
+		return ret;
+	}
+
+	k_sleep(K_MSEC(150));
 
 	uint8_t buf[512];
 	ret = read_mem(0, buf, sizeof(buf));
 	if (ret) {
 		LOG_ERR("Call `read_mem` failed: %d", ret);
-		return ret;
+		res = ret;
+
+		ret = gpio_pin_set_dt(&lpd_spec, 1);
+		if (ret) {
+			LOG_ERR("Call `gpio_pin_set_dt` failed: %d", ret);
+			return ret;
+		}
+
+		return res;
 	}
 
 	if (is_buffer_zero(buf, sizeof(buf))) {
+		ret = gpio_pin_set_dt(&lpd_spec, 1);
+		if (ret) {
+			LOG_ERR("Call `gpio_pin_set_dt` failed: %d", ret);
+			return ret;
+		}
+
 		return 0;
 	}
 
-	bool save_config = false;
-	ret = app_ndef_parser_run(buf, sizeof(buf), parser_callback, &save_config);
+	*action = APP_NFC_ACTION_NONE;
+	ret = app_ndef_parser_run(buf, sizeof(buf), parser_callback, action);
 	if (ret) {
 		LOG_ERR("Call `app_ndef_parser_run` failed: %d", ret);
 		res = ret;
@@ -294,15 +325,33 @@ static int init(void)
 		res = ret;
 	}
 
-	if (save_config) {
-		ret = app_config_save();
-		if (ret) {
-			LOG_ERR("Call `app_config_save` failed: %d", ret);
-			res = ret;
-		}
+	ret = gpio_pin_set_dt(&lpd_spec, 1);
+	if (ret) {
+		LOG_ERR("Call `gpio_pin_set_dt` failed: %d", ret);
+		res = ret;
 	}
 
 	return res;
 }
 
-SYS_INIT(init, APPLICATION, 99);
+static int init(void)
+{
+	int ret;
+
+	const struct gpio_dt_spec lpd_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
+
+	if (!gpio_is_ready_dt(&lpd_spec)) {
+		LOG_ERR("GPIO device not ready (LPD)");
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_configure_dt(&lpd_spec, GPIO_OUTPUT_ACTIVE);
+	if (ret) {
+		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+SYS_INIT(init, POST_KERNEL, 99);

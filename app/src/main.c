@@ -3,6 +3,7 @@
 #include "app_config.h"
 #include "app_led.h"
 #include "app_lrw.h"
+#include "app_nfc.h"
 #include "app_sensor.h"
 #include "app_wdog.h"
 
@@ -22,7 +23,13 @@
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
+#if defined(CONFIG_DEBUG)
+#define BLINK_INTERVAL_SECONDS 1
+#define NFC_CHECK_BLINKS       1
+#else
 #define BLINK_INTERVAL_SECONDS 3
+#define NFC_CHECK_BLINKS       10
+#endif /* defined(CONFIG_DEBUG) */
 
 static struct k_timer m_send_timer;
 
@@ -75,7 +82,7 @@ static void send_timer_handler(struct k_timer *timer)
 
 static K_TIMER_DEFINE(m_send_timer, send_timer_handler, NULL);
 
-static void carousel(void)
+static void play_carousel_boot(void)
 {
 	app_led_set(APP_LED_CHANNEL_R, 1);
 	k_sleep(K_MSEC(500));
@@ -90,11 +97,48 @@ static void carousel(void)
 	app_led_set(APP_LED_CHANNEL_G, 0);
 }
 
+static void play_carousel_nfc(void)
+{
+	for (int i = 10; i; i--) {
+		app_led_set(APP_LED_CHANNEL_Y, 1);
+		k_sleep(K_MSEC(100));
+		app_led_set(APP_LED_CHANNEL_Y, 0);
+
+		if (i == 1) {
+			break;
+		}
+
+		k_sleep(K_MSEC(100));
+	}
+}
+
 int main(void)
 {
 	int ret;
 
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
+
+	enum app_nfc_action action;
+	ret = app_nfc_check(&action);
+	if (ret) {
+		LOG_ERR("Call `app_nfc_check` failed: %d", ret);
+	}
+
+	if (action == APP_NFC_ACTION_SAVE) {
+		play_carousel_nfc();
+
+		ret = app_config_save();
+		if (ret) {
+			LOG_ERR("Call `app_config_save` failed: %d", ret);
+		}
+	} else if (action == APP_NFC_ACTION_RESET) {
+		play_carousel_nfc();
+
+		ret = app_config_reset();
+		if (ret) {
+			LOG_ERR("Call `app_config_reset` failed: %d", ret);
+		}
+	}
 
 	if (g_app_config.has_mpl3115a2) {
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(mpl3115a2));
@@ -102,16 +146,14 @@ int main(void)
 		ret = device_init(dev);
 		if (ret) {
 			LOG_ERR("Call `device_init` failed (mpl3115a2): %d", ret);
-			return ret;
 		}
 	}
 
-	carousel();
+	play_carousel_boot();
 
 	ret = app_lrw_join();
 	if (ret) {
 		LOG_ERR("Call `app_lrw_join` failed: %d", ret);
-		return ret;
 	}
 
 	k_work_queue_init(&m_send_work_q);
@@ -129,9 +171,35 @@ int main(void)
 		ret = app_wdog_feed();
 		if (ret) {
 			LOG_ERR("Call `app_wdog_feed` failed: %d", ret);
-			return ret;
 		}
 #endif /* defined(CONFIG_WATCHDOG) */
+
+		static int nfc_counter;
+
+		if (nfc_counter++ == NFC_CHECK_BLINKS) {
+			nfc_counter = 0;
+
+			ret = app_nfc_check(&action);
+			if (ret) {
+				LOG_ERR("Call `app_nfc_check` failed: %d", ret);
+			}
+
+			if (action == APP_NFC_ACTION_SAVE) {
+				play_carousel_nfc();
+
+				ret = app_config_save();
+				if (ret) {
+					LOG_ERR("Call `app_config_save` failed: %d", ret);
+				}
+			} else if (action == APP_NFC_ACTION_RESET) {
+				play_carousel_nfc();
+
+				ret = app_config_reset();
+				if (ret) {
+					LOG_ERR("Call `app_config_reset` failed: %d", ret);
+				}
+			}
+		}
 
 		if (app_alarm_is_active()) {
 			app_led_set(APP_LED_CHANNEL_R, 1);

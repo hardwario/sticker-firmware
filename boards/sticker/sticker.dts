@@ -51,6 +51,11 @@
 		};
 	};
 
+	lpd: lpd {
+		compatible = "power-switch";
+		gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;
+	};
+
 	aliases {
 		led0 = &led_r;
 		led1 = &led_g;
@@ -95,14 +100,6 @@ stm32_lp_tick_source: &lptim1 {
 	st,adc-clock-source = "SYNC";
 	st,adc-prescaler = <4>;
 	status = "okay";
-};
-
-&gpioa {
-	lpd {
-		gpio-hog;
-		gpios = <1 GPIO_ACTIVE_HIGH>;
-		output-low;
-	};
 };
 
 &i2c1 {

@@ -164,8 +164,6 @@ static int init(void)
 
 SYS_INIT(init, APPLICATION, 0);
 
-#if defined(CONFIG_SHELL)
-
 static int save(bool reboot)
 {
 	int ret;
@@ -231,6 +229,8 @@ static int reset(bool reboot)
 
 	return 0;
 }
+
+#if defined(CONFIG_SHELL)
 
 static void print_secret_key(const struct shell *shell)
 {
@@ -889,6 +889,19 @@ int app_config_save(void)
 	ret = save(true);
 	if (ret) {
 		LOG_ERR("Call `save` failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+int app_config_reset(void)
+{
+	int ret;
+
+	ret = reset(true);
+	if (ret) {
+		LOG_ERR("Call `reset` failed: %d", ret);
 		return ret;
 	}
 
