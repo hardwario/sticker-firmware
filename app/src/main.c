@@ -1,6 +1,7 @@
 #include "app_alarm.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_hall.h"
 #include "app_led.h"
 #include "app_lrw.h"
 #include "app_nfc.h"
@@ -81,6 +82,11 @@ static void send_timer_handler(struct k_timer *timer)
 }
 
 static K_TIMER_DEFINE(m_send_timer, send_timer_handler, NULL);
+
+void app_trigger_immediate_send(void)
+{
+	k_work_submit_to_queue(&m_send_work_q, &m_send_work);
+}
 
 static void play_carousel_boot(void)
 {

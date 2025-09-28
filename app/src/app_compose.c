@@ -5,6 +5,7 @@
  */
 
 #include "app_compose.h"
+#include "app_hall.h"
 #include "app_sensor.h"
 
 /* Zephyr includes */
@@ -49,6 +50,9 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	uint8_t machine_probe_humidity_2 = 0xff;
 	uint32_t hall_left_count = 0;
 	uint32_t hall_right_count = 0;
+	struct app_hall_data hall_data;
+
+	app_hall_get_data(&hall_data);
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
@@ -144,6 +148,31 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
+
+	/* Add hall notify events to header */
+	if (hall_data.left_notify_act) {
+		header |= BIT(11);
+	}
+	if (hall_data.left_notify_deact) {
+		header |= BIT(10);
+	}
+	if (hall_data.right_notify_act) {
+		header |= BIT(9);
+	}
+	if (hall_data.right_notify_deact) {
+		header |= BIT(8);
+	}
+
+	/* Add hall active states to header */
+	if (hall_data.left_is_active) {
+		header |= BIT(7);
+	}
+	if (hall_data.right_is_active) {
+		header |= BIT(6);
+	}
+
+	/* Clear notify flags after reading them */
+	app_hall_clear_notify_flags(&hall_data);
 
 	header |= orientation;
 

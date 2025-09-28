@@ -20,10 +20,16 @@ struct app_hall_data {
 	bool right_is_active;
 	uint32_t left_count;
 	uint32_t right_count;
+	bool left_notify_act;
+	bool left_notify_deact;
+	bool right_notify_act;
+	bool right_notify_deact;
 };
 
 int app_hall_init(void);
 int app_hall_get_data(struct app_hall_data *data);
+void app_hall_clear_notify_flags(struct app_hall_data *data);
+bool app_hall_check_notify_event(void);
 
 #ifdef __cplusplus
 }

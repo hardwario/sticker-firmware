@@ -5,6 +5,8 @@
  */
 
 #include "app_hall.h"
+#include "app_config.h"
+#include "app_send.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -42,33 +44,54 @@ static int poll(void)
 	right_was_active = m_hall_data.right_is_active;
 	k_mutex_unlock(&m_hall_data_mutex);
 
-	ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_UP);
-	if (ret < 0) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
-		return ret;
+	if (!g_app_config.hall_left_enabled) {
+		left_is_active = false;
 	}
 
-	ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_UP);
-	if (ret < 0) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
-		return ret;
+	if (!g_app_config.hall_right_enabled) {
+		right_is_active = false;
+	}
+
+	if (g_app_config.hall_left_enabled) {
+		ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_UP);
+		if (ret < 0) {
+			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+			return ret;
+		}
+	}
+
+	if (g_app_config.hall_right_enabled) {
+		ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_UP);
+		if (ret < 0) {
+			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+			return ret;
+		}
 	}
 
 	k_busy_wait(2);
 
-	left_is_active = !gpio_pin_get_dt(&m_hall_left);
-	right_is_active = !gpio_pin_get_dt(&m_hall_right);
-
-	ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_DOWN);
-	if (ret < 0) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
-		return ret;
+	if (g_app_config.hall_left_enabled) {
+		left_is_active = !gpio_pin_get_dt(&m_hall_left);
 	}
 
-	ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_DOWN);
-	if (ret < 0) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
-		return ret;
+	if (g_app_config.hall_right_enabled) {
+		right_is_active = !gpio_pin_get_dt(&m_hall_right);
+	}
+
+	if (g_app_config.hall_left_enabled) {
+		ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_DOWN);
+		if (ret < 0) {
+			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+			return ret;
+		}
+	}
+
+	if (g_app_config.hall_right_enabled) {
+		ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_DOWN);
+		if (ret < 0) {
+			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+			return ret;
+		}
 	}
 
 	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
@@ -77,22 +100,60 @@ static int poll(void)
 	m_hall_data.right_is_active = right_is_active;
 
 	if (!left_was_active && left_is_active) {
-		m_hall_data.left_count++;
+		if (g_app_config.hall_left_counter) {
+			m_hall_data.left_count++;
+		}
+
 		LOG_DBG("Left hall switch activated, count: %u", m_hall_data.left_count);
+
+		if (g_app_config.hall_left_notify_act) {
+			m_hall_data.left_notify_act = true;
+		}
+	}
+
+	if (left_was_active && !left_is_active) {
+		LOG_DBG("Left hall switch deactivated");
+
+		if (g_app_config.hall_left_notify_deact) {
+			m_hall_data.left_notify_deact = true;
+		}
 	}
 
 	if (!right_was_active && right_is_active) {
-		m_hall_data.right_count++;
+		if (g_app_config.hall_right_counter) {
+			m_hall_data.right_count++;
+		}
+
 		LOG_DBG("Right hall switch activated, count: %u", m_hall_data.right_count);
+
+		if (g_app_config.hall_right_notify_act) {
+			m_hall_data.right_notify_act = true;
+		}
+	}
+
+	if (right_was_active && !right_is_active) {
+		LOG_DBG("Right hall switch deactivated");
+
+		if (g_app_config.hall_right_notify_deact) {
+			m_hall_data.right_notify_deact = true;
+		}
 	}
 
 	k_mutex_unlock(&m_hall_data_mutex);
+
+	if (app_hall_check_notify_event()) {
+		app_trigger_immediate_send();
+	}
 
 	return 0;
 }
 
 static void hall_poll_work_handler(struct k_work *work)
 {
+	if (!g_app_config.hall_left_enabled && !g_app_config.hall_right_enabled) {
+		return;
+	}
+
 	int ret = poll();
 	if (ret < 0) {
 		LOG_ERR("Call `poll` failed: %d", ret);
@@ -150,4 +211,43 @@ int app_hall_get_data(struct app_hall_data *data)
 	k_mutex_unlock(&m_hall_data_mutex);
 
 	return 0;
+}
+
+void app_hall_clear_notify_flags(struct app_hall_data *data)
+{
+	if (!data) {
+		return;
+	}
+
+	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
+
+	if (data->left_notify_act) {
+		m_hall_data.left_notify_act = false;
+	}
+
+	if (data->left_notify_deact) {
+		m_hall_data.left_notify_deact = false;
+	}
+
+	if (data->right_notify_act) {
+		m_hall_data.right_notify_act = false;
+	}
+
+	if (data->right_notify_deact) {
+		m_hall_data.right_notify_deact = false;
+	}
+
+	k_mutex_unlock(&m_hall_data_mutex);
+}
+
+bool app_hall_check_notify_event(void)
+{
+	bool has_event;
+
+	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
+	has_event = m_hall_data.left_notify_act || m_hall_data.left_notify_deact ||
+		    m_hall_data.right_notify_act || m_hall_data.right_notify_deact;
+	k_mutex_unlock(&m_hall_data_mutex);
+
+	return has_event;
 }

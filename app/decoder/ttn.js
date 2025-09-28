@@ -145,6 +145,28 @@ function decodeUplink(input) {
     } else {
       data.machine_probe_tilt_alert_2 = false;
     }
+
+    if (header & (1 << 13)) {
+      var hall_left_count = (bytes[index++] << 24) | (bytes[index++] << 16) | (bytes[index++] << 8) | bytes[index++];
+      data.hall_left_count = hall_left_count;
+    } else {
+      data.hall_left_count = null;
+    }
+
+    if (header & (1 << 12)) {
+      var hall_right_count = (bytes[index++] << 24) | (bytes[index++] << 16) | (bytes[index++] << 8) | bytes[index++];
+      data.hall_right_count = hall_right_count;
+    } else {
+      data.hall_right_count = null;
+    }
+
+    data.hall_left_notify_act = (header & (1 << 11)) ? true : false;
+    data.hall_left_notify_deact = (header & (1 << 10)) ? true : false;
+    data.hall_right_notify_act = (header & (1 << 9)) ? true : false;
+    data.hall_right_notify_deact = (header & (1 << 8)) ? true : false;
+
+    data.hall_left_is_active = (header & (1 << 7)) ? true : false;
+    data.hall_right_is_active = (header & (1 << 6)) ? true : false;
   }
 
   return {
@@ -155,7 +177,11 @@ function decodeUplink(input) {
 }
 
 if (true) {
+
+  // console.log("Decoded data:", JSON.stringify(decodeUplink({
+  //   bytes: [0x78, 0x1a, 0x00, 0x01, 0xa5, 0x08, 0xd7, 0x88, 0x08, 0xed, 0x75],
+  // }), null, 2));
   console.log("Decoded data:", JSON.stringify(decodeUplink({
-    bytes: [0x78, 0x1a, 0x00, 0x01, 0xa5, 0x08, 0xd7, 0x88, 0x08, 0xed, 0x75],
+    bytes: Buffer.from("7a01a109fa580258", "hex"),
   }), null, 2));
 }

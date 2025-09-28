@@ -34,6 +34,10 @@ struct app_config g_app_config;
 
 static struct app_config m_app_config = {
 	.interval_report = 900,
+	.hall_left_enabled = true,
+	.hall_left_counter = true,
+	.hall_right_enabled = true,
+	.hall_right_counter = true,
 };
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
@@ -81,6 +85,22 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.corr_ext_temperature_2));
 	SETTINGS_SET("has-mpl3115a2", &m_app_config.has_mpl3115a2,
 		     sizeof(m_app_config.has_mpl3115a2));
+	SETTINGS_SET("hall-left-enabled", &m_app_config.hall_left_enabled,
+		     sizeof(m_app_config.hall_left_enabled));
+	SETTINGS_SET("hall-left-counter", &m_app_config.hall_left_counter,
+		     sizeof(m_app_config.hall_left_counter));
+	SETTINGS_SET("hall-left-notify-act", &m_app_config.hall_left_notify_act,
+		     sizeof(m_app_config.hall_left_notify_act));
+	SETTINGS_SET("hall-left-notify-deact", &m_app_config.hall_left_notify_deact,
+		     sizeof(m_app_config.hall_left_notify_deact));
+	SETTINGS_SET("hall-right-enabled", &m_app_config.hall_right_enabled,
+		     sizeof(m_app_config.hall_right_enabled));
+	SETTINGS_SET("hall-right-counter", &m_app_config.hall_right_counter,
+		     sizeof(m_app_config.hall_right_counter));
+	SETTINGS_SET("hall-right-notify-act", &m_app_config.hall_right_notify_act,
+		     sizeof(m_app_config.hall_right_notify_act));
+	SETTINGS_SET("hall-right-notify-deact", &m_app_config.hall_right_notify_deact,
+		     sizeof(m_app_config.hall_right_notify_deact));
 
 #undef SETTINGS_SET
 
@@ -124,6 +144,22 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.corr_ext_temperature_2));
 	EXPORT_FUNC("has-mpl3115a2", &m_app_config.has_mpl3115a2,
 		    sizeof(m_app_config.has_mpl3115a2));
+	EXPORT_FUNC("hall-left-enabled", &m_app_config.hall_left_enabled,
+		    sizeof(m_app_config.hall_left_enabled));
+	EXPORT_FUNC("hall-left-counter", &m_app_config.hall_left_counter,
+		    sizeof(m_app_config.hall_left_counter));
+	EXPORT_FUNC("hall-left-notify-act", &m_app_config.hall_left_notify_act,
+		    sizeof(m_app_config.hall_left_notify_act));
+	EXPORT_FUNC("hall-left-notify-deact", &m_app_config.hall_left_notify_deact,
+		    sizeof(m_app_config.hall_left_notify_deact));
+	EXPORT_FUNC("hall-right-enabled", &m_app_config.hall_right_enabled,
+		    sizeof(m_app_config.hall_right_enabled));
+	EXPORT_FUNC("hall-right-counter", &m_app_config.hall_right_counter,
+		    sizeof(m_app_config.hall_right_counter));
+	EXPORT_FUNC("hall-right-notify-act", &m_app_config.hall_right_notify_act,
+		    sizeof(m_app_config.hall_right_notify_act));
+	EXPORT_FUNC("hall-right-notify-deact", &m_app_config.hall_right_notify_deact,
+		    sizeof(m_app_config.hall_right_notify_deact));
 
 #undef EXPORT_FUNC
 
@@ -356,6 +392,54 @@ static void print_has_mpl3115a2(const struct shell *shell)
 		    m_app_config.has_mpl3115a2 ? "true" : "false");
 }
 
+static void print_hall_left_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " hall-left-enabled %s",
+		    m_app_config.hall_left_enabled ? "true" : "false");
+}
+
+static void print_hall_left_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " hall-left-counter %s",
+		    m_app_config.hall_left_counter ? "true" : "false");
+}
+
+static void print_hall_left_notify_act(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " hall-left-notify-act %s",
+		    m_app_config.hall_left_notify_act ? "true" : "false");
+}
+
+static void print_hall_left_notify_deact(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " hall-left-notify-deact %s",
+		    m_app_config.hall_left_notify_deact ? "true" : "false");
+}
+
+static void print_hall_right_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " hall-right-enabled %s",
+		    m_app_config.hall_right_enabled ? "true" : "false");
+}
+
+static void print_hall_right_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " hall-right-counter %s",
+		    m_app_config.hall_right_counter ? "true" : "false");
+}
+
+static void print_hall_right_notify_act(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " hall-right-notify-act %s",
+		    m_app_config.hall_right_notify_act ? "true" : "false");
+}
+
+static void print_hall_right_notify_deact(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " hall-right-notify-deact %s",
+		    m_app_config.hall_right_notify_deact ? "true" : "false");
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -372,6 +456,14 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_corr_ext_temperature_1(shell);
 	print_corr_ext_temperature_2(shell);
 	print_has_mpl3115a2(shell);
+	print_hall_left_enabled(shell);
+	print_hall_left_counter(shell);
+	print_hall_left_notify_act(shell);
+	print_hall_left_notify_deact(shell);
+	print_hall_right_enabled(shell);
+	print_hall_right_counter(shell);
+	print_hall_right_notify_act(shell);
+	print_hall_right_notify_deact(shell);
 
 	return 0;
 }
@@ -782,6 +874,198 @@ static int cmd_has_mpl3115a2(const struct shell *shell, size_t argc, char **argv
 	return 0;
 }
 
+static int cmd_hall_left_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_hall_left_enabled(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.hall_left_enabled = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.hall_left_enabled = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_hall_left_counter(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.hall_left_counter = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.hall_left_counter = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_hall_left_notify_act(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_hall_left_notify_act(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.hall_left_notify_act = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.hall_left_notify_act = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_hall_left_notify_deact(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_hall_left_notify_deact(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.hall_left_notify_deact = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.hall_left_notify_deact = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_hall_right_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_hall_right_enabled(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.hall_right_enabled = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.hall_right_enabled = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_hall_right_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_hall_right_counter(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.hall_right_counter = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.hall_right_counter = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_hall_right_notify_act(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_hall_right_notify_act(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.hall_right_notify_act = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.hall_right_notify_act = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_hall_right_notify_deact(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_hall_right_notify_deact(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.hall_right_notify_deact = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.hall_right_notify_deact = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -867,6 +1151,38 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(has-mpl3115a2, NULL,
 	              "Get/Set capability MPL3115A2 (true/false).",
 	              cmd_has_mpl3115a2, 1, 1),
+
+	SHELL_CMD_ARG(hall-left-enabled, NULL,
+	              "Get/Set hall left switch enabled (true/false).",
+	              cmd_hall_left_enabled, 1, 1),
+
+	SHELL_CMD_ARG(hall-left-counter, NULL,
+	              "Get/Set hall left switch counter enabled (true/false).",
+	              cmd_hall_left_counter, 1, 1),
+
+	SHELL_CMD_ARG(hall-left-notify-act, NULL,
+	              "Get/Set hall left switch notify on activation (true/false).",
+	              cmd_hall_left_notify_act, 1, 1),
+
+	SHELL_CMD_ARG(hall-left-notify-deact, NULL,
+	              "Get/Set hall left switch notify on deactivation (true/false).",
+	              cmd_hall_left_notify_deact, 1, 1),
+
+	SHELL_CMD_ARG(hall-right-enabled, NULL,
+	              "Get/Set hall right switch enabled (true/false).",
+	              cmd_hall_right_enabled, 1, 1),
+
+	SHELL_CMD_ARG(hall-right-counter, NULL,
+	              "Get/Set hall right switch counter enabled (true/false).",
+	              cmd_hall_right_counter, 1, 1),
+
+	SHELL_CMD_ARG(hall-right-notify-act, NULL,
+	              "Get/Set hall right switch notify on activation (true/false).",
+	              cmd_hall_right_notify_act, 1, 1),
+
+	SHELL_CMD_ARG(hall-right-notify-deact, NULL,
+	              "Get/Set hall right switch notify on deactivation (true/false).",
+	              cmd_hall_right_notify_deact, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );
