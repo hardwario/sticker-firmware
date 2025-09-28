@@ -54,7 +54,7 @@ static int poll(void)
 
 	if (g_app_config.hall_left_enabled) {
 		ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_UP);
-		if (ret < 0) {
+		if (ret) {
 			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
 			return ret;
 		}
@@ -62,7 +62,7 @@ static int poll(void)
 
 	if (g_app_config.hall_right_enabled) {
 		ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_UP);
-		if (ret < 0) {
+		if (ret) {
 			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
 			return ret;
 		}
@@ -80,7 +80,7 @@ static int poll(void)
 
 	if (g_app_config.hall_left_enabled) {
 		ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_DOWN);
-		if (ret < 0) {
+		if (ret) {
 			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
 			return ret;
 		}
@@ -88,7 +88,7 @@ static int poll(void)
 
 	if (g_app_config.hall_right_enabled) {
 		ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_DOWN);
-		if (ret < 0) {
+		if (ret) {
 			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
 			return ret;
 		}
@@ -155,7 +155,7 @@ static void hall_poll_work_handler(struct k_work *work)
 	}
 
 	int ret = poll();
-	if (ret < 0) {
+	if (ret) {
 		LOG_ERR("Call `poll` failed: %d", ret);
 	}
 }
@@ -184,13 +184,13 @@ int app_hall_init(void)
 	}
 
 	ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_DOWN);
-	if (ret < 0) {
+	if (ret) {
 		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
 		return ret;
 	}
 
 	ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_DOWN);
-	if (ret < 0) {
+	if (ret) {
 		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
 		return ret;
 	}

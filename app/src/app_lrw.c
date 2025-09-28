@@ -96,7 +96,7 @@ static int init(void)
 
 #if defined(CONFIG_LORAMAC_REGION_EU868)
 	ret = lorawan_set_region(LORAWAN_REGION_EU868);
-	if (ret < 0) {
+	if (ret) {
 		LOG_ERR("Call `lorawan_set_region` failed: %d", ret);
 		return ret;
 	}
