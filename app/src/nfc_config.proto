@@ -54,5 +54,13 @@ message NfcConfigMessage {
         optional float alarm_t2_temp_lo = 11;
         optional float alarm_t2_temp_hi = 12;
         optional float alarm_t2_temp_hst = 13;
+        optional bool hall_left_enabled = 14;
+        optional bool hall_left_counter = 15;
+        optional bool hall_left_notify_act = 16;
+        optional bool hall_left_notify_deact = 17;
+        optional bool hall_right_enabled = 18;
+        optional bool hall_right_counter = 19;
+        optional bool hall_right_notify_act = 20;
+        optional bool hall_right_notify_deact = 21;
     }
 }
