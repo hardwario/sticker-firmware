@@ -1,6 +1,11 @@
 #include <zephyr/dt-bindings/gpio/gpio.h>
 
 / {
+	aliases {
+		sw0 = &hall_l;
+		sw1 = &hall_r;
+	};
+
 	zephyr,user {
 		pir-si-gpios = <&gpioa 11 GPIO_ACTIVE_HIGH>;
 		pir-dl-gpios = <&gpiob 4 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;

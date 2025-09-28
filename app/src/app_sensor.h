@@ -35,6 +35,10 @@ struct app_sensor_data {
 	float machine_probe_humidity_2;
 	bool machine_probe_is_tilt_alert_1;
 	bool machine_probe_is_tilt_alert_2;
+	uint32_t hall_left_count;
+	uint32_t hall_right_count;
+	bool hall_left_is_active;
+	bool hall_right_is_active;
 };
 
 extern struct app_sensor_data g_app_sensor_data;

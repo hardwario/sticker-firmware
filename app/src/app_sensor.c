@@ -8,6 +8,7 @@
 #include "app_battery.h"
 #include "app_config.h"
 #include "app_ds18b20.h"
+#include "app_hall.h"
 #include "app_led.h"
 #include "app_machine_probe.h"
 #include "app_mpl3115a2.h"
@@ -18,7 +19,6 @@
 
 /* Zephyr includes */
 #include <zephyr/init.h>
-#include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -56,13 +56,6 @@ K_MUTEX_DEFINE(g_app_sensor_data_lock);
 static K_THREAD_STACK_DEFINE(m_sensor_work_stack, 4096);
 static struct k_work_q m_sensor_work_q;
 
-static void hall_switch_cb(struct input_event *evt, void *user_data)
-{
-	LOG_INF("Hall switch event: %x %d\n", evt->code, evt->value);
-}
-
-INPUT_CALLBACK_DEFINE(NULL, hall_switch_cb, NULL);
-
 void app_sensor_sample(void)
 {
 	int ret;
@@ -85,6 +78,7 @@ void app_sensor_sample(void)
 	float machine_probe_humidity_2 = NAN;
 	bool machine_probe_is_tilt_alert_1 = false;
 	bool machine_probe_is_tilt_alert_2 = false;
+	struct app_hall_data hall_data;
 
 #if defined(CONFIG_ADC)
 	ret = app_battery_measure(&voltage);
@@ -191,6 +185,11 @@ void app_sensor_sample(void)
 		}
 	}
 
+	ret = app_hall_get_data(&hall_data);
+	if (ret) {
+		LOG_ERR("Call `app_hall_get_data` failed: %d", ret);
+	}
+
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
 	g_app_sensor_data.orientation = orientation;
@@ -210,6 +209,11 @@ void app_sensor_sample(void)
 	g_app_sensor_data.machine_probe_humidity_2 = machine_probe_humidity_2;
 	g_app_sensor_data.machine_probe_is_tilt_alert_1 = machine_probe_is_tilt_alert_1;
 	g_app_sensor_data.machine_probe_is_tilt_alert_2 = machine_probe_is_tilt_alert_2;
+
+	g_app_sensor_data.hall_left_count = hall_data.left_count;
+	g_app_sensor_data.hall_right_count = hall_data.right_count;
+	g_app_sensor_data.hall_left_is_active = hall_data.left_is_active;
+	g_app_sensor_data.hall_right_is_active = hall_data.right_is_active;
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }
@@ -249,6 +253,12 @@ static int init(void)
 {
 	int ret;
 	UNUSED(ret);
+
+	ret = app_hall_init();
+	if (ret) {
+		LOG_ERR("Call `app_hall_init` failed: %d", ret);
+		return ret;
+	}
 
 #if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
 	app_pyq1648_set_callback(pyq1648_event_handler, NULL);

@@ -47,6 +47,8 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	int16_t machine_probe_temperature_2 = 0x7fff;
 	uint8_t machine_probe_humidity_1 = 0xff;
 	uint8_t machine_probe_humidity_2 = 0xff;
+	uint32_t hall_left_count = 0;
+	uint32_t hall_right_count = 0;
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
@@ -130,6 +132,15 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 
 	if (g_app_sensor_data.machine_probe_is_tilt_alert_2) {
 		header |= BIT(14);
+	}
+
+	hall_left_count = g_app_sensor_data.hall_left_count;
+	hall_right_count = g_app_sensor_data.hall_right_count;
+	if (hall_left_count > 0) {
+		header |= BIT(13);
+	}
+	if (hall_right_count > 0) {
+		header |= BIT(12);
 	}
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
@@ -218,6 +229,20 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 
 	if (header & BIT(16)) {
 		APPEND_BYTE(machine_probe_humidity_2);
+	}
+
+	if (header & BIT(13)) {
+		APPEND_BYTE(hall_left_count >> 24);
+		APPEND_BYTE(hall_left_count >> 16);
+		APPEND_BYTE(hall_left_count >> 8);
+		APPEND_BYTE(hall_left_count);
+	}
+
+	if (header & BIT(12)) {
+		APPEND_BYTE(hall_right_count >> 24);
+		APPEND_BYTE(hall_right_count >> 16);
+		APPEND_BYTE(hall_right_count >> 8);
+		APPEND_BYTE(hall_right_count);
 	}
 
 #undef APPEND
