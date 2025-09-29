@@ -198,9 +198,9 @@ void app_sensor_sample(void)
 	g_app_sensor_data.humidity = humidity;
 	g_app_sensor_data.illuminance = illuminance;
 	g_app_sensor_data.ext_temperature_1 =
-		ext_temperature_1 + g_app_config.corr_ext_temperature_1;
+		ext_temperature_1 + g_app_config.corr_t1_temperature;
 	g_app_sensor_data.ext_temperature_2 =
-		ext_temperature_2 + g_app_config.corr_ext_temperature_2;
+		ext_temperature_2 + g_app_config.corr_t2_temperature;
 	g_app_sensor_data.altitude = altitude;
 	g_app_sensor_data.pressure = pressure;
 	g_app_sensor_data.machine_probe_temperature_1 = machine_probe_temperature_1;

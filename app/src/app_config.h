@@ -65,8 +65,8 @@ struct app_config {
 	float alarm_t2_temperature_hi;
 	float alarm_t2_temperature_hst;
 	float corr_temperature;
-	float corr_ext_temperature_1;
-	float corr_ext_temperature_2;
+	float corr_t1_temperature;
+	float corr_t2_temperature;
 	bool hall_left_enabled;
 	bool hall_left_counter;
 	bool hall_left_notify_act;

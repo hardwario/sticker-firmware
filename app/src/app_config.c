@@ -128,10 +128,10 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.alarm_t2_temperature_hst));
 	SETTINGS_SET("corr-temperature", &m_app_config.corr_temperature,
 		     sizeof(m_app_config.corr_temperature));
-	SETTINGS_SET("corr-ext-temperature-1", &m_app_config.corr_ext_temperature_1,
-		     sizeof(m_app_config.corr_ext_temperature_1));
-	SETTINGS_SET("corr-ext-temperature-2", &m_app_config.corr_ext_temperature_2,
-		     sizeof(m_app_config.corr_ext_temperature_2));
+	SETTINGS_SET("corr-t1-temperature", &m_app_config.corr_t1_temperature,
+		     sizeof(m_app_config.corr_t1_temperature));
+	SETTINGS_SET("corr-t2-temperature", &m_app_config.corr_t2_temperature,
+		     sizeof(m_app_config.corr_t2_temperature));
 	SETTINGS_SET("hall-left-enabled", &m_app_config.hall_left_enabled,
 		     sizeof(m_app_config.hall_left_enabled));
 	SETTINGS_SET("hall-left-counter", &m_app_config.hall_left_counter,
@@ -225,10 +225,10 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.alarm_t2_temperature_hst));
 	EXPORT_FUNC("corr-temperature", &m_app_config.corr_temperature,
 		    sizeof(m_app_config.corr_temperature));
-	EXPORT_FUNC("corr-ext-temperature-1", &m_app_config.corr_ext_temperature_1,
-		    sizeof(m_app_config.corr_ext_temperature_1));
-	EXPORT_FUNC("corr-ext-temperature-2", &m_app_config.corr_ext_temperature_2,
-		    sizeof(m_app_config.corr_ext_temperature_2));
+	EXPORT_FUNC("corr-t1-temperature", &m_app_config.corr_t1_temperature,
+		    sizeof(m_app_config.corr_t1_temperature));
+	EXPORT_FUNC("corr-t2-temperature", &m_app_config.corr_t2_temperature,
+		    sizeof(m_app_config.corr_t2_temperature));
 	EXPORT_FUNC("hall-left-enabled", &m_app_config.hall_left_enabled,
 		    sizeof(m_app_config.hall_left_enabled));
 	EXPORT_FUNC("hall-left-counter", &m_app_config.hall_left_counter,
@@ -634,16 +634,16 @@ static void print_corr_temperature(const struct shell *shell)
 		    (double)m_app_config.corr_temperature);
 }
 
-static void print_corr_ext_temperature_1(const struct shell *shell)
+static void print_corr_t1_temperature(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " corr-ext-temperature-1 %.2f",
-		    (double)m_app_config.corr_ext_temperature_1);
+	shell_print(shell, SETTINGS_PFX " corr-t1-temperature %.2f",
+		    (double)m_app_config.corr_t1_temperature);
 }
 
-static void print_corr_ext_temperature_2(const struct shell *shell)
+static void print_corr_t2_temperature(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " corr-ext-temperature-2 %.2f",
-		    (double)m_app_config.corr_ext_temperature_2);
+	shell_print(shell, SETTINGS_PFX " corr-t2-temperature %.2f",
+		    (double)m_app_config.corr_t2_temperature);
 }
 
 static void print_hall_left_enabled(const struct shell *shell)
@@ -735,8 +735,8 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_alarm_t2_temperature_hi(shell);
 	print_alarm_t2_temperature_hst(shell);
 	print_corr_temperature(shell);
-	print_corr_ext_temperature_1(shell);
-	print_corr_ext_temperature_2(shell);
+	print_corr_t1_temperature(shell);
+	print_corr_t2_temperature(shell);
 	print_hall_left_enabled(shell);
 	print_hall_left_counter(shell);
 	print_hall_left_notify_act(shell);
@@ -1641,10 +1641,10 @@ static int cmd_corr_temperature(const struct shell *shell, size_t argc, char **a
 	return 0;
 }
 
-static int cmd_corr_ext_temperature_1(const struct shell *shell, size_t argc, char **argv)
+static int cmd_corr_t1_temperature(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
-		print_corr_ext_temperature_1(shell);
+		print_corr_t1_temperature(shell);
 		return 0;
 	}
 
@@ -1660,15 +1660,15 @@ static int cmd_corr_ext_temperature_1(const struct shell *shell, size_t argc, ch
 		return -EINVAL;
 	}
 
-	m_app_config.corr_ext_temperature_1 = a;
+	m_app_config.corr_t1_temperature = a;
 
 	return 0;
 }
 
-static int cmd_corr_ext_temperature_2(const struct shell *shell, size_t argc, char **argv)
+static int cmd_corr_t2_temperature(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
-		print_corr_ext_temperature_2(shell);
+		print_corr_t2_temperature(shell);
 		return 0;
 	}
 
@@ -1684,7 +1684,7 @@ static int cmd_corr_ext_temperature_2(const struct shell *shell, size_t argc, ch
 		return -EINVAL;
 	}
 
-	m_app_config.corr_ext_temperature_2 = a;
+	m_app_config.corr_t2_temperature = a;
 
 	return 0;
 }
@@ -2067,13 +2067,13 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set temperature correction (range -5.0 to +5.0 deg. C).",
 	              cmd_corr_temperature, 1, 1),
 
-	SHELL_CMD_ARG(corr-ext-temperature-1, NULL,
+	SHELL_CMD_ARG(corr-t1-temperature, NULL,
 	              "Get/Set external temperature 1 correction (range -5.0 to +5.0 deg. C).",
-	              cmd_corr_ext_temperature_1, 1, 1),
+	              cmd_corr_t1_temperature, 1, 1),
 
-	SHELL_CMD_ARG(corr-ext-temperature-2, NULL,
+	SHELL_CMD_ARG(corr-t2-temperature, NULL,
 	              "Get/Set external temperature 2 correction (range -5.0 to +5.0 deg. C).",
-	              cmd_corr_ext_temperature_2, 1, 1),
+	              cmd_corr_t2_temperature, 1, 1),
 
 	SHELL_CMD_ARG(hall-left-enabled, NULL,
 	              "Get/Set hall left switch enabled (true/false).",
