@@ -24,11 +24,10 @@ struct app_sensor_data {
 	float temperature;
 	float humidity;
 	float illuminance;
-	float ext_temperature_1;
-	float ext_temperature_2;
-	uint32_t motion_count;
 	float altitude;
 	float pressure;
+	float t1_temperature;
+	float t2_temperature;
 	float machine_probe_temperature_1;
 	float machine_probe_temperature_2;
 	float machine_probe_humidity_1;
@@ -39,6 +38,7 @@ struct app_sensor_data {
 	uint32_t hall_right_count;
 	bool hall_left_is_active;
 	bool hall_right_is_active;
+	uint32_t motion_count;
 };
 
 extern struct app_sensor_data g_app_sensor_data;

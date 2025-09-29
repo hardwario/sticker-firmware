@@ -41,14 +41,14 @@ struct app_sensor_data g_app_sensor_data = {
 	.temperature = NAN,
 	.humidity = NAN,
 	.illuminance = NAN,
-	.ext_temperature_1 = NAN,
-	.ext_temperature_2 = NAN,
+	.altitude = NAN,
+	.pressure = NAN,
+	.t1_temperature = NAN,
+	.t2_temperature = NAN,
 	.machine_probe_temperature_1 = NAN,
 	.machine_probe_temperature_2 = NAN,
 	.machine_probe_humidity_1 = NAN,
 	.machine_probe_humidity_2 = NAN,
-	.altitude = NAN,
-	.pressure = NAN,
 };
 
 K_MUTEX_DEFINE(g_app_sensor_data_lock);
@@ -68,10 +68,10 @@ void app_sensor_sample(void)
 	float temperature = NAN;
 	float humidity = NAN;
 	float illuminance = NAN;
-	float ext_temperature_1 = NAN;
-	float ext_temperature_2 = NAN;
 	float altitude = NAN;
 	float pressure = NAN;
+	float t1_temperature = NAN;
+	float t2_temperature = NAN;
 	float machine_probe_temperature_1 = NAN;
 	float machine_probe_temperature_2 = NAN;
 	float machine_probe_humidity_1 = NAN;
@@ -124,9 +124,9 @@ void app_sensor_sample(void)
 			(double)temperature);
 
 		if (i == 0) {
-			ext_temperature_1 = temperature;
+			t1_temperature = temperature;
 		} else if (i == 1) {
-			ext_temperature_2 = temperature;
+			t2_temperature = temperature;
 		}
 	}
 #endif /* defined(CONFIG_DS18B20) */
@@ -197,19 +197,18 @@ void app_sensor_sample(void)
 	g_app_sensor_data.temperature = temperature + g_app_config.corr_temperature;
 	g_app_sensor_data.humidity = humidity;
 	g_app_sensor_data.illuminance = illuminance;
-	g_app_sensor_data.ext_temperature_1 =
-		ext_temperature_1 + g_app_config.corr_t1_temperature;
-	g_app_sensor_data.ext_temperature_2 =
-		ext_temperature_2 + g_app_config.corr_t2_temperature;
 	g_app_sensor_data.altitude = altitude;
 	g_app_sensor_data.pressure = pressure;
+	g_app_sensor_data.t1_temperature =
+		t1_temperature + g_app_config.corr_t1_temperature;
+	g_app_sensor_data.t2_temperature =
+		t2_temperature + g_app_config.corr_t2_temperature;
 	g_app_sensor_data.machine_probe_temperature_1 = machine_probe_temperature_1;
 	g_app_sensor_data.machine_probe_temperature_2 = machine_probe_temperature_2;
 	g_app_sensor_data.machine_probe_humidity_1 = machine_probe_humidity_1;
 	g_app_sensor_data.machine_probe_humidity_2 = machine_probe_humidity_2;
 	g_app_sensor_data.machine_probe_is_tilt_alert_1 = machine_probe_is_tilt_alert_1;
 	g_app_sensor_data.machine_probe_is_tilt_alert_2 = machine_probe_is_tilt_alert_2;
-
 	g_app_sensor_data.hall_left_count = hall_data.left_count;
 	g_app_sensor_data.hall_right_count = hall_data.right_count;
 	g_app_sensor_data.hall_left_is_active = hall_data.left_is_active;

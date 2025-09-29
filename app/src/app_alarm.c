@@ -86,51 +86,51 @@ bool app_alarm_is_active(void)
 		}
 	}
 
-	static bool alarm_ext_temp_1 = false;
+	static bool alarm_t1_temperature = false;
 
-	if (isnan(g_app_sensor_data.ext_temperature_1)) {
-		alarm_ext_temp_1 = false;
-	} else if (alarm_ext_temp_1) {
-		if (g_app_sensor_data.ext_temperature_1 >
+	if (isnan(g_app_sensor_data.t1_temperature)) {
+		alarm_t1_temperature = false;
+	} else if (alarm_t1_temperature) {
+		if (g_app_sensor_data.t1_temperature >
 			    (g_app_config.alarm_t1_temperature_lo + g_app_config.alarm_t1_temperature_hst) &&
-		    g_app_sensor_data.ext_temperature_1 <
+		    g_app_sensor_data.t1_temperature <
 			    (g_app_config.alarm_t1_temperature_hi - g_app_config.alarm_t1_temperature_hst)) {
 			LOG_INF("Deactivated alarm for external temperature 1");
 
-			alarm_ext_temp_1 = false;
+			alarm_t1_temperature = false;
 		}
 	} else {
-		if (g_app_sensor_data.ext_temperature_1 <
+		if (g_app_sensor_data.t1_temperature <
 			    (g_app_config.alarm_t1_temperature_lo - g_app_config.alarm_t1_temperature_hst) ||
-		    g_app_sensor_data.ext_temperature_1 >
+		    g_app_sensor_data.t1_temperature >
 			    (g_app_config.alarm_t1_temperature_hi + g_app_config.alarm_t1_temperature_hst)) {
 			LOG_INF("Activated alarm for external temperature 1");
 
-			alarm_ext_temp_1 = true;
+			alarm_t1_temperature = true;
 		}
 	}
 
-	static bool alarm_ext_temp_2 = false;
+	static bool alarm_t2_temperature = false;
 
-	if (isnan(g_app_sensor_data.ext_temperature_2)) {
-		alarm_ext_temp_2 = false;
-	} else if (alarm_ext_temp_2) {
-		if (g_app_sensor_data.ext_temperature_2 >
+	if (isnan(g_app_sensor_data.t2_temperature)) {
+		alarm_t2_temperature = false;
+	} else if (alarm_t2_temperature) {
+		if (g_app_sensor_data.t2_temperature >
 			    (g_app_config.alarm_t2_temperature_lo + g_app_config.alarm_t2_temperature_hst) &&
-		    g_app_sensor_data.ext_temperature_2 <
+		    g_app_sensor_data.t2_temperature <
 			    (g_app_config.alarm_t2_temperature_hi - g_app_config.alarm_t2_temperature_hst)) {
 			LOG_INF("Deactivated alarm for external temperature 2");
 
-			alarm_ext_temp_2 = false;
+			alarm_t2_temperature = false;
 		}
 	} else {
-		if (g_app_sensor_data.ext_temperature_2 <
+		if (g_app_sensor_data.t2_temperature <
 			    (g_app_config.alarm_t2_temperature_lo - g_app_config.alarm_t2_temperature_hst) ||
-		    g_app_sensor_data.ext_temperature_2 >
+		    g_app_sensor_data.t2_temperature >
 			    (g_app_config.alarm_t2_temperature_hi + g_app_config.alarm_t2_temperature_hst)) {
 			LOG_INF("Activated alarm for external temperature 2");
 
-			alarm_ext_temp_2 = true;
+			alarm_t2_temperature = true;
 		}
 	}
 
@@ -149,8 +149,8 @@ bool app_alarm_is_active(void)
 #endif /* defined(CONFIG_APP_ALARM_PRESSURE) */
 
 #if defined(CONFIG_APP_ALARM_EXT_TEMP)
-	alarm = alarm_ext_temp_1 ? true : alarm;
-	alarm = alarm_ext_temp_2 ? true : alarm;
+	alarm = alarm_t1_temperature ? true : alarm;
+	alarm = alarm_t2_temperature ? true : alarm;
 #endif /* defined(CONFIG_APP_ALARM_EXT_TEMP) */
 
 	return alarm;

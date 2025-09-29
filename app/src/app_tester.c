@@ -96,18 +96,18 @@ static void cmd_print_illuminance(const struct shell *shell)
 	shell_print(shell, SHELL_PFX " illuminance %.2f", (double)g_app_sensor_data.illuminance);
 }
 
-static void cmd_print_ext_temperature_1(const struct shell *shell)
+static void cmd_print_t1_temperature(const struct shell *shell)
 {
 	app_sensor_sample();
-	shell_print(shell, SHELL_PFX " ext_temperature_1 %.2f",
-		    (double)g_app_sensor_data.ext_temperature_1);
+	shell_print(shell, SHELL_PFX " t1 temperature %.2f",
+		    (double)g_app_sensor_data.t1_temperature);
 }
 
-static void cmd_print_ext_temperature_2(const struct shell *shell)
+static void cmd_print_t2_temperature(const struct shell *shell)
 {
 	app_sensor_sample();
-	shell_print(shell, SHELL_PFX " ext_temperature_2 %.2f",
-		    (double)g_app_sensor_data.ext_temperature_2);
+	shell_print(shell, SHELL_PFX " t2 temperature %.2f",
+		    (double)g_app_sensor_data.t2_temperature);
 }
 
 #if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
@@ -129,10 +129,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(temperature, NULL, "Print temperature.", cmd_print_temperature, 1, 0),
 	SHELL_CMD_ARG(humidity, NULL, "Print humidity.", cmd_print_humidity, 1, 0),
 	SHELL_CMD_ARG(illuminance, NULL, "Print illuminance.", cmd_print_illuminance, 1, 0),
-	SHELL_CMD_ARG(ext_temperature_1, NULL, "Print ext. temperature 1.",
-		      cmd_print_ext_temperature_1, 1, 0),
-	SHELL_CMD_ARG(ext_temperature_2, NULL, "Print ext. temperature 2.",
-		      cmd_print_ext_temperature_2, 1, 0),
+	SHELL_CMD_ARG(t1_temperature, NULL, "Print T1 temperature.",
+		      cmd_print_t1_temperature, 1, 0),
+	SHELL_CMD_ARG(t2_temperature, NULL, "Print T2 temperature.",
+		      cmd_print_t2_temperature, 1, 0),
 
 #if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
 	SHELL_CMD_ARG(motion, NULL, "Print number of PIR activations", cmd_print_motion_count, 1,

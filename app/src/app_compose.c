@@ -39,11 +39,11 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	int16_t temperature = 0x7fff;
 	uint8_t humidity = 0xff;
 	uint16_t illuminance = 0xffff;
-	int16_t ext_temperature_1 = 0x7fff;
-	int16_t ext_temperature_2 = 0x7fff;
-	uint32_t motion_count = 0xffffffff;
 	int16_t altitude = 0x7fff;
 	uint32_t pressure = 0xffffffff;
+	int16_t t1_temperature = 0x7fff;
+	int16_t t2_temperature = 0x7fff;
+	uint32_t motion_count = 0xffffffff;
 	int16_t machine_probe_temperature_1 = 0x7fff;
 	int16_t machine_probe_temperature_2 = 0x7fff;
 	uint8_t machine_probe_humidity_1 = 0xff;
@@ -81,13 +81,13 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		header |= BIT(26);
 	}
 
-	if (!isnan(g_app_sensor_data.ext_temperature_1)) {
-		ext_temperature_1 = (int16_t)(g_app_sensor_data.ext_temperature_1 * 100);
+	if (!isnan(g_app_sensor_data.t1_temperature)) {
+		t1_temperature = (int16_t)(g_app_sensor_data.t1_temperature * 100);
 		header |= BIT(25);
 	}
 
-	if (!isnan(g_app_sensor_data.ext_temperature_2)) {
-		ext_temperature_2 = (int16_t)(g_app_sensor_data.ext_temperature_2 * 100);
+	if (!isnan(g_app_sensor_data.t2_temperature)) {
+		t2_temperature = (int16_t)(g_app_sensor_data.t2_temperature * 100);
 		header |= BIT(24);
 	}
 
@@ -214,13 +214,13 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	if (header & BIT(25)) {
-		APPEND_BYTE(ext_temperature_1 >> 8);
-		APPEND_BYTE(ext_temperature_1);
+		APPEND_BYTE(t1_temperature >> 8);
+		APPEND_BYTE(t1_temperature);
 	}
 
 	if (header & BIT(24)) {
-		APPEND_BYTE(ext_temperature_2 >> 8);
-		APPEND_BYTE(ext_temperature_2);
+		APPEND_BYTE(t2_temperature >> 8);
+		APPEND_BYTE(t2_temperature);
 	}
 
 	if (header & BIT(23)) {
