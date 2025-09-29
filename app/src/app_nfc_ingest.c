@@ -9,12 +9,47 @@
 
 /* Zephyr includes */
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
+
+/* Standard includes */
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(app_nfc_ingest, LOG_LEVEL_DBG);
+
+static bool parse_hex_string(const char *hex_str, uint8_t *buf, size_t buf_len)
+{
+	if (!hex_str || !buf) {
+		return false;
+	}
+
+	size_t str_len = strlen(hex_str);
+	if (str_len != 2 * buf_len) {
+		LOG_ERR("Invalid hex string length: expected %zu, got %zu", 2 * buf_len, str_len);
+		return false;
+	}
+
+	size_t ret = hex2bin(hex_str, str_len, buf, buf_len);
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed");
+		return false;
+	}
+
+	return true;
+}
 
 void app_nfc_ingest(const NfcConfigMessage *message)
 {
 	struct app_config *config = app_config();
+
+	if (message->has_factory) {
+		LOG_INF("Parameter `factory`: %s", message->factory ? "true" : "false");
+		if (message->factory) {
+			LOG_INF("Factory reset requested via NFC");
+			app_config_reset();
+		}
+	}
 
 	if (message->has_lorawan) {
 		if (message->lorawan.has_region) {
@@ -41,37 +76,58 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 
 		if (message->lorawan.has_deveui) {
 			LOG_INF("Parameter `lorawan.deveui`: %s", message->lorawan.deveui);
-			/* TODO: Parse hex string and store in config->lrw_deveui */
+			if (!parse_hex_string(message->lorawan.deveui, config->lrw_deveui,
+					      sizeof(config->lrw_deveui))) {
+				LOG_ERR("Failed to parse lorawan.deveui");
+			}
 		}
 
 		if (message->lorawan.has_joineui) {
 			LOG_INF("Parameter `lorawan.joineui`: %s", message->lorawan.joineui);
-			/* TODO: Parse hex string and store in config->lrw_joineui */
+			if (!parse_hex_string(message->lorawan.joineui, config->lrw_joineui,
+					      sizeof(config->lrw_joineui))) {
+				LOG_ERR("Failed to parse lorawan.joineui");
+			}
 		}
 
 		if (message->lorawan.has_nwkkey) {
 			LOG_INF("Parameter `lorawan.nwkkey`: %s", message->lorawan.nwkkey);
-			/* TODO: Parse hex string and store in config->lrw_nwkkey */
+			if (!parse_hex_string(message->lorawan.nwkkey, config->lrw_nwkkey,
+					      sizeof(config->lrw_nwkkey))) {
+				LOG_ERR("Failed to parse lorawan.nwkkey");
+			}
 		}
 
 		if (message->lorawan.has_appkey) {
 			LOG_INF("Parameter `lorawan.appkey`: %s", message->lorawan.appkey);
-			/* TODO: Parse hex string and store in config->lrw_appkey */
+			if (!parse_hex_string(message->lorawan.appkey, config->lrw_appkey,
+					      sizeof(config->lrw_appkey))) {
+				LOG_ERR("Failed to parse lorawan.appkey");
+			}
 		}
 
 		if (message->lorawan.has_devaddr) {
 			LOG_INF("Parameter `lorawan.devaddr`: %s", message->lorawan.devaddr);
-			/* TODO: Parse hex string and store in config->lrw_devaddr */
+			if (!parse_hex_string(message->lorawan.devaddr, config->lrw_devaddr,
+					      sizeof(config->lrw_devaddr))) {
+				LOG_ERR("Failed to parse lorawan.devaddr");
+			}
 		}
 
 		if (message->lorawan.has_nwkskey) {
 			LOG_INF("Parameter `lorawan.nwkskey`: %s", message->lorawan.nwkskey);
-			/* TODO: Parse hex string and store in config->lrw_nwkskey */
+			if (!parse_hex_string(message->lorawan.nwkskey, config->lrw_nwkskey,
+					      sizeof(config->lrw_nwkskey))) {
+				LOG_ERR("Failed to parse lorawan.nwkskey");
+			}
 		}
 
 		if (message->lorawan.has_appskey) {
 			LOG_INF("Parameter `lorawan.appskey`: %s", message->lorawan.appskey);
-			/* TODO: Parse hex string and store in config->lrw_appskey */
+			if (!parse_hex_string(message->lorawan.appskey, config->lrw_appskey,
+					      sizeof(config->lrw_appskey))) {
+				LOG_ERR("Failed to parse lorawan.appskey");
+			}
 		}
 	}
 
