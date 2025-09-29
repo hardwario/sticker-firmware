@@ -37,18 +37,18 @@ static struct app_config m_app_config = {
 	.alarm_temperature_lo = 15.0f,
 	.alarm_temperature_hi = 25.0f,
 	.alarm_temperature_hst = 0.5f,
-	.alarm_t1_temp_lo = 15.0f,
-	.alarm_t1_temp_hi = 25.0f,
-	.alarm_t1_temp_hst = 0.5f,
-	.alarm_t2_temp_lo = 15.0f,
-	.alarm_t2_temp_hi = 25.0f,
-	.alarm_t2_temp_hst = 0.5f,
 	.alarm_humidity_lo = 30.0f,
 	.alarm_humidity_hi = 75.0f,
 	.alarm_humidity_hst = 5.0f,
 	.alarm_pressure_lo = 700.0f,
 	.alarm_pressure_hi = 1060.0f,
 	.alarm_pressure_hst = 10.0f,
+	.alarm_t1_temp_lo = 15.0f,
+	.alarm_t1_temp_hi = 25.0f,
+	.alarm_t1_temp_hst = 0.5f,
+	.alarm_t2_temp_lo = 15.0f,
+	.alarm_t2_temp_hi = 25.0f,
+	.alarm_t2_temp_hst = 0.5f,
 };
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
@@ -102,18 +102,6 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.alarm_temperature_hi));
 	SETTINGS_SET("alarm-temperature-hst", &m_app_config.alarm_temperature_hst,
 		     sizeof(m_app_config.alarm_temperature_hst));
-	SETTINGS_SET("alarm-t1-temp-lo", &m_app_config.alarm_t1_temp_lo,
-		     sizeof(m_app_config.alarm_t1_temp_lo));
-	SETTINGS_SET("alarm-t1-temp-hi", &m_app_config.alarm_t1_temp_hi,
-		     sizeof(m_app_config.alarm_t1_temp_hi));
-	SETTINGS_SET("alarm-t1-temp-hst", &m_app_config.alarm_t1_temp_hst,
-		     sizeof(m_app_config.alarm_t1_temp_hst));
-	SETTINGS_SET("alarm-t2-temp-lo", &m_app_config.alarm_t2_temp_lo,
-		     sizeof(m_app_config.alarm_t2_temp_lo));
-	SETTINGS_SET("alarm-t2-temp-hi", &m_app_config.alarm_t2_temp_hi,
-		     sizeof(m_app_config.alarm_t2_temp_hi));
-	SETTINGS_SET("alarm-t2-temp-hst", &m_app_config.alarm_t2_temp_hst,
-		     sizeof(m_app_config.alarm_t2_temp_hst));
 	SETTINGS_SET("alarm-humidity-lo", &m_app_config.alarm_humidity_lo,
 		     sizeof(m_app_config.alarm_humidity_lo));
 	SETTINGS_SET("alarm-humidity-hi", &m_app_config.alarm_humidity_hi,
@@ -126,6 +114,18 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.alarm_pressure_hi));
 	SETTINGS_SET("alarm-pressure-hst", &m_app_config.alarm_pressure_hst,
 		     sizeof(m_app_config.alarm_pressure_hst));
+	SETTINGS_SET("alarm-t1-temp-lo", &m_app_config.alarm_t1_temp_lo,
+		     sizeof(m_app_config.alarm_t1_temp_lo));
+	SETTINGS_SET("alarm-t1-temp-hi", &m_app_config.alarm_t1_temp_hi,
+		     sizeof(m_app_config.alarm_t1_temp_hi));
+	SETTINGS_SET("alarm-t1-temp-hst", &m_app_config.alarm_t1_temp_hst,
+		     sizeof(m_app_config.alarm_t1_temp_hst));
+	SETTINGS_SET("alarm-t2-temp-lo", &m_app_config.alarm_t2_temp_lo,
+		     sizeof(m_app_config.alarm_t2_temp_lo));
+	SETTINGS_SET("alarm-t2-temp-hi", &m_app_config.alarm_t2_temp_hi,
+		     sizeof(m_app_config.alarm_t2_temp_hi));
+	SETTINGS_SET("alarm-t2-temp-hst", &m_app_config.alarm_t2_temp_hst,
+		     sizeof(m_app_config.alarm_t2_temp_hst));
 	SETTINGS_SET("corr-temperature", &m_app_config.corr_temperature,
 		     sizeof(m_app_config.corr_temperature));
 	SETTINGS_SET("corr-ext-temperature-1", &m_app_config.corr_ext_temperature_1,
@@ -199,18 +199,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.alarm_temperature_hi));
 	EXPORT_FUNC("alarm-temperature-hst", &m_app_config.alarm_temperature_hst,
 		    sizeof(m_app_config.alarm_temperature_hst));
-	EXPORT_FUNC("alarm-t1-temp-lo", &m_app_config.alarm_t1_temp_lo,
-		    sizeof(m_app_config.alarm_t1_temp_lo));
-	EXPORT_FUNC("alarm-t1-temp-hi", &m_app_config.alarm_t1_temp_hi,
-		    sizeof(m_app_config.alarm_t1_temp_hi));
-	EXPORT_FUNC("alarm-t1-temp-hst", &m_app_config.alarm_t1_temp_hst,
-		    sizeof(m_app_config.alarm_t1_temp_hst));
-	EXPORT_FUNC("alarm-t2-temp-lo", &m_app_config.alarm_t2_temp_lo,
-		    sizeof(m_app_config.alarm_t2_temp_lo));
-	EXPORT_FUNC("alarm-t2-temp-hi", &m_app_config.alarm_t2_temp_hi,
-		    sizeof(m_app_config.alarm_t2_temp_hi));
-	EXPORT_FUNC("alarm-t2-temp-hst", &m_app_config.alarm_t2_temp_hst,
-		    sizeof(m_app_config.alarm_t2_temp_hst));
 	EXPORT_FUNC("alarm-humidity-lo", &m_app_config.alarm_humidity_lo,
 		    sizeof(m_app_config.alarm_humidity_lo));
 	EXPORT_FUNC("alarm-humidity-hi", &m_app_config.alarm_humidity_hi,
@@ -223,6 +211,18 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.alarm_pressure_hi));
 	EXPORT_FUNC("alarm-pressure-hst", &m_app_config.alarm_pressure_hst,
 		    sizeof(m_app_config.alarm_pressure_hst));
+	EXPORT_FUNC("alarm-t1-temp-lo", &m_app_config.alarm_t1_temp_lo,
+		    sizeof(m_app_config.alarm_t1_temp_lo));
+	EXPORT_FUNC("alarm-t1-temp-hi", &m_app_config.alarm_t1_temp_hi,
+		    sizeof(m_app_config.alarm_t1_temp_hi));
+	EXPORT_FUNC("alarm-t1-temp-hst", &m_app_config.alarm_t1_temp_hst,
+		    sizeof(m_app_config.alarm_t1_temp_hst));
+	EXPORT_FUNC("alarm-t2-temp-lo", &m_app_config.alarm_t2_temp_lo,
+		    sizeof(m_app_config.alarm_t2_temp_lo));
+	EXPORT_FUNC("alarm-t2-temp-hi", &m_app_config.alarm_t2_temp_hi,
+		    sizeof(m_app_config.alarm_t2_temp_hi));
+	EXPORT_FUNC("alarm-t2-temp-hst", &m_app_config.alarm_t2_temp_hst,
+		    sizeof(m_app_config.alarm_t2_temp_hst));
 	EXPORT_FUNC("corr-temperature", &m_app_config.corr_temperature,
 		    sizeof(m_app_config.corr_temperature));
 	EXPORT_FUNC("corr-ext-temperature-1", &m_app_config.corr_ext_temperature_1,
@@ -556,42 +556,6 @@ static void print_alarm_temperature_hst(const struct shell *shell)
 		    (double)m_app_config.alarm_temperature_hst);
 }
 
-static void print_alarm_t1_temp_lo(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t1-temp-lo %.2f",
-		    (double)m_app_config.alarm_t1_temp_lo);
-}
-
-static void print_alarm_t1_temp_hi(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t1-temp-hi %.2f",
-		    (double)m_app_config.alarm_t1_temp_hi);
-}
-
-static void print_alarm_t1_temp_hst(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t1-temp-hst %.2f",
-		    (double)m_app_config.alarm_t1_temp_hst);
-}
-
-static void print_alarm_t2_temp_lo(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t2-temp-lo %.2f",
-		    (double)m_app_config.alarm_t2_temp_lo);
-}
-
-static void print_alarm_t2_temp_hi(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t2-temp-hi %.2f",
-		    (double)m_app_config.alarm_t2_temp_hi);
-}
-
-static void print_alarm_t2_temp_hst(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t2-temp-hst %.2f",
-		    (double)m_app_config.alarm_t2_temp_hst);
-}
-
 static void print_alarm_humidity_lo(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " alarm-humidity-lo %.2f",
@@ -626,6 +590,42 @@ static void print_alarm_pressure_hst(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " alarm-pressure-hst %.2f",
 		    (double)m_app_config.alarm_pressure_hst);
+}
+
+static void print_alarm_t1_temp_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-t1-temp-lo %.2f",
+		    (double)m_app_config.alarm_t1_temp_lo);
+}
+
+static void print_alarm_t1_temp_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-t1-temp-hi %.2f",
+		    (double)m_app_config.alarm_t1_temp_hi);
+}
+
+static void print_alarm_t1_temp_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-t1-temp-hst %.2f",
+		    (double)m_app_config.alarm_t1_temp_hst);
+}
+
+static void print_alarm_t2_temp_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-t2-temp-lo %.2f",
+		    (double)m_app_config.alarm_t2_temp_lo);
+}
+
+static void print_alarm_t2_temp_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-t2-temp-hi %.2f",
+		    (double)m_app_config.alarm_t2_temp_hi);
+}
+
+static void print_alarm_t2_temp_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-t2-temp-hst %.2f",
+		    (double)m_app_config.alarm_t2_temp_hst);
 }
 
 static void print_corr_temperature(const struct shell *shell)
@@ -722,18 +722,18 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_alarm_temperature_lo(shell);
 	print_alarm_temperature_hi(shell);
 	print_alarm_temperature_hst(shell);
-	print_alarm_t1_temp_lo(shell);
-	print_alarm_t1_temp_hi(shell);
-	print_alarm_t1_temp_hst(shell);
-	print_alarm_t2_temp_lo(shell);
-	print_alarm_t2_temp_hi(shell);
-	print_alarm_t2_temp_hst(shell);
 	print_alarm_humidity_lo(shell);
 	print_alarm_humidity_hi(shell);
 	print_alarm_humidity_hst(shell);
 	print_alarm_pressure_lo(shell);
 	print_alarm_pressure_hi(shell);
 	print_alarm_pressure_hst(shell);
+	print_alarm_t1_temp_lo(shell);
+	print_alarm_t1_temp_hi(shell);
+	print_alarm_t1_temp_hst(shell);
+	print_alarm_t2_temp_lo(shell);
+	print_alarm_t2_temp_hi(shell);
+	print_alarm_t2_temp_hst(shell);
 	print_corr_temperature(shell);
 	print_corr_ext_temperature_1(shell);
 	print_corr_ext_temperature_2(shell);
