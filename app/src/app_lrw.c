@@ -196,8 +196,7 @@ static int init(void)
 	lorawan_register_dr_changed_callback(datarate_changed_callback);
 
 	k_work_queue_init(&m_work_q);
-	k_work_queue_start(&m_work_q, m_work_stack,
-			   K_THREAD_STACK_SIZEOF(m_work_stack),
+	k_work_queue_start(&m_work_q, m_work_stack, K_THREAD_STACK_SIZEOF(m_work_stack),
 			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
 
 	k_work_init(&m_join_work, join_work_handler);

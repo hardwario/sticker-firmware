@@ -19,7 +19,6 @@
 
 LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 
-
 bool app_alarm_is_active(void)
 {
 	static bool alarm_temperature = false;
@@ -27,15 +26,19 @@ bool app_alarm_is_active(void)
 	if (isnan(g_app_sensor_data.temperature)) {
 		alarm_temperature = false;
 	} else if (alarm_temperature) {
-		if (g_app_sensor_data.temperature > (g_app_config.alarm_temperature_lo + g_app_config.alarm_temperature_hst) &&
-		    g_app_sensor_data.temperature < (g_app_config.alarm_temperature_hi - g_app_config.alarm_temperature_hst)) {
+		if (g_app_sensor_data.temperature > (g_app_config.alarm_temperature_lo +
+						     g_app_config.alarm_temperature_hst) &&
+		    g_app_sensor_data.temperature < (g_app_config.alarm_temperature_hi -
+						     g_app_config.alarm_temperature_hst)) {
 			LOG_INF("Deactivated alarm for internal temperature");
 
 			alarm_temperature = false;
 		}
 	} else {
-		if (g_app_sensor_data.temperature < (g_app_config.alarm_temperature_lo - g_app_config.alarm_temperature_hst) ||
-		    g_app_sensor_data.temperature > (g_app_config.alarm_temperature_hi + g_app_config.alarm_temperature_hst)) {
+		if (g_app_sensor_data.temperature < (g_app_config.alarm_temperature_lo -
+						     g_app_config.alarm_temperature_hst) ||
+		    g_app_sensor_data.temperature > (g_app_config.alarm_temperature_hi +
+						     g_app_config.alarm_temperature_hst)) {
 			LOG_INF("Activated alarm for internal temperature");
 
 			alarm_temperature = true;
@@ -47,15 +50,19 @@ bool app_alarm_is_active(void)
 	if (isnan(g_app_sensor_data.humidity)) {
 		alarm_humidity = false;
 	} else if (alarm_humidity) {
-		if (g_app_sensor_data.humidity > (g_app_config.alarm_humidity_lo + g_app_config.alarm_humidity_hst) &&
-		    g_app_sensor_data.humidity < (g_app_config.alarm_humidity_hi - g_app_config.alarm_humidity_hst)) {
+		if (g_app_sensor_data.humidity >
+			    (g_app_config.alarm_humidity_lo + g_app_config.alarm_humidity_hst) &&
+		    g_app_sensor_data.humidity <
+			    (g_app_config.alarm_humidity_hi - g_app_config.alarm_humidity_hst)) {
 			LOG_INF("Deactivated alarm for humidity");
 
 			alarm_humidity = false;
 		}
 	} else {
-		if (g_app_sensor_data.humidity < (g_app_config.alarm_humidity_lo - g_app_config.alarm_humidity_hst) ||
-		    g_app_sensor_data.humidity > (g_app_config.alarm_humidity_hi + g_app_config.alarm_humidity_hst)) {
+		if (g_app_sensor_data.humidity <
+			    (g_app_config.alarm_humidity_lo - g_app_config.alarm_humidity_hst) ||
+		    g_app_sensor_data.humidity >
+			    (g_app_config.alarm_humidity_hi + g_app_config.alarm_humidity_hst)) {
 			LOG_INF("Activated alarm for humidity");
 
 			alarm_humidity = true;
@@ -91,19 +98,19 @@ bool app_alarm_is_active(void)
 	if (isnan(g_app_sensor_data.t1_temperature)) {
 		alarm_t1_temperature = false;
 	} else if (alarm_t1_temperature) {
-		if (g_app_sensor_data.t1_temperature >
-			    (g_app_config.alarm_t1_temperature_lo + g_app_config.alarm_t1_temperature_hst) &&
-		    g_app_sensor_data.t1_temperature <
-			    (g_app_config.alarm_t1_temperature_hi - g_app_config.alarm_t1_temperature_hst)) {
+		if (g_app_sensor_data.t1_temperature > (g_app_config.alarm_t1_temperature_lo +
+							g_app_config.alarm_t1_temperature_hst) &&
+		    g_app_sensor_data.t1_temperature < (g_app_config.alarm_t1_temperature_hi -
+							g_app_config.alarm_t1_temperature_hst)) {
 			LOG_INF("Deactivated alarm for external temperature 1");
 
 			alarm_t1_temperature = false;
 		}
 	} else {
-		if (g_app_sensor_data.t1_temperature <
-			    (g_app_config.alarm_t1_temperature_lo - g_app_config.alarm_t1_temperature_hst) ||
-		    g_app_sensor_data.t1_temperature >
-			    (g_app_config.alarm_t1_temperature_hi + g_app_config.alarm_t1_temperature_hst)) {
+		if (g_app_sensor_data.t1_temperature < (g_app_config.alarm_t1_temperature_lo -
+							g_app_config.alarm_t1_temperature_hst) ||
+		    g_app_sensor_data.t1_temperature > (g_app_config.alarm_t1_temperature_hi +
+							g_app_config.alarm_t1_temperature_hst)) {
 			LOG_INF("Activated alarm for external temperature 1");
 
 			alarm_t1_temperature = true;
@@ -115,19 +122,19 @@ bool app_alarm_is_active(void)
 	if (isnan(g_app_sensor_data.t2_temperature)) {
 		alarm_t2_temperature = false;
 	} else if (alarm_t2_temperature) {
-		if (g_app_sensor_data.t2_temperature >
-			    (g_app_config.alarm_t2_temperature_lo + g_app_config.alarm_t2_temperature_hst) &&
-		    g_app_sensor_data.t2_temperature <
-			    (g_app_config.alarm_t2_temperature_hi - g_app_config.alarm_t2_temperature_hst)) {
+		if (g_app_sensor_data.t2_temperature > (g_app_config.alarm_t2_temperature_lo +
+							g_app_config.alarm_t2_temperature_hst) &&
+		    g_app_sensor_data.t2_temperature < (g_app_config.alarm_t2_temperature_hi -
+							g_app_config.alarm_t2_temperature_hst)) {
 			LOG_INF("Deactivated alarm for external temperature 2");
 
 			alarm_t2_temperature = false;
 		}
 	} else {
-		if (g_app_sensor_data.t2_temperature <
-			    (g_app_config.alarm_t2_temperature_lo - g_app_config.alarm_t2_temperature_hst) ||
-		    g_app_sensor_data.t2_temperature >
-			    (g_app_config.alarm_t2_temperature_hi + g_app_config.alarm_t2_temperature_hst)) {
+		if (g_app_sensor_data.t2_temperature < (g_app_config.alarm_t2_temperature_lo -
+							g_app_config.alarm_t2_temperature_hst) ||
+		    g_app_sensor_data.t2_temperature > (g_app_config.alarm_t2_temperature_hi +
+							g_app_config.alarm_t2_temperature_hst)) {
 			LOG_INF("Activated alarm for external temperature 2");
 
 			alarm_t2_temperature = true;

@@ -129,10 +129,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(temperature, NULL, "Print temperature.", cmd_print_temperature, 1, 0),
 	SHELL_CMD_ARG(humidity, NULL, "Print humidity.", cmd_print_humidity, 1, 0),
 	SHELL_CMD_ARG(illuminance, NULL, "Print illuminance.", cmd_print_illuminance, 1, 0),
-	SHELL_CMD_ARG(t1_temperature, NULL, "Print T1 temperature.",
-		      cmd_print_t1_temperature, 1, 0),
-	SHELL_CMD_ARG(t2_temperature, NULL, "Print T2 temperature.",
-		      cmd_print_t2_temperature, 1, 0),
+	SHELL_CMD_ARG(t1_temperature, NULL, "Print T1 temperature.", cmd_print_t1_temperature, 1,
+		      0),
+	SHELL_CMD_ARG(t2_temperature, NULL, "Print T2 temperature.", cmd_print_t2_temperature, 1,
+		      0),
 
 #if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
 	SHELL_CMD_ARG(motion, NULL, "Print number of PIR activations", cmd_print_motion_count, 1,

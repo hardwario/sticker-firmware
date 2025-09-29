@@ -418,13 +418,13 @@ static void print_lrw_region(const struct shell *shell)
 static void print_lrw_network(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " lrw-network %s",
-		    m_app_config.lrw_network == APP_CONFIG_LRW_NETWORK_PUBLIC ? "public" : "private");
+		    m_app_config.lrw_network == APP_CONFIG_LRW_NETWORK_PUBLIC ? "public"
+									      : "private");
 }
 
 static void print_lrw_adr(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " lrw-adr %s",
-		    m_app_config.lrw_adr ? "true" : "false");
+	shell_print(shell, SETTINGS_PFX " lrw-adr %s", m_app_config.lrw_adr ? "true" : "false");
 }
 
 static void print_lrw_activation(const struct shell *shell)

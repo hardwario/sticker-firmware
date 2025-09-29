@@ -28,13 +28,15 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 		}
 
 		if (message->lorawan.has_adr) {
-			LOG_INF("Parameter `lorawan.adr`: %s", message->lorawan.adr ? "true" : "false");
+			LOG_INF("Parameter `lorawan.adr`: %s",
+				message->lorawan.adr ? "true" : "false");
 			config->lrw_adr = message->lorawan.adr;
 		}
 
 		if (message->lorawan.has_activation) {
 			LOG_INF("Parameter `lorawan.activation`: %d", message->lorawan.activation);
-			config->lrw_activation = (enum app_config_lrw_activation)message->lorawan.activation;
+			config->lrw_activation =
+				(enum app_config_lrw_activation)message->lorawan.activation;
 		}
 
 		if (message->lorawan.has_deveui) {
@@ -113,37 +115,43 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 		if (message->application.has_alarm_t1_temperature_lo) {
 			LOG_INF("Parameter `application.alarm_t1_temperature_lo`: %.2f",
 				(double)message->application.alarm_t1_temperature_lo);
-			config->alarm_t1_temperature_lo = message->application.alarm_t1_temperature_lo;
+			config->alarm_t1_temperature_lo =
+				message->application.alarm_t1_temperature_lo;
 		}
 
 		if (message->application.has_alarm_t1_temperature_hi) {
 			LOG_INF("Parameter `application.alarm_t1_temperature_hi`: %.2f",
 				(double)message->application.alarm_t1_temperature_hi);
-			config->alarm_t1_temperature_hi = message->application.alarm_t1_temperature_hi;
+			config->alarm_t1_temperature_hi =
+				message->application.alarm_t1_temperature_hi;
 		}
 
 		if (message->application.has_alarm_t1_temperature_hst) {
 			LOG_INF("Parameter `application.alarm_t1_temperature_hst`: %.2f",
 				(double)message->application.alarm_t1_temperature_hst);
-			config->alarm_t1_temperature_hst = message->application.alarm_t1_temperature_hst;
+			config->alarm_t1_temperature_hst =
+				message->application.alarm_t1_temperature_hst;
 		}
 
 		if (message->application.has_alarm_t2_temperature_lo) {
 			LOG_INF("Parameter `application.alarm_t2_temperature_lo`: %.2f",
 				(double)message->application.alarm_t2_temperature_lo);
-			config->alarm_t2_temperature_lo = message->application.alarm_t2_temperature_lo;
+			config->alarm_t2_temperature_lo =
+				message->application.alarm_t2_temperature_lo;
 		}
 
 		if (message->application.has_alarm_t2_temperature_hi) {
 			LOG_INF("Parameter `application.alarm_t2_temperature_hi`: %.2f",
 				(double)message->application.alarm_t2_temperature_hi);
-			config->alarm_t2_temperature_hi = message->application.alarm_t2_temperature_hi;
+			config->alarm_t2_temperature_hi =
+				message->application.alarm_t2_temperature_hi;
 		}
 
 		if (message->application.has_alarm_t2_temperature_hst) {
 			LOG_INF("Parameter `application.alarm_t2_temperature_hst`: %.2f",
 				(double)message->application.alarm_t2_temperature_hst);
-			config->alarm_t2_temperature_hst = message->application.alarm_t2_temperature_hst;
+			config->alarm_t2_temperature_hst =
+				message->application.alarm_t2_temperature_hst;
 		}
 
 		if (message->application.has_alarm_humidity_lo) {
@@ -203,7 +211,8 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 		if (message->application.has_hall_left_notify_deact) {
 			LOG_INF("Parameter `application.hall_left_notify_deact`: %s",
 				message->application.hall_left_notify_deact ? "true" : "false");
-			config->hall_left_notify_deact = message->application.hall_left_notify_deact;
+			config->hall_left_notify_deact =
+				message->application.hall_left_notify_deact;
 		}
 
 		if (message->application.has_hall_right_enabled) {
@@ -227,7 +236,8 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 		if (message->application.has_hall_right_notify_deact) {
 			LOG_INF("Parameter `application.hall_right_notify_deact`: %s",
 				message->application.hall_right_notify_deact ? "true" : "false");
-			config->hall_right_notify_deact = message->application.hall_right_notify_deact;
+			config->hall_right_notify_deact =
+				message->application.hall_right_notify_deact;
 		}
 
 		if (message->application.has_barometer_enabled) {
