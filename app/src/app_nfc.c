@@ -5,6 +5,7 @@
  */
 
 #include "app_nfc.h"
+#include "app_nfc_ingest.h"
 #include "app_config.h"
 #include "app_ndef_parser.h"
 
@@ -196,19 +197,6 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 	return res;
 }
 
-static void ingest_message(const NfcConfigMessage *message)
-{
-	if (message->has_lorawan) {
-		if (message->lorawan.has_region) {
-			LOG_INF("Parameter `lorawan.region`: %d", message->lorawan.region);
-		}
-
-		if (message->lorawan.has_deveui) {
-			LOG_INF("Parameter `lorawan.deveui`: %s", message->lorawan.deveui);
-		}
-	}
-}
-
 static int parser_callback(const struct app_ndef_parser_record_info *record_info, void *user_data)
 {
 	int ret;
@@ -245,7 +233,7 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 		return -EIO;
 	}
 
-	ingest_message(&message);
+	app_nfc_ingest(&message);
 
 	*action = APP_NFC_ACTION_SAVE;
 
