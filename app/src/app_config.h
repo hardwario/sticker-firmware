@@ -15,6 +15,22 @@
 extern "C" {
 #endif
 
+enum app_config_lrw_region {
+	APP_CONFIG_LRW_REGION_EU868 = 0,
+	APP_CONFIG_LRW_REGION_US915 = 1,
+	APP_CONFIG_LRW_REGION_AU915 = 2,
+};
+
+enum app_config_lrw_network {
+	APP_CONFIG_LRW_NETWORK_PUBLIC = 0,
+	APP_CONFIG_LRW_NETWORK_PRIVATE = 1,
+};
+
+enum app_config_lrw_activation {
+	APP_CONFIG_LRW_ACTIVATION_OTAA = 0,
+	APP_CONFIG_LRW_ACTIVATION_ABP = 1,
+};
+
 struct app_config {
 	uint8_t secret_key[16];
 	uint32_t serial_number;
@@ -22,7 +38,14 @@ struct app_config {
 	bool calibration;
 	int interval_sample;
 	int interval_report;
+	enum app_config_lrw_region lrw_region;
+	enum app_config_lrw_network lrw_network;
+	bool lrw_adr;
+	enum app_config_lrw_activation lrw_activation;
 	uint8_t lrw_deveui[8];
+	uint8_t lrw_joineui[8];
+	uint8_t lrw_nwkkey[16];
+	uint8_t lrw_appkey[16];
 	uint8_t lrw_devaddr[4];
 	uint8_t lrw_nwkskey[16];
 	uint8_t lrw_appskey[16];

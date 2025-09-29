@@ -34,6 +34,10 @@ struct app_config g_app_config;
 
 static struct app_config m_app_config = {
 	.interval_report = 900,
+	.lrw_region = APP_CONFIG_LRW_REGION_EU868,
+	.lrw_network = APP_CONFIG_LRW_NETWORK_PUBLIC,
+	.lrw_adr = true,
+	.lrw_activation = APP_CONFIG_LRW_ACTIVATION_OTAA,
 	.hall_left_enabled = true,
 	.hall_left_counter = true,
 	.hall_right_enabled = true,
@@ -73,7 +77,15 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.interval_sample));
 	SETTINGS_SET("interval-report", &m_app_config.interval_report,
 		     sizeof(m_app_config.interval_report));
+	SETTINGS_SET("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
+	SETTINGS_SET("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
+	SETTINGS_SET("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
+	SETTINGS_SET("lrw-activation", &m_app_config.lrw_activation,
+		     sizeof(m_app_config.lrw_activation));
 	SETTINGS_SET("lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	SETTINGS_SET("lrw-joineui", m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui));
+	SETTINGS_SET("lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
+	SETTINGS_SET("lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
 	SETTINGS_SET("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	SETTINGS_SET("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	SETTINGS_SET("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
@@ -132,7 +144,15 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.interval_sample));
 	EXPORT_FUNC("interval-report", &m_app_config.interval_report,
 		    sizeof(m_app_config.interval_report));
+	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
+	EXPORT_FUNC("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
+	EXPORT_FUNC("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
+	EXPORT_FUNC("lrw-activation", &m_app_config.lrw_activation,
+		    sizeof(m_app_config.lrw_activation));
 	EXPORT_FUNC("lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	EXPORT_FUNC("lrw-joineui", m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui));
+	EXPORT_FUNC("lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
+	EXPORT_FUNC("lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
 	EXPORT_FUNC("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	EXPORT_FUNC("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	EXPORT_FUNC("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
@@ -274,7 +294,7 @@ static void print_secret_key(const struct shell *shell)
 
 	int ret =
 		bin2hex(m_app_config.secret_key, sizeof(m_app_config.secret_key), buf, sizeof(buf));
-	if (ret == 0) {
+	if (!ret) {
 		LOG_ERR("Call `bin2hex` failed: %d", ret);
 		return;
 	}
@@ -308,6 +328,44 @@ static void print_interval_report(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " interval-report %d", m_app_config.interval_report);
 }
 
+static void print_lrw_region(const struct shell *shell)
+{
+	const char *region_str;
+	switch (m_app_config.lrw_region) {
+	case APP_CONFIG_LRW_REGION_EU868:
+		region_str = "eu868";
+		break;
+	case APP_CONFIG_LRW_REGION_US915:
+		region_str = "us915";
+		break;
+	case APP_CONFIG_LRW_REGION_AU915:
+		region_str = "au915";
+		break;
+	default:
+		region_str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " lrw-region %s", region_str);
+}
+
+static void print_lrw_network(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " lrw-network %s",
+		    m_app_config.lrw_network == APP_CONFIG_LRW_NETWORK_PUBLIC ? "public" : "private");
+}
+
+static void print_lrw_adr(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " lrw-adr %s",
+		    m_app_config.lrw_adr ? "true" : "false");
+}
+
+static void print_lrw_activation(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " lrw-activation %s",
+		    m_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA ? "otaa" : "abp");
+}
+
 static void print_lrw_deveui(const struct shell *shell)
 {
 	int ret;
@@ -315,12 +373,57 @@ static void print_lrw_deveui(const struct shell *shell)
 	char buf[2 * sizeof(m_app_config.lrw_deveui) + 1];
 
 	ret = bin2hex(m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui), buf, sizeof(buf));
-	if (ret == 0) {
-		LOG_ERR("Call `hex2char` failed: %d", ret);
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
 		return;
 	}
 
 	shell_print(shell, SETTINGS_PFX " lrw-deveui %s", buf);
+}
+
+static void print_lrw_joineui(const struct shell *shell)
+{
+	int ret;
+
+	char buf[2 * sizeof(m_app_config.lrw_joineui) + 1];
+
+	ret = bin2hex(m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui), buf, sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " lrw-joineui %s", buf);
+}
+
+static void print_lrw_nwkkey(const struct shell *shell)
+{
+	int ret;
+
+	char buf[2 * sizeof(m_app_config.lrw_nwkkey) + 1];
+
+	ret = bin2hex(m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey), buf, sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " lrw-nwkkey %s", buf);
+}
+
+static void print_lrw_appkey(const struct shell *shell)
+{
+	int ret;
+
+	char buf[2 * sizeof(m_app_config.lrw_appkey) + 1];
+
+	ret = bin2hex(m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey), buf, sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " lrw-appkey %s", buf);
 }
 
 static void print_lrw_devaddr(const struct shell *shell)
@@ -330,8 +433,8 @@ static void print_lrw_devaddr(const struct shell *shell)
 	char buf[2 * sizeof(m_app_config.lrw_devaddr) + 1];
 
 	ret = bin2hex(m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr), buf, sizeof(buf));
-	if (ret == 0) {
-		LOG_ERR("Call `hex2char` failed: %d", ret);
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
 		return;
 	}
 
@@ -345,8 +448,8 @@ static void print_lrw_nwkskey(const struct shell *shell)
 	char buf[2 * sizeof(m_app_config.lrw_nwkskey) + 1];
 
 	ret = bin2hex(m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey), buf, sizeof(buf));
-	if (ret == 0) {
-		LOG_ERR("Call `hex2char` failed: %d", ret);
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
 		return;
 	}
 
@@ -360,8 +463,8 @@ static void print_lrw_appskey(const struct shell *shell)
 	char buf[2 * sizeof(m_app_config.lrw_appskey) + 1];
 
 	ret = bin2hex(m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey), buf, sizeof(buf));
-	if (ret == 0) {
-		LOG_ERR("Call `hex2char` failed: %d", ret);
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
 		return;
 	}
 
@@ -448,7 +551,14 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_calibration(shell);
 	print_interval_sample(shell);
 	print_interval_report(shell);
+	print_lrw_region(shell);
+	print_lrw_network(shell);
+	print_lrw_adr(shell);
+	print_lrw_activation(shell);
 	print_lrw_deveui(shell);
+	print_lrw_joineui(shell);
+	print_lrw_nwkkey(shell);
+	print_lrw_appkey(shell);
 	print_lrw_devaddr(shell);
 	print_lrw_nwkskey(shell);
 	print_lrw_appskey(shell);
@@ -517,7 +627,7 @@ static int cmd_secret_key(const struct shell *shell, size_t argc, char **argv)
 
 	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.secret_key,
 		      sizeof(m_app_config.secret_key));
-	if (ret == 0) {
+	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "command failed");
 		return ret;
@@ -646,6 +756,203 @@ static int cmd_interval_report(const struct shell *shell, size_t argc, char **ar
 	return 0;
 }
 
+static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_lrw_region(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "eu868")) {
+		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_EU868;
+	} else if (!strcmp(argv[1], "us915")) {
+		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_US915;
+	} else if (!strcmp(argv[1], "au915")) {
+		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_AU915;
+	} else {
+		shell_error(shell, "invalid argument (use eu868, us915, or au915)");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_lrw_network(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_lrw_network(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "public")) {
+		m_app_config.lrw_network = APP_CONFIG_LRW_NETWORK_PUBLIC;
+	} else if (!strcmp(argv[1], "private")) {
+		m_app_config.lrw_network = APP_CONFIG_LRW_NETWORK_PRIVATE;
+	} else {
+		shell_error(shell, "invalid argument (use public or private)");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_lrw_adr(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_lrw_adr(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.lrw_adr = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.lrw_adr = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_lrw_activation(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_lrw_activation(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "otaa")) {
+		m_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_OTAA;
+	} else if (!strcmp(argv[1], "abp")) {
+		m_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_ABP;
+	} else {
+		shell_error(shell, "invalid argument (use otaa or abp)");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_lrw_joineui(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_joineui)) {
+		shell_error(shell, "invalid argument length");
+		return -EINVAL;
+	}
+
+	uint8_t buf[sizeof(m_app_config.lrw_joineui)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "command failed");
+		return ret;
+	}
+
+	memcpy(m_app_config.lrw_joineui, buf, sizeof(m_app_config.lrw_joineui));
+
+	return 0;
+}
+
+static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_lrw_nwkkey(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_nwkkey)) {
+		shell_error(shell, "invalid argument length");
+		return -EINVAL;
+	}
+
+	uint8_t buf[sizeof(m_app_config.lrw_nwkkey)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "command failed");
+		return ret;
+	}
+
+	memcpy(m_app_config.lrw_nwkkey, buf, sizeof(m_app_config.lrw_nwkkey));
+
+	return 0;
+}
+
+static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_lrw_appkey(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_appkey)) {
+		shell_error(shell, "invalid argument length");
+		return -EINVAL;
+	}
+
+	uint8_t buf[sizeof(m_app_config.lrw_appkey)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "command failed");
+		return ret;
+	}
+
+	memcpy(m_app_config.lrw_appkey, buf, sizeof(m_app_config.lrw_appkey));
+
+	return 0;
+}
+
 static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
 {
 	int ret;
@@ -668,7 +975,7 @@ static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
 	uint8_t buf[sizeof(m_app_config.lrw_deveui)];
 
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
-	if (ret == 0) {
+	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "command failed");
 		return ret;
@@ -701,7 +1008,7 @@ static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
 	uint8_t buf[sizeof(m_app_config.lrw_devaddr)];
 
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
-	if (ret == 0) {
+	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "command failed");
 		return ret;
@@ -734,7 +1041,7 @@ static int cmd_lrw_nwkskey(const struct shell *shell, size_t argc, char **argv)
 	uint8_t buf[sizeof(m_app_config.lrw_nwkskey)];
 
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
-	if (ret == 0) {
+	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "command failed");
 		return ret;
@@ -767,7 +1074,7 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 	uint8_t buf[sizeof(m_app_config.lrw_appskey)];
 
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
-	if (ret == 0) {
+	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "command failed");
 		return ret;
@@ -1120,9 +1427,37 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set report interval (range 60 to 86400 seconds).",
 	              cmd_interval_report, 1, 1),
 
+	SHELL_CMD_ARG(lrw-region, NULL,
+	              "Get/Set LoRaWAN region (eu868/us915/au915).",
+	              cmd_lrw_region, 1, 1),
+
+	SHELL_CMD_ARG(lrw-network, NULL,
+	              "Get/Set LoRaWAN network (public/private).",
+	              cmd_lrw_network, 1, 1),
+
+	SHELL_CMD_ARG(lrw-adr, NULL,
+	              "Get/Set LoRaWAN ADR (true/false).",
+	              cmd_lrw_adr, 1, 1),
+
+	SHELL_CMD_ARG(lrw-activation, NULL,
+	              "Get/Set LoRaWAN activation (otaa/abp).",
+	              cmd_lrw_activation, 1, 1),
+
 	SHELL_CMD_ARG(lrw-deveui, NULL,
 	              "Get/Set LoRaWAN DevEUI (16 hex digits).",
 	              cmd_lrw_deveui, 1, 1),
+
+	SHELL_CMD_ARG(lrw-joineui, NULL,
+	              "Get/Set LoRaWAN JoinEUI (16 hex digits).",
+	              cmd_lrw_joineui, 1, 1),
+
+	SHELL_CMD_ARG(lrw-nwkkey, NULL,
+	              "Get/Set LoRaWAN NwkKey (32 hex digits).",
+	              cmd_lrw_nwkkey, 1, 1),
+
+	SHELL_CMD_ARG(lrw-appkey, NULL,
+	              "Get/Set LoRaWAN AppKey (32 hex digits).",
+	              cmd_lrw_appkey, 1, 1),
 
 	SHELL_CMD_ARG(lrw-devaddr, NULL,
 	              "Get/Set LoRaWAN DevAddr (8 hex digits).",
