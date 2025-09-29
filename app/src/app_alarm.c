@@ -92,18 +92,18 @@ bool app_alarm_is_active(void)
 		alarm_ext_temp_1 = false;
 	} else if (alarm_ext_temp_1) {
 		if (g_app_sensor_data.ext_temperature_1 >
-			    (g_app_config.alarm_t1_temp_lo + g_app_config.alarm_t1_temp_hst) &&
+			    (g_app_config.alarm_t1_temperature_lo + g_app_config.alarm_t1_temperature_hst) &&
 		    g_app_sensor_data.ext_temperature_1 <
-			    (g_app_config.alarm_t1_temp_hi - g_app_config.alarm_t1_temp_hst)) {
+			    (g_app_config.alarm_t1_temperature_hi - g_app_config.alarm_t1_temperature_hst)) {
 			LOG_INF("Deactivated alarm for external temperature 1");
 
 			alarm_ext_temp_1 = false;
 		}
 	} else {
 		if (g_app_sensor_data.ext_temperature_1 <
-			    (g_app_config.alarm_t1_temp_lo - g_app_config.alarm_t1_temp_hst) ||
+			    (g_app_config.alarm_t1_temperature_lo - g_app_config.alarm_t1_temperature_hst) ||
 		    g_app_sensor_data.ext_temperature_1 >
-			    (g_app_config.alarm_t1_temp_hi + g_app_config.alarm_t1_temp_hst)) {
+			    (g_app_config.alarm_t1_temperature_hi + g_app_config.alarm_t1_temperature_hst)) {
 			LOG_INF("Activated alarm for external temperature 1");
 
 			alarm_ext_temp_1 = true;
@@ -116,18 +116,18 @@ bool app_alarm_is_active(void)
 		alarm_ext_temp_2 = false;
 	} else if (alarm_ext_temp_2) {
 		if (g_app_sensor_data.ext_temperature_2 >
-			    (g_app_config.alarm_t2_temp_lo + g_app_config.alarm_t2_temp_hst) &&
+			    (g_app_config.alarm_t2_temperature_lo + g_app_config.alarm_t2_temperature_hst) &&
 		    g_app_sensor_data.ext_temperature_2 <
-			    (g_app_config.alarm_t2_temp_hi - g_app_config.alarm_t2_temp_hst)) {
+			    (g_app_config.alarm_t2_temperature_hi - g_app_config.alarm_t2_temperature_hst)) {
 			LOG_INF("Deactivated alarm for external temperature 2");
 
 			alarm_ext_temp_2 = false;
 		}
 	} else {
 		if (g_app_sensor_data.ext_temperature_2 <
-			    (g_app_config.alarm_t2_temp_lo - g_app_config.alarm_t2_temp_hst) ||
+			    (g_app_config.alarm_t2_temperature_lo - g_app_config.alarm_t2_temperature_hst) ||
 		    g_app_sensor_data.ext_temperature_2 >
-			    (g_app_config.alarm_t2_temp_hi + g_app_config.alarm_t2_temp_hst)) {
+			    (g_app_config.alarm_t2_temperature_hi + g_app_config.alarm_t2_temperature_hst)) {
 			LOG_INF("Activated alarm for external temperature 2");
 
 			alarm_ext_temp_2 = true;

@@ -58,12 +58,12 @@ struct app_config {
 	float alarm_pressure_lo;
 	float alarm_pressure_hi;
 	float alarm_pressure_hst;
-	float alarm_t1_temp_lo;
-	float alarm_t1_temp_hi;
-	float alarm_t1_temp_hst;
-	float alarm_t2_temp_lo;
-	float alarm_t2_temp_hi;
-	float alarm_t2_temp_hst;
+	float alarm_t1_temperature_lo;
+	float alarm_t1_temperature_hi;
+	float alarm_t1_temperature_hst;
+	float alarm_t2_temperature_lo;
+	float alarm_t2_temperature_hi;
+	float alarm_t2_temperature_hst;
 	float corr_temperature;
 	float corr_ext_temperature_1;
 	float corr_ext_temperature_2;
