@@ -45,9 +45,9 @@ message NfcConfigMessage {
         optional uint32 interval_sample = 2;
         optional uint32 interval_aggreg = 3;
         optional uint32 interval_report = 4;
-        optional float alarm_int_temp_lo = 5;
-        optional float alarm_int_temp_hi = 6;
-        optional float alarm_int_temp_hst = 7;
+        optional float alarm_temperature_lo = 5;
+        optional float alarm_temperature_hi = 6;
+        optional float alarm_temperature_hst = 7;
         optional float alarm_t1_temp_lo = 8;
         optional float alarm_t1_temp_hi = 9;
         optional float alarm_t1_temp_hst = 10;

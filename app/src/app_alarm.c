@@ -22,23 +22,23 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 
 bool app_alarm_is_active(void)
 {
-	static bool alarm_int_temp = false;
+	static bool alarm_temperature = false;
 
 	if (isnan(g_app_sensor_data.temperature)) {
-		alarm_int_temp = false;
-	} else if (alarm_int_temp) {
-		if (g_app_sensor_data.temperature > (g_app_config.alarm_int_temp_lo + g_app_config.alarm_int_temp_hst) &&
-		    g_app_sensor_data.temperature < (g_app_config.alarm_int_temp_hi - g_app_config.alarm_int_temp_hst)) {
+		alarm_temperature = false;
+	} else if (alarm_temperature) {
+		if (g_app_sensor_data.temperature > (g_app_config.alarm_temperature_lo + g_app_config.alarm_temperature_hst) &&
+		    g_app_sensor_data.temperature < (g_app_config.alarm_temperature_hi - g_app_config.alarm_temperature_hst)) {
 			LOG_INF("Deactivated alarm for internal temperature");
 
-			alarm_int_temp = false;
+			alarm_temperature = false;
 		}
 	} else {
-		if (g_app_sensor_data.temperature < (g_app_config.alarm_int_temp_lo - g_app_config.alarm_int_temp_hst) ||
-		    g_app_sensor_data.temperature > (g_app_config.alarm_int_temp_hi + g_app_config.alarm_int_temp_hst)) {
+		if (g_app_sensor_data.temperature < (g_app_config.alarm_temperature_lo - g_app_config.alarm_temperature_hst) ||
+		    g_app_sensor_data.temperature > (g_app_config.alarm_temperature_hi + g_app_config.alarm_temperature_hst)) {
 			LOG_INF("Activated alarm for internal temperature");
 
-			alarm_int_temp = true;
+			alarm_temperature = true;
 		}
 	}
 
@@ -136,9 +136,9 @@ bool app_alarm_is_active(void)
 
 	bool alarm = false;
 
-#if defined(CONFIG_APP_ALARM_INT_TEMP)
-	alarm = alarm_int_temp ? true : alarm;
-#endif /* defined(CONFIG_APP_ALARM_INT_TEMP) */
+#if defined(CONFIG_APP_ALARM_TEMPERATURE)
+	alarm = alarm_temperature ? true : alarm;
+#endif /* defined(CONFIG_APP_ALARM_TEMPERATURE) */
 
 #if defined(CONFIG_APP_ALARM_EXT_TEMP)
 	alarm = alarm_ext_temp_1 ? true : alarm;

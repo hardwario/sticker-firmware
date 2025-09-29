@@ -34,9 +34,9 @@ struct app_config g_app_config;
 
 static struct app_config m_app_config = {
 	.interval_report = 900,
-	.alarm_int_temp_lo = 15.0f,
-	.alarm_int_temp_hi = 25.0f,
-	.alarm_int_temp_hst = 0.5f,
+	.alarm_temperature_lo = 15.0f,
+	.alarm_temperature_hi = 25.0f,
+	.alarm_temperature_hst = 0.5f,
 	.alarm_t1_temp_lo = 15.0f,
 	.alarm_t1_temp_hi = 25.0f,
 	.alarm_t1_temp_hst = 0.5f,
@@ -96,12 +96,12 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	SETTINGS_SET("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	SETTINGS_SET("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
-	SETTINGS_SET("alarm-int-temp-lo", &m_app_config.alarm_int_temp_lo,
-		     sizeof(m_app_config.alarm_int_temp_lo));
-	SETTINGS_SET("alarm-int-temp-hi", &m_app_config.alarm_int_temp_hi,
-		     sizeof(m_app_config.alarm_int_temp_hi));
-	SETTINGS_SET("alarm-int-temp-hst", &m_app_config.alarm_int_temp_hst,
-		     sizeof(m_app_config.alarm_int_temp_hst));
+	SETTINGS_SET("alarm-temperature-lo", &m_app_config.alarm_temperature_lo,
+		     sizeof(m_app_config.alarm_temperature_lo));
+	SETTINGS_SET("alarm-temperature-hi", &m_app_config.alarm_temperature_hi,
+		     sizeof(m_app_config.alarm_temperature_hi));
+	SETTINGS_SET("alarm-temperature-hst", &m_app_config.alarm_temperature_hst,
+		     sizeof(m_app_config.alarm_temperature_hst));
 	SETTINGS_SET("alarm-t1-temp-lo", &m_app_config.alarm_t1_temp_lo,
 		     sizeof(m_app_config.alarm_t1_temp_lo));
 	SETTINGS_SET("alarm-t1-temp-hi", &m_app_config.alarm_t1_temp_hi,
@@ -193,12 +193,12 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	EXPORT_FUNC("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	EXPORT_FUNC("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
-	EXPORT_FUNC("alarm-int-temp-lo", &m_app_config.alarm_int_temp_lo,
-		    sizeof(m_app_config.alarm_int_temp_lo));
-	EXPORT_FUNC("alarm-int-temp-hi", &m_app_config.alarm_int_temp_hi,
-		    sizeof(m_app_config.alarm_int_temp_hi));
-	EXPORT_FUNC("alarm-int-temp-hst", &m_app_config.alarm_int_temp_hst,
-		    sizeof(m_app_config.alarm_int_temp_hst));
+	EXPORT_FUNC("alarm-temperature-lo", &m_app_config.alarm_temperature_lo,
+		    sizeof(m_app_config.alarm_temperature_lo));
+	EXPORT_FUNC("alarm-temperature-hi", &m_app_config.alarm_temperature_hi,
+		    sizeof(m_app_config.alarm_temperature_hi));
+	EXPORT_FUNC("alarm-temperature-hst", &m_app_config.alarm_temperature_hst,
+		    sizeof(m_app_config.alarm_temperature_hst));
 	EXPORT_FUNC("alarm-t1-temp-lo", &m_app_config.alarm_t1_temp_lo,
 		    sizeof(m_app_config.alarm_t1_temp_lo));
 	EXPORT_FUNC("alarm-t1-temp-hi", &m_app_config.alarm_t1_temp_hi,
@@ -538,22 +538,22 @@ static void print_lrw_appskey(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " lrw-appskey %s", buf);
 }
 
-static void print_alarm_int_temp_lo(const struct shell *shell)
+static void print_alarm_temperature_lo(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " alarm-int-temp-lo %.2f",
-		    (double)m_app_config.alarm_int_temp_lo);
+	shell_print(shell, SETTINGS_PFX " alarm-temperature-lo %.2f",
+		    (double)m_app_config.alarm_temperature_lo);
 }
 
-static void print_alarm_int_temp_hi(const struct shell *shell)
+static void print_alarm_temperature_hi(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " alarm-int-temp-hi %.2f",
-		    (double)m_app_config.alarm_int_temp_hi);
+	shell_print(shell, SETTINGS_PFX " alarm-temperature-hi %.2f",
+		    (double)m_app_config.alarm_temperature_hi);
 }
 
-static void print_alarm_int_temp_hst(const struct shell *shell)
+static void print_alarm_temperature_hst(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " alarm-int-temp-hst %.2f",
-		    (double)m_app_config.alarm_int_temp_hst);
+	shell_print(shell, SETTINGS_PFX " alarm-temperature-hst %.2f",
+		    (double)m_app_config.alarm_temperature_hst);
 }
 
 static void print_alarm_t1_temp_lo(const struct shell *shell)
@@ -719,9 +719,9 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_lrw_devaddr(shell);
 	print_lrw_nwkskey(shell);
 	print_lrw_appskey(shell);
-	print_alarm_int_temp_lo(shell);
-	print_alarm_int_temp_hi(shell);
-	print_alarm_int_temp_hst(shell);
+	print_alarm_temperature_lo(shell);
+	print_alarm_temperature_hi(shell);
+	print_alarm_temperature_hst(shell);
 	print_alarm_t1_temp_lo(shell);
 	print_alarm_t1_temp_hi(shell);
 	print_alarm_t1_temp_hst(shell);
@@ -1257,10 +1257,10 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-static int cmd_alarm_int_temp_lo(const struct shell *shell, size_t argc, char **argv)
+static int cmd_alarm_temperature_lo(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
-		print_alarm_int_temp_lo(shell);
+		print_alarm_temperature_lo(shell);
 		return 0;
 	}
 
@@ -1276,15 +1276,15 @@ static int cmd_alarm_int_temp_lo(const struct shell *shell, size_t argc, char **
 		return -EINVAL;
 	}
 
-	m_app_config.alarm_int_temp_lo = a;
+	m_app_config.alarm_temperature_lo = a;
 
 	return 0;
 }
 
-static int cmd_alarm_int_temp_hi(const struct shell *shell, size_t argc, char **argv)
+static int cmd_alarm_temperature_hi(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
-		print_alarm_int_temp_hi(shell);
+		print_alarm_temperature_hi(shell);
 		return 0;
 	}
 
@@ -1300,15 +1300,15 @@ static int cmd_alarm_int_temp_hi(const struct shell *shell, size_t argc, char **
 		return -EINVAL;
 	}
 
-	m_app_config.alarm_int_temp_hi = a;
+	m_app_config.alarm_temperature_hi = a;
 
 	return 0;
 }
 
-static int cmd_alarm_int_temp_hst(const struct shell *shell, size_t argc, char **argv)
+static int cmd_alarm_temperature_hst(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
-		print_alarm_int_temp_hst(shell);
+		print_alarm_temperature_hst(shell);
 		return 0;
 	}
 
@@ -1324,7 +1324,7 @@ static int cmd_alarm_int_temp_hst(const struct shell *shell, size_t argc, char *
 		return -EINVAL;
 	}
 
-	m_app_config.alarm_int_temp_hst = a;
+	m_app_config.alarm_temperature_hst = a;
 
 	return 0;
 }
@@ -2003,17 +2003,17 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set LoRaWAN AppSKey (32 hexadecimal digits).",
 	              cmd_lrw_appskey, 1, 1),
 
-	SHELL_CMD_ARG(alarm-int-temp-lo, NULL,
+	SHELL_CMD_ARG(alarm-temperature-lo, NULL,
 	              "Get/Set internal temp low threshold (-30 to 70 deg. C).",
-	              cmd_alarm_int_temp_lo, 1, 1),
+	              cmd_alarm_temperature_lo, 1, 1),
 
-	SHELL_CMD_ARG(alarm-int-temp-hi, NULL,
+	SHELL_CMD_ARG(alarm-temperature-hi, NULL,
 	              "Get/Set internal temp high threshold (-30 to 70 deg. C).",
-	              cmd_alarm_int_temp_hi, 1, 1),
+	              cmd_alarm_temperature_hi, 1, 1),
 
-	SHELL_CMD_ARG(alarm-int-temp-hst, NULL,
+	SHELL_CMD_ARG(alarm-temperature-hst, NULL,
 	              "Get/Set internal temp hysteresis (0 to 5 deg. C).",
-	              cmd_alarm_int_temp_hst, 1, 1),
+	              cmd_alarm_temperature_hst, 1, 1),
 
 	SHELL_CMD_ARG(alarm-t1-temp-lo, NULL,
 	              "Get/Set external temp 1 low threshold (-30 to 70 deg. C).",

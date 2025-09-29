@@ -49,9 +49,9 @@ struct app_config {
 	uint8_t lrw_devaddr[4];
 	uint8_t lrw_nwkskey[16];
 	uint8_t lrw_appskey[16];
-	float alarm_int_temp_lo;
-	float alarm_int_temp_hi;
-	float alarm_int_temp_hst;
+	float alarm_temperature_lo;
+	float alarm_temperature_hi;
+	float alarm_temperature_hst;
 	float alarm_t1_temp_lo;
 	float alarm_t1_temp_hi;
 	float alarm_t1_temp_hst;

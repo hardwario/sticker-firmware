@@ -92,22 +92,22 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 			config->interval_report = message->application.interval_report;
 		}
 
-		if (message->application.has_alarm_int_temp_lo) {
-			LOG_INF("Parameter `application.alarm_int_temp_lo`: %.2f",
-				(double)message->application.alarm_int_temp_lo);
-			config->alarm_int_temp_lo = message->application.alarm_int_temp_lo;
+		if (message->application.has_alarm_temperature_lo) {
+			LOG_INF("Parameter `application.alarm_temperature_lo`: %.2f",
+				(double)message->application.alarm_temperature_lo);
+			config->alarm_temperature_lo = message->application.alarm_temperature_lo;
 		}
 
-		if (message->application.has_alarm_int_temp_hi) {
-			LOG_INF("Parameter `application.alarm_int_temp_hi`: %.2f",
-				(double)message->application.alarm_int_temp_hi);
-			config->alarm_int_temp_hi = message->application.alarm_int_temp_hi;
+		if (message->application.has_alarm_temperature_hi) {
+			LOG_INF("Parameter `application.alarm_temperature_hi`: %.2f",
+				(double)message->application.alarm_temperature_hi);
+			config->alarm_temperature_hi = message->application.alarm_temperature_hi;
 		}
 
-		if (message->application.has_alarm_int_temp_hst) {
-			LOG_INF("Parameter `application.alarm_int_temp_hst`: %.2f",
-				(double)message->application.alarm_int_temp_hst);
-			config->alarm_int_temp_hst = message->application.alarm_int_temp_hst;
+		if (message->application.has_alarm_temperature_hst) {
+			LOG_INF("Parameter `application.alarm_temperature_hst`: %.2f",
+				(double)message->application.alarm_temperature_hst);
+			config->alarm_temperature_hst = message->application.alarm_temperature_hst;
 		}
 
 		if (message->application.has_alarm_t1_temp_lo) {
