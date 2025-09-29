@@ -112,6 +112,42 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 			config->alarm_temperature_hst = message->application.alarm_temperature_hst;
 		}
 
+		if (message->application.has_alarm_humidity_lo) {
+			LOG_INF("Parameter `application.alarm_humidity_lo`: %.2f",
+				(double)message->application.alarm_humidity_lo);
+			config->alarm_humidity_lo = message->application.alarm_humidity_lo;
+		}
+
+		if (message->application.has_alarm_humidity_hi) {
+			LOG_INF("Parameter `application.alarm_humidity_hi`: %.2f",
+				(double)message->application.alarm_humidity_hi);
+			config->alarm_humidity_hi = message->application.alarm_humidity_hi;
+		}
+
+		if (message->application.has_alarm_humidity_hst) {
+			LOG_INF("Parameter `application.alarm_humidity_hst`: %.2f",
+				(double)message->application.alarm_humidity_hst);
+			config->alarm_humidity_hst = message->application.alarm_humidity_hst;
+		}
+
+		if (message->application.has_alarm_pressure_lo) {
+			LOG_INF("Parameter `application.alarm_pressure_lo`: %.2f",
+				(double)message->application.alarm_pressure_lo);
+			config->alarm_pressure_lo = message->application.alarm_pressure_lo;
+		}
+
+		if (message->application.has_alarm_pressure_hi) {
+			LOG_INF("Parameter `application.alarm_pressure_hi`: %.2f",
+				(double)message->application.alarm_pressure_hi);
+			config->alarm_pressure_hi = message->application.alarm_pressure_hi;
+		}
+
+		if (message->application.has_alarm_pressure_hst) {
+			LOG_INF("Parameter `application.alarm_pressure_hst`: %.2f",
+				(double)message->application.alarm_pressure_hst);
+			config->alarm_pressure_hst = message->application.alarm_pressure_hst;
+		}
+
 		if (message->application.has_alarm_t1_temperature_lo) {
 			LOG_INF("Parameter `application.alarm_t1_temperature_lo`: %.2f",
 				(double)message->application.alarm_t1_temperature_lo);
@@ -152,42 +188,6 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 				(double)message->application.alarm_t2_temperature_hst);
 			config->alarm_t2_temperature_hst =
 				message->application.alarm_t2_temperature_hst;
-		}
-
-		if (message->application.has_alarm_humidity_lo) {
-			LOG_INF("Parameter `application.alarm_humidity_lo`: %.2f",
-				(double)message->application.alarm_humidity_lo);
-			config->alarm_humidity_lo = message->application.alarm_humidity_lo;
-		}
-
-		if (message->application.has_alarm_humidity_hi) {
-			LOG_INF("Parameter `application.alarm_humidity_hi`: %.2f",
-				(double)message->application.alarm_humidity_hi);
-			config->alarm_humidity_hi = message->application.alarm_humidity_hi;
-		}
-
-		if (message->application.has_alarm_humidity_hst) {
-			LOG_INF("Parameter `application.alarm_humidity_hst`: %.2f",
-				(double)message->application.alarm_humidity_hst);
-			config->alarm_humidity_hst = message->application.alarm_humidity_hst;
-		}
-
-		if (message->application.has_alarm_pressure_lo) {
-			LOG_INF("Parameter `application.alarm_pressure_lo`: %.2f",
-				(double)message->application.alarm_pressure_lo);
-			config->alarm_pressure_lo = message->application.alarm_pressure_lo;
-		}
-
-		if (message->application.has_alarm_pressure_hi) {
-			LOG_INF("Parameter `application.alarm_pressure_hi`: %.2f",
-				(double)message->application.alarm_pressure_hi);
-			config->alarm_pressure_hi = message->application.alarm_pressure_hi;
-		}
-
-		if (message->application.has_alarm_pressure_hst) {
-			LOG_INF("Parameter `application.alarm_pressure_hst`: %.2f",
-				(double)message->application.alarm_pressure_hst);
-			config->alarm_pressure_hst = message->application.alarm_pressure_hst;
 		}
 
 		if (message->application.has_hall_left_enabled) {
