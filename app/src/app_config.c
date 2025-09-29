@@ -126,12 +126,6 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.alarm_t2_temperature_hi));
 	SETTINGS_SET("alarm-t2-temperature-hst", &m_app_config.alarm_t2_temperature_hst,
 		     sizeof(m_app_config.alarm_t2_temperature_hst));
-	SETTINGS_SET("corr-temperature", &m_app_config.corr_temperature,
-		     sizeof(m_app_config.corr_temperature));
-	SETTINGS_SET("corr-t1-temperature", &m_app_config.corr_t1_temperature,
-		     sizeof(m_app_config.corr_t1_temperature));
-	SETTINGS_SET("corr-t2-temperature", &m_app_config.corr_t2_temperature,
-		     sizeof(m_app_config.corr_t2_temperature));
 	SETTINGS_SET("hall-left-enabled", &m_app_config.hall_left_enabled,
 		     sizeof(m_app_config.hall_left_enabled));
 	SETTINGS_SET("hall-left-counter", &m_app_config.hall_left_counter,
@@ -150,6 +144,12 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.hall_right_notify_deact));
 	SETTINGS_SET("barometer-enabled", &m_app_config.barometer_enabled,
 		     sizeof(m_app_config.barometer_enabled));
+	SETTINGS_SET("corr-temperature", &m_app_config.corr_temperature,
+		     sizeof(m_app_config.corr_temperature));
+	SETTINGS_SET("corr-t1-temperature", &m_app_config.corr_t1_temperature,
+		     sizeof(m_app_config.corr_t1_temperature));
+	SETTINGS_SET("corr-t2-temperature", &m_app_config.corr_t2_temperature,
+		     sizeof(m_app_config.corr_t2_temperature));
 
 #undef SETTINGS_SET
 
@@ -223,12 +223,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.alarm_t2_temperature_hi));
 	EXPORT_FUNC("alarm-t2-temperature-hst", &m_app_config.alarm_t2_temperature_hst,
 		    sizeof(m_app_config.alarm_t2_temperature_hst));
-	EXPORT_FUNC("corr-temperature", &m_app_config.corr_temperature,
-		    sizeof(m_app_config.corr_temperature));
-	EXPORT_FUNC("corr-t1-temperature", &m_app_config.corr_t1_temperature,
-		    sizeof(m_app_config.corr_t1_temperature));
-	EXPORT_FUNC("corr-t2-temperature", &m_app_config.corr_t2_temperature,
-		    sizeof(m_app_config.corr_t2_temperature));
 	EXPORT_FUNC("hall-left-enabled", &m_app_config.hall_left_enabled,
 		    sizeof(m_app_config.hall_left_enabled));
 	EXPORT_FUNC("hall-left-counter", &m_app_config.hall_left_counter,
@@ -247,6 +241,12 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.hall_right_notify_deact));
 	EXPORT_FUNC("barometer-enabled", &m_app_config.barometer_enabled,
 		    sizeof(m_app_config.barometer_enabled));
+	EXPORT_FUNC("corr-temperature", &m_app_config.corr_temperature,
+		    sizeof(m_app_config.corr_temperature));
+	EXPORT_FUNC("corr-t1-temperature", &m_app_config.corr_t1_temperature,
+		    sizeof(m_app_config.corr_t1_temperature));
+	EXPORT_FUNC("corr-t2-temperature", &m_app_config.corr_t2_temperature,
+		    sizeof(m_app_config.corr_t2_temperature));
 
 #undef EXPORT_FUNC
 
@@ -628,24 +628,6 @@ static void print_alarm_t2_temperature_hst(const struct shell *shell)
 		    (double)m_app_config.alarm_t2_temperature_hst);
 }
 
-static void print_corr_temperature(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " corr-temperature %.2f",
-		    (double)m_app_config.corr_temperature);
-}
-
-static void print_corr_t1_temperature(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " corr-t1-temperature %.2f",
-		    (double)m_app_config.corr_t1_temperature);
-}
-
-static void print_corr_t2_temperature(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " corr-t2-temperature %.2f",
-		    (double)m_app_config.corr_t2_temperature);
-}
-
 static void print_hall_left_enabled(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " hall-left-enabled %s",
@@ -700,6 +682,24 @@ static void print_barometer_enabled(const struct shell *shell)
 		    m_app_config.barometer_enabled ? "true" : "false");
 }
 
+static void print_corr_temperature(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " corr-temperature %.2f",
+		    (double)m_app_config.corr_temperature);
+}
+
+static void print_corr_t1_temperature(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " corr-t1-temperature %.2f",
+		    (double)m_app_config.corr_t1_temperature);
+}
+
+static void print_corr_t2_temperature(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " corr-t2-temperature %.2f",
+		    (double)m_app_config.corr_t2_temperature);
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -734,9 +734,6 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_alarm_t2_temperature_lo(shell);
 	print_alarm_t2_temperature_hi(shell);
 	print_alarm_t2_temperature_hst(shell);
-	print_corr_temperature(shell);
-	print_corr_t1_temperature(shell);
-	print_corr_t2_temperature(shell);
 	print_hall_left_enabled(shell);
 	print_hall_left_counter(shell);
 	print_hall_left_notify_act(shell);
@@ -746,6 +743,9 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_hall_right_notify_act(shell);
 	print_hall_right_notify_deact(shell);
 	print_barometer_enabled(shell);
+	print_corr_temperature(shell);
+	print_corr_t1_temperature(shell);
+	print_corr_t2_temperature(shell);
 
 	return 0;
 }
@@ -1617,78 +1617,6 @@ static int cmd_alarm_pressure_hst(const struct shell *shell, size_t argc, char *
 	return 0;
 }
 
-static int cmd_corr_temperature(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_corr_temperature(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < -5.f || a > 5.f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.corr_temperature = a;
-
-	return 0;
-}
-
-static int cmd_corr_t1_temperature(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_corr_t1_temperature(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < -5.f || a > 5.f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.corr_t1_temperature = a;
-
-	return 0;
-}
-
-static int cmd_corr_t2_temperature(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_corr_t2_temperature(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < -5.f || a > 5.f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.corr_t2_temperature = a;
-
-	return 0;
-}
-
 static int cmd_hall_left_enabled(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -1905,6 +1833,78 @@ static int cmd_barometer_enabled(const struct shell *shell, size_t argc, char **
 	return 0;
 }
 
+static int cmd_corr_temperature(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_corr_temperature(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < -5.f || a > 5.f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.corr_temperature = a;
+
+	return 0;
+}
+
+static int cmd_corr_t1_temperature(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_corr_t1_temperature(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < -5.f || a > 5.f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.corr_t1_temperature = a;
+
+	return 0;
+}
+
+static int cmd_corr_t2_temperature(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_corr_t2_temperature(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < -5.f || a > 5.f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.corr_t2_temperature = a;
+
+	return 0;
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -2004,39 +2004,39 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_lrw_appskey, 1, 1),
 
 	SHELL_CMD_ARG(alarm-temperature-lo, NULL,
-	              "Get/Set internal temp low threshold (-30 to 70 deg. C).",
+	              "Get/Set temperature low threshold (-30 to 70 deg. C).",
 	              cmd_alarm_temperature_lo, 1, 1),
 
 	SHELL_CMD_ARG(alarm-temperature-hi, NULL,
-	              "Get/Set internal temp high threshold (-30 to 70 deg. C).",
+	              "Get/Set temperature high threshold (-30 to 70 deg. C).",
 	              cmd_alarm_temperature_hi, 1, 1),
 
 	SHELL_CMD_ARG(alarm-temperature-hst, NULL,
-	              "Get/Set internal temp hysteresis (0 to 5 deg. C).",
+	              "Get/Set T1 temperature hysteresis (0 to 5 deg. C).",
 	              cmd_alarm_temperature_hst, 1, 1),
 
 	SHELL_CMD_ARG(alarm-t1-temperature-lo, NULL,
-	              "Get/Set external temp 1 low threshold (-30 to 70 deg. C).",
+	              "Get/Set T1 temperature low threshold (-30 to 70 deg. C).",
 	              cmd_alarm_t1_temperature_lo, 1, 1),
 
 	SHELL_CMD_ARG(alarm-t1-temperature-hi, NULL,
-	              "Get/Set external temp 1 high threshold (-30 to 70 deg. C).",
+	              "Get/Set T1 temperature high threshold (-30 to 70 deg. C).",
 	              cmd_alarm_t1_temperature_hi, 1, 1),
 
 	SHELL_CMD_ARG(alarm-t1-temperature-hst, NULL,
-	              "Get/Set external temp 1 hysteresis (0 to 5 deg. C).",
+	              "Get/Set T1 temperature hysteresis (0 to 5 deg. C).",
 	              cmd_alarm_t1_temperature_hst, 1, 1),
 
 	SHELL_CMD_ARG(alarm-t2-temperature-lo, NULL,
-	              "Get/Set external temp 2 low threshold (-30 to 70 deg. C).",
+	              "Get/Set T2 temperature low threshold (-30 to 70 deg. C).",
 	              cmd_alarm_t2_temperature_lo, 1, 1),
 
 	SHELL_CMD_ARG(alarm-t2-temperature-hi, NULL,
-	              "Get/Set external temp 2 high threshold (-30 to 70 deg. C).",
+	              "Get/Set T2 temperature high threshold (-30 to 70 deg. C).",
 	              cmd_alarm_t2_temperature_hi, 1, 1),
 
 	SHELL_CMD_ARG(alarm-t2-temperature-hst, NULL,
-	              "Get/Set external temp 2 hysteresis (0 to 5 deg. C).",
+	              "Get/Set T2 temperature hysteresis (0 to 5 deg. C).",
 	              cmd_alarm_t2_temperature_hst, 1, 1),
 
 	SHELL_CMD_ARG(alarm-humidity-lo, NULL,
@@ -2062,18 +2062,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(alarm-pressure-hst, NULL,
 	              "Get/Set pressure hysteresis (0 to 50 hPa).",
 	              cmd_alarm_pressure_hst, 1, 1),
-
-	SHELL_CMD_ARG(corr-temperature, NULL,
-	              "Get/Set temperature correction (range -5.0 to +5.0 deg. C).",
-	              cmd_corr_temperature, 1, 1),
-
-	SHELL_CMD_ARG(corr-t1-temperature, NULL,
-	              "Get/Set external temperature 1 correction (range -5.0 to +5.0 deg. C).",
-	              cmd_corr_t1_temperature, 1, 1),
-
-	SHELL_CMD_ARG(corr-t2-temperature, NULL,
-	              "Get/Set external temperature 2 correction (range -5.0 to +5.0 deg. C).",
-	              cmd_corr_t2_temperature, 1, 1),
 
 	SHELL_CMD_ARG(hall-left-enabled, NULL,
 	              "Get/Set hall left switch enabled (true/false).",
@@ -2110,6 +2098,18 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(barometer-enabled, NULL,
 	              "Get/Set barometer enabled (true/false).",
 	              cmd_barometer_enabled, 1, 1),
+
+	SHELL_CMD_ARG(corr-temperature, NULL,
+	              "Get/Set temperature correction (range -5.0 to +5.0 deg. C).",
+	              cmd_corr_temperature, 1, 1),
+
+	SHELL_CMD_ARG(corr-t1-temperature, NULL,
+	              "Get/Set T1 temperature correction (range -5.0 to +5.0 deg. C).",
+	              cmd_corr_t1_temperature, 1, 1),
+
+	SHELL_CMD_ARG(corr-t2-temperature, NULL,
+	              "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C).",
+	              cmd_corr_t2_temperature, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );
