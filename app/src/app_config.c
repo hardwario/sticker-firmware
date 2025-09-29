@@ -34,14 +34,6 @@ struct app_config g_app_config;
 
 static struct app_config m_app_config = {
 	.interval_report = 900,
-	.lrw_region = APP_CONFIG_LRW_REGION_EU868,
-	.lrw_network = APP_CONFIG_LRW_NETWORK_PUBLIC,
-	.lrw_adr = true,
-	.lrw_activation = APP_CONFIG_LRW_ACTIVATION_OTAA,
-	.hall_left_enabled = true,
-	.hall_left_counter = true,
-	.hall_right_enabled = true,
-	.hall_right_counter = true,
 };
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
