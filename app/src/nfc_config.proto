@@ -69,5 +69,9 @@ message NfcConfigMessage {
         optional bool hall_right_notify_act = 26;
         optional bool hall_right_notify_deact = 27;
         optional bool barometer_enabled = 28;
+        optional bool pir_detector_enabled = 29;
+        optional float corr_temperature = 30;
+        optional float corr_t1_temperature = 31;
+        optional float corr_t2_temperature = 32;
     }
 }

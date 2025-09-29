@@ -73,6 +73,7 @@ struct app_config {
 	bool hall_right_notify_act;
 	bool hall_right_notify_deact;
 	bool barometer_enabled;
+	bool pir_detector_enabled;
 	float corr_temperature;
 	float corr_t1_temperature;
 	float corr_t2_temperature;

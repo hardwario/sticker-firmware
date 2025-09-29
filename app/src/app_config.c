@@ -144,6 +144,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.hall_right_notify_deact));
 	SETTINGS_SET("barometer-enabled", &m_app_config.barometer_enabled,
 		     sizeof(m_app_config.barometer_enabled));
+	SETTINGS_SET("pir-detector-enabled", &m_app_config.pir_detector_enabled,
+		     sizeof(m_app_config.pir_detector_enabled));
 	SETTINGS_SET("corr-temperature", &m_app_config.corr_temperature,
 		     sizeof(m_app_config.corr_temperature));
 	SETTINGS_SET("corr-t1-temperature", &m_app_config.corr_t1_temperature,
@@ -241,6 +243,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.hall_right_notify_deact));
 	EXPORT_FUNC("barometer-enabled", &m_app_config.barometer_enabled,
 		    sizeof(m_app_config.barometer_enabled));
+	EXPORT_FUNC("pir-detector-enabled", &m_app_config.pir_detector_enabled,
+		    sizeof(m_app_config.pir_detector_enabled));
 	EXPORT_FUNC("corr-temperature", &m_app_config.corr_temperature,
 		    sizeof(m_app_config.corr_temperature));
 	EXPORT_FUNC("corr-t1-temperature", &m_app_config.corr_t1_temperature,
@@ -682,6 +686,12 @@ static void print_barometer_enabled(const struct shell *shell)
 		    m_app_config.barometer_enabled ? "true" : "false");
 }
 
+static void print_pir_detector_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " pir-detector-enabled %s",
+		    m_app_config.pir_detector_enabled ? "true" : "false");
+}
+
 static void print_corr_temperature(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " corr-temperature %.2f",
@@ -743,6 +753,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_hall_right_notify_act(shell);
 	print_hall_right_notify_deact(shell);
 	print_barometer_enabled(shell);
+	print_pir_detector_enabled(shell);
 	print_corr_temperature(shell);
 	print_corr_t1_temperature(shell);
 	print_corr_t2_temperature(shell);
@@ -1833,6 +1844,30 @@ static int cmd_barometer_enabled(const struct shell *shell, size_t argc, char **
 	return 0;
 }
 
+static int cmd_pir_detector_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_pir_detector_enabled(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.pir_detector_enabled = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.pir_detector_enabled = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int cmd_corr_temperature(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -2098,6 +2133,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(barometer-enabled, NULL,
 	              "Get/Set barometer enabled (true/false).",
 	              cmd_barometer_enabled, 1, 1),
+
+	SHELL_CMD_ARG(pir-detector-enabled, NULL,
+	              "Get/Set PIR detector enabled (true/false).",
+	              cmd_pir_detector_enabled, 1, 1),
 
 	SHELL_CMD_ARG(corr-temperature, NULL,
 	              "Get/Set temperature correction (range -5.0 to +5.0 deg. C).",

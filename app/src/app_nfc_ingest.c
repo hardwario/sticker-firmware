@@ -245,5 +245,29 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 				message->application.barometer_enabled ? "true" : "false");
 			config->barometer_enabled = message->application.barometer_enabled;
 		}
+
+		if (message->application.has_pir_detector_enabled) {
+			LOG_INF("Parameter `application.pir_detector_enabled`: %s",
+				message->application.pir_detector_enabled ? "true" : "false");
+			config->pir_detector_enabled = message->application.pir_detector_enabled;
+		}
+
+		if (message->application.has_corr_temperature) {
+			LOG_INF("Parameter `application.corr_temperature`: %.2f",
+				(double)message->application.corr_temperature);
+			config->corr_temperature = message->application.corr_temperature;
+		}
+
+		if (message->application.has_corr_t1_temperature) {
+			LOG_INF("Parameter `application.corr_t1_temperature`: %.2f",
+				(double)message->application.corr_t1_temperature);
+			config->corr_t1_temperature = message->application.corr_t1_temperature;
+		}
+
+		if (message->application.has_corr_t2_temperature) {
+			LOG_INF("Parameter `application.corr_t2_temperature`: %.2f",
+				(double)message->application.corr_t2_temperature);
+			config->corr_t2_temperature = message->application.corr_t2_temperature;
+		}
 	}
 }
