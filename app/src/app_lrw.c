@@ -4,8 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_alarm.h"
+#include "app_compose.h"
 #include "app_config.h"
 #include "app_lrw.h"
+#include "app_sensor.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -14,6 +17,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/lorawan/lorawan.h>
+#include <zephyr/random/random.h>
 #include <zephyr/sys/byteorder.h>
 
 /* Standard includes */
@@ -23,6 +27,12 @@
 #include <stdint.h>
 
 LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
+
+static K_THREAD_STACK_DEFINE(m_work_stack, 4096);
+static struct k_work_q m_work_q;
+static struct k_timer m_send_timer;
+static struct k_work m_send_work;
+static struct k_work m_join_work;
 
 static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t snr, uint8_t len,
 			      const uint8_t *data)
@@ -50,7 +60,7 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 	LOG_INF("Maximum payload size: %d", max_payload_size);
 }
 
-int app_lrw_join(void)
+static void join_work_handler(struct k_work *work)
 {
 	int ret;
 
@@ -72,31 +82,69 @@ int app_lrw_join(void)
 		config.abp.app_skey = g_app_config.lrw_appskey;
 	} else {
 		LOG_ERR("Invalid activation mode: %d", g_app_config.lrw_activation);
-		return -EINVAL;
+		return;
 	}
 
 	ret = lorawan_join(&config);
 	if (ret) {
 		LOG_ERR("Call `lorawan_join` failed: %d", ret);
-		return ret;
+		return;
 	}
 
 	lorawan_enable_adr(g_app_config.lrw_adr);
 
-	return 0;
+	LOG_INF("LoRaWAN join successful");
 }
 
-int app_lrw_send(const void *buf, size_t len)
+void app_lrw_join(void)
+{
+	k_work_submit_to_queue(&m_work_q, &m_join_work);
+}
+
+static void send_work_handler(struct k_work *work)
 {
 	int ret;
 
-	ret = lorawan_send(1, (uint8_t *)buf, len, LORAWAN_MSG_UNCONFIRMED);
-	if (ret) {
-		LOG_ERR("Call `lorawan_send` failed: %d", ret);
-		return ret;
+	int timeout = g_app_config.interval_report;
+
+#if defined(CONFIG_ENTROPY_GENERATOR)
+	timeout += (int32_t)sys_rand32_get() % (g_app_config.interval_report / 10);
+#endif /* defined(CONFIG_ENTROPY_GENERATOR) */
+
+	LOG_INF("Scheduling next timeout in %d seconds", timeout);
+
+	k_timer_start(&m_send_timer, K_SECONDS(timeout), K_FOREVER);
+
+	if (!g_app_config.interval_sample) {
+		app_sensor_sample();
 	}
 
-	return 0;
+	uint8_t buf[51];
+	size_t len;
+	ret = app_compose(buf, sizeof(buf), &len);
+	if (ret) {
+		LOG_ERR("Call `app_compose` failed: %d", ret);
+		return;
+	}
+
+	LOG_INF("Sending data...");
+
+	ret = lorawan_send(1, buf, len, LORAWAN_MSG_UNCONFIRMED);
+	if (ret) {
+		LOG_ERR("Call `lorawan_send` failed: %d", ret);
+	}
+
+	LOG_INF("Data sent");
+}
+
+static void send_timer_handler(struct k_timer *timer)
+{
+	k_work_submit_to_queue(&m_work_q, &m_send_work);
+}
+
+void app_lrw_send(void)
+{
+	k_timer_start(&m_send_timer, K_NO_WAIT, K_FOREVER);
 }
 
 static int init(void)
@@ -146,6 +194,17 @@ static int init(void)
 	lorawan_register_downlink_callback(&downlink_cb);
 	lorawan_register_battery_level_callback(battery_level_callback);
 	lorawan_register_dr_changed_callback(datarate_changed_callback);
+
+	k_work_queue_init(&m_work_q);
+	k_work_queue_start(&m_work_q, m_work_stack,
+			   K_THREAD_STACK_SIZEOF(m_work_stack),
+			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
+
+	k_work_init(&m_join_work, join_work_handler);
+	k_work_init(&m_send_work, send_work_handler);
+
+	k_timer_init(&m_send_timer, send_timer_handler, NULL);
+	k_timer_start(&m_send_timer, K_SECONDS(5), K_FOREVER);
 
 	return 0;
 }

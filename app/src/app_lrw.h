@@ -13,8 +13,8 @@
 extern "C" {
 #endif
 
-int app_lrw_join(void);
-int app_lrw_send(const void *buf, size_t len);
+void app_lrw_join(void);
+void app_lrw_send(void);
 
 #ifdef __cplusplus
 }

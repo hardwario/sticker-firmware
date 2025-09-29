@@ -6,6 +6,7 @@
 
 #include "app_hall.h"
 #include "app_config.h"
+#include "app_lrw.h"
 #include "app_send.h"
 
 /* Zephyr includes */
@@ -142,7 +143,7 @@ static int poll(void)
 	k_mutex_unlock(&m_hall_data_mutex);
 
 	if (app_hall_check_notify_event()) {
-		app_trigger_immediate_send();
+		app_lrw_send();
 	}
 
 	return 0;
