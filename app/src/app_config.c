@@ -34,6 +34,21 @@ struct app_config g_app_config;
 
 static struct app_config m_app_config = {
 	.interval_report = 900,
+	.alarm_int_temp_lo = 15.0f,
+	.alarm_int_temp_hi = 25.0f,
+	.alarm_int_temp_hst = 0.5f,
+	.alarm_t1_temp_lo = 15.0f,
+	.alarm_t1_temp_hi = 25.0f,
+	.alarm_t1_temp_hst = 0.5f,
+	.alarm_t2_temp_lo = 15.0f,
+	.alarm_t2_temp_hi = 25.0f,
+	.alarm_t2_temp_hst = 0.5f,
+	.alarm_humidity_lo = 30.0f,
+	.alarm_humidity_hi = 75.0f,
+	.alarm_humidity_hst = 5.0f,
+	.alarm_pressure_lo = 700.0f,
+	.alarm_pressure_hi = 1060.0f,
+	.alarm_pressure_hst = 10.0f,
 };
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
@@ -81,6 +96,36 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	SETTINGS_SET("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	SETTINGS_SET("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+	SETTINGS_SET("alarm-int-temp-lo", &m_app_config.alarm_int_temp_lo,
+		     sizeof(m_app_config.alarm_int_temp_lo));
+	SETTINGS_SET("alarm-int-temp-hi", &m_app_config.alarm_int_temp_hi,
+		     sizeof(m_app_config.alarm_int_temp_hi));
+	SETTINGS_SET("alarm-int-temp-hst", &m_app_config.alarm_int_temp_hst,
+		     sizeof(m_app_config.alarm_int_temp_hst));
+	SETTINGS_SET("alarm-t1-temp-lo", &m_app_config.alarm_t1_temp_lo,
+		     sizeof(m_app_config.alarm_t1_temp_lo));
+	SETTINGS_SET("alarm-t1-temp-hi", &m_app_config.alarm_t1_temp_hi,
+		     sizeof(m_app_config.alarm_t1_temp_hi));
+	SETTINGS_SET("alarm-t1-temp-hst", &m_app_config.alarm_t1_temp_hst,
+		     sizeof(m_app_config.alarm_t1_temp_hst));
+	SETTINGS_SET("alarm-t2-temp-lo", &m_app_config.alarm_t2_temp_lo,
+		     sizeof(m_app_config.alarm_t2_temp_lo));
+	SETTINGS_SET("alarm-t2-temp-hi", &m_app_config.alarm_t2_temp_hi,
+		     sizeof(m_app_config.alarm_t2_temp_hi));
+	SETTINGS_SET("alarm-t2-temp-hst", &m_app_config.alarm_t2_temp_hst,
+		     sizeof(m_app_config.alarm_t2_temp_hst));
+	SETTINGS_SET("alarm-humidity-lo", &m_app_config.alarm_humidity_lo,
+		     sizeof(m_app_config.alarm_humidity_lo));
+	SETTINGS_SET("alarm-humidity-hi", &m_app_config.alarm_humidity_hi,
+		     sizeof(m_app_config.alarm_humidity_hi));
+	SETTINGS_SET("alarm-humidity-hst", &m_app_config.alarm_humidity_hst,
+		     sizeof(m_app_config.alarm_humidity_hst));
+	SETTINGS_SET("alarm-pressure-lo", &m_app_config.alarm_pressure_lo,
+		     sizeof(m_app_config.alarm_pressure_lo));
+	SETTINGS_SET("alarm-pressure-hi", &m_app_config.alarm_pressure_hi,
+		     sizeof(m_app_config.alarm_pressure_hi));
+	SETTINGS_SET("alarm-pressure-hst", &m_app_config.alarm_pressure_hst,
+		     sizeof(m_app_config.alarm_pressure_hst));
 	SETTINGS_SET("corr-temperature", &m_app_config.corr_temperature,
 		     sizeof(m_app_config.corr_temperature));
 	SETTINGS_SET("corr-ext-temperature-1", &m_app_config.corr_ext_temperature_1,
@@ -148,6 +193,36 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	EXPORT_FUNC("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	EXPORT_FUNC("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+	EXPORT_FUNC("alarm-int-temp-lo", &m_app_config.alarm_int_temp_lo,
+		    sizeof(m_app_config.alarm_int_temp_lo));
+	EXPORT_FUNC("alarm-int-temp-hi", &m_app_config.alarm_int_temp_hi,
+		    sizeof(m_app_config.alarm_int_temp_hi));
+	EXPORT_FUNC("alarm-int-temp-hst", &m_app_config.alarm_int_temp_hst,
+		    sizeof(m_app_config.alarm_int_temp_hst));
+	EXPORT_FUNC("alarm-t1-temp-lo", &m_app_config.alarm_t1_temp_lo,
+		    sizeof(m_app_config.alarm_t1_temp_lo));
+	EXPORT_FUNC("alarm-t1-temp-hi", &m_app_config.alarm_t1_temp_hi,
+		    sizeof(m_app_config.alarm_t1_temp_hi));
+	EXPORT_FUNC("alarm-t1-temp-hst", &m_app_config.alarm_t1_temp_hst,
+		    sizeof(m_app_config.alarm_t1_temp_hst));
+	EXPORT_FUNC("alarm-t2-temp-lo", &m_app_config.alarm_t2_temp_lo,
+		    sizeof(m_app_config.alarm_t2_temp_lo));
+	EXPORT_FUNC("alarm-t2-temp-hi", &m_app_config.alarm_t2_temp_hi,
+		    sizeof(m_app_config.alarm_t2_temp_hi));
+	EXPORT_FUNC("alarm-t2-temp-hst", &m_app_config.alarm_t2_temp_hst,
+		    sizeof(m_app_config.alarm_t2_temp_hst));
+	EXPORT_FUNC("alarm-humidity-lo", &m_app_config.alarm_humidity_lo,
+		    sizeof(m_app_config.alarm_humidity_lo));
+	EXPORT_FUNC("alarm-humidity-hi", &m_app_config.alarm_humidity_hi,
+		    sizeof(m_app_config.alarm_humidity_hi));
+	EXPORT_FUNC("alarm-humidity-hst", &m_app_config.alarm_humidity_hst,
+		    sizeof(m_app_config.alarm_humidity_hst));
+	EXPORT_FUNC("alarm-pressure-lo", &m_app_config.alarm_pressure_lo,
+		    sizeof(m_app_config.alarm_pressure_lo));
+	EXPORT_FUNC("alarm-pressure-hi", &m_app_config.alarm_pressure_hi,
+		    sizeof(m_app_config.alarm_pressure_hi));
+	EXPORT_FUNC("alarm-pressure-hst", &m_app_config.alarm_pressure_hst,
+		    sizeof(m_app_config.alarm_pressure_hst));
 	EXPORT_FUNC("corr-temperature", &m_app_config.corr_temperature,
 		    sizeof(m_app_config.corr_temperature));
 	EXPORT_FUNC("corr-ext-temperature-1", &m_app_config.corr_ext_temperature_1,
@@ -463,6 +538,96 @@ static void print_lrw_appskey(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " lrw-appskey %s", buf);
 }
 
+static void print_alarm_int_temp_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-int-temp-lo %.2f",
+		    (double)m_app_config.alarm_int_temp_lo);
+}
+
+static void print_alarm_int_temp_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-int-temp-hi %.2f",
+		    (double)m_app_config.alarm_int_temp_hi);
+}
+
+static void print_alarm_int_temp_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-int-temp-hst %.2f",
+		    (double)m_app_config.alarm_int_temp_hst);
+}
+
+static void print_alarm_t1_temp_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-t1-temp-lo %.2f",
+		    (double)m_app_config.alarm_t1_temp_lo);
+}
+
+static void print_alarm_t1_temp_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-t1-temp-hi %.2f",
+		    (double)m_app_config.alarm_t1_temp_hi);
+}
+
+static void print_alarm_t1_temp_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-t1-temp-hst %.2f",
+		    (double)m_app_config.alarm_t1_temp_hst);
+}
+
+static void print_alarm_t2_temp_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-t2-temp-lo %.2f",
+		    (double)m_app_config.alarm_t2_temp_lo);
+}
+
+static void print_alarm_t2_temp_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-t2-temp-hi %.2f",
+		    (double)m_app_config.alarm_t2_temp_hi);
+}
+
+static void print_alarm_t2_temp_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-t2-temp-hst %.2f",
+		    (double)m_app_config.alarm_t2_temp_hst);
+}
+
+static void print_alarm_humidity_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-humidity-lo %.2f",
+		    (double)m_app_config.alarm_humidity_lo);
+}
+
+static void print_alarm_humidity_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-humidity-hi %.2f",
+		    (double)m_app_config.alarm_humidity_hi);
+}
+
+static void print_alarm_humidity_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-humidity-hst %.2f",
+		    (double)m_app_config.alarm_humidity_hst);
+}
+
+static void print_alarm_pressure_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-pressure-lo %.2f",
+		    (double)m_app_config.alarm_pressure_lo);
+}
+
+static void print_alarm_pressure_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-pressure-hi %.2f",
+		    (double)m_app_config.alarm_pressure_hi);
+}
+
+static void print_alarm_pressure_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-pressure-hst %.2f",
+		    (double)m_app_config.alarm_pressure_hst);
+}
+
 static void print_corr_temperature(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " corr-temperature %.2f",
@@ -554,6 +719,21 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_lrw_devaddr(shell);
 	print_lrw_nwkskey(shell);
 	print_lrw_appskey(shell);
+	print_alarm_int_temp_lo(shell);
+	print_alarm_int_temp_hi(shell);
+	print_alarm_int_temp_hst(shell);
+	print_alarm_t1_temp_lo(shell);
+	print_alarm_t1_temp_hi(shell);
+	print_alarm_t1_temp_hst(shell);
+	print_alarm_t2_temp_lo(shell);
+	print_alarm_t2_temp_hi(shell);
+	print_alarm_t2_temp_hst(shell);
+	print_alarm_humidity_lo(shell);
+	print_alarm_humidity_hi(shell);
+	print_alarm_humidity_hst(shell);
+	print_alarm_pressure_lo(shell);
+	print_alarm_pressure_hi(shell);
+	print_alarm_pressure_hst(shell);
 	print_corr_temperature(shell);
 	print_corr_ext_temperature_1(shell);
 	print_corr_ext_temperature_2(shell);
@@ -1077,6 +1257,366 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_alarm_int_temp_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_int_temp_lo(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < -30.0f || a > 70.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_int_temp_lo = a;
+
+	return 0;
+}
+
+static int cmd_alarm_int_temp_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_int_temp_hi(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < -30.0f || a > 70.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_int_temp_hi = a;
+
+	return 0;
+}
+
+static int cmd_alarm_int_temp_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_int_temp_hst(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < 0.0f || a > 5.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_int_temp_hst = a;
+
+	return 0;
+}
+
+static int cmd_alarm_t1_temp_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_t1_temp_lo(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < -30.0f || a > 70.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_t1_temp_lo = a;
+
+	return 0;
+}
+
+static int cmd_alarm_t1_temp_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_t1_temp_hi(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < -30.0f || a > 70.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_t1_temp_hi = a;
+
+	return 0;
+}
+
+static int cmd_alarm_t1_temp_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_t1_temp_hst(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < 0.0f || a > 5.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_t1_temp_hst = a;
+
+	return 0;
+}
+
+static int cmd_alarm_t2_temp_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_t2_temp_lo(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < -30.0f || a > 70.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_t2_temp_lo = a;
+
+	return 0;
+}
+
+static int cmd_alarm_t2_temp_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_t2_temp_hi(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < -30.0f || a > 70.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_t2_temp_hi = a;
+
+	return 0;
+}
+
+static int cmd_alarm_t2_temp_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_t2_temp_hst(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < 0.0f || a > 5.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_t2_temp_hst = a;
+
+	return 0;
+}
+
+static int cmd_alarm_humidity_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_humidity_lo(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < 0.0f || a > 100.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_humidity_lo = a;
+
+	return 0;
+}
+
+static int cmd_alarm_humidity_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_humidity_hi(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < 0.0f || a > 100.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_humidity_hi = a;
+
+	return 0;
+}
+
+static int cmd_alarm_humidity_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_humidity_hst(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < 0.0f || a > 20.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_humidity_hst = a;
+
+	return 0;
+}
+
+static int cmd_alarm_pressure_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_pressure_lo(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < 500.0f || a > 1200.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_pressure_lo = a;
+
+	return 0;
+}
+
+static int cmd_alarm_pressure_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_pressure_hi(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < 500.0f || a > 1200.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_pressure_hi = a;
+
+	return 0;
+}
+
+static int cmd_alarm_pressure_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_pressure_hst(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	float a = atof(argv[1]);
+
+	if (a < 0.0f || a > 50.0f) {
+		shell_error(shell, "invalid argument range");
+		return -EINVAL;
+	}
+
+	m_app_config.alarm_pressure_hst = a;
+
+	return 0;
+}
+
 static int cmd_corr_temperature(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -1463,16 +2003,76 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set LoRaWAN AppSKey (32 hexadecimal digits).",
 	              cmd_lrw_appskey, 1, 1),
 
+	SHELL_CMD_ARG(alarm-int-temp-lo, NULL,
+	              "Get/Set internal temp low threshold (-30 to 70 deg. C).",
+	              cmd_alarm_int_temp_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-int-temp-hi, NULL,
+	              "Get/Set internal temp high threshold (-30 to 70 deg. C).",
+	              cmd_alarm_int_temp_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-int-temp-hst, NULL,
+	              "Get/Set internal temp hysteresis (0 to 5 deg. C).",
+	              cmd_alarm_int_temp_hst, 1, 1),
+
+	SHELL_CMD_ARG(alarm-t1-temp-lo, NULL,
+	              "Get/Set external temp 1 low threshold (-30 to 70 deg. C).",
+	              cmd_alarm_t1_temp_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-t1-temp-hi, NULL,
+	              "Get/Set external temp 1 high threshold (-30 to 70 deg. C).",
+	              cmd_alarm_t1_temp_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-t1-temp-hst, NULL,
+	              "Get/Set external temp 1 hysteresis (0 to 5 deg. C).",
+	              cmd_alarm_t1_temp_hst, 1, 1),
+
+	SHELL_CMD_ARG(alarm-t2-temp-lo, NULL,
+	              "Get/Set external temp 2 low threshold (-30 to 70 deg. C).",
+	              cmd_alarm_t2_temp_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-t2-temp-hi, NULL,
+	              "Get/Set external temp 2 high threshold (-30 to 70 deg. C).",
+	              cmd_alarm_t2_temp_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-t2-temp-hst, NULL,
+	              "Get/Set external temp 2 hysteresis (0 to 5 deg. C).",
+	              cmd_alarm_t2_temp_hst, 1, 1),
+
+	SHELL_CMD_ARG(alarm-humidity-lo, NULL,
+	              "Get/Set humidity low threshold (0 to 100 %).",
+	              cmd_alarm_humidity_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-humidity-hi, NULL,
+	              "Get/Set humidity high threshold (0 to 100 %).",
+	              cmd_alarm_humidity_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-humidity-hst, NULL,
+	              "Get/Set humidity hysteresis (0 to 20 %).",
+	              cmd_alarm_humidity_hst, 1, 1),
+
+	SHELL_CMD_ARG(alarm-pressure-lo, NULL,
+	              "Get/Set pressure low threshold (500 to 1200 hPa).",
+	              cmd_alarm_pressure_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-pressure-hi, NULL,
+	              "Get/Set pressure high threshold (500 to 1200 hPa).",
+	              cmd_alarm_pressure_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-pressure-hst, NULL,
+	              "Get/Set pressure hysteresis (0 to 50 hPa).",
+	              cmd_alarm_pressure_hst, 1, 1),
+
 	SHELL_CMD_ARG(corr-temperature, NULL,
-	              "Get/Set temperature correction (range -5.0 to +5.0 degrees of Celsius).",
+	              "Get/Set temperature correction (range -5.0 to +5.0 deg. C).",
 	              cmd_corr_temperature, 1, 1),
 
 	SHELL_CMD_ARG(corr-ext-temperature-1, NULL,
-	              "Get/Set external temperature 1 correction (range -5.0 to +5.0 degrees of Celsius).",
+	              "Get/Set external temperature 1 correction (range -5.0 to +5.0 deg. C).",
 	              cmd_corr_ext_temperature_1, 1, 1),
 
 	SHELL_CMD_ARG(corr-ext-temperature-2, NULL,
-	              "Get/Set external temperature 2 correction (range -5.0 to +5.0 degrees of Celsius).",
+	              "Get/Set external temperature 2 correction (range -5.0 to +5.0 deg. C).",
 	              cmd_corr_ext_temperature_2, 1, 1),
 
 	SHELL_CMD_ARG(has-mpl3115a2, NULL,

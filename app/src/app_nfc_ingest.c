@@ -92,7 +92,96 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 			config->interval_report = message->application.interval_report;
 		}
 
-		/* Hall switch configuration */
+		if (message->application.has_alarm_int_temp_lo) {
+			LOG_INF("Parameter `application.alarm_int_temp_lo`: %.2f",
+				(double)message->application.alarm_int_temp_lo);
+			config->alarm_int_temp_lo = message->application.alarm_int_temp_lo;
+		}
+
+		if (message->application.has_alarm_int_temp_hi) {
+			LOG_INF("Parameter `application.alarm_int_temp_hi`: %.2f",
+				(double)message->application.alarm_int_temp_hi);
+			config->alarm_int_temp_hi = message->application.alarm_int_temp_hi;
+		}
+
+		if (message->application.has_alarm_int_temp_hst) {
+			LOG_INF("Parameter `application.alarm_int_temp_hst`: %.2f",
+				(double)message->application.alarm_int_temp_hst);
+			config->alarm_int_temp_hst = message->application.alarm_int_temp_hst;
+		}
+
+		if (message->application.has_alarm_t1_temp_lo) {
+			LOG_INF("Parameter `application.alarm_t1_temp_lo`: %.2f",
+				(double)message->application.alarm_t1_temp_lo);
+			config->alarm_t1_temp_lo = message->application.alarm_t1_temp_lo;
+		}
+
+		if (message->application.has_alarm_t1_temp_hi) {
+			LOG_INF("Parameter `application.alarm_t1_temp_hi`: %.2f",
+				(double)message->application.alarm_t1_temp_hi);
+			config->alarm_t1_temp_hi = message->application.alarm_t1_temp_hi;
+		}
+
+		if (message->application.has_alarm_t1_temp_hst) {
+			LOG_INF("Parameter `application.alarm_t1_temp_hst`: %.2f",
+				(double)message->application.alarm_t1_temp_hst);
+			config->alarm_t1_temp_hst = message->application.alarm_t1_temp_hst;
+		}
+
+		if (message->application.has_alarm_t2_temp_lo) {
+			LOG_INF("Parameter `application.alarm_t2_temp_lo`: %.2f",
+				(double)message->application.alarm_t2_temp_lo);
+			config->alarm_t2_temp_lo = message->application.alarm_t2_temp_lo;
+		}
+
+		if (message->application.has_alarm_t2_temp_hi) {
+			LOG_INF("Parameter `application.alarm_t2_temp_hi`: %.2f",
+				(double)message->application.alarm_t2_temp_hi);
+			config->alarm_t2_temp_hi = message->application.alarm_t2_temp_hi;
+		}
+
+		if (message->application.has_alarm_t2_temp_hst) {
+			LOG_INF("Parameter `application.alarm_t2_temp_hst`: %.2f",
+				(double)message->application.alarm_t2_temp_hst);
+			config->alarm_t2_temp_hst = message->application.alarm_t2_temp_hst;
+		}
+
+		if (message->application.has_alarm_humidity_lo) {
+			LOG_INF("Parameter `application.alarm_humidity_lo`: %.2f",
+				(double)message->application.alarm_humidity_lo);
+			config->alarm_humidity_lo = message->application.alarm_humidity_lo;
+		}
+
+		if (message->application.has_alarm_humidity_hi) {
+			LOG_INF("Parameter `application.alarm_humidity_hi`: %.2f",
+				(double)message->application.alarm_humidity_hi);
+			config->alarm_humidity_hi = message->application.alarm_humidity_hi;
+		}
+
+		if (message->application.has_alarm_humidity_hst) {
+			LOG_INF("Parameter `application.alarm_humidity_hst`: %.2f",
+				(double)message->application.alarm_humidity_hst);
+			config->alarm_humidity_hst = message->application.alarm_humidity_hst;
+		}
+
+		if (message->application.has_alarm_pressure_lo) {
+			LOG_INF("Parameter `application.alarm_pressure_lo`: %.2f",
+				(double)message->application.alarm_pressure_lo);
+			config->alarm_pressure_lo = message->application.alarm_pressure_lo;
+		}
+
+		if (message->application.has_alarm_pressure_hi) {
+			LOG_INF("Parameter `application.alarm_pressure_hi`: %.2f",
+				(double)message->application.alarm_pressure_hi);
+			config->alarm_pressure_hi = message->application.alarm_pressure_hi;
+		}
+
+		if (message->application.has_alarm_pressure_hst) {
+			LOG_INF("Parameter `application.alarm_pressure_hst`: %.2f",
+				(double)message->application.alarm_pressure_hst);
+			config->alarm_pressure_hst = message->application.alarm_pressure_hst;
+		}
+
 		if (message->application.has_hall_left_enabled) {
 			LOG_INF("Parameter `application.hall_left_enabled`: %s",
 				message->application.hall_left_enabled ? "true" : "false");

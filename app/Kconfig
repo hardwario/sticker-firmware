@@ -37,66 +37,6 @@ config APP_ALARM_PRESSURE
 	bool "Enable alarm for pressure"
 	default y
 
-config APP_ALARM_INT_TEMP_THR_LO_MUL_100
-	int "Alarm internal temperature threshold low multiplied by 100"
-	default 200
-
-config APP_ALARM_INT_TEMP_THR_HI_MUL_100
-	int "Alarm internal temperature threshold high multiplied by 100"
-	default 800
-
-config APP_ALARM_INT_TEMP_HST_MUL_100
-	int "Alarm internal temperature hysteresis multiplied by 100"
-	default 50
-
-config APP_ALARM_EXT_TEMP_1_THR_LO_MUL_100
-	int "Alarm external temperature 1 threshold low multiplied by 100"
-	default 200
-
-config APP_ALARM_EXT_TEMP_1_THR_HI_MUL_100
-	int "Alarm external temperature 1 threshold high multiplied by 100"
-	default 800
-
-config APP_ALARM_EXT_TEMP_1_HST_MUL_100
-	int "Alarm external temperature 1 hysteresis multiplied by 100"
-	default 50
-
-config APP_ALARM_EXT_TEMP_2_THR_LO_MUL_100
-	int "Alarm external temperature 2 low multiplied by 100"
-	default 200
-
-config APP_ALARM_EXT_TEMP_2_THR_HI_MUL_100
-	int "Alarm external temperature 2 threshold high multiplied by 100"
-	default 800
-
-config APP_ALARM_EXT_TEMP_2_HST_MUL_100
-	int "Alarm external temperature 2 hysteresis multiplied by 100"
-	default 50
-
-config APP_ALARM_HUMIDITY_THR_LO_MUL_10
-	int "Alarm humidity threshold low multiplied by 10"
-	default 300
-
-config APP_ALARM_HUMIDITY_THR_HI_MUL_10
-	int "Alarm humidity threshold high multiplied by 10"
-	default 750
-
-config APP_ALARM_HUMIDITY_HST_MUL_10
-	int "Alarm humidity hysteresis multiplied by 10"
-	default 50
-
-config APP_ALARM_PRESSURE_THR_LO
-	int "Alarm pressure threshold low"
-	default 700
-
-config APP_ALARM_PRESSURE_THR_HI
-	int "Alarm pressure threshold high"
-	default 1060
-
-config APP_ALARM_PRESSURE_HST
-	int "Alarm pressure hysteresis"
-	default 10
-
 endmenu
 
 menu "Zephyr Kernel"
