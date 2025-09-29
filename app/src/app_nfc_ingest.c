@@ -229,5 +229,11 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 				message->application.hall_right_notify_deact ? "true" : "false");
 			config->hall_right_notify_deact = message->application.hall_right_notify_deact;
 		}
+
+		if (message->application.has_barometer_enabled) {
+			LOG_INF("Parameter `application.barometer_enabled`: %s",
+				message->application.barometer_enabled ? "true" : "false");
+			config->barometer_enabled = message->application.barometer_enabled;
+		}
 	}
 }

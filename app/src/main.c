@@ -86,7 +86,7 @@ int main(void)
 		}
 	}
 
-	if (g_app_config.has_mpl3115a2) {
+	if (g_app_config.barometer_enabled) {
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(mpl3115a2));
 
 		ret = device_init(dev);

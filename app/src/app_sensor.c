@@ -178,7 +178,7 @@ void app_sensor_sample(void)
 	}
 #endif /* defined(CONFIG_DS28E17) */
 
-	if (g_app_config.has_mpl3115a2) {
+	if (g_app_config.barometer_enabled) {
 		ret = app_mpl3115a2_read(&altitude, &pressure, NULL);
 		if (ret) {
 			LOG_ERR("Call `app_mpl3115a2_read` failed: %d", ret);

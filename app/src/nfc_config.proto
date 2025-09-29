@@ -68,5 +68,6 @@ message NfcConfigMessage {
         optional bool hall_right_counter = 25;
         optional bool hall_right_notify_act = 26;
         optional bool hall_right_notify_deact = 27;
+        optional bool barometer_enabled = 28;
     }
 }

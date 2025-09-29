@@ -67,7 +67,6 @@ struct app_config {
 	float corr_temperature;
 	float corr_ext_temperature_1;
 	float corr_ext_temperature_2;
-	bool has_mpl3115a2;
 	bool hall_left_enabled;
 	bool hall_left_counter;
 	bool hall_left_notify_act;
@@ -76,6 +75,7 @@ struct app_config {
 	bool hall_right_counter;
 	bool hall_right_notify_act;
 	bool hall_right_notify_deact;
+	bool barometer_enabled;
 };
 
 extern struct app_config g_app_config;
