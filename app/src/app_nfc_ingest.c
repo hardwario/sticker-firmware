@@ -150,6 +150,12 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 			config->interval_report = message->application.interval_report;
 		}
 
+		if (message->application.has_alarm_temperature_enabled) {
+			LOG_INF("Parameter `application.alarm_temperature_enabled`: %s",
+				message->application.alarm_temperature_enabled ? "true" : "false");
+			config->alarm_temperature_enabled = message->application.alarm_temperature_enabled;
+		}
+
 		if (message->application.has_alarm_temperature_lo) {
 			LOG_INF("Parameter `application.alarm_temperature_lo`: %.2f",
 				(double)message->application.alarm_temperature_lo);
@@ -166,6 +172,12 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 			LOG_INF("Parameter `application.alarm_temperature_hst`: %.2f",
 				(double)message->application.alarm_temperature_hst);
 			config->alarm_temperature_hst = message->application.alarm_temperature_hst;
+		}
+
+		if (message->application.has_alarm_humidity_enabled) {
+			LOG_INF("Parameter `application.alarm_humidity_enabled`: %s",
+				message->application.alarm_humidity_enabled ? "true" : "false");
+			config->alarm_humidity_enabled = message->application.alarm_humidity_enabled;
 		}
 
 		if (message->application.has_alarm_humidity_lo) {
@@ -186,6 +198,12 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 			config->alarm_humidity_hst = message->application.alarm_humidity_hst;
 		}
 
+		if (message->application.has_alarm_pressure_enabled) {
+			LOG_INF("Parameter `application.alarm_pressure_enabled`: %s",
+				message->application.alarm_pressure_enabled ? "true" : "false");
+			config->alarm_pressure_enabled = message->application.alarm_pressure_enabled;
+		}
+
 		if (message->application.has_alarm_pressure_lo) {
 			LOG_INF("Parameter `application.alarm_pressure_lo`: %.2f",
 				(double)message->application.alarm_pressure_lo);
@@ -202,6 +220,12 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 			LOG_INF("Parameter `application.alarm_pressure_hst`: %.2f",
 				(double)message->application.alarm_pressure_hst);
 			config->alarm_pressure_hst = message->application.alarm_pressure_hst;
+		}
+
+		if (message->application.has_alarm_t1_temperature_enabled) {
+			LOG_INF("Parameter `application.alarm_t1_temperature_enabled`: %s",
+				message->application.alarm_t1_temperature_enabled ? "true" : "false");
+			config->alarm_t1_temperature_enabled = message->application.alarm_t1_temperature_enabled;
 		}
 
 		if (message->application.has_alarm_t1_temperature_lo) {
@@ -223,6 +247,12 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 				(double)message->application.alarm_t1_temperature_hst);
 			config->alarm_t1_temperature_hst =
 				message->application.alarm_t1_temperature_hst;
+		}
+
+		if (message->application.has_alarm_t2_temperature_enabled) {
+			LOG_INF("Parameter `application.alarm_t2_temperature_enabled`: %s",
+				message->application.alarm_t2_temperature_enabled ? "true" : "false");
+			config->alarm_t2_temperature_enabled = message->application.alarm_t2_temperature_enabled;
 		}
 
 		if (message->application.has_alarm_t2_temperature_lo) {

@@ -143,22 +143,25 @@ bool app_alarm_is_active(void)
 
 	bool alarm = false;
 
-#if defined(CONFIG_APP_ALARM_TEMPERATURE)
-	alarm = alarm_temperature ? true : alarm;
-#endif /* defined(CONFIG_APP_ALARM_TEMPERATURE) */
+	if (g_app_config.alarm_temperature_enabled) {
+		alarm = alarm_temperature ? true : alarm;
+	}
 
-#if defined(CONFIG_APP_ALARM_HUMIDITY)
-	alarm = alarm_humidity ? true : alarm;
-#endif /* defined(CONFIG_APP_ALARM_HUMIDITY) */
+	if (g_app_config.alarm_humidity_enabled) {
+		alarm = alarm_humidity ? true : alarm;
+	}
 
-#if defined(CONFIG_APP_ALARM_PRESSURE)
-	alarm = alarm_pressure ? true : alarm;
-#endif /* defined(CONFIG_APP_ALARM_PRESSURE) */
+	if (g_app_config.alarm_pressure_enabled) {
+		alarm = alarm_pressure ? true : alarm;
+	}
 
-#if defined(CONFIG_APP_ALARM_EXT_TEMP)
-	alarm = alarm_t1_temperature ? true : alarm;
-	alarm = alarm_t2_temperature ? true : alarm;
-#endif /* defined(CONFIG_APP_ALARM_EXT_TEMP) */
+	if (g_app_config.alarm_t1_temperature_enabled) {
+		alarm = alarm_t1_temperature ? true : alarm;
+	}
+
+	if (g_app_config.alarm_t2_temperature_enabled) {
+		alarm = alarm_t2_temperature ? true : alarm;
+	}
 
 	return alarm;
 }

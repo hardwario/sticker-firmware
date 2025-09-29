@@ -5,23 +5,6 @@
 #
 
 menu "Application"
-
-config APP_ALARM_INT_TEMP
-	bool "Enable alarm for internal temperature"
-	default y
-
-config APP_ALARM_EXT_TEMP
-	bool "Enable alarm for external temperature"
-	default y
-
-config APP_ALARM_HUMIDITY
-	bool "Enable alarm for humidity"
-	default y
-
-config APP_ALARM_PRESSURE
-	bool "Enable alarm for pressure"
-	default y
-
 endmenu
 
 menu "Zephyr Kernel"
