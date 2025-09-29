@@ -6,21 +6,6 @@
 
 menu "Application"
 
-choice APP_PROFILE_STICKER
-	prompt "Application profile STICKER"
-
-config APP_PROFILE_STICKER_CLIME
-	bool "Application profile STICKER Clime"
-
-config APP_PROFILE_STICKER_INPUT
-	bool "Application profile STICKER Input"
-	select W1
-
-config APP_PROFILE_STICKER_MOTION
-	bool "Application profile STICKER Motion"
-
-endchoice # APP_PROFILE_STICKER
-
 config APP_ALARM_INT_TEMP
 	bool "Enable alarm for internal temperature"
 	default y

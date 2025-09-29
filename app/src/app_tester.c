@@ -110,15 +110,10 @@ static void cmd_print_t2_temperature(const struct shell *shell)
 		    (double)g_app_sensor_data.t2_temperature);
 }
 
-#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
-
 static void cmd_print_motion_count(const struct shell *shell)
 {
-	app_sensor_sample();
-	shell_print(shell, SHELL_PFX " motion_count %d", (int)g_app_sensor_data.motion_count);
+	shell_print(shell, SHELL_PFX " motion count %d", (int)g_app_sensor_data.motion_count);
 }
-
-#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_test, SHELL_CMD_ARG(led_cycle, NULL, "Cycle LED (R/G/Y).", cmd_cycle_led, 1, 0),
@@ -133,11 +128,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      0),
 	SHELL_CMD_ARG(t2_temperature, NULL, "Print T2 temperature.", cmd_print_t2_temperature, 1,
 		      0),
-
-#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
 	SHELL_CMD_ARG(motion, NULL, "Print number of PIR activations", cmd_print_motion_count, 1,
 		      0),
-#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
 
 	SHELL_SUBCMD_SET_END);
 

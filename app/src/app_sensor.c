@@ -229,8 +229,6 @@ static void sensor_timer_handler(struct k_timer *timer)
 
 static K_TIMER_DEFINE(m_sensor_timer, sensor_timer_handler, NULL);
 
-#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
-
 static void pyq1648_event_handler(void *user_data)
 {
 	LOG_INF("Motion detected");
@@ -244,8 +242,6 @@ static void pyq1648_event_handler(void *user_data)
 	app_led_set(APP_LED_CHANNEL_Y, 0);
 }
 
-#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
-
 static int init(void)
 {
 	int ret;
@@ -257,9 +253,15 @@ static int init(void)
 		return ret;
 	}
 
-#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
-	app_pyq1648_set_callback(pyq1648_event_handler, NULL);
-#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
+	if (g_app_config.pir_detector_enabled) {
+		ret = app_pyq1648_init();
+		if (ret) {
+			LOG_ERR("Call `app_pyq1648_init` failed: %d", ret);
+			return ret;
+		}
+
+		app_pyq1648_set_callback(pyq1648_event_handler, NULL);
+	}
 
 #if defined(CONFIG_DS18B20)
 	ret = app_ds18b20_scan();

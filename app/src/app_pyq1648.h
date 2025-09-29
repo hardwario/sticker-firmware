@@ -13,6 +13,7 @@ extern "C" {
 
 typedef void (*app_pyq1648_callback)(void *user_data);
 
+int app_pyq1648_init(void);
 void app_pyq1648_set_callback(app_pyq1648_callback callback, void *user_data);
 
 #ifdef __cplusplus

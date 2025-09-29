@@ -10,7 +10,6 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/init.h>
 #include <zephyr/irq.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -34,25 +33,15 @@ struct pyq1648_config {
 	int bit;
 };
 
-static K_MUTEX_DEFINE(m_lock);
-static K_THREAD_STACK_DEFINE(m_stack_area, 2048);
-static struct k_thread m_thread;
-
 static const struct gpio_dt_spec m_si_spec = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), pir_si_gpios);
 static const struct gpio_dt_spec m_dl_spec = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), pir_dl_gpios);
 
+static K_THREAD_STACK_DEFINE(m_stack_area, 2048);
+static struct k_thread m_thread;
+
+static K_MUTEX_DEFINE(m_lock);
 static app_pyq1648_callback m_callback;
 static void *m_user_data;
-
-void app_pyq1648_set_callback(app_pyq1648_callback callback, void *user_data)
-{
-	k_mutex_lock(&m_lock, K_FOREVER);
-
-	m_callback = callback;
-	m_user_data = user_data;
-
-	k_mutex_unlock(&m_lock);
-}
 
 static void write_bit(struct pyq1648_config *config, int value)
 {
@@ -178,7 +167,7 @@ static void thread(void *p1, void *p2, void *p3)
 	}
 }
 
-static int init(void)
+int app_pyq1648_init(void)
 {
 	int ret;
 
@@ -223,4 +212,10 @@ static int init(void)
 	return 0;
 }
 
-SYS_INIT(init, APPLICATION, 99);
+void app_pyq1648_set_callback(app_pyq1648_callback callback, void *user_data)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+	m_callback = callback;
+	m_user_data = user_data;
+	k_mutex_unlock(&m_lock);
+}

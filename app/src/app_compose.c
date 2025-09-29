@@ -91,10 +91,10 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		header |= BIT(24);
 	}
 
-#if defined(CONFIG_APP_PROFILE_STICKER_MOTION)
 	motion_count = g_app_sensor_data.motion_count;
-	header |= BIT(23);
-#endif /* defined(CONFIG_APP_PROFILE_STICKER_MOTION) */
+	if (motion_count > 0) {
+		header |= BIT(23);
+	}
 
 	if (!isnan(g_app_sensor_data.altitude)) {
 		altitude = (int16_t)(g_app_sensor_data.altitude * 10);
