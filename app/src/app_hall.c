@@ -45,15 +45,15 @@ static int poll(void)
 	right_was_active = m_hall_data.right_is_active;
 	k_mutex_unlock(&m_hall_data_mutex);
 
-	if (!g_app_config.hall_left_enabled) {
+	if (!g_app_config.cap_hall_left) {
 		left_is_active = false;
 	}
 
-	if (!g_app_config.hall_right_enabled) {
+	if (!g_app_config.cap_hall_right) {
 		right_is_active = false;
 	}
 
-	if (g_app_config.hall_left_enabled) {
+	if (g_app_config.cap_hall_left) {
 		ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_UP);
 		if (ret) {
 			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
@@ -61,7 +61,7 @@ static int poll(void)
 		}
 	}
 
-	if (g_app_config.hall_right_enabled) {
+	if (g_app_config.cap_hall_right) {
 		ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_UP);
 		if (ret) {
 			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
@@ -71,15 +71,15 @@ static int poll(void)
 
 	k_busy_wait(2);
 
-	if (g_app_config.hall_left_enabled) {
+	if (g_app_config.cap_hall_left) {
 		left_is_active = !gpio_pin_get_dt(&m_hall_left);
 	}
 
-	if (g_app_config.hall_right_enabled) {
+	if (g_app_config.cap_hall_right) {
 		right_is_active = !gpio_pin_get_dt(&m_hall_right);
 	}
 
-	if (g_app_config.hall_left_enabled) {
+	if (g_app_config.cap_hall_left) {
 		ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_DOWN);
 		if (ret) {
 			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
@@ -87,7 +87,7 @@ static int poll(void)
 		}
 	}
 
-	if (g_app_config.hall_right_enabled) {
+	if (g_app_config.cap_hall_right) {
 		ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_DOWN);
 		if (ret) {
 			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
@@ -151,7 +151,7 @@ static int poll(void)
 
 static void hall_poll_work_handler(struct k_work *work)
 {
-	if (!g_app_config.hall_left_enabled && !g_app_config.hall_right_enabled) {
+	if (!g_app_config.cap_hall_left && !g_app_config.cap_hall_right) {
 		return;
 	}
 

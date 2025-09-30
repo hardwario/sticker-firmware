@@ -136,32 +136,38 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.alarm_t2_temperature_hi));
 	SETTINGS_SET("alarm-t2-temperature-hst", &m_app_config.alarm_t2_temperature_hst,
 		     sizeof(m_app_config.alarm_t2_temperature_hst));
-	SETTINGS_SET("hall-left-enabled", &m_app_config.hall_left_enabled,
-		     sizeof(m_app_config.hall_left_enabled));
 	SETTINGS_SET("hall-left-counter", &m_app_config.hall_left_counter,
 		     sizeof(m_app_config.hall_left_counter));
 	SETTINGS_SET("hall-left-notify-act", &m_app_config.hall_left_notify_act,
 		     sizeof(m_app_config.hall_left_notify_act));
 	SETTINGS_SET("hall-left-notify-deact", &m_app_config.hall_left_notify_deact,
 		     sizeof(m_app_config.hall_left_notify_deact));
-	SETTINGS_SET("hall-right-enabled", &m_app_config.hall_right_enabled,
-		     sizeof(m_app_config.hall_right_enabled));
 	SETTINGS_SET("hall-right-counter", &m_app_config.hall_right_counter,
 		     sizeof(m_app_config.hall_right_counter));
 	SETTINGS_SET("hall-right-notify-act", &m_app_config.hall_right_notify_act,
 		     sizeof(m_app_config.hall_right_notify_act));
 	SETTINGS_SET("hall-right-notify-deact", &m_app_config.hall_right_notify_deact,
 		     sizeof(m_app_config.hall_right_notify_deact));
-	SETTINGS_SET("barometer-enabled", &m_app_config.barometer_enabled,
-		     sizeof(m_app_config.barometer_enabled));
-	SETTINGS_SET("pir-detector-enabled", &m_app_config.pir_detector_enabled,
-		     sizeof(m_app_config.pir_detector_enabled));
 	SETTINGS_SET("corr-temperature", &m_app_config.corr_temperature,
 		     sizeof(m_app_config.corr_temperature));
 	SETTINGS_SET("corr-t1-temperature", &m_app_config.corr_t1_temperature,
 		     sizeof(m_app_config.corr_t1_temperature));
 	SETTINGS_SET("corr-t2-temperature", &m_app_config.corr_t2_temperature,
 		     sizeof(m_app_config.corr_t2_temperature));
+	SETTINGS_SET("cap-hall-left", &m_app_config.cap_hall_left,
+		     sizeof(m_app_config.cap_hall_left));
+	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
+		     sizeof(m_app_config.cap_hall_right));
+	SETTINGS_SET("cap-light-sensor", &m_app_config.cap_light_sensor,
+		     sizeof(m_app_config.cap_light_sensor));
+	SETTINGS_SET("cap-barometer", &m_app_config.cap_barometer,
+		     sizeof(m_app_config.cap_barometer));
+	SETTINGS_SET("cap-pir-detector", &m_app_config.cap_pir_detector,
+		     sizeof(m_app_config.cap_pir_detector));
+	SETTINGS_SET("cap-1w-thermometer", &m_app_config.cap_1w_thermometer,
+		     sizeof(m_app_config.cap_1w_thermometer));
+	SETTINGS_SET("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
+		     sizeof(m_app_config.cap_1w_machine_probe));
 
 #undef SETTINGS_SET
 
@@ -245,32 +251,38 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.alarm_t2_temperature_hi));
 	EXPORT_FUNC("alarm-t2-temperature-hst", &m_app_config.alarm_t2_temperature_hst,
 		    sizeof(m_app_config.alarm_t2_temperature_hst));
-	EXPORT_FUNC("hall-left-enabled", &m_app_config.hall_left_enabled,
-		    sizeof(m_app_config.hall_left_enabled));
 	EXPORT_FUNC("hall-left-counter", &m_app_config.hall_left_counter,
 		    sizeof(m_app_config.hall_left_counter));
 	EXPORT_FUNC("hall-left-notify-act", &m_app_config.hall_left_notify_act,
 		    sizeof(m_app_config.hall_left_notify_act));
 	EXPORT_FUNC("hall-left-notify-deact", &m_app_config.hall_left_notify_deact,
 		    sizeof(m_app_config.hall_left_notify_deact));
-	EXPORT_FUNC("hall-right-enabled", &m_app_config.hall_right_enabled,
-		    sizeof(m_app_config.hall_right_enabled));
 	EXPORT_FUNC("hall-right-counter", &m_app_config.hall_right_counter,
 		    sizeof(m_app_config.hall_right_counter));
 	EXPORT_FUNC("hall-right-notify-act", &m_app_config.hall_right_notify_act,
 		    sizeof(m_app_config.hall_right_notify_act));
 	EXPORT_FUNC("hall-right-notify-deact", &m_app_config.hall_right_notify_deact,
 		    sizeof(m_app_config.hall_right_notify_deact));
-	EXPORT_FUNC("barometer-enabled", &m_app_config.barometer_enabled,
-		    sizeof(m_app_config.barometer_enabled));
-	EXPORT_FUNC("pir-detector-enabled", &m_app_config.pir_detector_enabled,
-		    sizeof(m_app_config.pir_detector_enabled));
 	EXPORT_FUNC("corr-temperature", &m_app_config.corr_temperature,
 		    sizeof(m_app_config.corr_temperature));
 	EXPORT_FUNC("corr-t1-temperature", &m_app_config.corr_t1_temperature,
 		    sizeof(m_app_config.corr_t1_temperature));
 	EXPORT_FUNC("corr-t2-temperature", &m_app_config.corr_t2_temperature,
 		    sizeof(m_app_config.corr_t2_temperature));
+	EXPORT_FUNC("cap-hall-left", &m_app_config.cap_hall_left,
+		    sizeof(m_app_config.cap_hall_left));
+	EXPORT_FUNC("cap-hall-right", &m_app_config.cap_hall_right,
+		    sizeof(m_app_config.cap_hall_right));
+	EXPORT_FUNC("cap-light-sensor", &m_app_config.cap_light_sensor,
+		    sizeof(m_app_config.cap_light_sensor));
+	EXPORT_FUNC("cap-barometer", &m_app_config.cap_barometer,
+		    sizeof(m_app_config.cap_barometer));
+	EXPORT_FUNC("cap-pir-detector", &m_app_config.cap_pir_detector,
+		    sizeof(m_app_config.cap_pir_detector));
+	EXPORT_FUNC("cap-1w-thermometer", &m_app_config.cap_1w_thermometer,
+		    sizeof(m_app_config.cap_1w_thermometer));
+	EXPORT_FUNC("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
+		    sizeof(m_app_config.cap_1w_machine_probe));
 
 #undef EXPORT_FUNC
 
@@ -682,11 +694,6 @@ static void print_alarm_t2_temperature_hst(const struct shell *shell)
 		    (double)m_app_config.alarm_t2_temperature_hst);
 }
 
-static void print_hall_left_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-left-enabled %s",
-		    m_app_config.hall_left_enabled ? "true" : "false");
-}
 
 static void print_hall_left_counter(const struct shell *shell)
 {
@@ -706,11 +713,6 @@ static void print_hall_left_notify_deact(const struct shell *shell)
 		    m_app_config.hall_left_notify_deact ? "true" : "false");
 }
 
-static void print_hall_right_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-right-enabled %s",
-		    m_app_config.hall_right_enabled ? "true" : "false");
-}
 
 static void print_hall_right_counter(const struct shell *shell)
 {
@@ -730,17 +732,6 @@ static void print_hall_right_notify_deact(const struct shell *shell)
 		    m_app_config.hall_right_notify_deact ? "true" : "false");
 }
 
-static void print_barometer_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " barometer-enabled %s",
-		    m_app_config.barometer_enabled ? "true" : "false");
-}
-
-static void print_pir_detector_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " pir-detector-enabled %s",
-		    m_app_config.pir_detector_enabled ? "true" : "false");
-}
 
 static void print_corr_temperature(const struct shell *shell)
 {
@@ -758,6 +749,48 @@ static void print_corr_t2_temperature(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " corr-t2-temperature %.2f",
 		    (double)m_app_config.corr_t2_temperature);
+}
+
+static void print_cap_hall_left(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-hall-left %s",
+		    m_app_config.cap_hall_left ? "true" : "false");
+}
+
+static void print_cap_hall_right(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-hall-right %s",
+		    m_app_config.cap_hall_right ? "true" : "false");
+}
+
+static void print_cap_light_sensor(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-light-sensor %s",
+		    m_app_config.cap_light_sensor ? "true" : "false");
+}
+
+static void print_cap_barometer(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-barometer %s",
+		    m_app_config.cap_barometer ? "true" : "false");
+}
+
+static void print_cap_pir_detector(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-pir-detector %s",
+		    m_app_config.cap_pir_detector ? "true" : "false");
+}
+
+static void print_cap_1w_thermometer(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-1w-thermometer %s",
+		    m_app_config.cap_1w_thermometer ? "true" : "false");
+}
+
+static void print_cap_1w_machine_probe(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-1w-machine-probe %s",
+		    m_app_config.cap_1w_machine_probe ? "true" : "false");
 }
 
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
@@ -799,19 +832,22 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_alarm_t2_temperature_lo(shell);
 	print_alarm_t2_temperature_hi(shell);
 	print_alarm_t2_temperature_hst(shell);
-	print_hall_left_enabled(shell);
 	print_hall_left_counter(shell);
 	print_hall_left_notify_act(shell);
 	print_hall_left_notify_deact(shell);
-	print_hall_right_enabled(shell);
 	print_hall_right_counter(shell);
 	print_hall_right_notify_act(shell);
 	print_hall_right_notify_deact(shell);
-	print_barometer_enabled(shell);
-	print_pir_detector_enabled(shell);
 	print_corr_temperature(shell);
 	print_corr_t1_temperature(shell);
 	print_corr_t2_temperature(shell);
+	print_cap_hall_left(shell);
+	print_cap_hall_right(shell);
+	print_cap_light_sensor(shell);
+	print_cap_barometer(shell);
+	print_cap_pir_detector(shell);
+	print_cap_1w_thermometer(shell);
+	print_cap_1w_machine_probe(shell);
 
 	return 0;
 }
@@ -1803,29 +1839,6 @@ static int cmd_alarm_pressure_hst(const struct shell *shell, size_t argc, char *
 	return 0;
 }
 
-static int cmd_hall_left_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_hall_left_enabled(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.hall_left_enabled = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.hall_left_enabled = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
-}
 
 static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)
 {
@@ -1899,29 +1912,6 @@ static int cmd_hall_left_notify_deact(const struct shell *shell, size_t argc, ch
 	return 0;
 }
 
-static int cmd_hall_right_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_hall_right_enabled(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.hall_right_enabled = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.hall_right_enabled = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
-}
 
 static int cmd_hall_right_counter(const struct shell *shell, size_t argc, char **argv)
 {
@@ -1995,53 +1985,6 @@ static int cmd_hall_right_notify_deact(const struct shell *shell, size_t argc, c
 	return 0;
 }
 
-static int cmd_barometer_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_barometer_enabled(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.barometer_enabled = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.barometer_enabled = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int cmd_pir_detector_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_pir_detector_enabled(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.pir_detector_enabled = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.pir_detector_enabled = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
-}
 
 static int cmd_corr_temperature(const struct shell *shell, size_t argc, char **argv)
 {
@@ -2111,6 +2054,174 @@ static int cmd_corr_t2_temperature(const struct shell *shell, size_t argc, char 
 	}
 
 	m_app_config.corr_t2_temperature = a;
+
+	return 0;
+}
+
+static int cmd_cap_hall_left(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_cap_hall_left(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.cap_hall_left = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.cap_hall_left = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_cap_hall_right(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_cap_hall_right(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.cap_hall_right = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.cap_hall_right = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_cap_light_sensor(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_cap_light_sensor(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.cap_light_sensor = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.cap_light_sensor = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_cap_barometer(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_cap_barometer(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.cap_barometer = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.cap_barometer = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_cap_pir_detector(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.cap_pir_detector = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.cap_pir_detector = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_cap_1w_thermometer(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_cap_1w_thermometer(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.cap_1w_thermometer = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.cap_1w_thermometer = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_cap_1w_machine_probe(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_cap_1w_machine_probe(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "invalid number of arguments");
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		m_app_config.cap_1w_machine_probe = true;
+	} else if (!strcmp(argv[1], "false")) {
+		m_app_config.cap_1w_machine_probe = false;
+	} else {
+		shell_error(shell, "invalid argument");
+		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -2293,10 +2404,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set pressure hysteresis (0 to 50 hPa).",
 	              cmd_alarm_pressure_hst, 1, 1),
 
-	SHELL_CMD_ARG(hall-left-enabled, NULL,
-	              "Get/Set hall left switch enabled (true/false).",
-	              cmd_hall_left_enabled, 1, 1),
-
 	SHELL_CMD_ARG(hall-left-counter, NULL,
 	              "Get/Set hall left switch counter enabled (true/false).",
 	              cmd_hall_left_counter, 1, 1),
@@ -2308,10 +2415,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(hall-left-notify-deact, NULL,
 	              "Get/Set hall left switch notify on deactivation (true/false).",
 	              cmd_hall_left_notify_deact, 1, 1),
-
-	SHELL_CMD_ARG(hall-right-enabled, NULL,
-	              "Get/Set hall right switch enabled (true/false).",
-	              cmd_hall_right_enabled, 1, 1),
 
 	SHELL_CMD_ARG(hall-right-counter, NULL,
 	              "Get/Set hall right switch counter enabled (true/false).",
@@ -2325,14 +2428,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set hall right switch notify on deactivation (true/false).",
 	              cmd_hall_right_notify_deact, 1, 1),
 
-	SHELL_CMD_ARG(barometer-enabled, NULL,
-	              "Get/Set barometer enabled (true/false).",
-	              cmd_barometer_enabled, 1, 1),
-
-	SHELL_CMD_ARG(pir-detector-enabled, NULL,
-	              "Get/Set PIR detector enabled (true/false).",
-	              cmd_pir_detector_enabled, 1, 1),
-
 	SHELL_CMD_ARG(corr-temperature, NULL,
 	              "Get/Set temperature correction (range -5.0 to +5.0 deg. C).",
 	              cmd_corr_temperature, 1, 1),
@@ -2344,6 +2439,34 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(corr-t2-temperature, NULL,
 	              "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C).",
 	              cmd_corr_t2_temperature, 1, 1),
+
+	SHELL_CMD_ARG(cap-hall-left, NULL,
+	              "Get/Set hall left capability (true/false).",
+	              cmd_cap_hall_left, 1, 1),
+
+	SHELL_CMD_ARG(cap-hall-right, NULL,
+	              "Get/Set hall right capability (true/false).",
+	              cmd_cap_hall_right, 1, 1),
+
+	SHELL_CMD_ARG(cap-light-sensor, NULL,
+	              "Get/Set light sensor capability (true/false).",
+	              cmd_cap_light_sensor, 1, 1),
+
+	SHELL_CMD_ARG(cap-barometer, NULL,
+	              "Get/Set barometer capability (true/false).",
+	              cmd_cap_barometer, 1, 1),
+
+	SHELL_CMD_ARG(cap-pir-detector, NULL,
+	              "Get/Set PIR detector capability (true/false).",
+	              cmd_cap_pir_detector, 1, 1),
+
+	SHELL_CMD_ARG(cap-1w-thermometer, NULL,
+	              "Get/Set 1-wire thermometer capability (true/false).",
+	              cmd_cap_1w_thermometer, 1, 1),
+
+	SHELL_CMD_ARG(cap-1w-machine-probe, NULL,
+	              "Get/Set 1-wire machine probe capability (true/false).",
+	              cmd_cap_1w_machine_probe, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );

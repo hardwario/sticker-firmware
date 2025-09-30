@@ -36,21 +36,25 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 
 	uint8_t orientation = 0xff;
 	uint8_t voltage = 0xff;
+
 	int16_t temperature = 0x7fff;
 	uint8_t humidity = 0xff;
 	uint16_t illuminance = 0xffff;
 	int16_t altitude = 0x7fff;
 	uint32_t pressure = 0xffffffff;
-	int16_t t1_temperature = 0x7fff;
-	int16_t t2_temperature = 0x7fff;
-	uint32_t motion_count = 0xffffffff;
-	int16_t machine_probe_temperature_1 = 0x7fff;
-	int16_t machine_probe_temperature_2 = 0x7fff;
-	uint8_t machine_probe_humidity_1 = 0xff;
-	uint8_t machine_probe_humidity_2 = 0xff;
+
+	struct app_hall_data hall_data;
 	uint32_t hall_left_count = 0;
 	uint32_t hall_right_count = 0;
-	struct app_hall_data hall_data;
+
+	uint32_t motion_count = 0xffffffff;
+	int16_t t1_temperature = 0x7fff;
+	int16_t t2_temperature = 0x7fff;
+
+	int16_t mp1_temperature = 0x7fff;
+	int16_t mp2_temperature = 0x7fff;
+	uint8_t mp1_humidity = 0xff;
+	uint8_t mp2_humidity = 0xff;
 
 	app_hall_get_data(&hall_data);
 
@@ -106,43 +110,45 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		header |= BIT(21);
 	}
 
-	if (!isnan(g_app_sensor_data.machine_probe_temperature_1)) {
-		machine_probe_temperature_1 =
-			(int16_t)(g_app_sensor_data.machine_probe_temperature_1 * 100);
+	if (!isnan(g_app_sensor_data.mp1_temperature)) {
+		mp1_temperature =
+			(int16_t)(g_app_sensor_data.mp1_temperature * 100);
 		header |= BIT(19);
 	}
 
-	if (!isnan(g_app_sensor_data.machine_probe_temperature_2)) {
-		machine_probe_temperature_2 =
-			(int16_t)(g_app_sensor_data.machine_probe_temperature_2 * 100);
+	if (!isnan(g_app_sensor_data.mp2_temperature)) {
+		mp2_temperature =
+			(int16_t)(g_app_sensor_data.mp2_temperature * 100);
 		header |= BIT(18);
 	}
 
-	if (!isnan(g_app_sensor_data.machine_probe_humidity_1)) {
-		machine_probe_humidity_1 =
-			(uint8_t)(g_app_sensor_data.machine_probe_humidity_1 * 2);
+	if (!isnan(g_app_sensor_data.mp1_humidity)) {
+		mp1_humidity =
+			(uint8_t)(g_app_sensor_data.mp1_humidity * 2);
 		header |= BIT(17);
 	}
 
-	if (!isnan(g_app_sensor_data.machine_probe_humidity_2)) {
-		machine_probe_humidity_2 =
-			(uint8_t)(g_app_sensor_data.machine_probe_humidity_2 * 2);
+	if (!isnan(g_app_sensor_data.mp2_humidity)) {
+		mp2_humidity =
+			(uint8_t)(g_app_sensor_data.mp2_humidity * 2);
 		header |= BIT(16);
 	}
 
-	if (g_app_sensor_data.machine_probe_is_tilt_alert_1) {
+	if (g_app_sensor_data.mp1_is_tilt_alert) {
 		header |= BIT(15);
 	}
 
-	if (g_app_sensor_data.machine_probe_is_tilt_alert_2) {
+	if (g_app_sensor_data.mp2_is_tilt_alert) {
 		header |= BIT(14);
 	}
 
 	hall_left_count = g_app_sensor_data.hall_left_count;
 	hall_right_count = g_app_sensor_data.hall_right_count;
+
 	if (hall_left_count > 0) {
 		header |= BIT(13);
 	}
+
 	if (hall_right_count > 0) {
 		header |= BIT(12);
 	}
@@ -243,21 +249,21 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	if (header & BIT(19)) {
-		APPEND_BYTE(machine_probe_temperature_1 >> 8);
-		APPEND_BYTE(machine_probe_temperature_1);
+		APPEND_BYTE(mp1_temperature >> 8);
+		APPEND_BYTE(mp1_temperature);
 	}
 
 	if (header & BIT(18)) {
-		APPEND_BYTE(machine_probe_temperature_2 >> 8);
-		APPEND_BYTE(machine_probe_temperature_2);
+		APPEND_BYTE(mp2_temperature >> 8);
+		APPEND_BYTE(mp2_temperature);
 	}
 
 	if (header & BIT(17)) {
-		APPEND_BYTE(machine_probe_humidity_1);
+		APPEND_BYTE(mp1_humidity);
 	}
 
 	if (header & BIT(16)) {
-		APPEND_BYTE(machine_probe_humidity_2);
+		APPEND_BYTE(mp2_humidity);
 	}
 
 	if (header & BIT(13)) {

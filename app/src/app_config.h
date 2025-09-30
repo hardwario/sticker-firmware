@@ -69,19 +69,22 @@ struct app_config {
 	float alarm_t2_temperature_lo;
 	float alarm_t2_temperature_hi;
 	float alarm_t2_temperature_hst;
-	bool hall_left_enabled;
 	bool hall_left_counter;
 	bool hall_left_notify_act;
 	bool hall_left_notify_deact;
-	bool hall_right_enabled;
 	bool hall_right_counter;
 	bool hall_right_notify_act;
 	bool hall_right_notify_deact;
-	bool barometer_enabled;
-	bool pir_detector_enabled;
 	float corr_temperature;
 	float corr_t1_temperature;
 	float corr_t2_temperature;
+	bool cap_hall_left;
+	bool cap_hall_right;
+	bool cap_light_sensor;
+	bool cap_barometer;
+	bool cap_pir_detector;
+	bool cap_1w_thermometer;
+	bool cap_1w_machine_probe;
 };
 
 extern struct app_config g_app_config;

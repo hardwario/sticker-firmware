@@ -6,8 +6,6 @@
 #include "app_wdog.h"
 
 /* Zephyr includes */
-#include <zephyr/device.h>
-#include <zephyr/devicetree.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -83,15 +81,6 @@ int main(void)
 		ret = app_config_reset();
 		if (ret) {
 			LOG_ERR("Call `app_config_reset` failed: %d", ret);
-		}
-	}
-
-	if (g_app_config.barometer_enabled) {
-		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(mpl3115a2));
-
-		ret = device_init(dev);
-		if (ret) {
-			LOG_ERR("Call `device_init` failed (mpl3115a2): %d", ret);
 		}
 	}
 

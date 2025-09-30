@@ -109,11 +109,39 @@ stm32_lp_tick_source: &lptim1 {
 	pinctrl-names = "default", "sleep";
 	status = "okay";
 
+	lis2dh12: lis2dh12@19 {
+		compatible = "st,lis2dh";
+		reg = <0x19>;
+		anym-mode = <LIS2DH_DT_ANYM_6D_MOVEMENT>;
+		irq-gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>,
+			    <&gpioa 2 GPIO_ACTIVE_HIGH>;
+		disconnect-sdo-sa0-pull-up;
+	};
+
+	sht40: sht40@44 {
+		compatible = "sensirion,sht4x";
+		reg = <0x44>;
+		repeatability = <2>;
+	};
+
+	opt3001: opt3001@45 {
+		compatible = "ti,opt3001";
+		reg = <0x45>;
+		zephyr,deferred-init;
+	};
+
+	mpl3115a2: mpl3115a2@60 {
+		compatible = "nxp,mpl3115a2";
+		reg = <0x60>;
+		zephyr,deferred-init;
+	};
+
 	ds2484: ds2484@18 {
 		compatible = "maxim,ds2484";
 		reg = <0x18>;
 		slpz-gpios = <&gpiob 8 GPIO_ACTIVE_LOW>;
 		active-pullup;
+		zephyr,deferred-init;
 
 		ds18b20_0: ds18b20_0 {
 			compatible = "maxim,ds18b20";
@@ -136,32 +164,6 @@ stm32_lp_tick_source: &lptim1 {
 			compatible = "maxim,ds28e17";
 			family-code = <0x19>;
 		};
-	};
-
-	lis2dh12: lis2dh12@19 {
-		compatible = "st,lis2dh";
-		reg = <0x19>;
-		anym-mode = <LIS2DH_DT_ANYM_6D_MOVEMENT>;
-		irq-gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>,
-			    <&gpioa 2 GPIO_ACTIVE_HIGH>;
-		disconnect-sdo-sa0-pull-up;
-	};
-
-	mpl3115a2: mpl3115a2@60 {
-		compatible = "nxp,mpl3115a2";
-		reg = <0x60>;
-		zephyr,deferred-init;
-	};
-
-	opt3001: opt3001@45 {
-		compatible = "ti,opt3001";
-		reg = <0x45>;
-	};
-
-	sht40: sht40@44 {
-		compatible = "sensirion,sht4x";
-		reg = <0x44>;
-		repeatability = <2>;
 	};
 };
 

@@ -99,25 +99,25 @@ static int init(void)
 
 	LOG_WRN("Calibration mode is enabled");
 
-#if defined(CONFIG_DS18B20)
-	ret = app_ds18b20_scan();
-	if (ret) {
-		LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
-		return ret;
+	if (g_app_config.cap_1w_thermometer) {
+		ret = app_ds18b20_scan();
+		if (ret) {
+			LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
+			return ret;
+		}
+
+		count_ds18b20 = app_ds18b20_get_count();
 	}
 
-	count_ds18b20 = app_ds18b20_get_count();
-#endif /* defined(CONFIG_DS18B20) */
+	if (g_app_config.cap_1w_machine_probe) {
+		ret = app_machine_probe_scan();
+		if (ret) {
+			LOG_ERR("Call `app_machine_probe_scan` failed: %d", ret);
+			return ret;
+		}
 
-#if defined(CONFIG_DS28E17)
-	ret = app_machine_probe_scan();
-	if (ret) {
-		LOG_ERR("Call `app_machine_probe_scan` failed: %d", ret);
-		return ret;
+		count_machine_probe = app_machine_probe_get_count();
 	}
-
-	count_machine_probe = app_machine_probe_get_count();
-#endif /* defined(CONFIG_DS28E17) */
 
 	for (;;) {
 		LOG_INF("Alive");

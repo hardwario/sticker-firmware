@@ -28,12 +28,12 @@ struct app_sensor_data {
 	float pressure;
 	float t1_temperature;
 	float t2_temperature;
-	float machine_probe_temperature_1;
-	float machine_probe_temperature_2;
-	float machine_probe_humidity_1;
-	float machine_probe_humidity_2;
-	bool machine_probe_is_tilt_alert_1;
-	bool machine_probe_is_tilt_alert_2;
+	float mp1_temperature;
+	float mp2_temperature;
+	float mp1_humidity;
+	float mp2_humidity;
+	bool mp1_is_tilt_alert;
+	bool mp2_is_tilt_alert;
 	uint32_t hall_left_count;
 	uint32_t hall_right_count;
 	bool hall_left_is_active;

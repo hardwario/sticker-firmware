@@ -276,12 +276,6 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 				message->application.alarm_t2_temperature_hst;
 		}
 
-		if (message->application.has_hall_left_enabled) {
-			LOG_INF("Parameter `application.hall_left_enabled`: %s",
-				message->application.hall_left_enabled ? "true" : "false");
-			config->hall_left_enabled = message->application.hall_left_enabled;
-		}
-
 		if (message->application.has_hall_left_counter) {
 			LOG_INF("Parameter `application.hall_left_counter`: %s",
 				message->application.hall_left_counter ? "true" : "false");
@@ -299,12 +293,6 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 				message->application.hall_left_notify_deact ? "true" : "false");
 			config->hall_left_notify_deact =
 				message->application.hall_left_notify_deact;
-		}
-
-		if (message->application.has_hall_right_enabled) {
-			LOG_INF("Parameter `application.hall_right_enabled`: %s",
-				message->application.hall_right_enabled ? "true" : "false");
-			config->hall_right_enabled = message->application.hall_right_enabled;
 		}
 
 		if (message->application.has_hall_right_counter) {
@@ -326,18 +314,6 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 				message->application.hall_right_notify_deact;
 		}
 
-		if (message->application.has_barometer_enabled) {
-			LOG_INF("Parameter `application.barometer_enabled`: %s",
-				message->application.barometer_enabled ? "true" : "false");
-			config->barometer_enabled = message->application.barometer_enabled;
-		}
-
-		if (message->application.has_pir_detector_enabled) {
-			LOG_INF("Parameter `application.pir_detector_enabled`: %s",
-				message->application.pir_detector_enabled ? "true" : "false");
-			config->pir_detector_enabled = message->application.pir_detector_enabled;
-		}
-
 		if (message->application.has_corr_temperature) {
 			LOG_INF("Parameter `application.corr_temperature`: %.2f",
 				(double)message->application.corr_temperature);
@@ -354,6 +330,48 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 			LOG_INF("Parameter `application.corr_t2_temperature`: %.2f",
 				(double)message->application.corr_t2_temperature);
 			config->corr_t2_temperature = message->application.corr_t2_temperature;
+		}
+
+		if (message->application.has_cap_hall_left) {
+			LOG_INF("Parameter `application.cap_hall_left`: %s",
+				message->application.cap_hall_left ? "true" : "false");
+			config->cap_hall_left = message->application.cap_hall_left;
+		}
+
+		if (message->application.has_cap_hall_right) {
+			LOG_INF("Parameter `application.cap_hall_right`: %s",
+				message->application.cap_hall_right ? "true" : "false");
+			config->cap_hall_right = message->application.cap_hall_right;
+		}
+
+		if (message->application.has_cap_light_sensor) {
+			LOG_INF("Parameter `application.cap_light_sensor`: %s",
+				message->application.cap_light_sensor ? "true" : "false");
+			config->cap_light_sensor = message->application.cap_light_sensor;
+		}
+
+		if (message->application.has_cap_barometer) {
+			LOG_INF("Parameter `application.cap_barometer`: %s",
+				message->application.cap_barometer ? "true" : "false");
+			config->cap_barometer = message->application.cap_barometer;
+		}
+
+		if (message->application.has_cap_pir_detector) {
+			LOG_INF("Parameter `application.cap_pir_detector`: %s",
+				message->application.cap_pir_detector ? "true" : "false");
+			config->cap_pir_detector = message->application.cap_pir_detector;
+		}
+
+		if (message->application.has_cap_1w_thermometer) {
+			LOG_INF("Parameter `application.cap_1w_thermometer`: %s",
+				message->application.cap_1w_thermometer ? "true" : "false");
+			config->cap_1w_thermometer = message->application.cap_1w_thermometer;
+		}
+
+		if (message->application.has_cap_1w_machine_probe) {
+			LOG_INF("Parameter `application.cap_1w_machine_probe`: %s",
+				message->application.cap_1w_machine_probe ? "true" : "false");
+			config->cap_1w_machine_probe = message->application.cap_1w_machine_probe;
 		}
 	}
 }
