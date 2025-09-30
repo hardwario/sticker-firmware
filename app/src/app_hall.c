@@ -6,6 +6,7 @@
 
 #include "app_hall.h"
 #include "app_config.h"
+#include "app_led.h"
 #include "app_lrw.h"
 #include "app_send.h"
 
@@ -110,6 +111,10 @@ static int poll(void)
 		if (g_app_config.hall_left_notify_act) {
 			m_hall_data.left_notify_act = true;
 		}
+
+		app_led_set(APP_LED_CHANNEL_R, 1);
+		k_sleep(K_MSEC(250));
+		app_led_set(APP_LED_CHANNEL_R, 0);
 	}
 
 	if (left_was_active && !left_is_active) {
@@ -118,6 +123,10 @@ static int poll(void)
 		if (g_app_config.hall_left_notify_deact) {
 			m_hall_data.left_notify_deact = true;
 		}
+
+		app_led_set(APP_LED_CHANNEL_R, 1);
+		k_sleep(K_MSEC(250));
+		app_led_set(APP_LED_CHANNEL_R, 0);
 	}
 
 	if (!right_was_active && right_is_active) {
@@ -130,6 +139,10 @@ static int poll(void)
 		if (g_app_config.hall_right_notify_act) {
 			m_hall_data.right_notify_act = true;
 		}
+
+		app_led_set(APP_LED_CHANNEL_R, 1);
+		k_sleep(K_MSEC(250));
+		app_led_set(APP_LED_CHANNEL_R, 0);
 	}
 
 	if (right_was_active && !right_is_active) {
@@ -138,6 +151,10 @@ static int poll(void)
 		if (g_app_config.hall_right_notify_deact) {
 			m_hall_data.right_notify_deact = true;
 		}
+
+		app_led_set(APP_LED_CHANNEL_R, 1);
+		k_sleep(K_MSEC(250));
+		app_led_set(APP_LED_CHANNEL_R, 0);
 	}
 
 	k_mutex_unlock(&m_hall_data_mutex);
