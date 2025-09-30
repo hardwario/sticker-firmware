@@ -308,6 +308,22 @@ static int init(void)
 	}
 
 	if (g_app_config.cap_1w_thermometer) {
+		const struct device *dev_0 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_0));
+
+		ret = device_init(dev_0);
+		if (ret) {
+			LOG_ERR("Call `device_init` failed (ds18b20_0): %d", ret);
+			return ret;
+		}
+
+		const struct device *dev_1 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_1));
+
+		ret = device_init(dev_1);
+		if (ret) {
+			LOG_ERR("Call `device_init` failed (ds18b20_1): %d", ret);
+			return ret;
+		}
+
 		ret = app_ds18b20_scan();
 		if (ret) {
 			LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
@@ -316,6 +332,22 @@ static int init(void)
 	}
 
 	if (g_app_config.cap_1w_machine_probe) {
+		const struct device *dev_0 = DEVICE_DT_GET(DT_NODELABEL(machine_probe_0));
+
+		ret = device_init(dev_0);
+		if (ret) {
+			LOG_ERR("Call `device_init` failed (machine_probe_0): %d", ret);
+			return ret;
+		}
+
+		const struct device *dev_1 = DEVICE_DT_GET(DT_NODELABEL(machine_probe_1));
+
+		ret = device_init(dev_1);
+		if (ret) {
+			LOG_ERR("Call `device_init` failed (machine_probe_1): %d", ret);
+			return ret;
+		}
+
 		ret = app_machine_probe_scan();
 		if (ret) {
 			LOG_ERR("Call `app_machine_probe_scan` failed: %d", ret);
