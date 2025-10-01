@@ -5,6 +5,7 @@
  */
 
 #include "app_wdog.h"
+#include "app_log.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -35,7 +36,7 @@ int app_wdog_feed(void)
 
 	ret = wdt_feed(dev, m_wdog_channel);
 	if (ret) {
-		LOG_ERR("Call `wdt_feed` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("wdt_feed", ret);
 		return ret;
 	}
 
@@ -59,7 +60,7 @@ static int init(void)
 
 	ret = wdt_install_timeout(dev, &cfg);
 	if (ret < 0) {
-		LOG_ERR("Call `wdt_install_timeout` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("wdt_install_timeout", ret);
 		return ret;
 	}
 
@@ -67,7 +68,7 @@ static int init(void)
 
 	ret = wdt_setup(dev, 0);
 	if (ret) {
-		LOG_ERR("Call `wdt_setup` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("wdt_setup", ret);
 		return ret;
 	}
 

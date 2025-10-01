@@ -5,6 +5,7 @@
  */
 
 #include "app_pyq1648.h"
+#include "app_log.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -77,7 +78,7 @@ static int configure(struct pyq1648_param *param)
 
 		ret = gpio_pin_set_dt(&m_si_spec, 1);
 		if (ret) {
-			LOG_ERR("Call `gpio_pin_set_dt` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
 			irq_unlock(key);
 			return ret;
 		}
@@ -86,7 +87,7 @@ static int configure(struct pyq1648_param *param)
 
 		ret = gpio_pin_set_dt(&m_si_spec, 0);
 		if (ret) {
-			LOG_ERR("Call `gpio_pin_set_dt` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
 			irq_unlock(key);
 			return ret;
 		}
@@ -105,7 +106,7 @@ static int clear_event(void)
 
 	ret = gpio_pin_configure_dt(&m_dl_spec, GPIO_OUTPUT);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
 	}
 
@@ -113,7 +114,7 @@ static int clear_event(void)
 
 	ret = gpio_pin_configure_dt(&m_dl_spec, GPIO_INPUT);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
 	}
 
@@ -136,7 +137,7 @@ static void thread(void *p1, void *p2, void *p3)
 
 	ret = clear_event();
 	if (ret) {
-		LOG_ERR("Call `clear_event` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("clear_event", ret);
 	}
 
 	for (;;) {
@@ -144,7 +145,7 @@ static void thread(void *p1, void *p2, void *p3)
 
 		int value = gpio_pin_get_dt(&m_dl_spec);
 		if (value < 0) {
-			LOG_ERR("Call `gpio_pin_get_dt` failed: %d", value);
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", value);
 			continue;
 		} else if (!value) {
 			continue;
@@ -154,7 +155,7 @@ static void thread(void *p1, void *p2, void *p3)
 
 		ret = clear_event();
 		if (ret) {
-			LOG_ERR("Call `clear_event` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("clear_event", ret);
 		}
 
 		k_mutex_lock(&m_lock, K_FOREVER);
@@ -183,13 +184,13 @@ int app_pyq1648_init(void)
 
 	ret = gpio_pin_configure_dt(&m_si_spec, GPIO_OUTPUT);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
 	}
 
 	ret = gpio_pin_configure_dt(&m_dl_spec, GPIO_INPUT);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
 	}
 
@@ -202,7 +203,7 @@ int app_pyq1648_init(void)
 
 	ret = configure(&param);
 	if (ret) {
-		LOG_ERR("Call `configure` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("configure", ret);
 		return ret;
 	}
 

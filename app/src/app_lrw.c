@@ -7,6 +7,7 @@
 #include "app_alarm.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_log.h"
 #include "app_lrw.h"
 #include "app_sensor.h"
 
@@ -87,7 +88,7 @@ static void join_work_handler(struct k_work *work)
 
 	ret = lorawan_join(&config);
 	if (ret) {
-		LOG_ERR("Call `lorawan_join` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("lorawan_join", ret);
 		return;
 	}
 
@@ -123,7 +124,7 @@ static void send_work_handler(struct k_work *work)
 	size_t len;
 	ret = app_compose(buf, sizeof(buf), &len);
 	if (ret) {
-		LOG_ERR("Call `app_compose` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_compose", ret);
 		return;
 	}
 
@@ -131,7 +132,7 @@ static void send_work_handler(struct k_work *work)
 
 	ret = lorawan_send(1, buf, len, LORAWAN_MSG_UNCONFIRMED);
 	if (ret) {
-		LOG_ERR("Call `lorawan_send` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("lorawan_send", ret);
 	}
 
 	LOG_INF("Data sent");
@@ -176,13 +177,13 @@ static int init(void)
 
 	ret = lorawan_set_region(region);
 	if (ret) {
-		LOG_ERR("Call `lorawan_set_region` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("lorawan_set_region", ret);
 		return ret;
 	}
 
 	ret = lorawan_start();
 	if (ret) {
-		LOG_ERR("Call `lorawan_start` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("lorawan_start", ret);
 		return ret;
 	}
 

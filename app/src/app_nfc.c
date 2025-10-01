@@ -8,6 +8,7 @@
 #include "app_nfc_ingest.h"
 #include "app_config.h"
 #include "app_ndef_parser.h"
+#include "app_log.h"
 
 /* Nanopb includes */
 #include <pb_decode.h>
@@ -62,7 +63,7 @@ static int read_mem(uint16_t reg, void *buf, size_t len)
 
 	ret = i2c_write_read(dev, ST25DV_I2C_ADDR_E0, reg_, sizeof(reg_), buf, len);
 	if (ret) {
-		LOG_ERR("Call `i2c_write_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("i2c_write_read", ret);
 		return ret;
 	}
 
@@ -106,7 +107,7 @@ static int write_mem(uint16_t reg, const void *buf, size_t len)
 
 		ret = i2c_write(dev, frame, 2 + chunk, ST25DV_I2C_ADDR_E0);
 		if (ret) {
-			LOG_ERR("Call `i2c_write` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("i2c_write", ret);
 			return ret;
 		}
 
@@ -157,7 +158,7 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 
 	status = psa_crypto_init();
 	if (status != PSA_SUCCESS) {
-		LOG_ERR("Call `psa_crypto_init` failed: %d", status);
+		LOG_ERR_CALL_FAILED_INT("psa_crypto_init", status);
 		return -EIO;
 	}
 
@@ -171,7 +172,7 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 	status = psa_import_key(&key_attributes, g_app_config.secret_key,
 				sizeof(g_app_config.secret_key), &key_id);
 	if (status != PSA_SUCCESS) {
-		LOG_ERR("Call `psa_import_key` failed: %d", status);
+		LOG_ERR_CALL_FAILED_INT("psa_import_key", status);
 		return -EIO;
 	}
 
@@ -183,12 +184,12 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 	destroy_status = psa_destroy_key(key_id);
 
 	if (status != PSA_SUCCESS) {
-		LOG_ERR("Call `psa_aead_decrypt` failed: %d", status);
+		LOG_ERR_CALL_FAILED_INT("psa_aead_decrypt", status);
 		res = -EIO;
 	}
 
 	if (destroy_status != PSA_SUCCESS) {
-		LOG_ERR("Call `psa_destroy_key` failed: %d", destroy_status);
+		LOG_ERR_CALL_FAILED_INT("psa_destroy_key", destroy_status);
 		res = -EIO;
 	}
 
@@ -222,14 +223,15 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 	size_t len;
 	ret = decrypt(record_info->payload, record_info->payload_len, buf, sizeof(buf), &len);
 	if (ret) {
-		LOG_ERR("Call `decrypt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("decrypt", ret);
 		return ret;
 	}
 
 	pb_istream_t stream = pb_istream_from_buffer(buf, len);
 	NfcConfigMessage message = NfcConfigMessage_init_zero;
 	if (!pb_decode(&stream, NfcConfigMessage_fields, &message)) {
-		LOG_ERR("Call `pb_decode` failed: %s", PB_GET_ERROR(&stream));
+
+		LOG_ERR_CALL_FAILED_STR("pb_decode", PB_GET_ERROR(&stream));
 		return -EIO;
 	}
 
@@ -265,7 +267,7 @@ int app_nfc_check(enum app_nfc_action *action)
 
 	ret = gpio_pin_set_dt(&lpd_spec, 0);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_set_dt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
 		return ret;
 	}
 
@@ -274,12 +276,12 @@ int app_nfc_check(enum app_nfc_action *action)
 	static uint8_t buf[512];
 	ret = read_mem(0, buf, sizeof(buf));
 	if (ret) {
-		LOG_ERR("Call `read_mem` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("read_mem", ret);
 		res = ret;
 
 		ret = gpio_pin_set_dt(&lpd_spec, 1);
 		if (ret) {
-			LOG_ERR("Call `gpio_pin_set_dt` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
 			return ret;
 		}
 
@@ -289,7 +291,7 @@ int app_nfc_check(enum app_nfc_action *action)
 	if (is_buffer_zero(buf, sizeof(buf))) {
 		ret = gpio_pin_set_dt(&lpd_spec, 1);
 		if (ret) {
-			LOG_ERR("Call `gpio_pin_set_dt` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
 			return ret;
 		}
 
@@ -299,7 +301,7 @@ int app_nfc_check(enum app_nfc_action *action)
 	*action = APP_NFC_ACTION_NONE;
 	ret = app_ndef_parser_run(buf, sizeof(buf), parser_callback, action);
 	if (ret) {
-		LOG_ERR("Call `app_ndef_parser_run` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_ndef_parser_run", ret);
 		res = ret;
 	}
 
@@ -309,13 +311,13 @@ int app_nfc_check(enum app_nfc_action *action)
 
 	ret = write_mem(0, buf, sizeof(buf));
 	if (ret) {
-		LOG_ERR("Call `write_mem` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("write_mem", ret);
 		res = ret;
 	}
 
 	ret = gpio_pin_set_dt(&lpd_spec, 1);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_set_dt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
 		res = ret;
 	}
 
@@ -335,7 +337,7 @@ static int init(void)
 
 	ret = gpio_pin_configure_dt(&lpd_spec, GPIO_OUTPUT_ACTIVE);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
 	}
 

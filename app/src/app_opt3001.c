@@ -5,6 +5,7 @@
  */
 
 #include "app_opt3001.h"
+#include "app_log.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -30,14 +31,14 @@ int app_opt3001_read(float *illuminance)
 
 	ret = sensor_sample_fetch(dev);
 	if (ret) {
-		LOG_ERR("Call `sensor_sample_fetch` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("sensor_sample_fetch", ret);
 		return ret;
 	}
 
 	struct sensor_value val;
 	ret = sensor_channel_get(dev, SENSOR_CHAN_LIGHT, &val);
 	if (ret) {
-		LOG_ERR("Call `sensor_channel_get` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("sensor_channel_get", ret);
 		return ret;
 	}
 

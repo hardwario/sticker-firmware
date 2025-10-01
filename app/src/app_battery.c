@@ -5,6 +5,7 @@
  */
 
 #include "app_led.h"
+#include "app_log.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -47,7 +48,7 @@ int app_battery_measure(float *voltage)
 #if defined(CONFIG_PM_DEVICE)
 	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_RESUME);
 	if (ret && ret != -EALREADY) {
-		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("pm_device_action_run", ret);
 		return ret;
 	}
 #endif /* defined(CONFIG_PM_DEVICE) */
@@ -63,7 +64,7 @@ int app_battery_measure(float *voltage)
 
 	ret = adc_read(m_dev, &seq);
 	if (ret) {
-		LOG_ERR("Call `adc_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("adc_read", ret);
 		return ret;
 	}
 
@@ -71,7 +72,7 @@ int app_battery_measure(float *voltage)
 	ret = adc_raw_to_millivolts(adc_ref_internal(m_dev), m_channel_cfg.gain, seq.resolution,
 				    &voltage_);
 	if (ret) {
-		LOG_ERR("Call `adc_raw_to_millivolts` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("adc_raw_to_millivolts", ret);
 		return ret;
 	}
 
@@ -87,7 +88,7 @@ int app_battery_measure(float *voltage)
 #if defined(CONFIG_PM_DEVICE)
 	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_SUSPEND);
 	if (ret && ret != -EALREADY) {
-		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("pm_device_action_run", ret);
 		return ret;
 	}
 #endif /* defined(CONFIG_PM_DEVICE) */
@@ -106,14 +107,14 @@ static int init(void)
 
 	ret = adc_channel_setup(m_dev, &m_channel_cfg);
 	if (ret) {
-		LOG_ERR("Call `adc_channel_setup` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("adc_channel_setup", ret);
 		return ret;
 	}
 
 #if defined(CONFIG_PM_DEVICE)
 	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_SUSPEND);
 	if (ret && ret != -EALREADY) {
-		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("pm_device_action_run", ret);
 		return ret;
 	}
 #endif /* defined(CONFIG_PM_DEVICE) */

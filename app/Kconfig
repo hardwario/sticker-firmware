@@ -5,6 +5,15 @@
 #
 
 menu "Application"
+
+config APP_VERBOSE_LOGGING
+	bool "Enable verbose parameter logging"
+	default y
+	help
+	  Enable verbose logging of all configuration parameters.
+	  This adds detailed logging for NFC parameters and other
+	  configuration changes. Disable to save flash space.
+
 endmenu
 
 menu "Zephyr Kernel"

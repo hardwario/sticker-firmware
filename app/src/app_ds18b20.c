@@ -5,6 +5,7 @@
  */
 
 #include "app_ds18b20.h"
+#include "app_log.h"
 #include "app_w1.h"
 
 /* Zephyr includes */
@@ -65,7 +66,7 @@ static int scan_callback(struct w1_rom rom, void *user_data)
 
 	ret = sensor_attr_set(m_sensors[m_count].dev, SENSOR_CHAN_ALL, SENSOR_ATTR_W1_ROM, &val);
 	if (ret) {
-		LOG_ERR("Call `sensor_attr_set` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("sensor_attr_set", ret);
 		return ret;
 	}
 
@@ -97,7 +98,7 @@ int app_ds18b20_scan(void)
 
 	ret = app_w1_acquire(&m_w1, dev);
 	if (ret) {
-		LOG_ERR("Call `app_w1_acquire` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_w1_acquire", ret);
 		res = ret;
 		goto error;
 	}
@@ -106,7 +107,7 @@ int app_ds18b20_scan(void)
 
 	ret = app_w1_scan(&m_w1, dev, scan_callback, NULL);
 	if (ret < 0) {
-		LOG_ERR("Call `app_w1_scan` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_w1_scan", ret);
 		res = ret;
 		goto error;
 	}
@@ -114,7 +115,7 @@ int app_ds18b20_scan(void)
 error:
 	ret = app_w1_release(&m_w1, dev);
 	if (ret) {
-		LOG_ERR("Call `app_w1_release` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_w1_release", ret);
 		res = res ? res : ret;
 	}
 
@@ -166,7 +167,7 @@ int app_ds18b20_read(int index, uint64_t *serial_number, float *temperature)
 
 	ret = app_w1_acquire(&m_w1, dev);
 	if (ret) {
-		LOG_ERR("Call `app_w1_acquire` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_w1_acquire", ret);
 		res = ret;
 		goto error;
 	}
@@ -179,7 +180,7 @@ int app_ds18b20_read(int index, uint64_t *serial_number, float *temperature)
 
 	ret = sensor_sample_fetch(m_sensors[index].dev);
 	if (ret) {
-		LOG_WRN("Call `sensor_sample_fetch` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("sensor_sample_fetch", ret);
 		res = ret;
 		goto error;
 	}
@@ -187,7 +188,7 @@ int app_ds18b20_read(int index, uint64_t *serial_number, float *temperature)
 	struct sensor_value val;
 	ret = sensor_channel_get(m_sensors[index].dev, SENSOR_CHAN_AMBIENT_TEMP, &val);
 	if (ret) {
-		LOG_WRN("Call `sensor_channel_get` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("sensor_channel_get", ret);
 		res = ret;
 	}
 
@@ -202,7 +203,7 @@ int app_ds18b20_read(int index, uint64_t *serial_number, float *temperature)
 error:
 	ret = app_w1_release(&m_w1, dev);
 	if (ret) {
-		LOG_ERR("Call `app_w1_release` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_w1_release", ret);
 		res = res ? res : ret;
 	}
 

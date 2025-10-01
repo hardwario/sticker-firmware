@@ -5,6 +5,7 @@
  */
 
 #include "app_w1.h"
+#include "app_log.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -39,14 +40,14 @@ int app_w1_acquire(struct app_w1 *w1, const struct device *dev)
 
 	ret = w1_lock_bus(dev);
 	if (ret) {
-		LOG_ERR("Call `w1_lock_bus` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("w1_lock_bus", ret);
 		res = ret;
 		goto error;
 	}
 
 	ret = pm_device_action_run(dev, PM_DEVICE_ACTION_RESUME);
 	if (ret && ret != -EALREADY) {
-		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("pm_device_action_run", ret);
 		res = ret;
 		goto error;
 	}
@@ -59,7 +60,7 @@ int app_w1_acquire(struct app_w1 *w1, const struct device *dev)
 
 	ret = w1_reset_bus(dev);
 	if (ret < 0) {
-		LOG_ERR("Call `w1_reset_bus` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("w1_reset_bus", ret);
 		res = ret;
 		goto error;
 	}
@@ -69,7 +70,7 @@ int app_w1_acquire(struct app_w1 *w1, const struct device *dev)
 error:
 	ret = w1_unlock_bus(dev);
 	if (ret) {
-		LOG_ERR("Call `w1_unlock_bus` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("w1_unlock_bus", ret);
 		res = res ? res : ret;
 	}
 
@@ -92,12 +93,12 @@ int app_w1_release(struct app_w1 *w1, const struct device *dev)
 			const struct w1_slave_config config = {.overdrive = 0};
 			ret = w1_skip_rom(dev, &config);
 			if (ret) {
-				LOG_WRN("Call `w1_skip_rom` failed: %d", ret);
+				LOG_ERR_CALL_FAILED_INT("w1_skip_rom", ret);
 			} else {
 				const uint8_t buf[] = {0x1e};
 				ret = w1_write_block(dev, buf, sizeof(buf));
 				if (ret) {
-					LOG_WRN("Call `w1_write_block` failed: %d", ret);
+					LOG_ERR_CALL_FAILED_INT("w1_write_block", ret);
 				}
 			}
 		}
@@ -105,7 +106,7 @@ int app_w1_release(struct app_w1 *w1, const struct device *dev)
 
 	ret = pm_device_action_run(dev, PM_DEVICE_ACTION_SUSPEND);
 	if (ret && ret != -EALREADY) {
-		LOG_ERR("Call `pm_device_action_run` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("pm_device_action_run", ret);
 		res = ret;
 		goto error;
 	}
@@ -113,7 +114,7 @@ int app_w1_release(struct app_w1 *w1, const struct device *dev)
 error:
 	ret = w1_unlock_bus(dev);
 	if (ret) {
-		LOG_ERR("Call `w1_unlock_bus` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("w1_unlock_bus", ret);
 		res = res ? res : ret;
 	}
 
@@ -130,7 +131,7 @@ static void w1_search_callback(struct w1_rom rom, void *cb_arg)
 
 	struct scan_item *item = k_malloc(sizeof(*item));
 	if (!item) {
-		LOG_ERR("Call `k_malloc` failed");
+		LOG_ERR_CALL_FAILED("k_malloc");
 		return;
 	}
 
@@ -151,7 +152,7 @@ int app_w1_scan(struct app_w1 *w1, const struct device *dev,
 
 	ret = w1_search_rom(dev, w1_search_callback, w1);
 	if (ret < 0) {
-		LOG_ERR("Call `w1_search_rom` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("w1_search_rom", ret);
 		res = ret;
 		goto error;
 	}
@@ -165,7 +166,7 @@ int app_w1_scan(struct app_w1 *w1, const struct device *dev,
 		if (user_cb) {
 			ret = user_cb(item->rom, user_data);
 			if (ret) {
-				LOG_ERR("Call `user_cb` failed: %d", ret);
+				LOG_ERR_CALL_FAILED_INT("user_cb", ret);
 			}
 		}
 	}

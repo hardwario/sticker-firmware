@@ -5,6 +5,7 @@
  */
 
 #include "app_machine_probe.h"
+#include "app_log.h"
 #include "app_w1.h"
 
 /* STICKER includes */
@@ -84,7 +85,7 @@ static int tmp112_init(const struct device *dev)
 
 	ret = ds28e17_i2c_write(dev, TMP112_I2C_ADDR, write_buf, 3);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
 
@@ -102,7 +103,7 @@ static int tmp112_convert(const struct device *dev)
 
 	ret = ds28e17_i2c_write(dev, TMP112_I2C_ADDR, write_buf, 2);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
 
@@ -120,7 +121,7 @@ static int tmp112_read(const struct device *dev, float *temperature)
 
 	ret = ds28e17_i2c_write_read(dev, TMP112_I2C_ADDR, write_buf, 1, read_buf, 1);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write_read", ret);
 		return ret;
 	}
 
@@ -133,7 +134,7 @@ static int tmp112_read(const struct device *dev, float *temperature)
 
 	ret = ds28e17_i2c_write_read(dev, TMP112_I2C_ADDR, write_buf, 1, read_buf, 2);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write_read", ret);
 		return ret;
 	}
 
@@ -155,7 +156,7 @@ static int sht30_init(const struct device *dev)
 
 	ret = ds28e17_i2c_write(dev, SHT30_I2C_ADDR, write_buf, 2);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
 
@@ -173,7 +174,7 @@ static int sht30_convert(const struct device *dev)
 
 	ret = ds28e17_i2c_write(dev, SHT30_I2C_ADDR, write_buf, 2);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
 
@@ -188,7 +189,7 @@ static int sht30_read(const struct device *dev, float *temperature, float *humid
 
 	ret = ds28e17_i2c_read(dev, SHT30_I2C_ADDR, read_buf, 6);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_read", ret);
 		return ret;
 	}
 
@@ -215,7 +216,7 @@ static int opt3001_init(const struct device *dev)
 
 	ret = ds28e17_i2c_write(dev, OPT3001_I2C_ADDR, write_buf, 3);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
 
@@ -234,7 +235,7 @@ static int opt3001_convert(const struct device *dev)
 
 	ret = ds28e17_i2c_write(dev, OPT3001_I2C_ADDR, write_buf, 3);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
 
@@ -252,7 +253,7 @@ static int opt3001_read(const struct device *dev, float *illuminance)
 
 	ret = ds28e17_i2c_write_read(dev, OPT3001_I2C_ADDR, write_buf, 1, read_buf, 2);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write_read", ret);
 		return ret;
 	}
 
@@ -265,7 +266,7 @@ static int opt3001_read(const struct device *dev, float *illuminance)
 
 	ret = ds28e17_i2c_write_read(dev, OPT3001_I2C_ADDR, write_buf, 1, read_buf, 2);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write_read", ret);
 		return ret;
 	}
 
@@ -286,7 +287,7 @@ static int si7210_read(const struct device *dev, float *magnetic_field)
 
 	ret = ds28e17_i2c_read(dev, SI7210_I2C_ADDR, read_buf, 1);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_read", ret);
 		return ret;
 	}
 
@@ -295,7 +296,7 @@ static int si7210_read(const struct device *dev, float *magnetic_field)
 
 	ret = ds28e17_i2c_write(dev, SI7210_I2C_ADDR, write_buf, 2);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
 
@@ -303,7 +304,7 @@ static int si7210_read(const struct device *dev, float *magnetic_field)
 
 	ret = ds28e17_i2c_write_read(dev, SI7210_I2C_ADDR, write_buf, 1, read_buf, 1);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write_read", ret);
 		return ret;
 	}
 
@@ -313,7 +314,7 @@ static int si7210_read(const struct device *dev, float *magnetic_field)
 
 	ret = ds28e17_i2c_write_read(dev, SI7210_I2C_ADDR, write_buf, 1, read_buf, 1);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write_read", ret);
 		return ret;
 	}
 
@@ -324,7 +325,7 @@ static int si7210_read(const struct device *dev, float *magnetic_field)
 
 	ret = ds28e17_i2c_write(dev, SI7210_I2C_ADDR, write_buf, 2);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
 
@@ -347,7 +348,7 @@ static int lis2dh12_init(const struct device *dev)
 		write_buf[1] = val;                                                                \
 		ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 2);                     \
 		if (ret) {                                                                         \
-			LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);                       \
+			LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);                       \
 			return ret;                                                                \
 		}                                                                                  \
 	} while (0)
@@ -390,7 +391,7 @@ static int lis2dh12_read(const struct device *dev, float *accel_x, float *accel_
 
 	ret = ds28e17_i2c_write_read(dev, LIS2DH12_I2C_ADDR, write_buf, 1, read_buf, 7);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write_read", ret);
 		return ret;
 	}
 
@@ -429,7 +430,7 @@ static int lis2dh12_enable_alert(const struct device *dev, int threshold, int du
 
 	ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 2);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
 
@@ -438,7 +439,7 @@ static int lis2dh12_enable_alert(const struct device *dev, int threshold, int du
 
 	ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 2);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
 
@@ -446,7 +447,7 @@ static int lis2dh12_enable_alert(const struct device *dev, int threshold, int du
 
 	ret = ds28e17_i2c_write_read(dev, LIS2DH12_I2C_ADDR, write_buf, 1, read_buf, 1);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write_read", ret);
 		return ret;
 	}
 
@@ -455,7 +456,7 @@ static int lis2dh12_enable_alert(const struct device *dev, int threshold, int du
 
 	ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 2);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
 
@@ -473,7 +474,7 @@ static int lis2dh12_disable_alert(const struct device *dev)
 
 	ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 2);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
 
@@ -491,7 +492,7 @@ static int lis2dh12_get_interrupt(const struct device *dev, bool *is_active)
 
 	ret = ds28e17_i2c_write_read(dev, LIS2DH12_I2C_ADDR, write_buf, 1, read_buf, 1);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_i2c_write_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write_read", ret);
 		return ret;
 	}
 
@@ -523,13 +524,13 @@ static int scan_callback(struct w1_rom rom, void *user_data)
 	struct w1_slave_config config = {.rom = rom};
 	ret = ds28e17_set_w1_config(m_sensors[m_count].dev, config);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_set_w1_config` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_set_w1_config", ret);
 		return ret;
 	}
 
 	ret = ds28e17_write_config(m_sensors[m_count].dev, DS28E17_I2C_SPEED_100_KHZ);
 	if (ret) {
-		LOG_ERR("Call `ds28e17_write_config` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("ds28e17_write_config", ret);
 		return ret;
 	}
 
@@ -567,7 +568,7 @@ int app_machine_probe_scan(void)
 
 	ret = app_w1_acquire(&m_w1, dev);
 	if (ret) {
-		LOG_ERR("Call `app_w1_acquire` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_w1_acquire", ret);
 		res = ret;
 		goto error;
 	}
@@ -576,7 +577,7 @@ int app_machine_probe_scan(void)
 
 	ret = app_w1_scan(&m_w1, dev, scan_callback, NULL);
 	if (ret < 0) {
-		LOG_ERR("Call `app_w1_scan` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_w1_scan", ret);
 		res = ret;
 		goto error;
 	}
@@ -584,7 +585,7 @@ int app_machine_probe_scan(void)
 error:
 	ret = app_w1_release(&m_w1, dev);
 	if (ret) {
-		LOG_ERR("Call `app_w1_release` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_w1_release", ret);
 		res = res ? res : ret;
 	}
 
@@ -628,7 +629,7 @@ int app_machine_probe_get_count(void)
 	}                                                                                          \
 	ret = app_w1_acquire(&m_w1, dev);                                                          \
 	if (ret) {                                                                                 \
-		LOG_ERR("Call `app_w1_acquire` failed: %d", ret);                                  \
+		LOG_ERR_CALL_FAILED_INT("app_w1_acquire", ret);                                  \
 		res = ret;                                                                         \
 		goto error;                                                                        \
 	}                                                                                          \
@@ -639,7 +640,7 @@ int app_machine_probe_get_count(void)
 	}                                                                                          \
 	ret = ds28e17_write_config(m_sensors[index].dev, DS28E17_I2C_SPEED_100_KHZ);               \
 	if (ret) {                                                                                 \
-		LOG_ERR("Call `ds28e17_write_config` failed: %d", ret);                            \
+		LOG_ERR_CALL_FAILED_INT("ds28e17_write_config", ret);                            \
 		res = ret;                                                                         \
 		goto error;                                                                        \
 	}
@@ -648,7 +649,7 @@ int app_machine_probe_get_count(void)
 error:                                                                                             \
 	ret = app_w1_release(&m_w1, dev);                                                          \
 	if (ret) {                                                                                 \
-		LOG_ERR("Call `app_w1_release` failed: %d", ret);                                  \
+		LOG_ERR_CALL_FAILED_INT("app_w1_release", ret);                                  \
 		res = res ? res : ret;                                                             \
 	}                                                                                          \
 	k_mutex_unlock(&m_lock);                                                                   \
@@ -669,7 +670,7 @@ int app_machine_probe_read_thermometer(int index, uint64_t *serial_number, float
 	if (!res) {
 		ret = tmp112_init(m_sensors[index].dev);
 		if (ret) {
-			LOG_ERR("Call `tmp112_init` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("tmp112_init", ret);
 			res = ret;
 			goto error;
 		}
@@ -680,7 +681,7 @@ int app_machine_probe_read_thermometer(int index, uint64_t *serial_number, float
 	if (!res) {
 		ret = tmp112_convert(m_sensors[index].dev);
 		if (ret) {
-			LOG_ERR("Call `tmp112_convert` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("tmp112_convert", ret);
 			res = ret;
 			goto error;
 		}
@@ -691,7 +692,7 @@ int app_machine_probe_read_thermometer(int index, uint64_t *serial_number, float
 	if (!res) {
 		ret = tmp112_read(m_sensors[index].dev, temperature);
 		if (ret) {
-			LOG_ERR("Call `tmp112_read` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("tmp112_read", ret);
 			res = ret;
 			goto error;
 		}
@@ -724,7 +725,7 @@ int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float 
 	if (!res) {
 		ret = sht30_init(m_sensors[index].dev);
 		if (ret) {
-			LOG_ERR("Call `sht30_init` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("sht30_init", ret);
 			res = ret;
 			goto error;
 		}
@@ -735,7 +736,7 @@ int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float 
 	if (!res) {
 		ret = sht30_convert(m_sensors[index].dev);
 		if (ret) {
-			LOG_ERR("Call `sht30_convert` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("sht30_convert", ret);
 			res = ret;
 			goto error;
 		}
@@ -746,7 +747,7 @@ int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float 
 	if (!res) {
 		ret = sht30_read(m_sensors[index].dev, temperature, humidity);
 		if (ret) {
-			LOG_ERR("Call `sht30_read` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("sht30_read", ret);
 			res = ret;
 			goto error;
 		}
@@ -778,7 +779,7 @@ int app_machine_probe_read_lux_meter(int index, uint64_t *serial_number, float *
 	if (!res) {
 		ret = opt3001_init(m_sensors[index].dev);
 		if (ret) {
-			LOG_ERR("Call `opt3001_init` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("opt3001_init", ret);
 			res = ret;
 			goto error;
 		}
@@ -789,7 +790,7 @@ int app_machine_probe_read_lux_meter(int index, uint64_t *serial_number, float *
 	if (!res) {
 		ret = opt3001_convert(m_sensors[index].dev);
 		if (ret) {
-			LOG_ERR("Call `opt3001_convert` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("opt3001_convert", ret);
 			res = ret;
 			goto error;
 		}
@@ -800,7 +801,7 @@ int app_machine_probe_read_lux_meter(int index, uint64_t *serial_number, float *
 	if (!res) {
 		ret = opt3001_read(m_sensors[index].dev, illuminance);
 		if (ret) {
-			LOG_ERR("Call `opt3001_read` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("opt3001_read", ret);
 			res = ret;
 			goto error;
 		}
@@ -828,7 +829,7 @@ int app_machine_probe_read_magnetometer(int index, uint64_t *serial_number, floa
 	if (!res) {
 		ret = si7210_read(m_sensors[index].dev, magnetic_field);
 		if (ret) {
-			LOG_ERR("Call `si7210_read` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("si7210_read", ret);
 			res = ret;
 			goto error;
 		}
@@ -869,7 +870,7 @@ int app_machine_probe_read_accelerometer(int index, uint64_t *serial_number, flo
 	if (!res) {
 		ret = lis2dh12_read(m_sensors[index].dev, accel_x, accel_y, accel_z);
 		if (ret) {
-			LOG_ERR("Call `lis2dh12_read` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("lis2dh12_read", ret);
 			res = ret;
 			goto error;
 		}
@@ -904,7 +905,7 @@ int app_machine_probe_enable_tilt_alert(int index, uint64_t *serial_number, int 
 	if (!res) {
 		ret = lis2dh12_enable_alert(m_sensors[index].dev, threshold, duration);
 		if (ret) {
-			LOG_ERR("Call `lis2dh12_enable_alert` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("lis2dh12_enable_alert", ret);
 			return ret;
 		}
 	}
@@ -925,7 +926,7 @@ int app_machine_probe_disable_tilt_alert(int index, uint64_t *serial_number)
 	if (!res) {
 		ret = lis2dh12_disable_alert(m_sensors[index].dev);
 		if (ret) {
-			LOG_ERR("Call `lis2dh12_disable_alert` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("lis2dh12_disable_alert", ret);
 			return ret;
 		}
 	}
@@ -950,7 +951,7 @@ int app_machine_probe_get_tilt_alert(int index, uint64_t *serial_number, bool *i
 	if (!res) {
 		ret = lis2dh12_get_interrupt(m_sensors[index].dev, is_active);
 		if (ret) {
-			LOG_ERR("Call `lis2dh12_get_interrupt` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("lis2dh12_get_interrupt", ret);
 			return ret;
 		}
 	}

@@ -5,6 +5,7 @@
  */
 
 #include "app_accel.h"
+#include "app_log.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -99,7 +100,7 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 	}
 
 	if (ret) {
-		LOG_ERR("Call `sensor_sample_fetch` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("sensor_sample_fetch", ret);
 		k_mutex_unlock(&m_lock);
 		return ret;
 	}
@@ -107,7 +108,7 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 	struct sensor_value val[3];
 	ret = sensor_channel_get(dev, SENSOR_CHAN_ACCEL_XYZ, val);
 	if (ret) {
-		LOG_ERR("Call `sensor_channel_get` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("sensor_channel_get", ret);
 		k_mutex_unlock(&m_lock);
 		return ret;
 	}

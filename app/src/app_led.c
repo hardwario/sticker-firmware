@@ -5,6 +5,7 @@
  */
 
 #include "app_led.h"
+#include "app_log.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -46,7 +47,7 @@ void app_led_set(enum app_led_channel channel, int state)
 
 	ret = gpio_pin_set_dt(led, state);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_set` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_set", ret);
 		return;
 	}
 }
@@ -63,19 +64,19 @@ static int init(void)
 
 	ret = gpio_pin_configure_dt(&m_led_r, GPIO_OUTPUT_INACTIVE);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
 	}
 
 	ret = gpio_pin_configure_dt(&m_led_g, GPIO_OUTPUT_INACTIVE);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
 	}
 
 	ret = gpio_pin_configure_dt(&m_led_y, GPIO_OUTPUT_INACTIVE);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
 	}
 

@@ -7,6 +7,7 @@
 #include "app_hall.h"
 #include "app_config.h"
 #include "app_led.h"
+#include "app_log.h"
 #include "app_lrw.h"
 #include "app_send.h"
 
@@ -57,7 +58,7 @@ static int poll(void)
 	if (g_app_config.cap_hall_left) {
 		ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_UP);
 		if (ret) {
-			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 			return ret;
 		}
 	}
@@ -65,7 +66,7 @@ static int poll(void)
 	if (g_app_config.cap_hall_right) {
 		ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_UP);
 		if (ret) {
-			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 			return ret;
 		}
 	}
@@ -83,7 +84,7 @@ static int poll(void)
 	if (g_app_config.cap_hall_left) {
 		ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_DOWN);
 		if (ret) {
-			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 			return ret;
 		}
 	}
@@ -91,7 +92,7 @@ static int poll(void)
 	if (g_app_config.cap_hall_right) {
 		ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_DOWN);
 		if (ret) {
-			LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 			return ret;
 		}
 	}
@@ -174,7 +175,7 @@ static void hall_poll_work_handler(struct k_work *work)
 
 	int ret = poll();
 	if (ret) {
-		LOG_ERR("Call `poll` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("poll", ret);
 	}
 }
 
@@ -203,13 +204,13 @@ int app_hall_init(void)
 
 	ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_DOWN);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
 	}
 
 	ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_DOWN);
 	if (ret) {
-		LOG_ERR("Call `gpio_pin_configure_dt` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
 	}
 

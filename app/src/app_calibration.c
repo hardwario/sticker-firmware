@@ -7,6 +7,7 @@
 #include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_led.h"
+#include "app_log.h"
 #include "app_machine_probe.h"
 #include "app_sht40.h"
 #include "app_wdog.h"
@@ -28,7 +29,7 @@ static void read_ds18b20(int count)
 		float temperature;
 		int ret = app_ds18b20_read(i, &serial_number, &temperature);
 		if (ret) {
-			LOG_ERR("Call `app_ds18b20_read` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_ds18b20_read", ret);
 			continue;
 		}
 
@@ -50,7 +51,7 @@ static void read_machine_probe(int count)
 		float humidity;
 		ret = app_machine_probe_read_hygrometer(i, &serial_number, &temperature, &humidity);
 		if (ret) {
-			LOG_ERR("Call `app_machine_probe_read_hygrometer` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_machine_probe_read_hygrometer", ret);
 			continue;
 		}
 
@@ -75,7 +76,7 @@ static void read_sht40(void)
 	float humidity;
 	ret = app_sht40_read(&temperature, &humidity);
 	if (ret) {
-		LOG_ERR("Call `app_sht40_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_sht40_read", ret);
 		return;
 	}
 
@@ -104,7 +105,7 @@ static int init(void)
 
 		ret = device_init(dev);
 		if (ret) {
-			LOG_ERR("Call `device_init` failed (ds2484): %d", ret);
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "ds2484", ret);
 			return ret;
 		}
 	}
@@ -114,7 +115,7 @@ static int init(void)
 
 		ret = device_init(dev_0);
 		if (ret) {
-			LOG_ERR("Call `device_init` failed (ds18b20_0): %d", ret);
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "ds18b20_0", ret);
 			return ret;
 		}
 
@@ -122,13 +123,13 @@ static int init(void)
 
 		ret = device_init(dev_1);
 		if (ret) {
-			LOG_ERR("Call `device_init` failed (ds18b20_1): %d", ret);
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "ds18b20_1", ret);
 			return ret;
 		}
 
 		ret = app_ds18b20_scan();
 		if (ret) {
-			LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_ds18b20_scan", ret);
 			return ret;
 		}
 
@@ -140,7 +141,7 @@ static int init(void)
 
 		ret = device_init(dev_0);
 		if (ret) {
-			LOG_ERR("Call `device_init` failed (machine_probe_0): %d", ret);
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "machine_probe_0", ret);
 			return ret;
 		}
 
@@ -148,13 +149,13 @@ static int init(void)
 
 		ret = device_init(dev_1);
 		if (ret) {
-			LOG_ERR("Call `device_init` failed (machine_probe_1): %d", ret);
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "machine_probe_1", ret);
 			return ret;
 		}
 
 		ret = app_machine_probe_scan();
 		if (ret) {
-			LOG_ERR("Call `app_machine_probe_scan` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_machine_probe_scan", ret);
 			return ret;
 		}
 
@@ -167,7 +168,7 @@ static int init(void)
 #if defined(CONFIG_WATCHDOG)
 		ret = app_wdog_feed();
 		if (ret) {
-			LOG_ERR("Call `app_wdog_feed` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_wdog_feed", ret);
 			return ret;
 		}
 #endif /* defined(CONFIG_WATCHDOG) */

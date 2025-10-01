@@ -5,6 +5,7 @@
  */
 
 #include "app_config.h"
+#include "app_log.h"
 #include "app_shell.h"
 
 /* Zephyr includes */
@@ -67,7 +68,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 			ret = read_cb(cb_arg, _var, len);                                          \
                                                                                                    \
 			if (ret < 0) {                                                             \
-				LOG_ERR("Call `read_cb` failed: %d", ret);                         \
+				LOG_ERR_CALL_FAILED_INT("read_cb", ret);                              \
 				return ret;                                                        \
 			}                                                                          \
                                                                                                    \
@@ -296,7 +297,7 @@ static int init(void)
 
 	ret = settings_subsys_init();
 	if (ret) {
-		LOG_ERR("Call `settings_subsys_init` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("settings_subsys_init", ret);
 		return ret;
 	}
 
@@ -309,13 +310,13 @@ static int init(void)
 
 	ret = settings_register(&sh);
 	if (ret) {
-		LOG_ERR("Call `settings_register` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("settings_register", ret);
 		return ret;
 	}
 
 	ret = settings_load_subtree(SETTINGS_PFX);
 	if (ret) {
-		LOG_ERR("Call `settings_load_subtree` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("settings_load_subtree", ret);
 		return ret;
 	}
 
@@ -330,7 +331,7 @@ static int save(bool reboot)
 
 	ret = settings_save();
 	if (ret) {
-		LOG_ERR("Call `settings_save` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("settings_save", ret);
 		return ret;
 	}
 
@@ -349,20 +350,20 @@ static int reset(bool reboot)
 	/* Settings in external FLASH as a LittleFS file */
 	ret = fs_unlink(CONFIG_SETTINGS_FILE_PATH);
 	if (ret) {
-		LOG_WRN("Call `fs_unlink` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("fs_unlink", ret);
 	}
 
 	/* Needs to be static so it is zero-ed */
 	static struct fs_file_t file;
 	ret = fs_open(&file, CONFIG_SETTINGS_FILE_PATH, FS_O_CREATE);
 	if (ret) {
-		LOG_ERR("Call `fs_open` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("fs_open", ret);
 		return ret;
 	}
 
 	ret = fs_close(&file);
 	if (ret) {
-		LOG_ERR("Call `fs_close` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("fs_close", ret);
 		return ret;
 	}
 #else
@@ -370,13 +371,13 @@ static int reset(bool reboot)
 	const struct flash_area *fa;
 	ret = flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa);
 	if (ret) {
-		LOG_ERR("Call `flash_area_open` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("flash_area_open", ret);
 		return ret;
 	}
 
 	ret = flash_area_erase(fa, 0, FIXED_PARTITION_SIZE(storage_partition));
 	if (ret) {
-		LOG_ERR("Call `flash_area_erase` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("flash_area_erase", ret);
 		return ret;
 	}
 
@@ -399,7 +400,7 @@ static void print_secret_key(const struct shell *shell)
 	int ret =
 		bin2hex(m_app_config.secret_key, sizeof(m_app_config.secret_key), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("bin2hex", ret);
 		return;
 	}
 
@@ -478,7 +479,7 @@ static void print_lrw_deveui(const struct shell *shell)
 
 	ret = bin2hex(m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("bin2hex", ret);
 		return;
 	}
 
@@ -493,7 +494,7 @@ static void print_lrw_joineui(const struct shell *shell)
 
 	ret = bin2hex(m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("bin2hex", ret);
 		return;
 	}
 
@@ -508,7 +509,7 @@ static void print_lrw_nwkkey(const struct shell *shell)
 
 	ret = bin2hex(m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("bin2hex", ret);
 		return;
 	}
 
@@ -523,7 +524,7 @@ static void print_lrw_appkey(const struct shell *shell)
 
 	ret = bin2hex(m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("bin2hex", ret);
 		return;
 	}
 
@@ -538,7 +539,7 @@ static void print_lrw_devaddr(const struct shell *shell)
 
 	ret = bin2hex(m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("bin2hex", ret);
 		return;
 	}
 
@@ -553,7 +554,7 @@ static void print_lrw_nwkskey(const struct shell *shell)
 
 	ret = bin2hex(m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("bin2hex", ret);
 		return;
 	}
 
@@ -568,7 +569,7 @@ static void print_lrw_appskey(const struct shell *shell)
 
 	ret = bin2hex(m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("bin2hex", ret);
 		return;
 	}
 
@@ -859,7 +860,7 @@ static int cmd_save(const struct shell *shell, size_t argc, char **argv)
 
 	ret = save(true);
 	if (ret) {
-		LOG_ERR("Call `save` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("save", ret);
 		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
@@ -873,7 +874,7 @@ static int cmd_reset(const struct shell *shell, size_t argc, char **argv)
 
 	ret = reset(true);
 	if (ret) {
-		LOG_ERR("Call `reset` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("reset", ret);
 		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
@@ -903,7 +904,7 @@ static int cmd_secret_key(const struct shell *shell, size_t argc, char **argv)
 	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.secret_key,
 		      sizeof(m_app_config.secret_key));
 	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("hex2bin", ret);
 		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
@@ -1097,7 +1098,7 @@ static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
 
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("hex2bin", ret);
 		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
@@ -1130,7 +1131,7 @@ static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
 
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("hex2bin", ret);
 		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
@@ -1163,7 +1164,7 @@ static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
 
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("hex2bin", ret);
 		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
@@ -1196,7 +1197,7 @@ static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
 
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("hex2bin", ret);
 		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
@@ -1229,7 +1230,7 @@ static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
 
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("hex2bin", ret);
 		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
@@ -1262,7 +1263,7 @@ static int cmd_lrw_nwkskey(const struct shell *shell, size_t argc, char **argv)
 
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("hex2bin", ret);
 		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
@@ -1295,7 +1296,7 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("hex2bin", ret);
 		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
@@ -1786,7 +1787,7 @@ int app_config_save(void)
 
 	ret = save(true);
 	if (ret) {
-		LOG_ERR("Call `save` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("save", ret);
 		return ret;
 	}
 
@@ -1799,7 +1800,7 @@ int app_config_reset(void)
 
 	ret = reset(true);
 	if (ret) {
-		LOG_ERR("Call `reset` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("reset", ret);
 		return ret;
 	}
 

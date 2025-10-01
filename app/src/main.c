@@ -1,6 +1,7 @@
 #include "app_alarm.h"
 #include "app_config.h"
 #include "app_led.h"
+#include "app_log.h"
 #include "app_lrw.h"
 #include "app_nfc.h"
 #include "app_wdog.h"
@@ -65,7 +66,7 @@ int main(void)
 	enum app_nfc_action action;
 	ret = app_nfc_check(&action);
 	if (ret) {
-		LOG_ERR("Call `app_nfc_check` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
 	}
 
 	if (action == APP_NFC_ACTION_SAVE) {
@@ -73,14 +74,14 @@ int main(void)
 
 		ret = app_config_save();
 		if (ret) {
-			LOG_ERR("Call `app_config_save` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_config_save", ret);
 		}
 	} else if (action == APP_NFC_ACTION_RESET) {
 		play_carousel_nfc();
 
 		ret = app_config_reset();
 		if (ret) {
-			LOG_ERR("Call `app_config_reset` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_config_reset", ret);
 		}
 	}
 
@@ -94,7 +95,7 @@ int main(void)
 #if defined(CONFIG_WATCHDOG)
 		ret = app_wdog_feed();
 		if (ret) {
-			LOG_ERR("Call `app_wdog_feed` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_wdog_feed", ret);
 		}
 #endif /* defined(CONFIG_WATCHDOG) */
 
@@ -105,7 +106,7 @@ int main(void)
 
 			ret = app_nfc_check(&action);
 			if (ret) {
-				LOG_ERR("Call `app_nfc_check` failed: %d", ret);
+				LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
 			}
 
 			if (action == APP_NFC_ACTION_SAVE) {
@@ -113,14 +114,14 @@ int main(void)
 
 				ret = app_config_save();
 				if (ret) {
-					LOG_ERR("Call `app_config_save` failed: %d", ret);
+					LOG_ERR_CALL_FAILED_INT("app_config_save", ret);
 				}
 			} else if (action == APP_NFC_ACTION_RESET) {
 				play_carousel_nfc();
 
 				ret = app_config_reset();
 				if (ret) {
-					LOG_ERR("Call `app_config_reset` failed: %d", ret);
+					LOG_ERR_CALL_FAILED_INT("app_config_reset", ret);
 				}
 			}
 		}

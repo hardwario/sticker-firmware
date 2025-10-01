@@ -10,12 +10,14 @@
 #include "app_ds18b20.h"
 #include "app_hall.h"
 #include "app_led.h"
+#include "app_log.h"
 #include "app_machine_probe.h"
 #include "app_mpl3115a2.h"
 #include "app_opt3001.h"
 #include "app_pyq1648.h"
 #include "app_sensor.h"
 #include "app_sht40.h"
+#include "app_log.h"
 
 /* Zephyr includes */
 #include <zephyr/init.h>
@@ -89,42 +91,42 @@ void app_sensor_sample(void)
 #if defined(CONFIG_ADC)
 	ret = app_battery_measure(&voltage);
 	if (ret) {
-		LOG_ERR("Call `app_battery_measure` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_battery_measure", ret);
 	}
 #endif /* defined(CONFIG_ADC) */
 
 #if defined(CONFIG_LIS2DH)
 	ret = app_accel_read(NULL, NULL, NULL, &orientation);
 	if (ret) {
-		LOG_ERR("Call `app_accel_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_accel_read", ret);
 	}
 #endif /* defined(CONFIG_LIS2DH) */
 
 #if defined(CONFIG_SHT4X)
 	ret = app_sht40_read(&temperature, &humidity);
 	if (ret) {
-		LOG_ERR("Call `app_sht40_read` failed: %d", ret);
+		LOG_ERR_CALL_FAILED_INT("app_sht40_read", ret);
 	}
 #endif /* defined(CONFIG_SHT4X) */
 
 	if (g_app_config.cap_light_sensor) {
 		ret = app_opt3001_read(&illuminance);
 		if (ret) {
-			LOG_ERR("Call `app_opt3001_read` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_opt3001_read", ret);
 		}
 	}
 
 	if (g_app_config.cap_barometer) {
 		ret = app_mpl3115a2_read(&altitude, &pressure, NULL);
 		if (ret) {
-			LOG_ERR("Call `app_mpl3115a2_read` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_mpl3115a2_read", ret);
 		}
 	}
 
 	if (g_app_config.cap_hall_left || g_app_config.cap_hall_right) {
 		ret = app_hall_get_data(&hall_data);
 		if (ret) {
-			LOG_ERR("Call `app_hall_get_data` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_hall_get_data", ret);
 		}
 	}
 
@@ -136,7 +138,7 @@ void app_sensor_sample(void)
 			float temperature;
 			ret = app_ds18b20_read(i, &serial_number, &temperature);
 			if (ret) {
-				LOG_ERR("Call `app_ds18b20_read` failed: %d", ret);
+				LOG_ERR_CALL_FAILED_INT("app_ds18b20_read", ret);
 				continue;
 			}
 
@@ -162,18 +164,13 @@ void app_sensor_sample(void)
 			ret = app_machine_probe_read_hygrometer(i, &serial_number, &hygrometer_temperature,
 								&hygrometer_humidity);
 			if (ret) {
-				LOG_ERR("Call `app_machine_probe_read_hygrometer` failed: "
-					"%d",
-					ret);
+				LOG_ERR_CALL_FAILED_INT("app_machine_probe_read_hygrometer", ret);
 				continue;
 			}
 
 			ret = app_machine_probe_get_tilt_alert(i, &serial_number, &is_tilt_alert);
 			if (ret) {
-				LOG_ERR("Call `app_machine_probe_get_tilt_alert` failed: "
-					"%d",
-					ret);
-
+				LOG_ERR_CALL_FAILED_INT("app_machine_probe_get_tilt_alert", ret);
 				continue;
 			}
 
@@ -264,7 +261,7 @@ static int init(void)
 
 		ret = device_init(dev);
 		if (ret) {
-			LOG_ERR("Call `device_init` failed (opt3001): %d", ret);
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "opt3001", ret);
 			return ret;
 		}
 	}
@@ -274,7 +271,7 @@ static int init(void)
 
 		ret = device_init(dev);
 		if (ret) {
-			LOG_ERR("Call `device_init` failed (mpl3115a2): %d", ret);
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "mpl3115a2", ret);
 			return ret;
 		}
 	}
@@ -282,7 +279,7 @@ static int init(void)
 	if (g_app_config.cap_hall_left || g_app_config.cap_hall_right) {
 		ret = app_hall_init();
 		if (ret) {
-			LOG_ERR("Call `app_hall_init` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_hall_init", ret);
 			return ret;
 		}
 	}
@@ -290,7 +287,7 @@ static int init(void)
 	if (g_app_config.cap_pir_detector) {
 		ret = app_pyq1648_init();
 		if (ret) {
-			LOG_ERR("Call `app_pyq1648_init` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_pyq1648_init", ret);
 			return ret;
 		}
 
@@ -302,7 +299,7 @@ static int init(void)
 
 		ret = device_init(dev);
 		if (ret) {
-			LOG_ERR("Call `device_init` failed (ds2484): %d", ret);
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "ds2484", ret);
 			return ret;
 		}
 	}
@@ -312,7 +309,7 @@ static int init(void)
 
 		ret = device_init(dev_0);
 		if (ret) {
-			LOG_ERR("Call `device_init` failed (ds18b20_0): %d", ret);
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "ds18b20_0", ret);
 			return ret;
 		}
 
@@ -320,13 +317,13 @@ static int init(void)
 
 		ret = device_init(dev_1);
 		if (ret) {
-			LOG_ERR("Call `device_init` failed (ds18b20_1): %d", ret);
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "ds18b20_1", ret);
 			return ret;
 		}
 
 		ret = app_ds18b20_scan();
 		if (ret) {
-			LOG_ERR("Call `app_ds18b20_scan` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_ds18b20_scan", ret);
 			return ret;
 		}
 	}
@@ -336,7 +333,7 @@ static int init(void)
 
 		ret = device_init(dev_0);
 		if (ret) {
-			LOG_ERR("Call `device_init` failed (machine_probe_0): %d", ret);
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "machine_probe_0", ret);
 			return ret;
 		}
 
@@ -344,13 +341,13 @@ static int init(void)
 
 		ret = device_init(dev_1);
 		if (ret) {
-			LOG_ERR("Call `device_init` failed (machine_probe_1): %d", ret);
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "machine_probe_1", ret);
 			return ret;
 		}
 
 		ret = app_machine_probe_scan();
 		if (ret) {
-			LOG_ERR("Call `app_machine_probe_scan` failed: %d", ret);
+			LOG_ERR_CALL_FAILED_INT("app_machine_probe_scan", ret);
 			return ret;
 		}
 
@@ -361,7 +358,7 @@ static int init(void)
 			ret = app_machine_probe_enable_tilt_alert(i, &serial_number, TILT_THRESHOLD,
 								TILT_DURATION);
 			if (ret) {
-				LOG_ERR("Call `app_machine_probe_enable_tilt_alert` failed: %d", ret);
+				LOG_ERR_CALL_FAILED_INT("app_machine_probe_enable_tilt_alert", ret);
 				return ret;
 			}
 		}
