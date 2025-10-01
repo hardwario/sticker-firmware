@@ -5,6 +5,7 @@
  */
 
 #include "app_config.h"
+#include "app_shell.h"
 
 /* Zephyr includes */
 #include <zephyr/fs/fs.h>
@@ -859,7 +860,7 @@ static int cmd_save(const struct shell *shell, size_t argc, char **argv)
 	ret = save(true);
 	if (ret) {
 		LOG_ERR("Call `save` failed: %d", ret);
-		shell_error(shell, "command failed");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
 
@@ -873,7 +874,7 @@ static int cmd_reset(const struct shell *shell, size_t argc, char **argv)
 	ret = reset(true);
 	if (ret) {
 		LOG_ERR("Call `reset` failed: %d", ret);
-		shell_error(shell, "command failed");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
 
@@ -890,12 +891,12 @@ static int cmd_secret_key(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
 	if (strlen(argv[1]) != 2 * sizeof(m_app_config.secret_key)) {
-		shell_error(shell, "invalid argument length");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return -EINVAL;
 	}
 
@@ -903,7 +904,7 @@ static int cmd_secret_key(const struct shell *shell, size_t argc, char **argv)
 		      sizeof(m_app_config.secret_key));
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "command failed");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
 
@@ -918,20 +919,20 @@ static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
 	size_t len = strlen(argv[1]);
 
 	if (len != 10) {
-		shell_error(shell, "invalid argument format");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return -EINVAL;
 	}
 
 	for (size_t i = 0; i < len; i++) {
 		if (!isdigit((int)argv[1][i])) {
-			shell_error(shell, "invalid argument format");
+			shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 			return -EINVAL;
 		}
 	}
@@ -949,7 +950,7 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
@@ -960,26 +961,7 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 
 static int cmd_calibration(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_calibration(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.calibration = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.calibration = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.calibration, print_calibration);
 }
 
 static int cmd_interval_sample(const struct shell *shell, size_t argc, char **argv)
@@ -990,14 +972,14 @@ static int cmd_interval_sample(const struct shell *shell, size_t argc, char **ar
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
 	int a = strtol(argv[1], NULL, 10);
 
 	if (a != 0 && (a < 5 || a > 3600)) {
-		shell_error(shell, "invalid argument range");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_RANGE);
 		return -EINVAL;
 	}
 
@@ -1008,26 +990,8 @@ static int cmd_interval_sample(const struct shell *shell, size_t argc, char **ar
 
 static int cmd_interval_report(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_interval_report(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	int a = strtol(argv[1], NULL, 10);
-
-	if (a < 60 || a > 86400) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.interval_report = a;
-
-	return 0;
+	return app_shell_cmd_int(shell, argc, argv, &m_app_config.interval_report,
+	                         60, 86400, print_interval_report);
 }
 
 static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
@@ -1038,7 +1002,7 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
@@ -1049,7 +1013,7 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 	} else if (!strcmp(argv[1], "au915")) {
 		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_AU915;
 	} else {
-		shell_error(shell, "invalid argument (use eu868, us915, or au915)");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return -EINVAL;
 	}
 
@@ -1064,7 +1028,7 @@ static int cmd_lrw_network(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
@@ -1073,7 +1037,7 @@ static int cmd_lrw_network(const struct shell *shell, size_t argc, char **argv)
 	} else if (!strcmp(argv[1], "private")) {
 		m_app_config.lrw_network = APP_CONFIG_LRW_NETWORK_PRIVATE;
 	} else {
-		shell_error(shell, "invalid argument (use public or private)");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return -EINVAL;
 	}
 
@@ -1082,26 +1046,8 @@ static int cmd_lrw_network(const struct shell *shell, size_t argc, char **argv)
 
 static int cmd_lrw_adr(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_lrw_adr(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.lrw_adr = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.lrw_adr = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.lrw_adr,
+	                          print_lrw_adr);
 }
 
 static int cmd_lrw_activation(const struct shell *shell, size_t argc, char **argv)
@@ -1112,7 +1058,7 @@ static int cmd_lrw_activation(const struct shell *shell, size_t argc, char **arg
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
@@ -1121,7 +1067,7 @@ static int cmd_lrw_activation(const struct shell *shell, size_t argc, char **arg
 	} else if (!strcmp(argv[1], "abp")) {
 		m_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_ABP;
 	} else {
-		shell_error(shell, "invalid argument (use otaa or abp)");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return -EINVAL;
 	}
 
@@ -1138,12 +1084,12 @@ static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
 	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_joineui)) {
-		shell_error(shell, "invalid argument length");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return -EINVAL;
 	}
 
@@ -1152,7 +1098,7 @@ static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "command failed");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
 
@@ -1171,12 +1117,12 @@ static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
 	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_nwkkey)) {
-		shell_error(shell, "invalid argument length");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return -EINVAL;
 	}
 
@@ -1185,7 +1131,7 @@ static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "command failed");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
 
@@ -1204,12 +1150,12 @@ static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
 	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_appkey)) {
-		shell_error(shell, "invalid argument length");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return -EINVAL;
 	}
 
@@ -1218,7 +1164,7 @@ static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "command failed");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
 
@@ -1237,12 +1183,12 @@ static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
 	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_deveui)) {
-		shell_error(shell, "invalid argument length");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return -EINVAL;
 	}
 
@@ -1251,7 +1197,7 @@ static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "command failed");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
 
@@ -1270,12 +1216,12 @@ static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
 	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_devaddr)) {
-		shell_error(shell, "invalid argument length");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return -EINVAL;
 	}
 
@@ -1284,7 +1230,7 @@ static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "command failed");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
 
@@ -1303,12 +1249,12 @@ static int cmd_lrw_nwkskey(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
 	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_nwkskey)) {
-		shell_error(shell, "invalid argument length");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return -EINVAL;
 	}
 
@@ -1317,7 +1263,7 @@ static int cmd_lrw_nwkskey(const struct shell *shell, size_t argc, char **argv)
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "command failed");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
 
@@ -1336,12 +1282,12 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_ARGS);
 		return -EINVAL;
 	}
 
 	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_appskey)) {
-		shell_error(shell, "invalid argument length");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return -EINVAL;
 	}
 
@@ -1350,7 +1296,7 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 	ret = hex2bin(argv[1], strlen(argv[1]), buf, sizeof(buf));
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "command failed");
+		shell_error(shell, "%s", APP_SHELL_MSG_INVALID_VALUE);
 		return ret;
 	}
 
@@ -1361,869 +1307,221 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 
 static int cmd_alarm_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_temperature_enabled(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.alarm_temperature_enabled = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.alarm_temperature_enabled = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.alarm_temperature_enabled,
+	                          print_alarm_temperature_enabled);
 }
 
 static int cmd_alarm_temperature_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_temperature_lo(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < -30.0f || a > 70.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_temperature_lo = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_lo,
+	                           -30.0f, 70.0f, print_alarm_temperature_lo);
 }
 
 static int cmd_alarm_temperature_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_temperature_hi(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < -30.0f || a > 70.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_temperature_hi = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_hi,
+	                           -30.0f, 70.0f, print_alarm_temperature_hi);
 }
 
 static int cmd_alarm_temperature_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_temperature_hst(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < 0.0f || a > 5.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_temperature_hst = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_hst,
+	                           0.0f, 5.0f, print_alarm_temperature_hst);
 }
 
 static int cmd_alarm_t1_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_t1_temperature_enabled(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.alarm_t1_temperature_enabled = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.alarm_t1_temperature_enabled = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.alarm_t1_temperature_enabled,
+	                          print_alarm_t1_temperature_enabled);
 }
 
 static int cmd_alarm_t1_temperature_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_t1_temperature_lo(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < -30.0f || a > 70.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_t1_temperature_lo = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_lo,
+	                            -30.0f, 70.0f, print_alarm_t1_temperature_lo);
 }
 
 static int cmd_alarm_t1_temperature_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_t1_temperature_hi(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < -30.0f || a > 70.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_t1_temperature_hi = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_hi,
+	                            -30.0f, 70.0f, print_alarm_t1_temperature_hi);
 }
 
 static int cmd_alarm_t1_temperature_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_t1_temperature_hst(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < 0.0f || a > 5.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_t1_temperature_hst = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_hst,
+	                            0.0f, 5.0f, print_alarm_t1_temperature_hst);
 }
 
 static int cmd_alarm_t2_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_t2_temperature_enabled(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.alarm_t2_temperature_enabled = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.alarm_t2_temperature_enabled = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.alarm_t2_temperature_enabled,
+	                          print_alarm_t2_temperature_enabled);
 }
 
 static int cmd_alarm_t2_temperature_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_t2_temperature_lo(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < -30.0f || a > 70.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_t2_temperature_lo = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_lo,
+	                            -30.0f, 70.0f, print_alarm_t2_temperature_lo);
 }
 
 static int cmd_alarm_t2_temperature_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_t2_temperature_hi(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < -30.0f || a > 70.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_t2_temperature_hi = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_hi,
+	                            -30.0f, 70.0f, print_alarm_t2_temperature_hi);
 }
 
 static int cmd_alarm_t2_temperature_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_t2_temperature_hst(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < 0.0f || a > 5.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_t2_temperature_hst = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_hst,
+	                            0.0f, 5.0f, print_alarm_t2_temperature_hst);
 }
 
 static int cmd_alarm_humidity_enabled(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_humidity_enabled(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.alarm_humidity_enabled = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.alarm_humidity_enabled = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.alarm_humidity_enabled,
+	                          print_alarm_humidity_enabled);
 }
 
 static int cmd_alarm_humidity_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_humidity_lo(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < 0.0f || a > 100.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_humidity_lo = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_lo,
+	                            0.0f, 100.0f, print_alarm_humidity_lo);
 }
 
 static int cmd_alarm_humidity_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_humidity_hi(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < 0.0f || a > 100.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_humidity_hi = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_hi,
+	                            0.0f, 100.0f, print_alarm_humidity_hi);
 }
 
 static int cmd_alarm_humidity_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_humidity_hst(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < 0.0f || a > 20.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_humidity_hst = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_hst,
+	                            0.0f, 20.0f, print_alarm_humidity_hst);
 }
 
 static int cmd_alarm_pressure_enabled(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_pressure_enabled(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.alarm_pressure_enabled = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.alarm_pressure_enabled = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.alarm_pressure_enabled,
+	                          print_alarm_pressure_enabled);
 }
 
 static int cmd_alarm_pressure_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_pressure_lo(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < 500.0f || a > 1200.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_pressure_lo = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_lo,
+	                            500.0f, 1200.0f, print_alarm_pressure_lo);
 }
 
 static int cmd_alarm_pressure_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_pressure_hi(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < 500.0f || a > 1200.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_pressure_hi = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_hi,
+	                            500.0f, 1200.0f, print_alarm_pressure_hi);
 }
 
 static int cmd_alarm_pressure_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_alarm_pressure_hst(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < 0.0f || a > 50.0f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.alarm_pressure_hst = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_hst,
+	                            0.0f, 50.0f, print_alarm_pressure_hst);
 }
 
 
 static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_hall_left_counter(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.hall_left_counter = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.hall_left_counter = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.hall_left_counter,
+	                          print_hall_left_counter);
 }
 
 static int cmd_hall_left_notify_act(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_hall_left_notify_act(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.hall_left_notify_act = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.hall_left_notify_act = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.hall_left_notify_act,
+	                          print_hall_left_notify_act);
 }
 
 static int cmd_hall_left_notify_deact(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_hall_left_notify_deact(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.hall_left_notify_deact = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.hall_left_notify_deact = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.hall_left_notify_deact,
+	                          print_hall_left_notify_deact);
 }
 
 
 static int cmd_hall_right_counter(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_hall_right_counter(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.hall_right_counter = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.hall_right_counter = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.hall_right_counter,
+	                          print_hall_right_counter);
 }
 
 static int cmd_hall_right_notify_act(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_hall_right_notify_act(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.hall_right_notify_act = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.hall_right_notify_act = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.hall_right_notify_act,
+	                          print_hall_right_notify_act);
 }
 
 static int cmd_hall_right_notify_deact(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_hall_right_notify_deact(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.hall_right_notify_deact = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.hall_right_notify_deact = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.hall_right_notify_deact,
+	                          print_hall_right_notify_deact);
 }
 
 
 static int cmd_corr_temperature(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_corr_temperature(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < -5.f || a > 5.f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.corr_temperature = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.corr_temperature,
+	                            -5.0f, 5.0f, print_corr_temperature);
 }
 
 static int cmd_corr_t1_temperature(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_corr_t1_temperature(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < -5.f || a > 5.f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.corr_t1_temperature = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.corr_t1_temperature,
+	                            -5.0f, 5.0f, print_corr_t1_temperature);
 }
 
 static int cmd_corr_t2_temperature(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_corr_t2_temperature(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	float a = atof(argv[1]);
-
-	if (a < -5.f || a > 5.f) {
-		shell_error(shell, "invalid argument range");
-		return -EINVAL;
-	}
-
-	m_app_config.corr_t2_temperature = a;
-
-	return 0;
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.corr_t2_temperature,
+	                            -5.0f, 5.0f, print_corr_t2_temperature);
 }
 
 static int cmd_cap_hall_left(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_cap_hall_left(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.cap_hall_left = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.cap_hall_left = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_hall_left,
+	                          print_cap_hall_left);
 }
 
 static int cmd_cap_hall_right(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_cap_hall_right(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.cap_hall_right = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.cap_hall_right = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_hall_right,
+	                          print_cap_hall_right);
 }
 
 static int cmd_cap_light_sensor(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_cap_light_sensor(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.cap_light_sensor = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.cap_light_sensor = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_light_sensor,
+	                          print_cap_light_sensor);
 }
 
 static int cmd_cap_barometer(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_cap_barometer(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.cap_barometer = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.cap_barometer = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_barometer,
+	                          print_cap_barometer);
 }
 
 static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_cap_pir_detector(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.cap_pir_detector = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.cap_pir_detector = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_pir_detector,
+	                          print_cap_pir_detector);
 }
 
 static int cmd_cap_1w_thermometer(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_cap_1w_thermometer(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.cap_1w_thermometer = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.cap_1w_thermometer = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_1w_thermometer,
+	                          print_cap_1w_thermometer);
 }
 
 static int cmd_cap_1w_machine_probe(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		print_cap_1w_machine_probe(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "invalid number of arguments");
-		return -EINVAL;
-	}
-
-	if (!strcmp(argv[1], "true")) {
-		m_app_config.cap_1w_machine_probe = true;
-	} else if (!strcmp(argv[1], "false")) {
-		m_app_config.cap_1w_machine_probe = false;
-	} else {
-		shell_error(shell, "invalid argument");
-		return -EINVAL;
-	}
-
-	return 0;
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_1w_machine_probe,
+	                          print_cap_1w_machine_probe);
 }
 
 static int print_help(const struct shell *shell, size_t argc, char **argv)
