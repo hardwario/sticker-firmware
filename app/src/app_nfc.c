@@ -218,7 +218,7 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 
 	LOG_INF("Found supported MIME record - length: %u byte(s)", record_info->payload_len);
 
-	uint8_t buf[448];
+	static uint8_t buf[448];
 	size_t len;
 	ret = decrypt(record_info->payload, record_info->payload_len, buf, sizeof(buf), &len);
 	if (ret) {
@@ -271,7 +271,7 @@ int app_nfc_check(enum app_nfc_action *action)
 
 	k_sleep(K_MSEC(150));
 
-	uint8_t buf[512];
+	static uint8_t buf[512];
 	ret = read_mem(0, buf, sizeof(buf));
 	if (ret) {
 		LOG_ERR("Call `read_mem` failed: %d", ret);

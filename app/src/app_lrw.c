@@ -28,7 +28,7 @@
 
 LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
 
-static K_THREAD_STACK_DEFINE(m_work_stack, 4096);
+static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
 static struct k_work_q m_work_q;
 static struct k_timer m_send_timer;
 static struct k_work m_send_work;
