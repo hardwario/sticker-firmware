@@ -18,8 +18,8 @@ message NfcConfigMessage {
         }
 
         enum Activation {
-            ABP = 0;
-            OTAA = 1;
+            OTAA = 0;
+            ABP = 1;
         }
 
         enum Network {
