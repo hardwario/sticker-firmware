@@ -5,3 +5,5 @@
 - Finish accelerometer tilt detection (with options CONFIG_LIS2DH_ACCEL_HP_FILTERS=y and CONFIG_LIS2DH_TRIGGER_GLOBAL_THREAD=y ???).
 
 - Implement optional activation / deactivation delay for hall switches
+
+    - Activate calibration after 5-second activation of both hall switches.
