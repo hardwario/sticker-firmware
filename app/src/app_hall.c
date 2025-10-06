@@ -113,9 +113,13 @@ static int poll(void)
 			m_hall_data.left_notify_act = true;
 		}
 
-		app_led_set(APP_LED_CHANNEL_R, 1);
-		k_sleep(K_MSEC(250));
-		app_led_set(APP_LED_CHANNEL_R, 0);
+		struct app_led_blink_req req = {
+			.color = APP_LED_CHANNEL_R,
+			.duration = 250,
+			.space = 0,
+			.repetitions = 1
+		};
+		app_led_blink(&req);
 	}
 
 	if (left_was_active && !left_is_active) {
@@ -125,9 +129,13 @@ static int poll(void)
 			m_hall_data.left_notify_deact = true;
 		}
 
-		app_led_set(APP_LED_CHANNEL_R, 1);
-		k_sleep(K_MSEC(250));
-		app_led_set(APP_LED_CHANNEL_R, 0);
+		struct app_led_blink_req req = {
+			.color = APP_LED_CHANNEL_R,
+			.duration = 250,
+			.space = 0,
+			.repetitions = 1
+		};
+		app_led_blink(&req);
 	}
 
 	if (!right_was_active && right_is_active) {
@@ -141,9 +149,13 @@ static int poll(void)
 			m_hall_data.right_notify_act = true;
 		}
 
-		app_led_set(APP_LED_CHANNEL_R, 1);
-		k_sleep(K_MSEC(250));
-		app_led_set(APP_LED_CHANNEL_R, 0);
+		struct app_led_blink_req req = {
+			.color = APP_LED_CHANNEL_R,
+			.duration = 250,
+			.space = 0,
+			.repetitions = 1
+		};
+		app_led_blink(&req);
 	}
 
 	if (right_was_active && !right_is_active) {
@@ -153,9 +165,13 @@ static int poll(void)
 			m_hall_data.right_notify_deact = true;
 		}
 
-		app_led_set(APP_LED_CHANNEL_R, 1);
-		k_sleep(K_MSEC(250));
-		app_led_set(APP_LED_CHANNEL_R, 0);
+		struct app_led_blink_req req = {
+			.color = APP_LED_CHANNEL_R,
+			.duration = 250,
+			.space = 0,
+			.repetitions = 1
+		};
+		app_led_blink(&req);
 	}
 
 	k_mutex_unlock(&m_hall_data_mutex);

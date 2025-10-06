@@ -173,9 +173,13 @@ static int init(void)
 		}
 #endif /* defined(CONFIG_WATCHDOG) */
 
-		app_led_set(APP_LED_CHANNEL_Y, 1);
-		k_sleep(K_MSEC(100));
-		app_led_set(APP_LED_CHANNEL_Y, 0);
+		struct app_led_blink_req req = {
+			.color = APP_LED_CHANNEL_Y,
+			.duration = 100,
+			.space = 0,
+			.repetitions = 1
+		};
+		app_led_blink(&req);
 
 		if (count_ds18b20 > 0) {
 			LOG_INF("Reading DS18B20 sensors...");

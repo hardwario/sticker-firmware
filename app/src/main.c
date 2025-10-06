@@ -29,32 +29,38 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 static void play_carousel_boot(void)
 {
-	app_led_set(APP_LED_CHANNEL_R, 1);
-	k_sleep(K_MSEC(500));
-	app_led_set(APP_LED_CHANNEL_R, 0);
-	k_sleep(K_MSEC(250));
-	app_led_set(APP_LED_CHANNEL_Y, 1);
-	k_sleep(K_MSEC(500));
-	app_led_set(APP_LED_CHANNEL_Y, 0);
-	k_sleep(K_MSEC(250));
-	app_led_set(APP_LED_CHANNEL_G, 1);
-	k_sleep(K_MSEC(1500));
-	app_led_set(APP_LED_CHANNEL_G, 0);
+	struct app_led_play_req req = {
+		.commands = {
+			{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
+			{.type = APP_LED_CMD_DELAY, .duration = 500},
+			{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
+			{.type = APP_LED_CMD_DELAY, .duration = 250},
+			{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
+			{.type = APP_LED_CMD_DELAY, .duration = 500},
+			{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
+			{.type = APP_LED_CMD_DELAY, .duration = 250},
+			{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
+			{.type = APP_LED_CMD_DELAY, .duration = 1500},
+			{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
+			{.type = APP_LED_CMD_END}
+		},
+		.repetitions = 1
+	};
+
+	app_led_play(&req);
+	k_sleep(K_MSEC(5000));
 }
 
 static void play_carousel_nfc(void)
 {
-	for (int i = 10; i; i--) {
-		app_led_set(APP_LED_CHANNEL_Y, 1);
-		k_sleep(K_MSEC(100));
-		app_led_set(APP_LED_CHANNEL_Y, 0);
-
-		if (i == 1) {
-			break;
-		}
-
-		k_sleep(K_MSEC(100));
-	}
+	struct app_led_blink_req req = {
+		.color = APP_LED_CHANNEL_Y,
+		.duration = 100,
+		.space = 100,
+		.repetitions = 10
+	};
+	app_led_blink(&req);
+	k_sleep(K_MSEC(10 * 200 - 100));
 }
 
 int main(void)
@@ -127,13 +133,21 @@ int main(void)
 		}
 
 		if (app_alarm_is_active()) {
-			app_led_set(APP_LED_CHANNEL_R, 1);
-			k_sleep(K_MSEC(5));
-			app_led_set(APP_LED_CHANNEL_R, 0);
+			struct app_led_blink_req req = {
+				.color = APP_LED_CHANNEL_R,
+				.duration = 5,
+				.space = 0,
+				.repetitions = 1
+			};
+			app_led_blink(&req);
 		} else {
-			app_led_set(APP_LED_CHANNEL_G, 1);
-			k_sleep(K_MSEC(5));
-			app_led_set(APP_LED_CHANNEL_G, 0);
+			struct app_led_blink_req req = {
+				.color = APP_LED_CHANNEL_G,
+				.duration = 5,
+				.space = 0,
+				.repetitions = 1
+			};
+			app_led_blink(&req);
 		}
 
 		k_sleep(K_SECONDS(BLINK_INTERVAL_SECONDS));

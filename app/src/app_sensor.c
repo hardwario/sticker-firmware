@@ -17,7 +17,6 @@
 #include "app_pyq1648.h"
 #include "app_sensor.h"
 #include "app_sht40.h"
-#include "app_log.h"
 
 /* Zephyr includes */
 #include <zephyr/init.h>
@@ -246,9 +245,13 @@ static void pyq1648_event_handler(void *user_data)
 	g_app_sensor_data.motion_count++;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	app_led_set(APP_LED_CHANNEL_Y, 1);
-	k_sleep(K_MSEC(5));
-	app_led_set(APP_LED_CHANNEL_Y, 0);
+	struct app_led_blink_req req = {
+		.color = APP_LED_CHANNEL_Y,
+		.duration = 5,
+		.space = 0,
+		.repetitions = 1
+	};
+	app_led_blink(&req);
 }
 
 static int init(void)
