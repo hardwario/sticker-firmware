@@ -219,17 +219,17 @@ stm32_lp_tick_source: &lptim1 {
 
 		slot0_partition: partition@8000 {
 			label = "image-0";
-			reg = <0x00008000 DT_SIZE_K(108)>;
+			reg = <0x00008000 DT_SIZE_K(104)>;
 		};
 
-		slot1_partition: partition@23000 {
+		slot1_partition: partition@22000 {
 			label = "image-1";
-			reg = <0x00023000 DT_SIZE_K(108)>;
+			reg = <0x00022000 DT_SIZE_K(104)>;
 		};
 
-		storage_partition: partition@3e000 {
+		storage_partition: partition@3c000 {
 			label = "storage";
-			reg = <0x0003e000 DT_SIZE_K(8)>;
+			reg = <0x0003c000 DT_SIZE_K(16)>;
 		};
 	};
 };
