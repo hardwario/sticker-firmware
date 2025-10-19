@@ -22,12 +22,12 @@
 
 LOG_MODULE_REGISTER(app_led, LOG_LEVEL_DBG);
 
-#define REQUEST_QUEUE_SIZE     3
-#define REQUEST_MAX_AGE_MS     2000
-#define REQUEST_MIN_DELAY_MS   500
+#define REQUEST_QUEUE_SIZE   3
+#define REQUEST_MAX_AGE_MS   2000
+#define REQUEST_MIN_DELAY_MS 500
 
-#define LED_THREAD_STACK_SIZE     2048
-#define LED_THREAD_PRIORITY       K_PRIO_PREEMPT(5)
+#define LED_THREAD_STACK_SIZE 2048
+#define LED_THREAD_PRIORITY   K_PRIO_PREEMPT(5)
 
 static const struct gpio_dt_spec m_led_r = GPIO_DT_SPEC_GET(DT_NODELABEL(led_r), gpios);
 static const struct gpio_dt_spec m_led_g = GPIO_DT_SPEC_GET(DT_NODELABEL(led_g), gpios);
@@ -114,8 +114,7 @@ static void execute_play(const struct app_led_play_req *req)
 			const struct app_led_cmd *cmd = &req->commands[i];
 
 			/* Skip last delay on last repetition */
-			if (rep == req->repetitions - 1 &&
-			    i == length - 1 &&
+			if (rep == req->repetitions - 1 && i == length - 1 &&
 			    cmd->type == APP_LED_CMD_DELAY) {
 				break;
 			}
@@ -196,10 +195,7 @@ int app_led_blink(const struct app_led_blink_req *req)
 	}
 
 	struct request request = {
-		.type = REQUEST_TYPE_BLINK,
-		.timestamp = k_uptime_get(),
-		.blink = *req
-	};
+		.type = REQUEST_TYPE_BLINK, .timestamp = k_uptime_get(), .blink = *req};
 
 	int ret = k_msgq_put(&m_led_msgq, &request, K_NO_WAIT);
 	if (ret) {
@@ -221,10 +217,7 @@ int app_led_play(const struct app_led_play_req *req)
 	}
 
 	struct request request = {
-		.type = REQUEST_TYPE_PLAY,
-		.timestamp = k_uptime_get(),
-		.play = *req
-	};
+		.type = REQUEST_TYPE_PLAY, .timestamp = k_uptime_get(), .play = *req};
 
 	int ret = k_msgq_put(&m_led_msgq, &request, K_NO_WAIT);
 	if (ret) {
@@ -264,12 +257,9 @@ static int init(void)
 	}
 
 	static struct k_thread thread;
-	m_led_thread_id = k_thread_create(&thread,
-					   m_led_thread_stack,
-					   K_THREAD_STACK_SIZEOF(m_led_thread_stack),
-					   thread_entry,
-					   NULL, NULL, NULL,
-					   LED_THREAD_PRIORITY, 0, K_NO_WAIT);
+	m_led_thread_id = k_thread_create(&thread, m_led_thread_stack,
+					  K_THREAD_STACK_SIZEOF(m_led_thread_stack), thread_entry,
+					  NULL, NULL, NULL, LED_THREAD_PRIORITY, 0, K_NO_WAIT);
 
 	k_thread_name_set(m_led_thread_id, "led");
 

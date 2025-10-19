@@ -174,11 +174,7 @@ static int init(void)
 #endif /* defined(CONFIG_WATCHDOG) */
 
 		struct app_led_blink_req req = {
-			.color = APP_LED_CHANNEL_Y,
-			.duration = 100,
-			.space = 0,
-			.repetitions = 1
-		};
+			.color = APP_LED_CHANNEL_Y, .duration = 100, .space = 0, .repetitions = 1};
 		app_led_blink(&req);
 
 		if (count_ds18b20 > 0) {

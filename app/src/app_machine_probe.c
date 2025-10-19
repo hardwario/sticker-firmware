@@ -348,7 +348,7 @@ static int lis2dh12_init(const struct device *dev)
 		write_buf[1] = val;                                                                \
 		ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 2);                     \
 		if (ret) {                                                                         \
-			LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);                       \
+			LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);                         \
 			return ret;                                                                \
 		}                                                                                  \
 	} while (0)
@@ -629,7 +629,7 @@ int app_machine_probe_get_count(void)
 	}                                                                                          \
 	ret = app_w1_acquire(&m_w1, dev);                                                          \
 	if (ret) {                                                                                 \
-		LOG_ERR_CALL_FAILED_INT("app_w1_acquire", ret);                                  \
+		LOG_ERR_CALL_FAILED_INT("app_w1_acquire", ret);                                    \
 		res = ret;                                                                         \
 		goto error;                                                                        \
 	}                                                                                          \
@@ -640,7 +640,7 @@ int app_machine_probe_get_count(void)
 	}                                                                                          \
 	ret = ds28e17_write_config(m_sensors[index].dev, DS28E17_I2C_SPEED_100_KHZ);               \
 	if (ret) {                                                                                 \
-		LOG_ERR_CALL_FAILED_INT("ds28e17_write_config", ret);                            \
+		LOG_ERR_CALL_FAILED_INT("ds28e17_write_config", ret);                              \
 		res = ret;                                                                         \
 		goto error;                                                                        \
 	}
@@ -649,7 +649,7 @@ int app_machine_probe_get_count(void)
 error:                                                                                             \
 	ret = app_w1_release(&m_w1, dev);                                                          \
 	if (ret) {                                                                                 \
-		LOG_ERR_CALL_FAILED_INT("app_w1_release", ret);                                  \
+		LOG_ERR_CALL_FAILED_INT("app_w1_release", ret);                                    \
 		res = res ? res : ret;                                                             \
 	}                                                                                          \
 	k_mutex_unlock(&m_lock);                                                                   \

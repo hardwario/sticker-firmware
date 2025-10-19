@@ -114,11 +114,7 @@ static int poll(void)
 		}
 
 		struct app_led_blink_req req = {
-			.color = APP_LED_CHANNEL_R,
-			.duration = 250,
-			.space = 0,
-			.repetitions = 1
-		};
+			.color = APP_LED_CHANNEL_R, .duration = 250, .space = 0, .repetitions = 1};
 		app_led_blink(&req);
 	}
 
@@ -130,11 +126,7 @@ static int poll(void)
 		}
 
 		struct app_led_blink_req req = {
-			.color = APP_LED_CHANNEL_R,
-			.duration = 250,
-			.space = 0,
-			.repetitions = 1
-		};
+			.color = APP_LED_CHANNEL_R, .duration = 250, .space = 0, .repetitions = 1};
 		app_led_blink(&req);
 	}
 
@@ -150,11 +142,7 @@ static int poll(void)
 		}
 
 		struct app_led_blink_req req = {
-			.color = APP_LED_CHANNEL_R,
-			.duration = 250,
-			.space = 0,
-			.repetitions = 1
-		};
+			.color = APP_LED_CHANNEL_R, .duration = 250, .space = 0, .repetitions = 1};
 		app_led_blink(&req);
 	}
 
@@ -166,11 +154,7 @@ static int poll(void)
 		}
 
 		struct app_led_blink_req req = {
-			.color = APP_LED_CHANNEL_R,
-			.duration = 250,
-			.space = 0,
-			.repetitions = 1
-		};
+			.color = APP_LED_CHANNEL_R, .duration = 250, .space = 0, .repetitions = 1};
 		app_led_blink(&req);
 	}
 

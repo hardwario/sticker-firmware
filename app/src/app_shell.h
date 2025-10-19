@@ -20,15 +20,14 @@ extern "C" {
 
 typedef void (*app_shell_print_func_t)(const struct shell *shell);
 
-int app_shell_cmd_bool(const struct shell *shell, size_t argc, char **argv,
-                       bool *param, app_shell_print_func_t print_func);
-int app_shell_cmd_int(const struct shell *shell, size_t argc, char **argv,
-                      int *param, int min, int max, app_shell_print_func_t print_func);
-int app_shell_cmd_uint(const struct shell *shell, size_t argc, char **argv,
-                       unsigned int *param, unsigned int min, unsigned int max,
-                       app_shell_print_func_t print_func);
-int app_shell_cmd_float(const struct shell *shell, size_t argc, char **argv,
-                        float *param, float min, float max, app_shell_print_func_t print_func);
+int app_shell_cmd_bool(const struct shell *shell, size_t argc, char **argv, bool *param,
+		       app_shell_print_func_t print_func);
+int app_shell_cmd_int(const struct shell *shell, size_t argc, char **argv, int *param, int min,
+		      int max, app_shell_print_func_t print_func);
+int app_shell_cmd_uint(const struct shell *shell, size_t argc, char **argv, unsigned int *param,
+		       unsigned int min, unsigned int max, app_shell_print_func_t print_func);
+int app_shell_cmd_float(const struct shell *shell, size_t argc, char **argv, float *param,
+			float min, float max, app_shell_print_func_t print_func);
 
 extern const char APP_SHELL_MSG_INVALID_ARGS[];
 extern const char APP_SHELL_MSG_INVALID_RANGE[];

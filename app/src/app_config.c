@@ -68,7 +68,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 			ret = read_cb(cb_arg, _var, len);                                          \
                                                                                                    \
 			if (ret < 0) {                                                             \
-				LOG_ERR_CALL_FAILED_INT("read_cb", ret);                              \
+				LOG_ERR_CALL_FAILED_INT("read_cb", ret);                           \
 				return ret;                                                        \
 			}                                                                          \
                                                                                                    \
@@ -696,7 +696,6 @@ static void print_alarm_t2_temperature_hst(const struct shell *shell)
 		    (double)m_app_config.alarm_t2_temperature_hst);
 }
 
-
 static void print_hall_left_counter(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " hall-left-counter %s",
@@ -715,7 +714,6 @@ static void print_hall_left_notify_deact(const struct shell *shell)
 		    m_app_config.hall_left_notify_deact ? "true" : "false");
 }
 
-
 static void print_hall_right_counter(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " hall-right-counter %s",
@@ -733,7 +731,6 @@ static void print_hall_right_notify_deact(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " hall-right-notify-deact %s",
 		    m_app_config.hall_right_notify_deact ? "true" : "false");
 }
-
 
 static void print_corr_temperature(const struct shell *shell)
 {
@@ -991,8 +988,8 @@ static int cmd_interval_sample(const struct shell *shell, size_t argc, char **ar
 
 static int cmd_interval_report(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_int(shell, argc, argv, &m_app_config.interval_report,
-	                         60, 86400, print_interval_report);
+	return app_shell_cmd_int(shell, argc, argv, &m_app_config.interval_report, 60, 86400,
+				 print_interval_report);
 }
 
 static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
@@ -1047,8 +1044,7 @@ static int cmd_lrw_network(const struct shell *shell, size_t argc, char **argv)
 
 static int cmd_lrw_adr(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.lrw_adr,
-	                          print_lrw_adr);
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.lrw_adr, print_lrw_adr);
 }
 
 static int cmd_lrw_activation(const struct shell *shell, size_t argc, char **argv)
@@ -1309,220 +1305,217 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 static int cmd_alarm_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.alarm_temperature_enabled,
-	                          print_alarm_temperature_enabled);
+				  print_alarm_temperature_enabled);
 }
 
 static int cmd_alarm_temperature_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_lo,
-	                           -30.0f, 70.0f, print_alarm_temperature_lo);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_lo, -30.0f,
+				   70.0f, print_alarm_temperature_lo);
 }
 
 static int cmd_alarm_temperature_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_hi,
-	                           -30.0f, 70.0f, print_alarm_temperature_hi);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_hi, -30.0f,
+				   70.0f, print_alarm_temperature_hi);
 }
 
 static int cmd_alarm_temperature_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_hst,
-	                           0.0f, 5.0f, print_alarm_temperature_hst);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_hst, 0.0f,
+				   5.0f, print_alarm_temperature_hst);
 }
 
 static int cmd_alarm_t1_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.alarm_t1_temperature_enabled,
-	                          print_alarm_t1_temperature_enabled);
+				  print_alarm_t1_temperature_enabled);
 }
 
 static int cmd_alarm_t1_temperature_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_lo,
-	                            -30.0f, 70.0f, print_alarm_t1_temperature_lo);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_lo, -30.0f,
+				   70.0f, print_alarm_t1_temperature_lo);
 }
 
 static int cmd_alarm_t1_temperature_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_hi,
-	                            -30.0f, 70.0f, print_alarm_t1_temperature_hi);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_hi, -30.0f,
+				   70.0f, print_alarm_t1_temperature_hi);
 }
 
 static int cmd_alarm_t1_temperature_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_hst,
-	                            0.0f, 5.0f, print_alarm_t1_temperature_hst);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_hst, 0.0f,
+				   5.0f, print_alarm_t1_temperature_hst);
 }
 
 static int cmd_alarm_t2_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.alarm_t2_temperature_enabled,
-	                          print_alarm_t2_temperature_enabled);
+				  print_alarm_t2_temperature_enabled);
 }
 
 static int cmd_alarm_t2_temperature_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_lo,
-	                            -30.0f, 70.0f, print_alarm_t2_temperature_lo);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_lo, -30.0f,
+				   70.0f, print_alarm_t2_temperature_lo);
 }
 
 static int cmd_alarm_t2_temperature_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_hi,
-	                            -30.0f, 70.0f, print_alarm_t2_temperature_hi);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_hi, -30.0f,
+				   70.0f, print_alarm_t2_temperature_hi);
 }
 
 static int cmd_alarm_t2_temperature_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_hst,
-	                            0.0f, 5.0f, print_alarm_t2_temperature_hst);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_hst, 0.0f,
+				   5.0f, print_alarm_t2_temperature_hst);
 }
 
 static int cmd_alarm_humidity_enabled(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.alarm_humidity_enabled,
-	                          print_alarm_humidity_enabled);
+				  print_alarm_humidity_enabled);
 }
 
 static int cmd_alarm_humidity_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_lo,
-	                            0.0f, 100.0f, print_alarm_humidity_lo);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_lo, 0.0f, 100.0f,
+				   print_alarm_humidity_lo);
 }
 
 static int cmd_alarm_humidity_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_hi,
-	                            0.0f, 100.0f, print_alarm_humidity_hi);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_hi, 0.0f, 100.0f,
+				   print_alarm_humidity_hi);
 }
 
 static int cmd_alarm_humidity_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_hst,
-	                            0.0f, 20.0f, print_alarm_humidity_hst);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_hst, 0.0f, 20.0f,
+				   print_alarm_humidity_hst);
 }
 
 static int cmd_alarm_pressure_enabled(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.alarm_pressure_enabled,
-	                          print_alarm_pressure_enabled);
+				  print_alarm_pressure_enabled);
 }
 
 static int cmd_alarm_pressure_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_lo,
-	                            500.0f, 1200.0f, print_alarm_pressure_lo);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_lo, 500.0f,
+				   1200.0f, print_alarm_pressure_lo);
 }
 
 static int cmd_alarm_pressure_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_hi,
-	                            500.0f, 1200.0f, print_alarm_pressure_hi);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_hi, 500.0f,
+				   1200.0f, print_alarm_pressure_hi);
 }
 
 static int cmd_alarm_pressure_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_hst,
-	                            0.0f, 50.0f, print_alarm_pressure_hst);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_hst, 0.0f, 50.0f,
+				   print_alarm_pressure_hst);
 }
-
 
 static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.hall_left_counter,
-	                          print_hall_left_counter);
+				  print_hall_left_counter);
 }
 
 static int cmd_hall_left_notify_act(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.hall_left_notify_act,
-	                          print_hall_left_notify_act);
+				  print_hall_left_notify_act);
 }
 
 static int cmd_hall_left_notify_deact(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.hall_left_notify_deact,
-	                          print_hall_left_notify_deact);
+				  print_hall_left_notify_deact);
 }
-
 
 static int cmd_hall_right_counter(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.hall_right_counter,
-	                          print_hall_right_counter);
+				  print_hall_right_counter);
 }
 
 static int cmd_hall_right_notify_act(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.hall_right_notify_act,
-	                          print_hall_right_notify_act);
+				  print_hall_right_notify_act);
 }
 
 static int cmd_hall_right_notify_deact(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.hall_right_notify_deact,
-	                          print_hall_right_notify_deact);
+				  print_hall_right_notify_deact);
 }
-
 
 static int cmd_corr_temperature(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.corr_temperature,
-	                            -5.0f, 5.0f, print_corr_temperature);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.corr_temperature, -5.0f, 5.0f,
+				   print_corr_temperature);
 }
 
 static int cmd_corr_t1_temperature(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.corr_t1_temperature,
-	                            -5.0f, 5.0f, print_corr_t1_temperature);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.corr_t1_temperature, -5.0f,
+				   5.0f, print_corr_t1_temperature);
 }
 
 static int cmd_corr_t2_temperature(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_float(shell, argc, argv, &m_app_config.corr_t2_temperature,
-	                            -5.0f, 5.0f, print_corr_t2_temperature);
+	return app_shell_cmd_float(shell, argc, argv, &m_app_config.corr_t2_temperature, -5.0f,
+				   5.0f, print_corr_t2_temperature);
 }
 
 static int cmd_cap_hall_left(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_hall_left,
-	                          print_cap_hall_left);
+				  print_cap_hall_left);
 }
 
 static int cmd_cap_hall_right(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_hall_right,
-	                          print_cap_hall_right);
+				  print_cap_hall_right);
 }
 
 static int cmd_cap_light_sensor(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_light_sensor,
-	                          print_cap_light_sensor);
+				  print_cap_light_sensor);
 }
 
 static int cmd_cap_barometer(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_barometer,
-	                          print_cap_barometer);
+				  print_cap_barometer);
 }
 
 static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_pir_detector,
-	                          print_cap_pir_detector);
+				  print_cap_pir_detector);
 }
 
 static int cmd_cap_1w_thermometer(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_1w_thermometer,
-	                          print_cap_1w_thermometer);
+				  print_cap_1w_thermometer);
 }
 
 static int cmd_cap_1w_machine_probe(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_1w_machine_probe,
-	                          print_cap_1w_machine_probe);
+				  print_cap_1w_machine_probe);
 }
 
 static int print_help(const struct shell *shell, size_t argc, char **argv)

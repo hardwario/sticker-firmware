@@ -75,7 +75,7 @@ void app_sensor_sample(void)
 	float altitude = NAN;
 	float pressure = NAN;
 
-	struct app_hall_data hall_data = { 0 };
+	struct app_hall_data hall_data = {0};
 
 	float t1_temperature = NAN;
 	float t2_temperature = NAN;
@@ -160,8 +160,8 @@ void app_sensor_sample(void)
 			float hygrometer_temperature;
 			float hygrometer_humidity;
 			bool is_tilt_alert;
-			ret = app_machine_probe_read_hygrometer(i, &serial_number, &hygrometer_temperature,
-								&hygrometer_humidity);
+			ret = app_machine_probe_read_hygrometer(
+				i, &serial_number, &hygrometer_temperature, &hygrometer_humidity);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("app_machine_probe_read_hygrometer", ret);
 				continue;
@@ -246,11 +246,7 @@ static void pyq1648_event_handler(void *user_data)
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	struct app_led_blink_req req = {
-		.color = APP_LED_CHANNEL_Y,
-		.duration = 5,
-		.space = 0,
-		.repetitions = 1
-	};
+		.color = APP_LED_CHANNEL_Y, .duration = 5, .space = 0, .repetitions = 1};
 	app_led_blink(&req);
 }
 
@@ -359,7 +355,7 @@ static int init(void)
 		for (int i = 0; i < count; i++) {
 			uint64_t serial_number;
 			ret = app_machine_probe_enable_tilt_alert(i, &serial_number, TILT_THRESHOLD,
-								TILT_DURATION);
+								  TILT_DURATION);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("app_machine_probe_enable_tilt_alert", ret);
 				return ret;

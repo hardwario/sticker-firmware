@@ -111,26 +111,22 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	if (!isnan(g_app_sensor_data.mp1_temperature)) {
-		mp1_temperature =
-			(int16_t)(g_app_sensor_data.mp1_temperature * 100);
+		mp1_temperature = (int16_t)(g_app_sensor_data.mp1_temperature * 100);
 		header |= BIT(19);
 	}
 
 	if (!isnan(g_app_sensor_data.mp2_temperature)) {
-		mp2_temperature =
-			(int16_t)(g_app_sensor_data.mp2_temperature * 100);
+		mp2_temperature = (int16_t)(g_app_sensor_data.mp2_temperature * 100);
 		header |= BIT(18);
 	}
 
 	if (!isnan(g_app_sensor_data.mp1_humidity)) {
-		mp1_humidity =
-			(uint8_t)(g_app_sensor_data.mp1_humidity * 2);
+		mp1_humidity = (uint8_t)(g_app_sensor_data.mp1_humidity * 2);
 		header |= BIT(17);
 	}
 
 	if (!isnan(g_app_sensor_data.mp2_humidity)) {
-		mp2_humidity =
-			(uint8_t)(g_app_sensor_data.mp2_humidity * 2);
+		mp2_humidity = (uint8_t)(g_app_sensor_data.mp2_humidity * 2);
 		header |= BIT(16);
 	}
 

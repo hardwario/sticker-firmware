@@ -21,8 +21,8 @@ const char APP_SHELL_MSG_INVALID_RANGE[] = "invalid argument range";
 const char APP_SHELL_MSG_INVALID_VALUE[] = "invalid argument value";
 const char APP_SHELL_MSG_CMD_SUCCESS[] = "command succeeded";
 
-int app_shell_cmd_bool(const struct shell *shell, size_t argc, char **argv,
-                       bool *param, app_shell_print_func_t print_func)
+int app_shell_cmd_bool(const struct shell *shell, size_t argc, char **argv, bool *param,
+		       app_shell_print_func_t print_func)
 {
 	if (argc == 1) {
 		if (print_func) {
@@ -51,8 +51,8 @@ int app_shell_cmd_bool(const struct shell *shell, size_t argc, char **argv,
 	return 0;
 }
 
-int app_shell_cmd_int(const struct shell *shell, size_t argc, char **argv,
-                      int *param, int min, int max, app_shell_print_func_t print_func)
+int app_shell_cmd_int(const struct shell *shell, size_t argc, char **argv, int *param, int min,
+		      int max, app_shell_print_func_t print_func)
 {
 	if (argc == 1) {
 		if (print_func) {
@@ -87,9 +87,8 @@ int app_shell_cmd_int(const struct shell *shell, size_t argc, char **argv,
 	return 0;
 }
 
-int app_shell_cmd_uint(const struct shell *shell, size_t argc, char **argv,
-                       unsigned int *param, unsigned int min, unsigned int max,
-                       app_shell_print_func_t print_func)
+int app_shell_cmd_uint(const struct shell *shell, size_t argc, char **argv, unsigned int *param,
+		       unsigned int min, unsigned int max, app_shell_print_func_t print_func)
 {
 	if (argc == 1) {
 		if (print_func) {
@@ -124,8 +123,8 @@ int app_shell_cmd_uint(const struct shell *shell, size_t argc, char **argv,
 	return 0;
 }
 
-int app_shell_cmd_float(const struct shell *shell, size_t argc, char **argv,
-                        float *param, float min, float max, app_shell_print_func_t print_func)
+int app_shell_cmd_float(const struct shell *shell, size_t argc, char **argv, float *param,
+			float min, float max, app_shell_print_func_t print_func)
 {
 	if (argc == 1) {
 		if (print_func) {
