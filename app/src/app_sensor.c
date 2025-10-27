@@ -9,6 +9,7 @@
 #include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_hall.h"
+#include "app_input.h"
 #include "app_led.h"
 #include "app_log.h"
 #include "app_machine_probe.h"
@@ -76,6 +77,7 @@ void app_sensor_sample(void)
 	float pressure = NAN;
 
 	struct app_hall_data hall_data = {0};
+	struct app_input_data input_data = {0};
 
 	float t1_temperature = NAN;
 	float t2_temperature = NAN;
@@ -126,6 +128,13 @@ void app_sensor_sample(void)
 		ret = app_hall_get_data(&hall_data);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_hall_get_data", ret);
+		}
+	}
+
+	if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
+		ret = app_input_get_data(&input_data);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_input_get_data", ret);
 		}
 	}
 
@@ -210,6 +219,11 @@ void app_sensor_sample(void)
 	g_app_sensor_data.hall_left_is_active = hall_data.left_is_active;
 	g_app_sensor_data.hall_right_is_active = hall_data.right_is_active;
 
+	g_app_sensor_data.input_a_count = input_data.input_a_count;
+	g_app_sensor_data.input_b_count = input_data.input_b_count;
+	g_app_sensor_data.input_a_is_active = input_data.input_a_is_active;
+	g_app_sensor_data.input_b_is_active = input_data.input_b_is_active;
+
 	g_app_sensor_data.t1_temperature = t1_temperature + g_app_config.corr_t1_temperature;
 	g_app_sensor_data.t2_temperature = t2_temperature + g_app_config.corr_t2_temperature;
 
@@ -279,6 +293,14 @@ static int init(void)
 		ret = app_hall_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_hall_init", ret);
+			return ret;
+		}
+	}
+
+	if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
+		ret = app_input_init();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_input_init", ret);
 			return ret;
 		}
 	}

@@ -150,6 +150,18 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.hall_right_notify_act));
 	SETTINGS_SET("hall-right-notify-deact", &m_app_config.hall_right_notify_deact,
 		     sizeof(m_app_config.hall_right_notify_deact));
+	SETTINGS_SET("input-a-counter", &m_app_config.input_a_counter,
+		     sizeof(m_app_config.input_a_counter));
+	SETTINGS_SET("input-a-notify-act", &m_app_config.input_a_notify_act,
+		     sizeof(m_app_config.input_a_notify_act));
+	SETTINGS_SET("input-a-notify-deact", &m_app_config.input_a_notify_deact,
+		     sizeof(m_app_config.input_a_notify_deact));
+	SETTINGS_SET("input-b-counter", &m_app_config.input_b_counter,
+		     sizeof(m_app_config.input_b_counter));
+	SETTINGS_SET("input-b-notify-act", &m_app_config.input_b_notify_act,
+		     sizeof(m_app_config.input_b_notify_act));
+	SETTINGS_SET("input-b-notify-deact", &m_app_config.input_b_notify_deact,
+		     sizeof(m_app_config.input_b_notify_deact));
 	SETTINGS_SET("corr-temperature", &m_app_config.corr_temperature,
 		     sizeof(m_app_config.corr_temperature));
 	SETTINGS_SET("corr-t1-temperature", &m_app_config.corr_t1_temperature,
@@ -160,6 +172,10 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_hall_left));
 	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
 		     sizeof(m_app_config.cap_hall_right));
+	SETTINGS_SET("cap-input-a", &m_app_config.cap_input_a,
+		     sizeof(m_app_config.cap_input_a));
+	SETTINGS_SET("cap-input-b", &m_app_config.cap_input_b,
+		     sizeof(m_app_config.cap_input_b));
 	SETTINGS_SET("cap-light-sensor", &m_app_config.cap_light_sensor,
 		     sizeof(m_app_config.cap_light_sensor));
 	SETTINGS_SET("cap-barometer", &m_app_config.cap_barometer,
@@ -265,6 +281,18 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.hall_right_notify_act));
 	EXPORT_FUNC("hall-right-notify-deact", &m_app_config.hall_right_notify_deact,
 		    sizeof(m_app_config.hall_right_notify_deact));
+	EXPORT_FUNC("input-a-counter", &m_app_config.input_a_counter,
+		    sizeof(m_app_config.input_a_counter));
+	EXPORT_FUNC("input-a-notify-act", &m_app_config.input_a_notify_act,
+		    sizeof(m_app_config.input_a_notify_act));
+	EXPORT_FUNC("input-a-notify-deact", &m_app_config.input_a_notify_deact,
+		    sizeof(m_app_config.input_a_notify_deact));
+	EXPORT_FUNC("input-b-counter", &m_app_config.input_b_counter,
+		    sizeof(m_app_config.input_b_counter));
+	EXPORT_FUNC("input-b-notify-act", &m_app_config.input_b_notify_act,
+		    sizeof(m_app_config.input_b_notify_act));
+	EXPORT_FUNC("input-b-notify-deact", &m_app_config.input_b_notify_deact,
+		    sizeof(m_app_config.input_b_notify_deact));
 	EXPORT_FUNC("corr-temperature", &m_app_config.corr_temperature,
 		    sizeof(m_app_config.corr_temperature));
 	EXPORT_FUNC("corr-t1-temperature", &m_app_config.corr_t1_temperature,
@@ -275,6 +303,10 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_hall_left));
 	EXPORT_FUNC("cap-hall-right", &m_app_config.cap_hall_right,
 		    sizeof(m_app_config.cap_hall_right));
+	EXPORT_FUNC("cap-input-a", &m_app_config.cap_input_a,
+		    sizeof(m_app_config.cap_input_a));
+	EXPORT_FUNC("cap-input-b", &m_app_config.cap_input_b,
+		    sizeof(m_app_config.cap_input_b));
 	EXPORT_FUNC("cap-light-sensor", &m_app_config.cap_light_sensor,
 		    sizeof(m_app_config.cap_light_sensor));
 	EXPORT_FUNC("cap-barometer", &m_app_config.cap_barometer,
@@ -732,6 +764,42 @@ static void print_hall_right_notify_deact(const struct shell *shell)
 		    m_app_config.hall_right_notify_deact ? "true" : "false");
 }
 
+static void print_input_a_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " input-a-counter %s",
+		    m_app_config.input_a_counter ? "true" : "false");
+}
+
+static void print_input_a_notify_act(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " input-a-notify-act %s",
+		    m_app_config.input_a_notify_act ? "true" : "false");
+}
+
+static void print_input_a_notify_deact(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " input-a-notify-deact %s",
+		    m_app_config.input_a_notify_deact ? "true" : "false");
+}
+
+static void print_input_b_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " input-b-counter %s",
+		    m_app_config.input_b_counter ? "true" : "false");
+}
+
+static void print_input_b_notify_act(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " input-b-notify-act %s",
+		    m_app_config.input_b_notify_act ? "true" : "false");
+}
+
+static void print_input_b_notify_deact(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " input-b-notify-deact %s",
+		    m_app_config.input_b_notify_deact ? "true" : "false");
+}
+
 static void print_corr_temperature(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " corr-temperature %.2f",
@@ -760,6 +828,18 @@ static void print_cap_hall_right(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " cap-hall-right %s",
 		    m_app_config.cap_hall_right ? "true" : "false");
+}
+
+static void print_cap_input_a(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-input-a %s",
+		    m_app_config.cap_input_a ? "true" : "false");
+}
+
+static void print_cap_input_b(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-input-b %s",
+		    m_app_config.cap_input_b ? "true" : "false");
 }
 
 static void print_cap_light_sensor(const struct shell *shell)
@@ -837,11 +917,19 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_hall_right_counter(shell);
 	print_hall_right_notify_act(shell);
 	print_hall_right_notify_deact(shell);
+	print_input_a_counter(shell);
+	print_input_a_notify_act(shell);
+	print_input_a_notify_deact(shell);
+	print_input_b_counter(shell);
+	print_input_b_notify_act(shell);
+	print_input_b_notify_deact(shell);
 	print_corr_temperature(shell);
 	print_corr_t1_temperature(shell);
 	print_corr_t2_temperature(shell);
 	print_cap_hall_left(shell);
 	print_cap_hall_right(shell);
+	print_cap_input_a(shell);
+	print_cap_input_b(shell);
 	print_cap_light_sensor(shell);
 	print_cap_barometer(shell);
 	print_cap_pir_detector(shell);
@@ -1458,6 +1546,42 @@ static int cmd_hall_right_notify_deact(const struct shell *shell, size_t argc, c
 				  print_hall_right_notify_deact);
 }
 
+static int cmd_input_a_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.input_a_counter,
+				  print_input_a_counter);
+}
+
+static int cmd_input_a_notify_act(const struct shell *shell, size_t argc, char **argv)
+{
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.input_a_notify_act,
+				  print_input_a_notify_act);
+}
+
+static int cmd_input_a_notify_deact(const struct shell *shell, size_t argc, char **argv)
+{
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.input_a_notify_deact,
+				  print_input_a_notify_deact);
+}
+
+static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.input_b_counter,
+				  print_input_b_counter);
+}
+
+static int cmd_input_b_notify_act(const struct shell *shell, size_t argc, char **argv)
+{
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.input_b_notify_act,
+				  print_input_b_notify_act);
+}
+
+static int cmd_input_b_notify_deact(const struct shell *shell, size_t argc, char **argv)
+{
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.input_b_notify_deact,
+				  print_input_b_notify_deact);
+}
+
 static int cmd_corr_temperature(const struct shell *shell, size_t argc, char **argv)
 {
 	return app_shell_cmd_float(shell, argc, argv, &m_app_config.corr_temperature, -5.0f, 5.0f,
@@ -1486,6 +1610,18 @@ static int cmd_cap_hall_right(const struct shell *shell, size_t argc, char **arg
 {
 	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_hall_right,
 				  print_cap_hall_right);
+}
+
+static int cmd_cap_input_a(const struct shell *shell, size_t argc, char **argv)
+{
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_input_a,
+				  print_cap_input_a);
+}
+
+static int cmd_cap_input_b(const struct shell *shell, size_t argc, char **argv)
+{
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_input_b,
+				  print_cap_input_b);
 }
 
 static int cmd_cap_light_sensor(const struct shell *shell, size_t argc, char **argv)
@@ -1720,6 +1856,30 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set hall right switch notify on deactivation (true/false).",
 	              cmd_hall_right_notify_deact, 1, 1),
 
+	SHELL_CMD_ARG(input-a-counter, NULL,
+	              "Get/Set input A counter enabled (true/false).",
+	              cmd_input_a_counter, 1, 1),
+
+	SHELL_CMD_ARG(input-a-notify-act, NULL,
+	              "Get/Set input A notify on activation (true/false).",
+	              cmd_input_a_notify_act, 1, 1),
+
+	SHELL_CMD_ARG(input-a-notify-deact, NULL,
+	              "Get/Set input A notify on deactivation (true/false).",
+	              cmd_input_a_notify_deact, 1, 1),
+
+	SHELL_CMD_ARG(input-b-counter, NULL,
+	              "Get/Set input B counter enabled (true/false).",
+	              cmd_input_b_counter, 1, 1),
+
+	SHELL_CMD_ARG(input-b-notify-act, NULL,
+	              "Get/Set input B notify on activation (true/false).",
+	              cmd_input_b_notify_act, 1, 1),
+
+	SHELL_CMD_ARG(input-b-notify-deact, NULL,
+	              "Get/Set input B notify on deactivation (true/false).",
+	              cmd_input_b_notify_deact, 1, 1),
+
 	SHELL_CMD_ARG(corr-temperature, NULL,
 	              "Get/Set temperature correction (range -5.0 to +5.0 deg. C).",
 	              cmd_corr_temperature, 1, 1),
@@ -1739,6 +1899,14 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(cap-hall-right, NULL,
 	              "Get/Set hall right capability (true/false).",
 	              cmd_cap_hall_right, 1, 1),
+
+	SHELL_CMD_ARG(cap-input-a, NULL,
+	              "Get/Set input A capability (true/false).",
+	              cmd_cap_input_a, 1, 1),
+
+	SHELL_CMD_ARG(cap-input-b, NULL,
+	              "Get/Set input B capability (true/false).",
+	              cmd_cap_input_b, 1, 1),
 
 	SHELL_CMD_ARG(cap-light-sensor, NULL,
 	              "Get/Set light sensor capability (true/false).",

@@ -48,11 +48,11 @@
 		};
 
 		gp_a: gp_a {
-			gpios = <&gpiob 4 GPIO_ACTIVE_HIGH>;
+			gpios = <&gpiob 4 GPIO_ACTIVE_LOW>;
 		};
 
 		gp_b: gp_b {
-			gpios = <&gpioa 11 GPIO_ACTIVE_HIGH>;
+			gpios = <&gpioa 11 GPIO_ACTIVE_LOW>;
 		};
 	};
 

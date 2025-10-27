@@ -38,6 +38,10 @@ struct app_sensor_data {
 	uint32_t hall_right_count;
 	bool hall_left_is_active;
 	bool hall_right_is_active;
+	uint32_t input_a_count;
+	uint32_t input_b_count;
+	bool input_a_is_active;
+	bool input_b_is_active;
 	uint32_t motion_count;
 };
 

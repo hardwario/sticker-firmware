@@ -167,6 +167,34 @@ function decodeUplink(input) {
 
     data.hall_left_is_active = (header & (1 << 7)) ? true : false;
     data.hall_right_is_active = (header & (1 << 6)) ? true : false;
+
+    if (header & (1 << 5)) {
+      var input_a_count = (bytes[index++] << 24) | (bytes[index++] << 16) | (bytes[index++] << 8) | bytes[index++];
+      data.input_a_count = input_a_count;
+      var status_a = bytes[index++];
+      data.input_a_notify_act = (status_a & (1 << 3)) ? true : false;
+      data.input_a_notify_deact = (status_a & (1 << 2)) ? true : false;
+      data.input_a_is_active = (status_a & (1 << 0)) ? true : false;
+    } else {
+      data.input_a_count = null;
+      data.input_a_notify_act = false;
+      data.input_a_notify_deact = false;
+      data.input_a_is_active = false;
+    }
+
+    if (header & (1 << 4)) {
+      var input_b_count = (bytes[index++] << 24) | (bytes[index++] << 16) | (bytes[index++] << 8) | bytes[index++];
+      data.input_b_count = input_b_count;
+      var status_b = bytes[index++];
+      data.input_b_notify_act = (status_b & (1 << 3)) ? true : false;
+      data.input_b_notify_deact = (status_b & (1 << 2)) ? true : false;
+      data.input_b_is_active = (status_b & (1 << 0)) ? true : false;
+    } else {
+      data.input_b_count = null;
+      data.input_b_notify_act = false;
+      data.input_b_notify_deact = false;
+      data.input_b_is_active = false;
+    }
   }
 
   return {

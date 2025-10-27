@@ -6,6 +6,7 @@
 
 #include "app_compose.h"
 #include "app_hall.h"
+#include "app_input.h"
 #include "app_sensor.h"
 
 /* Zephyr includes */
@@ -47,6 +48,10 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	uint32_t hall_left_count = 0;
 	uint32_t hall_right_count = 0;
 
+	struct app_input_data input_data;
+	uint32_t input_a_count = 0;
+	uint32_t input_b_count = 0;
+
 	uint32_t motion_count = 0xffffffff;
 	int16_t t1_temperature = 0x7fff;
 	int16_t t2_temperature = 0x7fff;
@@ -57,6 +62,7 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	uint8_t mp2_humidity = 0xff;
 
 	app_hall_get_data(&hall_data);
+	app_input_get_data(&input_data);
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
@@ -149,6 +155,17 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		header |= BIT(12);
 	}
 
+	input_a_count = g_app_sensor_data.input_a_count;
+	input_b_count = g_app_sensor_data.input_b_count;
+
+	if (input_a_count > 0 || input_data.input_a_notify_act || input_data.input_a_notify_deact) {
+		header |= BIT(5);
+	}
+
+	if (input_b_count > 0 || input_data.input_b_notify_act || input_data.input_b_notify_deact) {
+		header |= BIT(4);
+	}
+
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	/* Add hall notify events to header */
@@ -175,6 +192,7 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 
 	/* Clear notify flags after reading them */
 	app_hall_clear_notify_flags(&hall_data);
+	app_input_clear_notify_flags(&input_data);
 
 	header |= orientation;
 
@@ -274,6 +292,32 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		APPEND_BYTE(hall_right_count >> 16);
 		APPEND_BYTE(hall_right_count >> 8);
 		APPEND_BYTE(hall_right_count);
+	}
+
+	if (header & BIT(5)) {
+		APPEND_BYTE(input_a_count >> 24);
+		APPEND_BYTE(input_a_count >> 16);
+		APPEND_BYTE(input_a_count >> 8);
+		APPEND_BYTE(input_a_count);
+		/* Append status byte: bit 3=notify_act, bit 2=notify_deact, bit 1=reserved, bit 0=is_active */
+		uint8_t status_a = 0;
+		if (input_data.input_a_notify_act) status_a |= BIT(3);
+		if (input_data.input_a_notify_deact) status_a |= BIT(2);
+		if (input_data.input_a_is_active) status_a |= BIT(0);
+		APPEND_BYTE(status_a);
+	}
+
+	if (header & BIT(4)) {
+		APPEND_BYTE(input_b_count >> 24);
+		APPEND_BYTE(input_b_count >> 16);
+		APPEND_BYTE(input_b_count >> 8);
+		APPEND_BYTE(input_b_count);
+		/* Append status byte: bit 3=notify_act, bit 2=notify_deact, bit 1=reserved, bit 0=is_active */
+		uint8_t status_b = 0;
+		if (input_data.input_b_notify_act) status_b |= BIT(3);
+		if (input_data.input_b_notify_deact) status_b |= BIT(2);
+		if (input_data.input_b_is_active) status_b |= BIT(0);
+		APPEND_BYTE(status_b);
 	}
 
 #undef APPEND

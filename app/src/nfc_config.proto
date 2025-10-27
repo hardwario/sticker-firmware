@@ -71,15 +71,23 @@ message NfcConfigMessage {
         optional bool hall_right_counter = 28;
         optional bool hall_right_notify_act = 29;
         optional bool hall_right_notify_deact = 30;
-        optional float corr_temperature = 31;
-        optional float corr_t1_temperature = 32;
-        optional float corr_t2_temperature = 33;
-        optional bool cap_hall_left = 34;
-        optional bool cap_hall_right = 35;
-        optional bool cap_light_sensor = 36;
-        optional bool cap_barometer = 37;
-        optional bool cap_pir_detector = 38;
-        optional bool cap_1w_thermometer = 39;
-        optional bool cap_1w_machine_probe = 40;
+        optional bool input_a_counter = 31;
+        optional bool input_a_notify_act = 32;
+        optional bool input_a_notify_deact = 33;
+        optional bool input_b_counter = 34;
+        optional bool input_b_notify_act = 35;
+        optional bool input_b_notify_deact = 36;
+        optional float corr_temperature = 37;
+        optional float corr_t1_temperature = 38;
+        optional float corr_t2_temperature = 39;
+        optional bool cap_hall_left = 40;
+        optional bool cap_hall_right = 41;
+        optional bool cap_input_a = 42;
+        optional bool cap_input_b = 43;
+        optional bool cap_light_sensor = 44;
+        optional bool cap_barometer = 45;
+        optional bool cap_pir_detector = 46;
+        optional bool cap_1w_thermometer = 47;
+        optional bool cap_1w_machine_probe = 48;
     }
 }

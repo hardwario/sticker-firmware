@@ -4,6 +4,8 @@
 	aliases {
 		sw0 = &hall_l;
 		sw1 = &hall_r;
+		sw2 = &gp_a;
+		sw3 = &gp_b;
 	};
 
 	zephyr,user {
