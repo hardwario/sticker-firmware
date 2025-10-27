@@ -6,7 +6,7 @@ manifest:
   projects:
     - name: sticker-zephyr
       remote: hardwario
-      revision: sticker-v7
+      revision: sticker-v8
       path: zephyr
       import: true
   self:
