@@ -115,6 +115,44 @@ static void cmd_print_motion_count(const struct shell *shell)
 	shell_print(shell, SHELL_PFX " motion count %d", (int)g_app_sensor_data.motion_count);
 }
 
+static void cmd_print_sample(const struct shell *shell)
+{
+	app_sensor_sample();
+
+	shell_print(shell, SHELL_PFX " orientation:              %d",
+		    g_app_sensor_data.orientation);
+	shell_print(shell, SHELL_PFX " voltage:                  %.2f V",
+		    (double)g_app_sensor_data.voltage);
+	shell_print(shell, SHELL_PFX " temperature:              %.2f C",
+		    (double)g_app_sensor_data.temperature);
+	shell_print(shell, SHELL_PFX " humidity:                 %.2f %%",
+		    (double)g_app_sensor_data.humidity);
+	shell_print(shell, SHELL_PFX " illuminance:              %.2f lux",
+		    (double)g_app_sensor_data.illuminance);
+	shell_print(shell, SHELL_PFX " t1_temperature:           %.2f C",
+		    (double)g_app_sensor_data.t1_temperature);
+	shell_print(shell, SHELL_PFX " t2_temperature:           %.2f C",
+		    (double)g_app_sensor_data.t2_temperature);
+	shell_print(shell, SHELL_PFX " motion_count:             %u",
+		    g_app_sensor_data.motion_count);
+	shell_print(shell, SHELL_PFX " altitude:                 %.2f m",
+		    (double)g_app_sensor_data.altitude);
+	shell_print(shell, SHELL_PFX " pressure:                 %.2f Pa",
+		    (double)g_app_sensor_data.pressure);
+	shell_print(shell, SHELL_PFX " machine_probe_temp_1:     %.2f C",
+		    (double)g_app_sensor_data.machine_probe_temperature_1);
+	shell_print(shell, SHELL_PFX " machine_probe_temp_2:     %.2f C",
+		    (double)g_app_sensor_data.machine_probe_temperature_2);
+	shell_print(shell, SHELL_PFX " machine_probe_humidity_1: %.2f %%",
+		    (double)g_app_sensor_data.machine_probe_humidity_1);
+	shell_print(shell, SHELL_PFX " machine_probe_humidity_2: %.2f %%",
+		    (double)g_app_sensor_data.machine_probe_humidity_2);
+	shell_print(shell, SHELL_PFX " machine_probe_tilt_1:     %s",
+		    g_app_sensor_data.machine_probe_is_tilt_alert_1 ? "true" : "false");
+	shell_print(shell, SHELL_PFX " machine_probe_tilt_2:     %s",
+		    g_app_sensor_data.machine_probe_is_tilt_alert_2 ? "true" : "false");
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_test, SHELL_CMD_ARG(led_cycle, NULL, "Cycle LED (R/G/Y).", cmd_cycle_led, 1, 0),
 	SHELL_CMD_ARG(led_switch, NULL, "Switch LED channel (format red|yellow|green on|off).",
@@ -130,6 +168,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      0),
 	SHELL_CMD_ARG(motion, NULL, "Print number of PIR activations", cmd_print_motion_count, 1,
 		      0),
+
+	SHELL_CMD_ARG(sample, NULL, "Print all sensor values.", cmd_print_sample, 1, 0),
 
 	SHELL_SUBCMD_SET_END);
 
