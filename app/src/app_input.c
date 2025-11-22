@@ -108,7 +108,9 @@ static int poll(void)
 	k_mutex_unlock(&m_input_data_mutex);
 
 	if (app_input_check_notify_event()) {
+#if defined(CONFIG_LORAWAN)
 		app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
 	}
 
 	return 0;

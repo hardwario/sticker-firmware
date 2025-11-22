@@ -86,7 +86,9 @@ int main(void)
 
 	play_carousel_boot();
 
+#if defined(CONFIG_LORAWAN)
 	app_lrw_join();
+#endif /* defined(CONFIG_LORAWAN) */
 
 	for (;;) {
 		LOG_INF("Alive");
@@ -156,6 +158,8 @@ SYS_INIT(init, POST_KERNEL, 0);
 
 #if defined(CONFIG_SHELL)
 
+#if defined(CONFIG_LORAWAN)
+
 static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 {
 	app_lrw_join();
@@ -176,5 +180,7 @@ static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 
 SHELL_CMD_REGISTER(join, NULL, "Join LoRaWAN network.", cmd_join);
 SHELL_CMD_REGISTER(send, NULL, "Send LoRaWAN data.", cmd_send);
+
+#endif /* defined(CONFIG_LORAWAN) */
 
 #endif /* defined(CONFIG_SHELL) */
