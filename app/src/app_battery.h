@@ -11,6 +11,7 @@
 extern "C" {
 #endif
 
+int app_battery_init(void);
 int app_battery_measure(float *voltage);
 
 #ifdef __cplusplus

@@ -13,7 +13,6 @@
 #include "app_wdog.h"
 
 /* Zephyr includes */
-#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -87,7 +86,7 @@ static void read_sht40(void)
 	       g_app_config.serial_number, (double)temperature, (double)humidity);
 }
 
-static int init(void)
+int app_calibration_init(void)
 {
 	int ret;
 
@@ -193,5 +192,3 @@ static int init(void)
 
 	return 0;
 }
-
-SYS_INIT(init, APPLICATION, 1);

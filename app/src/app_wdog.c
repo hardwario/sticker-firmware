@@ -11,7 +11,6 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/watchdog.h>
-#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -24,26 +23,7 @@ LOG_MODULE_REGISTER(app_wdog, LOG_LEVEL_DBG);
 
 static int m_wdog_channel;
 
-int app_wdog_feed(void)
-{
-	int ret;
-
-	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(iwdg));
-	if (!device_is_ready(dev)) {
-		LOG_ERR("Device not ready");
-		return -ENODEV;
-	}
-
-	ret = wdt_feed(dev, m_wdog_channel);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("wdt_feed", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-static int init(void)
+int app_wdog_init(void)
 {
 	int ret;
 
@@ -75,4 +55,21 @@ static int init(void)
 	return 0;
 }
 
-SYS_INIT(init, APPLICATION, 0);
+int app_wdog_feed(void)
+{
+	int ret;
+
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(iwdg));
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
+	}
+
+	ret = wdt_feed(dev, m_wdog_channel);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("wdt_feed", ret);
+		return ret;
+	}
+
+	return 0;
+}

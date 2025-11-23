@@ -14,7 +14,6 @@
 /* Zephyr includes */
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
-#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/lorawan/lorawan.h>
@@ -97,11 +96,6 @@ static void join_work_handler(struct k_work *work)
 	LOG_INF("LoRaWAN join successful");
 }
 
-void app_lrw_join(void)
-{
-	k_work_submit_to_queue(&m_work_q, &m_join_work);
-}
-
 static void send_work_handler(struct k_work *work)
 {
 	int ret;
@@ -143,12 +137,7 @@ static void send_timer_handler(struct k_timer *timer)
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
 }
 
-void app_lrw_send(void)
-{
-	k_timer_start(&m_send_timer, K_NO_WAIT, K_FOREVER);
-}
-
-static int init(void)
+int app_lrw_init(void)
 {
 	int ret;
 
@@ -209,4 +198,12 @@ static int init(void)
 	return 0;
 }
 
-SYS_INIT(init, APPLICATION, 0);
+void app_lrw_join(void)
+{
+	k_work_submit_to_queue(&m_work_q, &m_join_work);
+}
+
+void app_lrw_send(void)
+{
+	k_timer_start(&m_send_timer, K_NO_WAIT, K_FOREVER);
+}

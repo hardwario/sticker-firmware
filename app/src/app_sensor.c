@@ -20,7 +20,6 @@
 #include "app_sht40.h"
 
 /* Zephyr includes */
-#include <zephyr/init.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
@@ -60,183 +59,6 @@ K_MUTEX_DEFINE(g_app_sensor_data_lock);
 static K_THREAD_STACK_DEFINE(m_sensor_work_stack, 2048);
 static struct k_work_q m_sensor_work_q;
 
-void app_sensor_sample(void)
-{
-	int ret;
-	int count;
-	UNUSED(ret);
-	UNUSED(count);
-
-	int orientation = INT_MAX;
-	float voltage = NAN;
-
-	float temperature = NAN;
-	float humidity = NAN;
-	float illuminance = NAN;
-	float altitude = NAN;
-	float pressure = NAN;
-
-	struct app_hall_data hall_data = {0};
-	struct app_input_data input_data = {0};
-
-	float t1_temperature = NAN;
-	float t2_temperature = NAN;
-
-	float mp1_temperature = NAN;
-	float mp2_temperature = NAN;
-	float mp1_humidity = NAN;
-	float mp2_humidity = NAN;
-	bool mp1_is_tilt_alert = false;
-	bool mp2_is_tilt_alert = false;
-
-#if defined(CONFIG_ADC)
-	ret = app_battery_measure(&voltage);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_battery_measure", ret);
-	}
-#endif /* defined(CONFIG_ADC) */
-
-#if defined(CONFIG_LIS2DH)
-	ret = app_accel_read(NULL, NULL, NULL, &orientation);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_accel_read", ret);
-	}
-#endif /* defined(CONFIG_LIS2DH) */
-
-#if defined(CONFIG_SHT4X)
-	ret = app_sht40_read(&temperature, &humidity);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_sht40_read", ret);
-	}
-#endif /* defined(CONFIG_SHT4X) */
-
-	if (g_app_config.cap_light_sensor) {
-		ret = app_opt3001_read(&illuminance);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_opt3001_read", ret);
-		}
-	}
-
-	if (g_app_config.cap_barometer) {
-		ret = app_mpl3115a2_read(&altitude, &pressure, NULL);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_mpl3115a2_read", ret);
-		}
-	}
-
-	if (g_app_config.cap_hall_left || g_app_config.cap_hall_right) {
-		ret = app_hall_get_data(&hall_data);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_hall_get_data", ret);
-		}
-	}
-
-	if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
-		ret = app_input_get_data(&input_data);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_input_get_data", ret);
-		}
-	}
-
-	if (g_app_config.cap_1w_thermometer) {
-		count = app_ds18b20_get_count();
-
-		for (int i = 0; i < count; i++) {
-			uint64_t serial_number;
-			float temperature;
-			ret = app_ds18b20_read(i, &serial_number, &temperature);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_ds18b20_read", ret);
-				continue;
-			}
-
-			LOG_INF("Serial number: %llu / Temperature: %.2f C", serial_number,
-				(double)temperature);
-
-			if (i == 0) {
-				t1_temperature = temperature;
-			} else if (i == 1) {
-				t2_temperature = temperature;
-			}
-		}
-	}
-
-	if (g_app_config.cap_1w_machine_probe) {
-		count = app_machine_probe_get_count();
-
-		for (int i = 0; i < count; i++) {
-			uint64_t serial_number;
-			float hygrometer_temperature;
-			float hygrometer_humidity;
-			bool is_tilt_alert;
-			ret = app_machine_probe_read_hygrometer(
-				i, &serial_number, &hygrometer_temperature, &hygrometer_humidity);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_machine_probe_read_hygrometer", ret);
-				continue;
-			}
-
-			ret = app_machine_probe_get_tilt_alert(i, &serial_number, &is_tilt_alert);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_machine_probe_get_tilt_alert", ret);
-				continue;
-			}
-
-			LOG_INF("Serial number: %llu / Hygrometer / Temperature: "
-				"%.2f C",
-				serial_number, (double)hygrometer_temperature);
-			LOG_INF("Serial number: %llu / Hygrometer / Humidity: %.1f "
-				"%%",
-				serial_number, (double)hygrometer_humidity);
-			LOG_INF("Serial number: %llu / Tilt alert is %sactive", serial_number,
-				is_tilt_alert ? "" : "not ");
-
-			if (i == 0) {
-				mp1_temperature = hygrometer_temperature;
-				mp1_humidity = hygrometer_humidity;
-				mp1_is_tilt_alert = is_tilt_alert;
-			} else if (i == 1) {
-				mp2_temperature = hygrometer_temperature;
-				mp2_humidity = hygrometer_humidity;
-				mp2_is_tilt_alert = is_tilt_alert;
-			}
-		}
-	}
-
-	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-
-	g_app_sensor_data.orientation = orientation;
-	g_app_sensor_data.voltage = voltage;
-
-	g_app_sensor_data.temperature = temperature + g_app_config.corr_temperature;
-	g_app_sensor_data.humidity = humidity;
-	g_app_sensor_data.illuminance = illuminance;
-	g_app_sensor_data.altitude = altitude;
-	g_app_sensor_data.pressure = pressure;
-
-	g_app_sensor_data.hall_left_count = hall_data.left_count;
-	g_app_sensor_data.hall_right_count = hall_data.right_count;
-	g_app_sensor_data.hall_left_is_active = hall_data.left_is_active;
-	g_app_sensor_data.hall_right_is_active = hall_data.right_is_active;
-
-	g_app_sensor_data.input_a_count = input_data.input_a_count;
-	g_app_sensor_data.input_b_count = input_data.input_b_count;
-	g_app_sensor_data.input_a_is_active = input_data.input_a_is_active;
-	g_app_sensor_data.input_b_is_active = input_data.input_b_is_active;
-
-	g_app_sensor_data.t1_temperature = t1_temperature + g_app_config.corr_t1_temperature;
-	g_app_sensor_data.t2_temperature = t2_temperature + g_app_config.corr_t2_temperature;
-
-	g_app_sensor_data.mp1_temperature = mp1_temperature;
-	g_app_sensor_data.mp2_temperature = mp2_temperature;
-	g_app_sensor_data.mp1_humidity = mp1_humidity;
-	g_app_sensor_data.mp2_humidity = mp2_humidity;
-	g_app_sensor_data.mp1_is_tilt_alert = mp1_is_tilt_alert;
-	g_app_sensor_data.mp2_is_tilt_alert = mp2_is_tilt_alert;
-
-	k_mutex_unlock(&g_app_sensor_data_lock);
-}
-
 static void sensor_work_handler(struct k_work *work)
 {
 	app_sensor_sample();
@@ -264,10 +86,9 @@ static void pyq1648_event_handler(void *user_data)
 	app_led_blink(&req);
 }
 
-static int init(void)
+int app_sensor_init(void)
 {
 	int ret;
-	UNUSED(ret);
 
 	if (g_app_config.cap_light_sensor) {
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(opt3001));
@@ -399,4 +220,176 @@ static int init(void)
 	return 0;
 }
 
-SYS_INIT(init, APPLICATION, 99);
+void app_sensor_sample(void)
+{
+	int ret;
+
+	int orientation = INT_MAX;
+	float voltage = NAN;
+
+	float temperature = NAN;
+	float humidity = NAN;
+	float illuminance = NAN;
+	float altitude = NAN;
+	float pressure = NAN;
+
+	struct app_hall_data hall_data = {0};
+	struct app_input_data input_data = {0};
+
+	float t1_temperature = NAN;
+	float t2_temperature = NAN;
+
+	float mp1_temperature = NAN;
+	float mp2_temperature = NAN;
+	float mp1_humidity = NAN;
+	float mp2_humidity = NAN;
+	bool mp1_is_tilt_alert = false;
+	bool mp2_is_tilt_alert = false;
+
+#if defined(CONFIG_ADC)
+	ret = app_battery_measure(&voltage);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_battery_measure", ret);
+	}
+#endif /* defined(CONFIG_ADC) */
+
+#if defined(CONFIG_LIS2DH)
+	ret = app_accel_read(NULL, NULL, NULL, &orientation);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_accel_read", ret);
+	}
+#endif /* defined(CONFIG_LIS2DH) */
+
+#if defined(CONFIG_SHT4X)
+	ret = app_sht40_read(&temperature, &humidity);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_sht40_read", ret);
+	}
+#endif /* defined(CONFIG_SHT4X) */
+
+	if (g_app_config.cap_light_sensor) {
+		ret = app_opt3001_read(&illuminance);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_opt3001_read", ret);
+		}
+	}
+
+	if (g_app_config.cap_barometer) {
+		ret = app_mpl3115a2_read(&altitude, &pressure, NULL);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_mpl3115a2_read", ret);
+		}
+	}
+
+	if (g_app_config.cap_hall_left || g_app_config.cap_hall_right) {
+		ret = app_hall_get_data(&hall_data);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_hall_get_data", ret);
+		}
+	}
+
+	if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
+		ret = app_input_get_data(&input_data);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_input_get_data", ret);
+		}
+	}
+
+	if (g_app_config.cap_1w_thermometer) {
+		int count = app_ds18b20_get_count();
+
+		for (int i = 0; i < count; i++) {
+			uint64_t serial_number;
+			float temperature;
+			ret = app_ds18b20_read(i, &serial_number, &temperature);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_ds18b20_read", ret);
+				continue;
+			}
+
+			LOG_INF("Serial number: %llu / Temperature: %.2f C", serial_number,
+				(double)temperature);
+
+			if (i == 0) {
+				t1_temperature = temperature;
+			} else if (i == 1) {
+				t2_temperature = temperature;
+			}
+		}
+	}
+
+	if (g_app_config.cap_1w_machine_probe) {
+		int count = app_machine_probe_get_count();
+
+		for (int i = 0; i < count; i++) {
+			uint64_t serial_number;
+			float hygrometer_temperature;
+			float hygrometer_humidity;
+			bool is_tilt_alert;
+			ret = app_machine_probe_read_hygrometer(
+				i, &serial_number, &hygrometer_temperature, &hygrometer_humidity);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_machine_probe_read_hygrometer", ret);
+				continue;
+			}
+
+			ret = app_machine_probe_get_tilt_alert(i, &serial_number, &is_tilt_alert);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_machine_probe_get_tilt_alert", ret);
+				continue;
+			}
+
+			LOG_INF("Serial number: %llu / Hygrometer / Temperature: "
+				"%.2f C",
+				serial_number, (double)hygrometer_temperature);
+			LOG_INF("Serial number: %llu / Hygrometer / Humidity: %.1f "
+				"%%",
+				serial_number, (double)hygrometer_humidity);
+			LOG_INF("Serial number: %llu / Tilt alert is %sactive", serial_number,
+				is_tilt_alert ? "" : "not ");
+
+			if (i == 0) {
+				mp1_temperature = hygrometer_temperature;
+				mp1_humidity = hygrometer_humidity;
+				mp1_is_tilt_alert = is_tilt_alert;
+			} else if (i == 1) {
+				mp2_temperature = hygrometer_temperature;
+				mp2_humidity = hygrometer_humidity;
+				mp2_is_tilt_alert = is_tilt_alert;
+			}
+		}
+	}
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+
+	g_app_sensor_data.orientation = orientation;
+	g_app_sensor_data.voltage = voltage;
+
+	g_app_sensor_data.temperature = temperature + g_app_config.corr_temperature;
+	g_app_sensor_data.humidity = humidity;
+	g_app_sensor_data.illuminance = illuminance;
+	g_app_sensor_data.altitude = altitude;
+	g_app_sensor_data.pressure = pressure;
+
+	g_app_sensor_data.hall_left_count = hall_data.left_count;
+	g_app_sensor_data.hall_right_count = hall_data.right_count;
+	g_app_sensor_data.hall_left_is_active = hall_data.left_is_active;
+	g_app_sensor_data.hall_right_is_active = hall_data.right_is_active;
+
+	g_app_sensor_data.input_a_count = input_data.input_a_count;
+	g_app_sensor_data.input_b_count = input_data.input_b_count;
+	g_app_sensor_data.input_a_is_active = input_data.input_a_is_active;
+	g_app_sensor_data.input_b_is_active = input_data.input_b_is_active;
+
+	g_app_sensor_data.t1_temperature = t1_temperature + g_app_config.corr_t1_temperature;
+	g_app_sensor_data.t2_temperature = t2_temperature + g_app_config.corr_t2_temperature;
+
+	g_app_sensor_data.mp1_temperature = mp1_temperature;
+	g_app_sensor_data.mp2_temperature = mp2_temperature;
+	g_app_sensor_data.mp1_humidity = mp1_humidity;
+	g_app_sensor_data.mp2_humidity = mp2_humidity;
+	g_app_sensor_data.mp1_is_tilt_alert = mp1_is_tilt_alert;
+	g_app_sensor_data.mp2_is_tilt_alert = mp2_is_tilt_alert;
+
+	k_mutex_unlock(&g_app_sensor_data_lock);
+}
