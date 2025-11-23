@@ -299,11 +299,18 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		APPEND_BYTE(input_a_count >> 16);
 		APPEND_BYTE(input_a_count >> 8);
 		APPEND_BYTE(input_a_count);
-		/* Append status byte: bit 3=notify_act, bit 2=notify_deact, bit 1=reserved, bit 0=is_active */
+		/* Append status byte: bit 3=notify_act, bit 2=notify_deact, bit 1=reserved, bit
+		 * 0=is_active */
 		uint8_t status_a = 0;
-		if (input_data.input_a_notify_act) status_a |= BIT(3);
-		if (input_data.input_a_notify_deact) status_a |= BIT(2);
-		if (input_data.input_a_is_active) status_a |= BIT(0);
+		if (input_data.input_a_notify_act) {
+			status_a |= BIT(3);
+		}
+		if (input_data.input_a_notify_deact) {
+			status_a |= BIT(2);
+		}
+		if (input_data.input_a_is_active) {
+			status_a |= BIT(0);
+		}
 		APPEND_BYTE(status_a);
 	}
 
@@ -312,11 +319,18 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		APPEND_BYTE(input_b_count >> 16);
 		APPEND_BYTE(input_b_count >> 8);
 		APPEND_BYTE(input_b_count);
-		/* Append status byte: bit 3=notify_act, bit 2=notify_deact, bit 1=reserved, bit 0=is_active */
+		/* Append status byte: bit 3=notify_act, bit 2=notify_deact, bit 1=reserved, bit
+		 * 0=is_active */
 		uint8_t status_b = 0;
-		if (input_data.input_b_notify_act) status_b |= BIT(3);
-		if (input_data.input_b_notify_deact) status_b |= BIT(2);
-		if (input_data.input_b_is_active) status_b |= BIT(0);
+		if (input_data.input_b_notify_act) {
+			status_b |= BIT(3);
+		}
+		if (input_data.input_b_notify_deact) {
+			status_b |= BIT(2);
+		}
+		if (input_data.input_b_is_active) {
+			status_b |= BIT(0);
+		}
 		APPEND_BYTE(status_b);
 	}
 
