@@ -2,11 +2,11 @@ manifest:
   version: "1.2"
   remotes:
     - name: hardwario
-      url-base: git@github.com:hardwario
+      url-base: https://github.com/hardwario
   projects:
     - name: sticker-zephyr
       remote: hardwario
-      revision: sticker-v9
+      revision: v4.3.0-sticker1-branch
       path: zephyr
       import: true
   self:
