@@ -51,7 +51,7 @@ jobs:
         shell: bash
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
+            VERSION="v${GITHUB_REF#refs/tags/v}"
           else
             VERSION="$(git rev-parse --short HEAD)"
           fi
@@ -92,7 +92,7 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="v${GITHUB_REF#refs/tags/v}"
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download artifacts
@@ -105,5 +105,5 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          name: STICKER Firmware v${{ steps.version.outputs.value }}
+          name: STICKER Firmware ${{ steps.version.outputs.value }}
           files: artifacts/*.hex
