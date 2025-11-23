@@ -13,6 +13,7 @@
 extern "C" {
 #endif
 
+int app_lrw_init(void);
 void app_lrw_join(void);
 void app_lrw_send(void);
 

@@ -11,7 +11,6 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/adc.h>
-#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
@@ -35,6 +34,32 @@ static const struct adc_channel_cfg m_channel_cfg = {
 	.channel_id = ADC_CHANNEL_BATT,
 	.differential = 0,
 };
+
+int app_battery_init(void)
+{
+	int ret;
+
+	if (!device_is_ready(m_dev)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
+	}
+
+	ret = adc_channel_setup(m_dev, &m_channel_cfg);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("adc_channel_setup", ret);
+		return ret;
+	}
+
+#if defined(CONFIG_PM_DEVICE)
+	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_SUSPEND);
+	if (ret && ret != -EALREADY) {
+		LOG_ERR_CALL_FAILED_INT("pm_device_action_run", ret);
+		return ret;
+	}
+#endif /* defined(CONFIG_PM_DEVICE) */
+
+	return 0;
+}
 
 int app_battery_measure(float *voltage)
 {
@@ -95,31 +120,3 @@ int app_battery_measure(float *voltage)
 
 	return 0;
 }
-
-static int init(void)
-{
-	int ret;
-
-	if (!device_is_ready(m_dev)) {
-		LOG_ERR("Device not ready");
-		return -ENODEV;
-	}
-
-	ret = adc_channel_setup(m_dev, &m_channel_cfg);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("adc_channel_setup", ret);
-		return ret;
-	}
-
-#if defined(CONFIG_PM_DEVICE)
-	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_SUSPEND);
-	if (ret && ret != -EALREADY) {
-		LOG_ERR_CALL_FAILED_INT("pm_device_action_run", ret);
-		return ret;
-	}
-#endif /* defined(CONFIG_PM_DEVICE) */
-
-	return 0;
-}
-
-SYS_INIT(init, APPLICATION, 0);

@@ -19,7 +19,6 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
-#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
@@ -253,6 +252,26 @@ static bool is_buffer_zero(const void *buf, size_t len)
 	return true;
 }
 
+int app_nfc_init(void)
+{
+	int ret;
+
+	const struct gpio_dt_spec lpd_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
+
+	if (!gpio_is_ready_dt(&lpd_spec)) {
+		LOG_ERR("GPIO device not ready (LPD)");
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_configure_dt(&lpd_spec, GPIO_OUTPUT_ACTIVE);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
 int app_nfc_check(enum app_nfc_action *action)
 {
 	int ret;
@@ -323,25 +342,3 @@ int app_nfc_check(enum app_nfc_action *action)
 
 	return res;
 }
-
-static int init(void)
-{
-	int ret;
-
-	const struct gpio_dt_spec lpd_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
-
-	if (!gpio_is_ready_dt(&lpd_spec)) {
-		LOG_ERR("GPIO device not ready (LPD)");
-		return -ENODEV;
-	}
-
-	ret = gpio_pin_configure_dt(&lpd_spec, GPIO_OUTPUT_ACTIVE);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-SYS_INIT(init, POST_KERNEL, 99);

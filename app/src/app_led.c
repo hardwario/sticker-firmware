@@ -11,7 +11,6 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -184,6 +183,44 @@ static void thread_entry(void *p1, void *p2, void *p3)
 	}
 }
 
+int app_led_init(void)
+{
+	int ret;
+
+	if (!gpio_is_ready_dt(&m_led_r) || !gpio_is_ready_dt(&m_led_g) ||
+	    !gpio_is_ready_dt(&m_led_y)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_configure_dt(&m_led_r, GPIO_OUTPUT_INACTIVE);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
+		return ret;
+	}
+
+	ret = gpio_pin_configure_dt(&m_led_g, GPIO_OUTPUT_INACTIVE);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
+		return ret;
+	}
+
+	ret = gpio_pin_configure_dt(&m_led_y, GPIO_OUTPUT_INACTIVE);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
+		return ret;
+	}
+
+	static struct k_thread thread;
+	m_led_thread_id = k_thread_create(&thread, m_led_thread_stack,
+					  K_THREAD_STACK_SIZEOF(m_led_thread_stack), thread_entry,
+					  NULL, NULL, NULL, LED_THREAD_PRIORITY, 0, K_NO_WAIT);
+
+	k_thread_name_set(m_led_thread_id, "led");
+
+	return 0;
+}
+
 int app_led_blink(const struct app_led_blink_req *req)
 {
 	if (!m_led_thread_id) {
@@ -227,43 +264,3 @@ int app_led_play(const struct app_led_play_req *req)
 
 	return 0;
 }
-
-static int init(void)
-{
-	int ret;
-
-	if (!gpio_is_ready_dt(&m_led_r) || !gpio_is_ready_dt(&m_led_g) ||
-	    !gpio_is_ready_dt(&m_led_y)) {
-		LOG_ERR("Device not ready");
-		return -ENODEV;
-	}
-
-	ret = gpio_pin_configure_dt(&m_led_r, GPIO_OUTPUT_INACTIVE);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
-		return ret;
-	}
-
-	ret = gpio_pin_configure_dt(&m_led_g, GPIO_OUTPUT_INACTIVE);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
-		return ret;
-	}
-
-	ret = gpio_pin_configure_dt(&m_led_y, GPIO_OUTPUT_INACTIVE);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
-		return ret;
-	}
-
-	static struct k_thread thread;
-	m_led_thread_id = k_thread_create(&thread, m_led_thread_stack,
-					  K_THREAD_STACK_SIZEOF(m_led_thread_stack), thread_entry,
-					  NULL, NULL, NULL, LED_THREAD_PRIORITY, 0, K_NO_WAIT);
-
-	k_thread_name_set(m_led_thread_id, "led");
-
-	return 0;
-}
-
-SYS_INIT(init, APPLICATION, 0);

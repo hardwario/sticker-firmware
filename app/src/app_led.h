@@ -53,6 +53,7 @@ struct app_led_play_req {
 	int repetitions;
 };
 
+int app_led_init(void);
 void app_led_set(enum app_led_channel channel, int state);
 int app_led_blink(const struct app_led_blink_req *req);
 int app_led_play(const struct app_led_play_req *req);

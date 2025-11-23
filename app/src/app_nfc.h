@@ -17,6 +17,7 @@ enum app_nfc_action {
 	APP_NFC_ACTION_RESET = 2,
 };
 
+int app_nfc_init(void);
 int app_nfc_check(enum app_nfc_action *action);
 
 #ifdef __cplusplus

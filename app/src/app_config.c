@@ -11,7 +11,6 @@
 /* Zephyr includes */
 #include <zephyr/fs/fs.h>
 #include <zephyr/fs/nvs.h>
-#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
@@ -322,40 +321,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 
 	return 0;
 }
-
-static int init(void)
-{
-	int ret;
-
-	ret = settings_subsys_init();
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("settings_subsys_init", ret);
-		return ret;
-	}
-
-	static struct settings_handler sh = {
-		.name = SETTINGS_PFX,
-		.h_set = h_set,
-		.h_commit = h_commit,
-		.h_export = h_export,
-	};
-
-	ret = settings_register(&sh);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("settings_register", ret);
-		return ret;
-	}
-
-	ret = settings_load_subtree(SETTINGS_PFX);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("settings_load_subtree", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-SYS_INIT(init, APPLICATION, 0);
 
 static int save(bool reboot)
 {
@@ -1940,6 +1905,38 @@ SHELL_CMD_REGISTER(config, &sub_config, "Configuration commands.", print_help);
 struct app_config *app_config(void)
 {
 	return &m_app_config;
+}
+
+int app_config_init(void)
+{
+	int ret;
+
+	ret = settings_subsys_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("settings_subsys_init", ret);
+		return ret;
+	}
+
+	static struct settings_handler sh = {
+		.name = SETTINGS_PFX,
+		.h_set = h_set,
+		.h_commit = h_commit,
+		.h_export = h_export,
+	};
+
+	ret = settings_register(&sh);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("settings_register", ret);
+		return ret;
+	}
+
+	ret = settings_load_subtree(SETTINGS_PFX);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("settings_load_subtree", ret);
+		return ret;
+	}
+
+	return 0;
 }
 
 int app_config_save(void)

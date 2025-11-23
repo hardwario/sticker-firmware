@@ -98,6 +98,7 @@ struct app_config {
 extern struct app_config g_app_config;
 
 struct app_config *app_config(void);
+int app_config_init(void);
 int app_config_save(void);
 int app_config_reset(void);
 

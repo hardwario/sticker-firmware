@@ -1,16 +1,20 @@
 #include "app_alarm.h"
+#include "app_battery.h"
+#include "app_calibration.h"
 #include "app_config.h"
 #include "app_led.h"
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_nfc.h"
 #include "app_wdog.h"
+#include "app_sensor.h"
 
 /* Zephyr includes */
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
+#include <zephyr/sys/reboot.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -26,6 +30,13 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 #define BLINK_INTERVAL_SECONDS 3
 #define NFC_CHECK_BLINKS       10
 #endif /* defined(CONFIG_DEBUG) */
+
+static void die(void)
+{
+	LOG_ERR("Rebooting in 60 seconds due to fatal error");
+	k_sleep(K_SECONDS(60));
+	sys_reboot(SYS_REBOOT_COLD);
+}
 
 static void play_carousel_boot(void)
 {
@@ -62,10 +73,37 @@ int main(void)
 
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
 
+#if defined(CONFIG_WATCHDOG)
+	ret = app_wdog_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_wdog_init", ret);
+		die();
+	}
+#endif /* defined(CONFIG_WATCHDOG) */
+
+	ret = app_config_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_config_init", ret);
+		die();
+	}
+
+	ret = app_led_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_led_init", ret);
+		die();
+	}
+
+	ret = app_nfc_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_nfc_init", ret);
+		die();
+	}
+
 	enum app_nfc_action action;
 	ret = app_nfc_check(&action);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
+		die();
 	}
 
 	if (action == APP_NFC_ACTION_SAVE) {
@@ -74,6 +112,7 @@ int main(void)
 		ret = app_config_save();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_config_save", ret);
+			die();
 		}
 	} else if (action == APP_NFC_ACTION_RESET) {
 		play_carousel_nfc();
@@ -81,14 +120,39 @@ int main(void)
 		ret = app_config_reset();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_config_reset", ret);
+			die();
 		}
 	}
 
 	play_carousel_boot();
 
 #if defined(CONFIG_LORAWAN)
+	ret = app_lrw_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_lrw_init", ret);
+		die();
+	}
+
 	app_lrw_join();
 #endif /* defined(CONFIG_LORAWAN) */
+
+	ret = app_battery_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_battery_init", ret);
+		die();
+	}
+
+	ret = app_sensor_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_sensor_init", ret);
+		die();
+	}
+
+	ret = app_calibration_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_calibration_init", ret);
+		die();
+	}
 
 	for (;;) {
 		LOG_INF("Alive");
@@ -156,9 +220,7 @@ static int init(void)
 
 SYS_INIT(init, POST_KERNEL, 0);
 
-#if defined(CONFIG_SHELL)
-
-#if defined(CONFIG_LORAWAN)
+#if defined(CONFIG_SHELL) && defined(CONFIG_LORAWAN)
 
 static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 {
@@ -181,6 +243,4 @@ static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 SHELL_CMD_REGISTER(join, NULL, "Join LoRaWAN network.", cmd_join);
 SHELL_CMD_REGISTER(send, NULL, "Send LoRaWAN data.", cmd_send);
 
-#endif /* defined(CONFIG_LORAWAN) */
-
-#endif /* defined(CONFIG_SHELL) */
+#endif /* defined(CONFIG_SHELL) && defined(CONFIG_LORAWAN) */
