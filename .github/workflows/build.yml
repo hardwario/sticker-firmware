@@ -30,7 +30,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libusb-1.0-0-dev
+          sudo apt-get install -y libudev-dev libusb-1.0-0-dev
 
       - name: Set up Python
         uses: actions/setup-python@v5
