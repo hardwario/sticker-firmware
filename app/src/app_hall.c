@@ -9,7 +9,6 @@
 #include "app_led.h"
 #include "app_log.h"
 #include "app_lrw.h"
-#include "app_send.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
