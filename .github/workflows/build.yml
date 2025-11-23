@@ -1,0 +1,68 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.config }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        config: [debug, release]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: sticker
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Setup Zephyr project
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: sticker
+          toolchains: arm-zephyr-eabi
+
+      - name: Build firmware
+        working-directory: sticker/app
+        shell: bash
+        run: |
+          if [ "${{ matrix.config }}" == "debug" ]; then
+             ARGS="-DEXTRA_CONF_FILE=debug.conf"
+          else
+             ARGS=""
+          fi
+
+          west build -p always -b sticker -- $ARGS
+
+          mkdir -p ../artifacts
+
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION="short-sha-$(git rev-parse --short HEAD)"
+          fi
+
+          cp build/zephyr/zephyr.hex ../artifacts/hio-sticker-${VERSION}-${{ matrix.config }}.hex
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.config }}
+          path: sticker/artifacts/*.hex
+          if-no-files-found: error
