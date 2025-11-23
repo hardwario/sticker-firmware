@@ -171,10 +171,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_hall_left));
 	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
 		     sizeof(m_app_config.cap_hall_right));
-	SETTINGS_SET("cap-input-a", &m_app_config.cap_input_a,
-		     sizeof(m_app_config.cap_input_a));
-	SETTINGS_SET("cap-input-b", &m_app_config.cap_input_b,
-		     sizeof(m_app_config.cap_input_b));
+	SETTINGS_SET("cap-input-a", &m_app_config.cap_input_a, sizeof(m_app_config.cap_input_a));
+	SETTINGS_SET("cap-input-b", &m_app_config.cap_input_b, sizeof(m_app_config.cap_input_b));
 	SETTINGS_SET("cap-light-sensor", &m_app_config.cap_light_sensor,
 		     sizeof(m_app_config.cap_light_sensor));
 	SETTINGS_SET("cap-barometer", &m_app_config.cap_barometer,
@@ -302,10 +300,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_hall_left));
 	EXPORT_FUNC("cap-hall-right", &m_app_config.cap_hall_right,
 		    sizeof(m_app_config.cap_hall_right));
-	EXPORT_FUNC("cap-input-a", &m_app_config.cap_input_a,
-		    sizeof(m_app_config.cap_input_a));
-	EXPORT_FUNC("cap-input-b", &m_app_config.cap_input_b,
-		    sizeof(m_app_config.cap_input_b));
+	EXPORT_FUNC("cap-input-a", &m_app_config.cap_input_a, sizeof(m_app_config.cap_input_a));
+	EXPORT_FUNC("cap-input-b", &m_app_config.cap_input_b, sizeof(m_app_config.cap_input_b));
 	EXPORT_FUNC("cap-light-sensor", &m_app_config.cap_light_sensor,
 		    sizeof(m_app_config.cap_light_sensor));
 	EXPORT_FUNC("cap-barometer", &m_app_config.cap_barometer,
@@ -1579,14 +1575,12 @@ static int cmd_cap_hall_right(const struct shell *shell, size_t argc, char **arg
 
 static int cmd_cap_input_a(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_input_a,
-				  print_cap_input_a);
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_input_a, print_cap_input_a);
 }
 
 static int cmd_cap_input_b(const struct shell *shell, size_t argc, char **argv)
 {
-	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_input_b,
-				  print_cap_input_b);
+	return app_shell_cmd_bool(shell, argc, argv, &m_app_config.cap_input_b, print_cap_input_b);
 }
 
 static int cmd_cap_light_sensor(const struct shell *shell, size_t argc, char **argv)
