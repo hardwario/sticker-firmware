@@ -37,6 +37,17 @@ LOG_MODULE_REGISTER(app_machine_probe, LOG_LEVEL_DBG);
 #define SHT30_INIT_TIME K_MSEC(100)
 #define SHT30_CONV_TIME K_MSEC(100)
 
+/* Machine Probe SHT sensor type selection
+ * Configure via CONFIG_APP_MACHINE_PROBE_SHT43 in prj.conf
+ */
+#if defined(CONFIG_APP_MACHINE_PROBE_SHT43)
+/* SHT43 uses address 0x44 and 1-byte serial command 0x89 */
+#define SHT_SERIAL_ADDR 0x44
+#else
+/* SHT30/SHT33 uses address 0x45 and 2-byte serial command 0x3780 */
+#define SHT_SERIAL_ADDR 0x45
+#endif
+
 #define OPT3001_I2C_ADDR  0x44
 #define OPT3001_INIT_TIME K_MSEC(10)
 #define OPT3001_CONV_TIME K_MSEC(2000)
@@ -199,6 +210,46 @@ static int sht30_read(const struct device *dev, float *temperature, float *humid
 
 	if (humidity) {
 		*humidity = 100.f * (float)sys_get_be16(&read_buf[3]) / 65535.f;
+	}
+
+	return 0;
+}
+
+static int sht30_read_serial(const struct device *dev, uint32_t *serial_number)
+{
+	int ret;
+
+	uint8_t write_buf[2];
+	uint8_t read_buf[6];
+
+#if defined(CONFIG_APP_MACHINE_PROBE_SHT43)
+	/* SHT43 Read Serial Number command: 0x89 (1-byte) */
+	write_buf[0] = 0x89;
+	ret = ds28e17_i2c_write(dev, SHT_SERIAL_ADDR, write_buf, 1);
+#else
+	/* SHT30/SHT33 Read Serial Number command: 0x3780 (2-byte) */
+	write_buf[0] = 0x37;
+	write_buf[1] = 0x80;
+	ret = ds28e17_i2c_write(dev, SHT_SERIAL_ADDR, write_buf, 2);
+#endif
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
+		return ret;
+	}
+
+	k_sleep(K_MSEC(1));
+
+	ret = ds28e17_i2c_read(dev, SHT_SERIAL_ADDR, read_buf, 6);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_read", ret);
+		return ret;
+	}
+
+	if (serial_number) {
+		/* Serial is in bytes 0-1 and 3-4, with CRC in bytes 2 and 5 */
+		*serial_number = ((uint32_t)read_buf[0] << 24) | ((uint32_t)read_buf[1] << 16) |
+				 ((uint32_t)read_buf[3] << 8) | (uint32_t)read_buf[4];
 	}
 
 	return 0;
@@ -759,6 +810,35 @@ int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float 
 
 	if (!res && humidity) {
 		LOG_DBG("Humidity: %.1f %%", (double)*humidity);
+	}
+
+	COMM_EPILOGUE
+}
+
+int app_machine_probe_read_hygrometer_serial(int index, uint64_t *serial_number,
+					     uint32_t *sht_serial)
+{
+	if (serial_number) {
+		*serial_number = UINT64_MAX;
+	}
+
+	if (sht_serial) {
+		*sht_serial = 0;
+	}
+
+	COMM_PROLOGUE
+
+	if (!res) {
+		ret = sht30_read_serial(m_sensors[index].dev, sht_serial);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("sht30_read_serial", ret);
+			res = ret;
+			goto error;
+		}
+	}
+
+	if (!res && sht_serial) {
+		LOG_DBG("SHT Serial: 0x%08X", *sht_serial);
 	}
 
 	COMM_EPILOGUE
