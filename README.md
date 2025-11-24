@@ -84,7 +84,7 @@ Format the source codes:
 
     make format
 
-# Remarks
+## Remarks
 
 I2C:
 https://github.com/zephyrproject-rtos/zephyr/issues/37414
@@ -94,3 +94,11 @@ https://github.com/zephyrproject-rtos/zephyr/pull/72805
 ADC:
 https://github.com/sense-Jo/zephyr/commit/5c476cc087cc685f4b85a0f15dc395b53154340c
 https://github.com/sense-Jo/zephyr/commit/a1cf2447696f5d76f85445362af07abf03afc24d
+
+## License
+
+This project is licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) - see the [LICENSE](LICENSE) file for details.
+
+---
+
+Made with &#x2764;&nbsp; by [**HARDWARIO a.s.**](https://www.hardwario.com/) in the heart of Europe.
