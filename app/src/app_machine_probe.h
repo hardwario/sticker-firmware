@@ -20,6 +20,8 @@ int app_machine_probe_get_count(void);
 int app_machine_probe_read_thermometer(int index, uint64_t *serial_number, float *temperature);
 int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float *temperature,
 				      float *humidity);
+int app_machine_probe_read_hygrometer_serial(int index, uint64_t *serial_number,
+					     uint32_t *sht_serial);
 int app_machine_probe_read_lux_meter(int index, uint64_t *serial_number, float *illuminance);
 int app_machine_probe_read_magnetometer(int index, uint64_t *serial_number, float *magnetic_field);
 int app_machine_probe_read_accelerometer(int index, uint64_t *serial_number, float *accel_x,
