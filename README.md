@@ -14,16 +14,16 @@ This repository contains the **open firmware** for STICKER, built on the **Zephy
 
 The firmware implementation covers functionality of the catalog applications:
 
-* Catalog application[**STICKER Clime**](https://www.hardwario.com/sticker/clime/)
-* Catalog application[**STICKER Input**](https://www.hardwario.com/sticker/input/)
-* Catalog application[**STICKER Motion**](https://www.hardwario.com/sticker/motion/)
+* Catalog application [**STICKER Clime**](https://www.hardwario.com/sticker/clime/)
+* Catalog application [**STICKER Input**](https://www.hardwario.com/sticker/input/)
+* Catalog application [**STICKER Motion**](https://www.hardwario.com/sticker/motion/)
 
 The firmware is focused on the **device side** - you bring your own LoRaWAN network server, gateway and cloud/backend.
 
 ### Learn more about STICKER
 
-* Product page: https://www.hardwario.com/sticker
-* Documentation: https://docs.hardwario.com/sticker/
+* Product page: **https://www.hardwario.com/sticker**
+* Documentation: **https://docs.hardwario.com/sticker/**
 
 ---
 
@@ -190,34 +190,12 @@ make format
 
 ---
 
-## Development Notes
-
-### Zephyr I²C references
-
-The project references the following Zephyr discussions/patches related to I²C behavior:
-
-* [https://github.com/zephyrproject-rtos/zephyr/issues/37414](https://github.com/zephyrproject-rtos/zephyr/issues/37414)
-* [https://github.com/dinuxbg/zephyr/commit/aaf9c4ee246ee306f758ba0055c3c367a8ca53be](https://github.com/dinuxbg/zephyr/commit/aaf9c4ee246ee306f758ba0055c3c367a8ca53be)
-* [https://github.com/zephyrproject-rtos/zephyr/pull/72805](https://github.com/zephyrproject-rtos/zephyr/pull/72805)
-
-### Zephyr ADC references
-
-For ADC behavior and fixes, see:
-
-* [https://github.com/sense-Jo/zephyr/commit/5c476cc087cc685f4b85a0f15dc395b53154340c](https://github.com/sense-Jo/zephyr/commit/5c476cc087cc685f4b85a0f15dc395b53154340c)
-* [https://github.com/sense-Jo/zephyr/commit/a1cf2447696f5d76f85445362af07abf03afc24d](https://github.com/sense-Jo/zephyr/commit/a1cf2447696f5d76f85445362af07abf03afc24d)
-
-These links provide context for certain workarounds or configuration choices that may appear in the code.
-
----
-
 ## Continuous Integration
 
-This repository uses **GitHub Actions** for CI.
+This repository uses **GitHub Actions** for CI:
 
 * Every push and pull request is built to ensure the firmware compiles successfully.
-* You can browse runs and logs here:
-  [https://github.com/hardwario/sticker-firmware/actions](https://github.com/hardwario/sticker-firmware/actions)
+* You can browse runs and logs here: **https://github.com/hardwario/sticker-firmware/actions**
 
 If you make any changes, please ensure they build cleanly in CI.
 
@@ -235,16 +213,19 @@ Contributions are welcome — whether you:
 ### Basic workflow
 
 1. **Fork** this repository
+
 2. Create a feature branch:
 
    ```bash
    git checkout -b feature/my-improvement
    ```
+
 3. Commit your changes with a clear message:
 
    ```bash
    git commit -am "Describe your change briefly"
    ```
+
 4. **Open a Pull Request** against `main` with:
 
    * A short description of the change
@@ -256,10 +237,10 @@ Try to keep changes focused and small; it makes review easier and more pleasant 
 
 ## Support & Resources
 
-* STICKER product page: [**https://www.hardwario.com/sticker**](https://www.hardwario.com/sticker)
-* STICKER documentation: [**https://docs.hardwario.com/sticker/**](https://docs.hardwario.com/sticker/)
-* HARDWARIO forum: [**https://forum.hardwario.com**](https://forum.hardwario.com)
-* HARDWARIO store: [**https://store.hardwario.com**](https://store.hardwario.com)
+* STICKER product page: **https://www.hardwario.com/sticker**
+* STICKER documentation: **https://docs.hardwario.com/sticker/**
+* HARDWARIO forum: **https://forum.hardwario.com**
+* HARDWARIO store: **https://store.hardwario.com**
 
 If you are using STICKER in a commercial or larger-scale deployment and need guidance, you can also reach out via the contact form on the website.
 
