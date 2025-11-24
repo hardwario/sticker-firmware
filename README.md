@@ -1,16 +1,8 @@
 # STICKER Firmware
 
-<p>
-  <a href="https://github.com/hardwario/sticker-firmware/actions">
-    <img src="https://github.com/hardwario/sticker-firmware/actions/workflows/build.yml/badge.svg" alt="CI status" />
-  </a>
-  <a href="https://github.com/hardwario/sticker-firmware/releases">
-    <img src="https://img.shields.io/github/v/release/hardwario/sticker-firmware?sort=semver" alt="Latest release" />
-  </a>
-  <a href="https://github.com/hardwario/sticker-firmware/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/hardwario/sticker-firmware" alt="License file" />
-  </a>
-</p>
+![GitHub Workflow Status](https://github.com/hardwario/sticker-firmware/actions/workflows/build.yml/badge.svg)
+![Latest Release Version](https://img.shields.io/github/v/release/hardwario/sticker-firmware?sort=semver)
+![Project License File](https://img.shields.io/github/license/hardwario/sticker-firmware)
 
 ---
 
@@ -22,16 +14,16 @@ This repository contains the **open firmware** for STICKER, built on the **Zephy
 
 The firmware implementation covers functionality of the catalog applications:
 
-- **STICKER Clime**
-- **STICKER Input**
-- **STICKER Motion**
+* Catalog application[**STICKER Clime**](https://www.hardwario.com/sticker/clime/)
+* Catalog application[**STICKER Input**](https://www.hardwario.com/sticker/input/)
+* Catalog application[**STICKER Motion**](https://www.hardwario.com/sticker/motion/)
 
 The firmware is focused on the **device side** - you bring your own LoRaWAN network server, gateway and cloud/backend.
 
 ### Learn more about STICKER
 
-- Product page: https://www.hardwario.com/sticker
-- Documentation: https://docs.hardwario.com/sticker/
+* Product page: https://www.hardwario.com/sticker
+* Documentation: https://docs.hardwario.com/sticker/
 
 ---
 
@@ -39,20 +31,20 @@ The firmware is focused on the **device side** - you bring your own LoRaWAN netw
 
 STICKER platform highlights (hardware + firmware):
 
-- **LoRaWAN connectivity** for long-range, low-power wireless communication
-- **Low-power design** - operation from two AA battery cells with long lifetime
-- **Built-in sensors**
-  - Temperature, humidity, light intensity
-  - PIR motion detection
-  - 3-axis accelerometer
-- **Extensibility**
-  - 1-Wire interface for external temperature and other probes
-  - Support for voltage measurement (up to 30 V) and digital/industrial inputs
-- **NFC configuration**
-  - Configure LoRaWAN settings, alarms and other parameters using NFC from a phone
-- **Open firmware based on Zephyr**
-  - Full control over application logic
-  - Reuse of existing Zephyr drivers and subsystems
+* **LoRaWAN connectivity** for long-range, low-power wireless communication
+* **Low-power design** - operation from two AA battery cells with long lifetime
+* **Built-in sensors**
+  * Temperature, humidity, light intensity
+  * PIR motion detection
+  * 3-axis accelerometer
+* **Extensibility**
+  * 1-Wire interface for external temperature and other probes
+  * Support for voltage measurement (up to 30 V) and digital/industrial inputs
+* **NFC configuration**
+  * Configure LoRaWAN settings, alarms and other parameters using NFC from a phone
+* **Open firmware based on Zephyr**
+  * Full control over application logic
+  * Reuse of existing Zephyr drivers and subsystems
 
 ---
 
@@ -103,7 +95,7 @@ pip install west
 Initialize Zephyr workspace and fetch modules:
 
 ```bash
-west init -m git@github.com:hardwario/sticker.git
+west init -m https://github.com/hardwario/sticker-firmware.git
 ```
 
 Fetch all modules:
@@ -188,19 +180,13 @@ make clean
 make rttt
 ```
 
-To determine the RTT block address manually, you can use:
-
-```bash
-readelf -s build/zephyr/zephyr.elf | grep _SEGGER_RTT
-```
-
 ### Format source code
 
 ```bash
 make format
 ```
 
-> Available `make` targets may evolve over time; run `make help` (if present) or inspect the `Makefile` for details.
+> Available `make` targets may evolve over time; inspect the `Makefile` for details.
 
 ---
 
