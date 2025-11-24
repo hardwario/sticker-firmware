@@ -8,6 +8,7 @@
 #include "app_led.h"
 #include "app_machine_probe.h"
 #include "app_sensor.h"
+#include "app_sht40.h"
 
 /* Zephyr includes */
 #include <zephyr/drivers/hwinfo.h>
@@ -201,9 +202,20 @@ static void cmd_print_serial_numbers(const struct shell *shell)
 	int ret;
 	int count;
 
+#if defined(CONFIG_SHT4X)
+	/* SHT40 (onboard temperature/humidity sensor) */
+	uint32_t sht40_serial;
+	ret = app_sht40_read_serial(&sht40_serial);
+	if (ret) {
+		shell_error(shell, "Failed to read SHT40 serial: %d", ret);
+	} else {
+		shell_print(shell, "SHT40 serial: %u (0x%08X)", sht40_serial, sht40_serial);
+	}
+#endif /* defined(CONFIG_SHT4X) */
+
 	/* DS18B20 sensors (T1, T2) */
 	count = app_ds18b20_get_count();
-	shell_print(shell, SHELL_PFX " DS18B20 count: %d", count);
+	shell_print(shell, "DS18B20 count: %d", count);
 
 	for (int i = 0; i < count; i++) {
 		uint64_t serial_number;
@@ -215,12 +227,12 @@ static void cmd_print_serial_numbers(const struct shell *shell)
 			continue;
 		}
 
-		shell_print(shell, SHELL_PFX " DS18B20[%d] serial: %llu", i, serial_number);
+		shell_print(shell, "DS18B20[%d] serial: %llu", i, serial_number);
 	}
 
 	/* Machine Probe sensors (MP1, MP2) */
 	count = app_machine_probe_get_count();
-	shell_print(shell, SHELL_PFX " Machine Probe count: %d", count);
+	shell_print(shell, "Machine Probe count: %d", count);
 
 	for (int i = 0; i < count; i++) {
 		uint64_t serial_number;
@@ -233,7 +245,17 @@ static void cmd_print_serial_numbers(const struct shell *shell)
 			continue;
 		}
 
-		shell_print(shell, SHELL_PFX " Machine Probe[%d] serial: %llu", i, serial_number);
+		shell_print(shell, "Machine Probe[%d] serial: %llu", i, serial_number);
+
+		/* Read SHT serial from machine probe */
+		uint32_t sht_serial;
+		ret = app_machine_probe_read_hygrometer_serial(i, &serial_number, &sht_serial);
+		if (ret) {
+			shell_error(shell, "Failed to read Machine Probe SHT serial %d: %d", i, ret);
+		} else {
+			shell_print(shell, "Machine Probe[%d] SHT serial: %u (0x%08X)", i,
+				    sht_serial, sht_serial);
+		}
 	}
 }
 
@@ -499,53 +521,43 @@ static void cmd_print_sample(const struct shell *shell)
 {
 	app_sensor_sample();
 
-	shell_print(shell, SHELL_PFX " orientation:              %d",
-		    g_app_sensor_data.orientation);
-	shell_print(shell, SHELL_PFX " voltage:                  %.2f V",
-		    (double)g_app_sensor_data.voltage);
-	shell_print(shell, SHELL_PFX " temperature:              %.2f C",
+	shell_print(shell, "orientation:              %d", g_app_sensor_data.orientation);
+	shell_print(shell, "voltage:                  %.2f V", (double)g_app_sensor_data.voltage);
+	shell_print(shell, "temperature:              %.2f C",
 		    (double)g_app_sensor_data.temperature);
-	shell_print(shell, SHELL_PFX " humidity:                 %.2f %%",
-		    (double)g_app_sensor_data.humidity);
-	shell_print(shell, SHELL_PFX " illuminance:              %.2f lux",
+	shell_print(shell, "humidity:                 %.2f %%", (double)g_app_sensor_data.humidity);
+	shell_print(shell, "illuminance:              %.2f lux",
 		    (double)g_app_sensor_data.illuminance);
-	shell_print(shell, SHELL_PFX " t1_temperature:           %.2f C",
+	shell_print(shell, "t1_temperature:           %.2f C",
 		    (double)g_app_sensor_data.t1_temperature);
-	shell_print(shell, SHELL_PFX " t2_temperature:           %.2f C",
+	shell_print(shell, "t2_temperature:           %.2f C",
 		    (double)g_app_sensor_data.t2_temperature);
-	shell_print(shell, SHELL_PFX " motion_count:             %u",
-		    g_app_sensor_data.motion_count);
-	shell_print(shell, SHELL_PFX " altitude:                 %.2f m",
-		    (double)g_app_sensor_data.altitude);
-	shell_print(shell, SHELL_PFX " pressure:                 %.2f Pa",
-		    (double)g_app_sensor_data.pressure);
-	shell_print(shell, SHELL_PFX " machine_probe_temp_1:     %.2f C",
+	shell_print(shell, "motion_count:             %u", g_app_sensor_data.motion_count);
+	shell_print(shell, "altitude:                 %.2f m", (double)g_app_sensor_data.altitude);
+	shell_print(shell, "pressure:                 %.2f Pa", (double)g_app_sensor_data.pressure);
+	shell_print(shell, "machine_probe_temp_1:     %.2f C",
 		    (double)g_app_sensor_data.mp1_temperature);
-	shell_print(shell, SHELL_PFX " machine_probe_temp_2:     %.2f C",
+	shell_print(shell, "machine_probe_temp_2:     %.2f C",
 		    (double)g_app_sensor_data.mp2_temperature);
-	shell_print(shell, SHELL_PFX " machine_probe_humidity_1: %.2f %%",
+	shell_print(shell, "machine_probe_humidity_1: %.2f %%",
 		    (double)g_app_sensor_data.mp1_humidity);
-	shell_print(shell, SHELL_PFX " machine_probe_humidity_2: %.2f %%",
+	shell_print(shell, "machine_probe_humidity_2: %.2f %%",
 		    (double)g_app_sensor_data.mp2_humidity);
-	shell_print(shell, SHELL_PFX " machine_probe_tilt_1:     %s",
+	shell_print(shell, "machine_probe_tilt_1:     %s",
 		    g_app_sensor_data.mp1_is_tilt_alert ? "true" : "false");
-	shell_print(shell, SHELL_PFX " machine_probe_tilt_2:     %s",
+	shell_print(shell, "machine_probe_tilt_2:     %s",
 		    g_app_sensor_data.mp2_is_tilt_alert ? "true" : "false");
-	shell_print(shell, SHELL_PFX " hall_left_count:          %u",
-		    g_app_sensor_data.hall_left_count);
-	shell_print(shell, SHELL_PFX " hall_right_count:         %u",
-		    g_app_sensor_data.hall_right_count);
-	shell_print(shell, SHELL_PFX " hall_left_active:         %s",
+	shell_print(shell, "hall_left_count:          %u", g_app_sensor_data.hall_left_count);
+	shell_print(shell, "hall_right_count:         %u", g_app_sensor_data.hall_right_count);
+	shell_print(shell, "hall_left_active:         %s",
 		    g_app_sensor_data.hall_left_is_active ? "true" : "false");
-	shell_print(shell, SHELL_PFX " hall_right_active:        %s",
+	shell_print(shell, "hall_right_active:        %s",
 		    g_app_sensor_data.hall_right_is_active ? "true" : "false");
-	shell_print(shell, SHELL_PFX " input_a_count:            %u",
-		    g_app_sensor_data.input_a_count);
-	shell_print(shell, SHELL_PFX " input_b_count:            %u",
-		    g_app_sensor_data.input_b_count);
-	shell_print(shell, SHELL_PFX " input_a_active:           %s",
+	shell_print(shell, "input_a_count:            %u", g_app_sensor_data.input_a_count);
+	shell_print(shell, "input_b_count:            %u", g_app_sensor_data.input_b_count);
+	shell_print(shell, "input_a_active:           %s",
 		    g_app_sensor_data.input_a_is_active ? "true" : "false");
-	shell_print(shell, SHELL_PFX " input_b_active:           %s",
+	shell_print(shell, "input_b_active:           %s",
 		    g_app_sensor_data.input_b_is_active ? "true" : "false");
 }
 
