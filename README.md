@@ -2,13 +2,13 @@
 
 <p>
   <a href="https://github.com/hardwario/sticker-firmware/actions">
-    <img src="https://github.com/hardwario/sticker-firmware/actions/workflows/ci.yml/badge.svg" alt="CI Status" />
+    <img src="https://github.com/hardwario/sticker-firmware/actions/workflows/build.yml/badge.svg" alt="CI status" />
   </a>
   <a href="https://github.com/hardwario/sticker-firmware/releases">
-    <img src="https://img.shields.io/github/v/release/hardwario/sticker-firmware?sort=semver" alt="Latest Release" />
+    <img src="https://img.shields.io/github/v/release/hardwario/sticker-firmware?sort=semver" alt="Latest release" />
   </a>
   <a href="https://github.com/hardwario/sticker-firmware/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/hardwario/sticker-firmware" alt="License" />
+    <img src="https://img.shields.io/github/license/hardwario/sticker-firmware" alt="License file" />
   </a>
 </p>
 
@@ -21,11 +21,12 @@
 This repository contains the **open firmware** for STICKER, built on the **Zephyr RTOS** and using the Zephyr toolchain (West, Zephyr SDK, CMake). It is intended for main firmware development and customization.
 
 The firmware implementation covers functionality of the catalog applications:
-  - **STICKER Clime**
-  - **STICKER Input**
-  - **STICKER Motion**
 
-The firmware is focused on the **device side** – you bring your own LoRaWAN network server, gateway and cloud/backend.
+- **STICKER Clime**
+- **STICKER Input**
+- **STICKER Motion**
+
+The firmware is focused on the **device side** - you bring your own LoRaWAN network server, gateway and cloud/backend.
 
 ### Learn more about STICKER
 
@@ -39,7 +40,7 @@ The firmware is focused on the **device side** – you bring your own LoRaWAN ne
 STICKER platform highlights (hardware + firmware):
 
 - **LoRaWAN connectivity** for long-range, low-power wireless communication
-- **Low-power design** – operation from two AA battery cells with long lifetime
+- **Low-power design** - operation from two AA battery cells with long lifetime
 - **Built-in sensors**
   - Temperature, humidity, light intensity
   - PIR motion detection
@@ -59,58 +60,89 @@ STICKER platform highlights (hardware + firmware):
 
 ### 1. Create a workspace
 
+Create a workspace directory:
+
 ```bash
-# Create and enter a workspace directory
 mkdir sticker
+```
+
+Enter the workspace directory:
+
+```bash
 cd sticker
 ```
 
 ### 2. Set up Python environment
 
+Create Python virtual environment:
+
 ```bash
-# Create Python virtual environment
 python -m venv .venv
+```
 
-# Activate the virtual environment (Linux/macOS)
+Activate the virtual environment (Linux/macOS):
+
+```bash
 source .venv/bin/activate
+```
 
-# Upgrade pip
+Upgrade pip:
+
+```bash
 pip install --upgrade pip
 ```
 
 ### 3. Install Zephyr tooling
 
+Install West (Zephyr meta-tool):
+
 ```bash
-# Install West (Zephyr meta-tool)
 pip install west
+```
 
-# Initialize West workspace with STICKER manifest
+Initialize Zephyr workspace and fetch modules:
+
+```bash
 west init -m git@github.com:hardwario/sticker.git
+```
 
-# Fetch all modules
+Fetch all modules:
+
+```bash
 west update
+```
 
-# Export Zephyr CMake package
+Export Zephyr CMake package:
+
+```bash
 west zephyr-export
+```
 
-# Install required Python packages for Zephyr
+Install required Python packages for Zephyr:
+
+```bash
 west packages pip --install
 ```
 
 ### 4. Additional tools
 
-```bash
-# RTT terminal helper
-pip install rttt
+Install RTT terminal helper:
 
-# Protocol Buffers tooling
+```bash
+pip install rttt
+```
+
+Install Protocol Buffers tooling:
+
+```bash
 pip install protobuf grpcio-tools
 ```
 
 ### 5. Install Zephyr SDK
 
+Install the appropriate Zephyr SDK version:
+
 ```bash
-# Install the appropriate Zephyr SDK version
 west sdk install
 ```
 
@@ -238,10 +270,10 @@ Try to keep changes focused and small; it makes review easier and more pleasant 
 
 ## Support & Resources
 
-* STICKER product page: [https://www.hardwario.com/sticker](https://www.hardwario.com/sticker)
-* STICKER documentation: [https://docs.hardwario.com/sticker/](https://docs.hardwario.com/sticker/)
-* HARDWARIO forum: [https://forum.hardwario.com](https://forum.hardwario.com)
-* HARDWARIO store: [https://store.hardwario.com](https://store.hardwario.com)
+* STICKER product page: [**https://www.hardwario.com/sticker**](https://www.hardwario.com/sticker)
+* STICKER documentation: [**https://docs.hardwario.com/sticker/**](https://docs.hardwario.com/sticker/)
+* HARDWARIO forum: [**https://forum.hardwario.com**](https://forum.hardwario.com)
+* HARDWARIO store: [**https://store.hardwario.com**](https://store.hardwario.com)
 
 If you are using STICKER in a commercial or larger-scale deployment and need guidance, you can also reach out via the contact form on the website.
 
@@ -249,8 +281,8 @@ If you are using STICKER in a commercial or larger-scale deployment and need gui
 
 ## License
 
-This project is licensed under the **Apache License 2.0** – see the [`LICENSE`](LICENSE) file for details.
+This project is licensed under the **Apache License 2.0** - see the [**LICENSE**](LICENSE) file for details.
 
 ---
 
-Made with ❤ by <a href="https://www.hardwario.com/">HARDWARIO a.s.</a> in the heart of Europe.
+Made with ❤ by [**HARDWARIO a.s.**](https://www.hardwario.com/) in the heart of Europe.
