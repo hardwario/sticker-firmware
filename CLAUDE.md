@@ -74,3 +74,34 @@ sticker/sticker/           # Main application repository
 ## Development Setup
 
 Requires Python virtual environment with West, RTTT, and Protocol Buffers tools installed. See README.md for full setup instructions.
+
+## Tester Shell Commands
+
+The `app_tester.c` module provides shell commands for testing hardware:
+
+```bash
+tester sensors sample    # Print all sensor values
+tester sensors serial    # Print sensor serial numbers (SHT40, DS18B20, Machine Probe)
+tester sensors reset     # Reset sensor counters
+tester sensors check <sensor> [timeout]  # Monitor sensor for changes
+
+tester led_cycle [count]           # Cycle LEDs (R/Y/G)
+tester led_switch <color> <on|off> # Control individual LED
+tester hw_deveui                   # Print hardware DevEUI
+```
+
+## Serial Number Reading
+
+- **SHT43 (motherboard)**: Uses I2C command `0x89` (1-byte) at address from devicetree
+- **SHT33 (machine probe)**: Uses I2C command `0x3780` (2-byte) at address `0x45`
+- **DS18B20**: Serial from 1-Wire ROM
+- **Machine Probe**: Serial from DS28E17 1-Wire bridge
+
+Future SHT43 support on machine probe: Set `CONFIG_APP_MACHINE_PROBE_SHT43=y` in prj.conf
+
+## Recent Changes (app_tester branch)
+
+- Added `app_sht40_read_serial()` for SHT43 serial number reading
+- Added `app_machine_probe_read_hygrometer_serial()` for SHT33 serial
+- Added `CONFIG_APP_MACHINE_PROBE_SHT43` Kconfig option
+- Removed "tester" prefix from sample/serial output for cleaner display
