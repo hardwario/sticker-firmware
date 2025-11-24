@@ -1,8 +1,8 @@
 # STICKER Firmware
 
-![GitHub Workflow Status](https://github.com/hardwario/sticker-firmware/actions/workflows/build.yml/badge.svg)
-![Latest Release Version](https://img.shields.io/github/v/release/hardwario/sticker-firmware?sort=semver)
-![Project License File](https://img.shields.io/github/license/hardwario/sticker-firmware)
+[![GitHub Actions](https://img.shields.io/github/actions/workflow/status/hardwario/sticker-firmware/build.yml)](https://github.com/hardwario/sticker-firmware/actions)
+[![GitHub Release](https://img.shields.io/github/v/release/hardwario/sticker-firmware?sort=semver)](https://github.com/hardwario/sticker-firmware/releases)
+[![GitHub License](https://img.shields.io/github/license/hardwario/sticker-firmware)](https://github.com/hardwario/sticker-firmware/blob/main/LICENSE)
 
 ---
 
