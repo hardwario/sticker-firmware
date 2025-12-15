@@ -11,7 +11,6 @@
 #include "app_sht40.h"
 
 /* Zephyr includes */
-#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -148,55 +147,6 @@ static void cmd_switch_led(const struct shell *shell, size_t argc, char **argv)
 	}
 }
 
-static void cmd_print_hw_deveui(const struct shell *shell)
-{
-	uint8_t dev_id[16];
-	ssize_t length;
-
-	/* Get hardware device ID (UID) */
-	length = hwinfo_get_device_id(dev_id, sizeof(dev_id));
-
-	if (length < 0) {
-		shell_error(shell, "Failed to read hardware device ID: %d", length);
-		return;
-	}
-
-	shell_print(shell, SHELL_PFX " Hardware Device ID length: %d bytes", length);
-
-	/* Display full device ID in hex */
-	shell_print(shell, SHELL_PFX " Hardware Device ID (hex): ");
-	for (int i = 0; i < length; i++) {
-		shell_fprintf(shell, SHELL_NORMAL, "%02x", dev_id[i]);
-	}
-	shell_fprintf(shell, SHELL_NORMAL, "\n");
-
-	/* Derive 8-byte DevEUI from device ID
-	 * For STM32, UID is 96 bits (12 bytes), we take first 8 bytes
-	 */
-	uint8_t hw_deveui[8];
-	int deveui_len = MIN(8, length);
-	memcpy(hw_deveui, dev_id, deveui_len);
-
-	/* If device ID is shorter than 8 bytes, pad with zeros */
-	if (deveui_len < 8) {
-		memset(hw_deveui + deveui_len, 0, 8 - deveui_len);
-	}
-
-	/* Print as decimal (8 bytes as uint64) */
-	uint64_t deveui = 0;
-	for (int i = 0; i < 8; i++) {
-		deveui = (deveui << 8) | hw_deveui[i];
-	}
-
-	shell_print(shell, SHELL_PFX " Hardware DevEUI (decimal): %llu", deveui);
-
-	/* Also print as hex */
-	shell_print(shell, SHELL_PFX " Hardware DevEUI (hex): "
-		    "%02x%02x%02x%02x%02x%02x%02x%02x",
-		    hw_deveui[0], hw_deveui[1], hw_deveui[2], hw_deveui[3],
-		    hw_deveui[4], hw_deveui[5], hw_deveui[6], hw_deveui[7]);
-}
-
 static void cmd_print_serial_numbers(const struct shell *shell)
 {
 	int ret;
@@ -209,7 +159,7 @@ static void cmd_print_serial_numbers(const struct shell *shell)
 	if (ret) {
 		shell_error(shell, "Failed to read SHT40 serial: %d", ret);
 	} else {
-		shell_print(shell, "SHT40 serial: %u (0x%08X)", sht40_serial, sht40_serial);
+		shell_print(shell, "SHT40 serial: %u", sht40_serial);
 	}
 #endif /* defined(CONFIG_SHT4X) */
 
@@ -253,8 +203,7 @@ static void cmd_print_serial_numbers(const struct shell *shell)
 		if (ret) {
 			shell_error(shell, "Failed to read Machine Probe SHT serial %d: %d", i, ret);
 		} else {
-			shell_print(shell, "Machine Probe[%d] SHT serial: %u (0x%08X)", i,
-				    sht_serial, sht_serial);
+			shell_print(shell, "Machine Probe[%d] SHT serial: %u", i, sht_serial);
 		}
 	}
 }
@@ -280,25 +229,25 @@ static void print_available_sensors(const struct shell *shell)
 	shell_print(shell, "Available sensors:");
 	shell_print(shell, "  ---Float sensors---:");
 	shell_print(shell, "    voltage, temperature, humidity, illuminance");
-	shell_print(shell, "    t1_temperature, t2_temperature");
-	shell_print(shell, "    mp1_temperature, mp2_temperature");
-	shell_print(shell, "    mp1_humidity, mp2_humidity");
+	shell_print(shell, "    t1-temperature, t2-temperature");
+	shell_print(shell, "    mp1-temperature, mp2-temperature");
+	shell_print(shell, "    mp1-humidity, mp2-humidity");
 	shell_print(shell, "    altitude, pressure");
 	shell_print(shell, "  ---Integer sensors---:");
 	shell_print(shell, "    orientation");
 	shell_print(shell, "  ---Counter sensors---:");
-	shell_print(shell, "    motion_count, hall_left_count, hall_right_count");
-	shell_print(shell, "    input_a_count, input_b_count");
+	shell_print(shell, "    motion-count, hall-left-count, hall-right-count");
+	shell_print(shell, "    input-a-count, input-b-count");
 	shell_print(shell, "  ---Boolean sensors---:");
-	shell_print(shell, "    mp1_is_tilt_alert, mp2_is_tilt_alert");
-	shell_print(shell, "    hall_left_is_active, hall_right_is_active");
-	shell_print(shell, "    input_a_is_active, input_b_is_active");
+	shell_print(shell, "    mp1-is-tilt-alert, mp2-is-tilt-alert");
+	shell_print(shell, "    hall-left-is-active, hall-right-is-active");
+	shell_print(shell, "    input-a-is-active, input-b-is-active");
 }
 
 static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc < 2) {
-		shell_error(shell, "Usage: tester sensors check <sensor_name> [timeout_sec]");
+		shell_error(shell, "Usage: tester sensors check <sensor-name> [timeout-sec]");
 		print_available_sensors(shell);
 		return;
 	}
@@ -342,22 +291,22 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 	} else if (strcmp(sensor_name, "illuminance") == 0) {
 		prev_float = g_app_sensor_data.illuminance;
 		is_float = true;
-	} else if (strcmp(sensor_name, "t1_temperature") == 0) {
+	} else if (strcmp(sensor_name, "t1-temperature") == 0) {
 		prev_float = g_app_sensor_data.t1_temperature;
 		is_float = true;
-	} else if (strcmp(sensor_name, "t2_temperature") == 0) {
+	} else if (strcmp(sensor_name, "t2-temperature") == 0) {
 		prev_float = g_app_sensor_data.t2_temperature;
 		is_float = true;
-	} else if (strcmp(sensor_name, "mp1_temperature") == 0) {
+	} else if (strcmp(sensor_name, "mp1-temperature") == 0) {
 		prev_float = g_app_sensor_data.mp1_temperature;
 		is_float = true;
-	} else if (strcmp(sensor_name, "mp2_temperature") == 0) {
+	} else if (strcmp(sensor_name, "mp2-temperature") == 0) {
 		prev_float = g_app_sensor_data.mp2_temperature;
 		is_float = true;
-	} else if (strcmp(sensor_name, "mp1_humidity") == 0) {
+	} else if (strcmp(sensor_name, "mp1-humidity") == 0) {
 		prev_float = g_app_sensor_data.mp1_humidity;
 		is_float = true;
-	} else if (strcmp(sensor_name, "mp2_humidity") == 0) {
+	} else if (strcmp(sensor_name, "mp2-humidity") == 0) {
 		prev_float = g_app_sensor_data.mp2_humidity;
 		is_float = true;
 	} else if (strcmp(sensor_name, "altitude") == 0) {
@@ -369,37 +318,37 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 	} else if (strcmp(sensor_name, "orientation") == 0) {
 		prev_int = g_app_sensor_data.orientation;
 		is_int = true;
-	} else if (strcmp(sensor_name, "motion_count") == 0) {
+	} else if (strcmp(sensor_name, "motion-count") == 0) {
 		prev_uint32 = g_app_sensor_data.motion_count;
 		is_uint32 = true;
-	} else if (strcmp(sensor_name, "hall_left_count") == 0) {
+	} else if (strcmp(sensor_name, "hall-left-count") == 0) {
 		prev_uint32 = g_app_sensor_data.hall_left_count;
 		is_uint32 = true;
-	} else if (strcmp(sensor_name, "hall_right_count") == 0) {
+	} else if (strcmp(sensor_name, "hall-right-count") == 0) {
 		prev_uint32 = g_app_sensor_data.hall_right_count;
 		is_uint32 = true;
-	} else if (strcmp(sensor_name, "input_a_count") == 0) {
+	} else if (strcmp(sensor_name, "input-a-count") == 0) {
 		prev_uint32 = g_app_sensor_data.input_a_count;
 		is_uint32 = true;
-	} else if (strcmp(sensor_name, "input_b_count") == 0) {
+	} else if (strcmp(sensor_name, "input-b-count") == 0) {
 		prev_uint32 = g_app_sensor_data.input_b_count;
 		is_uint32 = true;
-	} else if (strcmp(sensor_name, "mp1_is_tilt_alert") == 0) {
+	} else if (strcmp(sensor_name, "mp1-is-tilt-alert") == 0) {
 		prev_bool = g_app_sensor_data.mp1_is_tilt_alert;
 		is_bool = true;
-	} else if (strcmp(sensor_name, "mp2_is_tilt_alert") == 0) {
+	} else if (strcmp(sensor_name, "mp2-is-tilt-alert") == 0) {
 		prev_bool = g_app_sensor_data.mp2_is_tilt_alert;
 		is_bool = true;
-	} else if (strcmp(sensor_name, "hall_left_is_active") == 0) {
+	} else if (strcmp(sensor_name, "hall-left-is-active") == 0) {
 		prev_bool = g_app_sensor_data.hall_left_is_active;
 		is_bool = true;
-	} else if (strcmp(sensor_name, "hall_right_is_active") == 0) {
+	} else if (strcmp(sensor_name, "hall-right-is-active") == 0) {
 		prev_bool = g_app_sensor_data.hall_right_is_active;
 		is_bool = true;
-	} else if (strcmp(sensor_name, "input_a_is_active") == 0) {
+	} else if (strcmp(sensor_name, "input-a-is-active") == 0) {
 		prev_bool = g_app_sensor_data.input_a_is_active;
 		is_bool = true;
-	} else if (strcmp(sensor_name, "input_b_is_active") == 0) {
+	} else if (strcmp(sensor_name, "input-b-is-active") == 0) {
 		prev_bool = g_app_sensor_data.input_b_is_active;
 		is_bool = true;
 	} else {
@@ -436,17 +385,17 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 				curr_float = g_app_sensor_data.humidity;
 			} else if (strcmp(sensor_name, "illuminance") == 0) {
 				curr_float = g_app_sensor_data.illuminance;
-			} else if (strcmp(sensor_name, "t1_temperature") == 0) {
+			} else if (strcmp(sensor_name, "t1-temperature") == 0) {
 				curr_float = g_app_sensor_data.t1_temperature;
-			} else if (strcmp(sensor_name, "t2_temperature") == 0) {
+			} else if (strcmp(sensor_name, "t2-temperature") == 0) {
 				curr_float = g_app_sensor_data.t2_temperature;
-			} else if (strcmp(sensor_name, "mp1_temperature") == 0) {
+			} else if (strcmp(sensor_name, "mp1-temperature") == 0) {
 				curr_float = g_app_sensor_data.mp1_temperature;
-			} else if (strcmp(sensor_name, "mp2_temperature") == 0) {
+			} else if (strcmp(sensor_name, "mp2-temperature") == 0) {
 				curr_float = g_app_sensor_data.mp2_temperature;
-			} else if (strcmp(sensor_name, "mp1_humidity") == 0) {
+			} else if (strcmp(sensor_name, "mp1-humidity") == 0) {
 				curr_float = g_app_sensor_data.mp1_humidity;
-			} else if (strcmp(sensor_name, "mp2_humidity") == 0) {
+			} else if (strcmp(sensor_name, "mp2-humidity") == 0) {
 				curr_float = g_app_sensor_data.mp2_humidity;
 			} else if (strcmp(sensor_name, "altitude") == 0) {
 				curr_float = g_app_sensor_data.altitude;
@@ -461,15 +410,15 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 				changed = true;
 			}
 		} else if (is_uint32) {
-			if (strcmp(sensor_name, "motion_count") == 0) {
+			if (strcmp(sensor_name, "motion-count") == 0) {
 				curr_uint32 = g_app_sensor_data.motion_count;
-			} else if (strcmp(sensor_name, "hall_left_count") == 0) {
+			} else if (strcmp(sensor_name, "hall-left-count") == 0) {
 				curr_uint32 = g_app_sensor_data.hall_left_count;
-			} else if (strcmp(sensor_name, "hall_right_count") == 0) {
+			} else if (strcmp(sensor_name, "hall-right-count") == 0) {
 				curr_uint32 = g_app_sensor_data.hall_right_count;
-			} else if (strcmp(sensor_name, "input_a_count") == 0) {
+			} else if (strcmp(sensor_name, "input-a-count") == 0) {
 				curr_uint32 = g_app_sensor_data.input_a_count;
-			} else if (strcmp(sensor_name, "input_b_count") == 0) {
+			} else if (strcmp(sensor_name, "input-b-count") == 0) {
 				curr_uint32 = g_app_sensor_data.input_b_count;
 			}
 
@@ -487,17 +436,17 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 				changed = true;
 			}
 		} else if (is_bool) {
-			if (strcmp(sensor_name, "mp1_is_tilt_alert") == 0) {
+			if (strcmp(sensor_name, "mp1-is-tilt-alert") == 0) {
 				curr_bool = g_app_sensor_data.mp1_is_tilt_alert;
-			} else if (strcmp(sensor_name, "mp2_is_tilt_alert") == 0) {
+			} else if (strcmp(sensor_name, "mp2-is-tilt-alert") == 0) {
 				curr_bool = g_app_sensor_data.mp2_is_tilt_alert;
-			} else if (strcmp(sensor_name, "hall_left_is_active") == 0) {
+			} else if (strcmp(sensor_name, "hall-left-is-active") == 0) {
 				curr_bool = g_app_sensor_data.hall_left_is_active;
-			} else if (strcmp(sensor_name, "hall_right_is_active") == 0) {
+			} else if (strcmp(sensor_name, "hall-right-is-active") == 0) {
 				curr_bool = g_app_sensor_data.hall_right_is_active;
-			} else if (strcmp(sensor_name, "input_a_is_active") == 0) {
+			} else if (strcmp(sensor_name, "input-a-is-active") == 0) {
 				curr_bool = g_app_sensor_data.input_a_is_active;
-			} else if (strcmp(sensor_name, "input_b_is_active") == 0) {
+			} else if (strcmp(sensor_name, "input-b-is-active") == 0) {
 				curr_bool = g_app_sensor_data.input_b_is_active;
 			}
 
@@ -528,36 +477,36 @@ static void cmd_print_sample(const struct shell *shell)
 	shell_print(shell, "humidity:                 %.2f %%", (double)g_app_sensor_data.humidity);
 	shell_print(shell, "illuminance:              %.2f lux",
 		    (double)g_app_sensor_data.illuminance);
-	shell_print(shell, "t1_temperature:           %.2f C",
+	shell_print(shell, "t1-temperature:           %.2f C",
 		    (double)g_app_sensor_data.t1_temperature);
-	shell_print(shell, "t2_temperature:           %.2f C",
+	shell_print(shell, "t2-temperature:           %.2f C",
 		    (double)g_app_sensor_data.t2_temperature);
-	shell_print(shell, "motion_count:             %u", g_app_sensor_data.motion_count);
+	shell_print(shell, "motion-count:             %u", g_app_sensor_data.motion_count);
 	shell_print(shell, "altitude:                 %.2f m", (double)g_app_sensor_data.altitude);
 	shell_print(shell, "pressure:                 %.2f Pa", (double)g_app_sensor_data.pressure);
-	shell_print(shell, "machine_probe_temp_1:     %.2f C",
+	shell_print(shell, "mp1-temperature:          %.2f C",
 		    (double)g_app_sensor_data.mp1_temperature);
-	shell_print(shell, "machine_probe_temp_2:     %.2f C",
+	shell_print(shell, "mp2-temperature:          %.2f C",
 		    (double)g_app_sensor_data.mp2_temperature);
-	shell_print(shell, "machine_probe_humidity_1: %.2f %%",
+	shell_print(shell, "mp1-humidity:             %.2f %%",
 		    (double)g_app_sensor_data.mp1_humidity);
-	shell_print(shell, "machine_probe_humidity_2: %.2f %%",
+	shell_print(shell, "mp2-humidity:             %.2f %%",
 		    (double)g_app_sensor_data.mp2_humidity);
-	shell_print(shell, "machine_probe_tilt_1:     %s",
+	shell_print(shell, "mp1-is-tilt-alert:        %s",
 		    g_app_sensor_data.mp1_is_tilt_alert ? "true" : "false");
-	shell_print(shell, "machine_probe_tilt_2:     %s",
+	shell_print(shell, "mp2-is-tilt-alert:        %s",
 		    g_app_sensor_data.mp2_is_tilt_alert ? "true" : "false");
-	shell_print(shell, "hall_left_count:          %u", g_app_sensor_data.hall_left_count);
-	shell_print(shell, "hall_right_count:         %u", g_app_sensor_data.hall_right_count);
-	shell_print(shell, "hall_left_active:         %s",
+	shell_print(shell, "hall-left-count:          %u", g_app_sensor_data.hall_left_count);
+	shell_print(shell, "hall-right-count:         %u", g_app_sensor_data.hall_right_count);
+	shell_print(shell, "hall-left-is-active:      %s",
 		    g_app_sensor_data.hall_left_is_active ? "true" : "false");
-	shell_print(shell, "hall_right_active:        %s",
+	shell_print(shell, "hall-right-is-active:     %s",
 		    g_app_sensor_data.hall_right_is_active ? "true" : "false");
-	shell_print(shell, "input_a_count:            %u", g_app_sensor_data.input_a_count);
-	shell_print(shell, "input_b_count:            %u", g_app_sensor_data.input_b_count);
-	shell_print(shell, "input_a_active:           %s",
+	shell_print(shell, "input-a-count:            %u", g_app_sensor_data.input_a_count);
+	shell_print(shell, "input-b-count:            %u", g_app_sensor_data.input_b_count);
+	shell_print(shell, "input-a-is-active:        %s",
 		    g_app_sensor_data.input_a_is_active ? "true" : "false");
-	shell_print(shell, "input_b_active:           %s",
+	shell_print(shell, "input-b-is-active:        %s",
 		    g_app_sensor_data.input_b_is_active ? "true" : "false");
 }
 
@@ -570,16 +519,18 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_sensors,
 		      cmd_check_sensor, 2, 1),
 	SHELL_SUBCMD_SET_END);
 
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_led,
+	SHELL_CMD_ARG(cycle, NULL,
+		      "Cycle LED (R/Y/G/off). Usage: cycle [count] (default=1, 0=stop, 1-99=cycles)",
+		      cmd_cycle_led, 1, 1),
+	SHELL_CMD_ARG(switch, NULL, "Switch LED channel (format red|yellow|green on|off).",
+		      cmd_switch_led, 3, 0),
+	SHELL_SUBCMD_SET_END);
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_test,
-	SHELL_CMD_ARG(led_cycle, NULL,
-		      "Cycle LED (R/Y/G/off). Usage: led_cycle [count] (default=1, 0=stop, 1-99=cycles)",
-		      cmd_cycle_led, 1, 1),
-	SHELL_CMD_ARG(led_switch, NULL, "Switch LED channel (format red|yellow|green on|off).",
-		      cmd_switch_led, 3, 0),
+	SHELL_CMD(led, &sub_led, "LED commands.", NULL),
 	SHELL_CMD(sensors, &sub_sensors, "Sensor commands.", NULL),
-	SHELL_CMD_ARG(hw_deveui, NULL, "Print hardware DevEUI from chip UID.",
-		      cmd_print_hw_deveui, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(tester, &sub_test, "Tester commands.", NULL);

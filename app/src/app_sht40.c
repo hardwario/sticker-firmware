@@ -73,13 +73,6 @@ int app_sht40_read_serial(uint32_t *serial_number)
 {
 	int ret;
 
-	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(sht40));
-	if (!device_is_ready(dev)) {
-		LOG_ERR("Device not ready");
-		return -ENODEV;
-	}
-
-	/* Get I2C bus and address from devicetree */
 	const struct device *i2c_dev = DEVICE_DT_GET(DT_BUS(DT_NODELABEL(sht40)));
 	if (!device_is_ready(i2c_dev)) {
 		LOG_ERR("I2C device not ready");
@@ -115,7 +108,7 @@ int app_sht40_read_serial(uint32_t *serial_number)
 				 ((uint32_t)data[3] << 8) | (uint32_t)data[4];
 	}
 
-	LOG_DBG("SHT40 Serial: 0x%08X", *serial_number);
+	LOG_DBG("SHT40 Serial: %u", *serial_number);
 
 	return 0;
 }
