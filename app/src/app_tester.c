@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_led.h"
+#include "app_lrw.h"
 #include "app_machine_probe.h"
 #include "app_sensor.h"
 #include "app_sht40.h"
@@ -14,6 +16,7 @@
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/lorawan/lorawan.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/sys/util.h>
 
@@ -510,6 +513,85 @@ static void cmd_print_sample(const struct shell *shell)
 		    g_app_sensor_data.input_b_is_active ? "true" : "false");
 }
 
+static void print_hex_key(const struct shell *shell, const char *name, const uint8_t *data,
+			  size_t len)
+{
+	shell_fprintf(shell, SHELL_NORMAL, "%s: ", name);
+	for (size_t i = 0; i < len; i++) {
+		shell_fprintf(shell, SHELL_NORMAL, "%02X", data[i]);
+	}
+	shell_fprintf(shell, SHELL_NORMAL, "\n");
+}
+
+static const char *lrw_state_to_str(enum app_lrw_state state)
+{
+	switch (state) {
+	case APP_LRW_STATE_IDLE:
+		return "IDLE";
+	case APP_LRW_STATE_JOINING:
+		return "JOINING";
+	case APP_LRW_STATE_HEALTHY:
+		return "HEALTHY";
+	case APP_LRW_STATE_LINK_CHECK_PENDING:
+		return "LINK_CHECK_PENDING";
+	case APP_LRW_STATE_LINK_CHECK_RETRY:
+		return "LINK_CHECK_RETRY";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+static void cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
+{
+	struct app_lrw_info info;
+	app_lrw_get_info(&info);
+
+	shell_print(shell, "State: %s", lrw_state_to_str(info.state));
+	shell_print(shell, "Joined: %s", info.joined ? "yes" : "no");
+
+	if (info.joined) {
+		shell_print(shell, "Session: %u s", info.session_uptime_s);
+	}
+
+	shell_print(shell, "DR: %d (min: %d)", info.datarate, info.min_datarate);
+	shell_print(shell, "Max payload: %d (next: %d)", info.max_payload, info.max_next_payload);
+
+	if (info.joined) {
+		shell_print(shell, "DevAddr: %08X", info.dev_addr);
+		print_hex_key(shell, "NwkSKey", info.nwk_s_key, 16);
+		print_hex_key(shell, "AppSKey", info.app_s_key, 16);
+		shell_print(shell, "RSSI: %d dB", info.last_rssi);
+		shell_print(shell, "SNR: %d dB", info.last_snr);
+		shell_print(shell, "Link check: margin=%d dB, gateways=%d", info.link_check_margin,
+			    info.link_check_gateways);
+	}
+
+	shell_print(shell, "ADR: %s", g_app_config.lrw_adr ? "enabled" : "disabled");
+	shell_print(shell, "Activation: %s",
+		    g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA ? "OTAA" : "ABP");
+	print_hex_key(shell, "DevEUI", g_app_config.lrw_deveui, 8);
+
+	if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA) {
+		print_hex_key(shell, "JoinEUI", g_app_config.lrw_joineui, 8);
+		print_hex_key(shell, "NwkKey", g_app_config.lrw_nwkkey, 16);
+		print_hex_key(shell, "AppKey", g_app_config.lrw_appkey, 16);
+	} else {
+		print_hex_key(shell, "DevAddr (cfg)", g_app_config.lrw_devaddr, 4);
+		print_hex_key(shell, "NwkSKey (cfg)", g_app_config.lrw_nwkskey, 16);
+		print_hex_key(shell, "AppSKey (cfg)", g_app_config.lrw_appskey, 16);
+	}
+}
+
+static void cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret = lorawan_request_link_check(false);
+	if (ret) {
+		shell_error(shell, "Link check request failed: %d", ret);
+	} else {
+		shell_print(shell, "Link check requested (result in log)");
+	}
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_sensors,
 	SHELL_CMD_ARG(sample, NULL, "Print all sensor values.", cmd_print_sample, 1, 0),
 	SHELL_CMD_ARG(reset, NULL, "Reset sensor counters.", cmd_reset_sample, 1, 0),
@@ -527,9 +609,15 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_led,
 		      cmd_switch_led, 3, 0),
 	SHELL_SUBCMD_SET_END);
 
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_lrw,
+	SHELL_CMD_ARG(status, NULL, "Print LRW status and keys.", cmd_lrw_status, 1, 0),
+	SHELL_CMD_ARG(check, NULL, "Request link check.", cmd_lrw_check, 1, 0),
+	SHELL_SUBCMD_SET_END);
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_test,
 	SHELL_CMD(led, &sub_led, "LED commands.", NULL),
+	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
 	SHELL_CMD(sensors, &sub_sensors, "Sensor commands.", NULL),
 	SHELL_SUBCMD_SET_END);
 

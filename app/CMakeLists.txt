@@ -9,6 +9,15 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sticker)
 
+# Include LoRaMac internal headers for MIB access (session keys)
+zephyr_include_directories_ifdef(CONFIG_LORAWAN
+  ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac
+  ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/region
+  ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/system
+  ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/boards
+  ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/radio
+)
+
 list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
 include(nanopb)
 

@@ -19,6 +19,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/lorawan/lorawan.h>
 #include <zephyr/random/random.h>
+#include <LoRaMac.h>
 #include <zephyr/sys/byteorder.h>
 
 /* Standard includes */
@@ -26,6 +27,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
 
@@ -44,6 +46,12 @@ static struct k_work m_join_work;
 /* Link check state management */
 static enum app_lrw_state m_state = APP_LRW_STATE_IDLE;
 static int m_link_check_retry_count;
+static enum lorawan_datarate m_current_dr = LORAWAN_DR_0;
+static uint32_t m_session_start_s = 0;
+static int16_t m_last_rssi = 0;
+static int8_t m_last_snr = 0;
+static uint8_t m_last_link_check_margin = 0;
+static uint8_t m_last_link_check_gateways = 0;
 static struct k_timer m_link_check_timer;
 static struct k_work m_link_check_work;
 static struct k_work m_rejoin_work;
@@ -57,6 +65,9 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 			      const uint8_t *data)
 {
 	LOG_INF("Port %d, Flags 0x%02x, RSSI %d dB, SNR %d dBm", port, flags, rssi, snr);
+
+	m_last_rssi = rssi;
+	m_last_snr = snr;
 
 	if (data) {
 		LOG_HEXDUMP_INF(data, len, "Payload: ");
@@ -73,6 +84,8 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 {
 	uint8_t max_next_payload_size;
 	uint8_t max_payload_size;
+
+	m_current_dr = dr;
 	lorawan_get_payload_sizes(&max_next_payload_size, &max_payload_size);
 
 	LOG_INF("New data rate: DR%d", dr);
@@ -131,6 +144,10 @@ static void restart_normal_operation(void)
 static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
 {
 	LOG_INF("Link check response: margin=%d dB, gateways=%d", demod_margin, nb_gateways);
+
+	/* Store last link check result */
+	m_last_link_check_margin = demod_margin;
+	m_last_link_check_gateways = nb_gateways;
 
 	/* Stop timeout timer */
 	k_timer_stop(&m_link_check_timer);
@@ -241,6 +258,7 @@ static void rejoin_work_handler(struct k_work *work)
 	lorawan_enable_adr(g_app_config.lrw_adr);
 
 	LOG_INF("Rejoin successful");
+	m_session_start_s = (uint32_t)(k_uptime_get() / 1000);
 
 	/* LED indication: Green blink for success */
 	led_req.color = APP_LED_CHANNEL_G;
@@ -292,6 +310,7 @@ static void join_work_handler(struct k_work *work)
 	LOG_INF("LoRaWAN join successful");
 
 	m_state = APP_LRW_STATE_HEALTHY;
+	m_session_start_s = (uint32_t)(k_uptime_get() / 1000);
 
 	/* Start link check timer after successful join */
 	schedule_next_link_check();
@@ -431,4 +450,51 @@ bool app_lrw_is_ready(void)
 {
 	return m_state == APP_LRW_STATE_HEALTHY ||
 	       m_state == APP_LRW_STATE_LINK_CHECK_PENDING;
+}
+
+int app_lrw_get_info(struct app_lrw_info *info)
+{
+	MibRequestConfirm_t mib_req;
+
+	memset(info, 0, sizeof(*info));
+
+	info->state = m_state;
+	info->joined = (m_state != APP_LRW_STATE_IDLE && m_state != APP_LRW_STATE_JOINING);
+	info->datarate = (int)m_current_dr;
+	info->min_datarate = (int)lorawan_get_min_datarate();
+	lorawan_get_payload_sizes(&info->max_next_payload, &info->max_payload);
+	uint32_t now_s = (uint32_t)(k_uptime_get() / 1000);
+	if (m_session_start_s > 0 && now_s >= m_session_start_s) {
+		info->session_uptime_s = now_s - m_session_start_s;
+	} else {
+		info->session_uptime_s = 0;
+	}
+
+	/* Get DevAddr */
+	mib_req.Type = MIB_DEV_ADDR;
+	if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK) {
+		info->dev_addr = mib_req.Param.DevAddr;
+	}
+
+	/* Get NwkSKey (FNwkSIntKey) */
+	mib_req.Type = MIB_F_NWK_S_INT_KEY;
+	if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK) {
+		memcpy(info->nwk_s_key, mib_req.Param.FNwkSIntKey, 16);
+	}
+
+	/* Get AppSKey */
+	mib_req.Type = MIB_APP_S_KEY;
+	if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK) {
+		memcpy(info->app_s_key, mib_req.Param.AppSKey, 16);
+	}
+
+	/* Last received signal quality */
+	info->last_rssi = m_last_rssi;
+	info->last_snr = m_last_snr;
+
+	/* Last link check result */
+	info->link_check_margin = m_last_link_check_margin;
+	info->link_check_gateways = m_last_link_check_gateways;
+
+	return 0;
 }
