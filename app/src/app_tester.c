@@ -584,11 +584,11 @@ static void cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 
 static void cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret = lorawan_request_link_check(false);
+	int ret = lorawan_request_link_check(true);
 	if (ret) {
 		shell_error(shell, "Link check request failed: %d", ret);
 	} else {
-		shell_print(shell, "Link check requested (result in log)");
+		shell_print(shell, "Link check requested");
 	}
 }
 
