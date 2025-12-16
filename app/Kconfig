@@ -16,6 +16,36 @@ config APP_VERBOSE_LOGGING
 
 endmenu
 
+menu "LoRaWAN Link Check"
+
+config APP_LRW_LINK_CHECK_INTERVAL
+	int "Link check interval (seconds)"
+	default 3600
+	help
+	  Interval between periodic link check requests.
+
+config APP_LRW_LINK_CHECK_RETRY_INTERVAL
+	int "Link check retry interval (seconds)"
+	default 180
+	help
+	  Interval between link check retries after failure.
+
+config APP_LRW_LINK_CHECK_MAX_RETRIES
+	int "Maximum link check retries before rejoin"
+	default 5
+	range 1 10
+	help
+	  Number of failed link checks before triggering rejoin.
+
+config APP_LRW_LINK_CHECK_TIMEOUT
+	int "Link check response timeout (seconds)"
+	default 30
+	range 10 120
+	help
+	  Timeout waiting for link check response.
+
+endmenu
+
 menu "Zephyr Kernel"
 source "Kconfig.zephyr"
 endmenu

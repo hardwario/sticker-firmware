@@ -191,7 +191,13 @@ int main(void)
 			}
 		}
 
-		if (app_alarm_is_active()) {
+		if (app_lrw_get_state() == APP_LRW_STATE_JOINING) {
+			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
+							.duration = 100,
+							.space = 200,
+							.repetitions = 3};
+			app_led_blink(&req);
+		} else if (app_alarm_is_active()) {
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_R,
 							.duration = 5,
 							.space = 0,

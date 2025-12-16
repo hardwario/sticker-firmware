@@ -7,7 +7,6 @@
 #include "app_alarm.h"
 #include "app_compose.h"
 #include "app_config.h"
-#include "app_led.h"
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_sensor.h"
@@ -31,11 +30,11 @@
 
 LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
 
-/* Link check configuration constants */
-#define LINK_CHECK_INTERVAL_SEC       3600 /* 1 hour */
-#define LINK_CHECK_RETRY_INTERVAL_SEC 180  /* 3 minutes */
-#define LINK_CHECK_MAX_RETRIES        5
-#define LINK_CHECK_TIMEOUT_SEC        30   /* Timeout for response */
+/* Link check configuration from Kconfig */
+#define LINK_CHECK_INTERVAL_SEC       CONFIG_APP_LRW_LINK_CHECK_INTERVAL
+#define LINK_CHECK_RETRY_INTERVAL_SEC CONFIG_APP_LRW_LINK_CHECK_RETRY_INTERVAL
+#define LINK_CHECK_MAX_RETRIES        CONFIG_APP_LRW_LINK_CHECK_MAX_RETRIES
+#define LINK_CHECK_TIMEOUT_SEC        CONFIG_APP_LRW_LINK_CHECK_TIMEOUT
 
 static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
 static struct k_work_q m_work_q;
@@ -52,9 +51,8 @@ static int16_t m_last_rssi = 0;
 static int8_t m_last_snr = 0;
 static uint8_t m_last_link_check_margin = 0;
 static uint8_t m_last_link_check_gateways = 0;
-static struct k_timer m_link_check_timer;
-static struct k_work m_link_check_work;
-static struct k_work m_rejoin_work;
+static struct k_work_delayable m_link_check_dwork;
+static struct k_work_delayable m_rejoin_dwork;
 
 /* Forward declarations */
 static void schedule_next_link_check(void);
@@ -101,7 +99,7 @@ static void schedule_next_link_check(void)
 	timeout += (int32_t)sys_rand32_get() % (LINK_CHECK_INTERVAL_SEC / 10);
 #endif
 
-	k_timer_start(&m_link_check_timer, K_SECONDS(timeout), K_FOREVER);
+	k_work_schedule_for_queue(&m_work_q, &m_link_check_dwork, K_SECONDS(timeout));
 	LOG_DBG("Next link check in %d seconds", timeout);
 }
 
@@ -116,11 +114,11 @@ static void handle_link_check_failure(void)
 		LOG_ERR("All link check retries failed, initiating rejoin");
 		m_state = APP_LRW_STATE_JOINING;
 		m_link_check_retry_count = 0;
-		k_work_submit_to_queue(&m_work_q, &m_rejoin_work);
+		k_work_submit_to_queue(&m_work_q, &m_rejoin_dwork.work);
 		return;
 	}
 
-	/* Schedule retry with 3 minutes + randomness */
+	/* Schedule retry with randomness */
 	m_state = APP_LRW_STATE_LINK_CHECK_RETRY;
 
 	int timeout = LINK_CHECK_RETRY_INTERVAL_SEC;
@@ -128,7 +126,7 @@ static void handle_link_check_failure(void)
 	timeout += (int32_t)sys_rand32_get() % (LINK_CHECK_RETRY_INTERVAL_SEC / 10);
 #endif
 
-	k_timer_start(&m_link_check_timer, K_SECONDS(timeout), K_FOREVER);
+	k_work_schedule_for_queue(&m_work_q, &m_link_check_dwork, K_SECONDS(timeout));
 	LOG_INF("Retrying link check in %d seconds", timeout);
 }
 
@@ -149,8 +147,8 @@ static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
 	m_last_link_check_margin = demod_margin;
 	m_last_link_check_gateways = nb_gateways;
 
-	/* Stop timeout timer */
-	k_timer_stop(&m_link_check_timer);
+	/* Cancel pending timeout - this properly cancels both timer and queued work */
+	k_work_cancel_delayable(&m_link_check_dwork);
 
 	if (nb_gateways == 0) {
 		/* No gateway received our message - treat as failure */
@@ -162,19 +160,8 @@ static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
 	m_link_check_retry_count = 0;
 	m_state = APP_LRW_STATE_HEALTHY;
 
-	/* Schedule next link check (1 hour + randomness) */
+	/* Schedule next link check */
 	schedule_next_link_check();
-}
-
-static void link_check_timeout_handler(struct k_timer *timer)
-{
-	/*
-	 * Timer fired - this could be either:
-	 * 1. Link check timeout (no response received)
-	 * 2. Retry interval elapsed
-	 * In both cases, submit work to attempt link check
-	 */
-	k_work_submit_to_queue(&m_work_q, &m_link_check_work);
 }
 
 static void link_check_work_handler(struct k_work *work)
@@ -198,7 +185,7 @@ static void link_check_work_handler(struct k_work *work)
 
 	m_state = APP_LRW_STATE_LINK_CHECK_PENDING;
 
-	ret = lorawan_request_link_check(false);
+	ret = lorawan_request_link_check(true);
 	if (ret) {
 		LOG_ERR("Link check request failed: %d", ret);
 		handle_link_check_failure();
@@ -207,8 +194,9 @@ static void link_check_work_handler(struct k_work *work)
 
 	LOG_DBG("Link check requested");
 
-	/* Start timeout timer for response */
-	k_timer_start(&m_link_check_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC), K_FOREVER);
+	/* Schedule timeout for response */
+	k_work_schedule_for_queue(&m_work_q, &m_link_check_dwork,
+				  K_SECONDS(LINK_CHECK_TIMEOUT_SEC));
 }
 
 static void rejoin_work_handler(struct k_work *work)
@@ -219,11 +207,6 @@ static void rejoin_work_handler(struct k_work *work)
 
 	/* Stop send timer during rejoin */
 	k_timer_stop(&m_send_timer);
-
-	/* LED indication: Yellow blink for rejoin start */
-	struct app_led_blink_req led_req = {
-		.color = APP_LED_CHANNEL_Y, .duration = 100, .space = 100, .repetitions = 3};
-	app_led_blink(&led_req);
 
 	/* ABP doesn't need rejoin */
 	if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP) {
@@ -244,14 +227,8 @@ static void rejoin_work_handler(struct k_work *work)
 	ret = lorawan_join(&config);
 	if (ret) {
 		LOG_ERR("Rejoin failed: %d, will retry in 60 seconds", ret);
-
-		/* LED indication: Red blink for failure */
-		led_req.color = APP_LED_CHANNEL_R;
-		led_req.repetitions = 2;
-		app_led_blink(&led_req);
-
-		/* Schedule retry after 60 seconds */
-		k_timer_start(&m_link_check_timer, K_SECONDS(60), K_FOREVER);
+		/* Schedule rejoin retry after 60 seconds */
+		k_work_schedule_for_queue(&m_work_q, &m_rejoin_dwork, K_SECONDS(60));
 		return;
 	}
 
@@ -259,12 +236,6 @@ static void rejoin_work_handler(struct k_work *work)
 
 	LOG_INF("Rejoin successful");
 	m_session_start_s = (uint32_t)(k_uptime_get() / 1000);
-
-	/* LED indication: Green blink for success */
-	led_req.color = APP_LED_CHANNEL_G;
-	led_req.repetitions = 2;
-	app_led_blink(&led_req);
-
 	m_state = APP_LRW_STATE_HEALTHY;
 
 	restart_normal_operation();
@@ -301,7 +272,7 @@ static void join_work_handler(struct k_work *work)
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lorawan_join", ret);
 		/* Keep state as JOINING, schedule retry */
-		k_timer_start(&m_link_check_timer, K_SECONDS(60), K_FOREVER);
+		k_work_schedule_for_queue(&m_work_q, &m_rejoin_dwork, K_SECONDS(60));
 		return;
 	}
 
@@ -419,11 +390,10 @@ int app_lrw_init(void)
 
 	k_work_init(&m_join_work, join_work_handler);
 	k_work_init(&m_send_work, send_work_handler);
-	k_work_init(&m_link_check_work, link_check_work_handler);
-	k_work_init(&m_rejoin_work, rejoin_work_handler);
+	k_work_init_delayable(&m_link_check_dwork, link_check_work_handler);
+	k_work_init_delayable(&m_rejoin_dwork, rejoin_work_handler);
 
 	k_timer_init(&m_send_timer, send_timer_handler, NULL);
-	k_timer_init(&m_link_check_timer, link_check_timeout_handler, NULL);
 	k_timer_start(&m_send_timer, K_SECONDS(5), K_FOREVER);
 
 	m_state = APP_LRW_STATE_IDLE;
