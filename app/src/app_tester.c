@@ -584,11 +584,18 @@ static void cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 
 static void cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret = lorawan_request_link_check(true);
+	int ret = lorawan_request_link_check(false);
 	if (ret) {
 		shell_error(shell, "Link check request failed: %d", ret);
+		return;
+	}
+
+	/* Send empty frame to trigger link check (confirmed to force downlink) */
+	ret = lorawan_send(0, NULL, 0, LORAWAN_MSG_CONFIRMED);
+	if (ret) {
+		shell_error(shell, "Failed to send link check frame: %d", ret);
 	} else {
-		shell_print(shell, "Link check requested");
+		shell_print(shell, "Link check sent");
 	}
 }
 
