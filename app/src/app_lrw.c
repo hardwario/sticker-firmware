@@ -53,22 +53,58 @@ static uint8_t m_last_link_check_margin = 0;
 static uint8_t m_last_link_check_gateways = 0;
 static struct k_work_delayable m_link_check_dwork;
 static struct k_work_delayable m_rejoin_dwork;
+static bool m_lrw_bypass = false;
+static int m_rejoin_backoff_sec = 0;
+static bool m_joined = false;
 
 /* Forward declarations */
 static void schedule_next_link_check(void);
 static void handle_link_check_failure(void);
 static void restart_normal_operation(void);
 
+/* Exponential backoff for rejoin attempts */
+static int get_rejoin_backoff_interval(void)
+{
+	int interval;
+
+	if (m_rejoin_backoff_sec == 0) {
+		m_rejoin_backoff_sec = LINK_CHECK_RETRY_INTERVAL_SEC;
+	} else {
+		m_rejoin_backoff_sec *= 2;
+		if (m_rejoin_backoff_sec > LINK_CHECK_INTERVAL_SEC) {
+			m_rejoin_backoff_sec = LINK_CHECK_INTERVAL_SEC;
+		}
+	}
+
+	interval = m_rejoin_backoff_sec;
+
+#if defined(CONFIG_ENTROPY_GENERATOR)
+	/* Add up to 10% randomness */
+	interval += (int32_t)sys_rand32_get() % (m_rejoin_backoff_sec / 10 + 1);
+#endif
+
+	LOG_INF("Next rejoin attempt in %d seconds",
+		interval);
+	return interval;
+}
+
+static void reset_rejoin_backoff(void)
+{
+	m_rejoin_backoff_sec = 0;
+}
+
 static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t snr, uint8_t len,
 			      const uint8_t *data)
 {
-	LOG_INF("Port %d, Flags 0x%02x, RSSI %d dB, SNR %d dBm", port, flags, rssi, snr);
-
 	m_last_rssi = rssi;
 	m_last_snr = snr;
 
-	if (data) {
-		LOG_HEXDUMP_INF(data, len, "Payload: ");
+	/* Port 0 is link check - logged separately in link_check_callback */
+	if (port != 0) {
+		LOG_INF("Downlink: port=%d, RSSI=%d dB, SNR=%d dB", port, rssi, snr);
+		if (data) {
+			LOG_HEXDUMP_INF(data, len, "Payload: ");
+		}
 	}
 }
 
@@ -112,9 +148,12 @@ static void handle_link_check_failure(void)
 
 	if (m_link_check_retry_count >= LINK_CHECK_MAX_RETRIES) {
 		LOG_ERR("All link check retries failed, initiating rejoin");
+		m_joined = false;
 		m_state = APP_LRW_STATE_JOINING;
 		m_link_check_retry_count = 0;
-		k_work_submit_to_queue(&m_work_q, &m_rejoin_dwork.work);
+		/* Use schedule with K_NO_WAIT instead of direct submit to avoid
+		 * mixing submit/schedule on same delayable work */
+		k_work_schedule_for_queue(&m_work_q, &m_rejoin_dwork, K_NO_WAIT);
 		return;
 	}
 
@@ -141,14 +180,24 @@ static void restart_normal_operation(void)
 
 static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
 {
-	LOG_INF("Link check response: margin=%d dB, gateways=%d", demod_margin, nb_gateways);
+	LOG_INF("Link check: RSSI=%d dB, SNR=%d dB, gateways=%d",
+		m_last_rssi, m_last_snr, nb_gateways);
 
 	/* Store last link check result */
 	m_last_link_check_margin = demod_margin;
 	m_last_link_check_gateways = nb_gateways;
 
-	/* Cancel pending timeout - this properly cancels both timer and queued work */
-	k_work_cancel_delayable(&m_link_check_dwork);
+	/*
+	 * Don't cancel pending work - that causes race conditions.
+	 * Instead, just reschedule with longer interval (replaces pending timeout).
+	 */
+
+	/* If bypass is active, simulate failure */
+	if (m_lrw_bypass) {
+		LOG_WRN("Bypass active - simulating link check failure");
+		handle_link_check_failure();
+		return;
+	}
 
 	if (nb_gateways == 0) {
 		/* No gateway received our message - treat as failure */
@@ -156,11 +205,13 @@ static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
 		return;
 	}
 
-	/* Success - reset retry counter and return to healthy state */
+	/* Success - reset counters and return to healthy state */
 	m_link_check_retry_count = 0;
+	reset_rejoin_backoff();
+	m_joined = true;
 	m_state = APP_LRW_STATE_HEALTHY;
 
-	/* Schedule next link check */
+	/* Schedule next link check - this replaces any pending timeout */
 	schedule_next_link_check();
 }
 
@@ -183,6 +234,11 @@ static void link_check_work_handler(struct k_work *work)
 		return;
 	}
 
+	/*
+	 * If state is HEALTHY, this is a normal periodic link check.
+	 * If state is LINK_CHECK_RETRY, this is a retry after failure.
+	 * Both cases: request link check.
+	 */
 	m_state = APP_LRW_STATE_LINK_CHECK_PENDING;
 
 	ret = lorawan_request_link_check(true);
@@ -192,9 +248,7 @@ static void link_check_work_handler(struct k_work *work)
 		return;
 	}
 
-	LOG_DBG("Link check requested");
-
-	/* Schedule timeout for response */
+	/* Schedule timeout for response - if callback comes first, it will reschedule */
 	k_work_schedule_for_queue(&m_work_q, &m_link_check_dwork,
 				  K_SECONDS(LINK_CHECK_TIMEOUT_SEC));
 }
@@ -208,11 +262,23 @@ static void rejoin_work_handler(struct k_work *work)
 	/* Stop send timer during rejoin */
 	k_timer_stop(&m_send_timer);
 
-	/* ABP doesn't need rejoin */
+	/* If bypass is active, simulate join failure */
+	if (m_lrw_bypass) {
+		int backoff = get_rejoin_backoff_interval();
+		LOG_WRN("Bypass active - simulating rejoin failure");
+		k_work_schedule_for_queue(&m_work_q, &m_rejoin_dwork, K_SECONDS(backoff));
+		return;
+	}
+
+	/* ABP doesn't need rejoin - trigger immediate link check to verify connectivity */
 	if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP) {
-		LOG_INF("ABP mode - rejoin not applicable");
-		m_state = APP_LRW_STATE_HEALTHY;
-		restart_normal_operation();
+		LOG_WRN("ABP mode - triggering immediate link check");
+		/* Use LINK_CHECK_RETRY state so handler will proceed (not JOINING which blocks) */
+		m_state = APP_LRW_STATE_LINK_CHECK_RETRY;
+		/* Restart send timer */
+		k_timer_start(&m_send_timer, K_SECONDS(5), K_FOREVER);
+		/* Trigger immediate link check to detect network state */
+		k_work_schedule_for_queue(&m_work_q, &m_link_check_dwork, K_NO_WAIT);
 		return;
 	}
 
@@ -226,16 +292,18 @@ static void rejoin_work_handler(struct k_work *work)
 
 	ret = lorawan_join(&config);
 	if (ret) {
-		LOG_ERR("Rejoin failed: %d, will retry in 60 seconds", ret);
-		/* Schedule rejoin retry after 60 seconds */
-		k_work_schedule_for_queue(&m_work_q, &m_rejoin_dwork, K_SECONDS(60));
+		int backoff = get_rejoin_backoff_interval();
+		LOG_ERR("Rejoin failed: %d, will retry in %d seconds", ret, backoff);
+		k_work_schedule_for_queue(&m_work_q, &m_rejoin_dwork, K_SECONDS(backoff));
 		return;
 	}
 
 	lorawan_enable_adr(g_app_config.lrw_adr);
 
 	LOG_INF("Rejoin successful");
+	reset_rejoin_backoff();
 	m_session_start_s = (uint32_t)(k_uptime_get() / 1000);
+	m_joined = true;
 	m_state = APP_LRW_STATE_HEALTHY;
 
 	restart_normal_operation();
@@ -245,7 +313,16 @@ static void join_work_handler(struct k_work *work)
 {
 	int ret;
 
+	m_joined = false;
 	m_state = APP_LRW_STATE_JOINING;
+
+	/* If bypass is active, simulate join failure */
+	if (m_lrw_bypass) {
+		int backoff = get_rejoin_backoff_interval();
+		LOG_WRN("Bypass active - simulating join failure");
+		k_work_schedule_for_queue(&m_work_q, &m_rejoin_dwork, K_SECONDS(backoff));
+		return;
+	}
 
 	static struct lorawan_join_config config = {0};
 
@@ -270,31 +347,37 @@ static void join_work_handler(struct k_work *work)
 
 	ret = lorawan_join(&config);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("lorawan_join", ret);
+		int backoff = get_rejoin_backoff_interval();
+		LOG_ERR("lorawan_join failed: %d, retry in %d seconds", ret, backoff);
 		/* Keep state as JOINING, schedule retry */
-		k_work_schedule_for_queue(&m_work_q, &m_rejoin_dwork, K_SECONDS(60));
+		k_work_schedule_for_queue(&m_work_q, &m_rejoin_dwork, K_SECONDS(backoff));
 		return;
 	}
 
 	lorawan_enable_adr(g_app_config.lrw_adr);
 
 	LOG_INF("LoRaWAN join successful");
+	reset_rejoin_backoff();
 
+	m_joined = true;
 	m_state = APP_LRW_STATE_HEALTHY;
 	m_session_start_s = (uint32_t)(k_uptime_get() / 1000);
 
-	/* Start link check timer after successful join */
-	schedule_next_link_check();
+	/* Start send timer and link check after successful join */
+	restart_normal_operation();
 }
 
 static void send_work_handler(struct k_work *work)
 {
 	int ret;
 
-	/* Block transmissions during joining or link check retry */
-	if (m_state == APP_LRW_STATE_JOINING ||
+	/* Block transmissions when not connected */
+	if (m_state == APP_LRW_STATE_IDLE ||
+	    m_state == APP_LRW_STATE_JOINING ||
 	    m_state == APP_LRW_STATE_LINK_CHECK_RETRY) {
-		LOG_WRN("TX blocked: state=%d", m_state);
+		LOG_WRN("Data send blocked due to network unavailability (state=%d)", m_state);
+		/* Don't reschedule - successful join/rejoin will restart the timer
+		 * via restart_normal_operation() */
 		return;
 	}
 
@@ -429,7 +512,7 @@ int app_lrw_get_info(struct app_lrw_info *info)
 	memset(info, 0, sizeof(*info));
 
 	info->state = m_state;
-	info->joined = (m_state != APP_LRW_STATE_IDLE && m_state != APP_LRW_STATE_JOINING);
+	info->joined = m_joined;
 	info->datarate = (int)m_current_dr;
 	info->min_datarate = (int)lorawan_get_min_datarate();
 	lorawan_get_payload_sizes(&info->max_next_payload, &info->max_payload);
@@ -467,4 +550,15 @@ int app_lrw_get_info(struct app_lrw_info *info)
 	info->link_check_gateways = m_last_link_check_gateways;
 
 	return 0;
+}
+
+void app_lrw_set_bypass(bool enable)
+{
+	m_lrw_bypass = enable;
+	LOG_INF("LoRaWAN bypass %s", enable ? "enabled" : "disabled");
+}
+
+bool app_lrw_get_bypass(void)
+{
+	return m_lrw_bypass;
 }

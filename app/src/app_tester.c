@@ -584,7 +584,14 @@ static void cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 
 static void cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret = lorawan_request_link_check(false);
+	struct app_lrw_info info;
+	int ret;
+
+	/* Save initial gateways value to detect change */
+	app_lrw_get_info(&info);
+	uint8_t initial_gateways = info.link_check_gateways;
+
+	ret = lorawan_request_link_check(true);
 	if (ret) {
 		shell_error(shell, "Link check request failed: %d", ret);
 		return;
@@ -594,8 +601,57 @@ static void cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 	ret = lorawan_send(0, NULL, 0, LORAWAN_MSG_CONFIRMED);
 	if (ret) {
 		shell_error(shell, "Failed to send link check frame: %d", ret);
+		return;
+	}
+
+	shell_print(shell, "Link check sent, waiting for response...");
+
+	/* Wait for response with timeout (30 seconds) */
+	for (int i = 0; i < 60; i++) {
+		k_sleep(K_MSEC(500));
+
+		app_lrw_get_info(&info);
+
+		/* Check if we got a response (gateways value changed or state changed) */
+		if (info.state == APP_LRW_STATE_HEALTHY &&
+		    info.link_check_gateways != initial_gateways) {
+			shell_print(shell, "status: pass");
+			shell_print(shell, "RSSI: %d dB", info.last_rssi);
+			shell_print(shell, "SNR: %d dB", info.last_snr);
+			shell_print(shell, "gateways: %d", info.link_check_gateways);
+			return;
+		}
+
+		/* Check if link check failed (state changed to retry) */
+		if (info.state == APP_LRW_STATE_LINK_CHECK_RETRY ||
+		    info.state == APP_LRW_STATE_JOINING) {
+			shell_print(shell, "status: failed");
+			return;
+		}
+	}
+
+	/* Timeout */
+	shell_print(shell, "status: failed");
+	shell_print(shell, "reason: timeout");
+}
+
+static void cmd_lrw_bypass(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc < 2) {
+		/* No argument - show current state */
+		shell_print(shell, "LoRaWAN bypass: %s",
+			    app_lrw_get_bypass() ? "enabled" : "disabled");
+		return;
+	}
+
+	if (strcmp(argv[1], "true") == 0 || strcmp(argv[1], "1") == 0) {
+		app_lrw_set_bypass(true);
+		shell_print(shell, SHELL_PFX " LoRaWAN bypass enabled");
+	} else if (strcmp(argv[1], "false") == 0 || strcmp(argv[1], "0") == 0) {
+		app_lrw_set_bypass(false);
+		shell_print(shell, SHELL_PFX " LoRaWAN bypass disabled");
 	} else {
-		shell_print(shell, "Link check sent");
+		shell_error(shell, "Invalid argument. Use: true|false or 1|0");
 	}
 }
 
@@ -619,6 +675,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_led,
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_lrw,
 	SHELL_CMD_ARG(status, NULL, "Print LRW status and keys.", cmd_lrw_status, 1, 0),
 	SHELL_CMD_ARG(check, NULL, "Request link check.", cmd_lrw_check, 1, 0),
+	SHELL_CMD_ARG(bypass, NULL, "Simulate network unavailability. Usage: bypass [true|false]",
+		      cmd_lrw_bypass, 1, 1),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(

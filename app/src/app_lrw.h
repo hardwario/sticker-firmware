@@ -47,6 +47,10 @@ enum app_lrw_state app_lrw_get_state(void);
 bool app_lrw_is_ready(void);
 int app_lrw_get_info(struct app_lrw_info *info);
 
+/* Test bypass - simulates network unavailability (runtime only, not persisted) */
+void app_lrw_set_bypass(bool enable);
+bool app_lrw_get_bypass(void);
+
 #ifdef __cplusplus
 }
 #endif

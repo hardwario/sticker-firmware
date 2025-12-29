@@ -191,7 +191,11 @@ int main(void)
 			}
 		}
 
-		if (app_lrw_get_state() == APP_LRW_STATE_JOINING) {
+		struct app_lrw_info lrw_info;
+		app_lrw_get_info(&lrw_info);
+
+		if (!lrw_info.joined) {
+			/* Yellow blink - not connected (IDLE or JOINING) */
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
 							.duration = 100,
 							.space = 200,
