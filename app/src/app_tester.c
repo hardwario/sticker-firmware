@@ -532,10 +532,8 @@ static const char *lrw_state_to_str(enum app_lrw_state state)
 		return "JOINING";
 	case APP_LRW_STATE_HEALTHY:
 		return "HEALTHY";
-	case APP_LRW_STATE_LINK_CHECK_PENDING:
-		return "LINK_CHECK_PENDING";
-	case APP_LRW_STATE_LINK_CHECK_RETRY:
-		return "LINK_CHECK_RETRY";
+	case APP_LRW_STATE_FAILURE:
+		return "FAILURE";
 	default:
 		return "UNKNOWN";
 	}
@@ -546,24 +544,24 @@ static void cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 	struct app_lrw_info info;
 	app_lrw_get_info(&info);
 
-	shell_print(shell, "State: %s", lrw_state_to_str(info.state));
-	shell_print(shell, "Joined: %s", info.joined ? "yes" : "no");
+	bool is_healthy = (info.state == APP_LRW_STATE_HEALTHY);
 
-	if (info.joined) {
+	shell_print(shell, "State: %s", lrw_state_to_str(info.state));
+
+	if (is_healthy || info.session_uptime_s > 0) {
 		shell_print(shell, "Session: %u s", info.session_uptime_s);
 	}
 
 	shell_print(shell, "DR: %d (min: %d)", info.datarate, info.min_datarate);
 	shell_print(shell, "Max payload: %d (next: %d)", info.max_payload, info.max_next_payload);
+	shell_print(shell, "Messages: %u (ACK failures: %u)", info.msg_count, info.ack_failure_count);
 
-	if (info.joined) {
+	if (is_healthy || info.dev_addr != 0) {
 		shell_print(shell, "DevAddr: %08X", info.dev_addr);
 		print_hex_key(shell, "NwkSKey", info.nwk_s_key, 16);
 		print_hex_key(shell, "AppSKey", info.app_s_key, 16);
 		shell_print(shell, "RSSI: %d dB", info.last_rssi);
 		shell_print(shell, "SNR: %d dB", info.last_snr);
-		shell_print(shell, "Link check: margin=%d dB, gateways=%d", info.link_check_margin,
-			    info.link_check_gateways);
 	}
 
 	shell_print(shell, "ADR: %s", g_app_config.lrw_adr ? "enabled" : "disabled");
@@ -585,54 +583,32 @@ static void cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 static void cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 {
 	struct app_lrw_info info;
-	int ret;
-
-	/* Save initial gateways value to detect change */
 	app_lrw_get_info(&info);
-	uint8_t initial_gateways = info.link_check_gateways;
 
-	ret = lorawan_request_link_check(true);
-	if (ret) {
-		shell_error(shell, "Link check request failed: %d", ret);
+	if (!app_lrw_is_ready()) {
+		shell_print(shell, "status: failed");
+		shell_print(shell, "reason: not ready (state=%s)", lrw_state_to_str(info.state));
 		return;
 	}
 
-	/* Send empty frame to trigger link check (confirmed to force downlink) */
-	ret = lorawan_send(0, NULL, 0, LORAWAN_MSG_CONFIRMED);
-	if (ret) {
-		shell_error(shell, "Failed to send link check frame: %d", ret);
-		return;
+	shell_print(shell, "Sending confirmed message...");
+
+	/* Send confirmed message with dummy payload */
+	uint8_t dummy = 0;
+	int ret = lorawan_send(1, &dummy, 1, LORAWAN_MSG_CONFIRMED);
+
+	/* Get updated info for RSSI/SNR */
+	app_lrw_get_info(&info);
+
+	if (ret == 0) {
+		shell_print(shell, "status: pass");
+		shell_print(shell, "ACK received");
+		shell_print(shell, "rssi: %d dBm", info.last_rssi);
+		shell_print(shell, "snr: %d dB", info.last_snr);
+	} else {
+		shell_print(shell, "status: failed");
+		shell_print(shell, "reason: no ACK (error=%d)", ret);
 	}
-
-	shell_print(shell, "Link check sent, waiting for response...");
-
-	/* Wait for response with timeout (30 seconds) */
-	for (int i = 0; i < 60; i++) {
-		k_sleep(K_MSEC(500));
-
-		app_lrw_get_info(&info);
-
-		/* Check if we got a response (gateways value changed or state changed) */
-		if (info.state == APP_LRW_STATE_HEALTHY &&
-		    info.link_check_gateways != initial_gateways) {
-			shell_print(shell, "status: pass");
-			shell_print(shell, "RSSI: %d dB", info.last_rssi);
-			shell_print(shell, "SNR: %d dB", info.last_snr);
-			shell_print(shell, "gateways: %d", info.link_check_gateways);
-			return;
-		}
-
-		/* Check if link check failed (state changed to retry) */
-		if (info.state == APP_LRW_STATE_LINK_CHECK_RETRY ||
-		    info.state == APP_LRW_STATE_JOINING) {
-			shell_print(shell, "status: failed");
-			return;
-		}
-	}
-
-	/* Timeout */
-	shell_print(shell, "status: failed");
-	shell_print(shell, "reason: timeout");
 }
 
 static void cmd_lrw_bypass(const struct shell *shell, size_t argc, char **argv)
@@ -674,7 +650,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_led,
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_lrw,
 	SHELL_CMD_ARG(status, NULL, "Print LRW status and keys.", cmd_lrw_status, 1, 0),
-	SHELL_CMD_ARG(check, NULL, "Request link check.", cmd_lrw_check, 1, 0),
+	SHELL_CMD_ARG(check, NULL, "Send confirmed message to verify network.", cmd_lrw_check, 1, 0),
 	SHELL_CMD_ARG(bypass, NULL, "Simulate network unavailability. Usage: bypass [true|false]",
 		      cmd_lrw_bypass, 1, 1),
 	SHELL_SUBCMD_SET_END);

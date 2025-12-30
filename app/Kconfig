@@ -16,33 +16,23 @@ config APP_VERBOSE_LOGGING
 
 endmenu
 
-menu "LoRaWAN Link Check"
+menu "LoRaWAN"
 
-config APP_LRW_LINK_CHECK_INTERVAL
-	int "Link check interval (seconds)"
-	default 3600
+config APP_LRW_CONFIRMED_INTERVAL
+	int "Send confirmed message every Nth message (0=disabled)"
+	default 10
 	help
-	  Interval between periodic link check requests.
+	  Every Nth message will be sent as confirmed to verify network connectivity.
+	  Set to 0 to disable confirmed messages.
+	  First message after join is always confirmed regardless of this setting.
 
-config APP_LRW_LINK_CHECK_RETRY_INTERVAL
-	int "Link check retry interval (seconds)"
-	default 180
-	help
-	  Interval between link check retries after failure.
-
-config APP_LRW_LINK_CHECK_MAX_RETRIES
-	int "Maximum link check retries before rejoin"
+config APP_LRW_ACK_FAILURES_MAX
+	int "Max consecutive ACK failures before FAILURE state"
 	default 5
-	range 1 10
+	range 1 100
 	help
-	  Number of failed link checks before triggering rejoin.
-
-config APP_LRW_LINK_CHECK_TIMEOUT
-	int "Link check response timeout (seconds)"
-	default 30
-	range 10 120
-	help
-	  Timeout waiting for link check response.
+	  Number of consecutive ACK failures before entering FAILURE state.
+	  In FAILURE state, all messages are sent as confirmed until recovery.
 
 endmenu
 
