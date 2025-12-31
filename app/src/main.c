@@ -8,6 +8,7 @@
 #include "app_nfc.h"
 #include "app_wdog.h"
 #include "app_sensor.h"
+#include "app_settings.h"
 
 /* Zephyr includes */
 #include <zephyr/init.h>
@@ -81,12 +82,6 @@ int main(void)
 	}
 #endif /* defined(CONFIG_WATCHDOG) */
 
-	ret = app_config_init();
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_config_init", ret);
-		die();
-	}
-
 	ret = app_led_init();
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_led_init", ret);
@@ -109,17 +104,17 @@ int main(void)
 	if (action == APP_NFC_ACTION_SAVE) {
 		play_carousel_nfc();
 
-		ret = app_config_save();
+		ret = app_settings_save();
 		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_config_save", ret);
+			LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
 			die();
 		}
 	} else if (action == APP_NFC_ACTION_RESET) {
 		play_carousel_nfc();
 
-		ret = app_config_reset();
+		ret = app_settings_reset();
 		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_config_reset", ret);
+			LOG_ERR_CALL_FAILED_INT("app_settings_reset", ret);
 			die();
 		}
 	}
@@ -177,16 +172,16 @@ int main(void)
 			if (action == APP_NFC_ACTION_SAVE) {
 				play_carousel_nfc();
 
-				ret = app_config_save();
+				ret = app_settings_save();
 				if (ret) {
-					LOG_ERR_CALL_FAILED_INT("app_config_save", ret);
+					LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
 				}
 			} else if (action == APP_NFC_ACTION_RESET) {
 				play_carousel_nfc();
 
-				ret = app_config_reset();
+				ret = app_settings_reset();
 				if (ret) {
-					LOG_ERR_CALL_FAILED_INT("app_config_reset", ret);
+					LOG_ERR_CALL_FAILED_INT("app_settings_reset", ret);
 				}
 			}
 		}

@@ -11,3 +11,4 @@ manifest:
       import: true
   self:
     path: sticker
+    west-commands: scripts/west-commands.yml

@@ -1,0 +1,6 @@
+west-commands:
+  - file: scripts/west_commands/configen.py
+    commands:
+      - name: configen
+        class: Configen
+        help: generate configuration module from YAML

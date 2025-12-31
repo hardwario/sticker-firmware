@@ -1,0 +1,352 @@
+version: 1
+
+module:
+  name: app_config
+  settings_prefix: config
+  shell_command: config
+  log_module: app_config
+
+enums:
+  lrw_region:
+    - name: EU868
+      value: 0
+      shell: eu868
+    - name: US915
+      value: 1
+      shell: us915
+    - name: AU915
+      value: 2
+      shell: au915
+
+  lrw_network:
+    - name: PUBLIC
+      value: 0
+      shell: public
+    - name: PRIVATE
+      value: 1
+      shell: private
+
+  lrw_activation:
+    - name: OTAA
+      value: 0
+      shell: otaa
+    - name: ABP
+      value: 1
+      shell: abp
+
+parameters:
+  - name: secret_key
+    type: bytes
+    size: 16
+    help: "Get/Set device secret key (32 hexadecimal digits)."
+
+  - name: serial_number
+    type: uint32
+    format: "%010u"
+    help: "Get/Set device serial number (10 decimal digits)."
+    extras:
+      digits: 10
+
+  - name: nonce_counter
+    type: uint32
+    help: "Get/Set nonce counter (unsigned integer)."
+
+  - name: calibration
+    type: bool
+    help: "Get/Set calibration mode (true/false)."
+
+  - name: interval_sample
+    type: int
+    min: 5
+    max: 3600
+    help: "Get/Set sample interval (range 5 to 3600 seconds; 0 = precede report)."
+    extras:
+      zero_allowed: true
+
+  - name: interval_report
+    type: int
+    default: 900
+    min: 60
+    max: 86400
+    help: "Get/Set report interval (range 60 to 86400 seconds)."
+
+  - name: lrw_region
+    type: enum
+    enum: lrw_region
+    help: "Get/Set LoRaWAN region (eu868/us915/au915)."
+
+  - name: lrw_network
+    type: enum
+    enum: lrw_network
+    help: "Get/Set LoRaWAN network (public/private)."
+
+  - name: lrw_adr
+    type: bool
+    help: "Get/Set LoRaWAN ADR (true/false)."
+
+  - name: lrw_activation
+    type: enum
+    enum: lrw_activation
+    help: "Get/Set LoRaWAN activation (otaa/abp)."
+
+  - name: lrw_deveui
+    type: bytes
+    size: 8
+    help: "Get/Set LoRaWAN DevEUI (16 hex digits)."
+
+  - name: lrw_joineui
+    type: bytes
+    size: 8
+    help: "Get/Set LoRaWAN JoinEUI (16 hex digits)."
+
+  - name: lrw_nwkkey
+    type: bytes
+    size: 16
+    help: "Get/Set LoRaWAN NwkKey (32 hex digits)."
+
+  - name: lrw_appkey
+    type: bytes
+    size: 16
+    help: "Get/Set LoRaWAN AppKey (32 hex digits)."
+
+  - name: lrw_devaddr
+    type: bytes
+    size: 4
+    help: "Get/Set LoRaWAN DevAddr (8 hex digits)."
+
+  - name: lrw_nwkskey
+    type: bytes
+    size: 16
+    help: "Get/Set LoRaWAN NwkSKey (32 hexadecimal digits)."
+
+  - name: lrw_appskey
+    type: bytes
+    size: 16
+    help: "Get/Set LoRaWAN AppSKey (32 hexadecimal digits)."
+
+  - name: alarm_temperature_enabled
+    type: bool
+    help: "Get/Set temperature alarm enabled (true/false)."
+
+  - name: alarm_temperature_lo
+    type: float
+    default: 15.0
+    min: -30.0
+    max: 70.0
+    help: "Get/Set temperature low threshold (-30 to 70 deg. C)."
+
+  - name: alarm_temperature_hi
+    type: float
+    default: 25.0
+    min: -30.0
+    max: 70.0
+    help: "Get/Set temperature high threshold (-30 to 70 deg. C)."
+
+  - name: alarm_temperature_hst
+    type: float
+    default: 0.5
+    min: 0.0
+    max: 5.0
+    help: "Get/Set T1 temperature hysteresis (0 to 5 deg. C)."
+
+  - name: alarm_humidity_enabled
+    type: bool
+    help: "Get/Set humidity alarm enabled (true/false)."
+
+  - name: alarm_humidity_lo
+    type: float
+    default: 30.0
+    min: 0.0
+    max: 100.0
+    help: "Get/Set humidity low threshold (0 to 100 %)."
+
+  - name: alarm_humidity_hi
+    type: float
+    default: 75.0
+    min: 0.0
+    max: 100.0
+    help: "Get/Set humidity high threshold (0 to 100 %)."
+
+  - name: alarm_humidity_hst
+    type: float
+    default: 5.0
+    min: 0.0
+    max: 20.0
+    help: "Get/Set humidity hysteresis (0 to 20 %)."
+
+  - name: alarm_pressure_enabled
+    type: bool
+    help: "Get/Set pressure alarm enabled (true/false)."
+
+  - name: alarm_pressure_lo
+    type: float
+    default: 700.0
+    min: 500.0
+    max: 1200.0
+    help: "Get/Set pressure low threshold (500 to 1200 hPa)."
+
+  - name: alarm_pressure_hi
+    type: float
+    default: 1060.0
+    min: 500.0
+    max: 1200.0
+    help: "Get/Set pressure high threshold (500 to 1200 hPa)."
+
+  - name: alarm_pressure_hst
+    type: float
+    default: 10.0
+    min: 0.0
+    max: 50.0
+    help: "Get/Set pressure hysteresis (0 to 50 hPa)."
+
+  - name: alarm_t1_temperature_enabled
+    type: bool
+    help: "Get/Set T1 temperature alarm enabled (true/false)."
+
+  - name: alarm_t1_temperature_lo
+    type: float
+    default: 15.0
+    min: -30.0
+    max: 70.0
+    help: "Get/Set T1 temperature low threshold (-30 to 70 deg. C)."
+
+  - name: alarm_t1_temperature_hi
+    type: float
+    default: 25.0
+    min: -30.0
+    max: 70.0
+    help: "Get/Set T1 temperature high threshold (-30 to 70 deg. C)."
+
+  - name: alarm_t1_temperature_hst
+    type: float
+    default: 0.5
+    min: 0.0
+    max: 5.0
+    help: "Get/Set T1 temperature hysteresis (0 to 5 deg. C)."
+
+  - name: alarm_t2_temperature_enabled
+    type: bool
+    help: "Get/Set T2 temperature alarm enabled (true/false)."
+
+  - name: alarm_t2_temperature_lo
+    type: float
+    default: 15.0
+    min: -30.0
+    max: 70.0
+    help: "Get/Set T2 temperature low threshold (-30 to 70 deg. C)."
+
+  - name: alarm_t2_temperature_hi
+    type: float
+    default: 25.0
+    min: -30.0
+    max: 70.0
+    help: "Get/Set T2 temperature high threshold (-30 to 70 deg. C)."
+
+  - name: alarm_t2_temperature_hst
+    type: float
+    default: 0.5
+    min: 0.0
+    max: 5.0
+    help: "Get/Set T2 temperature hysteresis (0 to 5 deg. C)."
+
+  - name: hall_left_counter
+    type: bool
+    help: "Get/Set hall left switch counter enabled (true/false)."
+
+  - name: hall_left_notify_act
+    type: bool
+    help: "Get/Set hall left switch notify on activation (true/false)."
+
+  - name: hall_left_notify_deact
+    type: bool
+    help: "Get/Set hall left switch notify on deactivation (true/false)."
+
+  - name: hall_right_counter
+    type: bool
+    help: "Get/Set hall right switch counter enabled (true/false)."
+
+  - name: hall_right_notify_act
+    type: bool
+    help: "Get/Set hall right switch notify on activation (true/false)."
+
+  - name: hall_right_notify_deact
+    type: bool
+    help: "Get/Set hall right switch notify on deactivation (true/false)."
+
+  - name: input_a_counter
+    type: bool
+    help: "Get/Set input A counter enabled (true/false)."
+
+  - name: input_a_notify_act
+    type: bool
+    help: "Get/Set input A notify on activation (true/false)."
+
+  - name: input_a_notify_deact
+    type: bool
+    help: "Get/Set input A notify on deactivation (true/false)."
+
+  - name: input_b_counter
+    type: bool
+    help: "Get/Set input B counter enabled (true/false)."
+
+  - name: input_b_notify_act
+    type: bool
+    help: "Get/Set input B notify on activation (true/false)."
+
+  - name: input_b_notify_deact
+    type: bool
+    help: "Get/Set input B notify on deactivation (true/false)."
+
+  - name: corr_temperature
+    type: float
+    min: -5.0
+    max: 5.0
+    help: "Get/Set temperature correction (range -5.0 to +5.0 deg. C)."
+
+  - name: corr_t1_temperature
+    type: float
+    min: -5.0
+    max: 5.0
+    help: "Get/Set T1 temperature correction (range -5.0 to +5.0 deg. C)."
+
+  - name: corr_t2_temperature
+    type: float
+    min: -5.0
+    max: 5.0
+    help: "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C)."
+
+  - name: cap_hall_left
+    type: bool
+    help: "Get/Set hall left capability (true/false)."
+
+  - name: cap_hall_right
+    type: bool
+    help: "Get/Set hall right capability (true/false)."
+
+  - name: cap_input_a
+    type: bool
+    help: "Get/Set input A capability (true/false)."
+
+  - name: cap_input_b
+    type: bool
+    help: "Get/Set input B capability (true/false)."
+
+  - name: cap_light_sensor
+    type: bool
+    help: "Get/Set light sensor capability (true/false)."
+
+  - name: cap_barometer
+    type: bool
+    help: "Get/Set barometer capability (true/false)."
+
+  - name: cap_pir_detector
+    type: bool
+    help: "Get/Set PIR detector capability (true/false)."
+
+  - name: cap_1w_thermometer
+    type: bool
+    help: "Get/Set 1-wire thermometer capability (true/false)."
+
+  - name: cap_1w_machine_probe
+    type: bool
+    help: "Get/Set 1-wire machine probe capability (true/false)."

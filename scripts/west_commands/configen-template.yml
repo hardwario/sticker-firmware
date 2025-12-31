@@ -1,0 +1,237 @@
+# =============================================================================
+# Configuration Module Template for `west configen`
+# =============================================================================
+#
+# This is a template file demonstrating all supported features of configen.
+# Use this as a reference when creating your own configuration YAML files.
+#
+# Usage:
+#   west configen <yaml_file> -o <output_dir>
+#
+# Example:
+#   west configen src/app_config.yml -o src/
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Version (required)
+# -----------------------------------------------------------------------------
+# Schema version - must be 1
+version: 1
+
+# -----------------------------------------------------------------------------
+# Module Definition (required)
+# -----------------------------------------------------------------------------
+module:
+  # Module name - used for struct name, file names, and function prefixes
+  name: app_config
+
+  # Settings prefix for Zephyr settings keys (optional)
+  # Defaults to module name with underscores replaced by dashes
+  # settings_prefix: app-config
+
+  # Shell command name (optional, defaults to module name without dashes)
+  # This is the root command users type in shell (e.g., "config show")
+  # shell_command: config
+
+  # Log module name (optional, defaults to module name)
+  # log_module: app_config
+
+  # SYS_INIT priority (optional, defaults to 0)
+  # init_priority: 0
+
+# -----------------------------------------------------------------------------
+# Enumerations (optional)
+# -----------------------------------------------------------------------------
+# Define enums that can be used as parameter types
+enums:
+  # Enum name - will generate: enum <module_name>_<enum_name>
+  mode:
+    - name: OFF           # Generates: APP_CONFIG_MODE_OFF = 0
+      value: 0            # Explicit value (optional, defaults to index)
+      shell: "off"        # Shell display name (optional, defaults to lowercase name)
+    - name: AUTO
+      value: 1
+      shell: "auto"
+    - name: MANUAL
+      value: 2
+      shell: "manual"
+
+  region:
+    - name: EU868
+      value: 0
+    - name: US915
+      value: 1
+    - name: AU915
+      value: 2
+
+# -----------------------------------------------------------------------------
+# Parameters (required)
+# -----------------------------------------------------------------------------
+# List of configuration parameters
+parameters:
+
+  # ---------------------------------------------------------------------------
+  # Boolean Type
+  # ---------------------------------------------------------------------------
+  - name: enabled
+    type: bool
+    default: true
+    help: "Enable or disable the feature"
+
+  # ---------------------------------------------------------------------------
+  # Integer Types: int8, int16, int32, int64, int
+  # ---------------------------------------------------------------------------
+  - name: threshold
+    type: int
+    default: 100
+    min: 0              # Minimum value (optional)
+    max: 1000           # Maximum value (optional)
+    help: "Detection threshold"
+
+  - name: offset
+    type: int16
+    default: 0
+    min: -1000
+    max: 1000
+    help: "Calibration offset"
+
+  # ---------------------------------------------------------------------------
+  # Unsigned Integer Types: uint8, uint16, uint32, uint64, uint
+  # ---------------------------------------------------------------------------
+  - name: interval
+    type: uint32
+    default: 60
+    min: 1
+    max: 86400
+    help: "Reporting interval in seconds"
+
+  - name: counter
+    type: uint64
+    default: 0
+    help: "Event counter"
+    readonly: true      # Cannot be modified via shell
+
+  # ---------------------------------------------------------------------------
+  # Floating Point Types: float, double
+  # ---------------------------------------------------------------------------
+  - name: temperature_hi
+    type: float
+    default: 25.0
+    min: -40.0
+    max: 85.0
+    precision: 1        # Decimal places for display (optional)
+    help: "High temperature threshold"
+
+  - name: coefficient
+    type: double
+    default: 1.0
+    precision: 6
+    help: "Calibration coefficient"
+
+  # ---------------------------------------------------------------------------
+  # String Type
+  # ---------------------------------------------------------------------------
+  - name: device_name
+    type: string
+    maxlen: 32          # Maximum string length (required for string)
+    minlen: 1           # Minimum string length (optional)
+    default: "device"
+    help: "Device name"
+
+  # ---------------------------------------------------------------------------
+  # Bytes Type (hex-encoded)
+  # ---------------------------------------------------------------------------
+  - name: secret_key
+    type: bytes
+    size: 16            # Byte array size (required for bytes)
+    help: "Secret key (hex)"
+
+  - name: device_eui
+    type: bytes
+    size: 8
+    help: "Device EUI (hex)"
+
+  # ---------------------------------------------------------------------------
+  # Enum Type
+  # ---------------------------------------------------------------------------
+  - name: operating_mode
+    type: enum
+    enum: mode          # Reference to enum defined above
+    default: AUTO
+    help: "Operating mode"
+
+  - name: radio_region
+    type: enum
+    enum: region
+    default: EU868
+    help: "Radio region"
+
+  # ---------------------------------------------------------------------------
+  # Arrays (for numeric types)
+  # ---------------------------------------------------------------------------
+  - name: calibration_data
+    type: float
+    array: 4            # Array size
+    help: "Calibration coefficients"
+
+  # ---------------------------------------------------------------------------
+  # Special Options
+  # ---------------------------------------------------------------------------
+  - name: debug_level
+    type: uint8
+    default: 0
+    max: 5
+    hidden: true        # Hidden from 'show' command
+    help: "Debug verbosity level"
+
+  - name: firmware_version
+    type: uint32
+    default: 0x010000
+    format: "0x%08x"    # Custom printf format
+    readonly: true      # Read-only parameter
+    help: "Firmware version"
+
+  # ---------------------------------------------------------------------------
+  # Extras (advanced)
+  # ---------------------------------------------------------------------------
+  # For special validation beyond min/max, use extras options:
+  #
+  # - name: serial_number
+  #   type: uint32
+  #   format: "%010u"
+  #   help: "Serial number (10 digits)"
+  #   extras:
+  #     digits: 10        # Require exact number of digits
+  #
+  # - name: interval_sample
+  #   type: int
+  #   min: 5
+  #   max: 3600
+  #   help: "Sample interval (5-3600s, or 0 to disable)"
+  #   extras:
+  #     zero_allowed: true  # Allow 0 even if outside min/max range
+
+# =============================================================================
+# Generated Output
+# =============================================================================
+#
+# Running `west configen` on this file generates:
+#
+# 1. Header file (<module_name>.h):
+#    - Enum definitions
+#    - Configuration struct
+#    - Global config instance declaration
+#    - Accessor function declaration
+#
+# 2. Source file (<module_name>.c):
+#    - Settings subsystem handlers (load/save/export)
+#    - Shell commands for all parameters
+#    - Automatic initialization via SYS_INIT
+#
+# Shell Commands:
+#    <shell_command> show              - Show all parameters
+#    <shell_command> <param-name>      - Get parameter value
+#    <shell_command> <param-name> <value>  - Set parameter value
+#
+# =============================================================================

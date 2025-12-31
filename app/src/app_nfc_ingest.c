@@ -7,6 +7,7 @@
 #include "app_nfc_ingest.h"
 #include "app_config.h"
 #include "app_log.h"
+#include "app_settings.h"
 
 /* Zephyr includes */
 #include <zephyr/logging/log.h>
@@ -48,7 +49,7 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 		LOG_INF_PARAM_BOOL("factory", message->factory);
 		if (message->factory) {
 			LOG_INF("Factory reset requested via NFC");
-			app_config_reset();
+			app_settings_reset();
 		}
 	}
 

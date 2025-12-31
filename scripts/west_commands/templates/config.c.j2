@@ -1,0 +1,637 @@
+{#- Generate print function for a parameter -#}
+{% macro print_function(param, module, enums) -%}
+static void print_{{ param.name | c_name }}(const struct shell *shell)
+{
+{% if param.type == 'bytes' %}
+	char buf[2 * sizeof(m_{{ module.name }}.{{ param.name | c_name }}) + 1];
+
+	int ret =
+		bin2hex(m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}), buf, sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " {{ param.name | settings_key }} %s", buf);
+{% elif param.type == 'string' %}
+	shell_print(shell, SETTINGS_PFX " {{ param.name | settings_key }} %s", m_{{ module.name }}.{{ param.name | c_name }});
+{% elif param.type == 'bool' %}
+	shell_print(shell, SETTINGS_PFX " {{ param.name | settings_key }} %s",
+		    m_{{ module.name }}.{{ param.name | c_name }} ? "true" : "false");
+{% elif param | is_numeric %}
+{% if param | needs_cast %}
+	shell_print(shell, SETTINGS_PFX " {{ param.name | settings_key }} {{ param | printf_format }}",
+		    {{ param | printf_cast }}m_{{ module.name }}.{{ param.name | c_name }});
+{% else %}
+	shell_print(shell, SETTINGS_PFX " {{ param.name | settings_key }} {{ param | printf_format }}", m_{{ module.name }}.{{ param.name | c_name }});
+{% endif %}
+{% elif param.type == 'enum' %}
+{% set enum_values = enums[param.enum] %}
+	const char *str;
+	switch (m_{{ module.name }}.{{ param.name | c_name }}) {
+{% for val in enum_values %}
+	case {{ module.name | upper }}_{{ param.enum | c_name | upper }}_{{ val.name | upper }}:
+		str = "{{ val.shell | default(val.name | lower) }}";
+		break;
+{% endfor %}
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " {{ param.name | settings_key }} %s", str);
+{% endif %}
+}
+{% endmacro %}
+
+{#- Generate command function for a parameter -#}
+{% macro cmd_function(param, module, enums) -%}
+static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc, char **argv)
+{
+{% if param.readonly %}
+	print_{{ param.name | c_name }}(shell);
+	return 0;
+{% elif param.type == 'bool' %}
+	return cmd_bool(shell, argc, argv, &m_{{ module.name }}.{{ param.name | c_name }}, print_{{ param.name | c_name }});
+{% elif param | is_signed and param.extras %}
+	if (argc == 1) {
+		print_{{ param.name | c_name }}(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	{{ param | c_type(module.name) }} a = {{ param | parse_func }}(argv[1], NULL, 10);
+
+{% if param.extras.zero_allowed %}
+	if (a != 0 && (a < {{ param | min_value }} || a > {{ param | max_value }})) {
+{% else %}
+	if (a < {{ param | min_value }} || a > {{ param | max_value }}) {
+{% endif %}
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_{{ module.name }}.{{ param.name | c_name }} = a;
+
+	return 0;
+{% elif param.type == 'int' %}
+	return cmd_int(shell, argc, argv, &m_{{ module.name }}.{{ param.name | c_name }}, {{ param | min_value }}, {{ param | max_value }},
+		       print_{{ param.name | c_name }});
+{% elif param | is_signed %}
+	if (argc == 1) {
+		print_{{ param.name | c_name }}(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	char *endptr;
+{% if param.type == 'int64' %}
+	long long value = strtoll(argv[1], &endptr, 10);
+{% else %}
+	long value = strtol(argv[1], &endptr, 10);
+{% endif %}
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < {{ param | min_value }} || value > {{ param | max_value }}) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_{{ module.name }}.{{ param.name | c_name }} = ({{ param | c_type(module.name) }})value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+{% elif param | is_unsigned and param.extras %}
+	if (argc == 1) {
+		print_{{ param.name | c_name }}(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+{% if param.extras.digits %}
+
+	size_t len = strlen(argv[1]);
+
+	if (len != {{ param.extras.digits }}) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	for (size_t i = 0; i < len; i++) {
+		if (!isdigit((int)argv[1][i])) {
+			shell_error(shell, "%s", m_msg_invalid_value);
+			return -EINVAL;
+		}
+	}
+{% endif %}
+
+	m_{{ module.name }}.{{ param.name | c_name }} = {{ param | parse_func }}(argv[1], NULL, 10);
+
+	return 0;
+{% elif param.type == 'uint' %}
+	return cmd_uint(shell, argc, argv, &m_{{ module.name }}.{{ param.name | c_name }}, {{ param | min_value }}, {{ param | max_value }},
+			print_{{ param.name | c_name }});
+{% elif param | is_unsigned %}
+	if (argc == 1) {
+		print_{{ param.name | c_name }}(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	char *endptr;
+{% if param.type == 'uint64' %}
+	unsigned long long value = strtoull(argv[1], &endptr, 10);
+{% else %}
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+{% endif %}
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < {{ param | min_value }} || value > {{ param | max_value }}) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_{{ module.name }}.{{ param.name | c_name }} = ({{ param | c_type(module.name) }})value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+{% elif param.type == 'float' %}
+	return cmd_float(shell, argc, argv, &m_{{ module.name }}.{{ param.name | c_name }}, {{ param | min_value }}f,
+			 {{ param | max_value }}f, print_{{ param.name | c_name }});
+{% elif param.type == 'double' %}
+	if (argc == 1) {
+		print_{{ param.name | c_name }}(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	double value = strtod(argv[1], &endptr);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < {{ param | min_value }} || value > {{ param | max_value }}) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_{{ module.name }}.{{ param.name | c_name }} = value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+{% elif param.type == 'string' %}
+	if (argc == 1) {
+		print_{{ param.name | c_name }}(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	size_t len = strlen(argv[1]);
+
+{% if param.minlen is defined %}
+	if (len < {{ param.minlen }}) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+{% endif %}
+	if (len >= sizeof(m_{{ module.name }}.{{ param.name | c_name }})) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	strncpy(m_{{ module.name }}.{{ param.name | c_name }}, argv[1], sizeof(m_{{ module.name }}.{{ param.name | c_name }}) - 1);
+	m_{{ module.name }}.{{ param.name | c_name }}[sizeof(m_{{ module.name }}.{{ param.name | c_name }}) - 1] = '\0';
+
+	return 0;
+{% elif param.type == 'bytes' %}
+	int ret;
+
+	if (argc == 1) {
+		print_{{ param.name | c_name }}(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_{{ module.name }}.{{ param.name | c_name }})) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	ret = hex2bin(argv[1], strlen(argv[1]), m_{{ module.name }}.{{ param.name | c_name }},
+		      sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return ret;
+	}
+
+	return 0;
+{% elif param.type == 'enum' %}
+{% set enum_values = enums[param.enum] %}
+	if (argc == 1) {
+		print_{{ param.name | c_name }}(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+{% for val in enum_values %}
+{% if loop.first %}
+	if (!strcmp(argv[1], "{{ val.shell | default(val.name | lower) }}")) {
+{% else %}
+	} else if (!strcmp(argv[1], "{{ val.shell | default(val.name | lower) }}")) {
+{% endif %}
+		m_{{ module.name }}.{{ param.name | c_name }} = {{ module.name | upper }}_{{ param.enum | c_name | upper }}_{{ val.name | upper }};
+{% endfor %}
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	return 0;
+{% endif %}
+}
+{% endmacro %}
+/* WARNING: This file is auto-generated by `west configen`. Do not modify manually. */
+
+/*
+ * Copyright (c) 2025 HARDWARIO a.s.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "{{ module.name }}.h"
+
+/* Zephyr includes */
+#include <zephyr/init.h>
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
+#include <zephyr/shell/shell.h>
+
+/* Standard includes */
+#include <ctype.h>
+#include <errno.h>
+#include <float.h>
+#include <limits.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+LOG_MODULE_REGISTER({{ module.log_module | default(module.name) }}, LOG_LEVEL_DBG);
+
+#define SETTINGS_PFX "{{ module.settings_prefix | default(module.name | replace('_', '-')) }}"
+
+struct {{ module.name }} g_{{ module.name }};
+
+static struct {{ module.name }} m_{{ module.name }} = {
+{% for param in parameters if param.default is defined %}
+	.{{ param.name | c_name }} = {{ param | default_value(module.name) }},
+{% endfor %}
+};
+
+static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	int ret;
+	const char *next;
+
+#define SETTINGS_SET(_key, _var, _size)                                                            \
+	do {                                                                                       \
+		if (settings_name_steq(key, _key, &next) && !next) {                               \
+			if (len != _size) {                                                        \
+				return -EINVAL;                                                    \
+			}                                                                          \
+                                                                                                   \
+			ret = read_cb(cb_arg, _var, len);                                          \
+                                                                                                   \
+			if (ret < 0) {                                                             \
+				LOG_ERR("Call `read_cb` failed: %d", ret);                         \
+				return ret;                                                        \
+			}                                                                          \
+                                                                                                   \
+			return 0;                                                                  \
+		}                                                                                  \
+	} while (0)
+
+{% for param in parameters %}
+{% if param.type == 'bytes' or param.type == 'string' %}
+	SETTINGS_SET("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+{% else %}
+	SETTINGS_SET("{{ param.name | settings_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
+		     sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+{% endif %}
+{% endfor %}
+
+#undef SETTINGS_SET
+
+	return -ENOENT;
+}
+
+static int h_commit(void)
+{
+	LOG_DBG("Loaded settings in full");
+
+	memcpy(&g_{{ module.name }}, &m_{{ module.name }}, sizeof(g_{{ module.name }}));
+	return 0;
+}
+
+static int h_export(int (*export_func)(const char *name, const void *val, size_t val_len))
+{
+#define EXPORT_FUNC(_key, _var, _size)                                                             \
+	do {                                                                                       \
+		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
+	} while (0)
+
+{% for param in parameters %}
+{% if param.type == 'bytes' or param.type == 'string' %}
+	EXPORT_FUNC("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+{% else %}
+	EXPORT_FUNC("{{ param.name | settings_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
+		    sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+{% endif %}
+{% endfor %}
+
+#undef EXPORT_FUNC
+
+	return 0;
+}
+
+#if defined(CONFIG_SHELL)
+
+static const char m_msg_invalid_args[] = "invalid number of arguments";
+static const char m_msg_invalid_range[] = "invalid argument range";
+static const char m_msg_invalid_value[] = "invalid argument value";
+static const char m_msg_cmd_success[] = "command succeeded";
+
+typedef void (*print_func_t)(const struct shell *shell);
+
+{% set needs_cmd_bool = parameters | selectattr('type', 'equalto', 'bool') | rejectattr('readonly', 'defined') | list | length > 0 %}
+{% set needs_cmd_int = parameters | selectattr('type', 'equalto', 'int') | rejectattr('readonly', 'defined') | rejectattr('extras', 'defined') | list | length > 0 %}
+{% set needs_cmd_uint = parameters | selectattr('type', 'equalto', 'uint') | rejectattr('readonly', 'defined') | rejectattr('extras', 'defined') | list | length > 0 %}
+{% set needs_cmd_float = parameters | selectattr('type', 'equalto', 'float') | rejectattr('readonly', 'defined') | list | length > 0 %}
+{% if needs_cmd_bool %}
+static int cmd_bool(const struct shell *shell, size_t argc, char **argv, bool *param,
+		    print_func_t print_func)
+{
+	if (argc == 1) {
+		if (print_func) {
+			print_func(shell);
+		}
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "true")) {
+		*param = true;
+	} else if (!strcmp(argv[1], "false")) {
+		*param = false;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+{% endif %}
+{% if needs_cmd_int %}
+static int cmd_int(const struct shell *shell, size_t argc, char **argv, int *param, int min,
+		   int max, print_func_t print_func)
+{
+	if (argc == 1) {
+		if (print_func) {
+			print_func(shell);
+		}
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	long value = strtol(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < min || value > max) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	*param = (int)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+{% endif %}
+{% if needs_cmd_uint %}
+static int cmd_uint(const struct shell *shell, size_t argc, char **argv, unsigned int *param,
+		    unsigned int min, unsigned int max, print_func_t print_func)
+{
+	if (argc == 1) {
+		if (print_func) {
+			print_func(shell);
+		}
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < min || value > max) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	*param = (unsigned int)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+{% endif %}
+{% if needs_cmd_float %}
+static int cmd_float(const struct shell *shell, size_t argc, char **argv, float *param,
+		     float min, float max, print_func_t print_func)
+{
+	if (argc == 1) {
+		if (print_func) {
+			print_func(shell);
+		}
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	float value = strtof(argv[1], &endptr);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < min || value > max) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	*param = value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+{% endif %}
+
+{% for param in parameters %}
+{{ print_function(param, module, enums) }}
+{% endfor %}
+static int cmd_show(const struct shell *shell, size_t argc, char **argv)
+{
+{% for param in parameters if not param.hidden %}
+	print_{{ param.name | c_name }}(shell);
+{% endfor %}
+
+	return 0;
+}
+
+{% for param in parameters %}
+{{ cmd_function(param, module, enums) }}
+{% endfor %}
+static int print_help(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc > 1) {
+		shell_error(shell, "command not found: %s", argv[1]);
+		shell_help(shell);
+		return -EINVAL;
+	}
+
+	shell_help(shell);
+
+	return 0;
+}
+
+/* clang-format off */
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_{{ module.shell_command | default(module.name) | c_name }},
+
+	SHELL_CMD_ARG(show, NULL,
+	              "Show all configuration.",
+	              cmd_show, 1, 0),
+
+{% for param in parameters %}
+	SHELL_CMD_ARG({{ param.name | settings_key }}, NULL,
+	              "{{ param.help | default('Get/Set ' ~ param.name ~ '.') }}",
+	              cmd_{{ param.name | c_name }}, 1, 1),
+
+{% endfor %}
+	SHELL_SUBCMD_SET_END
+);
+
+/* clang-format on */
+
+SHELL_CMD_REGISTER({{ module.shell_command | default(module.name) | replace('-', '') }}, &sub_{{ module.shell_command | default(module.name) | c_name }}, "Configuration commands.", print_help);
+
+#endif /* defined(CONFIG_SHELL) */
+
+struct {{ module.name }} *{{ module.name }}(void)
+{
+	return &m_{{ module.name }};
+}
+
+static int {{ module.name }}_init(void)
+{
+	int ret;
+
+	ret = settings_subsys_init();
+	if (ret) {
+		LOG_ERR("Call `settings_subsys_init` failed: %d", ret);
+		return ret;
+	}
+
+	static struct settings_handler sh = {
+		.name = SETTINGS_PFX,
+		.h_set = h_set,
+		.h_commit = h_commit,
+		.h_export = h_export,
+	};
+
+	ret = settings_register(&sh);
+	if (ret) {
+		LOG_ERR("Call `settings_register` failed: %d", ret);
+		return ret;
+	}
+
+	ret = settings_load_subtree(SETTINGS_PFX);
+	if (ret) {
+		LOG_ERR("Call `settings_load_subtree` failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+SYS_INIT({{ module.name }}_init, APPLICATION, {{ module.init_priority | default(0) }});
