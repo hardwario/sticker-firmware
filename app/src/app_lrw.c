@@ -33,7 +33,7 @@ LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
 #define LINK_CHECK_INTERVAL_SEC       3600 /* 1 hour */
 #define LINK_CHECK_RETRY_INTERVAL_SEC 180  /* 3 minutes */
 #define LINK_CHECK_MAX_RETRIES        5
-#define LINK_CHECK_TIMEOUT_SEC        30   /* Timeout for response */
+#define LINK_CHECK_TIMEOUT_SEC        30 /* Timeout for response */
 
 static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
 static struct k_work_q m_work_q;
@@ -302,8 +302,7 @@ static void send_work_handler(struct k_work *work)
 	int ret;
 
 	/* Block transmissions during joining or link check retry */
-	if (m_state == APP_LRW_STATE_JOINING ||
-	    m_state == APP_LRW_STATE_LINK_CHECK_RETRY) {
+	if (m_state == APP_LRW_STATE_JOINING || m_state == APP_LRW_STATE_LINK_CHECK_RETRY) {
 		LOG_WRN("TX blocked: state=%d", m_state);
 		return;
 	}
@@ -429,6 +428,5 @@ enum app_lrw_state app_lrw_get_state(void)
 
 bool app_lrw_is_ready(void)
 {
-	return m_state == APP_LRW_STATE_HEALTHY ||
-	       m_state == APP_LRW_STATE_LINK_CHECK_PENDING;
+	return m_state == APP_LRW_STATE_HEALTHY || m_state == APP_LRW_STATE_LINK_CHECK_PENDING;
 }
