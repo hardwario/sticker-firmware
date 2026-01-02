@@ -145,13 +145,18 @@ static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(shell, "State:    %s", lrw_state_to_str(info.state));
-	shell_print(shell, "Datarate: DR%d", info.datarate);
-	shell_print(shell, "RSSI:     %d dBm", info.rssi);
-	shell_print(shell, "SNR:      %d dB", info.snr);
-	shell_print(shell, "Margin:   %u dB", info.margin);
-	shell_print(shell, "Gateways: %u", info.gw_count);
-	shell_print(shell, "LC fails: %u", info.lc_fail_count);
+	shell_print(shell, "State:         %s", lrw_state_to_str(info.state));
+	shell_print(shell, "Datarate:      DR%d", info.datarate);
+	shell_print(shell, "RSSI:          %d dBm", info.rssi);
+	shell_print(shell, "SNR:           %d dB", info.snr);
+	shell_print(shell, "Margin:        %u dB", info.margin);
+	shell_print(shell, "Gateways:      %u", info.gw_count);
+	shell_print(shell, "Healthy->Warning:    %u/%u",
+		    info.consecutive_lc_fail, info.thresh_warning);
+	shell_print(shell, "Warning->Healthy:    %u/%u",
+		    info.consecutive_lc_ok, info.thresh_healthy);
+	shell_print(shell, "Warning->Reconnect:  %u/%u",
+		    info.warning_lc_fail_total, info.thresh_reconnect);
 
 	return 0;
 }

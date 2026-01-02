@@ -209,9 +209,9 @@ int main(void)
 			app_led_play(&req);
 		} else if (lrw_state == APP_LRW_STATE_WARNING) {
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
-							.duration = 5,
-							.space = 0,
-							.repetitions = 1};
+							.duration = 100,
+							.space = 200,
+							.repetitions = 3};
 			app_led_blink(&req);
 		} else
 #endif /* defined(CONFIG_LORAWAN) */

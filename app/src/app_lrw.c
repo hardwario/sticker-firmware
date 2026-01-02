@@ -32,8 +32,12 @@ LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
 /* Link check configuration constants */
 #define LINK_CHECK_INTERVAL_SEC       3600 /* 1 hour */
 #define LINK_CHECK_RETRY_INTERVAL_SEC 180  /* 3 minutes */
-#define LINK_CHECK_MAX_RETRIES        5
-#define LINK_CHECK_TIMEOUT_SEC        30 /* Timeout for response */
+#define LINK_CHECK_TIMEOUT_SEC        10    /* Timeout for response */
+
+/* State machine thresholds (per join.md) */
+#define FAIL_THRESHOLD_WARNING   3  /* LC failures to enter WARNING */
+#define FAIL_THRESHOLD_RECONNECT 5 /* LC failures in WARNING to enter RECONNECT */
+#define OK_THRESHOLD_HEALTHY     2  /* LC successes in WARNING to return to HEALTHY */
 
 static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
 static struct k_work_q m_work_q;
@@ -43,10 +47,16 @@ static struct k_work m_join_work;
 
 /* Link check state management */
 static enum app_lrw_state m_state = APP_LRW_STATE_IDLE;
-static int m_link_check_retry_count;
 static struct k_timer m_link_check_timer;
 static struct k_work m_link_check_work;
 static struct k_work m_rejoin_work;
+
+/* State machine counters (per join.md section 13.1) */
+static uint8_t m_consecutive_lc_fail;      /* LC failures in a row (HEALTHY) */
+static uint8_t m_consecutive_lc_ok;        /* LC successes in a row (WARNING) */
+static uint8_t m_warning_lc_fail_total;    /* Total LC failures in WARNING */
+static bool m_force_linkcheck;             /* Force LC on next message */
+static bool m_link_check_pending;          /* Waiting for LC response */
 
 /* Diagnostic data */
 static int m_current_dr;
@@ -54,7 +64,6 @@ static int16_t m_last_rssi;
 static int8_t m_last_snr;
 static uint8_t m_last_margin;
 static uint8_t m_last_gw_count;
-static bool m_link_check_pending;
 
 /* Forward declarations */
 static void schedule_next_link_check(void);
@@ -108,29 +117,50 @@ static void schedule_next_link_check(void)
 static void handle_link_check_failure(void)
 {
 	m_link_check_pending = false;
-	m_link_check_retry_count++;
+	m_consecutive_lc_ok = 0; /* Reset OK streak on any failure */
 
-	LOG_WRN("Link check failed (attempt %d/%d)", m_link_check_retry_count,
-		LINK_CHECK_MAX_RETRIES);
+	switch (m_state) {
+	case APP_LRW_STATE_HEALTHY:
+		m_consecutive_lc_fail++;
+		LOG_WRN("LC FAIL in HEALTHY (streak: %d/%d)",
+			m_consecutive_lc_fail, FAIL_THRESHOLD_WARNING);
 
-	if (m_link_check_retry_count >= LINK_CHECK_MAX_RETRIES) {
-		LOG_ERR("All link check retries failed, initiating rejoin");
-		m_state = APP_LRW_STATE_RECONNECT;
-		m_link_check_retry_count = 0;
-		k_work_submit_to_queue(&m_work_q, &m_rejoin_work);
+		if (m_consecutive_lc_fail >= FAIL_THRESHOLD_WARNING) {
+			LOG_WRN("Entering WARNING state");
+			m_state = APP_LRW_STATE_WARNING;
+			m_consecutive_lc_fail = 0;
+			m_warning_lc_fail_total = 0;
+		}
+		m_force_linkcheck = true;
+		break;
+
+	case APP_LRW_STATE_WARNING:
+		m_warning_lc_fail_total++;
+		LOG_WRN("LC FAIL in WARNING (total: %d/%d)",
+			m_warning_lc_fail_total, FAIL_THRESHOLD_RECONNECT);
+
+		if (m_warning_lc_fail_total >= FAIL_THRESHOLD_RECONNECT) {
+			LOG_ERR("Entering RECONNECT state - initiating rejoin");
+			m_state = APP_LRW_STATE_RECONNECT;
+			m_warning_lc_fail_total = 0;
+			k_work_submit_to_queue(&m_work_q, &m_rejoin_work);
+			return;
+		}
+		m_force_linkcheck = true;
+		break;
+
+	default:
+		LOG_WRN("LC FAIL in state %d (ignored)", m_state);
 		return;
 	}
 
-	/* Schedule retry with 3 minutes + randomness */
-	m_state = APP_LRW_STATE_WARNING;
-
+	/* Schedule retry */
 	int timeout = LINK_CHECK_RETRY_INTERVAL_SEC;
 #if defined(CONFIG_ENTROPY_GENERATOR)
 	timeout += (int32_t)sys_rand32_get() % (LINK_CHECK_RETRY_INTERVAL_SEC / 10);
 #endif
-
 	k_timer_start(&m_link_check_timer, K_SECONDS(timeout), K_FOREVER);
-	LOG_INF("Retrying link check in %d seconds", timeout);
+	LOG_INF("Next link check in %d seconds", timeout);
 }
 
 static void restart_normal_operation(void)
@@ -142,13 +172,54 @@ static void restart_normal_operation(void)
 	schedule_next_link_check();
 }
 
+static void handle_link_check_success(void)
+{
+	m_link_check_pending = false;
+	m_consecutive_lc_fail = 0; /* Reset fail streak on any success */
+
+	switch (m_state) {
+	case APP_LRW_STATE_HEALTHY:
+		LOG_INF("LC OK in HEALTHY");
+		/* Stay healthy, schedule next regular check */
+		schedule_next_link_check();
+		break;
+
+	case APP_LRW_STATE_WARNING:
+		m_consecutive_lc_ok++;
+		LOG_INF("LC OK in WARNING (streak: %d/%d)",
+			m_consecutive_lc_ok, OK_THRESHOLD_HEALTHY);
+
+		if (m_consecutive_lc_ok >= OK_THRESHOLD_HEALTHY) {
+			LOG_INF("Returning to HEALTHY state");
+			m_state = APP_LRW_STATE_HEALTHY;
+			m_consecutive_lc_ok = 0;
+			m_warning_lc_fail_total = 0;
+			m_force_linkcheck = false;
+			schedule_next_link_check();
+		} else {
+			/* Need more OKs, force LC on next message */
+			m_force_linkcheck = true;
+			/* Schedule shorter retry to verify recovery */
+			int timeout = LINK_CHECK_RETRY_INTERVAL_SEC;
+#if defined(CONFIG_ENTROPY_GENERATOR)
+			timeout += (int32_t)sys_rand32_get() % (LINK_CHECK_RETRY_INTERVAL_SEC / 10);
+#endif
+			k_timer_start(&m_link_check_timer, K_SECONDS(timeout), K_FOREVER);
+		}
+		break;
+
+	default:
+		LOG_INF("LC OK in state %d", m_state);
+		break;
+	}
+}
+
 static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
 {
 	LOG_INF("Link check response: margin=%d dB, gateways=%d", demod_margin, nb_gateways);
 
 	m_last_margin = demod_margin;
 	m_last_gw_count = nb_gateways;
-	m_link_check_pending = false;
 
 	/* Stop timeout timer */
 	k_timer_stop(&m_link_check_timer);
@@ -159,12 +230,7 @@ static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
 		return;
 	}
 
-	/* Success - reset retry counter and return to healthy state */
-	m_link_check_retry_count = 0;
-	m_state = APP_LRW_STATE_HEALTHY;
-
-	/* Schedule next link check (1 hour + randomness) */
-	schedule_next_link_check();
+	handle_link_check_success();
 }
 
 static void link_check_timeout_handler(struct k_timer *timer)
@@ -446,7 +512,9 @@ void app_lrw_send_with_link_check(void)
 		LOG_ERR("Link check request failed: %d", ret);
 	} else {
 		m_link_check_pending = true;
-		LOG_INF("Link check requested");
+		/* Start timeout timer for response */
+		k_timer_start(&m_link_check_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC), K_FOREVER);
+		LOG_INF("Link check requested, timeout in %d seconds", LINK_CHECK_TIMEOUT_SEC);
 	}
 
 	k_timer_start(&m_send_timer, K_NO_WAIT, K_FOREVER);
@@ -474,7 +542,12 @@ int app_lrw_get_info(struct app_lrw_info *info)
 	info->snr = m_last_snr;
 	info->margin = m_last_margin;
 	info->gw_count = m_last_gw_count;
-	info->lc_fail_count = m_link_check_retry_count;
+	info->consecutive_lc_fail = m_consecutive_lc_fail;
+	info->consecutive_lc_ok = m_consecutive_lc_ok;
+	info->warning_lc_fail_total = m_warning_lc_fail_total;
+	info->thresh_warning = FAIL_THRESHOLD_WARNING;
+	info->thresh_healthy = OK_THRESHOLD_HEALTHY;
+	info->thresh_reconnect = FAIL_THRESHOLD_RECONNECT;
 
 	return 0;
 }
