@@ -171,25 +171,9 @@ static int cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-static int cmd_lrw_join(const struct shell *shell, size_t argc, char **argv)
-{
-	app_lrw_join();
-	shell_print(shell, "Join request submitted");
-	return 0;
-}
-
-static int cmd_lrw_rejoin(const struct shell *shell, size_t argc, char **argv)
-{
-	app_lrw_rejoin();
-	shell_print(shell, "Rejoin request submitted (state set to RECONNECT)");
-	return 0;
-}
-
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_lrw,
 	SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
 	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
-	SHELL_CMD_ARG(join, NULL, "Trigger OTAA/ABP join.", cmd_lrw_join, 1, 0),
-	SHELL_CMD_ARG(rejoin, NULL, "Force rejoin (reset MAC and join).", cmd_lrw_rejoin, 1, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* defined(CONFIG_LORAWAN) */
 

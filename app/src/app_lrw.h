@@ -46,7 +46,6 @@ struct app_lrw_info {
 
 int app_lrw_init(void);
 void app_lrw_join(void);
-void app_lrw_rejoin(void);
 void app_lrw_send(void);
 void app_lrw_send_with_link_check(void);
 enum app_lrw_state app_lrw_get_state(void);

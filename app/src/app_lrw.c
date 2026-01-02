@@ -57,8 +57,6 @@ static struct k_work m_join_work;
 static enum app_lrw_state m_state = APP_LRW_STATE_IDLE;
 static struct k_timer m_link_check_timer;
 static struct k_work m_link_check_work;
-static struct k_work m_rejoin_work;
-
 /* State machine counters (per join.md section 13.1) */
 static uint8_t m_consecutive_lc_fail;      /* LC failures in a row (HEALTHY) */
 static uint8_t m_consecutive_lc_ok;        /* LC successes in a row (WARNING) */
@@ -67,6 +65,15 @@ static uint8_t m_force_lc_remaining;       /* Remaining forced LC messages */
 static bool m_link_check_pending;          /* Waiting for LC response */
 static uint8_t m_message_count;            /* Message counter for N-th LC */
 static uint8_t m_rejoin_attempts;          /* Rejoin attempt counter for backoff */
+static uint8_t m_join_busy_polls;          /* Counter for MAC busy polling */
+static bool m_init_join;                   /* True for first join after boot */
+
+/* Delayed work for join completion (gives MAC time to settle) */
+static struct k_work_delayable m_join_complete_work;
+
+/* Maximum time to wait for MAC to become ready (10 seconds = 20 × 500ms) */
+#define JOIN_BUSY_POLL_INTERVAL_MS  500
+#define JOIN_BUSY_MAX_POLLS         30
 
 /* Diagnostic data */
 static int m_current_dr;
@@ -78,16 +85,9 @@ static uint8_t m_last_gw_count;
 /* Forward declarations */
 static void handle_link_check_failure(void);
 static void restart_normal_operation(void);
+static void join_complete_work_handler(struct k_work *work);
 
-/**
- * @brief Calculate backoff time for rejoin attempts
- *
- * Simple exponential backoff: base * (multiplier ^ attempt)
- * Capped at maximum value. Easy to modify by changing constants above.
- *
- * @param attempt Current attempt number (0-based)
- * @return Backoff time in seconds
- */
+
 static uint32_t calculate_rejoin_backoff(uint8_t attempt)
 {
 	uint32_t backoff = REJOIN_BACKOFF_BASE_SEC;
@@ -99,7 +99,6 @@ static uint32_t calculate_rejoin_backoff(uint8_t attempt)
 			return REJOIN_BACKOFF_MAX_SEC;
 		}
 	}
-
 	return backoff;
 }
 
@@ -127,31 +126,52 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 	uint8_t max_next_payload_size;
 	uint8_t max_payload_size;
 	lorawan_get_payload_sizes(&max_next_payload_size, &max_payload_size);
-
 	m_current_dr = dr;
-
-	LOG_INF("New data rate: DR%d", dr);
-	LOG_INF("Maximum payload size: %d", max_payload_size);
-
-	/*
-	 * Detect async join completion:
-	 * When lorawan_join() returns immediately (e.g., -116 EBUSY from previous
-	 * pending operation), the join may complete asynchronously. This callback
-	 * is triggered after successful join - check DevAddr to confirm completion.
-	 */
-	if (m_state == APP_LRW_STATE_JOINING || m_state == APP_LRW_STATE_RECONNECT) {
-		MibRequestConfirm_t mib_req;
-		mib_req.Type = MIB_DEV_ADDR;
-		if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK &&
-		    mib_req.Param.DevAddr != 0) {
-			LOG_INF("Join completed (DevAddr: %08x) - transitioning to HEALTHY",
-				mib_req.Param.DevAddr);
-			k_timer_stop(&m_link_check_timer);
-			lorawan_enable_adr(g_app_config.lrw_adr);
-			m_state = APP_LRW_STATE_HEALTHY;
-			restart_normal_operation();
-		}
+	LOG_INF("New data rate: DR%d, Maximum payload size: %d", dr, max_payload_size);
 	}
+
+static void join_complete_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	/* Verify we're still in JOINING state (might have changed) */
+	if (m_state != APP_LRW_STATE_JOINING) {
+		LOG_DBG("Join complete handler: state changed to %d, ignoring", m_state);
+		return;
+	}
+
+	/* Check if MAC layer is still busy (join request in progress) */
+	if (LoRaMacIsBusy()) {
+		m_join_busy_polls++;
+
+		/* Check for timeout (10 seconds) */
+		if (m_join_busy_polls >= JOIN_BUSY_MAX_POLLS) {
+			LOG_ERR("MAC busy timeout after %d ms - triggering reconnect",
+				JOIN_BUSY_MAX_POLLS * JOIN_BUSY_POLL_INTERVAL_MS);
+			m_state = APP_LRW_STATE_RECONNECT;
+			m_rejoin_attempts = 0;
+			k_timer_start(&m_link_check_timer,
+				      K_SECONDS(REJOIN_BACKOFF_BASE_SEC), K_FOREVER);
+			return;
+		}
+
+		/* Log only every 10th poll (5 seconds) to reduce noise */
+		if ((m_join_busy_polls % 10) == 0) {
+			LOG_INF("MAC still busy (%d/%d)...",
+				m_join_busy_polls, JOIN_BUSY_MAX_POLLS);
+		}
+		k_work_schedule_for_queue(&m_work_q, &m_join_complete_work,
+					  K_MSEC(JOIN_BUSY_POLL_INTERVAL_MS));
+		return;
+	}
+
+	/* MAC is ready - join succeeded, transition to HEALTHY immediately */
+	LOG_INF("MAC ready - transitioning to HEALTHY");
+	m_init_join = false;  /* Next join will be rejoin with MAC reset */
+	lorawan_enable_adr(g_app_config.lrw_adr);
+	m_state = APP_LRW_STATE_HEALTHY;
+	m_rejoin_attempts = 0;
+	restart_normal_operation();
 }
 
 static void handle_link_check_failure(void)
@@ -279,14 +299,10 @@ static void link_check_timeout_handler(struct k_timer *timer)
 	/*
 	 * Timer fired - this could be either:
 	 * 1. Link check timeout (no response received)
-	 * 2. Join retry interval elapsed (in JOINING state)
-	 * 3. Rejoin retry interval elapsed (in RECONNECT state)
+	 * 2. Rejoin retry interval elapsed (in RECONNECT state)
 	 */
 	if (m_state == APP_LRW_STATE_RECONNECT) {
-		/* In RECONNECT: trigger rejoin work */
-		k_work_submit_to_queue(&m_work_q, &m_rejoin_work);
-	} else if (m_state == APP_LRW_STATE_JOINING) {
-		/* In JOINING: trigger join work */
+		/* In RECONNECT: trigger rejoin */
 		k_work_submit_to_queue(&m_work_q, &m_join_work);
 	} else {
 		/* Otherwise: trigger link check work */
@@ -328,69 +344,48 @@ static void link_check_work_handler(struct k_work *work)
 	k_timer_start(&m_link_check_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC), K_FOREVER);
 }
 
-static void rejoin_work_handler(struct k_work *work)
-{
-	int ret;
-
-	LOG_INF("Starting rejoin attempt %d...", m_rejoin_attempts + 1);
-
-	/* Stop send timer during rejoin */
-	k_timer_stop(&m_send_timer);
-
-	/* ABP doesn't need rejoin */
-	if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP) {
-		LOG_INF("ABP mode - rejoin not applicable");
-		m_state = APP_LRW_STATE_HEALTHY;
-		restart_normal_operation();
-		return;
-	}
-
-	/*
-	 * Reset MAC state machine before rejoin.
-	 * This clears any pending operations that could cause EBUSY (-116).
-	 * Similar to what happens on device restart.
-	 */
-	LoRaMacReset();
-
-	/* Perform OTAA join */
-	static struct lorawan_join_config config = {0};
-	config.dev_eui = g_app_config.lrw_deveui;
-	config.mode = LORAWAN_ACT_OTAA;
-	config.otaa.join_eui = g_app_config.lrw_joineui;
-	config.otaa.nwk_key = g_app_config.lrw_nwkkey;
-	config.otaa.app_key = g_app_config.lrw_appkey;
-
-	ret = lorawan_join(&config);
-	if (ret) {
-		uint32_t backoff = calculate_rejoin_backoff(m_rejoin_attempts);
-		LOG_ERR("Rejoin failed: %d, will retry in %u seconds (attempt %d)",
-			ret, backoff, m_rejoin_attempts + 1);
-		m_rejoin_attempts++;
-		/* Schedule retry with exponential backoff */
-		k_timer_start(&m_link_check_timer, K_SECONDS(backoff), K_FOREVER);
-		return;
-	}
-
-	lorawan_enable_adr(g_app_config.lrw_adr);
-
-	LOG_INF("Rejoin successful after %d attempt(s)", m_rejoin_attempts + 1);
-
-	m_state = APP_LRW_STATE_HEALTHY;
-
-	restart_normal_operation();
-}
-
 static void join_work_handler(struct k_work *work)
 {
 	int ret;
 
 	/* Stop send timer to prevent TX during join */
 	k_timer_stop(&m_send_timer);
-
 	m_state = APP_LRW_STATE_JOINING;
 
-	static struct lorawan_join_config config = {0};
+	if (m_init_join) {
+		LOG_INF("Initial join after boot");
+	} else {
+		LOG_INF("Rejoin attempt %d...", m_rejoin_attempts + 1);
 
+		/* ABP doesn't need rejoin - just restart normal operation */
+		if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP) {
+			LOG_INF("ABP mode - rejoin not applicable");
+			m_state = APP_LRW_STATE_HEALTHY;
+			restart_normal_operation();
+			return;
+		}
+
+		/*
+		 * Full MAC deinit + reinit before rejoin (not init join).
+		 * This is equivalent to device restart - clears all MAC state,
+		 * channels, pending operations, etc.
+		 */
+		LOG_INF("Deinitializing MAC...");
+		LoRaMacDeInitialization();
+
+		ret = lorawan_start();
+		if (ret) {
+			LOG_ERR("lorawan_start failed: %d", ret);
+			uint32_t backoff = calculate_rejoin_backoff(m_rejoin_attempts);
+			m_rejoin_attempts++;
+			k_timer_start(&m_link_check_timer, K_SECONDS(backoff), K_FOREVER);
+			return;
+		}
+		LOG_INF("MAC reinitialized");
+	}
+
+	/* Configure join based on activation mode */
+	static struct lorawan_join_config config = {0};
 	config.dev_eui = g_app_config.lrw_deveui;
 
 	if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA) {
@@ -410,24 +405,28 @@ static void join_work_handler(struct k_work *work)
 		return;
 	}
 
+	/* Reset counter before lorawan_join() */
+	m_join_busy_polls = 0;
+
 	ret = lorawan_join(&config);
-	if (ret) {
+	if (ret && ret != -ETIMEDOUT) {
+		/* Hard error (not ETIMEDOUT) - retry with backoff */
 		uint32_t backoff = calculate_rejoin_backoff(m_rejoin_attempts);
 		LOG_ERR("Join failed: %d, will retry in %u seconds (attempt %d)",
 			ret, backoff, m_rejoin_attempts + 1);
 		m_rejoin_attempts++;
-		/* Keep state as JOINING, schedule retry with backoff */
 		k_timer_start(&m_link_check_timer, K_SECONDS(backoff), K_FOREVER);
 		return;
 	}
 
-	lorawan_enable_adr(g_app_config.lrw_adr);
-
-	LOG_INF("LoRaWAN join successful");
-
-	m_state = APP_LRW_STATE_HEALTHY;
-
-	restart_normal_operation();
+	/*
+	 * lorawan_join() returned success or ETIMEDOUT.
+	 * ETIMEDOUT is ignored - Zephyr returns it prematurely.
+	 * Start polling LoRaMacIsBusy() - when MAC not busy, join succeeded.
+	 */
+	LOG_INF("lorawan_join() ret=%d, starting MAC busy poll...", ret);
+	k_work_schedule_for_queue(&m_work_q, &m_join_complete_work,
+				  K_MSEC(JOIN_BUSY_POLL_INTERVAL_MS));
 }
 
 static bool should_request_link_check(void)
@@ -582,13 +581,14 @@ int app_lrw_init(void)
 	k_work_init(&m_join_work, join_work_handler);
 	k_work_init(&m_send_work, send_work_handler);
 	k_work_init(&m_link_check_work, link_check_work_handler);
-	k_work_init(&m_rejoin_work, rejoin_work_handler);
+	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
 
 	k_timer_init(&m_send_timer, send_timer_handler, NULL);
 	k_timer_init(&m_link_check_timer, link_check_timeout_handler, NULL);
-	k_timer_start(&m_send_timer, K_SECONDS(5), K_FOREVER);
+	/* Don't start send timer here - wait for join completion via DR callback */
 
 	m_state = APP_LRW_STATE_IDLE;
+	m_init_join = true;  /* First join after boot */
 
 	return 0;
 }
@@ -596,13 +596,6 @@ int app_lrw_init(void)
 void app_lrw_join(void)
 {
 	k_work_submit_to_queue(&m_work_q, &m_join_work);
-}
-
-void app_lrw_rejoin(void)
-{
-	m_state = APP_LRW_STATE_RECONNECT;
-	m_rejoin_attempts = 0;
-	k_work_submit_to_queue(&m_work_q, &m_rejoin_work);
 }
 
 void app_lrw_send(void)
