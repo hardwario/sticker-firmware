@@ -25,6 +25,8 @@ enum app_lrw_state {
 
 struct app_lrw_info {
 	enum app_lrw_state state;
+	uint32_t dev_addr;             /* Device address (from OTAA or ABP) */
+	uint32_t fcnt_up;              /* Uplink frame counter */
 	int datarate;
 	int16_t rssi;
 	int8_t snr;
@@ -34,14 +36,17 @@ struct app_lrw_info {
 	uint8_t consecutive_lc_fail;   /* LC failures in a row (HEALTHY) */
 	uint8_t consecutive_lc_ok;     /* LC successes in a row (WARNING) */
 	uint8_t warning_lc_fail_total; /* Total LC failures in WARNING */
+	uint8_t message_count;         /* Messages sent since boot/rejoin */
 	/* Thresholds for display */
 	uint8_t thresh_warning;        /* FAIL_THRESHOLD_WARNING */
 	uint8_t thresh_healthy;        /* OK_THRESHOLD_HEALTHY */
 	uint8_t thresh_reconnect;      /* FAIL_THRESHOLD_RECONNECT */
+	uint8_t link_check_interval;   /* Every N-th message has LC */
 };
 
 int app_lrw_init(void);
 void app_lrw_join(void);
+void app_lrw_rejoin(void);
 void app_lrw_send(void);
 void app_lrw_send_with_link_check(void);
 enum app_lrw_state app_lrw_get_state(void);

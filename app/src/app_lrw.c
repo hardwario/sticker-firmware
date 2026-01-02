@@ -21,6 +21,10 @@
 #include <zephyr/random/random.h>
 #include <zephyr/sys/byteorder.h>
 
+/* LoRaMac includes for MIB access */
+#include <LoRaMac.h>
+#include <LoRaMacCrypto.h>
+
 /* Standard includes */
 #include <errno.h>
 #include <stdbool.h>
@@ -29,15 +33,19 @@
 
 LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
 
-/* Link check configuration constants */
-#define LINK_CHECK_INTERVAL_SEC       3600 /* 1 hour */
-#define LINK_CHECK_RETRY_INTERVAL_SEC 180  /* 3 minutes */
-#define LINK_CHECK_TIMEOUT_SEC        10    /* Timeout for response */
+/* Link check configuration constants UPDATE TO 5 after DEBUG*/
+#define LINK_CHECK_INTERVAL    2   //5/* Every N-th message has LC (0 = disabled) */
+#define LINK_CHECK_TIMEOUT_SEC 10  /* Timeout for response */
 
-/* State machine thresholds (per join.md) */
+/* State machine thresholds  */
 #define FAIL_THRESHOLD_WARNING   3  /* LC failures to enter WARNING */
-#define FAIL_THRESHOLD_RECONNECT 5 /* LC failures in WARNING to enter RECONNECT */
+#define FAIL_THRESHOLD_RECONNECT 2 //5 /* LC failures in WARNING to enter RECONNECT */
 #define OK_THRESHOLD_HEALTHY     2  /* LC successes in WARNING to return to HEALTHY */
+
+/* Join/Rejoin backoff configuration - easily adjustable */
+#define REJOIN_BACKOFF_BASE_SEC  60   /* Base backoff time in seconds */
+#define REJOIN_BACKOFF_MAX_SEC   3600 /* Maximum backoff time (1 hour) */
+#define REJOIN_BACKOFF_MULTIPLIER 2   /* Exponential multiplier per attempt */
 
 static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
 static struct k_work_q m_work_q;
@@ -55,8 +63,10 @@ static struct k_work m_rejoin_work;
 static uint8_t m_consecutive_lc_fail;      /* LC failures in a row (HEALTHY) */
 static uint8_t m_consecutive_lc_ok;        /* LC successes in a row (WARNING) */
 static uint8_t m_warning_lc_fail_total;    /* Total LC failures in WARNING */
-static bool m_force_linkcheck;             /* Force LC on next message */
+static uint8_t m_force_lc_remaining;       /* Remaining forced LC messages */
 static bool m_link_check_pending;          /* Waiting for LC response */
+static uint8_t m_message_count;            /* Message counter for N-th LC */
+static uint8_t m_rejoin_attempts;          /* Rejoin attempt counter for backoff */
 
 /* Diagnostic data */
 static int m_current_dr;
@@ -66,9 +76,32 @@ static uint8_t m_last_margin;
 static uint8_t m_last_gw_count;
 
 /* Forward declarations */
-static void schedule_next_link_check(void);
 static void handle_link_check_failure(void);
 static void restart_normal_operation(void);
+
+/**
+ * @brief Calculate backoff time for rejoin attempts
+ *
+ * Simple exponential backoff: base * (multiplier ^ attempt)
+ * Capped at maximum value. Easy to modify by changing constants above.
+ *
+ * @param attempt Current attempt number (0-based)
+ * @return Backoff time in seconds
+ */
+static uint32_t calculate_rejoin_backoff(uint8_t attempt)
+{
+	uint32_t backoff = REJOIN_BACKOFF_BASE_SEC;
+
+	/* Calculate exponential backoff */
+	for (uint8_t i = 0; i < attempt; i++) {
+		backoff *= REJOIN_BACKOFF_MULTIPLIER;
+		if (backoff >= REJOIN_BACKOFF_MAX_SEC) {
+			return REJOIN_BACKOFF_MAX_SEC;
+		}
+	}
+
+	return backoff;
+}
 
 static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t snr, uint8_t len,
 			      const uint8_t *data)
@@ -99,19 +132,26 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 
 	LOG_INF("New data rate: DR%d", dr);
 	LOG_INF("Maximum payload size: %d", max_payload_size);
-}
 
-static void schedule_next_link_check(void)
-{
-	int timeout = LINK_CHECK_INTERVAL_SEC;
-
-#if defined(CONFIG_ENTROPY_GENERATOR)
-	/* Add up to 10% randomness */
-	timeout += (int32_t)sys_rand32_get() % (LINK_CHECK_INTERVAL_SEC / 10);
-#endif
-
-	k_timer_start(&m_link_check_timer, K_SECONDS(timeout), K_FOREVER);
-	LOG_DBG("Next link check in %d seconds", timeout);
+	/*
+	 * Detect async join completion:
+	 * When lorawan_join() returns immediately (e.g., -116 EBUSY from previous
+	 * pending operation), the join may complete asynchronously. This callback
+	 * is triggered after successful join - check DevAddr to confirm completion.
+	 */
+	if (m_state == APP_LRW_STATE_JOINING || m_state == APP_LRW_STATE_RECONNECT) {
+		MibRequestConfirm_t mib_req;
+		mib_req.Type = MIB_DEV_ADDR;
+		if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK &&
+		    mib_req.Param.DevAddr != 0) {
+			LOG_INF("Join completed (DevAddr: %08x) - transitioning to HEALTHY",
+				mib_req.Param.DevAddr);
+			k_timer_stop(&m_link_check_timer);
+			lorawan_enable_adr(g_app_config.lrw_adr);
+			m_state = APP_LRW_STATE_HEALTHY;
+			restart_normal_operation();
+		}
+	}
 }
 
 static void handle_link_check_failure(void)
@@ -130,8 +170,11 @@ static void handle_link_check_failure(void)
 			m_state = APP_LRW_STATE_WARNING;
 			m_consecutive_lc_fail = 0;
 			m_warning_lc_fail_total = 0;
+			m_force_lc_remaining = 0; /* WARNING uses normal N-th interval */
+		} else {
+			/* Force LC on remaining attempts to recover */
+			m_force_lc_remaining = FAIL_THRESHOLD_WARNING - m_consecutive_lc_fail;
 		}
-		m_force_linkcheck = true;
 		break;
 
 	case APP_LRW_STATE_WARNING:
@@ -140,36 +183,41 @@ static void handle_link_check_failure(void)
 			m_warning_lc_fail_total, FAIL_THRESHOLD_RECONNECT);
 
 		if (m_warning_lc_fail_total >= FAIL_THRESHOLD_RECONNECT) {
-			LOG_ERR("Entering RECONNECT state - initiating rejoin");
-			m_state = APP_LRW_STATE_RECONNECT;
+			/* Only OTAA can reconnect */
+			if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA) {
+				LOG_ERR("Entering RECONNECT state - will rejoin in 5 seconds");
+				m_state = APP_LRW_STATE_RECONNECT;
+				m_warning_lc_fail_total = 0;
+				m_rejoin_attempts = 0; /* Reset backoff counter */
+				/* Schedule first rejoin after 5 seconds (non-blocking) */
+				k_timer_start(&m_link_check_timer, K_SECONDS(5), K_FOREVER);
+				return;
+			}
+			/* ABP: stay in WARNING, reset counter */
+			LOG_WRN("ABP mode - cannot rejoin, staying in WARNING");
 			m_warning_lc_fail_total = 0;
-			k_work_submit_to_queue(&m_work_q, &m_rejoin_work);
-			return;
 		}
-		m_force_linkcheck = true;
+		/* WARNING: NO force, use normal N-th interval */
 		break;
 
 	default:
 		LOG_WRN("LC FAIL in state %d (ignored)", m_state);
 		return;
 	}
-
-	/* Schedule retry */
-	int timeout = LINK_CHECK_RETRY_INTERVAL_SEC;
-#if defined(CONFIG_ENTROPY_GENERATOR)
-	timeout += (int32_t)sys_rand32_get() % (LINK_CHECK_RETRY_INTERVAL_SEC / 10);
-#endif
-	k_timer_start(&m_link_check_timer, K_SECONDS(timeout), K_FOREVER);
-	LOG_INF("Next link check in %d seconds", timeout);
 }
 
 static void restart_normal_operation(void)
 {
-	/* Restart send timer */
-	k_timer_start(&m_send_timer, K_SECONDS(5), K_FOREVER);
+	/* Reset all state machine counters */
+	m_consecutive_lc_fail = 0;
+	m_consecutive_lc_ok = 0;
+	m_warning_lc_fail_total = 0;
+	m_force_lc_remaining = 0;
+	m_message_count = 0;
+	m_rejoin_attempts = 0;
 
-	/* Schedule link check */
-	schedule_next_link_check();
+	/* Send first message immediately after join/rejoin (with LC) */
+	k_work_submit_to_queue(&m_work_q, &m_send_work);
 }
 
 static void handle_link_check_success(void)
@@ -180,8 +228,8 @@ static void handle_link_check_success(void)
 	switch (m_state) {
 	case APP_LRW_STATE_HEALTHY:
 		LOG_INF("LC OK in HEALTHY");
-		/* Stay healthy, schedule next regular check */
-		schedule_next_link_check();
+		/* Recovery successful, back to normal N-th interval */
+		m_force_lc_remaining = 0;
 		break;
 
 	case APP_LRW_STATE_WARNING:
@@ -194,17 +242,10 @@ static void handle_link_check_success(void)
 			m_state = APP_LRW_STATE_HEALTHY;
 			m_consecutive_lc_ok = 0;
 			m_warning_lc_fail_total = 0;
-			m_force_linkcheck = false;
-			schedule_next_link_check();
+			m_force_lc_remaining = 0;
 		} else {
 			/* Need more OKs, force LC on next message */
-			m_force_linkcheck = true;
-			/* Schedule shorter retry to verify recovery */
-			int timeout = LINK_CHECK_RETRY_INTERVAL_SEC;
-#if defined(CONFIG_ENTROPY_GENERATOR)
-			timeout += (int32_t)sys_rand32_get() % (LINK_CHECK_RETRY_INTERVAL_SEC / 10);
-#endif
-			k_timer_start(&m_link_check_timer, K_SECONDS(timeout), K_FOREVER);
+			m_force_lc_remaining = 1;
 		}
 		break;
 
@@ -238,10 +279,19 @@ static void link_check_timeout_handler(struct k_timer *timer)
 	/*
 	 * Timer fired - this could be either:
 	 * 1. Link check timeout (no response received)
-	 * 2. Retry interval elapsed
-	 * In both cases, submit work to attempt link check
+	 * 2. Join retry interval elapsed (in JOINING state)
+	 * 3. Rejoin retry interval elapsed (in RECONNECT state)
 	 */
-	k_work_submit_to_queue(&m_work_q, &m_link_check_work);
+	if (m_state == APP_LRW_STATE_RECONNECT) {
+		/* In RECONNECT: trigger rejoin work */
+		k_work_submit_to_queue(&m_work_q, &m_rejoin_work);
+	} else if (m_state == APP_LRW_STATE_JOINING) {
+		/* In JOINING: trigger join work */
+		k_work_submit_to_queue(&m_work_q, &m_join_work);
+	} else {
+		/* Otherwise: trigger link check work */
+		k_work_submit_to_queue(&m_work_q, &m_link_check_work);
+	}
 }
 
 static void link_check_work_handler(struct k_work *work)
@@ -282,15 +332,10 @@ static void rejoin_work_handler(struct k_work *work)
 {
 	int ret;
 
-	LOG_INF("Starting rejoin process...");
+	LOG_INF("Starting rejoin attempt %d...", m_rejoin_attempts + 1);
 
 	/* Stop send timer during rejoin */
 	k_timer_stop(&m_send_timer);
-
-	/* LED indication: Yellow blink for rejoin start */
-	struct app_led_blink_req led_req = {
-		.color = APP_LED_CHANNEL_Y, .duration = 100, .space = 100, .repetitions = 3};
-	app_led_blink(&led_req);
 
 	/* ABP doesn't need rejoin */
 	if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP) {
@@ -299,6 +344,13 @@ static void rejoin_work_handler(struct k_work *work)
 		restart_normal_operation();
 		return;
 	}
+
+	/*
+	 * Reset MAC state machine before rejoin.
+	 * This clears any pending operations that could cause EBUSY (-116).
+	 * Similar to what happens on device restart.
+	 */
+	LoRaMacReset();
 
 	/* Perform OTAA join */
 	static struct lorawan_join_config config = {0};
@@ -310,26 +362,18 @@ static void rejoin_work_handler(struct k_work *work)
 
 	ret = lorawan_join(&config);
 	if (ret) {
-		LOG_ERR("Rejoin failed: %d, will retry in 60 seconds", ret);
-
-		/* LED indication: Red blink for failure */
-		led_req.color = APP_LED_CHANNEL_R;
-		led_req.repetitions = 2;
-		app_led_blink(&led_req);
-
-		/* Schedule retry after 60 seconds */
-		k_timer_start(&m_link_check_timer, K_SECONDS(60), K_FOREVER);
+		uint32_t backoff = calculate_rejoin_backoff(m_rejoin_attempts);
+		LOG_ERR("Rejoin failed: %d, will retry in %u seconds (attempt %d)",
+			ret, backoff, m_rejoin_attempts + 1);
+		m_rejoin_attempts++;
+		/* Schedule retry with exponential backoff */
+		k_timer_start(&m_link_check_timer, K_SECONDS(backoff), K_FOREVER);
 		return;
 	}
 
 	lorawan_enable_adr(g_app_config.lrw_adr);
 
-	LOG_INF("Rejoin successful");
-
-	/* LED indication: Green blink for success */
-	led_req.color = APP_LED_CHANNEL_G;
-	led_req.repetitions = 2;
-	app_led_blink(&led_req);
+	LOG_INF("Rejoin successful after %d attempt(s)", m_rejoin_attempts + 1);
 
 	m_state = APP_LRW_STATE_HEALTHY;
 
@@ -339,6 +383,9 @@ static void rejoin_work_handler(struct k_work *work)
 static void join_work_handler(struct k_work *work)
 {
 	int ret;
+
+	/* Stop send timer to prevent TX during join */
+	k_timer_stop(&m_send_timer);
 
 	m_state = APP_LRW_STATE_JOINING;
 
@@ -365,9 +412,12 @@ static void join_work_handler(struct k_work *work)
 
 	ret = lorawan_join(&config);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("lorawan_join", ret);
-		/* Keep state as JOINING, schedule retry */
-		k_timer_start(&m_link_check_timer, K_SECONDS(60), K_FOREVER);
+		uint32_t backoff = calculate_rejoin_backoff(m_rejoin_attempts);
+		LOG_ERR("Join failed: %d, will retry in %u seconds (attempt %d)",
+			ret, backoff, m_rejoin_attempts + 1);
+		m_rejoin_attempts++;
+		/* Keep state as JOINING, schedule retry with backoff */
+		k_timer_start(&m_link_check_timer, K_SECONDS(backoff), K_FOREVER);
 		return;
 	}
 
@@ -377,13 +427,37 @@ static void join_work_handler(struct k_work *work)
 
 	m_state = APP_LRW_STATE_HEALTHY;
 
-	/* Start link check timer after successful join */
-	schedule_next_link_check();
+	restart_normal_operation();
+}
+
+static bool should_request_link_check(void)
+{
+	/* Disabled if LINK_CHECK_INTERVAL = 0 */
+	if (LINK_CHECK_INTERVAL == 0) {
+		return false;
+	}
+
+	/* Force LC for recovery attempts */
+	if (m_force_lc_remaining > 0) {
+		m_force_lc_remaining--;
+		return true;
+	}
+
+	/* Message number to be sent (1-based) */
+	uint8_t msg_num = m_message_count + 1;
+
+	/* First message always has LC, then every N-th (5, 10, 15...) */
+	if (msg_num == 1 || (msg_num % LINK_CHECK_INTERVAL) == 0) {
+		return true;
+	}
+
+	return false;
 }
 
 static void send_work_handler(struct k_work *work)
 {
 	int ret;
+	bool with_link_check;
 
 	/* Block transmissions during joining or reconnect */
 	if (m_state == APP_LRW_STATE_JOINING || m_state == APP_LRW_STATE_RECONNECT) {
@@ -413,12 +487,36 @@ static void send_work_handler(struct k_work *work)
 		return;
 	}
 
-	LOG_INF("Sending data...");
+	/* Determine if this message should have link check */
+	with_link_check = should_request_link_check();
+
+	if (with_link_check) {
+		ret = lorawan_request_link_check(false);
+		if (ret) {
+			LOG_ERR("Link check request failed: %d", ret);
+		} else {
+			m_link_check_pending = true;
+			/* Start timeout timer for response */
+			k_timer_start(&m_link_check_timer,
+				      K_SECONDS(LINK_CHECK_TIMEOUT_SEC), K_FOREVER);
+			LOG_INF("Sending data with LC (msg #%u)...", m_message_count + 1);
+		}
+	} else {
+		LOG_INF("Sending data (msg #%u)...", m_message_count + 1);
+	}
 
 	ret = lorawan_send(1, buf, len, LORAWAN_MSG_UNCONFIRMED);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lorawan_send", ret);
+		if (with_link_check) {
+			m_link_check_pending = false;
+			k_timer_stop(&m_link_check_timer);
+		}
+		return;
 	}
+
+	/* Increment message counter after successful send */
+	m_message_count++;
 
 	LOG_INF("Data sent");
 }
@@ -500,6 +598,13 @@ void app_lrw_join(void)
 	k_work_submit_to_queue(&m_work_q, &m_join_work);
 }
 
+void app_lrw_rejoin(void)
+{
+	m_state = APP_LRW_STATE_RECONNECT;
+	m_rejoin_attempts = 0;
+	k_work_submit_to_queue(&m_work_q, &m_rejoin_work);
+}
+
 void app_lrw_send(void)
 {
 	k_timer_start(&m_send_timer, K_NO_WAIT, K_FOREVER);
@@ -532,11 +637,30 @@ bool app_lrw_is_ready(void)
 
 int app_lrw_get_info(struct app_lrw_info *info)
 {
+	MibRequestConfirm_t mib_req;
+
 	if (!info) {
 		return -EINVAL;
 	}
 
 	info->state = m_state;
+
+	/* Get DevAddr from MIB */
+	mib_req.Type = MIB_DEV_ADDR;
+	if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK) {
+		info->dev_addr = mib_req.Param.DevAddr;
+	} else {
+		info->dev_addr = 0;
+	}
+
+	/* Get FCntUp from crypto module */
+	uint32_t fcnt_up;
+	if (LoRaMacCryptoGetFCntUp(&fcnt_up) == LORAMAC_CRYPTO_SUCCESS) {
+		info->fcnt_up = fcnt_up;
+	} else {
+		info->fcnt_up = 0;
+	}
+
 	info->datarate = m_current_dr;
 	info->rssi = m_last_rssi;
 	info->snr = m_last_snr;
@@ -545,9 +669,11 @@ int app_lrw_get_info(struct app_lrw_info *info)
 	info->consecutive_lc_fail = m_consecutive_lc_fail;
 	info->consecutive_lc_ok = m_consecutive_lc_ok;
 	info->warning_lc_fail_total = m_warning_lc_fail_total;
+	info->message_count = m_message_count;
 	info->thresh_warning = FAIL_THRESHOLD_WARNING;
 	info->thresh_healthy = OK_THRESHOLD_HEALTHY;
 	info->thresh_reconnect = FAIL_THRESHOLD_RECONNECT;
+	info->link_check_interval = LINK_CHECK_INTERVAL;
 
 	return 0;
 }

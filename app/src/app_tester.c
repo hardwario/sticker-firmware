@@ -146,11 +146,14 @@ static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	shell_print(shell, "State:         %s", lrw_state_to_str(info.state));
+	shell_print(shell, "DevAddr:       %08x", info.dev_addr);
+	shell_print(shell, "FCnt Up:       %u", info.fcnt_up);
 	shell_print(shell, "Datarate:      DR%d", info.datarate);
 	shell_print(shell, "RSSI:          %d dBm", info.rssi);
 	shell_print(shell, "SNR:           %d dB", info.snr);
 	shell_print(shell, "Margin:        %u dB", info.margin);
 	shell_print(shell, "Gateways:      %u", info.gw_count);
+	shell_print(shell, "Messages:      %u", info.message_count);
 	shell_print(shell, "Healthy->Warning:    %u/%u",
 		    info.consecutive_lc_fail, info.thresh_warning);
 	shell_print(shell, "Warning->Healthy:    %u/%u",
@@ -168,9 +171,25 @@ static int cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_lrw_join(const struct shell *shell, size_t argc, char **argv)
+{
+	app_lrw_join();
+	shell_print(shell, "Join request submitted");
+	return 0;
+}
+
+static int cmd_lrw_rejoin(const struct shell *shell, size_t argc, char **argv)
+{
+	app_lrw_rejoin();
+	shell_print(shell, "Rejoin request submitted (state set to RECONNECT)");
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_lrw,
 	SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
 	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
+	SHELL_CMD_ARG(join, NULL, "Trigger OTAA/ABP join.", cmd_lrw_join, 1, 0),
+	SHELL_CMD_ARG(rejoin, NULL, "Force rejoin (reset MAC and join).", cmd_lrw_rejoin, 1, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* defined(CONFIG_LORAWAN) */
 
