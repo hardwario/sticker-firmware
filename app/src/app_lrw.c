@@ -48,6 +48,14 @@ static struct k_timer m_link_check_timer;
 static struct k_work m_link_check_work;
 static struct k_work m_rejoin_work;
 
+/* Diagnostic data */
+static int m_current_dr;
+static int16_t m_last_rssi;
+static int8_t m_last_snr;
+static uint8_t m_last_margin;
+static uint8_t m_last_gw_count;
+static bool m_link_check_pending;
+
 /* Forward declarations */
 static void schedule_next_link_check(void);
 static void handle_link_check_failure(void);
@@ -57,6 +65,9 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 			      const uint8_t *data)
 {
 	LOG_INF("Port %d, Flags 0x%02x, RSSI %d dB, SNR %d dBm", port, flags, rssi, snr);
+
+	m_last_rssi = rssi;
+	m_last_snr = snr;
 
 	if (data) {
 		LOG_HEXDUMP_INF(data, len, "Payload: ");
@@ -74,6 +85,8 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 	uint8_t max_next_payload_size;
 	uint8_t max_payload_size;
 	lorawan_get_payload_sizes(&max_next_payload_size, &max_payload_size);
+
+	m_current_dr = dr;
 
 	LOG_INF("New data rate: DR%d", dr);
 	LOG_INF("Maximum payload size: %d", max_payload_size);
@@ -94,6 +107,7 @@ static void schedule_next_link_check(void)
 
 static void handle_link_check_failure(void)
 {
+	m_link_check_pending = false;
 	m_link_check_retry_count++;
 
 	LOG_WRN("Link check failed (attempt %d/%d)", m_link_check_retry_count,
@@ -101,14 +115,14 @@ static void handle_link_check_failure(void)
 
 	if (m_link_check_retry_count >= LINK_CHECK_MAX_RETRIES) {
 		LOG_ERR("All link check retries failed, initiating rejoin");
-		m_state = APP_LRW_STATE_JOINING;
+		m_state = APP_LRW_STATE_RECONNECT;
 		m_link_check_retry_count = 0;
 		k_work_submit_to_queue(&m_work_q, &m_rejoin_work);
 		return;
 	}
 
 	/* Schedule retry with 3 minutes + randomness */
-	m_state = APP_LRW_STATE_LINK_CHECK_RETRY;
+	m_state = APP_LRW_STATE_WARNING;
 
 	int timeout = LINK_CHECK_RETRY_INTERVAL_SEC;
 #if defined(CONFIG_ENTROPY_GENERATOR)
@@ -131,6 +145,10 @@ static void restart_normal_operation(void)
 static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
 {
 	LOG_INF("Link check response: margin=%d dB, gateways=%d", demod_margin, nb_gateways);
+
+	m_last_margin = demod_margin;
+	m_last_gw_count = nb_gateways;
+	m_link_check_pending = false;
 
 	/* Stop timeout timer */
 	k_timer_stop(&m_link_check_timer);
@@ -164,22 +182,22 @@ static void link_check_work_handler(struct k_work *work)
 {
 	int ret;
 
-	if (m_state == APP_LRW_STATE_JOINING) {
-		/* Don't request link check while joining */
+	if (m_state == APP_LRW_STATE_JOINING || m_state == APP_LRW_STATE_RECONNECT) {
+		/* Don't request link check while joining/reconnecting */
 		return;
 	}
 
 	/*
-	 * If we're in LINK_CHECK_PENDING state and this work runs,
+	 * If link check is pending and this work runs,
 	 * it means the timeout fired - treat as failure
 	 */
-	if (m_state == APP_LRW_STATE_LINK_CHECK_PENDING) {
+	if (m_link_check_pending) {
 		LOG_WRN("Link check timeout - no response received");
 		handle_link_check_failure();
 		return;
 	}
 
-	m_state = APP_LRW_STATE_LINK_CHECK_PENDING;
+	m_link_check_pending = true;
 
 	ret = lorawan_request_link_check(false);
 	if (ret) {
@@ -301,8 +319,8 @@ static void send_work_handler(struct k_work *work)
 {
 	int ret;
 
-	/* Block transmissions during joining or link check retry */
-	if (m_state == APP_LRW_STATE_JOINING || m_state == APP_LRW_STATE_LINK_CHECK_RETRY) {
+	/* Block transmissions during joining or reconnect */
+	if (m_state == APP_LRW_STATE_JOINING || m_state == APP_LRW_STATE_RECONNECT) {
 		LOG_WRN("TX blocked: state=%d", m_state);
 		return;
 	}
@@ -421,6 +439,19 @@ void app_lrw_send(void)
 	k_timer_start(&m_send_timer, K_NO_WAIT, K_FOREVER);
 }
 
+void app_lrw_send_with_link_check(void)
+{
+	int ret = lorawan_request_link_check(false);
+	if (ret) {
+		LOG_ERR("Link check request failed: %d", ret);
+	} else {
+		m_link_check_pending = true;
+		LOG_INF("Link check requested");
+	}
+
+	k_timer_start(&m_send_timer, K_NO_WAIT, K_FOREVER);
+}
+
 enum app_lrw_state app_lrw_get_state(void)
 {
 	return m_state;
@@ -428,5 +459,22 @@ enum app_lrw_state app_lrw_get_state(void)
 
 bool app_lrw_is_ready(void)
 {
-	return m_state == APP_LRW_STATE_HEALTHY || m_state == APP_LRW_STATE_LINK_CHECK_PENDING;
+	return m_state == APP_LRW_STATE_HEALTHY || m_state == APP_LRW_STATE_WARNING;
+}
+
+int app_lrw_get_info(struct app_lrw_info *info)
+{
+	if (!info) {
+		return -EINVAL;
+	}
+
+	info->state = m_state;
+	info->datarate = m_current_dr;
+	info->rssi = m_last_rssi;
+	info->snr = m_last_snr;
+	info->margin = m_last_margin;
+	info->gw_count = m_last_gw_count;
+	info->lc_fail_count = m_link_check_retry_count;
+
+	return 0;
 }

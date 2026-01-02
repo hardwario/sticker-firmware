@@ -9,6 +9,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,14 +19,26 @@ enum app_lrw_state {
 	APP_LRW_STATE_IDLE,
 	APP_LRW_STATE_JOINING,
 	APP_LRW_STATE_HEALTHY,
-	APP_LRW_STATE_LINK_CHECK_PENDING,
-	APP_LRW_STATE_LINK_CHECK_RETRY,
+	APP_LRW_STATE_WARNING,
+	APP_LRW_STATE_RECONNECT,
+};
+
+struct app_lrw_info {
+	enum app_lrw_state state;
+	int datarate;
+	int16_t rssi;
+	int8_t snr;
+	uint8_t margin;
+	uint8_t gw_count;
+	uint8_t lc_fail_count;
 };
 
 int app_lrw_init(void);
 void app_lrw_join(void);
 void app_lrw_send(void);
+void app_lrw_send_with_link_check(void);
 enum app_lrw_state app_lrw_get_state(void);
+int app_lrw_get_info(struct app_lrw_info *info);
 bool app_lrw_is_ready(void);
 
 #ifdef __cplusplus
