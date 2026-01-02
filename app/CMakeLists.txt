@@ -18,6 +18,12 @@ target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
 target_sources_ifdef(CONFIG_LIS2DH app PRIVATE src/app_accel.c)
 target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw.c)
+target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
+  ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac
+  ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/region
+  ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/system
+  ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/boards
+)
 target_sources_ifdef(CONFIG_OPT3001 app PRIVATE src/app_opt3001.c)
 target_sources_ifdef(CONFIG_SHELL app PRIVATE src/app_tester.c)
 target_sources_ifdef(CONFIG_SHT4X app PRIVATE src/app_sht40.c)
