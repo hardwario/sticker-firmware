@@ -7,11 +7,14 @@
 #ifndef APP_SHT40_H_
 #define APP_SHT40_H_
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 int app_sht40_read(float *temperature, float *humidity);
+int app_sht40_read_serial(uint32_t *serial_number);
 
 #ifdef __cplusplus
 }
