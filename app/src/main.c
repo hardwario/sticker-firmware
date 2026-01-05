@@ -186,6 +186,35 @@ int main(void)
 			}
 		}
 
+#if defined(CONFIG_LORAWAN)
+		enum app_lrw_state lrw_state = app_lrw_get_state();
+
+		if (lrw_state == APP_LRW_STATE_JOINING ||
+		    lrw_state == APP_LRW_STATE_RECONNECT) {
+			struct app_led_play_req req = {
+				.commands = {
+					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
+					{.type = APP_LED_CMD_DELAY, .duration = 100},
+					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
+					{.type = APP_LED_CMD_DELAY, .duration = 200},
+					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
+					{.type = APP_LED_CMD_DELAY, .duration = 100},
+					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
+					{.type = APP_LED_CMD_DELAY, .duration = 200},
+					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
+					{.type = APP_LED_CMD_DELAY, .duration = 800},
+					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
+					{.type = APP_LED_CMD_END}},
+				.repetitions = 1};
+			app_led_play(&req);
+		} else if (lrw_state == APP_LRW_STATE_WARNING) {
+			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
+							.duration = 100,
+							.space = 200,
+							.repetitions = 3};
+			app_led_blink(&req);
+		} else
+#endif /* defined(CONFIG_LORAWAN) */
 		if (app_alarm_is_active()) {
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_R,
 							.duration = 5,
