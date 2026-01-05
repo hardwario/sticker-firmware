@@ -5,6 +5,7 @@
  */
 
 #include "app_led.h"
+#include "app_lrw.h"
 #include "app_sensor.h"
 
 /* Zephyr includes */
@@ -115,6 +116,67 @@ static void cmd_print_motion_count(const struct shell *shell)
 	shell_print(shell, SHELL_PFX " motion count %d", (int)g_app_sensor_data.motion_count);
 }
 
+#if defined(CONFIG_LORAWAN)
+static const char *lrw_state_to_str(enum app_lrw_state state)
+{
+	switch (state) {
+	case APP_LRW_STATE_IDLE:
+		return "IDLE";
+	case APP_LRW_STATE_JOINING:
+		return "JOINING";
+	case APP_LRW_STATE_HEALTHY:
+		return "HEALTHY";
+	case APP_LRW_STATE_WARNING:
+		return "WARNING";
+	case APP_LRW_STATE_RECONNECT:
+		return "RECONNECT";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
+{
+	struct app_lrw_info info;
+	int ret = app_lrw_get_info(&info);
+
+	if (ret) {
+		shell_error(shell, "Failed to get LRW info: %d", ret);
+		return ret;
+	}
+
+	shell_print(shell, "state: %s", lrw_state_to_str(info.state));
+	shell_print(shell, "devaddr: %08x", info.dev_addr);
+	shell_print(shell, "fcnt up: %u", info.fcnt_up);
+	shell_print(shell, "datarate: DR%d", info.datarate);
+	shell_print(shell, "rssi: %d dBm", info.rssi);
+	shell_print(shell, "snr: %d dB", info.snr);
+	shell_print(shell, "margin: %u dB", info.margin);
+	shell_print(shell, "gateways: %u", info.gw_count);
+	shell_print(shell, "messages: %u", info.message_count);
+	shell_print(shell, "healthy->warning: %u/%u",
+		    info.consecutive_lc_fail, info.thresh_warning);
+	shell_print(shell, "warning->healthy: %u/%u",
+		    info.consecutive_lc_ok, info.thresh_healthy);
+	shell_print(shell, "warning->reconnect: %u/%u",
+		    info.warning_lc_fail_total, info.thresh_reconnect);
+
+	return 0;
+}
+
+static int cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
+{
+	app_lrw_send_with_link_check();
+	shell_print(shell, "Sending data with link check request");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_lrw,
+	SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
+	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
+	SHELL_SUBCMD_SET_END);
+#endif /* defined(CONFIG_LORAWAN) */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_test, SHELL_CMD_ARG(led_cycle, NULL, "Cycle LED (R/G/Y).", cmd_cycle_led, 1, 0),
 	SHELL_CMD_ARG(led_switch, NULL, "Switch LED channel (format red|yellow|green on|off).",
@@ -130,7 +192,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      0),
 	SHELL_CMD_ARG(motion, NULL, "Print number of PIR activations", cmd_print_motion_count, 1,
 		      0),
-
+#if defined(CONFIG_LORAWAN)
+	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
+#endif /* defined(CONFIG_LORAWAN) */
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(tester, &sub_test, "Tester commands.", NULL);
