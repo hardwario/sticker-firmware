@@ -1,4 +1,4 @@
-.PHONY: all deploy release debug flash gdb rttt init clean config config_debug
+.PHONY: all deploy release debug flash flash_debug flash_release gdb rttt init clean config config_debug
 
 all: release
 
@@ -20,6 +20,12 @@ debug:
 
 flash:
 	@west flash
+
+flash_debug:
+	@west flash --hex-file deploy/sticker-debug.hex
+
+flash_release:
+	@west flash --hex-file deploy/sticker-release.hex
 
 gdb:
 	@west debug
