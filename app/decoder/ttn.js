@@ -204,7 +204,7 @@ function decodeUplink(input) {
   };
 }
 
-if (true) {
+if (false) {
 
   // console.log("Decoded data:", JSON.stringify(decodeUplink({
   //   bytes: [0x78, 0x1a, 0x00, 0x01, 0xa5, 0x08, 0xd7, 0x88, 0x08, 0xed, 0x75],
