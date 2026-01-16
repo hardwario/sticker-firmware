@@ -17,7 +17,7 @@
 #include "app_opt3001.h"
 #include "app_pyq1648.h"
 #include "app_sensor.h"
-#include "app_sht40.h"
+#include "app_sht4x.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -261,9 +261,9 @@ void app_sensor_sample(void)
 #endif /* defined(CONFIG_LIS2DH) */
 
 #if defined(CONFIG_SHT4X)
-	ret = app_sht40_read(&temperature, &humidity);
+	ret = app_sht4x_read(&temperature, &humidity);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_sht40_read", ret);
+		LOG_ERR_CALL_FAILED_INT("app_sht4x_read", ret);
 	}
 #endif /* defined(CONFIG_SHT4X) */
 

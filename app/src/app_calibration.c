@@ -9,7 +9,7 @@
 #include "app_led.h"
 #include "app_log.h"
 #include "app_machine_probe.h"
-#include "app_sht40.h"
+#include "app_sht4x.h"
 #include "app_wdog.h"
 
 /* Zephyr includes */
@@ -73,9 +73,9 @@ static void read_sht40(void)
 
 	float temperature;
 	float humidity;
-	ret = app_sht40_read(&temperature, &humidity);
+	ret = app_sht4x_read(&temperature, &humidity);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_sht40_read", ret);
+		LOG_ERR_CALL_FAILED_INT("app_sht4x_read", ret);
 		return;
 	}
 

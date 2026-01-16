@@ -9,7 +9,7 @@
 #include "app_lrw.h"
 #include "app_machine_probe.h"
 #include "app_sensor.h"
-#include "app_sht40.h"
+#include "app_sht4x.h"
 
 /* Zephyr includes */
 #include <zephyr/init.h>
@@ -156,7 +156,7 @@ static void cmd_print_serial_numbers(const struct shell *shell)
 #if defined(CONFIG_SHT4X)
 	/* SHT40 (onboard temperature/humidity sensor) */
 	uint32_t sht40_serial;
-	ret = app_sht40_read_serial(&sht40_serial);
+	ret = app_sht4x_read_serial(&sht40_serial);
 	if (ret) {
 		shell_error(shell, "Failed to read SHT40 serial: %d", ret);
 	} else {

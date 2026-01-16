@@ -26,7 +26,7 @@ target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
 )
 target_sources_ifdef(CONFIG_OPT3001 app PRIVATE src/app_opt3001.c)
 target_sources_ifdef(CONFIG_SHELL app PRIVATE src/app_tester.c)
-target_sources_ifdef(CONFIG_SHT4X app PRIVATE src/app_sht40.c)
+target_sources_ifdef(CONFIG_SHT4X app PRIVATE src/app_sht4x.c)
 target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_ds18b20.c)
 target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_w1.c)
 target_sources_ifdef(CONFIG_WATCHDOG app PRIVATE src/app_wdog.c)

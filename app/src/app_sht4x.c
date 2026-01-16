@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "app_sht40.h"
+#include "app_sht4x.h"
 #include "app_log.h"
 
 /* Zephyr includes */
@@ -18,9 +18,9 @@
 /* Standard includes */
 #include <errno.h>
 
-LOG_MODULE_REGISTER(app_sht40, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(app_sht4x, LOG_LEVEL_DBG);
 
-int app_sht40_read(float *temperature, float *humidity)
+int app_sht4x_read(float *temperature, float *humidity)
 {
 	int ret;
 
@@ -69,7 +69,7 @@ int app_sht40_read(float *temperature, float *humidity)
 	return 0;
 }
 
-int app_sht40_read_serial(uint32_t *serial_number)
+int app_sht4x_read_serial(uint32_t *serial_number)
 {
 	int ret;
 
