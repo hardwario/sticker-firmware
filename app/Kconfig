@@ -14,6 +14,14 @@ config APP_VERBOSE_LOGGING
 	  This adds detailed logging for NFC parameters and other
 	  configuration changes. Disable to save flash space.
 
+config FW_DEBUG
+	bool "Debug firmware indication"
+	default n
+	help
+	  Enable debug firmware LED indication.
+	  When enabled, the periodic LED blink shows green + yellow
+	  instead of just green to indicate debug build.
+
 endmenu
 
 menu "Zephyr Kernel"

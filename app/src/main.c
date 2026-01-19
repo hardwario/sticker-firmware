@@ -24,13 +24,13 @@
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
-#if defined(CONFIG_DEBUG)
-#define BLINK_INTERVAL_SECONDS 1
+#if defined(CONFIG_FW_DEBUG)
+#define BLINK_INTERVAL_SECONDS 2
 #define NFC_CHECK_BLINKS       1
 #else
 #define BLINK_INTERVAL_SECONDS 3
 #define NFC_CHECK_BLINKS       10
-#endif /* defined(CONFIG_DEBUG) */
+#endif /* defined(CONFIG_FW_DEBUG) */
 
 static void die(void)
 {
