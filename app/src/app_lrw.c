@@ -40,7 +40,7 @@ LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
 /* State machine thresholds  */
 #define FAIL_THRESHOLD_WARNING   3  /* LC failures to enter WARNING */
 #define FAIL_THRESHOLD_RECONNECT 5  /* LC failures in WARNING to enter RECONNECT */
-#define OK_THRESHOLD_HEALTHY     2  /* LC successes in WARNING to return to HEALTHY */
+#define OK_THRESHOLD_HEALTHY     1  /* LC successes in WARNING to return to HEALTHY */
 
 /* Join/Rejoin backoff configuration - easily adjustable */
 #define REJOIN_BACKOFF_BASE_SEC  60   /* Base backoff time in seconds */
@@ -78,6 +78,7 @@ static uint8_t m_last_margin;
 static uint8_t m_last_gw_count;
 
 static void handle_link_check_failure(void);
+static void handle_link_check_success(void);
 static void restart_normal_operation(void);
 static void join_complete_work_handler(struct k_work *work);
 
@@ -106,6 +107,15 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 
 	if (data) {
 		LOG_HEXDUMP_INF(data, len, "Payload: ");
+	}
+
+	/* Any downlink = proof of working connection */
+	if (m_state == APP_LRW_STATE_HEALTHY || m_state == APP_LRW_STATE_WARNING) {
+		if (m_link_check_pending) {
+			k_timer_stop(&m_link_check_timer);
+		}
+		handle_link_check_success();
+		LOG_INF("Connection confirmed via downlink");
 	}
 }
 
@@ -200,10 +210,8 @@ static void handle_link_check_failure(void)
 			m_consecutive_lc_fail = 0;
 			m_warning_lc_fail_total = 0;
 			m_force_lc_remaining = 0; /* WARNING uses normal N-th interval */
-		} else {
-			/* Force LC on remaining attempts to recover */
-			m_force_lc_remaining = FAIL_THRESHOLD_WARNING - m_consecutive_lc_fail;
 		}
+		/* No force LC in HEALTHY - wait for normal N-th interval */
 		break;
 
 	case APP_LRW_STATE_WARNING:
@@ -407,8 +415,24 @@ static void join_work_handler(struct k_work *work)
 		LOG_ERR("Join failed: %d, will retry in %u seconds (attempt %d)",
 			ret, backoff, m_rejoin_attempts + 1);
 		m_rejoin_attempts++;
+		m_state = APP_LRW_STATE_RECONNECT;
 		k_timer_start(&m_link_check_timer, K_SECONDS(backoff), K_FOREVER);
 		return;
+	}
+
+	/* For ABP, explicitly set RX delays to match network configuration */
+	if (config.mode == LORAWAN_ACT_ABP) {
+		MibRequestConfirm_t mib_req;
+
+		mib_req.Type = MIB_RECEIVE_DELAY_1;
+		mib_req.Param.ReceiveDelay1 = 1000; /* 1 second in ms */
+		LoRaMacMibSetRequestConfirm(&mib_req);
+
+		mib_req.Type = MIB_RECEIVE_DELAY_2;
+		mib_req.Param.ReceiveDelay2 = 2000; /* 2 seconds in ms */
+		LoRaMacMibSetRequestConfirm(&mib_req);
+
+		LOG_INF("RX delays set: RX1=1s, RX2=2s");
 	}
 
 	LOG_INF("lorawan_join() ret=%d, polling MAC...", ret);

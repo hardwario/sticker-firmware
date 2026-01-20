@@ -24,13 +24,9 @@
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
-#if defined(CONFIG_FW_DEBUG)
-#define BLINK_INTERVAL_SECONDS 2
-#define NFC_CHECK_BLINKS       1
-#else
 #define BLINK_INTERVAL_SECONDS 3
 #define NFC_CHECK_BLINKS       10
-#endif /* defined(CONFIG_FW_DEBUG) */
+
 
 static void die(void)
 {
@@ -189,44 +185,57 @@ int main(void)
 #if defined(CONFIG_LORAWAN)
 		enum app_lrw_state lrw_state = app_lrw_get_state();
 
-		if (lrw_state == APP_LRW_STATE_JOINING ||
-		    lrw_state == APP_LRW_STATE_RECONNECT) {
+		 if (lrw_state == APP_LRW_STATE_JOINING ||
+			 lrw_state == APP_LRW_STATE_RECONNECT) {
 			struct app_led_play_req req = {
 				.commands = {
 					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
-					{.type = APP_LED_CMD_DELAY, .duration = 100},
+					{.type = APP_LED_CMD_DELAY, .duration = 10},
 					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
 					{.type = APP_LED_CMD_DELAY, .duration = 200},
 					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
-					{.type = APP_LED_CMD_DELAY, .duration = 100},
+					{.type = APP_LED_CMD_DELAY, .duration = 10},
 					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
 					{.type = APP_LED_CMD_DELAY, .duration = 200},
 					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
-					{.type = APP_LED_CMD_DELAY, .duration = 800},
+					{.type = APP_LED_CMD_DELAY, .duration = 80},
 					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
 					{.type = APP_LED_CMD_END}},
 				.repetitions = 1};
 			app_led_play(&req);
 		} else if (lrw_state == APP_LRW_STATE_WARNING) {
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
-							.duration = 100,
+							.duration = 10,
 							.space = 200,
 							.repetitions = 3};
 			app_led_blink(&req);
-		} else
+		}
 #endif /* defined(CONFIG_LORAWAN) */
-		if (app_alarm_is_active()) {
+		else if (app_alarm_is_active()) {
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_R,
 							.duration = 5,
 							.space = 0,
 							.repetitions = 1};
 			app_led_blink(&req);
 		} else {
+#if defined(CONFIG_FW_DEBUG)
+			/* Debug: yellow LED blink */
+			struct app_led_play_req req = {
+				.commands = {
+					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
+					{.type = APP_LED_CMD_DELAY, .duration = 5},
+					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
+					{.type = APP_LED_CMD_END}},
+				.repetitions = 1};
+			app_led_play(&req);
+#else
+			/* Release: green LED blink */
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_G,
 							.duration = 5,
 							.space = 0,
 							.repetitions = 1};
 			app_led_blink(&req);
+#endif /* defined(CONFIG_FW_DEBUG) */
 		}
 
 		k_sleep(K_SECONDS(BLINK_INTERVAL_SECONDS));
