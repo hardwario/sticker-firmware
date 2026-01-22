@@ -222,6 +222,10 @@ int main(void)
 			/* Debug: yellow LED blink */
 			struct app_led_play_req req = {
 				.commands = {
+					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
+					{.type = APP_LED_CMD_DELAY, .duration = 5},
+					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
+					{.type = APP_LED_CMD_DELAY, .duration = 50},
 					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
 					{.type = APP_LED_CMD_DELAY, .duration = 5},
 					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
