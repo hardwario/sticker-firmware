@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-void app_nfc_ingest(const NfcConfigMessage *message);
+bool app_nfc_ingest(const NfcConfigMessage *message);
 
 #ifdef __cplusplus
 }
