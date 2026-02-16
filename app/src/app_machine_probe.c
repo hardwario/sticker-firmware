@@ -387,7 +387,7 @@ static int opt3001_read(const struct device *dev, float *illuminance)
 		return ret;
 	}
 
-	if ((read_buf[0] & 0x06) != 0x00 || (read_buf[0] & 0x80) != 0x80) {
+	if ((read_buf[0] & 0x06) != 0x00 || (read_buf[1] & 0x80) != 0x80) {
 		LOG_ERR("Unexpected response");
 		return -EIO;
 	}
