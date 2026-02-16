@@ -77,6 +77,7 @@ static int reset(bool reboot)
 	ret = flash_area_erase(fa, 0, FIXED_PARTITION_SIZE(storage_partition));
 	if (ret) {
 		LOG_ERR("Call `flash_area_erase` failed: %d", ret);
+		flash_area_close(fa);
 		return ret;
 	}
 
