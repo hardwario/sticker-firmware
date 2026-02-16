@@ -106,9 +106,8 @@ int app_battery_measure(float *voltage)
 	if (voltage) {
 		*voltage = voltage_ / 1000.f;
 		*voltage = *voltage / R2_KOHM * (R1_KOHM + R2_KOHM);
+		LOG_DBG("Battery voltage: %.2f V", (double)*voltage);
 	}
-
-	LOG_DBG("Battery voltage: %.2f V", (double)*voltage);
 
 #if defined(CONFIG_PM_DEVICE)
 	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_SUSPEND);
