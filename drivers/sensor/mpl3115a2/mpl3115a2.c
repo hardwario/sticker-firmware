@@ -155,7 +155,7 @@ static int sample_altitude(const struct device *dev)
 	if (raw & 0x800000) {
 		raw |= 0xFF000000;
 	}
-	get_data(dev)->altitude = ((raw << 8) >> 12) / 16.f;
+	get_data(dev)->altitude = ((int32_t)((uint32_t)raw << 8) >> 12) / 16.f;
 	get_data(dev)->temperature = (int8_t)buffer[3] + (buffer[4] >> 4) / 16.f;
 
 	return 0;
