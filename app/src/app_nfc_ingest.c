@@ -7,7 +7,6 @@
 #include "app_nfc_ingest.h"
 #include "app_config.h"
 #include "app_log.h"
-#include "app_settings.h"
 
 /* Zephyr includes */
 #include <zephyr/logging/log.h>
@@ -41,16 +40,13 @@ static bool parse_hex_string(const char *hex_str, uint8_t *buf, size_t buf_len)
 	return true;
 }
 
-void app_nfc_ingest(const NfcConfigMessage *message)
+bool app_nfc_ingest(const NfcConfigMessage *message)
 {
 	struct app_config *config = app_config();
 
-	if (message->has_factory) {
-		LOG_INF_PARAM_BOOL("factory", message->factory);
-		if (message->factory) {
-			LOG_INF("Factory reset requested via NFC");
-			app_settings_reset();
-		}
+	if (message->has_factory && message->factory) {
+		LOG_INF("Factory reset requested via NFC");
+		return true;
 	}
 
 	if (message->has_lorawan) {
@@ -495,4 +491,32 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 			config->cap_1w_machine_probe = message->application.cap_1w_machine_probe;
 		}
 	}
+
+	/* Cross-validate alarm lo/hi pairs — reject if lo >= hi */
+	if (config->alarm_temperature_lo >= config->alarm_temperature_hi) {
+		LOG_WRN("alarm_temperature_lo >= hi, disabling alarm");
+		config->alarm_temperature_enabled = false;
+	}
+
+	if (config->alarm_humidity_lo >= config->alarm_humidity_hi) {
+		LOG_WRN("alarm_humidity_lo >= hi, disabling alarm");
+		config->alarm_humidity_enabled = false;
+	}
+
+	if (config->alarm_pressure_lo >= config->alarm_pressure_hi) {
+		LOG_WRN("alarm_pressure_lo >= hi, disabling alarm");
+		config->alarm_pressure_enabled = false;
+	}
+
+	if (config->alarm_t1_temperature_lo >= config->alarm_t1_temperature_hi) {
+		LOG_WRN("alarm_t1_temperature_lo >= hi, disabling alarm");
+		config->alarm_t1_temperature_enabled = false;
+	}
+
+	if (config->alarm_t2_temperature_lo >= config->alarm_t2_temperature_hi) {
+		LOG_WRN("alarm_t2_temperature_lo >= hi, disabling alarm");
+		config->alarm_t2_temperature_enabled = false;
+	}
+
+	return false;
 }

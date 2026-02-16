@@ -148,7 +148,7 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 
 	if (g_app_config.nonce_counter >= nonce_counter) {
 		LOG_ERR("Nonce counter is not greater than the last used nonce: %u >= %u",
-			nonce_counter, g_app_config.nonce_counter);
+			g_app_config.nonce_counter, nonce_counter);
 		return -EACCES;
 	}
 
@@ -236,9 +236,11 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 		return -EIO;
 	}
 
-	app_nfc_ingest(&message);
-
-	*action = APP_NFC_ACTION_SAVE;
+	if (app_nfc_ingest(&message)) {
+		*action = APP_NFC_ACTION_RESET;
+	} else {
+		*action = APP_NFC_ACTION_SAVE;
+	}
 
 	return 0;
 }
@@ -278,6 +280,8 @@ int app_nfc_check(enum app_nfc_action *action)
 {
 	int ret;
 	int res = 0;
+
+	*action = APP_NFC_ACTION_NONE;
 
 	const struct gpio_dt_spec lpd_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
 
@@ -319,7 +323,6 @@ int app_nfc_check(enum app_nfc_action *action)
 		return 0;
 	}
 
-	*action = APP_NFC_ACTION_NONE;
 	ret = app_ndef_parser_run(buf, sizeof(buf), parser_callback, action);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_ndef_parser_run", ret);
