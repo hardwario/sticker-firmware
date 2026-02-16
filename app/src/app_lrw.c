@@ -427,6 +427,7 @@ static void join_work_handler(struct k_work *work)
 		config.abp.app_skey = g_app_config.lrw_appskey;
 	} else {
 		LOG_ERR("Invalid activation mode: %d", g_app_config.lrw_activation);
+		atomic_set(&m_state, APP_LRW_STATE_IDLE);
 		return;
 	}
 
