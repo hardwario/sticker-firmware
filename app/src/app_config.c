@@ -1068,7 +1068,13 @@ static int cmd_interval_sample(const struct shell *shell, size_t argc, char **ar
 		return -EINVAL;
 	}
 
-	int a = strtol(argv[1], NULL, 10);
+	char *endptr;
+	int a = strtol(argv[1], &endptr, 10);
+
+	if (*endptr != '\0') {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
 
 	if (a != 0 && (a < 5 || a > 3600)) {
 		shell_error(shell, "%s", m_msg_invalid_range);
