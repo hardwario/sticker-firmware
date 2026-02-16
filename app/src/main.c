@@ -122,7 +122,15 @@ int main(void)
 		}
 	}
 
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
+
 	play_carousel_boot();
+
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
 
 #if defined(CONFIG_LORAWAN)
 	ret = app_lrw_init();
@@ -140,10 +148,18 @@ int main(void)
 		die();
 	}
 
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
+
 	ret = app_sensor_init();
 	if (ret) {
 		LOG_WRN("Sensor init partially failed: %d (continuing)", ret);
 	}
+
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
 
 	ret = app_calibration_init();
 	if (ret) {
