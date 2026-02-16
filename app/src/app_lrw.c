@@ -31,6 +31,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
 
@@ -402,7 +403,8 @@ static void join_work_handler(struct k_work *work)
 	}
 
 	/* Configure join based on activation mode */
-	static struct lorawan_join_config config = {0};
+	static struct lorawan_join_config config;
+	memset(&config, 0, sizeof(config));
 	config.dev_eui = g_app_config.lrw_deveui;
 
 	if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA) {
