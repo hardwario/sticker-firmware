@@ -1145,7 +1145,7 @@ int app_machine_probe_get_tilt_alert(int index, uint64_t *serial_number, bool *i
 
 	COMM_PROLOGUE
 
-	if (!res) {
+	if (!res && is_active) {
 		ret = lis2dh12_get_interrupt(m_sensors[index].dev, is_active);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("lis2dh12_get_interrupt", ret);
