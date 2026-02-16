@@ -142,8 +142,7 @@ int main(void)
 
 	ret = app_sensor_init();
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_sensor_init", ret);
-		die();
+		LOG_WRN("Sensor init partially failed: %d (continuing)", ret);
 	}
 
 	ret = app_calibration_init();
