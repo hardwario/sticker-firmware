@@ -1004,7 +1004,14 @@ static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv
 		}
 	}
 
-	m_app_config.serial_number = strtoul(argv[1], NULL, 10);
+	errno = 0;
+	unsigned long val = strtoul(argv[1], NULL, 10);
+	if (errno == ERANGE || val > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	m_app_config.serial_number = (uint32_t)val;
 
 	return 0;
 }
