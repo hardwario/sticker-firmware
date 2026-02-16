@@ -334,7 +334,7 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		APPEND_BYTE(status_b);
 	}
 
-#undef APPEND
+#undef APPEND_BYTE
 
 	LOG_HEXDUMP_DBG(buf, *len, "Composed buffer:");
 
