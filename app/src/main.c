@@ -182,11 +182,13 @@ int main(void)
 			}
 		}
 
+		bool led_handled = false;
+
 #if defined(CONFIG_LORAWAN)
 		enum app_lrw_state lrw_state = app_lrw_get_state();
 
-		 if (lrw_state == APP_LRW_STATE_JOINING ||
-			 lrw_state == APP_LRW_STATE_RECONNECT) {
+		if (lrw_state == APP_LRW_STATE_JOINING ||
+		    lrw_state == APP_LRW_STATE_RECONNECT) {
 			struct app_led_play_req req = {
 				.commands = {
 					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
@@ -203,21 +205,27 @@ int main(void)
 					{.type = APP_LED_CMD_END}},
 				.repetitions = 1};
 			app_led_play(&req);
+			led_handled = true;
 		} else if (lrw_state == APP_LRW_STATE_WARNING) {
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
 							.duration = 10,
 							.space = 200,
 							.repetitions = 3};
 			app_led_blink(&req);
+			led_handled = true;
 		}
 #endif /* defined(CONFIG_LORAWAN) */
-		else if (app_alarm_is_active()) {
+
+		if (!led_handled && app_alarm_is_active()) {
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_R,
 							.duration = 5,
 							.space = 0,
 							.repetitions = 1};
 			app_led_blink(&req);
-		} else {
+			led_handled = true;
+		}
+
+		if (!led_handled) {
 #if defined(CONFIG_FW_DEBUG)
 			/* Debug: yellow LED blink */
 			struct app_led_play_req req = {
