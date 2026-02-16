@@ -634,6 +634,11 @@ void app_lrw_send(void)
 
 void app_lrw_send_with_link_check(void)
 {
+	if (m_state == APP_LRW_STATE_RECONNECT || m_state == APP_LRW_STATE_JOINING) {
+		LOG_WRN("Cannot send with link check in state %d", m_state);
+		return;
+	}
+
 	int ret = lorawan_request_link_check(false);
 	if (ret) {
 		LOG_ERR("Link check request failed: %d", ret);
