@@ -151,8 +151,11 @@ static int sample_altitude(const struct device *dev)
 		return ret;
 	}
 
-	int32_t a = sys_get_be24(&buffer[0]) << 8;
-	get_data(dev)->altitude = (a >> 12) / 16.f;
+	int32_t raw = (int32_t)sys_get_be24(&buffer[0]);
+	if (raw & 0x800000) {
+		raw |= 0xFF000000;
+	}
+	get_data(dev)->altitude = ((raw << 8) >> 12) / 16.f;
 	get_data(dev)->temperature = (int8_t)buffer[3] + (buffer[4] >> 4) / 16.f;
 
 	return 0;
