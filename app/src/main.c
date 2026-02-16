@@ -35,7 +35,7 @@ static void die(void)
 	for (int i = 0; i < 60; i++) {
 #if defined(CONFIG_WATCHDOG)
 		app_wdog_feed();
-#endif
+#endif /* defined(CONFIG_WATCHDOG) */
 		k_sleep(K_SECONDS(1));
 	}
 
