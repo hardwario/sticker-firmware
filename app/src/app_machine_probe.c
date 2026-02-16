@@ -940,7 +940,7 @@ int app_machine_probe_read_hygrometer_serial(int index, uint64_t *serial_number,
 	}
 
 	if (!res && sht_serial_number) {
-		LOG_DBG("SHT Serial: %u", *sht_serial_number);
+		LOG_DBG("Serial number: %u", *sht_serial_number);
 	}
 
 	COMM_EPILOGUE
