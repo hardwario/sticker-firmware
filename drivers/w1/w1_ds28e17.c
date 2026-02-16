@@ -33,6 +33,11 @@ LOG_MODULE_REGISTER(ds28e17, CONFIG_W1_LOG_LEVEL);
 #define POLL_BUSY_MAX_ATTEMPTS 100
 #define POLL_BUSY_DELAY        K_MSEC(10)
 
+/* Max I2C write payload per transaction. The DS28E17 supports up to 255 but
+ * callers in this project use at most a few bytes. Limiting this keeps the
+ * stack-allocated buffers small enough for 2048-byte thread stacks. */
+#define MAX_WRITE_LEN 32
+
 struct ds28e17_config {
 	const struct device *bus;
 	uint8_t family;
@@ -88,7 +93,7 @@ static int ds28e17_i2c_write_(const struct device *dev, uint8_t dev_addr, const 
 {
 	int ret;
 
-	if (write_len < 1 || write_len > 255) {
+	if (write_len < 1 || write_len > MAX_WRITE_LEN) {
 		return -EINVAL;
 	}
 
@@ -105,7 +110,7 @@ static int ds28e17_i2c_write_(const struct device *dev, uint8_t dev_addr, const 
 		return ret;
 	}
 
-	uint8_t buf[3 + 255 + 2];
+	uint8_t buf[3 + MAX_WRITE_LEN + 2];
 
 	buf[0] = DEV_CMD_WRITE_DATA_STOP;
 	buf[1] = dev_addr << 1;
@@ -248,7 +253,7 @@ static int ds28e17_i2c_write_read_(const struct device *dev, uint8_t dev_addr,
 {
 	int ret;
 
-	if (write_len < 1 || write_len > 255 || read_len < 1 || read_len > 255) {
+	if (write_len < 1 || write_len > MAX_WRITE_LEN || read_len < 1 || read_len > 255) {
 		return -EINVAL;
 	}
 
@@ -265,7 +270,7 @@ static int ds28e17_i2c_write_read_(const struct device *dev, uint8_t dev_addr,
 		return ret;
 	}
 
-	uint8_t buf[3 + 255 + 3];
+	uint8_t buf[3 + MAX_WRITE_LEN + 3];
 
 	buf[0] = DEV_CMD_WRITE_READ_DATA_STOP;
 	buf[1] = dev_addr << 1;
