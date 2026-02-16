@@ -192,7 +192,9 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 		res = -EIO;
 	}
 
-	app_config()->nonce_counter = nonce_counter;
+	if (!res) {
+		app_config()->nonce_counter = nonce_counter;
+	}
 
 	return res;
 }
