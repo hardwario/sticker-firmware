@@ -19,6 +19,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/lorawan/lorawan.h>
 #include <zephyr/random/random.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 
 /* LoRaMac includes */
@@ -53,7 +54,7 @@ static struct k_timer m_send_timer;
 static struct k_work m_send_work;
 static struct k_work m_join_work;
 
-static enum app_lrw_state m_state = APP_LRW_STATE_IDLE;
+static atomic_t m_state = ATOMIC_INIT(APP_LRW_STATE_IDLE);
 static struct k_timer m_link_check_timer;
 static struct k_work m_link_check_work;
 static uint8_t m_consecutive_lc_fail;      /* LC failures in a row (HEALTHY) */
@@ -150,7 +151,7 @@ static void join_complete_work_handler(struct k_work *work)
 
 	/* Verify we're still in JOINING state (might have changed) */
 	if (m_state != APP_LRW_STATE_JOINING) {
-		LOG_DBG("Join complete handler: state changed to %d, ignoring", m_state);
+		LOG_DBG("Join complete handler: state changed to %d, ignoring", (int)m_state);
 		return;
 	}
 
@@ -162,7 +163,7 @@ static void join_complete_work_handler(struct k_work *work)
 		if (m_join_busy_polls >= JOIN_BUSY_MAX_POLLS) {
 			LOG_ERR("MAC busy timeout after %d ms - triggering reconnect",
 				JOIN_BUSY_MAX_POLLS * JOIN_BUSY_POLL_INTERVAL_MS);
-			m_state = APP_LRW_STATE_RECONNECT;
+			atomic_set(&m_state, APP_LRW_STATE_RECONNECT);
 			m_rejoin_attempts = 0;
 			k_timer_start(&m_link_check_timer,
 				      K_SECONDS(REJOIN_BACKOFF_BASE_SEC), K_FOREVER);
@@ -188,7 +189,7 @@ static void join_complete_work_handler(struct k_work *work)
 		uint32_t backoff = calculate_rejoin_backoff(m_rejoin_attempts);
 		LOG_ERR("Join failed (not activated), retry in %u seconds", backoff);
 		m_rejoin_attempts++;
-		m_state = APP_LRW_STATE_RECONNECT;
+		atomic_set(&m_state, APP_LRW_STATE_RECONNECT);
 		k_timer_start(&m_link_check_timer, K_SECONDS(backoff), K_FOREVER);
 		return;
 	}
@@ -197,7 +198,7 @@ static void join_complete_work_handler(struct k_work *work)
 	LOG_INF("Join successful - transitioning to HEALTHY");
 	m_init_join = false;  /* Next join will be rejoin with MAC reset */
 	lorawan_enable_adr(g_app_config.lrw_adr);
-	m_state = APP_LRW_STATE_HEALTHY;
+	atomic_set(&m_state, APP_LRW_STATE_HEALTHY);
 	m_rejoin_attempts = 0;
 	restart_normal_operation();
 }
@@ -207,7 +208,7 @@ static void handle_link_check_failure(void)
 	m_link_check_pending = false;
 	m_consecutive_lc_ok = 0; /* Reset OK streak on any failure */
 
-	switch (m_state) {
+	switch ((int)m_state) {
 	case APP_LRW_STATE_HEALTHY:
 		m_consecutive_lc_fail++;
 		LOG_WRN("LC FAIL in HEALTHY (streak: %d/%d)",
@@ -215,7 +216,7 @@ static void handle_link_check_failure(void)
 
 		if (m_consecutive_lc_fail >= FAIL_THRESHOLD_WARNING) {
 			LOG_WRN("Entering WARNING state");
-			m_state = APP_LRW_STATE_WARNING;
+			atomic_set(&m_state, APP_LRW_STATE_WARNING);
 			m_consecutive_lc_fail = 0;
 			m_warning_lc_fail_total = 0;
 			m_force_lc_remaining = 0; /* WARNING uses normal N-th interval */
@@ -232,7 +233,7 @@ static void handle_link_check_failure(void)
 			/* Only OTAA can reconnect */
 			if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA) {
 				LOG_ERR("Entering RECONNECT state - will rejoin in 5 seconds");
-				m_state = APP_LRW_STATE_RECONNECT;
+				atomic_set(&m_state, APP_LRW_STATE_RECONNECT);
 				m_warning_lc_fail_total = 0;
 				m_rejoin_attempts = 0; /* Reset backoff counter */
 				/* Schedule first rejoin after 5 seconds (non-blocking) */
@@ -247,7 +248,7 @@ static void handle_link_check_failure(void)
 		break;
 
 	default:
-		LOG_WRN("LC FAIL in state %d (ignored)", m_state);
+		LOG_WRN("LC FAIL in state %d (ignored)", (int)m_state);
 		return;
 	}
 }
@@ -271,7 +272,7 @@ static void handle_link_check_success(void)
 	m_link_check_pending = false;
 	m_consecutive_lc_fail = 0; /* Reset fail streak on any success */
 
-	switch (m_state) {
+	switch ((int)m_state) {
 	case APP_LRW_STATE_HEALTHY:
 		LOG_INF("LC OK in HEALTHY");
 		/* Recovery successful, back to normal N-th interval */
@@ -285,7 +286,7 @@ static void handle_link_check_success(void)
 
 		if (m_consecutive_lc_ok >= OK_THRESHOLD_HEALTHY) {
 			LOG_INF("Returning to HEALTHY state");
-			m_state = APP_LRW_STATE_HEALTHY;
+			atomic_set(&m_state, APP_LRW_STATE_HEALTHY);
 			m_consecutive_lc_ok = 0;
 			m_warning_lc_fail_total = 0;
 			m_force_lc_remaining = 0;
@@ -296,7 +297,7 @@ static void handle_link_check_success(void)
 		break;
 
 	default:
-		LOG_INF("LC OK in state %d", m_state);
+		LOG_INF("LC OK in state %d", (int)m_state);
 		break;
 	}
 }
@@ -370,7 +371,7 @@ static void join_work_handler(struct k_work *work)
 
 	/* Stop send timer to prevent TX during join */
 	k_timer_stop(&m_send_timer);
-	m_state = APP_LRW_STATE_JOINING;
+	atomic_set(&m_state, APP_LRW_STATE_JOINING);
 
 	if (m_init_join) {
 		LOG_INF("Initial join after boot");
@@ -380,7 +381,7 @@ static void join_work_handler(struct k_work *work)
 		/* ABP doesn't need rejoin - just restart normal operation */
 		if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP) {
 			LOG_INF("ABP mode - rejoin not applicable");
-			m_state = APP_LRW_STATE_HEALTHY;
+			atomic_set(&m_state, APP_LRW_STATE_HEALTHY);
 			restart_normal_operation();
 			return;
 		}
@@ -393,7 +394,7 @@ static void join_work_handler(struct k_work *work)
 			LOG_ERR("lorawan_start failed: %d", ret);
 			uint32_t backoff = calculate_rejoin_backoff(m_rejoin_attempts);
 			m_rejoin_attempts++;
-			m_state = APP_LRW_STATE_RECONNECT;
+			atomic_set(&m_state, APP_LRW_STATE_RECONNECT);
 			k_timer_start(&m_link_check_timer, K_SECONDS(backoff), K_FOREVER);
 			return;
 		}
@@ -431,7 +432,7 @@ static void join_work_handler(struct k_work *work)
 		LOG_ERR("Join failed: %d, will retry in %u seconds (attempt %d)",
 			ret, backoff, m_rejoin_attempts + 1);
 		m_rejoin_attempts++;
-		m_state = APP_LRW_STATE_RECONNECT;
+		atomic_set(&m_state, APP_LRW_STATE_RECONNECT);
 		k_timer_start(&m_link_check_timer, K_SECONDS(backoff), K_FOREVER);
 		return;
 	}
@@ -487,7 +488,7 @@ static void send_work_handler(struct k_work *work)
 
 	/* Block transmissions during joining or reconnect */
 	if (m_state == APP_LRW_STATE_JOINING || m_state == APP_LRW_STATE_RECONNECT) {
-		LOG_WRN("TX blocked: state=%d", m_state);
+		LOG_WRN("TX blocked: state=%d", (int)m_state);
 		return;
 	}
 
@@ -616,7 +617,7 @@ int app_lrw_init(void)
 	k_timer_init(&m_link_check_timer, link_check_timeout_handler, NULL);
 	/* Don't start send timer here - wait for join completion via DR callback */
 
-	m_state = APP_LRW_STATE_IDLE;
+	atomic_set(&m_state, APP_LRW_STATE_IDLE);
 	m_init_join = true;  /* First join after boot */
 
 	return 0;
@@ -635,7 +636,7 @@ void app_lrw_send(void)
 void app_lrw_send_with_link_check(void)
 {
 	if (m_state == APP_LRW_STATE_RECONNECT || m_state == APP_LRW_STATE_JOINING) {
-		LOG_WRN("Cannot send with link check in state %d", m_state);
+		LOG_WRN("Cannot send with link check in state %d", (int)m_state);
 		return;
 	}
 
@@ -654,12 +655,14 @@ void app_lrw_send_with_link_check(void)
 
 enum app_lrw_state app_lrw_get_state(void)
 {
-	return m_state;
+	return (enum app_lrw_state)atomic_get(&m_state);
 }
 
 bool app_lrw_is_ready(void)
 {
-	return m_state == APP_LRW_STATE_HEALTHY || m_state == APP_LRW_STATE_WARNING;
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+
+	return state == APP_LRW_STATE_HEALTHY || state == APP_LRW_STATE_WARNING;
 }
 
 int app_lrw_get_info(struct app_lrw_info *info)
@@ -670,7 +673,7 @@ int app_lrw_get_info(struct app_lrw_info *info)
 		return -EINVAL;
 	}
 
-	info->state = m_state;
+	info->state = (enum app_lrw_state)atomic_get(&m_state);
 
 	/* Get DevAddr from MIB */
 	mib_req.Type = MIB_DEV_ADDR;
