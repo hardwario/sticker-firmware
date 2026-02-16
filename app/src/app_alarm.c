@@ -23,7 +23,9 @@ bool app_alarm_is_active(void)
 {
 	static bool alarm_temperature = false;
 
-	if (isnan(g_app_sensor_data.temperature)) {
+	if (!g_app_config.alarm_temperature_enabled) {
+		alarm_temperature = false;
+	} else if (isnan(g_app_sensor_data.temperature)) {
 		alarm_temperature = false;
 	} else if (alarm_temperature) {
 		if (g_app_sensor_data.temperature > (g_app_config.alarm_temperature_lo +
@@ -47,7 +49,9 @@ bool app_alarm_is_active(void)
 
 	static bool alarm_humidity = false;
 
-	if (isnan(g_app_sensor_data.humidity)) {
+	if (!g_app_config.alarm_humidity_enabled) {
+		alarm_humidity = false;
+	} else if (isnan(g_app_sensor_data.humidity)) {
 		alarm_humidity = false;
 	} else if (alarm_humidity) {
 		if (g_app_sensor_data.humidity >
@@ -71,7 +75,9 @@ bool app_alarm_is_active(void)
 
 	static bool alarm_pressure = false;
 
-	if (isnan(g_app_sensor_data.pressure)) {
+	if (!g_app_config.alarm_pressure_enabled) {
+		alarm_pressure = false;
+	} else if (isnan(g_app_sensor_data.pressure)) {
 		alarm_pressure = false;
 	} else if (alarm_pressure) {
 		if (g_app_sensor_data.pressure / 100.f >
@@ -95,7 +101,9 @@ bool app_alarm_is_active(void)
 
 	static bool alarm_t1_temperature = false;
 
-	if (isnan(g_app_sensor_data.t1_temperature)) {
+	if (!g_app_config.alarm_t1_temperature_enabled) {
+		alarm_t1_temperature = false;
+	} else if (isnan(g_app_sensor_data.t1_temperature)) {
 		alarm_t1_temperature = false;
 	} else if (alarm_t1_temperature) {
 		if (g_app_sensor_data.t1_temperature > (g_app_config.alarm_t1_temperature_lo +
@@ -119,7 +127,9 @@ bool app_alarm_is_active(void)
 
 	static bool alarm_t2_temperature = false;
 
-	if (isnan(g_app_sensor_data.t2_temperature)) {
+	if (!g_app_config.alarm_t2_temperature_enabled) {
+		alarm_t2_temperature = false;
+	} else if (isnan(g_app_sensor_data.t2_temperature)) {
 		alarm_t2_temperature = false;
 	} else if (alarm_t2_temperature) {
 		if (g_app_sensor_data.t2_temperature > (g_app_config.alarm_t2_temperature_lo +
