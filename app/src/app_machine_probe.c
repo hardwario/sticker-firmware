@@ -61,9 +61,16 @@ LOG_MODULE_REGISTER(app_machine_probe, LOG_LEVEL_DBG);
 #define LIS2DH12_INT1_THS      0x32
 #define LIS2DH12_INT1_DURATION 0x33
 
+enum sht_type {
+	SHT_TYPE_UNKNOWN = 0,
+	SHT_TYPE_SHT30,
+	SHT_TYPE_SHT43,
+};
+
 struct sensor {
 	uint64_t serial_number;
 	const struct device *dev;
+	enum sht_type sht_type;
 };
 
 static K_MUTEX_DEFINE(m_lock);
@@ -208,7 +215,72 @@ static int sht30_read(const struct device *dev, float *temperature, float *humid
 	return 0;
 }
 
-static int sht_read_serial(const struct device *dev, uint32_t *serial_number)
+static int sht43_init(const struct device *dev)
+{
+	int ret;
+
+	uint8_t write_buf[1];
+
+	/* SHT43 soft reset command */
+	write_buf[0] = 0x94;
+
+	ret = ds28e17_i2c_write(dev, SHT43_I2C_ADDR, write_buf, 1);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int sht43_convert(const struct device *dev)
+{
+	int ret;
+
+	uint8_t write_buf[1];
+
+	/* SHT43 measure T & RH, high precision */
+	write_buf[0] = 0xfd;
+
+	ret = ds28e17_i2c_write(dev, SHT43_I2C_ADDR, write_buf, 1);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int sht43_read(const struct device *dev, float *temperature, float *humidity)
+{
+	int ret;
+
+	uint8_t read_buf[6];
+
+	ret = ds28e17_i2c_read(dev, SHT43_I2C_ADDR, read_buf, 6);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_read", ret);
+		return ret;
+	}
+
+	if (temperature) {
+		*temperature = -45.f + 175.f * (float)sys_get_be16(&read_buf[0]) / 65535.f;
+	}
+
+	if (humidity) {
+		*humidity = -6.f + 125.f * (float)sys_get_be16(&read_buf[3]) / 65535.f;
+		if (*humidity < 0.f) {
+			*humidity = 0.f;
+		} else if (*humidity > 100.f) {
+			*humidity = 100.f;
+		}
+	}
+
+	return 0;
+}
+
+static int sht_read_serial(const struct device *dev, uint32_t *serial_number,
+			   enum sht_type *detected_type)
 {
 	int ret;
 
@@ -223,6 +295,9 @@ static int sht_read_serial(const struct device *dev, uint32_t *serial_number)
 		ret = ds28e17_i2c_read(dev, SHT43_I2C_ADDR, read_buf, 6);
 		if (ret == 0) {
 			LOG_DBG("SHT43 detected");
+			if (detected_type) {
+				*detected_type = SHT_TYPE_SHT43;
+			}
 			goto parse_serial;
 		}
 	}
@@ -245,6 +320,9 @@ static int sht_read_serial(const struct device *dev, uint32_t *serial_number)
 	}
 
 	LOG_DBG("SHT33 detected");
+	if (detected_type) {
+		*detected_type = SHT_TYPE_SHT30;
+	}
 
 parse_serial:
 	if (serial_number) {
@@ -774,10 +852,24 @@ int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float 
 
 	COMM_PROLOGUE
 
-	if (!res) {
-		ret = sht30_init(m_sensors[index].dev);
+	if (!res && m_sensors[index].sht_type == SHT_TYPE_UNKNOWN) {
+		ret = sht_read_serial(m_sensors[index].dev, NULL,
+				      &m_sensors[index].sht_type);
 		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("sht30_init", ret);
+			LOG_ERR_CALL_FAILED_INT("sht_read_serial", ret);
+			res = ret;
+			goto error;
+		}
+	}
+
+	if (!res) {
+		if (m_sensors[index].sht_type == SHT_TYPE_SHT43) {
+			ret = sht43_init(m_sensors[index].dev);
+		} else {
+			ret = sht30_init(m_sensors[index].dev);
+		}
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("sht_init", ret);
 			res = ret;
 			goto error;
 		}
@@ -786,9 +878,13 @@ int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float 
 	k_sleep(SHT30_INIT_TIME);
 
 	if (!res) {
-		ret = sht30_convert(m_sensors[index].dev);
+		if (m_sensors[index].sht_type == SHT_TYPE_SHT43) {
+			ret = sht43_convert(m_sensors[index].dev);
+		} else {
+			ret = sht30_convert(m_sensors[index].dev);
+		}
 		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("sht30_convert", ret);
+			LOG_ERR_CALL_FAILED_INT("sht_convert", ret);
 			res = ret;
 			goto error;
 		}
@@ -797,9 +893,13 @@ int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float 
 	k_sleep(SHT30_CONV_TIME);
 
 	if (!res) {
-		ret = sht30_read(m_sensors[index].dev, temperature, humidity);
+		if (m_sensors[index].sht_type == SHT_TYPE_SHT43) {
+			ret = sht43_read(m_sensors[index].dev, temperature, humidity);
+		} else {
+			ret = sht30_read(m_sensors[index].dev, temperature, humidity);
+		}
 		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("sht30_read", ret);
+			LOG_ERR_CALL_FAILED_INT("sht_read", ret);
 			res = ret;
 			goto error;
 		}
@@ -830,7 +930,8 @@ int app_machine_probe_read_hygrometer_serial(int index, uint64_t *serial_number,
 	COMM_PROLOGUE
 
 	if (!res) {
-		ret = sht_read_serial(m_sensors[index].dev, sht_serial_number);
+		ret = sht_read_serial(m_sensors[index].dev, sht_serial_number,
+				      &m_sensors[index].sht_type);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("sht_read_serial", ret);
 			res = ret;
