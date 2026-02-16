@@ -112,9 +112,11 @@ static void downlink_success_work_handler(struct k_work *work)
 	if (state == APP_LRW_STATE_HEALTHY || state == APP_LRW_STATE_WARNING) {
 		if (m_link_check_pending) {
 			k_timer_stop(&m_link_check_timer);
+			handle_link_check_success();
+			LOG_INF("Connection confirmed via downlink (LC pending)");
+		} else {
+			LOG_INF("Downlink received (no LC pending)");
 		}
-		handle_link_check_success();
-		LOG_INF("Connection confirmed via downlink");
 	}
 }
 
@@ -643,6 +645,8 @@ static void send_with_lc_work_handler(struct k_work *work)
 	int ret = lorawan_request_link_check(false);
 	if (ret) {
 		LOG_ERR("Link check request failed: %d", ret);
+		/* Ensure send_work_handler retries LC on this message */
+		m_force_lc_remaining = 1;
 	} else {
 		m_link_check_pending = true;
 		k_timer_start(&m_link_check_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC), K_FOREVER);
