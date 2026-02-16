@@ -82,6 +82,11 @@ static void handle_link_check_success(void);
 static void restart_normal_operation(void);
 static void join_complete_work_handler(struct k_work *work);
 
+static struct k_work m_downlink_success_work;
+static struct k_work m_lc_response_work;
+static uint8_t m_lc_response_margin;
+static uint8_t m_lc_response_gw_count;
+
 
 static uint32_t calculate_rejoin_backoff(uint8_t attempt)
 {
@@ -97,6 +102,17 @@ static uint32_t calculate_rejoin_backoff(uint8_t attempt)
 	return backoff;
 }
 
+static void downlink_success_work_handler(struct k_work *work)
+{
+	if (m_state == APP_LRW_STATE_HEALTHY || m_state == APP_LRW_STATE_WARNING) {
+		if (m_link_check_pending) {
+			k_timer_stop(&m_link_check_timer);
+		}
+		handle_link_check_success();
+		LOG_INF("Connection confirmed via downlink");
+	}
+}
+
 static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t snr, uint8_t len,
 			      const uint8_t *data)
 {
@@ -109,14 +125,7 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 		LOG_HEXDUMP_INF(data, len, "Payload: ");
 	}
 
-	/* Any downlink = proof of working connection */
-	if (m_state == APP_LRW_STATE_HEALTHY || m_state == APP_LRW_STATE_WARNING) {
-		if (m_link_check_pending) {
-			k_timer_stop(&m_link_check_timer);
-		}
-		handle_link_check_success();
-		LOG_INF("Connection confirmed via downlink");
-	}
+	k_work_submit_to_queue(&m_work_q, &m_downlink_success_work);
 }
 
 static uint8_t battery_level_callback(void)
@@ -292,23 +301,29 @@ static void handle_link_check_success(void)
 	}
 }
 
+static void lc_response_work_handler(struct k_work *work)
+{
+	/* Stop timeout timer */
+	k_timer_stop(&m_link_check_timer);
+
+	if (m_lc_response_gw_count == 0) {
+		handle_link_check_failure();
+		return;
+	}
+
+	handle_link_check_success();
+}
+
 static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
 {
 	LOG_INF("Link check response: margin=%d dB, gateways=%d", demod_margin, nb_gateways);
 
 	m_last_margin = demod_margin;
 	m_last_gw_count = nb_gateways;
+	m_lc_response_margin = demod_margin;
+	m_lc_response_gw_count = nb_gateways;
 
-	/* Stop timeout timer */
-	k_timer_stop(&m_link_check_timer);
-
-	if (nb_gateways == 0) {
-		/* No gateway received our message - treat as failure */
-		handle_link_check_failure();
-		return;
-	}
-
-	handle_link_check_success();
+	k_work_submit_to_queue(&m_work_q, &m_lc_response_work);
 }
 
 static void link_check_timeout_handler(struct k_timer *timer)
@@ -593,6 +608,8 @@ int app_lrw_init(void)
 	k_work_init(&m_join_work, join_work_handler);
 	k_work_init(&m_send_work, send_work_handler);
 	k_work_init(&m_link_check_work, link_check_work_handler);
+	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
+	k_work_init(&m_lc_response_work, lc_response_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
 
 	k_timer_init(&m_send_timer, send_timer_handler, NULL);
