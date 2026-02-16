@@ -16,7 +16,7 @@ release:
 	@west build -p always -b sticker
 
 debug:
-	@west build -b sticker -- -DEXTRA_CONF_FILE=debug.conf
+	@west build -p always -b sticker -- -DEXTRA_CONF_FILE=debug.conf
 
 flash:
 	@west flash
