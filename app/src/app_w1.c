@@ -166,6 +166,7 @@ int app_w1_scan(struct app_w1 *w1, const struct device *dev,
 			ret = user_cb(item->rom, user_data);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("user_cb", ret);
+				res = res ? res : ret;
 			}
 		}
 	}
