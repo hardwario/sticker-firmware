@@ -210,6 +210,8 @@ int app_pyq1648_init(void)
 	k_thread_create(&m_thread, m_stack_area, K_THREAD_STACK_SIZEOF(m_stack_area), thread, NULL,
 			NULL, NULL, K_PRIO_PREEMPT(5), 0, K_NO_WAIT);
 
+	k_thread_name_set(&m_thread, "pir");
+
 	return 0;
 }
 
