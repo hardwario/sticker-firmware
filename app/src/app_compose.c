@@ -35,7 +35,7 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	/* For compatibility reasons (indicates header extension from 16 bits to 32 bits) */
 	header |= BIT(20);
 
-	uint8_t orientation = 0xff;
+	uint8_t orientation = 0;
 	uint8_t voltage = 0xff;
 
 	int16_t temperature = 0x7fff;
