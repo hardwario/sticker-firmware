@@ -143,7 +143,7 @@ static int tmp112_read(const struct device *dev, float *temperature)
 	}
 
 	if (temperature) {
-		*temperature = (sys_get_be16(&read_buf[0]) >> 4) * 0.0625f;
+		*temperature = ((int16_t)sys_get_be16(&read_buf[0]) >> 4) * 0.0625f;
 	}
 
 	return 0;
