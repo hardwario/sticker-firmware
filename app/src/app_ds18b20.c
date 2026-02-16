@@ -190,6 +190,7 @@ int app_ds18b20_read(int index, uint64_t *serial_number, float *temperature)
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("sensor_channel_get", ret);
 		res = ret;
+		goto error;
 	}
 
 	float temperature_ = val.val1 + val.val2 / 1000000.f;
