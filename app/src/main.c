@@ -31,7 +31,12 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 static void die(void)
 {
 	LOG_ERR("Rebooting in 60 seconds due to fatal error");
-	k_sleep(K_SECONDS(60));
+
+	for (int i = 0; i < 60; i++) {
+		app_wdog_feed();
+		k_sleep(K_SECONDS(1));
+	}
+
 	sys_reboot(SYS_REBOOT_COLD);
 }
 
