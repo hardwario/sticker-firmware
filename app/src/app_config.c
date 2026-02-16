@@ -1021,16 +1021,16 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 		return -EINVAL;
 	}
 
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
 	char *endptr;
 	unsigned long value = strtoul(argv[1], &endptr, 10);
 
 	if (*endptr != '\0' || endptr == argv[1]) {
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	if (value < 0 || value > UINT32_MAX) {
-		shell_error(shell, "%s", m_msg_invalid_range);
 		return -EINVAL;
 	}
 
