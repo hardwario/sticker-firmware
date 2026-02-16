@@ -83,9 +83,11 @@ static void handle_link_check_failure(void);
 static void handle_link_check_success(void);
 static void restart_normal_operation(void);
 static void join_complete_work_handler(struct k_work *work);
+static void send_with_lc_work_handler(struct k_work *work);
 
 static struct k_work m_downlink_success_work;
 static struct k_work m_lc_response_work;
+static struct k_work m_send_with_lc_work;
 static uint8_t m_lc_response_margin;
 static uint8_t m_lc_response_gw_count;
 
@@ -618,6 +620,7 @@ int app_lrw_init(void)
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
 	k_work_init(&m_lc_response_work, lc_response_work_handler);
+	k_work_init(&m_send_with_lc_work, send_with_lc_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
 
 	k_timer_init(&m_send_timer, send_timer_handler, NULL);
@@ -640,12 +643,12 @@ void app_lrw_send(void)
 	k_timer_start(&m_send_timer, K_NO_WAIT, K_FOREVER);
 }
 
-void app_lrw_send_with_link_check(void)
+static void send_with_lc_work_handler(struct k_work *work)
 {
-	if (atomic_get(&m_state) == APP_LRW_STATE_RECONNECT ||
-	    atomic_get(&m_state) == APP_LRW_STATE_JOINING) {
-		LOG_WRN("Cannot send with link check in state %d",
-			(int)atomic_get(&m_state));
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+
+	if (state != APP_LRW_STATE_HEALTHY && state != APP_LRW_STATE_WARNING) {
+		LOG_WRN("Cannot send with link check in state %d", (int)state);
 		return;
 	}
 
@@ -654,12 +657,16 @@ void app_lrw_send_with_link_check(void)
 		LOG_ERR("Link check request failed: %d", ret);
 	} else {
 		m_link_check_pending = true;
-		/* Start timeout timer for response */
 		k_timer_start(&m_link_check_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC), K_FOREVER);
 		LOG_INF("Link check requested, timeout in %d seconds", LINK_CHECK_TIMEOUT_SEC);
 	}
 
-	k_timer_start(&m_send_timer, K_NO_WAIT, K_FOREVER);
+	k_work_submit_to_queue(&m_work_q, &m_send_work);
+}
+
+void app_lrw_send_with_link_check(void)
+{
+	k_work_submit_to_queue(&m_work_q, &m_send_with_lc_work);
 }
 
 enum app_lrw_state app_lrw_get_state(void)
