@@ -56,12 +56,24 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 	if (message->has_lorawan) {
 		if (message->lorawan.has_region) {
 			LOG_INF_PARAM_INT("lorawan.region", message->lorawan.region);
-			config->lrw_region = (enum app_config_lrw_region)message->lorawan.region;
+			if (message->lorawan.region <= APP_CONFIG_LRW_REGION_AU915) {
+				config->lrw_region =
+					(enum app_config_lrw_region)message->lorawan.region;
+			} else {
+				LOG_WRN("Ignoring invalid lorawan.region: %d",
+					message->lorawan.region);
+			}
 		}
 
 		if (message->lorawan.has_network) {
 			LOG_INF_PARAM_INT("lorawan.network", message->lorawan.network);
-			config->lrw_network = (enum app_config_lrw_network)message->lorawan.network;
+			if (message->lorawan.network <= APP_CONFIG_LRW_NETWORK_PRIVATE) {
+				config->lrw_network =
+					(enum app_config_lrw_network)message->lorawan.network;
+			} else {
+				LOG_WRN("Ignoring invalid lorawan.network: %d",
+					message->lorawan.network);
+			}
 		}
 
 		if (message->lorawan.has_adr) {
@@ -71,8 +83,14 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 
 		if (message->lorawan.has_activation) {
 			LOG_INF_PARAM_INT("lorawan.activation", message->lorawan.activation);
-			config->lrw_activation =
-				(enum app_config_lrw_activation)message->lorawan.activation;
+			if (message->lorawan.activation <= APP_CONFIG_LRW_ACTIVATION_ABP) {
+				config->lrw_activation =
+					(enum app_config_lrw_activation)
+						message->lorawan.activation;
+			} else {
+				LOG_WRN("Ignoring invalid lorawan.activation: %d",
+					message->lorawan.activation);
+			}
 		}
 
 		if (message->lorawan.has_deveui) {
