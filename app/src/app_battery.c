@@ -78,6 +78,7 @@ int app_battery_measure(float *voltage)
 	}
 #endif /* defined(CONFIG_PM_DEVICE) */
 
+	int res = 0;
 	int16_t sample;
 
 	struct adc_sequence seq = {
@@ -90,7 +91,8 @@ int app_battery_measure(float *voltage)
 	ret = adc_read(m_dev, &seq);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("adc_read", ret);
-		return ret;
+		res = ret;
+		goto suspend;
 	}
 
 	int32_t voltage_ = sample;
@@ -98,7 +100,8 @@ int app_battery_measure(float *voltage)
 				    &voltage_);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("adc_raw_to_millivolts", ret);
-		return ret;
+		res = ret;
+		goto suspend;
 	}
 
 	LOG_DBG("ADC voltage: %d mV (raw: %d)", voltage_, sample);
@@ -109,13 +112,14 @@ int app_battery_measure(float *voltage)
 		LOG_DBG("Battery voltage: %.2f V", (double)*voltage);
 	}
 
+suspend:
 #if defined(CONFIG_PM_DEVICE)
 	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_SUSPEND);
 	if (ret && ret != -EALREADY) {
 		LOG_ERR_CALL_FAILED_INT("pm_device_action_run", ret);
-		return ret;
+		return res ? res : ret;
 	}
 #endif /* defined(CONFIG_PM_DEVICE) */
 
-	return 0;
+	return res;
 }
