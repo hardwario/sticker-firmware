@@ -179,7 +179,7 @@ int main(void)
 
 		static int nfc_counter;
 
-		if (nfc_counter++ == NFC_CHECK_BLINKS) {
+		if (++nfc_counter >= NFC_CHECK_BLINKS) {
 			nfc_counter = 0;
 
 			ret = app_nfc_check(&action);
