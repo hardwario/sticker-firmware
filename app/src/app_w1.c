@@ -41,8 +41,7 @@ int app_w1_acquire(struct app_w1 *w1, const struct device *dev)
 	ret = w1_lock_bus(dev);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("w1_lock_bus", ret);
-		res = ret;
-		goto error;
+		return ret;
 	}
 
 	ret = pm_device_action_run(dev, PM_DEVICE_ACTION_RESUME);
