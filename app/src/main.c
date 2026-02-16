@@ -33,7 +33,9 @@ static void die(void)
 	LOG_ERR("Rebooting in 60 seconds due to fatal error");
 
 	for (int i = 0; i < 60; i++) {
+#if defined(CONFIG_WATCHDOG)
 		app_wdog_feed();
+#endif
 		k_sleep(K_SECONDS(1));
 	}
 
