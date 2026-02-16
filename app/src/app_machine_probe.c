@@ -223,6 +223,12 @@ static int sht30_read(const struct device *dev, float *temperature, float *humid
 		return ret;
 	}
 
+	if (sht_crc8(&read_buf[0], 2) != read_buf[2] ||
+	    sht_crc8(&read_buf[3], 2) != read_buf[5]) {
+		LOG_ERR("CRC mismatch");
+		return -EIO;
+	}
+
 	if (temperature) {
 		*temperature = -45.f + 175.f * (float)sys_get_be16(&read_buf[0]) / 65535.f;
 	}
@@ -280,6 +286,12 @@ static int sht43_read(const struct device *dev, float *temperature, float *humid
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_read", ret);
 		return ret;
+	}
+
+	if (sht_crc8(&read_buf[0], 2) != read_buf[2] ||
+	    sht_crc8(&read_buf[3], 2) != read_buf[5]) {
+		LOG_ERR("CRC mismatch");
+		return -EIO;
 	}
 
 	if (temperature) {
