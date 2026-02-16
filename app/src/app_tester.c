@@ -148,8 +148,11 @@ static void cmd_switch_led(const struct shell *shell, size_t argc, char **argv)
 	}
 }
 
-static void cmd_print_serial_numbers(const struct shell *shell)
+static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char **argv)
 {
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
 	int ret;
 	int count;
 
@@ -207,10 +210,15 @@ static void cmd_print_serial_numbers(const struct shell *shell)
 			shell_print(shell, "Machine Probe[%d] SHT serial: %u", i, sht_serial);
 		}
 	}
+
+	return 0;
 }
 
-static void cmd_reset_sample(const struct shell *shell)
+static int cmd_reset_sample(const struct shell *shell, size_t argc, char **argv)
 {
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
 	/* Reset all counters */
@@ -223,6 +231,8 @@ static void cmd_reset_sample(const struct shell *shell)
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	shell_print(shell, SHELL_PFX " Sensor counters reset");
+
+	return 0;
 }
 
 static void print_available_sensors(const struct shell *shell)
@@ -467,8 +477,11 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 	shell_print(shell, SHELL_PFX " Monitoring timeout");
 }
 
-static void cmd_print_sample(const struct shell *shell)
+static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 {
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
 	app_sensor_sample();
 
 	shell_print(shell, "orientation:              %d", g_app_sensor_data.orientation);
@@ -509,6 +522,8 @@ static void cmd_print_sample(const struct shell *shell)
 		    g_app_sensor_data.input_a_is_active ? "true" : "false");
 	shell_print(shell, "input-b-is-active:        %s",
 		    g_app_sensor_data.input_b_is_active ? "true" : "false");
+
+	return 0;
 }
 
 #if defined(CONFIG_LORAWAN)
