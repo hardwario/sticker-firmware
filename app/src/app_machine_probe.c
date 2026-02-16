@@ -125,12 +125,13 @@ static int tmp112_convert(const struct device *dev)
 {
 	int ret;
 
-	uint8_t write_buf[2];
+	uint8_t write_buf[3];
 
 	write_buf[0] = 0x01;
 	write_buf[1] = 0x81;
+	write_buf[2] = 0x80;
 
-	ret = ds28e17_i2c_write(dev, TMP112_I2C_ADDR, write_buf, 2);
+	ret = ds28e17_i2c_write(dev, TMP112_I2C_ADDR, write_buf, 3);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
