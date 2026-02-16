@@ -138,7 +138,7 @@ static int sample_altitude(const struct device *dev)
 	}
 
 	/* Check if data is ready */
-	if (reg_status != 0x0e) {
+	if ((reg_status & 0x0e) != 0x0e) {
 		LOG_ERR("Data not ready");
 		return -EACCES;
 	}
@@ -198,7 +198,7 @@ static int sample_pressure(const struct device *dev)
 	}
 
 	/* Check if data is ready */
-	if (reg_status != 0x0e) {
+	if ((reg_status & 0x0e) != 0x0e) {
 		LOG_ERR("Data not ready");
 		return -EACCES;
 	}
