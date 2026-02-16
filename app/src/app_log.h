@@ -33,7 +33,7 @@ extern "C" {
 #define LOG_INF_PARAM_INT(name, value)
 #define LOG_INF_PARAM_FLOAT(name, value)
 #define LOG_INF_PARAM_STR(name, value)
-#endif
+#endif /* CONFIG_APP_VERBOSE_LOGGING */
 
 #ifdef __cplusplus
 }

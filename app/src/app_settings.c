@@ -22,7 +22,7 @@ LOG_MODULE_REGISTER(app_settings, LOG_LEVEL_DBG);
 
 #if defined(CONFIG_SHELL)
 static const char m_shell_msg_error[] = "command failed";
-#endif
+#endif /* defined(CONFIG_SHELL) */
 
 static int save(bool reboot)
 {
