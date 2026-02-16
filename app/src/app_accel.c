@@ -92,7 +92,7 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 	for (int i = 0; i < 5; i++) {
 		ret = sensor_sample_fetch(dev);
 
-		if (ret != ENODATA) {
+		if (ret != -ENODATA) {
 			break;
 		}
 
