@@ -88,7 +88,6 @@ static void send_with_lc_work_handler(struct k_work *work);
 static struct k_work m_downlink_success_work;
 static struct k_work m_lc_response_work;
 static struct k_work m_send_with_lc_work;
-static uint8_t m_lc_response_margin;
 static uint8_t m_lc_response_gw_count;
 
 
@@ -327,7 +326,6 @@ static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
 
 	m_last_margin = demod_margin;
 	m_last_gw_count = nb_gateways;
-	m_lc_response_margin = demod_margin;
 	m_lc_response_gw_count = nb_gateways;
 
 	k_work_submit_to_queue(&m_work_q, &m_lc_response_work);
@@ -344,8 +342,6 @@ static void link_check_timeout_handler(struct k_timer *timer)
 
 static void link_check_work_handler(struct k_work *work)
 {
-	int ret;
-
 	if (atomic_get(&m_state) == APP_LRW_STATE_JOINING ||
 	    atomic_get(&m_state) == APP_LRW_STATE_RECONNECT) {
 		return;
@@ -357,19 +353,9 @@ static void link_check_work_handler(struct k_work *work)
 		return;
 	}
 
-	m_link_check_pending = true;
-
-	ret = lorawan_request_link_check(false);
-	if (ret) {
-		LOG_ERR("Link check request failed: %d", ret);
-		handle_link_check_failure();
-		return;
-	}
-
-	LOG_DBG("Link check requested");
-
-	/* Start timeout timer for response */
-	k_timer_start(&m_link_check_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC), K_FOREVER);
+	/* Not pending — LC response already arrived and was handled before
+	 * the timeout timer fired. Nothing to do. */
+	LOG_DBG("Link check timeout fired but LC already resolved");
 }
 
 static void join_work_handler(struct k_work *work)
@@ -524,8 +510,9 @@ static void send_work_handler(struct k_work *work)
 		return;
 	}
 
-	/* Determine if this message should have link check */
-	with_link_check = should_request_link_check();
+	/* Determine if this message should have link check.
+	 * Skip if LC is already pending (e.g. from send_with_lc path). */
+	with_link_check = !m_link_check_pending && should_request_link_check();
 
 	if (with_link_check) {
 		ret = lorawan_request_link_check(false);
