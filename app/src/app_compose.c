@@ -107,7 +107,15 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	if (!isnan(g_app_sensor_data.altitude)) {
-		altitude = (int16_t)(g_app_sensor_data.altitude * 10);
+		float alt_scaled = g_app_sensor_data.altitude * 10;
+
+		if (alt_scaled > INT16_MAX) {
+			alt_scaled = INT16_MAX;
+		} else if (alt_scaled < INT16_MIN) {
+			alt_scaled = INT16_MIN;
+		}
+
+		altitude = (int16_t)alt_scaled;
 		header |= BIT(22);
 	}
 
