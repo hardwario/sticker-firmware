@@ -158,15 +158,25 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 		}
 
 		if (message->application.has_interval_sample) {
-			LOG_INF_PARAM_INT("application.interval_sample",
-					  message->application.interval_sample);
-			config->interval_sample = message->application.interval_sample;
+			int val = message->application.interval_sample;
+
+			LOG_INF_PARAM_INT("application.interval_sample", val);
+			if (val == 0 || (val >= 5 && val <= 3600)) {
+				config->interval_sample = val;
+			} else {
+				LOG_WRN("Ignoring invalid interval_sample: %d", val);
+			}
 		}
 
 		if (message->application.has_interval_report) {
-			LOG_INF_PARAM_INT("application.interval_report",
-					  message->application.interval_report);
-			config->interval_report = message->application.interval_report;
+			int val = message->application.interval_report;
+
+			LOG_INF_PARAM_INT("application.interval_report", val);
+			if (val >= 60 && val <= 86400) {
+				config->interval_report = val;
+			} else {
+				LOG_WRN("Ignoring invalid interval_report: %d", val);
+			}
 		}
 
 		if (message->application.has_alarm_temperature_enabled) {
@@ -177,21 +187,36 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 		}
 
 		if (message->application.has_alarm_temperature_lo) {
-			LOG_INF_PARAM_FLOAT("application.alarm_temperature_lo",
-					    message->application.alarm_temperature_lo);
-			config->alarm_temperature_lo = message->application.alarm_temperature_lo;
+			float val = message->application.alarm_temperature_lo;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_temperature_lo", val);
+			if (val >= -30.0f && val <= 70.0f) {
+				config->alarm_temperature_lo = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_temperature_lo");
+			}
 		}
 
 		if (message->application.has_alarm_temperature_hi) {
-			LOG_INF_PARAM_FLOAT("application.alarm_temperature_hi",
-					    message->application.alarm_temperature_hi);
-			config->alarm_temperature_hi = message->application.alarm_temperature_hi;
+			float val = message->application.alarm_temperature_hi;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_temperature_hi", val);
+			if (val >= -30.0f && val <= 70.0f) {
+				config->alarm_temperature_hi = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_temperature_hi");
+			}
 		}
 
 		if (message->application.has_alarm_temperature_hst) {
-			LOG_INF_PARAM_FLOAT("application.alarm_temperature_hst",
-					    message->application.alarm_temperature_hst);
-			config->alarm_temperature_hst = message->application.alarm_temperature_hst;
+			float val = message->application.alarm_temperature_hst;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_temperature_hst", val);
+			if (val >= 0.0f && val <= 5.0f) {
+				config->alarm_temperature_hst = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_temperature_hst");
+			}
 		}
 
 		if (message->application.has_alarm_humidity_enabled) {
@@ -202,21 +227,36 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 		}
 
 		if (message->application.has_alarm_humidity_lo) {
-			LOG_INF_PARAM_FLOAT("application.alarm_humidity_lo",
-					    message->application.alarm_humidity_lo);
-			config->alarm_humidity_lo = message->application.alarm_humidity_lo;
+			float val = message->application.alarm_humidity_lo;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_humidity_lo", val);
+			if (val >= 0.0f && val <= 100.0f) {
+				config->alarm_humidity_lo = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_humidity_lo");
+			}
 		}
 
 		if (message->application.has_alarm_humidity_hi) {
-			LOG_INF_PARAM_FLOAT("application.alarm_humidity_hi",
-					    message->application.alarm_humidity_hi);
-			config->alarm_humidity_hi = message->application.alarm_humidity_hi;
+			float val = message->application.alarm_humidity_hi;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_humidity_hi", val);
+			if (val >= 0.0f && val <= 100.0f) {
+				config->alarm_humidity_hi = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_humidity_hi");
+			}
 		}
 
 		if (message->application.has_alarm_humidity_hst) {
-			LOG_INF_PARAM_FLOAT("application.alarm_humidity_hst",
-					    message->application.alarm_humidity_hst);
-			config->alarm_humidity_hst = message->application.alarm_humidity_hst;
+			float val = message->application.alarm_humidity_hst;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_humidity_hst", val);
+			if (val >= 0.0f && val <= 20.0f) {
+				config->alarm_humidity_hst = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_humidity_hst");
+			}
 		}
 
 		if (message->application.has_alarm_pressure_enabled) {
@@ -227,21 +267,36 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 		}
 
 		if (message->application.has_alarm_pressure_lo) {
-			LOG_INF_PARAM_FLOAT("application.alarm_pressure_lo",
-					    message->application.alarm_pressure_lo);
-			config->alarm_pressure_lo = message->application.alarm_pressure_lo;
+			float val = message->application.alarm_pressure_lo;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_pressure_lo", val);
+			if (val >= 500.0f && val <= 1200.0f) {
+				config->alarm_pressure_lo = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_pressure_lo");
+			}
 		}
 
 		if (message->application.has_alarm_pressure_hi) {
-			LOG_INF_PARAM_FLOAT("application.alarm_pressure_hi",
-					    message->application.alarm_pressure_hi);
-			config->alarm_pressure_hi = message->application.alarm_pressure_hi;
+			float val = message->application.alarm_pressure_hi;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_pressure_hi", val);
+			if (val >= 500.0f && val <= 1200.0f) {
+				config->alarm_pressure_hi = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_pressure_hi");
+			}
 		}
 
 		if (message->application.has_alarm_pressure_hst) {
-			LOG_INF_PARAM_FLOAT("application.alarm_pressure_hst",
-					    message->application.alarm_pressure_hst);
-			config->alarm_pressure_hst = message->application.alarm_pressure_hst;
+			float val = message->application.alarm_pressure_hst;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_pressure_hst", val);
+			if (val >= 0.0f && val <= 50.0f) {
+				config->alarm_pressure_hst = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_pressure_hst");
+			}
 		}
 
 		if (message->application.has_alarm_t1_temperature_enabled) {
@@ -252,24 +307,36 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 		}
 
 		if (message->application.has_alarm_t1_temperature_lo) {
-			LOG_INF_PARAM_FLOAT("application.alarm_t1_temperature_lo",
-					    message->application.alarm_t1_temperature_lo);
-			config->alarm_t1_temperature_lo =
-				message->application.alarm_t1_temperature_lo;
+			float val = message->application.alarm_t1_temperature_lo;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_t1_temperature_lo", val);
+			if (val >= -30.0f && val <= 70.0f) {
+				config->alarm_t1_temperature_lo = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_t1_temperature_lo");
+			}
 		}
 
 		if (message->application.has_alarm_t1_temperature_hi) {
-			LOG_INF_PARAM_FLOAT("application.alarm_t1_temperature_hi",
-					    message->application.alarm_t1_temperature_hi);
-			config->alarm_t1_temperature_hi =
-				message->application.alarm_t1_temperature_hi;
+			float val = message->application.alarm_t1_temperature_hi;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_t1_temperature_hi", val);
+			if (val >= -30.0f && val <= 70.0f) {
+				config->alarm_t1_temperature_hi = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_t1_temperature_hi");
+			}
 		}
 
 		if (message->application.has_alarm_t1_temperature_hst) {
-			LOG_INF_PARAM_FLOAT("application.alarm_t1_temperature_hst",
-					    message->application.alarm_t1_temperature_hst);
-			config->alarm_t1_temperature_hst =
-				message->application.alarm_t1_temperature_hst;
+			float val = message->application.alarm_t1_temperature_hst;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_t1_temperature_hst", val);
+			if (val >= 0.0f && val <= 5.0f) {
+				config->alarm_t1_temperature_hst = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_t1_temperature_hst");
+			}
 		}
 
 		if (message->application.has_alarm_t2_temperature_enabled) {
@@ -280,24 +347,36 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 		}
 
 		if (message->application.has_alarm_t2_temperature_lo) {
-			LOG_INF_PARAM_FLOAT("application.alarm_t2_temperature_lo",
-					    message->application.alarm_t2_temperature_lo);
-			config->alarm_t2_temperature_lo =
-				message->application.alarm_t2_temperature_lo;
+			float val = message->application.alarm_t2_temperature_lo;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_t2_temperature_lo", val);
+			if (val >= -30.0f && val <= 70.0f) {
+				config->alarm_t2_temperature_lo = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_t2_temperature_lo");
+			}
 		}
 
 		if (message->application.has_alarm_t2_temperature_hi) {
-			LOG_INF_PARAM_FLOAT("application.alarm_t2_temperature_hi",
-					    message->application.alarm_t2_temperature_hi);
-			config->alarm_t2_temperature_hi =
-				message->application.alarm_t2_temperature_hi;
+			float val = message->application.alarm_t2_temperature_hi;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_t2_temperature_hi", val);
+			if (val >= -30.0f && val <= 70.0f) {
+				config->alarm_t2_temperature_hi = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_t2_temperature_hi");
+			}
 		}
 
 		if (message->application.has_alarm_t2_temperature_hst) {
-			LOG_INF_PARAM_FLOAT("application.alarm_t2_temperature_hst",
-					    message->application.alarm_t2_temperature_hst);
-			config->alarm_t2_temperature_hst =
-				message->application.alarm_t2_temperature_hst;
+			float val = message->application.alarm_t2_temperature_hst;
+
+			LOG_INF_PARAM_FLOAT("application.alarm_t2_temperature_hst", val);
+			if (val >= 0.0f && val <= 5.0f) {
+				config->alarm_t2_temperature_hst = val;
+			} else {
+				LOG_WRN("Ignoring invalid alarm_t2_temperature_hst");
+			}
 		}
 
 		if (message->application.has_hall_left_counter) {
@@ -339,21 +418,36 @@ void app_nfc_ingest(const NfcConfigMessage *message)
 		}
 
 		if (message->application.has_corr_temperature) {
-			LOG_INF_PARAM_FLOAT("application.corr_temperature",
-					    message->application.corr_temperature);
-			config->corr_temperature = message->application.corr_temperature;
+			float val = message->application.corr_temperature;
+
+			LOG_INF_PARAM_FLOAT("application.corr_temperature", val);
+			if (val >= -5.0f && val <= 5.0f) {
+				config->corr_temperature = val;
+			} else {
+				LOG_WRN("Ignoring invalid corr_temperature");
+			}
 		}
 
 		if (message->application.has_corr_t1_temperature) {
-			LOG_INF_PARAM_FLOAT("application.corr_t1_temperature",
-					    message->application.corr_t1_temperature);
-			config->corr_t1_temperature = message->application.corr_t1_temperature;
+			float val = message->application.corr_t1_temperature;
+
+			LOG_INF_PARAM_FLOAT("application.corr_t1_temperature", val);
+			if (val >= -5.0f && val <= 5.0f) {
+				config->corr_t1_temperature = val;
+			} else {
+				LOG_WRN("Ignoring invalid corr_t1_temperature");
+			}
 		}
 
 		if (message->application.has_corr_t2_temperature) {
-			LOG_INF_PARAM_FLOAT("application.corr_t2_temperature",
-					    message->application.corr_t2_temperature);
-			config->corr_t2_temperature = message->application.corr_t2_temperature;
+			float val = message->application.corr_t2_temperature;
+
+			LOG_INF_PARAM_FLOAT("application.corr_t2_temperature", val);
+			if (val >= -5.0f && val <= 5.0f) {
+				config->corr_t2_temperature = val;
+			} else {
+				LOG_WRN("Ignoring invalid corr_t2_temperature");
+			}
 		}
 
 		if (message->application.has_cap_hall_left) {
