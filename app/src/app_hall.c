@@ -73,11 +73,21 @@ static int poll(void)
 	k_busy_wait(2);
 
 	if (g_app_config.cap_hall_left) {
-		left_is_active = !gpio_pin_get_dt(&m_hall_left);
+		int val = gpio_pin_get_dt(&m_hall_left);
+		if (val < 0) {
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
+			return val;
+		}
+		left_is_active = !val;
 	}
 
 	if (g_app_config.cap_hall_right) {
-		right_is_active = !gpio_pin_get_dt(&m_hall_right);
+		int val = gpio_pin_get_dt(&m_hall_right);
+		if (val < 0) {
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
+			return val;
+		}
+		right_is_active = !val;
 	}
 
 	if (g_app_config.cap_hall_left) {

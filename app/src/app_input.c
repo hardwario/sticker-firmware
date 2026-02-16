@@ -52,11 +52,21 @@ static int poll(void)
 	}
 
 	if (g_app_config.cap_input_a) {
-		input_a_is_active = !gpio_pin_get_dt(&m_input_a);
+		int val = gpio_pin_get_dt(&m_input_a);
+		if (val < 0) {
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
+			return val;
+		}
+		input_a_is_active = !val;
 	}
 
 	if (g_app_config.cap_input_b) {
-		input_b_is_active = !gpio_pin_get_dt(&m_input_b);
+		int val = gpio_pin_get_dt(&m_input_b);
+		if (val < 0) {
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
+			return val;
+		}
+		input_b_is_active = !val;
 	}
 
 	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
