@@ -378,6 +378,7 @@ static void join_work_handler(struct k_work *work)
 			LOG_ERR("lorawan_start failed: %d", ret);
 			uint32_t backoff = calculate_rejoin_backoff(m_rejoin_attempts);
 			m_rejoin_attempts++;
+			m_state = APP_LRW_STATE_RECONNECT;
 			k_timer_start(&m_link_check_timer, K_SECONDS(backoff), K_FOREVER);
 			return;
 		}
