@@ -970,8 +970,6 @@ int app_machine_probe_read_accelerometer(int index, uint64_t *serial_number, flo
 	}
 
 	COMM_EPILOGUE
-
-	return 0;
 }
 
 int app_machine_probe_enable_tilt_alert(int index, uint64_t *serial_number, int threshold,
@@ -987,13 +985,12 @@ int app_machine_probe_enable_tilt_alert(int index, uint64_t *serial_number, int 
 		ret = lis2dh12_enable_alert(m_sensors[index].dev, threshold, duration);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("lis2dh12_enable_alert", ret);
-			return ret;
+			res = ret;
+			goto error;
 		}
 	}
 
 	COMM_EPILOGUE
-
-	return 0;
 }
 
 int app_machine_probe_disable_tilt_alert(int index, uint64_t *serial_number)
@@ -1008,13 +1005,12 @@ int app_machine_probe_disable_tilt_alert(int index, uint64_t *serial_number)
 		ret = lis2dh12_disable_alert(m_sensors[index].dev);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("lis2dh12_disable_alert", ret);
-			return ret;
+			res = ret;
+			goto error;
 		}
 	}
 
 	COMM_EPILOGUE
-
-	return 0;
 }
 
 int app_machine_probe_get_tilt_alert(int index, uint64_t *serial_number, bool *is_active)
@@ -1033,7 +1029,8 @@ int app_machine_probe_get_tilt_alert(int index, uint64_t *serial_number, bool *i
 		ret = lis2dh12_get_interrupt(m_sensors[index].dev, is_active);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("lis2dh12_get_interrupt", ret);
-			return ret;
+			res = ret;
+			goto error;
 		}
 	}
 
@@ -1042,6 +1039,4 @@ int app_machine_probe_get_tilt_alert(int index, uint64_t *serial_number, bool *i
 	}
 
 	COMM_EPILOGUE
-
-	return 0;
 }
