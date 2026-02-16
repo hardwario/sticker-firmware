@@ -29,6 +29,24 @@
 
 LOG_MODULE_REGISTER(app_machine_probe, LOG_LEVEL_DBG);
 
+static uint8_t sht_crc8(const uint8_t *data, size_t len)
+{
+	uint8_t crc = 0xff;
+
+	for (size_t i = 0; i < len; i++) {
+		crc ^= data[i];
+		for (int j = 0; j < 8; j++) {
+			if (crc & 0x80) {
+				crc = (crc << 1) ^ 0x31;
+			} else {
+				crc <<= 1;
+			}
+		}
+	}
+
+	return crc;
+}
+
 #define TMP112_I2C_ADDR  0x48
 #define TMP112_INIT_TIME K_MSEC(10)
 #define TMP112_CONV_TIME K_MSEC(50)
@@ -293,7 +311,8 @@ static int sht_read_serial(const struct device *dev, uint32_t *serial_number,
 	if (ret == 0) {
 		k_sleep(K_MSEC(1));
 		ret = ds28e17_i2c_read(dev, SHT43_I2C_ADDR, read_buf, 6);
-		if (ret == 0) {
+		if (ret == 0 && sht_crc8(&read_buf[0], 2) == read_buf[2] &&
+		    sht_crc8(&read_buf[3], 2) == read_buf[5]) {
 			LOG_DBG("SHT43 detected");
 			if (detected_type) {
 				*detected_type = SHT_TYPE_SHT43;
