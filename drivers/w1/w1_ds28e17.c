@@ -105,12 +105,7 @@ static int ds28e17_i2c_write_(const struct device *dev, uint8_t dev_addr, const 
 		return ret;
 	}
 
-	uint8_t *buf = k_malloc(3 + write_len + 2);
-	if (!buf) {
-		LOG_ERR("Call `k_malloc` failed");
-		w1_unlock_bus(get_config(dev)->bus);
-		return -ENOMEM;
-	}
+	uint8_t buf[3 + 255 + 2];
 
 	buf[0] = DEV_CMD_WRITE_DATA_STOP;
 	buf[1] = dev_addr << 1;
@@ -124,12 +119,9 @@ static int ds28e17_i2c_write_(const struct device *dev, uint8_t dev_addr, const 
 	ret = w1_write_block(get_config(dev)->bus, buf, 3 + write_len + 2);
 	if (ret) {
 		LOG_ERR("Call `w1_write_block` failed: %d", ret);
-		k_free(buf);
 		w1_unlock_bus(get_config(dev)->bus);
 		return ret;
 	}
-
-	k_free(buf);
 
 	ret = poll_busy(dev);
 	if (ret) {
@@ -197,12 +189,7 @@ static int ds28e17_i2c_read_(const struct device *dev, uint8_t dev_addr, uint8_t
 		return ret;
 	}
 
-	uint8_t *buf = k_malloc(3 + 2);
-	if (!buf) {
-		LOG_ERR("Call `k_malloc` failed");
-		w1_unlock_bus(get_config(dev)->bus);
-		return -ENOMEM;
-	}
+	uint8_t buf[5];
 
 	buf[0] = DEV_CMD_READ_DATA_STOP;
 	buf[1] = dev_addr << 1 | BIT(0);
@@ -214,12 +201,9 @@ static int ds28e17_i2c_read_(const struct device *dev, uint8_t dev_addr, uint8_t
 	ret = w1_write_block(get_config(dev)->bus, buf, 3 + 2);
 	if (ret) {
 		LOG_ERR("Call `w1_write_block` failed: %d", ret);
-		k_free(buf);
 		w1_unlock_bus(get_config(dev)->bus);
 		return ret;
 	}
-
-	k_free(buf);
 
 	ret = poll_busy(dev);
 	if (ret) {
@@ -281,12 +265,7 @@ static int ds28e17_i2c_write_read_(const struct device *dev, uint8_t dev_addr,
 		return ret;
 	}
 
-	uint8_t *buf = k_malloc(3 + write_len + 3);
-	if (!buf) {
-		LOG_ERR("Call `k_malloc` failed");
-		w1_unlock_bus(get_config(dev)->bus);
-		return -ENOMEM;
-	}
+	uint8_t buf[3 + 255 + 3];
 
 	buf[0] = DEV_CMD_WRITE_READ_DATA_STOP;
 	buf[1] = dev_addr << 1;
@@ -302,12 +281,9 @@ static int ds28e17_i2c_write_read_(const struct device *dev, uint8_t dev_addr,
 	ret = w1_write_block(get_config(dev)->bus, buf, 3 + write_len + 3);
 	if (ret) {
 		LOG_ERR("Call `w1_write_block` failed: %d", ret);
-		k_free(buf);
 		w1_unlock_bus(get_config(dev)->bus);
 		return ret;
 	}
-
-	k_free(buf);
 
 	ret = poll_busy(dev);
 	if (ret) {
