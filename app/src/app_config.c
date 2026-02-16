@@ -972,7 +972,7 @@ static int cmd_secret_key(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
