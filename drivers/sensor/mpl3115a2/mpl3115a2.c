@@ -212,7 +212,7 @@ static int sample_pressure(const struct device *dev)
 	}
 
 	uint32_t p = sys_get_be24(&buffer[0]) << 8;
-	get_data(dev)->pressure = (p >> 12) / 4.f;
+	get_data(dev)->pressure = (p >> 12) / 4000.f;
 	get_data(dev)->temperature = (int8_t)buffer[3] + (buffer[4] >> 4) / 16.f;
 
 	return 0;

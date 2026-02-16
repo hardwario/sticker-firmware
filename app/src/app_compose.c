@@ -120,7 +120,7 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	if (!isnan(g_app_sensor_data.pressure)) {
-		pressure = (uint32_t)g_app_sensor_data.pressure;
+		pressure = (uint32_t)(g_app_sensor_data.pressure * 1000.f);
 		header |= BIT(21);
 	}
 
