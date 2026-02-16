@@ -89,6 +89,7 @@ static void pyq1648_event_handler(void *user_data)
 int app_sensor_init(void)
 {
 	int ret;
+	int res = 0;
 
 	if (g_app_config.cap_light_sensor) {
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(opt3001));
@@ -96,6 +97,7 @@ int app_sensor_init(void)
 		ret = device_init(dev);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "opt3001", ret);
+			res = res ? res : ret;
 		}
 	}
 
@@ -105,6 +107,7 @@ int app_sensor_init(void)
 		ret = device_init(dev);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "mpl3115a2", ret);
+			res = res ? res : ret;
 		}
 	}
 
@@ -112,6 +115,7 @@ int app_sensor_init(void)
 		ret = app_hall_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_hall_init", ret);
+			res = res ? res : ret;
 		}
 	}
 
@@ -119,6 +123,7 @@ int app_sensor_init(void)
 		ret = app_input_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_input_init", ret);
+			res = res ? res : ret;
 		}
 	}
 
@@ -126,6 +131,7 @@ int app_sensor_init(void)
 		ret = app_pyq1648_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_pyq1648_init", ret);
+			res = res ? res : ret;
 		} else {
 			app_pyq1648_set_callback(pyq1648_event_handler, NULL);
 		}
@@ -137,6 +143,7 @@ int app_sensor_init(void)
 		ret = device_init(dev);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "ds2484", ret);
+			res = res ? res : ret;
 		}
 	}
 
@@ -146,6 +153,7 @@ int app_sensor_init(void)
 		ret = device_init(dev_0);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "ds18b20_0", ret);
+			res = res ? res : ret;
 		}
 
 		const struct device *dev_1 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_1));
@@ -153,11 +161,13 @@ int app_sensor_init(void)
 		ret = device_init(dev_1);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "ds18b20_1", ret);
+			res = res ? res : ret;
 		}
 
 		ret = app_ds18b20_scan();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_ds18b20_scan", ret);
+			res = res ? res : ret;
 		}
 	}
 
@@ -167,6 +177,7 @@ int app_sensor_init(void)
 		ret = device_init(dev_0);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "machine_probe_0", ret);
+			res = res ? res : ret;
 		}
 
 		const struct device *dev_1 = DEVICE_DT_GET(DT_NODELABEL(machine_probe_1));
@@ -174,11 +185,13 @@ int app_sensor_init(void)
 		ret = device_init(dev_1);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "machine_probe_1", ret);
+			res = res ? res : ret;
 		}
 
 		ret = app_machine_probe_scan();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_machine_probe_scan", ret);
+			res = res ? res : ret;
 		}
 
 		int count = app_machine_probe_get_count();
@@ -189,6 +202,7 @@ int app_sensor_init(void)
 								  TILT_DURATION);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("app_machine_probe_enable_tilt_alert", ret);
+				res = res ? res : ret;
 			}
 		}
 	}
@@ -204,7 +218,7 @@ int app_sensor_init(void)
 			      K_SECONDS(g_app_config.interval_sample));
 	}
 
-	return 0;
+	return res;
 }
 
 void app_sensor_sample(void)
