@@ -106,9 +106,8 @@ int app_sht4x_read_serial(uint32_t *serial_number)
 	if (serial_number) {
 		*serial_number = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
 				 ((uint32_t)data[3] << 8) | (uint32_t)data[4];
+		LOG_DBG("SHT40 Serial: %u", *serial_number);
 	}
-
-	LOG_DBG("SHT40 Serial: %u", *serial_number);
 
 	return 0;
 }
