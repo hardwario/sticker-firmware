@@ -1034,6 +1034,11 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 		return -EINVAL;
 	}
 
+	if (value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
 	m_app_config.nonce_counter = (uint32_t)value;
 	shell_print(shell, "%s", m_msg_cmd_success);
 	return 0;
