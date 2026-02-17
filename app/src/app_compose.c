@@ -12,15 +12,14 @@
 /* Zephyr includes */
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/net_buf.h>
 
 /* Standard includes */
-#include <errno.h>
 #include <limits.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 
 LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 
@@ -206,107 +205,75 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 
 	LOG_DBG("Header: 0x%08x", header);
 
-#define APPEND_BYTE(exp)                                                                           \
-	if (*len >= size) {                                                                        \
-		LOG_ERR("Not enough space in provided buffer");                                    \
-		return -ENOSPC;                                                                    \
-	} else {                                                                                   \
-		buf[(*len)++] = exp;                                                               \
-	}
+	struct net_buf_simple nbuf;
 
-	*len = 0;
+	net_buf_simple_init_with_data(&nbuf, buf, size);
+	net_buf_simple_reset(&nbuf);
 
-	memset(buf, 0, size);
-
-	APPEND_BYTE(header >> 24);
-	APPEND_BYTE(header >> 16);
-	APPEND_BYTE(header >> 8);
-	APPEND_BYTE(header);
+	net_buf_simple_add_be32(&nbuf, header);
 
 	if (header & BIT(29)) {
-		APPEND_BYTE(voltage);
+		net_buf_simple_add_u8(&nbuf, voltage);
 	}
 
 	if (header & BIT(28)) {
-		APPEND_BYTE((uint16_t)temperature >> 8);
-		APPEND_BYTE(temperature);
+		net_buf_simple_add_be16(&nbuf, (uint16_t)temperature);
 	}
 
 	if (header & BIT(27)) {
-		APPEND_BYTE(humidity);
+		net_buf_simple_add_u8(&nbuf, humidity);
 	}
 
 	if (header & BIT(26)) {
-		APPEND_BYTE(illuminance >> 8);
-		APPEND_BYTE(illuminance);
+		net_buf_simple_add_be16(&nbuf, illuminance);
 	}
 
 	if (header & BIT(25)) {
-		APPEND_BYTE((uint16_t)t1_temperature >> 8);
-		APPEND_BYTE(t1_temperature);
+		net_buf_simple_add_be16(&nbuf, (uint16_t)t1_temperature);
 	}
 
 	if (header & BIT(24)) {
-		APPEND_BYTE((uint16_t)t2_temperature >> 8);
-		APPEND_BYTE(t2_temperature);
+		net_buf_simple_add_be16(&nbuf, (uint16_t)t2_temperature);
 	}
 
 	if (header & BIT(23)) {
-		APPEND_BYTE(motion_count >> 24);
-		APPEND_BYTE(motion_count >> 16);
-		APPEND_BYTE(motion_count >> 8);
-		APPEND_BYTE(motion_count);
+		net_buf_simple_add_be32(&nbuf, motion_count);
 	}
 
 	if (header & BIT(22)) {
-		APPEND_BYTE((uint16_t)altitude >> 8);
-		APPEND_BYTE(altitude);
+		net_buf_simple_add_be16(&nbuf, (uint16_t)altitude);
 	}
 
 	if (header & BIT(21)) {
-		APPEND_BYTE(pressure >> 24);
-		APPEND_BYTE(pressure >> 16);
-		APPEND_BYTE(pressure >> 8);
-		APPEND_BYTE(pressure);
+		net_buf_simple_add_be32(&nbuf, pressure);
 	}
 
 	if (header & BIT(19)) {
-		APPEND_BYTE((uint16_t)mp1_temperature >> 8);
-		APPEND_BYTE(mp1_temperature);
+		net_buf_simple_add_be16(&nbuf, (uint16_t)mp1_temperature);
 	}
 
 	if (header & BIT(18)) {
-		APPEND_BYTE((uint16_t)mp2_temperature >> 8);
-		APPEND_BYTE(mp2_temperature);
+		net_buf_simple_add_be16(&nbuf, (uint16_t)mp2_temperature);
 	}
 
 	if (header & BIT(17)) {
-		APPEND_BYTE(mp1_humidity);
+		net_buf_simple_add_u8(&nbuf, mp1_humidity);
 	}
 
 	if (header & BIT(16)) {
-		APPEND_BYTE(mp2_humidity);
+		net_buf_simple_add_u8(&nbuf, mp2_humidity);
 	}
 
 	if (header & BIT(13)) {
-		APPEND_BYTE(hall_left_count >> 24);
-		APPEND_BYTE(hall_left_count >> 16);
-		APPEND_BYTE(hall_left_count >> 8);
-		APPEND_BYTE(hall_left_count);
+		net_buf_simple_add_be32(&nbuf, hall_left_count);
 	}
 
 	if (header & BIT(12)) {
-		APPEND_BYTE(hall_right_count >> 24);
-		APPEND_BYTE(hall_right_count >> 16);
-		APPEND_BYTE(hall_right_count >> 8);
-		APPEND_BYTE(hall_right_count);
+		net_buf_simple_add_be32(&nbuf, hall_right_count);
 	}
 
 	if (header & BIT(5)) {
-		APPEND_BYTE(input_a_count >> 24);
-		APPEND_BYTE(input_a_count >> 16);
-		APPEND_BYTE(input_a_count >> 8);
-		APPEND_BYTE(input_a_count);
+		net_buf_simple_add_be32(&nbuf, input_a_count);
 		/* Append status byte: bit 3=notify_act, bit 2=notify_deact, bit 1=reserved, bit
 		 * 0=is_active */
 		uint8_t status_a = 0;
@@ -319,14 +286,11 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		if (input_data.input_a_is_active) {
 			status_a |= BIT(0);
 		}
-		APPEND_BYTE(status_a);
+		net_buf_simple_add_u8(&nbuf, status_a);
 	}
 
 	if (header & BIT(4)) {
-		APPEND_BYTE(input_b_count >> 24);
-		APPEND_BYTE(input_b_count >> 16);
-		APPEND_BYTE(input_b_count >> 8);
-		APPEND_BYTE(input_b_count);
+		net_buf_simple_add_be32(&nbuf, input_b_count);
 		/* Append status byte: bit 3=notify_act, bit 2=notify_deact, bit 1=reserved, bit
 		 * 0=is_active */
 		uint8_t status_b = 0;
@@ -339,10 +303,10 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		if (input_data.input_b_is_active) {
 			status_b |= BIT(0);
 		}
-		APPEND_BYTE(status_b);
+		net_buf_simple_add_u8(&nbuf, status_b);
 	}
 
-#undef APPEND_BYTE
+	*len = nbuf.len;
 
 	LOG_HEXDUMP_DBG(buf, *len, "Composed buffer:");
 
