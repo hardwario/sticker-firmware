@@ -5,6 +5,8 @@
  */
 
 #include "app_ds18b20.h"
+#include "app_hall.h"
+#include "app_input.h"
 #include "app_led.h"
 #include "app_lrw.h"
 #include "app_machine_probe.h"
@@ -219,9 +221,11 @@ static int cmd_reset_sample(const struct shell *shell, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
+	app_hall_reset_counts();
+	app_input_reset_counts();
+
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
-	/* Reset all counters */
 	g_app_sensor_data.motion_count = 0;
 	g_app_sensor_data.hall_left_count = 0;
 	g_app_sensor_data.hall_right_count = 0;

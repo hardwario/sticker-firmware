@@ -298,6 +298,14 @@ void app_hall_clear_notify_flags(struct app_hall_data *data)
 	k_mutex_unlock(&m_hall_data_mutex);
 }
 
+void app_hall_reset_counts(void)
+{
+	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
+	m_hall_data.left_count = 0;
+	m_hall_data.right_count = 0;
+	k_mutex_unlock(&m_hall_data_mutex);
+}
+
 bool app_hall_check_notify_event(void)
 {
 	bool has_event;
