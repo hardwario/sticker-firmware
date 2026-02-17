@@ -32,7 +32,28 @@ LOG_MODULE_REGISTER(app_config, LOG_LEVEL_DBG);
 
 struct app_config g_app_config;
 
+static const struct app_config m_app_config_defaults = {
+	.config_version = APP_CONFIG_VERSION,
+	.interval_report = 900,
+	.alarm_temperature_lo = 15.0f,
+	.alarm_temperature_hi = 25.0f,
+	.alarm_temperature_hst = 0.5f,
+	.alarm_humidity_lo = 30.0f,
+	.alarm_humidity_hi = 75.0f,
+	.alarm_humidity_hst = 5.0f,
+	.alarm_pressure_lo = 700.0f,
+	.alarm_pressure_hi = 1060.0f,
+	.alarm_pressure_hst = 10.0f,
+	.alarm_t1_temperature_lo = 15.0f,
+	.alarm_t1_temperature_hi = 25.0f,
+	.alarm_t1_temperature_hst = 0.5f,
+	.alarm_t2_temperature_lo = 15.0f,
+	.alarm_t2_temperature_hi = 25.0f,
+	.alarm_t2_temperature_hst = 0.5f,
+};
+
 static struct app_config m_app_config = {
+	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
 	.alarm_temperature_lo = 15.0f,
 	.alarm_temperature_hi = 25.0f,
@@ -74,6 +95,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		}                                                                                  \
 	} while (0)
 
+	SETTINGS_SET("config-version", &m_app_config.config_version,
+		     sizeof(m_app_config.config_version));
 	SETTINGS_SET("secret-key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
 	SETTINGS_SET("serial-number", &m_app_config.serial_number,
 		     sizeof(m_app_config.serial_number));
@@ -192,6 +215,12 @@ static int h_commit(void)
 {
 	LOG_DBG("Loaded settings in full");
 
+	if (m_app_config.config_version != APP_CONFIG_VERSION) {
+		LOG_WRN("Config version mismatch (stored=%u, expected=%u), resetting to defaults",
+			m_app_config.config_version, APP_CONFIG_VERSION);
+		m_app_config = m_app_config_defaults;
+	}
+
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
 	return 0;
 }
@@ -203,6 +232,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
 	} while (0)
 
+	EXPORT_FUNC("config-version", &m_app_config.config_version,
+		    sizeof(m_app_config.config_version));
 	EXPORT_FUNC("secret-key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
 	EXPORT_FUNC("serial-number", &m_app_config.serial_number,
 		    sizeof(m_app_config.serial_number));
