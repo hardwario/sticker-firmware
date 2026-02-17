@@ -254,6 +254,23 @@ int app_hall_get_data(struct app_hall_data *data)
 	return 0;
 }
 
+int app_hall_get_data_and_clear_notify(struct app_hall_data *data)
+{
+	if (!data) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
+	*data = m_hall_data;
+	m_hall_data.left_notify_act = false;
+	m_hall_data.left_notify_deact = false;
+	m_hall_data.right_notify_act = false;
+	m_hall_data.right_notify_deact = false;
+	k_mutex_unlock(&m_hall_data_mutex);
+
+	return 0;
+}
+
 void app_hall_clear_notify_flags(struct app_hall_data *data)
 {
 	if (!data) {

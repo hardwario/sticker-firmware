@@ -59,8 +59,8 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	uint8_t mp1_humidity = 0xff;
 	uint8_t mp2_humidity = 0xff;
 
-	app_hall_get_data(&hall_data);
-	app_input_get_data(&input_data);
+	app_hall_get_data_and_clear_notify(&hall_data);
+	app_input_get_data_and_clear_notify(&input_data);
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
@@ -201,10 +201,6 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	if (hall_data.right_is_active) {
 		header |= BIT(6);
 	}
-
-	/* Clear notify flags after reading them */
-	app_hall_clear_notify_flags(&hall_data);
-	app_input_clear_notify_flags(&input_data);
 
 	header |= orientation;
 
