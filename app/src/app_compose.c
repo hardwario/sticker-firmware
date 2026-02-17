@@ -156,8 +156,8 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		header |= BIT(14);
 	}
 
-	hall_left_count = g_app_sensor_data.hall_left_count;
-	hall_right_count = g_app_sensor_data.hall_right_count;
+	hall_left_count = hall_data.left_count;
+	hall_right_count = hall_data.right_count;
 
 	if (hall_left_count > 0) {
 		header |= BIT(13);
@@ -167,8 +167,8 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		header |= BIT(12);
 	}
 
-	input_a_count = g_app_sensor_data.input_a_count;
-	input_b_count = g_app_sensor_data.input_b_count;
+	input_a_count = input_data.input_a_count;
+	input_b_count = input_data.input_b_count;
 
 	if (input_a_count > 0 || input_data.input_a_notify_act || input_data.input_a_notify_deact) {
 		header |= BIT(5);
