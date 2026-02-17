@@ -108,6 +108,11 @@ static void execute_play(const struct app_led_play_req *req)
 		}
 	}
 
+	if (length == 0) {
+		LOG_WRN("Play request has no commands (missing END sentinel?)");
+		return;
+	}
+
 	for (int rep = 0; rep < req->repetitions; rep++) {
 		for (int i = 0; i < length; i++) {
 			const struct app_led_cmd *cmd = &req->commands[i];
