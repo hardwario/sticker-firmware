@@ -119,7 +119,10 @@ int app_sensor_init(void)
 		}
 	}
 
-	if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
+	if ((g_app_config.cap_input_a || g_app_config.cap_input_b) &&
+	    g_app_config.cap_pir_detector) {
+		LOG_WRN("PIR and input share GPIO pins — skipping input init");
+	} else if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
 		ret = app_input_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_input_init", ret);
