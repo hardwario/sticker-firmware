@@ -58,14 +58,14 @@ static struct k_work m_join_work;
 static atomic_t m_state = ATOMIC_INIT(APP_LRW_STATE_IDLE);
 static struct k_timer m_link_check_timer;
 static struct k_work m_link_check_work;
-static uint8_t m_consecutive_lc_fail;      /* LC failures in a row (HEALTHY) */
-static uint8_t m_consecutive_lc_ok;        /* LC successes in a row (WARNING) */
-static uint8_t m_warning_lc_fail_total;    /* Total LC failures in WARNING */
-static uint8_t m_force_lc_remaining;       /* Remaining forced LC messages */
+static int m_consecutive_lc_fail;          /* LC failures in a row (HEALTHY) */
+static int m_consecutive_lc_ok;            /* LC successes in a row (WARNING) */
+static int m_warning_lc_fail_total;        /* Total LC failures in WARNING */
+static int m_force_lc_remaining;           /* Remaining forced LC messages */
 static bool m_link_check_pending;          /* Waiting for LC response */
-static uint8_t m_message_count;            /* Message counter for N-th LC */
-static uint8_t m_rejoin_attempts;          /* Rejoin attempt counter for backoff */
-static uint8_t m_join_busy_polls;          /* Counter for MAC busy polling */
+static int m_message_count;                /* Message counter for N-th LC */
+static int m_rejoin_attempts;              /* Rejoin attempt counter for backoff */
+static int m_join_busy_polls;              /* Counter for MAC busy polling */
 static bool m_init_join;                   /* True for first join after boot */
 
 static struct k_work_delayable m_join_complete_work;
@@ -91,12 +91,12 @@ static struct k_work m_send_with_lc_work;
 static uint8_t m_lc_response_gw_count;
 
 
-static uint32_t calculate_rejoin_backoff(uint8_t attempt)
+static uint32_t calculate_rejoin_backoff(int attempt)
 {
 	uint32_t backoff = REJOIN_BACKOFF_BASE_SEC;
 
 	/* Calculate exponential backoff */
-	for (uint8_t i = 0; i < attempt; i++) {
+	for (int i = 0; i < attempt; i++) {
 		backoff *= REJOIN_BACKOFF_MULTIPLIER;
 		if (backoff >= REJOIN_BACKOFF_MAX_SEC) {
 			return REJOIN_BACKOFF_MAX_SEC;
@@ -468,7 +468,7 @@ static bool should_request_link_check(void)
 	}
 
 	/* Message number to be sent (1-based) */
-	uint8_t msg_num = m_message_count + 1;
+	int msg_num = m_message_count + 1;
 
 	/* First message always has LC, then every N-th (5, 10, 15...) */
 	if (msg_num == 1 || (msg_num % LINK_CHECK_INTERVAL) == 0) {
