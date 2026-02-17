@@ -234,6 +234,14 @@ void app_input_clear_notify_flags(struct app_input_data *data)
 	k_mutex_unlock(&m_input_data_mutex);
 }
 
+void app_input_reset_counts(void)
+{
+	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
+	m_input_data.input_a_count = 0;
+	m_input_data.input_b_count = 0;
+	k_mutex_unlock(&m_input_data_mutex);
+}
+
 bool app_input_check_notify_event(void)
 {
 	bool has_event;
