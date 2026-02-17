@@ -138,8 +138,6 @@ int main(void)
 		LOG_ERR_CALL_FAILED_INT("app_lrw_init", ret);
 		die();
 	}
-
-	app_lrw_join();
 #endif /* defined(CONFIG_LORAWAN) */
 
 	ret = app_battery_init();
@@ -160,6 +158,10 @@ int main(void)
 #if defined(CONFIG_WATCHDOG)
 	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
+
+#if defined(CONFIG_LORAWAN)
+	app_lrw_join();
+#endif /* defined(CONFIG_LORAWAN) */
 
 	ret = app_calibration_init();
 	if (ret) {
