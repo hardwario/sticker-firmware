@@ -21,7 +21,8 @@
 
 LOG_MODULE_REGISTER(app_led, LOG_LEVEL_DBG);
 
-#define REQUEST_QUEUE_SIZE   3
+#define BLINK_QUEUE_SIZE     3
+#define PLAY_QUEUE_SIZE      1
 #define REQUEST_MAX_AGE_MS   2000
 #define REQUEST_MIN_DELAY_MS 500
 
@@ -32,21 +33,19 @@ static const struct gpio_dt_spec m_led_r = GPIO_DT_SPEC_GET(DT_NODELABEL(led_r),
 static const struct gpio_dt_spec m_led_g = GPIO_DT_SPEC_GET(DT_NODELABEL(led_g), gpios);
 static const struct gpio_dt_spec m_led_y = GPIO_DT_SPEC_GET(DT_NODELABEL(led_y), gpios);
 
-enum request_type {
-	REQUEST_TYPE_BLINK = 0,
-	REQUEST_TYPE_PLAY = 1,
-};
-
-struct request {
-	enum request_type type;
+struct blink_request {
 	int64_t timestamp;
-	union {
-		struct app_led_blink_req blink;
-		struct app_led_play_req play;
-	};
+	struct app_led_blink_req blink;
 };
 
-K_MSGQ_DEFINE(m_led_msgq, sizeof(struct request), REQUEST_QUEUE_SIZE, 4);
+struct play_request {
+	int64_t timestamp;
+	struct app_led_play_req play;
+};
+
+K_MSGQ_DEFINE(m_blink_msgq, sizeof(struct blink_request), BLINK_QUEUE_SIZE, 4);
+K_MSGQ_DEFINE(m_play_msgq, sizeof(struct play_request), PLAY_QUEUE_SIZE, 4);
+static K_SEM_DEFINE(m_led_sem, 0, K_SEM_MAX_LIMIT);
 static K_THREAD_STACK_DEFINE(m_led_thread_stack, LED_THREAD_STACK_SIZE);
 
 static k_tid_t m_led_thread_id;
@@ -144,45 +143,35 @@ static void execute_play(const struct app_led_play_req *req)
 	set(APP_LED_CHANNEL_Y, 0);
 }
 
-static void process_request(struct request *req)
-{
-	int64_t age = k_uptime_get() - req->timestamp;
-	if (age > REQUEST_MAX_AGE_MS) {
-		LOG_WRN("Discarding stale LED request (age: %lld ms)", age);
-		return;
-	}
-
-	switch (req->type) {
-	case REQUEST_TYPE_BLINK:
-		execute_blink(&req->blink);
-		break;
-	case REQUEST_TYPE_PLAY:
-		execute_play(&req->play);
-		break;
-	default:
-		LOG_ERR("Invalid request type: %d", req->type);
-		break;
-	}
-}
-
 static void thread_entry(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
-	int ret;
-
-	struct request req;
-
 	for (;;) {
-		ret = k_msgq_get(&m_led_msgq, &req, K_FOREVER);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("k_msgq_get", ret);
-			continue;
-		}
+		k_sem_take(&m_led_sem, K_FOREVER);
 
-		process_request(&req);
+		int64_t now = k_uptime_get();
+
+		/* Check play queue first (higher priority) */
+		struct play_request play_req;
+		if (k_msgq_get(&m_play_msgq, &play_req, K_NO_WAIT) == 0) {
+			if (now - play_req.timestamp <= REQUEST_MAX_AGE_MS) {
+				execute_play(&play_req.play);
+			} else {
+				LOG_WRN("Discarding stale LED play request");
+			}
+		} else {
+			struct blink_request blink_req;
+			if (k_msgq_get(&m_blink_msgq, &blink_req, K_NO_WAIT) == 0) {
+				if (now - blink_req.timestamp <= REQUEST_MAX_AGE_MS) {
+					execute_blink(&blink_req.blink);
+				} else {
+					LOG_WRN("Discarding stale LED blink request");
+				}
+			}
+		}
 
 		k_sleep(K_MSEC(REQUEST_MIN_DELAY_MS));
 	}
@@ -236,14 +225,15 @@ int app_led_blink(const struct app_led_blink_req *req)
 		return -EINVAL;
 	}
 
-	struct request request = {
-		.type = REQUEST_TYPE_BLINK, .timestamp = k_uptime_get(), .blink = *req};
+	struct blink_request request = {.timestamp = k_uptime_get(), .blink = *req};
 
-	int ret = k_msgq_put(&m_led_msgq, &request, K_NO_WAIT);
+	int ret = k_msgq_put(&m_blink_msgq, &request, K_NO_WAIT);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("k_msgq_put", ret);
 		return ret;
 	}
+
+	k_sem_give(&m_led_sem);
 
 	return 0;
 }
@@ -258,14 +248,15 @@ int app_led_play(const struct app_led_play_req *req)
 		return -EINVAL;
 	}
 
-	struct request request = {
-		.type = REQUEST_TYPE_PLAY, .timestamp = k_uptime_get(), .play = *req};
+	struct play_request request = {.timestamp = k_uptime_get(), .play = *req};
 
-	int ret = k_msgq_put(&m_led_msgq, &request, K_NO_WAIT);
+	int ret = k_msgq_put(&m_play_msgq, &request, K_NO_WAIT);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("k_msgq_put", ret);
 		return ret;
 	}
+
+	k_sem_give(&m_led_sem);
 
 	return 0;
 }
