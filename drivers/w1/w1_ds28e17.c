@@ -411,6 +411,21 @@ static int ds28e17_write_config_(const struct device *dev, enum ds28e17_i2c_spee
 		return ret;
 	}
 
+	uint8_t readback;
+	ret = w1_read_block(get_config(dev)->bus, &readback, 1);
+	if (ret) {
+		LOG_ERR("Call `w1_read_block` failed: %d", ret);
+		w1_unlock_bus(get_config(dev)->bus);
+		return ret;
+	}
+
+	if (readback != i2c_speed) {
+		LOG_ERR("Config readback mismatch: wrote 0x%02x, read 0x%02x",
+			i2c_speed, readback);
+		w1_unlock_bus(get_config(dev)->bus);
+		return -EIO;
+	}
+
 	ret = w1_unlock_bus(get_config(dev)->bus);
 	if (ret) {
 		LOG_ERR("Call `w1_unlock_bus` failed: %d", ret);
