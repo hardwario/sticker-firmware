@@ -190,6 +190,23 @@ int app_input_get_data(struct app_input_data *data)
 	return 0;
 }
 
+int app_input_get_data_and_clear_notify(struct app_input_data *data)
+{
+	if (!data) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
+	*data = m_input_data;
+	m_input_data.input_a_notify_act = false;
+	m_input_data.input_a_notify_deact = false;
+	m_input_data.input_b_notify_act = false;
+	m_input_data.input_b_notify_deact = false;
+	k_mutex_unlock(&m_input_data_mutex);
+
+	return 0;
+}
+
 void app_input_clear_notify_flags(struct app_input_data *data)
 {
 	if (!data) {
