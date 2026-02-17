@@ -563,12 +563,12 @@ static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "snr: %d dB", info.snr);
 	shell_print(shell, "margin: %u dB", info.margin);
 	shell_print(shell, "gateways: %u", info.gw_count);
-	shell_print(shell, "messages: %u", info.message_count);
-	shell_print(shell, "healthy->warning: %u/%u",
+	shell_print(shell, "messages: %d", info.message_count);
+	shell_print(shell, "healthy->warning: %d/%d",
 		    info.consecutive_lc_fail, info.thresh_warning);
-	shell_print(shell, "warning->healthy: %u/%u",
+	shell_print(shell, "warning->healthy: %d/%d",
 		    info.consecutive_lc_ok, info.thresh_healthy);
-	shell_print(shell, "warning->reconnect: %u/%u",
+	shell_print(shell, "warning->reconnect: %d/%d",
 		    info.warning_lc_fail_total, info.thresh_reconnect);
 
 	return 0;

@@ -33,15 +33,15 @@ struct app_lrw_info {
 	uint8_t margin;
 	uint8_t gw_count;
 	/* State machine counters */
-	uint8_t consecutive_lc_fail;   /* LC failures in a row (HEALTHY) */
-	uint8_t consecutive_lc_ok;     /* LC successes in a row (WARNING) */
-	uint8_t warning_lc_fail_total; /* Total LC failures in WARNING */
-	uint8_t message_count;         /* Messages sent since boot/rejoin */
+	int consecutive_lc_fail;       /* LC failures in a row (HEALTHY) */
+	int consecutive_lc_ok;         /* LC successes in a row (WARNING) */
+	int warning_lc_fail_total;     /* Total LC failures in WARNING */
+	int message_count;             /* Messages sent since boot/rejoin */
 	/* Thresholds for display */
-	uint8_t thresh_warning;        /* FAIL_THRESHOLD_WARNING */
-	uint8_t thresh_healthy;        /* OK_THRESHOLD_HEALTHY */
-	uint8_t thresh_reconnect;      /* FAIL_THRESHOLD_RECONNECT */
-	uint8_t link_check_interval;   /* Every N-th message has LC */
+	int thresh_warning;            /* FAIL_THRESHOLD_WARNING */
+	int thresh_healthy;            /* OK_THRESHOLD_HEALTHY */
+	int thresh_reconnect;          /* FAIL_THRESHOLD_RECONNECT */
+	int link_check_interval;       /* Every N-th message has LC */
 };
 
 int app_lrw_init(void);
