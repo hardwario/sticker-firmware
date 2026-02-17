@@ -462,6 +462,9 @@ static int si7210_read(const struct device *dev, float *magnetic_field)
 		return ret;
 	}
 
+	/* Wait for ONEBURST measurement to complete (~3ms typical) */
+	k_sleep(K_MSEC(5));
+
 	write_buf[0] = 0xc1;
 
 	ret = ds28e17_i2c_write_read(dev, SI7210_I2C_ADDR, write_buf, 1, read_buf, 1);
