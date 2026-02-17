@@ -71,15 +71,21 @@ static int configure(struct pyq1648_param *param)
 	write_field(&config, 0, 2);
 	write_field(&config, 16, 5);
 
-	unsigned int key = irq_lock();
+	/* Prevent context switches for the entire bitbang sequence.
+	 * IRQs are locked per-bit (~100us each) and enabled between
+	 * bits — the sensor tolerates up to 512us inter-bit gap. */
+	k_sched_lock();
 
 	for (int i = 0; i < 25; i++) {
 		int bit = (config.reg & BIT(24 - i)) ? 1 : 0;
+
+		unsigned int key = irq_lock();
 
 		ret = gpio_pin_set_dt(&m_si_spec, 1);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
 			irq_unlock(key);
+			k_sched_unlock();
 			return ret;
 		}
 
@@ -89,13 +95,16 @@ static int configure(struct pyq1648_param *param)
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
 			irq_unlock(key);
+			k_sched_unlock();
 			return ret;
 		}
 
 		k_busy_wait(bit ? 5 : 95);
+
+		irq_unlock(key);
 	}
 
-	irq_unlock(key);
+	k_sched_unlock();
 
 	return 0;
 }
