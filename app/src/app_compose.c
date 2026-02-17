@@ -30,8 +30,6 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 
 	uint32_t header = boot ? BIT(31) : 0;
 
-	boot = false;
-
 	/* For compatibility reasons (indicates header extension from 16 bits to 32 bits) */
 	header |= BIT(20);
 
@@ -351,6 +349,8 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 #undef APPEND_BYTE
 
 	LOG_HEXDUMP_DBG(buf, *len, "Composed buffer:");
+
+	boot = false;
 
 	return 0;
 }
