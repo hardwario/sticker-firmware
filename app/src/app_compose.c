@@ -234,7 +234,7 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	if (header & BIT(28)) {
-		APPEND_BYTE(temperature >> 8);
+		APPEND_BYTE((uint16_t)temperature >> 8);
 		APPEND_BYTE(temperature);
 	}
 
@@ -248,12 +248,12 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	if (header & BIT(25)) {
-		APPEND_BYTE(t1_temperature >> 8);
+		APPEND_BYTE((uint16_t)t1_temperature >> 8);
 		APPEND_BYTE(t1_temperature);
 	}
 
 	if (header & BIT(24)) {
-		APPEND_BYTE(t2_temperature >> 8);
+		APPEND_BYTE((uint16_t)t2_temperature >> 8);
 		APPEND_BYTE(t2_temperature);
 	}
 
@@ -265,7 +265,7 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	if (header & BIT(22)) {
-		APPEND_BYTE(altitude >> 8);
+		APPEND_BYTE((uint16_t)altitude >> 8);
 		APPEND_BYTE(altitude);
 	}
 
@@ -277,12 +277,12 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	if (header & BIT(19)) {
-		APPEND_BYTE(mp1_temperature >> 8);
+		APPEND_BYTE((uint16_t)mp1_temperature >> 8);
 		APPEND_BYTE(mp1_temperature);
 	}
 
 	if (header & BIT(18)) {
-		APPEND_BYTE(mp2_temperature >> 8);
+		APPEND_BYTE((uint16_t)mp2_temperature >> 8);
 		APPEND_BYTE(mp2_temperature);
 	}
 
