@@ -630,7 +630,7 @@ void app_lrw_join(void)
 
 void app_lrw_send(void)
 {
-	k_timer_start(&m_send_timer, K_NO_WAIT, K_FOREVER);
+	k_work_submit_to_queue(&m_work_q, &m_send_work);
 }
 
 static void send_with_lc_work_handler(struct k_work *work)
