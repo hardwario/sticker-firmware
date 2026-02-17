@@ -72,7 +72,13 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	}
 
 	if (!isnan(g_app_sensor_data.voltage)) {
-		voltage = (uint8_t)(g_app_sensor_data.voltage * 50);
+		float v = g_app_sensor_data.voltage * 50;
+		if (v > 255.f) {
+			v = 255.f;
+		} else if (v < 0.f) {
+			v = 0.f;
+		}
+		voltage = (uint8_t)v;
 		header |= BIT(29);
 	}
 
