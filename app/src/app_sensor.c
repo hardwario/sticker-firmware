@@ -334,28 +334,33 @@ void app_sensor_sample(void)
 				continue;
 			}
 
-			ret = app_machine_probe_get_tilt_alert(i, &serial_number, &is_tilt_alert);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_machine_probe_get_tilt_alert", ret);
-				continue;
-			}
-
 			LOG_INF("Serial number: %llu / Hygrometer / Temperature: "
 				"%.2f C",
 				serial_number, (double)hygrometer_temperature);
 			LOG_INF("Serial number: %llu / Hygrometer / Humidity: %.1f "
 				"%%",
 				serial_number, (double)hygrometer_humidity);
-			LOG_INF("Serial number: %llu / Tilt alert is %sactive", serial_number,
-				is_tilt_alert ? "" : "not ");
 
 			if (i == 0) {
 				mp1_temperature = hygrometer_temperature;
 				mp1_humidity = hygrometer_humidity;
-				mp1_is_tilt_alert = is_tilt_alert;
 			} else if (i == 1) {
 				mp2_temperature = hygrometer_temperature;
 				mp2_humidity = hygrometer_humidity;
+			}
+
+			ret = app_machine_probe_get_tilt_alert(i, &serial_number, &is_tilt_alert);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_machine_probe_get_tilt_alert", ret);
+				continue;
+			}
+
+			LOG_INF("Serial number: %llu / Tilt alert is %sactive", serial_number,
+				is_tilt_alert ? "" : "not ");
+
+			if (i == 0) {
+				mp1_is_tilt_alert = is_tilt_alert;
+			} else if (i == 1) {
 				mp2_is_tilt_alert = is_tilt_alert;
 			}
 		}
