@@ -29,7 +29,9 @@ LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
 
 #define SENTINEL          ((int16_t)0x7FFF)
 #define PAYLOAD_SIZE      28
-#define SEND_INTERVAL_SEC  15
+#define LOOP_INTERVAL_SEC       1
+#define BLINK_EVERY_N           1  /* every loop iteration */
+#define SEND_EVERY_N            5  /* 5 * 1s = 5s */
 #define CALIBRATION_TIMEOUT_MIN 30
 
 static int m_count_ds18b20;
@@ -267,14 +269,13 @@ int app_calibration_init(void)
 	LOG_INF("Sensors: DS18B20=%d, Machine Probe=%d", m_count_ds18b20, m_count_machine_probe);
 
 	int64_t deadline = k_uptime_get() + (int64_t)CALIBRATION_TIMEOUT_MIN * 60 * 1000;
+	int loop_counter = 0;
 
 	for (;;) {
 		if (k_uptime_get() >= deadline) {
 			LOG_WRN("Calibration timeout (%d min) — rebooting", CALIBRATION_TIMEOUT_MIN);
 			sys_reboot(SYS_REBOOT_COLD);
 		}
-
-		LOG_INF("Alive");
 
 #if defined(CONFIG_WATCHDOG)
 		ret = app_wdog_feed();
@@ -283,29 +284,42 @@ int app_calibration_init(void)
 		}
 #endif /* defined(CONFIG_WATCHDOG) */
 
-		struct app_led_blink_req req = {
-			.color = APP_LED_CHANNEL_Y, .duration = 50, .space = 50, .repetitions = 3};
-		app_led_blink(&req);
+		loop_counter++;
 
-		uint8_t buf[PAYLOAD_SIZE];
-		compose_calibration_payload(buf);
+		/* Send every 5s */
+		if (loop_counter % SEND_EVERY_N == 0) {
+			uint8_t buf[PAYLOAD_SIZE];
+			compose_calibration_payload(buf);
 
 #if defined(CONFIG_LORAWAN)
-		if (app_lrw_is_ready()) {
-			LOG_INF("Sending calibration data...");
+			if (app_lrw_is_ready()) {
+				LOG_INF("Sending calibration data...");
 
-			ret = lorawan_send(1, buf, PAYLOAD_SIZE, LORAWAN_MSG_UNCONFIRMED);
-			if (ret) {
-				LOG_ERR("lorawan_send failed: %d", ret);
+				ret = lorawan_send(1, buf, PAYLOAD_SIZE, LORAWAN_MSG_UNCONFIRMED);
+				if (ret) {
+					LOG_ERR("lorawan_send failed: %d", ret);
+				} else {
+					LOG_INF("Calibration data sent");
+				}
 			} else {
-				LOG_INF("Calibration data sent");
+				LOG_INF("LoRaWAN not ready, skipping send");
 			}
-		} else {
-			LOG_INF("LoRaWAN not ready, skipping send");
-		}
 #endif /* defined(CONFIG_LORAWAN) */
+		}
 
-		k_sleep(K_SECONDS(SEND_INTERVAL_SEC));
+		/* Blink every 3s — use direct GPIO to avoid msg queue staleness */
+		if (loop_counter % BLINK_EVERY_N == 0) {
+			for (int i = 0; i < 3; i++) {
+				app_led_set(APP_LED_CHANNEL_Y, APP_LED_ON);
+				k_sleep(K_MSEC(150));
+				app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+				if (i < 2) {
+					k_sleep(K_MSEC(150));
+				}
+			}
+		}
+
+		k_sleep(K_SECONDS(LOOP_INTERVAL_SEC));
 	}
 
 	return 0;

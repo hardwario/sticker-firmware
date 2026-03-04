@@ -81,6 +81,26 @@ int main(void)
 
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
 
+	/* Always start in normal mode — calibration is only set by magnet detection */
+	g_app_config.calibration = false;
+
+	/* Detect magnet on left Hall sensor FIRST — before any slow init */
+	{
+		const struct gpio_dt_spec hall = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+
+		if (gpio_is_ready_dt(&hall)) {
+			gpio_pin_configure_dt(&hall, GPIO_INPUT | GPIO_PULL_UP);
+			k_busy_wait(100);
+
+			if (gpio_pin_get_dt(&hall)) {
+				LOG_WRN("Magnet detected — entering calibration mode");
+				g_app_config.calibration = true;
+			}
+
+			gpio_pin_configure_dt(&hall, GPIO_INPUT | GPIO_PULL_DOWN);
+		}
+	}
+
 #if defined(CONFIG_WATCHDOG)
 	ret = app_wdog_init();
 	if (ret) {
@@ -130,27 +150,8 @@ int main(void)
 	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
 
-	play_carousel_boot();
-
-#if defined(CONFIG_WATCHDOG)
-	app_wdog_feed();
-#endif /* defined(CONFIG_WATCHDOG) */
-
-	/* Detect magnet on left Hall sensor → activate calibration mode */
-	{
-		const struct gpio_dt_spec hall = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
-
-		if (gpio_is_ready_dt(&hall)) {
-			gpio_pin_configure_dt(&hall, GPIO_INPUT | GPIO_PULL_UP);
-			k_busy_wait(2);
-
-			if (!gpio_pin_get_dt(&hall)) {
-				LOG_WRN("Magnet detected — entering calibration mode");
-				g_app_config.calibration = true;
-			}
-
-			gpio_pin_configure_dt(&hall, GPIO_INPUT | GPIO_PULL_DOWN);
-		}
+	if (!g_app_config.calibration) {
+		play_carousel_boot();
 	}
 
 	app_calibration_apply_keys();
@@ -163,19 +164,21 @@ int main(void)
 	}
 #endif /* defined(CONFIG_LORAWAN) */
 
-	ret = app_battery_init();
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_battery_init", ret);
-		die();
-	}
+	if (!g_app_config.calibration) {
+		ret = app_battery_init();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_battery_init", ret);
+			die();
+		}
 
 #if defined(CONFIG_WATCHDOG)
-	app_wdog_feed();
+		app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
 
-	ret = app_sensor_init();
-	if (ret) {
-		LOG_WRN("Sensor init partially failed: %d (continuing)", ret);
+		ret = app_sensor_init();
+		if (ret) {
+			LOG_WRN("Sensor init partially failed: %d (continuing)", ret);
+		}
 	}
 
 #if defined(CONFIG_WATCHDOG)
@@ -231,11 +234,22 @@ int main(void)
 
 		/* Detect magnet → reboot into calibration mode */
 		{
-			struct app_hall_data hall;
+			const struct gpio_dt_spec hall_gpio =
+				GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 
-			if (!app_hall_get_data(&hall) && hall.left_is_active) {
-				LOG_WRN("Magnet detected — rebooting into calibration mode");
-				sys_reboot(SYS_REBOOT_COLD);
+			if (gpio_is_ready_dt(&hall_gpio)) {
+				gpio_pin_configure_dt(&hall_gpio,
+						      GPIO_INPUT | GPIO_PULL_UP);
+				k_busy_wait(100);
+
+				if (gpio_pin_get_dt(&hall_gpio)) {
+					LOG_WRN("Magnet detected — rebooting into "
+						 "calibration mode");
+					sys_reboot(SYS_REBOOT_COLD);
+				}
+
+				gpio_pin_configure_dt(&hall_gpio,
+						      GPIO_INPUT | GPIO_PULL_DOWN);
 			}
 		}
 
