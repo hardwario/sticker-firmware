@@ -132,6 +132,8 @@ int main(void)
 	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
 
+	app_calibration_apply_keys();
+
 #if defined(CONFIG_LORAWAN)
 	ret = app_lrw_init();
 	if (ret) {

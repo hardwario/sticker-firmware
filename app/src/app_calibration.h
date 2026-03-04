@@ -11,6 +11,7 @@
 extern "C" {
 #endif
 
+void app_calibration_apply_keys(void);
 int app_calibration_init(void);
 
 #ifdef __cplusplus
