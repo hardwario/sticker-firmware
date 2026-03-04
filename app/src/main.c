@@ -2,6 +2,7 @@
 #include "app_battery.h"
 #include "app_calibration.h"
 #include "app_config.h"
+#include "app_hall.h"
 #include "app_led.h"
 #include "app_log.h"
 #include "app_lrw.h"
@@ -11,6 +12,9 @@
 #include "app_settings.h"
 
 /* Zephyr includes */
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -132,6 +136,23 @@ int main(void)
 	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
 
+	/* Detect magnet on left Hall sensor → activate calibration mode */
+	{
+		const struct gpio_dt_spec hall = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+
+		if (gpio_is_ready_dt(&hall)) {
+			gpio_pin_configure_dt(&hall, GPIO_INPUT | GPIO_PULL_UP);
+			k_busy_wait(2);
+
+			if (!gpio_pin_get_dt(&hall)) {
+				LOG_WRN("Magnet detected — entering calibration mode");
+				g_app_config.calibration = true;
+			}
+
+			gpio_pin_configure_dt(&hall, GPIO_INPUT | GPIO_PULL_DOWN);
+		}
+	}
+
 	app_calibration_apply_keys();
 
 #if defined(CONFIG_LORAWAN)
@@ -205,6 +226,16 @@ int main(void)
 				if (ret) {
 					LOG_ERR_CALL_FAILED_INT("app_settings_reset", ret);
 				}
+			}
+		}
+
+		/* Detect magnet → reboot into calibration mode */
+		{
+			struct app_hall_data hall;
+
+			if (!app_hall_get_data(&hall) && hall.left_is_active) {
+				LOG_WRN("Magnet detected — rebooting into calibration mode");
+				sys_reboot(SYS_REBOOT_COLD);
 			}
 		}
 
