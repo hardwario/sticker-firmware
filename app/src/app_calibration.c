@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_calibration.h"
 #include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_led.h"
@@ -34,72 +35,11 @@ LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
 #define ENTRY_BLINKS            5  /* one-time entry indication */
 #define SEND_INTERVAL_SEC       30
 #define CALIBRATION_PORT        10
-#define CALIBRATION_TIMEOUT_MIN 120
+#define CALIBRATION_TIMEOUT_MIN APP_CALIBRATION_ACTIVATION_WINDOW_MIN
 
 static int m_count_ds18b20;
 static int m_count_machine_probe;
 static bool m_calibration_active;
-
-static void compose_calibration_payload(uint8_t *buf);
-
-static void cal_send_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	app_sensor_sample();
-
-	uint8_t buf[PAYLOAD_SIZE];
-
-	compose_calibration_payload(buf);
-
-#if defined(CONFIG_LORAWAN)
-	if (!app_lrw_is_ready()) {
-		LOG_INF("LoRaWAN not ready, skipping calibration send");
-		return;
-	}
-
-	LOG_INF("Sending calibration data...");
-
-	int ret = lorawan_send(CALIBRATION_PORT, buf, PAYLOAD_SIZE, LORAWAN_MSG_UNCONFIRMED);
-
-	if (ret) {
-		LOG_ERR("Calibration send failed: %d", ret);
-	} else {
-		LOG_INF("Calibration data sent");
-	}
-#endif /* defined(CONFIG_LORAWAN) */
-}
-
-static K_WORK_DEFINE(m_cal_send_work, cal_send_work_handler);
-
-static void cal_send_timer_handler(struct k_timer *timer)
-{
-	ARG_UNUSED(timer);
-	k_work_submit(&m_cal_send_work);
-}
-
-static K_TIMER_DEFINE(m_cal_send_timer, cal_send_timer_handler, NULL);
-
-static void cal_timeout_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	LOG_WRN("Calibration timeout (%d min), rebooting", CALIBRATION_TIMEOUT_MIN);
-	k_timer_stop(&m_cal_send_timer);
-	m_calibration_active = false;
-	k_sleep(K_SECONDS(1));
-	sys_reboot(SYS_REBOOT_COLD);
-}
-
-static K_WORK_DEFINE(m_cal_timeout_work, cal_timeout_work_handler);
-
-static void cal_timeout_handler(struct k_timer *timer)
-{
-	ARG_UNUSED(timer);
-	k_work_submit(&m_cal_timeout_work);
-}
-
-static K_TIMER_DEFINE(m_cal_timeout_timer, cal_timeout_handler, NULL);
 
 static void compose_calibration_payload(uint8_t *buf)
 {

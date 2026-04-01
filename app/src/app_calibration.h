@@ -9,6 +9,8 @@
 
 #include <stdbool.h>
 
+#define APP_CALIBRATION_ACTIVATION_WINDOW_MIN 5
+
 #ifdef __cplusplus
 extern "C" {
 #endif

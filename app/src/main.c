@@ -248,9 +248,8 @@ int main(void)
 			}
 		}
 
-		/* Detect magnet on BOTH Hall sensors → reboot into calibration mode
-		 * Only within first 30 minutes after boot */
-		if (k_uptime_get() < (int64_t)120 * 60 * 1000) {
+		/* Detect magnet on BOTH Hall sensors → reboot into calibration mode */
+		if (k_uptime_get() < (int64_t)APP_CALIBRATION_ACTIVATION_WINDOW_MIN * 60 * 1000) {
 			const struct gpio_dt_spec halls[] = {
 				GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios),
 				GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios),
@@ -285,9 +284,7 @@ int main(void)
 			}
 		}
 
-		if (app_calibration_is_active()) {
-			goto skip_led;
-		}
+		if (!app_calibration_is_active()) {
 
 		bool led_handled = false;
 
@@ -357,7 +354,8 @@ int main(void)
 #endif /* defined(CONFIG_FW_DEBUG) */
 		}
 
-skip_led:
+		} /* !app_calibration_is_active() */
+
 		k_sleep(K_SECONDS(BLINK_INTERVAL_SECONDS));
 	}
 
