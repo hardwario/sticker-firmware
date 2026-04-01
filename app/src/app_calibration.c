@@ -302,7 +302,7 @@ int app_calibration_init(void)
 	k_sleep(K_SECONDS(2));
 
 	int64_t deadline = k_uptime_get() + (int64_t)CALIBRATION_TIMEOUT_MIN * 60 * 1000;
-	int loop_counter = 0;
+	int loop_counter = SEND_INTERVAL_SEC - 1;
 
 	for (;;) {
 		if (k_uptime_get() >= deadline) {
