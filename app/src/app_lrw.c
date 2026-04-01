@@ -156,9 +156,10 @@ static void join_complete_work_handler(struct k_work *work)
 	ARG_UNUSED(work);
 
 	/* Verify we're still in JOINING state (might have changed) */
-	if (atomic_get(&m_state) != APP_LRW_STATE_JOINING) {
-		LOG_DBG("Join complete handler: state changed to %d, ignoring",
-			(int)atomic_get(&m_state));
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+
+	if (state != APP_LRW_STATE_JOINING) {
+		LOG_DBG("Join complete handler: state changed to %d, ignoring", (int)state);
 		return;
 	}
 
@@ -212,10 +213,12 @@ static void join_complete_work_handler(struct k_work *work)
 
 static void handle_link_check_failure(void)
 {
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+
 	m_link_check_pending = false;
 	m_consecutive_lc_ok = 0; /* Reset OK streak on any failure */
 
-	switch ((int)atomic_get(&m_state)) {
+	switch (state) {
 	case APP_LRW_STATE_HEALTHY:
 		m_consecutive_lc_fail++;
 		LOG_WRN("LC FAIL in HEALTHY (streak: %d/%d)",
@@ -255,7 +258,7 @@ static void handle_link_check_failure(void)
 		break;
 
 	default:
-		LOG_WRN("LC FAIL in state %d (ignored)", (int)atomic_get(&m_state));
+		LOG_WRN("LC FAIL in state %d (ignored)", (int)state);
 		return;
 	}
 }
@@ -276,10 +279,12 @@ static void restart_normal_operation(void)
 
 static void handle_link_check_success(void)
 {
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+
 	m_link_check_pending = false;
 	m_consecutive_lc_fail = 0; /* Reset fail streak on any success */
 
-	switch ((int)atomic_get(&m_state)) {
+	switch (state) {
 	case APP_LRW_STATE_HEALTHY:
 		LOG_INF("LC OK in HEALTHY");
 		/* Recovery successful, back to normal N-th interval */
@@ -304,7 +309,7 @@ static void handle_link_check_success(void)
 		break;
 
 	default:
-		LOG_INF("LC OK in state %d", (int)atomic_get(&m_state));
+		LOG_INF("LC OK in state %d", (int)state);
 		break;
 	}
 }
@@ -344,8 +349,9 @@ static void link_check_timeout_handler(struct k_timer *timer)
 
 static void link_check_work_handler(struct k_work *work)
 {
-	if (atomic_get(&m_state) == APP_LRW_STATE_JOINING ||
-	    atomic_get(&m_state) == APP_LRW_STATE_RECONNECT) {
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+
+	if (state == APP_LRW_STATE_JOINING || state == APP_LRW_STATE_RECONNECT) {
 		return;
 	}
 
@@ -484,9 +490,10 @@ static void send_work_handler(struct k_work *work)
 	bool with_link_check;
 
 	/* Block transmissions during joining or reconnect */
-	if (atomic_get(&m_state) == APP_LRW_STATE_JOINING ||
-	    atomic_get(&m_state) == APP_LRW_STATE_RECONNECT) {
-		LOG_WRN("TX blocked: state=%d", (int)atomic_get(&m_state));
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+
+	if (state == APP_LRW_STATE_JOINING || state == APP_LRW_STATE_RECONNECT) {
+		LOG_WRN("TX blocked: state=%d", (int)state);
 		return;
 	}
 
