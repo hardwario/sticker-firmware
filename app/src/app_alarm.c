@@ -21,6 +21,8 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 
 bool app_alarm_is_active(void)
 {
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+
 	static bool alarm_temperature = false;
 
 	if (!g_app_config.alarm_temperature_enabled) {
@@ -80,18 +82,18 @@ bool app_alarm_is_active(void)
 	} else if (isnan(g_app_sensor_data.pressure)) {
 		alarm_pressure = false;
 	} else if (alarm_pressure) {
-		if (g_app_sensor_data.pressure / 100.f >
+		if (g_app_sensor_data.pressure * 10.f >
 			    (g_app_config.alarm_pressure_lo + g_app_config.alarm_pressure_hst) &&
-		    g_app_sensor_data.pressure / 100.f <
+		    g_app_sensor_data.pressure * 10.f <
 			    (g_app_config.alarm_pressure_hi - g_app_config.alarm_pressure_hst)) {
 			LOG_INF("Deactivated alarm for pressure");
 
 			alarm_pressure = false;
 		}
 	} else {
-		if (g_app_sensor_data.pressure / 100.f <
+		if (g_app_sensor_data.pressure * 10.f <
 			    (g_app_config.alarm_pressure_lo - g_app_config.alarm_pressure_hst) ||
-		    g_app_sensor_data.pressure / 100.f >
+		    g_app_sensor_data.pressure * 10.f >
 			    (g_app_config.alarm_pressure_hi + g_app_config.alarm_pressure_hst)) {
 			LOG_INF("Activated alarm for pressure");
 
@@ -172,6 +174,8 @@ bool app_alarm_is_active(void)
 	if (g_app_config.alarm_t2_temperature_enabled) {
 		alarm = alarm_t2_temperature ? true : alarm;
 	}
+
+	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	return alarm;
 }

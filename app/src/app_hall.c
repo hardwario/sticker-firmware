@@ -58,7 +58,7 @@ static int poll(void)
 		ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_UP);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
-			return ret;
+			goto restore;
 		}
 	}
 
@@ -66,34 +66,55 @@ static int poll(void)
 		ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_UP);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
-			return ret;
+			goto restore;
 		}
 	}
 
 	k_busy_wait(2);
 
 	if (g_app_config.cap_hall_left) {
-		left_is_active = !gpio_pin_get_dt(&m_hall_left);
+		int val = gpio_pin_get_dt(&m_hall_left);
+		if (val < 0) {
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
+			ret = val;
+			goto restore;
+		}
+		left_is_active = !val;
 	}
 
 	if (g_app_config.cap_hall_right) {
-		right_is_active = !gpio_pin_get_dt(&m_hall_right);
+		int val = gpio_pin_get_dt(&m_hall_right);
+		if (val < 0) {
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
+			ret = val;
+			goto restore;
+		}
+		right_is_active = !val;
 	}
 
+restore:
 	if (g_app_config.cap_hall_left) {
-		ret = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_DOWN);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
-			return ret;
+		int err = gpio_pin_configure_dt(&m_hall_left, GPIO_INPUT | GPIO_PULL_DOWN);
+		if (err) {
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", err);
+			if (!ret) {
+				ret = err;
+			}
 		}
 	}
 
 	if (g_app_config.cap_hall_right) {
-		ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_DOWN);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
-			return ret;
+		int err = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_DOWN);
+		if (err) {
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", err);
+			if (!ret) {
+				ret = err;
+			}
 		}
+	}
+
+	if (ret) {
+		return ret;
 	}
 
 	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
@@ -233,6 +254,23 @@ int app_hall_get_data(struct app_hall_data *data)
 	return 0;
 }
 
+int app_hall_get_data_and_clear_notify(struct app_hall_data *data)
+{
+	if (!data) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
+	*data = m_hall_data;
+	m_hall_data.left_notify_act = false;
+	m_hall_data.left_notify_deact = false;
+	m_hall_data.right_notify_act = false;
+	m_hall_data.right_notify_deact = false;
+	k_mutex_unlock(&m_hall_data_mutex);
+
+	return 0;
+}
+
 void app_hall_clear_notify_flags(struct app_hall_data *data)
 {
 	if (!data) {
@@ -257,6 +295,14 @@ void app_hall_clear_notify_flags(struct app_hall_data *data)
 		m_hall_data.right_notify_deact = false;
 	}
 
+	k_mutex_unlock(&m_hall_data_mutex);
+}
+
+void app_hall_reset_counts(void)
+{
+	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
+	m_hall_data.left_count = 0;
+	m_hall_data.right_count = 0;
 	k_mutex_unlock(&m_hall_data_mutex);
 }
 

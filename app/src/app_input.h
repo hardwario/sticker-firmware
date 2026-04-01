@@ -28,8 +28,10 @@ struct app_input_data {
 
 int app_input_init(void);
 int app_input_get_data(struct app_input_data *data);
+int app_input_get_data_and_clear_notify(struct app_input_data *data);
 void app_input_clear_notify_flags(struct app_input_data *data);
 bool app_input_check_notify_event(void);
+void app_input_reset_counts(void);
 
 #ifdef __cplusplus
 }

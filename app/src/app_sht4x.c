@@ -17,8 +17,28 @@
 
 /* Standard includes */
 #include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
 
 LOG_MODULE_REGISTER(app_sht4x, LOG_LEVEL_DBG);
+
+static uint8_t sht_crc8(const uint8_t *data, size_t len)
+{
+	uint8_t crc = 0xff;
+
+	for (size_t i = 0; i < len; i++) {
+		crc ^= data[i];
+		for (int j = 0; j < 8; j++) {
+			if (crc & 0x80) {
+				crc = (crc << 1) ^ 0x31;
+			} else {
+				crc <<= 1;
+			}
+		}
+	}
+
+	return crc;
+}
 
 int app_sht4x_read(float *temperature, float *humidity)
 {
@@ -100,6 +120,12 @@ int app_sht4x_read_serial(uint32_t *serial_number)
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("i2c_read", ret);
 		return ret;
+	}
+
+	if (sht_crc8(&data[0], 2) != data[2] ||
+	    sht_crc8(&data[3], 2) != data[5]) {
+		LOG_ERR("CRC mismatch");
+		return -EIO;
 	}
 
 	/* Serial number is in data[0:1] and data[3:4], with CRC in data[2] and data[5] */

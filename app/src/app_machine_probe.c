@@ -125,12 +125,13 @@ static int tmp112_convert(const struct device *dev)
 {
 	int ret;
 
-	uint8_t write_buf[2];
+	uint8_t write_buf[3];
 
 	write_buf[0] = 0x01;
 	write_buf[1] = 0x81;
+	write_buf[2] = 0x80;
 
-	ret = ds28e17_i2c_write(dev, TMP112_I2C_ADDR, write_buf, 2);
+	ret = ds28e17_i2c_write(dev, TMP112_I2C_ADDR, write_buf, 3);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
@@ -222,6 +223,12 @@ static int sht30_read(const struct device *dev, float *temperature, float *humid
 		return ret;
 	}
 
+	if (sht_crc8(&read_buf[0], 2) != read_buf[2] ||
+	    sht_crc8(&read_buf[3], 2) != read_buf[5]) {
+		LOG_ERR("CRC mismatch");
+		return -EIO;
+	}
+
 	if (temperature) {
 		*temperature = -45.f + 175.f * (float)sys_get_be16(&read_buf[0]) / 65535.f;
 	}
@@ -279,6 +286,12 @@ static int sht43_read(const struct device *dev, float *temperature, float *humid
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_read", ret);
 		return ret;
+	}
+
+	if (sht_crc8(&read_buf[0], 2) != read_buf[2] ||
+	    sht_crc8(&read_buf[3], 2) != read_buf[5]) {
+		LOG_ERR("CRC mismatch");
+		return -EIO;
 	}
 
 	if (temperature) {
@@ -448,6 +461,9 @@ static int si7210_read(const struct device *dev, float *magnetic_field)
 		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
 		return ret;
 	}
+
+	/* Wait for ONEBURST measurement to complete (~3ms typical) */
+	k_sleep(K_MSEC(5));
 
 	write_buf[0] = 0xc1;
 

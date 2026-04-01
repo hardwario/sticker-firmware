@@ -99,8 +99,8 @@ int app_ds18b20_scan(void)
 	ret = app_w1_acquire(&m_w1, dev);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_w1_acquire", ret);
-		res = ret;
-		goto error;
+		k_mutex_unlock(&m_lock);
+		return ret;
 	}
 
 	m_count = 0;
@@ -109,10 +109,8 @@ int app_ds18b20_scan(void)
 	if (ret < 0) {
 		LOG_ERR_CALL_FAILED_INT("app_w1_scan", ret);
 		res = ret;
-		goto error;
 	}
 
-error:
 	ret = app_w1_release(&m_w1, dev);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_w1_release", ret);
@@ -168,8 +166,8 @@ int app_ds18b20_read(int index, uint64_t *serial_number, float *temperature)
 	ret = app_w1_acquire(&m_w1, dev);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_w1_acquire", ret);
-		res = ret;
-		goto error;
+		k_mutex_unlock(&m_lock);
+		return ret;
 	}
 
 	if (!device_is_ready(m_sensors[index].dev)) {

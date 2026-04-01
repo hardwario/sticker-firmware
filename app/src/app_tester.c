@@ -5,6 +5,8 @@
  */
 
 #include "app_ds18b20.h"
+#include "app_hall.h"
+#include "app_input.h"
 #include "app_led.h"
 #include "app_lrw.h"
 #include "app_machine_probe.h"
@@ -148,8 +150,11 @@ static void cmd_switch_led(const struct shell *shell, size_t argc, char **argv)
 	}
 }
 
-static void cmd_print_serial_numbers(const struct shell *shell)
+static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char **argv)
 {
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
 	int ret;
 	int count;
 
@@ -207,13 +212,20 @@ static void cmd_print_serial_numbers(const struct shell *shell)
 			shell_print(shell, "Machine Probe[%d] SHT serial: %u", i, sht_serial);
 		}
 	}
+
+	return 0;
 }
 
-static void cmd_reset_sample(const struct shell *shell)
+static int cmd_reset_sample(const struct shell *shell, size_t argc, char **argv)
 {
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	app_hall_reset_counts();
+	app_input_reset_counts();
+
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
-	/* Reset all counters */
 	g_app_sensor_data.motion_count = 0;
 	g_app_sensor_data.hall_left_count = 0;
 	g_app_sensor_data.hall_right_count = 0;
@@ -223,6 +235,8 @@ static void cmd_reset_sample(const struct shell *shell)
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	shell_print(shell, SHELL_PFX " Sensor counters reset");
+
+	return 0;
 }
 
 static void print_available_sensors(const struct shell *shell)
@@ -467,8 +481,11 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 	shell_print(shell, SHELL_PFX " Monitoring timeout");
 }
 
-static void cmd_print_sample(const struct shell *shell)
+static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 {
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
 	app_sensor_sample();
 
 	shell_print(shell, "orientation:              %d", g_app_sensor_data.orientation);
@@ -509,6 +526,8 @@ static void cmd_print_sample(const struct shell *shell)
 		    g_app_sensor_data.input_a_is_active ? "true" : "false");
 	shell_print(shell, "input-b-is-active:        %s",
 		    g_app_sensor_data.input_b_is_active ? "true" : "false");
+
+	return 0;
 }
 
 #if defined(CONFIG_LORAWAN)
@@ -548,12 +567,12 @@ static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "snr: %d dB", info.snr);
 	shell_print(shell, "margin: %u dB", info.margin);
 	shell_print(shell, "gateways: %u", info.gw_count);
-	shell_print(shell, "messages: %u", info.message_count);
-	shell_print(shell, "healthy->warning: %u/%u",
+	shell_print(shell, "messages: %d", info.message_count);
+	shell_print(shell, "healthy->warning: %d/%d",
 		    info.consecutive_lc_fail, info.thresh_warning);
-	shell_print(shell, "warning->healthy: %u/%u",
+	shell_print(shell, "warning->healthy: %d/%d",
 		    info.consecutive_lc_ok, info.thresh_healthy);
-	shell_print(shell, "warning->reconnect: %u/%u",
+	shell_print(shell, "warning->reconnect: %d/%d",
 		    info.warning_lc_fail_total, info.thresh_reconnect);
 
 	return 0;

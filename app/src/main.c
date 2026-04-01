@@ -122,7 +122,15 @@ int main(void)
 		}
 	}
 
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
+
 	play_carousel_boot();
+
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
 
 #if defined(CONFIG_LORAWAN)
 	ret = app_lrw_init();
@@ -130,8 +138,6 @@ int main(void)
 		LOG_ERR_CALL_FAILED_INT("app_lrw_init", ret);
 		die();
 	}
-
-	app_lrw_join();
 #endif /* defined(CONFIG_LORAWAN) */
 
 	ret = app_battery_init();
@@ -140,10 +146,22 @@ int main(void)
 		die();
 	}
 
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
+
 	ret = app_sensor_init();
 	if (ret) {
 		LOG_WRN("Sensor init partially failed: %d (continuing)", ret);
 	}
+
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
+
+#if defined(CONFIG_LORAWAN)
+	app_lrw_join();
+#endif /* defined(CONFIG_LORAWAN) */
 
 	ret = app_calibration_init();
 	if (ret) {
@@ -163,7 +181,7 @@ int main(void)
 
 		static int nfc_counter;
 
-		if (nfc_counter++ == NFC_CHECK_BLINKS) {
+		if (++nfc_counter >= NFC_CHECK_BLINKS) {
 			nfc_counter = 0;
 
 			ret = app_nfc_check(&action);

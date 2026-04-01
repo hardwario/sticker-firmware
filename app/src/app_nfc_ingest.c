@@ -416,6 +416,44 @@ bool app_nfc_ingest(const NfcConfigMessage *message)
 				message->application.hall_right_notify_deact;
 		}
 
+		if (message->application.has_input_a_counter) {
+			LOG_INF_PARAM_BOOL("application.input_a_counter",
+					   message->application.input_a_counter);
+			config->input_a_counter = message->application.input_a_counter;
+		}
+
+		if (message->application.has_input_a_notify_act) {
+			LOG_INF_PARAM_BOOL("application.input_a_notify_act",
+					   message->application.input_a_notify_act);
+			config->input_a_notify_act = message->application.input_a_notify_act;
+		}
+
+		if (message->application.has_input_a_notify_deact) {
+			LOG_INF_PARAM_BOOL("application.input_a_notify_deact",
+					   message->application.input_a_notify_deact);
+			config->input_a_notify_deact =
+				message->application.input_a_notify_deact;
+		}
+
+		if (message->application.has_input_b_counter) {
+			LOG_INF_PARAM_BOOL("application.input_b_counter",
+					   message->application.input_b_counter);
+			config->input_b_counter = message->application.input_b_counter;
+		}
+
+		if (message->application.has_input_b_notify_act) {
+			LOG_INF_PARAM_BOOL("application.input_b_notify_act",
+					   message->application.input_b_notify_act);
+			config->input_b_notify_act = message->application.input_b_notify_act;
+		}
+
+		if (message->application.has_input_b_notify_deact) {
+			LOG_INF_PARAM_BOOL("application.input_b_notify_deact",
+					   message->application.input_b_notify_deact);
+			config->input_b_notify_deact =
+				message->application.input_b_notify_deact;
+		}
+
 		if (message->application.has_corr_temperature) {
 			float val = message->application.corr_temperature;
 
@@ -459,6 +497,18 @@ bool app_nfc_ingest(const NfcConfigMessage *message)
 			LOG_INF_PARAM_BOOL("application.cap_hall_right",
 					   message->application.cap_hall_right);
 			config->cap_hall_right = message->application.cap_hall_right;
+		}
+
+		if (message->application.has_cap_input_a) {
+			LOG_INF_PARAM_BOOL("application.cap_input_a",
+					   message->application.cap_input_a);
+			config->cap_input_a = message->application.cap_input_a;
+		}
+
+		if (message->application.has_cap_input_b) {
+			LOG_INF_PARAM_BOOL("application.cap_input_b",
+					   message->application.cap_input_b);
+			config->cap_input_b = message->application.cap_input_b;
 		}
 
 		if (message->application.has_cap_light_sensor) {

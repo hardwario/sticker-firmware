@@ -33,7 +33,10 @@ enum app_config_lrw_activation {
 	APP_CONFIG_LRW_ACTIVATION_ABP = 1,
 };
 
+#define APP_CONFIG_VERSION 1
+
 struct app_config {
+	uint32_t config_version;
 	uint8_t secret_key[16];
 	uint32_t serial_number;
 	uint32_t nonce_counter;

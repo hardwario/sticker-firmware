@@ -119,7 +119,10 @@ int app_sensor_init(void)
 		}
 	}
 
-	if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
+	if ((g_app_config.cap_input_a || g_app_config.cap_input_b) &&
+	    g_app_config.cap_pir_detector) {
+		LOG_WRN("PIR and input share GPIO pins — skipping input init");
+	} else if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
 		ret = app_input_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_input_init", ret);
@@ -213,7 +216,7 @@ int app_sensor_init(void)
 			   K_THREAD_STACK_SIZEOF(m_sensor_work_stack),
 			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
 
-	if (g_app_config.interval_sample) {
+	if (!res && g_app_config.interval_sample) {
 		k_timer_start(&m_sensor_timer, K_SECONDS(1),
 			      K_SECONDS(g_app_config.interval_sample));
 	}
@@ -334,28 +337,33 @@ void app_sensor_sample(void)
 				continue;
 			}
 
-			ret = app_machine_probe_get_tilt_alert(i, &serial_number, &is_tilt_alert);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_machine_probe_get_tilt_alert", ret);
-				continue;
-			}
-
 			LOG_INF("Serial number: %llu / Hygrometer / Temperature: "
 				"%.2f C",
 				serial_number, (double)hygrometer_temperature);
 			LOG_INF("Serial number: %llu / Hygrometer / Humidity: %.1f "
 				"%%",
 				serial_number, (double)hygrometer_humidity);
-			LOG_INF("Serial number: %llu / Tilt alert is %sactive", serial_number,
-				is_tilt_alert ? "" : "not ");
 
 			if (i == 0) {
 				mp1_temperature = hygrometer_temperature;
 				mp1_humidity = hygrometer_humidity;
-				mp1_is_tilt_alert = is_tilt_alert;
 			} else if (i == 1) {
 				mp2_temperature = hygrometer_temperature;
 				mp2_humidity = hygrometer_humidity;
+			}
+
+			ret = app_machine_probe_get_tilt_alert(i, &serial_number, &is_tilt_alert);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_machine_probe_get_tilt_alert", ret);
+				continue;
+			}
+
+			LOG_INF("Serial number: %llu / Tilt alert is %sactive", serial_number,
+				is_tilt_alert ? "" : "not ");
+
+			if (i == 0) {
+				mp1_is_tilt_alert = is_tilt_alert;
+			} else if (i == 1) {
 				mp2_is_tilt_alert = is_tilt_alert;
 			}
 		}

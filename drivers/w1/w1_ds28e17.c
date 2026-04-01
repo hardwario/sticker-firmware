@@ -238,6 +238,24 @@ static int ds28e17_i2c_read_(const struct device *dev, uint8_t dev_addr, uint8_t
 		return ret;
 	}
 
+	uint8_t crc_buf[2];
+
+	ret = w1_read_block(get_config(dev)->bus, crc_buf, 2);
+	if (ret) {
+		LOG_ERR("Call `w1_read_block` failed: %d", ret);
+		w1_unlock_bus(get_config(dev)->bus);
+		return ret;
+	}
+
+	uint16_t crc16_recv = sys_get_le16(crc_buf);
+	uint16_t crc16_calc = ~w1_crc16(W1_CRC16_SEED, read_buf, read_len);
+
+	if (crc16_recv != crc16_calc) {
+		LOG_ERR("CRC16 mismatch on read data: 0x%04x != 0x%04x", crc16_recv, crc16_calc);
+		w1_unlock_bus(get_config(dev)->bus);
+		return -EIO;
+	}
+
 	ret = w1_unlock_bus(get_config(dev)->bus);
 	if (ret) {
 		LOG_ERR("Call `w1_unlock_bus` failed: %d", ret);
@@ -332,6 +350,24 @@ static int ds28e17_i2c_write_read_(const struct device *dev, uint8_t dev_addr,
 		return ret;
 	}
 
+	uint8_t crc_buf[2];
+
+	ret = w1_read_block(get_config(dev)->bus, crc_buf, 2);
+	if (ret) {
+		LOG_ERR("Call `w1_read_block` failed: %d", ret);
+		w1_unlock_bus(get_config(dev)->bus);
+		return ret;
+	}
+
+	uint16_t crc16_recv = sys_get_le16(crc_buf);
+	uint16_t crc16_calc = ~w1_crc16(W1_CRC16_SEED, read_buf, read_len);
+
+	if (crc16_recv != crc16_calc) {
+		LOG_ERR("CRC16 mismatch on read data: 0x%04x != 0x%04x", crc16_recv, crc16_calc);
+		w1_unlock_bus(get_config(dev)->bus);
+		return -EIO;
+	}
+
 	ret = w1_unlock_bus(get_config(dev)->bus);
 	if (ret) {
 		LOG_ERR("Call `w1_unlock_bus` failed: %d", ret);
@@ -373,6 +409,21 @@ static int ds28e17_write_config_(const struct device *dev, enum ds28e17_i2c_spee
 		LOG_ERR("Call `w1_write_block` failed: %d", ret);
 		w1_unlock_bus(get_config(dev)->bus);
 		return ret;
+	}
+
+	uint8_t readback;
+	ret = w1_read_block(get_config(dev)->bus, &readback, 1);
+	if (ret) {
+		LOG_ERR("Call `w1_read_block` failed: %d", ret);
+		w1_unlock_bus(get_config(dev)->bus);
+		return ret;
+	}
+
+	if (readback != i2c_speed) {
+		LOG_ERR("Config readback mismatch: wrote 0x%02x, read 0x%02x",
+			i2c_speed, readback);
+		w1_unlock_bus(get_config(dev)->bus);
+		return -EIO;
 	}
 
 	ret = w1_unlock_bus(get_config(dev)->bus);

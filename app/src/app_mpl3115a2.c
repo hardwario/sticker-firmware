@@ -59,7 +59,7 @@ int app_mpl3115a2_read(float *altitude, float *pressure, float *temperature)
 
 	float pressure_ = sensor_value_to_float(&val);
 
-	LOG_DBG("Pressure: %.2f hPa", (double)(pressure_ / 100.f));
+	LOG_DBG("Pressure: %.2f hPa", (double)(pressure_ * 10.f));
 
 	if (pressure) {
 		*pressure = pressure_;

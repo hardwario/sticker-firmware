@@ -52,11 +52,21 @@ static int poll(void)
 	}
 
 	if (g_app_config.cap_input_a) {
-		input_a_is_active = !gpio_pin_get_dt(&m_input_a);
+		int val = gpio_pin_get_dt(&m_input_a);
+		if (val < 0) {
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
+			return val;
+		}
+		input_a_is_active = !val;
 	}
 
 	if (g_app_config.cap_input_b) {
-		input_b_is_active = !gpio_pin_get_dt(&m_input_b);
+		int val = gpio_pin_get_dt(&m_input_b);
+		if (val < 0) {
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
+			return val;
+		}
+		input_b_is_active = !val;
 	}
 
 	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
@@ -180,6 +190,23 @@ int app_input_get_data(struct app_input_data *data)
 	return 0;
 }
 
+int app_input_get_data_and_clear_notify(struct app_input_data *data)
+{
+	if (!data) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
+	*data = m_input_data;
+	m_input_data.input_a_notify_act = false;
+	m_input_data.input_a_notify_deact = false;
+	m_input_data.input_b_notify_act = false;
+	m_input_data.input_b_notify_deact = false;
+	k_mutex_unlock(&m_input_data_mutex);
+
+	return 0;
+}
+
 void app_input_clear_notify_flags(struct app_input_data *data)
 {
 	if (!data) {
@@ -204,6 +231,14 @@ void app_input_clear_notify_flags(struct app_input_data *data)
 		m_input_data.input_b_notify_deact = false;
 	}
 
+	k_mutex_unlock(&m_input_data_mutex);
+}
+
+void app_input_reset_counts(void)
+{
+	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
+	m_input_data.input_a_count = 0;
+	m_input_data.input_b_count = 0;
 	k_mutex_unlock(&m_input_data_mutex);
 }
 

@@ -28,8 +28,10 @@ struct app_hall_data {
 
 int app_hall_init(void);
 int app_hall_get_data(struct app_hall_data *data);
+int app_hall_get_data_and_clear_notify(struct app_hall_data *data);
 void app_hall_clear_notify_flags(struct app_hall_data *data);
 bool app_hall_check_notify_event(void);
+void app_hall_reset_counts(void);
 
 #ifdef __cplusplus
 }
