@@ -31,7 +31,7 @@ LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
 #define PAYLOAD_SIZE      28
 #define LOOP_INTERVAL_SEC       1
 #define ENTRY_BLINKS            5  /* one-time entry indication */
-#define SEND_EVERY_N            1  /* send every loop iteration (1s) */
+#define SEND_EVERY_N            30 /* 30 * 1s = 30s */
 #define CALIBRATION_TIMEOUT_MIN 30
 
 static int m_count_ds18b20;

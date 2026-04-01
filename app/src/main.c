@@ -84,12 +84,13 @@ int main(void)
 	/* Always start in normal mode — calibration is only set by magnet detection */
 	g_app_config.calibration = false;
 
-	/* Detect magnet on either Hall sensor FIRST — before any slow init */
+	/* Detect magnet on BOTH Hall sensors — require both active for calibration */
 	{
 		const struct gpio_dt_spec halls[] = {
 			GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios),
 			GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios),
 		};
+		bool hall_active[ARRAY_SIZE(halls)] = {false};
 
 		for (int i = 0; i < ARRAY_SIZE(halls); i++) {
 			if (!gpio_is_ready_dt(&halls[i])) {
@@ -97,14 +98,22 @@ int main(void)
 			}
 
 			gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_UP);
-			k_busy_wait(100);
+		}
 
-			if (gpio_pin_get_dt(&halls[i])) {
-				LOG_WRN("Magnet detected on Hall %d — entering calibration mode", i);
-				g_app_config.calibration = true;
+		k_busy_wait(100);
+
+		for (int i = 0; i < ARRAY_SIZE(halls); i++) {
+			if (!gpio_is_ready_dt(&halls[i])) {
+				continue;
 			}
 
+			hall_active[i] = gpio_pin_get_dt(&halls[i]);
 			gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_DOWN);
+		}
+
+		if (hall_active[0] && hall_active[1]) {
+			LOG_WRN("Magnet detected on both Hall sensors — entering calibration mode");
+			g_app_config.calibration = true;
 		}
 	}
 
@@ -239,12 +248,14 @@ int main(void)
 			}
 		}
 
-		/* Detect magnet on either Hall sensor → reboot into calibration mode */
-		{
+		/* Detect magnet on BOTH Hall sensors → reboot into calibration mode
+		 * Only within first 30 minutes after boot */
+		if (k_uptime_get() < (int64_t)30 * 60 * 1000) {
 			const struct gpio_dt_spec halls[] = {
 				GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios),
 				GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios),
 			};
+			bool hall_active[ARRAY_SIZE(halls)] = {false};
 
 			for (int i = 0; i < ARRAY_SIZE(halls); i++) {
 				if (!gpio_is_ready_dt(&halls[i])) {
@@ -253,16 +264,24 @@ int main(void)
 
 				gpio_pin_configure_dt(&halls[i],
 						      GPIO_INPUT | GPIO_PULL_UP);
-				k_busy_wait(100);
+			}
 
-				if (gpio_pin_get_dt(&halls[i])) {
-					LOG_WRN("Magnet detected on Hall %d "
-						 "— rebooting into calibration mode", i);
-					sys_reboot(SYS_REBOOT_COLD);
+			k_busy_wait(100);
+
+			for (int i = 0; i < ARRAY_SIZE(halls); i++) {
+				if (!gpio_is_ready_dt(&halls[i])) {
+					continue;
 				}
 
+				hall_active[i] = gpio_pin_get_dt(&halls[i]);
 				gpio_pin_configure_dt(&halls[i],
 						      GPIO_INPUT | GPIO_PULL_DOWN);
+			}
+
+			if (hall_active[0] && hall_active[1]) {
+				LOG_WRN("Magnet detected on both Hall sensors "
+					 "— rebooting into calibration mode");
+				sys_reboot(SYS_REBOOT_COLD);
 			}
 		}
 
