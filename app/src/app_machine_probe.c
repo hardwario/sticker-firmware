@@ -318,47 +318,39 @@ static int sht_read_serial(const struct device *dev, uint32_t *serial_number,
 	uint8_t write_buf[2];
 	uint8_t read_buf[6];
 
+	/* Use write_read to keep the I2C transaction atomic — separate
+	 * write + read causes a 1-Wire bus reset in between, which
+	 * aborts the pending I2C state on the DS28E17. */
+
 	/* Try SHT43 first (address 0x44, command 0x89) */
 	write_buf[0] = 0x89;
-	ret = ds28e17_i2c_write(dev, SHT43_I2C_ADDR, write_buf, 1);
-	if (ret == 0) {
-		k_sleep(K_MSEC(1));
-		ret = ds28e17_i2c_read(dev, SHT43_I2C_ADDR, read_buf, 6);
-		if (ret == 0 && sht_crc8(&read_buf[0], 2) == read_buf[2] &&
-		    sht_crc8(&read_buf[3], 2) == read_buf[5]) {
-			LOG_DBG("SHT43 detected");
-			if (detected_type) {
-				*detected_type = SHT_TYPE_SHT43;
-			}
-			goto parse_serial;
+	ret = ds28e17_i2c_write_read(dev, SHT43_I2C_ADDR, write_buf, 1, read_buf, 6);
+	if (ret == 0 && sht_crc8(&read_buf[0], 2) == read_buf[2] &&
+	    sht_crc8(&read_buf[3], 2) == read_buf[5]) {
+		LOG_DBG("SHT43 detected");
+		if (detected_type) {
+			*detected_type = SHT_TYPE_SHT43;
 		}
+		goto parse_serial;
 	}
 
 	/* Fallback to SHT30/SHT33 (address 0x45, command 0x3780) */
 	write_buf[0] = 0x37;
 	write_buf[1] = 0x80;
-	ret = ds28e17_i2c_write(dev, SHT33_I2C_ADDR, write_buf, 2);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
-		return ret;
+	ret = ds28e17_i2c_write_read(dev, SHT33_I2C_ADDR, write_buf, 2, read_buf, 6);
+	if (ret == 0) {
+		LOG_DBG("SHT33 detected");
+		if (detected_type) {
+			*detected_type = SHT_TYPE_SHT30;
+		}
+		goto parse_serial;
 	}
 
-	k_sleep(K_MSEC(1));
-
-	ret = ds28e17_i2c_read(dev, SHT33_I2C_ADDR, read_buf, 6);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_read", ret);
-		return ret;
-	}
-
-	LOG_DBG("SHT33 detected");
-	if (detected_type) {
-		*detected_type = SHT_TYPE_SHT30;
-	}
+	LOG_ERR("No SHT sensor detected");
+	return -ENODEV;
 
 parse_serial:
 	if (serial_number) {
-		/* Serial is in bytes 0-1 and 3-4, with CRC in bytes 2 and 5 */
 		*serial_number = ((uint32_t)read_buf[0] << 24) | ((uint32_t)read_buf[1] << 16) |
 				 ((uint32_t)read_buf[3] << 8) | (uint32_t)read_buf[4];
 	}
