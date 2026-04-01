@@ -10,6 +10,7 @@
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_machine_probe.h"
+#include "app_sensor.h"
 #include "app_sht4x.h"
 #include "app_wdog.h"
 
@@ -27,16 +28,78 @@
 
 LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
 
-#define SENTINEL          ((int16_t)0x7FFF)
-#define PAYLOAD_SIZE      28
+#define SENTINEL                ((int16_t)0x7FFF)
+#define PAYLOAD_SIZE            28
 #define LOOP_INTERVAL_SEC       1
 #define ENTRY_BLINKS            5  /* one-time entry indication */
-#define SEND_EVERY_N            30 /* 30 * 1s = 30s */
-#define BLINK_EVERY_N           5  /* 5 * 1s = blink every 5s */
+#define SEND_INTERVAL_SEC       30
+#define CALIBRATION_PORT        10
 #define CALIBRATION_TIMEOUT_MIN 120
 
 static int m_count_ds18b20;
 static int m_count_machine_probe;
+static bool m_calibration_active;
+
+static void compose_calibration_payload(uint8_t *buf);
+
+static void cal_send_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	app_sensor_sample();
+
+	uint8_t buf[PAYLOAD_SIZE];
+
+	compose_calibration_payload(buf);
+
+#if defined(CONFIG_LORAWAN)
+	if (!app_lrw_is_ready()) {
+		LOG_INF("LoRaWAN not ready, skipping calibration send");
+		return;
+	}
+
+	LOG_INF("Sending calibration data...");
+
+	int ret = lorawan_send(CALIBRATION_PORT, buf, PAYLOAD_SIZE, LORAWAN_MSG_UNCONFIRMED);
+
+	if (ret) {
+		LOG_ERR("Calibration send failed: %d", ret);
+	} else {
+		LOG_INF("Calibration data sent");
+	}
+#endif /* defined(CONFIG_LORAWAN) */
+}
+
+static K_WORK_DEFINE(m_cal_send_work, cal_send_work_handler);
+
+static void cal_send_timer_handler(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	k_work_submit(&m_cal_send_work);
+}
+
+static K_TIMER_DEFINE(m_cal_send_timer, cal_send_timer_handler, NULL);
+
+static void cal_timeout_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	LOG_WRN("Calibration timeout (%d min), rebooting", CALIBRATION_TIMEOUT_MIN);
+	k_timer_stop(&m_cal_send_timer);
+	m_calibration_active = false;
+	k_sleep(K_SECONDS(1));
+	sys_reboot(SYS_REBOOT_COLD);
+}
+
+static K_WORK_DEFINE(m_cal_timeout_work, cal_timeout_work_handler);
+
+static void cal_timeout_handler(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	k_work_submit(&m_cal_timeout_work);
+}
+
+static K_TIMER_DEFINE(m_cal_timeout_timer, cal_timeout_handler, NULL);
 
 static void compose_calibration_payload(uint8_t *buf)
 {
@@ -180,6 +243,11 @@ static const uint8_t cal_nwkskey[] = {0xaf, 0x4f, 0x05, 0x0b, 0xd3, 0x74, 0x0d, 
 static const uint8_t cal_appskey[] = {0xd9, 0xa9, 0xc4, 0x1a, 0xcf, 0x55, 0x99, 0xdc,
 				      0xe1, 0x16, 0x8e, 0xfe, 0x6d, 0x29, 0x1d, 0xab};
 
+bool app_calibration_is_active(void)
+{
+	return m_calibration_active;
+}
+
 void app_calibration_apply_keys(void)
 {
 	if (!g_app_config.calibration) {
@@ -288,12 +356,18 @@ int app_calibration_init(void)
 	}
 #endif
 
+	m_calibration_active = true;
+
+	/* Wait for LoRaWAN stack to settle after join */
+	k_sleep(K_SECONDS(2));
+
 	int64_t deadline = k_uptime_get() + (int64_t)CALIBRATION_TIMEOUT_MIN * 60 * 1000;
 	int loop_counter = 0;
 
 	for (;;) {
 		if (k_uptime_get() >= deadline) {
-			LOG_WRN("Calibration timeout (%d min) — rebooting", CALIBRATION_TIMEOUT_MIN);
+			LOG_WRN("Calibration timeout (%d min) — rebooting",
+				CALIBRATION_TIMEOUT_MIN);
 			sys_reboot(SYS_REBOOT_COLD);
 		}
 
@@ -306,15 +380,10 @@ int app_calibration_init(void)
 
 		loop_counter++;
 
-		/* Yellow blink every 5s to indicate calibration mode */
-		if (loop_counter % BLINK_EVERY_N == 0) {
-			struct app_led_blink_req req = {
-				.color = APP_LED_CHANNEL_Y, .duration = 100, .space = 100, .repetitions = 3};
-			app_led_blink(&req);
-		}
+		/* Send calibration data every SEND_INTERVAL_SEC */
+		if (loop_counter % SEND_INTERVAL_SEC == 0) {
+			app_sensor_sample();
 
-		/* Send every 30s */
-		if (loop_counter % SEND_EVERY_N == 0) {
 			uint8_t buf[PAYLOAD_SIZE];
 			compose_calibration_payload(buf);
 
@@ -322,16 +391,36 @@ int app_calibration_init(void)
 			if (app_lrw_is_ready()) {
 				LOG_INF("Sending calibration data...");
 
-				ret = lorawan_send(1, buf, PAYLOAD_SIZE, LORAWAN_MSG_UNCONFIRMED);
+				ret = lorawan_send(CALIBRATION_PORT, buf,
+						   PAYLOAD_SIZE,
+						   LORAWAN_MSG_UNCONFIRMED);
 				if (ret) {
-					LOG_ERR("lorawan_send failed: %d", ret);
+					LOG_ERR("Calibration send failed: %d", ret);
 				} else {
 					LOG_INF("Calibration data sent");
 				}
 			} else {
-				LOG_INF("LoRaWAN not ready, skipping send");
+				LOG_INF("LoRaWAN not ready, skipping");
 			}
 #endif /* defined(CONFIG_LORAWAN) */
+		}
+
+		/* Orange blink (R+G) every 1s to indicate calibration mode */
+		{
+			struct app_led_play_req led_req = {
+				.commands = {
+					{.type = APP_LED_CMD_SET,
+					 .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
+					{.type = APP_LED_CMD_SET,
+					 .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
+					{.type = APP_LED_CMD_DELAY, .duration = 50},
+					{.type = APP_LED_CMD_SET,
+					 .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
+					{.type = APP_LED_CMD_SET,
+					 .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
+					{.type = APP_LED_CMD_END}},
+				.repetitions = 1};
+			app_led_play(&led_req);
 		}
 
 		k_sleep(K_SECONDS(LOOP_INTERVAL_SEC));

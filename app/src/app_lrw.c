@@ -5,6 +5,7 @@
  */
 
 #include "app_alarm.h"
+#include "app_calibration.h"
 #include "app_compose.h"
 #include "app_config.h"
 #include "app_led.h"
@@ -488,6 +489,11 @@ static void send_work_handler(struct k_work *work)
 {
 	int ret;
 	bool with_link_check;
+
+	/* Block normal transmissions during calibration mode */
+	if (g_app_config.calibration) {
+		return;
+	}
 
 	/* Block transmissions during joining or reconnect */
 	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);

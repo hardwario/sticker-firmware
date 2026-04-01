@@ -285,6 +285,10 @@ int main(void)
 			}
 		}
 
+		if (app_calibration_is_active()) {
+			goto skip_led;
+		}
+
 		bool led_handled = false;
 
 #if defined(CONFIG_LORAWAN)
@@ -353,6 +357,7 @@ int main(void)
 #endif /* defined(CONFIG_FW_DEBUG) */
 		}
 
+skip_led:
 		k_sleep(K_SECONDS(BLINK_INTERVAL_SECONDS));
 	}
 

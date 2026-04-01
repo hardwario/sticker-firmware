@@ -7,10 +7,13 @@
 #ifndef APP_CALIBRATION_H_
 #define APP_CALIBRATION_H_
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+bool app_calibration_is_active(void);
 void app_calibration_apply_keys(void);
 int app_calibration_init(void);
 
