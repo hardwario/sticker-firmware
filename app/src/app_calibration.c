@@ -32,7 +32,8 @@ LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
 #define LOOP_INTERVAL_SEC       1
 #define ENTRY_BLINKS            5  /* one-time entry indication */
 #define SEND_EVERY_N            30 /* 30 * 1s = 30s */
-#define CALIBRATION_TIMEOUT_MIN 30
+#define BLINK_EVERY_N           5  /* 5 * 1s = blink every 5s */
+#define CALIBRATION_TIMEOUT_MIN 120
 
 static int m_count_ds18b20;
 static int m_count_machine_probe;
@@ -305,7 +306,14 @@ int app_calibration_init(void)
 
 		loop_counter++;
 
-		/* Send every 5s */
+		/* Yellow blink every 5s to indicate calibration mode */
+		if (loop_counter % BLINK_EVERY_N == 0) {
+			struct app_led_blink_req req = {
+				.color = APP_LED_CHANNEL_Y, .duration = 100, .space = 100, .repetitions = 3};
+			app_led_blink(&req);
+		}
+
+		/* Send every 30s */
 		if (loop_counter % SEND_EVERY_N == 0) {
 			uint8_t buf[PAYLOAD_SIZE];
 			compose_calibration_payload(buf);

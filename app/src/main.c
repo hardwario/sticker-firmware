@@ -250,7 +250,7 @@ int main(void)
 
 		/* Detect magnet on BOTH Hall sensors → reboot into calibration mode
 		 * Only within first 30 minutes after boot */
-		if (k_uptime_get() < (int64_t)30 * 60 * 1000) {
+		if (k_uptime_get() < (int64_t)120 * 60 * 1000) {
 			const struct gpio_dt_spec halls[] = {
 				GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios),
 				GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios),
