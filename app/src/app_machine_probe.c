@@ -693,17 +693,7 @@ static int scan_callback(struct w1_rom rom, void *user_data)
 		return ret;
 	}
 
-	/* After w1_search_rom the bus is in post-search state; the DS28E17 may
-	 * not respond to the first write_config (readback 0xFF).  Retry with a
-	 * short delay to let the device settle after the reset/select cycle. */
-	for (int i = 0; i < 3; i++) {
-		ret = ds28e17_write_config(m_sensors[m_count].dev, DS28E17_I2C_SPEED_100_KHZ);
-		if (!ret) {
-			break;
-		}
-		LOG_WRN("ds28e17_write_config attempt %d failed: %d", i + 1, ret);
-		k_sleep(K_MSEC(10));
-	}
+	ret = ds28e17_write_config(m_sensors[m_count].dev, DS28E17_I2C_SPEED_100_KHZ);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("ds28e17_write_config", ret);
 		return ret;
