@@ -79,9 +79,6 @@ static void compose_calibration_payload(uint8_t *buf)
 
 			LOG_INF("SHT40 Temperature: %.2f C", (double)temperature);
 			LOG_INF("SHT40 Humidity: %.1f %%", (double)humidity);
-
-			RTT_PRINTF("Serial number: %010u / Temperature: %.2f C / Humidity: %.1f %%\n",
-				   g_app_config.serial_number, (double)temperature, (double)humidity);
 		}
 	}
 	sys_put_le16((uint16_t)int_temp, &buf[8]);
@@ -116,11 +113,6 @@ static void compose_calibration_payload(uint8_t *buf)
 
 			LOG_INF("Machine Probe[0] Temperature: %.2f C / Humidity: %.1f %%",
 				(double)temperature, (double)humidity);
-
-			RTT_PRINTF("Serial number: %010u / Probe 1 Temperature: %.2f C / "
-				   "Humidity: %.1f %%\n",
-				   g_app_config.serial_number, (double)temperature,
-				   (double)humidity);
 		}
 
 		if (m_count_machine_probe > 1) {
@@ -133,11 +125,6 @@ static void compose_calibration_payload(uint8_t *buf)
 
 				LOG_INF("Machine Probe[1] Temperature: %.2f C / Humidity: %.1f %%",
 					(double)temperature, (double)humidity);
-
-				RTT_PRINTF("Serial number: %010u / Probe 2 Temperature: %.2f C / "
-					   "Humidity: %.1f %%\n",
-					   g_app_config.serial_number, (double)temperature,
-					   (double)humidity);
 			}
 		}
 	}
@@ -159,9 +146,6 @@ static void compose_calibration_payload(uint8_t *buf)
 			t1 = (int16_t)(temperature * 100.0f);
 
 			LOG_INF("DS18B20[0] Temperature: %.2f C", (double)temperature);
-
-			RTT_PRINTF("Serial number: %010u / DS18B20 T1: %.2f C\n",
-				   g_app_config.serial_number, (double)temperature);
 		}
 
 		if (m_count_ds18b20 > 1) {
@@ -172,9 +156,6 @@ static void compose_calibration_payload(uint8_t *buf)
 				t2 = (int16_t)(temperature * 100.0f);
 
 				LOG_INF("DS18B20[1] Temperature: %.2f C", (double)temperature);
-
-				RTT_PRINTF("Serial number: %010u / DS18B20 T2: %.2f C\n",
-					   g_app_config.serial_number, (double)temperature);
 			}
 		}
 	}
@@ -186,6 +167,16 @@ static void compose_calibration_payload(uint8_t *buf)
 	sys_put_le16((uint16_t)p1_hum, &buf[22]);
 	sys_put_le16((uint16_t)p2_temp, &buf[24]);
 	sys_put_le16((uint16_t)p2_hum, &buf[26]);
+
+	/* RTT output — all fields match the LoRaWAN payload, values x100, SENTINEL=32767 */
+	RTT_PRINTF("SN:%010u UP:%u ST:%d SH:%d HT:%d HH:%d T1:%d T2:%d P1T:%d P1H:%d P2T:%d P2H:%d\n",
+		   g_app_config.serial_number,
+		   (uint32_t)(k_uptime_get() / 1000),
+		   int_temp, int_hum,
+		   hygro_temp, hygro_hum,
+		   t1, t2,
+		   p1_temp, p1_hum,
+		   p2_temp, p2_hum);
 }
 
 /* Fixed ABP keys for calibration mode — all devices use the same credentials */
