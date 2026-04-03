@@ -20,6 +20,8 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/lorawan/lorawan.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/pm/pm.h>
+#include <zephyr/pm/policy.h>
 #include <zephyr/sys/reboot.h>
 
 /* Standard includes */
@@ -27,7 +29,18 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <SEGGER_RTT.h>
+
 LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
+
+#define CAL_RTT_CH 1
+
+#define RTT_PRINTF(fmt, ...)                                                                       \
+	do {                                                                                       \
+		char _rtt_buf[160];                                                                \
+		snprintf(_rtt_buf, sizeof(_rtt_buf), fmt, ##__VA_ARGS__);                          \
+		SEGGER_RTT_WriteString(CAL_RTT_CH, _rtt_buf);                                     \
+	} while (0)
 
 #define SENTINEL                ((int16_t)0x7FFF)
 #define PAYLOAD_SIZE            28
@@ -67,8 +80,8 @@ static void compose_calibration_payload(uint8_t *buf)
 			LOG_INF("SHT40 Temperature: %.2f C", (double)temperature);
 			LOG_INF("SHT40 Humidity: %.1f %%", (double)humidity);
 
-			printk("Serial number: %010u / Temperature: %.2f C / Humidity: %.1f %%\n",
-			       g_app_config.serial_number, (double)temperature, (double)humidity);
+			RTT_PRINTF("Serial number: %010u / Temperature: %.2f C / Humidity: %.1f %%\n",
+				   g_app_config.serial_number, (double)temperature, (double)humidity);
 		}
 	}
 	sys_put_le16((uint16_t)int_temp, &buf[8]);
@@ -104,10 +117,10 @@ static void compose_calibration_payload(uint8_t *buf)
 			LOG_INF("Machine Probe[0] Temperature: %.2f C / Humidity: %.1f %%",
 				(double)temperature, (double)humidity);
 
-			printk("Serial number: %010u / Probe 1 Temperature: %.2f C / "
-			       "Humidity: %.1f %%\n",
-			       g_app_config.serial_number, (double)temperature,
-			       (double)humidity);
+			RTT_PRINTF("Serial number: %010u / Probe 1 Temperature: %.2f C / "
+				   "Humidity: %.1f %%\n",
+				   g_app_config.serial_number, (double)temperature,
+				   (double)humidity);
 		}
 
 		if (m_count_machine_probe > 1) {
@@ -121,10 +134,10 @@ static void compose_calibration_payload(uint8_t *buf)
 				LOG_INF("Machine Probe[1] Temperature: %.2f C / Humidity: %.1f %%",
 					(double)temperature, (double)humidity);
 
-				printk("Serial number: %010u / Probe 2 Temperature: %.2f C / "
-				       "Humidity: %.1f %%\n",
-				       g_app_config.serial_number, (double)temperature,
-				       (double)humidity);
+				RTT_PRINTF("Serial number: %010u / Probe 2 Temperature: %.2f C / "
+					   "Humidity: %.1f %%\n",
+					   g_app_config.serial_number, (double)temperature,
+					   (double)humidity);
 			}
 		}
 	}
@@ -147,8 +160,8 @@ static void compose_calibration_payload(uint8_t *buf)
 
 			LOG_INF("DS18B20[0] Temperature: %.2f C", (double)temperature);
 
-			printk("Serial number: %010u / DS18B20 T1: %.2f C\n",
-			       g_app_config.serial_number, (double)temperature);
+			RTT_PRINTF("Serial number: %010u / DS18B20 T1: %.2f C\n",
+				   g_app_config.serial_number, (double)temperature);
 		}
 
 		if (m_count_ds18b20 > 1) {
@@ -160,8 +173,8 @@ static void compose_calibration_payload(uint8_t *buf)
 
 				LOG_INF("DS18B20[1] Temperature: %.2f C", (double)temperature);
 
-				printk("Serial number: %010u / DS18B20 T2: %.2f C\n",
-				       g_app_config.serial_number, (double)temperature);
+				RTT_PRINTF("Serial number: %010u / DS18B20 T2: %.2f C\n",
+					   g_app_config.serial_number, (double)temperature);
 			}
 		}
 	}
@@ -212,6 +225,15 @@ int app_calibration_init(void)
 	}
 
 	LOG_WRN("Calibration mode is enabled");
+
+	/* Prevent deep sleep so RTT/SWD remain accessible */
+	pm_policy_state_lock_get(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
+	pm_policy_state_lock_get(PM_STATE_STANDBY, PM_ALL_SUBSTATES);
+
+	SEGGER_RTT_Init();
+	static char rtt_up_buf[512];
+	SEGGER_RTT_ConfigUpBuffer(CAL_RTT_CH, "cal", rtt_up_buf, sizeof(rtt_up_buf),
+				  SEGGER_RTT_MODE_NO_BLOCK_SKIP);
 
 	/* Init 1-Wire bus (DS2484) — non-fatal on failure */
 	bool w1_ready = false;
