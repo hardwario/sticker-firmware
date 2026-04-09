@@ -8,39 +8,20 @@
 #include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_led.h"
-#include "app_log.h"
 #include "app_lrw.h"
 #include "app_machine_probe.h"
-#include "app_sensor.h"
 #include "app_sht4x.h"
 #include "app_wdog.h"
 
 /* Zephyr includes */
 #include <zephyr/kernel.h>
-#include <zephyr/logging/log.h>
 #include <zephyr/lorawan/lorawan.h>
 #include <zephyr/sys/byteorder.h>
-#include <zephyr/pm/pm.h>
-#include <zephyr/pm/policy.h>
 #include <zephyr/sys/reboot.h>
 
 /* Standard includes */
-#include <errno.h>
 #include <stdint.h>
 #include <string.h>
-
-#include <SEGGER_RTT.h>
-
-LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
-
-#define CAL_RTT_CH 1
-
-#define RTT_PRINTF(fmt, ...)                                                                       \
-	do {                                                                                       \
-		char _rtt_buf[160];                                                                \
-		snprintf(_rtt_buf, sizeof(_rtt_buf), fmt, ##__VA_ARGS__);                          \
-		SEGGER_RTT_WriteString(CAL_RTT_CH, _rtt_buf);                                     \
-	} while (0)
 
 #define SENTINEL                ((int16_t)0x7FFF)
 #define PAYLOAD_SIZE            28
@@ -71,14 +52,9 @@ static void compose_calibration_payload(uint8_t *buf)
 		float temperature, humidity;
 
 		ret = app_sht4x_read(&temperature, &humidity);
-		if (ret) {
-			LOG_WRN("SHT40 read failed: %d", ret);
-		} else {
+		if (!ret) {
 			int_temp = (int16_t)(temperature * 100.0f);
 			int_hum = (int16_t)(humidity * 100.0f);
-
-			LOG_INF("SHT40 Temperature: %.2f C", (double)temperature);
-			LOG_INF("SHT40 Humidity: %.1f %%", (double)humidity);
 		}
 	}
 	sys_put_le16((uint16_t)int_temp, &buf[8]);
@@ -100,9 +76,7 @@ static void compose_calibration_payload(uint8_t *buf)
 		float temperature, humidity;
 
 		ret = app_machine_probe_read_hygrometer(0, &sn, &temperature, &humidity);
-		if (ret) {
-			LOG_WRN("Machine Probe[0] hygrometer read failed: %d", ret);
-		} else {
+		if (!ret) {
 			int16_t t = (int16_t)(temperature * 100.0f);
 			int16_t h = (int16_t)(humidity * 100.0f);
 
@@ -110,21 +84,13 @@ static void compose_calibration_payload(uint8_t *buf)
 			hygro_hum = h;
 			p1_temp = t;
 			p1_hum = h;
-
-			LOG_INF("Machine Probe[0] Temperature: %.2f C / Humidity: %.1f %%",
-				(double)temperature, (double)humidity);
 		}
 
 		if (m_count_machine_probe > 1) {
 			ret = app_machine_probe_read_hygrometer(1, &sn, &temperature, &humidity);
-			if (ret) {
-				LOG_WRN("Machine Probe[1] hygrometer read failed: %d", ret);
-			} else {
+			if (!ret) {
 				p2_temp = (int16_t)(temperature * 100.0f);
 				p2_hum = (int16_t)(humidity * 100.0f);
-
-				LOG_INF("Machine Probe[1] Temperature: %.2f C / Humidity: %.1f %%",
-					(double)temperature, (double)humidity);
 			}
 		}
 	}
@@ -140,22 +106,14 @@ static void compose_calibration_payload(uint8_t *buf)
 		float temperature;
 
 		ret = app_ds18b20_read(0, &sn, &temperature);
-		if (ret) {
-			LOG_WRN("DS18B20[0] read failed: %d", ret);
-		} else {
+		if (!ret) {
 			t1 = (int16_t)(temperature * 100.0f);
-
-			LOG_INF("DS18B20[0] Temperature: %.2f C", (double)temperature);
 		}
 
 		if (m_count_ds18b20 > 1) {
 			ret = app_ds18b20_read(1, &sn, &temperature);
-			if (ret) {
-				LOG_WRN("DS18B20[1] read failed: %d", ret);
-			} else {
+			if (!ret) {
 				t2 = (int16_t)(temperature * 100.0f);
-
-				LOG_INF("DS18B20[1] Temperature: %.2f C", (double)temperature);
 			}
 		}
 	}
@@ -167,16 +125,6 @@ static void compose_calibration_payload(uint8_t *buf)
 	sys_put_le16((uint16_t)p1_hum, &buf[22]);
 	sys_put_le16((uint16_t)p2_temp, &buf[24]);
 	sys_put_le16((uint16_t)p2_hum, &buf[26]);
-
-	/* RTT output — all fields match the LoRaWAN payload, values x100, SENTINEL=32767 */
-	RTT_PRINTF("SN:%010u UP:%u ST:%d SH:%d HT:%d HH:%d T1:%d T2:%d P1T:%d P1H:%d P2T:%d P2H:%d\n",
-		   g_app_config.serial_number,
-		   (uint32_t)(k_uptime_get() / 1000),
-		   int_temp, int_hum,
-		   hygro_temp, hygro_hum,
-		   t1, t2,
-		   p1_temp, p1_hum,
-		   p2_temp, p2_hum);
 }
 
 /* Fixed ABP keys for calibration mode — all devices use the same credentials */
@@ -198,8 +146,6 @@ void app_calibration_apply_keys(void)
 		return;
 	}
 
-	LOG_INF("Applying calibration ABP keys");
-
 	g_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_ABP;
 	memcpy(g_app_config.lrw_deveui, cal_deveui, sizeof(cal_deveui));
 	memcpy(g_app_config.lrw_devaddr, cal_devaddr, sizeof(cal_devaddr));
@@ -215,17 +161,6 @@ int app_calibration_init(void)
 		return 0;
 	}
 
-	LOG_WRN("Calibration mode is enabled");
-
-	/* Prevent deep sleep so RTT/SWD remain accessible */
-	pm_policy_state_lock_get(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
-	pm_policy_state_lock_get(PM_STATE_STANDBY, PM_ALL_SUBSTATES);
-
-	SEGGER_RTT_Init();
-	static char rtt_up_buf[512];
-	SEGGER_RTT_ConfigUpBuffer(CAL_RTT_CH, "cal", rtt_up_buf, sizeof(rtt_up_buf),
-				  SEGGER_RTT_MODE_NO_BLOCK_SKIP);
-
 	/* Init 1-Wire bus (DS2484) — non-fatal on failure */
 	bool w1_ready = false;
 
@@ -234,7 +169,7 @@ int app_calibration_init(void)
 
 		ret = device_init(dev);
 		if (ret && ret != -EALREADY) {
-			LOG_WRN("DS2484 init failed: %d - 1-Wire sensors disabled", ret);
+			w1_ready = false;
 		} else {
 			w1_ready = true;
 		}
@@ -242,76 +177,46 @@ int app_calibration_init(void)
 
 	/* Init DS18B20 sensors */
 	if (w1_ready && g_app_config.cap_1w_thermometer) {
-		const struct device *dev_0 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_0));
+		device_init(DEVICE_DT_GET(DT_NODELABEL(ds18b20_0)));
+		device_init(DEVICE_DT_GET(DT_NODELABEL(ds18b20_1)));
 
-		ret = device_init(dev_0);
-		if (ret && ret != -EALREADY) {
-			LOG_WRN("ds18b20_0 init failed: %d", ret);
-		}
-
-		const struct device *dev_1 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_1));
-
-		ret = device_init(dev_1);
-		if (ret && ret != -EALREADY) {
-			LOG_WRN("ds18b20_1 init failed: %d", ret);
-		}
-
-		ret = app_ds18b20_scan();
-		if (ret) {
-			LOG_WRN("app_ds18b20_scan failed: %d", ret);
-		} else {
+		if (!app_ds18b20_scan()) {
 			m_count_ds18b20 = app_ds18b20_get_count();
 		}
 	}
 
 	/* Init Machine Probe sensors */
 	if (w1_ready && g_app_config.cap_1w_machine_probe) {
-		const struct device *dev_0 = DEVICE_DT_GET(DT_NODELABEL(machine_probe_0));
+		device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_0)));
+		device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_1)));
 
-		ret = device_init(dev_0);
-		if (ret && ret != -EALREADY) {
-			LOG_WRN("machine_probe_0 init failed: %d", ret);
-		}
-
-		const struct device *dev_1 = DEVICE_DT_GET(DT_NODELABEL(machine_probe_1));
-
-		ret = device_init(dev_1);
-		if (ret && ret != -EALREADY) {
-			LOG_WRN("machine_probe_1 init failed: %d", ret);
-		}
-
-		ret = app_machine_probe_scan();
-		if (ret) {
-			LOG_WRN("app_machine_probe_scan failed: %d", ret);
-		} else {
+		if (!app_machine_probe_scan()) {
 			m_count_machine_probe = app_machine_probe_get_count();
 		}
 	}
 
-	LOG_INF("Sensors: DS18B20=%d, Machine Probe=%d", m_count_ds18b20, m_count_machine_probe);
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif
 
 	/* One-time 5x fast yellow blink to indicate calibration entry */
-	for (int i = 0; i < ENTRY_BLINKS; i++) {
-		app_led_set(APP_LED_CHANNEL_Y, APP_LED_ON);
-		k_sleep(K_MSEC(100));
-		app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
-		if (i < ENTRY_BLINKS - 1) {
-			k_sleep(K_MSEC(100));
-		}
+	{
+		struct app_led_blink_req req = {
+			.color = APP_LED_CHANNEL_Y,
+			.duration = 100,
+			.space = 100,
+			.repetitions = ENTRY_BLINKS};
+		app_led_blink(&req);
 	}
 
 #if defined(CONFIG_LORAWAN)
 	/* Use DR5 (SF7) for calibration — short range, fast TX, minimal duty cycle */
 	lorawan_enable_adr(false);
 	ret = lorawan_set_datarate(LORAWAN_DR_5);
-	if (ret) {
-		LOG_WRN("Failed to set DR5: %d", ret);
-	}
 #endif
 
 	m_calibration_active = true;
 
-	/* Wait for LoRaWAN stack to settle after join */
 	k_sleep(K_SECONDS(2));
 
 	int64_t deadline = k_uptime_get() + (int64_t)CALIBRATION_TIMEOUT_MIN * 60 * 1000;
@@ -319,48 +224,31 @@ int app_calibration_init(void)
 
 	for (;;) {
 		if (k_uptime_get() >= deadline) {
-			LOG_WRN("Calibration timeout (%d min) — rebooting",
-				CALIBRATION_TIMEOUT_MIN);
 			sys_reboot(SYS_REBOOT_COLD);
 		}
 
 #if defined(CONFIG_WATCHDOG)
-		ret = app_wdog_feed();
-		if (ret) {
-			LOG_ERR("app_wdog_feed failed: %d", ret);
-		}
-#endif /* defined(CONFIG_WATCHDOG) */
+		app_wdog_feed();
+#endif
 
 		loop_counter++;
 
-		/* Send calibration data every SEND_INTERVAL_SEC */
 		if (loop_counter % SEND_INTERVAL_SEC == 0) {
-			app_sensor_sample();
-
 			uint8_t buf[PAYLOAD_SIZE];
 			compose_calibration_payload(buf);
 
 #if defined(CONFIG_LORAWAN)
 			if (app_lrw_is_ready()) {
-				LOG_INF("Sending calibration data...");
-
-				ret = lorawan_send(CALIBRATION_PORT, buf,
-						   PAYLOAD_SIZE,
-						   LORAWAN_MSG_UNCONFIRMED);
-				if (ret) {
-					LOG_ERR("Calibration send failed: %d", ret);
-				} else {
-					LOG_INF("Calibration data sent");
-				}
-			} else {
-				LOG_INF("LoRaWAN not ready, skipping");
+				lorawan_send(CALIBRATION_PORT, buf,
+					     PAYLOAD_SIZE,
+					     LORAWAN_MSG_UNCONFIRMED);
 			}
-#endif /* defined(CONFIG_LORAWAN) */
+#endif
 		}
 
-		/* Orange blink (R+G) every 1s to indicate calibration mode */
+		/* Orange blink (R+G) every 1s */
 		{
-			struct app_led_play_req led_req = {
+			static struct app_led_play_req led_req = {
 				.commands = {
 					{.type = APP_LED_CMD_SET,
 					 .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
