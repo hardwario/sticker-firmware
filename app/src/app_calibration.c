@@ -24,7 +24,7 @@
 #include <string.h>
 
 #define SENTINEL                ((int16_t)0x7FFF)
-#define PAYLOAD_SIZE            28
+#define PAYLOAD_SIZE            24
 #define LOOP_INTERVAL_SEC       1
 #define ENTRY_BLINKS            5  /* one-time entry indication */
 #define SEND_INTERVAL_SEC       30
@@ -60,44 +60,7 @@ static void compose_calibration_payload(uint8_t *buf)
 	sys_put_le16((uint16_t)int_temp, &buf[8]);
 	sys_put_le16((uint16_t)int_hum, &buf[10]);
 
-	/* Offset 12-15: Hygrometer temp/humidity (Machine Probe[0] hygrometer)
-	 * Offset 20-23: Probe 1 temp/humidity (same as hygrometer — Machine Probe[0])
-	 * Offset 24-27: Probe 2 temp/humidity (Machine Probe[1])
-	 */
-	int16_t hygro_temp = SENTINEL;
-	int16_t hygro_hum = SENTINEL;
-	int16_t p1_temp = SENTINEL;
-	int16_t p1_hum = SENTINEL;
-	int16_t p2_temp = SENTINEL;
-	int16_t p2_hum = SENTINEL;
-
-	if (m_count_machine_probe > 0) {
-		uint64_t sn;
-		float temperature, humidity;
-
-		ret = app_machine_probe_read_hygrometer(0, &sn, &temperature, &humidity);
-		if (!ret) {
-			int16_t t = (int16_t)(temperature * 100.0f);
-			int16_t h = (int16_t)(humidity * 100.0f);
-
-			hygro_temp = t;
-			hygro_hum = h;
-			p1_temp = t;
-			p1_hum = h;
-		}
-
-		if (m_count_machine_probe > 1) {
-			ret = app_machine_probe_read_hygrometer(1, &sn, &temperature, &humidity);
-			if (!ret) {
-				p2_temp = (int16_t)(temperature * 100.0f);
-				p2_hum = (int16_t)(humidity * 100.0f);
-			}
-		}
-	}
-	sys_put_le16((uint16_t)hygro_temp, &buf[12]);
-	sys_put_le16((uint16_t)hygro_hum, &buf[14]);
-
-	/* Offset 16-19: DS18B20 T1 and T2 */
+	/* Offset 12-15: DS18B20 T1 and T2 */
 	int16_t t1 = SENTINEL;
 	int16_t t2 = SENTINEL;
 
@@ -117,14 +80,37 @@ static void compose_calibration_payload(uint8_t *buf)
 			}
 		}
 	}
-	sys_put_le16((uint16_t)t1, &buf[16]);
-	sys_put_le16((uint16_t)t2, &buf[18]);
+	sys_put_le16((uint16_t)t1, &buf[12]);
+	sys_put_le16((uint16_t)t2, &buf[14]);
 
-	/* Probe 1 and 2 (offset 20-27) — already computed above */
-	sys_put_le16((uint16_t)p1_temp, &buf[20]);
-	sys_put_le16((uint16_t)p1_hum, &buf[22]);
-	sys_put_le16((uint16_t)p2_temp, &buf[24]);
-	sys_put_le16((uint16_t)p2_hum, &buf[26]);
+	/* Offset 16-23: Machine Probe 1 and 2 temp/humidity */
+	int16_t p1_temp = SENTINEL;
+	int16_t p1_hum = SENTINEL;
+	int16_t p2_temp = SENTINEL;
+	int16_t p2_hum = SENTINEL;
+
+	if (m_count_machine_probe > 0) {
+		uint64_t sn;
+		float temperature, humidity;
+
+		ret = app_machine_probe_read_hygrometer(0, &sn, &temperature, &humidity);
+		if (!ret) {
+			p1_temp = (int16_t)(temperature * 100.0f);
+			p1_hum = (int16_t)(humidity * 100.0f);
+		}
+
+		if (m_count_machine_probe > 1) {
+			ret = app_machine_probe_read_hygrometer(1, &sn, &temperature, &humidity);
+			if (!ret) {
+				p2_temp = (int16_t)(temperature * 100.0f);
+				p2_hum = (int16_t)(humidity * 100.0f);
+			}
+		}
+	}
+	sys_put_le16((uint16_t)p1_temp, &buf[16]);
+	sys_put_le16((uint16_t)p1_hum, &buf[18]);
+	sys_put_le16((uint16_t)p2_temp, &buf[20]);
+	sys_put_le16((uint16_t)p2_hum, &buf[22]);
 }
 
 /* Fixed ABP keys for calibration mode — all devices use the same credentials */
