@@ -8,6 +8,7 @@
 #include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_led.h"
+#include "app_log.h"
 #include "app_lrw.h"
 #include "app_machine_probe.h"
 #include "app_sht4x.h"
@@ -15,6 +16,7 @@
 
 /* Zephyr includes */
 #include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
 #include <zephyr/lorawan/lorawan.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/reboot.h>
@@ -23,17 +25,36 @@
 #include <stdint.h>
 #include <string.h>
 
-#define SENTINEL                ((int16_t)0x7FFF)
-#define PAYLOAD_SIZE            24
-#define LOOP_INTERVAL_SEC       1
-#define ENTRY_BLINKS            5  /* one-time entry indication */
-#define SEND_INTERVAL_SEC       30
-#define CALIBRATION_PORT        10
+LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
+
+#define SENTINEL          ((int16_t)0x7FFF)
+#define PAYLOAD_SIZE      24
+#define LOOP_INTERVAL_SEC 1
+#define SEND_INTERVAL_SEC 30
+#define SETTLE_DELAY_SEC  2
+#define ENTRY_BLINKS      5
+#define CALIBRATION_PORT  10
 #define CALIBRATION_TIMEOUT_MIN APP_CALIBRATION_ACTIVATION_WINDOW_MIN
+
+/* Fixed ABP keys for calibration mode — all devices use the same credentials */
+static const uint8_t m_cal_deveui[] = {0x02, 0x40, 0x3b, 0x84, 0xfd, 0x45, 0x1f, 0x37};
+static const uint8_t m_cal_devaddr[] = {0x01, 0x2c, 0x86, 0x9a};
+static const uint8_t m_cal_nwkskey[] = {0xaf, 0x4f, 0x05, 0x0b, 0xd3, 0x74, 0x0d, 0x19,
+					0x70, 0xd3, 0x63, 0xb2, 0xb4, 0x9e, 0x1a, 0x7b};
+static const uint8_t m_cal_appskey[] = {0xd9, 0xa9, 0xc4, 0x1a, 0xcf, 0x55, 0x99, 0xdc,
+					0xe1, 0x16, 0x8e, 0xfe, 0x6d, 0x29, 0x1d, 0xab};
 
 static int m_count_ds18b20;
 static int m_count_machine_probe;
-static bool m_calibration_active;
+
+static struct app_led_play_req m_orange_blink = {
+	.commands = {{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
+		     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
+		     {.type = APP_LED_CMD_DELAY, .duration = 50},
+		     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
+		     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
+		     {.type = APP_LED_CMD_END}},
+	.repetitions = 1};
 
 static void compose_calibration_payload(uint8_t *buf)
 {
@@ -45,20 +66,20 @@ static void compose_calibration_payload(uint8_t *buf)
 	/* Offset 4-7: Uptime in seconds (uint32, LE) */
 	sys_put_le32((uint32_t)(k_uptime_get() / 1000), &buf[4]);
 
-	/* Offset 8-11: SHT40 internal temperature and humidity */
-	int16_t int_temp = SENTINEL;
-	int16_t int_hum = SENTINEL;
+	/* Offset 8-11: SHT40 temperature and humidity */
+	int16_t sht_temp = SENTINEL;
+	int16_t sht_hum = SENTINEL;
 	{
 		float temperature, humidity;
 
 		ret = app_sht4x_read(&temperature, &humidity);
 		if (!ret) {
-			int_temp = (int16_t)(temperature * 100.0f);
-			int_hum = (int16_t)(humidity * 100.0f);
+			sht_temp = (int16_t)(temperature * 100.0f);
+			sht_hum = (int16_t)(humidity * 100.0f);
 		}
 	}
-	sys_put_le16((uint16_t)int_temp, &buf[8]);
-	sys_put_le16((uint16_t)int_hum, &buf[10]);
+	sys_put_le16((uint16_t)sht_temp, &buf[8]);
+	sys_put_le16((uint16_t)sht_hum, &buf[10]);
 
 	/* Offset 12-15: DS18B20 T1 and T2 */
 	int16_t t1 = SENTINEL;
@@ -80,6 +101,7 @@ static void compose_calibration_payload(uint8_t *buf)
 			}
 		}
 	}
+
 	sys_put_le16((uint16_t)t1, &buf[12]);
 	sys_put_le16((uint16_t)t2, &buf[14]);
 
@@ -107,45 +129,37 @@ static void compose_calibration_payload(uint8_t *buf)
 			}
 		}
 	}
+
 	sys_put_le16((uint16_t)p1_temp, &buf[16]);
 	sys_put_le16((uint16_t)p1_hum, &buf[18]);
 	sys_put_le16((uint16_t)p2_temp, &buf[20]);
 	sys_put_le16((uint16_t)p2_hum, &buf[22]);
 }
 
-/* Fixed ABP keys for calibration mode — all devices use the same credentials */
-static const uint8_t cal_deveui[] = {0x02, 0x40, 0x3b, 0x84, 0xfd, 0x45, 0x1f, 0x37};
-static const uint8_t cal_devaddr[] = {0x01, 0x2c, 0x86, 0x9a};
-static const uint8_t cal_nwkskey[] = {0xaf, 0x4f, 0x05, 0x0b, 0xd3, 0x74, 0x0d, 0x19,
-				      0x70, 0xd3, 0x63, 0xb2, 0xb4, 0x9e, 0x1a, 0x7b};
-static const uint8_t cal_appskey[] = {0xd9, 0xa9, 0xc4, 0x1a, 0xcf, 0x55, 0x99, 0xdc,
-				      0xe1, 0x16, 0x8e, 0xfe, 0x6d, 0x29, 0x1d, 0xab};
-
-bool app_calibration_is_active(void)
-{
-	return m_calibration_active;
-}
-
-void app_calibration_apply_keys(void)
-{
-	if (!g_app_config.calibration) {
-		return;
-	}
-
-	g_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_ABP;
-	memcpy(g_app_config.lrw_deveui, cal_deveui, sizeof(cal_deveui));
-	memcpy(g_app_config.lrw_devaddr, cal_devaddr, sizeof(cal_devaddr));
-	memcpy(g_app_config.lrw_nwkskey, cal_nwkskey, sizeof(cal_nwkskey));
-	memcpy(g_app_config.lrw_appskey, cal_appskey, sizeof(cal_appskey));
-}
-
 int app_calibration_init(void)
 {
 	int ret;
 
-	if (!g_app_config.calibration) {
-		return 0;
+	/* Set calibration ABP keys */
+	g_app_config.calibration = true;
+	g_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_ABP;
+	memcpy(g_app_config.lrw_deveui, m_cal_deveui, sizeof(m_cal_deveui));
+	memcpy(g_app_config.lrw_devaddr, m_cal_devaddr, sizeof(m_cal_devaddr));
+	memcpy(g_app_config.lrw_nwkskey, m_cal_nwkskey, sizeof(m_cal_nwkskey));
+	memcpy(g_app_config.lrw_appskey, m_cal_appskey, sizeof(m_cal_appskey));
+
+	/* Init LoRaWAN */
+#if defined(CONFIG_LORAWAN)
+	ret = app_lrw_init();
+	if (ret) {
+		return ret;
 	}
+
+	app_lrw_join();
+
+	lorawan_enable_adr(false);
+	ret = lorawan_set_datarate(LORAWAN_DR_5);
+#endif /* defined(CONFIG_LORAWAN) */
 
 	/* Init 1-Wire bus (DS2484) — non-fatal on failure */
 	bool w1_ready = false;
@@ -154,9 +168,7 @@ int app_calibration_init(void)
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
 
 		ret = device_init(dev);
-		if (ret && ret != -EALREADY) {
-			w1_ready = false;
-		} else {
+		if (!ret || ret == -EALREADY) {
 			w1_ready = true;
 		}
 	}
@@ -183,7 +195,7 @@ int app_calibration_init(void)
 
 #if defined(CONFIG_WATCHDOG)
 	app_wdog_feed();
-#endif
+#endif /* defined(CONFIG_WATCHDOG) */
 
 	/* One-time 5x fast yellow blink to indicate calibration entry */
 	{
@@ -195,18 +207,16 @@ int app_calibration_init(void)
 		app_led_blink(&req);
 	}
 
-#if defined(CONFIG_LORAWAN)
-	/* Use DR5 (SF7) for calibration — short range, fast TX, minimal duty cycle */
-	lorawan_enable_adr(false);
-	ret = lorawan_set_datarate(LORAWAN_DR_5);
-#endif
+	return 0;
+}
 
-	m_calibration_active = true;
+void app_calibration_run(void)
+{
+	k_sleep(K_SECONDS(SETTLE_DELAY_SEC));
 
-	k_sleep(K_SECONDS(2));
-
-	int64_t deadline = k_uptime_get() + (int64_t)CALIBRATION_TIMEOUT_MIN * 60 * 1000;
-	int loop_counter = SEND_INTERVAL_SEC - 1;
+	int64_t deadline = k_uptime_get()
+			 + (int64_t)CALIBRATION_TIMEOUT_MIN * 60 * 1000;
+	int counter = SEND_INTERVAL_SEC;
 
 	for (;;) {
 		if (k_uptime_get() >= deadline) {
@@ -215,11 +225,11 @@ int app_calibration_init(void)
 
 #if defined(CONFIG_WATCHDOG)
 		app_wdog_feed();
-#endif
+#endif /* defined(CONFIG_WATCHDOG) */
 
-		loop_counter++;
+		if (++counter >= SEND_INTERVAL_SEC) {
+			counter = 0;
 
-		if (loop_counter % SEND_INTERVAL_SEC == 0) {
 			uint8_t buf[PAYLOAD_SIZE];
 			compose_calibration_payload(buf);
 
@@ -229,29 +239,11 @@ int app_calibration_init(void)
 					     PAYLOAD_SIZE,
 					     LORAWAN_MSG_UNCONFIRMED);
 			}
-#endif
+#endif /* defined(CONFIG_LORAWAN) */
 		}
 
-		/* Orange blink (R+G) every 1s */
-		{
-			static struct app_led_play_req led_req = {
-				.commands = {
-					{.type = APP_LED_CMD_SET,
-					 .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
-					{.type = APP_LED_CMD_SET,
-					 .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
-					{.type = APP_LED_CMD_DELAY, .duration = 50},
-					{.type = APP_LED_CMD_SET,
-					 .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
-					{.type = APP_LED_CMD_SET,
-					 .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
-					{.type = APP_LED_CMD_END}},
-				.repetitions = 1};
-			app_led_play(&led_req);
-		}
+		app_led_play(&m_orange_blink);
 
 		k_sleep(K_SECONDS(LOOP_INTERVAL_SEC));
 	}
-
-	return 0;
 }

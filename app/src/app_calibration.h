@@ -7,17 +7,14 @@
 #ifndef APP_CALIBRATION_H_
 #define APP_CALIBRATION_H_
 
-#include <stdbool.h>
-
 #define APP_CALIBRATION_ACTIVATION_WINDOW_MIN 120
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-bool app_calibration_is_active(void);
-void app_calibration_apply_keys(void);
 int app_calibration_init(void);
+void app_calibration_run(void);
 
 #ifdef __cplusplus
 }

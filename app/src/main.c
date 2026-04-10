@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2025 HARDWARIO a.s.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "app_alarm.h"
 #include "app_battery.h"
 #include "app_calibration.h"
@@ -7,9 +13,9 @@
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_nfc.h"
-#include "app_wdog.h"
 #include "app_sensor.h"
 #include "app_settings.h"
+#include "app_wdog.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -31,6 +37,12 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 #define BLINK_INTERVAL_SECONDS 3
 #define NFC_CHECK_BLINKS       10
 
+enum app_mode {
+	APP_MODE_NORMAL = 0,
+	APP_MODE_CALIBRATION,
+};
+
+static int m_nfc_counter;
 
 static void die(void)
 {
@@ -75,48 +87,95 @@ static void play_carousel_nfc(void)
 	k_sleep(K_MSEC(10 * 200 - 100));
 }
 
+static enum app_mode detect_mode(void)
+{
+	const struct gpio_dt_spec halls[] = {
+		GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios),
+		GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios),
+	};
+	bool hall_active[ARRAY_SIZE(halls)] = {false};
+
+	for (int i = 0; i < ARRAY_SIZE(halls); i++) {
+		if (!gpio_is_ready_dt(&halls[i])) {
+			continue;
+		}
+
+		gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_UP);
+	}
+
+	k_busy_wait(100);
+
+	for (int i = 0; i < ARRAY_SIZE(halls); i++) {
+		if (!gpio_is_ready_dt(&halls[i])) {
+			continue;
+		}
+
+		int val = gpio_pin_get_dt(&halls[i]);
+		if (val >= 0) {
+			hall_active[i] = val;
+		}
+
+		gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_DOWN);
+	}
+
+	if (hall_active[0] && hall_active[1]) {
+		LOG_WRN("Magnet detected on both Hall sensors — entering calibration mode");
+		return APP_MODE_CALIBRATION;
+	}
+
+	return APP_MODE_NORMAL;
+}
+
+static bool detect_magnets(void)
+{
+	const struct gpio_dt_spec halls[] = {
+		GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios),
+		GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios),
+	};
+	bool hall_active[ARRAY_SIZE(halls)] = {false};
+
+	for (int i = 0; i < ARRAY_SIZE(halls); i++) {
+		if (!gpio_is_ready_dt(&halls[i])) {
+			continue;
+		}
+
+		gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_UP);
+	}
+
+	k_busy_wait(100);
+
+	for (int i = 0; i < ARRAY_SIZE(halls); i++) {
+		if (!gpio_is_ready_dt(&halls[i])) {
+			continue;
+		}
+
+		int val = gpio_pin_get_dt(&halls[i]);
+		if (val >= 0) {
+			hall_active[i] = val;
+		}
+
+		gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_DOWN);
+	}
+
+	return hall_active[0] && hall_active[1];
+}
+
+static int init(void)
+{
+	k_sleep(K_MSEC(500));
+
+	return 0;
+}
+
+SYS_INIT(init, POST_KERNEL, 0);
+
 int main(void)
 {
 	int ret;
 
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
 
-	/* Always start in normal mode — calibration is only set by magnet detection */
-	g_app_config.calibration = false;
-
-	/* Detect magnet on BOTH Hall sensors — require both active for calibration */
-	{
-		const struct gpio_dt_spec halls[] = {
-			GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios),
-			GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios),
-		};
-		bool hall_active[ARRAY_SIZE(halls)] = {false};
-
-		for (int i = 0; i < ARRAY_SIZE(halls); i++) {
-			if (!gpio_is_ready_dt(&halls[i])) {
-				continue;
-			}
-
-			gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_UP);
-		}
-
-		k_busy_wait(100);
-
-		for (int i = 0; i < ARRAY_SIZE(halls); i++) {
-			if (!gpio_is_ready_dt(&halls[i])) {
-				continue;
-			}
-
-			hall_active[i] = gpio_pin_get_dt(&halls[i]);
-			gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_DOWN);
-		}
-
-		if (hall_active[0] && hall_active[1]) {
-			LOG_WRN("Magnet detected on both Hall sensors — entering calibration mode");
-			g_app_config.calibration = true;
-		}
-	}
-
+	/* Shared HW init */
 #if defined(CONFIG_WATCHDOG)
 	ret = app_wdog_init();
 	if (ret) {
@@ -131,6 +190,28 @@ int main(void)
 		die();
 	}
 
+	/* Mode detection */
+	enum app_mode mode = detect_mode();
+
+	switch (mode) {
+	case APP_MODE_CALIBRATION:
+		ret = app_calibration_init();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_calibration_init", ret);
+			die();
+		}
+
+		app_calibration_run();
+		/* Never reached */
+		break;
+
+	case APP_MODE_NORMAL:
+	default:
+		break;
+	}
+
+	/* --- Normal mode --- */
+
 	ret = app_nfc_init();
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_nfc_init", ret);
@@ -138,6 +219,7 @@ int main(void)
 	}
 
 	enum app_nfc_action action;
+
 	ret = app_nfc_check(&action);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
@@ -166,11 +248,7 @@ int main(void)
 	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
 
-	if (!g_app_config.calibration) {
-		play_carousel_boot();
-	}
-
-	app_calibration_apply_keys();
+	play_carousel_boot();
 
 #if defined(CONFIG_LORAWAN)
 	ret = app_lrw_init();
@@ -180,21 +258,19 @@ int main(void)
 	}
 #endif /* defined(CONFIG_LORAWAN) */
 
-	if (!g_app_config.calibration) {
-		ret = app_battery_init();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_battery_init", ret);
-			die();
-		}
+	ret = app_battery_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_battery_init", ret);
+		die();
+	}
 
 #if defined(CONFIG_WATCHDOG)
-		app_wdog_feed();
+	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
 
-		ret = app_sensor_init();
-		if (ret) {
-			LOG_WRN("Sensor init partially failed: %d (continuing)", ret);
-		}
+	ret = app_sensor_init();
+	if (ret) {
+		LOG_WRN("Sensor init partially failed: %d (continuing)", ret);
 	}
 
 #if defined(CONFIG_WATCHDOG)
@@ -205,12 +281,7 @@ int main(void)
 	app_lrw_join();
 #endif /* defined(CONFIG_LORAWAN) */
 
-	ret = app_calibration_init();
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_calibration_init", ret);
-		die();
-	}
-
+	/* Normal mode main loop */
 	for (;;) {
 		LOG_INF("Alive");
 
@@ -221,10 +292,8 @@ int main(void)
 		}
 #endif /* defined(CONFIG_WATCHDOG) */
 
-		static int nfc_counter;
-
-		if (++nfc_counter >= NFC_CHECK_BLINKS) {
-			nfc_counter = 0;
+		if (++m_nfc_counter >= NFC_CHECK_BLINKS) {
+			m_nfc_counter = 0;
 
 			ret = app_nfc_check(&action);
 			if (ret) {
@@ -250,41 +319,11 @@ int main(void)
 
 		/* Detect magnet on BOTH Hall sensors → reboot into calibration mode */
 		if (k_uptime_get() < (int64_t)APP_CALIBRATION_ACTIVATION_WINDOW_MIN * 60 * 1000) {
-			const struct gpio_dt_spec halls[] = {
-				GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios),
-				GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios),
-			};
-			bool hall_active[ARRAY_SIZE(halls)] = {false};
-
-			for (int i = 0; i < ARRAY_SIZE(halls); i++) {
-				if (!gpio_is_ready_dt(&halls[i])) {
-					continue;
-				}
-
-				gpio_pin_configure_dt(&halls[i],
-						      GPIO_INPUT | GPIO_PULL_UP);
-			}
-
-			k_busy_wait(100);
-
-			for (int i = 0; i < ARRAY_SIZE(halls); i++) {
-				if (!gpio_is_ready_dt(&halls[i])) {
-					continue;
-				}
-
-				hall_active[i] = gpio_pin_get_dt(&halls[i]);
-				gpio_pin_configure_dt(&halls[i],
-						      GPIO_INPUT | GPIO_PULL_DOWN);
-			}
-
-			if (hall_active[0] && hall_active[1]) {
-				LOG_WRN("Magnet detected on both Hall sensors "
-					 "— rebooting into calibration mode");
+			if (detect_magnets()) {
+				LOG_WRN("Magnet detected — rebooting into calibration mode");
 				sys_reboot(SYS_REBOOT_COLD);
 			}
 		}
-
-		if (!app_calibration_is_active()) {
 
 		bool led_handled = false;
 
@@ -331,7 +370,7 @@ int main(void)
 
 		if (!led_handled) {
 #if defined(CONFIG_FW_DEBUG)
-			/* Debug: yellow LED blink */
+			/* Debug: green + yellow LED blink */
 			struct app_led_play_req req = {
 				.commands = {
 					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
@@ -354,22 +393,11 @@ int main(void)
 #endif /* defined(CONFIG_FW_DEBUG) */
 		}
 
-		} /* !app_calibration_is_active() */
-
 		k_sleep(K_SECONDS(BLINK_INTERVAL_SECONDS));
 	}
 
 	return 0;
 }
-
-static int init(void)
-{
-	k_sleep(K_MSEC(500));
-
-	return 0;
-}
-
-SYS_INIT(init, POST_KERNEL, 0);
 
 #if defined(CONFIG_SHELL) && defined(CONFIG_LORAWAN)
 
