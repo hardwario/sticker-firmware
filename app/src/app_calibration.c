@@ -7,7 +7,6 @@
 #include "app_calibration.h"
 #include "app_config.h"
 #include "app_ds18b20.h"
-#include "app_hall.h"
 #include "app_led.h"
 #include "app_log.h"
 #include "app_lrw.h"
@@ -16,6 +15,9 @@
 #include "app_wdog.h"
 
 /* Zephyr includes */
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/lorawan/lorawan.h>
@@ -28,15 +30,15 @@
 
 LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
 
-#define SENTINEL              ((int16_t)0x7FFF)
-#define PAYLOAD_SIZE          24
-#define MAGNET_PENDING_MAX    2
+#define SENTINEL          ((int16_t)0x7FFF)
+#define PAYLOAD_SIZE      24
 #define LOOP_INTERVAL_SEC 1
 #define SEND_INTERVAL_SEC 30
 #define SETTLE_DELAY_SEC  2
 #define ENTRY_BLINKS      5
-#define CALIBRATION_PORT  10
+#define CALIBRATION_PORT        10
 #define CALIBRATION_TIMEOUT_MIN APP_CALIBRATION_ACTIVATION_WINDOW_MIN
+#define MAGNET_PENDING_MAX      2
 
 /* Fixed ABP keys for calibration mode — all devices use the same credentials */
 static const uint8_t m_cal_deveui[] = {0x02, 0x40, 0x3b, 0x84, 0xfd, 0x45, 0x1f, 0x37};
@@ -58,19 +60,53 @@ static struct app_led_play_req m_orange_blink = {
 		     {.type = APP_LED_CMD_END}},
 	.repetitions = 1};
 
-static bool read_both_magnets(void)
+static bool read_hall_gpio(bool *out_left, bool *out_right)
 {
-	struct app_hall_data hall;
+	const struct gpio_dt_spec halls[] = {
+		GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios),
+		GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios),
+	};
+	bool active[ARRAY_SIZE(halls)] = {false};
 
-	app_hall_get_data(&hall);
+	for (int i = 0; i < ARRAY_SIZE(halls); i++) {
+		if (!gpio_is_ready_dt(&halls[i])) {
+			return false;
+		}
 
-	/* app_hall.c: is_active=true means no magnet, false means magnet present */
-	return !hall.left_is_active && !hall.right_is_active;
+		gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_UP);
+	}
+
+	k_busy_wait(100);
+
+	for (int i = 0; i < ARRAY_SIZE(halls); i++) {
+		int val = gpio_pin_get_dt(&halls[i]);
+		if (val >= 0) {
+			active[i] = val;
+		}
+
+		gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_DOWN);
+	}
+
+	if (out_left) {
+		*out_left = active[0];
+	}
+
+	if (out_right) {
+		*out_right = active[1];
+	}
+
+	return true;
 }
 
 bool app_calibration_detect_magnets(void)
 {
-	return read_both_magnets();
+	bool left, right;
+
+	if (!read_hall_gpio(&left, &right)) {
+		return false;
+	}
+
+	return left && right;
 }
 
 void app_calibration_check_trigger(void)
@@ -78,13 +114,11 @@ void app_calibration_check_trigger(void)
 	static bool magnet_pending;
 	static bool magnet_expired;
 	static int magnet_pending_cycles;
+	bool left, right;
 
-	struct app_hall_data hall;
-
-	app_hall_get_data(&hall);
-
-	bool left = !hall.left_is_active;
-	bool right = !hall.right_is_active;
+	if (!read_hall_gpio(&left, &right)) {
+		return;
+	}
 
 	if (magnet_expired) {
 		if (!left && !right) {
@@ -201,10 +235,6 @@ int app_calibration_init(void)
 	memcpy(g_app_config.lrw_nwkskey, m_cal_nwkskey, sizeof(m_cal_nwkskey));
 	memcpy(g_app_config.lrw_appskey, m_cal_appskey, sizeof(m_cal_appskey));
 
-	/* Sensor counts (sensors already initialized by app_sensor_init) */
-	m_count_ds18b20 = app_ds18b20_get_count();
-	m_count_machine_probe = app_machine_probe_get_count();
-
 	/* Init LoRaWAN */
 #if defined(CONFIG_LORAWAN)
 	ret = app_lrw_init();
@@ -217,6 +247,42 @@ int app_calibration_init(void)
 	lorawan_enable_adr(false);
 	ret = lorawan_set_datarate(LORAWAN_DR_5);
 #endif /* defined(CONFIG_LORAWAN) */
+
+	/* Init 1-Wire bus (DS2484) — non-fatal on failure */
+	bool w1_ready = false;
+
+	if (g_app_config.cap_1w_thermometer || g_app_config.cap_1w_machine_probe) {
+		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
+
+		ret = device_init(dev);
+		if (!ret || ret == -EALREADY) {
+			w1_ready = true;
+		}
+	}
+
+	/* Init DS18B20 sensors */
+	if (w1_ready && g_app_config.cap_1w_thermometer) {
+		device_init(DEVICE_DT_GET(DT_NODELABEL(ds18b20_0)));
+		device_init(DEVICE_DT_GET(DT_NODELABEL(ds18b20_1)));
+
+		if (!app_ds18b20_scan()) {
+			m_count_ds18b20 = app_ds18b20_get_count();
+		}
+	}
+
+	/* Init Machine Probe sensors */
+	if (w1_ready && g_app_config.cap_1w_machine_probe) {
+		device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_0)));
+		device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_1)));
+
+		if (!app_machine_probe_scan()) {
+			m_count_machine_probe = app_machine_probe_get_count();
+		}
+	}
+
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
 
 	/* One-time 5x fast yellow blink to indicate calibration entry */
 	{

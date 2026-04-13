@@ -24,6 +24,7 @@
 #include <zephyr/sys/reboot.h>
 
 /* Standard includes */
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -122,28 +123,6 @@ int main(void)
 		die();
 	}
 
-	ret = app_battery_init();
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_battery_init", ret);
-		die();
-	}
-
-#if defined(CONFIG_WATCHDOG)
-	app_wdog_feed();
-#endif /* defined(CONFIG_WATCHDOG) */
-
-	ret = app_sensor_init();
-	if (ret) {
-		LOG_WRN("Sensor init partially failed: %d (continuing)", ret);
-	}
-
-#if defined(CONFIG_WATCHDOG)
-	app_wdog_feed();
-#endif /* defined(CONFIG_WATCHDOG) */
-
-	/* Wait for hall sensor polling (100ms timer) to get initial readings */
-	k_sleep(K_MSEC(200));
-
 	/* Mode detection */
 	enum app_mode mode = detect_mode();
 
@@ -209,7 +188,28 @@ int main(void)
 		LOG_ERR_CALL_FAILED_INT("app_lrw_init", ret);
 		die();
 	}
+#endif /* defined(CONFIG_LORAWAN) */
 
+	ret = app_battery_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_battery_init", ret);
+		die();
+	}
+
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
+
+	ret = app_sensor_init();
+	if (ret) {
+		LOG_WRN("Sensor init partially failed: %d (continuing)", ret);
+	}
+
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
+
+#if defined(CONFIG_LORAWAN)
 	app_lrw_join();
 #endif /* defined(CONFIG_LORAWAN) */
 
@@ -249,6 +249,7 @@ int main(void)
 			}
 		}
 
+		/* Detect magnet on BOTH Hall sensors → reboot into calibration mode */
 		if (k_uptime_get() < (int64_t)APP_CALIBRATION_ACTIVATION_WINDOW_MIN * 60 * 1000) {
 			app_calibration_check_trigger();
 		}
