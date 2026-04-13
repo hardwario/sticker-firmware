@@ -8,7 +8,6 @@
 #include "app_battery.h"
 #include "app_calibration.h"
 #include "app_config.h"
-#include "app_hall.h"
 #include "app_led.h"
 #include "app_log.h"
 #include "app_lrw.h"
@@ -18,9 +17,6 @@
 #include "app_wdog.h"
 
 /* Zephyr includes */
-#include <zephyr/device.h>
-#include <zephyr/devicetree.h>
-#include <zephyr/drivers/gpio.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -28,7 +24,6 @@
 #include <zephyr/sys/reboot.h>
 
 /* Standard includes */
-#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -89,75 +84,12 @@ static void play_carousel_nfc(void)
 
 static enum app_mode detect_mode(void)
 {
-	const struct gpio_dt_spec halls[] = {
-		GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios),
-		GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios),
-	};
-	bool hall_active[ARRAY_SIZE(halls)] = {false};
-
-	for (int i = 0; i < ARRAY_SIZE(halls); i++) {
-		if (!gpio_is_ready_dt(&halls[i])) {
-			continue;
-		}
-
-		gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_UP);
-	}
-
-	k_busy_wait(100);
-
-	for (int i = 0; i < ARRAY_SIZE(halls); i++) {
-		if (!gpio_is_ready_dt(&halls[i])) {
-			continue;
-		}
-
-		int val = gpio_pin_get_dt(&halls[i]);
-		if (val >= 0) {
-			hall_active[i] = val;
-		}
-
-		gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_DOWN);
-	}
-
-	if (hall_active[0] && hall_active[1]) {
-		LOG_WRN("Magnet detected on both Hall sensors — entering calibration mode");
+	if (app_calibration_detect_magnets()) {
+		LOG_WRN("Both magnets detected at boot — entering calibration mode");
 		return APP_MODE_CALIBRATION;
 	}
 
 	return APP_MODE_NORMAL;
-}
-
-static bool detect_magnets(void)
-{
-	const struct gpio_dt_spec halls[] = {
-		GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios),
-		GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios),
-	};
-	bool hall_active[ARRAY_SIZE(halls)] = {false};
-
-	for (int i = 0; i < ARRAY_SIZE(halls); i++) {
-		if (!gpio_is_ready_dt(&halls[i])) {
-			continue;
-		}
-
-		gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_UP);
-	}
-
-	k_busy_wait(100);
-
-	for (int i = 0; i < ARRAY_SIZE(halls); i++) {
-		if (!gpio_is_ready_dt(&halls[i])) {
-			continue;
-		}
-
-		int val = gpio_pin_get_dt(&halls[i]);
-		if (val >= 0) {
-			hall_active[i] = val;
-		}
-
-		gpio_pin_configure_dt(&halls[i], GPIO_INPUT | GPIO_PULL_DOWN);
-	}
-
-	return hall_active[0] && hall_active[1];
 }
 
 static int init(void)
@@ -190,6 +122,28 @@ int main(void)
 		die();
 	}
 
+	ret = app_battery_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_battery_init", ret);
+		die();
+	}
+
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
+
+	ret = app_sensor_init();
+	if (ret) {
+		LOG_WRN("Sensor init partially failed: %d (continuing)", ret);
+	}
+
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
+
+	/* Wait for hall sensor polling (100ms timer) to get initial readings */
+	k_sleep(K_MSEC(200));
+
 	/* Mode detection */
 	enum app_mode mode = detect_mode();
 
@@ -206,7 +160,6 @@ int main(void)
 		break;
 
 	case APP_MODE_NORMAL:
-	default:
 		break;
 	}
 
@@ -256,28 +209,7 @@ int main(void)
 		LOG_ERR_CALL_FAILED_INT("app_lrw_init", ret);
 		die();
 	}
-#endif /* defined(CONFIG_LORAWAN) */
 
-	ret = app_battery_init();
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_battery_init", ret);
-		die();
-	}
-
-#if defined(CONFIG_WATCHDOG)
-	app_wdog_feed();
-#endif /* defined(CONFIG_WATCHDOG) */
-
-	ret = app_sensor_init();
-	if (ret) {
-		LOG_WRN("Sensor init partially failed: %d (continuing)", ret);
-	}
-
-#if defined(CONFIG_WATCHDOG)
-	app_wdog_feed();
-#endif /* defined(CONFIG_WATCHDOG) */
-
-#if defined(CONFIG_LORAWAN)
 	app_lrw_join();
 #endif /* defined(CONFIG_LORAWAN) */
 
@@ -317,12 +249,8 @@ int main(void)
 			}
 		}
 
-		/* Detect magnet on BOTH Hall sensors → reboot into calibration mode */
 		if (k_uptime_get() < (int64_t)APP_CALIBRATION_ACTIVATION_WINDOW_MIN * 60 * 1000) {
-			if (detect_magnets()) {
-				LOG_WRN("Magnet detected — rebooting into calibration mode");
-				sys_reboot(SYS_REBOOT_COLD);
-			}
+			app_calibration_check_trigger();
 		}
 
 		bool led_handled = false;

@@ -7,6 +7,7 @@
 #include "app_calibration.h"
 #include "app_config.h"
 #include "app_ds18b20.h"
+#include "app_hall.h"
 #include "app_led.h"
 #include "app_log.h"
 #include "app_lrw.h"
@@ -27,8 +28,9 @@
 
 LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
 
-#define SENTINEL          ((int16_t)0x7FFF)
-#define PAYLOAD_SIZE      24
+#define SENTINEL              ((int16_t)0x7FFF)
+#define PAYLOAD_SIZE          24
+#define MAGNET_PENDING_MAX    2
 #define LOOP_INTERVAL_SEC 1
 #define SEND_INTERVAL_SEC 30
 #define SETTLE_DELAY_SEC  2
@@ -55,6 +57,57 @@ static struct app_led_play_req m_orange_blink = {
 		     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
 		     {.type = APP_LED_CMD_END}},
 	.repetitions = 1};
+
+static bool read_both_magnets(void)
+{
+	struct app_hall_data hall;
+
+	app_hall_get_data(&hall);
+
+	/* app_hall.c: is_active=true means no magnet, false means magnet present */
+	return !hall.left_is_active && !hall.right_is_active;
+}
+
+bool app_calibration_detect_magnets(void)
+{
+	return read_both_magnets();
+}
+
+void app_calibration_check_trigger(void)
+{
+	static bool magnet_pending;
+	static bool magnet_expired;
+	static int magnet_pending_cycles;
+
+	struct app_hall_data hall;
+
+	app_hall_get_data(&hall);
+
+	bool left = !hall.left_is_active;
+	bool right = !hall.right_is_active;
+
+	if (magnet_expired) {
+		if (!left && !right) {
+			magnet_expired = false;
+		}
+		return;
+	}
+
+	if (left && right) {
+		LOG_WRN("Both magnets detected — rebooting into calibration mode");
+		sys_reboot(SYS_REBOOT_COLD);
+	} else if (left || right) {
+		if (!magnet_pending) {
+			magnet_pending = true;
+			magnet_pending_cycles = 0;
+		} else if (++magnet_pending_cycles >= MAGNET_PENDING_MAX) {
+			magnet_pending = false;
+			magnet_expired = true;
+		}
+	} else {
+		magnet_pending = false;
+	}
+}
 
 static void compose_calibration_payload(uint8_t *buf)
 {
@@ -148,6 +201,10 @@ int app_calibration_init(void)
 	memcpy(g_app_config.lrw_nwkskey, m_cal_nwkskey, sizeof(m_cal_nwkskey));
 	memcpy(g_app_config.lrw_appskey, m_cal_appskey, sizeof(m_cal_appskey));
 
+	/* Sensor counts (sensors already initialized by app_sensor_init) */
+	m_count_ds18b20 = app_ds18b20_get_count();
+	m_count_machine_probe = app_machine_probe_get_count();
+
 	/* Init LoRaWAN */
 #if defined(CONFIG_LORAWAN)
 	ret = app_lrw_init();
@@ -160,42 +217,6 @@ int app_calibration_init(void)
 	lorawan_enable_adr(false);
 	ret = lorawan_set_datarate(LORAWAN_DR_5);
 #endif /* defined(CONFIG_LORAWAN) */
-
-	/* Init 1-Wire bus (DS2484) — non-fatal on failure */
-	bool w1_ready = false;
-
-	if (g_app_config.cap_1w_thermometer || g_app_config.cap_1w_machine_probe) {
-		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
-
-		ret = device_init(dev);
-		if (!ret || ret == -EALREADY) {
-			w1_ready = true;
-		}
-	}
-
-	/* Init DS18B20 sensors */
-	if (w1_ready && g_app_config.cap_1w_thermometer) {
-		device_init(DEVICE_DT_GET(DT_NODELABEL(ds18b20_0)));
-		device_init(DEVICE_DT_GET(DT_NODELABEL(ds18b20_1)));
-
-		if (!app_ds18b20_scan()) {
-			m_count_ds18b20 = app_ds18b20_get_count();
-		}
-	}
-
-	/* Init Machine Probe sensors */
-	if (w1_ready && g_app_config.cap_1w_machine_probe) {
-		device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_0)));
-		device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_1)));
-
-		if (!app_machine_probe_scan()) {
-			m_count_machine_probe = app_machine_probe_get_count();
-		}
-	}
-
-#if defined(CONFIG_WATCHDOG)
-	app_wdog_feed();
-#endif /* defined(CONFIG_WATCHDOG) */
 
 	/* One-time 5x fast yellow blink to indicate calibration entry */
 	{
