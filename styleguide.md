@@ -1,4 +1,4 @@
-# Sticker Firmware — Coding Style Guide
+# STICKER Firmware — Coding Style Guide
 
 ## File structure
 
