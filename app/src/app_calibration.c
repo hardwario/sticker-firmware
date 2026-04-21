@@ -37,7 +37,6 @@ LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
 #define SETTLE_DELAY_SEC  2
 #define ENTRY_BLINKS      5
 #define CALIBRATION_PORT        10
-#define CALIBRATION_TIMEOUT_MIN APP_CALIBRATION_ACTIVATION_WINDOW_MIN
 #define MAGNET_PENDING_MAX      2
 
 /* Fixed ABP keys for calibration mode — all devices use the same credentials */
@@ -231,6 +230,7 @@ int app_calibration_init(void)
 	g_app_config.calibration = true;
 	g_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_ABP;
 	memcpy(g_app_config.lrw_deveui, m_cal_deveui, sizeof(m_cal_deveui));
+	memset(g_app_config.lrw_joineui, 0, sizeof(g_app_config.lrw_joineui));
 	memcpy(g_app_config.lrw_devaddr, m_cal_devaddr, sizeof(m_cal_devaddr));
 	memcpy(g_app_config.lrw_nwkskey, m_cal_nwkskey, sizeof(m_cal_nwkskey));
 	memcpy(g_app_config.lrw_appskey, m_cal_appskey, sizeof(m_cal_appskey));
@@ -302,7 +302,7 @@ void app_calibration_run(void)
 	k_sleep(K_SECONDS(SETTLE_DELAY_SEC));
 
 	int64_t deadline = k_uptime_get()
-			 + (int64_t)CALIBRATION_TIMEOUT_MIN * 60 * 1000;
+			 + (int64_t)APP_CALIBRATION_DURATION_MIN * 60 * 1000;
 	int counter = SEND_INTERVAL_SEC;
 
 	for (;;) {

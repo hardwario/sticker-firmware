@@ -10,6 +10,7 @@
 #include <stdbool.h>
 
 #define APP_CALIBRATION_ACTIVATION_WINDOW_MIN 30
+#define APP_CALIBRATION_DURATION_MIN          120
 
 #ifdef __cplusplus
 extern "C" {
