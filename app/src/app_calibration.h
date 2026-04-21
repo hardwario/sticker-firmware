@@ -7,11 +7,19 @@
 #ifndef APP_CALIBRATION_H_
 #define APP_CALIBRATION_H_
 
+#include <stdbool.h>
+
+#define APP_CALIBRATION_ACTIVATION_WINDOW_MIN 30
+#define APP_CALIBRATION_DURATION_MIN          120
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+bool app_calibration_detect_magnets(void);
+void app_calibration_check_trigger(void);
 int app_calibration_init(void);
+void app_calibration_run(void);
 
 #ifdef __cplusplus
 }
