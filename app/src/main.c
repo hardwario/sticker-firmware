@@ -33,6 +33,10 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 #define BLINK_INTERVAL_SECONDS 3
 #define NFC_CHECK_BLINKS       10
 
+#define APP_ALARM_ORANGE_RATE_LIMIT_MS 500
+#define APP_ALARM_ORANGE_AUTO_OFF_MS   (60 * 60 * 1000)
+#define APP_ALARM_ORANGE_BLINK_MS      50
+
 enum app_mode {
 	APP_MODE_NORMAL = 0,
 	APP_MODE_CALIBRATION,
@@ -91,6 +95,32 @@ static enum app_mode detect_mode(void)
 	}
 
 	return APP_MODE_NORMAL;
+}
+
+static void orange_event_handler(enum app_alarm_source source, bool active, void *user_data)
+{
+	ARG_UNUSED(source);
+	ARG_UNUSED(active);
+	ARG_UNUSED(user_data);
+
+	static int64_t last_blink_ms;
+	int64_t now = k_uptime_get();
+
+	if (now > APP_ALARM_ORANGE_AUTO_OFF_MS) {
+		return;
+	}
+
+	if (last_blink_ms != 0 && (now - last_blink_ms) < APP_ALARM_ORANGE_RATE_LIMIT_MS) {
+		return;
+	}
+
+	struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
+					.duration = APP_ALARM_ORANGE_BLINK_MS,
+					.space = 0,
+					.repetitions = 1};
+	app_led_blink(&req);
+
+	last_blink_ms = now;
 }
 
 static int init(void)
@@ -213,6 +243,8 @@ int main(void)
 	app_lrw_join();
 #endif /* defined(CONFIG_LORAWAN) */
 
+	app_alarm_set_event_callback(orange_event_handler, NULL);
+
 	/* Normal mode main loop */
 	for (;;) {
 		LOG_INF("Alive");
@@ -259,22 +291,26 @@ int main(void)
 #if defined(CONFIG_LORAWAN)
 		enum app_lrw_state lrw_state = app_lrw_get_state();
 
-		if (lrw_state == APP_LRW_STATE_JOINING ||
-		    lrw_state == APP_LRW_STATE_RECONNECT) {
+		if (lrw_state == APP_LRW_STATE_JOINING || lrw_state == APP_LRW_STATE_RECONNECT) {
 			struct app_led_play_req req = {
-				.commands = {
-					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
-					{.type = APP_LED_CMD_DELAY, .duration = 10},
-					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
-					{.type = APP_LED_CMD_DELAY, .duration = 200},
-					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
-					{.type = APP_LED_CMD_DELAY, .duration = 10},
-					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
-					{.type = APP_LED_CMD_DELAY, .duration = 200},
-					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
-					{.type = APP_LED_CMD_DELAY, .duration = 80},
-					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
-					{.type = APP_LED_CMD_END}},
+				.commands = {{.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
+					     {.type = APP_LED_CMD_DELAY, .duration = 10},
+					     {.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
+					     {.type = APP_LED_CMD_DELAY, .duration = 200},
+					     {.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
+					     {.type = APP_LED_CMD_DELAY, .duration = 10},
+					     {.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
+					     {.type = APP_LED_CMD_DELAY, .duration = 200},
+					     {.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
+					     {.type = APP_LED_CMD_DELAY, .duration = 80},
+					     {.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
+					     {.type = APP_LED_CMD_END}},
 				.repetitions = 1};
 			app_led_play(&req);
 			led_handled = true;
@@ -301,15 +337,18 @@ int main(void)
 #if defined(CONFIG_FW_DEBUG)
 			/* Debug: green + yellow LED blink */
 			struct app_led_play_req req = {
-				.commands = {
-					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
-					{.type = APP_LED_CMD_DELAY, .duration = 5},
-					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
-					{.type = APP_LED_CMD_DELAY, .duration = 50},
-					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
-					{.type = APP_LED_CMD_DELAY, .duration = 5},
-					{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
-					{.type = APP_LED_CMD_END}},
+				.commands = {{.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
+					     {.type = APP_LED_CMD_DELAY, .duration = 5},
+					     {.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
+					     {.type = APP_LED_CMD_DELAY, .duration = 50},
+					     {.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
+					     {.type = APP_LED_CMD_DELAY, .duration = 5},
+					     {.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
+					     {.type = APP_LED_CMD_END}},
 				.repetitions = 1};
 			app_led_play(&req);
 #else
