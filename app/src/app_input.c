@@ -5,9 +5,9 @@
  */
 
 #include "app_input.h"
+#include "app_alarm.h"
 #include "app_config.h"
 #include "app_log.h"
-#include "app_lrw.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -84,6 +84,8 @@ static int poll(void)
 		if (g_app_config.input_a_notify_act) {
 			m_input_data.input_a_notify_act = true;
 		}
+
+		app_alarm_event(APP_ALARM_SOURCE_INPUT_A, true);
 	}
 
 	if (input_a_was_active && !input_a_is_active) {
@@ -92,6 +94,8 @@ static int poll(void)
 		if (g_app_config.input_a_notify_deact) {
 			m_input_data.input_a_notify_deact = true;
 		}
+
+		app_alarm_event(APP_ALARM_SOURCE_INPUT_A, false);
 	}
 
 	if (!input_b_was_active && input_b_is_active) {
@@ -104,6 +108,8 @@ static int poll(void)
 		if (g_app_config.input_b_notify_act) {
 			m_input_data.input_b_notify_act = true;
 		}
+
+		app_alarm_event(APP_ALARM_SOURCE_INPUT_B, true);
 	}
 
 	if (input_b_was_active && !input_b_is_active) {
@@ -112,15 +118,11 @@ static int poll(void)
 		if (g_app_config.input_b_notify_deact) {
 			m_input_data.input_b_notify_deact = true;
 		}
+
+		app_alarm_event(APP_ALARM_SOURCE_INPUT_B, false);
 	}
 
 	k_mutex_unlock(&m_input_data_mutex);
-
-	if (app_input_check_notify_event()) {
-#if defined(CONFIG_LORAWAN)
-		app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
-	}
 
 	return 0;
 }
