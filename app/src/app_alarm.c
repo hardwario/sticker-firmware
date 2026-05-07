@@ -6,6 +6,8 @@
 
 #include "app_alarm.h"
 #include "app_config.h"
+#include "app_hall.h"
+#include "app_input.h"
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_sensor.h"
@@ -60,7 +62,77 @@ static int read_notify_bools(enum app_alarm_source source, bool *act, bool *deac
 	}
 }
 
-bool app_alarm_is_active(void)
+static void poll_binary_source(enum app_alarm_source source)
+{
+	bool sensor_active = false;
+	bool cap_enabled = false;
+	bool act = false;
+	bool deact = false;
+
+	switch (source) {
+	case APP_ALARM_SOURCE_HALL_LEFT: {
+		struct app_hall_data data;
+		app_hall_get_data(&data);
+		cap_enabled = g_app_config.cap_hall_left;
+		sensor_active = data.left_is_active;
+		break;
+	}
+	case APP_ALARM_SOURCE_HALL_RIGHT: {
+		struct app_hall_data data;
+		app_hall_get_data(&data);
+		cap_enabled = g_app_config.cap_hall_right;
+		sensor_active = data.right_is_active;
+		break;
+	}
+	case APP_ALARM_SOURCE_INPUT_A: {
+		struct app_input_data data;
+		app_input_get_data(&data);
+		cap_enabled = g_app_config.cap_input_a;
+		sensor_active = data.input_a_is_active;
+		break;
+	}
+	case APP_ALARM_SOURCE_INPUT_B: {
+		struct app_input_data data;
+		app_input_get_data(&data);
+		cap_enabled = g_app_config.cap_input_b;
+		sensor_active = data.input_b_is_active;
+		break;
+	}
+	default:
+		return;
+	}
+
+	if (read_notify_bools(source, &act, &deact)) {
+		return;
+	}
+
+	int64_t now = k_uptime_get();
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+
+	if (!cap_enabled) {
+		m_alarm_active[source] = false;
+		m_both_bool_expiry_ms[source] = 0;
+	} else if (act && deact) {
+		if (m_both_bool_expiry_ms[source] != 0 && now >= m_both_bool_expiry_ms[source]) {
+			m_alarm_active[source] = false;
+			m_both_bool_expiry_ms[source] = 0;
+		}
+	} else if (act) {
+		m_alarm_active[source] = sensor_active;
+		m_both_bool_expiry_ms[source] = 0;
+	} else if (deact) {
+		m_alarm_active[source] = !sensor_active;
+		m_both_bool_expiry_ms[source] = 0;
+	} else {
+		m_alarm_active[source] = false;
+		m_both_bool_expiry_ms[source] = 0;
+	}
+
+	k_mutex_unlock(&m_lock);
+}
+
+bool app_alarm_poll(void)
 {
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
@@ -78,6 +150,10 @@ bool app_alarm_is_active(void)
 			LOG_INF("Deactivated alarm for internal temperature");
 
 			alarm_temperature = false;
+
+#if defined(CONFIG_LORAWAN)
+			app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
 		}
 	} else {
 		if (g_app_sensor_data.temperature < (g_app_config.alarm_temperature_lo -
@@ -87,6 +163,10 @@ bool app_alarm_is_active(void)
 			LOG_INF("Activated alarm for internal temperature");
 
 			alarm_temperature = true;
+
+#if defined(CONFIG_LORAWAN)
+			app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
 		}
 	}
 
@@ -104,6 +184,10 @@ bool app_alarm_is_active(void)
 			LOG_INF("Deactivated alarm for humidity");
 
 			alarm_humidity = false;
+
+#if defined(CONFIG_LORAWAN)
+			app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
 		}
 	} else {
 		if (g_app_sensor_data.humidity <
@@ -113,6 +197,10 @@ bool app_alarm_is_active(void)
 			LOG_INF("Activated alarm for humidity");
 
 			alarm_humidity = true;
+
+#if defined(CONFIG_LORAWAN)
+			app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
 		}
 	}
 
@@ -130,6 +218,10 @@ bool app_alarm_is_active(void)
 			LOG_INF("Deactivated alarm for pressure");
 
 			alarm_pressure = false;
+
+#if defined(CONFIG_LORAWAN)
+			app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
 		}
 	} else {
 		if (g_app_sensor_data.pressure * 10.f <
@@ -139,6 +231,10 @@ bool app_alarm_is_active(void)
 			LOG_INF("Activated alarm for pressure");
 
 			alarm_pressure = true;
+
+#if defined(CONFIG_LORAWAN)
+			app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
 		}
 	}
 
@@ -156,6 +252,10 @@ bool app_alarm_is_active(void)
 			LOG_INF("Deactivated alarm for external temperature 1");
 
 			alarm_t1_temperature = false;
+
+#if defined(CONFIG_LORAWAN)
+			app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
 		}
 	} else {
 		if (g_app_sensor_data.t1_temperature < (g_app_config.alarm_t1_temperature_lo -
@@ -165,6 +265,10 @@ bool app_alarm_is_active(void)
 			LOG_INF("Activated alarm for external temperature 1");
 
 			alarm_t1_temperature = true;
+
+#if defined(CONFIG_LORAWAN)
+			app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
 		}
 	}
 
@@ -182,6 +286,10 @@ bool app_alarm_is_active(void)
 			LOG_INF("Deactivated alarm for external temperature 2");
 
 			alarm_t2_temperature = false;
+
+#if defined(CONFIG_LORAWAN)
+			app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
 		}
 	} else {
 		if (g_app_sensor_data.t2_temperature < (g_app_config.alarm_t2_temperature_lo -
@@ -191,6 +299,10 @@ bool app_alarm_is_active(void)
 			LOG_INF("Activated alarm for external temperature 2");
 
 			alarm_t2_temperature = true;
+
+#if defined(CONFIG_LORAWAN)
+			app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
 		}
 	}
 
@@ -218,7 +330,26 @@ bool app_alarm_is_active(void)
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
+	poll_binary_source(APP_ALARM_SOURCE_HALL_LEFT);
+	poll_binary_source(APP_ALARM_SOURCE_HALL_RIGHT);
+	poll_binary_source(APP_ALARM_SOURCE_INPUT_A);
+	poll_binary_source(APP_ALARM_SOURCE_INPUT_B);
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	for (int s = 0; s < APP_ALARM_SOURCE_COUNT; s++) {
+		if (m_alarm_active[s]) {
+			alarm = true;
+			break;
+		}
+	}
+	k_mutex_unlock(&m_lock);
+
 	return alarm;
+}
+
+bool app_alarm_is_active(void)
+{
+	return app_alarm_poll();
 }
 
 void app_alarm_event(enum app_alarm_source source, bool active)
