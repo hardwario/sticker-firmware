@@ -5,10 +5,9 @@
  */
 
 #include "app_hall.h"
+#include "app_alarm.h"
 #include "app_config.h"
-#include "app_led.h"
 #include "app_log.h"
-#include "app_lrw.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -133,9 +132,7 @@ restore:
 			m_hall_data.left_notify_act = true;
 		}
 
-		struct app_led_blink_req req = {
-			.color = APP_LED_CHANNEL_R, .duration = 250, .space = 0, .repetitions = 1};
-		app_led_blink(&req);
+		app_alarm_event(APP_ALARM_SOURCE_HALL_LEFT, true);
 	}
 
 	if (left_was_active && !left_is_active) {
@@ -145,9 +142,7 @@ restore:
 			m_hall_data.left_notify_deact = true;
 		}
 
-		struct app_led_blink_req req = {
-			.color = APP_LED_CHANNEL_R, .duration = 250, .space = 0, .repetitions = 1};
-		app_led_blink(&req);
+		app_alarm_event(APP_ALARM_SOURCE_HALL_LEFT, false);
 	}
 
 	if (!right_was_active && right_is_active) {
@@ -161,9 +156,7 @@ restore:
 			m_hall_data.right_notify_act = true;
 		}
 
-		struct app_led_blink_req req = {
-			.color = APP_LED_CHANNEL_R, .duration = 250, .space = 0, .repetitions = 1};
-		app_led_blink(&req);
+		app_alarm_event(APP_ALARM_SOURCE_HALL_RIGHT, true);
 	}
 
 	if (right_was_active && !right_is_active) {
@@ -173,18 +166,10 @@ restore:
 			m_hall_data.right_notify_deact = true;
 		}
 
-		struct app_led_blink_req req = {
-			.color = APP_LED_CHANNEL_R, .duration = 250, .space = 0, .repetitions = 1};
-		app_led_blink(&req);
+		app_alarm_event(APP_ALARM_SOURCE_HALL_RIGHT, false);
 	}
 
 	k_mutex_unlock(&m_hall_data_mutex);
-
-	if (app_hall_check_notify_event()) {
-#if defined(CONFIG_LORAWAN)
-		app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
-	}
 
 	return 0;
 }
