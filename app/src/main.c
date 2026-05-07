@@ -324,7 +324,7 @@ int main(void)
 		}
 #endif /* defined(CONFIG_LORAWAN) */
 
-		if (!led_handled && app_alarm_is_active()) {
+		if (!led_handled && app_alarm_poll()) {
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_R,
 							.duration = 5,
 							.space = 0,
