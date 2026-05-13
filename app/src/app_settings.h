@@ -7,12 +7,14 @@
 #ifndef APP_SETTINGS_H_
 #define APP_SETTINGS_H_
 
+/* Standard includes */
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-int app_settings_save(void);
-int app_settings_write(void);
+int app_settings_save(bool reboot);
 int app_settings_reset(void);
 
 #ifdef __cplusplus

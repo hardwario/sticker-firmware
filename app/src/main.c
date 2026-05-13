@@ -20,7 +20,6 @@
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/settings/settings.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/sys/reboot.h>
 
@@ -167,35 +166,7 @@ int main(void)
 	if (action == APP_NFC_ACTION_SAVE) {
 		play_carousel_nfc();
 
-		if (app_config()->calibration) {
-			/* Calibration requested via NFC — persist without
-			 * reboot, refresh g_app_config from NVS, and jump
-			 * directly into calibration on this same boot. */
-			ret = app_settings_write();
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_settings_write", ret);
-				die();
-			}
-
-			ret = settings_load_subtree("config");
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("settings_load_subtree", ret);
-				die();
-			}
-
-			LOG_WRN("Calibration requested via NFC — entering calibration mode");
-
-			ret = app_calibration_init();
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_calibration_init", ret);
-				die();
-			}
-
-			app_calibration_run();
-			/* Never reached */
-		}
-
-		ret = app_settings_save();
+		ret = app_settings_save(true);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
 			die();
@@ -269,7 +240,7 @@ int main(void)
 			if (action == APP_NFC_ACTION_SAVE) {
 				play_carousel_nfc();
 
-				ret = app_settings_save();
+				ret = app_settings_save(true);
 				if (ret) {
 					LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
 				}
