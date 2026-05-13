@@ -12,6 +12,7 @@ extern "C" {
 #endif
 
 int app_settings_save(void);
+int app_settings_write(void);
 int app_settings_reset(void);
 
 #ifdef __cplusplus

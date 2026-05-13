@@ -161,6 +161,11 @@ int app_settings_save(void)
 	return save(true);
 }
 
+int app_settings_write(void)
+{
+	return save(false);
+}
+
 int app_settings_reset(void)
 {
 	return reset(true);

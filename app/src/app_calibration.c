@@ -227,25 +227,6 @@ int app_calibration_init(void)
 {
 	int ret;
 
-	/* One-shot: clear persisted calibration flag in NVS so the device
-	 * returns to normal mode on the next reboot. g_app_config.calibration
-	 * stays true for the rest of this boot so app_lrw blocks normal TX.
-	 * Must run before the assignment below, because settings_load_subtree
-	 * would otherwise overwrite the runtime flag back to false. */
-	{
-		bool cal_false = false;
-
-		ret = settings_save_one("config/calibration", &cal_false, sizeof(cal_false));
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("settings_save_one", ret);
-		} else {
-			ret = settings_load_subtree("config");
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("settings_load_subtree", ret);
-			}
-		}
-	}
-
 	/* Set calibration ABP keys */
 	g_app_config.calibration = true;
 	g_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_ABP;
@@ -327,6 +308,17 @@ void app_calibration_run(void)
 
 	for (;;) {
 		if (k_uptime_get() >= deadline) {
+			/* Natural end: clear persisted calibration flag in NVS so
+			 * the next boot lands in normal mode. The flag is kept
+			 * true throughout the run so that any unexpected reset
+			 * (watchdog, brown-out) re-enters calibration. */
+			bool cal_false = false;
+			int s_ret = settings_save_one("config/calibration",
+						      &cal_false, sizeof(cal_false));
+			if (s_ret) {
+				LOG_ERR_CALL_FAILED_INT("settings_save_one", s_ret);
+			}
+
 			sys_reboot(SYS_REBOOT_COLD);
 		}
 
