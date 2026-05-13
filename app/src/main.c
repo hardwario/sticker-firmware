@@ -90,6 +90,11 @@ static enum app_mode detect_mode(void)
 		return APP_MODE_CALIBRATION;
 	}
 
+	if (g_app_config.calibration) {
+		LOG_WRN("Calibration flag set in config — entering calibration mode");
+		return APP_MODE_CALIBRATION;
+	}
+
 	return APP_MODE_NORMAL;
 }
 

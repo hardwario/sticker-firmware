@@ -21,6 +21,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/lorawan/lorawan.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/reboot.h>
 
@@ -225,6 +226,25 @@ static void compose_calibration_payload(uint8_t *buf)
 int app_calibration_init(void)
 {
 	int ret;
+
+	/* One-shot: clear persisted calibration flag in NVS so the device
+	 * returns to normal mode on the next reboot. g_app_config.calibration
+	 * stays true for the rest of this boot so app_lrw blocks normal TX.
+	 * Must run before the assignment below, because settings_load_subtree
+	 * would otherwise overwrite the runtime flag back to false. */
+	{
+		bool cal_false = false;
+
+		ret = settings_save_one("config/calibration", &cal_false, sizeof(cal_false));
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("settings_save_one", ret);
+		} else {
+			ret = settings_load_subtree("config");
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("settings_load_subtree", ret);
+			}
+		}
+	}
 
 	/* Set calibration ABP keys */
 	g_app_config.calibration = true;
