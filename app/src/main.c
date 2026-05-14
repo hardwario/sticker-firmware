@@ -90,6 +90,11 @@ static enum app_mode detect_mode(void)
 		return APP_MODE_CALIBRATION;
 	}
 
+	if (g_app_config.calibration) {
+		LOG_WRN("Calibration flag set in config — entering calibration mode");
+		return APP_MODE_CALIBRATION;
+	}
+
 	return APP_MODE_NORMAL;
 }
 
@@ -161,7 +166,7 @@ int main(void)
 	if (action == APP_NFC_ACTION_SAVE) {
 		play_carousel_nfc();
 
-		ret = app_settings_save();
+		ret = app_settings_save(true);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
 			die();
@@ -235,7 +240,7 @@ int main(void)
 			if (action == APP_NFC_ACTION_SAVE) {
 				play_carousel_nfc();
 
-				ret = app_settings_save();
+				ret = app_settings_save(true);
 				if (ret) {
 					LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
 				}

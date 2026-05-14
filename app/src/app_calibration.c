@@ -11,6 +11,7 @@
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_machine_probe.h"
+#include "app_settings.h"
 #include "app_sht4x.h"
 #include "app_wdog.h"
 
@@ -225,6 +226,16 @@ static void compose_calibration_payload(uint8_t *buf)
 int app_calibration_init(void)
 {
 	int ret;
+
+	/* One-shot: clear the persisted calibration flag in NVS without
+	 * rebooting, so the next boot (after the 2 h deadline, watchdog,
+	 * brown-out, etc.) lands in normal mode. g_app_config.calibration
+	 * stays true for the rest of this boot so app_lrw blocks normal TX. */
+	app_config()->calibration = false;
+	ret = app_settings_save(false);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
+	}
 
 	/* Set calibration ABP keys */
 	g_app_config.calibration = true;

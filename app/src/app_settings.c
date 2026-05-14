@@ -156,9 +156,9 @@ SHELL_CMD_REGISTER(settings, &sub_settings, "Settings commands.", print_help);
 
 #endif /* defined(CONFIG_SHELL) */
 
-int app_settings_save(void)
+int app_settings_save(bool reboot)
 {
-	return save(true);
+	return save(reboot);
 }
 
 int app_settings_reset(void)
