@@ -216,7 +216,7 @@ int app_sensor_init(void)
 			   K_THREAD_STACK_SIZEOF(m_sensor_work_stack),
 			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
 
-	if (!res && g_app_config.interval_sample) {
+	if (g_app_config.interval_sample) {
 		k_timer_start(&m_sensor_timer, K_SECONDS(1),
 			      K_SECONDS(g_app_config.interval_sample));
 	}
