@@ -1,3 +1,8 @@
+// ChirpStack v3 entry point — delegates to the TTS v3 / ChirpStack v4 codec below.
+function Decode(fPort, bytes, variables) {
+  return decodeUplink({ fPort: fPort, bytes: bytes }).data;
+}
+
 function decodeUplink(input) {
 
   function toSignedInt16(value) {
