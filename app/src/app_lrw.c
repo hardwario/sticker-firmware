@@ -456,6 +456,20 @@ static void join_work_handler(struct k_work *work)
 		LOG_INF("RX delays set: RX1=1s, RX2=2s");
 	}
 
+	/* Switch to private sync word only when explicitly configured.
+	 * Default (and any unknown value) leaves Zephyr's MIB_PUBLIC_NETWORK setting intact,
+	 * which is public (0x34) per CONFIG_LORAWAN_PUBLIC_NETWORK. This way the radio always
+	 * prefers public unless the user opts into private via `config lrw-network private`. */
+	if (g_app_config.lrw_network == APP_CONFIG_LRW_NETWORK_PRIVATE) {
+		MibRequestConfirm_t mib_req;
+
+		mib_req.Type = MIB_PUBLIC_NETWORK;
+		mib_req.Param.EnablePublicNetwork = false;
+		LoRaMacMibSetRequestConfirm(&mib_req);
+
+		LOG_INF("Network type: private (sync word 0x12)");
+	}
+
 	LOG_INF("lorawan_join() ret=%d, polling MAC...", ret);
 	k_work_schedule_for_queue(&m_work_q, &m_join_complete_work,
 				  K_MSEC(JOIN_BUSY_POLL_INTERVAL_MS));
