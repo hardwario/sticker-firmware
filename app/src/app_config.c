@@ -102,14 +102,18 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.serial_number));
 	SETTINGS_SET("nonce-counter", &m_app_config.nonce_counter,
 		     sizeof(m_app_config.nonce_counter));
-	SETTINGS_SET("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
+	SETTINGS_SET("calibration", &m_app_config.calibration,
+		     sizeof(m_app_config.calibration));
 	SETTINGS_SET("interval-sample", &m_app_config.interval_sample,
 		     sizeof(m_app_config.interval_sample));
 	SETTINGS_SET("interval-report", &m_app_config.interval_report,
 		     sizeof(m_app_config.interval_report));
-	SETTINGS_SET("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
-	SETTINGS_SET("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
-	SETTINGS_SET("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
+	SETTINGS_SET("lrw-region", &m_app_config.lrw_region,
+		     sizeof(m_app_config.lrw_region));
+	SETTINGS_SET("lrw-network", &m_app_config.lrw_network,
+		     sizeof(m_app_config.lrw_network));
+	SETTINGS_SET("lrw-adr", &m_app_config.lrw_adr,
+		     sizeof(m_app_config.lrw_adr));
 	SETTINGS_SET("lrw-activation", &m_app_config.lrw_activation,
 		     sizeof(m_app_config.lrw_activation));
 	SETTINGS_SET("lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
@@ -193,8 +197,10 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_hall_left));
 	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
 		     sizeof(m_app_config.cap_hall_right));
-	SETTINGS_SET("cap-input-a", &m_app_config.cap_input_a, sizeof(m_app_config.cap_input_a));
-	SETTINGS_SET("cap-input-b", &m_app_config.cap_input_b, sizeof(m_app_config.cap_input_b));
+	SETTINGS_SET("cap-input-a", &m_app_config.cap_input_a,
+		     sizeof(m_app_config.cap_input_a));
+	SETTINGS_SET("cap-input-b", &m_app_config.cap_input_b,
+		     sizeof(m_app_config.cap_input_b));
 	SETTINGS_SET("cap-light-sensor", &m_app_config.cap_light_sensor,
 		     sizeof(m_app_config.cap_light_sensor));
 	SETTINGS_SET("cap-barometer", &m_app_config.cap_barometer,
@@ -239,14 +245,18 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.serial_number));
 	EXPORT_FUNC("nonce-counter", &m_app_config.nonce_counter,
 		    sizeof(m_app_config.nonce_counter));
-	EXPORT_FUNC("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
+	EXPORT_FUNC("calibration", &m_app_config.calibration,
+		    sizeof(m_app_config.calibration));
 	EXPORT_FUNC("interval-sample", &m_app_config.interval_sample,
 		    sizeof(m_app_config.interval_sample));
 	EXPORT_FUNC("interval-report", &m_app_config.interval_report,
 		    sizeof(m_app_config.interval_report));
-	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
-	EXPORT_FUNC("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
-	EXPORT_FUNC("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
+	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region,
+		    sizeof(m_app_config.lrw_region));
+	EXPORT_FUNC("lrw-network", &m_app_config.lrw_network,
+		    sizeof(m_app_config.lrw_network));
+	EXPORT_FUNC("lrw-adr", &m_app_config.lrw_adr,
+		    sizeof(m_app_config.lrw_adr));
 	EXPORT_FUNC("lrw-activation", &m_app_config.lrw_activation,
 		    sizeof(m_app_config.lrw_activation));
 	EXPORT_FUNC("lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
@@ -330,8 +340,10 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_hall_left));
 	EXPORT_FUNC("cap-hall-right", &m_app_config.cap_hall_right,
 		    sizeof(m_app_config.cap_hall_right));
-	EXPORT_FUNC("cap-input-a", &m_app_config.cap_input_a, sizeof(m_app_config.cap_input_a));
-	EXPORT_FUNC("cap-input-b", &m_app_config.cap_input_b, sizeof(m_app_config.cap_input_b));
+	EXPORT_FUNC("cap-input-a", &m_app_config.cap_input_a,
+		    sizeof(m_app_config.cap_input_a));
+	EXPORT_FUNC("cap-input-b", &m_app_config.cap_input_b,
+		    sizeof(m_app_config.cap_input_b));
 	EXPORT_FUNC("cap-light-sensor", &m_app_config.cap_light_sensor,
 		    sizeof(m_app_config.cap_light_sensor));
 	EXPORT_FUNC("cap-barometer", &m_app_config.cap_barometer,
@@ -418,8 +430,8 @@ static int cmd_int(const struct shell *shell, size_t argc, char **argv, int *par
 	return 0;
 }
 
-static int cmd_float(const struct shell *shell, size_t argc, char **argv, float *param, float min,
-		     float max, print_func_t print_func)
+static int cmd_float(const struct shell *shell, size_t argc, char **argv, float *param,
+		     float min, float max, print_func_t print_func)
 {
 	if (argc == 1) {
 		if (print_func) {
@@ -450,6 +462,7 @@ static int cmd_float(const struct shell *shell, size_t argc, char **argv, float 
 	shell_print(shell, "%s", m_msg_cmd_success);
 	return 0;
 }
+
 
 static void print_secret_key(const struct shell *shell)
 {
@@ -530,7 +543,8 @@ static void print_lrw_network(const struct shell *shell)
 
 static void print_lrw_adr(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " lrw-adr %s", m_app_config.lrw_adr ? "true" : "false");
+	shell_print(shell, SETTINGS_PFX " lrw-adr %s",
+		    m_app_config.lrw_adr ? "true" : "false");
 }
 
 static void print_lrw_activation(const struct shell *shell)
@@ -568,8 +582,8 @@ static void print_lrw_joineui(const struct shell *shell)
 {
 	char buf[2 * sizeof(m_app_config.lrw_joineui) + 1];
 
-	int ret = bin2hex(m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui), buf,
-			  sizeof(buf));
+	int ret =
+		bin2hex(m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui), buf, sizeof(buf));
 	if (!ret) {
 		LOG_ERR("Call `bin2hex` failed: %d", ret);
 		return;
@@ -610,8 +624,8 @@ static void print_lrw_devaddr(const struct shell *shell)
 {
 	char buf[2 * sizeof(m_app_config.lrw_devaddr) + 1];
 
-	int ret = bin2hex(m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr), buf,
-			  sizeof(buf));
+	int ret =
+		bin2hex(m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr), buf, sizeof(buf));
 	if (!ret) {
 		LOG_ERR("Call `bin2hex` failed: %d", ret);
 		return;
@@ -624,8 +638,8 @@ static void print_lrw_nwkskey(const struct shell *shell)
 {
 	char buf[2 * sizeof(m_app_config.lrw_nwkskey) + 1];
 
-	int ret = bin2hex(m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey), buf,
-			  sizeof(buf));
+	int ret =
+		bin2hex(m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey), buf, sizeof(buf));
 	if (!ret) {
 		LOG_ERR("Call `bin2hex` failed: %d", ret);
 		return;
@@ -638,8 +652,8 @@ static void print_lrw_appskey(const struct shell *shell)
 {
 	char buf[2 * sizeof(m_app_config.lrw_appskey) + 1];
 
-	int ret = bin2hex(m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey), buf,
-			  sizeof(buf));
+	int ret =
+		bin2hex(m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey), buf, sizeof(buf));
 	if (!ret) {
 		LOG_ERR("Call `bin2hex` failed: %d", ret);
 		return;
@@ -1036,13 +1050,14 @@ static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv
 	}
 
 	errno = 0;
-	unsigned long val = strtoul(argv[1], NULL, 10);
-	if (errno == ERANGE || val > UINT32_MAX) {
+	unsigned long value = strtoul(argv[1], NULL, 10);
+
+	if (errno == ERANGE || value > UINT32_MAX) {
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
 
-	m_app_config.serial_number = (uint32_t)val;
+	m_app_config.serial_number = (uint32_t)value;
 
 	return 0;
 }
@@ -1072,7 +1087,7 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 		return -EINVAL;
 	}
 
-	if (value > UINT32_MAX) {
+	if (value < 0 || value > UINT32_MAX) {
 		shell_error(shell, "%s", m_msg_invalid_range);
 		return -EINVAL;
 	}
@@ -1102,7 +1117,7 @@ static int cmd_interval_sample(const struct shell *shell, size_t argc, char **ar
 	char *endptr;
 	int a = strtol(argv[1], &endptr, 10);
 
-	if (*endptr != '\0') {
+	if (*endptr != '\0' || endptr == argv[1]) {
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
@@ -1226,7 +1241,7 @@ static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1256,7 +1271,7 @@ static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1286,7 +1301,7 @@ static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1316,7 +1331,7 @@ static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1346,7 +1361,7 @@ static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1376,7 +1391,7 @@ static int cmd_lrw_nwkskey(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1406,7 +1421,7 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1414,158 +1429,147 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 
 static int cmd_alarm_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.alarm_temperature_enabled,
-			print_alarm_temperature_enabled);
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_temperature_enabled, print_alarm_temperature_enabled);
 }
 
 static int cmd_alarm_temperature_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_lo, -30.0f, 70.0f,
-			 print_alarm_temperature_lo);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_lo, -30.0f,
+			 70.0f, print_alarm_temperature_lo);
 }
 
 static int cmd_alarm_temperature_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_hi, -30.0f, 70.0f,
-			 print_alarm_temperature_hi);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_hi, -30.0f,
+			 70.0f, print_alarm_temperature_hi);
 }
 
 static int cmd_alarm_temperature_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_hst, 0.0f, 5.0f,
-			 print_alarm_temperature_hst);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_hst, 0.0f,
+			 5.0f, print_alarm_temperature_hst);
 }
 
 static int cmd_alarm_humidity_enabled(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.alarm_humidity_enabled,
-			print_alarm_humidity_enabled);
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_humidity_enabled, print_alarm_humidity_enabled);
 }
 
 static int cmd_alarm_humidity_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_lo, 0.0f, 100.0f,
-			 print_alarm_humidity_lo);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_lo, 0.0f,
+			 100.0f, print_alarm_humidity_lo);
 }
 
 static int cmd_alarm_humidity_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_hi, 0.0f, 100.0f,
-			 print_alarm_humidity_hi);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_hi, 0.0f,
+			 100.0f, print_alarm_humidity_hi);
 }
 
 static int cmd_alarm_humidity_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_hst, 0.0f, 20.0f,
-			 print_alarm_humidity_hst);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_hst, 0.0f,
+			 20.0f, print_alarm_humidity_hst);
 }
 
 static int cmd_alarm_pressure_enabled(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.alarm_pressure_enabled,
-			print_alarm_pressure_enabled);
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_pressure_enabled, print_alarm_pressure_enabled);
 }
 
 static int cmd_alarm_pressure_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_lo, 500.0f, 1200.0f,
-			 print_alarm_pressure_lo);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_lo, 500.0f,
+			 1200.0f, print_alarm_pressure_lo);
 }
 
 static int cmd_alarm_pressure_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_hi, 500.0f, 1200.0f,
-			 print_alarm_pressure_hi);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_hi, 500.0f,
+			 1200.0f, print_alarm_pressure_hi);
 }
 
 static int cmd_alarm_pressure_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_hst, 0.0f, 50.0f,
-			 print_alarm_pressure_hst);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_hst, 0.0f,
+			 50.0f, print_alarm_pressure_hst);
 }
 
 static int cmd_alarm_t1_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.alarm_t1_temperature_enabled,
-			print_alarm_t1_temperature_enabled);
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_t1_temperature_enabled, print_alarm_t1_temperature_enabled);
 }
 
 static int cmd_alarm_t1_temperature_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_lo, -30.0f, 70.0f,
-			 print_alarm_t1_temperature_lo);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_lo, -30.0f,
+			 70.0f, print_alarm_t1_temperature_lo);
 }
 
 static int cmd_alarm_t1_temperature_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_hi, -30.0f, 70.0f,
-			 print_alarm_t1_temperature_hi);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_hi, -30.0f,
+			 70.0f, print_alarm_t1_temperature_hi);
 }
 
 static int cmd_alarm_t1_temperature_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_hst, 0.0f, 5.0f,
-			 print_alarm_t1_temperature_hst);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_hst, 0.0f,
+			 5.0f, print_alarm_t1_temperature_hst);
 }
 
 static int cmd_alarm_t2_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.alarm_t2_temperature_enabled,
-			print_alarm_t2_temperature_enabled);
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_t2_temperature_enabled, print_alarm_t2_temperature_enabled);
 }
 
 static int cmd_alarm_t2_temperature_lo(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_lo, -30.0f, 70.0f,
-			 print_alarm_t2_temperature_lo);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_lo, -30.0f,
+			 70.0f, print_alarm_t2_temperature_lo);
 }
 
 static int cmd_alarm_t2_temperature_hi(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_hi, -30.0f, 70.0f,
-			 print_alarm_t2_temperature_hi);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_hi, -30.0f,
+			 70.0f, print_alarm_t2_temperature_hi);
 }
 
 static int cmd_alarm_t2_temperature_hst(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_hst, 0.0f, 5.0f,
-			 print_alarm_t2_temperature_hst);
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_hst, 0.0f,
+			 5.0f, print_alarm_t2_temperature_hst);
 }
 
 static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_counter,
-			print_hall_left_counter);
+	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_counter, print_hall_left_counter);
 }
 
 static int cmd_hall_left_notify_act(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_notify_act,
-			print_hall_left_notify_act);
+	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_notify_act, print_hall_left_notify_act);
 }
 
 static int cmd_hall_left_notify_deact(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_notify_deact,
-			print_hall_left_notify_deact);
+	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_notify_deact, print_hall_left_notify_deact);
 }
 
 static int cmd_hall_right_counter(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_counter,
-			print_hall_right_counter);
+	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_counter, print_hall_right_counter);
 }
 
 static int cmd_hall_right_notify_act(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_notify_act,
-			print_hall_right_notify_act);
+	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_notify_act, print_hall_right_notify_act);
 }
 
 static int cmd_hall_right_notify_deact(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_notify_deact,
-			print_hall_right_notify_deact);
+	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_notify_deact, print_hall_right_notify_deact);
 }
 
 static int cmd_input_a_counter(const struct shell *shell, size_t argc, char **argv)
@@ -1575,14 +1579,12 @@ static int cmd_input_a_counter(const struct shell *shell, size_t argc, char **ar
 
 static int cmd_input_a_notify_act(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.input_a_notify_act,
-			print_input_a_notify_act);
+	return cmd_bool(shell, argc, argv, &m_app_config.input_a_notify_act, print_input_a_notify_act);
 }
 
 static int cmd_input_a_notify_deact(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.input_a_notify_deact,
-			print_input_a_notify_deact);
+	return cmd_bool(shell, argc, argv, &m_app_config.input_a_notify_deact, print_input_a_notify_deact);
 }
 
 static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **argv)
@@ -1592,32 +1594,30 @@ static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **ar
 
 static int cmd_input_b_notify_act(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.input_b_notify_act,
-			print_input_b_notify_act);
+	return cmd_bool(shell, argc, argv, &m_app_config.input_b_notify_act, print_input_b_notify_act);
 }
 
 static int cmd_input_b_notify_deact(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.input_b_notify_deact,
-			print_input_b_notify_deact);
+	return cmd_bool(shell, argc, argv, &m_app_config.input_b_notify_deact, print_input_b_notify_deact);
 }
 
 static int cmd_corr_temperature(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.corr_temperature, -5.0f, 5.0f,
-			 print_corr_temperature);
+	return cmd_float(shell, argc, argv, &m_app_config.corr_temperature, -5.0f,
+			 5.0f, print_corr_temperature);
 }
 
 static int cmd_corr_t1_temperature(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.corr_t1_temperature, -5.0f, 5.0f,
-			 print_corr_t1_temperature);
+	return cmd_float(shell, argc, argv, &m_app_config.corr_t1_temperature, -5.0f,
+			 5.0f, print_corr_t1_temperature);
 }
 
 static int cmd_corr_t2_temperature(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.corr_t2_temperature, -5.0f, 5.0f,
-			 print_corr_t2_temperature);
+	return cmd_float(shell, argc, argv, &m_app_config.corr_t2_temperature, -5.0f,
+			 5.0f, print_corr_t2_temperature);
 }
 
 static int cmd_cap_hall_left(const struct shell *shell, size_t argc, char **argv)
@@ -1657,14 +1657,12 @@ static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **a
 
 static int cmd_cap_1w_thermometer(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_thermometer,
-			print_cap_1w_thermometer);
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_thermometer, print_cap_1w_thermometer);
 }
 
 static int cmd_cap_1w_machine_probe(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_machine_probe,
-			print_cap_1w_machine_probe);
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_machine_probe, print_cap_1w_machine_probe);
 }
 
 static int print_help(const struct shell *shell, size_t argc, char **argv)

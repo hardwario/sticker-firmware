@@ -5,6 +5,7 @@ module:
   settings_prefix: config
   shell_command: config
   log_module: app_config
+  version: 1
 
 enums:
   lrw_region:

@@ -63,7 +63,13 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 		return -EINVAL;
 	}
 
-	{{ param | c_type(module.name) }} a = {{ param | parse_func }}(argv[1], NULL, 10);
+	char *endptr;
+	{{ param | c_type(module.name) }} a = {{ param | parse_func }}(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
 
 {% if param.extras.zero_allowed %}
 	if (a != 0 && (a < {{ param | min_value }} || a > {{ param | max_value }})) {
@@ -138,7 +144,19 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 	}
 {% endif %}
 
-	m_{{ module.name }}.{{ param.name | c_name }} = {{ param | parse_func }}(argv[1], NULL, 10);
+	errno = 0;
+{% if param.type == 'uint64' %}
+	unsigned long long value = {{ param | parse_func }}(argv[1], NULL, 10);
+{% else %}
+	unsigned long value = {{ param | parse_func }}(argv[1], NULL, 10);
+{% endif %}
+
+	if (errno == ERANGE || value > {{ param | max_value }}) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	m_{{ module.name }}.{{ param.name | c_name }} = ({{ param | c_type(module.name) }})value;
 
 	return 0;
 {% elif param.type == 'uint' %}
@@ -152,6 +170,11 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 
 	if (argc != 2) {
 		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
 		return -EINVAL;
 	}
 
@@ -257,7 +280,7 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -324,7 +347,19 @@ LOG_MODULE_REGISTER({{ module.log_module | default(module.name) }}, LOG_LEVEL_DB
 
 struct {{ module.name }} g_{{ module.name }};
 
+{% if module.version is defined %}
+static const struct {{ module.name }} m_{{ module.name }}_defaults = {
+	.config_version = {{ module.name | upper }}_VERSION,
+{% for param in parameters if param.default is defined %}
+	.{{ param.name | c_name }} = {{ param | default_value(module.name) }},
+{% endfor %}
+};
+
+{% endif %}
 static struct {{ module.name }} m_{{ module.name }} = {
+{% if module.version is defined %}
+	.config_version = {{ module.name | upper }}_VERSION,
+{% endif %}
 {% for param in parameters if param.default is defined %}
 	.{{ param.name | c_name }} = {{ param | default_value(module.name) }},
 {% endfor %}
@@ -353,6 +388,10 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		}                                                                                  \
 	} while (0)
 
+{% if module.version is defined %}
+	SETTINGS_SET("config-version", &m_{{ module.name }}.config_version,
+		     sizeof(m_{{ module.name }}.config_version));
+{% endif %}
 {% for param in parameters %}
 {% if param.type == 'bytes' or param.type == 'string' %}
 	SETTINGS_SET("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
@@ -371,6 +410,14 @@ static int h_commit(void)
 {
 	LOG_DBG("Loaded settings in full");
 
+{% if module.version is defined %}
+	if (m_{{ module.name }}.config_version != {{ module.name | upper }}_VERSION) {
+		LOG_WRN("Config version mismatch (stored=%u, expected=%u), resetting to defaults",
+			m_{{ module.name }}.config_version, {{ module.name | upper }}_VERSION);
+		m_{{ module.name }} = m_{{ module.name }}_defaults;
+	}
+
+{% endif %}
 	memcpy(&g_{{ module.name }}, &m_{{ module.name }}, sizeof(g_{{ module.name }}));
 	return 0;
 }
@@ -382,6 +429,10 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
 	} while (0)
 
+{% if module.version is defined %}
+	EXPORT_FUNC("config-version", &m_{{ module.name }}.config_version,
+		    sizeof(m_{{ module.name }}.config_version));
+{% endif %}
 {% for param in parameters %}
 {% if param.type == 'bytes' or param.type == 'string' %}
 	EXPORT_FUNC("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
