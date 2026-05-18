@@ -35,6 +35,7 @@ struct app_config g_app_config;
 static const struct app_config m_app_config_defaults = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
+	.lrw_sub_band = 2,
 	.alarm_temperature_lo = 15.0f,
 	.alarm_temperature_hi = 25.0f,
 	.alarm_temperature_hst = 0.5f,
@@ -55,6 +56,7 @@ static const struct app_config m_app_config_defaults = {
 static struct app_config m_app_config = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
+	.lrw_sub_band = 2,
 	.alarm_temperature_lo = 15.0f,
 	.alarm_temperature_hi = 25.0f,
 	.alarm_temperature_hst = 0.5f,
@@ -110,6 +112,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.interval_report));
 	SETTINGS_SET("lrw-region", &m_app_config.lrw_region,
 		     sizeof(m_app_config.lrw_region));
+	SETTINGS_SET("lrw-sub-band", &m_app_config.lrw_sub_band,
+		     sizeof(m_app_config.lrw_sub_band));
 	SETTINGS_SET("lrw-network", &m_app_config.lrw_network,
 		     sizeof(m_app_config.lrw_network));
 	SETTINGS_SET("lrw-adr", &m_app_config.lrw_adr,
@@ -253,6 +257,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.interval_report));
 	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region,
 		    sizeof(m_app_config.lrw_region));
+	EXPORT_FUNC("lrw-sub-band", &m_app_config.lrw_sub_band,
+		    sizeof(m_app_config.lrw_sub_band));
 	EXPORT_FUNC("lrw-network", &m_app_config.lrw_network,
 		    sizeof(m_app_config.lrw_network));
 	EXPORT_FUNC("lrw-adr", &m_app_config.lrw_adr,
@@ -522,6 +528,11 @@ static void print_lrw_region(const struct shell *shell)
 		break;
 	}
 	shell_print(shell, SETTINGS_PFX " lrw-region %s", str);
+}
+
+static void print_lrw_sub_band(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " lrw-sub-band %d", m_app_config.lrw_sub_band);
 }
 
 static void print_lrw_network(const struct shell *shell)
@@ -935,6 +946,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_interval_sample(shell);
 	print_interval_report(shell);
 	print_lrw_region(shell);
+	print_lrw_sub_band(shell);
 	print_lrw_network(shell);
 	print_lrw_adr(shell);
 	print_lrw_activation(shell);
@@ -1162,6 +1174,12 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	return 0;
+}
+
+static int cmd_lrw_sub_band(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.lrw_sub_band, 0, 8,
+		       print_lrw_sub_band);
 }
 
 static int cmd_lrw_network(const struct shell *shell, size_t argc, char **argv)
@@ -1714,6 +1732,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(lrw-region, NULL,
 	              "Get/Set LoRaWAN region (eu868/us915/au915).",
 	              cmd_lrw_region, 1, 1),
+
+	SHELL_CMD_ARG(lrw-sub-band, NULL,
+	              "Get/Set US915/AU915 sub-band (1-8, 0 = all channels). Default 2 matches TTN/Helium/ChirpStack.",
+	              cmd_lrw_sub_band, 1, 1),
 
 	SHELL_CMD_ARG(lrw-network, NULL,
 	              "Get/Set LoRaWAN network (public/private).",

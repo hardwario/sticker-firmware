@@ -76,6 +76,13 @@ parameters:
     enum: lrw_region
     help: "Get/Set LoRaWAN region (eu868/us915/au915)."
 
+  - name: lrw_sub_band
+    type: int
+    default: 2
+    min: 0
+    max: 8
+    help: "Get/Set US915/AU915 sub-band (1-8, 0 = all channels). Default 2 matches TTN/Helium/ChirpStack."
+
   - name: lrw_network
     type: enum
     enum: lrw_network
