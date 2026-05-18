@@ -290,15 +290,3 @@ void app_hall_reset_counts(void)
 	m_hall_data.right_count = 0;
 	k_mutex_unlock(&m_hall_data_mutex);
 }
-
-bool app_hall_check_notify_event(void)
-{
-	bool has_event;
-
-	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
-	has_event = m_hall_data.left_notify_act || m_hall_data.left_notify_deact ||
-		    m_hall_data.right_notify_act || m_hall_data.right_notify_deact;
-	k_mutex_unlock(&m_hall_data_mutex);
-
-	return has_event;
-}

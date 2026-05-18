@@ -243,15 +243,3 @@ void app_input_reset_counts(void)
 	m_input_data.input_b_count = 0;
 	k_mutex_unlock(&m_input_data_mutex);
 }
-
-bool app_input_check_notify_event(void)
-{
-	bool has_event;
-
-	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
-	has_event = m_input_data.input_a_notify_act || m_input_data.input_a_notify_deact ||
-		    m_input_data.input_b_notify_act || m_input_data.input_b_notify_deact;
-	k_mutex_unlock(&m_input_data_mutex);
-
-	return has_event;
-}
