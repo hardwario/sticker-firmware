@@ -134,6 +134,8 @@ static void poll_binary_source(enum app_alarm_source source)
 
 bool app_alarm_poll(void)
 {
+	bool should_send = false;
+
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
 	static bool alarm_temperature = false;
@@ -150,10 +152,7 @@ bool app_alarm_poll(void)
 			LOG_INF("Deactivated alarm for internal temperature");
 
 			alarm_temperature = false;
-
-#if defined(CONFIG_LORAWAN)
-			app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
+			should_send = true;
 		}
 	} else {
 		if (g_app_sensor_data.temperature < (g_app_config.alarm_temperature_lo -
@@ -163,10 +162,7 @@ bool app_alarm_poll(void)
 			LOG_INF("Activated alarm for internal temperature");
 
 			alarm_temperature = true;
-
-#if defined(CONFIG_LORAWAN)
-			app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
+			should_send = true;
 		}
 	}
 
@@ -184,10 +180,7 @@ bool app_alarm_poll(void)
 			LOG_INF("Deactivated alarm for humidity");
 
 			alarm_humidity = false;
-
-#if defined(CONFIG_LORAWAN)
-			app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
+			should_send = true;
 		}
 	} else {
 		if (g_app_sensor_data.humidity <
@@ -197,10 +190,7 @@ bool app_alarm_poll(void)
 			LOG_INF("Activated alarm for humidity");
 
 			alarm_humidity = true;
-
-#if defined(CONFIG_LORAWAN)
-			app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
+			should_send = true;
 		}
 	}
 
@@ -218,10 +208,7 @@ bool app_alarm_poll(void)
 			LOG_INF("Deactivated alarm for pressure");
 
 			alarm_pressure = false;
-
-#if defined(CONFIG_LORAWAN)
-			app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
+			should_send = true;
 		}
 	} else {
 		if (g_app_sensor_data.pressure * 10.f <
@@ -231,10 +218,7 @@ bool app_alarm_poll(void)
 			LOG_INF("Activated alarm for pressure");
 
 			alarm_pressure = true;
-
-#if defined(CONFIG_LORAWAN)
-			app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
+			should_send = true;
 		}
 	}
 
@@ -252,10 +236,7 @@ bool app_alarm_poll(void)
 			LOG_INF("Deactivated alarm for external temperature 1");
 
 			alarm_t1_temperature = false;
-
-#if defined(CONFIG_LORAWAN)
-			app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
+			should_send = true;
 		}
 	} else {
 		if (g_app_sensor_data.t1_temperature < (g_app_config.alarm_t1_temperature_lo -
@@ -265,10 +246,7 @@ bool app_alarm_poll(void)
 			LOG_INF("Activated alarm for external temperature 1");
 
 			alarm_t1_temperature = true;
-
-#if defined(CONFIG_LORAWAN)
-			app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
+			should_send = true;
 		}
 	}
 
@@ -286,10 +264,7 @@ bool app_alarm_poll(void)
 			LOG_INF("Deactivated alarm for external temperature 2");
 
 			alarm_t2_temperature = false;
-
-#if defined(CONFIG_LORAWAN)
-			app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
+			should_send = true;
 		}
 	} else {
 		if (g_app_sensor_data.t2_temperature < (g_app_config.alarm_t2_temperature_lo -
@@ -299,10 +274,7 @@ bool app_alarm_poll(void)
 			LOG_INF("Activated alarm for external temperature 2");
 
 			alarm_t2_temperature = true;
-
-#if defined(CONFIG_LORAWAN)
-			app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
+			should_send = true;
 		}
 	}
 
@@ -343,6 +315,12 @@ bool app_alarm_poll(void)
 		}
 	}
 	k_mutex_unlock(&m_lock);
+
+	if (should_send) {
+#if defined(CONFIG_LORAWAN)
+		app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
+	}
 
 	return alarm;
 }
