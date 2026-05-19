@@ -102,7 +102,7 @@ parameters:
   - name: lrw_nwkkey
     type: bytes
     size: 16
-    help: "Get/Set LoRaWAN NwkKey (32 hex digits). Used only when CONFIG_APP_LORAWAN_1_1=y; otherwise AppKey is used for both slots."
+    help: "Get/Set LoRaWAN NwkKey (32 hex digits)."
 
   - name: lrw_appkey
     type: bytes
