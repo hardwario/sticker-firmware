@@ -480,6 +480,26 @@ class Configen(WestCommand):
                 f.write(source_content)
             log.inf(f"Generated: {source_path}")
 
+            self._clang_format([header_path, source_path])
+
+    def _clang_format(self, paths):
+        """Run clang-format on generated files if available."""
+        import shutil
+        import subprocess
+
+        clang_format = shutil.which("clang-format")
+        if not clang_format:
+            log.wrn("clang-format not found in PATH; skipping formatting. "
+                    "Generated output will use template wrap style.")
+            return
+
+        try:
+            subprocess.run([clang_format, "-i", *[str(p) for p in paths]],
+                           check=True)
+            log.inf(f"Formatted with clang-format: {', '.join(p.name for p in paths)}")
+        except subprocess.CalledProcessError as e:
+            log.wrn(f"clang-format failed: {e}; generated files left as-is")
+
     def _validate_param(self, param):
         """Validate a parameter definition."""
         name = param.get("name")

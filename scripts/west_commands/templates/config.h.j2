@@ -24,8 +24,15 @@ enum {{ module.name }}_{{ enum_name | c_name }} {
 {% endfor %}
 };
 {% endfor %}
+{% if module.version is defined %}
+
+#define {{ module.name | upper }}_VERSION {{ module.version }}
+{% endif %}
 
 struct {{ module.name }} {
+{% if module.version is defined %}
+	uint32_t config_version;
+{% endif %}
 {% for param in parameters %}
 {{ param | struct_field(module.name) }}
 {% endfor %}

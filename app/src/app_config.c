@@ -35,6 +35,7 @@ struct app_config g_app_config;
 static const struct app_config m_app_config_defaults = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
+	.lrw_sub_band = 2,
 	.alarm_temperature_lo = 15.0f,
 	.alarm_temperature_hi = 25.0f,
 	.alarm_temperature_hst = 0.5f,
@@ -55,6 +56,7 @@ static const struct app_config m_app_config_defaults = {
 static struct app_config m_app_config = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
+	.lrw_sub_band = 2,
 	.alarm_temperature_lo = 15.0f,
 	.alarm_temperature_hi = 25.0f,
 	.alarm_temperature_hst = 0.5f,
@@ -108,6 +110,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("interval-report", &m_app_config.interval_report,
 		     sizeof(m_app_config.interval_report));
 	SETTINGS_SET("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
+	SETTINGS_SET("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
 	SETTINGS_SET("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
 	SETTINGS_SET("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
 	SETTINGS_SET("lrw-activation", &m_app_config.lrw_activation,
@@ -245,6 +248,7 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("interval-report", &m_app_config.interval_report,
 		    sizeof(m_app_config.interval_report));
 	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
+	EXPORT_FUNC("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
 	EXPORT_FUNC("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
 	EXPORT_FUNC("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
 	EXPORT_FUNC("lrw-activation", &m_app_config.lrw_activation,
@@ -509,6 +513,11 @@ static void print_lrw_region(const struct shell *shell)
 		break;
 	}
 	shell_print(shell, SETTINGS_PFX " lrw-region %s", str);
+}
+
+static void print_lrw_sub_band(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " lrw-sub-band %d", m_app_config.lrw_sub_band);
 }
 
 static void print_lrw_network(const struct shell *shell)
@@ -921,6 +930,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_interval_sample(shell);
 	print_interval_report(shell);
 	print_lrw_region(shell);
+	print_lrw_sub_band(shell);
 	print_lrw_network(shell);
 	print_lrw_adr(shell);
 	print_lrw_activation(shell);
@@ -1036,13 +1046,14 @@ static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv
 	}
 
 	errno = 0;
-	unsigned long val = strtoul(argv[1], NULL, 10);
-	if (errno == ERANGE || val > UINT32_MAX) {
+	unsigned long value = strtoul(argv[1], NULL, 10);
+
+	if (errno == ERANGE || value > UINT32_MAX) {
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
 
-	m_app_config.serial_number = (uint32_t)val;
+	m_app_config.serial_number = (uint32_t)value;
 
 	return 0;
 }
@@ -1072,7 +1083,7 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 		return -EINVAL;
 	}
 
-	if (value > UINT32_MAX) {
+	if (value < 0 || value > UINT32_MAX) {
 		shell_error(shell, "%s", m_msg_invalid_range);
 		return -EINVAL;
 	}
@@ -1102,7 +1113,7 @@ static int cmd_interval_sample(const struct shell *shell, size_t argc, char **ar
 	char *endptr;
 	int a = strtol(argv[1], &endptr, 10);
 
-	if (*endptr != '\0') {
+	if (*endptr != '\0' || endptr == argv[1]) {
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
@@ -1147,6 +1158,11 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	return 0;
+}
+
+static int cmd_lrw_sub_band(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.lrw_sub_band, 0, 8, print_lrw_sub_band);
 }
 
 static int cmd_lrw_network(const struct shell *shell, size_t argc, char **argv)
@@ -1226,7 +1242,7 @@ static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1256,7 +1272,7 @@ static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1286,7 +1302,7 @@ static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1316,7 +1332,7 @@ static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1346,7 +1362,7 @@ static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1376,7 +1392,7 @@ static int cmd_lrw_nwkskey(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1406,7 +1422,7 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 	if (!ret) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
-		return ret;
+		return -EINVAL;
 	}
 
 	return 0;
@@ -1716,6 +1732,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(lrw-region, NULL,
 	              "Get/Set LoRaWAN region (eu868/us915/au915).",
 	              cmd_lrw_region, 1, 1),
+
+	SHELL_CMD_ARG(lrw-sub-band, NULL,
+	              "Get/Set US915/AU915 sub-band (1-8, 0 = all channels). Default 2 matches TTN/Helium/ChirpStack.",
+	              cmd_lrw_sub_band, 1, 1),
 
 	SHELL_CMD_ARG(lrw-network, NULL,
 	              "Get/Set LoRaWAN network (public/private).",

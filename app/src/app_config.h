@@ -44,6 +44,7 @@ struct app_config {
 	int interval_sample;
 	int interval_report;
 	enum app_config_lrw_region lrw_region;
+	int lrw_sub_band;
 	enum app_config_lrw_network lrw_network;
 	bool lrw_adr;
 	enum app_config_lrw_activation lrw_activation;
