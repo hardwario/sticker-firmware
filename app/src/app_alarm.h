@@ -20,6 +20,7 @@ enum app_alarm_source {
 	APP_ALARM_SOURCE_PIR_MOTION,
 	APP_ALARM_SOURCE_INPUT_A,
 	APP_ALARM_SOURCE_INPUT_B,
+	APP_ALARM_SOURCE_COUNT,
 };
 
 typedef void (*app_alarm_event_cb)(enum app_alarm_source source, bool active, void *user_data);

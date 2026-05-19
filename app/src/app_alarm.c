@@ -23,7 +23,6 @@
 LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 
 #define APP_ALARM_BOTH_BOOL_RED_HOLD_MS 10000
-#define APP_ALARM_SOURCE_COUNT          5
 
 static bool m_alarm_active[APP_ALARM_SOURCE_COUNT];
 static int64_t m_both_bool_expiry_ms[APP_ALARM_SOURCE_COUNT];
