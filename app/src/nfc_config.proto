@@ -38,6 +38,7 @@ message NfcConfigMessage {
         optional string devaddr = 9;
         optional string nwkskey = 10;
         optional string appskey = 11;
+        optional uint32 sub_band = 12;
     }
 
     message Application {

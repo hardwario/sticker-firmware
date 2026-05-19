@@ -62,6 +62,16 @@ bool app_nfc_ingest(const NfcConfigMessage *message)
 			}
 		}
 
+		if (message->lorawan.has_sub_band) {
+			LOG_INF_PARAM_INT("lorawan.sub_band", message->lorawan.sub_band);
+			if (message->lorawan.sub_band <= 8) {
+				config->lrw_sub_band = (int)message->lorawan.sub_band;
+			} else {
+				LOG_WRN("Ignoring invalid lorawan.sub_band: %u",
+					message->lorawan.sub_band);
+			}
+		}
+
 		if (message->lorawan.has_network) {
 			LOG_INF_PARAM_INT("lorawan.network", message->lorawan.network);
 			if ((int)message->lorawan.network >= 0 &&

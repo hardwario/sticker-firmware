@@ -20,6 +20,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/lorawan/lorawan.h>
 #include <zephyr/random/random.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 
@@ -579,6 +580,59 @@ static void send_timer_handler(struct k_timer *timer)
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
 }
 
+/* Clear the subset of Zephyr's LoRaWAN NVM keys (zephyr/subsys/lorawan/nvm/
+ * lorawan_nvm_settings.c:35-43) that would otherwise let lorawan_nvm_data_restore()
+ * inside lorawan_start() override the region we just set via lorawan_set_region().
+ * Crypto (DevNonce monotonicity), MacGroup1, and SecureElement are kept so the
+ * device does not look like a fresh provisioning to the network server.
+ * NetworkActivation lives in MacGroup2 -> device joins fresh every boot, which
+ * is the intended behaviour. */
+static void clear_stale_lorawan_nvm(void)
+{
+	static const char *const keys[] = {
+		"lorawan/nvm/MacGroup2",
+		"lorawan/nvm/RegionGroup1",
+		"lorawan/nvm/RegionGroup2",
+		"lorawan/nvm/ClassB",
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(keys); i++) {
+		int ret = settings_delete(keys[i]);
+		if (ret && ret != -ENOENT) {
+			LOG_ERR("Call `settings_delete` failed (%s): %d", keys[i], ret);
+			/* Continue - a leftover stale key is better than aborting boot. */
+		}
+	}
+}
+
+static int apply_subband(int sub_band)
+{
+	if (sub_band == 0) {
+		return 0;
+	}
+	if (sub_band < 1 || sub_band > 8) {
+		LOG_ERR("Invalid sub-band: %d", sub_band);
+		return -EINVAL;
+	}
+
+	uint16_t mask[6] = {0};
+	uint8_t base = (sub_band - 1) * 8;
+	for (uint8_t ch = base; ch < base + 8; ch++) {
+		mask[ch / 16] |= BIT(ch % 16);
+	}
+	uint8_t hi_ch = 64 + (sub_band - 1);
+	mask[hi_ch / 16] |= BIT(hi_ch % 16);
+
+	int ret = lorawan_set_channels_mask(mask, ARRAY_SIZE(mask));
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("lorawan_set_channels_mask", ret);
+		return ret;
+	}
+
+	LOG_INF("Applied sub-band %d", sub_band);
+	return 0;
+}
+
 int app_lrw_init(void)
 {
 	int ret;
@@ -588,6 +642,8 @@ int app_lrw_init(void)
 		LOG_ERR("Device not ready");
 		return -ENODEV;
 	}
+
+	clear_stale_lorawan_nvm();
 
 	enum lorawan_region region;
 
@@ -616,6 +672,15 @@ int app_lrw_init(void)
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lorawan_start", ret);
 		return ret;
+	}
+
+	if (g_app_config.lrw_region == APP_CONFIG_LRW_REGION_US915 ||
+	    g_app_config.lrw_region == APP_CONFIG_LRW_REGION_AU915) {
+		ret = apply_subband(g_app_config.lrw_sub_band);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("apply_subband", ret);
+			return ret;
+		}
 	}
 
 	static struct lorawan_downlink_cb downlink_cb = {
