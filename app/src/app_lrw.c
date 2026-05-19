@@ -413,7 +413,16 @@ static void join_work_handler(struct k_work *work)
 		LOG_INF("Using OTAA activation");
 		config.mode = LORAWAN_ACT_OTAA;
 		config.otaa.join_eui = g_app_config.lrw_joineui;
+#if defined(CONFIG_APP_LORAWAN_1_1)
+		/* LoRaWAN 1.1.x: NwkKey and AppKey are distinct root keys. */
 		config.otaa.nwk_key = g_app_config.lrw_nwkkey;
+#else
+		/* LoRaWAN 1.0.x: NwkKey == AppKey. LoRaMac computes the
+		 * JoinRequest MIC from the NwkKey slot, so feeding AppKey into
+		 * both slots keeps the device compatible with 1.0.x network
+		 * servers (TTN, ChirpStack, Helium). */
+		config.otaa.nwk_key = g_app_config.lrw_appkey;
+#endif
 		config.otaa.app_key = g_app_config.lrw_appkey;
 	} else if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP) {
 		LOG_INF("Using ABP activation");

@@ -22,6 +22,21 @@ config FW_DEBUG
 	  When enabled, the periodic LED blink shows green + yellow
 	  instead of just green to indicate debug build.
 
+config APP_LORAWAN_1_1
+	bool "Use LoRaWAN 1.1.x crypto for OTAA"
+	default n
+	help
+	  Enable LoRaWAN 1.1.x crypto for OTAA join: feed `lrw_nwkkey` into
+	  the NwkKey slot (distinct from AppKey). When disabled (default,
+	  LoRaWAN 1.0.x), the firmware copies `lrw_appkey` into both the
+	  NwkKey and AppKey slots so the JoinRequest MIC is computed from
+	  AppKey — required for 1.0.x network servers (TTN, ChirpStack,
+	  Helium).
+
+	  Enabling this also requires the LoRaMac library to be built with
+	  USE_LRWAN_1_1_X_CRYPTO=1; the Kconfig only flips the app-level
+	  key wiring.
+
 endmenu
 
 menu "Zephyr Kernel"
