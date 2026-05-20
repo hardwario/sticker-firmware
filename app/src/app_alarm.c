@@ -229,11 +229,20 @@ bool app_alarm_poll(void)
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
+	int64_t now = k_uptime_get();
+
 	k_mutex_lock(&m_lock, K_FOREVER);
 	for (int s = 0; s < APP_ALARM_SOURCE_COUNT; s++) {
+		/* Expire the both-bool 10 s hold: app_alarm_event() can only latch
+		 * m_alarm_active[s] true (no edge knows which state is "alarm"
+		 * when both bools are set), so the timer is the only mechanism
+		 * that clears it back to false. */
+		if (m_both_bool_expiry_ms[s] != 0 && now >= m_both_bool_expiry_ms[s]) {
+			m_alarm_active[s] = false;
+			m_both_bool_expiry_ms[s] = 0;
+		}
 		if (m_alarm_active[s]) {
 			alarm = true;
-			break;
 		}
 	}
 	k_mutex_unlock(&m_lock);
