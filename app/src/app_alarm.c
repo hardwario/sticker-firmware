@@ -59,173 +59,77 @@ static int read_notify_bools(enum app_alarm_source source, bool *act, bool *deac
 	}
 }
 
+/* Evaluate a single threshold with hysteresis. Updates *active to reflect the
+ * latched state and sets *should_send = true on every Activated/Deactivated
+ * edge. Returns the latched state for the caller to OR into the aggregate. */
+static bool eval_threshold(bool *active, bool enabled, float value, float lo, float hi, float hst,
+			   const char *name, bool *should_send)
+{
+	if (!enabled || isnan(value)) {
+		*active = false;
+		return false;
+	}
+
+	if (*active) {
+		if (value > lo + hst && value < hi - hst) {
+			LOG_INF("Deactivated alarm for %s", name);
+			*active = false;
+			*should_send = true;
+		}
+	} else {
+		if (value < lo - hst || value > hi + hst) {
+			LOG_INF("Activated alarm for %s", name);
+			*active = true;
+			*should_send = true;
+		}
+	}
+
+	return *active;
+}
+
 bool app_alarm_poll(void)
 {
 	bool should_send = false;
+	bool alarm = false;
+
+	static bool alarm_temperature;
+	static bool alarm_humidity;
+	static bool alarm_pressure;
+	static bool alarm_t1_temperature;
+	static bool alarm_t2_temperature;
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
-	static bool alarm_temperature = false;
+	alarm |= eval_threshold(&alarm_temperature, g_app_config.alarm_temperature_enabled,
+				g_app_sensor_data.temperature, g_app_config.alarm_temperature_lo,
+				g_app_config.alarm_temperature_hi,
+				g_app_config.alarm_temperature_hst, "internal temperature",
+				&should_send);
 
-	if (!g_app_config.alarm_temperature_enabled) {
-		alarm_temperature = false;
-	} else if (isnan(g_app_sensor_data.temperature)) {
-		alarm_temperature = false;
-	} else if (alarm_temperature) {
-		if (g_app_sensor_data.temperature > (g_app_config.alarm_temperature_lo +
-						     g_app_config.alarm_temperature_hst) &&
-		    g_app_sensor_data.temperature < (g_app_config.alarm_temperature_hi -
-						     g_app_config.alarm_temperature_hst)) {
-			LOG_INF("Deactivated alarm for internal temperature");
+	alarm |= eval_threshold(&alarm_humidity, g_app_config.alarm_humidity_enabled,
+				g_app_sensor_data.humidity, g_app_config.alarm_humidity_lo,
+				g_app_config.alarm_humidity_hi, g_app_config.alarm_humidity_hst,
+				"humidity", &should_send);
 
-			alarm_temperature = false;
-			should_send = true;
-		}
-	} else {
-		if (g_app_sensor_data.temperature < (g_app_config.alarm_temperature_lo -
-						     g_app_config.alarm_temperature_hst) ||
-		    g_app_sensor_data.temperature > (g_app_config.alarm_temperature_hi +
-						     g_app_config.alarm_temperature_hst)) {
-			LOG_INF("Activated alarm for internal temperature");
+	/* Pressure config thresholds are stored in hPa × 10, sensor reports hPa. */
+	alarm |= eval_threshold(&alarm_pressure, g_app_config.alarm_pressure_enabled,
+				g_app_sensor_data.pressure * 10.f, g_app_config.alarm_pressure_lo,
+				g_app_config.alarm_pressure_hi, g_app_config.alarm_pressure_hst,
+				"pressure", &should_send);
 
-			alarm_temperature = true;
-			should_send = true;
-		}
-	}
+	alarm |= eval_threshold(&alarm_t1_temperature, g_app_config.alarm_t1_temperature_enabled,
+				g_app_sensor_data.t1_temperature,
+				g_app_config.alarm_t1_temperature_lo,
+				g_app_config.alarm_t1_temperature_hi,
+				g_app_config.alarm_t1_temperature_hst, "external temperature 1",
+				&should_send);
 
-	static bool alarm_humidity = false;
-
-	if (!g_app_config.alarm_humidity_enabled) {
-		alarm_humidity = false;
-	} else if (isnan(g_app_sensor_data.humidity)) {
-		alarm_humidity = false;
-	} else if (alarm_humidity) {
-		if (g_app_sensor_data.humidity >
-			    (g_app_config.alarm_humidity_lo + g_app_config.alarm_humidity_hst) &&
-		    g_app_sensor_data.humidity <
-			    (g_app_config.alarm_humidity_hi - g_app_config.alarm_humidity_hst)) {
-			LOG_INF("Deactivated alarm for humidity");
-
-			alarm_humidity = false;
-			should_send = true;
-		}
-	} else {
-		if (g_app_sensor_data.humidity <
-			    (g_app_config.alarm_humidity_lo - g_app_config.alarm_humidity_hst) ||
-		    g_app_sensor_data.humidity >
-			    (g_app_config.alarm_humidity_hi + g_app_config.alarm_humidity_hst)) {
-			LOG_INF("Activated alarm for humidity");
-
-			alarm_humidity = true;
-			should_send = true;
-		}
-	}
-
-	static bool alarm_pressure = false;
-
-	if (!g_app_config.alarm_pressure_enabled) {
-		alarm_pressure = false;
-	} else if (isnan(g_app_sensor_data.pressure)) {
-		alarm_pressure = false;
-	} else if (alarm_pressure) {
-		if (g_app_sensor_data.pressure * 10.f >
-			    (g_app_config.alarm_pressure_lo + g_app_config.alarm_pressure_hst) &&
-		    g_app_sensor_data.pressure * 10.f <
-			    (g_app_config.alarm_pressure_hi - g_app_config.alarm_pressure_hst)) {
-			LOG_INF("Deactivated alarm for pressure");
-
-			alarm_pressure = false;
-			should_send = true;
-		}
-	} else {
-		if (g_app_sensor_data.pressure * 10.f <
-			    (g_app_config.alarm_pressure_lo - g_app_config.alarm_pressure_hst) ||
-		    g_app_sensor_data.pressure * 10.f >
-			    (g_app_config.alarm_pressure_hi + g_app_config.alarm_pressure_hst)) {
-			LOG_INF("Activated alarm for pressure");
-
-			alarm_pressure = true;
-			should_send = true;
-		}
-	}
-
-	static bool alarm_t1_temperature = false;
-
-	if (!g_app_config.alarm_t1_temperature_enabled) {
-		alarm_t1_temperature = false;
-	} else if (isnan(g_app_sensor_data.t1_temperature)) {
-		alarm_t1_temperature = false;
-	} else if (alarm_t1_temperature) {
-		if (g_app_sensor_data.t1_temperature > (g_app_config.alarm_t1_temperature_lo +
-							g_app_config.alarm_t1_temperature_hst) &&
-		    g_app_sensor_data.t1_temperature < (g_app_config.alarm_t1_temperature_hi -
-							g_app_config.alarm_t1_temperature_hst)) {
-			LOG_INF("Deactivated alarm for external temperature 1");
-
-			alarm_t1_temperature = false;
-			should_send = true;
-		}
-	} else {
-		if (g_app_sensor_data.t1_temperature < (g_app_config.alarm_t1_temperature_lo -
-							g_app_config.alarm_t1_temperature_hst) ||
-		    g_app_sensor_data.t1_temperature > (g_app_config.alarm_t1_temperature_hi +
-							g_app_config.alarm_t1_temperature_hst)) {
-			LOG_INF("Activated alarm for external temperature 1");
-
-			alarm_t1_temperature = true;
-			should_send = true;
-		}
-	}
-
-	static bool alarm_t2_temperature = false;
-
-	if (!g_app_config.alarm_t2_temperature_enabled) {
-		alarm_t2_temperature = false;
-	} else if (isnan(g_app_sensor_data.t2_temperature)) {
-		alarm_t2_temperature = false;
-	} else if (alarm_t2_temperature) {
-		if (g_app_sensor_data.t2_temperature > (g_app_config.alarm_t2_temperature_lo +
-							g_app_config.alarm_t2_temperature_hst) &&
-		    g_app_sensor_data.t2_temperature < (g_app_config.alarm_t2_temperature_hi -
-							g_app_config.alarm_t2_temperature_hst)) {
-			LOG_INF("Deactivated alarm for external temperature 2");
-
-			alarm_t2_temperature = false;
-			should_send = true;
-		}
-	} else {
-		if (g_app_sensor_data.t2_temperature < (g_app_config.alarm_t2_temperature_lo -
-							g_app_config.alarm_t2_temperature_hst) ||
-		    g_app_sensor_data.t2_temperature > (g_app_config.alarm_t2_temperature_hi +
-							g_app_config.alarm_t2_temperature_hst)) {
-			LOG_INF("Activated alarm for external temperature 2");
-
-			alarm_t2_temperature = true;
-			should_send = true;
-		}
-	}
-
-	bool alarm = false;
-
-	if (g_app_config.alarm_temperature_enabled) {
-		alarm = alarm_temperature ? true : alarm;
-	}
-
-	if (g_app_config.alarm_humidity_enabled) {
-		alarm = alarm_humidity ? true : alarm;
-	}
-
-	if (g_app_config.alarm_pressure_enabled) {
-		alarm = alarm_pressure ? true : alarm;
-	}
-
-	if (g_app_config.alarm_t1_temperature_enabled) {
-		alarm = alarm_t1_temperature ? true : alarm;
-	}
-
-	if (g_app_config.alarm_t2_temperature_enabled) {
-		alarm = alarm_t2_temperature ? true : alarm;
-	}
+	alarm |= eval_threshold(&alarm_t2_temperature, g_app_config.alarm_t2_temperature_enabled,
+				g_app_sensor_data.t2_temperature,
+				g_app_config.alarm_t2_temperature_lo,
+				g_app_config.alarm_t2_temperature_hi,
+				g_app_config.alarm_t2_temperature_hst, "external temperature 2",
+				&should_send);
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
@@ -254,11 +158,6 @@ bool app_alarm_poll(void)
 	}
 
 	return alarm;
-}
-
-bool app_alarm_is_active(void)
-{
-	return app_alarm_poll();
 }
 
 void app_alarm_event(enum app_alarm_source source, bool active)
