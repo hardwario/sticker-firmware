@@ -7,6 +7,7 @@
 #include "app_alarm.h"
 #include "app_calibration.h"
 #include "app_clock.h"
+#include "app_cmd.h"
 #include "app_compose.h"
 #include "app_config.h"
 #include "app_led.h"
@@ -93,6 +94,24 @@ static struct k_work m_lc_response_work;
 static struct k_work m_send_with_lc_work;
 static uint8_t m_lc_response_gw_count;
 
+/* Pending response staged by app_lrw_queue_response(). send_work_handler()
+ * drains this slot first. Single slot: a new queue call before the previous
+ * response leaves overwrites with a warning. */
+#define APP_LRW_RESPONSE_BUF_SIZE 64
+static uint8_t m_pending_response_buf[APP_LRW_RESPONSE_BUF_SIZE];
+static size_t  m_pending_response_len;
+static uint8_t m_pending_response_port;
+static K_MUTEX_DEFINE(m_pending_response_lock);
+
+/* Inbound downlink request on port 85 captured from downlink_callback().
+ * The callback runs on the LoRaMac stack (restricted), so it only copies the
+ * payload and defers parsing to m_dl_request_work on m_work_q. */
+#define APP_LRW_REQUEST_BUF_SIZE 64
+#define APP_LRW_DOWNLINK_CMD_PORT 85
+static uint8_t m_dl_request_buf[APP_LRW_REQUEST_BUF_SIZE];
+static size_t  m_dl_request_len;
+static struct k_work m_dl_request_work;
+
 
 static uint32_t calculate_rejoin_backoff(int attempt)
 {
@@ -123,6 +142,38 @@ static void downlink_success_work_handler(struct k_work *work)
 	}
 }
 
+static void dl_request_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	static uint8_t resp[APP_LRW_RESPONSE_BUF_SIZE];
+	size_t resp_len = 0;
+
+	int ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, m_dl_request_buf, m_dl_request_len,
+				 resp, sizeof(resp), &resp_len);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
+		return;
+	}
+
+	if (resp_len) {
+		ret = app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, resp, resp_len);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_lrw_queue_response", ret);
+		}
+	}
+
+	/* Diagnostic: stack headroom after the heaviest work this queue runs.
+	 * Helps decide if 2048 B m_work_stack needs growing as more handlers
+	 * land in later phases. Only built when stack info is enabled (debug). */
+#if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
+	size_t unused;
+	if (k_thread_stack_space_get(k_current_get(), &unused) == 0) {
+		LOG_INF("m_work_q stack: %zu B unused after cmd handle", unused);
+	}
+#endif
+}
+
 static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t snr, uint8_t len,
 			      const uint8_t *data)
 {
@@ -137,6 +188,17 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 
 	/* Set the RTC from the network if this downlink carried a DeviceTimeAns. */
 	app_clock_handle_downlink(flags);
+
+	if (port == APP_LRW_DOWNLINK_CMD_PORT && data && len > 0) {
+		if (len <= sizeof(m_dl_request_buf)) {
+			memcpy(m_dl_request_buf, data, len);
+			m_dl_request_len = len;
+			k_work_submit_to_queue(&m_work_q, &m_dl_request_work);
+		} else {
+			LOG_WRN("Port %u payload too large: %u B (max %zu)",
+				port, len, sizeof(m_dl_request_buf));
+		}
+	}
 
 	k_work_submit_to_queue(&m_work_q, &m_downlink_success_work);
 }
@@ -536,6 +598,30 @@ static void send_work_handler(struct k_work *work)
 		return;
 	}
 
+	/* Drain pending command response before composing telemetry. The
+	 * response leaves at the next jitter window; regular telemetry resumes
+	 * with the next periodic timer fire. */
+	k_mutex_lock(&m_pending_response_lock, K_FOREVER);
+	if (m_pending_response_len) {
+		uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
+		size_t  len  = m_pending_response_len;
+		uint8_t port = m_pending_response_port;
+		memcpy(buf, m_pending_response_buf, len);
+		m_pending_response_len = 0;
+		k_mutex_unlock(&m_pending_response_lock);
+
+		ret = lorawan_send(port, buf, len, LORAWAN_MSG_UNCONFIRMED);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("lorawan_send(response)", ret);
+		} else {
+			LOG_INF("Response sent on port %u (%zu B)", port, len);
+		}
+		k_timer_start(&m_send_timer,
+			      K_SECONDS(g_app_config.interval_report), K_FOREVER);
+		return;
+	}
+	k_mutex_unlock(&m_pending_response_lock);
+
 	int timeout = g_app_config.interval_report;
 
 #if defined(CONFIG_ENTROPY_GENERATOR)
@@ -721,6 +807,7 @@ int app_lrw_init(void)
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
 	k_work_init(&m_lc_response_work, lc_response_work_handler);
 	k_work_init(&m_send_with_lc_work, send_with_lc_work_handler);
+	k_work_init(&m_dl_request_work, dl_request_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
 
 	k_timer_init(&m_send_timer, send_timer_handler, NULL);
@@ -823,5 +910,32 @@ int app_lrw_get_info(struct app_lrw_info *info)
 	info->thresh_reconnect = FAIL_THRESHOLD_RECONNECT;
 	info->link_check_interval = LINK_CHECK_INTERVAL;
 
+	return 0;
+}
+
+int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len)
+{
+	if (!buf || len == 0) {
+		return -EINVAL;
+	}
+	if (len > sizeof(m_pending_response_buf)) {
+		LOG_ERR("Response too large: %zu B (max %zu)", len,
+			sizeof(m_pending_response_buf));
+		return -EMSGSIZE;
+	}
+
+	k_mutex_lock(&m_pending_response_lock, K_FOREVER);
+	if (m_pending_response_len) {
+		LOG_WRN("Overwriting unsent response on port %u (%zu B)",
+			m_pending_response_port, m_pending_response_len);
+	}
+	memcpy(m_pending_response_buf, buf, len);
+	m_pending_response_len = len;
+	m_pending_response_port = port;
+	k_mutex_unlock(&m_pending_response_lock);
+
+	/* Wake send path so the response leaves at the next jitter window
+	 * instead of waiting for the periodic timer. */
+	k_work_submit_to_queue(&m_work_q, &m_send_work);
 	return 0;
 }
