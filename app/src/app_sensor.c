@@ -5,12 +5,12 @@
  */
 
 #include "app_accel.h"
+#include "app_alarm.h"
 #include "app_battery.h"
 #include "app_config.h"
 #include "app_ds18b20.h"
 #include "app_hall.h"
 #include "app_input.h"
-#include "app_led.h"
 #include "app_log.h"
 #include "app_machine_probe.h"
 #include "app_mpl3115a2.h"
@@ -81,9 +81,7 @@ static void pyq1648_event_handler(void *user_data)
 	g_app_sensor_data.motion_count++;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	struct app_led_blink_req req = {
-		.color = APP_LED_CHANNEL_Y, .duration = 5, .space = 0, .repetitions = 1};
-	app_led_blink(&req);
+	app_alarm_event(APP_ALARM_SOURCE_PIR_MOTION, true);
 }
 
 int app_sensor_init(void)
