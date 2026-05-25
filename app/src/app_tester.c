@@ -14,6 +14,10 @@
 #include "app_sensor.h"
 #include "app_sht4x.h"
 
+#ifdef CONFIG_APP_CMD_DEBUG_SHELL
+#include "app_cmd.h"
+#endif
+
 /* Zephyr includes */
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
@@ -656,6 +660,63 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_clock,
 	SHELL_SUBCMD_SET_END);
 #endif /* defined(CONFIG_RTC) */
 
+#ifdef CONFIG_APP_CMD_DEBUG_SHELL
+static int cmd_cmd_inject(const struct shell *sh, size_t argc, char **argv)
+{
+	enum app_cmd_transport transport;
+
+	if (strcmp(argv[1], "lrw") == 0) {
+		transport = APP_CMD_TRANSPORT_LRW;
+	} else if (strcmp(argv[1], "nfc") == 0) {
+		transport = APP_CMD_TRANSPORT_NFC;
+	} else {
+		shell_error(sh, "Unknown transport `%s` (expected lrw|nfc)", argv[1]);
+		return -EINVAL;
+	}
+
+	const char *hex = argv[2];
+	size_t hex_len = strlen(hex);
+
+	if (hex_len == 0 || (hex_len % 2) != 0) {
+		shell_error(sh, "Hex length must be non-zero and even");
+		return -EINVAL;
+	}
+
+	static uint8_t in[64];
+	if (hex_len / 2 > sizeof(in)) {
+		shell_error(sh, "Hex too long: %zu B (max %zu)", hex_len / 2, sizeof(in));
+		return -EMSGSIZE;
+	}
+
+	size_t in_len = hex2bin(hex, hex_len, in, sizeof(in));
+	if (in_len == 0) {
+		shell_error(sh, "Failed to parse hex");
+		return -EINVAL;
+	}
+
+	static uint8_t out[64];
+	size_t out_len = 0;
+	int ret = app_cmd_handle(transport, in, in_len, out, sizeof(out), &out_len);
+	if (ret) {
+		shell_error(sh, "app_cmd_handle failed: %d", ret);
+		return ret;
+	}
+
+	LOG_HEXDUMP_INF(out, out_len, "DownlinkResponse:");
+
+#if defined(CONFIG_LORAWAN)
+	if (transport == APP_CMD_TRANSPORT_LRW && out_len > 0) {
+		ret = app_lrw_queue_response(85, out, out_len);
+		if (ret) {
+			shell_warn(sh, "queue_response failed: %d", ret);
+		}
+	}
+#endif
+
+	return 0;
+}
+#endif /* CONFIG_APP_CMD_DEBUG_SHELL */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_test,
 	SHELL_CMD(led, &sub_led, "LED commands.", NULL),
@@ -666,6 +727,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_RTC)
 	SHELL_CMD(clock, &sub_clock, "RTC time commands.", NULL),
 #endif /* defined(CONFIG_RTC) */
+#ifdef CONFIG_APP_CMD_DEBUG_SHELL
+	SHELL_CMD_ARG(cmd, NULL,
+		      "Inject DownlinkCommand. Usage: cmd <lrw|nfc> <hex>",
+		      cmd_cmd_inject, 3, 0),
+#endif
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(tester, &sub_test, "Tester commands.", NULL);
