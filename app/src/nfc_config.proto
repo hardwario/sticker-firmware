@@ -92,3 +92,96 @@ message NfcConfigMessage {
         optional bool cap_1w_machine_probe = 48;
     }
 }
+
+message DownlinkCommand {
+    uint32 seq = 1;
+
+    oneof body {
+        SetParam        set_param        = 2;
+        GetParam        get_param        = 3;
+        GetInfo         get_info         = 4;
+        GetConfig       get_config       = 5;
+        SettingsSave    settings_save    = 6;
+        Reboot          reboot           = 7;
+        FactoryReset    factory_reset    = 8;
+        ForceSend       force_send       = 9;
+        ResetCounters   reset_counters   = 10;
+        ReqHistory      req_history      = 11;
+    }
+
+    message SetParam {
+        optional NfcConfigMessage.Lorawan     lorawan     = 1;
+        optional NfcConfigMessage.Application application = 2;
+    }
+
+    message GetParam {
+        repeated uint32 lorawan_field     = 1;
+        repeated uint32 application_field = 2;
+    }
+
+    message GetInfo      { }
+    message GetConfig    { optional uint32 page = 1; }
+    message SettingsSave { }
+    message Reboot       { }
+    message FactoryReset { }
+    message ForceSend    { }
+    message ResetCounters {
+        optional bool hall_left  = 1;
+        optional bool hall_right = 2;
+        optional bool input_a    = 3;
+        optional bool input_b    = 4;
+    }
+    message ReqHistory   { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
+}
+
+message DownlinkResponse {
+    uint32 seq = 1;
+
+    oneof body {
+        Ack          ack           = 2;
+        Info         info          = 3;
+        ConfigDump   config_dump   = 4;
+        HistoryFrame history_frame = 5;
+        Error        error         = 6;
+    }
+
+    message Ack { }
+
+    message Info {
+        string build_version = 1;
+        bytes  dev_eui       = 2;
+        uint32 serial_number = 3;
+        string board         = 4;
+        uint32 lrw_state     = 5;
+    }
+
+    message ConfigDump {
+        uint32 page_index = 1;
+        uint32 page_count = 2;
+        optional NfcConfigMessage.Lorawan     lorawan     = 3;
+        optional NfcConfigMessage.Application application = 4;
+    }
+
+    message HistoryFrame {
+        uint32 frame_index = 1;
+        uint32 frame_count = 2;
+        uint32 t0_unix     = 3;
+        bytes  samples     = 4;
+    }
+
+    message Error {
+        enum Code {
+            UNKNOWN             = 0;
+            BAD_REQUEST         = 1;
+            OUT_OF_RANGE        = 2;
+            NOT_READY           = 3;
+            HISTORY_UNAVAILABLE = 4;
+            UNSUPPORTED_FIELD   = 5;
+            PERSIST_FAILED      = 6;
+        }
+
+        Code   code         = 1;
+        uint32 fault_field  = 2;
+        string detail       = 3;
+    }
+}
