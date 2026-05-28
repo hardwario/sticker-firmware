@@ -9,22 +9,24 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sticker)
 
-# Firmware version string baked into the image (logged at boot, reported by the
-# GetInfo command). CI passes the release tag or short commit hash via
-# -DAPP_VERSION_OVERRIDE (see .github/workflows/build.yml). Local builds fall
-# back to `git describe`, then to "dev" if git is unavailable.
-if(NOT DEFINED APP_VERSION_OVERRIDE)
-  execute_process(
-    COMMAND git -C ${CMAKE_CURRENT_SOURCE_DIR} describe --always --dirty --tags
-    OUTPUT_VARIABLE APP_VERSION_OVERRIDE
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
+# Firmware version baked into the image (logged at boot, reported by the
+# GetInfo command). CI passes the numeric version components and build type
+# via -DAPP_VERSION_* / -DAPP_BUILD_TYPE (see .github/workflows/build.yml):
+#   tag v1.3.4 -> 1/3/4, type 0 (RELEASE)
+#   branch/PR  -> 0/0/0, type 1 (DEV)
+# Local builds without the override default to 0/0/0, type 2 (CUSTOM).
+if(NOT DEFINED APP_VERSION_MAJOR)
+  set(APP_VERSION_MAJOR 0)
+  set(APP_VERSION_MINOR 0)
+  set(APP_VERSION_PATCH 0)
+  set(APP_BUILD_TYPE 2)
 endif()
-if(NOT APP_VERSION_OVERRIDE)
-  set(APP_VERSION_OVERRIDE "dev")
-endif()
-add_compile_definitions(APP_VERSION_STRING="${APP_VERSION_OVERRIDE}")
-message(STATUS "Firmware version: ${APP_VERSION_OVERRIDE}")
+add_compile_definitions(
+  APP_VERSION_MAJOR=${APP_VERSION_MAJOR}
+  APP_VERSION_MINOR=${APP_VERSION_MINOR}
+  APP_VERSION_PATCH=${APP_VERSION_PATCH}
+  APP_BUILD_TYPE=${APP_BUILD_TYPE})
+message(STATUS "Firmware version: ${APP_VERSION_MAJOR}.${APP_VERSION_MINOR}.${APP_VERSION_PATCH} (build type ${APP_BUILD_TYPE})")
 
 list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
 include(nanopb)
