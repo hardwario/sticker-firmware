@@ -8,6 +8,7 @@
 #include "app_battery.h"
 #include "app_calibration.h"
 #include "app_config.h"
+#include "app_version.h"
 #include "app_led.h"
 #include "app_log.h"
 #include "app_lrw.h"
@@ -29,15 +30,6 @@
 #include <stdint.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
-
-/* Defined by the build (CI passes -DAPP_VERSION_* / -DAPP_BUILD_TYPE, see
- * app/CMakeLists.txt). Fallbacks keep IDE/standalone tooling happy. */
-#ifndef APP_VERSION_MAJOR
-#define APP_VERSION_MAJOR 0
-#define APP_VERSION_MINOR 0
-#define APP_VERSION_PATCH 0
-#define APP_BUILD_TYPE    2
-#endif
 
 #define BLINK_INTERVAL_SECONDS 3
 #define NFC_CHECK_BLINKS       10
@@ -150,8 +142,8 @@ int main(void)
 {
 	int ret;
 
-	LOG_INF("Firmware version: %d.%d.%d (build type %d)", APP_VERSION_MAJOR,
-		APP_VERSION_MINOR, APP_VERSION_PATCH, APP_BUILD_TYPE);
+	LOG_INF("Firmware version: %d.%d.%d (%s)", APP_VERSION_MAJOR, APP_VERSION_MINOR,
+		APP_VERSION_PATCH, app_build_type_str(APP_BUILD_TYPE));
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
 
 	/* Shared HW init */
