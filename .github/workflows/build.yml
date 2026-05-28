@@ -68,7 +68,8 @@ jobs:
              ARGS=""
           fi
 
-          west build -p always -b sticker -- $ARGS
+          west build -p always -b sticker -- $ARGS \
+            -DAPP_VERSION_OVERRIDE=${{ steps.version.outputs.value }}
 
           mkdir -p ../artifacts
 

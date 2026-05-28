@@ -30,6 +30,12 @@
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
+/* Defined by the build (CI passes -DAPP_VERSION_OVERRIDE, see app/CMakeLists.txt).
+ * Fallback keeps IDE/standalone tooling happy. */
+#ifndef APP_VERSION_STRING
+#define APP_VERSION_STRING "dev"
+#endif
+
 #define BLINK_INTERVAL_SECONDS 3
 #define NFC_CHECK_BLINKS       10
 
@@ -141,6 +147,7 @@ int main(void)
 {
 	int ret;
 
+	LOG_INF("Firmware version: " APP_VERSION_STRING);
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
 
 	/* Shared HW init */
