@@ -6,6 +6,7 @@
 
 #include "app_alarm.h"
 #include "app_calibration.h"
+#include "app_clock.h"
 #include "app_compose.h"
 #include "app_config.h"
 #include "app_led.h"
@@ -134,6 +135,9 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 		LOG_HEXDUMP_INF(data, len, "Payload: ");
 	}
 
+	/* Set the RTC from the network if this downlink carried a DeviceTimeAns. */
+	app_clock_handle_downlink(flags);
+
 	k_work_submit_to_queue(&m_work_q, &m_downlink_success_work);
 }
 
@@ -210,6 +214,11 @@ static void join_complete_work_handler(struct k_work *work)
 	lorawan_enable_adr(g_app_config.lrw_adr);
 	atomic_set(&m_state, APP_LRW_STATE_HEALTHY);
 	m_rejoin_attempts = 0;
+
+	/* Request network time once joined; the answer sets the RTC asynchronously
+	 * in downlink_callback(). */
+	app_clock_request_sync();
+
 	restart_normal_operation();
 }
 
