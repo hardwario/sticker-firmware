@@ -939,3 +939,29 @@ int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
 	return 0;
 }
+
+int app_lrw_reset_nvm(void)
+{
+	/* Keys mirror the LoRaWAN NVM subtree members in
+	 * zephyr/subsys/lorawan/nvm/lorawan_nvm_settings.c. Deleting them clears
+	 * frame counters (FCntUp/Down), DevNonce and the cached session; a reboot
+	 * then makes the MAC re-init from a clean NVM. */
+	static const char *const keys[] = {
+		"lorawan/nvm/Crypto",       "lorawan/nvm/MacGroup1",
+		"lorawan/nvm/MacGroup2",    "lorawan/nvm/SecureElement",
+		"lorawan/nvm/RegionGroup1", "lorawan/nvm/RegionGroup2",
+		"lorawan/nvm/ClassB",
+	};
+	int ret = 0;
+
+	for (size_t i = 0; i < ARRAY_SIZE(keys); i++) {
+		int err = settings_delete(keys[i]);
+		if (err) {
+			LOG_WRN("settings_delete(%s) failed: %d", keys[i], err);
+			ret = err;
+		}
+	}
+
+	LOG_INF("LoRaWAN NVM cleared (frame counters + DevNonce); reboot required");
+	return ret;
+}

@@ -23,6 +23,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/sys/util.h>
 
 /* Standard includes */
@@ -592,9 +593,26 @@ static int cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_lrw_reset(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = app_lrw_reset_nvm();
+	if (ret) {
+		shell_warn(shell, "NVM clear reported errors: %d", ret);
+	}
+	shell_print(shell, "LoRaWAN frame counters + DevNonce reset; rebooting...");
+	k_sleep(K_MSEC(200)); /* let the shell flush */
+	sys_reboot(SYS_REBOOT_COLD);
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_lrw,
 	SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
 	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
+	SHELL_CMD_ARG(reset, NULL, "Reset LoRaWAN frame counters + DevNonce (reboots).",
+		      cmd_lrw_reset, 1, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* defined(CONFIG_LORAWAN) */
 

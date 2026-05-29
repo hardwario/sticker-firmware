@@ -58,6 +58,12 @@ bool app_lrw_is_ready(void);
  * a warning if a prior response hasn't been transmitted yet. */
 int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len);
 
+/* Erase the persisted LoRaWAN NVM context (frame counters, DevNonce, session).
+ * Used when re-provisioning credentials so a new ABP/OTAA identity starts from
+ * a clean state. The caller must reboot afterwards for the MAC to re-init from
+ * the cleared NVM. Returns 0 on success or a negative errno. */
+int app_lrw_reset_nvm(void);
+
 #ifdef __cplusplus
 }
 #endif
