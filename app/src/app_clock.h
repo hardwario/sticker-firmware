@@ -33,6 +33,11 @@ void app_clock_handle_downlink(uint8_t flags);
  * a NULL argument, or another negative errno from the RTC driver. */
 int app_clock_get_unix(uint32_t *unix_s);
 
+/* Set the RTC from a Unix timestamp (seconds, UTC). Mainly for testing /
+ * manual provisioning; the normal path is app_clock_handle_downlink(). Returns
+ * 0 on success or a negative errno from the RTC driver. */
+int app_clock_set_unix(uint32_t unix_s);
+
 #ifdef __cplusplus
 }
 #endif

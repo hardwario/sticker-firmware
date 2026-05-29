@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_clock.h"
 #include "app_ds18b20.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -21,9 +22,11 @@
 #include <zephyr/sys/util.h>
 
 /* Standard includes */
+#include <errno.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 LOG_MODULE_REGISTER(app_tester, LOG_LEVEL_DBG);
 
@@ -608,6 +611,51 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_led,
 		      cmd_switch_led, 3, 0),
 	SHELL_SUBCMD_SET_END);
 
+#if defined(CONFIG_RTC)
+static int cmd_clock(const struct shell *sh, size_t argc, char **argv)
+{
+	if (strcmp(argv[1], "get") == 0) {
+		uint32_t unix_s;
+		int ret = app_clock_get_unix(&unix_s);
+		if (ret == -ENODATA) {
+			shell_warn(sh, "RTC not set yet (no time sync)");
+			return 0;
+		}
+		if (ret) {
+			shell_error(sh, "app_clock_get_unix failed: %d", ret);
+			return ret;
+		}
+
+		time_t t = (time_t)unix_s;
+		struct tm tm;
+		gmtime_r(&t, &tm);
+		shell_print(sh, "unix=%u  UTC %04d-%02d-%02d %02d:%02d:%02d", unix_s,
+			    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
+			    tm.tm_sec);
+		return 0;
+	}
+
+	if (strcmp(argv[1], "set") == 0) {
+		if (argc < 3) {
+			shell_error(sh, "Usage: clock set <unix>");
+			return -EINVAL;
+		}
+
+		uint32_t unix_s = (uint32_t)strtoul(argv[2], NULL, 10);
+		int ret = app_clock_set_unix(unix_s);
+		if (ret) {
+			shell_error(sh, "app_clock_set_unix failed: %d", ret);
+			return ret;
+		}
+		shell_print(sh, "RTC set to unix=%u", unix_s);
+		return 0;
+	}
+
+	shell_error(sh, "Usage: clock get | clock set <unix>");
+	return -EINVAL;
+}
+#endif /* defined(CONFIG_RTC) */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_test,
 	SHELL_CMD(led, &sub_led, "LED commands.", NULL),
@@ -615,6 +663,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_LORAWAN)
 	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
 #endif /* defined(CONFIG_LORAWAN) */
+#if defined(CONFIG_RTC)
+	SHELL_CMD_ARG(clock, NULL, "RTC time. Usage: clock get | clock set <unix>", cmd_clock, 2,
+		      1),
+#endif /* defined(CONFIG_RTC) */
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(tester, &sub_test, "Tester commands.", NULL);

@@ -68,31 +68,15 @@ void app_clock_handle_downlink(uint8_t flags)
 		return;
 	}
 
-	time_t unix_time = (time_t)gps_time + GPS_UNIX_EPOCH_OFFSET - GPS_UTC_LEAP_SECONDS;
+	uint32_t unix_time = gps_time + GPS_UNIX_EPOCH_OFFSET - GPS_UTC_LEAP_SECONDS;
 
-	struct tm tm_utc;
-	gmtime_r(&unix_time, &tm_utc);
-
-	struct rtc_time rtc_tm = {
-		.tm_sec = tm_utc.tm_sec,
-		.tm_min = tm_utc.tm_min,
-		.tm_hour = tm_utc.tm_hour,
-		.tm_mday = tm_utc.tm_mday,
-		.tm_mon = tm_utc.tm_mon,
-		.tm_year = tm_utc.tm_year,
-		.tm_wday = tm_utc.tm_wday,
-		.tm_yday = tm_utc.tm_yday,
-		.tm_isdst = -1,
-		.tm_nsec = 0,
-	};
-
-	ret = rtc_set_time(m_rtc, &rtc_tm);
+	ret = app_clock_set_unix(unix_time);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("rtc_set_time", ret);
+		LOG_ERR_CALL_FAILED_INT("app_clock_set_unix", ret);
 		return;
 	}
 
-	LOG_INF("RTC synced from network: unix=%lld", (long long)unix_time);
+	LOG_INF("RTC synced from network: unix=%u", unix_time);
 #else
 	ARG_UNUSED(flags);
 #endif /* defined(CONFIG_LORAWAN) */
@@ -113,4 +97,27 @@ int app_clock_get_unix(uint32_t *unix_s)
 	*unix_s = (uint32_t)timeutil_timegm(rtc_time_to_tm(&rtc_tm));
 
 	return 0;
+}
+
+int app_clock_set_unix(uint32_t unix_s)
+{
+	time_t t = (time_t)unix_s;
+	struct tm tm_utc;
+
+	gmtime_r(&t, &tm_utc);
+
+	struct rtc_time rtc_tm = {
+		.tm_sec = tm_utc.tm_sec,
+		.tm_min = tm_utc.tm_min,
+		.tm_hour = tm_utc.tm_hour,
+		.tm_mday = tm_utc.tm_mday,
+		.tm_mon = tm_utc.tm_mon,
+		.tm_year = tm_utc.tm_year,
+		.tm_wday = tm_utc.tm_wday,
+		.tm_yday = tm_utc.tm_yday,
+		.tm_isdst = -1,
+		.tm_nsec = 0,
+	};
+
+	return rtc_set_time(m_rtc, &rtc_tm);
 }
