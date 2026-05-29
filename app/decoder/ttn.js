@@ -25,15 +25,6 @@ function _pbReadVarint(bytes, offset) {
   return { value: result >>> 0, next: pos };
 }
 
-function _pbBytesToHex(bytes) {
-  var hex = "";
-  for (var i = 0; i < bytes.length; i++) {
-    var h = bytes[i].toString(16);
-    hex += h.length === 1 ? "0" + h : h;
-  }
-  return hex;
-}
-
 function _pbBytesToAscii(bytes) {
   var s = "";
   for (var i = 0; i < bytes.length; i++) {
@@ -42,28 +33,35 @@ function _pbBytesToAscii(bytes) {
   return s;
 }
 
+var _BUILD_TYPES = ["main", "dev", "custom"];
+
 function _decodeInfo(bytes, start, end) {
-  var info = {};
+  var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false };
   var pos = start;
   while (pos < end) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
-    if (wire === 2) {
-      var len = _pbReadVarint(bytes, pos); pos = len.next;
-      var slice = bytes.slice(pos, pos + len.value);
-      if (field === 1) info.build_version = _pbBytesToAscii(slice);
-      else if (field === 2) info.dev_eui = _pbBytesToHex(slice);
-      else if (field === 4) info.board = _pbBytesToAscii(slice);
-      pos += len.value;
-    } else if (wire === 0) {
+    if (wire === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
-      if (field === 3) info.serial_number = v.value;
-      else if (field === 5) info.lrw_state = v.value;
+      if (field === 1) info.fw_major = v.value;
+      else if (field === 2) info.fw_minor = v.value;
+      else if (field === 3) info.fw_patch = v.value;
+      else if (field === 4) info.build_type = v.value;
+      else if (field === 5) info.serial_number = v.value;
+      else if (field === 6) info.uptime_s = v.value;
+      else if (field === 7) info.unix_time = v.value;
+      else if (field === 8) info.debug = v.value !== 0;
+    } else if (wire === 2) {
+      // Skip unknown length-delimited fields (forward compatibility).
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      pos += len.value;
     } else {
       break;
     }
   }
+  info.fw_version = info.fw_major + "." + info.fw_minor + "." + info.fw_patch;
+  info.build_type_name = _BUILD_TYPES[info.build_type] || "unknown";
   return info;
 }
 

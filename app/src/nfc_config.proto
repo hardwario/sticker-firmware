@@ -148,11 +148,24 @@ message DownlinkResponse {
     message Ack { }
 
     message Info {
-        string build_version = 1;
-        bytes  dev_eui       = 2;
-        uint32 serial_number = 3;
-        string board         = 4;
-        uint32 lrw_state     = 5;
+        // Firmware version (semver components). board and dev_eui are omitted
+        // on purpose — the LNS already knows them from the device context.
+        uint32 fw_major = 1;
+        uint32 fw_minor = 2;
+        uint32 fw_patch = 3;
+
+        // Source of the build (orthogonal to debug below).
+        enum BuildType {
+            MAIN   = 0;   // tagged build from main
+            DEV    = 1;   // CI build from a branch / PR
+            CUSTOM = 2;   // local / modified firmware
+        }
+        BuildType build_type = 4;
+
+        uint32 serial_number = 5;
+        uint32 uptime_s      = 6;   // seconds since boot
+        uint32 unix_time     = 7;   // wall-clock (UTC); 0/absent until RTC synced
+        bool   debug         = 8;   // true = debug build, false = release
     }
 
     message ConfigDump {
