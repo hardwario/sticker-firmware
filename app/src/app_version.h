@@ -7,15 +7,21 @@
 #ifndef APP_VERSION_H_
 #define APP_VERSION_H_
 
+#include <stdbool.h>
+#include <zephyr/sys/util.h> /* IS_ENABLED */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Firmware version + build type baked into the image. The build injects these
- * (CI passes -DAPP_VERSION_* / -DAPP_BUILD_TYPE, see app/CMakeLists.txt):
- *   tag v1.3.4 -> 1/3/4, build type RELEASE
- *   branch/PR  -> 0/0/0, build type DEV
- * Local builds without the override default to 0/0/0, build type CUSTOM.
+/* Firmware identity has two orthogonal axes:
+ *   1) version + source ("where the build came from") — injected by CI via
+ *      -DAPP_VERSION_* / -DAPP_BUILD_TYPE (see app/CMakeLists.txt):
+ *        tag v1.3.4 -> 1/3/4, build type MAIN
+ *        branch/PR  -> 0/0/0, build type DEV
+ *        local      -> 0/0/0, build type CUSTOM (CMake default)
+ *   2) configuration debug vs release — from CONFIG_FW_DEBUG (debug.conf sets
+ *      it y, release leaves it n), see app_version_is_debug().
  * The fallbacks below keep IDE/standalone tooling happy. */
 #ifndef APP_VERSION_MAJOR
 #define APP_VERSION_MAJOR 0
@@ -24,17 +30,18 @@ extern "C" {
 #define APP_BUILD_TYPE    2
 #endif
 
+/* Source of the build (orthogonal to the debug/release config). */
 enum app_build_type {
-	APP_BUILD_TYPE_RELEASE = 0, /* tagged release build */
-	APP_BUILD_TYPE_DEV     = 1, /* CI build from a branch / PR */
-	APP_BUILD_TYPE_CUSTOM  = 2, /* local / modified firmware */
+	APP_BUILD_TYPE_MAIN   = 0, /* tagged build from main */
+	APP_BUILD_TYPE_DEV    = 1, /* CI build from a branch / PR */
+	APP_BUILD_TYPE_CUSTOM = 2, /* local / modified firmware */
 };
 
 static inline const char *app_build_type_str(enum app_build_type type)
 {
 	switch (type) {
-	case APP_BUILD_TYPE_RELEASE:
-		return "release";
+	case APP_BUILD_TYPE_MAIN:
+		return "main";
 	case APP_BUILD_TYPE_DEV:
 		return "dev";
 	case APP_BUILD_TYPE_CUSTOM:
@@ -42,6 +49,12 @@ static inline const char *app_build_type_str(enum app_build_type type)
 	default:
 		return "unknown";
 	}
+}
+
+/* True for a debug build (debug.conf), false for release. */
+static inline bool app_version_is_debug(void)
+{
+	return IS_ENABLED(CONFIG_FW_DEBUG);
 }
 
 #ifdef __cplusplus

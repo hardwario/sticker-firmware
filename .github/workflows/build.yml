@@ -50,8 +50,9 @@ jobs:
         working-directory: sticker
         shell: bash
         run: |
-          # build_type: 0=RELEASE (tag), 1=DEV (branch/PR). Local builds
-          # default to 2=CUSTOM in CMake when no override is passed.
+          # build_type (source): 0=MAIN (tag), 1=DEV (branch/PR). Local builds
+          # default to 2=CUSTOM in CMake. The debug/release config is a separate
+          # axis (CONFIG_FW_DEBUG), driven by the matrix, not this value.
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="v${GITHUB_REF#refs/tags/v}"
             BUILD_TYPE=0

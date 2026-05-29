@@ -9,12 +9,13 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sticker)
 
-# Firmware version baked into the image (logged at boot, reported by the
-# GetInfo command). CI passes the numeric version components and build type
+# Firmware version + source baked into the image (logged at boot, reported by
+# the GetInfo command). CI passes the numeric version components and build type
 # via -DAPP_VERSION_* / -DAPP_BUILD_TYPE (see .github/workflows/build.yml):
-#   tag v1.3.4 -> 1/3/4, type 0 (RELEASE)
+#   tag v1.3.4 -> 1/3/4, type 0 (MAIN)
 #   branch/PR  -> 0/0/0, type 1 (DEV)
 # Local builds without the override default to 0/0/0, type 2 (CUSTOM).
+# The debug/release config is a separate axis (CONFIG_FW_DEBUG), not set here.
 if(NOT DEFINED APP_VERSION_MAJOR)
   set(APP_VERSION_MAJOR 0)
   set(APP_VERSION_MINOR 0)
