@@ -50,13 +50,36 @@ jobs:
         working-directory: sticker
         shell: bash
         run: |
+          # build_type (source): 0=MAIN (tag), 1=DEV (branch/PR). Local builds
+          # default to 2=CUSTOM in CMake. The debug/release config is a separate
+          # axis (CONFIG_FW_DEBUG), driven by the matrix, not this value.
+          #
+          # VERSION names the artifact (tag for releases, short hash otherwise).
+          # SEMVER is what gets baked into the firmware: the tag for releases,
+          # else the latest tag (so branch builds report the release they build
+          # on top of, matching the local git-describe behaviour in CMake).
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="v${GITHUB_REF#refs/tags/v}"
+            BUILD_TYPE=0
+            SEMVER="$VERSION"
           else
             VERSION="$(git rev-parse --short HEAD)"
+            BUILD_TYPE=1
+            SEMVER="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          fi
+
+          MAJOR=0; MINOR=0; PATCH=0
+          if [[ "$SEMVER" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            PATCH="${BASH_REMATCH[3]}"
           fi
 
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+          echo "minor=$MINOR" >> "$GITHUB_OUTPUT"
+          echo "patch=$PATCH" >> "$GITHUB_OUTPUT"
+          echo "build_type=$BUILD_TYPE" >> "$GITHUB_OUTPUT"
 
       - name: Build firmware
         working-directory: sticker/app
@@ -68,7 +91,11 @@ jobs:
              ARGS=""
           fi
 
-          west build -p always -b sticker -- $ARGS
+          west build -p always -b sticker -- $ARGS \
+            -DAPP_VERSION_MAJOR=${{ steps.version.outputs.major }} \
+            -DAPP_VERSION_MINOR=${{ steps.version.outputs.minor }} \
+            -DAPP_VERSION_PATCH=${{ steps.version.outputs.patch }} \
+            -DAPP_BUILD_TYPE=${{ steps.version.outputs.build_type }}
 
           mkdir -p ../artifacts
 

@@ -8,6 +8,7 @@
 #include "app_battery.h"
 #include "app_calibration.h"
 #include "app_config.h"
+#include "app_version.h"
 #include "app_led.h"
 #include "app_log.h"
 #include "app_lrw.h"
@@ -141,6 +142,9 @@ int main(void)
 {
 	int ret;
 
+	LOG_INF("Firmware version: %d.%d.%d (%s, %s)", APP_VERSION_MAJOR, APP_VERSION_MINOR,
+		APP_VERSION_PATCH, app_build_type_str(APP_BUILD_TYPE),
+		app_version_is_debug() ? "debug" : "release");
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
 
 	/* Shared HW init */

@@ -9,6 +9,39 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sticker)
 
+# Firmware version + source baked into the image (logged at boot, reported by
+# the GetInfo command). CI passes the numeric version components and build type
+# via -DAPP_VERSION_* / -DAPP_BUILD_TYPE (see .github/workflows/build.yml):
+#   tag v1.3.4 -> 1/3/4, type 0 (MAIN)
+#   branch/PR  -> 0/0/0, type 1 (DEV)
+# Local builds (no override) derive the version from the latest git tag and are
+# always type 2 (CUSTOM); they fall back to 0/0/0 if git/tags are unavailable.
+# The debug/release config is a separate axis (CONFIG_FW_DEBUG), not set here.
+if(NOT DEFINED APP_VERSION_MAJOR)
+  set(APP_BUILD_TYPE 2) # CUSTOM
+  execute_process(
+    COMMAND git describe --tags --abbrev=0
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE APP_GIT_TAG
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(APP_GIT_TAG MATCHES "^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    set(APP_VERSION_MAJOR ${CMAKE_MATCH_1})
+    set(APP_VERSION_MINOR ${CMAKE_MATCH_2})
+    set(APP_VERSION_PATCH ${CMAKE_MATCH_3})
+  else()
+    set(APP_VERSION_MAJOR 0)
+    set(APP_VERSION_MINOR 0)
+    set(APP_VERSION_PATCH 0)
+  endif()
+endif()
+add_compile_definitions(
+  APP_VERSION_MAJOR=${APP_VERSION_MAJOR}
+  APP_VERSION_MINOR=${APP_VERSION_MINOR}
+  APP_VERSION_PATCH=${APP_VERSION_PATCH}
+  APP_BUILD_TYPE=${APP_BUILD_TYPE})
+message(STATUS "Firmware version: ${APP_VERSION_MAJOR}.${APP_VERSION_MINOR}.${APP_VERSION_PATCH} (build type ${APP_BUILD_TYPE})")
+
 list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
 include(nanopb)
 
