@@ -612,48 +612,48 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_led,
 	SHELL_SUBCMD_SET_END);
 
 #if defined(CONFIG_RTC)
-static int cmd_clock(const struct shell *sh, size_t argc, char **argv)
+static int cmd_clock_get(const struct shell *sh, size_t argc, char **argv)
 {
-	if (strcmp(argv[1], "get") == 0) {
-		uint32_t unix_s;
-		int ret = app_clock_get_unix(&unix_s);
-		if (ret == -ENODATA) {
-			shell_warn(sh, "RTC not set yet (no time sync)");
-			return 0;
-		}
-		if (ret) {
-			shell_error(sh, "app_clock_get_unix failed: %d", ret);
-			return ret;
-		}
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
 
-		time_t t = (time_t)unix_s;
-		struct tm tm;
-		gmtime_r(&t, &tm);
-		shell_print(sh, "unix=%u  UTC %04d-%02d-%02d %02d:%02d:%02d", unix_s,
-			    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
-			    tm.tm_sec);
+	uint32_t unix_s;
+	int ret = app_clock_get_unix(&unix_s);
+	if (ret == -ENODATA) {
+		shell_warn(sh, "RTC not set yet (no time sync)");
 		return 0;
 	}
-
-	if (strcmp(argv[1], "set") == 0) {
-		if (argc < 3) {
-			shell_error(sh, "Usage: clock set <unix>");
-			return -EINVAL;
-		}
-
-		uint32_t unix_s = (uint32_t)strtoul(argv[2], NULL, 10);
-		int ret = app_clock_set_unix(unix_s);
-		if (ret) {
-			shell_error(sh, "app_clock_set_unix failed: %d", ret);
-			return ret;
-		}
-		shell_print(sh, "RTC set to unix=%u", unix_s);
-		return 0;
+	if (ret) {
+		shell_error(sh, "app_clock_get_unix failed: %d", ret);
+		return ret;
 	}
 
-	shell_error(sh, "Usage: clock get | clock set <unix>");
-	return -EINVAL;
+	time_t t = (time_t)unix_s;
+	struct tm tm;
+	gmtime_r(&t, &tm);
+	shell_print(sh, "unix=%u  UTC %04d-%02d-%02d %02d:%02d:%02d", unix_s, tm.tm_year + 1900,
+		    tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+	return 0;
 }
+
+static int cmd_clock_set(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	uint32_t unix_s = (uint32_t)strtoul(argv[1], NULL, 10);
+	int ret = app_clock_set_unix(unix_s);
+	if (ret) {
+		shell_error(sh, "app_clock_set_unix failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "RTC set to unix=%u", unix_s);
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_clock,
+	SHELL_CMD_ARG(get, NULL, "Read RTC time.", cmd_clock_get, 1, 0),
+	SHELL_CMD_ARG(set, NULL, "Set RTC time. Usage: set <unix>", cmd_clock_set, 2, 0),
+	SHELL_SUBCMD_SET_END);
 #endif /* defined(CONFIG_RTC) */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
@@ -664,8 +664,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
 #endif /* defined(CONFIG_LORAWAN) */
 #if defined(CONFIG_RTC)
-	SHELL_CMD_ARG(clock, NULL, "RTC time. Usage: clock get | clock set <unix>", cmd_clock, 2,
-		      1),
+	SHELL_CMD(clock, &sub_clock, "RTC time commands.", NULL),
 #endif /* defined(CONFIG_RTC) */
 	SHELL_SUBCMD_SET_END);
 
