@@ -37,6 +37,17 @@ config APP_LORAWAN_1_1
 	  USE_LRWAN_1_1_X_CRYPTO=1; the Kconfig only flips the app-level
 	  key wiring.
 
+config APP_CMD_DEBUG_SHELL
+	bool "Shell injector for downlink command dispatcher"
+	depends on SHELL
+	default n
+	help
+	  Enable `tester cmd <transport> <hex>` for end-to-end testing
+	  of the downlink command dispatcher without a LoRaWAN gateway.
+	  The hex payload is fed to app_cmd_handle as if it had arrived
+	  from the given transport (lrw or nfc) and the encoded response
+	  is logged and (for lrw) queued on port 85.
+
 endmenu
 
 menu "Zephyr Kernel"

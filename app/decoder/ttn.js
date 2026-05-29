@@ -3,7 +3,124 @@ function Decode(fPort, bytes, variables) {
   return decodeUplink({ fPort: fPort, bytes: bytes }).data;
 }
 
+// Minimal protobuf wire-format reader for DownlinkResponse on fPort 85.
+// Avoids pulling in protobufjs (TTN/ChirpStack JS sandboxes typically
+// block require()). Only handles varint (wire 0) and length-delimited
+// (wire 2) — enough for DownlinkResponse{ seq, Info{...}, Error{...} }.
+function _pbReadVarint(bytes, offset) {
+  var result = 0;
+  var shift = 0;
+  var pos = offset;
+  while (pos < bytes.length) {
+    var b = bytes[pos++];
+    result |= (b & 0x7f) << shift;
+    if ((b & 0x80) === 0) {
+      return { value: result >>> 0, next: pos };
+    }
+    shift += 7;
+    if (shift >= 32) {
+      return { value: result >>> 0, next: pos };
+    }
+  }
+  return { value: result >>> 0, next: pos };
+}
+
+function _pbBytesToAscii(bytes) {
+  var s = "";
+  for (var i = 0; i < bytes.length; i++) {
+    s += String.fromCharCode(bytes[i]);
+  }
+  return s;
+}
+
+var _BUILD_TYPES = ["main", "dev", "custom"];
+
+function _decodeInfo(bytes, start, end) {
+  var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false };
+  var pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var field = tag.value >>> 3;
+    var wire = tag.value & 0x7;
+    if (wire === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (field === 1) info.fw_major = v.value;
+      else if (field === 2) info.fw_minor = v.value;
+      else if (field === 3) info.fw_patch = v.value;
+      else if (field === 4) info.build_type = v.value;
+      else if (field === 5) info.serial_number = v.value;
+      else if (field === 6) info.uptime_s = v.value;
+      else if (field === 7) info.unix_time = v.value;
+      else if (field === 8) info.debug = v.value !== 0;
+    } else if (wire === 2) {
+      // Skip unknown length-delimited fields (forward compatibility).
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      pos += len.value;
+    } else {
+      break;
+    }
+  }
+  info.fw_version = info.fw_major + "." + info.fw_minor + "." + info.fw_patch;
+  info.build_type_name = _BUILD_TYPES[info.build_type] || "unknown";
+  return info;
+}
+
+function _decodeError(bytes, start, end) {
+  var err = {};
+  var pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var field = tag.value >>> 3;
+    var wire = tag.value & 0x7;
+    if (wire === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (field === 1) err.code = v.value;
+      else if (field === 2) err.fault_field = v.value;
+    } else if (wire === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      if (field === 3) err.detail = _pbBytesToAscii(bytes.slice(pos, pos + len.value));
+      pos += len.value;
+    } else {
+      break;
+    }
+  }
+  return err;
+}
+
+function decodeDownlinkResponse(bytes) {
+  var resp = {};
+  var pos = 0;
+  while (pos < bytes.length) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var field = tag.value >>> 3;
+    var wire = tag.value & 0x7;
+    if (wire === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (field === 1) resp.seq = v.value;
+    } else if (wire === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      var end = pos + len.value;
+      if (field === 2) resp.ack = {};
+      else if (field === 3) resp.info = _decodeInfo(bytes, pos, end);
+      else if (field === 6) resp.error = _decodeError(bytes, pos, end);
+      pos = end;
+    } else {
+      break;
+    }
+  }
+  return resp;
+}
+
 function decodeUplink(input) {
+
+  // fPort 85: DownlinkResponse (Ack / Info / Error from command dispatcher).
+  if (input.fPort === 85) {
+    return {
+      data: decodeDownlinkResponse(input.bytes),
+      warnings: [],
+      errors: []
+    };
+  }
 
   function toSignedInt16(value) {
     return value > 0x7fff ? value - 0x10000 : value;

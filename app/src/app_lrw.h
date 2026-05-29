@@ -52,6 +52,18 @@ enum app_lrw_state app_lrw_get_state(void);
 int app_lrw_get_info(struct app_lrw_info *info);
 bool app_lrw_is_ready(void);
 
+/* Stage a serialized response (e.g. DownlinkResponse on port 85) for the next
+ * uplink. send_work_handler() drains this slot before composing telemetry, so
+ * the response leaves at the next jitter window. Single-slot, overwritten with
+ * a warning if a prior response hasn't been transmitted yet. */
+int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len);
+
+/* Erase the persisted LoRaWAN NVM context (frame counters, DevNonce, session).
+ * Used when re-provisioning credentials so a new ABP/OTAA identity starts from
+ * a clean state. The caller must reboot afterwards for the MAC to re-init from
+ * the cleared NVM. Returns 0 on success or a negative errno. */
+int app_lrw_reset_nvm(void);
+
 #ifdef __cplusplus
 }
 #endif
