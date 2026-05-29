@@ -32,6 +32,11 @@ LOG_MODULE_REGISTER(app_clock, LOG_LEVEL_INF);
 
 static const struct device *const m_rtc = DEVICE_DT_GET(DT_NODELABEL(rtc));
 
+/* Set once the RTC has been synced from the network this session. Guards
+ * against re-requesting DeviceTimeReq, which would pile up MAC commands and
+ * push the uplink over the payload limit (Length error). */
+static bool m_time_synced;
+
 int app_clock_init(void)
 {
 	if (!device_is_ready(m_rtc)) {
@@ -45,7 +50,14 @@ int app_clock_init(void)
 void app_clock_request_sync(void)
 {
 #if defined(CONFIG_LORAWAN)
-	int ret = lorawan_request_device_time(true);
+	if (m_time_synced) {
+		/* Already have network time; don't queue another DeviceTimeReq. */
+		return;
+	}
+
+	/* force_request=false: piggyback the MAC command on the next regular
+	 * uplink instead of sending an extra empty message. */
+	int ret = lorawan_request_device_time(false);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lorawan_request_device_time", ret);
 	} else {
@@ -76,6 +88,7 @@ void app_clock_handle_downlink(uint8_t flags)
 		return;
 	}
 
+	m_time_synced = true;
 	LOG_INF("RTC synced from network: unix=%u", unix_time);
 #else
 	ARG_UNUSED(flags);

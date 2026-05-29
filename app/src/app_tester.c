@@ -672,9 +672,21 @@ static int cmd_clock_set(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_clock_sync(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	app_clock_request_sync();
+	shell_print(sh, "DeviceTimeReq requested; RTC updates on the next downlink");
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_clock,
 	SHELL_CMD_ARG(get, NULL, "Read RTC time.", cmd_clock_get, 1, 0),
 	SHELL_CMD_ARG(set, NULL, "Set RTC time. Usage: set <unix>", cmd_clock_set, 2, 0),
+	SHELL_CMD_ARG(sync, NULL, "Request network time (LoRaWAN DeviceTimeReq).", cmd_clock_sync,
+		      1, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* defined(CONFIG_RTC) */
 

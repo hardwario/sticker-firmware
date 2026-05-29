@@ -522,7 +522,9 @@ static void join_work_handler(struct k_work *work)
 		return;
 	}
 
-	/* For ABP, explicitly set RX delays to match network configuration */
+	/* For ABP, explicitly set RX delays to match network configuration. The
+	 * LNS round-trip is fast (~170 ms on this gateway), so the LoRaWAN default
+	 * 1s/2s windows are sufficient. Must match the LNS rx1_delay setting. */
 	if (config.mode == LORAWAN_ACT_ABP) {
 		MibRequestConfirm_t mib_req;
 
