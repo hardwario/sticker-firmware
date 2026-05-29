@@ -7,6 +7,7 @@
 #include "app_alarm.h"
 #include "app_battery.h"
 #include "app_calibration.h"
+#include "app_clock.h"
 #include "app_config.h"
 #include "app_version.h"
 #include "app_led.h"
@@ -220,6 +221,11 @@ int main(void)
 #endif /* defined(CONFIG_WATCHDOG) */
 
 	play_carousel_boot();
+
+	ret = app_clock_init();
+	if (ret) {
+		LOG_WRN("app_clock_init failed: %d (wall-clock unavailable)", ret);
+	}
 
 #if defined(CONFIG_LORAWAN)
 	ret = app_lrw_init();
