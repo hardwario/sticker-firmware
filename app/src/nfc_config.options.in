@@ -8,3 +8,8 @@ NfcConfigMessage.Lorawan.appskey max_length:32
 
 DownlinkResponse.Error.detail       max_size:32
 DownlinkResponse.HistoryFrame.samples max_size:48
+
+# GetParam field-id lists as static arrays (no nanopb callback). A batch is
+# bounded by the LoRaWAN downlink size anyway, so 16 ids each is plenty.
+DownlinkCommand.GetParam.lorawan_field     max_count:16
+DownlinkCommand.GetParam.application_field max_count:16

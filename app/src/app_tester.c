@@ -667,13 +667,20 @@ static int cmd_cmd_inject(const struct shell *sh, size_t argc, char **argv)
 
 	static uint8_t out[64];
 	size_t out_len = 0;
-	int ret = app_cmd_handle(transport, in, in_len, out, sizeof(out), &out_len);
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	int ret = app_cmd_handle(transport, in, in_len, out, sizeof(out), &out_len, &action);
 	if (ret) {
 		shell_error(sh, "app_cmd_handle failed: %d", ret);
 		return ret;
 	}
 
 	LOG_HEXDUMP_INF(out, out_len, "DownlinkResponse:");
+
+	/* Don't reboot the bench from a shell inject — just report what an LRW
+	 * downlink would trigger. Use `settings save` / `settings reset` to apply. */
+	if (action != APP_CMD_ACTION_NONE) {
+		shell_print(sh, "deferred action %d (not executed from shell inject)", (int)action);
+	}
 
 #if defined(CONFIG_LORAWAN)
 	if (transport == APP_CMD_TRANSPORT_LRW && out_len > 0) {

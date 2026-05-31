@@ -236,10 +236,19 @@ void app_input_clear_notify_flags(struct app_input_data *data)
 	k_mutex_unlock(&m_input_data_mutex);
 }
 
-void app_input_reset_counts(void)
+void app_input_reset_count(bool input_a, bool input_b)
 {
 	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
-	m_input_data.input_a_count = 0;
-	m_input_data.input_b_count = 0;
+	if (input_a) {
+		m_input_data.input_a_count = 0;
+	}
+	if (input_b) {
+		m_input_data.input_b_count = 0;
+	}
 	k_mutex_unlock(&m_input_data_mutex);
+}
+
+void app_input_reset_counts(void)
+{
+	app_input_reset_count(true, true);
 }

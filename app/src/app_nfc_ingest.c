@@ -13,11 +13,38 @@
 #include <zephyr/sys/util.h>
 
 /* Standard includes */
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(app_nfc_ingest, LOG_LEVEL_DBG);
+
+/* Record the first offending proto field tag and mark the result invalid. The
+ * apply still processes the remaining fields (best effort) so NFC ingest keeps
+ * its "skip invalid, apply the rest" behaviour; SetParam inspects fault_field. */
+#define FAULT(tag)                                                                                 \
+	do {                                                                                       \
+		if (fault_field && *fault_field == 0) {                                            \
+			*fault_field = (tag);                                                      \
+		}                                                                                  \
+		ret = -EINVAL;                                                                     \
+	} while (0)
+
+#define APPLY_BOOL(field)                                                                          \
+	if (src->has_##field) {                                                                    \
+		config->field = src->field;                                                        \
+	}
+
+#define APPLY_FLOAT(field, lo, hi, tag)                                                            \
+	if (src->has_##field) {                                                                    \
+		if (src->field >= (lo) && src->field <= (hi)) {                                    \
+			config->field = src->field;                                                \
+		} else {                                                                           \
+			LOG_WRN("Invalid " #field);                                                 \
+			FAULT(tag);                                                                \
+		}                                                                                  \
+	}
 
 static bool parse_hex_string(const char *hex_str, uint8_t *buf, size_t buf_len)
 {
@@ -40,542 +67,305 @@ static bool parse_hex_string(const char *hex_str, uint8_t *buf, size_t buf_len)
 	return true;
 }
 
-bool app_nfc_ingest(const NfcConfigMessage *message)
+int app_config_apply_lorawan(const NfcConfigMessage_Lorawan *src, uint32_t *fault_field)
 {
 	struct app_config *config = app_config();
+	int ret = 0;
 
+	if (fault_field) {
+		*fault_field = 0;
+	}
+
+	if (src->has_region) {
+		if ((int)src->region >= 0 && (int)src->region <= (int)APP_CONFIG_LRW_REGION_AU915) {
+			config->lrw_region = (enum app_config_lrw_region)src->region;
+		} else {
+			FAULT(1);
+		}
+	}
+	if (src->has_network) {
+		if ((int)src->network >= 0 &&
+		    (int)src->network <= (int)APP_CONFIG_LRW_NETWORK_PRIVATE) {
+			config->lrw_network = (enum app_config_lrw_network)src->network;
+		} else {
+			FAULT(2);
+		}
+	}
+	if (src->has_adr) {
+		config->lrw_adr = src->adr;
+	}
+	if (src->has_activation) {
+		if ((int)src->activation >= 0 &&
+		    (int)src->activation <= (int)APP_CONFIG_LRW_ACTIVATION_ABP) {
+			config->lrw_activation = (enum app_config_lrw_activation)src->activation;
+		} else {
+			FAULT(4);
+		}
+	}
+	if (src->has_deveui &&
+	    !parse_hex_string(src->deveui, config->lrw_deveui, sizeof(config->lrw_deveui))) {
+		FAULT(5);
+	}
+	if (src->has_joineui &&
+	    !parse_hex_string(src->joineui, config->lrw_joineui, sizeof(config->lrw_joineui))) {
+		FAULT(6);
+	}
+	if (src->has_nwkkey &&
+	    !parse_hex_string(src->nwkkey, config->lrw_nwkkey, sizeof(config->lrw_nwkkey))) {
+		FAULT(7);
+	}
+	if (src->has_appkey &&
+	    !parse_hex_string(src->appkey, config->lrw_appkey, sizeof(config->lrw_appkey))) {
+		FAULT(8);
+	}
+	if (src->has_devaddr &&
+	    !parse_hex_string(src->devaddr, config->lrw_devaddr, sizeof(config->lrw_devaddr))) {
+		FAULT(9);
+	}
+	if (src->has_nwkskey &&
+	    !parse_hex_string(src->nwkskey, config->lrw_nwkskey, sizeof(config->lrw_nwkskey))) {
+		FAULT(10);
+	}
+	if (src->has_appskey &&
+	    !parse_hex_string(src->appskey, config->lrw_appskey, sizeof(config->lrw_appskey))) {
+		FAULT(11);
+	}
+	if (src->has_sub_band) {
+		if (src->sub_band <= 8) {
+			config->lrw_sub_band = (int)src->sub_band;
+		} else {
+			FAULT(12);
+		}
+	}
+
+	return ret;
+}
+
+int app_config_apply_application(const NfcConfigMessage_Application *src, uint32_t *fault_field)
+{
+	struct app_config *config = app_config();
+	int ret = 0;
+
+	if (fault_field) {
+		*fault_field = 0;
+	}
+
+	APPLY_BOOL(calibration);
+
+	if (src->has_interval_sample) {
+		int val = src->interval_sample;
+
+		if (val == 0 || (val >= 5 && val <= 3600)) {
+			config->interval_sample = val;
+		} else {
+			FAULT(2);
+		}
+	}
+	/* interval_aggreg (tag 3) has no app_config counterpart — unsupported */
+	if (src->has_interval_report) {
+		int val = src->interval_report;
+
+		if (val >= 60 && val <= 86400) {
+			config->interval_report = val;
+		} else {
+			FAULT(4);
+		}
+	}
+
+	APPLY_BOOL(alarm_temperature_enabled);
+	APPLY_FLOAT(alarm_temperature_lo, -30.0f, 70.0f, 6);
+	APPLY_FLOAT(alarm_temperature_hi, -30.0f, 70.0f, 7);
+	APPLY_FLOAT(alarm_temperature_hst, 0.0f, 5.0f, 8);
+	APPLY_BOOL(alarm_humidity_enabled);
+	APPLY_FLOAT(alarm_humidity_lo, 0.0f, 100.0f, 10);
+	APPLY_FLOAT(alarm_humidity_hi, 0.0f, 100.0f, 11);
+	APPLY_FLOAT(alarm_humidity_hst, 0.0f, 20.0f, 12);
+	APPLY_BOOL(alarm_pressure_enabled);
+	APPLY_FLOAT(alarm_pressure_lo, 500.0f, 1200.0f, 14);
+	APPLY_FLOAT(alarm_pressure_hi, 500.0f, 1200.0f, 15);
+	APPLY_FLOAT(alarm_pressure_hst, 0.0f, 50.0f, 16);
+	APPLY_BOOL(alarm_t1_temperature_enabled);
+	APPLY_FLOAT(alarm_t1_temperature_lo, -30.0f, 70.0f, 18);
+	APPLY_FLOAT(alarm_t1_temperature_hi, -30.0f, 70.0f, 19);
+	APPLY_FLOAT(alarm_t1_temperature_hst, 0.0f, 5.0f, 20);
+	APPLY_BOOL(alarm_t2_temperature_enabled);
+	APPLY_FLOAT(alarm_t2_temperature_lo, -30.0f, 70.0f, 22);
+	APPLY_FLOAT(alarm_t2_temperature_hi, -30.0f, 70.0f, 23);
+	APPLY_FLOAT(alarm_t2_temperature_hst, 0.0f, 5.0f, 24);
+
+	APPLY_BOOL(hall_left_counter);
+	APPLY_BOOL(hall_left_notify_act);
+	APPLY_BOOL(hall_left_notify_deact);
+	APPLY_BOOL(hall_right_counter);
+	APPLY_BOOL(hall_right_notify_act);
+	APPLY_BOOL(hall_right_notify_deact);
+	APPLY_BOOL(input_a_counter);
+	APPLY_BOOL(input_a_notify_act);
+	APPLY_BOOL(input_a_notify_deact);
+	APPLY_BOOL(input_b_counter);
+	APPLY_BOOL(input_b_notify_act);
+	APPLY_BOOL(input_b_notify_deact);
+
+	APPLY_FLOAT(corr_temperature, -5.0f, 5.0f, 37);
+	APPLY_FLOAT(corr_t1_temperature, -5.0f, 5.0f, 38);
+	APPLY_FLOAT(corr_t2_temperature, -5.0f, 5.0f, 39);
+
+	APPLY_BOOL(cap_hall_left);
+	APPLY_BOOL(cap_hall_right);
+	APPLY_BOOL(cap_input_a);
+	APPLY_BOOL(cap_input_b);
+	APPLY_BOOL(cap_light_sensor);
+	APPLY_BOOL(cap_barometer);
+	APPLY_BOOL(cap_pir_detector);
+	APPLY_BOOL(cap_1w_thermometer);
+	APPLY_BOOL(cap_1w_machine_probe);
+
+	/* Cross-validate alarm lo/hi pairs — disable the alarm if lo >= hi */
+	if (config->alarm_temperature_lo >= config->alarm_temperature_hi) {
+		config->alarm_temperature_enabled = false;
+	}
+	if (config->alarm_humidity_lo >= config->alarm_humidity_hi) {
+		config->alarm_humidity_enabled = false;
+	}
+	if (config->alarm_pressure_lo >= config->alarm_pressure_hi) {
+		config->alarm_pressure_enabled = false;
+	}
+	if (config->alarm_t1_temperature_lo >= config->alarm_t1_temperature_hi) {
+		config->alarm_t1_temperature_enabled = false;
+	}
+	if (config->alarm_t2_temperature_lo >= config->alarm_t2_temperature_hi) {
+		config->alarm_t2_temperature_enabled = false;
+	}
+
+	return ret;
+}
+
+static bool requested(const uint32_t *ids, size_t n, uint32_t tag)
+{
+	for (size_t i = 0; i < n; i++) {
+		if (ids[i] == tag) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void app_config_fill_lorawan(NfcConfigMessage_Lorawan *dst, const uint32_t *ids, size_t n)
+{
+	const struct app_config *c = app_config();
+
+	if (requested(ids, n, 1)) {
+		dst->has_region = true;
+		dst->region = (NfcConfigMessage_Lorawan_Region)c->lrw_region;
+	}
+	if (requested(ids, n, 2)) {
+		dst->has_network = true;
+		dst->network = (NfcConfigMessage_Lorawan_Network)c->lrw_network;
+	}
+	if (requested(ids, n, 3)) {
+		dst->has_adr = true;
+		dst->adr = c->lrw_adr;
+	}
+	if (requested(ids, n, 4)) {
+		dst->has_activation = true;
+		dst->activation = (NfcConfigMessage_Lorawan_Activation)c->lrw_activation;
+	}
+	if (requested(ids, n, 5)) {
+		dst->has_deveui = true;
+		bin2hex(c->lrw_deveui, sizeof(c->lrw_deveui), dst->deveui, sizeof(dst->deveui));
+	}
+	if (requested(ids, n, 6)) {
+		dst->has_joineui = true;
+		bin2hex(c->lrw_joineui, sizeof(c->lrw_joineui), dst->joineui, sizeof(dst->joineui));
+	}
+	/* nwkkey/appkey/nwkskey/appskey (tags 7,8,10,11) are secrets — not dumped */
+	if (requested(ids, n, 9)) {
+		dst->has_devaddr = true;
+		bin2hex(c->lrw_devaddr, sizeof(c->lrw_devaddr), dst->devaddr, sizeof(dst->devaddr));
+	}
+	if (requested(ids, n, 12)) {
+		dst->has_sub_band = true;
+		dst->sub_band = (uint32_t)c->lrw_sub_band;
+	}
+}
+
+#define FILL_BOOL(tag, field)                                                                      \
+	if (requested(ids, n, tag)) {                                                              \
+		dst->has_##field = true;                                                            \
+		dst->field = c->field;                                                             \
+	}
+#define FILL_NUM(tag, field)                                                                       \
+	if (requested(ids, n, tag)) {                                                              \
+		dst->has_##field = true;                                                            \
+		dst->field = c->field;                                                             \
+	}
+
+void app_config_fill_application(NfcConfigMessage_Application *dst, const uint32_t *ids, size_t n)
+{
+	const struct app_config *c = app_config();
+
+	FILL_BOOL(1, calibration);
+	FILL_NUM(2, interval_sample);
+	FILL_NUM(4, interval_report);
+	FILL_BOOL(5, alarm_temperature_enabled);
+	FILL_NUM(6, alarm_temperature_lo);
+	FILL_NUM(7, alarm_temperature_hi);
+	FILL_NUM(8, alarm_temperature_hst);
+	FILL_BOOL(9, alarm_humidity_enabled);
+	FILL_NUM(10, alarm_humidity_lo);
+	FILL_NUM(11, alarm_humidity_hi);
+	FILL_NUM(12, alarm_humidity_hst);
+	FILL_BOOL(13, alarm_pressure_enabled);
+	FILL_NUM(14, alarm_pressure_lo);
+	FILL_NUM(15, alarm_pressure_hi);
+	FILL_NUM(16, alarm_pressure_hst);
+	FILL_BOOL(17, alarm_t1_temperature_enabled);
+	FILL_NUM(18, alarm_t1_temperature_lo);
+	FILL_NUM(19, alarm_t1_temperature_hi);
+	FILL_NUM(20, alarm_t1_temperature_hst);
+	FILL_BOOL(21, alarm_t2_temperature_enabled);
+	FILL_NUM(22, alarm_t2_temperature_lo);
+	FILL_NUM(23, alarm_t2_temperature_hi);
+	FILL_NUM(24, alarm_t2_temperature_hst);
+	FILL_BOOL(25, hall_left_counter);
+	FILL_BOOL(26, hall_left_notify_act);
+	FILL_BOOL(27, hall_left_notify_deact);
+	FILL_BOOL(28, hall_right_counter);
+	FILL_BOOL(29, hall_right_notify_act);
+	FILL_BOOL(30, hall_right_notify_deact);
+	FILL_BOOL(31, input_a_counter);
+	FILL_BOOL(32, input_a_notify_act);
+	FILL_BOOL(33, input_a_notify_deact);
+	FILL_BOOL(34, input_b_counter);
+	FILL_BOOL(35, input_b_notify_act);
+	FILL_BOOL(36, input_b_notify_deact);
+	FILL_NUM(37, corr_temperature);
+	FILL_NUM(38, corr_t1_temperature);
+	FILL_NUM(39, corr_t2_temperature);
+	FILL_BOOL(40, cap_hall_left);
+	FILL_BOOL(41, cap_hall_right);
+	FILL_BOOL(42, cap_input_a);
+	FILL_BOOL(43, cap_input_b);
+	FILL_BOOL(44, cap_light_sensor);
+	FILL_BOOL(45, cap_barometer);
+	FILL_BOOL(46, cap_pir_detector);
+	FILL_BOOL(47, cap_1w_thermometer);
+	FILL_BOOL(48, cap_1w_machine_probe);
+}
+
+bool app_nfc_ingest(const NfcConfigMessage *message)
+{
 	if (message->has_factory && message->factory) {
 		LOG_INF("Factory reset requested via NFC");
 		return true;
 	}
 
+	/* NFC keeps best-effort semantics: apply valid fields, ignore invalid. */
 	if (message->has_lorawan) {
-		if (message->lorawan.has_region) {
-			LOG_INF_PARAM_INT("lorawan.region", message->lorawan.region);
-			if ((int)message->lorawan.region >= 0 &&
-			    (int)message->lorawan.region <= (int)APP_CONFIG_LRW_REGION_AU915) {
-				config->lrw_region =
-					(enum app_config_lrw_region)message->lorawan.region;
-			} else {
-				LOG_WRN("Ignoring invalid lorawan.region: %d",
-					message->lorawan.region);
-			}
-		}
-
-		if (message->lorawan.has_sub_band) {
-			LOG_INF_PARAM_INT("lorawan.sub_band", message->lorawan.sub_band);
-			if (message->lorawan.sub_band <= 8) {
-				config->lrw_sub_band = (int)message->lorawan.sub_band;
-			} else {
-				LOG_WRN("Ignoring invalid lorawan.sub_band: %u",
-					message->lorawan.sub_band);
-			}
-		}
-
-		if (message->lorawan.has_network) {
-			LOG_INF_PARAM_INT("lorawan.network", message->lorawan.network);
-			if ((int)message->lorawan.network >= 0 &&
-			    (int)message->lorawan.network <= (int)APP_CONFIG_LRW_NETWORK_PRIVATE) {
-				config->lrw_network =
-					(enum app_config_lrw_network)message->lorawan.network;
-			} else {
-				LOG_WRN("Ignoring invalid lorawan.network: %d",
-					message->lorawan.network);
-			}
-		}
-
-		if (message->lorawan.has_adr) {
-			LOG_INF_PARAM_BOOL("lorawan.adr", message->lorawan.adr);
-			config->lrw_adr = message->lorawan.adr;
-		}
-
-		if (message->lorawan.has_activation) {
-			LOG_INF_PARAM_INT("lorawan.activation", message->lorawan.activation);
-			if ((int)message->lorawan.activation >= 0 &&
-			    (int)message->lorawan.activation <= (int)APP_CONFIG_LRW_ACTIVATION_ABP) {
-				config->lrw_activation =
-					(enum app_config_lrw_activation)
-						message->lorawan.activation;
-			} else {
-				LOG_WRN("Ignoring invalid lorawan.activation: %d",
-					message->lorawan.activation);
-			}
-		}
-
-		if (message->lorawan.has_deveui) {
-			LOG_INF_PARAM_STR("lorawan.deveui", message->lorawan.deveui);
-			if (!parse_hex_string(message->lorawan.deveui, config->lrw_deveui,
-					      sizeof(config->lrw_deveui))) {
-				LOG_ERR("Failed to parse lorawan.deveui");
-			}
-		}
-
-		if (message->lorawan.has_joineui) {
-			LOG_INF_PARAM_STR("lorawan.joineui", message->lorawan.joineui);
-			if (!parse_hex_string(message->lorawan.joineui, config->lrw_joineui,
-					      sizeof(config->lrw_joineui))) {
-				LOG_ERR("Failed to parse lorawan.joineui");
-			}
-		}
-
-		if (message->lorawan.has_nwkkey) {
-			LOG_INF_PARAM_STR("lorawan.nwkkey", message->lorawan.nwkkey);
-			if (!parse_hex_string(message->lorawan.nwkkey, config->lrw_nwkkey,
-					      sizeof(config->lrw_nwkkey))) {
-				LOG_ERR("Failed to parse lorawan.nwkkey");
-			}
-		}
-
-		if (message->lorawan.has_appkey) {
-			LOG_INF_PARAM_STR("lorawan.appkey", message->lorawan.appkey);
-			if (!parse_hex_string(message->lorawan.appkey, config->lrw_appkey,
-					      sizeof(config->lrw_appkey))) {
-				LOG_ERR("Failed to parse lorawan.appkey");
-			}
-		}
-
-		if (message->lorawan.has_devaddr) {
-			LOG_INF_PARAM_STR("lorawan.devaddr", message->lorawan.devaddr);
-			if (!parse_hex_string(message->lorawan.devaddr, config->lrw_devaddr,
-					      sizeof(config->lrw_devaddr))) {
-				LOG_ERR("Failed to parse lorawan.devaddr");
-			}
-		}
-
-		if (message->lorawan.has_nwkskey) {
-			LOG_INF_PARAM_STR("lorawan.nwkskey", message->lorawan.nwkskey);
-			if (!parse_hex_string(message->lorawan.nwkskey, config->lrw_nwkskey,
-					      sizeof(config->lrw_nwkskey))) {
-				LOG_ERR("Failed to parse lorawan.nwkskey");
-			}
-		}
-
-		if (message->lorawan.has_appskey) {
-			LOG_INF_PARAM_STR("lorawan.appskey", message->lorawan.appskey);
-			if (!parse_hex_string(message->lorawan.appskey, config->lrw_appskey,
-					      sizeof(config->lrw_appskey))) {
-				LOG_ERR("Failed to parse lorawan.appskey");
-			}
-		}
+		app_config_apply_lorawan(&message->lorawan, NULL);
 	}
-
 	if (message->has_application) {
-		if (message->application.has_calibration) {
-			LOG_INF_PARAM_BOOL("application.calibration",
-					   message->application.calibration);
-			config->calibration = message->application.calibration;
-		}
-
-		if (message->application.has_interval_sample) {
-			int val = message->application.interval_sample;
-
-			LOG_INF_PARAM_INT("application.interval_sample", val);
-			if (val == 0 || (val >= 5 && val <= 3600)) {
-				config->interval_sample = val;
-			} else {
-				LOG_WRN("Ignoring invalid interval_sample: %d", val);
-			}
-		}
-
-		if (message->application.has_interval_report) {
-			int val = message->application.interval_report;
-
-			LOG_INF_PARAM_INT("application.interval_report", val);
-			if (val >= 60 && val <= 86400) {
-				config->interval_report = val;
-			} else {
-				LOG_WRN("Ignoring invalid interval_report: %d", val);
-			}
-		}
-
-		if (message->application.has_alarm_temperature_enabled) {
-			LOG_INF_PARAM_BOOL("application.alarm_temperature_enabled",
-					   message->application.alarm_temperature_enabled);
-			config->alarm_temperature_enabled =
-				message->application.alarm_temperature_enabled;
-		}
-
-		if (message->application.has_alarm_temperature_lo) {
-			float val = message->application.alarm_temperature_lo;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_temperature_lo", val);
-			if (val >= -30.0f && val <= 70.0f) {
-				config->alarm_temperature_lo = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_temperature_lo");
-			}
-		}
-
-		if (message->application.has_alarm_temperature_hi) {
-			float val = message->application.alarm_temperature_hi;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_temperature_hi", val);
-			if (val >= -30.0f && val <= 70.0f) {
-				config->alarm_temperature_hi = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_temperature_hi");
-			}
-		}
-
-		if (message->application.has_alarm_temperature_hst) {
-			float val = message->application.alarm_temperature_hst;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_temperature_hst", val);
-			if (val >= 0.0f && val <= 5.0f) {
-				config->alarm_temperature_hst = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_temperature_hst");
-			}
-		}
-
-		if (message->application.has_alarm_humidity_enabled) {
-			LOG_INF_PARAM_BOOL("application.alarm_humidity_enabled",
-					   message->application.alarm_humidity_enabled);
-			config->alarm_humidity_enabled =
-				message->application.alarm_humidity_enabled;
-		}
-
-		if (message->application.has_alarm_humidity_lo) {
-			float val = message->application.alarm_humidity_lo;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_humidity_lo", val);
-			if (val >= 0.0f && val <= 100.0f) {
-				config->alarm_humidity_lo = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_humidity_lo");
-			}
-		}
-
-		if (message->application.has_alarm_humidity_hi) {
-			float val = message->application.alarm_humidity_hi;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_humidity_hi", val);
-			if (val >= 0.0f && val <= 100.0f) {
-				config->alarm_humidity_hi = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_humidity_hi");
-			}
-		}
-
-		if (message->application.has_alarm_humidity_hst) {
-			float val = message->application.alarm_humidity_hst;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_humidity_hst", val);
-			if (val >= 0.0f && val <= 20.0f) {
-				config->alarm_humidity_hst = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_humidity_hst");
-			}
-		}
-
-		if (message->application.has_alarm_pressure_enabled) {
-			LOG_INF_PARAM_BOOL("application.alarm_pressure_enabled",
-					   message->application.alarm_pressure_enabled);
-			config->alarm_pressure_enabled =
-				message->application.alarm_pressure_enabled;
-		}
-
-		if (message->application.has_alarm_pressure_lo) {
-			float val = message->application.alarm_pressure_lo;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_pressure_lo", val);
-			if (val >= 500.0f && val <= 1200.0f) {
-				config->alarm_pressure_lo = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_pressure_lo");
-			}
-		}
-
-		if (message->application.has_alarm_pressure_hi) {
-			float val = message->application.alarm_pressure_hi;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_pressure_hi", val);
-			if (val >= 500.0f && val <= 1200.0f) {
-				config->alarm_pressure_hi = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_pressure_hi");
-			}
-		}
-
-		if (message->application.has_alarm_pressure_hst) {
-			float val = message->application.alarm_pressure_hst;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_pressure_hst", val);
-			if (val >= 0.0f && val <= 50.0f) {
-				config->alarm_pressure_hst = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_pressure_hst");
-			}
-		}
-
-		if (message->application.has_alarm_t1_temperature_enabled) {
-			LOG_INF_PARAM_BOOL("application.alarm_t1_temperature_enabled",
-					   message->application.alarm_t1_temperature_enabled);
-			config->alarm_t1_temperature_enabled =
-				message->application.alarm_t1_temperature_enabled;
-		}
-
-		if (message->application.has_alarm_t1_temperature_lo) {
-			float val = message->application.alarm_t1_temperature_lo;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_t1_temperature_lo", val);
-			if (val >= -30.0f && val <= 70.0f) {
-				config->alarm_t1_temperature_lo = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_t1_temperature_lo");
-			}
-		}
-
-		if (message->application.has_alarm_t1_temperature_hi) {
-			float val = message->application.alarm_t1_temperature_hi;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_t1_temperature_hi", val);
-			if (val >= -30.0f && val <= 70.0f) {
-				config->alarm_t1_temperature_hi = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_t1_temperature_hi");
-			}
-		}
-
-		if (message->application.has_alarm_t1_temperature_hst) {
-			float val = message->application.alarm_t1_temperature_hst;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_t1_temperature_hst", val);
-			if (val >= 0.0f && val <= 5.0f) {
-				config->alarm_t1_temperature_hst = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_t1_temperature_hst");
-			}
-		}
-
-		if (message->application.has_alarm_t2_temperature_enabled) {
-			LOG_INF_PARAM_BOOL("application.alarm_t2_temperature_enabled",
-					   message->application.alarm_t2_temperature_enabled);
-			config->alarm_t2_temperature_enabled =
-				message->application.alarm_t2_temperature_enabled;
-		}
-
-		if (message->application.has_alarm_t2_temperature_lo) {
-			float val = message->application.alarm_t2_temperature_lo;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_t2_temperature_lo", val);
-			if (val >= -30.0f && val <= 70.0f) {
-				config->alarm_t2_temperature_lo = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_t2_temperature_lo");
-			}
-		}
-
-		if (message->application.has_alarm_t2_temperature_hi) {
-			float val = message->application.alarm_t2_temperature_hi;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_t2_temperature_hi", val);
-			if (val >= -30.0f && val <= 70.0f) {
-				config->alarm_t2_temperature_hi = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_t2_temperature_hi");
-			}
-		}
-
-		if (message->application.has_alarm_t2_temperature_hst) {
-			float val = message->application.alarm_t2_temperature_hst;
-
-			LOG_INF_PARAM_FLOAT("application.alarm_t2_temperature_hst", val);
-			if (val >= 0.0f && val <= 5.0f) {
-				config->alarm_t2_temperature_hst = val;
-			} else {
-				LOG_WRN("Ignoring invalid alarm_t2_temperature_hst");
-			}
-		}
-
-		if (message->application.has_hall_left_counter) {
-			LOG_INF_PARAM_BOOL("application.hall_left_counter",
-					   message->application.hall_left_counter);
-			config->hall_left_counter = message->application.hall_left_counter;
-		}
-
-		if (message->application.has_hall_left_notify_act) {
-			LOG_INF_PARAM_BOOL("application.hall_left_notify_act",
-					   message->application.hall_left_notify_act);
-			config->hall_left_notify_act = message->application.hall_left_notify_act;
-		}
-
-		if (message->application.has_hall_left_notify_deact) {
-			LOG_INF_PARAM_BOOL("application.hall_left_notify_deact",
-					   message->application.hall_left_notify_deact);
-			config->hall_left_notify_deact =
-				message->application.hall_left_notify_deact;
-		}
-
-		if (message->application.has_hall_right_counter) {
-			LOG_INF_PARAM_BOOL("application.hall_right_counter",
-					   message->application.hall_right_counter);
-			config->hall_right_counter = message->application.hall_right_counter;
-		}
-
-		if (message->application.has_hall_right_notify_act) {
-			LOG_INF_PARAM_BOOL("application.hall_right_notify_act",
-					   message->application.hall_right_notify_act);
-			config->hall_right_notify_act = message->application.hall_right_notify_act;
-		}
-
-		if (message->application.has_hall_right_notify_deact) {
-			LOG_INF_PARAM_BOOL("application.hall_right_notify_deact",
-					   message->application.hall_right_notify_deact);
-			config->hall_right_notify_deact =
-				message->application.hall_right_notify_deact;
-		}
-
-		if (message->application.has_input_a_counter) {
-			LOG_INF_PARAM_BOOL("application.input_a_counter",
-					   message->application.input_a_counter);
-			config->input_a_counter = message->application.input_a_counter;
-		}
-
-		if (message->application.has_input_a_notify_act) {
-			LOG_INF_PARAM_BOOL("application.input_a_notify_act",
-					   message->application.input_a_notify_act);
-			config->input_a_notify_act = message->application.input_a_notify_act;
-		}
-
-		if (message->application.has_input_a_notify_deact) {
-			LOG_INF_PARAM_BOOL("application.input_a_notify_deact",
-					   message->application.input_a_notify_deact);
-			config->input_a_notify_deact =
-				message->application.input_a_notify_deact;
-		}
-
-		if (message->application.has_input_b_counter) {
-			LOG_INF_PARAM_BOOL("application.input_b_counter",
-					   message->application.input_b_counter);
-			config->input_b_counter = message->application.input_b_counter;
-		}
-
-		if (message->application.has_input_b_notify_act) {
-			LOG_INF_PARAM_BOOL("application.input_b_notify_act",
-					   message->application.input_b_notify_act);
-			config->input_b_notify_act = message->application.input_b_notify_act;
-		}
-
-		if (message->application.has_input_b_notify_deact) {
-			LOG_INF_PARAM_BOOL("application.input_b_notify_deact",
-					   message->application.input_b_notify_deact);
-			config->input_b_notify_deact =
-				message->application.input_b_notify_deact;
-		}
-
-		if (message->application.has_corr_temperature) {
-			float val = message->application.corr_temperature;
-
-			LOG_INF_PARAM_FLOAT("application.corr_temperature", val);
-			if (val >= -5.0f && val <= 5.0f) {
-				config->corr_temperature = val;
-			} else {
-				LOG_WRN("Ignoring invalid corr_temperature");
-			}
-		}
-
-		if (message->application.has_corr_t1_temperature) {
-			float val = message->application.corr_t1_temperature;
-
-			LOG_INF_PARAM_FLOAT("application.corr_t1_temperature", val);
-			if (val >= -5.0f && val <= 5.0f) {
-				config->corr_t1_temperature = val;
-			} else {
-				LOG_WRN("Ignoring invalid corr_t1_temperature");
-			}
-		}
-
-		if (message->application.has_corr_t2_temperature) {
-			float val = message->application.corr_t2_temperature;
-
-			LOG_INF_PARAM_FLOAT("application.corr_t2_temperature", val);
-			if (val >= -5.0f && val <= 5.0f) {
-				config->corr_t2_temperature = val;
-			} else {
-				LOG_WRN("Ignoring invalid corr_t2_temperature");
-			}
-		}
-
-		if (message->application.has_cap_hall_left) {
-			LOG_INF_PARAM_BOOL("application.cap_hall_left",
-					   message->application.cap_hall_left);
-			config->cap_hall_left = message->application.cap_hall_left;
-		}
-
-		if (message->application.has_cap_hall_right) {
-			LOG_INF_PARAM_BOOL("application.cap_hall_right",
-					   message->application.cap_hall_right);
-			config->cap_hall_right = message->application.cap_hall_right;
-		}
-
-		if (message->application.has_cap_input_a) {
-			LOG_INF_PARAM_BOOL("application.cap_input_a",
-					   message->application.cap_input_a);
-			config->cap_input_a = message->application.cap_input_a;
-		}
-
-		if (message->application.has_cap_input_b) {
-			LOG_INF_PARAM_BOOL("application.cap_input_b",
-					   message->application.cap_input_b);
-			config->cap_input_b = message->application.cap_input_b;
-		}
-
-		if (message->application.has_cap_light_sensor) {
-			LOG_INF_PARAM_BOOL("application.cap_light_sensor",
-					   message->application.cap_light_sensor);
-			config->cap_light_sensor = message->application.cap_light_sensor;
-		}
-
-		if (message->application.has_cap_barometer) {
-			LOG_INF_PARAM_BOOL("application.cap_barometer",
-					   message->application.cap_barometer);
-			config->cap_barometer = message->application.cap_barometer;
-		}
-
-		if (message->application.has_cap_pir_detector) {
-			LOG_INF_PARAM_BOOL("application.cap_pir_detector",
-					   message->application.cap_pir_detector);
-			config->cap_pir_detector = message->application.cap_pir_detector;
-		}
-
-		if (message->application.has_cap_1w_thermometer) {
-			LOG_INF_PARAM_BOOL("application.cap_1w_thermometer",
-					   message->application.cap_1w_thermometer);
-			config->cap_1w_thermometer = message->application.cap_1w_thermometer;
-		}
-
-		if (message->application.has_cap_1w_machine_probe) {
-			LOG_INF_PARAM_BOOL("application.cap_1w_machine_probe",
-					   message->application.cap_1w_machine_probe);
-			config->cap_1w_machine_probe = message->application.cap_1w_machine_probe;
-		}
-	}
-
-	/* Cross-validate alarm lo/hi pairs — reject if lo >= hi */
-	if (config->alarm_temperature_lo >= config->alarm_temperature_hi) {
-		LOG_WRN("alarm_temperature_lo >= hi, disabling alarm");
-		config->alarm_temperature_enabled = false;
-	}
-
-	if (config->alarm_humidity_lo >= config->alarm_humidity_hi) {
-		LOG_WRN("alarm_humidity_lo >= hi, disabling alarm");
-		config->alarm_humidity_enabled = false;
-	}
-
-	if (config->alarm_pressure_lo >= config->alarm_pressure_hi) {
-		LOG_WRN("alarm_pressure_lo >= hi, disabling alarm");
-		config->alarm_pressure_enabled = false;
-	}
-
-	if (config->alarm_t1_temperature_lo >= config->alarm_t1_temperature_hi) {
-		LOG_WRN("alarm_t1_temperature_lo >= hi, disabling alarm");
-		config->alarm_t1_temperature_enabled = false;
-	}
-
-	if (config->alarm_t2_temperature_lo >= config->alarm_t2_temperature_hi) {
-		LOG_WRN("alarm_t2_temperature_lo >= hi, disabling alarm");
-		config->alarm_t2_temperature_enabled = false;
+		app_config_apply_application(&message->application, NULL);
 	}
 
 	return false;

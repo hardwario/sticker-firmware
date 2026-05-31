@@ -71,6 +71,13 @@ void app_clock_request_sync(void)
 #endif /* defined(CONFIG_LORAWAN) */
 }
 
+void app_clock_force_resync(void)
+{
+	/* Drop the guard so a fresh DeviceTimeReq is queued even if already synced. */
+	m_time_synced = false;
+	app_clock_request_sync();
+}
+
 void app_clock_handle_downlink(uint8_t flags)
 {
 #if defined(CONFIG_LORAWAN)

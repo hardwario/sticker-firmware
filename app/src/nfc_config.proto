@@ -107,6 +107,7 @@ message DownlinkCommand {
         ForceSend       force_send       = 9;
         ResetCounters   reset_counters   = 10;
         ReqHistory      req_history      = 11;
+        ClockSync       clock_sync       = 12;
     }
 
     message SetParam {
@@ -132,6 +133,7 @@ message DownlinkCommand {
         optional bool input_b    = 4;
     }
     message ReqHistory   { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
+    message ClockSync    { }
 }
 
 message DownlinkResponse {

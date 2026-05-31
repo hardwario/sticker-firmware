@@ -21,6 +21,15 @@ enum app_cmd_transport {
 	APP_CMD_TRANSPORT_SHELL_DEBUG,
 };
 
+/* Action the caller must perform AFTER the response has been sent (so the Ack
+ * leaves before the device reboots). Set by app_cmd_handle(). */
+enum app_cmd_action {
+	APP_CMD_ACTION_NONE = 0,
+	APP_CMD_ACTION_SETTINGS_SAVE, /* persist staged config + reboot */
+	APP_CMD_ACTION_REBOOT,        /* reboot (discards staged edits) */
+	APP_CMD_ACTION_FACTORY_RESET, /* erase NVS + reboot */
+};
+
 /* Decode a serialized DownlinkCommand from `in`, dispatch it, encode the
  * resulting DownlinkResponse into `out`.
  *
@@ -31,10 +40,15 @@ enum app_cmd_transport {
  *
  * On decode failure the function still returns 0 and encodes a
  * DownlinkResponse{ seq=0, error={ code=BAD_REQUEST } } into out.
+ *
+ * *action (if non-NULL) is set to a deferred action the caller must run after
+ * transmitting the response (reboot/save/factory-reset). APP_CMD_ACTION_NONE
+ * otherwise.
  */
 int app_cmd_handle(enum app_cmd_transport transport,
 		   const uint8_t *in, size_t in_len,
-		   uint8_t *out, size_t out_cap, size_t *out_len);
+		   uint8_t *out, size_t out_cap, size_t *out_len,
+		   enum app_cmd_action *action);
 
 #ifdef __cplusplus
 }

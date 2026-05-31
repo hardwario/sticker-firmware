@@ -33,7 +33,109 @@ function _pbBytesToAscii(bytes) {
   return s;
 }
 
+function _pbBytesToHex(bytes) {
+  var s = "";
+  for (var i = 0; i < bytes.length; i++) {
+    var h = bytes[i].toString(16);
+    s += h.length === 1 ? "0" + h : h;
+  }
+  return s;
+}
+
+// Decode a little-endian IEEE-754 float32 (protobuf wire type 5).
+function _pbReadFloat(bytes, offset) {
+  var b0 = bytes[offset], b1 = bytes[offset + 1], b2 = bytes[offset + 2], b3 = bytes[offset + 3];
+  var bits = (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
+  var sign = bits < 0 ? -1 : 1;
+  var exp = (bits >>> 23) & 0xff;
+  var mant = bits & 0x7fffff;
+  var val;
+  if (exp === 0) {
+    val = mant * Math.pow(2, -149);
+  } else if (exp === 0xff) {
+    val = mant ? NaN : Infinity;
+  } else {
+    val = (mant + 0x800000) * Math.pow(2, exp - 150);
+  }
+  return { value: sign * val, next: offset + 4 };
+}
+
 var _BUILD_TYPES = ["main", "dev", "custom"];
+
+// proto field tag -> name for ConfigDump.Application (floats marked in _APP_FLOAT)
+var _APP_NAMES = {
+  1: "calibration", 2: "interval_sample", 4: "interval_report",
+  5: "alarm_temperature_enabled", 6: "alarm_temperature_lo", 7: "alarm_temperature_hi", 8: "alarm_temperature_hst",
+  9: "alarm_humidity_enabled", 10: "alarm_humidity_lo", 11: "alarm_humidity_hi", 12: "alarm_humidity_hst",
+  13: "alarm_pressure_enabled", 14: "alarm_pressure_lo", 15: "alarm_pressure_hi", 16: "alarm_pressure_hst",
+  17: "alarm_t1_temperature_enabled", 18: "alarm_t1_temperature_lo", 19: "alarm_t1_temperature_hi", 20: "alarm_t1_temperature_hst",
+  21: "alarm_t2_temperature_enabled", 22: "alarm_t2_temperature_lo", 23: "alarm_t2_temperature_hi", 24: "alarm_t2_temperature_hst",
+  25: "hall_left_counter", 26: "hall_left_notify_act", 27: "hall_left_notify_deact",
+  28: "hall_right_counter", 29: "hall_right_notify_act", 30: "hall_right_notify_deact",
+  31: "input_a_counter", 32: "input_a_notify_act", 33: "input_a_notify_deact",
+  34: "input_b_counter", 35: "input_b_notify_act", 36: "input_b_notify_deact",
+  37: "corr_temperature", 38: "corr_t1_temperature", 39: "corr_t2_temperature",
+  40: "cap_hall_left", 41: "cap_hall_right", 42: "cap_input_a", 43: "cap_input_b",
+  44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector", 47: "cap_1w_thermometer", 48: "cap_1w_machine_probe"
+};
+var _LRW_NAMES = { 1: "region", 2: "network", 3: "adr", 4: "activation", 12: "sub_band" };
+var _LRW_HEX = { 5: "deveui", 6: "joineui", 9: "devaddr" };
+
+function _decodeLorawan(bytes, start, end) {
+  var o = {}, pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var f = tag.value >>> 3, w = tag.value & 0x7;
+    if (w === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (_LRW_NAMES[f]) o[_LRW_NAMES[f]] = v.value;
+    } else if (w === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      if (_LRW_HEX[f]) o[_LRW_HEX[f]] = _pbBytesToHex(bytes.slice(pos, pos + len.value));
+      pos += len.value;
+    } else { break; }
+  }
+  return o;
+}
+
+function _decodeApplication(bytes, start, end) {
+  var o = {}, pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var f = tag.value >>> 3, w = tag.value & 0x7;
+    if (w === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (_APP_NAMES[f]) o[_APP_NAMES[f]] = v.value;
+    } else if (w === 5) {
+      var fl = _pbReadFloat(bytes, pos); pos = fl.next;
+      if (_APP_NAMES[f]) o[_APP_NAMES[f]] = fl.value;
+    } else if (w === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      pos += len.value;
+    } else { break; }
+  }
+  return o;
+}
+
+function _decodeConfigDump(bytes, start, end) {
+  var cd = {}, pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var f = tag.value >>> 3, w = tag.value & 0x7;
+    if (w === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (f === 1) cd.page_index = v.value;
+      else if (f === 2) cd.page_count = v.value;
+    } else if (w === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      var e2 = pos + len.value;
+      if (f === 3) cd.lorawan = _decodeLorawan(bytes, pos, e2);
+      else if (f === 4) cd.application = _decodeApplication(bytes, pos, e2);
+      pos = e2;
+    } else { break; }
+  }
+  return cd;
+}
 
 function _decodeInfo(bytes, start, end) {
   var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false };
@@ -102,6 +204,7 @@ function decodeDownlinkResponse(bytes) {
       var end = pos + len.value;
       if (field === 2) resp.ack = {};
       else if (field === 3) resp.info = _decodeInfo(bytes, pos, end);
+      else if (field === 4) resp.config_dump = _decodeConfigDump(bytes, pos, end);
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       pos = end;
     } else {
