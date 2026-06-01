@@ -119,6 +119,91 @@ static void handle_get_param(const DownlinkCommand_GetParam *gp, DownlinkRespons
 	}
 }
 
+/* Dumpable config fields in fixed order, each with a conservative upper bound
+ * on its encoded size (field tag + value; hex fields include the length byte).
+ * Mirrors the non-secret fields emitted by app_config_fill_lorawan/application
+ * — a new config field needs a row here too (a codegen target once #44 lands).
+ * Drives get_config paging: greedy bin-pack into DR0-sized ConfigDump pages. */
+#define DUMP_SECTION_LORAWAN     0
+#define DUMP_SECTION_APPLICATION 1
+
+#define LRW(tag, size) {DUMP_SECTION_LORAWAN, (tag), (size)}
+#define APP2(tag)      {DUMP_SECTION_APPLICATION, (tag), 2}
+#define APP5(tag)      {DUMP_SECTION_APPLICATION, (tag), 5}
+
+static const struct {
+	uint8_t section;
+	uint8_t tag;
+	uint8_t size;
+} DUMP_FIELDS[] = {
+	/* Lorawan (non-secret): varints 2 B, deveui/joineui 18 B, devaddr 10 B */
+	LRW(1, 2), LRW(2, 2), LRW(3, 2), LRW(4, 2), LRW(5, 18), LRW(6, 18), LRW(9, 10), LRW(12, 2),
+	/* Application (tag 3 interval_aggreg has no config field — skipped, like
+	 * fill_application). Floats 5 B, everything else 2 B. */
+	APP2(1), APP2(2), APP2(4), APP2(5), APP5(6), APP5(7), APP5(8), APP2(9), APP5(10), APP5(11),
+	APP5(12), APP2(13), APP5(14), APP5(15), APP5(16), APP2(17), APP5(18), APP5(19), APP5(20),
+	APP2(21), APP5(22), APP5(23), APP5(24), APP2(25), APP2(26), APP2(27), APP2(28), APP2(29),
+	APP2(30), APP2(31), APP2(32), APP2(33), APP2(34), APP2(35), APP2(36), APP5(37), APP5(38),
+	APP5(39), APP2(40), APP2(41), APP2(42), APP2(43), APP2(44), APP2(45), APP2(46), APP2(47),
+	APP2(48),
+};
+
+/* Per-page byte budget for the field payload inside one ConfigDump. The encoded
+ * DownlinkResponse adds ~14 B of fixed overhead around these fields (seq +
+ * config_dump wrapper + page_index + page_count + the two submessage wrappers),
+ * so the on-air frame is roughly budget + 14. DR0 MTU is 51 B; 30 keeps the
+ * worst-case frame near 44 B with margin. Conservative — a page can never
+ * overflow (the largest single field is 18 B). */
+#define DUMP_PAGE_BUDGET 30
+
+static void handle_get_config(const DownlinkCommand_GetConfig *gc, DownlinkResponse *resp)
+{
+	uint32_t page = gc->has_page ? gc->page : 0;
+
+	uint32_t lrw_ids[8];
+	uint32_t app_ids[ARRAY_SIZE(DUMP_FIELDS)];
+	size_t n_lrw = 0, n_app = 0;
+
+	/* Single greedy pass: pack fields into pages by DUMP_PAGE_BUDGET, collect
+	 * the requested page's tags, and learn the total page count. */
+	uint32_t cur_page = 0, used = 0;
+	for (size_t i = 0; i < ARRAY_SIZE(DUMP_FIELDS); i++) {
+		if (used > 0 && used + DUMP_FIELDS[i].size > DUMP_PAGE_BUDGET) {
+			cur_page++;
+			used = 0;
+		}
+		used += DUMP_FIELDS[i].size;
+
+		if (cur_page == page) {
+			if (DUMP_FIELDS[i].section == DUMP_SECTION_LORAWAN) {
+				lrw_ids[n_lrw++] = DUMP_FIELDS[i].tag;
+			} else {
+				app_ids[n_app++] = DUMP_FIELDS[i].tag;
+			}
+		}
+	}
+	uint32_t page_count = cur_page + 1;
+
+	if (page >= page_count) {
+		make_error(resp, DownlinkResponse_Error_Code_OUT_OF_RANGE, "page");
+		resp->body.error.fault_field = 1;
+		return;
+	}
+
+	resp->which_body = DownlinkResponse_config_dump_tag;
+	resp->body.config_dump.page_index = page;
+	resp->body.config_dump.page_count = page_count;
+
+	if (n_lrw > 0) {
+		resp->body.config_dump.has_lorawan = true;
+		app_config_fill_lorawan(&resp->body.config_dump.lorawan, lrw_ids, n_lrw);
+	}
+	if (n_app > 0) {
+		resp->body.config_dump.has_application = true;
+		app_config_fill_application(&resp->body.config_dump.application, app_ids, n_app);
+	}
+}
+
 static void handle_reset_counters(const DownlinkCommand_ResetCounters *rc, DownlinkResponse *resp)
 {
 	app_hall_reset_count(rc->has_hall_left && rc->hall_left,
@@ -146,6 +231,10 @@ static void dispatch(enum app_cmd_transport transport, const DownlinkCommand *cm
 
 	case DownlinkCommand_get_param_tag:
 		handle_get_param(&cmd->body.get_param, resp);
+		break;
+
+	case DownlinkCommand_get_config_tag:
+		handle_get_config(&cmd->body.get_config, resp);
 		break;
 
 	case DownlinkCommand_settings_save_tag:
