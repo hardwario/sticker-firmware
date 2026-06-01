@@ -23,6 +23,10 @@ int app_clock_init(void);
  * app_clock_handle_downlink(). No-op when CONFIG_LORAWAN is disabled. */
 void app_clock_request_sync(void);
 
+/* Force a re-sync: clear the synced guard and request DeviceTimeReq again.
+ * Used by the ClockSync downlink command. No-op when CONFIG_LORAWAN is off. */
+void app_clock_force_resync(void);
+
 /* Inspect a downlink's flags; if LORAWAN_TIME_UPDATED is set, read the network
  * time and set the RTC from it. Call from the LoRaWAN downlink callback.
  * No-op when CONFIG_LORAWAN is disabled. */

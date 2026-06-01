@@ -6,7 +6,11 @@
 
 #include "app_cmd.h"
 #include "app_config.h"
+#include "app_hall.h"
+#include "app_input.h"
 #include "app_log.h"
+#include "app_lrw.h"
+#include "app_nfc_ingest.h"
 
 /* Wall-clock source (PR #41, branch lrw-rtc-time). Until that lands on this
  * branch, app_clock.h is absent and Info.unix_time stays 0 (omitted by proto3).
@@ -77,8 +81,139 @@ static void make_error(DownlinkResponse *resp, DownlinkResponse_Error_Code code,
 	}
 }
 
+static void handle_set_param(const DownlinkCommand_SetParam *sp, DownlinkResponse *resp)
+{
+	uint32_t fault = 0;
+	int rc = 0;
+
+	if (sp->has_lorawan) {
+		rc = app_config_apply_lorawan(&sp->lorawan, &fault);
+	}
+	if (rc == 0 && sp->has_application) {
+		rc = app_config_apply_application(&sp->application, &fault);
+	}
+
+	if (rc) {
+		make_error(resp, DownlinkResponse_Error_Code_OUT_OF_RANGE, "invalid value");
+		resp->body.error.fault_field = fault;
+	} else {
+		resp->which_body = DownlinkResponse_ack_tag;
+	}
+}
+
+static void handle_get_param(const DownlinkCommand_GetParam *gp, DownlinkResponse *resp)
+{
+	resp->which_body = DownlinkResponse_config_dump_tag;
+	resp->body.config_dump.page_index = 0;
+	resp->body.config_dump.page_count = 1;
+
+	if (gp->lorawan_field_count > 0) {
+		resp->body.config_dump.has_lorawan = true;
+		app_config_fill_lorawan(&resp->body.config_dump.lorawan, gp->lorawan_field,
+					gp->lorawan_field_count);
+	}
+	if (gp->application_field_count > 0) {
+		resp->body.config_dump.has_application = true;
+		app_config_fill_application(&resp->body.config_dump.application,
+					    gp->application_field, gp->application_field_count);
+	}
+}
+
+/* Dumpable config fields in fixed order, each with a conservative upper bound
+ * on its encoded size (field tag + value; hex fields include the length byte).
+ * Mirrors the non-secret fields emitted by app_config_fill_lorawan/application
+ * — a new config field needs a row here too (a codegen target once #44 lands).
+ * Drives get_config paging: greedy bin-pack into DR0-sized ConfigDump pages. */
+#define DUMP_SECTION_LORAWAN     0
+#define DUMP_SECTION_APPLICATION 1
+
+#define LRW(tag, size) {DUMP_SECTION_LORAWAN, (tag), (size)}
+#define APP2(tag)      {DUMP_SECTION_APPLICATION, (tag), 2}
+#define APP5(tag)      {DUMP_SECTION_APPLICATION, (tag), 5}
+
+static const struct {
+	uint8_t section;
+	uint8_t tag;
+	uint8_t size;
+} DUMP_FIELDS[] = {
+	/* Lorawan (non-secret): varints 2 B, deveui/joineui 18 B, devaddr 10 B */
+	LRW(1, 2), LRW(2, 2), LRW(3, 2), LRW(4, 2), LRW(5, 18), LRW(6, 18), LRW(9, 10), LRW(12, 2),
+	/* Application (tag 3 interval_aggreg has no config field — skipped, like
+	 * fill_application). Floats 5 B, everything else 2 B. */
+	APP2(1), APP2(2), APP2(4), APP2(5), APP5(6), APP5(7), APP5(8), APP2(9), APP5(10), APP5(11),
+	APP5(12), APP2(13), APP5(14), APP5(15), APP5(16), APP2(17), APP5(18), APP5(19), APP5(20),
+	APP2(21), APP5(22), APP5(23), APP5(24), APP2(25), APP2(26), APP2(27), APP2(28), APP2(29),
+	APP2(30), APP2(31), APP2(32), APP2(33), APP2(34), APP2(35), APP2(36), APP5(37), APP5(38),
+	APP5(39), APP2(40), APP2(41), APP2(42), APP2(43), APP2(44), APP2(45), APP2(46), APP2(47),
+	APP2(48),
+};
+
+/* Per-page byte budget for the field payload inside one ConfigDump. The encoded
+ * DownlinkResponse adds ~14 B of fixed overhead around these fields (seq +
+ * config_dump wrapper + page_index + page_count + the two submessage wrappers),
+ * so the on-air frame is roughly budget + 14. DR0 MTU is 51 B; 30 keeps the
+ * worst-case frame near 44 B with margin. Conservative — a page can never
+ * overflow (the largest single field is 18 B). */
+#define DUMP_PAGE_BUDGET 30
+
+static void handle_get_config(const DownlinkCommand_GetConfig *gc, DownlinkResponse *resp)
+{
+	uint32_t page = gc->has_page ? gc->page : 0;
+
+	uint32_t lrw_ids[8];
+	uint32_t app_ids[ARRAY_SIZE(DUMP_FIELDS)];
+	size_t n_lrw = 0, n_app = 0;
+
+	/* Single greedy pass: pack fields into pages by DUMP_PAGE_BUDGET, collect
+	 * the requested page's tags, and learn the total page count. */
+	uint32_t cur_page = 0, used = 0;
+	for (size_t i = 0; i < ARRAY_SIZE(DUMP_FIELDS); i++) {
+		if (used > 0 && used + DUMP_FIELDS[i].size > DUMP_PAGE_BUDGET) {
+			cur_page++;
+			used = 0;
+		}
+		used += DUMP_FIELDS[i].size;
+
+		if (cur_page == page) {
+			if (DUMP_FIELDS[i].section == DUMP_SECTION_LORAWAN) {
+				lrw_ids[n_lrw++] = DUMP_FIELDS[i].tag;
+			} else {
+				app_ids[n_app++] = DUMP_FIELDS[i].tag;
+			}
+		}
+	}
+	uint32_t page_count = cur_page + 1;
+
+	if (page >= page_count) {
+		make_error(resp, DownlinkResponse_Error_Code_OUT_OF_RANGE, "page");
+		resp->body.error.fault_field = 1;
+		return;
+	}
+
+	resp->which_body = DownlinkResponse_config_dump_tag;
+	resp->body.config_dump.page_index = page;
+	resp->body.config_dump.page_count = page_count;
+
+	if (n_lrw > 0) {
+		resp->body.config_dump.has_lorawan = true;
+		app_config_fill_lorawan(&resp->body.config_dump.lorawan, lrw_ids, n_lrw);
+	}
+	if (n_app > 0) {
+		resp->body.config_dump.has_application = true;
+		app_config_fill_application(&resp->body.config_dump.application, app_ids, n_app);
+	}
+}
+
+static void handle_reset_counters(const DownlinkCommand_ResetCounters *rc, DownlinkResponse *resp)
+{
+	app_hall_reset_count(rc->has_hall_left && rc->hall_left,
+			     rc->has_hall_right && rc->hall_right);
+	app_input_reset_count(rc->has_input_a && rc->input_a, rc->has_input_b && rc->input_b);
+	resp->which_body = DownlinkResponse_ack_tag;
+}
+
 static void dispatch(enum app_cmd_transport transport, const DownlinkCommand *cmd,
-		     DownlinkResponse *resp)
+		     DownlinkResponse *resp, enum app_cmd_action *action)
 {
 	ARG_UNUSED(transport);
 
@@ -90,22 +225,67 @@ static void dispatch(enum app_cmd_transport transport, const DownlinkCommand *cm
 		fill_info(&resp->body.info);
 		break;
 
+	case DownlinkCommand_set_param_tag:
+		handle_set_param(&cmd->body.set_param, resp);
+		break;
+
+	case DownlinkCommand_get_param_tag:
+		handle_get_param(&cmd->body.get_param, resp);
+		break;
+
+	case DownlinkCommand_get_config_tag:
+		handle_get_config(&cmd->body.get_config, resp);
+		break;
+
+	case DownlinkCommand_settings_save_tag:
+		resp->which_body = DownlinkResponse_ack_tag;
+		*action = APP_CMD_ACTION_SETTINGS_SAVE;
+		break;
+
+	case DownlinkCommand_reboot_tag:
+		resp->which_body = DownlinkResponse_ack_tag;
+		*action = APP_CMD_ACTION_REBOOT;
+		break;
+
+	case DownlinkCommand_factory_reset_tag:
+		resp->which_body = DownlinkResponse_ack_tag;
+		*action = APP_CMD_ACTION_FACTORY_RESET;
+		break;
+
+	case DownlinkCommand_force_send_tag:
+#if defined(CONFIG_LORAWAN)
+		app_lrw_send();
+#endif
+		resp->which_body = DownlinkResponse_ack_tag;
+		break;
+
+	case DownlinkCommand_reset_counters_tag:
+		handle_reset_counters(&cmd->body.reset_counters, resp);
+		break;
+
+	case DownlinkCommand_clock_sync_tag:
+#ifdef APP_CMD_HAVE_CLOCK
+		app_clock_force_resync();
+#endif
+		resp->which_body = DownlinkResponse_ack_tag;
+		break;
+
 	default:
-		LOG_WRN("Command tag %u not implemented in Phase 1", cmd->which_body);
-		make_error(resp, DownlinkResponse_Error_Code_UNKNOWN,
-			   "not implemented in phase 1");
+		LOG_WRN("Command tag %u not implemented", cmd->which_body);
+		make_error(resp, DownlinkResponse_Error_Code_UNKNOWN, "not implemented");
 		break;
 	}
 }
 
 int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len,
-		   uint8_t *out, size_t out_cap, size_t *out_len)
+		   uint8_t *out, size_t out_cap, size_t *out_len, enum app_cmd_action *action)
 {
 	if (!in || !out || !out_len) {
 		return -EINVAL;
 	}
 
 	*out_len = 0;
+	enum app_cmd_action act = APP_CMD_ACTION_NONE;
 
 	DownlinkCommand cmd = DownlinkCommand_init_zero;
 	DownlinkResponse resp = DownlinkResponse_init_zero;
@@ -117,7 +297,7 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		make_error(&resp, DownlinkResponse_Error_Code_BAD_REQUEST,
 			   PB_GET_ERROR(&istream));
 	} else {
-		dispatch(transport, &cmd, &resp);
+		dispatch(transport, &cmd, &resp, &act);
 	}
 
 	pb_ostream_t ostream = pb_ostream_from_buffer(out, out_cap);
@@ -127,5 +307,8 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	}
 
 	*out_len = ostream.bytes_written;
+	if (action) {
+		*action = act;
+	}
 	return 0;
 }

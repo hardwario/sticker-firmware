@@ -33,7 +33,141 @@ function _pbBytesToAscii(bytes) {
   return s;
 }
 
+function _pbBytesToHex(bytes) {
+  var s = "";
+  for (var i = 0; i < bytes.length; i++) {
+    var h = bytes[i].toString(16);
+    s += h.length === 1 ? "0" + h : h;
+  }
+  return s;
+}
+
+// Decode a little-endian IEEE-754 float32 (protobuf wire type 5).
+function _pbReadFloat(bytes, offset) {
+  var b0 = bytes[offset], b1 = bytes[offset + 1], b2 = bytes[offset + 2], b3 = bytes[offset + 3];
+  var bits = (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
+  var sign = bits < 0 ? -1 : 1;
+  var exp = (bits >>> 23) & 0xff;
+  var mant = bits & 0x7fffff;
+  var val;
+  if (exp === 0) {
+    val = mant * Math.pow(2, -149);
+  } else if (exp === 0xff) {
+    val = mant ? NaN : Infinity;
+  } else {
+    val = (mant + 0x800000) * Math.pow(2, exp - 150);
+  }
+  return { value: sign * val, next: offset + 4 };
+}
+
 var _BUILD_TYPES = ["main", "dev", "custom"];
+
+// proto field tag -> name for ConfigDump.Application (floats marked in _APP_FLOAT)
+var _APP_NAMES = {
+  1: "calibration", 2: "interval_sample", 4: "interval_report",
+  5: "alarm_temperature_enabled", 6: "alarm_temperature_lo", 7: "alarm_temperature_hi", 8: "alarm_temperature_hst",
+  9: "alarm_humidity_enabled", 10: "alarm_humidity_lo", 11: "alarm_humidity_hi", 12: "alarm_humidity_hst",
+  13: "alarm_pressure_enabled", 14: "alarm_pressure_lo", 15: "alarm_pressure_hi", 16: "alarm_pressure_hst",
+  17: "alarm_t1_temperature_enabled", 18: "alarm_t1_temperature_lo", 19: "alarm_t1_temperature_hi", 20: "alarm_t1_temperature_hst",
+  21: "alarm_t2_temperature_enabled", 22: "alarm_t2_temperature_lo", 23: "alarm_t2_temperature_hi", 24: "alarm_t2_temperature_hst",
+  25: "hall_left_counter", 26: "hall_left_notify_act", 27: "hall_left_notify_deact",
+  28: "hall_right_counter", 29: "hall_right_notify_act", 30: "hall_right_notify_deact",
+  31: "input_a_counter", 32: "input_a_notify_act", 33: "input_a_notify_deact",
+  34: "input_b_counter", 35: "input_b_notify_act", 36: "input_b_notify_deact",
+  37: "corr_temperature", 38: "corr_t1_temperature", 39: "corr_t2_temperature",
+  40: "cap_hall_left", 41: "cap_hall_right", 42: "cap_input_a", 43: "cap_input_b",
+  44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector", 47: "cap_1w_thermometer", 48: "cap_1w_machine_probe"
+};
+var _LRW_NAMES = { 1: "region", 2: "network", 3: "adr", 4: "activation", 12: "sub_band" };
+var _LRW_HEX = { 5: "deveui", 6: "joineui", 9: "devaddr" };
+
+// Application tags carrying a float32 (protobuf wire type 5): alarm thresholds
+// and the correction offsets. Everything else in Application is a varint.
+var _APP_FLOAT = {
+  6: 1, 7: 1, 8: 1, 10: 1, 11: 1, 12: 1, 14: 1, 15: 1, 16: 1,
+  18: 1, 19: 1, 20: 1, 22: 1, 23: 1, 24: 1, 37: 1, 38: 1, 39: 1
+};
+
+// Reverse maps (name -> tag) for encoding SetParam. The LoRaWAN hex set adds the
+// secret keys (nwkkey/appkey/nwkskey/appskey) which the decoder deliberately
+// hides but which a downlink may legitimately set.
+var _LRW_HEX_ENC = { deveui: 5, joineui: 6, nwkkey: 7, appkey: 8, devaddr: 9, nwkskey: 10, appskey: 11 };
+var _LRW_ENUM = {
+  region: { EU868: 0, US915: 1, AU915: 2 },
+  network: { PUBLIC: 0, PRIVATE: 1 },
+  activation: { OTAA: 0, ABP: 1 }
+};
+function _invert(map) {
+  var out = {};
+  for (var k in map) { if (map.hasOwnProperty(k)) out[map[k]] = +k; }
+  return out;
+}
+var _APP_TAGS = _invert(_APP_NAMES);
+var _LRW_TAGS = _invert(_LRW_NAMES);
+
+// proto field tag -> command name in the DownlinkCommand body oneof.
+var _CMD_NAMES = {
+  2: "set_param", 3: "get_param", 4: "get_info", 5: "get_config",
+  6: "settings_save", 7: "reboot", 8: "factory_reset", 9: "force_send",
+  10: "reset_counters", 11: "req_history", 12: "clock_sync"
+};
+var _CMD_TAGS = _invert(_CMD_NAMES);
+
+function _decodeLorawan(bytes, start, end) {
+  var o = {}, pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var f = tag.value >>> 3, w = tag.value & 0x7;
+    if (w === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (_LRW_NAMES[f]) o[_LRW_NAMES[f]] = v.value;
+    } else if (w === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      if (_LRW_HEX[f]) o[_LRW_HEX[f]] = _pbBytesToHex(bytes.slice(pos, pos + len.value));
+      pos += len.value;
+    } else { break; }
+  }
+  return o;
+}
+
+function _decodeApplication(bytes, start, end) {
+  var o = {}, pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var f = tag.value >>> 3, w = tag.value & 0x7;
+    if (w === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (_APP_NAMES[f]) o[_APP_NAMES[f]] = v.value;
+    } else if (w === 5) {
+      var fl = _pbReadFloat(bytes, pos); pos = fl.next;
+      if (_APP_NAMES[f]) o[_APP_NAMES[f]] = fl.value;
+    } else if (w === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      pos += len.value;
+    } else { break; }
+  }
+  return o;
+}
+
+function _decodeConfigDump(bytes, start, end) {
+  var cd = {}, pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var f = tag.value >>> 3, w = tag.value & 0x7;
+    if (w === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (f === 1) cd.page_index = v.value;
+      else if (f === 2) cd.page_count = v.value;
+    } else if (w === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      var e2 = pos + len.value;
+      if (f === 3) cd.lorawan = _decodeLorawan(bytes, pos, e2);
+      else if (f === 4) cd.application = _decodeApplication(bytes, pos, e2);
+      pos = e2;
+    } else { break; }
+  }
+  return cd;
+}
 
 function _decodeInfo(bytes, start, end) {
   var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false };
@@ -102,6 +236,7 @@ function decodeDownlinkResponse(bytes) {
       var end = pos + len.value;
       if (field === 2) resp.ack = {};
       else if (field === 3) resp.info = _decodeInfo(bytes, pos, end);
+      else if (field === 4) resp.config_dump = _decodeConfigDump(bytes, pos, end);
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       pos = end;
     } else {
@@ -198,6 +333,263 @@ function decodeTelemetry(bytes) {
     }
   }
   return d;
+}
+
+// ---------------------------------------------------------------------------
+// Downlink encoding: build a DownlinkCommand (protobuf) on fPort 85 from a
+// human-friendly JSON object. Mirrors the dispatcher in app_cmd.c.
+//
+// Examples (the object passed as input.data):
+//   { "command": "get_info", "seq": 1 }
+//   { "command": "force_send" }
+//   { "command": "clock_sync" }
+//   { "command": "reboot" }                 // also settings_save / factory_reset
+//   { "command": "reset_counters", "hall_left": true, "input_a": true }
+//   { "command": "get_config", "page": 0 }
+//   { "command": "req_history", "from_unix": 1780000000, "to_unix": 1780003600 }
+//   { "command": "get_param", "lorawan_field": [3], "application_field": [4, 7] }
+//   { "command": "set_param", "seq": 5,
+//     "lorawan": { "adr": true },
+//     "application": { "interval_report": 120, "alarm_temperature_hi": 50.0 } }
+// ---------------------------------------------------------------------------
+
+function _encVarint(value) {
+  var out = [];
+  var v = value >>> 0;
+  // Handle values above 2^31 (e.g. unix time) via Math, not bit ops.
+  if (value > 0xffffffff || value < 0) {
+    v = Math.floor(value);
+    while (v > 127) { out.push((v % 128) + 128); v = Math.floor(v / 128); }
+    out.push(v);
+    return out;
+  }
+  while (v > 127) { out.push((v & 0x7f) | 0x80); v >>>= 7; }
+  out.push(v);
+  return out;
+}
+
+function _encTag(field, wire) {
+  return _encVarint((field << 3) | wire);
+}
+
+// Manual IEEE-754 float32 little-endian encoder (no DataView — sandbox-safe).
+function _encFloat(value) {
+  if (value === 0) {
+    var negZero = (1 / value) === -Infinity;
+    return [0, 0, 0, negZero ? 0x80 : 0];
+  }
+  var sign = 0;
+  if (value < 0) { sign = 1; value = -value; }
+  var exp = Math.floor(Math.log(value) / Math.LN2);
+  var mant = value / Math.pow(2, exp);
+  if (mant < 1) { exp--; mant = value / Math.pow(2, exp); }
+  if (mant >= 2) { exp++; mant = value / Math.pow(2, exp); }
+  var e = exp + 127, m;
+  if (e <= 0) {
+    m = Math.round(value / Math.pow(2, -126) * Math.pow(2, 23));
+    e = 0;
+  } else if (e >= 255) {
+    e = 255; m = 0;
+  } else {
+    m = Math.round((mant - 1) * Math.pow(2, 23));
+    if (m === 0x800000) { m = 0; e++; }
+  }
+  var bits = ((sign << 31) | (e << 23) | m) >>> 0;
+  return [bits & 0xff, (bits >>> 8) & 0xff, (bits >>> 16) & 0xff, (bits >>> 24) & 0xff];
+}
+
+function _encLenDelim(field, payload) {
+  return _encTag(field, 2).concat(_encVarint(payload.length)).concat(payload);
+}
+
+function _hexToBytes(hex) {
+  var out = [];
+  for (var i = 0; i + 1 < hex.length; i += 2) {
+    out.push(parseInt(hex.substr(i, 2), 16));
+  }
+  return out;
+}
+
+function _encLorawan(lrw) {
+  var out = [];
+  for (var name in lrw) {
+    if (!lrw.hasOwnProperty(name)) continue;
+    var val = lrw[name];
+    if (_LRW_HEX_ENC[name] !== undefined) {
+      out = out.concat(_encLenDelim(_LRW_HEX_ENC[name], _hexToBytes(val)));
+    } else if (_LRW_TAGS[name] !== undefined) {
+      var num = val;
+      if (typeof val === "string" && _LRW_ENUM[name]) num = _LRW_ENUM[name][val];
+      if (typeof val === "boolean") num = val ? 1 : 0;
+      out = out.concat(_encTag(_LRW_TAGS[name], 0)).concat(_encVarint(num));
+    }
+  }
+  return out;
+}
+
+function _encApplication(app) {
+  var out = [];
+  for (var name in app) {
+    if (!app.hasOwnProperty(name)) continue;
+    var tag = _APP_TAGS[name];
+    if (tag === undefined) continue;
+    var val = app[name];
+    if (_APP_FLOAT[tag]) {
+      out = out.concat(_encTag(tag, 5)).concat(_encFloat(val));
+    } else {
+      var num = (typeof val === "boolean") ? (val ? 1 : 0) : val;
+      out = out.concat(_encTag(tag, 0)).concat(_encVarint(num));
+    }
+  }
+  return out;
+}
+
+function encodeDownlinkCommand(cmd) {
+  var out = [];
+  if (cmd.seq) out = out.concat(_encTag(1, 0)).concat(_encVarint(cmd.seq));
+
+  var name = cmd.command;
+  var tag = _CMD_TAGS[name];
+  if (tag === undefined) {
+    return { bytes: null, error: "unknown command: " + name };
+  }
+
+  var body = [];
+  if (name === "set_param") {
+    if (cmd.lorawan) body = body.concat(_encLenDelim(1, _encLorawan(cmd.lorawan)));
+    if (cmd.application) body = body.concat(_encLenDelim(2, _encApplication(cmd.application)));
+  } else if (name === "get_param") {
+    // proto3 repeated scalars are packed (length-delimited) by default.
+    var lf = cmd.lorawan_field || [];
+    var af = cmd.application_field || [];
+    if (lf.length) {
+      var pl = [];
+      for (var i = 0; i < lf.length; i++) pl = pl.concat(_encVarint(lf[i]));
+      body = body.concat(_encLenDelim(1, pl));
+    }
+    if (af.length) {
+      var pa = [];
+      for (var j = 0; j < af.length; j++) pa = pa.concat(_encVarint(af[j]));
+      body = body.concat(_encLenDelim(2, pa));
+    }
+  } else if (name === "get_config") {
+    if (cmd.page) body = body.concat(_encTag(1, 0)).concat(_encVarint(cmd.page));
+  } else if (name === "reset_counters") {
+    if (cmd.hall_left) body = body.concat(_encTag(1, 0)).concat(_encVarint(1));
+    if (cmd.hall_right) body = body.concat(_encTag(2, 0)).concat(_encVarint(1));
+    if (cmd.input_a) body = body.concat(_encTag(3, 0)).concat(_encVarint(1));
+    if (cmd.input_b) body = body.concat(_encTag(4, 0)).concat(_encVarint(1));
+  } else if (name === "req_history") {
+    if (cmd.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(cmd.from_unix));
+    if (cmd.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(cmd.to_unix));
+  }
+  // get_info / settings_save / reboot / factory_reset / force_send / clock_sync: empty body.
+
+  out = out.concat(_encLenDelim(tag, body));
+  return { bytes: out, error: null };
+}
+
+function encodeDownlink(input) {
+  var cmd = input.data || {};
+  var r = encodeDownlinkCommand(cmd);
+  if (r.error) {
+    return { bytes: [], fPort: 85, warnings: [], errors: [r.error] };
+  }
+  return { bytes: r.bytes, fPort: 85, warnings: [], errors: [] };
+}
+
+// Decode a DownlinkCommand (so the LNS shows queued/sent downlinks readably).
+function decodeDownlinkCommand(bytes) {
+  var cmd = {};
+  var pos = 0;
+  while (pos < bytes.length) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var field = tag.value >>> 3, wire = tag.value & 0x7;
+    if (wire === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (field === 1) cmd.seq = v.value;
+    } else if (wire === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      var end = pos + len.value;
+      cmd.command = _CMD_NAMES[field] || ("field_" + field);
+      if (field === 2) { // set_param
+        var sp = {}, p = pos;
+        while (p < end) {
+          var t = _pbReadVarint(bytes, p); p = t.next;
+          var f2 = t.value >>> 3, w2 = t.value & 0x7;
+          if (w2 === 2) {
+            var l2 = _pbReadVarint(bytes, p); p = l2.next;
+            if (f2 === 1) sp.lorawan = _decodeLorawan(bytes, p, p + l2.value);
+            else if (f2 === 2) sp.application = _decodeApplication(bytes, p, p + l2.value);
+            p += l2.value;
+          } else { break; }
+        }
+        cmd.set_param = sp;
+      } else if (field === 3) { // get_param (repeated uint32, packed or not)
+        var gp = { lorawan_field: [], application_field: [] }, q = pos;
+        while (q < end) {
+          var t3 = _pbReadVarint(bytes, q); q = t3.next;
+          var f3 = t3.value >>> 3, w3 = t3.value & 0x7;
+          var dst = (f3 === 1) ? gp.lorawan_field : (f3 === 2) ? gp.application_field : null;
+          if (w3 === 0) {
+            var v3 = _pbReadVarint(bytes, q); q = v3.next;
+            if (dst) dst.push(v3.value);
+          } else if (w3 === 2) {
+            var pl3 = _pbReadVarint(bytes, q); q = pl3.next;
+            var e3 = q + pl3.value;
+            while (q < e3) { var pv = _pbReadVarint(bytes, q); q = pv.next; if (dst) dst.push(pv.value); }
+          } else { break; }
+        }
+        cmd.get_param = gp;
+      } else if (field === 5) { // get_config
+        var gc = {}, r2 = pos;
+        if (r2 < end) {
+          var t5 = _pbReadVarint(bytes, r2); r2 = t5.next;
+          if ((t5.value >>> 3) === 1 && (t5.value & 0x7) === 0) {
+            var v5 = _pbReadVarint(bytes, r2); gc.page = v5.value;
+          }
+        }
+        cmd.get_config = gc;
+      } else if (field === 10) { // reset_counters
+        var rc = {}, s = pos;
+        while (s < end) {
+          var t10 = _pbReadVarint(bytes, s); s = t10.next;
+          var f10 = t10.value >>> 3, w10 = t10.value & 0x7;
+          if (w10 === 0) {
+            var v10 = _pbReadVarint(bytes, s); s = v10.next;
+            if (f10 === 1) rc.hall_left = v10.value !== 0;
+            else if (f10 === 2) rc.hall_right = v10.value !== 0;
+            else if (f10 === 3) rc.input_a = v10.value !== 0;
+            else if (f10 === 4) rc.input_b = v10.value !== 0;
+          } else { break; }
+        }
+        cmd.reset_counters = rc;
+      } else if (field === 11) { // req_history
+        var rh = {}, u = pos;
+        while (u < end) {
+          var t11 = _pbReadVarint(bytes, u); u = t11.next;
+          var f11 = t11.value >>> 3, w11 = t11.value & 0x7;
+          if (w11 === 0) {
+            var v11 = _pbReadVarint(bytes, u); u = v11.next;
+            if (f11 === 1) rh.from_unix = v11.value;
+            else if (f11 === 2) rh.to_unix = v11.value;
+          } else { break; }
+        }
+        cmd.req_history = rh;
+      }
+      pos = end;
+    } else {
+      break;
+    }
+  }
+  return cmd;
+}
+
+function decodeDownlink(input) {
+  if (input.fPort === 85) {
+    return { data: decodeDownlinkCommand(input.bytes), warnings: [], errors: [] };
+  }
+  return { data: { bytes_hex: _pbBytesToHex(input.bytes) }, warnings: [], errors: [] };
 }
 
 function decodeUplink(input) {

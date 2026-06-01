@@ -14,6 +14,7 @@
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_sensor.h"
+#include "app_settings.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -25,6 +26,7 @@
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/reboot.h>
 
 /* LoRaMac includes */
 #include <LoRaMac.h>
@@ -131,6 +133,10 @@ static uint8_t m_dl_request_buf[APP_LRW_REQUEST_BUF_SIZE];
 static size_t  m_dl_request_len;
 static struct k_work m_dl_request_work;
 
+/* Deferred reboot/save requested by a command handler; runs after the Ack TX. */
+static struct k_work_delayable m_post_cmd_work;
+static enum app_cmd_action m_post_cmd_action;
+
 
 static uint32_t calculate_rejoin_backoff(int attempt)
 {
@@ -161,15 +167,38 @@ static void downlink_success_work_handler(struct k_work *work)
 	}
 }
 
+static void post_cmd_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	switch (m_post_cmd_action) {
+	case APP_CMD_ACTION_SETTINGS_SAVE:
+		LOG_INF("Command: saving settings + reboot");
+		app_settings_save(true);
+		break;
+	case APP_CMD_ACTION_FACTORY_RESET:
+		LOG_INF("Command: factory reset + reboot");
+		app_settings_reset();
+		break;
+	case APP_CMD_ACTION_REBOOT:
+		LOG_INF("Command: reboot");
+		sys_reboot(SYS_REBOOT_COLD);
+		break;
+	default:
+		break;
+	}
+}
+
 static void dl_request_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
 	static uint8_t resp[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t resp_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
 
 	int ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, m_dl_request_buf, m_dl_request_len,
-				 resp, sizeof(resp), &resp_len);
+				 resp, sizeof(resp), &resp_len, &action);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
 		return;
@@ -180,6 +209,13 @@ static void dl_request_work_handler(struct k_work *work)
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_lrw_queue_response", ret);
 		}
+	}
+
+	/* Defer reboot/save so the Ack uplink + its RX window finish first. */
+	if (action != APP_CMD_ACTION_NONE) {
+		m_post_cmd_action = action;
+		k_work_schedule_for_queue(&m_work_q, &m_post_cmd_work, K_SECONDS(8));
+		LOG_INF("Post-command action %d scheduled in 8s", (int)action);
 	}
 
 	/* Diagnostic: stack headroom after the heaviest work this queue runs.
@@ -886,6 +922,7 @@ int app_lrw_init(void)
 	k_work_init(&m_lc_response_work, lc_response_work_handler);
 	k_work_init(&m_send_with_lc_work, send_with_lc_work_handler);
 	k_work_init(&m_dl_request_work, dl_request_work_handler);
+	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
 
 	k_timer_init(&m_send_timer, send_timer_handler, NULL);

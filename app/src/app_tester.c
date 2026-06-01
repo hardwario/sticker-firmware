@@ -632,20 +632,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_led,
 	SHELL_SUBCMD_SET_END);
 
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
-static int cmd_cmd_inject(const struct shell *sh, size_t argc, char **argv)
+static int cmd_cmd_inject(const struct shell *sh, enum app_cmd_transport transport,
+			  const char *hex)
 {
-	enum app_cmd_transport transport;
-
-	if (strcmp(argv[1], "lrw") == 0) {
-		transport = APP_CMD_TRANSPORT_LRW;
-	} else if (strcmp(argv[1], "nfc") == 0) {
-		transport = APP_CMD_TRANSPORT_NFC;
-	} else {
-		shell_error(sh, "Unknown transport `%s` (expected lrw|nfc)", argv[1]);
-		return -EINVAL;
-	}
-
-	const char *hex = argv[2];
 	size_t hex_len = strlen(hex);
 
 	if (hex_len == 0 || (hex_len % 2) != 0) {
@@ -667,13 +656,20 @@ static int cmd_cmd_inject(const struct shell *sh, size_t argc, char **argv)
 
 	static uint8_t out[64];
 	size_t out_len = 0;
-	int ret = app_cmd_handle(transport, in, in_len, out, sizeof(out), &out_len);
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	int ret = app_cmd_handle(transport, in, in_len, out, sizeof(out), &out_len, &action);
 	if (ret) {
 		shell_error(sh, "app_cmd_handle failed: %d", ret);
 		return ret;
 	}
 
 	LOG_HEXDUMP_INF(out, out_len, "DownlinkResponse:");
+
+	/* Don't reboot the bench from a shell inject — just report what an LRW
+	 * downlink would trigger. Use `settings save` / `settings reset` to apply. */
+	if (action != APP_CMD_ACTION_NONE) {
+		shell_print(sh, "deferred action %d (not executed from shell inject)", (int)action);
+	}
 
 #if defined(CONFIG_LORAWAN)
 	if (transport == APP_CMD_TRANSPORT_LRW && out_len > 0) {
@@ -686,6 +682,23 @@ static int cmd_cmd_inject(const struct shell *sh, size_t argc, char **argv)
 
 	return 0;
 }
+
+static int cmd_cmd_lrw(const struct shell *sh, size_t argc, char **argv)
+{
+	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_LRW, argv[1]);
+}
+
+static int cmd_cmd_nfc(const struct shell *sh, size_t argc, char **argv)
+{
+	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_NFC, argv[1]);
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_cmd,
+	SHELL_CMD_ARG(lrw, NULL, "Inject over LoRaWAN transport. Usage: lrw <hex>",
+		      cmd_cmd_lrw, 2, 0),
+	SHELL_CMD_ARG(nfc, NULL, "Inject over NFC transport. Usage: nfc <hex>",
+		      cmd_cmd_nfc, 2, 0),
+	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_APP_CMD_DEBUG_SHELL */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
@@ -696,9 +709,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
 #endif /* defined(CONFIG_LORAWAN) */
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
-	SHELL_CMD_ARG(cmd, NULL,
-		      "Inject DownlinkCommand. Usage: cmd <lrw|nfc> <hex>",
-		      cmd_cmd_inject, 3, 0),
+	SHELL_CMD(cmd, &sub_cmd, "Inject DownlinkCommand (protobuf hex).", NULL),
 #endif
 	SHELL_SUBCMD_SET_END);
 
