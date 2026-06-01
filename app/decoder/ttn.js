@@ -111,12 +111,110 @@ function decodeDownlinkResponse(bytes) {
   return resp;
 }
 
+// Zig-zag decode for protobuf sint32.
+function _pbZigzag(n) {
+  return (n >>> 1) ^ -(n & 1);
+}
+
+// fPort 2: flat protobuf Telemetry (periodic / event-triggered report). Keys
+// match the legacy fPort-1 bitmap decoder so dashboards stay stable. Unknown
+// fields are skipped (forward-compatible with newer firmware).
+function decodeTelemetry(bytes) {
+  var d = {};
+  var pos = 0;
+  while (pos < bytes.length) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var field = tag.value >>> 3;
+    var wire = tag.value & 0x7;
+    if (wire !== 0) {
+      // Forward-compat: skip an unknown non-varint field.
+      if (wire === 2) { var l = _pbReadVarint(bytes, pos); pos = l.next + l.value; continue; }
+      if (wire === 5) { pos += 4; continue; }
+      if (wire === 1) { pos += 8; continue; }
+      break;
+    }
+    var v = _pbReadVarint(bytes, pos); pos = v.next;
+    var f;
+    switch (field) {
+      // system
+      case 1:  d.voltage = v.value / 50; break;
+      case 2:  if (v.value & (1 << 0)) d.boot = true; break;   // system_flags
+      // internal (SHT4x)
+      case 3:  d.temperature = _pbZigzag(v.value) / 100; break;
+      case 4:  d.humidity = v.value / 2; break;
+      // barometer
+      case 5:  d.pressure = v.value / 1000; break;
+      case 6:  d.altitude = _pbZigzag(v.value) / 10; break;
+      // light
+      case 7:  d.illuminance = v.value * 2; break;
+      // accel
+      case 8:  d.orientation = v.value; break;
+      // pir
+      case 9:  d.motion_count = v.value; break;
+      // 1-wire ext
+      case 10: d.ext_temperature_1 = _pbZigzag(v.value) / 100; break;
+      case 11: d.ext_temperature_2 = _pbZigzag(v.value) / 100; break;
+      // machine probe 1
+      case 12: d.machine_probe_temperature_1 = _pbZigzag(v.value) / 100; break;
+      case 13: d.machine_probe_humidity_1 = v.value / 2; break;
+      case 14: if (v.value & (1 << 0)) d.machine_probe_tilt_alert_1 = true; break;
+      // machine probe 2
+      case 15: d.machine_probe_temperature_2 = _pbZigzag(v.value) / 100; break;
+      case 16: d.machine_probe_humidity_2 = v.value / 2; break;
+      case 17: if (v.value & (1 << 0)) d.machine_probe_tilt_alert_2 = true; break;
+      // hall left
+      case 18: d.hall_left_count = v.value; break;
+      case 19:
+        f = v.value;
+        if (f & (1 << 0)) d.hall_left_notify_act = true;
+        if (f & (1 << 1)) d.hall_left_notify_deact = true;
+        if (f & (1 << 2)) d.hall_left_is_active = true;
+        break;
+      // hall right
+      case 20: d.hall_right_count = v.value; break;
+      case 21:
+        f = v.value;
+        if (f & (1 << 0)) d.hall_right_notify_act = true;
+        if (f & (1 << 1)) d.hall_right_notify_deact = true;
+        if (f & (1 << 2)) d.hall_right_is_active = true;
+        break;
+      // input A
+      case 22: d.input_a_count = v.value; break;
+      case 23:
+        f = v.value;
+        if (f & (1 << 0)) d.input_a_notify_act = true;
+        if (f & (1 << 1)) d.input_a_notify_deact = true;
+        if (f & (1 << 2)) d.input_a_is_active = true;
+        break;
+      // input B
+      case 24: d.input_b_count = v.value; break;
+      case 25:
+        f = v.value;
+        if (f & (1 << 0)) d.input_b_notify_act = true;
+        if (f & (1 << 1)) d.input_b_notify_deact = true;
+        if (f & (1 << 2)) d.input_b_is_active = true;
+        break;
+      default: break; /* unknown field: ignore (forward-compatible) */
+    }
+  }
+  return d;
+}
+
 function decodeUplink(input) {
 
   // fPort 85: DownlinkResponse (Ack / Info / Error from command dispatcher).
   if (input.fPort === 85) {
     return {
       data: decodeDownlinkResponse(input.bytes),
+      warnings: [],
+      errors: []
+    };
+  }
+
+  // fPort 2: protobuf Telemetry (new format). fPort 1 stays the legacy bitmap.
+  if (input.fPort === 2) {
+    return {
+      data: decodeTelemetry(input.bytes),
       warnings: [],
       errors: []
     };

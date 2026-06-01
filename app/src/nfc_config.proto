@@ -198,3 +198,53 @@ message DownlinkResponse {
         string detail       = 3;
     }
 }
+
+// Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap
+// stays on fPort 1). Fields are grouped per sensor; each group's boolean state
+// lives in its own `*_flags` field so a sensor's data stays together as an
+// atomic unit. A field is present only when its sensor is connected (capability
+// on) and has valid data. The composer packs whole groups by priority into one
+// or more frames to fit the LoRaWAN payload budget (split, never drop); all
+// frames of a report carry the same snapshot. Scalars are scaled-int varints.
+// The same message is emitted for periodic reports and event triggers.
+message Telemetry {
+    // system
+    optional uint32 voltage          = 1;   // V    x50
+    optional uint32 system_flags     = 2;   // bit0 boot
+    // internal (SHT4x)
+    optional sint32 temperature      = 3;   // degC x100
+    optional uint32 humidity         = 4;   // %RH  x2
+    // barometer (cap_barometer)
+    optional uint32 pressure         = 5;   // hPa  x1000
+    optional sint32 altitude         = 6;   // m    x10
+    // light (cap_light_sensor)
+    optional uint32 illuminance      = 7;   // lux  /2
+    // accelerometer
+    optional uint32 orientation      = 8;   // 1..6
+    // pir (cap_pir_detector)
+    optional uint32 motion_count     = 9;
+    // 1-wire external thermometers (cap_1w_thermometer)
+    optional sint32 ext1_temperature = 10;  // degC x100
+    optional sint32 ext2_temperature = 11;  // degC x100
+    // machine probe 1 (cap_1w_machine_probe)
+    optional sint32 mp1_temperature  = 12;  // degC x100
+    optional uint32 mp1_humidity     = 13;  // %RH  x2
+    optional uint32 mp1_flags        = 14;  // bit0 tilt
+    // machine probe 2
+    optional sint32 mp2_temperature  = 15;  // degC x100
+    optional uint32 mp2_humidity     = 16;  // %RH  x2
+    optional uint32 mp2_flags        = 17;  // bit0 tilt
+    // hall left (cap_hall_left)
+    optional uint32 hall_left_count  = 18;
+    optional uint32 hall_left_flags  = 19;  // bit0 notify_act, bit1 notify_deact, bit2 active
+    // hall right (cap_hall_right)
+    optional uint32 hall_right_count = 20;
+    optional uint32 hall_right_flags = 21;
+    // input A (cap_input_a)
+    optional uint32 input_a_count    = 22;
+    optional uint32 input_a_flags    = 23;  // bit0 notify_act, bit1 notify_deact, bit2 active
+    // input B (cap_input_b)
+    optional uint32 input_b_count    = 24;
+    optional uint32 input_b_flags    = 25;
+    // New sensors append at field >= 26 as new groups; never renumber.
+}

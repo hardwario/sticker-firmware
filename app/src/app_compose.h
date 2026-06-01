@@ -8,6 +8,7 @@
 #define APP_COMPOSE_H_
 
 /* Standard includes */
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -15,7 +16,15 @@
 extern "C" {
 #endif
 
-int app_compose(uint8_t *buf, size_t size, size_t *len);
+/* Compose one telemetry frame into `buf` (max `size`, also bounded by the
+ * LoRaWAN payload budget). On the first call of a report a consistent snapshot
+ * of all sensor groups is taken; each call emits the highest-priority pending
+ * groups that fit (whole groups only). *len = encoded length, *more = true when
+ * groups remain for a follow-up frame of the same snapshot (send ASAP).
+ *
+ * Returns 0 on success, -EAGAIN when the payload budget is unknown (pre-join),
+ * or -EMSGSIZE on encode failure. */
+int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more);
 
 #ifdef __cplusplus
 }
