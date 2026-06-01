@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "app_clock.h"
 #include "app_ds18b20.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -31,7 +30,6 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 LOG_MODULE_REGISTER(app_tester, LOG_LEVEL_DBG);
 
@@ -633,63 +631,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_led,
 		      cmd_switch_led, 3, 0),
 	SHELL_SUBCMD_SET_END);
 
-#if defined(CONFIG_RTC)
-static int cmd_clock_get(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	uint32_t unix_s;
-	int ret = app_clock_get_unix(&unix_s);
-	if (ret == -ENODATA) {
-		shell_warn(sh, "RTC not set yet (no time sync)");
-		return 0;
-	}
-	if (ret) {
-		shell_error(sh, "app_clock_get_unix failed: %d", ret);
-		return ret;
-	}
-
-	time_t t = (time_t)unix_s;
-	struct tm tm;
-	gmtime_r(&t, &tm);
-	shell_print(sh, "unix=%u  UTC %04d-%02d-%02d %02d:%02d:%02d", unix_s, tm.tm_year + 1900,
-		    tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
-	return 0;
-}
-
-static int cmd_clock_set(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-
-	uint32_t unix_s = (uint32_t)strtoul(argv[1], NULL, 10);
-	int ret = app_clock_set_unix(unix_s);
-	if (ret) {
-		shell_error(sh, "app_clock_set_unix failed: %d", ret);
-		return ret;
-	}
-	shell_print(sh, "RTC set to unix=%u", unix_s);
-	return 0;
-}
-
-static int cmd_clock_sync(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	app_clock_request_sync();
-	shell_print(sh, "DeviceTimeReq requested; RTC updates on the next downlink");
-	return 0;
-}
-
-SHELL_STATIC_SUBCMD_SET_CREATE(sub_clock,
-	SHELL_CMD_ARG(get, NULL, "Read RTC time.", cmd_clock_get, 1, 0),
-	SHELL_CMD_ARG(set, NULL, "Set RTC time. Usage: set <unix>", cmd_clock_set, 2, 0),
-	SHELL_CMD_ARG(sync, NULL, "Request network time (LoRaWAN DeviceTimeReq).", cmd_clock_sync,
-		      1, 0),
-	SHELL_SUBCMD_SET_END);
-#endif /* defined(CONFIG_RTC) */
-
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
 static int cmd_cmd_inject(const struct shell *sh, size_t argc, char **argv)
 {
@@ -754,9 +695,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_LORAWAN)
 	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
 #endif /* defined(CONFIG_LORAWAN) */
-#if defined(CONFIG_RTC)
-	SHELL_CMD(clock, &sub_clock, "RTC time commands.", NULL),
-#endif /* defined(CONFIG_RTC) */
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
 	SHELL_CMD_ARG(cmd, NULL,
 		      "Inject DownlinkCommand. Usage: cmd <lrw|nfc> <hex>",
