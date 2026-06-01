@@ -52,6 +52,12 @@ enum app_lrw_state app_lrw_get_state(void);
 int app_lrw_get_info(struct app_lrw_info *info);
 bool app_lrw_is_ready(void);
 
+/* Current application-payload budget (bytes) for the next uplink, taken from the
+ * LoRaWAN stack (lorawan_get_payload_sizes) and refreshed on every DR change and
+ * after join. 0 when unknown (before the first join). app_compose() uses this to
+ * decide how many telemetry fields fit. */
+uint8_t app_lrw_get_max_payload(void);
+
 /* Stage a serialized response (e.g. DownlinkResponse on port 85) for the next
  * uplink. send_work_handler() drains this slot before composing telemetry, so
  * the response leaves at the next jitter window. Single-slot, overwritten with

@@ -198,3 +198,39 @@ message DownlinkResponse {
         string detail       = 3;
     }
 }
+
+// Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap
+// stays on fPort 1). Flat schema: a field is present only when its sensor is
+// connected (capability on) and has valid data; the composer drops low-priority
+// fields to fit the LoRaWAN payload budget. Scalars are scaled integers
+// (varint) to stay compact; boolean state is packed into `flags`. The same
+// message is emitted for both periodic reports and event triggers.
+message Telemetry {
+    optional uint32 voltage          = 1;   // V    x50
+    optional sint32 temperature      = 2;   // degC x100  (SHT4x)
+    optional uint32 humidity         = 3;   // %RH  x2
+    optional uint32 illuminance      = 4;   // lux  /2     (cap_light_sensor)
+    optional uint32 pressure         = 5;   // hPa  x1000  (cap_barometer)
+    optional sint32 altitude         = 6;   // m    x10
+    optional sint32 ext1_temperature = 7;   // degC x100   (cap_1w_thermometer)
+    optional sint32 ext2_temperature = 8;   // degC x100
+    optional sint32 mp1_temperature  = 9;   // degC x100   (cap_1w_machine_probe)
+    optional sint32 mp2_temperature  = 10;  // degC x100
+    optional uint32 mp1_humidity     = 11;  // %RH  x2
+    optional uint32 mp2_humidity     = 12;  // %RH  x2
+    optional uint32 orientation      = 13;  // 1..6
+    optional uint32 motion_count     = 14;
+    optional uint32 hall_left_count  = 15;  // cap_hall_left
+    optional uint32 hall_right_count = 16;  // cap_hall_right
+    optional uint32 input_a_count    = 17;  // cap_input_a
+    optional uint32 input_b_count    = 18;  // cap_input_b
+
+    // Boolean state bitfield (set only when any bit is true):
+    //   bit 0  boot                  bit 1  mp1_tilt          bit 2  mp2_tilt
+    //   bit 3  hall_left_notify_act   bit 4  hall_left_notify_deact   bit 5  hall_left_active
+    //   bit 6  hall_right_notify_act  bit 7  hall_right_notify_deact  bit 8  hall_right_active
+    //   bit 9  input_a_notify_act     bit 10 input_a_notify_deact     bit 11 input_a_active
+    //   bit 12 input_b_notify_act     bit 13 input_b_notify_deact     bit 14 input_b_active
+    optional uint32 flags            = 19;
+    // New sensors append at field >= 20; never renumber existing fields.
+}

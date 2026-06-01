@@ -78,6 +78,9 @@ static struct k_work_delayable m_join_complete_work;
 #define JOIN_BUSY_MAX_POLLS         30
 
 static int m_current_dr;
+/* Application-payload budget (bytes) for the next TX, sourced from the LoRaWAN
+ * stack (lorawan_get_payload_sizes); 0 until the first DR callback / join. */
+static uint8_t m_max_next_payload;
 static int16_t m_last_rssi;
 static int8_t m_last_snr;
 static uint8_t m_last_margin;
@@ -216,7 +219,13 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 
 	lorawan_get_payload_sizes(&max_next_payload_size, &max_payload_size);
 	m_current_dr = dr;
+	m_max_next_payload = max_next_payload_size;
 	LOG_INF("New data rate: DR%d, Maximum payload size: %d", dr, max_payload_size);
+}
+
+uint8_t app_lrw_get_max_payload(void)
+{
+	return m_max_next_payload;
 }
 
 static void join_complete_work_handler(struct k_work *work)
@@ -274,6 +283,14 @@ static void join_complete_work_handler(struct k_work *work)
 	LOG_INF("Join successful - transitioning to HEALTHY");
 	m_init_join = false;  /* Next join will be rejoin with MAC reset */
 	lorawan_enable_adr(g_app_config.lrw_adr);
+
+	/* Capture the initial DR's payload budget; the DR-changed callback may not
+	 * fire on join, so query it explicitly here. */
+	{
+		uint8_t max_next, max_now;
+		lorawan_get_payload_sizes(&max_next, &max_now);
+		m_max_next_payload = max_next;
+	}
 	atomic_set(&m_state, APP_LRW_STATE_HEALTHY);
 	m_rejoin_attempts = 0;
 
@@ -638,9 +655,14 @@ static void send_work_handler(struct k_work *work)
 		app_sensor_sample();
 	}
 
-	uint8_t buf[51];
+	uint8_t buf[64];
 	size_t len;
 	ret = app_compose(buf, sizeof(buf), &len);
+	if (ret == -EAGAIN) {
+		/* Budget unknown (not joined yet) — skip this TX. */
+		LOG_DBG("Telemetry budget unavailable, skipping TX");
+		return;
+	}
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_compose", ret);
 		return;
@@ -665,7 +687,8 @@ static void send_work_handler(struct k_work *work)
 		LOG_INF("Sending data (msg #%u)...", m_message_count + 1);
 	}
 
-	ret = lorawan_send(1, buf, len, LORAWAN_MSG_UNCONFIRMED);
+	/* Protobuf Telemetry on fPort 2 (legacy bitmap used fPort 1). */
+	ret = lorawan_send(2, buf, len, LORAWAN_MSG_UNCONFIRMED);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lorawan_send", ret);
 		if (with_link_check) {

@@ -5,16 +5,23 @@
  */
 
 #include "app_compose.h"
+#include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
+#include "app_lrw.h"
 #include "app_sensor.h"
+
+/* Nanopb includes */
+#include <pb_encode.h>
+#include "src/nfc_config.pb.h"
 
 /* Zephyr includes */
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/net_buf.h>
+#include <zephyr/sys/util.h>
 
 /* Standard includes */
+#include <errno.h>
 #include <limits.h>
 #include <math.h>
 #include <stdbool.h>
@@ -23,294 +30,231 @@
 
 LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 
+/* Telemetry.flags bit positions (see nfc_config.proto + ttn.js). */
+#define FLAG_BOOT               BIT(0)
+#define FLAG_MP1_TILT           BIT(1)
+#define FLAG_MP2_TILT           BIT(2)
+#define FLAG_HALL_L_NOTIFY_ACT  BIT(3)
+#define FLAG_HALL_L_NOTIFY_DEACT BIT(4)
+#define FLAG_HALL_L_ACTIVE      BIT(5)
+#define FLAG_HALL_R_NOTIFY_ACT  BIT(6)
+#define FLAG_HALL_R_NOTIFY_DEACT BIT(7)
+#define FLAG_HALL_R_ACTIVE      BIT(8)
+#define FLAG_INPUT_A_NOTIFY_ACT BIT(9)
+#define FLAG_INPUT_A_NOTIFY_DEACT BIT(10)
+#define FLAG_INPUT_A_ACTIVE     BIT(11)
+#define FLAG_INPUT_B_NOTIFY_ACT BIT(12)
+#define FLAG_INPUT_B_NOTIFY_DEACT BIT(13)
+#define FLAG_INPUT_B_ACTIVE     BIT(14)
+
+/*
+ * Build a protobuf Telemetry message from the current sensor data and encode it
+ * into `buf`, dropping low-priority fields until it fits the LoRaWAN payload
+ * budget reported by the stack. Sent on fPort 2 (the legacy bitmap used fPort 1).
+ *
+ * Returns 0 on success (*len = encoded length), -EAGAIN when the budget is not
+ * yet known (pre-join), or -EMSGSIZE if even the core fields don't fit / encode
+ * fails.
+ */
 int app_compose(uint8_t *buf, size_t size, size_t *len)
 {
 	static bool boot = true;
 
-	uint32_t header = boot ? BIT(31) : 0;
+	uint8_t budget = app_lrw_get_max_payload();
+	if (budget == 0) {
+		return -EAGAIN;
+	}
 
-	/* For compatibility reasons (indicates header extension from 16 bits to 32 bits) */
-	header |= BIT(20);
+	Telemetry t = Telemetry_init_zero;
+	uint32_t flags = boot ? FLAG_BOOT : 0;
 
-	uint8_t orientation = 0;
-	uint8_t voltage = 0xff;
-
-	int16_t temperature = 0x7fff;
-	uint8_t humidity = 0xff;
-	uint16_t illuminance = 0xffff;
-	int16_t altitude = 0x7fff;
-	uint32_t pressure = 0xffffffff;
-
-	struct app_hall_data hall_data;
-	uint32_t hall_left_count = 0;
-	uint32_t hall_right_count = 0;
-
-	struct app_input_data input_data;
-	uint32_t input_a_count = 0;
-	uint32_t input_b_count = 0;
-
-	uint32_t motion_count = 0xffffffff;
-	int16_t t1_temperature = 0x7fff;
-	int16_t t2_temperature = 0x7fff;
-
-	int16_t mp1_temperature = 0x7fff;
-	int16_t mp2_temperature = 0x7fff;
-	uint8_t mp1_humidity = 0xff;
-	uint8_t mp2_humidity = 0xff;
-
-	app_hall_get_data_and_clear_notify(&hall_data);
-	app_input_get_data_and_clear_notify(&input_data);
+	/* Snapshot hall/input (clears notify edges) before taking the sensor lock. */
+	struct app_hall_data hall;
+	struct app_input_data input;
+	app_hall_get_data_and_clear_notify(&hall);
+	app_input_get_data_and_clear_notify(&input);
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-
-	if (g_app_sensor_data.orientation != INT_MAX) {
-		orientation = g_app_sensor_data.orientation & 0xf;
-		header |= BIT(30);
-	}
-
-	if (!isnan(g_app_sensor_data.voltage)) {
-		float v = g_app_sensor_data.voltage * 50;
-		if (v > 255.f) {
-			v = 255.f;
-		} else if (v < 0.f) {
-			v = 0.f;
-		}
-		voltage = (uint8_t)v;
-		header |= BIT(29);
-	}
-
-	if (!isnan(g_app_sensor_data.temperature)) {
-		temperature = (int16_t)(g_app_sensor_data.temperature * 100);
-		header |= BIT(28);
-	}
-
-	if (!isnan(g_app_sensor_data.humidity)) {
-		humidity = (uint8_t)(g_app_sensor_data.humidity * 2);
-		header |= BIT(27);
-	}
-
-	if (!isnan(g_app_sensor_data.illuminance)) {
-		illuminance = (uint16_t)(g_app_sensor_data.illuminance / 2);
-		header |= BIT(26);
-	}
-
-	if (!isnan(g_app_sensor_data.t1_temperature)) {
-		t1_temperature = (int16_t)(g_app_sensor_data.t1_temperature * 100);
-		header |= BIT(25);
-	}
-
-	if (!isnan(g_app_sensor_data.t2_temperature)) {
-		t2_temperature = (int16_t)(g_app_sensor_data.t2_temperature * 100);
-		header |= BIT(24);
-	}
-
-	motion_count = g_app_sensor_data.motion_count;
-	if (motion_count > 0) {
-		header |= BIT(23);
-	}
-
-	if (!isnan(g_app_sensor_data.altitude)) {
-		float alt_scaled = g_app_sensor_data.altitude * 10;
-
-		if (alt_scaled > INT16_MAX) {
-			alt_scaled = INT16_MAX;
-		} else if (alt_scaled < INT16_MIN) {
-			alt_scaled = INT16_MIN;
-		}
-
-		altitude = (int16_t)alt_scaled;
-		header |= BIT(22);
-	}
-
-	if (!isnan(g_app_sensor_data.pressure)) {
-		pressure = (uint32_t)(g_app_sensor_data.pressure * 1000.f);
-		header |= BIT(21);
-	}
-
-	if (!isnan(g_app_sensor_data.mp1_temperature)) {
-		mp1_temperature = (int16_t)(g_app_sensor_data.mp1_temperature * 100);
-		header |= BIT(19);
-	}
-
-	if (!isnan(g_app_sensor_data.mp2_temperature)) {
-		mp2_temperature = (int16_t)(g_app_sensor_data.mp2_temperature * 100);
-		header |= BIT(18);
-	}
-
-	if (!isnan(g_app_sensor_data.mp1_humidity)) {
-		mp1_humidity = (uint8_t)(g_app_sensor_data.mp1_humidity * 2);
-		header |= BIT(17);
-	}
-
-	if (!isnan(g_app_sensor_data.mp2_humidity)) {
-		mp2_humidity = (uint8_t)(g_app_sensor_data.mp2_humidity * 2);
-		header |= BIT(16);
-	}
-
-	if (g_app_sensor_data.mp1_is_tilt_alert) {
-		header |= BIT(15);
-	}
-
-	if (g_app_sensor_data.mp2_is_tilt_alert) {
-		header |= BIT(14);
-	}
-
-	hall_left_count = hall_data.left_count;
-	hall_right_count = hall_data.right_count;
-
-	if (hall_left_count > 0) {
-		header |= BIT(13);
-	}
-
-	if (hall_right_count > 0) {
-		header |= BIT(12);
-	}
-
-	input_a_count = input_data.input_a_count;
-	input_b_count = input_data.input_b_count;
-
-	if (input_a_count > 0 || input_data.input_a_notify_act || input_data.input_a_notify_deact) {
-		header |= BIT(5);
-	}
-
-	if (input_b_count > 0 || input_data.input_b_notify_act || input_data.input_b_notify_deact) {
-		header |= BIT(4);
-	}
-
+	struct app_sensor_data d = g_app_sensor_data;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	/* Add hall notify events to header */
-	if (hall_data.left_notify_act) {
-		header |= BIT(11);
+	/* --- always-present onboard channels --- */
+	if (!isnan(d.voltage)) {
+		float v = CLAMP(d.voltage * 50.0f, 0.0f, 255.0f);
+		t.has_voltage = true;
+		t.voltage = (uint32_t)v;
 	}
-	if (hall_data.left_notify_deact) {
-		header |= BIT(10);
+	if (!isnan(d.temperature)) {
+		t.has_temperature = true;
+		t.temperature = (int32_t)(d.temperature * 100.0f);
 	}
-	if (hall_data.right_notify_act) {
-		header |= BIT(9);
+	if (!isnan(d.humidity)) {
+		t.has_humidity = true;
+		t.humidity = (uint32_t)(d.humidity * 2.0f);
 	}
-	if (hall_data.right_notify_deact) {
-		header |= BIT(8);
-	}
-
-	/* Add hall active states to header */
-	if (hall_data.left_is_active) {
-		header |= BIT(7);
-	}
-	if (hall_data.right_is_active) {
-		header |= BIT(6);
+	if (d.orientation != INT_MAX) {
+		t.has_orientation = true;
+		t.orientation = (uint32_t)(d.orientation & 0xf);
 	}
 
-	header |= orientation;
-
-	LOG_DBG("Header: 0x%08x", header);
-
-	struct net_buf_simple nbuf;
-
-	net_buf_simple_init_with_data(&nbuf, buf, size);
-	net_buf_simple_reset(&nbuf);
-
-	net_buf_simple_add_be32(&nbuf, header);
-
-	if (header & BIT(29)) {
-		net_buf_simple_add_u8(&nbuf, voltage);
+	/* --- capability-gated analog channels --- */
+	if (g_app_config.cap_light_sensor && !isnan(d.illuminance)) {
+		t.has_illuminance = true;
+		t.illuminance = (uint32_t)(d.illuminance / 2.0f);
+	}
+	if (g_app_config.cap_barometer && !isnan(d.pressure)) {
+		t.has_pressure = true;
+		t.pressure = (uint32_t)(d.pressure * 1000.0f);
+	}
+	if (g_app_config.cap_barometer && !isnan(d.altitude)) {
+		float a = CLAMP(d.altitude * 10.0f, (float)INT16_MIN, (float)INT16_MAX);
+		t.has_altitude = true;
+		t.altitude = (int32_t)a;
+	}
+	if (g_app_config.cap_1w_thermometer && !isnan(d.t1_temperature)) {
+		t.has_ext1_temperature = true;
+		t.ext1_temperature = (int32_t)(d.t1_temperature * 100.0f);
+	}
+	if (g_app_config.cap_1w_thermometer && !isnan(d.t2_temperature)) {
+		t.has_ext2_temperature = true;
+		t.ext2_temperature = (int32_t)(d.t2_temperature * 100.0f);
+	}
+	if (g_app_config.cap_1w_machine_probe && !isnan(d.mp1_temperature)) {
+		t.has_mp1_temperature = true;
+		t.mp1_temperature = (int32_t)(d.mp1_temperature * 100.0f);
+	}
+	if (g_app_config.cap_1w_machine_probe && !isnan(d.mp2_temperature)) {
+		t.has_mp2_temperature = true;
+		t.mp2_temperature = (int32_t)(d.mp2_temperature * 100.0f);
+	}
+	if (g_app_config.cap_1w_machine_probe && !isnan(d.mp1_humidity)) {
+		t.has_mp1_humidity = true;
+		t.mp1_humidity = (uint32_t)(d.mp1_humidity * 2.0f);
+	}
+	if (g_app_config.cap_1w_machine_probe && !isnan(d.mp2_humidity)) {
+		t.has_mp2_humidity = true;
+		t.mp2_humidity = (uint32_t)(d.mp2_humidity * 2.0f);
 	}
 
-	if (header & BIT(28)) {
-		net_buf_simple_add_be16(&nbuf, (uint16_t)temperature);
+	/* --- counters (capability-gated, sent when non-zero) --- */
+	if (g_app_config.cap_pir_detector && d.motion_count > 0) {
+		t.has_motion_count = true;
+		t.motion_count = d.motion_count;
+	}
+	if (g_app_config.cap_hall_left && hall.left_count > 0) {
+		t.has_hall_left_count = true;
+		t.hall_left_count = hall.left_count;
+	}
+	if (g_app_config.cap_hall_right && hall.right_count > 0) {
+		t.has_hall_right_count = true;
+		t.hall_right_count = hall.right_count;
+	}
+	if (g_app_config.cap_input_a && input.input_a_count > 0) {
+		t.has_input_a_count = true;
+		t.input_a_count = input.input_a_count;
+	}
+	if (g_app_config.cap_input_b && input.input_b_count > 0) {
+		t.has_input_b_count = true;
+		t.input_b_count = input.input_b_count;
 	}
 
-	if (header & BIT(27)) {
-		net_buf_simple_add_u8(&nbuf, humidity);
-	}
-
-	if (header & BIT(26)) {
-		net_buf_simple_add_be16(&nbuf, illuminance);
-	}
-
-	if (header & BIT(25)) {
-		net_buf_simple_add_be16(&nbuf, (uint16_t)t1_temperature);
-	}
-
-	if (header & BIT(24)) {
-		net_buf_simple_add_be16(&nbuf, (uint16_t)t2_temperature);
-	}
-
-	if (header & BIT(23)) {
-		net_buf_simple_add_be32(&nbuf, motion_count);
-	}
-
-	if (header & BIT(22)) {
-		net_buf_simple_add_be16(&nbuf, (uint16_t)altitude);
-	}
-
-	if (header & BIT(21)) {
-		net_buf_simple_add_be32(&nbuf, pressure);
-	}
-
-	if (header & BIT(19)) {
-		net_buf_simple_add_be16(&nbuf, (uint16_t)mp1_temperature);
-	}
-
-	if (header & BIT(18)) {
-		net_buf_simple_add_be16(&nbuf, (uint16_t)mp2_temperature);
-	}
-
-	if (header & BIT(17)) {
-		net_buf_simple_add_u8(&nbuf, mp1_humidity);
-	}
-
-	if (header & BIT(16)) {
-		net_buf_simple_add_u8(&nbuf, mp2_humidity);
-	}
-
-	if (header & BIT(13)) {
-		net_buf_simple_add_be32(&nbuf, hall_left_count);
-	}
-
-	if (header & BIT(12)) {
-		net_buf_simple_add_be32(&nbuf, hall_right_count);
-	}
-
-	if (header & BIT(5)) {
-		net_buf_simple_add_be32(&nbuf, input_a_count);
-		/* Append status byte: bit 3=notify_act, bit 2=notify_deact, bit 1=reserved, bit
-		 * 0=is_active */
-		uint8_t status_a = 0;
-		if (input_data.input_a_notify_act) {
-			status_a |= BIT(3);
+	/* --- boolean state into the flags bitfield --- */
+	if (g_app_config.cap_1w_machine_probe) {
+		if (d.mp1_is_tilt_alert) {
+			flags |= FLAG_MP1_TILT;
 		}
-		if (input_data.input_a_notify_deact) {
-			status_a |= BIT(2);
+		if (d.mp2_is_tilt_alert) {
+			flags |= FLAG_MP2_TILT;
 		}
-		if (input_data.input_a_is_active) {
-			status_a |= BIT(0);
+	}
+	if (g_app_config.cap_hall_left) {
+		if (hall.left_notify_act) {
+			flags |= FLAG_HALL_L_NOTIFY_ACT;
 		}
-		net_buf_simple_add_u8(&nbuf, status_a);
+		if (hall.left_notify_deact) {
+			flags |= FLAG_HALL_L_NOTIFY_DEACT;
+		}
+		if (hall.left_is_active) {
+			flags |= FLAG_HALL_L_ACTIVE;
+		}
+	}
+	if (g_app_config.cap_hall_right) {
+		if (hall.right_notify_act) {
+			flags |= FLAG_HALL_R_NOTIFY_ACT;
+		}
+		if (hall.right_notify_deact) {
+			flags |= FLAG_HALL_R_NOTIFY_DEACT;
+		}
+		if (hall.right_is_active) {
+			flags |= FLAG_HALL_R_ACTIVE;
+		}
+	}
+	if (g_app_config.cap_input_a) {
+		if (input.input_a_notify_act) {
+			flags |= FLAG_INPUT_A_NOTIFY_ACT;
+		}
+		if (input.input_a_notify_deact) {
+			flags |= FLAG_INPUT_A_NOTIFY_DEACT;
+		}
+		if (input.input_a_is_active) {
+			flags |= FLAG_INPUT_A_ACTIVE;
+		}
+	}
+	if (g_app_config.cap_input_b) {
+		if (input.input_b_notify_act) {
+			flags |= FLAG_INPUT_B_NOTIFY_ACT;
+		}
+		if (input.input_b_notify_deact) {
+			flags |= FLAG_INPUT_B_NOTIFY_DEACT;
+		}
+		if (input.input_b_is_active) {
+			flags |= FLAG_INPUT_B_ACTIVE;
+		}
+	}
+	if (flags) {
+		t.has_flags = true;
+		t.flags = flags;
 	}
 
-	if (header & BIT(4)) {
-		net_buf_simple_add_be32(&nbuf, input_b_count);
-		/* Append status byte: bit 3=notify_act, bit 2=notify_deact, bit 1=reserved, bit
-		 * 0=is_active */
-		uint8_t status_b = 0;
-		if (input_data.input_b_notify_act) {
-			status_b |= BIT(3);
+	/* Priority-ordered drop list (lowest priority first). Core voltage/
+	 * temperature/humidity are never dropped. When the message exceeds the
+	 * budget, clear the lowest-priority set fields until it fits. */
+	bool *drop[] = {
+		&t.has_input_b_count, &t.has_input_a_count,
+		&t.has_hall_right_count, &t.has_hall_left_count,
+		&t.has_motion_count, &t.has_orientation,
+		&t.has_mp2_humidity, &t.has_mp2_temperature,
+		&t.has_mp1_humidity, &t.has_mp1_temperature,
+		&t.has_ext2_temperature, &t.has_ext1_temperature,
+		&t.has_illuminance, &t.has_altitude, &t.has_pressure,
+		&t.has_flags,
+	};
+
+	size_t cap = MIN(size, (size_t)budget);
+	size_t needed = 0;
+	uint8_t dropped = 0;
+
+	pb_get_encoded_size(&needed, Telemetry_fields, &t);
+	for (size_t i = 0; needed > cap && i < ARRAY_SIZE(drop); i++) {
+		if (*drop[i]) {
+			*drop[i] = false;
+			dropped++;
+			pb_get_encoded_size(&needed, Telemetry_fields, &t);
 		}
-		if (input_data.input_b_notify_deact) {
-			status_b |= BIT(2);
-		}
-		if (input_data.input_b_is_active) {
-			status_b |= BIT(0);
-		}
-		net_buf_simple_add_u8(&nbuf, status_b);
 	}
 
-	*len = nbuf.len;
+	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
+	if (!pb_encode(&os, Telemetry_fields, &t)) {
+		LOG_ERR("pb_encode failed: %s", PB_GET_ERROR(&os));
+		return -EMSGSIZE;
+	}
 
-	LOG_HEXDUMP_DBG(buf, *len, "Composed buffer:");
-
+	*len = os.bytes_written;
 	boot = false;
+
+	LOG_INF("TX: DR budget=%uB (from system), payload=%zuB, %u field(s) dropped", budget,
+		*len, dropped);
+	LOG_HEXDUMP_DBG(buf, *len, "Telemetry:");
 
 	return 0;
 }
