@@ -513,6 +513,86 @@ int app_history_get(size_t idx, struct app_history_record *out)
 	return 0;
 }
 
+size_t app_history_export(uint32_t from_unix, uint32_t to_unix, uint8_t *buf, size_t cap,
+			  uint32_t *t0_out, uint16_t *n_written, uint16_t *total)
+{
+	size_t cnt = app_history_count();
+	size_t pos = 0;
+	uint16_t written = 0;
+	uint16_t matched = 0;
+	uint32_t t0 = 0;
+	bool have_t0 = false;
+	bool full = false;
+
+	for (size_t ord = 0; ord < cnt; ord++) {
+		struct app_history_record rec;
+		if (app_history_get(ord, &rec) != 0) {
+			break;
+		}
+		/* The window filter only makes sense once we have absolute time. */
+		if (rec.time_synced && (rec.time_unix < from_unix || rec.time_unix > to_unix)) {
+			continue;
+		}
+		matched++;
+		if (full) {
+			continue; /* keep counting the window total, stop packing */
+		}
+
+		uint8_t tmp[MAX_RECORD_SIZE];
+		size_t rl = 0;
+		uint32_t delta = have_t0 ? (rec.time_unix - t0) : 0;
+		if (delta > 0xFFFF) {
+			delta = 0xFFFF;
+		}
+		sys_put_le16((uint16_t)delta, &tmp[rl]);
+		rl += 2;
+		sys_put_le16(rec.present, &tmp[rl]);
+		rl += 2;
+		for (int s = 0; s < APP_HISTORY_SENSOR_COUNT; s++) {
+			if (!(rec.present & BIT(s))) {
+				continue;
+			}
+			double v = rec.value[s];
+			switch (m_desc[s].enc) {
+			case ENC_TEMP:
+				sys_put_le16((uint16_t)(int16_t)llround(v * 100.0), &tmp[rl]);
+				rl += 2;
+				break;
+			case ENC_HUM:
+				tmp[rl++] = (uint8_t)llround(v * 2.0);
+				break;
+			case ENC_COUNT:
+				sys_put_le32((uint32_t)v, &tmp[rl]);
+				rl += 4;
+				break;
+			}
+		}
+
+		if (pos + rl > cap) {
+			full = true; /* this record (and the rest) spill to a later page */
+			continue;
+		}
+		if (!have_t0) {
+			t0 = rec.time_unix;
+			have_t0 = true;
+		}
+		memcpy(buf + pos, tmp, rl);
+		pos += rl;
+		written++;
+	}
+
+	if (t0_out) {
+		*t0_out = t0;
+	}
+	if (n_written) {
+		*n_written = written;
+	}
+	if (total) {
+		*total = matched;
+	}
+	return pos;
+}
+
 bool app_history_is_enabled(void)
 {
 	return m_enabled;

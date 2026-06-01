@@ -221,6 +221,80 @@ function _decodeError(bytes, start, end) {
   return err;
 }
 
+// app_history_sensor enum order → name + encoding (mirrors app_history.c).
+var _HIST_SENSORS = [
+  { name: "temperature", enc: "temp" },
+  { name: "humidity", enc: "hum" },
+  { name: "ext_temperature_1", enc: "temp" },
+  { name: "ext_temperature_2", enc: "temp" },
+  { name: "machine_probe_temperature_1", enc: "temp" },
+  { name: "machine_probe_temperature_2", enc: "temp" },
+  { name: "machine_probe_humidity_1", enc: "hum" },
+  { name: "machine_probe_humidity_2", enc: "hum" },
+  { name: "hall_left_count", enc: "count" },
+  { name: "hall_right_count", enc: "count" },
+  { name: "input_a_count", enc: "count" },
+  { name: "input_b_count", enc: "count" },
+  { name: "motion_count", enc: "count" }
+];
+var _HIST_TEMP_SENTINEL = 0x7fff;
+var _HIST_HUM_SENTINEL = 0xff;
+
+// HistoryFrame.samples: a sequence of records, each
+//   [delta_s u16 LE][present u16 LE][per present sensor: scaled value]
+// where the value is int16 LE ×100 (temp), uint8 ×2 (humidity) or uint32 LE
+// (counter). delta_s is seconds since the frame's t0_unix.
+function _decodeHistorySamples(bytes, t0) {
+  var out = [];
+  var p = 0;
+  while (p + 4 <= bytes.length) {
+    var delta = bytes[p] | (bytes[p + 1] << 8); p += 2;
+    var present = bytes[p] | (bytes[p + 1] << 8); p += 2;
+    var rec = { time: (t0 + delta) >>> 0 };
+    for (var s = 0; s < _HIST_SENSORS.length; s++) {
+      if (!(present & (1 << s))) continue;
+      var d = _HIST_SENSORS[s];
+      if (d.enc === "temp") {
+        var raw = bytes[p] | (bytes[p + 1] << 8); p += 2;
+        rec[d.name] = raw === _HIST_TEMP_SENTINEL ? null
+          : (raw > 0x7fff ? raw - 0x10000 : raw) / 100;
+      } else if (d.enc === "hum") {
+        var hv = bytes[p]; p += 1;
+        rec[d.name] = hv === _HIST_HUM_SENTINEL ? null : hv / 2;
+      } else { // count
+        rec[d.name] = (bytes[p] | (bytes[p + 1] << 8) | (bytes[p + 2] << 16) |
+                       (bytes[p + 3] << 24)) >>> 0; p += 4;
+      }
+    }
+    out.push(rec);
+  }
+  return out;
+}
+
+function _decodeHistoryFrame(bytes, start, end) {
+  var hf = { records: [] };
+  var t0 = 0;
+  var samples = null;
+  var pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var f = tag.value >>> 3, w = tag.value & 0x7;
+    if (w === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (f === 1) hf.frame_index = v.value;
+      else if (f === 2) hf.frame_count = v.value;
+      else if (f === 3) t0 = v.value;
+    } else if (w === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      if (f === 4) samples = bytes.slice(pos, pos + len.value);
+      pos += len.value;
+    } else { break; }
+  }
+  hf.t0_unix = t0;
+  if (samples) hf.records = _decodeHistorySamples(samples, t0);
+  return hf;
+}
+
 function decodeDownlinkResponse(bytes) {
   var resp = {};
   var pos = 0;
@@ -237,6 +311,7 @@ function decodeDownlinkResponse(bytes) {
       if (field === 2) resp.ack = {};
       else if (field === 3) resp.info = _decodeInfo(bytes, pos, end);
       else if (field === 4) resp.config_dump = _decodeConfigDump(bytes, pos, end);
+      else if (field === 5) resp.history_frame = _decodeHistoryFrame(bytes, pos, end);
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       pos = end;
     } else {

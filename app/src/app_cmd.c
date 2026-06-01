@@ -20,6 +20,13 @@
 #define APP_CMD_HAVE_CLOCK 1
 #endif
 
+/* Sensor history store-and-forward (#24). When the module is present, ReqHistory
+ * replays stored records as paged HistoryFrame responses. */
+#if defined(__has_include) && __has_include("app_history.h")
+#include "app_history.h"
+#define APP_CMD_HAVE_HISTORY 1
+#endif
+
 /* Nanopb includes */
 #include <pb_decode.h>
 #include <pb_encode.h>
@@ -212,6 +219,31 @@ static void handle_reset_counters(const DownlinkCommand_ResetCounters *rc, Downl
 	resp->which_body = DownlinkResponse_ack_tag;
 }
 
+static void handle_req_history(const DownlinkCommand_ReqHistory *rq, DownlinkResponse *resp)
+{
+#ifdef APP_CMD_HAVE_HISTORY
+	uint32_t from = rq->has_from_unix ? rq->from_unix : 0;
+	uint32_t to = rq->has_to_unix ? rq->to_unix : UINT32_MAX;
+	uint32_t t0 = 0;
+	uint16_t n_written = 0;
+	uint16_t total = 0;
+
+	DownlinkResponse_HistoryFrame *hf = &resp->body.history_frame;
+	size_t len = app_history_export(from, to, hf->samples.bytes, sizeof(hf->samples.bytes),
+					&t0, &n_written, &total);
+
+	resp->which_body = DownlinkResponse_history_frame_tag;
+	hf->frame_index = 0;          /* this page starts at `from` */
+	hf->frame_count = total;      /* total records in the window; host pages by
+				       * narrowing from_unix to last returned time + 1 */
+	hf->t0_unix = t0;
+	hf->samples.size = len;
+#else
+	ARG_UNUSED(rq);
+	make_error(resp, DownlinkResponse_Error_Code_HISTORY_UNAVAILABLE, "no history");
+#endif
+}
+
 static void dispatch(enum app_cmd_transport transport, const DownlinkCommand *cmd,
 		     DownlinkResponse *resp, enum app_cmd_action *action)
 {
@@ -268,6 +300,10 @@ static void dispatch(enum app_cmd_transport transport, const DownlinkCommand *cm
 		app_clock_force_resync();
 #endif
 		resp->which_body = DownlinkResponse_ack_tag;
+		break;
+
+	case DownlinkCommand_req_history_tag:
+		handle_req_history(&cmd->body.req_history, resp);
 		break;
 
 	default:
