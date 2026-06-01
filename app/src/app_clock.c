@@ -17,9 +17,14 @@
 #include <zephyr/lorawan/lorawan.h>
 #endif
 
+#if defined(CONFIG_SHELL)
+#include <zephyr/shell/shell.h>
+#endif
+
 /* Standard includes */
 #include <errno.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <time.h>
 
 LOG_MODULE_REGISTER(app_clock, LOG_LEVEL_INF);
@@ -134,3 +139,62 @@ int app_clock_set_unix(uint32_t unix_s)
 
 	return rtc_set_time(m_rtc, &rtc_tm);
 }
+
+#if defined(CONFIG_SHELL)
+static int cmd_clock_get(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	uint32_t unix_s;
+	int ret = app_clock_get_unix(&unix_s);
+	if (ret == -ENODATA) {
+		shell_warn(sh, "RTC not set yet (no time sync)");
+		return 0;
+	}
+	if (ret) {
+		shell_error(sh, "app_clock_get_unix failed: %d", ret);
+		return ret;
+	}
+
+	time_t t = (time_t)unix_s;
+	struct tm tm;
+	gmtime_r(&t, &tm);
+	shell_print(sh, "unix=%u  UTC %04d-%02d-%02d %02d:%02d:%02d", unix_s, tm.tm_year + 1900,
+		    tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+	return 0;
+}
+
+static int cmd_clock_set(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	uint32_t unix_s = (uint32_t)strtoul(argv[1], NULL, 10);
+	int ret = app_clock_set_unix(unix_s);
+	if (ret) {
+		shell_error(sh, "app_clock_set_unix failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "RTC set to unix=%u", unix_s);
+	return 0;
+}
+
+static int cmd_clock_sync(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	app_clock_request_sync();
+	shell_print(sh, "DeviceTimeReq requested; RTC updates on the next downlink");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_clock,
+	SHELL_CMD_ARG(get, NULL, "Read RTC time.", cmd_clock_get, 1, 0),
+	SHELL_CMD_ARG(set, NULL, "Set RTC time. Usage: set <unix>", cmd_clock_set, 2, 0),
+	SHELL_CMD_ARG(sync, NULL, "Request network time (LoRaWAN DeviceTimeReq).", cmd_clock_sync,
+		      1, 0),
+	SHELL_SUBCMD_SET_END);
+
+SHELL_CMD_REGISTER(clock, &sub_clock, "RTC wall-clock commands.", NULL);
+#endif /* defined(CONFIG_SHELL) */
