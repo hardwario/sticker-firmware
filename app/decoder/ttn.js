@@ -154,22 +154,25 @@ function decodeTelemetry(bytes) {
       case 17: d.input_a_count = v.value; break;
       case 18: d.input_b_count = v.value; break;
       case 19:
+        // Expose only the flags that are set, so the output mirrors the sparse
+        // payload (a missing flag means false). Avoids implying sensors that
+        // aren't connected exist.
         var f = v.value;
-        d.boot = !!(f & (1 << 0));
-        d.machine_probe_tilt_alert_1 = !!(f & (1 << 1));
-        d.machine_probe_tilt_alert_2 = !!(f & (1 << 2));
-        d.hall_left_notify_act = !!(f & (1 << 3));
-        d.hall_left_notify_deact = !!(f & (1 << 4));
-        d.hall_left_is_active = !!(f & (1 << 5));
-        d.hall_right_notify_act = !!(f & (1 << 6));
-        d.hall_right_notify_deact = !!(f & (1 << 7));
-        d.hall_right_is_active = !!(f & (1 << 8));
-        d.input_a_notify_act = !!(f & (1 << 9));
-        d.input_a_notify_deact = !!(f & (1 << 10));
-        d.input_a_is_active = !!(f & (1 << 11));
-        d.input_b_notify_act = !!(f & (1 << 12));
-        d.input_b_notify_deact = !!(f & (1 << 13));
-        d.input_b_is_active = !!(f & (1 << 14));
+        if (f & (1 << 0))  d.boot = true;
+        if (f & (1 << 1))  d.machine_probe_tilt_alert_1 = true;
+        if (f & (1 << 2))  d.machine_probe_tilt_alert_2 = true;
+        if (f & (1 << 3))  d.hall_left_notify_act = true;
+        if (f & (1 << 4))  d.hall_left_notify_deact = true;
+        if (f & (1 << 5))  d.hall_left_is_active = true;
+        if (f & (1 << 6))  d.hall_right_notify_act = true;
+        if (f & (1 << 7))  d.hall_right_notify_deact = true;
+        if (f & (1 << 8))  d.hall_right_is_active = true;
+        if (f & (1 << 9))  d.input_a_notify_act = true;
+        if (f & (1 << 10)) d.input_a_notify_deact = true;
+        if (f & (1 << 11)) d.input_a_is_active = true;
+        if (f & (1 << 12)) d.input_b_notify_act = true;
+        if (f & (1 << 13)) d.input_b_notify_deact = true;
+        if (f & (1 << 14)) d.input_b_is_active = true;
         break;
       default: break; /* unknown field: ignore */
     }
