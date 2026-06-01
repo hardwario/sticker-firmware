@@ -57,7 +57,23 @@ static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
 static struct k_work_q m_work_q;
 static struct k_timer m_send_timer;
 static struct k_work m_send_work;
+static struct k_work_delayable m_frame_work; /* multi-frame snapshot continuation */
 static struct k_work m_join_work;
+
+/* Multi-frame telemetry: gap before the next frame of the same snapshot (covers
+ * RX1/RX2 windows) and backoff when a send is refused (duty cycle / MAC busy). */
+#define FRAME_GAP_SEC   3
+#define FRAME_RETRY_SEC 15
+
+/* Current telemetry frame, kept so a failed send can be retried verbatim
+ * (app_compose already consumed those groups from its snapshot). */
+static uint8_t m_frame_buf[64];
+static size_t  m_frame_len;
+static bool    m_frame_more;    /* more frames remain in this snapshot */
+static bool    m_frame_first;   /* this frame is the snapshot's first (for LC) */
+static bool    m_frame_resend;  /* last send failed; resend m_frame_buf as-is */
+
+static void tx_telemetry_frame(bool first_frame);
 
 static atomic_t m_state = ATOMIC_INIT(APP_LRW_STATE_IDLE);
 static struct k_timer m_link_check_timer;
@@ -602,7 +618,6 @@ static bool should_request_link_check(void)
 static void send_work_handler(struct k_work *work)
 {
 	int ret;
-	bool with_link_check;
 
 	/* Block normal transmissions during calibration mode */
 	if (g_app_config.calibration) {
@@ -641,67 +656,104 @@ static void send_work_handler(struct k_work *work)
 	}
 	k_mutex_unlock(&m_pending_response_lock);
 
-	int timeout = g_app_config.interval_report;
-
-#if defined(CONFIG_ENTROPY_GENERATOR)
-	timeout += (int32_t)sys_rand32_get() % (g_app_config.interval_report / 10);
-#endif /* defined(CONFIG_ENTROPY_GENERATOR) */
-
-	LOG_INF("Scheduling next timeout in %d seconds", timeout);
-
-	k_timer_start(&m_send_timer, K_SECONDS(timeout), K_FOREVER);
-
+	/* Sample fresh sensor values for a new report (the snapshot is taken inside
+	 * app_compose on the first frame). */
 	if (!g_app_config.interval_sample) {
 		app_sensor_sample();
 	}
 
-	uint8_t buf[64];
-	size_t len;
-	ret = app_compose(buf, sizeof(buf), &len);
-	if (ret == -EAGAIN) {
-		/* Budget unknown (not joined yet) — skip this TX. */
-		LOG_DBG("Telemetry budget unavailable, skipping TX");
-		return;
-	}
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_compose", ret);
-		return;
+	m_frame_resend = false; /* start a new snapshot */
+	tx_telemetry_frame(true);
+}
+
+/* Compose+send one telemetry frame on fPort 2. With more==true the snapshot
+ * isn't drained yet, so the next frame is scheduled ASAP (after the RX windows
+ * / duty-cycle), not at the next interval_report. A failed send is retried with
+ * the same bytes so no group is lost (split is lossless). */
+static void tx_telemetry_frame(bool first_frame)
+{
+	int ret;
+
+	if (!m_frame_resend) {
+		ret = app_compose(m_frame_buf, sizeof(m_frame_buf), &m_frame_len, &m_frame_more);
+		if (ret == -EAGAIN) {
+			LOG_DBG("Telemetry budget unavailable, skipping TX");
+			return;
+		}
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_compose", ret);
+			return;
+		}
+		if (m_frame_len == 0) {
+			/* Nothing to report; resume the periodic timer. */
+			k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report),
+				      K_FOREVER);
+			return;
+		}
+		m_frame_first = first_frame;
 	}
 
-	/* Determine if this message should have link check.
-	 * Skip if LC is already pending (e.g. from send_with_lc path). */
-	with_link_check = !m_link_check_pending && should_request_link_check();
-
+	/* Link check only on the first frame of a snapshot. */
+	bool with_link_check =
+		m_frame_first && !m_link_check_pending && should_request_link_check();
 	if (with_link_check) {
 		ret = lorawan_request_link_check(false);
 		if (ret) {
 			LOG_ERR("Link check request failed: %d", ret);
+			with_link_check = false;
 		} else {
 			m_link_check_pending = true;
-			/* Start timeout timer for response */
-			k_timer_start(&m_link_check_timer,
-				      K_SECONDS(LINK_CHECK_TIMEOUT_SEC), K_FOREVER);
-			LOG_INF("Sending data with LC (msg #%u)...", m_message_count + 1);
+			k_timer_start(&m_link_check_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC),
+				      K_FOREVER);
 		}
-	} else {
-		LOG_INF("Sending data (msg #%u)...", m_message_count + 1);
 	}
 
+	LOG_INF("Sending data (msg #%u, %s)...", m_message_count + 1,
+		m_frame_more ? "more pending" : "last frame");
+
 	/* Protobuf Telemetry on fPort 2 (legacy bitmap used fPort 1). */
-	ret = lorawan_send(2, buf, len, LORAWAN_MSG_UNCONFIRMED);
+	ret = lorawan_send(2, m_frame_buf, m_frame_len, LORAWAN_MSG_UNCONFIRMED);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lorawan_send", ret);
 		if (with_link_check) {
 			m_link_check_pending = false;
 			k_timer_stop(&m_link_check_timer);
 		}
+		/* Likely duty-cycle / MAC busy — retry the same frame shortly. */
+		m_frame_resend = true;
+		k_work_schedule_for_queue(&m_work_q, &m_frame_work, K_SECONDS(FRAME_RETRY_SEC));
 		return;
 	}
 
-	/* Increment message counter after successful send */
+	m_frame_resend = false;
 	m_message_count++;
 
-	LOG_INF("Data sent");
+	if (m_frame_more) {
+		/* Same snapshot has more groups — send the next frame as soon as the
+		 * MAC allows; keep the periodic timer stopped until the snapshot drains. */
+		k_work_schedule_for_queue(&m_work_q, &m_frame_work, K_SECONDS(FRAME_GAP_SEC));
+	} else {
+		int timeout = g_app_config.interval_report;
+#if defined(CONFIG_ENTROPY_GENERATOR)
+		timeout += (int32_t)sys_rand32_get() % (g_app_config.interval_report / 10);
+#endif /* defined(CONFIG_ENTROPY_GENERATOR) */
+		LOG_INF("Snapshot complete; next report in %d s", timeout);
+		k_timer_start(&m_send_timer, K_SECONDS(timeout), K_FOREVER);
+	}
+}
+
+static void frame_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	if (state == APP_LRW_STATE_JOINING || state == APP_LRW_STATE_RECONNECT) {
+		/* Lost the link mid-snapshot; abandon the remaining frames. */
+		LOG_WRN("Frame continuation aborted: state=%d", (int)state);
+		return;
+	}
+
+	tx_telemetry_frame(false);
 }
 
 static void send_timer_handler(struct k_timer *timer)
@@ -828,6 +880,7 @@ int app_lrw_init(void)
 
 	k_work_init(&m_join_work, join_work_handler);
 	k_work_init(&m_send_work, send_work_handler);
+	k_work_init_delayable(&m_frame_work, frame_work_handler);
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
 	k_work_init(&m_lc_response_work, lc_response_work_handler);

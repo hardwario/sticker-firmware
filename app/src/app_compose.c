@@ -27,48 +27,134 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 
-/* Telemetry.flags bit positions (see nfc_config.proto + ttn.js). */
-#define FLAG_BOOT               BIT(0)
-#define FLAG_MP1_TILT           BIT(1)
-#define FLAG_MP2_TILT           BIT(2)
-#define FLAG_HALL_L_NOTIFY_ACT  BIT(3)
-#define FLAG_HALL_L_NOTIFY_DEACT BIT(4)
-#define FLAG_HALL_L_ACTIVE      BIT(5)
-#define FLAG_HALL_R_NOTIFY_ACT  BIT(6)
-#define FLAG_HALL_R_NOTIFY_DEACT BIT(7)
-#define FLAG_HALL_R_ACTIVE      BIT(8)
-#define FLAG_INPUT_A_NOTIFY_ACT BIT(9)
-#define FLAG_INPUT_A_NOTIFY_DEACT BIT(10)
-#define FLAG_INPUT_A_ACTIVE     BIT(11)
-#define FLAG_INPUT_B_NOTIFY_ACT BIT(12)
-#define FLAG_INPUT_B_NOTIFY_DEACT BIT(13)
-#define FLAG_INPUT_B_ACTIVE     BIT(14)
+/* Per-group flag bit positions (mirrored in ttn.js). */
+#define SYSTEM_FLAG_BOOT      BIT(0)
+#define MP_FLAG_TILT          BIT(0)
+#define CNT_FLAG_NOTIFY_ACT   BIT(0)
+#define CNT_FLAG_NOTIFY_DEACT BIT(1)
+#define CNT_FLAG_ACTIVE       BIT(2)
 
-/*
- * Build a protobuf Telemetry message from the current sensor data and encode it
- * into `buf`, dropping low-priority fields until it fits the LoRaWAN payload
- * budget reported by the stack. Sent on fPort 2 (the legacy bitmap used fPort 1).
- *
- * Returns 0 on success (*len = encoded length), -EAGAIN when the budget is not
- * yet known (pre-join), or -EMSGSIZE if even the core fields don't fit / encode
- * fails.
- */
-int app_compose(uint8_t *buf, size_t size, size_t *len)
+/* Sensor groups, in priority order (packed into frames first → last). A group
+ * is the atomic unit: all its fields go into one frame, or none. */
+enum tlm_group {
+	G_INTERNAL = 0, /* temperature, humidity */
+	G_SYSTEM,       /* voltage, system_flags */
+	G_BAROMETER,    /* pressure, altitude */
+	G_LIGHT,        /* illuminance */
+	G_ACCEL,        /* orientation */
+	G_PIR,          /* motion_count */
+	G_EXT1,         /* ext1_temperature */
+	G_EXT2,         /* ext2_temperature */
+	G_MP1,          /* mp1_temperature, mp1_humidity, mp1_flags */
+	G_MP2,          /* mp2_temperature, mp2_humidity, mp2_flags */
+	G_HALL_L,       /* hall_left_count, hall_left_flags */
+	G_HALL_R,       /* hall_right_count, hall_right_flags */
+	G_INPUT_A,      /* input_a_count, input_a_flags */
+	G_INPUT_B,      /* input_b_count, input_b_flags */
+	G_COUNT,
+};
+
+/* Copy (on=true) or clear (on=false) a group's fields from src into dst. With a
+ * frozen snapshot src this both selects a group into a frame and reverts it. */
+static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, bool on)
+{
+#define SEL(field)                                                                                 \
+	do {                                                                                       \
+		dst->has_##field = on && src->has_##field;                                         \
+		if (on) {                                                                          \
+			dst->field = src->field;                                                   \
+		}                                                                                  \
+	} while (0)
+
+	switch (g) {
+	case G_INTERNAL:
+		SEL(temperature);
+		SEL(humidity);
+		break;
+	case G_SYSTEM:
+		SEL(voltage);
+		SEL(system_flags);
+		break;
+	case G_BAROMETER:
+		SEL(pressure);
+		SEL(altitude);
+		break;
+	case G_LIGHT:
+		SEL(illuminance);
+		break;
+	case G_ACCEL:
+		SEL(orientation);
+		break;
+	case G_PIR:
+		SEL(motion_count);
+		break;
+	case G_EXT1:
+		SEL(ext1_temperature);
+		break;
+	case G_EXT2:
+		SEL(ext2_temperature);
+		break;
+	case G_MP1:
+		SEL(mp1_temperature);
+		SEL(mp1_humidity);
+		SEL(mp1_flags);
+		break;
+	case G_MP2:
+		SEL(mp2_temperature);
+		SEL(mp2_humidity);
+		SEL(mp2_flags);
+		break;
+	case G_HALL_L:
+		SEL(hall_left_count);
+		SEL(hall_left_flags);
+		break;
+	case G_HALL_R:
+		SEL(hall_right_count);
+		SEL(hall_right_flags);
+		break;
+	case G_INPUT_A:
+		SEL(input_a_count);
+		SEL(input_a_flags);
+		break;
+	case G_INPUT_B:
+		SEL(input_b_count);
+		SEL(input_b_flags);
+		break;
+	default:
+		break;
+	}
+#undef SEL
+}
+
+/* True if a group carries any data in the snapshot (any of its fields present). */
+static bool group_present(const Telemetry *s, enum tlm_group g)
+{
+	Telemetry probe = Telemetry_init_zero;
+
+	apply_group(&probe, s, g, true);
+
+	/* Re-encode the probe: empty (no has_ set) → 0 bytes. */
+	size_t sz = 0;
+	pb_get_encoded_size(&sz, Telemetry_fields, &probe);
+	return sz > 0;
+}
+
+/* Snapshot held across the frames of one report (consistency). */
+static Telemetry m_snapshot;
+static uint16_t m_pending;  /* bitmask of enum tlm_group still to send */
+static bool m_active;
+
+static void fill_snapshot(void)
 {
 	static bool boot = true;
 
-	uint8_t budget = app_lrw_get_max_payload();
-	if (budget == 0) {
-		return -EAGAIN;
-	}
-
 	Telemetry t = Telemetry_init_zero;
-	uint32_t flags = boot ? FLAG_BOOT : 0;
+	uint32_t system_flags = boot ? SYSTEM_FLAG_BOOT : 0;
 
-	/* Snapshot hall/input (clears notify edges) before taking the sensor lock. */
 	struct app_hall_data hall;
 	struct app_input_data input;
 	app_hall_get_data_and_clear_notify(&hall);
@@ -78,12 +164,18 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 	struct app_sensor_data d = g_app_sensor_data;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	/* --- always-present onboard channels --- */
+	/* system */
 	if (!isnan(d.voltage)) {
 		float v = CLAMP(d.voltage * 50.0f, 0.0f, 255.0f);
 		t.has_voltage = true;
 		t.voltage = (uint32_t)v;
 	}
+	if (system_flags) {
+		t.has_system_flags = true;
+		t.system_flags = system_flags;
+	}
+
+	/* internal */
 	if (!isnan(d.temperature)) {
 		t.has_temperature = true;
 		t.temperature = (int32_t)(d.temperature * 100.0f);
@@ -92,16 +184,8 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		t.has_humidity = true;
 		t.humidity = (uint32_t)(d.humidity * 2.0f);
 	}
-	if (d.orientation != INT_MAX) {
-		t.has_orientation = true;
-		t.orientation = (uint32_t)(d.orientation & 0xf);
-	}
 
-	/* --- capability-gated analog channels --- */
-	if (g_app_config.cap_light_sensor && !isnan(d.illuminance)) {
-		t.has_illuminance = true;
-		t.illuminance = (uint32_t)(d.illuminance / 2.0f);
-	}
+	/* barometer */
 	if (g_app_config.cap_barometer && !isnan(d.pressure)) {
 		t.has_pressure = true;
 		t.pressure = (uint32_t)(d.pressure * 1000.0f);
@@ -111,6 +195,26 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		t.has_altitude = true;
 		t.altitude = (int32_t)a;
 	}
+
+	/* light */
+	if (g_app_config.cap_light_sensor && !isnan(d.illuminance)) {
+		t.has_illuminance = true;
+		t.illuminance = (uint32_t)(d.illuminance / 2.0f);
+	}
+
+	/* accel */
+	if (d.orientation != INT_MAX) {
+		t.has_orientation = true;
+		t.orientation = (uint32_t)(d.orientation & 0xf);
+	}
+
+	/* pir */
+	if (g_app_config.cap_pir_detector && d.motion_count > 0) {
+		t.has_motion_count = true;
+		t.motion_count = d.motion_count;
+	}
+
+	/* 1-wire ext */
 	if (g_app_config.cap_1w_thermometer && !isnan(d.t1_temperature)) {
 		t.has_ext1_temperature = true;
 		t.ext1_temperature = (int32_t)(d.t1_temperature * 100.0f);
@@ -119,142 +223,198 @@ int app_compose(uint8_t *buf, size_t size, size_t *len)
 		t.has_ext2_temperature = true;
 		t.ext2_temperature = (int32_t)(d.t2_temperature * 100.0f);
 	}
-	if (g_app_config.cap_1w_machine_probe && !isnan(d.mp1_temperature)) {
-		t.has_mp1_temperature = true;
-		t.mp1_temperature = (int32_t)(d.mp1_temperature * 100.0f);
-	}
-	if (g_app_config.cap_1w_machine_probe && !isnan(d.mp2_temperature)) {
-		t.has_mp2_temperature = true;
-		t.mp2_temperature = (int32_t)(d.mp2_temperature * 100.0f);
-	}
-	if (g_app_config.cap_1w_machine_probe && !isnan(d.mp1_humidity)) {
-		t.has_mp1_humidity = true;
-		t.mp1_humidity = (uint32_t)(d.mp1_humidity * 2.0f);
-	}
-	if (g_app_config.cap_1w_machine_probe && !isnan(d.mp2_humidity)) {
-		t.has_mp2_humidity = true;
-		t.mp2_humidity = (uint32_t)(d.mp2_humidity * 2.0f);
-	}
 
-	/* --- counters (capability-gated, sent when non-zero) --- */
-	if (g_app_config.cap_pir_detector && d.motion_count > 0) {
-		t.has_motion_count = true;
-		t.motion_count = d.motion_count;
-	}
-	if (g_app_config.cap_hall_left && hall.left_count > 0) {
-		t.has_hall_left_count = true;
-		t.hall_left_count = hall.left_count;
-	}
-	if (g_app_config.cap_hall_right && hall.right_count > 0) {
-		t.has_hall_right_count = true;
-		t.hall_right_count = hall.right_count;
-	}
-	if (g_app_config.cap_input_a && input.input_a_count > 0) {
-		t.has_input_a_count = true;
-		t.input_a_count = input.input_a_count;
-	}
-	if (g_app_config.cap_input_b && input.input_b_count > 0) {
-		t.has_input_b_count = true;
-		t.input_b_count = input.input_b_count;
-	}
-
-	/* --- boolean state into the flags bitfield --- */
+	/* machine probe 1 / 2 */
 	if (g_app_config.cap_1w_machine_probe) {
+		if (!isnan(d.mp1_temperature)) {
+			t.has_mp1_temperature = true;
+			t.mp1_temperature = (int32_t)(d.mp1_temperature * 100.0f);
+		}
+		if (!isnan(d.mp1_humidity)) {
+			t.has_mp1_humidity = true;
+			t.mp1_humidity = (uint32_t)(d.mp1_humidity * 2.0f);
+		}
 		if (d.mp1_is_tilt_alert) {
-			flags |= FLAG_MP1_TILT;
+			t.has_mp1_flags = true;
+			t.mp1_flags = MP_FLAG_TILT;
+		}
+		if (!isnan(d.mp2_temperature)) {
+			t.has_mp2_temperature = true;
+			t.mp2_temperature = (int32_t)(d.mp2_temperature * 100.0f);
+		}
+		if (!isnan(d.mp2_humidity)) {
+			t.has_mp2_humidity = true;
+			t.mp2_humidity = (uint32_t)(d.mp2_humidity * 2.0f);
 		}
 		if (d.mp2_is_tilt_alert) {
-			flags |= FLAG_MP2_TILT;
+			t.has_mp2_flags = true;
+			t.mp2_flags = MP_FLAG_TILT;
 		}
 	}
+
+	/* hall left / right */
 	if (g_app_config.cap_hall_left) {
+		uint32_t f = 0;
 		if (hall.left_notify_act) {
-			flags |= FLAG_HALL_L_NOTIFY_ACT;
+			f |= CNT_FLAG_NOTIFY_ACT;
 		}
 		if (hall.left_notify_deact) {
-			flags |= FLAG_HALL_L_NOTIFY_DEACT;
+			f |= CNT_FLAG_NOTIFY_DEACT;
 		}
 		if (hall.left_is_active) {
-			flags |= FLAG_HALL_L_ACTIVE;
+			f |= CNT_FLAG_ACTIVE;
+		}
+		if (hall.left_count > 0) {
+			t.has_hall_left_count = true;
+			t.hall_left_count = hall.left_count;
+		}
+		if (f) {
+			t.has_hall_left_flags = true;
+			t.hall_left_flags = f;
 		}
 	}
 	if (g_app_config.cap_hall_right) {
+		uint32_t f = 0;
 		if (hall.right_notify_act) {
-			flags |= FLAG_HALL_R_NOTIFY_ACT;
+			f |= CNT_FLAG_NOTIFY_ACT;
 		}
 		if (hall.right_notify_deact) {
-			flags |= FLAG_HALL_R_NOTIFY_DEACT;
+			f |= CNT_FLAG_NOTIFY_DEACT;
 		}
 		if (hall.right_is_active) {
-			flags |= FLAG_HALL_R_ACTIVE;
+			f |= CNT_FLAG_ACTIVE;
+		}
+		if (hall.right_count > 0) {
+			t.has_hall_right_count = true;
+			t.hall_right_count = hall.right_count;
+		}
+		if (f) {
+			t.has_hall_right_flags = true;
+			t.hall_right_flags = f;
 		}
 	}
+
+	/* input A / B */
 	if (g_app_config.cap_input_a) {
+		uint32_t f = 0;
 		if (input.input_a_notify_act) {
-			flags |= FLAG_INPUT_A_NOTIFY_ACT;
+			f |= CNT_FLAG_NOTIFY_ACT;
 		}
 		if (input.input_a_notify_deact) {
-			flags |= FLAG_INPUT_A_NOTIFY_DEACT;
+			f |= CNT_FLAG_NOTIFY_DEACT;
 		}
 		if (input.input_a_is_active) {
-			flags |= FLAG_INPUT_A_ACTIVE;
+			f |= CNT_FLAG_ACTIVE;
+		}
+		if (input.input_a_count > 0) {
+			t.has_input_a_count = true;
+			t.input_a_count = input.input_a_count;
+		}
+		if (f) {
+			t.has_input_a_flags = true;
+			t.input_a_flags = f;
 		}
 	}
 	if (g_app_config.cap_input_b) {
+		uint32_t f = 0;
 		if (input.input_b_notify_act) {
-			flags |= FLAG_INPUT_B_NOTIFY_ACT;
+			f |= CNT_FLAG_NOTIFY_ACT;
 		}
 		if (input.input_b_notify_deact) {
-			flags |= FLAG_INPUT_B_NOTIFY_DEACT;
+			f |= CNT_FLAG_NOTIFY_DEACT;
 		}
 		if (input.input_b_is_active) {
-			flags |= FLAG_INPUT_B_ACTIVE;
+			f |= CNT_FLAG_ACTIVE;
+		}
+		if (input.input_b_count > 0) {
+			t.has_input_b_count = true;
+			t.input_b_count = input.input_b_count;
+		}
+		if (f) {
+			t.has_input_b_flags = true;
+			t.input_b_flags = f;
 		}
 	}
-	if (flags) {
-		t.has_flags = true;
-		t.flags = flags;
+
+	m_snapshot = t;
+	m_pending = 0;
+	for (enum tlm_group g = 0; g < G_COUNT; g++) {
+		if (group_present(&m_snapshot, g)) {
+			m_pending |= BIT(g);
+		}
+	}
+	m_active = true;
+	boot = false;
+}
+
+int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
+{
+	uint8_t budget = app_lrw_get_max_payload();
+	if (budget == 0) {
+		return -EAGAIN;
 	}
 
-	/* Priority-ordered drop list (lowest priority first). Core voltage/
-	 * temperature/humidity are never dropped. When the message exceeds the
-	 * budget, clear the lowest-priority set fields until it fits. */
-	bool *drop[] = {
-		&t.has_input_b_count, &t.has_input_a_count,
-		&t.has_hall_right_count, &t.has_hall_left_count,
-		&t.has_motion_count, &t.has_orientation,
-		&t.has_mp2_humidity, &t.has_mp2_temperature,
-		&t.has_mp1_humidity, &t.has_mp1_temperature,
-		&t.has_ext2_temperature, &t.has_ext1_temperature,
-		&t.has_illuminance, &t.has_altitude, &t.has_pressure,
-		&t.has_flags,
-	};
+	if (!m_active) {
+		fill_snapshot();
+		if (m_pending == 0) {
+			/* Nothing to report (e.g. all sensors NaN pre-sample). */
+			*len = 0;
+			*more = false;
+			m_active = false;
+			return 0;
+		}
+	}
 
 	size_t cap = MIN(size, (size_t)budget);
-	size_t needed = 0;
-	uint8_t dropped = 0;
 
-	pb_get_encoded_size(&needed, Telemetry_fields, &t);
-	for (size_t i = 0; needed > cap && i < ARRAY_SIZE(drop); i++) {
-		if (*drop[i]) {
-			*drop[i] = false;
-			dropped++;
-			pb_get_encoded_size(&needed, Telemetry_fields, &t);
+	/* Greedily pack whole pending groups, highest priority first, that fit. */
+	Telemetry frame = Telemetry_init_zero;
+	uint16_t frame_groups = 0;
+
+	for (enum tlm_group g = 0; g < G_COUNT; g++) {
+		if (!(m_pending & BIT(g))) {
+			continue;
+		}
+		apply_group(&frame, &m_snapshot, g, true); /* tentatively add */
+		size_t sz = 0;
+		pb_get_encoded_size(&sz, Telemetry_fields, &frame);
+		if (sz <= cap) {
+			frame_groups |= BIT(g);
+		} else {
+			apply_group(&frame, &m_snapshot, g, false); /* revert */
 		}
 	}
 
-	pb_ostream_t os = pb_ostream_from_buffer(buf, cap);
-	if (!pb_encode(&os, Telemetry_fields, &t)) {
+	/* A single group bigger than the budget would stall forever: force the
+	 * highest-priority pending group out alone and log it. */
+	if (frame_groups == 0) {
+		for (enum tlm_group g = 0; g < G_COUNT; g++) {
+			if (m_pending & BIT(g)) {
+				apply_group(&frame, &m_snapshot, g, true);
+				frame_groups = BIT(g);
+				LOG_WRN("Group %d exceeds budget %uB, sending alone", (int)g, budget);
+				break;
+			}
+		}
+	}
+
+	pb_ostream_t os = pb_ostream_from_buffer(buf, size);
+	if (!pb_encode(&os, Telemetry_fields, &frame)) {
 		LOG_ERR("pb_encode failed: %s", PB_GET_ERROR(&os));
+		m_active = false;
 		return -EMSGSIZE;
 	}
 
+	m_pending &= ~frame_groups;
 	*len = os.bytes_written;
-	boot = false;
+	*more = (m_pending != 0);
+	if (!*more) {
+		m_active = false;
+	}
 
-	LOG_INF("TX: DR budget=%uB (from system), payload=%zuB, %u field(s) dropped", budget,
-		*len, dropped);
-	LOG_HEXDUMP_DBG(buf, *len, "Telemetry:");
+	LOG_INF("TX: budget=%uB (from system), frame=%zuB, groups=0x%04x, more=%d", budget, *len,
+		frame_groups, (int)*more);
+	LOG_HEXDUMP_DBG(buf, *len, "Telemetry frame:");
 
 	return 0;
 }
