@@ -9,6 +9,7 @@
 #include "app_calibration.h"
 #include "app_clock.h"
 #include "app_config.h"
+#include "app_history.h"
 #include "app_version.h"
 #include "app_led.h"
 #include "app_log.h"
@@ -225,6 +226,11 @@ int main(void)
 	ret = app_clock_init();
 	if (ret) {
 		LOG_WRN("app_clock_init failed: %d (wall-clock unavailable)", ret);
+	}
+
+	ret = app_history_init();
+	if (ret) {
+		LOG_WRN("app_history_init failed: %d (history unavailable)", ret);
 	}
 
 #if defined(CONFIG_LORAWAN)

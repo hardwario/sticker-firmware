@@ -9,6 +9,7 @@
 #include "app_clock.h"
 #include "app_cmd.h"
 #include "app_compose.h"
+#include "app_history.h"
 #include "app_config.h"
 #include "app_led.h"
 #include "app_log.h"
@@ -697,6 +698,11 @@ static void send_work_handler(struct k_work *work)
 	if (!g_app_config.interval_sample) {
 		app_sensor_sample();
 	}
+
+	/* Capture the reported values into the history store-and-forward buffer
+	 * (one record per interval_report, before the snapshot is split into
+	 * frames). No-op when history is disabled. */
+	app_history_capture();
 
 	m_frame_resend = false; /* start a new snapshot */
 	tx_telemetry_frame(true);

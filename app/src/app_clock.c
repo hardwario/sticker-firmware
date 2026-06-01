@@ -7,6 +7,11 @@
 #include "app_clock.h"
 #include "app_log.h"
 
+#if defined(__has_include) && __has_include("app_history.h")
+#include "app_history.h"
+#define APP_CLOCK_HAVE_HISTORY 1
+#endif
+
 /* Zephyr includes */
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -144,7 +149,13 @@ int app_clock_set_unix(uint32_t unix_s)
 		.tm_nsec = 0,
 	};
 
-	return rtc_set_time(m_rtc, &rtc_tm);
+	int ret = rtc_set_time(m_rtc, &rtc_tm);
+#ifdef APP_CLOCK_HAVE_HISTORY
+	if (ret == 0) {
+		app_history_on_clock_sync(unix_s);
+	}
+#endif
+	return ret;
 }
 
 #if defined(CONFIG_SHELL)

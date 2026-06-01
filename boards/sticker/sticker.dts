@@ -227,9 +227,16 @@ stm32_lp_tick_source: &lptim1 {
 			reg = <0x00008000 DT_SIZE_K(104)>;
 		};
 
-		slot1_partition: partition@22000 {
-			label = "image-1";
-			reg = <0x00022000 DT_SIZE_K(104)>;
+		/* Sensor history store-and-forward buffer (app_history.c,
+		 * FIXED_PARTITION_ID(history_partition)). Placed after the
+		 * application image (currently ~140 KB, ends ~0x22100) with
+		 * headroom, up to the storage partition. MCUboot dual-slot is
+		 * not active today (flat image from flash base); when FUOTA is
+		 * introduced this region becomes the DFU slot and the layout is
+		 * redesigned (history is sacrificed on FUOTA). */
+		history_partition: partition@24000 {
+			label = "history";
+			reg = <0x00024000 DT_SIZE_K(96)>;
 		};
 
 		storage_partition: partition@3c000 {

@@ -51,6 +51,8 @@ static const struct app_config m_app_config_defaults = {
 	.alarm_t2_temperature_lo = 15.0f,
 	.alarm_t2_temperature_hi = 25.0f,
 	.alarm_t2_temperature_hst = 0.5f,
+	.history_enable = false,
+	.history_sensors = 0,
 };
 
 static struct app_config m_app_config = {
@@ -72,6 +74,8 @@ static struct app_config m_app_config = {
 	.alarm_t2_temperature_lo = 15.0f,
 	.alarm_t2_temperature_hi = 25.0f,
 	.alarm_t2_temperature_hst = 0.5f,
+	.history_enable = false,
+	.history_sensors = 0,
 };
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
@@ -208,6 +212,10 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_1w_thermometer));
 	SETTINGS_SET("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
 		     sizeof(m_app_config.cap_1w_machine_probe));
+	SETTINGS_SET("history-enable", &m_app_config.history_enable,
+		     sizeof(m_app_config.history_enable));
+	SETTINGS_SET("history-sensors", &m_app_config.history_sensors,
+		     sizeof(m_app_config.history_sensors));
 
 #undef SETTINGS_SET
 
@@ -346,6 +354,10 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_1w_thermometer));
 	EXPORT_FUNC("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
 		    sizeof(m_app_config.cap_1w_machine_probe));
+	EXPORT_FUNC("history-enable", &m_app_config.history_enable,
+		    sizeof(m_app_config.history_enable));
+	EXPORT_FUNC("history-sensors", &m_app_config.history_sensors,
+		    sizeof(m_app_config.history_sensors));
 
 #undef EXPORT_FUNC
 
@@ -921,6 +933,17 @@ static void print_cap_1w_machine_probe(const struct shell *shell)
 		    m_app_config.cap_1w_machine_probe ? "true" : "false");
 }
 
+static void print_history_enable(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " history-enable %s",
+		    m_app_config.history_enable ? "true" : "false");
+}
+
+static void print_history_sensors(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " history-sensors %u", m_app_config.history_sensors);
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -985,6 +1008,8 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_pir_detector(shell);
 	print_cap_1w_thermometer(shell);
 	print_cap_1w_machine_probe(shell);
+	print_history_enable(shell);
+	print_history_sensors(shell);
 
 	return 0;
 }
@@ -1683,6 +1708,46 @@ static int cmd_cap_1w_machine_probe(const struct shell *shell, size_t argc, char
 			print_cap_1w_machine_probe);
 }
 
+static int cmd_history_enable(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.history_enable, print_history_enable);
+}
+
+static int cmd_history_sensors(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_history_sensors(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.history_sensors = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -1952,6 +2017,14 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(cap-1w-machine-probe, NULL,
 	              "Get/Set 1-wire machine probe capability (true/false).",
 	              cmd_cap_1w_machine_probe, 1, 1),
+
+	SHELL_CMD_ARG(history-enable, NULL,
+	              "Get/Set sensor history store-and-forward (true/false).",
+	              cmd_history_enable, 1, 1),
+
+	SHELL_CMD_ARG(history-sensors, NULL,
+	              "Get/Set history sensor selection bitmask (0 = all capability-available).",
+	              cmd_history_sensors, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );

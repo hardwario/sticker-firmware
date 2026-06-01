@@ -358,3 +358,13 @@ parameters:
   - name: cap_1w_machine_probe
     type: bool
     help: "Get/Set 1-wire machine probe capability (true/false)."
+
+  - name: history_enable
+    type: bool
+    default: false
+    help: "Get/Set sensor history store-and-forward (true/false)."
+
+  - name: history_sensors
+    type: uint32
+    default: 0
+    help: "Get/Set history sensor selection bitmask (0 = all capability-available)."
