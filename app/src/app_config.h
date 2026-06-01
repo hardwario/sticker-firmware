@@ -99,6 +99,8 @@ struct app_config {
 	bool cap_pir_detector;
 	bool cap_1w_thermometer;
 	bool cap_1w_machine_probe;
+	bool history_enable;
+	uint32_t history_sensors;
 };
 
 extern struct app_config g_app_config;

@@ -48,6 +48,23 @@ config APP_CMD_DEBUG_SHELL
 	  from the given transport (lrw or nfc) and the encoded response
 	  is logged and (for lrw) queued on port 85.
 
+config APP_HISTORY_FLASH
+	bool "Persist sensor history in the history_partition flash"
+	default y
+	help
+	  Store the sensor history store-and-forward buffer in the dedicated
+	  history_partition flash (NVS), surviving reboot and power loss.
+	  Disable (e.g. in debug builds whose large image overlaps that
+	  partition) to use a __noinit RAM ring of CONFIG_APP_HISTORY_BYTES
+	  instead; data is then lost on power loss.
+
+config APP_HISTORY_BYTES
+	int "History RAM fallback ring size (bytes)"
+	default 1024
+	help
+	  Size of the in-RAM history ring used when CONFIG_APP_HISTORY_FLASH=n.
+	  Record size is variable (5-33 B) depending on the enabled sensor set.
+
 endmenu
 
 menu "Zephyr Kernel"
