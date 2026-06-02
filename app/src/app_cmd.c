@@ -348,3 +348,24 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	}
 	return 0;
 }
+
+int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	if (!out || !out_len) {
+		return -EINVAL;
+	}
+
+	DownlinkResponse resp = DownlinkResponse_init_zero;
+	resp.seq = 0;
+	resp.which_body = DownlinkResponse_info_tag;
+	fill_info(&resp.body.info);
+
+	pb_ostream_t ostream = pb_ostream_from_buffer(out, out_cap);
+	if (!pb_encode(&ostream, DownlinkResponse_fields, &resp)) {
+		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
+		return -EMSGSIZE;
+	}
+
+	*out_len = ostream.bytes_written;
+	return 0;
+}
