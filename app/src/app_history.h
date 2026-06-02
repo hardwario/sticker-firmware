@@ -95,9 +95,8 @@ uint32_t app_history_get_interval(void);
  * bytes written; *t0_out = first packed record's absolute time, *n_written =
  * records packed, *next_ord = next ordinal to pass for the following page
  * (== app_history_count() when the scan is exhausted). */
-size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord,
-			       uint8_t *buf, size_t cap, uint32_t *t0_out, uint16_t *n_written,
-			       size_t *next_ord);
+size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
+			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord);
 
 /* Number of frames the [from_unix, to_unix] window needs at `cap` bytes/frame
  * (whole records per frame). Mirrors export_page's packing so the replay can

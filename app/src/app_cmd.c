@@ -266,8 +266,7 @@ static void handle_reset_counters(const Command_ResetCounters *rc, Response *res
 	resp->which_body = Response_ack_tag;
 }
 
-static void handle_req_history(enum app_cmd_transport transport, const Command *cmd,
-			       Response *resp)
+static void handle_req_history(enum app_cmd_transport transport, const Command *cmd, Response *resp)
 {
 #if defined(APP_CMD_HAVE_HISTORY) && defined(CONFIG_LORAWAN)
 	if (transport != APP_CMD_TRANSPORT_LRW) {

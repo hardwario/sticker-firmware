@@ -81,20 +81,21 @@ static void tx_telemetry_frame(bool first_frame);
 /* History replay (#52): one ReqHistory streams all matching records back as N
  * HistoryFrame uplinks on the command port, ASAP. Independent state machine,
  * modeled on the telemetry frame machine above. */
-#define HISTORY_SAMPLES_MAX    48 /* nanopb Response.HistoryFrame.samples bound */
-#define HISTORY_FRAME_OVERHEAD 22 /* seq + history_frame wrapper + frame_index/count
-				   * + t0_unix(5B varint) + present + interval_s
-				   * + samples tag/len; conservative upper bound */
+#define HISTORY_SAMPLES_MAX 48 /* nanopb Response.HistoryFrame.samples bound */
+#define HISTORY_FRAME_OVERHEAD                                                                     \
+	22 /* seq + history_frame wrapper + frame_index/count                                      \
+	    * + t0_unix(5B varint) + present + interval_s                                          \
+	    * + samples tag/len; conservative upper bound */
 
 static struct k_work_delayable m_hist_work;
-static bool     m_hist_active;
+static bool m_hist_active;
 static uint32_t m_hist_from, m_hist_to, m_hist_seq;
 static uint32_t m_hist_count;    /* total frames (N) */
 static uint32_t m_hist_idx;      /* next frame_index to send */
-static size_t   m_hist_cursor;   /* next record ordinal */
+static size_t m_hist_cursor;     /* next record ordinal */
 static uint16_t m_hist_present;  /* shared sensor mask, snapshot at replay start */
 static uint32_t m_hist_interval; /* seconds between records, snapshot at start */
-static uint8_t  m_hist_tx_buf[64];
+static uint8_t m_hist_tx_buf[64];
 
 static void m_hist_work_handler(struct k_work *work);
 

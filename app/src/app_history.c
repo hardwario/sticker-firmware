@@ -88,8 +88,8 @@ static const struct hist_desc m_desc[APP_HISTORY_SENSOR_COUNT] = {
 				4, offsetof(struct app_config, cap_pir_detector)},
 };
 
-#define TEMP_SENTINEL 0x7FFF
-#define HUM_SENTINEL  0xFF
+#define TEMP_SENTINEL   0x7FFF
+#define HUM_SENTINEL    0xFF
 #define MAX_RECORD_SIZE (13 * 4) /* worst case all channels, values only */
 
 /* ---- Module state ------------------------------------------------------- */
@@ -101,10 +101,10 @@ static uint16_t m_sample_size;
 static uint16_t m_capacity;
 static uint16_t m_start; /* index of oldest record */
 static uint16_t m_count;
-static uint32_t m_base_time;  /* oldest record's time: uptime-s unsynced, unix synced */
+static uint32_t m_base_time; /* oldest record's time: uptime-s unsynced, unix synced */
 static bool m_base_synced;
-static uint32_t m_interval;   /* interval_report (s) the buffer was recorded at; records
-			       * are periodic so per-record time = base + ord*interval */
+static uint32_t m_interval; /* interval_report (s) the buffer was recorded at; records
+			     * are periodic so per-record time = base + ord*interval */
 
 static bool cap_on(size_t cap_off)
 {
@@ -505,9 +505,8 @@ uint32_t app_history_get_interval(void)
  * record is just the raw stored bytes (sentinels mark absent values). Time is
  * implicit: ordinal `ord` is at base + ord*interval; records are time-ordered,
  * so the window filter can break once past `to_unix`. */
-size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord,
-			       uint8_t *buf, size_t cap, uint32_t *t0_out, uint16_t *n_written,
-			       size_t *next_ord)
+size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
+			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
 
