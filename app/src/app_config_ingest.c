@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "app_nfc_ingest.h"
+#include "app_config_ingest.h"
 #include "app_config.h"
 #include "app_log.h"
 
@@ -18,7 +18,7 @@
 #include <stdint.h>
 #include <string.h>
 
-LOG_MODULE_REGISTER(app_nfc_ingest, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(app_config_ingest, LOG_LEVEL_DBG);
 
 /* Record the first offending proto field tag and mark the result invalid. The
  * apply still processes the remaining fields (best effort) so NFC ingest keeps
@@ -67,7 +67,7 @@ static bool parse_hex_string(const char *hex_str, uint8_t *buf, size_t buf_len)
 	return true;
 }
 
-int app_config_apply_lorawan(const NfcConfigMessage_Lorawan *src, uint32_t *fault_field)
+int app_config_apply_lorawan(const AppConfigMessage_Lorawan *src, uint32_t *fault_field)
 {
 	struct app_config *config = app_config();
 	int ret = 0;
@@ -141,7 +141,7 @@ int app_config_apply_lorawan(const NfcConfigMessage_Lorawan *src, uint32_t *faul
 	return ret;
 }
 
-int app_config_apply_application(const NfcConfigMessage_Application *src, uint32_t *fault_field)
+int app_config_apply_application(const AppConfigMessage_Application *src, uint32_t *fault_field)
 {
 	struct app_config *config = app_config();
 	int ret = 0;
@@ -250,17 +250,17 @@ static bool requested(const uint32_t *ids, size_t n, uint32_t tag)
 	return false;
 }
 
-void app_config_fill_lorawan(NfcConfigMessage_Lorawan *dst, const uint32_t *ids, size_t n)
+void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids, size_t n)
 {
 	const struct app_config *c = app_config();
 
 	if (requested(ids, n, 1)) {
 		dst->has_region = true;
-		dst->region = (NfcConfigMessage_Lorawan_Region)c->lrw_region;
+		dst->region = (AppConfigMessage_Lorawan_Region)c->lrw_region;
 	}
 	if (requested(ids, n, 2)) {
 		dst->has_network = true;
-		dst->network = (NfcConfigMessage_Lorawan_Network)c->lrw_network;
+		dst->network = (AppConfigMessage_Lorawan_Network)c->lrw_network;
 	}
 	if (requested(ids, n, 3)) {
 		dst->has_adr = true;
@@ -268,7 +268,7 @@ void app_config_fill_lorawan(NfcConfigMessage_Lorawan *dst, const uint32_t *ids,
 	}
 	if (requested(ids, n, 4)) {
 		dst->has_activation = true;
-		dst->activation = (NfcConfigMessage_Lorawan_Activation)c->lrw_activation;
+		dst->activation = (AppConfigMessage_Lorawan_Activation)c->lrw_activation;
 	}
 	if (requested(ids, n, 5)) {
 		dst->has_deveui = true;
@@ -300,7 +300,7 @@ void app_config_fill_lorawan(NfcConfigMessage_Lorawan *dst, const uint32_t *ids,
 		dst->field = c->field;                                                             \
 	}
 
-void app_config_fill_application(NfcConfigMessage_Application *dst, const uint32_t *ids, size_t n)
+void app_config_fill_application(AppConfigMessage_Application *dst, const uint32_t *ids, size_t n)
 {
 	const struct app_config *c = app_config();
 
@@ -353,7 +353,7 @@ void app_config_fill_application(NfcConfigMessage_Application *dst, const uint32
 	FILL_BOOL(48, cap_1w_machine_probe);
 }
 
-bool app_nfc_ingest(const NfcConfigMessage *message)
+bool app_config_ingest(const AppConfigMessage *message)
 {
 	if (message->has_factory && message->factory) {
 		LOG_INF("Factory reset requested via NFC");

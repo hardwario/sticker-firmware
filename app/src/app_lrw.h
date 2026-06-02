@@ -58,7 +58,7 @@ bool app_lrw_is_ready(void);
  * decide how many telemetry fields fit. */
 uint8_t app_lrw_get_max_payload(void);
 
-/* Stage a serialized response (e.g. DownlinkResponse on port 85) for the next
+/* Stage a serialized response (e.g. Response on port 85) for the next
  * uplink. send_work_handler() drains this slot before composing telemetry, so
  * the response leaves at the next jitter window. Single-slot, overwritten with
  * a warning if a prior response hasn't been transmitted yet. */

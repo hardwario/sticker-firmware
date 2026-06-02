@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-message NfcConfigMessage {
+message AppConfigMessage {
     optional bool factory = 1;
 
     optional string secret_key = 2;
@@ -93,7 +93,7 @@ message NfcConfigMessage {
     }
 }
 
-message DownlinkCommand {
+message Command {
     uint32 seq = 1;
 
     oneof body {
@@ -111,8 +111,8 @@ message DownlinkCommand {
     }
 
     message SetParam {
-        optional NfcConfigMessage.Lorawan     lorawan     = 1;
-        optional NfcConfigMessage.Application application = 2;
+        optional AppConfigMessage.Lorawan     lorawan     = 1;
+        optional AppConfigMessage.Application application = 2;
     }
 
     message GetParam {
@@ -136,7 +136,7 @@ message DownlinkCommand {
     message ClockSync    { }
 }
 
-message DownlinkResponse {
+message Response {
     uint32 seq = 1;
 
     oneof body {
@@ -173,8 +173,8 @@ message DownlinkResponse {
     message ConfigDump {
         uint32 page_index = 1;
         uint32 page_count = 2;
-        optional NfcConfigMessage.Lorawan     lorawan     = 3;
-        optional NfcConfigMessage.Application application = 4;
+        optional AppConfigMessage.Lorawan     lorawan     = 3;
+        optional AppConfigMessage.Application application = 4;
     }
 
     message HistoryFrame {

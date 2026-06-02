@@ -663,7 +663,7 @@ static int cmd_cmd_inject(const struct shell *sh, enum app_cmd_transport transpo
 		return ret;
 	}
 
-	LOG_HEXDUMP_INF(out, out_len, "DownlinkResponse:");
+	LOG_HEXDUMP_INF(out, out_len, "Response:");
 
 	/* Don't reboot the bench from a shell inject — just report what an LRW
 	 * downlink would trigger. Use `settings save` / `settings reset` to apply. */
@@ -709,7 +709,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
 #endif /* defined(CONFIG_LORAWAN) */
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
-	SHELL_CMD(cmd, &sub_cmd, "Inject DownlinkCommand (protobuf hex).", NULL),
+	SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
 #endif
 	SHELL_SUBCMD_SET_END);
 

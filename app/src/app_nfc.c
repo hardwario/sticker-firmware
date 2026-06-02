@@ -5,14 +5,14 @@
  */
 
 #include "app_nfc.h"
-#include "app_nfc_ingest.h"
+#include "app_config_ingest.h"
 #include "app_config.h"
 #include "app_ndef_parser.h"
 #include "app_log.h"
 
 /* Nanopb includes */
 #include <pb_decode.h>
-#include "src/nfc_config.pb.h"
+#include "src/app_config.pb.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -229,14 +229,14 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 	}
 
 	pb_istream_t stream = pb_istream_from_buffer(buf, len);
-	NfcConfigMessage message = NfcConfigMessage_init_zero;
-	if (!pb_decode(&stream, NfcConfigMessage_fields, &message)) {
+	AppConfigMessage message = AppConfigMessage_init_zero;
+	if (!pb_decode(&stream, AppConfigMessage_fields, &message)) {
 
 		LOG_ERR_CALL_FAILED_STR("pb_decode", PB_GET_ERROR(&stream));
 		return -EIO;
 	}
 
-	if (app_nfc_ingest(&message)) {
+	if (app_config_ingest(&message)) {
 		*action = APP_NFC_ACTION_RESET;
 	} else {
 		*action = APP_NFC_ACTION_SAVE;
