@@ -351,6 +351,18 @@ static void join_complete_work_handler(struct k_work *work)
 	 * in downlink_callback(). */
 	app_clock_request_sync();
 
+	/* Autonomous GetInfo on join: announce device identity/firmware on
+	 * fPort 85 before the first telemetry. send_work_handler drains this
+	 * queued response first, so it is the first uplink; the DeviceTimeReq
+	 * queued just above piggybacks on its FOpts. */
+	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
+	size_t info_len;
+	if (app_cmd_build_info(info_buf, sizeof(info_buf), &info_len) == 0) {
+		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len);
+	} else {
+		LOG_WRN("app_cmd_build_info failed; skipping GetInfo-on-join");
+	}
+
 	restart_normal_operation();
 }
 

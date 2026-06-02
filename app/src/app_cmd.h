@@ -50,6 +50,12 @@ int app_cmd_handle(enum app_cmd_transport transport,
 		   uint8_t *out, size_t out_cap, size_t *out_len,
 		   enum app_cmd_action *action);
 
+/* Build an unsolicited device Info frame (DownlinkResponse{ seq=0, info=... },
+ * the same payload a GetInfo command returns) into `out`. Used to send an
+ * autonomous GetInfo uplink on join. Returns 0 with *out_len set, -EINVAL on a
+ * NULL argument, or -EMSGSIZE if `out_cap` is too small. */
+int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif
