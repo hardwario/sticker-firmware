@@ -225,6 +225,26 @@ int app_config_apply_application(const AppConfigMessage_Application *src, uint32
 		config->history_sensors = src->history_sensors;
 	}
 
+	APPLY_BOOL(pir_notify_act);
+	if (src->has_alarm_limit) {
+		int val = src->alarm_limit;
+
+		if (val >= 0 && val <= 3600) {
+			config->alarm_limit = val;
+		} else {
+			FAULT(51);
+		}
+	}
+	if (src->has_alarm_notif_time) {
+		int val = src->alarm_notif_time;
+
+		if (val >= 1 && val <= 60) {
+			config->alarm_notif_time = val;
+		} else {
+			FAULT(52);
+		}
+	}
+
 	/* Cross-validate alarm lo/hi pairs — disable the alarm if lo >= hi */
 	if (config->alarm_temperature_lo >= config->alarm_temperature_hi) {
 		config->alarm_temperature_enabled = false;

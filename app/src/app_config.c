@@ -53,6 +53,9 @@ static const struct app_config m_app_config_defaults = {
 	.alarm_t2_temperature_hst = 0.5f,
 	.history_enable = false,
 	.history_sensors = 0,
+	.alarm_limit = 0,
+	.alarm_notif_time = 10,
+	.pir_notify_act = false,
 };
 
 static struct app_config m_app_config = {
@@ -76,6 +79,9 @@ static struct app_config m_app_config = {
 	.alarm_t2_temperature_hst = 0.5f,
 	.history_enable = false,
 	.history_sensors = 0,
+	.alarm_limit = 0,
+	.alarm_notif_time = 10,
+	.pir_notify_act = false,
 };
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
@@ -216,6 +222,11 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.history_enable));
 	SETTINGS_SET("history-sensors", &m_app_config.history_sensors,
 		     sizeof(m_app_config.history_sensors));
+	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
+	SETTINGS_SET("alarm-notif-time", &m_app_config.alarm_notif_time,
+		     sizeof(m_app_config.alarm_notif_time));
+	SETTINGS_SET("pir-notify-act", &m_app_config.pir_notify_act,
+		     sizeof(m_app_config.pir_notify_act));
 
 #undef SETTINGS_SET
 
@@ -358,6 +369,11 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.history_enable));
 	EXPORT_FUNC("history-sensors", &m_app_config.history_sensors,
 		    sizeof(m_app_config.history_sensors));
+	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
+	EXPORT_FUNC("alarm-notif-time", &m_app_config.alarm_notif_time,
+		    sizeof(m_app_config.alarm_notif_time));
+	EXPORT_FUNC("pir-notify-act", &m_app_config.pir_notify_act,
+		    sizeof(m_app_config.pir_notify_act));
 
 #undef EXPORT_FUNC
 
@@ -944,6 +960,22 @@ static void print_history_sensors(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " history-sensors %u", m_app_config.history_sensors);
 }
 
+static void print_alarm_limit(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-limit %d", m_app_config.alarm_limit);
+}
+
+static void print_alarm_notif_time(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-notif-time %d", m_app_config.alarm_notif_time);
+}
+
+static void print_pir_notify_act(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " pir-notify-act %s",
+		    m_app_config.pir_notify_act ? "true" : "false");
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -1010,6 +1042,9 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_1w_machine_probe(shell);
 	print_history_enable(shell);
 	print_history_sensors(shell);
+	print_alarm_limit(shell);
+	print_alarm_notif_time(shell);
+	print_pir_notify_act(shell);
 
 	return 0;
 }
@@ -1748,6 +1783,22 @@ static int cmd_history_sensors(const struct shell *shell, size_t argc, char **ar
 	return 0;
 }
 
+static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.alarm_limit, 0, 3600, print_alarm_limit);
+}
+
+static int cmd_alarm_notif_time(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.alarm_notif_time, 1, 60,
+		       print_alarm_notif_time);
+}
+
+static int cmd_pir_notify_act(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.pir_notify_act, print_pir_notify_act);
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -2025,6 +2076,18 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(history-sensors, NULL,
 	              "Get/Set history sensor selection bitmask (0 = all capability-available).",
 	              cmd_history_sensors, 1, 1),
+
+	SHELL_CMD_ARG(alarm-limit, NULL,
+	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
+	              cmd_alarm_limit, 1, 1),
+
+	SHELL_CMD_ARG(alarm-notif-time, NULL,
+	              "Get/Set alarm red-LED hold time in seconds (both-mode and pulse sources).",
+	              cmd_alarm_notif_time, 1, 1),
+
+	SHELL_CMD_ARG(pir-notify-act, NULL,
+	              "Get/Set PIR motion alarm notify on activation (true/false).",
+	              cmd_pir_notify_act, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );
