@@ -915,18 +915,18 @@ static void m_hist_work_handler(struct k_work *work)
 	}
 }
 
-void app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
 {
 	if (!app_lrw_is_ready()) {
 		LOG_WRN("History replay requested but LRW not ready; ignoring");
-		return;
+		return false;
 	}
 
 	size_t cap = history_frame_cap();
 	uint32_t n = (cap > 0) ? app_history_count_frames(from_unix, to_unix, cap) : 0;
 	if (n == 0) {
 		LOG_INF("History replay: no records in window (or DR too low)");
-		return;
+		return false;
 	}
 
 	m_hist_from = from_unix;
@@ -943,6 +943,7 @@ void app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 	k_timer_stop(&m_send_timer);
 	LOG_INF("History replay start: %u frames (window %u..%u)", (unsigned)n, from_unix, to_unix);
 	k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_NO_WAIT);
+	return true;
 }
 
 static void send_timer_handler(struct k_timer *timer)
