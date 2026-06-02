@@ -130,12 +130,16 @@ ZTEST(history, test_export)
 
 	uint8_t buf[128];
 	uint32_t t0 = 0;
-	uint16_t n = 0, total = 0;
-	size_t bytes = app_history_export(0, 0xFFFFFFFF, buf, sizeof(buf), &t0, &n, &total);
+	uint16_t n = 0;
+	size_t next = 0;
+	size_t bytes = app_history_export_page(0, 0xFFFFFFFF, 0, buf, sizeof(buf), &t0, &n, &next);
 
-	zassert_equal(total, 3, "total %u", total);
 	zassert_equal(n, 3, "n_written %u", n);
+	zassert_equal(next, 3, "next_ord %zu", next);
 	zassert_true(bytes > 0, "no bytes exported");
+
+	/* count_frames mirrors the packing: 3 small records fit a single frame. */
+	zassert_equal(app_history_count_frames(0, 0xFFFFFFFF, sizeof(buf)), 1, "frames");
 }
 
 ZTEST_SUITE(history, NULL, NULL, NULL, NULL, NULL);
