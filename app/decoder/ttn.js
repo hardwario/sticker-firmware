@@ -240,20 +240,29 @@ var _HIST_SENSORS = [
 var _HIST_TEMP_SENTINEL = 0x7fff;
 var _HIST_HUM_SENTINEL = 0xff;
 
-// HistoryFrame.samples: a sequence of records, each
-//   [delta_s u16 LE][present u16 LE][per present sensor: scaled value]
-// where the value is int16 LE ×100 (temp), uint8 ×2 (humidity) or uint32 LE
-// (counter). delta_s is seconds since the frame's t0_unix.
-function _decodeHistorySamples(bytes, t0) {
+// HistoryFrame carries a shared `present` mask + `interval_s` once; samples is a
+// sequence of fixed-size, values-only records (no per-record time or mask):
+//   [per present sensor: scaled value]   int16 LE ×100 (temp), uint8 ×2 (hum),
+//                                         uint32 LE (counter); sentinel = null.
+// Record j's time is t0_unix + j*interval_s (records are periodic). One
+// ReqHistory yields N such frames (frame_index 0..frame_count-1); the consumer
+// concatenates their records to reconstruct the requested window.
+function _decodeHistorySamples(bytes, t0, present, interval) {
   var out = [];
-  var p = 0;
-  while (p + 4 <= bytes.length) {
-    var delta = bytes[p] | (bytes[p + 1] << 8); p += 2;
-    var present = bytes[p] | (bytes[p + 1] << 8); p += 2;
-    var rec = { time: (t0 + delta) >>> 0 };
-    for (var s = 0; s < _HIST_SENSORS.length; s++) {
-      if (!(present & (1 << s))) continue;
-      var d = _HIST_SENSORS[s];
+  var recSize = 0;
+  for (var s = 0; s < _HIST_SENSORS.length; s++) {
+    if (!(present & (1 << s))) continue;
+    var e = _HIST_SENSORS[s].enc;
+    recSize += (e === "temp") ? 2 : (e === "hum") ? 1 : 4;
+  }
+  if (recSize === 0) return out;
+
+  var p = 0, j = 0;
+  while (p + recSize <= bytes.length) {
+    var rec = { time: (t0 + j * interval) >>> 0 };
+    for (var k = 0; k < _HIST_SENSORS.length; k++) {
+      if (!(present & (1 << k))) continue;
+      var d = _HIST_SENSORS[k];
       if (d.enc === "temp") {
         var raw = bytes[p] | (bytes[p + 1] << 8); p += 2;
         rec[d.name] = raw === _HIST_TEMP_SENTINEL ? null
@@ -267,13 +276,14 @@ function _decodeHistorySamples(bytes, t0) {
       }
     }
     out.push(rec);
+    j++;
   }
   return out;
 }
 
 function _decodeHistoryFrame(bytes, start, end) {
   var hf = { records: [] };
-  var t0 = 0;
+  var t0 = 0, present = 0, interval = 0;
   var samples = null;
   var pos = start;
   while (pos < end) {
@@ -284,6 +294,8 @@ function _decodeHistoryFrame(bytes, start, end) {
       if (f === 1) hf.frame_index = v.value;
       else if (f === 2) hf.frame_count = v.value;
       else if (f === 3) t0 = v.value;
+      else if (f === 5) present = v.value;
+      else if (f === 6) interval = v.value;
     } else if (w === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       if (f === 4) samples = bytes.slice(pos, pos + len.value);
@@ -291,7 +303,9 @@ function _decodeHistoryFrame(bytes, start, end) {
     } else { break; }
   }
   hf.t0_unix = t0;
-  if (samples) hf.records = _decodeHistorySamples(samples, t0);
+  hf.present = present;
+  hf.interval_s = interval;
+  if (samples) hf.records = _decodeHistorySamples(samples, t0, present, interval);
   return hf;
 }
 

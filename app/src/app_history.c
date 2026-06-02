@@ -90,7 +90,7 @@ static const struct hist_desc m_desc[APP_HISTORY_SENSOR_COUNT] = {
 
 #define TEMP_SENTINEL 0x7FFF
 #define HUM_SENTINEL  0xFF
-#define MAX_RECORD_SIZE (2 + 13 * 4) /* delta + worst case all channels */
+#define MAX_RECORD_SIZE (13 * 4) /* worst case all channels, values only */
 
 /* ---- Module state ------------------------------------------------------- */
 
@@ -102,8 +102,9 @@ static uint16_t m_capacity;
 static uint16_t m_start;      /* index of oldest record */
 static uint16_t m_count;
 static uint32_t m_base_time;  /* oldest record's time: uptime-s unsynced, unix synced */
-static uint32_t m_last_time;  /* newest record's time source */
 static bool m_base_synced;
+static uint32_t m_interval;   /* interval_report (s) the buffer was recorded at; records
+			       * are periodic so per-record time = base + ord*interval */
 
 static bool cap_on(size_t cap_off)
 {
@@ -143,11 +144,11 @@ struct hist_meta {
 	uint16_t start;
 	uint16_t count;
 	uint32_t base_time;
-	uint32_t last_time;
+	uint32_t interval;
 	uint8_t base_synced;
 };
 
-#define META_MAGIC 0x48495331 /* "HIS1" */
+#define META_MAGIC 0x48495332 /* "HIS2" — bumped: record layout dropped per-record delta */
 
 static int backend_init(void)
 {
@@ -185,7 +186,7 @@ static void backend_save_meta(void)
 		.start = m_start,
 		.count = m_count,
 		.base_time = m_base_time,
-		.last_time = m_last_time,
+		.interval = m_interval,
 		.base_synced = m_base_synced,
 	};
 	(void)nvs_write(&m_fs, NVS_ID_META, &meta, sizeof(meta));
@@ -208,7 +209,7 @@ static bool backend_load_meta(void)
 	m_start = meta.start;
 	m_count = meta.count;
 	m_base_time = meta.base_time;
-	m_last_time = meta.last_time;
+	m_interval = meta.interval;
 	m_base_synced = meta.base_synced;
 	return true;
 }
@@ -301,7 +302,7 @@ static void recompute_sizing(void)
 	uint16_t avail = app_history_available_mask();
 	m_mask &= avail; /* drop sensors whose capability went away */
 
-	uint16_t size = 2; /* delta_s */
+	uint16_t size = 0; /* values only; per-record time is implicit (base + ord*interval) */
 	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
 		if (m_mask & BIT(i)) {
 			size += m_desc[i].size;
@@ -345,7 +346,7 @@ static size_t encode_value(uint8_t *p, int i)
 static void decode_record(const uint8_t *rec, struct app_history_record *out)
 {
 	out->present = 0;
-	const uint8_t *p = rec + 2; /* skip delta */
+	const uint8_t *p = rec; /* values only — no per-record delta prefix */
 	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
 		if (!(m_mask & BIT(i))) {
 			out->value[i] = 0;
@@ -382,32 +383,33 @@ static void decode_record(const uint8_t *rec, struct app_history_record *out)
 	}
 }
 
-static uint16_t slot_delta(uint16_t slot)
-{
-	uint8_t rec[MAX_RECORD_SIZE];
-	if (backend_read_slot(slot, rec, m_sample_size) != 0) {
-		return 0;
-	}
-	return sys_get_le16(rec);
-}
-
 /* ---- Public API --------------------------------------------------------- */
 
 void app_history_capture(void)
 {
-	if (!m_enabled || m_sample_size <= 2 || m_capacity == 0) {
+	if (!m_enabled || m_sample_size == 0 || m_capacity == 0) {
 		return;
 	}
 
 	uint8_t rec[MAX_RECORD_SIZE];
-	bool synced;
-	uint32_t now;
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 
-	/* Snapshot sensor values + timestamp atomically w.r.t. the sensor data. */
+	/* Records are periodic at interval_report, so per-record time is implicit
+	 * (base + ord*interval). If the interval changed, that timebase no longer
+	 * holds — drop the history and restart at the new rate. */
+	if (m_interval != (uint32_t)g_app_config.interval_report) {
+		backend_erase();
+		m_start = 0;
+		m_count = 0;
+		m_base_time = 0;
+		m_base_synced = false;
+		m_interval = (uint32_t)g_app_config.interval_report;
+	}
+
+	/* Snapshot sensor values atomically w.r.t. the sensor data. */
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	size_t pos = 2;
+	size_t pos = 0;
 	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
 		if (m_mask & BIT(i)) {
 			pos += encode_value(&rec[pos], i);
@@ -415,32 +417,20 @@ void app_history_capture(void)
 	}
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	now = now_seconds(&synced);
-
-	uint16_t delta;
-	if (m_count == 0) {
-		m_base_time = now;
-		m_last_time = now;
-		m_base_synced = synced;
-		delta = 0;
-	} else {
-		uint32_t d = now - m_last_time;
-		delta = (d > 0xFFFF) ? 0xFFFF : (uint16_t)d;
-		m_last_time = now;
-	}
-	sys_put_le16(delta, rec);
-
 	uint16_t slot;
 	if (m_count < m_capacity) {
+		if (m_count == 0) {
+			bool synced;
+			m_base_time = now_seconds(&synced);
+			m_base_synced = synced;
+		}
 		slot = (m_start + m_count) % m_capacity;
 		m_count++;
 	} else {
-		/* Full: evict oldest, advance base past it. */
-		m_base_time += slot_delta(m_start);
+		/* Full: evict oldest; the oldest ordinal moves forward one interval. */
+		m_base_time += m_interval;
 		slot = m_start;
 		m_start = (m_start + 1) % m_capacity;
-		/* The new record's delta was measured from the previous newest,
-		 * which stays correct; the evicted slot is reused for it. */
 	}
 
 	(void)backend_write_slot(slot, rec, m_sample_size);
@@ -455,7 +445,6 @@ void app_history_on_clock_sync(uint32_t unix_now)
 	if (!m_base_synced && m_count > 0) {
 		uint32_t off = unix_now - (uint32_t)(k_uptime_get() / 1000);
 		m_base_time += off;
-		m_last_time += off;
 		m_base_synced = true;
 		backend_save_meta();
 	} else if (m_count == 0) {
@@ -481,7 +470,6 @@ void app_history_clear(void)
 	m_start = 0;
 	m_count = 0;
 	m_base_time = 0;
-	m_last_time = 0;
 	m_base_synced = false;
 	backend_save_meta();
 	k_mutex_unlock(&m_lock);
@@ -495,89 +483,60 @@ int app_history_get(size_t idx, struct app_history_record *out)
 		return -ENOENT;
 	}
 
-	/* Accumulate delta from base up to idx (records are oldest-first). */
-	uint32_t t = m_base_time;
+	/* Records are periodic: time = base + ord*interval (no per-record delta). */
 	uint8_t rec[MAX_RECORD_SIZE];
-	for (size_t k = 0; k <= idx; k++) {
-		uint16_t slot = (m_start + k) % m_capacity;
-		(void)backend_read_slot(slot, rec, m_sample_size);
-		if (k > 0) {
-			t += sys_get_le16(rec);
-		}
-	}
+	uint16_t slot = (m_start + idx) % m_capacity;
+	(void)backend_read_slot(slot, rec, m_sample_size);
 	decode_record(rec, out);
-	out->time_unix = t;
+	out->time_unix = m_base_time + (uint32_t)idx * m_interval;
 	out->time_synced = m_base_synced;
 
 	k_mutex_unlock(&m_lock);
 	return 0;
 }
 
-size_t app_history_export(uint32_t from_unix, uint32_t to_unix, uint8_t *buf, size_t cap,
-			  uint32_t *t0_out, uint16_t *n_written, uint16_t *total)
+uint32_t app_history_get_interval(void)
 {
-	size_t cnt = app_history_count();
+	return m_interval;
+}
+
+/* Records have a fixed size (m_sample_size, values only) and a shared present
+ * mask (m_mask) — so a wire frame carries the mask + interval once and each
+ * record is just the raw stored bytes (sentinels mark absent values). Time is
+ * implicit: ordinal `ord` is at base + ord*interval; records are time-ordered,
+ * so the window filter can break once past `to_unix`. */
+size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord,
+			       uint8_t *buf, size_t cap, uint32_t *t0_out, uint16_t *n_written,
+			       size_t *next_ord)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+
 	size_t pos = 0;
 	uint16_t written = 0;
-	uint16_t matched = 0;
 	uint32_t t0 = 0;
 	bool have_t0 = false;
-	bool full = false;
+	size_t ord = start_ord;
 
-	for (size_t ord = 0; ord < cnt; ord++) {
-		struct app_history_record rec;
-		if (app_history_get(ord, &rec) != 0) {
-			break;
-		}
-		/* The window filter only makes sense once we have absolute time. */
-		if (rec.time_synced && (rec.time_unix < from_unix || rec.time_unix > to_unix)) {
-			continue;
-		}
-		matched++;
-		if (full) {
-			continue; /* keep counting the window total, stop packing */
-		}
-
-		uint8_t tmp[MAX_RECORD_SIZE];
-		size_t rl = 0;
-		uint32_t delta = have_t0 ? (rec.time_unix - t0) : 0;
-		if (delta > 0xFFFF) {
-			delta = 0xFFFF;
-		}
-		sys_put_le16((uint16_t)delta, &tmp[rl]);
-		rl += 2;
-		sys_put_le16(rec.present, &tmp[rl]);
-		rl += 2;
-		for (int s = 0; s < APP_HISTORY_SENSOR_COUNT; s++) {
-			if (!(rec.present & BIT(s))) {
-				continue;
+	for (; ord < m_count; ord++) {
+		uint32_t t = m_base_time + (uint32_t)ord * m_interval;
+		if (m_base_synced) {
+			if (t > to_unix) {
+				break; /* monotonic time: no later record qualifies */
 			}
-			double v = rec.value[s];
-			switch (m_desc[s].enc) {
-			case ENC_TEMP:
-				sys_put_le16((uint16_t)(int16_t)llround(v * 100.0), &tmp[rl]);
-				rl += 2;
-				break;
-			case ENC_HUM:
-				tmp[rl++] = (uint8_t)llround(v * 2.0);
-				break;
-			case ENC_COUNT:
-				sys_put_le32((uint32_t)v, &tmp[rl]);
-				rl += 4;
-				break;
+			if (t < from_unix) {
+				continue; /* not yet in window */
 			}
 		}
-
-		if (pos + rl > cap) {
-			full = true; /* this record (and the rest) spill to a later page */
-			continue;
+		if (pos + m_sample_size > cap) {
+			break; /* this record spills to the next page */
 		}
+		uint16_t slot = (m_start + ord) % m_capacity;
+		(void)backend_read_slot(slot, buf + pos, m_sample_size);
 		if (!have_t0) {
-			t0 = rec.time_unix;
+			t0 = t;
 			have_t0 = true;
 		}
-		memcpy(buf + pos, tmp, rl);
-		pos += rl;
+		pos += m_sample_size;
 		written++;
 	}
 
@@ -587,10 +546,40 @@ size_t app_history_export(uint32_t from_unix, uint32_t to_unix, uint8_t *buf, si
 	if (n_written) {
 		*n_written = written;
 	}
-	if (total) {
-		*total = matched;
+	if (next_ord) {
+		*next_ord = ord;
 	}
+
+	k_mutex_unlock(&m_lock);
 	return pos;
+}
+
+/* Number of frames the [from,to] window needs at `cap` bytes/frame. Mirrors the
+ * packing in export_page (fixed record size → whole records per frame). */
+uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t cap)
+{
+	if (m_sample_size == 0 || cap < m_sample_size) {
+		return 0;
+	}
+	size_t per_frame = cap / m_sample_size;
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	size_t matched = 0;
+	for (size_t ord = 0; ord < m_count; ord++) {
+		uint32_t t = m_base_time + (uint32_t)ord * m_interval;
+		if (m_base_synced) {
+			if (t > to_unix) {
+				break;
+			}
+			if (t < from_unix) {
+				continue;
+			}
+		}
+		matched++;
+	}
+	k_mutex_unlock(&m_lock);
+
+	return (uint16_t)((matched + per_frame - 1) / per_frame);
 }
 
 bool app_history_is_enabled(void)
@@ -617,7 +606,6 @@ void app_history_set_mask(uint16_t mask)
 	m_start = 0;
 	m_count = 0;
 	m_base_time = 0;
-	m_last_time = 0;
 	m_base_synced = false;
 	recompute_sizing();
 	backend_save_meta();
@@ -670,13 +658,14 @@ int app_history_init(void)
 
 	recompute_sizing();
 
-	/* Restore prior buffer state if the layout matches; else start clean. */
+	/* Restore prior buffer state if the layout matches; else start clean.
+	 * m_interval = 0 forces the first capture to seed it from interval_report. */
 	if (!backend_load_meta()) {
 		m_start = 0;
 		m_count = 0;
 		m_base_time = 0;
-		m_last_time = 0;
 		m_base_synced = false;
+		m_interval = 0;
 	}
 
 	LOG_INF("history: enabled=%d, %u sensors, sample=%uB, capacity=%u, stored=%u",
