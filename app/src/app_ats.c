@@ -33,7 +33,7 @@
 
 LOG_MODULE_REGISTER(app_ats, LOG_LEVEL_DBG);
 
-#define SHELL_PFX "ats"
+#define SHELL_PFX                     "ats"
 #define SENSOR_CHECK_POLL_INTERVAL_MS 300 /* Poll interval for sensor check in milliseconds */
 
 static struct k_work_delayable g_led_cycle_work;
@@ -213,7 +213,8 @@ static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char
 		uint32_t sht_serial;
 		ret = app_machine_probe_read_hygrometer_serial(i, &serial_number, &sht_serial);
 		if (ret) {
-			shell_error(shell, "Failed to read Machine Probe SHT serial %d: %d", i, ret);
+			shell_error(shell, "Failed to read Machine Probe SHT serial %d: %d", i,
+				    ret);
 		} else {
 			shell_print(shell, "Machine Probe[%d] SHT serial: %u", i, sht_serial);
 		}
@@ -574,12 +575,11 @@ static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "margin: %u dB", info.margin);
 	shell_print(shell, "gateways: %u", info.gw_count);
 	shell_print(shell, "messages: %d", info.message_count);
-	shell_print(shell, "healthy->warning: %d/%d",
-		    info.consecutive_lc_fail, info.thresh_warning);
-	shell_print(shell, "warning->healthy: %d/%d",
-		    info.consecutive_lc_ok, info.thresh_healthy);
-	shell_print(shell, "warning->reconnect: %d/%d",
-		    info.warning_lc_fail_total, info.thresh_reconnect);
+	shell_print(shell, "healthy->warning: %d/%d", info.consecutive_lc_fail,
+		    info.thresh_warning);
+	shell_print(shell, "warning->healthy: %d/%d", info.consecutive_lc_ok, info.thresh_healthy);
+	shell_print(shell, "warning->reconnect: %d/%d", info.warning_lc_fail_total,
+		    info.thresh_reconnect);
 
 	return 0;
 }
@@ -606,34 +606,35 @@ static int cmd_lrw_reset(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-SHELL_STATIC_SUBCMD_SET_CREATE(sub_lrw,
-	SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_lrw, SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
 	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
 	SHELL_CMD_ARG(reset, NULL, "Reset LoRaWAN frame counters + DevNonce (reboots).",
 		      cmd_lrw_reset, 1, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* defined(CONFIG_LORAWAN) */
 
-SHELL_STATIC_SUBCMD_SET_CREATE(sub_sensors,
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_sensors,
 	SHELL_CMD_ARG(sample, NULL, "Print all sensor values.", cmd_print_sample, 1, 0),
 	SHELL_CMD_ARG(reset, NULL, "Reset sensor counters.", cmd_reset_sample, 1, 0),
-	SHELL_CMD_ARG(serial, NULL, "Print sensor serial numbers.", cmd_print_serial_numbers, 1,
-		      0),
+	SHELL_CMD_ARG(serial, NULL, "Print sensor serial numbers.", cmd_print_serial_numbers, 1, 0),
 	SHELL_CMD_ARG(check, NULL, "Monitor sensor for changes. Usage: check <sensor> [timeout]",
 		      cmd_check_sensor, 2, 1),
 	SHELL_SUBCMD_SET_END);
 
-SHELL_STATIC_SUBCMD_SET_CREATE(sub_led,
-	SHELL_CMD_ARG(cycle, NULL,
-		      "Cycle LED (R/Y/G/off). Usage: cycle [count] (default=1, 0=stop, 1-99=cycles)",
-		      cmd_cycle_led, 1, 1),
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_led,
+	SHELL_CMD_ARG(
+		cycle, NULL,
+		"Cycle LED (R/Y/G/off). Usage: cycle [count] (default=1, 0=stop, 1-99=cycles)",
+		cmd_cycle_led, 1, 1),
 	SHELL_CMD_ARG(switch, NULL, "Switch LED channel (format red|yellow|green on|off).",
 		      cmd_switch_led, 3, 0),
 	SHELL_SUBCMD_SET_END);
 
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
-static int cmd_cmd_inject(const struct shell *sh, enum app_cmd_transport transport,
-			  const char *hex)
+static int cmd_cmd_inject(const struct shell *sh, enum app_cmd_transport transport, const char *hex)
 {
 	size_t hex_len = strlen(hex);
 
@@ -693,25 +694,23 @@ static int cmd_cmd_nfc(const struct shell *sh, size_t argc, char **argv)
 	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_NFC, argv[1]);
 }
 
-SHELL_STATIC_SUBCMD_SET_CREATE(sub_cmd,
-	SHELL_CMD_ARG(lrw, NULL, "Inject over LoRaWAN transport. Usage: lrw <hex>",
-		      cmd_cmd_lrw, 2, 0),
-	SHELL_CMD_ARG(nfc, NULL, "Inject over NFC transport. Usage: nfc <hex>",
-		      cmd_cmd_nfc, 2, 0),
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_cmd,
+	SHELL_CMD_ARG(lrw, NULL, "Inject over LoRaWAN transport. Usage: lrw <hex>", cmd_cmd_lrw, 2,
+		      0),
+	SHELL_CMD_ARG(nfc, NULL, "Inject over NFC transport. Usage: nfc <hex>", cmd_cmd_nfc, 2, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_APP_CMD_DEBUG_SHELL */
 
-SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_ats,
-	SHELL_CMD(led, &sub_led, "LED commands.", NULL),
-	SHELL_CMD(sensors, &sub_sensors, "Sensor commands.", NULL),
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_ats, SHELL_CMD(led, &sub_led, "LED commands.", NULL),
+			       SHELL_CMD(sensors, &sub_sensors, "Sensor commands.", NULL),
 #if defined(CONFIG_LORAWAN)
-	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
+			       SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
 #endif /* defined(CONFIG_LORAWAN) */
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
-	SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
+			       SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
 #endif
-	SHELL_SUBCMD_SET_END);
+			       SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(ats, &sub_ats, "Automated test system commands.", NULL);
 

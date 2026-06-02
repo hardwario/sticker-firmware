@@ -117,19 +117,17 @@ bool app_alarm_poll(void)
 				g_app_config.alarm_pressure_hi, g_app_config.alarm_pressure_hst,
 				"pressure", &should_send);
 
-	alarm |= eval_threshold(&alarm_t1_temperature, g_app_config.alarm_t1_temperature_enabled,
-				g_app_sensor_data.t1_temperature,
-				g_app_config.alarm_t1_temperature_lo,
-				g_app_config.alarm_t1_temperature_hi,
-				g_app_config.alarm_t1_temperature_hst, "external temperature 1",
-				&should_send);
+	alarm |= eval_threshold(
+		&alarm_t1_temperature, g_app_config.alarm_t1_temperature_enabled,
+		g_app_sensor_data.t1_temperature, g_app_config.alarm_t1_temperature_lo,
+		g_app_config.alarm_t1_temperature_hi, g_app_config.alarm_t1_temperature_hst,
+		"external temperature 1", &should_send);
 
-	alarm |= eval_threshold(&alarm_t2_temperature, g_app_config.alarm_t2_temperature_enabled,
-				g_app_sensor_data.t2_temperature,
-				g_app_config.alarm_t2_temperature_lo,
-				g_app_config.alarm_t2_temperature_hi,
-				g_app_config.alarm_t2_temperature_hst, "external temperature 2",
-				&should_send);
+	alarm |= eval_threshold(
+		&alarm_t2_temperature, g_app_config.alarm_t2_temperature_enabled,
+		g_app_sensor_data.t2_temperature, g_app_config.alarm_t2_temperature_lo,
+		g_app_config.alarm_t2_temperature_hi, g_app_config.alarm_t2_temperature_hst,
+		"external temperature 2", &should_send);
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 

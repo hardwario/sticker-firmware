@@ -137,6 +137,11 @@ jobs:
       - name: configen + proto tests
         run: pytest scripts/west_commands/tests
 
+      - name: clang-format check (app/src)
+        run: |
+          git ls-files 'app/src/*.c' 'app/src/*.h' \
+            | xargs clang-format --dry-run --Werror
+
   release:
     name: Create release
     if: startsWith(github.ref, 'refs/tags/v')

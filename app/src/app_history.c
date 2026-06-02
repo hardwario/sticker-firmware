@@ -52,7 +52,7 @@ enum hist_enc {
 
 struct hist_desc {
 	const char *name;
-	size_t src_off;  /* offset in struct app_sensor_data */
+	size_t src_off; /* offset in struct app_sensor_data */
 	enum hist_enc enc;
 	uint8_t size;
 	size_t cap_off; /* offset of bool capability in struct app_config, or NO_CAP */
@@ -78,8 +78,8 @@ static const struct hist_desc m_desc[APP_HISTORY_SENSOR_COUNT] = {
 	[APP_HISTORY_HALL_LEFT] = {"hall-left", offsetof(struct app_sensor_data, hall_left_count),
 				   ENC_COUNT, 4, offsetof(struct app_config, cap_hall_left)},
 	[APP_HISTORY_HALL_RIGHT] = {"hall-right",
-				    offsetof(struct app_sensor_data, hall_right_count), ENC_COUNT, 4,
-				    offsetof(struct app_config, cap_hall_right)},
+				    offsetof(struct app_sensor_data, hall_right_count), ENC_COUNT,
+				    4, offsetof(struct app_config, cap_hall_right)},
 	[APP_HISTORY_INPUT_A] = {"input-a", offsetof(struct app_sensor_data, input_a_count),
 				 ENC_COUNT, 4, offsetof(struct app_config, cap_input_a)},
 	[APP_HISTORY_INPUT_B] = {"input-b", offsetof(struct app_sensor_data, input_b_count),
@@ -88,21 +88,21 @@ static const struct hist_desc m_desc[APP_HISTORY_SENSOR_COUNT] = {
 				4, offsetof(struct app_config, cap_pir_detector)},
 };
 
-#define TEMP_SENTINEL 0x7FFF
-#define HUM_SENTINEL  0xFF
+#define TEMP_SENTINEL   0x7FFF
+#define HUM_SENTINEL    0xFF
 #define MAX_RECORD_SIZE (2 + 13 * 4) /* delta + worst case all channels */
 
 /* ---- Module state ------------------------------------------------------- */
 
 static struct k_mutex m_lock;
 static bool m_enabled;
-static uint16_t m_mask;       /* selected & available sensors */
+static uint16_t m_mask; /* selected & available sensors */
 static uint16_t m_sample_size;
 static uint16_t m_capacity;
-static uint16_t m_start;      /* index of oldest record */
+static uint16_t m_start; /* index of oldest record */
 static uint16_t m_count;
-static uint32_t m_base_time;  /* oldest record's time: uptime-s unsynced, unix synced */
-static uint32_t m_last_time;  /* newest record's time source */
+static uint32_t m_base_time; /* oldest record's time: uptime-s unsynced, unix synced */
+static uint32_t m_last_time; /* newest record's time source */
 static bool m_base_synced;
 
 static bool cap_on(size_t cap_off)
@@ -130,7 +130,7 @@ static uint32_t now_seconds(bool *synced)
 
 #if defined(CONFIG_APP_HISTORY_FLASH)
 
-#define NVS_ID_META    1
+#define NVS_ID_META     1
 #define NVS_ID_REC_BASE 100
 
 static struct nvs_fs m_fs;
@@ -679,8 +679,8 @@ int app_history_init(void)
 		m_base_synced = false;
 	}
 
-	LOG_INF("history: enabled=%d, %u sensors, sample=%uB, capacity=%u, stored=%u",
-		m_enabled, (unsigned)POPCOUNT(m_mask), m_sample_size, m_capacity, m_count);
+	LOG_INF("history: enabled=%d, %u sensors, sample=%uB, capacity=%u, stored=%u", m_enabled,
+		(unsigned)POPCOUNT(m_mask), m_sample_size, m_capacity, m_count);
 	return 0;
 }
 
@@ -727,7 +727,8 @@ static int cmd_history_info(const struct shell *sh, size_t argc, char **argv)
 		    (unsigned)POPCOUNT(m_mask), m_sample_size);
 	shell_print(sh, "capacity:  %u records", m_capacity);
 	shell_print(sh, "stored:    %u / %u", m_count, m_capacity);
-	shell_print(sh, "base:      %u (%s)", m_base_time, m_base_synced ? "unix" : "uptime/no-rtc");
+	shell_print(sh, "base:      %u (%s)", m_base_time,
+		    m_base_synced ? "unix" : "uptime/no-rtc");
 	return 0;
 }
 
@@ -906,8 +907,7 @@ static int cmd_history_stats(const struct shell *sh, size_t argc, char **argv)
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_history,
-	SHELL_CMD_ARG(info, NULL, "Buffer summary.", cmd_history_info, 1, 0),
+	sub_history, SHELL_CMD_ARG(info, NULL, "Buffer summary.", cmd_history_info, 1, 0),
 	SHELL_CMD_ARG(count, NULL, "Number of stored records.", cmd_history_count, 1, 0),
 	SHELL_CMD_ARG(read, NULL, "List records. Usage: read [N]", cmd_history_read, 1, 1),
 	SHELL_CMD_ARG(clear, NULL, "Erase the buffer.", cmd_history_clear, 1, 0),

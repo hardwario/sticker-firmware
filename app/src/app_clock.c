@@ -207,8 +207,8 @@ static int cmd_clock_sync(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-SHELL_STATIC_SUBCMD_SET_CREATE(sub_clock,
-	SHELL_CMD_ARG(get, NULL, "Read RTC time.", cmd_clock_get, 1, 0),
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_clock, SHELL_CMD_ARG(get, NULL, "Read RTC time.", cmd_clock_get, 1, 0),
 	SHELL_CMD_ARG(set, NULL, "Set RTC time. Usage: set <unix>", cmd_clock_set, 2, 0),
 	SHELL_CMD_ARG(sync, NULL, "Request network time (LoRaWAN DeviceTimeReq).", cmd_clock_sync,
 		      1, 0),
