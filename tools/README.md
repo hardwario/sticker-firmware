@@ -17,7 +17,16 @@ Steps (exits non-zero on the first hard failure):
 5. **configen in sync** — regenerate from `app_config.yml` and fail if the committed
    `app_config.{c,h,proto,options.in}` would change.
 
-The CI `test` job (`.github/workflows/build.yml`) runs steps 2–3 (no Zephyr toolchain);
+The CI `test` job (`.github/workflows/build.yml`) runs steps 2–4 (no Zephyr toolchain);
 this script is the fuller local superset that also builds and checks generated-file sync.
 
 Install the Python test deps once: `pip install -r scripts/west_commands/requirements-dev.txt`.
+
+## clang-format pre-commit hook
+
+`tools/hooks/pre-commit` auto-runs `clang-format -i` on staged `app/src/*.{c,h}` before
+each commit (CI then verifies the same with `--dry-run --Werror`). Enable once per clone:
+
+```bash
+git config core.hooksPath tools/hooks
+```
