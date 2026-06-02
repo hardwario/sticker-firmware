@@ -31,9 +31,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-LOG_MODULE_REGISTER(app_tester, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(app_ats, LOG_LEVEL_DBG);
 
-#define SHELL_PFX "tester"
+#define SHELL_PFX "ats"
 #define SENSOR_CHECK_POLL_INTERVAL_MS 300 /* Poll interval for sensor check in milliseconds */
 
 static struct k_work_delayable g_led_cycle_work;
@@ -702,7 +702,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_cmd,
 #endif /* CONFIG_APP_CMD_DEBUG_SHELL */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_test,
+	sub_ats,
 	SHELL_CMD(led, &sub_led, "LED commands.", NULL),
 	SHELL_CMD(sensors, &sub_sensors, "Sensor commands.", NULL),
 #if defined(CONFIG_LORAWAN)
@@ -713,12 +713,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #endif
 	SHELL_SUBCMD_SET_END);
 
-SHELL_CMD_REGISTER(tester, &sub_test, "Tester commands.", NULL);
+SHELL_CMD_REGISTER(ats, &sub_ats, "Automated test system commands.", NULL);
 
-static int app_tester_init(void)
+static int app_ats_init(void)
 {
 	k_work_init_delayable(&g_led_cycle_work, led_cycle_work_handler);
 	return 0;
 }
 
-SYS_INIT(app_tester_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+SYS_INIT(app_ats_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
