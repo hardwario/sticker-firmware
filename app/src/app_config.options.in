@@ -1,3 +1,4 @@
+# BEGIN GENERATED CONFIG
 AppConfigMessage.Lorawan.deveui max_length:16
 AppConfigMessage.Lorawan.joineui max_length:16
 AppConfigMessage.Lorawan.nwkkey max_length:32
@@ -5,6 +6,7 @@ AppConfigMessage.Lorawan.appkey max_length:32
 AppConfigMessage.Lorawan.devaddr max_length:8
 AppConfigMessage.Lorawan.nwkskey max_length:32
 AppConfigMessage.Lorawan.appskey max_length:32
+# END GENERATED CONFIG
 
 Response.Error.detail       max_size:32
 Response.HistoryFrame.samples max_size:48

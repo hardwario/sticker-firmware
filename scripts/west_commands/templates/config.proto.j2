@@ -1,0 +1,24 @@
+message {{ proto.message }} {
+{% for f in proto.root_fields %}
+    optional {{ f.ptype }} {{ f.name }} = {{ f.id }};
+{% endfor %}
+{% for sub in proto.submessages %}
+
+    message {{ sub.name }} {
+{% for e in sub.enums %}
+        enum {{ e.name }} {
+{% for v in e.members %}
+            {{ v.name }} = {{ v.value }};
+{% endfor %}
+        }
+
+{% endfor %}
+{% for r in sub.reserved %}
+        reserved {{ r }};
+{% endfor %}
+{% for f in sub.fields %}
+        optional {{ f.ptype }} {{ f.name }} = {{ f.id }};
+{% endfor %}
+    }
+{% endfor %}
+}

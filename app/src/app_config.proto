@@ -1,12 +1,11 @@
 syntax = "proto3";
 
+// BEGIN GENERATED CONFIG
 message AppConfigMessage {
     optional bool factory = 1;
-
     optional string secret_key = 2;
     optional uint32 serial_number = 3;
     optional uint32 nonce_counter = 4;
-
     optional Lorawan lorawan = 5;
     optional Application application = 6;
 
@@ -17,14 +16,14 @@ message AppConfigMessage {
             AU915 = 2;
         }
 
-        enum Activation {
-            OTAA = 0;
-            ABP = 1;
-        }
-
         enum Network {
             PUBLIC = 0;
             PRIVATE = 1;
+        }
+
+        enum Activation {
+            OTAA = 0;
+            ABP = 1;
         }
 
         optional Region region = 1;
@@ -42,9 +41,9 @@ message AppConfigMessage {
     }
 
     message Application {
+        reserved 3;
         optional bool calibration = 1;
         optional uint32 interval_sample = 2;
-        optional uint32 interval_aggreg = 3;
         optional uint32 interval_report = 4;
         optional bool alarm_temperature_enabled = 5;
         optional float alarm_temperature_lo = 6;
@@ -90,8 +89,11 @@ message AppConfigMessage {
         optional bool cap_pir_detector = 46;
         optional bool cap_1w_thermometer = 47;
         optional bool cap_1w_machine_probe = 48;
+        optional bool history_enable = 49;
+        optional uint32 history_sensors = 50;
     }
 }
+// END GENERATED CONFIG
 
 message Command {
     uint32 seq = 1;

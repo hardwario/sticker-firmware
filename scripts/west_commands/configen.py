@@ -34,6 +34,7 @@ Parameter options:
 """
 
 import argparse
+import re
 from pathlib import Path
 
 import yaml
@@ -320,6 +321,245 @@ def filter_printf_cast(param):
     return casts.get(ptype, "")
 
 
+# ---------------------------------------------------------------------------
+# Protobuf config generation (issue #44)
+#
+# configen also emits the config section of the .proto (and the nanopb
+# max_length options for hex-key fields) from the same YAML, so app_config.yml
+# is the single source of truth for both the C struct and the wire schema.
+# Existing field numbers are locked via per-parameter `proto_id`; the allocator
+# only appends new ones (never renumbers) and writes them back into the YAML.
+# ---------------------------------------------------------------------------
+
+# Marker pair delimiting the generated region in the .proto / .options files.
+PROTO_BEGIN = "BEGIN GENERATED CONFIG"
+PROTO_END = "END GENERATED CONFIG"
+
+# YAML type -> proto3 scalar type (mirrors the hand-written proto: every integer
+# maps to uint32, byte arrays / strings become `string` with a nanopb option).
+PROTO_SCALAR = {
+    "bool": "bool",
+    "float": "float",
+    "double": "double",
+    "bytes": "string",
+    "string": "string",
+}
+
+
+def _pascal(name):
+    """snake_case -> PascalCase (lrw_region -> Region after prefix strip)."""
+    return "".join(w.capitalize() for w in name.split("_") if w)
+
+
+def _proto_field_name(param, group):
+    """Proto field name = YAML name with the group's strip_prefix removed."""
+    name = param["name"]
+    prefix = group.get("strip_prefix", "")
+    if prefix and name.startswith(prefix):
+        name = name[len(prefix):]
+    return param.get("proto_name", name)
+
+
+def _proto_type(param, enum_proto_name):
+    ptype = param.get("type")
+    if ptype == "enum":
+        return enum_proto_name[param["enum"]]
+    return PROTO_SCALAR.get(ptype, "uint32")
+
+
+def _proto_groups(config):
+    """Return (proto_block, {group_key: group_cfg}) or (None, None)."""
+    proto = config.get("proto")
+    if not proto:
+        return None, None
+    return proto, {g["key"]: g for g in proto["groups"]}
+
+
+def allocate_proto_ids(config, rt_doc):
+    """Assign a proto_id to every parameter missing one (append-only) and mirror
+    the assignment back into `rt_doc` (a ruamel round-trip doc) for write-back.
+
+    Returns the list of (name, id) newly assigned. Mutates `config` parameters
+    in place so the proto model sees the final numbers.
+    """
+    proto, gmap = _proto_groups(config)
+
+    # Collect the used field numbers per message namespace. The root message
+    # namespace holds extra_fields(root), the root-group params and the
+    # submessage container fields; each submessage namespace holds its own
+    # params plus any `reserved` numbers.
+    used = {g["key"]: set() for g in proto["groups"]}
+    for ef in proto.get("extra_fields", []):
+        used[ef.get("proto_group", "root")].add(ef["proto_id"])
+    for g in proto["groups"]:
+        if g["key"] != "root":
+            used.setdefault("root", set()).add(g["proto_id"])
+        for r in g.get("reserved", []):
+            used[g["key"]].add(r)
+
+    # Lock existing ids + detect duplicates within a namespace.
+    for p in config["parameters"]:
+        group = p.get("proto_group")
+        if group is None:
+            log.die(f"parameter '{p['name']}' is missing 'proto_group'")
+        if group not in used:
+            log.die(f"parameter '{p['name']}' has unknown proto_group '{group}'")
+        pid = p.get("proto_id")
+        if pid is not None:
+            if pid in used[group]:
+                log.die(f"duplicate proto_id {pid} in group '{group}' "
+                        f"(parameter '{p['name']}')")
+            used[group].add(pid)
+
+    # Append-only allocation for parameters without an id, in YAML order.
+    assigned = []
+    for p in config["parameters"]:
+        if p.get("proto_id") is None:
+            group = p["proto_group"]
+            nid = (max(used[group]) + 1) if used[group] else 1
+            used[group].add(nid)
+            p["proto_id"] = nid
+            assigned.append((p["name"], nid))
+
+    # Write the new ids back into the round-trip doc (after proto_group).
+    if assigned:
+        new_ids = dict(assigned)
+        for p in rt_doc["parameters"]:
+            if p["name"] in new_ids and "proto_id" not in p:
+                idx = list(p.keys()).index("proto_group") + 1
+                p.insert(idx, "proto_id", new_ids[p["name"]])
+
+    return assigned
+
+
+def _parse_proto_field_ids(text):
+    """Extract {field_name: number} from `optional <type> <name> = <n>;` lines in
+    the existing generated region (used by the no-renumber guard)."""
+    ids = {}
+    region = text
+    if PROTO_BEGIN in text and PROTO_END in text:
+        region = text.split(PROTO_BEGIN, 1)[1].split(PROTO_END, 1)[0]
+    for m in re.finditer(r"optional\s+\S+\s+(\w+)\s*=\s*(\d+)\s*;", region):
+        ids[m.group(1)] = int(m.group(2))
+    return ids
+
+
+def guard_no_renumber(config, proto_path):
+    """Fail the run if a parameter's locked proto field number differs from the
+    one already in the target .proto (someone edited a YAML proto_id)."""
+    if not proto_path.exists():
+        return
+    old_ids = _parse_proto_field_ids(proto_path.read_text())
+    if not old_ids:
+        return
+    _, gmap = _proto_groups(config)
+    for p in config["parameters"]:
+        fname = _proto_field_name(p, gmap[p["proto_group"]])
+        if fname in old_ids and old_ids[fname] != p["proto_id"]:
+            log.die(f"proto_id for '{fname}' changed {old_ids[fname]} -> "
+                    f"{p['proto_id']} — renumbering is forbidden (NFC tags / "
+                    f"downlinks already deployed)")
+
+
+def build_proto_model(config):
+    """Build the jinja2 context for config.proto.j2 from the YAML config."""
+    proto, gmap = _proto_groups(config)
+    enums = config.get("enums", {})
+
+    by_group = {g["key"]: [] for g in proto["groups"]}
+    for p in config["parameters"]:
+        by_group[p["proto_group"]].append(p)
+
+    # Map each YAML enum to its proto type name, derived in the group that uses
+    # it (strip that group's prefix, PascalCase the remainder).
+    enum_proto_name = {}
+    for gkey, plist in by_group.items():
+        for p in plist:
+            if p.get("type") == "enum" and p["enum"] not in enum_proto_name:
+                base = p["enum"]
+                prefix = gmap[gkey].get("strip_prefix", "")
+                if prefix and base.startswith(prefix):
+                    base = base[len(prefix):]
+                enum_proto_name[p["enum"]] = _pascal(base)
+
+    def field(name, ptype, fid):
+        return {"name": name, "ptype": ptype, "id": fid}
+
+    # Root message: extra_fields(root) + root-group params + submessage
+    # containers, all in the root namespace, ordered by field number.
+    root_fields = []
+    for ef in proto.get("extra_fields", []):
+        if ef.get("proto_group", "root") == "root":
+            root_fields.append(field(ef["name"], ef["type"], ef["proto_id"]))
+    for p in by_group.get("root", []):
+        root_fields.append(field(_proto_field_name(p, gmap["root"]),
+                                  _proto_type(p, enum_proto_name), p["proto_id"]))
+    for g in proto["groups"]:
+        if g["key"] != "root":
+            root_fields.append(field(g["field"], g["message"], g["proto_id"]))
+    root_fields.sort(key=lambda f: f["id"])
+
+    submessages = []
+    for g in proto["groups"]:
+        if g["key"] == "root":
+            continue
+        plist = sorted(by_group.get(g["key"], []), key=lambda p: p["proto_id"])
+        genums, seen = [], set()
+        for p in plist:
+            if p.get("type") == "enum" and p["enum"] not in seen:
+                seen.add(p["enum"])
+                genums.append({
+                    "name": enum_proto_name[p["enum"]],
+                    "members": [{"name": v["name"], "value": v["value"]}
+                                for v in enums[p["enum"]]],
+                })
+        fields = [field(_proto_field_name(p, g), _proto_type(p, enum_proto_name),
+                        p["proto_id"]) for p in plist]
+        submessages.append({
+            "name": g["message"],
+            "enums": genums,
+            "reserved": list(g.get("reserved", [])),
+            "fields": fields,
+        })
+
+    return {"message": proto["message"], "root_fields": root_fields,
+            "submessages": submessages}
+
+
+def build_options_lines(config):
+    """nanopb max_length options for hex-key (bytes) fields. Fields flagged
+    `proto_callback: true` are left as nanopb callbacks (no option emitted)."""
+    proto, gmap = _proto_groups(config)
+    msg = proto["message"]
+    lines = []
+    for p in config["parameters"]:
+        if p.get("type") != "bytes" or p.get("proto_callback"):
+            continue
+        g = gmap[p["proto_group"]]
+        fname = _proto_field_name(p, g)
+        path = (f"{msg}.{fname}" if g["key"] == "root"
+                else f"{msg}.{g['message']}.{fname}")
+        lines.append(f"{path} max_length:{p['size'] * 2}")
+    return lines
+
+
+def rewrite_marked_region(path, body, comment):
+    """Replace the text between the BEGIN/END markers in `path` with `body`,
+    keeping everything outside (hand-written messages / options)."""
+    if not path.exists():
+        log.die(f"target {path} not found — seed it with the "
+                f"'{comment} {PROTO_BEGIN}' / '{comment} {PROTO_END}' markers first")
+    text = path.read_text()
+    begin = f"{comment} {PROTO_BEGIN}"
+    end = f"{comment} {PROTO_END}"
+    if begin not in text or end not in text:
+        log.die(f"{path} is missing the generated-region markers "
+                f"({begin} / {end})")
+    head, rest = text.split(begin, 1)
+    _, tail = rest.split(end, 1)
+    return f"{head}{begin}\n{body}\n{end}{tail}"
+
+
 class Configen(WestCommand):
     def __init__(self):
         super().__init__(
@@ -354,6 +594,27 @@ class Configen(WestCommand):
             type=Path,
             default=None,
             help="custom templates directory (default: built-in templates)",
+        )
+        parser.add_argument(
+            "--proto",
+            type=Path,
+            default=None,
+            help="path to the .proto whose generated region is rewritten "
+            "(default: <output-dir>/<module>.proto). Only used when the YAML "
+            "has a 'proto:' block.",
+        )
+        parser.add_argument(
+            "--options",
+            type=Path,
+            default=None,
+            help="path to the nanopb .options.in whose generated region is "
+            "rewritten (default: <output-dir>/<module>.options.in)",
+        )
+        parser.add_argument(
+            "--no-proto",
+            action="store_true",
+            help="skip proto/options generation even if the YAML has a "
+            "'proto:' block",
         )
         parser.add_argument(
             "--dry-run",
@@ -481,6 +742,59 @@ class Configen(WestCommand):
             log.inf(f"Generated: {source_path}")
 
             self._clang_format([header_path, source_path])
+
+        # Proto + nanopb options generation (issue #44).
+        if config.get("proto") and not args.no_proto:
+            proto_path = args.proto or (output_dir / f"{module_name}.proto")
+            options_path = args.options or (output_dir / f"{module_name}.options.in")
+            self._generate_proto(env, config, yaml_path, proto_path.resolve(),
+                                 options_path.resolve(), args.dry_run)
+
+    def _generate_proto(self, env, config, yaml_path, proto_path, options_path,
+                        dry_run):
+        """Generate the .proto config region + nanopb options from the YAML,
+        with an append-only proto_id allocator that writes new ids back."""
+        from ruamel.yaml import YAML
+
+        ryaml = YAML()
+        ryaml.preserve_quotes = True
+        ryaml.width = 4096
+        ryaml.indent(mapping=2, sequence=4, offset=2)
+        with open(yaml_path) as f:
+            rt_doc = ryaml.load(f)
+
+        # Allocate ids for new params, guard against renumbering existing ones.
+        assigned = allocate_proto_ids(config, rt_doc)
+        guard_no_renumber(config, proto_path)
+
+        model = build_proto_model(config)
+        body = env.get_template("config.proto.j2").render(proto=model).rstrip("\n")
+        proto_text = rewrite_marked_region(proto_path, body, "//")
+
+        options_body = "\n".join(build_options_lines(config))
+        options_text = rewrite_marked_region(options_path, options_body, "#")
+
+        if dry_run:
+            for name, fid in assigned:
+                log.inf(f"Would assign proto_id {fid} to '{name}'")
+            log.inf(f"Would generate: {proto_path}")
+            log.inf("--- Proto generated region ---")
+            print(body)
+            log.inf(f"\nWould generate: {options_path}")
+            print(options_body)
+            return
+
+        for name, fid in assigned:
+            log.inf(f"Assigned proto_id {fid} to new parameter '{name}'")
+        if assigned:
+            with open(yaml_path, "w") as f:
+                ryaml.dump(rt_doc, f)
+            log.inf(f"Wrote new proto_id(s) back into: {yaml_path}")
+
+        proto_path.write_text(proto_text)
+        log.inf(f"Generated: {proto_path}")
+        options_path.write_text(options_text)
+        log.inf(f"Generated: {options_path}")
 
     def _clang_format(self, paths):
         """Run clang-format on generated files if available."""
