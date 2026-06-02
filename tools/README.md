@@ -1,0 +1,24 @@
+# tools
+
+## `test.sh` — run everything CI checks, locally
+
+```bash
+source ~/.venv/bin/activate     # west, pytest, node on PATH
+tools/test.sh                   # full run
+SKIP_BUILD=1 tools/test.sh      # skip the slow firmware builds
+```
+
+Steps (exits non-zero on the first hard failure):
+
+1. **Firmware builds** — release + debug (`west build -p always -b sticker .`).
+2. **Decoder tests** — `node --test` in `app/decoder/` (the LoRaWAN codec).
+3. **configen tests** — `pytest scripts/west_commands/tests` (generator + proto round-trip).
+4. **clang-format** — `--dry-run` over `app/src/*.{c,h}`, **advisory** (the repo has
+   pre-existing hand-written sources that aren't format-clean; reported, not failing).
+5. **configen in sync** — regenerate from `app_config.yml` and fail if the committed
+   `app_config.{c,h,proto,options.in}` would change.
+
+The CI `test` job (`.github/workflows/build.yml`) runs steps 2–3 (no Zephyr toolchain);
+this script is the fuller local superset that also builds and checks generated-file sync.
+
+Install the Python test deps once: `pip install -r scripts/west_commands/requirements-dev.txt`.
