@@ -116,8 +116,10 @@ function histRec(tempC, humPct) {
   return [t & 0xff, (t >> 8) & 0xff, Math.round(humPct * 2)]; // int16 LE temp, u8 hum
 }
 function buildHistoryFrame(seq, idx, count, t0, present, interval, samples) {
-  const hf = []
-    .concat(pbTV(1, idx)).concat(pbTV(2, count)).concat(pbTV(3, t0))
+  // proto3 omits a zero field — mirror that for frame_index so the decoder's
+  // default-to-0 is exercised (the firmware sends frame 0 with no field 1).
+  let hf = idx ? pbTV(1, idx) : [];
+  hf = hf.concat(pbTV(2, count)).concat(pbTV(3, t0))
     .concat(pbLD(4, samples)).concat(pbTV(5, present)).concat(pbTV(6, interval));
   return [].concat(pbTV(1, seq)).concat(pbLD(5, hf)); // Response.history_frame = field 5
 }

@@ -282,7 +282,9 @@ function _decodeHistorySamples(bytes, t0, present, interval) {
 }
 
 function _decodeHistoryFrame(bytes, start, end) {
-  var hf = { records: [] };
+  // frame_index/frame_count default to 0 — proto3 omits a zero frame_index, so
+  // frame 0 of a replay carries no field 1; the consumer still needs index 0.
+  var hf = { frame_index: 0, frame_count: 0, records: [] };
   var t0 = 0, present = 0, interval = 0;
   var samples = null;
   var pos = start;
