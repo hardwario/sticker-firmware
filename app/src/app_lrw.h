@@ -25,23 +25,23 @@ enum app_lrw_state {
 
 struct app_lrw_info {
 	enum app_lrw_state state;
-	uint32_t dev_addr;             /* Device address (from OTAA or ABP) */
-	uint32_t fcnt_up;              /* Uplink frame counter */
+	uint32_t dev_addr; /* Device address (from OTAA or ABP) */
+	uint32_t fcnt_up;  /* Uplink frame counter */
 	int datarate;
 	int16_t rssi;
 	int8_t snr;
 	uint8_t margin;
 	uint8_t gw_count;
 	/* State machine counters */
-	int consecutive_lc_fail;       /* LC failures in a row (HEALTHY) */
-	int consecutive_lc_ok;         /* LC successes in a row (WARNING) */
-	int warning_lc_fail_total;     /* Total LC failures in WARNING */
-	int message_count;             /* Messages sent since boot/rejoin */
+	int consecutive_lc_fail;   /* LC failures in a row (HEALTHY) */
+	int consecutive_lc_ok;     /* LC successes in a row (WARNING) */
+	int warning_lc_fail_total; /* Total LC failures in WARNING */
+	int message_count;         /* Messages sent since boot/rejoin */
 	/* Thresholds for display */
-	int thresh_warning;            /* FAIL_THRESHOLD_WARNING */
-	int thresh_healthy;            /* OK_THRESHOLD_HEALTHY */
-	int thresh_reconnect;          /* FAIL_THRESHOLD_RECONNECT */
-	int link_check_interval;       /* Every N-th message has LC */
+	int thresh_warning;      /* FAIL_THRESHOLD_WARNING */
+	int thresh_healthy;      /* OK_THRESHOLD_HEALTHY */
+	int thresh_reconnect;    /* FAIL_THRESHOLD_RECONNECT */
+	int link_check_interval; /* Every N-th message has LC */
 };
 
 int app_lrw_init(void);

@@ -73,8 +73,7 @@ static void fill_info(Response_Info *info)
 #endif
 }
 
-static void make_error(Response *resp, Response_Error_Code code,
-		       const char *detail)
+static void make_error(Response *resp, Response_Error_Code code, const char *detail)
 {
 	resp->which_body = Response_error_tag;
 	resp->body.error.code = code;
@@ -144,14 +143,62 @@ static const struct {
 	uint8_t size;
 } DUMP_FIELDS[] = {
 	/* Lorawan (non-secret): varints 2 B, deveui/joineui 18 B, devaddr 10 B */
-	LRW(1, 2), LRW(2, 2), LRW(3, 2), LRW(4, 2), LRW(5, 18), LRW(6, 18), LRW(9, 10), LRW(12, 2),
+	LRW(1, 2),
+	LRW(2, 2),
+	LRW(3, 2),
+	LRW(4, 2),
+	LRW(5, 18),
+	LRW(6, 18),
+	LRW(9, 10),
+	LRW(12, 2),
 	/* Application (tag 3 interval_aggreg has no config field — skipped, like
 	 * fill_application). Floats 5 B, everything else 2 B. */
-	APP2(1), APP2(2), APP2(4), APP2(5), APP5(6), APP5(7), APP5(8), APP2(9), APP5(10), APP5(11),
-	APP5(12), APP2(13), APP5(14), APP5(15), APP5(16), APP2(17), APP5(18), APP5(19), APP5(20),
-	APP2(21), APP5(22), APP5(23), APP5(24), APP2(25), APP2(26), APP2(27), APP2(28), APP2(29),
-	APP2(30), APP2(31), APP2(32), APP2(33), APP2(34), APP2(35), APP2(36), APP5(37), APP5(38),
-	APP5(39), APP2(40), APP2(41), APP2(42), APP2(43), APP2(44), APP2(45), APP2(46), APP2(47),
+	APP2(1),
+	APP2(2),
+	APP2(4),
+	APP2(5),
+	APP5(6),
+	APP5(7),
+	APP5(8),
+	APP2(9),
+	APP5(10),
+	APP5(11),
+	APP5(12),
+	APP2(13),
+	APP5(14),
+	APP5(15),
+	APP5(16),
+	APP2(17),
+	APP5(18),
+	APP5(19),
+	APP5(20),
+	APP2(21),
+	APP5(22),
+	APP5(23),
+	APP5(24),
+	APP2(25),
+	APP2(26),
+	APP2(27),
+	APP2(28),
+	APP2(29),
+	APP2(30),
+	APP2(31),
+	APP2(32),
+	APP2(33),
+	APP2(34),
+	APP2(35),
+	APP2(36),
+	APP5(37),
+	APP5(38),
+	APP5(39),
+	APP2(40),
+	APP2(41),
+	APP2(42),
+	APP2(43),
+	APP2(44),
+	APP2(45),
+	APP2(46),
+	APP2(47),
 	APP2(48),
 };
 
@@ -248,8 +295,8 @@ static void handle_req_history(enum app_cmd_transport transport, const Command *
 #endif
 }
 
-static void dispatch(enum app_cmd_transport transport, const Command *cmd,
-		     Response *resp, enum app_cmd_action *action)
+static void dispatch(enum app_cmd_transport transport, const Command *cmd, Response *resp,
+		     enum app_cmd_action *action)
 {
 	ARG_UNUSED(transport);
 
@@ -317,8 +364,8 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd,
 	}
 }
 
-int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len,
-		   uint8_t *out, size_t out_cap, size_t *out_len, enum app_cmd_action *action)
+int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len, uint8_t *out,
+		   size_t out_cap, size_t *out_len, enum app_cmd_action *action)
 {
 	if (!in || !out || !out_len) {
 		return -EINVAL;
@@ -334,8 +381,7 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	if (!pb_decode(&istream, Command_fields, &cmd)) {
 		LOG_ERR_CALL_FAILED_STR("pb_decode", PB_GET_ERROR(&istream));
 		resp.seq = 0;
-		make_error(&resp, Response_Error_Code_BAD_REQUEST,
-			   PB_GET_ERROR(&istream));
+		make_error(&resp, Response_Error_Code_BAD_REQUEST, PB_GET_ERROR(&istream));
 	} else {
 		dispatch(transport, &cmd, &resp, &act);
 	}

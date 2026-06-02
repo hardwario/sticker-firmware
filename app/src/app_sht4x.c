@@ -122,8 +122,7 @@ int app_sht4x_read_serial(uint32_t *serial_number)
 		return ret;
 	}
 
-	if (sht_crc8(&data[0], 2) != data[2] ||
-	    sht_crc8(&data[3], 2) != data[5]) {
+	if (sht_crc8(&data[0], 2) != data[2] || sht_crc8(&data[3], 2) != data[5]) {
 		LOG_ERR("CRC mismatch");
 		return -EIO;
 	}

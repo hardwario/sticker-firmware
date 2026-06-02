@@ -45,10 +45,8 @@ enum app_cmd_action {
  * transmitting the response (reboot/save/factory-reset). APP_CMD_ACTION_NONE
  * otherwise.
  */
-int app_cmd_handle(enum app_cmd_transport transport,
-		   const uint8_t *in, size_t in_len,
-		   uint8_t *out, size_t out_cap, size_t *out_len,
-		   enum app_cmd_action *action);
+int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len, uint8_t *out,
+		   size_t out_cap, size_t *out_len, enum app_cmd_action *action);
 
 /* Build an unsolicited device Info frame (Response{ seq=0, info=... },
  * the same payload a GetInfo command returns) into `out`. Used to send an
