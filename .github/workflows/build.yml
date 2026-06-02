@@ -126,6 +126,17 @@ jobs:
         working-directory: app/decoder
         run: node --test
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install configen test deps
+        run: pip install -r scripts/west_commands/requirements-dev.txt
+
+      - name: configen + proto tests
+        run: pytest scripts/west_commands/tests
+
   release:
     name: Create release
     if: startsWith(github.ref, 'refs/tags/v')
