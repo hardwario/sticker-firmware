@@ -111,10 +111,17 @@ def test_allocator_appends_next_free():
     rt_new["type"] = "bool"
     rt_doc["parameters"].append(rt_new)
 
+    # Expected id = next free in the application group (1 + current max),
+    # computed from the YAML so this doesn't break when fields are added.
+    app_ids = [p["proto_id"] for p in cfg["parameters"]
+               if p.get("proto_group") == "application" and "proto_id" in p
+               and p["name"] != "telemetry_split"]
+    expected = max(app_ids) + 1
+
     assigned = configen.allocate_proto_ids(cfg, rt_doc)
-    assert ("telemetry_split", 51) in assigned  # max(application)=50 -> 51
+    assert ("telemetry_split", expected) in assigned
     got = next(p for p in cfg["parameters"] if p["name"] == "telemetry_split")
-    assert got["proto_id"] == 51
+    assert got["proto_id"] == expected
 
 
 def test_guard_rejects_renumbering():
