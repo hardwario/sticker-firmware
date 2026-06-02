@@ -45,7 +45,10 @@ message(STATUS "Firmware version: ${APP_VERSION_MAJOR}.${APP_VERSION_MINOR}.${AP
 list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
 include(nanopb)
 
-zephyr_nanopb_sources(app src/nfc_config.proto)
+# Note: nanopb generates src/app_config.pb.{c,h} here; west configen generates
+# src/app_config.{c,h} (struct/Settings/shell) from app_config.yml. Different
+# extensions, same stem — no clash.
+zephyr_nanopb_sources(app src/app_config.proto)
 
 target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
@@ -75,7 +78,7 @@ target_sources(app PRIVATE src/app_input.c)
 target_sources(app PRIVATE src/app_led.c)
 target_sources(app PRIVATE src/app_mpl3115a2.c)
 target_sources(app PRIVATE src/app_ndef_parser.c)
-target_sources(app PRIVATE src/app_nfc_ingest.c)
+target_sources(app PRIVATE src/app_config_ingest.c)
 target_sources(app PRIVATE src/app_nfc.c)
 target_sources(app PRIVATE src/app_pyq1648.c)
 target_sources(app PRIVATE src/app_sensor.c)

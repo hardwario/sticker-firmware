@@ -13,7 +13,7 @@
 
 /* Nanopb includes */
 #include <pb_encode.h>
-#include "src/nfc_config.pb.h"
+#include "src/app_config.pb.h"
 
 /* Zephyr includes */
 #include <zephyr/kernel.h>

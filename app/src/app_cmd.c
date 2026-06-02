@@ -10,7 +10,7 @@
 #include "app_input.h"
 #include "app_log.h"
 #include "app_lrw.h"
-#include "app_nfc_ingest.h"
+#include "app_config_ingest.h"
 
 /* Wall-clock source (PR #41, branch lrw-rtc-time). Until that lands on this
  * branch, app_clock.h is absent and Info.unix_time stays 0 (omitted by proto3).
@@ -30,7 +30,7 @@
 /* Nanopb includes */
 #include <pb_decode.h>
 #include <pb_encode.h>
-#include "src/nfc_config.pb.h"
+#include "src/app_config.pb.h"
 
 /* Zephyr includes */
 #include <zephyr/kernel.h>
@@ -55,12 +55,12 @@ LOG_MODULE_REGISTER(app_cmd, LOG_LEVEL_DBG);
 #define APP_BUILD_TYPE    2
 #endif
 
-static void fill_info(DownlinkResponse_Info *info)
+static void fill_info(Response_Info *info)
 {
 	info->fw_major = APP_VERSION_MAJOR;
 	info->fw_minor = APP_VERSION_MINOR;
 	info->fw_patch = APP_VERSION_PATCH;
-	info->build_type = (DownlinkResponse_Info_BuildType)APP_BUILD_TYPE;
+	info->build_type = (Response_Info_BuildType)APP_BUILD_TYPE;
 	info->serial_number = g_app_config.serial_number;
 	info->uptime_s = (uint32_t)(k_uptime_get() / 1000);
 	info->debug = IS_ENABLED(CONFIG_FW_DEBUG);
@@ -73,10 +73,10 @@ static void fill_info(DownlinkResponse_Info *info)
 #endif
 }
 
-static void make_error(DownlinkResponse *resp, DownlinkResponse_Error_Code code,
+static void make_error(Response *resp, Response_Error_Code code,
 		       const char *detail)
 {
-	resp->which_body = DownlinkResponse_error_tag;
+	resp->which_body = Response_error_tag;
 	resp->body.error.code = code;
 	resp->body.error.fault_field = 0;
 
@@ -88,7 +88,7 @@ static void make_error(DownlinkResponse *resp, DownlinkResponse_Error_Code code,
 	}
 }
 
-static void handle_set_param(const DownlinkCommand_SetParam *sp, DownlinkResponse *resp)
+static void handle_set_param(const Command_SetParam *sp, Response *resp)
 {
 	uint32_t fault = 0;
 	int rc = 0;
@@ -101,16 +101,16 @@ static void handle_set_param(const DownlinkCommand_SetParam *sp, DownlinkRespons
 	}
 
 	if (rc) {
-		make_error(resp, DownlinkResponse_Error_Code_OUT_OF_RANGE, "invalid value");
+		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid value");
 		resp->body.error.fault_field = fault;
 	} else {
-		resp->which_body = DownlinkResponse_ack_tag;
+		resp->which_body = Response_ack_tag;
 	}
 }
 
-static void handle_get_param(const DownlinkCommand_GetParam *gp, DownlinkResponse *resp)
+static void handle_get_param(const Command_GetParam *gp, Response *resp)
 {
-	resp->which_body = DownlinkResponse_config_dump_tag;
+	resp->which_body = Response_config_dump_tag;
 	resp->body.config_dump.page_index = 0;
 	resp->body.config_dump.page_count = 1;
 
@@ -156,14 +156,14 @@ static const struct {
 };
 
 /* Per-page byte budget for the field payload inside one ConfigDump. The encoded
- * DownlinkResponse adds ~14 B of fixed overhead around these fields (seq +
+ * Response adds ~14 B of fixed overhead around these fields (seq +
  * config_dump wrapper + page_index + page_count + the two submessage wrappers),
  * so the on-air frame is roughly budget + 14. DR0 MTU is 51 B; 30 keeps the
  * worst-case frame near 44 B with margin. Conservative — a page can never
  * overflow (the largest single field is 18 B). */
 #define DUMP_PAGE_BUDGET 30
 
-static void handle_get_config(const DownlinkCommand_GetConfig *gc, DownlinkResponse *resp)
+static void handle_get_config(const Command_GetConfig *gc, Response *resp)
 {
 	uint32_t page = gc->has_page ? gc->page : 0;
 
@@ -192,12 +192,12 @@ static void handle_get_config(const DownlinkCommand_GetConfig *gc, DownlinkRespo
 	uint32_t page_count = cur_page + 1;
 
 	if (page >= page_count) {
-		make_error(resp, DownlinkResponse_Error_Code_OUT_OF_RANGE, "page");
+		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "page");
 		resp->body.error.fault_field = 1;
 		return;
 	}
 
-	resp->which_body = DownlinkResponse_config_dump_tag;
+	resp->which_body = Response_config_dump_tag;
 	resp->body.config_dump.page_index = page;
 	resp->body.config_dump.page_count = page_count;
 
@@ -211,15 +211,15 @@ static void handle_get_config(const DownlinkCommand_GetConfig *gc, DownlinkRespo
 	}
 }
 
-static void handle_reset_counters(const DownlinkCommand_ResetCounters *rc, DownlinkResponse *resp)
+static void handle_reset_counters(const Command_ResetCounters *rc, Response *resp)
 {
 	app_hall_reset_count(rc->has_hall_left && rc->hall_left,
 			     rc->has_hall_right && rc->hall_right);
 	app_input_reset_count(rc->has_input_a && rc->input_a, rc->has_input_b && rc->input_b);
-	resp->which_body = DownlinkResponse_ack_tag;
+	resp->which_body = Response_ack_tag;
 }
 
-static void handle_req_history(const DownlinkCommand_ReqHistory *rq, DownlinkResponse *resp)
+static void handle_req_history(const Command_ReqHistory *rq, Response *resp)
 {
 #ifdef APP_CMD_HAVE_HISTORY
 	uint32_t from = rq->has_from_unix ? rq->from_unix : 0;
@@ -228,11 +228,11 @@ static void handle_req_history(const DownlinkCommand_ReqHistory *rq, DownlinkRes
 	uint16_t n_written = 0;
 	uint16_t total = 0;
 
-	DownlinkResponse_HistoryFrame *hf = &resp->body.history_frame;
+	Response_HistoryFrame *hf = &resp->body.history_frame;
 	size_t len = app_history_export(from, to, hf->samples.bytes, sizeof(hf->samples.bytes),
 					&t0, &n_written, &total);
 
-	resp->which_body = DownlinkResponse_history_frame_tag;
+	resp->which_body = Response_history_frame_tag;
 	hf->frame_index = 0;          /* this page starts at `from` */
 	hf->frame_count = total;      /* total records in the window; host pages by
 				       * narrowing from_unix to last returned time + 1 */
@@ -240,75 +240,75 @@ static void handle_req_history(const DownlinkCommand_ReqHistory *rq, DownlinkRes
 	hf->samples.size = len;
 #else
 	ARG_UNUSED(rq);
-	make_error(resp, DownlinkResponse_Error_Code_HISTORY_UNAVAILABLE, "no history");
+	make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no history");
 #endif
 }
 
-static void dispatch(enum app_cmd_transport transport, const DownlinkCommand *cmd,
-		     DownlinkResponse *resp, enum app_cmd_action *action)
+static void dispatch(enum app_cmd_transport transport, const Command *cmd,
+		     Response *resp, enum app_cmd_action *action)
 {
 	ARG_UNUSED(transport);
 
 	resp->seq = cmd->seq;
 
 	switch (cmd->which_body) {
-	case DownlinkCommand_get_info_tag:
-		resp->which_body = DownlinkResponse_info_tag;
+	case Command_get_info_tag:
+		resp->which_body = Response_info_tag;
 		fill_info(&resp->body.info);
 		break;
 
-	case DownlinkCommand_set_param_tag:
+	case Command_set_param_tag:
 		handle_set_param(&cmd->body.set_param, resp);
 		break;
 
-	case DownlinkCommand_get_param_tag:
+	case Command_get_param_tag:
 		handle_get_param(&cmd->body.get_param, resp);
 		break;
 
-	case DownlinkCommand_get_config_tag:
+	case Command_get_config_tag:
 		handle_get_config(&cmd->body.get_config, resp);
 		break;
 
-	case DownlinkCommand_settings_save_tag:
-		resp->which_body = DownlinkResponse_ack_tag;
+	case Command_settings_save_tag:
+		resp->which_body = Response_ack_tag;
 		*action = APP_CMD_ACTION_SETTINGS_SAVE;
 		break;
 
-	case DownlinkCommand_reboot_tag:
-		resp->which_body = DownlinkResponse_ack_tag;
+	case Command_reboot_tag:
+		resp->which_body = Response_ack_tag;
 		*action = APP_CMD_ACTION_REBOOT;
 		break;
 
-	case DownlinkCommand_factory_reset_tag:
-		resp->which_body = DownlinkResponse_ack_tag;
+	case Command_factory_reset_tag:
+		resp->which_body = Response_ack_tag;
 		*action = APP_CMD_ACTION_FACTORY_RESET;
 		break;
 
-	case DownlinkCommand_force_send_tag:
+	case Command_force_send_tag:
 #if defined(CONFIG_LORAWAN)
 		app_lrw_send();
 #endif
-		resp->which_body = DownlinkResponse_ack_tag;
+		resp->which_body = Response_ack_tag;
 		break;
 
-	case DownlinkCommand_reset_counters_tag:
+	case Command_reset_counters_tag:
 		handle_reset_counters(&cmd->body.reset_counters, resp);
 		break;
 
-	case DownlinkCommand_clock_sync_tag:
+	case Command_clock_sync_tag:
 #ifdef APP_CMD_HAVE_CLOCK
 		app_clock_force_resync();
 #endif
-		resp->which_body = DownlinkResponse_ack_tag;
+		resp->which_body = Response_ack_tag;
 		break;
 
-	case DownlinkCommand_req_history_tag:
+	case Command_req_history_tag:
 		handle_req_history(&cmd->body.req_history, resp);
 		break;
 
 	default:
 		LOG_WRN("Command tag %u not implemented", cmd->which_body);
-		make_error(resp, DownlinkResponse_Error_Code_UNKNOWN, "not implemented");
+		make_error(resp, Response_Error_Code_UNKNOWN, "not implemented");
 		break;
 	}
 }
@@ -323,21 +323,21 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	*out_len = 0;
 	enum app_cmd_action act = APP_CMD_ACTION_NONE;
 
-	DownlinkCommand cmd = DownlinkCommand_init_zero;
-	DownlinkResponse resp = DownlinkResponse_init_zero;
+	Command cmd = Command_init_zero;
+	Response resp = Response_init_zero;
 
 	pb_istream_t istream = pb_istream_from_buffer(in, in_len);
-	if (!pb_decode(&istream, DownlinkCommand_fields, &cmd)) {
+	if (!pb_decode(&istream, Command_fields, &cmd)) {
 		LOG_ERR_CALL_FAILED_STR("pb_decode", PB_GET_ERROR(&istream));
 		resp.seq = 0;
-		make_error(&resp, DownlinkResponse_Error_Code_BAD_REQUEST,
+		make_error(&resp, Response_Error_Code_BAD_REQUEST,
 			   PB_GET_ERROR(&istream));
 	} else {
 		dispatch(transport, &cmd, &resp, &act);
 	}
 
 	pb_ostream_t ostream = pb_ostream_from_buffer(out, out_cap);
-	if (!pb_encode(&ostream, DownlinkResponse_fields, &resp)) {
+	if (!pb_encode(&ostream, Response_fields, &resp)) {
 		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
 		return -EMSGSIZE;
 	}
@@ -355,13 +355,13 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
 		return -EINVAL;
 	}
 
-	DownlinkResponse resp = DownlinkResponse_init_zero;
+	Response resp = Response_init_zero;
 	resp.seq = 0;
-	resp.which_body = DownlinkResponse_info_tag;
+	resp.which_body = Response_info_tag;
 	fill_info(&resp.body.info);
 
 	pb_ostream_t ostream = pb_ostream_from_buffer(out, out_cap);
-	if (!pb_encode(&ostream, DownlinkResponse_fields, &resp)) {
+	if (!pb_encode(&ostream, Response_fields, &resp)) {
 		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
 		return -EMSGSIZE;
 	}

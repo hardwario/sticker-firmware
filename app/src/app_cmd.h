@@ -30,8 +30,8 @@ enum app_cmd_action {
 	APP_CMD_ACTION_FACTORY_RESET, /* erase NVS + reboot */
 };
 
-/* Decode a serialized DownlinkCommand from `in`, dispatch it, encode the
- * resulting DownlinkResponse into `out`.
+/* Decode a serialized Command from `in`, dispatch it, encode the
+ * resulting Response into `out`.
  *
  * Returns 0 on success with *out_len set to the encoded length. Returns a
  * negative errno only on encode failure (the caller's buffer is too small or
@@ -39,7 +39,7 @@ enum app_cmd_action {
  * produce an Error{...} response — that is not a function-level failure.
  *
  * On decode failure the function still returns 0 and encodes a
- * DownlinkResponse{ seq=0, error={ code=BAD_REQUEST } } into out.
+ * Response{ seq=0, error={ code=BAD_REQUEST } } into out.
  *
  * *action (if non-NULL) is set to a deferred action the caller must run after
  * transmitting the response (reboot/save/factory-reset). APP_CMD_ACTION_NONE
@@ -50,7 +50,7 @@ int app_cmd_handle(enum app_cmd_transport transport,
 		   uint8_t *out, size_t out_cap, size_t *out_len,
 		   enum app_cmd_action *action);
 
-/* Build an unsolicited device Info frame (DownlinkResponse{ seq=0, info=... },
+/* Build an unsolicited device Info frame (Response{ seq=0, info=... },
  * the same payload a GetInfo command returns) into `out`. Used to send an
  * autonomous GetInfo uplink on join. Returns 0 with *out_len set, -EINVAL on a
  * NULL argument, or -EMSGSIZE if `out_cap` is too small. */

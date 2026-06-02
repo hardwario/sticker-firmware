@@ -1,0 +1,15 @@
+AppConfigMessage.Lorawan.deveui max_length:16
+AppConfigMessage.Lorawan.joineui max_length:16
+AppConfigMessage.Lorawan.nwkkey max_length:32
+AppConfigMessage.Lorawan.appkey max_length:32
+AppConfigMessage.Lorawan.devaddr max_length:8
+AppConfigMessage.Lorawan.nwkskey max_length:32
+AppConfigMessage.Lorawan.appskey max_length:32
+
+Response.Error.detail       max_size:32
+Response.HistoryFrame.samples max_size:48
+
+# GetParam field-id lists as static arrays (no nanopb callback). A batch is
+# bounded by the LoRaWAN downlink size anyway, so 16 ids each is plenty.
+Command.GetParam.lorawan_field     max_count:16
+Command.GetParam.application_field max_count:16
