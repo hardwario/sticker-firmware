@@ -220,6 +220,11 @@ int app_config_apply_application(const AppConfigMessage_Application *src, uint32
 	APPLY_BOOL(cap_1w_thermometer);
 	APPLY_BOOL(cap_1w_machine_probe);
 
+	APPLY_BOOL(history_enable);
+	if (src->has_history_sensors) {
+		config->history_sensors = src->history_sensors;
+	}
+
 	/* Cross-validate alarm lo/hi pairs — disable the alarm if lo >= hi */
 	if (config->alarm_temperature_lo >= config->alarm_temperature_hi) {
 		config->alarm_temperature_enabled = false;
@@ -351,6 +356,8 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	FILL_BOOL(46, cap_pir_detector);
 	FILL_BOOL(47, cap_1w_thermometer);
 	FILL_BOOL(48, cap_1w_machine_probe);
+	FILL_BOOL(49, history_enable);
+	FILL_NUM(50, history_sensors);
 }
 
 bool app_config_ingest(const AppConfigMessage *message)
