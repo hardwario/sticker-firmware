@@ -54,6 +54,16 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
  * NULL argument, or -EMSGSIZE if `out_cap` is too small. */
 int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len);
 
+/* Build one history-replay frame (Response{ seq, history_frame={...} }) into
+ * `out`. `samples` holds values-only records (the shared `present` mask +
+ * `interval_s` describe their layout/timing). Used by the app_lrw replay state
+ * machine to stream a ReqHistory window as N frames. Returns 0 with *out_len
+ * set, -EINVAL on a NULL/oversized argument, or -EMSGSIZE if it won't encode. */
+int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
+				uint32_t t0_unix, uint32_t present, uint32_t interval_s,
+				const uint8_t *samples, size_t samples_len, uint8_t *out,
+				size_t out_cap, size_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif

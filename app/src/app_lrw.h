@@ -64,6 +64,13 @@ uint8_t app_lrw_get_max_payload(void);
  * a warning if a prior response hasn't been transmitted yet. */
 int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len);
 
+/* Start a device-driven history replay (issue #52): stream every stored record
+ * in [from_unix, to_unix] back as N HistoryFrame uplinks on the command port,
+ * back-to-back ASAP (duty-cycle permitting), echoing `seq`. Returns true when a
+ * replay was armed (the first frame is the reply, so the caller should NOT also
+ * send an Ack), false if the link isn't ready or the window is empty. */
+bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
+
 /* Erase the persisted LoRaWAN NVM context (frame counters, DevNonce, session).
  * Used when re-provisioning credentials so a new ABP/OTAA identity starts from
  * a clean state. The caller must reboot afterwards for the MAC to re-init from

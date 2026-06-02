@@ -82,17 +82,26 @@ void app_history_set_enabled(bool enable);
 uint16_t app_history_get_mask(void);
 void app_history_set_mask(uint16_t mask);
 
-/* Serialize stored records in the window [from_unix, to_unix] into `buf` for a
- * LoRaWAN replay (ReqHistory -> HistoryFrame). Records are written oldest-first,
- * as many as fit in `cap`, each: delta_s (uint16 LE, from *t0_out) + present
- * (uint16 LE) + per present sensor a scaled value (int16 LE x100 temp / uint8 x2
- * humidity / uint32 LE counter), in enum order. When the buffer has no absolute
- * time yet (RTC not synced) the window filter is ignored. Returns bytes written;
- * *t0_out = first record's timestamp, *n_written = records packed, *total = total
- * records matching the window (so the host knows how many pages remain).
- * For the next page the host narrows from_unix to the last returned time + 1. */
-size_t app_history_export(uint32_t from_unix, uint32_t to_unix, uint8_t *buf, size_t cap,
-			  uint32_t *t0_out, uint16_t *n_written, uint16_t *total);
+/* interval_report (s) the buffer is currently recorded at; records are periodic
+ * so a wire frame carries this once and per-record time = t0 + ord*interval. */
+uint32_t app_history_get_interval(void);
+
+/* Pack one page of stored records into `buf` for a LoRaWAN replay (ReqHistory ->
+ * HistoryFrame), starting at ordinal `start_ord` (0 = oldest), oldest-first, as
+ * many whole records as fit in `cap`. Each record is the raw stored bytes (values
+ * only, fixed size = the sample size, sentinels mark absent values); the shared
+ * present mask + interval travel in the frame header, not per record. Records in
+ * [from_unix, to_unix] only (filter skipped until the clock is synced). Returns
+ * bytes written; *t0_out = first packed record's absolute time, *n_written =
+ * records packed, *next_ord = next ordinal to pass for the following page
+ * (== app_history_count() when the scan is exhausted). */
+size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
+			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord);
+
+/* Number of frames the [from_unix, to_unix] window needs at `cap` bytes/frame
+ * (whole records per frame). Mirrors export_page's packing so the replay can
+ * announce frame_count up front. */
+uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t cap);
 
 /* Descriptor helpers for the shell. */
 const char *app_history_sensor_name(enum app_history_sensor s);

@@ -266,27 +266,30 @@ static void handle_reset_counters(const Command_ResetCounters *rc, Response *res
 	resp->which_body = Response_ack_tag;
 }
 
-static void handle_req_history(const Command_ReqHistory *rq, Response *resp)
+static void handle_req_history(enum app_cmd_transport transport, const Command *cmd, Response *resp)
 {
-#ifdef APP_CMD_HAVE_HISTORY
+#if defined(APP_CMD_HAVE_HISTORY) && defined(CONFIG_LORAWAN)
+	if (transport != APP_CMD_TRANSPORT_LRW) {
+		/* Replay is inherently a stream of LoRaWAN uplinks. */
+		make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
+		return;
+	}
+
+	const Command_ReqHistory *rq = &cmd->body.req_history;
 	uint32_t from = rq->has_from_unix ? rq->from_unix : 0;
 	uint32_t to = rq->has_to_unix ? rq->to_unix : UINT32_MAX;
-	uint32_t t0 = 0;
-	uint16_t n_written = 0;
-	uint16_t total = 0;
 
-	Response_HistoryFrame *hf = &resp->body.history_frame;
-	size_t len = app_history_export(from, to, hf->samples.bytes, sizeof(hf->samples.bytes), &t0,
-					&n_written, &total);
-
-	resp->which_body = Response_history_frame_tag;
-	hf->frame_index = 0;     /* this page starts at `from` */
-	hf->frame_count = total; /* total records in the window; host pages by
-				  * narrowing from_unix to last returned time + 1 */
-	hf->t0_unix = t0;
-	hf->samples.size = len;
+	/* Device-driven replay: the device streams all matching records back as N
+	 * HistoryFrame uplinks on port 85. The first frame is the reply, so leave
+	 * the response body unset (which_body stays 0) to suppress a redundant Ack
+	 * uplink. Only when nothing replays (empty window / DR too low) do we send
+	 * an Error so the host still gets a definitive answer. */
+	if (!app_lrw_start_history_replay(from, to, cmd->seq)) {
+		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no records");
+	}
 #else
-	ARG_UNUSED(rq);
+	ARG_UNUSED(transport);
+	ARG_UNUSED(cmd);
 	make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no history");
 #endif
 }
@@ -350,7 +353,7 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 		break;
 
 	case Command_req_history_tag:
-		handle_req_history(&cmd->body.req_history, resp);
+		handle_req_history(transport, cmd, resp);
 		break;
 
 	default:
@@ -380,6 +383,17 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		make_error(&resp, Response_Error_Code_BAD_REQUEST, PB_GET_ERROR(&istream));
 	} else {
 		dispatch(transport, &cmd, &resp, &act);
+	}
+
+	/* A handler may opt out of an immediate response by leaving the oneof unset
+	 * (which_body == 0) — e.g. ReqHistory, whose HistoryFrame stream is the
+	 * reply. Emit nothing so no redundant uplink is queued. */
+	if (resp.which_body == 0) {
+		*out_len = 0;
+		if (action) {
+			*action = act;
+		}
+		return 0;
 	}
 
 	pb_ostream_t ostream = pb_ostream_from_buffer(out, out_cap);
@@ -415,3 +429,40 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
 	*out_len = ostream.bytes_written;
 	return 0;
 }
+
+#if defined(APP_CMD_HAVE_HISTORY)
+int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
+				uint32_t t0_unix, uint32_t present, uint32_t interval_s,
+				const uint8_t *samples, size_t samples_len, uint8_t *out,
+				size_t out_cap, size_t *out_len)
+{
+	Response resp = Response_init_zero;
+
+	if (!out || !out_len || (samples_len > 0 && !samples)) {
+		return -EINVAL;
+	}
+	if (samples_len > sizeof(resp.body.history_frame.samples.bytes)) {
+		return -EMSGSIZE;
+	}
+
+	resp.seq = seq;
+	resp.which_body = Response_history_frame_tag;
+	Response_HistoryFrame *hf = &resp.body.history_frame;
+	hf->frame_index = frame_index;
+	hf->frame_count = frame_count;
+	hf->t0_unix = t0_unix;
+	hf->present = present;
+	hf->interval_s = interval_s;
+	memcpy(hf->samples.bytes, samples, samples_len);
+	hf->samples.size = samples_len;
+
+	pb_ostream_t ostream = pb_ostream_from_buffer(out, out_cap);
+	if (!pb_encode(&ostream, Response_fields, &resp)) {
+		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
+		return -EMSGSIZE;
+	}
+
+	*out_len = ostream.bytes_written;
+	return 0;
+}
+#endif /* APP_CMD_HAVE_HISTORY */

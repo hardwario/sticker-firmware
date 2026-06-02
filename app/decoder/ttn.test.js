@@ -99,6 +99,71 @@ test("decodeUplink routes fPort 2 to the telemetry decoder", () => {
   assert.equal(typeof got.data, "object");
 });
 
+// --- Uplink: history replay frames (fPort 85, device-driven multi-frame) ---
+// HistoryFrame carries a shared present mask + interval_s; samples are fixed-size
+// values-only records, time(j) = t0 + j*interval. Build frames with a tiny pb
+// encoder so the vectors are self-describing.
+function pbVarint(v) {
+  const o = [];
+  while (v > 127) { o.push((v & 0x7f) | 0x80); v = Math.floor(v / 128); }
+  o.push(v);
+  return o;
+}
+function pbTV(tag, varint) { return [(tag << 3) | 0].concat(pbVarint(varint)); }
+function pbLD(tag, payload) { return [(tag << 3) | 2, payload.length].concat(payload); }
+function histRec(tempC, humPct) {
+  const t = Math.round(tempC * 100);
+  return [t & 0xff, (t >> 8) & 0xff, Math.round(humPct * 2)]; // int16 LE temp, u8 hum
+}
+function buildHistoryFrame(seq, idx, count, t0, present, interval, samples) {
+  // proto3 omits a zero field — mirror that for frame_index so the decoder's
+  // default-to-0 is exercised (the firmware sends frame 0 with no field 1).
+  let hf = idx ? pbTV(1, idx) : [];
+  hf = hf.concat(pbTV(2, count)).concat(pbTV(3, t0))
+    .concat(pbLD(4, samples)).concat(pbTV(5, present)).concat(pbTV(6, interval));
+  return [].concat(pbTV(1, seq)).concat(pbLD(5, hf)); // Response.history_frame = field 5
+}
+
+test("decodeUplink decodes + reassembles multi-frame history (fPort 85)", () => {
+  const present = 0x03; // temperature (bit0) + humidity (bit1)
+  const interval = 900;
+  const t0a = 1780000000;
+  const f0 = buildHistoryFrame(10, 0, 2, t0a, present, interval,
+    [].concat(histRec(21.5, 45)).concat(histRec(21.6, 46)));
+  const t0b = t0a + 2 * interval;
+  const f1 = buildHistoryFrame(10, 1, 2, t0b, present, interval, histRec(21.7, 47));
+
+  const d0 = codec.decodeUplink({ bytes: f0, fPort: 85 }).data;
+  const d1 = codec.decodeUplink({ bytes: f1, fPort: 85 }).data;
+
+  assert.equal(d0.seq, 10);
+  assert.equal(d0.history_frame.frame_index, 0);
+  assert.equal(d0.history_frame.frame_count, 2);
+  assert.equal(d0.history_frame.present, present);
+  assert.equal(d0.history_frame.interval_s, interval);
+  assert.equal(d0.history_frame.records.length, 2);
+  assert.equal(d0.history_frame.records[0].temperature, 21.5);
+  assert.equal(d0.history_frame.records[0].humidity, 45);
+  assert.equal(d0.history_frame.records[0].time, t0a);
+  assert.equal(d0.history_frame.records[1].time, t0a + interval); // implicit delta
+  assert.equal(d1.history_frame.frame_index, 1);
+  assert.equal(d1.history_frame.records[0].time, t0b);
+  assert.equal(d1.history_frame.records[0].temperature, 21.7);
+
+  // Consumer concatenates frames 0..count-1 into one window.
+  const all = d0.history_frame.records.concat(d1.history_frame.records);
+  assert.equal(all.length, 3);
+  assert.deepEqual(all.map((r) => r.time), [t0a, t0a + interval, t0b]);
+});
+
+test("history sentinel values decode to null", () => {
+  const present = 0x03;
+  const f = buildHistoryFrame(1, 0, 1, 1780000000, present, 900, [0xff, 0x7f, 0xff]);
+  const rec = codec.decodeUplink({ bytes: f, fPort: 85 }).data.history_frame.records[0];
+  assert.equal(rec.temperature, null); // 0x7fff sentinel
+  assert.equal(rec.humidity, null);    // 0xff sentinel
+});
+
 // --- Negative: a corrupted frame must change the result (tests are sensitive) ---
 test("a tampered command byte does not silently decode to the original", () => {
   const good = codec.decodeDownlink({ bytes: hex("08032200"), fPort: 85 }).data;

@@ -78,6 +78,27 @@ static bool m_frame_resend; /* last send failed; resend m_frame_buf as-is */
 
 static void tx_telemetry_frame(bool first_frame);
 
+/* History replay (#52): one ReqHistory streams all matching records back as N
+ * HistoryFrame uplinks on the command port, ASAP. Independent state machine,
+ * modeled on the telemetry frame machine above. */
+#define HISTORY_SAMPLES_MAX 48 /* nanopb Response.HistoryFrame.samples bound */
+#define HISTORY_FRAME_OVERHEAD                                                                     \
+	22 /* seq + history_frame wrapper + frame_index/count                                      \
+	    * + t0_unix(5B varint) + present + interval_s                                          \
+	    * + samples tag/len; conservative upper bound */
+
+static struct k_work_delayable m_hist_work;
+static bool m_hist_active;
+static uint32_t m_hist_from, m_hist_to, m_hist_seq;
+static uint32_t m_hist_count;    /* total frames (N) */
+static uint32_t m_hist_idx;      /* next frame_index to send */
+static size_t m_hist_cursor;     /* next record ordinal */
+static uint16_t m_hist_present;  /* shared sensor mask, snapshot at replay start */
+static uint32_t m_hist_interval; /* seconds between records, snapshot at start */
+static uint8_t m_hist_tx_buf[64];
+
+static void m_hist_work_handler(struct k_work *work);
+
 static atomic_t m_state = ATOMIC_INIT(APP_LRW_STATE_IDLE);
 static struct k_timer m_link_check_timer;
 static struct k_work m_link_check_work;
@@ -527,6 +548,7 @@ static void join_work_handler(struct k_work *work)
 	/* Stop send timer to prevent TX during join */
 	k_timer_stop(&m_send_timer);
 	atomic_set(&m_state, APP_LRW_STATE_JOINING);
+	m_hist_active = false; /* drop any in-flight history replay across (re)join */
 
 	if (m_init_join) {
 		LOG_INF("Initial join after boot");
@@ -808,6 +830,121 @@ static void frame_work_handler(struct k_work *work)
 	tx_telemetry_frame(false);
 }
 
+/* Bytes of `samples` that fit one HistoryFrame at the current DR (0 if the DR
+ * is too small even for the frame overhead). Bounded by the nanopb field size. */
+static size_t history_frame_cap(void)
+{
+	uint8_t budget = app_lrw_get_max_payload();
+
+	if (budget <= HISTORY_FRAME_OVERHEAD) {
+		return 0;
+	}
+	return MIN((size_t)(budget - HISTORY_FRAME_OVERHEAD), (size_t)HISTORY_SAMPLES_MAX);
+}
+
+static void history_replay_finish(void)
+{
+	m_hist_active = false;
+	/* Restore the periodic telemetry cadence the replay paused. */
+	k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report), K_FOREVER);
+}
+
+static void m_hist_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (!m_hist_active) {
+		return;
+	}
+
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	if (state == APP_LRW_STATE_JOINING || state == APP_LRW_STATE_RECONNECT) {
+		LOG_WRN("History replay aborted: state=%d", (int)state);
+		m_hist_active = false;
+		return; /* join path restarts the timer */
+	}
+
+	size_t cap = history_frame_cap();
+	uint8_t samples[HISTORY_SAMPLES_MAX];
+	uint32_t t0 = 0;
+	uint16_t n = 0;
+	size_t next = m_hist_cursor;
+	size_t slen = 0;
+
+	if (cap > 0) {
+		slen = app_history_export_page(m_hist_from, m_hist_to, m_hist_cursor, samples, cap,
+					       &t0, &n, &next);
+	}
+	if (n == 0) {
+		/* DR too low for even one record, or nothing left to send. */
+		LOG_WRN("History replay stop at frame %u/%u (cap=%uB)", (unsigned)m_hist_idx,
+			(unsigned)m_hist_count, (unsigned)cap);
+		history_replay_finish();
+		return;
+	}
+
+	size_t len;
+	int ret = app_cmd_build_history_frame(m_hist_seq, m_hist_idx, m_hist_count, t0,
+					      m_hist_present, m_hist_interval, samples, slen,
+					      m_hist_tx_buf, sizeof(m_hist_tx_buf), &len);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_cmd_build_history_frame", ret);
+		history_replay_finish();
+		return;
+	}
+
+	ret = lorawan_send(APP_LRW_DOWNLINK_CMD_PORT, m_hist_tx_buf, len, LORAWAN_MSG_UNCONFIRMED);
+	if (ret) {
+		/* Duty-cycle / MAC busy — retry the same frame, don't advance. */
+		LOG_ERR_CALL_FAILED_INT("lorawan_send(history)", ret);
+		k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_SECONDS(FRAME_RETRY_SEC));
+		return;
+	}
+
+	LOG_INF("History frame %u/%u sent (%u rec, %zu B)", (unsigned)(m_hist_idx + 1),
+		(unsigned)m_hist_count, (unsigned)n, len);
+	m_hist_cursor = next;
+	m_hist_idx++;
+
+	if (m_hist_idx < m_hist_count && m_hist_cursor < app_history_count()) {
+		k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_SECONDS(FRAME_GAP_SEC));
+	} else {
+		LOG_INF("History replay complete: %u frames", (unsigned)m_hist_idx);
+		history_replay_finish();
+	}
+}
+
+bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+{
+	if (!app_lrw_is_ready()) {
+		LOG_WRN("History replay requested but LRW not ready; ignoring");
+		return false;
+	}
+
+	size_t cap = history_frame_cap();
+	uint32_t n = (cap > 0) ? app_history_count_frames(from_unix, to_unix, cap) : 0;
+	if (n == 0) {
+		LOG_INF("History replay: no records in window (or DR too low)");
+		return false;
+	}
+
+	m_hist_from = from_unix;
+	m_hist_to = to_unix;
+	m_hist_seq = seq;
+	m_hist_count = n;
+	m_hist_idx = 0;
+	m_hist_cursor = 0;
+	m_hist_present = app_history_get_mask();
+	m_hist_interval = app_history_get_interval();
+	m_hist_active = true;
+
+	/* Pause periodic telemetry; the replay drives the work queue ASAP. */
+	k_timer_stop(&m_send_timer);
+	LOG_INF("History replay start: %u frames (window %u..%u)", (unsigned)n, from_unix, to_unix);
+	k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_NO_WAIT);
+	return true;
+}
+
 static void send_timer_handler(struct k_timer *timer)
 {
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
@@ -933,6 +1070,7 @@ int app_lrw_init(void)
 	k_work_init(&m_join_work, join_work_handler);
 	k_work_init(&m_send_work, send_work_handler);
 	k_work_init_delayable(&m_frame_work, frame_work_handler);
+	k_work_init_delayable(&m_hist_work, m_hist_work_handler);
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
 	k_work_init(&m_lc_response_work, lc_response_work_handler);

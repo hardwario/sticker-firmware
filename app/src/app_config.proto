@@ -183,7 +183,9 @@ message Response {
         uint32 frame_index = 1;
         uint32 frame_count = 2;
         uint32 t0_unix     = 3;
-        bytes  samples     = 4;
+        bytes  samples     = 4;   // records, values only (no per-record time/mask)
+        uint32 present     = 5;   // sensor mask shared by every record in the frame
+        uint32 interval_s  = 6;   // seconds between records; time(j) = t0_unix + j*interval_s
     }
 
     message Error {
