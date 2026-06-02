@@ -43,18 +43,18 @@
 LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
 
 /* Link check configuration constants */
-#define LINK_CHECK_INTERVAL    5   /* Every N-th message has LC (0 = disabled) */
-#define LINK_CHECK_TIMEOUT_SEC 10  /* Timeout for response */
+#define LINK_CHECK_INTERVAL    5  /* Every N-th message has LC (0 = disabled) */
+#define LINK_CHECK_TIMEOUT_SEC 10 /* Timeout for response */
 
 /* State machine thresholds  */
-#define FAIL_THRESHOLD_WARNING   3  /* LC failures to enter WARNING */
-#define FAIL_THRESHOLD_RECONNECT 5  /* LC failures in WARNING to enter RECONNECT */
-#define OK_THRESHOLD_HEALTHY     1  /* LC successes in WARNING to return to HEALTHY */
+#define FAIL_THRESHOLD_WARNING   3 /* LC failures to enter WARNING */
+#define FAIL_THRESHOLD_RECONNECT 5 /* LC failures in WARNING to enter RECONNECT */
+#define OK_THRESHOLD_HEALTHY     1 /* LC successes in WARNING to return to HEALTHY */
 
 /* Join/Rejoin backoff configuration - easily adjustable */
-#define REJOIN_BACKOFF_BASE_SEC  60   /* Base backoff time in seconds */
-#define REJOIN_BACKOFF_MAX_SEC   3600 /* Maximum backoff time (1 hour) */
-#define REJOIN_BACKOFF_MULTIPLIER 2   /* Exponential multiplier per attempt */
+#define REJOIN_BACKOFF_BASE_SEC   60   /* Base backoff time in seconds */
+#define REJOIN_BACKOFF_MAX_SEC    3600 /* Maximum backoff time (1 hour) */
+#define REJOIN_BACKOFF_MULTIPLIER 2    /* Exponential multiplier per attempt */
 
 static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
 static struct k_work_q m_work_q;
@@ -71,30 +71,30 @@ static struct k_work m_join_work;
 /* Current telemetry frame, kept so a failed send can be retried verbatim
  * (app_compose already consumed those groups from its snapshot). */
 static uint8_t m_frame_buf[64];
-static size_t  m_frame_len;
-static bool    m_frame_more;    /* more frames remain in this snapshot */
-static bool    m_frame_first;   /* this frame is the snapshot's first (for LC) */
-static bool    m_frame_resend;  /* last send failed; resend m_frame_buf as-is */
+static size_t m_frame_len;
+static bool m_frame_more;   /* more frames remain in this snapshot */
+static bool m_frame_first;  /* this frame is the snapshot's first (for LC) */
+static bool m_frame_resend; /* last send failed; resend m_frame_buf as-is */
 
 static void tx_telemetry_frame(bool first_frame);
 
 static atomic_t m_state = ATOMIC_INIT(APP_LRW_STATE_IDLE);
 static struct k_timer m_link_check_timer;
 static struct k_work m_link_check_work;
-static int m_consecutive_lc_fail;          /* LC failures in a row (HEALTHY) */
-static int m_consecutive_lc_ok;            /* LC successes in a row (WARNING) */
-static int m_warning_lc_fail_total;        /* Total LC failures in WARNING */
-static int m_force_lc_remaining;           /* Remaining forced LC messages */
-static bool m_link_check_pending;          /* Waiting for LC response */
-static int m_message_count;                /* Message counter for N-th LC */
-static int m_rejoin_attempts;              /* Rejoin attempt counter for backoff */
-static int m_join_busy_polls;              /* Counter for MAC busy polling */
-static bool m_init_join;                   /* True for first join after boot */
+static int m_consecutive_lc_fail;   /* LC failures in a row (HEALTHY) */
+static int m_consecutive_lc_ok;     /* LC successes in a row (WARNING) */
+static int m_warning_lc_fail_total; /* Total LC failures in WARNING */
+static int m_force_lc_remaining;    /* Remaining forced LC messages */
+static bool m_link_check_pending;   /* Waiting for LC response */
+static int m_message_count;         /* Message counter for N-th LC */
+static int m_rejoin_attempts;       /* Rejoin attempt counter for backoff */
+static int m_join_busy_polls;       /* Counter for MAC busy polling */
+static bool m_init_join;            /* True for first join after boot */
 
 static struct k_work_delayable m_join_complete_work;
 
-#define JOIN_BUSY_POLL_INTERVAL_MS  500
-#define JOIN_BUSY_MAX_POLLS         30
+#define JOIN_BUSY_POLL_INTERVAL_MS 500
+#define JOIN_BUSY_MAX_POLLS        30
 
 static int m_current_dr;
 /* Application-payload budget (bytes) for the next TX, sourced from the LoRaWAN
@@ -121,23 +121,22 @@ static uint8_t m_lc_response_gw_count;
  * response leaves overwrites with a warning. */
 #define APP_LRW_RESPONSE_BUF_SIZE 64
 static uint8_t m_pending_response_buf[APP_LRW_RESPONSE_BUF_SIZE];
-static size_t  m_pending_response_len;
+static size_t m_pending_response_len;
 static uint8_t m_pending_response_port;
 static K_MUTEX_DEFINE(m_pending_response_lock);
 
 /* Inbound downlink request on port 85 captured from downlink_callback().
  * The callback runs on the LoRaMac stack (restricted), so it only copies the
  * payload and defers parsing to m_dl_request_work on m_work_q. */
-#define APP_LRW_REQUEST_BUF_SIZE 64
+#define APP_LRW_REQUEST_BUF_SIZE  64
 #define APP_LRW_DOWNLINK_CMD_PORT 85
 static uint8_t m_dl_request_buf[APP_LRW_REQUEST_BUF_SIZE];
-static size_t  m_dl_request_len;
+static size_t m_dl_request_len;
 static struct k_work m_dl_request_work;
 
 /* Deferred reboot/save requested by a command handler; runs after the Ack TX. */
 static struct k_work_delayable m_post_cmd_work;
 static enum app_cmd_action m_post_cmd_action;
-
 
 static uint32_t calculate_rejoin_backoff(int attempt)
 {
@@ -198,8 +197,8 @@ static void dl_request_work_handler(struct k_work *work)
 	size_t resp_len = 0;
 	enum app_cmd_action action = APP_CMD_ACTION_NONE;
 
-	int ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, m_dl_request_buf, m_dl_request_len,
-				 resp, sizeof(resp), &resp_len, &action);
+	int ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, m_dl_request_buf, m_dl_request_len, resp,
+				 sizeof(resp), &resp_len, &action);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
 		return;
@@ -251,8 +250,8 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 			m_dl_request_len = len;
 			k_work_submit_to_queue(&m_work_q, &m_dl_request_work);
 		} else {
-			LOG_WRN("Port %u payload too large: %u B (max %zu)",
-				port, len, sizeof(m_dl_request_buf));
+			LOG_WRN("Port %u payload too large: %u B (max %zu)", port, len,
+				sizeof(m_dl_request_buf));
 		}
 	}
 
@@ -303,15 +302,15 @@ static void join_complete_work_handler(struct k_work *work)
 				JOIN_BUSY_MAX_POLLS * JOIN_BUSY_POLL_INTERVAL_MS);
 			atomic_set(&m_state, APP_LRW_STATE_RECONNECT);
 			m_rejoin_attempts = 0;
-			k_timer_start(&m_link_check_timer,
-				      K_SECONDS(REJOIN_BACKOFF_BASE_SEC), K_FOREVER);
+			k_timer_start(&m_link_check_timer, K_SECONDS(REJOIN_BACKOFF_BASE_SEC),
+				      K_FOREVER);
 			return;
 		}
 
 		/* Log only every 10th poll (5 seconds) to reduce noise */
 		if ((m_join_busy_polls % 10) == 0) {
-			LOG_INF("MAC still busy (%d/%d)...",
-				m_join_busy_polls, JOIN_BUSY_MAX_POLLS);
+			LOG_INF("MAC still busy (%d/%d)...", m_join_busy_polls,
+				JOIN_BUSY_MAX_POLLS);
 		}
 		k_work_schedule_for_queue(&m_work_q, &m_join_complete_work,
 					  K_MSEC(JOIN_BUSY_POLL_INTERVAL_MS));
@@ -334,7 +333,7 @@ static void join_complete_work_handler(struct k_work *work)
 
 	/* Join succeeded - transition to HEALTHY */
 	LOG_INF("Join successful - transitioning to HEALTHY");
-	m_init_join = false;  /* Next join will be rejoin with MAC reset */
+	m_init_join = false; /* Next join will be rejoin with MAC reset */
 	lorawan_enable_adr(g_app_config.lrw_adr);
 
 	/* Capture the initial DR's payload budget; the DR-changed callback may not
@@ -376,8 +375,8 @@ static void handle_link_check_failure(void)
 	switch (state) {
 	case APP_LRW_STATE_HEALTHY:
 		m_consecutive_lc_fail++;
-		LOG_WRN("LC FAIL in HEALTHY (streak: %d/%d)",
-			m_consecutive_lc_fail, FAIL_THRESHOLD_WARNING);
+		LOG_WRN("LC FAIL in HEALTHY (streak: %d/%d)", m_consecutive_lc_fail,
+			FAIL_THRESHOLD_WARNING);
 
 		if (m_consecutive_lc_fail >= FAIL_THRESHOLD_WARNING) {
 			LOG_WRN("Entering WARNING state");
@@ -391,8 +390,8 @@ static void handle_link_check_failure(void)
 
 	case APP_LRW_STATE_WARNING:
 		m_warning_lc_fail_total++;
-		LOG_WRN("LC FAIL in WARNING (total: %d/%d)",
-			m_warning_lc_fail_total, FAIL_THRESHOLD_RECONNECT);
+		LOG_WRN("LC FAIL in WARNING (total: %d/%d)", m_warning_lc_fail_total,
+			FAIL_THRESHOLD_RECONNECT);
 
 		if (m_warning_lc_fail_total >= FAIL_THRESHOLD_RECONNECT) {
 			/* Only OTAA can reconnect */
@@ -448,8 +447,8 @@ static void handle_link_check_success(void)
 
 	case APP_LRW_STATE_WARNING:
 		m_consecutive_lc_ok++;
-		LOG_INF("LC OK in WARNING (streak: %d/%d)",
-			m_consecutive_lc_ok, OK_THRESHOLD_HEALTHY);
+		LOG_INF("LC OK in WARNING (streak: %d/%d)", m_consecutive_lc_ok,
+			OK_THRESHOLD_HEALTHY);
 
 		if (m_consecutive_lc_ok >= OK_THRESHOLD_HEALTHY) {
 			LOG_INF("Returning to HEALTHY state");
@@ -596,8 +595,8 @@ static void join_work_handler(struct k_work *work)
 	if (ret && ret != -ETIMEDOUT) {
 		/* Hard error (not ETIMEDOUT) - retry with backoff */
 		uint32_t backoff = calculate_rejoin_backoff(m_rejoin_attempts);
-		LOG_ERR("Join failed: %d, will retry in %u seconds (attempt %d)",
-			ret, backoff, m_rejoin_attempts + 1);
+		LOG_ERR("Join failed: %d, will retry in %u seconds (attempt %d)", ret, backoff,
+			m_rejoin_attempts + 1);
 		m_rejoin_attempts++;
 		atomic_set(&m_state, APP_LRW_STATE_RECONNECT);
 		k_timer_start(&m_link_check_timer, K_SECONDS(backoff), K_FOREVER);
@@ -687,7 +686,7 @@ static void send_work_handler(struct k_work *work)
 	k_mutex_lock(&m_pending_response_lock, K_FOREVER);
 	if (m_pending_response_len) {
 		uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
-		size_t  len  = m_pending_response_len;
+		size_t len = m_pending_response_len;
 		uint8_t port = m_pending_response_port;
 		memcpy(buf, m_pending_response_buf, len);
 		m_pending_response_len = 0;
@@ -699,8 +698,7 @@ static void send_work_handler(struct k_work *work)
 		} else {
 			LOG_INF("Response sent on port %u (%zu B)", port, len);
 		}
-		k_timer_start(&m_send_timer,
-			      K_SECONDS(g_app_config.interval_report), K_FOREVER);
+		k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report), K_FOREVER);
 		return;
 	}
 	k_mutex_unlock(&m_pending_response_lock);
@@ -948,7 +946,7 @@ int app_lrw_init(void)
 	/* Don't start send timer here - wait for join completion via DR callback */
 
 	atomic_set(&m_state, APP_LRW_STATE_IDLE);
-	m_init_join = true;  /* First join after boot */
+	m_init_join = true; /* First join after boot */
 
 	return 0;
 }
@@ -1052,15 +1050,14 @@ int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 		return -EINVAL;
 	}
 	if (len > sizeof(m_pending_response_buf)) {
-		LOG_ERR("Response too large: %zu B (max %zu)", len,
-			sizeof(m_pending_response_buf));
+		LOG_ERR("Response too large: %zu B (max %zu)", len, sizeof(m_pending_response_buf));
 		return -EMSGSIZE;
 	}
 
 	k_mutex_lock(&m_pending_response_lock, K_FOREVER);
 	if (m_pending_response_len) {
-		LOG_WRN("Overwriting unsent response on port %u (%zu B)",
-			m_pending_response_port, m_pending_response_len);
+		LOG_WRN("Overwriting unsent response on port %u (%zu B)", m_pending_response_port,
+			m_pending_response_len);
 	}
 	memcpy(m_pending_response_buf, buf, len);
 	m_pending_response_len = len;
@@ -1080,9 +1077,8 @@ int app_lrw_reset_nvm(void)
 	 * frame counters (FCntUp/Down), DevNonce and the cached session; a reboot
 	 * then makes the MAC re-init from a clean NVM. */
 	static const char *const keys[] = {
-		"lorawan/nvm/Crypto",       "lorawan/nvm/MacGroup1",
-		"lorawan/nvm/MacGroup2",    "lorawan/nvm/SecureElement",
-		"lorawan/nvm/RegionGroup1", "lorawan/nvm/RegionGroup2",
+		"lorawan/nvm/Crypto",        "lorawan/nvm/MacGroup1",    "lorawan/nvm/MacGroup2",
+		"lorawan/nvm/SecureElement", "lorawan/nvm/RegionGroup1", "lorawan/nvm/RegionGroup2",
 		"lorawan/nvm/ClassB",
 	};
 	int ret = 0;

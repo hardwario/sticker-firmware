@@ -31,14 +31,14 @@
 
 LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
 
-#define SENTINEL          ((int16_t)0x7FFF)
-#define PAYLOAD_SIZE      24
-#define LOOP_INTERVAL_SEC 1
-#define SEND_INTERVAL_SEC 30
-#define SETTLE_DELAY_SEC  2
-#define ENTRY_BLINKS      5
-#define CALIBRATION_PORT        10
-#define MAGNET_PENDING_MAX      2
+#define SENTINEL           ((int16_t)0x7FFF)
+#define PAYLOAD_SIZE       24
+#define LOOP_INTERVAL_SEC  1
+#define SEND_INTERVAL_SEC  30
+#define SETTLE_DELAY_SEC   2
+#define ENTRY_BLINKS       5
+#define CALIBRATION_PORT   10
+#define MAGNET_PENDING_MAX 2
 
 /* Fixed ABP keys for calibration mode — all devices use the same credentials */
 static const uint8_t m_cal_deveui[] = {0x02, 0x40, 0x3b, 0x84, 0xfd, 0x45, 0x1f, 0x37};
@@ -298,11 +298,10 @@ int app_calibration_init(void)
 
 	/* One-time 5x fast yellow blink to indicate calibration entry */
 	{
-		struct app_led_blink_req req = {
-			.color = APP_LED_CHANNEL_Y,
-			.duration = 100,
-			.space = 100,
-			.repetitions = ENTRY_BLINKS};
+		struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
+						.duration = 100,
+						.space = 100,
+						.repetitions = ENTRY_BLINKS};
 		app_led_blink(&req);
 	}
 
@@ -313,8 +312,7 @@ void app_calibration_run(void)
 {
 	k_sleep(K_SECONDS(SETTLE_DELAY_SEC));
 
-	int64_t deadline = k_uptime_get()
-			 + (int64_t)APP_CALIBRATION_DURATION_MIN * 60 * 1000;
+	int64_t deadline = k_uptime_get() + (int64_t)APP_CALIBRATION_DURATION_MIN * 60 * 1000;
 	int counter = SEND_INTERVAL_SEC;
 
 	for (;;) {
@@ -334,8 +332,7 @@ void app_calibration_run(void)
 
 #if defined(CONFIG_LORAWAN)
 			if (app_lrw_is_ready()) {
-				lorawan_send(CALIBRATION_PORT, buf,
-					     PAYLOAD_SIZE,
+				lorawan_send(CALIBRATION_PORT, buf, PAYLOAD_SIZE,
 					     LORAWAN_MSG_UNCONFIRMED);
 			}
 #endif /* defined(CONFIG_LORAWAN) */

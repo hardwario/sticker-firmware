@@ -41,7 +41,7 @@ LOG_MODULE_REGISTER(app_config_ingest, LOG_LEVEL_DBG);
 		if (src->field >= (lo) && src->field <= (hi)) {                                    \
 			config->field = src->field;                                                \
 		} else {                                                                           \
-			LOG_WRN("Invalid " #field);                                                 \
+			LOG_WRN("Invalid " #field);                                                \
 			FAULT(tag);                                                                \
 		}                                                                                  \
 	}
@@ -296,12 +296,12 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 
 #define FILL_BOOL(tag, field)                                                                      \
 	if (requested(ids, n, tag)) {                                                              \
-		dst->has_##field = true;                                                            \
+		dst->has_##field = true;                                                           \
 		dst->field = c->field;                                                             \
 	}
 #define FILL_NUM(tag, field)                                                                       \
 	if (requested(ids, n, tag)) {                                                              \
-		dst->has_##field = true;                                                            \
+		dst->has_##field = true;                                                           \
 		dst->field = c->field;                                                             \
 	}
 

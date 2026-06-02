@@ -145,7 +145,7 @@ static bool group_present(const Telemetry *s, enum tlm_group g)
 
 /* Snapshot held across the frames of one report (consistency). */
 static Telemetry m_snapshot;
-static uint16_t m_pending;  /* bitmask of enum tlm_group still to send */
+static uint16_t m_pending; /* bitmask of enum tlm_group still to send */
 static bool m_active;
 
 static void fill_snapshot(void)
@@ -392,7 +392,8 @@ int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 			if (m_pending & BIT(g)) {
 				apply_group(&frame, &m_snapshot, g, true);
 				frame_groups = BIT(g);
-				LOG_WRN("Group %d exceeds budget %uB, sending alone", (int)g, budget);
+				LOG_WRN("Group %d exceeds budget %uB, sending alone", (int)g,
+					budget);
 				break;
 			}
 		}

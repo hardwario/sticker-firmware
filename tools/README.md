@@ -13,8 +13,7 @@ Steps (exits non-zero on the first hard failure):
 1. **Firmware builds** — release + debug (`west build -p always -b sticker .`).
 2. **Decoder tests** — `node --test` in `app/decoder/` (the LoRaWAN codec).
 3. **configen tests** — `pytest scripts/west_commands/tests` (generator + proto round-trip).
-4. **clang-format** — `--dry-run` over `app/src/*.{c,h}`, **advisory** (the repo has
-   pre-existing hand-written sources that aren't format-clean; reported, not failing).
+4. **clang-format** — `--dry-run --Werror` over `app/src/*.{c,h}`; fails on any drift.
 5. **configen in sync** — regenerate from `app_config.yml` and fail if the committed
    `app_config.{c,h,proto,options.in}` would change.
 

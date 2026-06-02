@@ -223,8 +223,7 @@ static int sht30_read(const struct device *dev, float *temperature, float *humid
 		return ret;
 	}
 
-	if (sht_crc8(&read_buf[0], 2) != read_buf[2] ||
-	    sht_crc8(&read_buf[3], 2) != read_buf[5]) {
+	if (sht_crc8(&read_buf[0], 2) != read_buf[2] || sht_crc8(&read_buf[3], 2) != read_buf[5]) {
 		LOG_ERR("CRC mismatch");
 		return -EIO;
 	}
@@ -288,8 +287,7 @@ static int sht43_read(const struct device *dev, float *temperature, float *humid
 		return ret;
 	}
 
-	if (sht_crc8(&read_buf[0], 2) != read_buf[2] ||
-	    sht_crc8(&read_buf[3], 2) != read_buf[5]) {
+	if (sht_crc8(&read_buf[0], 2) != read_buf[2] || sht_crc8(&read_buf[3], 2) != read_buf[5]) {
 		LOG_ERR("CRC mismatch");
 		return -EIO;
 	}
@@ -880,8 +878,7 @@ int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float 
 	COMM_PROLOGUE
 
 	if (!res && m_sensors[index].sht_type == SHT_TYPE_UNKNOWN) {
-		ret = sht_read_serial(m_sensors[index].dev, NULL,
-				      &m_sensors[index].sht_type);
+		ret = sht_read_serial(m_sensors[index].dev, NULL, &m_sensors[index].sht_type);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("sht_read_serial", ret);
 			res = ret;

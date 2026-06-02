@@ -17,13 +17,11 @@ cd "$REPO"
 PASS=0
 FAIL=0
 SKIP=0
-WARN=0
 
 banner() { printf '\n\033[1;36m=== %s ===\033[0m\n' "$1"; }
 ok()     { printf '\033[1;32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()    { printf '\033[1;31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 skip()   { printf '\033[1;33mSKIP\033[0m %s\n' "$1"; SKIP=$((SKIP + 1)); }
-warn()   { printf '\033[1;33mWARN\033[0m %s\n' "$1"; WARN=$((WARN + 1)); }
 have()   { command -v "$1" >/dev/null 2>&1; }
 
 run() { # run <label> <cmd...>
@@ -56,17 +54,10 @@ else
   bad "configen tests — 'pytest' not found (pip install -r scripts/west_commands/requirements-dev.txt)"
 fi
 
-# 4. C formatting — advisory only. The repo has pre-existing hand-written
-# sources that aren't clang-format-clean; surface drift without failing the run.
+# 4. C formatting — app/src must be clang-format-clean.
 if have clang-format && [ -f "$REPO/.clang-format" ]; then
-  banner "clang-format --dry-run (advisory)"
   mapfile -t CFILES < <(git -C "$REPO" ls-files 'app/src/*.c' 'app/src/*.h')
-  if clang-format --dry-run --Werror "${CFILES[@]}" 2>/tmp/cf.$$; then
-    ok "clang-format"
-  else
-    warn "clang-format: $(grep -c 'clang-format-violations' /tmp/cf.$$) violation(s) in app/src (pre-existing; not failing)"
-  fi
-  rm -f /tmp/cf.$$
+  run "clang-format --dry-run --Werror" clang-format --dry-run --Werror "${CFILES[@]}"
 else
   skip "clang-format (not installed or no .clang-format)"
 fi
@@ -87,5 +78,5 @@ else
 fi
 
 banner "summary"
-printf 'pass=%d fail=%d warn=%d skip=%d\n' "$PASS" "$FAIL" "$WARN" "$SKIP"
+printf 'pass=%d fail=%d skip=%d\n' "$PASS" "$FAIL" "$SKIP"
 [ "$FAIL" -eq 0 ]
