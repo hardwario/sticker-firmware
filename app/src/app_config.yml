@@ -35,13 +35,26 @@ enums:
       value: 1
       shell: abp
 
+proto:
+  message: AppConfigMessage
+  extra_fields:
+    - {name: factory, type: bool, proto_id: 1, proto_group: root}
+  groups:
+    - {key: root}
+    - {key: lorawan, message: Lorawan, field: lorawan, proto_id: 5, strip_prefix: lrw_}
+    - {key: application, message: Application, field: application, proto_id: 6, reserved: [3]}
 parameters:
   - name: secret_key
+    proto_group: root
+    proto_id: 2
+    proto_callback: true
     type: bytes
     size: 16
     help: "Get/Set device secret key (32 hexadecimal digits)."
 
   - name: serial_number
+    proto_group: root
+    proto_id: 3
     type: uint32
     format: "%010u"
     help: "Get/Set device serial number (10 decimal digits)."
@@ -49,14 +62,20 @@ parameters:
       digits: 10
 
   - name: nonce_counter
+    proto_group: root
+    proto_id: 4
     type: uint32
     help: "Get/Set nonce counter (unsigned integer)."
 
   - name: calibration
+    proto_group: application
+    proto_id: 1
     type: bool
     help: "Get/Set calibration mode (true/false)."
 
   - name: interval_sample
+    proto_group: application
+    proto_id: 2
     type: int
     min: 5
     max: 3600
@@ -65,6 +84,8 @@ parameters:
       zero_allowed: true
 
   - name: interval_report
+    proto_group: application
+    proto_id: 4
     type: int
     default: 900
     min: 60
@@ -72,11 +93,15 @@ parameters:
     help: "Get/Set report interval (range 60 to 86400 seconds)."
 
   - name: lrw_region
+    proto_group: lorawan
+    proto_id: 1
     type: enum
     enum: lrw_region
     help: "Get/Set LoRaWAN region (eu868/us915/au915)."
 
   - name: lrw_sub_band
+    proto_group: lorawan
+    proto_id: 12
     type: int
     default: 2
     min: 0
@@ -84,59 +109,83 @@ parameters:
     help: "Get/Set US915/AU915 sub-band (1-8, 0 = all channels). Default 2 matches TTN/Helium/ChirpStack."
 
   - name: lrw_network
+    proto_group: lorawan
+    proto_id: 2
     type: enum
     enum: lrw_network
     help: "Get/Set LoRaWAN network (public/private)."
 
   - name: lrw_adr
+    proto_group: lorawan
+    proto_id: 3
     type: bool
     help: "Get/Set LoRaWAN ADR (true/false)."
 
   - name: lrw_activation
+    proto_group: lorawan
+    proto_id: 4
     type: enum
     enum: lrw_activation
     help: "Get/Set LoRaWAN activation (otaa/abp)."
 
   - name: lrw_deveui
+    proto_group: lorawan
+    proto_id: 5
     type: bytes
     size: 8
     help: "Get/Set LoRaWAN DevEUI (16 hex digits)."
 
   - name: lrw_joineui
+    proto_group: lorawan
+    proto_id: 6
     type: bytes
     size: 8
     help: "Get/Set LoRaWAN JoinEUI (16 hex digits)."
 
   - name: lrw_nwkkey
+    proto_group: lorawan
+    proto_id: 7
     type: bytes
     size: 16
     help: "Get/Set LoRaWAN NwkKey (32 hex digits)."
 
   - name: lrw_appkey
+    proto_group: lorawan
+    proto_id: 8
     type: bytes
     size: 16
     help: "Get/Set LoRaWAN AppKey (32 hex digits)."
 
   - name: lrw_devaddr
+    proto_group: lorawan
+    proto_id: 9
     type: bytes
     size: 4
     help: "Get/Set LoRaWAN DevAddr (8 hex digits)."
 
   - name: lrw_nwkskey
+    proto_group: lorawan
+    proto_id: 10
     type: bytes
     size: 16
     help: "Get/Set LoRaWAN NwkSKey (32 hexadecimal digits)."
 
   - name: lrw_appskey
+    proto_group: lorawan
+    proto_id: 11
     type: bytes
     size: 16
     help: "Get/Set LoRaWAN AppSKey (32 hexadecimal digits)."
 
   - name: alarm_temperature_enabled
+    proto_group: application
+    proto_id: 5
     type: bool
     help: "Get/Set temperature alarm enabled (true/false)."
 
   - name: alarm_temperature_lo
+    proto_group: application
+    proto_id: 6
     type: float
     default: 15.0
     min: -30.0
@@ -144,6 +193,8 @@ parameters:
     help: "Get/Set temperature low threshold (-30 to 70 deg. C)."
 
   - name: alarm_temperature_hi
+    proto_group: application
+    proto_id: 7
     type: float
     default: 25.0
     min: -30.0
@@ -151,6 +202,8 @@ parameters:
     help: "Get/Set temperature high threshold (-30 to 70 deg. C)."
 
   - name: alarm_temperature_hst
+    proto_group: application
+    proto_id: 8
     type: float
     default: 0.5
     min: 0.0
@@ -158,10 +211,14 @@ parameters:
     help: "Get/Set T1 temperature hysteresis (0 to 5 deg. C)."
 
   - name: alarm_humidity_enabled
+    proto_group: application
+    proto_id: 9
     type: bool
     help: "Get/Set humidity alarm enabled (true/false)."
 
   - name: alarm_humidity_lo
+    proto_group: application
+    proto_id: 10
     type: float
     default: 30.0
     min: 0.0
@@ -169,6 +226,8 @@ parameters:
     help: "Get/Set humidity low threshold (0 to 100 %)."
 
   - name: alarm_humidity_hi
+    proto_group: application
+    proto_id: 11
     type: float
     default: 75.0
     min: 0.0
@@ -176,6 +235,8 @@ parameters:
     help: "Get/Set humidity high threshold (0 to 100 %)."
 
   - name: alarm_humidity_hst
+    proto_group: application
+    proto_id: 12
     type: float
     default: 5.0
     min: 0.0
@@ -183,10 +244,14 @@ parameters:
     help: "Get/Set humidity hysteresis (0 to 20 %)."
 
   - name: alarm_pressure_enabled
+    proto_group: application
+    proto_id: 13
     type: bool
     help: "Get/Set pressure alarm enabled (true/false)."
 
   - name: alarm_pressure_lo
+    proto_group: application
+    proto_id: 14
     type: float
     default: 700.0
     min: 500.0
@@ -194,6 +259,8 @@ parameters:
     help: "Get/Set pressure low threshold (500 to 1200 hPa)."
 
   - name: alarm_pressure_hi
+    proto_group: application
+    proto_id: 15
     type: float
     default: 1060.0
     min: 500.0
@@ -201,6 +268,8 @@ parameters:
     help: "Get/Set pressure high threshold (500 to 1200 hPa)."
 
   - name: alarm_pressure_hst
+    proto_group: application
+    proto_id: 16
     type: float
     default: 10.0
     min: 0.0
@@ -208,10 +277,14 @@ parameters:
     help: "Get/Set pressure hysteresis (0 to 50 hPa)."
 
   - name: alarm_t1_temperature_enabled
+    proto_group: application
+    proto_id: 17
     type: bool
     help: "Get/Set T1 temperature alarm enabled (true/false)."
 
   - name: alarm_t1_temperature_lo
+    proto_group: application
+    proto_id: 18
     type: float
     default: 15.0
     min: -30.0
@@ -219,6 +292,8 @@ parameters:
     help: "Get/Set T1 temperature low threshold (-30 to 70 deg. C)."
 
   - name: alarm_t1_temperature_hi
+    proto_group: application
+    proto_id: 19
     type: float
     default: 25.0
     min: -30.0
@@ -226,6 +301,8 @@ parameters:
     help: "Get/Set T1 temperature high threshold (-30 to 70 deg. C)."
 
   - name: alarm_t1_temperature_hst
+    proto_group: application
+    proto_id: 20
     type: float
     default: 0.5
     min: 0.0
@@ -233,10 +310,14 @@ parameters:
     help: "Get/Set T1 temperature hysteresis (0 to 5 deg. C)."
 
   - name: alarm_t2_temperature_enabled
+    proto_group: application
+    proto_id: 21
     type: bool
     help: "Get/Set T2 temperature alarm enabled (true/false)."
 
   - name: alarm_t2_temperature_lo
+    proto_group: application
+    proto_id: 22
     type: float
     default: 15.0
     min: -30.0
@@ -244,6 +325,8 @@ parameters:
     help: "Get/Set T2 temperature low threshold (-30 to 70 deg. C)."
 
   - name: alarm_t2_temperature_hi
+    proto_group: application
+    proto_id: 23
     type: float
     default: 25.0
     min: -30.0
@@ -251,6 +334,8 @@ parameters:
     help: "Get/Set T2 temperature high threshold (-30 to 70 deg. C)."
 
   - name: alarm_t2_temperature_hst
+    proto_group: application
+    proto_id: 24
     type: float
     default: 0.5
     min: 0.0
@@ -258,113 +343,165 @@ parameters:
     help: "Get/Set T2 temperature hysteresis (0 to 5 deg. C)."
 
   - name: hall_left_counter
+    proto_group: application
+    proto_id: 25
     type: bool
     help: "Get/Set hall left switch counter enabled (true/false)."
 
   - name: hall_left_notify_act
+    proto_group: application
+    proto_id: 26
     type: bool
     help: "Get/Set hall left switch notify on activation (true/false)."
 
   - name: hall_left_notify_deact
+    proto_group: application
+    proto_id: 27
     type: bool
     help: "Get/Set hall left switch notify on deactivation (true/false)."
 
   - name: hall_right_counter
+    proto_group: application
+    proto_id: 28
     type: bool
     help: "Get/Set hall right switch counter enabled (true/false)."
 
   - name: hall_right_notify_act
+    proto_group: application
+    proto_id: 29
     type: bool
     help: "Get/Set hall right switch notify on activation (true/false)."
 
   - name: hall_right_notify_deact
+    proto_group: application
+    proto_id: 30
     type: bool
     help: "Get/Set hall right switch notify on deactivation (true/false)."
 
   - name: input_a_counter
+    proto_group: application
+    proto_id: 31
     type: bool
     help: "Get/Set input A counter enabled (true/false)."
 
   - name: input_a_notify_act
+    proto_group: application
+    proto_id: 32
     type: bool
     help: "Get/Set input A notify on activation (true/false)."
 
   - name: input_a_notify_deact
+    proto_group: application
+    proto_id: 33
     type: bool
     help: "Get/Set input A notify on deactivation (true/false)."
 
   - name: input_b_counter
+    proto_group: application
+    proto_id: 34
     type: bool
     help: "Get/Set input B counter enabled (true/false)."
 
   - name: input_b_notify_act
+    proto_group: application
+    proto_id: 35
     type: bool
     help: "Get/Set input B notify on activation (true/false)."
 
   - name: input_b_notify_deact
+    proto_group: application
+    proto_id: 36
     type: bool
     help: "Get/Set input B notify on deactivation (true/false)."
 
   - name: corr_temperature
+    proto_group: application
+    proto_id: 37
     type: float
     min: -5.0
     max: 5.0
     help: "Get/Set temperature correction (range -5.0 to +5.0 deg. C)."
 
   - name: corr_t1_temperature
+    proto_group: application
+    proto_id: 38
     type: float
     min: -5.0
     max: 5.0
     help: "Get/Set T1 temperature correction (range -5.0 to +5.0 deg. C)."
 
   - name: corr_t2_temperature
+    proto_group: application
+    proto_id: 39
     type: float
     min: -5.0
     max: 5.0
     help: "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C)."
 
   - name: cap_hall_left
+    proto_group: application
+    proto_id: 40
     type: bool
     help: "Get/Set hall left capability (true/false)."
 
   - name: cap_hall_right
+    proto_group: application
+    proto_id: 41
     type: bool
     help: "Get/Set hall right capability (true/false)."
 
   - name: cap_input_a
+    proto_group: application
+    proto_id: 42
     type: bool
     help: "Get/Set input A capability (true/false)."
 
   - name: cap_input_b
+    proto_group: application
+    proto_id: 43
     type: bool
     help: "Get/Set input B capability (true/false)."
 
   - name: cap_light_sensor
+    proto_group: application
+    proto_id: 44
     type: bool
     help: "Get/Set light sensor capability (true/false)."
 
   - name: cap_barometer
+    proto_group: application
+    proto_id: 45
     type: bool
     help: "Get/Set barometer capability (true/false)."
 
   - name: cap_pir_detector
+    proto_group: application
+    proto_id: 46
     type: bool
     help: "Get/Set PIR detector capability (true/false)."
 
   - name: cap_1w_thermometer
+    proto_group: application
+    proto_id: 47
     type: bool
     help: "Get/Set 1-wire thermometer capability (true/false)."
 
   - name: cap_1w_machine_probe
+    proto_group: application
+    proto_id: 48
     type: bool
     help: "Get/Set 1-wire machine probe capability (true/false)."
 
   - name: history_enable
+    proto_group: application
+    proto_id: 49
     type: bool
     default: false
     help: "Get/Set sensor history store-and-forward (true/false)."
 
   - name: history_sensors
+    proto_group: application
+    proto_id: 50
     type: uint32
     default: 0
     help: "Get/Set history sensor selection bitmask (0 = all capability-available)."
