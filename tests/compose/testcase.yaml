@@ -1,0 +1,5 @@
+common:
+  tags: sticker compose
+  platform_allow: native_sim
+tests:
+  sticker.compose: {}

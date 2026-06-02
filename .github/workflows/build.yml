@@ -142,6 +142,32 @@ jobs:
           git ls-files 'app/src/*.c' 'app/src/*.h' \
             | xargs clang-format --dry-run --Werror
 
+  unit-tests:
+    name: Unit tests (native_sim)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          path: sticker
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Setup Zephyr project
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: sticker
+          toolchains: arm-zephyr-eabi
+
+      - name: Run native_sim ztest suites
+        working-directory: sticker
+        run: bash tests/run_native.sh
+
   release:
     name: Create release
     if: startsWith(github.ref, 'refs/tags/v')
