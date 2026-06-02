@@ -529,14 +529,18 @@ function encodeDownlinkCommand(cmd) {
     return { bytes: null, error: "unknown command: " + name };
   }
 
+  // Symmetric with decodeDownlink: the command body lives under cmd[name] —
+  // the same nested-oneof shape decode emits. Empty-body commands have no
+  // sub-object.
+  var b = cmd[name] || {};
   var body = [];
   if (name === "set_param") {
-    if (cmd.lorawan) body = body.concat(_encLenDelim(1, _encLorawan(cmd.lorawan)));
-    if (cmd.application) body = body.concat(_encLenDelim(2, _encApplication(cmd.application)));
+    if (b.lorawan) body = body.concat(_encLenDelim(1, _encLorawan(b.lorawan)));
+    if (b.application) body = body.concat(_encLenDelim(2, _encApplication(b.application)));
   } else if (name === "get_param") {
     // proto3 repeated scalars are packed (length-delimited) by default.
-    var lf = cmd.lorawan_field || [];
-    var af = cmd.application_field || [];
+    var lf = b.lorawan_field || [];
+    var af = b.application_field || [];
     if (lf.length) {
       var pl = [];
       for (var i = 0; i < lf.length; i++) pl = pl.concat(_encVarint(lf[i]));
@@ -548,15 +552,15 @@ function encodeDownlinkCommand(cmd) {
       body = body.concat(_encLenDelim(2, pa));
     }
   } else if (name === "get_config") {
-    if (cmd.page) body = body.concat(_encTag(1, 0)).concat(_encVarint(cmd.page));
+    if (b.page) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.page));
   } else if (name === "reset_counters") {
-    if (cmd.hall_left) body = body.concat(_encTag(1, 0)).concat(_encVarint(1));
-    if (cmd.hall_right) body = body.concat(_encTag(2, 0)).concat(_encVarint(1));
-    if (cmd.input_a) body = body.concat(_encTag(3, 0)).concat(_encVarint(1));
-    if (cmd.input_b) body = body.concat(_encTag(4, 0)).concat(_encVarint(1));
+    if (b.hall_left) body = body.concat(_encTag(1, 0)).concat(_encVarint(1));
+    if (b.hall_right) body = body.concat(_encTag(2, 0)).concat(_encVarint(1));
+    if (b.input_a) body = body.concat(_encTag(3, 0)).concat(_encVarint(1));
+    if (b.input_b) body = body.concat(_encTag(4, 0)).concat(_encVarint(1));
   } else if (name === "req_history") {
-    if (cmd.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(cmd.from_unix));
-    if (cmd.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(cmd.to_unix));
+    if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
+    if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
   }
   // get_info / settings_save / reboot / factory_reset / force_send / clock_sync: empty body.
 
@@ -891,12 +895,11 @@ function decodeUplink(input) {
   };
 }
 
-if (false) {
-
-  // console.log("Decoded data:", JSON.stringify(decodeUplink({
-  //   bytes: [0x78, 0x1a, 0x00, 0x01, 0xa5, 0x08, 0xd7, 0x88, 0x08, 0xed, 0x75],
-  // }), null, 2));
-  console.log("Decoded data:", JSON.stringify(decodeUplink({
-    bytes: Buffer.from("7a01a109fa580258", "hex"),
-  }), null, 2));
+// Make the codec importable from Node (tests) without affecting the
+// TTN/ChirpStack sandbox, which has no `module`.
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    decodeUplink, encodeDownlink, decodeDownlink, Decode,
+    decodeTelemetry, decodeDownlinkResponse,
+  };
 }
