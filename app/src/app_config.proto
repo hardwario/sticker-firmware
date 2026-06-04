@@ -208,6 +208,58 @@ message Response {
     }
 }
 
+// Alarm-detail batch, sent on fPort 3 (#27). Alarm edges (threshold + discrete)
+// collected over one alarm_limit window are reported as a list; each event names
+// its source, transition and (for thresholds) bound, plus a time offset and the
+// current value. base_time is the window start (unix, or uptime-s before the RTC
+// syncs); per-event time = base_time + rel_s. total counts every alarm in the
+// window and may exceed events[] when records are dropped to fit the data rate.
+message AlarmReport {
+    uint32 base_time = 1;
+    uint32 total     = 2;
+    repeated AlarmEvent events = 3;
+}
+
+message AlarmEvent {
+    // An alarm edge described by three orthogonal enums instead of one combined
+    // flag: which sensor (source), the transition (edge), and — for thresholds —
+    // which bound was crossed (side). Discrete sources (hall/input/PIR) report
+    // SIDE_NONE; PIR is activate-only.
+
+    // Sensor that raised the event. Values match enum app_alarm_source 1:1.
+    enum Source {
+        HALL_LEFT      = 0;
+        HALL_RIGHT     = 1;
+        PIR_MOTION     = 2;
+        INPUT_A        = 3;
+        INPUT_B        = 4;
+        TEMPERATURE    = 5;
+        HUMIDITY       = 6;
+        PRESSURE       = 7;
+        T1_TEMPERATURE = 8;
+        T2_TEMPERATURE = 9;
+    }
+
+    // Transition direction. ACTIVATE = 0 so the common case omits the field.
+    enum Edge {
+        ACTIVATE   = 0;
+        DEACTIVATE = 1;
+    }
+
+    // Which threshold bound was crossed; SIDE_NONE for discrete sources.
+    enum Side {
+        SIDE_NONE = 0;
+        SIDE_LO   = 1;
+        SIDE_HI   = 2;
+    }
+
+    Source source = 1;           // which sensor
+    Edge   edge   = 2;           // activate / deactivate
+    Side   side   = 3;           // hi / lo / none
+    uint32 rel_s  = 4;           // seconds since AlarmReport.base_time
+    optional sint32 value = 5;   // current value, scaled (×100 temp/hum, ×10 pressure); absent for discrete
+}
+
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap
 // stays on fPort 1). Fields are grouped per sensor; each group's boolean state
 // lives in its own `*_flags` field so a sensor's data stays together as an

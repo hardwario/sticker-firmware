@@ -5,6 +5,7 @@
  */
 
 #include "app_alarm.h"
+#include "app_cmd.h"
 #include "app_config.h"
 #include "app_log.h"
 #include "app_lrw.h"
@@ -19,7 +20,6 @@
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
 /* Standard includes */
@@ -40,33 +40,27 @@ K_MUTEX_DEFINE(m_lock);
 
 /* ---- Alarm-detail batch on fPort 3 (#27) -------------------------------- */
 
-/* Threshold side crossed (encoded in the fPort-3 record header). */
-#define ALARM_SIDE_NA 0
-#define ALARM_SIDE_LO 1
-#define ALARM_SIDE_HI 2
+/* Threshold side crossed (AlarmEvent.Side wire values). */
+#define ALARM_SIDE_NONE 0
+#define ALARM_SIDE_LO   1
+#define ALARM_SIDE_HI   2
 
-#define ALARM_VALUE_SENTINEL ((int16_t)0x8000) /* discrete records: no threshold/value */
-
-/* One collected alarm edge. threshold/value/hyst are already scaled to the
- * sensor's wire units (temp/hum ×100, pressure ×10); sentinel for discrete. */
-struct alarm_event {
-	uint8_t source; /* enum app_alarm_source */
-	uint8_t side;   /* ALARM_SIDE_* */
-	bool active;    /* true = activate, false = deactivate */
-	int16_t threshold;
-	int16_t value;
-	int16_t hyst;
-	uint16_t rel_s; /* seconds since the window base time */
-};
+/* Transition direction (AlarmEvent.Edge wire values). */
+#define ALARM_EDGE_ACT   0
+#define ALARM_EDGE_DEACT 1
 
 #define ALARM_BATCH_MAX 8 /* records held per window; overflow counted in m_window_total */
 
-static struct alarm_event m_batch[ALARM_BATCH_MAX];
+/* Collected edges, ready to hand to app_cmd_build_alarm_report() verbatim. */
+static struct app_cmd_alarm_event m_batch[ALARM_BATCH_MAX];
 static uint8_t m_batch_count;
 static uint16_t m_window_total; /* all alarms in the window (may exceed m_batch_count) */
 static uint32_t m_window_base_unix;
 static int64_t m_window_start_ms;
 static bool m_window_open;
+/* Side latched when a threshold activates, reused so the deactivate edge keeps
+ * the same hi/lo (the deactivate condition itself doesn't know which bound). */
+static uint8_t m_alarm_side[APP_ALARM_SOURCE_COUNT];
 static struct k_work_delayable m_alarm_batch_work;
 
 static const char *const m_source_names[APP_ALARM_SOURCE_COUNT] = {
@@ -117,9 +111,7 @@ static void alarm_lrw_send(void)
 #endif /* defined(CONFIG_LORAWAN) */
 }
 
-#define ALARM_FRAME_MAX  64 /* fPort-3 frame buffer (matches app_lrw pending slot) */
-#define ALARM_RECORD_LEN 9  /* hdr + rel_s + threshold + value + hyst */
-#define ALARM_HEADER_LEN 5  /* total_count(1) + base_unix(4) */
+#define ALARM_FRAME_MAX 64 /* fPort-3 frame buffer (matches app_lrw pending slot) */
 
 static uint32_t now_unix_or_uptime(void)
 {
@@ -132,9 +124,11 @@ static uint32_t now_unix_or_uptime(void)
 	return (uint32_t)(k_uptime_get() / 1000);
 }
 
-/* Encode the collected batch into the fPort-3 frame and hand it to app_lrw.
- * Records are capped to the current DR budget; m_window_total still reports the
- * true count so the backend knows if some were dropped. Caller holds m_lock. */
+/* Encode the collected batch into an AlarmReport (fPort 3) and hand it to
+ * app_lrw. Events are trimmed to the current DR budget by retrying the encode
+ * with fewer events; m_window_total still reports the true count so the backend
+ * knows some were dropped (decoder: truncated = events < total). Caller holds
+ * m_lock. */
 static void alarm_batch_flush(void)
 {
 	if (m_batch_count == 0) {
@@ -143,8 +137,6 @@ static void alarm_batch_flush(void)
 		return;
 	}
 
-	uint8_t buf[ALARM_FRAME_MAX];
-	size_t pos = 0;
 	size_t cap = ALARM_FRAME_MAX;
 #if defined(CONFIG_LORAWAN)
 	uint8_t dr = app_lrw_get_max_payload();
@@ -153,32 +145,30 @@ static void alarm_batch_flush(void)
 	}
 #endif
 
-	buf[pos++] = (uint8_t)MIN(m_window_total, 0xFF);
-	sys_put_le32(m_window_base_unix, &buf[pos]);
-	pos += 4;
+	uint8_t buf[ALARM_FRAME_MAX];
+	size_t len = 0;
+	uint8_t n = m_batch_count;
+	int ret = -EMSGSIZE;
 
-	uint8_t written = 0;
-	for (uint8_t i = 0; i < m_batch_count; i++) {
-		if (pos + ALARM_RECORD_LEN > cap) {
-			break; /* DR-bounded; total_count signals the rest */
+	/* Drop the newest events first until the report fits the DR budget. */
+	while (n > 0) {
+		ret = app_cmd_build_alarm_report(m_window_base_unix, m_window_total, m_batch, n,
+						 buf, cap, &len);
+		if (ret == 0) {
+			break;
 		}
-		struct alarm_event *e = &m_batch[i];
-		buf[pos++] = (uint8_t)((e->source << 3) | (e->side << 1) | (e->active ? 1 : 0));
-		sys_put_le16(e->rel_s, &buf[pos]);
-		pos += 2;
-		sys_put_le16((uint16_t)e->threshold, &buf[pos]);
-		pos += 2;
-		sys_put_le16((uint16_t)e->value, &buf[pos]);
-		pos += 2;
-		sys_put_le16((uint16_t)e->hyst, &buf[pos]);
-		pos += 2;
-		written++;
+		n--;
 	}
 
+	if (ret == 0) {
 #if defined(CONFIG_LORAWAN)
-	(void)app_lrw_send_alarm(buf, pos);
+		(void)app_lrw_send_alarm(buf, len);
 #endif
-	LOG_INF("Alarm batch: %u/%u records on fPort 3", written, m_window_total);
+		LOG_INF("Alarm batch: %u/%u events on fPort 3 (%u B)", n, m_window_total,
+			(unsigned)len);
+	} else {
+		LOG_ERR_CALL_FAILED_INT("app_cmd_build_alarm_report", ret);
+	}
 
 	m_batch_count = 0;
 	m_window_total = 0;
@@ -194,15 +184,23 @@ static void alarm_batch_work_handler(struct k_work *work)
 }
 
 /* Record one alarm edge for the fPort-3 detail batch (#27). Threshold sources
- * pass scaled threshold/value/hyst; discrete sources pass sentinels + side N/A.
- * With alarm_limit == 0 the record is sent immediately as a 1-record frame;
- * otherwise it joins the current collection window (opened on the first edge,
- * flushed by m_alarm_batch_work after alarm_limit seconds). */
-static void alarm_collect(uint8_t source, bool active, uint8_t side, int16_t threshold,
-			  int16_t value, int16_t hyst)
+ * pass has_value=true with the scaled current value; discrete sources pass
+ * has_value=false + side none. With alarm_limit == 0 the event is sent
+ * immediately as a 1-event report; otherwise it joins the current collection
+ * window (opened on the first edge, flushed by m_alarm_batch_work after
+ * alarm_limit seconds). */
+static void alarm_collect(uint8_t source, bool active, uint8_t side, bool has_value, int32_t value)
 {
 	int limit = g_app_config.alarm_limit;
 	int64_t now = k_uptime_get();
+	struct app_cmd_alarm_event ev = {
+		.source = source,
+		.edge = active ? ALARM_EDGE_ACT : ALARM_EDGE_DEACT,
+		.side = side,
+		.has_value = has_value,
+		.value = value,
+		.rel_s = 0,
+	};
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 
@@ -210,7 +208,7 @@ static void alarm_collect(uint8_t source, bool active, uint8_t side, int16_t thr
 		m_window_base_unix = now_unix_or_uptime();
 		m_window_total = 1;
 		m_batch_count = 1;
-		m_batch[0] = (struct alarm_event){source, side, active, threshold, value, hyst, 0};
+		m_batch[0] = ev;
 		alarm_batch_flush();
 		k_mutex_unlock(&m_lock);
 		return;
@@ -227,9 +225,8 @@ static void alarm_collect(uint8_t source, bool active, uint8_t side, int16_t thr
 
 	m_window_total++;
 	if (m_batch_count < ALARM_BATCH_MAX) {
-		uint16_t rel = (uint16_t)MIN((now - m_window_start_ms) / 1000, 0xFFFF);
-		m_batch[m_batch_count++] =
-			(struct alarm_event){source, side, active, threshold, value, hyst, rel};
+		ev.rel_s = (uint32_t)MIN((now - m_window_start_ms) / 1000, 0xFFFF);
+		m_batch[m_batch_count++] = ev;
 	}
 
 	k_mutex_unlock(&m_lock);
@@ -263,26 +260,28 @@ static int read_notify_bools(enum app_alarm_source source, bool *act, bool *deac
 	}
 }
 
-/* Per-source wire scaling for the fPort-3 detail (threshold sources only): temp
- * and humidity ×100, pressure already hPa×10 from the poll call. */
-static int16_t alarm_scale(enum app_alarm_source source, float v)
+/* Per-source wire scaling for the fPort-3 detail value (threshold sources only):
+ * temp and humidity ×100, pressure already hPa×10 from the poll call. */
+static int32_t alarm_scale(enum app_alarm_source source, float v)
 {
 	switch (source) {
 	case APP_ALARM_SOURCE_TEMPERATURE:
 	case APP_ALARM_SOURCE_T1_TEMPERATURE:
 	case APP_ALARM_SOURCE_T2_TEMPERATURE:
 	case APP_ALARM_SOURCE_HUMIDITY:
-		return (int16_t)lroundf(v * 100.0f);
+		return (int32_t)lroundf(v * 100.0f);
 	case APP_ALARM_SOURCE_PRESSURE:
-		return (int16_t)lroundf(v);
+		return (int32_t)lroundf(v);
 	default:
-		return ALARM_VALUE_SENTINEL;
+		return 0;
 	}
 }
 
 /* Evaluate one threshold with hysteresis. Latches into m_alarm_active[source],
- * sets *should_send on every edge, and records the edge (source/side/threshold/
- * value/hysteresis) for the fPort-3 detail batch. Returns the latched state. */
+ * sets *should_send on every edge, and records the edge (source/edge/side +
+ * scaled current value) for the fPort-3 detail batch. The deactivate edge
+ * carries the side latched at activation (m_alarm_side). Returns the latched
+ * state. */
 static bool eval_threshold(enum app_alarm_source source, bool enabled, float value, float lo,
 			   float hi, float hst, bool *should_send)
 {
@@ -298,21 +297,21 @@ static bool eval_threshold(enum app_alarm_source source, bool enabled, float val
 			LOG_INF("Deactivated alarm for %s", app_alarm_source_name(source));
 			*active = false;
 			*should_send = true;
-			alarm_collect(source, false, ALARM_SIDE_NA, ALARM_VALUE_SENTINEL,
-				      alarm_scale(source, value), alarm_scale(source, hst));
+			alarm_collect(source, false, m_alarm_side[source], true,
+				      alarm_scale(source, value));
 		}
 	} else if (value < lo - hst) {
 		LOG_INF("Activated alarm for %s (lo)", app_alarm_source_name(source));
 		*active = true;
 		*should_send = true;
-		alarm_collect(source, true, ALARM_SIDE_LO, alarm_scale(source, lo),
-			      alarm_scale(source, value), alarm_scale(source, hst));
+		m_alarm_side[source] = ALARM_SIDE_LO;
+		alarm_collect(source, true, ALARM_SIDE_LO, true, alarm_scale(source, value));
 	} else if (value > hi + hst) {
 		LOG_INF("Activated alarm for %s (hi)", app_alarm_source_name(source));
 		*active = true;
 		*should_send = true;
-		alarm_collect(source, true, ALARM_SIDE_HI, alarm_scale(source, hi),
-			      alarm_scale(source, value), alarm_scale(source, hst));
+		m_alarm_side[source] = ALARM_SIDE_HI;
+		alarm_collect(source, true, ALARM_SIDE_HI, true, alarm_scale(source, value));
 	}
 
 	return *active;
@@ -421,9 +420,8 @@ void app_alarm_event(enum app_alarm_source source, bool active)
 
 	if (send) {
 		alarm_lrw_send();
-		/* Discrete sources have no threshold/value — sentinels, side N/A. */
-		alarm_collect(source, active, ALARM_SIDE_NA, ALARM_VALUE_SENTINEL,
-			      ALARM_VALUE_SENTINEL, ALARM_VALUE_SENTINEL);
+		/* Discrete sources have no value — side none, value absent. */
+		alarm_collect(source, active, ALARM_SIDE_NONE, false, 0);
 	}
 
 	if (cb) {
