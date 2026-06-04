@@ -70,11 +70,71 @@ The decoded field set (voltage, temperature, humidity, pressure/altitude, illumi
 
 ## 3. Alarm-detail batch on fPort 3 (NEW)
 
-When alarms occur, the device sends a batch of alarm events on **fPort 3**. Decoded fields:
+When alarms occur, the device sends a batch of alarm events on **fPort 3** as a **protobuf `AlarmReport`** (same wire family as the fPort-2 telemetry and the fPort-85 responses), so it decodes with the generated codec rather than a packed byte layout.
 
-- `total` — total alarms in the window (may exceed the records carried if rate-limited); `truncated` flags this.
-- `base_time` — Unix timestamp the records are relative to.
-- `alarms[]` — each with `source` (`temperature` / `humidity` / `pressure` / `t1-temperature` / `t2-temperature` / `hall-left` / `hall-right` / `pir` / `input-a` / `input-b`), `event` (`activate` / `deactivate`), `side` (`lo` / `hi` / `na`), `threshold` / `value` / `hysteresis` (sensor units; `null` for discrete sources), and `time`.
+### Message
+
+```proto
+message AlarmReport {
+    uint32 base_time = 1;            // Unix time the events are relative to (uptime-s until the clock syncs)
+    uint32 total     = 2;            // every alarm in the window (may exceed events[] if trimmed)
+    repeated AlarmEvent events = 3;  // up to 8, further trimmed to the data-rate budget
+}
+message AlarmEvent {
+    Source source = 1;               // which sensor
+    Edge   edge   = 2;               // ACTIVATE / DEACTIVATE
+    Side   side   = 3;               // SIDE_NONE / SIDE_LO / SIDE_HI
+    uint32 rel_s  = 4;               // seconds since base_time
+    optional sint32 value = 5;       // current reading, scaled; absent for discrete sources
+}
+```
+
+Each event is described by **three orthogonal enums** — an integration that only wants "did `hall-left` activate?" or "did `temperature` cross its high bound?" reads one field instead of unpacking a combined flag.
+
+### Decoded fields (`ttn.js`)
+
+- `base_time` — Unix timestamp the events are relative to.
+- `total` — total alarms that occurred in the window. `truncated` is `true` when `total` exceeds the events actually carried (some were dropped to fit the data rate).
+- `alarms[]` — each with:
+  - `source` — `temperature` / `humidity` / `pressure` / `t1-temperature` / `t2-temperature` / `hall-left` / `hall-right` / `pir` / `input-a` / `input-b`
+  - `event` — `activate` / `deactivate`
+  - `side` — `hi` / `lo` for threshold sources, `none` for discrete sources (hall/input/PIR). The **deactivate** edge keeps the side that was crossed on activation.
+  - `value` — the current reading at the edge (temperature/humidity in °C/%RH, pressure in hPa); `null` for discrete sources. *(Threshold and hysteresis are not carried — they are the device's own configuration.)*
+  - `time` — `base_time + rel_s` (per-event Unix time)
+
+### When the messages are sent (fPort 2 vs fPort 3)
+
+An alarm edge produces **two independent uplinks**:
+
+| Port | Content | Timing |
+|---|---|---|
+| **fPort 2** | a normal telemetry snapshot (current sensor values) | **immediately** on the first edge, so the backend sees fresh values at once |
+| **fPort 3** | the `AlarmReport` with the list of edges collected during the window | **at the end of the collection window** (`alarm-limit` seconds after the first edge) |
+
+The collection window is **shared across all sources**: the first edge opens it, and every edge during the window (any sensor, both activate and deactivate) accumulates into **one** `AlarmReport`. The immediate fPort-2 telemetry is **rate-limited to once per window** (`alarm-limit`, see §7) — the first edge sends it, later edges in the same window only add to the batch. Periodic telemetry continues on its own `interval_report` cadence.
+
+**Example — temperature crosses its high threshold** (`alarm-limit = 20 s`):
+
+```
+t = 0 s    threshold crossed → fPort 2 telemetry (immediate); 20 s window opens
+t ≈ 20 s   window flushes → fPort 3 AlarmReport
+           { total:1, alarms:[{ source:"temperature", event:"activate", side:"hi", value:26.5, time:base }] }
+```
+
+When the temperature later falls back below the band, the deactivate edge behaves the same way (immediate fPort-2 if the rate-limit has elapsed, then `event:"deactivate", side:"hi"` in the next window's fPort-3).
+
+**Example — a hall sensor is activated then deactivated within one window:**
+
+```
+t = 0 s    magnet applied   → hall-left activate   → fPort 2 (immediate); window opens
+t = 8 s    magnet removed   → hall-left deactivate → batched (fPort-2 suppressed by rate-limit)
+t ≈ 20 s   window flushes   → fPort 3 AlarmReport {
+             total:2, alarms:[
+               { source:"hall-left", event:"activate",   side:"none", value:null, time:base+0 },
+               { source:"hall-left", event:"deactivate", side:"none", value:null, time:base+8 } ] }
+```
+
+> Hall/input/PIR edges are only raised (and only collected) when their `*-notify-act` / `*-notify-deact` configuration is enabled and the sensor's `cap-*` capability is on. With `alarm-limit = 0` there is no window: each edge is sent immediately as its own one-event fPort-3 frame and the fPort-2 telemetry is not rate-limited.
 
 ---
 

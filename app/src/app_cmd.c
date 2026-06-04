@@ -466,3 +466,37 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 	return 0;
 }
 #endif /* APP_CMD_HAVE_HISTORY */
+
+int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total,
+			       const struct app_cmd_alarm_event *events, size_t n_events,
+			       uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	if (!out || !out_len || (n_events > 0 && !events)) {
+		return -EINVAL;
+	}
+
+	AlarmReport report = AlarmReport_init_zero;
+	report.base_time = base_time;
+	report.total = total;
+
+	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
+	for (size_t i = 0; i < n; i++) {
+		AlarmEvent *ev = &report.events[i];
+		ev->source = (AlarmEvent_Source)events[i].source;
+		ev->edge = (AlarmEvent_Edge)events[i].edge;
+		ev->side = (AlarmEvent_Side)events[i].side;
+		ev->rel_s = events[i].rel_s;
+		ev->has_value = events[i].has_value;
+		ev->value = events[i].value;
+	}
+	report.events_count = (pb_size_t)n;
+
+	pb_ostream_t ostream = pb_ostream_from_buffer(out, out_cap);
+	if (!pb_encode(&ostream, AlarmReport_fields, &report)) {
+		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
+		return -EMSGSIZE;
+	}
+
+	*out_len = ostream.bytes_written;
+	return 0;
+}

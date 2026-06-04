@@ -164,26 +164,32 @@ test("history sentinel values decode to null", () => {
   assert.equal(rec.humidity, null);    // 0xff sentinel
 });
 
-// --- Uplink: alarm-detail batch (fPort 3, #27) ----------------------------
-function leU16(v) { return [v & 0xff, (v >> 8) & 0xff]; }
-function leI16(v) { const u = v < 0 ? v + 0x10000 : v; return [u & 0xff, (u >> 8) & 0xff]; }
-function leU32(v) { return [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >>> 24) & 0xff]; }
-function alarmRec(source, side, active, rel, thr, val, hyst) {
-  return [(source << 3) | (side << 1) | (active ? 1 : 0)]
-    .concat(leU16(rel)).concat(leI16(thr)).concat(leI16(val)).concat(leI16(hyst));
+// --- Uplink: alarm-detail batch (fPort 3, #27, protobuf AlarmReport) -------
+// AlarmReport{ base_time(1), total(2), repeated AlarmEvent events(3) };
+// AlarmEvent{ source(1), edge(2), side(3), rel_s(4), optional sint32 value(5) }.
+// proto3 omits zero fields — the builders mirror that so default-to-0 decoding
+// (activate / side none / hall-left source) is exercised.
+function pbSint(tag, v) { return pbTV(tag, v < 0 ? -v * 2 - 1 : v * 2); }
+function alarmEvent(source, edge, side, rel, value) {
+  let e = [];
+  if (source) e = e.concat(pbTV(1, source));
+  if (edge) e = e.concat(pbTV(2, edge));
+  if (side) e = e.concat(pbTV(3, side));
+  if (rel) e = e.concat(pbTV(4, rel));
+  if (value !== null && value !== undefined) e = e.concat(pbSint(5, value));
+  return e;
 }
-function buildAlarmFrame(total, base, recs) {
-  let b = [total & 0xff].concat(leU32(base));
-  for (const r of recs) b = b.concat(r);
+function buildAlarmReport(base, total, events) {
+  let b = pbTV(1, base).concat(pbTV(2, total));
+  for (const e of events) b = b.concat(pbLD(3, e));
   return b;
 }
-const SENT = 0x8000; // discrete N/A sentinel
 
 test("decodeUplink decodes an fPort-3 alarm batch (threshold + discrete)", () => {
   const base = 1780000000;
-  const f = buildAlarmFrame(2, base, [
-    alarmRec(5, 2, true, 10, 2000, 2660, 0),    // temperature, HI, activate, 20→26.6 °C
-    alarmRec(0, 0, true, 15, SENT, SENT, SENT), // hall-left, discrete activate
+  const f = buildAlarmReport(base, 2, [
+    alarmEvent(5, 0, 2, 10, 2660), // temperature, activate, HI, 26.6 °C
+    alarmEvent(0, 0, 0, 15, null), // hall-left, activate, side none, discrete
   ]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
 
@@ -195,19 +201,19 @@ test("decodeUplink decodes an fPort-3 alarm batch (threshold + discrete)", () =>
   assert.equal(d.alarms[0].source, "temperature");
   assert.equal(d.alarms[0].event, "activate");
   assert.equal(d.alarms[0].side, "hi");
-  assert.equal(d.alarms[0].threshold, 20);
   assert.equal(d.alarms[0].value, 26.6);
   assert.equal(d.alarms[0].time, base + 10);
 
   assert.equal(d.alarms[1].source, "hall-left");
-  assert.equal(d.alarms[1].side, "na");
-  assert.equal(d.alarms[1].threshold, null); // sentinel → null
-  assert.equal(d.alarms[1].value, null);
+  assert.equal(d.alarms[1].event, "activate");
+  assert.equal(d.alarms[1].side, "none");
+  assert.equal(d.alarms[1].value, null); // discrete → absent
   assert.equal(d.alarms[1].time, base + 15);
 });
 
-test("fPort-3 batch: humidity deactivate + truncation flag (total > records)", () => {
-  const f = buildAlarmFrame(5, 1780000000, [alarmRec(6, 1, false, 0, 5000, 4500, 200)]);
+test("fPort-3 batch: humidity deactivate + truncation flag (total > events)", () => {
+  const base = 1780000000;
+  const f = buildAlarmReport(base, 5, [alarmEvent(6, 1, 1, 0, 4500)]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
   assert.equal(d.total, 5);
   assert.equal(d.alarms.length, 1);
@@ -215,9 +221,17 @@ test("fPort-3 batch: humidity deactivate + truncation flag (total > records)", (
   assert.equal(d.alarms[0].source, "humidity");
   assert.equal(d.alarms[0].event, "deactivate");
   assert.equal(d.alarms[0].side, "lo");
-  assert.equal(d.alarms[0].threshold, 50);
   assert.equal(d.alarms[0].value, 45);
-  assert.equal(d.alarms[0].hysteresis, 2);
+  assert.equal(d.alarms[0].time, base);
+});
+
+test("fPort-3 batch: negative threshold value round-trips via sint zigzag", () => {
+  const base = 1780000000;
+  const f = buildAlarmReport(base, 1, [alarmEvent(5, 0, 1, 5, -1234)]); // temp -12.34 °C
+  const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
+  assert.equal(d.alarms[0].source, "temperature");
+  assert.equal(d.alarms[0].side, "lo");
+  assert.equal(d.alarms[0].value, -12.34);
 });
 
 // --- Negative: a corrupted frame must change the result (tests are sensitive) ---
