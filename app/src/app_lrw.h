@@ -64,6 +64,11 @@ uint8_t app_lrw_get_max_payload(void);
  * a warning if a prior response hasn't been transmitted yet. */
 int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len);
 
+/* Stage an alarm-detail batch (issue #27) for the next uplink on fPort 3. Own
+ * slot, drained after the command response and before telemetry, so it never
+ * collides with app_lrw_queue_response(). Returns 0, -EINVAL, or -EMSGSIZE. */
+int app_lrw_send_alarm(const uint8_t *buf, size_t len);
+
 /* Start a device-driven history replay (issue #52): stream every stored record
  * in [from_unix, to_unix] back as N HistoryFrame uplinks on the command port,
  * back-to-back ASAP (duty-cycle permitting), echoing `seq`. Returns true when a
