@@ -687,15 +687,66 @@ function decodeDownlink(input) {
   return { data: { bytes_hex: _pbBytesToHex(input.bytes) }, warnings: [], errors: [] };
 }
 
+// fPort 3: alarm-detail batch (#27). Header [total u8][base_unix u32 LE] then
+// records [hdr u8: source<<3 | side<<1 | active][rel_s u16][threshold i16]
+// [value i16][hyst i16]. threshold/value/hyst scaled like the periodic payload
+// (temp/hum ×100, pressure ×10); 0x8000 = N/A (discrete sources). Per-event
+// time = base_unix + rel_s. `total` may exceed the records present (DR-capped).
+var _ALARM_SOURCES = ["hall-left", "hall-right", "pir", "input-a", "input-b",
+  "temperature", "humidity", "pressure", "t1-temperature", "t2-temperature"];
+var _ALARM_SIDES = ["na", "lo", "hi"];
+var _ALARM_SENTINEL = 0x8000;
+
+function _alarmUnscale(source, raw) {
+  if (raw === _ALARM_SENTINEL) return null;
+  var v = raw > 0x7fff ? raw - 0x10000 : raw; // int16
+  return source === 7 ? v / 10 : v / 100;     // 7 = pressure (hPa×10)
+}
+
+function decodeAlarmBatch(bytes) {
+  if (bytes.length < 5) return { total: 0, base_time: 0, alarms: [] };
+  var total = bytes[0];
+  var base = (bytes[1] | (bytes[2] << 8) | (bytes[3] << 16) | (bytes[4] << 24)) >>> 0;
+  var out = { total: total, base_time: base, alarms: [] };
+  var p = 5;
+  while (p + 9 <= bytes.length) {
+    var hdr = bytes[p++];
+    var source = hdr >> 3;
+    var side = (hdr >> 1) & 0x3;
+    var active = (hdr & 1) !== 0;
+    var rel = bytes[p] | (bytes[p + 1] << 8); p += 2;
+    var thr = bytes[p] | (bytes[p + 1] << 8); p += 2;
+    var val = bytes[p] | (bytes[p + 1] << 8); p += 2;
+    var hyst = bytes[p] | (bytes[p + 1] << 8); p += 2;
+    out.alarms.push({
+      source: _ALARM_SOURCES[source] || ("src" + source),
+      event: active ? "activate" : "deactivate",
+      side: _ALARM_SIDES[side] || "na",
+      threshold: _alarmUnscale(source, thr),
+      value: _alarmUnscale(source, val),
+      hysteresis: _alarmUnscale(source, hyst),
+      time: (base + rel) >>> 0,
+    });
+  }
+  out.truncated = out.alarms.length < total; // some alarms dropped to fit the DR
+  return out;
+}
+
 function decodeUplink(input) {
 
   // fPort 85: DownlinkResponse (Ack / Info / Error from command dispatcher).
   if (input.fPort === 85) {
+
     return {
       data: decodeDownlinkResponse(input.bytes),
       warnings: [],
       errors: []
     };
+  }
+
+  // fPort 3: alarm-detail batch (#27).
+  if (input.fPort === 3) {
+    return { data: decodeAlarmBatch(input.bytes), warnings: [], errors: [] };
   }
 
   // fPort 2: protobuf Telemetry (new format). fPort 1 stays the legacy bitmap.
@@ -916,6 +967,6 @@ function decodeUplink(input) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     decodeUplink, encodeDownlink, decodeDownlink, Decode,
-    decodeTelemetry, decodeDownlinkResponse,
+    decodeTelemetry, decodeDownlinkResponse, decodeAlarmBatch,
   };
 }

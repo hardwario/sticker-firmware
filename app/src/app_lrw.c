@@ -146,6 +146,14 @@ static size_t m_pending_response_len;
 static uint8_t m_pending_response_port;
 static K_MUTEX_DEFINE(m_pending_response_lock);
 
+/* Pending alarm-detail batch (#27) staged by app_lrw_send_alarm(), sent on
+ * fPort 3. Own slot so it never collides with the command response (port 85);
+ * send_work_handler drains command first, then alarm, then telemetry. */
+#define APP_LRW_ALARM_PORT 3
+static uint8_t m_pending_alarm_buf[APP_LRW_RESPONSE_BUF_SIZE];
+static size_t m_pending_alarm_len;
+static K_MUTEX_DEFINE(m_pending_alarm_lock);
+
 /* Inbound downlink request on port 85 captured from downlink_callback().
  * The callback runs on the LoRaMac stack (restricted), so it only copies the
  * payload and defers parsing to m_dl_request_work on m_work_q. */
@@ -720,10 +728,36 @@ static void send_work_handler(struct k_work *work)
 		} else {
 			LOG_INF("Response sent on port %u (%zu B)", port, len);
 		}
-		k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report), K_FOREVER);
+		/* If an alarm batch is also queued, send it ASAP; else resume periodic. */
+		if (m_pending_alarm_len) {
+			k_work_submit_to_queue(&m_work_q, &m_send_work);
+		} else {
+			k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report),
+				      K_FOREVER);
+		}
 		return;
 	}
 	k_mutex_unlock(&m_pending_response_lock);
+
+	/* Drain a pending alarm-detail batch (fPort 3) before composing telemetry. */
+	k_mutex_lock(&m_pending_alarm_lock, K_FOREVER);
+	if (m_pending_alarm_len) {
+		uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
+		size_t len = m_pending_alarm_len;
+		memcpy(buf, m_pending_alarm_buf, len);
+		m_pending_alarm_len = 0;
+		k_mutex_unlock(&m_pending_alarm_lock);
+
+		ret = lorawan_send(APP_LRW_ALARM_PORT, buf, len, LORAWAN_MSG_UNCONFIRMED);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("lorawan_send(alarm)", ret);
+		} else {
+			LOG_INF("Alarm batch sent on port %u (%zu B)", APP_LRW_ALARM_PORT, len);
+		}
+		k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report), K_FOREVER);
+		return;
+	}
+	k_mutex_unlock(&m_pending_alarm_lock);
 
 	/* Sample fresh sensor values for a new report (the snapshot is taken inside
 	 * app_compose on the first frame). */
@@ -1204,6 +1238,28 @@ int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 
 	/* Wake send path so the response leaves at the next jitter window
 	 * instead of waiting for the periodic timer. */
+	k_work_submit_to_queue(&m_work_q, &m_send_work);
+	return 0;
+}
+
+int app_lrw_send_alarm(const uint8_t *buf, size_t len)
+{
+	if (!buf || len == 0) {
+		return -EINVAL;
+	}
+	if (len > sizeof(m_pending_alarm_buf)) {
+		LOG_ERR("Alarm batch too large: %zu B (max %zu)", len, sizeof(m_pending_alarm_buf));
+		return -EMSGSIZE;
+	}
+
+	k_mutex_lock(&m_pending_alarm_lock, K_FOREVER);
+	if (m_pending_alarm_len) {
+		LOG_WRN("Overwriting unsent alarm batch (%zu B)", m_pending_alarm_len);
+	}
+	memcpy(m_pending_alarm_buf, buf, len);
+	m_pending_alarm_len = len;
+	k_mutex_unlock(&m_pending_alarm_lock);
+
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
 	return 0;
 }

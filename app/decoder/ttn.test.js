@@ -164,6 +164,62 @@ test("history sentinel values decode to null", () => {
   assert.equal(rec.humidity, null);    // 0xff sentinel
 });
 
+// --- Uplink: alarm-detail batch (fPort 3, #27) ----------------------------
+function leU16(v) { return [v & 0xff, (v >> 8) & 0xff]; }
+function leI16(v) { const u = v < 0 ? v + 0x10000 : v; return [u & 0xff, (u >> 8) & 0xff]; }
+function leU32(v) { return [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >>> 24) & 0xff]; }
+function alarmRec(source, side, active, rel, thr, val, hyst) {
+  return [(source << 3) | (side << 1) | (active ? 1 : 0)]
+    .concat(leU16(rel)).concat(leI16(thr)).concat(leI16(val)).concat(leI16(hyst));
+}
+function buildAlarmFrame(total, base, recs) {
+  let b = [total & 0xff].concat(leU32(base));
+  for (const r of recs) b = b.concat(r);
+  return b;
+}
+const SENT = 0x8000; // discrete N/A sentinel
+
+test("decodeUplink decodes an fPort-3 alarm batch (threshold + discrete)", () => {
+  const base = 1780000000;
+  const f = buildAlarmFrame(2, base, [
+    alarmRec(5, 2, true, 10, 2000, 2660, 0),    // temperature, HI, activate, 20→26.6 °C
+    alarmRec(0, 0, true, 15, SENT, SENT, SENT), // hall-left, discrete activate
+  ]);
+  const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
+
+  assert.equal(d.total, 2);
+  assert.equal(d.base_time, base);
+  assert.equal(d.truncated, false);
+  assert.equal(d.alarms.length, 2);
+
+  assert.equal(d.alarms[0].source, "temperature");
+  assert.equal(d.alarms[0].event, "activate");
+  assert.equal(d.alarms[0].side, "hi");
+  assert.equal(d.alarms[0].threshold, 20);
+  assert.equal(d.alarms[0].value, 26.6);
+  assert.equal(d.alarms[0].time, base + 10);
+
+  assert.equal(d.alarms[1].source, "hall-left");
+  assert.equal(d.alarms[1].side, "na");
+  assert.equal(d.alarms[1].threshold, null); // sentinel → null
+  assert.equal(d.alarms[1].value, null);
+  assert.equal(d.alarms[1].time, base + 15);
+});
+
+test("fPort-3 batch: humidity deactivate + truncation flag (total > records)", () => {
+  const f = buildAlarmFrame(5, 1780000000, [alarmRec(6, 1, false, 0, 5000, 4500, 200)]);
+  const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
+  assert.equal(d.total, 5);
+  assert.equal(d.alarms.length, 1);
+  assert.equal(d.truncated, true); // 5 alarms occurred, only 1 fit the frame
+  assert.equal(d.alarms[0].source, "humidity");
+  assert.equal(d.alarms[0].event, "deactivate");
+  assert.equal(d.alarms[0].side, "lo");
+  assert.equal(d.alarms[0].threshold, 50);
+  assert.equal(d.alarms[0].value, 45);
+  assert.equal(d.alarms[0].hysteresis, 2);
+});
+
 // --- Negative: a corrupted frame must change the result (tests are sensitive) ---
 test("a tampered command byte does not silently decode to the original", () => {
   const good = codec.decodeDownlink({ bytes: hex("08032200"), fPort: 85 }).data;
