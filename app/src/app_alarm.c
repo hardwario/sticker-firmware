@@ -22,14 +22,40 @@
 
 LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 
-#define APP_ALARM_BOTH_BOOL_RED_HOLD_MS 10000
-
 static bool m_alarm_active[APP_ALARM_SOURCE_COUNT];
 static int64_t m_both_bool_expiry_ms[APP_ALARM_SOURCE_COUNT];
+static int64_t m_last_alarm_send_ms;
 static app_alarm_event_cb m_event_cb;
 static void *m_event_cb_user_data;
 
 K_MUTEX_DEFINE(m_lock);
+
+/* Red-LED hold for both-mode and pulse sources, in ms (config alarm_notif_time). */
+static inline int64_t notif_hold_ms(void)
+{
+	return (int64_t)g_app_config.alarm_notif_time * 1000;
+}
+
+/* Send an alarm uplink, rate-limited by the global alarm_limit (seconds). The
+ * first alarm goes out immediately; further alarms within the window are
+ * suppressed (the source latch, LED and counters still update elsewhere — only
+ * the LoRaWAN message is throttled). alarm_limit == 0 disables the limit. */
+static void alarm_lrw_send(void)
+{
+#if defined(CONFIG_LORAWAN)
+	int limit = g_app_config.alarm_limit;
+	int64_t now = k_uptime_get();
+
+	if (limit > 0 && m_last_alarm_send_ms != 0 &&
+	    (now - m_last_alarm_send_ms) < (int64_t)limit * 1000) {
+		LOG_INF("Alarm uplink rate-limited (limit %d s)", limit);
+		return;
+	}
+
+	m_last_alarm_send_ms = now;
+	app_lrw_send();
+#endif /* defined(CONFIG_LORAWAN) */
+}
 
 static int read_notify_bools(enum app_alarm_source source, bool *act, bool *deact)
 {
@@ -51,7 +77,7 @@ static int read_notify_bools(enum app_alarm_source source, bool *act, bool *deac
 		*deact = g_app_config.input_b_notify_deact;
 		return 0;
 	case APP_ALARM_SOURCE_PIR_MOTION:
-		*act = false;
+		*act = g_app_config.pir_notify_act && g_app_config.cap_pir_detector;
 		*deact = false;
 		return 0;
 	default:
@@ -150,9 +176,7 @@ bool app_alarm_poll(void)
 	k_mutex_unlock(&m_lock);
 
 	if (should_send) {
-#if defined(CONFIG_LORAWAN)
-		app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
+		alarm_lrw_send();
 	}
 
 	return alarm;
@@ -174,10 +198,12 @@ void app_alarm_event(enum app_alarm_source source, bool active)
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 
-	/* Both bools set: every edge (act or deact) extends the red-LED hold 10 s further. */
-	if (notify_act && notify_deact) {
+	/* Both bools set, or a pulse source (PIR is activation-only): the latch has
+	 * no clearing edge, so hold it for alarm_notif_time and let app_alarm_poll()
+	 * auto-clear it. Otherwise the latch tracks the configured edge. */
+	if ((notify_act && notify_deact) || (source == APP_ALARM_SOURCE_PIR_MOTION && notify_act)) {
 		m_alarm_active[source] = true;
-		m_both_bool_expiry_ms[source] = k_uptime_get() + APP_ALARM_BOTH_BOOL_RED_HOLD_MS;
+		m_both_bool_expiry_ms[source] = k_uptime_get() + notif_hold_ms();
 	} else if (notify_act) {
 		m_alarm_active[source] = active;
 		m_both_bool_expiry_ms[source] = 0;
@@ -194,10 +220,8 @@ void app_alarm_event(enum app_alarm_source source, bool active)
 
 	k_mutex_unlock(&m_lock);
 
-	if (send && source != APP_ALARM_SOURCE_PIR_MOTION) {
-#if defined(CONFIG_LORAWAN)
-		app_lrw_send();
-#endif /* defined(CONFIG_LORAWAN) */
+	if (send) {
+		alarm_lrw_send();
 	}
 
 	if (cb) {

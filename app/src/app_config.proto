@@ -91,6 +91,9 @@ message AppConfigMessage {
         optional bool cap_1w_machine_probe = 48;
         optional bool history_enable = 49;
         optional uint32 history_sensors = 50;
+        optional uint32 alarm_limit = 51;
+        optional uint32 alarm_notif_time = 52;
+        optional bool pir_notify_act = 53;
     }
 }
 // END GENERATED CONFIG

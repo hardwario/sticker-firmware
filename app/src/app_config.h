@@ -101,6 +101,9 @@ struct app_config {
 	bool cap_1w_machine_probe;
 	bool history_enable;
 	uint32_t history_sensors;
+	int alarm_limit;
+	int alarm_notif_time;
+	bool pir_notify_act;
 };
 
 extern struct app_config g_app_config;
