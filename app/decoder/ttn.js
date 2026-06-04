@@ -420,6 +420,7 @@ function decodeTelemetry(bytes) {
         if (f & (1 << 1)) d.input_b_notify_deact = true;
         if (f & (1 << 2)) d.input_b_is_active = true;
         break;
+      case 26: d.accel_motion_count = v.value; break;
       default: break; /* unknown field: ignore (forward-compatible) */
     }
   }

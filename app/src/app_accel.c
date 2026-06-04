@@ -147,3 +147,102 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 
 	return 0;
 }
+
+/* ---- Motion (any-motion) detection -------------------------------------- */
+
+static app_accel_motion_cb_t m_motion_cb;
+static void *m_motion_user_data;
+
+static struct sensor_trigger m_motion_trig = {
+	.type = SENSOR_TRIG_DELTA,
+	.chan = SENSOR_CHAN_ACCEL_XYZ,
+};
+
+/* Slope threshold (m/s^2) + duration (samples at the configured ODR) per level.
+ * 4 g full-scale; ~1.5 / 0.8 / 0.3 g map to ~15 / 8 / 3 m/s^2. Tune on HW. */
+static void sensitivity_params(enum app_config_motion_sensitivity level, int *th_ms2, int *dur)
+{
+	switch (level) {
+	case APP_CONFIG_MOTION_SENSITIVITY_LOW:
+		*th_ms2 = 15;
+		*dur = 3;
+		break;
+	case APP_CONFIG_MOTION_SENSITIVITY_MEDIUM:
+		*th_ms2 = 8;
+		*dur = 2;
+		break;
+	case APP_CONFIG_MOTION_SENSITIVITY_HIGH:
+		*th_ms2 = 3;
+		*dur = 1;
+		break;
+	default:
+		*th_ms2 = 0;
+		*dur = 0;
+		break;
+	}
+}
+
+static void motion_trigger_handler(const struct device *dev, const struct sensor_trigger *trig)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(trig);
+
+	if (m_motion_cb) {
+		m_motion_cb(m_motion_user_data);
+	}
+}
+
+int app_accel_set_motion_sensitivity(enum app_config_motion_sensitivity level)
+{
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(lis2dh12));
+	int ret;
+
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
+	}
+
+	if (level == APP_CONFIG_MOTION_SENSITIVITY_OFF) {
+		ret = sensor_trigger_set(dev, &m_motion_trig, NULL);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("sensor_trigger_set(disable)", ret);
+			return ret;
+		}
+		LOG_INF("Motion detection disabled");
+		return 0;
+	}
+
+	int th_ms2, dur;
+	sensitivity_params(level, &th_ms2, &dur);
+
+	struct sensor_value th = {.val1 = th_ms2, .val2 = 0};
+	ret = sensor_attr_set(dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_TH, &th);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("sensor_attr_set(SLOPE_TH)", ret);
+		return ret;
+	}
+
+	struct sensor_value sv_dur = {.val1 = dur, .val2 = 0};
+	ret = sensor_attr_set(dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_DUR, &sv_dur);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("sensor_attr_set(SLOPE_DUR)", ret);
+		return ret;
+	}
+
+	ret = sensor_trigger_set(dev, &m_motion_trig, motion_trigger_handler);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("sensor_trigger_set", ret);
+		return ret;
+	}
+
+	LOG_INF("Motion detection armed (level %d, th=%d m/s^2, dur=%d samples)", (int)level,
+		th_ms2, dur);
+	return 0;
+}
+
+int app_accel_init_motion(app_accel_motion_cb_t cb, void *user_data)
+{
+	m_motion_cb = cb;
+	m_motion_user_data = user_data;
+	return app_accel_set_motion_sensitivity(g_app_config.motion_sensitivity);
+}

@@ -84,6 +84,23 @@ static void pyq1648_event_handler(void *user_data)
 	app_alarm_event(APP_ALARM_SOURCE_PIR_MOTION, true);
 }
 
+#if defined(CONFIG_LIS2DH)
+/* LIS2DH any-motion interrupt (mirrors the PIR path): count the event and raise
+ * the accelerometer-motion alarm source. The alarm layer handles the orange
+ * LED, the rate-limited uplink (alarm_limit) and the red-LED hold. */
+static void accel_motion_handler(void *user_data)
+{
+	ARG_UNUSED(user_data);
+	LOG_INF("Accelerometer motion detected");
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	g_app_sensor_data.accel_motion_count++;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+
+	app_alarm_event(APP_ALARM_SOURCE_ACCEL_MOTION, true);
+}
+#endif /* defined(CONFIG_LIS2DH) */
+
 int app_sensor_init(void)
 {
 	int ret;
@@ -137,6 +154,14 @@ int app_sensor_init(void)
 			app_pyq1648_set_callback(pyq1648_event_handler, NULL);
 		}
 	}
+
+#if defined(CONFIG_LIS2DH)
+	ret = app_accel_init_motion(accel_motion_handler, NULL);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_accel_init_motion", ret);
+		res = res ? res : ret;
+	}
+#endif /* defined(CONFIG_LIS2DH) */
 
 	if (g_app_config.cap_1w_thermometer || g_app_config.cap_1w_machine_probe) {
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));

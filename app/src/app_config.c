@@ -56,6 +56,7 @@ static const struct app_config m_app_config_defaults = {
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.pir_notify_act = false,
+	.motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
 
 static struct app_config m_app_config = {
@@ -82,6 +83,7 @@ static struct app_config m_app_config = {
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.pir_notify_act = false,
+	.motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
@@ -227,6 +229,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.alarm_notif_time));
 	SETTINGS_SET("pir-notify-act", &m_app_config.pir_notify_act,
 		     sizeof(m_app_config.pir_notify_act));
+	SETTINGS_SET("motion-sensitivity", &m_app_config.motion_sensitivity,
+		     sizeof(m_app_config.motion_sensitivity));
 
 #undef SETTINGS_SET
 
@@ -374,6 +378,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.alarm_notif_time));
 	EXPORT_FUNC("pir-notify-act", &m_app_config.pir_notify_act,
 		    sizeof(m_app_config.pir_notify_act));
+	EXPORT_FUNC("motion-sensitivity", &m_app_config.motion_sensitivity,
+		    sizeof(m_app_config.motion_sensitivity));
 
 #undef EXPORT_FUNC
 
@@ -976,6 +982,29 @@ static void print_pir_notify_act(const struct shell *shell)
 		    m_app_config.pir_notify_act ? "true" : "false");
 }
 
+static void print_motion_sensitivity(const struct shell *shell)
+{
+	const char *str;
+	switch (m_app_config.motion_sensitivity) {
+	case APP_CONFIG_MOTION_SENSITIVITY_OFF:
+		str = "off";
+		break;
+	case APP_CONFIG_MOTION_SENSITIVITY_LOW:
+		str = "low";
+		break;
+	case APP_CONFIG_MOTION_SENSITIVITY_MEDIUM:
+		str = "medium";
+		break;
+	case APP_CONFIG_MOTION_SENSITIVITY_HIGH:
+		str = "high";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " motion-sensitivity %s", str);
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -1045,6 +1074,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_alarm_limit(shell);
 	print_alarm_notif_time(shell);
 	print_pir_notify_act(shell);
+	print_motion_sensitivity(shell);
 
 	return 0;
 }
@@ -1799,6 +1829,34 @@ static int cmd_pir_notify_act(const struct shell *shell, size_t argc, char **arg
 	return cmd_bool(shell, argc, argv, &m_app_config.pir_notify_act, print_pir_notify_act);
 }
 
+static int cmd_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_motion_sensitivity(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (!strcmp(argv[1], "off")) {
+		m_app_config.motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
+	} else if (!strcmp(argv[1], "low")) {
+		m_app_config.motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_LOW;
+	} else if (!strcmp(argv[1], "medium")) {
+		m_app_config.motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_MEDIUM;
+	} else if (!strcmp(argv[1], "high")) {
+		m_app_config.motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_HIGH;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -2088,6 +2146,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(pir-notify-act, NULL,
 	              "Get/Set PIR motion alarm notify on activation (true/false).",
 	              cmd_pir_notify_act, 1, 1),
+
+	SHELL_CMD_ARG(motion-sensitivity, NULL,
+	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",
+	              cmd_motion_sensitivity, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );

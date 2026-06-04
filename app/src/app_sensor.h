@@ -42,7 +42,8 @@ struct app_sensor_data {
 	uint32_t input_b_count;
 	bool input_a_is_active;
 	bool input_b_is_active;
-	uint32_t motion_count;
+	uint32_t motion_count;       /* PIR (PYQ1648) motion events */
+	uint32_t accel_motion_count; /* accelerometer (LIS2DH) any-motion events */
 };
 
 extern struct app_sensor_data g_app_sensor_data;
