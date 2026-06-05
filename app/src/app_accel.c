@@ -10,6 +10,7 @@
 /* Zephyr includes */
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -150,6 +151,28 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 
 /* ---- Motion (any-motion) detection -------------------------------------- */
 
+/* LIS2DH registers accessed directly — the sensor API has no equivalent for
+ * the HP-filter setup nor for the REFERENCE dummy-read that re-bases it.
+ * Datasheet (LIS2DH12): CTRL_REG2 (8.10), REFERENCE (8.15). */
+#define LIS2DH_REG_CTRL2     0x21
+#define LIS2DH_REG_REFERENCE 0x26
+/* CTRL_REG2 = 0x02: HPM=00 (normal mode, reset by reading REFERENCE),
+ * HPCF=00 (f_cut ~ ODR/50 = 0.2 Hz @ 10 Hz LP), FDS=0 (output registers stay
+ * unfiltered — orientation in app_accel_read() keeps gravity), HP_IA2=1 (the
+ * HP filter feeds the INT2/IA2 any-motion comparator). Without the HPF the
+ * comparator sees the absolute acceleration including the static 1 g, which
+ * permanently exceeds any sub-1g threshold. */
+#define LIS2DH_CTRL2_HPF_IA2 0x02
+
+/* Re-arm delay after every motion event (see motion_trigger_handler). */
+#define MOTION_REARM_SECONDS    1
+/* First arm after boot — by then the main loop feeds the watchdog and the
+ * shell is up, so a mis-configured interrupt can degrade the device but
+ * never brick the boot path. */
+#define MOTION_BOOT_ARM_SECONDS 3
+
+static const struct i2c_dt_spec m_lis2dh_i2c = I2C_DT_SPEC_GET(DT_NODELABEL(lis2dh12));
+
 static app_accel_motion_cb_t m_motion_cb;
 static void *m_motion_user_data;
 
@@ -158,8 +181,44 @@ static struct sensor_trigger m_motion_trig = {
 	.chan = SENSOR_CHAN_ACCEL_XYZ,
 };
 
-/* Slope threshold (m/s^2) + duration (samples at the configured ODR) per level.
- * 4 g full-scale; ~1.5 / 0.8 / 0.3 g map to ~15 / 8 / 3 m/s^2. Tune on HW. */
+static struct k_work_delayable m_motion_arm_work;
+
+static void motion_arm_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	int ret = app_accel_set_motion_sensitivity(g_app_config.motion_sensitivity);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_accel_set_motion_sensitivity", ret);
+	}
+}
+
+/* Enable the HP filter on the IA2 path and snap its reference to the current
+ * acceleration: in HPM=00 mode a REFERENCE read re-bases the filter, so the
+ * any-motion comparator sees ~0 at the instant the trigger is armed — no
+ * settle time, gravity and orientation are nulled out (a static device must
+ * never trigger). Serialized against app_accel_read() bus traffic by m_lock. */
+static int motion_snap_hpf_reference(void)
+{
+	uint8_t ref;
+	int ret;
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	ret = i2c_reg_write_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_CTRL2, LIS2DH_CTRL2_HPF_IA2);
+	if (!ret) {
+		ret = i2c_reg_read_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_REFERENCE, &ref);
+	}
+	k_mutex_unlock(&m_lock);
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("motion_snap_hpf_reference", ret);
+	}
+	return ret;
+}
+
+/* Slope threshold (m/s^2 of the HP-filtered, i.e. dynamic, acceleration) and
+ * duration (samples at the 10 Hz low-power ODR) per level. Issue #18 table:
+ * low ~1.5 g (only strong shocks), medium ~0.8 g, high ~0.3 g (light
+ * vibration). At 4 g FS the 7-bit INT2_THS LSB is ~0.307 m/s^2. Tune on HW. */
 static void sensitivity_params(enum app_config_motion_sensitivity level, int *th_ms2, int *dur)
 {
 	switch (level) {
@@ -184,12 +243,25 @@ static void sensitivity_params(enum app_config_motion_sensitivity level, int *th
 
 static void motion_trigger_handler(const struct device *dev, const struct sensor_trigger *trig)
 {
-	ARG_UNUSED(dev);
 	ARG_UNUSED(trig);
+
+	/* Disarm at the driver level before anything else. The handler runs
+	 * inside the driver's work item; returning with a handler still
+	 * registered re-enables the GPIO interrupt (lis2dh_trigger.c), and a
+	 * persistently asserted INT2 line then re-fires in a tight ISR/work
+	 * loop on the system workqueue, starving the main loop and the
+	 * watchdog feed. Disarm + delayed re-arm bounds the interrupt rate to
+	 * 1/MOTION_REARM_SECONDS by construction, whatever the chip state. */
+	int ret = sensor_trigger_set(dev, &m_motion_trig, NULL);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("sensor_trigger_set(disarm)", ret);
+	}
 
 	if (m_motion_cb) {
 		m_motion_cb(m_motion_user_data);
 	}
+
+	k_work_schedule(&m_motion_arm_work, K_SECONDS(MOTION_REARM_SECONDS));
 }
 
 int app_accel_set_motion_sensitivity(enum app_config_motion_sensitivity level)
@@ -214,6 +286,14 @@ int app_accel_set_motion_sensitivity(enum app_config_motion_sensitivity level)
 
 	int th_ms2, dur;
 	sensitivity_params(level, &th_ms2, &dur);
+
+	/* HPF reference snap must immediately precede arming so the comparator
+	 * baseline matches the device's current attitude (also on every re-arm
+	 * after a motion event and on runtime sensitivity changes). */
+	ret = motion_snap_hpf_reference();
+	if (ret) {
+		return ret;
+	}
 
 	struct sensor_value th = {.val1 = th_ms2, .val2 = 0};
 	ret = sensor_attr_set(dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SLOPE_TH, &th);
@@ -244,5 +324,14 @@ int app_accel_init_motion(app_accel_motion_cb_t cb, void *user_data)
 {
 	m_motion_cb = cb;
 	m_motion_user_data = user_data;
-	return app_accel_set_motion_sensitivity(g_app_config.motion_sensitivity);
+
+	/* Defer the first arm until the main loop and watchdog feeding are
+	 * alive: a regression in the interrupt path can then at worst degrade
+	 * into bounded 1 Hz events on a running, shell-recoverable device
+	 * instead of a boot brick. The HPF needs no settle window here — the
+	 * REFERENCE snap in app_accel_set_motion_sensitivity() re-bases it
+	 * instantly at arm time. */
+	k_work_init_delayable(&m_motion_arm_work, motion_arm_work_handler);
+	k_work_schedule(&m_motion_arm_work, K_SECONDS(MOTION_BOOT_ARM_SECONDS));
+	return 0;
 }

@@ -117,7 +117,19 @@ stm32_lp_tick_source: &lptim1 {
 	lis2dh12: lis2dh12@19 {
 		compatible = "st,lis2dh";
 		reg = <0x19>;
-		anym-mode = <LIS2DH_DT_ANYM_6D_MOVEMENT>;
+		/* Any-motion = OR of |X|/|Y|/|Z| high events on the HP-filtered
+		 * signal (app_accel.c enables the HPF on the IA2 path), i.e. the
+		 * classic ST wake-up recipe. 6D_MOVEMENT would compare absolute
+		 * axes against the threshold — with sub-1g thresholds gravity
+		 * keeps the interrupt asserted permanently. */
+		anym-mode = <LIS2DH_DT_ANYM_OR_COMBINATION>;
+		/* INT2 (PA2) is active-high and latched (no anym-no-latch); the
+		 * driver de-asserts it by reading INT2_SRC in its work handler.
+		 * Rising-edge only: with the EDGE_BOTH default that SRC-read
+		 * generates a falling edge that re-pends the (masked) EXTI line
+		 * and immediately re-fires on re-enable. STM32 EXTI has no
+		 * level-trigger support, so LEVEL_HIGH is not an option. */
+		int2-gpio-config = <LIS2DH_DT_GPIO_INT_EDGE_RISING>;
 		irq-gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>,
 			    <&gpioa 2 GPIO_ACTIVE_HIGH>;
 		disconnect-sdo-sa0-pull-up;
