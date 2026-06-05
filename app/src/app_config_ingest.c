@@ -244,6 +244,16 @@ int app_config_apply_application(const AppConfigMessage_Application *src, uint32
 			FAULT(52);
 		}
 	}
+	if (src->has_motion_sensitivity) {
+		int val = src->motion_sensitivity;
+
+		if (val >= APP_CONFIG_MOTION_SENSITIVITY_OFF &&
+		    val <= APP_CONFIG_MOTION_SENSITIVITY_HIGH) {
+			config->motion_sensitivity = (enum app_config_motion_sensitivity)val;
+		} else {
+			FAULT(54);
+		}
+	}
 
 	/* Cross-validate alarm lo/hi pairs — disable the alarm if lo >= hi */
 	if (config->alarm_temperature_lo >= config->alarm_temperature_hi) {
@@ -378,6 +388,14 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	FILL_BOOL(48, cap_1w_machine_probe);
 	FILL_BOOL(49, history_enable);
 	FILL_NUM(50, history_sensors);
+	FILL_NUM(51, alarm_limit);
+	FILL_NUM(52, alarm_notif_time);
+	FILL_BOOL(53, pir_notify_act);
+	if (requested(ids, n, 54)) {
+		dst->has_motion_sensitivity = true;
+		dst->motion_sensitivity =
+			(AppConfigMessage_Application_MotionSensitivity)c->motion_sensitivity;
+	}
 }
 
 bool app_config_ingest(const AppConfigMessage *message)

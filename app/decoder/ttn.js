@@ -76,7 +76,15 @@ var _APP_NAMES = {
   34: "input_b_counter", 35: "input_b_notify_act", 36: "input_b_notify_deact",
   37: "corr_temperature", 38: "corr_t1_temperature", 39: "corr_t2_temperature",
   40: "cap_hall_left", 41: "cap_hall_right", 42: "cap_input_a", 43: "cap_input_b",
-  44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector", 47: "cap_1w_thermometer", 48: "cap_1w_machine_probe"
+  44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector", 47: "cap_1w_thermometer", 48: "cap_1w_machine_probe",
+  49: "history_enable", 50: "history_sensors", 51: "alarm_limit", 52: "alarm_notif_time",
+  53: "pir_notify_act", 54: "motion_sensitivity"
+};
+
+// Enum-valued Application fields: decode renders the symbolic name, encode
+// accepts either the name or the raw number.
+var _APP_ENUMS = {
+  54: ["off", "low", "medium", "high"]
 };
 var _LRW_NAMES = { 1: "region", 2: "network", 3: "adr", 4: "activation", 12: "sub_band" };
 var _LRW_HEX = { 5: "deveui", 6: "joineui", 9: "devaddr" };
@@ -137,7 +145,10 @@ function _decodeApplication(bytes, start, end) {
     var f = tag.value >>> 3, w = tag.value & 0x7;
     if (w === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
-      if (_APP_NAMES[f]) o[_APP_NAMES[f]] = v.value;
+      if (_APP_NAMES[f]) {
+        var ev = _APP_ENUMS[f] && _APP_ENUMS[f][v.value] !== undefined;
+        o[_APP_NAMES[f]] = ev ? _APP_ENUMS[f][v.value] : v.value;
+      }
     } else if (w === 5) {
       var fl = _pbReadFloat(bytes, pos); pos = fl.next;
       if (_APP_NAMES[f]) o[_APP_NAMES[f]] = fl.value;
@@ -530,6 +541,10 @@ function _encApplication(app) {
       out = out.concat(_encTag(tag, 5)).concat(_encFloat(val));
     } else {
       var num = (typeof val === "boolean") ? (val ? 1 : 0) : val;
+      if (typeof val === "string" && _APP_ENUMS[tag]) {
+        var ix = _APP_ENUMS[tag].indexOf(val);
+        if (ix >= 0) num = ix;
+      }
       out = out.concat(_encTag(tag, 0)).concat(_encVarint(num));
     }
   }

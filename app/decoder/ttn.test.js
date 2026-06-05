@@ -38,6 +38,17 @@ const COMMANDS = [
     },
   },
   {
+    // motion_sensitivity is enum-valued (field 54): encode accepts the
+    // symbolic name, decode renders it back ("high" = 3).
+    name: "set_param (application motion_sensitivity enum)",
+    hex: "080312051203b00303",
+    data: {
+      seq: 3,
+      command: "set_param",
+      set_param: { application: { motion_sensitivity: "high" } },
+    },
+  },
+  {
     name: "reset_counters (hall_left + input_a)",
     hex: "0807520408011801",
     data: {
@@ -97,6 +108,12 @@ test("decodeUplink decodes an Ack response (fPort 85)", () => {
 test("decodeUplink routes fPort 2 to the telemetry decoder", () => {
   const got = codec.decodeUplink({ bytes: hex("0864"), fPort: 2 });
   assert.equal(typeof got.data, "object");
+});
+
+test("fPort-2 telemetry decodes accel_motion_count (field 26)", () => {
+  // protobuf: tag (26 << 3 | varint) = 0xd0 0x01, value 3
+  const got = codec.decodeUplink({ bytes: hex("d00103"), fPort: 2 });
+  assert.equal(got.data.accel_motion_count, 3);
 });
 
 // --- Uplink: history replay frames (fPort 85, device-driven multi-frame) ---
