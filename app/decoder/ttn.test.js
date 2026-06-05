@@ -220,6 +220,24 @@ test("fPort-3 batch: humidity deactivate + truncation flag (total > records)", (
   assert.equal(d.alarms[0].hysteresis, 2);
 });
 
+test("fPort-3 batch: accel-motion activate (real capture, 2026-06-05)", () => {
+  // Captured on-air after shaking the device at motion-sensitivity high:
+  // hdr 0x51 = source 10 (accel-motion) << 3 | side na | activate.
+  const f = Array.from(Buffer.from("01339b226a510000008000800080", "hex"));
+  const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
+  assert.equal(d.total, 1);
+  assert.equal(d.base_time, 1780652851); // 2026-06-05T09:47:31Z (RTC synced)
+  assert.equal(d.truncated, false);
+  assert.equal(d.alarms.length, 1);
+  assert.equal(d.alarms[0].source, "accel-motion");
+  assert.equal(d.alarms[0].event, "activate");
+  assert.equal(d.alarms[0].side, "na");
+  assert.equal(d.alarms[0].threshold, null); // discrete source → sentinels
+  assert.equal(d.alarms[0].value, null);
+  assert.equal(d.alarms[0].hysteresis, null);
+  assert.equal(d.alarms[0].time, 1780652851);
+});
+
 // --- Negative: a corrupted frame must change the result (tests are sensitive) ---
 test("a tampered command byte does not silently decode to the original", () => {
   const good = codec.decodeDownlink({ bytes: hex("08032200"), fPort: 85 }).data;

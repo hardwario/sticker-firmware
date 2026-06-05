@@ -694,7 +694,8 @@ function decodeDownlink(input) {
 // (temp/hum ×100, pressure ×10); 0x8000 = N/A (discrete sources). Per-event
 // time = base_unix + rel_s. `total` may exceed the records present (DR-capped).
 var _ALARM_SOURCES = ["hall-left", "hall-right", "pir", "input-a", "input-b",
-  "temperature", "humidity", "pressure", "t1-temperature", "t2-temperature"];
+  "temperature", "humidity", "pressure", "t1-temperature", "t2-temperature",
+  "accel-motion"];
 var _ALARM_SIDES = ["na", "lo", "hi"];
 var _ALARM_SENTINEL = 0x8000;
 
