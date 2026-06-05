@@ -17,7 +17,7 @@
 	chosen {
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
-		zephyr,code-partition = &slot0_partition;
+		zephyr,code-partition = &code_partition;
 	};
 
 	leds {
@@ -216,27 +216,31 @@ stm32_lp_tick_source: &lptim1 {
 		#address-cells = <1>;
 		#size-cells = <1>;
 
-		boot_partition: partition@0 {
-			label = "mcuboot";
-			reg = <0x00000000 DT_SIZE_K(32)>;
+		/* Flat application image from the flash base — no bootloader is
+		 * active today (a future MCUboot/FUOTA layout redesigns this map).
+		 * The image is linked against CONFIG_FLASH_LOAD_SIZE (the linker
+		 * fails the build on overflow), because flash regions written at
+		 * runtime corrupt an image leaking into them — the device then
+		 * hard-faults on the next boot (recoverable only by mass erase):
+		 *  - release (CONFIG_APP_HISTORY_FLASH=y) writes history NVS
+		 *    here: budget = history_partition offset (prj.conf, 0x28000)
+		 *  - debug keeps history in RAM but NVS settings + LoRaWAN NVM
+		 *    always write storage: budget = storage_partition offset
+		 *    (debug.conf, 0x3C000)
+		 */
+		code_partition: partition@0 {
+			label = "code";
+			reg = <0x00000000 DT_SIZE_K(160)>;
 			read-only;
 		};
 
-		slot0_partition: partition@8000 {
-			label = "image-0";
-			reg = <0x00008000 DT_SIZE_K(104)>;
-		};
-
 		/* Sensor history store-and-forward buffer (app_history.c,
-		 * FIXED_PARTITION_ID(history_partition)). Placed after the
-		 * application image (currently ~140 KB, ends ~0x22100) with
-		 * headroom, up to the storage partition. MCUboot dual-slot is
-		 * not active today (flat image from flash base); when FUOTA is
+		 * FIXED_PARTITION_ID(history_partition)). When FUOTA is
 		 * introduced this region becomes the DFU slot and the layout is
 		 * redesigned (history is sacrificed on FUOTA). */
-		history_partition: partition@24000 {
+		history_partition: partition@28000 {
 			label = "history";
-			reg = <0x00024000 DT_SIZE_K(96)>;
+			reg = <0x00028000 DT_SIZE_K(80)>;
 		};
 
 		storage_partition: partition@3c000 {
