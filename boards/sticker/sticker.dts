@@ -17,7 +17,7 @@
 	chosen {
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
-		zephyr,code-partition = &slot0_partition;
+		zephyr,code-partition = &code_partition;
 	};
 
 	leds {
@@ -216,20 +216,19 @@ stm32_lp_tick_source: &lptim1 {
 		#address-cells = <1>;
 		#size-cells = <1>;
 
-		boot_partition: partition@0 {
-			label = "mcuboot";
-			reg = <0x00000000 DT_SIZE_K(32)>;
+		/* Flat application image from the flash base — no bootloader is
+		 * active today (a future MCUboot/FUOTA layout redesigns this map).
+		 * The image is linked against this region via
+		 * CONFIG_FLASH_LOAD_SIZE (prj.conf), which must equal the
+		 * storage_partition offset: NVS (settings + LoRaWAN NVM) erases
+		 * and rewrites its sectors at runtime, so an image leaking into
+		 * it is corrupted in flash and the device hard-faults on the
+		 * next boot (recoverable only by mass erase).
+		 */
+		code_partition: partition@0 {
+			label = "code";
+			reg = <0x00000000 DT_SIZE_K(240)>;
 			read-only;
-		};
-
-		slot0_partition: partition@8000 {
-			label = "image-0";
-			reg = <0x00008000 DT_SIZE_K(104)>;
-		};
-
-		slot1_partition: partition@22000 {
-			label = "image-1";
-			reg = <0x00022000 DT_SIZE_K(104)>;
 		};
 
 		storage_partition: partition@3c000 {
