@@ -32,6 +32,7 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 
 static bool m_alarm_active[APP_ALARM_SOURCE_COUNT];
 static int64_t m_both_bool_expiry_ms[APP_ALARM_SOURCE_COUNT];
+static bool m_tilt_prev[APP_W1_SLOT_COUNT]; /* per-slot tilt state for edge detection */
 static int64_t m_last_alarm_send_ms;
 static app_alarm_event_cb m_event_cb;
 static void *m_event_cb_user_data;
@@ -245,6 +246,14 @@ static void alarm_collect(uint8_t source, bool active, uint8_t side, bool has_va
 	k_mutex_unlock(&m_lock);
 }
 
+/* Per-slot alarm config accessor over the flat alarm_sN_* keys. */
+BUILD_ASSERT(APP_W1_SLOT_COUNT == 4, "SLOT_CFG covers exactly 4 slots");
+#define SLOT_CFG(field, s)                                                                         \
+	((s) == 0   ? g_app_config.alarm_s1_##field                                                \
+	 : (s) == 1 ? g_app_config.alarm_s2_##field                                                \
+	 : (s) == 2 ? g_app_config.alarm_s3_##field                                                \
+		    : g_app_config.alarm_s4_##field)
+
 static int read_notify_bools(enum app_alarm_source source, bool *act, bool *deact)
 {
 	switch (source) {
@@ -269,6 +278,20 @@ static int read_notify_bools(enum app_alarm_source source, bool *act, bool *deac
 		*deact = false;
 		return 0;
 	default:
+		/* Per-slot tilt is a discrete source: notify on both edges when the
+		 * slot's tilt alarm is enabled. */
+		if (source >= APP_ALARM_SOURCE_SLOT_BASE) {
+			int rel = source - APP_ALARM_SOURCE_SLOT_BASE;
+			int slot = rel / APP_ALARM_SLOT_QUANTITIES;
+
+			if (rel % APP_ALARM_SLOT_QUANTITIES == APP_ALARM_SLOT_TILT) {
+				bool en = SLOT_CFG(tilt_enabled, slot);
+
+				*act = en;
+				*deact = en;
+				return 0;
+			}
+		}
 		return -EINVAL;
 	}
 }
@@ -338,18 +361,12 @@ static bool eval_threshold(enum app_alarm_source source, bool enabled, float val
 	return *active;
 }
 
-/* Per-slot alarm config accessor over the flat alarm_sN_* keys. */
-BUILD_ASSERT(APP_W1_SLOT_COUNT == 4, "SLOT_CFG covers exactly 4 slots");
-#define SLOT_CFG(field, s)                                                                         \
-	((s) == 0   ? g_app_config.alarm_s1_##field                                                \
-	 : (s) == 1 ? g_app_config.alarm_s2_##field                                                \
-	 : (s) == 2 ? g_app_config.alarm_s3_##field                                                \
-		    : g_app_config.alarm_s4_##field)
-
 bool app_alarm_poll(void)
 {
 	bool should_send = false;
 	bool alarm = false;
+	bool tilt_now[APP_W1_SLOT_COUNT] = {0};
+	bool tilt_en[APP_W1_SLOT_COUNT] = {0};
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
@@ -372,7 +389,8 @@ bool app_alarm_poll(void)
 
 	/* Per-slot 1-Wire threshold alarms (P2): temperature for every bound slot,
 	 * humidity additionally for machine-probe slots. Absent slots read NaN →
-	 * eval_threshold leaves them inert. (Tilt is a discrete source — TODO.)
+	 * eval_threshold leaves them inert. Tilt (discrete) is collected here and
+	 * its edges handled after the unlock (app_alarm_event takes m_lock).
 	 * Supersedes the legacy T1/T2 alarms; the t1/t2 readings still populate the
 	 * matching dallas slots' w1[] entries. */
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
@@ -394,10 +412,22 @@ bool app_alarm_poll(void)
 						g_app_sensor_data.w1[s].humidity,
 						SLOT_CFG(humidity_lo, s), SLOT_CFG(humidity_hi, s),
 						SLOT_CFG(humidity_hst, s), &should_send);
+
+			tilt_now[s] = g_app_sensor_data.w1[s].is_tilt_alert;
+			tilt_en[s] = SLOT_CFG(tilt_enabled, s);
 		}
 	}
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
+
+	/* Tilt edges (discrete): route changes through app_alarm_event, which
+	 * takes m_lock and handles the latch / LED / fPort-3 record / uplink. */
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		if (tilt_en[s] && tilt_now[s] != m_tilt_prev[s]) {
+			m_tilt_prev[s] = tilt_now[s];
+			app_alarm_event(APP_ALARM_SLOT_SRC(s, APP_ALARM_SLOT_TILT), tilt_now[s]);
+		}
+	}
 
 	int64_t now = k_uptime_get();
 
