@@ -345,6 +345,31 @@ function _pbZigzag(n) {
 // fPort 2: flat protobuf Telemetry (periodic / event-triggered report). Keys
 // match the legacy fPort-1 bitmap decoder so dashboards stay stable. Unknown
 // fields are skipped (forward-compatible with newer firmware).
+// SensorReading submessage (Telemetry.w1_sensors): slot(1), type(2) varints +
+// optional temperature(3, sint x100), humidity(4, x2), flags(5, bit0 tilt).
+var _W1_TYPES = ["empty", "dallas", "machine-probe"];
+function _decodeSensorReading(bytes, start, end) {
+  var r = { slot: 0, type: 0, temperature: null, humidity: null, tilt_alert: false };
+  var p = start;
+  while (p < end) {
+    var t = _pbReadVarint(bytes, p); p = t.next;
+    var field = t.value >>> 3, wire = t.value & 0x7;
+    if (wire === 0) {
+      var v = _pbReadVarint(bytes, p); p = v.next;
+      if (field === 1) r.slot = v.value;
+      else if (field === 2) r.type = v.value;
+      else if (field === 3) r.temperature = _pbZigzag(v.value) / 100;
+      else if (field === 4) r.humidity = v.value / 2;
+      else if (field === 5) r.tilt_alert = (v.value & (1 << 0)) !== 0;
+    } else if (wire === 2) { var l = _pbReadVarint(bytes, p); p = l.next + l.value; }
+    else if (wire === 5) { p += 4; }
+    else if (wire === 1) { p += 8; }
+    else { break; }
+  }
+  r.type_name = _W1_TYPES[r.type] || "unknown";
+  return r;
+}
+
 function decodeTelemetry(bytes) {
   var d = {};
   var pos = 0;
@@ -353,8 +378,14 @@ function decodeTelemetry(bytes) {
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
     if (wire !== 0) {
-      // Forward-compat: skip an unknown non-varint field.
-      if (wire === 2) { var l = _pbReadVarint(bytes, pos); pos = l.next + l.value; continue; }
+      if (wire === 2) {
+        var l = _pbReadVarint(bytes, pos);
+        var startS = l.next, endS = l.next + l.value;
+        if (field === 26) { // w1_sensors (repeated SensorReading)
+          (d.w1_sensors = d.w1_sensors || []).push(_decodeSensorReading(bytes, startS, endS));
+        }
+        pos = endS; continue; // else forward-compat skip
+      }
       if (wire === 5) { pos += 4; continue; }
       if (wire === 1) { pos += 8; continue; }
       break;
@@ -377,17 +408,7 @@ function decodeTelemetry(bytes) {
       case 8:  d.orientation = v.value; break;
       // pir
       case 9:  d.motion_count = v.value; break;
-      // 1-wire ext
-      case 10: d.ext_temperature_1 = _pbZigzag(v.value) / 100; break;
-      case 11: d.ext_temperature_2 = _pbZigzag(v.value) / 100; break;
-      // machine probe 1
-      case 12: d.machine_probe_temperature_1 = _pbZigzag(v.value) / 100; break;
-      case 13: d.machine_probe_humidity_1 = v.value / 2; break;
-      case 14: if (v.value & (1 << 0)) d.machine_probe_tilt_alert_1 = true; break;
-      // machine probe 2
-      case 15: d.machine_probe_temperature_2 = _pbZigzag(v.value) / 100; break;
-      case 16: d.machine_probe_humidity_2 = v.value / 2; break;
-      case 17: if (v.value & (1 << 0)) d.machine_probe_tilt_alert_2 = true; break;
+      // fields 10-17 (ext1/ext2/mp1/mp2) retired → repeated w1_sensors (field 26)
       // hall left
       case 18: d.hall_left_count = v.value; break;
       case 19:

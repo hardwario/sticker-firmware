@@ -19,6 +19,9 @@ Response.HistoryFrame.samples max_size:48
 # encoder further caps by the live payload budget.
 AlarmReport.events max_count:8
 
+# Telemetry 1-Wire sensors (fPort 2): one per logical slot.
+Telemetry.w1_sensors max_count:4
+
 # GetParam field-id lists as static arrays (no nanopb callback). A batch is
 # bounded by the LoRaWAN downlink size anyway, so 16 ids each is plenty.
 Command.GetParam.lorawan_field     max_count:16

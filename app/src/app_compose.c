@@ -47,10 +47,7 @@ enum tlm_group {
 	G_LIGHT,        /* illuminance */
 	G_ACCEL,        /* orientation */
 	G_PIR,          /* motion_count */
-	G_EXT1,         /* ext1_temperature */
-	G_EXT2,         /* ext2_temperature */
-	G_MP1,          /* mp1_temperature, mp1_humidity, mp1_flags */
-	G_MP2,          /* mp2_temperature, mp2_humidity, mp2_flags */
+	G_W1,           /* w1_sensors (ROM-bound 1-Wire slots, repeated) */
 	G_HALL_L,       /* hall_left_count, hall_left_flags */
 	G_HALL_R,       /* hall_right_count, hall_right_flags */
 	G_INPUT_A,      /* input_a_count, input_a_flags */
@@ -92,21 +89,14 @@ static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, 
 	case G_PIR:
 		SEL(motion_count);
 		break;
-	case G_EXT1:
-		SEL(ext1_temperature);
-		break;
-	case G_EXT2:
-		SEL(ext2_temperature);
-		break;
-	case G_MP1:
-		SEL(mp1_temperature);
-		SEL(mp1_humidity);
-		SEL(mp1_flags);
-		break;
-	case G_MP2:
-		SEL(mp2_temperature);
-		SEL(mp2_humidity);
-		SEL(mp2_flags);
+	case G_W1:
+		/* Repeated field — copy the whole w1_sensors block as one unit. */
+		if (on) {
+			dst->w1_sensors_count = src->w1_sensors_count;
+			memcpy(dst->w1_sensors, src->w1_sensors, sizeof(dst->w1_sensors));
+		} else {
+			dst->w1_sensors_count = 0;
+		}
 		break;
 	case G_HALL_L:
 		SEL(hall_left_count);
@@ -214,41 +204,31 @@ static void fill_snapshot(void)
 		t.motion_count = d.motion_count;
 	}
 
-	/* 1-wire ext */
-	if (g_app_config.cap_1w_thermometer && !isnan(d.t1_temperature)) {
-		t.has_ext1_temperature = true;
-		t.ext1_temperature = (int32_t)(d.t1_temperature * 100.0f);
-	}
-	if (g_app_config.cap_1w_thermometer && !isnan(d.t2_temperature)) {
-		t.has_ext2_temperature = true;
-		t.ext2_temperature = (int32_t)(d.t2_temperature * 100.0f);
-	}
+	/* 1-Wire ROM-bound slots — one SensorReading per present slot, self-
+	 * describing (slot + type travel with the reading). Replaces ext1/ext2/
+	 * mp1/mp2. */
+	for (int s = 0; s < APP_W1_SLOT_COUNT && t.w1_sensors_count < ARRAY_SIZE(t.w1_sensors);
+	     s++) {
+		if (!d.w1[s].present) {
+			continue;
+		}
 
-	/* machine probe 1 / 2 */
-	if (g_app_config.cap_1w_machine_probe) {
-		if (!isnan(d.mp1_temperature)) {
-			t.has_mp1_temperature = true;
-			t.mp1_temperature = (int32_t)(d.mp1_temperature * 100.0f);
+		SensorReading *r = &t.w1_sensors[t.w1_sensors_count++];
+
+		*r = (SensorReading)SensorReading_init_zero;
+		r->slot = s + 1;
+		r->type = app_w1_slot_get_type(s);
+		if (!isnan(d.w1[s].temperature)) {
+			r->has_temperature = true;
+			r->temperature = (int32_t)(d.w1[s].temperature * 100.0f);
 		}
-		if (!isnan(d.mp1_humidity)) {
-			t.has_mp1_humidity = true;
-			t.mp1_humidity = (uint32_t)(d.mp1_humidity * 2.0f);
+		if (!isnan(d.w1[s].humidity)) {
+			r->has_humidity = true;
+			r->humidity = (uint32_t)(d.w1[s].humidity * 2.0f);
 		}
-		if (d.mp1_is_tilt_alert) {
-			t.has_mp1_flags = true;
-			t.mp1_flags = MP_FLAG_TILT;
-		}
-		if (!isnan(d.mp2_temperature)) {
-			t.has_mp2_temperature = true;
-			t.mp2_temperature = (int32_t)(d.mp2_temperature * 100.0f);
-		}
-		if (!isnan(d.mp2_humidity)) {
-			t.has_mp2_humidity = true;
-			t.mp2_humidity = (uint32_t)(d.mp2_humidity * 2.0f);
-		}
-		if (d.mp2_is_tilt_alert) {
-			t.has_mp2_flags = true;
-			t.mp2_flags = MP_FLAG_TILT;
+		if (d.w1[s].is_tilt_alert) {
+			r->has_flags = true;
+			r->flags = MP_FLAG_TILT;
 		}
 	}
 

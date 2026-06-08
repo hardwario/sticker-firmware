@@ -312,6 +312,17 @@ message AlarmEvent {
     optional sint32 value = 5;   // current value, scaled (×100 temp/hum, ×10 pressure); absent for discrete
 }
 
+// One ROM-bound 1-Wire sensor reading (fPort 2 telemetry, repeated in
+// Telemetry.w1_sensors). `type` matches enum app_w1_slot_type (1=dallas,
+// 2=machine-probe); quantities the slot's type doesn't provide are absent.
+message SensorReading {
+    uint32 slot                 = 1;  // 1-based logical slot
+    uint32 type                 = 2;  // 1=dallas, 2=machine-probe
+    optional sint32 temperature = 3;  // degC x100
+    optional uint32 humidity    = 4;  // %RH  x2
+    optional uint32 flags       = 5;  // bit0 tilt
+}
+
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap
 // stays on fPort 1). Fields are grouped per sensor; each group's boolean state
 // lives in its own `*_flags` field so a sensor's data stays together as an
@@ -336,17 +347,9 @@ message Telemetry {
     optional uint32 orientation      = 8;   // 1..6
     // pir (cap_pir_detector)
     optional uint32 motion_count     = 9;
-    // 1-wire external thermometers (cap_1w_thermometer)
-    optional sint32 ext1_temperature = 10;  // degC x100
-    optional sint32 ext2_temperature = 11;  // degC x100
-    // machine probe 1 (cap_1w_machine_probe)
-    optional sint32 mp1_temperature  = 12;  // degC x100
-    optional uint32 mp1_humidity     = 13;  // %RH  x2
-    optional uint32 mp1_flags        = 14;  // bit0 tilt
-    // machine probe 2
-    optional sint32 mp2_temperature  = 15;  // degC x100
-    optional uint32 mp2_humidity     = 16;  // %RH  x2
-    optional uint32 mp2_flags        = 17;  // bit0 tilt
+    // 1-Wire per-slot readings moved to repeated w1_sensors (field 26); the
+    // old flat ext1/ext2/mp1/mp2 fields are retired (v1.4.0 wire break).
+    reserved 10, 11, 12, 13, 14, 15, 16, 17;
     // hall left (cap_hall_left)
     optional uint32 hall_left_count  = 18;
     optional uint32 hall_left_flags  = 19;  // bit0 notify_act, bit1 notify_deact, bit2 active
@@ -359,5 +362,7 @@ message Telemetry {
     // input B (cap_input_b)
     optional uint32 input_b_count    = 24;
     optional uint32 input_b_flags    = 25;
-    // New sensors append at field >= 26 as new groups; never renumber.
+    // 1-Wire ROM-bound sensors (replaces ext1/ext2/mp1/mp2); one per present slot.
+    repeated SensorReading w1_sensors = 26;
+    // New sensors append at field >= 27 as new groups; never renumber.
 }
