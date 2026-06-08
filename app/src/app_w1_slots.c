@@ -346,3 +346,129 @@ bool app_w1_slot_is_replaced(int slot)
 	}
 	return m_slots[slot].replaced;
 }
+
+/* ---- enrollment (sensor shell) ----------------------------------------- */
+
+/* Which configured slot (staging config) holds this ROM, or -1. */
+static int slot_of_rom(uint64_t serial)
+{
+	if (serial == 0) {
+		return -1;
+	}
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		if (cfg_rom_get(s) == serial) {
+			return s;
+		}
+	}
+	return -1;
+}
+
+int app_w1_slots_scan(struct app_w1_scan_entry *out, int max)
+{
+	if (out == NULL || max <= 0) {
+		return -EINVAL;
+	}
+
+	/* Re-run the driver scans so freshly plugged devices are discovered. */
+	(void)app_ds18b20_scan();
+	(void)app_machine_probe_scan();
+
+	struct discovered dallas[DRIVER_MAX];
+	struct discovered probe[DRIVER_MAX];
+	int n_dallas = collect_dallas(dallas, DRIVER_MAX);
+	int n_probe = collect_machine_probe(probe, DRIVER_MAX);
+	int n = 0;
+
+	for (int i = 0; i < n_dallas && n < max; i++) {
+		out[n].serial = dallas[i].serial;
+		out[n].type = APP_W1_SLOT_DALLAS;
+		out[n].bound_slot = slot_of_rom(dallas[i].serial);
+		n++;
+	}
+	for (int i = 0; i < n_probe && n < max; i++) {
+		out[n].serial = probe[i].serial;
+		out[n].type = APP_W1_SLOT_MACHINE_PROBE;
+		out[n].bound_slot = slot_of_rom(probe[i].serial);
+		n++;
+	}
+	return n;
+}
+
+int app_w1_slots_teach(int slot, struct app_w1_scan_entry *bound)
+{
+	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
+		return -EINVAL;
+	}
+
+	struct app_w1_scan_entry e[APP_W1_SLOT_COUNT * 2];
+	int n = app_w1_slots_scan(e, APP_W1_SLOT_COUNT * 2);
+	if (n < 0) {
+		return n;
+	}
+
+	int new_idx = -1;
+	int new_count = 0;
+	for (int i = 0; i < n; i++) {
+		if (e[i].bound_slot < 0) {
+			new_count++;
+			new_idx = i;
+		}
+	}
+
+	if (new_count == 0) {
+		return -EAGAIN; /* nothing new to teach */
+	}
+	if (new_count > 1) {
+		return -E2BIG; /* ambiguous — caller should steer to assign */
+	}
+
+	cfg_rom_set(slot, e[new_idx].serial);
+	*cfg_type(slot) = e[new_idx].type;
+	*cfg_sht(slot) = 0;
+	if (bound != NULL) {
+		*bound = e[new_idx];
+	}
+	(void)app_w1_slots_rebind(); /* apply live for immediate feedback */
+	return 0;
+}
+
+int app_w1_slots_assign(int slot, uint64_t serial)
+{
+	if (slot < 0 || slot >= APP_W1_SLOT_COUNT || serial == 0) {
+		return -EINVAL;
+	}
+
+	int existing = slot_of_rom(serial);
+	if (existing >= 0 && existing != slot) {
+		return -EEXIST; /* ROM already bound to another slot */
+	}
+
+	struct app_w1_scan_entry e[APP_W1_SLOT_COUNT * 2];
+	int n = app_w1_slots_scan(e, APP_W1_SLOT_COUNT * 2);
+	if (n < 0) {
+		return n;
+	}
+
+	for (int i = 0; i < n; i++) {
+		if (e[i].serial == serial) {
+			cfg_rom_set(slot, serial);
+			*cfg_type(slot) = e[i].type;
+			*cfg_sht(slot) = 0;
+			(void)app_w1_slots_rebind();
+			return 0;
+		}
+	}
+	return -ENODEV; /* serial not on the bus */
+}
+
+int app_w1_slots_clear(int slot)
+{
+	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
+		return -EINVAL;
+	}
+	cfg_rom_set(slot, 0);
+	*cfg_type(slot) = APP_W1_SLOT_EMPTY;
+	*cfg_sht(slot) = 0;
+	(void)app_w1_slots_rebind();
+	return 0;
+}

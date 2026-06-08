@@ -61,6 +61,32 @@ uint64_t app_w1_slot_get_rom(int slot); /* 48-bit serial, 0 = empty */
 bool app_w1_slot_is_present(int slot);
 bool app_w1_slot_is_replaced(int slot); /* configured ROM absent but a same-type device appeared */
 
+/* One device seen on the bus during a scan, for the `sensor` shell. */
+struct app_w1_scan_entry {
+	uint64_t serial;            /* 48-bit ROM serial */
+	enum app_w1_slot_type type; /* detected from family code */
+	int bound_slot;             /* 0-based slot this ROM is bound to, or -1 */
+};
+
+/* Re-scan both transport drivers and list every device currently on the bus
+ * (serial + detected type + which slot it's bound to). Fills up to max entries,
+ * returns the count or negative errno. Used by `sensor scan` / `teach`. */
+int app_w1_slots_scan(struct app_w1_scan_entry *out, int max);
+
+/* Plug-one enrollment: scan, and if exactly one device is unbound, bind it to
+ * `slot` (0-based) — records ROM + detected type in the staging config (durable
+ * after `config save`). On success fills *bound. Returns 0, -EAGAIN (no unbound
+ * device found), -E2BIG (more than one — use assign), or other negative errno. */
+int app_w1_slots_teach(int slot, struct app_w1_scan_entry *bound);
+
+/* Explicit enrollment: bind the device with ROM `serial` to `slot`. The device
+ * must be present on the bus (its type is taken from the scan). Returns 0,
+ * -ENODEV (serial not on the bus), -EEXIST (already bound elsewhere), errno. */
+int app_w1_slots_assign(int slot, uint64_t serial);
+
+/* Forget a slot's binding (staging config; durable after `config save`). */
+int app_w1_slots_clear(int slot);
+
 #ifdef __cplusplus
 }
 #endif
