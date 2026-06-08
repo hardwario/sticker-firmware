@@ -695,7 +695,12 @@ function decodeDownlink(input) {
 // sources. Per-event time = base_time + rel_s. `total` may exceed the events
 // present (some dropped to fit the data rate → truncated).
 var _ALARM_SOURCES = ["hall-left", "hall-right", "pir", "input-a", "input-b",
-  "temperature", "humidity", "pressure", "t1-temperature", "t2-temperature"];
+  "temperature", "humidity", "pressure", "t1-temperature", "t2-temperature",
+  // Per-slot 1-Wire sources (SLOT_BASE=10): slot s (0..3) × {temperature, humidity, tilt}.
+  "s1-temperature", "s1-humidity", "s1-tilt",
+  "s2-temperature", "s2-humidity", "s2-tilt",
+  "s3-temperature", "s3-humidity", "s3-tilt",
+  "s4-temperature", "s4-humidity", "s4-tilt"];
 var _ALARM_EDGES = ["activate", "deactivate"];
 var _ALARM_SIDES = ["none", "lo", "hi"];
 
