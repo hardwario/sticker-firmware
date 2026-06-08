@@ -81,6 +81,19 @@ const char *app_alarm_source_name(enum app_alarm_source source)
 	if (source < 0 || source >= APP_ALARM_SOURCE_COUNT) {
 		return "?";
 	}
+	if (source >= APP_ALARM_SOURCE_SLOT_BASE) {
+		/* Per-slot sources have no static name — format "sN-<quantity>". */
+		static char buf[16];
+		int rel = source - APP_ALARM_SOURCE_SLOT_BASE;
+		int slot = rel / APP_ALARM_SLOT_QUANTITIES;
+		int q = rel % APP_ALARM_SLOT_QUANTITIES;
+		const char *qn = q == APP_ALARM_SLOT_TEMPERATURE ? "temperature"
+				 : q == APP_ALARM_SLOT_HUMIDITY  ? "humidity"
+								 : "tilt";
+
+		snprintf(buf, sizeof(buf), "s%d-%s", slot + 1, qn);
+		return buf;
+	}
 	return m_source_names[source];
 }
 
@@ -273,6 +286,14 @@ static int32_t alarm_scale(enum app_alarm_source source, float v)
 	case APP_ALARM_SOURCE_PRESSURE:
 		return (int32_t)lroundf(v);
 	default:
+		/* Per-slot temperature/humidity also scale ×100. */
+		if (source >= APP_ALARM_SOURCE_SLOT_BASE) {
+			int q = (source - APP_ALARM_SOURCE_SLOT_BASE) % APP_ALARM_SLOT_QUANTITIES;
+
+			if (q == APP_ALARM_SLOT_TEMPERATURE || q == APP_ALARM_SLOT_HUMIDITY) {
+				return (int32_t)lroundf(v * 100.0f);
+			}
+		}
 		return 0;
 	}
 }
@@ -317,6 +338,14 @@ static bool eval_threshold(enum app_alarm_source source, bool enabled, float val
 	return *active;
 }
 
+/* Per-slot alarm config accessor over the flat alarm_sN_* keys. */
+BUILD_ASSERT(APP_W1_SLOT_COUNT == 4, "SLOT_CFG covers exactly 4 slots");
+#define SLOT_CFG(field, s)                                                                         \
+	((s) == 0   ? g_app_config.alarm_s1_##field                                                \
+	 : (s) == 1 ? g_app_config.alarm_s2_##field                                                \
+	 : (s) == 2 ? g_app_config.alarm_s3_##field                                                \
+		    : g_app_config.alarm_s4_##field)
+
 bool app_alarm_poll(void)
 {
 	bool should_send = false;
@@ -341,17 +370,32 @@ bool app_alarm_poll(void)
 				g_app_config.alarm_pressure_hi, g_app_config.alarm_pressure_hst,
 				&should_send);
 
-	alarm |= eval_threshold(
-		APP_ALARM_SOURCE_T1_TEMPERATURE, g_app_config.alarm_t1_temperature_enabled,
-		g_app_sensor_data.t1_temperature, g_app_config.alarm_t1_temperature_lo,
-		g_app_config.alarm_t1_temperature_hi, g_app_config.alarm_t1_temperature_hst,
-		&should_send);
+	/* Per-slot 1-Wire threshold alarms (P2): temperature for every bound slot,
+	 * humidity additionally for machine-probe slots. Absent slots read NaN →
+	 * eval_threshold leaves them inert. (Tilt is a discrete source — TODO.)
+	 * Supersedes the legacy T1/T2 alarms; the t1/t2 readings still populate the
+	 * matching dallas slots' w1[] entries. */
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		enum app_w1_slot_type type = app_w1_slot_get_type(s);
 
-	alarm |= eval_threshold(
-		APP_ALARM_SOURCE_T2_TEMPERATURE, g_app_config.alarm_t2_temperature_enabled,
-		g_app_sensor_data.t2_temperature, g_app_config.alarm_t2_temperature_lo,
-		g_app_config.alarm_t2_temperature_hi, g_app_config.alarm_t2_temperature_hst,
-		&should_send);
+		if (type == APP_W1_SLOT_EMPTY) {
+			continue;
+		}
+
+		alarm |= eval_threshold(APP_ALARM_SLOT_SRC(s, APP_ALARM_SLOT_TEMPERATURE),
+					SLOT_CFG(temperature_enabled, s),
+					g_app_sensor_data.w1[s].temperature,
+					SLOT_CFG(temperature_lo, s), SLOT_CFG(temperature_hi, s),
+					SLOT_CFG(temperature_hst, s), &should_send);
+
+		if (type == APP_W1_SLOT_MACHINE_PROBE) {
+			alarm |= eval_threshold(APP_ALARM_SLOT_SRC(s, APP_ALARM_SLOT_HUMIDITY),
+						SLOT_CFG(humidity_enabled, s),
+						g_app_sensor_data.w1[s].humidity,
+						SLOT_CFG(humidity_lo, s), SLOT_CFG(humidity_hi, s),
+						SLOT_CFG(humidity_hst, s), &should_send);
+		}
+	}
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
