@@ -164,8 +164,10 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
  * permanently exceeds any sub-1g threshold. */
 #define LIS2DH_CTRL2_HPF_IA2 0x02
 
-/* Re-arm delay after every motion event (see motion_trigger_handler). */
-#define MOTION_REARM_SECONDS    1
+/* Re-arm delay after every motion event (see motion_trigger_handler). Kept
+ * short so a fall/impact arriving right after a prior event isn't dropped in
+ * the disarm window; still bounds the interrupt rate against a storm. */
+#define MOTION_REARM_MS         20
 /* First arm after boot — by then the main loop feeds the watchdog and the
  * shell is up, so a mis-configured interrupt can degrade the device but
  * never brick the boot path. */
@@ -261,7 +263,7 @@ static void motion_trigger_handler(const struct device *dev, const struct sensor
 		m_motion_cb(m_motion_user_data);
 	}
 
-	k_work_schedule(&m_motion_arm_work, K_SECONDS(MOTION_REARM_SECONDS));
+	k_work_schedule(&m_motion_arm_work, K_MSEC(MOTION_REARM_MS));
 }
 
 int app_accel_set_motion_sensitivity(enum app_config_motion_sensitivity level)
