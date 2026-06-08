@@ -10,6 +10,7 @@
 /* Zephyr includes */
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
@@ -324,10 +325,120 @@ int app_accel_set_motion_sensitivity(enum app_config_motion_sensitivity level)
 	return 0;
 }
 
+/* ---- Free-fall detection (LIS2DH INT1 generator) ------------------------ */
+
+/* The Zephyr driver only touches INT1 (gpio_drdy) for the data-ready trigger,
+ * which we never register — so the INT1 generator and the INT1 pin are free
+ * for free-fall, independent of the any-motion path on INT2. Datasheet 8.x. */
+#define LIS2DH_REG_CTRL3         0x22
+#define LIS2DH_REG_INT1_CFG      0x30
+#define LIS2DH_REG_INT1_SRC      0x31
+#define LIS2DH_REG_INT1_THS      0x32
+#define LIS2DH_REG_INT1_DUR      0x33
+#define LIS2DH_CTRL3_I1_IA1      0x40 /* route INT1 generator to the INT1 pin */
+/* INT1_CFG = AOI(AND) + Z/Y/X low events: all three axes below threshold at
+ * once = weightless = free-fall (the classic ST free-fall recipe). */
+#define LIS2DH_INT1_CFG_FREEFALL 0x95
+/* Threshold ~350 mg, min duration ~30 ms. At 4 g FS the INT1_THS LSB is
+ * ~16 mg; the INT1_DURATION LSB is 1/ODR (10 ms @ 100 Hz). Tune on HW. */
+#define LIS2DH_FREEFALL_THS      0x16
+#define LIS2DH_FREEFALL_DUR      0x03
+
+static const struct gpio_dt_spec m_int1_gpio =
+	GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(lis2dh12), irq_gpios, 0);
+static struct gpio_callback m_freefall_cb;
+static struct k_work m_freefall_work;
+
+static void freefall_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	/* Read INT1_SRC to clear the latched interrupt so the pin de-asserts
+	 * and can fire on the next free-fall. */
+	uint8_t src;
+	k_mutex_lock(&m_lock, K_FOREVER);
+	(void)i2c_reg_read_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_INT1_SRC, &src);
+	k_mutex_unlock(&m_lock);
+
+	LOG_INF("Free-fall detected");
+	if (m_motion_cb) {
+		m_motion_cb(m_motion_user_data);
+	}
+}
+
+static void freefall_isr(const struct device *port, struct gpio_callback *cb, uint32_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(cb);
+	ARG_UNUSED(pins);
+	k_work_submit(&m_freefall_work);
+}
+
+/* Configure the INT1 generator for free-fall, route it to the INT1 pin and
+ * hook our GPIO callback. Returns 0 also when there is no INT1 GPIO. */
+static int app_accel_init_freefall(void)
+{
+	int ret;
+
+	if (!gpio_is_ready_dt(&m_int1_gpio)) {
+		LOG_ERR("INT1 GPIO not ready");
+		return -ENODEV;
+	}
+
+	k_work_init(&m_freefall_work, freefall_work_handler);
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	ret = i2c_reg_write_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_INT1_THS, LIS2DH_FREEFALL_THS);
+	if (!ret) {
+		ret = i2c_reg_write_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_INT1_DUR,
+					    LIS2DH_FREEFALL_DUR);
+	}
+	if (!ret) {
+		/* Read-modify-write CTRL3: set I1_IA1, keep the driver's bits. */
+		uint8_t ctrl3;
+		ret = i2c_reg_read_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_CTRL3, &ctrl3);
+		if (!ret) {
+			ret = i2c_reg_write_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_CTRL3,
+						    ctrl3 | LIS2DH_CTRL3_I1_IA1);
+		}
+	}
+	if (!ret) {
+		ret = i2c_reg_write_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_INT1_CFG,
+					    LIS2DH_INT1_CFG_FREEFALL);
+	}
+	k_mutex_unlock(&m_lock);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("free-fall register config", ret);
+		return ret;
+	}
+
+	ret = gpio_pin_configure_dt(&m_int1_gpio, GPIO_INPUT);
+	if (!ret) {
+		gpio_init_callback(&m_freefall_cb, freefall_isr, BIT(m_int1_gpio.pin));
+		ret = gpio_add_callback_dt(&m_int1_gpio, &m_freefall_cb);
+	}
+	if (!ret) {
+		ret = gpio_pin_interrupt_configure_dt(&m_int1_gpio, GPIO_INT_EDGE_RISING);
+	}
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("free-fall GPIO setup", ret);
+		return ret;
+	}
+
+	LOG_INF("Free-fall detection enabled (INT1, ths=0x%02x, dur=0x%02x)", LIS2DH_FREEFALL_THS,
+		LIS2DH_FREEFALL_DUR);
+	return 0;
+}
+
 int app_accel_init_motion(app_accel_motion_cb_t cb, void *user_data)
 {
 	m_motion_cb = cb;
 	m_motion_user_data = user_data;
+
+	int ff = app_accel_init_freefall();
+	if (ff) {
+		LOG_ERR_CALL_FAILED_INT("app_accel_init_freefall", ff);
+	}
 
 	/* Defer the first arm until the main loop and watchdog feeding are
 	 * alive: a regression in the interrupt path can then at worst degrade
