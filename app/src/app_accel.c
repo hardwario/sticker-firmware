@@ -218,22 +218,24 @@ static int motion_snap_hpf_reference(void)
 }
 
 /* Slope threshold (m/s^2 of the HP-filtered, i.e. dynamic, acceleration) and
- * duration (samples at the 10 Hz low-power ODR) per level. Issue #18 table:
- * low ~1.5 g (only strong shocks), medium ~0.8 g, high ~0.3 g (light
- * vibration). At 4 g FS the 7-bit INT2_THS LSB is ~0.307 m/s^2. Tune on HW. */
+ * duration (samples at the 100 Hz low-power ODR) per level. Retuned on HW: the
+ * old 15/8/3 m/s^2 was too coarse — only "high" ever fired, medium/low never
+ * triggered even on a desk-tap. New scale 7/4/2 m/s^2 is reachable by ordinary
+ * motion and still rejects the static 1 g (HPF reference snap nulls gravity).
+ * At 4 g FS the 7-bit INT2_THS LSB is ~0.307 m/s^2. */
 static void sensitivity_params(enum app_config_motion_sensitivity level, int *th_ms2, int *dur)
 {
 	switch (level) {
 	case APP_CONFIG_MOTION_SENSITIVITY_LOW:
-		*th_ms2 = 15;
-		*dur = 3;
-		break;
-	case APP_CONFIG_MOTION_SENSITIVITY_MEDIUM:
-		*th_ms2 = 8;
+		*th_ms2 = 7;
 		*dur = 2;
 		break;
+	case APP_CONFIG_MOTION_SENSITIVITY_MEDIUM:
+		*th_ms2 = 4;
+		*dur = 1;
+		break;
 	case APP_CONFIG_MOTION_SENSITIVITY_HIGH:
-		*th_ms2 = 3;
+		*th_ms2 = 2;
 		*dur = 1;
 		break;
 	default:
