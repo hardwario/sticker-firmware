@@ -227,6 +227,18 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.alarm_notif_time));
 	SETTINGS_SET("pir-notify-act", &m_app_config.pir_notify_act,
 		     sizeof(m_app_config.pir_notify_act));
+	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
+	SETTINGS_SET("sensor1-type", &m_app_config.sensor1_type, sizeof(m_app_config.sensor1_type));
+	SETTINGS_SET("sensor1-sht", &m_app_config.sensor1_sht, sizeof(m_app_config.sensor1_sht));
+	SETTINGS_SET("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
+	SETTINGS_SET("sensor2-type", &m_app_config.sensor2_type, sizeof(m_app_config.sensor2_type));
+	SETTINGS_SET("sensor2-sht", &m_app_config.sensor2_sht, sizeof(m_app_config.sensor2_sht));
+	SETTINGS_SET("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
+	SETTINGS_SET("sensor3-type", &m_app_config.sensor3_type, sizeof(m_app_config.sensor3_type));
+	SETTINGS_SET("sensor3-sht", &m_app_config.sensor3_sht, sizeof(m_app_config.sensor3_sht));
+	SETTINGS_SET("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
+	SETTINGS_SET("sensor4-type", &m_app_config.sensor4_type, sizeof(m_app_config.sensor4_type));
+	SETTINGS_SET("sensor4-sht", &m_app_config.sensor4_sht, sizeof(m_app_config.sensor4_sht));
 
 #undef SETTINGS_SET
 
@@ -374,6 +386,18 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.alarm_notif_time));
 	EXPORT_FUNC("pir-notify-act", &m_app_config.pir_notify_act,
 		    sizeof(m_app_config.pir_notify_act));
+	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
+	EXPORT_FUNC("sensor1-type", &m_app_config.sensor1_type, sizeof(m_app_config.sensor1_type));
+	EXPORT_FUNC("sensor1-sht", &m_app_config.sensor1_sht, sizeof(m_app_config.sensor1_sht));
+	EXPORT_FUNC("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
+	EXPORT_FUNC("sensor2-type", &m_app_config.sensor2_type, sizeof(m_app_config.sensor2_type));
+	EXPORT_FUNC("sensor2-sht", &m_app_config.sensor2_sht, sizeof(m_app_config.sensor2_sht));
+	EXPORT_FUNC("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
+	EXPORT_FUNC("sensor3-type", &m_app_config.sensor3_type, sizeof(m_app_config.sensor3_type));
+	EXPORT_FUNC("sensor3-sht", &m_app_config.sensor3_sht, sizeof(m_app_config.sensor3_sht));
+	EXPORT_FUNC("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
+	EXPORT_FUNC("sensor4-type", &m_app_config.sensor4_type, sizeof(m_app_config.sensor4_type));
+	EXPORT_FUNC("sensor4-sht", &m_app_config.sensor4_sht, sizeof(m_app_config.sensor4_sht));
 
 #undef EXPORT_FUNC
 
@@ -976,6 +1000,102 @@ static void print_pir_notify_act(const struct shell *shell)
 		    m_app_config.pir_notify_act ? "true" : "false");
 }
 
+static void print_sensor1_rom(const struct shell *shell)
+{
+	char buf[2 * sizeof(m_app_config.sensor1_rom) + 1];
+
+	int ret = bin2hex(m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom), buf,
+			  sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " sensor1-rom %s", buf);
+}
+
+static void print_sensor1_type(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " sensor1-type %u", m_app_config.sensor1_type);
+}
+
+static void print_sensor1_sht(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " sensor1-sht %u", m_app_config.sensor1_sht);
+}
+
+static void print_sensor2_rom(const struct shell *shell)
+{
+	char buf[2 * sizeof(m_app_config.sensor2_rom) + 1];
+
+	int ret = bin2hex(m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom), buf,
+			  sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " sensor2-rom %s", buf);
+}
+
+static void print_sensor2_type(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " sensor2-type %u", m_app_config.sensor2_type);
+}
+
+static void print_sensor2_sht(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " sensor2-sht %u", m_app_config.sensor2_sht);
+}
+
+static void print_sensor3_rom(const struct shell *shell)
+{
+	char buf[2 * sizeof(m_app_config.sensor3_rom) + 1];
+
+	int ret = bin2hex(m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom), buf,
+			  sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " sensor3-rom %s", buf);
+}
+
+static void print_sensor3_type(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " sensor3-type %u", m_app_config.sensor3_type);
+}
+
+static void print_sensor3_sht(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " sensor3-sht %u", m_app_config.sensor3_sht);
+}
+
+static void print_sensor4_rom(const struct shell *shell)
+{
+	char buf[2 * sizeof(m_app_config.sensor4_rom) + 1];
+
+	int ret = bin2hex(m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom), buf,
+			  sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " sensor4-rom %s", buf);
+}
+
+static void print_sensor4_type(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " sensor4-type %u", m_app_config.sensor4_type);
+}
+
+static void print_sensor4_sht(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " sensor4-sht %u", m_app_config.sensor4_sht);
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -1045,6 +1165,18 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_alarm_limit(shell);
 	print_alarm_notif_time(shell);
 	print_pir_notify_act(shell);
+	print_sensor1_rom(shell);
+	print_sensor1_type(shell);
+	print_sensor1_sht(shell);
+	print_sensor2_rom(shell);
+	print_sensor2_type(shell);
+	print_sensor2_sht(shell);
+	print_sensor3_rom(shell);
+	print_sensor3_type(shell);
+	print_sensor3_sht(shell);
+	print_sensor4_rom(shell);
+	print_sensor4_type(shell);
+	print_sensor4_sht(shell);
 
 	return 0;
 }
@@ -1799,6 +1931,406 @@ static int cmd_pir_notify_act(const struct shell *shell, size_t argc, char **arg
 	return cmd_bool(shell, argc, argv, &m_app_config.pir_notify_act, print_pir_notify_act);
 }
 
+static int cmd_sensor1_rom(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_sensor1_rom(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.sensor1_rom)) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.sensor1_rom,
+		      sizeof(m_app_config.sensor1_rom));
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_sensor1_type(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_sensor1_type(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.sensor1_type = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_sensor1_sht(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_sensor1_sht(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.sensor1_sht = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_sensor2_rom(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_sensor2_rom(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.sensor2_rom)) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.sensor2_rom,
+		      sizeof(m_app_config.sensor2_rom));
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_sensor2_type(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_sensor2_type(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.sensor2_type = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_sensor2_sht(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_sensor2_sht(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.sensor2_sht = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_sensor3_rom(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_sensor3_rom(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.sensor3_rom)) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.sensor3_rom,
+		      sizeof(m_app_config.sensor3_rom));
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_sensor3_type(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_sensor3_type(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.sensor3_type = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_sensor3_sht(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_sensor3_sht(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.sensor3_sht = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_sensor4_rom(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_sensor4_rom(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.sensor4_rom)) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.sensor4_rom,
+		      sizeof(m_app_config.sensor4_rom));
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_sensor4_type(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_sensor4_type(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.sensor4_type = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_sensor4_sht(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_sensor4_sht(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.sensor4_sht = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -2088,6 +2620,54 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(pir-notify-act, NULL,
 	              "Get/Set PIR motion alarm notify on activation (true/false).",
 	              cmd_pir_notify_act, 1, 1),
+
+	SHELL_CMD_ARG(sensor1-rom, NULL,
+	              "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty).",
+	              cmd_sensor1_rom, 1, 1),
+
+	SHELL_CMD_ARG(sensor1-type, NULL,
+	              "Get/Set 1-Wire slot 1 type (0=empty,1=dallas,2=machine-probe).",
+	              cmd_sensor1_type, 1, 1),
+
+	SHELL_CMD_ARG(sensor1-sht, NULL,
+	              "Get/Set 1-Wire slot 1 SHT variant cache (0=unknown).",
+	              cmd_sensor1_sht, 1, 1),
+
+	SHELL_CMD_ARG(sensor2-rom, NULL,
+	              "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty).",
+	              cmd_sensor2_rom, 1, 1),
+
+	SHELL_CMD_ARG(sensor2-type, NULL,
+	              "Get/Set 1-Wire slot 2 type (0=empty,1=dallas,2=machine-probe).",
+	              cmd_sensor2_type, 1, 1),
+
+	SHELL_CMD_ARG(sensor2-sht, NULL,
+	              "Get/Set 1-Wire slot 2 SHT variant cache (0=unknown).",
+	              cmd_sensor2_sht, 1, 1),
+
+	SHELL_CMD_ARG(sensor3-rom, NULL,
+	              "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty).",
+	              cmd_sensor3_rom, 1, 1),
+
+	SHELL_CMD_ARG(sensor3-type, NULL,
+	              "Get/Set 1-Wire slot 3 type (0=empty,1=dallas,2=machine-probe).",
+	              cmd_sensor3_type, 1, 1),
+
+	SHELL_CMD_ARG(sensor3-sht, NULL,
+	              "Get/Set 1-Wire slot 3 SHT variant cache (0=unknown).",
+	              cmd_sensor3_sht, 1, 1),
+
+	SHELL_CMD_ARG(sensor4-rom, NULL,
+	              "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty).",
+	              cmd_sensor4_rom, 1, 1),
+
+	SHELL_CMD_ARG(sensor4-type, NULL,
+	              "Get/Set 1-Wire slot 4 type (0=empty,1=dallas,2=machine-probe).",
+	              cmd_sensor4_type, 1, 1),
+
+	SHELL_CMD_ARG(sensor4-sht, NULL,
+	              "Get/Set 1-Wire slot 4 SHT variant cache (0=unknown).",
+	              cmd_sensor4_sht, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );

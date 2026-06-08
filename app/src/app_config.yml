@@ -5,7 +5,7 @@ module:
   settings_prefix: config
   shell_command: config
   log_module: app_config
-  version: 1
+  version: 2
 
 enums:
   lrw_region:
@@ -530,3 +530,76 @@ parameters:
     type: bool
     default: false
     help: "Get/Set PIR motion alarm notify on activation (true/false)."
+
+  # --- 1-Wire sensor slots (1wire-sensor-framework, P1) -------------------
+  # Per-slot ROM identity + auto-detected type, for stable ROM-bound binding
+  # (replaces discovery-order binding). type: 0=empty, 1=dallas-thermometer,
+  # 2=machine-probe. sht: cached SHT variant for machine-probe (0=unknown).
+  # Slots are flat-numbered (configen has no repeated config fields).
+  - name: sensor1_rom
+    proto_group: application
+    proto_id: 54
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor1_type
+    proto_group: application
+    proto_id: 55
+    type: uint32
+    help: "Get/Set 1-Wire slot 1 type (0=empty,1=dallas,2=machine-probe)."
+  - name: sensor1_sht
+    proto_group: application
+    proto_id: 56
+    type: uint32
+    help: "Get/Set 1-Wire slot 1 SHT variant cache (0=unknown)."
+
+  - name: sensor2_rom
+    proto_group: application
+    proto_id: 57
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor2_type
+    proto_group: application
+    proto_id: 58
+    type: uint32
+    help: "Get/Set 1-Wire slot 2 type (0=empty,1=dallas,2=machine-probe)."
+  - name: sensor2_sht
+    proto_group: application
+    proto_id: 59
+    type: uint32
+    help: "Get/Set 1-Wire slot 2 SHT variant cache (0=unknown)."
+
+  - name: sensor3_rom
+    proto_group: application
+    proto_id: 60
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor3_type
+    proto_group: application
+    proto_id: 61
+    type: uint32
+    help: "Get/Set 1-Wire slot 3 type (0=empty,1=dallas,2=machine-probe)."
+  - name: sensor3_sht
+    proto_group: application
+    proto_id: 62
+    type: uint32
+    help: "Get/Set 1-Wire slot 3 SHT variant cache (0=unknown)."
+
+  - name: sensor4_rom
+    proto_group: application
+    proto_id: 63
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor4_type
+    proto_group: application
+    proto_id: 64
+    type: uint32
+    help: "Get/Set 1-Wire slot 4 type (0=empty,1=dallas,2=machine-probe)."
+  - name: sensor4_sht
+    proto_group: application
+    proto_id: 65
+    type: uint32
+    help: "Get/Set 1-Wire slot 4 SHT variant cache (0=unknown)."

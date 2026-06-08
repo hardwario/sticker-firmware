@@ -94,6 +94,18 @@ message AppConfigMessage {
         optional uint32 alarm_limit = 51;
         optional uint32 alarm_notif_time = 52;
         optional bool pir_notify_act = 53;
+        optional string sensor1_rom = 54;
+        optional uint32 sensor1_type = 55;
+        optional uint32 sensor1_sht = 56;
+        optional string sensor2_rom = 57;
+        optional uint32 sensor2_type = 58;
+        optional uint32 sensor2_sht = 59;
+        optional string sensor3_rom = 60;
+        optional uint32 sensor3_type = 61;
+        optional uint32 sensor3_sht = 62;
+        optional string sensor4_rom = 63;
+        optional uint32 sensor4_type = 64;
+        optional uint32 sensor4_sht = 65;
     }
 }
 // END GENERATED CONFIG

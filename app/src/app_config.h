@@ -33,7 +33,7 @@ enum app_config_lrw_activation {
 	APP_CONFIG_LRW_ACTIVATION_ABP = 1,
 };
 
-#define APP_CONFIG_VERSION 1
+#define APP_CONFIG_VERSION 2
 
 struct app_config {
 	uint32_t config_version;
@@ -104,6 +104,18 @@ struct app_config {
 	int alarm_limit;
 	int alarm_notif_time;
 	bool pir_notify_act;
+	uint8_t sensor1_rom[8];
+	uint32_t sensor1_type;
+	uint32_t sensor1_sht;
+	uint8_t sensor2_rom[8];
+	uint32_t sensor2_type;
+	uint32_t sensor2_sht;
+	uint8_t sensor3_rom[8];
+	uint32_t sensor3_type;
+	uint32_t sensor3_sht;
+	uint8_t sensor4_rom[8];
+	uint32_t sensor4_type;
+	uint32_t sensor4_sht;
 };
 
 extern struct app_config g_app_config;
