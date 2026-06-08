@@ -18,6 +18,7 @@
 #include "app_pyq1648.h"
 #include "app_sensor.h"
 #include "app_sht4x.h"
+#include "app_w1_slots.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -208,6 +209,13 @@ int app_sensor_init(void)
 		}
 	}
 
+	/* Bind discovered 1-Wire devices to logical slots by ROM (stable identity,
+	 * replaces discovery-order). Must run after both driver scans. */
+	if (g_app_config.cap_1w_thermometer || g_app_config.cap_1w_machine_probe) {
+		int present = app_w1_slots_rebind();
+		LOG_INF("1-Wire slots: %d sensor(s) bound", present);
+	}
+
 	k_work_queue_init(&m_sensor_work_q);
 
 	k_work_queue_start(&m_sensor_work_q, m_sensor_work_stack,
@@ -297,72 +305,50 @@ void app_sensor_sample(void)
 		}
 	}
 
-	if (g_app_config.cap_1w_thermometer) {
-		int count = app_ds18b20_get_count();
+	/* Read 1-Wire sensors through the ROM-bound slot table (stable identity,
+	 * replaces discovery-order). Dallas slots fill the legacy t1/t2 fields,
+	 * machine-probe slots fill mp1/mp2 — P1 keeps the existing telemetry/alarm
+	 * fields; the full w1[] migration is P3. */
+	if (g_app_config.cap_1w_thermometer || g_app_config.cap_1w_machine_probe) {
+		int dallas_n = 0;
+		int probe_n = 0;
 
-		for (int i = 0; i < count; i++) {
-			uint64_t serial_number;
-			float temperature;
-			ret = app_ds18b20_read(i, &serial_number, &temperature);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_ds18b20_read", ret);
+		for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+			struct app_w1_slot_reading r;
+
+			if (app_w1_slots_read(s, &r) != 0 || !r.present) {
 				continue;
 			}
 
-			LOG_INF("Serial number: %llu / Temperature: %.2f C", serial_number,
-				(double)temperature);
-
-			if (i == 0) {
-				t1_temperature = temperature;
-			} else if (i == 1) {
-				t2_temperature = temperature;
-			}
-		}
-	}
-
-	if (g_app_config.cap_1w_machine_probe) {
-		int count = app_machine_probe_get_count();
-
-		for (int i = 0; i < count; i++) {
-			uint64_t serial_number;
-			float hygrometer_temperature;
-			float hygrometer_humidity;
-			bool is_tilt_alert;
-			ret = app_machine_probe_read_hygrometer(
-				i, &serial_number, &hygrometer_temperature, &hygrometer_humidity);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_machine_probe_read_hygrometer", ret);
-				continue;
-			}
-
-			LOG_INF("Serial number: %llu / Hygrometer / Temperature: "
-				"%.2f C",
-				serial_number, (double)hygrometer_temperature);
-			LOG_INF("Serial number: %llu / Hygrometer / Humidity: %.1f "
-				"%%",
-				serial_number, (double)hygrometer_humidity);
-
-			if (i == 0) {
-				mp1_temperature = hygrometer_temperature;
-				mp1_humidity = hygrometer_humidity;
-			} else if (i == 1) {
-				mp2_temperature = hygrometer_temperature;
-				mp2_humidity = hygrometer_humidity;
-			}
-
-			ret = app_machine_probe_get_tilt_alert(i, &serial_number, &is_tilt_alert);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_machine_probe_get_tilt_alert", ret);
-				continue;
-			}
-
-			LOG_INF("Serial number: %llu / Tilt alert is %sactive", serial_number,
-				is_tilt_alert ? "" : "not ");
-
-			if (i == 0) {
-				mp1_is_tilt_alert = is_tilt_alert;
-			} else if (i == 1) {
-				mp2_is_tilt_alert = is_tilt_alert;
+			switch (app_w1_slot_get_type(s)) {
+			case APP_W1_SLOT_DALLAS:
+				LOG_INF("Slot %d (dallas) / Temperature: %.2f C", s + 1,
+					(double)r.temperature);
+				if (dallas_n == 0) {
+					t1_temperature = r.temperature;
+				} else if (dallas_n == 1) {
+					t2_temperature = r.temperature;
+				}
+				dallas_n++;
+				break;
+			case APP_W1_SLOT_MACHINE_PROBE:
+				LOG_INF("Slot %d (machine-probe) / %.2f C / %.1f %% / tilt "
+					"%sactive",
+					s + 1, (double)r.temperature, (double)r.humidity,
+					r.is_tilt_alert ? "" : "not ");
+				if (probe_n == 0) {
+					mp1_temperature = r.temperature;
+					mp1_humidity = r.humidity;
+					mp1_is_tilt_alert = r.is_tilt_alert;
+				} else if (probe_n == 1) {
+					mp2_temperature = r.temperature;
+					mp2_humidity = r.humidity;
+					mp2_is_tilt_alert = r.is_tilt_alert;
+				}
+				probe_n++;
+				break;
+			default:
+				break;
 			}
 		}
 	}
