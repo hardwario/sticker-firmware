@@ -106,6 +106,46 @@ message AppConfigMessage {
         optional string sensor4_rom = 63;
         optional uint32 sensor4_type = 64;
         optional uint32 sensor4_sht = 65;
+        optional bool alarm_s1_temperature_enabled = 66;
+        optional float alarm_s1_temperature_lo = 67;
+        optional float alarm_s1_temperature_hi = 68;
+        optional float alarm_s1_temperature_hst = 69;
+        optional bool alarm_s1_humidity_enabled = 70;
+        optional float alarm_s1_humidity_lo = 71;
+        optional float alarm_s1_humidity_hi = 72;
+        optional float alarm_s1_humidity_hst = 73;
+        optional bool alarm_s1_tilt_enabled = 74;
+        optional float corr_s1_temperature = 75;
+        optional bool alarm_s2_temperature_enabled = 76;
+        optional float alarm_s2_temperature_lo = 77;
+        optional float alarm_s2_temperature_hi = 78;
+        optional float alarm_s2_temperature_hst = 79;
+        optional bool alarm_s2_humidity_enabled = 80;
+        optional float alarm_s2_humidity_lo = 81;
+        optional float alarm_s2_humidity_hi = 82;
+        optional float alarm_s2_humidity_hst = 83;
+        optional bool alarm_s2_tilt_enabled = 84;
+        optional float corr_s2_temperature = 85;
+        optional bool alarm_s3_temperature_enabled = 86;
+        optional float alarm_s3_temperature_lo = 87;
+        optional float alarm_s3_temperature_hi = 88;
+        optional float alarm_s3_temperature_hst = 89;
+        optional bool alarm_s3_humidity_enabled = 90;
+        optional float alarm_s3_humidity_lo = 91;
+        optional float alarm_s3_humidity_hi = 92;
+        optional float alarm_s3_humidity_hst = 93;
+        optional bool alarm_s3_tilt_enabled = 94;
+        optional float corr_s3_temperature = 95;
+        optional bool alarm_s4_temperature_enabled = 96;
+        optional float alarm_s4_temperature_lo = 97;
+        optional float alarm_s4_temperature_hi = 98;
+        optional float alarm_s4_temperature_hst = 99;
+        optional bool alarm_s4_humidity_enabled = 100;
+        optional float alarm_s4_humidity_lo = 101;
+        optional float alarm_s4_humidity_hi = 102;
+        optional float alarm_s4_humidity_hst = 103;
+        optional bool alarm_s4_tilt_enabled = 104;
+        optional float corr_s4_temperature = 105;
     }
 }
 // END GENERATED CONFIG

@@ -56,6 +56,34 @@ static const struct app_config m_app_config_defaults = {
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.pir_notify_act = false,
+	.alarm_s1_temperature_lo = 15.0f,
+	.alarm_s1_temperature_hi = 25.0f,
+	.alarm_s1_temperature_hst = 0.5f,
+	.alarm_s1_humidity_lo = 30.0f,
+	.alarm_s1_humidity_hi = 75.0f,
+	.alarm_s1_humidity_hst = 5.0f,
+	.corr_s1_temperature = 0.0f,
+	.alarm_s2_temperature_lo = 15.0f,
+	.alarm_s2_temperature_hi = 25.0f,
+	.alarm_s2_temperature_hst = 0.5f,
+	.alarm_s2_humidity_lo = 30.0f,
+	.alarm_s2_humidity_hi = 75.0f,
+	.alarm_s2_humidity_hst = 5.0f,
+	.corr_s2_temperature = 0.0f,
+	.alarm_s3_temperature_lo = 15.0f,
+	.alarm_s3_temperature_hi = 25.0f,
+	.alarm_s3_temperature_hst = 0.5f,
+	.alarm_s3_humidity_lo = 30.0f,
+	.alarm_s3_humidity_hi = 75.0f,
+	.alarm_s3_humidity_hst = 5.0f,
+	.corr_s3_temperature = 0.0f,
+	.alarm_s4_temperature_lo = 15.0f,
+	.alarm_s4_temperature_hi = 25.0f,
+	.alarm_s4_temperature_hst = 0.5f,
+	.alarm_s4_humidity_lo = 30.0f,
+	.alarm_s4_humidity_hi = 75.0f,
+	.alarm_s4_humidity_hst = 5.0f,
+	.corr_s4_temperature = 0.0f,
 };
 
 static struct app_config m_app_config = {
@@ -82,6 +110,34 @@ static struct app_config m_app_config = {
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.pir_notify_act = false,
+	.alarm_s1_temperature_lo = 15.0f,
+	.alarm_s1_temperature_hi = 25.0f,
+	.alarm_s1_temperature_hst = 0.5f,
+	.alarm_s1_humidity_lo = 30.0f,
+	.alarm_s1_humidity_hi = 75.0f,
+	.alarm_s1_humidity_hst = 5.0f,
+	.corr_s1_temperature = 0.0f,
+	.alarm_s2_temperature_lo = 15.0f,
+	.alarm_s2_temperature_hi = 25.0f,
+	.alarm_s2_temperature_hst = 0.5f,
+	.alarm_s2_humidity_lo = 30.0f,
+	.alarm_s2_humidity_hi = 75.0f,
+	.alarm_s2_humidity_hst = 5.0f,
+	.corr_s2_temperature = 0.0f,
+	.alarm_s3_temperature_lo = 15.0f,
+	.alarm_s3_temperature_hi = 25.0f,
+	.alarm_s3_temperature_hst = 0.5f,
+	.alarm_s3_humidity_lo = 30.0f,
+	.alarm_s3_humidity_hi = 75.0f,
+	.alarm_s3_humidity_hst = 5.0f,
+	.corr_s3_temperature = 0.0f,
+	.alarm_s4_temperature_lo = 15.0f,
+	.alarm_s4_temperature_hi = 25.0f,
+	.alarm_s4_temperature_hst = 0.5f,
+	.alarm_s4_humidity_lo = 30.0f,
+	.alarm_s4_humidity_hi = 75.0f,
+	.alarm_s4_humidity_hst = 5.0f,
+	.corr_s4_temperature = 0.0f,
 };
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
@@ -239,6 +295,86 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
 	SETTINGS_SET("sensor4-type", &m_app_config.sensor4_type, sizeof(m_app_config.sensor4_type));
 	SETTINGS_SET("sensor4-sht", &m_app_config.sensor4_sht, sizeof(m_app_config.sensor4_sht));
+	SETTINGS_SET("alarm-s1-temperature-enabled", &m_app_config.alarm_s1_temperature_enabled,
+		     sizeof(m_app_config.alarm_s1_temperature_enabled));
+	SETTINGS_SET("alarm-s1-temperature-lo", &m_app_config.alarm_s1_temperature_lo,
+		     sizeof(m_app_config.alarm_s1_temperature_lo));
+	SETTINGS_SET("alarm-s1-temperature-hi", &m_app_config.alarm_s1_temperature_hi,
+		     sizeof(m_app_config.alarm_s1_temperature_hi));
+	SETTINGS_SET("alarm-s1-temperature-hst", &m_app_config.alarm_s1_temperature_hst,
+		     sizeof(m_app_config.alarm_s1_temperature_hst));
+	SETTINGS_SET("alarm-s1-humidity-enabled", &m_app_config.alarm_s1_humidity_enabled,
+		     sizeof(m_app_config.alarm_s1_humidity_enabled));
+	SETTINGS_SET("alarm-s1-humidity-lo", &m_app_config.alarm_s1_humidity_lo,
+		     sizeof(m_app_config.alarm_s1_humidity_lo));
+	SETTINGS_SET("alarm-s1-humidity-hi", &m_app_config.alarm_s1_humidity_hi,
+		     sizeof(m_app_config.alarm_s1_humidity_hi));
+	SETTINGS_SET("alarm-s1-humidity-hst", &m_app_config.alarm_s1_humidity_hst,
+		     sizeof(m_app_config.alarm_s1_humidity_hst));
+	SETTINGS_SET("alarm-s1-tilt-enabled", &m_app_config.alarm_s1_tilt_enabled,
+		     sizeof(m_app_config.alarm_s1_tilt_enabled));
+	SETTINGS_SET("corr-s1-temperature", &m_app_config.corr_s1_temperature,
+		     sizeof(m_app_config.corr_s1_temperature));
+	SETTINGS_SET("alarm-s2-temperature-enabled", &m_app_config.alarm_s2_temperature_enabled,
+		     sizeof(m_app_config.alarm_s2_temperature_enabled));
+	SETTINGS_SET("alarm-s2-temperature-lo", &m_app_config.alarm_s2_temperature_lo,
+		     sizeof(m_app_config.alarm_s2_temperature_lo));
+	SETTINGS_SET("alarm-s2-temperature-hi", &m_app_config.alarm_s2_temperature_hi,
+		     sizeof(m_app_config.alarm_s2_temperature_hi));
+	SETTINGS_SET("alarm-s2-temperature-hst", &m_app_config.alarm_s2_temperature_hst,
+		     sizeof(m_app_config.alarm_s2_temperature_hst));
+	SETTINGS_SET("alarm-s2-humidity-enabled", &m_app_config.alarm_s2_humidity_enabled,
+		     sizeof(m_app_config.alarm_s2_humidity_enabled));
+	SETTINGS_SET("alarm-s2-humidity-lo", &m_app_config.alarm_s2_humidity_lo,
+		     sizeof(m_app_config.alarm_s2_humidity_lo));
+	SETTINGS_SET("alarm-s2-humidity-hi", &m_app_config.alarm_s2_humidity_hi,
+		     sizeof(m_app_config.alarm_s2_humidity_hi));
+	SETTINGS_SET("alarm-s2-humidity-hst", &m_app_config.alarm_s2_humidity_hst,
+		     sizeof(m_app_config.alarm_s2_humidity_hst));
+	SETTINGS_SET("alarm-s2-tilt-enabled", &m_app_config.alarm_s2_tilt_enabled,
+		     sizeof(m_app_config.alarm_s2_tilt_enabled));
+	SETTINGS_SET("corr-s2-temperature", &m_app_config.corr_s2_temperature,
+		     sizeof(m_app_config.corr_s2_temperature));
+	SETTINGS_SET("alarm-s3-temperature-enabled", &m_app_config.alarm_s3_temperature_enabled,
+		     sizeof(m_app_config.alarm_s3_temperature_enabled));
+	SETTINGS_SET("alarm-s3-temperature-lo", &m_app_config.alarm_s3_temperature_lo,
+		     sizeof(m_app_config.alarm_s3_temperature_lo));
+	SETTINGS_SET("alarm-s3-temperature-hi", &m_app_config.alarm_s3_temperature_hi,
+		     sizeof(m_app_config.alarm_s3_temperature_hi));
+	SETTINGS_SET("alarm-s3-temperature-hst", &m_app_config.alarm_s3_temperature_hst,
+		     sizeof(m_app_config.alarm_s3_temperature_hst));
+	SETTINGS_SET("alarm-s3-humidity-enabled", &m_app_config.alarm_s3_humidity_enabled,
+		     sizeof(m_app_config.alarm_s3_humidity_enabled));
+	SETTINGS_SET("alarm-s3-humidity-lo", &m_app_config.alarm_s3_humidity_lo,
+		     sizeof(m_app_config.alarm_s3_humidity_lo));
+	SETTINGS_SET("alarm-s3-humidity-hi", &m_app_config.alarm_s3_humidity_hi,
+		     sizeof(m_app_config.alarm_s3_humidity_hi));
+	SETTINGS_SET("alarm-s3-humidity-hst", &m_app_config.alarm_s3_humidity_hst,
+		     sizeof(m_app_config.alarm_s3_humidity_hst));
+	SETTINGS_SET("alarm-s3-tilt-enabled", &m_app_config.alarm_s3_tilt_enabled,
+		     sizeof(m_app_config.alarm_s3_tilt_enabled));
+	SETTINGS_SET("corr-s3-temperature", &m_app_config.corr_s3_temperature,
+		     sizeof(m_app_config.corr_s3_temperature));
+	SETTINGS_SET("alarm-s4-temperature-enabled", &m_app_config.alarm_s4_temperature_enabled,
+		     sizeof(m_app_config.alarm_s4_temperature_enabled));
+	SETTINGS_SET("alarm-s4-temperature-lo", &m_app_config.alarm_s4_temperature_lo,
+		     sizeof(m_app_config.alarm_s4_temperature_lo));
+	SETTINGS_SET("alarm-s4-temperature-hi", &m_app_config.alarm_s4_temperature_hi,
+		     sizeof(m_app_config.alarm_s4_temperature_hi));
+	SETTINGS_SET("alarm-s4-temperature-hst", &m_app_config.alarm_s4_temperature_hst,
+		     sizeof(m_app_config.alarm_s4_temperature_hst));
+	SETTINGS_SET("alarm-s4-humidity-enabled", &m_app_config.alarm_s4_humidity_enabled,
+		     sizeof(m_app_config.alarm_s4_humidity_enabled));
+	SETTINGS_SET("alarm-s4-humidity-lo", &m_app_config.alarm_s4_humidity_lo,
+		     sizeof(m_app_config.alarm_s4_humidity_lo));
+	SETTINGS_SET("alarm-s4-humidity-hi", &m_app_config.alarm_s4_humidity_hi,
+		     sizeof(m_app_config.alarm_s4_humidity_hi));
+	SETTINGS_SET("alarm-s4-humidity-hst", &m_app_config.alarm_s4_humidity_hst,
+		     sizeof(m_app_config.alarm_s4_humidity_hst));
+	SETTINGS_SET("alarm-s4-tilt-enabled", &m_app_config.alarm_s4_tilt_enabled,
+		     sizeof(m_app_config.alarm_s4_tilt_enabled));
+	SETTINGS_SET("corr-s4-temperature", &m_app_config.corr_s4_temperature,
+		     sizeof(m_app_config.corr_s4_temperature));
 
 #undef SETTINGS_SET
 
@@ -398,6 +534,86 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
 	EXPORT_FUNC("sensor4-type", &m_app_config.sensor4_type, sizeof(m_app_config.sensor4_type));
 	EXPORT_FUNC("sensor4-sht", &m_app_config.sensor4_sht, sizeof(m_app_config.sensor4_sht));
+	EXPORT_FUNC("alarm-s1-temperature-enabled", &m_app_config.alarm_s1_temperature_enabled,
+		    sizeof(m_app_config.alarm_s1_temperature_enabled));
+	EXPORT_FUNC("alarm-s1-temperature-lo", &m_app_config.alarm_s1_temperature_lo,
+		    sizeof(m_app_config.alarm_s1_temperature_lo));
+	EXPORT_FUNC("alarm-s1-temperature-hi", &m_app_config.alarm_s1_temperature_hi,
+		    sizeof(m_app_config.alarm_s1_temperature_hi));
+	EXPORT_FUNC("alarm-s1-temperature-hst", &m_app_config.alarm_s1_temperature_hst,
+		    sizeof(m_app_config.alarm_s1_temperature_hst));
+	EXPORT_FUNC("alarm-s1-humidity-enabled", &m_app_config.alarm_s1_humidity_enabled,
+		    sizeof(m_app_config.alarm_s1_humidity_enabled));
+	EXPORT_FUNC("alarm-s1-humidity-lo", &m_app_config.alarm_s1_humidity_lo,
+		    sizeof(m_app_config.alarm_s1_humidity_lo));
+	EXPORT_FUNC("alarm-s1-humidity-hi", &m_app_config.alarm_s1_humidity_hi,
+		    sizeof(m_app_config.alarm_s1_humidity_hi));
+	EXPORT_FUNC("alarm-s1-humidity-hst", &m_app_config.alarm_s1_humidity_hst,
+		    sizeof(m_app_config.alarm_s1_humidity_hst));
+	EXPORT_FUNC("alarm-s1-tilt-enabled", &m_app_config.alarm_s1_tilt_enabled,
+		    sizeof(m_app_config.alarm_s1_tilt_enabled));
+	EXPORT_FUNC("corr-s1-temperature", &m_app_config.corr_s1_temperature,
+		    sizeof(m_app_config.corr_s1_temperature));
+	EXPORT_FUNC("alarm-s2-temperature-enabled", &m_app_config.alarm_s2_temperature_enabled,
+		    sizeof(m_app_config.alarm_s2_temperature_enabled));
+	EXPORT_FUNC("alarm-s2-temperature-lo", &m_app_config.alarm_s2_temperature_lo,
+		    sizeof(m_app_config.alarm_s2_temperature_lo));
+	EXPORT_FUNC("alarm-s2-temperature-hi", &m_app_config.alarm_s2_temperature_hi,
+		    sizeof(m_app_config.alarm_s2_temperature_hi));
+	EXPORT_FUNC("alarm-s2-temperature-hst", &m_app_config.alarm_s2_temperature_hst,
+		    sizeof(m_app_config.alarm_s2_temperature_hst));
+	EXPORT_FUNC("alarm-s2-humidity-enabled", &m_app_config.alarm_s2_humidity_enabled,
+		    sizeof(m_app_config.alarm_s2_humidity_enabled));
+	EXPORT_FUNC("alarm-s2-humidity-lo", &m_app_config.alarm_s2_humidity_lo,
+		    sizeof(m_app_config.alarm_s2_humidity_lo));
+	EXPORT_FUNC("alarm-s2-humidity-hi", &m_app_config.alarm_s2_humidity_hi,
+		    sizeof(m_app_config.alarm_s2_humidity_hi));
+	EXPORT_FUNC("alarm-s2-humidity-hst", &m_app_config.alarm_s2_humidity_hst,
+		    sizeof(m_app_config.alarm_s2_humidity_hst));
+	EXPORT_FUNC("alarm-s2-tilt-enabled", &m_app_config.alarm_s2_tilt_enabled,
+		    sizeof(m_app_config.alarm_s2_tilt_enabled));
+	EXPORT_FUNC("corr-s2-temperature", &m_app_config.corr_s2_temperature,
+		    sizeof(m_app_config.corr_s2_temperature));
+	EXPORT_FUNC("alarm-s3-temperature-enabled", &m_app_config.alarm_s3_temperature_enabled,
+		    sizeof(m_app_config.alarm_s3_temperature_enabled));
+	EXPORT_FUNC("alarm-s3-temperature-lo", &m_app_config.alarm_s3_temperature_lo,
+		    sizeof(m_app_config.alarm_s3_temperature_lo));
+	EXPORT_FUNC("alarm-s3-temperature-hi", &m_app_config.alarm_s3_temperature_hi,
+		    sizeof(m_app_config.alarm_s3_temperature_hi));
+	EXPORT_FUNC("alarm-s3-temperature-hst", &m_app_config.alarm_s3_temperature_hst,
+		    sizeof(m_app_config.alarm_s3_temperature_hst));
+	EXPORT_FUNC("alarm-s3-humidity-enabled", &m_app_config.alarm_s3_humidity_enabled,
+		    sizeof(m_app_config.alarm_s3_humidity_enabled));
+	EXPORT_FUNC("alarm-s3-humidity-lo", &m_app_config.alarm_s3_humidity_lo,
+		    sizeof(m_app_config.alarm_s3_humidity_lo));
+	EXPORT_FUNC("alarm-s3-humidity-hi", &m_app_config.alarm_s3_humidity_hi,
+		    sizeof(m_app_config.alarm_s3_humidity_hi));
+	EXPORT_FUNC("alarm-s3-humidity-hst", &m_app_config.alarm_s3_humidity_hst,
+		    sizeof(m_app_config.alarm_s3_humidity_hst));
+	EXPORT_FUNC("alarm-s3-tilt-enabled", &m_app_config.alarm_s3_tilt_enabled,
+		    sizeof(m_app_config.alarm_s3_tilt_enabled));
+	EXPORT_FUNC("corr-s3-temperature", &m_app_config.corr_s3_temperature,
+		    sizeof(m_app_config.corr_s3_temperature));
+	EXPORT_FUNC("alarm-s4-temperature-enabled", &m_app_config.alarm_s4_temperature_enabled,
+		    sizeof(m_app_config.alarm_s4_temperature_enabled));
+	EXPORT_FUNC("alarm-s4-temperature-lo", &m_app_config.alarm_s4_temperature_lo,
+		    sizeof(m_app_config.alarm_s4_temperature_lo));
+	EXPORT_FUNC("alarm-s4-temperature-hi", &m_app_config.alarm_s4_temperature_hi,
+		    sizeof(m_app_config.alarm_s4_temperature_hi));
+	EXPORT_FUNC("alarm-s4-temperature-hst", &m_app_config.alarm_s4_temperature_hst,
+		    sizeof(m_app_config.alarm_s4_temperature_hst));
+	EXPORT_FUNC("alarm-s4-humidity-enabled", &m_app_config.alarm_s4_humidity_enabled,
+		    sizeof(m_app_config.alarm_s4_humidity_enabled));
+	EXPORT_FUNC("alarm-s4-humidity-lo", &m_app_config.alarm_s4_humidity_lo,
+		    sizeof(m_app_config.alarm_s4_humidity_lo));
+	EXPORT_FUNC("alarm-s4-humidity-hi", &m_app_config.alarm_s4_humidity_hi,
+		    sizeof(m_app_config.alarm_s4_humidity_hi));
+	EXPORT_FUNC("alarm-s4-humidity-hst", &m_app_config.alarm_s4_humidity_hst,
+		    sizeof(m_app_config.alarm_s4_humidity_hst));
+	EXPORT_FUNC("alarm-s4-tilt-enabled", &m_app_config.alarm_s4_tilt_enabled,
+		    sizeof(m_app_config.alarm_s4_tilt_enabled));
+	EXPORT_FUNC("corr-s4-temperature", &m_app_config.corr_s4_temperature,
+		    sizeof(m_app_config.corr_s4_temperature));
 
 #undef EXPORT_FUNC
 
@@ -1096,6 +1312,246 @@ static void print_sensor4_sht(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " sensor4-sht %u", m_app_config.sensor4_sht);
 }
 
+static void print_alarm_s1_temperature_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s1-temperature-enabled %s",
+		    m_app_config.alarm_s1_temperature_enabled ? "true" : "false");
+}
+
+static void print_alarm_s1_temperature_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s1-temperature-lo %.2f",
+		    (double)m_app_config.alarm_s1_temperature_lo);
+}
+
+static void print_alarm_s1_temperature_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s1-temperature-hi %.2f",
+		    (double)m_app_config.alarm_s1_temperature_hi);
+}
+
+static void print_alarm_s1_temperature_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s1-temperature-hst %.2f",
+		    (double)m_app_config.alarm_s1_temperature_hst);
+}
+
+static void print_alarm_s1_humidity_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s1-humidity-enabled %s",
+		    m_app_config.alarm_s1_humidity_enabled ? "true" : "false");
+}
+
+static void print_alarm_s1_humidity_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s1-humidity-lo %.2f",
+		    (double)m_app_config.alarm_s1_humidity_lo);
+}
+
+static void print_alarm_s1_humidity_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s1-humidity-hi %.2f",
+		    (double)m_app_config.alarm_s1_humidity_hi);
+}
+
+static void print_alarm_s1_humidity_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s1-humidity-hst %.2f",
+		    (double)m_app_config.alarm_s1_humidity_hst);
+}
+
+static void print_alarm_s1_tilt_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s1-tilt-enabled %s",
+		    m_app_config.alarm_s1_tilt_enabled ? "true" : "false");
+}
+
+static void print_corr_s1_temperature(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " corr-s1-temperature %.2f",
+		    (double)m_app_config.corr_s1_temperature);
+}
+
+static void print_alarm_s2_temperature_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s2-temperature-enabled %s",
+		    m_app_config.alarm_s2_temperature_enabled ? "true" : "false");
+}
+
+static void print_alarm_s2_temperature_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s2-temperature-lo %.2f",
+		    (double)m_app_config.alarm_s2_temperature_lo);
+}
+
+static void print_alarm_s2_temperature_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s2-temperature-hi %.2f",
+		    (double)m_app_config.alarm_s2_temperature_hi);
+}
+
+static void print_alarm_s2_temperature_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s2-temperature-hst %.2f",
+		    (double)m_app_config.alarm_s2_temperature_hst);
+}
+
+static void print_alarm_s2_humidity_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s2-humidity-enabled %s",
+		    m_app_config.alarm_s2_humidity_enabled ? "true" : "false");
+}
+
+static void print_alarm_s2_humidity_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s2-humidity-lo %.2f",
+		    (double)m_app_config.alarm_s2_humidity_lo);
+}
+
+static void print_alarm_s2_humidity_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s2-humidity-hi %.2f",
+		    (double)m_app_config.alarm_s2_humidity_hi);
+}
+
+static void print_alarm_s2_humidity_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s2-humidity-hst %.2f",
+		    (double)m_app_config.alarm_s2_humidity_hst);
+}
+
+static void print_alarm_s2_tilt_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s2-tilt-enabled %s",
+		    m_app_config.alarm_s2_tilt_enabled ? "true" : "false");
+}
+
+static void print_corr_s2_temperature(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " corr-s2-temperature %.2f",
+		    (double)m_app_config.corr_s2_temperature);
+}
+
+static void print_alarm_s3_temperature_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s3-temperature-enabled %s",
+		    m_app_config.alarm_s3_temperature_enabled ? "true" : "false");
+}
+
+static void print_alarm_s3_temperature_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s3-temperature-lo %.2f",
+		    (double)m_app_config.alarm_s3_temperature_lo);
+}
+
+static void print_alarm_s3_temperature_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s3-temperature-hi %.2f",
+		    (double)m_app_config.alarm_s3_temperature_hi);
+}
+
+static void print_alarm_s3_temperature_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s3-temperature-hst %.2f",
+		    (double)m_app_config.alarm_s3_temperature_hst);
+}
+
+static void print_alarm_s3_humidity_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s3-humidity-enabled %s",
+		    m_app_config.alarm_s3_humidity_enabled ? "true" : "false");
+}
+
+static void print_alarm_s3_humidity_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s3-humidity-lo %.2f",
+		    (double)m_app_config.alarm_s3_humidity_lo);
+}
+
+static void print_alarm_s3_humidity_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s3-humidity-hi %.2f",
+		    (double)m_app_config.alarm_s3_humidity_hi);
+}
+
+static void print_alarm_s3_humidity_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s3-humidity-hst %.2f",
+		    (double)m_app_config.alarm_s3_humidity_hst);
+}
+
+static void print_alarm_s3_tilt_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s3-tilt-enabled %s",
+		    m_app_config.alarm_s3_tilt_enabled ? "true" : "false");
+}
+
+static void print_corr_s3_temperature(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " corr-s3-temperature %.2f",
+		    (double)m_app_config.corr_s3_temperature);
+}
+
+static void print_alarm_s4_temperature_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s4-temperature-enabled %s",
+		    m_app_config.alarm_s4_temperature_enabled ? "true" : "false");
+}
+
+static void print_alarm_s4_temperature_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s4-temperature-lo %.2f",
+		    (double)m_app_config.alarm_s4_temperature_lo);
+}
+
+static void print_alarm_s4_temperature_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s4-temperature-hi %.2f",
+		    (double)m_app_config.alarm_s4_temperature_hi);
+}
+
+static void print_alarm_s4_temperature_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s4-temperature-hst %.2f",
+		    (double)m_app_config.alarm_s4_temperature_hst);
+}
+
+static void print_alarm_s4_humidity_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s4-humidity-enabled %s",
+		    m_app_config.alarm_s4_humidity_enabled ? "true" : "false");
+}
+
+static void print_alarm_s4_humidity_lo(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s4-humidity-lo %.2f",
+		    (double)m_app_config.alarm_s4_humidity_lo);
+}
+
+static void print_alarm_s4_humidity_hi(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s4-humidity-hi %.2f",
+		    (double)m_app_config.alarm_s4_humidity_hi);
+}
+
+static void print_alarm_s4_humidity_hst(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s4-humidity-hst %.2f",
+		    (double)m_app_config.alarm_s4_humidity_hst);
+}
+
+static void print_alarm_s4_tilt_enabled(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-s4-tilt-enabled %s",
+		    m_app_config.alarm_s4_tilt_enabled ? "true" : "false");
+}
+
+static void print_corr_s4_temperature(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " corr-s4-temperature %.2f",
+		    (double)m_app_config.corr_s4_temperature);
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -1177,6 +1633,46 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_sensor4_rom(shell);
 	print_sensor4_type(shell);
 	print_sensor4_sht(shell);
+	print_alarm_s1_temperature_enabled(shell);
+	print_alarm_s1_temperature_lo(shell);
+	print_alarm_s1_temperature_hi(shell);
+	print_alarm_s1_temperature_hst(shell);
+	print_alarm_s1_humidity_enabled(shell);
+	print_alarm_s1_humidity_lo(shell);
+	print_alarm_s1_humidity_hi(shell);
+	print_alarm_s1_humidity_hst(shell);
+	print_alarm_s1_tilt_enabled(shell);
+	print_corr_s1_temperature(shell);
+	print_alarm_s2_temperature_enabled(shell);
+	print_alarm_s2_temperature_lo(shell);
+	print_alarm_s2_temperature_hi(shell);
+	print_alarm_s2_temperature_hst(shell);
+	print_alarm_s2_humidity_enabled(shell);
+	print_alarm_s2_humidity_lo(shell);
+	print_alarm_s2_humidity_hi(shell);
+	print_alarm_s2_humidity_hst(shell);
+	print_alarm_s2_tilt_enabled(shell);
+	print_corr_s2_temperature(shell);
+	print_alarm_s3_temperature_enabled(shell);
+	print_alarm_s3_temperature_lo(shell);
+	print_alarm_s3_temperature_hi(shell);
+	print_alarm_s3_temperature_hst(shell);
+	print_alarm_s3_humidity_enabled(shell);
+	print_alarm_s3_humidity_lo(shell);
+	print_alarm_s3_humidity_hi(shell);
+	print_alarm_s3_humidity_hst(shell);
+	print_alarm_s3_tilt_enabled(shell);
+	print_corr_s3_temperature(shell);
+	print_alarm_s4_temperature_enabled(shell);
+	print_alarm_s4_temperature_lo(shell);
+	print_alarm_s4_temperature_hi(shell);
+	print_alarm_s4_temperature_hst(shell);
+	print_alarm_s4_humidity_enabled(shell);
+	print_alarm_s4_humidity_lo(shell);
+	print_alarm_s4_humidity_hi(shell);
+	print_alarm_s4_humidity_hst(shell);
+	print_alarm_s4_tilt_enabled(shell);
+	print_corr_s4_temperature(shell);
 
 	return 0;
 }
@@ -2331,6 +2827,246 @@ static int cmd_sensor4_sht(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_alarm_s1_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_s1_temperature_enabled,
+			print_alarm_s1_temperature_enabled);
+}
+
+static int cmd_alarm_s1_temperature_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s1_temperature_lo, -30.0f, 70.0f,
+			 print_alarm_s1_temperature_lo);
+}
+
+static int cmd_alarm_s1_temperature_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s1_temperature_hi, -30.0f, 70.0f,
+			 print_alarm_s1_temperature_hi);
+}
+
+static int cmd_alarm_s1_temperature_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s1_temperature_hst, 0.0f, 5.0f,
+			 print_alarm_s1_temperature_hst);
+}
+
+static int cmd_alarm_s1_humidity_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_s1_humidity_enabled,
+			print_alarm_s1_humidity_enabled);
+}
+
+static int cmd_alarm_s1_humidity_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s1_humidity_lo, 0.0f, 100.0f,
+			 print_alarm_s1_humidity_lo);
+}
+
+static int cmd_alarm_s1_humidity_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s1_humidity_hi, 0.0f, 100.0f,
+			 print_alarm_s1_humidity_hi);
+}
+
+static int cmd_alarm_s1_humidity_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s1_humidity_hst, 0.0f, 20.0f,
+			 print_alarm_s1_humidity_hst);
+}
+
+static int cmd_alarm_s1_tilt_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_s1_tilt_enabled,
+			print_alarm_s1_tilt_enabled);
+}
+
+static int cmd_corr_s1_temperature(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.corr_s1_temperature, -5.0f, 5.0f,
+			 print_corr_s1_temperature);
+}
+
+static int cmd_alarm_s2_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_s2_temperature_enabled,
+			print_alarm_s2_temperature_enabled);
+}
+
+static int cmd_alarm_s2_temperature_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s2_temperature_lo, -30.0f, 70.0f,
+			 print_alarm_s2_temperature_lo);
+}
+
+static int cmd_alarm_s2_temperature_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s2_temperature_hi, -30.0f, 70.0f,
+			 print_alarm_s2_temperature_hi);
+}
+
+static int cmd_alarm_s2_temperature_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s2_temperature_hst, 0.0f, 5.0f,
+			 print_alarm_s2_temperature_hst);
+}
+
+static int cmd_alarm_s2_humidity_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_s2_humidity_enabled,
+			print_alarm_s2_humidity_enabled);
+}
+
+static int cmd_alarm_s2_humidity_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s2_humidity_lo, 0.0f, 100.0f,
+			 print_alarm_s2_humidity_lo);
+}
+
+static int cmd_alarm_s2_humidity_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s2_humidity_hi, 0.0f, 100.0f,
+			 print_alarm_s2_humidity_hi);
+}
+
+static int cmd_alarm_s2_humidity_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s2_humidity_hst, 0.0f, 20.0f,
+			 print_alarm_s2_humidity_hst);
+}
+
+static int cmd_alarm_s2_tilt_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_s2_tilt_enabled,
+			print_alarm_s2_tilt_enabled);
+}
+
+static int cmd_corr_s2_temperature(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.corr_s2_temperature, -5.0f, 5.0f,
+			 print_corr_s2_temperature);
+}
+
+static int cmd_alarm_s3_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_s3_temperature_enabled,
+			print_alarm_s3_temperature_enabled);
+}
+
+static int cmd_alarm_s3_temperature_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s3_temperature_lo, -30.0f, 70.0f,
+			 print_alarm_s3_temperature_lo);
+}
+
+static int cmd_alarm_s3_temperature_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s3_temperature_hi, -30.0f, 70.0f,
+			 print_alarm_s3_temperature_hi);
+}
+
+static int cmd_alarm_s3_temperature_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s3_temperature_hst, 0.0f, 5.0f,
+			 print_alarm_s3_temperature_hst);
+}
+
+static int cmd_alarm_s3_humidity_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_s3_humidity_enabled,
+			print_alarm_s3_humidity_enabled);
+}
+
+static int cmd_alarm_s3_humidity_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s3_humidity_lo, 0.0f, 100.0f,
+			 print_alarm_s3_humidity_lo);
+}
+
+static int cmd_alarm_s3_humidity_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s3_humidity_hi, 0.0f, 100.0f,
+			 print_alarm_s3_humidity_hi);
+}
+
+static int cmd_alarm_s3_humidity_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s3_humidity_hst, 0.0f, 20.0f,
+			 print_alarm_s3_humidity_hst);
+}
+
+static int cmd_alarm_s3_tilt_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_s3_tilt_enabled,
+			print_alarm_s3_tilt_enabled);
+}
+
+static int cmd_corr_s3_temperature(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.corr_s3_temperature, -5.0f, 5.0f,
+			 print_corr_s3_temperature);
+}
+
+static int cmd_alarm_s4_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_s4_temperature_enabled,
+			print_alarm_s4_temperature_enabled);
+}
+
+static int cmd_alarm_s4_temperature_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s4_temperature_lo, -30.0f, 70.0f,
+			 print_alarm_s4_temperature_lo);
+}
+
+static int cmd_alarm_s4_temperature_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s4_temperature_hi, -30.0f, 70.0f,
+			 print_alarm_s4_temperature_hi);
+}
+
+static int cmd_alarm_s4_temperature_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s4_temperature_hst, 0.0f, 5.0f,
+			 print_alarm_s4_temperature_hst);
+}
+
+static int cmd_alarm_s4_humidity_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_s4_humidity_enabled,
+			print_alarm_s4_humidity_enabled);
+}
+
+static int cmd_alarm_s4_humidity_lo(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s4_humidity_lo, 0.0f, 100.0f,
+			 print_alarm_s4_humidity_lo);
+}
+
+static int cmd_alarm_s4_humidity_hi(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s4_humidity_hi, 0.0f, 100.0f,
+			 print_alarm_s4_humidity_hi);
+}
+
+static int cmd_alarm_s4_humidity_hst(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.alarm_s4_humidity_hst, 0.0f, 20.0f,
+			 print_alarm_s4_humidity_hst);
+}
+
+static int cmd_alarm_s4_tilt_enabled(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.alarm_s4_tilt_enabled,
+			print_alarm_s4_tilt_enabled);
+}
+
+static int cmd_corr_s4_temperature(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_float(shell, argc, argv, &m_app_config.corr_s4_temperature, -5.0f, 5.0f,
+			 print_corr_s4_temperature);
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -2668,6 +3404,166 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(sensor4-sht, NULL,
 	              "Get/Set 1-Wire slot 4 SHT variant cache (0=unknown).",
 	              cmd_sensor4_sht, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s1-temperature-enabled, NULL,
+	              "Get/Set slot 1 temperature alarm enabled (true/false).",
+	              cmd_alarm_s1_temperature_enabled, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s1-temperature-lo, NULL,
+	              "Get/Set slot 1 temperature low threshold (-30 to 70 deg. C).",
+	              cmd_alarm_s1_temperature_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s1-temperature-hi, NULL,
+	              "Get/Set slot 1 temperature high threshold (-30 to 70 deg. C).",
+	              cmd_alarm_s1_temperature_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s1-temperature-hst, NULL,
+	              "Get/Set slot 1 temperature hysteresis (0 to 5 deg. C).",
+	              cmd_alarm_s1_temperature_hst, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s1-humidity-enabled, NULL,
+	              "Get/Set slot 1 humidity alarm enabled (machine-probe only).",
+	              cmd_alarm_s1_humidity_enabled, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s1-humidity-lo, NULL,
+	              "Get/Set slot 1 humidity low threshold (0 to 100 %).",
+	              cmd_alarm_s1_humidity_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s1-humidity-hi, NULL,
+	              "Get/Set slot 1 humidity high threshold (0 to 100 %).",
+	              cmd_alarm_s1_humidity_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s1-humidity-hst, NULL,
+	              "Get/Set slot 1 humidity hysteresis (0 to 20 %).",
+	              cmd_alarm_s1_humidity_hst, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s1-tilt-enabled, NULL,
+	              "Get/Set slot 1 tilt alarm enabled (machine-probe only).",
+	              cmd_alarm_s1_tilt_enabled, 1, 1),
+
+	SHELL_CMD_ARG(corr-s1-temperature, NULL,
+	              "Get/Set slot 1 temperature correction offset (-5 to 5 deg. C).",
+	              cmd_corr_s1_temperature, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s2-temperature-enabled, NULL,
+	              "Get/Set slot 2 temperature alarm enabled (true/false).",
+	              cmd_alarm_s2_temperature_enabled, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s2-temperature-lo, NULL,
+	              "Get/Set slot 2 temperature low threshold (-30 to 70 deg. C).",
+	              cmd_alarm_s2_temperature_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s2-temperature-hi, NULL,
+	              "Get/Set slot 2 temperature high threshold (-30 to 70 deg. C).",
+	              cmd_alarm_s2_temperature_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s2-temperature-hst, NULL,
+	              "Get/Set slot 2 temperature hysteresis (0 to 5 deg. C).",
+	              cmd_alarm_s2_temperature_hst, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s2-humidity-enabled, NULL,
+	              "Get/Set slot 2 humidity alarm enabled (machine-probe only).",
+	              cmd_alarm_s2_humidity_enabled, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s2-humidity-lo, NULL,
+	              "Get/Set slot 2 humidity low threshold (0 to 100 %).",
+	              cmd_alarm_s2_humidity_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s2-humidity-hi, NULL,
+	              "Get/Set slot 2 humidity high threshold (0 to 100 %).",
+	              cmd_alarm_s2_humidity_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s2-humidity-hst, NULL,
+	              "Get/Set slot 2 humidity hysteresis (0 to 20 %).",
+	              cmd_alarm_s2_humidity_hst, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s2-tilt-enabled, NULL,
+	              "Get/Set slot 2 tilt alarm enabled (machine-probe only).",
+	              cmd_alarm_s2_tilt_enabled, 1, 1),
+
+	SHELL_CMD_ARG(corr-s2-temperature, NULL,
+	              "Get/Set slot 2 temperature correction offset (-5 to 5 deg. C).",
+	              cmd_corr_s2_temperature, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s3-temperature-enabled, NULL,
+	              "Get/Set slot 3 temperature alarm enabled (true/false).",
+	              cmd_alarm_s3_temperature_enabled, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s3-temperature-lo, NULL,
+	              "Get/Set slot 3 temperature low threshold (-30 to 70 deg. C).",
+	              cmd_alarm_s3_temperature_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s3-temperature-hi, NULL,
+	              "Get/Set slot 3 temperature high threshold (-30 to 70 deg. C).",
+	              cmd_alarm_s3_temperature_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s3-temperature-hst, NULL,
+	              "Get/Set slot 3 temperature hysteresis (0 to 5 deg. C).",
+	              cmd_alarm_s3_temperature_hst, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s3-humidity-enabled, NULL,
+	              "Get/Set slot 3 humidity alarm enabled (machine-probe only).",
+	              cmd_alarm_s3_humidity_enabled, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s3-humidity-lo, NULL,
+	              "Get/Set slot 3 humidity low threshold (0 to 100 %).",
+	              cmd_alarm_s3_humidity_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s3-humidity-hi, NULL,
+	              "Get/Set slot 3 humidity high threshold (0 to 100 %).",
+	              cmd_alarm_s3_humidity_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s3-humidity-hst, NULL,
+	              "Get/Set slot 3 humidity hysteresis (0 to 20 %).",
+	              cmd_alarm_s3_humidity_hst, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s3-tilt-enabled, NULL,
+	              "Get/Set slot 3 tilt alarm enabled (machine-probe only).",
+	              cmd_alarm_s3_tilt_enabled, 1, 1),
+
+	SHELL_CMD_ARG(corr-s3-temperature, NULL,
+	              "Get/Set slot 3 temperature correction offset (-5 to 5 deg. C).",
+	              cmd_corr_s3_temperature, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s4-temperature-enabled, NULL,
+	              "Get/Set slot 4 temperature alarm enabled (true/false).",
+	              cmd_alarm_s4_temperature_enabled, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s4-temperature-lo, NULL,
+	              "Get/Set slot 4 temperature low threshold (-30 to 70 deg. C).",
+	              cmd_alarm_s4_temperature_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s4-temperature-hi, NULL,
+	              "Get/Set slot 4 temperature high threshold (-30 to 70 deg. C).",
+	              cmd_alarm_s4_temperature_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s4-temperature-hst, NULL,
+	              "Get/Set slot 4 temperature hysteresis (0 to 5 deg. C).",
+	              cmd_alarm_s4_temperature_hst, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s4-humidity-enabled, NULL,
+	              "Get/Set slot 4 humidity alarm enabled (machine-probe only).",
+	              cmd_alarm_s4_humidity_enabled, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s4-humidity-lo, NULL,
+	              "Get/Set slot 4 humidity low threshold (0 to 100 %).",
+	              cmd_alarm_s4_humidity_lo, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s4-humidity-hi, NULL,
+	              "Get/Set slot 4 humidity high threshold (0 to 100 %).",
+	              cmd_alarm_s4_humidity_hi, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s4-humidity-hst, NULL,
+	              "Get/Set slot 4 humidity hysteresis (0 to 20 %).",
+	              cmd_alarm_s4_humidity_hst, 1, 1),
+
+	SHELL_CMD_ARG(alarm-s4-tilt-enabled, NULL,
+	              "Get/Set slot 4 tilt alarm enabled (machine-probe only).",
+	              cmd_alarm_s4_tilt_enabled, 1, 1),
+
+	SHELL_CMD_ARG(corr-s4-temperature, NULL,
+	              "Get/Set slot 4 temperature correction offset (-5 to 5 deg. C).",
+	              cmd_corr_s4_temperature, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );
