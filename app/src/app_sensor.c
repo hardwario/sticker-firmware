@@ -256,6 +256,8 @@ void app_sensor_sample(void)
 	bool mp1_is_tilt_alert = false;
 	bool mp2_is_tilt_alert = false;
 
+	struct app_w1_slot_reading w1_local[APP_W1_SLOT_COUNT] = {0};
+
 #if defined(CONFIG_ADC)
 	ret = app_battery_measure(&voltage);
 	if (ret) {
@@ -316,7 +318,10 @@ void app_sensor_sample(void)
 		for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 			struct app_w1_slot_reading r;
 
-			if (app_w1_slots_read(s, &r) != 0 || !r.present) {
+			int rret = app_w1_slots_read(s, &r);
+
+			w1_local[s] = r; /* keep per-slot reading (incl. present flag) */
+			if (rret != 0 || !r.present) {
 				continue;
 			}
 
@@ -383,6 +388,10 @@ void app_sensor_sample(void)
 	g_app_sensor_data.mp2_humidity = mp2_humidity;
 	g_app_sensor_data.mp1_is_tilt_alert = mp1_is_tilt_alert;
 	g_app_sensor_data.mp2_is_tilt_alert = mp2_is_tilt_alert;
+
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		g_app_sensor_data.w1[s] = w1_local[s];
+	}
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }
