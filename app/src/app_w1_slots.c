@@ -14,6 +14,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/util.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -23,14 +24,91 @@
 
 LOG_MODULE_REGISTER(app_w1_slots, LOG_LEVEL_DBG);
 
-/* Max discovered devices per transport driver (matches the driver arrays). */
-#define DRIVER_MAX 2
+/* ====================================================================== */
+/* Sensor-type registry — the extensibility point.                        */
+/*                                                                        */
+/* Adding a new 1-Wire sensor type is one entry in m_types[] plus its     */
+/* thin read wrapper below (and a transport driver + devicetree nodes,    */
+/* which any new hardware needs regardless). No changes to the slot       */
+/* table, rebind, scan, read dispatch, shell or telemetry plumbing.       */
+/* ====================================================================== */
+
+/* Fill *out (temperature/humidity/tilt) for device `index` of this type and
+ * return its ROM serial in *serial. Quantities the type doesn't provide stay
+ * at the caller-initialised NaN/false. Returns 0 or negative errno. */
+typedef int (*w1_read_fn)(int index, uint64_t *serial, struct app_w1_slot_reading *out);
+
+struct app_w1_sensor_type {
+	enum app_w1_slot_type type;
+	uint8_t family;    /* 1-Wire family code (informational) */
+	const char *name;  /* shell / log label */
+	int (*scan)(void); /* re-enumerate this transport's devices */
+	int (*get_count)(void);
+	w1_read_fn read;
+};
+
+static int dallas_read(int index, uint64_t *serial, struct app_w1_slot_reading *out)
+{
+	float temperature;
+	int ret = app_ds18b20_read(index, serial, &temperature);
+
+	if (ret == 0) {
+		out->temperature = temperature;
+	}
+	return ret;
+}
+
+static int machine_probe_read(int index, uint64_t *serial, struct app_w1_slot_reading *out)
+{
+	float temperature, humidity;
+	int ret = app_machine_probe_read_hygrometer(index, serial, &temperature, &humidity);
+
+	if (ret == 0) {
+		out->temperature = temperature;
+		out->humidity = humidity;
+	}
+
+	bool tilt = false;
+	if (app_machine_probe_get_tilt_alert(index, serial, &tilt) == 0) {
+		out->is_tilt_alert = tilt;
+	}
+	return ret;
+}
+
+static const struct app_w1_sensor_type m_types[] = {
+	{APP_W1_SLOT_DALLAS, 0x28, "dallas", app_ds18b20_scan, app_ds18b20_get_count, dallas_read},
+	{APP_W1_SLOT_MACHINE_PROBE, 0x19, "machine-probe", app_machine_probe_scan,
+	 app_machine_probe_get_count, machine_probe_read},
+};
+
+static const struct app_w1_sensor_type *type_desc(enum app_w1_slot_type type)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(m_types); i++) {
+		if (m_types[i].type == type) {
+			return &m_types[i];
+		}
+	}
+	return NULL;
+}
+
+const char *app_w1_slot_type_name(enum app_w1_slot_type type)
+{
+	const struct app_w1_sensor_type *t = type_desc(type);
+
+	return t != NULL ? t->name : "empty";
+}
+
+/* Upper bound on devices discoverable across all types in one scan. */
+#define DISCOVERED_MAX (APP_W1_SLOT_COUNT * 2)
+
+/* ---- slot table --------------------------------------------------------- */
 
 struct slot_rt {
 	uint64_t rom; /* 48-bit serial; 0 = empty */
 	enum app_w1_slot_type type;
 	uint32_t sht;
-	int driver_index; /* index into the type's transport driver; -1 = absent */
+	const struct app_w1_sensor_type *desc; /* bound type descriptor, NULL if empty */
+	int driver_index;                      /* index into the type's driver; -1 = absent */
 	bool present;
 	bool replaced; /* configured ROM absent but a same-type device showed up */
 };
@@ -88,7 +166,7 @@ static uint32_t *cfg_sht(int slot)
 }
 
 /* ROM serial is stored in the 8-byte config field as a little-endian u64
- * (only the low 48 bits are used; upper bytes 0). 0 = empty slot. */
+ * (only the low 48 bits are used). 0 = empty slot. */
 static uint64_t cfg_rom_get(int slot)
 {
 	return sys_get_le64(cfg_rom(slot));
@@ -99,50 +177,36 @@ static void cfg_rom_set(int slot, uint64_t serial)
 	sys_put_le64(serial, cfg_rom(slot));
 }
 
-/* ---- type registry: probe each driver's discovered devices for serials ---- */
+/* ---- discovery (registry-driven) --------------------------------------- */
 
 struct discovered {
 	uint64_t serial;
 	int driver_index;
+	const struct app_w1_sensor_type *desc;
 	bool claimed;
 };
 
-/* Collect the serials currently exposed by the DALLAS transport. Uses the
- * driver read (which also yields the serial); throwaway value is fine at init. */
-static int collect_dallas(struct discovered *out, int max)
+/* Enumerate every device currently exposed by every registered type. Uses each
+ * type's read (which also yields the serial); throwaway readings are fine. */
+static int collect_all(struct discovered *out, int max)
 {
 	int n = 0;
-	int count = app_ds18b20_get_count();
 
-	for (int i = 0; i < count && n < max; i++) {
-		uint64_t serial = 0;
-		float temperature;
+	for (size_t ti = 0; ti < ARRAY_SIZE(m_types); ti++) {
+		const struct app_w1_sensor_type *t = &m_types[ti];
+		int count = t->get_count();
 
-		if (app_ds18b20_read(i, &serial, &temperature) == 0 && serial != 0) {
-			out[n].serial = serial;
-			out[n].driver_index = i;
-			out[n].claimed = false;
-			n++;
-		}
-	}
-	return n;
-}
+		for (int i = 0; i < count && n < max; i++) {
+			uint64_t serial = 0;
+			struct app_w1_slot_reading r = {.temperature = NAN, .humidity = NAN};
 
-static int collect_machine_probe(struct discovered *out, int max)
-{
-	int n = 0;
-	int count = app_machine_probe_get_count();
-
-	for (int i = 0; i < count && n < max; i++) {
-		uint64_t serial = 0;
-		float temperature, humidity;
-
-		if (app_machine_probe_read_hygrometer(i, &serial, &temperature, &humidity) == 0 &&
-		    serial != 0) {
-			out[n].serial = serial;
-			out[n].driver_index = i;
-			out[n].claimed = false;
-			n++;
+			if (t->read(i, &serial, &r) == 0 && serial != 0) {
+				out[n].serial = serial;
+				out[n].driver_index = i;
+				out[n].desc = t;
+				out[n].claimed = false;
+				n++;
+			}
 		}
 	}
 	return n;
@@ -152,16 +216,15 @@ static int collect_machine_probe(struct discovered *out, int max)
 
 int app_w1_slots_rebind(void)
 {
-	struct discovered dallas[DRIVER_MAX];
-	struct discovered probe[DRIVER_MAX];
-	int n_dallas = collect_dallas(dallas, DRIVER_MAX);
-	int n_probe = collect_machine_probe(probe, DRIVER_MAX);
+	struct discovered dev[DISCOVERED_MAX];
+	int ndev = collect_all(dev, DISCOVERED_MAX);
 
 	/* Load persisted slot identity and reset runtime binding. */
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 		m_slots[s].rom = cfg_rom_get(s);
 		m_slots[s].type = (enum app_w1_slot_type) * cfg_type(s);
 		m_slots[s].sht = *cfg_sht(s);
+		m_slots[s].desc = type_desc(m_slots[s].type);
 		m_slots[s].driver_index = -1;
 		m_slots[s].present = false;
 		m_slots[s].replaced = false;
@@ -173,25 +236,15 @@ int app_w1_slots_rebind(void)
 			continue;
 		}
 
-		struct discovered *list = NULL;
-		int n = 0;
-		if (m_slots[s].type == APP_W1_SLOT_DALLAS) {
-			list = dallas;
-			n = n_dallas;
-		} else if (m_slots[s].type == APP_W1_SLOT_MACHINE_PROBE) {
-			list = probe;
-			n = n_probe;
-		}
-
-		for (int i = 0; i < n; i++) {
-			if (!list[i].claimed && list[i].serial == m_slots[s].rom) {
-				list[i].claimed = true;
-				m_slots[s].driver_index = list[i].driver_index;
+		for (int d = 0; d < ndev; d++) {
+			if (!dev[d].claimed && dev[d].serial == m_slots[s].rom &&
+			    dev[d].desc->type == m_slots[s].type) {
+				dev[d].claimed = true;
+				m_slots[s].driver_index = dev[d].driver_index;
+				m_slots[s].desc = dev[d].desc;
 				m_slots[s].present = true;
 				LOG_INF("Slot %d bound to %s ROM %012llx (idx %d)", s + 1,
-					m_slots[s].type == APP_W1_SLOT_DALLAS ? "dallas"
-									      : "machine-probe",
-					m_slots[s].rom, list[i].driver_index);
+					dev[d].desc->name, m_slots[s].rom, dev[d].driver_index);
 				break;
 			}
 		}
@@ -200,8 +253,8 @@ int app_w1_slots_rebind(void)
 			/* Configured but its ROM was not seen. If an unclaimed same-type
 			 * device exists, the sensor was likely swapped — flag it, do NOT
 			 * silently rebind (alarm correctness). */
-			for (int i = 0; i < n; i++) {
-				if (!list[i].claimed) {
+			for (int d = 0; d < ndev; d++) {
+				if (!dev[d].claimed && dev[d].desc->type == m_slots[s].type) {
 					m_slots[s].replaced = true;
 					break;
 				}
@@ -214,40 +267,22 @@ int app_w1_slots_rebind(void)
 	/* Pass 2: auto-enroll unclaimed devices into the lowest empty slot. Written
 	 * to the staging config in RAM (idempotent each boot until `config save`
 	 * makes it durable); this is the first-bind / migration path. */
-	for (int i = 0; i < n_dallas; i++) {
-		if (dallas[i].claimed) {
+	for (int d = 0; d < ndev; d++) {
+		if (dev[d].claimed) {
 			continue;
 		}
 		for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 			if (m_slots[s].rom == 0 && m_slots[s].type == APP_W1_SLOT_EMPTY) {
-				m_slots[s].rom = dallas[i].serial;
-				m_slots[s].type = APP_W1_SLOT_DALLAS;
-				m_slots[s].driver_index = dallas[i].driver_index;
+				m_slots[s].rom = dev[d].serial;
+				m_slots[s].type = dev[d].desc->type;
+				m_slots[s].desc = dev[d].desc;
+				m_slots[s].driver_index = dev[d].driver_index;
 				m_slots[s].present = true;
-				cfg_rom_set(s, dallas[i].serial);
-				*cfg_type(s) = APP_W1_SLOT_DALLAS;
-				LOG_INF("Slot %d auto-enrolled dallas ROM %012llx", s + 1,
-					dallas[i].serial);
-				dallas[i].claimed = true;
-				break;
-			}
-		}
-	}
-	for (int i = 0; i < n_probe; i++) {
-		if (probe[i].claimed) {
-			continue;
-		}
-		for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
-			if (m_slots[s].rom == 0 && m_slots[s].type == APP_W1_SLOT_EMPTY) {
-				m_slots[s].rom = probe[i].serial;
-				m_slots[s].type = APP_W1_SLOT_MACHINE_PROBE;
-				m_slots[s].driver_index = probe[i].driver_index;
-				m_slots[s].present = true;
-				cfg_rom_set(s, probe[i].serial);
-				*cfg_type(s) = APP_W1_SLOT_MACHINE_PROBE;
-				LOG_INF("Slot %d auto-enrolled machine-probe ROM %012llx", s + 1,
-					probe[i].serial);
-				probe[i].claimed = true;
+				cfg_rom_set(s, dev[d].serial);
+				*cfg_type(s) = dev[d].desc->type;
+				LOG_INF("Slot %d auto-enrolled %s ROM %012llx", s + 1,
+					dev[d].desc->name, dev[d].serial);
+				dev[d].claimed = true;
 				break;
 			}
 		}
@@ -275,42 +310,13 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
 	out->is_tilt_alert = false;
 	out->present = m_slots[slot].present;
 
-	if (!m_slots[slot].present || m_slots[slot].driver_index < 0) {
+	if (!m_slots[slot].present || m_slots[slot].driver_index < 0 ||
+	    m_slots[slot].desc == NULL) {
 		return 0;
 	}
 
 	uint64_t serial;
-	int ret = -ENOTSUP;
-
-	switch (m_slots[slot].type) {
-	case APP_W1_SLOT_DALLAS: {
-		float temperature;
-		ret = app_ds18b20_read(m_slots[slot].driver_index, &serial, &temperature);
-		if (ret == 0) {
-			out->temperature = temperature;
-		}
-		break;
-	}
-	case APP_W1_SLOT_MACHINE_PROBE: {
-		float temperature, humidity;
-		ret = app_machine_probe_read_hygrometer(m_slots[slot].driver_index, &serial,
-							&temperature, &humidity);
-		if (ret == 0) {
-			out->temperature = temperature;
-			out->humidity = humidity;
-		}
-		bool tilt = false;
-		if (app_machine_probe_get_tilt_alert(m_slots[slot].driver_index, &serial, &tilt) ==
-		    0) {
-			out->is_tilt_alert = tilt;
-		}
-		break;
-	}
-	default:
-		break;
-	}
-
-	return ret;
+	return m_slots[slot].desc->read(m_slots[slot].driver_index, &serial, out);
 }
 
 /* ---- accessors ---------------------------------------------------------- */
@@ -369,26 +375,19 @@ int app_w1_slots_scan(struct app_w1_scan_entry *out, int max)
 		return -EINVAL;
 	}
 
-	/* Re-run the driver scans so freshly plugged devices are discovered. */
-	(void)app_ds18b20_scan();
-	(void)app_machine_probe_scan();
+	/* Re-run every type's driver scan so freshly plugged devices appear. */
+	for (size_t ti = 0; ti < ARRAY_SIZE(m_types); ti++) {
+		(void)m_types[ti].scan();
+	}
 
-	struct discovered dallas[DRIVER_MAX];
-	struct discovered probe[DRIVER_MAX];
-	int n_dallas = collect_dallas(dallas, DRIVER_MAX);
-	int n_probe = collect_machine_probe(probe, DRIVER_MAX);
+	struct discovered dev[DISCOVERED_MAX];
+	int ndev = collect_all(dev, DISCOVERED_MAX);
 	int n = 0;
 
-	for (int i = 0; i < n_dallas && n < max; i++) {
-		out[n].serial = dallas[i].serial;
-		out[n].type = APP_W1_SLOT_DALLAS;
-		out[n].bound_slot = slot_of_rom(dallas[i].serial);
-		n++;
-	}
-	for (int i = 0; i < n_probe && n < max; i++) {
-		out[n].serial = probe[i].serial;
-		out[n].type = APP_W1_SLOT_MACHINE_PROBE;
-		out[n].bound_slot = slot_of_rom(probe[i].serial);
+	for (int d = 0; d < ndev && n < max; d++) {
+		out[n].serial = dev[d].serial;
+		out[n].type = dev[d].desc->type;
+		out[n].bound_slot = slot_of_rom(dev[d].serial);
 		n++;
 	}
 	return n;
@@ -400,8 +399,8 @@ int app_w1_slots_teach(int slot, struct app_w1_scan_entry *bound)
 		return -EINVAL;
 	}
 
-	struct app_w1_scan_entry e[APP_W1_SLOT_COUNT * 2];
-	int n = app_w1_slots_scan(e, APP_W1_SLOT_COUNT * 2);
+	struct app_w1_scan_entry e[DISCOVERED_MAX];
+	int n = app_w1_slots_scan(e, DISCOVERED_MAX);
 	if (n < 0) {
 		return n;
 	}
@@ -443,8 +442,8 @@ int app_w1_slots_assign(int slot, uint64_t serial)
 		return -EEXIST; /* ROM already bound to another slot */
 	}
 
-	struct app_w1_scan_entry e[APP_W1_SLOT_COUNT * 2];
-	int n = app_w1_slots_scan(e, APP_W1_SLOT_COUNT * 2);
+	struct app_w1_scan_entry e[DISCOVERED_MAX];
+	int n = app_w1_slots_scan(e, DISCOVERED_MAX);
 	if (n < 0) {
 		return n;
 	}

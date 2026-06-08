@@ -55,6 +55,10 @@ int app_w1_slots_rebind(void);
  * absent). Returns 0 on success, negative errno on a read error. */
 int app_w1_slots_read(int slot, struct app_w1_slot_reading *out);
 
+/* Human-readable name for a slot type ("dallas", "machine-probe", "empty"),
+ * from the sensor-type registry. */
+const char *app_w1_slot_type_name(enum app_w1_slot_type type);
+
 /* Slot metadata accessors (0-based slot index). */
 enum app_w1_slot_type app_w1_slot_get_type(int slot);
 uint64_t app_w1_slot_get_rom(int slot); /* 48-bit serial, 0 = empty */

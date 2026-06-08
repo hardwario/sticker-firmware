@@ -19,18 +19,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-static const char *type_name(enum app_w1_slot_type t)
-{
-	switch (t) {
-	case APP_W1_SLOT_DALLAS:
-		return "dallas";
-	case APP_W1_SLOT_MACHINE_PROBE:
-		return "machine-probe";
-	default:
-		return "empty";
-	}
-}
-
 static int cmd_sensor_list(const struct shell *shell, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -61,8 +49,8 @@ static int cmd_sensor_list(const struct shell *shell, size_t argc, char **argv)
 			}
 		}
 
-		shell_print(shell, "%-4d  %-13s  %012llx  %-9s  %s", s + 1, type_name(t),
-			    app_w1_slot_get_rom(s), state, reading);
+		shell_print(shell, "%-4d  %-13s  %012llx  %-9s  %s", s + 1,
+			    app_w1_slot_type_name(t), app_w1_slot_get_rom(s), state, reading);
 	}
 	return 0;
 }
@@ -87,10 +75,12 @@ static int cmd_sensor_scan(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "TYPE           ROM           BOUND");
 	for (int i = 0; i < n; i++) {
 		if (e[i].bound_slot >= 0) {
-			shell_print(shell, "%-13s  %012llx  slot %d", type_name(e[i].type),
-				    e[i].serial, e[i].bound_slot + 1);
+			shell_print(shell, "%-13s  %012llx  slot %d",
+				    app_w1_slot_type_name(e[i].type), e[i].serial,
+				    e[i].bound_slot + 1);
 		} else {
-			shell_print(shell, "%-13s  %012llx  -", type_name(e[i].type), e[i].serial);
+			shell_print(shell, "%-13s  %012llx  -", app_w1_slot_type_name(e[i].type),
+				    e[i].serial);
 		}
 	}
 	return 0;
@@ -123,7 +113,7 @@ static int cmd_sensor_teach(const struct shell *shell, size_t argc, char **argv)
 	switch (ret) {
 	case 0:
 		shell_print(shell, "bound slot %d -> %s ROM %012llx (run `config save` to persist)",
-			    slot + 1, type_name(bound.type), bound.serial);
+			    slot + 1, app_w1_slot_type_name(bound.type), bound.serial);
 		return 0;
 	case -EAGAIN:
 		shell_error(shell, "no new sensor found — unplug already-bound sensors, or use "
