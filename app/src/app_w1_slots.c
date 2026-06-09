@@ -157,19 +157,20 @@ static uint8_t *cfg_rom_staging(int slot)
 
 /* Only the ROM is persisted — a slot's type (and SHT variant) are auto-detected
  * at runtime from the discovered device's family code, not stored in config.
- * ROM serial is stored in the 8-byte field as a little-endian u64 (low 48 bits
- * used). 0 = empty slot. */
+ * The serial is stored big-endian so `config sensorN-rom` reads the same digits
+ * as `w1 list` / the serial number (e.g. 0000000553f7), matching the lrw-deveui
+ * convention. 0 = empty slot. */
 static uint64_t cfg_rom_get(int slot)
 {
-	return sys_get_le64(cfg_rom(slot));
+	return sys_get_be64(cfg_rom(slot));
 }
 
 static void cfg_rom_set(int slot, uint64_t serial)
 {
 	/* Write both: runtime (for the live rebind below) + staging (so
 	 * `settings save` persists it and `config get` shows it). */
-	sys_put_le64(serial, cfg_rom(slot));
-	sys_put_le64(serial, cfg_rom_staging(slot));
+	sys_put_be64(serial, cfg_rom(slot));
+	sys_put_be64(serial, cfg_rom_staging(slot));
 }
 
 /* ---- discovery (registry-driven) --------------------------------------- */
