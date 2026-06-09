@@ -117,6 +117,10 @@ static struct slot_rt m_slots[APP_W1_SLOT_COUNT];
 
 /* ---- config accessors (flat sensorN_* keys, no array in g_app_config) ---- */
 
+/* The runtime config (g_app_config, read by all modules) and the staging config
+ * (app_config(), what `settings save` persists and `config get/set` use) are
+ * separate instances — g is memcpy'd from staging at boot. cfg_rom() returns the
+ * runtime ROM; cfg_rom_staging() the persisted one. */
 static uint8_t *cfg_rom(int slot)
 {
 	switch (slot) {
@@ -133,11 +137,28 @@ static uint8_t *cfg_rom(int slot)
 	}
 }
 
-/* Only the ROM is persisted — a slot's type (and SHT variant) are auto-detected
- * at runtime from the discovered device's family code, not stored in config. */
+static uint8_t *cfg_rom_staging(int slot)
+{
+	struct app_config *c = app_config();
 
-/* ROM serial is stored in the 8-byte config field as a little-endian u64
- * (only the low 48 bits are used). 0 = empty slot. */
+	switch (slot) {
+	case 0:
+		return c->sensor1_rom;
+	case 1:
+		return c->sensor2_rom;
+	case 2:
+		return c->sensor3_rom;
+	case 3:
+		return c->sensor4_rom;
+	default:
+		return NULL;
+	}
+}
+
+/* Only the ROM is persisted — a slot's type (and SHT variant) are auto-detected
+ * at runtime from the discovered device's family code, not stored in config.
+ * ROM serial is stored in the 8-byte field as a little-endian u64 (low 48 bits
+ * used). 0 = empty slot. */
 static uint64_t cfg_rom_get(int slot)
 {
 	return sys_get_le64(cfg_rom(slot));
@@ -145,7 +166,10 @@ static uint64_t cfg_rom_get(int slot)
 
 static void cfg_rom_set(int slot, uint64_t serial)
 {
+	/* Write both: runtime (for the live rebind below) + staging (so
+	 * `settings save` persists it and `config get` shows it). */
 	sys_put_le64(serial, cfg_rom(slot));
+	sys_put_le64(serial, cfg_rom_staging(slot));
 }
 
 /* ---- discovery (registry-driven) --------------------------------------- */
