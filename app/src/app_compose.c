@@ -164,16 +164,12 @@ static void fill_snapshot(void)
 	struct app_sensor_data d = g_app_sensor_data;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	/* system */
-	if (!isnan(d.voltage)) {
-		float v = CLAMP(d.voltage * 50.0f, 0.0f, 255.0f);
-		t.has_voltage = true;
-		t.voltage = (uint32_t)v;
-	}
-	if (system_flags) {
-		t.has_system_flags = true;
-		t.system_flags = system_flags;
-	}
+	/* system — always sent as one group; boot=false is encoded explicitly.
+	 * voltage uses 0 as a "no sample" sentinel (only the pre-sample case). */
+	t.has_voltage = true;
+	t.voltage = isnan(d.voltage) ? 0 : (uint32_t)CLAMP(d.voltage * 50.0f, 0.0f, 255.0f);
+	t.has_system_flags = true;
+	t.system_flags = system_flags;
 
 	/* internal */
 	if (!isnan(d.temperature)) {
@@ -208,8 +204,8 @@ static void fill_snapshot(void)
 		t.orientation = (uint32_t)(d.orientation & 0xf);
 	}
 
-	/* pir */
-	if (g_app_config.cap_pir_detector && d.motion_count > 0) {
+	/* pir — whole group sent whenever the detector is enabled (0 is valid) */
+	if (g_app_config.cap_pir_detector) {
 		t.has_motion_count = true;
 		t.motion_count = d.motion_count;
 	}
@@ -234,10 +230,8 @@ static void fill_snapshot(void)
 			t.has_mp1_humidity = true;
 			t.mp1_humidity = (uint32_t)(d.mp1_humidity * 2.0f);
 		}
-		if (d.mp1_is_tilt_alert) {
-			t.has_mp1_flags = true;
-			t.mp1_flags = MP_FLAG_TILT;
-		}
+		t.has_mp1_flags = true;
+		t.mp1_flags = d.mp1_is_tilt_alert ? MP_FLAG_TILT : 0;
 		if (!isnan(d.mp2_temperature)) {
 			t.has_mp2_temperature = true;
 			t.mp2_temperature = (int32_t)(d.mp2_temperature * 100.0f);
@@ -246,10 +240,8 @@ static void fill_snapshot(void)
 			t.has_mp2_humidity = true;
 			t.mp2_humidity = (uint32_t)(d.mp2_humidity * 2.0f);
 		}
-		if (d.mp2_is_tilt_alert) {
-			t.has_mp2_flags = true;
-			t.mp2_flags = MP_FLAG_TILT;
-		}
+		t.has_mp2_flags = true;
+		t.mp2_flags = d.mp2_is_tilt_alert ? MP_FLAG_TILT : 0;
 	}
 
 	/* hall left / right */
@@ -264,14 +256,10 @@ static void fill_snapshot(void)
 		if (hall.left_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
-		if (hall.left_count > 0) {
-			t.has_hall_left_count = true;
-			t.hall_left_count = hall.left_count;
-		}
-		if (f) {
-			t.has_hall_left_flags = true;
-			t.hall_left_flags = f;
-		}
+		t.has_hall_left_count = true;
+		t.hall_left_count = hall.left_count;
+		t.has_hall_left_flags = true;
+		t.hall_left_flags = f;
 	}
 	if (g_app_config.cap_hall_right) {
 		uint32_t f = 0;
@@ -284,14 +272,10 @@ static void fill_snapshot(void)
 		if (hall.right_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
-		if (hall.right_count > 0) {
-			t.has_hall_right_count = true;
-			t.hall_right_count = hall.right_count;
-		}
-		if (f) {
-			t.has_hall_right_flags = true;
-			t.hall_right_flags = f;
-		}
+		t.has_hall_right_count = true;
+		t.hall_right_count = hall.right_count;
+		t.has_hall_right_flags = true;
+		t.hall_right_flags = f;
 	}
 
 	/* input A / B */
@@ -306,14 +290,10 @@ static void fill_snapshot(void)
 		if (input.input_a_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
-		if (input.input_a_count > 0) {
-			t.has_input_a_count = true;
-			t.input_a_count = input.input_a_count;
-		}
-		if (f) {
-			t.has_input_a_flags = true;
-			t.input_a_flags = f;
-		}
+		t.has_input_a_count = true;
+		t.input_a_count = input.input_a_count;
+		t.has_input_a_flags = true;
+		t.input_a_flags = f;
 	}
 	if (g_app_config.cap_input_b) {
 		uint32_t f = 0;
@@ -326,14 +306,10 @@ static void fill_snapshot(void)
 		if (input.input_b_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
-		if (input.input_b_count > 0) {
-			t.has_input_b_count = true;
-			t.input_b_count = input.input_b_count;
-		}
-		if (f) {
-			t.has_input_b_flags = true;
-			t.input_b_flags = f;
-		}
+		t.has_input_b_count = true;
+		t.input_b_count = input.input_b_count;
+		t.has_input_b_flags = true;
+		t.input_b_flags = f;
 	}
 
 	m_snapshot = t;

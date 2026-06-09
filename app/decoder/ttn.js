@@ -364,7 +364,7 @@ function decodeTelemetry(bytes) {
     switch (field) {
       // system
       case 1:  d.voltage = v.value / 50; break;
-      case 2:  if (v.value & (1 << 0)) d.boot = true; break;   // system_flags
+      case 2:  d.boot = (v.value & (1 << 0)) !== 0; break;     // system_flags (always sent)
       // internal (SHT4x)
       case 3:  d.temperature = _pbZigzag(v.value) / 100; break;
       case 4:  d.humidity = v.value / 2; break;
@@ -383,42 +383,42 @@ function decodeTelemetry(bytes) {
       // machine probe 1
       case 12: d.machine_probe_temperature_1 = _pbZigzag(v.value) / 100; break;
       case 13: d.machine_probe_humidity_1 = v.value / 2; break;
-      case 14: if (v.value & (1 << 0)) d.machine_probe_tilt_alert_1 = true; break;
+      case 14: d.machine_probe_tilt_alert_1 = (v.value & (1 << 0)) !== 0; break;
       // machine probe 2
       case 15: d.machine_probe_temperature_2 = _pbZigzag(v.value) / 100; break;
       case 16: d.machine_probe_humidity_2 = v.value / 2; break;
-      case 17: if (v.value & (1 << 0)) d.machine_probe_tilt_alert_2 = true; break;
+      case 17: d.machine_probe_tilt_alert_2 = (v.value & (1 << 0)) !== 0; break;
       // hall left
       case 18: d.hall_left_count = v.value; break;
       case 19:
         f = v.value;
-        if (f & (1 << 0)) d.hall_left_notify_act = true;
-        if (f & (1 << 1)) d.hall_left_notify_deact = true;
-        if (f & (1 << 2)) d.hall_left_is_active = true;
+        d.hall_left_notify_act = (f & (1 << 0)) !== 0;
+        d.hall_left_notify_deact = (f & (1 << 1)) !== 0;
+        d.hall_left_is_active = (f & (1 << 2)) !== 0;
         break;
       // hall right
       case 20: d.hall_right_count = v.value; break;
       case 21:
         f = v.value;
-        if (f & (1 << 0)) d.hall_right_notify_act = true;
-        if (f & (1 << 1)) d.hall_right_notify_deact = true;
-        if (f & (1 << 2)) d.hall_right_is_active = true;
+        d.hall_right_notify_act = (f & (1 << 0)) !== 0;
+        d.hall_right_notify_deact = (f & (1 << 1)) !== 0;
+        d.hall_right_is_active = (f & (1 << 2)) !== 0;
         break;
       // input A
       case 22: d.input_a_count = v.value; break;
       case 23:
         f = v.value;
-        if (f & (1 << 0)) d.input_a_notify_act = true;
-        if (f & (1 << 1)) d.input_a_notify_deact = true;
-        if (f & (1 << 2)) d.input_a_is_active = true;
+        d.input_a_notify_act = (f & (1 << 0)) !== 0;
+        d.input_a_notify_deact = (f & (1 << 1)) !== 0;
+        d.input_a_is_active = (f & (1 << 2)) !== 0;
         break;
       // input B
       case 24: d.input_b_count = v.value; break;
       case 25:
         f = v.value;
-        if (f & (1 << 0)) d.input_b_notify_act = true;
-        if (f & (1 << 1)) d.input_b_notify_deact = true;
-        if (f & (1 << 2)) d.input_b_is_active = true;
+        d.input_b_notify_act = (f & (1 << 0)) !== 0;
+        d.input_b_notify_deact = (f & (1 << 1)) !== 0;
+        d.input_b_is_active = (f & (1 << 2)) !== 0;
         break;
       default: break; /* unknown field: ignore (forward-compatible) */
     }

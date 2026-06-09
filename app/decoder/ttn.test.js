@@ -99,6 +99,21 @@ test("decodeUplink routes fPort 2 to the telemetry decoder", () => {
   assert.equal(typeof got.data, "object");
 });
 
+// #78: the system group and any enabled-sensor group are sent every report,
+// whole, even when the values are 0/false. The decoder must surface those as
+// explicit false/0 (not omit them). Frame: voltage=100 (field 1), system_flags=0
+// (field 2 -> boot=false), hall_left_count=0 (field 18), hall_left_flags=0
+// (field 19 -> all hall-left booleans false).
+test("decodeUplink fPort 2: zero-valued groups decode to explicit false/0", () => {
+  const got = codec.decodeUplink({ bytes: hex("08641000900100980100"), fPort: 2 }).data;
+  assert.equal(got.voltage, 2);
+  assert.equal(got.boot, false);
+  assert.equal(got.hall_left_count, 0);
+  assert.equal(got.hall_left_notify_act, false);
+  assert.equal(got.hall_left_notify_deact, false);
+  assert.equal(got.hall_left_is_active, false);
+});
+
 // --- Uplink: history replay frames (fPort 85, device-driven multi-frame) ---
 // HistoryFrame carries a shared present mask + interval_s; samples are fixed-size
 // values-only records, time(j) = t0 + j*interval. Build frames with a tiny pb

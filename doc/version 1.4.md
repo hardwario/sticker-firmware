@@ -61,7 +61,7 @@ Periodic and event reports now use a compact, extensible **protobuf** format on 
 
 Key differences from the v1.3.x bitmap:
 - **Extensible** — new sensors can be added in future firmware without breaking older decoders.
-- **Capability-gated** — a sensor's data is included only when its capability is enabled and the reading is valid.
+- **Capability-gated, whole-group** — a sensor's group is sent in full **every report** whenever its capability is enabled, even when the values are `0`/`false` (e.g. a hall counter at 0, all states inactive). The **system group** (voltage, `boot`) is **always** present, so `boot=false` is reported explicitly rather than by omission. Digital fields carry their real value (0 is valid); an analog scalar is omitted only when there is no valid sample yet.
 - **Multi-frame split** — if a report is larger than the current data rate allows, it is split across several fPort-2 frames sent a few seconds apart. Each frame carries whole sensor groups from the **same snapshot**, so the network server can merge them; nothing is lost.
 
 The decoded field set (voltage, temperature, humidity, pressure/altitude, illuminance, orientation, motion_count, external temperatures, machine-probe values, hall/input counters and states, `boot`) matches the familiar v1.3.x fields — see the payload formatter output (§8). Decode with the updated `ttn.js`.
