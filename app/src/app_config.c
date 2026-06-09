@@ -1007,23 +1007,24 @@ static void print_motion_sensitivity(const struct shell *shell)
 
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
-	shell_print(shell, "");
-	shell_print(shell, "General:");
 	print_secret_key(shell);
 	print_serial_number(shell);
 	print_nonce_counter(shell);
 	print_calibration(shell);
 	print_interval_sample(shell);
 	print_interval_report(shell);
-	print_corr_temperature(shell);
-	print_corr_t1_temperature(shell);
-	print_corr_t2_temperature(shell);
-	print_history_enable(shell);
-	print_history_sensors(shell);
-	print_alarm_limit(shell);
-	print_alarm_notif_time(shell);
-	shell_print(shell, "");
-	shell_print(shell, "Alarm thresholds:");
+	print_lrw_region(shell);
+	print_lrw_sub_band(shell);
+	print_lrw_network(shell);
+	print_lrw_adr(shell);
+	print_lrw_activation(shell);
+	print_lrw_deveui(shell);
+	print_lrw_joineui(shell);
+	print_lrw_nwkkey(shell);
+	print_lrw_appkey(shell);
+	print_lrw_devaddr(shell);
+	print_lrw_nwkskey(shell);
+	print_lrw_appskey(shell);
 	print_alarm_temperature_enabled(shell);
 	print_alarm_temperature_lo(shell);
 	print_alarm_temperature_hi(shell);
@@ -1044,8 +1045,6 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_alarm_t2_temperature_lo(shell);
 	print_alarm_t2_temperature_hi(shell);
 	print_alarm_t2_temperature_hst(shell);
-	shell_print(shell, "");
-	shell_print(shell, "Discrete inputs:");
 	print_hall_left_counter(shell);
 	print_hall_left_notify_act(shell);
 	print_hall_left_notify_deact(shell);
@@ -1058,12 +1057,9 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_input_b_counter(shell);
 	print_input_b_notify_act(shell);
 	print_input_b_notify_deact(shell);
-	shell_print(shell, "");
-	shell_print(shell, "PIR / accel:");
-	print_pir_notify_act(shell);
-	print_motion_sensitivity(shell);
-	shell_print(shell, "");
-	shell_print(shell, "Capabilities:");
+	print_corr_temperature(shell);
+	print_corr_t1_temperature(shell);
+	print_corr_t2_temperature(shell);
 	print_cap_hall_left(shell);
 	print_cap_hall_right(shell);
 	print_cap_input_a(shell);
@@ -1073,20 +1069,12 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_pir_detector(shell);
 	print_cap_1w_thermometer(shell);
 	print_cap_1w_machine_probe(shell);
-	shell_print(shell, "");
-	shell_print(shell, "LoRaWAN:");
-	print_lrw_region(shell);
-	print_lrw_sub_band(shell);
-	print_lrw_network(shell);
-	print_lrw_adr(shell);
-	print_lrw_activation(shell);
-	print_lrw_deveui(shell);
-	print_lrw_joineui(shell);
-	print_lrw_nwkkey(shell);
-	print_lrw_appkey(shell);
-	print_lrw_devaddr(shell);
-	print_lrw_nwkskey(shell);
-	print_lrw_appskey(shell);
+	print_history_enable(shell);
+	print_history_sensors(shell);
+	print_alarm_limit(shell);
+	print_alarm_notif_time(shell);
+	print_pir_notify_act(shell);
+	print_motion_sensitivity(shell);
 
 	return 0;
 }

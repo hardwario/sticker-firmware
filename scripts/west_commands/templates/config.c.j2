@@ -608,30 +608,10 @@ static int cmd_float(const struct shell *shell, size_t argc, char **argv, float 
 {% for param in parameters %}
 {{ print_function(param, module, enums) }}
 {% endfor %}
-{# Derive a display section from the parameter name so `config show` can group
-   its output under headers without a per-parameter tag in app_config.yml. #}
-{% macro section_of(name) -%}
-{%- if name.startswith('lrw_') -%}LoRaWAN
-{%- elif name.startswith('cap_') -%}Capabilities
-{%- elif name.startswith('hall_') or name.startswith('input_') -%}Discrete inputs
-{%- elif name.startswith('pir_') or name == 'motion_sensitivity' -%}PIR / accel
-{%- elif name.startswith('alarm_temperature') or name.startswith('alarm_humidity') or name.startswith('alarm_pressure') or name.startswith('alarm_t1') or name.startswith('alarm_t2') -%}Alarm thresholds
-{%- else -%}General
-{%- endif -%}
-{%- endmacro %}
-{% set show_sections = ["General", "Alarm thresholds", "Discrete inputs", "PIR / accel", "Capabilities", "LoRaWAN"] %}
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
-{% for sec in show_sections %}
-{% set ns = namespace(first=true) %}
-{% for param in parameters if not param.hidden and section_of(param.name) | trim == sec %}
-{% if ns.first %}
-	shell_print(shell, "");
-	shell_print(shell, "{{ sec }}:");
-{% set ns.first = false %}
-{% endif %}
+{% for param in parameters if not param.hidden %}
 	print_{{ param.name | c_name }}(shell);
-{% endfor %}
 {% endfor %}
 
 	return 0;
