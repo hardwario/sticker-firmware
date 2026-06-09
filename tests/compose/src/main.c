@@ -99,7 +99,10 @@ ZTEST(compose, test_boot_internal)
 	zassert_equal(fr[0].temperature, 2350, "temp scaled wrong: %d", fr[0].temperature);
 	zassert_true(fr[0].has_humidity, "humidity missing");
 	zassert_equal(fr[0].humidity, 100, "hum scaled wrong: %u", fr[0].humidity);
-	zassert_false(fr[0].has_voltage, "voltage should be absent (NaN)");
+	/* #80: the system group is always present; an absent (NaN) voltage is
+	 * sent as a 0 sentinel rather than omitted. */
+	zassert_true(fr[0].has_voltage, "system voltage must always be present");
+	zassert_equal(fr[0].voltage, 0, "absent voltage -> 0 sentinel, got %u", fr[0].voltage);
 	zassert_true(fr[0].has_system_flags, "boot system_flags missing");
 	zassert_equal(fr[0].system_flags, SYSTEM_FLAG_BOOT, "boot flag wrong");
 }
@@ -199,18 +202,24 @@ ZTEST(compose, test_multiframe_split)
 	zassert_equal(hall, 1, "hall_left not exactly once");
 }
 
-ZTEST(compose, test_nothing_to_report)
+ZTEST(compose, test_system_always_present)
 {
-	uint8_t buf[64];
-	size_t len = 1;
-	bool more = true;
+	Telemetry fr[8];
+	size_t n;
 
-	set_clean(); /* all NaN, boot flag already consumed */
-	int ret = app_compose(buf, sizeof(buf), &len, &more);
+	set_clean(); /* all NaN, boot flag already consumed by test_boot_internal */
+	run_report(fr, 8, &n);
 
-	zassert_equal(ret, 0, "ret %d", ret);
-	zassert_equal(len, 0, "expected empty report, got %zuB", len);
-	zassert_false(more, "more should be false");
+	/* #80: the system group is always emitted, so a report is never empty even
+	 * when every sensor reading is absent. boot was consumed earlier -> flags 0. */
+	zassert_equal(n, 1, "expected one frame, got %zu", n);
+	zassert_true(fr[0].has_voltage, "system voltage must always be present");
+	zassert_equal(fr[0].voltage, 0, "absent voltage -> 0 sentinel, got %u", fr[0].voltage);
+	zassert_true(fr[0].has_system_flags, "system_flags must always be present");
+	zassert_equal(fr[0].system_flags, 0, "boot consumed -> flags 0, got %u", fr[0].system_flags);
+	/* No sensor groups leak in when nothing is available. */
+	zassert_false(fr[0].has_temperature, "temperature leaked");
+	zassert_false(fr[0].has_hall_left_count, "hall_left leaked");
 }
 
 ZTEST(compose, test_budget_unknown_pre_join)
