@@ -5,6 +5,7 @@
  */
 
 #include "app_compose.h"
+#include "app_cmd.h"
 #include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -346,7 +347,9 @@ int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 		}
 	}
 
-	size_t cap = MIN(size, (size_t)budget);
+	/* Reserve 1 byte for the version prefix (buf[0]); the protobuf is encoded
+	 * from buf+1, so the group-packing budget loses that byte. */
+	size_t cap = MIN(size, (size_t)budget) - 1;
 
 	/* Greedily pack whole pending groups, highest priority first, that fit. */
 	Telemetry frame = Telemetry_init_zero;
@@ -380,7 +383,8 @@ int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 		}
 	}
 
-	pb_ostream_t os = pb_ostream_from_buffer(buf, size);
+	buf[0] = APP_PROTO_VERSION;
+	pb_ostream_t os = pb_ostream_from_buffer(buf + 1, size - 1);
 	if (!pb_encode(&os, Telemetry_fields, &frame)) {
 		LOG_ERR("pb_encode failed: %s", PB_GET_ERROR(&os));
 		m_active = false;
@@ -388,7 +392,7 @@ int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 	}
 
 	m_pending &= ~frame_groups;
-	*len = os.bytes_written;
+	*len = os.bytes_written + 1;
 	*more = (m_pending != 0);
 	if (!*more) {
 		m_active = false;

@@ -572,6 +572,9 @@ function encodeDownlinkCommand(cmd) {
   if (name === "set_param") {
     if (b.lorawan) body = body.concat(_encLenDelim(1, _encLorawan(b.lorawan)));
     if (b.application) body = body.concat(_encLenDelim(2, _encApplication(b.application)));
+    // save (field 3): persist + reboot after applying; set on the LAST message
+    // of a multi-downlink batch only.
+    if (b.save) body = body.concat(_encTag(3, 0)).concat(_encVarint(1));
   } else if (name === "get_param") {
     // proto3 repeated scalars are packed (length-delimited) by default.
     var lf = b.lorawan_field || [];
@@ -636,6 +639,9 @@ function decodeDownlinkCommand(bytes) {
             if (f2 === 1) sp.lorawan = _decodeLorawan(bytes, p, p + l2.value);
             else if (f2 === 2) sp.application = _decodeApplication(bytes, p, p + l2.value);
             p += l2.value;
+          } else if (w2 === 0) {
+            var sv = _pbReadVarint(bytes, p); p = sv.next;
+            if (f2 === 3) sp.save = sv.value !== 0; // persist + reboot after apply
           } else { break; }
         }
         cmd.set_param = sp;
@@ -780,14 +786,30 @@ function decodeAlarmBatch(bytes) {
   return out;
 }
 
+// 1-byte format version prefixed to application protobuf payloads (fPort 2
+// telemetry, fPort 85 response). Mirrors APP_PROTO_VERSION in app_cmd.h.
+var _PROTO_VERSION = 0x01;
+
+// Strip + validate the version prefix at byte[0]. Returns the protobuf bytes
+// (byte 1..end) and pushes a warning on an unexpected version (the remainder is
+// still decoded best-effort). fPort 1 (legacy bitmap) and fPort 3 are unversioned.
+function _stripProtoVersion(bytes, warnings) {
+  if (!bytes || bytes.length < 1) return bytes;
+  if (bytes[0] !== _PROTO_VERSION) {
+    warnings.push("unknown payload version 0x" + bytes[0].toString(16));
+  }
+  return bytes.slice(1);
+}
+
 function decodeUplink(input) {
 
   // fPort 85: DownlinkResponse (Ack / Info / Error from command dispatcher).
   if (input.fPort === 85) {
-
+    var w85 = [];
+    var b85 = _stripProtoVersion(input.bytes, w85);
     return {
-      data: decodeDownlinkResponse(input.bytes),
-      warnings: [],
+      data: decodeDownlinkResponse(b85),
+      warnings: w85,
       errors: []
     };
   }
@@ -799,9 +821,11 @@ function decodeUplink(input) {
 
   // fPort 2: protobuf Telemetry (new format). fPort 1 stays the legacy bitmap.
   if (input.fPort === 2) {
+    var w2 = [];
+    var b2 = _stripProtoVersion(input.bytes, w2);
     return {
-      data: decodeTelemetry(input.bytes),
-      warnings: [],
+      data: decodeTelemetry(b2),
+      warnings: w2,
       errors: []
     };
   }

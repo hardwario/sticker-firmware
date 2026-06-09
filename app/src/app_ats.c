@@ -12,10 +12,7 @@
 #include "app_machine_probe.h"
 #include "app_sensor.h"
 #include "app_sht4x.h"
-
-#ifdef CONFIG_APP_CMD_DEBUG_SHELL
 #include "app_cmd.h"
-#endif
 
 /* Zephyr includes */
 #include <zephyr/init.h>
@@ -30,6 +27,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 LOG_MODULE_REGISTER(app_ats, LOG_LEVEL_DBG);
 
@@ -702,7 +700,50 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_APP_CMD_DEBUG_SHELL */
 
-SHELL_STATIC_SUBCMD_SET_CREATE(sub_ats, SHELL_CMD(led, &sub_led, "LED commands.", NULL),
+/* Prints the same device info a GetInfo command returns over LoRaWAN, via the
+ * shared app_cmd_get_info() (single source of truth). */
+static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	static const char *const build_type_name[] = {"main", "dev", "custom"};
+
+	struct app_cmd_info info;
+	app_cmd_get_info(&info);
+
+	const char *bt = info.build_type < ARRAY_SIZE(build_type_name)
+				 ? build_type_name[info.build_type]
+				 : "unknown";
+
+	shell_print(sh, "FW version:    %u.%u.%u", info.fw_major, info.fw_minor, info.fw_patch);
+	shell_print(sh, "Build type:    %s (%s)", bt, info.debug ? "debug" : "release");
+	shell_print(sh, "Serial number: %u", info.serial_number);
+	shell_print(sh, "Uptime:        %u s", info.uptime_s);
+
+	if (info.has_unix_time) {
+		time_t t = (time_t)info.unix_time;
+		struct tm tm;
+		gmtime_r(&t, &tm);
+		shell_print(sh, "Wall clock:    %04d-%02d-%02d %02d:%02d:%02d UTC",
+			    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
+			    tm.tm_sec);
+	} else {
+		shell_print(sh, "Wall clock:    RTC not synced");
+	}
+
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_device,
+	SHELL_CMD_ARG(info, NULL,
+		      "Print device info (FW version, build type, serial, uptime, clock).",
+		      cmd_device_info, 1, 0),
+	SHELL_SUBCMD_SET_END);
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_ats, SHELL_CMD(device, &sub_device, "Device info.", NULL),
+			       SHELL_CMD(led, &sub_led, "LED commands.", NULL),
 			       SHELL_CMD(sensors, &sub_sensors, "Sensor commands.", NULL),
 #if defined(CONFIG_LORAWAN)
 			       SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),

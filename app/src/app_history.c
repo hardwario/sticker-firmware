@@ -803,8 +803,8 @@ static int cmd_history_enable(const struct shell *sh, size_t argc, char **argv)
 		return -EINVAL;
 	}
 	app_history_set_enabled(en);
-	app_config()->history_enable = en; /* stage for `config save` */
-	shell_print(sh, "history %s (run `config save` to persist)", en ? "enabled" : "disabled");
+	app_config()->history_enable = en; /* staged; persisted on `settings save` */
+	shell_print(sh, "history %s", en ? "enabled" : "disabled");
 	return 0;
 }
 
@@ -845,9 +845,8 @@ static int cmd_history_sensors(const struct shell *sh, size_t argc, char **argv)
 	uint16_t mask = app_history_get_mask();
 	mask = on ? (mask | BIT(s)) : (mask & ~BIT(s));
 	app_history_set_mask(mask);
-	app_config()->history_sensors = app_history_get_mask(); /* stage */
-	shell_print(sh, "sensor `%s` %s; buffer cleared (run `config save` to persist)", argv[1],
-		    on ? "enabled" : "disabled");
+	app_config()->history_sensors = app_history_get_mask(); /* staged */
+	shell_print(sh, "sensor `%s` %s; buffer cleared", argv[1], on ? "enabled" : "disabled");
 	return 0;
 }
 

@@ -126,6 +126,10 @@ message Command {
     message SetParam {
         optional AppConfigMessage.Lorawan     lorawan     = 1;
         optional AppConfigMessage.Application application = 2;
+        // Persist + reboot after applying (same as SettingsSave). A large config
+        // is split across several SetParam downlinks that accumulate in staging;
+        // set save=true on the LAST one only to commit everything at once.
+        optional bool                         save        = 3;
     }
 
     message GetParam {

@@ -7,6 +7,7 @@
  */
 
 #include "app_compose.h"
+#include "app_cmd.h"
 #include "app_config.h"
 #include "app_sensor.h"
 #include "app_hall.h"
@@ -53,7 +54,11 @@ static void set_clean(void)
 static Telemetry decode(const uint8_t *buf, size_t len)
 {
 	Telemetry t = Telemetry_init_zero;
-	pb_istream_t is = pb_istream_from_buffer(buf, len);
+
+	/* buf[0] is the APP_PROTO_VERSION prefix (#55); decode the protobuf after it. */
+	zassert_true(len >= 1, "missing version byte");
+	zassert_equal(buf[0], APP_PROTO_VERSION, "bad version 0x%02x", buf[0]);
+	pb_istream_t is = pb_istream_from_buffer(buf + 1, len - 1);
 
 	zassert_true(pb_decode(&is, Telemetry_fields, &t), "pb_decode failed");
 	return t;
@@ -155,7 +160,8 @@ ZTEST(compose, test_counter_flags)
 			zassert_equal(fr[i].hall_left_count, 7, "hall count");
 			zassert_true(fr[i].has_hall_left_flags, "flags missing");
 			/* NOTIFY_ACT(bit0) | ACTIVE(bit2) = 0x5 */
-			zassert_equal(fr[i].hall_left_flags, 0x5, "flags %u", fr[i].hall_left_flags);
+			zassert_equal(fr[i].hall_left_flags, 0x5, "flags %u",
+				      fr[i].hall_left_flags);
 		}
 	}
 	zassert_true(seen, "hall_left missing");
@@ -216,7 +222,8 @@ ZTEST(compose, test_system_always_present)
 	zassert_true(fr[0].has_voltage, "system voltage must always be present");
 	zassert_equal(fr[0].voltage, 0, "absent voltage -> 0 sentinel, got %u", fr[0].voltage);
 	zassert_true(fr[0].has_system_flags, "system_flags must always be present");
-	zassert_equal(fr[0].system_flags, 0, "boot consumed -> flags 0, got %u", fr[0].system_flags);
+	zassert_equal(fr[0].system_flags, 0, "boot consumed -> flags 0, got %u",
+		      fr[0].system_flags);
 	/* No sensor groups leak in when nothing is available. */
 	zassert_false(fr[0].has_temperature, "temperature leaked");
 	zassert_false(fr[0].has_hall_left_count, "hall_left leaked");

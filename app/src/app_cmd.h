@@ -16,6 +16,12 @@
 extern "C" {
 #endif
 
+/* 1-byte format version prefixed to application protobuf payloads so the
+ * encoding can change incompatibly in future while staying decodable (protobuf
+ * alone only handles additive field changes). Carried on fPort 2 (telemetry)
+ * and fPort 85 (command response). fPort 1 legacy bitmap stays unversioned. */
+#define APP_PROTO_VERSION 0x01
+
 enum app_cmd_transport {
 	APP_CMD_TRANSPORT_LRW,
 	APP_CMD_TRANSPORT_NFC,
@@ -30,6 +36,26 @@ enum app_cmd_action {
 	APP_CMD_ACTION_REBOOT,        /* reboot (discards staged edits) */
 	APP_CMD_ACTION_FACTORY_RESET, /* erase NVS + reboot */
 };
+
+/* Plain-C device info snapshot (no protobuf dependency), filled by
+ * app_cmd_get_info(). Single source of truth for both the GetInfo response and
+ * the `ats device info` shell command. build_type: 0=main, 1=dev, 2=custom. */
+struct app_cmd_info {
+	uint8_t fw_major;
+	uint8_t fw_minor;
+	uint8_t fw_patch;
+	uint8_t build_type; /* 0=main, 1=dev, 2=custom */
+	bool debug;         /* debug build (CONFIG_FW_DEBUG) */
+	uint32_t serial_number;
+	uint32_t uptime_s;
+	bool has_unix_time; /* unix_time valid (RTC synced) */
+	uint32_t unix_time; /* UTC seconds since epoch */
+};
+
+/* Fill `info` with the current device info: FW version, build type, serial,
+ * uptime, and wall-clock time (has_unix_time=false when the RTC is unsynced or
+ * the clock module is absent). Single source of truth for GetInfo + shell. */
+void app_cmd_get_info(struct app_cmd_info *info);
 
 /* Decode a serialized Command from `in`, dispatch it, encode the
  * resulting Response into `out`.
