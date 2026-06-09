@@ -69,6 +69,19 @@ int fw_write(uint32_t off, const uint8_t *data, size_t len)
 	return ret;
 }
 
+int fw_read(uint32_t off, uint8_t *data, size_t len)
+{
+	const struct flash_area *fa;
+	int ret = flash_area_open(SLOT0_ID, &fa);
+
+	if (ret) {
+		return ret;
+	}
+	ret = flash_area_read(fa, off, data, len);
+	flash_area_close(fa);
+	return ret;
+}
+
 int fw_slot_crc32(size_t len, uint32_t *crc)
 {
 	const struct flash_area *fa;

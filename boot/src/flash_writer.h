@@ -27,6 +27,9 @@ int fw_erase_slot(void);
 /* Write `len` bytes at `off` within the application slot. */
 int fw_write(uint32_t off, const uint8_t *data, size_t len);
 
+/* Read `len` bytes at `off` from the application slot. */
+int fw_read(uint32_t off, uint8_t *data, size_t len);
+
 /* CRC-32/IEEE over the first `len` bytes already written to the slot. */
 int fw_slot_crc32(size_t len, uint32_t *crc);
 

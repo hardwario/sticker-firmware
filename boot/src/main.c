@@ -42,14 +42,47 @@ static bool dfu_forced(void)
 	return gpio_pin_get_dt(&m_hall_l) == 1 && gpio_pin_get_dt(&m_hall_r) == 1;
 }
 
+/*
+ * A vector table at slot0 looks like a runnable image when the initial stack
+ * pointer lands in SRAM and the reset vector points (thumb) into the slot.
+ * Lets a JLink-provisioned app (no sfu_meta yet) boot; a blank/erased slot
+ * (0xFFFFFFFF) fails the check and drops into DFU.
+ */
+static bool slot0_looks_valid(void)
+{
+	uint32_t vt[2];
+	const uint32_t base = fw_slot0_base();
+
+	if (fw_read(0, (uint8_t *)vt, sizeof(vt)) != 0) {
+		return false;
+	}
+
+	const uint32_t sram_lo = CONFIG_SRAM_BASE_ADDRESS;
+	const uint32_t sram_hi = sram_lo + (CONFIG_SRAM_SIZE * 1024);
+	const uint32_t sp = vt[0];
+	const uint32_t pc = vt[1];
+
+	if (sp < sram_lo || sp > sram_hi) {
+		return false;
+	}
+	if ((pc & 1) == 0) { /* thumb bit */
+		return false;
+	}
+	return pc >= base && pc < base + fw_slot0_size();
+}
+
 static bool slot_is_bootable(void)
 {
 	struct sfu_meta meta;
 
-	if (meta_read(&meta) != 0) {
-		return false;
+	if (meta_read(&meta) == 0 && meta.magic == SFU_META_MAGIC &&
+	    meta.valid == SFU_META_MAGIC) {
+		return true;
 	}
-	return meta.magic == SFU_META_MAGIC && meta.valid == SFU_META_MAGIC;
+
+	/* No valid metadata (e.g. factory JLink flash) — boot if slot0 holds a
+	 * plausible image rather than wedging in DFU. */
+	return slot0_looks_valid();
 }
 
 static void jump_to_app(uint32_t base)
