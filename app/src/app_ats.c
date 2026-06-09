@@ -312,22 +312,22 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 		prev_float = g_app_sensor_data.illuminance;
 		is_float = true;
 	} else if (strcmp(sensor_name, "t1-temperature") == 0) {
-		prev_float = g_app_sensor_data.t1_temperature;
+		prev_float = g_app_sensor_data.w1[0].temperature;
 		is_float = true;
 	} else if (strcmp(sensor_name, "t2-temperature") == 0) {
-		prev_float = g_app_sensor_data.t2_temperature;
+		prev_float = g_app_sensor_data.w1[1].temperature;
 		is_float = true;
 	} else if (strcmp(sensor_name, "mp1-temperature") == 0) {
-		prev_float = g_app_sensor_data.mp1_temperature;
+		prev_float = g_app_sensor_data.w1[2].temperature;
 		is_float = true;
 	} else if (strcmp(sensor_name, "mp2-temperature") == 0) {
-		prev_float = g_app_sensor_data.mp2_temperature;
+		prev_float = g_app_sensor_data.w1[3].temperature;
 		is_float = true;
 	} else if (strcmp(sensor_name, "mp1-humidity") == 0) {
-		prev_float = g_app_sensor_data.mp1_humidity;
+		prev_float = g_app_sensor_data.w1[2].humidity;
 		is_float = true;
 	} else if (strcmp(sensor_name, "mp2-humidity") == 0) {
-		prev_float = g_app_sensor_data.mp2_humidity;
+		prev_float = g_app_sensor_data.w1[3].humidity;
 		is_float = true;
 	} else if (strcmp(sensor_name, "altitude") == 0) {
 		prev_float = g_app_sensor_data.altitude;
@@ -354,10 +354,10 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 		prev_uint32 = g_app_sensor_data.input_b_count;
 		is_uint32 = true;
 	} else if (strcmp(sensor_name, "mp1-is-tilt-alert") == 0) {
-		prev_bool = g_app_sensor_data.mp1_is_tilt_alert;
+		prev_bool = g_app_sensor_data.w1[2].is_tilt_alert;
 		is_bool = true;
 	} else if (strcmp(sensor_name, "mp2-is-tilt-alert") == 0) {
-		prev_bool = g_app_sensor_data.mp2_is_tilt_alert;
+		prev_bool = g_app_sensor_data.w1[3].is_tilt_alert;
 		is_bool = true;
 	} else if (strcmp(sensor_name, "hall-left-is-active") == 0) {
 		prev_bool = g_app_sensor_data.hall_left_is_active;
@@ -406,17 +406,17 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 			} else if (strcmp(sensor_name, "illuminance") == 0) {
 				curr_float = g_app_sensor_data.illuminance;
 			} else if (strcmp(sensor_name, "t1-temperature") == 0) {
-				curr_float = g_app_sensor_data.t1_temperature;
+				curr_float = g_app_sensor_data.w1[0].temperature;
 			} else if (strcmp(sensor_name, "t2-temperature") == 0) {
-				curr_float = g_app_sensor_data.t2_temperature;
+				curr_float = g_app_sensor_data.w1[1].temperature;
 			} else if (strcmp(sensor_name, "mp1-temperature") == 0) {
-				curr_float = g_app_sensor_data.mp1_temperature;
+				curr_float = g_app_sensor_data.w1[2].temperature;
 			} else if (strcmp(sensor_name, "mp2-temperature") == 0) {
-				curr_float = g_app_sensor_data.mp2_temperature;
+				curr_float = g_app_sensor_data.w1[3].temperature;
 			} else if (strcmp(sensor_name, "mp1-humidity") == 0) {
-				curr_float = g_app_sensor_data.mp1_humidity;
+				curr_float = g_app_sensor_data.w1[2].humidity;
 			} else if (strcmp(sensor_name, "mp2-humidity") == 0) {
-				curr_float = g_app_sensor_data.mp2_humidity;
+				curr_float = g_app_sensor_data.w1[3].humidity;
 			} else if (strcmp(sensor_name, "altitude") == 0) {
 				curr_float = g_app_sensor_data.altitude;
 			} else if (strcmp(sensor_name, "pressure") == 0) {
@@ -457,9 +457,9 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 			}
 		} else if (is_bool) {
 			if (strcmp(sensor_name, "mp1-is-tilt-alert") == 0) {
-				curr_bool = g_app_sensor_data.mp1_is_tilt_alert;
+				curr_bool = g_app_sensor_data.w1[2].is_tilt_alert;
 			} else if (strcmp(sensor_name, "mp2-is-tilt-alert") == 0) {
-				curr_bool = g_app_sensor_data.mp2_is_tilt_alert;
+				curr_bool = g_app_sensor_data.w1[3].is_tilt_alert;
 			} else if (strcmp(sensor_name, "hall-left-is-active") == 0) {
 				curr_bool = g_app_sensor_data.hall_left_is_active;
 			} else if (strcmp(sensor_name, "hall-right-is-active") == 0) {
@@ -501,24 +501,24 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "illuminance:              %.2f lux",
 		    (double)g_app_sensor_data.illuminance);
 	shell_print(shell, "t1-temperature:           %.2f C",
-		    (double)g_app_sensor_data.t1_temperature);
+		    (double)g_app_sensor_data.w1[0].temperature);
 	shell_print(shell, "t2-temperature:           %.2f C",
-		    (double)g_app_sensor_data.t2_temperature);
+		    (double)g_app_sensor_data.w1[1].temperature);
 	shell_print(shell, "motion-count:             %u", g_app_sensor_data.motion_count);
 	shell_print(shell, "altitude:                 %.2f m", (double)g_app_sensor_data.altitude);
 	shell_print(shell, "pressure:                 %.2f Pa", (double)g_app_sensor_data.pressure);
 	shell_print(shell, "mp1-temperature:          %.2f C",
-		    (double)g_app_sensor_data.mp1_temperature);
+		    (double)g_app_sensor_data.w1[2].temperature);
 	shell_print(shell, "mp2-temperature:          %.2f C",
-		    (double)g_app_sensor_data.mp2_temperature);
+		    (double)g_app_sensor_data.w1[3].temperature);
 	shell_print(shell, "mp1-humidity:             %.2f %%",
-		    (double)g_app_sensor_data.mp1_humidity);
+		    (double)g_app_sensor_data.w1[2].humidity);
 	shell_print(shell, "mp2-humidity:             %.2f %%",
-		    (double)g_app_sensor_data.mp2_humidity);
+		    (double)g_app_sensor_data.w1[3].humidity);
 	shell_print(shell, "mp1-is-tilt-alert:        %s",
-		    g_app_sensor_data.mp1_is_tilt_alert ? "true" : "false");
+		    g_app_sensor_data.w1[2].is_tilt_alert ? "true" : "false");
 	shell_print(shell, "mp2-is-tilt-alert:        %s",
-		    g_app_sensor_data.mp2_is_tilt_alert ? "true" : "false");
+		    g_app_sensor_data.w1[3].is_tilt_alert ? "true" : "false");
 	shell_print(shell, "hall-left-count:          %u", g_app_sensor_data.hall_left_count);
 	shell_print(shell, "hall-right-count:         %u", g_app_sensor_data.hall_right_count);
 	shell_print(shell, "hall-left-is-active:      %s",

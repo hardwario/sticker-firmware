@@ -12,6 +12,7 @@
 #include "app_sensor.h"
 #include "app_hall.h"
 #include "app_input.h"
+#include "app_w1_slots.h"
 
 #include <pb_decode.h>
 #include "src/app_config.pb.h"
@@ -32,6 +33,7 @@ K_MUTEX_DEFINE(g_app_sensor_data_lock);
 extern uint8_t test_budget;
 extern struct app_hall_data test_hall;
 extern struct app_input_data test_input;
+extern enum app_w1_slot_type test_w1_types[APP_W1_SLOT_COUNT];
 
 #define SYSTEM_FLAG_BOOT 0x1
 
@@ -40,14 +42,21 @@ static void set_clean(void)
 	memset(&g_app_config, 0, sizeof(g_app_config));
 	memset(&test_hall, 0, sizeof(test_hall));
 	memset(&test_input, 0, sizeof(test_input));
+	memset(test_w1_types, 0, sizeof(test_w1_types)); /* all slots empty */
 	test_budget = 200;
 
 	g_app_sensor_data = (struct app_sensor_data){0};
 	g_app_sensor_data.orientation = INT_MAX; /* absent */
-	float *f = &g_app_sensor_data.voltage;
-	/* voltage..mp2_humidity are contiguous floats — NaN = absent */
-	for (size_t i = 0; i < 12; i++) {
-		f[i] = NAN;
+	/* Analog scalars: NaN = absent. */
+	g_app_sensor_data.voltage = NAN;
+	g_app_sensor_data.temperature = NAN;
+	g_app_sensor_data.humidity = NAN;
+	g_app_sensor_data.illuminance = NAN;
+	g_app_sensor_data.altitude = NAN;
+	g_app_sensor_data.pressure = NAN;
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		g_app_sensor_data.w1[s].temperature = NAN;
+		g_app_sensor_data.w1[s].humidity = NAN;
 	}
 }
 
@@ -181,30 +190,34 @@ ZTEST(compose, test_multiframe_split)
 	g_app_config.cap_light_sensor = true;
 	g_app_sensor_data.illuminance = 300.0f;
 	g_app_config.cap_w1_sensors = true;
-	g_app_sensor_data.t1_temperature = 11.0f;
+	test_w1_types[0] = APP_W1_SLOT_DALLAS;
+	g_app_sensor_data.w1[0].temperature = 11.0f;
 	g_app_config.cap_hall_left = true;
 	test_hall.left_count = 42;
 
-	test_budget = 8; /* tiny -> forces several frames */
+	/* Small budget forces several frames, but must still hold the largest
+	 * single unit alone (a w1 SensorReading ~10 B); smaller would trip the
+	 * oversized-unit stall-guard rather than test the split. */
+	test_budget = 16;
 	run_report(fr, 16, &n);
 
 	zassert_true(n > 1, "expected a multi-frame split, got %zu", n);
 
-	/* Lossless + disjoint: each field appears in exactly one frame. */
-	int temp = 0, hum = 0, press = 0, illum = 0, ext1 = 0, hall = 0;
+	/* Lossless + disjoint: each field/reading appears in exactly one frame. */
+	int temp = 0, hum = 0, press = 0, illum = 0, w1 = 0, hall = 0;
 	for (size_t i = 0; i < n; i++) {
 		temp += fr[i].has_temperature;
 		hum += fr[i].has_humidity;
 		press += fr[i].has_pressure;
 		illum += fr[i].has_illuminance;
-		ext1 += fr[i].has_ext1_temperature;
+		w1 += fr[i].w1_sensors_count; /* one slot reading total */
 		hall += fr[i].has_hall_left_count;
 	}
 	zassert_equal(temp, 1, "temperature not exactly once (%d)", temp);
 	zassert_equal(hum, 1, "humidity not exactly once");
 	zassert_equal(press, 1, "pressure not exactly once");
 	zassert_equal(illum, 1, "illuminance not exactly once");
-	zassert_equal(ext1, 1, "ext1 not exactly once");
+	zassert_equal(w1, 1, "w1 reading not exactly once (%d)", w1);
 	zassert_equal(hall, 1, "hall_left not exactly once");
 }
 

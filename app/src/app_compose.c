@@ -48,10 +48,6 @@ enum tlm_group {
 	G_LIGHT,        /* illuminance */
 	G_ACCEL,        /* orientation */
 	G_PIR,          /* motion_count */
-	G_EXT1,         /* ext1_temperature */
-	G_EXT2,         /* ext2_temperature */
-	G_MP1,          /* mp1_temperature, mp1_humidity, mp1_flags */
-	G_MP2,          /* mp2_temperature, mp2_humidity, mp2_flags */
 	G_HALL_L,       /* hall_left_count, hall_left_flags */
 	G_HALL_R,       /* hall_right_count, hall_right_flags */
 	G_INPUT_A,      /* input_a_count, input_a_flags */
@@ -94,22 +90,6 @@ static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, 
 	case G_PIR:
 		SEL(motion_count);
 		break;
-	case G_EXT1:
-		SEL(ext1_temperature);
-		break;
-	case G_EXT2:
-		SEL(ext2_temperature);
-		break;
-	case G_MP1:
-		SEL(mp1_temperature);
-		SEL(mp1_humidity);
-		SEL(mp1_flags);
-		break;
-	case G_MP2:
-		SEL(mp2_temperature);
-		SEL(mp2_humidity);
-		SEL(mp2_flags);
-		break;
 	case G_HALL_L:
 		SEL(hall_left_count);
 		SEL(hall_left_flags);
@@ -147,7 +127,8 @@ static bool group_present(const Telemetry *s, enum tlm_group g)
 
 /* Snapshot held across the frames of one report (consistency). */
 static Telemetry m_snapshot;
-static uint16_t m_pending; /* bitmask of enum tlm_group still to send */
+static uint16_t m_pending;  /* bitmask of enum tlm_group still to send */
+static pb_size_t m_w1_sent; /* repeated w1_sensors already emitted (split cursor) */
 static bool m_active;
 
 static void fill_snapshot(void)
@@ -216,38 +197,32 @@ static void fill_snapshot(void)
 		t.motion_count = d.motion_count;
 	}
 
-	/* 1-wire ext */
-	if (g_app_config.cap_w1_sensors && !isnan(d.t1_temperature)) {
-		t.has_ext1_temperature = true;
-		t.ext1_temperature = (int32_t)(d.t1_temperature * 100.0f);
-	}
-	if (g_app_config.cap_w1_sensors && !isnan(d.t2_temperature)) {
-		t.has_ext2_temperature = true;
-		t.ext2_temperature = (int32_t)(d.t2_temperature * 100.0f);
-	}
-
-	/* machine probe 1 / 2 */
+	/* 1-wire ROM-bound slots → one repeated SensorReading per populated slot.
+	 * type travels with the reading; the composer may split the list across
+	 * frames (each reading is indivisible). Absent quantities stay omitted. */
 	if (g_app_config.cap_w1_sensors) {
-		if (!isnan(d.mp1_temperature)) {
-			t.has_mp1_temperature = true;
-			t.mp1_temperature = (int32_t)(d.mp1_temperature * 100.0f);
+		for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
+			enum app_w1_slot_type type = app_w1_slot_get_type(i);
+			if (type == APP_W1_SLOT_EMPTY) {
+				continue; /* unconfigured slot → no reading */
+			}
+			const struct app_w1_slot_reading *r = &d.w1[i];
+			SensorReading *sr = &t.w1_sensors[t.w1_sensors_count];
+			*sr = (SensorReading)SensorReading_init_zero;
+			sr->slot = i;
+			sr->type = type;
+			if (!isnan(r->temperature)) {
+				sr->has_temperature = true;
+				sr->temperature = (int32_t)(r->temperature * 100.0f);
+			}
+			if (!isnan(r->humidity)) {
+				sr->has_humidity = true;
+				sr->humidity = (uint32_t)(r->humidity * 2.0f);
+			}
+			sr->has_flags = true;
+			sr->flags = r->is_tilt_alert ? MP_FLAG_TILT : 0;
+			t.w1_sensors_count++;
 		}
-		if (!isnan(d.mp1_humidity)) {
-			t.has_mp1_humidity = true;
-			t.mp1_humidity = (uint32_t)(d.mp1_humidity * 2.0f);
-		}
-		t.has_mp1_flags = true;
-		t.mp1_flags = d.mp1_is_tilt_alert ? MP_FLAG_TILT : 0;
-		if (!isnan(d.mp2_temperature)) {
-			t.has_mp2_temperature = true;
-			t.mp2_temperature = (int32_t)(d.mp2_temperature * 100.0f);
-		}
-		if (!isnan(d.mp2_humidity)) {
-			t.has_mp2_humidity = true;
-			t.mp2_humidity = (uint32_t)(d.mp2_humidity * 2.0f);
-		}
-		t.has_mp2_flags = true;
-		t.mp2_flags = d.mp2_is_tilt_alert ? MP_FLAG_TILT : 0;
 	}
 
 	/* hall left / right */
@@ -325,6 +300,7 @@ static void fill_snapshot(void)
 			m_pending |= BIT(g);
 		}
 	}
+	m_w1_sent = 0;
 	m_active = true;
 	boot = false;
 }
@@ -338,7 +314,7 @@ int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 
 	if (!m_active) {
 		fill_snapshot();
-		if (m_pending == 0) {
+		if (m_pending == 0 && m_snapshot.w1_sensors_count == 0) {
 			/* Nothing to report (e.g. all sensors NaN pre-sample). */
 			*len = 0;
 			*more = false;
@@ -369,17 +345,46 @@ int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 		}
 	}
 
-	/* A single group bigger than the budget would stall forever: force the
-	 * highest-priority pending group out alone and log it. */
-	if (frame_groups == 0) {
+	/* Append pending 1-Wire readings one at a time (lowest priority, after the
+	 * whole-group scalars). The repeated list may split across frames: stop at
+	 * the first reading that no longer fits and carry the rest (kept contiguous
+	 * from frame.w1_sensors[0]). */
+	pb_size_t w1_added = 0;
+	for (pb_size_t i = m_w1_sent; i < m_snapshot.w1_sensors_count; i++) {
+		pb_size_t at = frame.w1_sensors_count;
+		frame.w1_sensors[at] = m_snapshot.w1_sensors[i];
+		frame.w1_sensors_count = at + 1;
+		size_t sz = 0;
+		pb_get_encoded_size(&sz, Telemetry_fields, &frame);
+		if (sz <= cap) {
+			w1_added++;
+		} else {
+			frame.w1_sensors_count = at; /* revert; stop, keep order */
+			break;
+		}
+	}
+
+	/* A single unit bigger than the budget would stall forever: force the
+	 * highest-priority pending group — or, if none, the next 1-Wire reading —
+	 * out alone and log it. */
+	if (frame_groups == 0 && w1_added == 0) {
+		bool forced = false;
 		for (enum tlm_group g = 0; g < G_COUNT; g++) {
 			if (m_pending & BIT(g)) {
 				apply_group(&frame, &m_snapshot, g, true);
 				frame_groups = BIT(g);
 				LOG_WRN("Group %d exceeds budget %uB, sending alone", (int)g,
 					budget);
+				forced = true;
 				break;
 			}
+		}
+		if (!forced && m_w1_sent < m_snapshot.w1_sensors_count) {
+			frame.w1_sensors[0] = m_snapshot.w1_sensors[m_w1_sent];
+			frame.w1_sensors_count = 1;
+			w1_added = 1;
+			LOG_WRN("w1 reading slot=%u exceeds budget %uB, sending alone",
+				(unsigned)m_snapshot.w1_sensors[m_w1_sent].slot, budget);
 		}
 	}
 
@@ -392,14 +397,16 @@ int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 	}
 
 	m_pending &= ~frame_groups;
+	m_w1_sent += w1_added;
 	*len = os.bytes_written + 1;
-	*more = (m_pending != 0);
+	*more = (m_pending != 0) || (m_w1_sent < m_snapshot.w1_sensors_count);
 	if (!*more) {
 		m_active = false;
 	}
 
-	LOG_INF("TX: budget=%uB (from system), frame=%zuB, groups=0x%04x, more=%d", budget, *len,
-		frame_groups, (int)*more);
+	LOG_INF("TX: budget=%uB (from system), frame=%zuB, groups=0x%04x, w1=%u/%u, more=%d",
+		budget, *len, frame_groups, (unsigned)m_w1_sent,
+		(unsigned)m_snapshot.w1_sensors_count, (int)*more);
 	LOG_HEXDUMP_DBG(buf, *len, "Telemetry frame:");
 
 	return 0;

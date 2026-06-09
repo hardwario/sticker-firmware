@@ -168,6 +168,29 @@ test("fPort-2 telemetry decodes accel_motion_count (field 26)", () => {
   assert.equal(got.data.accel_motion_count, 3);
 });
 
+// 1-Wire slots are a repeated SensorReading on field 27 (tag 0xda 0x01,
+// length-delimited). type travels with each reading; the firmware emits one per
+// populated slot and may split the list across frames. Two readings here:
+//   reading A: slot=2 type=2(machine-probe) temp=23.65 hum=54 flags=tilt
+//     08 02 | 10 02 | 18 fa 24 | 20 6c | 28 01   (11 B body)
+//   reading B: slot=0 type=1(dallas) temp=21.5 (temperature-only)
+//     08 00 | 10 01 | 18 cc 21                   (7 B body)
+test("fPort-2 telemetry decodes repeated w1_sensors (field 27)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("01da010b0802100218fa24206c2801da01070800100118cc21"),
+    fPort: 2,
+  }).data;
+  assert.equal(got.w1_sensors.length, 2);
+  assert.deepEqual(got.w1_sensors[0], {
+    slot: 2, type: 2, type_name: "machine-probe",
+    temperature: 23.65, humidity: 54, tilt_alert: true,
+  });
+  assert.equal(got.w1_sensors[1].slot, 0);
+  assert.equal(got.w1_sensors[1].type_name, "dallas");
+  assert.equal(got.w1_sensors[1].temperature, 21.5);
+  assert.equal(got.w1_sensors[1].humidity, undefined); // dallas → no humidity
+});
+
 test("fPort 2: unknown payload version is flagged but still decodes", () => {
   // version 0x02 (unknown) followed by voltage=100 (field 1) -> warn + decode
   const r = codec.decodeUplink({ bytes: hex("020864"), fPort: 2 });
