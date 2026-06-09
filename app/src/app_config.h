@@ -50,6 +50,10 @@ struct app_config {
 	bool calibration;
 	int interval_sample;
 	int interval_report;
+	bool history_enable;
+	uint32_t history_sensors;
+	int alarm_limit;
+	int alarm_notif_time;
 	enum app_config_lrw_region lrw_region;
 	int lrw_sub_band;
 	enum app_config_lrw_network lrw_network;
@@ -106,10 +110,6 @@ struct app_config {
 	bool cap_pir_detector;
 	bool cap_1w_thermometer;
 	bool cap_1w_machine_probe;
-	bool history_enable;
-	uint32_t history_sensors;
-	int alarm_limit;
-	int alarm_notif_time;
 	bool pir_notify_act;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
 };

@@ -106,6 +106,38 @@ parameters:
     max: 86400
     help: "Get/Set report interval (range 60 to 86400 seconds)."
 
+  - name: history_enable
+    proto_group: application
+    proto_id: 49
+    type: bool
+    default: false
+    help: "Get/Set sensor history store-and-forward (true/false)."
+
+  - name: history_sensors
+    proto_group: application
+    proto_id: 50
+    type: uint32
+    default: 0
+    help: "Get/Set history sensor selection bitmask (0 = all capability-available)."
+
+  - name: alarm_limit
+    proto_group: application
+    proto_id: 51
+    type: int
+    default: 0
+    min: 0
+    max: 3600
+    help: "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled)."
+
+  - name: alarm_notif_time
+    proto_group: application
+    proto_id: 52
+    type: int
+    default: 10
+    min: 1
+    max: 60
+    help: "Get/Set alarm red-LED hold time in seconds (both-mode and pulse sources)."
+
   - name: lrw_region
     proto_group: lorawan
     proto_id: 1
@@ -505,38 +537,6 @@ parameters:
     proto_id: 48
     type: bool
     help: "Get/Set 1-wire machine probe capability (true/false)."
-
-  - name: history_enable
-    proto_group: application
-    proto_id: 49
-    type: bool
-    default: false
-    help: "Get/Set sensor history store-and-forward (true/false)."
-
-  - name: history_sensors
-    proto_group: application
-    proto_id: 50
-    type: uint32
-    default: 0
-    help: "Get/Set history sensor selection bitmask (0 = all capability-available)."
-
-  - name: alarm_limit
-    proto_group: application
-    proto_id: 51
-    type: int
-    default: 0
-    min: 0
-    max: 3600
-    help: "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled)."
-
-  - name: alarm_notif_time
-    proto_group: application
-    proto_id: 52
-    type: int
-    default: 10
-    min: 1
-    max: 60
-    help: "Get/Set alarm red-LED hold time in seconds (both-mode and pulse sources)."
 
   - name: pir_notify_act
     proto_group: application

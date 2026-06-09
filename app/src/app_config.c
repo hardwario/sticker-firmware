@@ -35,6 +35,10 @@ struct app_config g_app_config;
 static const struct app_config m_app_config_defaults = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
+	.history_enable = false,
+	.history_sensors = 0,
+	.alarm_limit = 0,
+	.alarm_notif_time = 10,
 	.lrw_sub_band = 2,
 	.temperature_alarm_lo = 15.0f,
 	.temperature_alarm_hi = 25.0f,
@@ -51,10 +55,6 @@ static const struct app_config m_app_config_defaults = {
 	.t2_alarm_lo = 15.0f,
 	.t2_alarm_hi = 25.0f,
 	.t2_alarm_hst = 0.5f,
-	.history_enable = false,
-	.history_sensors = 0,
-	.alarm_limit = 0,
-	.alarm_notif_time = 10,
 	.pir_notify_act = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
@@ -62,6 +62,10 @@ static const struct app_config m_app_config_defaults = {
 static struct app_config m_app_config = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
+	.history_enable = false,
+	.history_sensors = 0,
+	.alarm_limit = 0,
+	.alarm_notif_time = 10,
 	.lrw_sub_band = 2,
 	.temperature_alarm_lo = 15.0f,
 	.temperature_alarm_hi = 25.0f,
@@ -78,10 +82,6 @@ static struct app_config m_app_config = {
 	.t2_alarm_lo = 15.0f,
 	.t2_alarm_hi = 25.0f,
 	.t2_alarm_hst = 0.5f,
-	.history_enable = false,
-	.history_sensors = 0,
-	.alarm_limit = 0,
-	.alarm_notif_time = 10,
 	.pir_notify_act = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
@@ -121,6 +121,13 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.interval_sample));
 	SETTINGS_SET("interval-report", &m_app_config.interval_report,
 		     sizeof(m_app_config.interval_report));
+	SETTINGS_SET("history-enable", &m_app_config.history_enable,
+		     sizeof(m_app_config.history_enable));
+	SETTINGS_SET("history-sensors", &m_app_config.history_sensors,
+		     sizeof(m_app_config.history_sensors));
+	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
+	SETTINGS_SET("alarm-notif-time", &m_app_config.alarm_notif_time,
+		     sizeof(m_app_config.alarm_notif_time));
 	SETTINGS_SET("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
 	SETTINGS_SET("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
 	SETTINGS_SET("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
@@ -214,13 +221,6 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_1w_thermometer));
 	SETTINGS_SET("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
 		     sizeof(m_app_config.cap_1w_machine_probe));
-	SETTINGS_SET("history-enable", &m_app_config.history_enable,
-		     sizeof(m_app_config.history_enable));
-	SETTINGS_SET("history-sensors", &m_app_config.history_sensors,
-		     sizeof(m_app_config.history_sensors));
-	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
-	SETTINGS_SET("alarm-notif-time", &m_app_config.alarm_notif_time,
-		     sizeof(m_app_config.alarm_notif_time));
 	SETTINGS_SET("pir-notify-act", &m_app_config.pir_notify_act,
 		     sizeof(m_app_config.pir_notify_act));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
@@ -264,6 +264,13 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.interval_sample));
 	EXPORT_FUNC("interval-report", &m_app_config.interval_report,
 		    sizeof(m_app_config.interval_report));
+	EXPORT_FUNC("history-enable", &m_app_config.history_enable,
+		    sizeof(m_app_config.history_enable));
+	EXPORT_FUNC("history-sensors", &m_app_config.history_sensors,
+		    sizeof(m_app_config.history_sensors));
+	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
+	EXPORT_FUNC("alarm-notif-time", &m_app_config.alarm_notif_time,
+		    sizeof(m_app_config.alarm_notif_time));
 	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
 	EXPORT_FUNC("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
 	EXPORT_FUNC("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
@@ -357,13 +364,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_1w_thermometer));
 	EXPORT_FUNC("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
 		    sizeof(m_app_config.cap_1w_machine_probe));
-	EXPORT_FUNC("history-enable", &m_app_config.history_enable,
-		    sizeof(m_app_config.history_enable));
-	EXPORT_FUNC("history-sensors", &m_app_config.history_sensors,
-		    sizeof(m_app_config.history_sensors));
-	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
-	EXPORT_FUNC("alarm-notif-time", &m_app_config.alarm_notif_time,
-		    sizeof(m_app_config.alarm_notif_time));
 	EXPORT_FUNC("pir-notify-act", &m_app_config.pir_notify_act,
 		    sizeof(m_app_config.pir_notify_act));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
@@ -515,6 +515,27 @@ static void print_interval_sample(const struct shell *shell)
 static void print_interval_report(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " interval-report %d", m_app_config.interval_report);
+}
+
+static void print_history_enable(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " history-enable %s",
+		    m_app_config.history_enable ? "true" : "false");
+}
+
+static void print_history_sensors(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " history-sensors %u", m_app_config.history_sensors);
+}
+
+static void print_alarm_limit(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-limit %d", m_app_config.alarm_limit);
+}
+
+static void print_alarm_notif_time(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-notif-time %d", m_app_config.alarm_notif_time);
 }
 
 static void print_lrw_region(const struct shell *shell)
@@ -937,27 +958,6 @@ static void print_cap_1w_machine_probe(const struct shell *shell)
 		    m_app_config.cap_1w_machine_probe ? "true" : "false");
 }
 
-static void print_history_enable(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " history-enable %s",
-		    m_app_config.history_enable ? "true" : "false");
-}
-
-static void print_history_sensors(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " history-sensors %u", m_app_config.history_sensors);
-}
-
-static void print_alarm_limit(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-limit %d", m_app_config.alarm_limit);
-}
-
-static void print_alarm_notif_time(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-notif-time %d", m_app_config.alarm_notif_time);
-}
-
 static void print_pir_notify_act(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " pir-notify-act %s",
@@ -995,6 +995,10 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_calibration(shell);
 	print_interval_sample(shell);
 	print_interval_report(shell);
+	print_history_enable(shell);
+	print_history_sensors(shell);
+	print_alarm_limit(shell);
+	print_alarm_notif_time(shell);
 	print_lrw_region(shell);
 	print_lrw_sub_band(shell);
 	print_lrw_network(shell);
@@ -1051,10 +1055,6 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_pir_detector(shell);
 	print_cap_1w_thermometer(shell);
 	print_cap_1w_machine_probe(shell);
-	print_history_enable(shell);
-	print_history_sensors(shell);
-	print_alarm_limit(shell);
-	print_alarm_notif_time(shell);
 	print_pir_notify_act(shell);
 	print_accel_motion_sensitivity(shell);
 
@@ -1204,6 +1204,57 @@ static int cmd_interval_report(const struct shell *shell, size_t argc, char **ar
 {
 	return cmd_int(shell, argc, argv, &m_app_config.interval_report, 60, 86400,
 		       print_interval_report);
+}
+
+static int cmd_history_enable(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.history_enable, print_history_enable);
+}
+
+static int cmd_history_sensors(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_history_sensors(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.history_sensors = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.alarm_limit, 0, 3600, print_alarm_limit);
+}
+
+static int cmd_alarm_notif_time(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.alarm_notif_time, 1, 60,
+		       print_alarm_notif_time);
 }
 
 static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
@@ -1774,57 +1825,6 @@ static int cmd_cap_1w_machine_probe(const struct shell *shell, size_t argc, char
 			print_cap_1w_machine_probe);
 }
 
-static int cmd_history_enable(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.history_enable, print_history_enable);
-}
-
-static int cmd_history_sensors(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_history_sensors(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (argv[1][0] == '-') {
-		shell_error(shell, "%s", m_msg_invalid_range);
-		return -EINVAL;
-	}
-
-	char *endptr;
-	unsigned long value = strtoul(argv[1], &endptr, 10);
-
-	if (*endptr != '\0' || endptr == argv[1]) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	if (value < 0 || value > UINT32_MAX) {
-		shell_error(shell, "%s", m_msg_invalid_range);
-		return -EINVAL;
-	}
-
-	m_app_config.history_sensors = (uint32_t)value;
-	shell_print(shell, "%s", m_msg_cmd_success);
-	return 0;
-}
-
-static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_int(shell, argc, argv, &m_app_config.alarm_limit, 0, 3600, print_alarm_limit);
-}
-
-static int cmd_alarm_notif_time(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_int(shell, argc, argv, &m_app_config.alarm_notif_time, 1, 60,
-		       print_alarm_notif_time);
-}
-
 static int cmd_pir_notify_act(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.pir_notify_act, print_pir_notify_act);
@@ -1910,6 +1910,22 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(interval-report, NULL,
 	              "Get/Set report interval (range 60 to 86400 seconds).",
 	              cmd_interval_report, 1, 1),
+
+	SHELL_CMD_ARG(history-enable, NULL,
+	              "Get/Set sensor history store-and-forward (true/false).",
+	              cmd_history_enable, 1, 1),
+
+	SHELL_CMD_ARG(history-sensors, NULL,
+	              "Get/Set history sensor selection bitmask (0 = all capability-available).",
+	              cmd_history_sensors, 1, 1),
+
+	SHELL_CMD_ARG(alarm-limit, NULL,
+	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
+	              cmd_alarm_limit, 1, 1),
+
+	SHELL_CMD_ARG(alarm-notif-time, NULL,
+	              "Get/Set alarm red-LED hold time in seconds (both-mode and pulse sources).",
+	              cmd_alarm_notif_time, 1, 1),
 
 	SHELL_CMD_ARG(lrw-region, NULL,
 	              "Get/Set LoRaWAN region (eu868/us915/au915).",
@@ -2134,22 +2150,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(cap-1w-machine-probe, NULL,
 	              "Get/Set 1-wire machine probe capability (true/false).",
 	              cmd_cap_1w_machine_probe, 1, 1),
-
-	SHELL_CMD_ARG(history-enable, NULL,
-	              "Get/Set sensor history store-and-forward (true/false).",
-	              cmd_history_enable, 1, 1),
-
-	SHELL_CMD_ARG(history-sensors, NULL,
-	              "Get/Set history sensor selection bitmask (0 = all capability-available).",
-	              cmd_history_sensors, 1, 1),
-
-	SHELL_CMD_ARG(alarm-limit, NULL,
-	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
-	              cmd_alarm_limit, 1, 1),
-
-	SHELL_CMD_ARG(alarm-notif-time, NULL,
-	              "Get/Set alarm red-LED hold time in seconds (both-mode and pulse sources).",
-	              cmd_alarm_notif_time, 1, 1),
 
 	SHELL_CMD_ARG(pir-notify-act, NULL,
 	              "Get/Set PIR motion alarm notify on activation (true/false).",
