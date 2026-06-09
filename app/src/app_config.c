@@ -215,12 +215,10 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.input_b_notify_act));
 	SETTINGS_SET("input-b-notify-deact", &m_app_config.input_b_notify_deact,
 		     sizeof(m_app_config.input_b_notify_deact));
-	SETTINGS_SET("corr-temperature", &m_app_config.corr_temperature,
-		     sizeof(m_app_config.corr_temperature));
-	SETTINGS_SET("corr-t1-temperature", &m_app_config.corr_t1_temperature,
-		     sizeof(m_app_config.corr_t1_temperature));
-	SETTINGS_SET("corr-t2-temperature", &m_app_config.corr_t2_temperature,
-		     sizeof(m_app_config.corr_t2_temperature));
+	SETTINGS_SET("temperature-corr", &m_app_config.temperature_corr,
+		     sizeof(m_app_config.temperature_corr));
+	SETTINGS_SET("t1-corr", &m_app_config.t1_corr, sizeof(m_app_config.t1_corr));
+	SETTINGS_SET("t2-corr", &m_app_config.t2_corr, sizeof(m_app_config.t2_corr));
 	SETTINGS_SET("pir-notify-act", &m_app_config.pir_notify_act,
 		     sizeof(m_app_config.pir_notify_act));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
@@ -358,12 +356,10 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.input_b_notify_act));
 	EXPORT_FUNC("input-b-notify-deact", &m_app_config.input_b_notify_deact,
 		    sizeof(m_app_config.input_b_notify_deact));
-	EXPORT_FUNC("corr-temperature", &m_app_config.corr_temperature,
-		    sizeof(m_app_config.corr_temperature));
-	EXPORT_FUNC("corr-t1-temperature", &m_app_config.corr_t1_temperature,
-		    sizeof(m_app_config.corr_t1_temperature));
-	EXPORT_FUNC("corr-t2-temperature", &m_app_config.corr_t2_temperature,
-		    sizeof(m_app_config.corr_t2_temperature));
+	EXPORT_FUNC("temperature-corr", &m_app_config.temperature_corr,
+		    sizeof(m_app_config.temperature_corr));
+	EXPORT_FUNC("t1-corr", &m_app_config.t1_corr, sizeof(m_app_config.t1_corr));
+	EXPORT_FUNC("t2-corr", &m_app_config.t2_corr, sizeof(m_app_config.t2_corr));
 	EXPORT_FUNC("pir-notify-act", &m_app_config.pir_notify_act,
 		    sizeof(m_app_config.pir_notify_act));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
@@ -940,22 +936,20 @@ static void print_input_b_notify_deact(const struct shell *shell)
 		    m_app_config.input_b_notify_deact ? "true" : "false");
 }
 
-static void print_corr_temperature(const struct shell *shell)
+static void print_temperature_corr(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " corr-temperature %.2f",
-		    (double)m_app_config.corr_temperature);
+	shell_print(shell, SETTINGS_PFX " temperature-corr %.2f",
+		    (double)m_app_config.temperature_corr);
 }
 
-static void print_corr_t1_temperature(const struct shell *shell)
+static void print_t1_corr(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " corr-t1-temperature %.2f",
-		    (double)m_app_config.corr_t1_temperature);
+	shell_print(shell, SETTINGS_PFX " t1-corr %.2f", (double)m_app_config.t1_corr);
 }
 
-static void print_corr_t2_temperature(const struct shell *shell)
+static void print_t2_corr(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " corr-t2-temperature %.2f",
-		    (double)m_app_config.corr_t2_temperature);
+	shell_print(shell, SETTINGS_PFX " t2-corr %.2f", (double)m_app_config.t2_corr);
 }
 
 static void print_pir_notify_act(const struct shell *shell)
@@ -1052,9 +1046,9 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_input_b_counter(shell);
 	print_input_b_notify_act(shell);
 	print_input_b_notify_deact(shell);
-	print_corr_temperature(shell);
-	print_corr_t1_temperature(shell);
-	print_corr_t2_temperature(shell);
+	print_temperature_corr(shell);
+	print_t1_corr(shell);
+	print_t2_corr(shell);
 	print_pir_notify_act(shell);
 	print_accel_motion_sensitivity(shell);
 
@@ -1807,22 +1801,20 @@ static int cmd_input_b_notify_deact(const struct shell *shell, size_t argc, char
 			print_input_b_notify_deact);
 }
 
-static int cmd_corr_temperature(const struct shell *shell, size_t argc, char **argv)
+static int cmd_temperature_corr(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.corr_temperature, -5.0f, 5.0f,
-			 print_corr_temperature);
+	return cmd_float(shell, argc, argv, &m_app_config.temperature_corr, -5.0f, 5.0f,
+			 print_temperature_corr);
 }
 
-static int cmd_corr_t1_temperature(const struct shell *shell, size_t argc, char **argv)
+static int cmd_t1_corr(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.corr_t1_temperature, -5.0f, 5.0f,
-			 print_corr_t1_temperature);
+	return cmd_float(shell, argc, argv, &m_app_config.t1_corr, -5.0f, 5.0f, print_t1_corr);
 }
 
-static int cmd_corr_t2_temperature(const struct shell *shell, size_t argc, char **argv)
+static int cmd_t2_corr(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.corr_t2_temperature, -5.0f, 5.0f,
-			 print_corr_t2_temperature);
+	return cmd_float(shell, argc, argv, &m_app_config.t2_corr, -5.0f, 5.0f, print_t2_corr);
 }
 
 static int cmd_pir_notify_act(const struct shell *shell, size_t argc, char **argv)
@@ -2139,17 +2131,17 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set input B notify on deactivation (true/false).",
 	              cmd_input_b_notify_deact, 1, 1),
 
-	SHELL_CMD_ARG(corr-temperature, NULL,
+	SHELL_CMD_ARG(temperature-corr, NULL,
 	              "Get/Set temperature correction (range -5.0 to +5.0 deg. C).",
-	              cmd_corr_temperature, 1, 1),
+	              cmd_temperature_corr, 1, 1),
 
-	SHELL_CMD_ARG(corr-t1-temperature, NULL,
+	SHELL_CMD_ARG(t1-corr, NULL,
 	              "Get/Set T1 temperature correction (range -5.0 to +5.0 deg. C).",
-	              cmd_corr_t1_temperature, 1, 1),
+	              cmd_t1_corr, 1, 1),
 
-	SHELL_CMD_ARG(corr-t2-temperature, NULL,
+	SHELL_CMD_ARG(t2-corr, NULL,
 	              "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C).",
-	              cmd_corr_t2_temperature, 1, 1),
+	              cmd_t2_corr, 1, 1),
 
 	SHELL_CMD_ARG(pir-notify-act, NULL,
 	              "Get/Set PIR motion alarm notify on activation (true/false).",

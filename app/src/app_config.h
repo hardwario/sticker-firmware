@@ -107,9 +107,9 @@ struct app_config {
 	bool input_b_counter;
 	bool input_b_notify_act;
 	bool input_b_notify_deact;
-	float corr_temperature;
-	float corr_t1_temperature;
-	float corr_t2_temperature;
+	float temperature_corr;
+	float t1_corr;
+	float t2_corr;
 	bool pir_notify_act;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
 };

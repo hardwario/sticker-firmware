@@ -437,7 +437,7 @@ void app_sensor_sample(void)
 	g_app_sensor_data.orientation = orientation;
 	g_app_sensor_data.voltage = voltage;
 
-	g_app_sensor_data.temperature = temperature + g_app_config.corr_temperature;
+	g_app_sensor_data.temperature = temperature + g_app_config.temperature_corr;
 	g_app_sensor_data.humidity = humidity;
 	g_app_sensor_data.illuminance = illuminance;
 	g_app_sensor_data.altitude = altitude;
@@ -453,8 +453,8 @@ void app_sensor_sample(void)
 	g_app_sensor_data.input_a_is_active = input_data.input_a_is_active;
 	g_app_sensor_data.input_b_is_active = input_data.input_b_is_active;
 
-	g_app_sensor_data.t1_temperature = t1_temperature + g_app_config.corr_t1_temperature;
-	g_app_sensor_data.t2_temperature = t2_temperature + g_app_config.corr_t2_temperature;
+	g_app_sensor_data.t1_temperature = t1_temperature + g_app_config.t1_corr;
+	g_app_sensor_data.t2_temperature = t2_temperature + g_app_config.t2_corr;
 
 	g_app_sensor_data.mp1_temperature = mp1_temperature;
 	g_app_sensor_data.mp2_temperature = mp2_temperature;

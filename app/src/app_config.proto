@@ -84,9 +84,9 @@ message AppConfigMessage {
         optional bool input_b_counter = 34;
         optional bool input_b_notify_act = 35;
         optional bool input_b_notify_deact = 36;
-        optional float corr_temperature = 37;
-        optional float corr_t1_temperature = 38;
-        optional float corr_t2_temperature = 39;
+        optional float temperature_corr = 37;
+        optional float t1_corr = 38;
+        optional float t2_corr = 39;
         optional bool cap_hall_left = 40;
         optional bool cap_hall_right = 41;
         optional bool cap_input_a = 42;

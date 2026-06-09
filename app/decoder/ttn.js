@@ -74,7 +74,7 @@ var _APP_NAMES = {
   28: "hall_right_counter", 29: "hall_right_notify_act", 30: "hall_right_notify_deact",
   31: "input_a_counter", 32: "input_a_notify_act", 33: "input_a_notify_deact",
   34: "input_b_counter", 35: "input_b_notify_act", 36: "input_b_notify_deact",
-  37: "corr_temperature", 38: "corr_t1_temperature", 39: "corr_t2_temperature",
+  37: "temperature_corr", 38: "t1_corr", 39: "t2_corr",
   40: "cap_hall_left", 41: "cap_hall_right", 42: "cap_input_a", 43: "cap_input_b",
   44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector", 47: "cap_1w_thermometer", 48: "cap_1w_machine_probe",
   49: "history_enable", 50: "history_sensors", 51: "alarm_limit", 52: "alarm_notif_time",

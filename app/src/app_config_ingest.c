@@ -206,9 +206,9 @@ int app_config_apply_application(const AppConfigMessage_Application *src, uint32
 	APPLY_BOOL(input_b_notify_act);
 	APPLY_BOOL(input_b_notify_deact);
 
-	APPLY_FLOAT(corr_temperature, -5.0f, 5.0f, 37);
-	APPLY_FLOAT(corr_t1_temperature, -5.0f, 5.0f, 38);
-	APPLY_FLOAT(corr_t2_temperature, -5.0f, 5.0f, 39);
+	APPLY_FLOAT(temperature_corr, -5.0f, 5.0f, 37);
+	APPLY_FLOAT(t1_corr, -5.0f, 5.0f, 38);
+	APPLY_FLOAT(t2_corr, -5.0f, 5.0f, 39);
 
 	APPLY_BOOL(cap_hall_left);
 	APPLY_BOOL(cap_hall_right);
@@ -374,9 +374,9 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	FILL_BOOL(34, input_b_counter);
 	FILL_BOOL(35, input_b_notify_act);
 	FILL_BOOL(36, input_b_notify_deact);
-	FILL_NUM(37, corr_temperature);
-	FILL_NUM(38, corr_t1_temperature);
-	FILL_NUM(39, corr_t2_temperature);
+	FILL_NUM(37, temperature_corr);
+	FILL_NUM(38, t1_corr);
+	FILL_NUM(39, t2_corr);
 	FILL_BOOL(40, cap_hall_left);
 	FILL_BOOL(41, cap_hall_right);
 	FILL_BOOL(42, cap_input_a);

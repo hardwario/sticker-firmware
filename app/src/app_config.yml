@@ -514,7 +514,7 @@ parameters:
     type: bool
     help: "Get/Set input B notify on deactivation (true/false)."
 
-  - name: corr_temperature
+  - name: temperature_corr
     proto_group: application
     proto_id: 37
     type: float
@@ -522,7 +522,7 @@ parameters:
     max: 5.0
     help: "Get/Set temperature correction (range -5.0 to +5.0 deg. C)."
 
-  - name: corr_t1_temperature
+  - name: t1_corr
     proto_group: application
     proto_id: 38
     type: float
@@ -530,7 +530,7 @@ parameters:
     max: 5.0
     help: "Get/Set T1 temperature correction (range -5.0 to +5.0 deg. C)."
 
-  - name: corr_t2_temperature
+  - name: t2_corr
     proto_group: application
     proto_id: 39
     type: float
