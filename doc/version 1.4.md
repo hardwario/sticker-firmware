@@ -16,6 +16,7 @@ This document lists **only the changes introduced in firmware v1.4.0** relative 
 | History | **New** sensor history store-and-forward with on-request replay |
 | Shell | **New** `clock` and `history` commands; test command renamed `tester` → `ats` |
 | Payload formatter | `ttn.js` extended to decode fPorts 2/3/85 and to **encode downlink commands** |
+| Config keys | Threshold-alarm and motion keys renamed to a **sensor-centric** scheme (see §9) |
 
 ---
 
@@ -261,6 +262,25 @@ The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.
 | `config history-enable` / `history-sensors` / `alarm-limit` / `alarm-notif-time` / `pir-notify-act` | **New** parameters (see §6, §7) |
 
 Existing commands (`config`, `settings save`/`reset`, `join`, `send`) are unchanged.
+
+---
+
+## 9. Configuration key naming (sensor-centric)
+
+v1.4.0 organizes configuration keys **by sensor/source** rather than under a global `alarm-` tree. Threshold-alarm keys now use an `<source>-alarm-<param>` form (leaving room for future non-alarm params on the same sensor), and the accelerometer's motion sensitivity moves under the `accel-` sensor. A global `alarm-` prefix is reserved for cross-cutting params only.
+
+| Old key (v1.3.x) | New key (v1.4.0) |
+|---|---|
+| `alarm-temperature-{enabled,lo,hi,hst}` | `temperature-alarm-{enabled,lo,hi,hst}` |
+| `alarm-humidity-*` | `humidity-alarm-*` |
+| `alarm-pressure-*` | `pressure-alarm-*` |
+| `alarm-t1-temperature-*` | `t1-alarm-*` |
+| `alarm-t2-temperature-*` | `t2-alarm-*` |
+| `motion-sensitivity` | `accel-motion-sensitivity` |
+
+**Unchanged:** discrete sources (`hall-*`, `input-*`, `pir-notify-act`) and global params (`alarm-limit`, `alarm-notif-time`). `accel-motion-sensitivity` defaults to `off` (no accelerometer detection).
+
+The protobuf field numbers are **unchanged**, so the over-the-air wire format stays compatible; only the user-facing keys and code identifiers change. Devices must be reprovisioned with the new shell keys (the NVS settings keys moved).
 
 ---
 
