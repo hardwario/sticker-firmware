@@ -344,7 +344,10 @@ function _pbZigzag(n) {
 
 // fPort 2: flat protobuf Telemetry (periodic / event-triggered report). Keys
 // match the legacy fPort-1 bitmap decoder so dashboards stay stable. Unknown
-// fields are skipped (forward-compatible with newer firmware).
+// fields are skipped (forward-compatible with newer firmware). Per #80 the
+// firmware always sends the system group and every enabled-sensor group whole,
+// so boolean fields (boot, *_is_active, *_notify_*, tilt) are surfaced as
+// explicit true/false rather than set-only-when-true.
 function decodeTelemetry(bytes) {
   var d = {};
   var pos = 0;

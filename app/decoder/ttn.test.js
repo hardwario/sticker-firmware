@@ -92,18 +92,43 @@ test("decodeUplink decodes an Ack response (fPort 85)", () => {
 });
 
 // --- Uplink: protobuf telemetry (fPort 2) ---------------------------------
-// TODO(#51): assert an exact HW telemetry frame once captured. Until then,
-// confirm the fPort-2 path is wired and returns an object without throwing.
-test("decodeUplink routes fPort 2 to the telemetry decoder", () => {
-  const got = codec.decodeUplink({ bytes: hex("0864"), fPort: 2 });
-  assert.equal(typeof got.data, "object");
+// Real HW capture (#78/#80 verification, device sticker-2162165131, 2026-06-09):
+// a non-boot report with hall-left + hall-right capabilities enabled but no
+// counts. Proves the #80 fix on the wire: the system group is always present
+// (boot=false encoded explicitly, not omitted) and an enabled sensor group is
+// sent whole even at count=0. Frame bytes:
+//   08 a8 01  voltage=168 -> 3.36 V
+//   10 00     system_flags=0 -> boot=false (present, not dropped)
+//   18 fa 24  temperature (sint zigzag) -> 23.65 degC
+//   20 6c     humidity=108 -> 54 %RH
+//   40 02     orientation=2
+//   90 01 00  hall_left_count=0          98 01 04  hall_left_flags=ACTIVE
+//   a0 01 00  hall_right_count=0         a8 01 04  hall_right_flags=ACTIVE
+test("decodeUplink fPort 2: real HW frame, system + enabled groups always present", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("08a801100018fa24206c4002900100980104a00100a80104"),
+    fPort: 2,
+  }).data;
+  assert.equal(got.voltage, 3.36);
+  assert.equal(got.boot, false); // system group sent even when boot=false
+  assert.equal(got.temperature, 23.65);
+  assert.equal(got.humidity, 54);
+  assert.equal(got.orientation, 2);
+  // hall groups present in full although counts are 0 (capabilities enabled)
+  assert.equal(got.hall_left_count, 0);
+  assert.equal(got.hall_left_is_active, true);
+  assert.equal(got.hall_left_notify_act, false);
+  assert.equal(got.hall_left_notify_deact, false);
+  assert.equal(got.hall_right_count, 0);
+  assert.equal(got.hall_right_is_active, true);
+  assert.equal(got.hall_right_notify_act, false);
+  assert.equal(got.hall_right_notify_deact, false);
 });
 
-// #78: the system group and any enabled-sensor group are sent every report,
-// whole, even when the values are 0/false. The decoder must surface those as
-// explicit false/0 (not omit them). Frame: voltage=100 (field 1), system_flags=0
-// (field 2 -> boot=false), hall_left_count=0 (field 18), hall_left_flags=0
-// (field 19 -> all hall-left booleans false).
+// #78: an enabled-sensor group is sent whole even when ALL its values are 0 —
+// the decoder must surface those as explicit false/0, not omit them. Synthetic
+// frame: voltage=100 (field 1), system_flags=0 (field 2 -> boot=false),
+// hall_left_count=0 (field 18), hall_left_flags=0 (field 19 -> all false).
 test("decodeUplink fPort 2: zero-valued groups decode to explicit false/0", () => {
   const got = codec.decodeUplink({ bytes: hex("08641000900100980100"), fPort: 2 }).data;
   assert.equal(got.voltage, 2);
