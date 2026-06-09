@@ -74,6 +74,7 @@ static const char *const m_source_names[APP_ALARM_SOURCE_COUNT] = {
 	[APP_ALARM_SOURCE_PRESSURE] = "pressure",
 	[APP_ALARM_SOURCE_T1_TEMPERATURE] = "t1-temperature",
 	[APP_ALARM_SOURCE_T2_TEMPERATURE] = "t2-temperature",
+	[APP_ALARM_SOURCE_ACCEL_MOTION] = "accel-motion",
 };
 
 const char *app_alarm_source_name(enum app_alarm_source source)
@@ -255,6 +256,12 @@ static int read_notify_bools(enum app_alarm_source source, bool *act, bool *deac
 		*act = g_app_config.pir_notify_act && g_app_config.cap_pir_detector;
 		*deact = false;
 		return 0;
+	case APP_ALARM_SOURCE_ACCEL_MOTION:
+		/* Accelerometer any-motion is an activation-only pulse, gated by the
+		 * motion_sensitivity config (OFF = disabled). */
+		*act = g_app_config.motion_sensitivity != APP_CONFIG_MOTION_SENSITIVITY_OFF;
+		*deact = false;
+		return 0;
 	default:
 		return -EINVAL;
 	}
@@ -396,10 +403,13 @@ void app_alarm_event(enum app_alarm_source source, bool active)
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 
-	/* Both bools set, or a pulse source (PIR is activation-only): the latch has
-	 * no clearing edge, so hold it for alarm_notif_time and let app_alarm_poll()
-	 * auto-clear it. Otherwise the latch tracks the configured edge. */
-	if ((notify_act && notify_deact) || (source == APP_ALARM_SOURCE_PIR_MOTION && notify_act)) {
+	/* Both bools set, or a pulse source (PIR / accelerometer motion are
+	 * activation-only): the latch has no clearing edge, so hold it for
+	 * alarm_notif_time and let app_alarm_poll() auto-clear it. Otherwise the
+	 * latch tracks the configured edge. */
+	if ((notify_act && notify_deact) ||
+	    ((source == APP_ALARM_SOURCE_PIR_MOTION || source == APP_ALARM_SOURCE_ACCEL_MOTION) &&
+	     notify_act)) {
 		m_alarm_active[source] = true;
 		m_both_bool_expiry_ms[source] = k_uptime_get() + notif_hold_ms();
 	} else if (notify_act) {

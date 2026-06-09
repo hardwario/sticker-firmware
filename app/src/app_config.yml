@@ -35,6 +35,20 @@ enums:
       value: 1
       shell: abp
 
+  motion_sensitivity:
+    - name: "OFF"
+      value: 0
+      shell: "off"
+    - name: LOW
+      value: 1
+      shell: low
+    - name: MEDIUM
+      value: 2
+      shell: medium
+    - name: HIGH
+      value: 3
+      shell: high
+
 proto:
   message: AppConfigMessage
   extra_fields:
@@ -530,3 +544,11 @@ parameters:
     type: bool
     default: false
     help: "Get/Set PIR motion alarm notify on activation (true/false)."
+
+  - name: motion_sensitivity
+    proto_group: application
+    proto_id: 54
+    type: enum
+    enum: motion_sensitivity
+    default: "off"
+    help: "Get/Set accelerometer motion detection sensitivity (off/low/medium/high)."

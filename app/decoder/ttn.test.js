@@ -38,6 +38,17 @@ const COMMANDS = [
     },
   },
   {
+    // motion_sensitivity is enum-valued (field 54): encode accepts the
+    // symbolic name, decode renders it back ("high" = 3).
+    name: "set_param (application motion_sensitivity enum)",
+    hex: "080312051203b00303",
+    data: {
+      seq: 3,
+      command: "set_param",
+      set_param: { application: { motion_sensitivity: "high" } },
+    },
+  },
+  {
     name: "reset_counters (hall_left + input_a)",
     hex: "0807520408011801",
     data: {
@@ -97,6 +108,12 @@ test("decodeUplink decodes an Ack response (fPort 85)", () => {
 test("decodeUplink routes fPort 2 to the telemetry decoder", () => {
   const got = codec.decodeUplink({ bytes: hex("0864"), fPort: 2 });
   assert.equal(typeof got.data, "object");
+});
+
+test("fPort-2 telemetry decodes accel_motion_count (field 26)", () => {
+  // protobuf: tag (26 << 3 | varint) = 0xd0 0x01, value 3
+  const got = codec.decodeUplink({ bytes: hex("d00103"), fPort: 2 });
+  assert.equal(got.data.accel_motion_count, 3);
 });
 
 // --- Uplink: history replay frames (fPort 85, device-driven multi-frame) ---
@@ -232,6 +249,22 @@ test("fPort-3 batch: negative threshold value round-trips via sint zigzag", () =
   assert.equal(d.alarms[0].source, "temperature");
   assert.equal(d.alarms[0].side, "lo");
   assert.equal(d.alarms[0].value, -12.34);
+});
+
+test("fPort-3 batch: accel-motion activate (protobuf AlarmReport)", () => {
+  // AlarmReport: base_time=1780652851, total=1, one AlarmEvent{source=10
+  // (accel-motion), edge/side=0 → activate/none, no value (discrete source)}.
+  const f = Array.from(Buffer.from("08b3b68ad10610011a02080a", "hex"));
+  const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
+  assert.equal(d.total, 1);
+  assert.equal(d.base_time, 1780652851); // 2026-06-05T09:47:31Z (RTC synced)
+  assert.equal(d.truncated, false);
+  assert.equal(d.alarms.length, 1);
+  assert.equal(d.alarms[0].source, "accel-motion");
+  assert.equal(d.alarms[0].event, "activate");
+  assert.equal(d.alarms[0].side, "none");
+  assert.equal(d.alarms[0].value, null); // discrete source → no value
+  assert.equal(d.alarms[0].time, 1780652851);
 });
 
 // --- Negative: a corrupted frame must change the result (tests are sensitive) ---

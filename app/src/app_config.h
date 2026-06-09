@@ -33,6 +33,13 @@ enum app_config_lrw_activation {
 	APP_CONFIG_LRW_ACTIVATION_ABP = 1,
 };
 
+enum app_config_motion_sensitivity {
+	APP_CONFIG_MOTION_SENSITIVITY_OFF = 0,
+	APP_CONFIG_MOTION_SENSITIVITY_LOW = 1,
+	APP_CONFIG_MOTION_SENSITIVITY_MEDIUM = 2,
+	APP_CONFIG_MOTION_SENSITIVITY_HIGH = 3,
+};
+
 #define APP_CONFIG_VERSION 1
 
 struct app_config {
@@ -104,6 +111,7 @@ struct app_config {
 	int alarm_limit;
 	int alarm_notif_time;
 	bool pir_notify_act;
+	enum app_config_motion_sensitivity motion_sensitivity;
 };
 
 extern struct app_config g_app_config;

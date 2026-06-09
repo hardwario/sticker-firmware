@@ -88,6 +88,7 @@ static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, 
 		break;
 	case G_ACCEL:
 		SEL(orientation);
+		SEL(accel_motion_count);
 		break;
 	case G_PIR:
 		SEL(motion_count);
@@ -206,6 +207,10 @@ static void fill_snapshot(void)
 	if (d.orientation != INT_MAX) {
 		t.has_orientation = true;
 		t.orientation = (uint32_t)(d.orientation & 0xf);
+	}
+	if (d.accel_motion_count > 0) {
+		t.has_accel_motion_count = true;
+		t.accel_motion_count = d.accel_motion_count;
 	}
 
 	/* pir */

@@ -84,6 +84,62 @@ static void pyq1648_event_handler(void *user_data)
 	app_alarm_event(APP_ALARM_SOURCE_PIR_MOTION, true);
 }
 
+#if defined(CONFIG_LIS2DH)
+/* Event-classification thresholds on total acceleration magnitude (m/s^2).
+ * Free-fall ≈ weightless: in the air all axes drop toward 0 g, so |a| collapses
+ * well below 1 g (9.81). An impact is a sharp shock far above 1 g. Anything in
+ * between is ordinary motion. The any-motion (slope) interrupt fires on the
+ * 1 g→0 g edge at the START of a fall and on an impact's shock; reading |a|
+ * right after the trigger then tells the three cases apart. */
+#define ACCEL_FREEFALL_MS2 4.0f  /* |a| below this ≈ free-fall (~0.4 g) */
+#define ACCEL_IMPACT_MS2   25.0f /* |a| above this = impact/shock (~2.5 g) */
+
+/* Classify the event by total acceleration. Runs on the system workqueue, NOT
+ * in the trigger handler: app_accel_read() does a sensor_sample_fetch() on the
+ * same LIS2DH, which must not be called re-entrantly from inside that sensor's
+ * own trigger callback (it would deadlock the driver). A few ms of latency vs
+ * the interrupt is acceptable for logging the kind. */
+static struct k_work m_accel_classify_work;
+
+static void accel_classify_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	float ax, ay, az;
+	if (app_accel_read(&ax, &ay, &az, NULL) != 0) {
+		return;
+	}
+
+	float mag = sqrtf(ax * ax + ay * ay + az * az);
+	const char *kind = "motion";
+	if (mag < ACCEL_FREEFALL_MS2) {
+		kind = "free-fall";
+	} else if (mag > ACCEL_IMPACT_MS2) {
+		kind = "impact";
+	}
+	LOG_INF("Accel event class: %s (|a|=%d.%02d m/s^2)", kind, (int)mag,
+		(int)(mag * 100) % 100);
+}
+
+/* LIS2DH any-motion interrupt (mirrors the PIR path): count the event, raise
+ * the accelerometer-motion alarm source, and kick off async classification.
+ * Must stay light — it runs in the driver's trigger context. The alarm layer
+ * handles the orange LED, the rate-limited uplink (alarm_limit) and the
+ * red-LED hold. */
+static void accel_motion_handler(void *user_data)
+{
+	ARG_UNUSED(user_data);
+	LOG_INF("Accelerometer motion detected");
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	g_app_sensor_data.accel_motion_count++;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+
+	app_alarm_event(APP_ALARM_SOURCE_ACCEL_MOTION, true);
+	k_work_submit(&m_accel_classify_work);
+}
+#endif /* defined(CONFIG_LIS2DH) */
+
 int app_sensor_init(void)
 {
 	int ret;
@@ -137,6 +193,15 @@ int app_sensor_init(void)
 			app_pyq1648_set_callback(pyq1648_event_handler, NULL);
 		}
 	}
+
+#if defined(CONFIG_LIS2DH)
+	k_work_init(&m_accel_classify_work, accel_classify_work_handler);
+	ret = app_accel_init_motion(accel_motion_handler, NULL);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_accel_init_motion", ret);
+		res = res ? res : ret;
+	}
+#endif /* defined(CONFIG_LIS2DH) */
 
 	if (g_app_config.cap_1w_thermometer || g_app_config.cap_1w_machine_probe) {
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));

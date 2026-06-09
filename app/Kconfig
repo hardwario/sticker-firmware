@@ -54,9 +54,14 @@ config APP_HISTORY_FLASH
 	help
 	  Store the sensor history store-and-forward buffer in the dedicated
 	  history_partition flash (NVS), surviving reboot and power loss.
-	  Disable (e.g. in debug builds whose large image overlaps that
-	  partition) to use a __noinit RAM ring of CONFIG_APP_HISTORY_BYTES
+	  Disable to use a __noinit RAM ring of CONFIG_APP_HISTORY_BYTES
 	  instead; data is then lost on power loss.
+
+	  Builds with this enabled must keep CONFIG_FLASH_LOAD_SIZE at the
+	  history_partition offset so the linker stops the image from growing
+	  into the runtime-written flash (see prj.conf); builds with it
+	  disabled (debug.conf) may relax the budget up to the
+	  storage_partition offset.
 
 config APP_HISTORY_BYTES
 	int "History RAM fallback ring size (bytes)"
