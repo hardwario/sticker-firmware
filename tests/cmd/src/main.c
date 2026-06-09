@@ -64,7 +64,7 @@ ZTEST(cmd, test_set_param_applies_and_acks)
 
 	reset_cfg();
 	/* seq1 set_param{ lorawan.adr=true, application{interval_report=120,
-	 *                 alarm_temperature_hi=50.0} } */
+	 *                 temperature_alarm_hi=50.0} } */
 	enum app_cmd_action a = handle("0801120d0a021801120720783d00004842", &r);
 
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action expected");
@@ -73,7 +73,7 @@ ZTEST(cmd, test_set_param_applies_and_acks)
 	/* config applied through the real ingest path */
 	zassert_true(g_app_config.lrw_adr, "adr not applied");
 	zassert_equal(g_app_config.interval_report, 120, "interval_report not applied");
-	zassert_within(g_app_config.alarm_temperature_hi, 50.0f, 0.01f, "alarm hi not applied");
+	zassert_within(g_app_config.temperature_alarm_hi, 50.0f, 0.01f, "alarm hi not applied");
 }
 
 ZTEST(cmd, test_set_param_out_of_range)
@@ -99,7 +99,7 @@ ZTEST(cmd, test_get_param_config_dump)
 	reset_cfg();
 	g_app_config.lrw_adr = true;
 	g_app_config.interval_report = 120;
-	g_app_config.alarm_temperature_hi = 50.0f;
+	g_app_config.temperature_alarm_hi = 50.0f;
 
 	/* seq2 get_param{ lorawan_field=[3 adr], application_field=[4 ireport, 7 alarm_hi] } */
 	handle("08021a070a010312020407", &r);
@@ -110,8 +110,8 @@ ZTEST(cmd, test_get_param_config_dump)
 	zassert_true(r.body.config_dump.lorawan.adr, "adr value");
 	zassert_true(r.body.config_dump.application.has_interval_report, "ireport not dumped");
 	zassert_equal(r.body.config_dump.application.interval_report, 120, "ireport value");
-	zassert_true(r.body.config_dump.application.has_alarm_temperature_hi, "alarm not dumped");
-	zassert_within(r.body.config_dump.application.alarm_temperature_hi, 50.0f, 0.01f, "alarm");
+	zassert_true(r.body.config_dump.application.has_temperature_alarm_hi, "alarm not dumped");
+	zassert_within(r.body.config_dump.application.temperature_alarm_hi, 50.0f, 0.01f, "alarm");
 }
 
 ZTEST(cmd, test_build_info)

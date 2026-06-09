@@ -228,12 +228,12 @@ def test_proto_and_decoder_agree(tmp_path):
     assert msg.seq == 1
     assert msg.set_param.lorawan.adr is True
     assert msg.set_param.application.interval_report == 120
-    assert abs(msg.set_param.application.alarm_temperature_hi - 50.0) < 1e-6
+    assert abs(msg.set_param.application.temperature_alarm_hi - 50.0) < 1e-6
 
     js = _decode_with_node(COMMAND_VECTORS["set_param"])
     assert js["seq"] == 1
     assert js["set_param"]["application"]["interval_report"] == 120
-    assert abs(js["set_param"]["application"]["alarm_temperature_hi"] - 50.0) < 1e-6
+    assert abs(js["set_param"]["application"]["temperature_alarm_hi"] - 50.0) < 1e-6
 
     # get_param field lists
     msg = pb.Command.FromString(bytes.fromhex(COMMAND_VECTORS["get_param"]))

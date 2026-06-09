@@ -65,11 +65,11 @@ var _BUILD_TYPES = ["main", "dev", "custom"];
 // proto field tag -> name for ConfigDump.Application (floats marked in _APP_FLOAT)
 var _APP_NAMES = {
   1: "calibration", 2: "interval_sample", 4: "interval_report",
-  5: "alarm_temperature_enabled", 6: "alarm_temperature_lo", 7: "alarm_temperature_hi", 8: "alarm_temperature_hst",
-  9: "alarm_humidity_enabled", 10: "alarm_humidity_lo", 11: "alarm_humidity_hi", 12: "alarm_humidity_hst",
-  13: "alarm_pressure_enabled", 14: "alarm_pressure_lo", 15: "alarm_pressure_hi", 16: "alarm_pressure_hst",
-  17: "alarm_t1_temperature_enabled", 18: "alarm_t1_temperature_lo", 19: "alarm_t1_temperature_hi", 20: "alarm_t1_temperature_hst",
-  21: "alarm_t2_temperature_enabled", 22: "alarm_t2_temperature_lo", 23: "alarm_t2_temperature_hi", 24: "alarm_t2_temperature_hst",
+  5: "temperature_alarm_enabled", 6: "temperature_alarm_lo", 7: "temperature_alarm_hi", 8: "temperature_alarm_hst",
+  9: "humidity_alarm_enabled", 10: "humidity_alarm_lo", 11: "humidity_alarm_hi", 12: "humidity_alarm_hst",
+  13: "pressure_alarm_enabled", 14: "pressure_alarm_lo", 15: "pressure_alarm_hi", 16: "pressure_alarm_hst",
+  17: "t1_alarm_enabled", 18: "t1_alarm_lo", 19: "t1_alarm_hi", 20: "t1_alarm_hst",
+  21: "t2_alarm_enabled", 22: "t2_alarm_lo", 23: "t2_alarm_hi", 24: "t2_alarm_hst",
   25: "hall_left_counter", 26: "hall_left_notify_act", 27: "hall_left_notify_deact",
   28: "hall_right_counter", 29: "hall_right_notify_act", 30: "hall_right_notify_deact",
   31: "input_a_counter", 32: "input_a_notify_act", 33: "input_a_notify_deact",
@@ -78,7 +78,7 @@ var _APP_NAMES = {
   40: "cap_hall_left", 41: "cap_hall_right", 42: "cap_input_a", 43: "cap_input_b",
   44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector", 47: "cap_1w_thermometer", 48: "cap_1w_machine_probe",
   49: "history_enable", 50: "history_sensors", 51: "alarm_limit", 52: "alarm_notif_time",
-  53: "pir_notify_act", 54: "motion_sensitivity"
+  53: "pir_notify_act", 54: "accel_motion_sensitivity"
 };
 
 // Enum-valued Application fields: decode renders the symbolic name, encode
@@ -456,7 +456,7 @@ function decodeTelemetry(bytes) {
 //   { "command": "get_param", "lorawan_field": [3], "application_field": [4, 7] }
 //   { "command": "set_param", "seq": 5,
 //     "lorawan": { "adr": true },
-//     "application": { "interval_report": 120, "alarm_temperature_hi": 50.0 } }
+//     "application": { "interval_report": 120, "temperature_alarm_hi": 50.0 } }
 // ---------------------------------------------------------------------------
 
 function _encVarint(value) {

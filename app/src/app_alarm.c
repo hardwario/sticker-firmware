@@ -259,7 +259,7 @@ static int read_notify_bools(enum app_alarm_source source, bool *act, bool *deac
 	case APP_ALARM_SOURCE_ACCEL_MOTION:
 		/* Accelerometer any-motion is an activation-only pulse, gated by the
 		 * motion_sensitivity config (OFF = disabled). */
-		*act = g_app_config.motion_sensitivity != APP_CONFIG_MOTION_SENSITIVITY_OFF;
+		*act = g_app_config.accel_motion_sensitivity != APP_CONFIG_MOTION_SENSITIVITY_OFF;
 		*deact = false;
 		return 0;
 	default:
@@ -332,33 +332,29 @@ bool app_alarm_poll(void)
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
 	alarm |=
-		eval_threshold(APP_ALARM_SOURCE_TEMPERATURE, g_app_config.alarm_temperature_enabled,
-			       g_app_sensor_data.temperature, g_app_config.alarm_temperature_lo,
-			       g_app_config.alarm_temperature_hi,
-			       g_app_config.alarm_temperature_hst, &should_send);
+		eval_threshold(APP_ALARM_SOURCE_TEMPERATURE, g_app_config.temperature_alarm_enabled,
+			       g_app_sensor_data.temperature, g_app_config.temperature_alarm_lo,
+			       g_app_config.temperature_alarm_hi,
+			       g_app_config.temperature_alarm_hst, &should_send);
 
-	alarm |= eval_threshold(APP_ALARM_SOURCE_HUMIDITY, g_app_config.alarm_humidity_enabled,
-				g_app_sensor_data.humidity, g_app_config.alarm_humidity_lo,
-				g_app_config.alarm_humidity_hi, g_app_config.alarm_humidity_hst,
+	alarm |= eval_threshold(APP_ALARM_SOURCE_HUMIDITY, g_app_config.humidity_alarm_enabled,
+				g_app_sensor_data.humidity, g_app_config.humidity_alarm_lo,
+				g_app_config.humidity_alarm_hi, g_app_config.humidity_alarm_hst,
 				&should_send);
 
 	/* Pressure config thresholds are stored in hPa × 10, sensor reports hPa. */
-	alarm |= eval_threshold(APP_ALARM_SOURCE_PRESSURE, g_app_config.alarm_pressure_enabled,
-				g_app_sensor_data.pressure * 10.f, g_app_config.alarm_pressure_lo,
-				g_app_config.alarm_pressure_hi, g_app_config.alarm_pressure_hst,
+	alarm |= eval_threshold(APP_ALARM_SOURCE_PRESSURE, g_app_config.pressure_alarm_enabled,
+				g_app_sensor_data.pressure * 10.f, g_app_config.pressure_alarm_lo,
+				g_app_config.pressure_alarm_hi, g_app_config.pressure_alarm_hst,
 				&should_send);
 
-	alarm |= eval_threshold(
-		APP_ALARM_SOURCE_T1_TEMPERATURE, g_app_config.alarm_t1_temperature_enabled,
-		g_app_sensor_data.t1_temperature, g_app_config.alarm_t1_temperature_lo,
-		g_app_config.alarm_t1_temperature_hi, g_app_config.alarm_t1_temperature_hst,
-		&should_send);
+	alarm |= eval_threshold(APP_ALARM_SOURCE_T1_TEMPERATURE, g_app_config.t1_alarm_enabled,
+				g_app_sensor_data.t1_temperature, g_app_config.t1_alarm_lo,
+				g_app_config.t1_alarm_hi, g_app_config.t1_alarm_hst, &should_send);
 
-	alarm |= eval_threshold(
-		APP_ALARM_SOURCE_T2_TEMPERATURE, g_app_config.alarm_t2_temperature_enabled,
-		g_app_sensor_data.t2_temperature, g_app_config.alarm_t2_temperature_lo,
-		g_app_config.alarm_t2_temperature_hi, g_app_config.alarm_t2_temperature_hst,
-		&should_send);
+	alarm |= eval_threshold(APP_ALARM_SOURCE_T2_TEMPERATURE, g_app_config.t2_alarm_enabled,
+				g_app_sensor_data.t2_temperature, g_app_config.t2_alarm_lo,
+				g_app_config.t2_alarm_hi, g_app_config.t2_alarm_hst, &should_send);
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 

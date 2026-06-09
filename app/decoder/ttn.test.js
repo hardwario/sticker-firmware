@@ -17,14 +17,14 @@ const toHex = (bytes) => Buffer.from(bytes).toString("hex");
 // Each entry: hex on the wire <-> the structured command it represents.
 const COMMANDS = [
   {
-    name: "set_param (lorawan.adr + application interval_report/alarm_temperature_hi)",
+    name: "set_param (lorawan.adr + application interval_report/temperature_alarm_hi)",
     hex: "0801120d0a021801120720783d00004842",
     data: {
       seq: 1,
       command: "set_param",
       set_param: {
         lorawan: { adr: 1 },
-        application: { interval_report: 120, alarm_temperature_hi: 50 },
+        application: { interval_report: 120, temperature_alarm_hi: 50 },
       },
     },
   },
@@ -38,14 +38,14 @@ const COMMANDS = [
     },
   },
   {
-    // motion_sensitivity is enum-valued (field 54): encode accepts the
+    // accel_motion_sensitivity is enum-valued (field 54): encode accepts the
     // symbolic name, decode renders it back ("high" = 3).
-    name: "set_param (application motion_sensitivity enum)",
+    name: "set_param (application accel_motion_sensitivity enum)",
     hex: "080312051203b00303",
     data: {
       seq: 3,
       command: "set_param",
-      set_param: { application: { motion_sensitivity: "high" } },
+      set_param: { application: { accel_motion_sensitivity: "high" } },
     },
   },
   {

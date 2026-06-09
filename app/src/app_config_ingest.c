@@ -172,26 +172,26 @@ int app_config_apply_application(const AppConfigMessage_Application *src, uint32
 		}
 	}
 
-	APPLY_BOOL(alarm_temperature_enabled);
-	APPLY_FLOAT(alarm_temperature_lo, -30.0f, 70.0f, 6);
-	APPLY_FLOAT(alarm_temperature_hi, -30.0f, 70.0f, 7);
-	APPLY_FLOAT(alarm_temperature_hst, 0.0f, 5.0f, 8);
-	APPLY_BOOL(alarm_humidity_enabled);
-	APPLY_FLOAT(alarm_humidity_lo, 0.0f, 100.0f, 10);
-	APPLY_FLOAT(alarm_humidity_hi, 0.0f, 100.0f, 11);
-	APPLY_FLOAT(alarm_humidity_hst, 0.0f, 20.0f, 12);
-	APPLY_BOOL(alarm_pressure_enabled);
-	APPLY_FLOAT(alarm_pressure_lo, 500.0f, 1200.0f, 14);
-	APPLY_FLOAT(alarm_pressure_hi, 500.0f, 1200.0f, 15);
-	APPLY_FLOAT(alarm_pressure_hst, 0.0f, 50.0f, 16);
-	APPLY_BOOL(alarm_t1_temperature_enabled);
-	APPLY_FLOAT(alarm_t1_temperature_lo, -30.0f, 70.0f, 18);
-	APPLY_FLOAT(alarm_t1_temperature_hi, -30.0f, 70.0f, 19);
-	APPLY_FLOAT(alarm_t1_temperature_hst, 0.0f, 5.0f, 20);
-	APPLY_BOOL(alarm_t2_temperature_enabled);
-	APPLY_FLOAT(alarm_t2_temperature_lo, -30.0f, 70.0f, 22);
-	APPLY_FLOAT(alarm_t2_temperature_hi, -30.0f, 70.0f, 23);
-	APPLY_FLOAT(alarm_t2_temperature_hst, 0.0f, 5.0f, 24);
+	APPLY_BOOL(temperature_alarm_enabled);
+	APPLY_FLOAT(temperature_alarm_lo, -30.0f, 70.0f, 6);
+	APPLY_FLOAT(temperature_alarm_hi, -30.0f, 70.0f, 7);
+	APPLY_FLOAT(temperature_alarm_hst, 0.0f, 5.0f, 8);
+	APPLY_BOOL(humidity_alarm_enabled);
+	APPLY_FLOAT(humidity_alarm_lo, 0.0f, 100.0f, 10);
+	APPLY_FLOAT(humidity_alarm_hi, 0.0f, 100.0f, 11);
+	APPLY_FLOAT(humidity_alarm_hst, 0.0f, 20.0f, 12);
+	APPLY_BOOL(pressure_alarm_enabled);
+	APPLY_FLOAT(pressure_alarm_lo, 500.0f, 1200.0f, 14);
+	APPLY_FLOAT(pressure_alarm_hi, 500.0f, 1200.0f, 15);
+	APPLY_FLOAT(pressure_alarm_hst, 0.0f, 50.0f, 16);
+	APPLY_BOOL(t1_alarm_enabled);
+	APPLY_FLOAT(t1_alarm_lo, -30.0f, 70.0f, 18);
+	APPLY_FLOAT(t1_alarm_hi, -30.0f, 70.0f, 19);
+	APPLY_FLOAT(t1_alarm_hst, 0.0f, 5.0f, 20);
+	APPLY_BOOL(t2_alarm_enabled);
+	APPLY_FLOAT(t2_alarm_lo, -30.0f, 70.0f, 22);
+	APPLY_FLOAT(t2_alarm_hi, -30.0f, 70.0f, 23);
+	APPLY_FLOAT(t2_alarm_hst, 0.0f, 5.0f, 24);
 
 	APPLY_BOOL(hall_left_counter);
 	APPLY_BOOL(hall_left_notify_act);
@@ -244,32 +244,32 @@ int app_config_apply_application(const AppConfigMessage_Application *src, uint32
 			FAULT(52);
 		}
 	}
-	if (src->has_motion_sensitivity) {
-		int val = src->motion_sensitivity;
+	if (src->has_accel_motion_sensitivity) {
+		int val = src->accel_motion_sensitivity;
 
 		if (val >= APP_CONFIG_MOTION_SENSITIVITY_OFF &&
 		    val <= APP_CONFIG_MOTION_SENSITIVITY_HIGH) {
-			config->motion_sensitivity = (enum app_config_motion_sensitivity)val;
+			config->accel_motion_sensitivity = (enum app_config_motion_sensitivity)val;
 		} else {
 			FAULT(54);
 		}
 	}
 
 	/* Cross-validate alarm lo/hi pairs — disable the alarm if lo >= hi */
-	if (config->alarm_temperature_lo >= config->alarm_temperature_hi) {
-		config->alarm_temperature_enabled = false;
+	if (config->temperature_alarm_lo >= config->temperature_alarm_hi) {
+		config->temperature_alarm_enabled = false;
 	}
-	if (config->alarm_humidity_lo >= config->alarm_humidity_hi) {
-		config->alarm_humidity_enabled = false;
+	if (config->humidity_alarm_lo >= config->humidity_alarm_hi) {
+		config->humidity_alarm_enabled = false;
 	}
-	if (config->alarm_pressure_lo >= config->alarm_pressure_hi) {
-		config->alarm_pressure_enabled = false;
+	if (config->pressure_alarm_lo >= config->pressure_alarm_hi) {
+		config->pressure_alarm_enabled = false;
 	}
-	if (config->alarm_t1_temperature_lo >= config->alarm_t1_temperature_hi) {
-		config->alarm_t1_temperature_enabled = false;
+	if (config->t1_alarm_lo >= config->t1_alarm_hi) {
+		config->t1_alarm_enabled = false;
 	}
-	if (config->alarm_t2_temperature_lo >= config->alarm_t2_temperature_hi) {
-		config->alarm_t2_temperature_enabled = false;
+	if (config->t2_alarm_lo >= config->t2_alarm_hi) {
+		config->t2_alarm_enabled = false;
 	}
 
 	return ret;
@@ -342,26 +342,26 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	FILL_BOOL(1, calibration);
 	FILL_NUM(2, interval_sample);
 	FILL_NUM(4, interval_report);
-	FILL_BOOL(5, alarm_temperature_enabled);
-	FILL_NUM(6, alarm_temperature_lo);
-	FILL_NUM(7, alarm_temperature_hi);
-	FILL_NUM(8, alarm_temperature_hst);
-	FILL_BOOL(9, alarm_humidity_enabled);
-	FILL_NUM(10, alarm_humidity_lo);
-	FILL_NUM(11, alarm_humidity_hi);
-	FILL_NUM(12, alarm_humidity_hst);
-	FILL_BOOL(13, alarm_pressure_enabled);
-	FILL_NUM(14, alarm_pressure_lo);
-	FILL_NUM(15, alarm_pressure_hi);
-	FILL_NUM(16, alarm_pressure_hst);
-	FILL_BOOL(17, alarm_t1_temperature_enabled);
-	FILL_NUM(18, alarm_t1_temperature_lo);
-	FILL_NUM(19, alarm_t1_temperature_hi);
-	FILL_NUM(20, alarm_t1_temperature_hst);
-	FILL_BOOL(21, alarm_t2_temperature_enabled);
-	FILL_NUM(22, alarm_t2_temperature_lo);
-	FILL_NUM(23, alarm_t2_temperature_hi);
-	FILL_NUM(24, alarm_t2_temperature_hst);
+	FILL_BOOL(5, temperature_alarm_enabled);
+	FILL_NUM(6, temperature_alarm_lo);
+	FILL_NUM(7, temperature_alarm_hi);
+	FILL_NUM(8, temperature_alarm_hst);
+	FILL_BOOL(9, humidity_alarm_enabled);
+	FILL_NUM(10, humidity_alarm_lo);
+	FILL_NUM(11, humidity_alarm_hi);
+	FILL_NUM(12, humidity_alarm_hst);
+	FILL_BOOL(13, pressure_alarm_enabled);
+	FILL_NUM(14, pressure_alarm_lo);
+	FILL_NUM(15, pressure_alarm_hi);
+	FILL_NUM(16, pressure_alarm_hst);
+	FILL_BOOL(17, t1_alarm_enabled);
+	FILL_NUM(18, t1_alarm_lo);
+	FILL_NUM(19, t1_alarm_hi);
+	FILL_NUM(20, t1_alarm_hst);
+	FILL_BOOL(21, t2_alarm_enabled);
+	FILL_NUM(22, t2_alarm_lo);
+	FILL_NUM(23, t2_alarm_hi);
+	FILL_NUM(24, t2_alarm_hst);
 	FILL_BOOL(25, hall_left_counter);
 	FILL_BOOL(26, hall_left_notify_act);
 	FILL_BOOL(27, hall_left_notify_deact);
@@ -392,9 +392,9 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	FILL_NUM(52, alarm_notif_time);
 	FILL_BOOL(53, pir_notify_act);
 	if (requested(ids, n, 54)) {
-		dst->has_motion_sensitivity = true;
-		dst->motion_sensitivity =
-			(AppConfigMessage_Application_MotionSensitivity)c->motion_sensitivity;
+		dst->has_accel_motion_sensitivity = true;
+		dst->accel_motion_sensitivity =
+			(AppConfigMessage_Application_MotionSensitivity)c->accel_motion_sensitivity;
 	}
 }
 

@@ -49,7 +49,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `force_send` | `08064a00` |
 | `reboot` | `08083a00` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
-| `set_param`: ADR on, `interval_report`=120 s, `alarm_temperature_hi`=50 °C | `0801120d0a021801120720783d00004842` |
+| `set_param`: ADR on, `interval_report`=120 s, `temperature_alarm_hi`=50 °C | `0801120d0a021801120720783d00004842` |
 
 (The leading byte is the `seq` you chose; it is echoed in the reply.)
 
@@ -231,7 +231,7 @@ The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.
   "seq": 5,
   "set_param": {
     "lorawan": { "adr": true },
-    "application": { "interval_report": 120, "alarm_temperature_hi": 50.0 }
+    "application": { "interval_report": 120, "temperature_alarm_hi": 50.0 }
   }
 }
 ```
