@@ -106,6 +106,38 @@ parameters:
     max: 86400
     help: "Get/Set report interval (range 60 to 86400 seconds)."
 
+  - name: history_enable
+    proto_group: application
+    proto_id: 49
+    type: bool
+    default: false
+    help: "Get/Set sensor history store-and-forward (true/false)."
+
+  - name: history_sensors
+    proto_group: application
+    proto_id: 50
+    type: uint32
+    default: 0
+    help: "Get/Set history sensor selection bitmask (0 = all capability-available)."
+
+  - name: alarm_limit
+    proto_group: application
+    proto_id: 51
+    type: int
+    default: 0
+    min: 0
+    max: 3600
+    help: "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled)."
+
+  - name: alarm_notif_time
+    proto_group: application
+    proto_id: 52
+    type: int
+    default: 10
+    min: 1
+    max: 60
+    help: "Get/Set alarm red-LED hold time in seconds (both-mode and pulse sources)."
+
   - name: lrw_region
     proto_group: lorawan
     proto_id: 1
@@ -191,13 +223,73 @@ parameters:
     size: 16
     help: "Get/Set LoRaWAN AppSKey (32 hexadecimal digits)."
 
-  - name: alarm_temperature_enabled
+  - name: cap_hall_left
+    proto_group: application
+    proto_id: 40
+    type: bool
+    help: "Get/Set hall left capability (true/false)."
+
+  - name: cap_hall_right
+    proto_group: application
+    proto_id: 41
+    type: bool
+    help: "Get/Set hall right capability (true/false)."
+
+  - name: cap_input_a
+    proto_group: application
+    proto_id: 42
+    type: bool
+    help: "Get/Set input A capability (true/false)."
+
+  - name: cap_input_b
+    proto_group: application
+    proto_id: 43
+    type: bool
+    help: "Get/Set input B capability (true/false)."
+
+  - name: cap_light_sensor
+    proto_group: application
+    proto_id: 44
+    type: bool
+    help: "Get/Set light sensor capability (true/false)."
+
+  - name: cap_barometer
+    proto_group: application
+    proto_id: 45
+    type: bool
+    help: "Get/Set barometer capability (true/false)."
+
+  - name: cap_pir_detector
+    proto_group: application
+    proto_id: 46
+    type: bool
+    help: "Get/Set PIR detector capability (true/false)."
+
+  - name: cap_1w_thermometer
+    proto_group: application
+    proto_id: 47
+    type: bool
+    help: "Get/Set 1-wire thermometer capability (true/false)."
+
+  - name: cap_1w_machine_probe
+    proto_group: application
+    proto_id: 48
+    type: bool
+    help: "Get/Set 1-wire machine probe capability (true/false)."
+
+  - name: cap_accelerometer
+    proto_group: application
+    proto_id: 55
+    type: bool
+    help: "Get/Set accelerometer capability — orientation, motion and free-fall (true/false)."
+
+  - name: temperature_alarm_enabled
     proto_group: application
     proto_id: 5
     type: bool
     help: "Get/Set temperature alarm enabled (true/false)."
 
-  - name: alarm_temperature_lo
+  - name: temperature_alarm_lo
     proto_group: application
     proto_id: 6
     type: float
@@ -206,7 +298,7 @@ parameters:
     max: 70.0
     help: "Get/Set temperature low threshold (-30 to 70 deg. C)."
 
-  - name: alarm_temperature_hi
+  - name: temperature_alarm_hi
     proto_group: application
     proto_id: 7
     type: float
@@ -215,7 +307,7 @@ parameters:
     max: 70.0
     help: "Get/Set temperature high threshold (-30 to 70 deg. C)."
 
-  - name: alarm_temperature_hst
+  - name: temperature_alarm_hst
     proto_group: application
     proto_id: 8
     type: float
@@ -224,13 +316,13 @@ parameters:
     max: 5.0
     help: "Get/Set T1 temperature hysteresis (0 to 5 deg. C)."
 
-  - name: alarm_humidity_enabled
+  - name: humidity_alarm_enabled
     proto_group: application
     proto_id: 9
     type: bool
     help: "Get/Set humidity alarm enabled (true/false)."
 
-  - name: alarm_humidity_lo
+  - name: humidity_alarm_lo
     proto_group: application
     proto_id: 10
     type: float
@@ -239,7 +331,7 @@ parameters:
     max: 100.0
     help: "Get/Set humidity low threshold (0 to 100 %)."
 
-  - name: alarm_humidity_hi
+  - name: humidity_alarm_hi
     proto_group: application
     proto_id: 11
     type: float
@@ -248,7 +340,7 @@ parameters:
     max: 100.0
     help: "Get/Set humidity high threshold (0 to 100 %)."
 
-  - name: alarm_humidity_hst
+  - name: humidity_alarm_hst
     proto_group: application
     proto_id: 12
     type: float
@@ -257,13 +349,13 @@ parameters:
     max: 20.0
     help: "Get/Set humidity hysteresis (0 to 20 %)."
 
-  - name: alarm_pressure_enabled
+  - name: pressure_alarm_enabled
     proto_group: application
     proto_id: 13
     type: bool
     help: "Get/Set pressure alarm enabled (true/false)."
 
-  - name: alarm_pressure_lo
+  - name: pressure_alarm_lo
     proto_group: application
     proto_id: 14
     type: float
@@ -272,7 +364,7 @@ parameters:
     max: 1200.0
     help: "Get/Set pressure low threshold (500 to 1200 hPa)."
 
-  - name: alarm_pressure_hi
+  - name: pressure_alarm_hi
     proto_group: application
     proto_id: 15
     type: float
@@ -281,7 +373,7 @@ parameters:
     max: 1200.0
     help: "Get/Set pressure high threshold (500 to 1200 hPa)."
 
-  - name: alarm_pressure_hst
+  - name: pressure_alarm_hst
     proto_group: application
     proto_id: 16
     type: float
@@ -290,13 +382,13 @@ parameters:
     max: 50.0
     help: "Get/Set pressure hysteresis (0 to 50 hPa)."
 
-  - name: alarm_t1_temperature_enabled
+  - name: t1_alarm_enabled
     proto_group: application
     proto_id: 17
     type: bool
     help: "Get/Set T1 temperature alarm enabled (true/false)."
 
-  - name: alarm_t1_temperature_lo
+  - name: t1_alarm_lo
     proto_group: application
     proto_id: 18
     type: float
@@ -305,7 +397,7 @@ parameters:
     max: 70.0
     help: "Get/Set T1 temperature low threshold (-30 to 70 deg. C)."
 
-  - name: alarm_t1_temperature_hi
+  - name: t1_alarm_hi
     proto_group: application
     proto_id: 19
     type: float
@@ -314,7 +406,7 @@ parameters:
     max: 70.0
     help: "Get/Set T1 temperature high threshold (-30 to 70 deg. C)."
 
-  - name: alarm_t1_temperature_hst
+  - name: t1_alarm_hst
     proto_group: application
     proto_id: 20
     type: float
@@ -323,13 +415,13 @@ parameters:
     max: 5.0
     help: "Get/Set T1 temperature hysteresis (0 to 5 deg. C)."
 
-  - name: alarm_t2_temperature_enabled
+  - name: t2_alarm_enabled
     proto_group: application
     proto_id: 21
     type: bool
     help: "Get/Set T2 temperature alarm enabled (true/false)."
 
-  - name: alarm_t2_temperature_lo
+  - name: t2_alarm_lo
     proto_group: application
     proto_id: 22
     type: float
@@ -338,7 +430,7 @@ parameters:
     max: 70.0
     help: "Get/Set T2 temperature low threshold (-30 to 70 deg. C)."
 
-  - name: alarm_t2_temperature_hi
+  - name: t2_alarm_hi
     proto_group: application
     proto_id: 23
     type: float
@@ -347,7 +439,7 @@ parameters:
     max: 70.0
     help: "Get/Set T2 temperature high threshold (-30 to 70 deg. C)."
 
-  - name: alarm_t2_temperature_hst
+  - name: t2_alarm_hst
     proto_group: application
     proto_id: 24
     type: float
@@ -428,7 +520,7 @@ parameters:
     type: bool
     help: "Get/Set input B notify on deactivation (true/false)."
 
-  - name: corr_temperature
+  - name: temperature_corr
     proto_group: application
     proto_id: 37
     type: float
@@ -436,7 +528,7 @@ parameters:
     max: 5.0
     help: "Get/Set temperature correction (range -5.0 to +5.0 deg. C)."
 
-  - name: corr_t1_temperature
+  - name: t1_corr
     proto_group: application
     proto_id: 38
     type: float
@@ -444,99 +536,13 @@ parameters:
     max: 5.0
     help: "Get/Set T1 temperature correction (range -5.0 to +5.0 deg. C)."
 
-  - name: corr_t2_temperature
+  - name: t2_corr
     proto_group: application
     proto_id: 39
     type: float
     min: -5.0
     max: 5.0
     help: "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C)."
-
-  - name: cap_hall_left
-    proto_group: application
-    proto_id: 40
-    type: bool
-    help: "Get/Set hall left capability (true/false)."
-
-  - name: cap_hall_right
-    proto_group: application
-    proto_id: 41
-    type: bool
-    help: "Get/Set hall right capability (true/false)."
-
-  - name: cap_input_a
-    proto_group: application
-    proto_id: 42
-    type: bool
-    help: "Get/Set input A capability (true/false)."
-
-  - name: cap_input_b
-    proto_group: application
-    proto_id: 43
-    type: bool
-    help: "Get/Set input B capability (true/false)."
-
-  - name: cap_light_sensor
-    proto_group: application
-    proto_id: 44
-    type: bool
-    help: "Get/Set light sensor capability (true/false)."
-
-  - name: cap_barometer
-    proto_group: application
-    proto_id: 45
-    type: bool
-    help: "Get/Set barometer capability (true/false)."
-
-  - name: cap_pir_detector
-    proto_group: application
-    proto_id: 46
-    type: bool
-    help: "Get/Set PIR detector capability (true/false)."
-
-  - name: cap_1w_thermometer
-    proto_group: application
-    proto_id: 47
-    type: bool
-    help: "Get/Set 1-wire thermometer capability (true/false)."
-
-  - name: cap_1w_machine_probe
-    proto_group: application
-    proto_id: 48
-    type: bool
-    help: "Get/Set 1-wire machine probe capability (true/false)."
-
-  - name: history_enable
-    proto_group: application
-    proto_id: 49
-    type: bool
-    default: false
-    help: "Get/Set sensor history store-and-forward (true/false)."
-
-  - name: history_sensors
-    proto_group: application
-    proto_id: 50
-    type: uint32
-    default: 0
-    help: "Get/Set history sensor selection bitmask (0 = all capability-available)."
-
-  - name: alarm_limit
-    proto_group: application
-    proto_id: 51
-    type: int
-    default: 0
-    min: 0
-    max: 3600
-    help: "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled)."
-
-  - name: alarm_notif_time
-    proto_group: application
-    proto_id: 52
-    type: int
-    default: 10
-    min: 1
-    max: 60
-    help: "Get/Set alarm red-LED hold time in seconds (both-mode and pulse sources)."
 
   - name: pir_notify_act
     proto_group: application
@@ -545,7 +551,7 @@ parameters:
     default: false
     help: "Get/Set PIR motion alarm notify on activation (true/false)."
 
-  - name: motion_sensitivity
+  - name: accel_motion_sensitivity
     proto_group: application
     proto_id: 54
     type: enum

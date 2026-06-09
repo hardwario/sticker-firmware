@@ -19,7 +19,7 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 typedef void (*app_accel_motion_cb_t)(void *user_data);
 
 /* Register the motion callback and arm the interrupt at the configured
- * sensitivity (g_app_config.motion_sensitivity). Call once at init. */
+ * sensitivity (g_app_config.accel_motion_sensitivity). Call once at init. */
 int app_accel_init_motion(app_accel_motion_cb_t cb, void *user_data);
 
 /* Apply a sensitivity level at runtime. OFF disables the interrupt (power

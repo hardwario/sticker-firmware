@@ -189,7 +189,7 @@ static struct k_work_delayable m_motion_arm_work;
 static void motion_arm_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	int ret = app_accel_set_motion_sensitivity(g_app_config.motion_sensitivity);
+	int ret = app_accel_set_motion_sensitivity(g_app_config.accel_motion_sensitivity);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_accel_set_motion_sensitivity", ret);
 	}

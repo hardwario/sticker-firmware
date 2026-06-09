@@ -196,10 +196,14 @@ int app_sensor_init(void)
 
 #if defined(CONFIG_LIS2DH)
 	k_work_init(&m_accel_classify_work, accel_classify_work_handler);
-	ret = app_accel_init_motion(accel_motion_handler, NULL);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_accel_init_motion", ret);
-		res = res ? res : ret;
+	/* The accelerometer is a runtime capability: only arm motion + free-fall
+	 * (and read orientation, see app_sensor_sample) when cap-accelerometer is on. */
+	if (g_app_config.cap_accelerometer) {
+		ret = app_accel_init_motion(accel_motion_handler, NULL);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_accel_init_motion", ret);
+			res = res ? res : ret;
+		}
 	}
 #endif /* defined(CONFIG_LIS2DH) */
 
@@ -321,10 +325,13 @@ void app_sensor_sample(void)
 #endif /* defined(CONFIG_ADC) */
 
 #if defined(CONFIG_LIS2DH)
-	ret = app_accel_read(NULL, NULL, NULL, &orientation);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_accel_read", ret);
+	if (g_app_config.cap_accelerometer) {
+		ret = app_accel_read(NULL, NULL, NULL, &orientation);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_accel_read", ret);
+		}
 	}
+	/* orientation stays INT_MAX when the capability is off → absent in telemetry */
 #endif /* defined(CONFIG_LIS2DH) */
 
 #if defined(CONFIG_SHT4X)
@@ -437,7 +444,7 @@ void app_sensor_sample(void)
 	g_app_sensor_data.orientation = orientation;
 	g_app_sensor_data.voltage = voltage;
 
-	g_app_sensor_data.temperature = temperature + g_app_config.corr_temperature;
+	g_app_sensor_data.temperature = temperature + g_app_config.temperature_corr;
 	g_app_sensor_data.humidity = humidity;
 	g_app_sensor_data.illuminance = illuminance;
 	g_app_sensor_data.altitude = altitude;
@@ -453,8 +460,8 @@ void app_sensor_sample(void)
 	g_app_sensor_data.input_a_is_active = input_data.input_a_is_active;
 	g_app_sensor_data.input_b_is_active = input_data.input_b_is_active;
 
-	g_app_sensor_data.t1_temperature = t1_temperature + g_app_config.corr_t1_temperature;
-	g_app_sensor_data.t2_temperature = t2_temperature + g_app_config.corr_t2_temperature;
+	g_app_sensor_data.t1_temperature = t1_temperature + g_app_config.t1_corr;
+	g_app_sensor_data.t2_temperature = t2_temperature + g_app_config.t2_corr;
 
 	g_app_sensor_data.mp1_temperature = mp1_temperature;
 	g_app_sensor_data.mp2_temperature = mp2_temperature;
