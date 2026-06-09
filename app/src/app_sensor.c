@@ -18,6 +18,7 @@
 #include "app_pyq1648.h"
 #include "app_sensor.h"
 #include "app_sht4x.h"
+#include "app_w1_slots.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -275,6 +276,15 @@ int app_sensor_init(void)
 				res = res ? res : ret;
 			}
 		}
+	}
+
+	/* Bind discovered 1-Wire devices to logical slots by their persisted ROM
+	 * (sensorN_rom), so a slot keeps the same physical sensor across reboots /
+	 * rescans. Must run after both driver scans. */
+	if (g_app_config.cap_1w_thermometer || g_app_config.cap_1w_machine_probe) {
+		int present = app_w1_slots_rebind();
+
+		LOG_INF("1-Wire slots: %d sensor(s) bound", present);
 	}
 
 	k_work_queue_init(&m_sensor_work_q);
