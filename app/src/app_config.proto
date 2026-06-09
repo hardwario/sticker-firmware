@@ -49,6 +49,8 @@ message AppConfigMessage {
         }
 
         reserved 3;
+        reserved 47;
+        reserved 48;
         optional bool calibration = 1;
         optional uint32 interval_sample = 2;
         optional uint32 interval_report = 4;
@@ -94,8 +96,6 @@ message AppConfigMessage {
         optional bool cap_light_sensor = 44;
         optional bool cap_barometer = 45;
         optional bool cap_pir_detector = 46;
-        optional bool cap_1w_thermometer = 47;
-        optional bool cap_1w_machine_probe = 48;
         optional bool history_enable = 49;
         optional uint32 history_sensors = 50;
         optional uint32 alarm_limit = 51;
@@ -107,6 +107,7 @@ message AppConfigMessage {
         optional string sensor2_rom = 57;
         optional string sensor3_rom = 58;
         optional string sensor4_rom = 59;
+        optional bool cap_w1_sensors = 60;
     }
 }
 // END GENERATED CONFIG

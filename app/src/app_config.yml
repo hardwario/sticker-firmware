@@ -56,7 +56,7 @@ proto:
   groups:
     - {key: root}
     - {key: lorawan, message: Lorawan, field: lorawan, proto_id: 5, strip_prefix: lrw_}
-    - {key: application, message: Application, field: application, proto_id: 6, reserved: [3]}
+    - {key: application, message: Application, field: application, proto_id: 6, reserved: [3, 47, 48]}
 parameters:
   - name: secret_key
     proto_group: root
@@ -265,17 +265,11 @@ parameters:
     type: bool
     help: "Get/Set PIR detector capability (true/false)."
 
-  - name: cap_1w_thermometer
+  - name: cap_w1_sensors
     proto_group: application
-    proto_id: 47
+    proto_id: 60
     type: bool
-    help: "Get/Set 1-wire thermometer capability (true/false)."
-
-  - name: cap_1w_machine_probe
-    proto_group: application
-    proto_id: 48
-    type: bool
-    help: "Get/Set 1-wire machine probe capability (true/false)."
+    help: "Get/Set 1-Wire sensor bus capability — enables the bus + auto-detects attached sensors (true/false)."
 
   - name: cap_accelerometer
     proto_group: application

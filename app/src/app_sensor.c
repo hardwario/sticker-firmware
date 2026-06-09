@@ -208,7 +208,7 @@ int app_sensor_init(void)
 	}
 #endif /* defined(CONFIG_LIS2DH) */
 
-	if (g_app_config.cap_1w_thermometer || g_app_config.cap_1w_machine_probe) {
+	if (g_app_config.cap_w1_sensors) {
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
 
 		ret = device_init(dev);
@@ -218,7 +218,7 @@ int app_sensor_init(void)
 		}
 	}
 
-	if (g_app_config.cap_1w_thermometer) {
+	if (g_app_config.cap_w1_sensors) {
 		const struct device *dev_0 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_0));
 
 		ret = device_init(dev_0);
@@ -242,7 +242,7 @@ int app_sensor_init(void)
 		}
 	}
 
-	if (g_app_config.cap_1w_machine_probe) {
+	if (g_app_config.cap_w1_sensors) {
 		const struct device *dev_0 = DEVICE_DT_GET(DT_NODELABEL(machine_probe_0));
 
 		ret = device_init(dev_0);
@@ -281,7 +281,7 @@ int app_sensor_init(void)
 	/* Bind discovered 1-Wire devices to logical slots by their persisted ROM
 	 * (sensorN_rom), so a slot keeps the same physical sensor across reboots /
 	 * rescans. Must run after both driver scans. */
-	if (g_app_config.cap_1w_thermometer || g_app_config.cap_1w_machine_probe) {
+	if (g_app_config.cap_w1_sensors) {
 		int present = app_w1_slots_rebind();
 
 		LOG_INF("1-Wire slots: %d sensor(s) bound", present);
@@ -379,7 +379,7 @@ void app_sensor_sample(void)
 		}
 	}
 
-	if (g_app_config.cap_1w_thermometer) {
+	if (g_app_config.cap_w1_sensors) {
 		int count = app_ds18b20_get_count();
 
 		for (int i = 0; i < count; i++) {
@@ -402,7 +402,7 @@ void app_sensor_sample(void)
 		}
 	}
 
-	if (g_app_config.cap_1w_machine_probe) {
+	if (g_app_config.cap_w1_sensors) {
 		int count = app_machine_probe_get_count();
 
 		for (int i = 0; i < count; i++) {

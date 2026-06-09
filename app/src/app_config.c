@@ -153,10 +153,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_barometer));
 	SETTINGS_SET("cap-pir-detector", &m_app_config.cap_pir_detector,
 		     sizeof(m_app_config.cap_pir_detector));
-	SETTINGS_SET("cap-1w-thermometer", &m_app_config.cap_1w_thermometer,
-		     sizeof(m_app_config.cap_1w_thermometer));
-	SETTINGS_SET("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
-		     sizeof(m_app_config.cap_1w_machine_probe));
+	SETTINGS_SET("cap-w1-sensors", &m_app_config.cap_w1_sensors,
+		     sizeof(m_app_config.cap_w1_sensors));
 	SETTINGS_SET("cap-accelerometer", &m_app_config.cap_accelerometer,
 		     sizeof(m_app_config.cap_accelerometer));
 	SETTINGS_SET("temperature-alarm-enabled", &m_app_config.temperature_alarm_enabled,
@@ -300,10 +298,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_barometer));
 	EXPORT_FUNC("cap-pir-detector", &m_app_config.cap_pir_detector,
 		    sizeof(m_app_config.cap_pir_detector));
-	EXPORT_FUNC("cap-1w-thermometer", &m_app_config.cap_1w_thermometer,
-		    sizeof(m_app_config.cap_1w_thermometer));
-	EXPORT_FUNC("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
-		    sizeof(m_app_config.cap_1w_machine_probe));
+	EXPORT_FUNC("cap-w1-sensors", &m_app_config.cap_w1_sensors,
+		    sizeof(m_app_config.cap_w1_sensors));
 	EXPORT_FUNC("cap-accelerometer", &m_app_config.cap_accelerometer,
 		    sizeof(m_app_config.cap_accelerometer));
 	EXPORT_FUNC("temperature-alarm-enabled", &m_app_config.temperature_alarm_enabled,
@@ -750,16 +746,10 @@ static void print_cap_pir_detector(const struct shell *shell)
 		    m_app_config.cap_pir_detector ? "true" : "false");
 }
 
-static void print_cap_1w_thermometer(const struct shell *shell)
+static void print_cap_w1_sensors(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " cap-1w-thermometer %s",
-		    m_app_config.cap_1w_thermometer ? "true" : "false");
-}
-
-static void print_cap_1w_machine_probe(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-1w-machine-probe %s",
-		    m_app_config.cap_1w_machine_probe ? "true" : "false");
+	shell_print(shell, SETTINGS_PFX " cap-w1-sensors %s",
+		    m_app_config.cap_w1_sensors ? "true" : "false");
 }
 
 static void print_cap_accelerometer(const struct shell *shell)
@@ -1086,8 +1076,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_light_sensor(shell);
 	print_cap_barometer(shell);
 	print_cap_pir_detector(shell);
-	print_cap_1w_thermometer(shell);
-	print_cap_1w_machine_probe(shell);
+	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
 	print_temperature_alarm_enabled(shell);
 	print_temperature_alarm_lo(shell);
@@ -1680,16 +1669,9 @@ static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **a
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_pir_detector, print_cap_pir_detector);
 }
 
-static int cmd_cap_1w_thermometer(const struct shell *shell, size_t argc, char **argv)
+static int cmd_cap_w1_sensors(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_thermometer,
-			print_cap_1w_thermometer);
-}
-
-static int cmd_cap_1w_machine_probe(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_machine_probe,
-			print_cap_1w_machine_probe);
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_w1_sensors, print_cap_w1_sensors);
 }
 
 static int cmd_cap_accelerometer(const struct shell *shell, size_t argc, char **argv)
@@ -2200,13 +2182,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set PIR detector capability (true/false).",
 	              cmd_cap_pir_detector, 1, 1),
 
-	SHELL_CMD_ARG(cap-1w-thermometer, NULL,
-	              "Get/Set 1-wire thermometer capability (true/false).",
-	              cmd_cap_1w_thermometer, 1, 1),
-
-	SHELL_CMD_ARG(cap-1w-machine-probe, NULL,
-	              "Get/Set 1-wire machine probe capability (true/false).",
-	              cmd_cap_1w_machine_probe, 1, 1),
+	SHELL_CMD_ARG(cap-w1-sensors, NULL,
+	              "Get/Set 1-Wire sensor bus capability — enables the bus + auto-detects attached sensors (true/false).",
+	              cmd_cap_w1_sensors, 1, 1),
 
 	SHELL_CMD_ARG(cap-accelerometer, NULL,
 	              "Get/Set accelerometer capability — orientation, motion and free-fall (true/false).",
