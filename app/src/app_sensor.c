@@ -196,10 +196,14 @@ int app_sensor_init(void)
 
 #if defined(CONFIG_LIS2DH)
 	k_work_init(&m_accel_classify_work, accel_classify_work_handler);
-	ret = app_accel_init_motion(accel_motion_handler, NULL);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_accel_init_motion", ret);
-		res = res ? res : ret;
+	/* The accelerometer is a runtime capability: only arm motion + free-fall
+	 * (and read orientation, see app_sensor_sample) when cap-accelerometer is on. */
+	if (g_app_config.cap_accelerometer) {
+		ret = app_accel_init_motion(accel_motion_handler, NULL);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_accel_init_motion", ret);
+			res = res ? res : ret;
+		}
 	}
 #endif /* defined(CONFIG_LIS2DH) */
 
@@ -321,10 +325,13 @@ void app_sensor_sample(void)
 #endif /* defined(CONFIG_ADC) */
 
 #if defined(CONFIG_LIS2DH)
-	ret = app_accel_read(NULL, NULL, NULL, &orientation);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_accel_read", ret);
+	if (g_app_config.cap_accelerometer) {
+		ret = app_accel_read(NULL, NULL, NULL, &orientation);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_accel_read", ret);
+		}
 	}
+	/* orientation stays INT_MAX when the capability is off → absent in telemetry */
 #endif /* defined(CONFIG_LIS2DH) */
 
 #if defined(CONFIG_SHT4X)

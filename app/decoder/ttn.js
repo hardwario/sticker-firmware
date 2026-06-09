@@ -78,7 +78,7 @@ var _APP_NAMES = {
   40: "cap_hall_left", 41: "cap_hall_right", 42: "cap_input_a", 43: "cap_input_b",
   44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector", 47: "cap_1w_thermometer", 48: "cap_1w_machine_probe",
   49: "history_enable", 50: "history_sensors", 51: "alarm_limit", 52: "alarm_notif_time",
-  53: "pir_notify_act", 54: "accel_motion_sensitivity"
+  53: "pir_notify_act", 54: "accel_motion_sensitivity", 55: "cap_accelerometer"
 };
 
 // Enum-valued Application fields: decode renders the symbolic name, encode

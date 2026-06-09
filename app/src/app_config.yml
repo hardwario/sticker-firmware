@@ -277,6 +277,12 @@ parameters:
     type: bool
     help: "Get/Set 1-wire machine probe capability (true/false)."
 
+  - name: cap_accelerometer
+    proto_group: application
+    proto_id: 55
+    type: bool
+    help: "Get/Set accelerometer capability — orientation, motion and free-fall (true/false)."
+
   - name: temperature_alarm_enabled
     proto_group: application
     proto_id: 5

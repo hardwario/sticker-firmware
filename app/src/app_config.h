@@ -75,6 +75,7 @@ struct app_config {
 	bool cap_pir_detector;
 	bool cap_1w_thermometer;
 	bool cap_1w_machine_probe;
+	bool cap_accelerometer;
 	bool temperature_alarm_enabled;
 	float temperature_alarm_lo;
 	float temperature_alarm_hi;

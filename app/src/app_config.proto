@@ -102,6 +102,7 @@ message AppConfigMessage {
         optional uint32 alarm_notif_time = 52;
         optional bool pir_notify_act = 53;
         optional MotionSensitivity accel_motion_sensitivity = 54;
+        optional bool cap_accelerometer = 55;
     }
 }
 // END GENERATED CONFIG

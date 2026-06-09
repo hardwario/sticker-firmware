@@ -200,12 +200,12 @@ static void fill_snapshot(void)
 		t.illuminance = (uint32_t)(d.illuminance / 2.0f);
 	}
 
-	/* accel */
-	if (d.orientation != INT_MAX) {
+	/* accel (gated by the accelerometer capability) */
+	if (g_app_config.cap_accelerometer && d.orientation != INT_MAX) {
 		t.has_orientation = true;
 		t.orientation = (uint32_t)(d.orientation & 0xf);
 	}
-	if (d.accel_motion_count > 0) {
+	if (g_app_config.cap_accelerometer && d.accel_motion_count > 0) {
 		t.has_accel_motion_count = true;
 		t.accel_motion_count = d.accel_motion_count;
 	}
