@@ -437,6 +437,17 @@ int app_w1_slots_clear(int slot)
 	return 0;
 }
 
+int app_w1_slots_enroll_all(void)
+{
+	/* Re-scan the bus, then rebind — pass 2 of rebind auto-enrolls every
+	 * unbound device into the lowest free slot. Staged in config; the user
+	 * persists with `settings save`. Returns the number of bound slots. */
+	for (size_t ti = 0; ti < ARRAY_SIZE(m_types); ti++) {
+		(void)m_types[ti].scan();
+	}
+	return app_w1_slots_rebind();
+}
+
 /* ---- `w1` shell (scan / enroll / list / clear) ------------------------- */
 
 #if defined(CONFIG_SHELL)
@@ -528,11 +539,19 @@ static int parse_slot(const struct shell *shell, const char *arg, int *slot)
 	return 0;
 }
 
-/* enroll <slot>        → plug-one: bind the single newly-plugged device.
- * enroll <slot> <rom>  → explicit: bind that ROM (multi-sensor / remote). */
+/* enroll               → batch: bind every unbound device into free slots.
+ * enroll <slot>        → plug-one: bind the single newly-plugged device.
+ * enroll <slot> <rom>  → explicit: bind that ROM (multi-sensor). */
 static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv)
 {
 	int slot;
+
+	if (argc == 1) {
+		int n = app_w1_slots_enroll_all();
+
+		shell_print(shell, "enrolled; %d slot(s) bound", n);
+		return 0;
+	}
 
 	if (parse_slot(shell, argv[1], &slot) != 0) {
 		return -EINVAL;
@@ -550,12 +569,10 @@ static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv
 
 		switch (ret) {
 		case 0:
-			shell_print(shell, "enrolled ROM %012llx to slot %d (run `config save`)",
-				    serial, slot + 1);
+			shell_print(shell, "enrolled ROM %012llx to slot %d", serial, slot + 1);
 			return 0;
 		case -ENODEV:
-			shell_error(shell, "ROM %012llx not on the bus (run `sensor scan`)",
-				    serial);
+			shell_error(shell, "ROM %012llx not on the bus (run `w1 scan`)", serial);
 			return ret;
 		case -EEXIST:
 			shell_error(shell, "ROM %012llx already bound to another slot", serial);
@@ -571,16 +588,16 @@ static int cmd_sensor_enroll(const struct shell *shell, size_t argc, char **argv
 
 	switch (ret) {
 	case 0:
-		shell_print(shell, "enrolled slot %d -> %s ROM %012llx (run `config save`)",
-			    slot + 1, app_w1_slot_type_name(bound.type), bound.serial);
+		shell_print(shell, "enrolled slot %d -> %s ROM %012llx", slot + 1,
+			    app_w1_slot_type_name(bound.type), bound.serial);
 		return 0;
 	case -EAGAIN:
 		shell_error(shell, "no new sensor found — plug one in, or pass the ROM: "
-				   "`sensor enroll <slot> <rom>`");
+				   "`w1 enroll <slot> <rom>`");
 		return ret;
 	case -E2BIG:
 		shell_error(shell, "more than one new sensor — pass the ROM: "
-				   "`sensor enroll <slot> <rom>`");
+				   "`w1 enroll <slot> <rom>`");
 		return ret;
 	default:
 		shell_error(shell, "enroll failed: %d", ret);
@@ -602,7 +619,7 @@ static int cmd_sensor_clear(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "clear failed: %d", ret);
 		return ret;
 	}
-	shell_print(shell, "slot %d cleared (run `config save` to persist)", slot + 1);
+	shell_print(shell, "slot %d cleared", slot + 1);
 	return 0;
 }
 
@@ -612,11 +629,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_sensor_list, 1, 0),
 	SHELL_CMD_ARG(scan, NULL, "Scan the 1-Wire bus and list every device.", cmd_sensor_scan, 1,
 		      0),
-	SHELL_CMD_ARG(
-		enroll, NULL,
-		"Bind a sensor to <slot> (1..4): `enroll <slot>` for the single newly-plugged "
-		"device, or `enroll <slot> <rom-hex>` explicitly.",
-		cmd_sensor_enroll, 2, 1),
+	SHELL_CMD_ARG(enroll, NULL,
+		      "Enroll sensors: `enroll` binds all unbound devices into free slots; "
+		      "`enroll <slot>` binds the single newly-plugged device; "
+		      "`enroll <slot> <rom-hex>` binds a specific ROM.",
+		      cmd_sensor_enroll, 1, 2),
 	SHELL_CMD_ARG(clear, NULL, "Forget the sensor bound to <slot> (1..4).", cmd_sensor_clear, 2,
 		      0),
 	SHELL_SUBCMD_SET_END);

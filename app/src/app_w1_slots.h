@@ -88,8 +88,12 @@ int app_w1_slots_teach(int slot, struct app_w1_scan_entry *bound);
  * -ENODEV (serial not on the bus), -EEXIST (already bound elsewhere), errno. */
 int app_w1_slots_assign(int slot, uint64_t serial);
 
-/* Forget a slot's binding (staging config; durable after `config save`). */
+/* Forget a slot's binding (staging config; durable after `settings save`). */
 int app_w1_slots_clear(int slot);
+
+/* Batch enroll: scan the bus and bind every unbound device into the lowest free
+ * slots (staging config; durable after `settings save`). Returns bound count. */
+int app_w1_slots_enroll_all(void);
 
 #ifdef __cplusplus
 }
