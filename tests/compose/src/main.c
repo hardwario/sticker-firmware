@@ -180,7 +180,7 @@ ZTEST(compose, test_multiframe_split)
 	g_app_sensor_data.pressure = 990.0f;
 	g_app_config.cap_light_sensor = true;
 	g_app_sensor_data.illuminance = 300.0f;
-	g_app_config.cap_1w_thermometer = true;
+	g_app_config.cap_w1_sensors = true;
 	g_app_sensor_data.t1_temperature = 11.0f;
 	g_app_config.cap_hall_left = true;
 	test_hall.left_count = 42;
