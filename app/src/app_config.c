@@ -141,6 +141,22 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	SETTINGS_SET("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	SETTINGS_SET("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+	SETTINGS_SET("cap-hall-left", &m_app_config.cap_hall_left,
+		     sizeof(m_app_config.cap_hall_left));
+	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
+		     sizeof(m_app_config.cap_hall_right));
+	SETTINGS_SET("cap-input-a", &m_app_config.cap_input_a, sizeof(m_app_config.cap_input_a));
+	SETTINGS_SET("cap-input-b", &m_app_config.cap_input_b, sizeof(m_app_config.cap_input_b));
+	SETTINGS_SET("cap-light-sensor", &m_app_config.cap_light_sensor,
+		     sizeof(m_app_config.cap_light_sensor));
+	SETTINGS_SET("cap-barometer", &m_app_config.cap_barometer,
+		     sizeof(m_app_config.cap_barometer));
+	SETTINGS_SET("cap-pir-detector", &m_app_config.cap_pir_detector,
+		     sizeof(m_app_config.cap_pir_detector));
+	SETTINGS_SET("cap-1w-thermometer", &m_app_config.cap_1w_thermometer,
+		     sizeof(m_app_config.cap_1w_thermometer));
+	SETTINGS_SET("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
+		     sizeof(m_app_config.cap_1w_machine_probe));
 	SETTINGS_SET("temperature-alarm-enabled", &m_app_config.temperature_alarm_enabled,
 		     sizeof(m_app_config.temperature_alarm_enabled));
 	SETTINGS_SET("temperature-alarm-lo", &m_app_config.temperature_alarm_lo,
@@ -205,22 +221,6 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.corr_t1_temperature));
 	SETTINGS_SET("corr-t2-temperature", &m_app_config.corr_t2_temperature,
 		     sizeof(m_app_config.corr_t2_temperature));
-	SETTINGS_SET("cap-hall-left", &m_app_config.cap_hall_left,
-		     sizeof(m_app_config.cap_hall_left));
-	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
-		     sizeof(m_app_config.cap_hall_right));
-	SETTINGS_SET("cap-input-a", &m_app_config.cap_input_a, sizeof(m_app_config.cap_input_a));
-	SETTINGS_SET("cap-input-b", &m_app_config.cap_input_b, sizeof(m_app_config.cap_input_b));
-	SETTINGS_SET("cap-light-sensor", &m_app_config.cap_light_sensor,
-		     sizeof(m_app_config.cap_light_sensor));
-	SETTINGS_SET("cap-barometer", &m_app_config.cap_barometer,
-		     sizeof(m_app_config.cap_barometer));
-	SETTINGS_SET("cap-pir-detector", &m_app_config.cap_pir_detector,
-		     sizeof(m_app_config.cap_pir_detector));
-	SETTINGS_SET("cap-1w-thermometer", &m_app_config.cap_1w_thermometer,
-		     sizeof(m_app_config.cap_1w_thermometer));
-	SETTINGS_SET("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
-		     sizeof(m_app_config.cap_1w_machine_probe));
 	SETTINGS_SET("pir-notify-act", &m_app_config.pir_notify_act,
 		     sizeof(m_app_config.pir_notify_act));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
@@ -284,6 +284,22 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	EXPORT_FUNC("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	EXPORT_FUNC("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+	EXPORT_FUNC("cap-hall-left", &m_app_config.cap_hall_left,
+		    sizeof(m_app_config.cap_hall_left));
+	EXPORT_FUNC("cap-hall-right", &m_app_config.cap_hall_right,
+		    sizeof(m_app_config.cap_hall_right));
+	EXPORT_FUNC("cap-input-a", &m_app_config.cap_input_a, sizeof(m_app_config.cap_input_a));
+	EXPORT_FUNC("cap-input-b", &m_app_config.cap_input_b, sizeof(m_app_config.cap_input_b));
+	EXPORT_FUNC("cap-light-sensor", &m_app_config.cap_light_sensor,
+		    sizeof(m_app_config.cap_light_sensor));
+	EXPORT_FUNC("cap-barometer", &m_app_config.cap_barometer,
+		    sizeof(m_app_config.cap_barometer));
+	EXPORT_FUNC("cap-pir-detector", &m_app_config.cap_pir_detector,
+		    sizeof(m_app_config.cap_pir_detector));
+	EXPORT_FUNC("cap-1w-thermometer", &m_app_config.cap_1w_thermometer,
+		    sizeof(m_app_config.cap_1w_thermometer));
+	EXPORT_FUNC("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
+		    sizeof(m_app_config.cap_1w_machine_probe));
 	EXPORT_FUNC("temperature-alarm-enabled", &m_app_config.temperature_alarm_enabled,
 		    sizeof(m_app_config.temperature_alarm_enabled));
 	EXPORT_FUNC("temperature-alarm-lo", &m_app_config.temperature_alarm_lo,
@@ -348,22 +364,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.corr_t1_temperature));
 	EXPORT_FUNC("corr-t2-temperature", &m_app_config.corr_t2_temperature,
 		    sizeof(m_app_config.corr_t2_temperature));
-	EXPORT_FUNC("cap-hall-left", &m_app_config.cap_hall_left,
-		    sizeof(m_app_config.cap_hall_left));
-	EXPORT_FUNC("cap-hall-right", &m_app_config.cap_hall_right,
-		    sizeof(m_app_config.cap_hall_right));
-	EXPORT_FUNC("cap-input-a", &m_app_config.cap_input_a, sizeof(m_app_config.cap_input_a));
-	EXPORT_FUNC("cap-input-b", &m_app_config.cap_input_b, sizeof(m_app_config.cap_input_b));
-	EXPORT_FUNC("cap-light-sensor", &m_app_config.cap_light_sensor,
-		    sizeof(m_app_config.cap_light_sensor));
-	EXPORT_FUNC("cap-barometer", &m_app_config.cap_barometer,
-		    sizeof(m_app_config.cap_barometer));
-	EXPORT_FUNC("cap-pir-detector", &m_app_config.cap_pir_detector,
-		    sizeof(m_app_config.cap_pir_detector));
-	EXPORT_FUNC("cap-1w-thermometer", &m_app_config.cap_1w_thermometer,
-		    sizeof(m_app_config.cap_1w_thermometer));
-	EXPORT_FUNC("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
-		    sizeof(m_app_config.cap_1w_machine_probe));
 	EXPORT_FUNC("pir-notify-act", &m_app_config.pir_notify_act,
 		    sizeof(m_app_config.pir_notify_act));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
@@ -700,6 +700,60 @@ static void print_lrw_appskey(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " lrw-appskey %s", buf);
 }
 
+static void print_cap_hall_left(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-hall-left %s",
+		    m_app_config.cap_hall_left ? "true" : "false");
+}
+
+static void print_cap_hall_right(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-hall-right %s",
+		    m_app_config.cap_hall_right ? "true" : "false");
+}
+
+static void print_cap_input_a(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-input-a %s",
+		    m_app_config.cap_input_a ? "true" : "false");
+}
+
+static void print_cap_input_b(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-input-b %s",
+		    m_app_config.cap_input_b ? "true" : "false");
+}
+
+static void print_cap_light_sensor(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-light-sensor %s",
+		    m_app_config.cap_light_sensor ? "true" : "false");
+}
+
+static void print_cap_barometer(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-barometer %s",
+		    m_app_config.cap_barometer ? "true" : "false");
+}
+
+static void print_cap_pir_detector(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-pir-detector %s",
+		    m_app_config.cap_pir_detector ? "true" : "false");
+}
+
+static void print_cap_1w_thermometer(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-1w-thermometer %s",
+		    m_app_config.cap_1w_thermometer ? "true" : "false");
+}
+
+static void print_cap_1w_machine_probe(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-1w-machine-probe %s",
+		    m_app_config.cap_1w_machine_probe ? "true" : "false");
+}
+
 static void print_temperature_alarm_enabled(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " temperature-alarm-enabled %s",
@@ -904,60 +958,6 @@ static void print_corr_t2_temperature(const struct shell *shell)
 		    (double)m_app_config.corr_t2_temperature);
 }
 
-static void print_cap_hall_left(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-hall-left %s",
-		    m_app_config.cap_hall_left ? "true" : "false");
-}
-
-static void print_cap_hall_right(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-hall-right %s",
-		    m_app_config.cap_hall_right ? "true" : "false");
-}
-
-static void print_cap_input_a(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-input-a %s",
-		    m_app_config.cap_input_a ? "true" : "false");
-}
-
-static void print_cap_input_b(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-input-b %s",
-		    m_app_config.cap_input_b ? "true" : "false");
-}
-
-static void print_cap_light_sensor(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-light-sensor %s",
-		    m_app_config.cap_light_sensor ? "true" : "false");
-}
-
-static void print_cap_barometer(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-barometer %s",
-		    m_app_config.cap_barometer ? "true" : "false");
-}
-
-static void print_cap_pir_detector(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-pir-detector %s",
-		    m_app_config.cap_pir_detector ? "true" : "false");
-}
-
-static void print_cap_1w_thermometer(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-1w-thermometer %s",
-		    m_app_config.cap_1w_thermometer ? "true" : "false");
-}
-
-static void print_cap_1w_machine_probe(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-1w-machine-probe %s",
-		    m_app_config.cap_1w_machine_probe ? "true" : "false");
-}
-
 static void print_pir_notify_act(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " pir-notify-act %s",
@@ -1011,6 +1011,15 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_lrw_devaddr(shell);
 	print_lrw_nwkskey(shell);
 	print_lrw_appskey(shell);
+	print_cap_hall_left(shell);
+	print_cap_hall_right(shell);
+	print_cap_input_a(shell);
+	print_cap_input_b(shell);
+	print_cap_light_sensor(shell);
+	print_cap_barometer(shell);
+	print_cap_pir_detector(shell);
+	print_cap_1w_thermometer(shell);
+	print_cap_1w_machine_probe(shell);
 	print_temperature_alarm_enabled(shell);
 	print_temperature_alarm_lo(shell);
 	print_temperature_alarm_hi(shell);
@@ -1046,15 +1055,6 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_corr_temperature(shell);
 	print_corr_t1_temperature(shell);
 	print_corr_t2_temperature(shell);
-	print_cap_hall_left(shell);
-	print_cap_hall_right(shell);
-	print_cap_input_a(shell);
-	print_cap_input_b(shell);
-	print_cap_light_sensor(shell);
-	print_cap_barometer(shell);
-	print_cap_pir_detector(shell);
-	print_cap_1w_thermometer(shell);
-	print_cap_1w_machine_probe(shell);
 	print_pir_notify_act(shell);
 	print_accel_motion_sensitivity(shell);
 
@@ -1572,6 +1572,53 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_cap_hall_left(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_hall_left, print_cap_hall_left);
+}
+
+static int cmd_cap_hall_right(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_hall_right, print_cap_hall_right);
+}
+
+static int cmd_cap_input_a(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_input_a, print_cap_input_a);
+}
+
+static int cmd_cap_input_b(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_input_b, print_cap_input_b);
+}
+
+static int cmd_cap_light_sensor(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_light_sensor, print_cap_light_sensor);
+}
+
+static int cmd_cap_barometer(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_barometer, print_cap_barometer);
+}
+
+static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_pir_detector, print_cap_pir_detector);
+}
+
+static int cmd_cap_1w_thermometer(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_thermometer,
+			print_cap_1w_thermometer);
+}
+
+static int cmd_cap_1w_machine_probe(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_machine_probe,
+			print_cap_1w_machine_probe);
+}
+
 static int cmd_temperature_alarm_enabled(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.temperature_alarm_enabled,
@@ -1778,53 +1825,6 @@ static int cmd_corr_t2_temperature(const struct shell *shell, size_t argc, char 
 			 print_corr_t2_temperature);
 }
 
-static int cmd_cap_hall_left(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_hall_left, print_cap_hall_left);
-}
-
-static int cmd_cap_hall_right(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_hall_right, print_cap_hall_right);
-}
-
-static int cmd_cap_input_a(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_input_a, print_cap_input_a);
-}
-
-static int cmd_cap_input_b(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_input_b, print_cap_input_b);
-}
-
-static int cmd_cap_light_sensor(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_light_sensor, print_cap_light_sensor);
-}
-
-static int cmd_cap_barometer(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_barometer, print_cap_barometer);
-}
-
-static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_pir_detector, print_cap_pir_detector);
-}
-
-static int cmd_cap_1w_thermometer(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_thermometer,
-			print_cap_1w_thermometer);
-}
-
-static int cmd_cap_1w_machine_probe(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_machine_probe,
-			print_cap_1w_machine_probe);
-}
-
 static int cmd_pir_notify_act(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.pir_notify_act, print_pir_notify_act);
@@ -1975,6 +1975,42 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set LoRaWAN AppSKey (32 hexadecimal digits).",
 	              cmd_lrw_appskey, 1, 1),
 
+	SHELL_CMD_ARG(cap-hall-left, NULL,
+	              "Get/Set hall left capability (true/false).",
+	              cmd_cap_hall_left, 1, 1),
+
+	SHELL_CMD_ARG(cap-hall-right, NULL,
+	              "Get/Set hall right capability (true/false).",
+	              cmd_cap_hall_right, 1, 1),
+
+	SHELL_CMD_ARG(cap-input-a, NULL,
+	              "Get/Set input A capability (true/false).",
+	              cmd_cap_input_a, 1, 1),
+
+	SHELL_CMD_ARG(cap-input-b, NULL,
+	              "Get/Set input B capability (true/false).",
+	              cmd_cap_input_b, 1, 1),
+
+	SHELL_CMD_ARG(cap-light-sensor, NULL,
+	              "Get/Set light sensor capability (true/false).",
+	              cmd_cap_light_sensor, 1, 1),
+
+	SHELL_CMD_ARG(cap-barometer, NULL,
+	              "Get/Set barometer capability (true/false).",
+	              cmd_cap_barometer, 1, 1),
+
+	SHELL_CMD_ARG(cap-pir-detector, NULL,
+	              "Get/Set PIR detector capability (true/false).",
+	              cmd_cap_pir_detector, 1, 1),
+
+	SHELL_CMD_ARG(cap-1w-thermometer, NULL,
+	              "Get/Set 1-wire thermometer capability (true/false).",
+	              cmd_cap_1w_thermometer, 1, 1),
+
+	SHELL_CMD_ARG(cap-1w-machine-probe, NULL,
+	              "Get/Set 1-wire machine probe capability (true/false).",
+	              cmd_cap_1w_machine_probe, 1, 1),
+
 	SHELL_CMD_ARG(temperature-alarm-enabled, NULL,
 	              "Get/Set temperature alarm enabled (true/false).",
 	              cmd_temperature_alarm_enabled, 1, 1),
@@ -2114,42 +2150,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(corr-t2-temperature, NULL,
 	              "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C).",
 	              cmd_corr_t2_temperature, 1, 1),
-
-	SHELL_CMD_ARG(cap-hall-left, NULL,
-	              "Get/Set hall left capability (true/false).",
-	              cmd_cap_hall_left, 1, 1),
-
-	SHELL_CMD_ARG(cap-hall-right, NULL,
-	              "Get/Set hall right capability (true/false).",
-	              cmd_cap_hall_right, 1, 1),
-
-	SHELL_CMD_ARG(cap-input-a, NULL,
-	              "Get/Set input A capability (true/false).",
-	              cmd_cap_input_a, 1, 1),
-
-	SHELL_CMD_ARG(cap-input-b, NULL,
-	              "Get/Set input B capability (true/false).",
-	              cmd_cap_input_b, 1, 1),
-
-	SHELL_CMD_ARG(cap-light-sensor, NULL,
-	              "Get/Set light sensor capability (true/false).",
-	              cmd_cap_light_sensor, 1, 1),
-
-	SHELL_CMD_ARG(cap-barometer, NULL,
-	              "Get/Set barometer capability (true/false).",
-	              cmd_cap_barometer, 1, 1),
-
-	SHELL_CMD_ARG(cap-pir-detector, NULL,
-	              "Get/Set PIR detector capability (true/false).",
-	              cmd_cap_pir_detector, 1, 1),
-
-	SHELL_CMD_ARG(cap-1w-thermometer, NULL,
-	              "Get/Set 1-wire thermometer capability (true/false).",
-	              cmd_cap_1w_thermometer, 1, 1),
-
-	SHELL_CMD_ARG(cap-1w-machine-probe, NULL,
-	              "Get/Set 1-wire machine probe capability (true/false).",
-	              cmd_cap_1w_machine_probe, 1, 1),
 
 	SHELL_CMD_ARG(pir-notify-act, NULL,
 	              "Get/Set PIR motion alarm notify on activation (true/false).",

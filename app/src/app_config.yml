@@ -223,6 +223,60 @@ parameters:
     size: 16
     help: "Get/Set LoRaWAN AppSKey (32 hexadecimal digits)."
 
+  - name: cap_hall_left
+    proto_group: application
+    proto_id: 40
+    type: bool
+    help: "Get/Set hall left capability (true/false)."
+
+  - name: cap_hall_right
+    proto_group: application
+    proto_id: 41
+    type: bool
+    help: "Get/Set hall right capability (true/false)."
+
+  - name: cap_input_a
+    proto_group: application
+    proto_id: 42
+    type: bool
+    help: "Get/Set input A capability (true/false)."
+
+  - name: cap_input_b
+    proto_group: application
+    proto_id: 43
+    type: bool
+    help: "Get/Set input B capability (true/false)."
+
+  - name: cap_light_sensor
+    proto_group: application
+    proto_id: 44
+    type: bool
+    help: "Get/Set light sensor capability (true/false)."
+
+  - name: cap_barometer
+    proto_group: application
+    proto_id: 45
+    type: bool
+    help: "Get/Set barometer capability (true/false)."
+
+  - name: cap_pir_detector
+    proto_group: application
+    proto_id: 46
+    type: bool
+    help: "Get/Set PIR detector capability (true/false)."
+
+  - name: cap_1w_thermometer
+    proto_group: application
+    proto_id: 47
+    type: bool
+    help: "Get/Set 1-wire thermometer capability (true/false)."
+
+  - name: cap_1w_machine_probe
+    proto_group: application
+    proto_id: 48
+    type: bool
+    help: "Get/Set 1-wire machine probe capability (true/false)."
+
   - name: temperature_alarm_enabled
     proto_group: application
     proto_id: 5
@@ -483,60 +537,6 @@ parameters:
     min: -5.0
     max: 5.0
     help: "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C)."
-
-  - name: cap_hall_left
-    proto_group: application
-    proto_id: 40
-    type: bool
-    help: "Get/Set hall left capability (true/false)."
-
-  - name: cap_hall_right
-    proto_group: application
-    proto_id: 41
-    type: bool
-    help: "Get/Set hall right capability (true/false)."
-
-  - name: cap_input_a
-    proto_group: application
-    proto_id: 42
-    type: bool
-    help: "Get/Set input A capability (true/false)."
-
-  - name: cap_input_b
-    proto_group: application
-    proto_id: 43
-    type: bool
-    help: "Get/Set input B capability (true/false)."
-
-  - name: cap_light_sensor
-    proto_group: application
-    proto_id: 44
-    type: bool
-    help: "Get/Set light sensor capability (true/false)."
-
-  - name: cap_barometer
-    proto_group: application
-    proto_id: 45
-    type: bool
-    help: "Get/Set barometer capability (true/false)."
-
-  - name: cap_pir_detector
-    proto_group: application
-    proto_id: 46
-    type: bool
-    help: "Get/Set PIR detector capability (true/false)."
-
-  - name: cap_1w_thermometer
-    proto_group: application
-    proto_id: 47
-    type: bool
-    help: "Get/Set 1-wire thermometer capability (true/false)."
-
-  - name: cap_1w_machine_probe
-    proto_group: application
-    proto_id: 48
-    type: bool
-    help: "Get/Set 1-wire machine probe capability (true/false)."
 
   - name: pir_notify_act
     proto_group: application
