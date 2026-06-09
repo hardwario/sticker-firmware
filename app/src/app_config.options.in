@@ -6,6 +6,10 @@ AppConfigMessage.Lorawan.appkey max_length:32
 AppConfigMessage.Lorawan.devaddr max_length:8
 AppConfigMessage.Lorawan.nwkskey max_length:32
 AppConfigMessage.Lorawan.appskey max_length:32
+AppConfigMessage.Application.sensor1_rom max_length:16
+AppConfigMessage.Application.sensor2_rom max_length:16
+AppConfigMessage.Application.sensor3_rom max_length:16
+AppConfigMessage.Application.sensor4_rom max_length:16
 # END GENERATED CONFIG
 
 Response.Error.detail       max_size:32

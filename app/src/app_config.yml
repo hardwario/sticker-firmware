@@ -5,7 +5,7 @@ module:
   settings_prefix: config
   shell_command: config
   log_module: app_config
-  version: 1
+  version: 2
 
 enums:
   lrw_region:
@@ -56,7 +56,7 @@ proto:
   groups:
     - {key: root}
     - {key: lorawan, message: Lorawan, field: lorawan, proto_id: 5, strip_prefix: lrw_}
-    - {key: application, message: Application, field: application, proto_id: 6, reserved: [3]}
+    - {key: application, message: Application, field: application, proto_id: 6, reserved: [3, 47, 48]}
 parameters:
   - name: secret_key
     proto_group: root
@@ -265,17 +265,11 @@ parameters:
     type: bool
     help: "Get/Set PIR detector capability (true/false)."
 
-  - name: cap_1w_thermometer
+  - name: cap_w1_sensors
     proto_group: application
-    proto_id: 47
+    proto_id: 60
     type: bool
-    help: "Get/Set 1-wire thermometer capability (true/false)."
-
-  - name: cap_1w_machine_probe
-    proto_group: application
-    proto_id: 48
-    type: bool
-    help: "Get/Set 1-wire machine probe capability (true/false)."
+    help: "Get/Set 1-Wire sensor bus capability — enables the bus + auto-detects attached sensors (true/false)."
 
   - name: cap_accelerometer
     proto_group: application
@@ -558,3 +552,33 @@ parameters:
     enum: motion_sensitivity
     default: "off"
     help: "Get/Set accelerometer motion detection sensitivity (off/low/medium/high)."
+
+  # --- 1-Wire sensor slots (1wire-sensors) --------------------------------
+  # Each slot binds a physical 1-Wire sensor to a logical position by its ROM
+  # serial (stable across reboots/rescans). ONLY the ROM is persisted — the
+  # sensor type (dallas / machine-probe / …) and SHT variant are auto-detected
+  # at runtime from the ROM family code during the bus scan. all-zero = empty.
+  - name: sensor1_rom
+    proto_group: application
+    proto_id: 56
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor2_rom
+    proto_group: application
+    proto_id: 57
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor3_rom
+    proto_group: application
+    proto_id: 58
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor4_rom
+    proto_group: application
+    proto_id: 59
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty)."

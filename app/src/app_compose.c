@@ -217,17 +217,17 @@ static void fill_snapshot(void)
 	}
 
 	/* 1-wire ext */
-	if (g_app_config.cap_1w_thermometer && !isnan(d.t1_temperature)) {
+	if (g_app_config.cap_w1_sensors && !isnan(d.t1_temperature)) {
 		t.has_ext1_temperature = true;
 		t.ext1_temperature = (int32_t)(d.t1_temperature * 100.0f);
 	}
-	if (g_app_config.cap_1w_thermometer && !isnan(d.t2_temperature)) {
+	if (g_app_config.cap_w1_sensors && !isnan(d.t2_temperature)) {
 		t.has_ext2_temperature = true;
 		t.ext2_temperature = (int32_t)(d.t2_temperature * 100.0f);
 	}
 
 	/* machine probe 1 / 2 */
-	if (g_app_config.cap_1w_machine_probe) {
+	if (g_app_config.cap_w1_sensors) {
 		if (!isnan(d.mp1_temperature)) {
 			t.has_mp1_temperature = true;
 			t.mp1_temperature = (int32_t)(d.mp1_temperature * 100.0f);

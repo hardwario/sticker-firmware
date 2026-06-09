@@ -153,10 +153,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_barometer));
 	SETTINGS_SET("cap-pir-detector", &m_app_config.cap_pir_detector,
 		     sizeof(m_app_config.cap_pir_detector));
-	SETTINGS_SET("cap-1w-thermometer", &m_app_config.cap_1w_thermometer,
-		     sizeof(m_app_config.cap_1w_thermometer));
-	SETTINGS_SET("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
-		     sizeof(m_app_config.cap_1w_machine_probe));
+	SETTINGS_SET("cap-w1-sensors", &m_app_config.cap_w1_sensors,
+		     sizeof(m_app_config.cap_w1_sensors));
 	SETTINGS_SET("cap-accelerometer", &m_app_config.cap_accelerometer,
 		     sizeof(m_app_config.cap_accelerometer));
 	SETTINGS_SET("temperature-alarm-enabled", &m_app_config.temperature_alarm_enabled,
@@ -225,6 +223,10 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.pir_notify_act));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
+	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
+	SETTINGS_SET("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
+	SETTINGS_SET("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
+	SETTINGS_SET("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
 
 #undef SETTINGS_SET
 
@@ -296,10 +298,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_barometer));
 	EXPORT_FUNC("cap-pir-detector", &m_app_config.cap_pir_detector,
 		    sizeof(m_app_config.cap_pir_detector));
-	EXPORT_FUNC("cap-1w-thermometer", &m_app_config.cap_1w_thermometer,
-		    sizeof(m_app_config.cap_1w_thermometer));
-	EXPORT_FUNC("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
-		    sizeof(m_app_config.cap_1w_machine_probe));
+	EXPORT_FUNC("cap-w1-sensors", &m_app_config.cap_w1_sensors,
+		    sizeof(m_app_config.cap_w1_sensors));
 	EXPORT_FUNC("cap-accelerometer", &m_app_config.cap_accelerometer,
 		    sizeof(m_app_config.cap_accelerometer));
 	EXPORT_FUNC("temperature-alarm-enabled", &m_app_config.temperature_alarm_enabled,
@@ -368,6 +368,10 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.pir_notify_act));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
+	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
+	EXPORT_FUNC("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
+	EXPORT_FUNC("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
+	EXPORT_FUNC("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
 
 #undef EXPORT_FUNC
 
@@ -742,16 +746,10 @@ static void print_cap_pir_detector(const struct shell *shell)
 		    m_app_config.cap_pir_detector ? "true" : "false");
 }
 
-static void print_cap_1w_thermometer(const struct shell *shell)
+static void print_cap_w1_sensors(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " cap-1w-thermometer %s",
-		    m_app_config.cap_1w_thermometer ? "true" : "false");
-}
-
-static void print_cap_1w_machine_probe(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-1w-machine-probe %s",
-		    m_app_config.cap_1w_machine_probe ? "true" : "false");
+	shell_print(shell, SETTINGS_PFX " cap-w1-sensors %s",
+		    m_app_config.cap_w1_sensors ? "true" : "false");
 }
 
 static void print_cap_accelerometer(const struct shell *shell)
@@ -991,6 +989,62 @@ static void print_accel_motion_sensitivity(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " accel-motion-sensitivity %s", str);
 }
 
+static void print_sensor1_rom(const struct shell *shell)
+{
+	char buf[2 * sizeof(m_app_config.sensor1_rom) + 1];
+
+	int ret = bin2hex(m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom), buf,
+			  sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " sensor1-rom %s", buf);
+}
+
+static void print_sensor2_rom(const struct shell *shell)
+{
+	char buf[2 * sizeof(m_app_config.sensor2_rom) + 1];
+
+	int ret = bin2hex(m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom), buf,
+			  sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " sensor2-rom %s", buf);
+}
+
+static void print_sensor3_rom(const struct shell *shell)
+{
+	char buf[2 * sizeof(m_app_config.sensor3_rom) + 1];
+
+	int ret = bin2hex(m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom), buf,
+			  sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " sensor3-rom %s", buf);
+}
+
+static void print_sensor4_rom(const struct shell *shell)
+{
+	char buf[2 * sizeof(m_app_config.sensor4_rom) + 1];
+
+	int ret = bin2hex(m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom), buf,
+			  sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " sensor4-rom %s", buf);
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -1022,8 +1076,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_light_sensor(shell);
 	print_cap_barometer(shell);
 	print_cap_pir_detector(shell);
-	print_cap_1w_thermometer(shell);
-	print_cap_1w_machine_probe(shell);
+	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
 	print_temperature_alarm_enabled(shell);
 	print_temperature_alarm_lo(shell);
@@ -1062,6 +1115,10 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_t2_corr(shell);
 	print_pir_notify_act(shell);
 	print_accel_motion_sensitivity(shell);
+	print_sensor1_rom(shell);
+	print_sensor2_rom(shell);
+	print_sensor3_rom(shell);
+	print_sensor4_rom(shell);
 
 	return 0;
 }
@@ -1612,16 +1669,9 @@ static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **a
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_pir_detector, print_cap_pir_detector);
 }
 
-static int cmd_cap_1w_thermometer(const struct shell *shell, size_t argc, char **argv)
+static int cmd_cap_w1_sensors(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_thermometer,
-			print_cap_1w_thermometer);
-}
-
-static int cmd_cap_1w_machine_probe(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_machine_probe,
-			print_cap_1w_machine_probe);
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_w1_sensors, print_cap_w1_sensors);
 }
 
 static int cmd_cap_accelerometer(const struct shell *shell, size_t argc, char **argv)
@@ -1874,6 +1924,126 @@ static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, 
 	return 0;
 }
 
+static int cmd_sensor1_rom(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_sensor1_rom(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.sensor1_rom)) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.sensor1_rom,
+		      sizeof(m_app_config.sensor1_rom));
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_sensor2_rom(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_sensor2_rom(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.sensor2_rom)) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.sensor2_rom,
+		      sizeof(m_app_config.sensor2_rom));
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_sensor3_rom(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_sensor3_rom(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.sensor3_rom)) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.sensor3_rom,
+		      sizeof(m_app_config.sensor3_rom));
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_sensor4_rom(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_sensor4_rom(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.sensor4_rom)) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.sensor4_rom,
+		      sizeof(m_app_config.sensor4_rom));
+	if (!ret) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -2012,13 +2182,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set PIR detector capability (true/false).",
 	              cmd_cap_pir_detector, 1, 1),
 
-	SHELL_CMD_ARG(cap-1w-thermometer, NULL,
-	              "Get/Set 1-wire thermometer capability (true/false).",
-	              cmd_cap_1w_thermometer, 1, 1),
-
-	SHELL_CMD_ARG(cap-1w-machine-probe, NULL,
-	              "Get/Set 1-wire machine probe capability (true/false).",
-	              cmd_cap_1w_machine_probe, 1, 1),
+	SHELL_CMD_ARG(cap-w1-sensors, NULL,
+	              "Get/Set 1-Wire sensor bus capability — enables the bus + auto-detects attached sensors (true/false).",
+	              cmd_cap_w1_sensors, 1, 1),
 
 	SHELL_CMD_ARG(cap-accelerometer, NULL,
 	              "Get/Set accelerometer capability — orientation, motion and free-fall (true/false).",
@@ -2171,6 +2337,22 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",
 	              cmd_accel_motion_sensitivity, 1, 1),
+
+	SHELL_CMD_ARG(sensor1-rom, NULL,
+	              "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty).",
+	              cmd_sensor1_rom, 1, 1),
+
+	SHELL_CMD_ARG(sensor2-rom, NULL,
+	              "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty).",
+	              cmd_sensor2_rom, 1, 1),
+
+	SHELL_CMD_ARG(sensor3-rom, NULL,
+	              "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty).",
+	              cmd_sensor3_rom, 1, 1),
+
+	SHELL_CMD_ARG(sensor4-rom, NULL,
+	              "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty).",
+	              cmd_sensor4_rom, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );

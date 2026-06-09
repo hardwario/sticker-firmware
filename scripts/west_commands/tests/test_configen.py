@@ -63,8 +63,9 @@ def workdir(tmp_path):
 def test_build_options_lines_matches_committed():
     cfg = _load_config()
     lines = configen.build_options_lines(cfg)
-    # Only the 7 hex Lorawan keys get max_length; secret_key is a callback.
-    assert lines == [
+    # The 7 hex Lorawan keys + the 4 per-slot 1-Wire ROM keys get max_length;
+    # secret_key is a callback. Order-independent (config declaration order).
+    assert sorted(lines) == sorted([
         "AppConfigMessage.Lorawan.deveui max_length:16",
         "AppConfigMessage.Lorawan.joineui max_length:16",
         "AppConfigMessage.Lorawan.nwkkey max_length:32",
@@ -72,7 +73,11 @@ def test_build_options_lines_matches_committed():
         "AppConfigMessage.Lorawan.devaddr max_length:8",
         "AppConfigMessage.Lorawan.nwkskey max_length:32",
         "AppConfigMessage.Lorawan.appskey max_length:32",
-    ]
+        "AppConfigMessage.Application.sensor1_rom max_length:16",
+        "AppConfigMessage.Application.sensor2_rom max_length:16",
+        "AppConfigMessage.Application.sensor3_rom max_length:16",
+        "AppConfigMessage.Application.sensor4_rom max_length:16",
+    ])
     assert not any("secret_key" in ln for ln in lines)
 
 

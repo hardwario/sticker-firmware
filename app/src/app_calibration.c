@@ -263,7 +263,7 @@ int app_calibration_init(void)
 	/* Init 1-Wire bus (DS2484) — non-fatal on failure */
 	bool w1_ready = false;
 
-	if (g_app_config.cap_1w_thermometer || g_app_config.cap_1w_machine_probe) {
+	if (g_app_config.cap_w1_sensors) {
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
 
 		ret = device_init(dev);
@@ -273,7 +273,7 @@ int app_calibration_init(void)
 	}
 
 	/* Init DS18B20 sensors */
-	if (w1_ready && g_app_config.cap_1w_thermometer) {
+	if (w1_ready && g_app_config.cap_w1_sensors) {
 		device_init(DEVICE_DT_GET(DT_NODELABEL(ds18b20_0)));
 		device_init(DEVICE_DT_GET(DT_NODELABEL(ds18b20_1)));
 
@@ -283,7 +283,7 @@ int app_calibration_init(void)
 	}
 
 	/* Init Machine Probe sensors */
-	if (w1_ready && g_app_config.cap_1w_machine_probe) {
+	if (w1_ready && g_app_config.cap_w1_sensors) {
 		device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_0)));
 		device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_1)));
 

@@ -40,7 +40,7 @@ enum app_config_motion_sensitivity {
 	APP_CONFIG_MOTION_SENSITIVITY_HIGH = 3,
 };
 
-#define APP_CONFIG_VERSION 1
+#define APP_CONFIG_VERSION 2
 
 struct app_config {
 	uint32_t config_version;
@@ -73,8 +73,7 @@ struct app_config {
 	bool cap_light_sensor;
 	bool cap_barometer;
 	bool cap_pir_detector;
-	bool cap_1w_thermometer;
-	bool cap_1w_machine_probe;
+	bool cap_w1_sensors;
 	bool cap_accelerometer;
 	bool temperature_alarm_enabled;
 	float temperature_alarm_lo;
@@ -113,6 +112,10 @@ struct app_config {
 	float t2_corr;
 	bool pir_notify_act;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
+	uint8_t sensor1_rom[8];
+	uint8_t sensor2_rom[8];
+	uint8_t sensor3_rom[8];
+	uint8_t sensor4_rom[8];
 };
 
 extern struct app_config g_app_config;

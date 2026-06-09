@@ -217,8 +217,7 @@ int app_config_apply_application(const AppConfigMessage_Application *src, uint32
 	APPLY_BOOL(cap_light_sensor);
 	APPLY_BOOL(cap_barometer);
 	APPLY_BOOL(cap_pir_detector);
-	APPLY_BOOL(cap_1w_thermometer);
-	APPLY_BOOL(cap_1w_machine_probe);
+	APPLY_BOOL(cap_w1_sensors);
 
 	APPLY_BOOL(history_enable);
 	if (src->has_history_sensors) {
@@ -384,8 +383,7 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	FILL_BOOL(44, cap_light_sensor);
 	FILL_BOOL(45, cap_barometer);
 	FILL_BOOL(46, cap_pir_detector);
-	FILL_BOOL(47, cap_1w_thermometer);
-	FILL_BOOL(48, cap_1w_machine_probe);
+	FILL_BOOL(60, cap_w1_sensors);
 	FILL_BOOL(49, history_enable);
 	FILL_NUM(50, history_sensors);
 	FILL_NUM(51, alarm_limit);
