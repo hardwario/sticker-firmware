@@ -103,6 +103,10 @@ message AppConfigMessage {
         optional bool pir_notify_act = 53;
         optional MotionSensitivity accel_motion_sensitivity = 54;
         optional bool cap_accelerometer = 55;
+        optional string sensor1_rom = 56;
+        optional string sensor2_rom = 57;
+        optional string sensor3_rom = 58;
+        optional string sensor4_rom = 59;
     }
 }
 // END GENERATED CONFIG

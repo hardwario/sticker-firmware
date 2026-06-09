@@ -5,7 +5,7 @@ module:
   settings_prefix: config
   shell_command: config
   log_module: app_config
-  version: 1
+  version: 2
 
 enums:
   lrw_region:
@@ -558,3 +558,33 @@ parameters:
     enum: motion_sensitivity
     default: "off"
     help: "Get/Set accelerometer motion detection sensitivity (off/low/medium/high)."
+
+  # --- 1-Wire sensor slots (1wire-sensors) --------------------------------
+  # Each slot binds a physical 1-Wire sensor to a logical position by its ROM
+  # serial (stable across reboots/rescans). ONLY the ROM is persisted — the
+  # sensor type (dallas / machine-probe / …) and SHT variant are auto-detected
+  # at runtime from the ROM family code during the bus scan. all-zero = empty.
+  - name: sensor1_rom
+    proto_group: application
+    proto_id: 56
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor2_rom
+    proto_group: application
+    proto_id: 57
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor3_rom
+    proto_group: application
+    proto_id: 58
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor4_rom
+    proto_group: application
+    proto_id: 59
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty)."

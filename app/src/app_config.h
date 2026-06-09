@@ -40,7 +40,7 @@ enum app_config_motion_sensitivity {
 	APP_CONFIG_MOTION_SENSITIVITY_HIGH = 3,
 };
 
-#define APP_CONFIG_VERSION 1
+#define APP_CONFIG_VERSION 2
 
 struct app_config {
 	uint32_t config_version;
@@ -113,6 +113,10 @@ struct app_config {
 	float t2_corr;
 	bool pir_notify_act;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
+	uint8_t sensor1_rom[8];
+	uint8_t sensor2_rom[8];
+	uint8_t sensor3_rom[8];
+	uint8_t sensor4_rom[8];
 };
 
 extern struct app_config g_app_config;
