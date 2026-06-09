@@ -271,11 +271,15 @@ message AlarmEvent {
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap
 // stays on fPort 1). Fields are grouped per sensor; each group's boolean state
 // lives in its own `*_flags` field so a sensor's data stays together as an
-// atomic unit. A field is present only when its sensor is connected (capability
-// on) and has valid data. The composer packs whole groups by priority into one
-// or more frames to fit the LoRaWAN payload budget (split, never drop); all
-// frames of a report carry the same snapshot. Scalars are scaled-int varints.
-// The same message is emitted for periodic reports and event triggers.
+// atomic unit. A group is sent whenever its sensor is enabled (capability on),
+// as a whole, every report — its fields are present even when 0/false (e.g. a
+// hall counter at 0, or boot=false). The system group (voltage, system_flags)
+// is always present. Digital fields carry their real value (0 is valid); analog
+// scalars are omitted only when there is no valid sample yet (NaN). The composer
+// packs whole groups by priority into one or more frames to fit the LoRaWAN
+// payload budget (split, never drop); all frames of a report carry the same
+// snapshot. Scalars are scaled-int varints. The same message is emitted for
+// periodic reports and event triggers.
 message Telemetry {
     // system
     optional uint32 voltage          = 1;   // V    x50
