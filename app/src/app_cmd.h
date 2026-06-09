@@ -8,6 +8,7 @@
 #define APP_CMD_H_
 
 /* Standard includes */
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -63,6 +64,28 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 				uint32_t t0_unix, uint32_t present, uint32_t interval_s,
 				const uint8_t *samples, size_t samples_len, uint8_t *out,
 				size_t out_cap, size_t *out_len);
+
+/* One alarm edge for app_cmd_build_alarm_report(). source/edge/side carry the
+ * AlarmEvent_Source/Edge/Side enum values (app_alarm fills these without
+ * including the nanopb header). value is the scaled current reading and is only
+ * meaningful when has_value is true (discrete sources leave it absent). */
+struct app_cmd_alarm_event {
+	uint8_t source; /* AlarmEvent_Source / enum app_alarm_source */
+	uint8_t edge;   /* AlarmEvent_Edge: 0=activate, 1=deactivate */
+	uint8_t side;   /* AlarmEvent_Side: 0=none, 1=lo, 2=hi */
+	bool has_value; /* value present (threshold sources) */
+	int32_t value;  /* scaled current value (×100 temp/hum, ×10 pressure) */
+	uint32_t rel_s; /* seconds since base_time */
+};
+
+/* Build an alarm-detail batch (AlarmReport) for fPort 3 (#27) into `out`.
+ * `events[0..n_events)` are encoded (capped to the message's 8-event array);
+ * `total` is the true window count and may exceed the encoded events when the
+ * caller trimmed to fit the data rate. Returns 0 with *out_len set, -EINVAL on
+ * a NULL argument, or -EMSGSIZE if it won't fit `out_cap`. */
+int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total,
+			       const struct app_cmd_alarm_event *events, size_t n_events,
+			       uint8_t *out, size_t out_cap, size_t *out_len);
 
 #ifdef __cplusplus
 }

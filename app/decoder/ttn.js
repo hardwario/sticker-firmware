@@ -703,49 +703,77 @@ function decodeDownlink(input) {
   return { data: { bytes_hex: _pbBytesToHex(input.bytes) }, warnings: [], errors: [] };
 }
 
-// fPort 3: alarm-detail batch (#27). Header [total u8][base_unix u32 LE] then
-// records [hdr u8: source<<3 | side<<1 | active][rel_s u16][threshold i16]
-// [value i16][hyst i16]. threshold/value/hyst scaled like the periodic payload
-// (temp/hum ×100, pressure ×10); 0x8000 = N/A (discrete sources). Per-event
-// time = base_unix + rel_s. `total` may exceed the records present (DR-capped).
+// fPort 3: alarm-detail batch (#27), protobuf AlarmReport. Top-level fields:
+// base_time(1, varint), total(2, varint), repeated AlarmEvent events(3, len-
+// delimited). AlarmEvent: source(1), edge(2), side(3), rel_s(4) varints +
+// optional sint32 value(5). source/edge/side are the AlarmEvent_Source/Edge/Side
+// enums; value is scaled (temp/hum ×100, pressure ×10) and absent for discrete
+// sources. Per-event time = base_time + rel_s. `total` may exceed the events
+// present (some dropped to fit the data rate → truncated).
 var _ALARM_SOURCES = ["hall-left", "hall-right", "pir", "input-a", "input-b",
   "temperature", "humidity", "pressure", "t1-temperature", "t2-temperature",
   "accel-motion"];
-var _ALARM_SIDES = ["na", "lo", "hi"];
-var _ALARM_SENTINEL = 0x8000;
+var _ALARM_EDGES = ["activate", "deactivate"];
+var _ALARM_SIDES = ["none", "lo", "hi"];
 
 function _alarmUnscale(source, raw) {
-  if (raw === _ALARM_SENTINEL) return null;
-  var v = raw > 0x7fff ? raw - 0x10000 : raw; // int16
-  return source === 7 ? v / 10 : v / 100;     // 7 = pressure (hPa×10)
+  return source === 7 ? raw / 10 : raw / 100; // 7 = pressure (hPa×10)
+}
+
+function _decodeAlarmEvent(bytes, start, end) {
+  var ev = { source: 0, edge: 0, side: 0, rel_s: 0, value: null };
+  var p = start;
+  while (p < end) {
+    var t = _pbReadVarint(bytes, p); p = t.next;
+    var field = t.value >>> 3, wire = t.value & 0x7;
+    if (wire === 0) {
+      var v = _pbReadVarint(bytes, p); p = v.next;
+      if (field === 1) ev.source = v.value;
+      else if (field === 2) ev.edge = v.value;
+      else if (field === 3) ev.side = v.value;
+      else if (field === 4) ev.rel_s = v.value;
+      else if (field === 5) ev.value = _pbZigzag(v.value);
+    } else if (wire === 2) {
+      var l = _pbReadVarint(bytes, p); p = l.next + l.value;
+    } else { break; }
+  }
+  return ev;
 }
 
 function decodeAlarmBatch(bytes) {
-  if (bytes.length < 5) return { total: 0, base_time: 0, alarms: [] };
-  var total = bytes[0];
-  var base = (bytes[1] | (bytes[2] << 8) | (bytes[3] << 16) | (bytes[4] << 24)) >>> 0;
-  var out = { total: total, base_time: base, alarms: [] };
-  var p = 5;
-  while (p + 9 <= bytes.length) {
-    var hdr = bytes[p++];
-    var source = hdr >> 3;
-    var side = (hdr >> 1) & 0x3;
-    var active = (hdr & 1) !== 0;
-    var rel = bytes[p] | (bytes[p + 1] << 8); p += 2;
-    var thr = bytes[p] | (bytes[p + 1] << 8); p += 2;
-    var val = bytes[p] | (bytes[p + 1] << 8); p += 2;
-    var hyst = bytes[p] | (bytes[p + 1] << 8); p += 2;
-    out.alarms.push({
-      source: _ALARM_SOURCES[source] || ("src" + source),
-      event: active ? "activate" : "deactivate",
-      side: _ALARM_SIDES[side] || "na",
-      threshold: _alarmUnscale(source, thr),
-      value: _alarmUnscale(source, val),
-      hysteresis: _alarmUnscale(source, hyst),
-      time: (base + rel) >>> 0,
-    });
+  var out = { base_time: 0, total: 0, alarms: [] };
+  var rels = [];
+  var pos = 0;
+  while (pos < bytes.length) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var field = tag.value >>> 3, wire = tag.value & 0x7;
+    if (wire === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (field === 1) out.base_time = v.value >>> 0;
+      else if (field === 2) out.total = v.value;
+    } else if (wire === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      var endE = pos + len.value;
+      if (field === 3) {
+        var ev = _decodeAlarmEvent(bytes, pos, endE);
+        out.alarms.push({
+          source: _ALARM_SOURCES[ev.source] || ("src" + ev.source),
+          event: _ALARM_EDGES[ev.edge] || "activate",
+          side: _ALARM_SIDES[ev.side] || "none",
+          value: ev.value === null ? null : _alarmUnscale(ev.source, ev.value),
+          time: 0,
+        });
+        rels.push(ev.rel_s);
+      }
+      pos = endE;
+    } else { break; }
   }
-  out.truncated = out.alarms.length < total; // some alarms dropped to fit the DR
+  // base_time (field 1) precedes events (field 3) on the wire, but resolve the
+  // per-event times after the loop so order can't bite us.
+  for (var i = 0; i < out.alarms.length; i++) {
+    out.alarms[i].time = (out.base_time + rels[i]) >>> 0;
+  }
+  out.truncated = out.alarms.length < out.total; // some alarms dropped to fit the DR
   return out;
 }
 
