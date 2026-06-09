@@ -6,6 +6,8 @@
 
 #include "verify.h"
 
+#include <zephyr/toolchain.h>
+
 #include <string.h>
 
 bool verify_header(const struct sfu_header *hdr, uint32_t slot_size)

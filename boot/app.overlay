@@ -1,0 +1,10 @@
+/*
+ * The bootloader runs from boot_partition, not the application slot.
+ * The board DTS defaults zephyr,code-partition to slot0 (for the app build);
+ * override it here so the bootloader links at the boot partition base.
+ */
+/ {
+	chosen {
+		zephyr,code-partition = &boot_partition;
+	};
+};

@@ -25,6 +25,7 @@
  * this references it so the dependency is explicit.
  */
 #define META_ID FIXED_PARTITION_ID(sfu_meta_partition)
+#define META_SIZE FIXED_PARTITION_SIZE(sfu_meta_partition)
 
 #define CRC_CHUNK 256
 
@@ -120,7 +121,7 @@ int meta_write(const struct sfu_meta *meta)
 	if (ret) {
 		return ret;
 	}
-	ret = flash_area_erase(fa, 0, flash_area_get_size(fa));
+	ret = flash_area_erase(fa, 0, META_SIZE);
 	if (ret == 0) {
 		ret = flash_area_write(fa, 0, meta, sizeof(*meta));
 	}
