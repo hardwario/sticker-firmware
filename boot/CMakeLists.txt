@@ -20,4 +20,5 @@ target_sources(app PRIVATE
   src/st25dv_mb.c
   src/flash_writer.c
   src/verify.c
+  src/auth.c
 )

@@ -30,9 +30,22 @@ extern "C" {
 #define SFU_FLAG_SIGNED      0x0001
 #define SFU_FLAG_CRC_PRESENT 0x0002
 
-#define SFU_HEADER_LEN    32
-#define SFU_SIGNATURE_LEN 64 /* Ed25519 */
-#define SFU_PREAMBLE_LEN  (SFU_HEADER_LEN + SFU_SIGNATURE_LEN) /* 96 */
+#define SFU_HEADER_LEN 32
+
+/*
+ * Authentication: symmetric AES-CCM with the per-device secret_key (same key
+ * the config-ingest path uses). The phone encrypts each frame; the bootloader
+ * decrypts with the stored key. A device whose stored key is all-zero accepts
+ * plaintext frames unconditionally (factory bootstrap). The nonce_counter is
+ * NOT used for replay protection here (per design); a per-session value sent
+ * in CMD_START diversifies the nonce instead.
+ */
+#define NFC_KEY_LEN       16
+#define NFC_CCM_TAG_LEN   8
+#define NFC_CCM_NONCE_LEN 13 /* serial(4) | session(4) | seq(4) | 0 */
+
+/* Plaintext bytes per DATA frame (frame data = ciphertext + tag). */
+#define NFC_MAX_PLAINTEXT (NFC_MAX_DATA - NFC_CCM_TAG_LEN) /* 232 */
 
 /* 32-byte image header, little-endian on the wire. */
 struct sfu_header {
@@ -46,7 +59,10 @@ struct sfu_header {
 	uint8_t reserved[8];
 } __attribute__((packed));
 
-/* Validity metadata committed to flash after a successful update. */
+/* Validity + key metadata. Written by the bootloader after a successful
+ * update, and refreshed by the application on every boot so the bootloader
+ * always has the current secret_key (the app provisions it from its config).
+ * A blank/erased record or an all-zero key means "unkeyed" (factory). */
 #define SFU_META_MAGIC 0x53464D31u /* "SFM1" */
 
 struct sfu_meta {
@@ -54,6 +70,8 @@ struct sfu_meta {
 	uint32_t payload_len;
 	uint32_t payload_crc32;
 	uint32_t valid;        /* SFU_META_MAGIC -> bootable */
+	uint8_t secret_key[NFC_KEY_LEN];
+	uint32_t serial;       /* device serial, part of the CCM nonce */
 };
 
 /* ---- Logical frame layer -------------------------------------------- */

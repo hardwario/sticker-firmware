@@ -8,6 +8,7 @@
  * See doc/nfc-update-protocol.md. WIP scaffold — not yet HW-tested.
  */
 
+#include "auth.h"
 #include "flash_writer.h"
 #include "st25dv_mb.h"
 #include "verify.h"
@@ -17,6 +18,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/reboot.h>
@@ -106,7 +108,6 @@ static void jump_to_app(uint32_t base)
 /* ---- DFU receive loop ----------------------------------------------- */
 
 static struct sfu_header m_hdr;
-static uint8_t m_sig[SFU_SIGNATURE_LEN];
 static bool m_started;
 
 static size_t build_status(uint8_t *out, uint8_t status, uint16_t ctx)
@@ -117,13 +118,24 @@ static size_t build_status(uint8_t *out, uint8_t status, uint16_t ctx)
 	return 3;
 }
 
+/* START data = session(4) || CCM(header) [|| tag]  (plaintext header if unkeyed). */
 static uint16_t handle_start(const uint8_t *data, size_t len)
 {
-	if (len < SFU_PREAMBLE_LEN) {
+	if (len < 4) {
 		return NFC_ST_ERR_MAGIC;
 	}
-	memcpy(&m_hdr, data, SFU_HEADER_LEN);
-	memcpy(m_sig, data + SFU_HEADER_LEN, SFU_SIGNATURE_LEN);
+	auth_set_session(sys_get_le32(data));
+
+	uint8_t hdrbuf[SFU_HEADER_LEN + NFC_CCM_TAG_LEN];
+	size_t hl = 0;
+
+	if (auth_decrypt(0, data + 4, len - 4, hdrbuf, &hl) != 0) {
+		return NFC_ST_ERR_VERIFY;
+	}
+	if (hl != SFU_HEADER_LEN) {
+		return NFC_ST_ERR_MAGIC;
+	}
+	memcpy(&m_hdr, hdrbuf, SFU_HEADER_LEN);
 
 	if (!verify_header(&m_hdr, fw_slot0_size())) {
 		return (m_hdr.payload_len > fw_slot0_size()) ? NFC_ST_ERR_SIZE
@@ -136,14 +148,23 @@ static uint16_t handle_start(const uint8_t *data, size_t len)
 	return NFC_ST_READY;
 }
 
+/* DATA data = CCM(chunk) [|| tag]; plaintext chunk is NFC_MAX_PLAINTEXT-sized. */
 static uint16_t handle_data(uint16_t seq, const uint8_t *data, size_t len)
 {
 	if (!m_started) {
 		return NFC_ST_ERR_STATE;
 	}
-	uint32_t off = (uint32_t)seq * NFC_MAX_DATA;
 
-	if (fw_write(off, data, len) != 0) {
+	uint8_t pt[NFC_MAX_PLAINTEXT];
+	size_t pl = 0;
+
+	if (auth_decrypt((uint32_t)seq + 1, data, len, pt, &pl) != 0) {
+		return NFC_ST_ERR_VERIFY;
+	}
+
+	uint32_t off = (uint32_t)seq * NFC_MAX_PLAINTEXT;
+
+	if (fw_write(off, pt, pl) != 0) {
 		return NFC_ST_ERR_FLASH;
 	}
 	return NFC_ST_ACK;
@@ -162,16 +183,16 @@ static uint16_t handle_finish(void)
 	if (crc != m_hdr.payload_crc32) {
 		return NFC_ST_ERR_VERIFY;
 	}
-	if (!verify_signature(&m_hdr, m_sig)) {
-		return NFC_ST_ERR_VERIFY;
-	}
 
 	struct sfu_meta meta = {
 		.magic = SFU_META_MAGIC,
 		.payload_len = m_hdr.payload_len,
 		.payload_crc32 = m_hdr.payload_crc32,
 		.valid = SFU_META_MAGIC,
+		.serial = auth_serial(),
 	};
+	memcpy(meta.secret_key, auth_key(), NFC_KEY_LEN);
+
 	if (meta_write(&meta) != 0) {
 		return NFC_ST_ERR_FLASH;
 	}
@@ -247,6 +268,18 @@ int main(void)
 	}
 
 	printk("Entering DFU mode (bootable=%d forced=%d)\n", bootable, forced);
+
+	/* Load the device key (from sfu_meta, provisioned by the app). A blank
+	 * record / all-zero key => unkeyed: accept plaintext frames (factory). */
+	struct sfu_meta meta;
+	static const uint8_t zero_key[NFC_KEY_LEN] = {0};
+
+	if (meta_read(&meta) == 0 && meta.magic == SFU_META_MAGIC) {
+		auth_set_key(meta.secret_key, meta.serial);
+	} else {
+		auth_set_key(zero_key, 0);
+	}
+	printk("Auth: %s\n", auth_is_keyed() ? "keyed" : "unkeyed (factory)");
 
 	if (mb_init() != 0) {
 		printk("ST25DV init failed\n");
