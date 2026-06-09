@@ -49,6 +49,16 @@ const COMMANDS = [
     },
   },
   {
+    // #55: optional save flag (field 3) commits a multi-message SetParam batch.
+    name: "set_param (save flag only)",
+    hex: "080912021801",
+    data: {
+      seq: 9,
+      command: "set_param",
+      set_param: { save: true },
+    },
+  },
+  {
     name: "reset_counters (hall_left + input_a)",
     hex: "0807520408011801",
     data: {
@@ -97,7 +107,8 @@ test("decodeUplink decodes legacy bitmap (fPort 1)", () => {
 
 // --- Uplink: command response (fPort 85) ----------------------------------
 test("decodeUplink decodes an Ack response (fPort 85)", () => {
-  const got = codec.decodeUplink({ bytes: hex("08011200"), fPort: 85 });
+  // 01 = APP_PROTO_VERSION prefix, then Response{ seq=1, ack={} }.
+  const got = codec.decodeUplink({ bytes: hex("0108011200"), fPort: 85 });
   assert.equal(got.data.seq, 1);
   assert.deepEqual(got.data.ack, {});
 });
@@ -116,8 +127,9 @@ test("decodeUplink decodes an Ack response (fPort 85)", () => {
 //   90 01 00  hall_left_count=0          98 01 04  hall_left_flags=ACTIVE
 //   a0 01 00  hall_right_count=0         a8 01 04  hall_right_flags=ACTIVE
 test("decodeUplink fPort 2: real HW frame, system + enabled groups always present", () => {
+  // 01 = APP_PROTO_VERSION prefix (#55), then the captured Telemetry protobuf.
   const got = codec.decodeUplink({
-    bytes: hex("08a801100018fa24206c4002900100980104a00100a80104"),
+    bytes: hex("0108a801100018fa24206c4002900100980104a00100a80104"),
     fPort: 2,
   }).data;
   assert.equal(got.voltage, 3.36);
@@ -141,7 +153,7 @@ test("decodeUplink fPort 2: real HW frame, system + enabled groups always presen
 // frame: voltage=100 (field 1), system_flags=0 (field 2 -> boot=false),
 // hall_left_count=0 (field 18), hall_left_flags=0 (field 19 -> all false).
 test("decodeUplink fPort 2: zero-valued groups decode to explicit false/0", () => {
-  const got = codec.decodeUplink({ bytes: hex("08641000900100980100"), fPort: 2 }).data;
+  const got = codec.decodeUplink({ bytes: hex("0108641000900100980100"), fPort: 2 }).data;
   assert.equal(got.voltage, 2);
   assert.equal(got.boot, false);
   assert.equal(got.hall_left_count, 0);
@@ -151,9 +163,17 @@ test("decodeUplink fPort 2: zero-valued groups decode to explicit false/0", () =
 });
 
 test("fPort-2 telemetry decodes accel_motion_count (field 26)", () => {
-  // protobuf: tag (26 << 3 | varint) = 0xd0 0x01, value 3
-  const got = codec.decodeUplink({ bytes: hex("d00103"), fPort: 2 });
+  // 01 = version prefix, then tag (26 << 3 | varint) = 0xd0 0x01, value 3
+  const got = codec.decodeUplink({ bytes: hex("01d00103"), fPort: 2 });
   assert.equal(got.data.accel_motion_count, 3);
+});
+
+test("fPort 2: unknown payload version is flagged but still decodes", () => {
+  // version 0x02 (unknown) followed by voltage=100 (field 1) -> warn + decode
+  const r = codec.decodeUplink({ bytes: hex("020864"), fPort: 2 });
+  assert.equal(r.data.voltage, 2);
+  assert.ok(r.warnings.length >= 1, "expected a version warning");
+  assert.match(r.warnings[0], /version/);
 });
 
 // --- Uplink: history replay frames (fPort 85, device-driven multi-frame) ---
@@ -178,7 +198,8 @@ function buildHistoryFrame(seq, idx, count, t0, present, interval, samples) {
   let hf = idx ? pbTV(1, idx) : [];
   hf = hf.concat(pbTV(2, count)).concat(pbTV(3, t0))
     .concat(pbLD(4, samples)).concat(pbTV(5, present)).concat(pbTV(6, interval));
-  return [].concat(pbTV(1, seq)).concat(pbLD(5, hf)); // Response.history_frame = field 5
+  // 0x01 = APP_PROTO_VERSION prefix (#55); Response.history_frame = field 5.
+  return [0x01].concat(pbTV(1, seq)).concat(pbLD(5, hf));
 }
 
 test("decodeUplink decodes + reassembles multi-frame history (fPort 85)", () => {

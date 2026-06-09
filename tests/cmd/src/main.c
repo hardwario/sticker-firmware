@@ -43,8 +43,11 @@ static enum app_cmd_action handle(const char *hex, Response *resp)
 				 &action);
 	zassert_equal(ret, 0, "app_cmd_handle ret %d", ret);
 
+	/* out[0] is the APP_PROTO_VERSION prefix (#55); decode the protobuf after it. */
+	zassert_true(out_len >= 1, "missing version byte");
+	zassert_equal(out[0], APP_PROTO_VERSION, "bad version 0x%02x", out[0]);
 	*resp = (Response)Response_init_zero;
-	pb_istream_t is = pb_istream_from_buffer(out, out_len);
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
 	zassert_true(pb_decode(&is, Response_fields, resp), "Response decode failed");
 	return action;
 }
@@ -122,8 +125,10 @@ ZTEST(cmd, test_build_info)
 	int ret = app_cmd_build_info(out, sizeof(out), &out_len);
 	zassert_equal(ret, 0, "build_info ret %d", ret);
 
+	/* Skip the APP_PROTO_VERSION prefix (#55). */
+	zassert_equal(out[0], APP_PROTO_VERSION, "bad version 0x%02x", out[0]);
 	Response r = Response_init_zero;
-	pb_istream_t is = pb_istream_from_buffer(out, out_len);
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
 	zassert_equal(r.which_body, Response_info_tag, "expected Info");
 	zassert_equal(r.body.info.serial_number, 1234567890, "serial");

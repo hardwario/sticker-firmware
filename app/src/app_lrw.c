@@ -710,9 +710,9 @@ static void send_work_handler(struct k_work *work)
 		return;
 	}
 
-	/* Drain pending command response before composing telemetry. The
-	 * response leaves at the next jitter window; regular telemetry resumes
-	 * with the next periodic timer fire. */
+	/* Drain pending command response before composing telemetry. The response
+	 * leaves now; fresh telemetry follows shortly after (see below) instead of
+	 * waiting a full interval_report. */
 	k_mutex_lock(&m_pending_response_lock, K_FOREVER);
 	if (m_pending_response_len) {
 		uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
@@ -728,12 +728,16 @@ static void send_work_handler(struct k_work *work)
 		} else {
 			LOG_INF("Response sent on port %u (%zu B)", port, len);
 		}
-		/* If an alarm batch is also queued, send it ASAP; else resume periodic. */
+		/* Follow the response with fresh telemetry instead of waiting a full
+		 * interval_report: an alarm batch (if queued) goes out ASAP, otherwise
+		 * schedule a telemetry send just after the RX windows (FRAME_GAP_SEC).
+		 * The next pass has an empty m_pending_response, so it composes and
+		 * sends fPort 2. This also lets the first report after join leave
+		 * promptly (restart_normal_operation intends "send immediately"). */
 		if (m_pending_alarm_len) {
 			k_work_submit_to_queue(&m_work_q, &m_send_work);
 		} else {
-			k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report),
-				      K_FOREVER);
+			k_timer_start(&m_send_timer, K_SECONDS(FRAME_GAP_SEC), K_FOREVER);
 		}
 		return;
 	}

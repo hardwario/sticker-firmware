@@ -55,22 +55,47 @@ LOG_MODULE_REGISTER(app_cmd, LOG_LEVEL_DBG);
 #define APP_BUILD_TYPE    2
 #endif
 
-static void fill_info(Response_Info *info)
+void app_cmd_get_info(struct app_cmd_info *info)
 {
-	info->fw_major = APP_VERSION_MAJOR;
-	info->fw_minor = APP_VERSION_MINOR;
-	info->fw_patch = APP_VERSION_PATCH;
-	info->build_type = (Response_Info_BuildType)APP_BUILD_TYPE;
-	info->serial_number = g_app_config.serial_number;
-	info->uptime_s = (uint32_t)(k_uptime_get() / 1000);
-	info->debug = IS_ENABLED(CONFIG_FW_DEBUG);
+	if (!info) {
+		return;
+	}
+
+	*info = (struct app_cmd_info){
+		.fw_major = APP_VERSION_MAJOR,
+		.fw_minor = APP_VERSION_MINOR,
+		.fw_patch = APP_VERSION_PATCH,
+		.build_type = APP_BUILD_TYPE,
+		.debug = IS_ENABLED(CONFIG_FW_DEBUG),
+		.serial_number = g_app_config.serial_number,
+		.uptime_s = (uint32_t)(k_uptime_get() / 1000),
+	};
 
 #ifdef APP_CMD_HAVE_CLOCK
 	uint32_t unix_s;
 	if (app_clock_get_unix(&unix_s) == 0) {
+		info->has_unix_time = true;
 		info->unix_time = unix_s;
 	}
 #endif
+}
+
+/* Map the plain-C info snapshot onto the protobuf Response_Info. */
+static void fill_info(Response_Info *info)
+{
+	struct app_cmd_info i;
+	app_cmd_get_info(&i);
+
+	info->fw_major = i.fw_major;
+	info->fw_minor = i.fw_minor;
+	info->fw_patch = i.fw_patch;
+	info->build_type = (Response_Info_BuildType)i.build_type;
+	info->serial_number = i.serial_number;
+	info->uptime_s = i.uptime_s;
+	info->debug = i.debug;
+	if (i.has_unix_time) {
+		info->unix_time = i.unix_time;
+	}
 }
 
 static void make_error(Response *resp, Response_Error_Code code, const char *detail)
@@ -87,7 +112,8 @@ static void make_error(Response *resp, Response_Error_Code code, const char *det
 	}
 }
 
-static void handle_set_param(const Command_SetParam *sp, Response *resp)
+static void handle_set_param(const Command_SetParam *sp, Response *resp,
+			     enum app_cmd_action *action)
 {
 	uint32_t fault = 0;
 	int rc = 0;
@@ -104,6 +130,11 @@ static void handle_set_param(const Command_SetParam *sp, Response *resp)
 		resp->body.error.fault_field = fault;
 	} else {
 		resp->which_body = Response_ack_tag;
+		/* Optional one-shot commit: persist staged config + reboot, same path
+		 * as SettingsSave. Used as the last message of a multi-downlink batch. */
+		if (sp->has_save && sp->save) {
+			*action = APP_CMD_ACTION_SETTINGS_SAVE;
+		}
 	}
 }
 
@@ -308,7 +339,7 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 		break;
 
 	case Command_set_param_tag:
-		handle_set_param(&cmd->body.set_param, resp);
+		handle_set_param(&cmd->body.set_param, resp, action);
 		break;
 
 	case Command_get_param_tag:
@@ -363,6 +394,26 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 	}
 }
 
+/* Encode a Response into `out` with the 1-byte APP_PROTO_VERSION prefix at
+ * out[0] (fPort 85). Sets *out_len to the total length (version + protobuf). */
+static int encode_response(const Response *resp, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	if (out_cap < 1) {
+		return -EMSGSIZE;
+	}
+
+	out[0] = APP_PROTO_VERSION;
+
+	pb_ostream_t ostream = pb_ostream_from_buffer(out + 1, out_cap - 1);
+	if (!pb_encode(&ostream, Response_fields, resp)) {
+		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
+		return -EMSGSIZE;
+	}
+
+	*out_len = ostream.bytes_written + 1;
+	return 0;
+}
+
 int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len, uint8_t *out,
 		   size_t out_cap, size_t *out_len, enum app_cmd_action *action)
 {
@@ -396,13 +447,11 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		return 0;
 	}
 
-	pb_ostream_t ostream = pb_ostream_from_buffer(out, out_cap);
-	if (!pb_encode(&ostream, Response_fields, &resp)) {
-		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
-		return -EMSGSIZE;
+	int ret = encode_response(&resp, out, out_cap, out_len);
+	if (ret) {
+		return ret;
 	}
 
-	*out_len = ostream.bytes_written;
 	if (action) {
 		*action = act;
 	}
@@ -420,14 +469,7 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
 	resp.which_body = Response_info_tag;
 	fill_info(&resp.body.info);
 
-	pb_ostream_t ostream = pb_ostream_from_buffer(out, out_cap);
-	if (!pb_encode(&ostream, Response_fields, &resp)) {
-		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
-		return -EMSGSIZE;
-	}
-
-	*out_len = ostream.bytes_written;
-	return 0;
+	return encode_response(&resp, out, out_cap, out_len);
 }
 
 #if defined(APP_CMD_HAVE_HISTORY)
@@ -456,14 +498,7 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 	memcpy(hf->samples.bytes, samples, samples_len);
 	hf->samples.size = samples_len;
 
-	pb_ostream_t ostream = pb_ostream_from_buffer(out, out_cap);
-	if (!pb_encode(&ostream, Response_fields, &resp)) {
-		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
-		return -EMSGSIZE;
-	}
-
-	*out_len = ostream.bytes_written;
-	return 0;
+	return encode_response(&resp, out, out_cap, out_len);
 }
 #endif /* APP_CMD_HAVE_HISTORY */
 

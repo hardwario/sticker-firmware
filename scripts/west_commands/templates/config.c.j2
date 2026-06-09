@@ -286,6 +286,8 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 	return 0;
 {% elif param.type == 'enum' %}
 {% set enum_values = enums[param.enum] %}
+{% set ns = namespace(tokens=[]) %}
+{% for val in enum_values %}{% set ns.tokens = ns.tokens + [val.shell | default(val.name | lower)] %}{% endfor %}
 	if (argc == 1) {
 		print_{{ param.name | c_name }}(shell);
 		return 0;
@@ -294,6 +296,12 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 	if (argc != 2) {
 		shell_error(shell, "%s", m_msg_invalid_args);
 		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: {{ ns.tokens | join(', ') }}");
+		return 0;
 	}
 
 {% for val in enum_values %}
@@ -306,6 +314,7 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 {% endfor %}
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: {{ ns.tokens | join(', ') }}");
 		return -EINVAL;
 	}
 

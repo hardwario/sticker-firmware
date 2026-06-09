@@ -1236,6 +1236,12 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: eu868, us915, au915");
+		return 0;
+	}
+
 	if (!strcmp(argv[1], "eu868")) {
 		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_EU868;
 	} else if (!strcmp(argv[1], "us915")) {
@@ -1244,6 +1250,7 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_AU915;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: eu868, us915, au915");
 		return -EINVAL;
 	}
 
@@ -1267,12 +1274,19 @@ static int cmd_lrw_network(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: public, private");
+		return 0;
+	}
+
 	if (!strcmp(argv[1], "public")) {
 		m_app_config.lrw_network = APP_CONFIG_LRW_NETWORK_PUBLIC;
 	} else if (!strcmp(argv[1], "private")) {
 		m_app_config.lrw_network = APP_CONFIG_LRW_NETWORK_PRIVATE;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: public, private");
 		return -EINVAL;
 	}
 
@@ -1296,12 +1310,19 @@ static int cmd_lrw_activation(const struct shell *shell, size_t argc, char **arg
 		return -EINVAL;
 	}
 
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: otaa, abp");
+		return 0;
+	}
+
 	if (!strcmp(argv[1], "otaa")) {
 		m_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_OTAA;
 	} else if (!strcmp(argv[1], "abp")) {
 		m_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_ABP;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: otaa, abp");
 		return -EINVAL;
 	}
 
@@ -1841,6 +1862,12 @@ static int cmd_motion_sensitivity(const struct shell *shell, size_t argc, char *
 		return -EINVAL;
 	}
 
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: off, low, medium, high");
+		return 0;
+	}
+
 	if (!strcmp(argv[1], "off")) {
 		m_app_config.motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
 	} else if (!strcmp(argv[1], "low")) {
@@ -1851,6 +1878,7 @@ static int cmd_motion_sensitivity(const struct shell *shell, size_t argc, char *
 		m_app_config.motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_HIGH;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: off, low, medium, high");
 		return -EINVAL;
 	}
 
