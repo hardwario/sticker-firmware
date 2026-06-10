@@ -267,8 +267,10 @@ static int read_notify_bools(enum app_alarm_source source, bool *act, bool *deac
 	}
 }
 
-/* Per-source wire scaling for the fPort-3 detail value (threshold sources only):
- * temp and humidity ×100, pressure already hPa×10 from the poll call. */
+/* Per-source wire scaling for the fPort-3 detail value (threshold sources only).
+ * Wire units: temp and humidity ×100, pressure hPa×10. `v` for pressure arrives
+ * already in hPa (the poll call passes kPa×10), so ×10 again yields hPa×10 to
+ * match the proto/decoder contract. */
 static int32_t alarm_scale(enum app_alarm_source source, float v)
 {
 	switch (source) {
@@ -278,7 +280,7 @@ static int32_t alarm_scale(enum app_alarm_source source, float v)
 	case APP_ALARM_SOURCE_HUMIDITY:
 		return (int32_t)lroundf(v * 100.0f);
 	case APP_ALARM_SOURCE_PRESSURE:
-		return (int32_t)lroundf(v);
+		return (int32_t)lroundf(v * 10.0f);
 	default:
 		return 0;
 	}
@@ -354,7 +356,8 @@ bool app_alarm_poll(void)
 				g_app_config.humidity_alarm_hi, g_app_config.humidity_alarm_hst,
 				&should_send);
 
-	/* Pressure config thresholds are stored in hPa × 10, sensor reports hPa. */
+	/* Sensor reports kPa; ×10 converts to hPa to match the hPa-valued config
+	 * thresholds. (alarm_scale then ×10 again for the hPa×10 wire value.) */
 	alarm |= eval_threshold(APP_ALARM_SOURCE_PRESSURE, g_app_config.pressure_alarm_enabled,
 				g_app_sensor_data.pressure * 10.f, g_app_config.pressure_alarm_lo,
 				g_app_config.pressure_alarm_hi, g_app_config.pressure_alarm_hst,

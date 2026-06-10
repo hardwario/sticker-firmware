@@ -168,6 +168,18 @@ test("fPort-2 telemetry decodes accel_motion_count (field 26)", () => {
   assert.equal(got.data.accel_motion_count, 3);
 });
 
+// #92: pin the numeric scaling of barometer/light fields — these were never
+// asserted, which is why the pressure unit could drift 10x. Frame: version 01,
+// pressure (field 5, tag 0x28) raw 10135 -> 1013.5 hPa (hPa x10),
+// altitude (field 6, tag 0x30, sint zigzag) raw 3210 -> 321.0 m (m x10),
+// illuminance (field 7, tag 0x38) raw 250 -> 500 lux (lux /2... wire is lux/2).
+test("fPort-2 telemetry: pressure/altitude/illuminance numeric scaling", () => {
+  const got = codec.decodeUplink({ bytes: hex("0128974f30943238fa01"), fPort: 2 }).data;
+  assert.equal(got.pressure, 1013.5); // hPa x10 on the wire -> hPa
+  assert.equal(got.altitude, 321); // m x10
+  assert.equal(got.illuminance, 500); // lux /2 on the wire -> lux
+});
+
 test("fPort 2: unknown payload version is flagged but still decodes", () => {
   // version 0x02 (unknown) followed by voltage=100 (field 1) -> warn + decode
   const r = codec.decodeUplink({ bytes: hex("020864"), fPort: 2 });

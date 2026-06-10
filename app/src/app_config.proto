@@ -298,7 +298,7 @@ message Telemetry {
     optional sint32 temperature      = 3;   // degC x100
     optional uint32 humidity         = 4;   // %RH  x2
     // barometer (cap_barometer)
-    optional uint32 pressure         = 5;   // hPa  x1000
+    optional uint32 pressure         = 5;   // hPa  x10
     optional sint32 altitude         = 6;   // m    x10
     // light (cap_light_sensor)
     optional uint32 illuminance      = 7;   // lux  /2

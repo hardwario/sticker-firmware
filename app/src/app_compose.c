@@ -186,7 +186,9 @@ static void fill_snapshot(void)
 	/* barometer */
 	if (g_app_config.cap_barometer && !isnan(d.pressure)) {
 		t.has_pressure = true;
-		t.pressure = (uint32_t)(d.pressure * 1000.0f);
+		/* d.pressure is kPa from the driver; the wire unit is hPa x10
+		 * (0.1 hPa resolution). hPa = kPa x10, so hPa x10 = kPa x100. */
+		t.pressure = (uint32_t)(d.pressure * 100.0f);
 	}
 	if (g_app_config.cap_barometer && !isnan(d.altitude)) {
 		float a = CLAMP(d.altitude * 10.0f, (float)INT16_MIN, (float)INT16_MAX);

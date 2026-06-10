@@ -383,7 +383,7 @@ function decodeTelemetry(bytes) {
       case 3:  d.temperature = _pbZigzag(v.value) / 100; break;
       case 4:  d.humidity = v.value / 2; break;
       // barometer
-      case 5:  d.pressure = v.value / 1000; break;
+      case 5:  d.pressure = v.value / 10; break; // hPa x10
       case 6:  d.altitude = _pbZigzag(v.value) / 10; break;
       // light
       case 7:  d.illuminance = v.value * 2; break;
