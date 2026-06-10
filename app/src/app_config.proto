@@ -256,6 +256,7 @@ message AlarmEvent {
         PRESSURE       = 7;
         T1_TEMPERATURE = 8;
         T2_TEMPERATURE = 9;
+        ACCEL_MOTION   = 10;
     }
 
     // Transition direction. ACTIVATE = 0 so the common case omits the field.
@@ -298,7 +299,7 @@ message Telemetry {
     optional sint32 temperature      = 3;   // degC x100
     optional uint32 humidity         = 4;   // %RH  x2
     // barometer (cap_barometer)
-    optional uint32 pressure         = 5;   // hPa  x1000
+    optional uint32 pressure         = 5;   // hPa  x10
     optional sint32 altitude         = 6;   // m    x10
     // light (cap_light_sensor)
     optional uint32 illuminance      = 7;   // lux  /2

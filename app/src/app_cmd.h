@@ -81,6 +81,25 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
  * NULL argument, or -EMSGSIZE if `out_cap` is too small. */
 int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len);
 
+/* Buffer size that always holds one fully-populated history-replay frame
+ * (version byte + maximal Response{ seq, history_frame } protobuf). Sized from
+ * the nanopb-generated Response_HistoryFrame_size (80) plus the Response
+ * envelope (seq + submessage tag/len) plus the 1-byte version prefix, rounded
+ * up. The transmit path still clamps the payload to the current data rate; this
+ * macro only guarantees the staging buffer is never the binding limit (#89). */
+#define APP_CMD_HISTORY_FRAME_BUF_SIZE 96
+
+/* Largest `samples_len` that app_cmd_build_history_frame() can encode into
+ * `out_cap` bytes for these frame fields, clamped to the HistoryFrame.samples
+ * capacity. Computes the exact protobuf envelope overhead (no fixed guess), so
+ * a frame built with <= the returned length never overflows `out` and never
+ * serializes to an oversized/empty uplink. Returns 0 when even one sample byte
+ * will not fit. Pass worst-case (max-varint) field values to get a stable lower
+ * bound across a whole replay. */
+size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
+				       uint32_t t0_unix, uint32_t present, uint32_t interval_s,
+				       size_t out_cap);
+
 /* Build one history-replay frame (Response{ seq, history_frame={...} }) into
  * `out`. `samples` holds values-only records (the shared `present` mask +
  * `interval_s` describe their layout/timing). Used by the app_lrw replay state

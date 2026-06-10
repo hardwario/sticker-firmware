@@ -58,12 +58,24 @@ static bool parse_hex_string(const char *hex_str, uint8_t *buf, size_t buf_len)
 		return false;
 	}
 
-	size_t ret = hex2bin(hex_str, str_len, buf, buf_len);
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte into the
+	 * destination and bails (returning 0) on the first invalid nibble, so
+	 * decoding straight into the config field would leave a half-overwritten
+	 * value — and the NFC ingest path ignores this return and then saves,
+	 * persisting the corruption. Commit only on a fully valid decode. */
+	uint8_t tmp[16]; /* largest bytes field is a 16-byte LoRaWAN key */
+	if (buf_len > sizeof(tmp)) {
+		LOG_ERR("hex buffer too large: %zu", buf_len);
+		return false;
+	}
+
+	size_t ret = hex2bin(hex_str, str_len, tmp, buf_len);
+	if (ret != buf_len) {
 		LOG_ERR_CALL_FAILED("hex2bin");
 		return false;
 	}
 
+	memcpy(buf, tmp, buf_len);
 	return true;
 }
 

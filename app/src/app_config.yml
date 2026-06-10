@@ -64,6 +64,7 @@ parameters:
     proto_callback: true
     type: bytes
     size: 16
+    preserve_on_migration: true
     help: "Get/Set device secret key (32 hexadecimal digits)."
 
   - name: serial_number
@@ -71,6 +72,7 @@ parameters:
     proto_id: 3
     type: uint32
     format: "%010u"
+    preserve_on_migration: true
     help: "Get/Set device serial number (10 decimal digits)."
     extras:
       digits: 10
@@ -79,6 +81,7 @@ parameters:
     proto_group: root
     proto_id: 4
     type: uint32
+    preserve_on_migration: true
     help: "Get/Set nonce counter (unsigned integer)."
 
   - name: calibration
@@ -143,6 +146,7 @@ parameters:
     proto_id: 1
     type: enum
     enum: lrw_region
+    preserve_on_migration: true
     help: "Get/Set LoRaWAN region (eu868/us915/au915)."
 
   - name: lrw_sub_band
@@ -152,6 +156,7 @@ parameters:
     default: 2
     min: 0
     max: 8
+    preserve_on_migration: true
     help: "Get/Set US915/AU915 sub-band (1-8, 0 = all channels). Default 2 matches TTN/Helium/ChirpStack."
 
   - name: lrw_network
@@ -159,12 +164,14 @@ parameters:
     proto_id: 2
     type: enum
     enum: lrw_network
+    preserve_on_migration: true
     help: "Get/Set LoRaWAN network (public/private)."
 
   - name: lrw_adr
     proto_group: lorawan
     proto_id: 3
     type: bool
+    preserve_on_migration: true
     help: "Get/Set LoRaWAN ADR (true/false)."
 
   - name: lrw_activation
@@ -172,6 +179,7 @@ parameters:
     proto_id: 4
     type: enum
     enum: lrw_activation
+    preserve_on_migration: true
     help: "Get/Set LoRaWAN activation (otaa/abp)."
 
   - name: lrw_deveui
@@ -179,6 +187,7 @@ parameters:
     proto_id: 5
     type: bytes
     size: 8
+    preserve_on_migration: true
     help: "Get/Set LoRaWAN DevEUI (16 hex digits)."
 
   - name: lrw_joineui
@@ -186,6 +195,7 @@ parameters:
     proto_id: 6
     type: bytes
     size: 8
+    preserve_on_migration: true
     help: "Get/Set LoRaWAN JoinEUI (16 hex digits)."
 
   - name: lrw_nwkkey
@@ -193,6 +203,7 @@ parameters:
     proto_id: 7
     type: bytes
     size: 16
+    preserve_on_migration: true
     help: "Get/Set LoRaWAN NwkKey (32 hex digits)."
 
   - name: lrw_appkey
@@ -200,6 +211,7 @@ parameters:
     proto_id: 8
     type: bytes
     size: 16
+    preserve_on_migration: true
     help: "Get/Set LoRaWAN AppKey (32 hex digits)."
 
   - name: lrw_devaddr
@@ -207,6 +219,7 @@ parameters:
     proto_id: 9
     type: bytes
     size: 4
+    preserve_on_migration: true
     help: "Get/Set LoRaWAN DevAddr (8 hex digits)."
 
   - name: lrw_nwkskey
@@ -214,6 +227,7 @@ parameters:
     proto_id: 10
     type: bytes
     size: 16
+    preserve_on_migration: true
     help: "Get/Set LoRaWAN NwkSKey (32 hexadecimal digits)."
 
   - name: lrw_appskey
@@ -221,6 +235,7 @@ parameters:
     proto_id: 11
     type: bytes
     size: 16
+    preserve_on_migration: true
     help: "Get/Set LoRaWAN AppSKey (32 hexadecimal digits)."
 
   - name: cap_hall_left
@@ -308,7 +323,7 @@ parameters:
     default: 0.5
     min: 0.0
     max: 5.0
-    help: "Get/Set T1 temperature hysteresis (0 to 5 deg. C)."
+    help: "Get/Set temperature hysteresis (0 to 5 deg. C)."
 
   - name: humidity_alarm_enabled
     proto_group: application

@@ -340,8 +340,13 @@ int app_accel_set_motion_sensitivity(enum app_config_motion_sensitivity level)
  * once = weightless = free-fall (the classic ST free-fall recipe). */
 #define LIS2DH_INT1_CFG_FREEFALL 0x95
 /* Threshold ~350 mg, min duration ~30 ms. At 4 g FS the INT1_THS LSB is
- * ~16 mg; the INT1_DURATION LSB is 1/ODR (10 ms @ 100 Hz). Tune on HW. */
-#define LIS2DH_FREEFALL_THS      0x16
+ * ~32 mg (the 16 mg figure is the 2 g value; cf. the any-motion LSB note above
+ * = 0.307 m/s^2 = 31 mg, and the Zephyr lis2dh driver's 32 LSB/g at 4 g). So
+ * 0x0B = 11 * 32 mg = 352 mg. The old 0x16 (22) was 704 mg, which INT1_CFG's
+ * AND-of-all-axes-low could satisfy statically (~577 mg/axis on a diagonal),
+ * firing a false free-fall on mere reorientation. The INT1_DURATION LSB is
+ * 1/ODR (10 ms @ 100 Hz). Tune on HW. */
+#define LIS2DH_FREEFALL_THS      0x0B
 #define LIS2DH_FREEFALL_DUR      0x03
 
 static const struct gpio_dt_spec m_int1_gpio =
@@ -353,8 +358,9 @@ static void freefall_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	/* Read INT1_SRC to clear the latched interrupt so the pin de-asserts
-	 * and can fire on the next free-fall. */
+	/* Read INT1_SRC to acknowledge the event flags. INT1 is not latched
+	 * (CTRL_REG5 LIR_INT1 is never set), so the pin is level-following and the
+	 * GPIO fires on the rising edge; this read just clears the IA/axis flags. */
 	uint8_t src;
 	k_mutex_lock(&m_lock, K_FOREVER);
 	(void)i2c_reg_read_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_INT1_SRC, &src);
