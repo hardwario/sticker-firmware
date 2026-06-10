@@ -336,7 +336,7 @@ message Telemetry {
 // slot's type does not provide — or a sub-sensor that did not respond — are
 // absent. Fields 6-10 (lux/field/accel) are machine-probe only.
 message SensorReading {
-    uint32 slot              = 1;   // 0-based slot index
+    uint32 slot              = 1;   // 1-based slot (matches sensorN config / `w1 list`)
     uint32 type              = 2;   // enum app_w1_slot_type
     optional sint32 temperature = 3;  // degC x100
     optional uint32 humidity    = 4;  // %RH  x2

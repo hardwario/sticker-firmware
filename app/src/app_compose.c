@@ -217,7 +217,10 @@ static void fill_snapshot(void)
 			}
 			SensorReading *sr = &t->w1_sensors[t->w1_sensors_count];
 			*sr = (SensorReading)SensorReading_init_zero;
-			sr->slot = i;
+			/* 1-based on the wire to match the sensorN config keys and
+			 * `w1 list` (which both number slots from 1); the array index i
+			 * stays 0-based internally. */
+			sr->slot = i + 1;
 			sr->type = type;
 			app_w1_slot_encode(i, &d.w1[i], sr);
 			t->w1_sensors_count++;

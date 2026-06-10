@@ -73,7 +73,7 @@ The fixed `ext1/ext2` and `mp1/mp2` telemetry fields are replaced by a single **
 
 ```proto
 message SensorReading {
-    uint32 slot              = 1;   // 0-based slot index (matches `sensor list`)
+    uint32 slot              = 1;   // 1-based slot index (matches sensorN / `sensor list`)
     uint32 type              = 2;   // 1 = dallas (temperature-only), 2 = machine-probe (temp + humidity + tilt)
     optional sint32 temperature = 3; // °C ×100
     optional uint32 humidity    = 4; // %RH ×2  (machine-probe only)

@@ -245,7 +245,7 @@ ZTEST(compose, test_machine_probe_cluster)
 	zassert_equal(n, 1, "expected one frame, got %zu", n);
 	zassert_equal(fr[0].w1_sensors_count, 1, "expected one w1 reading");
 	const SensorReading *sr = &fr[0].w1_sensors[0];
-	zassert_equal(sr->slot, 0, "slot");
+	zassert_equal(sr->slot, 1, "slot (1-based: internal slot 0 -> wire 1)");
 	zassert_equal(sr->type, APP_W1_SLOT_MACHINE_PROBE, "type");
 	zassert_true(sr->has_temperature && sr->temperature == 2365, "temperature %d",
 		     sr->temperature);

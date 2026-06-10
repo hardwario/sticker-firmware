@@ -169,39 +169,40 @@ test("fPort-2 telemetry decodes accel_motion_count (field 26)", () => {
 });
 
 // 1-Wire slots are a repeated SensorReading on field 27 (tag 0xda 0x01,
-// length-delimited). type travels with each reading; the firmware emits one per
-// populated slot and may split the list across frames. Two readings here:
-//   reading A: slot=2 type=2(machine-probe) temp=23.65 hum=54 flags=tilt
-//     08 02 | 10 02 | 18 fa 24 | 20 6c | 28 01   (11 B body)
-//   reading B: slot=0 type=1(dallas) temp=21.5 (temperature-only)
-//     08 00 | 10 01 | 18 cc 21                   (7 B body)
+// length-delimited). slot is 1-based (matches sensorN / `w1 list`). type travels
+// with each reading; the firmware emits one per populated slot and may split the
+// list across frames. Two readings here:
+//   reading A: slot=3 type=2(machine-probe) temp=23.65 hum=54 flags=tilt
+//     08 03 | 10 02 | 18 fa 24 | 20 6c | 28 01   (11 B body)
+//   reading B: slot=1 type=1(dallas) temp=21.5 (temperature-only)
+//     08 01 | 10 01 | 18 cc 21                   (7 B body)
 test("fPort-2 telemetry decodes repeated w1_sensors (field 27)", () => {
   const got = codec.decodeUplink({
-    bytes: hex("01da010b0802100218fa24206c2801da01070800100118cc21"),
+    bytes: hex("01da010b0803100218fa24206c2801da01070801100118cc21"),
     fPort: 2,
   }).data;
   assert.equal(got.w1_sensors.length, 2);
   assert.deepEqual(got.w1_sensors[0], {
-    slot: 2, type: 2, type_name: "machine-probe",
+    slot: 3, type: 2, type_name: "machine-probe",
     temperature: 23.65, humidity: 54, tilt_alert: true,
   });
-  assert.equal(got.w1_sensors[1].slot, 0);
+  assert.equal(got.w1_sensors[1].slot, 1);
   assert.equal(got.w1_sensors[1].type_name, "dallas");
   assert.equal(got.w1_sensors[1].temperature, 21.5);
   assert.equal(got.w1_sensors[1].humidity, undefined); // dallas → no humidity
 });
 
 // Machine-probe sensor cluster: a single reading carrying the full set
-// (slot=0 type=2 temp=21.5 lux=27 field=0.062mT accel=0.38/-9.35/-0.54 m/s²).
-//   08 00 | 10 02 | 18 cc 21 | 30 1b | 38 7c | 40 4c | 48 cd 0e | 50 6b  (18 B body)
+// (slot=1 type=2 temp=21.5 lux=27 field=0.062mT accel=0.38/-9.35/-0.54 m/s²).
+//   08 01 | 10 02 | 18 cc 21 | 30 1b | 38 7c | 40 4c | 48 cd 0e | 50 6b  (18 B body)
 test("fPort-2 telemetry decodes machine-probe sensor cluster (fields 6-10)", () => {
   const got = codec.decodeUplink({
-    bytes: hex("01da011208001002 18cc21 301b 387c 404c 48cd0e 506b".replace(/ /g, "")),
+    bytes: hex("01da011208011002 18cc21 301b 387c 404c 48cd0e 506b".replace(/ /g, "")),
     fPort: 2,
   }).data;
   assert.equal(got.w1_sensors.length, 1);
   assert.deepEqual(got.w1_sensors[0], {
-    slot: 0, type: 2, type_name: "machine-probe",
+    slot: 1, type: 2, type_name: "machine-probe",
     temperature: 21.5, illuminance: 27, magnetic_field: 0.062,
     accel_x: 0.38, accel_y: -9.35, accel_z: -0.54,
   });
