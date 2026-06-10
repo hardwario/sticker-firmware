@@ -256,6 +256,7 @@ message AlarmEvent {
         PRESSURE       = 7;
         T1_TEMPERATURE = 8;
         T2_TEMPERATURE = 9;
+        ACCEL_MOTION   = 10;
     }
 
     // Transition direction. ACTIVATE = 0 so the common case omits the field.

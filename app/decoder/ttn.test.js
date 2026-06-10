@@ -91,6 +91,18 @@ test("encode/decode are symmetric (byte-exact round-trip)", () => {
   }
 });
 
+// #92: cap_w1_sensors (application tag 60) was missing from the formatter's name
+// map, so the 1-Wire bus capability could not be set or read via the payload
+// formatter (encodeDownlink silently drops unknown names). Lock both directions.
+test("set_param cap_w1_sensors (tag 60) is reachable both ways (#92)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 1, command: "set_param", set_param: { application: { cap_w1_sensors: true } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors");
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.application.cap_w1_sensors, 1);
+});
+
 // --- Uplink: legacy bitmap (fPort 1) --------------------------------------
 test("decodeUplink decodes legacy bitmap (fPort 1)", () => {
   const got = codec.decodeUplink({ bytes: hex("7a01a109fa580258"), fPort: 1 });
