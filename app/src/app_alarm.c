@@ -295,7 +295,19 @@ static bool eval_threshold(enum app_alarm_source source, bool enabled, float val
 	bool *active = &m_alarm_active[source];
 
 	if (!enabled || isnan(value)) {
-		*active = false;
+		if (*active) {
+			/* The alarm was latched active but it can no longer be
+			 * evaluated (sensor lost -> NaN, or the source was disabled).
+			 * Emit a deactivate edge so a backend tracking fPort-3 does not
+			 * stay "active" forever. No valid reading, so the edge carries
+			 * no value. */
+			LOG_INF("Force-deactivated alarm for %s (%s)",
+				app_alarm_source_name(source),
+				isnan(value) ? "sensor lost" : "disabled");
+			*active = false;
+			*should_send = true;
+			alarm_collect(source, false, m_alarm_side[source], false, 0);
+		}
 		return false;
 	}
 
