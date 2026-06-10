@@ -459,6 +459,26 @@ static int h_commit(void)
 	}
 
 {% endif %}
+	/* Clamp loaded values into their configured ranges so a corrupted or forged
+	 * NVS record can't leave the device in a broken state (e.g. interval=0 ->
+	 * K_SECONDS(0), or an out-of-range enum that no code path expects). */
+{% for param in parameters %}
+{% if param.type == 'enum' %}
+	if ((int)m_{{ module.name }}.{{ param.name | c_name }} < 0 ||
+	    (int)m_{{ module.name }}.{{ param.name | c_name }} > {{ (enums[param.enum] | length) - 1 }}) {
+		m_{{ module.name }}.{{ param.name | c_name }} = {{ param | default_value(module.name) or 0 }};
+	}
+{% elif (param.min is defined or param.max is defined) and (param | is_numeric) %}
+{% set sfx = 'f' if (param | is_float) else '' %}
+	if (m_{{ module.name }}.{{ param.name | c_name }} < {{ param | min_value }}{{ sfx }}{% if param.extras and param.extras.zero_allowed %} && m_{{ module.name }}.{{ param.name | c_name }} != 0{% endif %}) {
+		m_{{ module.name }}.{{ param.name | c_name }} = {{ param | min_value }}{{ sfx }};
+	}
+	if (m_{{ module.name }}.{{ param.name | c_name }} > {{ param | max_value }}{{ sfx }}) {
+		m_{{ module.name }}.{{ param.name | c_name }} = {{ param | max_value }}{{ sfx }};
+	}
+{% endif %}
+{% endfor %}
+
 	memcpy(&g_{{ module.name }}, &m_{{ module.name }}, sizeof(g_{{ module.name }}));
 	return 0;
 }
