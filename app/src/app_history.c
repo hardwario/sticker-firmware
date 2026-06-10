@@ -847,6 +847,24 @@ static int cmd_history_clear(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* Sample the sensors and store one record now — normally a capture happens on
+ * the periodic report path (needs a network join); this lets a bench/ATS test
+ * exercise the buffer without one. */
+static int cmd_history_capture(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!m_enabled) {
+		shell_warn(sh, "history is disabled (history enable on)");
+		return 0;
+	}
+	app_sensor_sample();
+	app_history_capture();
+	shell_print(sh, "captured; %u record(s) stored", (unsigned)app_history_count());
+	return 0;
+}
+
 static int cmd_history_enable(const struct shell *sh, size_t argc, char **argv)
 {
 	bool en;
@@ -954,6 +972,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(count, NULL, "Number of stored records.", cmd_history_count, 1, 0),
 	SHELL_CMD_ARG(read, NULL, "List records. Usage: read [N]", cmd_history_read, 1, 1),
 	SHELL_CMD_ARG(clear, NULL, "Erase the buffer.", cmd_history_clear, 1, 0),
+	SHELL_CMD_ARG(capture, NULL, "Sample sensors and store one record now (test).",
+		      cmd_history_capture, 1, 0),
 	SHELL_CMD_ARG(sensors, NULL, "List/select sensors. Usage: sensors [<name> on|off]",
 		      cmd_history_sensors, 1, 2),
 	SHELL_CMD_ARG(enable, NULL, "Master on/off. Usage: enable on|off", cmd_history_enable, 2,
