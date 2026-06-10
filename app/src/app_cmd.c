@@ -245,7 +245,9 @@ static void handle_get_config(const Command_GetConfig *gc, Response *resp)
 {
 	uint32_t page = gc->has_page ? gc->page : 0;
 
-	uint32_t lrw_ids[8];
+	/* Both sized to the whole table: a LoRaWAN row added to DUMP_FIELDS must not
+	 * overflow lrw_ids (was a fixed [8] matching exactly today's LoRaWAN rows). */
+	uint32_t lrw_ids[ARRAY_SIZE(DUMP_FIELDS)];
 	uint32_t app_ids[ARRAY_SIZE(DUMP_FIELDS)];
 	size_t n_lrw = 0, n_app = 0;
 

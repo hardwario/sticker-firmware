@@ -179,6 +179,8 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 	}
 
 	char *endptr;
+
+	errno = 0;
 {% if param.type == 'uint64' %}
 	unsigned long long value = strtoull(argv[1], &endptr, 10);
 {% else %}
@@ -190,7 +192,10 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 		return -EINVAL;
 	}
 
-	if (value < {{ param | min_value }} || value > {{ param | max_value }}) {
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < {{ param | min_value }} || value > {{ param | max_value }}) {
 		shell_error(shell, "%s", m_msg_invalid_range);
 		return -EINVAL;
 	}
@@ -275,13 +280,20 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_{{ module.name }}.{{ param.name | c_name }},
-		      sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_{{ module.name }}.{{ param.name | c_name }})];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_{{ module.name }}.{{ param.name | c_name }}, tmp, sizeof(tmp));
 
 	return 0;
 {% elif param.type == 'enum' %}
@@ -458,10 +470,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
 	} while (0)
 
-{% if module.version is defined %}
-	EXPORT_FUNC("config-version", &m_{{ module.name }}.config_version,
-		    sizeof(m_{{ module.name }}.config_version));
-{% endif %}
 {% for param in parameters %}
 {% if param.type == 'bytes' or param.type == 'string' %}
 	EXPORT_FUNC("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
@@ -470,6 +478,14 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% endif %}
 {% endfor %}
+{% if module.version is defined %}
+	/* Export config-version LAST: settings_save is per-key atomic, so writing
+	 * the schema marker after every value means a brownout mid-save leaves an
+	 * old version with a partial new payload rather than a new version flagging
+	 * data as fully migrated. Paired with the migration restore in h_commit. */
+	EXPORT_FUNC("config-version", &m_{{ module.name }}.config_version,
+		    sizeof(m_{{ module.name }}.config_version));
+{% endif %}
 
 #undef EXPORT_FUNC
 
