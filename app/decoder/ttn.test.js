@@ -191,6 +191,22 @@ test("fPort-2 telemetry decodes repeated w1_sensors (field 27)", () => {
   assert.equal(got.w1_sensors[1].humidity, undefined); // dallas → no humidity
 });
 
+// Machine-probe sensor cluster: a single reading carrying the full set
+// (slot=0 type=2 temp=21.5 lux=27 field=0.062mT accel=0.38/-9.35/-0.54 m/s²).
+//   08 00 | 10 02 | 18 cc 21 | 30 1b | 38 7c | 40 4c | 48 cd 0e | 50 6b  (18 B body)
+test("fPort-2 telemetry decodes machine-probe sensor cluster (fields 6-10)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("01da011208001002 18cc21 301b 387c 404c 48cd0e 506b".replace(/ /g, "")),
+    fPort: 2,
+  }).data;
+  assert.equal(got.w1_sensors.length, 1);
+  assert.deepEqual(got.w1_sensors[0], {
+    slot: 0, type: 2, type_name: "machine-probe",
+    temperature: 21.5, illuminance: 27, magnetic_field: 0.062,
+    accel_x: 0.38, accel_y: -9.35, accel_z: -0.54,
+  });
+});
+
 // Legacy flat 1-Wire fields (10-17, pre-SensorReading firmware) stay decodable
 // so one formatter serves a mixed fleet: ext1 temp (field 10, sint 21.5 °C) +
 // mp1 humidity (field 13, 54 %).

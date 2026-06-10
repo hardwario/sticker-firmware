@@ -34,7 +34,7 @@ LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 
 /* Per-group flag bit positions (mirrored in ttn.js). */
 #define SYSTEM_FLAG_BOOT      BIT(0)
-#define MP_FLAG_TILT          BIT(0)
+/* MP_FLAG_TILT moved to app_w1_slots.c with the per-type SensorReading encode. */
 #define CNT_FLAG_NOTIFY_ACT   BIT(0)
 #define CNT_FLAG_NOTIFY_DEACT BIT(1)
 #define CNT_FLAG_ACTIVE       BIT(2)
@@ -204,6 +204,9 @@ static void fill_snapshot(void)
 	}
 
 	/* 1-wire ROM-bound slots → one repeated SensorReading per populated slot.
+	 * The composer owns the slot index, type and the repeated array; the
+	 * per-type value fields are filled by the slot's driver via the registry
+	 * vtable (app_w1_slot_encode), so adding a sensor type needs no change here.
 	 * type travels with the reading; the composer may split the list across
 	 * frames (each reading is indivisible). Absent quantities stay omitted. */
 	if (g_app_config.cap_w1_sensors) {
@@ -212,26 +215,11 @@ static void fill_snapshot(void)
 			if (type == APP_W1_SLOT_EMPTY) {
 				continue; /* unconfigured slot → no reading */
 			}
-			const struct app_w1_slot_reading *r = &d.w1[i];
 			SensorReading *sr = &t->w1_sensors[t->w1_sensors_count];
 			*sr = (SensorReading)SensorReading_init_zero;
 			sr->slot = i;
 			sr->type = type;
-			if (!isnan(r->temperature)) {
-				sr->has_temperature = true;
-				sr->temperature = (int32_t)(r->temperature * 100.0f);
-			}
-			if (!isnan(r->humidity)) {
-				sr->has_humidity = true;
-				sr->humidity = (uint32_t)(r->humidity * 2.0f);
-			}
-			/* flags only for types that provide them (tilt is a real digital
-			 * state, sent every report per #80); temperature-only types omit
-			 * the field entirely. */
-			if (type == APP_W1_SLOT_MACHINE_PROBE) {
-				sr->has_flags = true;
-				sr->flags = r->is_tilt_alert ? MP_FLAG_TILT : 0;
-			}
+			app_w1_slot_encode(i, &d.w1[i], sr);
 			t->w1_sensors_count++;
 		}
 	}
@@ -317,7 +305,11 @@ static void fill_snapshot(void)
 
 int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 {
-	uint8_t budget = app_lrw_get_max_payload();
+	return app_compose_ex(buf, size, len, more, app_lrw_get_max_payload());
+}
+
+int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)
+{
 	if (budget == 0) {
 		return -EAGAIN;
 	}

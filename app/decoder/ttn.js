@@ -357,8 +357,11 @@ function _pbZigzag(n) {
 var _W1_SLOT_TYPES = { 1: "dallas", 2: "machine-probe" };
 
 // One SensorReading submessage (Telemetry field 27): slot=1, type=2,
-// temperature=3 (sint32 ×100), humidity=4 (uint ×2), flags=5 (bit0 tilt). Absent
-// quantities stay undefined. `bytes[start..end)` is the submessage body.
+// temperature=3 (sint32 ×100), humidity=4 (uint ×2), flags=5 (bit0 tilt),
+// illuminance=6 (uint lux), magnetic_field=7 (sint µT → mT /1000), accel
+// x/y/z=8/9/10 (sint m/s² ×100). Machine-probe carries 6-10; a sub-sensor that
+// did not respond is absent. Absent quantities stay undefined. `bytes[start..end)`
+// is the submessage body.
 function _decodeSensorReading(bytes, start, end) {
   var sr = {};
   var pos = start;
@@ -379,6 +382,11 @@ function _decodeSensorReading(bytes, start, end) {
       case 3: sr.temperature = _pbZigzag(v.value) / 100; break;
       case 4: sr.humidity = v.value / 2; break;
       case 5: sr.tilt_alert = (v.value & (1 << 0)) !== 0; break;
+      case 6: sr.illuminance = v.value; break;
+      case 7: sr.magnetic_field = _pbZigzag(v.value) / 1000; break; // mT
+      case 8: sr.accel_x = _pbZigzag(v.value) / 100; break;         // m/s²
+      case 9: sr.accel_y = _pbZigzag(v.value) / 100; break;
+      case 10: sr.accel_z = _pbZigzag(v.value) / 100; break;
       default: break;
     }
   }

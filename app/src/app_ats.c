@@ -13,6 +13,7 @@
 #include "app_sensor.h"
 #include "app_sht4x.h"
 #include "app_cmd.h"
+#include "app_compose.h"
 
 /* Zephyr includes */
 #include <zephyr/init.h>
@@ -604,9 +605,58 @@ static int cmd_lrw_reset(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+/* Build the telemetry uplink WITHOUT sending it and dump the raw fPort-2 bytes
+ * (decodable with ttn.js) — lets the tester verify exactly what would go on the
+ * wire. Samples first so the payload reflects the current sensors. Optional
+ * budget arg picks the data-rate payload size (default 51 = EU868 DR0); needed
+ * because the live budget is 0 before a join. */
+static int cmd_lrw_compose(const struct shell *shell, size_t argc, char **argv)
+{
+	uint8_t budget = 51;
+
+	if (argc >= 2) {
+		int b = atoi(argv[1]);
+		if (b < 1 || b > 242) {
+			shell_error(shell, "budget must be 1..242 B");
+			return -EINVAL;
+		}
+		budget = (uint8_t)b;
+	}
+
+	app_sensor_sample();
+
+	uint8_t buf[243];
+	size_t len = 0;
+	bool more = true;
+	int frame = 0;
+
+	shell_print(shell, "Telemetry uplink (fPort 2, budget %u B):", budget);
+	while (more) {
+		int ret = app_compose_ex(buf, sizeof(buf), &len, &more, budget);
+		if (ret) {
+			shell_error(shell, "compose failed: %d", ret);
+			return ret;
+		}
+		if (len == 0) {
+			shell_print(shell, "  (nothing to report)");
+			break;
+		}
+		shell_fprintf(shell, SHELL_NORMAL, "  frame %d (%zu B): ", frame++, len);
+		for (size_t i = 0; i < len; i++) {
+			shell_fprintf(shell, SHELL_NORMAL, "%02x", buf[i]);
+		}
+		shell_fprintf(shell, SHELL_NORMAL, "\n");
+	}
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_lrw, SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
 	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
+	SHELL_CMD_ARG(compose, NULL,
+		      "Build telemetry uplink without sending; dump fPort-2 hex. "
+		      "Usage: compose [budget]",
+		      cmd_lrw_compose, 1, 1),
 	SHELL_CMD_ARG(reset, NULL, "Reset LoRaWAN frame counters + DevNonce (reboots).",
 		      cmd_lrw_reset, 1, 0),
 	SHELL_SUBCMD_SET_END);

@@ -10,6 +10,12 @@
 #include "app_log.h"
 #include "app_machine_probe.h"
 
+/* Nanopb includes — this framework layer owns the slot→telemetry encode so the
+ * HW transport drivers (app_ds18b20, app_machine_probe) never see the wire
+ * schema. Mirrors the chester serial app, where the per-device CBOR encode lives
+ * in app_cbor.c, not in the device drivers. */
+#include "src/app_config.pb.h"
+
 /* Zephyr includes */
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -28,15 +34,21 @@ LOG_MODULE_REGISTER(app_w1_slots, LOG_LEVEL_DBG);
 /* Sensor-type registry — the extensibility point.                        */
 /*                                                                        */
 /* Adding a new 1-Wire sensor type is one entry in m_types[] plus its     */
-/* thin read wrapper below (and a transport driver + devicetree nodes,    */
-/* which any new hardware needs regardless). No changes to the slot       */
-/* table, rebind, scan, read dispatch, shell or telemetry plumbing.       */
+/* thin read + encode wrappers below (and a transport driver + devicetree */
+/* nodes, which any new hardware needs regardless). No changes to the slot */
+/* table, rebind, scan, read dispatch, or the telemetry composer — the     */
+/* per-type behaviour (read, encode) lives behind this vtable.             */
 /* ====================================================================== */
 
-/* Fill *out (temperature/humidity/tilt) for device `index` of this type and
- * return its ROM serial in *serial. Quantities the type doesn't provide stay
+/* Fill *out (temperature/humidity/cluster/tilt) for device `index` of this type
+ * and return its ROM serial in *serial. Quantities the type doesn't provide stay
  * at the caller-initialised NaN/false. Returns 0 or negative errno. */
 typedef int (*w1_read_fn)(int index, uint64_t *serial, struct app_w1_slot_reading *out);
+
+/* Encode a reading's value fields into its telemetry SensorReading. The caller
+ * owns slot/type/array; this fills only the quantities the type provides, each
+ * omitted when NaN. */
+typedef void (*w1_encode_fn)(const struct app_w1_slot_reading *r, SensorReading *sr);
 
 struct app_w1_sensor_type {
 	enum app_w1_slot_type type;
@@ -45,7 +57,11 @@ struct app_w1_sensor_type {
 	int (*scan)(void); /* re-enumerate this transport's devices */
 	int (*get_count)(void);
 	w1_read_fn read;
+	w1_encode_fn encode;
 };
+
+/* Telemetry SensorReading.flags bit positions (mirrored in ttn.js). */
+#define MP_FLAG_TILT BIT(0)
 
 static int dallas_read(int index, uint64_t *serial, struct app_w1_slot_reading *out)
 {
@@ -60,12 +76,34 @@ static int dallas_read(int index, uint64_t *serial, struct app_w1_slot_reading *
 
 static int machine_probe_read(int index, uint64_t *serial, struct app_w1_slot_reading *out)
 {
+	/* Temperature + humidity (SHT) is the primary reading — its result decides
+	 * the slot read's success. The remaining probe sub-sensors are best-effort:
+	 * a failure (e.g. an absent TMP112 on older revisions) leaves that quantity
+	 * NaN/false without failing the whole read. */
 	float temperature, humidity;
 	int ret = app_machine_probe_read_hygrometer(index, serial, &temperature, &humidity);
 
 	if (ret == 0) {
 		out->temperature = temperature;
 		out->humidity = humidity;
+	}
+
+	float illuminance;
+	if (app_machine_probe_read_lux_meter(index, serial, &illuminance) == 0) {
+		out->illuminance = illuminance;
+	}
+
+	float magnetic_field;
+	if (app_machine_probe_read_magnetometer(index, serial, &magnetic_field) == 0) {
+		out->magnetic_field = magnetic_field;
+	}
+
+	float ax, ay, az;
+	int orientation;
+	if (app_machine_probe_read_accelerometer(index, serial, &ax, &ay, &az, &orientation) == 0) {
+		out->accel_x = ax;
+		out->accel_y = ay;
+		out->accel_z = az;
 	}
 
 	bool tilt = false;
@@ -75,10 +113,53 @@ static int machine_probe_read(int index, uint64_t *serial, struct app_w1_slot_re
 	return ret;
 }
 
+/* Dallas (DS18B20): temperature only. */
+static void dallas_encode(const struct app_w1_slot_reading *r, SensorReading *sr)
+{
+	if (!isnan(r->temperature)) {
+		sr->has_temperature = true;
+		sr->temperature = (int32_t)(r->temperature * 100.0f);
+	}
+}
+
+/* Machine probe: the full sensor cluster. flags (tilt) is a real digital state
+ * sent every report per #80; the analog quantities are omitted individually when
+ * their sub-sensor did not respond (NaN). */
+static void machine_probe_encode(const struct app_w1_slot_reading *r, SensorReading *sr)
+{
+	if (!isnan(r->temperature)) {
+		sr->has_temperature = true;
+		sr->temperature = (int32_t)(r->temperature * 100.0f);
+	}
+	if (!isnan(r->humidity)) {
+		sr->has_humidity = true;
+		sr->humidity = (uint32_t)(r->humidity * 2.0f);
+	}
+	sr->has_flags = true;
+	sr->flags = r->is_tilt_alert ? MP_FLAG_TILT : 0;
+	if (!isnan(r->illuminance)) {
+		sr->has_illuminance = true;
+		sr->illuminance = (uint32_t)r->illuminance;
+	}
+	if (!isnan(r->magnetic_field)) {
+		sr->has_magnetic_field = true;
+		sr->magnetic_field = (int32_t)(r->magnetic_field * 1000.0f);
+	}
+	if (!isnan(r->accel_x) && !isnan(r->accel_y) && !isnan(r->accel_z)) {
+		sr->has_accel_x = true;
+		sr->accel_x = (int32_t)(r->accel_x * 100.0f);
+		sr->has_accel_y = true;
+		sr->accel_y = (int32_t)(r->accel_y * 100.0f);
+		sr->has_accel_z = true;
+		sr->accel_z = (int32_t)(r->accel_z * 100.0f);
+	}
+}
+
 static const struct app_w1_sensor_type m_types[] = {
-	{APP_W1_SLOT_DALLAS, 0x28, "dallas", app_ds18b20_scan, app_ds18b20_get_count, dallas_read},
+	{APP_W1_SLOT_DALLAS, 0x28, "dallas", app_ds18b20_scan, app_ds18b20_get_count, dallas_read,
+	 dallas_encode},
 	{APP_W1_SLOT_MACHINE_PROBE, 0x19, "machine-probe", app_machine_probe_scan,
-	 app_machine_probe_get_count, machine_probe_read},
+	 app_machine_probe_get_count, machine_probe_read, machine_probe_encode},
 };
 
 static const struct app_w1_sensor_type *type_desc(enum app_w1_slot_type type)
@@ -312,6 +393,11 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
 
 	out->temperature = NAN;
 	out->humidity = NAN;
+	out->illuminance = NAN;
+	out->magnetic_field = NAN;
+	out->accel_x = NAN;
+	out->accel_y = NAN;
+	out->accel_z = NAN;
 	out->is_tilt_alert = false;
 
 	/* Snapshot the binding under the lock; the (slow) driver read runs outside
@@ -339,12 +425,35 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
 	 * reject a reading whose serial no longer matches the slot's ROM rather
 	 * than report another sensor's values under this slot's identity. */
 	if (serial != rom) {
-		out->temperature = NAN;
-		out->humidity = NAN;
-		out->is_tilt_alert = false;
+		*out = (struct app_w1_slot_reading){.temperature = NAN,
+						    .humidity = NAN,
+						    .illuminance = NAN,
+						    .magnetic_field = NAN,
+						    .accel_x = NAN,
+						    .accel_y = NAN,
+						    .accel_z = NAN,
+						    .is_tilt_alert = false,
+						    .present = present};
 		return -ENODEV;
 	}
 	return 0;
+}
+
+/* ---- telemetry encode dispatch ------------------------------------------ */
+
+void app_w1_slot_encode(int slot, const struct app_w1_slot_reading *r, SensorReading *sr)
+{
+	if (slot < 0 || slot >= APP_W1_SLOT_COUNT || r == NULL || sr == NULL) {
+		return;
+	}
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	const struct app_w1_sensor_type *desc = m_slots[slot].desc;
+	k_mutex_unlock(&m_lock);
+
+	if (desc != NULL && desc->encode != NULL) {
+		desc->encode(r, sr);
+	}
 }
 
 /* ---- accessors ---------------------------------------------------------- */

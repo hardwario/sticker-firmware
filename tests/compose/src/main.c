@@ -221,6 +221,69 @@ ZTEST(compose, test_multiframe_split)
 	zassert_equal(hall, 1, "hall_left not exactly once");
 }
 
+ZTEST(compose, test_machine_probe_cluster)
+{
+	Telemetry fr[4];
+	size_t n;
+
+	set_clean();
+	g_app_config.cap_w1_sensors = true;
+	test_w1_types[0] = APP_W1_SLOT_MACHINE_PROBE;
+	g_app_sensor_data.w1[0].temperature = 23.65f;
+	g_app_sensor_data.w1[0].humidity = 54.0f;
+	g_app_sensor_data.w1[0].illuminance = 27.0f;
+	g_app_sensor_data.w1[0].magnetic_field = 0.062f; /* mT */
+	g_app_sensor_data.w1[0].accel_x = 0.38f;
+	g_app_sensor_data.w1[0].accel_y = -9.35f;
+	g_app_sensor_data.w1[0].accel_z = -0.54f;
+	g_app_sensor_data.w1[0].is_tilt_alert = true;
+	g_app_sensor_data.w1[0].present = true;
+
+	run_report(fr, 4, &n);
+
+	/* One SensorReading carrying the whole cluster, in one frame (ample budget). */
+	zassert_equal(n, 1, "expected one frame, got %zu", n);
+	zassert_equal(fr[0].w1_sensors_count, 1, "expected one w1 reading");
+	const SensorReading *sr = &fr[0].w1_sensors[0];
+	zassert_equal(sr->slot, 0, "slot");
+	zassert_equal(sr->type, APP_W1_SLOT_MACHINE_PROBE, "type");
+	zassert_true(sr->has_temperature && sr->temperature == 2365, "temperature %d",
+		     sr->temperature);
+	zassert_true(sr->has_humidity && sr->humidity == 108, "humidity %u", sr->humidity);
+	zassert_true(sr->has_illuminance && sr->illuminance == 27, "lux %u", sr->illuminance);
+	zassert_true(sr->has_magnetic_field && sr->magnetic_field == 62, "field %d",
+		     sr->magnetic_field);
+	zassert_true(sr->has_accel_x && sr->accel_x == 38, "ax %d", sr->accel_x);
+	zassert_true(sr->has_accel_y && sr->accel_y == -935, "ay %d", sr->accel_y);
+	zassert_true(sr->has_accel_z && sr->accel_z == -54, "az %d", sr->accel_z);
+	zassert_true(sr->has_flags && sr->flags == 1, "tilt flag %u", sr->flags);
+}
+
+ZTEST(compose, test_dallas_temperature_only)
+{
+	Telemetry fr[4];
+	size_t n;
+
+	set_clean();
+	g_app_config.cap_w1_sensors = true;
+	test_w1_types[0] = APP_W1_SLOT_DALLAS;
+	g_app_sensor_data.w1[0].temperature = 21.5f;
+	g_app_sensor_data.w1[0].present = true;
+
+	run_report(fr, 4, &n);
+
+	zassert_equal(fr[0].w1_sensors_count, 1, "expected one w1 reading");
+	const SensorReading *sr = &fr[0].w1_sensors[0];
+	zassert_true(sr->has_temperature && sr->temperature == 2150, "temperature %d",
+		     sr->temperature);
+	/* Dallas is temperature-only: cluster + flags must be absent. */
+	zassert_false(sr->has_humidity, "dallas humidity leaked");
+	zassert_false(sr->has_flags, "dallas flags leaked");
+	zassert_false(sr->has_illuminance, "dallas lux leaked");
+	zassert_false(sr->has_magnetic_field, "dallas field leaked");
+	zassert_false(sr->has_accel_x, "dallas accel leaked");
+}
+
 ZTEST(compose, test_system_always_present)
 {
 	Telemetry fr[8];

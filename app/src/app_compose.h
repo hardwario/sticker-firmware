@@ -26,6 +26,12 @@ extern "C" {
  * or -EMSGSIZE on encode failure. */
 int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more);
 
+/* As app_compose(), but with an explicit payload budget instead of the live
+ * LoRaWAN one. Lets a test/debug path (e.g. `ats lrw compose`) build the exact
+ * uplink bytes for a chosen data rate without a network join. budget == 0 still
+ * returns -EAGAIN. */
+int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget);
+
 #ifdef __cplusplus
 }
 #endif

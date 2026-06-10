@@ -332,12 +332,18 @@ message Telemetry {
 }
 
 // One ROM-bound 1-Wire slot's reading. type = enum app_w1_slot_type
-// (1=dallas temperature-only, 2=machine-probe temp+humidity+tilt); quantities a
-// slot's type does not provide are absent.
+// (1=dallas temperature-only, 2=machine-probe full sensor cluster); quantities a
+// slot's type does not provide — or a sub-sensor that did not respond — are
+// absent. Fields 6-10 (lux/field/accel) are machine-probe only.
 message SensorReading {
     uint32 slot              = 1;   // 0-based slot index
     uint32 type              = 2;   // enum app_w1_slot_type
-    optional sint32 temperature = 3; // degC x100
-    optional uint32 humidity    = 4; // %RH  x2
-    optional uint32 flags       = 5; // bit0 tilt (machine-probe only)
+    optional sint32 temperature = 3;  // degC x100
+    optional uint32 humidity    = 4;  // %RH  x2
+    optional uint32 flags       = 5;  // bit0 tilt (machine-probe only)
+    optional uint32 illuminance    = 6;  // lux           (OPT3001)
+    optional sint32 magnetic_field = 7;  // uT (mT x1000) (Si7210)
+    optional sint32 accel_x        = 8;  // m/s^2 x100    (LIS2DH12)
+    optional sint32 accel_y        = 9;  // m/s^2 x100
+    optional sint32 accel_z        = 10; // m/s^2 x100
 }
