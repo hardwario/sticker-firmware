@@ -551,6 +551,163 @@ int app_alarm_set_event_callback(app_alarm_event_cb cb, void *user_data)
 	return 0;
 }
 
+bool app_alarm_is_active(enum app_alarm_source source, enum app_alarm_quantity quantity)
+{
+	bool a = false;
+	k_mutex_lock(&m_lock, K_FOREVER);
+	for (int i = 0; i < APP_ALARM_RULE_MAX; i++) {
+		if (m_rt[i].used && m_rt[i].source == source && m_rt[i].quantity == quantity) {
+			a = m_rt[i].active;
+			break;
+		}
+	}
+	k_mutex_unlock(&m_lock);
+	return a;
+}
+
+/* ---- shell -------------------------------------------------------------- */
+
+#if defined(CONFIG_SHELL)
+#include <zephyr/shell/shell.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int cmd_alarm_list(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	uint8_t n = app_alarm_rules_count();
+	shell_print(sh, "%u rule(s):", n);
+	for (uint8_t i = 0; i < n; i++) {
+		const struct app_alarm_rule *r = app_alarm_rules_get(i);
+		const char *src = app_alarm_source_name(r->source);
+		const char *q = app_alarm_quantity_name(r->quantity);
+		bool active = app_alarm_is_active(r->source, r->quantity);
+		switch (app_alarm_quantity_kind(r->quantity)) {
+		case APP_ALARM_KIND_THRESHOLD:
+			shell_print(sh, "  %s %s  lo=%.2f hi=%.2f hst=%.2f  en=%d  active=%d", src,
+				    q, (double)r->lo, (double)r->hi, (double)r->hst, r->enabled,
+				    active);
+			break;
+		case APP_ALARM_KIND_STATE:
+			shell_print(sh, "  %s %s  %u->%u (%s)  en=%d  active=%d", src, q,
+				    r->from_state, r->to_state,
+				    r->from_state == r->to_state ? "level" : "edge", r->enabled,
+				    active);
+			break;
+		case APP_ALARM_KIND_RATE:
+			shell_print(sh, "  %s %s  rate>=%d/interval  en=%d  active=%d", src, q,
+				    (int)r->hi, r->enabled, active);
+			break;
+		}
+	}
+	return 0;
+}
+
+static int cmd_alarm_set(const struct shell *sh, size_t argc, char **argv)
+{
+	int src = app_alarm_source_by_name(argv[1]);
+	int qty = app_alarm_quantity_by_name(argv[2]);
+	if (src < 0 || qty < 0 ||
+	    !app_alarm_rule_valid((enum app_alarm_source)src, (enum app_alarm_quantity)qty)) {
+		shell_error(sh, "invalid <source> <quantity>");
+		return -EINVAL;
+	}
+
+	struct app_alarm_rule r = {.source = (uint8_t)src, .quantity = (uint8_t)qty, .enabled = 1};
+
+	switch (app_alarm_quantity_kind((enum app_alarm_quantity)qty)) {
+	case APP_ALARM_KIND_THRESHOLD:
+		if (argc < 5) {
+			shell_error(sh, "usage: alarm set <source> <quantity> <lo> <hi> [hst]");
+			return -EINVAL;
+		}
+		r.lo = strtof(argv[3], NULL);
+		r.hi = strtof(argv[4], NULL);
+		r.hst = (argc >= 6) ? strtof(argv[5], NULL) : 0.0f;
+		break;
+	case APP_ALARM_KIND_STATE:
+		if (argc < 5) {
+			shell_error(sh, "usage: alarm set <source> <quantity> <from> <to> "
+					"(0/1; from!=to=edge, from==to=level)");
+			return -EINVAL;
+		}
+		r.from_state = (uint8_t)(strtoul(argv[3], NULL, 10) ? 1 : 0);
+		r.to_state = (uint8_t)(strtoul(argv[4], NULL, 10) ? 1 : 0);
+		break;
+	case APP_ALARM_KIND_RATE:
+		if (argc < 4) {
+			shell_error(sh, "usage: alarm set <source> count <N-per-interval>");
+			return -EINVAL;
+		}
+		r.hi = (float)strtoul(argv[3], NULL, 10);
+		break;
+	}
+
+	int ret = app_alarm_rules_set(&r);
+	if (ret) {
+		shell_error(sh, "set failed: %d%s", ret,
+			    ret == -ENOSPC ? " (rule table full)" : "");
+		return ret;
+	}
+	ret = app_alarm_rules_save();
+	shell_print(sh, "rule set%s", ret ? " (NOT persisted!)" : "");
+	return 0;
+}
+
+/* Force a sample + one evaluation pass now and report whether any alarm is
+ * active. The main loop only calls app_alarm_poll() in the HEALTHY state, so on
+ * a bench device (not joined) this is how a test exercises the rules. */
+static int cmd_alarm_poll(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	app_sensor_sample();
+	bool any = app_alarm_poll();
+	shell_print(sh, "polled; any active: %s", any ? "yes" : "no");
+	return 0;
+}
+
+static int cmd_alarm_clear(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		app_alarm_rules_clear_all();
+		(void)app_alarm_rules_save();
+		shell_print(sh, "all rules cleared");
+		return 0;
+	}
+	int src = app_alarm_source_by_name(argv[1]);
+	int qty = (argc >= 3) ? app_alarm_quantity_by_name(argv[2]) : -1;
+	if (src < 0 || qty < 0) {
+		shell_error(sh, "usage: alarm clear [<source> <quantity>]");
+		return -EINVAL;
+	}
+	int ret = app_alarm_rules_clear((enum app_alarm_source)src, (enum app_alarm_quantity)qty);
+	if (ret) {
+		shell_error(sh, "clear failed: %d", ret);
+		return ret;
+	}
+	(void)app_alarm_rules_save();
+	shell_print(sh, "rule cleared");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_alarm, SHELL_CMD_ARG(list, NULL, "List alarm rules.", cmd_alarm_list, 1, 0),
+	SHELL_CMD_ARG(set, NULL,
+		      "Set a rule. Usage: set <source> <quantity> <args>\n"
+		      "  threshold: <lo> <hi> [hst]   state: <from> <to>   count: <N>",
+		      cmd_alarm_set, 4, 2),
+	SHELL_CMD_ARG(clear, NULL, "Clear a rule (or all). Usage: clear [<source> <quantity>]",
+		      cmd_alarm_clear, 1, 2),
+	SHELL_CMD_ARG(poll, NULL, "Sample + evaluate rules now (bench test).", cmd_alarm_poll, 1,
+		      0),
+	SHELL_SUBCMD_SET_END);
+
+SHELL_CMD_REGISTER(alarm, &sub_alarm, "Dynamic alarm rules.", NULL);
+#endif /* defined(CONFIG_SHELL) */
+
 static int app_alarm_init(void)
 {
 	k_work_init_delayable(&m_alarm_batch_work, alarm_batch_work_handler);

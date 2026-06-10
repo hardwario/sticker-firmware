@@ -32,6 +32,9 @@ void app_alarm_event(enum app_alarm_source source, bool active);
 
 int app_alarm_set_event_callback(app_alarm_event_cb cb, void *user_data);
 
+/* True if the rule for (source, quantity) currently has its alarm latched. */
+bool app_alarm_is_active(enum app_alarm_source source, enum app_alarm_quantity quantity);
+
 #ifdef __cplusplus
 }
 #endif
