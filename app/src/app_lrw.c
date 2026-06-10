@@ -90,7 +90,7 @@ static uint32_t m_hist_from, m_hist_to, m_hist_seq;
 static uint32_t m_hist_count;    /* total frames (N) */
 static uint32_t m_hist_idx;      /* next frame_index to send */
 static size_t m_hist_cursor;     /* next record ordinal */
-static uint16_t m_hist_present;  /* shared sensor mask, snapshot at replay start */
+static uint32_t m_hist_present;  /* shared sensor mask (uint32), snapshot at replay start */
 static uint32_t m_hist_interval; /* seconds between records, snapshot at start */
 static int m_hist_retries;       /* consecutive lorawan_send failures on the current frame */
 static uint8_t m_hist_tx_buf[APP_CMD_HISTORY_FRAME_BUF_SIZE];
@@ -968,7 +968,11 @@ static void m_hist_work_handler(struct k_work *work)
 	m_hist_cursor = next;
 	m_hist_idx++;
 
-	if (m_hist_idx < m_hist_count && m_hist_cursor < app_history_count()) {
+	/* Terminate on cursor exhaustion, not frame_index == frame_count (#89): a DR
+	 * change mid-replay alters records-per-frame, so the up-front frame_count is
+	 * only an estimate. The host concatenates by frame_index and tolerates
+	 * frame_index >= frame_count. */
+	if (m_hist_cursor < app_history_count()) {
 		k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_SECONDS(FRAME_GAP_SEC));
 	} else {
 		LOG_INF("History replay complete: %u frames", (unsigned)m_hist_idx);

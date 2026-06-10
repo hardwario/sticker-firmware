@@ -47,6 +47,28 @@ static const struct device *const m_rtc = DEVICE_DT_GET(DT_NODELABEL(rtc));
  * push the uplink over the payload limit (Length error). */
 static bool m_time_synced;
 
+/* Periodic re-sync (#96): the LSE drifts ~±20 ppm (~1.7 s/day, ~10 min/year),
+ * which shows up in history timestamps and GetInfo unix_time. Re-request the
+ * network time roughly weekly — it's a MAC command piggybacked on the next
+ * regular uplink, so it costs no extra message. The timer is armed once after
+ * the first successful sync (no point before the network has time). */
+#define RESYNC_PERIOD_SEC (7U * 24U * 3600U)
+
+static void resync_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	LOG_INF("Periodic time re-sync");
+	app_clock_force_resync();
+}
+static K_WORK_DEFINE(m_resync_work, resync_work_handler);
+
+static void resync_timer_handler(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	k_work_submit(&m_resync_work); /* defer off the ISR/timer context */
+}
+static K_TIMER_DEFINE(m_resync_timer, resync_timer_handler, NULL);
+
 int app_clock_init(void)
 {
 	if (!device_is_ready(m_rtc)) {
@@ -105,8 +127,15 @@ void app_clock_handle_downlink(uint8_t flags)
 		return;
 	}
 
+	bool first_sync = !m_time_synced;
 	m_time_synced = true;
 	LOG_INF("RTC synced from network: unix=%u", unix_time);
+
+	/* Arm the periodic re-sync once, after the first successful network sync. */
+	if (first_sync) {
+		k_timer_start(&m_resync_timer, K_SECONDS(RESYNC_PERIOD_SEC),
+			      K_SECONDS(RESYNC_PERIOD_SEC));
+	}
 #else
 	ARG_UNUSED(flags);
 #endif /* defined(CONFIG_LORAWAN) */
