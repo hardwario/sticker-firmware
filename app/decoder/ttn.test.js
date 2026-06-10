@@ -103,6 +103,33 @@ test("set_param cap_w1_sensors (tag 60) is reachable both ways (#92)", () => {
   assert.equal(back.set_param.application.cap_w1_sensors, 1);
 });
 
+// AlarmRule downlink command (field 13): set a dynamic alarm rule and clear-all.
+// op=0 SET / 1 CLEAR / 2 CLEAR_ALL; source/quantity are app_alarm enums.
+test("alarm_rule command encode/decode round-trips", () => {
+  // SET s3 (source 3) humidity (quantity 1) threshold lo=10 hi=80, enabled.
+  const set = codec.encodeDownlink({
+    data: {
+      seq: 4, command: "alarm_rule",
+      alarm_rule: { source: 3, quantity: 1, enabled: true, lo: 10, hi: 80 },
+    },
+  });
+  assert.equal(set.errors.length, 0, "encode errors");
+  assert.equal(set.fPort, 85);
+  const b = codec.decodeDownlink({ bytes: set.bytes, fPort: 85 }).data;
+  assert.equal(b.command, "alarm_rule");
+  assert.equal(b.alarm_rule.source, 3);
+  assert.equal(b.alarm_rule.quantity, 1);
+  assert.equal(b.alarm_rule.enabled, true);
+  assert.equal(b.alarm_rule.lo, 10);
+  assert.equal(b.alarm_rule.hi, 80);
+
+  // CLEAR_ALL (op=2).
+  const clr = codec.encodeDownlink({ data: { command: "alarm_rule", alarm_rule: { op: 2 } } });
+  assert.equal(clr.errors.length, 0);
+  const c = codec.decodeDownlink({ bytes: clr.bytes, fPort: 85 }).data;
+  assert.equal(c.alarm_rule.op, 2);
+});
+
 // --- Uplink: legacy bitmap (fPort 1) --------------------------------------
 test("decodeUplink decodes legacy bitmap (fPort 1)", () => {
   const got = codec.decodeUplink({ bytes: hex("7a01a109fa580258"), fPort: 1 });

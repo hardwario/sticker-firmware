@@ -120,7 +120,7 @@ var _LRW_TAGS = _invert(_LRW_NAMES);
 var _CMD_NAMES = {
   2: "set_param", 3: "get_param", 4: "get_info", 5: "get_config",
   6: "settings_save", 7: "reboot", 8: "factory_reset", 9: "force_send",
-  10: "reset_counters", 11: "req_history", 12: "clock_sync"
+  10: "reset_counters", 11: "req_history", 12: "clock_sync", 13: "alarm_rule"
 };
 var _CMD_TAGS = _invert(_CMD_NAMES);
 
@@ -654,6 +654,18 @@ function encodeDownlinkCommand(cmd) {
   } else if (name === "req_history") {
     if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
+  } else if (name === "alarm_rule") {
+    // op(1) 0=set/1=clear/2=clear_all, source(2), quantity(3) numeric enums,
+    // enabled(4), threshold lo(5)/hi(6)/hst(7) float, state from(8)/to(9).
+    if (b.op) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.op));
+    if (b.source) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.source));
+    if (b.quantity) body = body.concat(_encTag(3, 0)).concat(_encVarint(b.quantity));
+    if (b.enabled) body = body.concat(_encTag(4, 0)).concat(_encVarint(1));
+    if (b.lo !== undefined) body = body.concat(_encTag(5, 5)).concat(_encFloat(b.lo));
+    if (b.hi !== undefined) body = body.concat(_encTag(6, 5)).concat(_encFloat(b.hi));
+    if (b.hst !== undefined) body = body.concat(_encTag(7, 5)).concat(_encFloat(b.hst));
+    if (b.from_state) body = body.concat(_encTag(8, 0)).concat(_encVarint(b.from_state));
+    if (b.to_state) body = body.concat(_encTag(9, 0)).concat(_encVarint(b.to_state));
   }
   // get_info / settings_save / reboot / factory_reset / force_send / clock_sync: empty body.
 
@@ -751,6 +763,27 @@ function decodeDownlinkCommand(bytes) {
           } else { break; }
         }
         cmd.req_history = rh;
+      } else if (field === 13) { // alarm_rule
+        var arl = {}, w = pos;
+        while (w < end) {
+          var t13 = _pbReadVarint(bytes, w); w = t13.next;
+          var f13 = t13.value >>> 3, w13 = t13.value & 0x7;
+          if (w13 === 0) {
+            var v13 = _pbReadVarint(bytes, w); w = v13.next;
+            if (f13 === 1) arl.op = v13.value;
+            else if (f13 === 2) arl.source = v13.value;
+            else if (f13 === 3) arl.quantity = v13.value;
+            else if (f13 === 4) arl.enabled = v13.value !== 0;
+            else if (f13 === 8) arl.from_state = v13.value;
+            else if (f13 === 9) arl.to_state = v13.value;
+          } else if (w13 === 5) {
+            var fl13 = _pbReadFloat(bytes, w); w = fl13.next;
+            if (f13 === 5) arl.lo = fl13.value;
+            else if (f13 === 6) arl.hi = fl13.value;
+            else if (f13 === 7) arl.hst = fl13.value;
+          } else { break; }
+        }
+        cmd.alarm_rule = arl;
       }
       pos = end;
     } else {

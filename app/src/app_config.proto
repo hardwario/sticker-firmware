@@ -127,6 +127,7 @@ message Command {
         ResetCounters   reset_counters   = 10;
         ReqHistory      req_history      = 11;
         ClockSync       clock_sync       = 12;
+        AlarmRule       alarm_rule       = 13;
     }
 
     message SetParam {
@@ -157,6 +158,22 @@ message Command {
     }
     message ReqHistory   { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
     message ClockSync    { }
+
+    // Set, clear or clear-all a dynamic alarm rule (target = source + quantity).
+    // SET uses the kind's fields (threshold lo/hi/hst, state from/to); CLEAR
+    // removes one (source,quantity); CLEAR_ALL wipes the list. Rules persist.
+    message AlarmRule {
+        enum Op { SET = 0; CLEAR = 1; CLEAR_ALL = 2; }
+        Op     op         = 1;
+        uint32 source     = 2;   // enum app_alarm_source
+        uint32 quantity   = 3;   // enum app_alarm_quantity
+        bool   enabled    = 4;
+        optional float  lo  = 5;
+        optional float  hi  = 6;
+        optional float  hst = 7;
+        optional uint32 from_state = 8;
+        optional uint32 to_state   = 9;
+    }
 }
 
 message Response {

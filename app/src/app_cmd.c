@@ -5,6 +5,7 @@
  */
 
 #include "app_cmd.h"
+#include "app_alarm_rules.h"
 #include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -336,6 +337,53 @@ static void handle_req_history(enum app_cmd_transport transport, const Command *
 #endif
 }
 
+static void handle_alarm_rule(const Command *cmd, Response *resp)
+{
+	const Command_AlarmRule *ar = &cmd->body.alarm_rule;
+	int ret;
+
+	switch (ar->op) {
+	case Command_AlarmRule_Op_CLEAR_ALL:
+		app_alarm_rules_clear_all();
+		ret = app_alarm_rules_save();
+		break;
+	case Command_AlarmRule_Op_CLEAR:
+		ret = app_alarm_rules_clear((enum app_alarm_source)ar->source,
+					    (enum app_alarm_quantity)ar->quantity);
+		if (ret == 0) {
+			ret = app_alarm_rules_save();
+		}
+		break;
+	case Command_AlarmRule_Op_SET:
+	default: {
+		struct app_alarm_rule r = {
+			.source = (uint8_t)ar->source,
+			.quantity = (uint8_t)ar->quantity,
+			.enabled = ar->enabled ? 1 : 0,
+			.lo = ar->has_lo ? ar->lo : 0.0f,
+			.hi = ar->has_hi ? ar->hi : 0.0f,
+			.hst = ar->has_hst ? ar->hst : 0.0f,
+			.from_state = (uint8_t)((ar->has_from_state && ar->from_state) ? 1 : 0),
+			.to_state = (uint8_t)((ar->has_to_state && ar->to_state) ? 1 : 0),
+		};
+		ret = app_alarm_rules_set(&r);
+		if (ret == 0) {
+			ret = app_alarm_rules_save();
+		}
+		break;
+	}
+	}
+
+	if (ret == 0) {
+		resp->which_body = Response_ack_tag;
+	} else {
+		make_error(resp,
+			   ret == -EINVAL ? Response_Error_Code_OUT_OF_RANGE
+					  : Response_Error_Code_NOT_READY,
+			   "alarm rule");
+	}
+}
+
 static void dispatch(enum app_cmd_transport transport, const Command *cmd, Response *resp,
 		     enum app_cmd_action *action)
 {
@@ -394,6 +442,9 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 		resp->which_body = Response_ack_tag;
 		break;
 
+	case Command_alarm_rule_tag:
+		handle_alarm_rule(cmd, resp);
+		break;
 	case Command_req_history_tag:
 		handle_req_history(transport, cmd, resp);
 		break;
