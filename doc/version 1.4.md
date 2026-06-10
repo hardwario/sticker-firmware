@@ -212,7 +212,11 @@ New `history` shell command:
 | `history enable on\|off` | Master on/off switch |
 | `history stats` | Per-sensor min/max/avg |
 
-Replay over LoRaWAN with the `req_history` downlink command (§1): the device streams the matching records back as `history_frame` messages on fPort 85.
+Recordable channels (the `history-sensors` bitmask, one bit each): `temperature`, `humidity`, the per-slot 1-Wire channels `s1-temp`/`s1-hum` … `s4-temp`/`s4-hum` (ROM-bound slots, mirror the telemetry slot model; a Dallas slot has no humidity), `hall-left`, `hall-right`, `input-a`, `input-b`, `motion`. The mask is **32-bit** (room for future channels). A Dallas slot's humidity, or any channel whose capability is off, is simply not recorded.
+
+Replay over LoRaWAN with the `req_history` downlink command (§1): the device streams the matching records back as `history_frame` messages on fPort 85. Each frame carries a shared `present` mask + `interval_s` once; samples are fixed-size values-only records, time(j) = `t0_unix + j*interval_s`. The replay splits across as many frames as the data rate needs and terminates when the window is exhausted (a data-rate change mid-replay only changes records-per-frame; the consumer concatenates by `frame_index`).
+
+> **Note on `interval-report`:** the LoRaWAN stack persists frame counters to NVS on every uplink; at the 60 s minimum interval with multi-frame reports the storage partition reaches its ~10 k erase budget in roughly 1–2 years. The default (900 s) is decades. History flash wear is fine even at 60 s.
 
 ---
 

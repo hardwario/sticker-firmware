@@ -83,9 +83,10 @@ static void tx_telemetry_frame(bool first_frame);
  * modeled on the telemetry frame machine above. */
 #define HISTORY_SAMPLES_MAX 48 /* nanopb Response.HistoryFrame.samples bound */
 #define HISTORY_FRAME_OVERHEAD                                                                     \
-	22 /* seq + history_frame wrapper + frame_index/count                                      \
-	    * + t0_unix(5B varint) + present + interval_s                                          \
-	    * + samples tag/len; conservative upper bound */
+	36 /* version byte + seq + history_frame wrapper + frame_index/count + t0_unix(5B varint)  \
+	    * + present(uint32 → up to 5B varint) + interval_s + samples tag/len; conservative   \
+	    * upper bound so the encoded frame never exceeds the DR budget (#89) */
+#define HISTORY_MAX_RETRIES 8 /* give up a stuck frame instead of retrying forever (#89) */
 
 static struct k_work_delayable m_hist_work;
 static bool m_hist_active;
@@ -93,9 +94,14 @@ static uint32_t m_hist_from, m_hist_to, m_hist_seq;
 static uint32_t m_hist_count;    /* total frames (N) */
 static uint32_t m_hist_idx;      /* next frame_index to send */
 static size_t m_hist_cursor;     /* next record ordinal */
-static uint16_t m_hist_present;  /* shared sensor mask, snapshot at replay start */
+static uint32_t m_hist_present;  /* shared sensor mask (uint32), snapshot at replay start */
 static uint32_t m_hist_interval; /* seconds between records, snapshot at start */
-static uint8_t m_hist_tx_buf[64];
+static uint8_t m_hist_retries;   /* consecutive send retries of the current frame (#89) */
+/* Holds a full encoded HistoryFrame Response + version byte. The old 64 B
+ * overflowed once samples filled (frame ~70-90 B) → pb_encode failed and replay
+ * silently died on DR3+ (#89). 96 = version(1) + seq + oneof wrapper +
+ * Response_HistoryFrame_size(80, nanopb) with margin. */
+static uint8_t m_hist_tx_buf[96];
 
 static void m_hist_work_handler(struct k_work *work);
 
@@ -710,6 +716,17 @@ static void send_work_handler(struct k_work *work)
 		return;
 	}
 
+	/* A history replay owns the TX path and has paused the periodic timer (#89).
+	 * Don't run a telemetry pass here: app_history_capture() would evict/shift
+	 * record ordinals under the replay cursor, and restarting m_send_timer would
+	 * resume periodic telemetry concurrently with the replay stream. Anything
+	 * queued (response/alarm/force) is drained once the replay finishes and the
+	 * timer resumes. */
+	if (m_hist_active) {
+		LOG_WRN("TX deferred: history replay active");
+		return;
+	}
+
 	/* Drain pending command response before composing telemetry. The response
 	 * leaves now; fresh telemetry follows shortly after (see below) instead of
 	 * waiting a full interval_report. */
@@ -933,18 +950,31 @@ static void m_hist_work_handler(struct k_work *work)
 
 	ret = lorawan_send(APP_LRW_DOWNLINK_CMD_PORT, m_hist_tx_buf, len, LORAWAN_MSG_UNCONFIRMED);
 	if (ret) {
-		/* Duty-cycle / MAC busy — retry the same frame, don't advance. */
+		/* Duty-cycle / MAC busy — retry the same frame, don't advance. Give up
+		 * after a bounded number of retries so a permanently-failing frame can't
+		 * wedge the replay (and the paused telemetry timer) forever (#89). */
 		LOG_ERR_CALL_FAILED_INT("lorawan_send(history)", ret);
+		if (++m_hist_retries > HISTORY_MAX_RETRIES) {
+			LOG_WRN("History frame %u stuck after %u retries — aborting replay",
+				(unsigned)m_hist_idx, (unsigned)m_hist_retries);
+			history_replay_finish();
+			return;
+		}
 		k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_SECONDS(FRAME_RETRY_SEC));
 		return;
 	}
+	m_hist_retries = 0;
 
 	LOG_INF("History frame %u/%u sent (%u rec, %zu B)", (unsigned)(m_hist_idx + 1),
 		(unsigned)m_hist_count, (unsigned)n, len);
 	m_hist_cursor = next;
 	m_hist_idx++;
 
-	if (m_hist_idx < m_hist_count && m_hist_cursor < app_history_count()) {
+	/* Terminate on cursor exhaustion, not frame_index == frame_count (#89): a DR
+	 * change mid-replay alters records-per-frame, so the up-front frame_count is
+	 * only an estimate. The host concatenates by frame_index and tolerates
+	 * frame_index >= frame_count. */
+	if (m_hist_cursor < app_history_count()) {
 		k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_SECONDS(FRAME_GAP_SEC));
 	} else {
 		LOG_INF("History replay complete: %u frames", (unsigned)m_hist_idx);
@@ -972,6 +1002,7 @@ bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 	m_hist_count = n;
 	m_hist_idx = 0;
 	m_hist_cursor = 0;
+	m_hist_retries = 0;
 	m_hist_present = app_history_get_mask();
 	m_hist_interval = app_history_get_interval();
 	m_hist_active = true;

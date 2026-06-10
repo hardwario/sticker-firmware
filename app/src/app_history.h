@@ -17,16 +17,22 @@ extern "C" {
 #endif
 
 /* Analog + counter channels that can be stored in the history buffer. The order
- * is the wire order within a record and the bit order of the selection mask. */
+ * is the wire order within a record and the bit order of the selection mask
+ * (uint32 → up to 32 channels). The 1-Wire slots mirror the telemetry slot model
+ * (s1..s4 = ROM-bound w1[0..3]); each slot stores temperature + humidity (a
+ * Dallas slot leaves humidity at the sentinel). The selection mask lets a
+ * deployment enable only the channels it cares about. */
 enum app_history_sensor {
 	APP_HISTORY_TEMPERATURE = 0,
 	APP_HISTORY_HUMIDITY,
-	APP_HISTORY_EXT1,
-	APP_HISTORY_EXT2,
-	APP_HISTORY_MP1_TEMP,
-	APP_HISTORY_MP2_TEMP,
-	APP_HISTORY_MP1_HUM,
-	APP_HISTORY_MP2_HUM,
+	APP_HISTORY_S1_TEMP,
+	APP_HISTORY_S1_HUM,
+	APP_HISTORY_S2_TEMP,
+	APP_HISTORY_S2_HUM,
+	APP_HISTORY_S3_TEMP,
+	APP_HISTORY_S3_HUM,
+	APP_HISTORY_S4_TEMP,
+	APP_HISTORY_S4_HUM,
 	APP_HISTORY_HALL_LEFT,
 	APP_HISTORY_HALL_RIGHT,
 	APP_HISTORY_INPUT_A,
@@ -42,7 +48,7 @@ enum app_history_sensor {
 struct app_history_record {
 	uint32_t time_unix;
 	bool time_synced;
-	uint16_t present;
+	uint32_t present;
 	double value[APP_HISTORY_SENSOR_COUNT];
 };
 
@@ -79,8 +85,8 @@ void app_history_set_enabled(bool enable);
 /* Sensor selection mask (bit i = enum app_history_sensor i). Setting a new mask
  * clears the buffer (record layout changes). Sensors whose capability is off
  * are silently dropped from the mask. */
-uint16_t app_history_get_mask(void);
-void app_history_set_mask(uint16_t mask);
+uint32_t app_history_get_mask(void);
+void app_history_set_mask(uint32_t mask);
 
 /* interval_report (s) the buffer is currently recorded at; records are periodic
  * so a wire frame carries this once and per-record time = t0 + ord*interval. */
@@ -107,7 +113,7 @@ uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t c
 const char *app_history_sensor_name(enum app_history_sensor s);
 enum app_history_sensor app_history_sensor_by_name(const char *name);
 bool app_history_sensor_available(enum app_history_sensor s);
-uint16_t app_history_available_mask(void);
+uint32_t app_history_available_mask(void);
 
 #ifdef __cplusplus
 }

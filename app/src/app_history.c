@@ -63,21 +63,24 @@ static const struct hist_desc m_desc[APP_HISTORY_SENSOR_COUNT] = {
 				     ENC_TEMP, 2, NO_CAP},
 	[APP_HISTORY_HUMIDITY] = {"humidity", offsetof(struct app_sensor_data, humidity), ENC_HUM,
 				  1, NO_CAP},
-	/* 1-Wire channels repointed onto the ROM-bound slot array (w1[0..3]). Names
-	 * and wire layout are unchanged in P3; the per-slot rename (s1..s4) + magic
-	 * bump is P4. */
-	[APP_HISTORY_EXT1] = {"ext1", offsetof(struct app_sensor_data, w1[0].temperature), ENC_TEMP,
-			      2, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_EXT2] = {"ext2", offsetof(struct app_sensor_data, w1[1].temperature), ENC_TEMP,
-			      2, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_MP1_TEMP] = {"mp1-temp", offsetof(struct app_sensor_data, w1[2].temperature),
-				  ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_MP2_TEMP] = {"mp2-temp", offsetof(struct app_sensor_data, w1[3].temperature),
-				  ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_MP1_HUM] = {"mp1-hum", offsetof(struct app_sensor_data, w1[2].humidity),
-				 ENC_HUM, 1, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_MP2_HUM] = {"mp2-hum", offsetof(struct app_sensor_data, w1[3].humidity),
-				 ENC_HUM, 1, offsetof(struct app_config, cap_w1_sensors)},
+	/* 1-Wire ROM-bound slots s1..s4 (= telemetry slot model, w1[0..3]); each slot
+	 * stores temperature + humidity. A Dallas slot has no humidity → sentinel. */
+	[APP_HISTORY_S1_TEMP] = {"s1-temp", offsetof(struct app_sensor_data, w1[0].temperature),
+				 ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S1_HUM] = {"s1-hum", offsetof(struct app_sensor_data, w1[0].humidity), ENC_HUM,
+				1, offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S2_TEMP] = {"s2-temp", offsetof(struct app_sensor_data, w1[1].temperature),
+				 ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S2_HUM] = {"s2-hum", offsetof(struct app_sensor_data, w1[1].humidity), ENC_HUM,
+				1, offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S3_TEMP] = {"s3-temp", offsetof(struct app_sensor_data, w1[2].temperature),
+				 ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S3_HUM] = {"s3-hum", offsetof(struct app_sensor_data, w1[2].humidity), ENC_HUM,
+				1, offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S4_TEMP] = {"s4-temp", offsetof(struct app_sensor_data, w1[3].temperature),
+				 ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S4_HUM] = {"s4-hum", offsetof(struct app_sensor_data, w1[3].humidity), ENC_HUM,
+				1, offsetof(struct app_config, cap_w1_sensors)},
 	[APP_HISTORY_HALL_LEFT] = {"hall-left", offsetof(struct app_sensor_data, hall_left_count),
 				   ENC_COUNT, 4, offsetof(struct app_config, cap_hall_left)},
 	[APP_HISTORY_HALL_RIGHT] = {"hall-right",
@@ -93,13 +96,13 @@ static const struct hist_desc m_desc[APP_HISTORY_SENSOR_COUNT] = {
 
 #define TEMP_SENTINEL   0x7FFF
 #define HUM_SENTINEL    0xFF
-#define MAX_RECORD_SIZE (13 * 4) /* worst case all channels, values only */
+#define MAX_RECORD_SIZE (APP_HISTORY_SENSOR_COUNT * 4) /* worst case all channels, values only */
 
 /* ---- Module state ------------------------------------------------------- */
 
 static struct k_mutex m_lock;
 static bool m_enabled;
-static uint16_t m_mask; /* selected & available sensors */
+static uint32_t m_mask; /* selected & available sensors (bit i = enum app_history_sensor i) */
 static uint16_t m_sample_size;
 static uint16_t m_capacity;
 static uint16_t m_start; /* index of oldest record */
@@ -142,7 +145,7 @@ static bool m_fs_ready;
 
 struct hist_meta {
 	uint32_t magic;
-	uint16_t mask;
+	uint32_t mask;
 	uint16_t sample_size;
 	uint16_t start;
 	uint16_t count;
@@ -151,7 +154,7 @@ struct hist_meta {
 	uint8_t base_synced;
 };
 
-#define META_MAGIC 0x48495332 /* "HIS2" — bumped: record layout dropped per-record delta */
+#define META_MAGIC 0x48495333 /* "HIS3" — bumped: uint32 mask + per-slot s1..s4 channels */
 
 static int backend_init(void)
 {
@@ -171,7 +174,21 @@ static int backend_init(void)
 
 	ret = nvs_mount(&m_fs);
 	if (ret) {
-		return ret;
+		/* Recovery (#96): the partition can hold non-NVS garbage — e.g. a debug
+		 * image (FLASH_LOAD_SIZE 0x3C000) flashed over it, then a release image
+		 * flashed without --erase. nvs_startup then fails (often -EDEADLK) and,
+		 * without this, history is permanently dead (backend_erase no-ops while
+		 * !m_fs_ready). Erase the whole partition once and remount. */
+		LOG_WRN("history nvs_mount failed: %d — erasing partition and retrying", ret);
+		const struct flash_area *fa;
+		if (flash_area_open(FIXED_PARTITION_ID(history_partition), &fa) == 0) {
+			(void)flash_area_erase(fa, 0, FIXED_PARTITION_SIZE(history_partition));
+			flash_area_close(fa);
+		}
+		ret = nvs_mount(&m_fs);
+		if (ret) {
+			return ret;
+		}
 	}
 	m_fs_ready = true;
 	return 0;
@@ -208,6 +225,14 @@ static bool backend_load_meta(void)
 	}
 	if (meta.mask != m_mask || meta.sample_size != m_sample_size) {
 		return false; /* layout changed since last boot */
+	}
+	/* Validate the stored indices against the current capacity (#96): a changed
+	 * capacity formula or a corrupt record would otherwise let start/count point
+	 * at non-existent slots and decode garbage. */
+	if (meta.count > m_capacity || meta.start >= (m_capacity ? m_capacity : 1)) {
+		LOG_WRN("history meta out of range (start=%u count=%u cap=%u) — starting clean",
+			meta.start, meta.count, m_capacity);
+		return false;
 	}
 	m_start = meta.start;
 	m_count = meta.count;
@@ -289,9 +314,9 @@ static uint16_t backend_capacity(uint16_t sample_size)
 
 /* ---- Mask / sizing ------------------------------------------------------ */
 
-uint16_t app_history_available_mask(void)
+uint32_t app_history_available_mask(void)
 {
-	uint16_t m = 0;
+	uint32_t m = 0;
 	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
 		if (cap_on(m_desc[i].cap_off)) {
 			m |= BIT(i);
@@ -302,7 +327,7 @@ uint16_t app_history_available_mask(void)
 
 static void recompute_sizing(void)
 {
-	uint16_t avail = app_history_available_mask();
+	uint32_t avail = app_history_available_mask();
 	m_mask &= avail; /* drop sensors whose capability went away */
 
 	uint16_t size = 0; /* values only; per-record time is implicit (base + ord*interval) */
@@ -400,9 +425,11 @@ void app_history_capture(void)
 
 	/* Records are periodic at interval_report, so per-record time is implicit
 	 * (base + ord*interval). If the interval changed, that timebase no longer
-	 * holds — drop the history and restart at the new rate. */
+	 * holds — drop the history and restart at the new rate. Logical reset only
+	 * (#96): no nvs_clear here — that 80 KB erase stalls the CPU ~0.9 s on the
+	 * TX path. Reads are bounded by m_count, so the stale records are invisible
+	 * and get overwritten (same slot ids) / GC-reclaimed as new ones arrive. */
 	if (m_interval != (uint32_t)g_app_config.interval_report) {
-		backend_erase();
 		m_start = 0;
 		m_count = 0;
 		m_base_time = 0;
@@ -420,23 +447,33 @@ void app_history_capture(void)
 	}
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	uint16_t slot;
-	if (m_count < m_capacity) {
-		if (m_count == 0) {
-			bool synced;
-			m_base_time = now_seconds(&synced);
-			m_base_synced = synced;
-		}
-		slot = (m_start + m_count) % m_capacity;
-		m_count++;
-	} else {
-		/* Full: evict oldest; the oldest ordinal moves forward one interval. */
-		m_base_time += m_interval;
-		slot = m_start;
-		m_start = (m_start + 1) % m_capacity;
+	/* Tentative placement; only commit (advance count/start) if the write lands,
+	 * so a failed flash write leaves no phantom record (#96). */
+	bool full = (m_count >= m_capacity);
+	uint16_t slot = full ? m_start : (uint16_t)((m_start + m_count) % m_capacity);
+	uint32_t base_if_first = m_base_time;
+	bool synced_if_first = m_base_synced;
+	if (!full && m_count == 0) {
+		base_if_first = now_seconds(&synced_if_first);
 	}
 
-	(void)backend_write_slot(slot, rec, m_sample_size);
+	if (backend_write_slot(slot, rec, m_sample_size) != 0) {
+		LOG_WRN("history write slot %u failed — record dropped", slot);
+		k_mutex_unlock(&m_lock);
+		return;
+	}
+
+	if (full) {
+		/* Evicted oldest; the oldest ordinal moves forward one interval. */
+		m_base_time += m_interval;
+		m_start = (m_start + 1) % m_capacity;
+	} else {
+		if (m_count == 0) {
+			m_base_time = base_if_first;
+			m_base_synced = synced_if_first;
+		}
+		m_count++;
+	}
 	backend_save_meta();
 
 	k_mutex_unlock(&m_lock);
@@ -449,7 +486,10 @@ void app_history_on_clock_sync(uint32_t unix_now)
 		uint32_t off = unix_now - (uint32_t)(k_uptime_get() / 1000);
 		m_base_time += off;
 		m_base_synced = true;
-		backend_save_meta();
+		/* No backend_save_meta() here (#96): this runs inside the LoRaWAN downlink
+		 * callback (LoRaMacProcess on the system workqueue); a flash write there
+		 * stalls radio/timer handling. The next app_history_capture() persists the
+		 * fixed-up base — if a reboot intervenes, the next clock sync re-fixes it. */
 	} else if (m_count == 0) {
 		m_base_synced = true; /* next record will start absolute */
 	}
@@ -489,7 +529,14 @@ int app_history_get(size_t idx, struct app_history_record *out)
 	/* Records are periodic: time = base + ord*interval (no per-record delta). */
 	uint8_t rec[MAX_RECORD_SIZE];
 	uint16_t slot = (m_start + idx) % m_capacity;
-	(void)backend_read_slot(slot, rec, m_sample_size);
+	if (backend_read_slot(slot, rec, m_sample_size) != 0) {
+		/* Don't decode an uninitialised buffer (#96) — report all-absent. */
+		out->present = 0;
+		out->time_unix = m_base_time + (uint32_t)idx * m_interval;
+		out->time_synced = m_base_synced;
+		k_mutex_unlock(&m_lock);
+		return -EIO;
+	}
 	decode_record(rec, out);
 	out->time_unix = m_base_time + (uint32_t)idx * m_interval;
 	out->time_synced = m_base_synced;
@@ -533,7 +580,11 @@ size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t star
 			break; /* this record spills to the next page */
 		}
 		uint16_t slot = (m_start + ord) % m_capacity;
-		(void)backend_read_slot(slot, buf + pos, m_sample_size);
+		if (backend_read_slot(slot, buf + pos, m_sample_size) != 0) {
+			/* Don't ship an uninitialised buffer on the wire (#96) — end the
+			 * page here; the host gets the records read so far. */
+			break;
+		}
 		if (!have_t0) {
 			t0 = t;
 			have_t0 = true;
@@ -594,17 +645,19 @@ void app_history_set_enabled(bool enable)
 	m_enabled = enable;
 }
 
-uint16_t app_history_get_mask(void)
+uint32_t app_history_get_mask(void)
 {
 	return m_mask;
 }
 
-void app_history_set_mask(uint16_t mask)
+void app_history_set_mask(uint32_t mask)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
-	uint16_t avail = app_history_available_mask();
+	uint32_t avail = app_history_available_mask();
 	m_mask = mask & avail;
-	backend_erase();
+	/* Logical reset only (#96): the record layout changed, but reads are bounded
+	 * by m_count so stale bytes are invisible and overwritten as new records
+	 * arrive — no 0.9 s nvs_clear stall. (`history clear` still erases.) */
 	m_start = 0;
 	m_count = 0;
 	m_base_time = 0;
@@ -647,8 +700,8 @@ int app_history_init(void)
 	m_enabled = g_app_config.history_enable;
 
 	/* Seed mask: explicit config bitmask, or "all available" when 0. */
-	uint16_t avail = app_history_available_mask();
-	uint16_t cfg = (uint16_t)g_app_config.history_sensors;
+	uint32_t avail = app_history_available_mask();
+	uint32_t cfg = g_app_config.history_sensors;
 	m_mask = (cfg == 0) ? avail : (cfg & avail);
 
 	int ret = backend_init();
@@ -705,7 +758,7 @@ static int cmd_history_info(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "enabled:   %s", m_enabled ? "yes" : "no");
 	shell_print(sh, "backend:   %s", backend_name());
 
-	char list[128] = "";
+	char list[256] = "";
 	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT; i++) {
 		if (m_mask & BIT(i)) {
 			if (list[0]) {
@@ -744,7 +797,7 @@ static int cmd_history_read(const struct shell *sh, size_t argc, char **argv)
 	size_t first = count - n;
 
 	/* Header */
-	char hdr[160];
+	char hdr[256];
 	int off = snprintf(hdr, sizeof(hdr), "%-5s %-20s", "#", "time");
 	for (int i = 0; i < APP_HISTORY_SENSOR_COUNT && off < (int)sizeof(hdr); i++) {
 		if (m_mask & BIT(i)) {

@@ -142,4 +142,37 @@ ZTEST(history, test_export)
 	zassert_equal(app_history_count_frames(0, 0xFFFFFFFF, sizeof(buf)), 1, "frames");
 }
 
+/* Per-slot 1-Wire channels (s1..s4 temp/hum) become available when cap_w1_sensors
+ * is on; a Dallas-like slot with NaN humidity stores the sentinel → absent. */
+ZTEST(history, test_per_slot_w1_channels)
+{
+	setup();
+	g_app_config.cap_w1_sensors = true;
+	zassert_equal(app_history_init(), 0, "re-init with cap_w1_sensors");
+	app_history_clear();
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	g_app_sensor_data.temperature = 20.0f;
+	g_app_sensor_data.humidity = 40.0f;
+	g_app_sensor_data.w1[0].temperature = 24.5f; /* s1: temp + hum (machine-probe) */
+	g_app_sensor_data.w1[0].humidity = 55.0f;
+	g_app_sensor_data.w1[2].temperature = 30.0f; /* s3: temp only (Dallas-like) */
+	g_app_sensor_data.w1[2].humidity = NAN;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+	app_history_capture();
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0, "get");
+	zassert_true(r.present & BIT16(APP_HISTORY_S1_TEMP), "s1-temp present");
+	zassert_within(r.value[APP_HISTORY_S1_TEMP], 24.5, 0.01, "s1-temp %g",
+		       r.value[APP_HISTORY_S1_TEMP]);
+	zassert_true(r.present & BIT16(APP_HISTORY_S1_HUM), "s1-hum present");
+	zassert_within(r.value[APP_HISTORY_S1_HUM], 55.0, 0.5, "s1-hum %g",
+		       r.value[APP_HISTORY_S1_HUM]);
+	zassert_true(r.present & BIT16(APP_HISTORY_S3_TEMP), "s3-temp present");
+	zassert_within(r.value[APP_HISTORY_S3_TEMP], 30.0, 0.01, "s3-temp %g",
+		       r.value[APP_HISTORY_S3_TEMP]);
+	zassert_false(r.present & BIT16(APP_HISTORY_S3_HUM), "s3-hum absent (NaN sentinel)");
+}
+
 ZTEST_SUITE(history, NULL, NULL, NULL, NULL, NULL);
