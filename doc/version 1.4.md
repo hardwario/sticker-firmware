@@ -9,7 +9,7 @@ This document lists **only the changes introduced in firmware v1.4.0** relative 
 | Area | Change |
 |---|---|
 | Remote control | **New** bidirectional command protocol over LoRaWAN downlinks (fPort 85) |
-| Telemetry | **New** protobuf telemetry on **fPort 2** (legacy bitmap stays on fPort 1); large reports split across frames |
+| Telemetry | **New** protobuf telemetry on **fPort 2** (legacy fPort 1 bitmap no longer emitted); large reports split across frames |
 | Alarms | **New** alarm-detail batch on **fPort 3**; **new** global alarm rate-limit; **new** PIR motion alarm |
 | Device info | **New** automatic device-info uplink on every join |
 | Time | **New** real-time clock, synced from the network |
@@ -58,7 +58,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 
 ## 2. New telemetry format on fPort 2 (protobuf)
 
-Periodic and event reports now use a compact, extensible **protobuf** format on **fPort 2**. The previous bitmap format is **still emitted on fPort 1** for backward compatibility with existing integrations.
+Periodic and event reports now use a compact, extensible **protobuf** format on **fPort 2**. The legacy bitmap format is **no longer emitted** — the device transmits only the new ports (2 telemetry, 3 alarm, 10 calibration, 85 response/history). `decodeUplink` still understands a legacy fPort 1 frame so historical captures decode, but no current firmware produces one.
 
 Key differences from the v1.3.x bitmap:
 - **Extensible** — new sensors can be added in future firmware without breaking older decoders.
@@ -97,7 +97,7 @@ Each event is described by **three orthogonal enums** — an integration that on
 - `base_time` — Unix timestamp the events are relative to.
 - `total` — total alarms that occurred in the window. `truncated` is `true` when `total` exceeds the events actually carried (some were dropped to fit the data rate).
 - `alarms[]` — each with:
-  - `source` — `temperature` / `humidity` / `pressure` / `t1-temperature` / `t2-temperature` / `hall-left` / `hall-right` / `pir` / `input-a` / `input-b`
+  - `source` — `temperature` / `humidity` / `pressure` / `t1-temperature` / `t2-temperature` / `hall-left` / `hall-right` / `pir` / `input-a` / `input-b` / `accel-motion`
   - `event` — `activate` / `deactivate`
   - `side` — `hi` / `lo` for threshold sources, `none` for discrete sources (hall/input/PIR). The **deactivate** edge keeps the side that was crossed on activation.
   - `value` — the current reading at the edge (temperature/humidity in °C/%RH, pressure in hPa); `null` for discrete sources. *(Threshold and hysteresis are not carried — they are the device's own configuration.)*
@@ -265,7 +265,7 @@ Existing commands (`config`, `settings save`/`reset`, `join`, `send`) are unchan
 
 ---
 
-## 9. Configuration key naming (sensor-centric)
+## 10. Configuration key naming (sensor-centric)
 
 v1.4.0 organizes configuration keys **by sensor/source** rather than under a global `alarm-` tree. Threshold-alarm keys now use an `<source>-alarm-<param>` form (leaving room for future non-alarm params on the same sensor), and the accelerometer's motion sensitivity moves under the `accel-` sensor. A global `alarm-` prefix is reserved for cross-cutting params only.
 

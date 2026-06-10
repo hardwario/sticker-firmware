@@ -323,7 +323,7 @@ parameters:
     default: 0.5
     min: 0.0
     max: 5.0
-    help: "Get/Set T1 temperature hysteresis (0 to 5 deg. C)."
+    help: "Get/Set temperature hysteresis (0 to 5 deg. C)."
 
   - name: humidity_alarm_enabled
     proto_group: application

@@ -2234,7 +2234,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_temperature_alarm_hi, 1, 1),
 
 	SHELL_CMD_ARG(temperature-alarm-hst, NULL,
-	              "Get/Set T1 temperature hysteresis (0 to 5 deg. C).",
+	              "Get/Set temperature hysteresis (0 to 5 deg. C).",
 	              cmd_temperature_alarm_hst, 1, 1),
 
 	SHELL_CMD_ARG(humidity-alarm-enabled, NULL,

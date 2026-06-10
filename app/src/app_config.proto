@@ -307,10 +307,10 @@ message Telemetry {
     optional uint32 orientation      = 8;   // 1..6
     // pir (cap_pir_detector)
     optional uint32 motion_count     = 9;
-    // 1-wire external thermometers (cap_1w_thermometer)
+    // 1-wire external thermometers (cap_w1_sensors)
     optional sint32 ext1_temperature = 10;  // degC x100
     optional sint32 ext2_temperature = 11;  // degC x100
-    // machine probe 1 (cap_1w_machine_probe)
+    // machine probe 1 (cap_w1_sensors)
     optional sint32 mp1_temperature  = 12;  // degC x100
     optional uint32 mp1_humidity     = 13;  // %RH  x2
     optional uint32 mp1_flags        = 14;  // bit0 tilt
