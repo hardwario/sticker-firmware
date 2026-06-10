@@ -13,6 +13,7 @@
 #include "app_sensor.h"
 #include "app_sht4x.h"
 #include "app_cmd.h"
+#include "app_compose.h"
 
 /* Zephyr includes */
 #include <zephyr/init.h>
@@ -312,22 +313,22 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 		prev_float = g_app_sensor_data.illuminance;
 		is_float = true;
 	} else if (strcmp(sensor_name, "t1-temperature") == 0) {
-		prev_float = g_app_sensor_data.t1_temperature;
+		prev_float = g_app_sensor_data.w1[0].temperature;
 		is_float = true;
 	} else if (strcmp(sensor_name, "t2-temperature") == 0) {
-		prev_float = g_app_sensor_data.t2_temperature;
+		prev_float = g_app_sensor_data.w1[1].temperature;
 		is_float = true;
 	} else if (strcmp(sensor_name, "mp1-temperature") == 0) {
-		prev_float = g_app_sensor_data.mp1_temperature;
+		prev_float = g_app_sensor_data.w1[2].temperature;
 		is_float = true;
 	} else if (strcmp(sensor_name, "mp2-temperature") == 0) {
-		prev_float = g_app_sensor_data.mp2_temperature;
+		prev_float = g_app_sensor_data.w1[3].temperature;
 		is_float = true;
 	} else if (strcmp(sensor_name, "mp1-humidity") == 0) {
-		prev_float = g_app_sensor_data.mp1_humidity;
+		prev_float = g_app_sensor_data.w1[2].humidity;
 		is_float = true;
 	} else if (strcmp(sensor_name, "mp2-humidity") == 0) {
-		prev_float = g_app_sensor_data.mp2_humidity;
+		prev_float = g_app_sensor_data.w1[3].humidity;
 		is_float = true;
 	} else if (strcmp(sensor_name, "altitude") == 0) {
 		prev_float = g_app_sensor_data.altitude;
@@ -354,10 +355,10 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 		prev_uint32 = g_app_sensor_data.input_b_count;
 		is_uint32 = true;
 	} else if (strcmp(sensor_name, "mp1-is-tilt-alert") == 0) {
-		prev_bool = g_app_sensor_data.mp1_is_tilt_alert;
+		prev_bool = g_app_sensor_data.w1[2].is_tilt_alert;
 		is_bool = true;
 	} else if (strcmp(sensor_name, "mp2-is-tilt-alert") == 0) {
-		prev_bool = g_app_sensor_data.mp2_is_tilt_alert;
+		prev_bool = g_app_sensor_data.w1[3].is_tilt_alert;
 		is_bool = true;
 	} else if (strcmp(sensor_name, "hall-left-is-active") == 0) {
 		prev_bool = g_app_sensor_data.hall_left_is_active;
@@ -406,17 +407,17 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 			} else if (strcmp(sensor_name, "illuminance") == 0) {
 				curr_float = g_app_sensor_data.illuminance;
 			} else if (strcmp(sensor_name, "t1-temperature") == 0) {
-				curr_float = g_app_sensor_data.t1_temperature;
+				curr_float = g_app_sensor_data.w1[0].temperature;
 			} else if (strcmp(sensor_name, "t2-temperature") == 0) {
-				curr_float = g_app_sensor_data.t2_temperature;
+				curr_float = g_app_sensor_data.w1[1].temperature;
 			} else if (strcmp(sensor_name, "mp1-temperature") == 0) {
-				curr_float = g_app_sensor_data.mp1_temperature;
+				curr_float = g_app_sensor_data.w1[2].temperature;
 			} else if (strcmp(sensor_name, "mp2-temperature") == 0) {
-				curr_float = g_app_sensor_data.mp2_temperature;
+				curr_float = g_app_sensor_data.w1[3].temperature;
 			} else if (strcmp(sensor_name, "mp1-humidity") == 0) {
-				curr_float = g_app_sensor_data.mp1_humidity;
+				curr_float = g_app_sensor_data.w1[2].humidity;
 			} else if (strcmp(sensor_name, "mp2-humidity") == 0) {
-				curr_float = g_app_sensor_data.mp2_humidity;
+				curr_float = g_app_sensor_data.w1[3].humidity;
 			} else if (strcmp(sensor_name, "altitude") == 0) {
 				curr_float = g_app_sensor_data.altitude;
 			} else if (strcmp(sensor_name, "pressure") == 0) {
@@ -457,9 +458,9 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 			}
 		} else if (is_bool) {
 			if (strcmp(sensor_name, "mp1-is-tilt-alert") == 0) {
-				curr_bool = g_app_sensor_data.mp1_is_tilt_alert;
+				curr_bool = g_app_sensor_data.w1[2].is_tilt_alert;
 			} else if (strcmp(sensor_name, "mp2-is-tilt-alert") == 0) {
-				curr_bool = g_app_sensor_data.mp2_is_tilt_alert;
+				curr_bool = g_app_sensor_data.w1[3].is_tilt_alert;
 			} else if (strcmp(sensor_name, "hall-left-is-active") == 0) {
 				curr_bool = g_app_sensor_data.hall_left_is_active;
 			} else if (strcmp(sensor_name, "hall-right-is-active") == 0) {
@@ -501,24 +502,24 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "illuminance:              %.2f lux",
 		    (double)g_app_sensor_data.illuminance);
 	shell_print(shell, "t1-temperature:           %.2f C",
-		    (double)g_app_sensor_data.t1_temperature);
+		    (double)g_app_sensor_data.w1[0].temperature);
 	shell_print(shell, "t2-temperature:           %.2f C",
-		    (double)g_app_sensor_data.t2_temperature);
+		    (double)g_app_sensor_data.w1[1].temperature);
 	shell_print(shell, "motion-count:             %u", g_app_sensor_data.motion_count);
 	shell_print(shell, "altitude:                 %.2f m", (double)g_app_sensor_data.altitude);
 	shell_print(shell, "pressure:                 %.2f Pa", (double)g_app_sensor_data.pressure);
 	shell_print(shell, "mp1-temperature:          %.2f C",
-		    (double)g_app_sensor_data.mp1_temperature);
+		    (double)g_app_sensor_data.w1[2].temperature);
 	shell_print(shell, "mp2-temperature:          %.2f C",
-		    (double)g_app_sensor_data.mp2_temperature);
+		    (double)g_app_sensor_data.w1[3].temperature);
 	shell_print(shell, "mp1-humidity:             %.2f %%",
-		    (double)g_app_sensor_data.mp1_humidity);
+		    (double)g_app_sensor_data.w1[2].humidity);
 	shell_print(shell, "mp2-humidity:             %.2f %%",
-		    (double)g_app_sensor_data.mp2_humidity);
+		    (double)g_app_sensor_data.w1[3].humidity);
 	shell_print(shell, "mp1-is-tilt-alert:        %s",
-		    g_app_sensor_data.mp1_is_tilt_alert ? "true" : "false");
+		    g_app_sensor_data.w1[2].is_tilt_alert ? "true" : "false");
 	shell_print(shell, "mp2-is-tilt-alert:        %s",
-		    g_app_sensor_data.mp2_is_tilt_alert ? "true" : "false");
+		    g_app_sensor_data.w1[3].is_tilt_alert ? "true" : "false");
 	shell_print(shell, "hall-left-count:          %u", g_app_sensor_data.hall_left_count);
 	shell_print(shell, "hall-right-count:         %u", g_app_sensor_data.hall_right_count);
 	shell_print(shell, "hall-left-is-active:      %s",
@@ -604,9 +605,58 @@ static int cmd_lrw_reset(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+/* Build the telemetry uplink WITHOUT sending it and dump the raw fPort-2 bytes
+ * (decodable with ttn.js) — lets the tester verify exactly what would go on the
+ * wire. Samples first so the payload reflects the current sensors. Optional
+ * budget arg picks the data-rate payload size (default 51 = EU868 DR0); needed
+ * because the live budget is 0 before a join. */
+static int cmd_lrw_compose(const struct shell *shell, size_t argc, char **argv)
+{
+	uint8_t budget = 51;
+
+	if (argc >= 2) {
+		int b = atoi(argv[1]);
+		if (b < 1 || b > 242) {
+			shell_error(shell, "budget must be 1..242 B");
+			return -EINVAL;
+		}
+		budget = (uint8_t)b;
+	}
+
+	app_sensor_sample();
+
+	uint8_t buf[243];
+	size_t len = 0;
+	bool more = true;
+	int frame = 0;
+
+	shell_print(shell, "Telemetry uplink (fPort 2, budget %u B):", budget);
+	while (more) {
+		int ret = app_compose_ex(buf, sizeof(buf), &len, &more, budget);
+		if (ret) {
+			shell_error(shell, "compose failed: %d", ret);
+			return ret;
+		}
+		if (len == 0) {
+			shell_print(shell, "  (nothing to report)");
+			break;
+		}
+		shell_fprintf(shell, SHELL_NORMAL, "  frame %d (%zu B): ", frame++, len);
+		for (size_t i = 0; i < len; i++) {
+			shell_fprintf(shell, SHELL_NORMAL, "%02x", buf[i]);
+		}
+		shell_fprintf(shell, SHELL_NORMAL, "\n");
+	}
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_lrw, SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
 	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
+	SHELL_CMD_ARG(compose, NULL,
+		      "Build telemetry uplink without sending; dump fPort-2 hex. "
+		      "Usage: compose [budget]",
+		      cmd_lrw_compose, 1, 1),
 	SHELL_CMD_ARG(reset, NULL, "Reset LoRaWAN frame counters + DevNonce (reboots).",
 		      cmd_lrw_reset, 1, 0),
 	SHELL_SUBCMD_SET_END);

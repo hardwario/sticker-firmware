@@ -353,6 +353,47 @@ function _pbZigzag(n) {
   return (n >>> 1) ^ -(n & 1);
 }
 
+// enum app_w1_slot_type → label (mirrors app_w1_slots.h).
+var _W1_SLOT_TYPES = { 1: "dallas", 2: "machine-probe" };
+
+// One SensorReading submessage (Telemetry field 27): slot=1 (1-based, matches
+// sensorN config / `w1 list`), type=2,
+// temperature=3 (sint32 ×100), humidity=4 (uint ×2), flags=5 (bit0 tilt),
+// illuminance=6 (uint lux), magnetic_field=7 (sint µT → mT /1000), accel
+// x/y/z=8/9/10 (sint m/s² ×100). Machine-probe carries 6-10; a sub-sensor that
+// did not respond is absent. Absent quantities stay undefined. `bytes[start..end)`
+// is the submessage body.
+function _decodeSensorReading(bytes, start, end) {
+  var sr = {};
+  var pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var field = tag.value >>> 3;
+    var wire = tag.value & 0x7;
+    if (wire !== 0) { // forward-compat: skip unknown non-varint
+      if (wire === 2) { var l = _pbReadVarint(bytes, pos); pos = l.next + l.value; continue; }
+      if (wire === 5) { pos += 4; continue; }
+      if (wire === 1) { pos += 8; continue; }
+      break;
+    }
+    var v = _pbReadVarint(bytes, pos); pos = v.next;
+    switch (field) {
+      case 1: sr.slot = v.value; break;
+      case 2: sr.type = v.value; sr.type_name = _W1_SLOT_TYPES[v.value] || "unknown"; break;
+      case 3: sr.temperature = _pbZigzag(v.value) / 100; break;
+      case 4: sr.humidity = v.value / 2; break;
+      case 5: sr.tilt_alert = (v.value & (1 << 0)) !== 0; break;
+      case 6: sr.illuminance = v.value; break;
+      case 7: sr.magnetic_field = _pbZigzag(v.value) / 1000; break; // mT
+      case 8: sr.accel_x = _pbZigzag(v.value) / 100; break;         // m/s²
+      case 9: sr.accel_y = _pbZigzag(v.value) / 100; break;
+      case 10: sr.accel_z = _pbZigzag(v.value) / 100; break;
+      default: break;
+    }
+  }
+  return sr;
+}
+
 // fPort 2: flat protobuf Telemetry (periodic / event-triggered report). Keys
 // match the legacy fPort-1 bitmap decoder so dashboards stay stable. Unknown
 // fields are skipped (forward-compatible with newer firmware). Per #80 the
@@ -366,6 +407,14 @@ function decodeTelemetry(bytes) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
+    // 1-wire ROM-bound slots: repeated SensorReading (field 27, length-delimited).
+    if (field === 27 && wire === 2) {
+      var sl = _pbReadVarint(bytes, pos); pos = sl.next;
+      if (!d.w1_sensors) { d.w1_sensors = []; }
+      d.w1_sensors.push(_decodeSensorReading(bytes, pos, pos + sl.value));
+      pos += sl.value;
+      continue;
+    }
     if (wire !== 0) {
       // Forward-compat: skip an unknown non-varint field.
       if (wire === 2) { var l = _pbReadVarint(bytes, pos); pos = l.next + l.value; continue; }
@@ -391,14 +440,15 @@ function decodeTelemetry(bytes) {
       case 8:  d.orientation = v.value; break;
       // pir
       case 9:  d.motion_count = v.value; break;
-      // 1-wire ext
+      // 1-wire slots are repeated SensorReading (field 27, handled above).
+      // The flat fields 10-17 below are retired in current firmware but kept
+      // decodable so one formatter serves a mixed fleet (older firmware still
+      // emits them); new firmware never sends both.
       case 10: d.ext_temperature_1 = _pbZigzag(v.value) / 100; break;
       case 11: d.ext_temperature_2 = _pbZigzag(v.value) / 100; break;
-      // machine probe 1
       case 12: d.machine_probe_temperature_1 = _pbZigzag(v.value) / 100; break;
       case 13: d.machine_probe_humidity_1 = v.value / 2; break;
       case 14: d.machine_probe_tilt_alert_1 = (v.value & (1 << 0)) !== 0; break;
-      // machine probe 2
       case 15: d.machine_probe_temperature_2 = _pbZigzag(v.value) / 100; break;
       case 16: d.machine_probe_humidity_2 = v.value / 2; break;
       case 17: d.machine_probe_tilt_alert_2 = (v.value & (1 << 0)) !== 0; break;

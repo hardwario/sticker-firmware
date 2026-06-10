@@ -348,12 +348,13 @@ bool app_alarm_poll(void)
 				g_app_config.pressure_alarm_hi, g_app_config.pressure_alarm_hst,
 				&should_send);
 
+	/* Slots 0/1 keep the legacy T1/T2 alarm config until per-slot alarms (P2). */
 	alarm |= eval_threshold(APP_ALARM_SOURCE_T1_TEMPERATURE, g_app_config.t1_alarm_enabled,
-				g_app_sensor_data.t1_temperature, g_app_config.t1_alarm_lo,
+				g_app_sensor_data.w1[0].temperature, g_app_config.t1_alarm_lo,
 				g_app_config.t1_alarm_hi, g_app_config.t1_alarm_hst, &should_send);
 
 	alarm |= eval_threshold(APP_ALARM_SOURCE_T2_TEMPERATURE, g_app_config.t2_alarm_enabled,
-				g_app_sensor_data.t2_temperature, g_app_config.t2_alarm_lo,
+				g_app_sensor_data.w1[1].temperature, g_app_config.t2_alarm_lo,
 				g_app_config.t2_alarm_hi, g_app_config.t2_alarm_hst, &should_send);
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
