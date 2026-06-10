@@ -30,6 +30,16 @@ int app_config_apply_application(const AppConfigMessage_Application *src, uint32
 void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids, size_t n);
 void app_config_fill_application(AppConfigMessage_Application *dst, const uint32_t *ids, size_t n);
 
+/* Cross-validate the alarm threshold pairs on `cfg`. An enabled threshold alarm
+ * can only deactivate inside lo+hst < v < hi-hst; that band is empty when
+ * lo + 2*hst >= hi (which also covers lo >= hi), so an activated alarm would
+ * latch until NaN/reboot and hold the alarm LED. Sets *fault_field (if non-NULL)
+ * to the offending alarm's `lo` proto tag and returns -EINVAL on the first bad
+ * enabled pair; returns 0 if all enabled pairs are valid. Does not mutate cfg.
+ * One source of truth shared by the shell/SetParam/NFC commit paths. */
+struct app_config;
+int app_config_validate_alarm_pairs(const struct app_config *cfg, uint32_t *fault_field);
+
 #ifdef __cplusplus
 }
 #endif
