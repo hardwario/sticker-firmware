@@ -58,12 +58,24 @@ static bool parse_hex_string(const char *hex_str, uint8_t *buf, size_t buf_len)
 		return false;
 	}
 
-	size_t ret = hex2bin(hex_str, str_len, buf, buf_len);
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte into the
+	 * destination and bails (returning 0) on the first invalid nibble, so
+	 * decoding straight into the config field would leave a half-overwritten
+	 * value — and the NFC ingest path ignores this return and then saves,
+	 * persisting the corruption. Commit only on a fully valid decode. */
+	uint8_t tmp[16]; /* largest bytes field is a 16-byte LoRaWAN key */
+	if (buf_len > sizeof(tmp)) {
+		LOG_ERR("hex buffer too large: %zu", buf_len);
+		return false;
+	}
+
+	size_t ret = hex2bin(hex_str, str_len, tmp, buf_len);
+	if (ret != buf_len) {
 		LOG_ERR_CALL_FAILED("hex2bin");
 		return false;
 	}
 
+	memcpy(buf, tmp, buf_len);
 	return true;
 }
 
@@ -254,24 +266,47 @@ int app_config_apply_application(const AppConfigMessage_Application *src, uint32
 		}
 	}
 
-	/* Cross-validate alarm lo/hi pairs — disable the alarm if lo >= hi */
-	if (config->temperature_alarm_lo >= config->temperature_alarm_hi) {
-		config->temperature_alarm_enabled = false;
-	}
-	if (config->humidity_alarm_lo >= config->humidity_alarm_hi) {
-		config->humidity_alarm_enabled = false;
-	}
-	if (config->pressure_alarm_lo >= config->pressure_alarm_hi) {
-		config->pressure_alarm_enabled = false;
-	}
-	if (config->t1_alarm_lo >= config->t1_alarm_hi) {
-		config->t1_alarm_enabled = false;
-	}
-	if (config->t2_alarm_lo >= config->t2_alarm_hi) {
-		config->t2_alarm_enabled = false;
+	/* Cross-validation (lo/hi/hst) is no longer done here: mutating *_enabled
+	 * over the whole staging after every apply silently disabled alarms from
+	 * unrelated edits. It now lives in app_config_validate_alarm_pairs(), called
+	 * at the commit points (SetParam pre-stage, save()) where it can report a
+	 * fault / reject instead of silently changing the user's config. */
+	return ret;
+}
+
+int app_config_validate_alarm_pairs(const struct app_config *cfg, uint32_t *fault_field)
+{
+	if (fault_field) {
+		*fault_field = 0;
 	}
 
-	return ret;
+	const struct {
+		bool enabled;
+		float lo, hi, hst;
+		uint32_t tag; /* proto `lo` tag, reported as the fault field */
+	} pairs[] = {
+		{cfg->temperature_alarm_enabled, cfg->temperature_alarm_lo,
+		 cfg->temperature_alarm_hi, cfg->temperature_alarm_hst, 6},
+		{cfg->humidity_alarm_enabled, cfg->humidity_alarm_lo, cfg->humidity_alarm_hi,
+		 cfg->humidity_alarm_hst, 10},
+		{cfg->pressure_alarm_enabled, cfg->pressure_alarm_lo, cfg->pressure_alarm_hi,
+		 cfg->pressure_alarm_hst, 14},
+		{cfg->t1_alarm_enabled, cfg->t1_alarm_lo, cfg->t1_alarm_hi, cfg->t1_alarm_hst, 18},
+		{cfg->t2_alarm_enabled, cfg->t2_alarm_lo, cfg->t2_alarm_hi, cfg->t2_alarm_hst, 22},
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(pairs); i++) {
+		/* Empty deactivation band: lo + 2*hst >= hi (also catches lo >= hi). */
+		if (pairs[i].enabled && pairs[i].lo + 2.0f * pairs[i].hst >= pairs[i].hi) {
+			LOG_WRN("Alarm pair (tag %u) has an empty deactivation band", pairs[i].tag);
+			if (fault_field) {
+				*fault_field = pairs[i].tag;
+			}
+			return -EINVAL;
+		}
+	}
+
+	return 0;
 }
 
 static bool requested(const uint32_t *ids, size_t n, uint32_t tag)

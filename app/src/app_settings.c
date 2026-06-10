@@ -5,6 +5,8 @@
  */
 
 #include "app_settings.h"
+#include "app_config.h"
+#include "app_config_ingest.h"
 
 /* Zephyr includes */
 #include <zephyr/fs/fs.h>
@@ -27,6 +29,16 @@ static const char m_shell_msg_error[] = "command failed";
 static int save(bool reboot)
 {
 	int ret;
+
+	/* Refuse to persist a degenerate alarm configuration from any path (shell
+	 * `settings save`, NFC, or a downlink SettingsSave all reach here). An
+	 * enabled alarm with an empty deactivation band would latch forever. */
+	uint32_t fault = 0;
+	if (app_config_validate_alarm_pairs(app_config(), &fault)) {
+		LOG_ERR("Refusing to save: alarm pair (tag %u) has an empty deactivation band",
+			fault);
+		return -EINVAL;
+	}
 
 	ret = settings_save();
 	if (ret) {

@@ -56,7 +56,7 @@ byte is the `seq` and is echoed in the reply.
 | `force_send` | `08064a00` |
 | `reboot` | `08083a00` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
-| `set_param`: ADR on, `interval_report`=120 s, `alarm_temperature_hi`=50 °C | `0801120d0a021801120720783d00004842` |
+| `set_param`: ADR on, `interval_report`=120 s, `temperature_alarm_hi`=50 °C | `0801120d0a021801120720783d00004842` |
 
 ### Legend
 
@@ -324,18 +324,15 @@ check; `ats lrw reset` resets counters + DevNonce and reboots.
 
 - [ ] Pass
 
-### L12 — Legacy bitmap telemetry on fPort 1
+### L12 — No legacy bitmap on fPort 1
 
-**Goal:** Backward-compatible v1.3.x bitmap telemetry is still emitted alongside the new fPort 2
-protobuf.
-**Observable:** Each report produces a legacy bitmap uplink on **fPort 1** in addition to the
-protobuf on fPort 2 (`doc/version 1.4.md` §2).
+**Goal:** The legacy v1.3.x bitmap is no longer emitted; the device transmits only the new ports.
+**Observable:** A report produces a protobuf uplink on **fPort 2** only — no fPort 1 frame
+(`doc/version 1.4.md` §2). The decoder retains a legacy fPort-1 branch for old captures only.
 
 **Prompt for Claude:**
 > Trigger a telemetry report (`send` or ForceSend) and inspect the network-server uplinks. Confirm
-> that both a **fPort 1** legacy bitmap frame and a **fPort 2** protobuf frame are emitted for the
-> same report, and that the fPort 1 frame still decodes with the legacy v1.3.x decoder. Report both
-> frames.
+> the report arrives on **fPort 2** and that **no fPort 1** frame is emitted. Report the ports seen.
 
 - [ ] Pass
 
@@ -409,10 +406,10 @@ protobuf on fPort 2 (`doc/version 1.4.md` §2).
 
 **Goal:** External DS18B20 probes are read.
 **Observable:** Telemetry `ext1_temperature` / `ext2_temperature` (°C×100); requires
-`cap_1w_thermometer`.
+`cap_w1_sensors`.
 
 **Prompt for Claude:**
-> Confirm `cap_1w_thermometer` is enabled and the probes are wired. Run `ats sensors sample` and
+> Confirm `cap_w1_sensors` is enabled and the probes are wired. Run `ats sensors sample` and
 > report `ext1`/`ext2` temperatures; sanity-check them. Ask me to warm one probe (e.g. by hand)
 > and confirm that channel's reading rises. Confirm the values reach fPort 2 telemetry.
 
@@ -422,10 +419,10 @@ protobuf on fPort 2 (`doc/version 1.4.md` §2).
 
 **Goal:** Machine-probe temp/humidity and tilt flag work.
 **Observable:** Telemetry `mp1_temperature`/`mp1_humidity` (+`mp1_flags` tilt bit), same for MP2;
-requires `cap_1w_machine_probe`.
+requires `cap_w1_sensors`.
 
 **Prompt for Claude:**
-> Confirm `cap_1w_machine_probe` is enabled and the probe(s) connected. Read MP1/MP2 temp and
+> Confirm `cap_w1_sensors` is enabled and the probe(s) connected. Read MP1/MP2 temp and
 > humidity via `ats sensors sample` and sanity-check. Ask me to tilt the probe and confirm the
 > tilt-alert bit in the probe flags sets. Confirm the fields and flags reach fPort 2 telemetry.
 

@@ -59,6 +59,10 @@ static const struct app_config m_app_config_defaults = {
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
 
+/* Set by h_commit when a schema version migration ran; init persists the
+ * migrated config so the stored version is bumped exactly once. */
+static bool m_app_config_migrated;
+
 static struct app_config m_app_config = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
@@ -238,9 +242,36 @@ static int h_commit(void)
 	LOG_DBG("Loaded settings in full");
 
 	if (m_app_config.config_version != APP_CONFIG_VERSION) {
-		LOG_WRN("Config version mismatch (stored=%u, expected=%u), resetting to defaults",
+		LOG_WRN("Config version mismatch (stored=%u, expected=%u), migrating",
 			m_app_config.config_version, APP_CONFIG_VERSION);
+
+		/* Reset application parameters to defaults, but carry over factory
+		 * identity and network credentials (preserve_on_migration in the
+		 * YAML) so a schema bump never un-provisions a field device. */
+		struct app_config stored = m_app_config;
+
 		m_app_config = m_app_config_defaults;
+		memcpy(m_app_config.secret_key, stored.secret_key, sizeof(m_app_config.secret_key));
+		m_app_config.serial_number = stored.serial_number;
+		m_app_config.nonce_counter = stored.nonce_counter;
+		m_app_config.lrw_region = stored.lrw_region;
+		m_app_config.lrw_sub_band = stored.lrw_sub_band;
+		m_app_config.lrw_network = stored.lrw_network;
+		m_app_config.lrw_adr = stored.lrw_adr;
+		m_app_config.lrw_activation = stored.lrw_activation;
+		memcpy(m_app_config.lrw_deveui, stored.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+		memcpy(m_app_config.lrw_joineui, stored.lrw_joineui,
+		       sizeof(m_app_config.lrw_joineui));
+		memcpy(m_app_config.lrw_nwkkey, stored.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
+		memcpy(m_app_config.lrw_appkey, stored.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+		memcpy(m_app_config.lrw_devaddr, stored.lrw_devaddr,
+		       sizeof(m_app_config.lrw_devaddr));
+		memcpy(m_app_config.lrw_nwkskey, stored.lrw_nwkskey,
+		       sizeof(m_app_config.lrw_nwkskey));
+		memcpy(m_app_config.lrw_appskey, stored.lrw_appskey,
+		       sizeof(m_app_config.lrw_appskey));
+
+		m_app_config_migrated = true;
 	}
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
@@ -254,8 +285,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
 	} while (0)
 
-	EXPORT_FUNC("config-version", &m_app_config.config_version,
-		    sizeof(m_app_config.config_version));
 	EXPORT_FUNC("secret-key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
 	EXPORT_FUNC("serial-number", &m_app_config.serial_number,
 		    sizeof(m_app_config.serial_number));
@@ -372,6 +401,12 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
 	EXPORT_FUNC("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
 	EXPORT_FUNC("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
+	/* Export config-version LAST: settings_save is per-key atomic, so writing
+	 * the schema marker after every value means a brownout mid-save leaves an
+	 * old version with a partial new payload rather than a new version flagging
+	 * data as fully migrated. Paired with the migration restore in h_commit. */
+	EXPORT_FUNC("config-version", &m_app_config.config_version,
+		    sizeof(m_app_config.config_version));
 
 #undef EXPORT_FUNC
 
@@ -1142,13 +1177,20 @@ static int cmd_secret_key(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.secret_key,
-		      sizeof(m_app_config.secret_key));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.secret_key)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_app_config.secret_key, tmp, sizeof(tmp));
 
 	return 0;
 }
@@ -1210,6 +1252,8 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 	}
 
 	char *endptr;
+
+	errno = 0;
 	unsigned long value = strtoul(argv[1], &endptr, 10);
 
 	if (*endptr != '\0' || endptr == argv[1]) {
@@ -1217,7 +1261,10 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 		return -EINVAL;
 	}
 
-	if (value < 0 || value > UINT32_MAX) {
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < 0 || value > UINT32_MAX) {
 		shell_error(shell, "%s", m_msg_invalid_range);
 		return -EINVAL;
 	}
@@ -1291,6 +1338,8 @@ static int cmd_history_sensors(const struct shell *shell, size_t argc, char **ar
 	}
 
 	char *endptr;
+
+	errno = 0;
 	unsigned long value = strtoul(argv[1], &endptr, 10);
 
 	if (*endptr != '\0' || endptr == argv[1]) {
@@ -1298,7 +1347,10 @@ static int cmd_history_sensors(const struct shell *shell, size_t argc, char **ar
 		return -EINVAL;
 	}
 
-	if (value < 0 || value > UINT32_MAX) {
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < 0 || value > UINT32_MAX) {
 		shell_error(shell, "%s", m_msg_invalid_range);
 		return -EINVAL;
 	}
@@ -1443,13 +1495,20 @@ static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_deveui,
-		      sizeof(m_app_config.lrw_deveui));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.lrw_deveui)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_app_config.lrw_deveui, tmp, sizeof(tmp));
 
 	return 0;
 }
@@ -1473,13 +1532,20 @@ static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_joineui,
-		      sizeof(m_app_config.lrw_joineui));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.lrw_joineui)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_app_config.lrw_joineui, tmp, sizeof(tmp));
 
 	return 0;
 }
@@ -1503,13 +1569,20 @@ static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_nwkkey,
-		      sizeof(m_app_config.lrw_nwkkey));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.lrw_nwkkey)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_app_config.lrw_nwkkey, tmp, sizeof(tmp));
 
 	return 0;
 }
@@ -1533,13 +1606,20 @@ static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_appkey,
-		      sizeof(m_app_config.lrw_appkey));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.lrw_appkey)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_app_config.lrw_appkey, tmp, sizeof(tmp));
 
 	return 0;
 }
@@ -1563,13 +1643,20 @@ static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_devaddr,
-		      sizeof(m_app_config.lrw_devaddr));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.lrw_devaddr)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_app_config.lrw_devaddr, tmp, sizeof(tmp));
 
 	return 0;
 }
@@ -1593,13 +1680,20 @@ static int cmd_lrw_nwkskey(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_nwkskey,
-		      sizeof(m_app_config.lrw_nwkskey));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.lrw_nwkskey)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_app_config.lrw_nwkskey, tmp, sizeof(tmp));
 
 	return 0;
 }
@@ -1623,13 +1717,20 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_appskey,
-		      sizeof(m_app_config.lrw_appskey));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.lrw_appskey)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_app_config.lrw_appskey, tmp, sizeof(tmp));
 
 	return 0;
 }
@@ -1943,13 +2044,20 @@ static int cmd_sensor1_rom(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.sensor1_rom,
-		      sizeof(m_app_config.sensor1_rom));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.sensor1_rom)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_app_config.sensor1_rom, tmp, sizeof(tmp));
 
 	return 0;
 }
@@ -1973,13 +2081,20 @@ static int cmd_sensor2_rom(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.sensor2_rom,
-		      sizeof(m_app_config.sensor2_rom));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.sensor2_rom)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_app_config.sensor2_rom, tmp, sizeof(tmp));
 
 	return 0;
 }
@@ -2003,13 +2118,20 @@ static int cmd_sensor3_rom(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.sensor3_rom,
-		      sizeof(m_app_config.sensor3_rom));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.sensor3_rom)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_app_config.sensor3_rom, tmp, sizeof(tmp));
 
 	return 0;
 }
@@ -2033,13 +2155,20 @@ static int cmd_sensor4_rom(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.sensor4_rom,
-		      sizeof(m_app_config.sensor4_rom));
-	if (!ret) {
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.sensor4_rom)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
 		LOG_ERR("Call `hex2bin` failed: %d", ret);
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
+
+	memcpy(m_app_config.sensor4_rom, tmp, sizeof(tmp));
 
 	return 0;
 }
@@ -2203,7 +2332,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_temperature_alarm_hi, 1, 1),
 
 	SHELL_CMD_ARG(temperature-alarm-hst, NULL,
-	              "Get/Set T1 temperature hysteresis (0 to 5 deg. C).",
+	              "Get/Set temperature hysteresis (0 to 5 deg. C).",
 	              cmd_temperature_alarm_hst, 1, 1),
 
 	SHELL_CMD_ARG(humidity-alarm-enabled, NULL,
@@ -2395,6 +2524,21 @@ static int app_config_init(void)
 	if (ret) {
 		LOG_ERR("Call `settings_load_subtree` failed: %d", ret);
 		return ret;
+	}
+
+	if (m_app_config_migrated) {
+		m_app_config_migrated = false;
+
+		/* Persist the migrated config right away so the stored schema
+		 * version is bumped and the migration does not repeat on every
+		 * boot. A failure here is not fatal: the in-RAM config is valid
+		 * and the migration simply runs again next boot. */
+		ret = settings_save_subtree(SETTINGS_PFX);
+		if (ret) {
+			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		} else {
+			LOG_INF("Config migrated to version %u and persisted", APP_CONFIG_VERSION);
+		}
 	}
 
 	return 0;

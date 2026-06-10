@@ -91,6 +91,18 @@ test("encode/decode are symmetric (byte-exact round-trip)", () => {
   }
 });
 
+// #92: cap_w1_sensors (application tag 60) was missing from the formatter's name
+// map, so the 1-Wire bus capability could not be set or read via the payload
+// formatter (encodeDownlink silently drops unknown names). Lock both directions.
+test("set_param cap_w1_sensors (tag 60) is reachable both ways (#92)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 1, command: "set_param", set_param: { application: { cap_w1_sensors: true } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors");
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.application.cap_w1_sensors, 1);
+});
+
 // --- Uplink: legacy bitmap (fPort 1) --------------------------------------
 test("decodeUplink decodes legacy bitmap (fPort 1)", () => {
   const got = codec.decodeUplink({ bytes: hex("7a01a109fa580258"), fPort: 1 });
@@ -166,6 +178,18 @@ test("fPort-2 telemetry decodes accel_motion_count (field 26)", () => {
   // 01 = version prefix, then tag (26 << 3 | varint) = 0xd0 0x01, value 3
   const got = codec.decodeUplink({ bytes: hex("01d00103"), fPort: 2 });
   assert.equal(got.data.accel_motion_count, 3);
+});
+
+// #92: pin the numeric scaling of barometer/light fields — these were never
+// asserted, which is why the pressure unit could drift 10x. Frame: version 01,
+// pressure (field 5, tag 0x28) raw 10135 -> 1013.5 hPa (hPa x10),
+// altitude (field 6, tag 0x30, sint zigzag) raw 3210 -> 321.0 m (m x10),
+// illuminance (field 7, tag 0x38) raw 250 -> 500 lux (lux /2... wire is lux/2).
+test("fPort-2 telemetry: pressure/altitude/illuminance numeric scaling", () => {
+  const got = codec.decodeUplink({ bytes: hex("0128974f30943238fa01"), fPort: 2 }).data;
+  assert.equal(got.pressure, 1013.5); // hPa x10 on the wire -> hPa
+  assert.equal(got.altitude, 321); // m x10
+  assert.equal(got.illuminance, 500); // lux /2 on the wire -> lux
 });
 
 // 1-Wire slots are a repeated SensorReading on field 27 (tag 0xda 0x01,

@@ -173,7 +173,9 @@ static void fill_snapshot(void)
 	/* barometer */
 	if (g_app_config.cap_barometer && !isnan(d.pressure)) {
 		t->has_pressure = true;
-		t->pressure = (uint32_t)(d.pressure * 1000.0f);
+		/* d.pressure is kPa from the driver; the wire unit is hPa x10
+		 * (0.1 hPa resolution). hPa = kPa x10, so hPa x10 = kPa x100. */
+		t->pressure = (uint32_t)(d.pressure * 100.0f);
 	}
 	if (g_app_config.cap_barometer && !isnan(d.altitude)) {
 		float a = CLAMP(d.altitude * 10.0f, (float)INT16_MIN, (float)INT16_MAX);
@@ -192,7 +194,10 @@ static void fill_snapshot(void)
 		t->has_orientation = true;
 		t->orientation = (uint32_t)(d.orientation & 0xf);
 	}
-	if (g_app_config.cap_accelerometer && d.accel_motion_count > 0) {
+	/* Always send the count when the accelerometer is enabled (0 included) —
+	 * the #78/#80 "whole group every report" policy that the other digital
+	 * counters already follow; this was the lone holdout. */
+	if (g_app_config.cap_accelerometer) {
 		t->has_accel_motion_count = true;
 		t->accel_motion_count = d.accel_motion_count;
 	}

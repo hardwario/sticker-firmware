@@ -76,9 +76,12 @@ var _APP_NAMES = {
   34: "input_b_counter", 35: "input_b_notify_act", 36: "input_b_notify_deact",
   37: "temperature_corr", 38: "t1_corr", 39: "t2_corr",
   40: "cap_hall_left", 41: "cap_hall_right", 42: "cap_input_a", 43: "cap_input_b",
-  44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector", 47: "cap_1w_thermometer", 48: "cap_1w_machine_probe",
+  44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector",
+  // 47/48 (cap_1w_thermometer/machine_probe) retired -> reserved in the proto.
   49: "history_enable", 50: "history_sensors", 51: "alarm_limit", 52: "alarm_notif_time",
-  53: "pir_notify_act", 54: "accel_motion_sensitivity", 55: "cap_accelerometer"
+  53: "pir_notify_act", 54: "accel_motion_sensitivity", 55: "cap_accelerometer",
+  // 56-59 sensor1..4_rom are bytes (need hex handling, see 1-Wire framework); 60 below.
+  60: "cap_w1_sensors"
 };
 
 // Enum-valued Application fields: decode renders the symbolic name, encode
@@ -434,7 +437,7 @@ function decodeTelemetry(bytes) {
       case 3:  d.temperature = _pbZigzag(v.value) / 100; break;
       case 4:  d.humidity = v.value / 2; break;
       // barometer
-      case 5:  d.pressure = v.value / 1000; break;
+      case 5:  d.pressure = v.value / 10; break; // hPa x10
       case 6:  d.altitude = _pbZigzag(v.value) / 10; break;
       // light
       case 7:  d.illuminance = v.value * 2; break;

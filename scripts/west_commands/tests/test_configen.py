@@ -191,6 +191,37 @@ def test_generated_c_matches_committed(workdir):
         assert (workdir / name).read_text() == (APP_SRC / name).read_text(), name
 
 
+def test_migration_preserves_factory_fields(workdir):
+    """Issue #87: h_commit must restore every preserve_on_migration parameter
+    after the defaults reset, and must not restore anything else."""
+    _run_configen(workdir)
+    generated = (workdir / "app_config.c").read_text()
+    cfg = _load_config()
+
+    preserved = [p for p in cfg["parameters"] if p.get("preserve_on_migration")]
+    # The whole point of #87: identity/credentials are flagged in the YAML.
+    assert {p["name"] for p in preserved} >= {
+        "secret_key", "serial_number", "nonce_counter",
+        "lrw_deveui", "lrw_joineui", "lrw_appkey", "lrw_nwkkey",
+        "lrw_devaddr", "lrw_nwkskey", "lrw_appskey",
+    }
+
+    for p in cfg["parameters"]:
+        if p.get("preserve_on_migration"):
+            if p["type"] in ("bytes", "string"):
+                marker = f"memcpy(m_app_config.{p['name']}, stored.{p['name']}"
+            else:
+                marker = f"m_app_config.{p['name']} = stored.{p['name']};"
+            assert marker in generated, f"{p['name']} not restored on migration"
+        else:
+            assert f"stored.{p['name']}" not in generated, \
+                f"{p['name']} restored but not flagged preserve_on_migration"
+
+    # The migration must be persisted exactly once, from init, not from h_commit.
+    assert "settings_save_subtree(SETTINGS_PFX)" in generated
+    assert generated.count("m_app_config_migrated = true") == 1
+
+
 # --- proto <-> decoder cross-check ---------------------------------------
 
 COMMAND_VECTORS = {

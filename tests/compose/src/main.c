@@ -135,7 +135,8 @@ ZTEST(compose, test_capability_gating)
 		zassert_false(fr[i].has_pressure, "pressure leaked with cap off");
 	}
 
-	/* barometer capability ON -> pressure present and scaled x1000 */
+	/* barometer capability ON -> pressure present, scaled to hPa x10 (#92).
+	 * d.pressure is kPa; wire is hPa x10 = kPa x100, so 1000 kPa -> 100000. */
 	set_clean();
 	g_app_sensor_data.pressure = 1000.0f;
 	g_app_config.cap_barometer = true;
@@ -144,7 +145,7 @@ ZTEST(compose, test_capability_gating)
 	for (size_t i = 0; i < n; i++) {
 		if (fr[i].has_pressure) {
 			seen = true;
-			zassert_equal(fr[i].pressure, 1000000, "pressure scale");
+			zassert_equal(fr[i].pressure, 100000, "pressure scale");
 		}
 	}
 	zassert_true(seen, "pressure missing with cap on");

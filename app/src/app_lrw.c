@@ -82,11 +82,7 @@ static void tx_telemetry_frame(bool first_frame);
  * HistoryFrame uplinks on the command port, ASAP. Independent state machine,
  * modeled on the telemetry frame machine above. */
 #define HISTORY_SAMPLES_MAX 48 /* nanopb Response.HistoryFrame.samples bound */
-#define HISTORY_FRAME_OVERHEAD                                                                     \
-	36 /* version byte + seq + history_frame wrapper + frame_index/count + t0_unix(5B varint)  \
-	    * + present(uint32 → up to 5B varint) + interval_s + samples tag/len; conservative   \
-	    * upper bound so the encoded frame never exceeds the DR budget (#89) */
-#define HISTORY_MAX_RETRIES 8 /* give up a stuck frame instead of retrying forever (#89) */
+#define HISTORY_MAX_RETRIES 8  /* duty-cycle/MAC-busy retries before aborting a frame */
 
 static struct k_work_delayable m_hist_work;
 static bool m_hist_active;
@@ -96,12 +92,8 @@ static uint32_t m_hist_idx;      /* next frame_index to send */
 static size_t m_hist_cursor;     /* next record ordinal */
 static uint32_t m_hist_present;  /* shared sensor mask (uint32), snapshot at replay start */
 static uint32_t m_hist_interval; /* seconds between records, snapshot at start */
-static uint8_t m_hist_retries;   /* consecutive send retries of the current frame (#89) */
-/* Holds a full encoded HistoryFrame Response + version byte. The old 64 B
- * overflowed once samples filled (frame ~70-90 B) → pb_encode failed and replay
- * silently died on DR3+ (#89). 96 = version(1) + seq + oneof wrapper +
- * Response_HistoryFrame_size(80, nanopb) with margin. */
-static uint8_t m_hist_tx_buf[96];
+static int m_hist_retries;       /* consecutive lorawan_send failures on the current frame */
+static uint8_t m_hist_tx_buf[APP_CMD_HISTORY_FRAME_BUF_SIZE];
 
 static void m_hist_work_handler(struct k_work *work);
 
@@ -716,17 +708,6 @@ static void send_work_handler(struct k_work *work)
 		return;
 	}
 
-	/* A history replay owns the TX path and has paused the periodic timer (#89).
-	 * Don't run a telemetry pass here: app_history_capture() would evict/shift
-	 * record ordinals under the replay cursor, and restarting m_send_timer would
-	 * resume periodic telemetry concurrently with the replay stream. Anything
-	 * queued (response/alarm/force) is drained once the replay finishes and the
-	 * timer resumes. */
-	if (m_hist_active) {
-		LOG_WRN("TX deferred: history replay active");
-		return;
-	}
-
 	/* Drain pending command response before composing telemetry. The response
 	 * leaves now; fresh telemetry follows shortly after (see below) instead of
 	 * waiting a full interval_report. */
@@ -753,7 +734,10 @@ static void send_work_handler(struct k_work *work)
 		 * promptly (restart_normal_operation intends "send immediately"). */
 		if (m_pending_alarm_len) {
 			k_work_submit_to_queue(&m_work_q, &m_send_work);
-		} else {
+		} else if (!m_hist_active) {
+			/* Don't resurrect periodic telemetry while a replay owns the
+			 * queue — it paused the timer and a concurrent capture would
+			 * shift the replay cursor's ordinals (#89). */
 			k_timer_start(&m_send_timer, K_SECONDS(FRAME_GAP_SEC), K_FOREVER);
 		}
 		return;
@@ -775,10 +759,21 @@ static void send_work_handler(struct k_work *work)
 		} else {
 			LOG_INF("Alarm batch sent on port %u (%zu B)", APP_LRW_ALARM_PORT, len);
 		}
-		k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report), K_FOREVER);
+		if (!m_hist_active) {
+			k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report),
+				      K_FOREVER);
+		}
 		return;
 	}
 	k_mutex_unlock(&m_pending_alarm_lock);
+
+	/* A replay owns the work queue and has paused periodic telemetry. Skip the
+	 * capture + telemetry tail so a concurrent buffer eviction does not shift
+	 * the record ordinals out from under the replay cursor (#89). Responses and
+	 * alarm batches above still go out; replay finish restarts the timer. */
+	if (m_hist_active) {
+		return;
+	}
 
 	/* Sample fresh sensor values for a new report (the snapshot is taken inside
 	 * app_compose on the first frame). */
@@ -886,15 +881,18 @@ static void frame_work_handler(struct k_work *work)
 }
 
 /* Bytes of `samples` that fit one HistoryFrame at the current DR (0 if the DR
- * is too small even for the frame overhead). Bounded by the nanopb field size. */
+ * is too small even for the frame overhead). Bounded by both the staging buffer
+ * and the nanopb field size. Worst-case (max-varint) frame_index/frame_count/
+ * t0_unix are passed so the cap is a stable lower bound for the whole replay:
+ * every frame fits, frame_count stays consistent with the send path, and the
+ * exact protobuf overhead replaces the old fixed guess that overflowed the
+ * buffer on DR3+ with a synced RTC (#89). */
 static size_t history_frame_cap(void)
 {
-	uint8_t budget = app_lrw_get_max_payload();
+	size_t out_cap = MIN((size_t)app_lrw_get_max_payload(), sizeof(m_hist_tx_buf));
 
-	if (budget <= HISTORY_FRAME_OVERHEAD) {
-		return 0;
-	}
-	return MIN((size_t)(budget - HISTORY_FRAME_OVERHEAD), (size_t)HISTORY_SAMPLES_MAX);
+	return app_cmd_history_sample_capacity(m_hist_seq, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+					       m_hist_present, m_hist_interval, out_cap);
 }
 
 static void history_replay_finish(void)
@@ -950,13 +948,13 @@ static void m_hist_work_handler(struct k_work *work)
 
 	ret = lorawan_send(APP_LRW_DOWNLINK_CMD_PORT, m_hist_tx_buf, len, LORAWAN_MSG_UNCONFIRMED);
 	if (ret) {
-		/* Duty-cycle / MAC busy — retry the same frame, don't advance. Give up
-		 * after a bounded number of retries so a permanently-failing frame can't
-		 * wedge the replay (and the paused telemetry timer) forever (#89). */
+		/* Duty-cycle / MAC busy — retry the same frame, don't advance.
+		 * Bounded so a persistently rejected frame cannot wedge the replay
+		 * (and the paused telemetry timer) forever (#89). */
 		LOG_ERR_CALL_FAILED_INT("lorawan_send(history)", ret);
 		if (++m_hist_retries > HISTORY_MAX_RETRIES) {
-			LOG_WRN("History frame %u stuck after %u retries — aborting replay",
-				(unsigned)m_hist_idx, (unsigned)m_hist_retries);
+			LOG_ERR("History frame %u/%u abandoned after %d retries",
+				(unsigned)m_hist_idx, (unsigned)m_hist_count, m_hist_retries - 1);
 			history_replay_finish();
 			return;
 		}
@@ -989,6 +987,14 @@ bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 		return false;
 	}
 
+	/* Seed the snapshot fields the cap depends on (seq/present/interval) before
+	 * sizing a frame, so counting and sending use an identical per-frame cap. */
+	m_hist_from = from_unix;
+	m_hist_to = to_unix;
+	m_hist_seq = seq;
+	m_hist_present = app_history_get_mask();
+	m_hist_interval = app_history_get_interval();
+
 	size_t cap = history_frame_cap();
 	uint32_t n = (cap > 0) ? app_history_count_frames(from_unix, to_unix, cap) : 0;
 	if (n == 0) {
@@ -996,15 +1002,10 @@ bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 		return false;
 	}
 
-	m_hist_from = from_unix;
-	m_hist_to = to_unix;
-	m_hist_seq = seq;
 	m_hist_count = n;
 	m_hist_idx = 0;
 	m_hist_cursor = 0;
 	m_hist_retries = 0;
-	m_hist_present = app_history_get_mask();
-	m_hist_interval = app_history_get_interval();
 	m_hist_active = true;
 
 	/* Pause periodic telemetry; the replay drives the work queue ASAP. */
