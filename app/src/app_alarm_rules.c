@@ -30,11 +30,16 @@ static struct k_mutex m_lock;
 /* ---- names -------------------------------------------------------------- */
 
 static const char *const m_source_names[APP_ALARM_SRC_COUNT] = {
-	[APP_ALARM_SRC_ONBOARD] = "onboard",   [APP_ALARM_SRC_SLOT1] = "s1",
-	[APP_ALARM_SRC_SLOT2] = "s2",          [APP_ALARM_SRC_SLOT3] = "s3",
-	[APP_ALARM_SRC_SLOT4] = "s4",          [APP_ALARM_SRC_HALL_LEFT] = "hall-left",
-	[APP_ALARM_SRC_HALL_RIGHT] = "hall-right", [APP_ALARM_SRC_INPUT_A] = "input-a",
-	[APP_ALARM_SRC_INPUT_B] = "input-b",   [APP_ALARM_SRC_PIR] = "pir",
+	[APP_ALARM_SRC_ONBOARD] = "onboard",
+	[APP_ALARM_SRC_SLOT1] = "s1",
+	[APP_ALARM_SRC_SLOT2] = "s2",
+	[APP_ALARM_SRC_SLOT3] = "s3",
+	[APP_ALARM_SRC_SLOT4] = "s4",
+	[APP_ALARM_SRC_HALL_LEFT] = "hall-left",
+	[APP_ALARM_SRC_HALL_RIGHT] = "hall-right",
+	[APP_ALARM_SRC_INPUT_A] = "input-a",
+	[APP_ALARM_SRC_INPUT_B] = "input-b",
+	[APP_ALARM_SRC_PIR] = "pir",
 	[APP_ALARM_SRC_ACCEL] = "accel",
 };
 
@@ -159,9 +164,8 @@ const struct app_alarm_rule *app_alarm_rules_find(enum app_alarm_source source,
 
 int app_alarm_rules_set(const struct app_alarm_rule *rule)
 {
-	if (rule == NULL ||
-	    !app_alarm_rule_valid((enum app_alarm_source)rule->source,
-				  (enum app_alarm_quantity)rule->quantity)) {
+	if (rule == NULL || !app_alarm_rule_valid((enum app_alarm_source)rule->source,
+						  (enum app_alarm_quantity)rule->quantity)) {
 		return -EINVAL;
 	}
 

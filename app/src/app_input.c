@@ -85,7 +85,7 @@ static int poll(void)
 			m_input_data.input_a_notify_act = true;
 		}
 
-		app_alarm_event(APP_ALARM_SOURCE_INPUT_A, true);
+		app_alarm_event(APP_ALARM_SRC_INPUT_A, true);
 	}
 
 	if (input_a_was_active && !input_a_is_active) {
@@ -95,7 +95,7 @@ static int poll(void)
 			m_input_data.input_a_notify_deact = true;
 		}
 
-		app_alarm_event(APP_ALARM_SOURCE_INPUT_A, false);
+		app_alarm_event(APP_ALARM_SRC_INPUT_A, false);
 	}
 
 	if (!input_b_was_active && input_b_is_active) {
@@ -109,7 +109,7 @@ static int poll(void)
 			m_input_data.input_b_notify_act = true;
 		}
 
-		app_alarm_event(APP_ALARM_SOURCE_INPUT_B, true);
+		app_alarm_event(APP_ALARM_SRC_INPUT_B, true);
 	}
 
 	if (input_b_was_active && !input_b_is_active) {
@@ -119,7 +119,7 @@ static int poll(void)
 			m_input_data.input_b_notify_deact = true;
 		}
 
-		app_alarm_event(APP_ALARM_SOURCE_INPUT_B, false);
+		app_alarm_event(APP_ALARM_SRC_INPUT_B, false);
 	}
 
 	k_mutex_unlock(&m_input_data_mutex);

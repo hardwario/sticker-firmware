@@ -767,25 +767,31 @@ function decodeDownlink(input) {
   return { data: { bytes_hex: _pbBytesToHex(input.bytes) }, warnings: [], errors: [] };
 }
 
-// fPort 3: alarm-detail batch (#27), protobuf AlarmReport. Top-level fields:
-// base_time(1, varint), total(2, varint), repeated AlarmEvent events(3, len-
-// delimited). AlarmEvent: source(1), edge(2), side(3), rel_s(4) varints +
-// optional sint32 value(5). source/edge/side are the AlarmEvent_Source/Edge/Side
-// enums; value is scaled (temp/hum ×100, pressure ×10) and absent for discrete
-// sources. Per-event time = base_time + rel_s. `total` may exceed the events
-// present (some dropped to fit the data rate → truncated).
-var _ALARM_SOURCES = ["hall-left", "hall-right", "pir", "input-a", "input-b",
-  "temperature", "humidity", "pressure", "t1-temperature", "t2-temperature",
-  "accel-motion"];
+// fPort 3: alarm-detail batch, protobuf AlarmReport. Top-level: base_time(1),
+// total(2), repeated AlarmEvent events(3). AlarmEvent (dynamic alarm rule):
+// source(1), edge(2), side(3), rel_s(4) varints + optional sint32 value(5) +
+// quantity(6). source = enum app_alarm_source, quantity = enum app_alarm_quantity;
+// value is scaled per quantity (temp/hum ×100, pressure ×10, magnetic_field µT,
+// digital 0/1, counter) and absent for some edges. Per-event time = base_time +
+// rel_s. `total` may exceed events present (dropped to fit the data rate).
+var _ALARM_SOURCES = ["onboard", "s1", "s2", "s3", "s4", "hall-left", "hall-right",
+  "input-a", "input-b", "pir", "accel"];
+var _ALARM_QUANTITIES = ["temperature", "humidity", "pressure", "illuminance",
+  "magnetic-field", "tilt", "state", "count"];
 var _ALARM_EDGES = ["activate", "deactivate"];
 var _ALARM_SIDES = ["none", "lo", "hi"];
 
-function _alarmUnscale(source, raw) {
-  return source === 7 ? raw / 10 : raw / 100; // 7 = pressure (hPa×10)
+function _alarmUnscale(quantity, raw) {
+  switch (quantity) {
+    case 0: case 1: return raw / 100;   // temperature, humidity
+    case 2: return raw / 10;            // pressure (hPa×10)
+    case 4: return raw / 1000;          // magnetic-field (µT -> mT)
+    default: return raw;                // illuminance / state / count
+  }
 }
 
 function _decodeAlarmEvent(bytes, start, end) {
-  var ev = { source: 0, edge: 0, side: 0, rel_s: 0, value: null };
+  var ev = { source: 0, quantity: 0, edge: 0, side: 0, rel_s: 0, value: null };
   var p = start;
   while (p < end) {
     var t = _pbReadVarint(bytes, p); p = t.next;
@@ -797,6 +803,7 @@ function _decodeAlarmEvent(bytes, start, end) {
       else if (field === 3) ev.side = v.value;
       else if (field === 4) ev.rel_s = v.value;
       else if (field === 5) ev.value = _pbZigzag(v.value);
+      else if (field === 6) ev.quantity = v.value;
     } else if (wire === 2) {
       var l = _pbReadVarint(bytes, p); p = l.next + l.value;
     } else { break; }
@@ -822,9 +829,10 @@ function decodeAlarmBatch(bytes) {
         var ev = _decodeAlarmEvent(bytes, pos, endE);
         out.alarms.push({
           source: _ALARM_SOURCES[ev.source] || ("src" + ev.source),
+          quantity: _ALARM_QUANTITIES[ev.quantity] || ("q" + ev.quantity),
           event: _ALARM_EDGES[ev.edge] || "activate",
           side: _ALARM_SIDES[ev.side] || "none",
-          value: ev.value === null ? null : _alarmUnscale(ev.source, ev.value),
+          value: ev.value === null ? null : _alarmUnscale(ev.quantity, ev.value),
           time: 0,
         });
         rels.push(ev.rel_s);

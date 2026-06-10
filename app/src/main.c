@@ -233,6 +233,11 @@ int main(void)
 		LOG_WRN("app_history_init failed: %d (history unavailable)", ret);
 	}
 
+	ret = app_alarm_rules_init();
+	if (ret) {
+		LOG_WRN("app_alarm_rules_init failed: %d (alarms unavailable)", ret);
+	}
+
 #if defined(CONFIG_LORAWAN)
 	ret = app_lrw_init();
 	if (ret) {

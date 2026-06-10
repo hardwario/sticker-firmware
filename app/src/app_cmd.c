@@ -561,7 +561,8 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total,
 	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
 	for (size_t i = 0; i < n; i++) {
 		AlarmEvent *ev = &report.events[i];
-		ev->source = (AlarmEvent_Source)events[i].source;
+		ev->source = events[i].source;
+		ev->quantity = events[i].quantity;
 		ev->edge = (AlarmEvent_Edge)events[i].edge;
 		ev->side = (AlarmEvent_Side)events[i].side;
 		ev->rel_s = events[i].rel_s;

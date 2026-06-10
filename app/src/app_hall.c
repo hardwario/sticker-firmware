@@ -132,7 +132,7 @@ restore:
 			m_hall_data.left_notify_act = true;
 		}
 
-		app_alarm_event(APP_ALARM_SOURCE_HALL_LEFT, true);
+		app_alarm_event(APP_ALARM_SRC_HALL_LEFT, true);
 	}
 
 	if (left_was_active && !left_is_active) {
@@ -142,7 +142,7 @@ restore:
 			m_hall_data.left_notify_deact = true;
 		}
 
-		app_alarm_event(APP_ALARM_SOURCE_HALL_LEFT, false);
+		app_alarm_event(APP_ALARM_SRC_HALL_LEFT, false);
 	}
 
 	if (!right_was_active && right_is_active) {
@@ -156,7 +156,7 @@ restore:
 			m_hall_data.right_notify_act = true;
 		}
 
-		app_alarm_event(APP_ALARM_SOURCE_HALL_RIGHT, true);
+		app_alarm_event(APP_ALARM_SRC_HALL_RIGHT, true);
 	}
 
 	if (right_was_active && !right_is_active) {
@@ -166,7 +166,7 @@ restore:
 			m_hall_data.right_notify_deact = true;
 		}
 
-		app_alarm_event(APP_ALARM_SOURCE_HALL_RIGHT, false);
+		app_alarm_event(APP_ALARM_SRC_HALL_RIGHT, false);
 	}
 
 	k_mutex_unlock(&m_hall_data_mutex);

@@ -58,9 +58,9 @@ enum app_alarm_quantity {
 	APP_ALARM_Q_PRESSURE = 2,
 	APP_ALARM_Q_ILLUMINANCE = 3,
 	APP_ALARM_Q_MAGNETIC_FIELD = 4,
-	APP_ALARM_Q_TILT = 5,   /* digital (STATE) */
-	APP_ALARM_Q_STATE = 6,  /* digital line of a discrete input (STATE) */
-	APP_ALARM_Q_COUNT = 7,  /* counter rate (COUNT) */
+	APP_ALARM_Q_TILT = 5,  /* digital (STATE) */
+	APP_ALARM_Q_STATE = 6, /* digital line of a discrete input (STATE) */
+	APP_ALARM_Q_COUNT = 7, /* counter rate (COUNT) */
 	APP_ALARM_Q_QUANTITY_COUNT
 };
 

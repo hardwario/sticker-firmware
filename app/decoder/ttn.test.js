@@ -316,19 +316,23 @@ test("history sentinel values decode to null", () => {
   assert.equal(rec.humidity, null);    // 0xff sentinel
 });
 
-// --- Uplink: alarm-detail batch (fPort 3, #27, protobuf AlarmReport) -------
+// --- Uplink: alarm-detail batch (fPort 3, protobuf AlarmReport) -----------
 // AlarmReport{ base_time(1), total(2), repeated AlarmEvent events(3) };
-// AlarmEvent{ source(1), edge(2), side(3), rel_s(4), optional sint32 value(5) }.
-// proto3 omits zero fields — the builders mirror that so default-to-0 decoding
-// (activate / side none / hall-left source) is exercised.
+// AlarmEvent{ source(1), edge(2), side(3), rel_s(4), optional sint32 value(5),
+// quantity(6) }. Dynamic-alarm-rule model: source = enum app_alarm_source
+// (0=onboard, 1..4=s1..s4, 5/6=hall l/r, 7/8=input a/b, 9=pir, 10=accel),
+// quantity = enum app_alarm_quantity (0=temperature … 6=state, 7=count). proto3
+// omits zero fields — the builders mirror that (default source=onboard,
+// quantity=temperature, edge=activate, side=none).
 function pbSint(tag, v) { return pbTV(tag, v < 0 ? -v * 2 - 1 : v * 2); }
-function alarmEvent(source, edge, side, rel, value) {
+function alarmEvent(source, quantity, edge, side, rel, value) {
   let e = [];
   if (source) e = e.concat(pbTV(1, source));
   if (edge) e = e.concat(pbTV(2, edge));
   if (side) e = e.concat(pbTV(3, side));
   if (rel) e = e.concat(pbTV(4, rel));
   if (value !== null && value !== undefined) e = e.concat(pbSint(5, value));
+  if (quantity) e = e.concat(pbTV(6, quantity));
   return e;
 }
 function buildAlarmReport(base, total, events) {
@@ -337,11 +341,11 @@ function buildAlarmReport(base, total, events) {
   return b;
 }
 
-test("decodeUplink decodes an fPort-3 alarm batch (threshold + discrete)", () => {
+test("decodeUplink decodes an fPort-3 alarm batch (threshold + state)", () => {
   const base = 1780000000;
   const f = buildAlarmReport(base, 2, [
-    alarmEvent(5, 0, 2, 10, 2660), // temperature, activate, HI, 26.6 °C
-    alarmEvent(0, 0, 0, 15, null), // hall-left, activate, side none, discrete
+    alarmEvent(0, 0, 0, 2, 10, 2660), // onboard temperature, activate, HI, 26.6 °C
+    alarmEvent(5, 6, 0, 0, 15, 1),    // hall-left state, activate, level=1
   ]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
 
@@ -350,27 +354,31 @@ test("decodeUplink decodes an fPort-3 alarm batch (threshold + discrete)", () =>
   assert.equal(d.truncated, false);
   assert.equal(d.alarms.length, 2);
 
-  assert.equal(d.alarms[0].source, "temperature");
+  assert.equal(d.alarms[0].source, "onboard");
+  assert.equal(d.alarms[0].quantity, "temperature");
   assert.equal(d.alarms[0].event, "activate");
   assert.equal(d.alarms[0].side, "hi");
   assert.equal(d.alarms[0].value, 26.6);
   assert.equal(d.alarms[0].time, base + 10);
 
   assert.equal(d.alarms[1].source, "hall-left");
+  assert.equal(d.alarms[1].quantity, "state");
   assert.equal(d.alarms[1].event, "activate");
   assert.equal(d.alarms[1].side, "none");
-  assert.equal(d.alarms[1].value, null); // discrete → absent
+  assert.equal(d.alarms[1].value, 1); // digital level
   assert.equal(d.alarms[1].time, base + 15);
 });
 
-test("fPort-3 batch: humidity deactivate + truncation flag (total > events)", () => {
+test("fPort-3 batch: slot humidity deactivate + truncation flag (total > events)", () => {
   const base = 1780000000;
-  const f = buildAlarmReport(base, 5, [alarmEvent(6, 1, 1, 0, 4500)]);
+  // s2 humidity (source=2, quantity=1), deactivate, side lo, 45 %RH
+  const f = buildAlarmReport(base, 5, [alarmEvent(2, 1, 1, 1, 0, 4500)]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
   assert.equal(d.total, 5);
   assert.equal(d.alarms.length, 1);
   assert.equal(d.truncated, true); // 5 alarms occurred, only 1 fit the frame
-  assert.equal(d.alarms[0].source, "humidity");
+  assert.equal(d.alarms[0].source, "s2");
+  assert.equal(d.alarms[0].quantity, "humidity");
   assert.equal(d.alarms[0].event, "deactivate");
   assert.equal(d.alarms[0].side, "lo");
   assert.equal(d.alarms[0].value, 45);
@@ -379,27 +387,30 @@ test("fPort-3 batch: humidity deactivate + truncation flag (total > events)", ()
 
 test("fPort-3 batch: negative threshold value round-trips via sint zigzag", () => {
   const base = 1780000000;
-  const f = buildAlarmReport(base, 1, [alarmEvent(5, 0, 1, 5, -1234)]); // temp -12.34 °C
+  // s3 temperature (source=3, quantity=0), -12.34 °C, lo
+  const f = buildAlarmReport(base, 1, [alarmEvent(3, 0, 0, 1, 5, -1234)]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
-  assert.equal(d.alarms[0].source, "temperature");
+  assert.equal(d.alarms[0].source, "s3");
+  assert.equal(d.alarms[0].quantity, "temperature");
   assert.equal(d.alarms[0].side, "lo");
   assert.equal(d.alarms[0].value, -12.34);
 });
 
-test("fPort-3 batch: accel-motion activate (protobuf AlarmReport)", () => {
-  // AlarmReport: base_time=1780652851, total=1, one AlarmEvent{source=10
-  // (accel-motion), edge/side=0 → activate/none, no value (discrete source)}.
-  const f = Array.from(Buffer.from("08b3b68ad10610011a02080a", "hex"));
+test("fPort-3 batch: accel motion state activate", () => {
+  const base = 1780652851;
+  // accel (source=10) state (quantity=6) activate, value=1
+  const f = buildAlarmReport(base, 1, [alarmEvent(10, 6, 0, 0, 0, 1)]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
   assert.equal(d.total, 1);
-  assert.equal(d.base_time, 1780652851); // 2026-06-05T09:47:31Z (RTC synced)
+  assert.equal(d.base_time, base);
   assert.equal(d.truncated, false);
   assert.equal(d.alarms.length, 1);
-  assert.equal(d.alarms[0].source, "accel-motion");
+  assert.equal(d.alarms[0].source, "accel");
+  assert.equal(d.alarms[0].quantity, "state");
   assert.equal(d.alarms[0].event, "activate");
   assert.equal(d.alarms[0].side, "none");
-  assert.equal(d.alarms[0].value, null); // discrete source → no value
-  assert.equal(d.alarms[0].time, 1780652851);
+  assert.equal(d.alarms[0].value, 1);
+  assert.equal(d.alarms[0].time, base);
 });
 
 // --- Negative: a corrupted frame must change the result (tests are sensitive) ---

@@ -115,12 +115,13 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
  * including the nanopb header). value is the scaled current reading and is only
  * meaningful when has_value is true (discrete sources leave it absent). */
 struct app_cmd_alarm_event {
-	uint8_t source; /* AlarmEvent_Source / enum app_alarm_source */
-	uint8_t edge;   /* AlarmEvent_Edge: 0=activate, 1=deactivate */
-	uint8_t side;   /* AlarmEvent_Side: 0=none, 1=lo, 2=hi */
-	bool has_value; /* value present (threshold sources) */
-	int32_t value;  /* scaled current value (×100 temp/hum, ×10 pressure) */
-	uint32_t rel_s; /* seconds since base_time */
+	uint8_t source;   /* enum app_alarm_source (onboard/s1..s4/hall/input/pir/accel) */
+	uint8_t quantity; /* enum app_alarm_quantity */
+	uint8_t edge;     /* AlarmEvent_Edge: 0=activate, 1=deactivate */
+	uint8_t side;     /* AlarmEvent_Side: 0=none, 1=lo, 2=hi */
+	bool has_value;   /* value present */
+	int32_t value;    /* scaled value (×100 temp/hum, ×10 pressure, digital 0/1, counter) */
+	uint32_t rel_s;   /* seconds since base_time */
 };
 
 /* Build an alarm-detail batch (AlarmReport) for fPort 3 (#27) into `out`.
