@@ -207,7 +207,10 @@ static void fill_snapshot(void)
 		t.has_orientation = true;
 		t.orientation = (uint32_t)(d.orientation & 0xf);
 	}
-	if (g_app_config.cap_accelerometer && d.accel_motion_count > 0) {
+	/* Always send the count when the accelerometer is enabled (0 included) —
+	 * the #78/#80 "whole group every report" policy that the other digital
+	 * counters already follow; this was the lone holdout. */
+	if (g_app_config.cap_accelerometer) {
 		t.has_accel_motion_count = true;
 		t.accel_motion_count = d.accel_motion_count;
 	}
