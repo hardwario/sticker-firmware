@@ -208,6 +208,7 @@ New `history` shell command:
 | `history count` | Number of stored records |
 | `history read [N]` | List records (optionally last N) |
 | `history clear` | Erase the buffer |
+| `history capture` | Sample sensors and store one record now (bench/test) |
 | `history sensors [<name> on\|off]` | List or toggle recorded sensors |
 | `history enable on\|off` | Master on/off switch |
 | `history stats` | Per-sensor min/max/avg |
