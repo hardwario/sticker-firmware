@@ -785,14 +785,29 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* App-level cold reboot from the shell. The same reboot is available remotely
+ * via the `reboot` command over LoRaWAN/NFC (app_cmd.c, APP_CMD_ACTION_REBOOT). */
+static int cmd_device_reboot(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "Rebooting...");
+	k_sleep(K_MSEC(200)); /* let the shell flush */
+	sys_reboot(SYS_REBOOT_COLD);
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_device,
 	SHELL_CMD_ARG(info, NULL,
 		      "Print device info (FW version, build type, serial, uptime, clock).",
 		      cmd_device_info, 1, 0),
+	SHELL_CMD_ARG(reboot, NULL, "Cold-reboot the device.", cmd_device_reboot, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
-SHELL_STATIC_SUBCMD_SET_CREATE(sub_ats, SHELL_CMD(device, &sub_device, "Device info.", NULL),
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_ats,
+			       SHELL_CMD(device, &sub_device, "Device info & control.", NULL),
 			       SHELL_CMD(led, &sub_led, "LED commands.", NULL),
 			       SHELL_CMD(sensors, &sub_sensors, "Sensor commands.", NULL),
 #if defined(CONFIG_LORAWAN)
