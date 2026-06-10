@@ -225,7 +225,9 @@ def test_migration_preserves_factory_fields(workdir):
 # --- proto <-> decoder cross-check ---------------------------------------
 
 COMMAND_VECTORS = {
-    "set_param": "0801120d0a021801120720783d00004842",
+    # set_param: lorawan.adr=1, application.interval_report=120, temperature_corr=2.5
+    # (the fixed threshold alarm keys were retired in the dynamic-alarms migration).
+    "set_param": "0801120e0a02180112082078ad0200002040",
     "get_param": "08021a070a010312020407",
     "reboot": "08083a00",
 }
@@ -264,12 +266,12 @@ def test_proto_and_decoder_agree(tmp_path):
     assert msg.seq == 1
     assert msg.set_param.lorawan.adr is True
     assert msg.set_param.application.interval_report == 120
-    assert abs(msg.set_param.application.temperature_alarm_hi - 50.0) < 1e-6
+    assert abs(msg.set_param.application.temperature_corr - 2.5) < 1e-6
 
     js = _decode_with_node(COMMAND_VECTORS["set_param"])
     assert js["seq"] == 1
     assert js["set_param"]["application"]["interval_report"] == 120
-    assert abs(js["set_param"]["application"]["temperature_alarm_hi"] - 50.0) < 1e-6
+    assert abs(js["set_param"]["application"]["temperature_corr"] - 2.5) < 1e-6
 
     # get_param field lists
     msg = pb.Command.FromString(bytes.fromhex(COMMAND_VECTORS["get_param"]))

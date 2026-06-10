@@ -119,9 +119,11 @@ static void handle_set_param(const Command_SetParam *sp, Response *resp,
 	uint32_t fault = 0;
 	int rc = 0;
 
-	/* Apply atomically: snapshot the staging config, apply both sections, then
-	 * cross-validate. On any fault, restore the snapshot so a rejected batch
-	 * leaves nothing partially staged for a later SettingsSave to persist. */
+	/* Apply atomically: snapshot the staging config, apply both sections. On any
+	 * fault, restore the snapshot so a rejected batch leaves nothing partially
+	 * staged for a later SettingsSave to persist. (Threshold-pair cross-validation
+	 * was removed with the fixed alarm keys — alarm rules validate on their own
+	 * SET path in app_alarm_rules.) */
 	struct app_config snapshot = *app_config();
 
 	if (sp->has_lorawan) {
@@ -129,9 +131,6 @@ static void handle_set_param(const Command_SetParam *sp, Response *resp,
 	}
 	if (rc == 0 && sp->has_application) {
 		rc = app_config_apply_application(&sp->application, &fault);
-	}
-	if (rc == 0) {
-		rc = app_config_validate_alarm_pairs(app_config(), &fault);
 	}
 
 	if (rc) {
@@ -197,38 +196,12 @@ static const struct {
 	APP2(1),
 	APP2(2),
 	APP2(4),
-	APP2(5),
-	APP5(6),
-	APP5(7),
-	APP5(8),
-	APP2(9),
-	APP5(10),
-	APP5(11),
-	APP5(12),
-	APP2(13),
-	APP5(14),
-	APP5(15),
-	APP5(16),
-	APP2(17),
-	APP5(18),
-	APP5(19),
-	APP5(20),
-	APP2(21),
-	APP5(22),
-	APP5(23),
-	APP5(24),
+	/* tags 5-24 (threshold alarms), 26/27/29/30/32/33/35/36 (notify) retired —
+	 * dynamic-alarms migration; counters 25/28/31/34 kept. */
 	APP2(25),
-	APP2(26),
-	APP2(27),
 	APP2(28),
-	APP2(29),
-	APP2(30),
 	APP2(31),
-	APP2(32),
-	APP2(33),
 	APP2(34),
-	APP2(35),
-	APP2(36),
 	APP5(37),
 	APP5(38),
 	APP5(39),

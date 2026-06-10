@@ -128,19 +128,11 @@ restore:
 
 		LOG_DBG("Left hall switch activated, count: %u", m_hall_data.left_count);
 
-		if (g_app_config.hall_left_notify_act) {
-			m_hall_data.left_notify_act = true;
-		}
-
 		app_alarm_event(APP_ALARM_SRC_HALL_LEFT, true);
 	}
 
 	if (left_was_active && !left_is_active) {
 		LOG_DBG("Left hall switch deactivated");
-
-		if (g_app_config.hall_left_notify_deact) {
-			m_hall_data.left_notify_deact = true;
-		}
 
 		app_alarm_event(APP_ALARM_SRC_HALL_LEFT, false);
 	}
@@ -152,19 +144,11 @@ restore:
 
 		LOG_DBG("Right hall switch activated, count: %u", m_hall_data.right_count);
 
-		if (g_app_config.hall_right_notify_act) {
-			m_hall_data.right_notify_act = true;
-		}
-
 		app_alarm_event(APP_ALARM_SRC_HALL_RIGHT, true);
 	}
 
 	if (right_was_active && !right_is_active) {
 		LOG_DBG("Right hall switch deactivated");
-
-		if (g_app_config.hall_right_notify_deact) {
-			m_hall_data.right_notify_deact = true;
-		}
 
 		app_alarm_event(APP_ALARM_SRC_HALL_RIGHT, false);
 	}
@@ -237,50 +221,6 @@ int app_hall_get_data(struct app_hall_data *data)
 	k_mutex_unlock(&m_hall_data_mutex);
 
 	return 0;
-}
-
-int app_hall_get_data_and_clear_notify(struct app_hall_data *data)
-{
-	if (!data) {
-		return -EINVAL;
-	}
-
-	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
-	*data = m_hall_data;
-	m_hall_data.left_notify_act = false;
-	m_hall_data.left_notify_deact = false;
-	m_hall_data.right_notify_act = false;
-	m_hall_data.right_notify_deact = false;
-	k_mutex_unlock(&m_hall_data_mutex);
-
-	return 0;
-}
-
-void app_hall_clear_notify_flags(struct app_hall_data *data)
-{
-	if (!data) {
-		return;
-	}
-
-	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
-
-	if (data->left_notify_act) {
-		m_hall_data.left_notify_act = false;
-	}
-
-	if (data->left_notify_deact) {
-		m_hall_data.left_notify_deact = false;
-	}
-
-	if (data->right_notify_act) {
-		m_hall_data.right_notify_act = false;
-	}
-
-	if (data->right_notify_deact) {
-		m_hall_data.right_notify_deact = false;
-	}
-
-	k_mutex_unlock(&m_hall_data_mutex);
 }
 
 void app_hall_reset_count(bool left, bool right)

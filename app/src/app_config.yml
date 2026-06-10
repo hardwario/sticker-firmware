@@ -5,7 +5,7 @@ module:
   settings_prefix: config
   shell_command: config
   log_module: app_config
-  version: 2
+  version: 3
 
 enums:
   lrw_region:
@@ -56,7 +56,11 @@ proto:
   groups:
     - {key: root}
     - {key: lorawan, message: Lorawan, field: lorawan, proto_id: 5, strip_prefix: lrw_}
-    - {key: application, message: Application, field: application, proto_id: 6, reserved: [3, 47, 48]}
+    # Retired proto_ids (dynamic-alarms migration): 5-24 fixed threshold alarm
+    # keys, 26/27/29/30/32/33/35/36 hall/input notify, 53 pir_notify — all
+    # replaced by the dynamic alarm-rule subsystem (app_alarm_rules, "alarm/rules"
+    # settings blob). Never re-use these ids.
+    - {key: application, message: Application, field: application, proto_id: 6, reserved: [3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 27, 29, 30, 32, 33, 35, 36, 47, 48, 53]}
 parameters:
   - name: secret_key
     proto_group: root
@@ -292,188 +296,11 @@ parameters:
     type: bool
     help: "Get/Set accelerometer capability — orientation, motion and free-fall (true/false)."
 
-  - name: temperature_alarm_enabled
-    proto_group: application
-    proto_id: 5
-    type: bool
-    help: "Get/Set temperature alarm enabled (true/false)."
-
-  - name: temperature_alarm_lo
-    proto_group: application
-    proto_id: 6
-    type: float
-    default: 15.0
-    min: -30.0
-    max: 70.0
-    help: "Get/Set temperature low threshold (-30 to 70 deg. C)."
-
-  - name: temperature_alarm_hi
-    proto_group: application
-    proto_id: 7
-    type: float
-    default: 25.0
-    min: -30.0
-    max: 70.0
-    help: "Get/Set temperature high threshold (-30 to 70 deg. C)."
-
-  - name: temperature_alarm_hst
-    proto_group: application
-    proto_id: 8
-    type: float
-    default: 0.5
-    min: 0.0
-    max: 5.0
-    help: "Get/Set temperature hysteresis (0 to 5 deg. C)."
-
-  - name: humidity_alarm_enabled
-    proto_group: application
-    proto_id: 9
-    type: bool
-    help: "Get/Set humidity alarm enabled (true/false)."
-
-  - name: humidity_alarm_lo
-    proto_group: application
-    proto_id: 10
-    type: float
-    default: 30.0
-    min: 0.0
-    max: 100.0
-    help: "Get/Set humidity low threshold (0 to 100 %)."
-
-  - name: humidity_alarm_hi
-    proto_group: application
-    proto_id: 11
-    type: float
-    default: 75.0
-    min: 0.0
-    max: 100.0
-    help: "Get/Set humidity high threshold (0 to 100 %)."
-
-  - name: humidity_alarm_hst
-    proto_group: application
-    proto_id: 12
-    type: float
-    default: 5.0
-    min: 0.0
-    max: 20.0
-    help: "Get/Set humidity hysteresis (0 to 20 %)."
-
-  - name: pressure_alarm_enabled
-    proto_group: application
-    proto_id: 13
-    type: bool
-    help: "Get/Set pressure alarm enabled (true/false)."
-
-  - name: pressure_alarm_lo
-    proto_group: application
-    proto_id: 14
-    type: float
-    default: 700.0
-    min: 500.0
-    max: 1200.0
-    help: "Get/Set pressure low threshold (500 to 1200 hPa)."
-
-  - name: pressure_alarm_hi
-    proto_group: application
-    proto_id: 15
-    type: float
-    default: 1060.0
-    min: 500.0
-    max: 1200.0
-    help: "Get/Set pressure high threshold (500 to 1200 hPa)."
-
-  - name: pressure_alarm_hst
-    proto_group: application
-    proto_id: 16
-    type: float
-    default: 10.0
-    min: 0.0
-    max: 50.0
-    help: "Get/Set pressure hysteresis (0 to 50 hPa)."
-
-  - name: t1_alarm_enabled
-    proto_group: application
-    proto_id: 17
-    type: bool
-    help: "Get/Set T1 temperature alarm enabled (true/false)."
-
-  - name: t1_alarm_lo
-    proto_group: application
-    proto_id: 18
-    type: float
-    default: 15.0
-    min: -30.0
-    max: 70.0
-    help: "Get/Set T1 temperature low threshold (-30 to 70 deg. C)."
-
-  - name: t1_alarm_hi
-    proto_group: application
-    proto_id: 19
-    type: float
-    default: 25.0
-    min: -30.0
-    max: 70.0
-    help: "Get/Set T1 temperature high threshold (-30 to 70 deg. C)."
-
-  - name: t1_alarm_hst
-    proto_group: application
-    proto_id: 20
-    type: float
-    default: 0.5
-    min: 0.0
-    max: 5.0
-    help: "Get/Set T1 temperature hysteresis (0 to 5 deg. C)."
-
-  - name: t2_alarm_enabled
-    proto_group: application
-    proto_id: 21
-    type: bool
-    help: "Get/Set T2 temperature alarm enabled (true/false)."
-
-  - name: t2_alarm_lo
-    proto_group: application
-    proto_id: 22
-    type: float
-    default: 15.0
-    min: -30.0
-    max: 70.0
-    help: "Get/Set T2 temperature low threshold (-30 to 70 deg. C)."
-
-  - name: t2_alarm_hi
-    proto_group: application
-    proto_id: 23
-    type: float
-    default: 25.0
-    min: -30.0
-    max: 70.0
-    help: "Get/Set T2 temperature high threshold (-30 to 70 deg. C)."
-
-  - name: t2_alarm_hst
-    proto_group: application
-    proto_id: 24
-    type: float
-    default: 0.5
-    min: 0.0
-    max: 5.0
-    help: "Get/Set T2 temperature hysteresis (0 to 5 deg. C)."
-
   - name: hall_left_counter
     proto_group: application
     proto_id: 25
     type: bool
     help: "Get/Set hall left switch counter enabled (true/false)."
-
-  - name: hall_left_notify_act
-    proto_group: application
-    proto_id: 26
-    type: bool
-    help: "Get/Set hall left switch notify on activation (true/false)."
-
-  - name: hall_left_notify_deact
-    proto_group: application
-    proto_id: 27
-    type: bool
-    help: "Get/Set hall left switch notify on deactivation (true/false)."
 
   - name: hall_right_counter
     proto_group: application
@@ -481,53 +308,17 @@ parameters:
     type: bool
     help: "Get/Set hall right switch counter enabled (true/false)."
 
-  - name: hall_right_notify_act
-    proto_group: application
-    proto_id: 29
-    type: bool
-    help: "Get/Set hall right switch notify on activation (true/false)."
-
-  - name: hall_right_notify_deact
-    proto_group: application
-    proto_id: 30
-    type: bool
-    help: "Get/Set hall right switch notify on deactivation (true/false)."
-
   - name: input_a_counter
     proto_group: application
     proto_id: 31
     type: bool
     help: "Get/Set input A counter enabled (true/false)."
 
-  - name: input_a_notify_act
-    proto_group: application
-    proto_id: 32
-    type: bool
-    help: "Get/Set input A notify on activation (true/false)."
-
-  - name: input_a_notify_deact
-    proto_group: application
-    proto_id: 33
-    type: bool
-    help: "Get/Set input A notify on deactivation (true/false)."
-
   - name: input_b_counter
     proto_group: application
     proto_id: 34
     type: bool
     help: "Get/Set input B counter enabled (true/false)."
-
-  - name: input_b_notify_act
-    proto_group: application
-    proto_id: 35
-    type: bool
-    help: "Get/Set input B notify on activation (true/false)."
-
-  - name: input_b_notify_deact
-    proto_group: application
-    proto_id: 36
-    type: bool
-    help: "Get/Set input B notify on deactivation (true/false)."
 
   - name: temperature_corr
     proto_group: application
@@ -552,13 +343,6 @@ parameters:
     min: -5.0
     max: 5.0
     help: "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C)."
-
-  - name: pir_notify_act
-    proto_group: application
-    proto_id: 53
-    type: bool
-    default: false
-    help: "Get/Set PIR motion alarm notify on activation (true/false)."
 
   - name: accel_motion_sensitivity
     proto_group: application

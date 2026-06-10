@@ -65,21 +65,19 @@ var _BUILD_TYPES = ["main", "dev", "custom"];
 // proto field tag -> name for ConfigDump.Application (floats marked in _APP_FLOAT)
 var _APP_NAMES = {
   1: "calibration", 2: "interval_sample", 4: "interval_report",
-  5: "temperature_alarm_enabled", 6: "temperature_alarm_lo", 7: "temperature_alarm_hi", 8: "temperature_alarm_hst",
-  9: "humidity_alarm_enabled", 10: "humidity_alarm_lo", 11: "humidity_alarm_hi", 12: "humidity_alarm_hst",
-  13: "pressure_alarm_enabled", 14: "pressure_alarm_lo", 15: "pressure_alarm_hi", 16: "pressure_alarm_hst",
-  17: "t1_alarm_enabled", 18: "t1_alarm_lo", 19: "t1_alarm_hi", 20: "t1_alarm_hst",
-  21: "t2_alarm_enabled", 22: "t2_alarm_lo", 23: "t2_alarm_hi", 24: "t2_alarm_hst",
-  25: "hall_left_counter", 26: "hall_left_notify_act", 27: "hall_left_notify_deact",
-  28: "hall_right_counter", 29: "hall_right_notify_act", 30: "hall_right_notify_deact",
-  31: "input_a_counter", 32: "input_a_notify_act", 33: "input_a_notify_deact",
-  34: "input_b_counter", 35: "input_b_notify_act", 36: "input_b_notify_deact",
+  // 5-24 (fixed threshold alarms), 26/27/29/30/32/33/35/36 (hall/input notify)
+  // and 53 (pir_notify_act) retired -> reserved in the proto (dynamic-alarms
+  // migration); alarms are now configured as rules via the AlarmRule command.
+  25: "hall_left_counter",
+  28: "hall_right_counter",
+  31: "input_a_counter",
+  34: "input_b_counter",
   37: "temperature_corr", 38: "t1_corr", 39: "t2_corr",
   40: "cap_hall_left", 41: "cap_hall_right", 42: "cap_input_a", 43: "cap_input_b",
   44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector",
   // 47/48 (cap_1w_thermometer/machine_probe) retired -> reserved in the proto.
   49: "history_enable", 50: "history_sensors", 51: "alarm_limit", 52: "alarm_notif_time",
-  53: "pir_notify_act", 54: "accel_motion_sensitivity", 55: "cap_accelerometer",
+  54: "accel_motion_sensitivity", 55: "cap_accelerometer",
   // 56-59 sensor1..4_rom are bytes (need hex handling, see 1-Wire framework); 60 below.
   60: "cap_w1_sensors"
 };
@@ -92,11 +90,11 @@ var _APP_ENUMS = {
 var _LRW_NAMES = { 1: "region", 2: "network", 3: "adr", 4: "activation", 12: "sub_band" };
 var _LRW_HEX = { 5: "deveui", 6: "joineui", 9: "devaddr" };
 
-// Application tags carrying a float32 (protobuf wire type 5): alarm thresholds
-// and the correction offsets. Everything else in Application is a varint.
+// Application tags carrying a float32 (protobuf wire type 5): the correction
+// offsets. (Alarm threshold floats 6-24 retired with dynamic-alarms.)
+// Everything else in Application is a varint.
 var _APP_FLOAT = {
-  6: 1, 7: 1, 8: 1, 10: 1, 11: 1, 12: 1, 14: 1, 15: 1, 16: 1,
-  18: 1, 19: 1, 20: 1, 22: 1, 23: 1, 24: 1, 37: 1, 38: 1, 39: 1
+  37: 1, 38: 1, 39: 1
 };
 
 // Reverse maps (name -> tag) for encoding SetParam. The LoRaWAN hex set adds the
@@ -457,37 +455,25 @@ function decodeTelemetry(bytes) {
       case 15: d.machine_probe_temperature_2 = _pbZigzag(v.value) / 100; break;
       case 16: d.machine_probe_humidity_2 = v.value / 2; break;
       case 17: d.machine_probe_tilt_alert_2 = (v.value & (1 << 0)) !== 0; break;
-      // hall left
+      // hall left (flag bits 0/1 notify retired with dynamic-alarms; active = bit 2)
       case 18: d.hall_left_count = v.value; break;
       case 19:
-        f = v.value;
-        d.hall_left_notify_act = (f & (1 << 0)) !== 0;
-        d.hall_left_notify_deact = (f & (1 << 1)) !== 0;
-        d.hall_left_is_active = (f & (1 << 2)) !== 0;
+        d.hall_left_is_active = (v.value & (1 << 2)) !== 0;
         break;
       // hall right
       case 20: d.hall_right_count = v.value; break;
       case 21:
-        f = v.value;
-        d.hall_right_notify_act = (f & (1 << 0)) !== 0;
-        d.hall_right_notify_deact = (f & (1 << 1)) !== 0;
-        d.hall_right_is_active = (f & (1 << 2)) !== 0;
+        d.hall_right_is_active = (v.value & (1 << 2)) !== 0;
         break;
       // input A
       case 22: d.input_a_count = v.value; break;
       case 23:
-        f = v.value;
-        d.input_a_notify_act = (f & (1 << 0)) !== 0;
-        d.input_a_notify_deact = (f & (1 << 1)) !== 0;
-        d.input_a_is_active = (f & (1 << 2)) !== 0;
+        d.input_a_is_active = (v.value & (1 << 2)) !== 0;
         break;
       // input B
       case 24: d.input_b_count = v.value; break;
       case 25:
-        f = v.value;
-        d.input_b_notify_act = (f & (1 << 0)) !== 0;
-        d.input_b_notify_deact = (f & (1 << 1)) !== 0;
-        d.input_b_is_active = (f & (1 << 2)) !== 0;
+        d.input_b_is_active = (v.value & (1 << 2)) !== 0;
         break;
       case 26: d.accel_motion_count = v.value; break;
       default: break; /* unknown field: ignore (forward-compatible) */

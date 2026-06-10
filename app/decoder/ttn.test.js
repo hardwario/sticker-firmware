@@ -17,14 +17,14 @@ const toHex = (bytes) => Buffer.from(bytes).toString("hex");
 // Each entry: hex on the wire <-> the structured command it represents.
 const COMMANDS = [
   {
-    name: "set_param (lorawan.adr + application interval_report/temperature_alarm_hi)",
-    hex: "0801120d0a021801120720783d00004842",
+    name: "set_param (lorawan.adr + application interval_report/temperature_corr)",
+    hex: "0801120e0a02180112082078ad0200002040",
     data: {
       seq: 1,
       command: "set_param",
       set_param: {
         lorawan: { adr: 1 },
-        application: { interval_report: 120, temperature_alarm_hi: 50 },
+        application: { interval_report: 120, temperature_corr: 2.5 },
       },
     },
   },
@@ -179,12 +179,8 @@ test("decodeUplink fPort 2: real HW frame, system + enabled groups always presen
   // hall groups present in full although counts are 0 (capabilities enabled)
   assert.equal(got.hall_left_count, 0);
   assert.equal(got.hall_left_is_active, true);
-  assert.equal(got.hall_left_notify_act, false);
-  assert.equal(got.hall_left_notify_deact, false);
   assert.equal(got.hall_right_count, 0);
   assert.equal(got.hall_right_is_active, true);
-  assert.equal(got.hall_right_notify_act, false);
-  assert.equal(got.hall_right_notify_deact, false);
 });
 
 // #78: an enabled-sensor group is sent whole even when ALL its values are 0 —
@@ -196,8 +192,6 @@ test("decodeUplink fPort 2: zero-valued groups decode to explicit false/0", () =
   assert.equal(got.voltage, 2);
   assert.equal(got.boot, false);
   assert.equal(got.hall_left_count, 0);
-  assert.equal(got.hall_left_notify_act, false);
-  assert.equal(got.hall_left_notify_deact, false);
   assert.equal(got.hall_left_is_active, false);
 });
 

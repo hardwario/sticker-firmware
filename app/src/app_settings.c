@@ -30,15 +30,9 @@ static int save(bool reboot)
 {
 	int ret;
 
-	/* Refuse to persist a degenerate alarm configuration from any path (shell
-	 * `settings save`, NFC, or a downlink SettingsSave all reach here). An
-	 * enabled alarm with an empty deactivation band would latch forever. */
-	uint32_t fault = 0;
-	if (app_config_validate_alarm_pairs(app_config(), &fault)) {
-		LOG_ERR("Refusing to save: alarm pair (tag %u) has an empty deactivation band",
-			fault);
-		return -EINVAL;
-	}
+	/* Alarm threshold-pair cross-validation was removed with the fixed alarm
+	 * config keys (dynamic-alarms migration); alarm rules validate on their own
+	 * SET path in app_alarm_rules, so there is nothing to pre-check here. */
 
 	ret = settings_save();
 	if (ret) {
