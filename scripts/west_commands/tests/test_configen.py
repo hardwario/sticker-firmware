@@ -222,6 +222,24 @@ def test_migration_preserves_factory_fields(workdir):
     assert generated.count("m_app_config_migrated = true") == 1
 
 
+def test_h_commit_clamps_loaded_values(workdir):
+    """Issue #91: h_commit must clamp out-of-range NVS values so a corrupted
+    record can't break the device (interval=0 hang, out-of-range enum)."""
+    _run_configen(workdir)
+    generated = (workdir / "app_config.c").read_text()
+
+    # interval_report (min 60, max 86400) clamps both ways.
+    assert "if (m_app_config.interval_report < 60) {" in generated
+    assert "if (m_app_config.interval_report > 86400) {" in generated
+    # interval_sample is zero_allowed: the low clamp must spare 0.
+    assert ("if (m_app_config.interval_sample < 5 && "
+            "m_app_config.interval_sample != 0) {") in generated
+    # enums clamp to their valid range (lrw_activation 0..1).
+    assert "(int)m_app_config.lrw_activation > 1) {" in generated
+    # float ranges keep the f suffix.
+    assert "if (m_app_config.temperature_alarm_hst > 5.0f) {" in generated
+
+
 # --- proto <-> decoder cross-check ---------------------------------------
 
 COMMAND_VECTORS = {
