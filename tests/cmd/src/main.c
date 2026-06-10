@@ -8,12 +8,14 @@
 
 #include "app_cmd.h"
 #include "app_config.h"
+#include "app_config_ingest.h"
 
 #include <pb_decode.h>
 #include "src/app_config.pb.h"
 
 #include <zephyr/ztest.h>
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -90,6 +92,37 @@ ZTEST(cmd, test_set_param_out_of_range)
 	zassert_equal(r.body.error.fault_field, 4, "fault_field %u", r.body.error.fault_field);
 	/* invalid value must NOT be applied */
 	zassert_not_equal(g_app_config.interval_report, 10, "out-of-range value leaked");
+}
+
+/* #91: cross-validation is one shared function reporting a FAULT, no longer a
+ * silent *_enabled mutation. An enabled alarm needs lo + 2*hst < hi. */
+ZTEST(cmd, test_validate_alarm_pairs)
+{
+	struct app_config c;
+	uint32_t fault = 0xFFFF;
+
+	memset(&c, 0, sizeof(c));
+	/* All alarms disabled (lo==hi==0) must still pass — only enabled pairs count. */
+	zassert_equal(app_config_validate_alarm_pairs(&c, &fault), 0, "disabled pairs must pass");
+	zassert_equal(fault, 0, "no fault expected");
+
+	/* Enabled with a valid band. */
+	c.temperature_alarm_enabled = true;
+	c.temperature_alarm_lo = 15.0f;
+	c.temperature_alarm_hi = 25.0f;
+	c.temperature_alarm_hst = 0.5f;
+	zassert_equal(app_config_validate_alarm_pairs(&c, &fault), 0, "valid band must pass");
+
+	/* hst too large -> empty deactivation band (15 + 2*5 = 25 >= 25). */
+	c.temperature_alarm_hst = 5.0f;
+	zassert_equal(app_config_validate_alarm_pairs(&c, &fault), -EINVAL,
+		      "empty band must fault");
+	zassert_equal(fault, 6, "temperature lo tag expected, got %u", fault);
+
+	/* lo >= hi is also caught. */
+	c.temperature_alarm_hst = 0.5f;
+	c.temperature_alarm_lo = 30.0f;
+	zassert_equal(app_config_validate_alarm_pairs(&c, &fault), -EINVAL, "lo>=hi must fault");
 }
 
 ZTEST(cmd, test_get_param_config_dump)

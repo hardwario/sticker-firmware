@@ -118,14 +118,23 @@ static void handle_set_param(const Command_SetParam *sp, Response *resp,
 	uint32_t fault = 0;
 	int rc = 0;
 
+	/* Apply atomically: snapshot the staging config, apply both sections, then
+	 * cross-validate. On any fault, restore the snapshot so a rejected batch
+	 * leaves nothing partially staged for a later SettingsSave to persist. */
+	struct app_config snapshot = *app_config();
+
 	if (sp->has_lorawan) {
 		rc = app_config_apply_lorawan(&sp->lorawan, &fault);
 	}
 	if (rc == 0 && sp->has_application) {
 		rc = app_config_apply_application(&sp->application, &fault);
 	}
+	if (rc == 0) {
+		rc = app_config_validate_alarm_pairs(app_config(), &fault);
+	}
 
 	if (rc) {
+		*app_config() = snapshot; /* roll back the whole batch */
 		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid value");
 		resp->body.error.fault_field = fault;
 	} else {
