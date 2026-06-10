@@ -59,6 +59,10 @@ static const struct app_config m_app_config_defaults = {
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
 
+/* Set by h_commit when a schema version migration ran; init persists the
+ * migrated config so the stored version is bumped exactly once. */
+static bool m_app_config_migrated;
+
 static struct app_config m_app_config = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
@@ -238,9 +242,36 @@ static int h_commit(void)
 	LOG_DBG("Loaded settings in full");
 
 	if (m_app_config.config_version != APP_CONFIG_VERSION) {
-		LOG_WRN("Config version mismatch (stored=%u, expected=%u), resetting to defaults",
+		LOG_WRN("Config version mismatch (stored=%u, expected=%u), migrating",
 			m_app_config.config_version, APP_CONFIG_VERSION);
+
+		/* Reset application parameters to defaults, but carry over factory
+		 * identity and network credentials (preserve_on_migration in the
+		 * YAML) so a schema bump never un-provisions a field device. */
+		struct app_config stored = m_app_config;
+
 		m_app_config = m_app_config_defaults;
+		memcpy(m_app_config.secret_key, stored.secret_key, sizeof(m_app_config.secret_key));
+		m_app_config.serial_number = stored.serial_number;
+		m_app_config.nonce_counter = stored.nonce_counter;
+		m_app_config.lrw_region = stored.lrw_region;
+		m_app_config.lrw_sub_band = stored.lrw_sub_band;
+		m_app_config.lrw_network = stored.lrw_network;
+		m_app_config.lrw_adr = stored.lrw_adr;
+		m_app_config.lrw_activation = stored.lrw_activation;
+		memcpy(m_app_config.lrw_deveui, stored.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+		memcpy(m_app_config.lrw_joineui, stored.lrw_joineui,
+		       sizeof(m_app_config.lrw_joineui));
+		memcpy(m_app_config.lrw_nwkkey, stored.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
+		memcpy(m_app_config.lrw_appkey, stored.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+		memcpy(m_app_config.lrw_devaddr, stored.lrw_devaddr,
+		       sizeof(m_app_config.lrw_devaddr));
+		memcpy(m_app_config.lrw_nwkskey, stored.lrw_nwkskey,
+		       sizeof(m_app_config.lrw_nwkskey));
+		memcpy(m_app_config.lrw_appskey, stored.lrw_appskey,
+		       sizeof(m_app_config.lrw_appskey));
+
+		m_app_config_migrated = true;
 	}
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
@@ -2395,6 +2426,21 @@ static int app_config_init(void)
 	if (ret) {
 		LOG_ERR("Call `settings_load_subtree` failed: %d", ret);
 		return ret;
+	}
+
+	if (m_app_config_migrated) {
+		m_app_config_migrated = false;
+
+		/* Persist the migrated config right away so the stored schema
+		 * version is bumped and the migration does not repeat on every
+		 * boot. A failure here is not fatal: the in-RAM config is valid
+		 * and the migration simply runs again next boot. */
+		ret = settings_save_subtree(SETTINGS_PFX);
+		if (ret) {
+			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		} else {
+			LOG_INF("Config migrated to version %u and persisted", APP_CONFIG_VERSION);
+		}
 	}
 
 	return 0;

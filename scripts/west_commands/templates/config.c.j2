@@ -364,6 +364,10 @@ static const struct {{ module.name }} m_{{ module.name }}_defaults = {
 {% endfor %}
 };
 
+/* Set by h_commit when a schema version migration ran; init persists the
+ * migrated config so the stored version is bumped exactly once. */
+static bool m_{{ module.name }}_migrated;
+
 {% endif %}
 static struct {{ module.name }} m_{{ module.name }} = {
 {% if module.version is defined %}
@@ -421,9 +425,25 @@ static int h_commit(void)
 
 {% if module.version is defined %}
 	if (m_{{ module.name }}.config_version != {{ module.name | upper }}_VERSION) {
-		LOG_WRN("Config version mismatch (stored=%u, expected=%u), resetting to defaults",
+		LOG_WRN("Config version mismatch (stored=%u, expected=%u), migrating",
 			m_{{ module.name }}.config_version, {{ module.name | upper }}_VERSION);
+
+		/* Reset application parameters to defaults, but carry over factory
+		 * identity and network credentials (preserve_on_migration in the
+		 * YAML) so a schema bump never un-provisions a field device. */
+		struct {{ module.name }} stored = m_{{ module.name }};
+
 		m_{{ module.name }} = m_{{ module.name }}_defaults;
+{% for param in parameters if param.preserve_on_migration | default(false) %}
+{% if param.type == 'bytes' or param.type == 'string' %}
+		memcpy(m_{{ module.name }}.{{ param.name | c_name }}, stored.{{ param.name | c_name }},
+		       sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+{% else %}
+		m_{{ module.name }}.{{ param.name | c_name }} = stored.{{ param.name | c_name }};
+{% endif %}
+{% endfor %}
+
+		m_{{ module.name }}_migrated = true;
 	}
 
 {% endif %}
@@ -691,6 +711,24 @@ static int {{ module.name }}_init(void)
 		return ret;
 	}
 
+{% if module.version is defined %}
+	if (m_{{ module.name }}_migrated) {
+		m_{{ module.name }}_migrated = false;
+
+		/* Persist the migrated config right away so the stored schema
+		 * version is bumped and the migration does not repeat on every
+		 * boot. A failure here is not fatal: the in-RAM config is valid
+		 * and the migration simply runs again next boot. */
+		ret = settings_save_subtree(SETTINGS_PFX);
+		if (ret) {
+			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		} else {
+			LOG_INF("Config migrated to version %u and persisted",
+				{{ module.name | upper }}_VERSION);
+		}
+	}
+
+{% endif %}
 	return 0;
 }
 
