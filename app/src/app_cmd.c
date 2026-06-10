@@ -473,6 +473,39 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
 }
 
 #if defined(APP_CMD_HAVE_HISTORY)
+size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
+				       uint32_t t0_unix, uint32_t present, uint32_t interval_s,
+				       size_t out_cap)
+{
+	Response resp = Response_init_zero;
+
+	resp.seq = seq;
+	resp.which_body = Response_history_frame_tag;
+	Response_HistoryFrame *hf = &resp.body.history_frame;
+	hf->frame_index = frame_index;
+	hf->frame_count = frame_count;
+	hf->t0_unix = t0_unix;
+	hf->present = present;
+	hf->interval_s = interval_s;
+	hf->samples.size = 0; /* empty bytes field is omitted in proto3 */
+
+	size_t base = 0;
+	if (!pb_get_encoded_size(&base, Response_fields, &resp)) {
+		return 0;
+	}
+
+	/* The encoded frame is: version(1) + base + samples field. With 1..N
+	 * sample bytes (N <= 48 < 128) the samples field adds tag(1) + len(1) + N.
+	 * The empty-field omission above means `base` excludes those 2 bytes. */
+	const size_t fixed = 1 + base + 2;
+	if (out_cap <= fixed) {
+		return 0;
+	}
+
+	size_t avail = out_cap - fixed;
+	return MIN(avail, sizeof(hf->samples.bytes));
+}
+
 int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
 				uint32_t t0_unix, uint32_t present, uint32_t interval_s,
 				const uint8_t *samples, size_t samples_len, uint8_t *out,

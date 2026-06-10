@@ -146,4 +146,59 @@ ZTEST(cmd, test_deferred_actions)
 	zassert_equal(handle("08094200", &r), APP_CMD_ACTION_FACTORY_RESET, "factory");
 }
 
+/* #89: a fully-populated history frame (48 samples, synced 5-byte t0) must fit
+ * the staging buffer. The pre-fix 64-byte buffer overflowed (~68 B encoded),
+ * killing replay silently on DR3+. */
+ZTEST(cmd, test_history_frame_full_fits_buffer)
+{
+	uint8_t samples[48];
+	uint8_t out[APP_CMD_HISTORY_FRAME_BUF_SIZE];
+	size_t out_len = 0;
+
+	memset(samples, 0xAB, sizeof(samples));
+	int ret = app_cmd_build_history_frame(/*seq*/ 200, /*idx*/ 200, /*count*/ 200,
+					      /*t0*/ 1770000000u, /*present*/ 0x7, /*interval*/ 900,
+					      samples, sizeof(samples), out, sizeof(out), &out_len);
+	zassert_equal(ret, 0, "full frame did not fit (ret %d)", ret);
+	zassert_true(out_len <= sizeof(out), "out_len %zu overflows", out_len);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_equal(r.which_body, Response_history_frame_tag, "expected HistoryFrame");
+	zassert_equal(r.body.history_frame.samples.size, 48, "sample count");
+}
+
+/* The capacity helper must be exact: a frame built with `cap` samples fits the
+ * given out_cap, and one more byte does not. */
+ZTEST(cmd, test_history_sample_capacity_is_exact)
+{
+	uint8_t samples[64];
+	uint8_t out[APP_CMD_HISTORY_FRAME_BUF_SIZE];
+	size_t out_len = 0;
+
+	memset(samples, 0x5A, sizeof(samples));
+
+	/* Worst-case varints, mirroring history_frame_cap() in app_lrw.c. */
+	size_t cap = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,
+						     900, sizeof(out));
+	zassert_true(cap > 0 && cap <= 48, "cap %zu out of range", cap);
+
+	/* Exactly `cap` samples must encode within out_cap. */
+	int ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7, 900,
+					      samples, cap, out, sizeof(out), &out_len);
+	zassert_equal(ret, 0, "cap samples did not fit (ret %d)", ret);
+	zassert_true(out_len <= sizeof(out), "out_len %zu > out_cap", out_len);
+
+	/* A tighter budget yields a strictly smaller (or zero) capacity. */
+	size_t tight = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,
+						       900, 32);
+	zassert_true(tight < cap, "tight cap %zu not below %zu", tight, cap);
+
+	/* A budget below the fixed overhead yields zero. */
+	zassert_equal(app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,
+						      900, 8),
+		      0, "tiny budget should give 0");
+}
+
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);
