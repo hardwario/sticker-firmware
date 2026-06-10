@@ -61,7 +61,10 @@ static uint8_t sht_crc8(const uint8_t *data, size_t len)
 
 #define OPT3001_I2C_ADDR  0x44
 #define OPT3001_INIT_TIME K_MSEC(10)
-#define OPT3001_CONV_TIME K_MSEC(2000)
+/* Single-shot conversion time. The convert config uses CT=0 (100 ms integration);
+ * allow margin for the conversion-ready poll. Keeps the 1-Wire bus held ~150 ms
+ * instead of 2 s per lux sample. */
+#define OPT3001_CONV_TIME K_MSEC(150)
 
 #define SI7210_I2C_ADDR 0x32
 
@@ -382,7 +385,9 @@ static int opt3001_convert(const struct device *dev)
 	uint8_t write_buf[3];
 
 	write_buf[0] = 0x01;
-	write_buf[1] = 0xca;
+	/* 0xC2 0x10: RN=auto, CT=0 (100 ms), M=01 single-shot. CT=1 (0xCA) would be
+	 * an 800 ms integration — unnecessary here and it pins the 1-Wire bus. */
+	write_buf[1] = 0xc2;
 	write_buf[2] = 0x10;
 
 	ret = ds28e17_i2c_write(dev, OPT3001_I2C_ADDR, write_buf, 3);

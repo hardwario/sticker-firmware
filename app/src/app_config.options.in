@@ -19,6 +19,10 @@ Response.HistoryFrame.samples max_size:48
 # encoder further caps by the live payload budget.
 AlarmReport.events max_count:8
 
+# 1-Wire telemetry: one SensorReading per ROM-bound slot (APP_W1_SLOT_COUNT).
+# Static array; the composer splits readings across frames to fit the budget.
+Telemetry.w1_sensors max_count:4
+
 # GetParam field-id lists as static arrays (no nanopb callback). A batch is
 # bounded by the LoRaWAN downlink size anyway, so 16 ids each is plenty.
 Command.GetParam.lorawan_field     max_count:16

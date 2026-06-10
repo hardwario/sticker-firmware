@@ -47,12 +47,10 @@ struct app_sensor_data g_app_sensor_data = {
 	.illuminance = NAN,
 	.altitude = NAN,
 	.pressure = NAN,
-	.t1_temperature = NAN,
-	.t2_temperature = NAN,
-	.mp1_temperature = NAN,
-	.mp2_temperature = NAN,
-	.mp1_humidity = NAN,
-	.mp2_humidity = NAN,
+	.w1 =
+		{
+			[0 ... APP_W1_SLOT_COUNT - 1] = {.temperature = NAN, .humidity = NAN},
+		},
 };
 
 K_MUTEX_DEFINE(g_app_sensor_data_lock);
@@ -317,15 +315,13 @@ void app_sensor_sample(void)
 	struct app_hall_data hall_data = {0};
 	struct app_input_data input_data = {0};
 
-	float t1_temperature = NAN;
-	float t2_temperature = NAN;
-
-	float mp1_temperature = NAN;
-	float mp2_temperature = NAN;
-	float mp1_humidity = NAN;
-	float mp2_humidity = NAN;
-	bool mp1_is_tilt_alert = false;
-	bool mp2_is_tilt_alert = false;
+	struct app_w1_slot_reading w1[APP_W1_SLOT_COUNT];
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		w1[s] = (struct app_w1_slot_reading){.temperature = NAN,
+						     .humidity = NAN,
+						     .is_tilt_alert = false,
+						     .present = false};
+	}
 
 #if defined(CONFIG_ADC)
 	ret = app_battery_measure(&voltage);
@@ -379,72 +375,22 @@ void app_sensor_sample(void)
 		}
 	}
 
+	/* Read each logical 1-Wire slot through its ROM-bound driver (app_w1_slots
+	 * dispatches on the slot type). Unbound / absent slots return present=false
+	 * with NaN readings, so a slot keeps a stable identity across reboots
+	 * regardless of bus enumeration order. */
 	if (g_app_config.cap_w1_sensors) {
-		int count = app_ds18b20_get_count();
-
-		for (int i = 0; i < count; i++) {
-			uint64_t serial_number;
-			float temperature;
-			ret = app_ds18b20_read(i, &serial_number, &temperature);
+		for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+			ret = app_w1_slots_read(s, &w1[s]);
 			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_ds18b20_read", ret);
+				LOG_ERR_CALL_FAILED_INT("app_w1_slots_read", ret);
 				continue;
 			}
-
-			LOG_INF("Serial number: %llu / Temperature: %.2f C", serial_number,
-				(double)temperature);
-
-			if (i == 0) {
-				t1_temperature = temperature;
-			} else if (i == 1) {
-				t2_temperature = temperature;
-			}
-		}
-	}
-
-	if (g_app_config.cap_w1_sensors) {
-		int count = app_machine_probe_get_count();
-
-		for (int i = 0; i < count; i++) {
-			uint64_t serial_number;
-			float hygrometer_temperature;
-			float hygrometer_humidity;
-			bool is_tilt_alert;
-			ret = app_machine_probe_read_hygrometer(
-				i, &serial_number, &hygrometer_temperature, &hygrometer_humidity);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_machine_probe_read_hygrometer", ret);
-				continue;
-			}
-
-			LOG_INF("Serial number: %llu / Hygrometer / Temperature: "
-				"%.2f C",
-				serial_number, (double)hygrometer_temperature);
-			LOG_INF("Serial number: %llu / Hygrometer / Humidity: %.1f "
-				"%%",
-				serial_number, (double)hygrometer_humidity);
-
-			if (i == 0) {
-				mp1_temperature = hygrometer_temperature;
-				mp1_humidity = hygrometer_humidity;
-			} else if (i == 1) {
-				mp2_temperature = hygrometer_temperature;
-				mp2_humidity = hygrometer_humidity;
-			}
-
-			ret = app_machine_probe_get_tilt_alert(i, &serial_number, &is_tilt_alert);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_machine_probe_get_tilt_alert", ret);
-				continue;
-			}
-
-			LOG_INF("Serial number: %llu / Tilt alert is %sactive", serial_number,
-				is_tilt_alert ? "" : "not ");
-
-			if (i == 0) {
-				mp1_is_tilt_alert = is_tilt_alert;
-			} else if (i == 1) {
-				mp2_is_tilt_alert = is_tilt_alert;
+			if (w1[s].present) {
+				LOG_INF("Slot %d / Temperature: %.2f C / Humidity: %.1f %% / "
+					"Tilt: %sactive",
+					s, (double)w1[s].temperature, (double)w1[s].humidity,
+					w1[s].is_tilt_alert ? "" : "not ");
 			}
 		}
 	}
@@ -470,15 +416,17 @@ void app_sensor_sample(void)
 	g_app_sensor_data.input_a_is_active = input_data.input_a_is_active;
 	g_app_sensor_data.input_b_is_active = input_data.input_b_is_active;
 
-	g_app_sensor_data.t1_temperature = t1_temperature + g_app_config.t1_corr;
-	g_app_sensor_data.t2_temperature = t2_temperature + g_app_config.t2_corr;
-
-	g_app_sensor_data.mp1_temperature = mp1_temperature;
-	g_app_sensor_data.mp2_temperature = mp2_temperature;
-	g_app_sensor_data.mp1_humidity = mp1_humidity;
-	g_app_sensor_data.mp2_humidity = mp2_humidity;
-	g_app_sensor_data.mp1_is_tilt_alert = mp1_is_tilt_alert;
-	g_app_sensor_data.mp2_is_tilt_alert = mp2_is_tilt_alert;
+	/* Apply the per-slot temperature correction (only slots 0/1 have a config
+	 * key today; full per-slot corr lands with the per-slot alarms in P2). */
+	if (w1[0].present && !isnan(w1[0].temperature)) {
+		w1[0].temperature += g_app_config.t1_corr;
+	}
+	if (w1[1].present && !isnan(w1[1].temperature)) {
+		w1[1].temperature += g_app_config.t2_corr;
+	}
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		g_app_sensor_data.w1[s] = w1[s];
+	}
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }

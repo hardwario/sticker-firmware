@@ -14,6 +14,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Application includes */
+#include "app_w1_slots.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,14 +29,9 @@ struct app_sensor_data {
 	float illuminance;
 	float altitude;
 	float pressure;
-	float t1_temperature;
-	float t2_temperature;
-	float mp1_temperature;
-	float mp2_temperature;
-	float mp1_humidity;
-	float mp2_humidity;
-	bool mp1_is_tilt_alert;
-	bool mp2_is_tilt_alert;
+	/* 1-Wire sensor slots, ROM-bound (see app_w1_slots). Each slot's reading
+	 * carries temperature/humidity/tilt + present; unbound/absent → NaN/false. */
+	struct app_w1_slot_reading w1[APP_W1_SLOT_COUNT];
 	uint32_t hall_left_count;
 	uint32_t hall_right_count;
 	bool hall_left_is_active;

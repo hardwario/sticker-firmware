@@ -31,10 +31,19 @@ enum app_w1_slot_type {
 
 /* One slot's latest readings. Quantities a slot's type doesn't provide are
  * NaN (floats) / false (tilt). present=false when the bound ROM was not seen
- * on the last scan (alarms stay inert via NaN). */
+ * on the last scan (alarms stay inert via NaN). The machine-probe carries a
+ * whole sensor cluster (SHT temp/hum, OPT3001 lux, Si7210 field, LIS2DH12
+ * accel + tilt); a Dallas slot fills only temperature. A sub-sensor that fails
+ * to respond (e.g. an unpopulated TMP112 on older probe revisions) stays NaN
+ * without failing the whole slot read. */
 struct app_w1_slot_reading {
-	float temperature; /* degC, NaN if absent/unsupported */
-	float humidity;    /* %RH, NaN unless machine-probe */
+	float temperature;    /* degC, NaN if absent/unsupported */
+	float humidity;       /* %RH, NaN unless machine-probe */
+	float illuminance;    /* lux, NaN unless machine-probe */
+	float magnetic_field; /* mT, NaN unless machine-probe */
+	float accel_x;        /* m/s^2, NaN unless machine-probe */
+	float accel_y;        /* m/s^2, NaN unless machine-probe */
+	float accel_z;        /* m/s^2, NaN unless machine-probe */
 	bool is_tilt_alert;
 	bool present;
 };
@@ -54,6 +63,17 @@ int app_w1_slots_rebind(void);
  * (0..APP_W1_SLOT_COUNT-1). Fills *out (present=false + NaN when unbound /
  * absent). Returns 0 on success, negative errno on a read error. */
 int app_w1_slots_read(int slot, struct app_w1_slot_reading *out);
+
+/* Encode a slot's reading into its telemetry SensorReading (Telemetry field 27),
+ * dispatched to the slot type's driver — the caller (composer) owns the slot
+ * index, type and the repeated array; this fills only the value fields the
+ * driver provides (a Dallas slot fills temperature, a machine-probe the whole
+ * cluster). NaN quantities stay absent. `sr` is a nanopb SensorReading
+ * (forward-declared so this header stays protobuf-free; the dispatch lives in
+ * app_w1_slots.c, the HW drivers never see the wire schema). No-op for an
+ * unknown/empty type. */
+struct _SensorReading;
+void app_w1_slot_encode(int slot, const struct app_w1_slot_reading *r, struct _SensorReading *sr);
 
 /* Human-readable name for a slot type ("dallas", "machine-probe", "empty"),
  * from the sensor-type registry. */
