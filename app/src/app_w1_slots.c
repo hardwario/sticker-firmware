@@ -115,6 +115,11 @@ struct slot_rt {
 
 static struct slot_rt m_slots[APP_W1_SLOT_COUNT];
 
+/* m_slots is mutated by rebind (boot, shell teach/scan) and read from the
+ * production sampling/compose paths (m_sensor_work_q, m_work_q) — every access
+ * goes through this lock. The slow driver reads run outside it. */
+static K_MUTEX_DEFINE(m_lock);
+
 /* ---- config accessors (flat sensorN_* keys, no array in g_app_config) ---- */
 
 /* The runtime config (g_app_config, read by all modules) and the staging config
@@ -215,6 +220,8 @@ int app_w1_slots_rebind(void)
 	struct discovered dev[DISCOVERED_MAX];
 	int ndev = collect_all(dev, DISCOVERED_MAX);
 
+	k_mutex_lock(&m_lock, K_FOREVER);
+
 	/* Load persisted slot identity (ROM only) and reset runtime state. The
 	 * type/driver are resolved from the discovered device's family below. */
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
@@ -290,6 +297,8 @@ int app_w1_slots_rebind(void)
 			present++;
 		}
 	}
+
+	k_mutex_unlock(&m_lock);
 	return present;
 }
 
@@ -304,15 +313,38 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
 	out->temperature = NAN;
 	out->humidity = NAN;
 	out->is_tilt_alert = false;
-	out->present = m_slots[slot].present;
 
-	if (!m_slots[slot].present || m_slots[slot].driver_index < 0 ||
-	    m_slots[slot].desc == NULL) {
+	/* Snapshot the binding under the lock; the (slow) driver read runs outside
+	 * it so a teach/list in the shell never blocks sampling and vice versa. */
+	k_mutex_lock(&m_lock, K_FOREVER);
+	uint64_t rom = m_slots[slot].rom;
+	const struct app_w1_sensor_type *desc = m_slots[slot].desc;
+	int driver_index = m_slots[slot].driver_index;
+	bool present = m_slots[slot].present;
+	k_mutex_unlock(&m_lock);
+
+	out->present = present;
+
+	if (!present || driver_index < 0 || desc == NULL) {
 		return 0;
 	}
 
 	uint64_t serial;
-	return m_slots[slot].desc->read(m_slots[slot].driver_index, &serial, out);
+	int ret = desc->read(driver_index, &serial, out);
+	if (ret) {
+		return ret;
+	}
+
+	/* A concurrent rescan may have reshuffled the driver indices under us —
+	 * reject a reading whose serial no longer matches the slot's ROM rather
+	 * than report another sensor's values under this slot's identity. */
+	if (serial != rom) {
+		out->temperature = NAN;
+		out->humidity = NAN;
+		out->is_tilt_alert = false;
+		return -ENODEV;
+	}
+	return 0;
 }
 
 /* ---- accessors ---------------------------------------------------------- */
@@ -322,7 +354,10 @@ enum app_w1_slot_type app_w1_slot_get_type(int slot)
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
 		return APP_W1_SLOT_EMPTY;
 	}
-	return m_slots[slot].type;
+	k_mutex_lock(&m_lock, K_FOREVER);
+	enum app_w1_slot_type type = m_slots[slot].type;
+	k_mutex_unlock(&m_lock);
+	return type;
 }
 
 uint64_t app_w1_slot_get_rom(int slot)
@@ -330,7 +365,10 @@ uint64_t app_w1_slot_get_rom(int slot)
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
 		return 0;
 	}
-	return m_slots[slot].rom;
+	k_mutex_lock(&m_lock, K_FOREVER);
+	uint64_t rom = m_slots[slot].rom;
+	k_mutex_unlock(&m_lock);
+	return rom;
 }
 
 bool app_w1_slot_is_present(int slot)
@@ -338,7 +376,10 @@ bool app_w1_slot_is_present(int slot)
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
 		return false;
 	}
-	return m_slots[slot].present;
+	k_mutex_lock(&m_lock, K_FOREVER);
+	bool present = m_slots[slot].present;
+	k_mutex_unlock(&m_lock);
+	return present;
 }
 
 bool app_w1_slot_is_replaced(int slot)
@@ -346,7 +387,10 @@ bool app_w1_slot_is_replaced(int slot)
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {
 		return false;
 	}
-	return m_slots[slot].replaced;
+	k_mutex_lock(&m_lock, K_FOREVER);
+	bool replaced = m_slots[slot].replaced;
+	k_mutex_unlock(&m_lock);
+	return replaced;
 }
 
 /* ---- enrollment (sensor shell) ----------------------------------------- */

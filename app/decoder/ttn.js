@@ -431,8 +431,18 @@ function decodeTelemetry(bytes) {
       case 8:  d.orientation = v.value; break;
       // pir
       case 9:  d.motion_count = v.value; break;
-      // 1-wire slots are repeated SensorReading (field 27, handled above);
-      // legacy flat fields 10-17 retired.
+      // 1-wire slots are repeated SensorReading (field 27, handled above).
+      // The flat fields 10-17 below are retired in current firmware but kept
+      // decodable so one formatter serves a mixed fleet (older firmware still
+      // emits them); new firmware never sends both.
+      case 10: d.ext_temperature_1 = _pbZigzag(v.value) / 100; break;
+      case 11: d.ext_temperature_2 = _pbZigzag(v.value) / 100; break;
+      case 12: d.machine_probe_temperature_1 = _pbZigzag(v.value) / 100; break;
+      case 13: d.machine_probe_humidity_1 = v.value / 2; break;
+      case 14: d.machine_probe_tilt_alert_1 = (v.value & (1 << 0)) !== 0; break;
+      case 15: d.machine_probe_temperature_2 = _pbZigzag(v.value) / 100; break;
+      case 16: d.machine_probe_humidity_2 = v.value / 2; break;
+      case 17: d.machine_probe_tilt_alert_2 = (v.value & (1 << 0)) !== 0; break;
       // hall left
       case 18: d.hall_left_count = v.value; break;
       case 19:

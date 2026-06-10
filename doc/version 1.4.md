@@ -77,7 +77,7 @@ message SensorReading {
     uint32 type              = 2;   // 1 = dallas (temperature-only), 2 = machine-probe (temp + humidity + tilt)
     optional sint32 temperature = 3; // °C ×100
     optional uint32 humidity    = 4; // %RH ×2  (machine-probe only)
-    optional uint32 flags       = 5; // bit0 = tilt
+    optional uint32 flags       = 5; // bit0 = tilt (machine-probe only)
 }
 // Telemetry: repeated SensorReading w1_sensors = 27;   // replaces old fields 10–17
 ```

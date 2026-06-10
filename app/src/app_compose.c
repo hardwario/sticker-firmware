@@ -115,8 +115,11 @@ static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, 
 /* True if a group carries any data in the snapshot (any of its fields present). */
 static bool group_present(const Telemetry *s, enum tlm_group g)
 {
-	Telemetry probe = Telemetry_init_zero;
+	/* Compose runs solely on m_work_q; static keeps this large struct off the
+	 * tight work-queue stack (it grew with the w1_sensors array). */
+	static Telemetry probe;
 
+	memset(&probe, 0, sizeof(probe));
 	apply_group(&probe, s, g, true);
 
 	/* Re-encode the probe: empty (no has_ set) → 0 bytes. */
@@ -135,7 +138,10 @@ static void fill_snapshot(void)
 {
 	static bool boot = true;
 
-	Telemetry t = Telemetry_init_zero;
+	/* Build straight into the static snapshot — no Telemetry-sized local and
+	 * no struct copy on the tight m_work_q stack. */
+	Telemetry *t = &m_snapshot;
+	memset(t, 0, sizeof(*t));
 	uint32_t system_flags = boot ? SYSTEM_FLAG_BOOT : 0;
 
 	struct app_hall_data hall;
@@ -149,52 +155,52 @@ static void fill_snapshot(void)
 
 	/* system — always sent as one group; boot=false is encoded explicitly.
 	 * voltage uses 0 as a "no sample" sentinel (only the pre-sample case). */
-	t.has_voltage = true;
-	t.voltage = isnan(d.voltage) ? 0 : (uint32_t)CLAMP(d.voltage * 50.0f, 0.0f, 255.0f);
-	t.has_system_flags = true;
-	t.system_flags = system_flags;
+	t->has_voltage = true;
+	t->voltage = isnan(d.voltage) ? 0 : (uint32_t)CLAMP(d.voltage * 50.0f, 0.0f, 255.0f);
+	t->has_system_flags = true;
+	t->system_flags = system_flags;
 
 	/* internal */
 	if (!isnan(d.temperature)) {
-		t.has_temperature = true;
-		t.temperature = (int32_t)(d.temperature * 100.0f);
+		t->has_temperature = true;
+		t->temperature = (int32_t)(d.temperature * 100.0f);
 	}
 	if (!isnan(d.humidity)) {
-		t.has_humidity = true;
-		t.humidity = (uint32_t)(d.humidity * 2.0f);
+		t->has_humidity = true;
+		t->humidity = (uint32_t)(d.humidity * 2.0f);
 	}
 
 	/* barometer */
 	if (g_app_config.cap_barometer && !isnan(d.pressure)) {
-		t.has_pressure = true;
-		t.pressure = (uint32_t)(d.pressure * 1000.0f);
+		t->has_pressure = true;
+		t->pressure = (uint32_t)(d.pressure * 1000.0f);
 	}
 	if (g_app_config.cap_barometer && !isnan(d.altitude)) {
 		float a = CLAMP(d.altitude * 10.0f, (float)INT16_MIN, (float)INT16_MAX);
-		t.has_altitude = true;
-		t.altitude = (int32_t)a;
+		t->has_altitude = true;
+		t->altitude = (int32_t)a;
 	}
 
 	/* light */
 	if (g_app_config.cap_light_sensor && !isnan(d.illuminance)) {
-		t.has_illuminance = true;
-		t.illuminance = (uint32_t)(d.illuminance / 2.0f);
+		t->has_illuminance = true;
+		t->illuminance = (uint32_t)(d.illuminance / 2.0f);
 	}
 
 	/* accel (gated by the accelerometer capability) */
 	if (g_app_config.cap_accelerometer && d.orientation != INT_MAX) {
-		t.has_orientation = true;
-		t.orientation = (uint32_t)(d.orientation & 0xf);
+		t->has_orientation = true;
+		t->orientation = (uint32_t)(d.orientation & 0xf);
 	}
 	if (g_app_config.cap_accelerometer && d.accel_motion_count > 0) {
-		t.has_accel_motion_count = true;
-		t.accel_motion_count = d.accel_motion_count;
+		t->has_accel_motion_count = true;
+		t->accel_motion_count = d.accel_motion_count;
 	}
 
 	/* pir — whole group sent whenever the detector is enabled (0 is valid) */
 	if (g_app_config.cap_pir_detector) {
-		t.has_motion_count = true;
-		t.motion_count = d.motion_count;
+		t->has_motion_count = true;
+		t->motion_count = d.motion_count;
 	}
 
 	/* 1-wire ROM-bound slots → one repeated SensorReading per populated slot.
@@ -207,7 +213,7 @@ static void fill_snapshot(void)
 				continue; /* unconfigured slot → no reading */
 			}
 			const struct app_w1_slot_reading *r = &d.w1[i];
-			SensorReading *sr = &t.w1_sensors[t.w1_sensors_count];
+			SensorReading *sr = &t->w1_sensors[t->w1_sensors_count];
 			*sr = (SensorReading)SensorReading_init_zero;
 			sr->slot = i;
 			sr->type = type;
@@ -219,9 +225,14 @@ static void fill_snapshot(void)
 				sr->has_humidity = true;
 				sr->humidity = (uint32_t)(r->humidity * 2.0f);
 			}
-			sr->has_flags = true;
-			sr->flags = r->is_tilt_alert ? MP_FLAG_TILT : 0;
-			t.w1_sensors_count++;
+			/* flags only for types that provide them (tilt is a real digital
+			 * state, sent every report per #80); temperature-only types omit
+			 * the field entirely. */
+			if (type == APP_W1_SLOT_MACHINE_PROBE) {
+				sr->has_flags = true;
+				sr->flags = r->is_tilt_alert ? MP_FLAG_TILT : 0;
+			}
+			t->w1_sensors_count++;
 		}
 	}
 
@@ -237,10 +248,10 @@ static void fill_snapshot(void)
 		if (hall.left_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
-		t.has_hall_left_count = true;
-		t.hall_left_count = hall.left_count;
-		t.has_hall_left_flags = true;
-		t.hall_left_flags = f;
+		t->has_hall_left_count = true;
+		t->hall_left_count = hall.left_count;
+		t->has_hall_left_flags = true;
+		t->hall_left_flags = f;
 	}
 	if (g_app_config.cap_hall_right) {
 		uint32_t f = 0;
@@ -253,10 +264,10 @@ static void fill_snapshot(void)
 		if (hall.right_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
-		t.has_hall_right_count = true;
-		t.hall_right_count = hall.right_count;
-		t.has_hall_right_flags = true;
-		t.hall_right_flags = f;
+		t->has_hall_right_count = true;
+		t->hall_right_count = hall.right_count;
+		t->has_hall_right_flags = true;
+		t->hall_right_flags = f;
 	}
 
 	/* input A / B */
@@ -271,10 +282,10 @@ static void fill_snapshot(void)
 		if (input.input_a_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
-		t.has_input_a_count = true;
-		t.input_a_count = input.input_a_count;
-		t.has_input_a_flags = true;
-		t.input_a_flags = f;
+		t->has_input_a_count = true;
+		t->input_a_count = input.input_a_count;
+		t->has_input_a_flags = true;
+		t->input_a_flags = f;
 	}
 	if (g_app_config.cap_input_b) {
 		uint32_t f = 0;
@@ -287,13 +298,12 @@ static void fill_snapshot(void)
 		if (input.input_b_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
-		t.has_input_b_count = true;
-		t.input_b_count = input.input_b_count;
-		t.has_input_b_flags = true;
-		t.input_b_flags = f;
+		t->has_input_b_count = true;
+		t->input_b_count = input.input_b_count;
+		t->has_input_b_flags = true;
+		t->input_b_flags = f;
 	}
 
-	m_snapshot = t;
 	m_pending = 0;
 	for (enum tlm_group g = 0; g < G_COUNT; g++) {
 		if (group_present(&m_snapshot, g)) {
@@ -327,8 +337,11 @@ int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 	 * from buf+1, so the group-packing budget loses that byte. */
 	size_t cap = MIN(size, (size_t)budget) - 1;
 
-	/* Greedily pack whole pending groups, highest priority first, that fit. */
-	Telemetry frame = Telemetry_init_zero;
+	/* Greedily pack whole pending groups, highest priority first, that fit.
+	 * Static for the same reason as the snapshot: app_compose runs solely on
+	 * m_work_q and the struct is too big for that stack. */
+	static Telemetry frame;
+	memset(&frame, 0, sizeof(frame));
 	uint16_t frame_groups = 0;
 
 	for (enum tlm_group g = 0; g < G_COUNT; g++) {

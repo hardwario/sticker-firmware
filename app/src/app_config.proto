@@ -339,5 +339,5 @@ message SensorReading {
     uint32 type              = 2;   // enum app_w1_slot_type
     optional sint32 temperature = 3; // degC x100
     optional uint32 humidity    = 4; // %RH  x2
-    optional uint32 flags       = 5; // bit0 tilt
+    optional uint32 flags       = 5; // bit0 tilt (machine-probe only)
 }

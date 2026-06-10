@@ -191,6 +191,16 @@ test("fPort-2 telemetry decodes repeated w1_sensors (field 27)", () => {
   assert.equal(got.w1_sensors[1].humidity, undefined); // dallas → no humidity
 });
 
+// Legacy flat 1-Wire fields (10-17, pre-SensorReading firmware) stay decodable
+// so one formatter serves a mixed fleet: ext1 temp (field 10, sint 21.5 °C) +
+// mp1 humidity (field 13, 54 %).
+test("fPort-2 telemetry still decodes legacy flat 1-Wire fields (10-17)", () => {
+  const got = codec.decodeUplink({ bytes: hex("0150cc21686c"), fPort: 2 }).data;
+  assert.equal(got.ext_temperature_1, 21.5);
+  assert.equal(got.machine_probe_humidity_1, 54);
+  assert.equal(got.w1_sensors, undefined);
+});
+
 test("fPort 2: unknown payload version is flagged but still decodes", () => {
   // version 0x02 (unknown) followed by voltage=100 (field 1) -> warn + decode
   const r = codec.decodeUplink({ bytes: hex("020864"), fPort: 2 });
