@@ -1,0 +1,29 @@
+static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+			     enum app_cmd_action *action)
+{
+	resp->seq = cmd->seq;
+
+	switch (cmd->which_body) {
+{% for c in commands %}
+	case {{ c.tag }}:
+{% if c.lrw_only %}
+		/* transports: [lrw] — the answer is an uplink, meaningless over NFC */
+		if (tp != APP_CMD_TRANSPORT_LRW) {
+			make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
+			break;
+		}
+{% endif %}
+{% if c.kind == 'action' %}
+		*action = APP_CMD_ACTION_{{ c.action }};
+		resp->which_body = Response_ack_tag;
+{% else %}
+		{{ c.handler }}(tp, cmd, resp, action);
+{% endif %}
+		break;
+{% endfor %}
+	default:
+		LOG_WRN("Command tag %u not implemented", cmd->which_body);
+		make_error(resp, Response_Error_Code_UNKNOWN, "not implemented");
+		break;
+	}
+}

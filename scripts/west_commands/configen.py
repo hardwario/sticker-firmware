@@ -614,21 +614,121 @@ def build_options_lines(config):
     return lines
 
 
-def rewrite_marked_region(path, body, comment):
-    """Replace the text between the BEGIN/END markers in `path` with `body`,
-    keeping everything outside (hand-written messages / options)."""
-    if not path.exists():
-        log.die(f"target {path} not found — seed it with the "
-                f"'{comment} {PROTO_BEGIN}' / '{comment} {PROTO_END}' markers first")
-    text = path.read_text()
-    begin = f"{comment} {PROTO_BEGIN}"
-    end = f"{comment} {PROTO_END}"
+def rewrite_marked_text(text, body, comment, begin_label, end_label, where=""):
+    """Replace the text between the BEGIN/END markers in `text` with `body`."""
+    begin = f"{comment} {begin_label}"
+    end = f"{comment} {end_label}"
     if begin not in text or end not in text:
-        log.die(f"{path} is missing the generated-region markers "
+        log.die(f"{where or 'input'} is missing the generated-region markers "
                 f"({begin} / {end})")
     head, rest = text.split(begin, 1)
     _, tail = rest.split(end, 1)
     return f"{head}{begin}\n{body}\n{end}{tail}"
+
+
+def rewrite_marked_region(path, body, comment,
+                          begin_label=PROTO_BEGIN, end_label=PROTO_END):
+    """Replace the text between the BEGIN/END markers in `path` with `body`,
+    keeping everything outside (hand-written messages / options). `begin_label`
+    / `end_label` select which marker pair (a file may hold several, e.g. the
+    config region and the Command-oneof region in the .proto)."""
+    if not path.exists():
+        log.die(f"target {path} not found — seed it with the "
+                f"'{comment} {begin_label}' / '{comment} {end_label}' markers first")
+    return rewrite_marked_text(path.read_text(), body, comment,
+                               begin_label, end_label, str(path))
+
+
+# Marker labels for the command-codegen regions (each lives in its own file:
+# the Command oneof in the .proto, the dispatch switch in app_cmd.c, the
+# name<->tag maps in ttn.js). All use line comments so one rewrite helper fits.
+COMMANDS_BEGIN = "BEGIN GENERATED COMMANDS"
+COMMANDS_END = "END GENERATED COMMANDS"
+DISPATCH_BEGIN = "BEGIN GENERATED DISPATCH"
+DISPATCH_END = "END GENERATED DISPATCH"
+
+# Response-body kinds whose dispatch emits no immediate Response (the command's
+# effect — telemetry, history frames, a deferred Info — is the answer).
+COMMAND_RESPONSE_NONE = {"none", "info_deferred"}
+
+
+def guard_no_renumber_commands(model, proto_path):
+    """Fail the run if a command's proto_id differs from the one already in the
+    Command oneof region of the target .proto (a deployed downlink / NFC tag
+    encodes the tag, so renumbering silently breaks the field protocol)."""
+    if not proto_path.exists():
+        return
+    text = proto_path.read_text()
+    begin = f"// {COMMANDS_BEGIN}"
+    end = f"// {COMMANDS_END}"
+    if begin not in text or end not in text:
+        return
+    region = text.split(begin, 1)[1].split(end, 1)[0]
+    old = {}
+    for m in re.finditer(r"^\s*\w+\s+(\w+)\s*=\s*(\d+)\s*;", region, re.MULTILINE):
+        old[m.group(1)] = int(m.group(2))
+    for c in model["commands"]:
+        if c["name"] in old and old[c["name"]] != c["proto_id"]:
+            log.die(f"command proto_id for '{c['name']}' changed "
+                    f"{old[c['name']]} -> {c['proto_id']} — renumbering is "
+                    f"forbidden (downlinks / NFC tags already deployed)")
+
+
+def build_commands_model(config):
+    """jinja context for the command codegen (proto Command oneof, decoder
+    _CMD_NAMES/_CMD_TAGS, app_cmd_dispatch switch) from the YAML `commands:`
+    section. Returns None when the YAML has no command list."""
+    commands = config.get("commands")
+    if not commands:
+        return None
+
+    msg = commands["message"]
+    seen_ids, seen_names = {}, set()
+    cmds = []
+    for c in commands["list"]:
+        name = c["name"]
+        pid = c["proto_id"]
+        if name in seen_names:
+            log.die(f"duplicate command name '{name}'")
+        if pid in seen_ids:
+            log.die(f"duplicate command proto_id {pid} "
+                    f"('{name}' vs '{seen_ids[pid]}')")
+        seen_names.add(name)
+        seen_ids[pid] = name
+
+        kind = c["kind"]
+        if kind not in ("handler", "action"):
+            log.die(f"command '{name}' has invalid kind '{kind}' "
+                    f"(expected handler|action)")
+        if kind == "action" and not c.get("action"):
+            log.die(f"action command '{name}' must set 'action'")
+
+        transports = c.get("transports")
+        cmds.append({
+            "name": name,
+            "proto_id": pid,
+            "body": c["body"],
+            "kind": kind,
+            "action": c.get("action"),
+            "response": c.get("response", "ack"),
+            "transports": transports,
+            "lrw_only": transports == ["lrw"],
+            "emits_response": c.get("response", "ack") not in COMMAND_RESPONSE_NONE,
+            "tag": f"{msg}_{name}_tag",
+            "handler": f"app_cmd_handle_{name}",
+        })
+
+    by_id = sorted(cmds, key=lambda c: c["proto_id"])
+    return {
+        "message": msg,
+        "response_message": commands["response"],
+        "reserved": list(commands.get("reserved", [])),
+        "commands": cmds,        # YAML order (decoder/dispatch)
+        "commands_by_id": by_id, # proto_id order (proto oneof)
+        # Column widths so the generated .proto oneof aligns like the rest.
+        "type_width": max(len(c["body"]) for c in cmds),
+        "name_width": max(len(c["name"]) for c in cmds),
+    }
 
 
 class Configen(WestCommand):
@@ -686,6 +786,22 @@ class Configen(WestCommand):
             action="store_true",
             help="skip proto/options generation even if the YAML has a "
             "'proto:' block",
+        )
+        parser.add_argument(
+            "--decoder",
+            type=Path,
+            default=None,
+            help="path to the JS decoder whose _CMD_NAMES/_CMD_TAGS region is "
+            "rewritten from the YAML 'commands:' list "
+            "(default: <output-dir>/../decoder/ttn.js)",
+        )
+        parser.add_argument(
+            "--app-cmd",
+            type=Path,
+            default=None,
+            help="path to the C command file whose app_cmd_dispatch() region is "
+            "rewritten from the YAML 'commands:' list "
+            "(default: <output-dir>/app_cmd.c)",
         )
         parser.add_argument(
             "--dry-run",
@@ -840,6 +956,13 @@ class Configen(WestCommand):
             self._generate_proto(env, config, yaml_path, proto_path.resolve(),
                                  options_path.resolve(), args.dry_run)
 
+        # Command protocol codegen (decoder maps, dispatch switch, Command oneof)
+        # from the YAML `commands:` section — keeps the wire id / routing /
+        # availability of every command in one place (configen-commands design).
+        commands_model = build_commands_model(config)
+        if commands_model:
+            self._generate_commands(env, commands_model, output_dir, args)
+
     def _generate_proto(self, env, config, yaml_path, proto_path, options_path,
                         dry_run):
         """Generate the .proto config region + nanopb options from the YAML,
@@ -860,6 +983,19 @@ class Configen(WestCommand):
         model = build_proto_model(config)
         body = env.get_template("config.proto.j2").render(proto=model).rstrip("\n")
         proto_text = rewrite_marked_region(proto_path, body, "//")
+
+        # Command oneof: a second generated region in the same .proto (the body
+        # sub-messages + Response stay hand-written). Rewritten in-memory on top
+        # of the config region, when the YAML has a commands list and the file
+        # carries the markers.
+        commands_model = build_commands_model(config)
+        if commands_model and f"// {COMMANDS_BEGIN}" in proto_text:
+            guard_no_renumber_commands(commands_model, proto_path)
+            cmd_body = env.get_template("commands_proto.j2").render(
+                **commands_model).rstrip("\n")
+            proto_text = rewrite_marked_text(proto_text, cmd_body, "//",
+                                             COMMANDS_BEGIN, COMMANDS_END,
+                                             str(proto_path))
 
         options_body = "\n".join(build_options_lines(config))
         options_text = rewrite_marked_region(options_path, options_body, "#")
@@ -885,6 +1021,47 @@ class Configen(WestCommand):
         log.inf(f"Generated: {proto_path}")
         options_path.write_text(options_text)
         log.inf(f"Generated: {options_path}")
+
+    def _generate_commands(self, env, model, output_dir, args):
+        """Rewrite the command-codegen regions from the YAML `commands:` list:
+        the decoder _CMD_NAMES map (ttn.js) and the app_cmd_dispatch() switch
+        (app_cmd.c). The proto Command oneof is rewritten by _generate_proto."""
+        # Decoder: _CMD_NAMES / _CMD_TAGS region in ttn.js.
+        decoder_path = args.decoder or (output_dir.parent / "decoder" / "ttn.js")
+        decoder_path = decoder_path.resolve()
+        if decoder_path.exists():
+            body = env.get_template("commands_decoder.js.j2").render(**model)
+            body = body.rstrip("\n")
+            text = rewrite_marked_region(decoder_path, body, "//",
+                                         COMMANDS_BEGIN, COMMANDS_END)
+            if args.dry_run:
+                log.inf(f"Would generate decoder region in: {decoder_path}")
+                print(body)
+            else:
+                decoder_path.write_text(text)
+                log.inf(f"Generated decoder command region: {decoder_path}")
+        else:
+            log.wrn(f"decoder not found ({decoder_path}); "
+                    "skipping _CMD_NAMES region")
+
+        # Firmware: app_cmd_dispatch() switch region in app_cmd.c. Only rewritten
+        # once the file carries the markers (seeded when the dispatch codegen
+        # lands); skipped gracefully otherwise so the decoder region can ship
+        # ahead of it.
+        app_cmd_path = args.app_cmd or (output_dir / "app_cmd.c")
+        app_cmd_path = app_cmd_path.resolve()
+        if app_cmd_path.exists() and f"// {DISPATCH_BEGIN}" in app_cmd_path.read_text():
+            body = env.get_template("commands_dispatch.c.j2").render(**model)
+            body = body.rstrip("\n")
+            text = rewrite_marked_region(app_cmd_path, body, "//",
+                                         DISPATCH_BEGIN, DISPATCH_END)
+            if args.dry_run:
+                log.inf(f"Would generate dispatch region in: {app_cmd_path}")
+                print(body)
+            else:
+                app_cmd_path.write_text(text)
+                log.inf(f"Generated dispatch region: {app_cmd_path}")
+                self._clang_format([app_cmd_path])
 
     def _clang_format(self, paths):
         """Run clang-format on generated files if available."""

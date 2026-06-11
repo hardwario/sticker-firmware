@@ -1,0 +1,5 @@
+    oneof body {
+{% for c in commands_by_id %}
+        {{ "%-*s"|format(type_width, c.body) }} {{ "%-*s"|format(name_width, c.name) }} = {{ c.proto_id }};
+{% endfor %}
+    }

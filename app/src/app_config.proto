@@ -123,21 +123,23 @@ message AppConfigMessage {
 message Command {
     uint32 seq = 1;
 
+    // BEGIN GENERATED COMMANDS
     oneof body {
-        SetParam        set_param        = 2;
-        GetParam        get_param        = 3;
-        GetInfo         get_info         = 4;
-        GetConfig       get_config       = 5;
-        SettingsSave    settings_save    = 6;
-        Reboot          reboot           = 7;
-        FactoryReset    factory_reset    = 8;
-        ForceSend       force_send       = 9;
-        ResetCounters   reset_counters   = 10;
-        ReqHistory      req_history      = 11;
-        ClockSync       clock_sync       = 12;
-        AlarmRule       alarm_rule       = 13;
-        W1Scan          w1_scan          = 14;
+        SetParam      set_param      = 2;
+        GetParam      get_param      = 3;
+        GetInfo       get_info       = 4;
+        GetConfig     get_config     = 5;
+        SettingsSave  settings_save  = 6;
+        Reboot        reboot         = 7;
+        FactoryReset  factory_reset  = 8;
+        ForceSend     force_send     = 9;
+        ResetCounters reset_counters = 10;
+        ReqHistory    req_history    = 11;
+        ClockSync     clock_sync     = 12;
+        AlarmRule     alarm_rule     = 13;
+        W1Scan        w1_scan        = 14;
     }
+// END GENERATED COMMANDS
 
     message SetParam {
         optional AppConfigMessage.Lorawan     lorawan     = 1;

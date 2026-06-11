@@ -42,6 +42,8 @@ def _run_configen(out_dir):
         proto=None,
         options=None,
         no_proto=False,
+        decoder=out_dir / "ttn.js",
+        app_cmd=out_dir / "app_cmd.c",
         dry_run=False,
     )
     configen.Configen().do_run(args, [])
@@ -51,6 +53,10 @@ def _run_configen(out_dir):
 def workdir(tmp_path):
     for name in ["app_config.yml", "app_config.proto", "app_config.options.in"]:
         shutil.copy(APP_SRC / name, tmp_path / name)
+    # The decoder's command-map region and app_cmd.c's dispatch region are
+    # rewritten in place; copy them so the run has marked regions to edit.
+    shutil.copy(DECODER, tmp_path / "ttn.js")
+    shutil.copy(APP_SRC / "app_cmd.c", tmp_path / "app_cmd.c")
     # Carry the project clang-format style so generated C matches the committed
     # files (clang-format searches upward from the file for .clang-format).
     if (REPO / ".clang-format").exists():
@@ -299,3 +305,99 @@ def test_proto_and_decoder_agree(tmp_path):
     js = _decode_with_node(COMMAND_VECTORS["get_param"])
     assert js["get_param"]["lorawan_field"] == [3]
     assert js["get_param"]["application_field"] == [4, 7]
+
+
+# --- commands codegen -----------------------------------------------------
+
+def test_build_commands_model_shape():
+    model = configen.build_commands_model(_load_config())
+    assert model["message"] == "Command"
+    assert model["response_message"] == "Response"
+    by_name = {c["name"]: c for c in model["commands"]}
+    # wire identity + routing carried from the YAML
+    assert by_name["w1_scan"]["proto_id"] == 14
+    assert by_name["w1_scan"]["tag"] == "Command_w1_scan_tag"
+    assert by_name["w1_scan"]["handler"] == "app_cmd_handle_w1_scan"
+    # action vs handler kinds
+    assert by_name["reboot"]["kind"] == "action"
+    assert by_name["reboot"]["action"] == "REBOOT"
+    assert by_name["set_param"]["kind"] == "handler"
+    # transport gating + no-immediate-response flags
+    assert by_name["force_send"]["lrw_only"] is True
+    assert by_name["force_send"]["emits_response"] is False
+    assert by_name["clock_sync"]["emits_response"] is False  # info_deferred
+    assert by_name["set_param"]["lrw_only"] is False
+    assert by_name["set_param"]["emits_response"] is True
+    # proto-id order for the oneof
+    assert [c["proto_id"] for c in model["commands_by_id"]] == \
+        sorted(c["proto_id"] for c in model["commands"])
+
+
+def test_build_commands_model_rejects_duplicates():
+    cfg = _load_config()
+    cfg["commands"]["list"].append(
+        {"name": "dupe", "proto_id": 14, "body": "X", "kind": "action",
+         "action": "REBOOT", "response": "ack"})
+    with pytest.raises(SystemExit):
+        configen.build_commands_model(cfg)
+
+
+def test_generated_decoder_command_region_matches_committed(workdir):
+    """The _CMD_NAMES region the generator emits must equal what is committed in
+    ttn.js (locks the name<->tag map against hand-edits / YAML drift)."""
+    _run_configen(workdir)
+    assert (workdir / "ttn.js").read_text() == DECODER.read_text()
+
+
+@pytest.mark.skipif(shutil.which("clang-format") is None,
+                    reason="clang-format not available")
+def test_generated_dispatch_region_matches_committed(workdir):
+    """The app_cmd_dispatch() switch the generator emits must equal what is
+    committed in app_cmd.c (locks routing against YAML drift)."""
+    _run_configen(workdir)
+    assert (workdir / "app_cmd.c").read_text() == (APP_SRC / "app_cmd.c").read_text()
+
+
+def test_generated_proto_command_oneof_matches_committed(workdir):
+    """The generated Command oneof region must equal what is committed in the
+    .proto (locks the command wire ids alongside the config region)."""
+    _run_configen(workdir)
+    assert (workdir / "app_config.proto").read_text() == PROTO.read_text()
+
+
+def test_command_renumber_is_rejected(workdir):
+    """Changing a command's proto_id away from the committed .proto fails the run
+    (deployed downlinks / NFC tags encode the tag)."""
+    _run_configen(workdir)  # seed the committed ids into workdir proto
+    import ruamel.yaml
+    rt = ruamel.yaml.YAML()
+    with open(workdir / "app_config.yml") as f:
+        doc = rt.load(f)
+    for c in doc["commands"]["list"]:
+        if c["name"] == "w1_scan":
+            c["proto_id"] = 20  # was 14
+    with open(workdir / "app_config.yml", "w") as f:
+        rt.dump(doc, f)
+    with pytest.raises(SystemExit):
+        _run_configen(workdir)
+
+
+def test_dispatch_template_routes_every_command():
+    """Every command in the model appears in the rendered dispatch switch, with
+    LRW-only commands guarded and action commands setting their action."""
+    import jinja2
+    model = configen.build_commands_model(_load_config())
+    env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(configen.TEMPLATES_DIR),
+        trim_blocks=True, lstrip_blocks=True, keep_trailing_newline=True)
+    out = env.get_template("commands_dispatch.c.j2").render(**model)
+    for c in model["commands"]:
+        assert f"case {c['tag']}:" in out, c["name"]
+        if c["kind"] == "action":
+            assert f"APP_CMD_ACTION_{c['action']}" in out, c["name"]
+        else:
+            assert f"{c['handler']}(tp, cmd, resp, action);" in out, c["name"]
+        if c["lrw_only"]:
+            # the guard precedes this command's handler/action body
+            head = out.split(f"case {c['tag']}:", 1)[1]
+            assert "tp != APP_CMD_TRANSPORT_LRW" in head.split("break;", 1)[0]

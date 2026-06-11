@@ -110,6 +110,38 @@ proto:
         - 35
         - 36
         - 53
+
+# Command protocol (LoRaWAN fPort 85 downlink + NFC). The single source of truth
+# for which commands exist, their wire id, dispatch routing and availability.
+# configen generates from `list`: the proto `Command` oneof, the decoder
+# _CMD_NAMES/_CMD_TAGS maps, and the app_cmd_dispatch() switch. The per-command
+# body sub-messages and handler bodies stay hand-written (see configen-commands
+# design). Per-entry fields:
+#   name/proto_id : wire identity (append-only; reserved on removal).
+#   body          : protobuf sub-message type (hand-written in the proto).
+#   kind          : handler (calls app_cmd_handle_<name>) | action (sets *action).
+#   action        : APP_CMD_ACTION_* to set (action kind, or a handler that defers).
+#   transports    : optional allow-list (lrw/nfc/shell); omitted = all.
+#   response      : success body — ack | info | config_dump | none | info_deferred |
+#                   w1_scan (drives the decoder/docs; the FW emits it in the handler).
+commands:
+  message: Command
+  response: Response
+  reserved: []
+  list:
+    - {name: set_param,      proto_id: 2,  body: SetParam,      kind: handler, response: ack}
+    - {name: get_param,      proto_id: 3,  body: GetParam,      kind: handler, response: config_dump}
+    - {name: get_info,       proto_id: 4,  body: GetInfo,       kind: handler, response: info}
+    - {name: get_config,     proto_id: 5,  body: GetConfig,     kind: handler, response: config_dump}
+    - {name: settings_save,  proto_id: 6,  body: SettingsSave,  kind: action,  action: SETTINGS_SAVE, response: ack}
+    - {name: reboot,         proto_id: 7,  body: Reboot,        kind: action,  action: REBOOT, response: ack}
+    - {name: factory_reset,  proto_id: 8,  body: FactoryReset,  kind: action,  action: FACTORY_RESET, response: ack}
+    - {name: force_send,     proto_id: 9,  body: ForceSend,     kind: handler, response: none, transports: [lrw]}
+    - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
+    - {name: req_history,    proto_id: 11, body: ReqHistory,    kind: handler, response: none, transports: [lrw]}
+    - {name: clock_sync,     proto_id: 12, body: ClockSync,     kind: handler, response: info_deferred, transports: [lrw]}
+    - {name: alarm_rule,     proto_id: 13, body: AlarmRule,     kind: handler, response: ack}
+    - {name: w1_scan,        proto_id: 14, body: W1Scan,        kind: handler, response: w1_scan}
 parameters:
   - name: secret_key
     proto_group: root

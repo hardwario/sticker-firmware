@@ -121,9 +121,15 @@ static void make_error(Response *resp, Response_Error_Code code, const char *det
 	}
 }
 
-static void handle_set_param(const Command_SetParam *sp, Response *resp,
-			     enum app_cmd_action *action)
+/* Command handlers share a uniform signature (transport, cmd, resp, action) so
+ * the generated app_cmd_dispatch() switch can call any of them the same way; a
+ * handler simply ignores the parameters it does not need. They fill `resp`
+ * (response body or error) and may set `*action` for deferred work. */
+static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				     enum app_cmd_action *action)
 {
+	ARG_UNUSED(tp);
+	const Command_SetParam *sp = &cmd->body.set_param;
 	uint32_t fault = 0;
 	int rc = 0;
 
@@ -161,8 +167,13 @@ static void handle_set_param(const Command_SetParam *sp, Response *resp,
 	}
 }
 
-static void handle_get_param(const Command_GetParam *gp, Response *resp)
+static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				     enum app_cmd_action *action)
 {
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+	const Command_GetParam *gp = &cmd->body.get_param;
+
 	resp->which_body = Response_config_dump_tag;
 	resp->body.config_dump.page_index = 0;
 	resp->body.config_dump.page_count = 1;
@@ -187,6 +198,17 @@ static void handle_get_param(const Command_GetParam *gp, Response *resp)
 		app_config_fill_alarms(&resp->body.config_dump.alarms, gp->alarms_field,
 				       gp->alarms_field_count);
 	}
+}
+
+static void app_cmd_handle_get_info(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				    enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(action);
+
+	resp->which_body = Response_info_tag;
+	fill_info(&resp->body.info);
 }
 
 /* Dumpable config fields in fixed order, each with a conservative upper bound
@@ -258,8 +280,12 @@ static const struct {
  * overflow (the largest single field is 18 B). */
 #define DUMP_PAGE_BUDGET 30
 
-static void handle_get_config(const Command_GetConfig *gc, Response *resp)
+static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				      enum app_cmd_action *action)
 {
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+	const Command_GetConfig *gc = &cmd->body.get_config;
 	uint32_t page = gc->has_page ? gc->page : 0;
 
 	/* One tag buffer per section, each sized to the whole table so any single
@@ -317,35 +343,42 @@ static void handle_get_config(const Command_GetConfig *gc, Response *resp)
 	}
 }
 
-static void handle_reset_counters(const Command_ResetCounters *rc, Response *resp)
+static void app_cmd_handle_reset_counters(enum app_cmd_transport tp, const Command *cmd,
+					  Response *resp, enum app_cmd_action *action)
 {
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+	const Command_ResetCounters *rc = &cmd->body.reset_counters;
+
 	app_hall_reset_count(rc->has_hall_left && rc->hall_left,
 			     rc->has_hall_right && rc->hall_right);
 	app_input_reset_count(rc->has_input_a && rc->input_a, rc->has_input_b && rc->input_b);
 	resp->which_body = Response_ack_tag;
 }
 
-/* Some commands answer ONLY via a LoRaWAN uplink — triggered telemetry
- * (force_send), a HistoryFrame stream (req_history), or a deferred clock Info
- * (clock_sync). Over NFC the caller waits for a reply on the same transport and
- * would get nothing, so reject them with an error it can surface. Returns true
- * when the transport is LRW (proceed), false after filling an Error. */
-static bool require_lrw(enum app_cmd_transport transport, Response *resp)
+/* force_send / req_history / clock_sync are LRW-only (transports: [lrw] in the
+ * YAML); the generated dispatch enforces that before calling the handler, so
+ * the handlers below assume the LoRaWAN transport. */
+static void app_cmd_handle_force_send(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				      enum app_cmd_action *action)
 {
-	if (transport != APP_CMD_TRANSPORT_LRW) {
-		make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
-		return false;
-	}
-	return true;
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(resp);
+	ARG_UNUSED(action);
+#if defined(CONFIG_LORAWAN)
+	app_lrw_send();
+#endif
+	/* No ack — the triggered telemetry uplink IS the answer; an extra ack
+	 * would just cost a second uplink. Leave which_body == 0 (emit nothing). */
 }
 
-static void handle_req_history(enum app_cmd_transport transport, const Command *cmd, Response *resp)
+static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command *cmd,
+				       Response *resp, enum app_cmd_action *action)
 {
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
 #if defined(APP_CMD_HAVE_HISTORY) && defined(CONFIG_LORAWAN)
-	if (!require_lrw(transport, resp)) {
-		return;
-	}
-
 	const Command_ReqHistory *rq = &cmd->body.req_history;
 	uint32_t from = rq->has_from_unix ? rq->from_unix : 0;
 	uint32_t to = rq->has_to_unix ? rq->to_unix : UINT32_MAX;
@@ -359,14 +392,15 @@ static void handle_req_history(enum app_cmd_transport transport, const Command *
 		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no records");
 	}
 #else
-	ARG_UNUSED(transport);
 	ARG_UNUSED(cmd);
 	make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no history");
 #endif
 }
 
-static void handle_alarm_rule(const Command *cmd, Response *resp, enum app_cmd_action *action)
+static void app_cmd_handle_alarm_rule(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				      enum app_cmd_action *action)
 {
+	ARG_UNUSED(tp);
 	const Command_AlarmRule *ar = &cmd->body.alarm_rule;
 	int ret;
 
@@ -431,8 +465,32 @@ static int w1_scan_cb(struct w1_rom rom, void *user_data)
 	return 0;
 }
 
-static void handle_w1_scan(Response *resp)
+#endif /* APP_CMD_HAVE_W1 */
+
+static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				      enum app_cmd_action *action)
 {
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(action);
+#if defined(APP_CMD_HAVE_CLOCK) && defined(CONFIG_LORAWAN)
+	ARG_UNUSED(resp);
+	/* Re-sync, then answer with an Info uplink once the network time lands
+	 * (carries the synced unix_time). No ack — see app_lrw. */
+	app_clock_force_resync();
+	app_lrw_send_info_on_clock_sync();
+#else
+	resp->which_body = Response_ack_tag; /* no clock/LRW: just confirm */
+#endif
+}
+
+static void app_cmd_handle_w1_scan(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				   enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(action);
+#if defined(APP_CMD_HAVE_W1)
 	static const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
 	struct app_w1 w1 = {0};
 	int ret;
@@ -457,97 +515,82 @@ static void handle_w1_scan(Response *resp)
 	if (ret < 0) {
 		make_error(resp, Response_Error_Code_NOT_READY, "1-wire scan");
 	}
+#else
+	make_error(resp, Response_Error_Code_NOT_READY, "no 1-wire");
+#endif
 }
-#endif /* APP_CMD_HAVE_W1 */
 
-static void dispatch(enum app_cmd_transport transport, const Command *cmd, Response *resp,
-		     enum app_cmd_action *action)
+// BEGIN GENERATED DISPATCH
+static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+			     enum app_cmd_action *action)
 {
 	resp->seq = cmd->seq;
 
 	switch (cmd->which_body) {
-	case Command_get_info_tag:
-		resp->which_body = Response_info_tag;
-		fill_info(&resp->body.info);
-		break;
-
 	case Command_set_param_tag:
-		handle_set_param(&cmd->body.set_param, resp, action);
+		app_cmd_handle_set_param(tp, cmd, resp, action);
 		break;
-
 	case Command_get_param_tag:
-		handle_get_param(&cmd->body.get_param, resp);
+		app_cmd_handle_get_param(tp, cmd, resp, action);
 		break;
-
+	case Command_get_info_tag:
+		app_cmd_handle_get_info(tp, cmd, resp, action);
+		break;
 	case Command_get_config_tag:
-		handle_get_config(&cmd->body.get_config, resp);
+		app_cmd_handle_get_config(tp, cmd, resp, action);
 		break;
-
 	case Command_settings_save_tag:
-		resp->which_body = Response_ack_tag;
 		*action = APP_CMD_ACTION_SETTINGS_SAVE;
+		resp->which_body = Response_ack_tag;
 		break;
-
 	case Command_reboot_tag:
-		resp->which_body = Response_ack_tag;
 		*action = APP_CMD_ACTION_REBOOT;
-		break;
-
-	case Command_factory_reset_tag:
 		resp->which_body = Response_ack_tag;
+		break;
+	case Command_factory_reset_tag:
 		*action = APP_CMD_ACTION_FACTORY_RESET;
+		resp->which_body = Response_ack_tag;
 		break;
-
 	case Command_force_send_tag:
-		if (!require_lrw(transport, resp)) {
+		/* transports: [lrw] — the answer is an uplink, meaningless over NFC */
+		if (tp != APP_CMD_TRANSPORT_LRW) {
+			make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
 			break;
 		}
-#if defined(CONFIG_LORAWAN)
-		app_lrw_send();
-#endif
-		/* No ack — the triggered telemetry uplink IS the answer; an extra ack
-		 * would just cost a second uplink. Leave which_body == 0 (emit nothing). */
+		app_cmd_handle_force_send(tp, cmd, resp, action);
 		break;
-
 	case Command_reset_counters_tag:
-		handle_reset_counters(&cmd->body.reset_counters, resp);
-		break;
-
-	case Command_clock_sync_tag:
-		if (!require_lrw(transport, resp)) {
-			break;
-		}
-#if defined(APP_CMD_HAVE_CLOCK) && defined(CONFIG_LORAWAN)
-		/* Re-sync, then answer with an Info uplink once the network time lands
-		 * (carries the synced unix_time). No ack — see app_lrw. */
-		app_clock_force_resync();
-		app_lrw_send_info_on_clock_sync();
-#else
-		resp->which_body = Response_ack_tag; /* no clock/LRW: just confirm */
-#endif
-		break;
-
-	case Command_alarm_rule_tag:
-		handle_alarm_rule(cmd, resp, action);
+		app_cmd_handle_reset_counters(tp, cmd, resp, action);
 		break;
 	case Command_req_history_tag:
-		handle_req_history(transport, cmd, resp);
+		/* transports: [lrw] — the answer is an uplink, meaningless over NFC */
+		if (tp != APP_CMD_TRANSPORT_LRW) {
+			make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
+			break;
+		}
+		app_cmd_handle_req_history(tp, cmd, resp, action);
 		break;
-
+	case Command_clock_sync_tag:
+		/* transports: [lrw] — the answer is an uplink, meaningless over NFC */
+		if (tp != APP_CMD_TRANSPORT_LRW) {
+			make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
+			break;
+		}
+		app_cmd_handle_clock_sync(tp, cmd, resp, action);
+		break;
+	case Command_alarm_rule_tag:
+		app_cmd_handle_alarm_rule(tp, cmd, resp, action);
+		break;
 	case Command_w1_scan_tag:
-#if defined(APP_CMD_HAVE_W1)
-		handle_w1_scan(resp);
-#else
-		make_error(resp, Response_Error_Code_NOT_READY, "no 1-wire");
-#endif
+		app_cmd_handle_w1_scan(tp, cmd, resp, action);
 		break;
-
 	default:
 		LOG_WRN("Command tag %u not implemented", cmd->which_body);
 		make_error(resp, Response_Error_Code_UNKNOWN, "not implemented");
 		break;
 	}
 }
+// END GENERATED DISPATCH
 
 /* Encode a Response into `out` with the 1-byte APP_PROTO_VERSION prefix at
  * out[0] (fPort 85). Sets *out_len to the total length (version + protobuf). */
@@ -588,7 +631,7 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		resp.seq = 0;
 		make_error(&resp, Response_Error_Code_BAD_REQUEST, PB_GET_ERROR(&istream));
 	} else {
-		dispatch(transport, &cmd, &resp, &act);
+		app_cmd_dispatch(transport, &cmd, &resp, &act);
 	}
 
 	/* A handler may opt out of an immediate response by leaving the oneof unset
