@@ -14,6 +14,8 @@
 #include "app_sht4x.h"
 #include "app_cmd.h"
 #include "app_compose.h"
+#include "app_config.h"
+#include "app_w1_slots.h"
 
 /* Zephyr includes */
 #include <zephyr/init.h>
@@ -25,6 +27,7 @@
 
 /* Standard includes */
 #include <errno.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -487,6 +490,17 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 	shell_print(shell, SHELL_PFX " Monitoring timeout");
 }
 
+/* Print "label: value unit" or "label: nan" when the reading is NaN
+ * (absent/unsupported sensor), so the output mirrors the on-wire telemetry. */
+static void print_float(const struct shell *shell, const char *label, float v, const char *unit)
+{
+	if (isnan(v)) {
+		shell_print(shell, "  %-16s nan", label);
+	} else {
+		shell_print(shell, "  %-16s %.2f %s", label, (double)v, unit);
+	}
+}
+
 static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -494,44 +508,58 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 
 	app_sensor_sample();
 
-	shell_print(shell, "orientation:              %d", g_app_sensor_data.orientation);
-	shell_print(shell, "voltage:                  %.2f V", (double)g_app_sensor_data.voltage);
-	shell_print(shell, "temperature:              %.2f C",
-		    (double)g_app_sensor_data.temperature);
-	shell_print(shell, "humidity:                 %.2f %%", (double)g_app_sensor_data.humidity);
-	shell_print(shell, "illuminance:              %.2f lux",
-		    (double)g_app_sensor_data.illuminance);
-	shell_print(shell, "t1-temperature:           %.2f C",
-		    (double)g_app_sensor_data.w1[0].temperature);
-	shell_print(shell, "t2-temperature:           %.2f C",
-		    (double)g_app_sensor_data.w1[1].temperature);
-	shell_print(shell, "motion-count:             %u", g_app_sensor_data.motion_count);
-	shell_print(shell, "altitude:                 %.2f m", (double)g_app_sensor_data.altitude);
-	shell_print(shell, "pressure:                 %.2f Pa", (double)g_app_sensor_data.pressure);
-	shell_print(shell, "mp1-temperature:          %.2f C",
-		    (double)g_app_sensor_data.w1[2].temperature);
-	shell_print(shell, "mp2-temperature:          %.2f C",
-		    (double)g_app_sensor_data.w1[3].temperature);
-	shell_print(shell, "mp1-humidity:             %.2f %%",
-		    (double)g_app_sensor_data.w1[2].humidity);
-	shell_print(shell, "mp2-humidity:             %.2f %%",
-		    (double)g_app_sensor_data.w1[3].humidity);
-	shell_print(shell, "mp1-is-tilt-alert:        %s",
-		    g_app_sensor_data.w1[2].is_tilt_alert ? "true" : "false");
-	shell_print(shell, "mp2-is-tilt-alert:        %s",
-		    g_app_sensor_data.w1[3].is_tilt_alert ? "true" : "false");
-	shell_print(shell, "hall-left-count:          %u", g_app_sensor_data.hall_left_count);
-	shell_print(shell, "hall-right-count:         %u", g_app_sensor_data.hall_right_count);
-	shell_print(shell, "hall-left-is-active:      %s",
-		    g_app_sensor_data.hall_left_is_active ? "true" : "false");
-	shell_print(shell, "hall-right-is-active:     %s",
-		    g_app_sensor_data.hall_right_is_active ? "true" : "false");
-	shell_print(shell, "input-a-count:            %u", g_app_sensor_data.input_a_count);
-	shell_print(shell, "input-b-count:            %u", g_app_sensor_data.input_b_count);
-	shell_print(shell, "input-a-is-active:        %s",
-		    g_app_sensor_data.input_a_is_active ? "true" : "false");
-	shell_print(shell, "input-b-is-active:        %s",
-		    g_app_sensor_data.input_b_is_active ? "true" : "false");
+	const struct app_sensor_data *d = &g_app_sensor_data;
+
+	/* On-device sensors + the device's own discrete inputs. */
+	shell_print(shell, "== Device ==");
+	print_float(shell, "voltage:", d->voltage, "V");
+	print_float(shell, "temperature:", d->temperature, "C");
+	print_float(shell, "humidity:", d->humidity, "%");
+	print_float(shell, "pressure:", d->pressure, "Pa");
+	print_float(shell, "altitude:", d->altitude, "m");
+	print_float(shell, "illuminance:", d->illuminance, "lux");
+	/* orientation is meaningful only with the accelerometer enabled. */
+	if (g_app_config.cap_accelerometer) {
+		shell_print(shell, "  %-16s %d", "orientation:", d->orientation);
+	} else {
+		shell_print(shell, "  %-16s nan", "orientation:");
+	}
+	shell_print(shell, "  %-16s %u", "motion-count:", d->motion_count);
+	shell_print(shell, "  %-16s %u", "accel-motion:", d->accel_motion_count);
+	shell_print(shell, "  %-16s count=%u active=%s", "hall-left:", d->hall_left_count,
+		    d->hall_left_is_active ? "true" : "false");
+	shell_print(shell, "  %-16s count=%u active=%s", "hall-right:", d->hall_right_count,
+		    d->hall_right_is_active ? "true" : "false");
+	shell_print(shell, "  %-16s count=%u active=%s", "input-a:", d->input_a_count,
+		    d->input_a_is_active ? "true" : "false");
+	shell_print(shell, "  %-16s count=%u active=%s", "input-b:", d->input_b_count,
+		    d->input_b_is_active ? "true" : "false");
+
+	/* 1-Wire ROM-bound slots s1..s4 — only the quantities the bound sensor
+	 * actually provides are non-NaN (a thermometer shows temperature only; a
+	 * machine probe shows the full cluster). */
+	for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
+		enum app_w1_slot_type type = app_w1_slot_get_type(i);
+		const struct app_w1_slot_reading *s = &d->w1[i];
+
+		if (type == APP_W1_SLOT_EMPTY) {
+			shell_print(shell, "== s%d: empty ==", i + 1);
+			continue;
+		}
+		shell_print(shell, "== s%d: %s%s ==", i + 1, app_w1_slot_type_name(type),
+			    s->present ? "" : " (absent)");
+		print_float(shell, "temperature:", s->temperature, "C");
+		print_float(shell, "humidity:", s->humidity, "%");
+		print_float(shell, "illuminance:", s->illuminance, "lux");
+		print_float(shell, "magnetic-field:", s->magnetic_field, "mT");
+		if (!isnan(s->accel_x) || !isnan(s->accel_y) || !isnan(s->accel_z)) {
+			shell_print(shell, "  %-16s x=%.2f y=%.2f z=%.2f m/s^2",
+				    "accel:", (double)s->accel_x, (double)s->accel_y,
+				    (double)s->accel_z);
+		}
+		shell_print(shell, "  %-16s %s",
+			    "tilt-alert:", s->is_tilt_alert ? "true" : "false");
+	}
 
 	return 0;
 }
