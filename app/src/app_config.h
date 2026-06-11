@@ -40,7 +40,7 @@ enum app_config_motion_sensitivity {
 	APP_CONFIG_MOTION_SENSITIVITY_HIGH = 3,
 };
 
-#define APP_CONFIG_VERSION 2
+#define APP_CONFIG_VERSION 3
 
 struct app_config {
 	uint32_t config_version;
@@ -75,42 +75,13 @@ struct app_config {
 	bool cap_pir_detector;
 	bool cap_w1_sensors;
 	bool cap_accelerometer;
-	bool temperature_alarm_enabled;
-	float temperature_alarm_lo;
-	float temperature_alarm_hi;
-	float temperature_alarm_hst;
-	bool humidity_alarm_enabled;
-	float humidity_alarm_lo;
-	float humidity_alarm_hi;
-	float humidity_alarm_hst;
-	bool pressure_alarm_enabled;
-	float pressure_alarm_lo;
-	float pressure_alarm_hi;
-	float pressure_alarm_hst;
-	bool t1_alarm_enabled;
-	float t1_alarm_lo;
-	float t1_alarm_hi;
-	float t1_alarm_hst;
-	bool t2_alarm_enabled;
-	float t2_alarm_lo;
-	float t2_alarm_hi;
-	float t2_alarm_hst;
 	bool hall_left_counter;
-	bool hall_left_notify_act;
-	bool hall_left_notify_deact;
 	bool hall_right_counter;
-	bool hall_right_notify_act;
-	bool hall_right_notify_deact;
 	bool input_a_counter;
-	bool input_a_notify_act;
-	bool input_a_notify_deact;
 	bool input_b_counter;
-	bool input_b_notify_act;
-	bool input_b_notify_deact;
 	float temperature_corr;
 	float t1_corr;
 	float t2_corr;
-	bool pir_notify_act;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
 	uint8_t sensor1_rom[8];
 	uint8_t sensor2_rom[8];

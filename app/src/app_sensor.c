@@ -88,7 +88,7 @@ static void pyq1648_event_handler(void *user_data)
 	g_app_sensor_data.motion_count++;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	app_alarm_event(APP_ALARM_SOURCE_PIR_MOTION, true);
+	app_alarm_event(APP_ALARM_SRC_PIR, true);
 }
 
 #if defined(CONFIG_LIS2DH)
@@ -142,7 +142,7 @@ static void accel_motion_handler(void *user_data)
 	g_app_sensor_data.accel_motion_count++;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	app_alarm_event(APP_ALARM_SOURCE_ACCEL_MOTION, true);
+	app_alarm_event(APP_ALARM_SRC_ACCEL, true);
 	k_work_submit(&m_accel_classify_work);
 }
 #endif /* defined(CONFIG_LIS2DH) */

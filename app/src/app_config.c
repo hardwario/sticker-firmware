@@ -40,22 +40,6 @@ static const struct app_config m_app_config_defaults = {
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.lrw_sub_band = 2,
-	.temperature_alarm_lo = 15.0f,
-	.temperature_alarm_hi = 25.0f,
-	.temperature_alarm_hst = 0.5f,
-	.humidity_alarm_lo = 30.0f,
-	.humidity_alarm_hi = 75.0f,
-	.humidity_alarm_hst = 5.0f,
-	.pressure_alarm_lo = 700.0f,
-	.pressure_alarm_hi = 1060.0f,
-	.pressure_alarm_hst = 10.0f,
-	.t1_alarm_lo = 15.0f,
-	.t1_alarm_hi = 25.0f,
-	.t1_alarm_hst = 0.5f,
-	.t2_alarm_lo = 15.0f,
-	.t2_alarm_hi = 25.0f,
-	.t2_alarm_hst = 0.5f,
-	.pir_notify_act = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
 
@@ -71,22 +55,6 @@ static struct app_config m_app_config = {
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.lrw_sub_band = 2,
-	.temperature_alarm_lo = 15.0f,
-	.temperature_alarm_hi = 25.0f,
-	.temperature_alarm_hst = 0.5f,
-	.humidity_alarm_lo = 30.0f,
-	.humidity_alarm_hi = 75.0f,
-	.humidity_alarm_hst = 5.0f,
-	.pressure_alarm_lo = 700.0f,
-	.pressure_alarm_hi = 1060.0f,
-	.pressure_alarm_hst = 10.0f,
-	.t1_alarm_lo = 15.0f,
-	.t1_alarm_hi = 25.0f,
-	.t1_alarm_hst = 0.5f,
-	.t2_alarm_lo = 15.0f,
-	.t2_alarm_hi = 25.0f,
-	.t2_alarm_hst = 0.5f,
-	.pir_notify_act = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
 
@@ -161,70 +129,18 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_w1_sensors));
 	SETTINGS_SET("cap-accelerometer", &m_app_config.cap_accelerometer,
 		     sizeof(m_app_config.cap_accelerometer));
-	SETTINGS_SET("temperature-alarm-enabled", &m_app_config.temperature_alarm_enabled,
-		     sizeof(m_app_config.temperature_alarm_enabled));
-	SETTINGS_SET("temperature-alarm-lo", &m_app_config.temperature_alarm_lo,
-		     sizeof(m_app_config.temperature_alarm_lo));
-	SETTINGS_SET("temperature-alarm-hi", &m_app_config.temperature_alarm_hi,
-		     sizeof(m_app_config.temperature_alarm_hi));
-	SETTINGS_SET("temperature-alarm-hst", &m_app_config.temperature_alarm_hst,
-		     sizeof(m_app_config.temperature_alarm_hst));
-	SETTINGS_SET("humidity-alarm-enabled", &m_app_config.humidity_alarm_enabled,
-		     sizeof(m_app_config.humidity_alarm_enabled));
-	SETTINGS_SET("humidity-alarm-lo", &m_app_config.humidity_alarm_lo,
-		     sizeof(m_app_config.humidity_alarm_lo));
-	SETTINGS_SET("humidity-alarm-hi", &m_app_config.humidity_alarm_hi,
-		     sizeof(m_app_config.humidity_alarm_hi));
-	SETTINGS_SET("humidity-alarm-hst", &m_app_config.humidity_alarm_hst,
-		     sizeof(m_app_config.humidity_alarm_hst));
-	SETTINGS_SET("pressure-alarm-enabled", &m_app_config.pressure_alarm_enabled,
-		     sizeof(m_app_config.pressure_alarm_enabled));
-	SETTINGS_SET("pressure-alarm-lo", &m_app_config.pressure_alarm_lo,
-		     sizeof(m_app_config.pressure_alarm_lo));
-	SETTINGS_SET("pressure-alarm-hi", &m_app_config.pressure_alarm_hi,
-		     sizeof(m_app_config.pressure_alarm_hi));
-	SETTINGS_SET("pressure-alarm-hst", &m_app_config.pressure_alarm_hst,
-		     sizeof(m_app_config.pressure_alarm_hst));
-	SETTINGS_SET("t1-alarm-enabled", &m_app_config.t1_alarm_enabled,
-		     sizeof(m_app_config.t1_alarm_enabled));
-	SETTINGS_SET("t1-alarm-lo", &m_app_config.t1_alarm_lo, sizeof(m_app_config.t1_alarm_lo));
-	SETTINGS_SET("t1-alarm-hi", &m_app_config.t1_alarm_hi, sizeof(m_app_config.t1_alarm_hi));
-	SETTINGS_SET("t1-alarm-hst", &m_app_config.t1_alarm_hst, sizeof(m_app_config.t1_alarm_hst));
-	SETTINGS_SET("t2-alarm-enabled", &m_app_config.t2_alarm_enabled,
-		     sizeof(m_app_config.t2_alarm_enabled));
-	SETTINGS_SET("t2-alarm-lo", &m_app_config.t2_alarm_lo, sizeof(m_app_config.t2_alarm_lo));
-	SETTINGS_SET("t2-alarm-hi", &m_app_config.t2_alarm_hi, sizeof(m_app_config.t2_alarm_hi));
-	SETTINGS_SET("t2-alarm-hst", &m_app_config.t2_alarm_hst, sizeof(m_app_config.t2_alarm_hst));
 	SETTINGS_SET("hall-left-counter", &m_app_config.hall_left_counter,
 		     sizeof(m_app_config.hall_left_counter));
-	SETTINGS_SET("hall-left-notify-act", &m_app_config.hall_left_notify_act,
-		     sizeof(m_app_config.hall_left_notify_act));
-	SETTINGS_SET("hall-left-notify-deact", &m_app_config.hall_left_notify_deact,
-		     sizeof(m_app_config.hall_left_notify_deact));
 	SETTINGS_SET("hall-right-counter", &m_app_config.hall_right_counter,
 		     sizeof(m_app_config.hall_right_counter));
-	SETTINGS_SET("hall-right-notify-act", &m_app_config.hall_right_notify_act,
-		     sizeof(m_app_config.hall_right_notify_act));
-	SETTINGS_SET("hall-right-notify-deact", &m_app_config.hall_right_notify_deact,
-		     sizeof(m_app_config.hall_right_notify_deact));
 	SETTINGS_SET("input-a-counter", &m_app_config.input_a_counter,
 		     sizeof(m_app_config.input_a_counter));
-	SETTINGS_SET("input-a-notify-act", &m_app_config.input_a_notify_act,
-		     sizeof(m_app_config.input_a_notify_act));
-	SETTINGS_SET("input-a-notify-deact", &m_app_config.input_a_notify_deact,
-		     sizeof(m_app_config.input_a_notify_deact));
 	SETTINGS_SET("input-b-counter", &m_app_config.input_b_counter,
 		     sizeof(m_app_config.input_b_counter));
-	SETTINGS_SET("input-b-notify-act", &m_app_config.input_b_notify_act,
-		     sizeof(m_app_config.input_b_notify_act));
-	SETTINGS_SET("input-b-notify-deact", &m_app_config.input_b_notify_deact,
-		     sizeof(m_app_config.input_b_notify_deact));
 	SETTINGS_SET("temperature-corr", &m_app_config.temperature_corr,
 		     sizeof(m_app_config.temperature_corr));
 	SETTINGS_SET("t1-corr", &m_app_config.t1_corr, sizeof(m_app_config.t1_corr));
 	SETTINGS_SET("t2-corr", &m_app_config.t2_corr, sizeof(m_app_config.t2_corr));
-	SETTINGS_SET("pir-notify-act", &m_app_config.pir_notify_act,
-		     sizeof(m_app_config.pir_notify_act));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
 	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -316,96 +232,6 @@ static int h_commit(void)
 	if ((int)m_app_config.lrw_activation < 0 || (int)m_app_config.lrw_activation > 1) {
 		m_app_config.lrw_activation = 0;
 	}
-	if (m_app_config.temperature_alarm_lo < -30.0f) {
-		m_app_config.temperature_alarm_lo = -30.0f;
-	}
-	if (m_app_config.temperature_alarm_lo > 70.0f) {
-		m_app_config.temperature_alarm_lo = 70.0f;
-	}
-	if (m_app_config.temperature_alarm_hi < -30.0f) {
-		m_app_config.temperature_alarm_hi = -30.0f;
-	}
-	if (m_app_config.temperature_alarm_hi > 70.0f) {
-		m_app_config.temperature_alarm_hi = 70.0f;
-	}
-	if (m_app_config.temperature_alarm_hst < 0.0f) {
-		m_app_config.temperature_alarm_hst = 0.0f;
-	}
-	if (m_app_config.temperature_alarm_hst > 5.0f) {
-		m_app_config.temperature_alarm_hst = 5.0f;
-	}
-	if (m_app_config.humidity_alarm_lo < 0.0f) {
-		m_app_config.humidity_alarm_lo = 0.0f;
-	}
-	if (m_app_config.humidity_alarm_lo > 100.0f) {
-		m_app_config.humidity_alarm_lo = 100.0f;
-	}
-	if (m_app_config.humidity_alarm_hi < 0.0f) {
-		m_app_config.humidity_alarm_hi = 0.0f;
-	}
-	if (m_app_config.humidity_alarm_hi > 100.0f) {
-		m_app_config.humidity_alarm_hi = 100.0f;
-	}
-	if (m_app_config.humidity_alarm_hst < 0.0f) {
-		m_app_config.humidity_alarm_hst = 0.0f;
-	}
-	if (m_app_config.humidity_alarm_hst > 20.0f) {
-		m_app_config.humidity_alarm_hst = 20.0f;
-	}
-	if (m_app_config.pressure_alarm_lo < 500.0f) {
-		m_app_config.pressure_alarm_lo = 500.0f;
-	}
-	if (m_app_config.pressure_alarm_lo > 1200.0f) {
-		m_app_config.pressure_alarm_lo = 1200.0f;
-	}
-	if (m_app_config.pressure_alarm_hi < 500.0f) {
-		m_app_config.pressure_alarm_hi = 500.0f;
-	}
-	if (m_app_config.pressure_alarm_hi > 1200.0f) {
-		m_app_config.pressure_alarm_hi = 1200.0f;
-	}
-	if (m_app_config.pressure_alarm_hst < 0.0f) {
-		m_app_config.pressure_alarm_hst = 0.0f;
-	}
-	if (m_app_config.pressure_alarm_hst > 50.0f) {
-		m_app_config.pressure_alarm_hst = 50.0f;
-	}
-	if (m_app_config.t1_alarm_lo < -30.0f) {
-		m_app_config.t1_alarm_lo = -30.0f;
-	}
-	if (m_app_config.t1_alarm_lo > 70.0f) {
-		m_app_config.t1_alarm_lo = 70.0f;
-	}
-	if (m_app_config.t1_alarm_hi < -30.0f) {
-		m_app_config.t1_alarm_hi = -30.0f;
-	}
-	if (m_app_config.t1_alarm_hi > 70.0f) {
-		m_app_config.t1_alarm_hi = 70.0f;
-	}
-	if (m_app_config.t1_alarm_hst < 0.0f) {
-		m_app_config.t1_alarm_hst = 0.0f;
-	}
-	if (m_app_config.t1_alarm_hst > 5.0f) {
-		m_app_config.t1_alarm_hst = 5.0f;
-	}
-	if (m_app_config.t2_alarm_lo < -30.0f) {
-		m_app_config.t2_alarm_lo = -30.0f;
-	}
-	if (m_app_config.t2_alarm_lo > 70.0f) {
-		m_app_config.t2_alarm_lo = 70.0f;
-	}
-	if (m_app_config.t2_alarm_hi < -30.0f) {
-		m_app_config.t2_alarm_hi = -30.0f;
-	}
-	if (m_app_config.t2_alarm_hi > 70.0f) {
-		m_app_config.t2_alarm_hi = 70.0f;
-	}
-	if (m_app_config.t2_alarm_hst < 0.0f) {
-		m_app_config.t2_alarm_hst = 0.0f;
-	}
-	if (m_app_config.t2_alarm_hst > 5.0f) {
-		m_app_config.t2_alarm_hst = 5.0f;
-	}
 	if (m_app_config.temperature_corr < -5.0f) {
 		m_app_config.temperature_corr = -5.0f;
 	}
@@ -486,70 +312,18 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_w1_sensors));
 	EXPORT_FUNC("cap-accelerometer", &m_app_config.cap_accelerometer,
 		    sizeof(m_app_config.cap_accelerometer));
-	EXPORT_FUNC("temperature-alarm-enabled", &m_app_config.temperature_alarm_enabled,
-		    sizeof(m_app_config.temperature_alarm_enabled));
-	EXPORT_FUNC("temperature-alarm-lo", &m_app_config.temperature_alarm_lo,
-		    sizeof(m_app_config.temperature_alarm_lo));
-	EXPORT_FUNC("temperature-alarm-hi", &m_app_config.temperature_alarm_hi,
-		    sizeof(m_app_config.temperature_alarm_hi));
-	EXPORT_FUNC("temperature-alarm-hst", &m_app_config.temperature_alarm_hst,
-		    sizeof(m_app_config.temperature_alarm_hst));
-	EXPORT_FUNC("humidity-alarm-enabled", &m_app_config.humidity_alarm_enabled,
-		    sizeof(m_app_config.humidity_alarm_enabled));
-	EXPORT_FUNC("humidity-alarm-lo", &m_app_config.humidity_alarm_lo,
-		    sizeof(m_app_config.humidity_alarm_lo));
-	EXPORT_FUNC("humidity-alarm-hi", &m_app_config.humidity_alarm_hi,
-		    sizeof(m_app_config.humidity_alarm_hi));
-	EXPORT_FUNC("humidity-alarm-hst", &m_app_config.humidity_alarm_hst,
-		    sizeof(m_app_config.humidity_alarm_hst));
-	EXPORT_FUNC("pressure-alarm-enabled", &m_app_config.pressure_alarm_enabled,
-		    sizeof(m_app_config.pressure_alarm_enabled));
-	EXPORT_FUNC("pressure-alarm-lo", &m_app_config.pressure_alarm_lo,
-		    sizeof(m_app_config.pressure_alarm_lo));
-	EXPORT_FUNC("pressure-alarm-hi", &m_app_config.pressure_alarm_hi,
-		    sizeof(m_app_config.pressure_alarm_hi));
-	EXPORT_FUNC("pressure-alarm-hst", &m_app_config.pressure_alarm_hst,
-		    sizeof(m_app_config.pressure_alarm_hst));
-	EXPORT_FUNC("t1-alarm-enabled", &m_app_config.t1_alarm_enabled,
-		    sizeof(m_app_config.t1_alarm_enabled));
-	EXPORT_FUNC("t1-alarm-lo", &m_app_config.t1_alarm_lo, sizeof(m_app_config.t1_alarm_lo));
-	EXPORT_FUNC("t1-alarm-hi", &m_app_config.t1_alarm_hi, sizeof(m_app_config.t1_alarm_hi));
-	EXPORT_FUNC("t1-alarm-hst", &m_app_config.t1_alarm_hst, sizeof(m_app_config.t1_alarm_hst));
-	EXPORT_FUNC("t2-alarm-enabled", &m_app_config.t2_alarm_enabled,
-		    sizeof(m_app_config.t2_alarm_enabled));
-	EXPORT_FUNC("t2-alarm-lo", &m_app_config.t2_alarm_lo, sizeof(m_app_config.t2_alarm_lo));
-	EXPORT_FUNC("t2-alarm-hi", &m_app_config.t2_alarm_hi, sizeof(m_app_config.t2_alarm_hi));
-	EXPORT_FUNC("t2-alarm-hst", &m_app_config.t2_alarm_hst, sizeof(m_app_config.t2_alarm_hst));
 	EXPORT_FUNC("hall-left-counter", &m_app_config.hall_left_counter,
 		    sizeof(m_app_config.hall_left_counter));
-	EXPORT_FUNC("hall-left-notify-act", &m_app_config.hall_left_notify_act,
-		    sizeof(m_app_config.hall_left_notify_act));
-	EXPORT_FUNC("hall-left-notify-deact", &m_app_config.hall_left_notify_deact,
-		    sizeof(m_app_config.hall_left_notify_deact));
 	EXPORT_FUNC("hall-right-counter", &m_app_config.hall_right_counter,
 		    sizeof(m_app_config.hall_right_counter));
-	EXPORT_FUNC("hall-right-notify-act", &m_app_config.hall_right_notify_act,
-		    sizeof(m_app_config.hall_right_notify_act));
-	EXPORT_FUNC("hall-right-notify-deact", &m_app_config.hall_right_notify_deact,
-		    sizeof(m_app_config.hall_right_notify_deact));
 	EXPORT_FUNC("input-a-counter", &m_app_config.input_a_counter,
 		    sizeof(m_app_config.input_a_counter));
-	EXPORT_FUNC("input-a-notify-act", &m_app_config.input_a_notify_act,
-		    sizeof(m_app_config.input_a_notify_act));
-	EXPORT_FUNC("input-a-notify-deact", &m_app_config.input_a_notify_deact,
-		    sizeof(m_app_config.input_a_notify_deact));
 	EXPORT_FUNC("input-b-counter", &m_app_config.input_b_counter,
 		    sizeof(m_app_config.input_b_counter));
-	EXPORT_FUNC("input-b-notify-act", &m_app_config.input_b_notify_act,
-		    sizeof(m_app_config.input_b_notify_act));
-	EXPORT_FUNC("input-b-notify-deact", &m_app_config.input_b_notify_deact,
-		    sizeof(m_app_config.input_b_notify_deact));
 	EXPORT_FUNC("temperature-corr", &m_app_config.temperature_corr,
 		    sizeof(m_app_config.temperature_corr));
 	EXPORT_FUNC("t1-corr", &m_app_config.t1_corr, sizeof(m_app_config.t1_corr));
 	EXPORT_FUNC("t2-corr", &m_app_config.t2_corr, sizeof(m_app_config.t2_corr));
-	EXPORT_FUNC("pir-notify-act", &m_app_config.pir_notify_act,
-		    sizeof(m_app_config.pir_notify_act));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
 	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -948,136 +722,10 @@ static void print_cap_accelerometer(const struct shell *shell)
 		    m_app_config.cap_accelerometer ? "true" : "false");
 }
 
-static void print_temperature_alarm_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " temperature-alarm-enabled %s",
-		    m_app_config.temperature_alarm_enabled ? "true" : "false");
-}
-
-static void print_temperature_alarm_lo(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " temperature-alarm-lo %.2f",
-		    (double)m_app_config.temperature_alarm_lo);
-}
-
-static void print_temperature_alarm_hi(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " temperature-alarm-hi %.2f",
-		    (double)m_app_config.temperature_alarm_hi);
-}
-
-static void print_temperature_alarm_hst(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " temperature-alarm-hst %.2f",
-		    (double)m_app_config.temperature_alarm_hst);
-}
-
-static void print_humidity_alarm_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " humidity-alarm-enabled %s",
-		    m_app_config.humidity_alarm_enabled ? "true" : "false");
-}
-
-static void print_humidity_alarm_lo(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " humidity-alarm-lo %.2f",
-		    (double)m_app_config.humidity_alarm_lo);
-}
-
-static void print_humidity_alarm_hi(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " humidity-alarm-hi %.2f",
-		    (double)m_app_config.humidity_alarm_hi);
-}
-
-static void print_humidity_alarm_hst(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " humidity-alarm-hst %.2f",
-		    (double)m_app_config.humidity_alarm_hst);
-}
-
-static void print_pressure_alarm_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " pressure-alarm-enabled %s",
-		    m_app_config.pressure_alarm_enabled ? "true" : "false");
-}
-
-static void print_pressure_alarm_lo(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " pressure-alarm-lo %.2f",
-		    (double)m_app_config.pressure_alarm_lo);
-}
-
-static void print_pressure_alarm_hi(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " pressure-alarm-hi %.2f",
-		    (double)m_app_config.pressure_alarm_hi);
-}
-
-static void print_pressure_alarm_hst(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " pressure-alarm-hst %.2f",
-		    (double)m_app_config.pressure_alarm_hst);
-}
-
-static void print_t1_alarm_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " t1-alarm-enabled %s",
-		    m_app_config.t1_alarm_enabled ? "true" : "false");
-}
-
-static void print_t1_alarm_lo(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " t1-alarm-lo %.2f", (double)m_app_config.t1_alarm_lo);
-}
-
-static void print_t1_alarm_hi(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " t1-alarm-hi %.2f", (double)m_app_config.t1_alarm_hi);
-}
-
-static void print_t1_alarm_hst(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " t1-alarm-hst %.2f", (double)m_app_config.t1_alarm_hst);
-}
-
-static void print_t2_alarm_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " t2-alarm-enabled %s",
-		    m_app_config.t2_alarm_enabled ? "true" : "false");
-}
-
-static void print_t2_alarm_lo(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " t2-alarm-lo %.2f", (double)m_app_config.t2_alarm_lo);
-}
-
-static void print_t2_alarm_hi(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " t2-alarm-hi %.2f", (double)m_app_config.t2_alarm_hi);
-}
-
-static void print_t2_alarm_hst(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " t2-alarm-hst %.2f", (double)m_app_config.t2_alarm_hst);
-}
-
 static void print_hall_left_counter(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " hall-left-counter %s",
 		    m_app_config.hall_left_counter ? "true" : "false");
-}
-
-static void print_hall_left_notify_act(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-left-notify-act %s",
-		    m_app_config.hall_left_notify_act ? "true" : "false");
-}
-
-static void print_hall_left_notify_deact(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-left-notify-deact %s",
-		    m_app_config.hall_left_notify_deact ? "true" : "false");
 }
 
 static void print_hall_right_counter(const struct shell *shell)
@@ -1086,52 +734,16 @@ static void print_hall_right_counter(const struct shell *shell)
 		    m_app_config.hall_right_counter ? "true" : "false");
 }
 
-static void print_hall_right_notify_act(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-right-notify-act %s",
-		    m_app_config.hall_right_notify_act ? "true" : "false");
-}
-
-static void print_hall_right_notify_deact(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-right-notify-deact %s",
-		    m_app_config.hall_right_notify_deact ? "true" : "false");
-}
-
 static void print_input_a_counter(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " input-a-counter %s",
 		    m_app_config.input_a_counter ? "true" : "false");
 }
 
-static void print_input_a_notify_act(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-a-notify-act %s",
-		    m_app_config.input_a_notify_act ? "true" : "false");
-}
-
-static void print_input_a_notify_deact(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-a-notify-deact %s",
-		    m_app_config.input_a_notify_deact ? "true" : "false");
-}
-
 static void print_input_b_counter(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " input-b-counter %s",
 		    m_app_config.input_b_counter ? "true" : "false");
-}
-
-static void print_input_b_notify_act(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-b-notify-act %s",
-		    m_app_config.input_b_notify_act ? "true" : "false");
-}
-
-static void print_input_b_notify_deact(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-b-notify-deact %s",
-		    m_app_config.input_b_notify_deact ? "true" : "false");
 }
 
 static void print_temperature_corr(const struct shell *shell)
@@ -1148,12 +760,6 @@ static void print_t1_corr(const struct shell *shell)
 static void print_t2_corr(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " t2-corr %.2f", (double)m_app_config.t2_corr);
-}
-
-static void print_pir_notify_act(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " pir-notify-act %s",
-		    m_app_config.pir_notify_act ? "true" : "false");
 }
 
 static void print_accel_motion_sensitivity(const struct shell *shell)
@@ -1268,42 +874,13 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_pir_detector(shell);
 	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
-	print_temperature_alarm_enabled(shell);
-	print_temperature_alarm_lo(shell);
-	print_temperature_alarm_hi(shell);
-	print_temperature_alarm_hst(shell);
-	print_humidity_alarm_enabled(shell);
-	print_humidity_alarm_lo(shell);
-	print_humidity_alarm_hi(shell);
-	print_humidity_alarm_hst(shell);
-	print_pressure_alarm_enabled(shell);
-	print_pressure_alarm_lo(shell);
-	print_pressure_alarm_hi(shell);
-	print_pressure_alarm_hst(shell);
-	print_t1_alarm_enabled(shell);
-	print_t1_alarm_lo(shell);
-	print_t1_alarm_hi(shell);
-	print_t1_alarm_hst(shell);
-	print_t2_alarm_enabled(shell);
-	print_t2_alarm_lo(shell);
-	print_t2_alarm_hi(shell);
-	print_t2_alarm_hst(shell);
 	print_hall_left_counter(shell);
-	print_hall_left_notify_act(shell);
-	print_hall_left_notify_deact(shell);
 	print_hall_right_counter(shell);
-	print_hall_right_notify_act(shell);
-	print_hall_right_notify_deact(shell);
 	print_input_a_counter(shell);
-	print_input_a_notify_act(shell);
-	print_input_a_notify_deact(shell);
 	print_input_b_counter(shell);
-	print_input_b_notify_act(shell);
-	print_input_b_notify_deact(shell);
 	print_temperature_corr(shell);
 	print_t1_corr(shell);
 	print_t2_corr(shell);
-	print_pir_notify_act(shell);
 	print_accel_motion_sensitivity(shell);
 	print_sensor1_rom(shell);
 	print_sensor2_rom(shell);
@@ -1936,140 +1513,10 @@ static int cmd_cap_accelerometer(const struct shell *shell, size_t argc, char **
 			print_cap_accelerometer);
 }
 
-static int cmd_temperature_alarm_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.temperature_alarm_enabled,
-			print_temperature_alarm_enabled);
-}
-
-static int cmd_temperature_alarm_lo(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.temperature_alarm_lo, -30.0f, 70.0f,
-			 print_temperature_alarm_lo);
-}
-
-static int cmd_temperature_alarm_hi(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.temperature_alarm_hi, -30.0f, 70.0f,
-			 print_temperature_alarm_hi);
-}
-
-static int cmd_temperature_alarm_hst(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.temperature_alarm_hst, 0.0f, 5.0f,
-			 print_temperature_alarm_hst);
-}
-
-static int cmd_humidity_alarm_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.humidity_alarm_enabled,
-			print_humidity_alarm_enabled);
-}
-
-static int cmd_humidity_alarm_lo(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.humidity_alarm_lo, 0.0f, 100.0f,
-			 print_humidity_alarm_lo);
-}
-
-static int cmd_humidity_alarm_hi(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.humidity_alarm_hi, 0.0f, 100.0f,
-			 print_humidity_alarm_hi);
-}
-
-static int cmd_humidity_alarm_hst(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.humidity_alarm_hst, 0.0f, 20.0f,
-			 print_humidity_alarm_hst);
-}
-
-static int cmd_pressure_alarm_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.pressure_alarm_enabled,
-			print_pressure_alarm_enabled);
-}
-
-static int cmd_pressure_alarm_lo(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.pressure_alarm_lo, 500.0f, 1200.0f,
-			 print_pressure_alarm_lo);
-}
-
-static int cmd_pressure_alarm_hi(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.pressure_alarm_hi, 500.0f, 1200.0f,
-			 print_pressure_alarm_hi);
-}
-
-static int cmd_pressure_alarm_hst(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.pressure_alarm_hst, 0.0f, 50.0f,
-			 print_pressure_alarm_hst);
-}
-
-static int cmd_t1_alarm_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.t1_alarm_enabled, print_t1_alarm_enabled);
-}
-
-static int cmd_t1_alarm_lo(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.t1_alarm_lo, -30.0f, 70.0f,
-			 print_t1_alarm_lo);
-}
-
-static int cmd_t1_alarm_hi(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.t1_alarm_hi, -30.0f, 70.0f,
-			 print_t1_alarm_hi);
-}
-
-static int cmd_t1_alarm_hst(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.t1_alarm_hst, 0.0f, 5.0f,
-			 print_t1_alarm_hst);
-}
-
-static int cmd_t2_alarm_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.t2_alarm_enabled, print_t2_alarm_enabled);
-}
-
-static int cmd_t2_alarm_lo(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.t2_alarm_lo, -30.0f, 70.0f,
-			 print_t2_alarm_lo);
-}
-
-static int cmd_t2_alarm_hi(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.t2_alarm_hi, -30.0f, 70.0f,
-			 print_t2_alarm_hi);
-}
-
-static int cmd_t2_alarm_hst(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.t2_alarm_hst, 0.0f, 5.0f,
-			 print_t2_alarm_hst);
-}
-
 static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_counter,
 			print_hall_left_counter);
-}
-
-static int cmd_hall_left_notify_act(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_notify_act,
-			print_hall_left_notify_act);
-}
-
-static int cmd_hall_left_notify_deact(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_notify_deact,
-			print_hall_left_notify_deact);
 }
 
 static int cmd_hall_right_counter(const struct shell *shell, size_t argc, char **argv)
@@ -2078,50 +1525,14 @@ static int cmd_hall_right_counter(const struct shell *shell, size_t argc, char *
 			print_hall_right_counter);
 }
 
-static int cmd_hall_right_notify_act(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_notify_act,
-			print_hall_right_notify_act);
-}
-
-static int cmd_hall_right_notify_deact(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_notify_deact,
-			print_hall_right_notify_deact);
-}
-
 static int cmd_input_a_counter(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.input_a_counter, print_input_a_counter);
 }
 
-static int cmd_input_a_notify_act(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_a_notify_act,
-			print_input_a_notify_act);
-}
-
-static int cmd_input_a_notify_deact(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_a_notify_deact,
-			print_input_a_notify_deact);
-}
-
 static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.input_b_counter, print_input_b_counter);
-}
-
-static int cmd_input_b_notify_act(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_b_notify_act,
-			print_input_b_notify_act);
-}
-
-static int cmd_input_b_notify_deact(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_b_notify_deact,
-			print_input_b_notify_deact);
 }
 
 static int cmd_temperature_corr(const struct shell *shell, size_t argc, char **argv)
@@ -2138,11 +1549,6 @@ static int cmd_t1_corr(const struct shell *shell, size_t argc, char **argv)
 static int cmd_t2_corr(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_float(shell, argc, argv, &m_app_config.t2_corr, -5.0f, 5.0f, print_t2_corr);
-}
-
-static int cmd_pir_notify_act(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.pir_notify_act, print_pir_notify_act);
 }
 
 static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
@@ -2474,133 +1880,21 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set accelerometer capability — orientation, motion and free-fall (true/false).",
 	              cmd_cap_accelerometer, 1, 1),
 
-	SHELL_CMD_ARG(temperature-alarm-enabled, NULL,
-	              "Get/Set temperature alarm enabled (true/false).",
-	              cmd_temperature_alarm_enabled, 1, 1),
-
-	SHELL_CMD_ARG(temperature-alarm-lo, NULL,
-	              "Get/Set temperature low threshold (-30 to 70 deg. C).",
-	              cmd_temperature_alarm_lo, 1, 1),
-
-	SHELL_CMD_ARG(temperature-alarm-hi, NULL,
-	              "Get/Set temperature high threshold (-30 to 70 deg. C).",
-	              cmd_temperature_alarm_hi, 1, 1),
-
-	SHELL_CMD_ARG(temperature-alarm-hst, NULL,
-	              "Get/Set temperature hysteresis (0 to 5 deg. C).",
-	              cmd_temperature_alarm_hst, 1, 1),
-
-	SHELL_CMD_ARG(humidity-alarm-enabled, NULL,
-	              "Get/Set humidity alarm enabled (true/false).",
-	              cmd_humidity_alarm_enabled, 1, 1),
-
-	SHELL_CMD_ARG(humidity-alarm-lo, NULL,
-	              "Get/Set humidity low threshold (0 to 100 %).",
-	              cmd_humidity_alarm_lo, 1, 1),
-
-	SHELL_CMD_ARG(humidity-alarm-hi, NULL,
-	              "Get/Set humidity high threshold (0 to 100 %).",
-	              cmd_humidity_alarm_hi, 1, 1),
-
-	SHELL_CMD_ARG(humidity-alarm-hst, NULL,
-	              "Get/Set humidity hysteresis (0 to 20 %).",
-	              cmd_humidity_alarm_hst, 1, 1),
-
-	SHELL_CMD_ARG(pressure-alarm-enabled, NULL,
-	              "Get/Set pressure alarm enabled (true/false).",
-	              cmd_pressure_alarm_enabled, 1, 1),
-
-	SHELL_CMD_ARG(pressure-alarm-lo, NULL,
-	              "Get/Set pressure low threshold (500 to 1200 hPa).",
-	              cmd_pressure_alarm_lo, 1, 1),
-
-	SHELL_CMD_ARG(pressure-alarm-hi, NULL,
-	              "Get/Set pressure high threshold (500 to 1200 hPa).",
-	              cmd_pressure_alarm_hi, 1, 1),
-
-	SHELL_CMD_ARG(pressure-alarm-hst, NULL,
-	              "Get/Set pressure hysteresis (0 to 50 hPa).",
-	              cmd_pressure_alarm_hst, 1, 1),
-
-	SHELL_CMD_ARG(t1-alarm-enabled, NULL,
-	              "Get/Set T1 temperature alarm enabled (true/false).",
-	              cmd_t1_alarm_enabled, 1, 1),
-
-	SHELL_CMD_ARG(t1-alarm-lo, NULL,
-	              "Get/Set T1 temperature low threshold (-30 to 70 deg. C).",
-	              cmd_t1_alarm_lo, 1, 1),
-
-	SHELL_CMD_ARG(t1-alarm-hi, NULL,
-	              "Get/Set T1 temperature high threshold (-30 to 70 deg. C).",
-	              cmd_t1_alarm_hi, 1, 1),
-
-	SHELL_CMD_ARG(t1-alarm-hst, NULL,
-	              "Get/Set T1 temperature hysteresis (0 to 5 deg. C).",
-	              cmd_t1_alarm_hst, 1, 1),
-
-	SHELL_CMD_ARG(t2-alarm-enabled, NULL,
-	              "Get/Set T2 temperature alarm enabled (true/false).",
-	              cmd_t2_alarm_enabled, 1, 1),
-
-	SHELL_CMD_ARG(t2-alarm-lo, NULL,
-	              "Get/Set T2 temperature low threshold (-30 to 70 deg. C).",
-	              cmd_t2_alarm_lo, 1, 1),
-
-	SHELL_CMD_ARG(t2-alarm-hi, NULL,
-	              "Get/Set T2 temperature high threshold (-30 to 70 deg. C).",
-	              cmd_t2_alarm_hi, 1, 1),
-
-	SHELL_CMD_ARG(t2-alarm-hst, NULL,
-	              "Get/Set T2 temperature hysteresis (0 to 5 deg. C).",
-	              cmd_t2_alarm_hst, 1, 1),
-
 	SHELL_CMD_ARG(hall-left-counter, NULL,
 	              "Get/Set hall left switch counter enabled (true/false).",
 	              cmd_hall_left_counter, 1, 1),
-
-	SHELL_CMD_ARG(hall-left-notify-act, NULL,
-	              "Get/Set hall left switch notify on activation (true/false).",
-	              cmd_hall_left_notify_act, 1, 1),
-
-	SHELL_CMD_ARG(hall-left-notify-deact, NULL,
-	              "Get/Set hall left switch notify on deactivation (true/false).",
-	              cmd_hall_left_notify_deact, 1, 1),
 
 	SHELL_CMD_ARG(hall-right-counter, NULL,
 	              "Get/Set hall right switch counter enabled (true/false).",
 	              cmd_hall_right_counter, 1, 1),
 
-	SHELL_CMD_ARG(hall-right-notify-act, NULL,
-	              "Get/Set hall right switch notify on activation (true/false).",
-	              cmd_hall_right_notify_act, 1, 1),
-
-	SHELL_CMD_ARG(hall-right-notify-deact, NULL,
-	              "Get/Set hall right switch notify on deactivation (true/false).",
-	              cmd_hall_right_notify_deact, 1, 1),
-
 	SHELL_CMD_ARG(input-a-counter, NULL,
 	              "Get/Set input A counter enabled (true/false).",
 	              cmd_input_a_counter, 1, 1),
 
-	SHELL_CMD_ARG(input-a-notify-act, NULL,
-	              "Get/Set input A notify on activation (true/false).",
-	              cmd_input_a_notify_act, 1, 1),
-
-	SHELL_CMD_ARG(input-a-notify-deact, NULL,
-	              "Get/Set input A notify on deactivation (true/false).",
-	              cmd_input_a_notify_deact, 1, 1),
-
 	SHELL_CMD_ARG(input-b-counter, NULL,
 	              "Get/Set input B counter enabled (true/false).",
 	              cmd_input_b_counter, 1, 1),
-
-	SHELL_CMD_ARG(input-b-notify-act, NULL,
-	              "Get/Set input B notify on activation (true/false).",
-	              cmd_input_b_notify_act, 1, 1),
-
-	SHELL_CMD_ARG(input-b-notify-deact, NULL,
-	              "Get/Set input B notify on deactivation (true/false).",
-	              cmd_input_b_notify_deact, 1, 1),
 
 	SHELL_CMD_ARG(temperature-corr, NULL,
 	              "Get/Set temperature correction (range -5.0 to +5.0 deg. C).",
@@ -2613,10 +1907,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(t2-corr, NULL,
 	              "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C).",
 	              cmd_t2_corr, 1, 1),
-
-	SHELL_CMD_ARG(pir-notify-act, NULL,
-	              "Get/Set PIR motion alarm notify on activation (true/false).",
-	              cmd_pir_notify_act, 1, 1),
 
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",

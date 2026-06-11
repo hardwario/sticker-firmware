@@ -81,21 +81,13 @@ static int poll(void)
 
 		LOG_DBG("Input A activated, count: %u", m_input_data.input_a_count);
 
-		if (g_app_config.input_a_notify_act) {
-			m_input_data.input_a_notify_act = true;
-		}
-
-		app_alarm_event(APP_ALARM_SOURCE_INPUT_A, true);
+		app_alarm_event(APP_ALARM_SRC_INPUT_A, true);
 	}
 
 	if (input_a_was_active && !input_a_is_active) {
 		LOG_DBG("Input A deactivated");
 
-		if (g_app_config.input_a_notify_deact) {
-			m_input_data.input_a_notify_deact = true;
-		}
-
-		app_alarm_event(APP_ALARM_SOURCE_INPUT_A, false);
+		app_alarm_event(APP_ALARM_SRC_INPUT_A, false);
 	}
 
 	if (!input_b_was_active && input_b_is_active) {
@@ -105,21 +97,13 @@ static int poll(void)
 
 		LOG_DBG("Input B activated, count: %u", m_input_data.input_b_count);
 
-		if (g_app_config.input_b_notify_act) {
-			m_input_data.input_b_notify_act = true;
-		}
-
-		app_alarm_event(APP_ALARM_SOURCE_INPUT_B, true);
+		app_alarm_event(APP_ALARM_SRC_INPUT_B, true);
 	}
 
 	if (input_b_was_active && !input_b_is_active) {
 		LOG_DBG("Input B deactivated");
 
-		if (g_app_config.input_b_notify_deact) {
-			m_input_data.input_b_notify_deact = true;
-		}
-
-		app_alarm_event(APP_ALARM_SOURCE_INPUT_B, false);
+		app_alarm_event(APP_ALARM_SRC_INPUT_B, false);
 	}
 
 	k_mutex_unlock(&m_input_data_mutex);
@@ -190,50 +174,6 @@ int app_input_get_data(struct app_input_data *data)
 	k_mutex_unlock(&m_input_data_mutex);
 
 	return 0;
-}
-
-int app_input_get_data_and_clear_notify(struct app_input_data *data)
-{
-	if (!data) {
-		return -EINVAL;
-	}
-
-	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
-	*data = m_input_data;
-	m_input_data.input_a_notify_act = false;
-	m_input_data.input_a_notify_deact = false;
-	m_input_data.input_b_notify_act = false;
-	m_input_data.input_b_notify_deact = false;
-	k_mutex_unlock(&m_input_data_mutex);
-
-	return 0;
-}
-
-void app_input_clear_notify_flags(struct app_input_data *data)
-{
-	if (!data) {
-		return;
-	}
-
-	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
-
-	if (data->input_a_notify_act) {
-		m_input_data.input_a_notify_act = false;
-	}
-
-	if (data->input_a_notify_deact) {
-		m_input_data.input_a_notify_deact = false;
-	}
-
-	if (data->input_b_notify_act) {
-		m_input_data.input_b_notify_act = false;
-	}
-
-	if (data->input_b_notify_deact) {
-		m_input_data.input_b_notify_deact = false;
-	}
-
-	k_mutex_unlock(&m_input_data_mutex);
 }
 
 void app_input_reset_count(bool input_a, bool input_b)

@@ -5,6 +5,7 @@
  */
 
 #include "app_cmd.h"
+#include "app_alarm_rules.h"
 #include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -118,9 +119,11 @@ static void handle_set_param(const Command_SetParam *sp, Response *resp,
 	uint32_t fault = 0;
 	int rc = 0;
 
-	/* Apply atomically: snapshot the staging config, apply both sections, then
-	 * cross-validate. On any fault, restore the snapshot so a rejected batch
-	 * leaves nothing partially staged for a later SettingsSave to persist. */
+	/* Apply atomically: snapshot the staging config, apply both sections. On any
+	 * fault, restore the snapshot so a rejected batch leaves nothing partially
+	 * staged for a later SettingsSave to persist. (Threshold-pair cross-validation
+	 * was removed with the fixed alarm keys — alarm rules validate on their own
+	 * SET path in app_alarm_rules.) */
 	struct app_config snapshot = *app_config();
 
 	if (sp->has_lorawan) {
@@ -128,9 +131,6 @@ static void handle_set_param(const Command_SetParam *sp, Response *resp,
 	}
 	if (rc == 0 && sp->has_application) {
 		rc = app_config_apply_application(&sp->application, &fault);
-	}
-	if (rc == 0) {
-		rc = app_config_validate_alarm_pairs(app_config(), &fault);
 	}
 
 	if (rc) {
@@ -196,38 +196,12 @@ static const struct {
 	APP2(1),
 	APP2(2),
 	APP2(4),
-	APP2(5),
-	APP5(6),
-	APP5(7),
-	APP5(8),
-	APP2(9),
-	APP5(10),
-	APP5(11),
-	APP5(12),
-	APP2(13),
-	APP5(14),
-	APP5(15),
-	APP5(16),
-	APP2(17),
-	APP5(18),
-	APP5(19),
-	APP5(20),
-	APP2(21),
-	APP5(22),
-	APP5(23),
-	APP5(24),
+	/* tags 5-24 (threshold alarms), 26/27/29/30/32/33/35/36 (notify) retired —
+	 * dynamic-alarms migration; counters 25/28/31/34 kept. */
 	APP2(25),
-	APP2(26),
-	APP2(27),
 	APP2(28),
-	APP2(29),
-	APP2(30),
 	APP2(31),
-	APP2(32),
-	APP2(33),
 	APP2(34),
-	APP2(35),
-	APP2(36),
 	APP5(37),
 	APP5(38),
 	APP5(39),
@@ -336,6 +310,53 @@ static void handle_req_history(enum app_cmd_transport transport, const Command *
 #endif
 }
 
+static void handle_alarm_rule(const Command *cmd, Response *resp, enum app_cmd_action *action)
+{
+	const Command_AlarmRule *ar = &cmd->body.alarm_rule;
+	int ret;
+
+	/* Mutate the in-RAM rule list here (cheap), but DEFER the NVS persist to the
+	 * post-command action. settings_save_one() is too stack-heavy to run on the
+	 * m_work_q (2048 B) while app_cmd_handle's Command/Response locals are still
+	 * live on the stack — doing it inline overflowed the stack on a real device.
+	 * The deferred action runs after this frame unwinds. */
+	switch (ar->op) {
+	case Command_AlarmRule_Op_CLEAR_ALL:
+		app_alarm_rules_clear_all();
+		ret = 0;
+		break;
+	case Command_AlarmRule_Op_CLEAR:
+		ret = app_alarm_rules_clear((enum app_alarm_source)ar->source,
+					    (enum app_alarm_quantity)ar->quantity);
+		break;
+	case Command_AlarmRule_Op_SET:
+	default: {
+		struct app_alarm_rule r = {
+			.source = (uint8_t)ar->source,
+			.quantity = (uint8_t)ar->quantity,
+			.enabled = ar->enabled ? 1 : 0,
+			.lo = ar->has_lo ? ar->lo : 0.0f,
+			.hi = ar->has_hi ? ar->hi : 0.0f,
+			.hst = ar->has_hst ? ar->hst : 0.0f,
+			.from_state = (uint8_t)((ar->has_from_state && ar->from_state) ? 1 : 0),
+			.to_state = (uint8_t)((ar->has_to_state && ar->to_state) ? 1 : 0),
+		};
+		ret = app_alarm_rules_set(&r);
+		break;
+	}
+	}
+
+	if (ret == 0) {
+		*action = APP_CMD_ACTION_ALARM_RULES_SAVE;
+		resp->which_body = Response_ack_tag;
+	} else {
+		make_error(resp,
+			   ret == -EINVAL ? Response_Error_Code_OUT_OF_RANGE
+					  : Response_Error_Code_NOT_READY,
+			   "alarm rule");
+	}
+}
+
 static void dispatch(enum app_cmd_transport transport, const Command *cmd, Response *resp,
 		     enum app_cmd_action *action)
 {
@@ -394,6 +415,9 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 		resp->which_body = Response_ack_tag;
 		break;
 
+	case Command_alarm_rule_tag:
+		handle_alarm_rule(cmd, resp, action);
+		break;
 	case Command_req_history_tag:
 		handle_req_history(transport, cmd, resp);
 		break;
@@ -561,7 +585,8 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total,
 	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
 	for (size_t i = 0; i < n; i++) {
 		AlarmEvent *ev = &report.events[i];
-		ev->source = (AlarmEvent_Source)events[i].source;
+		ev->source = events[i].source;
+		ev->quantity = events[i].quantity;
 		ev->edge = (AlarmEvent_Edge)events[i].edge;
 		ev->side = (AlarmEvent_Side)events[i].side;
 		ev->rel_s = events[i].rel_s;

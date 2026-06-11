@@ -65,21 +65,19 @@ var _BUILD_TYPES = ["main", "dev", "custom"];
 // proto field tag -> name for ConfigDump.Application (floats marked in _APP_FLOAT)
 var _APP_NAMES = {
   1: "calibration", 2: "interval_sample", 4: "interval_report",
-  5: "temperature_alarm_enabled", 6: "temperature_alarm_lo", 7: "temperature_alarm_hi", 8: "temperature_alarm_hst",
-  9: "humidity_alarm_enabled", 10: "humidity_alarm_lo", 11: "humidity_alarm_hi", 12: "humidity_alarm_hst",
-  13: "pressure_alarm_enabled", 14: "pressure_alarm_lo", 15: "pressure_alarm_hi", 16: "pressure_alarm_hst",
-  17: "t1_alarm_enabled", 18: "t1_alarm_lo", 19: "t1_alarm_hi", 20: "t1_alarm_hst",
-  21: "t2_alarm_enabled", 22: "t2_alarm_lo", 23: "t2_alarm_hi", 24: "t2_alarm_hst",
-  25: "hall_left_counter", 26: "hall_left_notify_act", 27: "hall_left_notify_deact",
-  28: "hall_right_counter", 29: "hall_right_notify_act", 30: "hall_right_notify_deact",
-  31: "input_a_counter", 32: "input_a_notify_act", 33: "input_a_notify_deact",
-  34: "input_b_counter", 35: "input_b_notify_act", 36: "input_b_notify_deact",
+  // 5-24 (fixed threshold alarms), 26/27/29/30/32/33/35/36 (hall/input notify)
+  // and 53 (pir_notify_act) retired -> reserved in the proto (dynamic-alarms
+  // migration); alarms are now configured as rules via the AlarmRule command.
+  25: "hall_left_counter",
+  28: "hall_right_counter",
+  31: "input_a_counter",
+  34: "input_b_counter",
   37: "temperature_corr", 38: "t1_corr", 39: "t2_corr",
   40: "cap_hall_left", 41: "cap_hall_right", 42: "cap_input_a", 43: "cap_input_b",
   44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector",
   // 47/48 (cap_1w_thermometer/machine_probe) retired -> reserved in the proto.
   49: "history_enable", 50: "history_sensors", 51: "alarm_limit", 52: "alarm_notif_time",
-  53: "pir_notify_act", 54: "accel_motion_sensitivity", 55: "cap_accelerometer",
+  54: "accel_motion_sensitivity", 55: "cap_accelerometer",
   // 56-59 sensor1..4_rom are bytes (need hex handling, see 1-Wire framework); 60 below.
   60: "cap_w1_sensors"
 };
@@ -92,11 +90,11 @@ var _APP_ENUMS = {
 var _LRW_NAMES = { 1: "region", 2: "network", 3: "adr", 4: "activation", 12: "sub_band" };
 var _LRW_HEX = { 5: "deveui", 6: "joineui", 9: "devaddr" };
 
-// Application tags carrying a float32 (protobuf wire type 5): alarm thresholds
-// and the correction offsets. Everything else in Application is a varint.
+// Application tags carrying a float32 (protobuf wire type 5): the correction
+// offsets. (Alarm threshold floats 6-24 retired with dynamic-alarms.)
+// Everything else in Application is a varint.
 var _APP_FLOAT = {
-  6: 1, 7: 1, 8: 1, 10: 1, 11: 1, 12: 1, 14: 1, 15: 1, 16: 1,
-  18: 1, 19: 1, 20: 1, 22: 1, 23: 1, 24: 1, 37: 1, 38: 1, 39: 1
+  37: 1, 38: 1, 39: 1
 };
 
 // Reverse maps (name -> tag) for encoding SetParam. The LoRaWAN hex set adds the
@@ -120,7 +118,7 @@ var _LRW_TAGS = _invert(_LRW_NAMES);
 var _CMD_NAMES = {
   2: "set_param", 3: "get_param", 4: "get_info", 5: "get_config",
   6: "settings_save", 7: "reboot", 8: "factory_reset", 9: "force_send",
-  10: "reset_counters", 11: "req_history", 12: "clock_sync"
+  10: "reset_counters", 11: "req_history", 12: "clock_sync", 13: "alarm_rule"
 };
 var _CMD_TAGS = _invert(_CMD_NAMES);
 
@@ -457,37 +455,25 @@ function decodeTelemetry(bytes) {
       case 15: d.machine_probe_temperature_2 = _pbZigzag(v.value) / 100; break;
       case 16: d.machine_probe_humidity_2 = v.value / 2; break;
       case 17: d.machine_probe_tilt_alert_2 = (v.value & (1 << 0)) !== 0; break;
-      // hall left
+      // hall left (flag bits 0/1 notify retired with dynamic-alarms; active = bit 2)
       case 18: d.hall_left_count = v.value; break;
       case 19:
-        f = v.value;
-        d.hall_left_notify_act = (f & (1 << 0)) !== 0;
-        d.hall_left_notify_deact = (f & (1 << 1)) !== 0;
-        d.hall_left_is_active = (f & (1 << 2)) !== 0;
+        d.hall_left_is_active = (v.value & (1 << 2)) !== 0;
         break;
       // hall right
       case 20: d.hall_right_count = v.value; break;
       case 21:
-        f = v.value;
-        d.hall_right_notify_act = (f & (1 << 0)) !== 0;
-        d.hall_right_notify_deact = (f & (1 << 1)) !== 0;
-        d.hall_right_is_active = (f & (1 << 2)) !== 0;
+        d.hall_right_is_active = (v.value & (1 << 2)) !== 0;
         break;
       // input A
       case 22: d.input_a_count = v.value; break;
       case 23:
-        f = v.value;
-        d.input_a_notify_act = (f & (1 << 0)) !== 0;
-        d.input_a_notify_deact = (f & (1 << 1)) !== 0;
-        d.input_a_is_active = (f & (1 << 2)) !== 0;
+        d.input_a_is_active = (v.value & (1 << 2)) !== 0;
         break;
       // input B
       case 24: d.input_b_count = v.value; break;
       case 25:
-        f = v.value;
-        d.input_b_notify_act = (f & (1 << 0)) !== 0;
-        d.input_b_notify_deact = (f & (1 << 1)) !== 0;
-        d.input_b_is_active = (f & (1 << 2)) !== 0;
+        d.input_b_is_active = (v.value & (1 << 2)) !== 0;
         break;
       case 26: d.accel_motion_count = v.value; break;
       default: break; /* unknown field: ignore (forward-compatible) */
@@ -654,6 +640,18 @@ function encodeDownlinkCommand(cmd) {
   } else if (name === "req_history") {
     if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
+  } else if (name === "alarm_rule") {
+    // op(1) 0=set/1=clear/2=clear_all, source(2), quantity(3) numeric enums,
+    // enabled(4), threshold lo(5)/hi(6)/hst(7) float, state from(8)/to(9).
+    if (b.op) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.op));
+    if (b.source) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.source));
+    if (b.quantity) body = body.concat(_encTag(3, 0)).concat(_encVarint(b.quantity));
+    if (b.enabled) body = body.concat(_encTag(4, 0)).concat(_encVarint(1));
+    if (b.lo !== undefined) body = body.concat(_encTag(5, 5)).concat(_encFloat(b.lo));
+    if (b.hi !== undefined) body = body.concat(_encTag(6, 5)).concat(_encFloat(b.hi));
+    if (b.hst !== undefined) body = body.concat(_encTag(7, 5)).concat(_encFloat(b.hst));
+    if (b.from_state) body = body.concat(_encTag(8, 0)).concat(_encVarint(b.from_state));
+    if (b.to_state) body = body.concat(_encTag(9, 0)).concat(_encVarint(b.to_state));
   }
   // get_info / settings_save / reboot / factory_reset / force_send / clock_sync: empty body.
 
@@ -751,6 +749,27 @@ function decodeDownlinkCommand(bytes) {
           } else { break; }
         }
         cmd.req_history = rh;
+      } else if (field === 13) { // alarm_rule
+        var arl = {}, w = pos;
+        while (w < end) {
+          var t13 = _pbReadVarint(bytes, w); w = t13.next;
+          var f13 = t13.value >>> 3, w13 = t13.value & 0x7;
+          if (w13 === 0) {
+            var v13 = _pbReadVarint(bytes, w); w = v13.next;
+            if (f13 === 1) arl.op = v13.value;
+            else if (f13 === 2) arl.source = v13.value;
+            else if (f13 === 3) arl.quantity = v13.value;
+            else if (f13 === 4) arl.enabled = v13.value !== 0;
+            else if (f13 === 8) arl.from_state = v13.value;
+            else if (f13 === 9) arl.to_state = v13.value;
+          } else if (w13 === 5) {
+            var fl13 = _pbReadFloat(bytes, w); w = fl13.next;
+            if (f13 === 5) arl.lo = fl13.value;
+            else if (f13 === 6) arl.hi = fl13.value;
+            else if (f13 === 7) arl.hst = fl13.value;
+          } else { break; }
+        }
+        cmd.alarm_rule = arl;
       }
       pos = end;
     } else {
@@ -767,25 +786,31 @@ function decodeDownlink(input) {
   return { data: { bytes_hex: _pbBytesToHex(input.bytes) }, warnings: [], errors: [] };
 }
 
-// fPort 3: alarm-detail batch (#27), protobuf AlarmReport. Top-level fields:
-// base_time(1, varint), total(2, varint), repeated AlarmEvent events(3, len-
-// delimited). AlarmEvent: source(1), edge(2), side(3), rel_s(4) varints +
-// optional sint32 value(5). source/edge/side are the AlarmEvent_Source/Edge/Side
-// enums; value is scaled (temp/hum ×100, pressure ×10) and absent for discrete
-// sources. Per-event time = base_time + rel_s. `total` may exceed the events
-// present (some dropped to fit the data rate → truncated).
-var _ALARM_SOURCES = ["hall-left", "hall-right", "pir", "input-a", "input-b",
-  "temperature", "humidity", "pressure", "t1-temperature", "t2-temperature",
-  "accel-motion"];
+// fPort 3: alarm-detail batch, protobuf AlarmReport. Top-level: base_time(1),
+// total(2), repeated AlarmEvent events(3). AlarmEvent (dynamic alarm rule):
+// source(1), edge(2), side(3), rel_s(4) varints + optional sint32 value(5) +
+// quantity(6). source = enum app_alarm_source, quantity = enum app_alarm_quantity;
+// value is scaled per quantity (temp/hum ×100, pressure ×10, magnetic_field µT,
+// digital 0/1, counter) and absent for some edges. Per-event time = base_time +
+// rel_s. `total` may exceed events present (dropped to fit the data rate).
+var _ALARM_SOURCES = ["onboard", "s1", "s2", "s3", "s4", "hall-left", "hall-right",
+  "input-a", "input-b", "pir", "accel"];
+var _ALARM_QUANTITIES = ["temperature", "humidity", "pressure", "illuminance",
+  "magnetic-field", "tilt", "state", "count"];
 var _ALARM_EDGES = ["activate", "deactivate"];
 var _ALARM_SIDES = ["none", "lo", "hi"];
 
-function _alarmUnscale(source, raw) {
-  return source === 7 ? raw / 10 : raw / 100; // 7 = pressure (hPa×10)
+function _alarmUnscale(quantity, raw) {
+  switch (quantity) {
+    case 0: case 1: return raw / 100;   // temperature, humidity
+    case 2: return raw / 10;            // pressure (hPa×10)
+    case 4: return raw / 1000;          // magnetic-field (µT -> mT)
+    default: return raw;                // illuminance / state / count
+  }
 }
 
 function _decodeAlarmEvent(bytes, start, end) {
-  var ev = { source: 0, edge: 0, side: 0, rel_s: 0, value: null };
+  var ev = { source: 0, quantity: 0, edge: 0, side: 0, rel_s: 0, value: null };
   var p = start;
   while (p < end) {
     var t = _pbReadVarint(bytes, p); p = t.next;
@@ -797,6 +822,7 @@ function _decodeAlarmEvent(bytes, start, end) {
       else if (field === 3) ev.side = v.value;
       else if (field === 4) ev.rel_s = v.value;
       else if (field === 5) ev.value = _pbZigzag(v.value);
+      else if (field === 6) ev.quantity = v.value;
     } else if (wire === 2) {
       var l = _pbReadVarint(bytes, p); p = l.next + l.value;
     } else { break; }
@@ -822,9 +848,10 @@ function decodeAlarmBatch(bytes) {
         var ev = _decodeAlarmEvent(bytes, pos, endE);
         out.alarms.push({
           source: _ALARM_SOURCES[ev.source] || ("src" + ev.source),
+          quantity: _ALARM_QUANTITIES[ev.quantity] || ("q" + ev.quantity),
           event: _ALARM_EDGES[ev.edge] || "activate",
           side: _ALARM_SIDES[ev.side] || "none",
-          value: ev.value === null ? null : _alarmUnscale(ev.source, ev.value),
+          value: ev.value === null ? null : _alarmUnscale(ev.quantity, ev.value),
           time: 0,
         });
         rels.push(ev.rel_s);

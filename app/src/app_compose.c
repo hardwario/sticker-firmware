@@ -33,11 +33,12 @@
 LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 
 /* Per-group flag bit positions (mirrored in ttn.js). */
-#define SYSTEM_FLAG_BOOT      BIT(0)
+#define SYSTEM_FLAG_BOOT BIT(0)
 /* MP_FLAG_TILT moved to app_w1_slots.c with the per-type SensorReading encode. */
-#define CNT_FLAG_NOTIFY_ACT   BIT(0)
-#define CNT_FLAG_NOTIFY_DEACT BIT(1)
-#define CNT_FLAG_ACTIVE       BIT(2)
+/* Counter flag bits 0/1 (notify act/deact) retired with the dynamic-alarms
+ * migration — notify is now an alarm rule, not a per-counter telemetry flag.
+ * ACTIVE stays at bit 2 to keep the wire bit position stable. */
+#define CNT_FLAG_ACTIVE  BIT(2)
 
 /* Sensor groups, in priority order (packed into frames first → last). A group
  * is the atomic unit: all its fields go into one frame, or none. */
@@ -146,8 +147,8 @@ static void fill_snapshot(void)
 
 	struct app_hall_data hall;
 	struct app_input_data input;
-	app_hall_get_data_and_clear_notify(&hall);
-	app_input_get_data_and_clear_notify(&input);
+	app_hall_get_data(&hall);
+	app_input_get_data(&input);
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 	struct app_sensor_data d = g_app_sensor_data;
@@ -237,12 +238,6 @@ static void fill_snapshot(void)
 	/* hall left / right */
 	if (g_app_config.cap_hall_left) {
 		uint32_t f = 0;
-		if (hall.left_notify_act) {
-			f |= CNT_FLAG_NOTIFY_ACT;
-		}
-		if (hall.left_notify_deact) {
-			f |= CNT_FLAG_NOTIFY_DEACT;
-		}
 		if (hall.left_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
@@ -253,12 +248,6 @@ static void fill_snapshot(void)
 	}
 	if (g_app_config.cap_hall_right) {
 		uint32_t f = 0;
-		if (hall.right_notify_act) {
-			f |= CNT_FLAG_NOTIFY_ACT;
-		}
-		if (hall.right_notify_deact) {
-			f |= CNT_FLAG_NOTIFY_DEACT;
-		}
 		if (hall.right_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
@@ -271,12 +260,6 @@ static void fill_snapshot(void)
 	/* input A / B */
 	if (g_app_config.cap_input_a) {
 		uint32_t f = 0;
-		if (input.input_a_notify_act) {
-			f |= CNT_FLAG_NOTIFY_ACT;
-		}
-		if (input.input_a_notify_deact) {
-			f |= CNT_FLAG_NOTIFY_DEACT;
-		}
 		if (input.input_a_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}
@@ -287,12 +270,6 @@ static void fill_snapshot(void)
 	}
 	if (g_app_config.cap_input_b) {
 		uint32_t f = 0;
-		if (input.input_b_notify_act) {
-			f |= CNT_FLAG_NOTIFY_ACT;
-		}
-		if (input.input_b_notify_deact) {
-			f |= CNT_FLAG_NOTIFY_DEACT;
-		}
 		if (input.input_b_is_active) {
 			f |= CNT_FLAG_ACTIVE;
 		}

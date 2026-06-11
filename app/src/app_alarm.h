@@ -10,37 +10,30 @@
 /* Standard includes */
 #include <stdbool.h>
 
+/* The alarm source/quantity enums + the rule model live in app_alarm_rules.h —
+ * alarms are now driven by a dynamic rule list, not a fixed source enum. */
+#include "app_alarm_rules.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Alarm sources. The first five are discrete (edge) sources driven by
- * app_alarm_event(); the threshold sources are driven by app_alarm_poll(). The
- * enum value is the source id used in the fPort-3 alarm-detail payload (#27).
- * New sources insert before _COUNT (the id is stable per position). */
-enum app_alarm_source {
-	APP_ALARM_SOURCE_HALL_LEFT,
-	APP_ALARM_SOURCE_HALL_RIGHT,
-	APP_ALARM_SOURCE_PIR_MOTION,
-	APP_ALARM_SOURCE_INPUT_A,
-	APP_ALARM_SOURCE_INPUT_B,
-	APP_ALARM_SOURCE_TEMPERATURE,
-	APP_ALARM_SOURCE_HUMIDITY,
-	APP_ALARM_SOURCE_PRESSURE,
-	APP_ALARM_SOURCE_T1_TEMPERATURE,
-	APP_ALARM_SOURCE_T2_TEMPERATURE,
-	APP_ALARM_SOURCE_ACCEL_MOTION,
-	APP_ALARM_SOURCE_COUNT,
-};
-
 typedef void (*app_alarm_event_cb)(enum app_alarm_source source, bool active, void *user_data);
 
+/* Evaluate the threshold / slot-tilt / counter-rate rules against the latest
+ * sensor data. Returns true while any rule's alarm is latched active. Called
+ * periodically from the main loop. */
 bool app_alarm_poll(void);
+
+/* Report a discrete-source edge (hall/input/PIR/accel). `active` is the new
+ * digital level. Matched against the source's STATE rule (from/to: edge one-shot
+ * or level). Driven by the GPIO/poll handlers in app_hall/app_input/app_sensor. */
 void app_alarm_event(enum app_alarm_source source, bool active);
+
 int app_alarm_set_event_callback(app_alarm_event_cb cb, void *user_data);
 
-/* Human-readable source name (for logs / decoder parity). */
-const char *app_alarm_source_name(enum app_alarm_source source);
+/* True if the rule for (source, quantity) currently has its alarm latched. */
+bool app_alarm_is_active(enum app_alarm_source source, enum app_alarm_quantity quantity);
 
 #ifdef __cplusplus
 }

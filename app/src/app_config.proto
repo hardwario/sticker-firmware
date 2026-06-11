@@ -49,43 +49,44 @@ message AppConfigMessage {
         }
 
         reserved 3;
+        reserved 5;
+        reserved 6;
+        reserved 7;
+        reserved 8;
+        reserved 9;
+        reserved 10;
+        reserved 11;
+        reserved 12;
+        reserved 13;
+        reserved 14;
+        reserved 15;
+        reserved 16;
+        reserved 17;
+        reserved 18;
+        reserved 19;
+        reserved 20;
+        reserved 21;
+        reserved 22;
+        reserved 23;
+        reserved 24;
+        reserved 26;
+        reserved 27;
+        reserved 29;
+        reserved 30;
+        reserved 32;
+        reserved 33;
+        reserved 35;
+        reserved 36;
         reserved 47;
         reserved 48;
+        reserved 53;
         optional bool calibration = 1;
         optional uint32 interval_sample = 2;
         optional uint32 interval_report = 4;
-        optional bool temperature_alarm_enabled = 5;
-        optional float temperature_alarm_lo = 6;
-        optional float temperature_alarm_hi = 7;
-        optional float temperature_alarm_hst = 8;
-        optional bool humidity_alarm_enabled = 9;
-        optional float humidity_alarm_lo = 10;
-        optional float humidity_alarm_hi = 11;
-        optional float humidity_alarm_hst = 12;
-        optional bool pressure_alarm_enabled = 13;
-        optional float pressure_alarm_lo = 14;
-        optional float pressure_alarm_hi = 15;
-        optional float pressure_alarm_hst = 16;
-        optional bool t1_alarm_enabled = 17;
-        optional float t1_alarm_lo = 18;
-        optional float t1_alarm_hi = 19;
-        optional float t1_alarm_hst = 20;
-        optional bool t2_alarm_enabled = 21;
-        optional float t2_alarm_lo = 22;
-        optional float t2_alarm_hi = 23;
-        optional float t2_alarm_hst = 24;
         optional bool hall_left_counter = 25;
-        optional bool hall_left_notify_act = 26;
-        optional bool hall_left_notify_deact = 27;
         optional bool hall_right_counter = 28;
-        optional bool hall_right_notify_act = 29;
-        optional bool hall_right_notify_deact = 30;
         optional bool input_a_counter = 31;
-        optional bool input_a_notify_act = 32;
-        optional bool input_a_notify_deact = 33;
         optional bool input_b_counter = 34;
-        optional bool input_b_notify_act = 35;
-        optional bool input_b_notify_deact = 36;
         optional float temperature_corr = 37;
         optional float t1_corr = 38;
         optional float t2_corr = 39;
@@ -100,7 +101,6 @@ message AppConfigMessage {
         optional uint32 history_sensors = 50;
         optional uint32 alarm_limit = 51;
         optional uint32 alarm_notif_time = 52;
-        optional bool pir_notify_act = 53;
         optional MotionSensitivity accel_motion_sensitivity = 54;
         optional bool cap_accelerometer = 55;
         optional string sensor1_rom = 56;
@@ -127,6 +127,7 @@ message Command {
         ResetCounters   reset_counters   = 10;
         ReqHistory      req_history      = 11;
         ClockSync       clock_sync       = 12;
+        AlarmRule       alarm_rule       = 13;
     }
 
     message SetParam {
@@ -157,6 +158,22 @@ message Command {
     }
     message ReqHistory   { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
     message ClockSync    { }
+
+    // Set, clear or clear-all a dynamic alarm rule (target = source + quantity).
+    // SET uses the kind's fields (threshold lo/hi/hst, state from/to); CLEAR
+    // removes one (source,quantity); CLEAR_ALL wipes the list. Rules persist.
+    message AlarmRule {
+        enum Op { SET = 0; CLEAR = 1; CLEAR_ALL = 2; }
+        Op     op         = 1;
+        uint32 source     = 2;   // enum app_alarm_source
+        uint32 quantity   = 3;   // enum app_alarm_quantity
+        bool   enabled    = 4;
+        optional float  lo  = 5;
+        optional float  hi  = 6;
+        optional float  hst = 7;
+        optional uint32 from_state = 8;
+        optional uint32 to_state   = 9;
+    }
 }
 
 message Response {
@@ -239,25 +256,10 @@ message AlarmReport {
 }
 
 message AlarmEvent {
-    // An alarm edge described by three orthogonal enums instead of one combined
-    // flag: which sensor (source), the transition (edge), and — for thresholds —
-    // which bound was crossed (side). Discrete sources (hall/input/PIR) report
-    // SIDE_NONE; PIR is activate-only.
-
-    // Sensor that raised the event. Values match enum app_alarm_source 1:1.
-    enum Source {
-        HALL_LEFT      = 0;
-        HALL_RIGHT     = 1;
-        PIR_MOTION     = 2;
-        INPUT_A        = 3;
-        INPUT_B        = 4;
-        TEMPERATURE    = 5;
-        HUMIDITY       = 6;
-        PRESSURE       = 7;
-        T1_TEMPERATURE = 8;
-        T2_TEMPERATURE = 9;
-        ACCEL_MOTION   = 10;
-    }
+    // One alarm edge from a dynamic alarm rule. The rule's target is (source,
+    // quantity); the event reports the transition (edge), the threshold bound
+    // (side, threshold rules only) and the current value. The rule config
+    // (from/to, lo/hi, rate N) is NOT on the wire — only the resulting edge.
 
     // Transition direction. ACTIVATE = 0 so the common case omits the field.
     enum Edge {
@@ -265,18 +267,19 @@ message AlarmEvent {
         DEACTIVATE = 1;
     }
 
-    // Which threshold bound was crossed; SIDE_NONE for discrete sources.
+    // Which threshold bound was crossed; SIDE_NONE for state/count rules.
     enum Side {
         SIDE_NONE = 0;
         SIDE_LO   = 1;
         SIDE_HI   = 2;
     }
 
-    Source source = 1;           // which sensor
-    Edge   edge   = 2;           // activate / deactivate
-    Side   side   = 3;           // hi / lo / none
-    uint32 rel_s  = 4;           // seconds since AlarmReport.base_time
-    optional sint32 value = 5;   // current value, scaled (×100 temp/hum, ×10 pressure); absent for discrete
+    uint32 source   = 1;         // enum app_alarm_source: onboard/s1..s4/hall-l/r/input-a/b/pir/accel
+    Edge   edge     = 2;         // activate / deactivate
+    Side   side     = 3;         // hi / lo / none
+    uint32 rel_s    = 4;         // seconds since AlarmReport.base_time
+    optional sint32 value = 5;   // current value: analog ×100 (temp/hum) or ×10 (pressure), digital 0/1, or counter
+    uint32 quantity = 6;         // enum app_alarm_quantity: temperature/humidity/.../state/count
 }
 
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap
