@@ -438,7 +438,7 @@ void app_sensor_sample(void)
 	g_app_sensor_data.orientation = orientation;
 	g_app_sensor_data.voltage = voltage;
 
-	g_app_sensor_data.temperature = temperature + g_app_config.temperature_corr;
+	g_app_sensor_data.temperature = temperature;
 	g_app_sensor_data.humidity = humidity;
 	g_app_sensor_data.illuminance = illuminance;
 	g_app_sensor_data.altitude = altitude;
@@ -454,14 +454,6 @@ void app_sensor_sample(void)
 	g_app_sensor_data.input_a_is_active = input_data.input_a_is_active;
 	g_app_sensor_data.input_b_is_active = input_data.input_b_is_active;
 
-	/* Apply the per-slot temperature correction (only slots 0/1 have a config
-	 * key today; full per-slot corr lands with the per-slot alarms in P2). */
-	if (w1[0].present && !isnan(w1[0].temperature)) {
-		w1[0].temperature += g_app_config.t1_corr;
-	}
-	if (w1[1].present && !isnan(w1[1].temperature)) {
-		w1[1].temperature += g_app_config.t2_corr;
-	}
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 		g_app_sensor_data.w1[s] = w1[s];
 	}

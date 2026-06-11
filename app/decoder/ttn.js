@@ -62,40 +62,37 @@ function _pbReadFloat(bytes, offset) {
 
 var _BUILD_TYPES = ["main", "dev", "custom"];
 
-// proto field tag -> name for ConfigDump.Application (floats marked in _APP_FLOAT)
+// Config submessage maps: proto field tag -> name. The flat C struct is split
+// across submessages lorawan/application/sensors/alarms; device identity stays
+// at the AppConfigMessage root (not addressable via SetParam/GetConfig).
+// proto_ids are preserved from the pre-regroup schema.
 var _APP_NAMES = {
   1: "calibration", 2: "interval_sample", 4: "interval_report",
-  // 5-24 (fixed threshold alarms), 26/27/29/30/32/33/35/36 (hall/input notify)
-  // and 53 (pir_notify_act) retired -> reserved in the proto (dynamic-alarms
-  // migration); alarms are now configured as rules via the AlarmRule command.
-  25: "hall_left_counter",
-  28: "hall_right_counter",
-  31: "input_a_counter",
-  34: "input_b_counter",
-  37: "temperature_corr", 38: "t1_corr", 39: "t2_corr",
+  49: "history_enable", 50: "history_sensors"
+};
+var _APP_ENUMS = {};
+var _APP_FLOAT = {};
+
+var _SEN_NAMES = {
   40: "cap_hall_left", 41: "cap_hall_right", 42: "cap_input_a", 43: "cap_input_b",
   44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector",
-  // 47/48 (cap_1w_thermometer/machine_probe) retired -> reserved in the proto.
-  49: "history_enable", 50: "history_sensors", 51: "alarm_limit", 52: "alarm_notif_time",
-  54: "accel_motion_sensitivity", 55: "cap_accelerometer",
-  // 56-59 sensor1..4_rom are bytes (need hex handling, see 1-Wire framework); 60 below.
-  60: "cap_w1_sensors"
+  54: "accel_motion_sensitivity", 55: "cap_accelerometer", 60: "cap_w1_sensors"
 };
+var _SEN_ENUMS = { 54: ["off", "low", "medium", "high"] };
+var _SEN_FLOAT = {};
+var _SEN_HEX = { 56: "sensor1_rom", 57: "sensor2_rom", 58: "sensor3_rom", 59: "sensor4_rom" };
+var _SEN_HEX_ENC = { sensor1_rom: 56, sensor2_rom: 57, sensor3_rom: 58, sensor4_rom: 59 };
 
-// Enum-valued Application fields: decode renders the symbolic name, encode
-// accepts either the name or the raw number.
-var _APP_ENUMS = {
-  54: ["off", "low", "medium", "high"]
+var _ALM_NAMES = {
+  51: "alarm_limit", 52: "alarm_notif_time",
+  25: "hall_left_counter", 28: "hall_right_counter",
+  31: "input_a_counter", 34: "input_b_counter"
 };
+var _ALM_ENUMS = {};
+var _ALM_FLOAT = {};
+
 var _LRW_NAMES = { 1: "region", 2: "network", 3: "adr", 4: "activation", 12: "sub_band" };
 var _LRW_HEX = { 5: "deveui", 6: "joineui", 9: "devaddr" };
-
-// Application tags carrying a float32 (protobuf wire type 5): the correction
-// offsets. (Alarm threshold floats 6-24 retired with dynamic-alarms.)
-// Everything else in Application is a varint.
-var _APP_FLOAT = {
-  37: 1, 38: 1, 39: 1
-};
 
 // Reverse maps (name -> tag) for encoding SetParam. The LoRaWAN hex set adds the
 // secret keys (nwkkey/appkey/nwkskey/appskey) which the decoder deliberately
@@ -112,6 +109,8 @@ function _invert(map) {
   return out;
 }
 var _APP_TAGS = _invert(_APP_NAMES);
+var _SEN_TAGS = _invert(_SEN_NAMES);
+var _ALM_TAGS = _invert(_ALM_NAMES);
 var _LRW_TAGS = _invert(_LRW_NAMES);
 
 // proto field tag -> command name in the DownlinkCommand body oneof.
@@ -139,27 +138,34 @@ function _decodeLorawan(bytes, start, end) {
   return o;
 }
 
-function _decodeApplication(bytes, start, end) {
+// Generic config-submessage decoder: varint (with optional symbolic enum),
+// float (wire 5), and bytes -> hex (HEX map). Used for application/sensors/alarms.
+function _decodeCfgGroup(bytes, start, end, NAMES, ENUMS, HEX) {
   var o = {}, pos = start;
   while (pos < end) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var f = tag.value >>> 3, w = tag.value & 0x7;
     if (w === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
-      if (_APP_NAMES[f]) {
-        var ev = _APP_ENUMS[f] && _APP_ENUMS[f][v.value] !== undefined;
-        o[_APP_NAMES[f]] = ev ? _APP_ENUMS[f][v.value] : v.value;
+      if (NAMES[f]) {
+        var ev = ENUMS && ENUMS[f] && ENUMS[f][v.value] !== undefined;
+        o[NAMES[f]] = ev ? ENUMS[f][v.value] : v.value;
       }
     } else if (w === 5) {
       var fl = _pbReadFloat(bytes, pos); pos = fl.next;
-      if (_APP_NAMES[f]) o[_APP_NAMES[f]] = fl.value;
+      if (NAMES[f]) o[NAMES[f]] = fl.value;
     } else if (w === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
+      if (HEX && HEX[f]) o[HEX[f]] = _pbBytesToHex(bytes.slice(pos, pos + len.value));
       pos += len.value;
     } else { break; }
   }
   return o;
 }
+
+function _decodeApplication(b, s, e) { return _decodeCfgGroup(b, s, e, _APP_NAMES, _APP_ENUMS, null); }
+function _decodeSensors(b, s, e) { return _decodeCfgGroup(b, s, e, _SEN_NAMES, _SEN_ENUMS, _SEN_HEX); }
+function _decodeAlarms(b, s, e) { return _decodeCfgGroup(b, s, e, _ALM_NAMES, _ALM_ENUMS, null); }
 
 function _decodeConfigDump(bytes, start, end) {
   var cd = {}, pos = start;
@@ -175,6 +181,8 @@ function _decodeConfigDump(bytes, start, end) {
       var e2 = pos + len.value;
       if (f === 3) cd.lorawan = _decodeLorawan(bytes, pos, e2);
       else if (f === 4) cd.application = _decodeApplication(bytes, pos, e2);
+      else if (f === 5) cd.sensors = _decodeSensors(bytes, pos, e2);
+      else if (f === 6) cd.alarms = _decodeAlarms(bytes, pos, e2);
       pos = e2;
     } else { break; }
   }
@@ -574,19 +582,26 @@ function _encLorawan(lrw) {
   return out;
 }
 
-function _encApplication(app) {
+// Generic config-submessage encoder. HEXENC names encode as length-delimited
+// hex; FLOAT tags as wire-type 5; everything else varint (bool -> 0/1, symbolic
+// enum -> index). Used for application/sensors/alarms.
+function _encCfgGroup(obj, TAGS, FLOAT, ENUMS, HEXENC) {
   var out = [];
-  for (var name in app) {
-    if (!app.hasOwnProperty(name)) continue;
-    var tag = _APP_TAGS[name];
+  for (var name in obj) {
+    if (!obj.hasOwnProperty(name)) continue;
+    var val = obj[name];
+    if (HEXENC && HEXENC[name] !== undefined) {
+      out = out.concat(_encLenDelim(HEXENC[name], _hexToBytes(val)));
+      continue;
+    }
+    var tag = TAGS[name];
     if (tag === undefined) continue;
-    var val = app[name];
-    if (_APP_FLOAT[tag]) {
+    if (FLOAT && FLOAT[tag]) {
       out = out.concat(_encTag(tag, 5)).concat(_encFloat(val));
     } else {
       var num = (typeof val === "boolean") ? (val ? 1 : 0) : val;
-      if (typeof val === "string" && _APP_ENUMS[tag]) {
-        var ix = _APP_ENUMS[tag].indexOf(val);
+      if (typeof val === "string" && ENUMS && ENUMS[tag]) {
+        var ix = ENUMS[tag].indexOf(val);
         if (ix >= 0) num = ix;
       }
       out = out.concat(_encTag(tag, 0)).concat(_encVarint(num));
@@ -594,6 +609,10 @@ function _encApplication(app) {
   }
   return out;
 }
+
+function _encApplication(a) { return _encCfgGroup(a, _APP_TAGS, _APP_FLOAT, _APP_ENUMS, null); }
+function _encSensors(s) { return _encCfgGroup(s, _SEN_TAGS, _SEN_FLOAT, _SEN_ENUMS, _SEN_HEX_ENC); }
+function _encAlarms(a) { return _encCfgGroup(a, _ALM_TAGS, _ALM_FLOAT, _ALM_ENUMS, null); }
 
 function encodeDownlinkCommand(cmd) {
   var out = [];
@@ -613,23 +632,23 @@ function encodeDownlinkCommand(cmd) {
   if (name === "set_param") {
     if (b.lorawan) body = body.concat(_encLenDelim(1, _encLorawan(b.lorawan)));
     if (b.application) body = body.concat(_encLenDelim(2, _encApplication(b.application)));
+    if (b.sensors) body = body.concat(_encLenDelim(4, _encSensors(b.sensors)));
+    if (b.alarms) body = body.concat(_encLenDelim(5, _encAlarms(b.alarms)));
     // save (field 3): persist + reboot after applying; set on the LAST message
     // of a multi-downlink batch only.
     if (b.save) body = body.concat(_encTag(3, 0)).concat(_encVarint(1));
   } else if (name === "get_param") {
     // proto3 repeated scalars are packed (length-delimited) by default.
-    var lf = b.lorawan_field || [];
-    var af = b.application_field || [];
-    if (lf.length) {
+    var _packField = function (arr, tag) {
+      if (!arr || !arr.length) return;
       var pl = [];
-      for (var i = 0; i < lf.length; i++) pl = pl.concat(_encVarint(lf[i]));
-      body = body.concat(_encLenDelim(1, pl));
-    }
-    if (af.length) {
-      var pa = [];
-      for (var j = 0; j < af.length; j++) pa = pa.concat(_encVarint(af[j]));
-      body = body.concat(_encLenDelim(2, pa));
-    }
+      for (var i = 0; i < arr.length; i++) pl = pl.concat(_encVarint(arr[i]));
+      body = body.concat(_encLenDelim(tag, pl));
+    };
+    _packField(b.lorawan_field, 1);
+    _packField(b.application_field, 2);
+    _packField(b.sensors_field, 3);
+    _packField(b.alarms_field, 4);
   } else if (name === "get_config") {
     if (b.page) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.page));
   } else if (name === "reset_counters") {
@@ -691,6 +710,8 @@ function decodeDownlinkCommand(bytes) {
             var l2 = _pbReadVarint(bytes, p); p = l2.next;
             if (f2 === 1) sp.lorawan = _decodeLorawan(bytes, p, p + l2.value);
             else if (f2 === 2) sp.application = _decodeApplication(bytes, p, p + l2.value);
+            else if (f2 === 4) sp.sensors = _decodeSensors(bytes, p, p + l2.value);
+            else if (f2 === 5) sp.alarms = _decodeAlarms(bytes, p, p + l2.value);
             p += l2.value;
           } else if (w2 === 0) {
             var sv = _pbReadVarint(bytes, p); p = sv.next;
@@ -699,11 +720,13 @@ function decodeDownlinkCommand(bytes) {
         }
         cmd.set_param = sp;
       } else if (field === 3) { // get_param (repeated uint32, packed or not)
-        var gp = { lorawan_field: [], application_field: [] }, q = pos;
+        var gp = { lorawan_field: [], application_field: [], sensors_field: [], alarms_field: [] },
+            q = pos;
         while (q < end) {
           var t3 = _pbReadVarint(bytes, q); q = t3.next;
           var f3 = t3.value >>> 3, w3 = t3.value & 0x7;
-          var dst = (f3 === 1) ? gp.lorawan_field : (f3 === 2) ? gp.application_field : null;
+          var dst = (f3 === 1) ? gp.lorawan_field : (f3 === 2) ? gp.application_field
+                  : (f3 === 3) ? gp.sensors_field : (f3 === 4) ? gp.alarms_field : null;
           if (w3 === 0) {
             var v3 = _pbReadVarint(bytes, q); q = v3.next;
             if (dst) dst.push(v3.value);
@@ -713,6 +736,8 @@ function decodeDownlinkCommand(bytes) {
             while (q < e3) { var pv = _pbReadVarint(bytes, q); q = pv.next; if (dst) dst.push(pv.value); }
           } else { break; }
         }
+        ["lorawan_field", "application_field", "sensors_field", "alarms_field"].forEach(
+          function (k) { if (gp[k].length === 0) delete gp[k]; });
         cmd.get_param = gp;
       } else if (field === 5) { // get_config
         var gc = {}, r2 = pos;

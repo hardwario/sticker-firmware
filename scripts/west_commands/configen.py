@@ -526,6 +526,77 @@ def build_proto_model(config):
             "submessages": submessages}
 
 
+def build_ingest_model(config):
+    """jinja context for config_ingest.c.j2: the non-root submessage groups with
+    everything the generated apply_/fill_ functions need (proto field name, C
+    field name, per-type handling kind, range/enum metadata)."""
+    proto, gmap = _proto_groups(config)
+    module = config["module"]["name"]
+    enums = config.get("enums", {})
+
+    by_group = {g["key"]: [] for g in proto["groups"]}
+    for p in config["parameters"]:
+        by_group[p["proto_group"]].append(p)
+
+    enum_proto_name = {}
+    for gkey, plist in by_group.items():
+        for p in plist:
+            if p.get("type") == "enum" and p["enum"] not in enum_proto_name:
+                base = p["enum"]
+                prefix = gmap[gkey].get("strip_prefix", "")
+                if prefix and base.startswith(prefix):
+                    base = base[len(prefix):]
+                enum_proto_name[p["enum"]] = _pascal(base)
+
+    groups = []
+    for g in proto["groups"]:
+        if g["key"] == "root":
+            continue
+        c_message = f"{proto['message']}_{g['message']}"
+        params = []
+        for p in sorted(by_group.get(g["key"], []), key=lambda x: x["proto_id"]):
+            t = p.get("type")
+            e = {
+                "c_name": filter_c_name(p["name"]),
+                "proto_name": _proto_field_name(p, g),
+                "tag": p["proto_id"],
+                "dump": p.get("dump", True),
+                "callback": bool(p.get("proto_callback")),
+            }
+            if t == "bool":
+                e["kind"] = "bool"
+            elif t == "enum":
+                e["kind"] = "enum"
+                e["enum_max"] = max(v["value"] for v in enums[p["enum"]])
+                e["c_enum_type"] = filter_c_type(p, module)
+                e["proto_enum_type"] = f"{c_message}_{enum_proto_name[p['enum']]}"
+            elif t == "bytes":
+                e["kind"] = "bytes"
+            elif t in FLOAT_TYPES:
+                e["kind"] = "float"
+                e["min"] = filter_min_value(p)
+                e["max"] = filter_max_value(p)
+            elif t in NUMERIC_TYPES:
+                if p.get("min") is not None or p.get("max") is not None:
+                    e["kind"] = "int_ranged"
+                    e["min"] = filter_min_value(p)
+                    e["max"] = filter_max_value(p)
+                    e["zero_allowed"] = bool(p.get("extras", {}).get("zero_allowed"))
+                else:
+                    e["kind"] = "plain"
+            else:
+                e["kind"] = "plain"
+            params.append(e)
+        groups.append({
+            "key": g["key"],
+            "c_message": c_message,
+            "apply_fn": f"app_config_apply_{g['key']}",
+            "fill_fn": f"app_config_fill_{g['key']}",
+            "params": params,
+        })
+    return {"message": proto["message"], "ingest_groups": groups}
+
+
 def build_options_lines(config):
     """nanopb max_length options for hex-key (bytes) fields. Fields flagged
     `proto_callback: true` are left as nanopb callbacks (no option emitted)."""
@@ -742,6 +813,25 @@ class Configen(WestCommand):
             log.inf(f"Generated: {source_path}")
 
             self._clang_format([header_path, source_path])
+
+        # Config ingest (apply/fill per proto submessage) — generated so the
+        # SetParam/NFC/GetConfig mapping can't drift from the YAML (#44/#91).
+        ingest_path = output_dir / f"{module_name}_ingest.c"
+        if config.get("proto"):
+            try:
+                ingest_template = env.get_template("config_ingest.c.j2")
+            except Exception as e:
+                log.die(f"Failed to load config_ingest.c.j2: {e}")
+            ingest_content = ingest_template.render(**build_ingest_model(config),
+                                                    module=module)
+            if args.dry_run:
+                log.inf(f"Would generate: {ingest_path}")
+                print(ingest_content)
+            else:
+                with open(ingest_path, "w") as f:
+                    f.write(ingest_content)
+                log.inf(f"Generated: {ingest_path}")
+                self._clang_format([ingest_path])
 
         # Proto + nanopb options generation (issue #44).
         if config.get("proto") and not args.no_proto:

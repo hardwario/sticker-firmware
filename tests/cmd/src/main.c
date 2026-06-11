@@ -65,17 +65,17 @@ ZTEST(cmd, test_set_param_applies_and_acks)
 	Response r;
 
 	reset_cfg();
-	/* seq1 set_param{ lorawan.adr=true, application{interval_report=120,
-	 *                 temperature_corr=2.5} } (fixed alarm keys retired) */
-	enum app_cmd_action a = handle("0801120e0a02180112082078ad0200002040", &r);
+	/* seq1 set_param{ lorawan.adr=true, application{interval_report=120},
+	 *                 sensors{cap_barometer=true} } (config regroup) */
+	enum app_cmd_action a = handle("0801120d0a021801120220782203e80201", &r);
 
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action expected");
 	zassert_equal(r.which_body, Response_ack_tag, "expected Ack, which=%d", r.which_body);
 	zassert_equal(r.seq, 1, "seq");
-	/* config applied through the real ingest path */
+	/* config applied through the real ingest path (4 submessages -> flat struct) */
 	zassert_true(g_app_config.lrw_adr, "adr not applied");
 	zassert_equal(g_app_config.interval_report, 120, "interval_report not applied");
-	zassert_within(g_app_config.temperature_corr, 2.5f, 0.01f, "corr not applied");
+	zassert_true(g_app_config.cap_barometer, "cap_barometer not applied");
 }
 
 ZTEST(cmd, test_set_param_out_of_range)
@@ -101,10 +101,11 @@ ZTEST(cmd, test_get_param_config_dump)
 	reset_cfg();
 	g_app_config.lrw_adr = true;
 	g_app_config.interval_report = 120;
-	g_app_config.temperature_corr = 2.5f;
+	g_app_config.cap_barometer = true;
 
-	/* seq2 get_param{ lorawan_field=[3 adr], application_field=[4 ireport, 37 corr] } */
-	handle("08021a070a010312020425", &r);
+	/* seq2 get_param{ lorawan_field=[3 adr], application_field=[4 ireport],
+	 *                 sensors_field=[45 cap_barometer] } */
+	handle("08021a090a01031201041a012d", &r);
 
 	zassert_equal(r.which_body, Response_config_dump_tag, "expected ConfigDump, which=%d",
 		      r.which_body);
@@ -112,8 +113,8 @@ ZTEST(cmd, test_get_param_config_dump)
 	zassert_true(r.body.config_dump.lorawan.adr, "adr value");
 	zassert_true(r.body.config_dump.application.has_interval_report, "ireport not dumped");
 	zassert_equal(r.body.config_dump.application.interval_report, 120, "ireport value");
-	zassert_true(r.body.config_dump.application.has_temperature_corr, "corr not dumped");
-	zassert_within(r.body.config_dump.application.temperature_corr, 2.5f, 0.01f, "corr");
+	zassert_true(r.body.config_dump.sensors.has_cap_barometer, "cap_barometer not dumped");
+	zassert_true(r.body.config_dump.sensors.cap_barometer, "cap_barometer value");
 }
 
 ZTEST(cmd, test_build_info)

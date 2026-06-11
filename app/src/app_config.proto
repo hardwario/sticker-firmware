@@ -8,6 +8,8 @@ message AppConfigMessage {
     optional uint32 nonce_counter = 4;
     optional Lorawan lorawan = 5;
     optional Application application = 6;
+    optional Sensors sensors = 7;
+    optional Alarms alarms = 8;
 
     message Lorawan {
         enum Region {
@@ -41,6 +43,15 @@ message AppConfigMessage {
     }
 
     message Application {
+        reserved 3;
+        optional bool calibration = 1;
+        optional uint32 interval_sample = 2;
+        optional uint32 interval_report = 4;
+        optional bool history_enable = 49;
+        optional uint32 history_sensors = 50;
+    }
+
+    message Sensors {
         enum MotionSensitivity {
             OFF = 0;
             LOW = 1;
@@ -48,7 +59,28 @@ message AppConfigMessage {
             HIGH = 3;
         }
 
-        reserved 3;
+        reserved 37;
+        reserved 38;
+        reserved 39;
+        reserved 47;
+        reserved 48;
+        optional bool cap_hall_left = 40;
+        optional bool cap_hall_right = 41;
+        optional bool cap_input_a = 42;
+        optional bool cap_input_b = 43;
+        optional bool cap_light_sensor = 44;
+        optional bool cap_barometer = 45;
+        optional bool cap_pir_detector = 46;
+        optional MotionSensitivity accel_motion_sensitivity = 54;
+        optional bool cap_accelerometer = 55;
+        optional string sensor1_rom = 56;
+        optional string sensor2_rom = 57;
+        optional string sensor3_rom = 58;
+        optional string sensor4_rom = 59;
+        optional bool cap_w1_sensors = 60;
+    }
+
+    message Alarms {
         reserved 5;
         reserved 6;
         reserved 7;
@@ -77,37 +109,13 @@ message AppConfigMessage {
         reserved 33;
         reserved 35;
         reserved 36;
-        reserved 47;
-        reserved 48;
         reserved 53;
-        optional bool calibration = 1;
-        optional uint32 interval_sample = 2;
-        optional uint32 interval_report = 4;
         optional bool hall_left_counter = 25;
         optional bool hall_right_counter = 28;
         optional bool input_a_counter = 31;
         optional bool input_b_counter = 34;
-        optional float temperature_corr = 37;
-        optional float t1_corr = 38;
-        optional float t2_corr = 39;
-        optional bool cap_hall_left = 40;
-        optional bool cap_hall_right = 41;
-        optional bool cap_input_a = 42;
-        optional bool cap_input_b = 43;
-        optional bool cap_light_sensor = 44;
-        optional bool cap_barometer = 45;
-        optional bool cap_pir_detector = 46;
-        optional bool history_enable = 49;
-        optional uint32 history_sensors = 50;
         optional uint32 alarm_limit = 51;
         optional uint32 alarm_notif_time = 52;
-        optional MotionSensitivity accel_motion_sensitivity = 54;
-        optional bool cap_accelerometer = 55;
-        optional string sensor1_rom = 56;
-        optional string sensor2_rom = 57;
-        optional string sensor3_rom = 58;
-        optional string sensor4_rom = 59;
-        optional bool cap_w1_sensors = 60;
     }
 }
 // END GENERATED CONFIG
@@ -137,11 +145,15 @@ message Command {
         // is split across several SetParam downlinks that accumulate in staging;
         // set save=true on the LAST one only to commit everything at once.
         optional bool                         save        = 3;
+        optional AppConfigMessage.Sensors     sensors     = 4;
+        optional AppConfigMessage.Alarms      alarms      = 5;
     }
 
     message GetParam {
         repeated uint32 lorawan_field     = 1;
         repeated uint32 application_field = 2;
+        repeated uint32 sensors_field     = 3;
+        repeated uint32 alarms_field      = 4;
     }
 
     message GetInfo      { }
@@ -215,6 +227,8 @@ message Response {
         uint32 page_count = 2;
         optional AppConfigMessage.Lorawan     lorawan     = 3;
         optional AppConfigMessage.Application application = 4;
+        optional AppConfigMessage.Sensors     sensors     = 5;
+        optional AppConfigMessage.Alarms      alarms      = 6;
     }
 
     message HistoryFrame {
