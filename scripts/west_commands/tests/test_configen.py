@@ -358,6 +358,30 @@ def test_generated_dispatch_region_matches_committed(workdir):
     assert (workdir / "app_cmd.c").read_text() == (APP_SRC / "app_cmd.c").read_text()
 
 
+def test_generated_proto_command_oneof_matches_committed(workdir):
+    """The generated Command oneof region must equal what is committed in the
+    .proto (locks the command wire ids alongside the config region)."""
+    _run_configen(workdir)
+    assert (workdir / "app_config.proto").read_text() == PROTO.read_text()
+
+
+def test_command_renumber_is_rejected(workdir):
+    """Changing a command's proto_id away from the committed .proto fails the run
+    (deployed downlinks / NFC tags encode the tag)."""
+    _run_configen(workdir)  # seed the committed ids into workdir proto
+    import ruamel.yaml
+    rt = ruamel.yaml.YAML()
+    with open(workdir / "app_config.yml") as f:
+        doc = rt.load(f)
+    for c in doc["commands"]["list"]:
+        if c["name"] == "w1_scan":
+            c["proto_id"] = 20  # was 14
+    with open(workdir / "app_config.yml", "w") as f:
+        rt.dump(doc, f)
+    with pytest.raises(SystemExit):
+        _run_configen(workdir)
+
+
 def test_dispatch_template_routes_every_command():
     """Every command in the model appears in the rendered dispatch switch, with
     LRW-only commands guarded and action commands setting their action."""

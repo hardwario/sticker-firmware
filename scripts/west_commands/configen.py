@@ -614,6 +614,18 @@ def build_options_lines(config):
     return lines
 
 
+def rewrite_marked_text(text, body, comment, begin_label, end_label, where=""):
+    """Replace the text between the BEGIN/END markers in `text` with `body`."""
+    begin = f"{comment} {begin_label}"
+    end = f"{comment} {end_label}"
+    if begin not in text or end not in text:
+        log.die(f"{where or 'input'} is missing the generated-region markers "
+                f"({begin} / {end})")
+    head, rest = text.split(begin, 1)
+    _, tail = rest.split(end, 1)
+    return f"{head}{begin}\n{body}\n{end}{tail}"
+
+
 def rewrite_marked_region(path, body, comment,
                           begin_label=PROTO_BEGIN, end_label=PROTO_END):
     """Replace the text between the BEGIN/END markers in `path` with `body`,
@@ -623,15 +635,8 @@ def rewrite_marked_region(path, body, comment,
     if not path.exists():
         log.die(f"target {path} not found — seed it with the "
                 f"'{comment} {begin_label}' / '{comment} {end_label}' markers first")
-    text = path.read_text()
-    begin = f"{comment} {begin_label}"
-    end = f"{comment} {end_label}"
-    if begin not in text or end not in text:
-        log.die(f"{path} is missing the generated-region markers "
-                f"({begin} / {end})")
-    head, rest = text.split(begin, 1)
-    _, tail = rest.split(end, 1)
-    return f"{head}{begin}\n{body}\n{end}{tail}"
+    return rewrite_marked_text(path.read_text(), body, comment,
+                               begin_label, end_label, str(path))
 
 
 # Marker labels for the command-codegen regions (each lives in its own file:
@@ -645,6 +650,28 @@ DISPATCH_END = "END GENERATED DISPATCH"
 # Response-body kinds whose dispatch emits no immediate Response (the command's
 # effect — telemetry, history frames, a deferred Info — is the answer).
 COMMAND_RESPONSE_NONE = {"none", "info_deferred"}
+
+
+def guard_no_renumber_commands(model, proto_path):
+    """Fail the run if a command's proto_id differs from the one already in the
+    Command oneof region of the target .proto (a deployed downlink / NFC tag
+    encodes the tag, so renumbering silently breaks the field protocol)."""
+    if not proto_path.exists():
+        return
+    text = proto_path.read_text()
+    begin = f"// {COMMANDS_BEGIN}"
+    end = f"// {COMMANDS_END}"
+    if begin not in text or end not in text:
+        return
+    region = text.split(begin, 1)[1].split(end, 1)[0]
+    old = {}
+    for m in re.finditer(r"^\s*\w+\s+(\w+)\s*=\s*(\d+)\s*;", region, re.MULTILINE):
+        old[m.group(1)] = int(m.group(2))
+    for c in model["commands"]:
+        if c["name"] in old and old[c["name"]] != c["proto_id"]:
+            log.die(f"command proto_id for '{c['name']}' changed "
+                    f"{old[c['name']]} -> {c['proto_id']} — renumbering is "
+                    f"forbidden (downlinks / NFC tags already deployed)")
 
 
 def build_commands_model(config):
@@ -698,6 +725,9 @@ def build_commands_model(config):
         "reserved": list(commands.get("reserved", [])),
         "commands": cmds,        # YAML order (decoder/dispatch)
         "commands_by_id": by_id, # proto_id order (proto oneof)
+        # Column widths so the generated .proto oneof aligns like the rest.
+        "type_width": max(len(c["body"]) for c in cmds),
+        "name_width": max(len(c["name"]) for c in cmds),
     }
 
 
@@ -953,6 +983,19 @@ class Configen(WestCommand):
         model = build_proto_model(config)
         body = env.get_template("config.proto.j2").render(proto=model).rstrip("\n")
         proto_text = rewrite_marked_region(proto_path, body, "//")
+
+        # Command oneof: a second generated region in the same .proto (the body
+        # sub-messages + Response stay hand-written). Rewritten in-memory on top
+        # of the config region, when the YAML has a commands list and the file
+        # carries the markers.
+        commands_model = build_commands_model(config)
+        if commands_model and f"// {COMMANDS_BEGIN}" in proto_text:
+            guard_no_renumber_commands(commands_model, proto_path)
+            cmd_body = env.get_template("commands_proto.j2").render(
+                **commands_model).rstrip("\n")
+            proto_text = rewrite_marked_text(proto_text, cmd_body, "//",
+                                             COMMANDS_BEGIN, COMMANDS_END,
+                                             str(proto_path))
 
         options_body = "\n".join(build_options_lines(config))
         options_text = rewrite_marked_region(options_path, options_body, "#")
