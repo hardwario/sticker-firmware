@@ -160,7 +160,6 @@ ZTEST(compose, test_counter_flags)
 	g_app_config.cap_hall_left = true;
 	test_hall.left_count = 7;
 	test_hall.left_is_active = true;
-	test_hall.left_notify_act = true;
 	run_report(fr, 8, &n);
 
 	bool seen = false;
@@ -169,8 +168,8 @@ ZTEST(compose, test_counter_flags)
 			seen = true;
 			zassert_equal(fr[i].hall_left_count, 7, "hall count");
 			zassert_true(fr[i].has_hall_left_flags, "flags missing");
-			/* NOTIFY_ACT(bit0) | ACTIVE(bit2) = 0x5 */
-			zassert_equal(fr[i].hall_left_flags, 0x5, "flags %u",
+			/* notify bits 0/1 retired (dynamic-alarms); ACTIVE(bit2) = 0x4 */
+			zassert_equal(fr[i].hall_left_flags, 0x4, "flags %u",
 				      fr[i].hall_left_flags);
 		}
 	}
