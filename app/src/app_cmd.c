@@ -132,6 +132,12 @@ static void handle_set_param(const Command_SetParam *sp, Response *resp,
 	if (rc == 0 && sp->has_application) {
 		rc = app_config_apply_application(&sp->application, &fault);
 	}
+	if (rc == 0 && sp->has_sensors) {
+		rc = app_config_apply_sensors(&sp->sensors, &fault);
+	}
+	if (rc == 0 && sp->has_alarms) {
+		rc = app_config_apply_alarms(&sp->alarms, &fault);
+	}
 
 	if (rc) {
 		*app_config() = snapshot; /* roll back the whole batch */
@@ -163,6 +169,16 @@ static void handle_get_param(const Command_GetParam *gp, Response *resp)
 		app_config_fill_application(&resp->body.config_dump.application,
 					    gp->application_field, gp->application_field_count);
 	}
+	if (gp->sensors_field_count > 0) {
+		resp->body.config_dump.has_sensors = true;
+		app_config_fill_sensors(&resp->body.config_dump.sensors, gp->sensors_field,
+					gp->sensors_field_count);
+	}
+	if (gp->alarms_field_count > 0) {
+		resp->body.config_dump.has_alarms = true;
+		app_config_fill_alarms(&resp->body.config_dump.alarms, gp->alarms_field,
+				       gp->alarms_field_count);
+	}
 }
 
 /* Dumpable config fields in fixed order, each with a conservative upper bound
@@ -170,19 +186,24 @@ static void handle_get_param(const Command_GetParam *gp, Response *resp)
  * Mirrors the non-secret fields emitted by app_config_fill_lorawan/application
  * — a new config field needs a row here too (a codegen target once #44 lands).
  * Drives get_config paging: greedy bin-pack into DR0-sized ConfigDump pages. */
+/* Sections mirror the config submessages (one fill_<group>() each). Order is
+ * the ConfigDump submessage order. */
 #define DUMP_SECTION_LORAWAN     0
 #define DUMP_SECTION_APPLICATION 1
+#define DUMP_SECTION_SENSORS     2
+#define DUMP_SECTION_ALARMS      3
 
 #define LRW(tag, size) {DUMP_SECTION_LORAWAN, (tag), (size)}
-#define APP2(tag)      {DUMP_SECTION_APPLICATION, (tag), 2}
-#define APP5(tag)      {DUMP_SECTION_APPLICATION, (tag), 5}
+#define APP(tag)       {DUMP_SECTION_APPLICATION, (tag), 2}
+#define SEN(tag, size) {DUMP_SECTION_SENSORS, (tag), (size)}
+#define ALM(tag)       {DUMP_SECTION_ALARMS, (tag), 2}
 
 static const struct {
 	uint8_t section;
 	uint8_t tag;
 	uint8_t size;
 } DUMP_FIELDS[] = {
-	/* Lorawan (non-secret): varints 2 B, deveui/joineui 18 B, devaddr 10 B */
+	/* Lorawan (non-secret): varints 2 B, deveui/joineui 18 B, devaddr 10 B. */
 	LRW(1, 2),
 	LRW(2, 2),
 	LRW(3, 2),
@@ -191,29 +212,37 @@ static const struct {
 	LRW(6, 18),
 	LRW(9, 10),
 	LRW(12, 2),
-	/* Application (tag 3 interval_aggreg has no config field — skipped, like
-	 * fill_application). Floats 5 B, everything else 2 B. */
-	APP2(1),
-	APP2(2),
-	APP2(4),
-	/* tags 5-24 (threshold alarms), 26/27/29/30/32/33/35/36 (notify) retired —
-	 * dynamic-alarms migration; counters 25/28/31/34 kept. */
-	APP2(25),
-	APP2(28),
-	APP2(31),
-	APP2(34),
-	APP5(37),
-	APP5(38),
-	APP5(39),
-	APP2(40),
-	APP2(41),
-	APP2(42),
-	APP2(43),
-	APP2(44),
-	APP2(45),
-	APP2(46),
-	APP2(47),
-	APP2(48),
+	/* Application: calibration, intervals, history (varints, 2 B). */
+	APP(1),
+	APP(2),
+	APP(4),
+	APP(49),
+	APP(50),
+	/* Sensors: corr floats 5 B, caps/enum 2 B, sensorN_rom 8 B -> 18 B hex. */
+	SEN(37, 5),
+	SEN(38, 5),
+	SEN(39, 5),
+	SEN(40, 2),
+	SEN(41, 2),
+	SEN(42, 2),
+	SEN(43, 2),
+	SEN(44, 2),
+	SEN(45, 2),
+	SEN(46, 2),
+	SEN(54, 2),
+	SEN(55, 2),
+	SEN(60, 2),
+	SEN(56, 18),
+	SEN(57, 18),
+	SEN(58, 18),
+	SEN(59, 18),
+	/* Alarms: alarm_limit/notif_time + hall/input counters (varints, 2 B). */
+	ALM(51),
+	ALM(52),
+	ALM(25),
+	ALM(28),
+	ALM(31),
+	ALM(34),
 };
 
 /* Per-page byte budget for the field payload inside one ConfigDump. The encoded
@@ -228,14 +257,13 @@ static void handle_get_config(const Command_GetConfig *gc, Response *resp)
 {
 	uint32_t page = gc->has_page ? gc->page : 0;
 
-	/* Both sized to the whole table: a LoRaWAN row added to DUMP_FIELDS must not
-	 * overflow lrw_ids (was a fixed [8] matching exactly today's LoRaWAN rows). */
-	uint32_t lrw_ids[ARRAY_SIZE(DUMP_FIELDS)];
-	uint32_t app_ids[ARRAY_SIZE(DUMP_FIELDS)];
-	size_t n_lrw = 0, n_app = 0;
+	/* One tag buffer per section, each sized to the whole table so any single
+	 * section can hold all of a page's tags without overflow. */
+	uint32_t ids[4][ARRAY_SIZE(DUMP_FIELDS)];
+	size_t n[4] = {0};
 
 	/* Single greedy pass: pack fields into pages by DUMP_PAGE_BUDGET, collect
-	 * the requested page's tags, and learn the total page count. */
+	 * the requested page's tags per section, and learn the total page count. */
 	uint32_t cur_page = 0, used = 0;
 	for (size_t i = 0; i < ARRAY_SIZE(DUMP_FIELDS); i++) {
 		if (used > 0 && used + DUMP_FIELDS[i].size > DUMP_PAGE_BUDGET) {
@@ -245,11 +273,8 @@ static void handle_get_config(const Command_GetConfig *gc, Response *resp)
 		used += DUMP_FIELDS[i].size;
 
 		if (cur_page == page) {
-			if (DUMP_FIELDS[i].section == DUMP_SECTION_LORAWAN) {
-				lrw_ids[n_lrw++] = DUMP_FIELDS[i].tag;
-			} else {
-				app_ids[n_app++] = DUMP_FIELDS[i].tag;
-			}
+			uint8_t s = DUMP_FIELDS[i].section;
+			ids[s][n[s]++] = DUMP_FIELDS[i].tag;
 		}
 	}
 	uint32_t page_count = cur_page + 1;
@@ -260,17 +285,30 @@ static void handle_get_config(const Command_GetConfig *gc, Response *resp)
 		return;
 	}
 
+	Response_ConfigDump *cd = &resp->body.config_dump;
 	resp->which_body = Response_config_dump_tag;
-	resp->body.config_dump.page_index = page;
-	resp->body.config_dump.page_count = page_count;
+	cd->page_index = page;
+	cd->page_count = page_count;
 
-	if (n_lrw > 0) {
-		resp->body.config_dump.has_lorawan = true;
-		app_config_fill_lorawan(&resp->body.config_dump.lorawan, lrw_ids, n_lrw);
+	if (n[DUMP_SECTION_LORAWAN] > 0) {
+		cd->has_lorawan = true;
+		app_config_fill_lorawan(&cd->lorawan, ids[DUMP_SECTION_LORAWAN],
+					n[DUMP_SECTION_LORAWAN]);
 	}
-	if (n_app > 0) {
-		resp->body.config_dump.has_application = true;
-		app_config_fill_application(&resp->body.config_dump.application, app_ids, n_app);
+	if (n[DUMP_SECTION_APPLICATION] > 0) {
+		cd->has_application = true;
+		app_config_fill_application(&cd->application, ids[DUMP_SECTION_APPLICATION],
+					    n[DUMP_SECTION_APPLICATION]);
+	}
+	if (n[DUMP_SECTION_SENSORS] > 0) {
+		cd->has_sensors = true;
+		app_config_fill_sensors(&cd->sensors, ids[DUMP_SECTION_SENSORS],
+					n[DUMP_SECTION_SENSORS]);
+	}
+	if (n[DUMP_SECTION_ALARMS] > 0) {
+		cd->has_alarms = true;
+		app_config_fill_alarms(&cd->alarms, ids[DUMP_SECTION_ALARMS],
+				       n[DUMP_SECTION_ALARMS]);
 	}
 }
 

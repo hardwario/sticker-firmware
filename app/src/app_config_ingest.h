@@ -24,11 +24,15 @@ bool app_config_ingest(const AppConfigMessage *message);
  * Returns 0 if all present fields were valid, -EINVAL otherwise. */
 int app_config_apply_lorawan(const AppConfigMessage_Lorawan *src, uint32_t *fault_field);
 int app_config_apply_application(const AppConfigMessage_Application *src, uint32_t *fault_field);
+int app_config_apply_sensors(const AppConfigMessage_Sensors *src, uint32_t *fault_field);
+int app_config_apply_alarms(const AppConfigMessage_Alarms *src, uint32_t *fault_field);
 
 /* Populate dst with only the requested fields (by proto field tag in ids[0..n))
  * from the staging config, setting their has_* flags. Secret keys are not dumped. */
 void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids, size_t n);
 void app_config_fill_application(AppConfigMessage_Application *dst, const uint32_t *ids, size_t n);
+void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids, size_t n);
+void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, size_t n);
 
 #ifdef __cplusplus
 }

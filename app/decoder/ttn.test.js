@@ -17,14 +17,15 @@ const toHex = (bytes) => Buffer.from(bytes).toString("hex");
 // Each entry: hex on the wire <-> the structured command it represents.
 const COMMANDS = [
   {
-    name: "set_param (lorawan.adr + application interval_report/temperature_corr)",
-    hex: "0801120e0a02180112082078ad0200002040",
+    name: "set_param (lorawan.adr + application interval_report + sensors temperature_corr)",
+    hex: "080112100a021801120220782206ad0200002040",
     data: {
       seq: 1,
       command: "set_param",
       set_param: {
         lorawan: { adr: 1 },
-        application: { interval_report: 120, temperature_corr: 2.5 },
+        application: { interval_report: 120 },
+        sensors: { temperature_corr: 2.5 },
       },
     },
   },
@@ -38,14 +39,14 @@ const COMMANDS = [
     },
   },
   {
-    // accel_motion_sensitivity is enum-valued (field 54): encode accepts the
-    // symbolic name, decode renders it back ("high" = 3).
-    name: "set_param (application accel_motion_sensitivity enum)",
-    hex: "080312051203b00303",
+    // accel_motion_sensitivity is enum-valued (sensors field 54): encode accepts
+    // the symbolic name, decode renders it back ("high" = 3).
+    name: "set_param (sensors accel_motion_sensitivity enum)",
+    hex: "080312052203b00303",
     data: {
       seq: 3,
       command: "set_param",
-      set_param: { application: { accel_motion_sensitivity: "high" } },
+      set_param: { sensors: { accel_motion_sensitivity: "high" } },
     },
   },
   {
@@ -91,16 +92,15 @@ test("encode/decode are symmetric (byte-exact round-trip)", () => {
   }
 });
 
-// #92: cap_w1_sensors (application tag 60) was missing from the formatter's name
-// map, so the 1-Wire bus capability could not be set or read via the payload
-// formatter (encodeDownlink silently drops unknown names). Lock both directions.
+// #92: cap_w1_sensors (sensors tag 60) reachable via the formatter both ways
+// (was missing pre-regroup; now in the sensors submessage).
 test("set_param cap_w1_sensors (tag 60) is reachable both ways (#92)", () => {
   const enc = codec.encodeDownlink({
-    data: { seq: 1, command: "set_param", set_param: { application: { cap_w1_sensors: true } } },
+    data: { seq: 1, command: "set_param", set_param: { sensors: { cap_w1_sensors: true } } },
   });
   assert.equal(enc.errors.length, 0, "encode errors");
   const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
-  assert.equal(back.set_param.application.cap_w1_sensors, 1);
+  assert.equal(back.set_param.sensors.cap_w1_sensors, 1);
 });
 
 // AlarmRule downlink command (field 13): set a dynamic alarm rule and clear-all.

@@ -6,10 +6,10 @@ AppConfigMessage.Lorawan.appkey max_length:32
 AppConfigMessage.Lorawan.devaddr max_length:8
 AppConfigMessage.Lorawan.nwkskey max_length:32
 AppConfigMessage.Lorawan.appskey max_length:32
-AppConfigMessage.Application.sensor1_rom max_length:16
-AppConfigMessage.Application.sensor2_rom max_length:16
-AppConfigMessage.Application.sensor3_rom max_length:16
-AppConfigMessage.Application.sensor4_rom max_length:16
+AppConfigMessage.Sensors.sensor1_rom max_length:16
+AppConfigMessage.Sensors.sensor2_rom max_length:16
+AppConfigMessage.Sensors.sensor3_rom max_length:16
+AppConfigMessage.Sensors.sensor4_rom max_length:16
 # END GENERATED CONFIG
 
 Response.Error.detail       max_size:32
@@ -27,3 +27,5 @@ Telemetry.w1_sensors max_count:4
 # bounded by the LoRaWAN downlink size anyway, so 16 ids each is plenty.
 Command.GetParam.lorawan_field     max_count:16
 Command.GetParam.application_field max_count:16
+Command.GetParam.sensors_field     max_count:16
+Command.GetParam.alarms_field      max_count:16

@@ -73,10 +73,10 @@ def test_build_options_lines_matches_committed():
         "AppConfigMessage.Lorawan.devaddr max_length:8",
         "AppConfigMessage.Lorawan.nwkskey max_length:32",
         "AppConfigMessage.Lorawan.appskey max_length:32",
-        "AppConfigMessage.Application.sensor1_rom max_length:16",
-        "AppConfigMessage.Application.sensor2_rom max_length:16",
-        "AppConfigMessage.Application.sensor3_rom max_length:16",
-        "AppConfigMessage.Application.sensor4_rom max_length:16",
+        "AppConfigMessage.Sensors.sensor1_rom max_length:16",
+        "AppConfigMessage.Sensors.sensor2_rom max_length:16",
+        "AppConfigMessage.Sensors.sensor3_rom max_length:16",
+        "AppConfigMessage.Sensors.sensor4_rom max_length:16",
     ])
     assert not any("secret_key" in ln for ln in lines)
 
@@ -187,7 +187,7 @@ def test_proto_region_preserves_all_field_numbers(workdir):
                     reason="clang-format not available")
 def test_generated_c_matches_committed(workdir):
     _run_configen(workdir)
-    for name in ["app_config.c", "app_config.h"]:
+    for name in ["app_config.c", "app_config.h", "app_config_ingest.c"]:
         assert (workdir / name).read_text() == (APP_SRC / name).read_text(), name
 
 
@@ -243,9 +243,10 @@ def test_h_commit_clamps_loaded_values(workdir):
 # --- proto <-> decoder cross-check ---------------------------------------
 
 COMMAND_VECTORS = {
-    # set_param: lorawan.adr=1, application.interval_report=120, temperature_corr=2.5
-    # (the fixed threshold alarm keys were retired in the dynamic-alarms migration).
-    "set_param": "0801120e0a02180112082078ad0200002040",
+    # set_param: lorawan.adr=1, application.interval_report=120,
+    # sensors.temperature_corr=2.5 (corr moved to the sensors submessage in the
+    # config regroup; threshold alarm keys retired with dynamic-alarms).
+    "set_param": "080112100a021801120220782206ad0200002040",
     "get_param": "08021a070a010312020407",
     "reboot": "08083a00",
 }
@@ -284,12 +285,12 @@ def test_proto_and_decoder_agree(tmp_path):
     assert msg.seq == 1
     assert msg.set_param.lorawan.adr is True
     assert msg.set_param.application.interval_report == 120
-    assert abs(msg.set_param.application.temperature_corr - 2.5) < 1e-6
+    assert abs(msg.set_param.sensors.temperature_corr - 2.5) < 1e-6
 
     js = _decode_with_node(COMMAND_VECTORS["set_param"])
     assert js["seq"] == 1
     assert js["set_param"]["application"]["interval_report"] == 120
-    assert abs(js["set_param"]["application"]["temperature_corr"] - 2.5) < 1e-6
+    assert abs(js["set_param"]["sensors"]["temperature_corr"] - 2.5) < 1e-6
 
     # get_param field lists
     msg = pb.Command.FromString(bytes.fromhex(COMMAND_VECTORS["get_param"]))
