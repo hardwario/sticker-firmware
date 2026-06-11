@@ -137,10 +137,6 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.input_a_counter));
 	SETTINGS_SET("input-b-counter", &m_app_config.input_b_counter,
 		     sizeof(m_app_config.input_b_counter));
-	SETTINGS_SET("temperature-corr", &m_app_config.temperature_corr,
-		     sizeof(m_app_config.temperature_corr));
-	SETTINGS_SET("t1-corr", &m_app_config.t1_corr, sizeof(m_app_config.t1_corr));
-	SETTINGS_SET("t2-corr", &m_app_config.t2_corr, sizeof(m_app_config.t2_corr));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
 	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -232,24 +228,6 @@ static int h_commit(void)
 	if ((int)m_app_config.lrw_activation < 0 || (int)m_app_config.lrw_activation > 1) {
 		m_app_config.lrw_activation = 0;
 	}
-	if (m_app_config.temperature_corr < -5.0f) {
-		m_app_config.temperature_corr = -5.0f;
-	}
-	if (m_app_config.temperature_corr > 5.0f) {
-		m_app_config.temperature_corr = 5.0f;
-	}
-	if (m_app_config.t1_corr < -5.0f) {
-		m_app_config.t1_corr = -5.0f;
-	}
-	if (m_app_config.t1_corr > 5.0f) {
-		m_app_config.t1_corr = 5.0f;
-	}
-	if (m_app_config.t2_corr < -5.0f) {
-		m_app_config.t2_corr = -5.0f;
-	}
-	if (m_app_config.t2_corr > 5.0f) {
-		m_app_config.t2_corr = 5.0f;
-	}
 	if ((int)m_app_config.accel_motion_sensitivity < 0 ||
 	    (int)m_app_config.accel_motion_sensitivity > 3) {
 		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
@@ -320,10 +298,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.input_a_counter));
 	EXPORT_FUNC("input-b-counter", &m_app_config.input_b_counter,
 		    sizeof(m_app_config.input_b_counter));
-	EXPORT_FUNC("temperature-corr", &m_app_config.temperature_corr,
-		    sizeof(m_app_config.temperature_corr));
-	EXPORT_FUNC("t1-corr", &m_app_config.t1_corr, sizeof(m_app_config.t1_corr));
-	EXPORT_FUNC("t2-corr", &m_app_config.t2_corr, sizeof(m_app_config.t2_corr));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
 	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -408,39 +382,6 @@ static int cmd_int(const struct shell *shell, size_t argc, char **argv, int *par
 	}
 
 	*param = (int)value;
-	shell_print(shell, "%s", m_msg_cmd_success);
-	return 0;
-}
-
-static int cmd_float(const struct shell *shell, size_t argc, char **argv, float *param, float min,
-		     float max, print_func_t print_func)
-{
-	if (argc == 1) {
-		if (print_func) {
-			print_func(shell);
-		}
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	char *endptr;
-	float value = strtof(argv[1], &endptr);
-
-	if (*endptr != '\0' || endptr == argv[1]) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	if (value < min || value > max) {
-		shell_error(shell, "%s", m_msg_invalid_range);
-		return -EINVAL;
-	}
-
-	*param = value;
 	shell_print(shell, "%s", m_msg_cmd_success);
 	return 0;
 }
@@ -746,22 +687,6 @@ static void print_input_b_counter(const struct shell *shell)
 		    m_app_config.input_b_counter ? "true" : "false");
 }
 
-static void print_temperature_corr(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " temperature-corr %.2f",
-		    (double)m_app_config.temperature_corr);
-}
-
-static void print_t1_corr(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " t1-corr %.2f", (double)m_app_config.t1_corr);
-}
-
-static void print_t2_corr(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " t2-corr %.2f", (double)m_app_config.t2_corr);
-}
-
 static void print_accel_motion_sensitivity(const struct shell *shell)
 {
 	const char *str;
@@ -878,9 +803,6 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_hall_right_counter(shell);
 	print_input_a_counter(shell);
 	print_input_b_counter(shell);
-	print_temperature_corr(shell);
-	print_t1_corr(shell);
-	print_t2_corr(shell);
 	print_accel_motion_sensitivity(shell);
 	print_sensor1_rom(shell);
 	print_sensor2_rom(shell);
@@ -1535,22 +1457,6 @@ static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **ar
 	return cmd_bool(shell, argc, argv, &m_app_config.input_b_counter, print_input_b_counter);
 }
 
-static int cmd_temperature_corr(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.temperature_corr, -5.0f, 5.0f,
-			 print_temperature_corr);
-}
-
-static int cmd_t1_corr(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.t1_corr, -5.0f, 5.0f, print_t1_corr);
-}
-
-static int cmd_t2_corr(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.t2_corr, -5.0f, 5.0f, print_t2_corr);
-}
-
 static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -1895,18 +1801,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(input-b-counter, NULL,
 	              "Get/Set input B counter enabled (true/false).",
 	              cmd_input_b_counter, 1, 1),
-
-	SHELL_CMD_ARG(temperature-corr, NULL,
-	              "Get/Set temperature correction (range -5.0 to +5.0 deg. C).",
-	              cmd_temperature_corr, 1, 1),
-
-	SHELL_CMD_ARG(t1-corr, NULL,
-	              "Get/Set T1 temperature correction (range -5.0 to +5.0 deg. C).",
-	              cmd_t1_corr, 1, 1),
-
-	SHELL_CMD_ARG(t2-corr, NULL,
-	              "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C).",
-	              cmd_t2_corr, 1, 1),
 
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",

@@ -79,9 +79,6 @@ struct app_config {
 	bool hall_right_counter;
 	bool input_a_counter;
 	bool input_b_counter;
-	float temperature_corr;
-	float t1_corr;
-	float t2_corr;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
 	uint8_t sensor1_rom[8];
 	uint8_t sensor2_rom[8];

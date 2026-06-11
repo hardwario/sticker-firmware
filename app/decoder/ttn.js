@@ -74,13 +74,12 @@ var _APP_ENUMS = {};
 var _APP_FLOAT = {};
 
 var _SEN_NAMES = {
-  37: "temperature_corr", 38: "t1_corr", 39: "t2_corr",
   40: "cap_hall_left", 41: "cap_hall_right", 42: "cap_input_a", 43: "cap_input_b",
   44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector",
   54: "accel_motion_sensitivity", 55: "cap_accelerometer", 60: "cap_w1_sensors"
 };
 var _SEN_ENUMS = { 54: ["off", "low", "medium", "high"] };
-var _SEN_FLOAT = { 37: 1, 38: 1, 39: 1 };
+var _SEN_FLOAT = {};
 var _SEN_HEX = { 56: "sensor1_rom", 57: "sensor2_rom", 58: "sensor3_rom", 59: "sensor4_rom" };
 var _SEN_HEX_ENC = { sensor1_rom: 56, sensor2_rom: 57, sensor3_rom: 58, sensor4_rom: 59 };
 

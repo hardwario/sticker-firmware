@@ -218,10 +218,7 @@ static const struct {
 	APP(4),
 	APP(49),
 	APP(50),
-	/* Sensors: corr floats 5 B, caps/enum 2 B, sensorN_rom 8 B -> 18 B hex. */
-	SEN(37, 5),
-	SEN(38, 5),
-	SEN(39, 5),
+	/* Sensors: caps/enum 2 B, sensorN_rom 8 B -> 18 B hex. */
 	SEN(40, 2),
 	SEN(41, 2),
 	SEN(42, 2),

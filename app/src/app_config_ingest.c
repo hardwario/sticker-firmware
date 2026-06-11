@@ -262,27 +262,6 @@ int app_config_apply_sensors(const AppConfigMessage_Sensors *src, uint32_t *faul
 		*fault_field = 0;
 	}
 
-	if (src->has_temperature_corr) {
-		if (src->temperature_corr >= -5.0f && src->temperature_corr <= 5.0f) {
-			config->temperature_corr = src->temperature_corr;
-		} else {
-			FAULT(37);
-		}
-	}
-	if (src->has_t1_corr) {
-		if (src->t1_corr >= -5.0f && src->t1_corr <= 5.0f) {
-			config->t1_corr = src->t1_corr;
-		} else {
-			FAULT(38);
-		}
-	}
-	if (src->has_t2_corr) {
-		if (src->t2_corr >= -5.0f && src->t2_corr <= 5.0f) {
-			config->t2_corr = src->t2_corr;
-		} else {
-			FAULT(39);
-		}
-	}
 	if (src->has_cap_hall_left) {
 		config->cap_hall_left = src->cap_hall_left;
 	}
@@ -342,18 +321,6 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 {
 	const struct app_config *c = app_config();
 
-	if (requested(ids, n, 37)) {
-		dst->has_temperature_corr = true;
-		dst->temperature_corr = c->temperature_corr;
-	}
-	if (requested(ids, n, 38)) {
-		dst->has_t1_corr = true;
-		dst->t1_corr = c->t1_corr;
-	}
-	if (requested(ids, n, 39)) {
-		dst->has_t2_corr = true;
-		dst->t2_corr = c->t2_corr;
-	}
 	if (requested(ids, n, 40)) {
 		dst->has_cap_hall_left = true;
 		dst->cap_hall_left = c->cap_hall_left;

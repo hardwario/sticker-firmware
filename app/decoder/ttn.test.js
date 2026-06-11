@@ -17,15 +17,15 @@ const toHex = (bytes) => Buffer.from(bytes).toString("hex");
 // Each entry: hex on the wire <-> the structured command it represents.
 const COMMANDS = [
   {
-    name: "set_param (lorawan.adr + application interval_report + sensors temperature_corr)",
-    hex: "080112100a021801120220782206ad0200002040",
+    name: "set_param (lorawan.adr + application interval_report + sensors cap_barometer)",
+    hex: "0801120d0a021801120220782203e80201",
     data: {
       seq: 1,
       command: "set_param",
       set_param: {
         lorawan: { adr: 1 },
         application: { interval_report: 120 },
-        sensors: { temperature_corr: 2.5 },
+        sensors: { cap_barometer: 1 },
       },
     },
   },
