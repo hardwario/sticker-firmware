@@ -6,6 +6,7 @@
  * (so range validation is exercised); everything else app_cmd reaches is stubbed.
  */
 
+#include "app_alarm_rules.h"
 #include "app_config.h"
 
 #include <stddef.h>
@@ -67,4 +68,23 @@ size_t app_history_export(uint32_t from_unix, uint32_t to_unix, uint8_t *buf, si
 		*total = 0;
 	}
 	return 0;
+}
+
+/* Dynamic alarm rules — app_cmd's handle_alarm_rule mutates the list; the unit
+ * test only checks the command path, so these are inert. */
+int app_alarm_rules_set(const struct app_alarm_rule *rule)
+{
+	(void)rule;
+	return 0;
+}
+
+int app_alarm_rules_clear(enum app_alarm_source source, enum app_alarm_quantity quantity)
+{
+	(void)source;
+	(void)quantity;
+	return 0;
+}
+
+void app_alarm_rules_clear_all(void)
+{
 }
