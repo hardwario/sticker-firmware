@@ -26,19 +26,24 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 
 | Command | Purpose | Reply |
 |---|---|---|
-| `get_info` | Firmware version, serial, uptime, wall-clock, build type | `info` |
-| `set_param` | Change LoRaWAN and/or Application parameters | `ack` |
+| `get_info` | Firmware version, serial, uptime, wall-clock, build type | `info` (no ack) |
+| `set_param` | Change any configuration parameters (LoRaWAN/application/sensors/alarms) | `ack` |
 | `get_param` | Read back selected parameters | `config_dump` |
 | `get_config` | Dump the whole configuration (paged) | `config_dump` |
 | `settings_save` | Persist staged changes (**reboots**) | `ack` |
 | `reboot` | Cold reboot | `ack` |
-| `factory_reset` | Reset to defaults (**reboots**) | `ack` |
-| `force_send` | Send a telemetry report immediately | `ack` |
+| `factory_reset` | Reset config to defaults but **keep device identity + LoRaWAN keys** (stays provisioned/connected); clears dynamic alarm rules; **reboots** | `ack` |
+| `force_send` | Send a telemetry report immediately | **none** — the report itself is the reply |
 | `reset_counters` | Clear selected hall/input counters | `ack` |
-| `clock_sync` | Request a network time sync | `ack` |
+| `clock_sync` | Request a network time sync | **`info`, deferred** — sent once the network time lands (carries the synced `unix_time`) |
 | `req_history` | Replay stored history for a time window | `history_frame` (multiple) |
+| `w1_scan` | Enumerate the 1-Wire bus; returns the discovered ROMs so you can teach a slot via `set_param sensorN_rom` | `w1_scan` |
 
 > After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED), an optional `fault_field`, and a `detail` string.
+>
+> **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `clock_sync`, `req_history`, `w1_scan`) do **not** also send an `ack`, to save an uplink.
+>
+> **LoRaWAN-only commands:** `force_send`, `clock_sync` and `req_history` answer only via an uplink, so they are rejected (`NOT_READY` "lrw only") if sent over NFC.
 
 **Ready-to-use hex downlinks (fPort 85):**
 
@@ -49,10 +54,13 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `clock_sync` | `08056200` |
 | `force_send` | `08064a00` |
 | `reboot` | `08083a00` |
+| `w1_scan` | `08097200` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
-| `set_param`: ADR on, `interval_report`=120 s, `temperature_alarm_hi`=50 °C | `0801120d0a021801120720783d00004842` |
+| `set_param`: ADR on, `interval_report`=120 s, `cap_barometer` on | `0801120d0a021801120220782203e80201` |
 
 (The leading byte is the `seq` you chose; it is echoed in the reply.)
+
+> **Single source of truth (dev note):** the command list, wire ids, dispatch routing and per-command availability live in `app/src/app_config.yml` (`commands:`). `west configen` generates the proto `Command` oneof, the `ttn.js` `_CMD_NAMES` map and the firmware `app_cmd_dispatch()` switch from it, so the three never drift. Adding/removing a command = editing that list (proto ids are append-only and guarded).
 
 ---
 
