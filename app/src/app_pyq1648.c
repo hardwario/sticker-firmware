@@ -113,7 +113,9 @@ static int clear_event(void)
 {
 	int ret;
 
-	ret = gpio_pin_configure_dt(&m_dl_spec, GPIO_OUTPUT);
+	/* Drive DL low (defined initial level) to clear the event, not an
+	 * undefined GPIO_OUTPUT level. */
+	ret = gpio_pin_configure_dt(&m_dl_spec, GPIO_OUTPUT_INACTIVE);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
@@ -191,7 +193,8 @@ int app_pyq1648_init(void)
 		return -ENODEV;
 	}
 
-	ret = gpio_pin_configure_dt(&m_si_spec, GPIO_OUTPUT);
+	/* SI idles low; configure with a defined initial level. */
+	ret = gpio_pin_configure_dt(&m_si_spec, GPIO_OUTPUT_INACTIVE);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;

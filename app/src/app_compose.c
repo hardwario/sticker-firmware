@@ -168,7 +168,9 @@ static void fill_snapshot(void)
 	}
 	if (!isnan(d.humidity)) {
 		t->has_humidity = true;
-		t->humidity = (uint32_t)(d.humidity * 2.0f);
+		/* Clamp before the unsigned cast: the SHT4x formula can yield a
+		 * slightly negative %RH, and a negative float->uint cast is UB. */
+		t->humidity = (uint32_t)CLAMP(d.humidity * 2.0f, 0.0f, 200.0f);
 	}
 
 	/* barometer */
@@ -176,7 +178,7 @@ static void fill_snapshot(void)
 		t->has_pressure = true;
 		/* d.pressure is kPa from the driver; the wire unit is hPa x10
 		 * (0.1 hPa resolution). hPa = kPa x10, so hPa x10 = kPa x100. */
-		t->pressure = (uint32_t)(d.pressure * 100.0f);
+		t->pressure = (uint32_t)CLAMP(d.pressure * 100.0f, 0.0f, 200000.0f);
 	}
 	if (g_app_config.cap_barometer && !isnan(d.altitude)) {
 		float a = CLAMP(d.altitude * 10.0f, (float)INT16_MIN, (float)INT16_MAX);
@@ -187,7 +189,7 @@ static void fill_snapshot(void)
 	/* light */
 	if (g_app_config.cap_light_sensor && !isnan(d.illuminance)) {
 		t->has_illuminance = true;
-		t->illuminance = (uint32_t)(d.illuminance / 2.0f);
+		t->illuminance = (uint32_t)CLAMP(d.illuminance / 2.0f, 0.0f, 1000000.0f);
 	}
 
 	/* accel (gated by the accelerometer capability) */

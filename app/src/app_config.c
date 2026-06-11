@@ -190,6 +190,161 @@ static int h_commit(void)
 		m_app_config_migrated = true;
 	}
 
+	/* Clamp loaded values into their configured ranges so a corrupted or forged
+	 * NVS record can't leave the device in a broken state (e.g. interval=0 ->
+	 * K_SECONDS(0), or an out-of-range enum that no code path expects). */
+	if (m_app_config.interval_sample < 5 && m_app_config.interval_sample != 0) {
+		m_app_config.interval_sample = 5;
+	}
+	if (m_app_config.interval_sample > 3600) {
+		m_app_config.interval_sample = 3600;
+	}
+	if (m_app_config.interval_report < 60) {
+		m_app_config.interval_report = 60;
+	}
+	if (m_app_config.interval_report > 86400) {
+		m_app_config.interval_report = 86400;
+	}
+	if (m_app_config.alarm_limit < 0) {
+		m_app_config.alarm_limit = 0;
+	}
+	if (m_app_config.alarm_limit > 3600) {
+		m_app_config.alarm_limit = 3600;
+	}
+	if (m_app_config.alarm_notif_time < 1) {
+		m_app_config.alarm_notif_time = 1;
+	}
+	if (m_app_config.alarm_notif_time > 60) {
+		m_app_config.alarm_notif_time = 60;
+	}
+	if ((int)m_app_config.lrw_region < 0 || (int)m_app_config.lrw_region > 2) {
+		m_app_config.lrw_region = 0;
+	}
+	if (m_app_config.lrw_sub_band < 0) {
+		m_app_config.lrw_sub_band = 0;
+	}
+	if (m_app_config.lrw_sub_band > 8) {
+		m_app_config.lrw_sub_band = 8;
+	}
+	if ((int)m_app_config.lrw_network < 0 || (int)m_app_config.lrw_network > 1) {
+		m_app_config.lrw_network = 0;
+	}
+	if ((int)m_app_config.lrw_activation < 0 || (int)m_app_config.lrw_activation > 1) {
+		m_app_config.lrw_activation = 0;
+	}
+	if (m_app_config.temperature_alarm_lo < -30.0f) {
+		m_app_config.temperature_alarm_lo = -30.0f;
+	}
+	if (m_app_config.temperature_alarm_lo > 70.0f) {
+		m_app_config.temperature_alarm_lo = 70.0f;
+	}
+	if (m_app_config.temperature_alarm_hi < -30.0f) {
+		m_app_config.temperature_alarm_hi = -30.0f;
+	}
+	if (m_app_config.temperature_alarm_hi > 70.0f) {
+		m_app_config.temperature_alarm_hi = 70.0f;
+	}
+	if (m_app_config.temperature_alarm_hst < 0.0f) {
+		m_app_config.temperature_alarm_hst = 0.0f;
+	}
+	if (m_app_config.temperature_alarm_hst > 5.0f) {
+		m_app_config.temperature_alarm_hst = 5.0f;
+	}
+	if (m_app_config.humidity_alarm_lo < 0.0f) {
+		m_app_config.humidity_alarm_lo = 0.0f;
+	}
+	if (m_app_config.humidity_alarm_lo > 100.0f) {
+		m_app_config.humidity_alarm_lo = 100.0f;
+	}
+	if (m_app_config.humidity_alarm_hi < 0.0f) {
+		m_app_config.humidity_alarm_hi = 0.0f;
+	}
+	if (m_app_config.humidity_alarm_hi > 100.0f) {
+		m_app_config.humidity_alarm_hi = 100.0f;
+	}
+	if (m_app_config.humidity_alarm_hst < 0.0f) {
+		m_app_config.humidity_alarm_hst = 0.0f;
+	}
+	if (m_app_config.humidity_alarm_hst > 20.0f) {
+		m_app_config.humidity_alarm_hst = 20.0f;
+	}
+	if (m_app_config.pressure_alarm_lo < 500.0f) {
+		m_app_config.pressure_alarm_lo = 500.0f;
+	}
+	if (m_app_config.pressure_alarm_lo > 1200.0f) {
+		m_app_config.pressure_alarm_lo = 1200.0f;
+	}
+	if (m_app_config.pressure_alarm_hi < 500.0f) {
+		m_app_config.pressure_alarm_hi = 500.0f;
+	}
+	if (m_app_config.pressure_alarm_hi > 1200.0f) {
+		m_app_config.pressure_alarm_hi = 1200.0f;
+	}
+	if (m_app_config.pressure_alarm_hst < 0.0f) {
+		m_app_config.pressure_alarm_hst = 0.0f;
+	}
+	if (m_app_config.pressure_alarm_hst > 50.0f) {
+		m_app_config.pressure_alarm_hst = 50.0f;
+	}
+	if (m_app_config.t1_alarm_lo < -30.0f) {
+		m_app_config.t1_alarm_lo = -30.0f;
+	}
+	if (m_app_config.t1_alarm_lo > 70.0f) {
+		m_app_config.t1_alarm_lo = 70.0f;
+	}
+	if (m_app_config.t1_alarm_hi < -30.0f) {
+		m_app_config.t1_alarm_hi = -30.0f;
+	}
+	if (m_app_config.t1_alarm_hi > 70.0f) {
+		m_app_config.t1_alarm_hi = 70.0f;
+	}
+	if (m_app_config.t1_alarm_hst < 0.0f) {
+		m_app_config.t1_alarm_hst = 0.0f;
+	}
+	if (m_app_config.t1_alarm_hst > 5.0f) {
+		m_app_config.t1_alarm_hst = 5.0f;
+	}
+	if (m_app_config.t2_alarm_lo < -30.0f) {
+		m_app_config.t2_alarm_lo = -30.0f;
+	}
+	if (m_app_config.t2_alarm_lo > 70.0f) {
+		m_app_config.t2_alarm_lo = 70.0f;
+	}
+	if (m_app_config.t2_alarm_hi < -30.0f) {
+		m_app_config.t2_alarm_hi = -30.0f;
+	}
+	if (m_app_config.t2_alarm_hi > 70.0f) {
+		m_app_config.t2_alarm_hi = 70.0f;
+	}
+	if (m_app_config.t2_alarm_hst < 0.0f) {
+		m_app_config.t2_alarm_hst = 0.0f;
+	}
+	if (m_app_config.t2_alarm_hst > 5.0f) {
+		m_app_config.t2_alarm_hst = 5.0f;
+	}
+	if (m_app_config.temperature_corr < -5.0f) {
+		m_app_config.temperature_corr = -5.0f;
+	}
+	if (m_app_config.temperature_corr > 5.0f) {
+		m_app_config.temperature_corr = 5.0f;
+	}
+	if (m_app_config.t1_corr < -5.0f) {
+		m_app_config.t1_corr = -5.0f;
+	}
+	if (m_app_config.t1_corr > 5.0f) {
+		m_app_config.t1_corr = 5.0f;
+	}
+	if (m_app_config.t2_corr < -5.0f) {
+		m_app_config.t2_corr = -5.0f;
+	}
+	if (m_app_config.t2_corr > 5.0f) {
+		m_app_config.t2_corr = 5.0f;
+	}
+	if ((int)m_app_config.accel_motion_sensitivity < 0 ||
+	    (int)m_app_config.accel_motion_sensitivity > 3) {
+		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
+	}
+
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
 	return 0;
 }

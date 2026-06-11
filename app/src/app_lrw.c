@@ -5,6 +5,7 @@
  */
 
 #include "app_alarm.h"
+#include "app_battery.h"
 #include "app_calibration.h"
 #include "app_clock.h"
 #include "app_alarm_rules.h"
@@ -293,10 +294,25 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 	k_work_submit_to_queue(&m_work_q, &m_downlink_success_work);
 }
 
+/* Approximate operational cell window for the DevStatusAns battery level.
+ * Tune to the actual cell; values outside are clamped. */
+#define BATTERY_EMPTY_V 2.4f
+#define BATTERY_FULL_V  3.6f
+
 static uint8_t battery_level_callback(void)
 {
-	/* TODO Implement */
-	return 255;
+	/* LoRaWAN DevStatusAns battery level: 0 = external power, 1..254 = battery
+	 * (1 ~ empty, 254 ~ full), 255 = unable to measure. Map the measured cell
+	 * voltage linearly over the operational window. */
+	float v;
+
+	if (app_battery_measure(&v) != 0) {
+		return 255; /* can't measure */
+	}
+
+	float frac = CLAMP((v - BATTERY_EMPTY_V) / (BATTERY_FULL_V - BATTERY_EMPTY_V), 0.0f, 1.0f);
+
+	return (uint8_t)(1 + (int)(frac * 253.0f + 0.5f)); /* 1..254 */
 }
 
 static void datarate_changed_callback(enum lorawan_datarate dr)

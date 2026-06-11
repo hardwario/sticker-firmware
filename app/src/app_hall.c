@@ -69,7 +69,9 @@ static int poll(void)
 		}
 	}
 
-	k_busy_wait(2);
+	/* Let the pull-up settle before sampling. 2 us is borderline for the pin
+	 * RC; 10 us costs nothing and is safely above it. */
+	k_busy_wait(10);
 
 	if (g_app_config.cap_hall_left) {
 		int val = gpio_pin_get_dt(&m_hall_left);

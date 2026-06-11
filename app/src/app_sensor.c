@@ -23,6 +23,7 @@
 /* Zephyr includes */
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -38,6 +39,13 @@ LOG_MODULE_REGISTER(app_sensor, LOG_LEVEL_DBG);
 
 #define TILT_THRESHOLD 7
 #define TILT_DURATION  1
+
+/* I2C bus recovery: if every I2C sensor read in a sweep fails for this many
+ * consecutive sweeps, the bus is likely wedged (a slave holding SDA low after a
+ * brown-out/EMI glitch). i2c_recover_bus() bit-bangs 9 clocks to free it. */
+#define I2C_RECOVER_FAIL_THRESHOLD 3
+static const struct device *const m_i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+static int m_i2c_fail_streak;
 
 struct app_sensor_data g_app_sensor_data = {
 	.orientation = INT_MAX,
@@ -315,6 +323,9 @@ void app_sensor_sample(void)
 	struct app_hall_data hall_data = {0};
 	struct app_input_data input_data = {0};
 
+	/* Track I2C sensor reads this sweep to detect a wedged bus. */
+	int i2c_tried = 0, i2c_failed = 0;
+
 	struct app_w1_slot_reading w1[APP_W1_SLOT_COUNT];
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 		w1[s] = (struct app_w1_slot_reading){.temperature = NAN,
@@ -333,7 +344,9 @@ void app_sensor_sample(void)
 #if defined(CONFIG_LIS2DH)
 	if (g_app_config.cap_accelerometer) {
 		ret = app_accel_read(NULL, NULL, NULL, &orientation);
+		i2c_tried++;
 		if (ret) {
+			i2c_failed++;
 			LOG_ERR_CALL_FAILED_INT("app_accel_read", ret);
 		}
 	}
@@ -342,21 +355,27 @@ void app_sensor_sample(void)
 
 #if defined(CONFIG_SHT4X)
 	ret = app_sht4x_read(&temperature, &humidity);
+	i2c_tried++;
 	if (ret) {
+		i2c_failed++;
 		LOG_ERR_CALL_FAILED_INT("app_sht4x_read", ret);
 	}
 #endif /* defined(CONFIG_SHT4X) */
 
 	if (g_app_config.cap_light_sensor) {
 		ret = app_opt3001_read(&illuminance);
+		i2c_tried++;
 		if (ret) {
+			i2c_failed++;
 			LOG_ERR_CALL_FAILED_INT("app_opt3001_read", ret);
 		}
 	}
 
 	if (g_app_config.cap_barometer) {
 		ret = app_mpl3115a2_read(&altitude, &pressure, NULL);
+		i2c_tried++;
 		if (ret) {
+			i2c_failed++;
 			LOG_ERR_CALL_FAILED_INT("app_mpl3115a2_read", ret);
 		}
 	}
@@ -393,6 +412,25 @@ void app_sensor_sample(void)
 					w1[s].is_tilt_alert ? "" : "not ");
 			}
 		}
+	}
+
+	/* A whole sweep where every attempted I2C read failed points at a wedged
+	 * bus (slave holding SDA low). After a few such sweeps, bit-bang it free —
+	 * otherwise every I2C sensor stays dead until a reboot that may never come. */
+	if (i2c_tried > 0 && i2c_failed == i2c_tried) {
+		if (++m_i2c_fail_streak >= I2C_RECOVER_FAIL_THRESHOLD) {
+			LOG_WRN("All %d I2C reads failed for %d sweeps; recovering bus", i2c_tried,
+				m_i2c_fail_streak);
+			if (device_is_ready(m_i2c_dev)) {
+				ret = i2c_recover_bus(m_i2c_dev);
+				if (ret) {
+					LOG_ERR_CALL_FAILED_INT("i2c_recover_bus", ret);
+				}
+			}
+			m_i2c_fail_streak = 0;
+		}
+	} else {
+		m_i2c_fail_streak = 0;
 	}
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
