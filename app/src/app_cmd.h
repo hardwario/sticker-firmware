@@ -32,9 +32,10 @@ enum app_cmd_transport {
  * leaves before the device reboots). Set by app_cmd_handle(). */
 enum app_cmd_action {
 	APP_CMD_ACTION_NONE = 0,
-	APP_CMD_ACTION_SETTINGS_SAVE, /* persist staged config + reboot */
-	APP_CMD_ACTION_REBOOT,        /* reboot (discards staged edits) */
-	APP_CMD_ACTION_FACTORY_RESET, /* erase NVS + reboot */
+	APP_CMD_ACTION_SETTINGS_SAVE,    /* persist staged config + reboot */
+	APP_CMD_ACTION_REBOOT,           /* reboot (discards staged edits) */
+	APP_CMD_ACTION_FACTORY_RESET,    /* erase NVS + reboot */
+	APP_CMD_ACTION_ALARM_RULES_SAVE, /* persist alarm-rule blob (no reboot) */
 };
 
 /* Plain-C device info snapshot (no protobuf dependency), filled by

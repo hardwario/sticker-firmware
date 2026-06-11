@@ -310,22 +310,24 @@ static void handle_req_history(enum app_cmd_transport transport, const Command *
 #endif
 }
 
-static void handle_alarm_rule(const Command *cmd, Response *resp)
+static void handle_alarm_rule(const Command *cmd, Response *resp, enum app_cmd_action *action)
 {
 	const Command_AlarmRule *ar = &cmd->body.alarm_rule;
 	int ret;
 
+	/* Mutate the in-RAM rule list here (cheap), but DEFER the NVS persist to the
+	 * post-command action. settings_save_one() is too stack-heavy to run on the
+	 * m_work_q (2048 B) while app_cmd_handle's Command/Response locals are still
+	 * live on the stack — doing it inline overflowed the stack on a real device.
+	 * The deferred action runs after this frame unwinds. */
 	switch (ar->op) {
 	case Command_AlarmRule_Op_CLEAR_ALL:
 		app_alarm_rules_clear_all();
-		ret = app_alarm_rules_save();
+		ret = 0;
 		break;
 	case Command_AlarmRule_Op_CLEAR:
 		ret = app_alarm_rules_clear((enum app_alarm_source)ar->source,
 					    (enum app_alarm_quantity)ar->quantity);
-		if (ret == 0) {
-			ret = app_alarm_rules_save();
-		}
 		break;
 	case Command_AlarmRule_Op_SET:
 	default: {
@@ -340,14 +342,12 @@ static void handle_alarm_rule(const Command *cmd, Response *resp)
 			.to_state = (uint8_t)((ar->has_to_state && ar->to_state) ? 1 : 0),
 		};
 		ret = app_alarm_rules_set(&r);
-		if (ret == 0) {
-			ret = app_alarm_rules_save();
-		}
 		break;
 	}
 	}
 
 	if (ret == 0) {
+		*action = APP_CMD_ACTION_ALARM_RULES_SAVE;
 		resp->which_body = Response_ack_tag;
 	} else {
 		make_error(resp,
@@ -416,7 +416,7 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 		break;
 
 	case Command_alarm_rule_tag:
-		handle_alarm_rule(cmd, resp);
+		handle_alarm_rule(cmd, resp, action);
 		break;
 	case Command_req_history_tag:
 		handle_req_history(transport, cmd, resp);
