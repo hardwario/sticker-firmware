@@ -117,7 +117,8 @@ var _LRW_TAGS = _invert(_LRW_NAMES);
 var _CMD_NAMES = {
   2: "set_param", 3: "get_param", 4: "get_info", 5: "get_config",
   6: "settings_save", 7: "reboot", 8: "factory_reset", 9: "force_send",
-  10: "reset_counters", 11: "req_history", 12: "clock_sync", 13: "alarm_rule"
+  10: "reset_counters", 11: "req_history", 12: "clock_sync", 13: "alarm_rule",
+  14: "w1_scan"
 };
 var _CMD_TAGS = _invert(_CMD_NAMES);
 
@@ -241,6 +242,27 @@ function _decodeError(bytes, start, end) {
   return err;
 }
 
+// W1Scan response (fPort 85): repeated `rom` (field 1), each 8 bytes
+// (family + 6-byte serial + CRC). Returned as hex strings; the host picks one
+// and teaches a slot via SetParam sensorN_rom.
+function _decodeW1Scan(bytes, start, end) {
+  var roms = [];
+  var pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var field = tag.value >>> 3;
+    var wire = tag.value & 0x7;
+    if (wire === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      if (field === 1) roms.push(_pbBytesToHex(bytes.slice(pos, pos + len.value)));
+      pos += len.value;
+    } else {
+      break;
+    }
+  }
+  return { rom: roms };
+}
+
 // app_history_sensor enum order → name + encoding (mirrors app_history.c).
 var _HIST_SENSORS = [
   { name: "temperature", enc: "temp" },
@@ -351,6 +373,7 @@ function decodeDownlinkResponse(bytes) {
       else if (field === 4) resp.config_dump = _decodeConfigDump(bytes, pos, end);
       else if (field === 5) resp.history_frame = _decodeHistoryFrame(bytes, pos, end);
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
+      else if (field === 7) resp.w1_scan = _decodeW1Scan(bytes, pos, end);
       pos = end;
     } else {
       break;
@@ -672,7 +695,8 @@ function encodeDownlinkCommand(cmd) {
     if (b.from_state) body = body.concat(_encTag(8, 0)).concat(_encVarint(b.from_state));
     if (b.to_state) body = body.concat(_encTag(9, 0)).concat(_encVarint(b.to_state));
   }
-  // get_info / settings_save / reboot / factory_reset / force_send / clock_sync: empty body.
+  // get_info / settings_save / reboot / factory_reset / force_send / clock_sync /
+  // w1_scan: empty body.
 
   out = out.concat(_encLenDelim(tag, body));
   return { bytes: out, error: null };

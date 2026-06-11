@@ -73,6 +73,7 @@ const COMMANDS = [
   { name: "clock_sync", hex: "08056200", data: { seq: 5, command: "clock_sync" } },
   { name: "force_send", hex: "08064a00", data: { seq: 6, command: "force_send" } },
   { name: "reboot", hex: "08083a00", data: { seq: 8, command: "reboot" } },
+  { name: "w1_scan", hex: "08097200", data: { seq: 9, command: "w1_scan" } },
 ];
 
 test("decodeDownlink decodes command frames", () => {
@@ -150,6 +151,22 @@ test("decodeUplink decodes an Ack response (fPort 85)", () => {
   const got = codec.decodeUplink({ bytes: hex("0108011200"), fPort: 85 });
   assert.equal(got.data.seq, 1);
   assert.deepEqual(got.data.ack, {});
+});
+
+// W1Scan response (field 7): the discovered 1-Wire ROMs come back as hex
+// strings so the host can teach a slot via SetParam sensorN_rom.
+//   01           APP_PROTO_VERSION prefix
+//   08 02        seq=2
+//   3a 14        w1_scan, len=20
+//     0a 08 28000011223344a5   rom[0] (8 B: family 0x28 + serial + crc)
+//     0a 08 28abcdef010203b7   rom[1]
+test("decodeUplink decodes a W1Scan response (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108023a140a0828000011223344a50a0828abcdef010203b7"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.seq, 2);
+  assert.deepEqual(got.w1_scan.rom, ["28000011223344a5", "28abcdef010203b7"]);
 });
 
 // --- Uplink: protobuf telemetry (fPort 2) ---------------------------------

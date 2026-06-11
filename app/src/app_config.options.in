@@ -29,3 +29,7 @@ Command.GetParam.lorawan_field     max_count:16
 Command.GetParam.application_field max_count:16
 Command.GetParam.sensors_field     max_count:16
 Command.GetParam.alarms_field      max_count:16
+
+# W1Scan response: discovered 1-Wire ROMs (8 B each). Capped to the slot count;
+# the encoded reply must fit the fPort-85 response buffer (64 B).
+Response.W1Scan.rom max_count:4 max_size:8
