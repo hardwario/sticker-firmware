@@ -718,6 +718,39 @@ struct {{ module.name }} *{{ module.name }}(void)
 	return &m_{{ module.name }};
 }
 
+int {{ module.name }}_factory_reset(void)
+{
+	int ret;
+
+	/* Reset every parameter to its compiled-in default, but carry over the
+	 * factory identity and network credentials (preserve_on_migration in the
+	 * YAML) so the reset never un-provisions the device or drops it off the
+	 * LoRaWAN network. A full wipe (incl. identity) stays shell-only via
+	 * `settings reset`. Mirrors the migration restore in h_commit. */
+	struct {{ module.name }} preserved = m_{{ module.name }};
+
+	m_{{ module.name }} = m_{{ module.name }}_defaults;
+{% for param in parameters if param.preserve_on_migration | default(false) %}
+{% if param.type == 'bytes' or param.type == 'string' %}
+	memcpy(m_{{ module.name }}.{{ param.name | c_name }}, preserved.{{ param.name | c_name }},
+	       sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+{% else %}
+	m_{{ module.name }}.{{ param.name | c_name }} = preserved.{{ param.name | c_name }};
+{% endif %}
+{% endfor %}
+
+	memcpy(&g_{{ module.name }}, &m_{{ module.name }}, sizeof(g_{{ module.name }}));
+
+	ret = settings_save_subtree(SETTINGS_PFX);
+	if (ret) {
+		LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		return ret;
+	}
+
+	LOG_INF("Factory reset: config restored to defaults (identity + LoRaWAN kept)");
+	return 0;
+}
+
 static int {{ module.name }}_init(void)
 {
 	int ret;
