@@ -237,7 +237,7 @@ def test_h_commit_clamps_loaded_values(workdir):
     # enums clamp to their valid range (lrw_activation 0..1).
     assert "(int)m_app_config.lrw_activation > 1) {" in generated
     # float ranges keep the f suffix.
-    assert "if (m_app_config.temperature_alarm_hst > 5.0f) {" in generated
+    assert "if (m_app_config.temperature_corr > 5.0f) {" in generated
 
 
 # --- proto <-> decoder cross-check ---------------------------------------
