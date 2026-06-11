@@ -114,12 +114,23 @@ var _ALM_TAGS = _invert(_ALM_NAMES);
 var _LRW_TAGS = _invert(_LRW_NAMES);
 
 // proto field tag -> command name in the DownlinkCommand body oneof.
+// BEGIN GENERATED COMMANDS
 var _CMD_NAMES = {
-  2: "set_param", 3: "get_param", 4: "get_info", 5: "get_config",
-  6: "settings_save", 7: "reboot", 8: "factory_reset", 9: "force_send",
-  10: "reset_counters", 11: "req_history", 12: "clock_sync", 13: "alarm_rule",
-  14: "w1_scan"
+  2: "set_param",
+  3: "get_param",
+  4: "get_info",
+  5: "get_config",
+  6: "settings_save",
+  7: "reboot",
+  8: "factory_reset",
+  9: "force_send",
+  10: "reset_counters",
+  11: "req_history",
+  12: "clock_sync",
+  13: "alarm_rule",
+  14: "w1_scan",
 };
+// END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);
 
 function _decodeLorawan(bytes, start, end) {
