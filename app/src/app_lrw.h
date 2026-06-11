@@ -64,6 +64,11 @@ uint8_t app_lrw_get_max_payload(void);
  * a warning if a prior response hasn't been transmitted yet. */
 int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len);
 
+/* Arm a deferred GetInfo uplink to answer a ClockSync command: the next network
+ * time-update (DeviceTimeAns) sends an Info carrying the synced unix_time. The
+ * command itself does not ack (saves an uplink; a bare ack can't carry the time). */
+void app_lrw_send_info_on_clock_sync(void);
+
 /* Stage an alarm-detail batch (issue #27) for the next uplink on fPort 3. Own
  * slot, drained after the command response and before telemetry, so it never
  * collides with app_lrw_queue_response(). Returns 0, -EINVAL, or -EMSGSIZE. */

@@ -1836,6 +1836,46 @@ struct app_config *app_config(void)
 	return &m_app_config;
 }
 
+int app_config_factory_reset(void)
+{
+	int ret;
+
+	/* Reset every parameter to its compiled-in default, but carry over the
+	 * factory identity and network credentials (preserve_on_migration in the
+	 * YAML) so the reset never un-provisions the device or drops it off the
+	 * LoRaWAN network. A full wipe (incl. identity) stays shell-only via
+	 * `settings reset`. Mirrors the migration restore in h_commit. */
+	struct app_config preserved = m_app_config;
+
+	m_app_config = m_app_config_defaults;
+	memcpy(m_app_config.secret_key, preserved.secret_key, sizeof(m_app_config.secret_key));
+	m_app_config.serial_number = preserved.serial_number;
+	m_app_config.nonce_counter = preserved.nonce_counter;
+	m_app_config.lrw_region = preserved.lrw_region;
+	m_app_config.lrw_sub_band = preserved.lrw_sub_band;
+	m_app_config.lrw_network = preserved.lrw_network;
+	m_app_config.lrw_adr = preserved.lrw_adr;
+	m_app_config.lrw_activation = preserved.lrw_activation;
+	memcpy(m_app_config.lrw_deveui, preserved.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	memcpy(m_app_config.lrw_joineui, preserved.lrw_joineui, sizeof(m_app_config.lrw_joineui));
+	memcpy(m_app_config.lrw_nwkkey, preserved.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
+	memcpy(m_app_config.lrw_appkey, preserved.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+	memcpy(m_app_config.lrw_devaddr, preserved.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
+	memcpy(m_app_config.lrw_nwkskey, preserved.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
+	memcpy(m_app_config.lrw_appskey, preserved.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+
+	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
+
+	ret = settings_save_subtree(SETTINGS_PFX);
+	if (ret) {
+		LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		return ret;
+	}
+
+	LOG_INF("Factory reset: config restored to defaults (identity + LoRaWAN kept)");
+	return 0;
+}
+
 static int app_config_init(void)
 {
 	int ret;

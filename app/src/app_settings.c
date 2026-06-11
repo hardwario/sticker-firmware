@@ -5,6 +5,7 @@
  */
 
 #include "app_settings.h"
+#include "app_alarm_rules.h"
 #include "app_config.h"
 #include "app_config_ingest.h"
 
@@ -170,4 +171,30 @@ int app_settings_save(bool reboot)
 int app_settings_reset(void)
 {
 	return reset(true);
+}
+
+int app_settings_factory_reset(void)
+{
+	int ret;
+
+	/* Config: defaults for everything except the preserved identity + LoRaWAN
+	 * fields (see app_config_factory_reset). */
+	ret = app_config_factory_reset();
+	if (ret) {
+		LOG_ERR("Call `app_config_factory_reset` failed: %d", ret);
+		return ret;
+	}
+
+	/* Dynamic alarm rules live outside the config blob; clear them too so a
+	 * factory reset returns the full application state to defaults. */
+	app_alarm_rules_clear_all();
+	ret = app_alarm_rules_save();
+	if (ret) {
+		LOG_ERR("Call `app_alarm_rules_save` failed: %d", ret);
+		return ret;
+	}
+
+	sys_reboot(SYS_REBOOT_COLD);
+
+	return 0;
 }

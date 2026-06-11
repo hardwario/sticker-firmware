@@ -28,6 +28,14 @@
 #define APP_CMD_HAVE_HISTORY 1
 #endif
 
+/* 1-Wire bus enumeration (W1Scan command). Present only when the DS2484 bridge
+ * is configured; the response returns the discovered ROMs so the host can teach
+ * a slot via SetParam sensorN_rom. */
+#if defined(CONFIG_W1)
+#include "app_w1.h"
+#define APP_CMD_HAVE_W1 1
+#endif
+
 /* Nanopb includes */
 #include <pb_decode.h>
 #include <pb_encode.h>
@@ -317,12 +325,24 @@ static void handle_reset_counters(const Command_ResetCounters *rc, Response *res
 	resp->which_body = Response_ack_tag;
 }
 
+/* Some commands answer ONLY via a LoRaWAN uplink — triggered telemetry
+ * (force_send), a HistoryFrame stream (req_history), or a deferred clock Info
+ * (clock_sync). Over NFC the caller waits for a reply on the same transport and
+ * would get nothing, so reject them with an error it can surface. Returns true
+ * when the transport is LRW (proceed), false after filling an Error. */
+static bool require_lrw(enum app_cmd_transport transport, Response *resp)
+{
+	if (transport != APP_CMD_TRANSPORT_LRW) {
+		make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
+		return false;
+	}
+	return true;
+}
+
 static void handle_req_history(enum app_cmd_transport transport, const Command *cmd, Response *resp)
 {
 #if defined(APP_CMD_HAVE_HISTORY) && defined(CONFIG_LORAWAN)
-	if (transport != APP_CMD_TRANSPORT_LRW) {
-		/* Replay is inherently a stream of LoRaWAN uplinks. */
-		make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
+	if (!require_lrw(transport, resp)) {
 		return;
 	}
 
@@ -392,11 +412,57 @@ static void handle_alarm_rule(const Command *cmd, Response *resp, enum app_cmd_a
 	}
 }
 
+#if defined(APP_CMD_HAVE_W1)
+/* w1_scan ROM-discovery callback: append each ROM (8 bytes: family + 6-byte
+ * serial + CRC) to the response, capped at the field's max_count. */
+static int w1_scan_cb(struct w1_rom rom, void *user_data)
+{
+	Response_W1Scan *w1 = user_data;
+
+	if (w1->rom_count >= ARRAY_SIZE(w1->rom)) {
+		return 0; /* response is full; ignore the rest */
+	}
+
+	BUILD_ASSERT(sizeof(rom) == 8, "w1_rom must be 8 bytes");
+	w1->rom[w1->rom_count].size = sizeof(rom);
+	memcpy(w1->rom[w1->rom_count].bytes, &rom, sizeof(rom));
+	w1->rom_count++;
+
+	return 0;
+}
+
+static void handle_w1_scan(Response *resp)
+{
+	static const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
+	struct app_w1 w1 = {0};
+	int ret;
+
+	if (!device_is_ready(dev)) {
+		make_error(resp, Response_Error_Code_NOT_READY, "1-wire bus");
+		return;
+	}
+
+	ret = app_w1_acquire(&w1, dev);
+	if (ret) {
+		make_error(resp, Response_Error_Code_NOT_READY, "1-wire acquire");
+		return;
+	}
+
+	resp->which_body = Response_w1_scan_tag;
+	resp->body.w1_scan.rom_count = 0;
+	ret = app_w1_scan(&w1, dev, w1_scan_cb, &resp->body.w1_scan);
+
+	(void)app_w1_release(&w1, dev);
+
+	if (ret < 0) {
+		make_error(resp, Response_Error_Code_NOT_READY, "1-wire scan");
+	}
+}
+#endif /* APP_CMD_HAVE_W1 */
+
 static void dispatch(enum app_cmd_transport transport, const Command *cmd, Response *resp,
 		     enum app_cmd_action *action)
 {
-	ARG_UNUSED(transport);
-
 	resp->seq = cmd->seq;
 
 	switch (cmd->which_body) {
@@ -433,10 +499,14 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 		break;
 
 	case Command_force_send_tag:
+		if (!require_lrw(transport, resp)) {
+			break;
+		}
 #if defined(CONFIG_LORAWAN)
 		app_lrw_send();
 #endif
-		resp->which_body = Response_ack_tag;
+		/* No ack — the triggered telemetry uplink IS the answer; an extra ack
+		 * would just cost a second uplink. Leave which_body == 0 (emit nothing). */
 		break;
 
 	case Command_reset_counters_tag:
@@ -444,10 +514,17 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 		break;
 
 	case Command_clock_sync_tag:
-#ifdef APP_CMD_HAVE_CLOCK
+		if (!require_lrw(transport, resp)) {
+			break;
+		}
+#if defined(APP_CMD_HAVE_CLOCK) && defined(CONFIG_LORAWAN)
+		/* Re-sync, then answer with an Info uplink once the network time lands
+		 * (carries the synced unix_time). No ack — see app_lrw. */
 		app_clock_force_resync();
+		app_lrw_send_info_on_clock_sync();
+#else
+		resp->which_body = Response_ack_tag; /* no clock/LRW: just confirm */
 #endif
-		resp->which_body = Response_ack_tag;
 		break;
 
 	case Command_alarm_rule_tag:
@@ -455,6 +532,14 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 		break;
 	case Command_req_history_tag:
 		handle_req_history(transport, cmd, resp);
+		break;
+
+	case Command_w1_scan_tag:
+#if defined(APP_CMD_HAVE_W1)
+		handle_w1_scan(resp);
+#else
+		make_error(resp, Response_Error_Code_NOT_READY, "no 1-wire");
+#endif
 		break;
 
 	default:

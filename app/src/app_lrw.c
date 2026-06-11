@@ -167,6 +167,10 @@ static struct k_work m_dl_request_work;
 static struct k_work_delayable m_post_cmd_work;
 static enum app_cmd_action m_post_cmd_action;
 
+/* Set by a ClockSync command; the next network time-update sends an Info uplink
+ * (with the synced unix_time) instead of the command acking immediately. */
+static bool m_clock_sync_info_pending;
+
 static uint32_t calculate_rejoin_backoff(int attempt)
 {
 	uint32_t backoff = REJOIN_BACKOFF_BASE_SEC;
@@ -206,8 +210,8 @@ static void post_cmd_work_handler(struct k_work *work)
 		app_settings_save(true);
 		break;
 	case APP_CMD_ACTION_FACTORY_RESET:
-		LOG_INF("Command: factory reset + reboot");
-		app_settings_reset();
+		LOG_INF("Command: factory reset (keep identity + LoRaWAN) + reboot");
+		app_settings_factory_reset();
 		break;
 	case APP_CMD_ACTION_REBOOT:
 		LOG_INF("Command: reboot");
@@ -279,6 +283,19 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 
 	/* Set the RTC from the network if this downlink carried a DeviceTimeAns. */
 	app_clock_handle_downlink(flags);
+
+	/* Deferred answer to a ClockSync command: once the network time actually
+	 * lands, send an Info uplink carrying the freshly-synced unix_time (the
+	 * command itself does not ack — saves an uplink, and a bare ack couldn't
+	 * carry the synced time yet). */
+	if (m_clock_sync_info_pending && (flags & LORAWAN_TIME_UPDATED)) {
+		m_clock_sync_info_pending = false;
+		uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
+		size_t info_len;
+		if (app_cmd_build_info(info_buf, sizeof(info_buf), &info_len) == 0) {
+			(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len);
+		}
+	}
 
 	if (port == APP_LRW_DOWNLINK_CMD_PORT && data && len > 0) {
 		if (len <= sizeof(m_dl_request_buf)) {
@@ -1300,6 +1317,13 @@ int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 	 * instead of waiting for the periodic timer. */
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
 	return 0;
+}
+
+void app_lrw_send_info_on_clock_sync(void)
+{
+	/* Arm the deferred Info; downlink_callback sends it once LORAWAN_TIME_UPDATED
+	 * arrives (the ClockSync command answer). */
+	m_clock_sync_info_pending = true;
 }
 
 int app_lrw_send_alarm(const uint8_t *buf, size_t len)

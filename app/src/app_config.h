@@ -90,6 +90,13 @@ extern struct app_config g_app_config;
 
 struct app_config *app_config(void);
 
+/* Reset every parameter to its compiled-in default EXCEPT the factory identity
+ * and network credentials (preserve_on_migration), then persist. Backs the
+ * factory_reset command so the device keeps its LoRaWAN session; the shell
+ * `settings reset` still does a full NVS wipe. Returns 0 or a negative errno.
+ * The caller reboots so every module re-reads the restored config. */
+int app_config_factory_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

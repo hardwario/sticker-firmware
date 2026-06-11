@@ -136,6 +136,7 @@ message Command {
         ReqHistory      req_history      = 11;
         ClockSync       clock_sync       = 12;
         AlarmRule       alarm_rule       = 13;
+        W1Scan          w1_scan          = 14;
     }
 
     message SetParam {
@@ -186,6 +187,10 @@ message Command {
         optional uint32 from_state = 8;
         optional uint32 to_state   = 9;
     }
+
+    // Enumerate the 1-Wire bus; the response (Response.W1Scan) returns the
+    // discovered ROMs so the host can teach a slot via SetParam sensorN_rom.
+    message W1Scan { }
 }
 
 message Response {
@@ -197,6 +202,7 @@ message Response {
         ConfigDump   config_dump   = 4;
         HistoryFrame history_frame = 5;
         Error        error         = 6;
+        W1Scan       w1_scan       = 7;
     }
 
     message Ack { }
@@ -254,6 +260,13 @@ message Response {
         Code   code         = 1;
         uint32 fault_field  = 2;
         string detail       = 3;
+    }
+
+    // Answer to a W1Scan command: the ROMs discovered on the 1-Wire bus (8 bytes
+    // each: family + 6-byte serial + CRC). The host teaches a slot by writing a
+    // chosen ROM to sensorN_rom via SetParam.
+    message W1Scan {
+        repeated bytes rom = 1;
     }
 }
 
