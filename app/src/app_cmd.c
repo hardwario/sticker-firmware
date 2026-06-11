@@ -445,10 +445,14 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 		break;
 
 	case Command_clock_sync_tag:
-#ifdef APP_CMD_HAVE_CLOCK
+#if defined(APP_CMD_HAVE_CLOCK) && defined(CONFIG_LORAWAN)
+		/* Re-sync, then answer with an Info uplink once the network time lands
+		 * (carries the synced unix_time). No ack — see app_lrw. */
 		app_clock_force_resync();
+		app_lrw_send_info_on_clock_sync();
+#else
+		resp->which_body = Response_ack_tag; /* no clock/LRW: just confirm */
 #endif
-		resp->which_body = Response_ack_tag;
 		break;
 
 	case Command_alarm_rule_tag:
