@@ -252,20 +252,110 @@ static void print_available_sensors(const struct shell *shell)
 {
 	shell_print(shell, "Available sensors:");
 	shell_print(shell, "  ---Float sensors---:");
-	shell_print(shell, "    voltage, temperature, humidity, illuminance");
-	shell_print(shell, "    t1-temperature, t2-temperature");
-	shell_print(shell, "    mp1-temperature, mp2-temperature");
-	shell_print(shell, "    mp1-humidity, mp2-humidity");
-	shell_print(shell, "    altitude, pressure");
+	shell_print(shell, "    voltage, temperature, humidity, illuminance, altitude, pressure");
+	shell_print(shell, "    sN-{temperature,humidity,illuminance,magnetic-field} (N=1..4)");
 	shell_print(shell, "  ---Integer sensors---:");
 	shell_print(shell, "    orientation");
 	shell_print(shell, "  ---Counter sensors---:");
 	shell_print(shell, "    motion-count, hall-left-count, hall-right-count");
 	shell_print(shell, "    input-a-count, input-b-count");
 	shell_print(shell, "  ---Boolean sensors---:");
-	shell_print(shell, "    mp1-is-tilt-alert, mp2-is-tilt-alert");
+	shell_print(shell, "    sN-tilt-alert (N=1..4)");
 	shell_print(shell, "    hall-left-is-active, hall-right-is-active");
 	shell_print(shell, "    input-a-is-active, input-b-is-active");
+}
+
+/* Sensor-value kind for the generic `sensors check` resolver. */
+enum sval_kind {
+	SVAL_NONE = 0,
+	SVAL_FLOAT,
+	SVAL_UINT,
+	SVAL_INT,
+	SVAL_BOOL,
+};
+
+/* Resolve a sensor name to its current value from g_app_sensor_data and return
+ * its kind (SVAL_NONE if unknown). Caller must hold g_app_sensor_data_lock.
+ * Slot sensors are `sN-<quantity>` (N=1..4 -> w1[N-1]), single source of truth
+ * for both the initial snapshot and the monitor loop. */
+static enum sval_kind resolve_sensor(const char *name, float *f, uint32_t *u, int *iv, bool *bv)
+{
+	const struct app_sensor_data *d = &g_app_sensor_data;
+
+	if (strcmp(name, "voltage") == 0) {
+		*f = d->voltage;
+		return SVAL_FLOAT;
+	} else if (strcmp(name, "temperature") == 0) {
+		*f = d->temperature;
+		return SVAL_FLOAT;
+	} else if (strcmp(name, "humidity") == 0) {
+		*f = d->humidity;
+		return SVAL_FLOAT;
+	} else if (strcmp(name, "illuminance") == 0) {
+		*f = d->illuminance;
+		return SVAL_FLOAT;
+	} else if (strcmp(name, "altitude") == 0) {
+		*f = d->altitude;
+		return SVAL_FLOAT;
+	} else if (strcmp(name, "pressure") == 0) {
+		*f = d->pressure;
+		return SVAL_FLOAT;
+	} else if (strcmp(name, "orientation") == 0) {
+		*iv = d->orientation;
+		return SVAL_INT;
+	} else if (strcmp(name, "motion-count") == 0) {
+		*u = d->motion_count;
+		return SVAL_UINT;
+	} else if (strcmp(name, "hall-left-count") == 0) {
+		*u = d->hall_left_count;
+		return SVAL_UINT;
+	} else if (strcmp(name, "hall-right-count") == 0) {
+		*u = d->hall_right_count;
+		return SVAL_UINT;
+	} else if (strcmp(name, "input-a-count") == 0) {
+		*u = d->input_a_count;
+		return SVAL_UINT;
+	} else if (strcmp(name, "input-b-count") == 0) {
+		*u = d->input_b_count;
+		return SVAL_UINT;
+	} else if (strcmp(name, "hall-left-is-active") == 0) {
+		*bv = d->hall_left_is_active;
+		return SVAL_BOOL;
+	} else if (strcmp(name, "hall-right-is-active") == 0) {
+		*bv = d->hall_right_is_active;
+		return SVAL_BOOL;
+	} else if (strcmp(name, "input-a-is-active") == 0) {
+		*bv = d->input_a_is_active;
+		return SVAL_BOOL;
+	} else if (strcmp(name, "input-b-is-active") == 0) {
+		*bv = d->input_b_is_active;
+		return SVAL_BOOL;
+	}
+
+	/* Slot sensors: sN-<quantity>, N=1..4 -> w1[N-1]. */
+	if (name[0] == 's' && name[1] >= '1' && name[1] <= '4' && name[2] == '-') {
+		const struct app_w1_slot_reading *s = &d->w1[name[1] - '1'];
+		const char *q = name + 3;
+
+		if (strcmp(q, "temperature") == 0) {
+			*f = s->temperature;
+			return SVAL_FLOAT;
+		} else if (strcmp(q, "humidity") == 0) {
+			*f = s->humidity;
+			return SVAL_FLOAT;
+		} else if (strcmp(q, "illuminance") == 0) {
+			*f = s->illuminance;
+			return SVAL_FLOAT;
+		} else if (strcmp(q, "magnetic-field") == 0) {
+			*f = s->magnetic_field;
+			return SVAL_FLOAT;
+		} else if (strcmp(q, "tilt-alert") == 0) {
+			*bv = s->is_tilt_alert;
+			return SVAL_BOOL;
+		}
+	}
+
+	return SVAL_NONE;
 }
 
 static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv)
@@ -287,104 +377,25 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 		}
 	}
 
-	shell_print(shell, SHELL_PFX " Monitoring '%s' for %d seconds...", sensor_name,
-		    timeout_sec);
+	float pf = 0.0f, cf = 0.0f;
+	uint32_t pu = 0, cu = 0;
+	int pi = 0, ci = 0;
+	bool pb = false, cb = false;
 
-	/* Store initial value */
-	float prev_float = 0.0f;
-	uint32_t prev_uint32 = 0;
-	int prev_int = 0;
-	bool prev_bool = false;
-	bool is_float = false;
-	bool is_uint32 = false;
-	bool is_int = false;
-	bool is_bool = false;
-
-	/* Determine sensor type and get initial value */
+	/* Snapshot the initial value (and learn the sensor's kind). */
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	enum sval_kind kind = resolve_sensor(sensor_name, &pf, &pu, &pi, &pb);
+	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	if (strcmp(sensor_name, "voltage") == 0) {
-		prev_float = g_app_sensor_data.voltage;
-		is_float = true;
-	} else if (strcmp(sensor_name, "temperature") == 0) {
-		prev_float = g_app_sensor_data.temperature;
-		is_float = true;
-	} else if (strcmp(sensor_name, "humidity") == 0) {
-		prev_float = g_app_sensor_data.humidity;
-		is_float = true;
-	} else if (strcmp(sensor_name, "illuminance") == 0) {
-		prev_float = g_app_sensor_data.illuminance;
-		is_float = true;
-	} else if (strcmp(sensor_name, "t1-temperature") == 0) {
-		prev_float = g_app_sensor_data.w1[0].temperature;
-		is_float = true;
-	} else if (strcmp(sensor_name, "t2-temperature") == 0) {
-		prev_float = g_app_sensor_data.w1[1].temperature;
-		is_float = true;
-	} else if (strcmp(sensor_name, "mp1-temperature") == 0) {
-		prev_float = g_app_sensor_data.w1[2].temperature;
-		is_float = true;
-	} else if (strcmp(sensor_name, "mp2-temperature") == 0) {
-		prev_float = g_app_sensor_data.w1[3].temperature;
-		is_float = true;
-	} else if (strcmp(sensor_name, "mp1-humidity") == 0) {
-		prev_float = g_app_sensor_data.w1[2].humidity;
-		is_float = true;
-	} else if (strcmp(sensor_name, "mp2-humidity") == 0) {
-		prev_float = g_app_sensor_data.w1[3].humidity;
-		is_float = true;
-	} else if (strcmp(sensor_name, "altitude") == 0) {
-		prev_float = g_app_sensor_data.altitude;
-		is_float = true;
-	} else if (strcmp(sensor_name, "pressure") == 0) {
-		prev_float = g_app_sensor_data.pressure;
-		is_float = true;
-	} else if (strcmp(sensor_name, "orientation") == 0) {
-		prev_int = g_app_sensor_data.orientation;
-		is_int = true;
-	} else if (strcmp(sensor_name, "motion-count") == 0) {
-		prev_uint32 = g_app_sensor_data.motion_count;
-		is_uint32 = true;
-	} else if (strcmp(sensor_name, "hall-left-count") == 0) {
-		prev_uint32 = g_app_sensor_data.hall_left_count;
-		is_uint32 = true;
-	} else if (strcmp(sensor_name, "hall-right-count") == 0) {
-		prev_uint32 = g_app_sensor_data.hall_right_count;
-		is_uint32 = true;
-	} else if (strcmp(sensor_name, "input-a-count") == 0) {
-		prev_uint32 = g_app_sensor_data.input_a_count;
-		is_uint32 = true;
-	} else if (strcmp(sensor_name, "input-b-count") == 0) {
-		prev_uint32 = g_app_sensor_data.input_b_count;
-		is_uint32 = true;
-	} else if (strcmp(sensor_name, "mp1-is-tilt-alert") == 0) {
-		prev_bool = g_app_sensor_data.w1[2].is_tilt_alert;
-		is_bool = true;
-	} else if (strcmp(sensor_name, "mp2-is-tilt-alert") == 0) {
-		prev_bool = g_app_sensor_data.w1[3].is_tilt_alert;
-		is_bool = true;
-	} else if (strcmp(sensor_name, "hall-left-is-active") == 0) {
-		prev_bool = g_app_sensor_data.hall_left_is_active;
-		is_bool = true;
-	} else if (strcmp(sensor_name, "hall-right-is-active") == 0) {
-		prev_bool = g_app_sensor_data.hall_right_is_active;
-		is_bool = true;
-	} else if (strcmp(sensor_name, "input-a-is-active") == 0) {
-		prev_bool = g_app_sensor_data.input_a_is_active;
-		is_bool = true;
-	} else if (strcmp(sensor_name, "input-b-is-active") == 0) {
-		prev_bool = g_app_sensor_data.input_b_is_active;
-		is_bool = true;
-	} else {
-		k_mutex_unlock(&g_app_sensor_data_lock);
+	if (kind == SVAL_NONE) {
 		shell_error(shell, "Unknown sensor: %s", sensor_name);
 		print_available_sensors(shell);
 		return;
 	}
 
-	k_mutex_unlock(&g_app_sensor_data_lock);
+	shell_print(shell, SHELL_PFX " Monitoring '%s' for %d seconds...", sensor_name,
+		    timeout_sec);
 
-	/* Monitor for changes */
 	int64_t start_time = k_uptime_get();
 	int64_t timeout_ms = timeout_sec * 1000;
 
@@ -392,97 +403,38 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 		app_sensor_sample();
 
 		k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-
-		bool changed = false;
-		float curr_float = 0.0f;
-		uint32_t curr_uint32 = 0;
-		int curr_int = 0;
-		bool curr_bool = false;
-
-		/* Check for change based on sensor type */
-		if (is_float) {
-			if (strcmp(sensor_name, "voltage") == 0) {
-				curr_float = g_app_sensor_data.voltage;
-			} else if (strcmp(sensor_name, "temperature") == 0) {
-				curr_float = g_app_sensor_data.temperature;
-			} else if (strcmp(sensor_name, "humidity") == 0) {
-				curr_float = g_app_sensor_data.humidity;
-			} else if (strcmp(sensor_name, "illuminance") == 0) {
-				curr_float = g_app_sensor_data.illuminance;
-			} else if (strcmp(sensor_name, "t1-temperature") == 0) {
-				curr_float = g_app_sensor_data.w1[0].temperature;
-			} else if (strcmp(sensor_name, "t2-temperature") == 0) {
-				curr_float = g_app_sensor_data.w1[1].temperature;
-			} else if (strcmp(sensor_name, "mp1-temperature") == 0) {
-				curr_float = g_app_sensor_data.w1[2].temperature;
-			} else if (strcmp(sensor_name, "mp2-temperature") == 0) {
-				curr_float = g_app_sensor_data.w1[3].temperature;
-			} else if (strcmp(sensor_name, "mp1-humidity") == 0) {
-				curr_float = g_app_sensor_data.w1[2].humidity;
-			} else if (strcmp(sensor_name, "mp2-humidity") == 0) {
-				curr_float = g_app_sensor_data.w1[3].humidity;
-			} else if (strcmp(sensor_name, "altitude") == 0) {
-				curr_float = g_app_sensor_data.altitude;
-			} else if (strcmp(sensor_name, "pressure") == 0) {
-				curr_float = g_app_sensor_data.pressure;
-			}
-
-			if (curr_float != prev_float) {
-				shell_print(shell, SHELL_PFX " %s: %.2f", sensor_name,
-					    (double)curr_float);
-				prev_float = curr_float;
-				changed = true;
-			}
-		} else if (is_uint32) {
-			if (strcmp(sensor_name, "motion-count") == 0) {
-				curr_uint32 = g_app_sensor_data.motion_count;
-			} else if (strcmp(sensor_name, "hall-left-count") == 0) {
-				curr_uint32 = g_app_sensor_data.hall_left_count;
-			} else if (strcmp(sensor_name, "hall-right-count") == 0) {
-				curr_uint32 = g_app_sensor_data.hall_right_count;
-			} else if (strcmp(sensor_name, "input-a-count") == 0) {
-				curr_uint32 = g_app_sensor_data.input_a_count;
-			} else if (strcmp(sensor_name, "input-b-count") == 0) {
-				curr_uint32 = g_app_sensor_data.input_b_count;
-			}
-
-			if (curr_uint32 != prev_uint32) {
-				shell_print(shell, SHELL_PFX " %s: %u", sensor_name, curr_uint32);
-				prev_uint32 = curr_uint32;
-				changed = true;
-			}
-		} else if (is_int) {
-			curr_int = g_app_sensor_data.orientation;
-
-			if (curr_int != prev_int) {
-				shell_print(shell, SHELL_PFX " %s: %d", sensor_name, curr_int);
-				prev_int = curr_int;
-				changed = true;
-			}
-		} else if (is_bool) {
-			if (strcmp(sensor_name, "mp1-is-tilt-alert") == 0) {
-				curr_bool = g_app_sensor_data.w1[2].is_tilt_alert;
-			} else if (strcmp(sensor_name, "mp2-is-tilt-alert") == 0) {
-				curr_bool = g_app_sensor_data.w1[3].is_tilt_alert;
-			} else if (strcmp(sensor_name, "hall-left-is-active") == 0) {
-				curr_bool = g_app_sensor_data.hall_left_is_active;
-			} else if (strcmp(sensor_name, "hall-right-is-active") == 0) {
-				curr_bool = g_app_sensor_data.hall_right_is_active;
-			} else if (strcmp(sensor_name, "input-a-is-active") == 0) {
-				curr_bool = g_app_sensor_data.input_a_is_active;
-			} else if (strcmp(sensor_name, "input-b-is-active") == 0) {
-				curr_bool = g_app_sensor_data.input_b_is_active;
-			}
-
-			if (curr_bool != prev_bool) {
-				shell_print(shell, SHELL_PFX " %s: %s", sensor_name,
-					    curr_bool ? "true" : "false");
-				prev_bool = curr_bool;
-				changed = true;
-			}
-		}
-
+		resolve_sensor(sensor_name, &cf, &cu, &ci, &cb);
 		k_mutex_unlock(&g_app_sensor_data_lock);
+
+		switch (kind) {
+		case SVAL_FLOAT:
+			if (cf != pf) {
+				shell_print(shell, SHELL_PFX " %s: %.2f", sensor_name, (double)cf);
+				pf = cf;
+			}
+			break;
+		case SVAL_UINT:
+			if (cu != pu) {
+				shell_print(shell, SHELL_PFX " %s: %u", sensor_name, cu);
+				pu = cu;
+			}
+			break;
+		case SVAL_INT:
+			if (ci != pi) {
+				shell_print(shell, SHELL_PFX " %s: %d", sensor_name, ci);
+				pi = ci;
+			}
+			break;
+		case SVAL_BOOL:
+			if (cb != pb) {
+				shell_print(shell, SHELL_PFX " %s: %s", sensor_name,
+					    cb ? "true" : "false");
+				pb = cb;
+			}
+			break;
+		default:
+			break;
+		}
 
 		k_sleep(K_MSEC(SENSOR_CHECK_POLL_INTERVAL_MS));
 	}
