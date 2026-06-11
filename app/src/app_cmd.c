@@ -436,7 +436,8 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 #if defined(CONFIG_LORAWAN)
 		app_lrw_send();
 #endif
-		resp->which_body = Response_ack_tag;
+		/* No ack — the triggered telemetry uplink IS the answer; an extra ack
+		 * would just cost a second uplink. Leave which_body == 0 (emit nothing). */
 		break;
 
 	case Command_reset_counters_tag:
