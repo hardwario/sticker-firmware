@@ -53,9 +53,10 @@ def _run_configen(out_dir):
 def workdir(tmp_path):
     for name in ["app_config.yml", "app_config.proto", "app_config.options.in"]:
         shutil.copy(APP_SRC / name, tmp_path / name)
-    # The decoder's command-map region is rewritten in place; copy it so the run
-    # has a marked region to edit (app_cmd.c is intentionally absent → skipped).
+    # The decoder's command-map region and app_cmd.c's dispatch region are
+    # rewritten in place; copy them so the run has marked regions to edit.
     shutil.copy(DECODER, tmp_path / "ttn.js")
+    shutil.copy(APP_SRC / "app_cmd.c", tmp_path / "app_cmd.c")
     # Carry the project clang-format style so generated C matches the committed
     # files (clang-format searches upward from the file for .clang-format).
     if (REPO / ".clang-format").exists():
@@ -346,3 +347,33 @@ def test_generated_decoder_command_region_matches_committed(workdir):
     ttn.js (locks the name<->tag map against hand-edits / YAML drift)."""
     _run_configen(workdir)
     assert (workdir / "ttn.js").read_text() == DECODER.read_text()
+
+
+@pytest.mark.skipif(shutil.which("clang-format") is None,
+                    reason="clang-format not available")
+def test_generated_dispatch_region_matches_committed(workdir):
+    """The app_cmd_dispatch() switch the generator emits must equal what is
+    committed in app_cmd.c (locks routing against YAML drift)."""
+    _run_configen(workdir)
+    assert (workdir / "app_cmd.c").read_text() == (APP_SRC / "app_cmd.c").read_text()
+
+
+def test_dispatch_template_routes_every_command():
+    """Every command in the model appears in the rendered dispatch switch, with
+    LRW-only commands guarded and action commands setting their action."""
+    import jinja2
+    model = configen.build_commands_model(_load_config())
+    env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(configen.TEMPLATES_DIR),
+        trim_blocks=True, lstrip_blocks=True, keep_trailing_newline=True)
+    out = env.get_template("commands_dispatch.c.j2").render(**model)
+    for c in model["commands"]:
+        assert f"case {c['tag']}:" in out, c["name"]
+        if c["kind"] == "action":
+            assert f"APP_CMD_ACTION_{c['action']}" in out, c["name"]
+        else:
+            assert f"{c['handler']}(tp, cmd, resp, action);" in out, c["name"]
+        if c["lrw_only"]:
+            # the guard precedes this command's handler/action body
+            head = out.split(f"case {c['tag']}:", 1)[1]
+            assert "tp != APP_CMD_TRANSPORT_LRW" in head.split("break;", 1)[0]
