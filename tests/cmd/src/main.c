@@ -33,16 +33,16 @@ static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 	return n;
 }
 
-/* Run app_cmd_handle on a hex command; decode the Response into `resp`. */
-static enum app_cmd_action handle(const char *hex, Response *resp)
+/* Run app_cmd_handle on a hex command over `transport`; decode the Response. */
+static enum app_cmd_action handle_via(enum app_cmd_transport transport, const char *hex,
+				      Response *resp)
 {
 	uint8_t in[64], out[128];
 	size_t in_len = unhex(hex, in, sizeof(in));
 	size_t out_len = 0;
 	enum app_cmd_action action = APP_CMD_ACTION_NONE;
 
-	int ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len,
-				 &action);
+	int ret = app_cmd_handle(transport, in, in_len, out, sizeof(out), &out_len, &action);
 	zassert_equal(ret, 0, "app_cmd_handle ret %d", ret);
 
 	/* out[0] is the APP_PROTO_VERSION prefix (#55); decode the protobuf after it. */
@@ -52,6 +52,12 @@ static enum app_cmd_action handle(const char *hex, Response *resp)
 	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
 	zassert_true(pb_decode(&is, Response_fields, resp), "Response decode failed");
 	return action;
+}
+
+/* Most tests exercise the LoRaWAN transport. */
+static enum app_cmd_action handle(const char *hex, Response *resp)
+{
+	return handle_via(APP_CMD_TRANSPORT_LRW, hex, resp);
 }
 
 static void reset_cfg(void)
@@ -147,6 +153,34 @@ ZTEST(cmd, test_deferred_actions)
 
 	zassert_equal(handle("08083a00", &r), APP_CMD_ACTION_REBOOT, "reboot");
 	zassert_equal(handle("08094200", &r), APP_CMD_ACTION_FACTORY_RESET, "factory");
+}
+
+/* force_send / clock_sync / req_history answer only via a LoRaWAN uplink, so
+ * over NFC they must be rejected with an Error (NOT_READY) rather than firing a
+ * side effect the NFC caller can never observe. */
+ZTEST(cmd, test_lrw_only_commands_rejected_over_nfc)
+{
+	Response r;
+
+	/* force_send (field 9, empty body) — seq=6. */
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_NFC, "08064a00", &r);
+	zassert_equal(r.which_body, Response_error_tag, "force_send/NFC should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+
+	/* clock_sync (field 12, empty body) — seq=5. */
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_NFC, "08056200", &r);
+	zassert_equal(r.which_body, Response_error_tag, "clock_sync/NFC should error (which=%d)",
+		      r.which_body);
+
+	/* req_history (field 11) — seq=7, empty window. */
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_NFC, "08075a00", &r);
+	zassert_equal(r.which_body, Response_error_tag, "req_history/NFC should error (which=%d)",
+		      r.which_body);
 }
 
 /* #89: a fully-populated history frame (48 samples, synced 5-byte t0) must fit

@@ -325,12 +325,24 @@ static void handle_reset_counters(const Command_ResetCounters *rc, Response *res
 	resp->which_body = Response_ack_tag;
 }
 
+/* Some commands answer ONLY via a LoRaWAN uplink — triggered telemetry
+ * (force_send), a HistoryFrame stream (req_history), or a deferred clock Info
+ * (clock_sync). Over NFC the caller waits for a reply on the same transport and
+ * would get nothing, so reject them with an error it can surface. Returns true
+ * when the transport is LRW (proceed), false after filling an Error. */
+static bool require_lrw(enum app_cmd_transport transport, Response *resp)
+{
+	if (transport != APP_CMD_TRANSPORT_LRW) {
+		make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
+		return false;
+	}
+	return true;
+}
+
 static void handle_req_history(enum app_cmd_transport transport, const Command *cmd, Response *resp)
 {
 #if defined(APP_CMD_HAVE_HISTORY) && defined(CONFIG_LORAWAN)
-	if (transport != APP_CMD_TRANSPORT_LRW) {
-		/* Replay is inherently a stream of LoRaWAN uplinks. */
-		make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
+	if (!require_lrw(transport, resp)) {
 		return;
 	}
 
@@ -451,8 +463,6 @@ static void handle_w1_scan(Response *resp)
 static void dispatch(enum app_cmd_transport transport, const Command *cmd, Response *resp,
 		     enum app_cmd_action *action)
 {
-	ARG_UNUSED(transport);
-
 	resp->seq = cmd->seq;
 
 	switch (cmd->which_body) {
@@ -489,6 +499,9 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 		break;
 
 	case Command_force_send_tag:
+		if (!require_lrw(transport, resp)) {
+			break;
+		}
 #if defined(CONFIG_LORAWAN)
 		app_lrw_send();
 #endif
@@ -501,6 +514,9 @@ static void dispatch(enum app_cmd_transport transport, const Command *cmd, Respo
 		break;
 
 	case Command_clock_sync_tag:
+		if (!require_lrw(transport, resp)) {
+			break;
+		}
 #if defined(APP_CMD_HAVE_CLOCK) && defined(CONFIG_LORAWAN)
 		/* Re-sync, then answer with an Info uplink once the network time lands
 		 * (carries the synced unix_time). No ack — see app_lrw. */
