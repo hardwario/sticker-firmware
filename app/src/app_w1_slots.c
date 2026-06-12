@@ -539,6 +539,12 @@ int app_w1_slots_scan(struct app_w1_scan_entry *out, int max)
 		out[n].bound_slot = slot_of_rom(dev[d].serial);
 		n++;
 	}
+
+	/* The per-type driver scans above reshuffle driver indices, so re-bind
+	 * ROM->slot here — otherwise a bare `w1 scan` (no teach/enroll) leaves
+	 * m_slots[].driver_index pointing at a stale physical sensor until the next
+	 * teach or reboot. Idempotent; teach/assign rebind again after writing ROM. */
+	(void)app_w1_slots_rebind();
 	return n;
 }
 
