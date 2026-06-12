@@ -57,10 +57,18 @@ LOG_MODULE_REGISTER(app_nfc, LOG_LEVEL_DBG);
 /* Dynamic register IT_STS_Dyn (device E0, addr 0x2005): interrupt status,
  * read-clears. Non-zero => RF activity since last read (field change / RF
  * write / etc.). Used to skip the full 512 B read when nothing happened. */
-#define ST25DV_IT_STS_DYN 0x2005
+#define ST25DV_IT_STS_DYN  0x2005
+#define ST25DV_IT_RF_WRITE 0x80 /* IT_STS_Dyn bit7: RF wrote to the EEPROM */
+
+/* Static system config (device E1 0x57). Writing it needs an open I2C security
+ * session (present password). GPO bit6 RF_WRITE_EN makes RF EEPROM writes show
+ * up in IT_STS_Dyn, letting the poll gate on writes specifically. */
+#define ST25DV_GPO_REG         0x0000
+#define ST25DV_GPO_RF_WRITE_EN 0x40
+#define ST25DV_I2C_PWD_REG     0x0900
 
 #define NDEF_TNF_MIME       0x02
-#define NDEF_SUPPORTED_TYPE "application/vnd.hardwario.sticker-config.v1"
+#define NDEF_SUPPORTED_TYPE "application/com.hardwario.sticker.config"
 
 /* Plaintext info record the firmware keeps on the tag so a phone learns the
  * sticker identity and schema version the moment it taps, without decrypting
@@ -72,7 +80,7 @@ LOG_MODULE_REGISTER(app_nfc, LOG_LEVEL_DBG);
  *   [9]    config/schema version (APP_CONFIG_VERSION)
  *   [10]   flags: bit0 = debug build
  */
-#define NDEF_INFO_TYPE   "application/vnd.hardwario.sticker-info.v1"
+#define NDEF_INFO_TYPE   "application/com.hardwario.sticker.info"
 #define NDEF_INFO_FORMAT 0x01
 
 /* NFC Forum Type 5 Capability Container (4-byte form) for ST25DV04K:
@@ -97,6 +105,10 @@ static const struct gpio_dt_spec m_lpd = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpi
  * be written over several `nfc write` calls without the periodic check racing
  * it and rewriting the tag to the info record mid-write. */
 static bool m_periodic = true;
+
+/* True when GPO RF_WRITE_EN was successfully enabled, so the poll can gate on
+ * the RF_WRITE bit specifically. False => gate on any RF activity (fallback). */
+static bool m_rf_write_gate;
 
 bool app_nfc_periodic_enabled(void)
 {
@@ -234,6 +246,69 @@ static int write_reg(uint16_t reg, const void *buf, size_t len)
 	}
 
 	return 0;
+}
+
+/* Open the I2C security session by presenting an 8-byte password (required to
+ * write the static system config such as GPO). Frame: addr(2) + pwd(8) + 0x09
+ * (present code) + pwd(8). */
+static int nfc_present_password(const uint8_t pwd[8])
+{
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
+	}
+
+	uint8_t frame[2 + 8 + 1 + 8];
+	sys_put_be16(ST25DV_I2C_PWD_REG, frame);
+	memcpy(&frame[2], pwd, 8);
+	frame[10] = 0x09;
+	memcpy(&frame[11], pwd, 8);
+
+	int ret = i2c_write(dev, frame, sizeof(frame), ST25DV_I2C_ADDR_E1);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("i2c_write(password)", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+/* Set GPO RF_WRITE_EN so RF EEPROM writes are reported in IT_STS_Dyn. Needs the
+ * default (all-zero) I2C password. Returns 0 if RF_WRITE reporting is active.
+ * Caller must hold the access lock. */
+static int nfc_enable_rf_write_it(void)
+{
+	static const uint8_t default_pwd[8] = {0};
+
+	int ret = nfc_present_password(default_pwd);
+	if (ret) {
+		return ret;
+	}
+
+	uint8_t gpo;
+	ret = read_reg(ST25DV_GPO_REG, &gpo, 1);
+	if (ret) {
+		return ret;
+	}
+
+	if (gpo & ST25DV_GPO_RF_WRITE_EN) {
+		return 0; /* already enabled */
+	}
+
+	gpo |= ST25DV_GPO_RF_WRITE_EN;
+	ret = write_reg(ST25DV_GPO_REG, &gpo, 1);
+	if (ret) {
+		return ret;
+	}
+
+	uint8_t check = 0;
+	ret = read_reg(ST25DV_GPO_REG, &check, 1);
+	if (ret) {
+		return ret;
+	}
+
+	return (check & ST25DV_GPO_RF_WRITE_EN) ? 0 : -EIO;
 }
 
 /* Power the ST25DV up for I2C access (LPD low) and take the access lock. On
@@ -471,6 +546,19 @@ int app_nfc_init(void)
 		return ret;
 	}
 
+	/* Try to enable RF-write reporting in IT_STS_Dyn so the poll can gate on
+	 * writes specifically. Needs the default I2C password; on failure the poll
+	 * falls back to gating on any RF activity. Not fatal. */
+	if (nfc_access_begin() == 0) {
+		if (nfc_enable_rf_write_it() == 0) {
+			m_rf_write_gate = true;
+			LOG_INF("NFC: RF_WRITE IT enabled (precise poll gate)");
+		} else {
+			LOG_WRN("NFC: RF_WRITE IT enable failed; poll gates on any RF activity");
+		}
+		nfc_access_end();
+	}
+
 	return 0;
 }
 
@@ -565,8 +653,13 @@ int app_nfc_poll(enum app_nfc_action *action)
 	ret = read_reg(ST25DV_IT_STS_DYN, &it_sts, sizeof(it_sts));
 	if (ret) {
 		res = ret;
-	} else if (it_sts != 0) {
-		res = nfc_check_locked(action);
+	} else {
+		/* With RF_WRITE reporting on, gate on the write bit only (skip mere
+		 * reads/field changes); otherwise gate on any RF activity. */
+		bool trigger = m_rf_write_gate ? (it_sts & ST25DV_IT_RF_WRITE) : (it_sts != 0);
+		if (trigger) {
+			res = nfc_check_locked(action);
+		}
 	}
 
 	nfc_access_end();
