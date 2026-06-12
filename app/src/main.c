@@ -34,7 +34,14 @@
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 #define BLINK_INTERVAL_SECONDS 3
-#define NFC_CHECK_BLINKS       10
+
+/* NFC poll runs on its own thread (not tied to the LED blink loop). Each poll
+ * reads the 1-byte IT_STS_Dyn and only does a full read on RF activity, so a
+ * short interval is cheap. */
+#define NFC_POLL_INTERVAL_SECONDS  2
+#define NFC_POLL_START_DELAY_MS    3000
+#define NFC_POLL_THREAD_STACK_SIZE 2048
+#define NFC_POLL_THREAD_PRIO       K_LOWEST_APPLICATION_THREAD_PRIO
 
 #define APP_ALARM_ORANGE_RATE_LIMIT_MS 500
 #define APP_ALARM_ORANGE_AUTO_OFF_MS   (60 * 60 * 1000)
@@ -45,7 +52,6 @@ enum app_mode {
 	APP_MODE_CALIBRATION,
 };
 
-static int m_nfc_counter;
 
 static void die(void)
 {
@@ -89,6 +95,47 @@ static void play_carousel_nfc(void)
 	app_led_blink(&req);
 	k_sleep(K_MSEC(10 * 200 - 100));
 }
+
+/* Dedicated NFC poll thread: independent of the LED blink loop. Each cycle does
+ * the cheap gated poll (1-byte IT_STS_Dyn; full read only on RF activity) and
+ * applies a consumed config. Started after a delay so app_nfc_init() has run. */
+static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	for (;;) {
+		k_sleep(K_SECONDS(NFC_POLL_INTERVAL_SECONDS));
+
+		if (!app_nfc_periodic_enabled()) {
+			continue;
+		}
+
+		enum app_nfc_action action;
+		int ret = app_nfc_poll(&action);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_nfc_poll", ret);
+		}
+
+		if (action == APP_NFC_ACTION_SAVE) {
+			play_carousel_nfc();
+			ret = app_settings_save(true);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
+			}
+		} else if (action == APP_NFC_ACTION_RESET) {
+			play_carousel_nfc();
+			ret = app_settings_reset();
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_settings_reset", ret);
+			}
+		}
+	}
+}
+
+K_THREAD_DEFINE(nfc_poll_tid, NFC_POLL_THREAD_STACK_SIZE, nfc_poll_thread_fn, NULL, NULL, NULL,
+		NFC_POLL_THREAD_PRIO, 0, NFC_POLL_START_DELAY_MS);
 
 static enum app_mode detect_mode(void)
 {
@@ -280,30 +327,7 @@ int main(void)
 		}
 #endif /* defined(CONFIG_WATCHDOG) */
 
-		if (app_nfc_periodic_enabled() && ++m_nfc_counter >= NFC_CHECK_BLINKS) {
-			m_nfc_counter = 0;
-
-			ret = app_nfc_poll(&action);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
-			}
-
-			if (action == APP_NFC_ACTION_SAVE) {
-				play_carousel_nfc();
-
-				ret = app_settings_save(true);
-				if (ret) {
-					LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
-				}
-			} else if (action == APP_NFC_ACTION_RESET) {
-				play_carousel_nfc();
-
-				ret = app_settings_reset();
-				if (ret) {
-					LOG_ERR_CALL_FAILED_INT("app_settings_reset", ret);
-				}
-			}
-		}
+		/* NFC is polled on its own thread (nfc_poll_thread_fn), not here. */
 
 		/* Detect magnet on BOTH Hall sensors → reboot into calibration mode */
 		if (k_uptime_get() < (int64_t)APP_CALIBRATION_ACTIVATION_WINDOW_MIN * 60 * 1000) {
