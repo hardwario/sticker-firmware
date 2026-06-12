@@ -193,10 +193,13 @@ int main(void)
 
 	enum app_nfc_action action;
 
+	/* A stale/replay config left on the tag makes app_nfc_check() fail
+	 * (anti-replay) on every boot. Do NOT die() here — that would brick the
+	 * device into a reboot loop. Log and continue, like the periodic check
+	 * in the main loop does. */
 	ret = app_nfc_check(&action);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
-		die();
 	}
 
 	if (action == APP_NFC_ACTION_SAVE) {

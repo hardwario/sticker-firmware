@@ -5,9 +5,11 @@
  */
 
 #include "app_nfc.h"
+#include "app_cmd.h"
 #include "app_config_ingest.h"
 #include "app_config.h"
 #include "app_ndef_parser.h"
+#include "app_version.h"
 #include "app_log.h"
 
 /* Nanopb includes */
@@ -22,6 +24,11 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/util.h>
+
+#if defined(CONFIG_SHELL)
+#include <zephyr/shell/shell.h>
+#endif
 
 /* PSA Crypto includes */
 #include <psa/crypto.h>
@@ -30,6 +37,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(app_nfc, LOG_LEVEL_DBG);
@@ -41,10 +49,41 @@ LOG_MODULE_REGISTER(app_nfc, LOG_LEVEL_DBG);
 #define ST25DV_INT_PAGE_BYTES      4
 #define ST25DV_TW_MS_PER_PAGE      5
 
+#define ST25DV_USER_MEM_SIZE 512
+
 #define NDEF_TNF_MIME       0x02
 #define NDEF_SUPPORTED_TYPE "application/vnd.hardwario.sticker-config.v1"
 
-typedef void (*ndef_text_callback_t)(const char *text, size_t len);
+/* Plaintext info record the firmware keeps on the tag so a phone learns the
+ * sticker identity and schema version the moment it taps, without decrypting
+ * anything. Payload layout (11 bytes):
+ *   [0]    format version (NDEF_INFO_FORMAT)
+ *   [1..4] serial number (big-endian uint32)
+ *   [5]    fw major   [6] fw minor   [7] fw patch
+ *   [8]    build type (0=main, 1=dev, 2=custom)
+ *   [9]    config/schema version (APP_CONFIG_VERSION)
+ *   [10]   flags: bit0 = debug build
+ */
+#define NDEF_INFO_TYPE   "application/vnd.hardwario.sticker-info.v1"
+#define NDEF_INFO_FORMAT 0x01
+
+/* NFC Forum Type 5 Capability Container (4-byte form) for ST25DV04K:
+ *   [0] 0xE1 magic, [1] 0x40 mapping v1.0 + read/write,
+ *   [2] MLEN = user_memory / 8 = 512/8 = 0x40, [3] 0x01 (MBREAD feature).
+ * A phone's Web NFC (Type 5) reader requires a valid CC at offset 0 before the
+ * NDEF TLV; without it the tag reads as unformatted/empty over RF. */
+#define ST25DV_CC0 0xE1
+#define ST25DV_CC1 0x40
+#define ST25DV_CC2 (ST25DV_USER_MEM_SIZE / 8)
+#define ST25DV_CC3 0x01
+
+/* Single shared 512-byte scratch buffer for all ST25DV memory access. Always
+ * used while holding m_lock, which serialises app_nfc_check() (main loop) and
+ * the `nfc` shell commands against each other on the I2C bus and LPD pin. */
+static uint8_t m_buf[ST25DV_USER_MEM_SIZE];
+static K_MUTEX_DEFINE(m_lock);
+
+static const struct gpio_dt_spec m_lpd = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
 
 static int read_mem(uint16_t reg, void *buf, size_t len)
 {
@@ -123,6 +162,93 @@ static int write_mem(uint16_t reg, const void *buf, size_t len)
 	return 0;
 }
 
+/* Power the ST25DV up for I2C access (LPD low) and take the access lock. On
+ * success the caller must pair this with nfc_access_end(). */
+static int nfc_access_begin(void)
+{
+	int ret;
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+
+	if (!gpio_is_ready_dt(&m_lpd)) {
+		LOG_ERR("GPIO device not ready (LPD)");
+		k_mutex_unlock(&m_lock);
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_set_dt(&m_lpd, 0);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
+		k_mutex_unlock(&m_lock);
+		return ret;
+	}
+
+	k_sleep(K_MSEC(150));
+
+	return 0;
+}
+
+/* Power the ST25DV back down (LPD high) and release the access lock. */
+static void nfc_access_end(void)
+{
+	int ret = gpio_pin_set_dt(&m_lpd, 1);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
+	}
+
+	k_mutex_unlock(&m_lock);
+}
+
+/* Build the plaintext info NDEF (TLV + single MIME record + terminator) into
+ * `out`. Returns the byte length, or 0 if it would not fit. Deterministic for a
+ * given firmware/config (no uptime/clock), so app_nfc_check() can compare it to
+ * the tag content and skip rewriting when already present. */
+static size_t build_info_ndef(uint8_t *out, size_t out_size)
+{
+	struct app_cmd_info info;
+	app_cmd_get_info(&info);
+
+	uint8_t payload[11];
+	payload[0] = NDEF_INFO_FORMAT;
+	sys_put_be32(info.serial_number, &payload[1]);
+	payload[5] = info.fw_major;
+	payload[6] = info.fw_minor;
+	payload[7] = info.fw_patch;
+	payload[8] = info.build_type;
+	payload[9] = (uint8_t)g_app_config.config_version;
+	payload[10] = info.debug ? 0x01 : 0x00;
+
+	size_t type_len = strlen(NDEF_INFO_TYPE);
+	size_t payload_len = sizeof(payload);
+
+	/* NDEF record: header + type_len + payload_len + type + payload */
+	size_t msg_len = 1 + 1 + 1 + type_len + payload_len;
+
+	/* Tag content: CC (4) + NDEF Message TLV (0x03, len) + message + Terminator (0xFE) */
+	size_t total = 4 + 2 + msg_len + 1;
+	if (total > out_size || msg_len > 0xFE) {
+		return 0;
+	}
+
+	size_t i = 0;
+	out[i++] = ST25DV_CC0; /* Type 5 Capability Container */
+	out[i++] = ST25DV_CC1;
+	out[i++] = ST25DV_CC2;
+	out[i++] = ST25DV_CC3;
+	out[i++] = 0x03;             /* NDEF Message TLV type */
+	out[i++] = (uint8_t)msg_len; /* TLV length (single-byte form) */
+	out[i++] = 0xD2;             /* MB | ME | SR | TNF=MIME(0x02) */
+	out[i++] = (uint8_t)type_len;
+	out[i++] = (uint8_t)payload_len;
+	memcpy(&out[i], NDEF_INFO_TYPE, type_len);
+	i += type_len;
+	memcpy(&out[i], payload, payload_len);
+	i += payload_len;
+	out[i++] = 0xFE; /* Terminator TLV */
+
+	return i;
+}
+
 static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size, size_t *out_len)
 {
 	int res = 0;
@@ -169,7 +295,7 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 
 	psa_key_id_t key_id;
 	status = psa_import_key(&key_attributes, g_app_config.secret_key,
-				sizeof(g_app_config.secret_key), &key_id);
+			       sizeof(g_app_config.secret_key), &key_id);
 	if (status != PSA_SUCCESS) {
 		LOG_ERR_CALL_FAILED_INT("psa_import_key", status);
 		return -EIO;
@@ -260,14 +386,12 @@ int app_nfc_init(void)
 {
 	int ret;
 
-	const struct gpio_dt_spec lpd_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
-
-	if (!gpio_is_ready_dt(&lpd_spec)) {
+	if (!gpio_is_ready_dt(&m_lpd)) {
 		LOG_ERR("GPIO device not ready (LPD)");
 		return -ENODEV;
 	}
 
-	ret = gpio_pin_configure_dt(&lpd_spec, GPIO_OUTPUT_ACTIVE);
+	ret = gpio_pin_configure_dt(&m_lpd, GPIO_OUTPUT_ACTIVE);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
 		return ret;
@@ -283,67 +407,195 @@ int app_nfc_check(enum app_nfc_action *action)
 
 	*action = APP_NFC_ACTION_NONE;
 
-	const struct gpio_dt_spec lpd_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
+	/* Build the expected info record up front (no I2C); used both to detect
+	 * "tag already holds our info" and to (re)write it. */
+	uint8_t info[80];
+	size_t info_len = build_info_ndef(info, sizeof(info));
 
-	if (!gpio_is_ready_dt(&lpd_spec)) {
-		LOG_ERR("GPIO device not ready (LPD)");
-		return -ENODEV;
-	}
-
-	ret = gpio_pin_set_dt(&lpd_spec, 0);
+	ret = nfc_access_begin();
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
 		return ret;
 	}
 
-	k_sleep(K_MSEC(150));
-
-	static uint8_t buf[512];
-	ret = read_mem(0, buf, sizeof(buf));
+	ret = read_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("read_mem", ret);
 		res = ret;
-
-		ret = gpio_pin_set_dt(&lpd_spec, 1);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
-			return ret;
-		}
-
-		return res;
+		goto out;
 	}
 
-	if (is_buffer_zero(buf, sizeof(buf))) {
-		ret = gpio_pin_set_dt(&lpd_spec, 1);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
-			return ret;
+	/* Empty tag: lay down the info record so a phone always finds metadata. */
+	if (is_buffer_zero(m_buf, ST25DV_USER_MEM_SIZE)) {
+		if (info_len) {
+			ret = write_mem(0, info, info_len);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+				res = ret;
+			}
 		}
-
-		return 0;
+		goto out;
 	}
 
-	ret = app_ndef_parser_run(buf, sizeof(buf), parser_callback, action);
+	/* Tag already holds exactly our info record: nothing pending, leave it
+	 * (avoids rewriting the EEPROM on every periodic check). */
+	if (info_len && memcmp(m_buf, info, info_len) == 0) {
+		goto out;
+	}
+
+	/* Pending data written by a phone: parse it (config ingest sets *action). */
+	ret = app_ndef_parser_run(m_buf, ST25DV_USER_MEM_SIZE, parser_callback, action);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_ndef_parser_run", ret);
 		res = ret;
 	}
 
-	LOG_INF("Clearing memory...");
-
-	memset(buf, 0, sizeof(buf));
-
-	ret = write_mem(0, buf, sizeof(buf));
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("write_mem", ret);
-		res = ret;
+	/* Replace the tag content with the info record. This clears the consumed
+	 * config (anti-replay) and restores the metadata a phone expects to read. */
+	LOG_INF("Writing info record to NFC...");
+	if (info_len) {
+		ret = write_mem(0, info, info_len);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+			res = ret;
+		}
 	}
 
-	ret = gpio_pin_set_dt(&lpd_spec, 1);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
-		res = ret;
-	}
-
+out:
+	nfc_access_end();
 	return res;
 }
+
+#if defined(CONFIG_SHELL)
+
+static int cmd_nfc_dump(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	ret = read_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
+	if (ret == 0) {
+		shell_hexdump(sh, m_buf, ST25DV_USER_MEM_SIZE);
+	}
+
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "read failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int cmd_nfc_read(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	unsigned long off = strtoul(argv[1], NULL, 0);
+	unsigned long len = strtoul(argv[2], NULL, 0);
+
+	if (len == 0 || off >= ST25DV_USER_MEM_SIZE || off + len > ST25DV_USER_MEM_SIZE) {
+		shell_error(sh, "range out of 0..%d", ST25DV_USER_MEM_SIZE);
+		return -EINVAL;
+	}
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	ret = read_mem((uint16_t)off, m_buf, len);
+	if (ret == 0) {
+		shell_hexdump(sh, m_buf, len);
+	}
+
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "read failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int cmd_nfc_write(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	unsigned long off = strtoul(argv[1], NULL, 0);
+
+	size_t n = hex2bin(argv[2], strlen(argv[2]), m_buf, ST25DV_USER_MEM_SIZE);
+	if (n == 0) {
+		shell_error(sh, "bad hex (or empty)");
+		return -EINVAL;
+	}
+
+	if (off >= ST25DV_USER_MEM_SIZE || off + n > ST25DV_USER_MEM_SIZE) {
+		shell_error(sh, "range out of 0..%d", ST25DV_USER_MEM_SIZE);
+		return -EINVAL;
+	}
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	ret = write_mem((uint16_t)off, m_buf, n);
+
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "write failed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "wrote %zu byte(s) at offset %lu", n, off);
+	return 0;
+}
+
+static int cmd_nfc_clear(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	memset(m_buf, 0, ST25DV_USER_MEM_SIZE);
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	ret = write_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
+
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "clear failed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "cleared %d bytes", ST25DV_USER_MEM_SIZE);
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_nfc, SHELL_CMD_ARG(dump, NULL, "Hex dump all 512 B of NFC memory.", cmd_nfc_dump, 1, 0),
+	SHELL_CMD_ARG(read, NULL, "Read a range. Usage: read <offset> <len>", cmd_nfc_read, 3, 0),
+	SHELL_CMD_ARG(write, NULL, "Write hex bytes. Usage: write <offset> <hexbytes>", cmd_nfc_write,
+		      3, 0),
+	SHELL_CMD_ARG(clear, NULL, "Zero all 512 B of NFC memory.", cmd_nfc_clear, 1, 0),
+	SHELL_SUBCMD_SET_END);
+
+SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC memory access (debug).", NULL);
+
+#endif /* CONFIG_SHELL */
