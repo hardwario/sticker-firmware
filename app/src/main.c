@@ -280,7 +280,7 @@ int main(void)
 		}
 #endif /* defined(CONFIG_WATCHDOG) */
 
-		if (++m_nfc_counter >= NFC_CHECK_BLINKS) {
+		if (app_nfc_periodic_enabled() && ++m_nfc_counter >= NFC_CHECK_BLINKS) {
 			m_nfc_counter = 0;
 
 			ret = app_nfc_check(&action);

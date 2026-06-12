@@ -9,6 +9,7 @@
 #include "app_config_ingest.h"
 #include "app_config.h"
 #include "app_ndef_parser.h"
+#include "app_settings.h"
 #include "app_version.h"
 #include "app_log.h"
 
@@ -84,6 +85,16 @@ static uint8_t m_buf[ST25DV_USER_MEM_SIZE];
 static K_MUTEX_DEFINE(m_lock);
 
 static const struct gpio_dt_spec m_lpd = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
+
+/* Periodic NFC check enable (toggled via `nfc autocheck`). Lets a config blob
+ * be written over several `nfc write` calls without the periodic check racing
+ * it and rewriting the tag to the info record mid-write. */
+static bool m_periodic = true;
+
+bool app_nfc_periodic_enabled(void)
+{
+	return m_periodic;
+}
 
 static int read_mem(uint16_t reg, void *buf, size_t len)
 {
@@ -588,12 +599,58 @@ static int cmd_nfc_clear(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_nfc_autocheck(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	if (strcmp(argv[1], "on") == 0) {
+		m_periodic = true;
+	} else if (strcmp(argv[1], "off") == 0) {
+		m_periodic = false;
+	} else {
+		shell_error(sh, "usage: nfc autocheck on|off");
+		return -EINVAL;
+	}
+
+	shell_print(sh, "periodic NFC check %s", m_periodic ? "on" : "off");
+	return 0;
+}
+
+static int cmd_nfc_check(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	enum app_nfc_action action;
+	int ret = app_nfc_check(&action);
+	if (ret) {
+		shell_error(sh, "nfc check failed: %d", ret);
+		return ret;
+	}
+
+	if (action == APP_NFC_ACTION_SAVE) {
+		ret = app_settings_save(true);
+		shell_print(sh, "config applied%s", ret ? " (save failed!)" : " and saved");
+	} else if (action == APP_NFC_ACTION_RESET) {
+		ret = app_settings_reset();
+		shell_print(sh, "factory reset%s", ret ? " (failed!)" : "");
+	} else {
+		shell_print(sh, "no config on tag (no action)");
+	}
+
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_nfc, SHELL_CMD_ARG(dump, NULL, "Hex dump all 512 B of NFC memory.", cmd_nfc_dump, 1, 0),
 	SHELL_CMD_ARG(read, NULL, "Read a range. Usage: read <offset> <len>", cmd_nfc_read, 3, 0),
 	SHELL_CMD_ARG(write, NULL, "Write hex bytes. Usage: write <offset> <hexbytes>", cmd_nfc_write,
 		      3, 0),
 	SHELL_CMD_ARG(clear, NULL, "Zero all 512 B of NFC memory.", cmd_nfc_clear, 1, 0),
+	SHELL_CMD_ARG(autocheck, NULL, "Enable/disable periodic check. Usage: autocheck on|off",
+		      cmd_nfc_autocheck, 2, 0),
+	SHELL_CMD_ARG(check, NULL, "Run the NFC check now (parse + apply config).", cmd_nfc_check, 1,
+		      0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC memory access (debug).", NULL);
