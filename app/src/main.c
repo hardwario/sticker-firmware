@@ -283,7 +283,7 @@ int main(void)
 		if (app_nfc_periodic_enabled() && ++m_nfc_counter >= NFC_CHECK_BLINKS) {
 			m_nfc_counter = 0;
 
-			ret = app_nfc_check(&action);
+			ret = app_nfc_poll(&action);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
 			}

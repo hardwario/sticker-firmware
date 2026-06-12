@@ -20,7 +20,13 @@ enum app_nfc_action {
 };
 
 int app_nfc_init(void);
+
+/* Full check: always reads the tag. Use at boot and for on-demand checks. */
 int app_nfc_check(enum app_nfc_action *action);
+
+/* Gated poll for the periodic check: reads the 1-byte IT_STS_Dyn first and only
+ * does the full read when RF activity is flagged. Cheaper when nothing changed. */
+int app_nfc_poll(enum app_nfc_action *action);
 
 /* Whether the main loop should run the periodic NFC check. Toggled by the
  * `nfc autocheck on|off` shell command so a multi-step `nfc write` of a config

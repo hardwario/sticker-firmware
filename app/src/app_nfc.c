@@ -44,13 +44,20 @@
 LOG_MODULE_REGISTER(app_nfc, LOG_LEVEL_DBG);
 
 #define ST25DV_I2C_ADDR_E0 0x53
-#define ST25DV_I2C_ADDR_E1 0x55
+/* System/dynamic register device address. With user memory at 0x53 (E2=1),
+ * the system area is at 0x57 (the prior 0x55 was the E2=0 value and NACKed). */
+#define ST25DV_I2C_ADDR_E1 0x57
 
 #define ST25DV_MAX_SEQ_WRITE_BYTES 256
 #define ST25DV_INT_PAGE_BYTES      4
 #define ST25DV_TW_MS_PER_PAGE      5
 
 #define ST25DV_USER_MEM_SIZE 512
+
+/* Dynamic register IT_STS_Dyn (device E0, addr 0x2005): interrupt status,
+ * read-clears. Non-zero => RF activity since last read (field change / RF
+ * write / etc.). Used to skip the full 512 B read when nothing happened. */
+#define ST25DV_IT_STS_DYN 0x2005
 
 #define NDEF_TNF_MIME       0x02
 #define NDEF_SUPPORTED_TYPE "application/vnd.hardwario.sticker-config.v1"
@@ -168,6 +175,62 @@ static int write_mem(uint16_t reg, const void *buf, size_t len)
 		reg += chunk;
 		p += chunk;
 		remaining -= chunk;
+	}
+
+	return 0;
+}
+
+/* ST25DV register device select: dynamic registers (>=0x2000, e.g. IT_STS_Dyn
+ * 0x2005, GPO_Dyn 0x2000) live on the user-memory device (E0 0x53); the static
+ * system configuration area (<0x2000, e.g. GPO 0x0000) is on the system device
+ * (E1 0x57). */
+static inline uint8_t reg_dev_addr(uint16_t reg)
+{
+	return (reg >= 0x2000) ? ST25DV_I2C_ADDR_E0 : ST25DV_I2C_ADDR_E1;
+}
+
+/* Read ST25DV system/dynamic register(s). No password needed for reads. */
+static int read_reg(uint16_t reg, void *buf, size_t len)
+{
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
+	}
+
+	uint8_t reg_[2];
+	sys_put_be16(reg, reg_);
+
+	int ret = i2c_write_read(dev, reg_dev_addr(reg), reg_, sizeof(reg_), buf, len);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("i2c_write_read", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+/* Write an ST25DV register. Dynamic registers need no password; the static
+ * system config area requires an open I2C security session (not handled here). */
+static int write_reg(uint16_t reg, const void *buf, size_t len)
+{
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
+	}
+	if (len > 16) {
+		return -EINVAL;
+	}
+
+	uint8_t frame[2 + 16];
+	sys_put_be16(reg, frame);
+	memcpy(&frame[2], buf, len);
+
+	int ret = i2c_write(dev, frame, 2 + len, reg_dev_addr(reg));
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("i2c_write", ret);
+		return ret;
 	}
 
 	return 0;
@@ -411,28 +474,22 @@ int app_nfc_init(void)
 	return 0;
 }
 
-int app_nfc_check(enum app_nfc_action *action)
+/* Core NFC check: read the tag, parse/ingest a pending config, and restore the
+ * info record. Caller must hold the access lock (nfc_access_begin). */
+static int nfc_check_locked(enum app_nfc_action *action)
 {
 	int ret;
 	int res = 0;
-
-	*action = APP_NFC_ACTION_NONE;
 
 	/* Build the expected info record up front (no I2C); used both to detect
 	 * "tag already holds our info" and to (re)write it. */
 	uint8_t info[80];
 	size_t info_len = build_info_ndef(info, sizeof(info));
 
-	ret = nfc_access_begin();
-	if (ret) {
-		return ret;
-	}
-
 	ret = read_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("read_mem", ret);
-		res = ret;
-		goto out;
+		return ret;
 	}
 
 	/* Empty tag: lay down the info record so a phone always finds metadata. */
@@ -444,13 +501,13 @@ int app_nfc_check(enum app_nfc_action *action)
 				res = ret;
 			}
 		}
-		goto out;
+		return res;
 	}
 
 	/* Tag already holds exactly our info record: nothing pending, leave it
-	 * (avoids rewriting the EEPROM on every periodic check). */
+	 * (avoids rewriting the EEPROM on every check). */
 	if (info_len && memcmp(m_buf, info, info_len) == 0) {
-		goto out;
+		return 0;
 	}
 
 	/* Pending data written by a phone: parse it (config ingest sets *action). */
@@ -471,7 +528,47 @@ int app_nfc_check(enum app_nfc_action *action)
 		}
 	}
 
-out:
+	return res;
+}
+
+/* Full NFC check: always reads the tag. Used at boot and by `nfc check`
+ * (an I2C-side `nfc write` does not set the RF IT_STS_Dyn flags). */
+int app_nfc_check(enum app_nfc_action *action)
+{
+	*action = APP_NFC_ACTION_NONE;
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		return ret;
+	}
+
+	int res = nfc_check_locked(action);
+
+	nfc_access_end();
+	return res;
+}
+
+/* Gated poll for the periodic main-loop check: read the 1-byte IT_STS_Dyn
+ * (read-clears). Only when it shows RF activity since the last poll do the full
+ * 512 B read + parse. Saves waking the bus / parsing when nothing changed. */
+int app_nfc_poll(enum app_nfc_action *action)
+{
+	*action = APP_NFC_ACTION_NONE;
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		return ret;
+	}
+
+	int res = 0;
+	uint8_t it_sts = 0;
+	ret = read_reg(ST25DV_IT_STS_DYN, &it_sts, sizeof(it_sts));
+	if (ret) {
+		res = ret;
+	} else if (it_sts != 0) {
+		res = nfc_check_locked(action);
+	}
+
 	nfc_access_end();
 	return res;
 }
@@ -641,6 +738,66 @@ static int cmd_nfc_check(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_nfc_reg(const struct shell *sh, size_t argc, char **argv)
+{
+	unsigned long addr = strtoul(argv[1], NULL, 0);
+	unsigned long count = (argc >= 3) ? strtoul(argv[2], NULL, 0) : 1;
+
+	if (count == 0 || count > 64) {
+		shell_error(sh, "count must be 1..64");
+		return -EINVAL;
+	}
+
+	uint8_t buf[64];
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	ret = read_reg((uint16_t)addr, buf, count);
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "reg read failed: %d", ret);
+		return ret;
+	}
+
+	shell_hexdump(sh, buf, count);
+	return 0;
+}
+
+static int cmd_nfc_regw(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	unsigned long addr = strtoul(argv[1], NULL, 0);
+
+	uint8_t buf[16];
+	size_t n = hex2bin(argv[2], strlen(argv[2]), buf, sizeof(buf));
+	if (n == 0) {
+		shell_error(sh, "bad hex (or empty / too long, max 16 B)");
+		return -EINVAL;
+	}
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	ret = write_reg((uint16_t)addr, buf, n);
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "reg write failed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "wrote %zu byte(s) to reg 0x%lx", n, addr);
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_nfc, SHELL_CMD_ARG(dump, NULL, "Hex dump all 512 B of NFC memory.", cmd_nfc_dump, 1, 0),
 	SHELL_CMD_ARG(read, NULL, "Read a range. Usage: read <offset> <len>", cmd_nfc_read, 3, 0),
@@ -651,6 +808,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_nfc_autocheck, 2, 0),
 	SHELL_CMD_ARG(check, NULL, "Run the NFC check now (parse + apply config).", cmd_nfc_check, 1,
 		      0),
+	SHELL_CMD_ARG(reg, NULL, "Read system/dynamic register (E1). Usage: reg <addr> [count]",
+		      cmd_nfc_reg, 2, 1),
+	SHELL_CMD_ARG(regw, NULL, "Write system/dynamic register (E1). Usage: regw <addr> <hex>",
+		      cmd_nfc_regw, 3, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC memory access (debug).", NULL);
