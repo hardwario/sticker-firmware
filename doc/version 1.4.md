@@ -92,6 +92,8 @@ message SensorReading {
 
 `ttn.js` decodes this into `w1_sensors[]`, each `{ slot, type, type_name, temperature?, humidity?, tilt_alert }`. A slot keeps its identity across reboots/rescans (ROM-bound), so `slot 2` is always the same physical sensor — not a function of bus enumeration order.
 
+A runtime `w1_scan` / enroll re-binds the slots and re-arms machine-probe tilt detection on the spot — **no reboot is needed** for either the slot→sensor mapping or tilt alerts to stay correct after a rescan. Machine-probe readbacks are integrity-checked (SHT serial CRC; the tilt status bit is rejected if the 1-Wire readback is corrupt) so a noisy bus can't bind the wrong sensor or raise a false tilt.
+
 ---
 
 ## 3. Alarm-detail batch on fPort 3 (NEW)
