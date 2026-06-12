@@ -82,6 +82,11 @@ static uint8_t sht_crc8(const uint8_t *data, size_t len)
 #define LIS2DH12_INT1_THS      0x32
 #define LIS2DH12_INT1_DURATION 0x33
 
+/* Tilt-alert defaults — armed per probe inside the bus scan (see scan_callback)
+ * so the alert survives runtime re-scans, not just the boot scan. */
+#define MP_TILT_THRESHOLD 7
+#define MP_TILT_DURATION  1
+
 enum sht_type {
 	SHT_TYPE_UNKNOWN = 0,
 	SHT_TYPE_SHT30,
@@ -339,7 +344,11 @@ static int sht_read_serial(const struct device *dev, uint32_t *serial_number,
 	write_buf[0] = 0x37;
 	write_buf[1] = 0x80;
 	ret = ds28e17_i2c_write_read(dev, SHT33_I2C_ADDR, write_buf, 2, read_buf, 6);
-	if (ret == 0) {
+	if (ret == 0 && sht_crc8(&read_buf[0], 2) == read_buf[2] &&
+	    sht_crc8(&read_buf[3], 2) == read_buf[5]) {
+		/* CRC-check the serial read (same as the SHT43 branch) — addr 0x45 can
+		 * collide with an OPT3001 on some probes, so an un-validated response
+		 * must not be accepted as an SHT. */
 		LOG_DBG("SHT33 detected");
 		if (detected_type) {
 			*detected_type = SHT_TYPE_SHT30;
@@ -656,6 +665,17 @@ static int lis2dh12_get_interrupt(const struct device *dev, bool *is_active)
 		return ret;
 	}
 
+	/* The DS28E17 1-Wire data readback is not CRC-protected and tilt is a single
+	 * bit, so a flipped bit on a long cable would inject a false tilt alert.
+	 * INT1_SRC bit 7 is reserved-zero: a set bit 7 means the byte was corrupted
+	 * on the wire — discard it rather than trust the IA bit. (A true double-read
+	 * can't help here: INT1_SRC is latched and clears on read.) */
+	if (read_buf[0] & BIT(7)) {
+		LOG_WRN("LIS2DH INT1_SRC readback corrupt (0x%02x), ignoring", read_buf[0]);
+		*is_active = false;
+		return 0;
+	}
+
 	*is_active = read_buf[0] & BIT(6) ? true : false;
 
 	return 0;
@@ -698,6 +718,15 @@ static int scan_callback(struct w1_rom rom, void *user_data)
 	if (ret) {
 		LOG_DBG("Skipping serial number: %llu", serial_number);
 		return 0;
+	}
+
+	/* Arm tilt detection here, on every scan (incl. runtime re-scan/enroll).
+	 * lis2dh12_init just BOOTed CTRL_REG5 and wiped the INT1 config, so arming
+	 * only from app_sensor_init would silently disable tilt after any later
+	 * `w1 scan`. Non-fatal: register the probe even if arming fails. */
+	ret = lis2dh12_enable_alert(m_sensors[m_count].dev, MP_TILT_THRESHOLD, MP_TILT_DURATION);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("lis2dh12_enable_alert", ret);
 	}
 
 	m_sensors[m_count++].serial_number = serial_number;

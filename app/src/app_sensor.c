@@ -37,9 +37,6 @@
 
 LOG_MODULE_REGISTER(app_sensor, LOG_LEVEL_DBG);
 
-#define TILT_THRESHOLD 7
-#define TILT_DURATION  1
-
 /* I2C bus recovery: if every I2C sensor read in a sweep fails for this many
  * consecutive sweeps, the bus is likely wedged (a slave holding SDA low after a
  * brown-out/EMI glitch). i2c_recover_bus() bit-bangs 9 clocks to free it. */
@@ -271,17 +268,9 @@ int app_sensor_init(void)
 			res = res ? res : ret;
 		}
 
-		int count = app_machine_probe_get_count();
-
-		for (int i = 0; i < count; i++) {
-			uint64_t serial_number;
-			ret = app_machine_probe_enable_tilt_alert(i, &serial_number, TILT_THRESHOLD,
-								  TILT_DURATION);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_machine_probe_enable_tilt_alert", ret);
-				res = res ? res : ret;
-			}
-		}
+		/* Tilt alert is armed per probe inside app_machine_probe_scan() (see
+		 * scan_callback), so it survives runtime re-scans too — no separate
+		 * arming pass is needed here. */
 	}
 
 	/* Bind discovered 1-Wire devices to logical slots by their persisted ROM
