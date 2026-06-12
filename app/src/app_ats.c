@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_accel.h"
 #include "app_ds18b20.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -470,11 +471,18 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	print_float(shell, "pressure:", d->pressure, "Pa");
 	print_float(shell, "altitude:", d->altitude, "m");
 	print_float(shell, "illuminance:", d->illuminance, "lux");
-	/* orientation is meaningful only with the accelerometer enabled. */
+	/* orientation + raw axes are meaningful only with the accelerometer enabled;
+	 * read live (the onboard accel x/y/z are not cached in g_app_sensor_data). */
 	if (g_app_config.cap_accelerometer) {
-		shell_print(shell, "  %-16s %d", "orientation:", d->orientation);
+		float ax = NAN, ay = NAN, az = NAN;
+		int ori = d->orientation;
+		(void)app_accel_read(&ax, &ay, &az, &ori);
+		shell_print(shell, "  %-16s %d", "orientation:", ori);
+		shell_print(shell, "  %-16s x=%.2f y=%.2f z=%.2f m/s^2", "accel:", (double)ax,
+			    (double)ay, (double)az);
 	} else {
 		shell_print(shell, "  %-16s nan", "orientation:");
+		shell_print(shell, "  %-16s nan", "accel:");
 	}
 	shell_print(shell, "  %-16s %u", "motion-count:", d->motion_count);
 	shell_print(shell, "  %-16s %u", "accel-motion:", d->accel_motion_count);
