@@ -646,6 +646,8 @@ COMMANDS_BEGIN = "BEGIN GENERATED COMMANDS"
 COMMANDS_END = "END GENERATED COMMANDS"
 DISPATCH_BEGIN = "BEGIN GENERATED DISPATCH"
 DISPATCH_END = "END GENERATED DISPATCH"
+DUMP_FIELDS_BEGIN = "BEGIN GENERATED DUMP_FIELDS"
+DUMP_FIELDS_END = "END GENERATED DUMP_FIELDS"
 
 # Response-body kinds whose dispatch emits no immediate Response (the command's
 # effect — telemetry, history frames, a deferred Info — is the answer).
@@ -729,6 +731,59 @@ def build_commands_model(config):
         "type_width": max(len(c["body"]) for c in cmds),
         "name_width": max(len(c["name"]) for c in cmds),
     }
+
+
+# get_config DUMP_FIELDS[] codegen ------------------------------------------
+# Section order MUST match the DUMP_SECTION_* enum in app_cmd.c.
+DUMP_SECTIONS = ["lorawan", "application", "sensors", "alarms"]
+
+
+def _varint_bytes(value):
+    """Encoded length of `value` as an unsigned protobuf varint (>= 1 byte)."""
+    v = int(value)
+    n = 1
+    while v >= 0x80:
+        v >>= 7
+        n += 1
+    return n
+
+
+def _dump_field_size(p):
+    """Conservative upper bound on the encoded bytes of one config field inside a
+    ConfigDump: proto tag + value, matching the on-wire encoding configen emits.
+    Tags for proto_id >= 16 take two bytes; integers up to their declared max;
+    bytes are emitted as a hex string (2 chars/byte + a length byte)."""
+    tag = 1 if p["proto_id"] <= 15 else 2
+    t = p.get("type")
+    if t == "bytes":
+        n = 2 * int(p["size"])
+        return tag + _varint_bytes(n) + n
+    if t in ("bool", "enum"):
+        return tag + 1
+    # Integers map to a varint. All current config ints are non-negative, so the
+    # declared max bounds the width; fall back to the uint32 worst case (5 B)
+    # when unbounded or potentially negative.
+    mx = p.get("max")
+    mn = p.get("min")
+    if mx is not None and (mn is None or mn >= 0):
+        return tag + _varint_bytes(int(mx))
+    return tag + 5
+
+
+def build_dump_fields_model(config):
+    """Rows for the get_config DUMP_FIELDS[] table: every dumpable parameter
+    (proto_group in a ConfigDump section and not `dump: false`), grouped by
+    section in DUMP_SECTION order, YAML declaration order within a section."""
+    rows = []
+    for section in DUMP_SECTIONS:
+        macro = "DUMP_SECTION_" + section.upper()
+        for p in config["parameters"]:
+            if p.get("proto_group") != section or "proto_id" not in p:
+                continue
+            if p.get("dump") is False:
+                continue
+            rows.append({"section": macro, "tag": p["proto_id"], "size": _dump_field_size(p)})
+    return {"dump_fields": rows}
 
 
 class Configen(WestCommand):
@@ -961,6 +1016,7 @@ class Configen(WestCommand):
         # availability of every command in one place (configen-commands design).
         commands_model = build_commands_model(config)
         if commands_model:
+            commands_model.update(build_dump_fields_model(config))
             self._generate_commands(env, commands_model, output_dir, args)
 
     def _generate_proto(self, env, config, yaml_path, proto_path, options_path,
@@ -1050,17 +1106,32 @@ class Configen(WestCommand):
         # ahead of it.
         app_cmd_path = args.app_cmd or (output_dir / "app_cmd.c")
         app_cmd_path = app_cmd_path.resolve()
-        if app_cmd_path.exists() and f"// {DISPATCH_BEGIN}" in app_cmd_path.read_text():
-            body = env.get_template("commands_dispatch.c.j2").render(**model)
-            body = body.rstrip("\n")
-            text = rewrite_marked_region(app_cmd_path, body, "//",
-                                         DISPATCH_BEGIN, DISPATCH_END)
-            if args.dry_run:
-                log.inf(f"Would generate dispatch region in: {app_cmd_path}")
-                print(body)
-            else:
+        if app_cmd_path.exists():
+            text = app_cmd_path.read_text()
+            changed = False
+
+            if f"// {DISPATCH_BEGIN}" in text:
+                body = env.get_template("commands_dispatch.c.j2").render(**model).rstrip("\n")
+                text = rewrite_marked_text(text, body, "//", DISPATCH_BEGIN, DISPATCH_END,
+                                           str(app_cmd_path))
+                changed = True
+                if args.dry_run:
+                    log.inf(f"Would generate dispatch region in: {app_cmd_path}")
+                    print(body)
+
+            # get_config DUMP_FIELDS[] paging table (#112).
+            if "dump_fields" in model and f"// {DUMP_FIELDS_BEGIN}" in text:
+                body = env.get_template("dump_fields.c.j2").render(**model).rstrip("\n")
+                text = rewrite_marked_text(text, body, "//", DUMP_FIELDS_BEGIN, DUMP_FIELDS_END,
+                                           str(app_cmd_path))
+                changed = True
+                if args.dry_run:
+                    log.inf(f"Would generate DUMP_FIELDS region in: {app_cmd_path}")
+                    print(body)
+
+            if changed and not args.dry_run:
                 app_cmd_path.write_text(text)
-                log.inf(f"Generated dispatch region: {app_cmd_path}")
+                log.inf(f"Generated app_cmd regions: {app_cmd_path}")
                 self._clang_format([app_cmd_path])
 
     def _clang_format(self, paths):

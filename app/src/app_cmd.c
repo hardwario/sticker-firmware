@@ -213,9 +213,12 @@ static void app_cmd_handle_get_info(enum app_cmd_transport tp, const Command *cm
 
 /* Dumpable config fields in fixed order, each with a conservative upper bound
  * on its encoded size (field tag + value; hex fields include the length byte).
- * Mirrors the non-secret fields emitted by app_config_fill_lorawan/application
- * — a new config field needs a row here too (a codegen target once #44 lands).
- * Drives get_config paging: greedy bin-pack into DR0-sized ConfigDump pages. */
+ * Mirrors the non-secret fields emitted by app_config_fill_<group>().
+ * Drives get_config paging: greedy bin-pack into DR0-sized ConfigDump pages.
+ *
+ * The rows are GENERATED from app_config.yml by `west configen` (#112): one per
+ * dumpable parameter (proto_group in a ConfigDump section, not `dump: false`),
+ * with the encoded-size bound derived from its type. Do not edit by hand. */
 /* Sections mirror the config submessages (one fill_<group>() each). Order is
  * the ConfigDump submessage order. */
 #define DUMP_SECTION_LORAWAN     0
@@ -223,53 +226,30 @@ static void app_cmd_handle_get_info(enum app_cmd_transport tp, const Command *cm
 #define DUMP_SECTION_SENSORS     2
 #define DUMP_SECTION_ALARMS      3
 
-#define LRW(tag, size) {DUMP_SECTION_LORAWAN, (tag), (size)}
-#define APP(tag)       {DUMP_SECTION_APPLICATION, (tag), 2}
-#define SEN(tag, size) {DUMP_SECTION_SENSORS, (tag), (size)}
-#define ALM(tag)       {DUMP_SECTION_ALARMS, (tag), 2}
-
 static const struct {
 	uint8_t section;
 	uint8_t tag;
 	uint8_t size;
 } DUMP_FIELDS[] = {
-	/* Lorawan (non-secret): varints 2 B, deveui/joineui 18 B, devaddr 10 B. */
-	LRW(1, 2),
-	LRW(2, 2),
-	LRW(3, 2),
-	LRW(4, 2),
-	LRW(5, 18),
-	LRW(6, 18),
-	LRW(9, 10),
-	LRW(12, 2),
-	/* Application: calibration, intervals, history (varints, 2 B). */
-	APP(1),
-	APP(2),
-	APP(4),
-	APP(49),
-	APP(50),
-	/* Sensors: caps/enum 2 B, sensorN_rom 8 B -> 18 B hex. */
-	SEN(40, 2),
-	SEN(41, 2),
-	SEN(42, 2),
-	SEN(43, 2),
-	SEN(44, 2),
-	SEN(45, 2),
-	SEN(46, 2),
-	SEN(54, 2),
-	SEN(55, 2),
-	SEN(60, 2),
-	SEN(56, 18),
-	SEN(57, 18),
-	SEN(58, 18),
-	SEN(59, 18),
-	/* Alarms: alarm_limit/notif_time + hall/input counters (varints, 2 B). */
-	ALM(51),
-	ALM(52),
-	ALM(25),
-	ALM(28),
-	ALM(31),
-	ALM(34),
+	// BEGIN GENERATED DUMP_FIELDS
+	{DUMP_SECTION_LORAWAN, 1, 2},      {DUMP_SECTION_LORAWAN, 12, 2},
+	{DUMP_SECTION_LORAWAN, 2, 2},      {DUMP_SECTION_LORAWAN, 3, 2},
+	{DUMP_SECTION_LORAWAN, 4, 2},      {DUMP_SECTION_LORAWAN, 5, 18},
+	{DUMP_SECTION_LORAWAN, 6, 18},     {DUMP_SECTION_LORAWAN, 9, 10},
+	{DUMP_SECTION_APPLICATION, 1, 2},  {DUMP_SECTION_APPLICATION, 2, 3},
+	{DUMP_SECTION_APPLICATION, 4, 4},  {DUMP_SECTION_APPLICATION, 49, 3},
+	{DUMP_SECTION_APPLICATION, 50, 7}, {DUMP_SECTION_SENSORS, 40, 3},
+	{DUMP_SECTION_SENSORS, 41, 3},     {DUMP_SECTION_SENSORS, 42, 3},
+	{DUMP_SECTION_SENSORS, 43, 3},     {DUMP_SECTION_SENSORS, 44, 3},
+	{DUMP_SECTION_SENSORS, 45, 3},     {DUMP_SECTION_SENSORS, 46, 3},
+	{DUMP_SECTION_SENSORS, 60, 3},     {DUMP_SECTION_SENSORS, 55, 3},
+	{DUMP_SECTION_SENSORS, 54, 3},     {DUMP_SECTION_SENSORS, 56, 19},
+	{DUMP_SECTION_SENSORS, 57, 19},    {DUMP_SECTION_SENSORS, 58, 19},
+	{DUMP_SECTION_SENSORS, 59, 19},    {DUMP_SECTION_ALARMS, 51, 4},
+	{DUMP_SECTION_ALARMS, 52, 3},      {DUMP_SECTION_ALARMS, 25, 3},
+	{DUMP_SECTION_ALARMS, 28, 3},      {DUMP_SECTION_ALARMS, 31, 3},
+	{DUMP_SECTION_ALARMS, 34, 3},
+	// END GENERATED DUMP_FIELDS
 };
 
 /* Per-page byte budget for the field payload inside one ConfigDump. The encoded
