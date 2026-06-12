@@ -40,8 +40,11 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
  * short interval is cheap. */
 #define NFC_POLL_INTERVAL_SECONDS  2
 #define NFC_POLL_START_DELAY_MS    3000
-#define NFC_POLL_THREAD_STACK_SIZE 2048
+#define NFC_POLL_THREAD_STACK_SIZE 3072
 #define NFC_POLL_THREAD_PRIO       K_LOWEST_APPLICATION_THREAD_PRIO
+/* Delay before running an NFC command's deferred action, so the phone can read
+ * the Ack response off the tag before the device reboots/saves. */
+#define NFC_CMD_ACTION_DELAY_SECONDS 3
 
 #define APP_ALARM_ORANGE_RATE_LIMIT_MS 500
 #define APP_ALARM_ORANGE_AUTO_OFF_MS   (60 * 60 * 1000)
@@ -129,6 +132,27 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 			ret = app_settings_reset();
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("app_settings_reset", ret);
+			}
+		}
+
+		/* Deferred action from an NFC command (reboot/save/factory-reset). Run
+		 * it after a short delay so the phone can still read the Ack response
+		 * off the tag first. */
+		enum app_cmd_action cmd_action = app_nfc_take_cmd_action();
+		if (cmd_action != APP_CMD_ACTION_NONE) {
+			k_sleep(K_SECONDS(NFC_CMD_ACTION_DELAY_SECONDS));
+			switch (cmd_action) {
+			case APP_CMD_ACTION_SETTINGS_SAVE:
+				app_settings_save(true);
+				break;
+			case APP_CMD_ACTION_REBOOT:
+				sys_reboot(SYS_REBOOT_COLD);
+				break;
+			case APP_CMD_ACTION_FACTORY_RESET:
+				app_settings_reset();
+				break;
+			default:
+				break;
 			}
 		}
 	}

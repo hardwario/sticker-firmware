@@ -83,6 +83,12 @@ LOG_MODULE_REGISTER(app_nfc, LOG_LEVEL_DBG);
 #define NDEF_INFO_TYPE   "application/com.hardwario.sticker.info"
 #define NDEF_INFO_FORMAT 0x01
 
+/* Command/response over NDEF. The phone writes a command record (raw protobuf
+ * Command, like a LoRaWAN downlink); the firmware processes it via app_cmd and
+ * replaces it with a response record (0x01 version + protobuf Response). */
+#define NDEF_COMMAND_TYPE  "application/com.hardwario.sticker.command"
+#define NDEF_RESPONSE_TYPE "application/com.hardwario.sticker.response"
+
 /* NFC Forum Type 5 Capability Container (4-byte form) for ST25DV04K:
  *   [0] 0xE1 magic, [1] 0x40 mapping v1.0 + read/write,
  *   [2] MLEN = user_memory / 8 = 512/8 = 0x40, [3] 0x01 (MBREAD feature).
@@ -109,6 +115,23 @@ static bool m_periodic = true;
 /* True when GPO RF_WRITE_EN was successfully enabled, so the poll can gate on
  * the RF_WRITE bit specifically. False => gate on any RF activity (fallback). */
 static bool m_rf_write_gate;
+
+/* Command/response state, filled by parser_callback when an NDEF command record
+ * is found and consumed by nfc_check_locked (writes the response to the tag). */
+static uint8_t m_resp_buf[256];
+static size_t m_resp_len;
+static bool m_have_resp;    /* a command was processed; m_resp_buf holds the reply to write */
+static bool m_seen_resp;    /* tag already holds a response record; leave it for the phone */
+static enum app_cmd_action m_cmd_action; /* deferred action from app_cmd_handle */
+
+/* Take (and clear) the deferred action from the last processed NFC command, so
+ * the poll thread can run reboot/save AFTER the response was written/read. */
+enum app_cmd_action app_nfc_take_cmd_action(void)
+{
+	enum app_cmd_action a = m_cmd_action;
+	m_cmd_action = APP_CMD_ACTION_NONE;
+	return a;
+}
 
 bool app_nfc_periodic_enabled(void)
 {
@@ -286,6 +309,10 @@ static int nfc_enable_rf_write_it(void)
 		return ret;
 	}
 
+	/* The chip needs a moment after a present-password write before the next
+	 * I2C access is ACKed. */
+	k_msleep(5);
+
 	uint8_t gpo;
 	ret = read_reg(ST25DV_GPO_REG, &gpo, 1);
 	if (ret) {
@@ -348,10 +375,45 @@ static void nfc_access_end(void)
 	k_mutex_unlock(&m_lock);
 }
 
-/* Build the plaintext info NDEF (TLV + single MIME record + terminator) into
- * `out`. Returns the byte length, or 0 if it would not fit. Deterministic for a
- * given firmware/config (no uptime/clock), so app_nfc_check() can compare it to
- * the tag content and skip rewriting when already present. */
+/* Build CC + NDEF Message TLV + a single short MIME record + terminator into
+ * `out`. Returns the byte length, or 0 if it would not fit (short record, so
+ * payload <= 255 B). Shared by the info and command-response writers. */
+static size_t build_ndef_mime(uint8_t *out, size_t out_size, const char *mime,
+			      const uint8_t *payload, size_t payload_len)
+{
+	size_t type_len = strlen(mime);
+
+	/* NDEF record: header + type_len + payload_len + type + payload */
+	size_t msg_len = 1 + 1 + 1 + type_len + payload_len;
+
+	/* Tag content: CC (4) + NDEF Message TLV (0x03, len) + message + Terminator (0xFE) */
+	size_t total = 4 + 2 + msg_len + 1;
+	if (payload_len > 0xFF || msg_len > 0xFE || total > out_size) {
+		return 0;
+	}
+
+	size_t i = 0;
+	out[i++] = ST25DV_CC0; /* Type 5 Capability Container */
+	out[i++] = ST25DV_CC1;
+	out[i++] = ST25DV_CC2;
+	out[i++] = ST25DV_CC3;
+	out[i++] = 0x03;             /* NDEF Message TLV type */
+	out[i++] = (uint8_t)msg_len; /* TLV length (single-byte form) */
+	out[i++] = 0xD2;             /* MB | ME | SR | TNF=MIME(0x02) */
+	out[i++] = (uint8_t)type_len;
+	out[i++] = (uint8_t)payload_len;
+	memcpy(&out[i], mime, type_len);
+	i += type_len;
+	memcpy(&out[i], payload, payload_len);
+	i += payload_len;
+	out[i++] = 0xFE; /* Terminator TLV */
+
+	return i;
+}
+
+/* Build the plaintext info NDEF into `out`. Deterministic for a given
+ * firmware/config (no uptime/clock), so app_nfc_check() can compare it to the
+ * tag content and skip rewriting when already present. */
 static size_t build_info_ndef(uint8_t *out, size_t out_size)
 {
 	struct app_cmd_info info;
@@ -367,35 +429,7 @@ static size_t build_info_ndef(uint8_t *out, size_t out_size)
 	payload[9] = (uint8_t)g_app_config.config_version;
 	payload[10] = info.debug ? 0x01 : 0x00;
 
-	size_t type_len = strlen(NDEF_INFO_TYPE);
-	size_t payload_len = sizeof(payload);
-
-	/* NDEF record: header + type_len + payload_len + type + payload */
-	size_t msg_len = 1 + 1 + 1 + type_len + payload_len;
-
-	/* Tag content: CC (4) + NDEF Message TLV (0x03, len) + message + Terminator (0xFE) */
-	size_t total = 4 + 2 + msg_len + 1;
-	if (total > out_size || msg_len > 0xFE) {
-		return 0;
-	}
-
-	size_t i = 0;
-	out[i++] = ST25DV_CC0; /* Type 5 Capability Container */
-	out[i++] = ST25DV_CC1;
-	out[i++] = ST25DV_CC2;
-	out[i++] = ST25DV_CC3;
-	out[i++] = 0x03;             /* NDEF Message TLV type */
-	out[i++] = (uint8_t)msg_len; /* TLV length (single-byte form) */
-	out[i++] = 0xD2;             /* MB | ME | SR | TNF=MIME(0x02) */
-	out[i++] = (uint8_t)type_len;
-	out[i++] = (uint8_t)payload_len;
-	memcpy(&out[i], NDEF_INFO_TYPE, type_len);
-	i += type_len;
-	memcpy(&out[i], payload, payload_len);
-	i += payload_len;
-	out[i++] = 0xFE; /* Terminator TLV */
-
-	return i;
+	return build_ndef_mime(out, out_size, NDEF_INFO_TYPE, payload, sizeof(payload));
 }
 
 static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size, size_t *out_len)
@@ -485,6 +519,37 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 		return 0;
 	}
 
+	/* Command record: hand the raw protobuf Command to app_cmd and stage the
+	 * response for nfc_check_locked to write back to the tag. */
+	size_t cmd_type_len = strlen(NDEF_COMMAND_TYPE);
+	if (record_info->type_len == cmd_type_len &&
+	    strncmp((const char *)record_info->type, NDEF_COMMAND_TYPE, cmd_type_len) == 0) {
+		LOG_INF("Found command record - length: %u byte(s)", record_info->payload_len);
+
+		enum app_cmd_action cmd_action = APP_CMD_ACTION_NONE;
+		ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, record_info->payload,
+				     record_info->payload_len, m_resp_buf, sizeof(m_resp_buf),
+				     &m_resp_len, &cmd_action);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
+			m_resp_len = 0;
+			return ret;
+		}
+
+		m_have_resp = (m_resp_len > 0);
+		m_cmd_action = cmd_action;
+		return 0;
+	}
+
+	/* Response record already on the tag (our previous reply): leave it so the
+	 * phone can read it; don't overwrite with the info record. */
+	size_t resp_type_len = strlen(NDEF_RESPONSE_TYPE);
+	if (record_info->type_len == resp_type_len &&
+	    strncmp((const char *)record_info->type, NDEF_RESPONSE_TYPE, resp_type_len) == 0) {
+		m_seen_resp = true;
+		return 0;
+	}
+
 	size_t expected_type_len = strlen(NDEF_SUPPORTED_TYPE);
 
 	/* Check if type matches */
@@ -569,6 +634,9 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	int ret;
 	int res = 0;
 
+	m_have_resp = false;
+	m_seen_resp = false;
+
 	/* Build the expected info record up front (no I2C); used both to detect
 	 * "tag already holds our info" and to (re)write it. */
 	uint8_t info[80];
@@ -598,15 +666,39 @@ static int nfc_check_locked(enum app_nfc_action *action)
 		return 0;
 	}
 
-	/* Pending data written by a phone: parse it (config ingest sets *action). */
+	/* Pending data written by a phone: parse it. parser_callback may ingest a
+	 * config (sets *action), or process a command (stages m_resp_buf), or flag
+	 * that the tag already holds our response (m_seen_resp). */
 	ret = app_ndef_parser_run(m_buf, ST25DV_USER_MEM_SIZE, parser_callback, action);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_ndef_parser_run", ret);
 		res = ret;
 	}
 
-	/* Replace the tag content with the info record. This clears the consumed
-	 * config (anti-replay) and restores the metadata a phone expects to read. */
+	/* A command was processed: write the response back to the tag. Reuse m_buf
+	 * as the output buffer (its parsed contents are no longer needed; the reply
+	 * is already copied into m_resp_buf) to keep this off the thread stack. */
+	if (m_have_resp) {
+		size_t out_len = build_ndef_mime(m_buf, ST25DV_USER_MEM_SIZE, NDEF_RESPONSE_TYPE,
+						 m_resp_buf, m_resp_len);
+		LOG_INF("Writing command response to NFC (%zu B)...", m_resp_len);
+		if (out_len) {
+			ret = write_mem(0, m_buf, out_len);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+				res = ret;
+			}
+		}
+		return res;
+	}
+
+	/* Our response is already on the tag (awaiting the phone read): leave it. */
+	if (m_seen_resp) {
+		return res;
+	}
+
+	/* Config consumed (or unrecognized data): (re)write the info record. This
+	 * clears the consumed config (anti-replay) and restores the metadata. */
 	LOG_INF("Writing info record to NFC...");
 	if (info_len) {
 		ret = write_mem(0, info, info_len);
