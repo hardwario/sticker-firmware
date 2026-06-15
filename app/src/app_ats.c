@@ -640,9 +640,34 @@ static int cmd_lrw_compose(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+/* Debug: drive the state machine by injecting a synthetic link-check outcome,
+ * so HEALTHY->WARNING->RECONNECT->rejoin (and the late-LC-in-RECONNECT guard)
+ * can be exercised on the bench without a real RF outage. */
+static int cmd_lrw_lc(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	bool ok;
+
+	if (strcmp(argv[1], "ok") == 0) {
+		ok = true;
+	} else if (strcmp(argv[1], "fail") == 0) {
+		ok = false;
+	} else {
+		shell_error(shell, "usage: lrw lc ok|fail");
+		return -EINVAL;
+	}
+
+	app_lrw_debug_inject_lc(ok);
+	shell_print(shell, "Injected link-check %s (see 'ats lrw status')", argv[1]);
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_lrw, SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
 	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
+	SHELL_CMD_ARG(lc, NULL, "Debug: inject link-check result. Usage: lc ok|fail", cmd_lrw_lc, 2,
+		      0),
 	SHELL_CMD_ARG(compose, NULL,
 		      "Build telemetry uplink without sending; dump fPort-2 hex. "
 		      "Usage: compose [budget]",

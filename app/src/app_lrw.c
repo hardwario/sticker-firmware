@@ -459,6 +459,33 @@ static void on_downlink_received(void)
 	}
 }
 
+#if defined(CONFIG_SHELL)
+/* Debug: inject a synthetic link-check outcome onto m_work_q so the state
+ * machine can be driven deterministically from the shell (`ats lrw lc ...`)
+ * without a real RF outage — including the late-LC-in-RECONNECT case (#71
+ * HIGH-1), which is otherwise practically impossible to trigger on the bench.
+ * The handlers themselves are state-guarded, so an injected event in
+ * IDLE/JOINING/RECONNECT is ignored exactly as a real one would be. */
+static bool m_dbg_lc_ok;
+static struct k_work m_dbg_lc_work;
+
+static void dbg_lc_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	if (m_dbg_lc_ok) {
+		on_lc_success();
+	} else {
+		on_lc_failure();
+	}
+}
+
+void app_lrw_debug_inject_lc(bool ok)
+{
+	m_dbg_lc_ok = ok;
+	k_work_submit_to_queue(&m_work_q, &m_dbg_lc_work);
+}
+#endif /* CONFIG_SHELL */
+
 /* ======================================================================== */
 /* Work handlers                                                            */
 /* ======================================================================== */
@@ -1258,6 +1285,9 @@ int app_lrw_init(void)
 	k_work_init(&m_dl_request_work, dl_request_work_handler);
 	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
+#if defined(CONFIG_SHELL)
+	k_work_init(&m_dbg_lc_work, dbg_lc_work_handler);
+#endif
 
 	k_timer_init(&m_send_timer, send_timer_handler, NULL);
 	k_timer_init(&m_lc_timeout_timer, lc_timeout_timer_handler, NULL);
