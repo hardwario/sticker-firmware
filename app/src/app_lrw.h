@@ -21,6 +21,7 @@ enum app_lrw_state {
 	APP_LRW_STATE_HEALTHY,
 	APP_LRW_STATE_WARNING,
 	APP_LRW_STATE_RECONNECT,
+	APP_LRW_STATE_DISABLED, /* DevEUI all-zero: radio-silent, no join/TX (#98) */
 };
 
 struct app_lrw_info {

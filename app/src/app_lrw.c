@@ -96,6 +96,8 @@ static struct k_work m_dl_request_work; /* drains m_dl_msgq (port-85 commands) *
 static struct k_work_delayable m_post_cmd_work;
 static struct k_work_delayable m_join_complete_work;
 static struct k_work_delayable m_hist_work;
+static struct k_work_delayable
+	m_tx_retry_work; /* re-drains response/alarm after a -EAGAIN backoff */
 
 /* Multi-frame telemetry: gap before the next frame of the same snapshot (covers
  * RX1/RX2 windows) and backoff when a send is refused (duty cycle / MAC busy). */
@@ -238,6 +240,8 @@ static const char *state_name(enum app_lrw_state s)
 		return "WARNING";
 	case APP_LRW_STATE_RECONNECT:
 		return "RECONNECT";
+	case APP_LRW_STATE_DISABLED:
+		return "DISABLED";
 	default:
 		return "?";
 	}
@@ -272,6 +276,8 @@ static void state_transition(enum app_lrw_state new_state)
 	/* --- Entry actions --- */
 	switch (new_state) {
 	case APP_LRW_STATE_IDLE:
+	case APP_LRW_STATE_DISABLED:
+		/* Radio-silent: no periodic report, no link-check, no rejoin. */
 		k_timer_stop(&m_send_timer);
 		k_timer_stop(&m_lc_timeout_timer);
 		k_timer_stop(&m_rejoin_timer);
@@ -634,10 +640,31 @@ static void join_complete_work_handler(struct k_work *work)
 	on_join_success();
 }
 
+static bool deveui_is_zero(void)
+{
+	for (size_t i = 0; i < sizeof(g_app_config.lrw_deveui); i++) {
+		if (g_app_config.lrw_deveui[i] != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static void join_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 	int ret;
+
+	/* Radio-silent mode (#98): an all-zero DevEUI means the device was never
+	 * provisioned — don't burn power on join requests that can never succeed.
+	 * Enter DISABLED and stay there until reprovisioned + rebooted. */
+	if (deveui_is_zero()) {
+		if ((enum app_lrw_state)atomic_get(&m_state) != APP_LRW_STATE_DISABLED) {
+			LOG_WRN("DevEUI is all-zero: LoRaWAN disabled (radio-silent)");
+			state_transition(APP_LRW_STATE_DISABLED);
+		}
+		return;
+	}
 
 	/* MED-10: ignore re-entry while a join is already in progress. */
 	if ((enum app_lrw_state)atomic_get(&m_state) == APP_LRW_STATE_JOINING) {
@@ -833,10 +860,48 @@ static void frame_work_handler(struct k_work *work)
 	tx_telemetry_frame(false);
 }
 
+static void tx_retry_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	k_work_submit_to_queue(&m_work_q, &m_send_work);
+}
+
+/* Send one queued response/alarm with a DR-budget guard and a bounded
+ * duty-cycle retry (#93.1). Returns true if the message was consumed (sent or
+ * dropped); false if it was requeued for a later retry (a backoff re-drain is
+ * already scheduled, so the caller must not touch the timers). */
+static bool tx_send_queued(struct k_msgq *q, struct lrw_tx_msg *tx, uint8_t port)
+{
+	uint8_t budget = refresh_payload_budget();
+
+	if (tx->len > budget) {
+		/* Won't fit at this DR — Zephyr's lorawan_send would transmit an empty
+		 * frame and drop the payload anyway, so drop it explicitly with a log
+		 * rather than burning airtime on an empty uplink. */
+		LOG_ERR("TX %u B over DR budget %u B (port %u); dropped", tx->len, budget, port);
+		return true;
+	}
+
+	int ret = lorawan_send(port, tx->buf, tx->len, LORAWAN_MSG_UNCONFIRMED);
+	if (ret == 0) {
+		LOG_INF("Sent on port %u (%u B)", port, tx->len);
+		return true;
+	}
+
+	/* Likely duty-cycle / MAC busy: keep the payload and retry after a backoff
+	 * instead of losing it (the slot was already consumed by k_msgq_get). */
+	LOG_ERR_CALL_FAILED_INT("lorawan_send", ret);
+	if (k_msgq_put(q, tx, K_NO_WAIT) != 0) {
+		LOG_WRN("TX requeue failed (port %u); dropped", port);
+		return true;
+	}
+	k_work_schedule_for_queue(&m_work_q, &m_tx_retry_work, K_SECONDS(FRAME_RETRY_SEC));
+	return false;
+}
+
 static void send_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	int ret;
 
 	/* Block normal transmissions during calibration mode (flag-based). */
 	if (g_app_config.calibration) {
@@ -856,11 +921,8 @@ static void send_work_handler(struct k_work *work)
 	 * One TX per call; if more are queued, re-submit. The periodic timer is
 	 * only (re)started when nothing is queued AND no history replay owns it. */
 	if (k_msgq_get(&m_response_msgq, &tx, K_NO_WAIT) == 0) {
-		ret = lorawan_send(tx.port, tx.buf, tx.len, LORAWAN_MSG_UNCONFIRMED);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("lorawan_send(response)", ret);
-		} else {
-			LOG_INF("Response sent on port %u (%u B)", tx.port, tx.len);
+		if (!tx_send_queued(&m_response_msgq, &tx, tx.port)) {
+			return; /* requeued; a backoff retry is scheduled */
 		}
 		if (k_msgq_num_used_get(&m_response_msgq) || k_msgq_num_used_get(&m_alarm_msgq)) {
 			k_work_submit_to_queue(&m_work_q, &m_send_work);
@@ -872,11 +934,8 @@ static void send_work_handler(struct k_work *work)
 	}
 
 	if (k_msgq_get(&m_alarm_msgq, &tx, K_NO_WAIT) == 0) {
-		ret = lorawan_send(APP_LRW_ALARM_PORT, tx.buf, tx.len, LORAWAN_MSG_UNCONFIRMED);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("lorawan_send(alarm)", ret);
-		} else {
-			LOG_INF("Alarm batch sent on port %u (%u B)", APP_LRW_ALARM_PORT, tx.len);
+		if (!tx_send_queued(&m_alarm_msgq, &tx, APP_LRW_ALARM_PORT)) {
+			return; /* requeued; a backoff retry is scheduled */
 		}
 		if (k_msgq_num_used_get(&m_alarm_msgq)) {
 			k_work_submit_to_queue(&m_work_q, &m_send_work);
@@ -1285,6 +1344,7 @@ int app_lrw_init(void)
 	k_work_init(&m_dl_request_work, dl_request_work_handler);
 	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
+	k_work_init_delayable(&m_tx_retry_work, tx_retry_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_dbg_lc_work, dbg_lc_work_handler);
 #endif
