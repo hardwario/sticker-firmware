@@ -43,6 +43,46 @@
 
 LOG_MODULE_REGISTER(app_nfc, LOG_LEVEL_DBG);
 
+#if defined(CONFIG_SHELL)
+/* When set (by `nfc check`), nfc_check_locked()/parser_callback emit a human-
+ * readable trace to this shell: what was read & decoded off the tag, how the
+ * firmware reacted, and what it wrote back. NULL for boot/poll-thread checks
+ * (those only log over RTT). Set/cleared around the app_nfc_check() call. */
+static const struct shell *m_report_sh;
+#define NFC_REPORT(...)                                                                            \
+	do {                                                                                       \
+		if (m_report_sh) {                                                                 \
+			shell_print(m_report_sh, __VA_ARGS__);                                     \
+		}                                                                                  \
+	} while (0)
+#define NFC_REPORT_HEX(label, data, len)                                                           \
+	do {                                                                                       \
+		if (m_report_sh) {                                                                 \
+			shell_print(m_report_sh, label);                                           \
+			shell_hexdump(m_report_sh, (data), (len));                                 \
+		}                                                                                  \
+	} while (0)
+
+static const char *cmd_action_str(enum app_cmd_action a)
+{
+	switch (a) {
+	case APP_CMD_ACTION_NONE:
+		return "none";
+	case APP_CMD_ACTION_SETTINGS_SAVE:
+		return "save+reboot";
+	case APP_CMD_ACTION_REBOOT:
+		return "reboot";
+	case APP_CMD_ACTION_FACTORY_RESET:
+		return "factory-reset";
+	default:
+		return "?";
+	}
+}
+#else
+#define NFC_REPORT(...)                  ((void)0)
+#define NFC_REPORT_HEX(label, data, len) ((void)0)
+#endif
+
 #define ST25DV_I2C_ADDR_E0 0x53
 /* System/dynamic register device address. With user memory at 0x53 (E2=1),
  * the system area is at 0x57 (the prior 0x55 was the E2=0 value and NACKed). */
@@ -67,8 +107,12 @@ LOG_MODULE_REGISTER(app_nfc, LOG_LEVEL_DBG);
 #define ST25DV_GPO_RF_WRITE_EN 0x40
 #define ST25DV_I2C_PWD_REG     0x0900
 
-#define NDEF_TNF_MIME       0x02
-#define NDEF_SUPPORTED_TYPE "application/com.hardwario.sticker.config"
+/* NFC Forum external type (TNF=0x04, urn:nfc:ext:) records. Short type names
+ * ("hio.stck:<kind>") instead of full MIME media-types save ST25DV user memory
+ * (512 B total) — leaving more room for the encrypted config payload — while
+ * staying typed/filterable: Web NFC exposes them as record.recordType. */
+#define NDEF_TNF_EXT        0x04
+#define NDEF_SUPPORTED_TYPE "hio.stck:cfg"
 
 /* Plaintext info record the firmware keeps on the tag so a phone learns the
  * sticker identity and schema version the moment it taps, without decrypting
@@ -80,14 +124,14 @@ LOG_MODULE_REGISTER(app_nfc, LOG_LEVEL_DBG);
  *   [9]    config/schema version (APP_CONFIG_VERSION)
  *   [10]   flags: bit0 = debug build
  */
-#define NDEF_INFO_TYPE   "application/com.hardwario.sticker.info"
+#define NDEF_INFO_TYPE   "hio.stck:inf"
 #define NDEF_INFO_FORMAT 0x01
 
 /* Command/response over NDEF. The phone writes a command record (raw protobuf
  * Command, like a LoRaWAN downlink); the firmware processes it via app_cmd and
  * replaces it with a response record (0x01 version + protobuf Response). */
-#define NDEF_COMMAND_TYPE  "application/com.hardwario.sticker.command"
-#define NDEF_RESPONSE_TYPE "application/com.hardwario.sticker.response"
+#define NDEF_COMMAND_TYPE  "hio.stck:cmd"
+#define NDEF_RESPONSE_TYPE "hio.stck:rsp"
 
 /* NFC Forum Type 5 Capability Container (4-byte form) for ST25DV04K:
  *   [0] 0xE1 magic, [1] 0x40 mapping v1.0 + read/write,
@@ -120,8 +164,8 @@ static bool m_rf_write_gate;
  * is found and consumed by nfc_check_locked (writes the response to the tag). */
 static uint8_t m_resp_buf[256];
 static size_t m_resp_len;
-static bool m_have_resp;    /* a command was processed; m_resp_buf holds the reply to write */
-static bool m_seen_resp;    /* tag already holds a response record; leave it for the phone */
+static bool m_have_resp; /* a command was processed; m_resp_buf holds the reply to write */
+static bool m_seen_resp; /* tag already holds a response record; leave it for the phone */
 static enum app_cmd_action m_cmd_action; /* deferred action from app_cmd_handle */
 
 /* Take (and clear) the deferred action from the last processed NFC command, so
@@ -375,13 +419,14 @@ static void nfc_access_end(void)
 	k_mutex_unlock(&m_lock);
 }
 
-/* Build CC + NDEF Message TLV + a single short MIME record + terminator into
- * `out`. Returns the byte length, or 0 if it would not fit (short record, so
- * payload <= 255 B). Shared by the info and command-response writers. */
-static size_t build_ndef_mime(uint8_t *out, size_t out_size, const char *mime,
-			      const uint8_t *payload, size_t payload_len)
+/* Build CC + NDEF Message TLV + a single short NFC-Forum-external-type record +
+ * terminator into `out`. Returns the byte length, or 0 if it would not fit
+ * (short record, so payload <= 255 B). Shared by the info and command-response
+ * writers. */
+static size_t build_ndef_record(uint8_t *out, size_t out_size, const char *type,
+				const uint8_t *payload, size_t payload_len)
 {
-	size_t type_len = strlen(mime);
+	size_t type_len = strlen(type);
 
 	/* NDEF record: header + type_len + payload_len + type + payload */
 	size_t msg_len = 1 + 1 + 1 + type_len + payload_len;
@@ -399,10 +444,10 @@ static size_t build_ndef_mime(uint8_t *out, size_t out_size, const char *mime,
 	out[i++] = ST25DV_CC3;
 	out[i++] = 0x03;             /* NDEF Message TLV type */
 	out[i++] = (uint8_t)msg_len; /* TLV length (single-byte form) */
-	out[i++] = 0xD2;             /* MB | ME | SR | TNF=MIME(0x02) */
+	out[i++] = 0xD4;             /* MB | ME | SR | TNF=NFC Forum external(0x04) */
 	out[i++] = (uint8_t)type_len;
 	out[i++] = (uint8_t)payload_len;
-	memcpy(&out[i], mime, type_len);
+	memcpy(&out[i], type, type_len);
 	i += type_len;
 	memcpy(&out[i], payload, payload_len);
 	i += payload_len;
@@ -429,7 +474,7 @@ static size_t build_info_ndef(uint8_t *out, size_t out_size)
 	payload[9] = (uint8_t)g_app_config.config_version;
 	payload[10] = info.debug ? 0x01 : 0x00;
 
-	return build_ndef_mime(out, out_size, NDEF_INFO_TYPE, payload, sizeof(payload));
+	return build_ndef_record(out, out_size, NDEF_INFO_TYPE, payload, sizeof(payload));
 }
 
 static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size, size_t *out_len)
@@ -444,6 +489,7 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 	/* Verify serial number (part of nonce) */
 	uint32_t serial_number = sys_get_be32(&in[0]);
 	LOG_INF("Serial number: %u", serial_number);
+	NFC_REPORT("  serial: %u (expected %u)", serial_number, g_app_config.serial_number);
 
 	if (g_app_config.serial_number != serial_number) {
 		LOG_ERR("Serial number does not match: %u != %u", serial_number,
@@ -454,6 +500,7 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 	/* Verify nonce counter (part of nonce) */
 	uint32_t nonce_counter = sys_get_be32(&in[4]);
 	LOG_INF("Nonce counter: %u", nonce_counter);
+	NFC_REPORT("  nonce: %u (last used %u)", nonce_counter, g_app_config.nonce_counter);
 
 	if (g_app_config.nonce_counter >= nonce_counter) {
 		LOG_ERR("Nonce counter is not greater than the last used nonce: %u >= %u",
@@ -478,7 +525,7 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 
 	psa_key_id_t key_id;
 	status = psa_import_key(&key_attributes, g_app_config.secret_key,
-			       sizeof(g_app_config.secret_key), &key_id);
+				sizeof(g_app_config.secret_key), &key_id);
 	if (status != PSA_SUCCESS) {
 		LOG_ERR_CALL_FAILED_INT("psa_import_key", status);
 		return -EIO;
@@ -514,8 +561,8 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 
 	enum app_nfc_action *action = (enum app_nfc_action *)user_data;
 
-	/* Check if TNF type is MIME */
-	if (record_info->tnf != NDEF_TNF_MIME) {
+	/* Only our NFC Forum external-type records carry sticker payloads. */
+	if (record_info->tnf != NDEF_TNF_EXT) {
 		return 0;
 	}
 
@@ -525,6 +572,9 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 	if (record_info->type_len == cmd_type_len &&
 	    strncmp((const char *)record_info->type, NDEF_COMMAND_TYPE, cmd_type_len) == 0) {
 		LOG_INF("Found command record - length: %u byte(s)", record_info->payload_len);
+		NFC_REPORT("NFC read: command record (%u B)", record_info->payload_len);
+		NFC_REPORT_HEX("  command (protobuf):", record_info->payload,
+			       record_info->payload_len);
 
 		enum app_cmd_action cmd_action = APP_CMD_ACTION_NONE;
 		ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, record_info->payload,
@@ -532,12 +582,15 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 				     &m_resp_len, &cmd_action);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
+			NFC_REPORT("  -> app_cmd_handle failed: %d", ret);
 			m_resp_len = 0;
 			return ret;
 		}
 
 		m_have_resp = (m_resp_len > 0);
 		m_cmd_action = cmd_action;
+		NFC_REPORT("  -> handled, response %zu B, deferred action: %s", m_resp_len,
+			   cmd_action_str(cmd_action));
 		return 0;
 	}
 
@@ -547,6 +600,9 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 	if (record_info->type_len == resp_type_len &&
 	    strncmp((const char *)record_info->type, NDEF_RESPONSE_TYPE, resp_type_len) == 0) {
 		m_seen_resp = true;
+		NFC_REPORT("NFC read: our response record still on tag (%u B) - leaving it for "
+			   "the phone",
+			   record_info->payload_len);
 		return 0;
 	}
 
@@ -559,12 +615,14 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 	}
 
 	LOG_INF("Found supported MIME record - length: %u byte(s)", record_info->payload_len);
+	NFC_REPORT("NFC read: config record (%u B encrypted)", record_info->payload_len);
 
 	static uint8_t buf[448];
 	size_t len;
 	ret = decrypt(record_info->payload, record_info->payload_len, buf, sizeof(buf), &len);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("decrypt", ret);
+		NFC_REPORT("  -> decrypt failed: %d (rejected, tag left untouched)", ret);
 		return ret;
 	}
 
@@ -578,8 +636,10 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 
 	if (app_config_ingest(&message)) {
 		*action = APP_NFC_ACTION_RESET;
+		NFC_REPORT("  -> config decoded & ingested, action: factory reset");
 	} else {
 		*action = APP_NFC_ACTION_SAVE;
+		NFC_REPORT("  -> config decoded & ingested, action: apply + save");
 	}
 
 	return 0;
@@ -650,6 +710,7 @@ static int nfc_check_locked(enum app_nfc_action *action)
 
 	/* Empty tag: lay down the info record so a phone always finds metadata. */
 	if (is_buffer_zero(m_buf, ST25DV_USER_MEM_SIZE)) {
+		NFC_REPORT("NFC tag empty -> writing info record (%zu B)", info_len);
 		if (info_len) {
 			ret = write_mem(0, info, info_len);
 			if (ret) {
@@ -663,6 +724,7 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	/* Tag already holds exactly our info record: nothing pending, leave it
 	 * (avoids rewriting the EEPROM on every check). */
 	if (info_len && memcmp(m_buf, info, info_len) == 0) {
+		NFC_REPORT("NFC tag holds our info record (nothing pending) -> no action");
 		return 0;
 	}
 
@@ -679,9 +741,13 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	 * as the output buffer (its parsed contents are no longer needed; the reply
 	 * is already copied into m_resp_buf) to keep this off the thread stack. */
 	if (m_have_resp) {
-		size_t out_len = build_ndef_mime(m_buf, ST25DV_USER_MEM_SIZE, NDEF_RESPONSE_TYPE,
-						 m_resp_buf, m_resp_len);
+		size_t out_len = build_ndef_record(m_buf, ST25DV_USER_MEM_SIZE, NDEF_RESPONSE_TYPE,
+						   m_resp_buf, m_resp_len);
 		LOG_INF("Writing command response to NFC (%zu B)...", m_resp_len);
+		NFC_REPORT("NFC wrote: response record (%zu B NDEF, %zu B payload)", out_len,
+			   m_resp_len);
+		NFC_REPORT_HEX("  response (0x01 ver + protobuf Response):", m_resp_buf,
+			       m_resp_len);
 		if (out_len) {
 			ret = write_mem(0, m_buf, out_len);
 			if (ret) {
@@ -700,6 +766,9 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	/* Config consumed (or unrecognized data): (re)write the info record. This
 	 * clears the consumed config (anti-replay) and restores the metadata. */
 	LOG_INF("Writing info record to NFC...");
+	NFC_REPORT("NFC wrote: info record (%zu B) - cleared consumed/unknown data, restored "
+		   "metadata",
+		   info_len);
 	if (info_len) {
 		ret = write_mem(0, info, info_len);
 		if (ret) {
@@ -904,7 +973,11 @@ static int cmd_nfc_check(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 
 	enum app_nfc_action action;
+
+	/* Route the check's read/decode/react/write trace to this shell. */
+	m_report_sh = sh;
 	int ret = app_nfc_check(&action);
+	m_report_sh = NULL;
 	if (ret) {
 		shell_error(sh, "nfc check failed: %d", ret);
 		return ret;
@@ -986,13 +1059,13 @@ static int cmd_nfc_regw(const struct shell *sh, size_t argc, char **argv)
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_nfc, SHELL_CMD_ARG(dump, NULL, "Hex dump all 512 B of NFC memory.", cmd_nfc_dump, 1, 0),
 	SHELL_CMD_ARG(read, NULL, "Read a range. Usage: read <offset> <len>", cmd_nfc_read, 3, 0),
-	SHELL_CMD_ARG(write, NULL, "Write hex bytes. Usage: write <offset> <hexbytes>", cmd_nfc_write,
-		      3, 0),
+	SHELL_CMD_ARG(write, NULL, "Write hex bytes. Usage: write <offset> <hexbytes>",
+		      cmd_nfc_write, 3, 0),
 	SHELL_CMD_ARG(clear, NULL, "Zero all 512 B of NFC memory.", cmd_nfc_clear, 1, 0),
 	SHELL_CMD_ARG(autocheck, NULL, "Enable/disable periodic check. Usage: autocheck on|off",
 		      cmd_nfc_autocheck, 2, 0),
-	SHELL_CMD_ARG(check, NULL, "Run the NFC check now (parse + apply config).", cmd_nfc_check, 1,
-		      0),
+	SHELL_CMD_ARG(check, NULL, "Run the NFC check now (parse + apply config).", cmd_nfc_check,
+		      1, 0),
 	SHELL_CMD_ARG(reg, NULL, "Read system/dynamic register (E1). Usage: reg <addr> [count]",
 		      cmd_nfc_reg, 2, 1),
 	SHELL_CMD_ARG(regw, NULL, "Write system/dynamic register (E1). Usage: regw <addr> <hex>",
