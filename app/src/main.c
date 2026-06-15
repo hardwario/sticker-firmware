@@ -38,10 +38,10 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 /* NFC poll runs on its own thread (not tied to the LED blink loop). Each poll
  * reads the 1-byte IT_STS_Dyn and only does a full read on RF activity, so a
  * short interval is cheap. */
-#define NFC_POLL_INTERVAL_SECONDS  2
-#define NFC_POLL_START_DELAY_MS    3000
-#define NFC_POLL_THREAD_STACK_SIZE 3072
-#define NFC_POLL_THREAD_PRIO       K_LOWEST_APPLICATION_THREAD_PRIO
+#define NFC_POLL_INTERVAL_SECONDS    2
+#define NFC_POLL_START_DELAY_MS      3000
+#define NFC_POLL_THREAD_STACK_SIZE   3072
+#define NFC_POLL_THREAD_PRIO         K_LOWEST_APPLICATION_THREAD_PRIO
 /* Delay before running an NFC command's deferred action, so the phone can read
  * the Ack response off the tag before the device reboots/saves. */
 #define NFC_CMD_ACTION_DELAY_SECONDS 3
@@ -54,7 +54,6 @@ enum app_mode {
 	APP_MODE_NORMAL = 0,
 	APP_MODE_CALIBRATION,
 };
-
 
 static void die(void)
 {
