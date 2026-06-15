@@ -60,14 +60,16 @@ LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
  *   - m_rejoin_timer      : rejoin backoff only
  */
 
-/* Link check configuration constants */
-#define LINK_CHECK_INTERVAL    5  /* Every N-th message has LC (0 = disabled) */
+/* Link check configuration constants.
+ * The LC cadence (every N-th uplink) and the failures-before-rejoin threshold
+ * are runtime-configurable: g_app_config.lrw_link_check_interval and
+ * lrw_link_check_fail_rejoin (config keys lrw-link-check-interval /
+ * lrw-link-check-fail-rejoin). */
 #define LINK_CHECK_TIMEOUT_SEC 10 /* Timeout for response */
 
 /* State machine thresholds  */
-#define FAIL_THRESHOLD_WARNING   3 /* LC failures to enter WARNING */
-#define FAIL_THRESHOLD_RECONNECT 5 /* LC failures in WARNING to enter RECONNECT */
-#define OK_THRESHOLD_HEALTHY     1 /* LC successes in WARNING to return to HEALTHY */
+#define FAIL_THRESHOLD_WARNING 3 /* LC failures to enter WARNING */
+#define OK_THRESHOLD_HEALTHY   1 /* LC successes in WARNING to return to HEALTHY */
 
 /* Join/Rejoin backoff configuration - easily adjustable */
 #define REJOIN_BACKOFF_BASE_SEC   60   /* Base backoff time in seconds */
@@ -375,8 +377,8 @@ static void on_lc_failure(void)
 	case APP_LRW_STATE_WARNING:
 		m_warning_lc_fail_total++;
 		LOG_WRN("LC FAIL in WARNING (total: %d/%d)", m_warning_lc_fail_total,
-			FAIL_THRESHOLD_RECONNECT);
-		if (m_warning_lc_fail_total >= FAIL_THRESHOLD_RECONNECT) {
+			g_app_config.lrw_link_check_fail_rejoin);
+		if (m_warning_lc_fail_total >= g_app_config.lrw_link_check_fail_rejoin) {
 			if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA) {
 				state_transition(APP_LRW_STATE_RECONNECT);
 			} else {
@@ -704,16 +706,18 @@ static void join_work_handler(struct k_work *work)
 
 static bool should_request_link_check(void)
 {
-	if (LINK_CHECK_INTERVAL == 0) {
-		return false;
-	}
+	int interval = g_app_config.lrw_link_check_interval;
+
 	if (m_force_lc_remaining > 0) {
 		m_force_lc_remaining--;
 		return true;
 	}
+	if (interval <= 0) {
+		return false;
+	}
 	int msg_num = m_message_count + 1;
 
-	if (msg_num == 1 || (msg_num % LINK_CHECK_INTERVAL) == 0) {
+	if (msg_num == 1 || (msg_num % interval) == 0) {
 		return true;
 	}
 	return false;
@@ -1353,8 +1357,8 @@ int app_lrw_get_info(struct app_lrw_info *info)
 	info->message_count = m_message_count;
 	info->thresh_warning = FAIL_THRESHOLD_WARNING;
 	info->thresh_healthy = OK_THRESHOLD_HEALTHY;
-	info->thresh_reconnect = FAIL_THRESHOLD_RECONNECT;
-	info->link_check_interval = LINK_CHECK_INTERVAL;
+	info->thresh_reconnect = g_app_config.lrw_link_check_fail_rejoin;
+	info->link_check_interval = g_app_config.lrw_link_check_interval;
 
 	return 0;
 }

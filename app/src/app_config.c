@@ -40,6 +40,8 @@ static const struct app_config m_app_config_defaults = {
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.lrw_sub_band = 2,
+	.lrw_link_check_interval = 5,
+	.lrw_link_check_fail_rejoin = 5,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
 
@@ -55,6 +57,8 @@ static struct app_config m_app_config = {
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.lrw_sub_band = 2,
+	.lrw_link_check_interval = 5,
+	.lrw_link_check_fail_rejoin = 5,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
 
@@ -113,6 +117,10 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	SETTINGS_SET("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	SETTINGS_SET("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+	SETTINGS_SET("lrw-link-check-interval", &m_app_config.lrw_link_check_interval,
+		     sizeof(m_app_config.lrw_link_check_interval));
+	SETTINGS_SET("lrw-link-check-fail-rejoin", &m_app_config.lrw_link_check_fail_rejoin,
+		     sizeof(m_app_config.lrw_link_check_fail_rejoin));
 	SETTINGS_SET("cap-hall-left", &m_app_config.cap_hall_left,
 		     sizeof(m_app_config.cap_hall_left));
 	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
@@ -228,6 +236,18 @@ static int h_commit(void)
 	if ((int)m_app_config.lrw_activation < 0 || (int)m_app_config.lrw_activation > 1) {
 		m_app_config.lrw_activation = 0;
 	}
+	if (m_app_config.lrw_link_check_interval < 0) {
+		m_app_config.lrw_link_check_interval = 0;
+	}
+	if (m_app_config.lrw_link_check_interval > 255) {
+		m_app_config.lrw_link_check_interval = 255;
+	}
+	if (m_app_config.lrw_link_check_fail_rejoin < 1) {
+		m_app_config.lrw_link_check_fail_rejoin = 1;
+	}
+	if (m_app_config.lrw_link_check_fail_rejoin > 255) {
+		m_app_config.lrw_link_check_fail_rejoin = 255;
+	}
 	if ((int)m_app_config.accel_motion_sensitivity < 0 ||
 	    (int)m_app_config.accel_motion_sensitivity > 3) {
 		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
@@ -274,6 +294,10 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	EXPORT_FUNC("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	EXPORT_FUNC("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+	EXPORT_FUNC("lrw-link-check-interval", &m_app_config.lrw_link_check_interval,
+		    sizeof(m_app_config.lrw_link_check_interval));
+	EXPORT_FUNC("lrw-link-check-fail-rejoin", &m_app_config.lrw_link_check_fail_rejoin,
+		    sizeof(m_app_config.lrw_link_check_fail_rejoin));
 	EXPORT_FUNC("cap-hall-left", &m_app_config.cap_hall_left,
 		    sizeof(m_app_config.cap_hall_left));
 	EXPORT_FUNC("cap-hall-right", &m_app_config.cap_hall_right,
@@ -609,6 +633,18 @@ static void print_lrw_appskey(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " lrw-appskey %s", buf);
 }
 
+static void print_lrw_link_check_interval(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " lrw-link-check-interval %d",
+		    m_app_config.lrw_link_check_interval);
+}
+
+static void print_lrw_link_check_fail_rejoin(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " lrw-link-check-fail-rejoin %d",
+		    m_app_config.lrw_link_check_fail_rejoin);
+}
+
 static void print_cap_hall_left(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " cap-hall-left %s",
@@ -790,6 +826,8 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_lrw_devaddr(shell);
 	print_lrw_nwkskey(shell);
 	print_lrw_appskey(shell);
+	print_lrw_link_check_interval(shell);
+	print_lrw_link_check_fail_rejoin(shell);
 	print_cap_hall_left(shell);
 	print_cap_hall_right(shell);
 	print_cap_input_a(shell);
@@ -1389,6 +1427,18 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_lrw_link_check_interval(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.lrw_link_check_interval, 0, 255,
+		       print_lrw_link_check_interval);
+}
+
+static int cmd_lrw_link_check_fail_rejoin(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.lrw_link_check_fail_rejoin, 1, 255,
+		       print_lrw_link_check_fail_rejoin);
+}
+
 static int cmd_cap_hall_left(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_hall_left, print_cap_hall_left);
@@ -1749,6 +1799,14 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(lrw-appskey, NULL,
 	              "Get/Set LoRaWAN AppSKey (32 hexadecimal digits).",
 	              cmd_lrw_appskey, 1, 1),
+
+	SHELL_CMD_ARG(lrw-link-check-interval, NULL,
+	              "Get/Set link-check cadence: request a LinkCheckReq every N-th uplink (0 = disabled).",
+	              cmd_lrw_link_check_interval, 1, 1),
+
+	SHELL_CMD_ARG(lrw-link-check-fail-rejoin, NULL,
+	              "Get/Set link-check failures (while degraded) before an OTAA rejoin is attempted.",
+	              cmd_lrw_link_check_fail_rejoin, 1, 1),
 
 	SHELL_CMD_ARG(cap-hall-left, NULL,
 	              "Get/Set hall left capability (true/false).",
