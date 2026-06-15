@@ -38,6 +38,8 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `clock_sync` | Request a network time sync | **`info`, deferred** — sent once the network time lands (carries the synced `unix_time`) |
 | `req_history` | Replay stored history for a time window | `history_frame` (multiple) |
 | `w1_scan` | Enumerate the 1-Wire bus; returns the discovered ROMs so you can teach a slot via `set_param sensorN_rom` | `w1_scan` |
+| `alarm_rule` | Set / clear / clear-all a dynamic alarm rule (target = `source` + `quantity`) | `ack` |
+| `req_alarm_rules` | Read back the stored dynamic alarm rules (paged); optional `source`+`quantity` filter selects one | `alarm_rules_dump` |
 
 > After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED), an optional `fault_field`, and a `detail` string.
 >
@@ -57,6 +59,10 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `w1_scan` | `08097200` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
 | `set_param`: ADR on, `interval_report`=120 s, `cap_barometer` on | `0801120d0a021801120220782203e80201` |
+| `alarm_rule` SET s1 temperature 15–25 °C, hyst 0.5 | `08016a13100120012d00007041350000c8413d0000003f` |
+| `alarm_rule` CLEAR_ALL | `08016a020802` |
+| `req_alarm_rules` (all rules, page 0) | `08017a00` |
+| `req_alarm_rules` (onboard temperature only) | `08017a0408001000` |
 
 (The leading byte is the `seq` you chose; it is echoed in the reply.)
 
@@ -241,13 +247,43 @@ New configuration parameters control alarm uplink frequency and add a PIR motion
 | `alarm-notif-time` | int (s) | `10` | 1–60 | Red-LED hold time for both-mode and pulse (PIR) alarms |
 | `pir-notify-act` | bool | `false` | | Raise an alarm on PIR motion (previously PIR was indication-only) |
 
+### Dynamic alarm rules — read / write over LoRaWAN & NFC
+
+Per-sensor alarm thresholds are **dynamic rules** (`app_alarm_rules`, up to 16, each keyed by `source` + `quantity`). A rule's *kind* follows its quantity: **threshold** (`lo`/`hi`/`hst`) for analog quantities, **state** (`from_state`/`to_state`) for discrete inputs, **rate** (`hi` = max events per report) for counters. Locally they are managed with the `alarm` shell command (`alarm set`, `alarm clear`, `alarm list`). Remotely they go through the same transport-agnostic command channel, so **the identical message works on both fPort 85 (LoRaWAN) and NFC**:
+
+- **Write** — `alarm_rule` command (`op`: `0`=SET, `1`=CLEAR, `2`=CLEAR_ALL; `source`, `quantity`, and for SET the kind's fields). Reply: `ack`.
+- **Read back** — `req_alarm_rules` command; reply: **`alarm_rules_dump`**, paged like `get_config` (`page_index`/`page_count`). An optional `source`+`quantity` pair narrows it to one rule; omit both to list all. Each `RuleEntry` carries `source`, `quantity`, `enabled`, `kind` and only the fields valid for that kind. Read-back over LoRaWAN needs a data rate above DR0 (a rule does not fit a DR0 frame); NFC returns everything in one page.
+
+```jsonc
+// SET: onboard-board sensor s1, temperature, alarm below 15 °C or above 25 °C, 0.5° hysteresis
+{ "command": "alarm_rule", "seq": 1,
+  "alarm_rule": { "op": 0, "source": 1, "quantity": 0, "enabled": true, "lo": 15, "hi": 25, "hst": 0.5 } }
+// CLEAR one rule (source 1, quantity 0)
+{ "command": "alarm_rule", "seq": 2, "alarm_rule": { "op": 1, "source": 1, "quantity": 0 } }
+// CLEAR_ALL
+{ "command": "alarm_rule", "seq": 3, "alarm_rule": { "op": 2 } }
+// READ all rules
+{ "command": "req_alarm_rules", "seq": 4, "req_alarm_rules": {} }
+// READ one rule (onboard temperature)
+{ "command": "req_alarm_rules", "seq": 4, "req_alarm_rules": { "source": 0, "quantity": 0 } }
+```
+
+`alarm_rules_dump` reply decoded by `ttn.js` (two rules — a threshold and a state rule):
+
+```jsonc
+{ "seq": 4, "alarm_rules_dump": { "page_count": 1, "rules": [
+  { "source": 1, "quantity": 0, "enabled": true, "kind": 0, "kind_name": "threshold", "lo": 15, "hi": 25, "hst": 0.5 },
+  { "source": 8, "quantity": 6, "enabled": true, "kind": 1, "kind_name": "state", "from_state": 0, "to_state": 1 }
+] } }
+```
+
 ---
 
 ## 8. Payload formatter updates (`ttn.js`)
 
 The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.4.0:
 
-- **`decodeUplink`** now decodes the new ports — fPort 2 (protobuf telemetry), fPort 3 (alarm batch), and fPort 85 (command responses: `info`, `ack`, `config_dump`, `history_frame`, `error`) — in addition to the legacy fPort 1.
+- **`decodeUplink`** now decodes the new ports — fPort 2 (protobuf telemetry), fPort 3 (alarm batch), and fPort 85 (command responses: `info`, `ack`, `config_dump`, `history_frame`, `w1_scan`, `alarm_rules_dump`, `error`) — in addition to the legacy fPort 1.
 - **`encodeDownlink`** (new) lets you author commands as JSON; the formatter encodes them to bytes on fPort 85.
 - **`decodeDownlink`** (new) lets the network server display a queued command.
 
