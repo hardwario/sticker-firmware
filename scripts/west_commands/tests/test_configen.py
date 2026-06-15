@@ -307,6 +307,65 @@ def test_proto_and_decoder_agree(tmp_path):
     assert js["get_param"]["application_field"] == [4, 7]
 
 
+def _decode_uplink_with_node(hex_str, fport=85):
+    js = (
+        "const fs=require('fs'),vm=require('vm');"
+        "const ctx={Buffer,console};vm.createContext(ctx);"
+        f"vm.runInContext(fs.readFileSync({str(DECODER)!r},'utf8'),ctx);"
+        f"process.stdout.write(JSON.stringify("
+        f"ctx.decodeUplink({{bytes:Buffer.from('{hex_str}','hex'),fPort:{fport}}}).data));"
+    )
+    out = subprocess.check_output(["node", "-e", js], text=True)
+    import json
+    return json.loads(out)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_alarm_rules_readback_roundtrip(tmp_path):
+    pb = _compile_proto(tmp_path)
+
+    # Command ReqAlarmRules: the all-zero targeted filter (onboard, temperature)
+    # must serialize the zeros (proto3 `optional`) so the device sees an explicit
+    # (source=0, quantity=0), not "no filter".
+    cmd = pb.Command()
+    cmd.seq = 6
+    cmd.req_alarm_rules.source = 0
+    cmd.req_alarm_rules.quantity = 0
+    js = _decode_with_node(cmd.SerializeToString().hex())
+    assert js["seq"] == 6
+    assert js["req_alarm_rules"]["source"] == 0
+    assert js["req_alarm_rules"]["quantity"] == 0
+
+    # Response AlarmRulesDump: a threshold rule (kind 0, all-zero identity) and a
+    # state rule. python protobuf encodes, ttn.js must decode the same view.
+    resp = pb.Response()
+    resp.seq = 7
+    d = resp.alarm_rules_dump
+    d.page_index = 0
+    d.page_count = 1
+    r1 = d.rules.add()
+    r1.source, r1.quantity, r1.enabled, r1.kind = 0, 0, True, 0
+    r1.lo, r1.hi, r1.hst = 10.0, 25.0, 0.5
+    r2 = d.rules.add()
+    r2.source, r2.quantity, r2.enabled, r2.kind = 7, 6, False, 1
+    r2.from_state, r2.to_state = 0, 1
+    # 01 = APP_PROTO_VERSION prefix on the fPort-85 uplink.
+    got = _decode_uplink_with_node("01" + resp.SerializeToString().hex())
+    assert got["seq"] == 7
+    assert got["alarm_rules_dump"]["page_count"] == 1
+    rules = got["alarm_rules_dump"]["rules"]
+    assert len(rules) == 2
+    # threshold rule: zero identity preserved, kind labelled, floats exact
+    assert rules[0]["source"] == 0 and rules[0]["quantity"] == 0
+    assert rules[0]["enabled"] is True
+    assert rules[0]["kind_name"] == "threshold"
+    assert rules[0]["lo"] == 10 and rules[0]["hi"] == 25 and rules[0]["hst"] == 0.5
+    # state rule: disabled flag and from/to survive
+    assert rules[1]["source"] == 7 and rules[1]["kind_name"] == "state"
+    assert rules[1]["enabled"] is False
+    assert rules[1]["from_state"] == 0 and rules[1]["to_state"] == 1
+
+
 # --- commands codegen -----------------------------------------------------
 
 def test_build_commands_model_shape():

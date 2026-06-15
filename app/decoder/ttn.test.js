@@ -131,6 +131,28 @@ test("alarm_rule command encode/decode round-trips", () => {
   assert.equal(c.alarm_rule.op, 2);
 });
 
+test("req_alarm_rules command encode/decode round-trips", () => {
+  // Targeted read: onboard (source 0) temperature (quantity 0), page 0 — the
+  // all-zero case that must still survive the round trip as an explicit filter.
+  const one = codec.encodeDownlink({
+    data: { seq: 6, command: "req_alarm_rules", req_alarm_rules: { source: 0, quantity: 0 } },
+  });
+  assert.equal(one.errors.length, 0, "encode errors");
+  assert.equal(one.fPort, 85);
+  const b = codec.decodeDownlink({ bytes: one.bytes, fPort: 85 }).data;
+  assert.equal(b.command, "req_alarm_rules");
+  assert.equal(b.req_alarm_rules.source, 0);
+  assert.equal(b.req_alarm_rules.quantity, 0);
+
+  // List all, second page.
+  const all = codec.encodeDownlink({
+    data: { command: "req_alarm_rules", req_alarm_rules: { page: 2 } },
+  });
+  assert.equal(all.errors.length, 0);
+  const a = codec.decodeDownlink({ bytes: all.bytes, fPort: 85 }).data;
+  assert.equal(a.req_alarm_rules.page, 2);
+});
+
 // --- Uplink: legacy bitmap (fPort 1) --------------------------------------
 test("decodeUplink decodes legacy bitmap (fPort 1)", () => {
   const got = codec.decodeUplink({ bytes: hex("7a01a109fa580258"), fPort: 1 });

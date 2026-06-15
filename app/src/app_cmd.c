@@ -500,6 +500,136 @@ static void app_cmd_handle_w1_scan(enum app_cmd_transport tp, const Command *cmd
 #endif
 }
 
+/* Per-page byte budget for the RuleEntry payload inside one AlarmRulesDump.
+ * Mirrors ConfigDump's paging: keep a page comfortably under the transport MTU.
+ * LRW pages tightly for low data rates; NFC's response buffer is 256 B, so it
+ * fits everything in one page (a real device has only a handful of rules). */
+#define RULES_PAGE_BUDGET_LRW 30
+#define RULES_PAGE_BUDGET_NFC 200
+
+/* Worst-case encoded size of one RuleEntry, by kind: ~2 B each for the
+ * source/quantity/enabled/kind scalars + the repeated-field wrapper, plus 5 B
+ * per present float (tag + 4) or 2 B per present state varint. */
+static size_t app_cmd_rule_entry_size(const struct app_alarm_rule *r)
+{
+	size_t s = 2 /* wrapper */ + 2 + 2 + 2 + 2 /* source quantity enabled kind */;
+
+	switch (app_alarm_quantity_kind((enum app_alarm_quantity)r->quantity)) {
+	case APP_ALARM_KIND_THRESHOLD:
+		s += 5 + 5 + 5; /* lo, hi, hst */
+		break;
+	case APP_ALARM_KIND_STATE:
+		s += 2 + 2; /* from_state, to_state */
+		break;
+	case APP_ALARM_KIND_RATE:
+	default:
+		s += 5; /* hi = max per interval */
+		break;
+	}
+	return s;
+}
+
+static void app_cmd_fill_rule_entry(Response_RuleEntry *e, const struct app_alarm_rule *r)
+{
+	enum app_alarm_kind kind = app_alarm_quantity_kind((enum app_alarm_quantity)r->quantity);
+
+	*e = (Response_RuleEntry){0};
+	/* All four are proto3 `optional` — set the has-flags so a zero value
+	 * (source 0 onboard, quantity 0 temperature, kind 0 threshold, disabled)
+	 * still goes on the wire and the read-back stays unambiguous. */
+	e->has_source = true;
+	e->source = r->source;
+	e->has_quantity = true;
+	e->quantity = r->quantity;
+	e->has_enabled = true;
+	e->enabled = r->enabled ? true : false;
+	e->has_kind = true;
+	e->kind = (uint32_t)kind;
+
+	switch (kind) {
+	case APP_ALARM_KIND_THRESHOLD:
+		e->has_lo = true;
+		e->lo = r->lo;
+		e->has_hi = true;
+		e->hi = r->hi;
+		e->has_hst = true;
+		e->hst = r->hst;
+		break;
+	case APP_ALARM_KIND_STATE:
+		e->has_from_state = true;
+		e->from_state = r->from_state;
+		e->has_to_state = true;
+		e->to_state = r->to_state;
+		break;
+	case APP_ALARM_KIND_RATE:
+	default:
+		e->has_hi = true;
+		e->hi = r->hi;
+		break;
+	}
+}
+
+static void app_cmd_handle_req_alarm_rules(enum app_cmd_transport tp, const Command *cmd,
+					   Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(action);
+	const Command_ReqAlarmRules *rq = &cmd->body.req_alarm_rules;
+	uint32_t page = rq->has_page ? rq->page : 0;
+	size_t budget =
+		(tp == APP_CMD_TRANSPORT_LRW) ? RULES_PAGE_BUDGET_LRW : RULES_PAGE_BUDGET_NFC;
+
+	/* Optional single-rule filter: a real targeted query names both source and
+	 * quantity (proto3 can't distinguish source==0 from absent on its own). */
+	bool filter = rq->has_source && rq->has_quantity;
+
+	Response_AlarmRulesDump *d = &resp->body.alarm_rules_dump;
+	resp->which_body = Response_alarm_rules_dump_tag;
+	d->rules_count = 0;
+
+	/* Single greedy pass: pack matching rules into pages by budget (and the
+	 * static array bound), collect the requested page, learn the page count. */
+	uint32_t cur_page = 0, in_page = 0, matched = 0;
+	size_t used = 0;
+	uint8_t total = app_alarm_rules_count();
+
+	for (uint8_t i = 0; i < total; i++) {
+		const struct app_alarm_rule *r = app_alarm_rules_get(i);
+
+		if (r == NULL) {
+			continue;
+		}
+		if (filter && !(r->source == rq->source && r->quantity == rq->quantity)) {
+			continue;
+		}
+		matched++;
+
+		size_t sz = app_cmd_rule_entry_size(r);
+
+		if (in_page > 0 && (used + sz > budget || in_page >= ARRAY_SIZE(d->rules))) {
+			cur_page++;
+			used = 0;
+			in_page = 0;
+		}
+		used += sz;
+		in_page++;
+
+		if (cur_page == page && d->rules_count < ARRAY_SIZE(d->rules)) {
+			app_cmd_fill_rule_entry(&d->rules[d->rules_count++], r);
+		}
+	}
+
+	uint32_t page_count = matched ? cur_page + 1 : 1;
+
+	if (page >= page_count) {
+		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "page");
+		resp->body.error.fault_field = 3; /* ReqAlarmRules.page */
+		return;
+	}
+
+	d->page_index = page;
+	d->page_count = page_count;
+}
+
 // BEGIN GENERATED DISPATCH
 static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 			     enum app_cmd_action *action)
@@ -563,6 +693,9 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		break;
 	case Command_w1_scan_tag:
 		app_cmd_handle_w1_scan(tp, cmd, resp, action);
+		break;
+	case Command_req_alarm_rules_tag:
+		app_cmd_handle_req_alarm_rules(tp, cmd, resp, action);
 		break;
 	default:
 		LOG_WRN("Command tag %u not implemented", cmd->which_body);

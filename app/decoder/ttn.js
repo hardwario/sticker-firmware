@@ -129,6 +129,7 @@ var _CMD_NAMES = {
   12: "clock_sync",
   13: "alarm_rule",
   14: "w1_scan",
+  15: "req_alarm_rules",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);
@@ -274,6 +275,58 @@ function _decodeW1Scan(bytes, start, end) {
   return { rom: roms };
 }
 
+// enum app_alarm_kind → label (mirrors app_alarm_rules.h).
+var _ALARM_KINDS = { 0: "threshold", 1: "state", 2: "rate" };
+
+// One Response.RuleEntry: source(1), quantity(2) numeric enums, enabled(3),
+// kind(4) [0=threshold 1=state 2=rate], threshold lo(5)/hi(6)/hst(7) float,
+// state from_state(8)/to_state(9). Only the fields for the rule's kind are set.
+function _decodeRuleEntry(bytes, start, end) {
+  var r = {}, pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var f = tag.value >>> 3, w = tag.value & 0x7;
+    if (w === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (f === 1) r.source = v.value;
+      else if (f === 2) r.quantity = v.value;
+      else if (f === 3) r.enabled = v.value !== 0;
+      else if (f === 4) { r.kind = v.value; r.kind_name = _ALARM_KINDS[v.value] || "unknown"; }
+      else if (f === 8) r.from_state = v.value;
+      else if (f === 9) r.to_state = v.value;
+    } else if (w === 5) {
+      var fl = _pbReadFloat(bytes, pos); pos = fl.next;
+      if (f === 5) r.lo = fl.value;
+      else if (f === 6) r.hi = fl.value;
+      else if (f === 7) r.hst = fl.value;
+    } else if (w === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next + len.value;
+    } else { break; }
+  }
+  return r;
+}
+
+// Response.AlarmRulesDump (field 8): paged dynamic alarm rules. page_index(1),
+// page_count(2), repeated RuleEntry rules(3).
+function _decodeAlarmRulesDump(bytes, start, end) {
+  var d = { rules: [] }, pos = start;
+  while (pos < end) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var f = tag.value >>> 3, w = tag.value & 0x7;
+    if (w === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      if (f === 1) d.page_index = v.value;
+      else if (f === 2) d.page_count = v.value;
+    } else if (w === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next;
+      var e2 = pos + len.value;
+      if (f === 3) d.rules.push(_decodeRuleEntry(bytes, pos, e2));
+      pos = e2;
+    } else { break; }
+  }
+  return d;
+}
+
 // app_history_sensor enum order → name + encoding (mirrors app_history.c).
 var _HIST_SENSORS = [
   { name: "temperature", enc: "temp" },
@@ -385,6 +438,7 @@ function decodeDownlinkResponse(bytes) {
       else if (field === 5) resp.history_frame = _decodeHistoryFrame(bytes, pos, end);
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       else if (field === 7) resp.w1_scan = _decodeW1Scan(bytes, pos, end);
+      else if (field === 8) resp.alarm_rules_dump = _decodeAlarmRulesDump(bytes, pos, end);
       pos = end;
     } else {
       break;
@@ -705,6 +759,13 @@ function encodeDownlinkCommand(cmd) {
     if (b.hst !== undefined) body = body.concat(_encTag(7, 5)).concat(_encFloat(b.hst));
     if (b.from_state) body = body.concat(_encTag(8, 0)).concat(_encVarint(b.from_state));
     if (b.to_state) body = body.concat(_encTag(9, 0)).concat(_encVarint(b.to_state));
+  } else if (name === "req_alarm_rules") {
+    // Optional filter: source(1) + quantity(2) together select one rule; omit
+    // both to list all. page(3) for paging. Use !== undefined so source/quantity
+    // 0 (onboard / temperature) are still sent as an explicit filter.
+    if (b.source !== undefined) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.source));
+    if (b.quantity !== undefined) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.quantity));
+    if (b.page) body = body.concat(_encTag(3, 0)).concat(_encVarint(b.page));
   }
   // get_info / settings_save / reboot / factory_reset / force_send / clock_sync /
   // w1_scan: empty body.
@@ -830,6 +891,19 @@ function decodeDownlinkCommand(bytes) {
           } else { break; }
         }
         cmd.alarm_rule = arl;
+      } else if (field === 15) { // req_alarm_rules
+        var rar = {}, x = pos;
+        while (x < end) {
+          var t15 = _pbReadVarint(bytes, x); x = t15.next;
+          var f15 = t15.value >>> 3, w15 = t15.value & 0x7;
+          if (w15 === 0) {
+            var v15 = _pbReadVarint(bytes, x); x = v15.next;
+            if (f15 === 1) rar.source = v15.value;
+            else if (f15 === 2) rar.quantity = v15.value;
+            else if (f15 === 3) rar.page = v15.value;
+          } else { break; }
+        }
+        cmd.req_alarm_rules = rar;
       }
       pos = end;
     } else {
