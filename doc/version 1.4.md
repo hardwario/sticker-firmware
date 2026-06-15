@@ -291,6 +291,7 @@ The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.
 | `ats …` | **Renamed** from `tester` — diagnostics/test commands |
 | `ats lrw reset` | **New** — clear LoRaWAN frame counters + DevNonce (reboots) |
 | `ats cmd lrw \| nfc <hex>` | **New** (debug) — inject a command over the LoRaWAN/NFC transport for bench testing |
+| `nfc dump` / `read` / `write` / `clear` / `check` / `autocheck` / `reg` / `regw` | **New** (debug) — direct ST25DV tag access; `nfc check` prints a readable trace of what it read, decoded and wrote back (see §10) |
 | `config history-enable` / `history-sensors` / `alarm-limit` / `alarm-notif-time` / `pir-notify-act` | **New** parameters (see §6, §7) |
 
 Existing commands (`config`, `settings save`/`reset`, `join`, `send`) are unchanged.
@@ -313,6 +314,29 @@ v1.4.0 organizes configuration keys **by sensor/source** rather than under a glo
 **Unchanged:** discrete sources (`hall-*`, `input-*`, `pir-notify-act`) and global params (`alarm-limit`, `alarm-notif-time`). `accel-motion-sensitivity` defaults to `off` (no accelerometer detection).
 
 The protobuf field numbers are **unchanged**, so the over-the-air wire format stays compatible; only the user-facing keys and code identifiers change. Devices must be reprovisioned with the new shell keys (the NVS settings keys moved).
+
+---
+
+## 10. Local NFC access (NEW)
+
+The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel — for reading the sticker's identity and for the same command protocol available over LoRaWAN, without a network connection.
+
+**Identity record (always present).** When idle, the firmware keeps a small plaintext **info record** on the tag, so a phone learns the sticker identity and config-schema version the moment it taps — no decryption, no app required. Payload (11 bytes): format version, serial number, firmware version, build type, config-schema version, debug flag. The record is self-healing: it is restored whenever the tag is empty or after a written config/command has been consumed, and it is **not** rewritten while it is already present (no needless EEPROM wear).
+
+**Command/response over NFC.** A phone can drive the **same commands as over LoRaWAN** (`get_info`, `set_param`, `get_config`, `reboot`, …; see §1) by writing a command record to the tag. The firmware processes it with the transport-agnostic command engine and replaces it with a **response record** for the phone to read back. Deferred actions (reboot / save / factory-reset) run *after* the response is written, so the phone always reads the acknowledgement first. Encrypted **config provisioning** over NFC (AES-CCM, serial + monotonic nonce, anti-replay) is also applied through the same path.
+
+**Tag format.** Records are NFC Forum **Type 5**: a 4-byte Capability Container (`E1 40 40 01`) followed by an NDEF message. Each record uses a short **NFC Forum external type** to keep the 512-byte user memory free for payload:
+
+| Record | NDEF type |
+|---|---|
+| Info | `hio.stck:inf` |
+| Config (encrypted) | `hio.stck:cfg` |
+| Command (phone → device) | `hio.stck:cmd` |
+| Response (device → phone) | `hio.stck:rsp` |
+
+A phone's Web NFC reader sees each as `record.recordType === "hio.stck:…"`.
+
+**Power.** The periodic check is gated on the tag's `IT_STS_Dyn` register — the firmware reads a single byte each cycle and only performs the full read + NDEF parse when RF activity occurred since the last poll, so an untouched tag costs almost nothing.
 
 ---
 

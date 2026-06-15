@@ -34,7 +34,17 @@
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 #define BLINK_INTERVAL_SECONDS 3
-#define NFC_CHECK_BLINKS       10
+
+/* NFC poll runs on its own thread (not tied to the LED blink loop). Each poll
+ * reads the 1-byte IT_STS_Dyn and only does a full read on RF activity, so a
+ * short interval is cheap. */
+#define NFC_POLL_INTERVAL_SECONDS    2
+#define NFC_POLL_START_DELAY_MS      3000
+#define NFC_POLL_THREAD_STACK_SIZE   3072
+#define NFC_POLL_THREAD_PRIO         K_LOWEST_APPLICATION_THREAD_PRIO
+/* Delay before running an NFC command's deferred action, so the phone can read
+ * the Ack response off the tag before the device reboots/saves. */
+#define NFC_CMD_ACTION_DELAY_SECONDS 3
 
 #define APP_ALARM_ORANGE_RATE_LIMIT_MS 500
 #define APP_ALARM_ORANGE_AUTO_OFF_MS   (60 * 60 * 1000)
@@ -44,8 +54,6 @@ enum app_mode {
 	APP_MODE_NORMAL = 0,
 	APP_MODE_CALIBRATION,
 };
-
-static int m_nfc_counter;
 
 static void die(void)
 {
@@ -89,6 +97,68 @@ static void play_carousel_nfc(void)
 	app_led_blink(&req);
 	k_sleep(K_MSEC(10 * 200 - 100));
 }
+
+/* Dedicated NFC poll thread: independent of the LED blink loop. Each cycle does
+ * the cheap gated poll (1-byte IT_STS_Dyn; full read only on RF activity) and
+ * applies a consumed config. Started after a delay so app_nfc_init() has run. */
+static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	for (;;) {
+		k_sleep(K_SECONDS(NFC_POLL_INTERVAL_SECONDS));
+
+		if (!app_nfc_periodic_enabled()) {
+			continue;
+		}
+
+		enum app_nfc_action action;
+		int ret = app_nfc_poll(&action);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_nfc_poll", ret);
+		}
+
+		if (action == APP_NFC_ACTION_SAVE) {
+			play_carousel_nfc();
+			ret = app_settings_save(true);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
+			}
+		} else if (action == APP_NFC_ACTION_RESET) {
+			play_carousel_nfc();
+			ret = app_settings_reset();
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_settings_reset", ret);
+			}
+		}
+
+		/* Deferred action from an NFC command (reboot/save/factory-reset). Run
+		 * it after a short delay so the phone can still read the Ack response
+		 * off the tag first. */
+		enum app_cmd_action cmd_action = app_nfc_take_cmd_action();
+		if (cmd_action != APP_CMD_ACTION_NONE) {
+			k_sleep(K_SECONDS(NFC_CMD_ACTION_DELAY_SECONDS));
+			switch (cmd_action) {
+			case APP_CMD_ACTION_SETTINGS_SAVE:
+				app_settings_save(true);
+				break;
+			case APP_CMD_ACTION_REBOOT:
+				sys_reboot(SYS_REBOOT_COLD);
+				break;
+			case APP_CMD_ACTION_FACTORY_RESET:
+				app_settings_reset();
+				break;
+			default:
+				break;
+			}
+		}
+	}
+}
+
+K_THREAD_DEFINE(nfc_poll_tid, NFC_POLL_THREAD_STACK_SIZE, nfc_poll_thread_fn, NULL, NULL, NULL,
+		NFC_POLL_THREAD_PRIO, 0, NFC_POLL_START_DELAY_MS);
 
 static enum app_mode detect_mode(void)
 {
@@ -193,10 +263,13 @@ int main(void)
 
 	enum app_nfc_action action;
 
+	/* A stale/replay config left on the tag makes app_nfc_check() fail
+	 * (anti-replay) on every boot. Do NOT die() here — that would brick the
+	 * device into a reboot loop. Log and continue, like the periodic check
+	 * in the main loop does. */
 	ret = app_nfc_check(&action);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
-		die();
 	}
 
 	if (action == APP_NFC_ACTION_SAVE) {
@@ -282,30 +355,7 @@ int main(void)
 		}
 #endif /* defined(CONFIG_WATCHDOG) */
 
-		if (++m_nfc_counter >= NFC_CHECK_BLINKS) {
-			m_nfc_counter = 0;
-
-			ret = app_nfc_check(&action);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
-			}
-
-			if (action == APP_NFC_ACTION_SAVE) {
-				play_carousel_nfc();
-
-				ret = app_settings_save(true);
-				if (ret) {
-					LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
-				}
-			} else if (action == APP_NFC_ACTION_RESET) {
-				play_carousel_nfc();
-
-				ret = app_settings_reset();
-				if (ret) {
-					LOG_ERR_CALL_FAILED_INT("app_settings_reset", ret);
-				}
-			}
-		}
+		/* NFC is polled on its own thread (nfc_poll_thread_fn), not here. */
 
 		/* Detect magnet on BOTH Hall sensors → reboot into calibration mode */
 		if (k_uptime_get() < (int64_t)APP_CALIBRATION_ACTIVATION_WINDOW_MIN * 60 * 1000) {
