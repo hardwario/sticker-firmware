@@ -116,6 +116,7 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
  * including the nanopb header). value is the scaled current reading and is only
  * meaningful when has_value is true (discrete sources leave it absent). */
 struct app_cmd_alarm_event {
+	uint8_t slot;     /* alarm rule slot index (0..APP_ALARM_SLOT_COUNT-1) that fired */
 	uint8_t source;   /* enum app_alarm_source (onboard/s1..s4/hall/input/pir/accel) */
 	uint8_t quantity; /* enum app_alarm_quantity */
 	uint8_t edge;     /* AlarmEvent_Edge: 0=activate, 1=deactivate */

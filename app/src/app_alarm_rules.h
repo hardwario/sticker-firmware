@@ -7,12 +7,21 @@
 #ifndef APP_ALARM_RULES_H_
 #define APP_ALARM_RULES_H_
 
-/* Dynamic alarm rules — a small, persisted list of {source, quantity, condition}
+/* Dynamic alarm rules — a small, persisted array of {source, quantity, condition}
  * rules that unifies every alarm (onboard sensors, ROM-bound 1-Wire slots,
  * discrete inputs and counters) under one model. Replaces the fixed per-source
  * flat config keys: a new sensor quantity is one enum value, and config grows
  * only with the rules actually set. Stored as one settings blob (storage NVS),
- * max APP_ALARM_RULE_MAX rules.
+ * APP_ALARM_SLOT_COUNT slots.
+ *
+ * Rules live in fixed alarm slots 0..APP_ALARM_SLOT_COUNT-1. The slot index is
+ * the rule's stable identity: several slots may carry the same (source,quantity)
+ * — that is the multi-level case (e.g. a warning band and a critical band on one
+ * sensor as two independent rules). Clearing a slot empties it without
+ * renumbering the others, so a host / AlarmReport can refer to a rule by slot
+ * index reliably. NOTE: the rule "slot" (this index) is distinct from the
+ * 1-Wire sensor "slot" (APP_ALARM_SRC_SLOT1..4); shell/proto call this one the
+ * rule index.
  *
  * A rule's kind is derived from its quantity:
  *  - THRESHOLD (analog): lo/hi/hst hysteresis band — temperature, humidity,
@@ -30,7 +39,7 @@
 extern "C" {
 #endif
 
-#define APP_ALARM_RULE_MAX 16
+#define APP_ALARM_SLOT_COUNT 16
 
 /* Physical sensor a rule targets. Slot 1..4 mirror the telemetry/history slot
  * model (ROM-bound w1[0..3]). Discrete + counter sources reuse these too. */
@@ -91,22 +100,24 @@ enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q);
  * a slot rule before the sensor is enrolled). */
 bool app_alarm_rule_valid(enum app_alarm_source source, enum app_alarm_quantity quantity);
 
-/* Number of stored rules, and indexed access (0..count-1). */
+/* Number of occupied slots, and per-slot access. Iterate occupied rules with
+ *   for (uint8_t s = 0; s < APP_ALARM_SLOT_COUNT; s++)
+ *           if ((r = app_alarm_rules_get(s))) { ... }
+ * app_alarm_rules_get() returns NULL for an out-of-range or empty slot. */
 uint8_t app_alarm_rules_count(void);
-const struct app_alarm_rule *app_alarm_rules_get(uint8_t idx);
+const struct app_alarm_rule *app_alarm_rules_get(uint8_t slot);
+bool app_alarm_rules_occupied(uint8_t slot);
 
-/* Find the rule for (source, quantity), or NULL. */
-const struct app_alarm_rule *app_alarm_rules_find(enum app_alarm_source source,
-						  enum app_alarm_quantity quantity);
+/* Store a rule in `slot`, overwriting whatever was there. Returns 0, -EINVAL
+ * (bad slot or invalid source+quantity pair). Does not persist — call
+ * app_alarm_rules_save(). */
+int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule);
 
-/* Upsert a rule (one per source+quantity). Returns 0, -EINVAL (bad pair),
- * -ENOSPC (table full). Does not persist — call app_alarm_rules_save(). */
-int app_alarm_rules_set(const struct app_alarm_rule *rule);
+/* Empty `slot` (no renumbering). Returns 0, -EINVAL (bad slot), -ENOENT (already
+ * empty). Not persisted. */
+int app_alarm_rules_clear(uint8_t slot);
 
-/* Remove the rule for (source, quantity); -ENOENT if none. Not persisted. */
-int app_alarm_rules_clear(enum app_alarm_source source, enum app_alarm_quantity quantity);
-
-/* Remove all rules. Not persisted. */
+/* Empty all slots. Not persisted. */
 void app_alarm_rules_clear_all(void);
 
 /* Persist the current rule list to settings (storage NVS). */

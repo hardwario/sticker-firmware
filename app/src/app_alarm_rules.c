@@ -11,6 +11,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/sys/util.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -21,10 +22,15 @@ LOG_MODULE_REGISTER(app_alarm_rules, LOG_LEVEL_INF);
 
 #define SETTINGS_SUBTREE "alarm"
 #define SETTINGS_KEY     "alarm/rules"
-#define BLOB_VERSION     1
+#define BLOB_VERSION_V1  1 /* legacy: count + compacted list of rules */
+#define BLOB_VERSION     2 /* current: sparse (slot, rule) entries */
 
-static struct app_alarm_rule m_rules[APP_ALARM_RULE_MAX];
-static uint8_t m_count;
+struct app_alarm_slot {
+	bool used;
+	struct app_alarm_rule rule;
+};
+
+static struct app_alarm_slot m_slots[APP_ALARM_SLOT_COUNT];
 static struct k_mutex m_lock;
 
 /* ---- names -------------------------------------------------------------- */
@@ -133,85 +139,103 @@ bool app_alarm_rule_valid(enum app_alarm_source source, enum app_alarm_quantity 
 	}
 }
 
-/* ---- CRUD --------------------------------------------------------------- */
+/* ---- CRUD (slot-addressed) ---------------------------------------------- */
 
 uint8_t app_alarm_rules_count(void)
 {
-	return m_count;
-}
-
-const struct app_alarm_rule *app_alarm_rules_get(uint8_t idx)
-{
-	return (idx < m_count) ? &m_rules[idx] : NULL;
-}
-
-static int find_idx(enum app_alarm_source source, enum app_alarm_quantity quantity)
-{
-	for (int i = 0; i < m_count; i++) {
-		if (m_rules[i].source == source && m_rules[i].quantity == quantity) {
-			return i;
+	uint8_t n = 0;
+	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
+		if (m_slots[i].used) {
+			n++;
 		}
 	}
-	return -1;
+	return n;
 }
 
-const struct app_alarm_rule *app_alarm_rules_find(enum app_alarm_source source,
-						  enum app_alarm_quantity quantity)
+const struct app_alarm_rule *app_alarm_rules_get(uint8_t slot)
 {
-	int i = find_idx(source, quantity);
-	return (i >= 0) ? &m_rules[i] : NULL;
+	if (slot >= APP_ALARM_SLOT_COUNT || !m_slots[slot].used) {
+		return NULL;
+	}
+	return &m_slots[slot].rule;
 }
 
-int app_alarm_rules_set(const struct app_alarm_rule *rule)
+bool app_alarm_rules_occupied(uint8_t slot)
 {
-	if (rule == NULL || !app_alarm_rule_valid((enum app_alarm_source)rule->source,
-						  (enum app_alarm_quantity)rule->quantity)) {
+	return slot < APP_ALARM_SLOT_COUNT && m_slots[slot].used;
+}
+
+int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule)
+{
+	if (slot >= APP_ALARM_SLOT_COUNT || rule == NULL ||
+	    !app_alarm_rule_valid((enum app_alarm_source)rule->source,
+				  (enum app_alarm_quantity)rule->quantity)) {
 		return -EINVAL;
 	}
 
 	k_mutex_lock(&m_lock, K_FOREVER);
-	int i = find_idx((enum app_alarm_source)rule->source,
-			 (enum app_alarm_quantity)rule->quantity);
-	if (i < 0) {
-		if (m_count >= APP_ALARM_RULE_MAX) {
-			k_mutex_unlock(&m_lock);
-			return -ENOSPC;
-		}
-		i = m_count++;
-	}
-	m_rules[i] = *rule;
+	m_slots[slot].rule = *rule;
+	m_slots[slot].used = true;
 	k_mutex_unlock(&m_lock);
 	return 0;
 }
 
-int app_alarm_rules_clear(enum app_alarm_source source, enum app_alarm_quantity quantity)
+int app_alarm_rules_clear(uint8_t slot)
 {
-	k_mutex_lock(&m_lock, K_FOREVER);
-	int i = find_idx(source, quantity);
-	if (i < 0) {
-		k_mutex_unlock(&m_lock);
-		return -ENOENT;
+	if (slot >= APP_ALARM_SLOT_COUNT) {
+		return -EINVAL;
 	}
-	/* Compact: move the last rule into the hole. */
-	m_rules[i] = m_rules[--m_count];
+	k_mutex_lock(&m_lock, K_FOREVER);
+	int ret = m_slots[slot].used ? 0 : -ENOENT;
+	m_slots[slot].used = false;
 	k_mutex_unlock(&m_lock);
-	return 0;
+	return ret;
 }
 
 void app_alarm_rules_clear_all(void)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
-	m_count = 0;
+	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
+		m_slots[i].used = false;
+	}
 	k_mutex_unlock(&m_lock);
 }
 
 /* ---- persistence (settings blob) --------------------------------------- */
 
-struct rules_blob {
+/* v1 (legacy): version + count + a compacted list of rules. Migrated on load
+ * into slots 0..count-1. */
+struct rules_blob_v1 {
 	uint8_t version;
 	uint8_t count;
-	struct app_alarm_rule rules[APP_ALARM_RULE_MAX];
+	struct app_alarm_rule rules[APP_ALARM_SLOT_COUNT];
 };
+
+/* v2 (current): version + count + a sparse list of (slot, rule) entries. Only
+ * occupied slots are stored, so an empty table is 2 bytes and the blob never
+ * exceeds the v1 size. */
+struct rules_entry_v2 {
+	uint8_t slot;
+	struct app_alarm_rule rule;
+};
+
+struct rules_blob_v2 {
+	uint8_t version;
+	uint8_t count;
+	struct rules_entry_v2 entries[APP_ALARM_SLOT_COUNT];
+};
+
+/* Adopt one (slot, rule) into m_slots if the slot and pair are valid (drops
+ * anything that no longer validates, e.g. enum changed across FW). */
+static void load_one(uint8_t slot, const struct app_alarm_rule *r)
+{
+	if (slot < APP_ALARM_SLOT_COUNT &&
+	    app_alarm_rule_valid((enum app_alarm_source)r->source,
+				 (enum app_alarm_quantity)r->quantity)) {
+		m_slots[slot].rule = *r;
+		m_slots[slot].used = true;
+	}
+}
 
 static int rules_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
@@ -220,27 +244,41 @@ static int rules_settings_set(const char *name, size_t len, settings_read_cb rea
 		return -ENOENT;
 	}
 
-	struct rules_blob blob;
-	if (len > sizeof(blob)) {
-		return -EINVAL;
-	}
-	ssize_t n = read_cb(cb_arg, &blob, len);
-	if (n < (ssize_t)offsetof(struct rules_blob, rules) || blob.version != BLOB_VERSION) {
-		LOG_WRN("alarm rules blob ignored (len=%d, version=%u)", (int)n, blob.version);
+	union {
+		uint8_t version;
+		struct rules_blob_v1 v1;
+		struct rules_blob_v2 v2;
+	} blob;
+	if (len > sizeof(blob) || len < 2) {
+		LOG_WRN("alarm rules blob ignored (len=%d)", (int)len);
 		return 0;
 	}
-	if (blob.count > APP_ALARM_RULE_MAX) {
-		blob.count = APP_ALARM_RULE_MAX;
+	ssize_t n = read_cb(cb_arg, &blob, len);
+	if (n < 2) {
+		LOG_WRN("alarm rules blob short read (n=%d)", (int)n);
+		return 0;
 	}
-	/* Drop any rule that no longer validates (e.g. enum changed across FW). */
-	m_count = 0;
-	for (int i = 0; i < blob.count; i++) {
-		if (app_alarm_rule_valid((enum app_alarm_source)blob.rules[i].source,
-					 (enum app_alarm_quantity)blob.rules[i].quantity)) {
-			m_rules[m_count++] = blob.rules[i];
+
+	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
+		m_slots[i].used = false;
+	}
+
+	if (blob.version == BLOB_VERSION) {
+		uint8_t count = MIN(blob.v2.count, (uint8_t)APP_ALARM_SLOT_COUNT);
+		for (int i = 0; i < count; i++) {
+			load_one(blob.v2.entries[i].slot, &blob.v2.entries[i].rule);
 		}
+	} else if (blob.version == BLOB_VERSION_V1) {
+		uint8_t count = MIN(blob.v1.count, (uint8_t)APP_ALARM_SLOT_COUNT);
+		for (int i = 0; i < count; i++) {
+			load_one((uint8_t)i, &blob.v1.rules[i]);
+		}
+	} else {
+		LOG_WRN("alarm rules blob ignored (version=%u)", blob.version);
+		return 0;
 	}
-	LOG_INF("Loaded %u alarm rule(s)", m_count);
+
+	LOG_INF("Loaded %u alarm rule(s)", app_alarm_rules_count());
 	return 0;
 }
 
@@ -251,10 +289,18 @@ static struct settings_handler m_sh = {
 
 int app_alarm_rules_save(void)
 {
+	struct rules_blob_v2 blob = {.version = BLOB_VERSION, .count = 0};
+
 	k_mutex_lock(&m_lock, K_FOREVER);
-	struct rules_blob blob = {.version = BLOB_VERSION, .count = m_count};
-	memcpy(blob.rules, m_rules, (size_t)m_count * sizeof(m_rules[0]));
-	size_t len = offsetof(struct rules_blob, rules) + (size_t)m_count * sizeof(m_rules[0]);
+	for (uint8_t s = 0; s < APP_ALARM_SLOT_COUNT; s++) {
+		if (m_slots[s].used) {
+			blob.entries[blob.count].slot = s;
+			blob.entries[blob.count].rule = m_slots[s].rule;
+			blob.count++;
+		}
+	}
+	size_t len = offsetof(struct rules_blob_v2, entries) +
+		     (size_t)blob.count * sizeof(blob.entries[0]);
 	k_mutex_unlock(&m_lock);
 
 	int ret = settings_save_one(SETTINGS_KEY, &blob, len);

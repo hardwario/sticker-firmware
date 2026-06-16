@@ -175,9 +175,11 @@ message Command {
     message ReqHistory   { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
     message ClockSync    { }
 
-    // Set, clear or clear-all a dynamic alarm rule (target = source + quantity).
-    // SET uses the kind's fields (threshold lo/hi/hst, state from/to); CLEAR
-    // removes one (source,quantity); CLEAR_ALL wipes the list. Rules persist.
+    // Set or clear a dynamic alarm rule in a fixed slot (the slot index is the
+    // rule's stable identity; several slots may share one source+quantity for
+    // multi-level alarms). SET stores into `slot` using the kind's fields
+    // (threshold lo/hi/hst, state from/to); CLEAR empties `slot`; CLEAR_ALL
+    // wipes every slot. `slot` is required for SET and CLEAR. Rules persist.
     message AlarmRule {
         enum Op { SET = 0; CLEAR = 1; CLEAR_ALL = 2; }
         Op     op         = 1;
@@ -189,15 +191,18 @@ message Command {
         optional float  hst = 7;
         optional uint32 from_state = 8;
         optional uint32 to_state   = 9;
+        optional uint32 slot       = 10;  // target slot (required for SET/CLEAR)
     }
 
-    // Read back dynamic alarm rules. No target = all rules; source+quantity =
-    // just that one. Paged like GetConfig: omitted/0 page = first; the response
-    // (Response.AlarmRulesDump) carries page_count so the host can fetch the rest.
+    // Read back dynamic alarm rules. No filter = all slots; `slot` = just that
+    // one slot; source+quantity = all slots on that pair. Paged like GetConfig:
+    // omitted/0 page = first; the response (Response.AlarmRulesDump) carries
+    // page_count so the host can fetch the rest.
     message ReqAlarmRules {
         optional uint32 source   = 1;
         optional uint32 quantity = 2;
         optional uint32 page     = 3;
+        optional uint32 slot     = 4;
     }
 
     // Enumerate the 1-Wire bus; the response (Response.W1Scan) returns the
@@ -294,10 +299,10 @@ message Response {
     }
 
     message RuleEntry {
-        // source/quantity/enabled/kind are `optional` so a rule on source 0
-        // (onboard) / quantity 0 (temperature) / kind 0 (threshold) / disabled
-        // still goes on the wire — a read-back must always carry the full
-        // identity, never let a proto3 zero-default silently drop it.
+        // slot/source/quantity/enabled/kind are `optional` so a rule in slot 0
+        // on source 0 (onboard) / quantity 0 (temperature) / kind 0 (threshold)
+        // / disabled still goes on the wire — a read-back must always carry the
+        // full identity, never let a proto3 zero-default silently drop it.
         optional uint32 source   = 1;   // enum app_alarm_source
         optional uint32 quantity = 2;   // enum app_alarm_quantity
         optional bool   enabled  = 3;
@@ -307,6 +312,7 @@ message Response {
         optional float  hst = 7;
         optional uint32 from_state = 8;
         optional uint32 to_state   = 9;
+        optional uint32 slot       = 10;  // alarm rule slot index (stable identity)
     }
 }
 
@@ -347,6 +353,7 @@ message AlarmEvent {
     uint32 rel_s    = 4;         // seconds since AlarmReport.base_time
     optional sint32 value = 5;   // current value: analog ×100 (temp/hum) or ×10 (pressure), digital 0/1, or counter
     uint32 quantity = 6;         // enum app_alarm_quantity: temperature/humidity/.../state/count
+    uint32 slot     = 7;         // alarm rule slot index that fired (stable identity)
 }
 
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap

@@ -38,8 +38,8 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `clock_sync` | Request a network time sync | **`info`, deferred** — sent once the network time lands (carries the synced `unix_time`) |
 | `req_history` | Replay stored history for a time window | `history_frame` (multiple) |
 | `w1_scan` | Enumerate the 1-Wire bus; returns the discovered ROMs so you can teach a slot via `set_param sensorN_rom` | `w1_scan` |
-| `alarm_rule` | Set / clear / clear-all a dynamic alarm rule (target = `source` + `quantity`) | `ack` |
-| `req_alarm_rules` | Read back the stored dynamic alarm rules (paged); optional `source`+`quantity` filter selects one | `alarm_rules_dump` |
+| `alarm_rule` | Set / clear a dynamic alarm rule in a `slot`, or clear-all (SET/CLEAR require `slot`; the slot index is the rule's stable identity) | `ack` |
+| `req_alarm_rules` | Read back the stored dynamic alarm rules (paged); optional `slot` filter selects one slot, or `source`+`quantity` selects every slot on that pair | `alarm_rules_dump` |
 
 > After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED), an optional `fault_field`, and a `detail` string.
 >
@@ -59,10 +59,12 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `w1_scan` | `08097200` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
 | `set_param`: ADR on, `interval_report`=120 s, `cap_barometer` on | `0801120d0a021801120220782203e80201` |
-| `alarm_rule` SET s1 temperature 15–25 °C, hyst 0.5 | `08016a13100120012d00007041350000c8413d0000003f` |
+| `alarm_rule` SET slot 0 = s1 temperature 15–25 °C, hyst 0.5 | `08016a15100120012d00007041350000c8413d0000003f5000` |
+| `alarm_rule` CLEAR slot 0 | `08016a0408015000` |
 | `alarm_rule` CLEAR_ALL | `08016a020802` |
 | `req_alarm_rules` (all rules, page 0) | `08017a00` |
-| `req_alarm_rules` (onboard temperature only) | `08017a0408001000` |
+| `req_alarm_rules` (slot 0 only) | `08017a022000` |
+| `req_alarm_rules` (all slots on onboard temperature) | `08017a0408001000` |
 
 (The leading byte is the `seq` you chose; it is echoed in the reply.)
 
@@ -120,6 +122,8 @@ message AlarmEvent {
     Side   side   = 3;               // SIDE_NONE / SIDE_LO / SIDE_HI
     uint32 rel_s  = 4;               // seconds since base_time
     optional sint32 value = 5;       // current reading, scaled; absent for discrete sources
+    uint32 quantity = 6;             // which quantity (temperature/humidity/.../state/count)
+    uint32 slot     = 7;             // alarm rule slot index that fired (stable identity)
 }
 ```
 
@@ -130,6 +134,7 @@ Each event is described by **three orthogonal enums** — an integration that on
 - `base_time` — Unix timestamp the events are relative to.
 - `total` — total alarms that occurred in the window. `truncated` is `true` when `total` exceeds the events actually carried (some were dropped to fit the data rate).
 - `alarms[]` — each with:
+  - `slot` — the alarm rule slot index that fired (`0` when omitted on the wire); lets a host map the edge back to the exact rule, including which level of a multi-level alarm
   - `source` — `temperature` / `humidity` / `pressure` / `t1-temperature` / `t2-temperature` / `hall-left` / `hall-right` / `pir` / `input-a` / `input-b` / `accel-motion`
   - `event` — `activate` / `deactivate`
   - `side` — `hi` / `lo` for threshold sources, `none` for discrete sources (hall/input/PIR). The **deactivate** edge keeps the side that was crossed on activation.
@@ -249,31 +254,40 @@ New configuration parameters control alarm uplink frequency and add a PIR motion
 
 ### Dynamic alarm rules — read / write over LoRaWAN & NFC
 
-Per-sensor alarm thresholds are **dynamic rules** (`app_alarm_rules`, up to 16, each keyed by `source` + `quantity`). A rule's *kind* follows its quantity: **threshold** (`lo`/`hi`/`hst`) for analog quantities, **state** (`from_state`/`to_state`) for discrete inputs, **rate** (`hi` = max events per report) for counters. Locally they are managed with the `alarm` shell command (`alarm set`, `alarm clear`, `alarm list`). Remotely they go through the same transport-agnostic command channel, so **the identical message works on both fPort 85 (LoRaWAN) and NFC**:
+Per-sensor alarm thresholds are **dynamic rules** (`app_alarm_rules`, 16 fixed **slots** `0…15`). The **slot index is the rule's stable identity**: `(source, quantity)` is an attribute of the slot, not a key, so **several slots may carry the same `(source, quantity)`** — that is the multi-level case (e.g. a *warning* band and a separate *critical* band on one sensor as two independent rules, each latching and reporting on its own). Clearing a slot empties it without renumbering the others, so a host (and `AlarmEvent.slot`) can refer to a rule by slot reliably. A rule's *kind* follows its quantity: **threshold** (`lo`/`hi`/`hst`) for analog quantities, **state** (`from_state`/`to_state`) for discrete inputs, **rate** (`hi` = max events per report) for counters.
 
-- **Write** — `alarm_rule` command (`op`: `0`=SET, `1`=CLEAR, `2`=CLEAR_ALL; `source`, `quantity`, and for SET the kind's fields). Reply: `ack`.
-- **Read back** — `req_alarm_rules` command; reply: **`alarm_rules_dump`**, paged like `get_config` (`page_index`/`page_count`). An optional `source`+`quantity` pair narrows it to one rule; omit both to list all. Each `RuleEntry` carries `source`, `quantity`, `enabled`, `kind` and only the fields valid for that kind. Read-back over LoRaWAN needs a data rate above DR0 (a rule does not fit a DR0 frame); NFC returns everything in one page.
+> **Note on "slot":** the alarm rule *slot* (`0…15`, this section) is a distinct concept from the 1-Wire sensor *slot* (`s1…s4`); the shell calls the alarm one the rule **index** (`alarm set <index> …`).
+
+Locally they are managed with the `alarm` shell command: `alarm set <index> <source> <quantity> <args…>`, `alarm clear <index>|all`, `alarm list` (prints each rule with its `[index]`). Remotely they go through the same transport-agnostic command channel, so **the identical message works on both fPort 85 (LoRaWAN) and NFC**:
+
+- **Write** — `alarm_rule` command (`op`: `0`=SET, `1`=CLEAR, `2`=CLEAR_ALL). SET and CLEAR **require `slot`**; SET also carries `source`, `quantity` and the kind's fields. Reply: `ack`.
+- **Read back** — `req_alarm_rules` command; reply: **`alarm_rules_dump`**, paged like `get_config` (`page_index`/`page_count`). An optional `slot` narrows it to one slot; a `source`+`quantity` pair selects every slot on that pair; omit all to list everything. Each `RuleEntry` carries `slot`, `source`, `quantity`, `enabled`, `kind` and only the fields valid for that kind. Read-back over LoRaWAN needs a data rate above DR0 (a rule does not fit a DR0 frame); NFC returns everything in one page.
 
 ```jsonc
-// SET: onboard-board sensor s1, temperature, alarm below 15 °C or above 25 °C, 0.5° hysteresis
+// SET slot 0: sensor s1, temperature, alarm below 15 °C or above 25 °C, 0.5° hysteresis
 { "command": "alarm_rule", "seq": 1,
-  "alarm_rule": { "op": 0, "source": 1, "quantity": 0, "enabled": true, "lo": 15, "hi": 25, "hst": 0.5 } }
-// CLEAR one rule (source 1, quantity 0)
-{ "command": "alarm_rule", "seq": 2, "alarm_rule": { "op": 1, "source": 1, "quantity": 0 } }
+  "alarm_rule": { "op": 0, "slot": 0, "source": 1, "quantity": 0, "enabled": true, "lo": 15, "hi": 25, "hst": 0.5 } }
+// SET slot 1: a second, critical band on the SAME sensor (multi-level)
+{ "command": "alarm_rule", "seq": 2,
+  "alarm_rule": { "op": 0, "slot": 1, "source": 1, "quantity": 0, "enabled": true, "lo": 5, "hi": 35, "hst": 0.5 } }
+// CLEAR slot 0
+{ "command": "alarm_rule", "seq": 3, "alarm_rule": { "op": 1, "slot": 0 } }
 // CLEAR_ALL
-{ "command": "alarm_rule", "seq": 3, "alarm_rule": { "op": 2 } }
+{ "command": "alarm_rule", "seq": 4, "alarm_rule": { "op": 2 } }
 // READ all rules
-{ "command": "req_alarm_rules", "seq": 4, "req_alarm_rules": {} }
-// READ one rule (onboard temperature)
-{ "command": "req_alarm_rules", "seq": 4, "req_alarm_rules": { "source": 0, "quantity": 0 } }
+{ "command": "req_alarm_rules", "seq": 5, "req_alarm_rules": {} }
+// READ one slot
+{ "command": "req_alarm_rules", "seq": 5, "req_alarm_rules": { "slot": 0 } }
+// READ every slot on onboard temperature
+{ "command": "req_alarm_rules", "seq": 5, "req_alarm_rules": { "source": 0, "quantity": 0 } }
 ```
 
-`alarm_rules_dump` reply decoded by `ttn.js` (two rules — a threshold and a state rule):
+`alarm_rules_dump` reply decoded by `ttn.js` (two rules — a threshold and a state rule, each with its `slot`):
 
 ```jsonc
-{ "seq": 4, "alarm_rules_dump": { "page_count": 1, "rules": [
-  { "source": 1, "quantity": 0, "enabled": true, "kind": 0, "kind_name": "threshold", "lo": 15, "hi": 25, "hst": 0.5 },
-  { "source": 8, "quantity": 6, "enabled": true, "kind": 1, "kind_name": "state", "from_state": 0, "to_state": 1 }
+{ "seq": 5, "alarm_rules_dump": { "page_count": 1, "rules": [
+  { "slot": 0, "source": 1, "quantity": 0, "enabled": true, "kind": 0, "kind_name": "threshold", "lo": 15, "hi": 25, "hst": 0.5 },
+  { "slot": 3, "source": 8, "quantity": 6, "enabled": true, "kind": 1, "kind_name": "state", "from_state": 0, "to_state": 1 }
 ] } }
 ```
 

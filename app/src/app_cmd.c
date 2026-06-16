@@ -395,11 +395,20 @@ static void app_cmd_handle_alarm_rule(enum app_cmd_transport tp, const Command *
 		ret = 0;
 		break;
 	case Command_AlarmRule_Op_CLEAR:
-		ret = app_alarm_rules_clear((enum app_alarm_source)ar->source,
-					    (enum app_alarm_quantity)ar->quantity);
+		if (!ar->has_slot) {
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "slot required");
+			resp->body.error.fault_field = 10; /* AlarmRule.slot */
+			return;
+		}
+		ret = app_alarm_rules_clear((uint8_t)ar->slot);
 		break;
 	case Command_AlarmRule_Op_SET:
 	default: {
+		if (!ar->has_slot) {
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "slot required");
+			resp->body.error.fault_field = 10; /* AlarmRule.slot */
+			return;
+		}
 		struct app_alarm_rule r = {
 			.source = (uint8_t)ar->source,
 			.quantity = (uint8_t)ar->quantity,
@@ -410,7 +419,7 @@ static void app_cmd_handle_alarm_rule(enum app_cmd_transport tp, const Command *
 			.from_state = (uint8_t)((ar->has_from_state && ar->from_state) ? 1 : 0),
 			.to_state = (uint8_t)((ar->has_to_state && ar->to_state) ? 1 : 0),
 		};
-		ret = app_alarm_rules_set(&r);
+		ret = app_alarm_rules_set((uint8_t)ar->slot, &r);
 		break;
 	}
 	}
@@ -512,7 +521,7 @@ static void app_cmd_handle_w1_scan(enum app_cmd_transport tp, const Command *cmd
  * per present float (tag + 4) or 2 B per present state varint. */
 static size_t app_cmd_rule_entry_size(const struct app_alarm_rule *r)
 {
-	size_t s = 2 /* wrapper */ + 2 + 2 + 2 + 2 /* source quantity enabled kind */;
+	size_t s = 2 /* wrapper */ + 2 + 2 + 2 + 2 + 2 /* source quantity enabled kind slot */;
 
 	switch (app_alarm_quantity_kind((enum app_alarm_quantity)r->quantity)) {
 	case APP_ALARM_KIND_THRESHOLD:
@@ -529,14 +538,17 @@ static size_t app_cmd_rule_entry_size(const struct app_alarm_rule *r)
 	return s;
 }
 
-static void app_cmd_fill_rule_entry(Response_RuleEntry *e, const struct app_alarm_rule *r)
+static void app_cmd_fill_rule_entry(Response_RuleEntry *e, uint8_t slot,
+				    const struct app_alarm_rule *r)
 {
 	enum app_alarm_kind kind = app_alarm_quantity_kind((enum app_alarm_quantity)r->quantity);
 
 	*e = (Response_RuleEntry){0};
-	/* All four are proto3 `optional` — set the has-flags so a zero value
-	 * (source 0 onboard, quantity 0 temperature, kind 0 threshold, disabled)
-	 * still goes on the wire and the read-back stays unambiguous. */
+	/* All identity fields are proto3 `optional` — set the has-flags so a zero
+	 * value (slot 0, source 0 onboard, quantity 0 temperature, kind 0 threshold,
+	 * disabled) still goes on the wire and the read-back stays unambiguous. */
+	e->has_slot = true;
+	e->slot = slot;
 	e->has_source = true;
 	e->source = r->source;
 	e->has_quantity = true;
@@ -578,27 +590,31 @@ static void app_cmd_handle_req_alarm_rules(enum app_cmd_transport tp, const Comm
 	size_t budget =
 		(tp == APP_CMD_TRANSPORT_LRW) ? RULES_PAGE_BUDGET_LRW : RULES_PAGE_BUDGET_NFC;
 
-	/* Optional single-rule filter: a real targeted query names both source and
-	 * quantity (proto3 can't distinguish source==0 from absent on its own). */
-	bool filter = rq->has_source && rq->has_quantity;
+	/* Optional filters (most specific first): a `slot` selects exactly one slot;
+	 * source+quantity together select every slot on that pair (proto3 can't tell
+	 * source==0 from absent, so both must be present to filter by pair). */
+	bool filter_slot = rq->has_slot;
+	bool filter_pair = rq->has_source && rq->has_quantity;
 
 	Response_AlarmRulesDump *d = &resp->body.alarm_rules_dump;
 	resp->which_body = Response_alarm_rules_dump_tag;
 	d->rules_count = 0;
 
-	/* Single greedy pass: pack matching rules into pages by budget (and the
-	 * static array bound), collect the requested page, learn the page count. */
+	/* Single greedy pass over the slots: pack matching rules into pages by budget
+	 * (and the static array bound), collect the requested page, learn the count. */
 	uint32_t cur_page = 0, in_page = 0, matched = 0;
 	size_t used = 0;
-	uint8_t total = app_alarm_rules_count();
 
-	for (uint8_t i = 0; i < total; i++) {
-		const struct app_alarm_rule *r = app_alarm_rules_get(i);
+	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
+		const struct app_alarm_rule *r = app_alarm_rules_get(slot);
 
 		if (r == NULL) {
 			continue;
 		}
-		if (filter && !(r->source == rq->source && r->quantity == rq->quantity)) {
+		if (filter_slot && slot != rq->slot) {
+			continue;
+		}
+		if (filter_pair && !(r->source == rq->source && r->quantity == rq->quantity)) {
 			continue;
 		}
 		matched++;
@@ -614,7 +630,7 @@ static void app_cmd_handle_req_alarm_rules(enum app_cmd_transport tp, const Comm
 		in_page++;
 
 		if (cur_page == page && d->rules_count < ARRAY_SIZE(d->rules)) {
-			app_cmd_fill_rule_entry(&d->rules[d->rules_count++], r);
+			app_cmd_fill_rule_entry(&d->rules[d->rules_count++], slot, r);
 		}
 	}
 
@@ -861,6 +877,7 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total,
 	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
 	for (size_t i = 0; i < n; i++) {
 		AlarmEvent *ev = &report.events[i];
+		ev->slot = events[i].slot;
 		ev->source = events[i].source;
 		ev->quantity = events[i].quantity;
 		ev->edge = (AlarmEvent_Edge)events[i].edge;

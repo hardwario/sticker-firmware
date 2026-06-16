@@ -278,9 +278,10 @@ function _decodeW1Scan(bytes, start, end) {
 // enum app_alarm_kind → label (mirrors app_alarm_rules.h).
 var _ALARM_KINDS = { 0: "threshold", 1: "state", 2: "rate" };
 
-// One Response.RuleEntry: source(1), quantity(2) numeric enums, enabled(3),
-// kind(4) [0=threshold 1=state 2=rate], threshold lo(5)/hi(6)/hst(7) float,
-// state from_state(8)/to_state(9). Only the fields for the rule's kind are set.
+// One Response.RuleEntry: slot(10) is the rule's stable identity, source(1),
+// quantity(2) numeric enums, enabled(3), kind(4) [0=threshold 1=state 2=rate],
+// threshold lo(5)/hi(6)/hst(7) float, state from_state(8)/to_state(9). Only the
+// value fields for the rule's kind are set.
 function _decodeRuleEntry(bytes, start, end) {
   var r = {}, pos = start;
   while (pos < end) {
@@ -294,6 +295,7 @@ function _decodeRuleEntry(bytes, start, end) {
       else if (f === 4) { r.kind = v.value; r.kind_name = _ALARM_KINDS[v.value] || "unknown"; }
       else if (f === 8) r.from_state = v.value;
       else if (f === 9) r.to_state = v.value;
+      else if (f === 10) r.slot = v.value;
     } else if (w === 5) {
       var fl = _pbReadFloat(bytes, pos); pos = fl.next;
       if (f === 5) r.lo = fl.value;
@@ -749,7 +751,9 @@ function encodeDownlinkCommand(cmd) {
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
   } else if (name === "alarm_rule") {
     // op(1) 0=set/1=clear/2=clear_all, source(2), quantity(3) numeric enums,
-    // enabled(4), threshold lo(5)/hi(6)/hst(7) float, state from(8)/to(9).
+    // enabled(4), threshold lo(5)/hi(6)/hst(7) float, state from(8)/to(9),
+    // slot(10) = target slot (required for SET/CLEAR). Use !== undefined so
+    // slot 0 is sent explicitly.
     if (b.op) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.op));
     if (b.source) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.source));
     if (b.quantity) body = body.concat(_encTag(3, 0)).concat(_encVarint(b.quantity));
@@ -759,13 +763,15 @@ function encodeDownlinkCommand(cmd) {
     if (b.hst !== undefined) body = body.concat(_encTag(7, 5)).concat(_encFloat(b.hst));
     if (b.from_state) body = body.concat(_encTag(8, 0)).concat(_encVarint(b.from_state));
     if (b.to_state) body = body.concat(_encTag(9, 0)).concat(_encVarint(b.to_state));
+    if (b.slot !== undefined) body = body.concat(_encTag(10, 0)).concat(_encVarint(b.slot));
   } else if (name === "req_alarm_rules") {
-    // Optional filter: source(1) + quantity(2) together select one rule; omit
-    // both to list all. page(3) for paging. Use !== undefined so source/quantity
-    // 0 (onboard / temperature) are still sent as an explicit filter.
+    // Optional filter: slot(4) selects one slot; source(1)+quantity(2) together
+    // select all slots on that pair; omit all to list everything. page(3) for
+    // paging. Use !== undefined so slot/source/quantity 0 are sent explicitly.
     if (b.source !== undefined) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.source));
     if (b.quantity !== undefined) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.quantity));
     if (b.page) body = body.concat(_encTag(3, 0)).concat(_encVarint(b.page));
+    if (b.slot !== undefined) body = body.concat(_encTag(4, 0)).concat(_encVarint(b.slot));
   }
   // get_info / settings_save / reboot / factory_reset / force_send / clock_sync /
   // w1_scan: empty body.
@@ -883,6 +889,7 @@ function decodeDownlinkCommand(bytes) {
             else if (f13 === 4) arl.enabled = v13.value !== 0;
             else if (f13 === 8) arl.from_state = v13.value;
             else if (f13 === 9) arl.to_state = v13.value;
+            else if (f13 === 10) arl.slot = v13.value;
           } else if (w13 === 5) {
             var fl13 = _pbReadFloat(bytes, w); w = fl13.next;
             if (f13 === 5) arl.lo = fl13.value;
@@ -901,6 +908,7 @@ function decodeDownlinkCommand(bytes) {
             if (f15 === 1) rar.source = v15.value;
             else if (f15 === 2) rar.quantity = v15.value;
             else if (f15 === 3) rar.page = v15.value;
+            else if (f15 === 4) rar.slot = v15.value;
           } else { break; }
         }
         cmd.req_alarm_rules = rar;
@@ -944,7 +952,7 @@ function _alarmUnscale(quantity, raw) {
 }
 
 function _decodeAlarmEvent(bytes, start, end) {
-  var ev = { source: 0, quantity: 0, edge: 0, side: 0, rel_s: 0, value: null };
+  var ev = { slot: 0, source: 0, quantity: 0, edge: 0, side: 0, rel_s: 0, value: null };
   var p = start;
   while (p < end) {
     var t = _pbReadVarint(bytes, p); p = t.next;
@@ -957,6 +965,7 @@ function _decodeAlarmEvent(bytes, start, end) {
       else if (field === 4) ev.rel_s = v.value;
       else if (field === 5) ev.value = _pbZigzag(v.value);
       else if (field === 6) ev.quantity = v.value;
+      else if (field === 7) ev.slot = v.value;
     } else if (wire === 2) {
       var l = _pbReadVarint(bytes, p); p = l.next + l.value;
     } else { break; }
@@ -981,6 +990,7 @@ function decodeAlarmBatch(bytes) {
       if (field === 3) {
         var ev = _decodeAlarmEvent(bytes, pos, endE);
         out.alarms.push({
+          slot: ev.slot,
           source: _ALARM_SOURCES[ev.source] || ("src" + ev.source),
           quantity: _ALARM_QUANTITIES[ev.quantity] || ("q" + ev.quantity),
           event: _ALARM_EDGES[ev.edge] || "activate",
