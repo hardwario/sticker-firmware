@@ -395,9 +395,10 @@ void app_sensor_sample(void)
 				continue;
 			}
 			if (w1[s].present) {
-				LOG_INF("Slot %d / Temperature: %.2f C / Humidity: %.1f %% / "
-					"Tilt: %sactive",
-					s, (double)w1[s].temperature, (double)w1[s].humidity,
+				LOG_INF("Slot %d / Temperature: %s%d.%02d C / Humidity: %s%d.%01d "
+					"%% "
+					"/ Tilt: %sactive",
+					s, APP_FP2(w1[s].temperature), APP_FP1(w1[s].humidity),
 					w1[s].is_tilt_alert ? "" : "not ");
 			}
 		}

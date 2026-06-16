@@ -888,7 +888,7 @@ int app_machine_probe_read_thermometer(int index, uint64_t *serial_number, float
 	}
 
 	if (!res && temperature) {
-		LOG_DBG("Temperature: %.2f C", (double)*temperature);
+		LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(*temperature));
 	}
 
 	COMM_EPILOGUE
@@ -964,11 +964,11 @@ int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float 
 	}
 
 	if (!res && temperature) {
-		LOG_DBG("Temperature: %.2f C", (double)*temperature);
+		LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(*temperature));
 	}
 
 	if (!res && humidity) {
-		LOG_DBG("Humidity: %.1f %%", (double)*humidity);
+		LOG_DBG("Humidity: %s%d.%01d %%", APP_FP1(*humidity));
 	}
 
 	COMM_EPILOGUE
@@ -1048,7 +1048,7 @@ int app_machine_probe_read_lux_meter(int index, uint64_t *serial_number, float *
 	}
 
 	if (!res && illuminance) {
-		LOG_DBG("Illuminance: %.0f lux", (double)*illuminance);
+		LOG_DBG("Illuminance: %d lux", APP_FP0(*illuminance));
 	}
 
 	COMM_EPILOGUE
@@ -1076,7 +1076,7 @@ int app_machine_probe_read_magnetometer(int index, uint64_t *serial_number, floa
 	}
 
 	if (!res && magnetic_field) {
-		LOG_DBG("Magnetic field: %.2f mT", (double)*magnetic_field);
+		LOG_DBG("Magnetic field: %s%d.%02d mT", APP_FP2(*magnetic_field));
 	}
 
 	COMM_EPILOGUE
@@ -1117,15 +1117,15 @@ int app_machine_probe_read_accelerometer(int index, uint64_t *serial_number, flo
 	}
 
 	if (!res && accel_x) {
-		LOG_DBG("Acceleration in X-axis: %.3f m/s^2", (double)*accel_x);
+		LOG_DBG("Acceleration in X-axis: %s%d.%03d m/s^2", APP_FP3(*accel_x));
 	}
 
 	if (!res && accel_y) {
-		LOG_DBG("Acceleration in Y-axis: %.3f m/s^2", (double)*accel_y);
+		LOG_DBG("Acceleration in Y-axis: %s%d.%03d m/s^2", APP_FP3(*accel_y));
 	}
 
 	if (!res && accel_z) {
-		LOG_DBG("Acceleration in Z-axis: %.3f m/s^2", (double)*accel_z);
+		LOG_DBG("Acceleration in Z-axis: %s%d.%03d m/s^2", APP_FP3(*accel_z));
 	}
 
 	COMM_EPILOGUE

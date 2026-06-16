@@ -666,11 +666,12 @@ static int cmd_sensor_list(const struct shell *shell, size_t argc, char **argv)
 		char reading[40] = "--";
 		if (app_w1_slots_read(s, &r) == 0 && r.present) {
 			if (!isnan(r.humidity)) {
-				snprintf(reading, sizeof(reading), "%.2f C / %.1f %%%s",
-					 (double)r.temperature, (double)r.humidity,
+				snprintf(reading, sizeof(reading), "%s%d.%02d C / %s%d.%01d %%%s",
+					 APP_FP2(r.temperature), APP_FP1(r.humidity),
 					 r.is_tilt_alert ? " / TILT" : "");
 			} else if (!isnan(r.temperature)) {
-				snprintf(reading, sizeof(reading), "%.2f C", (double)r.temperature);
+				snprintf(reading, sizeof(reading), "%s%d.%02d C",
+					 APP_FP2(r.temperature));
 			}
 		}
 

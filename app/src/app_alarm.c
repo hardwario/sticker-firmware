@@ -586,9 +586,11 @@ static int cmd_alarm_list(const struct shell *sh, size_t argc, char **argv)
 		bool active = app_alarm_is_active(r->source, r->quantity);
 		switch (app_alarm_quantity_kind(r->quantity)) {
 		case APP_ALARM_KIND_THRESHOLD:
-			shell_print(sh, "  %s %s  lo=%.2f hi=%.2f hst=%.2f  en=%d  active=%d", src,
-				    q, (double)r->lo, (double)r->hi, (double)r->hst, r->enabled,
-				    active);
+			shell_print(sh,
+				    "  %s %s  lo=%s%d.%02d hi=%s%d.%02d hst=%s%d.%02d  en=%d  "
+				    "active=%d",
+				    src, q, APP_FP2(r->lo), APP_FP2(r->hi), APP_FP2(r->hst),
+				    r->enabled, active);
 			break;
 		case APP_ALARM_KIND_STATE:
 			shell_print(sh, "  %s %s  %u->%u (%s)  en=%d  active=%d", src, q,
