@@ -36,6 +36,8 @@ enum app_cmd_action {
 	APP_CMD_ACTION_REBOOT,            /* reboot (discards staged edits) */
 	APP_CMD_ACTION_FACTORY_RESET,     /* defaults (keep identity+LoRaWAN) + reboot */
 	APP_CMD_ACTION_ENTER_CALIBRATION, /* persist calibration=true + reboot */
+	APP_CMD_ACTION_LRW_RESET,         /* reset LoRaWAN NVM (counters+DevNonce) + reboot (#109) */
+	APP_CMD_ACTION_LRW_JOIN,          /* trigger a forced (re)join, no reboot (#109) */
 };
 
 /* Plain-C device info snapshot (no protobuf dependency), filled by

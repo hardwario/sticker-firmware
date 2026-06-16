@@ -76,6 +76,10 @@ static const char *cmd_action_str(enum app_cmd_action a)
 		return "factory-reset";
 	case APP_CMD_ACTION_ENTER_CALIBRATION:
 		return "enter-calibration";
+	case APP_CMD_ACTION_LRW_RESET:
+		return "lrw-reset+reboot";
+	case APP_CMD_ACTION_LRW_JOIN:
+		return "lrw-join";
 	default:
 		return "?";
 	}

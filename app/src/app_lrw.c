@@ -585,6 +585,20 @@ static void post_cmd_work_handler(struct k_work *work)
 		app_config()->calibration = true;
 		app_settings_save(true);
 		break;
+	case APP_CMD_ACTION_LRW_RESET:
+		/* Wipe the LoRaWAN NVM (frame counters + DevNonce + session), then cold
+		 * reboot so the MAC re-initialises from a clean NVM (#109). Same path as
+		 * `ats lrw reset`. The Ack uplink has already left (deferred 8s). */
+		LOG_INF("Command: LoRaWAN reset (NVM wipe) + reboot");
+		app_lrw_reset_nvm();
+		sys_reboot(SYS_REBOOT_COLD);
+		break;
+	case APP_CMD_ACTION_LRW_JOIN:
+		/* Force a (re)join now instead of waiting for the next attempt (#109).
+		 * No reboot — app_lrw_join() just queues a join work item. */
+		LOG_INF("Command: forced LoRaWAN join");
+		app_lrw_join();
+		break;
 	default:
 		break;
 	}

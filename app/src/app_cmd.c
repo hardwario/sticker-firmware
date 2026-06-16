@@ -608,6 +608,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 	case Command_w1_scan_tag:
 		app_cmd_handle_w1_scan(tp, cmd, resp, action);
 		break;
+	case Command_lrw_reset_tag:
+		*action = APP_CMD_ACTION_LRW_RESET;
+		resp->which_body = Response_ack_tag;
+		break;
+	case Command_lrw_join_tag:
+		*action = APP_CMD_ACTION_LRW_JOIN;
+		resp->which_body = Response_ack_tag;
+		break;
 	case Command_enter_calibration_tag:
 		*action = APP_CMD_ACTION_ENTER_CALIBRATION;
 		resp->which_body = Response_ack_tag;

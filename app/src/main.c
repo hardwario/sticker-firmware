@@ -160,6 +160,15 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 				app_config()->calibration = true;
 				app_settings_save(true);
 				break;
+			case APP_CMD_ACTION_LRW_RESET:
+				/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). */
+				app_lrw_reset_nvm();
+				sys_reboot(SYS_REBOOT_COLD);
+				break;
+			case APP_CMD_ACTION_LRW_JOIN:
+				/* Force a (re)join now, no reboot (#109). */
+				app_lrw_join();
+				break;
 			default:
 				break;
 			}
