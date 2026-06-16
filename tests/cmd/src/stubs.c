@@ -33,6 +33,13 @@ int app_clock_get_unix(uint32_t *unix_s)
 	return 0;
 }
 
+int app_clock_set_unix(uint32_t unix_s)
+{
+	test_clock_unix = unix_s;
+	test_clock_has = true;
+	return 0;
+}
+
 void app_clock_force_resync(void)
 {
 }
