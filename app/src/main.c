@@ -16,6 +16,7 @@
 #include "app_lrw.h"
 #include "app_nfc.h"
 #include "app_power.h"
+#include "app_report.h"
 #include "app_sensor.h"
 #include "app_settings.h"
 #include "app_wdog.h"
@@ -318,6 +319,15 @@ int main(void)
 		LOG_ERR_CALL_FAILED_INT("app_lrw_init", ret);
 		die();
 	}
+
+	/* Report orchestration (#126): owns the interval_report cadence and hands
+	 * telemetry frames to app_lrw. Register before the join so the link-ready
+	 * kick is wired when on_join_success fires. */
+	ret = app_report_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_report_init", ret);
+		die();
+	}
 #endif /* defined(CONFIG_LORAWAN) */
 
 	ret = app_battery_init();
@@ -463,7 +473,7 @@ static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 
 static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 {
-	app_lrw_send();
+	app_report_trigger();
 
 	shell_print(shell, "command succeeded");
 

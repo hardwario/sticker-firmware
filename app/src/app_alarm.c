@@ -10,6 +10,7 @@
 #include "app_config.h"
 #include "app_log.h"
 #include "app_lrw.h"
+#include "app_report.h"
 #include "app_sensor.h"
 
 #if defined(__has_include) && __has_include("app_clock.h")
@@ -115,7 +116,7 @@ static void alarm_lrw_send(void)
 		return;
 	}
 	m_last_alarm_send_ms = now;
-	app_lrw_send();
+	app_report_trigger();
 #endif
 }
 

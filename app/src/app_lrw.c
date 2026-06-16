@@ -13,7 +13,6 @@
 #include "app_history.h"
 #include "app_log.h"
 #include "app_lrw.h"
-#include "app_sensor.h"
 #include "app_settings.h"
 
 /* Zephyr includes */
@@ -53,11 +52,17 @@ LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
  * action of the old state and the entry action of the new state (counter
  * resets, timer start/stop) in one place.
  *
- * Three independent timers, each with a single meaning (no more inferring a
+ * Two independent timers, each with a single meaning (no more inferring a
  * timer's purpose from the current state):
- *   - m_send_timer        : periodic report cadence
  *   - m_lc_timeout_timer  : link-check response timeout only
  *   - m_rejoin_timer      : rejoin backoff only
+ *
+ * The periodic report cadence lives in app_report (#126): it samples, captures
+ * history and triggers app_lrw_send_telemetry(). app_lrw stays transport — it
+ * composes the snapshot (app_compose), splits it into DR-budget frames, sends
+ * them with the LinkCheckReq piggyback + duty-cycle retry, drains the
+ * response/alarm queues and streams a history replay. On a link-ready edge (join
+ * success / replay finish) app_lrw kicks app_report via the registered callback.
  */
 
 /* Link check configuration constants.
@@ -80,19 +85,18 @@ static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
 static struct k_work_q m_work_q;
 
 /* --- Timers (each one meaning only) --- */
-static struct k_timer m_send_timer;
 static struct k_timer m_lc_timeout_timer;
 static struct k_timer m_rejoin_timer;
 
 /* --- Works --- */
-static struct k_work m_send_work;
+static struct k_work m_send_work;            /* drains response/alarm, then composes telemetry */
 static struct k_work_delayable m_frame_work; /* multi-frame snapshot continuation */
 static struct k_work m_join_work;
 static struct k_work m_link_check_work;       /* LC timeout (from m_lc_timeout_timer) */
 static struct k_work m_downlink_success_work; /* deferred from downlink_callback */
 static struct k_work m_lc_response_work;      /* deferred from link_check_callback */
-static struct k_work m_send_with_lc_work;
-static struct k_work m_dl_request_work; /* drains m_dl_msgq (port-85 commands) */
+static struct k_work m_force_lc_work;         /* arm a forced LC on the next telemetry */
+static struct k_work m_dl_request_work;       /* drains m_dl_msgq (port-85 commands) */
 static struct k_work_delayable m_post_cmd_work;
 static struct k_work_delayable m_join_complete_work;
 static struct k_work_delayable m_hist_work;
@@ -185,6 +189,10 @@ static enum app_cmd_action m_post_cmd_action;
  * (with the synced unix_time) instead of the command acking immediately. */
 static bool m_clock_sync_info_pending;
 
+/* Kicked on a link-ready edge (join success / history-replay finish) so
+ * app_report can resume the report cadence with an immediate uplink. */
+static void (*m_ready_cb)(void);
+
 /* Forward declarations */
 static void on_join_success(void);
 static void on_join_failure(void);
@@ -194,7 +202,14 @@ static void on_lc_timeout(void);
 static void on_downlink_received(void);
 static void state_transition(enum app_lrw_state new_state);
 static bool should_request_link_check(void);
-static void send_with_lc_work_handler(struct k_work *work);
+static void force_lc_work_handler(struct k_work *work);
+
+static void fire_ready_cb(void)
+{
+	if (m_ready_cb) {
+		m_ready_cb();
+	}
+}
 
 static uint32_t calculate_rejoin_backoff(int attempt)
 {
@@ -277,15 +292,16 @@ static void state_transition(enum app_lrw_state new_state)
 	switch (new_state) {
 	case APP_LRW_STATE_IDLE:
 	case APP_LRW_STATE_DISABLED:
-		/* Radio-silent: no periodic report, no link-check, no rejoin. */
-		k_timer_stop(&m_send_timer);
+		/* Radio-silent: no link-check, no rejoin. (The report cadence is
+		 * app_report's; it self-pauses while not app_lrw_is_ready().) */
 		k_timer_stop(&m_lc_timeout_timer);
 		k_timer_stop(&m_rejoin_timer);
 		break;
 
 	case APP_LRW_STATE_JOINING:
-		k_timer_stop(&m_send_timer);
-		m_hist_active = false; /* drop any in-flight history replay across (re)join */
+		/* Drop any in-flight history replay across (re)join. */
+		m_hist_active = false;
+		app_history_set_replay_active(false);
 		break;
 
 	case APP_LRW_STATE_HEALTHY:
@@ -350,8 +366,11 @@ static void on_join_success(void)
 		LOG_WRN("app_cmd_build_info failed; skipping GetInfo-on-join");
 	}
 
-	/* Send first message immediately after join (with LC). */
-	k_work_submit_to_queue(&m_work_q, &m_send_work);
+	/* Kick app_report to start the report cadence with an immediate uplink (its
+	 * cycle samples, captures and triggers app_lrw_send_telemetry; the first
+	 * telemetry frame carries LC, msg #1). The queued GetInfo above drains first
+	 * via m_send_work. */
+	fire_ready_cb();
 }
 
 static void on_join_failure(void)
@@ -794,8 +813,8 @@ static void tx_telemetry_frame(bool first_frame)
 			return;
 		}
 		if (m_frame_len == 0) {
-			k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report),
-				      K_FOREVER);
+			/* Nothing to report (e.g. all sensors NaN pre-sample); app_report
+			 * owns the cadence, so just return. */
 			return;
 		}
 		m_frame_first = first_frame;
@@ -838,12 +857,8 @@ static void tx_telemetry_frame(bool first_frame)
 	if (m_frame_more) {
 		k_work_schedule_for_queue(&m_work_q, &m_frame_work, K_SECONDS(FRAME_GAP_SEC));
 	} else {
-		int timeout = g_app_config.interval_report;
-#if defined(CONFIG_ENTROPY_GENERATOR)
-		timeout += (int32_t)sys_rand32_get() % (g_app_config.interval_report / 10);
-#endif
-		LOG_INF("Snapshot complete; next report in %d s", timeout);
-		k_timer_start(&m_send_timer, K_SECONDS(timeout), K_FOREVER);
+		/* Snapshot complete; app_report's timer schedules the next report. */
+		LOG_INF("Snapshot complete");
 	}
 }
 
@@ -917,18 +932,16 @@ static void send_work_handler(struct k_work *work)
 
 	struct lrw_tx_msg tx;
 
-	/* Priority drain: command response (port 85) first, then alarm (port 3).
-	 * One TX per call; if more are queued, re-submit. The periodic timer is
-	 * only (re)started when nothing is queued AND no history replay owns it. */
+	/* Priority drain: command response (port 85) first, then alarm (port 3). One
+	 * TX per call; if more are queued, re-submit. A drain never falls through to
+	 * telemetry — telemetry is composed only when this handler runs with both
+	 * queues already empty (i.e. when app_report triggered the send). */
 	if (k_msgq_get(&m_response_msgq, &tx, K_NO_WAIT) == 0) {
 		if (!tx_send_queued(&m_response_msgq, &tx, tx.port)) {
 			return; /* requeued; a backoff retry is scheduled */
 		}
 		if (k_msgq_num_used_get(&m_response_msgq) || k_msgq_num_used_get(&m_alarm_msgq)) {
 			k_work_submit_to_queue(&m_work_q, &m_send_work);
-		} else if (!m_hist_active) {
-			k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report),
-				      K_FOREVER);
 		}
 		return;
 	}
@@ -939,23 +952,17 @@ static void send_work_handler(struct k_work *work)
 		}
 		if (k_msgq_num_used_get(&m_alarm_msgq)) {
 			k_work_submit_to_queue(&m_work_q, &m_send_work);
-		} else if (!m_hist_active) {
-			k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report),
-				      K_FOREVER);
 		}
 		return;
 	}
 
-	/* MED-9: history replay owns the send cadence; don't inject telemetry. */
+	/* MED-9: history replay owns the radio; don't inject telemetry. */
 	if (m_hist_active) {
 		return;
 	}
 
-	if (!g_app_config.interval_sample) {
-		app_sensor_sample();
-	}
-	app_history_capture();
-
+	/* Both queues empty: compose + split the telemetry snapshot built from the
+	 * sensor data app_report just sampled/captured. */
 	m_frame_resend = false; /* start a new snapshot */
 	tx_telemetry_frame(true);
 }
@@ -979,7 +986,9 @@ static size_t history_frame_cap(void)
 static void history_replay_finish(void)
 {
 	m_hist_active = false;
-	k_timer_start(&m_send_timer, K_SECONDS(g_app_config.interval_report), K_FOREVER);
+	app_history_set_replay_active(false);
+	/* Hand the report cadence back to app_report with an immediate uplink. */
+	fire_ready_cb();
 }
 
 static void m_hist_work_handler(struct k_work *work)
@@ -1087,8 +1096,8 @@ bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 	m_hist_cursor = 0;
 	m_hist_retries = 0;
 	m_hist_active = true;
+	app_history_set_replay_active(true); /* pause capture; app_report telemetry self-skips */
 
-	k_timer_stop(&m_send_timer); /* replay owns the cadence */
 	LOG_INF("History replay start: %u frames (window %u..%u)", (unsigned)n, from_unix, to_unix);
 	k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_NO_WAIT);
 	return true;
@@ -1097,12 +1106,6 @@ bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 /* ======================================================================== */
 /* Timer ISR handlers (thin: enqueue the right work, no state decisions)    */
 /* ======================================================================== */
-
-static void send_timer_handler(struct k_timer *timer)
-{
-	ARG_UNUSED(timer);
-	k_work_submit_to_queue(&m_work_q, &m_send_work);
-}
 
 static void lc_timeout_timer_handler(struct k_timer *timer)
 {
@@ -1273,8 +1276,8 @@ void app_lrw_suspend(void)
 	/* Stop every LRW timer so nothing re-arms the radio after this point; the
 	 * caller is about to power the MCU off (deep sleep). Pending works on
 	 * m_work_q are simply abandoned — they cannot run once the system is shut
-	 * down, and wake is a clean boot. */
-	k_timer_stop(&m_send_timer);
+	 * down, and wake is a clean boot. (The report-cadence timer lives in
+	 * app_report now; app_power_suspend stops it via app_report_suspend.) */
 	k_timer_stop(&m_lc_timeout_timer);
 	k_timer_stop(&m_rejoin_timer);
 }
@@ -1351,7 +1354,7 @@ int app_lrw_init(void)
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
 	k_work_init(&m_lc_response_work, lc_response_work_handler);
-	k_work_init(&m_send_with_lc_work, send_with_lc_work_handler);
+	k_work_init(&m_force_lc_work, force_lc_work_handler);
 	k_work_init(&m_dl_request_work, dl_request_work_handler);
 	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
@@ -1360,7 +1363,6 @@ int app_lrw_init(void)
 	k_work_init(&m_dbg_lc_work, dbg_lc_work_handler);
 #endif
 
-	k_timer_init(&m_send_timer, send_timer_handler, NULL);
 	k_timer_init(&m_lc_timeout_timer, lc_timeout_timer_handler, NULL);
 	k_timer_init(&m_rejoin_timer, rejoin_timer_handler, NULL);
 
@@ -1375,39 +1377,30 @@ void app_lrw_join(void)
 	k_work_submit_to_queue(&m_work_q, &m_join_work);
 }
 
-void app_lrw_send(void)
+void app_lrw_send_telemetry(void)
 {
+	/* Compose + split + send a telemetry snapshot from the current sensor data.
+	 * Runs on m_work_q; send_work_handler drains response/alarm first, then falls
+	 * through to the telemetry compose when both queues are empty. */
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
 }
 
-static void send_with_lc_work_handler(struct k_work *work)
+void app_lrw_register_ready_cb(void (*cb)(void))
+{
+	m_ready_cb = cb;
+}
+
+/* Arm a forced LinkCheckReq on the next telemetry first-frame (shell/test path;
+ * pair with app_report_trigger() to actually emit the uplink). */
+static void force_lc_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-
-	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
-
-	if (state != APP_LRW_STATE_HEALTHY && state != APP_LRW_STATE_WARNING) {
-		LOG_WRN("Cannot send with link check in %s", state_name(state));
-		return;
-	}
-
-	int ret = lorawan_request_link_check(false);
-
-	if (ret) {
-		LOG_ERR("Link check request failed: %d", ret);
-		m_force_lc_remaining = 1; /* retry LC on the next message */
-	} else {
-		m_link_check_pending = true;
-		k_timer_start(&m_lc_timeout_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC), K_FOREVER);
-		LOG_INF("Link check requested, timeout in %d s", LINK_CHECK_TIMEOUT_SEC);
-	}
-
-	k_work_submit_to_queue(&m_work_q, &m_send_work);
+	m_force_lc_remaining = 1;
 }
 
-void app_lrw_send_with_link_check(void)
+void app_lrw_force_link_check(void)
 {
-	k_work_submit_to_queue(&m_work_q, &m_send_with_lc_work);
+	k_work_submit_to_queue(&m_work_q, &m_force_lc_work);
 }
 
 enum app_lrw_state app_lrw_get_state(void)

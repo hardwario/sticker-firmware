@@ -10,6 +10,7 @@
 #include "app_sensor.h"
 #if defined(CONFIG_LORAWAN)
 #include "app_lrw.h"
+#include "app_report.h"
 #endif
 
 #include <zephyr/kernel.h>
@@ -35,6 +36,7 @@ void app_power_suspend(void)
 	LOG_WRN("Entering deep sleep (Shutdown) — wake via NRST / power-cycle");
 
 #if defined(CONFIG_LORAWAN)
+	app_report_suspend(); /* stop the report cadence before the radio teardown */
 	app_lrw_suspend();
 #endif
 	app_sensor_suspend();

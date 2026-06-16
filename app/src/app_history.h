@@ -58,8 +58,13 @@ struct app_history_record {
 int app_history_init(void);
 
 /* Capture one record from the current g_app_sensor_data (called once per
- * interval_report). No-op when history is disabled. */
+ * interval_report). No-op when history is disabled or while a replay is active. */
 void app_history_capture(void);
+
+/* Pause/resume history capture while a LoRaWAN replay is streaming records back
+ * (#126). app_lrw sets it true at replay start and false at finish; capture
+ * self-skips in between so the buffer it is replaying can't shift underneath it. */
+void app_history_set_replay_active(bool active);
 
 /* Fix up the buffer base time once the wall-clock becomes available, so all
  * stored records gain correct absolute timestamps. Idempotent. */

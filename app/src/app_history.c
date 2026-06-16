@@ -110,8 +110,9 @@ static uint16_t m_start; /* index of oldest record */
 static uint16_t m_count;
 static uint32_t m_base_time; /* oldest record's time: uptime-s unsynced, unix synced */
 static bool m_base_synced;
-static uint32_t m_interval; /* interval_report (s) the buffer was recorded at; records
-			     * are periodic so per-record time = base + ord*interval */
+static uint32_t m_interval;  /* interval_report (s) the buffer was recorded at; records
+			      * are periodic so per-record time = base + ord*interval */
+static bool m_replay_active; /* true while app_lrw streams a replay (capture self-skips, #126) */
 
 static bool cap_on(size_t cap_off)
 {
@@ -414,9 +415,20 @@ static void decode_record(const uint8_t *rec, struct app_history_record *out)
 
 /* ---- Public API --------------------------------------------------------- */
 
+void app_history_set_replay_active(bool active)
+{
+	m_replay_active = active;
+}
+
 void app_history_capture(void)
 {
 	if (!m_enabled || m_sample_size == 0 || m_capacity == 0) {
+		return;
+	}
+
+	/* A replay is streaming the buffer back; don't mutate it underneath. */
+	if (m_replay_active) {
+		LOG_DBG("history capture skipped: replay active");
 		return;
 	}
 
