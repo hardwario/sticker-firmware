@@ -5,6 +5,7 @@
  */
 
 #include "app_accel.h"
+#include "app_log.h"
 #include "app_ds18b20.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -410,7 +411,8 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 		switch (kind) {
 		case SVAL_FLOAT:
 			if (cf != pf) {
-				shell_print(shell, SHELL_PFX " %s: %.2f", sensor_name, (double)cf);
+				shell_print(shell, SHELL_PFX " %s: %s%d.%02d", sensor_name,
+					    APP_FP2(cf));
 				pf = cf;
 			}
 			break;
@@ -450,7 +452,7 @@ static void print_float(const struct shell *shell, const char *label, float v, c
 	if (isnan(v)) {
 		shell_print(shell, "  %-16s nan", label);
 	} else {
-		shell_print(shell, "  %-16s %.2f %s", label, (double)v, unit);
+		shell_print(shell, "  %-16s %s%d.%02d %s", label, APP_FP2(v), unit);
 	}
 }
 
@@ -478,8 +480,8 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 		int ori = d->orientation;
 		(void)app_accel_read(&ax, &ay, &az, &ori);
 		shell_print(shell, "  %-16s %d", "orientation:", ori);
-		shell_print(shell, "  %-16s x=%.2f y=%.2f z=%.2f m/s^2", "accel:", (double)ax,
-			    (double)ay, (double)az);
+		shell_print(shell, "  %-16s x=%s%d.%02d y=%s%d.%02d z=%s%d.%02d m/s^2",
+			    "accel:", APP_FP2(ax), APP_FP2(ay), APP_FP2(az));
 	} else {
 		shell_print(shell, "  %-16s nan", "orientation:");
 		shell_print(shell, "  %-16s nan", "accel:");
@@ -513,9 +515,9 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 		print_float(shell, "illuminance:", s->illuminance, "lux");
 		print_float(shell, "magnetic-field:", s->magnetic_field, "mT");
 		if (!isnan(s->accel_x) || !isnan(s->accel_y) || !isnan(s->accel_z)) {
-			shell_print(shell, "  %-16s x=%.2f y=%.2f z=%.2f m/s^2",
-				    "accel:", (double)s->accel_x, (double)s->accel_y,
-				    (double)s->accel_z);
+			shell_print(shell, "  %-16s x=%s%d.%02d y=%s%d.%02d z=%s%d.%02d m/s^2",
+				    "accel:", APP_FP2(s->accel_x), APP_FP2(s->accel_y),
+				    APP_FP2(s->accel_z));
 		}
 		shell_print(shell, "  %-16s %s",
 			    "tilt-alert:", s->is_tilt_alert ? "true" : "false");

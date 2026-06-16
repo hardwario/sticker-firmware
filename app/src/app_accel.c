@@ -119,9 +119,9 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 	float accel_y_ = sensor_value_to_float(&val[1]);
 	float accel_z_ = sensor_value_to_float(&val[2]);
 
-	LOG_DBG("Acceleration X: %.3f m/s^2", (double)accel_x_);
-	LOG_DBG("Acceleration Y: %.3f m/s^2", (double)accel_y_);
-	LOG_DBG("Acceleration Z: %.3f m/s^2", (double)accel_z_);
+	LOG_DBG("Acceleration X: %s%d.%03d m/s^2", APP_FP3(accel_x_));
+	LOG_DBG("Acceleration Y: %s%d.%03d m/s^2", APP_FP3(accel_y_));
+	LOG_DBG("Acceleration Z: %s%d.%03d m/s^2", APP_FP3(accel_z_));
 
 	if (accel_x != NULL) {
 		*accel_x = accel_x_;

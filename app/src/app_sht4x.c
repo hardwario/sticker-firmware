@@ -66,7 +66,7 @@ int app_sht4x_read(float *temperature, float *humidity)
 
 	float temperature_ = sensor_value_to_float(&val);
 
-	LOG_DBG("Temperature: %.2f C", (double)temperature_);
+	LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(temperature_));
 
 	if (temperature) {
 		*temperature = temperature_;
@@ -80,7 +80,7 @@ int app_sht4x_read(float *temperature, float *humidity)
 
 	float humidity_ = sensor_value_to_float(&val);
 
-	LOG_DBG("Humidity: %.1f %%", (double)humidity_);
+	LOG_DBG("Humidity: %s%d.%01d %%", APP_FP1(humidity_));
 
 	if (humidity) {
 		*humidity = humidity_;
