@@ -35,7 +35,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `factory_reset` | Reset config to defaults but **keep device identity + LoRaWAN keys** (stays provisioned/connected); clears dynamic alarm rules; **reboots** | `ack` |
 | `force_send` | Send a telemetry report immediately | **none** — the report itself is the reply |
 | `reset_counters` | Clear selected hall/input counters | `ack` |
-| `clock_sync` | Request a network time sync | **`info`, deferred** — sent once the network time lands (carries the synced `unix_time`) |
+| `clock_sync` | Sync the wall-clock. **Empty** (LoRaWAN): request a network time sync. **With `unix_time`** (NFC): set the RTC directly from the phone's clock (UTC seconds) | LoRaWAN: **`info`, deferred** — sent once the network time lands. NFC: **`info`** immediately — carries the new `unix_time` |
 | `req_history` | Replay stored history for a time window | `history_frame` (multiple) |
 | `w1_scan` | Enumerate the 1-Wire bus; returns the discovered ROMs so you can teach a slot via `set_param sensorN_rom` | `w1_scan` |
 | `alarm_rule` | Set / clear a dynamic alarm rule in a `slot`, or clear-all (SET/CLEAR require `slot`; the slot index is the rule's stable identity) | `ack` |
@@ -45,7 +45,9 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 >
 > **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `clock_sync`, `req_history`, `w1_scan`) do **not** also send an `ack`, to save an uplink.
 >
-> **LoRaWAN-only commands:** `force_send`, `clock_sync` and `req_history` answer only via an uplink, so they are rejected (`NOT_READY` "lrw only") if sent over NFC.
+> **LoRaWAN-only commands:** `force_send` and `req_history` answer only via an uplink, so they are rejected (`NOT_READY` "lrw only") if sent over NFC.
+>
+> **Setting the clock over NFC:** `clock_sync` with a `unix_time` field sets the RTC directly from a phone, bootstrapping wall-clock time before/without a network (epoch sanity-bounded to 2024-01-01 … 2100-01-01; out-of-range → `BAD_REQUEST` "bad epoch"). A later network `DeviceTimeReq`/`DeviceTimeAns` stays authoritative and may refine it. Empty `clock_sync` over NFC just confirms (no network to query).
 
 **Ready-to-use hex downlinks (fPort 85):**
 
@@ -196,7 +198,7 @@ The same message is returned on demand by the `get_info` command.
 
 ## 5. Real-time clock (NEW)
 
-The device now keeps wall-clock time, synchronised from the network via LoRaWAN `DeviceTimeReq` (requested automatically on join). It timestamps history records and alarm events.
+The device now keeps wall-clock time, synchronised from the network via LoRaWAN `DeviceTimeReq` (requested automatically on join). It timestamps history records and alarm events. A phone can also bootstrap the time over NFC (`clock_sync` with `unix_time`, §1) before/without a network — the network sync stays authoritative once joined.
 
 New `clock` shell command:
 
