@@ -477,6 +477,7 @@ static size_t build_info_ndef(uint8_t *out, size_t out_size)
 	return build_ndef_record(out, out_size, NDEF_INFO_TYPE, payload, sizeof(payload));
 }
 
+#ifdef CONFIG_APP_NFC_ENCRYPTION
 static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size, size_t *out_len)
 {
 	int res = 0;
@@ -555,6 +556,75 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 	return res;
 }
 
+/* Encrypt `in_len` plaintext bytes into the response wire format:
+ * [serial(4)][nonce_counter(4)][AES-CCM ciphertext + 16 B tag]. The nonce
+ * reuses the request's `nonce_counter` (per protocol — request and response
+ * share the (key, nonce) pair); the phone already knows it, so it can decrypt
+ * the reply. Returns the wire length in *out_len, or a negative errno. */
+static int encrypt(const uint8_t *in, size_t in_len, uint32_t nonce_counter, uint8_t *out,
+		   size_t out_size, size_t *out_len)
+{
+	int res = 0;
+
+	/* 8 B header + ciphertext (== plaintext) + 16 B CCM tag. */
+	if (out_size < 8 + in_len + 16) {
+		LOG_ERR("Buffer too short for encryption: need %zu, have %zu", 8 + in_len + 16,
+			out_size);
+		return -ENOMEM;
+	}
+
+	sys_put_be32(g_app_config.serial_number, &out[0]);
+	sys_put_be32(nonce_counter, &out[4]);
+
+	psa_status_t status;
+	psa_status_t destroy_status;
+
+	status = psa_crypto_init();
+	if (status != PSA_SUCCESS) {
+		LOG_ERR_CALL_FAILED_INT("psa_crypto_init", status);
+		return -EIO;
+	}
+
+	psa_key_attributes_t key_attributes = PSA_KEY_ATTRIBUTES_INIT;
+	psa_set_key_usage_flags(&key_attributes, PSA_KEY_USAGE_ENCRYPT);
+	psa_set_key_algorithm(&key_attributes, PSA_ALG_CCM);
+	psa_set_key_type(&key_attributes, PSA_KEY_TYPE_AES);
+	psa_set_key_bits(&key_attributes, PSA_BYTES_TO_BITS(sizeof(g_app_config.secret_key)));
+
+	psa_key_id_t key_id;
+	status = psa_import_key(&key_attributes, g_app_config.secret_key,
+				sizeof(g_app_config.secret_key), &key_id);
+	if (status != PSA_SUCCESS) {
+		LOG_ERR_CALL_FAILED_INT("psa_import_key", status);
+		return -EIO;
+	}
+
+	psa_reset_key_attributes(&key_attributes);
+
+	size_t ct_len = 0;
+	status = psa_aead_encrypt(key_id, PSA_ALG_CCM, &out[0], 8, NULL, 0, in, in_len, &out[8],
+				  out_size - 8, &ct_len);
+
+	destroy_status = psa_destroy_key(key_id);
+
+	if (status != PSA_SUCCESS) {
+		LOG_ERR_CALL_FAILED_INT("psa_aead_encrypt", status);
+		res = -EIO;
+	}
+
+	if (destroy_status != PSA_SUCCESS) {
+		LOG_ERR_CALL_FAILED_INT("psa_destroy_key", destroy_status);
+		res = -EIO;
+	}
+
+	if (!res) {
+		*out_len = 8 + ct_len;
+	}
+
+	return res;
+}
+#endif /* CONFIG_APP_NFC_ENCRYPTION */
+
 static int parser_callback(const struct app_ndef_parser_record_info *record_info, void *user_data)
 {
 	int ret;
@@ -566,8 +636,10 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 		return 0;
 	}
 
-	/* Command record: hand the raw protobuf Command to app_cmd and stage the
-	 * response for nfc_check_locked to write back to the tag. */
+	/* Command record: run the protobuf Command through app_cmd and stage the
+	 * response for nfc_check_locked to write back to the tag. With encryption on
+	 * (default) the record is decrypted first and the reply encrypted back;
+	 * without it (validation build) both are plaintext. */
 	size_t cmd_type_len = strlen(NDEF_COMMAND_TYPE);
 	if (record_info->type_len == cmd_type_len &&
 	    strncmp((const char *)record_info->type, NDEF_COMMAND_TYPE, cmd_type_len) == 0) {
@@ -577,6 +649,48 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 			       record_info->payload_len);
 
 		enum app_cmd_action cmd_action = APP_CMD_ACTION_NONE;
+#ifdef CONFIG_APP_NFC_ENCRYPTION
+		/* Encrypted channel: decrypt the command, run it, then encrypt the
+		 * reply. The response reuses the request's nonce counter (set into
+		 * g_app_config.nonce_counter by decrypt()). */
+		static uint8_t cmd_plain[256];
+		static uint8_t resp_plain[256];
+		size_t cmd_len = 0;
+		ret = decrypt(record_info->payload, record_info->payload_len, cmd_plain,
+			      sizeof(cmd_plain), &cmd_len);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("decrypt", ret);
+			NFC_REPORT("  -> command decrypt failed: %d (rejected)", ret);
+			m_resp_len = 0;
+			return ret;
+		}
+		uint32_t req_nonce = g_app_config.nonce_counter;
+
+		size_t resp_len = 0;
+		ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, cmd_plain, cmd_len, resp_plain,
+				     sizeof(resp_plain), &resp_len, &cmd_action);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
+			NFC_REPORT("  -> app_cmd_handle failed: %d", ret);
+			m_resp_len = 0;
+			return ret;
+		}
+
+		if (resp_len > 0) {
+			ret = encrypt(resp_plain, resp_len, req_nonce, m_resp_buf,
+				      sizeof(m_resp_buf), &m_resp_len);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("encrypt", ret);
+				NFC_REPORT("  -> response encrypt failed: %d", ret);
+				m_resp_len = 0;
+				return ret;
+			}
+		} else {
+			m_resp_len = 0;
+		}
+#else
+		/* Plaintext channel (validation build): hand the raw protobuf Command
+		 * to app_cmd and stage the plaintext response. */
 		ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, record_info->payload,
 				     record_info->payload_len, m_resp_buf, sizeof(m_resp_buf),
 				     &m_resp_len, &cmd_action);
@@ -586,6 +700,7 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 			m_resp_len = 0;
 			return ret;
 		}
+#endif /* CONFIG_APP_NFC_ENCRYPTION */
 
 		m_have_resp = (m_resp_len > 0);
 		m_cmd_action = cmd_action;
@@ -615,8 +730,11 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 	}
 
 	LOG_INF("Found supported MIME record - length: %u byte(s)", record_info->payload_len);
-	NFC_REPORT("NFC read: config record (%u B encrypted)", record_info->payload_len);
 
+	const uint8_t *cfg_data;
+	size_t cfg_len;
+#ifdef CONFIG_APP_NFC_ENCRYPTION
+	NFC_REPORT("NFC read: config record (%u B encrypted)", record_info->payload_len);
 	static uint8_t buf[448];
 	size_t len;
 	ret = decrypt(record_info->payload, record_info->payload_len, buf, sizeof(buf), &len);
@@ -625,8 +743,17 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 		NFC_REPORT("  -> decrypt failed: %d (rejected, tag left untouched)", ret);
 		return ret;
 	}
+	cfg_data = buf;
+	cfg_len = len;
+#else
+	/* Plaintext channel (validation build): the record is a bare AppConfigMessage
+	 * protobuf — no secret key, serial check or nonce anti-replay. */
+	NFC_REPORT("NFC read: config record (%u B plaintext)", record_info->payload_len);
+	cfg_data = record_info->payload;
+	cfg_len = record_info->payload_len;
+#endif /* CONFIG_APP_NFC_ENCRYPTION */
 
-	pb_istream_t stream = pb_istream_from_buffer(buf, len);
+	pb_istream_t stream = pb_istream_from_buffer(cfg_data, cfg_len);
 	AppConfigMessage message = AppConfigMessage_init_zero;
 	if (!pb_decode(&stream, AppConfigMessage_fields, &message)) {
 
@@ -659,6 +786,14 @@ static bool is_buffer_zero(const void *buf, size_t len)
 int app_nfc_init(void)
 {
 	int ret;
+
+#ifndef CONFIG_APP_NFC_ENCRYPTION
+	LOG_WRN("============================================================");
+	LOG_WRN("== NFC ENCRYPTION DISABLED - VALIDATION BUILD ONLY        ==");
+	LOG_WRN("== Command & config records are accepted in PLAINTEXT.    ==");
+	LOG_WRN("== Do NOT ship this build.                                ==");
+	LOG_WRN("============================================================");
+#endif
 
 	if (!gpio_is_ready_dt(&m_lpd)) {
 		LOG_ERR("GPIO device not ready (LPD)");
