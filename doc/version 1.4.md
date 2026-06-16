@@ -340,6 +340,17 @@ A phone's Web NFC reader sees each as `record.recordType === "hio.stck:…"`.
 
 ---
 
+## Debug auto-suspend / deep sleep (NEW)
+
+The **Debug** build runs with `CONFIG_PM=n` (the CPU never sleeps) so SWD/RTT stay reachable — but that means a debug unit forgotten on the bench drains its battery. To avoid that, the Debug firmware now **auto-suspends after an idle timeout**.
+
+- **Idle timeout** — `CONFIG_APP_DEBUG_AUTOSUSPEND_S` (default **3600 s** = 1 h). After this long with no **RTT/shell interaction**, the device enters deep sleep. Any shell input resets the timer. Set to `0` to disable. Debug-only (no effect on the Release build, which already sleeps via PM).
+- **Deep sleep** = STM32WL **Shutdown** (`sys_poweroff()`): lowest practical quiescent current, all peripherals off. Before powering down it stops the LoRaWAN TX/join timers and the sensor sample timer and turns the LEDs off.
+- **Wake** = **NRST / power-cycle** only — a clean boot. NVS identity and LoRaWAN keys live in flash and survive; the RAM state and RTC wall-clock are lost and re-established on boot (time re-syncs from the network). (NFC-field / wakeup-pin wake is a possible future addition, not in this version.)
+- **On demand** — a `power suspend` shell command enters deep sleep immediately (bench/test hook). On-demand suspend over LoRaWAN/NFC is not wired yet.
+
+---
+
 ## 11. Footprint & build notes (internal)
 
 Not user-facing, but worth recording: v1.4.0 grew enough that the debug image RAM/flash budgets got tight, so two footprint optimizations landed.
