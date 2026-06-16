@@ -11,6 +11,7 @@
 #include "app_input.h"
 #include "app_log.h"
 #include "app_lrw.h"
+#include "app_report.h"
 #include "app_config_ingest.h"
 
 /* Wall-clock source (PR #41, branch lrw-rtc-time). Until that lands on this
@@ -348,7 +349,7 @@ static void app_cmd_handle_force_send(enum app_cmd_transport tp, const Command *
 	ARG_UNUSED(resp);
 	ARG_UNUSED(action);
 #if defined(CONFIG_LORAWAN)
-	app_lrw_send();
+	app_report_trigger();
 #endif
 	/* No ack — the triggered telemetry uplink IS the answer; an extra ack
 	 * would just cost a second uplink. Leave which_body == 0 (emit nothing). */

@@ -11,6 +11,7 @@
 #include "app_input.h"
 #include "app_led.h"
 #include "app_lrw.h"
+#include "app_report.h"
 #include "app_machine_probe.h"
 #include "app_sensor.h"
 #include "app_sht4x.h"
@@ -575,7 +576,8 @@ static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 
 static int cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 {
-	app_lrw_send_with_link_check();
+	app_lrw_force_link_check();
+	app_report_trigger();
 	shell_print(shell, "Sending data with link check request");
 	return 0;
 }
