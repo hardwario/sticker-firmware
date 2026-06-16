@@ -152,6 +152,14 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 			case APP_CMD_ACTION_FACTORY_RESET:
 				app_settings_reset();
 				break;
+			case APP_CMD_ACTION_ENTER_CALIBRATION:
+				/* Persist calibration=true + reboot; next boot enters
+				 * calibration mode (app_calibration_init() clears it).
+				 * Write the staging config (settings_save persists that,
+				 * not the boot-time g_app_config copy). */
+				app_config()->calibration = true;
+				app_settings_save(true);
+				break;
 			default:
 				break;
 			}

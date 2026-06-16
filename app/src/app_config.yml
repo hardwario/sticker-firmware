@@ -141,6 +141,8 @@ commands:
     - {name: req_history,    proto_id: 11, body: ReqHistory,    kind: handler, response: none, transports: [lrw]}
     - {name: clock_sync,     proto_id: 12, body: ClockSync,     kind: handler, response: info_deferred, transports: [lrw, nfc]}
     - {name: w1_scan,        proto_id: 14, body: W1Scan,        kind: handler, response: w1_scan}
+    - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: action, action: ENTER_CALIBRATION, response: ack, transports: [lrw, nfc]}
+
 parameters:
   - name: secret_key
     proto_group: root

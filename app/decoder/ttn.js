@@ -135,6 +135,7 @@ var _CMD_NAMES = {
   11: "req_history",
   12: "clock_sync",
   14: "w1_scan",
+  18: "enter_calibration",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);

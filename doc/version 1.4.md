@@ -40,6 +40,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `w1_scan` | Enumerate the 1-Wire bus; returns the discovered ROMs so you can teach a slot via `set_param sensorN_rom` | `w1_scan` |
 | `alarm_rule` | Set / clear a dynamic alarm rule in a `slot`, or clear-all (SET/CLEAR require `slot`; the slot index is the rule's stable identity) | `ack` |
 | `req_alarm_rules` | Read back the stored dynamic alarm rules (paged); optional `slot` filter selects one slot, or `source`+`quantity` selects every slot on that pair | `alarm_rules_dump` |
+| `enter_calibration` | Persist `calibration=true` + **reboot** into calibration mode (same end state as `set_param calibration=true` + `settings_save`); the flag is cleared on entry, so the device returns to normal after the calibration window | `ack` |
 
 > After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED), an optional `fault_field`, and a `detail` string.
 >
@@ -69,6 +70,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `req_alarm_rules` (all rules, page 0) | `08017a00` |
 | `req_alarm_rules` (slot 0 only) | `08017a022000` |
 | `req_alarm_rules` (all slots on onboard temperature) | `08017a0408001000` |
+| `enter_calibration` | `0801920100` |
 
 (The leading byte is the `seq` you chose; it is echoed in the reply.)
 

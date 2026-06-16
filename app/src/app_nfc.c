@@ -74,6 +74,8 @@ static const char *cmd_action_str(enum app_cmd_action a)
 		return "reboot";
 	case APP_CMD_ACTION_FACTORY_RESET:
 		return "factory-reset";
+	case APP_CMD_ACTION_ENTER_CALIBRATION:
+		return "enter-calibration";
 	default:
 		return "?";
 	}

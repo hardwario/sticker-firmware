@@ -608,6 +608,10 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 	case Command_w1_scan_tag:
 		app_cmd_handle_w1_scan(tp, cmd, resp, action);
 		break;
+	case Command_enter_calibration_tag:
+		*action = APP_CMD_ACTION_ENTER_CALIBRATION;
+		resp->which_body = Response_ack_tag;
+		break;
 	default:
 		LOG_WRN("Command tag %u not implemented", cmd->which_body);
 		make_error(resp, Response_Error_Code_UNKNOWN, "not implemented");
