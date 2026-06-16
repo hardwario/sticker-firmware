@@ -27,6 +27,9 @@ int app_hall_get_data(struct app_hall_data *data);
 void app_hall_reset_counts(void);
 void app_hall_reset_count(bool left, bool right);
 
+/* Seed the totalizers (used to restore persisted counts on boot). */
+void app_hall_set_counts(uint32_t left, uint32_t right);
+
 #ifdef __cplusplus
 }
 #endif

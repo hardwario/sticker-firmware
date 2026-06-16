@@ -241,3 +241,11 @@ void app_hall_reset_counts(void)
 {
 	app_hall_reset_count(true, true);
 }
+
+void app_hall_set_counts(uint32_t left, uint32_t right)
+{
+	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
+	m_hall_data.left_count = left;
+	m_hall_data.right_count = right;
+	k_mutex_unlock(&m_hall_data_mutex);
+}

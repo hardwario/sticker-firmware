@@ -27,6 +27,9 @@ int app_input_get_data(struct app_input_data *data);
 void app_input_reset_counts(void);
 void app_input_reset_count(bool input_a, bool input_b);
 
+/* Seed the totalizers (used to restore persisted counts on boot). */
+void app_input_set_counts(uint32_t input_a, uint32_t input_b);
+
 #ifdef __cplusplus
 }
 #endif

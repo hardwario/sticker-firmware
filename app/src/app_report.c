@@ -5,6 +5,7 @@
  */
 
 #include "app_config.h"
+#include "app_counters.h"
 #include "app_history.h"
 #include "app_log.h"
 #include "app_lrw.h"
@@ -49,6 +50,11 @@ static void report_work_handler(struct k_work *work)
 
 	/* Re-arm the cadence up front so a skipped cycle still keeps ticking. */
 	schedule_next_report();
+
+	/* Persist the pulse totalizers at the report cadence (dirty-flagged, no-op
+	 * when unchanged). Done before the link/calibration gates below so counters
+	 * survive a power loss even while the device is not joined. */
+	app_counters_save(false);
 
 	/* Block normal reporting during calibration mode. */
 	if (g_app_config.calibration) {
