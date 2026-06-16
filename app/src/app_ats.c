@@ -5,6 +5,7 @@
  */
 
 #include "app_accel.h"
+#include "app_log.h"
 #include "app_ds18b20.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -410,7 +411,8 @@ static void cmd_check_sensor(const struct shell *shell, size_t argc, char **argv
 		switch (kind) {
 		case SVAL_FLOAT:
 			if (cf != pf) {
-				shell_print(shell, SHELL_PFX " %s: %.2f", sensor_name, (double)cf);
+				shell_print(shell, SHELL_PFX " %s: %s%d.%02d", sensor_name,
+					    APP_FP2(cf));
 				pf = cf;
 			}
 			break;
@@ -450,7 +452,7 @@ static void print_float(const struct shell *shell, const char *label, float v, c
 	if (isnan(v)) {
 		shell_print(shell, "  %-16s nan", label);
 	} else {
-		shell_print(shell, "  %-16s %.2f %s", label, (double)v, unit);
+		shell_print(shell, "  %-16s %s%d.%02d %s", label, APP_FP2(v), unit);
 	}
 }
 
@@ -478,8 +480,8 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 		int ori = d->orientation;
 		(void)app_accel_read(&ax, &ay, &az, &ori);
 		shell_print(shell, "  %-16s %d", "orientation:", ori);
-		shell_print(shell, "  %-16s x=%.2f y=%.2f z=%.2f m/s^2", "accel:", (double)ax,
-			    (double)ay, (double)az);
+		shell_print(shell, "  %-16s x=%s%d.%02d y=%s%d.%02d z=%s%d.%02d m/s^2",
+			    "accel:", APP_FP2(ax), APP_FP2(ay), APP_FP2(az));
 	} else {
 		shell_print(shell, "  %-16s nan", "orientation:");
 		shell_print(shell, "  %-16s nan", "accel:");
@@ -513,9 +515,9 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 		print_float(shell, "illuminance:", s->illuminance, "lux");
 		print_float(shell, "magnetic-field:", s->magnetic_field, "mT");
 		if (!isnan(s->accel_x) || !isnan(s->accel_y) || !isnan(s->accel_z)) {
-			shell_print(shell, "  %-16s x=%.2f y=%.2f z=%.2f m/s^2",
-				    "accel:", (double)s->accel_x, (double)s->accel_y,
-				    (double)s->accel_z);
+			shell_print(shell, "  %-16s x=%s%d.%02d y=%s%d.%02d z=%s%d.%02d m/s^2",
+				    "accel:", APP_FP2(s->accel_x), APP_FP2(s->accel_y),
+				    APP_FP2(s->accel_z));
 		}
 		shell_print(shell, "  %-16s %s",
 			    "tilt-alert:", s->is_tilt_alert ? "true" : "false");
@@ -638,9 +640,34 @@ static int cmd_lrw_compose(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+/* Debug: drive the state machine by injecting a synthetic link-check outcome,
+ * so HEALTHY->WARNING->RECONNECT->rejoin (and the late-LC-in-RECONNECT guard)
+ * can be exercised on the bench without a real RF outage. */
+static int cmd_lrw_lc(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	bool ok;
+
+	if (strcmp(argv[1], "ok") == 0) {
+		ok = true;
+	} else if (strcmp(argv[1], "fail") == 0) {
+		ok = false;
+	} else {
+		shell_error(shell, "usage: lrw lc ok|fail");
+		return -EINVAL;
+	}
+
+	app_lrw_debug_inject_lc(ok);
+	shell_print(shell, "Injected link-check %s (see 'ats lrw status')", argv[1]);
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_lrw, SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
 	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
+	SHELL_CMD_ARG(lc, NULL, "Debug: inject link-check result. Usage: lc ok|fail", cmd_lrw_lc, 2,
+		      0),
 	SHELL_CMD_ARG(compose, NULL,
 		      "Build telemetry uplink without sending; dump fPort-2 hex. "
 		      "Usage: compose [budget]",

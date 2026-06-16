@@ -45,7 +45,7 @@ int app_mpl3115a2_read(float *altitude, float *pressure, float *temperature)
 
 	float altitude_ = sensor_value_to_float(&val);
 
-	LOG_DBG("Altitude: %.1f m", (double)altitude_);
+	LOG_DBG("Altitude: %s%d.%01d m", APP_FP1(altitude_));
 
 	if (altitude) {
 		*altitude = altitude_;
@@ -59,7 +59,7 @@ int app_mpl3115a2_read(float *altitude, float *pressure, float *temperature)
 
 	float pressure_ = sensor_value_to_float(&val);
 
-	LOG_DBG("Pressure: %.2f hPa", (double)(pressure_ * 10.f));
+	LOG_DBG("Pressure: %s%d.%02d hPa", APP_FP2(pressure_ * 10.f));
 
 	if (pressure) {
 		*pressure = pressure_;
@@ -73,7 +73,7 @@ int app_mpl3115a2_read(float *altitude, float *pressure, float *temperature)
 
 	float temperature_ = sensor_value_to_float(&val);
 
-	LOG_DBG("Temperature: %.2f C", (double)temperature_);
+	LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(temperature_));
 
 	if (temperature) {
 		*temperature = temperature_;

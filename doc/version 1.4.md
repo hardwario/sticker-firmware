@@ -390,4 +390,32 @@ A phone's Web NFC reader sees each as `record.recordType === "hio.stck:…"`.
 
 ---
 
+## 11. Footprint & build notes (internal)
+
+Not user-facing, but worth recording: v1.4.0 grew enough that the debug image RAM/flash budgets got tight, so two footprint optimizations landed.
+
+- **mbedtls AES tables in flash** — `CONFIG_MBEDTLS_AES_ROM_TABLES` + `MBEDTLS_AES_FEWER_TABLES`. mbedtls otherwise generates the AES T-tables in RAM at runtime (~8 KB of `.bss`); these keep them `const` in flash. Frees **~8.8 KB RAM** (debug 99 % → 86 %) for ~2 KB flash. AES-CCM (NFC config decrypt) and LoRaWAN crypto are functionally unchanged. The LoRaWAN MAC uses its own (already-flash) soft-SE AES, so only the PSA path is affected.
+- **Integer log formatting** — all `%f`/`%g` in `LOG_*`/`shell_print`/`snprintf` were converted to scaled-integer output via the `APP_FP0/1/2/3` helpers in `app_log.h` (e.g. `"%s%d.%02d"`, sign + integer + zero-padded fraction). With no float format specifiers left, the debug build sets `CONFIG_CBPRINTF_FP_SUPPORT=n`, freeing **~3.5 KB debug flash**. Float arithmetic is unchanged; only the printed representation differs (e.g. `21.91`, `-5.50`).
+
+---
+
+## 12. LoRaWAN connection management (NEW)
+
+`app_lrw.c` was refactored to a single, explicitly-defined state machine (`IDLE → JOINING → HEALTHY ⇄ WARNING → RECONNECT → JOINING`, plus `DISABLED`). All state changes go through one `state_transition()` with entry/exit actions, and three timers each have a single purpose (report cadence / link-check timeout / rejoin backoff). This removes a long-standing failure mode where a late link-check answer in RECONNECT could cancel the rejoin and leave the device wedged with TX stopped (the *"TX stops after 4–5 messages"* bug) — validated fixed on hardware over both TTN and ChirpStack.
+
+**New configuration keys** (LoRaWAN link supervision, runtime-tunable):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `lrw-link-check-interval` | 5 | Request a LinkCheckReq every N-th uplink (0 = disabled). |
+| `lrw-link-check-fail-rejoin` | 5 | Link-check failures while degraded before an OTAA rejoin is attempted. |
+
+Behaviour notes:
+- **Tolerant supervision** — a single missed LinkCheckAns does not escalate; WARNING needs 3 consecutive failures, RECONNECT then needs `lrw-link-check-fail-rejoin` more. Some networks (e.g. TTN) do not always answer `LinkCheckReq`; the device correctly stays HEALTHY rather than rejoining spuriously.
+- **OTAA rejoin** uses exponential backoff (60 s → ×2 → capped 3600 s); **ABP** cannot rejoin and stays in WARNING (it never had a join).
+- **Radio-silent mode (#98)** — if the configured **DevEUI is all-zero** (an un-provisioned device), the firmware enters `DISABLED` instead of looping on join requests that can never succeed, saving power. It stays DISABLED until reprovisioned and rebooted.
+- Debug builds expose `ats lrw lc ok|fail` to drive the state machine deterministically on the bench (no real RF outage needed).
+
+---
+
 *Applies to firmware v1.4.0. Reflects the v1.4.0 source. For full configuration parameters and base behaviour, see the device datasheet / v1.3.x documentation.*

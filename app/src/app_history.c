@@ -5,6 +5,7 @@
  */
 
 #include "app_history.h"
+#include "app_log.h"
 #include "app_config.h"
 #include "app_sensor.h"
 
@@ -743,9 +744,9 @@ static void print_value(const struct shell *sh, char *buf, size_t cap, int i, bo
 	if (!present) {
 		snprintf(buf, cap, "--");
 	} else if (m_desc[i].enc == ENC_COUNT) {
-		snprintf(buf, cap, "%.0f", v);
+		snprintf(buf, cap, "%d", APP_FP0(v));
 	} else {
-		snprintf(buf, cap, "%.2f", v);
+		snprintf(buf, cap, "%s%d.%02d", APP_FP2(v));
 	}
 	ARG_UNUSED(sh);
 }
@@ -960,8 +961,8 @@ static int cmd_history_stats(const struct shell *sh, size_t argc, char **argv)
 			shell_print(sh, "%-12s %8s %8s %8s %5u", m_desc[i].name, "--", "--", "--",
 				    0);
 		} else {
-			shell_print(sh, "%-12s %8.2f %8.2f %8.2f %5u", m_desc[i].name, mn, mx,
-				    sum / n, n);
+			shell_print(sh, "%-12s %s%d.%02d %s%d.%02d %s%d.%02d %5u", m_desc[i].name,
+				    APP_FP2(mn), APP_FP2(mx), APP_FP2(sum / n), n);
 		}
 	}
 	return 0;

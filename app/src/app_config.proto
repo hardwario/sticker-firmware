@@ -40,6 +40,8 @@ message AppConfigMessage {
         optional string nwkskey = 10;
         optional string appskey = 11;
         optional uint32 sub_band = 12;
+        optional uint32 link_check_interval = 13;
+        optional uint32 link_check_fail_rejoin = 14;
     }
 
     message Application {

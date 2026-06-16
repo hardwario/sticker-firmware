@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_battery.h"
 #include "app_calibration.h"
 #include "app_config.h"
 #include "app_ds18b20.h"
@@ -32,13 +33,17 @@
 LOG_MODULE_REGISTER(app_calibration, LOG_LEVEL_DBG);
 
 #define SENTINEL           ((int16_t)0x7FFF)
-#define PAYLOAD_SIZE       24
+#define PAYLOAD_SIZE       26
 #define LOOP_INTERVAL_SEC  1
 #define SEND_INTERVAL_SEC  30
 #define SETTLE_DELAY_SEC   2
 #define ENTRY_BLINKS       5
 #define CALIBRATION_PORT   10
 #define MAGNET_PENDING_MAX 2
+
+/* Re-measure battery every 60 calibration TX (30 minutes at SEND_INTERVAL_SEC=30) */
+#define BATTERY_REMEASURE_TX_COUNT 60
+#define BATTERY_INVALID_MV         ((uint16_t)0xFFFF)
 
 /* Fixed ABP keys for calibration mode — all devices use the same credentials */
 static const uint8_t m_cal_deveui[] = {0x02, 0x40, 0x3b, 0x84, 0xfd, 0x45, 0x1f, 0x37};
@@ -50,6 +55,7 @@ static const uint8_t m_cal_appskey[] = {0xd9, 0xa9, 0xc4, 0x1a, 0xcf, 0x55, 0x99
 
 static int m_count_ds18b20;
 static int m_count_machine_probe;
+static uint16_t m_battery_mv = BATTERY_INVALID_MV;
 
 static struct app_led_play_req m_orange_blink = {
 	.commands = {{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
@@ -143,6 +149,29 @@ void app_calibration_check_trigger(void)
 	}
 }
 
+static void measure_battery(void)
+{
+	float voltage;
+	int ret = app_battery_measure(&voltage);
+	if (ret) {
+		LOG_WRN("app_battery_measure failed: %d", ret);
+		m_battery_mv = BATTERY_INVALID_MV;
+		return;
+	}
+
+	if (voltage < 0.0f) {
+		voltage = 0.0f;
+	}
+
+	uint32_t mv = (uint32_t)(voltage * 1000.0f);
+	if (mv > 0xFFFE) {
+		mv = 0xFFFE; /* reserve 0xFFFF as the invalid sentinel */
+	}
+
+	m_battery_mv = (uint16_t)mv;
+	LOG_INF("Battery: %u mV", m_battery_mv);
+}
+
 static void compose_calibration_payload(uint8_t *buf)
 {
 	int ret;
@@ -221,6 +250,9 @@ static void compose_calibration_payload(uint8_t *buf)
 	sys_put_le16((uint16_t)p1_hum, &buf[18]);
 	sys_put_le16((uint16_t)p2_temp, &buf[20]);
 	sys_put_le16((uint16_t)p2_hum, &buf[22]);
+
+	/* Offset 24-25: Battery voltage (uint16, LE, millivolts; 0xFFFF = invalid) */
+	sys_put_le16(m_battery_mv, &buf[24]);
 }
 
 int app_calibration_init(void)
@@ -246,6 +278,12 @@ int app_calibration_init(void)
 	memcpy(g_app_config.lrw_devaddr, m_cal_devaddr, sizeof(m_cal_devaddr));
 	memcpy(g_app_config.lrw_nwkskey, m_cal_nwkskey, sizeof(m_cal_nwkskey));
 	memcpy(g_app_config.lrw_appskey, m_cal_appskey, sizeof(m_cal_appskey));
+
+	/* Init battery ADC — non-fatal so calibration still runs without battery readings */
+	ret = app_battery_init();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_battery_init", ret);
+	}
 
 	/* Init LoRaWAN */
 #if defined(CONFIG_LORAWAN)
@@ -305,6 +343,9 @@ int app_calibration_init(void)
 		app_led_blink(&req);
 	}
 
+	/* Initial battery measurement so the first TX already carries a real value */
+	measure_battery();
+
 	return 0;
 }
 
@@ -314,6 +355,7 @@ void app_calibration_run(void)
 
 	int64_t deadline = k_uptime_get() + (int64_t)APP_CALIBRATION_DURATION_MIN * 60 * 1000;
 	int counter = SEND_INTERVAL_SEC;
+	int battery_tx_counter = 0;
 
 	for (;;) {
 		if (k_uptime_get() >= deadline) {
@@ -336,6 +378,11 @@ void app_calibration_run(void)
 					     LORAWAN_MSG_UNCONFIRMED);
 			}
 #endif /* defined(CONFIG_LORAWAN) */
+
+			if (++battery_tx_counter >= BATTERY_REMEASURE_TX_COUNT) {
+				battery_tx_counter = 0;
+				measure_battery();
+			}
 		}
 
 		app_led_play(&m_orange_blink);

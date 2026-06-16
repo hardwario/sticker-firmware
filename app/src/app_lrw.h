@@ -21,6 +21,7 @@ enum app_lrw_state {
 	APP_LRW_STATE_HEALTHY,
 	APP_LRW_STATE_WARNING,
 	APP_LRW_STATE_RECONNECT,
+	APP_LRW_STATE_DISABLED, /* DevEUI all-zero: radio-silent, no join/TX (#98) */
 };
 
 struct app_lrw_info {
@@ -86,6 +87,14 @@ bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
  * a clean state. The caller must reboot afterwards for the MAC to re-init from
  * the cleared NVM. Returns 0 on success or a negative errno. */
 int app_lrw_reset_nvm(void);
+
+#if defined(CONFIG_SHELL)
+/* Debug/test only: inject a synthetic link-check outcome (ok=true success,
+ * false failure) onto the LRW work queue, to drive the state-machine
+ * transitions (HEALTHY->WARNING->RECONNECT->rejoin and the late-LC-in-RECONNECT
+ * guard, #71) deterministically from the shell without a real RF outage. */
+void app_lrw_debug_inject_lc(bool ok);
+#endif
 
 #ifdef __cplusplus
 }

@@ -602,9 +602,10 @@ static void print_slot(const struct shell *sh, uint8_t slot, const struct app_al
 
 	switch (app_alarm_quantity_kind(r->quantity)) {
 	case APP_ALARM_KIND_THRESHOLD:
-		shell_print(sh, "  [%u] %s %s  lo=%.2f hi=%.2f hst=%.2f  en=%d  active=%d", slot,
-			    src, q, (double)r->lo, (double)r->hi, (double)r->hst, r->enabled,
-			    active);
+		shell_print(sh,
+			    "  [%u] %s %s  lo=%s%d.%02d hi=%s%d.%02d hst=%s%d.%02d  en=%d  active=%d",
+			    slot, src, q, APP_FP2(r->lo), APP_FP2(r->hi), APP_FP2(r->hst),
+			    r->enabled, active);
 		break;
 	case APP_ALARM_KIND_STATE:
 		shell_print(sh, "  [%u] %s %s  %u->%u (%s)  en=%d  active=%d", slot, src, q,
