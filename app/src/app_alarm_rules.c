@@ -165,6 +165,16 @@ bool app_alarm_rules_occupied(uint8_t slot)
 	return slot < APP_ALARM_SLOT_COUNT && m_slots[slot].used;
 }
 
+int app_alarm_rules_first_free(void)
+{
+	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
+		if (!m_slots[i].used) {
+			return i;
+		}
+	}
+	return -1;
+}
+
 int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule)
 {
 	if (slot >= APP_ALARM_SLOT_COUNT || rule == NULL ||

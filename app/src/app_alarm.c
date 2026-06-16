@@ -593,38 +593,118 @@ static bool slot_active(uint8_t slot)
 	return a;
 }
 
+/* Print one occupied slot's rule (caller has checked it is occupied). */
+static void print_slot(const struct shell *sh, uint8_t slot, const struct app_alarm_rule *r)
+{
+	const char *src = app_alarm_source_name(r->source);
+	const char *q = app_alarm_quantity_name(r->quantity);
+	bool active = slot_active(slot);
+
+	switch (app_alarm_quantity_kind(r->quantity)) {
+	case APP_ALARM_KIND_THRESHOLD:
+		shell_print(sh, "  [%u] %s %s  lo=%.2f hi=%.2f hst=%.2f  en=%d  active=%d", slot,
+			    src, q, (double)r->lo, (double)r->hi, (double)r->hst, r->enabled,
+			    active);
+		break;
+	case APP_ALARM_KIND_STATE:
+		shell_print(sh, "  [%u] %s %s  %u->%u (%s)  en=%d  active=%d", slot, src, q,
+			    r->from_state, r->to_state,
+			    r->from_state == r->to_state ? "level" : "edge", r->enabled, active);
+		break;
+	case APP_ALARM_KIND_RATE:
+		shell_print(sh, "  [%u] %s %s  rate>=%d/interval  en=%d  active=%d", slot, src, q,
+			    (int)r->hi, r->enabled, active);
+		break;
+	}
+}
+
 static int cmd_alarm_list(const struct shell *sh, size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
+	/* Optional <index>: list just that one slot. */
+	if (argc >= 2) {
+		char *end;
+		unsigned long slot = strtoul(argv[1], &end, 10);
+		if (*end != '\0' || slot >= APP_ALARM_SLOT_COUNT) {
+			shell_error(sh, "invalid <index> (0..%d)", APP_ALARM_SLOT_COUNT - 1);
+			return -EINVAL;
+		}
+		const struct app_alarm_rule *r = app_alarm_rules_get((uint8_t)slot);
+		if (r == NULL) {
+			shell_print(sh, "slot %lu empty", slot);
+			return 0;
+		}
+		print_slot(sh, (uint8_t)slot, r);
+		return 0;
+	}
 
 	shell_print(sh, "%u rule(s):", app_alarm_rules_count());
 	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
 		const struct app_alarm_rule *r = app_alarm_rules_get(slot);
-		if (r == NULL) {
-			continue;
-		}
-		const char *src = app_alarm_source_name(r->source);
-		const char *q = app_alarm_quantity_name(r->quantity);
-		bool active = slot_active(slot);
-		switch (app_alarm_quantity_kind(r->quantity)) {
-		case APP_ALARM_KIND_THRESHOLD:
-			shell_print(sh, "  [%u] %s %s  lo=%.2f hi=%.2f hst=%.2f  en=%d  active=%d",
-				    slot, src, q, (double)r->lo, (double)r->hi, (double)r->hst,
-				    r->enabled, active);
-			break;
-		case APP_ALARM_KIND_STATE:
-			shell_print(sh, "  [%u] %s %s  %u->%u (%s)  en=%d  active=%d", slot, src, q,
-				    r->from_state, r->to_state,
-				    r->from_state == r->to_state ? "level" : "edge", r->enabled,
-				    active);
-			break;
-		case APP_ALARM_KIND_RATE:
-			shell_print(sh, "  [%u] %s %s  rate>=%d/interval  en=%d  active=%d", slot,
-				    src, q, (int)r->hi, r->enabled, active);
-			break;
+		if (r != NULL) {
+			print_slot(sh, slot, r);
 		}
 	}
+	return 0;
+}
+
+/* Parse `<source> <quantity> <kind-args…>` starting at argv[base] into `r`
+ * (enabled). Shared by `alarm set` (base=2, after the index) and `alarm new`
+ * (base=1). Prints a usage/validity error and returns -EINVAL on bad input. */
+static int parse_rule_spec(const struct shell *sh, size_t argc, char **argv, size_t base,
+			   struct app_alarm_rule *r)
+{
+	int src = app_alarm_source_by_name(argv[base]);
+	int qty = app_alarm_quantity_by_name(argv[base + 1]);
+	if (src < 0 || qty < 0 ||
+	    !app_alarm_rule_valid((enum app_alarm_source)src, (enum app_alarm_quantity)qty)) {
+		shell_error(sh, "invalid <source> <quantity>");
+		return -EINVAL;
+	}
+
+	*r = (struct app_alarm_rule){
+		.source = (uint8_t)src, .quantity = (uint8_t)qty, .enabled = 1};
+
+	size_t a = base + 2; /* first kind-arg */
+	switch (app_alarm_quantity_kind((enum app_alarm_quantity)qty)) {
+	case APP_ALARM_KIND_THRESHOLD:
+		if (argc < a + 2) {
+			shell_error(sh, "threshold args: <lo> <hi> [hst]");
+			return -EINVAL;
+		}
+		r->lo = strtof(argv[a], NULL);
+		r->hi = strtof(argv[a + 1], NULL);
+		r->hst = (argc > a + 2) ? strtof(argv[a + 2], NULL) : 0.0f;
+		break;
+	case APP_ALARM_KIND_STATE:
+		if (argc < a + 2) {
+			shell_error(sh,
+				    "state args: <from> <to> (0/1; from!=to=edge, from==to=level)");
+			return -EINVAL;
+		}
+		r->from_state = (uint8_t)(strtoul(argv[a], NULL, 10) ? 1 : 0);
+		r->to_state = (uint8_t)(strtoul(argv[a + 1], NULL, 10) ? 1 : 0);
+		break;
+	case APP_ALARM_KIND_RATE:
+		if (argc < a + 1) {
+			shell_error(sh, "count args: <N-per-interval>");
+			return -EINVAL;
+		}
+		r->hi = (float)strtoul(argv[a], NULL, 10);
+		break;
+	}
+	return 0;
+}
+
+/* Store `r` into `slot`, persist, and report. Shared by set / new. */
+static int store_rule(const struct shell *sh, uint8_t slot, const struct app_alarm_rule *r)
+{
+	int ret = app_alarm_rules_set(slot, r);
+	if (ret) {
+		shell_error(sh, "set failed: %d", ret);
+		return ret;
+	}
+	ret = app_alarm_rules_save();
+	shell_print(sh, "rule set in slot %u%s", slot, ret ? " (NOT persisted!)" : "");
 	return 0;
 }
 
@@ -636,53 +716,28 @@ static int cmd_alarm_set(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "invalid <index> (0..%d)", APP_ALARM_SLOT_COUNT - 1);
 		return -EINVAL;
 	}
-	int src = app_alarm_source_by_name(argv[2]);
-	int qty = app_alarm_quantity_by_name(argv[3]);
-	if (src < 0 || qty < 0 ||
-	    !app_alarm_rule_valid((enum app_alarm_source)src, (enum app_alarm_quantity)qty)) {
-		shell_error(sh, "invalid <source> <quantity>");
-		return -EINVAL;
-	}
 
-	struct app_alarm_rule r = {.source = (uint8_t)src, .quantity = (uint8_t)qty, .enabled = 1};
-
-	switch (app_alarm_quantity_kind((enum app_alarm_quantity)qty)) {
-	case APP_ALARM_KIND_THRESHOLD:
-		if (argc < 6) {
-			shell_error(sh,
-				    "usage: alarm set <index> <source> <quantity> <lo> <hi> [hst]");
-			return -EINVAL;
-		}
-		r.lo = strtof(argv[4], NULL);
-		r.hi = strtof(argv[5], NULL);
-		r.hst = (argc >= 7) ? strtof(argv[6], NULL) : 0.0f;
-		break;
-	case APP_ALARM_KIND_STATE:
-		if (argc < 6) {
-			shell_error(sh, "usage: alarm set <index> <source> <quantity> <from> <to> "
-					"(0/1; from!=to=edge, from==to=level)");
-			return -EINVAL;
-		}
-		r.from_state = (uint8_t)(strtoul(argv[4], NULL, 10) ? 1 : 0);
-		r.to_state = (uint8_t)(strtoul(argv[5], NULL, 10) ? 1 : 0);
-		break;
-	case APP_ALARM_KIND_RATE:
-		if (argc < 5) {
-			shell_error(sh, "usage: alarm set <index> <source> count <N-per-interval>");
-			return -EINVAL;
-		}
-		r.hi = (float)strtoul(argv[4], NULL, 10);
-		break;
-	}
-
-	int ret = app_alarm_rules_set((uint8_t)slot, &r);
+	struct app_alarm_rule r;
+	int ret = parse_rule_spec(sh, argc, argv, 2, &r);
 	if (ret) {
-		shell_error(sh, "set failed: %d", ret);
 		return ret;
 	}
-	ret = app_alarm_rules_save();
-	shell_print(sh, "rule set in slot %lu%s", slot, ret ? " (NOT persisted!)" : "");
-	return 0;
+	return store_rule(sh, (uint8_t)slot, &r);
+}
+
+static int cmd_alarm_new(const struct shell *sh, size_t argc, char **argv)
+{
+	struct app_alarm_rule r;
+	int ret = parse_rule_spec(sh, argc, argv, 1, &r);
+	if (ret) {
+		return ret;
+	}
+	int slot = app_alarm_rules_first_free();
+	if (slot < 0) {
+		shell_error(sh, "no free slot (all %d in use)", APP_ALARM_SLOT_COUNT);
+		return -ENOSPC;
+	}
+	return store_rule(sh, (uint8_t)slot, &r);
 }
 
 /* Force a sample + one evaluation pass now and report whether any alarm is
@@ -724,11 +779,16 @@ static int cmd_alarm_clear(const struct shell *sh, size_t argc, char **argv)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_alarm,
-	SHELL_CMD_ARG(list, NULL, "List alarm rules (by slot index).", cmd_alarm_list, 1, 0),
+	SHELL_CMD_ARG(list, NULL, "List alarm rules, or one slot. Usage: list [<index>]",
+		      cmd_alarm_list, 1, 1),
 	SHELL_CMD_ARG(set, NULL,
 		      "Set a rule in a slot. Usage: set <index> <source> <quantity> <args>\n"
 		      "  threshold: <lo> <hi> [hst]   state: <from> <to>   count: <N>",
 		      cmd_alarm_set, 5, 2),
+	SHELL_CMD_ARG(new, NULL,
+		      "Set a rule in the first free slot. Usage: new <source> <quantity> <args>\n"
+		      "  threshold: <lo> <hi> [hst]   state: <from> <to>   count: <N>",
+		      cmd_alarm_new, 4, 2),
 	SHELL_CMD_ARG(clear, NULL, "Clear a slot (or all). Usage: clear <index>|all",
 		      cmd_alarm_clear, 1, 1),
 	SHELL_CMD_ARG(poll, NULL, "Sample + evaluate rules now (bench test).", cmd_alarm_poll, 1,

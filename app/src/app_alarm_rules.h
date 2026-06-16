@@ -108,6 +108,9 @@ uint8_t app_alarm_rules_count(void);
 const struct app_alarm_rule *app_alarm_rules_get(uint8_t slot);
 bool app_alarm_rules_occupied(uint8_t slot);
 
+/* Lowest empty slot, or -1 if all APP_ALARM_SLOT_COUNT slots are occupied. */
+int app_alarm_rules_first_free(void);
+
 /* Store a rule in `slot`, overwriting whatever was there. Returns 0, -EINVAL
  * (bad slot or invalid source+quantity pair). Does not persist — call
  * app_alarm_rules_save(). */
