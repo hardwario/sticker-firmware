@@ -386,8 +386,10 @@ The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.
 | `ats cmd lrw \| nfc <hex>` | **New** (debug) — inject a command over the LoRaWAN/NFC transport for bench testing |
 | `nfc dump` / `read` / `write` / `clear` / `check` / `autocheck` / `reg` / `regw` | **New** (debug) — direct ST25DV tag access; `nfc check` prints a readable trace of what it read, decoded and wrote back (see §10) |
 | `config history-enable` / `history-sensors` / `alarm-limit` / `alarm-notif-time` / `pir-notify-act` | **New** parameters (see §6, §7) |
+| `settings reset` | **Changed** — now keeps device identity + LoRaWAN credentials (see §13); restores only application config + alarm rules to defaults |
+| `settings erase` | **New** — full NVS wipe incl. identity + LoRaWAN credentials; shell-only, destructive (see §13) |
 
-Existing commands (`config`, `settings save`/`reset`, `join`, `send`) are unchanged.
+Existing commands (`config`, `settings save`, `join`, `send`) are unchanged.
 
 ---
 
@@ -485,6 +487,48 @@ Follow-up to §12 with no behaviour change: the report *orchestration* was lifte
 - History capture now self-skips while a replay is streaming (`app_history` owns that guard), instead of `app_lrw` gating it.
 
 The report cadence is unified with `interval_report` (there is no separate `interval_history`). No configuration, wire-format or shell change. Validated end-to-end on hardware over ChirpStack on both debug and release builds (join → cadence, force_send, LC piggyback, multi-frame split, history capture; release `f_cnt_up` sustained well past the historical 4–5-message stall).
+
+---
+
+## 14. Identity & provisioning preservation (NEW)
+
+A firmware update or a reset must **never** un-provision a field device. The device identity
+(`serial-number`, `secret-key`, `nonce-counter`) and the LoRaWAN provisioning (`lrw-deveui`,
+`lrw-joineui`, all keys, `lrw-devaddr`, session keys, `region`, `sub-band`, `network`,
+`activation`, `adr`) are a **protected set** that survives every reset and migration path
+(issue #108). These parameters are flagged `preserve_on_reset` in `app_config.yml`, and `configen`
+generates the restore logic from that single source of truth — adding a new protected field is a
+one-line YAML change, no hand-maintained C list.
+
+**Reset semantics**
+
+| Path | Reaches | Effect on identity + LoRaWAN credentials |
+|---|---|---|
+| `settings reset` (shell) | local | **Kept** — only app config + alarm rules go back to defaults |
+| `factory_reset` command | LoRaWAN **and** NFC | **Kept** — same as `settings reset`; this is the only reset reachable remotely, so no command can un-provision a device |
+| NFC config-tag reset | NFC | **Kept** |
+| schema migration (config-version bump) | automatic on boot | **Kept** — a firmware update that bumps the config schema restores the protected set after applying new defaults |
+| `settings erase` (shell) | local **only** | **Wiped** — full NVS erase incl. identity; the deliberate "return to blank" escape hatch, never wired to LoRaWAN/NFC |
+
+**Partition-map contract** (256 KB internal flash, single flat image, no bootloader yet):
+
+| Partition | Offset | Size | Contents |
+|---|---|---|---|
+| `code` | `0x00000` | 160 KB | application image (`CONFIG_FLASH_LOAD_SIZE` link-time budget) |
+| `history` | `0x28000` | 80 KB | sensor history buffer (future FUOTA DFU slot) |
+| `storage` | `0x3C000` | 16 KB | **NVS — the protected set lives here** |
+
+The contract every update path must honour: **never erase the `storage` region at `0x3C000`.**
+
+- **J-Link / SWD** — a plain `west flash` (no `--erase`) writes only the sectors covered by the
+  image, and the image can never overflow into `storage` (the linker fails the build on overflow).
+  A full-chip `--erase` / mass-erase **does** wipe `storage` and must not be used on a provisioned
+  unit. (Hardware write-protect on `storage` is not an option — NVS must write/erase it at runtime.)
+- **NFC firmware update** (future erase-in-place bootloader) and **LoRaWAN FUOTA** (future) must
+  erase/program only the image region and skip `storage`.
+
+See manual-test-plan G6 / G6b / G6c for the regression checks (reset keeps identity, erase wipes
+it, re-flash preserves it).
 
 ---
 

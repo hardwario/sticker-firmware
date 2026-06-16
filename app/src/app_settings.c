@@ -48,7 +48,7 @@ static int save(bool reboot)
 	return 0;
 }
 
-static int reset(bool reboot)
+static int erase(bool reboot)
 {
 	int ret;
 
@@ -118,9 +118,23 @@ static int cmd_reset(const struct shell *shell, size_t argc, char **argv)
 {
 	int ret;
 
-	ret = reset(true);
+	ret = app_settings_reset();
 	if (ret) {
-		LOG_ERR("Call `reset` failed: %d", ret);
+		LOG_ERR("Call `app_settings_reset` failed: %d", ret);
+		shell_error(shell, "%s", m_shell_msg_error);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int cmd_erase(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	ret = erase(true);
+	if (ret) {
+		LOG_ERR("Call `erase` failed: %d", ret);
 		shell_error(shell, "%s", m_shell_msg_error);
 		return ret;
 	}
@@ -151,8 +165,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_save, 1, 0),
 
 	SHELL_CMD_ARG(reset, NULL,
-	              "Reset all settings and reboot.",
+	              "Reset config + alarm rules to defaults (keeps identity + LoRaWAN) and reboot.",
 	              cmd_reset, 1, 0),
+
+	SHELL_CMD_ARG(erase, NULL,
+	              "Erase the whole NVS partition incl. identity + LoRaWAN credentials, then reboot.",
+	              cmd_erase, 1, 0),
 
 	SHELL_SUBCMD_SET_END
 );
@@ -168,17 +186,19 @@ int app_settings_save(bool reboot)
 	return save(reboot);
 }
 
-int app_settings_reset(void)
+int app_settings_erase(void)
 {
-	return reset(true);
+	return erase(true);
 }
 
-int app_settings_factory_reset(void)
+int app_settings_reset(void)
 {
 	int ret;
 
 	/* Config: defaults for everything except the preserved identity + LoRaWAN
-	 * fields (see app_config_factory_reset). */
+	 * fields (see app_config_factory_reset). This is the only reset reachable
+	 * over LoRaWAN/NFC, so a remote command can never un-provision the device;
+	 * a full wipe (incl. identity) stays shell-only via `settings erase`. */
 	ret = app_config_factory_reset();
 	if (ret) {
 		LOG_ERR("Call `app_config_factory_reset` failed: %d", ret);

@@ -441,12 +441,12 @@ static int h_commit(void)
 			m_{{ module.name }}.config_version, {{ module.name | upper }}_VERSION);
 
 		/* Reset application parameters to defaults, but carry over factory
-		 * identity and network credentials (preserve_on_migration in the
+		 * identity and network credentials (preserve_on_reset in the
 		 * YAML) so a schema bump never un-provisions a field device. */
 		struct {{ module.name }} stored = m_{{ module.name }};
 
 		m_{{ module.name }} = m_{{ module.name }}_defaults;
-{% for param in parameters if param.preserve_on_migration | default(false) %}
+{% for param in parameters if param.preserve_on_reset | default(false) %}
 {% if param.type == 'bytes' or param.type == 'string' %}
 		memcpy(m_{{ module.name }}.{{ param.name | c_name }}, stored.{{ param.name | c_name }},
 		       sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
@@ -723,14 +723,14 @@ int {{ module.name }}_factory_reset(void)
 	int ret;
 
 	/* Reset every parameter to its compiled-in default, but carry over the
-	 * factory identity and network credentials (preserve_on_migration in the
+	 * factory identity and network credentials (preserve_on_reset in the
 	 * YAML) so the reset never un-provisions the device or drops it off the
 	 * LoRaWAN network. A full wipe (incl. identity) stays shell-only via
-	 * `settings reset`. Mirrors the migration restore in h_commit. */
+	 * `settings erase`. Mirrors the migration restore in h_commit. */
 	struct {{ module.name }} preserved = m_{{ module.name }};
 
 	m_{{ module.name }} = m_{{ module.name }}_defaults;
-{% for param in parameters if param.preserve_on_migration | default(false) %}
+{% for param in parameters if param.preserve_on_reset | default(false) %}
 {% if param.type == 'bytes' or param.type == 'string' %}
 	memcpy(m_{{ module.name }}.{{ param.name | c_name }}, preserved.{{ param.name | c_name }},
 	       sizeof(m_{{ module.name }}.{{ param.name | c_name }}));

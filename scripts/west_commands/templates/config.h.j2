@@ -43,9 +43,9 @@ extern struct {{ module.name }} g_{{ module.name }};
 struct {{ module.name }} *{{ module.name }}(void);
 
 /* Reset every parameter to its compiled-in default EXCEPT the factory identity
- * and network credentials (preserve_on_migration), then persist. Backs the
+ * and network credentials (preserve_on_reset), then persist. Backs the
  * factory_reset command so the device keeps its LoRaWAN session; the shell
- * `settings reset` still does a full NVS wipe. Returns 0 or a negative errno.
+ * `settings erase` still does a full NVS wipe. Returns 0 or a negative errno.
  * The caller reboots so every module re-reads the restored config. */
 int {{ module.name }}_factory_reset(void);
 

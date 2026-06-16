@@ -182,7 +182,7 @@ static int h_commit(void)
 			m_app_config.config_version, APP_CONFIG_VERSION);
 
 		/* Reset application parameters to defaults, but carry over factory
-		 * identity and network credentials (preserve_on_migration in the
+		 * identity and network credentials (preserve_on_reset in the
 		 * YAML) so a schema bump never un-provisions a field device. */
 		struct app_config stored = m_app_config;
 
@@ -1931,10 +1931,10 @@ int app_config_factory_reset(void)
 	int ret;
 
 	/* Reset every parameter to its compiled-in default, but carry over the
-	 * factory identity and network credentials (preserve_on_migration in the
+	 * factory identity and network credentials (preserve_on_reset in the
 	 * YAML) so the reset never un-provisions the device or drops it off the
 	 * LoRaWAN network. A full wipe (incl. identity) stays shell-only via
-	 * `settings reset`. Mirrors the migration restore in h_commit. */
+	 * `settings erase`. Mirrors the migration restore in h_commit. */
 	struct app_config preserved = m_app_config;
 
 	m_app_config = m_app_config_defaults;

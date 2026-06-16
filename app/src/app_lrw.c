@@ -570,7 +570,7 @@ static void post_cmd_work_handler(struct k_work *work)
 		break;
 	case APP_CMD_ACTION_FACTORY_RESET:
 		LOG_INF("Command: factory reset (keep identity + LoRaWAN) + reboot");
-		app_settings_factory_reset();
+		app_settings_reset();
 		break;
 	case APP_CMD_ACTION_REBOOT:
 		LOG_INF("Command: reboot");
