@@ -147,6 +147,24 @@ int app_config_apply_lorawan(const AppConfigMessage_Lorawan *src, uint32_t *faul
 			FAULT(12);
 		}
 	}
+	if (src->has_link_check_interval) {
+		int val = src->link_check_interval;
+
+		if ((val >= 0 && val <= 255)) {
+			config->lrw_link_check_interval = val;
+		} else {
+			FAULT(13);
+		}
+	}
+	if (src->has_link_check_fail_rejoin) {
+		int val = src->link_check_fail_rejoin;
+
+		if ((val >= 1 && val <= 255)) {
+			config->lrw_link_check_fail_rejoin = val;
+		} else {
+			FAULT(14);
+		}
+	}
 	return ret;
 }
 
@@ -185,6 +203,14 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 	if (requested(ids, n, 12)) {
 		dst->has_sub_band = true;
 		dst->sub_band = c->lrw_sub_band;
+	}
+	if (requested(ids, n, 13)) {
+		dst->has_link_check_interval = true;
+		dst->link_check_interval = c->lrw_link_check_interval;
+	}
+	if (requested(ids, n, 14)) {
+		dst->has_link_check_fail_rejoin = true;
+		dst->link_check_fail_rejoin = c->lrw_link_check_fail_rejoin;
 	}
 }
 
