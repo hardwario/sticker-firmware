@@ -28,7 +28,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 |---|---|---|
 | `get_info` | Firmware version, serial, uptime, wall-clock, build type | `info` (no ack) |
 | `set_param` | Change any configuration parameters (LoRaWAN/application/sensors/alarms) | `ack` |
-| `get_param` | Read back selected parameters | `config_dump` |
+| `get_param` | Read back selected parameters (paged) | `config_dump` |
 | `get_config` | Dump the whole configuration (paged) | `config_dump` |
 | `settings_save` | Persist staged changes (**reboots**) | `ack` |
 | `reboot` | Cold reboot | `ack` |
@@ -48,6 +48,8 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 > **LoRaWAN-only commands:** `force_send` and `req_history` answer only via an uplink, so they are rejected (`NOT_READY` "lrw only") if sent over NFC.
 >
 > **Setting the clock over NFC:** `clock_sync` with a `unix_time` field sets the RTC directly from a phone, bootstrapping wall-clock time before/without a network (epoch sanity-bounded to 2024-01-01 … 2100-01-01; out-of-range → `BAD_REQUEST` "bad epoch"). A later network `DeviceTimeReq`/`DeviceTimeAns` stays authoritative and may refine it. Empty `clock_sync` over NFC just confirms (no network to query).
+>
+> **`get_param` is paged** like `get_config`: the reply carries `page_index`/`page_count`, and an optional `page` field in the request selects which page (omit = 0). When the selected fields don't all fit one data-rate frame they are split across pages — fetch the rest by re-sending with the next `page`. A page out of range returns `OUT_OF_RANGE`. If any response still doesn't fit the buffer it is replaced by an `error` (same `seq`) rather than dropped silently.
 
 **Ready-to-use hex downlinks (fPort 85):**
 
@@ -322,6 +324,9 @@ The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.
 ```
 ```json
 { "command": "get_param", "seq": 2, "get_param": { "lorawan_field": [3], "application_field": [4, 7] } }
+```
+```json
+{ "command": "get_param", "seq": 3, "get_param": { "lorawan_field": [5, 6, 9], "page": 1 } }
 ```
 ```json
 { "command": "reset_counters", "reset_counters": { "hall_left": true, "input_a": true } }
