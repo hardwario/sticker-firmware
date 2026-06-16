@@ -50,6 +50,9 @@ extern struct k_mutex g_app_sensor_data_lock;
 int app_sensor_init(void);
 void app_sensor_sample(void);
 
+/* Stop the periodic sample timer ahead of a deep-sleep poweroff. */
+void app_sensor_suspend(void);
+
 #ifdef __cplusplus
 }
 #endif

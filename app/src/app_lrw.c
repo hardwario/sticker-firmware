@@ -1114,6 +1114,16 @@ static int apply_subband(int sub_band)
 	return 0;
 }
 
+void app_lrw_suspend(void)
+{
+	/* Stop the periodic TX timer and the join/reconnect backoff so nothing
+	 * re-arms the radio after this point; the caller is about to power the MCU
+	 * off (deep sleep). Pending works on m_work_q are simply abandoned — they
+	 * cannot run once the system is shut down, and wake is a clean boot. */
+	k_timer_stop(&m_send_timer);
+	k_timer_stop(&m_link_check_timer);
+}
+
 int app_lrw_init(void)
 {
 	int ret;

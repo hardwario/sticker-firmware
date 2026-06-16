@@ -61,6 +61,7 @@ target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/boards
 )
 target_sources_ifdef(CONFIG_OPT3001 app PRIVATE src/app_opt3001.c)
+target_sources_ifdef(CONFIG_POWEROFF app PRIVATE src/app_power.c)
 target_sources_ifdef(CONFIG_SHELL app PRIVATE src/app_ats.c)
 target_sources_ifdef(CONFIG_SHT4X app PRIVATE src/app_sht4x.c)
 target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_ds18b20.c)
