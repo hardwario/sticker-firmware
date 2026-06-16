@@ -109,13 +109,26 @@ static void alarm_lrw_send(void)
 #if defined(CONFIG_LORAWAN)
 	int limit = g_app_config.alarm_limit;
 	int64_t now = k_uptime_get();
+	bool send;
 
+	/* m_last_alarm_send_ms is read-modify-written from three contexts (main
+	 * poll, PIR thread, system WQ). A 64-bit RMW is not atomic on Cortex-M4, so
+	 * guard it under m_lock (#93.6); release before app_lrw_send() so the radio
+	 * call never runs while holding the alarm lock. */
+	k_mutex_lock(&m_lock, K_FOREVER);
 	if (limit > 0 && m_last_alarm_send_ms != 0 &&
 	    (now - m_last_alarm_send_ms) < (int64_t)limit * 1000) {
+		send = false;
+	} else {
+		m_last_alarm_send_ms = now;
+		send = true;
+	}
+	k_mutex_unlock(&m_lock);
+
+	if (!send) {
 		LOG_INF("Alarm uplink rate-limited (limit %d s)", limit);
 		return;
 	}
-	m_last_alarm_send_ms = now;
 	app_report_trigger();
 #endif
 }

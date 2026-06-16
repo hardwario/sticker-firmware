@@ -290,6 +290,16 @@ static void fill_snapshot(void)
 	boot = false;
 }
 
+void app_compose_reset(void)
+{
+	/* Drop the in-progress snapshot; the next app_compose() takes a fresh one.
+	 * These run solely on m_work_q (as does the join path that calls this), so
+	 * no lock is needed. */
+	m_active = false;
+	m_pending = 0;
+	m_w1_sent = 0;
+}
+
 int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 {
 	return app_compose_ex(buf, size, len, more, app_lrw_get_max_payload());
