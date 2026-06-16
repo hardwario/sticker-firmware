@@ -144,6 +144,13 @@ static void accel_motion_handler(void *user_data)
 }
 #endif /* defined(CONFIG_LIS2DH) */
 
+void app_sensor_suspend(void)
+{
+	/* Stop the periodic sample timer so no further I2C/1-Wire/ADC activity is
+	 * scheduled ahead of a deep-sleep poweroff. */
+	k_timer_stop(&m_sensor_timer);
+}
+
 int app_sensor_init(void)
 {
 	int ret;

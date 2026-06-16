@@ -1268,6 +1268,17 @@ static int apply_subband(int sub_band)
 /* Public API                                                               */
 /* ======================================================================== */
 
+void app_lrw_suspend(void)
+{
+	/* Stop every LRW timer so nothing re-arms the radio after this point; the
+	 * caller is about to power the MCU off (deep sleep). Pending works on
+	 * m_work_q are simply abandoned — they cannot run once the system is shut
+	 * down, and wake is a clean boot. */
+	k_timer_stop(&m_send_timer);
+	k_timer_stop(&m_lc_timeout_timer);
+	k_timer_stop(&m_rejoin_timer);
+}
+
 int app_lrw_init(void)
 {
 	int ret;
