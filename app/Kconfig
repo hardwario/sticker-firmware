@@ -25,13 +25,14 @@ config FW_DEBUG
 config APP_DEBUG_AUTOSUSPEND_S
 	int "Debug auto-suspend idle timeout (seconds, 0 = disabled)"
 	depends on FW_DEBUG && POWEROFF
-	default 3600
+	default 7200
 	help
 	  On the Debug build, after this many seconds with no RTT/shell
 	  activity the device enters deep-sleep (STM32 Shutdown via
 	  sys_poweroff) so a forgotten bench unit stops draining its
 	  battery — Debug FW runs with CONFIG_PM=n, so the CPU never sleeps
-	  and the quiescent draw is high. 0 disables the auto-suspend.
+	  and the quiescent draw is high. Default 7200 s (2 h). 0 disables
+	  the auto-suspend.
 	  Wake is by NRST / power-cycle (clean boot; NVS identity and
 	  LoRaWAN keys survive in flash).
 
