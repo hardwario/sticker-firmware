@@ -127,19 +127,20 @@ message Command {
 
     // BEGIN GENERATED COMMANDS
     oneof body {
-        SetParam      set_param      = 2;
-        GetParam      get_param      = 3;
-        GetInfo       get_info       = 4;
-        GetConfig     get_config     = 5;
-        SettingsSave  settings_save  = 6;
-        Reboot        reboot         = 7;
-        FactoryReset  factory_reset  = 8;
-        ForceSend     force_send     = 9;
-        ResetCounters reset_counters = 10;
-        ReqHistory    req_history    = 11;
-        ClockSync     clock_sync     = 12;
-        AlarmRule     alarm_rule     = 13;
-        W1Scan        w1_scan        = 14;
+        SetParam      set_param       = 2;
+        GetParam      get_param       = 3;
+        GetInfo       get_info        = 4;
+        GetConfig     get_config      = 5;
+        SettingsSave  settings_save   = 6;
+        Reboot        reboot          = 7;
+        FactoryReset  factory_reset   = 8;
+        ForceSend     force_send      = 9;
+        ResetCounters reset_counters  = 10;
+        ReqHistory    req_history     = 11;
+        ClockSync     clock_sync      = 12;
+        AlarmRule     alarm_rule      = 13;
+        W1Scan        w1_scan         = 14;
+        ReqAlarmRules req_alarm_rules = 15;
     }
 // END GENERATED COMMANDS
 
@@ -174,11 +175,17 @@ message Command {
         optional bool input_b    = 4;
     }
     message ReqHistory   { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
-    message ClockSync    { }
+    // Empty (LRW): re-sync the RTC from the network (DeviceTimeReq). With
+    // unix_time set (NFC): the phone supplies the wall-clock time (UTC seconds)
+    // and the RTC is set from it directly — a one-shot bootstrap before/without
+    // a network. A later DeviceTimeAns stays authoritative and may refine it.
+    message ClockSync    { optional uint32 unix_time = 1; }
 
-    // Set, clear or clear-all a dynamic alarm rule (target = source + quantity).
-    // SET uses the kind's fields (threshold lo/hi/hst, state from/to); CLEAR
-    // removes one (source,quantity); CLEAR_ALL wipes the list. Rules persist.
+    // Set or clear a dynamic alarm rule in a fixed slot (the slot index is the
+    // rule's stable identity; several slots may share one source+quantity for
+    // multi-level alarms). SET stores into `slot` using the kind's fields
+    // (threshold lo/hi/hst, state from/to); CLEAR empties `slot`; CLEAR_ALL
+    // wipes every slot. `slot` is required for SET and CLEAR. Rules persist.
     message AlarmRule {
         enum Op { SET = 0; CLEAR = 1; CLEAR_ALL = 2; }
         Op     op         = 1;
@@ -190,6 +197,18 @@ message Command {
         optional float  hst = 7;
         optional uint32 from_state = 8;
         optional uint32 to_state   = 9;
+        optional uint32 slot       = 10;  // target slot (required for SET/CLEAR)
+    }
+
+    // Read back dynamic alarm rules. No filter = all slots; `slot` = just that
+    // one slot; source+quantity = all slots on that pair. Paged like GetConfig:
+    // omitted/0 page = first; the response (Response.AlarmRulesDump) carries
+    // page_count so the host can fetch the rest.
+    message ReqAlarmRules {
+        optional uint32 source   = 1;
+        optional uint32 quantity = 2;
+        optional uint32 page     = 3;
+        optional uint32 slot     = 4;
     }
 
     // Enumerate the 1-Wire bus; the response (Response.W1Scan) returns the
@@ -201,12 +220,13 @@ message Response {
     uint32 seq = 1;
 
     oneof body {
-        Ack          ack           = 2;
-        Info         info          = 3;
-        ConfigDump   config_dump   = 4;
-        HistoryFrame history_frame = 5;
-        Error        error         = 6;
-        W1Scan       w1_scan       = 7;
+        Ack            ack              = 2;
+        Info           info             = 3;
+        ConfigDump     config_dump      = 4;
+        HistoryFrame   history_frame    = 5;
+        Error          error            = 6;
+        W1Scan         w1_scan          = 7;
+        AlarmRulesDump alarm_rules_dump = 8;
     }
 
     message Ack { }
@@ -272,6 +292,34 @@ message Response {
     message W1Scan {
         repeated bytes rom = 1;
     }
+
+    // Answer to a ReqAlarmRules command: the dynamic alarm rules currently
+    // stored, paged like ConfigDump (host requests page N, learns page_count).
+    // Each RuleEntry is the stored config of one rule — its `op`-free twin of
+    // Command.AlarmRule, plus `kind` so the host knows which fields apply
+    // (threshold lo/hi/hst, state from/to). No runtime active flag (config only).
+    message AlarmRulesDump {
+        uint32 page_index = 1;
+        uint32 page_count = 2;
+        repeated RuleEntry rules = 3;
+    }
+
+    message RuleEntry {
+        // slot/source/quantity/enabled/kind are `optional` so a rule in slot 0
+        // on source 0 (onboard) / quantity 0 (temperature) / kind 0 (threshold)
+        // / disabled still goes on the wire — a read-back must always carry the
+        // full identity, never let a proto3 zero-default silently drop it.
+        optional uint32 source   = 1;   // enum app_alarm_source
+        optional uint32 quantity = 2;   // enum app_alarm_quantity
+        optional bool   enabled  = 3;
+        optional uint32 kind     = 4;   // enum app_alarm_kind: 0=THRESHOLD 1=STATE 2=RATE
+        optional float  lo  = 5;
+        optional float  hi  = 6;
+        optional float  hst = 7;
+        optional uint32 from_state = 8;
+        optional uint32 to_state   = 9;
+        optional uint32 slot       = 10;  // alarm rule slot index (stable identity)
+    }
 }
 
 // Alarm-detail batch, sent on fPort 3 (#27). Alarm edges (threshold + discrete)
@@ -311,6 +359,7 @@ message AlarmEvent {
     uint32 rel_s    = 4;         // seconds since AlarmReport.base_time
     optional sint32 value = 5;   // current value: analog ×100 (temp/hum) or ×10 (pressure), digital 0/1, or counter
     uint32 quantity = 6;         // enum app_alarm_quantity: temperature/humidity/.../state/count
+    uint32 slot     = 7;         // alarm rule slot index that fired (stable identity)
 }
 
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap

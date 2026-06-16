@@ -103,6 +103,11 @@ bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
  * the cleared NVM. Returns 0 on success or a negative errno. */
 int app_lrw_reset_nvm(void);
 
+/* Stop LoRaWAN activity (all TX/link-check/rejoin timers) ahead of a deep-sleep
+ * poweroff, so nothing re-arms the radio before the MCU shuts down. Does not
+ * deinit the stack — wake from deep sleep is a clean boot. */
+void app_lrw_suspend(void);
+
 #if defined(CONFIG_SHELL)
 /* Debug/test only: inject a synthetic link-check outcome (ok=true success,
  * false failure) onto the LRW work queue, to drive the state-machine

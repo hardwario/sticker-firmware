@@ -338,9 +338,10 @@ static void app_cmd_handle_reset_counters(enum app_cmd_transport tp, const Comma
 	resp->which_body = Response_ack_tag;
 }
 
-/* force_send / req_history / clock_sync are LRW-only (transports: [lrw] in the
- * YAML); the generated dispatch enforces that before calling the handler, so
- * the handlers below assume the LoRaWAN transport. */
+/* force_send / req_history are LRW-only (transports: [lrw] in the YAML); the
+ * generated dispatch enforces that before calling the handler, so the handlers
+ * below assume the LoRaWAN transport. (clock_sync also runs over NFC — see its
+ * handler.) */
 static void app_cmd_handle_force_send(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
@@ -397,11 +398,20 @@ static void app_cmd_handle_alarm_rule(enum app_cmd_transport tp, const Command *
 		ret = 0;
 		break;
 	case Command_AlarmRule_Op_CLEAR:
-		ret = app_alarm_rules_clear((enum app_alarm_source)ar->source,
-					    (enum app_alarm_quantity)ar->quantity);
+		if (!ar->has_slot) {
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "slot required");
+			resp->body.error.fault_field = 10; /* AlarmRule.slot */
+			return;
+		}
+		ret = app_alarm_rules_clear((uint8_t)ar->slot);
 		break;
 	case Command_AlarmRule_Op_SET:
 	default: {
+		if (!ar->has_slot) {
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "slot required");
+			resp->body.error.fault_field = 10; /* AlarmRule.slot */
+			return;
+		}
 		struct app_alarm_rule r = {
 			.source = (uint8_t)ar->source,
 			.quantity = (uint8_t)ar->quantity,
@@ -412,7 +422,7 @@ static void app_cmd_handle_alarm_rule(enum app_cmd_transport tp, const Command *
 			.from_state = (uint8_t)((ar->has_from_state && ar->from_state) ? 1 : 0),
 			.to_state = (uint8_t)((ar->has_to_state && ar->to_state) ? 1 : 0),
 		};
-		ret = app_alarm_rules_set(&r);
+		ret = app_alarm_rules_set((uint8_t)ar->slot, &r);
 		break;
 	}
 	}
@@ -449,20 +459,47 @@ static int w1_scan_cb(struct w1_rom rom, void *user_data)
 
 #endif /* APP_CMD_HAVE_W1 */
 
+/* Sanity bounds for a wall-clock time supplied over NFC: reject obviously wrong
+ * epochs. 2024-01-01 .. 2100-01-01 (UTC) comfortably brackets any real device
+ * provisioning while staying well inside the uint32 range (rolls over in 2106). */
+#define APP_CMD_CLOCK_UNIX_MIN 1704067200UL /* 2024-01-01T00:00:00Z */
+#define APP_CMD_CLOCK_UNIX_MAX 4102444800UL /* 2100-01-01T00:00:00Z */
+
 static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
 	ARG_UNUSED(tp);
-	ARG_UNUSED(cmd);
 	ARG_UNUSED(action);
-#if defined(APP_CMD_HAVE_CLOCK) && defined(CONFIG_LORAWAN)
-	ARG_UNUSED(resp);
-	/* Re-sync, then answer with an Info uplink once the network time lands
-	 * (carries the synced unix_time). No ack — see app_lrw. */
+#ifdef APP_CMD_HAVE_CLOCK
+	/* unix_time set (NFC): the phone supplies the wall-clock time; set the RTC
+	 * directly and answer with the resulting Info (carries the new unix_time).
+	 * This bootstraps a device before/without a network. */
+	if (cmd->body.clock_sync.has_unix_time) {
+		uint32_t unix_s = cmd->body.clock_sync.unix_time;
+		if (unix_s < APP_CMD_CLOCK_UNIX_MIN || unix_s > APP_CMD_CLOCK_UNIX_MAX) {
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "bad epoch");
+			return;
+		}
+		if (app_clock_set_unix(unix_s) != 0) {
+			make_error(resp, Response_Error_Code_UNKNOWN, "rtc set failed");
+			return;
+		}
+		resp->which_body = Response_info_tag;
+		fill_info(&resp->body.info);
+		return;
+	}
+#ifdef CONFIG_LORAWAN
+	/* Empty (LRW): re-sync from the network, then answer with an Info uplink
+	 * once the network time lands (carries the synced unix_time). No ack — see
+	 * app_lrw. */
 	app_clock_force_resync();
 	app_lrw_send_info_on_clock_sync();
 #else
-	resp->which_body = Response_ack_tag; /* no clock/LRW: just confirm */
+	resp->which_body = Response_ack_tag; /* no LRW: just confirm */
+#endif
+#else
+	ARG_UNUSED(cmd);
+	resp->which_body = Response_ack_tag; /* no clock: just confirm */
 #endif
 }
 
@@ -500,6 +537,143 @@ static void app_cmd_handle_w1_scan(enum app_cmd_transport tp, const Command *cmd
 #else
 	make_error(resp, Response_Error_Code_NOT_READY, "no 1-wire");
 #endif
+}
+
+/* Per-page byte budget for the RuleEntry payload inside one AlarmRulesDump.
+ * Mirrors ConfigDump's paging: keep a page comfortably under the transport MTU.
+ * LRW pages tightly for low data rates; NFC's response buffer is 256 B, so it
+ * fits everything in one page (a real device has only a handful of rules). */
+#define RULES_PAGE_BUDGET_LRW 30
+#define RULES_PAGE_BUDGET_NFC 200
+
+/* Worst-case encoded size of one RuleEntry, by kind: ~2 B each for the
+ * source/quantity/enabled/kind scalars + the repeated-field wrapper, plus 5 B
+ * per present float (tag + 4) or 2 B per present state varint. */
+static size_t app_cmd_rule_entry_size(const struct app_alarm_rule *r)
+{
+	size_t s = 2 /* wrapper */ + 2 + 2 + 2 + 2 + 2 /* source quantity enabled kind slot */;
+
+	switch (app_alarm_quantity_kind((enum app_alarm_quantity)r->quantity)) {
+	case APP_ALARM_KIND_THRESHOLD:
+		s += 5 + 5 + 5; /* lo, hi, hst */
+		break;
+	case APP_ALARM_KIND_STATE:
+		s += 2 + 2; /* from_state, to_state */
+		break;
+	case APP_ALARM_KIND_RATE:
+	default:
+		s += 5; /* hi = max per interval */
+		break;
+	}
+	return s;
+}
+
+static void app_cmd_fill_rule_entry(Response_RuleEntry *e, uint8_t slot,
+				    const struct app_alarm_rule *r)
+{
+	enum app_alarm_kind kind = app_alarm_quantity_kind((enum app_alarm_quantity)r->quantity);
+
+	*e = (Response_RuleEntry){0};
+	/* All identity fields are proto3 `optional` — set the has-flags so a zero
+	 * value (slot 0, source 0 onboard, quantity 0 temperature, kind 0 threshold,
+	 * disabled) still goes on the wire and the read-back stays unambiguous. */
+	e->has_slot = true;
+	e->slot = slot;
+	e->has_source = true;
+	e->source = r->source;
+	e->has_quantity = true;
+	e->quantity = r->quantity;
+	e->has_enabled = true;
+	e->enabled = r->enabled ? true : false;
+	e->has_kind = true;
+	e->kind = (uint32_t)kind;
+
+	switch (kind) {
+	case APP_ALARM_KIND_THRESHOLD:
+		e->has_lo = true;
+		e->lo = r->lo;
+		e->has_hi = true;
+		e->hi = r->hi;
+		e->has_hst = true;
+		e->hst = r->hst;
+		break;
+	case APP_ALARM_KIND_STATE:
+		e->has_from_state = true;
+		e->from_state = r->from_state;
+		e->has_to_state = true;
+		e->to_state = r->to_state;
+		break;
+	case APP_ALARM_KIND_RATE:
+	default:
+		e->has_hi = true;
+		e->hi = r->hi;
+		break;
+	}
+}
+
+static void app_cmd_handle_req_alarm_rules(enum app_cmd_transport tp, const Command *cmd,
+					   Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(action);
+	const Command_ReqAlarmRules *rq = &cmd->body.req_alarm_rules;
+	uint32_t page = rq->has_page ? rq->page : 0;
+	size_t budget =
+		(tp == APP_CMD_TRANSPORT_LRW) ? RULES_PAGE_BUDGET_LRW : RULES_PAGE_BUDGET_NFC;
+
+	/* Optional filters (most specific first): a `slot` selects exactly one slot;
+	 * source+quantity together select every slot on that pair (proto3 can't tell
+	 * source==0 from absent, so both must be present to filter by pair). */
+	bool filter_slot = rq->has_slot;
+	bool filter_pair = rq->has_source && rq->has_quantity;
+
+	Response_AlarmRulesDump *d = &resp->body.alarm_rules_dump;
+	resp->which_body = Response_alarm_rules_dump_tag;
+	d->rules_count = 0;
+
+	/* Single greedy pass over the slots: pack matching rules into pages by budget
+	 * (and the static array bound), collect the requested page, learn the count. */
+	uint32_t cur_page = 0, in_page = 0, matched = 0;
+	size_t used = 0;
+
+	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
+		const struct app_alarm_rule *r = app_alarm_rules_get(slot);
+
+		if (r == NULL) {
+			continue;
+		}
+		if (filter_slot && slot != rq->slot) {
+			continue;
+		}
+		if (filter_pair && !(r->source == rq->source && r->quantity == rq->quantity)) {
+			continue;
+		}
+		matched++;
+
+		size_t sz = app_cmd_rule_entry_size(r);
+
+		if (in_page > 0 && (used + sz > budget || in_page >= ARRAY_SIZE(d->rules))) {
+			cur_page++;
+			used = 0;
+			in_page = 0;
+		}
+		used += sz;
+		in_page++;
+
+		if (cur_page == page && d->rules_count < ARRAY_SIZE(d->rules)) {
+			app_cmd_fill_rule_entry(&d->rules[d->rules_count++], slot, r);
+		}
+	}
+
+	uint32_t page_count = matched ? cur_page + 1 : 1;
+
+	if (page >= page_count) {
+		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "page");
+		resp->body.error.fault_field = 3; /* ReqAlarmRules.page */
+		return;
+	}
+
+	d->page_index = page;
+	d->page_count = page_count;
 }
 
 // BEGIN GENERATED DISPATCH
@@ -553,11 +727,6 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_req_history(tp, cmd, resp, action);
 		break;
 	case Command_clock_sync_tag:
-		/* transports: [lrw] — the answer is an uplink, meaningless over NFC */
-		if (tp != APP_CMD_TRANSPORT_LRW) {
-			make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
-			break;
-		}
 		app_cmd_handle_clock_sync(tp, cmd, resp, action);
 		break;
 	case Command_alarm_rule_tag:
@@ -565,6 +734,9 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		break;
 	case Command_w1_scan_tag:
 		app_cmd_handle_w1_scan(tp, cmd, resp, action);
+		break;
+	case Command_req_alarm_rules_tag:
+		app_cmd_handle_req_alarm_rules(tp, cmd, resp, action);
 		break;
 	default:
 		LOG_WRN("Command tag %u not implemented", cmd->which_body);
@@ -730,6 +902,7 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total,
 	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
 	for (size_t i = 0; i < n; i++) {
 		AlarmEvent *ev = &report.events[i];
+		ev->slot = events[i].slot;
 		ev->source = events[i].source;
 		ev->quantity = events[i].quantity;
 		ev->edge = (AlarmEvent_Edge)events[i].edge;

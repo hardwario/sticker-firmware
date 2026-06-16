@@ -15,6 +15,7 @@
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_nfc.h"
+#include "app_power.h"
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_settings.h"
@@ -357,6 +358,12 @@ int main(void)
 	/* Normal mode main loop */
 	for (;;) {
 		LOG_INF("Alive");
+
+#if defined(CONFIG_POWEROFF)
+		/* Debug auto-suspend: deep-sleep after a configurable idle timeout
+		 * (no-op outside the Debug build / when the timeout is 0). */
+		app_power_check_idle();
+#endif
 
 #if defined(CONFIG_WATCHDOG)
 		ret = app_wdog_feed();

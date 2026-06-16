@@ -22,6 +22,20 @@ config FW_DEBUG
 	  When enabled, the periodic LED blink shows green + yellow
 	  instead of just green to indicate debug build.
 
+config APP_DEBUG_AUTOSUSPEND_S
+	int "Debug auto-suspend idle timeout (seconds, 0 = disabled)"
+	depends on FW_DEBUG && POWEROFF
+	default 7200
+	help
+	  On the Debug build, after this many seconds with no RTT/shell
+	  activity the device enters deep-sleep (STM32 Shutdown via
+	  sys_poweroff) so a forgotten bench unit stops draining its
+	  battery — Debug FW runs with CONFIG_PM=n, so the CPU never sleeps
+	  and the quiescent draw is high. Default 7200 s (2 h). 0 disables
+	  the auto-suspend.
+	  Wake is by NRST / power-cycle (clean boot; NVS identity and
+	  LoRaWAN keys survive in flash).
+
 config APP_LORAWAN_1_1
 	bool "Use LoRaWAN 1.1.x crypto for OTAA"
 	default n

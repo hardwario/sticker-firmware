@@ -95,6 +95,14 @@ void app_report_trigger(void)
 	k_work_submit_to_queue(&m_work_q, &m_report_work);
 }
 
+void app_report_suspend(void)
+{
+	/* Stop the cadence so it can't fire and re-arm the radio during poweroff.
+	 * Pending work on m_work_q is abandoned (the MCU is about to shut down;
+	 * wake is a clean boot). */
+	k_timer_stop(&m_report_timer);
+}
+
 int app_report_init(void)
 {
 	k_work_queue_init(&m_work_q);

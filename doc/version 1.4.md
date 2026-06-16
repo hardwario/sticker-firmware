@@ -35,15 +35,19 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `factory_reset` | Reset config to defaults but **keep device identity + LoRaWAN keys** (stays provisioned/connected); clears dynamic alarm rules; **reboots** | `ack` |
 | `force_send` | Send a telemetry report immediately | **none** — the report itself is the reply |
 | `reset_counters` | Clear selected hall/input counters | `ack` |
-| `clock_sync` | Request a network time sync | **`info`, deferred** — sent once the network time lands (carries the synced `unix_time`) |
+| `clock_sync` | Sync the wall-clock. **Empty** (LoRaWAN): request a network time sync. **With `unix_time`** (NFC): set the RTC directly from the phone's clock (UTC seconds) | LoRaWAN: **`info`, deferred** — sent once the network time lands. NFC: **`info`** immediately — carries the new `unix_time` |
 | `req_history` | Replay stored history for a time window | `history_frame` (multiple) |
 | `w1_scan` | Enumerate the 1-Wire bus; returns the discovered ROMs so you can teach a slot via `set_param sensorN_rom` | `w1_scan` |
+| `alarm_rule` | Set / clear a dynamic alarm rule in a `slot`, or clear-all (SET/CLEAR require `slot`; the slot index is the rule's stable identity) | `ack` |
+| `req_alarm_rules` | Read back the stored dynamic alarm rules (paged); optional `slot` filter selects one slot, or `source`+`quantity` selects every slot on that pair | `alarm_rules_dump` |
 
 > After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED), an optional `fault_field`, and a `detail` string.
 >
 > **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `clock_sync`, `req_history`, `w1_scan`) do **not** also send an `ack`, to save an uplink.
 >
-> **LoRaWAN-only commands:** `force_send`, `clock_sync` and `req_history` answer only via an uplink, so they are rejected (`NOT_READY` "lrw only") if sent over NFC.
+> **LoRaWAN-only commands:** `force_send` and `req_history` answer only via an uplink, so they are rejected (`NOT_READY` "lrw only") if sent over NFC.
+>
+> **Setting the clock over NFC:** `clock_sync` with a `unix_time` field sets the RTC directly from a phone, bootstrapping wall-clock time before/without a network (epoch sanity-bounded to 2024-01-01 … 2100-01-01; out-of-range → `BAD_REQUEST` "bad epoch"). A later network `DeviceTimeReq`/`DeviceTimeAns` stays authoritative and may refine it. Empty `clock_sync` over NFC just confirms (no network to query).
 
 **Ready-to-use hex downlinks (fPort 85):**
 
@@ -57,6 +61,12 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `w1_scan` | `08097200` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
 | `set_param`: ADR on, `interval_report`=120 s, `cap_barometer` on | `0801120d0a021801120220782203e80201` |
+| `alarm_rule` SET slot 0 = s1 temperature 15–25 °C, hyst 0.5 | `08016a15100120012d00007041350000c8413d0000003f5000` |
+| `alarm_rule` CLEAR slot 0 | `08016a0408015000` |
+| `alarm_rule` CLEAR_ALL | `08016a020802` |
+| `req_alarm_rules` (all rules, page 0) | `08017a00` |
+| `req_alarm_rules` (slot 0 only) | `08017a022000` |
+| `req_alarm_rules` (all slots on onboard temperature) | `08017a0408001000` |
 
 (The leading byte is the `seq` you chose; it is echoed in the reply.)
 
@@ -114,6 +124,8 @@ message AlarmEvent {
     Side   side   = 3;               // SIDE_NONE / SIDE_LO / SIDE_HI
     uint32 rel_s  = 4;               // seconds since base_time
     optional sint32 value = 5;       // current reading, scaled; absent for discrete sources
+    uint32 quantity = 6;             // which quantity (temperature/humidity/.../state/count)
+    uint32 slot     = 7;             // alarm rule slot index that fired (stable identity)
 }
 ```
 
@@ -124,6 +136,7 @@ Each event is described by **three orthogonal enums** — an integration that on
 - `base_time` — Unix timestamp the events are relative to.
 - `total` — total alarms that occurred in the window. `truncated` is `true` when `total` exceeds the events actually carried (some were dropped to fit the data rate).
 - `alarms[]` — each with:
+  - `slot` — the alarm rule slot index that fired (`0` when omitted on the wire); lets a host map the edge back to the exact rule, including which level of a multi-level alarm
   - `source` — `temperature` / `humidity` / `pressure` / `t1-temperature` / `t2-temperature` / `hall-left` / `hall-right` / `pir` / `input-a` / `input-b` / `accel-motion`
   - `event` — `activate` / `deactivate`
   - `side` — `hi` / `lo` for threshold sources, `none` for discrete sources (hall/input/PIR). The **deactivate** edge keeps the side that was crossed on activation.
@@ -185,7 +198,7 @@ The same message is returned on demand by the `get_info` command.
 
 ## 5. Real-time clock (NEW)
 
-The device now keeps wall-clock time, synchronised from the network via LoRaWAN `DeviceTimeReq` (requested automatically on join). It timestamps history records and alarm events.
+The device now keeps wall-clock time, synchronised from the network via LoRaWAN `DeviceTimeReq` (requested automatically on join). It timestamps history records and alarm events. A phone can also bootstrap the time over NFC (`clock_sync` with `unix_time`, §1) before/without a network — the network sync stays authoritative once joined.
 
 New `clock` shell command:
 
@@ -241,13 +254,52 @@ New configuration parameters control alarm uplink frequency and add a PIR motion
 | `alarm-notif-time` | int (s) | `10` | 1–60 | Red-LED hold time for both-mode and pulse (PIR) alarms |
 | `pir-notify-act` | bool | `false` | | Raise an alarm on PIR motion (previously PIR was indication-only) |
 
+### Dynamic alarm rules — read / write over LoRaWAN & NFC
+
+Per-sensor alarm thresholds are **dynamic rules** (`app_alarm_rules`, 16 fixed **slots** `0…15`). The **slot index is the rule's stable identity**: `(source, quantity)` is an attribute of the slot, not a key, so **several slots may carry the same `(source, quantity)`** — that is the multi-level case (e.g. a *warning* band and a separate *critical* band on one sensor as two independent rules, each latching and reporting on its own). Clearing a slot empties it without renumbering the others, so a host (and `AlarmEvent.slot`) can refer to a rule by slot reliably. A rule's *kind* follows its quantity: **threshold** (`lo`/`hi`/`hst`) for analog quantities, **state** (`from_state`/`to_state`) for discrete inputs, **rate** (`hi` = max events per report) for counters.
+
+> **Note on "slot":** the alarm rule *slot* (`0…15`, this section) is a distinct concept from the 1-Wire sensor *slot* (`s1…s4`); the shell calls the alarm one the rule **index** (`alarm set <index> …`).
+
+Locally they are managed with the `alarm` shell command: `alarm set <index> <source> <quantity> <args…>` (write a specific slot), `alarm new <source> <quantity> <args…>` (write the first free slot, prints the chosen index), `alarm clear <index>|all`, `alarm list` (prints each rule with its `[index]`; `alarm list <index>` prints just that one slot). Remotely they go through the same transport-agnostic command channel, so **the identical message works on both fPort 85 (LoRaWAN) and NFC**:
+
+- **Write** — `alarm_rule` command (`op`: `0`=SET, `1`=CLEAR, `2`=CLEAR_ALL). SET and CLEAR **require `slot`**; SET also carries `source`, `quantity` and the kind's fields. Reply: `ack`.
+- **Read back** — `req_alarm_rules` command; reply: **`alarm_rules_dump`**, paged like `get_config` (`page_index`/`page_count`). An optional `slot` narrows it to one slot; a `source`+`quantity` pair selects every slot on that pair; omit all to list everything. Each `RuleEntry` carries `slot`, `source`, `quantity`, `enabled`, `kind` and only the fields valid for that kind. Read-back over LoRaWAN needs a data rate above DR0 (a rule does not fit a DR0 frame); NFC returns everything in one page.
+
+```jsonc
+// SET slot 0: sensor s1, temperature, alarm below 15 °C or above 25 °C, 0.5° hysteresis
+{ "command": "alarm_rule", "seq": 1,
+  "alarm_rule": { "op": 0, "slot": 0, "source": 1, "quantity": 0, "enabled": true, "lo": 15, "hi": 25, "hst": 0.5 } }
+// SET slot 1: a second, critical band on the SAME sensor (multi-level)
+{ "command": "alarm_rule", "seq": 2,
+  "alarm_rule": { "op": 0, "slot": 1, "source": 1, "quantity": 0, "enabled": true, "lo": 5, "hi": 35, "hst": 0.5 } }
+// CLEAR slot 0
+{ "command": "alarm_rule", "seq": 3, "alarm_rule": { "op": 1, "slot": 0 } }
+// CLEAR_ALL
+{ "command": "alarm_rule", "seq": 4, "alarm_rule": { "op": 2 } }
+// READ all rules
+{ "command": "req_alarm_rules", "seq": 5, "req_alarm_rules": {} }
+// READ one slot
+{ "command": "req_alarm_rules", "seq": 5, "req_alarm_rules": { "slot": 0 } }
+// READ every slot on onboard temperature
+{ "command": "req_alarm_rules", "seq": 5, "req_alarm_rules": { "source": 0, "quantity": 0 } }
+```
+
+`alarm_rules_dump` reply decoded by `ttn.js` (two rules — a threshold and a state rule, each with its `slot`):
+
+```jsonc
+{ "seq": 5, "alarm_rules_dump": { "page_count": 1, "rules": [
+  { "slot": 0, "source": 1, "quantity": 0, "enabled": true, "kind": 0, "kind_name": "threshold", "lo": 15, "hi": 25, "hst": 0.5 },
+  { "slot": 3, "source": 8, "quantity": 6, "enabled": true, "kind": 1, "kind_name": "state", "from_state": 0, "to_state": 1 }
+] } }
+```
+
 ---
 
 ## 8. Payload formatter updates (`ttn.js`)
 
 The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.4.0:
 
-- **`decodeUplink`** now decodes the new ports — fPort 2 (protobuf telemetry), fPort 3 (alarm batch), and fPort 85 (command responses: `info`, `ack`, `config_dump`, `history_frame`, `error`) — in addition to the legacy fPort 1.
+- **`decodeUplink`** now decodes the new ports — fPort 2 (protobuf telemetry), fPort 3 (alarm batch), and fPort 85 (command responses: `info`, `ack`, `config_dump`, `history_frame`, `w1_scan`, `alarm_rules_dump`, `error`) — in addition to the legacy fPort 1.
 - **`encodeDownlink`** (new) lets you author commands as JSON; the formatter encodes them to bytes on fPort 85.
 - **`decodeDownlink`** (new) lets the network server display a queued command.
 
@@ -337,6 +389,17 @@ The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel �
 A phone's Web NFC reader sees each as `record.recordType === "hio.stck:…"`.
 
 **Power.** The periodic check is gated on the tag's `IT_STS_Dyn` register — the firmware reads a single byte each cycle and only performs the full read + NDEF parse when RF activity occurred since the last poll, so an untouched tag costs almost nothing.
+
+---
+
+## Debug auto-suspend / deep sleep (NEW)
+
+The **Debug** build runs with `CONFIG_PM=n` (the CPU never sleeps) so SWD/RTT stay reachable — but that means a debug unit forgotten on the bench drains its battery. To avoid that, the Debug firmware now **auto-suspends after an idle timeout**.
+
+- **Idle timeout** — `CONFIG_APP_DEBUG_AUTOSUSPEND_S` (default **7200 s** = 2 h). After this long with no **RTT/shell interaction**, the device enters deep sleep. Any shell input resets the timer. Set to `0` to disable. Debug-only (no effect on the Release build, which already sleeps via PM). During an active debug session you keep the device awake simply by issuing shell commands; an idle unit (e.g. after the J-Link is unplugged) suspends once the timeout elapses.
+- **Deep sleep** = STM32WL **Shutdown** (`sys_poweroff()`): lowest practical quiescent current, all peripherals off. Before powering down it stops the LoRaWAN TX/join timers and the sensor sample timer and turns the LEDs off.
+- **Wake** = **NRST / power-cycle** only — a clean boot. NVS identity and LoRaWAN keys live in flash and survive; the RAM state and RTC wall-clock are lost and re-established on boot (time re-syncs from the network). (NFC-field / wakeup-pin wake is a possible future addition, not in this version.)
+- **On demand** — a `power suspend` shell command enters deep sleep immediately (bench/test hook). On-demand suspend over LoRaWAN/NFC is not wired yet.
 
 ---
 

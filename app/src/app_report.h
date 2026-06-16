@@ -39,6 +39,10 @@ int app_report_init(void);
  * ready, and the periodic timer keeps ticking. */
 void app_report_trigger(void);
 
+/* Stop the report cadence before a deep-sleep/poweroff so the timer can't fire
+ * and re-arm the radio on the way down. Called from app_power_suspend(). */
+void app_report_suspend(void);
+
 #ifdef __cplusplus
 }
 #endif

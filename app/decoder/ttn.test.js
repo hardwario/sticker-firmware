@@ -107,28 +107,68 @@ test("set_param cap_w1_sensors (tag 60) is reachable both ways (#92)", () => {
 // AlarmRule downlink command (field 13): set a dynamic alarm rule and clear-all.
 // op=0 SET / 1 CLEAR / 2 CLEAR_ALL; source/quantity are app_alarm enums.
 test("alarm_rule command encode/decode round-trips", () => {
-  // SET s3 (source 3) humidity (quantity 1) threshold lo=10 hi=80, enabled.
+  // SET slot 5: s3 (source 3) humidity (quantity 1) threshold lo=10 hi=80, enabled.
   const set = codec.encodeDownlink({
     data: {
       seq: 4, command: "alarm_rule",
-      alarm_rule: { source: 3, quantity: 1, enabled: true, lo: 10, hi: 80 },
+      alarm_rule: { slot: 5, source: 3, quantity: 1, enabled: true, lo: 10, hi: 80 },
     },
   });
   assert.equal(set.errors.length, 0, "encode errors");
   assert.equal(set.fPort, 85);
   const b = codec.decodeDownlink({ bytes: set.bytes, fPort: 85 }).data;
   assert.equal(b.command, "alarm_rule");
+  assert.equal(b.alarm_rule.slot, 5);
   assert.equal(b.alarm_rule.source, 3);
   assert.equal(b.alarm_rule.quantity, 1);
   assert.equal(b.alarm_rule.enabled, true);
   assert.equal(b.alarm_rule.lo, 10);
   assert.equal(b.alarm_rule.hi, 80);
 
-  // CLEAR_ALL (op=2).
+  // CLEAR slot 0 — slot 0 must survive as an explicit target (not dropped).
+  const clr0 = codec.encodeDownlink({
+    data: { command: "alarm_rule", alarm_rule: { op: 1, slot: 0 } },
+  });
+  assert.equal(clr0.errors.length, 0);
+  const c0 = codec.decodeDownlink({ bytes: clr0.bytes, fPort: 85 }).data;
+  assert.equal(c0.alarm_rule.op, 1);
+  assert.equal(c0.alarm_rule.slot, 0);
+
+  // CLEAR_ALL (op=2) — no slot needed.
   const clr = codec.encodeDownlink({ data: { command: "alarm_rule", alarm_rule: { op: 2 } } });
   assert.equal(clr.errors.length, 0);
   const c = codec.decodeDownlink({ bytes: clr.bytes, fPort: 85 }).data;
   assert.equal(c.alarm_rule.op, 2);
+});
+
+test("req_alarm_rules command encode/decode round-trips", () => {
+  // Targeted read: onboard (source 0) temperature (quantity 0), page 0 — the
+  // all-zero case that must still survive the round trip as an explicit filter.
+  const one = codec.encodeDownlink({
+    data: { seq: 6, command: "req_alarm_rules", req_alarm_rules: { source: 0, quantity: 0 } },
+  });
+  assert.equal(one.errors.length, 0, "encode errors");
+  assert.equal(one.fPort, 85);
+  const b = codec.decodeDownlink({ bytes: one.bytes, fPort: 85 }).data;
+  assert.equal(b.command, "req_alarm_rules");
+  assert.equal(b.req_alarm_rules.source, 0);
+  assert.equal(b.req_alarm_rules.quantity, 0);
+
+  // List all, second page.
+  const all = codec.encodeDownlink({
+    data: { command: "req_alarm_rules", req_alarm_rules: { page: 2 } },
+  });
+  assert.equal(all.errors.length, 0);
+  const a = codec.decodeDownlink({ bytes: all.bytes, fPort: 85 }).data;
+  assert.equal(a.req_alarm_rules.page, 2);
+
+  // Single-slot filter — slot 0 must survive as an explicit filter.
+  const bySlot = codec.encodeDownlink({
+    data: { command: "req_alarm_rules", req_alarm_rules: { slot: 0 } },
+  });
+  assert.equal(bySlot.errors.length, 0);
+  const s = codec.decodeDownlink({ bytes: bySlot.bytes, fPort: 85 }).data;
+  assert.equal(s.req_alarm_rules.slot, 0);
 });
 
 // --- Uplink: legacy bitmap (fPort 1) --------------------------------------
@@ -363,7 +403,7 @@ test("history sentinel values decode to null", () => {
 // omits zero fields — the builders mirror that (default source=onboard,
 // quantity=temperature, edge=activate, side=none).
 function pbSint(tag, v) { return pbTV(tag, v < 0 ? -v * 2 - 1 : v * 2); }
-function alarmEvent(source, quantity, edge, side, rel, value) {
+function alarmEvent(source, quantity, edge, side, rel, value, slot) {
   let e = [];
   if (source) e = e.concat(pbTV(1, source));
   if (edge) e = e.concat(pbTV(2, edge));
@@ -371,6 +411,7 @@ function alarmEvent(source, quantity, edge, side, rel, value) {
   if (rel) e = e.concat(pbTV(4, rel));
   if (value !== null && value !== undefined) e = e.concat(pbSint(5, value));
   if (quantity) e = e.concat(pbTV(6, quantity));
+  if (slot) e = e.concat(pbTV(7, slot));
   return e;
 }
 function buildAlarmReport(base, total, events) {
@@ -382,8 +423,8 @@ function buildAlarmReport(base, total, events) {
 test("decodeUplink decodes an fPort-3 alarm batch (threshold + state)", () => {
   const base = 1780000000;
   const f = buildAlarmReport(base, 2, [
-    alarmEvent(0, 0, 0, 2, 10, 2660), // onboard temperature, activate, HI, 26.6 °C
-    alarmEvent(5, 6, 0, 0, 15, 1),    // hall-left state, activate, level=1
+    alarmEvent(0, 0, 0, 2, 10, 2660, 7), // onboard temp, activate, HI, 26.6 °C, slot 7
+    alarmEvent(5, 6, 0, 0, 15, 1),       // hall-left state, activate, level=1, slot 0
   ]);
   const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
 
@@ -392,6 +433,7 @@ test("decodeUplink decodes an fPort-3 alarm batch (threshold + state)", () => {
   assert.equal(d.truncated, false);
   assert.equal(d.alarms.length, 2);
 
+  assert.equal(d.alarms[0].slot, 7);
   assert.equal(d.alarms[0].source, "onboard");
   assert.equal(d.alarms[0].quantity, "temperature");
   assert.equal(d.alarms[0].event, "activate");
@@ -399,6 +441,7 @@ test("decodeUplink decodes an fPort-3 alarm batch (threshold + state)", () => {
   assert.equal(d.alarms[0].value, 26.6);
   assert.equal(d.alarms[0].time, base + 10);
 
+  assert.equal(d.alarms[1].slot, 0); // omitted on the wire → defaults to slot 0
   assert.equal(d.alarms[1].source, "hall-left");
   assert.equal(d.alarms[1].quantity, "state");
   assert.equal(d.alarms[1].event, "activate");

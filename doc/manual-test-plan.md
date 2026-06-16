@@ -979,6 +979,27 @@ network: unix=<...>`. Per `doc/version 1.4.md` §5 the sync is **requested autom
 
 - [ ] Pass
 
+### K6 — Set RTC over NFC (`clock_sync` with `unix_time`)
+
+**Goal:** A phone can bootstrap the wall-clock over NFC before/without a network (#107).
+**Observable:** A `clock_sync` command carrying `unix_time` sets the RTC and answers with an `info`
+response whose `unix_time` matches; `clock get` then returns that time. An out-of-range epoch is
+rejected with `error` `BAD_REQUEST` "bad epoch".
+
+**Prompt for Claude:**
+> On a freshly booted device that has **not** synced time (so `clock get` reports unset), inject a
+> `clock_sync` command with a `unix_time` over the NFC transport. On a debug build use the debug
+> shell: `ats cmd nfc 0801620608808bd2bb06` (ClockSync `unix_time = 1735689600`, i.e.
+> 2025-01-01T00:00:00Z) — or present an NFC command record from the manager app. Confirm the
+> decoded response is an `Info` with `unix_time = 1735689600` (not an `ack`), then `clock get`
+> returns ~that time and is advancing. Finally inject an out-of-range epoch (e.g. `unix_time = 1`)
+> and confirm the response is `error` code 1 (BAD_REQUEST) with detail "bad epoch", and the RTC is
+> left unchanged. Report all three results.
+
+- [x] Pass — HW-verified 2026-06-16 (debug build, RTT shell). Fresh boot `RTC not set yet`; NFC
+  `clock_sync{unix_time}` set the RTC and `clock get` returned/advanced it (3×); out-of-range
+  `unix_time=1` was rejected, RTC left at ~2026 (no jump to 1970).
+
 ---
 
 ## NFC
