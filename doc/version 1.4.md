@@ -17,6 +17,7 @@ This document lists **only the changes introduced in firmware v1.4.0** relative 
 | Shell | **New** `clock` and `history` commands; test command renamed `tester` → `ats` |
 | Payload formatter | `ttn.js` extended to decode fPorts 2/3/85 and to **encode downlink commands** |
 | Config keys | Threshold-alarm and motion keys renamed to a **sensor-centric** scheme (see §9) |
+| Counters | **New** — hall/input pulse totalizers now persist across reboot & power loss (see §14) |
 
 ---
 
@@ -533,6 +534,18 @@ The contract every update path must honour: **never erase the `storage` region a
 
 See manual-test-plan G6 / G6b / G6c for the regression checks (reset keeps identity, erase wipes
 it, re-flash preserves it).
+
+---
+
+## 15. Counter persistence across power loss (NEW, #49)
+
+The hall (`hall-left` / `hall-right`) and input (`input-a` / `input-b`) pulse totalizers used to live **only in RAM**, so any reset (watchdog, command, FUOTA) or power loss (battery swap, brownout) silently reset a metering total to zero. They are now **persisted to flash (NVS)** and **restored on boot**.
+
+- **Where:** a single small blob in the `storage` partition via the Zephyr Settings API (`counters/totals`), alongside config and the alarm-rule blob. (Not the `history` partition — a debug image is linked over that region.) No new configuration key, no wire-format change; the `reset_counters` command is unchanged.
+- **Save cadence:** the totals are written **once per `interval_report` cycle**, and only when a value actually changed since the last save (dirty flag — an idle channel writes nothing). A `reset_counters` command flushes the cleared value immediately, so a reboot cannot resurrect it.
+- **Guarantee / trade-off:** the worst-case lost-pulse window is **one `interval_report`** (default 900 s) — pulses counted between the last periodic save and an abrupt power loss are lost. Raising `interval_report` widens the window and lowers flash wear; lowering it does the opposite.
+- **Flash wear:** the dirty-flagged, per-report write costs at most one tiny NVS record per cycle. Worst case (continuous counting at the 900 s default) is well within the storage partition's ~10 k erase budget for the life of the device; an idle counter costs nothing. A future brownout/PVD flush (to capture the last window's pulses on supply collapse) is possible but needs HW hold-up verification and is **not** in this version.
+- **Width:** counters stay **`uint32_t`** (max 4 294 967 295, then wraps), matching the telemetry/history encoding.
 
 ---
 
