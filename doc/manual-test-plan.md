@@ -1042,6 +1042,20 @@ rejected with `error` `BAD_REQUEST` "bad epoch".
 
 - [ ] Pass / TODO
 
+### N4 — NFC channel encryption (`CONFIG_APP_NFC_ENCRYPTION`)
+
+**Goal:** The command/config channel is AES-CCM encrypted by default; only info reads without a key. A validation build (`=n`) accepts plaintext (#135).
+**Observable:** On a default build, a plaintext `hio.stck:cmd` record is rejected (no response / decrypt error) while a properly encrypted one is answered with an encrypted `hio.stck:rsp`. On a `CONFIG_APP_NFC_ENCRYPTION=n` build, the boot log shows the `NFC ENCRYPTION DISABLED - VALIDATION BUILD ONLY` banner and plaintext command/config records are accepted.
+
+**Prompt for Claude:**
+> Validation build (`-DCONFIG_APP_NFC_ENCRYPTION=n`, debug): confirm the boot banner, then inject
+> `ats cmd nfc 08032200` (get_info) and confirm a plaintext `Response.Info` comes back. Default
+> build (encryption on): present a plaintext command record and confirm it is rejected; present an
+> AES-CCM record (serial + nonce > last) and confirm an encrypted response is written back, and that
+> the info record (`hio.stck:inf`) is still readable without the key. Report all results.
+
+- [ ] Pass
+
 ---
 
 ## Payload formatter (`ttn.js`)

@@ -51,6 +51,21 @@ config APP_LORAWAN_1_1
 	  USE_LRWAN_1_1_X_CRYPTO=1; the Kconfig only flips the app-level
 	  key wiring.
 
+config APP_NFC_ENCRYPTION
+	bool "Encrypt the NFC command/config channel (AES-CCM)"
+	default y
+	help
+	  Production default (y): NFC command records (hio.stck:cmd) and config
+	  records (hio.stck:cfg) must be AES-CCM encrypted with the device
+	  secret_key and a strictly increasing nonce, and the response written
+	  back (hio.stck:rsp) is encrypted the same way. Without the key, the
+	  only thing a phone can read is the plaintext info record (hio.stck:inf).
+
+	  Disable (n) ONLY for a bench validation build, to drive the NFC command
+	  and config channel in plaintext without provisioning a secret key or
+	  managing nonces. Such a build logs a loud boot warning. NEVER ship a
+	  build with this turned off.
+
 config APP_CMD_DEBUG_SHELL
 	bool "Shell injector for downlink command dispatcher"
 	depends on SHELL
