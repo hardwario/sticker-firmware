@@ -141,6 +141,7 @@ var _CMD_NAMES = {
   19: "enter_mailbox",
   20: "exit_mailbox",
   21: "sample",
+  22: "enter_dfu",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);

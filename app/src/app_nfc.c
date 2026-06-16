@@ -80,6 +80,8 @@ static const char *cmd_action_str(enum app_cmd_action a)
 		return "lrw-reset+reboot";
 	case APP_CMD_ACTION_LRW_JOIN:
 		return "lrw-join";
+	case APP_CMD_ACTION_ENTER_DFU:
+		return "enter-dfu";
 	default:
 		return "?";
 	}

@@ -274,3 +274,12 @@ stm32_lp_tick_source: &lptim1 {
 		};
 	};
 };
+
+/* Reserve the top 32 bytes of SRAM for the DFU-request handoff word
+ * (include/sticker/dfu_signal.h): the application writes a magic value there and
+ * cold-reboots to ask the NFC bootloader to enter DFU mode. Kept out of sram0 so
+ * neither image's linker allocates it; the value survives a software reset and
+ * is lost on power loss. DFU_SIGNAL_ADDR must match (0x2000FFE0). */
+&sram0 {
+	reg = <0x20000000 (DT_SIZE_K(64) - 32)>;
+};

@@ -806,6 +806,15 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		}
 		app_cmd_handle_sample(tp, cmd, resp, action);
 		break;
+	case Command_enter_dfu_tag:
+		/* transports: [nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		*action = APP_CMD_ACTION_ENTER_DFU;
+		resp->which_body = Response_ack_tag;
+		break;
 	default:
 		LOG_WRN("Command tag %u not implemented", cmd->which_body);
 		make_error(resp, Response_Error_Code_UNKNOWN, "not implemented");

@@ -13,10 +13,9 @@
 #include "st25dv_mb.h"
 #include "verify.h"
 
+#include <sticker/dfu_signal.h>
 #include <sticker/nfc_proto.h>
 
-#include <zephyr/devicetree.h>
-#include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/crc.h>
@@ -28,21 +27,6 @@
 #include <string.h>
 
 #define DFU_SESSION_TIMEOUT_MS 30000
-
-/* Force-DFU gesture: both hall magnets held at reset (active-low). */
-static const struct gpio_dt_spec m_hall_l = GPIO_DT_SPEC_GET(DT_NODELABEL(hall_l), gpios);
-static const struct gpio_dt_spec m_hall_r = GPIO_DT_SPEC_GET(DT_NODELABEL(hall_r), gpios);
-
-static bool dfu_forced(void)
-{
-	if (!gpio_is_ready_dt(&m_hall_l) || !gpio_is_ready_dt(&m_hall_r)) {
-		return false;
-	}
-	(void)gpio_pin_configure_dt(&m_hall_l, GPIO_INPUT);
-	(void)gpio_pin_configure_dt(&m_hall_r, GPIO_INPUT);
-	k_busy_wait(50);
-	return gpio_pin_get_dt(&m_hall_l) == 1 && gpio_pin_get_dt(&m_hall_r) == 1;
-}
 
 /*
  * A vector table at slot0 looks like a runnable image when the initial stack
@@ -261,7 +245,10 @@ int main(void)
 	printk("STICKER NFC bootloader\n");
 
 	bool bootable = slot_is_bootable();
-	bool forced = dfu_forced();
+	/* DFU requested by the app over NFC (enter_dfu command): it set a magic in
+	 * retained RAM and cold-rebooted. One-shot — cleared on read so a power
+	 * cycle boots the app normally. */
+	bool forced = dfu_signal_check_and_clear();
 
 	if (bootable && !forced) {
 		jump_to_app(fw_slot0_base());

@@ -18,8 +18,8 @@ All multi-byte fields are **little-endian** unless stated otherwise.
   The bootloader is never erased, so the device is always recoverable via NFC.
 - **Security = pre-signed image**: CI signs the image with a private key; the bootloader verifies
   the signature against a baked-in **public key**. The phone app is a pure transport — it holds
-  no secret and performs no crypto. DFU entry additionally requires a **physical trigger** so a
-  stray NFC field cannot wipe a device.
+  no secret and performs no crypto. DFU entry is requested by the authenticated `enter_dfu` NFC
+  command (§6), so a stray NFC field cannot push a device into DFU.
 
 ## 2. Update image format (`.sfu`)
 
@@ -132,9 +132,13 @@ Requires `MB_MODE` enabled; GPO interrupt is optional (polling is sufficient in 
 ## 6. DFU entry & boot decision
 
 **Entry (into DFU-wait):** the bootloader enters DFU-wait when **either**
-1. the running app set a **DFU-request flag** after a physical trigger (e.g. magnet held on a
-   hall sensor for N s, or a button combo) and rebooted, **or**
+1. the running app received the **`enter_dfu` command over NFC** (protobuf, NFC-only). The app
+   sets a magic word in a reserved retained-RAM slot (`include/sticker/dfu_signal.h`) and
+   cold-reboots; the bootloader reads the word once and clears it. The word survives a software
+   reset but is lost on power loss, so an aborted request cannot wedge the device in DFU. **or**
 2. slot0 has **no valid metadata** (blank / failed / interrupted update).
+
+(No physical/magnet gesture: the both-hall-magnets reset combo is reserved for calibration mode.)
 
 **Valid metadata block:** a small dedicated flash record (own page) written only after a
 successful `CMD_FINISH`:

@@ -37,12 +37,15 @@ reset ──► read sfu_meta (flash)
   needed. ST25DV I2C primitives are ported from `app/src/app_nfc.c`.
 - **Boot decision:** `sfu_meta` (a small dedicated flash record) marks slot0
   bootable. Written only after a verified `CMD_FINISH`.
-- **DFU entry:** the application sets a DFU-request flag and reboots (physical
-  trigger — e.g. magnet gesture, reusing `app_calibration` hall detection), or
-  the bootloader stays in DFU mode automatically when `sfu_meta` is invalid.
-- **Security:** the image is pre-signed by CI; the bootloader verifies the
-  Ed25519 signature against a baked-in public key. Unsigned images are accepted
-  only in `DEV`/debug builds.
+- **DFU entry:** the app receives the **`enter_dfu` NFC command** (protobuf,
+  NFC-only), sets a magic word in reserved retained RAM
+  (`include/sticker/dfu_signal.h`) and cold-reboots; the bootloader reads it once
+  and clears it. (The both-hall-magnets reset combo is *not* used — it is
+  reserved for calibration mode.) The bootloader also stays in DFU automatically
+  when `sfu_meta` is invalid.
+- **Security:** per-frame **AES-CCM** keyed by the per-device `secret_key`
+  (provisioned into `sfu_meta` by the app); an all-zero key means unkeyed
+  (factory bootstrap accepts plaintext frames). See `src/auth.c`.
 
 ## Files
 
@@ -65,13 +68,13 @@ reset ──► read sfu_meta (flash)
    relink the app at the new slot0 base, add the `sfu_meta` page, shrink
    `history`. The app's `chosen { zephyr,code-partition }` already points at
    slot0.
-3. **Signature verify** — wire an Ed25519 implementation (tinycrypt/uECC from
-   `bootloader/mcuboot/ext`, or a compact ed25519) and bake in the public key
-   (Phase 3 produces the keypair + CI signing).
-4. **DFU-entry trigger** — add the flag + magnet/button gesture in the app and
-   the matching check here.
-5. **Size budget** — confirm the bootloader (I2C + flash + Ed25519 + SHA-512)
-   fits the ~48 KB `boot_partition`.
+3. **App provisions `sfu_meta`** — the app must write its `secret_key` + serial
+   into `sfu_meta` at boot so the bootloader has the current AES-CCM key;
+   without it every device stays unkeyed (factory bootstrap).
+4. ~~**DFU-entry trigger**~~ — done: the `enter_dfu` NFC command sets the
+   retained-RAM flag (`include/sticker/dfu_signal.h`) and the bootloader reads it.
+5. **Size budget** — confirm the bootloader (I2C + flash + PSA AES-CCM) fits the
+   36 KB `boot_partition` (currently ~31 KB).
 6. **HW test** — end-to-end with `tools/nfc-flasher` against a real device.
 
 ## Build (once wired)

@@ -128,6 +128,7 @@ message Command {
         EnterMailbox     enter_mailbox     = 19;
         ExitMailbox      exit_mailbox      = 20;
         Sample           sample            = 21;
+        EnterDfu         enter_dfu         = 22;
     }
 // END GENERATED COMMANDS
 
@@ -201,6 +202,11 @@ message Command {
     // when the phone has finished streaming, so the device drops straight back to
     // the low-power NDEF poll instead of waiting out the idle timeout.
     message ExitMailbox { }
+
+    // Reboot into the NFC firmware-update bootloader (variant B, erase-in-place).
+    // NFC-only: the app sets the DFU-entry signal and cold-reboots; the bootloader
+    // then services the image stream over the ST25DV mailbox.
+    message EnterDfu     { }
 
     // Take a fresh sensor sample, send it as telemetry over LoRaWAN (fPort 2),
     // and — over NFC — return the same readings synchronously in Response.sample

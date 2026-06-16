@@ -23,6 +23,8 @@
 #include "app_settings.h"
 #include "app_wdog.h"
 
+#include <sticker/dfu_signal.h>
+
 /* Zephyr includes */
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/init.h>
@@ -237,6 +239,12 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 				 * window comes from the EnterMailbox command (#200; 0 = the
 				 * firmware default). */
 				app_nfc_serve_mailbox(app_cmd_get_mailbox_timeout_s() * 1000);
+				break;
+			case APP_CMD_ACTION_ENTER_DFU:
+				/* Ask the NFC bootloader to enter DFU on the next boot,
+				 * then cold-reboot into it (variant-B firmware update). */
+				dfu_signal_request();
+				sys_reboot(SYS_REBOOT_COLD);
 				break;
 			default:
 				break;
