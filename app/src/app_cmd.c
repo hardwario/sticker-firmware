@@ -168,38 +168,8 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	}
 }
 
-static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *cmd, Response *resp,
-				     enum app_cmd_action *action)
-{
-	ARG_UNUSED(tp);
-	ARG_UNUSED(action);
-	const Command_GetParam *gp = &cmd->body.get_param;
-
-	resp->which_body = Response_config_dump_tag;
-	resp->body.config_dump.page_index = 0;
-	resp->body.config_dump.page_count = 1;
-
-	if (gp->lorawan_field_count > 0) {
-		resp->body.config_dump.has_lorawan = true;
-		app_config_fill_lorawan(&resp->body.config_dump.lorawan, gp->lorawan_field,
-					gp->lorawan_field_count);
-	}
-	if (gp->application_field_count > 0) {
-		resp->body.config_dump.has_application = true;
-		app_config_fill_application(&resp->body.config_dump.application,
-					    gp->application_field, gp->application_field_count);
-	}
-	if (gp->sensors_field_count > 0) {
-		resp->body.config_dump.has_sensors = true;
-		app_config_fill_sensors(&resp->body.config_dump.sensors, gp->sensors_field,
-					gp->sensors_field_count);
-	}
-	if (gp->alarms_field_count > 0) {
-		resp->body.config_dump.has_alarms = true;
-		app_config_fill_alarms(&resp->body.config_dump.alarms, gp->alarms_field,
-				       gp->alarms_field_count);
-	}
-}
+/* app_cmd_handle_get_param is defined after DUMP_FIELDS (it pages like
+ * get_config); see below. */
 
 static void app_cmd_handle_get_info(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				    enum app_cmd_action *action)
@@ -322,6 +292,93 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 		cd->has_alarms = true;
 		app_config_fill_alarms(&cd->alarms, ids[DUMP_SECTION_ALARMS],
 				       n[DUMP_SECTION_ALARMS]);
+	}
+}
+
+/* Encoded-size bound for a (section, tag) from DUMP_FIELDS. Returns false for a
+ * field that isn't dumpable (secret / unknown id): such ids never appear in the
+ * response (app_config_fill_<group>() skips them) so they take no page budget. */
+static bool dump_field_size(uint8_t section, uint32_t tag, uint8_t *size)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(DUMP_FIELDS); i++) {
+		if (DUMP_FIELDS[i].section == section && DUMP_FIELDS[i].tag == tag) {
+			*size = DUMP_FIELDS[i].size;
+			return true;
+		}
+	}
+	return false;
+}
+
+static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				     enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+	const Command_GetParam *gp = &cmd->body.get_param;
+	uint32_t page = gp->has_page ? gp->page : 0;
+
+	/* Requested ids per section, in ConfigDump section order. DUMP_SECTION_*
+	 * equals the index here (0..3). */
+	const uint32_t *req_ids[4] = {gp->lorawan_field, gp->application_field, gp->sensors_field,
+				      gp->alarms_field};
+	const size_t req_n[4] = {gp->lorawan_field_count, gp->application_field_count,
+				 gp->sensors_field_count, gp->alarms_field_count};
+
+	/* Collected ids for the requested page, one buffer per section sized to its
+	 * own request array (the page can't hold more than was requested). */
+	uint32_t lw[ARRAY_SIZE(gp->lorawan_field)], ap[ARRAY_SIZE(gp->application_field)],
+		se[ARRAY_SIZE(gp->sensors_field)], al[ARRAY_SIZE(gp->alarms_field)];
+	uint32_t *out_ids[4] = {lw, ap, se, al};
+	size_t out_n[4] = {0};
+
+	/* One greedy pass over all requested (dumpable) ids, continuous across
+	 * sections like get_config: pack into DR0-sized pages by DUMP_PAGE_BUDGET
+	 * and collect the requested page's tags per section. */
+	uint32_t cur_page = 0, used = 0;
+	for (uint8_t s = 0; s < 4; s++) {
+		for (size_t j = 0; j < req_n[s]; j++) {
+			uint8_t sz;
+			if (!dump_field_size(s, req_ids[s][j], &sz)) {
+				continue; /* secret/unknown → not dumpable */
+			}
+			if (used > 0 && used + sz > DUMP_PAGE_BUDGET) {
+				cur_page++;
+				used = 0;
+			}
+			used += sz;
+			if (cur_page == page) {
+				out_ids[s][out_n[s]++] = req_ids[s][j];
+			}
+		}
+	}
+	uint32_t page_count = cur_page + 1;
+
+	if (page >= page_count) {
+		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "page");
+		resp->body.error.fault_field = 1;
+		return;
+	}
+
+	Response_ConfigDump *cd = &resp->body.config_dump;
+	resp->which_body = Response_config_dump_tag;
+	cd->page_index = page;
+	cd->page_count = page_count;
+
+	if (out_n[DUMP_SECTION_LORAWAN] > 0) {
+		cd->has_lorawan = true;
+		app_config_fill_lorawan(&cd->lorawan, lw, out_n[DUMP_SECTION_LORAWAN]);
+	}
+	if (out_n[DUMP_SECTION_APPLICATION] > 0) {
+		cd->has_application = true;
+		app_config_fill_application(&cd->application, ap, out_n[DUMP_SECTION_APPLICATION]);
+	}
+	if (out_n[DUMP_SECTION_SENSORS] > 0) {
+		cd->has_sensors = true;
+		app_config_fill_sensors(&cd->sensors, se, out_n[DUMP_SECTION_SENSORS]);
+	}
+	if (out_n[DUMP_SECTION_ALARMS] > 0) {
+		cd->has_alarms = true;
+		app_config_fill_alarms(&cd->alarms, al, out_n[DUMP_SECTION_ALARMS]);
 	}
 }
 
@@ -800,6 +857,17 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	}
 
 	int ret = encode_response(&resp, out, out_cap, out_len);
+	if (ret == -EMSGSIZE) {
+		/* The composed response doesn't fit the transport buffer. Don't fail
+		 * silently (#93.3) — replace it with a compact Error carrying the same
+		 * seq so the host learns the request couldn't be answered (e.g. an
+		 * over-broad GetParam/GetConfig page). */
+		LOG_WRN("Response too large for buffer; sending Error instead");
+		Response err = Response_init_zero;
+		err.seq = resp.seq;
+		make_error(&err, Response_Error_Code_UNKNOWN, "response too large");
+		ret = encode_response(&err, out, out_cap, out_len);
+	}
 	if (ret) {
 		return ret;
 	}

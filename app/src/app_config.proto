@@ -155,11 +155,17 @@ message Command {
         optional AppConfigMessage.Alarms      alarms      = 5;
     }
 
+    // Read back selected non-secret config fields. Paged like GetConfig:
+    // omitted/0 page = first; the response (Response.ConfigDump) carries
+    // page_count so the host can fetch the rest. A request that selects more
+    // fields than fit one DR0 page would otherwise overflow the response and be
+    // dropped silently (#93.3).
     message GetParam {
         repeated uint32 lorawan_field     = 1;
         repeated uint32 application_field = 2;
         repeated uint32 sensors_field     = 3;
         repeated uint32 alarms_field      = 4;
+        optional uint32 page              = 5;
     }
 
     message GetInfo      { }

@@ -162,11 +162,23 @@ static uint8_t m_lc_response_gw_count;
 
 /* --- TX queues (MED-7/8: were single overwrite-able slots) --- */
 #define APP_LRW_RESPONSE_BUF_SIZE 64
-#define APP_LRW_REQUEST_BUF_SIZE  64
+/* Incoming command buffer. The network can deliver up to the LoRaWAN MTU
+ * (~222 B at the highest DR) on a single downlink; a realistic SetParam with
+ * deveui+joineui+appkey encodes to ~90 B. 224 covers the full MTU so large
+ * commands are never silently dropped (#93.4 — was 64, which dropped them with
+ * only a LOG_WRN and the host never learned the command wasn't processed). */
+#define APP_LRW_REQUEST_BUF_SIZE  224
 #define APP_LRW_DOWNLINK_CMD_PORT 85
 #define APP_LRW_ALARM_PORT        3
 #define APP_LRW_TX_QUEUE_DEPTH    4
 #define APP_LRW_DL_QUEUE_DEPTH    4
+
+/* The request buffer must hold a full-MTU downlink so the largest command the
+ * network can deliver still fits (#93.4/#93.7). Response/frame buffers are
+ * deliberately NOT asserted against the nanopb *_size bounds: those frames are
+ * DR-budget-limited and paged (get_config/get_param/history), so the on-air
+ * size is always far below the protobuf worst case. */
+BUILD_ASSERT(APP_LRW_REQUEST_BUF_SIZE >= 222, "request buffer below LoRaWAN MTU");
 
 struct lrw_tx_msg {
 	uint8_t port;
@@ -692,6 +704,10 @@ static void join_work_handler(struct k_work *work)
 	}
 
 	state_transition(APP_LRW_STATE_JOINING); /* stops send timer, drops history */
+
+	/* Discard any in-progress telemetry snapshot: a rejoin must not resume a
+	 * pre-outage snapshot with stale sensor data and no indication (#93.5). */
+	app_compose_reset();
 
 	if (m_init_join) {
 		LOG_INF("Initial join after boot");

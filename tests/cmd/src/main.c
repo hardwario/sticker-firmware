@@ -123,6 +123,44 @@ ZTEST(cmd, test_get_param_config_dump)
 	zassert_true(r.body.config_dump.sensors.cap_barometer, "cap_barometer value");
 }
 
+/* get_param pages like get_config when the requested fields don't fit one DR0
+ * response (#93.3). deveui(18 B) + joineui(18 B) + devaddr(10 B) = 46 B > the
+ * 30 B page budget, so they split: page 0 = {deveui}, page 1 = {joineui,
+ * devaddr}, page_count = 2. */
+ZTEST(cmd, test_get_param_paging)
+{
+	Response r;
+
+	/* seq2 get_param{ lorawan_field=[5 deveui, 6 joineui, 9 devaddr] } — page omitted (0). */
+	reset_cfg();
+	handle("08021a050a03050609", &r);
+	zassert_equal(r.which_body, Response_config_dump_tag, "page0 which=%d", r.which_body);
+	zassert_equal(r.body.config_dump.page_index, 0, "page0 index");
+	zassert_equal(r.body.config_dump.page_count, 2, "page_count %u",
+		      r.body.config_dump.page_count);
+	zassert_true(r.body.config_dump.lorawan.has_deveui, "deveui on page0");
+	zassert_false(r.body.config_dump.lorawan.has_joineui, "joineui must not be on page0");
+	zassert_false(r.body.config_dump.lorawan.has_devaddr, "devaddr must not be on page0");
+
+	/* Same request with page=1 (field 5 varint = 0x28 0x01). */
+	reset_cfg();
+	handle("08021a070a030506092801", &r);
+	zassert_equal(r.which_body, Response_config_dump_tag, "page1 which=%d", r.which_body);
+	zassert_equal(r.body.config_dump.page_index, 1, "page1 index");
+	zassert_equal(r.body.config_dump.page_count, 2, "page1 count");
+	zassert_false(r.body.config_dump.lorawan.has_deveui, "deveui must not be on page1");
+	zassert_true(r.body.config_dump.lorawan.has_joineui, "joineui on page1");
+	zassert_true(r.body.config_dump.lorawan.has_devaddr, "devaddr on page1");
+
+	/* Out-of-range page → Error. */
+	reset_cfg();
+	handle("08021a070a030506092805", &r);
+	zassert_equal(r.which_body, Response_error_tag, "oob page should Error, which=%d",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
+		      r.body.error.code);
+}
+
 ZTEST(cmd, test_build_info)
 {
 	uint8_t out[128];
