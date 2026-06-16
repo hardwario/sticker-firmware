@@ -175,7 +175,11 @@ message Command {
         optional bool input_b    = 4;
     }
     message ReqHistory   { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
-    message ClockSync    { }
+    // Empty (LRW): re-sync the RTC from the network (DeviceTimeReq). With
+    // unix_time set (NFC): the phone supplies the wall-clock time (UTC seconds)
+    // and the RTC is set from it directly — a one-shot bootstrap before/without
+    // a network. A later DeviceTimeAns stays authoritative and may refine it.
+    message ClockSync    { optional uint32 unix_time = 1; }
 
     // Set or clear a dynamic alarm rule in a fixed slot (the slot index is the
     // rule's stable identity; several slots may share one source+quantity for

@@ -337,9 +337,10 @@ static void app_cmd_handle_reset_counters(enum app_cmd_transport tp, const Comma
 	resp->which_body = Response_ack_tag;
 }
 
-/* force_send / req_history / clock_sync are LRW-only (transports: [lrw] in the
- * YAML); the generated dispatch enforces that before calling the handler, so
- * the handlers below assume the LoRaWAN transport. */
+/* force_send / req_history are LRW-only (transports: [lrw] in the YAML); the
+ * generated dispatch enforces that before calling the handler, so the handlers
+ * below assume the LoRaWAN transport. (clock_sync also runs over NFC — see its
+ * handler.) */
 static void app_cmd_handle_force_send(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
@@ -457,20 +458,47 @@ static int w1_scan_cb(struct w1_rom rom, void *user_data)
 
 #endif /* APP_CMD_HAVE_W1 */
 
+/* Sanity bounds for a wall-clock time supplied over NFC: reject obviously wrong
+ * epochs. 2024-01-01 .. 2100-01-01 (UTC) comfortably brackets any real device
+ * provisioning while staying well inside the uint32 range (rolls over in 2106). */
+#define APP_CMD_CLOCK_UNIX_MIN 1704067200UL /* 2024-01-01T00:00:00Z */
+#define APP_CMD_CLOCK_UNIX_MAX 4102444800UL /* 2100-01-01T00:00:00Z */
+
 static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
 	ARG_UNUSED(tp);
-	ARG_UNUSED(cmd);
 	ARG_UNUSED(action);
-#if defined(APP_CMD_HAVE_CLOCK) && defined(CONFIG_LORAWAN)
-	ARG_UNUSED(resp);
-	/* Re-sync, then answer with an Info uplink once the network time lands
-	 * (carries the synced unix_time). No ack — see app_lrw. */
+#ifdef APP_CMD_HAVE_CLOCK
+	/* unix_time set (NFC): the phone supplies the wall-clock time; set the RTC
+	 * directly and answer with the resulting Info (carries the new unix_time).
+	 * This bootstraps a device before/without a network. */
+	if (cmd->body.clock_sync.has_unix_time) {
+		uint32_t unix_s = cmd->body.clock_sync.unix_time;
+		if (unix_s < APP_CMD_CLOCK_UNIX_MIN || unix_s > APP_CMD_CLOCK_UNIX_MAX) {
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "bad epoch");
+			return;
+		}
+		if (app_clock_set_unix(unix_s) != 0) {
+			make_error(resp, Response_Error_Code_UNKNOWN, "rtc set failed");
+			return;
+		}
+		resp->which_body = Response_info_tag;
+		fill_info(&resp->body.info);
+		return;
+	}
+#ifdef CONFIG_LORAWAN
+	/* Empty (LRW): re-sync from the network, then answer with an Info uplink
+	 * once the network time lands (carries the synced unix_time). No ack — see
+	 * app_lrw. */
 	app_clock_force_resync();
 	app_lrw_send_info_on_clock_sync();
 #else
-	resp->which_body = Response_ack_tag; /* no clock/LRW: just confirm */
+	resp->which_body = Response_ack_tag; /* no LRW: just confirm */
+#endif
+#else
+	ARG_UNUSED(cmd);
+	resp->which_body = Response_ack_tag; /* no clock: just confirm */
 #endif
 }
 
@@ -698,11 +726,6 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_req_history(tp, cmd, resp, action);
 		break;
 	case Command_clock_sync_tag:
-		/* transports: [lrw] — the answer is an uplink, meaningless over NFC */
-		if (tp != APP_CMD_TRANSPORT_LRW) {
-			make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
-			break;
-		}
 		app_cmd_handle_clock_sync(tp, cmd, resp, action);
 		break;
 	case Command_alarm_rule_tag:
