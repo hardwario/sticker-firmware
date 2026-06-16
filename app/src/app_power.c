@@ -21,7 +21,6 @@
 
 #if defined(CONFIG_FW_DEBUG) && (CONFIG_APP_DEBUG_AUTOSUSPEND_S > 0)
 #include <SEGGER_RTT.h>
-#include <cmsis_core.h>
 #endif
 
 LOG_MODULE_REGISTER(app_power, LOG_LEVEL_DBG);
@@ -51,16 +50,6 @@ void app_power_suspend(void)
 
 #if defined(CONFIG_FW_DEBUG) && (CONFIG_APP_DEBUG_AUTOSUSPEND_S > 0)
 
-/* True while a debugger (SWD) is attached — the probe sets CoreDebug C_DEBUGEN.
- * With a debugger connected the STM32WL wakes from Shutdown immediately via the
- * still-powered debug domain (DBGMCU) and would just boot-loop, so we never
- * auto-suspend during an active debug session. A forgotten battery unit has no
- * debugger attached, so the idle timeout still protects it. */
-static inline bool app_power_debugger_attached(void)
-{
-	return (CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) != 0U;
-}
-
 void app_power_check_idle(void)
 {
 	static int64_t last_activity_ms;
@@ -69,7 +58,12 @@ void app_power_check_idle(void)
 
 	/* The shell RTT down-buffer WrOff advances whenever the host sends shell
 	 * input over the probe — use it as the "last interaction" signal without
-	 * touching the shell internals. */
+	 * touching the shell internals. (We deliberately do NOT gate on CoreDebug
+	 * C_DEBUGEN: that bit is sticky and stays set after the probe is physically
+	 * unplugged, so it can never tell "attached" from "was attached" — a unit
+	 * with the J-Link yanked would then never suspend. Relying on shell idle
+	 * means an active debug session keeps the device awake by sending commands,
+	 * and an unplugged/idle unit suspends after the timeout.) */
 	unsigned int wr = _SEGGER_RTT.aDown[CONFIG_SHELL_BACKEND_RTT_BUFFER].WrOff;
 	int64_t now = k_uptime_get();
 
@@ -80,9 +74,7 @@ void app_power_check_idle(void)
 		return;
 	}
 
-	/* Treat an attached debugger as activity: don't suspend during a debug
-	 * session, and start the idle window fresh once the probe detaches. */
-	if (app_power_debugger_attached() || wr != last_wr) {
+	if (wr != last_wr) {
 		last_wr = wr;
 		last_activity_ms = now;
 		return;
