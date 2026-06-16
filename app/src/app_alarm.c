@@ -38,8 +38,11 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 #define ALARM_EDGE_ACT   0
 #define ALARM_EDGE_DEACT 1
 
-/* ---- per-rule runtime state (keyed by source+quantity, not rule index, so it
- * survives the rule list being reordered on clear) -------------------------- */
+/* ---- per-rule runtime state, keyed 1:1 on the alarm slot index -----------
+ * m_rt[slot] is the runtime latch for the rule in that slot. source/quantity are
+ * cached so a slot that is cleared or re-pointed at a different (source,quantity)
+ * resets its latch (see rt_sync). Two rules on one sensor live in different slots
+ * and so latch independently. */
 
 struct rstate {
 	bool used;
@@ -54,28 +57,32 @@ struct rstate {
 	int64_t oneshot_expiry; /* STATE edge one-shot: auto-clear time (0 = none) */
 };
 
-static struct rstate m_rt[APP_ALARM_RULE_MAX];
+static struct rstate m_rt[APP_ALARM_SLOT_COUNT];
 static int64_t m_last_alarm_send_ms;
 static app_alarm_event_cb m_event_cb;
 static void *m_event_cb_user_data;
 
 K_MUTEX_DEFINE(m_lock);
 
-static struct rstate *rt_for(uint8_t source, uint8_t quantity)
+/* Return the rule in `slot`, syncing its runtime latch: an empty slot (or one
+ * now pointing at a different source/quantity than its latch tracked) is reset.
+ * Returns NULL for an empty slot. */
+static const struct app_alarm_rule *rt_sync(uint8_t slot)
 {
-	struct rstate *free = NULL;
-	for (int i = 0; i < APP_ALARM_RULE_MAX; i++) {
-		if (m_rt[i].used && m_rt[i].source == source && m_rt[i].quantity == quantity) {
-			return &m_rt[i];
+	const struct app_alarm_rule *rule = app_alarm_rules_get(slot);
+	struct rstate *rt = &m_rt[slot];
+
+	if (rule == NULL) {
+		if (rt->used) {
+			*rt = (struct rstate){0};
 		}
-		if (!m_rt[i].used && free == NULL) {
-			free = &m_rt[i];
-		}
+		return NULL;
 	}
-	if (free) {
-		*free = (struct rstate){.used = true, .source = source, .quantity = quantity};
+	if (!rt->used || rt->source != rule->source || rt->quantity != rule->quantity) {
+		*rt = (struct rstate){
+			.used = true, .source = rule->source, .quantity = rule->quantity};
 	}
-	return free;
+	return rule;
 }
 
 /* ---- Alarm-detail batch on fPort 3 (#27) -------------------------------- */
@@ -178,12 +185,13 @@ static void alarm_batch_work_handler(struct k_work *work)
 
 /* Record one alarm edge for the fPort-3 detail batch. Caller does NOT hold
  * m_lock (this takes it). */
-static void alarm_collect(uint8_t source, uint8_t quantity, bool active, uint8_t side,
+static void alarm_collect(uint8_t slot, uint8_t source, uint8_t quantity, bool active, uint8_t side,
 			  bool has_value, int32_t value)
 {
 	int limit = g_app_config.alarm_limit;
 	int64_t now = k_uptime_get();
 	struct app_cmd_alarm_event ev = {
+		.slot = slot,
 		.source = source,
 		.quantity = quantity,
 		.edge = active ? ALARM_EDGE_ACT : ALARM_EDGE_DEACT,
@@ -331,14 +339,15 @@ static bool read_poll_state(uint8_t source, uint8_t quantity, bool *out)
 
 /* Threshold rule with hysteresis (reuses the previous eval_threshold logic,
  * keyed to the rule's runtime state). Returns latched state. */
-static bool eval_threshold(const struct app_alarm_rule *rule, struct rstate *rt, float value,
-			   bool *should_send)
+static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, struct rstate *rt,
+			   float value, bool *should_send)
 {
 	if (!rule->enabled || isnan(value)) {
 		if (rt->active) {
 			rt->active = false;
 			*should_send = true;
-			alarm_collect(rule->source, rule->quantity, false, rt->side, false, 0);
+			alarm_collect(slot, rule->source, rule->quantity, false, rt->side, false,
+				      0);
 		}
 		return false;
 	}
@@ -349,20 +358,20 @@ static bool eval_threshold(const struct app_alarm_rule *rule, struct rstate *rt,
 		if (value > lo + hst && value < hi - hst) {
 			rt->active = false;
 			*should_send = true;
-			alarm_collect(rule->source, rule->quantity, false, rt->side, true,
+			alarm_collect(slot, rule->source, rule->quantity, false, rt->side, true,
 				      alarm_scale(rule->quantity, value));
 		}
 	} else if (value < lo - hst) {
 		rt->active = true;
 		rt->side = ALARM_SIDE_LO;
 		*should_send = true;
-		alarm_collect(rule->source, rule->quantity, true, ALARM_SIDE_LO, true,
+		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_LO, true,
 			      alarm_scale(rule->quantity, value));
 	} else if (value > hi + hst) {
 		rt->active = true;
 		rt->side = ALARM_SIDE_HI;
 		*should_send = true;
-		alarm_collect(rule->source, rule->quantity, true, ALARM_SIDE_HI, true,
+		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_HI, true,
 			      alarm_scale(rule->quantity, value));
 	}
 	return rt->active;
@@ -371,7 +380,7 @@ static bool eval_threshold(const struct app_alarm_rule *rule, struct rstate *rt,
 /* STATE rule: from/to over a digital level. from != to is an edge (one-shot:
  * activate, auto-clear after alarm_notif_time, no deactivate); from == to is a
  * level (active while cur == to). */
-static void eval_state(const struct app_alarm_rule *rule, struct rstate *rt, bool cur,
+static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct rstate *rt, bool cur,
 		       bool *should_send)
 {
 	bool is_edge = (rule->from_state != rule->to_state);
@@ -382,8 +391,8 @@ static void eval_state(const struct app_alarm_rule *rule, struct rstate *rt, boo
 			rt->active = false;
 			rt->oneshot_expiry = 0;
 			*should_send = true;
-			alarm_collect(rule->source, rule->quantity, false, ALARM_SIDE_NONE, true,
-				      0);
+			alarm_collect(slot, rule->source, rule->quantity, false, ALARM_SIDE_NONE,
+				      true, 0);
 		}
 		rt->have_prev_state = true;
 		rt->prev_state = cur_lvl;
@@ -397,8 +406,8 @@ static void eval_state(const struct app_alarm_rule *rule, struct rstate *rt, boo
 			rt->active = true;
 			rt->oneshot_expiry = k_uptime_get() + notif_hold_ms();
 			*should_send = true;
-			alarm_collect(rule->source, rule->quantity, true, ALARM_SIDE_NONE, true,
-				      cur_lvl);
+			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_NONE,
+				      true, cur_lvl);
 		}
 	} else {
 		/* Level: active while cur == to. */
@@ -406,13 +415,13 @@ static void eval_state(const struct app_alarm_rule *rule, struct rstate *rt, boo
 		if (want && !rt->active) {
 			rt->active = true;
 			*should_send = true;
-			alarm_collect(rule->source, rule->quantity, true, ALARM_SIDE_NONE, true,
-				      cur_lvl);
+			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_NONE,
+				      true, cur_lvl);
 		} else if (!want && rt->active) {
 			rt->active = false;
 			*should_send = true;
-			alarm_collect(rule->source, rule->quantity, false, ALARM_SIDE_NONE, true,
-				      cur_lvl);
+			alarm_collect(slot, rule->source, rule->quantity, false, ALARM_SIDE_NONE,
+				      true, cur_lvl);
 		}
 	}
 
@@ -423,8 +432,8 @@ static void eval_state(const struct app_alarm_rule *rule, struct rstate *rt, boo
 /* COUNT rate rule: alarm when the counter rose by >= hi since the last fire.
  * The underlying counters in g_app_sensor_data only refresh per sample/report,
  * so this is effectively a per-report rate. One-shot (auto-clear). */
-static void eval_count(const struct app_alarm_rule *rule, struct rstate *rt, uint32_t cur,
-		       bool *should_send)
+static void eval_count(uint8_t slot, const struct app_alarm_rule *rule, struct rstate *rt,
+		       uint32_t cur, bool *should_send)
 {
 	if (!rt->have_prev_count) {
 		rt->have_prev_count = true;
@@ -440,7 +449,7 @@ static void eval_count(const struct app_alarm_rule *rule, struct rstate *rt, uin
 		rt->active = true;
 		rt->oneshot_expiry = k_uptime_get() + notif_hold_ms();
 		*should_send = true;
-		alarm_collect(rule->source, rule->quantity, true, ALARM_SIDE_NONE, true,
+		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_NONE, true,
 			      (int32_t)cur);
 		rt->prev_count = cur;
 	}
@@ -454,21 +463,18 @@ bool app_alarm_poll(void)
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
-	for (uint8_t i = 0; i < app_alarm_rules_count(); i++) {
-		const struct app_alarm_rule *rule = app_alarm_rules_get(i);
+	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
+		const struct app_alarm_rule *rule = rt_sync(slot);
 		if (rule == NULL) {
-			break;
-		}
-		struct rstate *rt = rt_for(rule->source, rule->quantity);
-		if (rt == NULL) {
 			continue;
 		}
+		struct rstate *rt = &m_rt[slot];
 
 		switch (app_alarm_quantity_kind((enum app_alarm_quantity)rule->quantity)) {
 		case APP_ALARM_KIND_THRESHOLD: {
 			float v = NAN;
 			read_threshold_value(rule->source, rule->quantity, &v);
-			eval_threshold(rule, rt, v, &should_send);
+			eval_threshold(slot, rule, rt, v, &should_send);
 			break;
 		}
 		case APP_ALARM_KIND_STATE: {
@@ -476,14 +482,14 @@ bool app_alarm_poll(void)
 			 * app_alarm_event(). */
 			bool st;
 			if (read_poll_state(rule->source, rule->quantity, &st)) {
-				eval_state(rule, rt, st, &should_send);
+				eval_state(slot, rule, rt, st, &should_send);
 			}
 			break;
 		}
 		case APP_ALARM_KIND_RATE: {
 			uint32_t c;
 			if (read_counter(rule->source, &c)) {
-				eval_count(rule, rt, c, &should_send);
+				eval_count(slot, rule, rt, c, &should_send);
 			}
 			break;
 		}
@@ -494,7 +500,7 @@ bool app_alarm_poll(void)
 
 	/* Expire one-shot latches and collect "any active". */
 	k_mutex_lock(&m_lock, K_FOREVER);
-	for (int i = 0; i < APP_ALARM_RULE_MAX; i++) {
+	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
 		if (!m_rt[i].used) {
 			continue;
 		}
@@ -516,25 +522,27 @@ bool app_alarm_poll(void)
 
 void app_alarm_event(enum app_alarm_source source, bool active)
 {
-	/* Discrete edge → its STATE rule (if any). */
-	const struct app_alarm_rule *rule = app_alarm_rules_find(source, APP_ALARM_Q_STATE);
+	/* Discrete edge → every STATE rule on this source (several slots may carry
+	 * the same source, e.g. an edge rule and a level rule). */
 	app_alarm_event_cb cb;
 	void *user_data;
+	bool should_send = false;
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 	cb = m_event_cb;
 	user_data = m_event_cb_user_data;
 	k_mutex_unlock(&m_lock);
 
-	if (rule != NULL) {
-		struct rstate *rt = rt_for(source, APP_ALARM_Q_STATE);
-		if (rt != NULL) {
-			bool should_send = false;
-			eval_state(rule, rt, active, &should_send);
-			if (should_send) {
-				alarm_lrw_send();
-			}
+	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
+		const struct app_alarm_rule *rule = rt_sync(slot);
+		if (rule == NULL || rule->source != source || rule->quantity != APP_ALARM_Q_STATE) {
+			continue;
 		}
+		eval_state(slot, rule, &m_rt[slot], active, &should_send);
+	}
+
+	if (should_send) {
+		alarm_lrw_send();
 	}
 
 	if (cb) {
@@ -555,9 +563,11 @@ bool app_alarm_is_active(enum app_alarm_source source, enum app_alarm_quantity q
 {
 	bool a = false;
 	k_mutex_lock(&m_lock, K_FOREVER);
-	for (int i = 0; i < APP_ALARM_RULE_MAX; i++) {
-		if (m_rt[i].used && m_rt[i].source == source && m_rt[i].quantity == quantity) {
-			a = m_rt[i].active;
+	/* Any slot on this (source, quantity) latched active — several may exist. */
+	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
+		if (m_rt[i].used && m_rt[i].source == source && m_rt[i].quantity == quantity &&
+		    m_rt[i].active) {
+			a = true;
 			break;
 		}
 	}
@@ -572,90 +582,164 @@ bool app_alarm_is_active(enum app_alarm_source source, enum app_alarm_quantity q
 #include <stdlib.h>
 #include <string.h>
 
+/* Per-slot latch state, for the shell list (distinct from the any-slot
+ * app_alarm_is_active used by callers that key on source+quantity). */
+static bool slot_active(uint8_t slot)
+{
+	bool a;
+	k_mutex_lock(&m_lock, K_FOREVER);
+	a = slot < APP_ALARM_SLOT_COUNT && m_rt[slot].used && m_rt[slot].active;
+	k_mutex_unlock(&m_lock);
+	return a;
+}
+
+/* Print one occupied slot's rule (caller has checked it is occupied). */
+static void print_slot(const struct shell *sh, uint8_t slot, const struct app_alarm_rule *r)
+{
+	const char *src = app_alarm_source_name(r->source);
+	const char *q = app_alarm_quantity_name(r->quantity);
+	bool active = slot_active(slot);
+
+	switch (app_alarm_quantity_kind(r->quantity)) {
+	case APP_ALARM_KIND_THRESHOLD:
+		shell_print(
+			sh,
+			"  [%u] %s %s  lo=%s%d.%02d hi=%s%d.%02d hst=%s%d.%02d  en=%d  active=%d",
+			slot, src, q, APP_FP2(r->lo), APP_FP2(r->hi), APP_FP2(r->hst), r->enabled,
+			active);
+		break;
+	case APP_ALARM_KIND_STATE:
+		shell_print(sh, "  [%u] %s %s  %u->%u (%s)  en=%d  active=%d", slot, src, q,
+			    r->from_state, r->to_state,
+			    r->from_state == r->to_state ? "level" : "edge", r->enabled, active);
+		break;
+	case APP_ALARM_KIND_RATE:
+		shell_print(sh, "  [%u] %s %s  rate>=%d/interval  en=%d  active=%d", slot, src, q,
+			    (int)r->hi, r->enabled, active);
+		break;
+	}
+}
+
 static int cmd_alarm_list(const struct shell *sh, size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
+	/* Optional <index>: list just that one slot. */
+	if (argc >= 2) {
+		char *end;
+		unsigned long slot = strtoul(argv[1], &end, 10);
+		if (*end != '\0' || slot >= APP_ALARM_SLOT_COUNT) {
+			shell_error(sh, "invalid <index> (0..%d)", APP_ALARM_SLOT_COUNT - 1);
+			return -EINVAL;
+		}
+		const struct app_alarm_rule *r = app_alarm_rules_get((uint8_t)slot);
+		if (r == NULL) {
+			shell_print(sh, "slot %lu empty", slot);
+			return 0;
+		}
+		print_slot(sh, (uint8_t)slot, r);
+		return 0;
+	}
 
-	uint8_t n = app_alarm_rules_count();
-	shell_print(sh, "%u rule(s):", n);
-	for (uint8_t i = 0; i < n; i++) {
-		const struct app_alarm_rule *r = app_alarm_rules_get(i);
-		const char *src = app_alarm_source_name(r->source);
-		const char *q = app_alarm_quantity_name(r->quantity);
-		bool active = app_alarm_is_active(r->source, r->quantity);
-		switch (app_alarm_quantity_kind(r->quantity)) {
-		case APP_ALARM_KIND_THRESHOLD:
-			shell_print(sh,
-				    "  %s %s  lo=%s%d.%02d hi=%s%d.%02d hst=%s%d.%02d  en=%d  "
-				    "active=%d",
-				    src, q, APP_FP2(r->lo), APP_FP2(r->hi), APP_FP2(r->hst),
-				    r->enabled, active);
-			break;
-		case APP_ALARM_KIND_STATE:
-			shell_print(sh, "  %s %s  %u->%u (%s)  en=%d  active=%d", src, q,
-				    r->from_state, r->to_state,
-				    r->from_state == r->to_state ? "level" : "edge", r->enabled,
-				    active);
-			break;
-		case APP_ALARM_KIND_RATE:
-			shell_print(sh, "  %s %s  rate>=%d/interval  en=%d  active=%d", src, q,
-				    (int)r->hi, r->enabled, active);
-			break;
+	shell_print(sh, "%u rule(s):", app_alarm_rules_count());
+	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
+		const struct app_alarm_rule *r = app_alarm_rules_get(slot);
+		if (r != NULL) {
+			print_slot(sh, slot, r);
 		}
 	}
 	return 0;
 }
 
-static int cmd_alarm_set(const struct shell *sh, size_t argc, char **argv)
+/* Parse `<source> <quantity> <kind-args…>` starting at argv[base] into `r`
+ * (enabled). Shared by `alarm set` (base=2, after the index) and `alarm new`
+ * (base=1). Prints a usage/validity error and returns -EINVAL on bad input. */
+static int parse_rule_spec(const struct shell *sh, size_t argc, char **argv, size_t base,
+			   struct app_alarm_rule *r)
 {
-	int src = app_alarm_source_by_name(argv[1]);
-	int qty = app_alarm_quantity_by_name(argv[2]);
+	int src = app_alarm_source_by_name(argv[base]);
+	int qty = app_alarm_quantity_by_name(argv[base + 1]);
 	if (src < 0 || qty < 0 ||
 	    !app_alarm_rule_valid((enum app_alarm_source)src, (enum app_alarm_quantity)qty)) {
 		shell_error(sh, "invalid <source> <quantity>");
 		return -EINVAL;
 	}
 
-	struct app_alarm_rule r = {.source = (uint8_t)src, .quantity = (uint8_t)qty, .enabled = 1};
+	*r = (struct app_alarm_rule){
+		.source = (uint8_t)src, .quantity = (uint8_t)qty, .enabled = 1};
 
+	size_t a = base + 2; /* first kind-arg */
 	switch (app_alarm_quantity_kind((enum app_alarm_quantity)qty)) {
 	case APP_ALARM_KIND_THRESHOLD:
-		if (argc < 5) {
-			shell_error(sh, "usage: alarm set <source> <quantity> <lo> <hi> [hst]");
+		if (argc < a + 2) {
+			shell_error(sh, "threshold args: <lo> <hi> [hst]");
 			return -EINVAL;
 		}
-		r.lo = strtof(argv[3], NULL);
-		r.hi = strtof(argv[4], NULL);
-		r.hst = (argc >= 6) ? strtof(argv[5], NULL) : 0.0f;
+		r->lo = strtof(argv[a], NULL);
+		r->hi = strtof(argv[a + 1], NULL);
+		r->hst = (argc > a + 2) ? strtof(argv[a + 2], NULL) : 0.0f;
 		break;
 	case APP_ALARM_KIND_STATE:
-		if (argc < 5) {
-			shell_error(sh, "usage: alarm set <source> <quantity> <from> <to> "
-					"(0/1; from!=to=edge, from==to=level)");
+		if (argc < a + 2) {
+			shell_error(sh,
+				    "state args: <from> <to> (0/1; from!=to=edge, from==to=level)");
 			return -EINVAL;
 		}
-		r.from_state = (uint8_t)(strtoul(argv[3], NULL, 10) ? 1 : 0);
-		r.to_state = (uint8_t)(strtoul(argv[4], NULL, 10) ? 1 : 0);
+		r->from_state = (uint8_t)(strtoul(argv[a], NULL, 10) ? 1 : 0);
+		r->to_state = (uint8_t)(strtoul(argv[a + 1], NULL, 10) ? 1 : 0);
 		break;
 	case APP_ALARM_KIND_RATE:
-		if (argc < 4) {
-			shell_error(sh, "usage: alarm set <source> count <N-per-interval>");
+		if (argc < a + 1) {
+			shell_error(sh, "count args: <N-per-interval>");
 			return -EINVAL;
 		}
-		r.hi = (float)strtoul(argv[3], NULL, 10);
+		r->hi = (float)strtoul(argv[a], NULL, 10);
 		break;
 	}
+	return 0;
+}
 
-	int ret = app_alarm_rules_set(&r);
+/* Store `r` into `slot`, persist, and report. Shared by set / new. */
+static int store_rule(const struct shell *sh, uint8_t slot, const struct app_alarm_rule *r)
+{
+	int ret = app_alarm_rules_set(slot, r);
 	if (ret) {
-		shell_error(sh, "set failed: %d%s", ret,
-			    ret == -ENOSPC ? " (rule table full)" : "");
+		shell_error(sh, "set failed: %d", ret);
 		return ret;
 	}
 	ret = app_alarm_rules_save();
-	shell_print(sh, "rule set%s", ret ? " (NOT persisted!)" : "");
+	shell_print(sh, "rule set in slot %u%s", slot, ret ? " (NOT persisted!)" : "");
 	return 0;
+}
+
+static int cmd_alarm_set(const struct shell *sh, size_t argc, char **argv)
+{
+	char *end;
+	unsigned long slot = strtoul(argv[1], &end, 10);
+	if (*end != '\0' || slot >= APP_ALARM_SLOT_COUNT) {
+		shell_error(sh, "invalid <index> (0..%d)", APP_ALARM_SLOT_COUNT - 1);
+		return -EINVAL;
+	}
+
+	struct app_alarm_rule r;
+	int ret = parse_rule_spec(sh, argc, argv, 2, &r);
+	if (ret) {
+		return ret;
+	}
+	return store_rule(sh, (uint8_t)slot, &r);
+}
+
+static int cmd_alarm_new(const struct shell *sh, size_t argc, char **argv)
+{
+	struct app_alarm_rule r;
+	int ret = parse_rule_spec(sh, argc, argv, 1, &r);
+	if (ret) {
+		return ret;
+	}
+	int slot = app_alarm_rules_first_free();
+	if (slot < 0) {
+		shell_error(sh, "no free slot (all %d in use)", APP_ALARM_SLOT_COUNT);
+		return -ENOSPC;
+	}
+	return store_rule(sh, (uint8_t)slot, &r);
 }
 
 /* Force a sample + one evaluation pass now and report whether any alarm is
@@ -673,36 +757,42 @@ static int cmd_alarm_poll(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_alarm_clear(const struct shell *sh, size_t argc, char **argv)
 {
-	if (argc == 1) {
+	if (argc == 1 || strcmp(argv[1], "all") == 0) {
 		app_alarm_rules_clear_all();
 		(void)app_alarm_rules_save();
 		shell_print(sh, "all rules cleared");
 		return 0;
 	}
-	int src = app_alarm_source_by_name(argv[1]);
-	int qty = (argc >= 3) ? app_alarm_quantity_by_name(argv[2]) : -1;
-	if (src < 0 || qty < 0) {
-		shell_error(sh, "usage: alarm clear [<source> <quantity>]");
+	char *end;
+	unsigned long slot = strtoul(argv[1], &end, 10);
+	if (*end != '\0' || slot >= APP_ALARM_SLOT_COUNT) {
+		shell_error(sh, "usage: alarm clear <index>|all");
 		return -EINVAL;
 	}
-	int ret = app_alarm_rules_clear((enum app_alarm_source)src, (enum app_alarm_quantity)qty);
+	int ret = app_alarm_rules_clear((uint8_t)slot);
 	if (ret) {
-		shell_error(sh, "clear failed: %d", ret);
+		shell_error(sh, "clear failed: %d%s", ret, ret == -ENOENT ? " (slot empty)" : "");
 		return ret;
 	}
 	(void)app_alarm_rules_save();
-	shell_print(sh, "rule cleared");
+	shell_print(sh, "slot %lu cleared", slot);
 	return 0;
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_alarm, SHELL_CMD_ARG(list, NULL, "List alarm rules.", cmd_alarm_list, 1, 0),
+	sub_alarm,
+	SHELL_CMD_ARG(list, NULL, "List alarm rules, or one slot. Usage: list [<index>]",
+		      cmd_alarm_list, 1, 1),
 	SHELL_CMD_ARG(set, NULL,
-		      "Set a rule. Usage: set <source> <quantity> <args>\n"
+		      "Set a rule in a slot. Usage: set <index> <source> <quantity> <args>\n"
 		      "  threshold: <lo> <hi> [hst]   state: <from> <to>   count: <N>",
-		      cmd_alarm_set, 4, 2),
-	SHELL_CMD_ARG(clear, NULL, "Clear a rule (or all). Usage: clear [<source> <quantity>]",
-		      cmd_alarm_clear, 1, 2),
+		      cmd_alarm_set, 5, 2),
+	SHELL_CMD_ARG(new, NULL,
+		      "Set a rule in the first free slot. Usage: new <source> <quantity> <args>\n"
+		      "  threshold: <lo> <hi> [hst]   state: <from> <to>   count: <N>",
+		      cmd_alarm_new, 4, 2),
+	SHELL_CMD_ARG(clear, NULL, "Clear a slot (or all). Usage: clear <index>|all",
+		      cmd_alarm_clear, 1, 1),
 	SHELL_CMD_ARG(poll, NULL, "Sample + evaluate rules now (bench test).", cmd_alarm_poll, 1,
 		      0),
 	SHELL_SUBCMD_SET_END);

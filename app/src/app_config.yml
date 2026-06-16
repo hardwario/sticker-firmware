@@ -142,6 +142,7 @@ commands:
     - {name: clock_sync,     proto_id: 12, body: ClockSync,     kind: handler, response: info_deferred, transports: [lrw]}
     - {name: alarm_rule,     proto_id: 13, body: AlarmRule,     kind: handler, response: ack}
     - {name: w1_scan,        proto_id: 14, body: W1Scan,        kind: handler, response: w1_scan}
+    - {name: req_alarm_rules, proto_id: 15, body: ReqAlarmRules, kind: handler, response: alarm_rules_dump}
 parameters:
   - name: secret_key
     proto_group: root
