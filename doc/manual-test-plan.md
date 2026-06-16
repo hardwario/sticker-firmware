@@ -996,7 +996,9 @@ rejected with `error` `BAD_REQUEST` "bad epoch".
 > and confirm the response is `error` code 1 (BAD_REQUEST) with detail "bad epoch", and the RTC is
 > left unchanged. Report all three results.
 
-- [ ] Pass
+- [x] Pass — HW-verified 2026-06-16 (debug build, RTT shell). Fresh boot `RTC not set yet`; NFC
+  `clock_sync{unix_time}` set the RTC and `clock get` returned/advanced it (3×); out-of-range
+  `unix_time=1` was rejected, RTC left at ~2026 (no jump to 1970).
 
 ---
 
