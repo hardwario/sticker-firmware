@@ -19,6 +19,10 @@
 #include <zephyr/shell/shell.h>
 #endif
 
+#if defined(CONFIG_SOC_FAMILY_STM32)
+#include <stm32_ll_system.h> /* LL_DBGMCU_Disable* */
+#endif
+
 #if defined(CONFIG_FW_DEBUG) && (CONFIG_APP_DEBUG_AUTOSUSPEND_S > 0)
 #include <SEGGER_RTT.h>
 #endif
@@ -41,6 +45,17 @@ void app_power_suspend(void)
 
 	/* Let the RTT log line flush before the core powers down. */
 	k_sleep(K_MSEC(100));
+
+#if defined(CONFIG_SOC_FAMILY_STM32)
+	/* Drop the DBGMCU debug-in-low-power bits before powering off. With
+	 * CONFIG_STM32_ENABLE_DEBUG_SLEEP_STOP=y (and after any J-Link session)
+	 * they stay set, keeping the debug domain powered — which wakes the MCU
+	 * straight back out of Shutdown and boot-loops, even after the probe is
+	 * unplugged, until a power-on-reset. Clearing them here lets Shutdown hold. */
+	LL_DBGMCU_DisableDBGSleepMode();
+	LL_DBGMCU_DisableDBGStopMode();
+	LL_DBGMCU_DisableDBGStandbyMode();
+#endif
 
 	/* STM32WL Shutdown: lowest practical quiescent current. Identity and
 	 * LoRaWAN keys live in NVS (flash) and survive; RAM and the RTC wall-clock
