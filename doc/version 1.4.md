@@ -351,7 +351,7 @@ Not user-facing, but worth recording: v1.4.0 grew enough that the debug image RA
 
 ## 12. LoRaWAN connection management (NEW)
 
-`app_lrw.c` was refactored to a single, explicitly-defined state machine (`IDLE → JOINING → HEALTHY ⇄ WARNING → RECONNECT → JOINING`, plus `DISABLED`). All state changes go through one `state_transition()` with entry/exit actions, and three timers each have a single purpose (report cadence / link-check timeout / rejoin backoff). This removes a long-standing failure mode where a late link-check answer in RECONNECT could cancel the rejoin and leave the device wedged with TX stopped (the *"TX stops after 4–5 messages"* bug) — validated fixed on hardware over both TTN and ChirpStack.
+`app_lrw.c` was refactored to a single, explicitly-defined state machine (`IDLE → JOINING → HEALTHY ⇄ WARNING → RECONNECT → JOINING`, plus `DISABLED`). All state changes go through one `state_transition()` with entry/exit actions, and the link-check-timeout and rejoin-backoff timers each have a single purpose (the report-cadence timer moved out to `app_report`, see §13). This removes a long-standing failure mode where a late link-check answer in RECONNECT could cancel the rejoin and leave the device wedged with TX stopped (the *"TX stops after 4–5 messages"* bug) — validated fixed on hardware over both TTN and ChirpStack.
 
 **New configuration keys** (LoRaWAN link supervision, runtime-tunable):
 
@@ -365,6 +365,18 @@ Behaviour notes:
 - **OTAA rejoin** uses exponential backoff (60 s → ×2 → capped 3600 s); **ABP** cannot rejoin and stays in WARNING (it never had a join).
 - **Radio-silent mode (#98)** — if the configured **DevEUI is all-zero** (an un-provisioned device), the firmware enters `DISABLED` instead of looping on join requests that can never succeed, saving power. It stays DISABLED until reprovisioned and rebooted.
 - Debug builds expose `ats lrw lc ok|fail` to drive the state machine deterministically on the bench (no real RF outage needed).
+
+---
+
+## 13. Report orchestration split (internal, #126)
+
+Follow-up to §12 with no behaviour change: the report *orchestration* was lifted out of `app_lrw.c` into a new `app_report` module, leaving `app_lrw` as pure LoRaWAN transport.
+
+- **`app_report`** owns *when* to measure & send — the `interval_report` cadence timer, the lazy sample trigger (`interval_sample == 0`) and the per-cycle history capture — and runs on its **own work queue**, so the sensor read and the history flash write no longer execute on the LoRaWAN TX work queue (or the system work queue that also drives the MAC). Each cycle it samples, captures, then calls `app_lrw_send_telemetry()`.
+- **`app_lrw`** still owns *how* it reaches the network: it composes the snapshot, splits it into per-DR-budget frames, piggybacks the `LinkCheckReq`, retries on duty-cycle backoff and drains the response/alarm queues. On a link-ready edge (join success / history-replay finish) it kicks `app_report` to resume the cadence.
+- History capture now self-skips while a replay is streaming (`app_history` owns that guard), instead of `app_lrw` gating it.
+
+The report cadence is unified with `interval_report` (there is no separate `interval_history`). No configuration, wire-format or shell change. Validated end-to-end on hardware over ChirpStack on both debug and release builds (join → cadence, force_send, LC piggyback, multi-frame split, history capture; release `f_cnt_up` sustained well past the historical 4–5-message stall).
 
 ---
 
