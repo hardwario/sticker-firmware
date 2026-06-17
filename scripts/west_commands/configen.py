@@ -364,6 +364,12 @@ def _proto_type(param, enum_proto_name):
     ptype = param.get("type")
     if ptype == "enum":
         return enum_proto_name[param["enum"]]
+    # Non-callback bytes use native protobuf `bytes` (nanopb fixed_length, see
+    # build_options_lines) to avoid the 2x hex-string overhead on the wire.
+    # Callback bytes (e.g. secret_key) stay `string` — their hand-written
+    # callback handles the raw stream and they are off the SetParam/dump paths.
+    if ptype == "bytes" and not param.get("proto_callback"):
+        return "bytes"
     return PROTO_SCALAR.get(ptype, "uint32")
 
 
@@ -598,8 +604,10 @@ def build_ingest_model(config):
 
 
 def build_options_lines(config):
-    """nanopb max_length options for hex-key (bytes) fields. Fields flagged
-    `proto_callback: true` are left as nanopb callbacks (no option emitted)."""
+    """nanopb options for bytes fields: native `bytes` with fixed_length (a plain
+    `pb_byte_t[size]`, no length word) — half the wire size of the old hex string
+    and the C struct stays `uint8_t[size]`. Fields flagged `proto_callback: true`
+    are left as nanopb callbacks (no option emitted)."""
     proto, gmap = _proto_groups(config)
     msg = proto["message"]
     lines = []
@@ -610,7 +618,7 @@ def build_options_lines(config):
         fname = _proto_field_name(p, g)
         path = (f"{msg}.{fname}" if g["key"] == "root"
                 else f"{msg}.{g['message']}.{fname}")
-        lines.append(f"{path} max_length:{p['size'] * 2}")
+        lines.append(f"{path} max_size:{p['size']} fixed_length:true")
     return lines
 
 

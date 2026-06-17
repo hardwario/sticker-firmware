@@ -1,15 +1,15 @@
 # BEGIN GENERATED CONFIG
-AppConfigMessage.Lorawan.deveui max_length:16
-AppConfigMessage.Lorawan.joineui max_length:16
-AppConfigMessage.Lorawan.nwkkey max_length:32
-AppConfigMessage.Lorawan.appkey max_length:32
-AppConfigMessage.Lorawan.devaddr max_length:8
-AppConfigMessage.Lorawan.nwkskey max_length:32
-AppConfigMessage.Lorawan.appskey max_length:32
-AppConfigMessage.Sensors.sensor1_rom max_length:16
-AppConfigMessage.Sensors.sensor2_rom max_length:16
-AppConfigMessage.Sensors.sensor3_rom max_length:16
-AppConfigMessage.Sensors.sensor4_rom max_length:16
+AppConfigMessage.Lorawan.deveui max_size:8 fixed_length:true
+AppConfigMessage.Lorawan.joineui max_size:8 fixed_length:true
+AppConfigMessage.Lorawan.nwkkey max_size:16 fixed_length:true
+AppConfigMessage.Lorawan.appkey max_size:16 fixed_length:true
+AppConfigMessage.Lorawan.devaddr max_size:4 fixed_length:true
+AppConfigMessage.Lorawan.nwkskey max_size:16 fixed_length:true
+AppConfigMessage.Lorawan.appskey max_size:16 fixed_length:true
+AppConfigMessage.Sensors.sensor1_rom max_size:8 fixed_length:true
+AppConfigMessage.Sensors.sensor2_rom max_size:8 fixed_length:true
+AppConfigMessage.Sensors.sensor3_rom max_size:8 fixed_length:true
+AppConfigMessage.Sensors.sensor4_rom max_size:8 fixed_length:true
 # END GENERATED CONFIG
 
 Response.Error.detail       max_size:32
