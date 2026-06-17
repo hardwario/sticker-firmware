@@ -190,19 +190,6 @@ static struct gpio_callback m_gpo_cb;
  * (max count 1 — bursts coalesce into one wake, which is fine). */
 static K_SEM_DEFINE(m_gpo_sem, 0, 1);
 
-/* Set by app_nfc_wait_event: true when the last poll woke from its timeout (no
- * RF activity for the whole window -> phone gone), false when a GPO event woke
- * it (phone active on the tag). Gates restoring the info record over a spent
- * response so a still-in-progress NDEF exchange (whose field flickers off
- * between the write and read passes) isn't wiped mid-flight. */
-static bool m_woke_timeout;
-
-/* True while a response record sits on the tag awaiting the "phone gone" revert
- * to the info record. Lets the poll thread wait on a short fallback (so the
- * revert is prompt) instead of the full low-power window, but only during this
- * transient post-command state. */
-static bool m_resp_on_tag;
-
 /* Periodic NFC check enable (toggled via `nfc autocheck`). Lets a config blob
  * be written over several `nfc write` calls without the periodic check racing
  * it and rewriting the tag to the info record mid-write. */
@@ -238,11 +225,6 @@ enum app_cmd_action app_nfc_take_cmd_action(void)
 bool app_nfc_periodic_enabled(void)
 {
 	return m_periodic;
-}
-
-bool app_nfc_resp_pending(void)
-{
-	return m_resp_on_tag;
 }
 
 static int read_mem(uint16_t reg, void *buf, size_t len)
@@ -865,14 +847,7 @@ static void gpo_isr(const struct device *dev, struct gpio_callback *cb, uint32_t
  * channel). Returns 0 if woken by GPO, -EAGAIN on the fallback timeout. */
 int app_nfc_wait_event(int fallback_ms)
 {
-	int ret = k_sem_take(&m_gpo_sem, K_MSEC(fallback_ms));
-
-	/* Remember how we woke: a GPO event (ret == 0) means the phone is active on
-	 * the tag (its RF field changed); a timeout (ret != 0) means no RF activity
-	 * for the whole window — the phone is gone. Used to decide when it's safe to
-	 * restore the info record over a spent response (see nfc_check_locked). */
-	m_woke_timeout = (ret != 0);
-	return ret;
+	return k_sem_take(&m_gpo_sem, K_MSEC(fallback_ms));
 }
 
 /* Configure the GPO line (PB12) as an input with an edge interrupt. */
@@ -956,9 +931,6 @@ static int nfc_check_locked(enum app_nfc_action *action)
 
 	m_have_resp = false;
 	m_seen_resp = false;
-	/* Cleared here; set true only on the paths that leave a response on the tag
-	 * (just-written reply, or an existing reply we keep). */
-	m_resp_on_tag = false;
 
 	/* Build the expected info record up front (no I2C); used both to detect
 	 * "tag already holds our info" and to (re)write it. */
@@ -1021,37 +993,12 @@ static int nfc_check_locked(enum app_nfc_action *action)
 				res = ret;
 			}
 		}
-		m_resp_on_tag = true; /* poll on a short fallback so the revert is prompt */
 		return res;
 	}
 
-	/* Our response is already on the tag. Restore the info record only once the
-	 * phone is really gone — i.e. this poll woke from its timeout (no RF activity
-	 * for the whole window), not from a GPO event. A GPO-woken poll means the
-	 * phone is still active on the tag, and its RF field legitimately flickers off
-	 * between the write and read passes of a single exchange; wiping the response
-	 * then (on a bare field-off check) would make that read fail. The field-off
-	 * check stays as a second guard. */
+	/* Our response is already on the tag (awaiting the phone read): leave it. */
 	if (m_seen_resp) {
 		m_unknown_count = 0;
-		if (m_woke_timeout) {
-			/* This poll woke from its (short) timeout: no RF activity for the
-			 * whole window, so the phone is gone (during an exchange it keeps the
-			 * field active, which wakes us via GPO instead). Safe — and reliable
-			 * even on a flaky I2C unit — to restore the info record now. */
-			LOG_INF("NFC: response spent (phone gone) -> restoring info record");
-			if (info_len) {
-				ret = write_mem(0, info, info_len);
-				if (ret) {
-					LOG_ERR_CALL_FAILED_INT("write_mem", ret);
-					res = ret;
-				}
-			}
-		} else {
-			/* GPO-woken: phone still active -> keep the response and stay on the
-			 * short fallback so we notice promptly once it leaves. */
-			m_resp_on_tag = true;
-		}
 		return res;
 	}
 

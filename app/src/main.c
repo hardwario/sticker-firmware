@@ -43,10 +43,6 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
  * tag when the phone touches it — low power. The fallback is a safety net in
  * case an edge is missed. */
 #define NFC_EVENT_FALLBACK_MS        30000
-/* Shorter fallback used only while a spent response sits on the tag, so it is
- * reverted to the info record promptly once the phone leaves (rather than after
- * the full low-power window). */
-#define NFC_RESP_REVERT_MS           4000
 #define NFC_POLL_START_DELAY_MS      3000
 #define NFC_POLL_THREAD_STACK_SIZE   3072
 #define NFC_POLL_THREAD_PRIO         K_LOWEST_APPLICATION_THREAD_PRIO
@@ -117,11 +113,8 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 
 	for (;;) {
 		/* Sleep until the GPO interrupt fires (phone touched the tag) or the
-		 * fallback elapses. Use a shorter fallback while a spent response is still
-		 * on the tag so it's reverted to the info record promptly once the phone
-		 * leaves. */
-		app_nfc_wait_event(app_nfc_resp_pending() ? NFC_RESP_REVERT_MS
-							  : NFC_EVENT_FALLBACK_MS);
+		 * fallback elapses. */
+		app_nfc_wait_event(NFC_EVENT_FALLBACK_MS);
 
 		if (!app_nfc_periodic_enabled()) {
 			continue;
@@ -147,9 +140,6 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 			}
 		}
 
-		/* Deferred action from an NFC command (reboot/save/factory-reset). Run
-		 * it after a short delay so the phone can still read the Ack response
-		 * off the tag first. */
 		/* Deferred action from an NFC command (reboot/save/factory-reset/enter-
 		 * mailbox). Run it after a short delay so the phone can still read the Ack
 		 * response off the tag first. Re-check after each one: serving the mailbox
