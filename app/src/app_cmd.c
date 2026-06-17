@@ -11,6 +11,7 @@
 #include "app_input.h"
 #include "app_log.h"
 #include "app_lrw.h"
+#include "app_report.h"
 #include "app_config_ingest.h"
 
 /* Wall-clock source (PR #41, branch lrw-rtc-time). Until that lands on this
@@ -167,38 +168,8 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	}
 }
 
-static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *cmd, Response *resp,
-				     enum app_cmd_action *action)
-{
-	ARG_UNUSED(tp);
-	ARG_UNUSED(action);
-	const Command_GetParam *gp = &cmd->body.get_param;
-
-	resp->which_body = Response_config_dump_tag;
-	resp->body.config_dump.page_index = 0;
-	resp->body.config_dump.page_count = 1;
-
-	if (gp->lorawan_field_count > 0) {
-		resp->body.config_dump.has_lorawan = true;
-		app_config_fill_lorawan(&resp->body.config_dump.lorawan, gp->lorawan_field,
-					gp->lorawan_field_count);
-	}
-	if (gp->application_field_count > 0) {
-		resp->body.config_dump.has_application = true;
-		app_config_fill_application(&resp->body.config_dump.application,
-					    gp->application_field, gp->application_field_count);
-	}
-	if (gp->sensors_field_count > 0) {
-		resp->body.config_dump.has_sensors = true;
-		app_config_fill_sensors(&resp->body.config_dump.sensors, gp->sensors_field,
-					gp->sensors_field_count);
-	}
-	if (gp->alarms_field_count > 0) {
-		resp->body.config_dump.has_alarms = true;
-		app_config_fill_alarms(&resp->body.config_dump.alarms, gp->alarms_field,
-				       gp->alarms_field_count);
-	}
-}
+/* app_cmd_handle_get_param is defined after DUMP_FIELDS (it pages like
+ * get_config); see below. */
 
 static void app_cmd_handle_get_info(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				    enum app_cmd_action *action)
@@ -213,9 +184,12 @@ static void app_cmd_handle_get_info(enum app_cmd_transport tp, const Command *cm
 
 /* Dumpable config fields in fixed order, each with a conservative upper bound
  * on its encoded size (field tag + value; hex fields include the length byte).
- * Mirrors the non-secret fields emitted by app_config_fill_lorawan/application
- * — a new config field needs a row here too (a codegen target once #44 lands).
- * Drives get_config paging: greedy bin-pack into DR0-sized ConfigDump pages. */
+ * Mirrors the non-secret fields emitted by app_config_fill_<group>().
+ * Drives get_config paging: greedy bin-pack into DR0-sized ConfigDump pages.
+ *
+ * The rows are GENERATED from app_config.yml by `west configen` (#112): one per
+ * dumpable parameter (proto_group in a ConfigDump section, not `dump: false`),
+ * with the encoded-size bound derived from its type. Do not edit by hand. */
 /* Sections mirror the config submessages (one fill_<group>() each). Order is
  * the ConfigDump submessage order. */
 #define DUMP_SECTION_LORAWAN     0
@@ -223,53 +197,31 @@ static void app_cmd_handle_get_info(enum app_cmd_transport tp, const Command *cm
 #define DUMP_SECTION_SENSORS     2
 #define DUMP_SECTION_ALARMS      3
 
-#define LRW(tag, size) {DUMP_SECTION_LORAWAN, (tag), (size)}
-#define APP(tag)       {DUMP_SECTION_APPLICATION, (tag), 2}
-#define SEN(tag, size) {DUMP_SECTION_SENSORS, (tag), (size)}
-#define ALM(tag)       {DUMP_SECTION_ALARMS, (tag), 2}
-
 static const struct {
 	uint8_t section;
 	uint8_t tag;
 	uint8_t size;
 } DUMP_FIELDS[] = {
-	/* Lorawan (non-secret): varints 2 B, deveui/joineui 18 B, devaddr 10 B. */
-	LRW(1, 2),
-	LRW(2, 2),
-	LRW(3, 2),
-	LRW(4, 2),
-	LRW(5, 18),
-	LRW(6, 18),
-	LRW(9, 10),
-	LRW(12, 2),
-	/* Application: calibration, intervals, history (varints, 2 B). */
-	APP(1),
-	APP(2),
-	APP(4),
-	APP(49),
-	APP(50),
-	/* Sensors: caps/enum 2 B, sensorN_rom 8 B -> 18 B hex. */
-	SEN(40, 2),
-	SEN(41, 2),
-	SEN(42, 2),
-	SEN(43, 2),
-	SEN(44, 2),
-	SEN(45, 2),
-	SEN(46, 2),
-	SEN(54, 2),
-	SEN(55, 2),
-	SEN(60, 2),
-	SEN(56, 18),
-	SEN(57, 18),
-	SEN(58, 18),
-	SEN(59, 18),
-	/* Alarms: alarm_limit/notif_time + hall/input counters (varints, 2 B). */
-	ALM(51),
-	ALM(52),
-	ALM(25),
-	ALM(28),
-	ALM(31),
-	ALM(34),
+	// BEGIN GENERATED DUMP_FIELDS
+	{DUMP_SECTION_LORAWAN, 1, 2},      {DUMP_SECTION_LORAWAN, 12, 2},
+	{DUMP_SECTION_LORAWAN, 2, 2},      {DUMP_SECTION_LORAWAN, 3, 2},
+	{DUMP_SECTION_LORAWAN, 4, 2},      {DUMP_SECTION_LORAWAN, 5, 18},
+	{DUMP_SECTION_LORAWAN, 6, 18},     {DUMP_SECTION_LORAWAN, 9, 10},
+	{DUMP_SECTION_LORAWAN, 13, 3},     {DUMP_SECTION_LORAWAN, 14, 3},
+	{DUMP_SECTION_APPLICATION, 1, 2},  {DUMP_SECTION_APPLICATION, 2, 3},
+	{DUMP_SECTION_APPLICATION, 4, 4},  {DUMP_SECTION_APPLICATION, 49, 3},
+	{DUMP_SECTION_APPLICATION, 50, 7}, {DUMP_SECTION_SENSORS, 40, 3},
+	{DUMP_SECTION_SENSORS, 41, 3},     {DUMP_SECTION_SENSORS, 42, 3},
+	{DUMP_SECTION_SENSORS, 43, 3},     {DUMP_SECTION_SENSORS, 44, 3},
+	{DUMP_SECTION_SENSORS, 45, 3},     {DUMP_SECTION_SENSORS, 46, 3},
+	{DUMP_SECTION_SENSORS, 60, 3},     {DUMP_SECTION_SENSORS, 55, 3},
+	{DUMP_SECTION_SENSORS, 54, 3},     {DUMP_SECTION_SENSORS, 56, 19},
+	{DUMP_SECTION_SENSORS, 57, 19},    {DUMP_SECTION_SENSORS, 58, 19},
+	{DUMP_SECTION_SENSORS, 59, 19},    {DUMP_SECTION_ALARMS, 51, 4},
+	{DUMP_SECTION_ALARMS, 52, 3},      {DUMP_SECTION_ALARMS, 25, 3},
+	{DUMP_SECTION_ALARMS, 28, 3},      {DUMP_SECTION_ALARMS, 31, 3},
+	{DUMP_SECTION_ALARMS, 34, 3},
+	// END GENERATED DUMP_FIELDS
 };
 
 /* Per-page byte budget for the field payload inside one ConfigDump. The encoded
@@ -343,6 +295,93 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 	}
 }
 
+/* Encoded-size bound for a (section, tag) from DUMP_FIELDS. Returns false for a
+ * field that isn't dumpable (secret / unknown id): such ids never appear in the
+ * response (app_config_fill_<group>() skips them) so they take no page budget. */
+static bool dump_field_size(uint8_t section, uint32_t tag, uint8_t *size)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(DUMP_FIELDS); i++) {
+		if (DUMP_FIELDS[i].section == section && DUMP_FIELDS[i].tag == tag) {
+			*size = DUMP_FIELDS[i].size;
+			return true;
+		}
+	}
+	return false;
+}
+
+static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				     enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+	const Command_GetParam *gp = &cmd->body.get_param;
+	uint32_t page = gp->has_page ? gp->page : 0;
+
+	/* Requested ids per section, in ConfigDump section order. DUMP_SECTION_*
+	 * equals the index here (0..3). */
+	const uint32_t *req_ids[4] = {gp->lorawan_field, gp->application_field, gp->sensors_field,
+				      gp->alarms_field};
+	const size_t req_n[4] = {gp->lorawan_field_count, gp->application_field_count,
+				 gp->sensors_field_count, gp->alarms_field_count};
+
+	/* Collected ids for the requested page, one buffer per section sized to its
+	 * own request array (the page can't hold more than was requested). */
+	uint32_t lw[ARRAY_SIZE(gp->lorawan_field)], ap[ARRAY_SIZE(gp->application_field)],
+		se[ARRAY_SIZE(gp->sensors_field)], al[ARRAY_SIZE(gp->alarms_field)];
+	uint32_t *out_ids[4] = {lw, ap, se, al};
+	size_t out_n[4] = {0};
+
+	/* One greedy pass over all requested (dumpable) ids, continuous across
+	 * sections like get_config: pack into DR0-sized pages by DUMP_PAGE_BUDGET
+	 * and collect the requested page's tags per section. */
+	uint32_t cur_page = 0, used = 0;
+	for (uint8_t s = 0; s < 4; s++) {
+		for (size_t j = 0; j < req_n[s]; j++) {
+			uint8_t sz;
+			if (!dump_field_size(s, req_ids[s][j], &sz)) {
+				continue; /* secret/unknown → not dumpable */
+			}
+			if (used > 0 && used + sz > DUMP_PAGE_BUDGET) {
+				cur_page++;
+				used = 0;
+			}
+			used += sz;
+			if (cur_page == page) {
+				out_ids[s][out_n[s]++] = req_ids[s][j];
+			}
+		}
+	}
+	uint32_t page_count = cur_page + 1;
+
+	if (page >= page_count) {
+		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "page");
+		resp->body.error.fault_field = 1;
+		return;
+	}
+
+	Response_ConfigDump *cd = &resp->body.config_dump;
+	resp->which_body = Response_config_dump_tag;
+	cd->page_index = page;
+	cd->page_count = page_count;
+
+	if (out_n[DUMP_SECTION_LORAWAN] > 0) {
+		cd->has_lorawan = true;
+		app_config_fill_lorawan(&cd->lorawan, lw, out_n[DUMP_SECTION_LORAWAN]);
+	}
+	if (out_n[DUMP_SECTION_APPLICATION] > 0) {
+		cd->has_application = true;
+		app_config_fill_application(&cd->application, ap, out_n[DUMP_SECTION_APPLICATION]);
+	}
+	if (out_n[DUMP_SECTION_SENSORS] > 0) {
+		cd->has_sensors = true;
+		app_config_fill_sensors(&cd->sensors, se, out_n[DUMP_SECTION_SENSORS]);
+	}
+	if (out_n[DUMP_SECTION_ALARMS] > 0) {
+		cd->has_alarms = true;
+		app_config_fill_alarms(&cd->alarms, al, out_n[DUMP_SECTION_ALARMS]);
+	}
+}
+
 static void app_cmd_handle_reset_counters(enum app_cmd_transport tp, const Command *cmd,
 					  Response *resp, enum app_cmd_action *action)
 {
@@ -356,9 +395,10 @@ static void app_cmd_handle_reset_counters(enum app_cmd_transport tp, const Comma
 	resp->which_body = Response_ack_tag;
 }
 
-/* force_send / req_history / clock_sync are LRW-only (transports: [lrw] in the
- * YAML); the generated dispatch enforces that before calling the handler, so
- * the handlers below assume the LoRaWAN transport. */
+/* force_send / req_history are LRW-only (transports: [lrw] in the YAML); the
+ * generated dispatch enforces that before calling the handler, so the handlers
+ * below assume the LoRaWAN transport. (clock_sync also runs over NFC — see its
+ * handler.) */
 static void app_cmd_handle_force_send(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
@@ -367,7 +407,7 @@ static void app_cmd_handle_force_send(enum app_cmd_transport tp, const Command *
 	ARG_UNUSED(resp);
 	ARG_UNUSED(action);
 #if defined(CONFIG_LORAWAN)
-	app_lrw_send();
+	app_report_trigger();
 #endif
 	/* No ack — the triggered telemetry uplink IS the answer; an extra ack
 	 * would just cost a second uplink. Leave which_body == 0 (emit nothing). */
@@ -415,11 +455,20 @@ static void app_cmd_handle_alarm_rule(enum app_cmd_transport tp, const Command *
 		ret = 0;
 		break;
 	case Command_AlarmRule_Op_CLEAR:
-		ret = app_alarm_rules_clear((enum app_alarm_source)ar->source,
-					    (enum app_alarm_quantity)ar->quantity);
+		if (!ar->has_slot) {
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "slot required");
+			resp->body.error.fault_field = 10; /* AlarmRule.slot */
+			return;
+		}
+		ret = app_alarm_rules_clear((uint8_t)ar->slot);
 		break;
 	case Command_AlarmRule_Op_SET:
 	default: {
+		if (!ar->has_slot) {
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "slot required");
+			resp->body.error.fault_field = 10; /* AlarmRule.slot */
+			return;
+		}
 		struct app_alarm_rule r = {
 			.source = (uint8_t)ar->source,
 			.quantity = (uint8_t)ar->quantity,
@@ -430,7 +479,7 @@ static void app_cmd_handle_alarm_rule(enum app_cmd_transport tp, const Command *
 			.from_state = (uint8_t)((ar->has_from_state && ar->from_state) ? 1 : 0),
 			.to_state = (uint8_t)((ar->has_to_state && ar->to_state) ? 1 : 0),
 		};
-		ret = app_alarm_rules_set(&r);
+		ret = app_alarm_rules_set((uint8_t)ar->slot, &r);
 		break;
 	}
 	}
@@ -467,20 +516,47 @@ static int w1_scan_cb(struct w1_rom rom, void *user_data)
 
 #endif /* APP_CMD_HAVE_W1 */
 
+/* Sanity bounds for a wall-clock time supplied over NFC: reject obviously wrong
+ * epochs. 2024-01-01 .. 2100-01-01 (UTC) comfortably brackets any real device
+ * provisioning while staying well inside the uint32 range (rolls over in 2106). */
+#define APP_CMD_CLOCK_UNIX_MIN 1704067200UL /* 2024-01-01T00:00:00Z */
+#define APP_CMD_CLOCK_UNIX_MAX 4102444800UL /* 2100-01-01T00:00:00Z */
+
 static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
 	ARG_UNUSED(tp);
-	ARG_UNUSED(cmd);
 	ARG_UNUSED(action);
-#if defined(APP_CMD_HAVE_CLOCK) && defined(CONFIG_LORAWAN)
-	ARG_UNUSED(resp);
-	/* Re-sync, then answer with an Info uplink once the network time lands
-	 * (carries the synced unix_time). No ack — see app_lrw. */
+#ifdef APP_CMD_HAVE_CLOCK
+	/* unix_time set (NFC): the phone supplies the wall-clock time; set the RTC
+	 * directly and answer with the resulting Info (carries the new unix_time).
+	 * This bootstraps a device before/without a network. */
+	if (cmd->body.clock_sync.has_unix_time) {
+		uint32_t unix_s = cmd->body.clock_sync.unix_time;
+		if (unix_s < APP_CMD_CLOCK_UNIX_MIN || unix_s > APP_CMD_CLOCK_UNIX_MAX) {
+			make_error(resp, Response_Error_Code_BAD_REQUEST, "bad epoch");
+			return;
+		}
+		if (app_clock_set_unix(unix_s) != 0) {
+			make_error(resp, Response_Error_Code_UNKNOWN, "rtc set failed");
+			return;
+		}
+		resp->which_body = Response_info_tag;
+		fill_info(&resp->body.info);
+		return;
+	}
+#ifdef CONFIG_LORAWAN
+	/* Empty (LRW): re-sync from the network, then answer with an Info uplink
+	 * once the network time lands (carries the synced unix_time). No ack — see
+	 * app_lrw. */
 	app_clock_force_resync();
 	app_lrw_send_info_on_clock_sync();
 #else
-	resp->which_body = Response_ack_tag; /* no clock/LRW: just confirm */
+	resp->which_body = Response_ack_tag; /* no LRW: just confirm */
+#endif
+#else
+	ARG_UNUSED(cmd);
+	resp->which_body = Response_ack_tag; /* no clock: just confirm */
 #endif
 }
 
@@ -518,6 +594,143 @@ static void app_cmd_handle_w1_scan(enum app_cmd_transport tp, const Command *cmd
 #else
 	make_error(resp, Response_Error_Code_NOT_READY, "no 1-wire");
 #endif
+}
+
+/* Per-page byte budget for the RuleEntry payload inside one AlarmRulesDump.
+ * Mirrors ConfigDump's paging: keep a page comfortably under the transport MTU.
+ * LRW pages tightly for low data rates; NFC's response buffer is 256 B, so it
+ * fits everything in one page (a real device has only a handful of rules). */
+#define RULES_PAGE_BUDGET_LRW 30
+#define RULES_PAGE_BUDGET_NFC 200
+
+/* Worst-case encoded size of one RuleEntry, by kind: ~2 B each for the
+ * source/quantity/enabled/kind scalars + the repeated-field wrapper, plus 5 B
+ * per present float (tag + 4) or 2 B per present state varint. */
+static size_t app_cmd_rule_entry_size(const struct app_alarm_rule *r)
+{
+	size_t s = 2 /* wrapper */ + 2 + 2 + 2 + 2 + 2 /* source quantity enabled kind slot */;
+
+	switch (app_alarm_quantity_kind((enum app_alarm_quantity)r->quantity)) {
+	case APP_ALARM_KIND_THRESHOLD:
+		s += 5 + 5 + 5; /* lo, hi, hst */
+		break;
+	case APP_ALARM_KIND_STATE:
+		s += 2 + 2; /* from_state, to_state */
+		break;
+	case APP_ALARM_KIND_RATE:
+	default:
+		s += 5; /* hi = max per interval */
+		break;
+	}
+	return s;
+}
+
+static void app_cmd_fill_rule_entry(Response_RuleEntry *e, uint8_t slot,
+				    const struct app_alarm_rule *r)
+{
+	enum app_alarm_kind kind = app_alarm_quantity_kind((enum app_alarm_quantity)r->quantity);
+
+	*e = (Response_RuleEntry){0};
+	/* All identity fields are proto3 `optional` — set the has-flags so a zero
+	 * value (slot 0, source 0 onboard, quantity 0 temperature, kind 0 threshold,
+	 * disabled) still goes on the wire and the read-back stays unambiguous. */
+	e->has_slot = true;
+	e->slot = slot;
+	e->has_source = true;
+	e->source = r->source;
+	e->has_quantity = true;
+	e->quantity = r->quantity;
+	e->has_enabled = true;
+	e->enabled = r->enabled ? true : false;
+	e->has_kind = true;
+	e->kind = (uint32_t)kind;
+
+	switch (kind) {
+	case APP_ALARM_KIND_THRESHOLD:
+		e->has_lo = true;
+		e->lo = r->lo;
+		e->has_hi = true;
+		e->hi = r->hi;
+		e->has_hst = true;
+		e->hst = r->hst;
+		break;
+	case APP_ALARM_KIND_STATE:
+		e->has_from_state = true;
+		e->from_state = r->from_state;
+		e->has_to_state = true;
+		e->to_state = r->to_state;
+		break;
+	case APP_ALARM_KIND_RATE:
+	default:
+		e->has_hi = true;
+		e->hi = r->hi;
+		break;
+	}
+}
+
+static void app_cmd_handle_req_alarm_rules(enum app_cmd_transport tp, const Command *cmd,
+					   Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(action);
+	const Command_ReqAlarmRules *rq = &cmd->body.req_alarm_rules;
+	uint32_t page = rq->has_page ? rq->page : 0;
+	size_t budget =
+		(tp == APP_CMD_TRANSPORT_LRW) ? RULES_PAGE_BUDGET_LRW : RULES_PAGE_BUDGET_NFC;
+
+	/* Optional filters (most specific first): a `slot` selects exactly one slot;
+	 * source+quantity together select every slot on that pair (proto3 can't tell
+	 * source==0 from absent, so both must be present to filter by pair). */
+	bool filter_slot = rq->has_slot;
+	bool filter_pair = rq->has_source && rq->has_quantity;
+
+	Response_AlarmRulesDump *d = &resp->body.alarm_rules_dump;
+	resp->which_body = Response_alarm_rules_dump_tag;
+	d->rules_count = 0;
+
+	/* Single greedy pass over the slots: pack matching rules into pages by budget
+	 * (and the static array bound), collect the requested page, learn the count. */
+	uint32_t cur_page = 0, in_page = 0, matched = 0;
+	size_t used = 0;
+
+	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
+		const struct app_alarm_rule *r = app_alarm_rules_get(slot);
+
+		if (r == NULL) {
+			continue;
+		}
+		if (filter_slot && slot != rq->slot) {
+			continue;
+		}
+		if (filter_pair && !(r->source == rq->source && r->quantity == rq->quantity)) {
+			continue;
+		}
+		matched++;
+
+		size_t sz = app_cmd_rule_entry_size(r);
+
+		if (in_page > 0 && (used + sz > budget || in_page >= ARRAY_SIZE(d->rules))) {
+			cur_page++;
+			used = 0;
+			in_page = 0;
+		}
+		used += sz;
+		in_page++;
+
+		if (cur_page == page && d->rules_count < ARRAY_SIZE(d->rules)) {
+			app_cmd_fill_rule_entry(&d->rules[d->rules_count++], slot, r);
+		}
+	}
+
+	uint32_t page_count = matched ? cur_page + 1 : 1;
+
+	if (page >= page_count) {
+		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "page");
+		resp->body.error.fault_field = 3; /* ReqAlarmRules.page */
+		return;
+	}
+
+	d->page_index = page;
+	d->page_count = page_count;
 }
 
 // BEGIN GENERATED DISPATCH
@@ -571,11 +784,6 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_req_history(tp, cmd, resp, action);
 		break;
 	case Command_clock_sync_tag:
-		/* transports: [lrw] — the answer is an uplink, meaningless over NFC */
-		if (tp != APP_CMD_TRANSPORT_LRW) {
-			make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
-			break;
-		}
 		app_cmd_handle_clock_sync(tp, cmd, resp, action);
 		break;
 	case Command_alarm_rule_tag:
@@ -583,6 +791,9 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		break;
 	case Command_w1_scan_tag:
 		app_cmd_handle_w1_scan(tp, cmd, resp, action);
+		break;
+	case Command_req_alarm_rules_tag:
+		app_cmd_handle_req_alarm_rules(tp, cmd, resp, action);
 		break;
 	default:
 		LOG_WRN("Command tag %u not implemented", cmd->which_body);
@@ -646,6 +857,17 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	}
 
 	int ret = encode_response(&resp, out, out_cap, out_len);
+	if (ret == -EMSGSIZE) {
+		/* The composed response doesn't fit the transport buffer. Don't fail
+		 * silently (#93.3) — replace it with a compact Error carrying the same
+		 * seq so the host learns the request couldn't be answered (e.g. an
+		 * over-broad GetParam/GetConfig page). */
+		LOG_WRN("Response too large for buffer; sending Error instead");
+		Response err = Response_init_zero;
+		err.seq = resp.seq;
+		make_error(&err, Response_Error_Code_UNKNOWN, "response too large");
+		ret = encode_response(&err, out, out_cap, out_len);
+	}
 	if (ret) {
 		return ret;
 	}
@@ -748,6 +970,7 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total,
 	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
 	for (size_t i = 0; i < n; i++) {
 		AlarmEvent *ev = &report.events[i];
+		ev->slot = events[i].slot;
 		ev->source = events[i].source;
 		ev->quantity = events[i].quantity;
 		ev->edge = (AlarmEvent_Edge)events[i].edge;

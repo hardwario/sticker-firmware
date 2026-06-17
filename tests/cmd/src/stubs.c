@@ -33,6 +33,13 @@ int app_clock_get_unix(uint32_t *unix_s)
 	return 0;
 }
 
+int app_clock_set_unix(uint32_t unix_s)
+{
+	test_clock_unix = unix_s;
+	test_clock_has = true;
+	return 0;
+}
+
 void app_clock_force_resync(void)
 {
 }
@@ -72,19 +79,33 @@ size_t app_history_export(uint32_t from_unix, uint32_t to_unix, uint8_t *buf, si
 
 /* Dynamic alarm rules — app_cmd's handle_alarm_rule mutates the list; the unit
  * test only checks the command path, so these are inert. */
-int app_alarm_rules_set(const struct app_alarm_rule *rule)
+int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule)
 {
+	(void)slot;
 	(void)rule;
 	return 0;
 }
 
-int app_alarm_rules_clear(enum app_alarm_source source, enum app_alarm_quantity quantity)
+int app_alarm_rules_clear(uint8_t slot)
 {
-	(void)source;
-	(void)quantity;
+	(void)slot;
 	return 0;
 }
 
 void app_alarm_rules_clear_all(void)
 {
+}
+
+/* Read-back path (handle_req_alarm_rules): no rules in the unit test, so the
+ * dump comes back empty. quantity_kind only needs to resolve for the linker. */
+const struct app_alarm_rule *app_alarm_rules_get(uint8_t slot)
+{
+	(void)slot;
+	return NULL;
+}
+
+enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
+{
+	(void)q;
+	return APP_ALARM_KIND_THRESHOLD;
 }

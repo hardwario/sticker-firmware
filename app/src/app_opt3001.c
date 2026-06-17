@@ -44,7 +44,7 @@ int app_opt3001_read(float *illuminance)
 
 	float illuminance_ = sensor_value_to_float(&val);
 
-	LOG_DBG("Illuminance: %.0f lux", (double)illuminance_);
+	LOG_DBG("Illuminance: %d lux", APP_FP0(illuminance_));
 
 	if (illuminance) {
 		*illuminance = illuminance_;

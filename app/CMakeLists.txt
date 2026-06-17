@@ -14,26 +14,14 @@ project(sticker)
 # via -DAPP_VERSION_* / -DAPP_BUILD_TYPE (see .github/workflows/build.yml):
 #   tag v1.3.4 -> 1/3/4, type 0 (MAIN)
 #   branch/PR  -> 0/0/0, type 1 (DEV)
-# Local builds (no override) derive the version from the latest git tag and are
-# always type 2 (CUSTOM); they fall back to 0/0/0 if git/tags are unavailable.
-# The debug/release config is a separate axis (CONFIG_FW_DEBUG), not set here.
+# Local builds (no override) use the hardcoded development version below and are
+# always type 2 (CUSTOM). The debug/release config is a separate axis
+# (CONFIG_FW_DEBUG), not set here.
 if(NOT DEFINED APP_VERSION_MAJOR)
   set(APP_BUILD_TYPE 2) # CUSTOM
-  execute_process(
-    COMMAND git describe --tags --abbrev=0
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    OUTPUT_VARIABLE APP_GIT_TAG
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
-  if(APP_GIT_TAG MATCHES "^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)")
-    set(APP_VERSION_MAJOR ${CMAKE_MATCH_1})
-    set(APP_VERSION_MINOR ${CMAKE_MATCH_2})
-    set(APP_VERSION_PATCH ${CMAKE_MATCH_3})
-  else()
-    set(APP_VERSION_MAJOR 0)
-    set(APP_VERSION_MINOR 0)
-    set(APP_VERSION_PATCH 0)
-  endif()
+  set(APP_VERSION_MAJOR 1)
+  set(APP_VERSION_MINOR 4)
+  set(APP_VERSION_PATCH 0)
 endif()
 add_compile_definitions(
   APP_VERSION_MAJOR=${APP_VERSION_MAJOR}
@@ -54,6 +42,7 @@ target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
 target_sources_ifdef(CONFIG_LIS2DH app PRIVATE src/app_accel.c)
 target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw.c)
+target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_report.c)
 target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/region
@@ -61,6 +50,7 @@ target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/boards
 )
 target_sources_ifdef(CONFIG_OPT3001 app PRIVATE src/app_opt3001.c)
+target_sources_ifdef(CONFIG_POWEROFF app PRIVATE src/app_power.c)
 target_sources_ifdef(CONFIG_SHELL app PRIVATE src/app_ats.c)
 target_sources_ifdef(CONFIG_SHT4X app PRIVATE src/app_sht4x.c)
 target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_ds18b20.c)

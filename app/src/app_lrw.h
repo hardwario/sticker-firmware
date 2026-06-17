@@ -21,6 +21,7 @@ enum app_lrw_state {
 	APP_LRW_STATE_HEALTHY,
 	APP_LRW_STATE_WARNING,
 	APP_LRW_STATE_RECONNECT,
+	APP_LRW_STATE_DISABLED, /* DevEUI all-zero: radio-silent, no join/TX (#98) */
 };
 
 struct app_lrw_info {
@@ -46,11 +47,26 @@ struct app_lrw_info {
 
 int app_lrw_init(void);
 void app_lrw_join(void);
-void app_lrw_send(void);
-void app_lrw_send_with_link_check(void);
 enum app_lrw_state app_lrw_get_state(void);
 int app_lrw_get_info(struct app_lrw_info *info);
 bool app_lrw_is_ready(void);
+
+/* Compose + split + send a telemetry snapshot (fPort 2) from the current sensor
+ * data. app_lrw builds the snapshot (app_compose), splits it into DR-budget
+ * frames, piggybacks a LinkCheckReq on the first frame when the N-th-message
+ * cadence is due, and retries on a duty-cycle backoff. Triggered by app_report
+ * after it samples + captures history. No-op while joining/reconnecting, during
+ * calibration or while a history replay owns the radio. */
+void app_lrw_send_telemetry(void);
+
+/* Register a callback fired on a link-ready edge (join success / history-replay
+ * finish) so app_report can resume the report cadence with an immediate uplink.
+ * NULL clears it. Called once from app_report_init(). */
+void app_lrw_register_ready_cb(void (*cb)(void));
+
+/* Arm a forced LinkCheckReq on the next telemetry first-frame (shell/test path;
+ * pair with app_report_trigger() to actually emit the uplink). */
+void app_lrw_force_link_check(void);
 
 /* Current application-payload budget (bytes) for the next uplink, taken from the
  * LoRaWAN stack (lorawan_get_payload_sizes) and refreshed on every DR change and
@@ -86,6 +102,19 @@ bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
  * a clean state. The caller must reboot afterwards for the MAC to re-init from
  * the cleared NVM. Returns 0 on success or a negative errno. */
 int app_lrw_reset_nvm(void);
+
+/* Stop LoRaWAN activity (all TX/link-check/rejoin timers) ahead of a deep-sleep
+ * poweroff, so nothing re-arms the radio before the MCU shuts down. Does not
+ * deinit the stack — wake from deep sleep is a clean boot. */
+void app_lrw_suspend(void);
+
+#if defined(CONFIG_SHELL)
+/* Debug/test only: inject a synthetic link-check outcome (ok=true success,
+ * false failure) onto the LRW work queue, to drive the state-machine
+ * transitions (HEALTHY->WARNING->RECONNECT->rejoin and the late-LC-in-RECONNECT
+ * guard, #71) deterministically from the shell without a real RF outage. */
+void app_lrw_debug_inject_lc(bool ok);
+#endif
 
 #ifdef __cplusplus
 }

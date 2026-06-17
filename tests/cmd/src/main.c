@@ -123,6 +123,44 @@ ZTEST(cmd, test_get_param_config_dump)
 	zassert_true(r.body.config_dump.sensors.cap_barometer, "cap_barometer value");
 }
 
+/* get_param pages like get_config when the requested fields don't fit one DR0
+ * response (#93.3). deveui(18 B) + joineui(18 B) + devaddr(10 B) = 46 B > the
+ * 30 B page budget, so they split: page 0 = {deveui}, page 1 = {joineui,
+ * devaddr}, page_count = 2. */
+ZTEST(cmd, test_get_param_paging)
+{
+	Response r;
+
+	/* seq2 get_param{ lorawan_field=[5 deveui, 6 joineui, 9 devaddr] } — page omitted (0). */
+	reset_cfg();
+	handle("08021a050a03050609", &r);
+	zassert_equal(r.which_body, Response_config_dump_tag, "page0 which=%d", r.which_body);
+	zassert_equal(r.body.config_dump.page_index, 0, "page0 index");
+	zassert_equal(r.body.config_dump.page_count, 2, "page_count %u",
+		      r.body.config_dump.page_count);
+	zassert_true(r.body.config_dump.lorawan.has_deveui, "deveui on page0");
+	zassert_false(r.body.config_dump.lorawan.has_joineui, "joineui must not be on page0");
+	zassert_false(r.body.config_dump.lorawan.has_devaddr, "devaddr must not be on page0");
+
+	/* Same request with page=1 (field 5 varint = 0x28 0x01). */
+	reset_cfg();
+	handle("08021a070a030506092801", &r);
+	zassert_equal(r.which_body, Response_config_dump_tag, "page1 which=%d", r.which_body);
+	zassert_equal(r.body.config_dump.page_index, 1, "page1 index");
+	zassert_equal(r.body.config_dump.page_count, 2, "page1 count");
+	zassert_false(r.body.config_dump.lorawan.has_deveui, "deveui must not be on page1");
+	zassert_true(r.body.config_dump.lorawan.has_joineui, "joineui on page1");
+	zassert_true(r.body.config_dump.lorawan.has_devaddr, "devaddr on page1");
+
+	/* Out-of-range page → Error. */
+	reset_cfg();
+	handle("08021a070a030506092805", &r);
+	zassert_equal(r.which_body, Response_error_tag, "oob page should Error, which=%d",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
+		      r.body.error.code);
+}
+
 ZTEST(cmd, test_build_info)
 {
 	uint8_t out[128];
@@ -155,9 +193,10 @@ ZTEST(cmd, test_deferred_actions)
 	zassert_equal(handle("08094200", &r), APP_CMD_ACTION_FACTORY_RESET, "factory");
 }
 
-/* force_send / clock_sync / req_history answer only via a LoRaWAN uplink, so
- * over NFC they must be rejected with an Error (NOT_READY) rather than firing a
- * side effect the NFC caller can never observe. */
+/* force_send / req_history answer only via a LoRaWAN uplink, so over NFC they
+ * must be rejected with an Error (NOT_READY) rather than firing a side effect
+ * the NFC caller can never observe. (clock_sync is NOT here — it runs over NFC,
+ * see test_clock_sync_over_nfc.) */
 ZTEST(cmd, test_lrw_only_commands_rejected_over_nfc)
 {
 	Response r;
@@ -170,16 +209,42 @@ ZTEST(cmd, test_lrw_only_commands_rejected_over_nfc)
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
 		      r.body.error.code);
 
-	/* clock_sync (field 12, empty body) — seq=5. */
-	reset_cfg();
-	handle_via(APP_CMD_TRANSPORT_NFC, "08056200", &r);
-	zassert_equal(r.which_body, Response_error_tag, "clock_sync/NFC should error (which=%d)",
-		      r.which_body);
-
 	/* req_history (field 11) — seq=7, empty window. */
 	reset_cfg();
 	handle_via(APP_CMD_TRANSPORT_NFC, "08075a00", &r);
 	zassert_equal(r.which_body, Response_error_tag, "req_history/NFC should error (which=%d)",
+		      r.which_body);
+}
+
+/* #107: clock_sync carrying unix_time sets the RTC directly (NFC time bootstrap).
+ * A bare clock_sync over NFC just acks here — there is no LoRaWAN in this build
+ * to query for network time. */
+ZTEST(cmd, test_clock_sync_over_nfc)
+{
+	Response r;
+
+	/* clock_sync{ unix_time = 1735689600 } over NFC -> sets the RTC, answers Info. */
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_NFC, "0801620608808bd2bb06", &r);
+	zassert_equal(r.which_body, Response_info_tag, "clock_sync+unix/NFC -> Info (which=%d)",
+		      r.which_body);
+	zassert_equal(test_clock_unix, 1735689600u, "RTC not set (%u)", test_clock_unix);
+	zassert_equal(r.body.info.unix_time, 1735689600u, "Info.unix_time %u",
+		      r.body.info.unix_time);
+
+	/* Out-of-range epoch (unix_time = 1) -> BAD_REQUEST, RTC left untouched. */
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_NFC, "080162020801", &r);
+	zassert_equal(r.which_body, Response_error_tag, "bad epoch -> error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
+		      r.body.error.code);
+	zassert_false(test_clock_has, "RTC must stay unset after a rejected epoch");
+
+	/* Bare clock_sync over NFC (no unix_time, seq=5) just acks (no network). */
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_NFC, "08056200", &r);
+	zassert_equal(r.which_body, Response_ack_tag, "bare clock_sync/NFC -> ack (which=%d)",
 		      r.which_body);
 }
 

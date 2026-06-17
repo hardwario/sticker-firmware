@@ -272,29 +272,35 @@ RTT LC logs.
 ### L8 — LC state machine (HEALTHY → WARNING → RECONNECT)
 
 **Goal:** Link-check failures escalate state correctly.
-**Observable:** RTT `LC FAIL in HEALTHY (streak: n/3)`; WARNING after 3 fails; RECONNECT after 5.
+**Observable:** RTT `LC FAIL in HEALTHY (streak: n/3)` → `State: HEALTHY -> WARNING` after 3
+consecutive fails; `LC FAIL in WARNING (total: n/5)` → `State: WARNING -> RECONNECT` after
+`lrw-link-check-fail-rejoin` fails; `ats lrw status` mirrors the counters.
 
 **Prompt for Claude:**
-> Provoke link-check failures (e.g. power down / move the gateway out of range, note the method).
-> Watching the RTT log, confirm the state machine escalates: `LC FAIL in HEALTHY (streak: n/3)`,
-> transition to WARNING after 3 fails, then `Entering RECONNECT state` after 5 total fails. Then
-> restore the gateway and confirm one `LC OK` returns the device toward HEALTHY. Report the
-> observed thresholds.
+> On a debug build, drive the failures deterministically with `ats lrw lc fail` (space them ~2 s
+> apart — the hook reuses one work item, rapid injects coalesce); set
+> `config lrw-link-check-interval 0` + `settings save` first so real link-checks don't reset the
+> streak. Watching the RTT log / `ats lrw status`, confirm HEALTHY → WARNING (3 consecutive) →
+> RECONNECT (after `lrw-link-check-fail-rejoin` more). Then `ats lrw lc ok` and confirm one success
+> returns WARNING → HEALTHY. (Alternatively provoke real failures by taking the gateway out of
+> range — note the method.) Report the observed thresholds.
 
 - [ ] Pass
 
 ### L9 — Rejoin with exponential backoff (OTAA)
 
 **Goal:** In RECONNECT the device retries join with growing backoff.
-**Observable:** RTT `Entering RECONNECT state - will rejoin in 5 seconds`, then `Rejoin attempt N`
-with increasing delay (60→3600 s); ABP logs `ABP mode - rejoin not applicable`.
+**Observable:** RTT `Rejoin in <s> s (attempt <N>)` with increasing delay (60 → ×2 → capped
+3600 s); a successful rejoin returns to HEALTHY with counters reset. ABP logs
+`ABP mode - cannot rejoin, staying in WARNING`.
 
 **Prompt for Claude:**
-> With an OTAA device driven into RECONNECT (gateway unreachable), confirm from the RTT log the
-> rejoin attempts fire with exponential backoff (base 60 s, ×2, capped 3600 s) and the
-> `Rejoin attempt N` counter increments. Then bring the gateway back and confirm it rejoins and
-> returns to HEALTHY. Separately, on an ABP device, confirm rejoin is skipped with
-> `ABP mode - rejoin not applicable`.
+> Drive an OTAA device into RECONNECT (L8). Confirm from the RTT log the rejoin timer arms with
+> exponential backoff — `Rejoin in 60 s (attempt 1)`, then 120/240/… on repeated failures (base
+> 60 s, ×2, capped 3600 s). With the gateway reachable, confirm the rejoin succeeds (real
+> JoinRequest/JoinAccept) and returns to HEALTHY — cross-check the LNS shows a fresh session (TTN:
+> f_cnt resets to 1; ChirpStack: a new `dev_addr` via `GetActivation`). On an ABP device, confirm
+> rejoin is skipped with `ABP mode - cannot rejoin, staying in WARNING`.
 
 - [ ] Pass
 
@@ -333,6 +339,62 @@ check; `ats lrw reset` resets counters + DevNonce and reboots.
 **Prompt for Claude:**
 > Trigger a telemetry report (`send` or ForceSend) and inspect the network-server uplinks. Confirm
 > the report arrives on **fPort 2** and that **no fPort 1** frame is emitted. Report the ports seen.
+
+- [ ] Pass
+
+### L13 — Configurable link-check cadence & rejoin threshold
+
+**Goal:** `lrw-link-check-interval` and `lrw-link-check-fail-rejoin` drive the state machine.
+**Observable:** `ats lrw status` reports `healthy->warning: n/3` and `warning->reconnect: n/M`
+where M = `lrw-link-check-fail-rejoin`; a LinkCheckReq is sent every Nth uplink (0 = none).
+
+**Prompt for Claude:**
+> Set e.g. `config lrw-link-check-interval 1`, `config lrw-link-check-fail-rejoin 3`,
+> `settings save`. Confirm `ats lrw status` shows `warning->reconnect: n/3`. With interval 1,
+> confirm a link check rides every uplink; with interval 0, confirm none are requested. Then drive
+> failures (L8) and confirm RECONNECT now triggers after 3 (not 5) WARNING fails.
+
+- [ ] Pass
+
+### L14 — Late link-check in RECONNECT does not wedge (HIGH-1 regression)
+
+**Goal:** A link-check result arriving while in RECONNECT is ignored and never cancels the rejoin
+(the root cause of the old "TX stops" bug).
+**Observable:** In RECONNECT, `ats lrw lc ok`/`fail` is logged as ignored; state stays RECONNECT,
+the rejoin timer keeps running and the device rejoins.
+
+**Prompt for Claude:**
+> Drive the device into RECONNECT (L8). While it waits for the rejoin timer, inject `ats lrw lc ok`
+> and `ats lrw lc fail`. Confirm via `ats lrw status` the state stays RECONNECT (not back to
+> HEALTHY/WARNING) and the rejoin still fires on schedule → HEALTHY. This must NOT wedge or stop TX.
+
+- [ ] Pass
+
+### L15 — Radio-silent on zero DevEUI (#98)
+
+**Goal:** An un-provisioned device (DevEUI all-zero) does not burn power on impossible joins.
+**Observable:** RTT `DevEUI is all-zero: LoRaWAN disabled (radio-silent)`; `ats lrw status` state
+DISABLED; no JoinRequest uplinks, no rejoin timer.
+
+**Prompt for Claude:**
+> Set `config lrw-deveui 0000000000000000`, `settings save`. After reboot confirm the device enters
+> DISABLED (no join attempts on the LNS, no rejoin backoff in the log). Restore a real DevEUI +
+> `settings save` and confirm it joins again.
+
+- [ ] Pass
+
+### L16 — Release-FW sustained TX (TX-stop regression, decisive)
+
+**Goal:** The original *"TX stops after 4–5 messages"* bug stays fixed under its exact repro
+conditions (release build masks-off: no `CONFIG_LOG`, `PM=y`).
+**Observable:** On the LNS, f_cnt climbs continuously well past 5 (≥10–15) with link-check active
+(`lrw-link-check-interval 5`), no stall — including across the msg-5/10 link-checks.
+
+**Prompt for Claude:**
+> Provision OTAA, `config lrw-link-check-interval 5`, `settings save`. Flash the **plain release**
+> build (no debug overlay) and let it run. Watch the LNS uplinks (TTS/ChirpStack) and confirm f_cnt
+> climbs continuously past ~13 with no stop. (Release has PM=y → SWD sleeps; reflash via a
+> `west flash` retry loop or power-cycle.) Report the highest f_cnt reached.
 
 - [ ] Pass
 
@@ -917,6 +979,27 @@ network: unix=<...>`. Per `doc/version 1.4.md` §5 the sync is **requested autom
 
 - [ ] Pass
 
+### K6 — Set RTC over NFC (`clock_sync` with `unix_time`)
+
+**Goal:** A phone can bootstrap the wall-clock over NFC before/without a network (#107).
+**Observable:** A `clock_sync` command carrying `unix_time` sets the RTC and answers with an `info`
+response whose `unix_time` matches; `clock get` then returns that time. An out-of-range epoch is
+rejected with `error` `BAD_REQUEST` "bad epoch".
+
+**Prompt for Claude:**
+> On a freshly booted device that has **not** synced time (so `clock get` reports unset), inject a
+> `clock_sync` command with a `unix_time` over the NFC transport. On a debug build use the debug
+> shell: `ats cmd nfc 0801620608808bd2bb06` (ClockSync `unix_time = 1735689600`, i.e.
+> 2025-01-01T00:00:00Z) — or present an NFC command record from the manager app. Confirm the
+> decoded response is an `Info` with `unix_time = 1735689600` (not an `ack`), then `clock get`
+> returns ~that time and is advancing. Finally inject an out-of-range epoch (e.g. `unix_time = 1`)
+> and confirm the response is `error` code 1 (BAD_REQUEST) with detail "bad epoch", and the RTC is
+> left unchanged. Report all three results.
+
+- [x] Pass — HW-verified 2026-06-16 (debug build, RTT shell). Fresh boot `RTC not set yet`; NFC
+  `clock_sync{unix_time}` set the RTC and `clock get` returned/advanced it (3×); out-of-range
+  `unix_time=1` was rejected, RTC left at ~2026 (no jump to 1970).
+
 ---
 
 ## NFC
@@ -958,6 +1041,20 @@ network: unix=<...>`. Per `doc/version 1.4.md` §5 the sync is **requested autom
 > TODO/N-A and say what's missing.
 
 - [ ] Pass / TODO
+
+### N4 — NFC channel encryption (`CONFIG_APP_NFC_ENCRYPTION`)
+
+**Goal:** The command/config channel is AES-CCM encrypted by default; only info reads without a key. A validation build (`=n`) accepts plaintext (#135).
+**Observable:** On a default build, a plaintext `hio.stck:cmd` record is rejected (no response / decrypt error) while a properly encrypted one is answered with an encrypted `hio.stck:rsp`. On a `CONFIG_APP_NFC_ENCRYPTION=n` build, the boot log shows the `NFC ENCRYPTION DISABLED - VALIDATION BUILD ONLY` banner and plaintext command/config records are accepted.
+
+**Prompt for Claude:**
+> Validation build (`-DCONFIG_APP_NFC_ENCRYPTION=n`, debug): confirm the boot banner, then inject
+> `ats cmd nfc 08032200` (get_info) and confirm a plaintext `Response.Info` comes back. Default
+> build (encryption on): present a plaintext command record and confirm it is rejected; present an
+> AES-CCM record (serial + nonce > last) and confirm an encrypted response is written back, and that
+> the info record (`hio.stck:inf`) is still readable without the key. Report all results.
+
+- [ ] Pass
 
 ---
 

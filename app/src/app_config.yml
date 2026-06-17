@@ -139,9 +139,10 @@ commands:
     - {name: force_send,     proto_id: 9,  body: ForceSend,     kind: handler, response: none, transports: [lrw]}
     - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
     - {name: req_history,    proto_id: 11, body: ReqHistory,    kind: handler, response: none, transports: [lrw]}
-    - {name: clock_sync,     proto_id: 12, body: ClockSync,     kind: handler, response: info_deferred, transports: [lrw]}
+    - {name: clock_sync,     proto_id: 12, body: ClockSync,     kind: handler, response: info_deferred, transports: [lrw, nfc]}
     - {name: alarm_rule,     proto_id: 13, body: AlarmRule,     kind: handler, response: ack}
     - {name: w1_scan,        proto_id: 14, body: W1Scan,        kind: handler, response: w1_scan}
+    - {name: req_alarm_rules, proto_id: 15, body: ReqAlarmRules, kind: handler, response: alarm_rules_dump}
 parameters:
   - name: secret_key
     proto_group: root
@@ -327,6 +328,24 @@ parameters:
     size: 16
     preserve_on_migration: true
     help: "Get/Set LoRaWAN AppSKey (32 hexadecimal digits)."
+
+  - name: lrw_link_check_interval
+    proto_group: lorawan
+    proto_id: 13
+    type: int
+    default: 5
+    min: 0
+    max: 255
+    help: "Get/Set link-check cadence: request a LinkCheckReq every N-th uplink (0 = disabled)."
+
+  - name: lrw_link_check_fail_rejoin
+    proto_group: lorawan
+    proto_id: 14
+    type: int
+    default: 5
+    min: 1
+    max: 255
+    help: "Get/Set link-check failures (while degraded) before an OTAA rejoin is attempted."
 
   - name: cap_hall_left
     proto_group: sensors

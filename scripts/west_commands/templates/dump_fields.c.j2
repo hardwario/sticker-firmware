@@ -1,0 +1,3 @@
+{% for f in dump_fields -%}
+	{ {{ f.section }}, {{ f.tag }}, {{ f.size }} },
+{% endfor -%}

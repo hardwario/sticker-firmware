@@ -33,3 +33,10 @@ Command.GetParam.alarms_field      max_count:16
 # W1Scan response: discovered 1-Wire ROMs (8 B each). Capped to the slot count;
 # the encoded reply must fit the fPort-85 response buffer (64 B).
 Response.W1Scan.rom max_count:4 max_size:8
+
+# Alarm-rules read-back: up to 5 RuleEntry per AlarmRulesDump page (paged like
+# ConfigDump; the handler further caps a page by a per-transport byte budget).
+# 5 is the sweet spot: 5*sizeof(RuleEntry) keeps AlarmRulesDump <= ConfigDump, so
+# the Response union (and the Command+Response stack frame in app_cmd_handle, on
+# the 2048 B m_work_q) does NOT grow versus the rest of the protocol.
+Response.AlarmRulesDump.rules max_count:5

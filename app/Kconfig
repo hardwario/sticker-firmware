@@ -22,6 +22,20 @@ config FW_DEBUG
 	  When enabled, the periodic LED blink shows green + yellow
 	  instead of just green to indicate debug build.
 
+config APP_DEBUG_AUTOSUSPEND_S
+	int "Debug auto-suspend idle timeout (seconds, 0 = disabled)"
+	depends on FW_DEBUG && POWEROFF
+	default 7200
+	help
+	  On the Debug build, after this many seconds with no RTT/shell
+	  activity the device enters deep-sleep (STM32 Shutdown via
+	  sys_poweroff) so a forgotten bench unit stops draining its
+	  battery — Debug FW runs with CONFIG_PM=n, so the CPU never sleeps
+	  and the quiescent draw is high. Default 7200 s (2 h). 0 disables
+	  the auto-suspend.
+	  Wake is by NRST / power-cycle (clean boot; NVS identity and
+	  LoRaWAN keys survive in flash).
+
 config APP_LORAWAN_1_1
 	bool "Use LoRaWAN 1.1.x crypto for OTAA"
 	default n
@@ -36,6 +50,21 @@ config APP_LORAWAN_1_1
 	  Enabling this also requires the LoRaMac library to be built with
 	  USE_LRWAN_1_1_X_CRYPTO=1; the Kconfig only flips the app-level
 	  key wiring.
+
+config APP_NFC_ENCRYPTION
+	bool "Encrypt the NFC command/config channel (AES-CCM)"
+	default y
+	help
+	  Production default (y): NFC command records (hio.stck:cmd) and config
+	  records (hio.stck:cfg) must be AES-CCM encrypted with the device
+	  secret_key and a strictly increasing nonce, and the response written
+	  back (hio.stck:rsp) is encrypted the same way. Without the key, the
+	  only thing a phone can read is the plaintext info record (hio.stck:inf).
+
+	  Disable (n) ONLY for a bench validation build, to drive the NFC command
+	  and config channel in plaintext without provisioning a secret key or
+	  managing nonces. Such a build logs a loud boot warning. NEVER ship a
+	  build with this turned off.
 
 config APP_CMD_DEBUG_SHELL
 	bool "Shell injector for downlink command dispatcher"

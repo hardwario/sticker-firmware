@@ -5,6 +5,7 @@
  */
 
 #include "app_history.h"
+#include "app_log.h"
 #include "app_config.h"
 #include "app_sensor.h"
 
@@ -109,8 +110,9 @@ static uint16_t m_start; /* index of oldest record */
 static uint16_t m_count;
 static uint32_t m_base_time; /* oldest record's time: uptime-s unsynced, unix synced */
 static bool m_base_synced;
-static uint32_t m_interval; /* interval_report (s) the buffer was recorded at; records
-			     * are periodic so per-record time = base + ord*interval */
+static uint32_t m_interval;  /* interval_report (s) the buffer was recorded at; records
+			      * are periodic so per-record time = base + ord*interval */
+static bool m_replay_active; /* true while app_lrw streams a replay (capture self-skips, #126) */
 
 static bool cap_on(size_t cap_off)
 {
@@ -413,9 +415,20 @@ static void decode_record(const uint8_t *rec, struct app_history_record *out)
 
 /* ---- Public API --------------------------------------------------------- */
 
+void app_history_set_replay_active(bool active)
+{
+	m_replay_active = active;
+}
+
 void app_history_capture(void)
 {
 	if (!m_enabled || m_sample_size == 0 || m_capacity == 0) {
+		return;
+	}
+
+	/* A replay is streaming the buffer back; don't mutate it underneath. */
+	if (m_replay_active) {
+		LOG_DBG("history capture skipped: replay active");
 		return;
 	}
 
@@ -743,9 +756,9 @@ static void print_value(const struct shell *sh, char *buf, size_t cap, int i, bo
 	if (!present) {
 		snprintf(buf, cap, "--");
 	} else if (m_desc[i].enc == ENC_COUNT) {
-		snprintf(buf, cap, "%.0f", v);
+		snprintf(buf, cap, "%d", APP_FP0(v));
 	} else {
-		snprintf(buf, cap, "%.2f", v);
+		snprintf(buf, cap, "%s%d.%02d", APP_FP2(v));
 	}
 	ARG_UNUSED(sh);
 }
@@ -960,8 +973,8 @@ static int cmd_history_stats(const struct shell *sh, size_t argc, char **argv)
 			shell_print(sh, "%-12s %8s %8s %8s %5u", m_desc[i].name, "--", "--", "--",
 				    0);
 		} else {
-			shell_print(sh, "%-12s %8.2f %8.2f %8.2f %5u", m_desc[i].name, mn, mx,
-				    sum / n, n);
+			shell_print(sh, "%-12s %s%d.%02d %s%d.%02d %s%d.%02d %5u", m_desc[i].name,
+				    APP_FP2(mn), APP_FP2(mx), APP_FP2(sum / n), n);
 		}
 	}
 	return 0;

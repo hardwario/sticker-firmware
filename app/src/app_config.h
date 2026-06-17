@@ -66,6 +66,8 @@ struct app_config {
 	uint8_t lrw_devaddr[4];
 	uint8_t lrw_nwkskey[16];
 	uint8_t lrw_appskey[16];
+	int lrw_link_check_interval;
+	int lrw_link_check_fail_rejoin;
 	bool cap_hall_left;
 	bool cap_hall_right;
 	bool cap_input_a;

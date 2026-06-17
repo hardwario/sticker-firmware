@@ -144,6 +144,13 @@ static void accel_motion_handler(void *user_data)
 }
 #endif /* defined(CONFIG_LIS2DH) */
 
+void app_sensor_suspend(void)
+{
+	/* Stop the periodic sample timer so no further I2C/1-Wire/ADC activity is
+	 * scheduled ahead of a deep-sleep poweroff. */
+	k_timer_stop(&m_sensor_timer);
+}
+
 int app_sensor_init(void)
 {
 	int ret;
@@ -395,9 +402,10 @@ void app_sensor_sample(void)
 				continue;
 			}
 			if (w1[s].present) {
-				LOG_INF("Slot %d / Temperature: %.2f C / Humidity: %.1f %% / "
-					"Tilt: %sactive",
-					s, (double)w1[s].temperature, (double)w1[s].humidity,
+				LOG_INF("Slot %d / Temperature: %s%d.%02d C / Humidity: %s%d.%01d "
+					"%% "
+					"/ Tilt: %sactive",
+					s, APP_FP2(w1[s].temperature), APP_FP1(w1[s].humidity),
 					w1[s].is_tilt_alert ? "" : "not ");
 			}
 		}

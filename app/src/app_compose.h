@@ -32,6 +32,11 @@ int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more);
  * returns -EAGAIN. */
 int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget);
 
+/* Discard any in-progress snapshot so the next app_compose() starts fresh.
+ * Call from the join path: a rejoin must not continue a pre-outage snapshot
+ * with stale data and no indication (#93.5). */
+void app_compose_reset(void);
+
 #ifdef __cplusplus
 }
 #endif
