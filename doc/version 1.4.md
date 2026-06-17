@@ -337,6 +337,8 @@ The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.
 
 `encodeDownlink` returns `{ bytes, fPort: 85, warnings, errors }`.
 
+**Binary config fields are native `bytes` (v1.4.0).** DevEUI, the LoRaWAN keys, DevAddr and the 1-Wire ROMs travel as native protobuf `bytes` on the wire — raw bytes, half the size of the previous hex-string encoding — which trims fPort-85 config payloads and NFC-tag usage. No change for formatter users: `encodeDownlink` still accepts these as hex strings and `decodeUplink`/`decodeDownlink` still present them as hex. Only clients that build the protobuf directly (e.g. the NFC manager app) must send and read raw bytes.
+
 ---
 
 ## 9. Shell command summary (v1.4.0 changes)
