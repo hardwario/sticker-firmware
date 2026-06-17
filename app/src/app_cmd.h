@@ -39,6 +39,7 @@ enum app_cmd_action {
 	APP_CMD_ACTION_LRW_RESET,     /* reset LoRaWAN NVM (counters+DevNonce) + reboot (#109) */
 	APP_CMD_ACTION_LRW_JOIN,      /* trigger a forced (re)join, no reboot (#109) */
 	APP_CMD_ACTION_COUNTERS_SAVE, /* persist pulse totalizers (no reboot) */
+	APP_CMD_ACTION_ENTER_MAILBOX, /* switch to mailbox (FTM) serving mode */
 };
 
 /* Plain-C device info snapshot (no protobuf dependency), filled by

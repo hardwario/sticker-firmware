@@ -8,6 +8,7 @@
 #define APP_NFC_H_
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "app_cmd.h"
 
@@ -45,6 +46,13 @@ enum app_cmd_action app_nfc_take_cmd_action(void);
  * `nfc autocheck on|off` shell command so a multi-step `nfc write` of a config
  * blob is not raced (and overwritten) by the periodic check mid-write. */
 bool app_nfc_periodic_enabled(void);
+
+/* Enter mailbox (ST25DV Fast-Transfer-Mode) serving mode until `idle_timeout_s`
+ * of inactivity (0 = firmware default), holding the tag powered so the phone's
+ * RF and our I2C reach it at once. Runs commands off the mailbox and returns the
+ * number served (or a negative errno). Called from the poll thread when an
+ * EnterMailbox command is taken via app_nfc_take_cmd_action(). */
+int app_nfc_serve_mailbox(uint32_t idle_timeout_s);
 
 #ifdef __cplusplus
 }

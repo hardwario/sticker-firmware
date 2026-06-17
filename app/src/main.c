@@ -177,6 +177,13 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 				/* Persist the (reset) pulse totalizers, no reboot. */
 				app_counters_save(true);
 				break;
+			case APP_CMD_ACTION_ENTER_MAILBOX:
+				/* The phone has read the Ack off the tag; switch to the
+				 * mailbox (FTM) channel for fast config streaming / firmware
+				 * update. Blocks here serving the mailbox until the phone goes
+				 * quiet, then returns to the low-power NDEF poll. */
+				app_nfc_serve_mailbox(0);
+				break;
 			default:
 				break;
 			}
