@@ -414,6 +414,70 @@ int app_config_apply_alarms(const AppConfigMessage_Alarms *src, uint32_t *fault_
 			FAULT(52);
 		}
 	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_0) {
+		memcpy(config->alarm_0, src->alarm_0, sizeof(config->alarm_0));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_1) {
+		memcpy(config->alarm_1, src->alarm_1, sizeof(config->alarm_1));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_2) {
+		memcpy(config->alarm_2, src->alarm_2, sizeof(config->alarm_2));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_3) {
+		memcpy(config->alarm_3, src->alarm_3, sizeof(config->alarm_3));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_4) {
+		memcpy(config->alarm_4, src->alarm_4, sizeof(config->alarm_4));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_5) {
+		memcpy(config->alarm_5, src->alarm_5, sizeof(config->alarm_5));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_6) {
+		memcpy(config->alarm_6, src->alarm_6, sizeof(config->alarm_6));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_7) {
+		memcpy(config->alarm_7, src->alarm_7, sizeof(config->alarm_7));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_8) {
+		memcpy(config->alarm_8, src->alarm_8, sizeof(config->alarm_8));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_9) {
+		memcpy(config->alarm_9, src->alarm_9, sizeof(config->alarm_9));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_10) {
+		memcpy(config->alarm_10, src->alarm_10, sizeof(config->alarm_10));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_11) {
+		memcpy(config->alarm_11, src->alarm_11, sizeof(config->alarm_11));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_12) {
+		memcpy(config->alarm_12, src->alarm_12, sizeof(config->alarm_12));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_13) {
+		memcpy(config->alarm_13, src->alarm_13, sizeof(config->alarm_13));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_14) {
+		memcpy(config->alarm_14, src->alarm_14, sizeof(config->alarm_14));
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_alarm_15) {
+		memcpy(config->alarm_15, src->alarm_15, sizeof(config->alarm_15));
+	}
 	return ret;
 }
 
@@ -444,6 +508,70 @@ void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, s
 	if (requested(ids, n, 52)) {
 		dst->has_alarm_notif_time = true;
 		dst->alarm_notif_time = c->alarm_notif_time;
+	}
+	if (requested(ids, n, 54)) {
+		dst->has_alarm_0 = true;
+		memcpy(dst->alarm_0, c->alarm_0, sizeof(c->alarm_0));
+	}
+	if (requested(ids, n, 55)) {
+		dst->has_alarm_1 = true;
+		memcpy(dst->alarm_1, c->alarm_1, sizeof(c->alarm_1));
+	}
+	if (requested(ids, n, 56)) {
+		dst->has_alarm_2 = true;
+		memcpy(dst->alarm_2, c->alarm_2, sizeof(c->alarm_2));
+	}
+	if (requested(ids, n, 57)) {
+		dst->has_alarm_3 = true;
+		memcpy(dst->alarm_3, c->alarm_3, sizeof(c->alarm_3));
+	}
+	if (requested(ids, n, 58)) {
+		dst->has_alarm_4 = true;
+		memcpy(dst->alarm_4, c->alarm_4, sizeof(c->alarm_4));
+	}
+	if (requested(ids, n, 59)) {
+		dst->has_alarm_5 = true;
+		memcpy(dst->alarm_5, c->alarm_5, sizeof(c->alarm_5));
+	}
+	if (requested(ids, n, 60)) {
+		dst->has_alarm_6 = true;
+		memcpy(dst->alarm_6, c->alarm_6, sizeof(c->alarm_6));
+	}
+	if (requested(ids, n, 61)) {
+		dst->has_alarm_7 = true;
+		memcpy(dst->alarm_7, c->alarm_7, sizeof(c->alarm_7));
+	}
+	if (requested(ids, n, 62)) {
+		dst->has_alarm_8 = true;
+		memcpy(dst->alarm_8, c->alarm_8, sizeof(c->alarm_8));
+	}
+	if (requested(ids, n, 63)) {
+		dst->has_alarm_9 = true;
+		memcpy(dst->alarm_9, c->alarm_9, sizeof(c->alarm_9));
+	}
+	if (requested(ids, n, 64)) {
+		dst->has_alarm_10 = true;
+		memcpy(dst->alarm_10, c->alarm_10, sizeof(c->alarm_10));
+	}
+	if (requested(ids, n, 65)) {
+		dst->has_alarm_11 = true;
+		memcpy(dst->alarm_11, c->alarm_11, sizeof(c->alarm_11));
+	}
+	if (requested(ids, n, 66)) {
+		dst->has_alarm_12 = true;
+		memcpy(dst->alarm_12, c->alarm_12, sizeof(c->alarm_12));
+	}
+	if (requested(ids, n, 67)) {
+		dst->has_alarm_13 = true;
+		memcpy(dst->alarm_13, c->alarm_13, sizeof(c->alarm_13));
+	}
+	if (requested(ids, n, 68)) {
+		dst->has_alarm_14 = true;
+		memcpy(dst->alarm_14, c->alarm_14, sizeof(c->alarm_14));
+	}
+	if (requested(ids, n, 69)) {
+		dst->has_alarm_15 = true;
+		memcpy(dst->alarm_15, c->alarm_15, sizeof(c->alarm_15));
 	}
 }
 

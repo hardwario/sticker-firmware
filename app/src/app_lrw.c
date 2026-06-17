@@ -576,13 +576,6 @@ static void post_cmd_work_handler(struct k_work *work)
 		LOG_INF("Command: reboot");
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
-	case APP_CMD_ACTION_ALARM_RULES_SAVE:
-		/* Persist the alarm-rule blob, no reboot. Deferred here (off the
-		 * command-handle stack frame) because settings_save_one is too
-		 * stack-heavy to run inline on the m_work_q. */
-		LOG_INF("Command: saving alarm rules");
-		app_alarm_rules_save();
-		break;
 	default:
 		break;
 	}

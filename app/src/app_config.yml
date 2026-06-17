@@ -140,9 +140,7 @@ commands:
     - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
     - {name: req_history,    proto_id: 11, body: ReqHistory,    kind: handler, response: none, transports: [lrw]}
     - {name: clock_sync,     proto_id: 12, body: ClockSync,     kind: handler, response: info_deferred, transports: [lrw, nfc]}
-    - {name: alarm_rule,     proto_id: 13, body: AlarmRule,     kind: handler, response: ack}
     - {name: w1_scan,        proto_id: 14, body: W1Scan,        kind: handler, response: w1_scan}
-    - {name: req_alarm_rules, proto_id: 15, body: ReqAlarmRules, kind: handler, response: alarm_rules_dump}
 parameters:
   - name: secret_key
     proto_group: root
@@ -424,6 +422,143 @@ parameters:
     proto_id: 34
     type: bool
     help: "Get/Set input B counter enabled (true/false)."
+
+  # Dynamic alarm rule slots. One packed-hex rule per slot (the slot index is the
+  # rule's stable identity). 17 bytes little-endian:
+  #   [0] flags  bit0=present (slot occupied), bit1=enabled
+  #   [1] source (enum app_alarm_source)
+  #   [2] quantity (enum app_alarm_quantity)
+  #   [3] from_state, [4] to_state (STATE only)
+  #   [5..8] lo, [9..12] hi, [13..16] hst (IEEE-754 float LE)
+  # An empty slot is 34 zero hex chars (present=0). The rule cache in
+  # app_alarm_rules.c is rebuilt from these on load and after every SetParam.
+  - name: alarm_0
+    proto_group: alarms
+    proto_id: 54
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 0 (packed hex, see app_config.yml)."
+
+  - name: alarm_1
+    proto_group: alarms
+    proto_id: 55
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 1 (packed hex, see app_config.yml)."
+
+  - name: alarm_2
+    proto_group: alarms
+    proto_id: 56
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 2 (packed hex, see app_config.yml)."
+
+  - name: alarm_3
+    proto_group: alarms
+    proto_id: 57
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 3 (packed hex, see app_config.yml)."
+
+  - name: alarm_4
+    proto_group: alarms
+    proto_id: 58
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 4 (packed hex, see app_config.yml)."
+
+  - name: alarm_5
+    proto_group: alarms
+    proto_id: 59
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 5 (packed hex, see app_config.yml)."
+
+  - name: alarm_6
+    proto_group: alarms
+    proto_id: 60
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 6 (packed hex, see app_config.yml)."
+
+  - name: alarm_7
+    proto_group: alarms
+    proto_id: 61
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 7 (packed hex, see app_config.yml)."
+
+  - name: alarm_8
+    proto_group: alarms
+    proto_id: 62
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 8 (packed hex, see app_config.yml)."
+
+  - name: alarm_9
+    proto_group: alarms
+    proto_id: 63
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 9 (packed hex, see app_config.yml)."
+
+  - name: alarm_10
+    proto_group: alarms
+    proto_id: 64
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 10 (packed hex, see app_config.yml)."
+
+  - name: alarm_11
+    proto_group: alarms
+    proto_id: 65
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 11 (packed hex, see app_config.yml)."
+
+  - name: alarm_12
+    proto_group: alarms
+    proto_id: 66
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 12 (packed hex, see app_config.yml)."
+
+  - name: alarm_13
+    proto_group: alarms
+    proto_id: 67
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 13 (packed hex, see app_config.yml)."
+
+  - name: alarm_14
+    proto_group: alarms
+    proto_id: 68
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 14 (packed hex, see app_config.yml)."
+
+  - name: alarm_15
+    proto_group: alarms
+    proto_id: 69
+    type: bytes
+    size: 17
+    no_shell: true
+    help: "Get/Set alarm rule slot 15 (packed hex, see app_config.yml)."
 
   - name: accel_motion_sensitivity
     proto_group: sensors

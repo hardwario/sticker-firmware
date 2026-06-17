@@ -145,6 +145,22 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.input_a_counter));
 	SETTINGS_SET("input-b-counter", &m_app_config.input_b_counter,
 		     sizeof(m_app_config.input_b_counter));
+	SETTINGS_SET("alarm-0", m_app_config.alarm_0, sizeof(m_app_config.alarm_0));
+	SETTINGS_SET("alarm-1", m_app_config.alarm_1, sizeof(m_app_config.alarm_1));
+	SETTINGS_SET("alarm-2", m_app_config.alarm_2, sizeof(m_app_config.alarm_2));
+	SETTINGS_SET("alarm-3", m_app_config.alarm_3, sizeof(m_app_config.alarm_3));
+	SETTINGS_SET("alarm-4", m_app_config.alarm_4, sizeof(m_app_config.alarm_4));
+	SETTINGS_SET("alarm-5", m_app_config.alarm_5, sizeof(m_app_config.alarm_5));
+	SETTINGS_SET("alarm-6", m_app_config.alarm_6, sizeof(m_app_config.alarm_6));
+	SETTINGS_SET("alarm-7", m_app_config.alarm_7, sizeof(m_app_config.alarm_7));
+	SETTINGS_SET("alarm-8", m_app_config.alarm_8, sizeof(m_app_config.alarm_8));
+	SETTINGS_SET("alarm-9", m_app_config.alarm_9, sizeof(m_app_config.alarm_9));
+	SETTINGS_SET("alarm-10", m_app_config.alarm_10, sizeof(m_app_config.alarm_10));
+	SETTINGS_SET("alarm-11", m_app_config.alarm_11, sizeof(m_app_config.alarm_11));
+	SETTINGS_SET("alarm-12", m_app_config.alarm_12, sizeof(m_app_config.alarm_12));
+	SETTINGS_SET("alarm-13", m_app_config.alarm_13, sizeof(m_app_config.alarm_13));
+	SETTINGS_SET("alarm-14", m_app_config.alarm_14, sizeof(m_app_config.alarm_14));
+	SETTINGS_SET("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
 	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -322,6 +338,22 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.input_a_counter));
 	EXPORT_FUNC("input-b-counter", &m_app_config.input_b_counter,
 		    sizeof(m_app_config.input_b_counter));
+	EXPORT_FUNC("alarm-0", m_app_config.alarm_0, sizeof(m_app_config.alarm_0));
+	EXPORT_FUNC("alarm-1", m_app_config.alarm_1, sizeof(m_app_config.alarm_1));
+	EXPORT_FUNC("alarm-2", m_app_config.alarm_2, sizeof(m_app_config.alarm_2));
+	EXPORT_FUNC("alarm-3", m_app_config.alarm_3, sizeof(m_app_config.alarm_3));
+	EXPORT_FUNC("alarm-4", m_app_config.alarm_4, sizeof(m_app_config.alarm_4));
+	EXPORT_FUNC("alarm-5", m_app_config.alarm_5, sizeof(m_app_config.alarm_5));
+	EXPORT_FUNC("alarm-6", m_app_config.alarm_6, sizeof(m_app_config.alarm_6));
+	EXPORT_FUNC("alarm-7", m_app_config.alarm_7, sizeof(m_app_config.alarm_7));
+	EXPORT_FUNC("alarm-8", m_app_config.alarm_8, sizeof(m_app_config.alarm_8));
+	EXPORT_FUNC("alarm-9", m_app_config.alarm_9, sizeof(m_app_config.alarm_9));
+	EXPORT_FUNC("alarm-10", m_app_config.alarm_10, sizeof(m_app_config.alarm_10));
+	EXPORT_FUNC("alarm-11", m_app_config.alarm_11, sizeof(m_app_config.alarm_11));
+	EXPORT_FUNC("alarm-12", m_app_config.alarm_12, sizeof(m_app_config.alarm_12));
+	EXPORT_FUNC("alarm-13", m_app_config.alarm_13, sizeof(m_app_config.alarm_13));
+	EXPORT_FUNC("alarm-14", m_app_config.alarm_14, sizeof(m_app_config.alarm_14));
+	EXPORT_FUNC("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
 	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));

@@ -5,6 +5,7 @@
  */
 
 #include "app_alarm_rules.h"
+#include "app_config.h"
 #include "app_log.h"
 
 /* Zephyr includes */
@@ -20,10 +21,11 @@
 
 LOG_MODULE_REGISTER(app_alarm_rules, LOG_LEVEL_INF);
 
-#define SETTINGS_SUBTREE "alarm"
-#define SETTINGS_KEY     "alarm/rules"
-#define BLOB_VERSION_V1  1 /* legacy: count + compacted list of rules */
-#define BLOB_VERSION     2 /* current: sparse (slot, rule) entries */
+/* Packed wire/storage layout of one rule, mirrored in app_config.yml and the
+ * manager-app. 17 bytes, little-endian. */
+#define RULE_PACK_LEN     17
+#define RULE_FLAG_PRESENT 0x01 /* slot occupied */
+#define RULE_FLAG_ENABLED 0x02 /* rule evaluated */
 
 struct app_alarm_slot {
 	bool used;
@@ -31,7 +33,7 @@ struct app_alarm_slot {
 };
 
 static struct app_alarm_slot m_slots[APP_ALARM_SLOT_COUNT];
-static struct k_mutex m_lock;
+static K_MUTEX_DEFINE(m_lock);
 
 /* ---- names -------------------------------------------------------------- */
 
@@ -139,6 +141,82 @@ bool app_alarm_rule_valid(enum app_alarm_source source, enum app_alarm_quantity 
 	}
 }
 
+/* ---- app_config storage (per-slot bytes) -------------------------------- */
+
+/* The 16 alarm_N config fields are separate `uint8_t[RULE_PACK_LEN]` members;
+ * map a slot index to its field. Returns NULL for an out-of-range slot. */
+static uint8_t *slot_field(struct app_config *c, uint8_t slot)
+{
+	switch (slot) {
+	case 0:
+		return c->alarm_0;
+	case 1:
+		return c->alarm_1;
+	case 2:
+		return c->alarm_2;
+	case 3:
+		return c->alarm_3;
+	case 4:
+		return c->alarm_4;
+	case 5:
+		return c->alarm_5;
+	case 6:
+		return c->alarm_6;
+	case 7:
+		return c->alarm_7;
+	case 8:
+		return c->alarm_8;
+	case 9:
+		return c->alarm_9;
+	case 10:
+		return c->alarm_10;
+	case 11:
+		return c->alarm_11;
+	case 12:
+		return c->alarm_12;
+	case 13:
+		return c->alarm_13;
+	case 14:
+		return c->alarm_14;
+	case 15:
+		return c->alarm_15;
+	default:
+		return NULL;
+	}
+}
+
+BUILD_ASSERT(sizeof(((struct app_config *)0)->alarm_0) == RULE_PACK_LEN,
+	     "alarm slot config field must be RULE_PACK_LEN bytes");
+
+static void pack_rule(const struct app_alarm_rule *r, uint8_t out[RULE_PACK_LEN])
+{
+	out[0] = RULE_FLAG_PRESENT | (r->enabled ? RULE_FLAG_ENABLED : 0);
+	out[1] = r->source;
+	out[2] = r->quantity;
+	out[3] = r->from_state;
+	out[4] = r->to_state;
+	memcpy(&out[5], &r->lo, sizeof(float));
+	memcpy(&out[9], &r->hi, sizeof(float));
+	memcpy(&out[13], &r->hst, sizeof(float));
+}
+
+/* Decode `in` into `*r`. Returns true if the slot is present (occupied). */
+static bool unpack_rule(const uint8_t in[RULE_PACK_LEN], struct app_alarm_rule *r)
+{
+	if (!(in[0] & RULE_FLAG_PRESENT)) {
+		return false;
+	}
+	r->enabled = (in[0] & RULE_FLAG_ENABLED) ? 1 : 0;
+	r->source = in[1];
+	r->quantity = in[2];
+	r->from_state = in[3];
+	r->to_state = in[4];
+	memcpy(&r->lo, &in[5], sizeof(float));
+	memcpy(&r->hi, &in[9], sizeof(float));
+	memcpy(&r->hst, &in[13], sizeof(float));
+	return true;
+}
+
 /* ---- CRUD (slot-addressed) ---------------------------------------------- */
 
 uint8_t app_alarm_rules_count(void)
@@ -184,6 +262,7 @@ int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule)
 	}
 
 	k_mutex_lock(&m_lock, K_FOREVER);
+	pack_rule(rule, slot_field(app_config(), slot));
 	m_slots[slot].rule = *rule;
 	m_slots[slot].used = true;
 	k_mutex_unlock(&m_lock);
@@ -197,6 +276,7 @@ int app_alarm_rules_clear(uint8_t slot)
 	}
 	k_mutex_lock(&m_lock, K_FOREVER);
 	int ret = m_slots[slot].used ? 0 : -ENOENT;
+	memset(slot_field(app_config(), slot), 0, RULE_PACK_LEN);
 	m_slots[slot].used = false;
 	k_mutex_unlock(&m_lock);
 	return ret;
@@ -205,133 +285,51 @@ int app_alarm_rules_clear(uint8_t slot)
 void app_alarm_rules_clear_all(void)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
+	struct app_config *c = app_config();
 	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
+		memset(slot_field(c, (uint8_t)i), 0, RULE_PACK_LEN);
 		m_slots[i].used = false;
 	}
 	k_mutex_unlock(&m_lock);
 }
 
-/* ---- persistence (settings blob) --------------------------------------- */
+/* ---- persistence (app_config storage) ----------------------------------- */
 
-/* v1 (legacy): version + count + a compacted list of rules. Migrated on load
- * into slots 0..count-1. */
-struct rules_blob_v1 {
-	uint8_t version;
-	uint8_t count;
-	struct app_alarm_rule rules[APP_ALARM_SLOT_COUNT];
-};
-
-/* v2 (current): version + count + a sparse list of (slot, rule) entries. Only
- * occupied slots are stored, so an empty table is 2 bytes and the blob never
- * exceeds the v1 size. */
-struct rules_entry_v2 {
-	uint8_t slot;
-	struct app_alarm_rule rule;
-};
-
-struct rules_blob_v2 {
-	uint8_t version;
-	uint8_t count;
-	struct rules_entry_v2 entries[APP_ALARM_SLOT_COUNT];
-};
-
-/* Adopt one (slot, rule) into m_slots if the slot and pair are valid (drops
- * anything that no longer validates, e.g. enum changed across FW). */
-static void load_one(uint8_t slot, const struct app_alarm_rule *r)
+void app_alarm_rules_reload_from_config(void)
 {
-	if (slot < APP_ALARM_SLOT_COUNT &&
-	    app_alarm_rule_valid((enum app_alarm_source)r->source,
-				 (enum app_alarm_quantity)r->quantity)) {
-		m_slots[slot].rule = *r;
-		m_slots[slot].used = true;
-	}
-}
-
-static int rules_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
-{
-	const char *next;
-	if (!settings_name_steq(name, "rules", &next) || next) {
-		return -ENOENT;
-	}
-
-	union {
-		uint8_t version;
-		struct rules_blob_v1 v1;
-		struct rules_blob_v2 v2;
-	} blob;
-	if (len > sizeof(blob) || len < 2) {
-		LOG_WRN("alarm rules blob ignored (len=%d)", (int)len);
-		return 0;
-	}
-	ssize_t n = read_cb(cb_arg, &blob, len);
-	if (n < 2) {
-		LOG_WRN("alarm rules blob short read (n=%d)", (int)n);
-		return 0;
-	}
-
-	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
-		m_slots[i].used = false;
-	}
-
-	if (blob.version == BLOB_VERSION) {
-		uint8_t count = MIN(blob.v2.count, (uint8_t)APP_ALARM_SLOT_COUNT);
-		for (int i = 0; i < count; i++) {
-			load_one(blob.v2.entries[i].slot, &blob.v2.entries[i].rule);
-		}
-	} else if (blob.version == BLOB_VERSION_V1) {
-		uint8_t count = MIN(blob.v1.count, (uint8_t)APP_ALARM_SLOT_COUNT);
-		for (int i = 0; i < count; i++) {
-			load_one((uint8_t)i, &blob.v1.rules[i]);
-		}
-	} else {
-		LOG_WRN("alarm rules blob ignored (version=%u)", blob.version);
-		return 0;
-	}
-
-	LOG_INF("Loaded %u alarm rule(s)", app_alarm_rules_count());
-	return 0;
-}
-
-static struct settings_handler m_sh = {
-	.name = SETTINGS_SUBTREE,
-	.h_set = rules_settings_set,
-};
-
-int app_alarm_rules_save(void)
-{
-	struct rules_blob_v2 blob = {.version = BLOB_VERSION, .count = 0};
+	struct app_config *c = app_config();
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 	for (uint8_t s = 0; s < APP_ALARM_SLOT_COUNT; s++) {
-		if (m_slots[s].used) {
-			blob.entries[blob.count].slot = s;
-			blob.entries[blob.count].rule = m_slots[s].rule;
-			blob.count++;
+		struct app_alarm_rule r;
+		/* Drop a slot that decodes to a pair that no longer validates
+		 * (e.g. enum changed across FW, or a host wrote garbage). */
+		if (unpack_rule(slot_field(c, s), &r) &&
+		    app_alarm_rule_valid((enum app_alarm_source)r.source,
+					 (enum app_alarm_quantity)r.quantity)) {
+			m_slots[s].rule = r;
+			m_slots[s].used = true;
+		} else {
+			m_slots[s].used = false;
 		}
 	}
-	size_t len = offsetof(struct rules_blob_v2, entries) +
-		     (size_t)blob.count * sizeof(blob.entries[0]);
 	k_mutex_unlock(&m_lock);
 
-	int ret = settings_save_one(SETTINGS_KEY, &blob, len);
+	LOG_INF("Loaded %u alarm rule(s)", app_alarm_rules_count());
+}
+
+int app_alarm_rules_save(void)
+{
+	/* Rules live in the app_config slots; persist the config (no reboot). */
+	int ret = settings_save();
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("settings_save_one", ret);
+		LOG_ERR_CALL_FAILED_INT("settings_save", ret);
 	}
 	return ret;
 }
 
 int app_alarm_rules_init(void)
 {
-	k_mutex_init(&m_lock);
-
-	int ret = settings_register(&m_sh);
-	if (ret && ret != -EEXIST) {
-		LOG_ERR_CALL_FAILED_INT("settings_register", ret);
-		return ret;
-	}
-	ret = settings_load_subtree(SETTINGS_SUBTREE);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("settings_load_subtree", ret);
-	}
-	return ret;
+	app_alarm_rules_reload_from_config();
+	return 0;
 }

@@ -56,7 +56,7 @@ byte is the `seq` and is echoed in the reply.
 | `force_send` | `08064a00` |
 | `reboot` | `08083a00` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
-| `set_param`: ADR on, `interval_report`=120 s, `temperature_alarm_hi`=50 °C | `0801120d0a021801120720783d00004842` |
+| `set_param`: ADR on, `interval_report`=120 s, `alarm_0`=onboard temp 5–30 °C (hyst 1) | `0801121e0a021801120220782a14b2031103000000000000a0400000f0410000803f` |
 
 ### Legend
 
@@ -682,71 +682,145 @@ it resets to 0.
 
 ## Alarms
 
-### A1 — Temperature threshold alarm
+> **Alarms are dynamic rules** in 16 fixed slots (`0…15`). Arm/change/clear them locally with the
+> `alarm` shell command (`alarm set <i> <source> <quantity> <args>`, `alarm new …`,
+> `alarm clear <i>|all`, `alarm list`), or over the air with **SetParam** writing the slot config
+> parameter `alarm_<i>` (a packed 17-byte rule as hex) — the same message works on **fPort 85
+> (LoRaWAN)** and **NFC**. There are no per-source `*-notify-*` flags or `*_alarm_*` config keys
+> any more, and no separate `AlarmRule`/`ReqAlarmRules` commands. See `doc/version 1.4.md` §7 for
+> the source/quantity enums, the kinds (threshold / state / count) and the packed-slot layout.
+> `alarm-limit` (rate-limit) and `alarm-notif-time` (LED hold + one-shot re-arm) still apply.
 
-**Goal:** Crossing the temperature bound raises an alarm with hysteresis.
-**Observable:** AlarmReport on fPort 3, source `temperature`, edge + side (LO/HI); RTT alarm log;
-orange LED.
+### A1 — Threshold alarm (onboard temperature)
+
+**Goal:** Crossing an analog bound raises an alarm with hysteresis.
+**Observable:** AlarmReport on fPort 3, source `onboard`, quantity `temperature`, edge + side
+(LO/HI); RTT alarm log; orange LED.
 
 **Prompt for Claude:**
-> Enable the temperature alarm and set `temperature_alarm_lo`/`hi`/`hst` to bounds near the
-> current room temperature (note the values). Ask me to warm/cool the sensor across a bound.
-> Confirm an AlarmReport arrives on fPort 3 with source `temperature`, the correct edge and side
-> (LO/HI), and that hysteresis prevents immediate re-triggering. Decode and report the event.
+> Arm `alarm set 0 onboard temperature <lo> <hi> <hst>` with bounds near the current room
+> temperature (note the values); confirm with `alarm list`. Ask me to warm/cool the sensor across a
+> bound. Confirm an AlarmReport on fPort 3 with source `onboard`/quantity `temperature`, the correct
+> side (LO/HI), and that hysteresis prevents immediate re-triggering. Decode and report the event.
 
 - [ ] Pass
 
-### A2 — Threshold alarms: humidity / pressure / T1 / T2
+### A2 — Threshold alarms: humidity / pressure / 1-Wire slots
 
-**Goal:** The remaining threshold alarms behave like temperature.
+**Goal:** The other analog quantities behave like temperature.
 **Observable:** AlarmReport fPort 3 with the matching source and side.
 
 **Prompt for Claude:**
-> For each of humidity, pressure, T1 and T2 (whichever sensors are present on this unit), enable
-> the alarm with bounds around the current reading, stimulate a crossing, and confirm an
-> AlarmReport on fPort 3 with the correct source and LO/HI side. Summarize results per source;
-> mark any sensor not fitted as N/A.
+> For each present analog quantity (onboard humidity/pressure, and 1-Wire slot s1…s4 temperature/
+> humidity), arm `alarm set <i> <source> <quantity> <lo> <hi> [hst]`, stimulate a crossing, and
+> confirm an AlarmReport on fPort 3 with the correct source/quantity and LO/HI side. Summarize per
+> source; mark any sensor not fitted as N/A.
 
 - [ ] Pass
 
-### A3 — Discrete alarm: Hall
+### A3 — Binary alarm: Hall (state edge & level)
 
-**Goal:** Hall activate/deactivate edges raise alarms.
-**Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`, edge ACTIVATE/DEACTIVATE
-per `*_notify_act`/`*_notify_deact`.
+**Goal:** A `state` rule on a hall sensor fires on the configured transition (edge) or while held
+(level).
+**Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`, quantity `state`.
 
 **Prompt for Claude:**
-> Enable hall notify-on-activate and notify-on-deactivate. Ask me to apply and remove a magnet on
-> a hall sensor. Confirm AlarmReports on fPort 3 with source `hall-left`/`hall-right` and the
-> ACTIVATE then DEACTIVATE edges. Report the decoded events.
+> Arm an **edge** rule `alarm set 0 hall-left state 0 1` (fires on 0→1) and confirm with
+> `alarm list` it reads `0->1 (edge)`. Ask me to apply/remove a magnet; confirm an AlarmReport on
+> fPort 3 (source `hall-left`) on the rising edge. Then arm a **level** rule
+> `alarm set 0 hall-left state 1 1` (`1->1 (level)`) and confirm it stays active while the magnet is
+> present. Report both.
 
 - [ ] Pass
 
-### A4 — Discrete alarm: Input A/B
+### A4 — Binary alarm: Input A/B (state)
 
-**Goal:** Input edges raise alarms.
-**Observable:** AlarmReport fPort 3, source `input-a`/`input-b`, edge per notify config.
+**Goal:** Input edges/levels raise `state` alarms.
+**Observable:** AlarmReport fPort 3, source `input-a`/`input-b`, quantity `state`.
 
 **Prompt for Claude:**
-> Enable input notify-on-activate/deactivate (and ensure PIR is disabled — shared pins). Toggle
-> each input and confirm AlarmReports on fPort 3 with source `input-a`/`input-b` and correct
-> edges. Report results.
+> With PIR disabled (shared pins), arm `alarm set <i> input-a state 0 1` (and `input-b`). Toggle
+> each input and confirm AlarmReports on fPort 3 with source `input-a`/`input-b`. Report results.
 
 - [ ] Pass
 
-### A5 — PIR alarm (activate-only)
+### A5 — Momentary alarm: PIR / accel (state one-shot, #150)
 
-**Goal:** PIR motion raises an activate-only alarm.
-**Observable:** AlarmReport fPort 3, source `pir`, edge ACTIVATE only (no DEACTIVATE); requires
-`pir_notify_act`.
+**Goal:** PIR and accel `state` alarms fire as per-pulse one-shots that re-arm (they only ever
+pulse, never report a level).
+**Observable:** AlarmReport fPort 3, source `pir`/`accel`, quantity `state`, edge ACTIVATE; one
+report per pulse, suppressed within `alarm-notif-time`, then re-armed; a motion burst is
+flood-suppressed (no permanent latch).
 
 **Prompt for Claude:**
-> Enable `pir_notify_act`. Ask me to trigger motion. Confirm an AlarmReport on fPort 3 with source
-> `pir` and edge ACTIVATE, and confirm there is **no** DEACTIVATE edge for PIR. Report the event.
+> Enable the sensor (`config cap-pir-detector true` / `cap-accelerometer true`, save). Arm
+> `alarm set 0 pir state 0 1` (or `accel state 0 1`) — note edge and level behave alike for these
+> momentary sources. Ask me to trigger motion repeatedly; confirm each pulse fires an AlarmReport
+> (source `pir`/`accel`, ACTIVATE), that reports within `alarm-notif-time` are suppressed and it
+> re-arms after, and that a sustained burst produces only periodic reports (not a flood, not a stuck
+> `active`). Report the cadence.
 
 - [ ] Pass
 
-### A6 — AlarmReport structure
+### A6 — Count / rate alarm (hall / input)
+
+**Goal:** A `count` rule fires when a counter exceeds the per-interval rate.
+**Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`/`input-a`/`input-b`, quantity
+`count`.
+
+**Prompt for Claude:**
+> Arm `alarm new hall-left count <N>` (small N; `alarm list` shows `rate>=N/interval`). Ask me to
+> pulse the hall sensor more than N times within a report interval and confirm an AlarmReport on
+> fPort 3 for that source/quantity. Report the result.
+
+- [ ] Pass
+
+### A7 — Set & read alarms over LoRaWAN & NFC (SetParam / GetParam)
+
+**Goal:** Alarm slots are written/read as `alarm_<i>` config parameters over both transports
+(native protobuf bytes, not hex strings on the wire).
+**Observable:** `set_param.alarms.alarm_<i>` arms a slot (Ack); `get_param.alarms_field=[54+i]`
+returns the packed rule in `config_dump`; `alarm list` matches; identical behaviour on fPort 85
+and NFC.
+
+**Prompt for Claude:**
+> Author a SetParam with `ttn.js encodeDownlink` setting e.g. `alarm_0` to a packed onboard-
+> temperature rule (hex), send it over LoRaWAN (fPort 85), and confirm an Ack and that `alarm list`
+> shows the rule. Then GetParam `alarms_field:[54]` and confirm the returned hex matches what was
+> set. Repeat the SetParam over NFC and confirm the same result. Report both transports.
+
+- [ ] Pass
+
+### A8 — Change / delete / deactivate a rule
+
+**Goal:** A slot can be overwritten, cleared, and disabled-without-losing-its-definition.
+**Observable:** Overwriting `alarm_<i>` changes the rule; `alarm clear <i>` (or `alarm_<i>` = 34
+zero hex chars) removes it; a packed rule with flags = present-only (enabled bit clear, e.g.
+`01…`) keeps the slot listed with `en=0` and is **not** evaluated.
+
+**Prompt for Claude:**
+> Using slot 0: (1) **change** it — `alarm set 0 onboard temperature 0 10 1` then re-set to
+> `5 30 1`, confirm `alarm list` reflects each. (2) **deactivate** it over SetParam by writing
+> `alarm_0` with the same rule but flags `01` (present, not enabled); confirm `alarm list` shows
+> `en=0` and that crossing the bound raises **no** alarm. (3) **delete** it (`alarm clear 0`, or
+> SetParam `alarm_0` = all zeros); confirm the slot disappears from `alarm list`. Report all three.
+
+- [ ] Pass
+
+### A9 — Multi-level (two slots, same source + quantity)
+
+**Goal:** Several slots may carry the same `(source, quantity)` as independent rules (e.g. a warning
+band and a critical band), each latching/reporting on its own.
+
+**Prompt for Claude:**
+> Arm two onboard-temperature rules — slot 0 a wide "warning" band and slot 1 a tighter "critical"
+> band (note both). Stimulate crossings into each band and confirm each slot raises its own
+> AlarmReport independently (the `slot`/event fields distinguish them) and clears independently.
+> Report.
+
+- [ ] Pass
+
+### A10 — AlarmReport structure
 
 **Goal:** AlarmReport fields are well-formed.
 **Observable:** `base_time`, `total`, `events[]` with `source`, `edge`, `side`, `rel_s`, and
@@ -760,7 +834,7 @@ optional scaled `value` (×100 temp/hum, ×10 pressure; absent for discrete).
 
 - [ ] Pass
 
-### A7 — Alarm rate-limiting
+### A11 — Alarm rate-limiting
 
 **Goal:** `alarm_limit` throttles uplinks while still latching events.
 **Observable:** First alarm sends immediately; subsequent within the window are batched/suppressed
@@ -775,7 +849,7 @@ on the air (LED + counters still update); RTT `Alarm uplink rate-limited; next b
 
 - [ ] Pass
 
-### A8 — Event LED (orange)
+### A12 — Event LED (orange)
 
 **Goal:** Orange LED indicates alarms and auto-off after 60 min.
 **Observable:** Orange (red+yellow) blink on alarm, held `alarm_notif_time` s; auto-off 60 min
@@ -789,7 +863,7 @@ after boot.
 
 - [ ] Pass
 
-### A9 — Dual uplink per edge & `alarm-limit = 0`
+### A13 — Dual uplink per edge & `alarm-limit = 0`
 
 **Goal:** An alarm edge produces an immediate fPort 2 telemetry **and** a delayed fPort 3 batch;
 `alarm-limit = 0` disables windowing.
