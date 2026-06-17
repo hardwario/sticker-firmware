@@ -368,6 +368,14 @@ static bool eval_threshold(const struct app_alarm_rule *rule, struct rstate *rt,
 	return rt->active;
 }
 
+/* Momentary/pulse sources only ever assert (app_alarm_event(src, true)) and never
+ * deassert, so a STATE rule's prev->cur edge can be observed at most once. Handle
+ * them as a per-pulse one-shot in eval_state(). */
+static inline bool source_is_momentary(uint8_t source)
+{
+	return source == APP_ALARM_SRC_ACCEL || source == APP_ALARM_SRC_PIR;
+}
+
 /* STATE rule: from/to over a digital level. from != to is an edge (one-shot:
  * activate, auto-clear after alarm_notif_time, no deactivate); from == to is a
  * level (active while cur == to). */
@@ -384,6 +392,24 @@ static void eval_state(const struct app_alarm_rule *rule, struct rstate *rt, boo
 			*should_send = true;
 			alarm_collect(rule->source, rule->quantity, false, ALARM_SIDE_NONE, true,
 				      0);
+		}
+		rt->have_prev_state = true;
+		rt->prev_state = cur_lvl;
+		return;
+	}
+
+	if (source_is_momentary(rule->source)) {
+		/* Pulse source: each asserted event is a discrete trigger. Fire a one-shot
+		 * (auto-cleared after alarm_notif_time in app_alarm_poll), suppressed while a
+		 * previous one is still latched so we emit at most one alarm per notif-time
+		 * window regardless of event rate. from/to are not meaningful for a source
+		 * that never reports a level, so edge (0->1) and level (1->1) behave alike. */
+		if (cur && !rt->active) {
+			rt->active = true;
+			rt->oneshot_expiry = k_uptime_get() + notif_hold_ms();
+			*should_send = true;
+			alarm_collect(rule->source, rule->quantity, true, ALARM_SIDE_NONE, true,
+				      cur_lvl);
 		}
 		rt->have_prev_state = true;
 		rt->prev_state = cur_lvl;
