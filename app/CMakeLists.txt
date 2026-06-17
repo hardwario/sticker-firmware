@@ -30,6 +30,10 @@ add_compile_definitions(
   APP_BUILD_TYPE=${APP_BUILD_TYPE})
 message(STATUS "Firmware version: ${APP_VERSION_MAJOR}.${APP_VERSION_MINOR}.${APP_VERSION_PATCH} (build type ${APP_BUILD_TYPE})")
 
+# Shared headers (sticker/dfu_signal.h, sticker/nfc_proto.h) live in the repo's
+# top-level include/ so the app and the NFC bootloader use the same contract.
+target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
 list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
 include(nanopb)
 
