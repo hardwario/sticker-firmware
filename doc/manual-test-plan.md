@@ -134,18 +134,50 @@ byte is the `seq` and is echoed in the reply.
 
 - [ ] Pass
 
-### G6 — Factory reset
+### G6 — Reset keeps identity (`settings reset` / FactoryReset)
 
-**Goal:** Factory reset clears NVS and reboots.
-**Observable:** Shell `settings reset` (or FactoryReset downlink) → NVS cleared, device reboots,
-config back to defaults.
+**Goal:** `settings reset` and the FactoryReset command restore application config + alarm rules to
+defaults but **keep** the device identity (`serial-number`, `secret-key`) and LoRaWAN provisioning
+(`lrw-deveui`, keys, region, …), so the unit stays provisioned and on the network (issue #108).
+**Observable:** changed app/alarm values back to defaults; DevEUI/keys/serial unchanged; device
+stays joined / rejoins with the same credentials.
 
 **Prompt for Claude:**
-> First capture a couple of non-default config values via `config` (e.g. `config interval-report`).
-> Then run `settings reset` over the RTT shell (this is destructive — confirm it's acceptable on
-> this bench unit). Confirm the device reboots and the previously-changed values are back to
-> defaults. Optionally repeat using a FactoryReset downlink on fPort 85 and confirm the
-> `Response.Ack` precedes the reboot.
+> First capture the identity + a couple of app values via `config` (e.g. `config lrw-deveui`,
+> `config serial-number`, `config interval-report`) and change `interval-report` to a non-default.
+> Then run `settings reset` over the RTT shell. After reboot confirm: `interval-report` is back to
+> default, but `config lrw-deveui` / `config serial-number` are **unchanged**, and the device
+> rejoins with the same DevEUI. Repeat using a FactoryReset downlink on fPort 85 and confirm the
+> `Response.Ack` precedes the reboot and identity again survives.
+
+- [ ] Pass
+
+### G6b — Full erase un-provisions (`settings erase`)
+
+**Goal:** `settings erase` is the only path that wipes the whole NVS partition (identity + LoRaWAN
+credentials included). It is **shell-only** — no LoRaWAN or NFC command can reach it (issue #108).
+**Observable:** after `settings erase` the DevEUI/keys/serial are gone (back to all-zero/defaults);
+the device no longer joins until re-provisioned.
+
+**Prompt for Claude:**
+> ⚠️ Destructive — confirm it's acceptable to un-provision this bench unit first (you'll need to
+> re-flash provisioning afterwards). Run `settings erase` over the RTT shell. After reboot confirm
+> `config lrw-deveui` and `config serial-number` are wiped and the device fails to join. Then
+> re-provision and confirm join works again.
+
+- [ ] Pass
+
+### G6c — Re-flash preserves provisioning (J-Link regression)
+
+**Goal:** A normal `west flash` (no `--erase`) never touches the `storage` NVS partition, so
+re-flashing firmware keeps the device provisioned (issue #108 partition-map contract).
+**Observable:** identity + LoRaWAN credentials survive a firmware re-flash.
+
+**Prompt for Claude:**
+> Capture `config lrw-deveui` / `config serial-number` / `config interval-report` (set the latter
+> to a non-default and `settings save`). Re-flash the firmware with a plain `west flash` (no
+> `--erase`). After reboot confirm all three values are **unchanged** and the device rejoins with
+> the same DevEUI — i.e. the flash preserved the `storage` partition at `0x3C000`.
 
 - [ ] Pass
 
@@ -554,6 +586,24 @@ fPort 10 every 30 s using fixed ABP keys.
 > uplinks on fPort 10 roughly every 30 s (verify on the network server; note the fixed ABP keys).
 > Confirm normal telemetry is suppressed while in calibration mode. Also verify the
 > config-flag path: `config calibration on` + reboot logs `Calibration flag set in config`.
+
+- [ ] Pass
+
+### S12b — `enter_calibration` command (remote)
+
+**Goal:** The `enter_calibration` command (#141) drops the device into calibration mode over
+LoRaWAN and NFC, with the same end state as the magnet/flag path.
+**Observable:** `Response.Ack` on fPort 85; after the deferred action (≈8 s) the device cold-reboots
+and the boot log shows `Calibration flag set in config — entering calibration mode`, then fPort-10
+calibration uplinks. The flag is one-shot, so the next reboot returns to normal.
+
+**Prompt for Claude:**
+> Send the `enter_calibration` command (downlink hex `0801920100` on fPort 85 via the TTS MCP, or
+> over NFC). Confirm the Ack, then that the device reboots into calibration mode (boot log
+> `Calibration flag set in config — entering calibration mode`, fPort-10 uplinks). Reboot once more
+> and confirm it returns to normal telemetry (the flag self-clears). Note: a shell `ats cmd lrw
+> 0801920100` only acks and reports the deferred action without executing it — drive the real entry
+> via an actual downlink or the NFC tag.
 
 - [ ] Pass
 
