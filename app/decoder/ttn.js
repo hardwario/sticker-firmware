@@ -90,6 +90,13 @@ var _ALM_NAMES = {
 };
 var _ALM_ENUMS = {};
 var _ALM_FLOAT = {};
+// Dynamic alarm rule slots alarm_0..alarm_15 = proto fields 54..69, each a packed
+// 17-byte rule carried as native bytes (presented/authored as a 34-char hex string).
+var _ALM_HEX = {};
+var _ALM_HEX_ENC = {};
+(function () {
+  for (var i = 0; i < 16; i++) { _ALM_HEX[54 + i] = "alarm_" + i; _ALM_HEX_ENC["alarm_" + i] = 54 + i; }
+})();
 
 var _LRW_NAMES = { 1: "region", 2: "network", 3: "adr", 4: "activation", 12: "sub_band" };
 var _LRW_HEX = { 5: "deveui", 6: "joineui", 9: "devaddr" };
@@ -127,9 +134,7 @@ var _CMD_NAMES = {
   10: "reset_counters",
   11: "req_history",
   12: "clock_sync",
-  13: "alarm_rule",
   14: "w1_scan",
-  15: "req_alarm_rules",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);
@@ -178,7 +183,7 @@ function _decodeCfgGroup(bytes, start, end, NAMES, ENUMS, HEX) {
 
 function _decodeApplication(b, s, e) { return _decodeCfgGroup(b, s, e, _APP_NAMES, _APP_ENUMS, null); }
 function _decodeSensors(b, s, e) { return _decodeCfgGroup(b, s, e, _SEN_NAMES, _SEN_ENUMS, _SEN_HEX); }
-function _decodeAlarms(b, s, e) { return _decodeCfgGroup(b, s, e, _ALM_NAMES, _ALM_ENUMS, null); }
+function _decodeAlarms(b, s, e) { return _decodeCfgGroup(b, s, e, _ALM_NAMES, _ALM_ENUMS, _ALM_HEX); }
 
 function _decodeConfigDump(bytes, start, end) {
   var cd = {}, pos = start;
@@ -273,60 +278,6 @@ function _decodeW1Scan(bytes, start, end) {
     }
   }
   return { rom: roms };
-}
-
-// enum app_alarm_kind → label (mirrors app_alarm_rules.h).
-var _ALARM_KINDS = { 0: "threshold", 1: "state", 2: "rate" };
-
-// One Response.RuleEntry: slot(10) is the rule's stable identity, source(1),
-// quantity(2) numeric enums, enabled(3), kind(4) [0=threshold 1=state 2=rate],
-// threshold lo(5)/hi(6)/hst(7) float, state from_state(8)/to_state(9). Only the
-// value fields for the rule's kind are set.
-function _decodeRuleEntry(bytes, start, end) {
-  var r = {}, pos = start;
-  while (pos < end) {
-    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
-    var f = tag.value >>> 3, w = tag.value & 0x7;
-    if (w === 0) {
-      var v = _pbReadVarint(bytes, pos); pos = v.next;
-      if (f === 1) r.source = v.value;
-      else if (f === 2) r.quantity = v.value;
-      else if (f === 3) r.enabled = v.value !== 0;
-      else if (f === 4) { r.kind = v.value; r.kind_name = _ALARM_KINDS[v.value] || "unknown"; }
-      else if (f === 8) r.from_state = v.value;
-      else if (f === 9) r.to_state = v.value;
-      else if (f === 10) r.slot = v.value;
-    } else if (w === 5) {
-      var fl = _pbReadFloat(bytes, pos); pos = fl.next;
-      if (f === 5) r.lo = fl.value;
-      else if (f === 6) r.hi = fl.value;
-      else if (f === 7) r.hst = fl.value;
-    } else if (w === 2) {
-      var len = _pbReadVarint(bytes, pos); pos = len.next + len.value;
-    } else { break; }
-  }
-  return r;
-}
-
-// Response.AlarmRulesDump (field 8): paged dynamic alarm rules. page_index(1),
-// page_count(2), repeated RuleEntry rules(3).
-function _decodeAlarmRulesDump(bytes, start, end) {
-  var d = { rules: [] }, pos = start;
-  while (pos < end) {
-    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
-    var f = tag.value >>> 3, w = tag.value & 0x7;
-    if (w === 0) {
-      var v = _pbReadVarint(bytes, pos); pos = v.next;
-      if (f === 1) d.page_index = v.value;
-      else if (f === 2) d.page_count = v.value;
-    } else if (w === 2) {
-      var len = _pbReadVarint(bytes, pos); pos = len.next;
-      var e2 = pos + len.value;
-      if (f === 3) d.rules.push(_decodeRuleEntry(bytes, pos, e2));
-      pos = e2;
-    } else { break; }
-  }
-  return d;
 }
 
 // app_history_sensor enum order → name + encoding (mirrors app_history.c).
@@ -440,7 +391,6 @@ function decodeDownlinkResponse(bytes) {
       else if (field === 5) resp.history_frame = _decodeHistoryFrame(bytes, pos, end);
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       else if (field === 7) resp.w1_scan = _decodeW1Scan(bytes, pos, end);
-      else if (field === 8) resp.alarm_rules_dump = _decodeAlarmRulesDump(bytes, pos, end);
       pos = end;
     } else {
       break;
@@ -702,7 +652,7 @@ function _encCfgGroup(obj, TAGS, FLOAT, ENUMS, HEXENC) {
 
 function _encApplication(a) { return _encCfgGroup(a, _APP_TAGS, _APP_FLOAT, _APP_ENUMS, null); }
 function _encSensors(s) { return _encCfgGroup(s, _SEN_TAGS, _SEN_FLOAT, _SEN_ENUMS, _SEN_HEX_ENC); }
-function _encAlarms(a) { return _encCfgGroup(a, _ALM_TAGS, _ALM_FLOAT, _ALM_ENUMS, null); }
+function _encAlarms(a) { return _encCfgGroup(a, _ALM_TAGS, _ALM_FLOAT, _ALM_ENUMS, _ALM_HEX_ENC); }
 
 function encodeDownlinkCommand(cmd) {
   var out = [];
@@ -749,29 +699,6 @@ function encodeDownlinkCommand(cmd) {
   } else if (name === "req_history") {
     if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
-  } else if (name === "alarm_rule") {
-    // op(1) 0=set/1=clear/2=clear_all, source(2), quantity(3) numeric enums,
-    // enabled(4), threshold lo(5)/hi(6)/hst(7) float, state from(8)/to(9),
-    // slot(10) = target slot (required for SET/CLEAR). Use !== undefined so
-    // slot 0 is sent explicitly.
-    if (b.op) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.op));
-    if (b.source) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.source));
-    if (b.quantity) body = body.concat(_encTag(3, 0)).concat(_encVarint(b.quantity));
-    if (b.enabled) body = body.concat(_encTag(4, 0)).concat(_encVarint(1));
-    if (b.lo !== undefined) body = body.concat(_encTag(5, 5)).concat(_encFloat(b.lo));
-    if (b.hi !== undefined) body = body.concat(_encTag(6, 5)).concat(_encFloat(b.hi));
-    if (b.hst !== undefined) body = body.concat(_encTag(7, 5)).concat(_encFloat(b.hst));
-    if (b.from_state) body = body.concat(_encTag(8, 0)).concat(_encVarint(b.from_state));
-    if (b.to_state) body = body.concat(_encTag(9, 0)).concat(_encVarint(b.to_state));
-    if (b.slot !== undefined) body = body.concat(_encTag(10, 0)).concat(_encVarint(b.slot));
-  } else if (name === "req_alarm_rules") {
-    // Optional filter: slot(4) selects one slot; source(1)+quantity(2) together
-    // select all slots on that pair; omit all to list everything. page(3) for
-    // paging. Use !== undefined so slot/source/quantity 0 are sent explicitly.
-    if (b.source !== undefined) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.source));
-    if (b.quantity !== undefined) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.quantity));
-    if (b.page) body = body.concat(_encTag(3, 0)).concat(_encVarint(b.page));
-    if (b.slot !== undefined) body = body.concat(_encTag(4, 0)).concat(_encVarint(b.slot));
   }
   // get_info / settings_save / reboot / factory_reset / force_send / clock_sync /
   // w1_scan: empty body.
@@ -876,42 +803,6 @@ function decodeDownlinkCommand(bytes) {
           } else { break; }
         }
         cmd.req_history = rh;
-      } else if (field === 13) { // alarm_rule
-        var arl = {}, w = pos;
-        while (w < end) {
-          var t13 = _pbReadVarint(bytes, w); w = t13.next;
-          var f13 = t13.value >>> 3, w13 = t13.value & 0x7;
-          if (w13 === 0) {
-            var v13 = _pbReadVarint(bytes, w); w = v13.next;
-            if (f13 === 1) arl.op = v13.value;
-            else if (f13 === 2) arl.source = v13.value;
-            else if (f13 === 3) arl.quantity = v13.value;
-            else if (f13 === 4) arl.enabled = v13.value !== 0;
-            else if (f13 === 8) arl.from_state = v13.value;
-            else if (f13 === 9) arl.to_state = v13.value;
-            else if (f13 === 10) arl.slot = v13.value;
-          } else if (w13 === 5) {
-            var fl13 = _pbReadFloat(bytes, w); w = fl13.next;
-            if (f13 === 5) arl.lo = fl13.value;
-            else if (f13 === 6) arl.hi = fl13.value;
-            else if (f13 === 7) arl.hst = fl13.value;
-          } else { break; }
-        }
-        cmd.alarm_rule = arl;
-      } else if (field === 15) { // req_alarm_rules
-        var rar = {}, x = pos;
-        while (x < end) {
-          var t15 = _pbReadVarint(bytes, x); x = t15.next;
-          var f15 = t15.value >>> 3, w15 = t15.value & 0x7;
-          if (w15 === 0) {
-            var v15 = _pbReadVarint(bytes, x); x = v15.next;
-            if (f15 === 1) rar.source = v15.value;
-            else if (f15 === 2) rar.quantity = v15.value;
-            else if (f15 === 3) rar.page = v15.value;
-            else if (f15 === 4) rar.slot = v15.value;
-          } else { break; }
-        }
-        cmd.req_alarm_rules = rar;
       }
       pos = end;
     } else {

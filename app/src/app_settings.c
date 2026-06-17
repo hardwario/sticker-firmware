@@ -185,8 +185,8 @@ int app_settings_factory_reset(void)
 		return ret;
 	}
 
-	/* Dynamic alarm rules live outside the config blob; clear them too so a
-	 * factory reset returns the full application state to defaults. */
+	/* Alarm rules live in the config slots (cleared to defaults above); also
+	 * drop the decoded rule cache so the running state matches immediately. */
 	app_alarm_rules_clear_all();
 	ret = app_alarm_rules_save();
 	if (ret) {

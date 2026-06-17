@@ -104,73 +104,6 @@ test("set_param cap_w1_sensors (tag 60) is reachable both ways (#92)", () => {
   assert.equal(back.set_param.sensors.cap_w1_sensors, 1);
 });
 
-// AlarmRule downlink command (field 13): set a dynamic alarm rule and clear-all.
-// op=0 SET / 1 CLEAR / 2 CLEAR_ALL; source/quantity are app_alarm enums.
-test("alarm_rule command encode/decode round-trips", () => {
-  // SET slot 5: s3 (source 3) humidity (quantity 1) threshold lo=10 hi=80, enabled.
-  const set = codec.encodeDownlink({
-    data: {
-      seq: 4, command: "alarm_rule",
-      alarm_rule: { slot: 5, source: 3, quantity: 1, enabled: true, lo: 10, hi: 80 },
-    },
-  });
-  assert.equal(set.errors.length, 0, "encode errors");
-  assert.equal(set.fPort, 85);
-  const b = codec.decodeDownlink({ bytes: set.bytes, fPort: 85 }).data;
-  assert.equal(b.command, "alarm_rule");
-  assert.equal(b.alarm_rule.slot, 5);
-  assert.equal(b.alarm_rule.source, 3);
-  assert.equal(b.alarm_rule.quantity, 1);
-  assert.equal(b.alarm_rule.enabled, true);
-  assert.equal(b.alarm_rule.lo, 10);
-  assert.equal(b.alarm_rule.hi, 80);
-
-  // CLEAR slot 0 — slot 0 must survive as an explicit target (not dropped).
-  const clr0 = codec.encodeDownlink({
-    data: { command: "alarm_rule", alarm_rule: { op: 1, slot: 0 } },
-  });
-  assert.equal(clr0.errors.length, 0);
-  const c0 = codec.decodeDownlink({ bytes: clr0.bytes, fPort: 85 }).data;
-  assert.equal(c0.alarm_rule.op, 1);
-  assert.equal(c0.alarm_rule.slot, 0);
-
-  // CLEAR_ALL (op=2) — no slot needed.
-  const clr = codec.encodeDownlink({ data: { command: "alarm_rule", alarm_rule: { op: 2 } } });
-  assert.equal(clr.errors.length, 0);
-  const c = codec.decodeDownlink({ bytes: clr.bytes, fPort: 85 }).data;
-  assert.equal(c.alarm_rule.op, 2);
-});
-
-test("req_alarm_rules command encode/decode round-trips", () => {
-  // Targeted read: onboard (source 0) temperature (quantity 0), page 0 — the
-  // all-zero case that must still survive the round trip as an explicit filter.
-  const one = codec.encodeDownlink({
-    data: { seq: 6, command: "req_alarm_rules", req_alarm_rules: { source: 0, quantity: 0 } },
-  });
-  assert.equal(one.errors.length, 0, "encode errors");
-  assert.equal(one.fPort, 85);
-  const b = codec.decodeDownlink({ bytes: one.bytes, fPort: 85 }).data;
-  assert.equal(b.command, "req_alarm_rules");
-  assert.equal(b.req_alarm_rules.source, 0);
-  assert.equal(b.req_alarm_rules.quantity, 0);
-
-  // List all, second page.
-  const all = codec.encodeDownlink({
-    data: { command: "req_alarm_rules", req_alarm_rules: { page: 2 } },
-  });
-  assert.equal(all.errors.length, 0);
-  const a = codec.decodeDownlink({ bytes: all.bytes, fPort: 85 }).data;
-  assert.equal(a.req_alarm_rules.page, 2);
-
-  // Single-slot filter — slot 0 must survive as an explicit filter.
-  const bySlot = codec.encodeDownlink({
-    data: { command: "req_alarm_rules", req_alarm_rules: { slot: 0 } },
-  });
-  assert.equal(bySlot.errors.length, 0);
-  const s = codec.decodeDownlink({ bytes: bySlot.bytes, fPort: 85 }).data;
-  assert.equal(s.req_alarm_rules.slot, 0);
-});
-
 // --- Uplink: legacy bitmap (fPort 1) --------------------------------------
 test("decodeUplink decodes legacy bitmap (fPort 1)", () => {
   const got = codec.decodeUplink({ bytes: hex("7a01a109fa580258"), fPort: 1 });
@@ -506,4 +439,22 @@ test("a tampered command byte does not silently decode to the original", () => {
 test("a truncated buffer is handled without throwing", () => {
   assert.doesNotThrow(() => codec.decodeUplink({ bytes: hex("7a01"), fPort: 1 }));
   assert.doesNotThrow(() => codec.decodeDownlink({ bytes: hex("0801"), fPort: 85 }));
+});
+
+test("alarm slot set_param encodes as native bytes and round-trips (LRW)", () => {
+  // Packed 17-byte rule: flags present|enabled, onboard temperature, lo=5 hi=30 hst=1.
+  const rule = "03000000000000a0400000f0410000803f";
+  const enc = codec.encodeDownlink({ data: { command: "set_param", seq: 1, set_param: { alarms: { alarm_0: rule } } } });
+  assert.equal(enc.errors.length, 0, "encode errors");
+  assert.equal(enc.fPort, 85);
+  // The rule must appear raw on the wire (native bytes, 17 B), not as 34 hex chars.
+  assert.ok(Buffer.from(enc.bytes).toString("hex").includes(rule));
+  const dec = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(dec.set_param.alarms.alarm_0, rule);
+
+  // ConfigDump (uplink) presents an alarm slot as hex too. Wire: ver 01, seq 1,
+  // config_dump{ page_count=1, alarms{ alarm_0 } } (as captured from the device).
+  const dump = hex("010801221810013214b20311" + rule);
+  const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
+  assert.equal(u.config_dump.alarms.alarm_0, rule);
 });

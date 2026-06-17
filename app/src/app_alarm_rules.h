@@ -11,8 +11,13 @@
  * rules that unifies every alarm (onboard sensors, ROM-bound 1-Wire slots,
  * discrete inputs and counters) under one model. Replaces the fixed per-source
  * flat config keys: a new sensor quantity is one enum value, and config grows
- * only with the rules actually set. Stored as one settings blob (storage NVS),
- * APP_ALARM_SLOT_COUNT slots.
+ * only with the rules actually set.
+ *
+ * Storage lives in app_config: each slot is a `bytes` config parameter
+ * (alarm_0..alarm_15), so rules are set/read over SetParam/GetParam like any
+ * other parameter (manager-app); the `alarm` shell edits the same slots. m_slots
+ * here is just a decoded cache, rebuilt from app_config on load and after every
+ * change. APP_ALARM_SLOT_COUNT slots.
  *
  * Rules live in fixed alarm slots 0..APP_ALARM_SLOT_COUNT-1. The slot index is
  * the rule's stable identity: several slots may carry the same (source,quantity)
@@ -88,8 +93,14 @@ struct app_alarm_rule {
 	float lo, hi, hst;  /* THRESHOLD (and hi for RATE) */
 };
 
-/* Load rules from settings (called once at init, after settings_subsys_init). */
+/* Build the rule cache from the app_config slots (called once at init, after
+ * app_config has loaded). */
 int app_alarm_rules_init(void);
+
+/* Rebuild the rule cache from the app_config alarm_N slots. Call after a
+ * SetParam that touched the alarms group so the runtime reflects it without a
+ * reboot. */
+void app_alarm_rules_reload_from_config(void);
 
 /* The kind implied by a quantity (THRESHOLD / STATE / RATE). */
 enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q);
@@ -123,7 +134,8 @@ int app_alarm_rules_clear(uint8_t slot);
 /* Empty all slots. Not persisted. */
 void app_alarm_rules_clear_all(void);
 
-/* Persist the current rule list to settings (storage NVS). */
+/* Persist the rules. They live in the app_config slots, so this saves the
+ * config (storage NVS) without rebooting. */
 int app_alarm_rules_save(void);
 
 /* Names for shell / decoder parity. */

@@ -661,19 +661,19 @@ static int cmd_float(const struct shell *shell, size_t argc, char **argv, float 
 
 {% endif %}
 
-{% for param in parameters %}
+{% for param in parameters if not param.no_shell %}
 {{ print_function(param, module, enums) }}
 {% endfor %}
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
-{% for param in parameters if not param.hidden %}
+{% for param in parameters if not param.hidden and not param.no_shell %}
 	print_{{ param.name | c_name }}(shell);
 {% endfor %}
 
 	return 0;
 }
 
-{% for param in parameters %}
+{% for param in parameters if not param.no_shell %}
 {{ cmd_function(param, module, enums) }}
 {% endfor %}
 static int print_help(const struct shell *shell, size_t argc, char **argv)
@@ -698,7 +698,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Show all configuration.",
 	              cmd_show, 1, 0),
 
-{% for param in parameters %}
+{% for param in parameters if not param.no_shell %}
 	SHELL_CMD_ARG({{ param.name | settings_key }}, NULL,
 	              "{{ param.help | default('Get/Set ' ~ param.name ~ '.') }}",
 	              cmd_{{ param.name | c_name }}, 1, 1),

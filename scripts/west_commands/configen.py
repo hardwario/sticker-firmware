@@ -29,6 +29,8 @@ Parameter options:
 - array: array size for numeric types
 - hidden: hide from shell 'show' command
 - readonly: prevent shell modification
+- no_shell: skip shell get/set command generation entirely (param still has
+  NVS/proto/ingest; use for bulk/packed params not meant for manual shell use)
 - precision: decimal places for float/double display
 - format: display format (hex/dec for integers, printf format for uint)
 """
