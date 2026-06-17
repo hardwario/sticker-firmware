@@ -145,6 +145,7 @@ commands:
     - {name: lrw_join,       proto_id: 17, body: LrwJoin,       kind: action,  action: LRW_JOIN, response: ack}
     - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: action, action: ENTER_CALIBRATION, response: ack, transports: [lrw, nfc]}
     - {name: enter_mailbox,  proto_id: 19, body: EnterMailbox,  kind: action,  action: ENTER_MAILBOX, response: ack, transports: [nfc]}
+    - {name: exit_mailbox,   proto_id: 20, body: ExitMailbox,   kind: action,  action: LEAVE_MAILBOX, response: ack, transports: [nfc]}
 parameters:
   - name: secret_key
     proto_group: root

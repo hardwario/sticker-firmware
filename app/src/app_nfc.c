@@ -1180,7 +1180,7 @@ int app_nfc_serve_mailbox(uint32_t idle_timeout_ms)
 		return ret;
 	}
 
-	NFC_REPORT("mailbox serving (idle timeout %u ms)", idle_timeout_ms);
+	LOG_INF("NFC mailbox: serving (idle timeout %u ms)", idle_timeout_ms);
 
 	int64_t deadline = k_uptime_get() + idle_timeout_ms;
 	uint32_t served = 0;
@@ -1221,12 +1221,21 @@ int app_nfc_serve_mailbox(uint32_t idle_timeout_ms)
 		}
 		served++;
 		deadline = k_uptime_get() + idle_timeout_ms;
-		NFC_REPORT("mailbox: served %zu B (#%u)", m_resp_len, served);
+		LOG_INF("NFC mailbox: served %zu B (#%u)", m_resp_len, served);
 
-		/* A mailbox command asked for a deferred action (settings save / reboot /
-		 * factory reset / alarm-rules save). Hand it to the poll thread the same
-		 * way the NDEF path does, give the phone a moment to read the ack we just
-		 * wrote, then leave mailbox mode so the action can run. */
+		/* The phone signalled end of stream (ExitMailbox): the ack is written, so
+		 * give it a moment to read it, then leave mailbox mode immediately — no
+		 * poll-thread action to run. */
+		if (action == APP_CMD_ACTION_LEAVE_MAILBOX) {
+			k_msleep(300);
+			LOG_INF("NFC mailbox: ExitMailbox -> leaving (served %u)", served);
+			break;
+		}
+
+		/* Any other deferred action (settings save / reboot / factory reset /
+		 * alarm-rules save): hand it to the poll thread the same way the NDEF path
+		 * does, give the phone a moment to read the ack, then leave mailbox mode so
+		 * the action can run. */
 		if (action != APP_CMD_ACTION_NONE) {
 			m_cmd_action = action;
 			k_msleep(300);
@@ -1237,7 +1246,7 @@ int app_nfc_serve_mailbox(uint32_t idle_timeout_ms)
 	uint8_t off = 0;
 	write_reg(ST25DV_MB_CTRL_DYN, &off, 1);
 	nfc_access_end();
-	NFC_REPORT("mailbox off, served %u message(s)", served);
+	LOG_INF("NFC mailbox: off, served %u message(s)", served);
 	return (int)served;
 }
 
