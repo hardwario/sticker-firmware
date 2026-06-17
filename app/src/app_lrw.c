@@ -10,6 +10,7 @@
 #include "app_clock.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_counters.h"
 #include "app_history.h"
 #include "app_log.h"
 #include "app_lrw.h"
@@ -598,6 +599,12 @@ static void post_cmd_work_handler(struct k_work *work)
 		 * No reboot — app_lrw_join() just queues a join work item. */
 		LOG_INF("Command: forced LoRaWAN join");
 		app_lrw_join();
+		break;
+	case APP_CMD_ACTION_COUNTERS_SAVE:
+		/* Persist the (reset) pulse totalizers, no reboot. Deferred for the
+		 * same stack reason as the alarm-rule save above. */
+		LOG_INF("Command: saving counters");
+		app_counters_save(true);
 		break;
 	default:
 		break;

@@ -192,3 +192,11 @@ void app_input_reset_counts(void)
 {
 	app_input_reset_count(true, true);
 }
+
+void app_input_set_counts(uint32_t input_a, uint32_t input_b)
+{
+	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
+	m_input_data.input_a_count = input_a;
+	m_input_data.input_b_count = input_b;
+	k_mutex_unlock(&m_input_data_mutex);
+}

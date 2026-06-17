@@ -9,6 +9,7 @@
 #include "app_calibration.h"
 #include "app_clock.h"
 #include "app_config.h"
+#include "app_counters.h"
 #include "app_history.h"
 #include "app_version.h"
 #include "app_led.h"
@@ -168,6 +169,10 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 			case APP_CMD_ACTION_LRW_JOIN:
 				/* Force a (re)join now, no reboot (#109). */
 				app_lrw_join();
+				break;
+			case APP_CMD_ACTION_COUNTERS_SAVE:
+				/* Persist the (reset) pulse totalizers, no reboot. */
+				app_counters_save(true);
 				break;
 			default:
 				break;
@@ -360,6 +365,13 @@ int main(void)
 	ret = app_sensor_init();
 	if (ret) {
 		LOG_WRN("Sensor init partially failed: %d (continuing)", ret);
+	}
+
+	/* Restore persisted pulse totalizers. Must run after app_sensor_init so the
+	 * seed is not clobbered by app_hall_init / app_input_init. */
+	ret = app_counters_init();
+	if (ret) {
+		LOG_WRN("app_counters_init failed: %d (counter persistence unavailable)", ret);
 	}
 
 #if defined(CONFIG_WATCHDOG)

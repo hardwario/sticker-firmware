@@ -400,12 +400,16 @@ static void app_cmd_handle_reset_counters(enum app_cmd_transport tp, const Comma
 					  Response *resp, enum app_cmd_action *action)
 {
 	ARG_UNUSED(tp);
-	ARG_UNUSED(action);
 	const Command_ResetCounters *rc = &cmd->body.reset_counters;
 
 	app_hall_reset_count(rc->has_hall_left && rc->hall_left,
 			     rc->has_hall_right && rc->hall_right);
 	app_input_reset_count(rc->has_input_a && rc->input_a, rc->has_input_b && rc->input_b);
+
+	/* Persist the cleared totals so a reboot cannot resurrect them. Deferred to
+	 * the post-command action (off this stack frame) because settings_save_one
+	 * is too stack-heavy to run inline on the m_work_q. */
+	*action = APP_CMD_ACTION_COUNTERS_SAVE;
 	resp->which_body = Response_ack_tag;
 }
 
