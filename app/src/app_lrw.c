@@ -576,6 +576,15 @@ static void post_cmd_work_handler(struct k_work *work)
 		LOG_INF("Command: reboot");
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
+	case APP_CMD_ACTION_ENTER_CALIBRATION:
+		/* Persist calibration=true + reboot; main() enters calibration
+		 * mode on the next boot (app_calibration_init() clears the flag).
+		 * Write the staging config (app_config()) — that is what settings_save
+		 * persists; g_app_config is only the boot-time read copy. */
+		LOG_INF("Command: entering calibration mode + reboot");
+		app_config()->calibration = true;
+		app_settings_save(true);
+		break;
 	default:
 		break;
 	}
