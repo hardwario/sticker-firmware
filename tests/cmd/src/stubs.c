@@ -96,6 +96,12 @@ void app_alarm_rules_clear_all(void)
 {
 }
 
+/* handle_set_param refreshes the runtime rule cache from config after an apply;
+ * inert in the unit test. */
+void app_alarm_rules_reload_from_config(void)
+{
+}
+
 /* Read-back path (handle_req_alarm_rules): no rules in the unit test, so the
  * dump comes back empty. quantity_kind only needs to resolve for the linker. */
 const struct app_alarm_rule *app_alarm_rules_get(uint8_t slot)
