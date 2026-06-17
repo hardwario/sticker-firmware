@@ -155,6 +155,8 @@ message Command {
         ReqHistory       req_history       = 11;
         ClockSync        clock_sync        = 12;
         W1Scan           w1_scan           = 14;
+        LrwReset         lrw_reset         = 16;
+        LrwJoin          lrw_join          = 17;
         EnterCalibration enter_calibration = 18;
     }
 // END GENERATED COMMANDS
@@ -193,6 +195,13 @@ message Command {
     // calibration mode (same end state as set_param calibration=true +
     // settings_save). One-shot: app_calibration_init() clears the flag on entry.
     message EnterCalibration { }
+    // Reset the LoRaWAN NVM (frame counters + DevNonce + session) and reboot,
+    // equivalent of `ats lrw reset`. Used during (re)commissioning after re-keying
+    // or moving the device to another network/session (#109).
+    message LrwReset     { }
+    // Trigger a forced (re)join immediately instead of waiting for the next
+    // scheduled attempt (#109). No reboot.
+    message LrwJoin      { }
     message ResetCounters {
         optional bool hall_left  = 1;
         optional bool hall_right = 2;

@@ -38,8 +38,8 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `clock_sync` | Sync the wall-clock. **Empty** (LoRaWAN): request a network time sync. **With `unix_time`** (NFC): set the RTC directly from the phone's clock (UTC seconds) | LoRaWAN: **`info`, deferred** — sent once the network time lands. NFC: **`info`** immediately — carries the new `unix_time` |
 | `req_history` | Replay stored history for a time window | `history_frame` (multiple) |
 | `w1_scan` | Enumerate the 1-Wire bus; returns the discovered ROMs so you can teach a slot via `set_param sensorN_rom` | `w1_scan` |
-| `alarm_rule` | Set / clear a dynamic alarm rule in a `slot`, or clear-all (SET/CLEAR require `slot`; the slot index is the rule's stable identity) | `ack` |
-| `req_alarm_rules` | Read back the stored dynamic alarm rules (paged); optional `slot` filter selects one slot, or `source`+`quantity` selects every slot on that pair | `alarm_rules_dump` |
+| `lrw_reset` | Reset the LoRaWAN NVM — frame counters + `DevNonce` + session (same as `ats lrw reset`); **reboots** so the MAC re-initialises clean | `ack` |
+| `lrw_join` | Trigger a forced (re)join immediately instead of waiting for the next scheduled attempt; **no reboot** | `ack` |
 | `enter_calibration` | Persist `calibration=true` + **reboot** into calibration mode (same end state as `set_param calibration=true` + `settings_save`); the flag is cleared on entry, so the device returns to normal after the calibration window | `ack` |
 
 > After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED), an optional `fault_field`, and a `detail` string.
@@ -49,6 +49,8 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 > **LoRaWAN-only commands:** `force_send` and `req_history` answer only via an uplink, so they are rejected (`NOT_READY` "lrw only") if sent over NFC.
 >
 > **Setting the clock over NFC:** `clock_sync` with a `unix_time` field sets the RTC directly from a phone, bootstrapping wall-clock time before/without a network (epoch sanity-bounded to 2024-01-01 … 2100-01-01; out-of-range → `BAD_REQUEST` "bad epoch"). A later network `DeviceTimeReq`/`DeviceTimeAns` stays authoritative and may refine it. Empty `clock_sync` over NFC just confirms (no network to query).
+>
+> **Commissioning a device with just a phone (NFC):** the LoRaWAN identifiers/keys are written through the encrypted NFC config channel (`set_param`/config ingest covers every `lorawan` field — DevEUI, JoinEUI, AppKey, NwkKey, DevAddr, NwkSKey, AppSKey, region, sub-band, network, activation, ADR, link-check). The typical order is **set params → `lrw_reset` → `lrw_join`**: write the keys, reset the counters/`DevNonce` (so a re-keyed or relocated device starts a clean session), then force the join. `lrw_reset` reboots; the `ack` is written back to the tag first, then the reset + reboot run after a short delay (the phone can read the reply before the device restarts). `lrw_reset` and `lrw_join` work over both NFC and a LoRaWAN downlink.
 >
 > **`get_param` is paged** like `get_config`: the reply carries `page_index`/`page_count`, and an optional `page` field in the request selects which page (omit = 0). When the selected fields don't all fit one data-rate frame they are split across pages — fetch the rest by re-sending with the next `page`. A page out of range returns `OUT_OF_RANGE`. If any response still doesn't fit the buffer it is replaced by an `error` (same `seq`) rather than dropped silently.
 
@@ -70,6 +72,8 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `req_alarm_rules` (all rules, page 0) | `08017a00` |
 | `req_alarm_rules` (slot 0 only) | `08017a022000` |
 | `req_alarm_rules` (all slots on onboard temperature) | `08017a0408001000` |
+| `lrw_reset` | `0801820100` |
+| `lrw_join` | `08018a0100` |
 | `enter_calibration` | `0801920100` |
 
 (The leading byte is the `seq` you chose; it is echoed in the reply.)

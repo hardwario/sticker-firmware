@@ -74,6 +74,9 @@ const COMMANDS = [
   { name: "force_send", hex: "08064a00", data: { seq: 6, command: "force_send" } },
   { name: "reboot", hex: "08083a00", data: { seq: 8, command: "reboot" } },
   { name: "w1_scan", hex: "08097200", data: { seq: 9, command: "w1_scan" } },
+  { name: "lrw_reset", hex: "0810820100", data: { seq: 16, command: "lrw_reset" } },
+  { name: "lrw_join", hex: "08118a0100", data: { seq: 17, command: "lrw_join" } },
+  { name: "enter_calibration", hex: "0812920100", data: { seq: 18, command: "enter_calibration" } },
 ];
 
 test("decodeDownlink decodes command frames", () => {

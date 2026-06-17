@@ -57,6 +57,8 @@ byte is the `seq` and is echoed in the reply.
 | `reboot` | `08083a00` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
 | `set_param`: ADR on, `interval_report`=120 s, `alarm_0`=onboard temp 5–30 °C (hyst 1) | `0801121e0a021801120220782a14b2031103000000000000a0400000f0410000803f` |
+| `lrw_reset` | `0801820100` |
+| `lrw_join` | `08018a0100` |
 
 ### Legend
 
@@ -1177,6 +1179,20 @@ rejected with `error` `BAD_REQUEST` "bad epoch".
 > build (encryption on): present a plaintext command record and confirm it is rejected; present an
 > AES-CCM record (serial + nonce > last) and confirm an encrypted response is written back, and that
 > the info record (`hio.stck:inf`) is still readable without the key. Report all results.
+
+- [ ] Pass
+
+### N5 — LoRaWAN reset & forced join over NFC (#109)
+
+**Goal:** A phone can reset the LoRaWAN counters and force a join via the NFC command channel, completing the set-params → `lrw_reset` → `lrw_join` commissioning flow without a shell/J-Link.
+**Observable:** `lrw_reset` writes an `ack` back to the tag, then RTT shows `Command: LoRaWAN reset (NVM wipe) + reboot` and the device cold-reboots (frame counter / `DevNonce` back to 0). `lrw_join` writes an `ack` and RTT shows `Command: forced LoRaWAN join` with a fresh join (no reboot).
+
+**Prompt for Claude:**
+> On a default (encrypted) build: present an AES-CCM `hio.stck:cmd` record carrying `lrw_join`
+> (`08018a0100`) and confirm the `ack` is written back to the tag and RTT logs `Command: forced
+> LoRaWAN join` followed by a join attempt — with no reboot. Then present `lrw_reset` (`0801820100`),
+> confirm the `ack` is readable first, then RTT logs the NVM wipe + reboot and the LoRaWAN frame
+> counter restarts at 0 after reboot. Also verify both commands work as fPort-85 downlinks. Report results.
 
 - [ ] Pass
 
