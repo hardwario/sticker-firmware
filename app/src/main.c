@@ -37,10 +37,11 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 #define BLINK_INTERVAL_SECONDS 3
 
-/* NFC poll runs on its own thread (not tied to the LED blink loop). Each poll
- * reads the 1-byte IT_STS_Dyn and only does a full read on RF activity, so a
- * short interval is cheap. */
-#define NFC_POLL_INTERVAL_SECONDS    2
+/* NFC poll runs on its own thread (not tied to the LED blink loop). It sleeps
+ * on the ST25DV GPO interrupt (app_nfc_wait_event) and only wakes to read the
+ * tag when the phone touches it — low power. The fallback is a safety net in
+ * case an edge is missed. */
+#define NFC_EVENT_FALLBACK_MS        30000
 #define NFC_POLL_START_DELAY_MS      3000
 #define NFC_POLL_THREAD_STACK_SIZE   3072
 #define NFC_POLL_THREAD_PRIO         K_LOWEST_APPLICATION_THREAD_PRIO
@@ -110,7 +111,9 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	for (;;) {
-		k_sleep(K_SECONDS(NFC_POLL_INTERVAL_SECONDS));
+		/* Sleep until the GPO interrupt fires (phone touched the tag) or the
+		 * fallback elapses. */
+		app_nfc_wait_event(NFC_EVENT_FALLBACK_MS);
 
 		if (!app_nfc_periodic_enabled()) {
 			continue;
