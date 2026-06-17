@@ -431,8 +431,8 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
 			rt->active = true;
 			rt->oneshot_expiry = k_uptime_get() + notif_hold_ms();
 			*should_send = true;
-			alarm_collect(rule->source, rule->quantity, true, ALARM_SIDE_NONE, true,
-				      cur_lvl);
+			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_NONE,
+				      true, cur_lvl);
 		}
 		rt->have_prev_state = true;
 		rt->prev_state = cur_lvl;
