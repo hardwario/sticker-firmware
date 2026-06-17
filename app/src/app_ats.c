@@ -731,6 +731,13 @@ static int cmd_cmd_inject(const struct shell *sh, enum app_cmd_transport transpo
 
 	LOG_HEXDUMP_INF(out, out_len, "Response:");
 
+	/* Mirror the response to the shell terminal as one hex line. The log channel
+	 * can drop the INF hexdump under debug-level noise, so this is the reliable
+	 * way to capture the Response for an over-the-wire round-trip check. */
+	char resp_hex[2 * sizeof(out) + 1];
+	bin2hex(out, out_len, resp_hex, sizeof(resp_hex));
+	shell_print(sh, "RESP %s", resp_hex);
+
 	/* Don't reboot the bench from a shell inject — just report what an LRW
 	 * downlink would trigger. Use `settings save` / `settings reset` to apply. */
 	if (action != APP_CMD_ACTION_NONE) {

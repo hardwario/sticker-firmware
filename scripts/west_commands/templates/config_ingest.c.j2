@@ -36,37 +36,6 @@ LOG_MODULE_REGISTER({{ module.name }}_ingest, LOG_LEVEL_DBG);
 		ret = -EINVAL;                                                                     \
 	} while (0)
 
-static bool parse_hex_string(const char *hex_str, uint8_t *buf, size_t buf_len)
-{
-	if (!hex_str || !buf) {
-		return false;
-	}
-
-	size_t str_len = strlen(hex_str);
-	if (str_len != 2 * buf_len) {
-		LOG_ERR("Invalid hex string length: expected %zu, got %zu", 2 * buf_len, str_len);
-		return false;
-	}
-
-	/* Decode into a temp buffer first: hex2bin writes byte-by-byte into the
-	 * destination and bails (returning 0) on the first invalid nibble, so
-	 * decoding straight into the config field would leave a half-overwritten
-	 * value that a later save would persist (#91). Commit only on full success. */
-	uint8_t tmp[16];
-	if (buf_len > sizeof(tmp)) {
-		LOG_ERR("hex buffer too large: %zu", buf_len);
-		return false;
-	}
-
-	if (hex2bin(hex_str, str_len, tmp, buf_len) != buf_len) {
-		LOG_ERR_CALL_FAILED("hex2bin");
-		return false;
-	}
-
-	memcpy(buf, tmp, buf_len);
-	return true;
-}
-
 static bool requested(const uint32_t *ids, size_t n, uint32_t tag)
 {
 	for (size_t i = 0; i < n; i++) {
@@ -101,9 +70,9 @@ int {{ g.apply_fn }}(const {{ g.c_message }} *src, uint32_t *fault_field)
 		}
 	}
 {% elif p.kind == 'bytes' %}
-	if (src->has_{{ p.proto_name }} &&
-	    !parse_hex_string(src->{{ p.proto_name }}, config->{{ p.c_name }}, sizeof(config->{{ p.c_name }}))) {
-		FAULT({{ p.tag }});
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_{{ p.proto_name }}) {
+		memcpy(config->{{ p.c_name }}, src->{{ p.proto_name }}, sizeof(config->{{ p.c_name }}));
 	}
 {% elif p.kind == 'float' %}
 	if (src->has_{{ p.proto_name }}) {
@@ -140,8 +109,7 @@ void {{ g.fill_fn }}({{ g.c_message }} *dst, const uint32_t *ids, size_t n)
 {% if p.kind == 'bytes' %}
 	if (requested(ids, n, {{ p.tag }})) {
 		dst->has_{{ p.proto_name }} = true;
-		bin2hex(c->{{ p.c_name }}, sizeof(c->{{ p.c_name }}), dst->{{ p.proto_name }},
-			sizeof(dst->{{ p.proto_name }}));
+		memcpy(dst->{{ p.proto_name }}, c->{{ p.c_name }}, sizeof(c->{{ p.c_name }}));
 	}
 {% elif p.kind == 'enum' %}
 	if (requested(ids, n, {{ p.tag }})) {

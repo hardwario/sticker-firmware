@@ -69,20 +69,21 @@ def workdir(tmp_path):
 def test_build_options_lines_matches_committed():
     cfg = _load_config()
     lines = configen.build_options_lines(cfg)
-    # The 7 hex Lorawan keys + the 4 per-slot 1-Wire ROM keys get max_length;
+    # The 7 LoRaWAN keys + the 4 per-slot 1-Wire ROM keys are native bytes with
+    # nanopb fixed_length (plain pb_byte_t[size], half the old hex wire size);
     # secret_key is a callback. Order-independent (config declaration order).
     assert sorted(lines) == sorted([
-        "AppConfigMessage.Lorawan.deveui max_length:16",
-        "AppConfigMessage.Lorawan.joineui max_length:16",
-        "AppConfigMessage.Lorawan.nwkkey max_length:32",
-        "AppConfigMessage.Lorawan.appkey max_length:32",
-        "AppConfigMessage.Lorawan.devaddr max_length:8",
-        "AppConfigMessage.Lorawan.nwkskey max_length:32",
-        "AppConfigMessage.Lorawan.appskey max_length:32",
-        "AppConfigMessage.Sensors.sensor1_rom max_length:16",
-        "AppConfigMessage.Sensors.sensor2_rom max_length:16",
-        "AppConfigMessage.Sensors.sensor3_rom max_length:16",
-        "AppConfigMessage.Sensors.sensor4_rom max_length:16",
+        "AppConfigMessage.Lorawan.deveui max_size:8 fixed_length:true",
+        "AppConfigMessage.Lorawan.joineui max_size:8 fixed_length:true",
+        "AppConfigMessage.Lorawan.nwkkey max_size:16 fixed_length:true",
+        "AppConfigMessage.Lorawan.appkey max_size:16 fixed_length:true",
+        "AppConfigMessage.Lorawan.devaddr max_size:4 fixed_length:true",
+        "AppConfigMessage.Lorawan.nwkskey max_size:16 fixed_length:true",
+        "AppConfigMessage.Lorawan.appskey max_size:16 fixed_length:true",
+        "AppConfigMessage.Sensors.sensor1_rom max_size:8 fixed_length:true",
+        "AppConfigMessage.Sensors.sensor2_rom max_size:8 fixed_length:true",
+        "AppConfigMessage.Sensors.sensor3_rom max_size:8 fixed_length:true",
+        "AppConfigMessage.Sensors.sensor4_rom max_size:8 fixed_length:true",
     ])
     assert not any("secret_key" in ln for ln in lines)
 
@@ -280,6 +281,48 @@ def _decode_with_node(hex_str):
     out = subprocess.check_output(["node", "-e", js], text=True)
     import json
     return json.loads(out)
+
+
+def _encode_with_node(data):
+    import json
+    js = (
+        "const fs=require('fs'),vm=require('vm');"
+        "const ctx={Buffer,console};vm.createContext(ctx);"
+        f"vm.runInContext(fs.readFileSync({str(DECODER)!r},'utf8'),ctx);"
+        f"const r=ctx.encodeDownlink({{data:{json.dumps(data)}}});"
+        "if(r.errors&&r.errors.length)throw new Error(r.errors.join(','));"
+        "process.stdout.write(Buffer.from(r.bytes).toString('hex'));"
+    )
+    return subprocess.check_output(["node", "-e", js], text=True)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_bytes_fields_native_roundtrip(tmp_path):
+    """Config `bytes` params go on the wire as native protobuf bytes (not a hex
+    string), so the payload is half the size. The ttn.js decoder keeps its hex
+    contract (hexes the raw bytes for output; accepts hex on encode). Verify both
+    directions agree between python-protobuf and ttn.js."""
+    pb = _compile_proto(tmp_path)
+
+    # python encodes raw bytes -> ttn.js decode must present them as hex
+    cmd = pb.Command()
+    cmd.seq = 9
+    cmd.set_param.lorawan.deveui = bytes.fromhex("70b3d5470a0b0c0d")
+    cmd.set_param.sensors.sensor1_rom = bytes.fromhex("28000011223344a5")
+    wire = cmd.SerializeToString()
+    # native bytes: deveui occupies 8 payload bytes, not 16 hex chars
+    assert b"70b3d5470a0b0c0d" not in wire  # not ASCII hex on the wire
+    js = _decode_with_node(wire.hex())
+    assert js["set_param"]["lorawan"]["deveui"] == "70b3d5470a0b0c0d"
+    assert js["set_param"]["sensors"]["sensor1_rom"] == "28000011223344a5"
+
+    # ttn.js encodes hex -> python protobuf must read the raw bytes
+    enc = _encode_with_node({
+        "command": "set_param",
+        "set_param": {"lorawan": {"deveui": "70b3d5470a0b0c0d"}},
+    })
+    msg = pb.Command.FromString(bytes.fromhex(enc))
+    assert msg.set_param.lorawan.deveui == bytes.fromhex("70b3d5470a0b0c0d")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")

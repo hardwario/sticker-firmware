@@ -32,13 +32,13 @@ message AppConfigMessage {
         optional Network network = 2;
         optional bool adr = 3;
         optional Activation activation = 4;
-        optional string deveui = 5;
-        optional string joineui = 6;
-        optional string nwkkey = 7;
-        optional string appkey = 8;
-        optional string devaddr = 9;
-        optional string nwkskey = 10;
-        optional string appskey = 11;
+        optional bytes deveui = 5;
+        optional bytes joineui = 6;
+        optional bytes nwkkey = 7;
+        optional bytes appkey = 8;
+        optional bytes devaddr = 9;
+        optional bytes nwkskey = 10;
+        optional bytes appskey = 11;
         optional uint32 sub_band = 12;
         optional uint32 link_check_interval = 13;
         optional uint32 link_check_fail_rejoin = 14;
@@ -75,10 +75,10 @@ message AppConfigMessage {
         optional bool cap_pir_detector = 46;
         optional MotionSensitivity accel_motion_sensitivity = 54;
         optional bool cap_accelerometer = 55;
-        optional string sensor1_rom = 56;
-        optional string sensor2_rom = 57;
-        optional string sensor3_rom = 58;
-        optional string sensor4_rom = 59;
+        optional bytes sensor1_rom = 56;
+        optional bytes sensor2_rom = 57;
+        optional bytes sensor3_rom = 58;
+        optional bytes sensor4_rom = 59;
         optional bool cap_w1_sensors = 60;
     }
 

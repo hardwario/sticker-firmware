@@ -36,37 +36,6 @@ LOG_MODULE_REGISTER(app_config_ingest, LOG_LEVEL_DBG);
 		ret = -EINVAL;                                                                     \
 	} while (0)
 
-static bool parse_hex_string(const char *hex_str, uint8_t *buf, size_t buf_len)
-{
-	if (!hex_str || !buf) {
-		return false;
-	}
-
-	size_t str_len = strlen(hex_str);
-	if (str_len != 2 * buf_len) {
-		LOG_ERR("Invalid hex string length: expected %zu, got %zu", 2 * buf_len, str_len);
-		return false;
-	}
-
-	/* Decode into a temp buffer first: hex2bin writes byte-by-byte into the
-	 * destination and bails (returning 0) on the first invalid nibble, so
-	 * decoding straight into the config field would leave a half-overwritten
-	 * value that a later save would persist (#91). Commit only on full success. */
-	uint8_t tmp[16];
-	if (buf_len > sizeof(tmp)) {
-		LOG_ERR("hex buffer too large: %zu", buf_len);
-		return false;
-	}
-
-	if (hex2bin(hex_str, str_len, tmp, buf_len) != buf_len) {
-		LOG_ERR_CALL_FAILED("hex2bin");
-		return false;
-	}
-
-	memcpy(buf, tmp, buf_len);
-	return true;
-}
-
 static bool requested(const uint32_t *ids, size_t n, uint32_t tag)
 {
 	for (size_t i = 0; i < n; i++) {
@@ -110,33 +79,33 @@ int app_config_apply_lorawan(const AppConfigMessage_Lorawan *src, uint32_t *faul
 			FAULT(4);
 		}
 	}
-	if (src->has_deveui &&
-	    !parse_hex_string(src->deveui, config->lrw_deveui, sizeof(config->lrw_deveui))) {
-		FAULT(5);
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_deveui) {
+		memcpy(config->lrw_deveui, src->deveui, sizeof(config->lrw_deveui));
 	}
-	if (src->has_joineui &&
-	    !parse_hex_string(src->joineui, config->lrw_joineui, sizeof(config->lrw_joineui))) {
-		FAULT(6);
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_joineui) {
+		memcpy(config->lrw_joineui, src->joineui, sizeof(config->lrw_joineui));
 	}
-	if (src->has_nwkkey &&
-	    !parse_hex_string(src->nwkkey, config->lrw_nwkkey, sizeof(config->lrw_nwkkey))) {
-		FAULT(7);
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_nwkkey) {
+		memcpy(config->lrw_nwkkey, src->nwkkey, sizeof(config->lrw_nwkkey));
 	}
-	if (src->has_appkey &&
-	    !parse_hex_string(src->appkey, config->lrw_appkey, sizeof(config->lrw_appkey))) {
-		FAULT(8);
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_appkey) {
+		memcpy(config->lrw_appkey, src->appkey, sizeof(config->lrw_appkey));
 	}
-	if (src->has_devaddr &&
-	    !parse_hex_string(src->devaddr, config->lrw_devaddr, sizeof(config->lrw_devaddr))) {
-		FAULT(9);
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_devaddr) {
+		memcpy(config->lrw_devaddr, src->devaddr, sizeof(config->lrw_devaddr));
 	}
-	if (src->has_nwkskey &&
-	    !parse_hex_string(src->nwkskey, config->lrw_nwkskey, sizeof(config->lrw_nwkskey))) {
-		FAULT(10);
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_nwkskey) {
+		memcpy(config->lrw_nwkskey, src->nwkskey, sizeof(config->lrw_nwkskey));
 	}
-	if (src->has_appskey &&
-	    !parse_hex_string(src->appskey, config->lrw_appskey, sizeof(config->lrw_appskey))) {
-		FAULT(11);
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_appskey) {
+		memcpy(config->lrw_appskey, src->appskey, sizeof(config->lrw_appskey));
 	}
 	if (src->has_sub_band) {
 		int val = src->sub_band;
@@ -190,15 +159,15 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 	}
 	if (requested(ids, n, 5)) {
 		dst->has_deveui = true;
-		bin2hex(c->lrw_deveui, sizeof(c->lrw_deveui), dst->deveui, sizeof(dst->deveui));
+		memcpy(dst->deveui, c->lrw_deveui, sizeof(c->lrw_deveui));
 	}
 	if (requested(ids, n, 6)) {
 		dst->has_joineui = true;
-		bin2hex(c->lrw_joineui, sizeof(c->lrw_joineui), dst->joineui, sizeof(dst->joineui));
+		memcpy(dst->joineui, c->lrw_joineui, sizeof(c->lrw_joineui));
 	}
 	if (requested(ids, n, 9)) {
 		dst->has_devaddr = true;
-		bin2hex(c->lrw_devaddr, sizeof(c->lrw_devaddr), dst->devaddr, sizeof(dst->devaddr));
+		memcpy(dst->devaddr, c->lrw_devaddr, sizeof(c->lrw_devaddr));
 	}
 	if (requested(ids, n, 12)) {
 		dst->has_sub_band = true;
@@ -321,21 +290,21 @@ int app_config_apply_sensors(const AppConfigMessage_Sensors *src, uint32_t *faul
 	if (src->has_cap_accelerometer) {
 		config->cap_accelerometer = src->cap_accelerometer;
 	}
-	if (src->has_sensor1_rom &&
-	    !parse_hex_string(src->sensor1_rom, config->sensor1_rom, sizeof(config->sensor1_rom))) {
-		FAULT(56);
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_sensor1_rom) {
+		memcpy(config->sensor1_rom, src->sensor1_rom, sizeof(config->sensor1_rom));
 	}
-	if (src->has_sensor2_rom &&
-	    !parse_hex_string(src->sensor2_rom, config->sensor2_rom, sizeof(config->sensor2_rom))) {
-		FAULT(57);
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_sensor2_rom) {
+		memcpy(config->sensor2_rom, src->sensor2_rom, sizeof(config->sensor2_rom));
 	}
-	if (src->has_sensor3_rom &&
-	    !parse_hex_string(src->sensor3_rom, config->sensor3_rom, sizeof(config->sensor3_rom))) {
-		FAULT(58);
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_sensor3_rom) {
+		memcpy(config->sensor3_rom, src->sensor3_rom, sizeof(config->sensor3_rom));
 	}
-	if (src->has_sensor4_rom &&
-	    !parse_hex_string(src->sensor4_rom, config->sensor4_rom, sizeof(config->sensor4_rom))) {
-		FAULT(59);
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_sensor4_rom) {
+		memcpy(config->sensor4_rom, src->sensor4_rom, sizeof(config->sensor4_rom));
 	}
 	if (src->has_cap_w1_sensors) {
 		config->cap_w1_sensors = src->cap_w1_sensors;
@@ -386,23 +355,19 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 	}
 	if (requested(ids, n, 56)) {
 		dst->has_sensor1_rom = true;
-		bin2hex(c->sensor1_rom, sizeof(c->sensor1_rom), dst->sensor1_rom,
-			sizeof(dst->sensor1_rom));
+		memcpy(dst->sensor1_rom, c->sensor1_rom, sizeof(c->sensor1_rom));
 	}
 	if (requested(ids, n, 57)) {
 		dst->has_sensor2_rom = true;
-		bin2hex(c->sensor2_rom, sizeof(c->sensor2_rom), dst->sensor2_rom,
-			sizeof(dst->sensor2_rom));
+		memcpy(dst->sensor2_rom, c->sensor2_rom, sizeof(c->sensor2_rom));
 	}
 	if (requested(ids, n, 58)) {
 		dst->has_sensor3_rom = true;
-		bin2hex(c->sensor3_rom, sizeof(c->sensor3_rom), dst->sensor3_rom,
-			sizeof(dst->sensor3_rom));
+		memcpy(dst->sensor3_rom, c->sensor3_rom, sizeof(c->sensor3_rom));
 	}
 	if (requested(ids, n, 59)) {
 		dst->has_sensor4_rom = true;
-		bin2hex(c->sensor4_rom, sizeof(c->sensor4_rom), dst->sensor4_rom,
-			sizeof(dst->sensor4_rom));
+		memcpy(dst->sensor4_rom, c->sensor4_rom, sizeof(c->sensor4_rom));
 	}
 	if (requested(ids, n, 60)) {
 		dst->has_cap_w1_sensors = true;
