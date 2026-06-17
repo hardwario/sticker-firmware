@@ -157,6 +157,18 @@ static K_MUTEX_DEFINE(m_lock);
 
 static const struct gpio_dt_spec m_lpd = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
 
+/* ST25DV GPO interrupt line (PB12). Asserts on the RF events enabled in the GPO
+ * config (RF write, field change, ...), letting us wake on demand instead of
+ * polling. Handled directly here. */
+static const struct gpio_dt_spec m_gpo =
+	GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), nfc_gpo_gpios);
+static struct gpio_callback m_gpo_cb;
+
+/* Given by the GPO ISR on each RF event; the NFC poll thread sleeps on it so the
+ * CPU only wakes to service the tag when the phone is actually doing something
+ * (max count 1 — bursts coalesce into one wake, which is fine). */
+static K_SEM_DEFINE(m_gpo_sem, 0, 1);
+
 /* Periodic NFC check enable (toggled via `nfc autocheck`). Lets a config blob
  * be written over several `nfc write` calls without the periodic check racing
  * it and rewriting the tag to the info record mid-write. */
@@ -800,6 +812,49 @@ static bool is_buffer_zero(const void *buf, size_t len)
 	return true;
 }
 
+/* ST25DV GPO interrupt handler: wake the NFC poll thread to service the tag. */
+static void gpo_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(cb);
+	ARG_UNUSED(pins);
+	k_sem_give(&m_gpo_sem);
+}
+
+/* Block the NFC poll thread until the GPO line signals RF activity, or until
+ * `fallback_ms` elapses (a safety net so a missed edge can't stall the
+ * channel). Returns 0 if woken by GPO, -EAGAIN on the fallback timeout. */
+int app_nfc_wait_event(int fallback_ms)
+{
+	return k_sem_take(&m_gpo_sem, K_MSEC(fallback_ms));
+}
+
+/* Configure the GPO line (PB12) as an input with an edge interrupt. */
+static int nfc_gpo_irq_setup(void)
+{
+	if (!gpio_is_ready_dt(&m_gpo)) {
+		LOG_ERR("GPO gpio not ready");
+		return -ENODEV;
+	}
+	int ret = gpio_pin_configure_dt(&m_gpo, GPIO_INPUT);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt(gpo)", ret);
+		return ret;
+	}
+	ret = gpio_pin_interrupt_configure_dt(&m_gpo, GPIO_INT_EDGE_BOTH);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_interrupt_configure_dt(gpo)", ret);
+		return ret;
+	}
+	gpio_init_callback(&m_gpo_cb, gpo_isr, BIT(m_gpo.pin));
+	ret = gpio_add_callback(m_gpo.port, &m_gpo_cb);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_add_callback(gpo)", ret);
+		return ret;
+	}
+	return 0;
+}
+
 int app_nfc_init(void)
 {
 	int ret;
@@ -834,6 +889,13 @@ int app_nfc_init(void)
 			LOG_WRN("NFC: RF_WRITE_EN config failed (not used by the poll)");
 		}
 		nfc_access_end();
+	}
+
+	ret = nfc_gpo_irq_setup();
+	if (ret) {
+		LOG_WRN("NFC: GPO IRQ setup failed: %d", ret);
+	} else {
+		LOG_INF("NFC: GPO IRQ on PB12 ready");
 	}
 
 	return 0;
@@ -980,17 +1042,13 @@ int app_nfc_check(enum app_nfc_action *action)
 	return res;
 }
 
-/* Periodic main-loop NFC poll: read the tag and process any pending command /
- * config, restoring the info record otherwise.
- *
- * We deliberately do the full read every poll instead of gating on IT_STS_Dyn.
- * On this hardware IT_STS reads 0x00 on every poll (the dynamic register is
- * cleared by the LPD power-cycle that nfc_access_begin() does each poll), so it
- * never reports the phone's RF write. And a command can only be read / answered
- * over I2C while the RF field is briefly off — which IT_STS wouldn't flag
- * anyway. The poll already power-cycles the chip (150 ms LPD settle), so the
- * extra 512 B read is cheap next to that. A GPO-pin hardware interrupt would be
- * the proper low-power trigger for the production FW (see firmware issue). */
+/* NFC service pass: read the tag and process any pending command / config,
+ * restoring the info record otherwise. The poll thread calls this after
+ * app_nfc_wait_event() wakes it on the GPO interrupt (low-power; no busy
+ * polling). It always does the full read — software gating on IT_STS_Dyn is
+ * useless here (the register reads 0x00 every pass, cleared by the LPD
+ * power-cycle in nfc_access_begin), and a command can only be read / answered
+ * while the RF field is briefly off, which IT_STS wouldn't flag anyway. */
 int app_nfc_poll(enum app_nfc_action *action)
 {
 	*action = APP_NFC_ACTION_NONE;
