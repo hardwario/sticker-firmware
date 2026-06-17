@@ -134,12 +134,6 @@ static const char *cmd_action_str(enum app_cmd_action a)
 #define ST25DV_MB_RAM           0x2008 /* dynamic, E0; 256 B mailbox RAM */
 #define ST25DV_MB_RAM_SIZE      256
 
-/* EH_CTRL_Dyn (dynamic, E0 0x2002): bit2 FIELD_ON reflects whether an external
- * RF field (a phone) is present. Used to know when the phone has left so the
- * info record can be restored over a spent command response. */
-#define ST25DV_EH_CTRL_DYN      0x2002
-#define ST25DV_EH_FIELD_ON      0x04
-
 /* NFC Forum external type (TNF=0x04, urn:nfc:ext:) records. Short type names
  * ("hio.stck:<kind>") instead of full MIME media-types save ST25DV user memory
  * (512 B total) — leaving more room for the encrypted config payload — while
@@ -953,19 +947,6 @@ int app_nfc_init(void)
 	return 0;
 }
 
-/* True if an external RF field (a phone) is currently transmitting, per
- * EH_CTRL_Dyn FIELD_ON. Caller holds the access lock. On I2C read failure it
- * returns true (assume present) so a still-unread response is never wiped. */
-static bool nfc_rf_field_present(void)
-{
-	uint8_t eh = 0;
-
-	if (read_reg(ST25DV_EH_CTRL_DYN, &eh, 1)) {
-		return true;
-	}
-	return (eh & ST25DV_EH_FIELD_ON) != 0;
-}
-
 /* Core NFC check: read the tag, parse/ingest a pending config, and restore the
  * info record. Caller must hold the access lock (nfc_access_begin). */
 static int nfc_check_locked(enum app_nfc_action *action)
@@ -1053,7 +1034,11 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	 * check stays as a second guard. */
 	if (m_seen_resp) {
 		m_unknown_count = 0;
-		if (m_woke_timeout && !nfc_rf_field_present()) {
+		if (m_woke_timeout) {
+			/* This poll woke from its (short) timeout: no RF activity for the
+			 * whole window, so the phone is gone (during an exchange it keeps the
+			 * field active, which wakes us via GPO instead). Safe — and reliable
+			 * even on a flaky I2C unit — to restore the info record now. */
 			LOG_INF("NFC: response spent (phone gone) -> restoring info record");
 			if (info_len) {
 				ret = write_mem(0, info, info_len);
@@ -1063,8 +1048,8 @@ static int nfc_check_locked(enum app_nfc_action *action)
 				}
 			}
 		} else {
-			/* Still keeping the response (phone active) -> stay on the short
-			 * fallback so we notice promptly once it leaves. */
+			/* GPO-woken: phone still active -> keep the response and stay on the
+			 * short fallback so we notice promptly once it leaves. */
 			m_resp_on_tag = true;
 		}
 		return res;
