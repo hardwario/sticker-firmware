@@ -156,10 +156,6 @@ static const struct gpio_dt_spec m_lpd = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpi
  * it and rewriting the tag to the info record mid-write. */
 static bool m_periodic = true;
 
-/* True when GPO RF_WRITE_EN was successfully enabled, so the poll can gate on
- * the RF_WRITE bit specifically. False => gate on any RF activity (fallback). */
-static bool m_rf_write_gate;
-
 /* Command/response state, filled by parser_callback when an NDEF command record
  * is found and consumed by nfc_check_locked (writes the response to the tag). */
 static uint8_t m_resp_buf[256];
@@ -167,6 +163,16 @@ static size_t m_resp_len;
 static bool m_have_resp; /* a command was processed; m_resp_buf holds the reply to write */
 static bool m_seen_resp; /* tag already holds a response record; leave it for the phone */
 static enum app_cmd_action m_cmd_action; /* deferred action from app_cmd_handle */
+
+/* Debounce for the "unrecognized data -> restore info" path. A poll can catch
+ * the tag mid-write (the phone is still laying down a command/config record),
+ * which parses as garbage; restoring the info record then would clobber what
+ * the phone is writing (and any reply we just produced). So only restore info
+ * after the data stays unrecognized for this many consecutive polls — a real
+ * partial write resolves within one poll. A recognized consumed config (sets
+ * *action) is still cleared immediately for anti-replay. */
+#define NFC_UNKNOWN_DEBOUNCE 3
+static uint8_t m_unknown_count;
 
 /* Take (and clear) the deferred action from the last processed NFC command, so
  * the poll thread can run reboot/save AFTER the response was written/read. */
@@ -354,8 +360,9 @@ static int nfc_enable_rf_write_it(void)
 	}
 
 	/* The chip needs a moment after a present-password write before the next
-	 * I2C access is ACKed. */
-	k_msleep(5);
+	 * I2C access is ACKed. 5 ms was too short (the next read NACKed with -EIO);
+	 * a system-area probe confirmed 10 ms is enough, so allow a safe margin. */
+	k_msleep(15);
 
 	uint8_t gpo;
 	ret = read_reg(ST25DV_GPO_REG, &gpo, 1);
@@ -372,6 +379,10 @@ static int nfc_enable_rf_write_it(void)
 	if (ret) {
 		return ret;
 	}
+
+	/* GPO is a system-config register held in EEPROM: wait the write time
+	 * before reading it back, or the verify read sees the stale value. */
+	k_msleep(ST25DV_TW_MS_PER_PAGE + 5);
 
 	uint8_t check = 0;
 	ret = read_reg(ST25DV_GPO_REG, &check, 1);
@@ -806,15 +817,15 @@ int app_nfc_init(void)
 		return ret;
 	}
 
-	/* Try to enable RF-write reporting in IT_STS_Dyn so the poll can gate on
-	 * writes specifically. Needs the default I2C password; on failure the poll
-	 * falls back to gating on any RF activity. Not fatal. */
+	/* Configure GPO RF_WRITE_EN so RF EEPROM writes are reported (sets the GPO
+	 * pin / IT_STS_Dyn). The poll no longer gates on it (it reads 0x00 here, see
+	 * app_nfc_poll), but keeping it set readies the GPO pin for a future
+	 * hardware-interrupt-driven, low-power command pickup. Not fatal. */
 	if (nfc_access_begin() == 0) {
 		if (nfc_enable_rf_write_it() == 0) {
-			m_rf_write_gate = true;
-			LOG_INF("NFC: RF_WRITE IT enabled (precise poll gate)");
+			LOG_INF("NFC: RF_WRITE_EN configured");
 		} else {
-			LOG_WRN("NFC: RF_WRITE IT enable failed; poll gates on any RF activity");
+			LOG_WRN("NFC: RF_WRITE_EN config failed (not used by the poll)");
 		}
 		nfc_access_end();
 	}
@@ -845,6 +856,7 @@ static int nfc_check_locked(enum app_nfc_action *action)
 
 	/* Empty tag: lay down the info record so a phone always finds metadata. */
 	if (is_buffer_zero(m_buf, ST25DV_USER_MEM_SIZE)) {
+		m_unknown_count = 0;
 		NFC_REPORT("NFC tag empty -> writing info record (%zu B)", info_len);
 		if (info_len) {
 			ret = write_mem(0, info, info_len);
@@ -859,6 +871,7 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	/* Tag already holds exactly our info record: nothing pending, leave it
 	 * (avoids rewriting the EEPROM on every check). */
 	if (info_len && memcmp(m_buf, info, info_len) == 0) {
+		m_unknown_count = 0;
 		NFC_REPORT("NFC tag holds our info record (nothing pending) -> no action");
 		return 0;
 	}
@@ -876,6 +889,7 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	 * as the output buffer (its parsed contents are no longer needed; the reply
 	 * is already copied into m_resp_buf) to keep this off the thread stack. */
 	if (m_have_resp) {
+		m_unknown_count = 0;
 		size_t out_len = build_ndef_record(m_buf, ST25DV_USER_MEM_SIZE, NDEF_RESPONSE_TYPE,
 						   m_resp_buf, m_resp_len);
 		LOG_INF("Writing command response to NFC (%zu B)...", m_resp_len);
@@ -895,14 +909,42 @@ static int nfc_check_locked(enum app_nfc_action *action)
 
 	/* Our response is already on the tag (awaiting the phone read): leave it. */
 	if (m_seen_resp) {
+		m_unknown_count = 0;
 		return res;
 	}
 
-	/* Config consumed (or unrecognized data): (re)write the info record. This
-	 * clears the consumed config (anti-replay) and restores the metadata. */
-	LOG_INF("Writing info record to NFC...");
-	NFC_REPORT("NFC wrote: info record (%zu B) - cleared consumed/unknown data, restored "
-		   "metadata",
+	/* A recognized config was consumed (ingest set *action): clear it right away
+	 * for anti-replay, restoring the info record. */
+	if (*action != APP_NFC_ACTION_NONE) {
+		m_unknown_count = 0;
+		LOG_INF("Writing info record to NFC (consumed config)...");
+		NFC_REPORT("NFC wrote: info record (%zu B) - cleared consumed config, restored "
+			   "metadata",
+			   info_len);
+		if (info_len) {
+			ret = write_mem(0, info, info_len);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+				res = ret;
+			}
+		}
+		return res;
+	}
+
+	/* Unrecognized data and nothing actionable. This is usually a poll catching
+	 * the tag mid-write while the phone lays down a command/config record, which
+	 * resolves on the next poll. Debounce: only restore the info record (which
+	 * would clobber the in-progress write) after the data stays unrecognized for
+	 * NFC_UNKNOWN_DEBOUNCE consecutive polls. */
+	if (++m_unknown_count < NFC_UNKNOWN_DEBOUNCE) {
+		NFC_REPORT("NFC unrecognized data (%u/%u) -> waiting (likely mid-write)",
+			   m_unknown_count, NFC_UNKNOWN_DEBOUNCE);
+		return res;
+	}
+
+	m_unknown_count = 0;
+	LOG_INF("Writing info record to NFC (cleared unknown data)...");
+	NFC_REPORT("NFC wrote: info record (%zu B) - cleared unknown data, restored metadata",
 		   info_len);
 	if (info_len) {
 		ret = write_mem(0, info, info_len);
@@ -932,9 +974,17 @@ int app_nfc_check(enum app_nfc_action *action)
 	return res;
 }
 
-/* Gated poll for the periodic main-loop check: read the 1-byte IT_STS_Dyn
- * (read-clears). Only when it shows RF activity since the last poll do the full
- * 512 B read + parse. Saves waking the bus / parsing when nothing changed. */
+/* Periodic main-loop NFC poll: read the tag and process any pending command /
+ * config, restoring the info record otherwise.
+ *
+ * We deliberately do the full read every poll instead of gating on IT_STS_Dyn.
+ * On this hardware IT_STS reads 0x00 on every poll (the dynamic register is
+ * cleared by the LPD power-cycle that nfc_access_begin() does each poll), so it
+ * never reports the phone's RF write. And a command can only be read / answered
+ * over I2C while the RF field is briefly off — which IT_STS wouldn't flag
+ * anyway. The poll already power-cycles the chip (150 ms LPD settle), so the
+ * extra 512 B read is cheap next to that. A GPO-pin hardware interrupt would be
+ * the proper low-power trigger for the production FW (see firmware issue). */
 int app_nfc_poll(enum app_nfc_action *action)
 {
 	*action = APP_NFC_ACTION_NONE;
@@ -944,19 +994,7 @@ int app_nfc_poll(enum app_nfc_action *action)
 		return ret;
 	}
 
-	int res = 0;
-	uint8_t it_sts = 0;
-	ret = read_reg(ST25DV_IT_STS_DYN, &it_sts, sizeof(it_sts));
-	if (ret) {
-		res = ret;
-	} else {
-		/* With RF_WRITE reporting on, gate on the write bit only (skip mere
-		 * reads/field changes); otherwise gate on any RF activity. */
-		bool trigger = m_rf_write_gate ? (it_sts & ST25DV_IT_RF_WRITE) : (it_sts != 0);
-		if (trigger) {
-			res = nfc_check_locked(action);
-		}
-	}
+	int res = nfc_check_locked(action);
 
 	nfc_access_end();
 	return res;
