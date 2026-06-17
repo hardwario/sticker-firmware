@@ -80,10 +80,23 @@ static void jump_to_app(uint32_t base)
 	__disable_irq();
 	SysTick->CTRL = 0;
 	SysTick->VAL = 0;
+	/* Disable the MPU: the bootloader (a Zephyr app) leaves MPU regions sized for
+	 * its own small RAM, which deny the app's early .data/.bss init (it touches
+	 * RAM beyond the bootloader's regions before it reconfigures the MPU itself) —
+	 * seen as a MemManage data-access violation. The app re-enables + reprograms
+	 * the MPU during kernel init. */
+	MPU->CTRL = 0;
+	__DSB();
 	SCB->VTOR = base;
 	__DSB();
 	__ISB();
 	__set_MSP(sp);
+	/* The bootloader is a Zephyr application, so this runs on a thread stack via
+	 * PSP (CONTROL.SPSEL=1). Switch back to the main stack (SPSEL=0, privileged)
+	 * before entering the app — otherwise the app keeps running on the
+	 * bootloader's small thread stack and faults (MemManage stack violation). */
+	__set_CONTROL(0);
+	__ISB();
 	((void (*)(void))pc)();
 
 	CODE_UNREACHABLE;
