@@ -47,6 +47,12 @@ enum app_cmd_action app_nfc_take_cmd_action(void);
  * blob is not raced (and overwritten) by the periodic check mid-write. */
 bool app_nfc_periodic_enabled(void);
 
+/* True while a spent response record is still on the tag awaiting the revert to
+ * the info record. The poll thread waits on a short fallback while this holds so
+ * the revert (once the phone leaves) is prompt, instead of the full low-power
+ * window. */
+bool app_nfc_resp_pending(void);
+
 /* Enter mailbox (ST25DV Fast-Transfer-Mode) serving mode until `idle_timeout_s`
  * of inactivity (0 = firmware default), holding the tag powered so the phone's
  * RF and our I2C reach it at once. Runs commands off the mailbox and returns the
