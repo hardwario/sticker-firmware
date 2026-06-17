@@ -9,6 +9,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/crc.h>
+#include <zephyr/sys/util.h>
 
 #include <errno.h>
 #include <string.h>
@@ -28,6 +29,41 @@
 #define META_SIZE FIXED_PARTITION_SIZE(sfu_meta_partition)
 
 #define CRC_CHUNK 256
+
+/* STM32WLE5 main flash: uniform 2 KB pages (the erase granularity). */
+#define FW_PAGE_SZ  2048
+#define FW_MAX_PAGES ((SLOT0_SIZE + FW_PAGE_SZ - 1) / FW_PAGE_SZ)
+
+/* Incremental-erase bookkeeping: one bit per slot page, set once the page has
+ * been erased during this session. */
+static uint8_t m_erased[(FW_MAX_PAGES + 7) / 8];
+static bool m_incremental;
+
+void fw_begin_incremental(void)
+{
+	memset(m_erased, 0, sizeof(m_erased));
+	m_incremental = true;
+}
+
+/* Erase any not-yet-erased page(s) covering [off, off+len). */
+static int ensure_erased(const struct flash_area *fa, uint32_t off, size_t len)
+{
+	uint32_t first = off / FW_PAGE_SZ;
+	uint32_t last = (off + len - 1) / FW_PAGE_SZ;
+
+	for (uint32_t p = first; p <= last && p < FW_MAX_PAGES; p++) {
+		if (m_erased[p / 8] & (1u << (p % 8))) {
+			continue;
+		}
+		int ret = flash_area_erase(fa, (off_t)p * FW_PAGE_SZ, FW_PAGE_SZ);
+
+		if (ret) {
+			return ret;
+		}
+		m_erased[p / 8] |= (1u << (p % 8));
+	}
+	return 0;
+}
 
 uint32_t fw_slot0_base(void)
 {
@@ -63,6 +99,13 @@ int fw_write(uint32_t off, const uint8_t *data, size_t len)
 	if (off + len > SLOT0_SIZE) {
 		flash_area_close(fa);
 		return -EFBIG;
+	}
+	if (m_incremental) {
+		ret = ensure_erased(fa, off, len);
+		if (ret) {
+			flash_area_close(fa);
+			return ret;
+		}
 	}
 	ret = flash_area_write(fa, off, data, len);
 	flash_area_close(fa);
@@ -136,7 +179,14 @@ int meta_write(const struct sfu_meta *meta)
 	}
 	ret = flash_area_erase(fa, 0, META_SIZE);
 	if (ret == 0) {
-		ret = flash_area_write(fa, 0, meta, sizeof(*meta));
+		/* STM32WL flash writes in 8-byte (doubleword) units, so the length
+		 * must be a multiple of 8; sizeof(sfu_meta) is 36. Pad to the next
+		 * doubleword in a zero-filled buffer (erased flash reads 0xFF, so the
+		 * pad bytes are explicit). */
+		uint8_t buf[ROUND_UP(sizeof(*meta), 8)] = {0};
+
+		memcpy(buf, meta, sizeof(*meta));
+		ret = flash_area_write(fa, 0, buf, sizeof(buf));
 	}
 	flash_area_close(fa);
 	return ret;

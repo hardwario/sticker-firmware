@@ -138,9 +138,10 @@ static uint16_t handle_start(const uint8_t *data, size_t len)
 		return (m_hdr.payload_len > fw_slot0_size()) ? NFC_ST_ERR_SIZE
 							     : NFC_ST_ERR_MAGIC;
 	}
-	if (fw_erase_slot() != 0) {
-		return NFC_ST_ERR_FLASH;
-	}
+	/* Arm lazy per-page erase instead of a blocking ~1.7 s full-slot erase:
+	 * CMD_START must reply quickly or the phone's mailbox poll window re-sends
+	 * START and the handshake livelocks. Pages are erased on first write. */
+	fw_begin_incremental();
 	m_started = true;
 	return NFC_ST_READY;
 }
@@ -174,9 +175,14 @@ static uint16_t handle_finish(void)
 	if (!m_started) {
 		return NFC_ST_ERR_STATE;
 	}
-	if (fw_slot_crc32(m_hdr.payload_len, &crc) != 0) {
+	int ret = fw_slot_crc32(m_hdr.payload_len, &crc);
+
+	if (ret != 0) {
+		printk("DFU: finish crc read failed (%d)\n", ret);
 		return NFC_ST_ERR_FLASH;
 	}
+	printk("DFU: finish crc=0x%08x want=0x%08x len=%u\n", crc, m_hdr.payload_crc32,
+	       m_hdr.payload_len);
 	if (crc != m_hdr.payload_crc32) {
 		return NFC_ST_ERR_VERIFY;
 	}
@@ -190,7 +196,9 @@ static uint16_t handle_finish(void)
 	};
 	memcpy(meta.secret_key, auth_key(), NFC_KEY_LEN);
 
-	if (meta_write(&meta) != 0) {
+	ret = meta_write(&meta);
+	if (ret != 0) {
+		printk("DFU: meta_write failed (%d)\n", ret);
 		return NFC_ST_ERR_FLASH;
 	}
 	return NFC_ST_OK;
@@ -218,7 +226,13 @@ static void dfu_loop(void)
 		uint8_t dlen = frame[3];
 		const uint8_t *data = frame + NFC_REQ_HDR_LEN;
 		uint16_t status;
-		uint16_t ctx = 0;
+		/* Echo the request seq in ctx so the phone can tell a fresh reply from a
+		 * stale one left in the half-duplex mailbox (PING/START/FINISH all reply
+		 * with an otherwise-identical status byte). DATA overrides ctx only on
+		 * RETRY (expected_seq); on ACK ctx == seq, same as this default. */
+		uint16_t ctx = seq;
+
+		printk("DFU: rx type=0x%02x seq=%u len=%u\n", type, seq, dlen);
 
 		switch (type) {
 		case NFC_CMD_PING:
@@ -245,6 +259,7 @@ static void dfu_loop(void)
 
 		size_t rlen = build_status(rsp, status, ctx);
 		(void)mb_send_response(rsp, rlen);
+		printk("DFU: tx status=0x%02x ctx=%u\n", status, ctx);
 
 		if (status == NFC_ST_OK) {
 			k_msleep(50);
@@ -289,6 +304,7 @@ int main(void)
 		}
 	}
 
+	printk("DFU: mailbox up, waiting for frames\n");
 	dfu_loop();
 	sys_reboot(SYS_REBOOT_COLD);
 	return 0;

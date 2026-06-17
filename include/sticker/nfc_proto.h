@@ -102,18 +102,26 @@ struct sfu_meta {
 
 #define NFC_ST_IS_ERROR(s) ((s) >= 0x20)
 
-/* ---- EEPROM software-mailbox binding (baseline, doc §4) ------------- */
-/* ST25DV ISO15693 blocks are 4 bytes; offsets below are byte offsets.   */
+/* ---- FTM mailbox binding (doc §4) ----------------------------------- */
+/*
+ * The ST25DV Fast-Transfer-Mode mailbox is a single 256-byte volatile RAM
+ * buffer, shared half-duplex between the RF (phone) and I2C (MCU) sides:
+ *   - phone writes a request via the RF "Write Message" command (arms RF_PUT);
+ *   - MCU polls MB_CTRL_Dyn.RF_PUT, reads MB_LEN_Dyn + the buffer, processes it;
+ *   - MCU writes the response into the same buffer (arms HOST_PUT);
+ *   - phone reads it via "Read Msg Length" + "Read Message".
+ * No EEPROM wear, no 5 ms page programming — a whole frame moves in one I2C
+ * transaction. The register addresses and RF command opcodes live MCU-side in
+ * boot/src/st25dv_mb.c and phone-side in the flasher; only the logical frame
+ * sizes are shared here.
+ */
+#define NFC_MB_RAM_SIZE 256 /* ST25DV04K Fast-Transfer mailbox RAM */
 
-#define NFC_MB_PH_FLAG_OFF 0x000 /* phone->MCU request-ready flag (1 byte) */
-#define NFC_MB_REQ_OFF     0x004 /* request frame, up to 260 bytes        */
-#define NFC_MB_REQ_LEN     260
-#define NFC_MB_MC_FLAG_OFF 0x108 /* MCU->phone response-ready flag         */
-#define NFC_MB_RSP_OFF     0x10C /* response frame, up to 16 bytes         */
-#define NFC_MB_RSP_LEN     16
-
-#define NFC_MB_FLAG_SET   1
-#define NFC_MB_FLAG_CLEAR 0
+/* A request frame ([type][seq][len] + up to NFC_MAX_DATA) must fit the buffer
+ * (4 + 240 = 244 <= 256). */
+#define NFC_MB_REQ_LEN NFC_MB_RAM_SIZE
+/* A response frame is just [status][ctx_lo][ctx_hi] (+ optional detail). */
+#define NFC_MB_RSP_LEN 16
 
 #ifdef __cplusplus
 }

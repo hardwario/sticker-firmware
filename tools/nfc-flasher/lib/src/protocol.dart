@@ -13,8 +13,17 @@ const int kSfuPreambleLen = kSfuHeaderLen + kSfuSignatureLen; // 96
 const int kFlagSigned = 0x0001;
 const int kFlagCrcPresent = 0x0002;
 
-/// Max firmware payload bytes carried per DATA frame.
+/// Max frame data bytes carried per DATA frame (ciphertext + tag when keyed).
 const int kMaxData = 240;
+
+/// AES-CCM tag length appended to each keyed frame's payload.
+const int kCcmTagLen = 8;
+
+/// Plaintext firmware bytes per DATA frame. The bootloader writes each frame at
+/// `seq * kMaxPlaintext`, so the phone must chunk the payload by this size
+/// regardless of keyed/unkeyed (unkeyed sends the bytes verbatim; keyed appends
+/// an 8-byte tag, still <= kMaxData).
+const int kMaxPlaintext = kMaxData - kCcmTagLen; // 232
 
 // Command codes (phone -> MCU).
 const int kCmdStart = 0x01;
@@ -104,7 +113,8 @@ class FirmwareImage {
   int get payloadCrc32 =>
       header.buffer.asByteData().getUint32(20, Endian.little);
 
-  int get totalDataFrames => (payload.length + kMaxData - 1) ~/ kMaxData;
+  int get totalDataFrames =>
+      (payload.length + kMaxPlaintext - 1) ~/ kMaxPlaintext;
 
   /// Build a header for a raw/unsigned image (no signature, CRC only).
   static FirmwareImage unsigned(Uint8List payload, {int loadAddr = 0x08008000}) {

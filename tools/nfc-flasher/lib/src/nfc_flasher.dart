@@ -1,5 +1,7 @@
-// ISO15693 (NfcV) firmware streaming to an ST25DV tag, EEPROM software-mailbox
-// binding (baseline) per doc/nfc-update-protocol.md §4.
+// ISO15693 (NfcV) firmware streaming to an ST25DV tag over the FTM (Fast
+// Transfer Mode) mailbox per doc/nfc-update-protocol.md §4. Each exchange writes
+// a request into the 256-byte mailbox RAM with the ST custom Write Message
+// (0xAA) command and polls Read Message (0xAB/0xAC) for the bootloader's reply.
 //
 // NOTE: NFC plugin APIs change between major versions. This targets
 // nfc_manager ^3.5.0 (Android NfcV.transceive). If you bump the plugin,
@@ -28,15 +30,21 @@ class FlashException implements Exception {
   String toString() => message;
 }
 
-// EEPROM mailbox block layout (4-byte ISO15693 blocks).
-const int _blkPhFlag = 0; // 0x000
-const int _blkReq = 1; // 0x004 .. (260 B -> 65 blocks)
-const int _blkMcFlag = 66; // 0x108
-const int _blkRsp = 67; // 0x10C .. (16 B -> 4 blocks)
-const int _rspBlocks = 4;
+// ISO15693 request flags: high data rate, non-addressed.
+const int _iso15693Flags = 0x02;
+// ST IC manufacturer code (carried by ST custom commands).
+const int _stMfgCode = 0x02;
+// ST25DV custom mailbox commands.
+const int _cmdWriteMessage = 0xAA;
+const int _cmdReadMsgLength = 0xAB;
+const int _cmdReadMessage = 0xAC;
 
-const int _iso15693Flags = 0x02; // high data rate, single sub-carrier
+// How long to wait for a single exchange's reply before giving up.
 const Duration _pollTimeout = Duration(seconds: 3);
+// The first exchange of a session must also cover the firmware's switch into
+// mailbox mode (it acks EnterMailbox over NDEF first), so allow longer.
+const Duration _firstPollTimeout = Duration(seconds: 8);
+const Duration _pollInterval = Duration(milliseconds: 40);
 
 class NfcFlasher {
   final void Function(FlashProgress)? onProgress;
@@ -87,24 +95,31 @@ class NfcFlasher {
   Future<void> _flash(NfcV nfcV, FirmwareImage image) async {
     _report('Handshake', 0, image.payload.length);
 
-    // PING — discover bootloader.
-    var rsp = await _exchange(nfcV, _frame(kCmdPing, 0, Uint8List(0)));
+    // PING — discover bootloader (also covers the switch into mailbox mode).
+    var rsp = await _exchange(nfcV, _frame(kCmdPing, 0, Uint8List(0)),
+        first: true);
     _expect(rsp, kStReady, 'PING');
 
-    // START — header + signature.
-    final start = Uint8List(kSfuPreambleLen)
-      ..setRange(0, kSfuHeaderLen, image.header)
-      ..setRange(kSfuHeaderLen, kSfuPreambleLen, image.signature);
+    // START — session(4) + sfu_header(32). The bootloader diversifies its
+    // AES-CCM nonce with the session; an unkeyed (factory) device ignores it
+    // and accepts the plaintext header. The Ed25519 signature is not sent: the
+    // bootloader authenticates with the per-device AES-CCM key, not the .sfu
+    // signature.
+    final session = DateTime.now().millisecondsSinceEpoch & 0xFFFFFFFF;
+    final start = Uint8List(4 + kSfuHeaderLen);
+    start.buffer.asByteData().setUint32(0, session, Endian.little);
+    start.setRange(4, 4 + kSfuHeaderLen, image.header);
     rsp = await _exchange(nfcV, _frame(kCmdStart, 0, start));
     _expect(rsp, kStReady, 'START');
 
-    // DATA — stream payload.
+    // DATA — stream payload, kMaxPlaintext bytes per frame (matches the
+    // bootloader's seq * kMaxPlaintext write offset).
     final payload = image.payload;
     final frames = image.totalDataFrames;
     int seq = 0;
     while (seq < frames) {
-      final off = seq * kMaxData;
-      final end = (off + kMaxData).clamp(0, payload.length);
+      final off = seq * kMaxPlaintext;
+      final end = (off + kMaxPlaintext).clamp(0, payload.length);
       final chunk = Uint8List.sublistView(payload, off, end);
       rsp = await _exchange(nfcV, _frame(kCmdData, seq, chunk));
       final status = rsp[0];
@@ -144,67 +159,53 @@ class NfcFlasher {
     }
   }
 
-  /// One request/response round-trip through the EEPROM mailbox.
-  Future<Uint8List> _exchange(NfcV nfcV, Uint8List frame) async {
-    // 1. clear MCU flag, 2. write request, 3. set phone flag.
-    await _writeBlock(nfcV, _blkMcFlag, const [0, 0, 0, 0]);
-    await _writeBlocks(nfcV, _blkReq, frame);
-    await _writeBlock(nfcV, _blkPhFlag, const [1, 0, 0, 0]);
+  /// One request/response round-trip through the FTM mailbox. Writes [frame]
+  /// with Write Message, then polls Read Message until the bootloader's reply
+  /// lands. The request is re-written each outer pass (covers a missed write or
+  /// the firmware's switch into mailbox mode). A reply is told apart from our
+  /// own echoed request by its first byte: status codes start at 0x10, command
+  /// codes are 0x01..0x05.
+  Future<Uint8List> _exchange(NfcV nfcV, Uint8List frame,
+      {bool first = false}) async {
+    final deadline =
+        DateTime.now().add(first ? _firstPollTimeout : _pollTimeout);
+    while (DateTime.now().isBefore(deadline)) {
+      await _writeMessage(nfcV, frame);
 
-    // 4. poll MCU flag.
-    final deadline = DateTime.now().add(_pollTimeout);
-    while (true) {
-      final flag = await _readBlock(nfcV, _blkMcFlag);
-      if (flag[0] == 1) break;
-      if (DateTime.now().isAfter(deadline)) {
-        throw FlashException('Timeout waiting for device response');
+      final innerEnd = DateTime.now().add(const Duration(milliseconds: 1200));
+      while (DateTime.now().isBefore(innerEnd) &&
+          DateTime.now().isBefore(deadline)) {
+        await Future.delayed(_pollInterval);
+        final msg = await _readMessage(nfcV);
+        if (msg != null && msg.isNotEmpty && msg[0] >= 0x10) return msg;
       }
     }
-
-    // 5. read response, 6. clear phone flag.
-    final rsp = await _readBlocks(nfcV, _blkRsp, _rspBlocks);
-    await _writeBlock(nfcV, _blkPhFlag, const [0, 0, 0, 0]);
-    return rsp;
+    throw FlashException('Timeout waiting for device response');
   }
 
-  Future<Uint8List> _readBlock(NfcV nfcV, int block) async {
-    final cmd = Uint8List.fromList([_iso15693Flags, 0x20, block & 0xFF]);
-    final r = await nfcV.transceive(data: cmd);
-    // r[0] = response flags; r[1..4] = block data.
-    if (r.isEmpty || r[0] != 0x00) {
-      throw FlashException('Read block $block failed (flags=0x${r.isEmpty ? '?' : r[0].toRadixString(16)})');
+  /// ST25DV Write Message (0xAA): place [data] in the mailbox RAM (arms RF_PUT).
+  /// Frame: flags, cmd, IC-mfg(0x02), MBLength(=len-1), data.
+  Future<void> _writeMessage(NfcV nfcV, Uint8List data) async {
+    if (data.isEmpty || data.length > 256) {
+      throw FlashException('Mailbox: bad message length ${data.length}');
     }
-    return Uint8List.sublistView(r, 1, 5);
-  }
-
-  Future<Uint8List> _readBlocks(NfcV nfcV, int firstBlock, int count) async {
-    final out = Uint8List(count * 4);
-    for (int i = 0; i < count; i++) {
-      out.setRange(i * 4, i * 4 + 4, await _readBlock(nfcV, firstBlock + i));
-    }
-    return out;
-  }
-
-  Future<void> _writeBlock(NfcV nfcV, int block, List<int> data4) async {
     final cmd = Uint8List.fromList(
-        [_iso15693Flags, 0x21, block & 0xFF, ...data4]);
-    final r = await nfcV.transceive(data: cmd);
-    if (r.isNotEmpty && r[0] != 0x00) {
-      throw FlashException('Write block $block failed (flags=0x${r[0].toRadixString(16)})');
-    }
-    // ST25DV EEPROM page programming time (~5 ms / 4-byte page).
-    await Future.delayed(const Duration(milliseconds: 5));
+        [_iso15693Flags, _cmdWriteMessage, _stMfgCode, data.length - 1, ...data]);
+    await nfcV.transceive(data: cmd);
   }
 
-  Future<void> _writeBlocks(NfcV nfcV, int firstBlock, Uint8List data) async {
-    // pad to a multiple of 4 bytes.
-    final padded = (data.length % 4 == 0)
-        ? data
-        : (Uint8List(((data.length + 3) ~/ 4) * 4)..setRange(0, data.length, data));
-    for (int i = 0; i < padded.length; i += 4) {
-      await _writeBlock(
-          nfcV, firstBlock + i ~/ 4, padded.sublist(i, i + 4));
-    }
+  /// ST25DV Read Msg Length (0xAB) + Read Message (0xAC). Returns the mailbox
+  /// payload (without the leading response-flags byte), or null if not ready.
+  Future<Uint8List?> _readMessage(NfcV nfcV) async {
+    final lenResp = await nfcV
+        .transceive(data: Uint8List.fromList([_iso15693Flags, _cmdReadMsgLength, _stMfgCode]));
+    if (lenResp.length < 2 || lenResp[0] != 0x00) return null;
+    final len = lenResp[1] + 1;
+    final msgResp = await nfcV.transceive(
+        data: Uint8List.fromList(
+            [_iso15693Flags, _cmdReadMessage, _stMfgCode, 0x00, len - 1]));
+    if (msgResp.isEmpty || msgResp[0] != 0x00) return null;
+    return Uint8List.fromList(msgResp.sublist(1));
   }
 
   void _report(String phase, int sent, int total) =>

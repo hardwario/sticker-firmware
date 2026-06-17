@@ -3,9 +3,10 @@
 Shared contract between the firmware NFC bootloader and the `tools/nfc-flasher` Flutter app.
 All multi-byte fields are **little-endian** unless stated otherwise.
 
-> Status: draft v1. The logical frame layer is transport-agnostic; two physical bindings are
-> defined (EEPROM-window = baseline, FTM mailbox = optimization). Numeric constants are
-> mirrored in firmware (`bootloader/.../nfc_proto.h`) and app (`lib/src/protocol.dart`).
+> Status: draft v2. The logical frame layer is transport-agnostic; the physical binding is the
+> **ST25DV FTM mailbox** (§4). The earlier EEPROM software-mailbox binding was dropped (slow,
+> wears the EEPROM, manual RF↔I2C arbitration). Numeric constants are mirrored in firmware
+> (`include/sticker/nfc_proto.h`) and the flasher (`tools/nfc-flasher/lib/src/protocol.dart`).
 
 ## 1. Design summary
 
@@ -74,7 +75,7 @@ byte 3..    detail     optional
 ### Commands
 | Name        | Code | Payload                          | MCU action |
 |-------------|------|----------------------------------|------------|
-| `CMD_START` | 0x01 | `sfu_header`(32) + signature(64) | Validate magic/version, anti-downgrade check, erase slot0; keep header+sig in RAM. Reply `ST_READY` or `ST_ERR_*`. |
+| `CMD_START` | 0x01 | `session`(4) + `sfu_header`(32) [AES-CCM] | Set the CCM session, decrypt/validate the header, erase slot0. Reply `ST_READY` or `ST_ERR_*`. (Unkeyed factory devices accept a plaintext header.) |
 | `CMD_DATA`  | 0x02 | `seq`, `data[len]`               | Write `data` at `seq * MAX_DATA` into slot0. Reply `ST_ACK(seq)` or `ST_RETRY(expected_seq)`. |
 | `CMD_FINISH`| 0x03 | —                                | Verify payload CRC32, then signature over header+payload. On success write the **valid metadata** block, reply `ST_OK`, reboot into app. On failure reply `ST_ERR_VERIFY` (slot0 stays invalid → DFU-wait). |
 | `CMD_ABORT` | 0x04 | —                                | Drop session; slot0 stays erased/partial → DFU-wait. |
@@ -99,35 +100,39 @@ IDLE --CMD_START(ok)--> ERASED --CMD_DATA*--> RECEIVING --CMD_FINISH(ok)--> COMM
   ^                                                |                          |
   +----- CMD_ABORT / error / timeout -------------+--------------------------+
 ```
-`MAX_DATA` is reported by `CMD_PING` (EEPROM binding: 240; FTM binding: 240). The phone must
-honour `ST_RETRY` and resend from `expected_seq`. A bootloader DFU-session timeout
-(e.g. 30 s with no frame) returns to DFU-wait without bricking.
+Each `CMD_DATA` frame carries up to `MAX_DATA` (240) frame bytes, of which up to **232 are
+plaintext firmware** (`MAX_PLAINTEXT`; the remaining 8 are the AES-CCM tag when keyed). The
+bootloader writes frame `seq` at `seq * MAX_PLAINTEXT`, so the phone chunks the payload by 232
+regardless of keyed/unkeyed. The phone must honour `ST_RETRY` and resend from `expected_seq`. A
+bootloader DFU-session timeout (e.g. 30 s with no frame) returns to DFU-wait without bricking.
 
-## 4. Physical binding A — EEPROM software mailbox (baseline)
+## 4. Physical binding — FTM mailbox
 
-A fixed region of ST25DV user EEPROM acts as a polled double-handshake mailbox. The phone uses
-ISO15693 **Write Single Block** (4-byte blocks) on the RF side; the MCU uses I2C
-(`i2c_write` / `i2c_write_read`, reuse of `app_nfc.c` primitives).
+The ST25DV 256-byte **Fast-Transfer-Mode mailbox** (volatile RAM, no EEPROM wear, no 5 ms page
+programming) carries the logical frames of §3, half-duplex over a single shared buffer.
 
-```
-EEPROM offset   size   field
-0x000           1      PH_FLAG   (phone sets 1 after writing request; MCU clears to 0)
-0x004           260    REQ       request frame (type/seq/len + up to 240 data, padded)
-0x108           1      MC_FLAG   (MCU sets 1 after writing response; phone clears to 0)
-0x10C           16     RSP       response frame
-```
-Handshake: phone clears `MC_FLAG`, writes `REQ`, sets `PH_FLAG` → MCU polls `PH_FLAG` over I2C
-(~5 ms cadence), reads `REQ`, processes, writes `RSP`, sets `MC_FLAG`, clears `PH_FLAG` → phone
-polls `MC_FLAG`, reads `RSP`. ~3–5 min for a 132 KB image (bounded by EEPROM page programming,
-5 ms / 4-byte page). No GPO pin required.
+**RF side (phone, ISO15693 custom commands, manufacturer code `0x02`):**
+- **Write Message (0xAA)** — `[flags 0x02][0xAA][mfg 0x02][MBLength = len-1][data…]`: writes the
+  request frame into the mailbox, arming `RF_PUT_MSG`.
+- **Read Msg Length (0xAB)** — `[0x02][0xAB][0x02]` → `[resp_flags][MB_LEN_Dyn = len-1]`.
+- **Read Message (0xAC)** — `[0x02][0xAC][0x02][pointer 0x00][NbBytes = len-1]` →
+  `[resp_flags][data…]`: reads the response frame.
 
-## 5. Physical binding B — FTM mailbox (fast-follow optimization)
+**MCU side (I2C, mirrors `app_nfc.c`):** enable the mailbox once — present the I2C password,
+set the static `MB_MODE` allow-bit (E1 `0x000D`), set `MB_EN` in `MB_CTRL_Dyn` (E0 `0x2006`).
+Then poll `MB_CTRL_Dyn` for `RF_PUT_MSG` (bit2); on a request read `MB_LEN_Dyn` (E0 `0x2007`) and
+the mailbox RAM (E0 `0x2008`), process, and write the response back into the RAM (which arms
+`HOST_PUT_MSG`, bit1, for the phone to read). GPO interrupt is optional — polling is sufficient.
 
-Uses the ST25DV 256-byte Fast-Transfer-Mode mailbox (volatile RAM, no EEPROM wear, no 5 ms
-programming). RF side: ST custom **Fast Write Message (0xAA)** / **Read Message (0xAC)** with
-manufacturer code 0x02. MCU side: poll `MB_CTRL_Dyn` (I2C dynamic register) for `RF_PUT_MSG` /
-drive `HOST_PUT_MSG`. Same logical frames as §3. Target ~40–60 s for a 132 KB image.
-Requires `MB_MODE` enabled; GPO interrupt is optional (polling is sufficient in the bootloader).
+Handshake per exchange: phone Write Message → MCU sees `RF_PUT`, reads + processes → MCU writes
+response (arms `HOST_PUT`) → phone Read Message. A reply is distinguished from the phone's own
+echoed request by its first byte (status codes ≥ 0x10; command codes 0x01..0x05). The phone
+re-writes the request each poll window, which also covers the firmware's switch into mailbox mode
+(it acks the `enter_dfu`/EnterMailbox request over NDEF first). Target ~40–60 s for a 132 KB image.
+
+> The earlier EEPROM software-mailbox binding (polled flags + Write Single Block) was dropped: ~3–5
+> min per image, EEPROM wear from thousands of chunk writes, and manual RF↔I2C arbitration. The FTM
+> mailbox gets HW handshake (`RF_PUT`/`HOST_PUT`) for free.
 
 ## 6. DFU entry & boot decision
 
