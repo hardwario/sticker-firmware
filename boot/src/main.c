@@ -61,13 +61,17 @@ static bool slot_is_bootable(void)
 {
 	struct sfu_meta meta;
 
-	if (meta_read(&meta) == 0 && meta.magic == SFU_META_MAGIC &&
-	    meta.valid == SFU_META_MAGIC) {
-		return true;
+	if (meta_read(&meta) == 0 && meta.magic == SFU_META_MAGIC) {
+		/* Metadata exists: it is the authority. valid==MAGIC means a committed
+		 * image (FINISH succeeded). Anything else (e.g. valid==0) means an
+		 * update is in progress or was interrupted — slot0 is partial, so stay
+		 * in DFU rather than boot a corrupt image. Recoverable: a fresh update
+		 * (or a power cycle mid-write) always lands here, never bricks. */
+		return meta.valid == SFU_META_MAGIC;
 	}
 
-	/* No valid metadata (e.g. factory JLink flash) — boot if slot0 holds a
-	 * plausible image rather than wedging in DFU. */
+	/* No metadata at all (blank record = factory JLink flash, never touched by
+	 * DFU) — boot if slot0 holds a plausible image rather than wedging in DFU. */
 	return slot0_looks_valid();
 }
 
@@ -138,6 +142,23 @@ static uint16_t handle_start(const uint8_t *data, size_t len)
 		return (m_hdr.payload_len > fw_slot0_size()) ? NFC_ST_ERR_SIZE
 							     : NFC_ST_ERR_MAGIC;
 	}
+	/* Mark the slot in-progress BEFORE touching it: write metadata with a valid
+	 * magic but valid != MAGIC. From here on, an interruption + power cycle finds
+	 * meta present-but-not-committed and stays in DFU (slot_is_bootable), instead
+	 * of booting a half-written image. handle_finish overwrites this with the
+	 * committed record only after the CRC verifies. */
+	struct sfu_meta in_progress = {
+		.magic = SFU_META_MAGIC,
+		.payload_len = m_hdr.payload_len,
+		.payload_crc32 = m_hdr.payload_crc32,
+		.valid = 0,
+		.serial = auth_serial(),
+	};
+	memcpy(in_progress.secret_key, auth_key(), NFC_KEY_LEN);
+	if (meta_write(&in_progress) != 0) {
+		return NFC_ST_ERR_FLASH;
+	}
+
 	/* Arm lazy per-page erase instead of a blocking ~1.7 s full-slot erase:
 	 * CMD_START must reply quickly or the phone's mailbox poll window re-sends
 	 * START and the handshake livelocks. Pages are erased on first write. */
