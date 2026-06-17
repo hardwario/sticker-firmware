@@ -143,8 +143,15 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 		/* Deferred action from an NFC command (reboot/save/factory-reset). Run
 		 * it after a short delay so the phone can still read the Ack response
 		 * off the tag first. */
+		/* Deferred action from an NFC command (reboot/save/factory-reset/enter-
+		 * mailbox). Run it after a short delay so the phone can still read the Ack
+		 * response off the tag first. Re-check after each one: serving the mailbox
+		 * can itself queue a save/reboot (a SetParam written over the mailbox). */
 		enum app_cmd_action cmd_action = app_nfc_take_cmd_action();
-		if (cmd_action != APP_CMD_ACTION_NONE) {
+		while (cmd_action != APP_CMD_ACTION_NONE) {
+			/* Delay before acting so the phone can first read the Ack off the tag
+			 * over NDEF — including before switching to mailbox mode (which makes
+			 * RF user-memory reads, and so reading the Ack, impossible). */
 			k_sleep(K_SECONDS(NFC_CMD_ACTION_DELAY_SECONDS));
 			switch (cmd_action) {
 			case APP_CMD_ACTION_SETTINGS_SAVE:
@@ -181,12 +188,15 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 				/* The phone has read the Ack off the tag; switch to the
 				 * mailbox (FTM) channel for fast config streaming / firmware
 				 * update. Blocks here serving the mailbox until the phone goes
-				 * quiet, then returns to the low-power NDEF poll. */
+				 * quiet, then returns to the low-power NDEF poll. A SetParam
+				 * served over the mailbox queues its save via m_cmd_action,
+				 * picked up by the next loop iteration below. */
 				app_nfc_serve_mailbox(0);
 				break;
 			default:
 				break;
 			}
+			cmd_action = app_nfc_take_cmd_action();
 		}
 	}
 }

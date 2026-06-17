@@ -1141,8 +1141,15 @@ static int mb_enable(void)
 	return 0;
 }
 
-/* Default mailbox idle window when the caller passes 0. */
-#define APP_NFC_MAILBOX_IDLE_S 30
+/* Default mailbox idle window when the caller passes 0 (the deadline resets on
+ * every served message). Short on purpose: active streaming (config read,
+ * firmware update) keeps resetting it, so it's never cut off, but once the phone
+ * goes quiet the device drops back to the NDEF poll within ~2 s — so an NDEF
+ * write that follows a read (e.g. saving edited config) isn't blocked for long
+ * by lingering Fast-Transfer mode. Measured in milliseconds. Must stay long
+ * enough to cover the phone's hand-off from the NDEF EnterMailbox ack to its
+ * first mailbox write (a couple of seconds). */
+#define APP_NFC_MAILBOX_IDLE_MS 5000
 
 /* Serve the mailbox (FTM) until `idle_timeout_s` of inactivity, holding the
  * ST25DV powered (LPD low) the whole time so the phone's RF field and our I2C
@@ -1154,10 +1161,10 @@ static int mb_enable(void)
  * of messages served, or a negative errno if the mailbox could not be brought
  * up. Entered from the NFC poll thread on an EnterMailbox command (the device
  * acks that over NDEF first), or directly via the `nfc mailbox` shell command. */
-int app_nfc_serve_mailbox(uint32_t idle_timeout_s)
+int app_nfc_serve_mailbox(uint32_t idle_timeout_ms)
 {
-	if (idle_timeout_s == 0) {
-		idle_timeout_s = APP_NFC_MAILBOX_IDLE_S;
+	if (idle_timeout_ms == 0) {
+		idle_timeout_ms = APP_NFC_MAILBOX_IDLE_MS;
 	}
 
 	int ret = nfc_access_begin();
@@ -1173,9 +1180,9 @@ int app_nfc_serve_mailbox(uint32_t idle_timeout_s)
 		return ret;
 	}
 
-	NFC_REPORT("mailbox serving (idle timeout %u s)", idle_timeout_s);
+	NFC_REPORT("mailbox serving (idle timeout %u ms)", idle_timeout_ms);
 
-	int64_t deadline = k_uptime_get() + (int64_t)idle_timeout_s * 1000;
+	int64_t deadline = k_uptime_get() + idle_timeout_ms;
 	uint32_t served = 0;
 
 	while (k_uptime_get() < deadline) {
@@ -1213,8 +1220,18 @@ int app_nfc_serve_mailbox(uint32_t idle_timeout_s)
 			continue;
 		}
 		served++;
-		deadline = k_uptime_get() + (int64_t)idle_timeout_s * 1000;
+		deadline = k_uptime_get() + idle_timeout_ms;
 		NFC_REPORT("mailbox: served %zu B (#%u)", m_resp_len, served);
+
+		/* A mailbox command asked for a deferred action (settings save / reboot /
+		 * factory reset / alarm-rules save). Hand it to the poll thread the same
+		 * way the NDEF path does, give the phone a moment to read the ack we just
+		 * wrote, then leave mailbox mode so the action can run. */
+		if (action != APP_CMD_ACTION_NONE) {
+			m_cmd_action = action;
+			k_msleep(300);
+			break;
+		}
 	}
 
 	uint8_t off = 0;
@@ -1227,7 +1244,7 @@ int app_nfc_serve_mailbox(uint32_t idle_timeout_s)
 #if defined(CONFIG_SHELL)
 
 /* Shell wrapper around app_nfc_serve_mailbox(): serve with the given idle
- * timeout (default 30 s, 0 = default). */
+ * timeout in seconds (0 = firmware default). */
 static int cmd_nfc_mailbox(const struct shell *sh, size_t argc, char **argv)
 {
 	uint32_t seconds = (argc >= 2) ? (uint32_t)strtoul(argv[1], NULL, 0) : 30;
@@ -1235,7 +1252,7 @@ static int cmd_nfc_mailbox(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "seconds must be 0..300");
 		return -EINVAL;
 	}
-	int ret = app_nfc_serve_mailbox(seconds);
+	int ret = app_nfc_serve_mailbox(seconds * 1000);
 	if (ret < 0) {
 		shell_error(sh, "mailbox failed: %d", ret);
 		return ret;

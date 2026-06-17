@@ -52,7 +52,7 @@ bool app_nfc_periodic_enabled(void);
  * RF and our I2C reach it at once. Runs commands off the mailbox and returns the
  * number served (or a negative errno). Called from the poll thread when an
  * EnterMailbox command is taken via app_nfc_take_cmd_action(). */
-int app_nfc_serve_mailbox(uint32_t idle_timeout_s);
+int app_nfc_serve_mailbox(uint32_t idle_timeout_ms);
 
 #ifdef __cplusplus
 }
