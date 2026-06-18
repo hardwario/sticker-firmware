@@ -11,5 +11,8 @@
 	zephyr,user {
 		pir-si-gpios = <&gpioa 11 GPIO_ACTIVE_HIGH>;
 		pir-dl-gpios = <&gpiob 4 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		/* ST25DV GPO interrupt output (U11 pin 11 -> STM32 PB12, EXTI12),
+		 * handled in app_nfc.c to wake the NFC handler on RF events. */
+		nfc-gpo-gpios = <&gpiob 12 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
 	};
 };

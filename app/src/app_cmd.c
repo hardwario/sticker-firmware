@@ -624,6 +624,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		*action = APP_CMD_ACTION_ENTER_CALIBRATION;
 		resp->which_body = Response_ack_tag;
 		break;
+	case Command_enter_mailbox_tag:
+		*action = APP_CMD_ACTION_ENTER_MAILBOX;
+		resp->which_body = Response_ack_tag;
+		break;
+	case Command_exit_mailbox_tag:
+		*action = APP_CMD_ACTION_LEAVE_MAILBOX;
+		resp->which_body = Response_ack_tag;
+		break;
 	default:
 		LOG_WRN("Command tag %u not implemented", cmd->which_body);
 		make_error(resp, Response_Error_Code_UNKNOWN, "not implemented");

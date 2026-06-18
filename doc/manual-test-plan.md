@@ -1216,6 +1216,24 @@ rejected with `error` `BAD_REQUEST` "bad epoch".
 
 - [ ] Pass
 
+### N6 — Mailbox (Fast-Transfer-Mode) command channel (#148)
+
+**Goal:** A phone can switch the device into the ST25DV mailbox and run commands over it in a single
+RF hold — high-throughput config streaming.
+**Observable:** `enter_mailbox` writes an `ack` over NDEF, then RTT shows the device serving the
+mailbox; a `get_info`/`set_param` sent over the mailbox round-trips while the field stays on;
+`exit_mailbox` (or the idle timeout) returns the device to the low-power NDEF poll. The GPO interrupt
+wakes the poll thread on a tap and the device idles (low power) otherwise.
+
+**Prompt for Claude (needs the Manager-App phone — not bench/J-Link testable):**
+> With the Manager-App: present `enter_mailbox` over the (encrypted) NDEF channel, confirm the `ack`
+> is read back, then stream a `get_info` and a `set_param` over the mailbox in the same hold and
+> confirm both round-trip. Send `exit_mailbox` and confirm the device returns to the NDEF poll. Verify
+> the mailbox frames are encrypted (default build) and that a SetParam streamed over the mailbox
+> persists like the NDEF path. Confirm the device sleeps between taps (GPO-driven wake). Report results.
+
+- [ ] Pass
+
 ---
 
 ## Payload formatter (`ttn.js`)
