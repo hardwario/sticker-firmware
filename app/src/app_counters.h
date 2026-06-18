@@ -18,8 +18,16 @@ extern "C" {
  *
  * The live counters live in RAM (app_hall / app_input). This module mirrors
  * them to NVS (storage partition, Settings API) so a reset, FUOTA, battery swap
- * or brownout does not silently zero a metering total. Guarantee: the worst-case
- * lost-pulse window is one interval_report (the save cadence); see app_report.
+ * or brownout does not silently zero a metering total.
+ *
+ * Save cadence (all independent of the LoRaWAN join state, so counters persist
+ * even on a device that never joins):
+ *   - interval_sample > 0: backed up on every sensor sample (app_sensor), so the
+ *     worst-case lost-pulse window is one interval_sample — typically far tighter
+ *     than the report/send cadence (e.g. back up every 5 min, send every 60 min).
+ *   - interval_sample == 0: backed up at the report cadence (app_report), so the
+ *     worst-case window is one interval_report.
+ * Both paths are dirty-flagged (no flash write when nothing changed).
  */
 
 /* Register the settings handler, load the persisted totals and seed them back

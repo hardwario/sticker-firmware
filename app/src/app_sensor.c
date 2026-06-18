@@ -8,6 +8,7 @@
 #include "app_alarm.h"
 #include "app_battery.h"
 #include "app_config.h"
+#include "app_counters.h"
 #include "app_ds18b20.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -66,6 +67,15 @@ static struct k_work_q m_sensor_work_q;
 static void sensor_work_handler(struct k_work *work)
 {
 	app_sensor_sample();
+
+	/* Back up the pulse totalizers at the sample cadence (interval_sample),
+	 * which is typically far tighter than the report/send cadence. This timer
+	 * is armed at boot and runs independently of the LoRaWAN join state, so
+	 * counters persist even on a device that never joins. Dirty-flagged, so a
+	 * no-op when nothing changed (no flash wear). When interval_sample == 0
+	 * this handler does not run; app_report saves at the report cadence
+	 * instead (see app_report.c). */
+	(void)app_counters_save(false);
 }
 
 static K_WORK_DEFINE(m_sensor_work, sensor_work_handler);

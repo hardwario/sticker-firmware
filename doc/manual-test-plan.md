@@ -1040,6 +1040,26 @@ each edge sent immediately as its own one-event fPort 3 frame, fPort 2 not rate-
 
 - [ ] Pass
 
+### C9 — Counter persistence across power loss (#49)
+
+**Goal:** Hall/input pulse totalizers survive a reboot/power loss, are backed up at the
+`interval_sample` cadence, and do so independently of the LoRaWAN join state.
+**Observable:** After a reboot **without** `settings save`, the counters resume from their last
+periodically-saved value (not zero).
+
+**Prompt for Claude:**
+> Enable a hall (or input) counter. Set `interval-sample` short (e.g. 30 s) and `interval-report`
+> long (e.g. 900 s), then `settings save`. Note the baseline counts. Ask me to generate some pulses,
+> then read the new RAM counts. Wait one `interval_sample` for the periodic backup, then reboot the
+> device **without** `settings save` (`ats device reset`) to simulate a power loss. Confirm the
+> counts persisted (≈ the pre-reboot value, not reset to ~1) — this proves the backup ran at the
+> sample cadence, decoupled from the long report interval. On a device with DevEUI all-zero
+> (LoRaWAN disabled) this also proves join-independence. Then `ats sensors reset`, wait one
+> `interval_sample`, reboot without save again, and confirm the zeroed value persisted (the dirty
+> flag handles decrements too). Restore `interval-sample`/`interval-report` at the end.
+
+- [ ] Pass
+
 ---
 
 ## Clock / RTC

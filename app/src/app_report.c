@@ -118,8 +118,12 @@ int app_report_init(void)
 	k_work_init(&m_report_work, report_work_handler);
 	k_timer_init(&m_report_timer, report_timer_handler, NULL);
 
-	/* Cadence is not started here — it begins on the first link-ready kick from
-	 * app_lrw (join success), then re-arms itself each cycle. */
+	/* Arm the cadence at boot so the counter backup (report_work_handler runs
+	 * app_counters_save before the link gate) fires even on a device that never
+	 * joins — the worst-case lost-pulse window is interval_report regardless of
+	 * the link state. Reporting itself still self-skips at the link gate until
+	 * joined; app_lrw's ready kick re-arms with an immediate report on join. */
+	schedule_next_report();
 	app_lrw_register_ready_cb(report_kick);
 
 	return 0;
