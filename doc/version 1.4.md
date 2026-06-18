@@ -454,6 +454,15 @@ A phone's Web NFC reader sees each as `record.recordType === "hio.stck:…"`.
 - The keys are flagged `dump_nfc_only`: the dump path emits them only when the transport is NFC. A `get_config`/`get_param` arriving as a **LoRaWAN downlink never selects the key tags**, so they can never leave in an uplink — important because the fPort-85 payload is plain protobuf (the LoRaWAN MAC layer would expose the keys to the network server). The DevEUI/JoinEUI/DevAddr identifiers remain readable over both transports as before.
 - **`secret_key` itself is never readable** on any transport (it is the master key for the whole NFC channel).
 
+**Provisioning while powered off (boot-staged config).** Because the ST25DV is powered by the phone's RF field, a STICKER can be configured **while it is unpowered** — on the shelf, before first power-on, or with the battery removed. A phone (Manager-App) writes a config record (`hio.stck:cfg`) or a command record (`hio.stck:cmd`, e.g. `set_param … save=true`) into the tag's user EEPROM over RF; the write lands and persists with no MCU power. On the **next boot** the firmware applies it:
+
+- The boot sequence runs a synchronous NFC check (`app_nfc_check()` in `main.c`) **early — before the LED boot carousel and before the LoRaWAN stack starts** — so a staged config (including LoRaWAN keys) takes effect *before the first join attempt*, not one poll cycle later.
+- A staged config is decrypted and **nonce-checked** (same anti-replay as the runtime channel: `nonce_counter` must be strictly greater than the last accepted, then it is persisted), applied through the same config-ingest path, persisted (`settings_save`, which reboots), and the staged record is **cleared** (the plaintext info record is restored) so it is not re-applied on the following boot.
+- A **stale or replayed** record left on the tag is rejected by the nonce check on every boot; the firmware logs it and **continues booting** (it never bricks into a reboot loop).
+- The yellow NFC LED carousel blinks when a staged config is applied, as operator feedback.
+- If the device is already running when the tag is written, the same record is picked up by the normal low-power poll instead (on the GPO interrupt, or within the ~30 s fallback).
+
+Notes: the payload budget is the same ~400–450 B as the runtime config channel; `secret_key` is **not** applied via a config record (the ingest ignores it — key provisioning is handled separately); and the phone must supply the correct `nonce_counter` (it is not exposed in the plaintext info record today). HW feasibility — RF read/write with the MCU fully unpowered, and auto-apply on the next boot — is confirmed on hardware (see #147); an end-to-end pass of the **encrypted** boot-staging path is still pending.
 ---
 
 ## Debug auto-suspend / deep sleep (NEW)
