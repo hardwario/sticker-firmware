@@ -165,9 +165,25 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 		dst->has_joineui = true;
 		memcpy(dst->joineui, c->lrw_joineui, sizeof(c->lrw_joineui));
 	}
+	if (requested(ids, n, 7)) {
+		dst->has_nwkkey = true;
+		memcpy(dst->nwkkey, c->lrw_nwkkey, sizeof(c->lrw_nwkkey));
+	}
+	if (requested(ids, n, 8)) {
+		dst->has_appkey = true;
+		memcpy(dst->appkey, c->lrw_appkey, sizeof(c->lrw_appkey));
+	}
 	if (requested(ids, n, 9)) {
 		dst->has_devaddr = true;
 		memcpy(dst->devaddr, c->lrw_devaddr, sizeof(c->lrw_devaddr));
+	}
+	if (requested(ids, n, 10)) {
+		dst->has_nwkskey = true;
+		memcpy(dst->nwkskey, c->lrw_nwkskey, sizeof(c->lrw_nwkskey));
+	}
+	if (requested(ids, n, 11)) {
+		dst->has_appskey = true;
+		memcpy(dst->appskey, c->lrw_appskey, sizeof(c->lrw_appskey));
 	}
 	if (requested(ids, n, 12)) {
 		dst->has_sub_band = true;

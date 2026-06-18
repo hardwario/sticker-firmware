@@ -105,7 +105,7 @@ void {{ g.fill_fn }}({{ g.c_message }} *dst, const uint32_t *ids, size_t n)
 {
 	const struct {{ module.name }} *c = {{ module.name }}();
 
-{% for p in g.params if p.dump and not p.callback %}
+{% for p in g.params if (p.dump or p.dump_nfc_only) and not p.callback %}
 {% if p.kind == 'bytes' %}
 	if (requested(ids, n, {{ p.tag }})) {
 		dst->has_{{ p.proto_name }} = true;

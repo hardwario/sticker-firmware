@@ -207,34 +207,37 @@ static const struct {
 	uint8_t section;
 	uint8_t tag;
 	uint8_t size;
+	bool nfc_only; /* only dumped over NFC (e.g. LoRaWAN keys) — never over LoRaWAN */
 } DUMP_FIELDS[] = {
 	// BEGIN GENERATED DUMP_FIELDS
-	{DUMP_SECTION_LORAWAN, 1, 2},      {DUMP_SECTION_LORAWAN, 12, 2},
-	{DUMP_SECTION_LORAWAN, 2, 2},      {DUMP_SECTION_LORAWAN, 3, 2},
-	{DUMP_SECTION_LORAWAN, 4, 2},      {DUMP_SECTION_LORAWAN, 5, 18},
-	{DUMP_SECTION_LORAWAN, 6, 18},     {DUMP_SECTION_LORAWAN, 9, 10},
-	{DUMP_SECTION_LORAWAN, 13, 3},     {DUMP_SECTION_LORAWAN, 14, 3},
-	{DUMP_SECTION_APPLICATION, 1, 2},  {DUMP_SECTION_APPLICATION, 2, 3},
-	{DUMP_SECTION_APPLICATION, 4, 4},  {DUMP_SECTION_APPLICATION, 49, 3},
-	{DUMP_SECTION_APPLICATION, 50, 7}, {DUMP_SECTION_SENSORS, 40, 3},
-	{DUMP_SECTION_SENSORS, 41, 3},     {DUMP_SECTION_SENSORS, 42, 3},
-	{DUMP_SECTION_SENSORS, 43, 3},     {DUMP_SECTION_SENSORS, 44, 3},
-	{DUMP_SECTION_SENSORS, 45, 3},     {DUMP_SECTION_SENSORS, 46, 3},
-	{DUMP_SECTION_SENSORS, 60, 3},     {DUMP_SECTION_SENSORS, 55, 3},
-	{DUMP_SECTION_SENSORS, 54, 3},     {DUMP_SECTION_SENSORS, 56, 19},
-	{DUMP_SECTION_SENSORS, 57, 19},    {DUMP_SECTION_SENSORS, 58, 19},
-	{DUMP_SECTION_SENSORS, 59, 19},    {DUMP_SECTION_ALARMS, 51, 4},
-	{DUMP_SECTION_ALARMS, 52, 3},      {DUMP_SECTION_ALARMS, 25, 3},
-	{DUMP_SECTION_ALARMS, 28, 3},      {DUMP_SECTION_ALARMS, 31, 3},
-	{DUMP_SECTION_ALARMS, 34, 3},      {DUMP_SECTION_ALARMS, 54, 37},
-	{DUMP_SECTION_ALARMS, 55, 37},     {DUMP_SECTION_ALARMS, 56, 37},
-	{DUMP_SECTION_ALARMS, 57, 37},     {DUMP_SECTION_ALARMS, 58, 37},
-	{DUMP_SECTION_ALARMS, 59, 37},     {DUMP_SECTION_ALARMS, 60, 37},
-	{DUMP_SECTION_ALARMS, 61, 37},     {DUMP_SECTION_ALARMS, 62, 37},
-	{DUMP_SECTION_ALARMS, 63, 37},     {DUMP_SECTION_ALARMS, 64, 37},
-	{DUMP_SECTION_ALARMS, 65, 37},     {DUMP_SECTION_ALARMS, 66, 37},
-	{DUMP_SECTION_ALARMS, 67, 37},     {DUMP_SECTION_ALARMS, 68, 37},
-	{DUMP_SECTION_ALARMS, 69, 37},
+	{DUMP_SECTION_LORAWAN, 1, 2, false},      {DUMP_SECTION_LORAWAN, 12, 2, false},
+	{DUMP_SECTION_LORAWAN, 2, 2, false},      {DUMP_SECTION_LORAWAN, 3, 2, false},
+	{DUMP_SECTION_LORAWAN, 4, 2, false},      {DUMP_SECTION_LORAWAN, 5, 18, false},
+	{DUMP_SECTION_LORAWAN, 6, 18, false},     {DUMP_SECTION_LORAWAN, 7, 34, true},
+	{DUMP_SECTION_LORAWAN, 8, 34, true},      {DUMP_SECTION_LORAWAN, 9, 10, false},
+	{DUMP_SECTION_LORAWAN, 10, 34, true},     {DUMP_SECTION_LORAWAN, 11, 34, true},
+	{DUMP_SECTION_LORAWAN, 13, 3, false},     {DUMP_SECTION_LORAWAN, 14, 3, false},
+	{DUMP_SECTION_APPLICATION, 1, 2, false},  {DUMP_SECTION_APPLICATION, 2, 3, false},
+	{DUMP_SECTION_APPLICATION, 4, 4, false},  {DUMP_SECTION_APPLICATION, 49, 3, false},
+	{DUMP_SECTION_APPLICATION, 50, 7, false}, {DUMP_SECTION_SENSORS, 40, 3, false},
+	{DUMP_SECTION_SENSORS, 41, 3, false},     {DUMP_SECTION_SENSORS, 42, 3, false},
+	{DUMP_SECTION_SENSORS, 43, 3, false},     {DUMP_SECTION_SENSORS, 44, 3, false},
+	{DUMP_SECTION_SENSORS, 45, 3, false},     {DUMP_SECTION_SENSORS, 46, 3, false},
+	{DUMP_SECTION_SENSORS, 60, 3, false},     {DUMP_SECTION_SENSORS, 55, 3, false},
+	{DUMP_SECTION_SENSORS, 54, 3, false},     {DUMP_SECTION_SENSORS, 56, 19, false},
+	{DUMP_SECTION_SENSORS, 57, 19, false},    {DUMP_SECTION_SENSORS, 58, 19, false},
+	{DUMP_SECTION_SENSORS, 59, 19, false},    {DUMP_SECTION_ALARMS, 51, 4, false},
+	{DUMP_SECTION_ALARMS, 52, 3, false},      {DUMP_SECTION_ALARMS, 25, 3, false},
+	{DUMP_SECTION_ALARMS, 28, 3, false},      {DUMP_SECTION_ALARMS, 31, 3, false},
+	{DUMP_SECTION_ALARMS, 34, 3, false},      {DUMP_SECTION_ALARMS, 54, 37, false},
+	{DUMP_SECTION_ALARMS, 55, 37, false},     {DUMP_SECTION_ALARMS, 56, 37, false},
+	{DUMP_SECTION_ALARMS, 57, 37, false},     {DUMP_SECTION_ALARMS, 58, 37, false},
+	{DUMP_SECTION_ALARMS, 59, 37, false},     {DUMP_SECTION_ALARMS, 60, 37, false},
+	{DUMP_SECTION_ALARMS, 61, 37, false},     {DUMP_SECTION_ALARMS, 62, 37, false},
+	{DUMP_SECTION_ALARMS, 63, 37, false},     {DUMP_SECTION_ALARMS, 64, 37, false},
+	{DUMP_SECTION_ALARMS, 65, 37, false},     {DUMP_SECTION_ALARMS, 66, 37, false},
+	{DUMP_SECTION_ALARMS, 67, 37, false},     {DUMP_SECTION_ALARMS, 68, 37, false},
+	{DUMP_SECTION_ALARMS, 69, 37, false},
 	// END GENERATED DUMP_FIELDS
 };
 
@@ -249,10 +252,14 @@ static const struct {
 static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
-	ARG_UNUSED(tp);
 	ARG_UNUSED(action);
 	const Command_GetConfig *gc = &cmd->body.get_config;
 	uint32_t page = gc->has_page ? gc->page : 0;
+	/* NFC-only fields (LoRaWAN keys) are read-back exclusively over the encrypted
+	 * NFC channel; never include them in a LoRaWAN response (the fPort-85 payload
+	 * is plain protobuf — the network server would see the keys). They are skipped
+	 * for paging too, so page layout is consistent within a transport. */
+	const bool allow_nfc_only = (tp == APP_CMD_TRANSPORT_NFC);
 
 	/* One tag buffer per section, each sized to the whole table so any single
 	 * section can hold all of a page's tags without overflow. */
@@ -263,6 +270,9 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 	 * the requested page's tags per section, and learn the total page count. */
 	uint32_t cur_page = 0, used = 0;
 	for (size_t i = 0; i < ARRAY_SIZE(DUMP_FIELDS); i++) {
+		if (DUMP_FIELDS[i].nfc_only && !allow_nfc_only) {
+			continue;
+		}
 		if (used > 0 && used + DUMP_FIELDS[i].size > DUMP_PAGE_BUDGET) {
 			cur_page++;
 			used = 0;
@@ -312,11 +322,12 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 /* Encoded-size bound for a (section, tag) from DUMP_FIELDS. Returns false for a
  * field that isn't dumpable (secret / unknown id): such ids never appear in the
  * response (app_config_fill_<group>() skips them) so they take no page budget. */
-static bool dump_field_size(uint8_t section, uint32_t tag, uint8_t *size)
+static bool dump_field_size(uint8_t section, uint32_t tag, uint8_t *size, bool *nfc_only)
 {
 	for (size_t i = 0; i < ARRAY_SIZE(DUMP_FIELDS); i++) {
 		if (DUMP_FIELDS[i].section == section && DUMP_FIELDS[i].tag == tag) {
 			*size = DUMP_FIELDS[i].size;
+			*nfc_only = DUMP_FIELDS[i].nfc_only;
 			return true;
 		}
 	}
@@ -326,10 +337,12 @@ static bool dump_field_size(uint8_t section, uint32_t tag, uint8_t *size)
 static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				     enum app_cmd_action *action)
 {
-	ARG_UNUSED(tp);
 	ARG_UNUSED(action);
 	const Command_GetParam *gp = &cmd->body.get_param;
 	uint32_t page = gp->has_page ? gp->page : 0;
+	/* NFC-only fields (LoRaWAN keys) are returned over the encrypted NFC channel
+	 * only — never in a LoRaWAN response (see get_config). */
+	const bool allow_nfc_only = (tp == APP_CMD_TRANSPORT_NFC);
 
 	/* Requested ids per section, in ConfigDump section order. DUMP_SECTION_*
 	 * equals the index here (0..3). */
@@ -352,8 +365,12 @@ static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *c
 	for (uint8_t s = 0; s < 4; s++) {
 		for (size_t j = 0; j < req_n[s]; j++) {
 			uint8_t sz;
-			if (!dump_field_size(s, req_ids[s][j], &sz)) {
+			bool nfc_only;
+			if (!dump_field_size(s, req_ids[s][j], &sz, &nfc_only)) {
 				continue; /* secret/unknown → not dumpable */
+			}
+			if (nfc_only && !allow_nfc_only) {
+				continue; /* keys: NFC transport only */
 			}
 			if (used > 0 && used + sz > DUMP_PAGE_BUDGET) {
 				cur_page++;

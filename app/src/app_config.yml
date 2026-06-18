@@ -292,6 +292,7 @@ parameters:
     proto_group: lorawan
     proto_id: 7
     dump: false
+    dump_nfc_only: true
     type: bytes
     size: 16
     preserve_on_reset: true
@@ -301,6 +302,7 @@ parameters:
     proto_group: lorawan
     proto_id: 8
     dump: false
+    dump_nfc_only: true
     type: bytes
     size: 16
     preserve_on_reset: true
@@ -318,6 +320,7 @@ parameters:
     proto_group: lorawan
     proto_id: 10
     dump: false
+    dump_nfc_only: true
     type: bytes
     size: 16
     preserve_on_reset: true
@@ -327,6 +330,7 @@ parameters:
     proto_group: lorawan
     proto_id: 11
     dump: false
+    dump_nfc_only: true
     type: bytes
     size: 16
     preserve_on_reset: true
