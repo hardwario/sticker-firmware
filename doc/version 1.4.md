@@ -44,6 +44,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `enter_calibration` | Persist `calibration=true` + **reboot** into calibration mode (same end state as `set_param calibration=true` + `settings_save`); the flag is cleared on entry, so the device returns to normal after the calibration window | `ack` |
 | `enter_mailbox` | **NFC only.** Switch into mailbox (ST25DV Fast-Transfer-Mode) serving mode for a bounded window — high-throughput config streaming / firmware update. `ack` is written over NDEF first, then the device serves the mailbox until the phone goes quiet (or `timeout_s` elapses) and returns to the low-power NDEF poll. See §10 | `ack` |
 | `exit_mailbox` | **NFC only.** End mailbox serving immediately (sent as the last mailbox message when the phone is done streaming) so the device drops straight back to the low-power NDEF poll | `ack` |
+| `enter_standby` | **NFC only.** Enter an off-like standby (STM32WL Stop2): no uplinks/join, no sampling, LEDs off, lowest practical power that an NFC tap can still wake. `ack` is written over NDEF first, then the device sleeps; a phone tap (or NRST / power-cycle) wakes it and it cold-reboots into normal operation. RAM-only. See §10 | `ack` |
 
 > After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED), an optional `fault_field`, and a `detail` string.
 >
@@ -447,6 +448,13 @@ A phone's Web NFC reader sees each as `record.recordType === "hio.stck:…"`.
 **Power.** The poll thread sleeps on the ST25DV **GPO interrupt** (wired to the STM32, EXTI) and only wakes to read the tag when RF activity occurs — so an untouched tag costs almost nothing and the CPU stays asleep when no phone is present. A periodic fallback timer (30 s) is a safety net in case an edge is missed; each wake still does the cheap gated check (one `IT_STS_Dyn` byte; full read + NDEF parse only on RF activity).
 
 **Robustness.** The command/response round-trip hardens the ST25DV write path (RF_WRITE_EN enable timing after present-password, an "unrecognized data" debounce so a poll that catches a half-written record doesn't clobber it, and an always-read poll). The earlier *auto-restore of the info record over a just-written response* was dropped — it raced with the phone reading the reply (#144).
+
+**Standby, wake on tap (`enter_standby`, #156).** The `enter_standby` command puts the device into a user-initiated, off-like state and arms an NFC tap as the wake source:
+
+- On `enter_standby` (NFC only), the firmware writes the `ack` over NDEF, tears down the radio / sensors / LEDs, and enters **STM32WL Stop2**. A subsequent NFC field (a phone tap) wakes the MCU and it **cold-reboots into normal operation**.
+- **Why Stop2 and not Shutdown:** the ST25DV GPO is wired to an STM32 **EXTI** pin (PB12), not a **WKUP** pin. An EXTI line can wake the MCU from Stop2 but not from the deeper Shutdown used by the debug auto-suspend below — so standby uses Stop2 (RAM retained, low µA), the lowest-power state an NFC tap can still wake on the current board.
+- To make a tap wake the MCU, the GPO is configured to pulse on any **RF field change** (`GPO_EN | FIELD_CHANGE_EN`), and the tag is left powered (LPD low) so it keeps sensing the field while the MCU sleeps.
+- **RAM-only:** standby does not persist across a reset — a power-cycle / NRST also exits it (no NVS flag, so a device can never get "stuck" in standby). If the wake source cannot be armed, the command aborts back to normal operation rather than entering an unwakeable sleep.
 
 ---
 

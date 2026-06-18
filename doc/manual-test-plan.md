@@ -1234,6 +1234,26 @@ wakes the poll thread on a tap and the device idles (low power) otherwise.
 
 - [ ] Pass
 
+### N7 — NFC standby, wake on tap (`enter_standby`, #156)
+
+**Goal:** An NFC `enter_standby` command puts the device into an off-like Stop2 state, and a later
+phone tap wakes it back into normal operation.
+**Observable:** After `enter_standby` the device goes dark (no LEDs, no uplinks); current drops to
+the Stop2 range. A phone tap wakes it and it cold-reboots (boot banner, normal operation). A
+power-cycle / NRST also exits standby.
+
+**Prompt for Claude (needs the Manager-App phone + a current meter for the power check — not fully bench/J-Link testable):**
+> Send an (encrypted) `enter_standby` over NFC and confirm the `ack` is read back, then the device
+> goes dark (LEDs off, no further uplinks/log). Confirm the supply current falls to the Stop2 range
+> (µA, with a meter). Tap the phone again and confirm the device wakes and cold-reboots into normal
+> operation (boot banner, telemetry resumes). Repeat the wake with NRST / power-cycle to confirm
+> standby is RAM-only. **Key HW bring-up checks:** (1) the ST25DV GPO actually pulses PB12/EXTI on a
+> field change so Stop2 wakes; (2) the device is not woken immediately by the still-present field
+> right after entering standby; (3) the IWDG (if running) does not reset the device during the Stop2
+> dwell before a tap. Report results.
+
+- [ ] Pass
+
 ---
 
 ## Payload formatter (`ttn.js`)
