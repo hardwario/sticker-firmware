@@ -161,6 +161,34 @@ ZTEST(cmd, test_get_param_paging)
 		      r.body.error.code);
 }
 
+/* The LoRaWAN crypto keys are read-back over NFC only — never over LoRaWAN
+ * (the fPort-85 payload is plain protobuf). A get_param requesting nwkkey (tag 7)
+ * must dump it over NFC and omit it over LoRaWAN. (#162) */
+ZTEST(cmd, test_get_param_keys_nfc_only)
+{
+	Response r;
+
+	reset_cfg();
+	g_app_config.lrw_nwkkey[0] = 0xAB;
+	g_app_config.lrw_nwkkey[15] = 0xCD;
+
+	/* seq3 get_param{ lorawan_field=[7 nwkkey] } */
+	const char *cmd = "08031a030a0107";
+
+	/* NFC: key is dumped. */
+	handle_via(APP_CMD_TRANSPORT_NFC, cmd, &r);
+	zassert_equal(r.which_body, Response_config_dump_tag, "NFC which=%d", r.which_body);
+	zassert_true(r.body.config_dump.has_lorawan, "NFC: lorawan section missing");
+	zassert_true(r.body.config_dump.lorawan.has_nwkkey, "NFC: nwkkey not dumped");
+	zassert_equal(r.body.config_dump.lorawan.nwkkey[0], 0xAB, "NFC: nwkkey[0]");
+	zassert_equal(r.body.config_dump.lorawan.nwkkey[15], 0xCD, "NFC: nwkkey[15]");
+
+	/* LoRaWAN: key must NOT be dumped (omitted entirely → empty lorawan section). */
+	handle_via(APP_CMD_TRANSPORT_LRW, cmd, &r);
+	zassert_equal(r.which_body, Response_config_dump_tag, "LRW which=%d", r.which_body);
+	zassert_false(r.body.config_dump.lorawan.has_nwkkey, "LRW: nwkkey leaked over LoRaWAN!");
+}
+
 ZTEST(cmd, test_build_info)
 {
 	uint8_t out[128];

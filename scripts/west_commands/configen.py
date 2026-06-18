@@ -569,6 +569,7 @@ def build_ingest_model(config):
                 "proto_name": _proto_field_name(p, g),
                 "tag": p["proto_id"],
                 "dump": p.get("dump", True),
+                "dump_nfc_only": bool(p.get("dump_nfc_only")),
                 "callback": bool(p.get("proto_callback")),
             }
             if t == "bool":
@@ -783,16 +784,23 @@ def _dump_field_size(p):
 def build_dump_fields_model(config):
     """Rows for the get_config DUMP_FIELDS[] table: every dumpable parameter
     (proto_group in a ConfigDump section and not `dump: false`), grouped by
-    section in DUMP_SECTION order, YAML declaration order within a section."""
+    section in DUMP_SECTION order, YAML declaration order within a section.
+
+    A `dump_nfc_only: true` field is included with nfc_only=1; the handler only
+    selects it when the transport is NFC, so it never enters a LoRaWAN response
+    (e.g. the LoRaWAN crypto keys — readable over the encrypted NFC channel only).
+    A plain `dump: false` field stays excluded from every transport."""
     rows = []
     for section in DUMP_SECTIONS:
         macro = "DUMP_SECTION_" + section.upper()
         for p in config["parameters"]:
             if p.get("proto_group") != section or "proto_id" not in p:
                 continue
-            if p.get("dump") is False:
+            nfc_only = bool(p.get("dump_nfc_only"))
+            if p.get("dump") is False and not nfc_only:
                 continue
-            rows.append({"section": macro, "tag": p["proto_id"], "size": _dump_field_size(p)})
+            rows.append({"section": macro, "tag": p["proto_id"],
+                         "size": _dump_field_size(p), "nfc_only": nfc_only})
     return {"dump_fields": rows}
 
 
