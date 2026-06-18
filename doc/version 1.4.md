@@ -42,6 +42,8 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `lrw_reset` | Reset the LoRaWAN NVM — frame counters + `DevNonce` + session (same as `ats lrw reset`); **reboots** so the MAC re-initialises clean | `ack` |
 | `lrw_join` | Trigger a forced (re)join immediately instead of waiting for the next scheduled attempt; **no reboot** | `ack` |
 | `enter_calibration` | Persist `calibration=true` + **reboot** into calibration mode (same end state as `set_param calibration=true` + `settings_save`); the flag is cleared on entry, so the device returns to normal after the calibration window | `ack` |
+| `enter_mailbox` | **NFC only.** Switch into mailbox (ST25DV Fast-Transfer-Mode) serving mode for a bounded window — high-throughput config streaming / firmware update. `ack` is written over NDEF first, then the device serves the mailbox until the phone goes quiet (or `timeout_s` elapses) and returns to the low-power NDEF poll. See §10 | `ack` |
+| `exit_mailbox` | **NFC only.** End mailbox serving immediately (sent as the last mailbox message when the phone is done streaming) so the device drops straight back to the low-power NDEF poll | `ack` |
 
 > After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED), an optional `fault_field`, and a `detail` string.
 >
@@ -421,7 +423,7 @@ The protobuf field numbers are **unchanged**, so the over-the-air wire format st
 
 The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel — for reading the sticker's identity and for the same command protocol available over LoRaWAN, without a network connection.
 
-**Identity record (always present).** When idle, the firmware keeps a small plaintext **info record** on the tag, so a phone learns the sticker identity and config-schema version the moment it taps — no decryption, no app required. Payload (11 bytes): format version, serial number, firmware version, build type, config-schema version, debug flag. The record is self-healing: it is restored whenever the tag is empty or after a written config/command has been consumed, and it is **not** rewritten while it is already present (no needless EEPROM wear).
+**Identity record (always present).** When idle, the firmware keeps a small plaintext **info record** on the tag, so a phone learns the sticker identity and config-schema version the moment it taps — no decryption, no app required. Payload (11 bytes): format version, serial number, firmware version, build type, config-schema version, debug flag. The record is self-healing: it is laid down whenever the tag is empty, and it is **not** rewritten while it is already present (no needless EEPROM wear). It is **not** auto-restored over a freshly written command response — that races with the phone reading the reply (#144); the response stays until the next tap.
 
 **Command/response over NFC.** A phone can drive the **same commands as over LoRaWAN** (`get_info`, `set_param`, `get_config`, `reboot`, …; see §1) by writing a command record to the tag. The firmware processes it with the transport-agnostic command engine and replaces it with a **response record** for the phone to read back. Deferred actions (reboot / save / factory-reset) run *after* the response is written, so the phone always reads the acknowledgement first. **Config provisioning** over NFC is applied through the same path.
 
@@ -440,7 +442,11 @@ The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel �
 
 A phone's Web NFC reader sees each as `record.recordType === "hio.stck:…"`.
 
-**Power.** The periodic check is gated on the tag's `IT_STS_Dyn` register — the firmware reads a single byte each cycle and only performs the full read + NDEF parse when RF activity occurred since the last poll, so an untouched tag costs almost nothing.
+**Mailbox (fast transfer).** For high-throughput exchanges (config streaming, and later firmware update) the device can switch to the ST25DV **mailbox** (Fast-Transfer-Mode, a dual-port RAM that works while the RF field stays on — no field-off gaps). The phone sends an **`enter_mailbox`** command over the normal NDEF channel; the device acks over NDEF, then serves the mailbox in a single hold until the phone goes quiet or a bounded `timeout_s` elapses, then drops back to the low-power NDEF poll. **`exit_mailbox`** ends serving immediately. A `set_param` written over the mailbox queues its save exactly like the NDEF path. The mailbox carries the **same encrypted command frames** as the NDEF channel — encryption is not bypassed.
+
+**Power.** The poll thread sleeps on the ST25DV **GPO interrupt** (wired to the STM32, EXTI) and only wakes to read the tag when RF activity occurs — so an untouched tag costs almost nothing and the CPU stays asleep when no phone is present. A periodic fallback timer (30 s) is a safety net in case an edge is missed; each wake still does the cheap gated check (one `IT_STS_Dyn` byte; full read + NDEF parse only on RF activity).
+
+**Robustness.** The command/response round-trip hardens the ST25DV write path (RF_WRITE_EN enable timing after present-password, an "unrecognized data" debounce so a poll that catches a half-written record doesn't clobber it, and an always-read poll). The earlier *auto-restore of the info record over a just-written response* was dropped — it raced with the phone reading the reply (#144).
 
 ---
 
