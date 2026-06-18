@@ -448,6 +448,12 @@ A phone's Web NFC reader sees each as `record.recordType === "hio.stck:…"`.
 
 **Robustness.** The command/response round-trip hardens the ST25DV write path (RF_WRITE_EN enable timing after present-password, an "unrecognized data" debounce so a poll that catches a half-written record doesn't clobber it, and an always-read poll). The earlier *auto-restore of the info record over a just-written response* was dropped — it raced with the phone reading the reply (#144).
 
+**Reading the LoRaWAN keys back (NFC only, #162).** So an operator can verify which keys a device holds, `get_config` / `get_param` now return the LoRaWAN crypto keys (`nwkkey`, `appkey`, `nwkskey`, `appskey`) — but **only over NFC**, never over LoRaWAN:
+
+- The NFC command/config channel is AES-CCM encrypted with the device `secret_key`, so a key read-back is only decryptable by a phone that already holds `secret_key` (the provisioning operator). A device with no `secret_key` knowledge is unreachable over NFC beyond the plaintext info record.
+- The keys are flagged `dump_nfc_only`: the dump path emits them only when the transport is NFC. A `get_config`/`get_param` arriving as a **LoRaWAN downlink never selects the key tags**, so they can never leave in an uplink — important because the fPort-85 payload is plain protobuf (the LoRaWAN MAC layer would expose the keys to the network server). The DevEUI/JoinEUI/DevAddr identifiers remain readable over both transports as before.
+- **`secret_key` itself is never readable** on any transport (it is the master key for the whole NFC channel).
+
 ---
 
 ## Debug auto-suspend / deep sleep (NEW)

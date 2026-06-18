@@ -1060,6 +1060,23 @@ periodically-saved value (not zero).
 
 - [ ] Pass
 
+### C10 — Read LoRaWAN keys back over NFC only (#162)
+
+**Goal:** The LoRaWAN crypto keys (`nwkkey`/`appkey`/`nwkskey`/`appskey`) are readable over the
+encrypted NFC channel but never over LoRaWAN.
+**Observable:** A `GetParam`/`GetConfig` selecting a key returns it when sent over NFC; the same
+request over a LoRaWAN downlink comes back with the key **omitted**. `secret_key` is never returned.
+
+**Prompt for Claude:**
+> Provision known LoRaWAN keys. Over a **LoRaWAN downlink**, send a `GetParam` selecting `nwkkey`
+> (and `appkey`) and confirm the `config_dump` response does **not** contain them (and `GetConfig`
+> never includes them on any page). Then over **NFC** (Manager-App, encrypted) send the same
+> `GetParam` and confirm the keys come back with the provisioned values. Confirm `secret_key` is
+> never returned on either transport. (LRW omission is also covered by the native_sim unit test
+> `test_get_param_keys_nfc_only`; this is the on-air / NFC confirmation.)
+
+- [ ] Pass
+
 ---
 
 ## Clock / RTC
