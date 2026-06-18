@@ -220,6 +220,16 @@ int app_sensor_init(void)
 	/* The accelerometer is a runtime capability: only arm motion + free-fall
 	 * (and read orientation, see app_sensor_sample) when cap-accelerometer is on. */
 	if (g_app_config.cap_accelerometer) {
+		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(lis2dh12));
+
+		/* lis2dh12 is deferred-init: power it up only when the cap is on,
+		 * otherwise it would run ODR_5 low-power sampling permanently. */
+		ret = device_init(dev);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "lis2dh12", ret);
+			res = res ? res : ret;
+		}
+
 		ret = app_accel_init_motion(accel_motion_handler, NULL);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_accel_init_motion", ret);
