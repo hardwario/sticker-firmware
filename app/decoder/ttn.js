@@ -140,6 +140,7 @@ var _CMD_NAMES = {
   18: "enter_calibration",
   19: "enter_mailbox",
   20: "exit_mailbox",
+  21: "enter_standby",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);

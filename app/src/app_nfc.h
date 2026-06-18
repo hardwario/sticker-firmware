@@ -54,6 +54,12 @@ bool app_nfc_periodic_enabled(void);
  * EnterMailbox command is taken via app_nfc_take_cmd_action(). */
 int app_nfc_serve_mailbox(uint32_t idle_timeout_ms);
 
+/* Arm the ST25DV GPO to pulse on RF field changes (a phone tap) so the GPO EXTI
+ * line can wake the MCU from Stop2. On success the tag is left powered (LPD low)
+ * to keep detecting the field while the MCU sleeps. Used by app_power_standby()
+ * (#156). Returns 0 or a negative errno. */
+int app_nfc_arm_field_wake(void);
+
 #ifdef __cplusplus
 }
 #endif

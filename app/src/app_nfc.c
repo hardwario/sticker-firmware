@@ -109,9 +109,14 @@ static const char *cmd_action_str(enum app_cmd_action a)
 /* Static system config (device E1 0x57). Writing it needs an open I2C security
  * session (present password). GPO bit6 RF_WRITE_EN makes RF EEPROM writes show
  * up in IT_STS_Dyn, letting the poll gate on writes specifically. */
-#define ST25DV_GPO_REG         0x0000
-#define ST25DV_GPO_RF_WRITE_EN 0x40
-#define ST25DV_I2C_PWD_REG     0x0900
+#define ST25DV_GPO_REG             0x0000
+#define ST25DV_GPO_RF_WRITE_EN     0x40
+/* GPO bit3 FIELD_CHANGE_EN: pulse the GPO pin whenever the RF field appears or
+ * disappears (i.e. a phone tap), independent of any EEPROM access. bit7 GPO_EN
+ * gates the GPO output entirely. Used to wake the MCU from Stop2 on a tap (#156). */
+#define ST25DV_GPO_FIELD_CHANGE_EN 0x08
+#define ST25DV_GPO_EN              0x80
+#define ST25DV_I2C_PWD_REG         0x0900
 
 /* Mailbox / Fast Transfer Mode (FTM). A 256 B dual-port RAM that the RF and I2C
  * sides exchange messages through *while the RF field is present* (unlike user
@@ -466,6 +471,65 @@ static void nfc_access_end(void)
 	}
 
 	k_mutex_unlock(&m_lock);
+}
+
+/* Arm the ST25DV GPO to pulse on any RF field change (a phone tap), so the GPO
+ * EXTI line can wake the MCU from Stop2 — the NFC-standby wake source (#156).
+ * Sets GPO_EN | FIELD_CHANGE_EN (read-modify-write, preserving RF_WRITE_EN).
+ *
+ * On success the ST25DV is left POWERED (LPD low) so it keeps detecting the RF
+ * field while the MCU sleeps, and the access mutex is released (the caller is
+ * about to enter Stop2 and reboot on wake, so nothing else touches the tag). On
+ * failure LPD is raised and the mutex released as usual. */
+int app_nfc_arm_field_wake(void)
+{
+	static const uint8_t default_pwd[8] = {0};
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		return ret;
+	}
+
+	ret = nfc_present_password(default_pwd);
+	if (ret) {
+		goto fail;
+	}
+	k_msleep(15);
+
+	uint8_t gpo;
+	ret = read_reg(ST25DV_GPO_REG, &gpo, 1);
+	if (ret) {
+		goto fail;
+	}
+
+	uint8_t want = gpo | ST25DV_GPO_EN | ST25DV_GPO_FIELD_CHANGE_EN;
+	if (want != gpo) {
+		ret = write_reg(ST25DV_GPO_REG, &want, 1);
+		if (ret) {
+			goto fail;
+		}
+		k_msleep(ST25DV_TW_MS_PER_PAGE + 5);
+
+		uint8_t check = 0;
+		ret = read_reg(ST25DV_GPO_REG, &check, 1);
+		if (ret) {
+			goto fail;
+		}
+		if ((check & (ST25DV_GPO_EN | ST25DV_GPO_FIELD_CHANGE_EN)) !=
+		    (ST25DV_GPO_EN | ST25DV_GPO_FIELD_CHANGE_EN)) {
+			ret = -EIO;
+			goto fail;
+		}
+	}
+
+	/* Keep the tag powered (LPD low) so it detects the field while we sleep.
+	 * Release the mutex without raising LPD (unlike nfc_access_end). */
+	k_mutex_unlock(&m_lock);
+	return 0;
+
+fail:
+	nfc_access_end();
+	return ret;
 }
 
 /* Build CC + NDEF Message TLV + a single short NFC-Forum-external-type record +

@@ -41,6 +41,7 @@ enum app_cmd_action {
 	APP_CMD_ACTION_COUNTERS_SAVE, /* persist pulse totalizers (no reboot) */
 	APP_CMD_ACTION_ENTER_MAILBOX, /* switch to mailbox (FTM) serving mode */
 	APP_CMD_ACTION_LEAVE_MAILBOX, /* end mailbox serving (phone done streaming) */
+	APP_CMD_ACTION_ENTER_STANDBY, /* NFC-triggered standby (Stop2), wake on NFC tap (#156) */
 };
 
 /* Plain-C device info snapshot (no protobuf dependency), filled by

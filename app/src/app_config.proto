@@ -160,6 +160,7 @@ message Command {
         EnterCalibration enter_calibration = 18;
         EnterMailbox     enter_mailbox     = 19;
         ExitMailbox      exit_mailbox      = 20;
+        EnterStandby     enter_standby     = 21;
     }
 // END GENERATED COMMANDS
 
@@ -233,6 +234,14 @@ message Command {
     // when the phone has finished streaming, so the device drops straight back to
     // the low-power NDEF poll instead of waiting out the idle timeout.
     message ExitMailbox { }
+
+    // Enter a user-initiated standby (off-like) state: the device tears down the
+    // radio/sensors/LEDs and enters STM32WL Stop2 (lowest practical power that an
+    // NFC tap can still wake — the ST25DV GPO is on an EXTI pin, not a WKUP pin,
+    // so true Shutdown can't be woken by NFC). A subsequent NFC field (phone tap)
+    // wakes the MCU via the GPO EXTI and the device reboots into normal operation.
+    // RAM-only: a power-cycle / NRST also exits standby. NFC-only command (#156).
+    message EnterStandby { }
 }
 
 message Response {

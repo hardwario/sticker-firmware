@@ -190,6 +190,12 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 				 * picked up by the next loop iteration below. */
 				app_nfc_serve_mailbox(0);
 				break;
+			case APP_CMD_ACTION_ENTER_STANDBY:
+				/* The phone has read the Ack off the tag; go dark. Enters
+				 * Stop2 and does not return (cold-reboots on the next NFC tap
+				 * or NRST). #156. */
+				app_power_standby();
+				break;
 			default:
 				break;
 			}
