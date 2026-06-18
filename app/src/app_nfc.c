@@ -181,8 +181,7 @@ static const struct gpio_dt_spec m_lpd = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpi
 /* ST25DV GPO interrupt line (PB12). Asserts on the RF events enabled in the GPO
  * config (RF write, field change, ...), letting us wake on demand instead of
  * polling. Handled directly here. */
-static const struct gpio_dt_spec m_gpo =
-	GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), nfc_gpo_gpios);
+static const struct gpio_dt_spec m_gpo = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), nfc_gpo_gpios);
 static struct gpio_callback m_gpo_cb;
 
 /* Given by the GPO ISR on each RF event; the NFC poll thread sleeps on it so the
@@ -1187,8 +1186,7 @@ int app_nfc_serve_mailbox(uint32_t idle_timeout_ms)
 
 	while (k_uptime_get() < deadline) {
 		uint8_t ctrl = 0;
-		if (read_reg(ST25DV_MB_CTRL_DYN, &ctrl, 1) ||
-		    !(ctrl & ST25DV_MB_CTRL_RF_PUT)) {
+		if (read_reg(ST25DV_MB_CTRL_DYN, &ctrl, 1) || !(ctrl & ST25DV_MB_CTRL_RF_PUT)) {
 			k_msleep(15);
 			continue;
 		}

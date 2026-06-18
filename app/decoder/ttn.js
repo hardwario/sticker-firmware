@@ -138,6 +138,8 @@ var _CMD_NAMES = {
   16: "lrw_reset",
   17: "lrw_join",
   18: "enter_calibration",
+  19: "enter_mailbox",
+  20: "exit_mailbox",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);
