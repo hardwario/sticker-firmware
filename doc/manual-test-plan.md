@@ -1251,6 +1251,26 @@ wakes the poll thread on a tap and the device idles (low power) otherwise.
 
 - [ ] Pass
 
+### N7 — Provisioning while powered off (boot-staged config, #147)
+
+**Goal:** A STICKER written over NFC while **unpowered** self-configures on the next boot, before
+the LoRaWAN stack starts, with nonce anti-replay.
+**Observable:** A config/command record written to the tag with the MCU off is applied on the next
+boot (yellow NFC carousel), persisted, and cleared from the tag (info record restored); a stale/replay
+record is rejected and the device still boots normally.
+
+**Prompt for Claude (needs the Manager-App phone + a way to remove device power — not bench/J-Link testable):**
+> With the device **fully powered off** (battery out, J-Link disconnected so SWD can't back-power it),
+> use the Manager-App to write an (encrypted) `set_param` (e.g. `lorawan.adr` toggled, `save=true`) to
+> the tag and confirm the bytes read back. Power the device on with **no further phone interaction**
+> and confirm: the yellow NFC carousel blinks, the new value is persisted (read it back over shell/NFC),
+> the tag no longer holds the staged record (info record restored), and — because the early boot check
+> runs before LoRaWAN — staged LoRaWAN keys take effect on the first join. Then power-cycle again and
+> confirm the config is **not** re-applied (nonce anti-replay) and the device boots normally. Report
+> results, including that the **encrypted** path (decrypt + nonce at boot) works end-to-end.
+
+- [ ] Pass
+
 ---
 
 ## Payload formatter (`ttn.js`)
