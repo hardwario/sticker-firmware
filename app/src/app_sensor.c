@@ -27,6 +27,7 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device_runtime.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -227,6 +228,19 @@ int app_sensor_init(void)
 		ret = device_init(dev);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "lis2dh12", ret);
+			res = res ? res : ret;
+		}
+
+		/* Hand the part to runtime PM so it idles in power-down (ODR=0) and
+		 * is only resumed on demand: for an orientation read (app_accel_read)
+		 * or while interrupt detection is armed (app_accel_set_motion_
+		 * sensitivity holds a get). device_init() above left it running at
+		 * ODR_5 — enabling runtime PM here suspends it immediately (refcount
+		 * 0), removing the ~continuous accelerometer current when detection is
+		 * OFF. */
+		ret = pm_device_runtime_enable(dev);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_CTX_INT("pm_device_runtime_enable", "lis2dh12", ret);
 			res = res ? res : ret;
 		}
 
