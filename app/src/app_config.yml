@@ -112,8 +112,8 @@ parameters:
   - name: secret_key
     proto_group: root
     proto_id: 2
-    dump: false
-    proto_callback: true
+    readable: [shell]
+    writable: [shell]
     type: bytes
     size: 16
     preserve_on_reset: true
@@ -137,16 +137,16 @@ parameters:
     help: "Get/Set nonce counter (unsigned integer)."
 
   # Device claim token (#170): 128-bit identity, on the same level as
-  # serial_number. Written ONCE during commissioning via `config claim-token`
-  # and then immutable (write_once latch in the shell setter — the only write
-  # path; root fields are not in SetParam). Read back over NFC + LoRaWAN via the
-  # get_info Info message. Off the wire in AppConfigMessage (proto_callback, like
-  # secret_key); preserved across reset, cleared only by a full NVS erase.
+  # serial_number. writable:[shell] = written ONCE during commissioning via
+  # `config claim-token` (write_once latch), then immutable. readable everywhere
+  # — its air read goes via the hand-written get_info Info message (root bytes
+  # are kept off the generated config wire automatically). Preserved across
+  # reset, cleared only by a full NVS erase.
   - name: claim_token
     proto_group: root
     proto_id: 9
-    dump: false
-    proto_callback: true
+    readable: [shell, nfc, lrw]
+    writable: [shell]
     type: bytes
     size: 16
     write_once: true
@@ -270,8 +270,7 @@ parameters:
   - name: lrw_nwkkey
     proto_group: lorawan
     proto_id: 8
-    dump: false
-    dump_nfc_only: true
+    readable: [shell, nfc]
     type: bytes
     size: 16
     preserve_on_reset: true
@@ -280,8 +279,7 @@ parameters:
   - name: lrw_appkey
     proto_group: lorawan
     proto_id: 9
-    dump: false
-    dump_nfc_only: true
+    readable: [shell, nfc]
     type: bytes
     size: 16
     preserve_on_reset: true
@@ -298,8 +296,7 @@ parameters:
   - name: lrw_nwkskey
     proto_group: lorawan
     proto_id: 11
-    dump: false
-    dump_nfc_only: true
+    readable: [shell, nfc]
     type: bytes
     size: 16
     preserve_on_reset: true
@@ -308,8 +305,7 @@ parameters:
   - name: lrw_appskey
     proto_group: lorawan
     proto_id: 12
-    dump: false
-    dump_nfc_only: true
+    readable: [shell, nfc]
     type: bytes
     size: 16
     preserve_on_reset: true
@@ -425,7 +421,8 @@ parameters:
     proto_id: 7
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 0 (packed hex, see app_config.yml)."
 
   - name: alarm_1
@@ -433,7 +430,8 @@ parameters:
     proto_id: 8
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 1 (packed hex, see app_config.yml)."
 
   - name: alarm_2
@@ -441,7 +439,8 @@ parameters:
     proto_id: 9
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 2 (packed hex, see app_config.yml)."
 
   - name: alarm_3
@@ -449,7 +448,8 @@ parameters:
     proto_id: 10
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 3 (packed hex, see app_config.yml)."
 
   - name: alarm_4
@@ -457,7 +457,8 @@ parameters:
     proto_id: 11
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 4 (packed hex, see app_config.yml)."
 
   - name: alarm_5
@@ -465,7 +466,8 @@ parameters:
     proto_id: 12
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 5 (packed hex, see app_config.yml)."
 
   - name: alarm_6
@@ -473,7 +475,8 @@ parameters:
     proto_id: 13
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 6 (packed hex, see app_config.yml)."
 
   - name: alarm_7
@@ -481,7 +484,8 @@ parameters:
     proto_id: 14
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 7 (packed hex, see app_config.yml)."
 
   - name: alarm_8
@@ -489,7 +493,8 @@ parameters:
     proto_id: 15
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 8 (packed hex, see app_config.yml)."
 
   - name: alarm_9
@@ -497,7 +502,8 @@ parameters:
     proto_id: 16
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 9 (packed hex, see app_config.yml)."
 
   - name: alarm_10
@@ -505,7 +511,8 @@ parameters:
     proto_id: 17
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 10 (packed hex, see app_config.yml)."
 
   - name: alarm_11
@@ -513,7 +520,8 @@ parameters:
     proto_id: 18
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 11 (packed hex, see app_config.yml)."
 
   - name: alarm_12
@@ -521,7 +529,8 @@ parameters:
     proto_id: 19
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 12 (packed hex, see app_config.yml)."
 
   - name: alarm_13
@@ -529,7 +538,8 @@ parameters:
     proto_id: 20
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 13 (packed hex, see app_config.yml)."
 
   - name: alarm_14
@@ -537,7 +547,8 @@ parameters:
     proto_id: 21
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 14 (packed hex, see app_config.yml)."
 
   - name: alarm_15
@@ -545,7 +556,8 @@ parameters:
     proto_id: 22
     type: bytes
     size: 17
-    no_shell: true
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 15 (packed hex, see app_config.yml)."
 
   - name: accel_motion_sensitivity
