@@ -145,6 +145,29 @@ test("decodeUplink decodes a W1Scan response (fPort 85)", () => {
   assert.deepEqual(got.w1_scan.rom, ["28000011223344a5", "28abcdef010203b7"]);
 });
 
+// Info response carrying the claim_token (#170): Info.claim_token = field 9
+// (bytes), presented as hex. Readable over both NFC and LoRaWAN.
+test("decodeUplink decodes get_info with claim_token (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a24080110041802200228d285d8cc04302a40014a10158a6a5d5b54c5118e62a8f4af0de8d2"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.seq, 3);
+  assert.equal(got.info.fw_version, "1.4.2");
+  assert.equal(got.info.serial_number, 1234567890);
+  assert.equal(got.info.claim_token, "158a6a5d5b54c5118e62a8f4af0de8d2");
+});
+
+// An uncommissioned device omits claim_token (the all-zero sentinel) → absent.
+test("decodeUplink get_info omits claim_token when uncommissioned (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a0c08011004180228d285d8cc04"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.seq, 3);
+  assert.equal(got.info.claim_token, undefined);
+});
+
 // --- Uplink: protobuf telemetry (fPort 2) ---------------------------------
 // Real HW capture (#78/#80 verification, device sticker-2162165131, 2026-06-09):
 // a non-boot report with hall-left + hall-right capabilities enabled but no

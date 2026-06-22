@@ -81,6 +81,10 @@ void app_cmd_get_info(struct app_cmd_info *info)
 		.uptime_s = (uint32_t)(k_uptime_get() / 1000),
 	};
 
+	BUILD_ASSERT(sizeof(info->claim_token) == sizeof(g_app_config.claim_token),
+		     "claim_token size mismatch");
+	memcpy(info->claim_token, g_app_config.claim_token, sizeof(info->claim_token));
+
 #ifdef APP_CMD_HAVE_CLOCK
 	uint32_t unix_s;
 	if (app_clock_get_unix(&unix_s) == 0) {
@@ -105,6 +109,17 @@ static void fill_info(Response_Info *info)
 	info->debug = i.debug;
 	if (i.has_unix_time) {
 		info->unix_time = i.unix_time;
+	}
+
+	/* claim_token (#170): emit only once commissioned (any non-zero byte). The
+	 * all-zero "unset" state is omitted so an uncommissioned device's Info stays
+	 * compact. fixed_length bytes -> plain 16-byte array, no .size. */
+	for (size_t j = 0; j < sizeof(i.claim_token); j++) {
+		if (i.claim_token[j] != 0) {
+			info->has_claim_token = true;
+			memcpy(info->claim_token, i.claim_token, sizeof(info->claim_token));
+			break;
+		}
 	}
 }
 

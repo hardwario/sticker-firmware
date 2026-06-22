@@ -47,6 +47,7 @@ struct app_config {
 	uint8_t secret_key[16];
 	uint32_t serial_number;
 	uint32_t nonce_counter;
+	uint8_t claim_token[16];
 	bool calibration;
 	int interval_sample;
 	int interval_report;

@@ -54,8 +54,9 @@ struct app_cmd_info {
 	bool debug;         /* debug build (CONFIG_FW_DEBUG) */
 	uint32_t serial_number;
 	uint32_t uptime_s;
-	bool has_unix_time; /* unix_time valid (RTC synced) */
-	uint32_t unix_time; /* UTC seconds since epoch */
+	bool has_unix_time;      /* unix_time valid (RTC synced) */
+	uint32_t unix_time;      /* UTC seconds since epoch */
+	uint8_t claim_token[16]; /* 128-bit device claim token (#170); all-zero = uncommissioned */
 };
 
 /* Fill `info` with the current device info: FW version, build type, serial,

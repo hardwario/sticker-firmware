@@ -10,6 +10,7 @@ message AppConfigMessage {
     optional Application application = 6;
     optional Sensors sensors = 7;
     optional Alarms alarms = 8;
+    optional string claim_token = 9;
 
     message Lorawan {
         enum Region {
@@ -233,6 +234,7 @@ message Response {
         uint32 uptime_s      = 6;   // seconds since boot
         uint32 unix_time     = 7;   // wall-clock (UTC); 0/absent until RTC synced
         bool   debug         = 8;   // true = debug build, false = release
+        optional bytes claim_token = 9;   // 128-bit device claim token (#170); omitted until commissioned
     }
 
     message ConfigDump {

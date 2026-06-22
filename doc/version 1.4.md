@@ -204,8 +204,13 @@ After every LoRaWAN join the device automatically sends a device-info message on
 | `serial_number` | Device serial |
 | `uptime_s` | Seconds since boot |
 | `unix_time` | Wall-clock UTC (0 until the clock is synced) |
+| `claim_token` | 128-bit device claim token, hex (#170) — **omitted** until the device is commissioned |
 
-The same message is returned on demand by the `get_info` command.
+The same message is returned on demand by the `get_info` command (over LoRaWAN **and** NFC), so a backend can read the claim token over either channel.
+
+### Claim token (#170)
+
+The **claim token** is a 128-bit device-identity value, on the same footing as the serial number, used by the backend to claim/associate the unit. It is **set once during commissioning** with the shell command **`config claim-token <32-hex>`** (then `settings save`), and is afterwards **immutable** — any further write (shell, `SetParam`, NFC, LoRaWAN) is rejected (`claim-token already set`). It survives `settings reset` and is cleared only by a full NVS erase. Unlike the LoRaWAN/secret keys it is **not** confidential: it is reported in the `Info` message and readable over both NFC and LoRaWAN.
 
 ---
 
@@ -395,6 +400,7 @@ The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.
 | `ats cmd lrw \| nfc <hex>` | **New** (debug) — inject a command over the LoRaWAN/NFC transport for bench testing |
 | `nfc dump` / `read` / `write` / `clear` / `check` / `autocheck` / `reg` / `regw` | **New** (debug) — direct ST25DV tag access; `nfc check` prints a readable trace of what it read, decoded and wrote back (see §10) |
 | `config history-enable` / `history-sensors` / `alarm-limit` / `alarm-notif-time` / `pir-notify-act` | **New** parameters (see §6, §7) |
+| `config claim-token <32-hex>` | **New** — set the 128-bit claim token once at commissioning; **write-once** (immutable after first set, see §4) |
 | `settings reset` | **Changed** — now keeps device identity + LoRaWAN credentials (see §13); restores only application config + alarm rules to defaults |
 | `settings erase` | **New** — full NVS wipe incl. identity + LoRaWAN credentials; shell-only, destructive (see §13) |
 

@@ -207,6 +207,27 @@ ZTEST(cmd, test_build_info)
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
 	zassert_equal(r.which_body, Response_info_tag, "expected Info");
 	zassert_equal(r.body.info.serial_number, 1234567890, "serial");
+	/* #170: uncommissioned device (all-zero claim_token) omits the field. */
+	zassert_false(r.body.info.has_claim_token, "claim_token must be omitted when unset");
+}
+
+/* #170: once commissioned, the Info carries the 16-byte claim_token. */
+ZTEST(cmd, test_build_info_claim_token)
+{
+	uint8_t out[128];
+	size_t out_len = 0;
+	const uint8_t token[16] = {0x15, 0x8a, 0x6a, 0x5d, 0x5b, 0x54, 0xc5, 0x11,
+				   0x8e, 0x62, 0xa8, 0xf4, 0xaf, 0x0d, 0xe8, 0xd2};
+
+	reset_cfg();
+	memcpy(g_app_config.claim_token, token, sizeof(token));
+
+	zassert_equal(app_cmd_build_info(out, sizeof(out), &out_len), 0, "build_info");
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_true(r.body.info.has_claim_token, "claim_token must be present once set");
+	zassert_mem_equal(r.body.info.claim_token, token, sizeof(token), "claim_token bytes");
 }
 
 ZTEST(cmd, test_deferred_actions)
