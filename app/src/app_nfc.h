@@ -47,6 +47,15 @@ enum app_cmd_action app_nfc_take_cmd_action(void);
  * blob is not raced (and overwritten) by the periodic check mid-write. */
 bool app_nfc_periodic_enabled(void);
 
+/* #164: a command/response exchange leaves the response record on the tag (the
+ * immediate info-restore was dropped in #144 to avoid racing the phone read).
+ * `app_nfc_info_restore_pending()` is true while that stale response is still on
+ * the tag; the poll thread shortens its wait and, once the RF field has been
+ * quiet for the debounce window (no GPO events), calls `app_nfc_restore_info()`
+ * to rewrite the plaintext info record so a later tap finds valid metadata. */
+bool app_nfc_info_restore_pending(void);
+int app_nfc_restore_info(void);
+
 /* Enter mailbox (ST25DV Fast-Transfer-Mode) serving mode until `idle_timeout_s`
  * of inactivity (0 = firmware default), holding the tag powered so the phone's
  * RF and our I2C reach it at once. Runs commands off the mailbox and returns the

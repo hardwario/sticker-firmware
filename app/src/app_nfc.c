@@ -212,6 +212,15 @@ static enum app_cmd_action m_cmd_action; /* deferred action from app_cmd_handle 
 #define NFC_UNKNOWN_DEBOUNCE 3
 static uint8_t m_unknown_count;
 
+/* #164: after a command/response exchange the response record is left on the tag
+ * (the immediate info-restore was dropped in #144 because it raced the phone
+ * reading the reply). This flag is set whenever a response record is left on the
+ * tag, and cleared whenever the info record is (re)written. The poll thread uses
+ * it to restore the info record once the RF field has been quiet for a debounce
+ * window (~10 s = no GPO events → phone gone), so a later tap always finds valid
+ * info instead of a stale response. */
+static bool m_info_restore_pending;
+
 /* Take (and clear) the deferred action from the last processed NFC command, so
  * the poll thread can run reboot/save AFTER the response was written/read. */
 enum app_cmd_action app_nfc_take_cmd_action(void)
@@ -945,6 +954,7 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	/* Empty tag: lay down the info record so a phone always finds metadata. */
 	if (is_buffer_zero(m_buf, ST25DV_USER_MEM_SIZE)) {
 		m_unknown_count = 0;
+		m_info_restore_pending = false; /* #164: writing info record below */
 		NFC_REPORT("NFC tag empty -> writing info record (%zu B)", info_len);
 		if (info_len) {
 			ret = write_mem(0, info, info_len);
@@ -960,6 +970,7 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	 * (avoids rewriting the EEPROM on every check). */
 	if (info_len && memcmp(m_buf, info, info_len) == 0) {
 		m_unknown_count = 0;
+		m_info_restore_pending = false; /* #164: info record is present */
 		NFC_REPORT("NFC tag holds our info record (nothing pending) -> no action");
 		return 0;
 	}
@@ -992,12 +1003,16 @@ static int nfc_check_locked(enum app_nfc_action *action)
 				res = ret;
 			}
 		}
+		/* #164: a response record now sits on the tag — arm the info-restore so
+		 * the poll thread rewrites the info record once the field goes quiet. */
+		m_info_restore_pending = true;
 		return res;
 	}
 
 	/* Our response is already on the tag (awaiting the phone read): leave it. */
 	if (m_seen_resp) {
 		m_unknown_count = 0;
+		m_info_restore_pending = true; /* #164: still need to restore info later */
 		return res;
 	}
 
@@ -1005,6 +1020,7 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	 * for anti-replay, restoring the info record. */
 	if (*action != APP_NFC_ACTION_NONE) {
 		m_unknown_count = 0;
+		m_info_restore_pending = false; /* #164: writing info record below */
 		LOG_INF("Writing info record to NFC (consumed config)...");
 		NFC_REPORT("NFC wrote: info record (%zu B) - cleared consumed config, restored "
 			   "metadata",
@@ -1031,6 +1047,7 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	}
 
 	m_unknown_count = 0;
+	m_info_restore_pending = false; /* #164: writing info record below */
 	LOG_INF("Writing info record to NFC (cleared unknown data)...");
 	NFC_REPORT("NFC wrote: info record (%zu B) - cleared unknown data, restored metadata",
 		   info_len);
@@ -1082,6 +1099,45 @@ int app_nfc_poll(enum app_nfc_action *action)
 
 	nfc_access_end();
 	return res;
+}
+
+/* #164: true while a response record is left on the tag and the info record has
+ * not yet been restored. The poll thread uses this to shorten its wait and to
+ * decide whether to restore the info record once the field goes quiet. */
+bool app_nfc_info_restore_pending(void)
+{
+	return m_info_restore_pending;
+}
+
+/* #164: rewrite the plaintext info record over whatever is on the tag (a stale
+ * response record), so a later passive read finds valid metadata. Called by the
+ * poll thread only after the RF field has been quiet for the debounce window
+ * (no GPO events ~10 s → the phone has left), which avoids the #144 race of
+ * clobbering the reply while the phone may still be reading it. */
+int app_nfc_restore_info(void)
+{
+	uint8_t info[80];
+	size_t info_len = build_info_ndef(info, sizeof(info));
+
+	if (!info_len) {
+		return -EINVAL;
+	}
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		return ret;
+	}
+
+	ret = write_mem(0, info, info_len);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+	} else {
+		m_info_restore_pending = false;
+		LOG_INF("NFC: restored info record after field loss (#164)");
+	}
+
+	nfc_access_end();
+	return ret;
 }
 
 /* Write the whole mailbox in one I2C transaction (volatile RAM, no program

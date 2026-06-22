@@ -43,6 +43,11 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
  * tag when the phone touches it — low power. The fallback is a safety net in
  * case an edge is missed. */
 #define NFC_EVENT_FALLBACK_MS        30000
+/* #164: once a response record is left on the tag, poll this often so the info
+ * record is restored ~10 s after the phone leaves (no GPO events in this window
+ * = field lost). The debounce avoids the #144 race with the phone still reading
+ * the reply. */
+#define NFC_INFO_RESTORE_DEBOUNCE_MS 10000
 #define NFC_POLL_START_DELAY_MS      3000
 #define NFC_POLL_THREAD_STACK_SIZE   3072
 #define NFC_POLL_THREAD_PRIO         K_LOWEST_APPLICATION_THREAD_PRIO
@@ -113,10 +118,26 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 
 	for (;;) {
 		/* Sleep until the GPO interrupt fires (phone touched the tag) or the
-		 * fallback elapses. */
-		app_nfc_wait_event(NFC_EVENT_FALLBACK_MS);
+		 * fallback elapses. While a stale response record is on the tag (#164),
+		 * use a short ~10 s fallback so we can restore the info record soon after
+		 * the phone leaves; otherwise the long low-power fallback. */
+		int fallback = app_nfc_info_restore_pending() ? NFC_INFO_RESTORE_DEBOUNCE_MS
+							      : NFC_EVENT_FALLBACK_MS;
+		int wret = app_nfc_wait_event(fallback);
 
 		if (!app_nfc_periodic_enabled()) {
+			continue;
+		}
+
+		/* #164: the fallback elapsed (wret == -EAGAIN) with a response still on
+		 * the tag and no GPO event in the debounce window → the RF field has been
+		 * quiet (phone gone), so it is safe to restore the info record without
+		 * racing the phone reading the reply (the #144 hazard). */
+		if (wret == -EAGAIN && app_nfc_info_restore_pending()) {
+			int ret = app_nfc_restore_info();
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_nfc_restore_info", ret);
+			}
 			continue;
 		}
 
