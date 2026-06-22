@@ -806,6 +806,28 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "Wall clock:    RTC not synced");
 	}
 
+	/* Device identity keys (local shell only). secret-key is confidential; the
+	 * claim-token (#170) is shown as "(unset)" until commissioned. */
+	char hexbuf[2 * 16 + 1];
+
+	bin2hex(g_app_config.secret_key, sizeof(g_app_config.secret_key), hexbuf, sizeof(hexbuf));
+	shell_print(sh, "Secret key:    %s", hexbuf);
+
+	bool claim_set = false;
+	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
+		if (g_app_config.claim_token[i] != 0) {
+			claim_set = true;
+			break;
+		}
+	}
+	if (claim_set) {
+		bin2hex(g_app_config.claim_token, sizeof(g_app_config.claim_token), hexbuf,
+			sizeof(hexbuf));
+		shell_print(sh, "Claim token:   %s", hexbuf);
+	} else {
+		shell_print(sh, "Claim token:   (unset)");
+	}
+
 	return 0;
 }
 
