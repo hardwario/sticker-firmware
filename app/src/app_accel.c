@@ -15,6 +15,8 @@
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
+#include <zephyr/pm/device_runtime.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -90,6 +92,15 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 		return -ENODEV;
 	}
 
+	/* Power the LIS2DH up for the read and back down afterwards (runtime PM).
+	 * When motion/free-fall detection is armed the device is already held
+	 * resumed (refcounted get in app_accel_set_motion_sensitivity), so this
+	 * just keeps it on; when detection is OFF the part is in power-down and
+	 * this is the only thing that spins it up — for the duration of the read
+	 * only. RESUME restores the active ODR; the ENODATA retry below absorbs
+	 * the turn-on + first-sample latency. */
+	(void)pm_device_runtime_get(dev);
+
 	/* TODO Check if this is the best aprroach */
 	for (int i = 0; i < 5; i++) {
 		ret = sensor_sample_fetch(dev);
@@ -103,6 +114,7 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("sensor_sample_fetch", ret);
+		(void)pm_device_runtime_put(dev);
 		k_mutex_unlock(&m_lock);
 		return ret;
 	}
@@ -111,6 +123,7 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 	ret = sensor_channel_get(dev, SENSOR_CHAN_ACCEL_XYZ, val);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("sensor_channel_get", ret);
+		(void)pm_device_runtime_put(dev);
 		k_mutex_unlock(&m_lock);
 		return ret;
 	}
@@ -145,6 +158,7 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 		*orientation = orientation_;
 	}
 
+	(void)pm_device_runtime_put(dev);
 	k_mutex_unlock(&m_lock);
 
 	return 0;
@@ -185,6 +199,12 @@ static struct sensor_trigger m_motion_trig = {
 };
 
 static struct k_work_delayable m_motion_arm_work;
+
+/* Tracks whether a runtime-PM "get" is currently held to keep the LIS2DH
+ * resumed for interrupt-driven detection (any-motion + free-fall). Balanced
+ * against the get/put in app_accel_set_motion_sensitivity so the device is
+ * powered down (ODR=0) whenever detection is OFF. */
+static bool m_motion_armed;
 
 static void motion_arm_work_handler(struct k_work *work)
 {
@@ -285,8 +305,29 @@ int app_accel_set_motion_sensitivity(enum app_config_motion_sensitivity level)
 			LOG_ERR_CALL_FAILED_INT("sensor_trigger_set(disable)", ret);
 			return ret;
 		}
+		/* Release the runtime-PM hold so the part can power down (ODR=0).
+		 * With the device suspended it no longer samples, so neither the
+		 * any-motion nor the free-fall comparator can fire — detection is
+		 * fully off and the ~ continuous accelerometer current is saved. */
+		if (m_motion_armed) {
+			(void)pm_device_runtime_put(dev);
+			m_motion_armed = false;
+		}
 		LOG_INF("Motion detection disabled");
 		return 0;
+	}
+
+	/* Keep the LIS2DH resumed (active ODR) for the whole armed period so its
+	 * interrupt generators run. Taken once; balanced by the put in the OFF
+	 * branch. Must precede the register config below (a suspended part ignores
+	 * the HPF snap / threshold writes at the analog level). */
+	if (!m_motion_armed) {
+		ret = pm_device_runtime_get(dev);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("pm_device_runtime_get", ret);
+			return ret;
+		}
+		m_motion_armed = true;
 	}
 
 	int th_ms2, dur;

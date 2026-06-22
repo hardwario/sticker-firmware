@@ -133,6 +133,9 @@ stm32_lp_tick_source: &lptim1 {
 		irq-gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>,
 			    <&gpioa 2 GPIO_ACTIVE_HIGH>;
 		disconnect-sdo-sa0-pull-up;
+		/* Deferred so the accel stays powered down (no ODR_5 sampling)
+		 * unless cap-accelerometer is on; device_init() in app_sensor. */
+		zephyr,deferred-init;
 	};
 
 	sht40: sht40@44 {

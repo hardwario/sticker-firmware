@@ -417,6 +417,8 @@ v1.4.0 organizes configuration keys **by sensor/source** rather than under a glo
 
 **Unchanged:** discrete sources (`hall-*`, `input-*`, `pir-notify-act`) and global params (`alarm-limit`, `alarm-notif-time`). `accel-motion-sensitivity` defaults to `off` (no accelerometer detection).
 
+> **Accelerometer power (#90).** The LIS2DH is now power-managed on demand: it idles in power-down (ODR=0) and is only resumed for an orientation read or while motion detection is armed — saving ~30 µA of continuous idle current when the accelerometer would otherwise run free. **Consequence:** free-fall detection is active only when `accel-motion-sensitivity != off` (it shares the single motion-sensitivity knob); with sensitivity `off` the accelerometer is fully powered down.
+
 The protobuf field numbers are **unchanged**, so the over-the-air wire format stays compatible; only the user-facing keys and code identifiers change. Devices must be reprovisioned with the new shell keys (the NVS settings keys moved).
 
 ---
