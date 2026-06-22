@@ -383,30 +383,6 @@ parameters:
     type: bool
     help: "Get/Set accelerometer capability — orientation, motion and free-fall (true/false)."
 
-  - name: hall_left_counter
-    proto_group: alarms
-    proto_id: 3
-    type: bool
-    help: "Get/Set hall left switch counter enabled (true/false)."
-
-  - name: hall_right_counter
-    proto_group: alarms
-    proto_id: 4
-    type: bool
-    help: "Get/Set hall right switch counter enabled (true/false)."
-
-  - name: input_a_counter
-    proto_group: alarms
-    proto_id: 5
-    type: bool
-    help: "Get/Set input A counter enabled (true/false)."
-
-  - name: input_b_counter
-    proto_group: alarms
-    proto_id: 6
-    type: bool
-    help: "Get/Set input B counter enabled (true/false)."
-
   # Dynamic alarm rule slots. One packed-hex rule per slot (the slot index is the
   # rule's stable identity). 17 bytes little-endian:
   #   [0] flags  bit0=present (slot occupied), bit1=enabled
@@ -418,7 +394,7 @@ parameters:
   # app_alarm_rules.c is rebuilt from these on load and after every SetParam.
   - name: alarm_0
     proto_group: alarms
-    proto_id: 7
+    proto_id: 3
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -427,7 +403,7 @@ parameters:
 
   - name: alarm_1
     proto_group: alarms
-    proto_id: 8
+    proto_id: 4
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -436,7 +412,7 @@ parameters:
 
   - name: alarm_2
     proto_group: alarms
-    proto_id: 9
+    proto_id: 5
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -445,7 +421,7 @@ parameters:
 
   - name: alarm_3
     proto_group: alarms
-    proto_id: 10
+    proto_id: 6
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -454,7 +430,7 @@ parameters:
 
   - name: alarm_4
     proto_group: alarms
-    proto_id: 11
+    proto_id: 7
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -463,7 +439,7 @@ parameters:
 
   - name: alarm_5
     proto_group: alarms
-    proto_id: 12
+    proto_id: 8
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -472,7 +448,7 @@ parameters:
 
   - name: alarm_6
     proto_group: alarms
-    proto_id: 13
+    proto_id: 9
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -481,7 +457,7 @@ parameters:
 
   - name: alarm_7
     proto_group: alarms
-    proto_id: 14
+    proto_id: 10
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -490,7 +466,7 @@ parameters:
 
   - name: alarm_8
     proto_group: alarms
-    proto_id: 15
+    proto_id: 11
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -499,7 +475,7 @@ parameters:
 
   - name: alarm_9
     proto_group: alarms
-    proto_id: 16
+    proto_id: 12
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -508,7 +484,7 @@ parameters:
 
   - name: alarm_10
     proto_group: alarms
-    proto_id: 17
+    proto_id: 13
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -517,7 +493,7 @@ parameters:
 
   - name: alarm_11
     proto_group: alarms
-    proto_id: 18
+    proto_id: 14
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -526,7 +502,7 @@ parameters:
 
   - name: alarm_12
     proto_group: alarms
-    proto_id: 19
+    proto_id: 15
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -535,7 +511,7 @@ parameters:
 
   - name: alarm_13
     proto_group: alarms
-    proto_id: 20
+    proto_id: 16
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -544,7 +520,7 @@ parameters:
 
   - name: alarm_14
     proto_group: alarms
-    proto_id: 21
+    proto_id: 17
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -553,7 +529,7 @@ parameters:
 
   - name: alarm_15
     proto_group: alarms
-    proto_id: 22
+    proto_id: 18
     type: bytes
     size: 17
     readable: [nfc, lrw]
@@ -597,3 +573,29 @@ parameters:
     type: bytes
     size: 8
     help: "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty)."
+
+  # Pulse totalizer enables (#49) — a sensor feature, not an alarm. Grouped with
+  # the sensors they belong to (moved out of `alarms`).
+  - name: hall_left_counter
+    proto_group: sensors
+    proto_id: 15
+    type: bool
+    help: "Get/Set hall left switch counter enabled (true/false)."
+
+  - name: hall_right_counter
+    proto_group: sensors
+    proto_id: 16
+    type: bool
+    help: "Get/Set hall right switch counter enabled (true/false)."
+
+  - name: input_a_counter
+    proto_group: sensors
+    proto_id: 17
+    type: bool
+    help: "Get/Set input A counter enabled (true/false)."
+
+  - name: input_b_counter
+    proto_group: sensors
+    proto_id: 18
+    type: bool
+    help: "Get/Set input B counter enabled (true/false)."

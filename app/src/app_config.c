@@ -138,14 +138,6 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_w1_sensors));
 	SETTINGS_SET("cap-accelerometer", &m_app_config.cap_accelerometer,
 		     sizeof(m_app_config.cap_accelerometer));
-	SETTINGS_SET("hall-left-counter", &m_app_config.hall_left_counter,
-		     sizeof(m_app_config.hall_left_counter));
-	SETTINGS_SET("hall-right-counter", &m_app_config.hall_right_counter,
-		     sizeof(m_app_config.hall_right_counter));
-	SETTINGS_SET("input-a-counter", &m_app_config.input_a_counter,
-		     sizeof(m_app_config.input_a_counter));
-	SETTINGS_SET("input-b-counter", &m_app_config.input_b_counter,
-		     sizeof(m_app_config.input_b_counter));
 	SETTINGS_SET("alarm-0", m_app_config.alarm_0, sizeof(m_app_config.alarm_0));
 	SETTINGS_SET("alarm-1", m_app_config.alarm_1, sizeof(m_app_config.alarm_1));
 	SETTINGS_SET("alarm-2", m_app_config.alarm_2, sizeof(m_app_config.alarm_2));
@@ -168,6 +160,14 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
 	SETTINGS_SET("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
 	SETTINGS_SET("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
+	SETTINGS_SET("hall-left-counter", &m_app_config.hall_left_counter,
+		     sizeof(m_app_config.hall_left_counter));
+	SETTINGS_SET("hall-right-counter", &m_app_config.hall_right_counter,
+		     sizeof(m_app_config.hall_right_counter));
+	SETTINGS_SET("input-a-counter", &m_app_config.input_a_counter,
+		     sizeof(m_app_config.input_a_counter));
+	SETTINGS_SET("input-b-counter", &m_app_config.input_b_counter,
+		     sizeof(m_app_config.input_b_counter));
 
 #undef SETTINGS_SET
 
@@ -334,14 +334,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_w1_sensors));
 	EXPORT_FUNC("cap-accelerometer", &m_app_config.cap_accelerometer,
 		    sizeof(m_app_config.cap_accelerometer));
-	EXPORT_FUNC("hall-left-counter", &m_app_config.hall_left_counter,
-		    sizeof(m_app_config.hall_left_counter));
-	EXPORT_FUNC("hall-right-counter", &m_app_config.hall_right_counter,
-		    sizeof(m_app_config.hall_right_counter));
-	EXPORT_FUNC("input-a-counter", &m_app_config.input_a_counter,
-		    sizeof(m_app_config.input_a_counter));
-	EXPORT_FUNC("input-b-counter", &m_app_config.input_b_counter,
-		    sizeof(m_app_config.input_b_counter));
 	EXPORT_FUNC("alarm-0", m_app_config.alarm_0, sizeof(m_app_config.alarm_0));
 	EXPORT_FUNC("alarm-1", m_app_config.alarm_1, sizeof(m_app_config.alarm_1));
 	EXPORT_FUNC("alarm-2", m_app_config.alarm_2, sizeof(m_app_config.alarm_2));
@@ -364,6 +356,14 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
 	EXPORT_FUNC("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
 	EXPORT_FUNC("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
+	EXPORT_FUNC("hall-left-counter", &m_app_config.hall_left_counter,
+		    sizeof(m_app_config.hall_left_counter));
+	EXPORT_FUNC("hall-right-counter", &m_app_config.hall_right_counter,
+		    sizeof(m_app_config.hall_right_counter));
+	EXPORT_FUNC("input-a-counter", &m_app_config.input_a_counter,
+		    sizeof(m_app_config.input_a_counter));
+	EXPORT_FUNC("input-b-counter", &m_app_config.input_b_counter,
+		    sizeof(m_app_config.input_b_counter));
 	/* Export config-version LAST: settings_save is per-key atomic, so writing
 	 * the schema marker after every value means a brownout mid-save leaves an
 	 * old version with a partial new payload rather than a new version flagging
@@ -749,30 +749,6 @@ static void print_cap_accelerometer(const struct shell *shell)
 		    m_app_config.cap_accelerometer ? "true" : "false");
 }
 
-static void print_hall_left_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-left-counter %s",
-		    m_app_config.hall_left_counter ? "true" : "false");
-}
-
-static void print_hall_right_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-right-counter %s",
-		    m_app_config.hall_right_counter ? "true" : "false");
-}
-
-static void print_input_a_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-a-counter %s",
-		    m_app_config.input_a_counter ? "true" : "false");
-}
-
-static void print_input_b_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-b-counter %s",
-		    m_app_config.input_b_counter ? "true" : "false");
-}
-
 static void print_accel_motion_sensitivity(const struct shell *shell)
 {
 	const char *str;
@@ -852,6 +828,30 @@ static void print_sensor4_rom(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " sensor4-rom %s", buf);
 }
 
+static void print_hall_left_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " hall-left-counter %s",
+		    m_app_config.hall_left_counter ? "true" : "false");
+}
+
+static void print_hall_right_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " hall-right-counter %s",
+		    m_app_config.hall_right_counter ? "true" : "false");
+}
+
+static void print_input_a_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " input-a-counter %s",
+		    m_app_config.input_a_counter ? "true" : "false");
+}
+
+static void print_input_b_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " input-b-counter %s",
+		    m_app_config.input_b_counter ? "true" : "false");
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -888,15 +888,15 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_pir_detector(shell);
 	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
-	print_hall_left_counter(shell);
-	print_hall_right_counter(shell);
-	print_input_a_counter(shell);
-	print_input_b_counter(shell);
 	print_accel_motion_sensitivity(shell);
 	print_sensor1_rom(shell);
 	print_sensor2_rom(shell);
 	print_sensor3_rom(shell);
 	print_sensor4_rom(shell);
+	print_hall_left_counter(shell);
+	print_hall_right_counter(shell);
+	print_input_a_counter(shell);
+	print_input_b_counter(shell);
 
 	return 0;
 }
@@ -1573,28 +1573,6 @@ static int cmd_cap_accelerometer(const struct shell *shell, size_t argc, char **
 			print_cap_accelerometer);
 }
 
-static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_counter,
-			print_hall_left_counter);
-}
-
-static int cmd_hall_right_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_counter,
-			print_hall_right_counter);
-}
-
-static int cmd_input_a_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_a_counter, print_input_a_counter);
-}
-
-static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_b_counter, print_input_b_counter);
-}
-
 static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -1774,6 +1752,28 @@ static int cmd_sensor4_rom(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_counter,
+			print_hall_left_counter);
+}
+
+static int cmd_hall_right_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_counter,
+			print_hall_right_counter);
+}
+
+static int cmd_input_a_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.input_a_counter, print_input_a_counter);
+}
+
+static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.input_b_counter, print_input_b_counter);
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -1932,22 +1932,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set accelerometer capability — orientation, motion and free-fall (true/false).",
 	              cmd_cap_accelerometer, 1, 1),
 
-	SHELL_CMD_ARG(hall-left-counter, NULL,
-	              "Get/Set hall left switch counter enabled (true/false).",
-	              cmd_hall_left_counter, 1, 1),
-
-	SHELL_CMD_ARG(hall-right-counter, NULL,
-	              "Get/Set hall right switch counter enabled (true/false).",
-	              cmd_hall_right_counter, 1, 1),
-
-	SHELL_CMD_ARG(input-a-counter, NULL,
-	              "Get/Set input A counter enabled (true/false).",
-	              cmd_input_a_counter, 1, 1),
-
-	SHELL_CMD_ARG(input-b-counter, NULL,
-	              "Get/Set input B counter enabled (true/false).",
-	              cmd_input_b_counter, 1, 1),
-
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",
 	              cmd_accel_motion_sensitivity, 1, 1),
@@ -1967,6 +1951,22 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(sensor4-rom, NULL,
 	              "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty).",
 	              cmd_sensor4_rom, 1, 1),
+
+	SHELL_CMD_ARG(hall-left-counter, NULL,
+	              "Get/Set hall left switch counter enabled (true/false).",
+	              cmd_hall_left_counter, 1, 1),
+
+	SHELL_CMD_ARG(hall-right-counter, NULL,
+	              "Get/Set hall right switch counter enabled (true/false).",
+	              cmd_hall_right_counter, 1, 1),
+
+	SHELL_CMD_ARG(input-a-counter, NULL,
+	              "Get/Set input A counter enabled (true/false).",
+	              cmd_input_a_counter, 1, 1),
+
+	SHELL_CMD_ARG(input-b-counter, NULL,
+	              "Get/Set input B counter enabled (true/false).",
+	              cmd_input_b_counter, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );

@@ -76,7 +76,9 @@ var _APP_FLOAT = {};
 var _SEN_NAMES = {
   1: "cap_hall_left", 2: "cap_hall_right", 3: "cap_input_a", 4: "cap_input_b",
   5: "cap_light_sensor", 6: "cap_barometer", 7: "cap_pir_detector",
-  8: "cap_w1_sensors", 9: "cap_accelerometer", 10: "accel_motion_sensitivity"
+  8: "cap_w1_sensors", 9: "cap_accelerometer", 10: "accel_motion_sensitivity",
+  15: "hall_left_counter", 16: "hall_right_counter",
+  17: "input_a_counter", 18: "input_b_counter"
 };
 var _SEN_ENUMS = { 10: ["off", "low", "medium", "high"] };
 var _SEN_FLOAT = {};
@@ -84,18 +86,16 @@ var _SEN_HEX = { 11: "sensor1_rom", 12: "sensor2_rom", 13: "sensor3_rom", 14: "s
 var _SEN_HEX_ENC = { sensor1_rom: 11, sensor2_rom: 12, sensor3_rom: 13, sensor4_rom: 14 };
 
 var _ALM_NAMES = {
-  1: "alarm_limit", 2: "alarm_notif_time",
-  3: "hall_left_counter", 4: "hall_right_counter",
-  5: "input_a_counter", 6: "input_b_counter"
+  1: "alarm_limit", 2: "alarm_notif_time"
 };
 var _ALM_ENUMS = {};
 var _ALM_FLOAT = {};
-// Dynamic alarm rule slots alarm_0..alarm_15 = proto fields 7..22, each a packed
+// Dynamic alarm rule slots alarm_0..alarm_15 = proto fields 3..18, each a packed
 // 17-byte rule carried as native bytes (presented/authored as a 34-char hex string).
 var _ALM_HEX = {};
 var _ALM_HEX_ENC = {};
 (function () {
-  for (var i = 0; i < 16; i++) { _ALM_HEX[7 + i] = "alarm_" + i; _ALM_HEX_ENC["alarm_" + i] = 7 + i; }
+  for (var i = 0; i < 16; i++) { _ALM_HEX[3 + i] = "alarm_" + i; _ALM_HEX_ENC["alarm_" + i] = 3 + i; }
 })();
 
 var _LRW_NAMES = { 1: "region", 2: "sub_band", 3: "network", 4: "adr", 5: "activation" };

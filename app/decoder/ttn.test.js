@@ -500,9 +500,9 @@ test("alarm slot set_param encodes as native bytes and round-trips (LRW)", () =>
   assert.equal(dec.set_param.alarms.alarm_0, rule);
 
   // ConfigDump (uplink) presents an alarm slot as hex too. Wire: ver 01, seq 1,
-  // config_dump{ page_count=1, alarms{ alarm_0 } }. alarm_0 = alarms field 7
-  // after the #166 renumber (tag 0x3a).
-  const dump = hex("0108012217100132133a11" + rule);
+  // config_dump{ page_count=1, alarms{ alarm_0 } }. alarm_0 = alarms field 3
+  // (the *_counter slots moved to the sensors group), tag 0x1a.
+  const dump = hex("0108012217100132131a11" + rule);
   const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
   assert.equal(u.config_dump.alarms.alarm_0, rule);
 });
