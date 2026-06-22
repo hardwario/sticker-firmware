@@ -277,7 +277,7 @@ Two configuration parameters control alarm uplink frequency:
 
 Per-sensor alarm thresholds are **dynamic rules** in 16 fixed **slots** (`0…15`). The **slot index is the rule's stable identity** — `(source, quantity)` is an attribute of the slot, not a key, so **several slots may share the same `(source, quantity)`** (the multi-level case: e.g. a *warning* band and a separate *critical* band on one sensor as two independent rules). Clearing a slot empties it without renumbering the others, so a host (and `AlarmEvent.slot`) can refer to a rule by slot reliably.
 
-Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields `7…22` in the `alarms` submessage), so rules are written and read like any other configuration — over **SetParam / GetParam** (the *identical* message works on **fPort 85 (LoRaWAN)** and **NFC**) or with the local **`alarm` shell** command. There is no separate alarm command.
+Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields `3…18` in the `alarms` submessage), so rules are written and read like any other configuration — over **SetParam / GetParam** (the *identical* message works on **fPort 85 (LoRaWAN)** and **NFC**) or with the local **`alarm` shell** command. There is no separate alarm command.
 
 > **Note on "slot":** the alarm rule *slot* (`0…15`) is distinct from the 1-Wire sensor *slot* (`s1…s4`); the shell calls the alarm one the rule **index**.
 
@@ -310,7 +310,7 @@ Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields
 | **Delete** a slot | `alarm clear <i>` | write `alarm_<i>` = 34 zero hex chars (present=0) |
 | **Delete all** | `alarm clear all` | clear each `alarm_<i>` |
 | **Deactivate** (keep the rule, stop evaluating) | — *(the shell always enables)* | write `alarm_<i>` packed with flags = present only (`01…`, enabled bit clear) |
-| **Read** | `alarm list [<i>]` | `get_param.alarms_field = [7+i]` → `config_dump.alarms.alarm_<i>` |
+| **Read** | `alarm list [<i>]` | `get_param.alarms_field = [3+i]` → `config_dump.alarms.alarm_<i>` |
 
 Shell `<args>` by kind: threshold `<lo> <hi> [hst]` · state `<from> <to>` · count `<N>`.
 
@@ -577,7 +577,8 @@ it, re-flash preserves it).
 
 The hall (`hall-left` / `hall-right`) and input (`input-a` / `input-b`) pulse totalizers used to live **only in RAM**, so any reset (watchdog, command, FUOTA) or power loss (battery swap, brownout) silently reset a metering total to zero. They are now **persisted to flash (NVS)** and **restored on boot**.
 
-- **Where:** a single small blob in the `storage` partition via the Zephyr Settings API (`counters/totals`), alongside config and the alarm-rule blob. (Not the `history` partition — a debug image is linked over that region.) No new configuration key, no wire-format change; the `reset_counters` command is unchanged.
+- **Where:** a single small blob in the `storage` partition via the Zephyr Settings API (`counters/totals`), alongside config and the alarm-rule blob. (Not the `history` partition — a debug image is linked over that region.) No new configuration key; the `reset_counters` command is unchanged.
+- **Enable flags grouping:** the per-channel enable toggles (`hall-left-counter` / `hall-right-counter` / `input-a-counter` / `input-b-counter`) are **sensor** configuration and live in the `sensors` SetParam/GetParam/ConfigDump submessage (they were moved out of `alarms`, which now holds only the rate-limit params and the dynamic-rule slots).
 - **Save cadence (decoupled from sending and from the LoRaWAN join state):**
   - When `interval_sample > 0`, the totals are written on **every sensor sample** (`interval_sample` cadence). This timer is armed at boot, so backups run even on a device that **never joins** (no gateway in range) — and the backup interval can be far tighter than the report/send interval (e.g. back up every 5 min while sending once an hour).
   - When `interval_sample == 0` (sensors are read inside the report cycle), the totals are written **once per `interval_report` cycle**.

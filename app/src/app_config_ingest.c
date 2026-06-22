@@ -325,6 +325,18 @@ int app_config_apply_sensors(const AppConfigMessage_Sensors *src, uint32_t *faul
 	if (src->has_sensor4_rom) {
 		memcpy(config->sensor4_rom, src->sensor4_rom, sizeof(config->sensor4_rom));
 	}
+	if (src->has_hall_left_counter) {
+		config->hall_left_counter = src->hall_left_counter;
+	}
+	if (src->has_hall_right_counter) {
+		config->hall_right_counter = src->hall_right_counter;
+	}
+	if (src->has_input_a_counter) {
+		config->input_a_counter = src->input_a_counter;
+	}
+	if (src->has_input_b_counter) {
+		config->input_b_counter = src->input_b_counter;
+	}
 	return ret;
 }
 
@@ -389,6 +401,22 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 		dst->has_sensor4_rom = true;
 		memcpy(dst->sensor4_rom, c->sensor4_rom, sizeof(c->sensor4_rom));
 	}
+	if (requested(ids, n, 15)) {
+		dst->has_hall_left_counter = true;
+		dst->hall_left_counter = c->hall_left_counter;
+	}
+	if (requested(ids, n, 16)) {
+		dst->has_hall_right_counter = true;
+		dst->hall_right_counter = c->hall_right_counter;
+	}
+	if (requested(ids, n, 17)) {
+		dst->has_input_a_counter = true;
+		dst->input_a_counter = c->input_a_counter;
+	}
+	if (requested(ids, n, 18)) {
+		dst->has_input_b_counter = true;
+		dst->input_b_counter = c->input_b_counter;
+	}
 }
 
 int app_config_apply_alarms(const AppConfigMessage_Alarms *src, uint32_t *fault_field)
@@ -417,18 +445,6 @@ int app_config_apply_alarms(const AppConfigMessage_Alarms *src, uint32_t *fault_
 		} else {
 			FAULT(2);
 		}
-	}
-	if (src->has_hall_left_counter) {
-		config->hall_left_counter = src->hall_left_counter;
-	}
-	if (src->has_hall_right_counter) {
-		config->hall_right_counter = src->hall_right_counter;
-	}
-	if (src->has_input_a_counter) {
-		config->input_a_counter = src->input_a_counter;
-	}
-	if (src->has_input_b_counter) {
-		config->input_b_counter = src->input_b_counter;
 	}
 	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 	if (src->has_alarm_0) {
@@ -510,82 +526,66 @@ void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, s
 		dst->alarm_notif_time = c->alarm_notif_time;
 	}
 	if (requested(ids, n, 3)) {
-		dst->has_hall_left_counter = true;
-		dst->hall_left_counter = c->hall_left_counter;
-	}
-	if (requested(ids, n, 4)) {
-		dst->has_hall_right_counter = true;
-		dst->hall_right_counter = c->hall_right_counter;
-	}
-	if (requested(ids, n, 5)) {
-		dst->has_input_a_counter = true;
-		dst->input_a_counter = c->input_a_counter;
-	}
-	if (requested(ids, n, 6)) {
-		dst->has_input_b_counter = true;
-		dst->input_b_counter = c->input_b_counter;
-	}
-	if (requested(ids, n, 7)) {
 		dst->has_alarm_0 = true;
 		memcpy(dst->alarm_0, c->alarm_0, sizeof(c->alarm_0));
 	}
-	if (requested(ids, n, 8)) {
+	if (requested(ids, n, 4)) {
 		dst->has_alarm_1 = true;
 		memcpy(dst->alarm_1, c->alarm_1, sizeof(c->alarm_1));
 	}
-	if (requested(ids, n, 9)) {
+	if (requested(ids, n, 5)) {
 		dst->has_alarm_2 = true;
 		memcpy(dst->alarm_2, c->alarm_2, sizeof(c->alarm_2));
 	}
-	if (requested(ids, n, 10)) {
+	if (requested(ids, n, 6)) {
 		dst->has_alarm_3 = true;
 		memcpy(dst->alarm_3, c->alarm_3, sizeof(c->alarm_3));
 	}
-	if (requested(ids, n, 11)) {
+	if (requested(ids, n, 7)) {
 		dst->has_alarm_4 = true;
 		memcpy(dst->alarm_4, c->alarm_4, sizeof(c->alarm_4));
 	}
-	if (requested(ids, n, 12)) {
+	if (requested(ids, n, 8)) {
 		dst->has_alarm_5 = true;
 		memcpy(dst->alarm_5, c->alarm_5, sizeof(c->alarm_5));
 	}
-	if (requested(ids, n, 13)) {
+	if (requested(ids, n, 9)) {
 		dst->has_alarm_6 = true;
 		memcpy(dst->alarm_6, c->alarm_6, sizeof(c->alarm_6));
 	}
-	if (requested(ids, n, 14)) {
+	if (requested(ids, n, 10)) {
 		dst->has_alarm_7 = true;
 		memcpy(dst->alarm_7, c->alarm_7, sizeof(c->alarm_7));
 	}
-	if (requested(ids, n, 15)) {
+	if (requested(ids, n, 11)) {
 		dst->has_alarm_8 = true;
 		memcpy(dst->alarm_8, c->alarm_8, sizeof(c->alarm_8));
 	}
-	if (requested(ids, n, 16)) {
+	if (requested(ids, n, 12)) {
 		dst->has_alarm_9 = true;
 		memcpy(dst->alarm_9, c->alarm_9, sizeof(c->alarm_9));
 	}
-	if (requested(ids, n, 17)) {
+	if (requested(ids, n, 13)) {
 		dst->has_alarm_10 = true;
 		memcpy(dst->alarm_10, c->alarm_10, sizeof(c->alarm_10));
 	}
-	if (requested(ids, n, 18)) {
+	if (requested(ids, n, 14)) {
 		dst->has_alarm_11 = true;
 		memcpy(dst->alarm_11, c->alarm_11, sizeof(c->alarm_11));
 	}
-	if (requested(ids, n, 19)) {
+	if (requested(ids, n, 15)) {
 		dst->has_alarm_12 = true;
 		memcpy(dst->alarm_12, c->alarm_12, sizeof(c->alarm_12));
 	}
-	if (requested(ids, n, 20)) {
+	if (requested(ids, n, 16)) {
 		dst->has_alarm_13 = true;
 		memcpy(dst->alarm_13, c->alarm_13, sizeof(c->alarm_13));
 	}
-	if (requested(ids, n, 21)) {
+	if (requested(ids, n, 17)) {
 		dst->has_alarm_14 = true;
 		memcpy(dst->alarm_14, c->alarm_14, sizeof(c->alarm_14));
 	}
-	if (requested(ids, n, 22)) {
+	if (requested(ids, n, 18)) {
 		dst->has_alarm_15 = true;
 		memcpy(dst->alarm_15, c->alarm_15, sizeof(c->alarm_15));
 	}

@@ -78,10 +78,6 @@ struct app_config {
 	bool cap_pir_detector;
 	bool cap_w1_sensors;
 	bool cap_accelerometer;
-	bool hall_left_counter;
-	bool hall_right_counter;
-	bool input_a_counter;
-	bool input_b_counter;
 	uint8_t alarm_0[17];
 	uint8_t alarm_1[17];
 	uint8_t alarm_2[17];
@@ -103,6 +99,10 @@ struct app_config {
 	uint8_t sensor2_rom[8];
 	uint8_t sensor3_rom[8];
 	uint8_t sensor4_rom[8];
+	bool hall_left_counter;
+	bool hall_right_counter;
+	bool input_a_counter;
+	bool input_b_counter;
 };
 
 extern struct app_config g_app_config;
