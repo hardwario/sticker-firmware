@@ -210,7 +210,7 @@ The same message is returned on demand by the `get_info` command (over LoRaWAN *
 
 ### Claim token (#170)
 
-The **claim token** is a 128-bit device-identity value, on the same footing as the serial number, used by the backend to claim/associate the unit. It is **set once during commissioning** with the shell command **`config claim-token <32-hex>`** (then `settings save`), and is afterwards **immutable** — any further write (shell, `SetParam`, NFC, LoRaWAN) is rejected (`claim-token already set`). It survives `settings reset` and is cleared only by a full NVS erase. Unlike the LoRaWAN/secret keys it is **not** confidential: it is reported in the `Info` message and readable over both NFC and LoRaWAN.
+The **claim token** is a 128-bit device-identity value, on the same footing as the serial number, used by the backend to claim/associate the unit. It is **set once during commissioning** with the shell command **`config claim-token <32-hex>`** (then `settings save`), and is afterwards **immutable** — any further write (shell, `SetParam`, NFC, LoRaWAN) is rejected (`claim-token already set`). It survives `settings reset` and is cleared only by a full NVS erase. Unlike the LoRaWAN/secret keys it is **not** confidential: it is reported in the `Info` message and readable over both NFC and LoRaWAN. Locally, **`ats device info`** prints it (and the secret key) next to the serial number, firmware and uptime.
 
 ---
 
