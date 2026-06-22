@@ -429,6 +429,8 @@ This key rename kept the protobuf field numbers; the user-facing keys and code i
 
 > **Wire-format note (#166):** the config protobuf field numbers were later **renumbered** to a contiguous `1..N` per submessage (`lorawan`/`application`/`sensors`/`alarms`) — a one-off **breaking** change to the over-the-air `SetParam`/`GetParam`/`ConfigDump` framing for v1.4.0. Any client that builds/parses the config protobuf directly (the NFC manager app, external decoders) must re-sync to the field numbers in `app_config.proto`. The flat NVS settings keys are by name and are unaffected.
 
+> **Access model (dev note):** each parameter in `app_config.yml` declares **who may read and write it** with two transport lists — `readable` and `writable`, each a subset of `{shell, nfc, lrw}` (omitted ⇒ all three). `west configen` derives the internal generator flags from them (shell command vs not, ConfigDump inclusion, NFC-only keys, off-wire identity blobs), so the read/write matrix is the single source of truth and `proto_group` is purely a layout choice (root vs submessage) with no access side-effect. Example: `secret_key` is `readable/writable: [shell]` (local only); `claim_token` is `readable: [shell, nfc, lrw]` + `writable: [shell]` (public, write-once); LoRaWAN keys are `readable: [shell, nfc]` (never dumped over LoRaWAN). This is an authoring-side change only — no wire-format impact.
+
 ---
 
 ## 10. Local NFC access (NEW)
