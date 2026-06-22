@@ -292,7 +292,17 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
+{% if param.write_once | default(false) %}
+	/* write-once (#170): refuse to overwrite a value that is already set. The
+	 * all-zero state is the "unset" sentinel; once any byte is non-zero the
+	 * field is locked (commission once, then immutable). */
+	for (size_t i = 0; i < sizeof(m_{{ module.name }}.{{ param.name | c_name }}); i++) {
+		if (m_{{ module.name }}.{{ param.name | c_name }}[i] != 0) {
+			shell_error(shell, "{{ param.name | settings_key }} already set (immutable)");
+			return -EACCES;
+		}
+	}
+{% endif %}
 	memcpy(m_{{ module.name }}.{{ param.name | c_name }}, tmp, sizeof(tmp));
 
 	return 0;

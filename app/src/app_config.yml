@@ -136,6 +136,23 @@ parameters:
     preserve_on_reset: true
     help: "Get/Set nonce counter (unsigned integer)."
 
+  # Device claim token (#170): 128-bit identity, on the same level as
+  # serial_number. Written ONCE during commissioning via `config claim-token`
+  # and then immutable (write_once latch in the shell setter — the only write
+  # path; root fields are not in SetParam). Read back over NFC + LoRaWAN via the
+  # get_info Info message. Off the wire in AppConfigMessage (proto_callback, like
+  # secret_key); preserved across reset, cleared only by a full NVS erase.
+  - name: claim_token
+    proto_group: root
+    proto_id: 9
+    dump: false
+    proto_callback: true
+    type: bytes
+    size: 16
+    write_once: true
+    preserve_on_reset: true
+    help: "Get/Set device claim token (32 hexadecimal digits); write-once at commissioning."
+
   - name: calibration
     proto_group: application
     proto_id: 1

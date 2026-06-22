@@ -230,8 +230,11 @@ function _decodeInfo(bytes, start, end) {
       else if (field === 7) info.unix_time = v.value;
       else if (field === 8) info.debug = v.value !== 0;
     } else if (wire === 2) {
-      // Skip unknown length-delimited fields (forward compatibility).
       var len = _pbReadVarint(bytes, pos); pos = len.next;
+      // field 9 = claim_token (#170): 128-bit device claim token, presented as
+      // hex. Omitted by the device until commissioned.
+      if (field === 9) info.claim_token = _pbBytesToHex(bytes.slice(pos, pos + len.value));
+      // else: skip unknown length-delimited fields (forward compatibility).
       pos += len.value;
     } else {
       break;

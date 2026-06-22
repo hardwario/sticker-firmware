@@ -92,6 +92,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.serial_number));
 	SETTINGS_SET("nonce-counter", &m_app_config.nonce_counter,
 		     sizeof(m_app_config.nonce_counter));
+	SETTINGS_SET("claim-token", m_app_config.claim_token, sizeof(m_app_config.claim_token));
 	SETTINGS_SET("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
 	SETTINGS_SET("interval-sample", &m_app_config.interval_sample,
 		     sizeof(m_app_config.interval_sample));
@@ -190,6 +191,8 @@ static int h_commit(void)
 		memcpy(m_app_config.secret_key, stored.secret_key, sizeof(m_app_config.secret_key));
 		m_app_config.serial_number = stored.serial_number;
 		m_app_config.nonce_counter = stored.nonce_counter;
+		memcpy(m_app_config.claim_token, stored.claim_token,
+		       sizeof(m_app_config.claim_token));
 		m_app_config.lrw_region = stored.lrw_region;
 		m_app_config.lrw_sub_band = stored.lrw_sub_band;
 		m_app_config.lrw_network = stored.lrw_network;
@@ -285,6 +288,7 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.serial_number));
 	EXPORT_FUNC("nonce-counter", &m_app_config.nonce_counter,
 		    sizeof(m_app_config.nonce_counter));
+	EXPORT_FUNC("claim-token", m_app_config.claim_token, sizeof(m_app_config.claim_token));
 	EXPORT_FUNC("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
 	EXPORT_FUNC("interval-sample", &m_app_config.interval_sample,
 		    sizeof(m_app_config.interval_sample));
@@ -464,6 +468,20 @@ static void print_serial_number(const struct shell *shell)
 static void print_nonce_counter(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " nonce-counter %u", m_app_config.nonce_counter);
+}
+
+static void print_claim_token(const struct shell *shell)
+{
+	char buf[2 * sizeof(m_app_config.claim_token) + 1];
+
+	int ret = bin2hex(m_app_config.claim_token, sizeof(m_app_config.claim_token), buf,
+			  sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " claim-token %s", buf);
 }
 
 static void print_calibration(const struct shell *shell)
@@ -839,6 +857,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_secret_key(shell);
 	print_serial_number(shell);
 	print_nonce_counter(shell);
+	print_claim_token(shell);
 	print_calibration(shell);
 	print_interval_sample(shell);
 	print_interval_report(shell);
@@ -913,7 +932,6 @@ static int cmd_secret_key(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
 	memcpy(m_app_config.secret_key, tmp, sizeof(tmp));
 
 	return 0;
@@ -995,6 +1013,51 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 
 	m_app_config.nonce_counter = (uint32_t)value;
 	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_claim_token(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_claim_token(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.claim_token)) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.claim_token)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+	/* write-once (#170): refuse to overwrite a value that is already set. The
+	 * all-zero state is the "unset" sentinel; once any byte is non-zero the
+	 * field is locked (commission once, then immutable). */
+	for (size_t i = 0; i < sizeof(m_app_config.claim_token); i++) {
+		if (m_app_config.claim_token[i] != 0) {
+			shell_error(shell, "claim-token already set (immutable)");
+			return -EACCES;
+		}
+	}
+	memcpy(m_app_config.claim_token, tmp, sizeof(tmp));
+
 	return 0;
 }
 
@@ -1231,7 +1294,6 @@ static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
 	memcpy(m_app_config.lrw_deveui, tmp, sizeof(tmp));
 
 	return 0;
@@ -1268,7 +1330,6 @@ static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
 	memcpy(m_app_config.lrw_joineui, tmp, sizeof(tmp));
 
 	return 0;
@@ -1305,7 +1366,6 @@ static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
 	memcpy(m_app_config.lrw_nwkkey, tmp, sizeof(tmp));
 
 	return 0;
@@ -1342,7 +1402,6 @@ static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
 	memcpy(m_app_config.lrw_appkey, tmp, sizeof(tmp));
 
 	return 0;
@@ -1379,7 +1438,6 @@ static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
 	memcpy(m_app_config.lrw_devaddr, tmp, sizeof(tmp));
 
 	return 0;
@@ -1416,7 +1474,6 @@ static int cmd_lrw_nwkskey(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
 	memcpy(m_app_config.lrw_nwkskey, tmp, sizeof(tmp));
 
 	return 0;
@@ -1453,7 +1510,6 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
 	memcpy(m_app_config.lrw_appskey, tmp, sizeof(tmp));
 
 	return 0;
@@ -1605,7 +1661,6 @@ static int cmd_sensor1_rom(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
 	memcpy(m_app_config.sensor1_rom, tmp, sizeof(tmp));
 
 	return 0;
@@ -1642,7 +1697,6 @@ static int cmd_sensor2_rom(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
 	memcpy(m_app_config.sensor2_rom, tmp, sizeof(tmp));
 
 	return 0;
@@ -1679,7 +1733,6 @@ static int cmd_sensor3_rom(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
 	memcpy(m_app_config.sensor3_rom, tmp, sizeof(tmp));
 
 	return 0;
@@ -1716,7 +1769,6 @@ static int cmd_sensor4_rom(const struct shell *shell, size_t argc, char **argv)
 		shell_error(shell, "%s", m_msg_invalid_value);
 		return -EINVAL;
 	}
-
 	memcpy(m_app_config.sensor4_rom, tmp, sizeof(tmp));
 
 	return 0;
@@ -1755,6 +1807,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(nonce-counter, NULL,
 	              "Get/Set nonce counter (unsigned integer).",
 	              cmd_nonce_counter, 1, 1),
+
+	SHELL_CMD_ARG(claim-token, NULL,
+	              "Get/Set device claim token (32 hexadecimal digits); write-once at commissioning.",
+	              cmd_claim_token, 1, 1),
 
 	SHELL_CMD_ARG(calibration, NULL,
 	              "Get/Set calibration mode (true/false).",
@@ -1941,6 +1997,7 @@ int app_config_factory_reset(void)
 	memcpy(m_app_config.secret_key, preserved.secret_key, sizeof(m_app_config.secret_key));
 	m_app_config.serial_number = preserved.serial_number;
 	m_app_config.nonce_counter = preserved.nonce_counter;
+	memcpy(m_app_config.claim_token, preserved.claim_token, sizeof(m_app_config.claim_token));
 	m_app_config.lrw_region = preserved.lrw_region;
 	m_app_config.lrw_sub_band = preserved.lrw_sub_band;
 	m_app_config.lrw_network = preserved.lrw_network;
