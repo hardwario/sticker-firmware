@@ -114,10 +114,10 @@ def test_build_proto_model_structure():
     subs = {s["name"]: s for s in model["submessages"]}
     assert subs["Lorawan"]["fields"][0]["name"] == "region"
     app = subs["Application"]
-    assert 3 in app["reserved"]  # interval_aggreg
+    assert app["reserved"] == []  # #166 dropped the leftover gaps
     ids = {f["name"]: f["id"] for f in app["fields"]}
-    assert ids["history_enable"] == 49 and ids["history_sensors"] == 50
-    assert 3 not in ids.values()  # never reused
+    assert ids["history_enable"] == 4 and ids["history_sensors"] == 5
+    assert sorted(ids.values()) == [1, 2, 3, 4, 5]  # contiguous after #166
 
 
 # --- allocator + guard ----------------------------------------------------
@@ -269,7 +269,9 @@ COMMAND_VECTORS = {
     # set_param: lorawan.adr=1, application.interval_report=120,
     # sensors.cap_barometer=true (a sensors-submessage field; temperature-corr
     # params were removed, threshold alarm keys retired with dynamic-alarms).
-    "set_param": "0801120d0a021801120220782203e80201",
+    # Field numbers are the contiguous post-#166 ids (adr=4, interval_report=3,
+    # cap_barometer=6).
+    "set_param": "0801120c0a0220011202187822023001",
     "get_param": "08021a070a010312020407",
     "reboot": "08083a00",
 }

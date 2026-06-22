@@ -72,8 +72,8 @@ ZTEST(cmd, test_set_param_applies_and_acks)
 
 	reset_cfg();
 	/* seq1 set_param{ lorawan.adr=true, application{interval_report=120},
-	 *                 sensors{cap_barometer=true} } (config regroup) */
-	enum app_cmd_action a = handle("0801120d0a021801120220782203e80201", &r);
+	 *                 sensors{cap_barometer=true} } (contiguous #166 ids) */
+	enum app_cmd_action a = handle("0801120c0a0220011202187822023001", &r);
 
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action expected");
 	zassert_equal(r.which_body, Response_ack_tag, "expected Ack, which=%d", r.which_body);
@@ -90,12 +90,12 @@ ZTEST(cmd, test_set_param_out_of_range)
 
 	reset_cfg();
 	/* seq3 set_param{ application{ interval_report=10 } } — below min 60 */
-	handle("080312041202200a", &r);
+	handle("080312041202180a", &r);
 
 	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
 		      r.body.error.code);
-	zassert_equal(r.body.error.fault_field, 4, "fault_field %u", r.body.error.fault_field);
+	zassert_equal(r.body.error.fault_field, 3, "fault_field %u", r.body.error.fault_field);
 	/* invalid value must NOT be applied */
 	zassert_not_equal(g_app_config.interval_report, 10, "out-of-range value leaked");
 }
@@ -109,9 +109,9 @@ ZTEST(cmd, test_get_param_config_dump)
 	g_app_config.interval_report = 120;
 	g_app_config.cap_barometer = true;
 
-	/* seq2 get_param{ lorawan_field=[3 adr], application_field=[4 ireport],
-	 *                 sensors_field=[45 cap_barometer] } */
-	handle("08021a090a01031201041a012d", &r);
+	/* seq2 get_param{ lorawan_field=[4 adr], application_field=[3 ireport],
+	 *                 sensors_field=[6 cap_barometer] } */
+	handle("08021a090a01041201031a0106", &r);
 
 	zassert_equal(r.which_body, Response_config_dump_tag, "expected ConfigDump, which=%d",
 		      r.which_body);
@@ -131,9 +131,9 @@ ZTEST(cmd, test_get_param_paging)
 {
 	Response r;
 
-	/* seq2 get_param{ lorawan_field=[5 deveui, 6 joineui, 9 devaddr] } — page omitted (0). */
+	/* seq2 get_param{ lorawan_field=[6 deveui, 7 joineui, 10 devaddr] } — page omitted (0). */
 	reset_cfg();
-	handle("08021a050a03050609", &r);
+	handle("08021a050a0306070a", &r);
 	zassert_equal(r.which_body, Response_config_dump_tag, "page0 which=%d", r.which_body);
 	zassert_equal(r.body.config_dump.page_index, 0, "page0 index");
 	zassert_equal(r.body.config_dump.page_count, 2, "page_count %u",
@@ -144,7 +144,7 @@ ZTEST(cmd, test_get_param_paging)
 
 	/* Same request with page=1 (field 5 varint = 0x28 0x01). */
 	reset_cfg();
-	handle("08021a070a030506092801", &r);
+	handle("08021a070a0306070a2801", &r);
 	zassert_equal(r.which_body, Response_config_dump_tag, "page1 which=%d", r.which_body);
 	zassert_equal(r.body.config_dump.page_index, 1, "page1 index");
 	zassert_equal(r.body.config_dump.page_count, 2, "page1 count");
@@ -154,7 +154,7 @@ ZTEST(cmd, test_get_param_paging)
 
 	/* Out-of-range page → Error. */
 	reset_cfg();
-	handle("08021a070a030506092805", &r);
+	handle("08021a070a0306070a2805", &r);
 	zassert_equal(r.which_body, Response_error_tag, "oob page should Error, which=%d",
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
@@ -162,7 +162,7 @@ ZTEST(cmd, test_get_param_paging)
 }
 
 /* The LoRaWAN crypto keys are read-back over NFC only — never over LoRaWAN
- * (the fPort-85 payload is plain protobuf). A get_param requesting nwkkey (tag 7)
+ * (the fPort-85 payload is plain protobuf). A get_param requesting nwkkey (tag 8)
  * must dump it over NFC and omit it over LoRaWAN. (#162) */
 ZTEST(cmd, test_get_param_keys_nfc_only)
 {
@@ -172,8 +172,8 @@ ZTEST(cmd, test_get_param_keys_nfc_only)
 	g_app_config.lrw_nwkkey[0] = 0xAB;
 	g_app_config.lrw_nwkkey[15] = 0xCD;
 
-	/* seq3 get_param{ lorawan_field=[7 nwkkey] } */
-	const char *cmd = "08031a030a0107";
+	/* seq3 get_param{ lorawan_field=[8 nwkkey] } */
+	const char *cmd = "08031a030a0108";
 
 	/* NFC: key is dumped. */
 	handle_via(APP_CMD_TRANSPORT_NFC, cmd, &r);

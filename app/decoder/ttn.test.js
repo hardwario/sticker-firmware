@@ -18,7 +18,7 @@ const toHex = (bytes) => Buffer.from(bytes).toString("hex");
 const COMMANDS = [
   {
     name: "set_param (lorawan.adr + application interval_report + sensors cap_barometer)",
-    hex: "0801120d0a021801120220782203e80201",
+    hex: "0801120c0a0220011202187822023001",
     data: {
       seq: 1,
       command: "set_param",
@@ -39,10 +39,10 @@ const COMMANDS = [
     },
   },
   {
-    // accel_motion_sensitivity is enum-valued (sensors field 54): encode accepts
+    // accel_motion_sensitivity is enum-valued (sensors field 10): encode accepts
     // the symbolic name, decode renders it back ("high" = 3).
     name: "set_param (sensors accel_motion_sensitivity enum)",
-    hex: "080312052203b00303",
+    hex: "0803120422025003",
     data: {
       seq: 3,
       command: "set_param",
@@ -96,9 +96,9 @@ test("encode/decode are symmetric (byte-exact round-trip)", () => {
   }
 });
 
-// #92: cap_w1_sensors (sensors tag 60) reachable via the formatter both ways
+// #92: cap_w1_sensors (sensors tag 8) reachable via the formatter both ways
 // (was missing pre-regroup; now in the sensors submessage).
-test("set_param cap_w1_sensors (tag 60) is reachable both ways (#92)", () => {
+test("set_param cap_w1_sensors (tag 8) is reachable both ways (#92)", () => {
   const enc = codec.encodeDownlink({
     data: { seq: 1, command: "set_param", set_param: { sensors: { cap_w1_sensors: true } } },
   });
@@ -477,8 +477,9 @@ test("alarm slot set_param encodes as native bytes and round-trips (LRW)", () =>
   assert.equal(dec.set_param.alarms.alarm_0, rule);
 
   // ConfigDump (uplink) presents an alarm slot as hex too. Wire: ver 01, seq 1,
-  // config_dump{ page_count=1, alarms{ alarm_0 } } (as captured from the device).
-  const dump = hex("010801221810013214b20311" + rule);
+  // config_dump{ page_count=1, alarms{ alarm_0 } }. alarm_0 = alarms field 7
+  // after the #166 renumber (tag 0x3a).
+  const dump = hex("0108012217100132133a11" + rule);
   const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
   assert.equal(u.config_dump.alarms.alarm_0, rule);
 });
