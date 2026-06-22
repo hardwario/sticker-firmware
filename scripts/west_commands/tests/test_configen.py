@@ -29,7 +29,11 @@ GEN_FILES = ["app_config.c", "app_config.h", "app_config.proto", "app_config.opt
 
 def _load_config():
     with open(YAML) as f:
-        return pyyaml.safe_load(f)
+        cfg = pyyaml.safe_load(f)
+    # Mirror do_run: derive the internal access flags (dump/no_shell/...) from the
+    # readable/writable transport lists before the model builders consume them.
+    configen.normalize_access(cfg)
+    return cfg
 
 
 def _run_configen(out_dir):
@@ -102,6 +106,53 @@ def test_no_shell_omits_shell_command():
     assert "config->alarm_0" in ingest
     # A normal param in the same group keeps its shell command.
     assert "cmd_alarm_limit(" in c
+
+
+def test_normalize_access_derives_internal_flags():
+    """readable/writable transport lists are the source of truth; configen derives
+    the legacy dump/dump_nfc_only/no_shell/readonly/proto_callback flags from them."""
+    cfg = {"parameters": [
+        # secret: shell-only read+write, root bytes -> off-wire callback, no dump
+        {"name": "secret_key", "proto_group": "root", "type": "bytes",
+         "readable": ["shell"], "writable": ["shell"]},
+        # claim: readable everywhere, write-once shell only; root bytes -> callback
+        {"name": "claim_token", "proto_group": "root", "type": "bytes",
+         "readable": ["shell", "nfc", "lrw"], "writable": ["shell"]},
+        # key: NFC-readable only (never over LoRaWAN), writable everywhere
+        {"name": "lrw_nwkkey", "proto_group": "lorawan", "type": "bytes",
+         "readable": ["shell", "nfc"]},
+        # packed slot: no shell entry, air read/write only
+        {"name": "alarm_0", "proto_group": "alarms", "type": "bytes",
+         "readable": ["nfc", "lrw"], "writable": ["nfc", "lrw"]},
+        # plain param: lists omitted -> all transports, normal flags
+        {"name": "interval_report", "proto_group": "application", "type": "int"},
+    ]}
+    configen.normalize_access(cfg)
+    by = {p["name"]: p for p in cfg["parameters"]}
+
+    assert by["secret_key"]["dump"] is False
+    assert by["secret_key"]["proto_callback"] is True
+    assert "no_shell" not in by["secret_key"] and "readonly" not in by["secret_key"]
+
+    assert by["claim_token"]["proto_callback"] is True  # root bytes -> off-wire
+    assert by["claim_token"]["dump"] is True             # readable over the air
+    assert "readonly" not in by["claim_token"]           # shell is writable
+
+    assert by["lrw_nwkkey"]["dump_nfc_only"] is True
+    assert "proto_callback" not in by["lrw_nwkkey"]      # submessage bytes = native
+
+    assert by["alarm_0"]["no_shell"] is True
+    assert "proto_callback" not in by["alarm_0"]
+
+    assert by["interval_report"]["dump"] is True
+    assert "no_shell" not in by["interval_report"]
+
+
+def test_normalize_access_rejects_bad_transport():
+    cfg = {"parameters": [{"name": "x", "proto_group": "root", "type": "bool",
+                           "readable": ["shell", "ble"]}]}
+    with pytest.raises(SystemExit):
+        configen.normalize_access(cfg)
 
 
 def test_build_proto_model_structure():

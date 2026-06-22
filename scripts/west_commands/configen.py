@@ -28,11 +28,27 @@ Parameter options:
 - minlen/maxlen: length constraints for string type
 - array: array size for numeric types
 - hidden: hide from shell 'show' command
-- readonly: prevent shell modification
-- no_shell: skip shell get/set command generation entirely (param still has
-  NVS/proto/ingest; use for bulk/packed params not meant for manual shell use)
 - precision: decimal places for float/double display
 - format: display format (hex/dec for integers, printf format for uint)
+- write_once: once the field holds a non-zero value the shell setter refuses to
+  overwrite it (commission-once identity fields, e.g. claim_token)
+
+Access control (readable / writable):
+  Each parameter declares who may read and who may write it, as a subset of the
+  transports {shell, nfc, lrw}. Both lists default to all three (the common
+  case, so they are usually omitted):
+    readable: [shell, nfc, lrw]   # shell = `config <name>` / `config show`;
+                                  # nfc/lrw = ConfigDump (get_param/get_config)
+    writable: [shell, nfc, lrw]   # shell = `config <name>` set; nfc/lrw = SetParam
+  configen derives the internal generator flags from these (see normalize_access):
+    - no_shell      <- shell in neither list
+    - readonly      <- shell readable but not writable
+    - dump          <- readable over nfc or lrw
+    - dump_nfc_only <- readable over nfc but not lrw (e.g. LoRaWAN keys)
+  Root `bytes` identity blobs (secret_key, claim_token) are emitted as a nanopb
+  callback and kept off the wire automatically (their air read, if any, goes via
+  a hand-written message such as Info). `proto_group` is a layout choice only
+  (root vs submessage); it no longer implies anything about access.
 """
 
 import argparse
@@ -381,6 +397,54 @@ def _proto_groups(config):
     if not proto:
         return None, None
     return proto, {g["key"]: g for g in proto["groups"]}
+
+
+TRANSPORTS = ("shell", "nfc", "lrw")
+
+
+def normalize_access(config):
+    """Derive the internal per-parameter flags from the `readable`/`writable`
+    transport lists (the single source of truth for who may read/write a field).
+
+    Each list is a subset of {shell, nfc, lrw}; an omitted list defaults to all
+    three (the common case). From them we compute the legacy flags the code
+    generators already consume, so the templates stay unchanged:
+
+      - no_shell      = shell in neither readable nor writable (no `config` entry)
+      - readonly      = shell may read but not write
+      - dump          = field is readable over the air (nfc or lrw) -> ConfigDump
+      - dump_nfc_only = readable over nfc but NOT lrw (keys: LNS must not see them)
+      - proto_callback = root `bytes` (identity blobs stay off the wire, as
+                         before) — structural, independent of the access lists
+
+    Idempotent: callable more than once (the model builders and do_run share it).
+    """
+    for p in config.get("parameters", []):
+        readable = p.get("readable", list(TRANSPORTS))
+        writable = p.get("writable", list(TRANSPORTS))
+        for which, lst in (("readable", readable), ("writable", writable)):
+            bad = set(lst) - set(TRANSPORTS)
+            if bad:
+                log.die(f"parameter '{p.get('name')}' has invalid {which} "
+                        f"transport(s) {sorted(bad)}; valid: {list(TRANSPORTS)}")
+        r, w = set(readable), set(writable)
+
+        if "shell" not in r and "shell" not in w:
+            p["no_shell"] = True
+        if "shell" in r and "shell" not in w:
+            p["readonly"] = True
+
+        air_read = ("nfc" in r) or ("lrw" in r)
+        p["dump"] = air_read
+        if ("nfc" in r) and ("lrw" not in r):
+            p["dump_nfc_only"] = True
+
+        # Root byte blobs (secret_key / claim_token) stay off the wire: emitted as
+        # a nanopb callback in the proto, never in SetParam/ConfigDump. The air
+        # read for these identity fields (claim_token) goes via the hand-written
+        # Info message, not the generated config path.
+        if p.get("proto_group") == "root" and p.get("type") == "bytes":
+            p["proto_callback"] = True
 
 
 def allocate_proto_ids(config, rt_doc):
@@ -920,6 +984,10 @@ class Configen(WestCommand):
         # Validate parameters
         for param in parameters:
             self._validate_param(param)
+
+        # Derive the internal access flags (dump / no_shell / ...) from the
+        # readable/writable transport lists before any model is built.
+        normalize_access(config)
 
         # Setup Jinja2 environment
         templates_dir = args.templates_dir or TEMPLATES_DIR
