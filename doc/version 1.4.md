@@ -121,6 +121,8 @@ A runtime `w1_scan` / enroll re-binds the slots and re-arms machine-probe tilt d
 
 When alarms occur, the device sends a batch of alarm events on **fPort 3** as a **protobuf `AlarmReport`** (same wire family as the fPort-2 telemetry and the fPort-85 responses), so it decodes with the generated codec rather than a packed byte layout.
 
+The frame is prefixed with the same **1-byte format version** (`APP_PROTO_VERSION = 0x01`) as fPort 2 and fPort 85, so every protobuf uplink shares the rule *"byte 0 = version, protobuf starts at byte 1"* (#165). `decodeUplink` strips and validates it. *(fPort 1 legacy bitmap and fPort 10 calibration remain unversioned.)*
+
 ### Message
 
 ```proto

@@ -835,12 +835,20 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total,
 	}
 	report.events_count = (pb_size_t)n;
 
-	pb_ostream_t ostream = pb_ostream_from_buffer(out, out_cap);
+	/* fPort 3 carries the same 1-byte APP_PROTO_VERSION prefix as fPort 2
+	 * (telemetry) and fPort 85 (responses) so every protobuf uplink frame is
+	 * uniformly versioned (#165). */
+	if (out_cap < 1) {
+		return -EMSGSIZE;
+	}
+	out[0] = APP_PROTO_VERSION;
+
+	pb_ostream_t ostream = pb_ostream_from_buffer(out + 1, out_cap - 1);
 	if (!pb_encode(&ostream, AlarmReport_fields, &report)) {
 		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
 		return -EMSGSIZE;
 	}
 
-	*out_len = ostream.bytes_written;
+	*out_len = ostream.bytes_written + 1;
 	return 0;
 }
