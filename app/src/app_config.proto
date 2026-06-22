@@ -29,28 +29,27 @@ message AppConfigMessage {
         }
 
         optional Region region = 1;
-        optional Network network = 2;
-        optional bool adr = 3;
-        optional Activation activation = 4;
-        optional bytes deveui = 5;
-        optional bytes joineui = 6;
-        optional bytes nwkkey = 7;
-        optional bytes appkey = 8;
-        optional bytes devaddr = 9;
-        optional bytes nwkskey = 10;
-        optional bytes appskey = 11;
-        optional uint32 sub_band = 12;
+        optional uint32 sub_band = 2;
+        optional Network network = 3;
+        optional bool adr = 4;
+        optional Activation activation = 5;
+        optional bytes deveui = 6;
+        optional bytes joineui = 7;
+        optional bytes nwkkey = 8;
+        optional bytes appkey = 9;
+        optional bytes devaddr = 10;
+        optional bytes nwkskey = 11;
+        optional bytes appskey = 12;
         optional uint32 link_check_interval = 13;
         optional uint32 link_check_fail_rejoin = 14;
     }
 
     message Application {
-        reserved 3;
         optional bool calibration = 1;
         optional uint32 interval_sample = 2;
-        optional uint32 interval_report = 4;
-        optional bool history_enable = 49;
-        optional uint32 history_sensors = 50;
+        optional uint32 interval_report = 3;
+        optional bool history_enable = 4;
+        optional uint32 history_sensors = 5;
     }
 
     message Sensors {
@@ -61,79 +60,45 @@ message AppConfigMessage {
             HIGH = 3;
         }
 
-        reserved 37;
-        reserved 38;
-        reserved 39;
-        reserved 47;
-        reserved 48;
-        optional bool cap_hall_left = 40;
-        optional bool cap_hall_right = 41;
-        optional bool cap_input_a = 42;
-        optional bool cap_input_b = 43;
-        optional bool cap_light_sensor = 44;
-        optional bool cap_barometer = 45;
-        optional bool cap_pir_detector = 46;
-        optional MotionSensitivity accel_motion_sensitivity = 54;
-        optional bool cap_accelerometer = 55;
-        optional bytes sensor1_rom = 56;
-        optional bytes sensor2_rom = 57;
-        optional bytes sensor3_rom = 58;
-        optional bytes sensor4_rom = 59;
-        optional bool cap_w1_sensors = 60;
+        optional bool cap_hall_left = 1;
+        optional bool cap_hall_right = 2;
+        optional bool cap_input_a = 3;
+        optional bool cap_input_b = 4;
+        optional bool cap_light_sensor = 5;
+        optional bool cap_barometer = 6;
+        optional bool cap_pir_detector = 7;
+        optional bool cap_w1_sensors = 8;
+        optional bool cap_accelerometer = 9;
+        optional MotionSensitivity accel_motion_sensitivity = 10;
+        optional bytes sensor1_rom = 11;
+        optional bytes sensor2_rom = 12;
+        optional bytes sensor3_rom = 13;
+        optional bytes sensor4_rom = 14;
     }
 
     message Alarms {
-        reserved 5;
-        reserved 6;
-        reserved 7;
-        reserved 8;
-        reserved 9;
-        reserved 10;
-        reserved 11;
-        reserved 12;
-        reserved 13;
-        reserved 14;
-        reserved 15;
-        reserved 16;
-        reserved 17;
-        reserved 18;
-        reserved 19;
-        reserved 20;
-        reserved 21;
-        reserved 22;
-        reserved 23;
-        reserved 24;
-        reserved 26;
-        reserved 27;
-        reserved 29;
-        reserved 30;
-        reserved 32;
-        reserved 33;
-        reserved 35;
-        reserved 36;
-        reserved 53;
-        optional bool hall_left_counter = 25;
-        optional bool hall_right_counter = 28;
-        optional bool input_a_counter = 31;
-        optional bool input_b_counter = 34;
-        optional uint32 alarm_limit = 51;
-        optional uint32 alarm_notif_time = 52;
-        optional bytes alarm_0 = 54;
-        optional bytes alarm_1 = 55;
-        optional bytes alarm_2 = 56;
-        optional bytes alarm_3 = 57;
-        optional bytes alarm_4 = 58;
-        optional bytes alarm_5 = 59;
-        optional bytes alarm_6 = 60;
-        optional bytes alarm_7 = 61;
-        optional bytes alarm_8 = 62;
-        optional bytes alarm_9 = 63;
-        optional bytes alarm_10 = 64;
-        optional bytes alarm_11 = 65;
-        optional bytes alarm_12 = 66;
-        optional bytes alarm_13 = 67;
-        optional bytes alarm_14 = 68;
-        optional bytes alarm_15 = 69;
+        optional uint32 alarm_limit = 1;
+        optional uint32 alarm_notif_time = 2;
+        optional bool hall_left_counter = 3;
+        optional bool hall_right_counter = 4;
+        optional bool input_a_counter = 5;
+        optional bool input_b_counter = 6;
+        optional bytes alarm_0 = 7;
+        optional bytes alarm_1 = 8;
+        optional bytes alarm_2 = 9;
+        optional bytes alarm_3 = 10;
+        optional bytes alarm_4 = 11;
+        optional bytes alarm_5 = 12;
+        optional bytes alarm_6 = 13;
+        optional bytes alarm_7 = 14;
+        optional bytes alarm_8 = 15;
+        optional bytes alarm_9 = 16;
+        optional bytes alarm_10 = 17;
+        optional bytes alarm_11 = 18;
+        optional bytes alarm_12 = 19;
+        optional bytes alarm_13 = 20;
+        optional bytes alarm_14 = 21;
+        optional bytes alarm_15 = 22;
     }
 }
 // END GENERATED CONFIG

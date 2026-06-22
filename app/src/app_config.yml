@@ -64,52 +64,14 @@ proto:
       message: Application
       field: application
       proto_id: 6
-      reserved:
-        - 3
     - key: sensors
       message: Sensors
       field: sensors
       proto_id: 7
-      reserved:
-        - 37
-        - 38
-        - 39
-        - 47
-        - 48
     - key: alarms
       message: Alarms
       field: alarms
       proto_id: 8
-      reserved:
-        - 5
-        - 6
-        - 7
-        - 8
-        - 9
-        - 10
-        - 11
-        - 12
-        - 13
-        - 14
-        - 15
-        - 16
-        - 17
-        - 18
-        - 19
-        - 20
-        - 21
-        - 22
-        - 23
-        - 24
-        - 26
-        - 27
-        - 29
-        - 30
-        - 32
-        - 33
-        - 35
-        - 36
-        - 53
 
 # Command protocol (LoRaWAN fPort 85 downlink + NFC). The single source of truth
 # for which commands exist, their wire id, dispatch routing and availability.
@@ -192,7 +154,7 @@ parameters:
 
   - name: interval_report
     proto_group: application
-    proto_id: 4
+    proto_id: 3
     type: int
     default: 900
     min: 60
@@ -201,21 +163,21 @@ parameters:
 
   - name: history_enable
     proto_group: application
-    proto_id: 49
+    proto_id: 4
     type: bool
     default: false
     help: "Get/Set sensor history store-and-forward (true/false)."
 
   - name: history_sensors
     proto_group: application
-    proto_id: 50
+    proto_id: 5
     type: uint32
     default: 0
     help: "Get/Set history sensor selection bitmask (0 = all capability-available)."
 
   - name: alarm_limit
     proto_group: alarms
-    proto_id: 51
+    proto_id: 1
     type: int
     default: 0
     min: 0
@@ -224,7 +186,7 @@ parameters:
 
   - name: alarm_notif_time
     proto_group: alarms
-    proto_id: 52
+    proto_id: 2
     type: int
     default: 10
     min: 1
@@ -241,7 +203,7 @@ parameters:
 
   - name: lrw_sub_band
     proto_group: lorawan
-    proto_id: 12
+    proto_id: 2
     type: int
     default: 2
     min: 0
@@ -251,7 +213,7 @@ parameters:
 
   - name: lrw_network
     proto_group: lorawan
-    proto_id: 2
+    proto_id: 3
     type: enum
     enum: lrw_network
     preserve_on_reset: true
@@ -259,14 +221,14 @@ parameters:
 
   - name: lrw_adr
     proto_group: lorawan
-    proto_id: 3
+    proto_id: 4
     type: bool
     preserve_on_reset: true
     help: "Get/Set LoRaWAN ADR (true/false)."
 
   - name: lrw_activation
     proto_group: lorawan
-    proto_id: 4
+    proto_id: 5
     type: enum
     enum: lrw_activation
     preserve_on_reset: true
@@ -274,7 +236,7 @@ parameters:
 
   - name: lrw_deveui
     proto_group: lorawan
-    proto_id: 5
+    proto_id: 6
     type: bytes
     size: 8
     preserve_on_reset: true
@@ -282,7 +244,7 @@ parameters:
 
   - name: lrw_joineui
     proto_group: lorawan
-    proto_id: 6
+    proto_id: 7
     type: bytes
     size: 8
     preserve_on_reset: true
@@ -290,7 +252,7 @@ parameters:
 
   - name: lrw_nwkkey
     proto_group: lorawan
-    proto_id: 7
+    proto_id: 8
     dump: false
     dump_nfc_only: true
     type: bytes
@@ -300,7 +262,7 @@ parameters:
 
   - name: lrw_appkey
     proto_group: lorawan
-    proto_id: 8
+    proto_id: 9
     dump: false
     dump_nfc_only: true
     type: bytes
@@ -310,7 +272,7 @@ parameters:
 
   - name: lrw_devaddr
     proto_group: lorawan
-    proto_id: 9
+    proto_id: 10
     type: bytes
     size: 4
     preserve_on_reset: true
@@ -318,7 +280,7 @@ parameters:
 
   - name: lrw_nwkskey
     proto_group: lorawan
-    proto_id: 10
+    proto_id: 11
     dump: false
     dump_nfc_only: true
     type: bytes
@@ -328,7 +290,7 @@ parameters:
 
   - name: lrw_appskey
     proto_group: lorawan
-    proto_id: 11
+    proto_id: 12
     dump: false
     dump_nfc_only: true
     type: bytes
@@ -356,79 +318,79 @@ parameters:
 
   - name: cap_hall_left
     proto_group: sensors
-    proto_id: 40
+    proto_id: 1
     type: bool
     help: "Get/Set hall left capability (true/false)."
 
   - name: cap_hall_right
     proto_group: sensors
-    proto_id: 41
+    proto_id: 2
     type: bool
     help: "Get/Set hall right capability (true/false)."
 
   - name: cap_input_a
     proto_group: sensors
-    proto_id: 42
+    proto_id: 3
     type: bool
     help: "Get/Set input A capability (true/false)."
 
   - name: cap_input_b
     proto_group: sensors
-    proto_id: 43
+    proto_id: 4
     type: bool
     help: "Get/Set input B capability (true/false)."
 
   - name: cap_light_sensor
     proto_group: sensors
-    proto_id: 44
+    proto_id: 5
     type: bool
     help: "Get/Set light sensor capability (true/false)."
 
   - name: cap_barometer
     proto_group: sensors
-    proto_id: 45
+    proto_id: 6
     type: bool
     help: "Get/Set barometer capability (true/false)."
 
   - name: cap_pir_detector
     proto_group: sensors
-    proto_id: 46
+    proto_id: 7
     type: bool
     help: "Get/Set PIR detector capability (true/false)."
 
   - name: cap_w1_sensors
     proto_group: sensors
-    proto_id: 60
+    proto_id: 8
     type: bool
     help: "Get/Set 1-Wire sensor bus capability — enables the bus + auto-detects attached sensors (true/false)."
 
   - name: cap_accelerometer
     proto_group: sensors
-    proto_id: 55
+    proto_id: 9
     type: bool
     help: "Get/Set accelerometer capability — orientation, motion and free-fall (true/false)."
 
   - name: hall_left_counter
     proto_group: alarms
-    proto_id: 25
+    proto_id: 3
     type: bool
     help: "Get/Set hall left switch counter enabled (true/false)."
 
   - name: hall_right_counter
     proto_group: alarms
-    proto_id: 28
+    proto_id: 4
     type: bool
     help: "Get/Set hall right switch counter enabled (true/false)."
 
   - name: input_a_counter
     proto_group: alarms
-    proto_id: 31
+    proto_id: 5
     type: bool
     help: "Get/Set input A counter enabled (true/false)."
 
   - name: input_b_counter
     proto_group: alarms
-    proto_id: 34
+    proto_id: 6
     type: bool
     help: "Get/Set input B counter enabled (true/false)."
 
@@ -443,7 +405,7 @@ parameters:
   # app_alarm_rules.c is rebuilt from these on load and after every SetParam.
   - name: alarm_0
     proto_group: alarms
-    proto_id: 54
+    proto_id: 7
     type: bytes
     size: 17
     no_shell: true
@@ -451,7 +413,7 @@ parameters:
 
   - name: alarm_1
     proto_group: alarms
-    proto_id: 55
+    proto_id: 8
     type: bytes
     size: 17
     no_shell: true
@@ -459,7 +421,7 @@ parameters:
 
   - name: alarm_2
     proto_group: alarms
-    proto_id: 56
+    proto_id: 9
     type: bytes
     size: 17
     no_shell: true
@@ -467,7 +429,7 @@ parameters:
 
   - name: alarm_3
     proto_group: alarms
-    proto_id: 57
+    proto_id: 10
     type: bytes
     size: 17
     no_shell: true
@@ -475,7 +437,7 @@ parameters:
 
   - name: alarm_4
     proto_group: alarms
-    proto_id: 58
+    proto_id: 11
     type: bytes
     size: 17
     no_shell: true
@@ -483,7 +445,7 @@ parameters:
 
   - name: alarm_5
     proto_group: alarms
-    proto_id: 59
+    proto_id: 12
     type: bytes
     size: 17
     no_shell: true
@@ -491,7 +453,7 @@ parameters:
 
   - name: alarm_6
     proto_group: alarms
-    proto_id: 60
+    proto_id: 13
     type: bytes
     size: 17
     no_shell: true
@@ -499,7 +461,7 @@ parameters:
 
   - name: alarm_7
     proto_group: alarms
-    proto_id: 61
+    proto_id: 14
     type: bytes
     size: 17
     no_shell: true
@@ -507,7 +469,7 @@ parameters:
 
   - name: alarm_8
     proto_group: alarms
-    proto_id: 62
+    proto_id: 15
     type: bytes
     size: 17
     no_shell: true
@@ -515,7 +477,7 @@ parameters:
 
   - name: alarm_9
     proto_group: alarms
-    proto_id: 63
+    proto_id: 16
     type: bytes
     size: 17
     no_shell: true
@@ -523,7 +485,7 @@ parameters:
 
   - name: alarm_10
     proto_group: alarms
-    proto_id: 64
+    proto_id: 17
     type: bytes
     size: 17
     no_shell: true
@@ -531,7 +493,7 @@ parameters:
 
   - name: alarm_11
     proto_group: alarms
-    proto_id: 65
+    proto_id: 18
     type: bytes
     size: 17
     no_shell: true
@@ -539,7 +501,7 @@ parameters:
 
   - name: alarm_12
     proto_group: alarms
-    proto_id: 66
+    proto_id: 19
     type: bytes
     size: 17
     no_shell: true
@@ -547,7 +509,7 @@ parameters:
 
   - name: alarm_13
     proto_group: alarms
-    proto_id: 67
+    proto_id: 20
     type: bytes
     size: 17
     no_shell: true
@@ -555,7 +517,7 @@ parameters:
 
   - name: alarm_14
     proto_group: alarms
-    proto_id: 68
+    proto_id: 21
     type: bytes
     size: 17
     no_shell: true
@@ -563,7 +525,7 @@ parameters:
 
   - name: alarm_15
     proto_group: alarms
-    proto_id: 69
+    proto_id: 22
     type: bytes
     size: 17
     no_shell: true
@@ -571,7 +533,7 @@ parameters:
 
   - name: accel_motion_sensitivity
     proto_group: sensors
-    proto_id: 54
+    proto_id: 10
     type: enum
     enum: motion_sensitivity
     default: "off"
@@ -584,25 +546,25 @@ parameters:
   # at runtime from the ROM family code during the bus scan. all-zero = empty.
   - name: sensor1_rom
     proto_group: sensors
-    proto_id: 56
+    proto_id: 11
     type: bytes
     size: 8
     help: "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty)."
   - name: sensor2_rom
     proto_group: sensors
-    proto_id: 57
+    proto_id: 12
     type: bytes
     size: 8
     help: "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty)."
   - name: sensor3_rom
     proto_group: sensors
-    proto_id: 58
+    proto_id: 13
     type: bytes
     size: 8
     help: "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty)."
   - name: sensor4_rom
     proto_group: sensors
-    proto_id: 59
+    proto_id: 14
     type: bytes
     size: 8
     help: "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty)."

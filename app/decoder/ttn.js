@@ -65,46 +65,46 @@ var _BUILD_TYPES = ["main", "dev", "custom"];
 // Config submessage maps: proto field tag -> name. The flat C struct is split
 // across submessages lorawan/application/sensors/alarms; device identity stays
 // at the AppConfigMessage root (not addressable via SetParam/GetConfig).
-// proto_ids are preserved from the pre-regroup schema.
+// proto_ids are contiguous 1..N per submessage (aligned in #166).
 var _APP_NAMES = {
-  1: "calibration", 2: "interval_sample", 4: "interval_report",
-  49: "history_enable", 50: "history_sensors"
+  1: "calibration", 2: "interval_sample", 3: "interval_report",
+  4: "history_enable", 5: "history_sensors"
 };
 var _APP_ENUMS = {};
 var _APP_FLOAT = {};
 
 var _SEN_NAMES = {
-  40: "cap_hall_left", 41: "cap_hall_right", 42: "cap_input_a", 43: "cap_input_b",
-  44: "cap_light_sensor", 45: "cap_barometer", 46: "cap_pir_detector",
-  54: "accel_motion_sensitivity", 55: "cap_accelerometer", 60: "cap_w1_sensors"
+  1: "cap_hall_left", 2: "cap_hall_right", 3: "cap_input_a", 4: "cap_input_b",
+  5: "cap_light_sensor", 6: "cap_barometer", 7: "cap_pir_detector",
+  8: "cap_w1_sensors", 9: "cap_accelerometer", 10: "accel_motion_sensitivity"
 };
-var _SEN_ENUMS = { 54: ["off", "low", "medium", "high"] };
+var _SEN_ENUMS = { 10: ["off", "low", "medium", "high"] };
 var _SEN_FLOAT = {};
-var _SEN_HEX = { 56: "sensor1_rom", 57: "sensor2_rom", 58: "sensor3_rom", 59: "sensor4_rom" };
-var _SEN_HEX_ENC = { sensor1_rom: 56, sensor2_rom: 57, sensor3_rom: 58, sensor4_rom: 59 };
+var _SEN_HEX = { 11: "sensor1_rom", 12: "sensor2_rom", 13: "sensor3_rom", 14: "sensor4_rom" };
+var _SEN_HEX_ENC = { sensor1_rom: 11, sensor2_rom: 12, sensor3_rom: 13, sensor4_rom: 14 };
 
 var _ALM_NAMES = {
-  51: "alarm_limit", 52: "alarm_notif_time",
-  25: "hall_left_counter", 28: "hall_right_counter",
-  31: "input_a_counter", 34: "input_b_counter"
+  1: "alarm_limit", 2: "alarm_notif_time",
+  3: "hall_left_counter", 4: "hall_right_counter",
+  5: "input_a_counter", 6: "input_b_counter"
 };
 var _ALM_ENUMS = {};
 var _ALM_FLOAT = {};
-// Dynamic alarm rule slots alarm_0..alarm_15 = proto fields 54..69, each a packed
+// Dynamic alarm rule slots alarm_0..alarm_15 = proto fields 7..22, each a packed
 // 17-byte rule carried as native bytes (presented/authored as a 34-char hex string).
 var _ALM_HEX = {};
 var _ALM_HEX_ENC = {};
 (function () {
-  for (var i = 0; i < 16; i++) { _ALM_HEX[54 + i] = "alarm_" + i; _ALM_HEX_ENC["alarm_" + i] = 54 + i; }
+  for (var i = 0; i < 16; i++) { _ALM_HEX[7 + i] = "alarm_" + i; _ALM_HEX_ENC["alarm_" + i] = 7 + i; }
 })();
 
-var _LRW_NAMES = { 1: "region", 2: "network", 3: "adr", 4: "activation", 12: "sub_band" };
-var _LRW_HEX = { 5: "deveui", 6: "joineui", 9: "devaddr" };
+var _LRW_NAMES = { 1: "region", 2: "sub_band", 3: "network", 4: "adr", 5: "activation" };
+var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
 
 // Reverse maps (name -> tag) for encoding SetParam. The LoRaWAN hex set adds the
 // secret keys (nwkkey/appkey/nwkskey/appskey) which the decoder deliberately
 // hides but which a downlink may legitimately set.
-var _LRW_HEX_ENC = { deveui: 5, joineui: 6, nwkkey: 7, appkey: 8, devaddr: 9, nwkskey: 10, appskey: 11 };
+var _LRW_HEX_ENC = { deveui: 6, joineui: 7, nwkkey: 8, appkey: 9, devaddr: 10, nwkskey: 11, appskey: 12 };
 var _LRW_ENUM = {
   region: { EU868: 0, US915: 1, AU915: 2 },
   network: { PUBLIC: 0, PRIVATE: 1 },

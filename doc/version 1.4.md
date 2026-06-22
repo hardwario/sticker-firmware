@@ -68,7 +68,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `reboot` | `08083a00` |
 | `w1_scan` | `08097200` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
-| `set_param`: ADR on, `interval_report`=120 s, `cap_barometer` on | `0801120d0a021801120220782203e80201` |
+| `set_param`: ADR on, `interval_report`=120 s, `cap_barometer` on | `0801120c0a0220011202187822023001` |
 | `alarm_rule` SET slot 0 = s1 temperature 15–25 °C, hyst 0.5 | `08016a15100120012d00007041350000c8413d0000003f5000` |
 | `alarm_rule` CLEAR slot 0 | `08016a0408015000` |
 | `alarm_rule` CLEAR_ALL | `08016a020802` |
@@ -272,7 +272,7 @@ Two configuration parameters control alarm uplink frequency:
 
 Per-sensor alarm thresholds are **dynamic rules** in 16 fixed **slots** (`0…15`). The **slot index is the rule's stable identity** — `(source, quantity)` is an attribute of the slot, not a key, so **several slots may share the same `(source, quantity)`** (the multi-level case: e.g. a *warning* band and a separate *critical* band on one sensor as two independent rules). Clearing a slot empties it without renumbering the others, so a host (and `AlarmEvent.slot`) can refer to a rule by slot reliably.
 
-Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields `54…69`), so rules are written and read like any other configuration — over **SetParam / GetParam** (the *identical* message works on **fPort 85 (LoRaWAN)** and **NFC**) or with the local **`alarm` shell** command. There is no separate alarm command.
+Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields `7…22` in the `alarms` submessage), so rules are written and read like any other configuration — over **SetParam / GetParam** (the *identical* message works on **fPort 85 (LoRaWAN)** and **NFC**) or with the local **`alarm` shell** command. There is no separate alarm command.
 
 > **Note on "slot":** the alarm rule *slot* (`0…15`) is distinct from the 1-Wire sensor *slot* (`s1…s4`); the shell calls the alarm one the rule **index**.
 
@@ -305,7 +305,7 @@ Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields
 | **Delete** a slot | `alarm clear <i>` | write `alarm_<i>` = 34 zero hex chars (present=0) |
 | **Delete all** | `alarm clear all` | clear each `alarm_<i>` |
 | **Deactivate** (keep the rule, stop evaluating) | — *(the shell always enables)* | write `alarm_<i>` packed with flags = present only (`01…`, enabled bit clear) |
-| **Read** | `alarm list [<i>]` | `get_param.alarms_field = [54+i]` → `config_dump.alarms.alarm_<i>` |
+| **Read** | `alarm list [<i>]` | `get_param.alarms_field = [7+i]` → `config_dump.alarms.alarm_<i>` |
 
 Shell `<args>` by kind: threshold `<lo> <hi> [hst]` · state `<from> <to>` · count `<N>`.
 
@@ -419,7 +419,9 @@ v1.4.0 organizes configuration keys **by sensor/source** rather than under a glo
 
 > **Accelerometer power (#90).** The LIS2DH is now power-managed on demand: it idles in power-down (ODR=0) and is only resumed for an orientation read or while motion detection is armed — saving ~30 µA of continuous idle current when the accelerometer would otherwise run free. **Consequence:** free-fall detection is active only when `accel-motion-sensitivity != off` (it shares the single motion-sensitivity knob); with sensitivity `off` the accelerometer is fully powered down.
 
-The protobuf field numbers are **unchanged**, so the over-the-air wire format stays compatible; only the user-facing keys and code identifiers change. Devices must be reprovisioned with the new shell keys (the NVS settings keys moved).
+This key rename kept the protobuf field numbers; the user-facing keys and code identifiers changed and devices must be reprovisioned with the new shell keys (the NVS settings keys moved).
+
+> **Wire-format note (#166):** the config protobuf field numbers were later **renumbered** to a contiguous `1..N` per submessage (`lorawan`/`application`/`sensors`/`alarms`) — a one-off **breaking** change to the over-the-air `SetParam`/`GetParam`/`ConfigDump` framing for v1.4.0. Any client that builds/parses the config protobuf directly (the NFC manager app, external decoders) must re-sync to the field numbers in `app_config.proto`. The flat NVS settings keys are by name and are unaffected.
 
 ---
 
