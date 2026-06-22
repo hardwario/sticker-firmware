@@ -351,7 +351,8 @@ function alarmEvent(source, quantity, edge, side, rel, value, slot) {
   return e;
 }
 function buildAlarmReport(base, total, events) {
-  let b = pbTV(1, base).concat(pbTV(2, total));
+  // 0x01 = APP_PROTO_VERSION prefix (#165), then the AlarmReport protobuf.
+  let b = [0x01].concat(pbTV(1, base)).concat(pbTV(2, total));
   for (const e of events) b = b.concat(pbLD(3, e));
   return b;
 }
@@ -428,6 +429,26 @@ test("fPort-3 batch: accel motion state activate", () => {
   assert.equal(d.alarms[0].side, "none");
   assert.equal(d.alarms[0].value, 1);
   assert.equal(d.alarms[0].time, base);
+});
+
+test("fPort-3 batch: version prefix is stripped, body decodes after byte 0", () => {
+  const base = 1780000000;
+  const f = buildAlarmReport(base, 1, [alarmEvent(0, 0, 0, 2, 10, 2660, 7)]);
+  assert.equal(f[0], 0x01); // APP_PROTO_VERSION prefix present (#165)
+  const r = codec.decodeUplink({ bytes: f, fPort: 3 });
+  assert.equal(r.warnings.length, 0);
+  assert.equal(r.data.base_time, base);
+  assert.equal(r.data.alarms[0].value, 26.6);
+});
+
+test("fPort-3 batch: unknown version byte warns but still decodes", () => {
+  const base = 1780000000;
+  const f = buildAlarmReport(base, 1, [alarmEvent(0, 0, 0, 2, 10, 2660, 7)]);
+  f[0] = 0x02; // bump the version prefix to an unexpected value
+  const r = codec.decodeUplink({ bytes: f, fPort: 3 });
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], /unknown payload version 0x2/);
+  assert.equal(r.data.base_time, base); // remainder still decoded best-effort
 });
 
 // --- Negative: a corrupted frame must change the result (tests are sensitive) ---

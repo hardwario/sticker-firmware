@@ -909,12 +909,14 @@ function decodeAlarmBatch(bytes) {
 }
 
 // 1-byte format version prefixed to application protobuf payloads (fPort 2
-// telemetry, fPort 85 response). Mirrors APP_PROTO_VERSION in app_cmd.h.
+// telemetry, fPort 3 alarm report, fPort 85 response). Mirrors APP_PROTO_VERSION
+// in app_cmd.h.
 var _PROTO_VERSION = 0x01;
 
 // Strip + validate the version prefix at byte[0]. Returns the protobuf bytes
 // (byte 1..end) and pushes a warning on an unexpected version (the remainder is
-// still decoded best-effort). fPort 1 (legacy bitmap) and fPort 3 are unversioned.
+// still decoded best-effort). fPort 1 (legacy bitmap) and fPort 10 (calibration)
+// are unversioned.
 function _stripProtoVersion(bytes, warnings) {
   if (!bytes || bytes.length < 1) return bytes;
   if (bytes[0] !== _PROTO_VERSION) {
@@ -936,9 +938,11 @@ function decodeUplink(input) {
     };
   }
 
-  // fPort 3: alarm-detail batch (#27).
+  // fPort 3: alarm-detail batch (#27), version-prefixed like fPort 2/85 (#165).
   if (input.fPort === 3) {
-    return { data: decodeAlarmBatch(input.bytes), warnings: [], errors: [] };
+    var w3 = [];
+    var b3 = _stripProtoVersion(input.bytes, w3);
+    return { data: decodeAlarmBatch(b3), warnings: w3, errors: [] };
   }
 
   // fPort 2: protobuf Telemetry (new format). fPort 1 stays the legacy bitmap.
