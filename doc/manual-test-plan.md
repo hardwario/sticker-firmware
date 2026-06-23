@@ -1225,6 +1225,8 @@ rejected with `error` `BAD_REQUEST` "bad epoch".
 > AES-CCM record (serial + nonce > last) and confirm an encrypted response is written back, and that
 > the info record (`hio.stck:inf`) is still readable without the key. Report all results.
 
+> Note: the request/response nonce construction and anti-replay behaviour are covered in detail by **N8**.
+
 - [ ] Pass
 
 ### N5 — LoRaWAN reset & forced join over NFC (#109)
@@ -1276,6 +1278,40 @@ record is rejected and the device still boots normally.
 > runs before LoRaWAN — staged LoRaWAN keys take effect on the first join. Then power-cycle again and
 > confirm the config is **not** re-applied (nonce anti-replay) and the device boots normally. Report
 > results, including that the **encrypted** path (decrypt + nonce at boot) works end-to-end.
+
+- [ ] Pass
+
+### N8 — NFC crypto hardening: nonce separation, anti-replay persistence, counter readback (#179, #184)
+
+**Goal:** The encrypted channel no longer reuses a `(key, nonce)` pair across a request and its
+response (#179), the anti-replay counter survives a power-cycle (#184), and the counter high-water is
+exposed in the plaintext info record so a phone can resync.
+**Observable:**
+- **Direction-separated nonce:** the CCM nonce is `serial ‖ nonce_counter ‖ direction` (9 bytes), with
+  the direction byte `0x00` for the request and `0x01` for the response. Request and response carry the
+  *same* counter in the header but use different keystreams. A phone on the new codec (9-byte nonce +
+  header-as-AAD) decrypts the response; the old 8-byte-nonce / no-AAD codec fails to decrypt or verify.
+- **Counter in info record:** `hio.stck:inf` is format `0x02`, 15-byte payload, with the last-accepted
+  `nonce_counter` (big-endian) at payload bytes `[11..14]`. It tracks the live counter.
+- **Anti-replay persists across reboot:** after an accepted command advances the counter, the bumped
+  value is durable; the same command replayed after a power-cycle is rejected (`-EACCES`). `lrw_reset`
+  (which reboots immediately) cannot be replayed.
+
+**Prompt for Claude — bench/J-Link verifiable parts (FW agent):**
+> On the default (encrypted) build, over RTT: `nfc dump` and confirm the `hio.stck:inf` record has
+> format byte `0x02`, payload length `0x0f` (15), and a 4-byte counter field after the debug flag.
+> Set `config nonce-counter <N>` to a recognizable value, force an info rewrite (`nfc clear` then a few
+> `nfc check`), `nfc dump` again and confirm the counter field shows `<N>` big-endian. Restore
+> `config nonce-counter 0`. (The wire-format contract — golden request/response vectors, direction
+> separation, AAD binding — is also asserted by the `tests/nfc_crypto` native_sim unit suite.)
+
+**Prompt for Claude — round-trip & replay parts (needs the Manager-App phone):**
+> With the Manager-App on the matching codec: send an encrypted `get_info` with counter = last+1,
+> confirm the encrypted `hio.stck:rsp` decrypts on the phone and that `config nonce-counter` (shell) and
+> the info-record counter both advanced. Re-send the **same** counter and confirm the device rejects it
+> (no/garbage response, RTT shows the nonce check failing). Power-cycle the device, re-send the same
+> counter again, and confirm it is still rejected (counter persisted). Finally, capture a request and its
+> response and confirm they cannot be cross-decrypted (nonce direction separation). Report results.
 
 - [ ] Pass
 
