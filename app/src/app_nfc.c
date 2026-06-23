@@ -725,6 +725,81 @@ static int encrypt(const uint8_t *in, size_t in_len, uint32_t nonce_counter, uin
 
 	return res;
 }
+
+/* Last encrypted response, kept so a retransmission (same nonce_counter, e.g. the
+ * phone never read the reply over a lossy RF link) replays the cached reply instead
+ * of re-running the command. RAM-only and serialised by the tag lock (m_lock); on a
+ * reboot it is empty, so a post-reboot retransmission falls through to -EACCES and
+ * the phone resyncs from the info-record counter. */
+static uint32_t m_resp_cache_counter;
+static uint8_t m_resp_cache_buf[256];
+static size_t m_resp_cache_len;
+
+/* Process one encrypted command frame (shared by the NDEF and mailbox channels).
+ * Three-way on the nonce counter vs the stored high-water:
+ *   counter == cached  -> retransmission: replay the cached response, do NOT re-run
+ *   counter  > stored  -> new: decrypt (advances+persists the counter), run, cache
+ *   counter <= stored  -> stale replay: decrypt() rejects with -EACCES
+ * Writes the encrypted reply into out_buf/out_len and the deferred action into
+ * *action (NONE on a replay — the original already ran). Returns 0 or -errno. */
+static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_buf,
+				size_t out_cap, size_t *out_len, enum app_cmd_action *action)
+{
+	*out_len = 0;
+	*action = APP_CMD_ACTION_NONE;
+
+	if (in_len < 8) {
+		return -EINVAL;
+	}
+
+	uint32_t serial = sys_get_be32(&in[0]);
+	uint32_t counter = sys_get_be32(&in[4]);
+
+	if (serial == g_app_config.serial_number && m_resp_cache_len > 0 &&
+	    counter == m_resp_cache_counter) {
+		if (m_resp_cache_len > out_cap) {
+			return -ENOMEM;
+		}
+		memcpy(out_buf, m_resp_cache_buf, m_resp_cache_len);
+		*out_len = m_resp_cache_len;
+		NFC_REPORT("  -> retransmission (counter %u): replaying cached response", counter);
+		return 0;
+	}
+
+	static uint8_t cmd_plain[256];
+	static uint8_t resp_plain[256];
+	size_t cmd_len = 0;
+	int ret = decrypt(in, in_len, cmd_plain, sizeof(cmd_plain), &cmd_len);
+	if (ret) {
+		return ret;
+	}
+	uint32_t req_nonce = app_config()->nonce_counter;
+
+	size_t resp_len = 0;
+	ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, cmd_plain, cmd_len, resp_plain,
+			     sizeof(resp_plain), &resp_len, action);
+	if (ret) {
+		return ret;
+	}
+	if (resp_len == 0) {
+		return 0;
+	}
+
+	ret = encrypt(resp_plain, resp_len, req_nonce, out_buf, out_cap, out_len);
+	if (ret) {
+		return ret;
+	}
+
+	/* Cache for an idempotent retransmission of this counter. */
+	if (*out_len <= sizeof(m_resp_cache_buf)) {
+		memcpy(m_resp_cache_buf, out_buf, *out_len);
+		m_resp_cache_len = *out_len;
+		m_resp_cache_counter = req_nonce;
+	} else {
+		m_resp_cache_len = 0;
+	}
+	return 0;
+}
 #endif /* CONFIG_APP_NFC_ENCRYPTION */
 
 static int parser_callback(const struct app_ndef_parser_record_info *record_info, void *user_data)
@@ -752,44 +827,16 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 
 		enum app_cmd_action cmd_action = APP_CMD_ACTION_NONE;
 #ifdef CONFIG_APP_NFC_ENCRYPTION
-		/* Encrypted channel: decrypt the command, run it, then encrypt the
-		 * reply. The reply uses the request's counter with a RESPONSE direction
-		 * byte (see encrypt()), so it never reuses the request nonce. decrypt()
-		 * stored the accepted counter into app_config()->nonce_counter. */
-		static uint8_t cmd_plain[256];
-		static uint8_t resp_plain[256];
-		size_t cmd_len = 0;
-		ret = decrypt(record_info->payload, record_info->payload_len, cmd_plain,
-			      sizeof(cmd_plain), &cmd_len);
+		/* Encrypted channel: decrypt, run, encrypt the reply (RESPONSE-direction
+		 * nonce so it never reuses the request nonce), with same-counter
+		 * retransmission served from the response cache. */
+		ret = handle_encrypted_cmd(record_info->payload, record_info->payload_len,
+					   m_resp_buf, sizeof(m_resp_buf), &m_resp_len, &cmd_action);
 		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("decrypt", ret);
-			NFC_REPORT("  -> command decrypt failed: %d (rejected)", ret);
+			LOG_ERR_CALL_FAILED_INT("handle_encrypted_cmd", ret);
+			NFC_REPORT("  -> command rejected: %d", ret);
 			m_resp_len = 0;
 			return ret;
-		}
-		uint32_t req_nonce = app_config()->nonce_counter;
-
-		size_t resp_len = 0;
-		ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, cmd_plain, cmd_len, resp_plain,
-				     sizeof(resp_plain), &resp_len, &cmd_action);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
-			NFC_REPORT("  -> app_cmd_handle failed: %d", ret);
-			m_resp_len = 0;
-			return ret;
-		}
-
-		if (resp_len > 0) {
-			ret = encrypt(resp_plain, resp_len, req_nonce, m_resp_buf,
-				      sizeof(m_resp_buf), &m_resp_len);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("encrypt", ret);
-				NFC_REPORT("  -> response encrypt failed: %d", ret);
-				m_resp_len = 0;
-				return ret;
-			}
-		} else {
-			m_resp_len = 0;
 		}
 #else
 		/* Plaintext channel (validation build): hand the raw protobuf Command
@@ -1306,10 +1353,19 @@ int app_nfc_serve_mailbox(uint32_t idle_timeout_ms)
 
 		enum app_cmd_action action = APP_CMD_ACTION_NONE;
 		m_resp_len = 0;
+#ifdef CONFIG_APP_NFC_ENCRYPTION
+		/* Mailbox frames are AES-CCM encrypted exactly like the NDEF channel
+		 * (#194): same direction nonce + AAD + anti-replay, and same-counter
+		 * retransmissions are served from the response cache. */
+		ret = handle_encrypted_cmd(m_buf, cmd_len, m_resp_buf, sizeof(m_resp_buf),
+					   &m_resp_len, &action);
+#else
+		/* Plaintext channel (validation build only). */
 		ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, m_buf, cmd_len, m_resp_buf,
 				     sizeof(m_resp_buf), &m_resp_len, &action);
+#endif
 		if (ret || m_resp_len == 0) {
-			NFC_REPORT("mailbox: app_cmd_handle ret=%d resp=%zu", ret, m_resp_len);
+			NFC_REPORT("mailbox: handle ret=%d resp=%zu", ret, m_resp_len);
 			k_msleep(15);
 			continue;
 		}
