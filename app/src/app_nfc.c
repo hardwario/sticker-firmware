@@ -143,16 +143,20 @@ static const char *cmd_action_str(enum app_cmd_action a)
 
 /* Plaintext info record the firmware keeps on the tag so a phone learns the
  * sticker identity and schema version the moment it taps, without decrypting
- * anything. Payload layout (11 bytes):
- *   [0]    format version (NDEF_INFO_FORMAT)
- *   [1..4] serial number (big-endian uint32)
- *   [5]    fw major   [6] fw minor   [7] fw patch
- *   [8]    build type (0=main, 1=dev, 2=custom)
- *   [9]    config/schema version (APP_CONFIG_VERSION)
- *   [10]   flags: bit0 = debug build
+ * anything. Payload layout (15 bytes):
+ *   [0]     format version (NDEF_INFO_FORMAT)
+ *   [1..4]  serial number (big-endian uint32)
+ *   [5]     fw major   [6] fw minor   [7] fw patch
+ *   [8]     build type (0=main, 1=dev, 2=custom)
+ *   [9]     config/schema version (APP_CONFIG_VERSION)
+ *   [10]    flags: bit0 = debug build
+ *   [11..14] NFC anti-replay counter high-water (big-endian uint32) — the last
+ *            accepted nonce_counter, so a phone can resync its counter (= this
+ *            value + 1) after a device reboot/cache-miss without an encrypted
+ *            exchange. Not secret (it travels in plaintext in every header).
  */
 #define NDEF_INFO_TYPE   "hio.stck:inf"
-#define NDEF_INFO_FORMAT 0x01
+#define NDEF_INFO_FORMAT 0x02
 
 /* Command/response over NDEF. The phone writes a command record (raw protobuf
  * Command, like a LoRaWAN downlink); the firmware processes it via app_cmd and
@@ -514,15 +518,16 @@ static size_t build_ndef_record(uint8_t *out, size_t out_size, const char *type,
 	return i;
 }
 
-/* Build the plaintext info NDEF into `out`. Deterministic for a given
- * firmware/config (no uptime/clock), so app_nfc_check() can compare it to the
- * tag content and skip rewriting when already present. */
+/* Build the plaintext info NDEF into `out`. Stable between accepted NFC commands
+ * (no uptime/clock; the nonce counter advances only on an accepted command), so
+ * app_nfc_check() can compare it to the tag content and skip rewriting when
+ * already present, and rewrite it when the counter has moved. */
 static size_t build_info_ndef(uint8_t *out, size_t out_size)
 {
 	struct app_cmd_info info;
 	app_cmd_get_info(&info);
 
-	uint8_t payload[11];
+	uint8_t payload[15];
 	payload[0] = NDEF_INFO_FORMAT;
 	sys_put_be32(info.serial_number, &payload[1]);
 	payload[5] = info.fw_major;
@@ -531,6 +536,9 @@ static size_t build_info_ndef(uint8_t *out, size_t out_size)
 	payload[8] = info.build_type;
 	payload[9] = (uint8_t)g_app_config.config_version;
 	payload[10] = info.debug ? 0x01 : 0x00;
+	/* Anti-replay counter high-water (live source of truth, == what decrypt()
+	 * checks against) so the phone can resync after a reboot/cache-miss. */
+	sys_put_be32(app_config()->nonce_counter, &payload[11]);
 
 	return build_ndef_record(out, out_size, NDEF_INFO_TYPE, payload, sizeof(payload));
 }
