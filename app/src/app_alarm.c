@@ -521,7 +521,13 @@ bool app_alarm_poll(void)
 	bool alarm = false;
 	int64_t now = k_uptime_get();
 
+	/* m_rt[] is shared with app_alarm_event() (system WQ / PIR thread); hold
+	 * m_lock across the whole evaluation + latch sweep so a concurrent event
+	 * can't tear an m_rt slot (#185). Lock order is always
+	 * g_app_sensor_data_lock -> m_lock; m_lock is recursive, so the nested
+	 * alarm_collect() re-lock inside eval_* is fine. */
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	k_mutex_lock(&m_lock, K_FOREVER);
 
 	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
 		const struct app_alarm_rule *rule = rt_sync(slot);
@@ -556,10 +562,10 @@ bool app_alarm_poll(void)
 		}
 	}
 
+	/* Sensor data no longer needed; keep m_lock for the latch sweep. */
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	/* Expire one-shot latches and collect "any active". */
-	k_mutex_lock(&m_lock, K_FOREVER);
 	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
 		if (!m_rt[i].used) {
 			continue;
@@ -588,10 +594,14 @@ void app_alarm_event(enum app_alarm_source source, bool active)
 	void *user_data;
 	bool should_send = false;
 
+	/* Evaluate every STATE rule on this source under m_lock so m_rt[] is not
+	 * torn against app_alarm_poll() or another event on a different thread
+	 * (#185). m_lock is recursive: the nested alarm_collect() re-lock is fine.
+	 * cb is read under the same lock; should_send / cb are acted on after
+	 * release so the radio enqueue and callback never run under m_lock. */
 	k_mutex_lock(&m_lock, K_FOREVER);
 	cb = m_event_cb;
 	user_data = m_event_cb_user_data;
-	k_mutex_unlock(&m_lock);
 
 	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
 		const struct app_alarm_rule *rule = rt_sync(slot);
@@ -600,6 +610,7 @@ void app_alarm_event(enum app_alarm_source source, bool active)
 		}
 		eval_state(slot, rule, &m_rt[slot], active, &should_send);
 	}
+	k_mutex_unlock(&m_lock);
 
 	if (should_send) {
 		alarm_lrw_send();
