@@ -1288,6 +1288,26 @@ static int mb_enable(void)
 	return 0;
 }
 
+/* Block until the RF side has read the response we just wrote, i.e. until the
+ * ST25DV clears HOST_PUT_MSG (it sets it on our mailbox write and clears it when
+ * RF reads the last byte). This serialises the FTM exchange — without it a fast
+ * streaming phone can write its next request before reading the current reply,
+ * so it ends up reading a stale reply (or we overwrite an unread one), which
+ * desynchronises the request/response pairing (the mailbox paged-read frame gap,
+ * #194). Bounded by `timeout_ms` so a phone that left mid-stream can't wedge us. */
+static void mb_wait_host_put_cleared(uint32_t timeout_ms)
+{
+	int64_t deadline = k_uptime_get() + timeout_ms;
+	while (k_uptime_get() < deadline) {
+		uint8_t ctrl = 0;
+		if (read_reg(ST25DV_MB_CTRL_DYN, &ctrl, 1) == 0 &&
+		    !(ctrl & ST25DV_MB_CTRL_HOST_PUT)) {
+			return; /* RF read our response */
+		}
+		k_msleep(3);
+	}
+}
+
 /* Default mailbox idle window when the caller passes 0 (the deadline resets on
  * every served message). Short on purpose: active streaming (config read,
  * firmware update) keeps resetting it, so it's never cut off, but once the phone
@@ -1378,22 +1398,24 @@ int app_nfc_serve_mailbox(uint32_t idle_timeout_ms)
 		deadline = k_uptime_get() + idle_timeout_ms;
 		LOG_INF("NFC mailbox: served %zu B (#%u)", m_resp_len, served);
 
-		/* The phone signalled end of stream (ExitMailbox): the ack is written, so
-		 * give it a moment to read it, then leave mailbox mode immediately — no
-		 * poll-thread action to run. */
+		/* Serialise the exchange: wait until the phone has read this reply before
+		 * accepting the next request (or tearing down on a terminal action), so a
+		 * fast streamer can't read a stale reply or have an unread one overwritten
+		 * — the mailbox paged-read frame gap (#194). */
+		mb_wait_host_put_cleared(200);
+
+		/* The phone signalled end of stream (ExitMailbox): its ack has been read
+		 * (waited for above), so leave mailbox mode immediately. */
 		if (action == APP_CMD_ACTION_LEAVE_MAILBOX) {
-			k_msleep(300);
 			LOG_INF("NFC mailbox: ExitMailbox -> leaving (served %u)", served);
 			break;
 		}
 
 		/* Any other deferred action (settings save / reboot / factory reset /
 		 * alarm-rules save): hand it to the poll thread the same way the NDEF path
-		 * does, give the phone a moment to read the ack, then leave mailbox mode so
-		 * the action can run. */
+		 * does, then leave mailbox mode so the action can run (ack already read). */
 		if (action != APP_CMD_ACTION_NONE) {
 			m_cmd_action = action;
-			k_msleep(300);
 			break;
 		}
 	}
