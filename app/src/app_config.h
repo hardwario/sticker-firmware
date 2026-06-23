@@ -109,6 +109,12 @@ extern struct app_config g_app_config;
 
 struct app_config *app_config(void);
 
+/* Persist only the NFC anti-replay nonce counter to NVS as a single settings
+ * key (not the whole config blob). Called from the NFC decrypt path on every
+ * accepted command so a captured command can't be replayed after a power-cycle.
+ * Returns 0 or a negative errno. */
+int app_config_save_nonce_counter(void);
+
 /* Reset every parameter to its compiled-in default EXCEPT the factory identity
  * and network credentials (preserve_on_reset), then persist. Backs the
  * factory_reset command so the device keeps its LoRaWAN session; the shell

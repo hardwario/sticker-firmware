@@ -1982,6 +1982,12 @@ struct app_config *app_config(void)
 	return &m_app_config;
 }
 
+int app_config_save_nonce_counter(void)
+{
+	return settings_save_one(SETTINGS_PFX "/nonce-counter", &m_app_config.nonce_counter,
+				 sizeof(m_app_config.nonce_counter));
+}
+
 int app_config_factory_reset(void)
 {
 	int ret;

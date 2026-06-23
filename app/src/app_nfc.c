@@ -536,6 +536,17 @@ static size_t build_info_ndef(uint8_t *out, size_t out_size)
 }
 
 #ifdef CONFIG_APP_NFC_ENCRYPTION
+
+/* AES-CCM nonce layout: serial(4) || nonce_counter(4) || direction(1). The
+ * direction byte separates the request keystream from the response keystream so
+ * a request and its reply can never share a (key, nonce) pair (which would leak
+ * both plaintexts via keystream XOR). It is implicit — NOT transmitted — each
+ * side fills it in from its own role. The 8-byte wire header is additionally
+ * fed as AAD so serial/counter are authenticated by the tag. */
+#define NFC_NONCE_LEN	       9
+#define NFC_NONCE_DIR_REQUEST  0x00
+#define NFC_NONCE_DIR_RESPONSE 0x01
+
 static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size, size_t *out_len)
 {
 	int res = 0;
@@ -559,11 +570,15 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 	/* Verify nonce counter (part of nonce) */
 	uint32_t nonce_counter = sys_get_be32(&in[4]);
 	LOG_INF("Nonce counter: %u", nonce_counter);
-	NFC_REPORT("  nonce: %u (last used %u)", nonce_counter, g_app_config.nonce_counter);
+	NFC_REPORT("  nonce: %u (last used %u)", nonce_counter, app_config()->nonce_counter);
 
-	if (g_app_config.nonce_counter >= nonce_counter) {
+	/* Compare against the live high-water mark (app_config()/m_app_config) — the
+	 * same struct decrypt() advances below. Using g_app_config here would read a
+	 * stale boot-time value (g is only synced from m at commit/reset), which would
+	 * let any already-used counter be replayed within a session. */
+	if (app_config()->nonce_counter >= nonce_counter) {
 		LOG_ERR("Nonce counter is not greater than the last used nonce: %u >= %u",
-			g_app_config.nonce_counter, nonce_counter);
+			app_config()->nonce_counter, nonce_counter);
 		return -EACCES;
 	}
 
@@ -592,8 +607,12 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 
 	psa_reset_key_attributes(&key_attributes);
 
-	status = psa_aead_decrypt(key_id, PSA_ALG_CCM, &in[0], 8, NULL, 0, &in[8], in_len - 8, out,
-				  out_size, out_len);
+	uint8_t nonce[NFC_NONCE_LEN];
+	memcpy(nonce, in, 8);
+	nonce[8] = NFC_NONCE_DIR_REQUEST;
+
+	status = psa_aead_decrypt(key_id, PSA_ALG_CCM, nonce, sizeof(nonce), /* AAD */ in, 8,
+				  &in[8], in_len - 8, out, out_size, out_len);
 
 	destroy_status = psa_destroy_key(key_id);
 
@@ -608,17 +627,30 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 	}
 
 	if (!res) {
+		/* Advance and persist the anti-replay counter NOW, before the caller runs
+		 * the command — otherwise a command that reboots (e.g. lrw_reset) would
+		 * lose the bump and stay replayable. Persist a single NVS key, not the
+		 * whole settings blob. If the persist fails, roll the counter back and
+		 * reject so we never accept a counter we couldn't make durable. */
+		uint32_t prev = app_config()->nonce_counter;
 		app_config()->nonce_counter = nonce_counter;
+		int sret = app_config_save_nonce_counter();
+		if (sret) {
+			LOG_ERR_CALL_FAILED_INT("app_config_save_nonce_counter", sret);
+			app_config()->nonce_counter = prev;
+			res = sret;
+		}
 	}
 
 	return res;
 }
 
 /* Encrypt `in_len` plaintext bytes into the response wire format:
- * [serial(4)][nonce_counter(4)][AES-CCM ciphertext + 16 B tag]. The nonce
- * reuses the request's `nonce_counter` (per protocol — request and response
- * share the (key, nonce) pair); the phone already knows it, so it can decrypt
- * the reply. Returns the wire length in *out_len, or a negative errno. */
+ * [serial(4)][nonce_counter(4)][AES-CCM ciphertext + 16 B tag]. The CCM nonce is
+ * serial||nonce_counter||RESPONSE — same counter as the request but a distinct
+ * direction byte, so the reply never shares a (key, nonce) pair with the request.
+ * The phone knows the counter (echoed in the header) and the implicit RESPONSE
+ * direction, so it can decrypt. Returns the wire length in *out_len, or errno. */
 static int encrypt(const uint8_t *in, size_t in_len, uint32_t nonce_counter, uint8_t *out,
 		   size_t out_size, size_t *out_len)
 {
@@ -659,9 +691,13 @@ static int encrypt(const uint8_t *in, size_t in_len, uint32_t nonce_counter, uin
 
 	psa_reset_key_attributes(&key_attributes);
 
+	uint8_t nonce[NFC_NONCE_LEN];
+	memcpy(nonce, out, 8);
+	nonce[8] = NFC_NONCE_DIR_RESPONSE;
+
 	size_t ct_len = 0;
-	status = psa_aead_encrypt(key_id, PSA_ALG_CCM, &out[0], 8, NULL, 0, in, in_len, &out[8],
-				  out_size - 8, &ct_len);
+	status = psa_aead_encrypt(key_id, PSA_ALG_CCM, nonce, sizeof(nonce), /* AAD */ out, 8, in,
+				  in_len, &out[8], out_size - 8, &ct_len);
 
 	destroy_status = psa_destroy_key(key_id);
 
@@ -709,8 +745,9 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 		enum app_cmd_action cmd_action = APP_CMD_ACTION_NONE;
 #ifdef CONFIG_APP_NFC_ENCRYPTION
 		/* Encrypted channel: decrypt the command, run it, then encrypt the
-		 * reply. The response reuses the request's nonce counter (set into
-		 * g_app_config.nonce_counter by decrypt()). */
+		 * reply. The reply uses the request's counter with a RESPONSE direction
+		 * byte (see encrypt()), so it never reuses the request nonce. decrypt()
+		 * stored the accepted counter into app_config()->nonce_counter. */
 		static uint8_t cmd_plain[256];
 		static uint8_t resp_plain[256];
 		size_t cmd_len = 0;
@@ -722,7 +759,7 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 			m_resp_len = 0;
 			return ret;
 		}
-		uint32_t req_nonce = g_app_config.nonce_counter;
+		uint32_t req_nonce = app_config()->nonce_counter;
 
 		size_t resp_len = 0;
 		ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, cmd_plain, cmd_len, resp_plain,
