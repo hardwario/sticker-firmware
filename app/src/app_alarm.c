@@ -32,6 +32,13 @@
 
 LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 
+/* Minimum threshold hysteresis (#190). A rule with hst == 0 (or a negative /
+ * NaN value written by a host) lets a reading dithering around a bound flap the
+ * alarm active/inactive on every 3 s poll. Clamp the effective hysteresis to
+ * this small floor — negligible against any real threshold yet wide enough to
+ * absorb sensor LSB dither — so each transition needs a genuine excursion. */
+#define ALARM_MIN_HYSTERESIS 0.1f
+
 /* Wire enum values (AlarmEvent.Side / .Edge). */
 #define ALARM_SIDE_NONE  0
 #define ALARM_SIDE_LO    1
@@ -366,7 +373,14 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 		return false;
 	}
 
-	float lo = rule->lo, hi = rule->hi, hst = rule->hst;
+	float lo = rule->lo, hi = rule->hi;
+	/* Clamp the hysteresis to a non-negative floor. The negated comparison
+	 * also captures NaN (NaN >= x is false), so a garbage value can't disable
+	 * the dead-band. */
+	float hst = rule->hst;
+	if (!(hst >= ALARM_MIN_HYSTERESIS)) {
+		hst = ALARM_MIN_HYSTERESIS;
+	}
 
 	if (rt->active) {
 		if (value > lo + hst && value < hi - hst) {
