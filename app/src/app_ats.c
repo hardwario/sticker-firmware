@@ -541,6 +541,8 @@ static const char *lrw_state_to_str(enum app_lrw_state state)
 		return "WARNING";
 	case APP_LRW_STATE_RECONNECT:
 		return "RECONNECT";
+	case APP_LRW_STATE_DISABLED:
+		return "DISABLED";
 	default:
 		return "UNKNOWN";
 	}
