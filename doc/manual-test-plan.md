@@ -404,18 +404,26 @@ the rejoin timer keeps running and the device rejoins.
 
 - [ ] Pass
 
-### L15 — Radio-silent on zero DevEUI (#98)
+### L15 — Radio-silent on zero DevEUI (#98, #175)
 
-**Goal:** An un-provisioned device (DevEUI all-zero) does not burn power on impossible joins.
-**Observable:** RTT `DevEUI is all-zero: LoRaWAN disabled (radio-silent)`; `ats lrw status` state
-DISABLED; no JoinRequest uplinks, no rejoin timer.
+**Goal:** An un-provisioned device (DevEUI all-zero) does not burn power on impossible joins, and
+(#175) does not even bring up the radio.
+**Observable:** RTT `DevEUI is all-zero: skipping LoRaWAN bring-up (radio-silent, #98/#175)`;
+`ats lrw status` state **DISABLED**; **no** `lorawan_start`/region/JoinRequest activity at all, no
+rejoin timer; on a power trace (PPK2, J-Link detached) **no boot radio burst** in the first second.
 
 **Prompt for Claude:**
-> Set `config lrw-deveui 0000000000000000`, `settings save`. After reboot confirm the device enters
-> DISABLED (no join attempts on the LNS, no rejoin backoff in the log). Restore a real DevEUI +
-> `settings save` and confirm it joins again.
+> Set `config lrw-deveui 0000000000000000`, `settings save`. After reboot confirm the boot RTT log
+> shows `skipping LoRaWAN bring-up (radio-silent, #98/#175)` (debug build) and **no** region /
+> `lorawan_start` / join lines follow — `app_lrw_init` takes the radio-silent path. Confirm
+> `ats lrw status` = `DISABLED`. Restore a real DevEUI + `settings save` and confirm it joins again.
 
 - [ ] Pass
+
+> **HW-verified (2026-06-23, #175):** debug build on Base Compact, `lrw-deveui = 00…00` — RTT showed
+> `skipping LoRaWAN bring-up (radio-silent, #98/#175)`, no radio/region/join logs, `ats lrw status`
+> = DISABLED. The `DIAG_NO_RADIO` build (skips the whole `app_lrw_init` call) confirmed via a
+> sentinel log that `app_lrw_init` is never even entered.
 
 ### L16 — Release-FW sustained TX (TX-stop regression, decisive)
 

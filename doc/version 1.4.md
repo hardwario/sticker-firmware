@@ -514,7 +514,7 @@ Not user-facing, but worth recording: v1.4.0 grew enough that the debug image RA
 Behaviour notes:
 - **Tolerant supervision** — a single missed LinkCheckAns does not escalate; WARNING needs 3 consecutive failures, RECONNECT then needs `lrw-link-check-fail-rejoin` more. Some networks (e.g. TTN) do not always answer `LinkCheckReq`; the device correctly stays HEALTHY rather than rejoining spuriously.
 - **OTAA rejoin** uses exponential backoff (60 s → ×2 → capped 3600 s); **ABP** cannot rejoin and stays in WARNING (it never had a join).
-- **Radio-silent mode (#98)** — if the configured **DevEUI is all-zero** (an un-provisioned device), the firmware enters `DISABLED` instead of looping on join requests that can never succeed, saving power. It stays DISABLED until reprovisioned and rebooted.
+- **Radio-silent mode (#98, #175)** — if the configured **DevEUI is all-zero** (an un-provisioned device), the firmware enters `DISABLED` instead of looping on join requests that can never succeed, saving power. It stays DISABLED until reprovisioned and rebooted. As of #175 the **entire LoRaWAN bring-up is skipped** in this mode: `lorawan_start()` is never called, so the SubGHz radio is never powered and there is **no boot radio burst** at all (previously the radio was started once at boot before the device went DISABLED). `ats lrw status` reports `DISABLED`.
 - Debug builds expose `ats lrw lc ok|fail` to drive the state machine deterministically on the bench (no real RF outage needed).
 
 ---
