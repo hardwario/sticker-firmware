@@ -964,6 +964,11 @@ static void send_work_handler(struct k_work *work)
 
 	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
 
+	/* Radio-silent (#98/#175): the stack was never started, never transmit. */
+	if (state == APP_LRW_STATE_DISABLED) {
+		return;
+	}
+
 	if (state == APP_LRW_STATE_JOINING || state == APP_LRW_STATE_RECONNECT) {
 		LOG_WRN("TX blocked: %s", state_name(state));
 		return;
@@ -1332,55 +1337,67 @@ int app_lrw_init(void)
 		return -ENODEV;
 	}
 
-	clear_stale_lorawan_nvm();
+	/* #175: when the DevEUI is all-zero (#98 radio-silent provisioning) skip the
+	 * entire LoRaMac/radio bring-up. The work queue, works and timers below are
+	 * still set up so the public API stays safe (app_lrw_join / send hit the
+	 * DISABLED guard and no-op), but clear_stale_lorawan_nvm() /
+	 * lorawan_set_region() / lorawan_start() are never called — the SubGHz radio
+	 * is never powered, so there is no boot radio burst. */
+	const bool radio_silent = deveui_is_zero();
 
-	enum lorawan_region region;
+	if (!radio_silent) {
+		clear_stale_lorawan_nvm();
 
-	switch (g_app_config.lrw_region) {
-	case APP_CONFIG_LRW_REGION_EU868:
-		region = LORAWAN_REGION_EU868;
-		break;
-	case APP_CONFIG_LRW_REGION_US915:
-		region = LORAWAN_REGION_US915;
-		break;
-	case APP_CONFIG_LRW_REGION_AU915:
-		region = LORAWAN_REGION_AU915;
-		break;
-	default:
-		LOG_ERR("Invalid region: %d", g_app_config.lrw_region);
-		return -EINVAL;
-	}
+		enum lorawan_region region;
 
-	ret = lorawan_set_region(region);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("lorawan_set_region", ret);
-		return ret;
-	}
+		switch (g_app_config.lrw_region) {
+		case APP_CONFIG_LRW_REGION_EU868:
+			region = LORAWAN_REGION_EU868;
+			break;
+		case APP_CONFIG_LRW_REGION_US915:
+			region = LORAWAN_REGION_US915;
+			break;
+		case APP_CONFIG_LRW_REGION_AU915:
+			region = LORAWAN_REGION_AU915;
+			break;
+		default:
+			LOG_ERR("Invalid region: %d", g_app_config.lrw_region);
+			return -EINVAL;
+		}
 
-	ret = lorawan_start();
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("lorawan_start", ret);
-		return ret;
-	}
-
-	if (g_app_config.lrw_region == APP_CONFIG_LRW_REGION_US915 ||
-	    g_app_config.lrw_region == APP_CONFIG_LRW_REGION_AU915) {
-		ret = apply_subband(g_app_config.lrw_sub_band);
+		ret = lorawan_set_region(region);
 		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("apply_subband", ret);
+			LOG_ERR_CALL_FAILED_INT("lorawan_set_region", ret);
 			return ret;
 		}
+
+		ret = lorawan_start();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("lorawan_start", ret);
+			return ret;
+		}
+
+		if (g_app_config.lrw_region == APP_CONFIG_LRW_REGION_US915 ||
+		    g_app_config.lrw_region == APP_CONFIG_LRW_REGION_AU915) {
+			ret = apply_subband(g_app_config.lrw_sub_band);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("apply_subband", ret);
+				return ret;
+			}
+		}
+
+		static struct lorawan_downlink_cb downlink_cb = {
+			.port = LW_RECV_PORT_ANY,
+			.cb = downlink_callback,
+		};
+
+		lorawan_register_downlink_callback(&downlink_cb);
+		lorawan_register_battery_level_callback(battery_level_callback);
+		lorawan_register_dr_changed_callback(datarate_changed_callback);
+		lorawan_register_link_check_ans_callback(link_check_callback);
+	} else {
+		LOG_WRN("DevEUI is all-zero: skipping LoRaWAN bring-up (radio-silent, #98/#175)");
 	}
-
-	static struct lorawan_downlink_cb downlink_cb = {
-		.port = LW_RECV_PORT_ANY,
-		.cb = downlink_callback,
-	};
-
-	lorawan_register_downlink_callback(&downlink_cb);
-	lorawan_register_battery_level_callback(battery_level_callback);
-	lorawan_register_dr_changed_callback(datarate_changed_callback);
-	lorawan_register_link_check_ans_callback(link_check_callback);
 
 	k_work_queue_init(&m_work_q);
 	k_work_queue_start(&m_work_q, m_work_stack, K_THREAD_STACK_SIZEOF(m_work_stack),
@@ -1405,7 +1422,7 @@ int app_lrw_init(void)
 	k_timer_init(&m_lc_timeout_timer, lc_timeout_timer_handler, NULL);
 	k_timer_init(&m_rejoin_timer, rejoin_timer_handler, NULL);
 
-	atomic_set(&m_state, APP_LRW_STATE_IDLE);
+	atomic_set(&m_state, radio_silent ? APP_LRW_STATE_DISABLED : APP_LRW_STATE_IDLE);
 	m_init_join = true;
 
 	return 0;
