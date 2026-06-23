@@ -63,13 +63,43 @@ struct app_w1_sensor_type {
 /* Telemetry SensorReading.flags bit positions (mirrored in ttn.js). */
 #define MP_FLAG_TILT BIT(0)
 
+/* DS18B20 plausibility gate (#180). The Zephyr driver CRC-checks the scratchpad,
+ * so a *missing* sensor errors out — but the part's power-on-reset / brownout /
+ * mid-conversion value of +85.0 C (scratchpad 0x0550) carries a *valid* CRC and
+ * reads back as success. That sentinel (and any physically impossible value)
+ * would otherwise latch a hi-bound temperature alarm — the field-reported
+ * "blinks red at 6 C" case. 0.0 C is deliberately NOT rejected: it is a
+ * legitimate freezing reading, only an ambiguous reset hint. */
+#define DS18B20_TEMP_MIN     (-55.0f)
+#define DS18B20_TEMP_MAX     125.0f
+#define DS18B20_POR_SENTINEL 85.0f
+
+static bool dallas_temp_plausible(float t)
+{
+	if (t < DS18B20_TEMP_MIN || t > DS18B20_TEMP_MAX) {
+		return false;
+	}
+	/* Exact power-on-reset sentinel (scratchpad 0x0550 -> 85.0 C). */
+	if (t == DS18B20_POR_SENTINEL) {
+		return false;
+	}
+	return true;
+}
+
 static int dallas_read(int index, uint64_t *serial, struct app_w1_slot_reading *out)
 {
 	float temperature;
 	int ret = app_ds18b20_read(index, serial, &temperature);
 
 	if (ret == 0) {
-		out->temperature = temperature;
+		if (dallas_temp_plausible(temperature)) {
+			out->temperature = temperature;
+		} else {
+			/* Leave temperature NaN so eval_threshold / encode treat it
+			 * as absent rather than firing a false alarm. */
+			LOG_WRN("DS18B20 idx %d: implausible %s%d.%02d C rejected", index,
+				APP_FP2(temperature));
+		}
 	}
 	return ret;
 }
