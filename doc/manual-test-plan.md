@@ -1281,11 +1281,12 @@ record is rejected and the device still boots normally.
 
 - [ ] Pass
 
-### N8 — NFC crypto hardening: nonce separation, anti-replay persistence, counter readback (#179, #184)
+### N8 — NFC crypto hardening: nonce separation, anti-replay, response cache, mailbox encryption (#179, #184, #194)
 
 **Goal:** The encrypted channel no longer reuses a `(key, nonce)` pair across a request and its
-response (#179), the anti-replay counter survives a power-cycle (#184), and the counter high-water is
-exposed in the plaintext info record so a phone can resync.
+response (#179), the anti-replay counter survives a power-cycle (#184), the counter high-water is
+exposed in the plaintext info record so a phone can resync, a same-counter retransmission is idempotent
+via a response cache, and the mailbox (FTM) channel is encrypted (#194).
 **Observable:**
 - **Direction-separated nonce:** the CCM nonce is `serial ‖ nonce_counter ‖ direction` (9 bytes), with
   the direction byte `0x00` for the request and `0x01` for the response. Request and response carry the
@@ -1293,9 +1294,15 @@ exposed in the plaintext info record so a phone can resync.
   header-as-AAD) decrypts the response; the old 8-byte-nonce / no-AAD codec fails to decrypt or verify.
 - **Counter in info record:** `hio.stck:inf` is format `0x02`, 15-byte payload, with the last-accepted
   `nonce_counter` (big-endian) at payload bytes `[11..14]`. It tracks the live counter.
-- **Anti-replay persists across reboot:** after an accepted command advances the counter, the bumped
-  value is durable; the same command replayed after a power-cycle is rejected (`-EACCES`). `lrw_reset`
-  (which reboots immediately) cannot be replayed.
+- **Idempotent retransmission (response cache):** re-sending the **same** counter (e.g. the phone never
+  read the reply) replays the cached encrypted response **without re-running** the command — no double
+  execution of a `set_param`/action.
+- **Anti-replay persists across reboot:** the accepted counter is durable; a counter `<=` the stored
+  high-water is rejected (`-EACCES`). After a reboot the response cache is empty, so even a same-counter
+  retry is rejected and the phone resyncs from the info-record counter. `lrw_reset` (which reboots
+  immediately) cannot be replayed.
+- **Mailbox encrypted (#194):** mailbox (FTM) frames use the same direction nonce + AAD + anti-replay +
+  response cache as the NDEF channel; on a default build a plaintext mailbox frame is rejected.
 
 **Prompt for Claude — bench/J-Link verifiable parts (FW agent):**
 > On the default (encrypted) build, over RTT: `nfc dump` and confirm the `hio.stck:inf` record has
@@ -1308,10 +1315,14 @@ exposed in the plaintext info record so a phone can resync.
 **Prompt for Claude — round-trip & replay parts (needs the Manager-App phone):**
 > With the Manager-App on the matching codec: send an encrypted `get_info` with counter = last+1,
 > confirm the encrypted `hio.stck:rsp` decrypts on the phone and that `config nonce-counter` (shell) and
-> the info-record counter both advanced. Re-send the **same** counter and confirm the device rejects it
-> (no/garbage response, RTT shows the nonce check failing). Power-cycle the device, re-send the same
-> counter again, and confirm it is still rejected (counter persisted). Finally, capture a request and its
-> response and confirm they cannot be cross-decrypted (nonce direction separation). Report results.
+> the info-record counter both advanced. Re-send the **same** counter (simulating a lost reply) and
+> confirm the device **replays the identical cached response without re-running** the command (RTT shows
+> `retransmission … replaying cached response`; a `set_param` value is not applied twice). Power-cycle the
+> device, re-send the same counter, and confirm it is now **rejected** (`-EACCES`, cache gone) and the
+> phone resyncs from the info-record counter (`stored+1`). Capture a request and its response and confirm
+> they cannot be cross-decrypted (direction separation). Finally, over the **mailbox** (`enter_mailbox`
+> → stream `get_info` → `exit_mailbox`), confirm the frames are encrypted and a same-counter mailbox
+> retry is also served from the cache. Report results.
 
 - [ ] Pass
 
