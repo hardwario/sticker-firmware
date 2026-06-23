@@ -53,9 +53,10 @@ struct rstate {
 	uint8_t side;       /* threshold: which bound latched */
 	uint8_t prev_state; /* STATE: last digital level seen */
 	bool have_prev_state;
-	uint32_t prev_count; /* COUNT: baseline counter */
+	uint32_t prev_count; /* COUNT: baseline counter at window start */
 	bool have_prev_count;
-	int64_t oneshot_expiry; /* STATE edge one-shot: auto-clear time (0 = none) */
+	int64_t count_window_start; /* COUNT: start of the current interval_report window (#195) */
+	int64_t oneshot_expiry;     /* STATE edge one-shot: auto-clear time (0 = none) */
 };
 
 static struct rstate m_rt[APP_ALARM_SLOT_COUNT];
@@ -469,30 +470,49 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
 	rt->prev_state = cur_lvl;
 }
 
-/* COUNT rate rule: alarm when the counter rose by >= hi since the last fire.
- * The underlying counters in g_app_sensor_data only refresh per sample/report,
- * so this is effectively a per-report rate. One-shot (auto-clear). */
+/* COUNT rate rule: alarm when the counter rose by >= hi over one interval_report
+ * window. This is called on the 3 s LED poll, but the rate must be assessed over
+ * interval_report ("per interval_report" contract, app_alarm_rules.h), not per
+ * poll — otherwise with interval_sample < 3 s the counts split across polls and
+ * the threshold under-counts (#195). So we accumulate across polls and evaluate
+ * the delta only once a full interval_report window has elapsed (tumbling
+ * window), re-baselining the counter and window each time. One-shot
+ * (auto-clear). */
 static void eval_count(uint8_t slot, const struct app_alarm_rule *rule, struct rstate *rt,
 		       uint32_t cur, bool *should_send)
 {
+	int64_t now = k_uptime_get();
+
 	if (!rt->have_prev_count) {
 		rt->have_prev_count = true;
 		rt->prev_count = cur;
+		rt->count_window_start = now;
 		return;
 	}
 	if (!rule->enabled) {
 		rt->prev_count = cur;
+		rt->count_window_start = now;
 		return;
 	}
+
+	/* Hold until the interval_report window closes; counts keep accumulating
+	 * in prev_count's delta meanwhile. */
+	int64_t window_ms = (int64_t)g_app_config.interval_report * 1000;
+	if (window_ms > 0 && (now - rt->count_window_start) < window_ms) {
+		return;
+	}
+
 	uint32_t delta = cur - rt->prev_count; /* wraps correctly on uint32 */
 	if (rule->hi > 0 && delta >= (uint32_t)rule->hi) {
 		rt->active = true;
-		rt->oneshot_expiry = k_uptime_get() + notif_hold_ms();
+		rt->oneshot_expiry = now + notif_hold_ms();
 		*should_send = true;
 		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_NONE, true,
 			      (int32_t)cur);
-		rt->prev_count = cur;
 	}
+	/* Re-baseline for the next window whether or not it fired. */
+	rt->prev_count = cur;
+	rt->count_window_start = now;
 }
 
 bool app_alarm_poll(void)
