@@ -22,6 +22,17 @@
 
 LOG_MODULE_REGISTER(app_sht4x, LOG_LEVEL_DBG);
 
+/* Application-level plausibility gate (#202), mirroring the DS18B20 fix (#180).
+ * The Zephyr driver CRC-checks the I2C transfer, so a missing sensor errors out
+ * — but a stuck/faulty part can return a finite out-of-range value that would
+ * feed a false onboard-temp/humidity alarm. Reject readings outside the SHT4x
+ * spec window (slightly widened for measurement margin) so the sample is treated
+ * as a failed read rather than a valid sample. */
+#define SHT4X_TEMP_MIN (-45.0f)
+#define SHT4X_TEMP_MAX 130.0f
+#define SHT4X_HUM_MIN  0.0f
+#define SHT4X_HUM_MAX  100.0f
+
 static uint8_t sht_crc8(const uint8_t *data, size_t len)
 {
 	uint8_t crc = 0xff;
@@ -68,6 +79,11 @@ int app_sht4x_read(float *temperature, float *humidity)
 
 	LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(temperature_));
 
+	if (temperature_ < SHT4X_TEMP_MIN || temperature_ > SHT4X_TEMP_MAX) {
+		LOG_WRN("Implausible temperature %s%d.%02d C rejected", APP_FP2(temperature_));
+		return -ERANGE;
+	}
+
 	if (temperature) {
 		*temperature = temperature_;
 	}
@@ -81,6 +97,11 @@ int app_sht4x_read(float *temperature, float *humidity)
 	float humidity_ = sensor_value_to_float(&val);
 
 	LOG_DBG("Humidity: %s%d.%01d %%", APP_FP1(humidity_));
+
+	if (humidity_ < SHT4X_HUM_MIN || humidity_ > SHT4X_HUM_MAX) {
+		LOG_WRN("Implausible humidity %s%d.%01d %% rejected", APP_FP1(humidity_));
+		return -ERANGE;
+	}
 
 	if (humidity) {
 		*humidity = humidity_;
