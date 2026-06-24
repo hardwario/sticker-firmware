@@ -63,6 +63,13 @@ int app_nfc_restore_info(void);
  * EnterMailbox command is taken via app_nfc_take_cmd_action(). */
 int app_nfc_serve_mailbox(uint32_t idle_timeout_ms);
 
+/* Briefly power the ST25DV down (LPD high for `off_ms`) so a phone holding a
+ * continuous RF field re-discovers the tag for the next operation without a
+ * physical lift. Idle-only: never during a mailbox session and only after the
+ * phone has read the previous reply (the volatile mailbox RAM is lost on
+ * power-down; the NDEF EEPROM survives). */
+void app_nfc_rediscovery_pulse(uint32_t off_ms);
+
 #ifdef __cplusplus
 }
 #endif
