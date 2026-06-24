@@ -267,8 +267,13 @@ message Response {
         }
 
         Code   code         = 1;
-        uint32 fault_field  = 2;
+        uint32 fault_field  = 2;   // proto tag of the offending field within fault_group
         string detail       = 3;
+        // SetParam applies groups in a fixed order and stops at the first failing
+        // one; fault_field is the tag *within* that group, so it is ambiguous on
+        // its own (#196). fault_group names the group so a host can map it back:
+        // 1=lorawan, 2=application, 3=sensors, 4=alarms; 0 when not group-scoped.
+        uint32 fault_group  = 4;
     }
 
     // Answer to a W1Scan command: the ROMs discovered on the 1-Wire bus (8 bytes
