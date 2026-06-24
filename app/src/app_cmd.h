@@ -130,6 +130,7 @@ struct app_cmd_alarm_event {
 	bool has_value;   /* value present */
 	int32_t value;    /* scaled value (×100 temp/hum, ×10 pressure, digital 0/1, counter) */
 	uint32_t rel_s;   /* seconds since base_time */
+	bool no_data;     /* sensor stopped reporting (NaN watchdog); slot = 0xFF, side none, value absent */
 };
 
 /* Build an alarm-detail batch (AlarmReport) for fPort 3 (#27) into `out`.

@@ -32,6 +32,13 @@
 
 LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 
+/* "Value not available" sentinels (mirrored in ttn.js → null). An enabled analog
+ * sensor is always present on the wire so the configured-sensor list is stable
+ * across reports; a missing/NaN reading is sent as the sentinel rather than
+ * dropping the field (which would be indistinguishable from a disabled sensor). */
+#define TM_S32_NA INT32_MIN  /* sint32 fields: temperature, altitude */
+#define TM_U32_NA UINT32_MAX /* uint32 fields: humidity, pressure, illuminance */
+
 /* Per-group flag bit positions (mirrored in ttn.js). */
 #define SYSTEM_FLAG_BOOT BIT(0)
 /* MP_FLAG_TILT moved to app_w1_slots.c with the per-type SensorReading encode. */
@@ -161,35 +168,36 @@ static void fill_snapshot(void)
 	t->has_system_flags = true;
 	t->system_flags = system_flags;
 
-	/* internal */
-	if (!isnan(d.temperature)) {
-		t->has_temperature = true;
-		t->temperature = (int32_t)(d.temperature * 100.0f);
-	}
-	if (!isnan(d.humidity)) {
-		t->has_humidity = true;
-		/* Clamp before the unsigned cast: the SHT4x formula can yield a
-		 * slightly negative %RH, and a negative float->uint cast is UB. */
-		t->humidity = (uint32_t)CLAMP(d.humidity * 2.0f, 0.0f, 200.0f);
-	}
+	/* internal — onboard SHT4x is always present, so temperature/humidity are
+	 * always on the wire; a NaN reading (sensor fault) goes out as the sentinel
+	 * (decoder → null) instead of dropping the field. */
+	t->has_temperature = true;
+	t->temperature = isnan(d.temperature) ? TM_S32_NA : (int32_t)(d.temperature * 100.0f);
+	t->has_humidity = true;
+	/* Clamp before the unsigned cast: the SHT4x formula can yield a slightly
+	 * negative %RH, and a negative float->uint cast is UB. */
+	t->humidity = isnan(d.humidity) ? TM_U32_NA : (uint32_t)CLAMP(d.humidity * 2.0f, 0.0f, 200.0f);
 
-	/* barometer */
-	if (g_app_config.cap_barometer && !isnan(d.pressure)) {
+	/* barometer — sent whenever enabled (sentinel on NaN). */
+	if (g_app_config.cap_barometer) {
 		t->has_pressure = true;
 		/* d.pressure is kPa from the driver; the wire unit is hPa x10
 		 * (0.1 hPa resolution). hPa = kPa x10, so hPa x10 = kPa x100. */
-		t->pressure = (uint32_t)CLAMP(d.pressure * 100.0f, 0.0f, 200000.0f);
-	}
-	if (g_app_config.cap_barometer && !isnan(d.altitude)) {
-		float a = CLAMP(d.altitude * 10.0f, (float)INT16_MIN, (float)INT16_MAX);
+		t->pressure = isnan(d.pressure) ? TM_U32_NA
+						: (uint32_t)CLAMP(d.pressure * 100.0f, 0.0f, 200000.0f);
 		t->has_altitude = true;
-		t->altitude = (int32_t)a;
+		t->altitude = isnan(d.altitude)
+				      ? TM_S32_NA
+				      : (int32_t)CLAMP(d.altitude * 10.0f, (float)INT16_MIN,
+						       (float)INT16_MAX);
 	}
 
-	/* light */
-	if (g_app_config.cap_light_sensor && !isnan(d.illuminance)) {
+	/* light — sent whenever enabled (sentinel on NaN). */
+	if (g_app_config.cap_light_sensor) {
 		t->has_illuminance = true;
-		t->illuminance = (uint32_t)CLAMP(d.illuminance / 2.0f, 0.0f, 1000000.0f);
+		t->illuminance = isnan(d.illuminance)
+					 ? TM_U32_NA
+					 : (uint32_t)CLAMP(d.illuminance / 2.0f, 0.0f, 1000000.0f);
 	}
 
 	/* accel (gated by the accelerometer capability) */

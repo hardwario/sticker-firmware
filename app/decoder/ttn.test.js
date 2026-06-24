@@ -506,3 +506,27 @@ test("alarm slot set_param encodes as native bytes and round-trips (LRW)", () =>
   const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
   assert.equal(u.config_dump.alarms.alarm_0, rule);
 });
+
+// #205 follow-up: a config-enabled analog sensor is always on the wire; a NaN
+// reading is sent as a sentinel and must decode to null (not a huge number).
+test("fPort-2 telemetry: not-available sentinels decode to null", () => {
+  // 01 version, temperature (field 3, tag 0x18) = INT32_MIN sentinel
+  // (zigzag 0xFFFFFFFF), humidity (field 4, tag 0x20) = UINT32_MAX sentinel.
+  const got = codec.decodeUplink({ bytes: hex("0118ffffffff0f20ffffffff0f"), fPort: 2 }).data;
+  assert.equal(got.temperature, null);
+  assert.equal(got.humidity, null);
+});
+
+// #205 follow-up: no_data watchdog event (sensor stopped reporting). slot 0xFF,
+// no_data=true (field 8), value absent.
+test("fPort-3 alarm: no_data flag decodes (sensor stopped reporting)", () => {
+  const base = 1780000000;
+  const ev = pbTV(7, 255).concat(pbTV(8, 1)); // slot=255, no_data=1 (source/quantity default onboard/temperature)
+  const f = buildAlarmReport(base, 1, [ev]);
+  const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
+  assert.equal(d.alarms[0].slot, 255);
+  assert.equal(d.alarms[0].no_data, true);
+  assert.equal(d.alarms[0].source, "onboard");
+  assert.equal(d.alarms[0].quantity, "temperature");
+  assert.equal(d.alarms[0].value, null);
+});
