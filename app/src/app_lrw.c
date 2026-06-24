@@ -15,6 +15,7 @@
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_settings.h"
+#include "app_wdog.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -82,8 +83,25 @@ LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
 #define REJOIN_BACKOFF_MAX_SEC    3600 /* Maximum backoff time (1 hour) */
 #define REJOIN_BACKOFF_MULTIPLIER 2    /* Exponential multiplier per attempt */
 
-static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
+/* 4096 B (was 2048): the TX path nests lorawan_send → LoRaMac → nanopb encode →
+ * mbedTLS AES-CCM, which is deep, and release builds carry no stack canary
+ * (CONFIG_INIT_STACKS is debug-only) so an overflow would silently corrupt RAM
+ * and mimic the TX-stop wedge rather than fault cleanly (#187). */
+static K_THREAD_STACK_DEFINE(m_work_stack, 4096);
 static struct k_work_q m_work_q;
+
+#if defined(CONFIG_WATCHDOG)
+/* Liveness heartbeat (#182): a self-rearming work item proves m_work_q is still
+ * draining. If the queue wedges (e.g. lorawan_send blocks forever on the MAC
+ * confirm semaphore, #181) this work can no longer run, the channel goes stale
+ * and app_wdog stops feeding the IWDG → SoC reset + rejoin. The timeout is far
+ * above the worst-case legitimate single-send blocking (~7 s on TTN with a 5 s
+ * RX1 delay), so only a true wedge trips it. */
+#define LRW_HEARTBEAT_PERIOD_SEC 5
+#define LRW_HEARTBEAT_TIMEOUT_MS 30000
+static int m_wdog_channel = -1;
+static struct k_work_delayable m_heartbeat_work;
+#endif
 
 /* --- Timers (each one meaning only) --- */
 static struct k_timer m_lc_timeout_timer;
@@ -1326,6 +1344,17 @@ void app_lrw_suspend(void)
 	k_timer_stop(&m_rejoin_timer);
 }
 
+#if defined(CONFIG_WATCHDOG)
+static void heartbeat_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	app_wdog_ping(m_wdog_channel);
+	k_work_schedule_for_queue(&m_work_q, &m_heartbeat_work,
+				  K_SECONDS(LRW_HEARTBEAT_PERIOD_SEC));
+}
+#endif /* defined(CONFIG_WATCHDOG) */
+
 int app_lrw_init(void)
 {
 	int ret;
@@ -1421,6 +1450,18 @@ int app_lrw_init(void)
 
 	k_timer_init(&m_lc_timeout_timer, lc_timeout_timer_handler, NULL);
 	k_timer_init(&m_rejoin_timer, rejoin_timer_handler, NULL);
+
+#if defined(CONFIG_WATCHDOG)
+	/* Start the liveness heartbeat on m_work_q so a wedged queue is detected and
+	 * the IWDG resets us (#181/#182). Registered even when radio-silent: the
+	 * queue still runs and a wedge there should still recover. */
+	m_wdog_channel = app_wdog_register(LRW_HEARTBEAT_TIMEOUT_MS);
+	if (m_wdog_channel < 0) {
+		LOG_ERR_CALL_FAILED_INT("app_wdog_register", m_wdog_channel);
+	}
+	k_work_init_delayable(&m_heartbeat_work, heartbeat_work_handler);
+	k_work_schedule_for_queue(&m_work_q, &m_heartbeat_work, K_NO_WAIT);
+#endif /* defined(CONFIG_WATCHDOG) */
 
 	atomic_set(&m_state, radio_silent ? APP_LRW_STATE_DISABLED : APP_LRW_STATE_IDLE);
 	m_init_join = true;
