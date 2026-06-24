@@ -365,7 +365,11 @@ static int write_reg(uint16_t reg, const void *buf, size_t len)
 
 	int ret = i2c_write(dev, frame, 2 + len, reg_dev_addr(reg));
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("i2c_write", ret);
+		/* Name the register + I2C device select so a NACK is identifiable on RTT
+		 * (E0=0x53 data/dynamic, E1=0x57 system/password-protected). */
+		LOG_ERR("i2c_write reg 0x%04x (E%c addr 0x%02x, %u B) failed: %d", reg,
+			reg_dev_addr(reg) == ST25DV_I2C_ADDR_E0 ? '0' : '1', reg_dev_addr(reg),
+			(unsigned)len, ret);
 		return ret;
 	}
 
@@ -987,31 +991,39 @@ static int mb_disable(void)
 {
 	static const uint8_t default_pwd[8] = {0};
 
-	/* Dynamic enable (E0, no password) — the bit that actually gates FTM. */
-	uint8_t ctrl = 0;
-	(void)write_reg(ST25DV_MB_CTRL_DYN, &ctrl, 1);
+	/* Log the current mailbox state up front so a boot RTT trace shows whether
+	 * the mailbox was actually stuck and which clear (if any) NACKs. */
+	uint8_t mode = 0xff, ctrl = 0xff;
+	int rm = read_reg(ST25DV_MB_MODE_REG, &mode, 1);   /* E1 static allow-bit */
+	int rc = read_reg(ST25DV_MB_CTRL_DYN, &ctrl, 1);   /* E0 dynamic enable/status */
+	LOG_INF("NFC mb state at boot: MB_MODE(E1 0x000D)=0x%02x (rd %d), "
+		"MB_CTRL_Dyn(E0 0x2006)=0x%02x (rd %d)",
+		mode, rm, ctrl, rc);
 
-	/* Static allow-bit (E1 EEPROM, survives reset): clear only if set, to avoid
-	 * needless EEPROM writes on devices that never used the mailbox. */
+	/* Clear the static "mailbox allowed" bit FIRST (E1 EEPROM, password-protected):
+	 * it is the gate — with it clear the mailbox is fully off and the dynamic
+	 * enable is moot. Only written if set, to spare EEPROM. */
 	int ret = nfc_present_password(default_pwd);
 	if (ret) {
-		return ret;
-	}
-	k_msleep(15);
-
-	uint8_t mode = 0;
-	ret = read_reg(ST25DV_MB_MODE_REG, &mode, 1);
-	if (ret) {
-		return ret;
-	}
-	if (mode & ST25DV_MB_MODE_EN) {
-		mode &= ~ST25DV_MB_MODE_EN;
-		ret = write_reg(ST25DV_MB_MODE_REG, &mode, 1);
-		if (ret) {
-			return ret;
+		LOG_WRN("NFC mb_disable: present_password failed: %d", ret);
+	} else {
+		k_msleep(15);
+		if (rm == 0 && (mode & ST25DV_MB_MODE_EN)) {
+			mode &= ~ST25DV_MB_MODE_EN;
+			ret = write_reg(ST25DV_MB_MODE_REG, &mode, 1);
+			LOG_INF("NFC mb_disable: cleared MB_MODE allow-bit (wr %d)", ret);
+			k_msleep(ST25DV_TW_MS_PER_PAGE + 5);
 		}
-		k_msleep(ST25DV_TW_MS_PER_PAGE + 5);
 	}
+
+	/* Clear the dynamic enable too (E0, no password). Best-effort: if the mailbox
+	 * is no longer allowed this may NACK, which is fine — log and move on. */
+	uint8_t zero = 0;
+	ret = write_reg(ST25DV_MB_CTRL_DYN, &zero, 1);
+	if (ret) {
+		LOG_WRN("NFC mb_disable: clear MB_CTRL_Dyn (E0) failed: %d", ret);
+	}
+
 	return 0;
 }
 
