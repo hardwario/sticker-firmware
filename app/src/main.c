@@ -210,12 +210,6 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 				 * served over the mailbox queues its save via m_cmd_action,
 				 * picked up by the next loop iteration below. */
 				app_nfc_serve_mailbox(0);
-				/* The mailbox session ended (phone sent ExitMailbox or
-				 * went quiet), so it is done reading: briefly drop the tag
-				 * out of the RF field so a phone still held on the antenna
-				 * re-discovers it for the next operation without a physical
-				 * lift (#194 follow-up). Safe here — no mailbox state is live. */
-				app_nfc_rediscovery_pulse(80);
 				break;
 			default:
 				break;

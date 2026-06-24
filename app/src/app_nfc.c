@@ -481,27 +481,6 @@ static void nfc_access_end(void)
 	k_mutex_unlock(&m_lock);
 }
 
-/* Hold the ST25DV powered down (LPD high) for `off_ms` so a phone keeping a
- * continuous RF field on the tag sees it vanish and re-discovers it for the next
- * operation — no physical lift needed. The lock is held across the off window so
- * no concurrent access powers the tag back up mid-pulse; the next
- * nfc_access_begin() restores it.
- *
- * SAFE ONLY WHEN IDLE (between operations): the NDEF user memory is non-volatile
- * EEPROM and survives, but the volatile mailbox RAM + dynamic registers (MB_EN,
- * MB_CTRL_Dyn) do NOT — never call this during an active mailbox session, and
- * only after the phone has finished reading the previous reply (a power-down
- * before that would drop an unread NDEF response). */
-void app_nfc_rediscovery_pulse(uint32_t off_ms)
-{
-	k_mutex_lock(&m_lock, K_FOREVER);
-	if (gpio_is_ready_dt(&m_lpd)) {
-		(void)gpio_pin_set_dt(&m_lpd, 1); /* power down: tag leaves the field */
-		k_sleep(K_MSEC(off_ms));
-	}
-	k_mutex_unlock(&m_lock);
-}
-
 /* Build CC + NDEF Message TLV + a single short NFC-Forum-external-type record +
  * terminator into `out`. Returns the byte length, or 0 if it would not fit
  * (short record, so payload <= 255 B). Shared by the info and command-response
