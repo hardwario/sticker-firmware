@@ -264,6 +264,24 @@ static const struct {
  * overflow (the largest single field is 18 B). */
 #define DUMP_PAGE_BUDGET 30
 
+/* Over NFC the response lands in the ST25DV user memory, so config can page far
+ * coarser than the tiny DR0 LoRaWAN frame — a whole snapshot in a handful of
+ * pages instead of ~30, read in one RF session (GetConfig page 0..page_count-1,
+ * each rewritten to the tag on request). Bounded by the encrypted-response
+ * buffer (m_resp_buf, 256 B): encrypted = 8 B header + plaintext + 16 B tag, so
+ * plaintext <= 232 B, minus version + the ~14 B Response/ConfigDump wrapper
+ * leaves ~217 B for field payload. The budget is in DUMP_FIELDS.size units,
+ * which over-estimate native byte fields ~2x (so real bytes <= budget), hence
+ * 200 is always safe. (To get down to ~2 pages, enlarge m_resp_buf/resp_plain
+ * to 512 B first — costs ~RAM.) LoRaWAN keeps the small budget (DR0 MTU). */
+#define DUMP_PAGE_BUDGET_NFC 200
+
+/* Per-page budget for the given transport (NFC pages coarsely, LoRaWAN tightly). */
+static inline uint32_t dump_page_budget(enum app_cmd_transport tp)
+{
+	return (tp == APP_CMD_TRANSPORT_NFC) ? DUMP_PAGE_BUDGET_NFC : DUMP_PAGE_BUDGET;
+}
+
 static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
@@ -288,7 +306,7 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 		if (DUMP_FIELDS[i].nfc_only && !allow_nfc_only) {
 			continue;
 		}
-		if (used > 0 && used + DUMP_FIELDS[i].size > DUMP_PAGE_BUDGET) {
+		if (used > 0 && used + DUMP_FIELDS[i].size > dump_page_budget(tp)) {
 			cur_page++;
 			used = 0;
 		}
@@ -387,7 +405,7 @@ static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *c
 			if (nfc_only && !allow_nfc_only) {
 				continue; /* keys: NFC transport only */
 			}
-			if (used > 0 && used + sz > DUMP_PAGE_BUDGET) {
+			if (used > 0 && used + sz > dump_page_budget(tp)) {
 				cur_page++;
 				used = 0;
 			}
