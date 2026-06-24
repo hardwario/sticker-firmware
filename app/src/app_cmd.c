@@ -128,7 +128,6 @@ static void make_error(Response *resp, Response_Error_Code code, const char *det
 	resp->which_body = Response_error_tag;
 	resp->body.error.code = code;
 	resp->body.error.fault_field = 0;
-	resp->body.error.fault_group = 0; /* set by SetParam on a group fault (#196) */
 
 	if (detail) {
 		strncpy(resp->body.error.detail, detail, sizeof(resp->body.error.detail) - 1);
@@ -148,9 +147,9 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	ARG_UNUSED(tp);
 	const Command_SetParam *sp = &cmd->body.set_param;
 	uint32_t fault = 0;
-	/* Group that produced the fault, so the host can disambiguate fault_field
-	 * (a tag relative to the group). 1=lorawan 2=application 3=sensors 4=alarms,
-	 * matching the proto Error.fault_group contract (#196). */
+	/* Group that produced the fault, folded into fault_field as group*100 + tag so
+	 * the host can disambiguate the tag across groups (#196): 1=lorawan
+	 * 2=application 3=sensors 4=alarms. */
 	uint32_t fault_group = 0;
 	int rc = 0;
 
@@ -181,8 +180,7 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	if (rc) {
 		*app_config() = snapshot; /* roll back the whole batch */
 		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid value");
-		resp->body.error.fault_field = fault;
-		resp->body.error.fault_group = fault_group;
+		resp->body.error.fault_field = fault_group * 100 + fault;
 	} else {
 		resp->which_body = Response_ack_tag;
 		/* Alarm rules staged into the config slots only take effect once the

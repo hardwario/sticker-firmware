@@ -255,7 +255,13 @@ function _decodeError(bytes, start, end) {
     if (wire === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (field === 1) err.code = v.value;
-      else if (field === 2) err.fault_field = v.value;
+      else if (field === 2) {
+        // fault_field is encoded group*100 + tag (#196): split into a readable
+        // group (1=lorawan 2=application 3=sensors 4=alarms; 0=not group-scoped)
+        // and the proto tag within that group.
+        err.fault_field = v.value % 100;
+        err.fault_group = Math.floor(v.value / 100);
+      }
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       if (field === 3) err.detail = _pbBytesToAscii(bytes.slice(pos, pos + len.value));

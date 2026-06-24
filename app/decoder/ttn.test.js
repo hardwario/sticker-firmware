@@ -129,6 +129,22 @@ test("decodeUplink decodes an Ack response (fPort 85)", () => {
   assert.deepEqual(got.data.ack, {});
 });
 
+test("decodeUplink splits Error.fault_field group*100 + tag (#196, fPort 85)", () => {
+  // 01 prefix, Response{ seq=1, error=Error{ code=2 (OUT_OF_RANGE),
+  // fault_field=205 } }. 205 = group 2 (application) * 100 + tag 5; the decoder
+  // splits it into a readable fault_group + fault_field.
+  //   01           APP_PROTO_VERSION prefix
+  //   08 01        seq=1
+  //   32 05        error (field 6), len=5
+  //     08 02        code=2
+  //     10 cd 01     fault_field=205 (varint)
+  const got = codec.decodeUplink({ bytes: hex("0108013205080210cd01"), fPort: 85 }).data;
+  assert.equal(got.seq, 1);
+  assert.equal(got.error.code, 2);
+  assert.equal(got.error.fault_group, 2);
+  assert.equal(got.error.fault_field, 5);
+});
+
 // W1Scan response (field 7): the discovered 1-Wire ROMs come back as hex
 // strings so the host can teach a slot via SetParam sensorN_rom.
 //   01           APP_PROTO_VERSION prefix
