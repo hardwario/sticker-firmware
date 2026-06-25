@@ -12,6 +12,7 @@
 #include "app_lrw.h"
 #include "app_report.h"
 #include "app_sensor.h"
+#include "app_w1_slots.h"
 
 #if defined(__has_include) && __has_include("app_clock.h")
 #include "app_clock.h"
@@ -31,6 +32,14 @@
 #include <stdint.h>
 
 LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
+
+/* No-data watchdog: a config-enabled analog sensor that reads NaN continuously
+ * for this long is reported as stopped (a no_data AlarmEvent). Drivers already
+ * retry transient I2C/1-Wire errors, so a NaN here is a confirmed read failure;
+ * the window only rejects a single missed sample. The watchdog is independent
+ * of the 16 alarm rule slots, so its events carry slot = APP_ALARM_NO_DATA_SLOT. */
+#define APP_ALARM_NO_DATA_MS   5000
+#define APP_ALARM_NO_DATA_SLOT 0xFF
 
 /* Wire enum values (AlarmEvent.Side / .Edge). */
 #define ALARM_SIDE_NONE  0
@@ -200,21 +209,13 @@ static void alarm_batch_work_handler(struct k_work *work)
 
 /* Record one alarm edge for the fPort-3 detail batch. Caller does NOT hold
  * m_lock (this takes it). */
-static void alarm_collect(uint8_t slot, uint8_t source, uint8_t quantity, bool active, uint8_t side,
-			  bool has_value, int32_t value)
+/* Queue one built alarm event into the rate-limit window (or flush immediately
+ * when alarm_limit <= 0). Shared by the rule path (alarm_collect) and the
+ * no-data watchdog (alarm_collect_nodata). */
+static void alarm_queue(struct app_cmd_alarm_event ev)
 {
 	int limit = g_app_config.alarm_limit;
 	int64_t now = k_uptime_get();
-	struct app_cmd_alarm_event ev = {
-		.slot = slot,
-		.source = source,
-		.quantity = quantity,
-		.edge = active ? ALARM_EDGE_ACT : ALARM_EDGE_DEACT,
-		.side = side,
-		.has_value = has_value,
-		.value = value,
-		.rel_s = 0,
-	};
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 
@@ -244,6 +245,40 @@ static void alarm_collect(uint8_t slot, uint8_t source, uint8_t quantity, bool a
 	}
 
 	k_mutex_unlock(&m_lock);
+}
+
+static void alarm_collect(uint8_t slot, uint8_t source, uint8_t quantity, bool active, uint8_t side,
+			  bool has_value, int32_t value)
+{
+	struct app_cmd_alarm_event ev = {
+		.slot = slot,
+		.source = source,
+		.quantity = quantity,
+		.edge = active ? ALARM_EDGE_ACT : ALARM_EDGE_DEACT,
+		.side = side,
+		.has_value = has_value,
+		.value = value,
+		.rel_s = 0,
+	};
+	alarm_queue(ev);
+}
+
+/* No-data watchdog event: a config-enabled sensor stopped reporting (NaN for
+ * >= APP_ALARM_NO_DATA_MS) or recovered. Not tied to a rule slot (slot = 0xFF). */
+static void alarm_collect_nodata(uint8_t source, uint8_t quantity, bool active)
+{
+	struct app_cmd_alarm_event ev = {
+		.slot = APP_ALARM_NO_DATA_SLOT,
+		.source = source,
+		.quantity = quantity,
+		.edge = active ? ALARM_EDGE_ACT : ALARM_EDGE_DEACT,
+		.side = ALARM_SIDE_NONE,
+		.has_value = false,
+		.value = 0,
+		.no_data = true,
+		.rel_s = 0,
+	};
+	alarm_queue(ev);
 }
 
 /* ---- value access (source, quantity) ------------------------------------ */
@@ -367,7 +402,14 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 		return false;
 	}
 
-	float lo = rule->lo, hi = rule->hi, hst = rule->hst;
+	float lo = rule->lo, hi = rule->hi;
+	/* Use the rule's hysteresis verbatim (0 = no dead-band, as configured). The
+	 * negated comparison still captures NaN/negative (NaN >= 0 is false), so a
+	 * garbage value can't widen the band, but we no longer force a minimum. */
+	float hst = rule->hst;
+	if (!(hst >= 0.0f)) {
+		hst = 0.0f;
+	}
 
 	if (rt->active) {
 		if (value > lo + hst && value < hi - hst) {
@@ -515,6 +557,89 @@ static void eval_count(uint8_t slot, const struct app_alarm_rule *rule, struct r
 	rt->count_window_start = now;
 }
 
+/* ---- no-data watchdog (config-driven, independent of rule slots) -------- */
+
+/* Analog sensors monitored for "stopped reporting". Digital sources (hall /
+ * input / PIR) are excluded — a disconnected line still reads a level, it never
+ * goes NaN. One representative quantity per source (a dead sensor takes all of
+ * its quantities with it). */
+static const struct {
+	uint8_t source;
+	uint8_t quantity;
+} m_nodata_tab[] = {
+	{APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE},
+	{APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_HUMIDITY},
+	{APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_PRESSURE},
+	{APP_ALARM_SRC_SLOT1, APP_ALARM_Q_TEMPERATURE},
+	{APP_ALARM_SRC_SLOT2, APP_ALARM_Q_TEMPERATURE},
+	{APP_ALARM_SRC_SLOT3, APP_ALARM_Q_TEMPERATURE},
+	{APP_ALARM_SRC_SLOT4, APP_ALARM_Q_TEMPERATURE},
+};
+#define NODATA_COUNT ARRAY_SIZE(m_nodata_tab)
+static int64_t m_nodata_nan_since[NODATA_COUNT]; /* 0 = has data now */
+static bool m_nodata_active[NODATA_COUNT];       /* no_data alarm latched */
+
+/* Is this monitored sensor expected to report under the current config? */
+static bool nodata_enabled(uint8_t source, uint8_t quantity)
+{
+	switch (source) {
+	case APP_ALARM_SRC_ONBOARD:
+		if (quantity == APP_ALARM_Q_PRESSURE) {
+			return g_app_config.cap_barometer;
+		}
+		return true; /* onboard SHT4x temperature/humidity always present */
+	case APP_ALARM_SRC_SLOT1:
+	case APP_ALARM_SRC_SLOT2:
+	case APP_ALARM_SRC_SLOT3:
+	case APP_ALARM_SRC_SLOT4:
+		return g_app_config.cap_w1_sensors &&
+		       app_w1_slot_get_type(source - APP_ALARM_SRC_SLOT1) != APP_W1_SLOT_EMPTY;
+	default:
+		return false;
+	}
+}
+
+/* Evaluate the no-data watchdog over all monitored sensors. Caller holds
+ * g_app_sensor_data_lock (read_threshold_value reads g_app_sensor_data). */
+static void nodata_poll(int64_t now, bool *should_send)
+{
+	for (size_t i = 0; i < NODATA_COUNT; i++) {
+		uint8_t src = m_nodata_tab[i].source;
+		uint8_t q = m_nodata_tab[i].quantity;
+
+		if (!nodata_enabled(src, q)) {
+			/* Sensor disabled (cap off / slot unbound): drop the latch
+			 * silently — no deactivate event for a sensor nobody asked for. */
+			m_nodata_nan_since[i] = 0;
+			m_nodata_active[i] = false;
+			continue;
+		}
+
+		float v = NAN;
+		read_threshold_value(src, q, &v);
+
+		if (!isnan(v)) {
+			m_nodata_nan_since[i] = 0;
+			if (m_nodata_active[i]) {
+				m_nodata_active[i] = false;
+				alarm_collect_nodata(src, q, false); /* recovered */
+				*should_send = true;
+			}
+			continue;
+		}
+
+		/* NaN: arm / age the timer; fire once it has been NaN long enough. */
+		if (m_nodata_nan_since[i] == 0) {
+			m_nodata_nan_since[i] = now;
+		}
+		if (!m_nodata_active[i] && (now - m_nodata_nan_since[i]) >= APP_ALARM_NO_DATA_MS) {
+			m_nodata_active[i] = true;
+			alarm_collect_nodata(src, q, true);
+			*should_send = true;
+		}
+	}
+}
+
 bool app_alarm_poll(void)
 {
 	bool should_send = false;
@@ -562,7 +687,12 @@ bool app_alarm_poll(void)
 		}
 	}
 
-	/* Sensor data no longer needed; keep m_lock for the latch sweep. */
+	/* No-data watchdog over every config-enabled analog sensor (independent of
+	 * the rule slots above). Same lock — it reads g_app_sensor_data too, so it
+	 * must run before the sensor-data lock is dropped (#205). */
+	nodata_poll(now, &should_send);
+
+	/* Sensor data no longer needed; keep m_lock for the latch sweep (#185). */
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	/* Expire one-shot latches and collect "any active". */

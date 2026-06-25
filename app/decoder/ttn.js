@@ -255,7 +255,13 @@ function _decodeError(bytes, start, end) {
     if (wire === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (field === 1) err.code = v.value;
-      else if (field === 2) err.fault_field = v.value;
+      else if (field === 2) {
+        // fault_field is encoded group*100 + tag (#196): split into a readable
+        // group (1=lorawan 2=application 3=sensors 4=alarms; 0=not group-scoped)
+        // and the proto tag within that group.
+        err.fault_field = v.value % 100;
+        err.fault_group = Math.floor(v.value / 100);
+      }
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       if (field === 3) err.detail = _pbBytesToAscii(bytes.slice(pos, pos + len.value));
@@ -459,6 +465,12 @@ function _decodeSensorReading(bytes, start, end) {
 // firmware always sends the system group and every enabled-sensor group whole,
 // so boolean fields (boot, *_is_active, *_notify_*, tilt) are surfaced as
 // explicit true/false rather than set-only-when-true.
+// "Value not available" sentinels (mirror app_compose.c): an enabled analog
+// sensor is always on the wire so the configured-sensor list is stable; a NaN
+// reading arrives as the sentinel and decodes to null.
+var _TM_S32_NA = -2147483648; // INT32_MIN (sint32: temperature, altitude)
+var _TM_U32_NA = 4294967295;  // UINT32_MAX (uint32: humidity, pressure, illuminance)
+
 function decodeTelemetry(bytes) {
   var d = {};
   var pos = 0;
@@ -487,14 +499,14 @@ function decodeTelemetry(bytes) {
       // system
       case 1:  d.voltage = v.value / 50; break;
       case 2:  d.boot = (v.value & (1 << 0)) !== 0; break;     // system_flags (always sent)
-      // internal (SHT4x)
-      case 3:  d.temperature = _pbZigzag(v.value) / 100; break;
-      case 4:  d.humidity = v.value / 2; break;
+      // internal (SHT4x) — sentinel → null (sensor enabled but no valid sample)
+      case 3:  { var _t = _pbZigzag(v.value); d.temperature = (_t === _TM_S32_NA) ? null : _t / 100; break; }
+      case 4:  d.humidity = (v.value === _TM_U32_NA) ? null : v.value / 2; break;
       // barometer
-      case 5:  d.pressure = v.value / 10; break; // hPa x10
-      case 6:  d.altitude = _pbZigzag(v.value) / 10; break;
+      case 5:  d.pressure = (v.value === _TM_U32_NA) ? null : v.value / 10; break; // hPa x10
+      case 6:  { var _a = _pbZigzag(v.value); d.altitude = (_a === _TM_S32_NA) ? null : _a / 10; break; }
       // light
-      case 7:  d.illuminance = v.value * 2; break;
+      case 7:  d.illuminance = (v.value === _TM_U32_NA) ? null : v.value * 2; break;
       // accel
       case 8:  d.orientation = v.value; break;
       // pir
@@ -851,7 +863,7 @@ function _alarmUnscale(quantity, raw) {
 }
 
 function _decodeAlarmEvent(bytes, start, end) {
-  var ev = { slot: 0, source: 0, quantity: 0, edge: 0, side: 0, rel_s: 0, value: null };
+  var ev = { slot: 0, source: 0, quantity: 0, edge: 0, side: 0, rel_s: 0, value: null, no_data: false };
   var p = start;
   while (p < end) {
     var t = _pbReadVarint(bytes, p); p = t.next;
@@ -865,6 +877,7 @@ function _decodeAlarmEvent(bytes, start, end) {
       else if (field === 5) ev.value = _pbZigzag(v.value);
       else if (field === 6) ev.quantity = v.value;
       else if (field === 7) ev.slot = v.value;
+      else if (field === 8) ev.no_data = (v.value !== 0);
     } else if (wire === 2) {
       var l = _pbReadVarint(bytes, p); p = l.next + l.value;
     } else { break; }
@@ -895,6 +908,7 @@ function decodeAlarmBatch(bytes) {
           event: _ALARM_EDGES[ev.edge] || "activate",
           side: _ALARM_SIDES[ev.side] || "none",
           value: ev.value === null ? null : _alarmUnscale(ev.quantity, ev.value),
+          no_data: ev.no_data,
           time: 0,
         });
         rels.push(ev.rel_s);

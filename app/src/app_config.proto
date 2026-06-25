@@ -267,6 +267,11 @@ message Response {
         }
 
         Code   code         = 1;
+        // Offending field, encoded as group*100 + tag (#196). SetParam applies
+        // groups in a fixed order and stops at the first failing one; the tag
+        // alone is ambiguous across groups, so the group is folded in:
+        // group 1=lorawan, 2=application, 3=sensors, 4=alarms; 0 = not group-scoped
+        // (tags stay < 100). Host decodes: group = fault_field / 100, tag = % 100.
         uint32 fault_field  = 2;
         string detail       = 3;
     }
@@ -317,7 +322,8 @@ message AlarmEvent {
     uint32 rel_s    = 4;         // seconds since AlarmReport.base_time
     optional sint32 value = 5;   // current value: analog ×100 (temp/hum) or ×10 (pressure), digital 0/1, or counter
     uint32 quantity = 6;         // enum app_alarm_quantity: temperature/humidity/.../state/count
-    uint32 slot     = 7;         // alarm rule slot index that fired (stable identity)
+    uint32 slot     = 7;         // alarm rule slot index that fired (stable identity), or 0xFF for a no_data watchdog event
+    optional bool no_data = 8;   // true = sensor stopped reporting (NaN >= 5 s); edge act/deact, side none, value absent
 }
 
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap

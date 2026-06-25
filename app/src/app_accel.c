@@ -28,6 +28,15 @@ LOG_MODULE_REGISTER(app_accel, LOG_LEVEL_DBG);
 #define GRAVITY         9.80665f
 #define ORIENTATION_THR 0.4f
 
+/* On-demand read turn-on (#205). When motion detection is OFF the LIS2DH idles
+ * in power-down; app_accel_read() resumes it just for the read, but RESUME only
+ * restores the ODR — the first sample is valid after the part's turn-on time
+ * (~7/ODR, ~70 ms at the 100 Hz ODR_5). Poll the fetch a little beyond that so
+ * accel + orientation land in the periodic sample even with detection off (the
+ * old 5x10 ms window was shorter than the turn-on and read flaky -ENODATA). */
+#define APP_ACCEL_FETCH_RETRY_MS 15
+#define APP_ACCEL_FETCH_RETRIES  12
+
 static const int m_vectors[7][3] = {
 	[0] = {0, 0, 0},  [1] = {-1, 0, 0}, [2] = {0, 0, 1}, [3] = {0, 1, 0},
 	[4] = {0, -1, 0}, [5] = {0, 0, -1}, [6] = {1, 0, 0},
@@ -95,21 +104,27 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 	/* Power the LIS2DH up for the read and back down afterwards (runtime PM).
 	 * When motion/free-fall detection is armed the device is already held
 	 * resumed (refcounted get in app_accel_set_motion_sensitivity), so this
-	 * just keeps it on; when detection is OFF the part is in power-down and
-	 * this is the only thing that spins it up — for the duration of the read
-	 * only. RESUME restores the active ODR; the ENODATA retry below absorbs
-	 * the turn-on + first-sample latency. */
-	(void)pm_device_runtime_get(dev);
+	 * just keeps it on; when detection is OFF the part idles in power-down and
+	 * this get is the only thing that spins it up — for this read only. */
+	ret = pm_device_runtime_get(dev);
+	if (ret < 0) {
+		LOG_ERR_CALL_FAILED_INT("pm_device_runtime_get", ret);
+		k_mutex_unlock(&m_lock);
+		return ret;
+	}
 
-	/* TODO Check if this is the best aprroach */
-	for (int i = 0; i < 5; i++) {
+	/* RESUME restores the active ODR, but the first sample is only valid after
+	 * the part's turn-on time. Poll until a sample is ready, tolerating "no
+	 * data yet" (-ENODATA) and the brief bus/PM settling errors a cold resume
+	 * can raise, over a window safely above the turn-on time (#205). When
+	 * detection is armed the part is already running, so the first fetch
+	 * succeeds immediately and the loop costs nothing. */
+	for (int i = 0; i < APP_ACCEL_FETCH_RETRIES; i++) {
 		ret = sensor_sample_fetch(dev);
-
-		if (ret != -ENODATA) {
+		if (ret == 0 || (ret != -ENODATA && ret != -ENODEV && ret != -EBUSY)) {
 			break;
 		}
-
-		k_sleep(K_MSEC(10));
+		k_sleep(K_MSEC(APP_ACCEL_FETCH_RETRY_MS));
 	}
 
 	if (ret) {
@@ -289,6 +304,11 @@ static void motion_trigger_handler(const struct device *dev, const struct sensor
 	k_work_schedule(&m_motion_arm_work, K_MSEC(MOTION_REARM_MS));
 }
 
+/* Free-fall (INT1) arm/teardown — defined below, used here so motion detection
+ * and free-fall are armed/disarmed together (#186). */
+static int app_accel_init_freefall(void);
+static int app_accel_deinit_freefall(void);
+
 int app_accel_set_motion_sensitivity(enum app_config_motion_sensitivity level)
 {
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(lis2dh12));
@@ -305,6 +325,10 @@ int app_accel_set_motion_sensitivity(enum app_config_motion_sensitivity level)
 			LOG_ERR_CALL_FAILED_INT("sensor_trigger_set(disable)", ret);
 			return ret;
 		}
+		/* Tear down free-fall (INT1) too — disabling only the any-motion
+		 * trigger above would leave the free-fall comparator armed and able
+		 * to fire during the brief resume for an orientation read (#186). */
+		(void)app_accel_deinit_freefall();
 		/* Release the runtime-PM hold so the part can power down (ODR=0).
 		 * With the device suspended it no longer samples, so neither the
 		 * any-motion nor the free-fall comparator can fire — detection is
@@ -361,6 +385,14 @@ int app_accel_set_motion_sensitivity(enum app_config_motion_sensitivity level)
 		return ret;
 	}
 
+	/* Arm free-fall (INT1) alongside any-motion. The device is held resumed
+	 * by the get above, so the register writes take effect. Idempotent on a
+	 * sensitivity change while already armed. */
+	ret = app_accel_init_freefall();
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_accel_init_freefall", ret);
+	}
+
 	LOG_INF("Motion detection armed (level %d, th=%d m/s^2, dur=%d samples)", (int)level,
 		th_ms2, dur);
 	return 0;
@@ -394,6 +426,10 @@ static const struct gpio_dt_spec m_int1_gpio =
 	GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(lis2dh12), irq_gpios, 0);
 static struct gpio_callback m_freefall_cb;
 static struct k_work m_freefall_work;
+/* Tracks whether the INT1 free-fall generator + its GPIO callback are armed, so
+ * init/deinit are idempotent and free-fall is torn down (not just any-motion)
+ * when motion detection is set OFF (#186). */
+static bool m_freefall_armed;
 
 static void freefall_work_handler(struct k_work *work)
 {
@@ -432,7 +468,11 @@ static int app_accel_init_freefall(void)
 		return -ENODEV;
 	}
 
-	k_work_init(&m_freefall_work, freefall_work_handler);
+	/* Idempotent: re-arming on a sensitivity change must not re-add the GPIO
+	 * callback (gpio_add_callback_dt would corrupt the callback list). */
+	if (m_freefall_armed) {
+		return 0;
+	}
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 	ret = i2c_reg_write_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_INT1_THS, LIS2DH_FREEFALL_THS);
@@ -472,8 +512,38 @@ static int app_accel_init_freefall(void)
 		return ret;
 	}
 
+	m_freefall_armed = true;
 	LOG_INF("Free-fall detection enabled (INT1, ths=0x%02x, dur=0x%02x)", LIS2DH_FREEFALL_THS,
 		LIS2DH_FREEFALL_DUR);
+	return 0;
+}
+
+/* Tear down the INT1 free-fall path: disable the generator, unroute it from the
+ * INT1 pin and drop the GPIO interrupt + callback. Without this the comparator
+ * stays armed while motion detection is OFF and can fire during the brief resume
+ * for an orientation read, raising a spurious accel alarm (#186). Idempotent. */
+static int app_accel_deinit_freefall(void)
+{
+	if (!m_freefall_armed) {
+		return 0;
+	}
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	/* Clear INT1_CFG (no axis events) and drop I1_IA1 so INT1 stops driving
+	 * the pin; leave the rest of CTRL3 (driver bits) intact. */
+	(void)i2c_reg_write_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_INT1_CFG, 0x00);
+	uint8_t ctrl3;
+	if (i2c_reg_read_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_CTRL3, &ctrl3) == 0) {
+		(void)i2c_reg_write_byte_dt(&m_lis2dh_i2c, LIS2DH_REG_CTRL3,
+					    ctrl3 & ~LIS2DH_CTRL3_I1_IA1);
+	}
+	k_mutex_unlock(&m_lock);
+
+	(void)gpio_pin_interrupt_configure_dt(&m_int1_gpio, GPIO_INT_DISABLE);
+	(void)gpio_remove_callback_dt(&m_int1_gpio, &m_freefall_cb);
+
+	m_freefall_armed = false;
+	LOG_INF("Free-fall detection disabled");
 	return 0;
 }
 
@@ -482,10 +552,11 @@ int app_accel_init_motion(app_accel_motion_cb_t cb, void *user_data)
 	m_motion_cb = cb;
 	m_motion_user_data = user_data;
 
-	int ff = app_accel_init_freefall();
-	if (ff) {
-		LOG_ERR_CALL_FAILED_INT("app_accel_init_freefall", ff);
-	}
+	/* The free-fall work item is one-shot init here; the INT1 generator and
+	 * its GPIO callback are armed/torn down on demand by
+	 * app_accel_set_motion_sensitivity so they follow motion detection (#186)
+	 * rather than staying live when detection is configured OFF. */
+	k_work_init(&m_freefall_work, freefall_work_handler);
 
 	/* Defer the first arm until the main loop and watchdog feeding are
 	 * alive: a regression in the interrupt path can then at worst degrade

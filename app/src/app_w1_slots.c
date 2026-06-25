@@ -63,13 +63,37 @@ struct app_w1_sensor_type {
 /* Telemetry SensorReading.flags bit positions (mirrored in ttn.js). */
 #define MP_FLAG_TILT BIT(0)
 
+/* DS18B20 plausibility (#180). The Zephyr driver CRC-checks the scratchpad, so a
+ * *missing* sensor errors out — but the part's power-on-reset / brownout /
+ * mid-conversion value of +85.0 C (scratchpad 0x0550) carries a *valid* CRC and
+ * reads back as success, and a glitch can also yield a physically impossible
+ * value. Both would otherwise latch a hi-bound temperature alarm — the
+ * field-reported "blinks red at 6 C" case.
+ *
+ * Two-tier defence: out-of-range values (< -55 / > 125 C) are always rejected
+ * here (a real DS18B20 can never produce them, so no false negative). The +85.0
+ * C POR sentinel is *in range* and could be a genuine reading, so it is not
+ * dropped outright — app_w1_slots_read debounces it (accept only when a second
+ * consecutive read confirms it). 0.0 C is deliberately accepted: a legitimate
+ * freezing reading, only an ambiguous reset hint. */
+#define DS18B20_TEMP_MIN     (-55.0f)
+#define DS18B20_TEMP_MAX     125.0f
+#define DS18B20_POR_SENTINEL 85.0f
+
 static int dallas_read(int index, uint64_t *serial, struct app_w1_slot_reading *out)
 {
 	float temperature;
 	int ret = app_ds18b20_read(index, serial, &temperature);
 
 	if (ret == 0) {
-		out->temperature = temperature;
+		if (temperature >= DS18B20_TEMP_MIN && temperature <= DS18B20_TEMP_MAX) {
+			out->temperature = temperature;
+		} else {
+			/* Leave temperature NaN so eval_threshold / encode treat it
+			 * as absent rather than firing a false alarm. */
+			LOG_WRN("DS18B20 idx %d: out-of-range %s%d.%02d C rejected", index,
+				APP_FP2(temperature));
+		}
 	}
 	return ret;
 }
@@ -191,7 +215,8 @@ struct slot_rt {
 	const struct app_w1_sensor_type *desc; /* bound type descriptor, NULL if empty */
 	int driver_index;                      /* index into the type's driver; -1 = absent */
 	bool present;
-	bool replaced; /* configured ROM absent but a same-type device showed up */
+	bool replaced;           /* configured ROM absent but a same-type device showed up */
+	bool ds18b20_pending_85; /* DS18B20: a +85.0 C sample awaiting confirmation (#180) */
 };
 
 static struct slot_rt m_slots[APP_W1_SLOT_COUNT];
@@ -313,6 +338,7 @@ int app_w1_slots_rebind(void)
 		m_slots[s].driver_index = -1;
 		m_slots[s].present = false;
 		m_slots[s].replaced = false;
+		m_slots[s].ds18b20_pending_85 = false;
 	}
 
 	/* Pass 1: bind each configured slot (ROM set) to the discovered device with
@@ -435,6 +461,28 @@ int app_w1_slots_read(int slot, struct app_w1_slot_reading *out)
 						    .is_tilt_alert = false,
 						    .present = present};
 		return -ENODEV;
+	}
+
+	/* DS18B20 +85.0 C POR-sentinel debounce (#180). The sentinel is in range so
+	 * it could be a genuine reading; accept it only once a second consecutive
+	 * read confirms it. A lone transient (boot, brownout, EMI) is suppressed to
+	 * NaN — treated as absent by the alarm/encode paths — while a sustained real
+	 * +85 C still gets through after one extra sample. Any other valid reading
+	 * clears the suspicion. Keyed on the (stable) slot, not the driver index. */
+	if (desc->type == APP_W1_SLOT_DALLAS) {
+		k_mutex_lock(&m_lock, K_FOREVER);
+		if (out->temperature == DS18B20_POR_SENTINEL) {
+			if (!m_slots[slot].ds18b20_pending_85) {
+				m_slots[slot].ds18b20_pending_85 = true;
+				out->temperature = NAN;
+				LOG_WRN("Slot %d: DS18B20 +85.0 C suppressed (awaiting confirm)",
+					slot + 1);
+			}
+			/* else: confirmed by a second consecutive +85.0 C — accept. */
+		} else if (!isnan(out->temperature)) {
+			m_slots[slot].ds18b20_pending_85 = false;
+		}
+		k_mutex_unlock(&m_lock);
 	}
 	return 0;
 }
