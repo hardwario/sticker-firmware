@@ -106,6 +106,23 @@ static const char *cmd_action_str(enum app_cmd_action a)
 #define ST25DV_IT_STS_DYN  0x2005
 #define ST25DV_IT_RF_WRITE 0x80 /* IT_STS_Dyn bit7: RF wrote to the EEPROM */
 
+/* Dynamic register EH_CTRL_Dyn (device E0, addr 0x2002): bit2 FIELD_ON reports
+ * whether an RF field is currently present. Dynamic registers live in the
+ * dual-port area and are safe to read while RF is active (unlike the 512 B
+ * user-memory EEPROM, whose reads/writes collide with RF on the shared i2c1 bus
+ * and can wedge it). The poll gates EEPROM access on this bit so the firmware
+ * only touches the tag while the field is off — see nfc_wait_field_off(). */
+#define ST25DV_EH_CTRL_DYN 0x2002
+#define ST25DV_FIELD_ON    0x04
+
+/* Bound the wait for the RF field to clear before an EEPROM access. The phone's
+ * protocol drops the field for ~1500 ms after writing a command so the firmware
+ * can read/answer cleanly; wait a little longer than that, polling the FIELD_ON
+ * bit. Only short dynamic-register reads happen during the wait, so the shared
+ * i2c1 bus stays free for the sensors. */
+#define NFC_FIELD_OFF_WAIT_MS 1800
+#define NFC_FIELD_POLL_MS     20
+
 /* Static system config (device E1 0x57). Writing it needs an open I2C security
  * session (present password). GPO bit6 RF_WRITE_EN makes RF EEPROM writes show
  * up in IT_STS_Dyn, letting the poll gate on writes specifically. */
@@ -245,9 +262,9 @@ bool app_nfc_periodic_enabled(void)
  * out the contention. Chunking a long read also means a collision only retries
  * a small block, not the whole 512 B (which would otherwise fail repeatedly
  * under continuous RF). */
-#define ST25DV_I2C_RETRIES   20
-#define ST25DV_I2C_RETRY_MS  2
-#define ST25DV_READ_CHUNK    64
+#define ST25DV_I2C_RETRIES  20
+#define ST25DV_I2C_RETRY_MS 2
+#define ST25DV_READ_CHUNK   64
 
 static int read_mem(uint16_t reg, void *buf, size_t len)
 {
@@ -438,7 +455,14 @@ static int nfc_present_password(const uint8_t pwd[8])
 	frame[10] = 0x09;
 	memcpy(&frame[11], pwd, 8);
 
-	int ret = i2c_write(dev, frame, sizeof(frame), ST25DV_I2C_ADDR_E1);
+	int ret = -EIO;
+	for (int attempt = 0; attempt < ST25DV_I2C_RETRIES; attempt++) {
+		ret = i2c_write(dev, frame, sizeof(frame), ST25DV_I2C_ADDR_E1);
+		if (ret == 0) {
+			break;
+		}
+		k_msleep(ST25DV_I2C_RETRY_MS); /* RF contention / chip-busy on the dual port */
+	}
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("i2c_write(password)", ret);
 		return ret;
@@ -530,6 +554,34 @@ static void nfc_access_end(void)
 	k_mutex_unlock(&m_lock);
 }
 
+/* Wait (bounded) for the RF field to be absent before the caller touches the
+ * user-memory EEPROM. The 512 B EEPROM reads/writes collide with a present RF
+ * field on the shared i2c1 bus (arbitration NACK / bus wedge), and a wedged
+ * transaction can starve the watchdog feeder in the main loop (all the sensors
+ * share i2c1) -> a 10 s SoC reset with no panic dump. EH_CTRL_Dyn.FIELD_ON is a
+ * dual-port dynamic register, safe to poll during RF.
+ *
+ * Returns true once the field is absent (safe to access). Returns false if the
+ * field is still present after NFC_FIELD_OFF_WAIT_MS (caller should skip this
+ * cycle). FAIL-OPEN: if the status read itself fails, returns true so the path
+ * falls back to the existing I2C-retry behaviour (never worse than before). The
+ * caller must already hold the access lock (tag powered via nfc_access_begin). */
+static bool nfc_wait_field_off(void)
+{
+	for (int waited = 0; waited <= NFC_FIELD_OFF_WAIT_MS; waited += NFC_FIELD_POLL_MS) {
+		uint8_t eh;
+		if (read_reg(ST25DV_EH_CTRL_DYN, &eh, 1) != 0) {
+			return true; /* can't tell -> proceed (fall back to I2C retry) */
+		}
+		if (!(eh & ST25DV_FIELD_ON)) {
+			return true; /* field absent -> safe to access the EEPROM */
+		}
+		k_msleep(NFC_FIELD_POLL_MS);
+	}
+	LOG_DBG("NFC: RF field still on after %d ms, skipping poll cycle", NFC_FIELD_OFF_WAIT_MS);
+	return false;
+}
+
 /* Build CC + NDEF Message TLV + a single short NFC-Forum-external-type record +
  * terminator into `out`. Returns the byte length, or 0 if it would not fit
  * (short record, so payload <= 255 B). Shared by the info and command-response
@@ -600,7 +652,7 @@ static size_t build_info_ndef(uint8_t *out, size_t out_size)
  * both plaintexts via keystream XOR). It is implicit — NOT transmitted — each
  * side fills it in from its own role. The 8-byte wire header is additionally
  * fed as AAD so serial/counter are authenticated by the tag. */
-#define NFC_NONCE_LEN	       9
+#define NFC_NONCE_LEN          9
 #define NFC_NONCE_DIR_REQUEST  0x00
 #define NFC_NONCE_DIR_RESPONSE 0x01
 
@@ -791,8 +843,8 @@ static size_t m_resp_cache_len;
  *   counter <= stored  -> stale replay: decrypt() rejects with -EACCES
  * Writes the encrypted reply into out_buf/out_len and the deferred action into
  * *action (NONE on a replay — the original already ran). Returns 0 or -errno. */
-static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_buf,
-				size_t out_cap, size_t *out_len, enum app_cmd_action *action)
+static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_buf, size_t out_cap,
+				size_t *out_len, enum app_cmd_action *action)
 {
 	*out_len = 0;
 	*action = APP_CMD_ACTION_NONE;
@@ -880,7 +932,8 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 		 * nonce so it never reuses the request nonce), with same-counter
 		 * retransmission served from the response cache. */
 		ret = handle_encrypted_cmd(record_info->payload, record_info->payload_len,
-					   m_resp_buf, sizeof(m_resp_buf), &m_resp_len, &cmd_action);
+					   m_resp_buf, sizeof(m_resp_buf), &m_resp_len,
+					   &cmd_action);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("handle_encrypted_cmd", ret);
 			NFC_REPORT("  -> command rejected: %d", ret);
@@ -1080,6 +1133,16 @@ static int nfc_check_locked(enum app_nfc_action *action)
 
 	m_have_resp = false;
 	m_seen_resp = false;
+
+	/* Only read/write the user-memory EEPROM while the RF field is off. A 512 B
+	 * EEPROM access during RF collides with the phone on the shared i2c1 bus and
+	 * can wedge it, starving the watchdog feeder in the main loop (all sensors
+	 * share i2c1) -> a 10 s SoC reset with no panic dump. If the field stays on,
+	 * skip this cycle (benign — the GPO event / fallback re-polls); the sensors
+	 * keep using i2c1 unaffected. */
+	if (!nfc_wait_field_off()) {
+		return 0;
+	}
 
 	/* Build the expected info record up front (no I2C); used both to detect
 	 * "tag already holds our info" and to (re)write it. */
