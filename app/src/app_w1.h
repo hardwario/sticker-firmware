@@ -22,6 +22,7 @@ extern "C" {
 struct app_w1 {
 	sys_slist_t scan_list;
 	bool is_ds28e17_present;
+	uint16_t scan_count; /* devices appended this scan (capped, see app_w1.c) */
 };
 
 int app_w1_acquire(struct app_w1 *w1, const struct device *dev);

@@ -95,7 +95,9 @@ ZTEST(cmd, test_set_param_out_of_range)
 	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
 		      r.body.error.code);
-	zassert_equal(r.body.error.fault_field, 3, "fault_field %u", r.body.error.fault_field);
+	/* #196: fault_field encodes group*100 + tag (group 2 = application,
+	 * interval_report tag 3) so the host can disambiguate the tag across groups. */
+	zassert_equal(r.body.error.fault_field, 203, "fault_field %u", r.body.error.fault_field);
 	/* invalid value must NOT be applied */
 	zassert_not_equal(g_app_config.interval_report, 10, "out-of-range value leaked");
 }
@@ -124,37 +126,39 @@ ZTEST(cmd, test_get_param_config_dump)
 }
 
 /* get_param pages like get_config when the requested fields don't fit one DR0
- * response (#93.3). deveui(18 B) + joineui(18 B) + devaddr(10 B) = 46 B > the
- * 30 B page budget, so they split: page 0 = {deveui}, page 1 = {joineui,
- * devaddr}, page_count = 2. */
+ * response (#93.3). After #192 the byte-field dump estimate is the native
+ * fixed_length size (deveui/joineui = 10 B, devaddr = 6 B), so the old
+ * deveui+joineui+devaddr trio now fits a single 30 B page. To still exercise the
+ * split we request deveui + joineui + five small lorawan fields (region…activation,
+ * 2 B each) + devaddr, in that order: deveui(10)+joineui(10)+5×2 = 30 fills page 0,
+ * devaddr(6) overflows to page 1 → page_count = 2. */
 ZTEST(cmd, test_get_param_paging)
 {
 	Response r;
 
-	/* seq2 get_param{ lorawan_field=[6 deveui, 7 joineui, 10 devaddr] } — page omitted (0). */
+	/* seq2 get_param{ lorawan_field=[6 deveui, 7 joineui, 1,2,3,4,5, 10 devaddr] }, page 0. */
 	reset_cfg();
-	handle("08021a050a0306070a", &r);
+	handle("08021a0a0a08060701020304050a", &r);
 	zassert_equal(r.which_body, Response_config_dump_tag, "page0 which=%d", r.which_body);
 	zassert_equal(r.body.config_dump.page_index, 0, "page0 index");
 	zassert_equal(r.body.config_dump.page_count, 2, "page_count %u",
 		      r.body.config_dump.page_count);
 	zassert_true(r.body.config_dump.lorawan.has_deveui, "deveui on page0");
-	zassert_false(r.body.config_dump.lorawan.has_joineui, "joineui must not be on page0");
+	zassert_true(r.body.config_dump.lorawan.has_joineui, "joineui on page0");
 	zassert_false(r.body.config_dump.lorawan.has_devaddr, "devaddr must not be on page0");
 
 	/* Same request with page=1 (field 5 varint = 0x28 0x01). */
 	reset_cfg();
-	handle("08021a070a0306070a2801", &r);
+	handle("08021a0c0a08060701020304050a2801", &r);
 	zassert_equal(r.which_body, Response_config_dump_tag, "page1 which=%d", r.which_body);
 	zassert_equal(r.body.config_dump.page_index, 1, "page1 index");
 	zassert_equal(r.body.config_dump.page_count, 2, "page1 count");
 	zassert_false(r.body.config_dump.lorawan.has_deveui, "deveui must not be on page1");
-	zassert_true(r.body.config_dump.lorawan.has_joineui, "joineui on page1");
 	zassert_true(r.body.config_dump.lorawan.has_devaddr, "devaddr on page1");
 
 	/* Out-of-range page → Error. */
 	reset_cfg();
-	handle("08021a070a0306070a2805", &r);
+	handle("08021a0c0a08060701020304050a2805", &r);
 	zassert_equal(r.which_body, Response_error_tag, "oob page should Error, which=%d",
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",

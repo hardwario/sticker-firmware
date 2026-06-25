@@ -141,6 +141,21 @@ bool app_alarm_rule_valid(enum app_alarm_source source, enum app_alarm_quantity 
 	}
 }
 
+/* A STATE rule on a momentary source (PIR/ACCEL) is only meaningful as an edge
+ * (from != to): those sources only ever assert — they never report a steady
+ * level — so a level rule (from == to) cannot deactivate and is silently treated
+ * as a one-shot by eval_state. Reject it at validation time so the
+ * misconfiguration surfaces instead of behaving unexpectedly (#203). */
+static bool rule_state_shape_valid(const struct app_alarm_rule *r)
+{
+	bool momentary = (r->source == APP_ALARM_SRC_PIR || r->source == APP_ALARM_SRC_ACCEL);
+
+	if (r->quantity == APP_ALARM_Q_STATE && momentary && r->from_state == r->to_state) {
+		return false;
+	}
+	return true;
+}
+
 /* ---- app_config storage (per-slot bytes) -------------------------------- */
 
 /* The 16 alarm_N config fields are separate `uint8_t[RULE_PACK_LEN]` members;
@@ -257,7 +272,8 @@ int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule)
 {
 	if (slot >= APP_ALARM_SLOT_COUNT || rule == NULL ||
 	    !app_alarm_rule_valid((enum app_alarm_source)rule->source,
-				  (enum app_alarm_quantity)rule->quantity)) {
+				  (enum app_alarm_quantity)rule->quantity) ||
+	    !rule_state_shape_valid(rule)) {
 		return -EINVAL;
 	}
 
@@ -302,14 +318,24 @@ void app_alarm_rules_reload_from_config(void)
 	k_mutex_lock(&m_lock, K_FOREVER);
 	for (uint8_t s = 0; s < APP_ALARM_SLOT_COUNT; s++) {
 		struct app_alarm_rule r;
+		uint8_t *field = slot_field(c, s);
 		/* Drop a slot that decodes to a pair that no longer validates
 		 * (e.g. enum changed across FW, or a host wrote garbage). */
-		if (unpack_rule(slot_field(c, s), &r) &&
+		if (unpack_rule(field, &r) &&
 		    app_alarm_rule_valid((enum app_alarm_source)r.source,
-					 (enum app_alarm_quantity)r.quantity)) {
+					 (enum app_alarm_quantity)r.quantity) &&
+		    rule_state_shape_valid(&r)) {
 			m_slots[s].rule = r;
 			m_slots[s].used = true;
 		} else {
+			/* Zero the persisted bytes too, not just the live cache, so a
+			 * rejected slot doesn't linger in NVS and get echoed by
+			 * GetParam/dump — keeping stored state consistent with live
+			 * state (#197). Non-empty-but-invalid is the case worth a log. */
+			if (field[0] & RULE_FLAG_PRESENT) {
+				LOG_WRN("Alarm slot %u: invalid persisted rule sanitized", s);
+			}
+			memset(field, 0, RULE_PACK_LEN);
 			m_slots[s].used = false;
 		}
 	}

@@ -300,8 +300,17 @@ ZTEST(compose, test_system_always_present)
 	zassert_true(fr[0].has_system_flags, "system_flags must always be present");
 	zassert_equal(fr[0].system_flags, 0, "boot consumed -> flags 0, got %u",
 		      fr[0].system_flags);
-	/* No sensor groups leak in when nothing is available. */
-	zassert_false(fr[0].has_temperature, "temperature leaked");
+	/* The onboard SHT4x temperature/humidity are always on the wire so the
+	 * configured-sensor list stays stable across reports; an absent (NaN)
+	 * reading goes out as the sentinel (decoder -> null) rather than dropping
+	 * the field (no-data watchdog). */
+	zassert_true(fr[0].has_temperature, "onboard temperature must always be present");
+	zassert_equal(fr[0].temperature, INT32_MIN, "absent temperature -> sentinel, got %d",
+		      fr[0].temperature);
+	zassert_true(fr[0].has_humidity, "onboard humidity must always be present");
+	zassert_equal(fr[0].humidity, UINT32_MAX, "absent humidity -> sentinel, got %u",
+		      fr[0].humidity);
+	/* Capability-gated / external groups still don't leak in when absent. */
 	zassert_false(fr[0].has_hall_left_count, "hall_left leaked");
 }
 

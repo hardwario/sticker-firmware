@@ -110,6 +110,10 @@ static uint16_t m_start; /* index of oldest record */
 static uint16_t m_count;
 static uint32_t m_base_time; /* oldest record's time: uptime-s unsynced, unix synced */
 static bool m_base_synced;
+/* #191: m_base_time is an uptime base inherited from a previous boot (flash
+ * backend) — k_uptime_get() has since restarted at 0, so the additive sync fixup
+ * is invalid; the next clock sync re-anchors instead. */
+static bool m_base_stale_uptime;
 static uint32_t m_interval;  /* interval_report (s) the buffer was recorded at; records
 			      * are periodic so per-record time = base + ord*interval */
 static bool m_replay_active; /* true while app_lrw streams a replay (capture self-skips, #126) */
@@ -241,6 +245,10 @@ static bool backend_load_meta(void)
 	m_base_time = meta.base_time;
 	m_interval = meta.interval;
 	m_base_synced = meta.base_synced;
+	/* #191: an unsynced base restored from flash is uptime-based but its uptime
+	 * epoch ended at the reboot. Flag it so the next clock sync re-anchors instead
+	 * of applying the (now meaningless) additive offset. */
+	m_base_stale_uptime = (!m_base_synced && m_count > 0);
 	return true;
 }
 
@@ -496,8 +504,19 @@ void app_history_on_clock_sync(uint32_t unix_now)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
 	if (!m_base_synced && m_count > 0) {
-		uint32_t off = unix_now - (uint32_t)(k_uptime_get() / 1000);
-		m_base_time += off;
+		if (m_base_stale_uptime) {
+			/* #191: the uptime base is from a previous boot; the additive
+			 * offset (unix_now - current uptime) would be wrong by the
+			 * pre-reboot uptime. We can't recover the records' true wall-clock
+			 * time, so re-anchor: place the newest record at ~now, preserving
+			 * the periodic spacing. Best available estimate after losing the
+			 * uptime continuity across the reboot. */
+			m_base_time = unix_now - (uint32_t)(m_count - 1) * m_interval;
+			m_base_stale_uptime = false;
+		} else {
+			uint32_t off = unix_now - (uint32_t)(k_uptime_get() / 1000);
+			m_base_time += off;
+		}
 		m_base_synced = true;
 		/* No backend_save_meta() here (#96): this runs inside the LoRaWAN downlink
 		 * callback (LoRaMacProcess on the system workqueue); a flash write there
@@ -527,6 +546,7 @@ void app_history_clear(void)
 	m_count = 0;
 	m_base_time = 0;
 	m_base_synced = false;
+	m_base_stale_uptime = false;
 	backend_save_meta();
 	k_mutex_unlock(&m_lock);
 }
@@ -675,6 +695,7 @@ void app_history_set_mask(uint32_t mask)
 	m_count = 0;
 	m_base_time = 0;
 	m_base_synced = false;
+	m_base_stale_uptime = false;
 	recompute_sizing();
 	backend_save_meta();
 	k_mutex_unlock(&m_lock);
@@ -733,6 +754,7 @@ int app_history_init(void)
 		m_count = 0;
 		m_base_time = 0;
 		m_base_synced = false;
+		m_base_stale_uptime = false;
 		m_interval = 0;
 	}
 
