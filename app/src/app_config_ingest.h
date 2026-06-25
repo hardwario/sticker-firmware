@@ -7,6 +7,7 @@
 #ifndef APP_CONFIG_INGEST_H_
 #define APP_CONFIG_INGEST_H_
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -33,6 +34,13 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 void app_config_fill_application(AppConfigMessage_Application *dst, const uint32_t *ids, size_t n);
 void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids, size_t n);
 void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, size_t n);
+
+/* True when alarms dump field `tag` (3..18 -> alarm_0..15) is an unconfigured
+ * (all-zero) slot. Such slots are omitted from a ConfigDump; the get_config
+ * paging loop calls this to skip their byte budget so page_count matches what
+ * fill_alarms() actually emits. Returns false for any non-slot tag. GENERATED
+ * from dump_omit_if_zero params in app_config.yml. */
+bool app_config_alarms_slot_empty(uint32_t tag);
 
 #ifdef __cplusplus
 }

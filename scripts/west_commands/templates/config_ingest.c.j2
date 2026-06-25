@@ -45,6 +45,21 @@ static bool requested(const uint32_t *ids, size_t n, uint32_t tag)
 	}
 	return false;
 }
+{% if has_omit_if_zero %}
+
+/* True when a fixed-length bytes slot is all zero (unconfigured). Such slots are
+ * omitted from a ConfigDump (dump_omit_if_zero in app_config.yml) so an
+ * unprovisioned device pages its whole config into far fewer frames. */
+static bool slot_all_zero(const uint8_t *slot, size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		if (slot[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+{% endif %}
 
 {% for g in ingest_groups %}
 int {{ g.apply_fn }}(const {{ g.c_message }} *src, uint32_t *fault_field)
@@ -106,7 +121,13 @@ void {{ g.fill_fn }}({{ g.c_message }} *dst, const uint32_t *ids, size_t n)
 	const struct {{ module.name }} *c = {{ module.name }}();
 
 {% for p in g.params if (p.dump or p.dump_nfc_only) and not p.callback %}
-{% if p.kind == 'bytes' %}
+{% if p.kind == 'bytes' and p.omit_if_zero %}
+	if (requested(ids, n, {{ p.tag }}) &&
+	    !slot_all_zero(c->{{ p.c_name }}, sizeof(c->{{ p.c_name }}))) {
+		dst->has_{{ p.proto_name }} = true;
+		memcpy(dst->{{ p.proto_name }}, c->{{ p.c_name }}, sizeof(c->{{ p.c_name }}));
+	}
+{% elif p.kind == 'bytes' %}
 	if (requested(ids, n, {{ p.tag }})) {
 		dst->has_{{ p.proto_name }} = true;
 		memcpy(dst->{{ p.proto_name }}, c->{{ p.c_name }}, sizeof(c->{{ p.c_name }}));
@@ -124,6 +145,25 @@ void {{ g.fill_fn }}({{ g.c_message }} *dst, const uint32_t *ids, size_t n)
 {% endif %}
 {% endfor %}
 }
+{% if g.has_omit_if_zero %}
+
+/* True when dump field `tag` in this group is an omit-if-zero slot that is
+ * currently all zero (so fill_{{ g.key }}() omits it). The get_config paging loop
+ * calls this to skip the slot's byte budget, keeping page_count exact. */
+bool {{ g.slot_empty_fn }}(uint32_t tag)
+{
+	const struct {{ module.name }} *c = {{ module.name }}();
+
+	switch (tag) {
+{% for p in g.params if p.omit_if_zero %}
+	case {{ p.tag }}:
+		return slot_all_zero(c->{{ p.c_name }}, sizeof(c->{{ p.c_name }}));
+{% endfor %}
+	default:
+		return false;
+	}
+}
+{% endif %}
 
 {% endfor %}
 bool {{ module.name }}_ingest(const {{ message }} *message)

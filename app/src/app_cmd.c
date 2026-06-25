@@ -308,6 +308,13 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 		if (DUMP_FIELDS[i].nfc_only && !allow_nfc_only) {
 			continue;
 		}
+		/* Empty (all-zero) alarm slots are omitted by app_config_fill_alarms(),
+		 * so they take no page budget and no tag — an unprovisioned device pages
+		 * its whole config into far fewer frames (page_count stays exact). */
+		if (DUMP_FIELDS[i].section == DUMP_SECTION_ALARMS &&
+		    app_config_alarms_slot_empty(DUMP_FIELDS[i].tag)) {
+			continue;
+		}
 		if (used > 0 && used + DUMP_FIELDS[i].size > dump_page_budget(tp)) {
 			cur_page++;
 			used = 0;
@@ -406,6 +413,12 @@ static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *c
 			}
 			if (nfc_only && !allow_nfc_only) {
 				continue; /* keys: NFC transport only */
+			}
+			/* Empty alarm slots are omitted by fill_alarms() — skip their
+			 * budget/tag here too so page_count matches the emitted response. */
+			if (s == DUMP_SECTION_ALARMS &&
+			    app_config_alarms_slot_empty(req_ids[s][j])) {
+				continue;
 			}
 			if (used > 0 && used + sz > dump_page_budget(tp)) {
 				cur_page++;

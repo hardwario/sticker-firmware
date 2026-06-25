@@ -396,6 +396,7 @@ parameters:
     proto_group: alarms
     proto_id: 3
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -405,6 +406,7 @@ parameters:
     proto_group: alarms
     proto_id: 4
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -414,6 +416,7 @@ parameters:
     proto_group: alarms
     proto_id: 5
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -423,6 +426,7 @@ parameters:
     proto_group: alarms
     proto_id: 6
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -432,6 +436,7 @@ parameters:
     proto_group: alarms
     proto_id: 7
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -441,6 +446,7 @@ parameters:
     proto_group: alarms
     proto_id: 8
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -450,6 +456,7 @@ parameters:
     proto_group: alarms
     proto_id: 9
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -459,6 +466,7 @@ parameters:
     proto_group: alarms
     proto_id: 10
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -468,6 +476,7 @@ parameters:
     proto_group: alarms
     proto_id: 11
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -477,6 +486,7 @@ parameters:
     proto_group: alarms
     proto_id: 12
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -486,6 +496,7 @@ parameters:
     proto_group: alarms
     proto_id: 13
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -495,6 +506,7 @@ parameters:
     proto_group: alarms
     proto_id: 14
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -504,6 +516,7 @@ parameters:
     proto_group: alarms
     proto_id: 15
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -513,6 +526,7 @@ parameters:
     proto_group: alarms
     proto_id: 16
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -522,6 +536,7 @@ parameters:
     proto_group: alarms
     proto_id: 17
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]
@@ -531,6 +546,7 @@ parameters:
     proto_group: alarms
     proto_id: 18
     type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
     size: 17
     readable: [nfc, lrw]
     writable: [nfc, lrw]

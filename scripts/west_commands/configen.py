@@ -635,6 +635,7 @@ def build_ingest_model(config):
                 "dump": p.get("dump", True),
                 "dump_nfc_only": bool(p.get("dump_nfc_only")),
                 "callback": bool(p.get("proto_callback")),
+                "omit_if_zero": bool(p.get("dump_omit_if_zero")),
             }
             if t == "bool":
                 e["kind"] = "bool"
@@ -665,9 +666,13 @@ def build_ingest_model(config):
             "c_message": c_message,
             "apply_fn": f"app_config_apply_{g['key']}",
             "fill_fn": f"app_config_fill_{g['key']}",
+            "slot_empty_fn": f"app_config_{g['key']}_slot_empty",
+            "has_omit_if_zero": any(e["omit_if_zero"] for e in params),
             "params": params,
         })
-    return {"message": proto["message"], "ingest_groups": groups}
+    has_omit_if_zero = any(g["has_omit_if_zero"] for g in groups)
+    return {"message": proto["message"], "ingest_groups": groups,
+            "has_omit_if_zero": has_omit_if_zero}
 
 
 def build_options_lines(config):
