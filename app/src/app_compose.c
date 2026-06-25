@@ -176,15 +176,17 @@ static void fill_snapshot(void)
 	t->has_humidity = true;
 	/* Clamp before the unsigned cast: the SHT4x formula can yield a slightly
 	 * negative %RH, and a negative float->uint cast is UB. */
-	t->humidity = isnan(d.humidity) ? TM_U32_NA : (uint32_t)CLAMP(d.humidity * 2.0f, 0.0f, 200.0f);
+	t->humidity =
+		isnan(d.humidity) ? TM_U32_NA : (uint32_t)CLAMP(d.humidity * 2.0f, 0.0f, 200.0f);
 
 	/* barometer — sent whenever enabled (sentinel on NaN). */
 	if (g_app_config.cap_barometer) {
 		t->has_pressure = true;
 		/* d.pressure is kPa from the driver; the wire unit is hPa x10
 		 * (0.1 hPa resolution). hPa = kPa x10, so hPa x10 = kPa x100. */
-		t->pressure = isnan(d.pressure) ? TM_U32_NA
-						: (uint32_t)CLAMP(d.pressure * 100.0f, 0.0f, 200000.0f);
+		t->pressure = isnan(d.pressure)
+				      ? TM_U32_NA
+				      : (uint32_t)CLAMP(d.pressure * 100.0f, 0.0f, 200000.0f);
 		t->has_altitude = true;
 		t->altitude = isnan(d.altitude)
 				      ? TM_S32_NA
