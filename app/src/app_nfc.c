@@ -980,53 +980,6 @@ static int nfc_gpo_irq_setup(void)
 	return 0;
 }
 
-/* Hard-disable the mailbox: clear the dynamic enable (MB_CTRL_Dyn, E0) and, if
- * set, the static "mailbox allowed" bit (MB_MODE, E1 EEPROM, password-protected).
- * An enabled FTM mailbox impairs RF user-memory reads (a phone then sees a
- * truncated NDEF), and that state can outlive a previous/interrupted session —
- * the dynamic bit if the ST25DV kept Vcc across an MCU reset, the static bit
- * always (EEPROM). Run at boot so a clean device always reads its NDEF; mb_enable()
- * re-enables both when a session actually starts. Caller holds the access lock. */
-static int mb_disable(void)
-{
-	static const uint8_t default_pwd[8] = {0};
-
-	/* Log the current mailbox state up front so a boot RTT trace shows whether
-	 * the mailbox was actually stuck and which clear (if any) NACKs. */
-	uint8_t mode = 0xff, ctrl = 0xff;
-	int rm = read_reg(ST25DV_MB_MODE_REG, &mode, 1);   /* E1 static allow-bit */
-	int rc = read_reg(ST25DV_MB_CTRL_DYN, &ctrl, 1);   /* E0 dynamic enable/status */
-	LOG_INF("NFC mb state at boot: MB_MODE(E1 0x000D)=0x%02x (rd %d), "
-		"MB_CTRL_Dyn(E0 0x2006)=0x%02x (rd %d)",
-		mode, rm, ctrl, rc);
-
-	/* Clear the static "mailbox allowed" bit FIRST (E1 EEPROM, password-protected):
-	 * it is the gate — with it clear the mailbox is fully off and the dynamic
-	 * enable is moot. Only written if set, to spare EEPROM. */
-	int ret = nfc_present_password(default_pwd);
-	if (ret) {
-		LOG_WRN("NFC mb_disable: present_password failed: %d", ret);
-	} else {
-		k_msleep(15);
-		if (rm == 0 && (mode & ST25DV_MB_MODE_EN)) {
-			mode &= ~ST25DV_MB_MODE_EN;
-			ret = write_reg(ST25DV_MB_MODE_REG, &mode, 1);
-			LOG_INF("NFC mb_disable: cleared MB_MODE allow-bit (wr %d)", ret);
-			k_msleep(ST25DV_TW_MS_PER_PAGE + 5);
-		}
-	}
-
-	/* Clear the dynamic enable too (E0, no password). Best-effort: if the mailbox
-	 * is no longer allowed this may NACK, which is fine — log and move on. */
-	uint8_t zero = 0;
-	ret = write_reg(ST25DV_MB_CTRL_DYN, &zero, 1);
-	if (ret) {
-		LOG_WRN("NFC mb_disable: clear MB_CTRL_Dyn (E0) failed: %d", ret);
-	}
-
-	return 0;
-}
-
 int app_nfc_init(void)
 {
 	int ret;
@@ -1055,11 +1008,6 @@ int app_nfc_init(void)
 	 * app_nfc_poll), but keeping it set readies the GPO pin for a future
 	 * hardware-interrupt-driven, low-power command pickup. Not fatal. */
 	if (nfc_access_begin() == 0) {
-		/* Hard-disable any mailbox left enabled by a previous/interrupted session
-		 * (an enabled FTM mailbox impairs RF user-memory reads → truncated NDEF). */
-		if (mb_disable() != 0) {
-			LOG_WRN("NFC: mailbox disable at boot failed");
-		}
 		if (nfc_enable_rf_write_it() == 0) {
 			LOG_INF("NFC: RF_WRITE_EN configured");
 		} else {
