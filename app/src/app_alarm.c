@@ -62,9 +62,10 @@ struct rstate {
 	uint8_t side;       /* threshold: which bound latched */
 	uint8_t prev_state; /* STATE: last digital level seen */
 	bool have_prev_state;
-	uint32_t prev_count; /* COUNT: baseline counter */
+	uint32_t prev_count; /* COUNT: baseline counter at window start */
 	bool have_prev_count;
-	int64_t oneshot_expiry; /* STATE edge one-shot: auto-clear time (0 = none) */
+	int64_t count_window_start; /* COUNT: start of the current interval_report window (#195) */
+	int64_t oneshot_expiry;     /* STATE edge one-shot: auto-clear time (0 = none) */
 };
 
 static struct rstate m_rt[APP_ALARM_SLOT_COUNT];
@@ -511,30 +512,49 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
 	rt->prev_state = cur_lvl;
 }
 
-/* COUNT rate rule: alarm when the counter rose by >= hi since the last fire.
- * The underlying counters in g_app_sensor_data only refresh per sample/report,
- * so this is effectively a per-report rate. One-shot (auto-clear). */
+/* COUNT rate rule: alarm when the counter rose by >= hi over one interval_report
+ * window. This is called on the 3 s LED poll, but the rate must be assessed over
+ * interval_report ("per interval_report" contract, app_alarm_rules.h), not per
+ * poll — otherwise with interval_sample < 3 s the counts split across polls and
+ * the threshold under-counts (#195). So we accumulate across polls and evaluate
+ * the delta only once a full interval_report window has elapsed (tumbling
+ * window), re-baselining the counter and window each time. One-shot
+ * (auto-clear). */
 static void eval_count(uint8_t slot, const struct app_alarm_rule *rule, struct rstate *rt,
 		       uint32_t cur, bool *should_send)
 {
+	int64_t now = k_uptime_get();
+
 	if (!rt->have_prev_count) {
 		rt->have_prev_count = true;
 		rt->prev_count = cur;
+		rt->count_window_start = now;
 		return;
 	}
 	if (!rule->enabled) {
 		rt->prev_count = cur;
+		rt->count_window_start = now;
 		return;
 	}
+
+	/* Hold until the interval_report window closes; counts keep accumulating
+	 * in prev_count's delta meanwhile. */
+	int64_t window_ms = (int64_t)g_app_config.interval_report * 1000;
+	if (window_ms > 0 && (now - rt->count_window_start) < window_ms) {
+		return;
+	}
+
 	uint32_t delta = cur - rt->prev_count; /* wraps correctly on uint32 */
 	if (rule->hi > 0 && delta >= (uint32_t)rule->hi) {
 		rt->active = true;
-		rt->oneshot_expiry = k_uptime_get() + notif_hold_ms();
+		rt->oneshot_expiry = now + notif_hold_ms();
 		*should_send = true;
 		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_NONE, true,
 			      (int32_t)cur);
-		rt->prev_count = cur;
 	}
+	/* Re-baseline for the next window whether or not it fired. */
+	rt->prev_count = cur;
+	rt->count_window_start = now;
 }
 
 /* ---- no-data watchdog (config-driven, independent of rule slots) -------- */
@@ -626,7 +646,13 @@ bool app_alarm_poll(void)
 	bool alarm = false;
 	int64_t now = k_uptime_get();
 
+	/* m_rt[] is shared with app_alarm_event() (system WQ / PIR thread); hold
+	 * m_lock across the whole evaluation + latch sweep so a concurrent event
+	 * can't tear an m_rt slot (#185). Lock order is always
+	 * g_app_sensor_data_lock -> m_lock; m_lock is recursive, so the nested
+	 * alarm_collect() re-lock inside eval_* is fine. */
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	k_mutex_lock(&m_lock, K_FOREVER);
 
 	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
 		const struct app_alarm_rule *rule = rt_sync(slot);
@@ -662,12 +688,13 @@ bool app_alarm_poll(void)
 	}
 
 	/* No-data watchdog over every config-enabled analog sensor (independent of
-	 * the rule slots above). Same lock — it reads g_app_sensor_data too. */
+	 * the rule slots above). Same lock — it reads g_app_sensor_data too, so it
+	 * must run before the sensor-data lock is dropped (#205). */
 	nodata_poll(now, &should_send);
 
 	/* A latched no-data watchdog event also counts as "active", so the main
 	 * loop lights the red LED (blinks every BLINK_INTERVAL_SECONDS) until the
-	 * sensor resumes. Read here under g_app_sensor_data_lock, like nodata_poll. */
+	 * sensor resumes. Read here under g_app_sensor_data_lock, like nodata_poll (#211). */
 	for (size_t i = 0; i < NODATA_COUNT; i++) {
 		if (m_nodata_active[i]) {
 			alarm = true;
@@ -675,10 +702,10 @@ bool app_alarm_poll(void)
 		}
 	}
 
+	/* Sensor data no longer needed; keep m_lock for the latch sweep (#185). */
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	/* Expire one-shot latches and collect "any active". */
-	k_mutex_lock(&m_lock, K_FOREVER);
 	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
 		if (!m_rt[i].used) {
 			continue;
@@ -707,10 +734,14 @@ void app_alarm_event(enum app_alarm_source source, bool active)
 	void *user_data;
 	bool should_send = false;
 
+	/* Evaluate every STATE rule on this source under m_lock so m_rt[] is not
+	 * torn against app_alarm_poll() or another event on a different thread
+	 * (#185). m_lock is recursive: the nested alarm_collect() re-lock is fine.
+	 * cb is read under the same lock; should_send / cb are acted on after
+	 * release so the radio enqueue and callback never run under m_lock. */
 	k_mutex_lock(&m_lock, K_FOREVER);
 	cb = m_event_cb;
 	user_data = m_event_cb_user_data;
-	k_mutex_unlock(&m_lock);
 
 	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
 		const struct app_alarm_rule *rule = rt_sync(slot);
@@ -719,6 +750,7 @@ void app_alarm_event(enum app_alarm_source source, bool active)
 		}
 		eval_state(slot, rule, &m_rt[slot], active, &should_send);
 	}
+	k_mutex_unlock(&m_lock);
 
 	if (should_send) {
 		alarm_lrw_send();

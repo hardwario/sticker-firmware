@@ -297,7 +297,7 @@ Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields
 **Kind** (follows the quantity):
 - **threshold** (analog) — `lo`/`hi`/`hst` band with hysteresis; alarm when the value leaves `[lo, hi]`.
 - **state** (digital: tilt + discrete inputs) — `from_state`/`to_state`. **`from != to` = edge** (fires once on that transition: `0→1` rising, `1→0` falling); **`from == to` = level** (active while the line equals `to`: `1→1` active-high, `0→0` active-low). PIR and accel are *momentary* sources (they only pulse), so any state rule there fires a **per-pulse one-shot** that re-arms after `alarm-notif-time` (edge and level behave alike).
-- **count / rate** (counters: hall, input) — `hi` = maximum events allowed per report interval.
+- **count / rate** (counters: hall, input) — `hi` = maximum events allowed per report interval. The increase is assessed once per **`interval_report` window** (a tumbling window that re-baselines each report), not on every internal poll, so the rate is counted consistently regardless of the sample cadence.
 
 **Packed slot format** — each `alarm_N` is **17 bytes, little-endian**:
 

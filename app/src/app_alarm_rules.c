@@ -318,15 +318,24 @@ void app_alarm_rules_reload_from_config(void)
 	k_mutex_lock(&m_lock, K_FOREVER);
 	for (uint8_t s = 0; s < APP_ALARM_SLOT_COUNT; s++) {
 		struct app_alarm_rule r;
+		uint8_t *field = slot_field(c, s);
 		/* Drop a slot that decodes to a pair that no longer validates
 		 * (e.g. enum changed across FW, or a host wrote garbage). */
-		if (unpack_rule(slot_field(c, s), &r) &&
+		if (unpack_rule(field, &r) &&
 		    app_alarm_rule_valid((enum app_alarm_source)r.source,
 					 (enum app_alarm_quantity)r.quantity) &&
 		    rule_state_shape_valid(&r)) {
 			m_slots[s].rule = r;
 			m_slots[s].used = true;
 		} else {
+			/* Zero the persisted bytes too, not just the live cache, so a
+			 * rejected slot doesn't linger in NVS and get echoed by
+			 * GetParam/dump — keeping stored state consistent with live
+			 * state (#197). Non-empty-but-invalid is the case worth a log. */
+			if (field[0] & RULE_FLAG_PRESENT) {
+				LOG_WRN("Alarm slot %u: invalid persisted rule sanitized", s);
+			}
+			memset(field, 0, RULE_PACK_LEN);
 			m_slots[s].used = false;
 		}
 	}
