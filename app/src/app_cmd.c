@@ -265,16 +265,18 @@ static const struct {
 #define DUMP_PAGE_BUDGET 30
 
 /* Over NFC the response lands in the ST25DV user memory, so config can page far
- * coarser than the tiny DR0 LoRaWAN frame — a whole snapshot in a handful of
- * pages instead of ~30, read in one RF session (GetConfig page 0..page_count-1,
- * each rewritten to the tag on request). Bounded by the encrypted-response
- * buffer (m_resp_buf, 256 B): encrypted = 8 B header + plaintext + 16 B tag, so
- * plaintext <= 232 B, minus version + the ~14 B Response/ConfigDump wrapper
- * leaves ~217 B for field payload. The budget is in DUMP_FIELDS.size units,
- * which over-estimate native byte fields ~2x (so real bytes <= budget), hence
- * 200 is always safe. (To get down to ~2 pages, enlarge m_resp_buf/resp_plain
- * to 512 B first — costs ~RAM.) LoRaWAN keeps the small budget (DR0 MTU). */
-#define DUMP_PAGE_BUDGET_NFC 200
+ * coarser than the tiny DR0 LoRaWAN frame — a whole snapshot in ~2 pages instead
+ * of ~30, read in one RF session (GetConfig page 0..page_count-1, each rewritten
+ * to the tag on request). Bounded by the encrypted-response buffer (m_resp_buf,
+ * 512 B) AND the 512 B ST25DV user memory the rsp NDEF record is written into:
+ * the on-tag record is ~22 B framing + encrypted(8 B header + plaintext + 16 B
+ * tag), so encrypted <= 490 -> plaintext <= 466 -> minus version + the ~14 B
+ * Response/ConfigDump wrapper leaves ~452 B for field payload. The budget is in
+ * DUMP_FIELDS.size units, which over-estimate native byte fields ~2x (so real
+ * bytes <= budget), hence 450 keeps the worst-case page on the tag with margin
+ * (encrypted ~474 + 22 framing ~= 496 <= 512). LoRaWAN keeps the small budget
+ * (DR0 MTU). */
+#define DUMP_PAGE_BUDGET_NFC 450
 
 /* Per-page budget for the given transport (NFC pages coarsely, LoRaWAN tightly). */
 static inline uint32_t dump_page_budget(enum app_cmd_transport tp)

@@ -200,7 +200,7 @@ static bool m_periodic = true;
 
 /* Command/response state, filled by parser_callback when an NDEF command record
  * is found and consumed by nfc_check_locked (writes the response to the tag). */
-static uint8_t m_resp_buf[256];
+static uint8_t m_resp_buf[512];
 static size_t m_resp_len;
 static bool m_have_resp; /* a command was processed; m_resp_buf holds the reply to write */
 static bool m_seen_resp; /* tag already holds a response record; leave it for the phone */
@@ -781,7 +781,7 @@ static int encrypt(const uint8_t *in, size_t in_len, uint32_t nonce_counter, uin
  * reboot it is empty, so a post-reboot retransmission falls through to -EACCES and
  * the phone resyncs from the info-record counter. */
 static uint32_t m_resp_cache_counter;
-static uint8_t m_resp_cache_buf[256];
+static uint8_t m_resp_cache_buf[512];
 static size_t m_resp_cache_len;
 
 /* Process one encrypted command frame (shared by the NDEF and mailbox channels).
@@ -815,8 +815,8 @@ static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_b
 		return 0;
 	}
 
-	static uint8_t cmd_plain[256];
-	static uint8_t resp_plain[256];
+	static uint8_t cmd_plain[512];
+	static uint8_t resp_plain[512];
 	size_t cmd_len = 0;
 	int ret = decrypt(in, in_len, cmd_plain, sizeof(cmd_plain), &cmd_len);
 	if (ret) {
@@ -934,7 +934,7 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 	size_t cfg_len;
 #ifdef CONFIG_APP_NFC_ENCRYPTION
 	NFC_REPORT("NFC read: config record (%u B encrypted)", record_info->payload_len);
-	static uint8_t buf[448];
+	static uint8_t buf[512];
 	size_t len;
 	ret = decrypt(record_info->payload, record_info->payload_len, buf, sizeof(buf), &len);
 	if (ret) {
