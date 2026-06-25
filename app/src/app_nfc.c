@@ -227,6 +227,12 @@ static uint8_t m_resp_buf[512];
 static size_t m_resp_len;
 static bool m_have_resp; /* a command was processed; m_resp_buf holds the reply to write */
 static bool m_seen_resp; /* tag already holds a response record; leave it for the phone */
+/* A response is staged in m_resp_buf/m_resp_len but not yet fully written to the
+ * tag (the RF field came back before the write landed). While set, the poll
+ * re-attempts the write in the next field-off window WITHOUT re-reading or
+ * re-running the command — same principle as the gated read: don't regenerate,
+ * retry the EEPROM transfer until a clean window lands it. */
+static bool m_resp_write_pending;
 static enum app_cmd_action m_cmd_action; /* deferred action from app_cmd_handle */
 
 /* Debounce for the "unrecognized data -> restore info" path. A poll can catch
@@ -1172,12 +1178,59 @@ int app_nfc_init(void)
 	return 0;
 }
 
+/* Write the staged response (m_resp_buf/m_resp_len) to the tag as a response
+ * record. write_mem gates every EEPROM chunk on the RF field being off; if the
+ * field is up the write defers (-EBUSY) and m_resp_write_pending stays set so the
+ * next field-off poll re-attempts it — the encrypted reply is never regenerated,
+ * just rewritten, the same principle as the gated read. Returns 0 (deferred or
+ * done) or -errno on a hard error. Caller holds the access lock; m_buf is free
+ * scratch (a pending write skips the tag read, so its contents are unused). */
+static int nfc_write_response(void)
+{
+	size_t out_len = build_ndef_record(m_buf, ST25DV_USER_MEM_SIZE, NDEF_RESPONSE_TYPE,
+					   m_resp_buf, m_resp_len);
+	if (out_len == 0) {
+		LOG_ERR("NFC response record too large (%zu B payload)", m_resp_len);
+		m_resp_write_pending = false;
+		return -EMSGSIZE;
+	}
+
+	int ret = write_mem(0, m_buf, out_len);
+	if (ret == -EBUSY) {
+		/* RF field up -> the write could not land this window; keep it pending and
+		 * retry on the next field-off poll (no re-read, no regeneration). */
+		NFC_DBG("resp: write deferred (field on), %zu B still pending", out_len);
+		return 0;
+	}
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+		m_resp_write_pending = false;
+		return ret;
+	}
+
+	NFC_DBG("resp: wrote %zu B record to tag", out_len);
+	NFC_REPORT("NFC wrote: response record (%zu B NDEF, %zu B payload)", out_len, m_resp_len);
+	m_resp_write_pending = false;
+	/* #164: a response record now sits on the tag -> arm the info-restore so the
+	 * poll rewrites the info record once the field goes quiet. */
+	m_info_restore_pending = true;
+	return 0;
+}
+
 /* Core NFC check: read the tag, parse/ingest a pending config, and restore the
  * info record. Caller must hold the access lock (nfc_access_begin). */
 static int nfc_check_locked(enum app_nfc_action *action)
 {
 	int ret;
 	int res = 0;
+
+	/* A response from an earlier cycle is still waiting to be written (the RF
+	 * field came back before the write landed). Retry it in this field-off window
+	 * WITHOUT re-reading the tag or re-running the command — the reply is cached
+	 * in m_resp_buf, so just rewrite it until a clean window lands it. */
+	if (m_resp_write_pending) {
+		return nfc_write_response();
+	}
 
 	m_have_resp = false;
 	m_seen_resp = false;
@@ -1239,29 +1292,17 @@ static int nfc_check_locked(enum app_nfc_action *action)
 		res = ret;
 	}
 
-	/* A command was processed: write the response back to the tag. Reuse m_buf
-	 * as the output buffer (its parsed contents are no longer needed; the reply
-	 * is already copied into m_resp_buf) to keep this off the thread stack. */
+	/* A command was processed: stage the reply for writing. The reply is in
+	 * m_resp_buf; mark it pending and write it (resuming across field-off windows
+	 * if the field interrupts — see nfc_write_response). The record is built into
+	 * m_buf there (its parsed contents are no longer needed). */
 	if (m_have_resp) {
 		m_unknown_count = 0;
-		size_t out_len = build_ndef_record(m_buf, ST25DV_USER_MEM_SIZE, NDEF_RESPONSE_TYPE,
-						   m_resp_buf, m_resp_len);
 		LOG_INF("Writing command response to NFC (%zu B)...", m_resp_len);
-		NFC_REPORT("NFC wrote: response record (%zu B NDEF, %zu B payload)", out_len,
-			   m_resp_len);
 		NFC_REPORT_HEX("  response (0x01 ver + protobuf Response):", m_resp_buf,
 			       m_resp_len);
-		if (out_len) {
-			ret = write_mem(0, m_buf, out_len);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
-				res = ret;
-			}
-		}
-		/* #164: a response record now sits on the tag — arm the info-restore so
-		 * the poll thread rewrites the info record once the field goes quiet. */
-		m_info_restore_pending = true;
-		return res;
+		m_resp_write_pending = true;
+		return nfc_write_response();
 	}
 
 	/* Our response is already on the tag (awaiting the phone read): leave it. */
@@ -1362,6 +1403,15 @@ int app_nfc_poll(enum app_nfc_action *action)
 bool app_nfc_info_restore_pending(void)
 {
 	return m_info_restore_pending;
+}
+
+/* True while a command response is staged but not yet fully written to the tag
+ * (the RF field interrupted the write). The poll thread uses this to shorten its
+ * wait and to re-run app_nfc_poll() — which rewrites the cached reply — instead
+ * of restoring the info record (which would clobber the pending response). */
+bool app_nfc_resp_write_pending(void)
+{
+	return m_resp_write_pending;
 }
 
 /* #164: rewrite the plaintext info record over whatever is on the tag (a stale

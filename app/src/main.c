@@ -122,22 +122,27 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 
 	for (;;) {
 		/* Sleep until the GPO interrupt fires (phone touched the tag) or the
-		 * fallback elapses. While a stale response record is on the tag (#164),
-		 * use a short ~10 s fallback so we can restore the info record soon after
-		 * the phone leaves; otherwise the long low-power fallback. */
-		int fallback = app_nfc_info_restore_pending() ? NFC_INFO_RESTORE_DEBOUNCE_MS
-							      : NFC_EVENT_FALLBACK_MS;
+		 * fallback elapses. While a response is mid-write or a stale response
+		 * record is on the tag (#164), use a short ~10 s fallback so we retry the
+		 * deferred write / restore the info record soon; otherwise the long
+		 * low-power fallback. */
+		bool nfc_busy = app_nfc_info_restore_pending() || app_nfc_resp_write_pending();
+		int fallback = nfc_busy ? NFC_INFO_RESTORE_DEBOUNCE_MS : NFC_EVENT_FALLBACK_MS;
 		int wret = app_nfc_wait_event(fallback);
 
 		if (!app_nfc_periodic_enabled()) {
 			continue;
 		}
 
-		/* #164: the fallback elapsed (wret == -EAGAIN) with a response still on
-		 * the tag and no GPO event in the debounce window → the RF field has been
-		 * quiet (phone gone), so it is safe to restore the info record without
-		 * racing the phone reading the reply (the #144 hazard). */
-		if (wret == -EAGAIN && app_nfc_info_restore_pending()) {
+		/* A response write was deferred (RF field was up): fall through to
+		 * app_nfc_poll(), which rewrites the cached reply in this field-off window
+		 * — do NOT restore the info record (it would clobber the pending reply). */
+		if (wret == -EAGAIN && !app_nfc_resp_write_pending() &&
+		    app_nfc_info_restore_pending()) {
+			/* #164: the fallback elapsed with a response record still on the tag
+			 * and no GPO event in the debounce window → the RF field has been
+			 * quiet (phone gone), so it is safe to restore the info record without
+			 * racing the phone reading the reply (the #144 hazard). */
 			int ret = app_nfc_restore_info();
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("app_nfc_restore_info", ret);
