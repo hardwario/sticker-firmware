@@ -266,6 +266,13 @@ bool app_nfc_periodic_enabled(void)
 #define ST25DV_I2C_RETRY_MS 2
 #define ST25DV_READ_CHUNK   64
 
+/* Bounded wait for the RF field to be off (defined further below). read_mem /
+ * write_mem gate every chunk on it: if the field reappears mid-transfer they
+ * pause before the next chunk and resume once it clears, so no EEPROM chunk
+ * ever runs on the bus while RF is active. Returns false if the field stays on
+ * past the wait (the chunk loop then aborts with -EBUSY; the caller skips). */
+static bool nfc_wait_field_off(void);
+
 static int read_mem(uint16_t reg, void *buf, size_t len)
 {
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
@@ -278,6 +285,12 @@ static int read_mem(uint16_t reg, void *buf, size_t len)
 	uint8_t *p = buf;
 	size_t off = 0;
 	while (off < len) {
+		/* Pause before this chunk if the RF field is back; resume once it clears.
+		 * Keeps every EEPROM read off the dual-port bus during RF. */
+		if (!nfc_wait_field_off()) {
+			return -EBUSY;
+		}
+
 		size_t chunk = MIN(len - off, (size_t)ST25DV_READ_CHUNK);
 		uint8_t reg_[2];
 		sys_put_be16((uint16_t)(reg + off), reg_);
@@ -324,6 +337,12 @@ static int write_mem(uint16_t reg, const void *buf, size_t len)
 	size_t remaining = len;
 
 	while (remaining) {
+		/* Pause before this chunk if the RF field is back; resume once it clears.
+		 * Keeps every EEPROM write off the dual-port bus during RF. */
+		if (!nfc_wait_field_off()) {
+			return -EBUSY;
+		}
+
 		size_t within_256 =
 			ST25DV_MAX_SEQ_WRITE_BYTES - (reg & (ST25DV_MAX_SEQ_WRITE_BYTES - 1));
 
@@ -1134,15 +1153,11 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	m_have_resp = false;
 	m_seen_resp = false;
 
-	/* Only read/write the user-memory EEPROM while the RF field is off. A 512 B
-	 * EEPROM access during RF collides with the phone on the shared i2c1 bus and
-	 * can wedge it, starving the watchdog feeder in the main loop (all sensors
-	 * share i2c1) -> a 10 s SoC reset with no panic dump. If the field stays on,
-	 * skip this cycle (benign — the GPO event / fallback re-polls); the sensors
-	 * keep using i2c1 unaffected. */
-	if (!nfc_wait_field_off()) {
-		return 0;
-	}
+	/* read_mem / write_mem below gate every EEPROM chunk on the RF field being
+	 * off (see nfc_wait_field_off): a 512 B access during RF collides with the
+	 * phone on the shared i2c1 bus and can wedge it, starving the watchdog feeder
+	 * in the main loop (all sensors share i2c1) -> a 10 s SoC reset with no panic
+	 * dump. The sensors keep using i2c1 unaffected. */
 
 	/* Build the expected info record up front (no I2C); used both to detect
 	 * "tag already holds our info" and to (re)write it. */
@@ -1150,6 +1165,11 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	size_t info_len = build_info_ndef(info, sizeof(info));
 
 	ret = read_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
+	if (ret == -EBUSY) {
+		/* RF field stayed on through the read -> skip this cycle (benign); the
+		 * GPO event / fallback re-polls once the field is quiet again. */
+		return 0;
+	}
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("read_mem", ret);
 		return ret;
