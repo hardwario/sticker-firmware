@@ -28,6 +28,15 @@ LOG_MODULE_REGISTER(app_accel, LOG_LEVEL_DBG);
 #define GRAVITY         9.80665f
 #define ORIENTATION_THR 0.4f
 
+/* On-demand read turn-on (#205). When motion detection is OFF the LIS2DH idles
+ * in power-down; app_accel_read() resumes it just for the read, but RESUME only
+ * restores the ODR — the first sample is valid after the part's turn-on time
+ * (~7/ODR, ~70 ms at the 100 Hz ODR_5). Poll the fetch a little beyond that so
+ * accel + orientation land in the periodic sample even with detection off (the
+ * old 5x10 ms window was shorter than the turn-on and read flaky -ENODATA). */
+#define APP_ACCEL_FETCH_RETRY_MS 15
+#define APP_ACCEL_FETCH_RETRIES  12
+
 static const int m_vectors[7][3] = {
 	[0] = {0, 0, 0},  [1] = {-1, 0, 0}, [2] = {0, 0, 1}, [3] = {0, 1, 0},
 	[4] = {0, -1, 0}, [5] = {0, 0, -1}, [6] = {1, 0, 0},
@@ -95,21 +104,27 @@ int app_accel_read(float *accel_x, float *accel_y, float *accel_z, int *orientat
 	/* Power the LIS2DH up for the read and back down afterwards (runtime PM).
 	 * When motion/free-fall detection is armed the device is already held
 	 * resumed (refcounted get in app_accel_set_motion_sensitivity), so this
-	 * just keeps it on; when detection is OFF the part is in power-down and
-	 * this is the only thing that spins it up — for the duration of the read
-	 * only. RESUME restores the active ODR; the ENODATA retry below absorbs
-	 * the turn-on + first-sample latency. */
-	(void)pm_device_runtime_get(dev);
+	 * just keeps it on; when detection is OFF the part idles in power-down and
+	 * this get is the only thing that spins it up — for this read only. */
+	ret = pm_device_runtime_get(dev);
+	if (ret < 0) {
+		LOG_ERR_CALL_FAILED_INT("pm_device_runtime_get", ret);
+		k_mutex_unlock(&m_lock);
+		return ret;
+	}
 
-	/* TODO Check if this is the best aprroach */
-	for (int i = 0; i < 5; i++) {
+	/* RESUME restores the active ODR, but the first sample is only valid after
+	 * the part's turn-on time. Poll until a sample is ready, tolerating "no
+	 * data yet" (-ENODATA) and the brief bus/PM settling errors a cold resume
+	 * can raise, over a window safely above the turn-on time (#205). When
+	 * detection is armed the part is already running, so the first fetch
+	 * succeeds immediately and the loop costs nothing. */
+	for (int i = 0; i < APP_ACCEL_FETCH_RETRIES; i++) {
 		ret = sensor_sample_fetch(dev);
-
-		if (ret != -ENODATA) {
+		if (ret == 0 || (ret != -ENODATA && ret != -ENODEV && ret != -EBUSY)) {
 			break;
 		}
-
-		k_sleep(K_MSEC(10));
+		k_sleep(K_MSEC(APP_ACCEL_FETCH_RETRY_MS));
 	}
 
 	if (ret) {
