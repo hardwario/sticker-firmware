@@ -445,7 +445,7 @@ function _decodeSensorReading(bytes, start, end) {
     switch (field) {
       case 1: sr.slot = v.value; break;
       case 2: sr.type = v.value; sr.type_name = _W1_SLOT_TYPES[v.value] || "unknown"; break;
-      case 3: sr.temperature = _pbZigzag(v.value) / 100; break;
+      case 3: { var _t = _pbZigzag(v.value); sr.temperature = (_t === _TM_S32_NA) ? null : _t / 100; break; }
       case 4: sr.humidity = v.value / 2; break;
       case 5: sr.tilt_alert = (v.value & (1 << 0)) !== 0; break;
       case 6: sr.illuminance = v.value; break;

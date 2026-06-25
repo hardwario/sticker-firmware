@@ -692,6 +692,16 @@ bool app_alarm_poll(void)
 	 * must run before the sensor-data lock is dropped (#205). */
 	nodata_poll(now, &should_send);
 
+	/* A latched no-data watchdog event also counts as "active", so the main
+	 * loop lights the red LED (blinks every BLINK_INTERVAL_SECONDS) until the
+	 * sensor resumes. Read here under g_app_sensor_data_lock, like nodata_poll (#211). */
+	for (size_t i = 0; i < NODATA_COUNT; i++) {
+		if (m_nodata_active[i]) {
+			alarm = true;
+			break;
+		}
+	}
+
 	/* Sensor data no longer needed; keep m_lock for the latch sweep (#185). */
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
