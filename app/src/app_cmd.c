@@ -147,6 +147,10 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	ARG_UNUSED(tp);
 	const Command_SetParam *sp = &cmd->body.set_param;
 	uint32_t fault = 0;
+	/* Group that produced the fault, folded into fault_field as group*100 + tag so
+	 * the host can disambiguate the tag across groups (#196): 1=lorawan
+	 * 2=application 3=sensors 4=alarms. */
+	uint32_t fault_group = 0;
 	int rc = 0;
 
 	/* Apply atomically: snapshot the staging config, apply both sections. On any
@@ -158,21 +162,25 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 
 	if (sp->has_lorawan) {
 		rc = app_config_apply_lorawan(&sp->lorawan, &fault);
+		fault_group = 1;
 	}
 	if (rc == 0 && sp->has_application) {
 		rc = app_config_apply_application(&sp->application, &fault);
+		fault_group = 2;
 	}
 	if (rc == 0 && sp->has_sensors) {
 		rc = app_config_apply_sensors(&sp->sensors, &fault);
+		fault_group = 3;
 	}
 	if (rc == 0 && sp->has_alarms) {
 		rc = app_config_apply_alarms(&sp->alarms, &fault);
+		fault_group = 4;
 	}
 
 	if (rc) {
 		*app_config() = snapshot; /* roll back the whole batch */
 		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid value");
-		resp->body.error.fault_field = fault;
+		resp->body.error.fault_field = fault_group * 100 + fault;
 	} else {
 		resp->which_body = Response_ack_tag;
 		/* Alarm rules staged into the config slots only take effect once the
@@ -227,10 +235,10 @@ static const struct {
 	// BEGIN GENERATED DUMP_FIELDS
 	{DUMP_SECTION_LORAWAN, 1, 2, false},     {DUMP_SECTION_LORAWAN, 2, 2, false},
 	{DUMP_SECTION_LORAWAN, 3, 2, false},     {DUMP_SECTION_LORAWAN, 4, 2, false},
-	{DUMP_SECTION_LORAWAN, 5, 2, false},     {DUMP_SECTION_LORAWAN, 6, 18, false},
-	{DUMP_SECTION_LORAWAN, 7, 18, false},    {DUMP_SECTION_LORAWAN, 8, 34, true},
-	{DUMP_SECTION_LORAWAN, 9, 34, true},     {DUMP_SECTION_LORAWAN, 10, 10, false},
-	{DUMP_SECTION_LORAWAN, 11, 34, true},    {DUMP_SECTION_LORAWAN, 12, 34, true},
+	{DUMP_SECTION_LORAWAN, 5, 2, false},     {DUMP_SECTION_LORAWAN, 6, 10, false},
+	{DUMP_SECTION_LORAWAN, 7, 10, false},    {DUMP_SECTION_LORAWAN, 8, 18, true},
+	{DUMP_SECTION_LORAWAN, 9, 18, true},     {DUMP_SECTION_LORAWAN, 10, 6, false},
+	{DUMP_SECTION_LORAWAN, 11, 18, true},    {DUMP_SECTION_LORAWAN, 12, 18, true},
 	{DUMP_SECTION_LORAWAN, 13, 3, false},    {DUMP_SECTION_LORAWAN, 14, 3, false},
 	{DUMP_SECTION_APPLICATION, 1, 2, false}, {DUMP_SECTION_APPLICATION, 2, 3, false},
 	{DUMP_SECTION_APPLICATION, 3, 4, false}, {DUMP_SECTION_APPLICATION, 4, 2, false},
@@ -239,20 +247,20 @@ static const struct {
 	{DUMP_SECTION_SENSORS, 4, 2, false},     {DUMP_SECTION_SENSORS, 5, 2, false},
 	{DUMP_SECTION_SENSORS, 6, 2, false},     {DUMP_SECTION_SENSORS, 7, 2, false},
 	{DUMP_SECTION_SENSORS, 8, 2, false},     {DUMP_SECTION_SENSORS, 9, 2, false},
-	{DUMP_SECTION_SENSORS, 10, 2, false},    {DUMP_SECTION_SENSORS, 11, 18, false},
-	{DUMP_SECTION_SENSORS, 12, 18, false},   {DUMP_SECTION_SENSORS, 13, 18, false},
-	{DUMP_SECTION_SENSORS, 14, 18, false},   {DUMP_SECTION_SENSORS, 15, 2, false},
+	{DUMP_SECTION_SENSORS, 10, 2, false},    {DUMP_SECTION_SENSORS, 11, 10, false},
+	{DUMP_SECTION_SENSORS, 12, 10, false},   {DUMP_SECTION_SENSORS, 13, 10, false},
+	{DUMP_SECTION_SENSORS, 14, 10, false},   {DUMP_SECTION_SENSORS, 15, 2, false},
 	{DUMP_SECTION_SENSORS, 16, 3, false},    {DUMP_SECTION_SENSORS, 17, 3, false},
 	{DUMP_SECTION_SENSORS, 18, 3, false},    {DUMP_SECTION_ALARMS, 1, 3, false},
-	{DUMP_SECTION_ALARMS, 2, 2, false},      {DUMP_SECTION_ALARMS, 3, 36, false},
-	{DUMP_SECTION_ALARMS, 4, 36, false},     {DUMP_SECTION_ALARMS, 5, 36, false},
-	{DUMP_SECTION_ALARMS, 6, 36, false},     {DUMP_SECTION_ALARMS, 7, 36, false},
-	{DUMP_SECTION_ALARMS, 8, 36, false},     {DUMP_SECTION_ALARMS, 9, 36, false},
-	{DUMP_SECTION_ALARMS, 10, 36, false},    {DUMP_SECTION_ALARMS, 11, 36, false},
-	{DUMP_SECTION_ALARMS, 12, 36, false},    {DUMP_SECTION_ALARMS, 13, 36, false},
-	{DUMP_SECTION_ALARMS, 14, 36, false},    {DUMP_SECTION_ALARMS, 15, 36, false},
-	{DUMP_SECTION_ALARMS, 16, 37, false},    {DUMP_SECTION_ALARMS, 17, 37, false},
-	{DUMP_SECTION_ALARMS, 18, 37, false},
+	{DUMP_SECTION_ALARMS, 2, 2, false},      {DUMP_SECTION_ALARMS, 3, 19, false},
+	{DUMP_SECTION_ALARMS, 4, 19, false},     {DUMP_SECTION_ALARMS, 5, 19, false},
+	{DUMP_SECTION_ALARMS, 6, 19, false},     {DUMP_SECTION_ALARMS, 7, 19, false},
+	{DUMP_SECTION_ALARMS, 8, 19, false},     {DUMP_SECTION_ALARMS, 9, 19, false},
+	{DUMP_SECTION_ALARMS, 10, 19, false},    {DUMP_SECTION_ALARMS, 11, 19, false},
+	{DUMP_SECTION_ALARMS, 12, 19, false},    {DUMP_SECTION_ALARMS, 13, 19, false},
+	{DUMP_SECTION_ALARMS, 14, 19, false},    {DUMP_SECTION_ALARMS, 15, 19, false},
+	{DUMP_SECTION_ALARMS, 16, 20, false},    {DUMP_SECTION_ALARMS, 17, 20, false},
+	{DUMP_SECTION_ALARMS, 18, 20, false},
 	// END GENERATED DUMP_FIELDS
 };
 
@@ -261,7 +269,8 @@ static const struct {
  * config_dump wrapper + page_index + page_count + the two submessage wrappers),
  * so the on-air frame is roughly budget + 14. DR0 MTU is 51 B; 30 keeps the
  * worst-case frame near 44 B with margin. Conservative — a page can never
- * overflow (the largest single field is 18 B). */
+ * overflow (the largest single field is 20 B: a 17-byte alarm rule with a
+ * two-byte tag). */
 #define DUMP_PAGE_BUDGET 30
 
 static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *cmd, Response *resp,
@@ -620,9 +629,9 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		resp->which_body = Response_ack_tag;
 		break;
 	case Command_force_send_tag:
-		/* transports: [lrw] — the answer is an uplink, meaningless over NFC */
+		/* transports: [lrw] — reject on any other transport */
 		if (tp != APP_CMD_TRANSPORT_LRW) {
-			make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
 		app_cmd_handle_force_send(tp, cmd, resp, action);
@@ -631,14 +640,19 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_reset_counters(tp, cmd, resp, action);
 		break;
 	case Command_req_history_tag:
-		/* transports: [lrw] — the answer is an uplink, meaningless over NFC */
+		/* transports: [lrw] — reject on any other transport */
 		if (tp != APP_CMD_TRANSPORT_LRW) {
-			make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
 		app_cmd_handle_req_history(tp, cmd, resp, action);
 		break;
 	case Command_clock_sync_tag:
+		/* transports: [lrw, nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_clock_sync(tp, cmd, resp, action);
 		break;
 	case Command_w1_scan_tag:
@@ -653,14 +667,29 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		resp->which_body = Response_ack_tag;
 		break;
 	case Command_enter_calibration_tag:
+		/* transports: [lrw, nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		*action = APP_CMD_ACTION_ENTER_CALIBRATION;
 		resp->which_body = Response_ack_tag;
 		break;
 	case Command_enter_mailbox_tag:
+		/* transports: [nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		*action = APP_CMD_ACTION_ENTER_MAILBOX;
 		resp->which_body = Response_ack_tag;
 		break;
 	case Command_exit_mailbox_tag:
+		/* transports: [nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		*action = APP_CMD_ACTION_LEAVE_MAILBOX;
 		resp->which_body = Response_ack_tag;
 		break;

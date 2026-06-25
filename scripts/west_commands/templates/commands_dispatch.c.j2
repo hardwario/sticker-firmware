@@ -6,10 +6,10 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 	switch (cmd->which_body) {
 {% for c in commands %}
 	case {{ c.tag }}:
-{% if c.lrw_only %}
-		/* transports: [lrw] — the answer is an uplink, meaningless over NFC */
-		if (tp != APP_CMD_TRANSPORT_LRW) {
-			make_error(resp, Response_Error_Code_NOT_READY, "lrw only");
+{% if c.transport_guard %}
+		/* transports: [{{ c.transports | join(", ") }}] — reject on any other transport */
+		if ({% for e in c.transport_guard %}tp != {{ e }}{{ " && " if not loop.last }}{% endfor %}) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
 {% endif %}
