@@ -89,6 +89,12 @@ static const char *cmd_action_str(enum app_cmd_action a)
 #define NFC_REPORT_HEX(label, data, len) ((void)0)
 #endif
 
+/* Temporary poll-thread diagnostics for the GetConfig-vs-GetInfo i2c -5 hunt
+ * (#204). The debug build pins CONFIG_LOG_MAX_LEVEL=2, so LOG_INF/LOG_DBG are
+ * compiled out and only LOG_WRN/LOG_ERR reach RTT — route these through LOG_WRN
+ * so they are visible. Remove once the read-wedge is understood. */
+#define NFC_DBG(...) LOG_WRN(__VA_ARGS__)
+
 #define ST25DV_I2C_ADDR_E0 0x53
 /* System/dynamic register device address. With user memory at 0x53 (E2=1),
  * the system area is at 0x57 (the prior 0x55 was the E2=0 value and NACKed). */
@@ -296,7 +302,8 @@ static int read_mem(uint16_t reg, void *buf, size_t len)
 		sys_put_be16((uint16_t)(reg + off), reg_);
 
 		int ret = -EIO;
-		for (int attempt = 0; attempt < ST25DV_I2C_RETRIES; attempt++) {
+		int attempt = 0;
+		for (; attempt < ST25DV_I2C_RETRIES; attempt++) {
 			ret = i2c_write_read(dev, ST25DV_I2C_ADDR_E0, reg_, sizeof(reg_), p + off,
 					     chunk);
 			if (ret == 0) {
@@ -309,6 +316,8 @@ static int read_mem(uint16_t reg, void *buf, size_t len)
 				(unsigned)(reg + off), (unsigned)chunk, ST25DV_I2C_RETRIES);
 			return ret;
 		}
+		NFC_DBG("rd @0x%04x +%u ok (tries=%d)", (unsigned)(reg + off), (unsigned)chunk,
+			attempt + 1);
 		off += chunk;
 	}
 
@@ -357,7 +366,8 @@ static int write_mem(uint16_t reg, const void *buf, size_t len)
 		memcpy(&frame[2], p, chunk);
 
 		ret = -EIO;
-		for (int attempt = 0; attempt < ST25DV_I2C_RETRIES; attempt++) {
+		int attempt = 0;
+		for (; attempt < ST25DV_I2C_RETRIES; attempt++) {
 			ret = i2c_write(dev, frame, 2 + chunk, ST25DV_I2C_ADDR_E0);
 			if (ret == 0) {
 				break;
@@ -369,6 +379,8 @@ static int write_mem(uint16_t reg, const void *buf, size_t len)
 				(unsigned)chunk, ST25DV_I2C_RETRIES);
 			return ret;
 		}
+		NFC_DBG("wr @0x%04x +%u ok (tries=%d)", (unsigned)reg, (unsigned)chunk,
+			attempt + 1);
 
 		uint32_t wait_ms = calc_prog_time_ms(reg, chunk);
 		if (wait_ms) {
@@ -587,17 +599,27 @@ static void nfc_access_end(void)
  * caller must already hold the access lock (tag powered via nfc_access_begin). */
 static bool nfc_wait_field_off(void)
 {
+	bool waited_for_field = false;
 	for (int waited = 0; waited <= NFC_FIELD_OFF_WAIT_MS; waited += NFC_FIELD_POLL_MS) {
 		uint8_t eh;
-		if (read_reg(ST25DV_EH_CTRL_DYN, &eh, 1) != 0) {
+		int ret = read_reg(ST25DV_EH_CTRL_DYN, &eh, 1);
+		if (ret != 0) {
+			NFC_DBG("field: EH_CTRL_Dyn read=%d -> proceed (fail-open)", ret);
 			return true; /* can't tell -> proceed (fall back to I2C retry) */
 		}
 		if (!(eh & ST25DV_FIELD_ON)) {
+			if (waited_for_field) {
+				NFC_DBG("field: cleared after %d ms (EH=0x%02x)", waited, eh);
+			}
 			return true; /* field absent -> safe to access the EEPROM */
+		}
+		if (!waited_for_field) {
+			NFC_DBG("field: FIELD_ON set (EH=0x%02x) -> waiting for RF off", eh);
+			waited_for_field = true;
 		}
 		k_msleep(NFC_FIELD_POLL_MS);
 	}
-	LOG_DBG("NFC: RF field still on after %d ms, skipping poll cycle", NFC_FIELD_OFF_WAIT_MS);
+	NFC_DBG("field: still on after %d ms -> abort EEPROM chunk", NFC_FIELD_OFF_WAIT_MS);
 	return false;
 }
 
@@ -874,6 +896,8 @@ static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_b
 
 	uint32_t serial = sys_get_be32(&in[0]);
 	uint32_t counter = sys_get_be32(&in[4]);
+	NFC_DBG("cmd: in_len=%zu serial=%u counter=%u (cache=%u stored=%u)", in_len, serial,
+		counter, m_resp_cache_counter, app_config()->nonce_counter);
 
 	if (serial == g_app_config.serial_number && m_resp_cache_len > 0 &&
 	    counter == m_resp_cache_counter) {
@@ -891,16 +915,20 @@ static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_b
 	size_t cmd_len = 0;
 	int ret = decrypt(in, in_len, cmd_plain, sizeof(cmd_plain), &cmd_len);
 	if (ret) {
+		NFC_DBG("cmd: decrypt failed=%d", ret);
 		return ret;
 	}
 	uint32_t req_nonce = app_config()->nonce_counter;
+	NFC_DBG("cmd: decrypt ok, cmd_len=%zu", cmd_len);
 
 	size_t resp_len = 0;
 	ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, cmd_plain, cmd_len, resp_plain,
 			     sizeof(resp_plain), &resp_len, action);
 	if (ret) {
+		NFC_DBG("cmd: app_cmd_handle failed=%d", ret);
 		return ret;
 	}
+	NFC_DBG("cmd: handled, resp_len=%zu", resp_len);
 	if (resp_len == 0) {
 		return 0;
 	}
@@ -941,6 +969,7 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 	if (record_info->type_len == cmd_type_len &&
 	    strncmp((const char *)record_info->type, NDEF_COMMAND_TYPE, cmd_type_len) == 0) {
 		LOG_INF("Found command record - length: %u byte(s)", record_info->payload_len);
+		NFC_DBG("parsed: command record, payload=%u B", record_info->payload_len);
 		NFC_REPORT("NFC read: command record (%u B)", record_info->payload_len);
 		NFC_REPORT_HEX("  command (protobuf):", record_info->payload,
 			       record_info->payload_len);
@@ -1174,6 +1203,8 @@ static int nfc_check_locked(enum app_nfc_action *action)
 		LOG_ERR_CALL_FAILED_INT("read_mem", ret);
 		return ret;
 	}
+	NFC_DBG("poll: tag read ok, CC=%02x TLV=%02x len=%02x rec=%02x", m_buf[0], m_buf[4],
+		m_buf[5], m_buf[6]);
 
 	/* Empty tag: lay down the info record so a phone always finds metadata. */
 	if (is_buffer_zero(m_buf, ST25DV_USER_MEM_SIZE)) {
