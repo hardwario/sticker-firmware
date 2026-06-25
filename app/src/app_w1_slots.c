@@ -137,13 +137,17 @@ static int machine_probe_read(int index, uint64_t *serial, struct app_w1_slot_re
 	return ret;
 }
 
-/* Dallas (DS18B20): temperature only. */
+/* sint32 telemetry "no data" sentinel — keep in sync with app_compose.c
+ * (TM_S32_NA) and the codec (ttn.js _TM_S32_NA). */
+#define TM_S32_NA INT32_MIN
+
+/* Dallas (DS18B20): temperature only. A NaN reading (sensor disconnected or
+ * faulted) is sent as TM_S32_NA so the decoder surfaces temperature=null,
+ * rather than dropping the field. */
 static void dallas_encode(const struct app_w1_slot_reading *r, SensorReading *sr)
 {
-	if (!isnan(r->temperature)) {
-		sr->has_temperature = true;
-		sr->temperature = (int32_t)(r->temperature * 100.0f);
-	}
+	sr->has_temperature = true;
+	sr->temperature = isnan(r->temperature) ? TM_S32_NA : (int32_t)(r->temperature * 100.0f);
 }
 
 /* Machine probe: the full sensor cluster. flags (tilt) is a real digital state
@@ -151,10 +155,8 @@ static void dallas_encode(const struct app_w1_slot_reading *r, SensorReading *sr
  * their sub-sensor did not respond (NaN). */
 static void machine_probe_encode(const struct app_w1_slot_reading *r, SensorReading *sr)
 {
-	if (!isnan(r->temperature)) {
-		sr->has_temperature = true;
-		sr->temperature = (int32_t)(r->temperature * 100.0f);
-	}
+	sr->has_temperature = true;
+	sr->temperature = isnan(r->temperature) ? TM_S32_NA : (int32_t)(r->temperature * 100.0f);
 	if (!isnan(r->humidity)) {
 		sr->has_humidity = true;
 		sr->humidity = (uint32_t)(r->humidity * 2.0f);
