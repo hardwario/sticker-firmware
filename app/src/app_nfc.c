@@ -245,7 +245,7 @@ bool app_nfc_periodic_enabled(void)
  * out the contention. Chunking a long read also means a collision only retries
  * a small block, not the whole 512 B (which would otherwise fail repeatedly
  * under continuous RF). */
-#define ST25DV_I2C_RETRIES   10
+#define ST25DV_I2C_RETRIES   20
 #define ST25DV_I2C_RETRY_MS  2
 #define ST25DV_READ_CHUNK    64
 

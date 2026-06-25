@@ -49,7 +49,11 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
  * the reply. */
 #define NFC_INFO_RESTORE_DEBOUNCE_MS 10000
 #define NFC_POLL_START_DELAY_MS      3000
-#define NFC_POLL_THREAD_STACK_SIZE   3072
+/* Sized for the deepest NFC command run on this thread: a GetConfig/GetParam
+ * over NFC packs DUMP_FIELDS into ids[4][~48] (~768 B), builds a Response (union
+ * sized to ConfigDump), and runs PSA AES-CCM decrypt/encrypt + nanopb — far more
+ * than a short GetInfo. 3072 B overflowed on the longer commands. */
+#define NFC_POLL_THREAD_STACK_SIZE   6144
 #define NFC_POLL_THREAD_PRIO         K_LOWEST_APPLICATION_THREAD_PRIO
 /* Delay before running an NFC command's deferred action, so the phone can read
  * the Ack response off the tag before the device reboots/saves. */
