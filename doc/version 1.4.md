@@ -9,8 +9,8 @@ This document lists **only the changes introduced in firmware v1.4.0** relative 
 | Area | Change |
 |---|---|
 | Remote control | **New** bidirectional command protocol over LoRaWAN downlinks (fPort 85) |
-| Telemetry | **New** protobuf telemetry on **fPort 2** (legacy fPort 1 bitmap no longer emitted); large reports split across frames |
-| Alarms | **New** alarm-detail batch on **fPort 3**; **new** global alarm rate-limit; **new** PIR motion alarm |
+| Telemetry | **New** protobuf telemetry on **fPort 2** (legacy fPort 1 bitmap no longer emitted); large reports split across frames; absent analog readings sent as a `null` sentinel |
+| Alarms | **New** alarm-detail batch on **fPort 3**; **new** global alarm rate-limit; **new** PIR motion alarm; **new** no-data watchdog; sensor-reading validation hardening |
 | Device info | **New** automatic device-info uplink on every join |
 | Time | **New** real-time clock, synced from the network |
 | History | **New** sensor history store-and-forward with on-request replay |
@@ -91,10 +91,21 @@ Periodic and event reports now use a compact, extensible **protobuf** format on 
 
 Key differences from the v1.3.x bitmap:
 - **Extensible** — new sensors can be added in future firmware without breaking older decoders.
-- **Capability-gated, whole-group** — a sensor's group is sent in full **every report** whenever its capability is enabled, even when the values are `0`/`false` (e.g. a hall counter at 0, all states inactive). The **system group** (voltage, `boot`) is **always** present, so `boot=false` is reported explicitly rather than by omission. Digital fields carry their real value (0 is valid); an analog scalar is omitted only when there is no valid sample yet.
+- **Capability-gated, whole-group** — a sensor's group is sent in full **every report** whenever its capability is enabled, even when the values are `0`/`false` (e.g. a hall counter at 0, all states inactive). The **system group** (voltage, `boot`) is **always** present, so `boot=false` is reported explicitly rather than by omission. Digital fields carry their real value (0 is valid).
+- **Absent readings → `null` sentinel (changed)** — an **enabled analog sensor is now always present on the wire** so the configured-sensor list stays stable across reports; a missing or faulty reading (NaN) is sent as a **sentinel** value the decoder maps to **`null`** instead of dropping the field. This lets the backend tell *"configured but no data right now"* from *"not configured"*. (Previously an absent analog scalar was simply omitted.) The onboard temperature/humidity follow this rule too.
+- **No-data watchdog** — a configured sensor that stops producing samples (reads NaN for ≥ 5 s) raises an alarm, so a silently dead sensor is surfaced instead of reporting `null` forever.
 - **Multi-frame split** — if a report is larger than the current data rate allows, it is split across several fPort-2 frames sent a few seconds apart. Each frame carries whole sensor groups from the **same snapshot**, so the network server can merge them; nothing is lost. The 1-Wire list (below) splits **per reading** — a single frame may carry only some of the slots, the rest follow in the next frame.
 
 The decoded field set (voltage, temperature, humidity, pressure/altitude, illuminance, orientation, motion_count, 1-Wire sensors, hall/input counters and states, `boot`) matches the familiar v1.3.x fields — see the payload formatter output (§8). Decode with the updated `ttn.js`.
+
+### Reading validation & robustness
+
+Readings are range-checked before they reach telemetry, history and alarms, so a glitchy sample no longer fires a false alarm or skews stored data:
+
+- **DS18B20** — values outside −55…125 °C are rejected; the +85.0 °C power-on/brown-out glitch (a valid-CRC sentinel) is **debounced** (a lone spike is suppressed, a sustained real +85 °C still passes after one extra sample). This is the root cause of the earlier spurious low-temperature alarms.
+- **Onboard SHT4x** — temperature/humidity outside the sensor's spec window are rejected.
+- **Accelerometer** — free-fall detection is armed/torn down together with any-motion (no spurious free-fall while motion detection is off); accel **and orientation** are still read into the periodic sample even when motion detection is off.
+- **Alarms** — a minimum threshold hysteresis is enforced (no chattering when `hst` is 0); momentary STATE rules (PIR/accel) reject a `from==to` shape; the 1-Wire bus scan caps the number of recorded ROMs so a noisy bus can't exhaust memory.
 
 ### 1-Wire sensors — repeated, self-describing (changed)
 
