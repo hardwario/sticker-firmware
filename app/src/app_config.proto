@@ -317,7 +317,8 @@ message AlarmEvent {
     uint32 rel_s    = 4;         // seconds since AlarmReport.base_time
     optional sint32 value = 5;   // current value: analog ×100 (temp/hum) or ×10 (pressure), digital 0/1, or counter
     uint32 quantity = 6;         // enum app_alarm_quantity: temperature/humidity/.../state/count
-    uint32 slot     = 7;         // alarm rule slot index that fired (stable identity)
+    uint32 slot     = 7;         // alarm rule slot index that fired (stable identity), or 0xFF for a no_data watchdog event
+    optional bool no_data = 8;   // true = sensor stopped reporting (NaN >= 5 s); edge act/deact, side none, value absent
 }
 
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap
