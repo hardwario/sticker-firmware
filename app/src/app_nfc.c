@@ -239,10 +239,18 @@ bool app_nfc_periodic_enabled(void)
 	return m_periodic;
 }
 
+/* The ST25DV is dual-port: an I2C access concurrent with an RF transaction can
+ * be NACKed (-EIO) by the arbiter — common while a phone holds its field open
+ * waiting for our reply. The transfers are short-lived, so a brief retry rides
+ * out the contention. Chunking a long read also means a collision only retries
+ * a small block, not the whole 512 B (which would otherwise fail repeatedly
+ * under continuous RF). */
+#define ST25DV_I2C_RETRIES   10
+#define ST25DV_I2C_RETRY_MS  2
+#define ST25DV_READ_CHUNK    64
+
 static int read_mem(uint16_t reg, void *buf, size_t len)
 {
-	int ret;
-
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 
 	if (!device_is_ready(dev)) {
@@ -250,13 +258,28 @@ static int read_mem(uint16_t reg, void *buf, size_t len)
 		return -ENODEV;
 	}
 
-	uint8_t reg_[2];
-	sys_put_be16(reg, reg_);
+	uint8_t *p = buf;
+	size_t off = 0;
+	while (off < len) {
+		size_t chunk = MIN(len - off, (size_t)ST25DV_READ_CHUNK);
+		uint8_t reg_[2];
+		sys_put_be16((uint16_t)(reg + off), reg_);
 
-	ret = i2c_write_read(dev, ST25DV_I2C_ADDR_E0, reg_, sizeof(reg_), buf, len);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("i2c_write_read", ret);
-		return ret;
+		int ret = -EIO;
+		for (int attempt = 0; attempt < ST25DV_I2C_RETRIES; attempt++) {
+			ret = i2c_write_read(dev, ST25DV_I2C_ADDR_E0, reg_, sizeof(reg_), p + off,
+					     chunk);
+			if (ret == 0) {
+				break;
+			}
+			k_msleep(ST25DV_I2C_RETRY_MS); /* let RF yield the dual port */
+		}
+		if (ret) {
+			LOG_ERR("read_mem @0x%04x +%u: i2c -EIO after %d retries (RF contention?)",
+				(unsigned)(reg + off), (unsigned)chunk, ST25DV_I2C_RETRIES);
+			return ret;
+		}
+		off += chunk;
 	}
 
 	return 0;
@@ -297,9 +320,17 @@ static int write_mem(uint16_t reg, const void *buf, size_t len)
 		sys_put_be16(reg, frame);
 		memcpy(&frame[2], p, chunk);
 
-		ret = i2c_write(dev, frame, 2 + chunk, ST25DV_I2C_ADDR_E0);
+		ret = -EIO;
+		for (int attempt = 0; attempt < ST25DV_I2C_RETRIES; attempt++) {
+			ret = i2c_write(dev, frame, 2 + chunk, ST25DV_I2C_ADDR_E0);
+			if (ret == 0) {
+				break;
+			}
+			k_msleep(ST25DV_I2C_RETRY_MS); /* RF contention on the dual port */
+		}
 		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("i2c_write", ret);
+			LOG_ERR("write_mem @0x%04x +%u: i2c -EIO after %d retries", (unsigned)reg,
+				(unsigned)chunk, ST25DV_I2C_RETRIES);
 			return ret;
 		}
 
@@ -337,7 +368,14 @@ static int read_reg(uint16_t reg, void *buf, size_t len)
 	uint8_t reg_[2];
 	sys_put_be16(reg, reg_);
 
-	int ret = i2c_write_read(dev, reg_dev_addr(reg), reg_, sizeof(reg_), buf, len);
+	int ret = -EIO;
+	for (int attempt = 0; attempt < ST25DV_I2C_RETRIES; attempt++) {
+		ret = i2c_write_read(dev, reg_dev_addr(reg), reg_, sizeof(reg_), buf, len);
+		if (ret == 0) {
+			break;
+		}
+		k_msleep(ST25DV_I2C_RETRY_MS); /* RF contention on the dual port */
+	}
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("i2c_write_read", ret);
 		return ret;
@@ -363,13 +401,20 @@ static int write_reg(uint16_t reg, const void *buf, size_t len)
 	sys_put_be16(reg, frame);
 	memcpy(&frame[2], buf, len);
 
-	int ret = i2c_write(dev, frame, 2 + len, reg_dev_addr(reg));
+	int ret = -EIO;
+	for (int attempt = 0; attempt < ST25DV_I2C_RETRIES; attempt++) {
+		ret = i2c_write(dev, frame, 2 + len, reg_dev_addr(reg));
+		if (ret == 0) {
+			break;
+		}
+		k_msleep(ST25DV_I2C_RETRY_MS); /* RF contention on the dual port */
+	}
 	if (ret) {
 		/* Name the register + I2C device select so a NACK is identifiable on RTT
 		 * (E0=0x53 data/dynamic, E1=0x57 system/password-protected). */
-		LOG_ERR("i2c_write reg 0x%04x (E%c addr 0x%02x, %u B) failed: %d", reg,
-			reg_dev_addr(reg) == ST25DV_I2C_ADDR_E0 ? '0' : '1', reg_dev_addr(reg),
-			(unsigned)len, ret);
+		LOG_ERR("i2c_write reg 0x%04x (E%c addr 0x%02x, %u B) failed after %d retries: %d",
+			reg, reg_dev_addr(reg) == ST25DV_I2C_ADDR_E0 ? '0' : '1', reg_dev_addr(reg),
+			(unsigned)len, ST25DV_I2C_RETRIES, ret);
 		return ret;
 	}
 
