@@ -433,8 +433,10 @@ int main(void)
 #endif
 
 #if defined(CONFIG_WATCHDOG)
+		/* -EBUSY = feed deliberately withheld because a worker is wedged
+		 * (app_wdog logs which channel); let the IWDG reset us. */
 		ret = app_wdog_feed();
-		if (ret) {
+		if (ret && ret != -EBUSY) {
 			LOG_ERR_CALL_FAILED_INT("app_wdog_feed", ret);
 		}
 #endif /* defined(CONFIG_WATCHDOG) */
