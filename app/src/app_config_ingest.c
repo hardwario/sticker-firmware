@@ -235,6 +235,15 @@ int app_config_apply_application(const AppConfigMessage_Application *src, uint32
 	if (src->has_history_sensors) {
 		config->history_sensors = src->history_sensors;
 	}
+	if (src->has_battery_level) {
+		int val = src->battery_level;
+
+		if ((val >= 1000 && val <= 3600)) {
+			config->battery_level = val;
+		} else {
+			FAULT(6);
+		}
+	}
 	return ret;
 }
 
@@ -261,6 +270,10 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	if (requested(ids, n, 5)) {
 		dst->has_history_sensors = true;
 		dst->history_sensors = c->history_sensors;
+	}
+	if (requested(ids, n, 6)) {
+		dst->has_battery_level = true;
+		dst->battery_level = c->battery_level;
 	}
 }
 

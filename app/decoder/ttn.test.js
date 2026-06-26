@@ -472,6 +472,20 @@ test("fPort-3 batch: accel motion state activate", () => {
   assert.equal(d.alarms[0].time, base);
 });
 
+test("fPort-3 batch: low-battery watchdog event (battery/voltage, type=low, slot 0xFE)", () => {
+  const base = 1780000000;
+  // battery (source=11) voltage (quantity=8), activate, type low (1), 2.15 V (×100=215), slot 254
+  const f = buildAlarmReport(base, 1, [alarmEvent(11, 8, 0, 1, 0, 215, 254)]);
+  const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
+  assert.equal(d.alarms.length, 1);
+  assert.equal(d.alarms[0].slot, 254);
+  assert.equal(d.alarms[0].source, "battery");
+  assert.equal(d.alarms[0].quantity, "voltage");
+  assert.equal(d.alarms[0].event, "activate");
+  assert.equal(d.alarms[0].type, "low");
+  assert.equal(d.alarms[0].value, 2.15); // V×100 unscaled
+});
+
 test("fPort-3 batch: no-data watchdog event (type=no_data, slot 0xFF)", () => {
   const base = 1780000000;
   // s1 temperature (source=1, quantity=0) stopped reporting: activate, type

@@ -849,9 +849,9 @@ function decodeDownlink(input) {
 // absent for some edges. Per-event time = base_time + rel_s. `total` may exceed
 // events present (dropped to fit the data rate).
 var _ALARM_SOURCES = ["onboard", "s1", "s2", "s3", "s4", "hall-left", "hall-right",
-  "input-a", "input-b", "pir", "accel"];
+  "input-a", "input-b", "pir", "accel", "battery"];
 var _ALARM_QUANTITIES = ["temperature", "humidity", "pressure", "illuminance",
-  "magnetic-field", "tilt", "state", "count"];
+  "magnetic-field", "tilt", "state", "count", "voltage"];
 var _ALARM_EDGES = ["activate", "deactivate"];
 var _ALARM_TYPES = ["none", "low", "high", "trigger", "no_data"];
 
@@ -860,6 +860,7 @@ function _alarmUnscale(quantity, raw) {
     case 0: case 1: return raw / 100;   // temperature, humidity
     case 2: return raw / 10;            // pressure (hPa×10)
     case 4: return raw / 1000;          // magnetic-field (µT -> mT)
+    case 8: return raw / 100;           // voltage (V×100)
     default: return raw;                // illuminance / state / count
   }
 }

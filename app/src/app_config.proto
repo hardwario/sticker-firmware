@@ -51,6 +51,7 @@ message AppConfigMessage {
         optional uint32 interval_report = 3;
         optional bool history_enable = 4;
         optional uint32 history_sensors = 5;
+        optional uint32 battery_level = 6;
     }
 
     message Sensors {
