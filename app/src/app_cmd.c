@@ -273,6 +273,26 @@ static const struct {
  * two-byte tag). */
 #define DUMP_PAGE_BUDGET 30
 
+/* Over NFC the response lands in the ST25DV user memory, so config can page far
+ * coarser than the tiny DR0 LoRaWAN frame — a whole snapshot in ~2 pages instead
+ * of ~30, read in one RF session (GetConfig page 0..page_count-1, each rewritten
+ * to the tag on request). Bounded by the encrypted-response buffer (m_resp_buf,
+ * 512 B) AND the 512 B ST25DV user memory the rsp NDEF record is written into:
+ * the on-tag record is ~22 B framing + encrypted(8 B header + plaintext + 16 B
+ * tag), so encrypted <= 490 -> plaintext <= 466 -> minus version + the ~14 B
+ * Response/ConfigDump wrapper leaves ~452 B for field payload. The budget is in
+ * DUMP_FIELDS.size units, which over-estimate native byte fields ~2x (so real
+ * bytes <= budget), hence 450 keeps the worst-case page on the tag with margin
+ * (encrypted ~474 + 22 framing ~= 496 <= 512). LoRaWAN keeps the small budget
+ * (DR0 MTU). */
+#define DUMP_PAGE_BUDGET_NFC 450
+
+/* Per-page budget for the given transport (NFC pages coarsely, LoRaWAN tightly). */
+static inline uint32_t dump_page_budget(enum app_cmd_transport tp)
+{
+	return (tp == APP_CMD_TRANSPORT_NFC) ? DUMP_PAGE_BUDGET_NFC : DUMP_PAGE_BUDGET;
+}
+
 static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
@@ -297,7 +317,14 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 		if (DUMP_FIELDS[i].nfc_only && !allow_nfc_only) {
 			continue;
 		}
-		if (used > 0 && used + DUMP_FIELDS[i].size > DUMP_PAGE_BUDGET) {
+		/* Empty (all-zero) alarm slots are omitted by app_config_fill_alarms(),
+		 * so they take no page budget and no tag — an unprovisioned device pages
+		 * its whole config into far fewer frames (page_count stays exact). */
+		if (DUMP_FIELDS[i].section == DUMP_SECTION_ALARMS &&
+		    app_config_alarms_slot_empty(DUMP_FIELDS[i].tag)) {
+			continue;
+		}
+		if (used > 0 && used + DUMP_FIELDS[i].size > dump_page_budget(tp)) {
 			cur_page++;
 			used = 0;
 		}
@@ -396,7 +423,13 @@ static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *c
 			if (nfc_only && !allow_nfc_only) {
 				continue; /* keys: NFC transport only */
 			}
-			if (used > 0 && used + sz > DUMP_PAGE_BUDGET) {
+			/* Empty alarm slots are omitted by fill_alarms() — skip their
+			 * budget/tag here too so page_count matches the emitted response. */
+			if (s == DUMP_SECTION_ALARMS &&
+			    app_config_alarms_slot_empty(req_ids[s][j])) {
+				continue;
+			}
+			if (used > 0 && used + sz > dump_page_budget(tp)) {
 				cur_page++;
 				used = 0;
 			}

@@ -54,6 +54,12 @@ bool app_nfc_periodic_enabled(void);
  * quiet for the debounce window (no GPO events), calls `app_nfc_restore_info()`
  * to rewrite the plaintext info record so a later tap finds valid metadata. */
 bool app_nfc_info_restore_pending(void);
+
+/* True while a command response is staged but not yet fully written to the tag
+ * (the RF field interrupted the write). The poll thread shortens its wait and
+ * re-runs app_nfc_poll() to rewrite the cached reply, rather than restoring the
+ * info record. */
+bool app_nfc_resp_write_pending(void);
 int app_nfc_restore_info(void);
 
 /* Enter mailbox (ST25DV Fast-Transfer-Mode) serving mode until `idle_timeout_s`

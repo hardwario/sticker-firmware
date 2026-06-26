@@ -186,6 +186,15 @@ int app_settings_save(bool reboot)
 	return save(reboot);
 }
 
+int app_settings_save_nonce_counter(void)
+{
+	/* Single-key write to the "config" settings subtree (see SETTINGS_PFX in the
+	 * generated app_config.c). Persisting just this key keeps the NFC accept path
+	 * cheap and avoids rewriting the whole config blob. */
+	return settings_save_one("config/nonce-counter", &app_config()->nonce_counter,
+				 sizeof(app_config()->nonce_counter));
+}
+
 int app_settings_erase(void)
 {
 	return erase(true);

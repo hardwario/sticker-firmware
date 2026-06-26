@@ -46,6 +46,19 @@ static bool requested(const uint32_t *ids, size_t n, uint32_t tag)
 	return false;
 }
 
+/* True when a fixed-length bytes slot is all zero (unconfigured). Such slots are
+ * omitted from a ConfigDump (dump_omit_if_zero in app_config.yml) so an
+ * unprovisioned device pages its whole config into far fewer frames. */
+static bool slot_all_zero(const uint8_t *slot, size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		if (slot[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
 int app_config_apply_lorawan(const AppConfigMessage_Lorawan *src, uint32_t *fault_field)
 {
 	struct app_config *config = app_config();
@@ -538,69 +551,114 @@ void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, s
 		dst->has_alarm_notif_time = true;
 		dst->alarm_notif_time = c->alarm_notif_time;
 	}
-	if (requested(ids, n, 3)) {
+	if (requested(ids, n, 3) && !slot_all_zero(c->alarm_0, sizeof(c->alarm_0))) {
 		dst->has_alarm_0 = true;
 		memcpy(dst->alarm_0, c->alarm_0, sizeof(c->alarm_0));
 	}
-	if (requested(ids, n, 4)) {
+	if (requested(ids, n, 4) && !slot_all_zero(c->alarm_1, sizeof(c->alarm_1))) {
 		dst->has_alarm_1 = true;
 		memcpy(dst->alarm_1, c->alarm_1, sizeof(c->alarm_1));
 	}
-	if (requested(ids, n, 5)) {
+	if (requested(ids, n, 5) && !slot_all_zero(c->alarm_2, sizeof(c->alarm_2))) {
 		dst->has_alarm_2 = true;
 		memcpy(dst->alarm_2, c->alarm_2, sizeof(c->alarm_2));
 	}
-	if (requested(ids, n, 6)) {
+	if (requested(ids, n, 6) && !slot_all_zero(c->alarm_3, sizeof(c->alarm_3))) {
 		dst->has_alarm_3 = true;
 		memcpy(dst->alarm_3, c->alarm_3, sizeof(c->alarm_3));
 	}
-	if (requested(ids, n, 7)) {
+	if (requested(ids, n, 7) && !slot_all_zero(c->alarm_4, sizeof(c->alarm_4))) {
 		dst->has_alarm_4 = true;
 		memcpy(dst->alarm_4, c->alarm_4, sizeof(c->alarm_4));
 	}
-	if (requested(ids, n, 8)) {
+	if (requested(ids, n, 8) && !slot_all_zero(c->alarm_5, sizeof(c->alarm_5))) {
 		dst->has_alarm_5 = true;
 		memcpy(dst->alarm_5, c->alarm_5, sizeof(c->alarm_5));
 	}
-	if (requested(ids, n, 9)) {
+	if (requested(ids, n, 9) && !slot_all_zero(c->alarm_6, sizeof(c->alarm_6))) {
 		dst->has_alarm_6 = true;
 		memcpy(dst->alarm_6, c->alarm_6, sizeof(c->alarm_6));
 	}
-	if (requested(ids, n, 10)) {
+	if (requested(ids, n, 10) && !slot_all_zero(c->alarm_7, sizeof(c->alarm_7))) {
 		dst->has_alarm_7 = true;
 		memcpy(dst->alarm_7, c->alarm_7, sizeof(c->alarm_7));
 	}
-	if (requested(ids, n, 11)) {
+	if (requested(ids, n, 11) && !slot_all_zero(c->alarm_8, sizeof(c->alarm_8))) {
 		dst->has_alarm_8 = true;
 		memcpy(dst->alarm_8, c->alarm_8, sizeof(c->alarm_8));
 	}
-	if (requested(ids, n, 12)) {
+	if (requested(ids, n, 12) && !slot_all_zero(c->alarm_9, sizeof(c->alarm_9))) {
 		dst->has_alarm_9 = true;
 		memcpy(dst->alarm_9, c->alarm_9, sizeof(c->alarm_9));
 	}
-	if (requested(ids, n, 13)) {
+	if (requested(ids, n, 13) && !slot_all_zero(c->alarm_10, sizeof(c->alarm_10))) {
 		dst->has_alarm_10 = true;
 		memcpy(dst->alarm_10, c->alarm_10, sizeof(c->alarm_10));
 	}
-	if (requested(ids, n, 14)) {
+	if (requested(ids, n, 14) && !slot_all_zero(c->alarm_11, sizeof(c->alarm_11))) {
 		dst->has_alarm_11 = true;
 		memcpy(dst->alarm_11, c->alarm_11, sizeof(c->alarm_11));
 	}
-	if (requested(ids, n, 15)) {
+	if (requested(ids, n, 15) && !slot_all_zero(c->alarm_12, sizeof(c->alarm_12))) {
 		dst->has_alarm_12 = true;
 		memcpy(dst->alarm_12, c->alarm_12, sizeof(c->alarm_12));
 	}
-	if (requested(ids, n, 16)) {
+	if (requested(ids, n, 16) && !slot_all_zero(c->alarm_13, sizeof(c->alarm_13))) {
 		dst->has_alarm_13 = true;
 		memcpy(dst->alarm_13, c->alarm_13, sizeof(c->alarm_13));
 	}
-	if (requested(ids, n, 17)) {
+	if (requested(ids, n, 17) && !slot_all_zero(c->alarm_14, sizeof(c->alarm_14))) {
 		dst->has_alarm_14 = true;
 		memcpy(dst->alarm_14, c->alarm_14, sizeof(c->alarm_14));
 	}
-	if (requested(ids, n, 18)) {
+	if (requested(ids, n, 18) && !slot_all_zero(c->alarm_15, sizeof(c->alarm_15))) {
 		dst->has_alarm_15 = true;
 		memcpy(dst->alarm_15, c->alarm_15, sizeof(c->alarm_15));
+	}
+}
+
+/* True when dump field `tag` in this group is an omit-if-zero slot that is
+ * currently all zero (so fill_alarms() omits it). The get_config paging loop
+ * calls this to skip the slot's byte budget, keeping page_count exact. */
+bool app_config_alarms_slot_empty(uint32_t tag)
+{
+	const struct app_config *c = app_config();
+
+	switch (tag) {
+	case 3:
+		return slot_all_zero(c->alarm_0, sizeof(c->alarm_0));
+	case 4:
+		return slot_all_zero(c->alarm_1, sizeof(c->alarm_1));
+	case 5:
+		return slot_all_zero(c->alarm_2, sizeof(c->alarm_2));
+	case 6:
+		return slot_all_zero(c->alarm_3, sizeof(c->alarm_3));
+	case 7:
+		return slot_all_zero(c->alarm_4, sizeof(c->alarm_4));
+	case 8:
+		return slot_all_zero(c->alarm_5, sizeof(c->alarm_5));
+	case 9:
+		return slot_all_zero(c->alarm_6, sizeof(c->alarm_6));
+	case 10:
+		return slot_all_zero(c->alarm_7, sizeof(c->alarm_7));
+	case 11:
+		return slot_all_zero(c->alarm_8, sizeof(c->alarm_8));
+	case 12:
+		return slot_all_zero(c->alarm_9, sizeof(c->alarm_9));
+	case 13:
+		return slot_all_zero(c->alarm_10, sizeof(c->alarm_10));
+	case 14:
+		return slot_all_zero(c->alarm_11, sizeof(c->alarm_11));
+	case 15:
+		return slot_all_zero(c->alarm_12, sizeof(c->alarm_12));
+	case 16:
+		return slot_all_zero(c->alarm_13, sizeof(c->alarm_13));
+	case 17:
+		return slot_all_zero(c->alarm_14, sizeof(c->alarm_14));
+	case 18:
+		return slot_all_zero(c->alarm_15, sizeof(c->alarm_15));
+	default:
+		return false;
 	}
 }
 
