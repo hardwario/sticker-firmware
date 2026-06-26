@@ -1145,7 +1145,16 @@ static void gpo_isr(const struct device *dev, struct gpio_callback *cb, uint32_t
  * channel). Returns 0 if woken by GPO, -EAGAIN on the fallback timeout. */
 int app_nfc_wait_event(int fallback_ms)
 {
-	return k_sem_take(&m_gpo_sem, K_MSEC(fallback_ms));
+	int ret = k_sem_take(&m_gpo_sem, K_MSEC(fallback_ms));
+	/* #164 (fast restore): a GPO edge while a response awaits restore means the
+	 * RF field changed — the phone has come to read the reply. Latch it here
+	 * (the most reliable signal: every field edge wakes us, GPIO_INT_EDGE_BOTH),
+	 * so the next field-off poll restores the info record straight away instead
+	 * of relying on an EEPROM access happening to observe the brief field-on. */
+	if (ret == 0 && m_info_restore_pending) {
+		m_resp_field_seen = true;
+	}
+	return ret;
 }
 
 /* Configure the GPO line (PB12) as an input with an edge interrupt. */
