@@ -37,9 +37,9 @@ static const struct app_config m_app_config_defaults = {
 	.interval_report = 900,
 	.history_enable = false,
 	.history_sensors = 0,
+	.battery_level = 2400,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
-	.battery_level = 2400,
 	.lrw_sub_band = 2,
 	.lrw_link_check_interval = 5,
 	.lrw_link_check_fail_rejoin = 5,
@@ -55,9 +55,9 @@ static struct app_config m_app_config = {
 	.interval_report = 900,
 	.history_enable = false,
 	.history_sensors = 0,
+	.battery_level = 2400,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
-	.battery_level = 2400,
 	.lrw_sub_band = 2,
 	.lrw_link_check_interval = 5,
 	.lrw_link_check_fail_rejoin = 5,
@@ -104,11 +104,11 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.history_enable));
 	SETTINGS_SET("history-sensors", &m_app_config.history_sensors,
 		     sizeof(m_app_config.history_sensors));
+	SETTINGS_SET("battery-level", &m_app_config.battery_level,
+		     sizeof(m_app_config.battery_level));
 	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	SETTINGS_SET("alarm-notif-time", &m_app_config.alarm_notif_time,
 		     sizeof(m_app_config.alarm_notif_time));
-	SETTINGS_SET("battery-level", &m_app_config.battery_level,
-		     sizeof(m_app_config.battery_level));
 	SETTINGS_SET("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
 	SETTINGS_SET("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
 	SETTINGS_SET("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
@@ -232,6 +232,12 @@ static int h_commit(void)
 	if (m_app_config.interval_report > 86400) {
 		m_app_config.interval_report = 86400;
 	}
+	if (m_app_config.battery_level < 1000) {
+		m_app_config.battery_level = 1000;
+	}
+	if (m_app_config.battery_level > 3600) {
+		m_app_config.battery_level = 3600;
+	}
 	if (m_app_config.alarm_limit < 0) {
 		m_app_config.alarm_limit = 0;
 	}
@@ -243,12 +249,6 @@ static int h_commit(void)
 	}
 	if (m_app_config.alarm_notif_time > 60) {
 		m_app_config.alarm_notif_time = 60;
-	}
-	if (m_app_config.battery_level < 1000) {
-		m_app_config.battery_level = 1000;
-	}
-	if (m_app_config.battery_level > 3600) {
-		m_app_config.battery_level = 3600;
 	}
 	if ((int)m_app_config.lrw_region < 0 || (int)m_app_config.lrw_region > 2) {
 		m_app_config.lrw_region = 0;
@@ -308,11 +308,11 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.history_enable));
 	EXPORT_FUNC("history-sensors", &m_app_config.history_sensors,
 		    sizeof(m_app_config.history_sensors));
+	EXPORT_FUNC("battery-level", &m_app_config.battery_level,
+		    sizeof(m_app_config.battery_level));
 	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	EXPORT_FUNC("alarm-notif-time", &m_app_config.alarm_notif_time,
 		    sizeof(m_app_config.alarm_notif_time));
-	EXPORT_FUNC("battery-level", &m_app_config.battery_level,
-		    sizeof(m_app_config.battery_level));
 	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
 	EXPORT_FUNC("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
 	EXPORT_FUNC("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
@@ -523,6 +523,11 @@ static void print_history_sensors(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " history-sensors %u", m_app_config.history_sensors);
 }
 
+static void print_battery_level(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " battery-level %d", m_app_config.battery_level);
+}
+
 static void print_alarm_limit(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " alarm-limit %d", m_app_config.alarm_limit);
@@ -531,11 +536,6 @@ static void print_alarm_limit(const struct shell *shell)
 static void print_alarm_notif_time(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " alarm-notif-time %d", m_app_config.alarm_notif_time);
-}
-
-static void print_battery_level(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " battery-level %d", m_app_config.battery_level);
 }
 
 static void print_lrw_region(const struct shell *shell)
@@ -880,9 +880,9 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_interval_report(shell);
 	print_history_enable(shell);
 	print_history_sensors(shell);
+	print_battery_level(shell);
 	print_alarm_limit(shell);
 	print_alarm_notif_time(shell);
-	print_battery_level(shell);
 	print_lrw_region(shell);
 	print_lrw_sub_band(shell);
 	print_lrw_network(shell);
@@ -1165,6 +1165,12 @@ static int cmd_history_sensors(const struct shell *shell, size_t argc, char **ar
 	return 0;
 }
 
+static int cmd_battery_level(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.battery_level, 1000, 3600,
+		       print_battery_level);
+}
+
 static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_int(shell, argc, argv, &m_app_config.alarm_limit, 0, 3600, print_alarm_limit);
@@ -1174,12 +1180,6 @@ static int cmd_alarm_notif_time(const struct shell *shell, size_t argc, char **a
 {
 	return cmd_int(shell, argc, argv, &m_app_config.alarm_notif_time, 1, 60,
 		       print_alarm_notif_time);
-}
-
-static int cmd_battery_level(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_int(shell, argc, argv, &m_app_config.battery_level, 1000, 3600,
-		       print_battery_level);
 }
 
 static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
@@ -1856,6 +1856,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set history sensor selection bitmask (0 = all capability-available).",
 	              cmd_history_sensors, 1, 1),
 
+	SHELL_CMD_ARG(battery-level, NULL,
+	              "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this.",
+	              cmd_battery_level, 1, 1),
+
 	SHELL_CMD_ARG(alarm-limit, NULL,
 	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
 	              cmd_alarm_limit, 1, 1),
@@ -1863,10 +1867,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(alarm-notif-time, NULL,
 	              "Get/Set alarm red-LED hold time in seconds (both-mode and pulse sources).",
 	              cmd_alarm_notif_time, 1, 1),
-
-	SHELL_CMD_ARG(battery-level, NULL,
-	              "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this.",
-	              cmd_battery_level, 1, 1),
 
 	SHELL_CMD_ARG(lrw-region, NULL,
 	              "Get/Set LoRaWAN region (eu868/us915/au915).",

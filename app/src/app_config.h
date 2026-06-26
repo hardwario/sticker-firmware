@@ -53,9 +53,9 @@ struct app_config {
 	int interval_report;
 	bool history_enable;
 	uint32_t history_sensors;
+	int battery_level;
 	int alarm_limit;
 	int alarm_notif_time;
-	int battery_level;
 	enum app_config_lrw_region lrw_region;
 	int lrw_sub_band;
 	enum app_config_lrw_network lrw_network;
