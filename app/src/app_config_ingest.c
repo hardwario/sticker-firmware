@@ -510,6 +510,15 @@ int app_config_apply_alarms(const AppConfigMessage_Alarms *src, uint32_t *fault_
 	if (src->has_alarm_15) {
 		memcpy(config->alarm_15, src->alarm_15, sizeof(config->alarm_15));
 	}
+	if (src->has_battery_level) {
+		int val = src->battery_level;
+
+		if ((val >= 1000 && val <= 3600)) {
+			config->battery_level = val;
+		} else {
+			FAULT(19);
+		}
+	}
 	return ret;
 }
 
@@ -588,6 +597,10 @@ void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, s
 	if (requested(ids, n, 18)) {
 		dst->has_alarm_15 = true;
 		memcpy(dst->alarm_15, c->alarm_15, sizeof(c->alarm_15));
+	}
+	if (requested(ids, n, 19)) {
+		dst->has_battery_level = true;
+		dst->battery_level = c->battery_level;
 	}
 }
 

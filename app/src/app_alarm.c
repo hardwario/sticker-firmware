@@ -42,13 +42,15 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 #define APP_ALARM_NO_DATA_SLOT 0xFF
 
 /* Low-battery watchdog (#210): raise a fPort-3 alarm (source=battery,
- * quantity=voltage, type=low) when the supply drops below APP_ALARM_BATTERY_LOW_V
- * and clear it once it recovers past the hysteresis band. Bench-measured min
- * operating voltage is ~1.3 V (the node wedges silently below that and only a
- * power-cycle recovers it), so 2.2 V warns the backend with margin to spare.
- * Independent of the 16 rule slots — its event carries slot = 0xFE. */
-#define APP_ALARM_BATTERY_LOW_V  2.2f
-#define APP_ALARM_BATTERY_HYST_V 0.1f /* recover above LOW_V + HYST to avoid chatter */
+ * quantity=voltage, type=low) when the supply drops below the configurable
+ * `battery_level` threshold (config in mV, default 2400 — Li cells discharge
+ * non-linearly so the warning level is left to the integrator) and clear it once
+ * it recovers past the hysteresis band. Bench-measured min operating voltage is
+ * ~1.3 V (the node wedges silently below that and only a power-cycle recovers
+ * it), so the default 2.4 V warns the backend with margin to spare. Like the
+ * no-data watchdog it is independent of the 16 rule slots (slot = 0xFE) and it
+ * does drive the red LED (it is an alarm). */
+#define APP_ALARM_BATTERY_HYST_V 0.1f /* recover above threshold + HYST to avoid chatter */
 #define APP_ALARM_BATTERY_SLOT   0xFE
 
 /* fPort-3 wire scaling per quantity; defined later, forward-declared for the
@@ -679,12 +681,13 @@ static void nodata_poll(int64_t now, bool *should_send)
 
 /* Low-battery watchdog (#210): independent of the rule slots and the no-data
  * watchdog. Reads the supply voltage from g_app_sensor_data (caller holds
- * g_app_sensor_data_lock) and fires/clears a low-battery alarm with hysteresis.
- * Deliberately does NOT drive the red LED (unlike the no-data watchdog) — a
- * blinking LED on an already-weak battery only hastens the wedge. */
+ * g_app_sensor_data_lock), compares it against the configurable `battery_level`
+ * threshold (mV) and fires/clears a low-battery alarm with hysteresis. A latched
+ * alarm drives the red LED via app_alarm_poll (it is an alarm). */
 static void battery_poll(bool *should_send)
 {
 	float v = g_app_sensor_data.voltage;
+	float threshold = g_app_config.battery_level / 1000.0f; /* mV -> V */
 
 	/* Skip until a plausible measurement exists (0/NaN before the first
 	 * app_battery_measure, which would otherwise read as a false low). */
@@ -693,12 +696,12 @@ static void battery_poll(bool *should_send)
 	}
 
 	if (!m_battery_low_active) {
-		if (v < APP_ALARM_BATTERY_LOW_V) {
+		if (v < threshold) {
 			m_battery_low_active = true;
 			alarm_collect_battery(true, v);
 			*should_send = true;
 		}
-	} else if (v > APP_ALARM_BATTERY_LOW_V + APP_ALARM_BATTERY_HYST_V) {
+	} else if (v > threshold + APP_ALARM_BATTERY_HYST_V) {
 		m_battery_low_active = false;
 		alarm_collect_battery(false, v);
 		*should_send = true;
@@ -769,6 +772,12 @@ bool app_alarm_poll(void)
 			alarm = true;
 			break;
 		}
+	}
+
+	/* A latched low-battery alarm also lights the red LED (#210) — it is an
+	 * alarm. Read here under g_app_sensor_data_lock, like the no-data sweep. */
+	if (m_battery_low_active) {
+		alarm = true;
 	}
 
 	/* Sensor data no longer needed; keep m_lock for the latch sweep (#185). */

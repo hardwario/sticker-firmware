@@ -210,6 +210,15 @@ parameters:
     max: 60
     help: "Get/Set alarm red-LED hold time in seconds (both-mode and pulse sources)."
 
+  - name: battery_level
+    proto_group: alarms
+    proto_id: 19
+    type: int
+    default: 2400
+    min: 1000
+    max: 3600
+    help: "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this."
+
   - name: lrw_region
     proto_group: lorawan
     proto_id: 1
