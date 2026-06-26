@@ -9,6 +9,8 @@
 #include "app_alarm_rules.h"
 #include "app_config.h"
 
+#include "src/app_config.pb.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -18,6 +20,25 @@ struct app_config g_app_config;
 struct app_config *app_config(void)
 {
 	return &g_app_config;
+}
+
+/* Sensor sampling + telemetry snapshot (sample command). app_sensor_sample is
+ * inert; app_compose_snapshot fills a recognisable reading so the test can check
+ * the Sample response carries the snapshot. */
+void app_sensor_sample(void)
+{
+}
+
+void app_compose_snapshot(Telemetry *out)
+{
+	if (!out) {
+		return;
+	}
+	*out = (Telemetry)Telemetry_init_zero;
+	out->has_voltage = true;
+	out->voltage = 165; /* 3.30 V x50 */
+	out->has_temperature = true;
+	out->temperature = 2345; /* 23.45 °C x100 */
 }
 
 /* Clock (APP_CMD_HAVE_CLOCK). */

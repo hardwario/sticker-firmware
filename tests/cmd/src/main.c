@@ -221,6 +221,42 @@ ZTEST(cmd, test_build_info)
 	zassert_false(r.body.info.has_claim_token, "claim_token must be omitted when unset");
 }
 
+/* sample over NFC: the device answers synchronously with the fresh telemetry
+ * snapshot (Response.sample) so the phone can show the readings. */
+ZTEST(cmd, test_sample_over_nfc)
+{
+	Response r;
+
+	reset_cfg();
+	/* seq5 sample{} (field 21, empty message). */
+	handle_via(APP_CMD_TRANSPORT_NFC, "0805aa0100", &r);
+
+	zassert_equal(r.which_body, Response_sample_tag, "expected Sample, which=%d", r.which_body);
+	zassert_equal(r.seq, 5, "seq");
+	zassert_true(r.body.sample.has_temperature, "snapshot temperature missing");
+	zassert_equal(r.body.sample.temperature, 2345, "temperature %d", r.body.sample.temperature);
+	zassert_true(r.body.sample.has_voltage, "snapshot voltage missing");
+}
+
+/* sample over LoRaWAN: the fPort-2 telemetry uplink is the answer, so no
+ * fPort-85 body is emitted (out_len == 0, like force_send / req_history). */
+ZTEST(cmd, test_sample_over_lrw_emits_no_body)
+{
+	uint8_t in[16], out[128];
+	size_t in_len = unhex("0805aa0100", in, sizeof(in));
+	size_t out_len = 123;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	reset_cfg();
+	int ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len,
+				 &action);
+
+	zassert_equal(ret, 0, "app_cmd_handle ret %d", ret);
+	zassert_equal(out_len, 0, "LoRaWAN sample must emit no fPort-85 body, out_len=%zu",
+		      out_len);
+	zassert_equal(action, APP_CMD_ACTION_NONE, "no deferred action");
+}
+
 /* #170: once commissioned, the Info carries the 16-byte claim_token. */
 ZTEST(cmd, test_build_info_claim_token)
 {
