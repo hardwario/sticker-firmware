@@ -299,9 +299,11 @@ message AlarmReport {
 
 message AlarmEvent {
     // One alarm edge from a dynamic alarm rule. The rule's target is (source,
-    // quantity); the event reports the transition (edge), the threshold bound
-    // (side, threshold rules only) and the current value. The rule config
-    // (from/to, lo/hi, rate N) is NOT on the wire — only the resulting edge.
+    // quantity); the event reports what fired (type) and the transition (edge),
+    // plus the current value. The rule config (from/to, lo/hi, rate N) is NOT on
+    // the wire — only the resulting edge. type and edge are orthogonal: type says
+    // WHAT fired, edge says rising/falling, so a recovery still names the
+    // condition that cleared (e.g. type=HIGH, edge=DEACTIVATE).
 
     // Transition direction. ACTIVATE = 0 so the common case omits the field.
     enum Edge {
@@ -309,21 +311,26 @@ message AlarmEvent {
         DEACTIVATE = 1;
     }
 
-    // Which threshold bound was crossed; SIDE_NONE for state/count rules.
-    enum Side {
-        SIDE_NONE = 0;
-        SIDE_LO   = 1;
-        SIDE_HI   = 2;
+    // What kind of condition fired (#212). Threshold rules report LOW/HIGH (which
+    // bound); state/count/PIR/accel rules report TRIGGER; the no-data watchdog
+    // reports NO_DATA. NONE is unused on the wire (default guard).
+    enum Type {
+        TYPE_NONE    = 0;
+        TYPE_LOW     = 1;
+        TYPE_HIGH    = 2;
+        TYPE_TRIGGER = 3;
+        TYPE_NO_DATA = 4;
     }
+
+    reserved 3, 8;               // was: side (3), no_data (8) — folded into type (#212)
 
     uint32 source   = 1;         // enum app_alarm_source: onboard/s1..s4/hall-l/r/input-a/b/pir/accel
     Edge   edge     = 2;         // activate / deactivate
-    Side   side     = 3;         // hi / lo / none
     uint32 rel_s    = 4;         // seconds since AlarmReport.base_time
     optional sint32 value = 5;   // current value: analog ×100 (temp/hum) or ×10 (pressure), digital 0/1, or counter
     uint32 quantity = 6;         // enum app_alarm_quantity: temperature/humidity/.../state/count
     uint32 slot     = 7;         // alarm rule slot index that fired (stable identity), or 0xFF for a no_data watchdog event
-    optional bool no_data = 8;   // true = sensor stopped reporting (NaN >= 5 s); edge act/deact, side none, value absent
+    Type   type     = 9;         // low / high / trigger / no_data
 }
 
 // Periodic / event-triggered telemetry uplink, sent on fPort 2 (legacy bitmap

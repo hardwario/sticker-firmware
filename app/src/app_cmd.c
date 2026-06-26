@@ -872,12 +872,10 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total,
 		ev->source = events[i].source;
 		ev->quantity = events[i].quantity;
 		ev->edge = (AlarmEvent_Edge)events[i].edge;
-		ev->side = (AlarmEvent_Side)events[i].side;
+		ev->type = (AlarmEvent_Type)events[i].type;
 		ev->rel_s = events[i].rel_s;
 		ev->has_value = events[i].has_value;
 		ev->value = events[i].value;
-		ev->has_no_data = events[i].no_data;
-		ev->no_data = events[i].no_data;
 	}
 	report.events_count = (pb_size_t)n;
 
