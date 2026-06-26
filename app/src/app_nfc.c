@@ -254,6 +254,16 @@ static uint8_t m_unknown_count;
  * info instead of a stale response. */
 static bool m_info_restore_pending;
 
+/* #164 (fast restore): set once the RF field has been seen present since the
+ * response was written — i.e. the phone has come to read the reply. Gates the
+ * fast info restore in nfc_check_locked: the info record is restored on the
+ * first field-off poll AFTER the phone has been in the field and left, so a
+ * follow-up operation that reseeds from the info record finds it immediately
+ * (instead of the stale response) — without the #144 race of clobbering the
+ * reply before the phone reads it. The ~10 s quiet backstop still covers the
+ * case where no field-on edge was ever observed. */
+static bool m_resp_field_seen;
+
 /* Take (and clear) the deferred action from the last processed NFC command, so
  * the poll thread can run reboot/save AFTER the response was written/read. */
 enum app_cmd_action app_nfc_take_cmd_action(void)
@@ -622,6 +632,12 @@ static bool nfc_wait_field_off(void)
 		if (!waited_for_field) {
 			NFC_DBG("field: FIELD_ON set (EH=0x%02x) -> waiting for RF off", eh);
 			waited_for_field = true;
+		}
+		/* #164: the phone is in the field. If a written response is awaiting
+		 * restore, note that the phone has read (or is reading) it, so the next
+		 * field-off poll can restore the info record right away. */
+		if (m_info_restore_pending) {
+			m_resp_field_seen = true;
 		}
 		k_msleep(NFC_FIELD_POLL_MS);
 	}
@@ -1237,9 +1253,11 @@ static int nfc_write_response(void)
 	NFC_DBG("resp: wrote %zu B record to tag", out_len);
 	NFC_REPORT("NFC wrote: response record (%zu B NDEF, %zu B payload)", out_len, m_resp_len);
 	m_resp_write_pending = false;
-	/* #164: a response record now sits on the tag -> arm the info-restore so the
-	 * poll rewrites the info record once the field goes quiet. */
+	/* #164: a response record now sits on the tag -> arm the info-restore. Clear
+	 * the field-seen latch: the phone has not yet come to read THIS reply, so the
+	 * fast restore waits for a field-on-then-off edge before clobbering it. */
 	m_info_restore_pending = true;
+	m_resp_field_seen = false;
 	return 0;
 }
 
@@ -1331,9 +1349,31 @@ static int nfc_check_locked(enum app_nfc_action *action)
 		return nfc_write_response();
 	}
 
-	/* Our response is already on the tag (awaiting the phone read): leave it. */
+	/* Our response is already on the tag. #164 fast restore: if the phone has
+	 * been in the field since we wrote the reply (m_resp_field_seen) and the
+	 * field is now off (this poll just read the EEPROM, so it is), the phone has
+	 * read it -> restore the info record now, so a follow-up operation reseeding
+	 * from the info record finds fresh metadata immediately. Otherwise this is
+	 * still the post-write window (phone hasn't read yet) -> leave the reply and
+	 * keep the restore pending (the ~10 s quiet backstop covers "phone left
+	 * without us seeing the field"). */
 	if (m_seen_resp) {
 		m_unknown_count = 0;
+		if (m_resp_field_seen) {
+			m_info_restore_pending = false;
+			m_resp_field_seen = false;
+			LOG_INF("Restoring info record after the phone read the reply (#164)...");
+			NFC_REPORT("NFC wrote: info record (%zu B) - restored after reply read",
+				   info_len);
+			if (info_len) {
+				ret = write_mem(0, info, info_len);
+				if (ret) {
+					LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+					res = ret;
+				}
+			}
+			return res;
+		}
 		m_info_restore_pending = true; /* #164: still need to restore info later */
 		return res;
 	}
