@@ -60,6 +60,8 @@ enum app_alarm_source {
 	APP_ALARM_SRC_INPUT_B = 8,
 	APP_ALARM_SRC_PIR = 9,
 	APP_ALARM_SRC_ACCEL = 10,
+	APP_ALARM_SRC_BATTERY =
+		11, /* system supply rail — low-battery watchdog (#210), not a rule slot */
 	APP_ALARM_SRC_COUNT
 };
 
@@ -72,9 +74,10 @@ enum app_alarm_quantity {
 	APP_ALARM_Q_PRESSURE = 2,
 	APP_ALARM_Q_ILLUMINANCE = 3,
 	APP_ALARM_Q_MAGNETIC_FIELD = 4,
-	APP_ALARM_Q_TILT = 5,  /* digital (STATE) */
-	APP_ALARM_Q_STATE = 6, /* digital line of a discrete input (STATE) */
-	APP_ALARM_Q_COUNT = 7, /* counter rate (COUNT) */
+	APP_ALARM_Q_TILT = 5,    /* digital (STATE) */
+	APP_ALARM_Q_STATE = 6,   /* digital line of a discrete input (STATE) */
+	APP_ALARM_Q_COUNT = 7,   /* counter rate (COUNT) */
+	APP_ALARM_Q_VOLTAGE = 8, /* supply voltage in V (THRESHOLD) — battery watchdog (#210) */
 	APP_ALARM_Q_QUANTITY_COUNT
 };
 

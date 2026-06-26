@@ -49,6 +49,7 @@ static const char *const m_source_names[APP_ALARM_SRC_COUNT] = {
 	[APP_ALARM_SRC_INPUT_B] = "input-b",
 	[APP_ALARM_SRC_PIR] = "pir",
 	[APP_ALARM_SRC_ACCEL] = "accel",
+	[APP_ALARM_SRC_BATTERY] = "battery",
 };
 
 static const char *const m_quantity_names[APP_ALARM_Q_QUANTITY_COUNT] = {
@@ -60,6 +61,7 @@ static const char *const m_quantity_names[APP_ALARM_Q_QUANTITY_COUNT] = {
 	[APP_ALARM_Q_TILT] = "tilt",
 	[APP_ALARM_Q_STATE] = "state",
 	[APP_ALARM_Q_COUNT] = "count",
+	[APP_ALARM_Q_VOLTAGE] = "voltage",
 };
 
 const char *app_alarm_source_name(enum app_alarm_source source)

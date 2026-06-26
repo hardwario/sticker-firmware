@@ -41,6 +41,20 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 #define APP_ALARM_NO_DATA_MS   5000
 #define APP_ALARM_NO_DATA_SLOT 0xFF
 
+/* Low-battery watchdog (#210): raise a fPort-3 alarm (source=battery,
+ * quantity=voltage, type=low) when the supply drops below APP_ALARM_BATTERY_LOW_V
+ * and clear it once it recovers past the hysteresis band. Bench-measured min
+ * operating voltage is ~1.3 V (the node wedges silently below that and only a
+ * power-cycle recovers it), so 2.2 V warns the backend with margin to spare.
+ * Independent of the 16 rule slots — its event carries slot = 0xFE. */
+#define APP_ALARM_BATTERY_LOW_V  2.2f
+#define APP_ALARM_BATTERY_HYST_V 0.1f /* recover above LOW_V + HYST to avoid chatter */
+#define APP_ALARM_BATTERY_SLOT   0xFE
+
+/* fPort-3 wire scaling per quantity; defined later, forward-declared for the
+ * battery watchdog's alarm_collect_battery(). */
+static int32_t alarm_scale(enum app_alarm_quantity q, float v);
+
 /* Wire enum values (AlarmEvent.Type / .Edge). type says WHAT fired (#212). */
 #define ALARM_TYPE_NONE    0
 #define ALARM_TYPE_LOW     1
@@ -282,6 +296,24 @@ static void alarm_collect_nodata(uint8_t source, uint8_t quantity, bool active)
 	alarm_queue(ev);
 }
 
+/* Low-battery watchdog event (#210): supply dropped below / recovered above the
+ * threshold. type=low always (a falling supply); the deactivate edge marks the
+ * recovery. Carries the current voltage (V×100) and slot = 0xFE. */
+static void alarm_collect_battery(bool active, float voltage)
+{
+	struct app_cmd_alarm_event ev = {
+		.slot = APP_ALARM_BATTERY_SLOT,
+		.source = APP_ALARM_SRC_BATTERY,
+		.quantity = APP_ALARM_Q_VOLTAGE,
+		.edge = active ? ALARM_EDGE_ACT : ALARM_EDGE_DEACT,
+		.type = ALARM_TYPE_LOW,
+		.has_value = true,
+		.value = alarm_scale(APP_ALARM_Q_VOLTAGE, voltage),
+		.rel_s = 0,
+	};
+	alarm_queue(ev);
+}
+
 /* ---- value access (source, quantity) ------------------------------------ */
 
 /* Wire scaling per quantity for the fPort-3 detail value. */
@@ -295,6 +327,8 @@ static int32_t alarm_scale(enum app_alarm_quantity q, float v)
 		return (int32_t)lroundf(v * 10.0f); /* v already in hPa -> hPa×10 wire */
 	case APP_ALARM_Q_MAGNETIC_FIELD:
 		return (int32_t)lroundf(v * 1000.0f); /* mT -> µT */
+	case APP_ALARM_Q_VOLTAGE:
+		return (int32_t)lroundf(v * 100.0f); /* V -> V×100 */
 	case APP_ALARM_Q_ILLUMINANCE:
 	default:
 		return (int32_t)lroundf(v);
@@ -580,6 +614,8 @@ static const struct {
 static int64_t m_nodata_nan_since[NODATA_COUNT]; /* 0 = has data now */
 static bool m_nodata_active[NODATA_COUNT];       /* no_data alarm latched */
 
+static bool m_battery_low_active; /* low-battery watchdog latched (#210) */
+
 /* Is this monitored sensor expected to report under the current config? */
 static bool nodata_enabled(uint8_t source, uint8_t quantity)
 {
@@ -641,6 +677,34 @@ static void nodata_poll(int64_t now, bool *should_send)
 	}
 }
 
+/* Low-battery watchdog (#210): independent of the rule slots and the no-data
+ * watchdog. Reads the supply voltage from g_app_sensor_data (caller holds
+ * g_app_sensor_data_lock) and fires/clears a low-battery alarm with hysteresis.
+ * Deliberately does NOT drive the red LED (unlike the no-data watchdog) — a
+ * blinking LED on an already-weak battery only hastens the wedge. */
+static void battery_poll(bool *should_send)
+{
+	float v = g_app_sensor_data.voltage;
+
+	/* Skip until a plausible measurement exists (0/NaN before the first
+	 * app_battery_measure, which would otherwise read as a false low). */
+	if (!(v > 0.5f)) {
+		return;
+	}
+
+	if (!m_battery_low_active) {
+		if (v < APP_ALARM_BATTERY_LOW_V) {
+			m_battery_low_active = true;
+			alarm_collect_battery(true, v);
+			*should_send = true;
+		}
+	} else if (v > APP_ALARM_BATTERY_LOW_V + APP_ALARM_BATTERY_HYST_V) {
+		m_battery_low_active = false;
+		alarm_collect_battery(false, v);
+		*should_send = true;
+	}
+}
+
 bool app_alarm_poll(void)
 {
 	bool should_send = false;
@@ -692,6 +756,10 @@ bool app_alarm_poll(void)
 	 * the rule slots above). Same lock — it reads g_app_sensor_data too, so it
 	 * must run before the sensor-data lock is dropped (#205). */
 	nodata_poll(now, &should_send);
+
+	/* Low-battery watchdog (#210). Reads g_app_sensor_data.voltage, so it must
+	 * also run before the sensor-data lock is dropped. */
+	battery_poll(&should_send);
 
 	/* A latched no-data watchdog event also counts as "active", so the main
 	 * loop lights the red LED (blinks every BLINK_INTERVAL_SECONDS) until the
