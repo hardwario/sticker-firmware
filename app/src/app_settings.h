@@ -29,6 +29,12 @@ int app_settings_reset(void);
  * any LoRaWAN or NFC path. */
 int app_settings_erase(void);
 
+/* Persist only the NFC anti-replay nonce counter to NVS as a single settings
+ * key (not the whole config blob). Called from the NFC decrypt path on every
+ * accepted command so a captured command can't be replayed after a power-cycle.
+ * Returns 0 or a negative errno. */
+int app_settings_save_nonce_counter(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -32,7 +32,7 @@
 #endif
 
 /* PSA Crypto includes */
-#include <psa/crypto.h>
+#include <mbedtls/ccm.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -737,11 +737,37 @@ static size_t build_info_ndef(uint8_t *out, size_t out_size)
 #define NFC_NONCE_DIR_REQUEST  0x00
 #define NFC_NONCE_DIR_RESPONSE 0x01
 
+#define NFC_CCM_TAG_LEN 16
+
+/* Initialise an AES-CCM context with the device secret key. The caller frees it
+ * with mbedtls_ccm_free(). Returns 0 or a negative errno. Shared by
+ * decrypt()/encrypt() so the key setup lives in one place.
+ *
+ * We use mbedtls_ccm directly rather than the PSA crypto API: the PSA dispatch
+ * layer + key-slot management costs ~2.5 KB of flash the release image can't
+ * spare, and CCM produces identical wire bytes either way (PSA's CCM backend is
+ * this same mbedtls_ccm), so the phone-side contract and the nfc_crypto golden
+ * vectors are unchanged. */
+static int ccm_setkey(mbedtls_ccm_context *ctx)
+{
+	mbedtls_ccm_init(ctx);
+
+	int ret = mbedtls_ccm_setkey(ctx, MBEDTLS_CIPHER_ID_AES, g_app_config.secret_key,
+				     8 * sizeof(g_app_config.secret_key));
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("mbedtls_ccm_setkey", ret);
+		mbedtls_ccm_free(ctx);
+		return -EIO;
+	}
+
+	return 0;
+}
+
 static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size, size_t *out_len)
 {
 	int res = 0;
 
-	if (in_len < 8) {
+	if (in_len < 8 + NFC_CCM_TAG_LEN) {
 		LOG_ERR("Buffer too short for decryption: %zu byte(s)", in_len);
 		return -EINVAL;
 	}
@@ -772,48 +798,32 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 		return -EACCES;
 	}
 
-	psa_status_t status;
-	psa_status_t destroy_status;
-
-	status = psa_crypto_init();
-	if (status != PSA_SUCCESS) {
-		LOG_ERR_CALL_FAILED_INT("psa_crypto_init", status);
-		return -EIO;
+	/* Wire after the 8 B header is [ciphertext || 16 B tag]. */
+	size_t pt_len = in_len - 8 - NFC_CCM_TAG_LEN;
+	if (out_size < pt_len) {
+		LOG_ERR("Output buffer too short: need %zu, have %zu", pt_len, out_size);
+		return -ENOMEM;
 	}
 
-	psa_key_attributes_t key_attributes = PSA_KEY_ATTRIBUTES_INIT;
-	psa_set_key_usage_flags(&key_attributes, PSA_KEY_USAGE_DECRYPT);
-	psa_set_key_algorithm(&key_attributes, PSA_ALG_CCM);
-	psa_set_key_type(&key_attributes, PSA_KEY_TYPE_AES);
-	psa_set_key_bits(&key_attributes, PSA_BYTES_TO_BITS(sizeof(g_app_config.secret_key)));
-
-	psa_key_id_t key_id;
-	status = psa_import_key(&key_attributes, g_app_config.secret_key,
-				sizeof(g_app_config.secret_key), &key_id);
-	if (status != PSA_SUCCESS) {
-		LOG_ERR_CALL_FAILED_INT("psa_import_key", status);
-		return -EIO;
+	mbedtls_ccm_context ctx;
+	res = ccm_setkey(&ctx);
+	if (res) {
+		return res;
 	}
-
-	psa_reset_key_attributes(&key_attributes);
 
 	uint8_t nonce[NFC_NONCE_LEN];
 	memcpy(nonce, in, 8);
 	nonce[8] = NFC_NONCE_DIR_REQUEST;
 
-	status = psa_aead_decrypt(key_id, PSA_ALG_CCM, nonce, sizeof(nonce), /* AAD */ in, 8,
-				  &in[8], in_len - 8, out, out_size, out_len);
+	int ret = mbedtls_ccm_auth_decrypt(&ctx, pt_len, nonce, sizeof(nonce), /* AAD */ in, 8,
+					   &in[8], out, &in[8 + pt_len], NFC_CCM_TAG_LEN);
+	mbedtls_ccm_free(&ctx);
 
-	destroy_status = psa_destroy_key(key_id);
-
-	if (status != PSA_SUCCESS) {
-		LOG_ERR_CALL_FAILED_INT("psa_aead_decrypt", status);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("mbedtls_ccm_auth_decrypt", ret);
 		res = -EIO;
-	}
-
-	if (destroy_status != PSA_SUCCESS) {
-		LOG_ERR_CALL_FAILED_INT("psa_destroy_key", destroy_status);
-		res = -EIO;
+	} else {
+		*out_len = pt_len;
 	}
 
 	if (!res) {
@@ -824,9 +834,9 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 		 * reject so we never accept a counter we couldn't make durable. */
 		uint32_t prev = app_config()->nonce_counter;
 		app_config()->nonce_counter = nonce_counter;
-		int sret = app_config_save_nonce_counter();
+		int sret = app_settings_save_nonce_counter();
 		if (sret) {
-			LOG_ERR_CALL_FAILED_INT("app_config_save_nonce_counter", sret);
+			LOG_ERR_CALL_FAILED_INT("app_settings_save_nonce_counter", sret);
 			app_config()->nonce_counter = prev;
 			res = sret;
 		}
@@ -856,53 +866,28 @@ static int encrypt(const uint8_t *in, size_t in_len, uint32_t nonce_counter, uin
 	sys_put_be32(g_app_config.serial_number, &out[0]);
 	sys_put_be32(nonce_counter, &out[4]);
 
-	psa_status_t status;
-	psa_status_t destroy_status;
-
-	status = psa_crypto_init();
-	if (status != PSA_SUCCESS) {
-		LOG_ERR_CALL_FAILED_INT("psa_crypto_init", status);
-		return -EIO;
+	mbedtls_ccm_context ctx;
+	res = ccm_setkey(&ctx);
+	if (res) {
+		return res;
 	}
-
-	psa_key_attributes_t key_attributes = PSA_KEY_ATTRIBUTES_INIT;
-	psa_set_key_usage_flags(&key_attributes, PSA_KEY_USAGE_ENCRYPT);
-	psa_set_key_algorithm(&key_attributes, PSA_ALG_CCM);
-	psa_set_key_type(&key_attributes, PSA_KEY_TYPE_AES);
-	psa_set_key_bits(&key_attributes, PSA_BYTES_TO_BITS(sizeof(g_app_config.secret_key)));
-
-	psa_key_id_t key_id;
-	status = psa_import_key(&key_attributes, g_app_config.secret_key,
-				sizeof(g_app_config.secret_key), &key_id);
-	if (status != PSA_SUCCESS) {
-		LOG_ERR_CALL_FAILED_INT("psa_import_key", status);
-		return -EIO;
-	}
-
-	psa_reset_key_attributes(&key_attributes);
 
 	uint8_t nonce[NFC_NONCE_LEN];
 	memcpy(nonce, out, 8);
 	nonce[8] = NFC_NONCE_DIR_RESPONSE;
 
-	size_t ct_len = 0;
-	status = psa_aead_encrypt(key_id, PSA_ALG_CCM, nonce, sizeof(nonce), /* AAD */ out, 8, in,
-				  in_len, &out[8], out_size - 8, &ct_len);
+	/* Ciphertext (== plaintext length) into &out[8], the 16 B tag right after it. */
+	int ret = mbedtls_ccm_encrypt_and_tag(&ctx, in_len, nonce, sizeof(nonce), /* AAD */ out, 8,
+					      in, &out[8], &out[8 + in_len], NFC_CCM_TAG_LEN);
+	mbedtls_ccm_free(&ctx);
 
-	destroy_status = psa_destroy_key(key_id);
-
-	if (status != PSA_SUCCESS) {
-		LOG_ERR_CALL_FAILED_INT("psa_aead_encrypt", status);
-		res = -EIO;
-	}
-
-	if (destroy_status != PSA_SUCCESS) {
-		LOG_ERR_CALL_FAILED_INT("psa_destroy_key", destroy_status);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("mbedtls_ccm_encrypt_and_tag", ret);
 		res = -EIO;
 	}
 
 	if (!res) {
-		*out_len = 8 + ct_len;
+		*out_len = 8 + in_len + NFC_CCM_TAG_LEN;
 	}
 
 	return res;
