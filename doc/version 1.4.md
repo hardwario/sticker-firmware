@@ -94,6 +94,7 @@ Key differences from the v1.3.x bitmap:
 - **Capability-gated, whole-group** — a sensor's group is sent in full **every report** whenever its capability is enabled, even when the values are `0`/`false` (e.g. a hall counter at 0, all states inactive). The **system group** (voltage, `boot`) is **always** present, so `boot=false` is reported explicitly rather than by omission. Digital fields carry their real value (0 is valid).
 - **Absent readings → `null` sentinel (changed)** — an **enabled analog sensor is now always present on the wire** so the configured-sensor list stays stable across reports; a missing or faulty reading (NaN) is sent as a **sentinel** value the decoder maps to **`null`** instead of dropping the field. This lets the backend tell *"configured but no data right now"* from *"not configured"*. (Previously an absent analog scalar was simply omitted.) The onboard temperature/humidity **and the 1-Wire sensors** follow this rule — a disconnected or faulted DS18B20 / machine-probe reports `temperature: null` rather than dropping its slot from the report.
 - **No-data watchdog** — a configured sensor that stops producing samples (reads NaN for ≥ 5 s) raises a no-data alarm (fPort 3) **and** the device blinks the **red LED** every `BLINK_INTERVAL_SECONDS` (3 s) while any sensor is in the no-data state, until it recovers — so a silently dead sensor is surfaced instead of reporting `null` forever.
+- **Low-battery watchdog (#210)** — when the supply drops below **2.2 V** the device raises a low-battery alarm on fPort 3 (`source: battery`, `quantity: voltage`, `type: low`), clearing once it recovers above 2.3 V (0.1 V hysteresis). Unlike the no-data watchdog it does **not** blink the red LED (that would only drain an already-weak cell). See §3 for the wire detail and the bench measurement behind the threshold.
 - **Multi-frame split** — if a report is larger than the current data rate allows, it is split across several fPort-2 frames sent a few seconds apart. Each frame carries whole sensor groups from the **same snapshot**, so the network server can merge them; nothing is lost. The 1-Wire list (below) splits **per reading** — a single frame may carry only some of the slots, the rest follow in the next frame.
 
 The decoded field set (voltage, temperature, humidity, pressure/altitude, illuminance, orientation, motion_count, 1-Wire sensors, hall/input counters and states, `boot`) matches the familiar v1.3.x fields — see the payload formatter output (§8). Decode with the updated `ttn.js`.
@@ -163,10 +164,11 @@ Each event is described by **two orthogonal enums** (`type` + `edge`) plus its `
 - `total` — total alarms that occurred in the window. `truncated` is `true` when `total` exceeds the events actually carried (some were dropped to fit the data rate).
 - `alarms[]` — each with:
   - `slot` — the alarm rule slot index that fired (`0` when omitted on the wire); lets a host map the edge back to the exact rule, including which level of a multi-level alarm
-  - `source` — `temperature` / `humidity` / `pressure` / `t1-temperature` / `t2-temperature` / `hall-left` / `hall-right` / `pir` / `input-a` / `input-b` / `accel-motion`
+  - `source` — `onboard` / `s1`–`s4` (1-Wire slots) / `hall-left` / `hall-right` / `input-a` / `input-b` / `pir` / `accel` / `battery`
+  - `quantity` — `temperature` / `humidity` / `pressure` / `illuminance` / `magnetic-field` / `tilt` / `state` / `count` / `voltage`
   - `event` — `activate` / `deactivate`
-  - `type` — **what** fired: `high` / `low` for threshold rules (which bound was crossed), `trigger` for discrete rules (state/count/PIR/accel), `no_data` for the no-data watchdog. The **deactivate** edge keeps the `type` that was raised on activation (e.g. a temperature that fell back inside the band reports `type:"high", event:"deactivate"`).
-  - `value` — the current reading at the edge (temperature/humidity in °C/%RH, pressure in hPa); `null` for discrete sources. *(Threshold and hysteresis are not carried — they are the device's own configuration.)*
+  - `type` — **what** fired: `high` / `low` for threshold rules (which bound was crossed; the low-battery watchdog also reports `low`), `trigger` for discrete rules (state/count/PIR/accel), `no_data` for the no-data watchdog. The **deactivate** edge keeps the `type` that was raised on activation (e.g. a temperature that fell back inside the band reports `type:"high", event:"deactivate"`).
+  - `value` — the current reading at the edge (temperature/humidity in °C/%RH, pressure in hPa, voltage in V); `null` for discrete sources. *(Threshold and hysteresis are not carried — they are the device's own configuration.)*
   - `time` — `base_time + rel_s` (per-event Unix time)
 
 ### When the messages are sent (fPort 2 vs fPort 3)
@@ -202,6 +204,18 @@ t ≈ 20 s   window flushes   → fPort 3 AlarmReport {
 ```
 
 > Hall/input/PIR edges are only raised (and only collected) when their `*-notify-act` / `*-notify-deact` configuration is enabled and the sensor's `cap-*` capability is on. With `alarm-limit = 0` there is no window: each edge is sent immediately as its own one-event fPort-3 frame and the fPort-2 telemetry is not rate-limited.
+
+### Low-battery alarm (#210)
+
+A built-in watchdog (independent of the configurable rule slots, like the no-data watchdog) raises a low-battery alarm on fPort 3 when the supply voltage drops below **2.2 V**:
+
+```json
+{ "slot":254, "source":"battery", "quantity":"voltage", "type":"low", "event":"activate", "value":2.15 }
+```
+
+It clears (`event:"deactivate"`) once the supply recovers above **2.3 V** (0.1 V hysteresis prevents chatter). The event carries the measured voltage in `value` and uses the reserved slot `254` (0xFE; the no-data watchdog uses `255`). It deliberately does **not** blink the red LED — that would only hasten the discharge of an already-weak cell. The 2.2 V threshold is a fixed compile-time constant.
+
+**Why 2.2 V — bench measurement.** A PPK2 supply sweep (SWD physically detached, liveness judged only from over-the-air uplinks) found the STICKER keeps transmitting normally down to **~1.30–1.35 V** — far below the STM32WLE5 datasheet minimum and well below the firmware's "empty = 2.4 V" battery curve; the earlier hypothesis that the LoRa RF/TCXO dies near 3.4 V is not borne out. The real hazard is the **failure mode**: below ~1.3 V the node goes silent without a clean reset, and **raising the supply back up does not recover it** — only a full power-cycle does. So a cell that briefly sags can leave the node permanently dark in the field. The 2.2 V alarm warns the backend with comfortable margin above that wedge point. *(A connected J-Link back-powers the MCU through the SWD pins and masks the brownout entirely — undervoltage tests must run with SWD detached.)*
 
 ---
 
@@ -294,8 +308,8 @@ Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields
 
 > **Note on "slot":** the alarm rule *slot* (`0…15`) is distinct from the 1-Wire sensor *slot* (`s1…s4`); the shell calls the alarm one the rule **index**.
 
-**Sources** (`source`): `0` onboard · `1–4` s1–s4 (1-Wire) · `5` hall-left · `6` hall-right · `7` input-a · `8` input-b · `9` pir · `10` accel.
-**Quantities** (`quantity`): `0` temperature · `1` humidity · `2` pressure · `3` illuminance · `4` magnetic-field · `5` tilt · `6` state · `7` count.
+**Sources** (`source`): `0` onboard · `1–4` s1–s4 (1-Wire) · `5` hall-left · `6` hall-right · `7` input-a · `8` input-b · `9` pir · `10` accel · `11` battery *(watchdog only, see §3 — not a configurable rule source)*.
+**Quantities** (`quantity`): `0` temperature · `1` humidity · `2` pressure · `3` illuminance · `4` magnetic-field · `5` tilt · `6` state · `7` count · `8` voltage *(battery watchdog only)*.
 **Kind** (follows the quantity):
 - **threshold** (analog) — `lo`/`hi`/`hst` band with hysteresis; alarm when the value leaves `[lo, hi]`.
 - **state** (digital: tilt + discrete inputs) — `from_state`/`to_state`. **`from != to` = edge** (fires once on that transition: `0→1` rising, `1→0` falling); **`from == to` = level** (active while the line equals `to`: `1→1` active-high, `0→0` active-low). PIR and accel are *momentary* sources (they only pulse), so any state rule there fires a **per-pulse one-shot** that re-arms after `alarm-notif-time` (edge and level behave alike).
