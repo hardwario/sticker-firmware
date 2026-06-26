@@ -50,7 +50,7 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
  * it), so the default 2.4 V warns the backend with margin to spare. Like the
  * no-data watchdog it is independent of the 16 rule slots (slot = 0xFE) and it
  * does drive the red LED (it is an alarm). */
-#define APP_ALARM_BATTERY_HYST_V 0.1f /* recover above threshold + HYST to avoid chatter */
+#define APP_ALARM_BATTERY_HYST_V 0.3f /* fixed: recover above threshold + 0.3 V (anti-chatter) */
 #define APP_ALARM_BATTERY_SLOT   0xFE
 
 /* fPort-3 wire scaling per quantity; defined later, forward-declared for the
