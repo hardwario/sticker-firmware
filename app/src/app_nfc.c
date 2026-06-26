@@ -186,6 +186,11 @@ static const char *cmd_action_str(enum app_cmd_action a)
  * replaces it with a response record (0x01 version + protobuf Response). */
 #define NDEF_COMMAND_TYPE  "hio.stck:cmd"
 #define NDEF_RESPONSE_TYPE "hio.stck:rsp"
+/* The phone writes this over the response record once it has read and accepted
+ * the reply (#164): an explicit "consumed" ack, so the firmware restores the
+ * info record deterministically instead of guessing from RF-field timing (which
+ * raced the phone's read and clobbered the reply mid-exchange). */
+#define NDEF_ACK_TYPE      "hio.stck:ack"
 
 /* NFC Forum Type 5 Capability Container (4-byte form) for ST25DV04K:
  *   [0] 0xE1 magic, [1] 0x40 mapping v1.0 + read/write,
@@ -227,6 +232,7 @@ static uint8_t m_resp_buf[512];
 static size_t m_resp_len;
 static bool m_have_resp; /* a command was processed; m_resp_buf holds the reply to write */
 static bool m_seen_resp; /* tag already holds a response record; leave it for the phone */
+static bool m_seen_ack;  /* tag holds the phone's ack: reply consumed, restore info now */
 /* A response is staged in m_resp_buf/m_resp_len but not yet fully written to the
  * tag (the RF field came back before the write landed). While set, the poll
  * re-attempts the write in the next field-off window WITHOUT re-reading or
@@ -246,23 +252,15 @@ static enum app_cmd_action m_cmd_action; /* deferred action from app_cmd_handle 
 static uint8_t m_unknown_count;
 
 /* #164: after a command/response exchange the response record is left on the tag
- * (the immediate info-restore was dropped in #144 because it raced the phone
- * reading the reply). This flag is set whenever a response record is left on the
- * tag, and cleared whenever the info record is (re)written. The poll thread uses
- * it to restore the info record once the RF field has been quiet for a debounce
- * window (~10 s = no GPO events → phone gone), so a later tap always finds valid
- * info instead of a stale response. */
+ * for the phone to read. This flag is set while it sits unread and cleared when
+ * the info record is (re)written. The info record is restored deterministically
+ * when the phone writes its ack (NDEF_ACK_TYPE — it has read the reply); the
+ * poll thread also restores it after a long RF-quiet window (~10 s, no GPO →
+ * phone gone) as a backstop for when no ack arrives, so a later tap always finds
+ * valid info instead of a stale response. The earlier "restore on the field
+ * edge" heuristic was dropped: it raced the phone's read and clobbered the
+ * reply mid-exchange (#144). */
 static bool m_info_restore_pending;
-
-/* #164 (fast restore): set once the RF field has been seen present since the
- * response was written — i.e. the phone has come to read the reply. Gates the
- * fast info restore in nfc_check_locked: the info record is restored on the
- * first field-off poll AFTER the phone has been in the field and left, so a
- * follow-up operation that reseeds from the info record finds it immediately
- * (instead of the stale response) — without the #144 race of clobbering the
- * reply before the phone reads it. The ~10 s quiet backstop still covers the
- * case where no field-on edge was ever observed. */
-static bool m_resp_field_seen;
 
 /* Take (and clear) the deferred action from the last processed NFC command, so
  * the poll thread can run reboot/save AFTER the response was written/read. */
@@ -632,12 +630,6 @@ static bool nfc_wait_field_off(void)
 		if (!waited_for_field) {
 			NFC_DBG("field: FIELD_ON set (EH=0x%02x) -> waiting for RF off", eh);
 			waited_for_field = true;
-		}
-		/* #164: the phone is in the field. If a written response is awaiting
-		 * restore, note that the phone has read (or is reading) it, so the next
-		 * field-off poll can restore the info record right away. */
-		if (m_info_restore_pending) {
-			m_resp_field_seen = true;
 		}
 		k_msleep(NFC_FIELD_POLL_MS);
 	}
@@ -1069,6 +1061,17 @@ static int parser_callback(const struct app_ndef_parser_record_info *record_info
 		return 0;
 	}
 
+	/* Ack record: the phone wrote it over our response to confirm it read the
+	 * reply (#164). nfc_check_locked restores the info record now — deterministic,
+	 * no RF-timing guess, so the restore can never clobber an unread reply. */
+	size_t ack_type_len = strlen(NDEF_ACK_TYPE);
+	if (record_info->type_len == ack_type_len &&
+	    strncmp((const char *)record_info->type, NDEF_ACK_TYPE, ack_type_len) == 0) {
+		m_seen_ack = true;
+		NFC_REPORT("NFC read: phone ack record - reply consumed, restoring info");
+		return 0;
+	}
+
 	size_t expected_type_len = strlen(NDEF_SUPPORTED_TYPE);
 
 	/* Check if type matches */
@@ -1145,16 +1148,7 @@ static void gpo_isr(const struct device *dev, struct gpio_callback *cb, uint32_t
  * channel). Returns 0 if woken by GPO, -EAGAIN on the fallback timeout. */
 int app_nfc_wait_event(int fallback_ms)
 {
-	int ret = k_sem_take(&m_gpo_sem, K_MSEC(fallback_ms));
-	/* #164 (fast restore): a GPO edge while a response awaits restore means the
-	 * RF field changed — the phone has come to read the reply. Latch it here
-	 * (the most reliable signal: every field edge wakes us, GPIO_INT_EDGE_BOTH),
-	 * so the next field-off poll restores the info record straight away instead
-	 * of relying on an EEPROM access happening to observe the brief field-on. */
-	if (ret == 0 && m_info_restore_pending) {
-		m_resp_field_seen = true;
-	}
-	return ret;
+	return k_sem_take(&m_gpo_sem, K_MSEC(fallback_ms));
 }
 
 /* Configure the GPO line (PB12) as an input with an edge interrupt. */
@@ -1262,11 +1256,10 @@ static int nfc_write_response(void)
 	NFC_DBG("resp: wrote %zu B record to tag", out_len);
 	NFC_REPORT("NFC wrote: response record (%zu B NDEF, %zu B payload)", out_len, m_resp_len);
 	m_resp_write_pending = false;
-	/* #164: a response record now sits on the tag -> arm the info-restore. Clear
-	 * the field-seen latch: the phone has not yet come to read THIS reply, so the
-	 * fast restore waits for a field-on-then-off edge before clobbering it. */
+	/* #164: a response record now sits on the tag -> arm the info-restore. It is
+	 * restored when the phone acks the reply (NDEF_ACK_TYPE), or after the quiet
+	 * backstop if no ack arrives. */
 	m_info_restore_pending = true;
-	m_resp_field_seen = false;
 	return 0;
 }
 
@@ -1287,6 +1280,7 @@ static int nfc_check_locked(enum app_nfc_action *action)
 
 	m_have_resp = false;
 	m_seen_resp = false;
+	m_seen_ack = false;
 
 	/* read_mem / write_mem below gate every EEPROM chunk on the RF field being
 	 * off (see nfc_wait_field_off): a 512 B access during RF collides with the
@@ -1358,32 +1352,30 @@ static int nfc_check_locked(enum app_nfc_action *action)
 		return nfc_write_response();
 	}
 
-	/* Our response is already on the tag. #164 fast restore: if the phone has
-	 * been in the field since we wrote the reply (m_resp_field_seen) and the
-	 * field is now off (this poll just read the EEPROM, so it is), the phone has
-	 * read it -> restore the info record now, so a follow-up operation reseeding
-	 * from the info record finds fresh metadata immediately. Otherwise this is
-	 * still the post-write window (phone hasn't read yet) -> leave the reply and
-	 * keep the restore pending (the ~10 s quiet backstop covers "phone left
-	 * without us seeing the field"). */
+	/* The phone wrote its ack over our response: it has read and accepted the
+	 * reply, so restore the info record now (#164). Deterministic — unlike the
+	 * dropped field-timing heuristic, this can never clobber an unread reply. */
+	if (m_seen_ack) {
+		m_unknown_count = 0;
+		m_info_restore_pending = false;
+		LOG_INF("Restoring info record after phone ack (#164)...");
+		NFC_REPORT("NFC wrote: info record (%zu B) - restored after phone ack", info_len);
+		if (info_len) {
+			ret = write_mem(0, info, info_len);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+				res = ret;
+			}
+		}
+		return res;
+	}
+
+	/* Our response is already on the tag (awaiting the phone read): leave it.
+	 * It is restored to the info record on the phone's ack, or by the quiet
+	 * backstop if the phone leaves without acking. */
 	if (m_seen_resp) {
 		m_unknown_count = 0;
-		if (m_resp_field_seen) {
-			m_info_restore_pending = false;
-			m_resp_field_seen = false;
-			LOG_INF("Restoring info record after the phone read the reply (#164)...");
-			NFC_REPORT("NFC wrote: info record (%zu B) - restored after reply read",
-				   info_len);
-			if (info_len) {
-				ret = write_mem(0, info, info_len);
-				if (ret) {
-					LOG_ERR_CALL_FAILED_INT("write_mem", ret);
-					res = ret;
-				}
-			}
-			return res;
-		}
-		m_info_restore_pending = true; /* #164: still need to restore info later */
+		m_info_restore_pending = true;
 		return res;
 	}
 
