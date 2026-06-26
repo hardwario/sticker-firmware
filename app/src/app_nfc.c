@@ -629,21 +629,33 @@ static bool nfc_wait_field_off(void)
 	return false;
 }
 
-/* Build CC + NDEF Message TLV + a single short NFC-Forum-external-type record +
- * terminator into `out`. Returns the byte length, or 0 if it would not fit
- * (short record, so payload <= 255 B). Shared by the info and command-response
- * writers. */
+/* Build CC + NDEF Message TLV + a single NFC-Forum-external-type record +
+ * terminator into `out`. Returns the byte length, or 0 if it would not fit the
+ * tag (out_size). Uses an NDEF short record (1-byte payload length) when the
+ * payload is <= 255 B, else a normal record (4-byte length) so a full config
+ * dump (encrypted ConfigDump can exceed 255 B) still fits the 512 B EEPROM;
+ * the NDEF Message TLV likewise switches to its 3-byte length form when needed.
+ * Shared by the info and command-response writers. */
 static size_t build_ndef_record(uint8_t *out, size_t out_size, const char *type,
 				const uint8_t *payload, size_t payload_len)
 {
 	size_t type_len = strlen(type);
 
-	/* NDEF record: header + type_len + payload_len + type + payload */
-	size_t msg_len = 1 + 1 + 1 + type_len + payload_len;
+	/* Short record encodes the payload length in 1 byte; a normal record in 4. */
+	bool short_record = payload_len <= 0xFF;
+	size_t len_field = short_record ? 1 : 4;
 
-	/* Tag content: CC (4) + NDEF Message TLV (0x03, len) + message + Terminator (0xFE) */
-	size_t total = 4 + 2 + msg_len + 1;
-	if (payload_len > 0xFF || msg_len > 0xFE || total > out_size) {
+	/* NDEF record: flags + type_len + payload_len_field + type + payload */
+	size_t msg_len = 1 + 1 + len_field + type_len + payload_len;
+
+	/* NDEF Message TLV length: single byte below 0xFF, else the 3-byte form
+	 * (0xFF + 2-byte big-endian length, max 0xFFFE). */
+	bool tlv_long = msg_len >= 0xFF;
+	size_t tlv_len_field = tlv_long ? 3 : 1;
+
+	/* Tag content: CC (4) + TLV type (0x03) + TLV length + message + Terminator. */
+	size_t total = 4 + 1 + tlv_len_field + msg_len + 1;
+	if (msg_len > 0xFFFE || total > out_size) {
 		return 0;
 	}
 
@@ -652,11 +664,25 @@ static size_t build_ndef_record(uint8_t *out, size_t out_size, const char *type,
 	out[i++] = ST25DV_CC1;
 	out[i++] = ST25DV_CC2;
 	out[i++] = ST25DV_CC3;
-	out[i++] = 0x03;             /* NDEF Message TLV type */
-	out[i++] = (uint8_t)msg_len; /* TLV length (single-byte form) */
-	out[i++] = 0xD4;             /* MB | ME | SR | TNF=NFC Forum external(0x04) */
+	out[i++] = 0x03; /* NDEF Message TLV type */
+	if (tlv_long) {
+		out[i++] = 0xFF;
+		out[i++] = (uint8_t)(msg_len >> 8);
+		out[i++] = (uint8_t)(msg_len & 0xFF);
+	} else {
+		out[i++] = (uint8_t)msg_len;
+	}
+	/* MB | ME | [SR] | TNF=NFC Forum external (0x04). */
+	out[i++] = short_record ? 0xD4 : 0xC4;
 	out[i++] = (uint8_t)type_len;
-	out[i++] = (uint8_t)payload_len;
+	if (short_record) {
+		out[i++] = (uint8_t)payload_len;
+	} else {
+		out[i++] = (uint8_t)(payload_len >> 24);
+		out[i++] = (uint8_t)(payload_len >> 16);
+		out[i++] = (uint8_t)(payload_len >> 8);
+		out[i++] = (uint8_t)(payload_len & 0xFF);
+	}
 	memcpy(&out[i], type, type_len);
 	i += type_len;
 	memcpy(&out[i], payload, payload_len);
