@@ -126,6 +126,7 @@ message Command {
         EnterCalibration enter_calibration = 18;
         EnterMailbox     enter_mailbox     = 19;
         ExitMailbox      exit_mailbox      = 20;
+        SensorSample     sensor_sample     = 21;
     }
 // END GENERATED COMMANDS
 
@@ -187,6 +188,11 @@ message Command {
     // discovered ROMs so the host can teach a slot via SetParam sensorN_rom.
     message W1Scan { }
 
+    // Sample all sensors now and return the live per-slot 1-Wire readings — the
+    // NFC equivalent of the `ats sensors sample` shell command. The response
+    // (Response.SensorSample) carries one SensorReading per populated slot.
+    message SensorSample { }
+
     // Switch the device into mailbox (ST25DV Fast-Transfer-Mode) serving mode
     // for a bounded window, used for fast config streaming and firmware update.
     // The device acks over the normal NDEF channel, then powers the tag up and
@@ -211,6 +217,7 @@ message Response {
         HistoryFrame   history_frame    = 5;
         Error          error            = 6;
         W1Scan         w1_scan          = 7;
+        SensorSample   sensor_sample    = 8;
     }
 
     message Ack { }
@@ -276,6 +283,13 @@ message Response {
     // chosen ROM to sensorN_rom via SetParam.
     message W1Scan {
         repeated bytes rom = 1;
+    }
+
+    // Answer to a SensorSample command: one SensorReading per populated 1-Wire
+    // slot (the same SensorReading the telemetry uplink uses), so the host shows
+    // live values per discovered/assigned sensor.
+    message SensorSample {
+        repeated SensorReading reading = 1;
     }
 
 }

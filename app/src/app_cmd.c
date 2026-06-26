@@ -36,6 +36,8 @@
 #include "app_w1.h"
 #define APP_CMD_HAVE_W1 1
 #endif
+#include "app_sensor.h"
+#include "app_w1_slots.h"
 
 /* Nanopb includes */
 #include <pb_decode.h>
@@ -621,6 +623,39 @@ static void app_cmd_handle_w1_scan(enum app_cmd_transport tp, const Command *cmd
 #endif
 }
 
+/* Sample all sensors now and return one SensorReading per populated 1-Wire slot
+ * — the NFC twin of the `ats sensors sample` shell command (same app_sensor_sample()
+ * path + per-slot app_w1_slot_encode()). */
+static void app_cmd_handle_sensor_sample(enum app_cmd_transport tp, const Command *cmd,
+					 Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(action);
+
+	app_sensor_sample();
+
+	resp->which_body = Response_sensor_sample_tag;
+	Response_SensorSample *ss = &resp->body.sensor_sample;
+	ss->reading_count = 0;
+
+	for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
+		enum app_w1_slot_type type = app_w1_slot_get_type(i);
+		const struct app_w1_slot_reading *r = &g_app_sensor_data.w1[i];
+		if (type == APP_W1_SLOT_EMPTY || !r->present) {
+			continue;
+		}
+		if (ss->reading_count >= (int)ARRAY_SIZE(ss->reading)) {
+			break;
+		}
+		SensorReading *sr = &ss->reading[ss->reading_count++];
+		*sr = (SensorReading)SensorReading_init_zero;
+		sr->slot = i + 1;
+		sr->type = (uint32_t)type;
+		app_w1_slot_encode(i, r, sr);
+	}
+}
+
 // BEGIN GENERATED DISPATCH
 static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 			     enum app_cmd_action *action)
@@ -696,6 +731,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 	case Command_exit_mailbox_tag:
 		*action = APP_CMD_ACTION_LEAVE_MAILBOX;
 		resp->which_body = Response_ack_tag;
+		break;
+	case Command_sensor_sample_tag:
+		/* transports: [nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_sensor_sample(tp, cmd, resp, action);
 		break;
 	default:
 		LOG_WRN("Command tag %u not implemented", cmd->which_body);

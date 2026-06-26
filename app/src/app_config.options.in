@@ -51,6 +51,9 @@ Command.GetParam.alarms_field      max_count:16
 # the encoded reply must fit the fPort-85 response buffer (64 B).
 Response.W1Scan.rom max_count:4 max_size:8
 
+# SensorSample response: one SensorReading per populated 1-Wire slot.
+Response.SensorSample.reading max_count:4
+
 # Alarm-rules read-back: up to 5 RuleEntry per AlarmRulesDump page (paged like
 # ConfigDump; the handler further caps a page by a per-transport byte budget).
 # 5 is the sweet spot: 5*sizeof(RuleEntry) keeps AlarmRulesDump <= ConfigDump, so
