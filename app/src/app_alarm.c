@@ -41,12 +41,14 @@ LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 #define APP_ALARM_NO_DATA_MS   5000
 #define APP_ALARM_NO_DATA_SLOT 0xFF
 
-/* Wire enum values (AlarmEvent.Side / .Edge). */
-#define ALARM_SIDE_NONE  0
-#define ALARM_SIDE_LO    1
-#define ALARM_SIDE_HI    2
-#define ALARM_EDGE_ACT   0
-#define ALARM_EDGE_DEACT 1
+/* Wire enum values (AlarmEvent.Type / .Edge). type says WHAT fired (#212). */
+#define ALARM_TYPE_NONE    0
+#define ALARM_TYPE_LOW     1
+#define ALARM_TYPE_HIGH    2
+#define ALARM_TYPE_TRIGGER 3
+#define ALARM_TYPE_NO_DATA 4
+#define ALARM_EDGE_ACT     0
+#define ALARM_EDGE_DEACT   1
 
 /* ---- per-rule runtime state, keyed 1:1 on the alarm slot index -----------
  * m_rt[slot] is the runtime latch for the rule in that slot. source/quantity are
@@ -58,8 +60,8 @@ struct rstate {
 	bool used;
 	uint8_t source;
 	uint8_t quantity;
-	bool active;        /* alarm latched */
-	uint8_t side;       /* threshold: which bound latched */
+	bool active;  /* alarm latched */
+	uint8_t type; /* threshold: which bound latched (ALARM_TYPE_LOW/HIGH) for deactivate */
 	uint8_t prev_state; /* STATE: last digital level seen */
 	bool have_prev_state;
 	uint32_t prev_count; /* COUNT: baseline counter at window start */
@@ -247,7 +249,7 @@ static void alarm_queue(struct app_cmd_alarm_event ev)
 	k_mutex_unlock(&m_lock);
 }
 
-static void alarm_collect(uint8_t slot, uint8_t source, uint8_t quantity, bool active, uint8_t side,
+static void alarm_collect(uint8_t slot, uint8_t source, uint8_t quantity, bool active, uint8_t type,
 			  bool has_value, int32_t value)
 {
 	struct app_cmd_alarm_event ev = {
@@ -255,7 +257,7 @@ static void alarm_collect(uint8_t slot, uint8_t source, uint8_t quantity, bool a
 		.source = source,
 		.quantity = quantity,
 		.edge = active ? ALARM_EDGE_ACT : ALARM_EDGE_DEACT,
-		.side = side,
+		.type = type,
 		.has_value = has_value,
 		.value = value,
 		.rel_s = 0,
@@ -272,10 +274,9 @@ static void alarm_collect_nodata(uint8_t source, uint8_t quantity, bool active)
 		.source = source,
 		.quantity = quantity,
 		.edge = active ? ALARM_EDGE_ACT : ALARM_EDGE_DEACT,
-		.side = ALARM_SIDE_NONE,
+		.type = ALARM_TYPE_NO_DATA,
 		.has_value = false,
 		.value = 0,
-		.no_data = true,
 		.rel_s = 0,
 	};
 	alarm_queue(ev);
@@ -396,7 +397,7 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 		if (rt->active) {
 			rt->active = false;
 			*should_send = true;
-			alarm_collect(slot, rule->source, rule->quantity, false, rt->side, false,
+			alarm_collect(slot, rule->source, rule->quantity, false, rt->type, false,
 				      0);
 		}
 		return false;
@@ -415,20 +416,20 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 		if (value > lo + hst && value < hi - hst) {
 			rt->active = false;
 			*should_send = true;
-			alarm_collect(slot, rule->source, rule->quantity, false, rt->side, true,
+			alarm_collect(slot, rule->source, rule->quantity, false, rt->type, true,
 				      alarm_scale(rule->quantity, value));
 		}
 	} else if (value < lo - hst) {
 		rt->active = true;
-		rt->side = ALARM_SIDE_LO;
+		rt->type = ALARM_TYPE_LOW;
 		*should_send = true;
-		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_LO, true,
+		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_LOW, true,
 			      alarm_scale(rule->quantity, value));
 	} else if (value > hi + hst) {
 		rt->active = true;
-		rt->side = ALARM_SIDE_HI;
+		rt->type = ALARM_TYPE_HIGH;
 		*should_send = true;
-		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_HI, true,
+		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_HIGH, true,
 			      alarm_scale(rule->quantity, value));
 	}
 	return rt->active;
@@ -456,7 +457,7 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
 			rt->active = false;
 			rt->oneshot_expiry = 0;
 			*should_send = true;
-			alarm_collect(slot, rule->source, rule->quantity, false, ALARM_SIDE_NONE,
+			alarm_collect(slot, rule->source, rule->quantity, false, ALARM_TYPE_TRIGGER,
 				      true, 0);
 		}
 		rt->have_prev_state = true;
@@ -474,7 +475,7 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
 			rt->active = true;
 			rt->oneshot_expiry = k_uptime_get() + notif_hold_ms();
 			*should_send = true;
-			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_NONE,
+			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_TRIGGER,
 				      true, cur_lvl);
 		}
 		rt->have_prev_state = true;
@@ -489,7 +490,7 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
 			rt->active = true;
 			rt->oneshot_expiry = k_uptime_get() + notif_hold_ms();
 			*should_send = true;
-			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_NONE,
+			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_TRIGGER,
 				      true, cur_lvl);
 		}
 	} else {
@@ -498,12 +499,12 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
 		if (want && !rt->active) {
 			rt->active = true;
 			*should_send = true;
-			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_NONE,
+			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_TRIGGER,
 				      true, cur_lvl);
 		} else if (!want && rt->active) {
 			rt->active = false;
 			*should_send = true;
-			alarm_collect(slot, rule->source, rule->quantity, false, ALARM_SIDE_NONE,
+			alarm_collect(slot, rule->source, rule->quantity, false, ALARM_TYPE_TRIGGER,
 				      true, cur_lvl);
 		}
 	}
@@ -549,7 +550,7 @@ static void eval_count(uint8_t slot, const struct app_alarm_rule *rule, struct r
 		rt->active = true;
 		rt->oneshot_expiry = now + notif_hold_ms();
 		*should_send = true;
-		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_SIDE_NONE, true,
+		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_TRIGGER, true,
 			      (int32_t)cur);
 	}
 	/* Re-baseline for the next window whether or not it fired. */

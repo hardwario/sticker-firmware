@@ -145,15 +145,17 @@ message AlarmReport {
 message AlarmEvent {
     Source source = 1;               // which sensor
     Edge   edge   = 2;               // ACTIVATE / DEACTIVATE
-    Side   side   = 3;               // SIDE_NONE / SIDE_LO / SIDE_HI
     uint32 rel_s  = 4;               // seconds since base_time
     optional sint32 value = 5;       // current reading, scaled; absent for discrete sources
     uint32 quantity = 6;             // which quantity (temperature/humidity/.../state/count)
     uint32 slot     = 7;             // alarm rule slot index that fired (stable identity)
+    Type   type     = 9;             // TYPE_LOW / TYPE_HIGH / TYPE_TRIGGER / TYPE_NO_DATA
 }
 ```
 
-Each event is described by **three orthogonal enums** — an integration that only wants "did `hall-left` activate?" or "did `temperature` cross its high bound?" reads one field instead of unpacking a combined flag.
+> **Changed in #212 (BREAKING):** the former `side` (field 3) and `no_data` (field 8) are replaced by a single **`type`** enum (`none`, `low`, `high`, `trigger`, `no_data`). Fields 3 and 8 are now `reserved`. `type` says *what* fired, `edge` says *rising/falling* — they stay orthogonal, so a recovery still names the condition that cleared (e.g. `type=high, event=deactivate`).
+
+Each event is described by **two orthogonal enums** (`type` + `edge`) plus its `source`/`quantity` — an integration that only wants "did `hall-left` trigger?" or "did `temperature` cross its high bound?" reads one field instead of unpacking a combined flag.
 
 ### Decoded fields (`ttn.js`)
 
@@ -163,7 +165,7 @@ Each event is described by **three orthogonal enums** — an integration that on
   - `slot` — the alarm rule slot index that fired (`0` when omitted on the wire); lets a host map the edge back to the exact rule, including which level of a multi-level alarm
   - `source` — `temperature` / `humidity` / `pressure` / `t1-temperature` / `t2-temperature` / `hall-left` / `hall-right` / `pir` / `input-a` / `input-b` / `accel-motion`
   - `event` — `activate` / `deactivate`
-  - `side` — `hi` / `lo` for threshold sources, `none` for discrete sources (hall/input/PIR). The **deactivate** edge keeps the side that was crossed on activation.
+  - `type` — **what** fired: `high` / `low` for threshold rules (which bound was crossed), `trigger` for discrete rules (state/count/PIR/accel), `no_data` for the no-data watchdog. The **deactivate** edge keeps the `type` that was raised on activation (e.g. a temperature that fell back inside the band reports `type:"high", event:"deactivate"`).
   - `value` — the current reading at the edge (temperature/humidity in °C/%RH, pressure in hPa); `null` for discrete sources. *(Threshold and hysteresis are not carried — they are the device's own configuration.)*
   - `time` — `base_time + rel_s` (per-event Unix time)
 
@@ -183,10 +185,10 @@ The collection window is **shared across all sources**: the first edge opens it,
 ```
 t = 0 s    threshold crossed → fPort 2 telemetry (immediate); 20 s window opens
 t ≈ 20 s   window flushes → fPort 3 AlarmReport
-           { total:1, alarms:[{ source:"temperature", event:"activate", side:"hi", value:26.5, time:base }] }
+           { total:1, alarms:[{ source:"temperature", event:"activate", type:"high", value:26.5, time:base }] }
 ```
 
-When the temperature later falls back below the band, the deactivate edge behaves the same way (immediate fPort-2 if the rate-limit has elapsed, then `event:"deactivate", side:"hi"` in the next window's fPort-3).
+When the temperature later falls back below the band, the deactivate edge behaves the same way (immediate fPort-2 if the rate-limit has elapsed, then `event:"deactivate", type:"high"` in the next window's fPort-3).
 
 **Example — a hall sensor is activated then deactivated within one window:**
 
@@ -195,8 +197,8 @@ t = 0 s    magnet applied   → hall-left activate   → fPort 2 (immediate); wi
 t = 8 s    magnet removed   → hall-left deactivate → batched (fPort-2 suppressed by rate-limit)
 t ≈ 20 s   window flushes   → fPort 3 AlarmReport {
              total:2, alarms:[
-               { source:"hall-left", event:"activate",   side:"none", value:null, time:base+0 },
-               { source:"hall-left", event:"deactivate", side:"none", value:null, time:base+8 } ] }
+               { source:"hall-left", event:"activate",   type:"trigger", value:null, time:base+0 },
+               { source:"hall-left", event:"deactivate", type:"trigger", value:null, time:base+8 } ] }
 ```
 
 > Hall/input/PIR edges are only raised (and only collected) when their `*-notify-act` / `*-notify-deact` configuration is enabled and the sensor's `cap-*` capability is on. With `alarm-limit = 0` there is no window: each edge is sent immediately as its own one-event fPort-3 frame and the fPort-2 telemetry is not rate-limited.

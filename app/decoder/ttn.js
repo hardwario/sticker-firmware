@@ -841,17 +841,19 @@ function decodeDownlink(input) {
 
 // fPort 3: alarm-detail batch, protobuf AlarmReport. Top-level: base_time(1),
 // total(2), repeated AlarmEvent events(3). AlarmEvent (dynamic alarm rule):
-// source(1), edge(2), side(3), rel_s(4) varints + optional sint32 value(5) +
-// quantity(6). source = enum app_alarm_source, quantity = enum app_alarm_quantity;
-// value is scaled per quantity (temp/hum ×100, pressure ×10, magnetic_field µT,
-// digital 0/1, counter) and absent for some edges. Per-event time = base_time +
-// rel_s. `total` may exceed events present (dropped to fit the data rate).
+// source(1), edge(2), rel_s(4) varints + optional sint32 value(5) + quantity(6) +
+// slot(7) + type(9). source = enum app_alarm_source, quantity = enum
+// app_alarm_quantity; type says WHAT fired (low/high/trigger/no_data) and edge
+// the rising/falling transition — orthogonal (#212). value is scaled per quantity
+// (temp/hum ×100, pressure ×10, magnetic_field µT, digital 0/1, counter) and
+// absent for some edges. Per-event time = base_time + rel_s. `total` may exceed
+// events present (dropped to fit the data rate).
 var _ALARM_SOURCES = ["onboard", "s1", "s2", "s3", "s4", "hall-left", "hall-right",
   "input-a", "input-b", "pir", "accel"];
 var _ALARM_QUANTITIES = ["temperature", "humidity", "pressure", "illuminance",
   "magnetic-field", "tilt", "state", "count"];
 var _ALARM_EDGES = ["activate", "deactivate"];
-var _ALARM_SIDES = ["none", "lo", "hi"];
+var _ALARM_TYPES = ["none", "low", "high", "trigger", "no_data"];
 
 function _alarmUnscale(quantity, raw) {
   switch (quantity) {
@@ -863,7 +865,7 @@ function _alarmUnscale(quantity, raw) {
 }
 
 function _decodeAlarmEvent(bytes, start, end) {
-  var ev = { slot: 0, source: 0, quantity: 0, edge: 0, side: 0, rel_s: 0, value: null, no_data: false };
+  var ev = { slot: 0, source: 0, quantity: 0, edge: 0, type: 0, rel_s: 0, value: null };
   var p = start;
   while (p < end) {
     var t = _pbReadVarint(bytes, p); p = t.next;
@@ -872,12 +874,11 @@ function _decodeAlarmEvent(bytes, start, end) {
       var v = _pbReadVarint(bytes, p); p = v.next;
       if (field === 1) ev.source = v.value;
       else if (field === 2) ev.edge = v.value;
-      else if (field === 3) ev.side = v.value;
       else if (field === 4) ev.rel_s = v.value;
       else if (field === 5) ev.value = _pbZigzag(v.value);
       else if (field === 6) ev.quantity = v.value;
       else if (field === 7) ev.slot = v.value;
-      else if (field === 8) ev.no_data = (v.value !== 0);
+      else if (field === 9) ev.type = v.value;
     } else if (wire === 2) {
       var l = _pbReadVarint(bytes, p); p = l.next + l.value;
     } else { break; }
@@ -906,9 +907,8 @@ function decodeAlarmBatch(bytes) {
           source: _ALARM_SOURCES[ev.source] || ("src" + ev.source),
           quantity: _ALARM_QUANTITIES[ev.quantity] || ("q" + ev.quantity),
           event: _ALARM_EDGES[ev.edge] || "activate",
-          side: _ALARM_SIDES[ev.side] || "none",
+          type: _ALARM_TYPES[ev.type] || "none",
           value: ev.value === null ? null : _alarmUnscale(ev.quantity, ev.value),
-          no_data: ev.no_data,
           time: 0,
         });
         rels.push(ev.rel_s);
