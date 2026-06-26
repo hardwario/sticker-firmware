@@ -235,6 +235,7 @@ message Response {
         uint32 unix_time     = 7;   // wall-clock (UTC); 0/absent until RTC synced
         bool   debug         = 8;   // true = debug build, false = release
         optional bytes claim_token = 9;   // 128-bit device claim token (#170); omitted until commissioned
+        uint32 battery       = 10;  // supply voltage in mV (0 = unavailable)
     }
 
     message ConfigDump {

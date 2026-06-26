@@ -22,6 +22,8 @@
 extern struct app_config g_app_config;
 extern bool test_clock_has;
 extern uint32_t test_clock_unix;
+extern float test_battery_v;
+extern int test_battery_ret;
 
 static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 {
@@ -200,6 +202,8 @@ ZTEST(cmd, test_build_info)
 
 	reset_cfg();
 	g_app_config.serial_number = 1234567890;
+	test_battery_v = 3.3f;
+	test_battery_ret = 0;
 
 	int ret = app_cmd_build_info(out, sizeof(out), &out_len);
 	zassert_equal(ret, 0, "build_info ret %d", ret);
@@ -211,6 +215,8 @@ ZTEST(cmd, test_build_info)
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
 	zassert_equal(r.which_body, Response_info_tag, "expected Info");
 	zassert_equal(r.body.info.serial_number, 1234567890, "serial");
+	/* Battery (mV) from the fresh ADC reading; 3.3 V -> 3300 mV. */
+	zassert_equal(r.body.info.battery, 3300, "battery %u", r.body.info.battery);
 	/* #170: uncommissioned device (all-zero claim_token) omits the field. */
 	zassert_false(r.body.info.has_claim_token, "claim_token must be omitted when unset");
 }

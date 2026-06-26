@@ -796,6 +796,11 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "Build type:    %s (%s)", bt, info.debug ? "debug" : "release");
 	shell_print(sh, "Serial number: %u", info.serial_number);
 	shell_print(sh, "Uptime:        %u s", info.uptime_s);
+	if (info.battery_mv) {
+		shell_print(sh, "Battery:       %u mV", info.battery_mv);
+	} else {
+		shell_print(sh, "Battery:       unavailable");
+	}
 
 	if (info.has_unix_time) {
 		time_t t = (time_t)info.unix_time;

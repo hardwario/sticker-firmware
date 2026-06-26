@@ -6,6 +6,7 @@
 
 #include "app_cmd.h"
 #include "app_alarm_rules.h"
+#include "app_battery.h"
 #include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -85,6 +86,11 @@ void app_cmd_get_info(struct app_cmd_info *info)
 		     "claim_token size mismatch");
 	memcpy(info->claim_token, g_app_config.claim_token, sizeof(info->claim_token));
 
+	/* Fresh battery reading (mV). 0 if the ADC is unavailable (e.g. host test);
+	 * the proto omits a 0 so the host treats it as "unknown". */
+	float v;
+	info->battery_mv = (app_battery_measure(&v) == 0) ? (uint32_t)(v * 1000.0f) : 0;
+
 #ifdef APP_CMD_HAVE_CLOCK
 	uint32_t unix_s;
 	if (app_clock_get_unix(&unix_s) == 0) {
@@ -107,6 +113,7 @@ static void fill_info(Response_Info *info)
 	info->serial_number = i.serial_number;
 	info->uptime_s = i.uptime_s;
 	info->debug = i.debug;
+	info->battery = i.battery_mv;
 	if (i.has_unix_time) {
 		info->unix_time = i.unix_time;
 	}

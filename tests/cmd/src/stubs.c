@@ -44,6 +44,19 @@ void app_clock_force_resync(void)
 {
 }
 
+/* Battery (GetInfo battery field). Seedable per test; default reports a value so
+ * the encoded Info carries a non-zero battery. */
+float test_battery_v = 3.3f;
+int test_battery_ret;
+
+int app_battery_measure(float *voltage)
+{
+	if (test_battery_ret == 0 && voltage) {
+		*voltage = test_battery_v;
+	}
+	return test_battery_ret;
+}
+
 /* Counters. */
 void app_hall_reset_count(bool left, bool right)
 {
