@@ -756,6 +756,17 @@ def guard_no_renumber_commands(model, proto_path):
                     f"forbidden (downlinks / NFC tags already deployed)")
 
 
+# Maps the YAML `transports:` tokens to the enum app_cmd_transport constants the
+# generated dispatch guard compares `tp` against. Order here is the canonical
+# "all transports" set; a command whose list is a proper subset gets a guard.
+_TRANSPORT_ENUM = {
+    "lrw": "APP_CMD_TRANSPORT_LRW",
+    "nfc": "APP_CMD_TRANSPORT_NFC",
+    "shell": "APP_CMD_TRANSPORT_SHELL_DEBUG",
+}
+_ALL_TRANSPORTS = set(_TRANSPORT_ENUM)
+
+
 def build_commands_model(config):
     """jinja context for the command codegen (proto Command oneof, decoder
     _CMD_NAMES/_CMD_TAGS, app_cmd_dispatch switch) from the YAML `commands:`
@@ -786,6 +797,18 @@ def build_commands_model(config):
             log.die(f"action command '{name}' must set 'action'")
 
         transports = c.get("transports")
+        # Emit a transport guard for every command whose allow-list is a proper
+        # subset of all transports (#183): the dispatch must reject the command on
+        # any disallowed transport, not just the [lrw]-only case. `None` (omitted)
+        # means all transports → no guard.
+        transport_guard = None
+        if transports is not None:
+            unknown = [t for t in transports if t not in _TRANSPORT_ENUM]
+            if unknown:
+                log.die(f"command '{name}' has unknown transport(s) {unknown} "
+                        f"(expected any of {sorted(_TRANSPORT_ENUM)})")
+            if set(transports) != _ALL_TRANSPORTS:
+                transport_guard = [_TRANSPORT_ENUM[t] for t in transports]
         cmds.append({
             "name": name,
             "proto_id": pid,
@@ -794,6 +817,7 @@ def build_commands_model(config):
             "action": c.get("action"),
             "response": c.get("response", "ack"),
             "transports": transports,
+            "transport_guard": transport_guard,
             "lrw_only": transports == ["lrw"],
             "emits_response": c.get("response", "ack") not in COMMAND_RESPONSE_NONE,
             "tag": f"{msg}_{name}_tag",
@@ -832,11 +856,11 @@ def _dump_field_size(p):
     """Conservative upper bound on the encoded bytes of one config field inside a
     ConfigDump: proto tag + value, matching the on-wire encoding configen emits.
     Tags for proto_id >= 16 take two bytes; integers up to their declared max;
-    bytes are emitted as a hex string (2 chars/byte + a length byte)."""
+    bytes are emitted as native fixed_length protobuf bytes (tag + length + size)."""
     tag = 1 if p["proto_id"] <= 15 else 2
     t = p.get("type")
     if t == "bytes":
-        n = 2 * int(p["size"])
+        n = int(p["size"])
         return tag + _varint_bytes(n) + n
     if t in ("bool", "enum"):
         return tag + 1

@@ -19,6 +19,7 @@
 
 LOG_MODULE_REGISTER(app_ndef_parser, LOG_LEVEL_DBG);
 
+#define NDEF_TLV_TYPE_NULL       0x00
 #define NDEF_TLV_TYPE_NDEF_MSG   0x03
 #define NDEF_TLV_TYPE_TERMINATOR 0xfe
 
@@ -41,6 +42,38 @@ static bool advance_buffer(const uint8_t **buffer, size_t *remaining_len, size_t
 	return true;
 }
 
+/* Read a TLV length field at *buffer (NFC Forum Type 5): either a single length
+ * byte, or the three-byte form (0xff followed by a big-endian 16-bit length).
+ * Advances past the length field and returns the value length via *out_len.
+ * Returns false when the buffer does not hold the whole length field. */
+static bool read_tlv_length(const uint8_t **buffer, size_t *remaining_len, size_t *out_len)
+{
+	if (*remaining_len == 0) {
+		return false;
+	}
+
+	uint8_t length = **buffer;
+
+	if (!advance_buffer(buffer, remaining_len, 1)) {
+		return false;
+	}
+
+	if (length == 0xff) {
+		/* Three-byte format: 0xff followed by a 2-byte length */
+		if (*remaining_len < 2) {
+			return false;
+		}
+
+		*out_len = sys_get_be16(*buffer);
+		advance_buffer(buffer, remaining_len, 2);
+	} else {
+		/* Single-byte format */
+		*out_len = length;
+	}
+
+	return true;
+}
+
 int app_ndef_parser_run(const uint8_t *buffer, size_t buffer_len,
 			app_ndef_parser_callback_t callback, void *user_data)
 {
@@ -58,49 +91,47 @@ int app_ndef_parser_run(const uint8_t *buffer, size_t buffer_len,
 			return -ENODATA;
 		}
 
+		if (type == NDEF_TLV_TYPE_TERMINATOR) {
+			LOG_INF("Terminator TLV found, no NDEF message");
+			return 0;
+		}
+
+		/* NULL TLV: a single padding byte with no length/value field. */
+		if (type == NDEF_TLV_TYPE_NULL) {
+			continue;
+		}
+
+		/* Every other TLV (NDEF message + proprietary/unknown) carries a
+		 * length followed by that many value bytes. */
+		size_t tlv_len;
+
+		if (!read_tlv_length(&buffer, &remaining_len, &tlv_len)) {
+			LOG_ERR("Invalid TLV length");
+			return -EMSGSIZE;
+		}
+
+		if (remaining_len < tlv_len) {
+			LOG_ERR("TLV length (%zu) exceeds buffer size (%zu)", tlv_len,
+				remaining_len);
+			return -EMSGSIZE;
+		}
+
 		if (type == NDEF_TLV_TYPE_NDEF_MSG) {
-			if (remaining_len == 0) {
-				LOG_ERR("Found NDEF message type but no length");
-				return -EMSGSIZE;
-			}
-
-			uint8_t length = *buffer;
-
-			if (!advance_buffer(&buffer, &remaining_len, 1)) {
-				return -ENODATA;
-			}
-
-			if (length == 0xff) {
-				/* Three-byte format: 0xff followed by 2-byte length */
-				if (remaining_len < 2) {
-					LOG_ERR("Invalid 3-byte TLV length");
-					return -EMSGSIZE;
-				}
-
-				/* Safely read length after boundary check */
-				ndef_msg_len = sys_get_be16(buffer);
-
-				advance_buffer(&buffer, &remaining_len, 2);
-			} else {
-				/* Single-byte format */
-				ndef_msg_len = length;
-			}
-
-			if (remaining_len < ndef_msg_len) {
-				LOG_ERR("NDEF message length (%zu) exceeds buffer size (%zu)",
-					ndef_msg_len, remaining_len);
-				return -EMSGSIZE;
-			}
-
+			ndef_msg_len = tlv_len;
 			ndef_msg_start = buffer;
 
 			/* Found our message */
 			break;
 		}
 
-		if (type == NDEF_TLV_TYPE_TERMINATOR) {
-			LOG_INF("Terminator TLV found, no NDEF message");
-			return 0;
+		/* Unknown TLV: skip its value bytes and keep scanning (#199). The
+		 * loop previously advanced only the type byte, so the value bytes of
+		 * a leading non-NDEF TLV were reinterpreted as TLV types — a crafted
+		 * tag could make the parser latch onto an attacker-chosen offset as
+		 * the NDEF message. */
+		if (!advance_buffer(&buffer, &remaining_len, tlv_len)) {
+			LOG_ERR("Unknown TLV value exceeds buffer");
+			return -EMSGSIZE;
 		}
 	}
 

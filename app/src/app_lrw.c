@@ -15,6 +15,7 @@
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_settings.h"
+#include "app_wdog.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -82,8 +83,25 @@ LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
 #define REJOIN_BACKOFF_MAX_SEC    3600 /* Maximum backoff time (1 hour) */
 #define REJOIN_BACKOFF_MULTIPLIER 2    /* Exponential multiplier per attempt */
 
-static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
+/* 4096 B (was 2048): the TX path nests lorawan_send → LoRaMac → nanopb encode →
+ * mbedTLS AES-CCM, which is deep, and release builds carry no stack canary
+ * (CONFIG_INIT_STACKS is debug-only) so an overflow would silently corrupt RAM
+ * and mimic the TX-stop wedge rather than fault cleanly (#187). */
+static K_THREAD_STACK_DEFINE(m_work_stack, 4096);
 static struct k_work_q m_work_q;
+
+#if defined(CONFIG_WATCHDOG)
+/* Liveness heartbeat (#182): a self-rearming work item proves m_work_q is still
+ * draining. If the queue wedges (e.g. lorawan_send blocks forever on the MAC
+ * confirm semaphore, #181) this work can no longer run, the channel goes stale
+ * and app_wdog stops feeding the IWDG → SoC reset + rejoin. The timeout is far
+ * above the worst-case legitimate single-send blocking (~7 s on TTN with a 5 s
+ * RX1 delay), so only a true wedge trips it. */
+#define LRW_HEARTBEAT_PERIOD_SEC 5
+#define LRW_HEARTBEAT_TIMEOUT_MS 30000
+static int m_wdog_channel = -1;
+static struct k_work_delayable m_heartbeat_work;
+#endif
 
 /* --- Timers (each one meaning only) --- */
 static struct k_timer m_lc_timeout_timer;
@@ -114,6 +132,9 @@ static size_t m_frame_len;
 static bool m_frame_more;
 static bool m_frame_first;
 static bool m_frame_resend;
+static bool m_frame_with_lc; /* #188: link-check decision, computed once at compose,
+			      * reused on resend (should_request_link_check() has a side
+			      * effect — must not re-run on a duty-cycle retry) */
 
 static void tx_telemetry_frame(bool first_frame);
 
@@ -200,7 +221,9 @@ static enum app_cmd_action m_post_cmd_action;
 
 /* Set by a ClockSync command; the next network time-update sends an Info uplink
  * (with the synced unix_time) instead of the command acking immediately. */
-static bool m_clock_sync_info_pending;
+/* #193: set from a command-handler thread, test-and-cleared in the LoRaMac
+ * downlink callback (another context) — an atomic bit closes the lost-update race. */
+static atomic_t m_clock_sync_info_pending;
 
 /* Kicked on a link-ready edge (join success / history-replay finish) so
  * app_report can resume the report cadence with an immediate uplink. */
@@ -857,10 +880,15 @@ static void tx_telemetry_frame(bool first_frame)
 			return;
 		}
 		m_frame_first = first_frame;
+		/* #188: decide the link-check piggyback exactly once, here on the fresh
+		 * compose. should_request_link_check() decrements m_force_lc_remaining and
+		 * advances the modulo, so re-evaluating it on the resend path would
+		 * double-consume / lose a forced link check. */
+		m_frame_with_lc =
+			m_frame_first && !m_link_check_pending && should_request_link_check();
 	}
 
-	bool with_link_check =
-		m_frame_first && !m_link_check_pending && should_request_link_check();
+	bool with_link_check = m_frame_with_lc;
 
 	if (with_link_check) {
 		ret = lorawan_request_link_check(false);
@@ -1002,6 +1030,17 @@ static void send_work_handler(struct k_work *work)
 
 	/* MED-9: history replay owns the radio; don't inject telemetry. */
 	if (m_hist_active) {
+		return;
+	}
+
+	/* #189: a multi-frame snapshot continuation may still be in flight — a
+	 * frame_work fire is scheduled after a frame gap (m_frame_more) or a resend
+	 * backoff. Re-entering compose now would clobber the snapshot cursor flags
+	 * (m_frame_resend/m_frame_first/m_frame_with_lc) and the LC piggyback, yielding
+	 * a malformed multi-frame sequence. Let the in-flight snapshot finish; app_report
+	 * re-triggers the next one. */
+	if (k_work_delayable_is_pending(&m_frame_work)) {
+		LOG_DBG("Snapshot continuation pending; skipping new telemetry compose");
 		return;
 	}
 
@@ -1186,8 +1225,8 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 	 * lands, send an Info uplink carrying the freshly-synced unix_time (the
 	 * command itself does not ack — saves an uplink, and a bare ack couldn't
 	 * carry the synced time yet). */
-	if (m_clock_sync_info_pending && (flags & LORAWAN_TIME_UPDATED)) {
-		m_clock_sync_info_pending = false;
+	if ((flags & LORAWAN_TIME_UPDATED) &&
+	    atomic_test_and_clear_bit(&m_clock_sync_info_pending, 0)) {
 		uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
 		size_t info_len;
 		if (app_cmd_build_info(info_buf, sizeof(info_buf), &info_len) == 0) {
@@ -1326,6 +1365,17 @@ void app_lrw_suspend(void)
 	k_timer_stop(&m_rejoin_timer);
 }
 
+#if defined(CONFIG_WATCHDOG)
+static void heartbeat_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	app_wdog_ping(m_wdog_channel);
+	k_work_schedule_for_queue(&m_work_q, &m_heartbeat_work,
+				  K_SECONDS(LRW_HEARTBEAT_PERIOD_SEC));
+}
+#endif /* defined(CONFIG_WATCHDOG) */
+
 int app_lrw_init(void)
 {
 	int ret;
@@ -1421,6 +1471,18 @@ int app_lrw_init(void)
 
 	k_timer_init(&m_lc_timeout_timer, lc_timeout_timer_handler, NULL);
 	k_timer_init(&m_rejoin_timer, rejoin_timer_handler, NULL);
+
+#if defined(CONFIG_WATCHDOG)
+	/* Start the liveness heartbeat on m_work_q so a wedged queue is detected and
+	 * the IWDG resets us (#181/#182). Registered even when radio-silent: the
+	 * queue still runs and a wedge there should still recover. */
+	m_wdog_channel = app_wdog_register(LRW_HEARTBEAT_TIMEOUT_MS);
+	if (m_wdog_channel < 0) {
+		LOG_ERR_CALL_FAILED_INT("app_wdog_register", m_wdog_channel);
+	}
+	k_work_init_delayable(&m_heartbeat_work, heartbeat_work_handler);
+	k_work_schedule_for_queue(&m_work_q, &m_heartbeat_work, K_NO_WAIT);
+#endif /* defined(CONFIG_WATCHDOG) */
 
 	atomic_set(&m_state, radio_silent ? APP_LRW_STATE_DISABLED : APP_LRW_STATE_IDLE);
 	m_init_join = true;
@@ -1543,7 +1605,7 @@ void app_lrw_send_info_on_clock_sync(void)
 {
 	/* Arm the deferred Info; downlink_callback sends it once LORAWAN_TIME_UPDATED
 	 * arrives (the ClockSync command answer). */
-	m_clock_sync_info_pending = true;
+	atomic_set_bit(&m_clock_sync_info_pending, 0);
 }
 
 int app_lrw_send_alarm(const uint8_t *buf, size_t len)

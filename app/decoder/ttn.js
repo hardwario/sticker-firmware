@@ -255,7 +255,13 @@ function _decodeError(bytes, start, end) {
     if (wire === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (field === 1) err.code = v.value;
-      else if (field === 2) err.fault_field = v.value;
+      else if (field === 2) {
+        // fault_field is encoded group*100 + tag (#196): split into a readable
+        // group (1=lorawan 2=application 3=sensors 4=alarms; 0=not group-scoped)
+        // and the proto tag within that group.
+        err.fault_field = v.value % 100;
+        err.fault_group = Math.floor(v.value / 100);
+      }
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       if (field === 3) err.detail = _pbBytesToAscii(bytes.slice(pos, pos + len.value));
@@ -439,7 +445,7 @@ function _decodeSensorReading(bytes, start, end) {
     switch (field) {
       case 1: sr.slot = v.value; break;
       case 2: sr.type = v.value; sr.type_name = _W1_SLOT_TYPES[v.value] || "unknown"; break;
-      case 3: sr.temperature = _pbZigzag(v.value) / 100; break;
+      case 3: { var _t = _pbZigzag(v.value); sr.temperature = (_t === _TM_S32_NA) ? null : _t / 100; break; }
       case 4: sr.humidity = v.value / 2; break;
       case 5: sr.tilt_alert = (v.value & (1 << 0)) !== 0; break;
       case 6: sr.illuminance = v.value; break;
@@ -459,6 +465,12 @@ function _decodeSensorReading(bytes, start, end) {
 // firmware always sends the system group and every enabled-sensor group whole,
 // so boolean fields (boot, *_is_active, *_notify_*, tilt) are surfaced as
 // explicit true/false rather than set-only-when-true.
+// "Value not available" sentinels (mirror app_compose.c): an enabled analog
+// sensor is always on the wire so the configured-sensor list is stable; a NaN
+// reading arrives as the sentinel and decodes to null.
+var _TM_S32_NA = -2147483648; // INT32_MIN (sint32: temperature, altitude)
+var _TM_U32_NA = 4294967295;  // UINT32_MAX (uint32: humidity, pressure, illuminance)
+
 function decodeTelemetry(bytes) {
   var d = {};
   var pos = 0;
@@ -487,14 +499,14 @@ function decodeTelemetry(bytes) {
       // system
       case 1:  d.voltage = v.value / 50; break;
       case 2:  d.boot = (v.value & (1 << 0)) !== 0; break;     // system_flags (always sent)
-      // internal (SHT4x)
-      case 3:  d.temperature = _pbZigzag(v.value) / 100; break;
-      case 4:  d.humidity = v.value / 2; break;
+      // internal (SHT4x) — sentinel → null (sensor enabled but no valid sample)
+      case 3:  { var _t = _pbZigzag(v.value); d.temperature = (_t === _TM_S32_NA) ? null : _t / 100; break; }
+      case 4:  d.humidity = (v.value === _TM_U32_NA) ? null : v.value / 2; break;
       // barometer
-      case 5:  d.pressure = v.value / 10; break; // hPa x10
-      case 6:  d.altitude = _pbZigzag(v.value) / 10; break;
+      case 5:  d.pressure = (v.value === _TM_U32_NA) ? null : v.value / 10; break; // hPa x10
+      case 6:  { var _a = _pbZigzag(v.value); d.altitude = (_a === _TM_S32_NA) ? null : _a / 10; break; }
       // light
-      case 7:  d.illuminance = v.value * 2; break;
+      case 7:  d.illuminance = (v.value === _TM_U32_NA) ? null : v.value * 2; break;
       // accel
       case 8:  d.orientation = v.value; break;
       // pir
@@ -829,29 +841,32 @@ function decodeDownlink(input) {
 
 // fPort 3: alarm-detail batch, protobuf AlarmReport. Top-level: base_time(1),
 // total(2), repeated AlarmEvent events(3). AlarmEvent (dynamic alarm rule):
-// source(1), edge(2), side(3), rel_s(4) varints + optional sint32 value(5) +
-// quantity(6). source = enum app_alarm_source, quantity = enum app_alarm_quantity;
-// value is scaled per quantity (temp/hum ×100, pressure ×10, magnetic_field µT,
-// digital 0/1, counter) and absent for some edges. Per-event time = base_time +
-// rel_s. `total` may exceed events present (dropped to fit the data rate).
+// source(1), edge(2), rel_s(4) varints + optional sint32 value(5) + quantity(6) +
+// slot(7) + type(9). source = enum app_alarm_source, quantity = enum
+// app_alarm_quantity; type says WHAT fired (low/high/trigger/no_data) and edge
+// the rising/falling transition — orthogonal (#212). value is scaled per quantity
+// (temp/hum ×100, pressure ×10, magnetic_field µT, digital 0/1, counter) and
+// absent for some edges. Per-event time = base_time + rel_s. `total` may exceed
+// events present (dropped to fit the data rate).
 var _ALARM_SOURCES = ["onboard", "s1", "s2", "s3", "s4", "hall-left", "hall-right",
-  "input-a", "input-b", "pir", "accel"];
+  "input-a", "input-b", "pir", "accel", "battery"];
 var _ALARM_QUANTITIES = ["temperature", "humidity", "pressure", "illuminance",
-  "magnetic-field", "tilt", "state", "count"];
+  "magnetic-field", "tilt", "state", "count", "voltage"];
 var _ALARM_EDGES = ["activate", "deactivate"];
-var _ALARM_SIDES = ["none", "lo", "hi"];
+var _ALARM_TYPES = ["none", "low", "high", "trigger", "no_data"];
 
 function _alarmUnscale(quantity, raw) {
   switch (quantity) {
     case 0: case 1: return raw / 100;   // temperature, humidity
     case 2: return raw / 10;            // pressure (hPa×10)
     case 4: return raw / 1000;          // magnetic-field (µT -> mT)
+    case 8: return raw / 100;           // voltage (V×100)
     default: return raw;                // illuminance / state / count
   }
 }
 
 function _decodeAlarmEvent(bytes, start, end) {
-  var ev = { slot: 0, source: 0, quantity: 0, edge: 0, side: 0, rel_s: 0, value: null };
+  var ev = { slot: 0, source: 0, quantity: 0, edge: 0, type: 0, rel_s: 0, value: null };
   var p = start;
   while (p < end) {
     var t = _pbReadVarint(bytes, p); p = t.next;
@@ -860,11 +875,11 @@ function _decodeAlarmEvent(bytes, start, end) {
       var v = _pbReadVarint(bytes, p); p = v.next;
       if (field === 1) ev.source = v.value;
       else if (field === 2) ev.edge = v.value;
-      else if (field === 3) ev.side = v.value;
       else if (field === 4) ev.rel_s = v.value;
       else if (field === 5) ev.value = _pbZigzag(v.value);
       else if (field === 6) ev.quantity = v.value;
       else if (field === 7) ev.slot = v.value;
+      else if (field === 9) ev.type = v.value;
     } else if (wire === 2) {
       var l = _pbReadVarint(bytes, p); p = l.next + l.value;
     } else { break; }
@@ -893,7 +908,7 @@ function decodeAlarmBatch(bytes) {
           source: _ALARM_SOURCES[ev.source] || ("src" + ev.source),
           quantity: _ALARM_QUANTITIES[ev.quantity] || ("q" + ev.quantity),
           event: _ALARM_EDGES[ev.edge] || "activate",
-          side: _ALARM_SIDES[ev.side] || "none",
+          type: _ALARM_TYPES[ev.type] || "none",
           value: ev.value === null ? null : _alarmUnscale(ev.quantity, ev.value),
           time: 0,
         });

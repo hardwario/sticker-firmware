@@ -192,6 +192,15 @@ parameters:
     default: 0
     help: "Get/Set history sensor selection bitmask (0 = all capability-available)."
 
+  - name: battery_level
+    proto_group: application
+    proto_id: 6
+    type: int
+    default: 2400
+    min: 1000
+    max: 3600
+    help: "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this."
+
   - name: alarm_limit
     proto_group: alarms
     proto_id: 1

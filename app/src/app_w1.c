@@ -23,6 +23,12 @@ LOG_MODULE_REGISTER(app_w1, LOG_LEVEL_DBG);
 
 #define ACQUIRE_DELAY K_MSEC(3)
 
+/* Upper bound on devices recorded in a single bus scan (#201). The real bus
+ * holds a handful of sensors; this caps per-ROM k_malloc so a noisy bus (EMI
+ * phantom ROMs) can't exhaust the heap before the free loop in app_w1_scan
+ * runs. Generously above any real population. */
+#define APP_W1_SCAN_MAX 32
+
 struct scan_item {
 	struct w1_rom rom;
 	sys_snode_t node;
@@ -128,6 +134,17 @@ static void w1_search_callback(struct w1_rom rom, void *cb_arg)
 		w1->is_ds28e17_present = true;
 	}
 
+	if (w1->scan_count >= APP_W1_SCAN_MAX) {
+		/* Drop further ROMs rather than keep allocating. Logged once at the
+		 * cap so a flood of EMI phantoms can't spam the log either. */
+		if (w1->scan_count == APP_W1_SCAN_MAX) {
+			LOG_WRN("1-Wire scan cap %d reached; ignoring further devices",
+				APP_W1_SCAN_MAX);
+			w1->scan_count++;
+		}
+		return;
+	}
+
 	struct scan_item *item = k_malloc(sizeof(*item));
 	if (!item) {
 		LOG_ERR_CALL_FAILED("k_malloc");
@@ -135,6 +152,7 @@ static void w1_search_callback(struct w1_rom rom, void *cb_arg)
 	}
 
 	item->rom = rom;
+	w1->scan_count++;
 
 	sys_slist_append(&w1->scan_list, &item->node);
 }
@@ -146,6 +164,7 @@ int app_w1_scan(struct app_w1 *w1, const struct device *dev,
 	int res = 0;
 
 	w1->is_ds28e17_present = false;
+	w1->scan_count = 0;
 
 	sys_slist_init(&w1->scan_list);
 

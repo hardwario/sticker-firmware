@@ -9,8 +9,8 @@ This document lists **only the changes introduced in firmware v1.4.0** relative 
 | Area | Change |
 |---|---|
 | Remote control | **New** bidirectional command protocol over LoRaWAN downlinks (fPort 85) |
-| Telemetry | **New** protobuf telemetry on **fPort 2** (legacy fPort 1 bitmap no longer emitted); large reports split across frames |
-| Alarms | **New** alarm-detail batch on **fPort 3**; **new** global alarm rate-limit; **new** PIR motion alarm |
+| Telemetry | **New** protobuf telemetry on **fPort 2** (legacy fPort 1 bitmap no longer emitted); large reports split across frames; absent analog readings sent as a `null` sentinel |
+| Alarms | **New** alarm-detail batch on **fPort 3**; **new** global alarm rate-limit; **new** PIR motion alarm; **new** no-data watchdog; sensor-reading validation hardening |
 | Device info | **New** automatic device-info uplink on every join |
 | Time | **New** real-time clock, synced from the network |
 | History | **New** sensor history store-and-forward with on-request replay |
@@ -45,11 +45,11 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `enter_mailbox` | **NFC only.** Switch into mailbox (ST25DV Fast-Transfer-Mode) serving mode for a bounded window — high-throughput config streaming / firmware update. `ack` is written over NDEF first, then the device serves the mailbox until the phone goes quiet (or `timeout_s` elapses) and returns to the low-power NDEF poll. See §10 | `ack` |
 | `exit_mailbox` | **NFC only.** End mailbox serving immediately (sent as the last mailbox message when the phone is done streaming) so the device drops straight back to the low-power NDEF poll | `ack` |
 
-> After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED), an optional `fault_field`, and a `detail` string.
+> After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED), an optional `fault_field`, and a `detail` string. `fault_field` encodes **`group × 100 + tag`** (group 1 = lorawan, 2 = application, 3 = sensors, 4 = alarms; 0 = not group-scoped) so one value identifies the offending field unambiguously across groups — e.g. `203` = application `interval_report`, `102` = lorawan `sub_band`. `ttn.js` splits it back into `fault_group` + `fault_field`.
 >
 > **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `clock_sync`, `req_history`, `w1_scan`) do **not** also send an `ack`, to save an uplink.
 >
-> **LoRaWAN-only commands:** `force_send` and `req_history` answer only via an uplink, so they are rejected (`NOT_READY` "lrw only") if sent over NFC.
+> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC. `enter_mailbox` / `exit_mailbox` are **NFC-only** (the mailbox is an NFC/Fast-Transfer-Mode channel) → rejected over a LoRaWAN downlink (previously such NFC-only commands were wrongly accepted over LoRaWAN with a misleading `Ack`).
 >
 > **Setting the clock over NFC:** `clock_sync` with a `unix_time` field sets the RTC directly from a phone, bootstrapping wall-clock time before/without a network (epoch sanity-bounded to 2024-01-01 … 2100-01-01; out-of-range → `BAD_REQUEST` "bad epoch"). A later network `DeviceTimeReq`/`DeviceTimeAns` stays authoritative and may refine it. Empty `clock_sync` over NFC just confirms (no network to query).
 >
@@ -91,10 +91,22 @@ Periodic and event reports now use a compact, extensible **protobuf** format on 
 
 Key differences from the v1.3.x bitmap:
 - **Extensible** — new sensors can be added in future firmware without breaking older decoders.
-- **Capability-gated, whole-group** — a sensor's group is sent in full **every report** whenever its capability is enabled, even when the values are `0`/`false` (e.g. a hall counter at 0, all states inactive). The **system group** (voltage, `boot`) is **always** present, so `boot=false` is reported explicitly rather than by omission. Digital fields carry their real value (0 is valid); an analog scalar is omitted only when there is no valid sample yet.
+- **Capability-gated, whole-group** — a sensor's group is sent in full **every report** whenever its capability is enabled, even when the values are `0`/`false` (e.g. a hall counter at 0, all states inactive). The **system group** (voltage, `boot`) is **always** present, so `boot=false` is reported explicitly rather than by omission. Digital fields carry their real value (0 is valid).
+- **Absent readings → `null` sentinel (changed)** — an **enabled analog sensor is now always present on the wire** so the configured-sensor list stays stable across reports; a missing or faulty reading (NaN) is sent as a **sentinel** value the decoder maps to **`null`** instead of dropping the field. This lets the backend tell *"configured but no data right now"* from *"not configured"*. (Previously an absent analog scalar was simply omitted.) The onboard temperature/humidity **and the 1-Wire sensors** follow this rule — a disconnected or faulted DS18B20 / machine-probe reports `temperature: null` rather than dropping its slot from the report.
+- **No-data watchdog** — a configured sensor that stops producing samples (reads NaN for ≥ 5 s) raises a no-data alarm (fPort 3) **and** the device blinks the **red LED** every `BLINK_INTERVAL_SECONDS` (3 s) while any sensor is in the no-data state, until it recovers — so a silently dead sensor is surfaced instead of reporting `null` forever.
+- **Low-battery watchdog (#210)** — when the supply drops below the configurable **`battery-level`** threshold (default **2.4 V**) the device raises a low-battery alarm on fPort 3 (`source: battery`, `quantity: voltage`, `type: low`) **and blinks the red LED** like any other alarm, clearing once it recovers past a fixed 0.3 V hysteresis band (default: alarm < 2.4 V, clears > 2.7 V). Li cells discharge non-linearly, so the warning level is left configurable. See §3 for the wire detail and the bench measurement behind the default.
 - **Multi-frame split** — if a report is larger than the current data rate allows, it is split across several fPort-2 frames sent a few seconds apart. Each frame carries whole sensor groups from the **same snapshot**, so the network server can merge them; nothing is lost. The 1-Wire list (below) splits **per reading** — a single frame may carry only some of the slots, the rest follow in the next frame.
 
 The decoded field set (voltage, temperature, humidity, pressure/altitude, illuminance, orientation, motion_count, 1-Wire sensors, hall/input counters and states, `boot`) matches the familiar v1.3.x fields — see the payload formatter output (§8). Decode with the updated `ttn.js`.
+
+### Reading validation & robustness
+
+Readings are range-checked before they reach telemetry, history and alarms, so a glitchy sample no longer fires a false alarm or skews stored data:
+
+- **DS18B20** — values outside −55…125 °C are rejected; the +85.0 °C power-on/brown-out glitch (a valid-CRC sentinel) is **debounced** (a lone spike is suppressed, a sustained real +85 °C still passes after one extra sample). This is the root cause of the earlier spurious low-temperature alarms.
+- **Onboard SHT4x** — temperature/humidity outside the sensor's spec window are rejected.
+- **Accelerometer** — free-fall detection is armed/torn down together with any-motion (no spurious free-fall while motion detection is off); accel **and orientation** are still read into the periodic sample even when motion detection is off.
+- **Alarms** — a minimum threshold hysteresis is enforced (no chattering when `hst` is 0); momentary STATE rules (PIR/accel) reject a `from==to` shape; the 1-Wire bus scan caps the number of recorded ROMs so a noisy bus can't exhaust memory.
 
 ### 1-Wire sensors — repeated, self-describing (changed)
 
@@ -134,15 +146,17 @@ message AlarmReport {
 message AlarmEvent {
     Source source = 1;               // which sensor
     Edge   edge   = 2;               // ACTIVATE / DEACTIVATE
-    Side   side   = 3;               // SIDE_NONE / SIDE_LO / SIDE_HI
     uint32 rel_s  = 4;               // seconds since base_time
     optional sint32 value = 5;       // current reading, scaled; absent for discrete sources
     uint32 quantity = 6;             // which quantity (temperature/humidity/.../state/count)
     uint32 slot     = 7;             // alarm rule slot index that fired (stable identity)
+    Type   type     = 9;             // TYPE_LOW / TYPE_HIGH / TYPE_TRIGGER / TYPE_NO_DATA
 }
 ```
 
-Each event is described by **three orthogonal enums** — an integration that only wants "did `hall-left` activate?" or "did `temperature` cross its high bound?" reads one field instead of unpacking a combined flag.
+> **Changed in #212 (BREAKING):** the former `side` (field 3) and `no_data` (field 8) are replaced by a single **`type`** enum (`none`, `low`, `high`, `trigger`, `no_data`). Fields 3 and 8 are now `reserved`. `type` says *what* fired, `edge` says *rising/falling* — they stay orthogonal, so a recovery still names the condition that cleared (e.g. `type=high, event=deactivate`).
+
+Each event is described by **two orthogonal enums** (`type` + `edge`) plus its `source`/`quantity` — an integration that only wants "did `hall-left` trigger?" or "did `temperature` cross its high bound?" reads one field instead of unpacking a combined flag.
 
 ### Decoded fields (`ttn.js`)
 
@@ -150,10 +164,11 @@ Each event is described by **three orthogonal enums** — an integration that on
 - `total` — total alarms that occurred in the window. `truncated` is `true` when `total` exceeds the events actually carried (some were dropped to fit the data rate).
 - `alarms[]` — each with:
   - `slot` — the alarm rule slot index that fired (`0` when omitted on the wire); lets a host map the edge back to the exact rule, including which level of a multi-level alarm
-  - `source` — `temperature` / `humidity` / `pressure` / `t1-temperature` / `t2-temperature` / `hall-left` / `hall-right` / `pir` / `input-a` / `input-b` / `accel-motion`
+  - `source` — `onboard` / `s1`–`s4` (1-Wire slots) / `hall-left` / `hall-right` / `input-a` / `input-b` / `pir` / `accel` / `battery`
+  - `quantity` — `temperature` / `humidity` / `pressure` / `illuminance` / `magnetic-field` / `tilt` / `state` / `count` / `voltage`
   - `event` — `activate` / `deactivate`
-  - `side` — `hi` / `lo` for threshold sources, `none` for discrete sources (hall/input/PIR). The **deactivate** edge keeps the side that was crossed on activation.
-  - `value` — the current reading at the edge (temperature/humidity in °C/%RH, pressure in hPa); `null` for discrete sources. *(Threshold and hysteresis are not carried — they are the device's own configuration.)*
+  - `type` — **what** fired: `high` / `low` for threshold rules (which bound was crossed; the low-battery watchdog also reports `low`), `trigger` for discrete rules (state/count/PIR/accel), `no_data` for the no-data watchdog. The **deactivate** edge keeps the `type` that was raised on activation (e.g. a temperature that fell back inside the band reports `type:"high", event:"deactivate"`).
+  - `value` — the current reading at the edge (temperature/humidity in °C/%RH, pressure in hPa, voltage in V); `null` for discrete sources. *(Threshold and hysteresis are not carried — they are the device's own configuration.)*
   - `time` — `base_time + rel_s` (per-event Unix time)
 
 ### When the messages are sent (fPort 2 vs fPort 3)
@@ -172,10 +187,10 @@ The collection window is **shared across all sources**: the first edge opens it,
 ```
 t = 0 s    threshold crossed → fPort 2 telemetry (immediate); 20 s window opens
 t ≈ 20 s   window flushes → fPort 3 AlarmReport
-           { total:1, alarms:[{ source:"temperature", event:"activate", side:"hi", value:26.5, time:base }] }
+           { total:1, alarms:[{ source:"temperature", event:"activate", type:"high", value:26.5, time:base }] }
 ```
 
-When the temperature later falls back below the band, the deactivate edge behaves the same way (immediate fPort-2 if the rate-limit has elapsed, then `event:"deactivate", side:"hi"` in the next window's fPort-3).
+When the temperature later falls back below the band, the deactivate edge behaves the same way (immediate fPort-2 if the rate-limit has elapsed, then `event:"deactivate", type:"high"` in the next window's fPort-3).
 
 **Example — a hall sensor is activated then deactivated within one window:**
 
@@ -184,11 +199,27 @@ t = 0 s    magnet applied   → hall-left activate   → fPort 2 (immediate); wi
 t = 8 s    magnet removed   → hall-left deactivate → batched (fPort-2 suppressed by rate-limit)
 t ≈ 20 s   window flushes   → fPort 3 AlarmReport {
              total:2, alarms:[
-               { source:"hall-left", event:"activate",   side:"none", value:null, time:base+0 },
-               { source:"hall-left", event:"deactivate", side:"none", value:null, time:base+8 } ] }
+               { source:"hall-left", event:"activate",   type:"trigger", value:null, time:base+0 },
+               { source:"hall-left", event:"deactivate", type:"trigger", value:null, time:base+8 } ] }
 ```
 
 > Hall/input/PIR edges are only raised (and only collected) when their `*-notify-act` / `*-notify-deact` configuration is enabled and the sensor's `cap-*` capability is on. With `alarm-limit = 0` there is no window: each edge is sent immediately as its own one-event fPort-3 frame and the fPort-2 telemetry is not rate-limited.
+
+### Low-battery alarm (#210)
+
+A built-in watchdog (independent of the configurable rule slots, like the no-data watchdog) raises a low-battery alarm on fPort 3 when the supply voltage drops below the **`battery-level`** threshold (config, in mV, **default 2400 = 2.4 V**):
+
+```json
+{ "slot":254, "source":"battery", "quantity":"voltage", "type":"low", "event":"activate", "value":2.35 }
+```
+
+It clears (`event:"deactivate"`) once the supply recovers past a **fixed 0.3 V** hysteresis band (with the 2.4 V default: alarm below 2.4 V, clears above 2.7 V) — the hysteresis is a compile-time constant, not configurable.
+
+> **Across a power-cycle (e.g. battery replacement)** the latch is RAM-only, so it resets to inactive on boot. A device that boots already above the threshold simply never raises the alarm — and, having no prior active state, sends **no `deactivate`** event. The hysteresis (2.7 V recovery) therefore applies only within one power session; after a battery swap the backend learns the recovered voltage from the ordinary fPort-2 telemetry (which carries `voltage` every report), not from an alarm edge. Treat the fPort-2 voltage as the source of truth and the fPort-3 alarm as an edge hint.
+
+The event carries the measured voltage in `value` and uses the reserved slot `254` (0xFE; the no-data watchdog uses `255`). Being an alarm, it also **blinks the red LED**. The threshold is configurable (`config battery-level <mV>`, or `battery_level` over SetParam in the `application` group, proto field 6) because Li cells discharge non-linearly — a fixed empty point would mis-warn across chemistries.
+
+**Why 2.4 V default — bench measurement.** A PPK2 supply sweep (SWD physically detached, liveness judged only from over-the-air uplinks) found the STICKER keeps transmitting normally down to **~1.30–1.35 V** — far below the STM32WLE5 datasheet minimum; the earlier hypothesis that the LoRa RF/TCXO dies near 3.4 V is not borne out. The real hazard is the **failure mode**: below ~1.3 V the node goes silent without a clean reset, and **raising the supply back up does not recover it** — only a full power-cycle does. So a cell that briefly sags can leave the node permanently dark in the field. The 2.4 V default warns the backend with comfortable margin above that wedge point, and is adjustable for other chemistries/duty cycles. *(A connected J-Link back-powers the MCU through the SWD pins and masks the brownout entirely — undervoltage tests must run with SWD detached.)*
 
 ---
 
@@ -281,12 +312,12 @@ Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields
 
 > **Note on "slot":** the alarm rule *slot* (`0…15`) is distinct from the 1-Wire sensor *slot* (`s1…s4`); the shell calls the alarm one the rule **index**.
 
-**Sources** (`source`): `0` onboard · `1–4` s1–s4 (1-Wire) · `5` hall-left · `6` hall-right · `7` input-a · `8` input-b · `9` pir · `10` accel.
-**Quantities** (`quantity`): `0` temperature · `1` humidity · `2` pressure · `3` illuminance · `4` magnetic-field · `5` tilt · `6` state · `7` count.
+**Sources** (`source`): `0` onboard · `1–4` s1–s4 (1-Wire) · `5` hall-left · `6` hall-right · `7` input-a · `8` input-b · `9` pir · `10` accel · `11` battery *(watchdog only, see §3 — not a configurable rule source)*.
+**Quantities** (`quantity`): `0` temperature · `1` humidity · `2` pressure · `3` illuminance · `4` magnetic-field · `5` tilt · `6` state · `7` count · `8` voltage *(battery watchdog only)*.
 **Kind** (follows the quantity):
 - **threshold** (analog) — `lo`/`hi`/`hst` band with hysteresis; alarm when the value leaves `[lo, hi]`.
 - **state** (digital: tilt + discrete inputs) — `from_state`/`to_state`. **`from != to` = edge** (fires once on that transition: `0→1` rising, `1→0` falling); **`from == to` = level** (active while the line equals `to`: `1→1` active-high, `0→0` active-low). PIR and accel are *momentary* sources (they only pulse), so any state rule there fires a **per-pulse one-shot** that re-arms after `alarm-notif-time` (edge and level behave alike).
-- **count / rate** (counters: hall, input) — `hi` = maximum events allowed per report interval.
+- **count / rate** (counters: hall, input) — `hi` = maximum events allowed per report interval. The increase is assessed once per **`interval_report` window** (a tumbling window that re-baselines each report), not on every internal poll, so the rate is counted consistently regardless of the sample cadence.
 
 **Packed slot format** — each `alarm_N` is **17 bytes, little-endian**:
 
@@ -516,6 +547,7 @@ Behaviour notes:
 - **OTAA rejoin** uses exponential backoff (60 s → ×2 → capped 3600 s); **ABP** cannot rejoin and stays in WARNING (it never had a join).
 - **Radio-silent mode (#98, #175)** — if the configured **DevEUI is all-zero** (an un-provisioned device), the firmware enters `DISABLED` instead of looping on join requests that can never succeed, saving power. It stays DISABLED until reprovisioned and rebooted. As of #175 the **entire LoRaWAN bring-up is skipped** in this mode: `lorawan_start()` is never called, so the SubGHz radio is never powered and there is **no boot radio burst** at all (previously the radio was started once at boot before the device went DISABLED). `ats lrw status` reports `DISABLED`.
 - Debug builds expose `ats lrw lc ok|fail` to drive the state machine deterministically on the bench (no real RF outage needed).
+- **Watchdog-liveness wedge recovery (#182)** — the hardware watchdog (IWDG) is no longer fed unconditionally from `main()`; the feed is **gated on a per-work-queue liveness heartbeat**. The TX work queue (`m_work_q`) and the report queue each ping a liveness channel every few seconds; `main()` feeds the IWDG only while both are fresh. If a queue wedges — e.g. `lorawan_send()` blocking forever on the MAC confirm semaphore — its heartbeat goes stale, `main()` withholds the feed, and the SoC **resets (~40 s) and rejoins on a clean boot**, recovering a wedged TX path without a manual power-cycle (HW-validated). The timeout (30 s) sits far above the worst-case legitimate single-send blocking, so a healthy device is never reset. The TX/report work-queue stacks were also grown (4096 / 3072 B) to remove a marginal-overflow that could mimic the same wedge (#187).
 
 ---
 

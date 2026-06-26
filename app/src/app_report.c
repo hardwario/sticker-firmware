@@ -11,6 +11,7 @@
 #include "app_lrw.h"
 #include "app_report.h"
 #include "app_sensor.h"
+#include "app_wdog.h"
 
 /* Zephyr includes */
 #include <zephyr/kernel.h>
@@ -25,12 +26,35 @@ LOG_MODULE_REGISTER(app_report, LOG_LEVEL_DBG);
 
 /* Own work queue so the sensor read (app_sensor_sample) and the history flash
  * write (app_history_capture) never run on the LoRaWAN TX work queue or the
- * system work queue (the latter also drives LoRaMacProcess()). */
-static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
+ * system work queue (the latter also drives LoRaMacProcess()).
+ *
+ * 3072 B (was 2048): the report cycle nests sensor I2C reads + an NVS flash write
+ * (app_history_capture / app_counters_save); release builds carry no stack canary
+ * so an overflow corrupts RAM silently. Headroom over the measured high-water
+ * mark; revisit with CONFIG_INIT_STACKS on hardware (#187). */
+static K_THREAD_STACK_DEFINE(m_work_stack, 3072);
 static struct k_work_q m_work_q;
 
 static struct k_timer m_report_timer; /* interval_report cadence */
 static struct k_work m_report_work;   /* one report cycle (sample + capture + trigger) */
+
+#if defined(CONFIG_WATCHDOG)
+/* Liveness heartbeat (#182): mirror of the app_lrw guard for the report queue, so
+ * a wedge in the sample/capture path is caught by the IWDG too. */
+#define REPORT_HEARTBEAT_PERIOD_SEC 5
+#define REPORT_HEARTBEAT_TIMEOUT_MS 30000
+static int m_wdog_channel = -1;
+static struct k_work_delayable m_heartbeat_work;
+
+static void heartbeat_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	app_wdog_ping(m_wdog_channel);
+	k_work_schedule_for_queue(&m_work_q, &m_heartbeat_work,
+				  K_SECONDS(REPORT_HEARTBEAT_PERIOD_SEC));
+}
+#endif /* defined(CONFIG_WATCHDOG) */
 
 /* (Re)arm the periodic cadence for the next report. One-shot + manual restart
  * (like the old app_lrw m_send_timer) so a multi-frame snapshot in app_lrw
@@ -117,6 +141,15 @@ int app_report_init(void)
 
 	k_work_init(&m_report_work, report_work_handler);
 	k_timer_init(&m_report_timer, report_timer_handler, NULL);
+
+#if defined(CONFIG_WATCHDOG)
+	m_wdog_channel = app_wdog_register(REPORT_HEARTBEAT_TIMEOUT_MS);
+	if (m_wdog_channel < 0) {
+		LOG_ERR_CALL_FAILED_INT("app_wdog_register", m_wdog_channel);
+	}
+	k_work_init_delayable(&m_heartbeat_work, heartbeat_work_handler);
+	k_work_schedule_for_queue(&m_work_q, &m_heartbeat_work, K_NO_WAIT);
+#endif /* defined(CONFIG_WATCHDOG) */
 
 	/* Arm the cadence at boot so the counter backup (report_work_handler runs
 	 * app_counters_save before the link gate) fires even on a device that never

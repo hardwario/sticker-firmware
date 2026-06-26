@@ -168,7 +168,8 @@ def test_build_proto_model_structure():
     assert app["reserved"] == []  # #166 dropped the leftover gaps
     ids = {f["name"]: f["id"] for f in app["fields"]}
     assert ids["history_enable"] == 4 and ids["history_sensors"] == 5
-    assert sorted(ids.values()) == [1, 2, 3, 4, 5]  # contiguous after #166
+    assert ids["battery_level"] == 6  # low-battery alarm threshold (#210)
+    assert sorted(ids.values()) == [1, 2, 3, 4, 5, 6]  # contiguous
 
 
 # --- allocator + guard ----------------------------------------------------

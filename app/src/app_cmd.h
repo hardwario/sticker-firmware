@@ -117,8 +117,8 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 				const uint8_t *samples, size_t samples_len, uint8_t *out,
 				size_t out_cap, size_t *out_len);
 
-/* One alarm edge for app_cmd_build_alarm_report(). source/edge/side carry the
- * AlarmEvent_Source/Edge/Side enum values (app_alarm fills these without
+/* One alarm edge for app_cmd_build_alarm_report(). source/edge/type carry the
+ * AlarmEvent_Source/Edge/Type enum values (app_alarm fills these without
  * including the nanopb header). value is the scaled current reading and is only
  * meaningful when has_value is true (discrete sources leave it absent). */
 struct app_cmd_alarm_event {
@@ -126,7 +126,7 @@ struct app_cmd_alarm_event {
 	uint8_t source;   /* enum app_alarm_source (onboard/s1..s4/hall/input/pir/accel) */
 	uint8_t quantity; /* enum app_alarm_quantity */
 	uint8_t edge;     /* AlarmEvent_Edge: 0=activate, 1=deactivate */
-	uint8_t side;     /* AlarmEvent_Side: 0=none, 1=lo, 2=hi */
+	uint8_t type;     /* AlarmEvent_Type: 0=none, 1=low, 2=high, 3=trigger, 4=no_data (#212) */
 	bool has_value;   /* value present */
 	int32_t value;    /* scaled value (×100 temp/hum, ×10 pressure, digital 0/1, counter) */
 	uint32_t rel_s;   /* seconds since base_time */
