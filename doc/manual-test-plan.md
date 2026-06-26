@@ -54,6 +54,7 @@ byte is the `seq` and is echoed in the reply.
 | `settings_save` | `08043200` |
 | `clock_sync` | `08056200` |
 | `force_send` | `08064a00` |
+| `sample` | `0805aa0100` |
 | `reboot` | `08083a00` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
 | `set_param`: ADR on, `interval_report`=120 s, `alarm_0`=onboard temp 5–30 °C (hyst 1) | `0801121e0a021801120220782a14b2031103000000000000a0400000f0410000803f` |
@@ -111,16 +112,35 @@ byte is the `seq` and is echoed in the reply.
 
 ### G4 — GetInfo command (device info)
 
-**Goal:** Device answers GetInfo with version, serial, uptime, clock, build type.
+**Goal:** Device answers GetInfo with version, serial, uptime, clock, build type, battery.
 **Observable:** `Response.Info` on fPort 85 with `fw_major/minor/patch`, `build_type`,
-`serial_number`, `uptime_s`, `unix_time`, `debug`.
+`serial_number`, `uptime_s`, `unix_time`, `debug`, `battery` (mV).
 
 **Prompt for Claude:**
 > Send a GetInfo command to the joined device. In a debug build you may inject it locally with
 > `ats cmd lrw <hex>` over the RTT shell (the device queues the Response on fPort 85), or send it
 > as a real downlink via the TTS MCP `send_downlink` on fPort 85. Then read the fPort 85 uplink
 > via `get_uplinks` and decode the `Response.Info`. Confirm `fw_*` matches the boot version,
-> `serial_number` is non-zero, `uptime_s` is plausible, and `build_type`/`debug` are correct.
+> `serial_number` is non-zero, `uptime_s` is plausible, `build_type`/`debug` are correct, and
+> `battery` is a plausible supply voltage in mV (e.g. ~3000 on a 3 V bench supply). `ats device
+> info` prints the same `Battery:` line locally.
+
+- [ ] Pass
+
+### G4b — Sample command (fresh reading on demand)
+
+**Goal:** `sample` takes a fresh reading, sends it as fPort-2 telemetry **and** (over NFC) returns
+the readings synchronously; over LoRaWAN it emits no fPort-85 body.
+**Observable:** NFC → `Response.sample` (a `Telemetry`) with the current readings. LoRaWAN → a
+fPort-2 `Telemetry` frame and **no** fPort-85 response.
+
+**Prompt for Claude:**
+> In a debug build, inject `ats cmd nfc 0805aa0100` over the RTT shell and confirm the printed
+> `RESP` decodes to `Response.sample` (`Telemetry`) whose values match `ats sensors sample`.
+> Then inject `ats cmd lrw 0805aa0100`: confirm the `RESP` body is **empty** (no fPort-85 reply)
+> and a fPort-2 telemetry frame is sent (when joined). Note: with `cap-w1-sensors` /
+> `cap-accelerometer` enabled but no hardware attached, `app_sensor_sample()` is slow — disable
+> those caps for a quick bench check.
 
 - [ ] Pass
 

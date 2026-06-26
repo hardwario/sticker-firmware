@@ -35,6 +35,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `reboot` | Cold reboot | `ack` |
 | `factory_reset` | Reset config to defaults but **keep device identity + LoRaWAN keys** (stays provisioned/connected); clears dynamic alarm rules; **reboots** | `ack` |
 | `force_send` | Send a telemetry report immediately | **none** — the report itself is the reply |
+| `sample` | Take a fresh reading: send a `Telemetry` report on fPort 2 **and** (over NFC) return the same readings in the reply. Works over LoRaWAN and NFC | LoRaWAN: **none** — the fPort-2 report is the reply. NFC: **`sample`** — a full `Telemetry` with the fresh readings |
 | `reset_counters` | Clear selected hall/input counters | `ack` |
 | `clock_sync` | Sync the wall-clock. **Empty** (LoRaWAN): request a network time sync. **With `unix_time`** (NFC): set the RTC directly from the phone's clock (UTC seconds) | LoRaWAN: **`info`, deferred** — sent once the network time lands. NFC: **`info`** immediately — carries the new `unix_time` |
 | `req_history` | Replay stored history for a time window | `history_frame` (multiple) |
@@ -47,7 +48,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 
 > After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED), an optional `fault_field`, and a `detail` string. `fault_field` encodes **`group × 100 + tag`** (group 1 = lorawan, 2 = application, 3 = sensors, 4 = alarms; 0 = not group-scoped) so one value identifies the offending field unambiguously across groups — e.g. `203` = application `interval_report`, `102` = lorawan `sub_band`. `ttn.js` splits it back into `fault_group` + `fault_field`.
 >
-> **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `clock_sync`, `req_history`, `w1_scan`) do **not** also send an `ack`, to save an uplink.
+> **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `sample`, `clock_sync`, `req_history`, `w1_scan`) do **not** also send an `ack`, to save an uplink. `sample` is dual: over LoRaWAN the fPort-2 report is the only reply (no fPort-85 body, like `force_send`); over NFC it additionally returns the readings synchronously so a phone can show them on the spot.
 >
 > **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC. `enter_mailbox` / `exit_mailbox` are **NFC-only** (the mailbox is an NFC/Fast-Transfer-Mode channel) → rejected over a LoRaWAN downlink (previously such NFC-only commands were wrongly accepted over LoRaWAN with a misleading `Ack`).
 >
@@ -65,6 +66,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `settings_save` | `08043200` |
 | `clock_sync` | `08056200` |
 | `force_send` | `08064a00` |
+| `sample` | `0805aa0100` |
 | `reboot` | `08083a00` |
 | `w1_scan` | `08097200` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
@@ -217,6 +219,7 @@ After every LoRaWAN join the device automatically sends a device-info message on
 | `serial_number` | Device serial |
 | `uptime_s` | Seconds since boot |
 | `unix_time` | Wall-clock UTC (0 until the clock is synced) |
+| `battery` | Supply voltage in **mV**, measured fresh on each `get_info` (0/absent = unavailable) |
 | `claim_token` | 128-bit device claim token, hex (#170) — **omitted** until the device is commissioned |
 
 The same message is returned on demand by the `get_info` command (over LoRaWAN **and** NFC), so a backend can read the claim token over either channel.
