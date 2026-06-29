@@ -88,6 +88,8 @@ def test_build_options_lines_matches_committed():
         "AppConfigMessage.Sensors.sensor2_rom max_size:8 fixed_length:true",
         "AppConfigMessage.Sensors.sensor3_rom max_size:8 fixed_length:true",
         "AppConfigMessage.Sensors.sensor4_rom max_size:8 fixed_length:true",
+        # P2P link key (#118): native bytes, same as the LoRaWAN keys.
+        "AppConfigMessage.P2P.key max_size:16 fixed_length:true",
     ] + [
         f"AppConfigMessage.Alarms.alarm_{i} max_size:17 fixed_length:true" for i in range(16)
     ])
@@ -162,6 +164,7 @@ def test_build_proto_model_structure():
     assert root["factory"] == 1
     assert root["secret_key"] == 2
     assert root["lorawan"] == 5 and root["application"] == 6
+    assert root["p2p"] == 10  # raw-LoRa P2P group (#118)
     subs = {s["name"]: s for s in model["submessages"]}
     assert subs["Lorawan"]["fields"][0]["name"] == "region"
     app = subs["Application"]
@@ -169,7 +172,12 @@ def test_build_proto_model_structure():
     ids = {f["name"]: f["id"] for f in app["fields"]}
     assert ids["history_enable"] == 4 and ids["history_sensors"] == 5
     assert ids["battery_level"] == 6  # low-battery alarm threshold (#210)
-    assert sorted(ids.values()) == [1, 2, 3, 4, 5, 6]  # contiguous
+    assert ids["transport"] == 7  # transport selector (#118)
+    assert sorted(ids.values()) == [1, 2, 3, 4, 5, 6, 7]  # contiguous
+    # Raw-LoRa P2P radio/link params (#118), contiguous 1..6.
+    p2p = {f["name"]: f["id"] for f in subs["P2P"]["fields"]}
+    assert p2p["frequency"] == 1 and p2p["key"] == 6
+    assert sorted(p2p.values()) == [1, 2, 3, 4, 5, 6]
 
 
 # --- allocator + guard ----------------------------------------------------

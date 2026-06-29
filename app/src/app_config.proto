@@ -11,6 +11,7 @@ message AppConfigMessage {
     optional Sensors sensors = 7;
     optional Alarms alarms = 8;
     optional string claim_token = 9;
+    optional P2P p2p = 10;
 
     message Lorawan {
         enum Region {
@@ -46,12 +47,18 @@ message AppConfigMessage {
     }
 
     message Application {
+        enum Transport {
+            LORAWAN = 0;
+            P2P = 1;
+        }
+
         optional bool calibration = 1;
         optional uint32 interval_sample = 2;
         optional uint32 interval_report = 3;
         optional bool history_enable = 4;
         optional uint32 history_sensors = 5;
         optional uint32 battery_level = 6;
+        optional Transport transport = 7;
     }
 
     message Sensors {
@@ -101,6 +108,15 @@ message AppConfigMessage {
         optional bytes alarm_13 = 16;
         optional bytes alarm_14 = 17;
         optional bytes alarm_15 = 18;
+    }
+
+    message P2P {
+        optional uint32 frequency = 1;
+        optional uint32 spreading_factor = 2;
+        optional uint32 tx_power = 3;
+        optional uint32 network_id = 4;
+        optional uint32 device_addr = 5;
+        optional bytes key = 6;
     }
 }
 // END GENERATED CONFIG

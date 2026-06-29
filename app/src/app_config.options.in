@@ -26,6 +26,7 @@ AppConfigMessage.Sensors.sensor1_rom max_size:8 fixed_length:true
 AppConfigMessage.Sensors.sensor2_rom max_size:8 fixed_length:true
 AppConfigMessage.Sensors.sensor3_rom max_size:8 fixed_length:true
 AppConfigMessage.Sensors.sensor4_rom max_size:8 fixed_length:true
+AppConfigMessage.P2P.key max_size:16 fixed_length:true
 # END GENERATED CONFIG
 
 Response.Error.detail       max_size:32

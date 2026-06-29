@@ -257,6 +257,13 @@ int app_config_apply_application(const AppConfigMessage_Application *src, uint32
 			FAULT(6);
 		}
 	}
+	if (src->has_transport) {
+		if ((int)src->transport >= 0 && (int)src->transport <= 1) {
+			config->transport = (enum app_config_transport)src->transport;
+		} else {
+			FAULT(7);
+		}
+	}
 	return ret;
 }
 
@@ -287,6 +294,10 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	if (requested(ids, n, 6)) {
 		dst->has_battery_level = true;
 		dst->battery_level = c->battery_level;
+	}
+	if (requested(ids, n, 7)) {
+		dst->has_transport = true;
+		dst->transport = (AppConfigMessage_Application_Transport)c->transport;
 	}
 }
 
@@ -662,6 +673,85 @@ bool app_config_alarms_slot_empty(uint32_t tag)
 	}
 }
 
+int app_config_apply_p2p(const AppConfigMessage_P2P *src, uint32_t *fault_field)
+{
+	struct app_config *config = app_config();
+	int ret = 0;
+
+	if (fault_field) {
+		*fault_field = 0;
+	}
+
+	if (src->has_frequency) {
+		config->p2p_frequency = src->frequency;
+	}
+	if (src->has_spreading_factor) {
+		int val = src->spreading_factor;
+
+		if ((val >= 6 && val <= 12)) {
+			config->p2p_spreading_factor = val;
+		} else {
+			FAULT(2);
+		}
+	}
+	if (src->has_tx_power) {
+		int val = src->tx_power;
+
+		if ((val >= 0 && val <= 22)) {
+			config->p2p_tx_power = val;
+		} else {
+			FAULT(3);
+		}
+	}
+	if (src->has_network_id) {
+		config->p2p_network_id = src->network_id;
+	}
+	if (src->has_device_addr) {
+		int val = src->device_addr;
+
+		if ((val >= 0 && val <= 65535)) {
+			config->p2p_device_addr = val;
+		} else {
+			FAULT(5);
+		}
+	}
+	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+	if (src->has_key) {
+		memcpy(config->p2p_key, src->key, sizeof(config->p2p_key));
+	}
+	return ret;
+}
+
+void app_config_fill_p2p(AppConfigMessage_P2P *dst, const uint32_t *ids, size_t n)
+{
+	const struct app_config *c = app_config();
+
+	if (requested(ids, n, 1)) {
+		dst->has_frequency = true;
+		dst->frequency = c->p2p_frequency;
+	}
+	if (requested(ids, n, 2)) {
+		dst->has_spreading_factor = true;
+		dst->spreading_factor = c->p2p_spreading_factor;
+	}
+	if (requested(ids, n, 3)) {
+		dst->has_tx_power = true;
+		dst->tx_power = c->p2p_tx_power;
+	}
+	if (requested(ids, n, 4)) {
+		dst->has_network_id = true;
+		dst->network_id = c->p2p_network_id;
+	}
+	if (requested(ids, n, 5)) {
+		dst->has_device_addr = true;
+		dst->device_addr = c->p2p_device_addr;
+	}
+	if (requested(ids, n, 6)) {
+		dst->has_key = true;
+		memcpy(dst->key, c->p2p_key, sizeof(c->p2p_key));
+	}
+}
+
 bool app_config_ingest(const AppConfigMessage *message)
 {
 	if (message->has_factory && message->factory) {
@@ -681,6 +771,9 @@ bool app_config_ingest(const AppConfigMessage *message)
 	}
 	if (message->has_alarms) {
 		app_config_apply_alarms(&message->alarms, NULL);
+	}
+	if (message->has_p2p) {
+		app_config_apply_p2p(&message->p2p, NULL);
 	}
 	return false;
 }

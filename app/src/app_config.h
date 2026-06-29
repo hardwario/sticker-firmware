@@ -40,6 +40,11 @@ enum app_config_motion_sensitivity {
 	APP_CONFIG_MOTION_SENSITIVITY_HIGH = 3,
 };
 
+enum app_config_transport {
+	APP_CONFIG_TRANSPORT_LORAWAN = 0,
+	APP_CONFIG_TRANSPORT_P2P = 1,
+};
+
 #define APP_CONFIG_VERSION 3
 
 struct app_config {
@@ -54,6 +59,7 @@ struct app_config {
 	bool history_enable;
 	uint32_t history_sensors;
 	int battery_level;
+	enum app_config_transport transport;
 	int alarm_limit;
 	int alarm_notif_time;
 	enum app_config_lrw_region lrw_region;
@@ -104,6 +110,12 @@ struct app_config {
 	bool hall_right_counter;
 	bool input_a_counter;
 	bool input_b_counter;
+	uint32_t p2p_frequency;
+	int p2p_spreading_factor;
+	int p2p_tx_power;
+	uint32_t p2p_network_id;
+	uint32_t p2p_device_addr;
+	uint8_t p2p_key[16];
 };
 
 extern struct app_config g_app_config;

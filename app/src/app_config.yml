@@ -49,6 +49,18 @@ enums:
       value: 3
       shell: high
 
+  # Transport selector (#118 P2P): boot-time choice between the LoRaWAN stack and
+  # the raw-LoRa P2P transport. Read once at boot by app_transport_init(); both
+  # stacks are compiled in (when CONFIG_APP_LORA_P2P=y), only the chosen one is
+  # brought up. Switching requires `settings save` (reboot).
+  transport:
+    - name: LORAWAN
+      value: 0
+      shell: lorawan
+    - name: P2P
+      value: 1
+      shell: p2p
+
 proto:
   message: AppConfigMessage
   extra_fields:
@@ -72,6 +84,11 @@ proto:
       message: Alarms
       field: alarms
       proto_id: 8
+    - key: p2p
+      message: P2P
+      field: p2p
+      proto_id: 10
+      strip_prefix: p2p_
 
 # Command protocol (LoRaWAN fPort 85 downlink + NFC). The single source of truth
 # for which commands exist, their wire id, dispatch routing and availability.
@@ -201,6 +218,15 @@ parameters:
     min: 1000
     max: 3600
     help: "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this."
+
+  - name: transport
+    proto_group: application
+    proto_id: 7
+    type: enum
+    enum: transport
+    default: lorawan
+    preserve_on_reset: true
+    help: "Get/Set radio transport (lorawan/p2p). Boot-time selector; change needs `settings save` (reboot). p2p requires a CONFIG_APP_LORA_P2P build."
 
   - name: alarm_limit
     proto_group: alarms
@@ -625,3 +651,61 @@ parameters:
     proto_id: 18
     type: bool
     help: "Get/Set input B counter enabled (true/false)."
+
+  # --- Raw-LoRa P2P radio/link parameters (#118 / #122) -------------------
+  # Active only when transport == p2p. The paired receiver must match the radio
+  # parameters exactly. Bandwidth and coding rate are fixed in v1 (125 kHz, 4/5
+  # — the common P2P defaults; rarely retuned in the field and kept out of config
+  # to fit the dual-stack flash budget); frequency, spreading factor and TX power
+  # are the deployment knobs. The link is AES-CCM encrypted+authenticated with
+  # p2p_key; the receiver needs the same key, network_id and device_addr.
+  - name: p2p_frequency
+    proto_group: p2p
+    proto_id: 1
+    type: uint32
+    default: 868100000
+    help: "Get/Set P2P carrier frequency in Hz (default 868100000 = 868.1 MHz)."
+
+  - name: p2p_spreading_factor
+    proto_group: p2p
+    proto_id: 2
+    type: int
+    default: 10
+    min: 6
+    max: 12
+    help: "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate)."
+
+  - name: p2p_tx_power
+    proto_group: p2p
+    proto_id: 3
+    type: int
+    default: 14
+    min: 0
+    max: 22
+    help: "Get/Set P2P TX power in dBm (0-22; the sticker board RFO-LP caps at 14)."
+
+  - name: p2p_network_id
+    proto_group: p2p
+    proto_id: 4
+    type: uint32
+    default: 0
+    help: "Get/Set P2P 32-bit network id (frame header; receiver filters foreign traffic)."
+
+  - name: p2p_device_addr
+    proto_group: p2p
+    proto_id: 5
+    type: uint32
+    default: 0
+    min: 0
+    max: 65535
+    help: "Get/Set P2P 16-bit device address (frame header source/destination)."
+
+  - name: p2p_key
+    proto_group: p2p
+    proto_id: 6
+    readable: [shell, nfc]
+    writable: [shell, nfc]
+    type: bytes
+    size: 16
+    preserve_on_reset: true
+    help: "Get/Set P2P AES-CCM link key (32 hex digits). Never read back over LoRaWAN/P2P air."

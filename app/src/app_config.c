@@ -38,12 +38,18 @@ static const struct app_config m_app_config_defaults = {
 	.history_enable = false,
 	.history_sensors = 0,
 	.battery_level = 2400,
+	.transport = APP_CONFIG_TRANSPORT_LORAWAN,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.lrw_sub_band = 2,
 	.lrw_link_check_interval = 5,
 	.lrw_link_check_fail_rejoin = 5,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
+	.p2p_frequency = 868100000,
+	.p2p_spreading_factor = 10,
+	.p2p_tx_power = 14,
+	.p2p_network_id = 0,
+	.p2p_device_addr = 0,
 };
 
 /* Set by h_commit when a schema version migration ran; init persists the
@@ -56,12 +62,18 @@ static struct app_config m_app_config = {
 	.history_enable = false,
 	.history_sensors = 0,
 	.battery_level = 2400,
+	.transport = APP_CONFIG_TRANSPORT_LORAWAN,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.lrw_sub_band = 2,
 	.lrw_link_check_interval = 5,
 	.lrw_link_check_fail_rejoin = 5,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
+	.p2p_frequency = 868100000,
+	.p2p_spreading_factor = 10,
+	.p2p_tx_power = 14,
+	.p2p_network_id = 0,
+	.p2p_device_addr = 0,
 };
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
@@ -106,6 +118,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.history_sensors));
 	SETTINGS_SET("battery-level", &m_app_config.battery_level,
 		     sizeof(m_app_config.battery_level));
+	SETTINGS_SET("transport", &m_app_config.transport, sizeof(m_app_config.transport));
 	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	SETTINGS_SET("alarm-notif-time", &m_app_config.alarm_notif_time,
 		     sizeof(m_app_config.alarm_notif_time));
@@ -172,6 +185,16 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.input_a_counter));
 	SETTINGS_SET("input-b-counter", &m_app_config.input_b_counter,
 		     sizeof(m_app_config.input_b_counter));
+	SETTINGS_SET("p2p-frequency", &m_app_config.p2p_frequency,
+		     sizeof(m_app_config.p2p_frequency));
+	SETTINGS_SET("p2p-spreading-factor", &m_app_config.p2p_spreading_factor,
+		     sizeof(m_app_config.p2p_spreading_factor));
+	SETTINGS_SET("p2p-tx-power", &m_app_config.p2p_tx_power, sizeof(m_app_config.p2p_tx_power));
+	SETTINGS_SET("p2p-network-id", &m_app_config.p2p_network_id,
+		     sizeof(m_app_config.p2p_network_id));
+	SETTINGS_SET("p2p-device-addr", &m_app_config.p2p_device_addr,
+		     sizeof(m_app_config.p2p_device_addr));
+	SETTINGS_SET("p2p-key", m_app_config.p2p_key, sizeof(m_app_config.p2p_key));
 
 #undef SETTINGS_SET
 
@@ -197,6 +220,7 @@ static int h_commit(void)
 		m_app_config.nonce_counter = stored.nonce_counter;
 		memcpy(m_app_config.claim_token, stored.claim_token,
 		       sizeof(m_app_config.claim_token));
+		m_app_config.transport = stored.transport;
 		m_app_config.lrw_region = stored.lrw_region;
 		m_app_config.lrw_sub_band = stored.lrw_sub_band;
 		m_app_config.lrw_network = stored.lrw_network;
@@ -213,6 +237,7 @@ static int h_commit(void)
 		       sizeof(m_app_config.lrw_nwkskey));
 		memcpy(m_app_config.lrw_appskey, stored.lrw_appskey,
 		       sizeof(m_app_config.lrw_appskey));
+		memcpy(m_app_config.p2p_key, stored.p2p_key, sizeof(m_app_config.p2p_key));
 
 		m_app_config_migrated = true;
 	}
@@ -237,6 +262,9 @@ static int h_commit(void)
 	}
 	if (m_app_config.battery_level > 3600) {
 		m_app_config.battery_level = 3600;
+	}
+	if ((int)m_app_config.transport < 0 || (int)m_app_config.transport > 1) {
+		m_app_config.transport = APP_CONFIG_TRANSPORT_LORAWAN;
 	}
 	if (m_app_config.alarm_limit < 0) {
 		m_app_config.alarm_limit = 0;
@@ -281,6 +309,24 @@ static int h_commit(void)
 	    (int)m_app_config.accel_motion_sensitivity > 3) {
 		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
 	}
+	if (m_app_config.p2p_spreading_factor < 6) {
+		m_app_config.p2p_spreading_factor = 6;
+	}
+	if (m_app_config.p2p_spreading_factor > 12) {
+		m_app_config.p2p_spreading_factor = 12;
+	}
+	if (m_app_config.p2p_tx_power < 0) {
+		m_app_config.p2p_tx_power = 0;
+	}
+	if (m_app_config.p2p_tx_power > 22) {
+		m_app_config.p2p_tx_power = 22;
+	}
+	if (m_app_config.p2p_device_addr < 0) {
+		m_app_config.p2p_device_addr = 0;
+	}
+	if (m_app_config.p2p_device_addr > 65535) {
+		m_app_config.p2p_device_addr = 65535;
+	}
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
 	return 0;
@@ -310,6 +356,7 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.history_sensors));
 	EXPORT_FUNC("battery-level", &m_app_config.battery_level,
 		    sizeof(m_app_config.battery_level));
+	EXPORT_FUNC("transport", &m_app_config.transport, sizeof(m_app_config.transport));
 	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	EXPORT_FUNC("alarm-notif-time", &m_app_config.alarm_notif_time,
 		    sizeof(m_app_config.alarm_notif_time));
@@ -376,6 +423,16 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.input_a_counter));
 	EXPORT_FUNC("input-b-counter", &m_app_config.input_b_counter,
 		    sizeof(m_app_config.input_b_counter));
+	EXPORT_FUNC("p2p-frequency", &m_app_config.p2p_frequency,
+		    sizeof(m_app_config.p2p_frequency));
+	EXPORT_FUNC("p2p-spreading-factor", &m_app_config.p2p_spreading_factor,
+		    sizeof(m_app_config.p2p_spreading_factor));
+	EXPORT_FUNC("p2p-tx-power", &m_app_config.p2p_tx_power, sizeof(m_app_config.p2p_tx_power));
+	EXPORT_FUNC("p2p-network-id", &m_app_config.p2p_network_id,
+		    sizeof(m_app_config.p2p_network_id));
+	EXPORT_FUNC("p2p-device-addr", &m_app_config.p2p_device_addr,
+		    sizeof(m_app_config.p2p_device_addr));
+	EXPORT_FUNC("p2p-key", m_app_config.p2p_key, sizeof(m_app_config.p2p_key));
 	/* Export config-version LAST: settings_save is per-key atomic, so writing
 	 * the schema marker after every value means a brownout mid-save leaves an
 	 * old version with a partial new payload rather than a new version flagging
@@ -526,6 +583,23 @@ static void print_history_sensors(const struct shell *shell)
 static void print_battery_level(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " battery-level %d", m_app_config.battery_level);
+}
+
+static void print_transport(const struct shell *shell)
+{
+	const char *str;
+	switch (m_app_config.transport) {
+	case APP_CONFIG_TRANSPORT_LORAWAN:
+		str = "lorawan";
+		break;
+	case APP_CONFIG_TRANSPORT_P2P:
+		str = "p2p";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " transport %s", str);
 }
 
 static void print_alarm_limit(const struct shell *shell)
@@ -869,6 +943,45 @@ static void print_input_b_counter(const struct shell *shell)
 		    m_app_config.input_b_counter ? "true" : "false");
 }
 
+static void print_p2p_frequency(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " p2p-frequency %u", m_app_config.p2p_frequency);
+}
+
+static void print_p2p_spreading_factor(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " p2p-spreading-factor %d",
+		    m_app_config.p2p_spreading_factor);
+}
+
+static void print_p2p_tx_power(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " p2p-tx-power %d", m_app_config.p2p_tx_power);
+}
+
+static void print_p2p_network_id(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " p2p-network-id %u", m_app_config.p2p_network_id);
+}
+
+static void print_p2p_device_addr(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " p2p-device-addr %u", m_app_config.p2p_device_addr);
+}
+
+static void print_p2p_key(const struct shell *shell)
+{
+	char buf[2 * sizeof(m_app_config.p2p_key) + 1];
+
+	int ret = bin2hex(m_app_config.p2p_key, sizeof(m_app_config.p2p_key), buf, sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " p2p-key %s", buf);
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -881,6 +994,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_history_enable(shell);
 	print_history_sensors(shell);
 	print_battery_level(shell);
+	print_transport(shell);
 	print_alarm_limit(shell);
 	print_alarm_notif_time(shell);
 	print_lrw_region(shell);
@@ -915,6 +1029,12 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_hall_right_counter(shell);
 	print_input_a_counter(shell);
 	print_input_b_counter(shell);
+	print_p2p_frequency(shell);
+	print_p2p_spreading_factor(shell);
+	print_p2p_tx_power(shell);
+	print_p2p_network_id(shell);
+	print_p2p_device_addr(shell);
+	print_p2p_key(shell);
 
 	return 0;
 }
@@ -1169,6 +1289,37 @@ static int cmd_battery_level(const struct shell *shell, size_t argc, char **argv
 {
 	return cmd_int(shell, argc, argv, &m_app_config.battery_level, 1000, 3600,
 		       print_battery_level);
+}
+
+static int cmd_transport(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_transport(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: lorawan, p2p");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "lorawan")) {
+		m_app_config.transport = APP_CONFIG_TRANSPORT_LORAWAN;
+	} else if (!strcmp(argv[1], "p2p")) {
+		m_app_config.transport = APP_CONFIG_TRANSPORT_P2P;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: lorawan, p2p");
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
@@ -1798,6 +1949,173 @@ static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **ar
 	return cmd_bool(shell, argc, argv, &m_app_config.input_b_counter, print_input_b_counter);
 }
 
+static int cmd_p2p_frequency(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_p2p_frequency(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+
+	errno = 0;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.p2p_frequency = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_p2p_spreading_factor(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.p2p_spreading_factor, 6, 12,
+		       print_p2p_spreading_factor);
+}
+
+static int cmd_p2p_tx_power(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.p2p_tx_power, 0, 22, print_p2p_tx_power);
+}
+
+static int cmd_p2p_network_id(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_p2p_network_id(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+
+	errno = 0;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.p2p_network_id = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_p2p_device_addr(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_p2p_device_addr(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+
+	errno = 0;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < 0 || value > 65535) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.p2p_device_addr = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_p2p_key(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	if (argc == 1) {
+		print_p2p_key(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (strlen(argv[1]) != 2 * sizeof(m_app_config.p2p_key)) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[sizeof(m_app_config.p2p_key)];
+
+	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
+	if (ret != sizeof(tmp)) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+	memcpy(m_app_config.p2p_key, tmp, sizeof(tmp));
+
+	return 0;
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -1859,6 +2177,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(battery-level, NULL,
 	              "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this.",
 	              cmd_battery_level, 1, 1),
+
+	SHELL_CMD_ARG(transport, NULL,
+	              "Get/Set radio transport (lorawan/p2p). Boot-time selector; change needs `settings save` (reboot). p2p requires a CONFIG_APP_LORA_P2P build.",
+	              cmd_transport, 1, 1),
 
 	SHELL_CMD_ARG(alarm-limit, NULL,
 	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
@@ -1996,6 +2318,30 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set input B counter enabled (true/false).",
 	              cmd_input_b_counter, 1, 1),
 
+	SHELL_CMD_ARG(p2p-frequency, NULL,
+	              "Get/Set P2P carrier frequency in Hz (default 868100000 = 868.1 MHz).",
+	              cmd_p2p_frequency, 1, 1),
+
+	SHELL_CMD_ARG(p2p-spreading-factor, NULL,
+	              "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate).",
+	              cmd_p2p_spreading_factor, 1, 1),
+
+	SHELL_CMD_ARG(p2p-tx-power, NULL,
+	              "Get/Set P2P TX power in dBm (0-22; the sticker board RFO-LP caps at 14).",
+	              cmd_p2p_tx_power, 1, 1),
+
+	SHELL_CMD_ARG(p2p-network-id, NULL,
+	              "Get/Set P2P 32-bit network id (frame header; receiver filters foreign traffic).",
+	              cmd_p2p_network_id, 1, 1),
+
+	SHELL_CMD_ARG(p2p-device-addr, NULL,
+	              "Get/Set P2P 16-bit device address (frame header source/destination).",
+	              cmd_p2p_device_addr, 1, 1),
+
+	SHELL_CMD_ARG(p2p-key, NULL,
+	              "Get/Set P2P AES-CCM link key (32 hex digits). Never read back over LoRaWAN/P2P air.",
+	              cmd_p2p_key, 1, 1),
+
 	SHELL_SUBCMD_SET_END
 );
 
@@ -2026,6 +2372,7 @@ int app_config_factory_reset(void)
 	m_app_config.serial_number = preserved.serial_number;
 	m_app_config.nonce_counter = preserved.nonce_counter;
 	memcpy(m_app_config.claim_token, preserved.claim_token, sizeof(m_app_config.claim_token));
+	m_app_config.transport = preserved.transport;
 	m_app_config.lrw_region = preserved.lrw_region;
 	m_app_config.lrw_sub_band = preserved.lrw_sub_band;
 	m_app_config.lrw_network = preserved.lrw_network;
@@ -2038,6 +2385,7 @@ int app_config_factory_reset(void)
 	memcpy(m_app_config.lrw_devaddr, preserved.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	memcpy(m_app_config.lrw_nwkskey, preserved.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	memcpy(m_app_config.lrw_appskey, preserved.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+	memcpy(m_app_config.p2p_key, preserved.p2p_key, sizeof(m_app_config.p2p_key));
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
 
