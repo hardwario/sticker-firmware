@@ -127,6 +127,7 @@ message Command {
         EnterCalibration enter_calibration = 18;
         EnterMailbox     enter_mailbox     = 19;
         ExitMailbox      exit_mailbox      = 20;
+        Sample           sample            = 21;
     }
 // END GENERATED COMMANDS
 
@@ -200,6 +201,12 @@ message Command {
     // when the phone has finished streaming, so the device drops straight back to
     // the low-power NDEF poll instead of waiting out the idle timeout.
     message ExitMailbox { }
+
+    // Take a fresh sensor sample, send it as telemetry over LoRaWAN (fPort 2),
+    // and — over NFC — return the same readings synchronously in Response.sample
+    // so the phone can display them on the spot. Over LoRaWAN the fPort-2 uplink
+    // is the answer (no fPort-85 body, like ForceSend).
+    message Sample { }
 }
 
 message Response {
@@ -212,6 +219,7 @@ message Response {
         HistoryFrame   history_frame    = 5;
         Error          error            = 6;
         W1Scan         w1_scan          = 7;
+        Telemetry      sample           = 8;   // Sample command: fresh readings (NFC)
     }
 
     message Ack { }
@@ -236,6 +244,7 @@ message Response {
         uint32 unix_time     = 7;   // wall-clock (UTC); 0/absent until RTC synced
         bool   debug         = 8;   // true = debug build, false = release
         optional bytes claim_token = 9;   // 128-bit device claim token (#170); omitted until commissioned
+        uint32 battery       = 10;  // supply voltage in mV (0 = unavailable)
     }
 
     message ConfigDump {

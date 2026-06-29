@@ -57,6 +57,7 @@ struct app_cmd_info {
 	bool has_unix_time;      /* unix_time valid (RTC synced) */
 	uint32_t unix_time;      /* UTC seconds since epoch */
 	uint8_t claim_token[16]; /* 128-bit device claim token (#170); all-zero = uncommissioned */
+	uint32_t battery_mv;     /* supply voltage in mV; 0 = measurement unavailable */
 };
 
 /* Fill `info` with the current device info: FW version, build type, serial,

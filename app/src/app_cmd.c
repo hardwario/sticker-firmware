@@ -6,12 +6,15 @@
 
 #include "app_cmd.h"
 #include "app_alarm_rules.h"
+#include "app_battery.h"
+#include "app_compose.h"
 #include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_report.h"
+#include "app_sensor.h"
 #include "app_config_ingest.h"
 
 /* Wall-clock source (PR #41, branch lrw-rtc-time). Until that lands on this
@@ -85,6 +88,11 @@ void app_cmd_get_info(struct app_cmd_info *info)
 		     "claim_token size mismatch");
 	memcpy(info->claim_token, g_app_config.claim_token, sizeof(info->claim_token));
 
+	/* Fresh battery reading (mV). 0 if the ADC is unavailable (e.g. host test);
+	 * the proto omits a 0 so the host treats it as "unknown". */
+	float v;
+	info->battery_mv = (app_battery_measure(&v) == 0) ? (uint32_t)(v * 1000.0f) : 0;
+
 #ifdef APP_CMD_HAVE_CLOCK
 	uint32_t unix_s;
 	if (app_clock_get_unix(&unix_s) == 0) {
@@ -107,6 +115,7 @@ static void fill_info(Response_Info *info)
 	info->serial_number = i.serial_number;
 	info->uptime_s = i.uptime_s;
 	info->debug = i.debug;
+	info->battery = i.battery_mv;
 	if (i.has_unix_time) {
 		info->unix_time = i.unix_time;
 	}
@@ -505,6 +514,31 @@ static void app_cmd_handle_force_send(enum app_cmd_transport tp, const Command *
 	 * would just cost a second uplink. Leave which_body == 0 (emit nothing). */
 }
 
+/* sample (transports: [lrw, nfc]): take a fresh reading, push it out as
+ * telemetry on fPort 2, and — over NFC — return the same readings synchronously
+ * so the phone can show them. Over LoRaWAN the fPort-2 uplink is the answer
+ * (no fPort-85 body, like force_send). */
+static void app_cmd_handle_sample(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				  enum app_cmd_action *action)
+{
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(action);
+
+	/* Fresh reading now, so the NFC response and the telemetry uplink agree. */
+	app_sensor_sample();
+
+	if (tp == APP_CMD_TRANSPORT_NFC) {
+		resp->which_body = Response_sample_tag;
+		app_compose_snapshot(&resp->body.sample);
+	}
+	/* Over LoRaWAN leave which_body == 0: the fPort-2 frame below is the answer,
+	 * and a full Telemetry would not fit the 64-byte fPort-85 response buffer. */
+
+#if defined(CONFIG_LORAWAN)
+	app_report_trigger();
+#endif
+}
+
 static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command *cmd,
 				       Response *resp, enum app_cmd_action *action)
 {
@@ -725,6 +759,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		}
 		*action = APP_CMD_ACTION_LEAVE_MAILBOX;
 		resp->which_body = Response_ack_tag;
+		break;
+	case Command_sample_tag:
+		/* transports: [lrw, nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_sample(tp, cmd, resp, action);
 		break;
 	default:
 		LOG_WRN("Command tag %u not implemented", cmd->which_body);

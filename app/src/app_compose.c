@@ -142,13 +142,12 @@ static uint16_t m_pending;  /* bitmask of enum tlm_group still to send */
 static pb_size_t m_w1_sent; /* repeated w1_sensors already emitted (split cursor) */
 static bool m_active;
 
-static void fill_snapshot(void)
+/* Map the current sensor + counter readings into `t`. Pure mapping with no
+ * compose state-machine side effects, so it backs both the LoRaWAN snapshot
+ * (fill_snapshot) and the synchronous Sample response (app_compose_snapshot).
+ * `boot` sets the one-shot system boot flag. */
+static void fill_telemetry(Telemetry *t, bool boot)
 {
-	static bool boot = true;
-
-	/* Build straight into the static snapshot — no Telemetry-sized local and
-	 * no struct copy on the tight m_work_q stack. */
-	Telemetry *t = &m_snapshot;
 	memset(t, 0, sizeof(*t));
 	uint32_t system_flags = boot ? SYSTEM_FLAG_BOOT : 0;
 
@@ -288,6 +287,15 @@ static void fill_snapshot(void)
 		t->has_input_b_flags = true;
 		t->input_b_flags = f;
 	}
+}
+
+/* Take a fresh snapshot into m_snapshot and arm the multi-frame packer. Runs
+ * solely on m_work_q. */
+static void fill_snapshot(void)
+{
+	static bool boot = true;
+
+	fill_telemetry(&m_snapshot, boot);
 
 	m_pending = 0;
 	for (enum tlm_group g = 0; g < G_COUNT; g++) {
@@ -308,6 +316,18 @@ void app_compose_reset(void)
 	m_active = false;
 	m_pending = 0;
 	m_w1_sent = 0;
+}
+
+void app_compose_snapshot(Telemetry *out)
+{
+	if (!out) {
+		return;
+	}
+	/* Full reading (all groups) for a synchronous response — e.g. the Sample
+	 * command over NFC, where the whole Telemetry fits the 256-byte mailbox and
+	 * there is no DR budget to bin-pack against. Pure mapping: it neither
+	 * disturbs the in-progress LoRaWAN snapshot nor consumes the boot flag. */
+	fill_telemetry(out, false);
 }
 
 int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
