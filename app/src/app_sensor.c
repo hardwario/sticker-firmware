@@ -253,6 +253,16 @@ int app_sensor_init(void)
 #endif /* defined(CONFIG_LIS2DH) */
 
 	if (g_app_config.cap_w1_sensors) {
+		/* The DS2484 1-Wire master's device reset — and every later 1-Wire
+		 * transaction — spans several back-to-back I2C transfers. i2c1 runtime PM
+		 * would suspend the bus between them (gate the peripheral clock + apply
+		 * the analog sleep pinctrl), which corrupts the multi-transfer sequence
+		 * and makes the DS2484 reset fail with -EIO. Hold i2c1 resumed for as
+		 * long as the 1-Wire master is enabled so the bus never drops mid-
+		 * transaction. (Regression since the v1.4.0 PM rework; 1-Wire was silent
+		 * on release until this.) */
+		(void)pm_device_runtime_get(m_i2c_dev);
+
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
 
 		ret = device_init(dev);
