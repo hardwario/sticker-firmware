@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "app_ndef_parser.h"
+#include "app_nfc_parser.h"
 
 /* Zephyr includes */
 #include <zephyr/kernel.h>
@@ -17,7 +17,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-LOG_MODULE_REGISTER(app_ndef_parser, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(app_nfc_parser, LOG_LEVEL_DBG);
 
 #define NDEF_TLV_TYPE_NULL       0x00
 #define NDEF_TLV_TYPE_NDEF_MSG   0x03
@@ -79,8 +79,8 @@ static bool read_tlv_length(const uint8_t **buffer, size_t *remaining_len, size_
 	return true;
 }
 
-int app_ndef_parser_run(const uint8_t *buffer, size_t buffer_len,
-			app_ndef_parser_callback_t callback, void *user_data)
+int app_nfc_parser_run(const uint8_t *buffer, size_t buffer_len, app_nfc_parser_callback_t callback,
+		       void *user_data)
 {
 	int ret;
 
@@ -168,7 +168,7 @@ int app_ndef_parser_run(const uint8_t *buffer, size_t buffer_len,
 	size_t records_len = ndef_msg_len;
 
 	while (records_len > 0) {
-		struct app_ndef_parser_record_info info = {0};
+		struct app_nfc_parser_record_info info = {0};
 
 		uint8_t header = *record;
 

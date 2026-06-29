@@ -2,13 +2,13 @@
  * Copyright (c) 2026 HARDWARIO a.s.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Host unit tests for app_ndef_parser, covering the NFC Forum Type-5 Capability
+ * Host unit tests for app_nfc_parser, covering the NFC Forum Type-5 Capability
  * Container (CC) skip (#218) and the #199 unknown-TLV value-skip. Vectors use
  * the device's own canonical record: NDEF Message TLV (0x03) carrying a short
  * external-type record `hio.stck:cfg` with a 4-byte payload, then a terminator.
  */
 
-#include "app_ndef_parser.h"
+#include "app_nfc_parser.h"
 
 #include <zephyr/ztest.h>
 
@@ -43,7 +43,7 @@ static uint32_t m_type_len;
 static uint8_t m_payload[32];
 static uint32_t m_payload_len;
 
-static int capture_cb(const struct app_ndef_parser_record_info *info, void *user_data)
+static int capture_cb(const struct app_nfc_parser_record_info *info, void *user_data)
 {
 	ARG_UNUSED(user_data);
 	m_cb_count++;
@@ -87,7 +87,7 @@ static int run_hex(const char *hex)
 	uint8_t buf[128];
 	size_t len = unhex(hex, buf, sizeof(buf));
 
-	return app_ndef_parser_run(buf, len, capture_cb, NULL);
+	return app_nfc_parser_run(buf, len, capture_cb, NULL);
 }
 
 ZTEST_SUITE(ndef, NULL, NULL, reset_capture, NULL, NULL);
