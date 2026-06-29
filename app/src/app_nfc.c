@@ -8,7 +8,7 @@
 #include "app_cmd.h"
 #include "app_config_ingest.h"
 #include "app_config.h"
-#include "app_ndef_parser.h"
+#include "app_nfc_parser.h"
 #include "app_settings.h"
 #include "app_version.h"
 #include "app_log.h"
@@ -975,7 +975,7 @@ static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_b
 }
 #endif /* CONFIG_APP_NFC_ENCRYPTION */
 
-static int parser_callback(const struct app_ndef_parser_record_info *record_info, void *user_data)
+static int parser_callback(const struct app_nfc_parser_record_info *record_info, void *user_data)
 {
 	int ret;
 
@@ -1318,9 +1318,9 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	/* Pending data written by a phone: parse it. parser_callback may ingest a
 	 * config (sets *action), or process a command (stages m_resp_buf), or flag
 	 * that the tag already holds our response (m_seen_resp). */
-	ret = app_ndef_parser_run(m_buf, ST25DV_USER_MEM_SIZE, parser_callback, action);
+	ret = app_nfc_parser_run(m_buf, ST25DV_USER_MEM_SIZE, parser_callback, action);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_ndef_parser_run", ret);
+		LOG_ERR_CALL_FAILED_INT("app_nfc_parser_run", ret);
 		res = ret;
 	}
 
