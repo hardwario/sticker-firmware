@@ -118,6 +118,18 @@ static uint32_t m_interval;  /* interval_report (s) the buffer was recorded at; 
 			      * are periodic so per-record time = base + ord*interval */
 static bool m_replay_active; /* true while app_lrw streams a replay (capture self-skips, #126) */
 
+/* The record itself is persisted on every capture, but the meta record
+ * (count/start/base) is flushed only every N captures to halve the NVS
+ * write/erase load — once the ring is full every capture is an eviction, so
+ * saving meta each time would double wear and add a GC-erase power blip per
+ * sample. After an unclean reboot the buffer then loses visibility to at most
+ * the last N-1 records (still in flash, just not counted, and their implicit
+ * timestamps re-anchor as fresh records arrive) — acceptable for a best-effort
+ * history buffer. Clean state changes (clear, mask, interval, clock sync,
+ * shutdown) still flush immediately via meta_save_now(). */
+#define HISTORY_META_SAVE_EVERY 16
+static uint8_t m_meta_dirty;
+
 static bool cap_on(size_t cap_off)
 {
 	if (cap_off == NO_CAP) {
@@ -495,7 +507,11 @@ void app_history_capture(void)
 		}
 		m_count++;
 	}
-	backend_save_meta();
+	/* Coalesce meta writes (#audit): flush every N captures, not every one. */
+	if (++m_meta_dirty >= HISTORY_META_SAVE_EVERY) {
+		backend_save_meta();
+		m_meta_dirty = 0;
+	}
 
 	k_mutex_unlock(&m_lock);
 }
@@ -548,6 +564,7 @@ void app_history_clear(void)
 	m_base_synced = false;
 	m_base_stale_uptime = false;
 	backend_save_meta();
+	m_meta_dirty = 0;
 	k_mutex_unlock(&m_lock);
 }
 
@@ -678,6 +695,10 @@ void app_history_set_enabled(bool enable)
 	m_enabled = enable;
 }
 
+/* The selection mask is a uint32_t bitmap (one bit per channel), persisted as
+ * config.history_sensors. Adding a 33rd channel would silently overflow it. */
+BUILD_ASSERT(APP_HISTORY_SENSOR_COUNT <= 32, "history mask is 32-bit");
+
 uint32_t app_history_get_mask(void)
 {
 	return m_mask;
@@ -698,6 +719,7 @@ void app_history_set_mask(uint32_t mask)
 	m_base_stale_uptime = false;
 	recompute_sizing();
 	backend_save_meta();
+	m_meta_dirty = 0;
 	k_mutex_unlock(&m_lock);
 }
 
@@ -951,7 +973,7 @@ static int cmd_history_sensors(const struct shell *sh, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	uint16_t mask = app_history_get_mask();
+	uint32_t mask = app_history_get_mask();
 	mask = on ? (mask | BIT(s)) : (mask & ~BIT(s));
 	app_history_set_mask(mask);
 	app_config()->history_sensors = app_history_get_mask(); /* staged */
