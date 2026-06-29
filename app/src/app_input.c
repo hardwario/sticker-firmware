@@ -7,7 +7,6 @@
 #include "app_input.h"
 #include "app_alarm.h"
 #include "app_config.h"
-#include "app_gpio_count.h"
 #include "app_log.h"
 
 /* Zephyr includes */
@@ -30,20 +29,6 @@ static const struct gpio_dt_spec m_input_b = GPIO_DT_SPEC_GET(DT_ALIAS(sw3), gpi
 static struct app_input_data m_input_data;
 
 K_MUTEX_DEFINE(m_input_data_mutex);
-
-static const struct app_gpio_count_chan m_chan_a = {
-	.name = "Input A",
-	.counter_en = &g_app_config.input_a_counter,
-	.stored_active = &m_input_data.input_a_is_active,
-	.count = &m_input_data.input_a_count,
-};
-
-static const struct app_gpio_count_chan m_chan_b = {
-	.name = "Input B",
-	.counter_en = &g_app_config.input_b_counter,
-	.stored_active = &m_input_data.input_b_is_active,
-	.count = &m_input_data.input_b_count,
-};
 
 static int poll(void)
 {
@@ -77,20 +62,45 @@ static int poll(void)
 	}
 
 	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
-	int a_edge = app_gpio_count_apply(&m_chan_a, input_a_is_active);
-	int b_edge = app_gpio_count_apply(&m_chan_b, input_b_is_active);
+
+	bool a_rise = (!m_input_data.input_a_is_active && input_a_is_active);
+	bool a_fall = (m_input_data.input_a_is_active && !input_a_is_active);
+	bool b_rise = (!m_input_data.input_b_is_active && input_b_is_active);
+	bool b_fall = (m_input_data.input_b_is_active && !input_b_is_active);
+
+	m_input_data.input_a_is_active = input_a_is_active;
+	m_input_data.input_b_is_active = input_b_is_active;
+
+	if (a_rise) {
+		if (g_app_config.input_a_counter) {
+			m_input_data.input_a_count++;
+		}
+		LOG_DBG("Input A activated, count: %u", m_input_data.input_a_count);
+	} else if (a_fall) {
+		LOG_DBG("Input A deactivated");
+	}
+
+	if (b_rise) {
+		if (g_app_config.input_b_counter) {
+			m_input_data.input_b_count++;
+		}
+		LOG_DBG("Input B activated, count: %u", m_input_data.input_b_count);
+	} else if (b_fall) {
+		LOG_DBG("Input B deactivated");
+	}
+
 	k_mutex_unlock(&m_input_data_mutex);
 
 	/* Fire alarm events after releasing the data mutex (see app_hall.c): keeps
 	 * the data lock off the alarm lock + uplink-enqueue path. */
-	if (a_edge > 0) {
+	if (a_rise) {
 		app_alarm_event(APP_ALARM_SRC_INPUT_A, true);
-	} else if (a_edge < 0) {
+	} else if (a_fall) {
 		app_alarm_event(APP_ALARM_SRC_INPUT_A, false);
 	}
-	if (b_edge > 0) {
+	if (b_rise) {
 		app_alarm_event(APP_ALARM_SRC_INPUT_B, true);
-	} else if (b_edge < 0) {
+	} else if (b_fall) {
 		app_alarm_event(APP_ALARM_SRC_INPUT_B, false);
 	}
 
