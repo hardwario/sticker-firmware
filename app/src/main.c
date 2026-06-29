@@ -11,6 +11,7 @@
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_counters.h"
+#include "app_dfu_meta.h"
 #include "app_history.h"
 #include "app_version.h"
 #include "app_led.h"
@@ -365,6 +366,17 @@ int main(void)
 	}
 
 	/* --- Normal mode --- */
+
+#if defined(CONFIG_USE_DT_CODE_PARTITION)
+	/* Variant-B image (running behind the NFC bootloader): keep the bootloader's
+	 * sfu_meta record seeded with this device's secret_key + serial so it can
+	 * authenticate encrypted DFU frames. Non-fatal — a flash hiccup just leaves
+	 * DFU unkeyed, never a die() loop. */
+	ret = app_dfu_meta_provision();
+	if (ret) {
+		LOG_WRN("app_dfu_meta_provision failed: %d (NFC DFU may be unkeyed)", ret);
+	}
+#endif /* defined(CONFIG_USE_DT_CODE_PARTITION) */
 
 	/* The NFC tag (ST25DV) is non-essential: a broken tag must not brick an
 	 * otherwise-healthy device (radio + sensors fine) into a die() reboot loop

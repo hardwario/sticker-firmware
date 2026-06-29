@@ -43,6 +43,9 @@ include(nanopb)
 zephyr_nanopb_sources(app src/app_config.proto)
 
 target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
+# Variant-B image (behind the NFC bootloader): seeds the bootloader's sfu_meta
+# with this device's secret_key + serial. No-op partition in the flat build.
+target_sources_ifdef(CONFIG_USE_DT_CODE_PARTITION app PRIVATE src/app_dfu_meta.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
 target_sources_ifdef(CONFIG_LIS2DH app PRIVATE src/app_accel.c)
 target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw.c)
