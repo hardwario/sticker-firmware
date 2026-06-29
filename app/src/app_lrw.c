@@ -381,6 +381,20 @@ static void state_transition(enum app_lrw_state new_state)
 /* Event handlers (run on m_work_q)                                         */
 /* ======================================================================== */
 
+/* Build a GetInfo response and stage it on the command port. Shared by the
+ * on-join announce and the deferred clock-sync uplink so the encode buffer and
+ * queue call live in one place (#220.F). Returns the app_cmd_build_info() result. */
+static int queue_info_uplink(void)
+{
+	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
+	size_t info_len;
+	int ret = app_cmd_build_info(info_buf, sizeof(info_buf), &info_len);
+	if (ret == 0) {
+		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len);
+	}
+	return ret;
+}
+
 static void on_join_success(void)
 {
 	LOG_INF("Join successful");
@@ -399,11 +413,7 @@ static void on_join_success(void)
 
 	/* Autonomous GetInfo on join: announce identity/firmware on fPort 85 before
 	 * the first telemetry. send_work drains queued responses first. */
-	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
-	size_t info_len;
-	if (app_cmd_build_info(info_buf, sizeof(info_buf), &info_len) == 0) {
-		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len);
-	} else {
+	if (queue_info_uplink() != 0) {
 		LOG_WRN("app_cmd_build_info failed; skipping GetInfo-on-join");
 	}
 
@@ -574,11 +584,7 @@ static void downlink_success_work_handler(struct k_work *work)
 static void clock_sync_info_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
-	size_t info_len;
-	if (app_cmd_build_info(info_buf, sizeof(info_buf), &info_len) == 0) {
-		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len);
-	}
+	(void)queue_info_uplink();
 }
 
 static void lc_response_work_handler(struct k_work *work)
