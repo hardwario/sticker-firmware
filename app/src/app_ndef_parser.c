@@ -23,6 +23,11 @@ LOG_MODULE_REGISTER(app_ndef_parser, LOG_LEVEL_DBG);
 #define NDEF_TLV_TYPE_NDEF_MSG   0x03
 #define NDEF_TLV_TYPE_TERMINATOR 0xfe
 
+/* NFC Forum Type-5 Capability Container magic bytes (first CC byte): 0xE1 for the
+ * standard one-byte memory-size form, 0xE2 for the extended form. */
+#define NDEF_T5T_CC_MAGIC_E1 0xe1
+#define NDEF_T5T_CC_MAGIC_E2 0xe2
+
 #define NDEF_RECORD_HEADER_TNF_MASK 0x07
 #define NDEF_RECORD_HEADER_IL_FLAG  0x08
 #define NDEF_RECORD_HEADER_SR_FLAG  0x10
@@ -82,6 +87,24 @@ int app_ndef_parser_run(const uint8_t *buffer, size_t buffer_len,
 	const uint8_t *ndef_msg_start = NULL;
 	size_t ndef_msg_len = 0;
 	size_t remaining_len = buffer_len;
+
+	/* NFC Forum Type-5 user memory is laid out as a fixed Capability Container
+	 * (CC) followed by the TLV area, with the NDEF Message TLV at offset 4. The
+	 * CC is NOT a TLV, so skip it before the scan: otherwise its magic byte
+	 * (0xE1/0xE2) is read as an unknown TLV and the following memory-size byte
+	 * (e.g. 0x40 = 64) is taken as a length that jumps clean past the NDEF
+	 * message at offset 4 (#218 — regression of the #199 value-skip). A raw TLV
+	 * buffer written from offset 0 (no CC magic) is parsed unchanged. */
+	if (remaining_len >= 4 &&
+	    (buffer[0] == NDEF_T5T_CC_MAGIC_E1 || buffer[0] == NDEF_T5T_CC_MAGIC_E2)) {
+		/* 4-byte CC normally; 8-byte extended form when the MLEN byte is 0. */
+		size_t cc_len = (buffer[2] == 0x00) ? 8 : 4;
+
+		if (!advance_buffer(&buffer, &remaining_len, cc_len)) {
+			LOG_WRN("Capability Container (%zu B) exceeds buffer", cc_len);
+			return -ENOMSG;
+		}
+	}
 
 	/* Find the NDEF Message TLV (Type-Length-Value) block */
 	while (remaining_len > 0) {
