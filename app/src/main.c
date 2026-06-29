@@ -70,6 +70,11 @@ enum app_mode {
 	APP_MODE_CALIBRATION,
 };
 
+/* Set once app_nfc_init() succeeds. The NFC tag is non-essential (#88): on init
+ * failure we degrade instead of die()-ing, and the poll thread self-exits when
+ * this stays false so a broken ST25DV can't keep the device awake/looping. */
+static bool m_nfc_ready;
+
 static void die(void)
 {
 	LOG_ERR("Rebooting in 60 seconds due to fatal error");
@@ -121,6 +126,15 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
+
+	/* NFC init failed at boot (#88): the tag is unusable, so exit instead of
+	 * polling a dead ST25DV (which would error every wake and keep the CPU busy).
+	 * The thread starts after NFC_POLL_START_DELAY_MS, so main() has already set
+	 * m_nfc_ready by now. */
+	if (!m_nfc_ready) {
+		LOG_WRN("NFC unavailable; poll thread not started");
+		return;
+	}
 
 	for (;;) {
 		/* Sleep until the GPO interrupt fires (phone touched the tag) or the
@@ -342,38 +356,44 @@ int main(void)
 
 	/* --- Normal mode --- */
 
+	/* The NFC tag (ST25DV) is non-essential: a broken tag must not brick an
+	 * otherwise-healthy device (radio + sensors fine) into a die() reboot loop
+	 * (#88). On init failure, log and continue with NFC disabled — the poll
+	 * thread self-exits (m_nfc_ready stays false) and the boot config check is
+	 * skipped. die() stays reserved for wdog / LED / LRW init. */
 	ret = app_nfc_init();
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_nfc_init", ret);
-		die();
-	}
+		LOG_WRN("app_nfc_init failed: %d (NFC unavailable, continuing)", ret);
+	} else {
+		m_nfc_ready = true;
 
-	enum app_nfc_action action;
+		enum app_nfc_action action;
 
-	/* A stale/replay config left on the tag makes app_nfc_check() fail
-	 * (anti-replay) on every boot. Do NOT die() here — that would brick the
-	 * device into a reboot loop. Log and continue, like the periodic check
-	 * in the main loop does. */
-	ret = app_nfc_check(&action);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
-	}
-
-	if (action == APP_NFC_ACTION_SAVE) {
-		play_carousel_nfc();
-
-		ret = app_settings_save(true);
+		/* A stale/replay config left on the tag makes app_nfc_check() fail
+		 * (anti-replay) on every boot. Do NOT die() here — that would brick the
+		 * device into a reboot loop. Log and continue, like the periodic check
+		 * in the main loop does. */
+		ret = app_nfc_check(&action);
 		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
-			die();
+			LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
 		}
-	} else if (action == APP_NFC_ACTION_RESET) {
-		play_carousel_nfc();
 
-		ret = app_settings_reset();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_settings_reset", ret);
-			die();
+		if (action == APP_NFC_ACTION_SAVE) {
+			play_carousel_nfc();
+
+			ret = app_settings_save(true);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
+				die();
+			}
+		} else if (action == APP_NFC_ACTION_RESET) {
+			play_carousel_nfc();
+
+			ret = app_settings_reset();
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_settings_reset", ret);
+				die();
+			}
 		}
 	}
 
