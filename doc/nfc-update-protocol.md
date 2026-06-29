@@ -17,10 +17,14 @@ All multi-byte fields are **little-endian** unless stated otherwise.
 - **Erase-in-place, no fallback** (256 KB part has no room for an A/B slot). Acceptable because
   the operation is operator-present: a failed/interrupted update is simply retried on the spot.
   The bootloader is never erased, so the device is always recoverable via NFC.
-- **Security = pre-signed image**: CI signs the image with a private key; the bootloader verifies
-  the signature against a baked-in **public key**. The phone app is a pure transport — it holds
-  no secret and performs no crypto. DFU entry is requested by the authenticated `enter_dfu` NFC
-  command (§6), so a stray NFC field cannot push a device into DFU.
+- **Security = symmetric AES-CCM** keyed by the per-device `secret_key` (the same secret the NFC
+  config-ingest channel uses). The phone encrypts each frame; the bootloader decrypts with the key
+  it reads from `sfu_meta`, which the **application provisions from its config on every boot** (§6),
+  so the bootloader always holds the current key. A device whose stored key is all-zero accepts
+  plaintext frames unconditionally (factory bootstrap). The `nonce_counter` is **not** used for
+  replay protection here; a per-session value sent in `CMD_START` diversifies the CCM nonce instead
+  (nonce = `serial(4) | session(4) | seq(4) | 0`, 13 B; tag 8 B). DFU entry is requested by the
+  authenticated `enter_dfu` NFC command (§6), so a stray NFC field cannot push a device into DFU.
 
 ## 2. Update image format (`.sfu`)
 
@@ -30,11 +34,11 @@ Produced by CI (Phase 3), transported verbatim by the app, verified by the bootl
 +---------------------+  offset 0
 |  sfu_header (32 B)   |
 +---------------------+  offset 32
-|  signature (64 B)    |  Ed25519 over header[0..31] || payload
-+---------------------+  offset 96
 |  payload (firmware)  |  raw slot0 image, payload_len bytes
-+---------------------+  offset 96 + payload_len
++---------------------+  offset 32 + payload_len
 ```
+There is no image signature: integrity is the payload CRC-32 in the header plus the per-frame
+AES-CCM authentication during transfer (§1, §3). `SFU_FLAG_SIGNED` is reserved and currently unused.
 
 ```c
 struct sfu_header {        /* 32 bytes, little-endian */
@@ -50,8 +54,9 @@ struct sfu_header {        /* 32 bytes, little-endian */
 ```
 
 - The app may also accept a **raw `.bin`** or **Intel `.hex`** with no header — in that case it
-  builds a header itself (no signature, `flags=CRC_PRESENT`). The bootloader rejects unsigned
-  images unless built in a `DEV` configuration (debug builds only).
+  builds a header itself (`flags = CRC_PRESENT`). Authenticity comes from the AES-CCM channel (only
+  a holder of the device `secret_key` can stream a frame the bootloader accepts), so there is no
+  separate signed/unsigned image distinction.
 
 ## 3. Logical frame layer (transport-agnostic)
 
@@ -77,7 +82,7 @@ byte 3..    detail     optional
 |-------------|------|----------------------------------|------------|
 | `CMD_START` | 0x01 | `session`(4) + `sfu_header`(32) [AES-CCM] | Set the CCM session, decrypt/validate the header, erase slot0. Reply `ST_READY` or `ST_ERR_*`. (Unkeyed factory devices accept a plaintext header.) |
 | `CMD_DATA`  | 0x02 | `seq`, `data[len]`               | Write `data` at `seq * MAX_DATA` into slot0. Reply `ST_ACK(seq)` or `ST_RETRY(expected_seq)`. |
-| `CMD_FINISH`| 0x03 | —                                | Verify payload CRC32, then signature over header+payload. On success write the **valid metadata** block, reply `ST_OK`, reboot into app. On failure reply `ST_ERR_VERIFY` (slot0 stays invalid → DFU-wait). |
+| `CMD_FINISH`| 0x03 | —                                | Verify the payload CRC32 over the written slot. On success write the **valid metadata** block (refreshing key+serial), reply `ST_OK`, reboot into app. On failure reply `ST_ERR_VERIFY` (slot0 stays invalid → DFU-wait). |
 | `CMD_ABORT` | 0x04 | —                                | Drop session; slot0 stays erased/partial → DFU-wait. |
 | `CMD_PING`  | 0x05 | —                                | Reply `ST_READY` + bootloader version + max_data + slot0 size. Handshake/discovery. |
 
@@ -91,7 +96,7 @@ byte 3..    detail     optional
 | `ST_ERR_MAGIC` | 0x20 | Bad magic / header |
 | `ST_ERR_SIZE`  | 0x21 | payload_len > slot0 |
 | `ST_ERR_FLASH` | 0x22 | Erase/write failure |
-| `ST_ERR_VERIFY`| 0x23 | CRC or signature mismatch |
+| `ST_ERR_VERIFY`| 0x23 | payload CRC mismatch |
 | `ST_ERR_STATE` | 0x24 | Command not valid in current state |
 
 ### State machine (bootloader, DFU mode)
@@ -145,25 +150,43 @@ re-writes the request each poll window, which also covers the firmware's switch 
 
 (No physical/magnet gesture: the both-hall-magnets reset combo is reserved for calibration mode.)
 
-**Valid metadata block:** a small dedicated flash record (own page) written only after a
-successful `CMD_FINISH`:
+**Metadata + key block (`sfu_meta`):** a small dedicated flash record (own page). The bootloader
+writes it after a successful `CMD_FINISH`; the **application also refreshes it on every boot** from
+its config (`app_dfu_meta_provision()`), so the bootloader always holds the current `secret_key`:
 ```c
-struct sfu_meta { uint32_t magic; uint32_t payload_len; uint32_t payload_crc32; uint32_t valid; };
+#define SFU_META_MAGIC 0x53464D31u /* "SFM1" */
+struct sfu_meta {
+    uint32_t magic;          /* SFU_META_MAGIC when present */
+    uint32_t payload_len;
+    uint32_t payload_crc32;
+    uint32_t valid;          /* SFU_META_MAGIC -> slot0 bootable */
+    uint8_t  secret_key[16]; /* per-device CCM key; all-zero = unkeyed */
+    uint32_t serial;         /* device serial, part of the CCM nonce */
+};
 ```
-**Boot path:** on reset the bootloader reads `sfu_meta`. If `valid == VALID_MAGIC` (and optionally
-the slot0 CRC matches), it jumps to the app at `load_addr`. Otherwise it powers ST25DV via `lpd`
-and stays in DFU-wait, polling the mailbox.
+**Boot path:** on reset the bootloader reads `sfu_meta`. If `magic == SFU_META_MAGIC` the record is
+authoritative — it jumps to the app only when `valid == SFU_META_MAGIC` (a committed image), else it
+stays in DFU-wait (partial/interrupted update). If there is no metadata at all (blank record,
+factory JLink flash), it boots when slot0 holds a plausible vector table, otherwise powers ST25DV
+via `lpd` and stays in DFU-wait, polling the mailbox. The DFU decryption key is loaded from
+`sfu_meta` whenever `magic == SFU_META_MAGIC`; a missing record or an all-zero key means unkeyed
+(plaintext frames accepted). Because the application asserts both `magic` and `valid` when it
+provisions the record, a normally-running device keeps booting; a power loss mid-provision leaves a
+blank record and falls back to the vector-table check, never bricking.
 
 ## 7. Flash layout (variant B)
 
-No second slot. Indicative sizes (tuned once bootloader size is known):
+No second slot. Current layout (`boards/sticker/sticker.dts`):
 ```
-mcuboot/boot   ~48 KB   0x00000000   NFC bootloader (read-only)
-image-0/slot0  ~132 KB  0x0000C000   application (relinked here; code-partition)
-sfu_meta        ~2 KB    ...          valid-metadata page
-history         remainder              sensor store-and-forward (reduced)
-storage          16 KB   0x0003C000   NVS (DevEUI/keys/config — preserved)
+boot            36 KB   0x00000000   NFC bootloader (read-only)
+code_partition 162 KB   0x00009000   application (variant-B links here via CONFIG_USE_DT_CODE_PARTITION)
+sfu_meta         2 KB   0x00031800   metadata + per-device key
+history         40 KB   0x00032000   sensor store-and-forward (reduced from the flat map's 80 KB)
+storage         16 KB   0x0003C000   NVS (DevEUI/keys/config — preserved)
 ```
+Variant B is **release-only**: the debug image is too large to fit `code_partition` behind the
+bootloader. The default flat build is unchanged — it ignores these partitions, links from `0x0`,
+and is flashed standalone without the bootloader.
 
 ## 8. Open hardware items
 
