@@ -108,7 +108,7 @@ Readings are range-checked before they reach telemetry, history and alarms, so a
 - **DS18B20** — values outside −55…125 °C are rejected; the +85.0 °C power-on/brown-out glitch (a valid-CRC sentinel) is **debounced** (a lone spike is suppressed, a sustained real +85 °C still passes after one extra sample). This is the root cause of the earlier spurious low-temperature alarms.
 - **Onboard SHT4x** — temperature/humidity outside the sensor's spec window are rejected.
 - **Accelerometer** — free-fall detection is armed/torn down together with any-motion (no spurious free-fall while motion detection is off); accel **and orientation** are still read into the periodic sample even when motion detection is off.
-- **Alarms** — a minimum threshold hysteresis is enforced (no chattering when `hst` is 0); momentary STATE rules (PIR/accel) reject a `from==to` shape; the 1-Wire bus scan caps the number of recorded ROMs so a noisy bus can't exhaust memory.
+- **Alarms** — a THRESHOLD rule whose clear band is empty (`hi − lo ≤ 2·hst`, including inverted or NaN bounds) is **rejected** on the write path and sanitized on reload, so a latched alarm can always clear (`hst = 0` is honoured verbatim = no dead-band); momentary STATE rules (PIR/accel) reject a `from==to` shape; the 1-Wire bus scan caps the number of recorded ROMs so a noisy bus can't exhaust memory.
 
 ### 1-Wire sensors — repeated, self-describing (changed)
 
@@ -293,6 +293,8 @@ Recordable channels (the `history-sensors` bitmask, one bit each): `temperature`
 Replay over LoRaWAN with the `req_history` downlink command (§1): the device streams the matching records back as `history_frame` messages on fPort 85. Each frame carries a shared `present` mask + `interval_s` once; samples are fixed-size values-only records, time(j) = `t0_unix + j*interval_s`. The replay splits across as many frames as the data rate needs and terminates when the window is exhausted (a data-rate change mid-replay only changes records-per-frame; the consumer concatenates by `frame_index`).
 
 > **Note on `interval-report`:** the LoRaWAN stack persists frame counters to NVS on every uplink; at the 60 s minimum interval with multi-frame reports the storage partition reaches its ~10 k erase budget in roughly 1–2 years. The default (900 s) is decades. History flash wear is fine even at 60 s.
+>
+> **Note on durability:** each record is written on every capture, but the buffer index (count/start/base) is persisted only once every 16 captures to halve history flash wear. An *unclean* reboot can therefore lose visibility to at most the last 15 records (they are still in flash, just not counted, and re-anchor as fresh records arrive). Clean state changes — `clear`, sensor-mask change, interval change, clock sync — persist the index immediately.
 
 ---
 
