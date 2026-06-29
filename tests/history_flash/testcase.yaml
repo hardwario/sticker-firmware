@@ -1,0 +1,5 @@
+common:
+  tags: sticker history
+  platform_allow: native_sim
+tests:
+  sticker.history_flash: {}

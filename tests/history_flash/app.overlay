@@ -1,0 +1,10 @@
+/* Add a dedicated history NVS partition in the 1 MB of flash0 left free above
+ * storage_partition (0x100000 .. 0x200000) on native_sim. */
+&flash0 {
+	partitions {
+		history_partition: partition@100000 {
+			label = "history";
+			reg = <0x00100000 0x00008000>;
+		};
+	};
+};
