@@ -89,6 +89,11 @@ void app_cmd_get_info(struct app_cmd_info *info);
 int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len, uint8_t *out,
 		   size_t out_cap, size_t *out_len, enum app_cmd_action *action);
 
+/* Idle window (seconds) carried by the most recent EnterMailbox command, for the
+ * NFC poll thread to pass to app_nfc_serve_mailbox() when it acts on
+ * APP_CMD_ACTION_ENTER_MAILBOX. 0 = firmware default (field optional/absent). */
+uint32_t app_cmd_get_mailbox_timeout_s(void);
+
 /* Build an unsolicited device Info frame (Response{ seq=0, info=... },
  * the same payload a GetInfo command returns) into `out`. Used to send an
  * autonomous GetInfo uplink on join. Returns 0 with *out_len set, -EINVAL on a

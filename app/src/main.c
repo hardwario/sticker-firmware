@@ -233,8 +233,10 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 				 * update. Blocks here serving the mailbox until the phone goes
 				 * quiet, then returns to the low-power NDEF poll. A SetParam
 				 * served over the mailbox queues its save via m_cmd_action,
-				 * picked up by the next loop iteration below. */
-				app_nfc_serve_mailbox(0);
+				 * picked up by the next loop iteration below. The idle
+				 * window comes from the EnterMailbox command (#200; 0 = the
+				 * firmware default). */
+				app_nfc_serve_mailbox(app_cmd_get_mailbox_timeout_s() * 1000);
 				break;
 			default:
 				break;
