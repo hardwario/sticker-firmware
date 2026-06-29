@@ -6,6 +6,7 @@
 
 #include "app_sht4x.h"
 #include "app_log.h"
+#include "app_sensor_read.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -53,30 +54,21 @@ static uint8_t sht_crc8(const uint8_t *data, size_t len)
 
 int app_sht4x_read(float *temperature, float *humidity)
 {
-	int ret;
-
-	struct sensor_value val;
-
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(sht40));
-	if (!device_is_ready(dev)) {
-		LOG_ERR("Device not ready");
-		return -ENODEV;
-	}
+	static const enum sensor_channel chans[] = {SENSOR_CHAN_AMBIENT_TEMP, SENSOR_CHAN_HUMIDITY};
+	float vals[ARRAY_SIZE(chans)];
 
-	ret = sensor_sample_fetch(dev);
+	int ret = app_sensor_read_channels(dev, chans, vals, ARRAY_SIZE(chans));
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("sensor_sample_fetch", ret);
 		return ret;
 	}
 
-	ret = sensor_channel_get(dev, SENSOR_CHAN_AMBIENT_TEMP, &val);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("sensor_channel_get", ret);
-		return ret;
-	}
+	float temperature_ = vals[0];
+	float humidity_ = vals[1];
 
-	float temperature_ = sensor_value_to_float(&val);
-
+	/* Application-level plausibility gate (#202): a stuck part can return a
+	 * finite out-of-range value that would feed a false onboard-temp/humidity
+	 * alarm, so reject implausible channels. */
 	LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(temperature_));
 
 	if (temperature_ < SHT4X_TEMP_MIN || temperature_ > SHT4X_TEMP_MAX) {
@@ -87,14 +79,6 @@ int app_sht4x_read(float *temperature, float *humidity)
 	if (temperature) {
 		*temperature = temperature_;
 	}
-
-	ret = sensor_channel_get(dev, SENSOR_CHAN_HUMIDITY, &val);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("sensor_channel_get", ret);
-		return ret;
-	}
-
-	float humidity_ = sensor_value_to_float(&val);
 
 	LOG_DBG("Humidity: %s%d.%01d %%", APP_FP1(humidity_));
 

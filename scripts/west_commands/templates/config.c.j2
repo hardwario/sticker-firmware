@@ -3,16 +3,7 @@
 static void print_{{ param.name | c_name }}(const struct shell *shell)
 {
 {% if param.type == 'bytes' %}
-	char buf[2 * sizeof(m_{{ module.name }}.{{ param.name | c_name }}) + 1];
-
-	int ret =
-		bin2hex(m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}), buf, sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " {{ param.name | settings_key }} %s", buf);
+	print_bytes(shell, "{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% elif param.type == 'string' %}
 	shell_print(shell, SETTINGS_PFX " {{ param.name | settings_key }} %s", m_{{ module.name }}.{{ param.name | c_name }});
 {% elif param.type == 'bool' %}
@@ -263,49 +254,7 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 
 	return 0;
 {% elif param.type == 'bytes' %}
-	int ret;
-
-	if (argc == 1) {
-		print_{{ param.name | c_name }}(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_{{ module.name }}.{{ param.name | c_name }})) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_{{ module.name }}.{{ param.name | c_name }})];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-{% if param.write_once | default(false) %}
-	/* write-once (#170): refuse to overwrite a value that is already set. The
-	 * all-zero state is the "unset" sentinel; once any byte is non-zero the
-	 * field is locked (commission once, then immutable). */
-	for (size_t i = 0; i < sizeof(m_{{ module.name }}.{{ param.name | c_name }}); i++) {
-		if (m_{{ module.name }}.{{ param.name | c_name }}[i] != 0) {
-			shell_error(shell, "{{ param.name | settings_key }} already set (immutable)");
-			return -EACCES;
-		}
-	}
-{% endif %}
-	memcpy(m_{{ module.name }}.{{ param.name | c_name }}, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}), {{ 'true' if param.write_once | default(false) else 'false' }}, print_{{ param.name | c_name }});
 {% elif param.type == 'enum' %}
 {% set enum_values = enums[param.enum] %}
 {% set ns = namespace(tokens=[]) %}
@@ -535,6 +484,84 @@ typedef void (*print_func_t)(const struct shell *shell);
 {% set needs_cmd_int = parameters | selectattr('type', 'equalto', 'int') | rejectattr('readonly', 'defined') | rejectattr('extras', 'defined') | list | length > 0 %}
 {% set needs_cmd_uint = parameters | selectattr('type', 'equalto', 'uint') | rejectattr('readonly', 'defined') | rejectattr('extras', 'defined') | list | length > 0 %}
 {% set needs_cmd_float = parameters | selectattr('type', 'equalto', 'float') | rejectattr('readonly', 'defined') | list | length > 0 %}
+{% set needs_print_bytes = parameters | selectattr('type', 'equalto', 'bytes') | list | length > 0 %}
+{% set needs_cmd_bytes = parameters | selectattr('type', 'equalto', 'bytes') | rejectattr('readonly', 'defined') | list | length > 0 %}
+{% if needs_print_bytes %}
+/* Largest shell-settable byte field is 16 B (the LoRaWAN keys); the guard keeps
+ * the fixed scratch safe should a longer field ever be added. */
+#define CMD_BYTES_MAX 32
+
+static void print_bytes(const struct shell *shell, const char *key, const uint8_t *value,
+			size_t size)
+{
+	char buf[2 * CMD_BYTES_MAX + 1];
+
+	if (size > CMD_BYTES_MAX) {
+		return;
+	}
+
+	int ret = bin2hex(value, size, buf, sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " %s %s", key, buf);
+}
+
+{% endif %}
+{% if needs_cmd_bytes %}
+static int cmd_bytes(const struct shell *shell, size_t argc, char **argv, uint8_t *value,
+		     size_t size, bool write_once, print_func_t print_func)
+{
+	if (argc == 1) {
+		if (print_func) {
+			print_func(shell);
+		}
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (size > CMD_BYTES_MAX || strlen(argv[1]) != 2 * size) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[CMD_BYTES_MAX];
+
+	int ret = hex2bin(argv[1], strlen(argv[1]), tmp, size);
+	if (ret != (int)size) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (write_once) {
+		/* write-once (#170): refuse to overwrite a value that is already set. The
+		 * all-zero state is the "unset" sentinel; once any byte is non-zero the
+		 * field is locked (commission once, then immutable). */
+		for (size_t i = 0; i < size; i++) {
+			if (value[i] != 0) {
+				shell_error(shell, "%s already set (immutable)", argv[0]);
+				return -EACCES;
+			}
+		}
+	}
+
+	memcpy(value, tmp, size);
+
+	return 0;
+}
+
+{% endif %}
 {% if needs_cmd_bool %}
 static int cmd_bool(const struct shell *shell, size_t argc, char **argv, bool *param,
 		    print_func_t print_func)

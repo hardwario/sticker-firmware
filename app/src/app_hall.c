@@ -7,6 +7,7 @@
 #include "app_hall.h"
 #include "app_alarm.h"
 #include "app_config.h"
+#include "app_gpio_count.h"
 #include "app_log.h"
 
 /* Zephyr includes */
@@ -30,20 +31,26 @@ static struct app_hall_data m_hall_data;
 
 K_MUTEX_DEFINE(m_hall_data_mutex);
 
+static const struct app_gpio_count_chan m_chan_left = {
+	.name = "Left hall switch",
+	.counter_en = &g_app_config.hall_left_counter,
+	.stored_active = &m_hall_data.left_is_active,
+	.count = &m_hall_data.left_count,
+};
+
+static const struct app_gpio_count_chan m_chan_right = {
+	.name = "Right hall switch",
+	.counter_en = &g_app_config.hall_right_counter,
+	.stored_active = &m_hall_data.right_is_active,
+	.count = &m_hall_data.right_count,
+};
+
 static int poll(void)
 {
-	int ret;
+	int ret = 0;
 
-	bool left_was_active;
-	bool left_is_active;
-
-	bool right_was_active;
-	bool right_is_active;
-
-	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
-	left_was_active = m_hall_data.left_is_active;
-	right_was_active = m_hall_data.right_is_active;
-	k_mutex_unlock(&m_hall_data_mutex);
+	bool left_is_active = false;
+	bool right_is_active = false;
 
 	if (!g_app_config.cap_hall_left) {
 		left_is_active = false;
@@ -118,47 +125,22 @@ restore:
 		return ret;
 	}
 
-	bool left_rise = (!left_was_active && left_is_active);
-	bool left_fall = (left_was_active && !left_is_active);
-	bool right_rise = (!right_was_active && right_is_active);
-	bool right_fall = (right_was_active && !right_is_active);
-
 	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
-
-	m_hall_data.left_is_active = left_is_active;
-	m_hall_data.right_is_active = right_is_active;
-
-	if (left_rise) {
-		if (g_app_config.hall_left_counter) {
-			m_hall_data.left_count++;
-		}
-		LOG_DBG("Left hall switch activated, count: %u", m_hall_data.left_count);
-	} else if (left_fall) {
-		LOG_DBG("Left hall switch deactivated");
-	}
-
-	if (right_rise) {
-		if (g_app_config.hall_right_counter) {
-			m_hall_data.right_count++;
-		}
-		LOG_DBG("Right hall switch activated, count: %u", m_hall_data.right_count);
-	} else if (right_fall) {
-		LOG_DBG("Right hall switch deactivated");
-	}
-
+	int left_edge = app_gpio_count_apply(&m_chan_left, left_is_active);
+	int right_edge = app_gpio_count_apply(&m_chan_right, right_is_active);
 	k_mutex_unlock(&m_hall_data_mutex);
 
 	/* Fire alarm events after releasing the data mutex: app_alarm_event() takes
 	 * the alarm lock and may enqueue an uplink. Keeping it outside avoids the
 	 * data->alarm nested lock order and holding the data lock over alarm work. */
-	if (left_rise) {
+	if (left_edge > 0) {
 		app_alarm_event(APP_ALARM_SRC_HALL_LEFT, true);
-	} else if (left_fall) {
+	} else if (left_edge < 0) {
 		app_alarm_event(APP_ALARM_SRC_HALL_LEFT, false);
 	}
-	if (right_rise) {
+	if (right_edge > 0) {
 		app_alarm_event(APP_ALARM_SRC_HALL_RIGHT, true);
-	} else if (right_fall) {
+	} else if (right_edge < 0) {
 		app_alarm_event(APP_ALARM_SRC_HALL_RIGHT, false);
 	}
 

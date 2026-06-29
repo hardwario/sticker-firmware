@@ -397,6 +397,78 @@ static const char m_msg_cmd_success[] = "command succeeded";
 
 typedef void (*print_func_t)(const struct shell *shell);
 
+/* Largest shell-settable byte field is 16 B (the LoRaWAN keys); the guard keeps
+ * the fixed scratch safe should a longer field ever be added. */
+#define CMD_BYTES_MAX 32
+
+static void print_bytes(const struct shell *shell, const char *key, const uint8_t *value,
+			size_t size)
+{
+	char buf[2 * CMD_BYTES_MAX + 1];
+
+	if (size > CMD_BYTES_MAX) {
+		return;
+	}
+
+	int ret = bin2hex(value, size, buf, sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " %s %s", key, buf);
+}
+
+static int cmd_bytes(const struct shell *shell, size_t argc, char **argv, uint8_t *value,
+		     size_t size, bool write_once, print_func_t print_func)
+{
+	if (argc == 1) {
+		if (print_func) {
+			print_func(shell);
+		}
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (size > CMD_BYTES_MAX || strlen(argv[1]) != 2 * size) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[CMD_BYTES_MAX];
+
+	int ret = hex2bin(argv[1], strlen(argv[1]), tmp, size);
+	if (ret != (int)size) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (write_once) {
+		/* write-once (#170): refuse to overwrite a value that is already set. The
+		 * all-zero state is the "unset" sentinel; once any byte is non-zero the
+		 * field is locked (commission once, then immutable). */
+		for (size_t i = 0; i < size; i++) {
+			if (value[i] != 0) {
+				shell_error(shell, "%s already set (immutable)", argv[0]);
+				return -EACCES;
+			}
+		}
+	}
+
+	memcpy(value, tmp, size);
+
+	return 0;
+}
+
 static int cmd_bool(const struct shell *shell, size_t argc, char **argv, bool *param,
 		    print_func_t print_func)
 {
@@ -460,16 +532,7 @@ static int cmd_int(const struct shell *shell, size_t argc, char **argv, int *par
 
 static void print_secret_key(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.secret_key) + 1];
-
-	int ret =
-		bin2hex(m_app_config.secret_key, sizeof(m_app_config.secret_key), buf, sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " secret-key %s", buf);
+	print_bytes(shell, "secret-key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
 }
 
 static void print_serial_number(const struct shell *shell)
@@ -484,16 +547,8 @@ static void print_nonce_counter(const struct shell *shell)
 
 static void print_claim_token(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.claim_token) + 1];
-
-	int ret = bin2hex(m_app_config.claim_token, sizeof(m_app_config.claim_token), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " claim-token %s", buf);
+	print_bytes(shell, "claim-token", m_app_config.claim_token,
+		    sizeof(m_app_config.claim_token));
 }
 
 static void print_calibration(const struct shell *shell)
@@ -604,100 +659,41 @@ static void print_lrw_activation(const struct shell *shell)
 
 static void print_lrw_deveui(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_deveui) + 1];
-
-	int ret =
-		bin2hex(m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui), buf, sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-deveui %s", buf);
+	print_bytes(shell, "lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
 }
 
 static void print_lrw_joineui(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_joineui) + 1];
-
-	int ret = bin2hex(m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-joineui %s", buf);
+	print_bytes(shell, "lrw-joineui", m_app_config.lrw_joineui,
+		    sizeof(m_app_config.lrw_joineui));
 }
 
 static void print_lrw_nwkkey(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_nwkkey) + 1];
-
-	int ret =
-		bin2hex(m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey), buf, sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-nwkkey %s", buf);
+	print_bytes(shell, "lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
 }
 
 static void print_lrw_appkey(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_appkey) + 1];
-
-	int ret =
-		bin2hex(m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey), buf, sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-appkey %s", buf);
+	print_bytes(shell, "lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
 }
 
 static void print_lrw_devaddr(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_devaddr) + 1];
-
-	int ret = bin2hex(m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-devaddr %s", buf);
+	print_bytes(shell, "lrw-devaddr", m_app_config.lrw_devaddr,
+		    sizeof(m_app_config.lrw_devaddr));
 }
 
 static void print_lrw_nwkskey(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_nwkskey) + 1];
-
-	int ret = bin2hex(m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-nwkskey %s", buf);
+	print_bytes(shell, "lrw-nwkskey", m_app_config.lrw_nwkskey,
+		    sizeof(m_app_config.lrw_nwkskey));
 }
 
 static void print_lrw_appskey(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_appskey) + 1];
-
-	int ret = bin2hex(m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-appskey %s", buf);
+	print_bytes(shell, "lrw-appskey", m_app_config.lrw_appskey,
+		    sizeof(m_app_config.lrw_appskey));
 }
 
 static void print_lrw_link_check_interval(const struct shell *shell)
@@ -791,58 +787,26 @@ static void print_accel_motion_sensitivity(const struct shell *shell)
 
 static void print_sensor1_rom(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.sensor1_rom) + 1];
-
-	int ret = bin2hex(m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " sensor1-rom %s", buf);
+	print_bytes(shell, "sensor1-rom", m_app_config.sensor1_rom,
+		    sizeof(m_app_config.sensor1_rom));
 }
 
 static void print_sensor2_rom(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.sensor2_rom) + 1];
-
-	int ret = bin2hex(m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " sensor2-rom %s", buf);
+	print_bytes(shell, "sensor2-rom", m_app_config.sensor2_rom,
+		    sizeof(m_app_config.sensor2_rom));
 }
 
 static void print_sensor3_rom(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.sensor3_rom) + 1];
-
-	int ret = bin2hex(m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " sensor3-rom %s", buf);
+	print_bytes(shell, "sensor3-rom", m_app_config.sensor3_rom,
+		    sizeof(m_app_config.sensor3_rom));
 }
 
 static void print_sensor4_rom(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.sensor4_rom) + 1];
-
-	int ret = bin2hex(m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " sensor4-rom %s", buf);
+	print_bytes(shell, "sensor4-rom", m_app_config.sensor4_rom,
+		    sizeof(m_app_config.sensor4_rom));
 }
 
 static void print_hall_left_counter(const struct shell *shell)
@@ -921,38 +885,8 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 
 static int cmd_secret_key(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_secret_key(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.secret_key)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.secret_key)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	memcpy(m_app_config.secret_key, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.secret_key,
+			 sizeof(m_app_config.secret_key), false, print_secret_key);
 }
 
 static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv)
@@ -1036,47 +970,8 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 
 static int cmd_claim_token(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_claim_token(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.claim_token)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.claim_token)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	/* write-once (#170): refuse to overwrite a value that is already set. The
-	 * all-zero state is the "unset" sentinel; once any byte is non-zero the
-	 * field is locked (commission once, then immutable). */
-	for (size_t i = 0; i < sizeof(m_app_config.claim_token); i++) {
-		if (m_app_config.claim_token[i] != 0) {
-			shell_error(shell, "claim-token already set (immutable)");
-			return -EACCES;
-		}
-	}
-	memcpy(m_app_config.claim_token, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.claim_token,
+			 sizeof(m_app_config.claim_token), true, print_claim_token);
 }
 
 static int cmd_calibration(const struct shell *shell, size_t argc, char **argv)
@@ -1289,254 +1184,44 @@ static int cmd_lrw_activation(const struct shell *shell, size_t argc, char **arg
 
 static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_deveui(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_deveui)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.lrw_deveui)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	memcpy(m_app_config.lrw_deveui, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_deveui,
+			 sizeof(m_app_config.lrw_deveui), false, print_lrw_deveui);
 }
 
 static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_joineui(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_joineui)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.lrw_joineui)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	memcpy(m_app_config.lrw_joineui, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_joineui,
+			 sizeof(m_app_config.lrw_joineui), false, print_lrw_joineui);
 }
 
 static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_nwkkey(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_nwkkey)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.lrw_nwkkey)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	memcpy(m_app_config.lrw_nwkkey, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_nwkkey,
+			 sizeof(m_app_config.lrw_nwkkey), false, print_lrw_nwkkey);
 }
 
 static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_appkey(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_appkey)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.lrw_appkey)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	memcpy(m_app_config.lrw_appkey, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_appkey,
+			 sizeof(m_app_config.lrw_appkey), false, print_lrw_appkey);
 }
 
 static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_devaddr(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_devaddr)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.lrw_devaddr)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	memcpy(m_app_config.lrw_devaddr, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_devaddr,
+			 sizeof(m_app_config.lrw_devaddr), false, print_lrw_devaddr);
 }
 
 static int cmd_lrw_nwkskey(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_nwkskey(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_nwkskey)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.lrw_nwkskey)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	memcpy(m_app_config.lrw_nwkskey, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_nwkskey,
+			 sizeof(m_app_config.lrw_nwkskey), false, print_lrw_nwkskey);
 }
 
 static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_appskey(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_appskey)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.lrw_appskey)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	memcpy(m_app_config.lrw_appskey, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_appskey,
+			 sizeof(m_app_config.lrw_appskey), false, print_lrw_appskey);
 }
 
 static int cmd_lrw_link_check_interval(const struct shell *shell, size_t argc, char **argv)
@@ -1634,146 +1319,26 @@ static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, 
 
 static int cmd_sensor1_rom(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_sensor1_rom(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.sensor1_rom)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.sensor1_rom)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	memcpy(m_app_config.sensor1_rom, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.sensor1_rom,
+			 sizeof(m_app_config.sensor1_rom), false, print_sensor1_rom);
 }
 
 static int cmd_sensor2_rom(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_sensor2_rom(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.sensor2_rom)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.sensor2_rom)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	memcpy(m_app_config.sensor2_rom, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.sensor2_rom,
+			 sizeof(m_app_config.sensor2_rom), false, print_sensor2_rom);
 }
 
 static int cmd_sensor3_rom(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_sensor3_rom(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.sensor3_rom)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.sensor3_rom)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	memcpy(m_app_config.sensor3_rom, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.sensor3_rom,
+			 sizeof(m_app_config.sensor3_rom), false, print_sensor3_rom);
 }
 
 static int cmd_sensor4_rom(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_sensor4_rom(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.sensor4_rom)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
-	 * into the destination and bails (returning 0) on the first invalid nibble,
-	 * so decoding into the config would leave a half-overwritten key that a
-	 * later `save` would persist. Commit only on a fully valid decode. */
-	uint8_t tmp[sizeof(m_app_config.sensor4_rom)];
-
-	ret = hex2bin(argv[1], strlen(argv[1]), tmp, sizeof(tmp));
-	if (ret != sizeof(tmp)) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-	memcpy(m_app_config.sensor4_rom, tmp, sizeof(tmp));
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.sensor4_rom,
+			 sizeof(m_app_config.sensor4_rom), false, print_sensor4_rom);
 }
 
 static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)

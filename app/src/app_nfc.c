@@ -1436,17 +1436,9 @@ int app_nfc_check(enum app_nfc_action *action)
  * while the RF field is briefly off, which IT_STS wouldn't flag anyway. */
 int app_nfc_poll(enum app_nfc_action *action)
 {
-	*action = APP_NFC_ACTION_NONE;
-
-	int ret = nfc_access_begin();
-	if (ret) {
-		return ret;
-	}
-
-	int res = nfc_check_locked(action);
-
-	nfc_access_end();
-	return res;
+	/* Identical to app_nfc_check() — both do a full tag read under the access
+	 * lock; kept as a separate entry point for call-site clarity (#220.F). */
+	return app_nfc_check(action);
 }
 
 /* #164: true while a response record is left on the tag and the info record has
