@@ -646,6 +646,27 @@ static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *
 #endif
 }
 
+/* Mailbox idle window (seconds) requested by the last EnterMailbox command. The
+ * NFC poll thread reads it when it acts on APP_CMD_ACTION_ENTER_MAILBOX. 0 = use
+ * the firmware default (the field is optional and absent → 0). */
+static uint32_t m_mailbox_timeout_s;
+
+uint32_t app_cmd_get_mailbox_timeout_s(void)
+{
+	return m_mailbox_timeout_s;
+}
+
+static void app_cmd_handle_enter_mailbox(enum app_cmd_transport tp, const Command *cmd,
+					 Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	/* Plumb the requested idle window through to app_nfc_serve_mailbox() — it
+	 * used to be decoded and dropped (#200). 0 (or absent) keeps the default. */
+	m_mailbox_timeout_s = cmd->body.enter_mailbox.timeout_s;
+	*action = APP_CMD_ACTION_ENTER_MAILBOX;
+	resp->which_body = Response_ack_tag;
+}
+
 static void app_cmd_handle_w1_scan(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				   enum app_cmd_action *action)
 {
@@ -766,8 +787,7 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
-		*action = APP_CMD_ACTION_ENTER_MAILBOX;
-		resp->which_body = Response_ack_tag;
+		app_cmd_handle_enter_mailbox(tp, cmd, resp, action);
 		break;
 	case Command_exit_mailbox_tag:
 		/* transports: [nfc] — reject on any other transport */
