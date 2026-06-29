@@ -198,7 +198,11 @@ static uint8_t m_lc_response_gw_count;
 #define APP_LRW_DOWNLINK_CMD_PORT 85
 #define APP_LRW_ALARM_PORT        3
 #define APP_LRW_TX_QUEUE_DEPTH    4
-#define APP_LRW_DL_QUEUE_DEPTH    4
+/* Downlink-command FIFO. Each slot is a full-MTU lrw_dl_msg (~228 B), and the
+ * network delivers at most one port-85 command per RX window, drained promptly by
+ * m_dl_request_work. Depth 2 absorbs a back-to-back pair while halving the buffer
+ * vs the old depth 4 (saves ~456 B RAM, #221.4). */
+#define APP_LRW_DL_QUEUE_DEPTH    2
 
 /* The request buffer must hold a full-MTU downlink so the largest command the
  * network can deliver still fits (#93.4/#93.7). Response/frame buffers are
