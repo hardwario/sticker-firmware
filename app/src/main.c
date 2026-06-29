@@ -8,6 +8,7 @@
 #include "app_battery.h"
 #include "app_calibration.h"
 #include "app_clock.h"
+#include "app_cmd.h"
 #include "app_config.h"
 #include "app_counters.h"
 #include "app_history.h"
@@ -23,6 +24,7 @@
 #include "app_wdog.h"
 
 /* Zephyr includes */
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -50,9 +52,9 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 #define NFC_INFO_RESTORE_DEBOUNCE_MS 10000
 #define NFC_POLL_START_DELAY_MS      3000
 /* Sized for the deepest NFC command run on this thread: a GetConfig/GetParam
- * over NFC packs DUMP_FIELDS into ids[4][~48] (~768 B), builds a Response (union
- * sized to ConfigDump), and runs PSA AES-CCM decrypt/encrypt + nanopb — far more
- * than a short GetInfo. 3072 B overflowed on the longer commands. */
+ * over NFC packs DUMP_FIELDS tags into a flat ids[] (#176), builds a Response
+ * (union sized to ConfigDump), and runs PSA AES-CCM decrypt/encrypt + nanopb —
+ * far more than a short GetInfo. 3072 B overflowed on the longer commands. */
 #define NFC_POLL_THREAD_STACK_SIZE   6144
 #define NFC_POLL_THREAD_PRIO         K_LOWEST_APPLICATION_THREAD_PRIO
 /* Delay before running an NFC command's deferred action, so the phone can read
@@ -290,6 +292,20 @@ int main(void)
 		app_version_is_debug() ? "debug" : "release");
 	LOG_INF("Build time: " __DATE__ " " __TIME__);
 
+	/* Capture why we last reset (watchdog / brownout / pin / software) and clear
+	 * the latch so the next boot reports a fresh cause. Reported in GetInfo so a
+	 * watchdog reset is visible in the field (#88). */
+#if defined(CONFIG_HWINFO)
+	uint32_t reset_cause = 0;
+	if (hwinfo_get_reset_cause(&reset_cause) == 0) {
+		LOG_INF("Reset cause: 0x%08x", reset_cause);
+		(void)hwinfo_clear_reset_cause();
+	} else {
+		LOG_WRN("hwinfo_get_reset_cause unavailable");
+	}
+	app_cmd_set_reset_cause(reset_cause);
+#endif /* defined(CONFIG_HWINFO) */
+
 	/* Shared HW init */
 #if defined(CONFIG_WATCHDOG)
 	ret = app_wdog_init();
@@ -399,10 +415,13 @@ int main(void)
 	}
 #endif /* defined(CONFIG_LORAWAN) */
 
+	/* A failed battery monitor must not brick an otherwise-healthy device into a
+	 * die() reboot loop (#88): the radio and sensors work without it. Degrade
+	 * gracefully — app_battery_measure() then returns an error and callers already
+	 * treat that as "unavailable" (Info battery = 0, DevStatusAns level = 255). */
 	ret = app_battery_init();
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_battery_init", ret);
-		die();
+		LOG_WRN("app_battery_init failed: %d (battery monitoring unavailable)", ret);
 	}
 
 #if defined(CONFIG_WATCHDOG)

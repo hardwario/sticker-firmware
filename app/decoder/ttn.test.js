@@ -184,6 +184,19 @@ test("decodeUplink get_info omits claim_token when uncommissioned (fPort 85)", (
   assert.equal(got.info.claim_token, undefined);
 });
 
+// Info carries battery (field 10, mV) and reset_cause (field 11, hwinfo bitmask
+// of the last boot, #88). Inner Info: fw 1.4.2, battery=3062 mV, reset_cause=0x20
+// (RESET_WATCHDOG).
+test("decodeUplink decodes get_info battery + reset_cause (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a0b08011004180250f6175820"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.seq, 3);
+  assert.equal(got.info.battery, 3062);
+  assert.equal(got.info.reset_cause, 0x20);
+});
+
 // --- Uplink: protobuf telemetry (fPort 2) ---------------------------------
 // Real HW capture (#78/#80 verification, device sticker-2162165131, 2026-06-09):
 // a non-boot report with hall-left + hall-right capabilities enabled but no

@@ -245,6 +245,7 @@ message Response {
         bool   debug         = 8;   // true = debug build, false = release
         optional bytes claim_token = 9;   // 128-bit device claim token (#170); omitted until commissioned
         uint32 battery       = 10;  // supply voltage in mV (0 = unavailable)
+        uint32 reset_cause   = 11;  // hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown
     }
 
     message ConfigDump {

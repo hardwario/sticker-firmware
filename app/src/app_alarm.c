@@ -87,7 +87,10 @@ struct rstate {
 };
 
 static struct rstate m_rt[APP_ALARM_SLOT_COUNT];
-static int64_t m_last_alarm_send_ms;
+/* -1 = "never sent" sentinel; k_uptime_get() legitimately returns 0 in the first
+ * millisecond after boot, so 0 cannot mark "never sent" without a window where the
+ * rate limit is silently skipped (#219). */
+static int64_t m_last_alarm_send_ms = -1;
 static app_alarm_event_cb m_event_cb;
 static void *m_event_cb_user_data;
 
@@ -144,7 +147,7 @@ static void alarm_lrw_send(void)
 	 * guard it under m_lock (#93.6); release before app_lrw_send() so the radio
 	 * call never runs while holding the alarm lock. */
 	k_mutex_lock(&m_lock, K_FOREVER);
-	if (limit > 0 && m_last_alarm_send_ms != 0 &&
+	if (limit > 0 && m_last_alarm_send_ms != -1 &&
 	    (now - m_last_alarm_send_ms) < (int64_t)limit * 1000) {
 		send = false;
 	} else {
