@@ -487,7 +487,7 @@ The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel �
 
 > **Validation builds.** `CONFIG_APP_NFC_ENCRYPTION=n` turns the channel to **plaintext** — command/config records are accepted with no key, serial check or nonce, and the response is written back in the clear. This is **bench-only**: such a build logs a loud boot banner (`NFC ENCRYPTION DISABLED - VALIDATION BUILD ONLY`) and must never be shipped. Build it with `west build … -- -DCONFIG_APP_NFC_ENCRYPTION=n`.
 
-**Tag format.** Records are NFC Forum **Type 5**: a 4-byte Capability Container (`E1 40 40 01`) followed by an NDEF message. Each record uses a short **NFC Forum external type** to keep the 512-byte user memory free for payload:
+**Tag format.** Records are NFC Forum **Type 5**: a 4-byte Capability Container (`E1 40 40 01`) followed by an NDEF message. The NDEF parser skips the CC (4-byte form, or 8-byte when the memory-size byte is 0) before the TLV scan, so a record a compliant phone writes at the standard offset 4 is read correctly (#218 — a regression where the CC was consumed as a 64-byte unknown TLV and the NDEF message was skipped). Each record uses a short **NFC Forum external type** to keep the 512-byte user memory free for payload:
 
 | Record | NDEF type |
 |---|---|
