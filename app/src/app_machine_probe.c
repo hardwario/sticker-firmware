@@ -479,6 +479,16 @@ static int si7210_read(const struct device *dev, float *magnetic_field)
 
 	uint8_t reg_dspsigm = read_buf[0];
 
+	/* Dspsigm bit 7 is the "Fresh" flag: the Si7210 sets it when a new ONEBURST
+	 * conversion result is available. The DS28E17 1-Wire readback is not
+	 * CRC-protected, so a flipped bit on a long machine-probe cable could inject a
+	 * silent bad field value (and a false hall alarm). If Fresh is clear the byte
+	 * is stale or corrupt on the wire — reject the read rather than trust it (#219). */
+	if (!(reg_dspsigm & BIT(7))) {
+		LOG_WRN("Si7210 Dspsigm not fresh (0x%02x), discarding read", reg_dspsigm);
+		return -EIO;
+	}
+
 	write_buf[0] = 0xc2;
 
 	ret = ds28e17_i2c_write_read(dev, SI7210_I2C_ADDR, write_buf, 1, read_buf, 1);

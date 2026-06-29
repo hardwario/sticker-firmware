@@ -21,6 +21,7 @@
 #include "app_w1_slots.h"
 
 /* Zephyr includes */
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -776,6 +777,40 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_APP_CMD_DEBUG_SHELL */
 
+/* Decode a hwinfo reset-cause bitmask (from app_cmd_info.reset_cause, read at
+ * boot via hwinfo_get_reset_cause) into a human-readable shell line. On the
+ * STM32WLE5 the driver only ever sets the flags below; several can be set at
+ * once (a cold power-up typically asserts power-on + pin + brownout together). */
+static void print_reset_cause(const struct shell *sh, uint32_t cause)
+{
+	static const struct {
+		uint32_t flag;
+		const char *name;
+	} names[] = {
+		{RESET_PIN, "pin"},
+		{RESET_SOFTWARE, "software"},
+		{RESET_BROWNOUT, "brownout"},
+		{RESET_POR, "power-on"},
+		{RESET_WATCHDOG, "watchdog"},
+		{RESET_SECURITY, "security"},
+		{RESET_LOW_POWER_WAKE, "low-power-wake"},
+	};
+
+	char buf[96] = "";
+
+	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+		if (cause & names[i].flag) {
+			if (buf[0] != '\0') {
+				strlcat(buf, ", ", sizeof(buf));
+			}
+			strlcat(buf, names[i].name, sizeof(buf));
+		}
+	}
+
+	shell_print(sh, "Reset cause:   0x%08x (%s)", cause,
+		    buf[0] != '\0' ? buf : (cause ? "other" : "unknown"));
+}
+
 /* Prints the same device info a GetInfo command returns over LoRaWAN, via the
  * shared app_cmd_get_info() (single source of truth). */
 static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
@@ -801,6 +836,8 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	} else {
 		shell_print(sh, "Battery:       unavailable");
 	}
+
+	print_reset_cause(sh, info.reset_cause);
 
 	if (info.has_unix_time) {
 		time_t t = (time_t)info.unix_time;

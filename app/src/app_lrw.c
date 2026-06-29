@@ -113,6 +113,7 @@ static struct k_work_delayable m_frame_work; /* multi-frame snapshot continuatio
 static struct k_work m_join_work;
 static struct k_work m_link_check_work;       /* LC timeout (from m_lc_timeout_timer) */
 static struct k_work m_downlink_success_work; /* deferred from downlink_callback */
+static struct k_work m_clock_sync_info_work;  /* deferred ClockSync Info uplink (#219) */
 static struct k_work m_lc_response_work;      /* deferred from link_check_callback */
 static struct k_work m_force_lc_work;         /* arm a forced LC on the next telemetry */
 static struct k_work m_dl_request_work;       /* drains m_dl_msgq (port-85 commands) */
@@ -124,14 +125,18 @@ static struct k_work_delayable
 
 /* Multi-frame telemetry: gap before the next frame of the same snapshot (covers
  * RX1/RX2 windows) and backoff when a send is refused (duty cycle / MAC busy). */
-#define FRAME_GAP_SEC   3
-#define FRAME_RETRY_SEC 15
+#define FRAME_GAP_SEC     3
+#define FRAME_RETRY_SEC   15
+/* Duty-cycle/MAC-busy retries before abandoning a telemetry frame (#219); mirrors
+ * HISTORY_MAX_RETRIES so a permanent TX error can't be retried forever. */
+#define FRAME_MAX_RETRIES 8
 
 static uint8_t m_frame_buf[64];
 static size_t m_frame_len;
 static bool m_frame_more;
 static bool m_frame_first;
 static bool m_frame_resend;
+static int m_frame_retries;  /* consecutive lorawan_send failures on the current frame (#219) */
 static bool m_frame_with_lc; /* #188: link-check decision, computed once at compose,
 			      * reused on resend (should_request_link_check() has a side
 			      * effect — must not re-run on a duty-cycle retry) */
@@ -563,6 +568,19 @@ static void downlink_success_work_handler(struct k_work *work)
 	on_downlink_received();
 }
 
+/* Deferred from downlink_callback (#219): the nanopb Info encode + queue must not
+ * run on the LoRaMac/system-WQ callback stack, whose depth is not ours to assume.
+ * Runs on m_work_q like every other TX-side work item. */
+static void clock_sync_info_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
+	size_t info_len;
+	if (app_cmd_build_info(info_buf, sizeof(info_buf), &info_len) == 0) {
+		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len);
+	}
+}
+
 static void lc_response_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -879,6 +897,7 @@ static void tx_telemetry_frame(bool first_frame)
 			 * owns the cadence, so just return. */
 			return;
 		}
+		m_frame_retries = 0; /* fresh frame composed; reset the retry budget (#219) */
 		m_frame_first = first_frame;
 		/* #188: decide the link-check piggyback exactly once, here on the fresh
 		 * compose. should_request_link_check() decrements m_force_lc_remaining and
@@ -912,13 +931,24 @@ static void tx_telemetry_frame(bool first_frame)
 			m_link_check_pending = false;
 			k_timer_stop(&m_lc_timeout_timer);
 		}
-		/* Likely duty-cycle / MAC busy — retry the same frame shortly. */
+		/* Likely duty-cycle / MAC busy — retry the same frame shortly, but bound
+		 * the attempts so a permanent TX error (e.g. misconfigured duty cycle)
+		 * can't be retried indefinitely. After the budget is spent, drop the
+		 * frame and let app_report re-arm the cadence cleanly (#219). */
+		if (++m_frame_retries > FRAME_MAX_RETRIES) {
+			LOG_ERR("Telemetry frame abandoned after %d retries", m_frame_retries - 1);
+			m_frame_resend = false;
+			m_frame_more = false;
+			m_frame_retries = 0;
+			return;
+		}
 		m_frame_resend = true;
 		k_work_schedule_for_queue(&m_work_q, &m_frame_work, K_SECONDS(FRAME_RETRY_SEC));
 		return;
 	}
 
 	m_frame_resend = false;
+	m_frame_retries = 0;
 	m_message_count++;
 
 	if (m_frame_more) {
@@ -1224,14 +1254,11 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 	/* Deferred answer to a ClockSync command: once the network time actually
 	 * lands, send an Info uplink carrying the freshly-synced unix_time (the
 	 * command itself does not ack — saves an uplink, and a bare ack couldn't
-	 * carry the synced time yet). */
+	 * carry the synced time yet). The Info encode is pushed to m_work_q so it
+	 * never runs on the callback stack (#219). */
 	if ((flags & LORAWAN_TIME_UPDATED) &&
 	    atomic_test_and_clear_bit(&m_clock_sync_info_pending, 0)) {
-		uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
-		size_t info_len;
-		if (app_cmd_build_info(info_buf, sizeof(info_buf), &info_len) == 0) {
-			(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len);
-		}
+		k_work_submit_to_queue(&m_work_q, &m_clock_sync_info_work);
 	}
 
 	if (port == APP_LRW_DOWNLINK_CMD_PORT && data && len > 0) {
@@ -1459,6 +1486,7 @@ int app_lrw_init(void)
 	k_work_init_delayable(&m_hist_work, m_hist_work_handler);
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
+	k_work_init(&m_clock_sync_info_work, clock_sync_info_work_handler);
 	k_work_init(&m_lc_response_work, lc_response_work_handler);
 	k_work_init(&m_force_lc_work, force_lc_work_handler);
 	k_work_init(&m_dl_request_work, dl_request_work_handler);
