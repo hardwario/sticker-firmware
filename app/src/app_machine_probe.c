@@ -806,53 +806,77 @@ int app_machine_probe_get_count(void)
 	return count;
 }
 
+/* Shared 1-Wire/DS28E17 access prologue+epilogue for every machine-probe read.
+ * Was previously a COMM_PROLOGUE/COMM_EPILOGUE macro pair inlined into each of
+ * the five read_* functions; pulling it into real functions saves ~1 KB of flash
+ * (#220.D) with no behaviour change. On success the bus mutex stays held and the
+ * 1-Wire master is acquired — the caller runs its sensor sequence, then must call
+ * mp_comm_end() to release the bus and unlock. */
+static int mp_comm_begin(int index, uint64_t *serial_number, const struct device **out_bus)
+{
+	if (k_is_in_isr()) {
+		return -EWOULDBLOCK;
+	}
+	k_mutex_lock(&m_lock, K_FOREVER);
+	if (index < 0 || index >= m_count || !m_count) {
+		k_mutex_unlock(&m_lock);
+		return -ERANGE;
+	}
+	static const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
+	*out_bus = dev;
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Device not ready");
+		k_mutex_unlock(&m_lock);
+		return -ENODEV;
+	}
+	if (serial_number) {
+		*serial_number = m_sensors[index].serial_number;
+	}
+	int ret = app_w1_acquire(&m_w1, dev);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_w1_acquire", ret);
+		goto error;
+	}
+	if (!device_is_ready(m_sensors[index].dev)) {
+		LOG_ERR("Device not ready");
+		ret = -ENODEV;
+		goto error;
+	}
+	ret = ds28e17_write_config(m_sensors[index].dev, DS28E17_I2C_SPEED_100_KHZ);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("ds28e17_write_config", ret);
+		goto error;
+	}
+	return 0;
+error:
+	/* Mirror the old macro: release on any post-lock failure, then unlock. */
+	(void)app_w1_release(&m_w1, dev);
+	k_mutex_unlock(&m_lock);
+	return ret;
+}
+
+static int mp_comm_end(const struct device *bus, int res)
+{
+	int ret = app_w1_release(&m_w1, bus);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_w1_release", ret);
+		res = res ? res : ret;
+	}
+	k_mutex_unlock(&m_lock);
+	return res;
+}
+
 #define COMM_PROLOGUE                                                                              \
+	const struct device *bus;                                                                  \
 	int ret;                                                                                   \
-	int res = 0;                                                                               \
-	if (k_is_in_isr()) {                                                                       \
-		return -EWOULDBLOCK;                                                               \
-	}                                                                                          \
-	k_mutex_lock(&m_lock, K_FOREVER);                                                          \
-	if (index < 0 || index >= m_count || !m_count) {                                           \
-		k_mutex_unlock(&m_lock);                                                           \
-		return -ERANGE;                                                                    \
-	}                                                                                          \
-	static const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));                     \
-	if (!device_is_ready(dev)) {                                                               \
-		LOG_ERR("Device not ready");                                                       \
-		k_mutex_unlock(&m_lock);                                                           \
-		return -ENODEV;                                                                    \
-	}                                                                                          \
-	if (serial_number) {                                                                       \
-		*serial_number = m_sensors[index].serial_number;                                   \
-	}                                                                                          \
-	ret = app_w1_acquire(&m_w1, dev);                                                          \
-	if (ret) {                                                                                 \
-		LOG_ERR_CALL_FAILED_INT("app_w1_acquire", ret);                                    \
-		res = ret;                                                                         \
-		goto error;                                                                        \
-	}                                                                                          \
-	if (!device_is_ready(m_sensors[index].dev)) {                                              \
-		LOG_ERR("Device not ready");                                                       \
-		res = -ENODEV;                                                                     \
-		goto error;                                                                        \
-	}                                                                                          \
-	ret = ds28e17_write_config(m_sensors[index].dev, DS28E17_I2C_SPEED_100_KHZ);               \
-	if (ret) {                                                                                 \
-		LOG_ERR_CALL_FAILED_INT("ds28e17_write_config", ret);                              \
-		res = ret;                                                                         \
-		goto error;                                                                        \
+	int res = mp_comm_begin(index, serial_number, &bus);                                       \
+	if (res) {                                                                                 \
+		return res;                                                                        \
 	}
 
 #define COMM_EPILOGUE                                                                              \
 error:                                                                                             \
-	ret = app_w1_release(&m_w1, dev);                                                          \
-	if (ret) {                                                                                 \
-		LOG_ERR_CALL_FAILED_INT("app_w1_release", ret);                                    \
-		res = res ? res : ret;                                                             \
-	}                                                                                          \
-	k_mutex_unlock(&m_lock);                                                                   \
-	return res;
+	return mp_comm_end(bus, res);
 
 int app_machine_probe_read_thermometer(int index, uint64_t *serial_number, float *temperature)
 {
