@@ -1,0 +1,5 @@
+common:
+  tags: sticker ndef
+  platform_allow: native_sim
+tests:
+  sticker.ndef: {}
