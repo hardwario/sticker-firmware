@@ -68,6 +68,14 @@ LOG_MODULE_REGISTER(app_cmd, LOG_LEVEL_DBG);
 #define APP_BUILD_TYPE    2
 #endif
 
+/* hwinfo reset-cause bitmask of the last boot, cached by main() (#88). */
+static uint32_t m_reset_cause;
+
+void app_cmd_set_reset_cause(uint32_t cause)
+{
+	m_reset_cause = cause;
+}
+
 void app_cmd_get_info(struct app_cmd_info *info)
 {
 	if (!info) {
@@ -82,6 +90,7 @@ void app_cmd_get_info(struct app_cmd_info *info)
 		.debug = IS_ENABLED(CONFIG_FW_DEBUG),
 		.serial_number = g_app_config.serial_number,
 		.uptime_s = (uint32_t)(k_uptime_get() / 1000),
+		.reset_cause = m_reset_cause,
 	};
 
 	BUILD_ASSERT(sizeof(info->claim_token) == sizeof(g_app_config.claim_token),
@@ -116,6 +125,7 @@ static void fill_info(Response_Info *info)
 	info->uptime_s = i.uptime_s;
 	info->debug = i.debug;
 	info->battery = i.battery_mv;
+	info->reset_cause = i.reset_cause;
 	if (i.has_unix_time) {
 		info->unix_time = i.unix_time;
 	}
@@ -314,10 +324,14 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 	 * for paging too, so page layout is consistent within a transport. */
 	const bool allow_nfc_only = (tp == APP_CMD_TRANSPORT_NFC);
 
-	/* One tag buffer per section, each sized to the whole table so any single
-	 * section can hold all of a page's tags without overflow. */
-	uint32_t ids[4][ARRAY_SIZE(DUMP_FIELDS)];
-	size_t n[4] = {0};
+	/* Tags that land on the requested page, grouped by section. DUMP_FIELDS is
+	 * ordered by section, so each section's tags form a contiguous run here;
+	 * off[]/n[] record each run's start and length. Sized flat to the whole
+	 * table (one NFC page can hold every field) — a per-section [4][N] matrix
+	 * would cost ~4x the stack and overflowed the handler thread (#176). */
+	uint32_t ids[ARRAY_SIZE(DUMP_FIELDS)];
+	size_t off[4] = {0}, n[4] = {0};
+	size_t total = 0;
 
 	/* Single greedy pass: pack fields into pages by DUMP_PAGE_BUDGET, collect
 	 * the requested page's tags per section, and learn the total page count. */
@@ -341,7 +355,11 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 
 		if (cur_page == page) {
 			uint8_t s = DUMP_FIELDS[i].section;
-			ids[s][n[s]++] = DUMP_FIELDS[i].tag;
+			if (n[s] == 0) {
+				off[s] = total;
+			}
+			ids[total++] = DUMP_FIELDS[i].tag;
+			n[s]++;
 		}
 	}
 	uint32_t page_count = cur_page + 1;
@@ -359,22 +377,22 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 
 	if (n[DUMP_SECTION_LORAWAN] > 0) {
 		cd->has_lorawan = true;
-		app_config_fill_lorawan(&cd->lorawan, ids[DUMP_SECTION_LORAWAN],
+		app_config_fill_lorawan(&cd->lorawan, &ids[off[DUMP_SECTION_LORAWAN]],
 					n[DUMP_SECTION_LORAWAN]);
 	}
 	if (n[DUMP_SECTION_APPLICATION] > 0) {
 		cd->has_application = true;
-		app_config_fill_application(&cd->application, ids[DUMP_SECTION_APPLICATION],
+		app_config_fill_application(&cd->application, &ids[off[DUMP_SECTION_APPLICATION]],
 					    n[DUMP_SECTION_APPLICATION]);
 	}
 	if (n[DUMP_SECTION_SENSORS] > 0) {
 		cd->has_sensors = true;
-		app_config_fill_sensors(&cd->sensors, ids[DUMP_SECTION_SENSORS],
+		app_config_fill_sensors(&cd->sensors, &ids[off[DUMP_SECTION_SENSORS]],
 					n[DUMP_SECTION_SENSORS]);
 	}
 	if (n[DUMP_SECTION_ALARMS] > 0) {
 		cd->has_alarms = true;
-		app_config_fill_alarms(&cd->alarms, ids[DUMP_SECTION_ALARMS],
+		app_config_fill_alarms(&cd->alarms, &ids[off[DUMP_SECTION_ALARMS]],
 				       n[DUMP_SECTION_ALARMS]);
 	}
 }

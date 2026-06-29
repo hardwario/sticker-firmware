@@ -230,6 +230,8 @@ function _decodeInfo(bytes, start, end) {
       else if (field === 6) info.uptime_s = v.value;
       else if (field === 7) info.unix_time = v.value;
       else if (field === 8) info.debug = v.value !== 0;
+      else if (field === 10) info.battery = v.value; // supply voltage in mV (0/absent = unavailable)
+      else if (field === 11) info.reset_cause = v.value; // hwinfo reset-cause bitmask of last boot (#88)
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       // field 9 = claim_token (#170): 128-bit device claim token, presented as

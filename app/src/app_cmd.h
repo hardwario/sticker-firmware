@@ -58,7 +58,13 @@ struct app_cmd_info {
 	uint32_t unix_time;      /* UTC seconds since epoch */
 	uint8_t claim_token[16]; /* 128-bit device claim token (#170); all-zero = uncommissioned */
 	uint32_t battery_mv;     /* supply voltage in mV; 0 = measurement unavailable */
+	uint32_t reset_cause; /* hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown */
 };
+
+/* Cache the hwinfo reset-cause bitmask read once at boot (RESET_* flags from
+ * <zephyr/drivers/hwinfo.h>). Reported back in GetInfo so a watchdog/brownout
+ * reset is visible in the field (#88). */
+void app_cmd_set_reset_cause(uint32_t cause);
 
 /* Fill `info` with the current device info: FW version, build type, serial,
  * uptime, and wall-clock time (has_unix_time=false when the RTC is unsynced or
