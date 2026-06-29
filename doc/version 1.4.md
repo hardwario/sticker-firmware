@@ -108,6 +108,7 @@ Readings are range-checked before they reach telemetry, history and alarms, so a
 - **DS18B20** — values outside −55…125 °C are rejected; the +85.0 °C power-on/brown-out glitch (a valid-CRC sentinel) is **debounced** (a lone spike is suppressed, a sustained real +85 °C still passes after one extra sample). This is the root cause of the earlier spurious low-temperature alarms.
 - **Onboard SHT4x** — temperature/humidity outside the sensor's spec window are rejected.
 - **Accelerometer** — free-fall detection is armed/torn down together with any-motion (no spurious free-fall while motion detection is off); accel **and orientation** are still read into the periodic sample even when motion detection is off.
+- **Si7210 magnetometer (machine probe)** — the magnetic read checks the `Dspsigm` *Fresh* flag (set by the sensor on a new conversion) before trusting the value, and rejects the read otherwise (#219). The DS28E17 1-Wire readback is not CRC-protected, so a flipped bit on a long machine-probe cable could otherwise inject a silent bad field value and a false hall alarm — mirrors the LIS2DH `INT1_SRC` reserved-bit guard.
 - **Alarms** — a THRESHOLD rule whose clear band is empty (`hi − lo ≤ 2·hst`, including inverted or NaN bounds) is **rejected** on the write path and sanitized on reload, so a latched alarm can always clear (`hst = 0` is honoured verbatim = no dead-band); momentary STATE rules (PIR/accel) reject a `from==to` shape; the 1-Wire bus scan caps the number of recorded ROMs so a noisy bus can't exhaust memory.
 
 ### 1-Wire sensors — repeated, self-describing (changed)
@@ -238,7 +239,10 @@ After every LoRaWAN join the device automatically sends a device-info message on
 | `uptime_s` | Seconds since boot |
 | `unix_time` | Wall-clock UTC (0 until the clock is synced) |
 | `battery` | Supply voltage in **mV**, measured fresh on each `get_info` (0/absent = unavailable) |
+| `reset_cause` | hwinfo reset-cause bitmask of the last boot (#88) — see below; 0/absent = unknown |
 | `claim_token` | 128-bit device claim token, hex (#170) — **omitted** until the device is commissioned |
+
+The **`reset_cause`** field (proto field 11) carries the hardware reset-cause bitmask read once at boot via `hwinfo_get_reset_cause()`, so a watchdog/brownout reset is visible in the field instead of being silent. On the STM32WLE5 the bits that can appear are `pin` (0x01), `software` (0x02), `brownout` (0x04), `power-on`/POR (0x08), `watchdog` (0x10), `security` (0x40) and `low-power-wake` (0x80); several can be set at once (a cold power-up typically asserts power-on + pin + brownout). `ats device info` decodes the mask to names, e.g. `Reset cause: 0x00000010 (watchdog)`.
 
 The same message is returned on demand by the `get_info` command (over LoRaWAN **and** NFC), so a backend can read the claim token over either channel.
 
@@ -536,6 +540,12 @@ Not user-facing, but worth recording: v1.4.0 grew enough that the debug image RA
 - **mbedtls AES tables in flash** — `CONFIG_MBEDTLS_AES_ROM_TABLES` + `MBEDTLS_AES_FEWER_TABLES`. mbedtls otherwise generates the AES T-tables in RAM at runtime (~8 KB of `.bss`); these keep them `const` in flash. Frees **~8.8 KB RAM** (debug 99 % → 86 %) for ~2 KB flash. AES-CCM (NFC config decrypt) and LoRaWAN crypto are functionally unchanged. The LoRaWAN MAC uses its own (already-flash) soft-SE AES, so only the PSA path is affected.
 - **Integer log formatting** — all `%f`/`%g` in `LOG_*`/`shell_print`/`snprintf` were converted to scaled-integer output via the `APP_FP0/1/2/3` helpers in `app_log.h` (e.g. `"%s%d.%02d"`, sign + integer + zero-padded fraction). With no float format specifiers left, the debug build sets `CONFIG_CBPRINTF_FP_SUPPORT=n`, freeing **~3.5 KB debug flash**. Float arithmetic is unchanged; only the printed representation differs (e.g. `21.91`, `-5.50`).
 - **1-Wire bus init vs i2c runtime PM** — the DS2484 1-Wire master is brought up only while i2c1 is held runtime-resumed (`pm_device_runtime_get` in `app_sensor_init`, gated on `cap-w1-sensors`). i2c1 runtime PM otherwise suspends the bus *between* the back-to-back transfers of the DS2484 device-reset (gating the peripheral clock + swapping to the analog sleep pinctrl), which NAKs the reset (`-EIO`) and left every 1-Wire sensor (DS18B20 / DS28E17 machine probe) silent on release while the on-board SHT4x on the same bus kept working. Costs **+16 B flash, 0 RAM**; no measurable power change (Stop2 floor 4.3 → 4.6 µA, within noise — measured PPK2 @ 3.0 V). The on-board sensors are unaffected.
+- **v1.4.0 audit robustness batch (#219, #176, #88)** — a set of MEDIUM-severity hardening fixes from the deep audit:
+  - **GetConfig stack (#176)** — the full config-dump handler sized its per-section tag scratch to the whole dump table as a `[4][N]` matrix (~0.9 KB on the handler stack on top of the large nanopb `Command`/`Response` locals), which could overflow the work-queue / shell thread stack and reboot the device. The scratch is now a single flat array (sections are contiguous in the dump table), cutting it to ~¼ with no behaviour change.
+  - **Bounded telemetry retry (#219)** — a telemetry frame that fails to send is retried a bounded number of times (mirrors the history-replay limit) instead of forever, so a permanent TX error can't be retried indefinitely; `app_report` re-arms the cadence cleanly after the budget is spent.
+  - **Deferred clock-sync info uplink (#219)** — the post-`DeviceTime` Info uplink (nanopb encode + queue) is deferred to the TX work queue instead of running on the LoRaMac/system-WQ callback stack.
+  - **Graceful battery-monitor degrade (#88)** — a failed `app_battery_init()` no longer calls `die()` (which bricked an otherwise-healthy device into a 60 s reboot loop); it logs and continues, with battery reported as unavailable. `CONFIG_HWINFO=y` is enabled to read the boot reset cause (§4) at **+176 B flash, 0 RAM** (the STM32 hwinfo driver is a thin RCC read).
+  - Plus the alarm rate-limit sentinel fix (uses `-1` instead of `0`, which collides with `k_uptime_get()==0` in the first ms after boot).
 
 ---
 
