@@ -99,6 +99,24 @@ config APP_HISTORY_BYTES
 	  Size of the in-RAM history ring used when CONFIG_APP_HISTORY_FLASH=n.
 	  Record size is variable (5-33 B) depending on the enabled sensor set.
 
+config APP_LORA_P2P
+	bool "Raw-LoRa P2P transport (#118)"
+	depends on LORA
+	default y
+	help
+	  Compile in the raw-LoRa point-to-point transport (app_p2p.c) as an
+	  alternative to LoRaWAN. Both stacks are linked into one image; the
+	  active one is selected at boot from the `transport` config parameter
+	  (lorawan/p2p), so this symbol only controls whether the P2P code is
+	  present — it does NOT exclude CONFIG_LORAWAN.
+
+	  The SX126x sub-GHz radio is shared, so only one transport is brought
+	  up per boot; switching transport requires changing `transport` and a
+	  reboot (settings save).
+
+	  Disable to drop the P2P code and reclaim flash on a LoRaWAN-only
+	  build (e.g. the flash-tight Debug image).
+
 endmenu
 
 menu "Zephyr Kernel"

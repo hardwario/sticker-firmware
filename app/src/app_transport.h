@@ -1,0 +1,73 @@
+/*
+ * Copyright (c) 2025 HARDWARIO a.s.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef APP_TRANSPORT_H_
+#define APP_TRANSPORT_H_
+
+#include "app_lrw.h" /* enum app_lrw_state */
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Transport facade (#118): one image links both the LoRaWAN stack (app_lrw) and
+ * the raw-LoRa P2P transport (app_p2p, when CONFIG_APP_LORA_P2P=y). The active
+ * one is chosen at boot from the `transport` config parameter and never changes
+ * at runtime (the SX126x radio is shared). The transport-agnostic layers
+ * (app_report, app_compose, app_alarm, main) call through this facade; the few
+ * LoRaWAN-only operations (join NVM reset, link check, history replay, …) stay
+ * direct app_lrw_* calls guarded by CONFIG_LORAWAN. */
+
+enum app_transport_kind {
+	APP_TRANSPORT_LORAWAN,
+	APP_TRANSPORT_P2P,
+};
+
+/* Read `transport` from config and bring up the chosen stack (app_lrw_init or
+ * app_p2p_init). Falls back to LoRaWAN if P2P is selected but not compiled in.
+ * Returns 0 or a negative errno. */
+int app_transport_init(void);
+
+/* Start the link: LoRaWAN join, or P2P ready-kick (no join). */
+void app_transport_start(void);
+
+/* Which transport was selected at boot. */
+enum app_transport_kind app_transport_get_kind(void);
+
+/* Coarse link state for the status LED. P2P maps to HEALTHY once started so the
+ * main loop's join/warning LED animations stay LoRaWAN-only. */
+enum app_lrw_state app_transport_get_state(void);
+
+/* True when the link can carry an uplink now. */
+bool app_transport_is_ready(void);
+
+/* Application-payload budget (bytes) for the next uplink. */
+uint8_t app_transport_get_max_payload(void);
+
+/* Compose + send a telemetry snapshot (triggered by app_report). */
+void app_transport_send_telemetry(void);
+
+/* Stage a command response for the next uplink. */
+int app_transport_queue_response(uint8_t port, const uint8_t *buf, size_t len);
+
+/* Stage an alarm-detail batch. */
+int app_transport_send_alarm(const uint8_t *buf, size_t len);
+
+/* Register the link-ready kick app_report uses to (re)start the cadence. */
+void app_transport_register_ready_cb(void (*cb)(void));
+
+/* Stop transport activity ahead of a deep-sleep poweroff. */
+void app_transport_suspend(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* APP_TRANSPORT_H_ */

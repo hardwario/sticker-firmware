@@ -8,9 +8,9 @@
 #include "app_counters.h"
 #include "app_history.h"
 #include "app_log.h"
-#include "app_lrw.h"
 #include "app_report.h"
 #include "app_sensor.h"
+#include "app_transport.h"
 #include "app_wdog.h"
 
 /* Zephyr includes */
@@ -86,9 +86,10 @@ static void report_work_handler(struct k_work *work)
 	}
 
 	/* State-gated cadence: skip while the link is joining/reconnecting/disabled.
-	 * app_lrw kicks us (report_kick) on the link-ready edge to resume promptly. */
-	if (!app_lrw_is_ready()) {
-		LOG_DBG("Report skipped: link not ready (%d)", app_lrw_get_state());
+	 * The transport kicks us (report_kick) on the link-ready edge to resume
+	 * promptly. (P2P has no join, so it is always ready once started.) */
+	if (!app_transport_is_ready()) {
+		LOG_DBG("Report skipped: link not ready (%d)", app_transport_get_state());
 		return;
 	}
 
@@ -102,9 +103,10 @@ static void report_work_handler(struct k_work *work)
 	 * replay is active, #126). */
 	app_history_capture();
 
-	/* Hand off to the transport: app_lrw composes the snapshot and splits it
-	 * into DR-budget frames (LC piggyback + duty-cycle retry live there). */
-	app_lrw_send_telemetry();
+	/* Hand off to the transport: LoRaWAN composes the snapshot and splits it
+	 * into DR-budget frames (LC piggyback + duty-cycle retry); P2P frames it as
+	 * one or more AES-CCM raw-LoRa packets. */
+	app_transport_send_telemetry();
 }
 
 static void report_timer_handler(struct k_timer *timer)
@@ -157,7 +159,7 @@ int app_report_init(void)
 	 * the link state. Reporting itself still self-skips at the link gate until
 	 * joined; app_lrw's ready kick re-arms with an immediate report on join. */
 	schedule_next_report();
-	app_lrw_register_ready_cb(report_kick);
+	app_transport_register_ready_cb(report_kick);
 
 	return 0;
 }

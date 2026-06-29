@@ -42,7 +42,8 @@ target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
 target_sources_ifdef(CONFIG_LIS2DH app PRIVATE src/app_accel.c)
 target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw.c)
-target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_report.c)
+target_sources_ifdef(CONFIG_APP_LORA_P2P app PRIVATE src/app_p2p.c)
+target_sources_ifdef(CONFIG_APP_LORA_P2P app PRIVATE src/app_ccm.c)
 target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/region
@@ -74,6 +75,8 @@ target_sources(app PRIVATE src/app_ndef_parser.c)
 target_sources(app PRIVATE src/app_config_ingest.c)
 target_sources(app PRIVATE src/app_nfc.c)
 target_sources(app PRIVATE src/app_pyq1648.c)
+target_sources(app PRIVATE src/app_report.c)
 target_sources(app PRIVATE src/app_sensor.c)
+target_sources(app PRIVATE src/app_transport.c)
 target_sources(app PRIVATE src/app_settings.c)
 target_sources(app PRIVATE src/main.c)

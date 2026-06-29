@@ -20,6 +20,7 @@
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_settings.h"
+#include "app_transport.h"
 #include "app_wdog.h"
 
 /* Zephyr includes */
@@ -382,22 +383,22 @@ int main(void)
 		LOG_WRN("app_alarm_rules_init failed: %d (alarms unavailable)", ret);
 	}
 
-#if defined(CONFIG_LORAWAN)
-	ret = app_lrw_init();
+	/* Transport (#118): bring up the stack selected by the `transport` config
+	 * (LoRaWAN or raw-LoRa P2P). Both are linked; only the chosen one is started. */
+	ret = app_transport_init();
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_lrw_init", ret);
+		LOG_ERR_CALL_FAILED_INT("app_transport_init", ret);
 		die();
 	}
 
 	/* Report orchestration (#126): owns the interval_report cadence and hands
-	 * telemetry frames to app_lrw. Register before the join so the link-ready
-	 * kick is wired when on_join_success fires. */
+	 * telemetry frames to the transport. Register before the start so the
+	 * link-ready kick is wired when the transport comes up. */
 	ret = app_report_init();
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_report_init", ret);
 		die();
 	}
-#endif /* defined(CONFIG_LORAWAN) */
 
 	ret = app_battery_init();
 	if (ret) {
@@ -425,9 +426,7 @@ int main(void)
 	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
 
-#if defined(CONFIG_LORAWAN)
-	app_lrw_join();
-#endif /* defined(CONFIG_LORAWAN) */
+	app_transport_start();
 
 	app_alarm_set_event_callback(orange_event_handler, NULL);
 
@@ -460,7 +459,9 @@ int main(void)
 		bool led_handled = false;
 
 #if defined(CONFIG_LORAWAN)
-		enum app_lrw_state lrw_state = app_lrw_get_state();
+		/* Status LED reflects the active transport: P2P maps to HEALTHY (no
+		 * join), so the join/warning animations stay LoRaWAN-only. */
+		enum app_lrw_state lrw_state = app_transport_get_state();
 
 		if (lrw_state == APP_LRW_STATE_JOINING || lrw_state == APP_LRW_STATE_RECONNECT) {
 			struct app_led_play_req req = {

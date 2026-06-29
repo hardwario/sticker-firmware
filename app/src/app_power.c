@@ -8,10 +8,8 @@
 #include "app_led.h"
 #include "app_log.h"
 #include "app_sensor.h"
-#if defined(CONFIG_LORAWAN)
-#include "app_lrw.h"
 #include "app_report.h"
-#endif
+#include "app_transport.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -35,10 +33,8 @@ void app_power_suspend(void)
 	/* WRN level so the line survives the debug log filter (LOG_MAX_LEVEL=2). */
 	LOG_WRN("Entering deep sleep (Shutdown) — wake via NRST / power-cycle");
 
-#if defined(CONFIG_LORAWAN)
 	app_report_suspend(); /* stop the report cadence before the radio teardown */
-	app_lrw_suspend();
-#endif
+	app_transport_suspend();
 	app_sensor_suspend();
 
 	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
