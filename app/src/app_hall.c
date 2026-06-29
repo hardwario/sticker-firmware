@@ -118,44 +118,49 @@ restore:
 		return ret;
 	}
 
+	bool left_rise = (!left_was_active && left_is_active);
+	bool left_fall = (left_was_active && !left_is_active);
+	bool right_rise = (!right_was_active && right_is_active);
+	bool right_fall = (right_was_active && !right_is_active);
+
 	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
 
 	m_hall_data.left_is_active = left_is_active;
 	m_hall_data.right_is_active = right_is_active;
 
-	if (!left_was_active && left_is_active) {
+	if (left_rise) {
 		if (g_app_config.hall_left_counter) {
 			m_hall_data.left_count++;
 		}
-
 		LOG_DBG("Left hall switch activated, count: %u", m_hall_data.left_count);
-
-		app_alarm_event(APP_ALARM_SRC_HALL_LEFT, true);
-	}
-
-	if (left_was_active && !left_is_active) {
+	} else if (left_fall) {
 		LOG_DBG("Left hall switch deactivated");
-
-		app_alarm_event(APP_ALARM_SRC_HALL_LEFT, false);
 	}
 
-	if (!right_was_active && right_is_active) {
+	if (right_rise) {
 		if (g_app_config.hall_right_counter) {
 			m_hall_data.right_count++;
 		}
-
 		LOG_DBG("Right hall switch activated, count: %u", m_hall_data.right_count);
-
-		app_alarm_event(APP_ALARM_SRC_HALL_RIGHT, true);
-	}
-
-	if (right_was_active && !right_is_active) {
+	} else if (right_fall) {
 		LOG_DBG("Right hall switch deactivated");
-
-		app_alarm_event(APP_ALARM_SRC_HALL_RIGHT, false);
 	}
 
 	k_mutex_unlock(&m_hall_data_mutex);
+
+	/* Fire alarm events after releasing the data mutex: app_alarm_event() takes
+	 * the alarm lock and may enqueue an uplink. Keeping it outside avoids the
+	 * data->alarm nested lock order and holding the data lock over alarm work. */
+	if (left_rise) {
+		app_alarm_event(APP_ALARM_SRC_HALL_LEFT, true);
+	} else if (left_fall) {
+		app_alarm_event(APP_ALARM_SRC_HALL_LEFT, false);
+	}
+	if (right_rise) {
+		app_alarm_event(APP_ALARM_SRC_HALL_RIGHT, true);
+	} else if (right_fall) {
+		app_alarm_event(APP_ALARM_SRC_HALL_RIGHT, false);
+	}
 
 	return 0;
 }
