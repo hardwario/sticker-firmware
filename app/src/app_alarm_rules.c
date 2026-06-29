@@ -158,6 +158,28 @@ static bool rule_state_shape_valid(const struct app_alarm_rule *r)
 	return true;
 }
 
+/* A THRESHOLD rule latches when value < lo-hst or > hi+hst and clears only in
+ * the open band (lo+hst, hi-hst). If that band is empty — hi <= lo + 2*hst,
+ * which also catches inverted (hi < lo) and NaN bounds — a latched alarm can
+ * never clear except via NaN/disable, so the device stays stuck in alarm. Such
+ * a rule is rejected at the write path rather than stored. Non-THRESHOLD kinds
+ * (STATE/RATE) don't use the lo/hi band, so they pass. */
+static bool rule_threshold_shape_valid(const struct app_alarm_rule *r)
+{
+	if (app_alarm_quantity_kind((enum app_alarm_quantity)r->quantity) !=
+	    APP_ALARM_KIND_THRESHOLD) {
+		return true;
+	}
+	float hst = (r->hst >= 0.0f) ? r->hst : 0.0f;
+	return r->hi - r->lo > 2.0f * hst;
+}
+
+/* All shape checks a decoded rule must pass before it is stored or accepted. */
+static bool rule_shape_valid(const struct app_alarm_rule *r)
+{
+	return rule_state_shape_valid(r) && rule_threshold_shape_valid(r);
+}
+
 /* ---- app_config storage (per-slot bytes) -------------------------------- */
 
 /* The 16 alarm_N config fields are separate `uint8_t[RULE_PACK_LEN]` members;
@@ -275,7 +297,7 @@ int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule)
 	if (slot >= APP_ALARM_SLOT_COUNT || rule == NULL ||
 	    !app_alarm_rule_valid((enum app_alarm_source)rule->source,
 				  (enum app_alarm_quantity)rule->quantity) ||
-	    !rule_state_shape_valid(rule)) {
+	    !rule_shape_valid(rule)) {
 		return -EINVAL;
 	}
 
@@ -326,7 +348,7 @@ void app_alarm_rules_reload_from_config(void)
 		if (unpack_rule(field, &r) &&
 		    app_alarm_rule_valid((enum app_alarm_source)r.source,
 					 (enum app_alarm_quantity)r.quantity) &&
-		    rule_state_shape_valid(&r)) {
+		    rule_shape_valid(&r)) {
 			m_slots[s].rule = r;
 			m_slots[s].used = true;
 		} else {

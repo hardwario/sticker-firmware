@@ -69,44 +69,48 @@ static int poll(void)
 		input_b_is_active = !val;
 	}
 
+	bool a_rise = (!input_a_was_active && input_a_is_active);
+	bool a_fall = (input_a_was_active && !input_a_is_active);
+	bool b_rise = (!input_b_was_active && input_b_is_active);
+	bool b_fall = (input_b_was_active && !input_b_is_active);
+
 	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
 
 	m_input_data.input_a_is_active = input_a_is_active;
 	m_input_data.input_b_is_active = input_b_is_active;
 
-	if (!input_a_was_active && input_a_is_active) {
+	if (a_rise) {
 		if (g_app_config.input_a_counter) {
 			m_input_data.input_a_count++;
 		}
-
 		LOG_DBG("Input A activated, count: %u", m_input_data.input_a_count);
-
-		app_alarm_event(APP_ALARM_SRC_INPUT_A, true);
-	}
-
-	if (input_a_was_active && !input_a_is_active) {
+	} else if (a_fall) {
 		LOG_DBG("Input A deactivated");
-
-		app_alarm_event(APP_ALARM_SRC_INPUT_A, false);
 	}
 
-	if (!input_b_was_active && input_b_is_active) {
+	if (b_rise) {
 		if (g_app_config.input_b_counter) {
 			m_input_data.input_b_count++;
 		}
-
 		LOG_DBG("Input B activated, count: %u", m_input_data.input_b_count);
-
-		app_alarm_event(APP_ALARM_SRC_INPUT_B, true);
-	}
-
-	if (input_b_was_active && !input_b_is_active) {
+	} else if (b_fall) {
 		LOG_DBG("Input B deactivated");
-
-		app_alarm_event(APP_ALARM_SRC_INPUT_B, false);
 	}
 
 	k_mutex_unlock(&m_input_data_mutex);
+
+	/* Fire alarm events after releasing the data mutex (see app_hall.c): keeps
+	 * the data lock off the alarm lock + uplink-enqueue path. */
+	if (a_rise) {
+		app_alarm_event(APP_ALARM_SRC_INPUT_A, true);
+	} else if (a_fall) {
+		app_alarm_event(APP_ALARM_SRC_INPUT_A, false);
+	}
+	if (b_rise) {
+		app_alarm_event(APP_ALARM_SRC_INPUT_B, true);
+	} else if (b_fall) {
+		app_alarm_event(APP_ALARM_SRC_INPUT_B, false);
+	}
 
 	return 0;
 }
