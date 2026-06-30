@@ -32,14 +32,22 @@ All multi-byte fields are **little-endian** unless stated otherwise.
 Produced by CI (Phase 3), transported verbatim by the app, verified by the bootloader.
 
 ```
-+---------------------+  offset 0
-|  sfu_header (32 B)   |
-+---------------------+  offset 32
-|  payload (firmware)  |  raw slot0 image, payload_len bytes
-+---------------------+  offset 32 + payload_len
+unsigned:                          signed (SFU_FLAG_SIGNED):
++---------------------+  off 0     +---------------------+  off 0
+|  sfu_header (32 B)   |           |  sfu_header (32 B)   |
++---------------------+  off 32    +---------------------+  off 32
+|  payload (firmware)  |          |  signature (64 B)    |  Ed25519 over the 32 B header
++---------------------+           +---------------------+  off 96
+                                  |  payload (firmware)  |  raw slot0 image, payload_len bytes
+                                  +---------------------+  off 96 + payload_len
 ```
-There is no image signature: integrity is the payload CRC-32 in the header plus the per-frame
-AES-CCM authentication during transfer (§1, §3). `SFU_FLAG_SIGNED` is reserved and currently unused.
+**Integrity** is the payload CRC-32 in the header. **Authenticity** has two layers: the per-frame
+AES-CCM channel during transfer (§1, §3, proves the sender holds the device `secret_key`), and —
+when signed — an **Ed25519 signature over the 32-byte header**. Because the header carries the
+payload CRC-32, signing the header authenticates the whole image. The bootloader verifies the
+signature against a baked-in public key (`boot/src/fw_signing_key.h`); see `CONFIG_BOOT_REQUIRE_SIGNATURE`.
+Signing is produced by `scripts/mksfu.py --key <ed25519-private.pem>` (CI signs with a secret key;
+the private key never lives in the repo).
 
 ```c
 struct sfu_header {        /* 32 bytes, little-endian */
@@ -55,9 +63,9 @@ struct sfu_header {        /* 32 bytes, little-endian */
 ```
 
 - The app may also accept a **raw `.bin`** or **Intel `.hex`** with no header — in that case it
-  builds a header itself (`flags = CRC_PRESENT`). Authenticity comes from the AES-CCM channel (only
-  a holder of the device `secret_key` can stream a frame the bootloader accepts), so there is no
-  separate signed/unsigned image distinction.
+  builds an unsigned header itself (`flags = CRC_PRESENT`). Such an image is only accepted by a
+  bootloader that does not require a signature (`CONFIG_BOOT_REQUIRE_SIGNATURE=n`, dev builds);
+  a production bootloader rejects it.
 
 ## 3. Logical frame layer (transport-agnostic)
 
