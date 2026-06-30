@@ -3,10 +3,11 @@
 Shared contract between the firmware NFC bootloader and the `tools/nfc-flasher` Flutter app.
 All multi-byte fields are **little-endian** unless stated otherwise.
 
-> Status: draft v2. The logical frame layer is transport-agnostic; the physical binding is the
-> **ST25DV FTM mailbox** (§4). The earlier EEPROM software-mailbox binding was dropped (slow,
-> wears the EEPROM, manual RF↔I2C arbitration). Numeric constants are mirrored in firmware
-> (`include/sticker/nfc_proto.h`) and the flasher (`tools/nfc-flasher/lib/src/protocol.dart`).
+> Status: validated on hardware (keyed and unkeyed end-to-end, ~694 frames). The logical frame
+> layer is transport-agnostic; the physical binding is the **ST25DV FTM mailbox** (§4). The earlier
+> EEPROM software-mailbox binding was dropped (slow, wears the EEPROM, manual RF↔I2C arbitration).
+> Numeric constants are mirrored in firmware (`include/sticker/nfc_proto.h`) and the Manager-App
+> flasher (`lib/features/sticker/nfc/fw_update_protocol.dart`).
 
 ## 1. Design summary
 
@@ -80,7 +81,7 @@ byte 3..    detail     optional
 ### Commands
 | Name        | Code | Payload                          | MCU action |
 |-------------|------|----------------------------------|------------|
-| `CMD_START` | 0x01 | `session`(4) + `sfu_header`(32) [AES-CCM] | Set the CCM session, decrypt/validate the header, erase slot0. Reply `ST_READY` or `ST_ERR_*`. (Unkeyed factory devices accept a plaintext header.) |
+| `CMD_START` | 0x01 | `session`(4) + `sfu_header`(32) [AES-CCM] | Set the CCM session, decrypt/validate the header, **erase the whole `code_partition` up front** (not incrementally). Reply `ST_READY` or `ST_ERR_*`. A repeated `CMD_START` for the same `session` re-acks without re-erasing (idempotent, rides out a lost reply). (Unkeyed factory devices accept a plaintext header.) |
 | `CMD_DATA`  | 0x02 | `seq`, `data[len]`               | Write `data` at `seq * MAX_DATA` into slot0. Reply `ST_ACK(seq)` or `ST_RETRY(expected_seq)`. |
 | `CMD_FINISH`| 0x03 | —                                | Verify the payload CRC32 over the written slot. On success write the **valid metadata** block (refreshing key+serial), reply `ST_OK`, reboot into app. On failure reply `ST_ERR_VERIFY` (slot0 stays invalid → DFU-wait). |
 | `CMD_ABORT` | 0x04 | —                                | Drop session; slot0 stays erased/partial → DFU-wait. |
@@ -110,6 +111,17 @@ plaintext firmware** (`MAX_PLAINTEXT`; the remaining 8 are the AES-CCM tag when 
 bootloader writes frame `seq` at `seq * MAX_PLAINTEXT`, so the phone chunks the payload by 232
 regardless of keyed/unkeyed. The phone must honour `ST_RETRY` and resend from `expected_seq`. A
 bootloader DFU-session timeout (e.g. 30 s with no frame) returns to DFU-wait without bricking.
+
+### Recovery model (interrupted update)
+The transfer has **no mid-stream resume**: the bootloader writes each `CMD_DATA` page once and does
+not track which pages were programmed, so re-writing an already-programmed page would double-program
+(→ `ST_ERR_FLASH`). Any interruption — RF field removed, phone moved, power loss, timeout — therefore
+recovers by **re-doing the whole update from `CMD_START`** (which re-erases `code_partition`). This is
+safe and bounded because the operation is operator-present. Until a fresh `CMD_FINISH` succeeds,
+`sfu_meta.valid != SFU_META_MAGIC`, so the device stays in DFU-wait (never boots a half-written
+image); the phone app detects this (PING → `ST_READY`) and surfaces "re-flash required". The previous
+application is gone after the first `CMD_START` erase, by design (no second slot) — this is acceptable
+because the device is recoverable on the spot.
 
 ## 4. Physical binding — FTM mailbox
 
