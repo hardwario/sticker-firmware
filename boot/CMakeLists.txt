@@ -27,3 +27,10 @@ target_sources(app PRIVATE
 if(BOOT_SELFTEST)
   zephyr_compile_definitions(CONFIG_BOOT_SELFTEST)
 endif()
+
+# DFU retry test hook (diagnostic): build with -DBOOT_DFU_FAULT_INJECT=ON to drop
+# the response to one DATA frame once, forcing the phone to resend it so the
+# idempotent re-ack path (#236) can be exercised on hardware.
+if(BOOT_DFU_FAULT_INJECT)
+  zephyr_compile_definitions(CONFIG_BOOT_DFU_FAULT_INJECT)
+endif()

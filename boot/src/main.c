@@ -122,6 +122,13 @@ static uint32_t m_erased_session;
  * Reset to 0 only when a fresh slot is erased. */
 static uint16_t m_next_seq;
 
+#ifdef CONFIG_BOOT_DFU_FAULT_INJECT
+/* Test hook: the DATA seq whose response is dropped once, and a one-shot guard.
+ * Forces the phone to resend that frame so the idempotent re-ack path is hit. */
+#define BOOT_DFU_FAULT_SEQ 5
+static bool m_fault_injected;
+#endif
+
 static size_t build_status(uint8_t *out, uint8_t status, uint16_t ctx)
 {
 	out[0] = status;
@@ -329,6 +336,17 @@ static void dfu_loop(void)
 			status = NFC_ST_ERR_STATE;
 			break;
 		}
+
+#ifdef CONFIG_BOOT_DFU_FAULT_INJECT
+		/* Swallow the response to one DATA frame (after it was written) so the
+		 * phone times out and resends it — exercising the duplicate re-ack. */
+		if (type == NFC_CMD_DATA && seq == BOOT_DFU_FAULT_SEQ &&
+		    !m_fault_injected) {
+			m_fault_injected = true;
+			printk("DFU: FAULT-INJECT dropping response for DATA seq=%u\n", seq);
+			continue;
+		}
+#endif
 
 		size_t rlen = build_status(rsp, status, ctx);
 		(void)mb_send_response(rsp, rlen);
