@@ -110,6 +110,10 @@ static void jump_to_app(uint32_t base)
 
 static struct sfu_header m_hdr;
 static bool m_started;
+/* Session for which slot0 was already fully erased, so a re-sent START (the
+ * phone re-writes it each poll window during the ~1.7 s erase) doesn't erase
+ * again and livelock. */
+static uint32_t m_erased_session;
 
 static size_t build_status(uint8_t *out, uint8_t status, uint16_t ctx)
 {
@@ -125,7 +129,9 @@ static uint16_t handle_start(const uint8_t *data, size_t len)
 	if (len < 4) {
 		return NFC_ST_ERR_MAGIC;
 	}
-	auth_set_session(sys_get_le32(data));
+	uint32_t session = sys_get_le32(data);
+
+	auth_set_session(session);
 
 	uint8_t hdrbuf[SFU_HEADER_LEN + NFC_CCM_TAG_LEN];
 	size_t hl = 0;
@@ -142,6 +148,13 @@ static uint16_t handle_start(const uint8_t *data, size_t len)
 		return (m_hdr.payload_len > fw_slot0_size()) ? NFC_ST_ERR_SIZE
 							     : NFC_ST_ERR_MAGIC;
 	}
+	/* Idempotent: the phone re-writes START every poll window, so a START that
+	 * repeats the session we already erased just re-acks — no second erase, no
+	 * livelock. */
+	if (m_started && session == m_erased_session) {
+		return NFC_ST_READY;
+	}
+
 	/* Mark the slot in-progress BEFORE touching it: write metadata with a valid
 	 * magic but valid != MAGIC. From here on, an interruption + power cycle finds
 	 * meta present-but-not-committed and stays in DFU (slot_is_bootable), instead
@@ -159,10 +172,19 @@ static uint16_t handle_start(const uint8_t *data, size_t len)
 		return NFC_ST_ERR_FLASH;
 	}
 
-	/* Arm lazy per-page erase instead of a blocking ~1.7 s full-slot erase:
-	 * CMD_START must reply quickly or the phone's mailbox poll window re-sends
-	 * START and the handshake livelocks. Pages are erased on first write. */
-	fw_begin_incremental();
+	/* Erase the WHOLE slot now, up front (~1.7 s). This keeps the per-frame DATA
+	 * path write-only, so a flash page erase never overlaps the RF field + the
+	 * AES-CCM decrypt — that 3-way overlap (NFC + crypto + erase) is what failed
+	 * the erase mid-stream on keyed updates. The erase blocks the START reply,
+	 * but it runs with no concurrent crypto and the idempotent re-ack above
+	 * absorbs the phone's retries. DATA frames then only program. */
+	int eret = fw_erase_slot();
+
+	if (eret) {
+		printk("DFU: full slot erase FAILED: %d\n", eret);
+		return NFC_ST_ERR_FLASH;
+	}
+	m_erased_session = session;
 	m_started = true;
 	return NFC_ST_READY;
 }
