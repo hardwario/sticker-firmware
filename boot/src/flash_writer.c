@@ -9,6 +9,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/crc.h>
+#include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 
 #include <errno.h>
@@ -58,6 +59,8 @@ static int ensure_erased(const struct flash_area *fa, uint32_t off, size_t len)
 		int ret = flash_area_erase(fa, (off_t)p * FW_PAGE_SZ, FW_PAGE_SZ);
 
 		if (ret) {
+			printk("DFU: ERASE page %u @0x%lx FAILED: %d\n", p,
+			       (unsigned long)((off_t)p * FW_PAGE_SZ), ret);
 			return ret;
 		}
 		m_erased[p / 8] |= (1u << (p % 8));
@@ -108,6 +111,10 @@ int fw_write(uint32_t off, const uint8_t *data, size_t len)
 		}
 	}
 	ret = flash_area_write(fa, off, data, len);
+	if (ret) {
+		printk("DFU: WRITE @0x%lx len=%u FAILED: %d\n", (unsigned long)off,
+		       (unsigned)len, ret);
+	}
 	flash_area_close(fa);
 	return ret;
 }
