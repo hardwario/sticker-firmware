@@ -1,0 +1,60 @@
+/*
+ * Variant-B flash layout for the NFC bootloader (doc/nfc-update-protocol.md §7).
+ * The board DTS ships a flat single-image map (code@0); the NFC-update build
+ * needs a real partition table: a bootloader slot, the application slot it
+ * writes in-place, and a small sfu_meta record marking slot0 bootable.
+ *
+ *   boot       36K @ 0x00000   bootloader (this image)
+ *   code      162K @ 0x09000   application slot0 (written in-place over NFC)
+ *   sfu_meta    2K @ 0x31800   validity + AES-CCM key record
+ *   history    40K @ 0x32000   app history NVS (shrunk from the flat map)
+ *   storage    16K @ 0x3C000   settings / LoRaWAN NVM
+ *
+ * Defined as an overlay so the default flat build (no bootloader) is unchanged;
+ * this layout applies only to the bootloader and the variant-B app builds.
+ */
+
+#include <zephyr/dt-bindings/dt-util.h>
+
+&flash0 {
+	/delete-node/ partitions;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			label = "boot";
+			reg = <0x00000000 DT_SIZE_K(36)>;
+		};
+
+		/* slot0_partition: the bootloader's flash_writer target; code_partition:
+		 * what the variant-B app links against (chosen zephyr,code-partition). */
+		slot0_partition: code_partition: partition@9000 {
+			label = "code";
+			reg = <0x00009000 DT_SIZE_K(162)>;
+		};
+
+		sfu_meta_partition: partition@31800 {
+			label = "sfu_meta";
+			reg = <0x00031800 DT_SIZE_K(2)>;
+		};
+
+		history_partition: partition@32000 {
+			label = "history";
+			reg = <0x00032000 DT_SIZE_K(40)>;
+		};
+
+		storage_partition: partition@3c000 {
+			label = "storage";
+			reg = <0x0003c000 DT_SIZE_K(16)>;
+		};
+	};
+};
+
+/ {
+	chosen {
+		zephyr,code-partition = &boot_partition;
+	};
+};

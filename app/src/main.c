@@ -11,6 +11,7 @@
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_counters.h"
+#include "app_dfu_meta.h"
 #include "app_history.h"
 #include "app_version.h"
 #include "app_led.h"
@@ -22,6 +23,8 @@
 #include "app_sensor.h"
 #include "app_settings.h"
 #include "app_wdog.h"
+
+#include <sticker/dfu_signal.h>
 
 /* Zephyr includes */
 #include <zephyr/drivers/hwinfo.h>
@@ -238,6 +241,12 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 				 * firmware default). */
 				app_nfc_serve_mailbox(app_cmd_get_mailbox_timeout_s() * 1000);
 				break;
+			case APP_CMD_ACTION_ENTER_DFU:
+				/* Ask the NFC bootloader to enter DFU on the next boot,
+				 * then cold-reboot into it (variant-B firmware update). */
+				dfu_signal_request();
+				sys_reboot(SYS_REBOOT_COLD);
+				break;
 			default:
 				break;
 			}
@@ -357,6 +366,17 @@ int main(void)
 	}
 
 	/* --- Normal mode --- */
+
+#if defined(CONFIG_USE_DT_CODE_PARTITION)
+	/* Variant-B image (running behind the NFC bootloader): keep the bootloader's
+	 * sfu_meta record seeded with this device's secret_key + serial so it can
+	 * authenticate encrypted DFU frames. Non-fatal — a flash hiccup just leaves
+	 * DFU unkeyed, never a die() loop. */
+	ret = app_dfu_meta_provision();
+	if (ret) {
+		LOG_WRN("app_dfu_meta_provision failed: %d (NFC DFU may be unkeyed)", ret);
+	}
+#endif /* defined(CONFIG_USE_DT_CODE_PARTITION) */
 
 	/* The NFC tag (ST25DV) is non-essential: a broken tag must not brick an
 	 * otherwise-healthy device (radio + sensors fine) into a die() reboot loop
