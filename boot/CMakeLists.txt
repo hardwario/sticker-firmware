@@ -22,3 +22,8 @@ target_sources(app PRIVATE
   src/verify.c
   src/auth.c
 )
+
+# Phone-free crypto+erase self-test (diagnostic): build with -DBOOT_SELFTEST=ON.
+if(BOOT_SELFTEST)
+  zephyr_compile_definitions(CONFIG_BOOT_SELFTEST)
+endif()

@@ -289,9 +289,70 @@ static void dfu_loop(void)
 	}
 }
 
+#if defined(CONFIG_BOOT_SELFTEST)
+/* Phone-free reproduction of the keyed-DFU flash failure. Loops over slot0
+ * pages doing (optionally) an AES-CCM decrypt (the per-frame crypto current
+ * load) immediately before each page erase+write — exactly the keyed handle_data
+ * sequence — first WITHOUT crypto (control) then WITH, so a PPK2 current trace
+ * can show the erase spike that sags the supply, and flash_writer logs whether
+ * the erase or the program is what fails. Never returns. */
+#define SELFTEST_ROUNDS 100
+static void selftest(void)
+{
+	static const uint8_t test_key[NFC_KEY_LEN] = {
+		0x9a, 0x7c, 0x7d, 0x1f, 0xfe, 0xcc, 0xfe, 0xb7,
+		0x41, 0x5a, 0xb2, 0x47, 0x9b, 0xe9, 0x31, 0xb8,
+	};
+	static const uint8_t zero_key[NFC_KEY_LEN] = {0};
+	const uint32_t npages = fw_slot0_size() / 2048u;
+	static uint8_t buf[NFC_MAX_PLAINTEXT];
+	static uint8_t ct[NFC_MAX_PLAINTEXT + NFC_CCM_TAG_LEN];
+	static uint8_t pt[NFC_MAX_PLAINTEXT + NFC_CCM_TAG_LEN];
+	size_t ptl;
+
+	memset(buf, 0xA5, sizeof(buf));
+	memset(ct, 0x5A, sizeof(ct));
+	printk("SELFTEST: npages=%u rounds=%d\n", npages, SELFTEST_ROUNDS);
+
+	for (int phase = 0; phase < 2; phase++) {
+		bool crypto = (phase == 1);
+		int fails = 0;
+
+		auth_set_key(crypto ? test_key : zero_key, 0x80E0058Bu);
+		auth_set_session(0x12345678u);
+		printk("SELFTEST: PHASE %d (crypto=%d) START\n", phase, crypto);
+		k_msleep(2000); /* idle gap = low-current marker in the PPK2 trace */
+
+		for (int r = 0; r < SELFTEST_ROUNDS; r++) {
+			fw_begin_incremental();
+			for (uint32_t p = 0; p < npages; p++) {
+				if (crypto) {
+					(void)auth_decrypt(p, ct, sizeof(ct), pt, &ptl);
+				}
+				if (fw_write(p * 2048u, buf, NFC_MAX_PLAINTEXT) != 0) {
+					fails++; /* flash_writer prints erase-vs-write + errno */
+				}
+			}
+			if ((r % 20) == 0) {
+				printk("SELFTEST: phase=%d round=%d fails=%d\n", phase, r, fails);
+			}
+		}
+		printk("SELFTEST: PHASE %d DONE fails=%d\n", phase, fails);
+	}
+	printk("SELFTEST: COMPLETE\n");
+	for (;;) {
+		k_msleep(1000);
+	}
+}
+#endif /* CONFIG_BOOT_SELFTEST */
+
 int main(void)
 {
 	printk("STICKER NFC bootloader\n");
+
+#if defined(CONFIG_BOOT_SELFTEST)
+	selftest(); /* never returns */
+#endif
 
 	bool bootable = slot_is_bootable();
 	/* DFU requested by the app over NFC (enter_dfu command): it set a magic in
