@@ -1207,20 +1207,13 @@ int app_nfc_init(void)
 		LOG_INF("NFC: GPO IRQ on PB12 ready");
 	}
 
-	/* Write the info record now so the very first command a phone sends can seed
-	 * from it (serial + live nonce counter). The firmware otherwise only (re)writes
-	 * the info record as part of a command/response cycle (#164) — but a keyed
-	 * first command can't complete without already knowing the serial+nonce, so on
-	 * a fresh boot whose tag has no prior record there would be a deadlock. Arm the
-	 * restore first: if no RF field is present (the usual boot case) it writes
-	 * immediately; if a phone is already on the tag the write defers (-EBUSY) and
-	 * the poll thread lands it at the first field-off window. */
-	m_info_restore_pending = true;
-	ret = app_nfc_restore_info();
-	if (ret && ret != -EBUSY) {
-		LOG_WRN("NFC: initial info record write failed: %d", ret);
-	}
-
+	/* NOTE: do NOT write the info record here. The boot-time app_nfc_check() (and
+	 * the poll thread) already lay it down on a blank tag and restore it after a
+	 * consumed config/command — and crucially they run AFTER reading the tag, so a
+	 * config/command written over NFC while the device was powered off is ingested
+	 * first. Writing the info record at init would overwrite that pending record
+	 * before it is read, breaking power-off provisioning (SetParam-applied-at-boot,
+	 * #147). */
 	return 0;
 }
 
