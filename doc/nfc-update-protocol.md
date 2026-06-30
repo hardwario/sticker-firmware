@@ -109,19 +109,30 @@ IDLE --CMD_START(ok)--> ERASED --CMD_DATA*--> RECEIVING --CMD_FINISH(ok)--> COMM
 Each `CMD_DATA` frame carries up to `MAX_DATA` (240) frame bytes, of which up to **232 are
 plaintext firmware** (`MAX_PLAINTEXT`; the remaining 8 are the AES-CCM tag when keyed). The
 bootloader writes frame `seq` at `seq * MAX_PLAINTEXT`, so the phone chunks the payload by 232
-regardless of keyed/unkeyed. The phone must honour `ST_RETRY` and resend from `expected_seq`. A
-bootloader DFU-session timeout (e.g. 30 s with no frame) returns to DFU-wait without bricking.
+regardless of keyed/unkeyed. A bootloader DFU-session timeout (e.g. 30 s with no frame) returns to
+DFU-wait without bricking.
+
+**Per-frame retry.** The bootloader tracks the next expected seq and writes each page exactly once
+(flash cannot be re-programmed without an erase). It therefore makes `CMD_DATA` idempotent:
+- a **duplicate** (`seq < expected`, e.g. the phone resends after a lost ACK) is **re-acked without
+  re-programming** — so a dropped reply costs one re-send, not a `ST_ERR_FLASH`;
+- a **gap** (`seq > expected`) returns `ST_RETRY` with `ctx = expected`, so the phone resends **only
+  the missing frame** and continues — a single corrupted/lost frame no longer aborts the transfer;
+- the **next** frame (`seq == expected`) is decrypted, programmed, and the counter advances.
+
+The phone must honour `ST_RETRY` and resend from `ctx`. This makes a live session robust to transient
+NFC-coupling glitches frame-by-frame.
 
 ### Recovery model (interrupted update)
-The transfer has **no mid-stream resume**: the bootloader writes each `CMD_DATA` page once and does
-not track which pages were programmed, so re-writing an already-programmed page would double-program
-(→ `ST_ERR_FLASH`). Any interruption — RF field removed, phone moved, power loss, timeout — therefore
-recovers by **re-doing the whole update from `CMD_START`** (which re-erases `code_partition`). This is
-safe and bounded because the operation is operator-present. Until a fresh `CMD_FINISH` succeeds,
-`sfu_meta.valid != SFU_META_MAGIC`, so the device stays in DFU-wait (never boots a half-written
-image); the phone app detects this (PING → `ST_READY`) and surfaces "re-flash required". The previous
-application is gone after the first `CMD_START` erase, by design (no second slot) — this is acceptable
-because the device is recoverable on the spot.
+There is **no resume across a power loss**: the expected-seq counter lives in RAM and the slot was
+erased at `CMD_START`, so an update interrupted by a reset/power loss recovers by **re-doing the whole
+update from `CMD_START`** (which re-erases `code_partition`). This is safe and bounded because the
+operation is operator-present. Until a fresh `CMD_FINISH` succeeds, `sfu_meta.valid != SFU_META_MAGIC`,
+so the device stays in DFU-wait (never boots a half-written image); the phone app detects this
+(PING → `ST_READY`) and surfaces "re-flash required". The previous application is gone after the first
+`CMD_START` erase, by design (no second slot) — acceptable because the device is recoverable on the
+spot. (Within a live session, transient frame errors are handled by per-frame retry above without
+re-doing the whole image.)
 
 ## 4. Physical binding — FTM mailbox
 
