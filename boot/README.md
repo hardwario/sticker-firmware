@@ -4,10 +4,11 @@ Custom Zephyr bootloader image that receives a firmware image over NFC
 (phone → ST25DV → I2C) and writes it directly into the application slot.
 Implements the device side of [`doc/nfc-update-protocol.md`](../doc/nfc-update-protocol.md).
 
-> **Status: WIP scaffold — not yet build-wired or HW-tested.** The core logic
-> (ST25DV EEPROM mailbox, flash erase/write, CRC verify, boot decision + jump)
-> is in place; the items in *Remaining work* below must be completed before it
-> runs on hardware.
+> **Status: HW-validated.** End-to-end NFC firmware update works on hardware
+> (keyed and unkeyed): `enter_dfu` → bootloader DFU-wait → AES-CCM frame transfer
+> → CRC verify + commit → reboot. Build & flash via `make final_build` /
+> `make final_flash` (see below). Open follow-ups: sysbuild (build both images in
+> one step), per-variant DTS rollout, and image signing (issue #237).
 
 ## Why a custom bootloader (not MCUboot swap)
 
@@ -77,11 +78,57 @@ reset ──► read sfu_meta (flash)
    36 KB `boot_partition` (currently ~31 KB).
 6. **HW test** — end-to-end with `tools/nfc-flasher` against a real device.
 
-## Build (once wired)
+## Build & flash
+
+The bootloader and the variant-B app (the app relinked at `code_partition`) are
+two separate images. The `app/Makefile` wraps building + flashing both. Run from
+the **main checkout** (not a git worktree — the `sticker` board would otherwise be
+defined twice and the build fails with "board defined multiple times").
 
 ```bash
-source /home/hymbajs/.venv/bin/activate
-# separate-image build (interim, before sysbuild):
-west build -b sticker boot --pristine -d build/boot
-west flash -d build/boot          # writes boot_partition
+source ~/.venv/bin/activate
+cd app
+
+make final_build     # build bootloader + variant-B app -> deploy/
+                     #   sticker-bootloader.hex, sticker-app.{hex,bin,sfu}
+make final_flash     # flash bootloader (@0x08000000) + app (@code_partition)
+                     #   no --erase, so NVS (DevEUI/keys/config) is preserved
+make final_clean     # remove build-boot / build-app-b
 ```
+
+The bootloader only needs flashing once; afterwards the app is updated over NFC
+(`enter_dfu` → flash the `.sfu` from the phone), no SWD/J-Link required.
+
+### Examples
+
+```bash
+make final_build                       # 1.4.0, build_type CUSTOM(2)
+make final_build BUILD_TYPE=0          # 1.4.0 MAIN (release)
+make final_build BUILD_TYPE=1          # 1.4.0-dev (DEV branch build)
+make final_build VERSION_MINOR=5 VERSION_PATCH=0   # 1.5.0
+make final_flash JLINK_SN=822005110    # pick a specific J-Link
+
+# Two test images differing only by version (flash one, then the other):
+make final_build BUILD_TYPE=0 && cp deploy/sticker-app.sfu /tmp/fw-main.sfu
+make final_build BUILD_TYPE=1 && cp deploy/sticker-app.sfu /tmp/fw-dev.sfu
+```
+
+Overridable vars: `VERSION_MAJOR/MINOR/PATCH`, `BUILD_TYPE` (0=MAIN 1=DEV 2=CUSTOM),
+`LOAD_ADDR` (code_partition base, default `0x08009000`), `JLINK_SN`. The `.sfu`
+header's `fw_version` = `(major<<24)|(minor<<16)|(patch<<8)|build_type`.
+
+### Manual (without make)
+
+```bash
+west build -p always -b sticker boot -d build-boot
+west build -p always -b sticker app  -d build-app-b -- -DEXTRA_CONF_FILE=nfc-boot.conf
+west flash -d build-boot      # bootloader @0x08000000
+west flash -d build-app-b     # variant-B app @code_partition
+# package the .sfu for NFC flashing:
+python3 ../scripts/mksfu.py build-app-b/zephyr/zephyr.bin out.sfu \
+    --load-addr 0x08009000 --fw-version 0x01040000
+```
+
+> The variant-B app is **release-only** — the debug image is too large to fit
+> `code_partition` behind the bootloader. CI builds the same images in the
+> `build-nfc` job and attaches the `.sfu` to tagged releases.

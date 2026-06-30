@@ -114,6 +114,20 @@ static bool m_started;
  * phone re-writes it each poll window during the ~1.7 s erase) doesn't erase
  * again and livelock. */
 static uint32_t m_erased_session;
+/* Next DATA seq expected in-order. The slot is erased contiguously at START and
+ * each offset is programmed exactly once (flash can't be re-programmed without an
+ * erase), so DATA must arrive in order. This counter lets handle_data tell apart
+ * a duplicate (already-written, < expected → re-ack, no second program) from a
+ * gap (> expected → ask the phone to resend just the missing frame via RETRY).
+ * Reset to 0 only when a fresh slot is erased. */
+static uint16_t m_next_seq;
+
+#ifdef CONFIG_BOOT_DFU_FAULT_INJECT
+/* Test hook: the DATA seq whose response is dropped once, and a one-shot guard.
+ * Forces the phone to resend that frame so the idempotent re-ack path is hit. */
+#define BOOT_DFU_FAULT_SEQ 5
+static bool m_fault_injected;
+#endif
 
 static size_t build_status(uint8_t *out, uint8_t status, uint16_t ctx)
 {
@@ -186,14 +200,34 @@ static uint16_t handle_start(const uint8_t *data, size_t len)
 	}
 	m_erased_session = session;
 	m_started = true;
+	m_next_seq = 0;
 	return NFC_ST_READY;
 }
 
-/* DATA data = CCM(chunk) [|| tag]; plaintext chunk is NFC_MAX_PLAINTEXT-sized. */
+/* DATA data = CCM(chunk) [|| tag]; plaintext chunk is NFC_MAX_PLAINTEXT-sized.
+ *
+ * Per-frame retry without re-programming flash:
+ *  - seq <  m_next_seq : duplicate (its page is already written). Re-ack it
+ *                        WITHOUT touching flash — re-programming a written
+ *                        doubleword raises PROGERR (→ ST_ERR_FLASH). This
+ *                        absorbs a lost ACK (the phone resends the same frame).
+ *  - seq >  m_next_seq : a frame was missed. The slot is written in order, so we
+ *                        can't accept seq out of order; reply RETRY with the
+ *                        expected seq (caller sets ctx = m_next_seq) so the phone
+ *                        resends only that frame, not the whole image.
+ *  - seq == m_next_seq : the next frame — decrypt, program, advance.
+ */
 static uint16_t handle_data(uint16_t seq, const uint8_t *data, size_t len)
 {
 	if (!m_started) {
 		return NFC_ST_ERR_STATE;
+	}
+
+	if (seq < m_next_seq) {
+		return NFC_ST_ACK; /* already written; re-ack, no re-program */
+	}
+	if (seq > m_next_seq) {
+		return NFC_ST_RETRY; /* gap; ctx = m_next_seq set by the caller */
 	}
 
 	uint8_t pt[NFC_MAX_PLAINTEXT];
@@ -208,6 +242,7 @@ static uint16_t handle_data(uint16_t seq, const uint8_t *data, size_t len)
 	if (fw_write(off, pt, pl) != 0) {
 		return NFC_ST_ERR_FLASH;
 	}
+	m_next_seq = seq + 1;
 	return NFC_ST_ACK;
 }
 
@@ -286,7 +321,9 @@ static void dfu_loop(void)
 			break;
 		case NFC_CMD_DATA:
 			status = handle_data(seq, data, dlen);
-			ctx = seq;
+			/* On RETRY ctx tells the phone the seq to resend; on ACK
+			 * (fresh or duplicate re-ack) ctx echoes the acked seq. */
+			ctx = (status == NFC_ST_RETRY) ? m_next_seq : seq;
 			break;
 		case NFC_CMD_FINISH:
 			status = handle_finish();
@@ -299,6 +336,17 @@ static void dfu_loop(void)
 			status = NFC_ST_ERR_STATE;
 			break;
 		}
+
+#ifdef CONFIG_BOOT_DFU_FAULT_INJECT
+		/* Swallow the response to one DATA frame (after it was written) so the
+		 * phone times out and resends it — exercising the duplicate re-ack. */
+		if (type == NFC_CMD_DATA && seq == BOOT_DFU_FAULT_SEQ &&
+		    !m_fault_injected) {
+			m_fault_injected = true;
+			printk("DFU: FAULT-INJECT dropping response for DATA seq=%u\n", seq);
+			continue;
+		}
+#endif
 
 		size_t rlen = build_status(rsp, status, ctx);
 		(void)mb_send_response(rsp, rlen);

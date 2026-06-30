@@ -1207,6 +1207,13 @@ int app_nfc_init(void)
 		LOG_INF("NFC: GPO IRQ on PB12 ready");
 	}
 
+	/* NOTE: do NOT write the info record here. The boot-time app_nfc_check() (and
+	 * the poll thread) already lay it down on a blank tag and restore it after a
+	 * consumed config/command — and crucially they run AFTER reading the tag, so a
+	 * config/command written over NFC while the device was powered off is ingested
+	 * first. Writing the info record at init would overwrite that pending record
+	 * before it is read, breaking power-off provisioning (SetParam-applied-at-boot,
+	 * #147). */
 	return 0;
 }
 
