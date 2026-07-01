@@ -352,6 +352,13 @@ int app_sensor_init(void)
 			      K_SECONDS(g_app_config.interval_sample));
 	}
 
+	/* L-51: take one full sample now (all sensors + battery) so g_app_sensor_data
+	 * holds real readings before any telemetry can be composed. Otherwise the
+	 * first report — which may fire on the join edge before the 1 s sensor-timer
+	 * tick — would ship the pre-sample sentinels (e.g. voltage 0 → a bogus
+	 * low-battery on the dashboard). */
+	app_sensor_sample();
+
 	return res;
 }
 
