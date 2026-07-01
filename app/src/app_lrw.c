@@ -97,11 +97,21 @@ static struct k_work_q m_work_q;
  * and app_wdog stops feeding the IWDG → SoC reset + rejoin. The timeout is far
  * above the worst-case legitimate single-send blocking (~7 s on TTN with a 5 s
  * RX1 delay), so only a true wedge trips it. */
-#define LRW_HEARTBEAT_PERIOD_SEC 5
-#define LRW_HEARTBEAT_TIMEOUT_MS 30000
+#define LRW_HEARTBEAT_PERIOD_SEC   5
+#define LRW_HEARTBEAT_TIMEOUT_MS   30000
+/* M-2: the #182 heartbeat only proves m_work_q drains, not that telemetry
+ * actually leaves. If sends are perpetually skipped (budget==0 loop, retries
+ * exhausted) the queue stays live and the IWDG is fed while the station is mute.
+ * Force a MAC-reset rejoin after this many report intervals with no successful
+ * telemetry uplink. */
+#define LRW_TX_STALE_REJOIN_FACTOR 4
 static int m_wdog_channel = -1;
 static struct k_work_delayable m_heartbeat_work;
 #endif
+
+/* Uptime (ms) of the last successful telemetry uplink; 0 = none since the last
+ * (re)join. Drives the M-2 stale-uplink watchdog in heartbeat_work_handler. */
+static int64_t m_last_uplink_ms;
 
 /* --- Timers (each one meaning only) --- */
 static struct k_timer m_lc_timeout_timer;
@@ -263,8 +273,19 @@ static uint32_t calculate_rejoin_backoff(int attempt)
 	for (int i = 0; i < attempt; i++) {
 		backoff *= REJOIN_BACKOFF_MULTIPLIER;
 		if (backoff >= REJOIN_BACKOFF_MAX_SEC) {
-			return REJOIN_BACKOFF_MAX_SEC;
+			backoff = REJOIN_BACKOFF_MAX_SEC;
+			break;
 		}
+	}
+
+	/* ±25% jitter (M-1): a purely deterministic backoff makes a whole fleet that
+	 * entered RECONNECT together (shared gateway/LNS outage) rejoin in lockstep —
+	 * a thundering herd that collides in the join windows and saturates the duty
+	 * cycle on recovery. Spread the slots (app_report.c jitters its cadence the
+	 * same way). */
+	uint32_t spread = backoff / 4;
+	if (spread) {
+		backoff = backoff - spread + (sys_rand32_get() % (2 * spread + 1));
 	}
 	return backoff;
 }
@@ -357,6 +378,7 @@ static void state_transition(enum app_lrw_state new_state)
 		m_force_lc_remaining = 0;
 		m_rejoin_attempts = 0;
 		m_link_check_pending = false;
+		m_last_uplink_ms = k_uptime_get(); /* M-2: start the stale-uplink clock */
 		break;
 
 	case APP_LRW_STATE_WARNING:
@@ -957,6 +979,25 @@ static void tx_telemetry_frame(bool first_frame)
 			m_frame_first && !m_link_check_pending && should_request_link_check();
 	}
 
+	/* M-10: app_compose force-emits a single group / w1 reading that is larger
+	 * than the DR budget "alone" (into the big compose buffer), so m_frame_len can
+	 * exceed the on-air budget — most acute on US915/AU915 DR0 (11 B) with a
+	 * machine-probe reading (~25-30 B). lorawan_send would reject it and we'd burn
+	 * ~120 s of retries every report cycle on data that can't fit at this DR. Drop
+	 * the over-budget frame explicitly (mirrors tx_send_queued) and keep draining
+	 * the rest of the snapshot; it recovers once the DR rises. */
+	if (m_frame_len > m_max_next_payload) {
+		LOG_ERR("Telemetry frame %u B over DR budget %u B; dropped (raise DR)",
+			(unsigned)m_frame_len, (unsigned)m_max_next_payload);
+		m_frame_resend = false;
+		m_frame_retries = 0;
+		if (m_frame_more) {
+			k_work_schedule_for_queue(&m_work_q, &m_frame_work,
+						  K_SECONDS(FRAME_GAP_SEC));
+		}
+		return;
+	}
+
 	bool with_link_check = m_frame_with_lc;
 
 	if (with_link_check) {
@@ -1000,6 +1041,7 @@ static void tx_telemetry_frame(bool first_frame)
 	m_frame_resend = false;
 	m_frame_retries = 0;
 	m_message_count++;
+	m_last_uplink_ms = k_uptime_get(); /* M-2: telemetry actually went out */
 
 	if (m_frame_more) {
 		k_work_schedule_for_queue(&m_work_q, &m_frame_work, K_SECONDS(FRAME_GAP_SEC));
@@ -1448,6 +1490,27 @@ static void heartbeat_work_handler(struct k_work *work)
 	ARG_UNUSED(work);
 
 	app_wdog_ping(m_wdog_channel);
+
+	/* M-2: stale-uplink watchdog. The ping above only proves m_work_q drains; if
+	 * telemetry is perpetually skipped (budget==0, retries exhausted) the station
+	 * is mute while the IWDG stays fed. When joined but no successful uplink has
+	 * left for LRW_TX_STALE_REJOIN_FACTOR × interval_report, force a MAC-reset
+	 * rejoin (same escalation the link-check failure path uses). Runs on m_work_q,
+	 * so state_transition() is single-threaded here. */
+	enum app_lrw_state st = (enum app_lrw_state)atomic_get(&m_state);
+	if ((st == APP_LRW_STATE_HEALTHY || st == APP_LRW_STATE_WARNING) && m_last_uplink_ms &&
+	    g_app_config.interval_report) {
+		int64_t stale_ms =
+			(int64_t)g_app_config.interval_report * LRW_TX_STALE_REJOIN_FACTOR * 1000;
+		if (k_uptime_get() - m_last_uplink_ms > stale_ms) {
+			LOG_WRN("No telemetry uplink for >%d report intervals - forcing rejoin "
+				"(M-2)",
+				LRW_TX_STALE_REJOIN_FACTOR);
+			m_last_uplink_ms = k_uptime_get(); /* don't re-trigger every tick */
+			state_transition(APP_LRW_STATE_RECONNECT);
+		}
+	}
+
 	k_work_schedule_for_queue(&m_work_q, &m_heartbeat_work,
 				  K_SECONDS(LRW_HEARTBEAT_PERIOD_SEC));
 }
