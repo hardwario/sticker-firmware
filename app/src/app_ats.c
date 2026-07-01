@@ -819,6 +819,8 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 
 	static const char *const build_type_name[] = {"main", "dev", "custom"};
+	static const char *const lrw_state_name[] = {"idle", "joining", "healthy", "warning",
+						     "reconnect"};
 
 	struct app_cmd_info info;
 	app_cmd_get_info(&info);
@@ -826,11 +828,15 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	const char *bt = info.build_type < ARRAY_SIZE(build_type_name)
 				 ? build_type_name[info.build_type]
 				 : "unknown";
+	const char *ls = info.lrw_state < ARRAY_SIZE(lrw_state_name)
+				 ? lrw_state_name[info.lrw_state]
+				 : "unknown";
 
 	shell_print(sh, "FW version:    %u.%u.%u", info.fw_major, info.fw_minor, info.fw_patch);
 	shell_print(sh, "Build type:    %s (%s)", bt, info.debug ? "debug" : "release");
 	shell_print(sh, "Serial number: %u", info.serial_number);
 	shell_print(sh, "Uptime:        %u s", info.uptime_s);
+	shell_print(sh, "LRW state:     %s", ls);
 	if (info.battery_mv) {
 		shell_print(sh, "Battery:       %u mV", info.battery_mv);
 	} else {
@@ -853,6 +859,9 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	/* Device identity keys (local shell only). secret-key is confidential; the
 	 * claim-token (#170) is shown as "(unset)" until commissioned. */
 	char hexbuf[2 * 16 + 1];
+
+	bin2hex(info.dev_eui, sizeof(info.dev_eui), hexbuf, sizeof(hexbuf));
+	shell_print(sh, "DevEUI:        %s", hexbuf);
 
 	bin2hex(g_app_config.secret_key, sizeof(g_app_config.secret_key), hexbuf, sizeof(hexbuf));
 	shell_print(sh, "Secret key:    %s", hexbuf);

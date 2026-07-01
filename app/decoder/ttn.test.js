@@ -197,6 +197,32 @@ test("decodeUplink decodes get_info battery + reset_cause (fPort 85)", () => {
   assert.equal(got.info.reset_cause, 0x20);
 });
 
+// Info carries lrw_state (field 12, mirrors app_lrw_state) and dev_eui (field 13,
+// 8 bytes). dev_eui is emitted over NFC only. Inner Info: fw 1.4.2,
+// lrw_state=2 (HEALTHY), dev_eui=0102030405060708.
+test("decodeUplink decodes get_info lrw_state + dev_eui (NFC)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a1208011004180260026a080102030405060708"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.seq, 3);
+  assert.equal(got.info.lrw_state, 2);
+  assert.equal(got.info.lrw_state_name, "healthy");
+  assert.equal(got.info.dev_eui, "0102030405060708");
+});
+
+// Over LoRaWAN the device omits dev_eui but still reports lrw_state.
+test("decodeUplink get_info omits dev_eui over LoRaWAN, keeps lrw_state (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a080801100418026002"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.seq, 3);
+  assert.equal(got.info.lrw_state, 2);
+  assert.equal(got.info.lrw_state_name, "healthy");
+  assert.equal(got.info.dev_eui, undefined);
+});
+
 // --- Uplink: protobuf telemetry (fPort 2) ---------------------------------
 // Real HW capture (#78/#80 verification, device sticker-2162165131, 2026-06-09):
 // a non-boot report with hall-left + hall-right capabilities enabled but no
