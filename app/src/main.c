@@ -57,9 +57,6 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
  * far more than a short GetInfo. 3072 B overflowed on the longer commands. */
 #define NFC_POLL_THREAD_STACK_SIZE   6144
 #define NFC_POLL_THREAD_PRIO         K_LOWEST_APPLICATION_THREAD_PRIO
-/* Delay before running an NFC command's deferred action, so the phone can read
- * the Ack response off the tag before the device reboots/saves. */
-#define NFC_CMD_ACTION_DELAY_SECONDS 3
 
 #define APP_ALARM_ORANGE_RATE_LIMIT_MS 500
 #define APP_ALARM_ORANGE_AUTO_OFF_MS   (60 * 60 * 1000)
@@ -118,6 +115,53 @@ static void play_carousel_nfc(void)
 	k_sleep(K_MSEC(10 * 200 - 100));
 }
 
+/* Run any deferred action queued by an NFC command (reboot/save/factory-reset/
+ * ...). app_nfc_take_cmd_action() returns an action only once its response has
+ * been delivered to the phone — the phone acked the reply and the info record was
+ * restored, or the quiet backstop restored it — so a reboot/save fires *after*
+ * the phone has read the response instead of racing a blind fixed delay. */
+static void nfc_run_deferred_cmd_actions(void)
+{
+	enum app_cmd_action cmd_action = app_nfc_take_cmd_action();
+	while (cmd_action != APP_CMD_ACTION_NONE) {
+		switch (cmd_action) {
+		case APP_CMD_ACTION_SETTINGS_SAVE:
+			app_settings_save(true);
+			break;
+		case APP_CMD_ACTION_REBOOT:
+			sys_reboot(SYS_REBOOT_COLD);
+			break;
+		case APP_CMD_ACTION_FACTORY_RESET:
+			app_settings_reset();
+			break;
+		case APP_CMD_ACTION_ENTER_CALIBRATION:
+			/* Persist calibration=true + reboot; next boot enters
+			 * calibration mode (app_calibration_init() clears it).
+			 * Write the staging config (settings_save persists that,
+			 * not the boot-time g_app_config copy). */
+			app_config()->calibration = true;
+			app_settings_save(true);
+			break;
+		case APP_CMD_ACTION_LRW_RESET:
+			/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). */
+			app_lrw_reset_nvm();
+			sys_reboot(SYS_REBOOT_COLD);
+			break;
+		case APP_CMD_ACTION_LRW_JOIN:
+			/* Force a (re)join now, no reboot (#109). */
+			app_lrw_join();
+			break;
+		case APP_CMD_ACTION_COUNTERS_SAVE:
+			/* Persist the (reset) pulse totalizers, no reboot. */
+			app_counters_save(true);
+			break;
+		default:
+			break;
+		}
+		cmd_action = app_nfc_take_cmd_action();
+	}
+}
+
 /* Dedicated NFC poll thread: independent of the LED blink loop. Each cycle does
  * the cheap gated poll (1-byte IT_STS_Dyn; full read only on RF activity) and
  * applies a consumed config. Started after a delay so app_nfc_init() has run. */
@@ -163,6 +207,9 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("app_nfc_restore_info", ret);
 			}
+			/* The backstop restore releases any deferred action (the phone left
+			 * without acking) — run it now instead of waiting for the next wake. */
+			nfc_run_deferred_cmd_actions();
 			continue;
 		}
 
@@ -186,50 +233,10 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 			}
 		}
 
-		/* Deferred action from an NFC command (reboot/save/factory-reset). Run it
-		 * after a short delay so the phone can still read the Ack response off the
-		 * tag first. */
-		enum app_cmd_action cmd_action = app_nfc_take_cmd_action();
-		while (cmd_action != APP_CMD_ACTION_NONE) {
-			/* Delay before acting so the phone can first read the Ack off the tag
-			 * over NDEF. */
-			k_sleep(K_SECONDS(NFC_CMD_ACTION_DELAY_SECONDS));
-			switch (cmd_action) {
-			case APP_CMD_ACTION_SETTINGS_SAVE:
-				app_settings_save(true);
-				break;
-			case APP_CMD_ACTION_REBOOT:
-				sys_reboot(SYS_REBOOT_COLD);
-				break;
-			case APP_CMD_ACTION_FACTORY_RESET:
-				app_settings_reset();
-				break;
-			case APP_CMD_ACTION_ENTER_CALIBRATION:
-				/* Persist calibration=true + reboot; next boot enters
-				 * calibration mode (app_calibration_init() clears it).
-				 * Write the staging config (settings_save persists that,
-				 * not the boot-time g_app_config copy). */
-				app_config()->calibration = true;
-				app_settings_save(true);
-				break;
-			case APP_CMD_ACTION_LRW_RESET:
-				/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). */
-				app_lrw_reset_nvm();
-				sys_reboot(SYS_REBOOT_COLD);
-				break;
-			case APP_CMD_ACTION_LRW_JOIN:
-				/* Force a (re)join now, no reboot (#109). */
-				app_lrw_join();
-				break;
-			case APP_CMD_ACTION_COUNTERS_SAVE:
-				/* Persist the (reset) pulse totalizers, no reboot. */
-				app_counters_save(true);
-				break;
-			default:
-				break;
-			}
-			cmd_action = app_nfc_take_cmd_action();
-		}
+		/* Deferred action from an NFC command (reboot/save/factory-reset/...).
+		 * Gated: only runs once the phone has read the response (see
+		 * nfc_run_deferred_cmd_actions / app_nfc_take_cmd_action). */
+		nfc_run_deferred_cmd_actions();
 	}
 }
 
