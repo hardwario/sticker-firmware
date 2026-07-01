@@ -530,6 +530,26 @@ uint64_t app_w1_slot_get_rom(int slot)
 	return rom;
 }
 
+/* True if a probe has been *configured* (taught) into this slot — the persisted
+ * ROM is non-zero — regardless of whether the device is on the bus right now. The
+ * no-data watchdog uses this (H-5): a configured probe that is absent must still
+ * be monitored so its disappearance raises a no_data alarm, instead of the
+ * runtime type going EMPTY and the slot silently dropping off monitoring. */
+bool app_w1_slot_is_configured(int slot)
+{
+	const uint8_t *rom = cfg_rom(slot);
+
+	if (!rom) {
+		return false;
+	}
+	for (size_t i = 0; i < 8; i++) {
+		if (rom[i]) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool app_w1_slot_is_present(int slot)
 {
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT) {

@@ -81,7 +81,8 @@ const char *app_w1_slot_type_name(enum app_w1_slot_type type);
 
 /* Slot metadata accessors (0-based slot index). */
 enum app_w1_slot_type app_w1_slot_get_type(int slot);
-uint64_t app_w1_slot_get_rom(int slot); /* 48-bit serial, 0 = empty */
+uint64_t app_w1_slot_get_rom(int slot);   /* 48-bit serial, 0 = empty */
+bool app_w1_slot_is_configured(int slot); /* a probe was taught to this slot (persisted ROM != 0) */
 bool app_w1_slot_is_present(int slot);
 bool app_w1_slot_is_replaced(int slot); /* configured ROM absent but a same-type device appeared */
 
