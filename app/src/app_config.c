@@ -50,6 +50,17 @@ static const struct app_config m_app_config_defaults = {
  * migrated config so the stored version is bumped exactly once. */
 static bool m_app_config_migrated;
 
+/* Set by init when settings_load fails (corrupt/unreadable NVS): the device then
+ * boots on compile-time defaults with its identity + provisioning gone. Queryable
+ * so the app can surface a distinct state (LED / GetInfo) instead of silently
+ * looking like a blank device (H-4). */
+static bool m_app_config_load_failed;
+
+bool app_config_load_failed(void)
+{
+	return m_app_config_load_failed;
+}
+
 static struct app_config m_app_config = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
@@ -1641,8 +1652,13 @@ static int app_config_init(void)
 
 	ret = settings_load_subtree(SETTINGS_PFX);
 	if (ret) {
-		LOG_ERR("Call `settings_load_subtree` failed: %d", ret);
-		return ret;
+		/* H-4: do not silently swallow a load failure. SYS_INIT discards our
+		 * return value, so returning here just lets the device boot on defaults
+		 * (identity + provisioning gone) with no signal. Flag it instead so the
+		 * app can show a distinct state; the in-RAM defaults keep the device
+		 * running rather than dead. */
+		LOG_ERR("Call `settings_load_subtree` failed: %d — booting on defaults", ret);
+		m_app_config_load_failed = true;
 	}
 
 	if (m_app_config_migrated) {

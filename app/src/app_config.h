@@ -110,6 +110,11 @@ extern struct app_config g_app_config;
 
 struct app_config *app_config(void);
 
+/* True if settings_load failed at boot (corrupt/unreadable NVS) and the device is
+ * running on compile-time defaults — identity + provisioning lost. Lets the app
+ * surface a distinct state instead of silently looking like a blank device (H-4). */
+bool app_config_load_failed(void);
+
 /* Reset every parameter to its compiled-in default EXCEPT the factory identity
  * and network credentials (preserve_on_reset), then persist. Backs the
  * factory_reset command so the device keeps its LoRaWAN session; the shell
