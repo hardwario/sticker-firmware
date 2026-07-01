@@ -335,9 +335,10 @@ void app_alarm_rules_clear_all(void)
 
 /* ---- persistence (app_config storage) ----------------------------------- */
 
-void app_alarm_rules_reload_from_config(void)
+int app_alarm_rules_reload_from_config(void)
 {
 	struct app_config *c = app_config();
+	int dropped = 0; /* non-empty slots that failed validation and were sanitized */
 
 	k_mutex_lock(&m_lock, K_FOREVER);
 	for (uint8_t s = 0; s < APP_ALARM_SLOT_COUNT; s++) {
@@ -355,9 +356,11 @@ void app_alarm_rules_reload_from_config(void)
 			/* Zero the persisted bytes too, not just the live cache, so a
 			 * rejected slot doesn't linger in NVS and get echoed by
 			 * GetParam/dump — keeping stored state consistent with live
-			 * state (#197). Non-empty-but-invalid is the case worth a log. */
+			 * state (#197). Non-empty-but-invalid is the case worth a log
+			 * (and worth reporting to the caller — H-10). */
 			if (field[0] & RULE_FLAG_PRESENT) {
 				LOG_WRN("Alarm slot %u: invalid persisted rule sanitized", s);
+				dropped++;
 			}
 			memset(field, 0, RULE_PACK_LEN);
 			m_slots[s].used = false;
@@ -366,6 +369,7 @@ void app_alarm_rules_reload_from_config(void)
 	k_mutex_unlock(&m_lock);
 
 	LOG_INF("Loaded %u alarm rule(s)", app_alarm_rules_count());
+	return dropped;
 }
 
 int app_alarm_rules_save(void)

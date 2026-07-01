@@ -214,13 +214,19 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid value");
 		resp->body.error.fault_field = fault_group * 100 + fault;
 	} else {
-		resp->which_body = Response_ack_tag;
 		/* Alarm rules staged into the config slots only take effect once the
 		 * decoded rule cache is rebuilt; do it here so they go live without a
-		 * reboot (whether or not this batch is persisted). */
-		if (sp->has_alarms) {
-			app_alarm_rules_reload_from_config();
+		 * reboot (whether or not this batch is persisted). reload sanitizes and
+		 * reports any rule that fails validation — surface that as a fault instead
+		 * of a misleading ACK for a rule that was silently dropped (H-10). */
+		if (sp->has_alarms && app_alarm_rules_reload_from_config() > 0) {
+			*app_config() = snapshot;                   /* roll back the batch */
+			(void)app_alarm_rules_reload_from_config(); /* resync cache to it */
+			make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid alarm rule");
+			resp->body.error.fault_field = 4 * 100; /* group 4 = alarms */
+			return;
 		}
+		resp->which_body = Response_ack_tag;
 		/* Optional one-shot commit: persist staged config + reboot, same path
 		 * as SettingsSave. Used as the last message of a multi-downlink batch. */
 		if (sp->has_save && sp->save) {
