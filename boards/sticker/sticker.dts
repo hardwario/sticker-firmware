@@ -112,6 +112,11 @@ stm32_lp_tick_source: &lptim1 {
 	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
 	pinctrl-1 = <&analog_pb6 &analog_pb7>;
 	pinctrl-names = "default", "sleep";
+	/* Bus-recovery bit-bang pins (H-6, CONFIG_I2C_STM32_BUS_RECOVERY): same SCL
+	 * PB6 / SDA PB7, driven as open-drain GPIOs to clock a wedged slave free. The
+	 * bus has external pull-ups (onboard sensors). */
+	scl-gpios = <&gpiob 6 GPIO_OPEN_DRAIN>;
+	sda-gpios = <&gpiob 7 GPIO_OPEN_DRAIN>;
 	status = "okay";
 
 	lis2dh12: lis2dh12@19 {
