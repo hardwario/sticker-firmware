@@ -220,6 +220,7 @@ parameters:
 
   - name: lrw_region
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 1
     type: enum
     enum: lrw_region
@@ -228,6 +229,7 @@ parameters:
 
   - name: lrw_sub_band
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 2
     type: int
     default: 2
@@ -238,6 +240,7 @@ parameters:
 
   - name: lrw_network
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 3
     type: enum
     enum: lrw_network
@@ -246,6 +249,7 @@ parameters:
 
   - name: lrw_adr
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 4
     type: bool
     preserve_on_reset: true
@@ -253,6 +257,7 @@ parameters:
 
   - name: lrw_activation
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 5
     type: enum
     enum: lrw_activation
@@ -261,6 +266,7 @@ parameters:
 
   - name: lrw_deveui
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 6
     type: bytes
     size: 8
@@ -269,6 +275,7 @@ parameters:
 
   - name: lrw_joineui
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 7
     type: bytes
     size: 8
@@ -277,6 +284,7 @@ parameters:
 
   - name: lrw_nwkkey
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 8
     readable: [shell, nfc]
     type: bytes
@@ -286,6 +294,7 @@ parameters:
 
   - name: lrw_appkey
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 9
     readable: [shell, nfc]
     type: bytes
@@ -295,6 +304,7 @@ parameters:
 
   - name: lrw_devaddr
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 10
     type: bytes
     size: 4
@@ -303,6 +313,7 @@ parameters:
 
   - name: lrw_nwkskey
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 11
     readable: [shell, nfc]
     type: bytes
@@ -312,6 +323,7 @@ parameters:
 
   - name: lrw_appskey
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 12
     readable: [shell, nfc]
     type: bytes
@@ -321,6 +333,7 @@ parameters:
 
   - name: lrw_link_check_interval
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 13
     type: int
     default: 5
@@ -330,6 +343,7 @@ parameters:
 
   - name: lrw_link_check_fail_rejoin
     proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 14
     type: int
     default: 5
