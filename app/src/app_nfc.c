@@ -220,6 +220,15 @@ static bool m_seen_ack;  /* tag holds the phone's ack: reply consumed, restore i
 static bool m_resp_write_pending;
 static enum app_cmd_action m_cmd_action; /* deferred action from app_cmd_handle */
 
+/* Gate for m_cmd_action. A deferred action (reboot/save/factory-reset/...) is
+ * only handed to the poll thread once its response has actually been delivered
+ * to the phone: after the phone acks the reply and we restore the info record,
+ * or after the quiet backstop restores it if the phone leaves without acking.
+ * This makes a reboot fire *after* the phone has read the response — extending
+ * the #164 read handshake to the action — instead of the old blind fixed delay
+ * that raced the phone read. */
+static bool m_cmd_action_ready;
+
 /* Debounce for the "unrecognized data -> restore info" path. A poll can catch
  * the tag mid-write (the phone is still laying down a command/config record),
  * which parses as garbage; restoring the info record then would clobber what
@@ -242,11 +251,19 @@ static uint8_t m_unknown_count;
 static bool m_info_restore_pending;
 
 /* Take (and clear) the deferred action from the last processed NFC command, so
- * the poll thread can run reboot/save AFTER the response was written/read. */
+ * the poll thread can run reboot/save AFTER the response was written and read.
+ * Returns APP_CMD_ACTION_NONE until the response has been delivered to the phone
+ * (m_cmd_action_ready), so a reboot never cuts off a reply the phone has not yet
+ * read. */
 enum app_cmd_action app_nfc_take_cmd_action(void)
 {
+	if (!m_cmd_action_ready) {
+		return APP_CMD_ACTION_NONE;
+	}
+
 	enum app_cmd_action a = m_cmd_action;
 	m_cmd_action = APP_CMD_ACTION_NONE;
+	m_cmd_action_ready = false;
 	return a;
 }
 
@@ -916,12 +933,15 @@ static size_t m_resp_cache_len;
  *   counter  > stored  -> new: decrypt (advances+persists the counter), run, cache
  *   counter <= stored  -> stale replay: decrypt() rejects with -EACCES
  * Writes the encrypted reply into out_buf/out_len and the deferred action into
- * *action (NONE on a replay — the original already ran). Returns 0 or -errno. */
+ * *action (NONE on a replay — the original already ran). Sets *replayed=true on a
+ * same-counter retransmission so the caller keeps a deferred action still waiting
+ * for the phone's ack instead of clearing it. Returns 0 or -errno. */
 static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_buf, size_t out_cap,
-				size_t *out_len, enum app_cmd_action *action)
+				size_t *out_len, enum app_cmd_action *action, bool *replayed)
 {
 	*out_len = 0;
 	*action = APP_CMD_ACTION_NONE;
+	*replayed = false;
 
 	if (in_len < 8) {
 		return -EINVAL;
@@ -939,6 +959,7 @@ static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_b
 		}
 		memcpy(out_buf, m_resp_cache_buf, m_resp_cache_len);
 		*out_len = m_resp_cache_len;
+		*replayed = true;
 		NFC_REPORT("  -> retransmission (counter %u): replaying cached response", counter);
 		return 0;
 	}
@@ -1008,13 +1029,14 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 			       record_info->payload_len);
 
 		enum app_cmd_action cmd_action = APP_CMD_ACTION_NONE;
+		bool replayed = false;
 #ifdef CONFIG_APP_NFC_ENCRYPTION
 		/* Encrypted channel: decrypt, run, encrypt the reply (RESPONSE-direction
 		 * nonce so it never reuses the request nonce), with same-counter
 		 * retransmission served from the response cache. */
 		ret = handle_encrypted_cmd(record_info->payload, record_info->payload_len,
-					   m_resp_buf, sizeof(m_resp_buf), &m_resp_len,
-					   &cmd_action);
+					   m_resp_buf, sizeof(m_resp_buf), &m_resp_len, &cmd_action,
+					   &replayed);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("handle_encrypted_cmd", ret);
 			NFC_REPORT("  -> command rejected: %d", ret);
@@ -1023,7 +1045,9 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 		}
 #else
 		/* Plaintext channel (validation build): hand the raw protobuf Command
-		 * to app_cmd and stage the plaintext response. */
+		 * to app_cmd and stage the plaintext response. No response cache, so no
+		 * replay handling. */
+		(void)replayed;
 		ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, record_info->payload,
 				     record_info->payload_len, m_resp_buf, sizeof(m_resp_buf),
 				     &m_resp_len, &cmd_action);
@@ -1036,7 +1060,15 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 #endif /* CONFIG_APP_NFC_ENCRYPTION */
 
 		m_have_resp = (m_resp_len > 0);
-		m_cmd_action = cmd_action;
+		/* A same-counter retransmission replays the cached reply without
+		 * re-running the command — keep any action still awaiting the phone's ack
+		 * instead of clearing it. A fresh execution sets the action: it waits for
+		 * the ack (set ready in the m_seen_ack / backstop paths) when there is a
+		 * reply to deliver, or fires immediately when there is nothing to read. */
+		if (!replayed) {
+			m_cmd_action = cmd_action;
+			m_cmd_action_ready = (cmd_action != APP_CMD_ACTION_NONE && !m_have_resp);
+		}
 		NFC_REPORT("  -> handled, response %zu B, deferred action: %s", m_resp_len,
 			   cmd_action_str(cmd_action));
 		return 0;
@@ -1358,6 +1390,11 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	if (m_seen_ack) {
 		m_unknown_count = 0;
 		m_info_restore_pending = false;
+		/* The phone has read and acked the reply: a deferred action (reboot/save)
+		 * may now fire without cutting off an unread response. */
+		if (m_cmd_action != APP_CMD_ACTION_NONE) {
+			m_cmd_action_ready = true;
+		}
 		LOG_INF("Restoring info record after phone ack (#164)...");
 		NFC_REPORT("NFC wrote: info record (%zu B) - restored after phone ack", info_len);
 		if (info_len) {
@@ -1497,6 +1534,12 @@ int app_nfc_restore_info(void)
 		LOG_ERR_CALL_FAILED_INT("write_mem", ret);
 	} else {
 		m_info_restore_pending = false;
+		/* Backstop: the phone left without acking the reply. Release any deferred
+		 * action now so a reboot/save is never stuck waiting for an ack that will
+		 * not come. */
+		if (m_cmd_action != APP_CMD_ACTION_NONE) {
+			m_cmd_action_ready = true;
+		}
 		LOG_INF("NFC: restored info record after field loss (#164)");
 	}
 
