@@ -269,12 +269,21 @@ uint8_t app_alarm_rules_count(void)
 	return n;
 }
 
-const struct app_alarm_rule *app_alarm_rules_get(uint8_t slot)
+bool app_alarm_rules_get(uint8_t slot, struct app_alarm_rule *out)
 {
-	if (slot >= APP_ALARM_SLOT_COUNT || !m_slots[slot].used) {
-		return NULL;
+	bool ok = false;
+
+	/* M-6: copy the rule out under the rules lock instead of returning a raw
+	 * pointer. The alarm poll otherwise read &m_slots[slot].rule holding only
+	 * app_alarm.c's lock, racing reload_from_config() which rewrites the ~17 B
+	 * rule under this lock — a torn read that could evaluate a half-written rule. */
+	k_mutex_lock(&m_lock, K_FOREVER);
+	if (slot < APP_ALARM_SLOT_COUNT && m_slots[slot].used) {
+		*out = m_slots[slot].rule;
+		ok = true;
 	}
-	return &m_slots[slot].rule;
+	k_mutex_unlock(&m_lock);
+	return ok;
 }
 
 bool app_alarm_rules_occupied(uint8_t slot)

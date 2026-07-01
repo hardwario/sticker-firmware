@@ -99,22 +99,21 @@ K_MUTEX_DEFINE(m_lock);
 /* Return the rule in `slot`, syncing its runtime latch: an empty slot (or one
  * now pointing at a different source/quantity than its latch tracked) is reset.
  * Returns NULL for an empty slot. */
-static const struct app_alarm_rule *rt_sync(uint8_t slot)
+static bool rt_sync(uint8_t slot, struct app_alarm_rule *out)
 {
-	const struct app_alarm_rule *rule = app_alarm_rules_get(slot);
 	struct rstate *rt = &m_rt[slot];
 
-	if (rule == NULL) {
+	if (!app_alarm_rules_get(slot, out)) {
 		if (rt->used) {
 			*rt = (struct rstate){0};
 		}
-		return NULL;
+		return false;
 	}
-	if (!rt->used || rt->source != rule->source || rt->quantity != rule->quantity) {
+	if (!rt->used || rt->source != out->source || rt->quantity != out->quantity) {
 		*rt = (struct rstate){
-			.used = true, .source = rule->source, .quantity = rule->quantity};
+			.used = true, .source = out->source, .quantity = out->quantity};
 	}
-	return rule;
+	return true;
 }
 
 /* ---- Alarm-detail batch on fPort 3 (#27) -------------------------------- */
@@ -584,6 +583,16 @@ static void eval_count(uint8_t slot, const struct app_alarm_rule *rule, struct r
 		return;
 	}
 
+	/* M-8: a counter reset (counters-reset command / totalizer wipe) drops `cur`
+	 * below prev_count. The uint32 subtraction below would then wrap to ~4.29e9
+	 * and fire a bogus rate alarm on a routine admin action. A decreasing counter
+	 * is never a legitimate rate — re-baseline the window and skip this pass. */
+	if (cur < rt->prev_count) {
+		rt->prev_count = cur;
+		rt->count_window_start = now;
+		return;
+	}
+
 	uint32_t delta = cur - rt->prev_count; /* wraps correctly on uint32 */
 	if (rule->hi > 0 && delta >= (uint32_t)rule->hi) {
 		rt->active = true;
@@ -654,8 +663,14 @@ static void nodata_poll(int64_t now, bool *should_send)
 		uint8_t q = m_nodata_tab[i].quantity;
 
 		if (!nodata_enabled(src, q)) {
-			/* Sensor disabled (cap off / slot unbound): drop the latch
-			 * silently — no deactivate event for a sensor nobody asked for. */
+			/* Sensor disabled (cap off / slot unbound). If a no_data alarm was
+			 * latched for it, emit the deactivate edge (M-7) before dropping the
+			 * latch — otherwise the backend keeps a no_data alarm open forever on a
+			 * sensor the operator deliberately turned off, needing a manual clear. */
+			if (m_nodata_active[i]) {
+				alarm_collect_nodata(src, q, false);
+				*should_send = true;
+			}
 			m_nodata_nan_since[i] = 0;
 			m_nodata_active[i] = false;
 			continue;
@@ -730,10 +745,11 @@ bool app_alarm_poll(void)
 	k_mutex_lock(&m_lock, K_FOREVER);
 
 	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
-		const struct app_alarm_rule *rule = rt_sync(slot);
-		if (rule == NULL) {
+		struct app_alarm_rule rule_copy;
+		if (!rt_sync(slot, &rule_copy)) {
 			continue;
 		}
+		const struct app_alarm_rule *rule = &rule_copy;
 		struct rstate *rt = &m_rt[slot];
 
 		switch (app_alarm_quantity_kind((enum app_alarm_quantity)rule->quantity)) {
@@ -829,8 +845,12 @@ void app_alarm_event(enum app_alarm_source source, bool active)
 	user_data = m_event_cb_user_data;
 
 	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
-		const struct app_alarm_rule *rule = rt_sync(slot);
-		if (rule == NULL || rule->source != source || rule->quantity != APP_ALARM_Q_STATE) {
+		struct app_alarm_rule rule_copy;
+		if (!rt_sync(slot, &rule_copy)) {
+			continue;
+		}
+		const struct app_alarm_rule *rule = &rule_copy;
+		if (rule->source != source || rule->quantity != APP_ALARM_Q_STATE) {
 			continue;
 		}
 		eval_state(slot, rule, &m_rt[slot], active, &should_send);
@@ -926,20 +946,20 @@ static int cmd_alarm_list(const struct shell *sh, size_t argc, char **argv)
 			shell_error(sh, "invalid <index> (0..%d)", APP_ALARM_SLOT_COUNT - 1);
 			return -EINVAL;
 		}
-		const struct app_alarm_rule *r = app_alarm_rules_get((uint8_t)slot);
-		if (r == NULL) {
+		struct app_alarm_rule r;
+		if (!app_alarm_rules_get((uint8_t)slot, &r)) {
 			shell_print(sh, "slot %lu empty", slot);
 			return 0;
 		}
-		print_slot(sh, (uint8_t)slot, r);
+		print_slot(sh, (uint8_t)slot, &r);
 		return 0;
 	}
 
 	shell_print(sh, "%u rule(s):", app_alarm_rules_count());
 	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
-		const struct app_alarm_rule *r = app_alarm_rules_get(slot);
-		if (r != NULL) {
-			print_slot(sh, slot, r);
+		struct app_alarm_rule r;
+		if (app_alarm_rules_get(slot, &r)) {
+			print_slot(sh, slot, &r);
 		}
 	}
 	return 0;

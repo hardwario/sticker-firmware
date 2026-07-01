@@ -117,11 +117,13 @@ enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q);
 bool app_alarm_rule_valid(enum app_alarm_source source, enum app_alarm_quantity quantity);
 
 /* Number of occupied slots, and per-slot access. Iterate occupied rules with
+ *   struct app_alarm_rule r;
  *   for (uint8_t s = 0; s < APP_ALARM_SLOT_COUNT; s++)
- *           if ((r = app_alarm_rules_get(s))) { ... }
- * app_alarm_rules_get() returns NULL for an out-of-range or empty slot. */
+ *           if (app_alarm_rules_get(s, &r)) { ... use &r ... }
+ * app_alarm_rules_get() copies the rule into *out under the rules lock (M-6) and
+ * returns false for an out-of-range or empty slot. */
 uint8_t app_alarm_rules_count(void);
-const struct app_alarm_rule *app_alarm_rules_get(uint8_t slot);
+bool app_alarm_rules_get(uint8_t slot, struct app_alarm_rule *out);
 bool app_alarm_rules_occupied(uint8_t slot);
 
 /* Lowest empty slot, or -1 if all APP_ALARM_SLOT_COUNT slots are occupied. */
