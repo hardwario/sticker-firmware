@@ -922,7 +922,19 @@ static void tx_telemetry_frame(bool first_frame)
 		refresh_payload_budget(); /* MED-6: per-TX budget, not cached */
 		ret = app_compose(m_frame_buf, sizeof(m_frame_buf), &m_frame_len, &m_frame_more);
 		if (ret == -EAGAIN) {
-			LOG_DBG("Telemetry budget unavailable, skipping TX");
+			/* Budget 0: pending MAC commands (an ADR/channel batch from the LNS)
+			 * exceed the DR payload room, so no telemetry fits. Returning here
+			 * DEADLOCKS (H-1): telemetry never sends -> the MAC command queue never
+			 * flushes -> the budget stays 0 forever, and the station goes mute with
+			 * only a LOG_DBG. Send an empty uplink instead so LoRaMac drains the
+			 * queued MAC answers (in FOpts, or on port 0 when they overflow); the
+			 * budget recovers for the next report cycle. Rate-limited by the report
+			 * cadence (this path runs once per cycle). */
+			LOG_WRN("Telemetry budget 0 (MAC-command flood): empty uplink to flush MAC");
+			ret = lorawan_send(2, m_frame_buf, 0, LORAWAN_MSG_UNCONFIRMED);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("lorawan_send (MAC flush)", ret);
+			}
 			return;
 		}
 		if (ret) {
