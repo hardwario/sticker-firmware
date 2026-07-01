@@ -240,10 +240,16 @@ After every LoRaWAN join the device automatically sends a device-info message on
 | `battery` | Supply voltage in **mV**, measured fresh on each `get_info` (0/absent = unavailable) |
 | `reset_cause` | hwinfo reset-cause bitmask of the last boot (#88) — see below; 0/absent = unknown |
 | `claim_token` | 128-bit device claim token, hex (#170) — **omitted** until the device is commissioned |
+| `lrw_state` (`lrw_state_name`) | Current LoRaWAN network state: `idle` / `joining` / `healthy` / `warning` / `reconnect` |
+| `dev_eui` | 8-byte DevEUI, hex — **NFC only** (never sent over LoRaWAN); omitted when unset |
 
 The **`reset_cause`** field (proto field 11) carries the hardware reset-cause bitmask read once at boot via `hwinfo_get_reset_cause()`, so a watchdog/brownout reset is visible in the field instead of being silent. On the STM32WLE5 the bits that can appear are `pin` (0x01), `software` (0x02), `brownout` (0x04), `power-on`/POR (0x08), `watchdog` (0x10), `security` (0x40) and `low-power-wake` (0x80); several can be set at once (a cold power-up typically asserts power-on + pin + brownout). `ats device info` decodes the mask to names, e.g. `Reset cause: 0x00000010 (watchdog)`.
 
-The same message is returned on demand by the `get_info` command (over LoRaWAN **and** NFC), so a backend can read the claim token over either channel.
+The **`lrw_state`** field (proto field 12) mirrors the firmware's LoRaWAN state machine (`app_lrw_state`): `idle` (not joined), `joining`, `healthy` (joined, link OK), `warning` (link check failing) and `reconnect` (rejoining with backoff). Because proto3 omits a zero scalar on the wire, an `idle` device sends no value and the decoder defaults `lrw_state` to `0` / `idle`.
+
+The **`dev_eui`** field (proto field 13) is the 8-byte LoRaWAN DevEUI. It is emitted **only over the encrypted NFC channel** — a LoRaWAN uplink would leak it (the fPort-85 payload is plain protobuf) and the network server already knows it from the device context. It is also omitted when the DevEUI is still all-zero (unset).
+
+The same message is returned on demand by the `get_info` command (over LoRaWAN **and** NFC), so a backend can read the claim token over either channel. `dev_eui` is the exception: it appears in the `get_info` reply over NFC only.
 
 ### Claim token (#170)
 
