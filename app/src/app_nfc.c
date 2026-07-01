@@ -80,8 +80,6 @@ static const char *cmd_action_str(enum app_cmd_action a)
 		return "lrw-reset+reboot";
 	case APP_CMD_ACTION_LRW_JOIN:
 		return "lrw-join";
-	case APP_CMD_ACTION_ENTER_DFU:
-		return "enter-dfu";
 	default:
 		return "?";
 	}
@@ -137,27 +135,6 @@ static const char *cmd_action_str(enum app_cmd_action a)
 #define ST25DV_GPO_REG         0x0000
 #define ST25DV_GPO_RF_WRITE_EN 0x40
 #define ST25DV_I2C_PWD_REG     0x0900
-
-/* Mailbox / Fast Transfer Mode (FTM). A 256 B dual-port RAM that the RF and I2C
- * sides exchange messages through *while the RF field is present* (unlike user
- * EEPROM, which the ST25DV can't serve to RF and I2C at once). Used for fast
- * config streaming and (later) firmware update — the phone writes a command via
- * the ISO 15693 Write Message custom command, the firmware reads it over I2C,
- * runs it, and writes the reply back for the phone to Read Message.
- *
- * MB_MODE (static, E1 0x000D, password-protected) bit0 must be 1 to allow the
- * mailbox at all; MB_CTRL_Dyn (dynamic, E0 0x2006) MB_EN then turns it on at
- * runtime. MB_LEN_Dyn (E0 0x2007) holds (message length - 1); the message bytes
- * live in MAILBOX_RAM (E0 0x2008..0x2107). */
-#define ST25DV_MB_MODE_REG      0x000D /* static, E1; bit0 = mailbox allowed */
-#define ST25DV_MB_MODE_EN       0x01
-#define ST25DV_MB_CTRL_DYN      0x2006 /* dynamic, E0 */
-#define ST25DV_MB_CTRL_MB_EN    0x01   /* bit0: mailbox enable */
-#define ST25DV_MB_CTRL_HOST_PUT 0x02   /* bit1: host (I2C) wrote a message */
-#define ST25DV_MB_CTRL_RF_PUT   0x04   /* bit2: RF wrote a message */
-#define ST25DV_MB_LEN_DYN       0x2007 /* dynamic, E0; holds (msg length - 1) */
-#define ST25DV_MB_RAM           0x2008 /* dynamic, E0; 256 B mailbox RAM */
-#define ST25DV_MB_RAM_SIZE      256
 
 /* NFC Forum external type (TNF=0x04, urn:nfc:ext:) records. Short type names
  * ("hio.stck:<kind>") instead of full MIME media-types save ST25DV user memory
@@ -904,7 +881,7 @@ static uint32_t m_resp_cache_counter;
 static uint8_t m_resp_cache_buf[512];
 static size_t m_resp_cache_len;
 
-/* Process one encrypted command frame (shared by the NDEF and mailbox channels).
+/* Process one encrypted command frame (the NDEF command channel).
  * Three-way on the nonce counter vs the stored high-water:
  *   counter == cached  -> retransmission: replay the cached response, do NOT re-run
  *   counter  > stored  -> new: decrypt (advances+persists the counter), run, cache
@@ -1498,220 +1475,7 @@ int app_nfc_restore_info(void)
 	return ret;
 }
 
-/* Write the whole mailbox in one I2C transaction (volatile RAM, no program
- * wait). Setting the first RAM byte arms HOST_PUT_MSG so the RF side can read
- * it. Caller holds the access lock. */
-static int mb_write(const uint8_t *data, size_t len)
-{
-	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
-	if (!device_is_ready(dev)) {
-		return -ENODEV;
-	}
-	if (len == 0 || len > ST25DV_MB_RAM_SIZE) {
-		return -EINVAL;
-	}
-
-	uint8_t frame[2 + ST25DV_MB_RAM_SIZE];
-	sys_put_be16(ST25DV_MB_RAM, frame);
-	memcpy(&frame[2], data, len);
-
-	return i2c_write(dev, frame, 2 + len, ST25DV_I2C_ADDR_E0);
-}
-
-/* Enable the mailbox: set the static MB_MODE allow-bit (needs the I2C password)
- * then the dynamic MB_EN. Caller holds the access lock. */
-static int mb_enable(void)
-{
-	static const uint8_t default_pwd[8] = {0};
-	int ret;
-
-	ret = nfc_present_password(default_pwd);
-	if (ret) {
-		return ret;
-	}
-	k_msleep(15);
-
-	uint8_t mode = 0;
-	ret = read_reg(ST25DV_MB_MODE_REG, &mode, 1);
-	if (ret) {
-		return ret;
-	}
-	if (!(mode & ST25DV_MB_MODE_EN)) {
-		mode |= ST25DV_MB_MODE_EN;
-		ret = write_reg(ST25DV_MB_MODE_REG, &mode, 1);
-		if (ret) {
-			return ret;
-		}
-		k_msleep(ST25DV_TW_MS_PER_PAGE + 5);
-	}
-
-	uint8_t ctrl = ST25DV_MB_CTRL_MB_EN;
-	ret = write_reg(ST25DV_MB_CTRL_DYN, &ctrl, 1);
-	if (ret) {
-		return ret;
-	}
-	k_msleep(1);
-	return 0;
-}
-
-/* Block until the RF side has read the response we just wrote, i.e. until the
- * ST25DV clears HOST_PUT_MSG (it sets it on our mailbox write and clears it when
- * RF reads the last byte). This serialises the FTM exchange — without it a fast
- * streaming phone can write its next request before reading the current reply,
- * so it ends up reading a stale reply (or we overwrite an unread one), which
- * desynchronises the request/response pairing (the mailbox paged-read frame gap,
- * #194). Bounded by `timeout_ms` so a phone that left mid-stream can't wedge us. */
-static void mb_wait_host_put_cleared(uint32_t timeout_ms)
-{
-	int64_t deadline = k_uptime_get() + timeout_ms;
-	while (k_uptime_get() < deadline) {
-		uint8_t ctrl = 0;
-		if (read_reg(ST25DV_MB_CTRL_DYN, &ctrl, 1) == 0 &&
-		    !(ctrl & ST25DV_MB_CTRL_HOST_PUT)) {
-			return; /* RF read our response */
-		}
-		k_msleep(3);
-	}
-}
-
-/* Default mailbox idle window when the caller passes 0 (the deadline resets on
- * every served message). Short on purpose: active streaming (config read,
- * firmware update) keeps resetting it, so it's never cut off, but once the phone
- * goes quiet the device drops back to the NDEF poll within ~2 s — so an NDEF
- * write that follows a read (e.g. saving edited config) isn't blocked for long
- * by lingering Fast-Transfer mode. Measured in milliseconds. Must stay long
- * enough to cover the phone's hand-off from the NDEF EnterMailbox ack to its
- * first mailbox write (a couple of seconds). */
-#define APP_NFC_MAILBOX_IDLE_MS 5000
-
-/* Serve the mailbox (FTM) until `idle_timeout_s` of inactivity, holding the
- * ST25DV powered (LPD low) the whole time so the phone's RF field and our I2C
- * polling both reach it (the tag is dual-port in this mode). Each RF command
- * message is run through app_cmd_handle and the reply written back. The window
- * is an *idle* timeout — it resets on every served message, so a config stream
- * or firmware update keeps the device here as long as traffic flows, then falls
- * back to the low-power NDEF poll once the phone goes quiet. Returns the number
- * of messages served, or a negative errno if the mailbox could not be brought
- * up. Entered from the NFC poll thread on an EnterMailbox command (the device
- * acks that over NDEF first), or directly via the `nfc mailbox` shell command. */
-int app_nfc_serve_mailbox(uint32_t idle_timeout_ms)
-{
-	if (idle_timeout_ms == 0) {
-		idle_timeout_ms = APP_NFC_MAILBOX_IDLE_MS;
-	}
-
-	int ret = nfc_access_begin();
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("nfc_access_begin", ret);
-		return ret;
-	}
-
-	ret = mb_enable();
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("mb_enable", ret);
-		nfc_access_end();
-		return ret;
-	}
-
-	LOG_INF("NFC mailbox: serving (idle timeout %u ms)", idle_timeout_ms);
-
-	int64_t deadline = k_uptime_get() + idle_timeout_ms;
-	uint32_t served = 0;
-
-	while (k_uptime_get() < deadline) {
-		uint8_t ctrl = 0;
-		if (read_reg(ST25DV_MB_CTRL_DYN, &ctrl, 1) || !(ctrl & ST25DV_MB_CTRL_RF_PUT)) {
-			k_msleep(15);
-			continue;
-		}
-
-		uint8_t lenm1 = 0;
-		if (read_reg(ST25DV_MB_LEN_DYN, &lenm1, 1)) {
-			k_msleep(15);
-			continue;
-		}
-		size_t cmd_len = (size_t)lenm1 + 1;
-
-		if (read_mem(ST25DV_MB_RAM, m_buf, cmd_len)) {
-			k_msleep(15);
-			continue;
-		}
-
-		enum app_cmd_action action = APP_CMD_ACTION_NONE;
-		m_resp_len = 0;
-#ifdef CONFIG_APP_NFC_ENCRYPTION
-		/* Mailbox frames are AES-CCM encrypted exactly like the NDEF channel
-		 * (#194): same direction nonce + AAD + anti-replay, and same-counter
-		 * retransmissions are served from the response cache. */
-		ret = handle_encrypted_cmd(m_buf, cmd_len, m_resp_buf, sizeof(m_resp_buf),
-					   &m_resp_len, &action);
-#else
-		/* Plaintext channel (validation build only). */
-		ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, m_buf, cmd_len, m_resp_buf,
-				     sizeof(m_resp_buf), &m_resp_len, &action);
-#endif
-		if (ret || m_resp_len == 0) {
-			NFC_REPORT("mailbox: handle ret=%d resp=%zu", ret, m_resp_len);
-			k_msleep(15);
-			continue;
-		}
-
-		if (mb_write(m_resp_buf, m_resp_len)) {
-			k_msleep(15);
-			continue;
-		}
-		served++;
-		deadline = k_uptime_get() + idle_timeout_ms;
-		LOG_INF("NFC mailbox: served %zu B (#%u)", m_resp_len, served);
-
-		/* Serialise the exchange: wait until the phone has read this reply before
-		 * accepting the next request (or tearing down on a terminal action), so a
-		 * fast streamer can't read a stale reply or have an unread one overwritten
-		 * — the mailbox paged-read frame gap (#194). */
-		mb_wait_host_put_cleared(200);
-
-		/* The phone signalled end of stream (ExitMailbox): its ack has been read
-		 * (waited for above), so leave mailbox mode immediately. */
-		if (action == APP_CMD_ACTION_LEAVE_MAILBOX) {
-			LOG_INF("NFC mailbox: ExitMailbox -> leaving (served %u)", served);
-			break;
-		}
-
-		/* Any other deferred action (settings save / reboot / factory reset /
-		 * alarm-rules save): hand it to the poll thread the same way the NDEF path
-		 * does, then leave mailbox mode so the action can run (ack already read). */
-		if (action != APP_CMD_ACTION_NONE) {
-			m_cmd_action = action;
-			break;
-		}
-	}
-
-	uint8_t off = 0;
-	write_reg(ST25DV_MB_CTRL_DYN, &off, 1);
-	nfc_access_end();
-	LOG_INF("NFC mailbox: off, served %u message(s)", served);
-	return (int)served;
-}
-
 #if defined(CONFIG_SHELL)
-
-/* Shell wrapper around app_nfc_serve_mailbox(): serve with the given idle
- * timeout in seconds (0 = firmware default). */
-static int cmd_nfc_mailbox(const struct shell *sh, size_t argc, char **argv)
-{
-	uint32_t seconds = (argc >= 2) ? (uint32_t)strtoul(argv[1], NULL, 0) : 30;
-	if (seconds > 300) {
-		shell_error(sh, "seconds must be 0..300");
-		return -EINVAL;
-	}
-	int ret = app_nfc_serve_mailbox(seconds * 1000);
-	if (ret < 0) {
-		shell_error(sh, "mailbox failed: %d", ret);
-		return ret;
-	}
-	shell_print(sh, "mailbox done, served %d message(s)", ret);
-	return 0;
-}
 
 static int cmd_nfc_dump(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1954,8 +1718,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_nfc_reg, 2, 1),
 	SHELL_CMD_ARG(regw, NULL, "Write system/dynamic register (E1). Usage: regw <addr> <hex>",
 		      cmd_nfc_regw, 3, 0),
-	SHELL_CMD_ARG(mailbox, NULL, "Serve the mailbox (FTM) for N s. Usage: mailbox [seconds]",
-		      cmd_nfc_mailbox, 1, 1),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC memory access (debug).", NULL);

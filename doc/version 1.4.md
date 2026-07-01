@@ -43,14 +43,12 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `lrw_reset` | Reset the LoRaWAN NVM — frame counters + `DevNonce` + session (same as `ats lrw reset`); **reboots** so the MAC re-initialises clean | `ack` |
 | `lrw_join` | Trigger a forced (re)join immediately instead of waiting for the next scheduled attempt; **no reboot** | `ack` |
 | `enter_calibration` | Persist `calibration=true` + **reboot** into calibration mode (same end state as `set_param calibration=true` + `settings_save`); the flag is cleared on entry, so the device returns to normal after the calibration window | `ack` |
-| `enter_mailbox` | **NFC only.** Switch into mailbox (ST25DV Fast-Transfer-Mode) serving mode for a bounded window — high-throughput config streaming / firmware update. `ack` is written over NDEF first, then the device serves the mailbox until the phone goes quiet (or `timeout_s` elapses) and returns to the low-power NDEF poll. See §10 | `ack` |
-| `exit_mailbox` | **NFC only.** End mailbox serving immediately (sent as the last mailbox message when the phone is done streaming) so the device drops straight back to the low-power NDEF poll | `ack` |
 
 > After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED), an optional `fault_field`, and a `detail` string. `fault_field` encodes **`group × 100 + tag`** (group 1 = lorawan, 2 = application, 3 = sensors, 4 = alarms; 0 = not group-scoped) so one value identifies the offending field unambiguously across groups — e.g. `203` = application `interval_report`, `102` = lorawan `sub_band`. `ttn.js` splits it back into `fault_group` + `fault_field`.
 >
 > **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `sample`, `clock_sync`, `req_history`, `w1_scan`) do **not** also send an `ack`, to save an uplink. `sample` is dual: over LoRaWAN the fPort-2 report is the only reply (no fPort-85 body, like `force_send`); over NFC it additionally returns the readings synchronously so a phone can show them on the spot.
 >
-> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC. `enter_mailbox` / `exit_mailbox` are **NFC-only** (the mailbox is an NFC/Fast-Transfer-Mode channel) → rejected over a LoRaWAN downlink (previously such NFC-only commands were wrongly accepted over LoRaWAN with a misleading `Ack`).
+> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC (previously such transport-scoped commands could be wrongly accepted on the other transport with a misleading `Ack`).
 >
 > **Setting the clock over NFC:** `clock_sync` with a `unix_time` field sets the RTC directly from a phone, bootstrapping wall-clock time before/without a network (epoch sanity-bounded to 2024-01-01 … 2100-01-01; out-of-range → `BAD_REQUEST` "bad epoch"). A later network `DeviceTimeReq`/`DeviceTimeAns` stays authoritative and may refine it. Empty `clock_sync` over NFC just confirms (no network to query).
 >
@@ -498,8 +496,6 @@ The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel �
 
 A phone's Web NFC reader sees each as `record.recordType === "hio.stck:…"`.
 
-**Mailbox (fast transfer).** For high-throughput exchanges (config streaming, and later firmware update) the device can switch to the ST25DV **mailbox** (Fast-Transfer-Mode, a dual-port RAM that works while the RF field stays on — no field-off gaps). The phone sends an **`enter_mailbox`** command over the normal NDEF channel; the device acks over NDEF, then serves the mailbox in a single hold until the phone goes quiet or a bounded `timeout_s` elapses, then drops back to the low-power NDEF poll. **`exit_mailbox`** ends serving immediately. A `set_param` written over the mailbox queues its save exactly like the NDEF path. The mailbox carries the **same encrypted command frames** as the NDEF channel — same direction nonce + AAD + anti-replay + response cache, decrypted/encrypted per frame; encryption is not bypassed (#194). The `enter_mailbox.timeout_s` field sets that idle window in seconds; **0 or omitted** uses the firmware default (#200).
-
 **Power.** The poll thread sleeps on the ST25DV **GPO interrupt** (wired to the STM32, EXTI) and only wakes to read the tag when RF activity occurs — so an untouched tag costs almost nothing and the CPU stays asleep when no phone is present. A periodic fallback timer (30 s) is a safety net in case an edge is missed; each wake still does the cheap gated check (one `IT_STS_Dyn` byte; full read + NDEF parse only on RF activity).
 
 **Robustness.** The command/response round-trip hardens the ST25DV write path (RF_WRITE_EN enable timing after present-password, an "unrecognized data" debounce so a poll that catches a half-written record doesn't clobber it, and an always-read poll). The earlier *immediate* auto-restore of the info record over a just-written response was dropped because it raced the phone reading the reply (#144); it is now done **on a ~10 s field-loss debounce** instead — once no RF (GPO) activity has occurred for the debounce window the phone has left, so restoring the info record can no longer clobber an in-flight read (#164).
@@ -627,8 +623,11 @@ The contract every update path must honour: **never erase the `storage` region a
   image, and the image can never overflow into `storage` (the linker fails the build on overflow).
   A full-chip `--erase` / mass-erase **does** wipe `storage` and must not be used on a provisioned
   unit. (Hardware write-protect on `storage` is not an option — NVS must write/erase it at runtime.)
-- **NFC firmware update** (future erase-in-place bootloader) and **LoRaWAN FUOTA** (future) must
-  erase/program only the image region and skip `storage`.
+- **NFC firmware update** and **LoRaWAN FUOTA** (both future) must erase/program only the image
+  region and skip `storage`. An NFC firmware-update path (erase-in-place bootloader + DFU protocol +
+  ST25DV FTM mailbox) was implemented during v1.4.0 and then **removed** before release — it could
+  not be shipped safely without asymmetric image signing, which does not fit the flash budget;
+  revival is tracked in #237.
 
 See manual-test-plan G6 / G6b / G6c for the regression checks (reset keeps identity, erase wipes
 it, re-flash preserves it).
