@@ -669,18 +669,31 @@ bool app_config_ingest(const AppConfigMessage *message)
 		return true;
 	}
 
-	/* NFC keeps best-effort semantics: apply valid fields, ignore invalid. */
-	if (message->has_lorawan) {
-		app_config_apply_lorawan(&message->lorawan, NULL);
+	/* Atomic ingest (H-11): apply every present group but capture the first fault,
+	 * and roll the whole record back on any invalid field. A config record written
+	 * over NFC with a bad field is now rejected outright (nothing applied) instead
+	 * of half-applying the valid fields and silently looking like success — which
+	 * left the device mis-provisioned with no indication. */
+	struct app_config snapshot = *app_config();
+	uint32_t fault = 0;
+	int rc = 0;
+
+	if (rc == 0 && message->has_lorawan) {
+		rc = app_config_apply_lorawan(&message->lorawan, &fault);
 	}
-	if (message->has_application) {
-		app_config_apply_application(&message->application, NULL);
+	if (rc == 0 && message->has_application) {
+		rc = app_config_apply_application(&message->application, &fault);
 	}
-	if (message->has_sensors) {
-		app_config_apply_sensors(&message->sensors, NULL);
+	if (rc == 0 && message->has_sensors) {
+		rc = app_config_apply_sensors(&message->sensors, &fault);
 	}
-	if (message->has_alarms) {
-		app_config_apply_alarms(&message->alarms, NULL);
+	if (rc == 0 && message->has_alarms) {
+		rc = app_config_apply_alarms(&message->alarms, &fault);
+	}
+	if (rc) {
+		*app_config() = snapshot;
+		LOG_WRN("NFC config ingest rejected: invalid field (fault %u) — no change applied",
+			fault);
 	}
 	return false;
 }
