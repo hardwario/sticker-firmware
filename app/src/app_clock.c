@@ -40,6 +40,12 @@ LOG_MODULE_REGISTER(app_clock, LOG_LEVEL_INF);
  * leap second. GPS time does not count leap seconds; UTC does. */
 #define GPS_UTC_LEAP_SECONDS  18UL
 
+/* Plausible wall-clock window (L-5), matching the NFC clock_sync bounds in
+ * app_cmd.c: reject a bogus network DeviceTimeAns rather than skewing every
+ * history/alarm timestamp (and underflowing the history re-anchor base). */
+#define APP_CLOCK_UNIX_MIN 1704067200UL /* 2024-01-01T00:00:00Z */
+#define APP_CLOCK_UNIX_MAX 4102444800UL /* 2100-01-01T00:00:00Z */
+
 static const struct device *const m_rtc = DEVICE_DT_GET(DT_NODELABEL(rtc));
 
 /* Set once the RTC has been synced from the network this session. Guards
@@ -120,6 +126,14 @@ void app_clock_handle_downlink(uint8_t flags)
 	}
 
 	uint32_t unix_time = gps_time + GPS_UNIX_EPOCH_OFFSET - GPS_UTC_LEAP_SECONDS;
+
+	/* L-5: sanity-bound the network time the same way the NFC clock_sync path
+	 * does. A bogus DeviceTimeAns (or a GPS→Unix conversion underflow) would
+	 * otherwise be written to the RTC and skew every history/alarm timestamp. */
+	if (unix_time < APP_CLOCK_UNIX_MIN || unix_time > APP_CLOCK_UNIX_MAX) {
+		LOG_WRN("Network time %u out of range - ignored (L-5)", unix_time);
+		return;
+	}
 
 	ret = app_clock_set_unix(unix_time);
 	if (ret) {
