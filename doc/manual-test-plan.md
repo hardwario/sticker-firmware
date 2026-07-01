@@ -1220,18 +1220,14 @@ rejected with `error` `BAD_REQUEST` "bad epoch".
 
 - [ ] Pass
 
-### N3 — NFC firmware update
+### N3 — NFC firmware update — REMOVED
 
-**Goal:** NFC-based FW update path works (if active in this build).
-**Observable:** Per `doc/nfc-update-protocol.md` (frame format, status codes, state machine).
+The NFC firmware-update path (erase-in-place bootloader + DFU protocol + ST25DV FTM mailbox) was
+implemented during v1.4.0 and **removed before release**: it could not be shipped safely without
+asymmetric image signing, which does not fit the flash budget. The device is **not NFC-updatable**.
+Revival is tracked in #237.
 
-**Prompt for Claude:**
-> Check whether NFC firmware update is active in this build (consult `doc/nfc-update-protocol.md`
-> and the build config). If it is, outline and run the update handshake and confirm the status
-> codes/state transitions match the protocol doc. If it is not yet wired up, mark this task as
-> TODO/N-A and say what's missing.
-
-- [ ] Pass / TODO
+- [x] N/A (feature removed)
 
 ### N4 — NFC channel encryption (`CONFIG_APP_NFC_ENCRYPTION`)
 
@@ -1263,23 +1259,13 @@ rejected with `error` `BAD_REQUEST` "bad epoch".
 
 - [ ] Pass
 
-### N6 — Mailbox (Fast-Transfer-Mode) command channel (#148)
+### N6 — Mailbox (Fast-Transfer-Mode) command channel — REMOVED
 
-**Goal:** A phone can switch the device into the ST25DV mailbox and run commands over it in a single
-RF hold — high-throughput config streaming.
-**Observable:** `enter_mailbox` writes an `ack` over NDEF, then RTT shows the device serving the
-mailbox; a `get_info`/`set_param` sent over the mailbox round-trips while the field stays on;
-`exit_mailbox` (or the idle timeout) returns the device to the low-power NDEF poll. The GPO interrupt
-wakes the poll thread on a tap and the device idles (low power) otherwise.
+The ST25DV mailbox (Fast-Transfer-Mode) channel and the `enter_mailbox` / `exit_mailbox` commands
+were removed together with the NFC firmware-update path (they shared the FTM machinery). All
+config/command exchange goes over the NDEF channel only (see N4 / N5 / N8). Revival is tracked in #237.
 
-**Prompt for Claude (needs the Manager-App phone — not bench/J-Link testable):**
-> With the Manager-App: present `enter_mailbox` over the (encrypted) NDEF channel, confirm the `ack`
-> is read back, then stream a `get_info` and a `set_param` over the mailbox in the same hold and
-> confirm both round-trip. Send `exit_mailbox` and confirm the device returns to the NDEF poll. Verify
-> the mailbox frames are encrypted (default build) and that a SetParam streamed over the mailbox
-> persists like the NDEF path. Confirm the device sleeps between taps (GPO-driven wake). Report results.
-
-- [ ] Pass
+- [x] N/A (feature removed)
 
 ### N7 — Provisioning while powered off (boot-staged config, #147)
 
@@ -1301,12 +1287,12 @@ record is rejected and the device still boots normally.
 
 - [ ] Pass
 
-### N8 — NFC crypto hardening: nonce separation, anti-replay, response cache, mailbox encryption (#179, #184, #194)
+### N8 — NFC crypto hardening: nonce separation, anti-replay, response cache (#179, #184)
 
 **Goal:** The encrypted channel no longer reuses a `(key, nonce)` pair across a request and its
 response (#179), the anti-replay counter survives a power-cycle (#184), the counter high-water is
-exposed in the plaintext info record so a phone can resync, a same-counter retransmission is idempotent
-via a response cache, and the mailbox (FTM) channel is encrypted (#194).
+exposed in the plaintext info record so a phone can resync, and a same-counter retransmission is
+idempotent via a response cache.
 **Observable:**
 - **Direction-separated nonce:** the CCM nonce is `serial ‖ nonce_counter ‖ direction` (9 bytes), with
   the direction byte `0x00` for the request and `0x01` for the response. Request and response carry the
@@ -1321,8 +1307,6 @@ via a response cache, and the mailbox (FTM) channel is encrypted (#194).
   high-water is rejected (`-EACCES`). After a reboot the response cache is empty, so even a same-counter
   retry is rejected and the phone resyncs from the info-record counter. `lrw_reset` (which reboots
   immediately) cannot be replayed.
-- **Mailbox encrypted (#194):** mailbox (FTM) frames use the same direction nonce + AAD + anti-replay +
-  response cache as the NDEF channel; on a default build a plaintext mailbox frame is rejected.
 
 **Prompt for Claude — bench/J-Link verifiable parts (FW agent):**
 > On the default (encrypted) build, over RTT: `nfc dump` and confirm the `hio.stck:inf` record has
@@ -1340,9 +1324,7 @@ via a response cache, and the mailbox (FTM) channel is encrypted (#194).
 > `retransmission … replaying cached response`; a `set_param` value is not applied twice). Power-cycle the
 > device, re-send the same counter, and confirm it is now **rejected** (`-EACCES`, cache gone) and the
 > phone resyncs from the info-record counter (`stored+1`). Capture a request and its response and confirm
-> they cannot be cross-decrypted (direction separation). Finally, over the **mailbox** (`enter_mailbox`
-> → stream `get_info` → `exit_mailbox`), confirm the frames are encrypted and a same-counter mailbox
-> retry is also served from the cache. Report results.
+> they cannot be cross-decrypted (direction separation). Report results.
 
 - [ ] Pass
 
