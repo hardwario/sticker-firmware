@@ -193,8 +193,12 @@ static int h_commit(void)
 {
 	LOG_DBG("Loaded settings in full");
 
-	if (m_app_config.config_version != APP_CONFIG_VERSION) {
-		LOG_WRN("Config version mismatch (stored=%u, expected=%u), migrating",
+	/* L-33: migrate only on an UPGRADE (stored < current). Using != also fired on
+	 * a downgrade and reset the application parameters to the older firmware's
+	 * defaults; a downgrade should keep the stored config as-is (values are clamped
+	 * below anyway). */
+	if (m_app_config.config_version < APP_CONFIG_VERSION) {
+		LOG_WRN("Config version older than firmware (stored=%u, expected=%u), migrating",
 			m_app_config.config_version, APP_CONFIG_VERSION);
 
 		/* Reset application parameters to defaults, but carry over factory
