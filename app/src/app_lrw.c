@@ -930,7 +930,8 @@ static void tx_telemetry_frame(bool first_frame)
 			 * queued MAC answers (in FOpts, or on port 0 when they overflow); the
 			 * budget recovers for the next report cycle. Rate-limited by the report
 			 * cadence (this path runs once per cycle). */
-			LOG_WRN("Telemetry budget 0 (MAC-command flood): empty uplink to flush MAC");
+			LOG_WRN("Telemetry budget 0 (MAC-command flood): empty uplink to flush "
+				"MAC");
 			ret = lorawan_send(2, m_frame_buf, 0, LORAWAN_MSG_UNCONFIRMED);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("lorawan_send (MAC flush)", ret);
