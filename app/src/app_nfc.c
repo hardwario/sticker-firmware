@@ -718,6 +718,25 @@ static size_t build_info_ndef(uint8_t *out, size_t out_size)
 
 #define NFC_CCM_TAG_LEN 16
 
+/* An all-zero secret key means the device has not been provisioned yet. Mirror
+ * the bootloader's auth.c (all_zero() -> unkeyed): refuse to take part in the
+ * encrypted channel at all while unkeyed. Otherwise, with
+ * CONFIG_APP_NFC_ENCRYPTION=y (default), the device would AES-CCM-decrypt and
+ * execute any command forged under the public all-zero key (serial is public,
+ * nonce_counter starts at 0) — an attacker in NFC range could rewrite LoRaWAN
+ * keys, factory-reset or wedge the device with valid CCM tags. In the unkeyed
+ * state only the plaintext info record is served. */
+static bool secret_key_is_set(void)
+{
+	for (size_t i = 0; i < sizeof(g_app_config.secret_key); i++) {
+		if (g_app_config.secret_key[i] != 0) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 /* Initialise an AES-CCM context with the device secret key. The caller frees it
  * with mbedtls_ccm_free(). Returns 0 or a negative errno. Shared by
  * decrypt()/encrypt() so the key setup lives in one place.
@@ -745,6 +764,11 @@ static int ccm_setkey(mbedtls_ccm_context *ctx)
 static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size, size_t *out_len)
 {
 	int res = 0;
+
+	if (!secret_key_is_set()) {
+		LOG_ERR("Secret key not provisioned; rejecting encrypted request");
+		return -EACCES;
+	}
 
 	if (in_len < 8 + NFC_CCM_TAG_LEN) {
 		LOG_ERR("Buffer too short for decryption: %zu byte(s)", in_len);
@@ -834,6 +858,11 @@ static int encrypt(const uint8_t *in, size_t in_len, uint32_t nonce_counter, uin
 		   size_t out_size, size_t *out_len)
 {
 	int res = 0;
+
+	if (!secret_key_is_set()) {
+		LOG_ERR("Secret key not provisioned; refusing to emit encrypted response");
+		return -EACCES;
+	}
 
 	/* 8 B header + ciphertext (== plaintext) + 16 B CCM tag. */
 	if (out_size < 8 + in_len + 16) {
