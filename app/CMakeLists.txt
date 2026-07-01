@@ -30,8 +30,7 @@ add_compile_definitions(
   APP_BUILD_TYPE=${APP_BUILD_TYPE})
 message(STATUS "Firmware version: ${APP_VERSION_MAJOR}.${APP_VERSION_MINOR}.${APP_VERSION_PATCH} (build type ${APP_BUILD_TYPE})")
 
-# Shared headers (sticker/dfu_signal.h, sticker/nfc_proto.h) live in the repo's
-# top-level include/ so the app and the NFC bootloader use the same contract.
+# Shared headers (sticker/drivers/...) live in the repo's top-level include/.
 target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 
 list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
@@ -43,9 +42,6 @@ include(nanopb)
 zephyr_nanopb_sources(app src/app_config.proto)
 
 target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
-# Variant-B image (behind the NFC bootloader): seeds the bootloader's sfu_meta
-# with this device's secret_key + serial. No-op partition in the flat build.
-target_sources_ifdef(CONFIG_USE_DT_CODE_PARTITION app PRIVATE src/app_dfu_meta.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
 target_sources_ifdef(CONFIG_LIS2DH app PRIVATE src/app_accel.c)
 target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw.c)

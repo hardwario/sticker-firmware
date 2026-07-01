@@ -109,100 +109,6 @@ jobs:
           path: sticker/artifacts/hio-sticker-${{ steps.version.outputs.value }}-${{ matrix.config }}.hex
           if-no-files-found: error
 
-  build-nfc:
-    # Variant-B NFC firmware update: the custom bootloader (boot/) and the
-    # application relinked at code_partition (nfc-boot.conf). Neither is covered
-    # by the default flat `build` job, and app_dfu_meta.c only compiles in this
-    # variant — so without this job a bootloader/variant-B regression ships
-    # silently. Also packages the distributable .sfu update image.
-    name: Build NFC bootloader + variant-B
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          path: sticker
-          fetch-depth: 0
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libudev-dev libusb-1.0-0-dev
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Setup Zephyr project
-        uses: zephyrproject-rtos/action-zephyr-setup@v1
-        with:
-          app-path: sticker
-          toolchains: arm-zephyr-eabi
-
-      - name: Determine version
-        id: version
-        working-directory: sticker
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            VERSION="v${GITHUB_REF#refs/tags/v}"; BUILD_TYPE=0; SEMVER="$VERSION"
-          else
-            VERSION="$(git rev-parse --short HEAD)"; BUILD_TYPE=1
-            SEMVER="$(git describe --tags --abbrev=0 2>/dev/null || true)"
-          fi
-          MAJOR=0; MINOR=0; PATCH=0
-          if [[ "$SEMVER" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
-            MAJOR="${BASH_REMATCH[1]}"; MINOR="${BASH_REMATCH[2]}"; PATCH="${BASH_REMATCH[3]}"
-          fi
-          {
-            echo "value=$VERSION"
-            echo "major=$MAJOR"
-            echo "minor=$MINOR"
-            echo "patch=$PATCH"
-            echo "build_type=$BUILD_TYPE"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build NFC bootloader
-        working-directory: sticker
-        run: west build -p always -b sticker boot -d build/boot
-
-      - name: Build variant-B application (links at code_partition)
-        working-directory: sticker
-        run: |
-          west build -p always -b sticker app -d build/app-b -- \
-            -DEXTRA_CONF_FILE=nfc-boot.conf \
-            -DAPP_VERSION_MAJOR=${{ steps.version.outputs.major }} \
-            -DAPP_VERSION_MINOR=${{ steps.version.outputs.minor }} \
-            -DAPP_VERSION_PATCH=${{ steps.version.outputs.patch }} \
-            -DAPP_BUILD_TYPE=${{ steps.version.outputs.build_type }}
-
-      - name: Package .sfu update image
-        working-directory: sticker
-        run: |
-          FWVER=$(( (${{ steps.version.outputs.major }} << 24) \
-                  | (${{ steps.version.outputs.minor }} << 16) \
-                  | (${{ steps.version.outputs.patch }} << 8) \
-                  |  ${{ steps.version.outputs.build_type }} ))
-          mkdir -p artifacts
-          python3 scripts/mksfu.py \
-            build/app-b/zephyr/zephyr.bin \
-            "artifacts/hio-sticker-${{ steps.version.outputs.value }}.sfu" \
-            --load-addr 0x08009000 \
-            --fw-version "$FWVER"
-          cp build/boot/zephyr/zephyr.hex \
-            "artifacts/hio-sticker-bootloader-${{ steps.version.outputs.value }}.hex"
-
-      - name: Upload NFC artifacts
-        uses: actions/upload-artifact@v5
-        with:
-          name: hio-sticker-nfc-${{ steps.version.outputs.value }}
-          path: |
-            sticker/artifacts/hio-sticker-${{ steps.version.outputs.value }}.sfu
-            sticker/artifacts/hio-sticker-bootloader-${{ steps.version.outputs.value }}.hex
-          if-no-files-found: error
-
   test:
     name: Tests
     runs-on: ubuntu-latest
@@ -265,7 +171,7 @@ jobs:
   release:
     name: Create release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, build-nfc]
+    needs: build
     runs-on: ubuntu-latest
 
     steps:
@@ -288,4 +194,3 @@ jobs:
           name: STICKER Firmware ${{ steps.version.outputs.value }}
           files: |
             artifacts/*.hex
-            artifacts/*.sfu

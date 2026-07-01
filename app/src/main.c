@@ -11,7 +11,6 @@
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_counters.h"
-#include "app_dfu_meta.h"
 #include "app_history.h"
 #include "app_version.h"
 #include "app_led.h"
@@ -23,8 +22,6 @@
 #include "app_sensor.h"
 #include "app_settings.h"
 #include "app_wdog.h"
-
-#include <sticker/dfu_signal.h>
 
 /* Zephyr includes */
 #include <zephyr/drivers/hwinfo.h>
@@ -189,15 +186,13 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 			}
 		}
 
-		/* Deferred action from an NFC command (reboot/save/factory-reset/enter-
-		 * mailbox). Run it after a short delay so the phone can still read the Ack
-		 * response off the tag first. Re-check after each one: serving the mailbox
-		 * can itself queue a save/reboot (a SetParam written over the mailbox). */
+		/* Deferred action from an NFC command (reboot/save/factory-reset). Run it
+		 * after a short delay so the phone can still read the Ack response off the
+		 * tag first. */
 		enum app_cmd_action cmd_action = app_nfc_take_cmd_action();
 		while (cmd_action != APP_CMD_ACTION_NONE) {
 			/* Delay before acting so the phone can first read the Ack off the tag
-			 * over NDEF — including before switching to mailbox mode (which makes
-			 * RF user-memory reads, and so reading the Ack, impossible). */
+			 * over NDEF. */
 			k_sleep(K_SECONDS(NFC_CMD_ACTION_DELAY_SECONDS));
 			switch (cmd_action) {
 			case APP_CMD_ACTION_SETTINGS_SAVE:
@@ -229,23 +224,6 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 			case APP_CMD_ACTION_COUNTERS_SAVE:
 				/* Persist the (reset) pulse totalizers, no reboot. */
 				app_counters_save(true);
-				break;
-			case APP_CMD_ACTION_ENTER_MAILBOX:
-				/* The phone has read the Ack off the tag; switch to the
-				 * mailbox (FTM) channel for fast config streaming / firmware
-				 * update. Blocks here serving the mailbox until the phone goes
-				 * quiet, then returns to the low-power NDEF poll. A SetParam
-				 * served over the mailbox queues its save via m_cmd_action,
-				 * picked up by the next loop iteration below. The idle
-				 * window comes from the EnterMailbox command (#200; 0 = the
-				 * firmware default). */
-				app_nfc_serve_mailbox(app_cmd_get_mailbox_timeout_s() * 1000);
-				break;
-			case APP_CMD_ACTION_ENTER_DFU:
-				/* Ask the NFC bootloader to enter DFU on the next boot,
-				 * then cold-reboot into it (variant-B firmware update). */
-				dfu_signal_request();
-				sys_reboot(SYS_REBOOT_COLD);
 				break;
 			default:
 				break;
@@ -366,17 +344,6 @@ int main(void)
 	}
 
 	/* --- Normal mode --- */
-
-#if defined(CONFIG_USE_DT_CODE_PARTITION)
-	/* Variant-B image (running behind the NFC bootloader): keep the bootloader's
-	 * sfu_meta record seeded with this device's secret_key + serial so it can
-	 * authenticate encrypted DFU frames. Non-fatal — a flash hiccup just leaves
-	 * DFU unkeyed, never a die() loop. */
-	ret = app_dfu_meta_provision();
-	if (ret) {
-		LOG_WRN("app_dfu_meta_provision failed: %d (NFC DFU may be unkeyed)", ret);
-	}
-#endif /* defined(CONFIG_USE_DT_CODE_PARTITION) */
 
 	/* The NFC tag (ST25DV) is non-essential: a broken tag must not brick an
 	 * otherwise-healthy device (radio + sensors fine) into a die() reboot loop

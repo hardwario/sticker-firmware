@@ -231,41 +231,30 @@ stm32_lp_tick_source: &lptim1 {
 		#address-cells = <1>;
 		#size-cells = <1>;
 
-		/* Variant-B NFC firmware update layout (doc/nfc-update-protocol.md
-		 * §7), layered on the #77 flat map. Erase-in-place: no second slot.
-		 * The NFC bootloader (boot_partition) receives an AES-CCM image over
-		 * the ST25DV tag and writes code_partition directly; sfu_meta marks
-		 * it bootable. The bootloader takes ~40K from the front, so the app
-		 * (code_partition) moves up and history shrinks 80K->42K.
-		 *
-		 * The variant-B app links at code_partition via
-		 * CONFIG_USE_DT_CODE_PARTITION (app/nfc-boot.conf). The default flat
-		 * build is unchanged (links from 0x0 with the CONFIG_FLASH_LOAD_SIZE
-		 * budget) and is flashed standalone without the bootloader. Only a
-		 * release-sized image (~151K) fits code_partition; the debug image
-		 * (~241K) is too large for variant B.
+		/* Flat application image from the flash base — no bootloader is
+		 * active (NFC firmware update / variant-B bootloader was removed;
+		 * a future MCUboot/FUOTA layout would redesign this map). The image
+		 * is linked against CONFIG_FLASH_LOAD_SIZE (the linker fails the
+		 * build on overflow), because flash regions written at runtime
+		 * corrupt an image leaking into them — the device then hard-faults
+		 * on the next boot (recoverable only by mass erase):
+		 *  - release (CONFIG_APP_HISTORY_FLASH=y) writes history NVS
+		 *    here: budget = history_partition offset (prj.conf, 0x28000)
+		 *  - debug keeps history in RAM but NVS settings + LoRaWAN NVM
+		 *    always write storage: budget = storage_partition offset
+		 *    (debug.conf, 0x3C000)
 		 */
-		boot_partition: partition@0 {
-			label = "mcuboot";
-			reg = <0x00000000 DT_SIZE_K(36)>;
+		code_partition: partition@0 {
+			label = "code";
+			reg = <0x00000000 DT_SIZE_K(160)>;
 			read-only;
 		};
 
-		code_partition: partition@9000 {
-			label = "code";
-			reg = <0x00009000 DT_SIZE_K(162)>;
-		};
-
-		sfu_meta_partition: partition@31800 {
-			label = "sfu_meta";
-			reg = <0x00031800 DT_SIZE_K(2)>;
-		};
-
 		/* Sensor history store-and-forward buffer (app_history.c,
-		 * FIXED_PARTITION_ID(history_partition)). Shrunk for variant B. */
-		history_partition: partition@32000 {
+		 * FIXED_PARTITION_ID(history_partition)). */
+		history_partition: partition@28000 {
 			label = "history";
-			reg = <0x00032000 DT_SIZE_K(40)>;
+			reg = <0x00028000 DT_SIZE_K(80)>;
 		};
 
 		storage_partition: partition@3c000 {
@@ -273,13 +262,4 @@ stm32_lp_tick_source: &lptim1 {
 			reg = <0x0003c000 DT_SIZE_K(16)>;
 		};
 	};
-};
-
-/* Reserve the top 32 bytes of SRAM for the DFU-request handoff word
- * (include/sticker/dfu_signal.h): the application writes a magic value there and
- * cold-reboots to ask the NFC bootloader to enter DFU mode. Kept out of sram0 so
- * neither image's linker allocates it; the value survives a software reset and
- * is lost on power loss. DFU_SIGNAL_ADDR must match (0x2000FFE0). */
-&sram0 {
-	reg = <0x20000000 (DT_SIZE_K(64) - 32)>;
 };

@@ -324,7 +324,7 @@ void app_compose_snapshot(Telemetry *out)
 		return;
 	}
 	/* Full reading (all groups) for a synchronous response — e.g. the Sample
-	 * command over NFC, where the whole Telemetry fits the 256-byte mailbox and
+	 * command over NFC, where the whole Telemetry fits in one frame and
 	 * there is no DR budget to bin-pack against. Pure mapping: it neither
 	 * disturbs the in-progress LoRaWAN snapshot nor consumes the boot flag. */
 	fill_telemetry(out, false);

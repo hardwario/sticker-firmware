@@ -62,13 +62,6 @@ bool app_nfc_info_restore_pending(void);
 bool app_nfc_resp_write_pending(void);
 int app_nfc_restore_info(void);
 
-/* Enter mailbox (ST25DV Fast-Transfer-Mode) serving mode until `idle_timeout_s`
- * of inactivity (0 = firmware default), holding the tag powered so the phone's
- * RF and our I2C reach it at once. Runs commands off the mailbox and returns the
- * number served (or a negative errno). Called from the poll thread when an
- * EnterMailbox command is taken via app_nfc_take_cmd_action(). */
-int app_nfc_serve_mailbox(uint32_t idle_timeout_ms);
-
 #ifdef __cplusplus
 }
 #endif

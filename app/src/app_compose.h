@@ -34,7 +34,7 @@ int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t b
 
 /* Take a fresh, full reading of every sensor group into `*out` (a complete
  * Telemetry, not budget-split). For a synchronous response such as the Sample
- * command over NFC, where the whole message fits the mailbox. Independent of
+ * command over NFC, where the whole message fits in one frame. Independent of
  * the app_compose() multi-frame state, so it can run off m_work_q. */
 struct _Telemetry; /* fwd: real type is the nanopb Telemetry */
 void app_compose_snapshot(struct _Telemetry *out);
