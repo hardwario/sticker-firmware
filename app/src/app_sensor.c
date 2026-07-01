@@ -197,7 +197,15 @@ int app_sensor_init(void)
 
 	if ((g_app_config.cap_input_a || g_app_config.cap_input_b) &&
 	    g_app_config.cap_pir_detector) {
-		LOG_WRN("PIR and input share GPIO pins — skipping input init");
+		/* PIR and the digital inputs share PB4/PA11 (#90). PIR wins; the inputs
+		 * are not initialised. Clear their runtime enables too (H-7) so telemetry
+		 * and GetConfig stop reporting a non-functional input as active — otherwise
+		 * the operator sees the input "enabled" with count 0 and never learns it is
+		 * silently dead. The persisted config is untouched (g_app_config is the
+		 * runtime copy); fixing the pin conflict is a config change. */
+		LOG_WRN("PIR and input share GPIO pins — inputs disabled (PIR takes the pins)");
+		g_app_config.cap_input_a = false;
+		g_app_config.cap_input_b = false;
 	} else if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
 		ret = app_input_init();
 		if (ret) {
