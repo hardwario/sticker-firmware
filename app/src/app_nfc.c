@@ -43,6 +43,14 @@
 
 LOG_MODULE_REGISTER(app_nfc, LOG_LEVEL_DBG);
 
+/* M-11: the NFC command/config channel may only run in plaintext on a debug /
+ * validation build. In a release build the boot warning is a LOG_WRN that
+ * preprocesses away (no CONFIG_LOG), so a release with encryption off would ship
+ * a fully unencrypted NFC channel with no runtime signal. Fail the build instead
+ * — plaintext NFC requires CONFIG_FW_DEBUG. */
+BUILD_ASSERT(IS_ENABLED(CONFIG_APP_NFC_ENCRYPTION) || IS_ENABLED(CONFIG_FW_DEBUG),
+	     "plaintext NFC (CONFIG_APP_NFC_ENCRYPTION=n) is only allowed with CONFIG_FW_DEBUG");
+
 #if defined(CONFIG_SHELL)
 /* When set (by `nfc check`), nfc_check_locked()/parser_callback emit a human-
  * readable trace to this shell: what was read & decoded off the tag, how the
@@ -1066,8 +1074,22 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 		 * the ack (set ready in the m_seen_ack / backstop paths) when there is a
 		 * reply to deliver, or fires immediately when there is nothing to read. */
 		if (!replayed) {
-			m_cmd_action = cmd_action;
-			m_cmd_action_ready = (cmd_action != APP_CMD_ACTION_NONE && !m_have_resp);
+			/* M-5: don't clobber a deferred action from an earlier command that
+			 * has not been dispatched yet (the phone sent another command before
+			 * acking the first reply). Overwriting it would silently drop a pending
+			 * reboot/save. Keep the pending action — it still fires once the phone
+			 * acks (m_seen_ack) — and drop the new command's own action instead.
+			 * A well-behaved app acks between commands (#242), so this only guards
+			 * the misbehaving case. */
+			if (m_cmd_action == APP_CMD_ACTION_NONE) {
+				m_cmd_action = cmd_action;
+				m_cmd_action_ready =
+					(cmd_action != APP_CMD_ACTION_NONE && !m_have_resp);
+			} else if (cmd_action != APP_CMD_ACTION_NONE) {
+				LOG_WRN("NFC: action %d still pending; ignoring new command action "
+					"%d",
+					(int)m_cmd_action, (int)cmd_action);
+			}
 		}
 		NFC_REPORT("  -> handled, response %zu B, deferred action: %s", m_resp_len,
 			   cmd_action_str(cmd_action));
