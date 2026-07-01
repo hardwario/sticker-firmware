@@ -788,8 +788,12 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_sample(tp, cmd, resp, action);
 		break;
 	default:
-		LOG_WRN("Command tag %u not implemented", cmd->which_body);
-		make_error(resp, Response_Error_Code_UNKNOWN, "not implemented");
+		/* L-54: an unknown command tag (e.g. a removed command like the old
+		 * enter_dfu/enter_mailbox 19/20/22 sent by an older app) is a distinct,
+		 * expected outcome — report NOT_SUPPORTED so the host can tell "command
+		 * removed/unknown" apart from a generic UNKNOWN failure. */
+		LOG_WRN("Command tag %u not supported", cmd->which_body);
+		make_error(resp, Response_Error_Code_NOT_SUPPORTED, "command not supported");
 		break;
 	}
 }
