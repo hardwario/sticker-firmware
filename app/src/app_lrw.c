@@ -755,17 +755,44 @@ static bool deveui_is_zero(void)
 	return true;
 }
 
+static bool devaddr_is_zero(void)
+{
+	for (size_t i = 0; i < sizeof(g_app_config.lrw_devaddr); i++) {
+		if (g_app_config.lrw_devaddr[i] != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* "Never provisioned" — the identifier that MUST be set for the configured
+ * activation mode is all-zero. For OTAA that is the DevEUI; for ABP the DevEUI is
+ * unused (and legitimately left blank), so provisioning is keyed on the DevAddr
+ * instead. Applying the DevEUI test to ABP (the #98 radio-silent guard did) left
+ * a correctly-configured ABP device permanently DISABLED — no uplinks, but a
+ * healthy-looking green LED (C-1). */
+static bool lrw_unprovisioned(void)
+{
+	if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP) {
+		return devaddr_is_zero();
+	}
+	return deveui_is_zero();
+}
+
 static void join_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 	int ret;
 
-	/* Radio-silent mode (#98): an all-zero DevEUI means the device was never
-	 * provisioned — don't burn power on join requests that can never succeed.
+	/* Radio-silent mode (#98): an unprovisioned device (OTAA with no DevEUI, or
+	 * ABP with no DevAddr) can never succeed — don't burn power on join requests.
 	 * Enter DISABLED and stay there until reprovisioned + rebooted. */
-	if (deveui_is_zero()) {
+	if (lrw_unprovisioned()) {
 		if ((enum app_lrw_state)atomic_get(&m_state) != APP_LRW_STATE_DISABLED) {
-			LOG_WRN("DevEUI is all-zero: LoRaWAN disabled (radio-silent)");
+			LOG_WRN("LoRaWAN not provisioned (%s): disabled (radio-silent)",
+				g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP
+					? "ABP/DevAddr"
+					: "OTAA/DevEUI");
 			state_transition(APP_LRW_STATE_DISABLED);
 		}
 		return;
@@ -895,7 +922,20 @@ static void tx_telemetry_frame(bool first_frame)
 		refresh_payload_budget(); /* MED-6: per-TX budget, not cached */
 		ret = app_compose(m_frame_buf, sizeof(m_frame_buf), &m_frame_len, &m_frame_more);
 		if (ret == -EAGAIN) {
-			LOG_DBG("Telemetry budget unavailable, skipping TX");
+			/* Budget 0: pending MAC commands (an ADR/channel batch from the LNS)
+			 * exceed the DR payload room, so no telemetry fits. Returning here
+			 * DEADLOCKS (H-1): telemetry never sends -> the MAC command queue never
+			 * flushes -> the budget stays 0 forever, and the station goes mute with
+			 * only a LOG_DBG. Send an empty uplink instead so LoRaMac drains the
+			 * queued MAC answers (in FOpts, or on port 0 when they overflow); the
+			 * budget recovers for the next report cycle. Rate-limited by the report
+			 * cadence (this path runs once per cycle). */
+			LOG_WRN("Telemetry budget 0 (MAC-command flood): empty uplink to flush "
+				"MAC");
+			ret = lorawan_send(2, m_frame_buf, 0, LORAWAN_MSG_UNCONFIRMED);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("lorawan_send (MAC flush)", ret);
+			}
 			return;
 		}
 		if (ret) {
@@ -1424,13 +1464,14 @@ int app_lrw_init(void)
 		return -ENODEV;
 	}
 
-	/* #175: when the DevEUI is all-zero (#98 radio-silent provisioning) skip the
-	 * entire LoRaMac/radio bring-up. The work queue, works and timers below are
-	 * still set up so the public API stays safe (app_lrw_join / send hit the
-	 * DISABLED guard and no-op), but clear_stale_lorawan_nvm() /
-	 * lorawan_set_region() / lorawan_start() are never called — the SubGHz radio
-	 * is never powered, so there is no boot radio burst. */
-	const bool radio_silent = deveui_is_zero();
+	/* #175: when the device is unprovisioned (#98 radio-silent) skip the entire
+	 * LoRaMac/radio bring-up. The work queue, works and timers below are still set
+	 * up so the public API stays safe (app_lrw_join / send hit the DISABLED guard
+	 * and no-op), but clear_stale_lorawan_nvm() / lorawan_set_region() /
+	 * lorawan_start() are never called — the SubGHz radio is never powered, so
+	 * there is no boot radio burst. Provisioning is activation-aware (C-1): OTAA
+	 * needs a DevEUI, ABP needs a DevAddr. */
+	const bool radio_silent = lrw_unprovisioned();
 
 	if (!radio_silent) {
 		clear_stale_lorawan_nvm();

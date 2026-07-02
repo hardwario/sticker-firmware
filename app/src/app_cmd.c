@@ -163,8 +163,21 @@ static void make_error(Response *resp, Response_Error_Code code, const char *det
 static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				     enum app_cmd_action *action)
 {
-	ARG_UNUSED(tp);
 	const Command_SetParam *sp = &cmd->body.set_param;
+
+	/* Access model (H-3): the whole lorawan provisioning/identity group is
+	 * writable:[shell, nfc] only (see app_config.yml) — never over a LoRaWAN
+	 * downlink, otherwise the LNS could overwrite the root keys / DevEUI and
+	 * hijack or brick the device. Reject a SetParam carrying it over LRW; the
+	 * other groups (application/sensors/alarms) stay remotely writable.
+	 * NOTE: configen does not yet emit per-field write-transport gating, so this
+	 * is enforced by hand at the group level; full codegen enforcement is the
+	 * follow-up (audit top lever #4). */
+	if (tp == APP_CMD_TRANSPORT_LRW && sp->has_lorawan) {
+		make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+		return;
+	}
+
 	uint32_t fault = 0;
 	/* Group that produced the fault, folded into fault_field as group*100 + tag so
 	 * the host can disambiguate the tag across groups (#196): 1=lorawan
