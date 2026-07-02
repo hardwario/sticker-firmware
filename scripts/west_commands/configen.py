@@ -32,6 +32,12 @@ Parameter options:
 - format: display format (hex/dec for integers, printf format for uint)
 - write_once: once the field holds a non-zero value the shell setter refuses to
   overwrite it (commission-once identity fields, e.g. claim_token)
+- proto_field: whether the parameter is a field in the generated config protobuf
+  (AppConfigMessage). Default true. `proto_field: false` keeps it in the C struct
+  + settings (still shell-managed) but emits NO proto field and reserves its
+  proto_id, so it can never be read/written via SetParam/GetParam/GetConfig — for
+  identity fields whose only channels are the shell and hand-written messages
+  (Info / inf), not the config wire.
 
 Access control (readable / writable):
   Each parameter declares who may read and who may write it, as a subset of the
@@ -568,18 +574,18 @@ def build_proto_model(config):
 
     # Root message: extra_fields(root) + root-group params + submessage
     # containers, all in the root namespace, ordered by field number. A field with
-    # `wire: false` (#250 Part B) stays in the C struct/settings but is kept off the
+    # `proto_field: false` (#250 Part B) stays in the C struct/settings but is kept off the
     # proto — its id goes to the message `reserved` list so it is never re-used.
     root_fields = []
     root_reserved = []
     for ef in proto.get("extra_fields", []):
         if ef.get("proto_group", "root") == "root":
-            if ef.get("wire", True):
+            if ef.get("proto_field", True):
                 root_fields.append(field(ef["name"], ef["type"], ef["proto_id"]))
             else:
                 root_reserved.append(ef["proto_id"])
     for p in by_group.get("root", []):
-        if not p.get("wire", True):
+        if not p.get("proto_field", True):
             root_reserved.append(p["proto_id"])
             continue
         root_fields.append(field(_proto_field_name(p, gmap["root"]),

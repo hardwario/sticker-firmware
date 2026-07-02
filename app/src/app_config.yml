@@ -53,9 +53,9 @@ proto:
   message: AppConfigMessage
   extra_fields:
     # #250 Part B: `factory` was the config-record factory-reset flag, read only by
-    # the now-removed app_config_ingest(). Kept here as `wire: false` so configen
+    # the now-removed app_config_ingest(). Kept here as `proto_field: false` so configen
     # reserves proto id 1 in AppConfigMessage (never re-used) but emits no field.
-    - {name: factory, type: bool, proto_id: 1, proto_group: root, wire: false}
+    - {name: factory, type: bool, proto_id: 1, proto_group: root, proto_field: false}
   groups:
     - key: root
     - key: lorawan
@@ -112,7 +112,7 @@ commands:
     - {name: sample,         proto_id: 21, body: Sample,        kind: handler, response: sample, transports: [lrw, nfc]}
 parameters:
   # Root identity fields (secret_key / serial_number / nonce_counter / claim_token)
-  # are OFF the config wire (`wire: false`, #250 Part B): configen keeps them in the C
+  # are OFF the config wire (`proto_field: false`, #250 Part B): configen keeps them in the C
   # struct + settings and reserves their proto ids, but they are NOT fields in
   # AppConfigMessage — so they can never be read or written via SetParam / GetParam /
   # GetConfig. Their `readable`/`writable` lists therefore only govern the `config`
@@ -125,7 +125,7 @@ parameters:
   - name: secret_key
     proto_group: root
     proto_id: 2
-    wire: false
+    proto_field: false
     readable: [shell]
     writable: [shell]
     type: bytes
@@ -136,7 +136,7 @@ parameters:
   - name: serial_number
     proto_group: root
     proto_id: 3
-    wire: false
+    proto_field: false
     readable: [shell]
     writable: [shell]
     type: uint32
@@ -149,7 +149,7 @@ parameters:
   - name: nonce_counter
     proto_group: root
     proto_id: 4
-    wire: false
+    proto_field: false
     readable: [shell]
     writable: [shell]
     type: uint32
@@ -159,7 +159,7 @@ parameters:
   - name: claim_token
     proto_group: root
     proto_id: 9
-    wire: false
+    proto_field: false
     readable: [shell]
     writable: [shell]
     type: bytes
