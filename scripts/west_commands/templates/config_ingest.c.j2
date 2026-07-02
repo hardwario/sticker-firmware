@@ -26,14 +26,30 @@
 LOG_MODULE_REGISTER({{ module.name }}_ingest, LOG_LEVEL_DBG);
 
 /* Record the first offending proto field tag and mark the result invalid. The
- * apply still processes the remaining fields (best effort) so NFC ingest keeps
- * its "skip invalid, apply the rest" behaviour; SetParam inspects fault_field. */
+ * apply still processes the remaining fields (best effort) so a caller inspecting
+ * fault_field learns the FIRST offender; the rc reflects that first fault too
+ * (value → -EINVAL). */
 #define FAULT(tag)                                                                                 \
 	do {                                                                                       \
 		if (fault_field && *fault_field == 0) {                                            \
 			*fault_field = (tag);                                                      \
 		}                                                                                  \
-		ret = -EINVAL;                                                                     \
+		if (ret == 0) {                                                                    \
+			ret = -EINVAL;                                                             \
+		}                                                                                  \
+	} while (0)
+
+/* Reject a write of this field over a transport not in its `writable` list (M-3).
+ * Distinct rc (-EACCES) so the SetParam caller reports NOT_WRITABLE rather than
+ * OUT_OF_RANGE; records the first offending tag like FAULT. */
+#define FAULT_TRANSPORT(tag)                                                                       \
+	do {                                                                                       \
+		if (fault_field && *fault_field == 0) {                                            \
+			*fault_field = (tag);                                                      \
+		}                                                                                  \
+		if (ret == 0) {                                                                    \
+			ret = -EACCES;                                                             \
+		}                                                                                  \
 	} while (0)
 
 static bool requested(const uint32_t *ids, size_t n, uint32_t tag)
@@ -62,16 +78,27 @@ static bool slot_all_zero(const uint8_t *slot, size_t len)
 {% endif %}
 
 {% for g in ingest_groups %}
-int {{ g.apply_fn }}(const {{ g.c_message }} *src, uint32_t *fault_field)
+int {{ g.apply_fn }}(enum app_cmd_transport tp, const {{ g.c_message }} *src, uint32_t *fault_field)
 {
 	struct {{ module.name }} *config = {{ module.name }}();
 	int ret = 0;
+{% if not g.any_write_gated %}
+	ARG_UNUSED(tp);
+{% endif %}
 
 	if (fault_field) {
 		*fault_field = 0;
 	}
 
 {% for p in g.params %}
+{% if p.no_write_lrw or p.no_write_nfc %}
+	/* M-3: this field is not writable over {{ 'lrw' if p.no_write_lrw else '' }}{{ '/' if p.no_write_lrw and p.no_write_nfc else '' }}{{ 'nfc' if p.no_write_nfc else '' }}. */
+	if (src->has_{{ p.proto_name }} &&
+	    ({% if p.no_write_lrw %}tp == APP_CMD_TRANSPORT_LRW{% endif %}{% if p.no_write_lrw and p.no_write_nfc %} ||
+	     {% endif %}{% if p.no_write_nfc %}tp == APP_CMD_TRANSPORT_NFC{% endif %})) {
+		FAULT_TRANSPORT({{ p.tag }});
+	} else
+{% endif %}
 {% if p.kind == 'bool' %}
 	if (src->has_{{ p.proto_name }}) {
 		config->{{ p.c_name }} = src->{{ p.proto_name }};
@@ -166,31 +193,3 @@ bool {{ g.slot_empty_fn }}(uint32_t tag)
 {% endif %}
 
 {% endfor %}
-bool {{ module.name }}_ingest(const {{ message }} *message)
-{
-	if (message->has_factory && message->factory) {
-		LOG_INF("Factory reset requested via NFC");
-		return true;
-	}
-
-	/* Atomic ingest (H-11): apply every present group but capture the first fault,
-	 * and roll the whole record back on any invalid field. A config record written
-	 * over NFC with a bad field is now rejected outright (nothing applied) instead
-	 * of half-applying the valid fields and silently looking like success — which
-	 * left the device mis-provisioned with no indication. */
-	struct {{ module.name }} snapshot = *{{ module.name }}();
-	uint32_t fault = 0;
-	int rc = 0;
-
-{% for g in ingest_groups %}
-	if (rc == 0 && message->has_{{ g.key }}) {
-		rc = {{ g.apply_fn }}(&message->{{ g.key }}, &fault);
-	}
-{% endfor %}
-	if (rc) {
-		*{{ module.name }}() = snapshot;
-		LOG_WRN("NFC config ingest rejected: invalid field (fault %u) — no change applied",
-			fault);
-	}
-	return false;
-}

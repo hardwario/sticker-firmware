@@ -87,24 +87,30 @@ ZTEST(cmd, test_set_param_applies_and_acks)
 	zassert_true(g_app_config.cap_barometer, "cap_barometer not applied");
 }
 
-/* H-3: a SetParam carrying the lorawan provisioning/identity group is rejected over
- * a LoRaWAN downlink (the network server must never be able to rewrite the DevEUI /
- * root keys / DevAddr), but is accepted over NFC. */
+/* M-3: a SetParam writing a lorawan provisioning/identity field is rejected over a
+ * LoRaWAN downlink per-field (the network server must never be able to rewrite the
+ * DevEUI / root keys / DevAddr), reported as NOT_WRITABLE with fault_field pointing
+ * at the offending field; the whole batch rolls back. Accepted over NFC (writable
+ * includes nfc). Enforcement is now generated from app_config.yml `writable`, not a
+ * hand-coded group guard. */
 ZTEST(cmd, test_set_param_lorawan_rejected_over_lrw)
 {
 	Response r;
 
 	/* seq1 set_param{ lorawan.adr=true, application{interval_report=120},
-	 *                 sensors{cap_barometer=true} } */
+	 *                 sensors{cap_barometer=true} }. lorawan is applied first, so
+	 *  adr (tag 4) trips the write-transport reject → fault_field = 1*100 + 4. */
 	const char *hex = "0801120c0a0220011202187822023001";
 
 	reset_cfg();
 	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_LRW, hex, &r);
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action expected");
 	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
-	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "code %d",
 		      r.body.error.code);
-	/* the whole message is rejected before ingest — nothing is applied */
+	zassert_equal(r.body.error.fault_field, 104, "fault_field %u (want 104 = lorawan adr)",
+		      r.body.error.fault_field);
+	/* the whole message is rejected — nothing is applied */
 	zassert_false(g_app_config.lrw_adr, "lorawan applied over LRW despite guard");
 	zassert_not_equal(g_app_config.interval_report, 120,
 			  "message applied over LRW despite guard");

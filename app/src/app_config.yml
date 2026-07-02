@@ -52,7 +52,10 @@ enums:
 proto:
   message: AppConfigMessage
   extra_fields:
-    - {name: factory, type: bool, proto_id: 1, proto_group: root}
+    # #250 Part B: `factory` was the config-record factory-reset flag, read only by
+    # the now-removed app_config_ingest(). Kept here as `wire: false` so configen
+    # reserves proto id 1 in AppConfigMessage (never re-used) but emits no field.
+    - {name: factory, type: bool, proto_id: 1, proto_group: root, wire: false}
   groups:
     - key: root
     - key: lorawan
@@ -111,6 +114,7 @@ parameters:
   - name: secret_key
     proto_group: root
     proto_id: 2
+    wire: false   # #250 Part B: shell-only master key, never on the config wire
     readable: [shell]
     writable: [shell]
     type: bytes
@@ -121,6 +125,7 @@ parameters:
   - name: serial_number
     proto_group: root
     proto_id: 3
+    wire: false   # #250 Part B: read via get_info Info; crypto reads the struct, not the config wire
     type: uint32
     format: "%010u"
     preserve_on_reset: true
@@ -131,6 +136,7 @@ parameters:
   - name: nonce_counter
     proto_group: root
     proto_id: 4
+    wire: false   # #250 Part B: crypto anti-replay counter, struct-only (never on the config wire)
     type: uint32
     preserve_on_reset: true
     help: "Get/Set nonce counter (unsigned integer)."
@@ -144,6 +150,7 @@ parameters:
   - name: claim_token
     proto_group: root
     proto_id: 9
+    wire: false   # #250 Part B: air read via get_info Info; off the generated config wire
     readable: [shell, nfc, lrw]
     writable: [shell]
     type: bytes

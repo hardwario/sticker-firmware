@@ -26,14 +26,30 @@
 LOG_MODULE_REGISTER(app_config_ingest, LOG_LEVEL_DBG);
 
 /* Record the first offending proto field tag and mark the result invalid. The
- * apply still processes the remaining fields (best effort) so NFC ingest keeps
- * its "skip invalid, apply the rest" behaviour; SetParam inspects fault_field. */
+ * apply still processes the remaining fields (best effort) so a caller inspecting
+ * fault_field learns the FIRST offender; the rc reflects that first fault too
+ * (value → -EINVAL). */
 #define FAULT(tag)                                                                                 \
 	do {                                                                                       \
 		if (fault_field && *fault_field == 0) {                                            \
 			*fault_field = (tag);                                                      \
 		}                                                                                  \
-		ret = -EINVAL;                                                                     \
+		if (ret == 0) {                                                                    \
+			ret = -EINVAL;                                                             \
+		}                                                                                  \
+	} while (0)
+
+/* Reject a write of this field over a transport not in its `writable` list (M-3).
+ * Distinct rc (-EACCES) so the SetParam caller reports NOT_WRITABLE rather than
+ * OUT_OF_RANGE; records the first offending tag like FAULT. */
+#define FAULT_TRANSPORT(tag)                                                                       \
+	do {                                                                                       \
+		if (fault_field && *fault_field == 0) {                                            \
+			*fault_field = (tag);                                                      \
+		}                                                                                  \
+		if (ret == 0) {                                                                    \
+			ret = -EACCES;                                                             \
+		}                                                                                  \
 	} while (0)
 
 static bool requested(const uint32_t *ids, size_t n, uint32_t tag)
@@ -59,7 +75,8 @@ static bool slot_all_zero(const uint8_t *slot, size_t len)
 	return true;
 }
 
-int app_config_apply_lorawan(const AppConfigMessage_Lorawan *src, uint32_t *fault_field)
+int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_Lorawan *src,
+			     uint32_t *fault_field)
 {
 	struct app_config *config = app_config();
 	int ret = 0;
@@ -68,14 +85,20 @@ int app_config_apply_lorawan(const AppConfigMessage_Lorawan *src, uint32_t *faul
 		*fault_field = 0;
 	}
 
-	if (src->has_region) {
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_region && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(1);
+	} else if (src->has_region) {
 		if ((int)src->region >= 0 && (int)src->region <= 2) {
 			config->lrw_region = (enum app_config_lrw_region)src->region;
 		} else {
 			FAULT(1);
 		}
 	}
-	if (src->has_sub_band) {
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_sub_band && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(2);
+	} else if (src->has_sub_band) {
 		int val = src->sub_band;
 
 		if ((val >= 0 && val <= 8)) {
@@ -84,52 +107,92 @@ int app_config_apply_lorawan(const AppConfigMessage_Lorawan *src, uint32_t *faul
 			FAULT(2);
 		}
 	}
-	if (src->has_network) {
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_network && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(3);
+	} else if (src->has_network) {
 		if ((int)src->network >= 0 && (int)src->network <= 1) {
 			config->lrw_network = (enum app_config_lrw_network)src->network;
 		} else {
 			FAULT(3);
 		}
 	}
-	if (src->has_adr) {
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_adr && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(4);
+	} else if (src->has_adr) {
 		config->lrw_adr = src->adr;
 	}
-	if (src->has_activation) {
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_activation && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(5);
+	} else if (src->has_activation) {
 		if ((int)src->activation >= 0 && (int)src->activation <= 1) {
 			config->lrw_activation = (enum app_config_lrw_activation)src->activation;
 		} else {
 			FAULT(5);
 		}
 	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_deveui) {
-		memcpy(config->lrw_deveui, src->deveui, sizeof(config->lrw_deveui));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_joineui) {
-		memcpy(config->lrw_joineui, src->joineui, sizeof(config->lrw_joineui));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_nwkkey) {
-		memcpy(config->lrw_nwkkey, src->nwkkey, sizeof(config->lrw_nwkkey));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_appkey) {
-		memcpy(config->lrw_appkey, src->appkey, sizeof(config->lrw_appkey));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_devaddr) {
-		memcpy(config->lrw_devaddr, src->devaddr, sizeof(config->lrw_devaddr));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_nwkskey) {
-		memcpy(config->lrw_nwkskey, src->nwkskey, sizeof(config->lrw_nwkskey));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_appskey) {
-		memcpy(config->lrw_appskey, src->appskey, sizeof(config->lrw_appskey));
-	}
-	if (src->has_link_check_interval) {
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_deveui && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(6);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_deveui) {
+			memcpy(config->lrw_deveui, src->deveui, sizeof(config->lrw_deveui));
+		}
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_joineui && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(7);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_joineui) {
+			memcpy(config->lrw_joineui, src->joineui, sizeof(config->lrw_joineui));
+		}
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_nwkkey && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(8);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_nwkkey) {
+			memcpy(config->lrw_nwkkey, src->nwkkey, sizeof(config->lrw_nwkkey));
+		}
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_appkey && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(9);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_appkey) {
+			memcpy(config->lrw_appkey, src->appkey, sizeof(config->lrw_appkey));
+		}
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_devaddr && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(10);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_devaddr) {
+			memcpy(config->lrw_devaddr, src->devaddr, sizeof(config->lrw_devaddr));
+		}
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_nwkskey && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(11);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_nwkskey) {
+			memcpy(config->lrw_nwkskey, src->nwkskey, sizeof(config->lrw_nwkskey));
+		}
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_appskey && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(12);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_appskey) {
+			memcpy(config->lrw_appskey, src->appskey, sizeof(config->lrw_appskey));
+		}
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_link_check_interval && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(13);
+	} else if (src->has_link_check_interval) {
 		int val = src->link_check_interval;
 
 		if ((val >= 0 && val <= 255)) {
@@ -138,7 +201,10 @@ int app_config_apply_lorawan(const AppConfigMessage_Lorawan *src, uint32_t *faul
 			FAULT(13);
 		}
 	}
-	if (src->has_link_check_fail_rejoin) {
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_link_check_fail_rejoin && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(14);
+	} else if (src->has_link_check_fail_rejoin) {
 		int val = src->link_check_fail_rejoin;
 
 		if ((val >= 1 && val <= 255)) {
@@ -212,10 +278,12 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 	}
 }
 
-int app_config_apply_application(const AppConfigMessage_Application *src, uint32_t *fault_field)
+int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessage_Application *src,
+				 uint32_t *fault_field)
 {
 	struct app_config *config = app_config();
 	int ret = 0;
+	ARG_UNUSED(tp);
 
 	if (fault_field) {
 		*fault_field = 0;
@@ -290,10 +358,12 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	}
 }
 
-int app_config_apply_sensors(const AppConfigMessage_Sensors *src, uint32_t *fault_field)
+int app_config_apply_sensors(enum app_cmd_transport tp, const AppConfigMessage_Sensors *src,
+			     uint32_t *fault_field)
 {
 	struct app_config *config = app_config();
 	int ret = 0;
+	ARG_UNUSED(tp);
 
 	if (fault_field) {
 		*fault_field = 0;
@@ -445,10 +515,12 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 	}
 }
 
-int app_config_apply_alarms(const AppConfigMessage_Alarms *src, uint32_t *fault_field)
+int app_config_apply_alarms(enum app_cmd_transport tp, const AppConfigMessage_Alarms *src,
+			    uint32_t *fault_field)
 {
 	struct app_config *config = app_config();
 	int ret = 0;
+	ARG_UNUSED(tp);
 
 	if (fault_field) {
 		*fault_field = 0;
@@ -660,40 +732,4 @@ bool app_config_alarms_slot_empty(uint32_t tag)
 	default:
 		return false;
 	}
-}
-
-bool app_config_ingest(const AppConfigMessage *message)
-{
-	if (message->has_factory && message->factory) {
-		LOG_INF("Factory reset requested via NFC");
-		return true;
-	}
-
-	/* Atomic ingest (H-11): apply every present group but capture the first fault,
-	 * and roll the whole record back on any invalid field. A config record written
-	 * over NFC with a bad field is now rejected outright (nothing applied) instead
-	 * of half-applying the valid fields and silently looking like success — which
-	 * left the device mis-provisioned with no indication. */
-	struct app_config snapshot = *app_config();
-	uint32_t fault = 0;
-	int rc = 0;
-
-	if (rc == 0 && message->has_lorawan) {
-		rc = app_config_apply_lorawan(&message->lorawan, &fault);
-	}
-	if (rc == 0 && message->has_application) {
-		rc = app_config_apply_application(&message->application, &fault);
-	}
-	if (rc == 0 && message->has_sensors) {
-		rc = app_config_apply_sensors(&message->sensors, &fault);
-	}
-	if (rc == 0 && message->has_alarms) {
-		rc = app_config_apply_alarms(&message->alarms, &fault);
-	}
-	if (rc) {
-		*app_config() = snapshot;
-		LOG_WRN("NFC config ingest rejected: invalid field (fault %u) — no change applied",
-			fault);
-	}
-	return false;
 }

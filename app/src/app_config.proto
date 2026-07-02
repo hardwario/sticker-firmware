@@ -2,15 +2,11 @@ syntax = "proto3";
 
 // BEGIN GENERATED CONFIG
 message AppConfigMessage {
-    optional bool factory = 1;
-    optional string secret_key = 2;
-    optional uint32 serial_number = 3;
-    optional uint32 nonce_counter = 4;
+    reserved 1, 2, 3, 4, 9;
     optional Lorawan lorawan = 5;
     optional Application application = 6;
     optional Sensors sensors = 7;
     optional Alarms alarms = 8;
-    optional string claim_token = 9;
 
     message Lorawan {
         enum Region {
@@ -282,6 +278,7 @@ message Response {
             UNSUPPORTED_FIELD   = 5;
             PERSIST_FAILED      = 6;
             NOT_SUPPORTED       = 7;   // command tag unknown / removed (L-54)
+            NOT_WRITABLE        = 8;   // field not writable over this transport (M-3); fault_field = group*100+tag
         }
 
         Code   code         = 1;

@@ -1,4 +1,7 @@
 message {{ proto.message }} {
+{% if proto.root_reserved %}
+    reserved {{ proto.root_reserved | join(", ") }};
+{% endif %}
 {% for f in proto.root_fields %}
     optional {{ f.ptype }} {{ f.name }} = {{ f.id }};
 {% endfor %}
