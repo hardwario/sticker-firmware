@@ -604,6 +604,12 @@ uint32_t app_history_get_interval(void)
 	return m_interval;
 }
 
+bool app_history_base_synced(void)
+{
+	/* Single aligned bool; a lock would only serialise an atomic read. */
+	return m_base_synced;
+}
+
 /* Records have a fixed size (m_sample_size, values only) and a shared present
  * mask (m_mask) — so a wire frame carries the mask + interval once and each
  * record is just the raw stored bytes (sentinels mark absent values). Time is

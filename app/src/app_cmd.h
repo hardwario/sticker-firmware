@@ -118,11 +118,12 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
  * `out`. `samples` holds values-only records (the shared `present` mask +
  * `interval_s` describe their layout/timing). Used by the app_lrw replay state
  * machine to stream a ReqHistory window as N frames. Returns 0 with *out_len
- * set, -EINVAL on a NULL/oversized argument, or -EMSGSIZE if it won't encode. */
+ * set, -EINVAL on a NULL/oversized argument, or -EMSGSIZE if it won't encode.
+ * `time_synced` reports whether `t0_unix` is absolute UTC (L-1/L-3). */
 int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
 				uint32_t t0_unix, uint32_t present, uint32_t interval_s,
-				const uint8_t *samples, size_t samples_len, uint8_t *out,
-				size_t out_cap, size_t *out_len);
+				bool time_synced, const uint8_t *samples, size_t samples_len,
+				uint8_t *out, size_t out_cap, size_t *out_len);
 
 /* One alarm edge for app_cmd_build_alarm_report(). source/edge/type carry the
  * AlarmEvent_Source/Edge/Type enum values (app_alarm fills these without
@@ -143,8 +144,9 @@ struct app_cmd_alarm_event {
  * `events[0..n_events)` are encoded (capped to the message's 8-event array);
  * `total` is the true window count and may exceed the encoded events when the
  * caller trimmed to fit the data rate. Returns 0 with *out_len set, -EINVAL on
- * a NULL argument, or -EMSGSIZE if it won't fit `out_cap`. */
-int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total,
+ * a NULL argument, or -EMSGSIZE if it won't fit `out_cap`. `time_synced` reports
+ * whether `base_time` is absolute UTC (L-3/L-4). */
+int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
 			       uint8_t *out, size_t out_cap, size_t *out_len);
 

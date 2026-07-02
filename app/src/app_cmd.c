@@ -928,6 +928,10 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 	hf->t0_unix = t0_unix;
 	hf->present = present;
 	hf->interval_s = interval_s;
+	/* app_cmd_build_history_frame() always sets time_synced, so account for its
+	 * bytes here (value 0/1 both encode to 1 byte) or the frame could overflow. */
+	hf->has_time_synced = true;
+	hf->time_synced = true;
 	hf->samples.size = 0; /* empty bytes field is omitted in proto3 */
 
 	size_t base = 0;
@@ -949,8 +953,8 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 
 int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
 				uint32_t t0_unix, uint32_t present, uint32_t interval_s,
-				const uint8_t *samples, size_t samples_len, uint8_t *out,
-				size_t out_cap, size_t *out_len)
+				bool time_synced, const uint8_t *samples, size_t samples_len,
+				uint8_t *out, size_t out_cap, size_t *out_len)
 {
 	Response resp = Response_init_zero;
 
@@ -969,6 +973,9 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 	hf->t0_unix = t0_unix;
 	hf->present = present;
 	hf->interval_s = interval_s;
+	/* Flag whether t0_unix is absolute (L-1/L-3): host emits time=null otherwise. */
+	hf->has_time_synced = true;
+	hf->time_synced = time_synced;
 	memcpy(hf->samples.bytes, samples, samples_len);
 	hf->samples.size = samples_len;
 
@@ -976,7 +983,7 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 }
 #endif /* APP_CMD_HAVE_HISTORY */
 
-int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total,
+int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
 			       uint8_t *out, size_t out_cap, size_t *out_len)
 {
@@ -987,6 +994,9 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total,
 	AlarmReport report = AlarmReport_init_zero;
 	report.base_time = base_time;
 	report.total = total;
+	/* Flag whether base_time is absolute (L-3/L-4): host emits time=null otherwise. */
+	report.has_time_synced = true;
+	report.time_synced = time_synced;
 
 	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
 	for (size_t i = 0; i < n; i++) {

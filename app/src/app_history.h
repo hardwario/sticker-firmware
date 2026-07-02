@@ -97,6 +97,11 @@ void app_history_set_mask(uint32_t mask);
  * so a wire frame carries this once and per-record time = t0 + ord*interval. */
 uint32_t app_history_get_interval(void);
 
+/* True once the buffer's base time has been anchored to absolute UTC (the RTC
+ * synced while records were held). Until then export_page's t0 is uptime-relative,
+ * so the replay frame must carry time_synced=false (L-1/L-3). */
+bool app_history_base_synced(void);
+
 /* Pack one page of stored records into `buf` for a LoRaWAN replay (ReqHistory ->
  * HistoryFrame), starting at ordinal `start_ord` (0 = oldest), oldest-first, as
  * many whole records as fit in `cap`. Each record is the raw stored bytes (values

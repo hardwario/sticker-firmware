@@ -333,7 +333,7 @@ var _HIST_HUM_SENTINEL = 0xff;
 // Record j's time is t0_unix + j*interval_s (records are periodic). One
 // ReqHistory yields N such frames (frame_index 0..frame_count-1); the consumer
 // concatenates their records to reconstruct the requested window.
-function _decodeHistorySamples(bytes, t0, present, interval) {
+function _decodeHistorySamples(bytes, t0, present, interval, synced) {
   var out = [];
   var recSize = 0;
   for (var s = 0; s < _HIST_SENSORS.length; s++) {
@@ -345,7 +345,9 @@ function _decodeHistorySamples(bytes, t0, present, interval) {
 
   var p = 0, j = 0;
   while (p + recSize <= bytes.length) {
-    var rec = { time: (t0 + j * interval) >>> 0 };
+    // time=null when the clock had not synced at capture (L-1/L-3): t0 is only
+    // uptime-relative, so an absolute timestamp would be a bogus ~1970 date.
+    var rec = { time: synced ? ((t0 + j * interval) >>> 0) : null };
     for (var k = 0; k < _HIST_SENSORS.length; k++) {
       if (!(present & (1 << k))) continue;
       var d = _HIST_SENSORS[k];
@@ -372,6 +374,8 @@ function _decodeHistoryFrame(bytes, start, end) {
   // frame 0 of a replay carries no field 1; the consumer still needs index 0.
   var hf = { frame_index: 0, frame_count: 0, records: [] };
   var t0 = 0, present = 0, interval = 0;
+  // time_synced (field 7) absent = old FW = treat as synced (emit timestamps).
+  var synced = true;
   var samples = null;
   var pos = start;
   while (pos < end) {
@@ -384,6 +388,7 @@ function _decodeHistoryFrame(bytes, start, end) {
       else if (f === 3) t0 = v.value;
       else if (f === 5) present = v.value;
       else if (f === 6) interval = v.value;
+      else if (f === 7) synced = v.value !== 0;
     } else if (w === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       if (f === 4) samples = bytes.slice(pos, pos + len.value);
@@ -393,7 +398,8 @@ function _decodeHistoryFrame(bytes, start, end) {
   hf.t0_unix = t0;
   hf.present = present;
   hf.interval_s = interval;
-  if (samples) hf.records = _decodeHistorySamples(samples, t0, present, interval);
+  hf.time_synced = synced;
+  if (samples) hf.records = _decodeHistorySamples(samples, t0, present, interval, synced);
   return hf;
 }
 
@@ -899,7 +905,8 @@ function _decodeAlarmEvent(bytes, start, end) {
 }
 
 function decodeAlarmBatch(bytes) {
-  var out = { base_time: 0, total: 0, alarms: [] };
+  // time_synced (field 4) absent = old FW = treat as synced (emit timestamps).
+  var out = { base_time: 0, total: 0, time_synced: true, alarms: [] };
   var rels = [];
   var pos = 0;
   while (pos < bytes.length) {
@@ -909,6 +916,7 @@ function decodeAlarmBatch(bytes) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (field === 1) out.base_time = v.value >>> 0;
       else if (field === 2) out.total = v.value;
+      else if (field === 4) out.time_synced = v.value !== 0;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var endE = pos + len.value;
@@ -929,9 +937,10 @@ function decodeAlarmBatch(bytes) {
     } else { break; }
   }
   // base_time (field 1) precedes events (field 3) on the wire, but resolve the
-  // per-event times after the loop so order can't bite us.
+  // per-event times after the loop so order can't bite us. time=null when the
+  // clock had not synced at window start (L-3/L-4): base_time is uptime-relative.
   for (var i = 0; i < out.alarms.length; i++) {
-    out.alarms[i].time = (out.base_time + rels[i]) >>> 0;
+    out.alarms[i].time = out.time_synced ? ((out.base_time + rels[i]) >>> 0) : null;
   }
   out.truncated = out.alarms.length < out.total; // some alarms dropped to fit the DR
   return out;
