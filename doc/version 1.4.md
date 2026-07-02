@@ -240,16 +240,35 @@ After every LoRaWAN join the device automatically sends a device-info message on
 | `battery` | Supply voltage in **mV**, measured fresh on each `get_info` (0/absent = unavailable) |
 | `reset_cause` | hwinfo reset-cause bitmask of the last boot (#88) — see below; 0/absent = unknown |
 | `claim_token` | 128-bit device claim token, hex (#170) — **omitted** until the device is commissioned |
-| `lrw_state` (`lrw_state_name`) | Current LoRaWAN network state: `idle` / `joining` / `healthy` / `warning` / `reconnect` — **NFC only** (absent from LoRaWAN uplinks) |
+| `lrw_state` (`lrw_state_name`) | Current LoRaWAN network state: `idle` / `joining` / `healthy` / `warning` / `reconnect` / `disabled` — **NFC only** (absent from LoRaWAN uplinks) |
 | `dev_eui` | 8-byte DevEUI, hex — **NFC only** (never sent over LoRaWAN); omitted when unset |
+| `device_status` (`device_status_flags`) | Aggregated device status (uint32 bitmask) — active-alarm categories + health/degradation; 0/absent = all OK |
 
 The **`reset_cause`** field (proto field 11) carries the hardware reset-cause bitmask read once at boot via `hwinfo_get_reset_cause()`, so a watchdog/brownout reset is visible in the field instead of being silent. On the STM32WLE5 the bits that can appear are `pin` (0x01), `software` (0x02), `brownout` (0x04), `power-on`/POR (0x08), `watchdog` (0x10), `security` (0x40) and `low-power-wake` (0x80); several can be set at once (a cold power-up typically asserts power-on + pin + brownout). `ats device info` decodes the mask to names, e.g. `Reset cause: 0x00000010 (watchdog)`.
 
-The **`lrw_state`** field (proto field 12) mirrors the firmware's LoRaWAN state machine (`app_lrw_state`): `idle` (not joined), `joining`, `healthy` (joined, link OK), `warning` (link check failing) and `reconnect` (rejoining with backoff). Like `dev_eui` it is emitted **over the NFC channel only** and is absent from LoRaWAN uplinks — the link state is redundant on a frame the network just received, and the on-join autonomous `get_info` (which goes out over LoRaWAN) therefore omits it. Over NFC it is an `optional` field, so even the `idle` (zero) state is transmitted explicitly; when the field is absent (any LoRaWAN uplink) the decoder leaves `lrw_state`/`lrw_state_name` `undefined` rather than defaulting to `idle`.
+The **`lrw_state`** field (proto field 12) mirrors the firmware's LoRaWAN state machine (`app_lrw_state`): `idle` (not joined), `joining`, `healthy` (joined, link OK), `warning` (link check failing), `reconnect` (rejoining with backoff) and `disabled` (DevEUI all-zero, radio-silent — #98). Like `dev_eui` it is emitted **over the NFC channel only** and is absent from LoRaWAN uplinks — the link state is redundant on a frame the network just received, and the on-join autonomous `get_info` (which goes out over LoRaWAN) therefore omits it. Over NFC it is an `optional` field, so even the `idle` (zero) state is transmitted explicitly; when the field is absent (any LoRaWAN uplink) the decoder leaves `lrw_state`/`lrw_state_name` `undefined` rather than defaulting to `idle`.
 
 The **`dev_eui`** field (proto field 13) is the 8-byte LoRaWAN DevEUI. It is emitted **only over the encrypted NFC channel** — a LoRaWAN uplink would leak it (the fPort-85 payload is plain protobuf) and the network server already knows it from the device context. It is also omitted when the DevEUI is still all-zero (unset).
 
-The same message is returned on demand by the `get_info` command (over LoRaWAN **and** NFC), so a backend can read the claim token over either channel. **`lrw_state` and `dev_eui` are the exceptions**: they appear in the `get_info` reply over NFC only, giving a clean split — a LoRaWAN Info carries what the network needs (firmware / serial / uptime / battery / reset-cause / clock / claim token), while the NFC Info adds the commissioning view (link state + DevEUI).
+The **`device_status`** field (proto field 14) is a uint32 bitmask aggregating the device's global state, so a backend gets a one-glance health/alarm summary without polling individual subsystems. The low bits are **active-alarm categories** (derived read-only from the alarm latches — they never trigger an uplink), the high bits are **health/degradation**. proto3 omits a zero, so an empty field means "all OK / nothing active". `ats device info` decodes it to names, e.g. `Device status: 0x00000003 (alarm-any, alarm-threshold)`.
+
+| Bit | Name | Meaning |
+|---|---|---|
+| 0 | `alarm_any` | any alarm currently latched active |
+| 1 | `alarm_threshold` | an analog-threshold rule is active |
+| 2 | `alarm_state` | a discrete-state rule is active |
+| 3 | `alarm_rate` | a counter-rate rule is active |
+| 4 | `alarm_no_data` | the no-data watchdog is latched (a sensor stopped reporting) |
+| 5 | `alarm_low_battery` | the low-battery watchdog is latched (#210) |
+| 8 | `nfc_down` | NFC (ST25DV) init failed — running degraded (#88) |
+| 9 | `history_down` | history flash mount failed |
+| 10 | `i2c_wedged` | I2C bus currently wedged (last sweep all-fail) |
+| 11 | `time_unsynced` | RTC not synced (no wall-clock) |
+| 12 | `lrw_disabled` | LoRaWAN radio-silent (DevEUI all-zero, #98) |
+
+The raw LoRaWAN link state is **not** duplicated here — it has its own `lrw_state` field; only the derived `lrw_disabled` bit is mirrored into the status word.
+
+The same message is returned on demand by the `get_info` command (over LoRaWAN **and** NFC), so a backend can read the claim token and `device_status` over either channel. **`lrw_state` and `dev_eui` are the exceptions**: they appear in the `get_info` reply over NFC only, giving a clean split — a LoRaWAN Info carries what the network needs (firmware / serial / uptime / battery / reset-cause / clock / claim token / device status), while the NFC Info adds the commissioning view (link state + DevEUI).
 
 ### Claim token (#170)
 
