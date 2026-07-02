@@ -13,20 +13,27 @@
 
 #include "src/app_config.pb.h"
 
+#include "app_cmd.h" /* enum app_cmd_transport (per-field write-transport gating, M-3) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-bool app_config_ingest(const AppConfigMessage *message);
-
 /* Apply LoRaWAN / Application config fields into the staging config (app_config()).
  * Valid fields are written; an invalid one is skipped and (if fault_field is
  * non-NULL) its proto field tag is recorded in *fault_field (first offender).
- * Returns 0 if all present fields were valid, -EINVAL otherwise. */
-int app_config_apply_lorawan(const AppConfigMessage_Lorawan *src, uint32_t *fault_field);
-int app_config_apply_application(const AppConfigMessage_Application *src, uint32_t *fault_field);
-int app_config_apply_sensors(const AppConfigMessage_Sensors *src, uint32_t *fault_field);
-int app_config_apply_alarms(const AppConfigMessage_Alarms *src, uint32_t *fault_field);
+ * `tp` is the transport the SetParam arrived on: a field whose `writable` list
+ * excludes `tp` is rejected (M-3). Returns 0 if all present fields were valid and
+ * writable on `tp`; -EACCES if a field was not writable over `tp`; -EINVAL on an
+ * invalid value (first offender wins). */
+int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_Lorawan *src,
+			     uint32_t *fault_field);
+int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessage_Application *src,
+				 uint32_t *fault_field);
+int app_config_apply_sensors(enum app_cmd_transport tp, const AppConfigMessage_Sensors *src,
+			     uint32_t *fault_field);
+int app_config_apply_alarms(enum app_cmd_transport tp, const AppConfigMessage_Alarms *src,
+			    uint32_t *fault_field);
 
 /* Populate dst with only the requested fields (by proto field tag in ids[0..n))
  * from the staging config, setting their has_* flags. Secret keys are not dumped. */

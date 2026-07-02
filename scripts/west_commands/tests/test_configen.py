@@ -124,6 +124,10 @@ def test_normalize_access_derives_internal_flags():
         # packed slot: no shell entry, air read/write only
         {"name": "alarm_0", "proto_group": "alarms", "type": "bytes",
          "readable": ["nfc", "lrw"], "writable": ["nfc", "lrw"]},
+        # lorawan provisioning field: readable everywhere, write blocked over lrw
+        # (writable:[shell,nfc]) -> no_write_lrw only (M-3)
+        {"name": "lrw_region", "proto_group": "lorawan", "type": "int",
+         "writable": ["shell", "nfc"]},
         # plain param: lists omitted -> all transports, normal flags
         {"name": "interval_report", "proto_group": "application", "type": "int"},
     ]}
@@ -147,6 +151,14 @@ def test_normalize_access_derives_internal_flags():
     assert by["interval_report"]["dump"] is True
     assert "no_shell" not in by["interval_report"]
 
+    # M-3 per-transport write flags derived from `writable`:
+    assert by["claim_token"]["no_write_lrw"] is True   # writable:[shell]
+    assert by["claim_token"]["no_write_nfc"] is True
+    assert by["lrw_region"]["no_write_lrw"] is True     # writable:[shell,nfc]
+    assert "no_write_nfc" not in by["lrw_region"]       # nfc still writable
+    assert "no_write_lrw" not in by["interval_report"]  # writable everywhere
+    assert "no_write_nfc" not in by["interval_report"]
+
 
 def test_normalize_access_rejects_bad_transport():
     cfg = {"parameters": [{"name": "x", "proto_group": "root", "type": "bool",
@@ -159,8 +171,11 @@ def test_build_proto_model_structure():
     model = configen.build_proto_model(_load_config())
     assert model["message"] == "AppConfigMessage"
     root = {f["name"]: f["id"] for f in model["root_fields"]}
-    assert root["factory"] == 1
-    assert root["secret_key"] == 2
+    # #250 Part B: the off-wire root fields (factory/secret_key/serial_number/
+    # nonce_counter/claim_token) are dropped from the proto and their ids reserved;
+    # only the 4 submessage containers remain in the root message.
+    assert "factory" not in root and "secret_key" not in root
+    assert model["root_reserved"] == [1, 2, 3, 4, 9]
     assert root["lorawan"] == 5 and root["application"] == 6
     subs = {s["name"]: s for s in model["submessages"]}
     assert subs["Lorawan"]["fields"][0]["name"] == "region"

@@ -194,19 +194,6 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 {
 	const Command_SetParam *sp = &cmd->body.set_param;
 
-	/* Access model (H-3): the whole lorawan provisioning/identity group is
-	 * writable:[shell, nfc] only (see app_config.yml) — never over a LoRaWAN
-	 * downlink, otherwise the LNS could overwrite the root keys / DevEUI and
-	 * hijack or brick the device. Reject a SetParam carrying it over LRW; the
-	 * other groups (application/sensors/alarms) stay remotely writable.
-	 * NOTE: configen does not yet emit per-field write-transport gating, so this
-	 * is enforced by hand at the group level; full codegen enforcement is the
-	 * follow-up (audit top lever #4). */
-	if (tp == APP_CMD_TRANSPORT_LRW && sp->has_lorawan) {
-		make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
-		return;
-	}
-
 	uint32_t fault = 0;
 	/* Group that produced the fault, folded into fault_field as group*100 + tag so
 	 * the host can disambiguate the tag across groups (#196): 1=lorawan
@@ -222,25 +209,34 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	struct app_config snapshot = *app_config();
 
 	if (sp->has_lorawan) {
-		rc = app_config_apply_lorawan(&sp->lorawan, &fault);
+		rc = app_config_apply_lorawan(tp, &sp->lorawan, &fault);
 		fault_group = 1;
 	}
 	if (rc == 0 && sp->has_application) {
-		rc = app_config_apply_application(&sp->application, &fault);
+		rc = app_config_apply_application(tp, &sp->application, &fault);
 		fault_group = 2;
 	}
 	if (rc == 0 && sp->has_sensors) {
-		rc = app_config_apply_sensors(&sp->sensors, &fault);
+		rc = app_config_apply_sensors(tp, &sp->sensors, &fault);
 		fault_group = 3;
 	}
 	if (rc == 0 && sp->has_alarms) {
-		rc = app_config_apply_alarms(&sp->alarms, &fault);
+		rc = app_config_apply_alarms(tp, &sp->alarms, &fault);
 		fault_group = 4;
 	}
 
 	if (rc) {
 		*app_config() = snapshot; /* roll back the whole batch */
-		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid value");
+		/* M-3: a field not writable over this transport returns -EACCES → report
+		 * NOT_WRITABLE (the field exists but this transport may not set it — e.g.
+		 * the lorawan provisioning/identity group over a LoRaWAN downlink); a bad
+		 * value returns -EINVAL → OUT_OF_RANGE. Either way fault_field pinpoints
+		 * the offending field (group*100 + tag). */
+		if (rc == -EACCES) {
+			make_error(resp, Response_Error_Code_NOT_WRITABLE, "transport not allowed");
+		} else {
+			make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid value");
+		}
 		resp->body.error.fault_field = fault_group * 100 + fault;
 	} else {
 		/* Alarm rules staged into the config slots only take effect once the

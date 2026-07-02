@@ -32,6 +32,12 @@ Parameter options:
 - format: display format (hex/dec for integers, printf format for uint)
 - write_once: once the field holds a non-zero value the shell setter refuses to
   overwrite it (commission-once identity fields, e.g. claim_token)
+- proto_field: whether the parameter is a field in the generated config protobuf
+  (AppConfigMessage). Default true. `proto_field: false` keeps it in the C struct
+  + settings (still shell-managed) but emits NO proto field and reserves its
+  proto_id, so it can never be read/written via SetParam/GetParam/GetConfig — for
+  identity fields whose only channels are the shell and hand-written messages
+  (Info / inf), not the config wire.
 
 Access control (readable / writable):
   Each parameter declares who may read and who may write it, as a subset of the
@@ -439,6 +445,15 @@ def normalize_access(config):
         if ("nfc" in r) and ("lrw" not in r):
             p["dump_nfc_only"] = True
 
+        # Per-transport WRITE gating (M-3): the generated apply_<group>() rejects a
+        # SetParam that tries to write this field over a transport not in `writable`.
+        # shell is not represented — shell writes never go through the OTA apply_*
+        # path (no_shell/readonly already govern shell). Mirrors dump/dump_nfc_only.
+        if "lrw" not in w:
+            p["no_write_lrw"] = True
+        if "nfc" not in w:
+            p["no_write_nfc"] = True
+
         # Root byte blobs (secret_key / claim_token) stay off the wire: emitted as
         # a nanopb callback in the proto, never in SetParam/ConfigDump. The air
         # read for these identity fields (claim_token) goes via the hand-written
@@ -558,18 +573,28 @@ def build_proto_model(config):
         return {"name": name, "ptype": ptype, "id": fid}
 
     # Root message: extra_fields(root) + root-group params + submessage
-    # containers, all in the root namespace, ordered by field number.
+    # containers, all in the root namespace, ordered by field number. A field with
+    # `proto_field: false` (#250 Part B) stays in the C struct/settings but is kept off the
+    # proto — its id goes to the message `reserved` list so it is never re-used.
     root_fields = []
+    root_reserved = []
     for ef in proto.get("extra_fields", []):
         if ef.get("proto_group", "root") == "root":
-            root_fields.append(field(ef["name"], ef["type"], ef["proto_id"]))
+            if ef.get("proto_field", True):
+                root_fields.append(field(ef["name"], ef["type"], ef["proto_id"]))
+            else:
+                root_reserved.append(ef["proto_id"])
     for p in by_group.get("root", []):
+        if not p.get("proto_field", True):
+            root_reserved.append(p["proto_id"])
+            continue
         root_fields.append(field(_proto_field_name(p, gmap["root"]),
                                   _proto_type(p, enum_proto_name), p["proto_id"]))
     for g in proto["groups"]:
         if g["key"] != "root":
             root_fields.append(field(g["field"], g["message"], g["proto_id"]))
     root_fields.sort(key=lambda f: f["id"])
+    root_reserved.sort()
 
     submessages = []
     for g in proto["groups"]:
@@ -595,7 +620,7 @@ def build_proto_model(config):
         })
 
     return {"message": proto["message"], "root_fields": root_fields,
-            "submessages": submessages}
+            "root_reserved": root_reserved, "submessages": submessages}
 
 
 def build_ingest_model(config):
@@ -636,6 +661,8 @@ def build_ingest_model(config):
                 "dump_nfc_only": bool(p.get("dump_nfc_only")),
                 "callback": bool(p.get("proto_callback")),
                 "omit_if_zero": bool(p.get("dump_omit_if_zero")),
+                "no_write_lrw": bool(p.get("no_write_lrw")),
+                "no_write_nfc": bool(p.get("no_write_nfc")),
             }
             if t == "bool":
                 e["kind"] = "bool"
@@ -668,6 +695,7 @@ def build_ingest_model(config):
             "fill_fn": f"app_config_fill_{g['key']}",
             "slot_empty_fn": f"app_config_{g['key']}_slot_empty",
             "has_omit_if_zero": any(e["omit_if_zero"] for e in params),
+            "any_write_gated": any(e["no_write_lrw"] or e["no_write_nfc"] for e in params),
             "params": params,
         })
     has_omit_if_zero = any(g["has_omit_if_zero"] for g in groups)

@@ -52,7 +52,10 @@ enums:
 proto:
   message: AppConfigMessage
   extra_fields:
-    - {name: factory, type: bool, proto_id: 1, proto_group: root}
+    # #250 Part B: `factory` was the config-record factory-reset flag, read only by
+    # the now-removed app_config_ingest(). Kept here as `proto_field: false` so configen
+    # reserves proto id 1 in AppConfigMessage (never re-used) but emits no field.
+    - {name: factory, type: bool, proto_id: 1, proto_group: root, proto_field: false}
   groups:
     - key: root
     - key: lorawan
@@ -108,9 +111,21 @@ commands:
     - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: action, action: ENTER_CALIBRATION, response: ack, transports: [lrw, nfc]}
     - {name: sample,         proto_id: 21, body: Sample,        kind: handler, response: sample, transports: [lrw, nfc]}
 parameters:
+  # Root identity fields (secret_key / serial_number / nonce_counter / claim_token)
+  # are OFF the config wire (`proto_field: false`, #250 Part B): configen keeps them in the C
+  # struct + settings and reserves their proto ids, but they are NOT fields in
+  # AppConfigMessage — so they can never be read or written via SetParam / GetParam /
+  # GetConfig. Their `readable`/`writable` lists therefore only govern the `config`
+  # shell command, hence both `[shell]`. Their real air exposure is a SEPARATE,
+  # hand-written channel that does NOT consult these lists: serial + nonce high-water
+  # are published in the plaintext `hio.stck:inf` record, and serial + claim_token in
+  # the GetInfo `Info` message (over nfc + lrw). Writes come from the shell (`config
+  # <name>`), firmware provisioning, or a full NVS erase — `preserve_on_reset` keeps
+  # them across a factory_reset.
   - name: secret_key
     proto_group: root
     proto_id: 2
+    proto_field: false
     readable: [shell]
     writable: [shell]
     type: bytes
@@ -121,6 +136,9 @@ parameters:
   - name: serial_number
     proto_group: root
     proto_id: 3
+    proto_field: false
+    readable: [shell]
+    writable: [shell]
     type: uint32
     format: "%010u"
     preserve_on_reset: true
@@ -131,24 +149,22 @@ parameters:
   - name: nonce_counter
     proto_group: root
     proto_id: 4
+    proto_field: false
+    readable: [shell]
+    writable: [shell]
     type: uint32
     preserve_on_reset: true
     help: "Get/Set nonce counter (unsigned integer)."
 
-  # Device claim token (#170): 128-bit identity, on the same level as
-  # serial_number. writable:[shell] = written ONCE during commissioning via
-  # `config claim-token` (write_once latch), then immutable. readable everywhere
-  # — its air read goes via the hand-written get_info Info message (root bytes
-  # are kept off the generated config wire automatically). Preserved across
-  # reset, cleared only by a full NVS erase.
   - name: claim_token
     proto_group: root
     proto_id: 9
-    readable: [shell, nfc, lrw]
+    proto_field: false
+    readable: [shell]
     writable: [shell]
     type: bytes
     size: 16
-    write_once: true
+    write_once: true   # written once at commissioning via `config claim-token`, then immutable
     preserve_on_reset: true
     help: "Get/Set device claim token (32 hexadecimal digits); write-once at commissioning."
 
