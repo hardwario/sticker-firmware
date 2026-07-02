@@ -360,12 +360,15 @@ function histRec(tempC, humPct) {
   const t = Math.round(tempC * 100);
   return [t & 0xff, (t >> 8) & 0xff, Math.round(humPct * 2)]; // int16 LE temp, u8 hum
 }
-function buildHistoryFrame(seq, idx, count, t0, present, interval, samples) {
+function buildHistoryFrame(seq, idx, count, t0, present, interval, samples, synced) {
   // proto3 omits a zero field — mirror that for frame_index so the decoder's
   // default-to-0 is exercised (the firmware sends frame 0 with no field 1).
   let hf = idx ? pbTV(1, idx) : [];
   hf = hf.concat(pbTV(2, count)).concat(pbTV(3, t0))
     .concat(pbLD(4, samples)).concat(pbTV(5, present)).concat(pbTV(6, interval));
+  // time_synced (field 7). Omitted when `synced` is undefined so the old-FW
+  // "absent = treat as synced" default is exercised by the other vectors.
+  if (synced !== undefined) hf = hf.concat(pbTV(7, synced ? 1 : 0));
   // 0x01 = APP_PROTO_VERSION prefix (#55); Response.history_frame = field 5.
   return [0x01].concat(pbTV(1, seq)).concat(pbLD(5, hf));
 }
@@ -410,6 +413,30 @@ test("history sentinel values decode to null", () => {
   assert.equal(rec.humidity, null);    // 0xff sentinel
 });
 
+test("history time_synced=false decodes record times as null (L-1/L-3)", () => {
+  const present = 0x03;
+  // t0 is uptime-relative here; the frame flags it unsynced, so times must be null
+  // rather than a bogus ~1970 date — but the sensor values still decode.
+  const f = buildHistoryFrame(7, 0, 1, 1234, present, 900,
+    [].concat(histRec(21.5, 45)).concat(histRec(21.6, 46)), false);
+  const hf = codec.decodeUplink({ bytes: f, fPort: 85 }).data.history_frame;
+  assert.equal(hf.time_synced, false);
+  assert.equal(hf.records.length, 2);
+  assert.equal(hf.records[0].time, null);
+  assert.equal(hf.records[1].time, null);
+  assert.equal(hf.records[0].temperature, 21.5);
+  assert.equal(hf.records[1].humidity, 46);
+});
+
+test("history time_synced=true keeps absolute record times", () => {
+  const present = 0x03;
+  const t0 = 1780000000;
+  const f = buildHistoryFrame(8, 0, 1, t0, present, 900, histRec(21.5, 45), true);
+  const hf = codec.decodeUplink({ bytes: f, fPort: 85 }).data.history_frame;
+  assert.equal(hf.time_synced, true);
+  assert.equal(hf.records[0].time, t0);
+});
+
 // --- Uplink: alarm-detail batch (fPort 3, protobuf AlarmReport) -----------
 // AlarmReport{ base_time(1), total(2), repeated AlarmEvent events(3) };
 // AlarmEvent{ source(1), edge(2), rel_s(4), optional sint32 value(5),
@@ -432,10 +459,12 @@ function alarmEvent(source, quantity, edge, type, rel, value, slot) {
   if (type) e = e.concat(pbTV(9, type));
   return e;
 }
-function buildAlarmReport(base, total, events) {
+function buildAlarmReport(base, total, events, synced) {
   // 0x01 = APP_PROTO_VERSION prefix (#165), then the AlarmReport protobuf.
   let b = [0x01].concat(pbTV(1, base)).concat(pbTV(2, total));
   for (const e of events) b = b.concat(pbLD(3, e));
+  // time_synced (field 4). Omitted when undefined → old-FW "treat as synced".
+  if (synced !== undefined) b = b.concat(pbTV(4, synced ? 1 : 0));
   return b;
 }
 
@@ -467,6 +496,19 @@ test("decodeUplink decodes an fPort-3 alarm batch (threshold + state)", () => {
   assert.equal(d.alarms[1].type, "trigger");
   assert.equal(d.alarms[1].value, 1); // digital level
   assert.equal(d.alarms[1].time, base + 15);
+});
+
+test("fPort-3 batch time_synced=false → per-event time null (L-3/L-4)", () => {
+  // base_time is uptime-relative; the report flags it unsynced, so per-event
+  // times must be null instead of a bogus ~1970 date. Values still decode.
+  const f = buildAlarmReport(120, 1, [
+    alarmEvent(0, 0, 0, 2, 10, 2660, 7), // onboard temp HIGH 26.6 °C
+  ], false);
+  const d = codec.decodeUplink({ bytes: f, fPort: 3 }).data;
+  assert.equal(d.time_synced, false);
+  assert.equal(d.alarms.length, 1);
+  assert.equal(d.alarms[0].time, null);
+  assert.equal(d.alarms[0].value, 26.6);
 });
 
 test("fPort-3 batch: slot humidity deactivate + truncation flag (total > events)", () => {

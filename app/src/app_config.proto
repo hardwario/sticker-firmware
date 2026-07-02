@@ -266,6 +266,11 @@ message Response {
         bytes  samples     = 4;   // records, values only (no per-record time/mask)
         uint32 present     = 5;   // sensor mask shared by every record in the frame
         uint32 interval_s  = 6;   // seconds between records; time(j) = t0_unix + j*interval_s
+        // True when t0_unix is absolute UTC; false when the RTC had not synced at
+        // capture, so t0_unix is only uptime-relative (L-1/L-3). Absent = old FW =
+        // treat as synced. The decoder emits time=null for the whole frame when
+        // this is present and false, instead of bogus ~1970 timestamps.
+        optional bool time_synced = 7;
     }
 
     message Error {
@@ -310,6 +315,11 @@ message AlarmReport {
     uint32 base_time = 1;
     uint32 total     = 2;
     repeated AlarmEvent events = 3;
+    // True when base_time is absolute UTC; false when the window opened before the
+    // RTC synced and could not be re-anchored at send time, so base_time is only
+    // uptime-relative (L-3/L-4). Absent = old FW = treat as synced. The decoder
+    // emits time=null for every event when this is present and false.
+    optional bool time_synced = 4;
 }
 
 message AlarmEvent {

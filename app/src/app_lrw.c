@@ -1232,7 +1232,8 @@ static void m_hist_work_handler(struct k_work *work)
 
 	size_t len;
 	int ret = app_cmd_build_history_frame(m_hist_seq, m_hist_idx, m_hist_count, t0,
-					      m_hist_present, m_hist_interval, samples, slen,
+					      m_hist_present, m_hist_interval,
+					      app_history_base_synced(), samples, slen,
 					      m_hist_tx_buf, sizeof(m_hist_tx_buf), &len);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_cmd_build_history_frame", ret);

@@ -395,7 +395,8 @@ ZTEST(cmd, test_history_frame_full_fits_buffer)
 	memset(samples, 0xAB, sizeof(samples));
 	int ret = app_cmd_build_history_frame(/*seq*/ 200, /*idx*/ 200, /*count*/ 200,
 					      /*t0*/ 1770000000u, /*present*/ 0x7, /*interval*/ 900,
-					      samples, sizeof(samples), out, sizeof(out), &out_len);
+					      /*time_synced*/ true, samples, sizeof(samples), out,
+					      sizeof(out), &out_len);
 	zassert_equal(ret, 0, "full frame did not fit (ret %d)", ret);
 	zassert_true(out_len <= sizeof(out), "out_len %zu overflows", out_len);
 
@@ -404,6 +405,8 @@ ZTEST(cmd, test_history_frame_full_fits_buffer)
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
 	zassert_equal(r.which_body, Response_history_frame_tag, "expected HistoryFrame");
 	zassert_equal(r.body.history_frame.samples.size, 48, "sample count");
+	zassert_true(r.body.history_frame.has_time_synced, "time_synced must be present");
+	zassert_true(r.body.history_frame.time_synced, "time_synced should be true");
 }
 
 /* The capacity helper must be exact: a frame built with `cap` samples fits the
@@ -423,7 +426,8 @@ ZTEST(cmd, test_history_sample_capacity_is_exact)
 
 	/* Exactly `cap` samples must encode within out_cap. */
 	int ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7, 900,
-					      samples, cap, out, sizeof(out), &out_len);
+					      /*time_synced*/ true, samples, cap, out, sizeof(out),
+					      &out_len);
 	zassert_equal(ret, 0, "cap samples did not fit (ret %d)", ret);
 	zassert_true(out_len <= sizeof(out), "out_len %zu > out_cap", out_len);
 

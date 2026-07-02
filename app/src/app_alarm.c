@@ -125,6 +125,7 @@ static struct app_cmd_alarm_event m_batch[ALARM_BATCH_MAX];
 static uint8_t m_batch_count;
 static uint16_t m_window_total;
 static uint32_t m_window_base_unix;
+static bool m_window_base_synced; /* m_window_base_unix is absolute UTC, not uptime */
 static int64_t m_window_start_ms;
 static bool m_window_open;
 static struct k_work_delayable m_alarm_batch_work;
@@ -163,14 +164,19 @@ static void alarm_lrw_send(void)
 #endif
 }
 
-static uint32_t now_unix_or_uptime(void)
+/* Current time in seconds. Returns absolute UTC when the RTC has synced (and sets
+ * *synced), else uptime-seconds (*synced=false) so alarm times stay monotonic
+ * before the clock is known. */
+static uint32_t now_seconds(bool *synced)
 {
 #ifdef APP_ALARM_HAVE_CLOCK
 	uint32_t u;
 	if (app_clock_get_unix(&u) == 0) {
+		*synced = true;
 		return u;
 	}
 #endif
+	*synced = false;
 	return (uint32_t)(k_uptime_get() / 1000);
 }
 
@@ -190,14 +196,28 @@ static void alarm_batch_flush(void)
 	}
 #endif
 
+	/* L-4: if the window opened before the RTC synced but the clock is known
+	 * now, re-anchor base_time to absolute UTC (rel_s offsets are unaffected).
+	 * Mirrors the "fresh uptime" fixup in app_history_on_clock_sync(). */
+	bool synced = m_window_base_synced;
+#ifdef APP_ALARM_HAVE_CLOCK
+	if (!synced) {
+		uint32_t now_u;
+		if (app_clock_get_unix(&now_u) == 0) {
+			m_window_base_unix += now_u - (uint32_t)(k_uptime_get() / 1000);
+			synced = true;
+		}
+	}
+#endif
+
 	uint8_t buf[ALARM_FRAME_MAX];
 	size_t len = 0;
 	uint8_t n = m_batch_count;
 	int ret = -EMSGSIZE;
 
 	while (n > 0) {
-		ret = app_cmd_build_alarm_report(m_window_base_unix, m_window_total, m_batch, n,
-						 buf, cap, &len);
+		ret = app_cmd_build_alarm_report(m_window_base_unix, m_window_total, synced,
+						 m_batch, n, buf, cap, &len);
 		if (ret == 0) {
 			break;
 		}
@@ -240,7 +260,7 @@ static void alarm_queue(struct app_cmd_alarm_event ev)
 	k_mutex_lock(&m_lock, K_FOREVER);
 
 	if (limit <= 0) {
-		m_window_base_unix = now_unix_or_uptime();
+		m_window_base_unix = now_seconds(&m_window_base_synced);
 		m_window_total = 1;
 		m_batch_count = 1;
 		m_batch[0] = ev;
@@ -252,7 +272,7 @@ static void alarm_queue(struct app_cmd_alarm_event ev)
 	if (!m_window_open) {
 		m_window_open = true;
 		m_window_start_ms = now;
-		m_window_base_unix = now_unix_or_uptime();
+		m_window_base_unix = now_seconds(&m_window_base_synced);
 		m_window_total = 0;
 		m_batch_count = 0;
 		k_work_schedule(&m_alarm_batch_work, K_SECONDS(limit));
