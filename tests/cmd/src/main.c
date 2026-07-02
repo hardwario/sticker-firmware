@@ -73,17 +73,51 @@ ZTEST(cmd, test_set_param_applies_and_acks)
 	Response r;
 
 	reset_cfg();
-	/* seq1 set_param{ lorawan.adr=true, application{interval_report=120},
-	 *                 sensors{cap_barometer=true} } (contiguous #166 ids) */
-	enum app_cmd_action a = handle("0801120c0a0220011202187822023001", &r);
+	/* seq1 set_param{ application{interval_report=120}, sensors{cap_barometer=true} }
+	 * over LRW — the non-identity groups stay remotely writable. The lorawan group is
+	 * excluded here because it is LRW-write-blocked (H-3); see
+	 * test_set_param_lorawan_rejected_over_lrw. */
+	enum app_cmd_action a = handle("080112081202187822023001", &r);
 
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action expected");
 	zassert_equal(r.which_body, Response_ack_tag, "expected Ack, which=%d", r.which_body);
 	zassert_equal(r.seq, 1, "seq");
-	/* config applied through the real ingest path (4 submessages -> flat struct) */
-	zassert_true(g_app_config.lrw_adr, "adr not applied");
+	/* config applied through the real ingest path (submessages -> flat struct) */
 	zassert_equal(g_app_config.interval_report, 120, "interval_report not applied");
 	zassert_true(g_app_config.cap_barometer, "cap_barometer not applied");
+}
+
+/* H-3: a SetParam carrying the lorawan provisioning/identity group is rejected over
+ * a LoRaWAN downlink (the network server must never be able to rewrite the DevEUI /
+ * root keys / DevAddr), but is accepted over NFC. */
+ZTEST(cmd, test_set_param_lorawan_rejected_over_lrw)
+{
+	Response r;
+
+	/* seq1 set_param{ lorawan.adr=true, application{interval_report=120},
+	 *                 sensors{cap_barometer=true} } */
+	const char *hex = "0801120c0a0220011202187822023001";
+
+	reset_cfg();
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_LRW, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action expected");
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+	/* the whole message is rejected before ingest — nothing is applied */
+	zassert_false(g_app_config.lrw_adr, "lorawan applied over LRW despite guard");
+	zassert_not_equal(g_app_config.interval_report, 120,
+			  "message applied over LRW despite guard");
+
+	/* same payload over NFC is accepted and applies every group */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_NFC, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action expected");
+	zassert_equal(r.which_body, Response_ack_tag, "expected Ack over NFC, which=%d",
+		      r.which_body);
+	zassert_true(g_app_config.lrw_adr, "lorawan.adr not applied over NFC");
+	zassert_equal(g_app_config.interval_report, 120, "interval_report not applied over NFC");
+	zassert_true(g_app_config.cap_barometer, "cap_barometer not applied over NFC");
 }
 
 ZTEST(cmd, test_set_param_out_of_range)
