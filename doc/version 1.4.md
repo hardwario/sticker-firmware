@@ -144,6 +144,7 @@ message AlarmReport {
     uint32 base_time = 1;            // Unix time the events are relative to (uptime-s until the clock syncs)
     uint32 total     = 2;            // every alarm in the window (may exceed events[] if trimmed)
     repeated AlarmEvent events = 3;  // up to 8, further trimmed to the data-rate budget
+    optional bool time_synced = 4;   // true when base_time is absolute UTC (see below)
 }
 message AlarmEvent {
     Source source = 1;               // which sensor
@@ -163,6 +164,7 @@ Each event is described by **two orthogonal enums** (`type` + `edge`) plus its `
 ### Decoded fields (`ttn.js`)
 
 - `base_time` — Unix timestamp the events are relative to.
+- `time_synced` — `true` when `base_time` is absolute UTC. It is `false` when the window opened before the RTC synced and could not be re-anchored at send time; the decoder then emits `time: null` for every event instead of a bogus ~1970 date (L-3/L-4). Absent on the wire (older firmware) is treated as `true`.
 - `total` — total alarms that occurred in the window. `truncated` is `true` when `total` exceeds the events actually carried (some were dropped to fit the data rate).
 - `alarms[]` — each with:
   - `slot` — the alarm rule slot index that fired (`0` when omitted on the wire); lets a host map the edge back to the exact rule, including which level of a multi-level alarm
@@ -171,7 +173,7 @@ Each event is described by **two orthogonal enums** (`type` + `edge`) plus its `
   - `event` — `activate` / `deactivate`
   - `type` — **what** fired: `high` / `low` for threshold rules (which bound was crossed; the low-battery watchdog also reports `low`), `trigger` for discrete rules (state/count/PIR/accel), `no_data` for the no-data watchdog. The **deactivate** edge keeps the `type` that was raised on activation (e.g. a temperature that fell back inside the band reports `type:"high", event:"deactivate"`).
   - `value` — the current reading at the edge (temperature/humidity in °C/%RH, pressure in hPa, voltage in V); `null` for discrete sources. *(Threshold and hysteresis are not carried — they are the device's own configuration.)*
-  - `time` — `base_time + rel_s` (per-event Unix time)
+  - `time` — `base_time + rel_s` (per-event Unix time), or `null` when `time_synced` is `false`
 
 ### When the messages are sent (fPort 2 vs fPort 3)
 
@@ -299,7 +301,7 @@ New `history` shell command:
 
 Recordable channels (the `history-sensors` bitmask, one bit each): `temperature`, `humidity`, the per-slot 1-Wire channels `s1-temp`/`s1-hum` … `s4-temp`/`s4-hum` (ROM-bound slots, mirror the telemetry slot model; a Dallas slot has no humidity), `hall-left`, `hall-right`, `input-a`, `input-b`, `motion`. The mask is **32-bit** (room for future channels). A Dallas slot's humidity, or any channel whose capability is off, is simply not recorded.
 
-Replay over LoRaWAN with the `req_history` downlink command (§1): the device streams the matching records back as `history_frame` messages on fPort 85. Each frame carries a shared `present` mask + `interval_s` once; samples are fixed-size values-only records, time(j) = `t0_unix + j*interval_s`. The replay splits across as many frames as the data rate needs and terminates when the window is exhausted (a data-rate change mid-replay only changes records-per-frame; the consumer concatenates by `frame_index`).
+Replay over LoRaWAN with the `req_history` downlink command (§1): the device streams the matching records back as `history_frame` messages on fPort 85. Each frame carries a shared `present` mask + `interval_s` once; samples are fixed-size values-only records, time(j) = `t0_unix + j*interval_s`. The replay splits across as many frames as the data rate needs and terminates when the window is exhausted (a data-rate change mid-replay only changes records-per-frame; the consumer concatenates by `frame_index`). Each frame also carries **`time_synced`** (proto field 7): when `false`, the buffer was captured before the RTC synced so `t0_unix` is only uptime-relative — the decoder then emits `time: null` for that frame's records instead of a bogus ~1970 date (L-1/L-3). Absent (older firmware) is treated as `true`.
 
 > **Note on `interval-report`:** the LoRaWAN stack persists frame counters to NVS on every uplink; at the 60 s minimum interval with multi-frame reports the storage partition reaches its ~10 k erase budget in roughly 1–2 years. The default (900 s) is decades. History flash wear is fine even at 60 s.
 >
