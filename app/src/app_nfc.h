@@ -16,20 +16,17 @@
 extern "C" {
 #endif
 
-enum app_nfc_action {
-	APP_NFC_ACTION_NONE = 0,
-	APP_NFC_ACTION_SAVE = 1,
-	APP_NFC_ACTION_RESET = 2,
-};
-
 int app_nfc_init(void);
 
-/* Full check: always reads the tag. Use at boot and for on-demand checks. */
-int app_nfc_check(enum app_nfc_action *action);
+/* Full check: always reads the tag. Use at boot and for on-demand checks. A
+ * staged command (hio.stck:cmd) is run through app_cmd_handle(); its deferred
+ * action is taken separately via app_nfc_take_cmd_action() — offline/boot-staged
+ * provisioning is unified on the encrypted Command/SetParam path (#250). */
+int app_nfc_check(void);
 
-/* Reads the tag and processes any pending command/config, restoring the info
- * record otherwise. Run from the poll thread after app_nfc_wait_event(). */
-int app_nfc_poll(enum app_nfc_action *action);
+/* Reads the tag and processes any pending command, restoring the info record
+ * otherwise. Run from the poll thread after app_nfc_wait_event(). */
+int app_nfc_poll(void);
 
 /* Block until the ST25DV GPO line signals RF activity (the phone touched the
  * tag) or `fallback_ms` elapses. Lets the poll thread sleep instead of busy

@@ -126,12 +126,17 @@ static void nfc_run_deferred_cmd_actions(void)
 	while (cmd_action != APP_CMD_ACTION_NONE) {
 		switch (cmd_action) {
 		case APP_CMD_ACTION_SETTINGS_SAVE:
+			/* #250: yellow NFC carousel as operator feedback that an
+			 * (offline-)staged config was applied — was previously only
+			 * shown for the retired hio.stck:cfg record. */
+			play_carousel_nfc();
 			app_settings_save(true);
 			break;
 		case APP_CMD_ACTION_REBOOT:
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
 		case APP_CMD_ACTION_FACTORY_RESET:
+			play_carousel_nfc();
 			app_settings_reset();
 			break;
 		case APP_CMD_ACTION_ENTER_CALIBRATION:
@@ -139,6 +144,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			 * calibration mode (app_calibration_init() clears it).
 			 * Write the staging config (settings_save persists that,
 			 * not the boot-time g_app_config copy). */
+			play_carousel_nfc();
 			app_config()->calibration = true;
 			app_settings_save(true);
 			break;
@@ -213,29 +219,16 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		enum app_nfc_action action;
-		int ret = app_nfc_poll(&action);
+		int ret = app_nfc_poll();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_nfc_poll", ret);
 		}
 
-		if (action == APP_NFC_ACTION_SAVE) {
-			play_carousel_nfc();
-			ret = app_settings_save(true);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
-			}
-		} else if (action == APP_NFC_ACTION_RESET) {
-			play_carousel_nfc();
-			ret = app_settings_reset();
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_settings_reset", ret);
-			}
-		}
-
-		/* Deferred action from an NFC command (reboot/save/factory-reset/...).
-		 * Gated: only runs once the phone has read the response (see
-		 * nfc_run_deferred_cmd_actions / app_nfc_take_cmd_action). */
+		/* Deferred action from an NFC command (reboot/save/factory-reset/...) —
+		 * the unified provisioning path (#250). Gated: only runs once the phone has
+		 * read the response (see nfc_run_deferred_cmd_actions / app_nfc_take_cmd_action).
+		 * play_carousel_nfc() is driven from inside the SETTINGS_SAVE/RESET cases if
+		 * needed; here we just release the staged action. */
 		nfc_run_deferred_cmd_actions();
 	}
 }
@@ -363,34 +356,32 @@ int main(void)
 	} else {
 		m_nfc_ready = true;
 
-		enum app_nfc_action action;
-
-		/* A stale/replay config left on the tag makes app_nfc_check() fail
+		/* A stale/replay command left on the tag makes app_nfc_check() fail
 		 * (anti-replay) on every boot. Do NOT die() here — that would brick the
 		 * device into a reboot loop. Log and continue, like the periodic check
 		 * in the main loop does. */
-		ret = app_nfc_check(&action);
+		ret = app_nfc_check();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
 		}
 
-		if (action == APP_NFC_ACTION_SAVE) {
-			play_carousel_nfc();
-
-			ret = app_settings_save(true);
+		/* #250: offline/boot-staged provisioning is unified on the encrypted
+		 * hio.stck:cmd record (SetParam save=true / FactoryReset), applied through
+		 * the validated app_cmd_handle() path in app_nfc_check() above. The phone
+		 * that wrote the record is gone (the device was off), so there is nobody to
+		 * ack the response — restore the info record now, which opens the deferred-
+		 * action gate (#164), and run the staged action synchronously *here*, before
+		 * the LoRaWAN stack starts, so staged keys are in place before the first
+		 * join (preserves the #147 property the retired hio.stck:cfg path had).
+		 * A SETTINGS_SAVE/FACTORY_RESET reboots; the record is then replay-rejected
+		 * on the next boot, so this runs at most once. */
+		if (app_nfc_info_restore_pending()) {
+			ret = app_nfc_restore_info();
 			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_settings_save", ret);
-				die();
-			}
-		} else if (action == APP_NFC_ACTION_RESET) {
-			play_carousel_nfc();
-
-			ret = app_settings_reset();
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_settings_reset", ret);
-				die();
+				LOG_ERR_CALL_FAILED_INT("app_nfc_restore_info", ret);
 			}
 		}
+		nfc_run_deferred_cmd_actions();
 	}
 
 #if defined(CONFIG_WATCHDOG)
