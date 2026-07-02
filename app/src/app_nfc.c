@@ -147,7 +147,7 @@ static const char *cmd_action_str(enum app_cmd_action a)
  * ("hio.stck:<kind>") instead of full MIME media-types save ST25DV user memory
  * (512 B total) — leaving more room for the encrypted config payload — while
  * staying typed/filterable: Web NFC exposes them as record.recordType. */
-#define NDEF_TNF_EXT        0x04
+#define NDEF_TNF_EXT 0x04
 
 /* Plaintext info record the firmware keeps on the tag so a phone learns the
  * sticker identity and schema version the moment it taps, without decrypting
@@ -1121,7 +1121,8 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 	 * "hio.stck:cfg") has been retired — offline/boot-staged provisioning now goes
 	 * through the encrypted Command/SetParam record handled above, so any other
 	 * record type is just unrecognized data. */
-	NFC_REPORT("NFC read: unrecognized record type (%u B) -> ignored", record_info->payload_len);
+	NFC_REPORT("NFC read: unrecognized record type (%u B) -> ignored",
+		   record_info->payload_len);
 	return 0;
 }
 
