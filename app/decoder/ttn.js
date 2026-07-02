@@ -498,7 +498,7 @@ function decodeTelemetry(bytes) {
     var f;
     switch (field) {
       // system
-      case 1:  d.voltage = v.value / 50; break;
+      case 1:  d.voltage = (v.value === 0) ? null : v.value / 50; break; // 0 = pre-sample sentinel (L-51)
       case 2:  d.boot = (v.value & (1 << 0)) !== 0; break;     // system_flags (always sent)
       // internal (SHT4x) — sentinel → null (sensor enabled but no valid sample)
       case 3:  { var _t = _pbZigzag(v.value); d.temperature = (_t === _TM_S32_NA) ? null : _t / 100; break; }

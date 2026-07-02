@@ -878,6 +878,16 @@ static int mp_comm_end(const struct device *bus, int res)
 error:                                                                                             \
 	return mp_comm_end(bus, res);
 
+/* L-25: application-level plausibility gate, mirroring the onboard SHT4x (#202)
+ * and DS18B20 (#180). A stuck machine-probe part can return a finite but
+ * out-of-range value that would otherwise feed a false threshold alarm; reject
+ * it to NaN instead, so the reading reads as absent (→ no_data watchdog) rather
+ * than plausibly-wrong. */
+#define MP_TEMP_MIN (-45.0f)
+#define MP_TEMP_MAX 130.0f
+#define MP_HUM_MIN  0.0f
+#define MP_HUM_MAX  100.0f
+
 int app_machine_probe_read_thermometer(int index, uint64_t *serial_number, float *temperature)
 {
 	if (serial_number) {
@@ -923,6 +933,11 @@ int app_machine_probe_read_thermometer(int index, uint64_t *serial_number, float
 
 	if (!res && temperature) {
 		LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(*temperature));
+		if (*temperature < MP_TEMP_MIN || *temperature > MP_TEMP_MAX) {
+			LOG_WRN("Implausible machine-probe temperature %s%d.%02d C rejected (L-25)",
+				APP_FP2(*temperature));
+			*temperature = NAN;
+		}
 	}
 
 	COMM_EPILOGUE
@@ -999,10 +1014,20 @@ int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float 
 
 	if (!res && temperature) {
 		LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(*temperature));
+		if (*temperature < MP_TEMP_MIN || *temperature > MP_TEMP_MAX) {
+			LOG_WRN("Implausible machine-probe temperature %s%d.%02d C rejected (L-25)",
+				APP_FP2(*temperature));
+			*temperature = NAN;
+		}
 	}
 
 	if (!res && humidity) {
 		LOG_DBG("Humidity: %s%d.%01d %%", APP_FP1(*humidity));
+		if (*humidity < MP_HUM_MIN || *humidity > MP_HUM_MAX) {
+			LOG_WRN("Implausible machine-probe humidity %s%d.%01d %% rejected (L-25)",
+				APP_FP1(*humidity));
+			*humidity = NAN;
+		}
 	}
 
 	COMM_EPILOGUE

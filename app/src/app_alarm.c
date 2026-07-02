@@ -380,6 +380,13 @@ static bool read_threshold_value(uint8_t source, uint8_t quantity, float *out)
 			return false;
 		}
 	}
+	/* Battery supply for the no-data watchdog (L-41): a failed/absent measurement
+	 * leaves voltage NaN, so a dead battery monitor raises a no_data alarm like
+	 * any other sensor instead of silently never firing. */
+	if (source == APP_ALARM_SRC_BATTERY && quantity == APP_ALARM_Q_VOLTAGE) {
+		*out = d->voltage;
+		return true;
+	}
 	return false;
 }
 
@@ -623,6 +630,7 @@ static const struct {
 	{APP_ALARM_SRC_SLOT2, APP_ALARM_Q_TEMPERATURE},
 	{APP_ALARM_SRC_SLOT3, APP_ALARM_Q_TEMPERATURE},
 	{APP_ALARM_SRC_SLOT4, APP_ALARM_Q_TEMPERATURE},
+	{APP_ALARM_SRC_BATTERY, APP_ALARM_Q_VOLTAGE}, /* L-41: battery monitor liveness */
 };
 #define NODATA_COUNT ARRAY_SIZE(m_nodata_tab)
 static int64_t m_nodata_nan_since[NODATA_COUNT]; /* 0 = has data now */
@@ -649,6 +657,8 @@ static bool nodata_enabled(uint8_t source, uint8_t quantity)
 		 * configured ROM keeps it monitored so its absence raises a no_data alarm. */
 		return g_app_config.cap_w1_sensors &&
 		       app_w1_slot_is_configured(source - APP_ALARM_SRC_SLOT1);
+	case APP_ALARM_SRC_BATTERY:
+		return true; /* L-41: battery monitor always expected to report */
 	default:
 		return false;
 	}

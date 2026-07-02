@@ -39,6 +39,12 @@ struct counters_blob {
 /* Snapshot of the last value written to NVS, used as the dirty-flag baseline. */
 static struct counters_blob m_last_saved = {.version = BLOB_VERSION};
 static bool m_loaded;
+/* L-30: set when settings_load failed at boot. The persisted totalizers could not
+ * be read, so the live counters started from 0; persisting them would overwrite
+ * the last-good NVS value with 0 and destroy the totalizer baseline (billing
+ * data). While set, app_counters_save() is a no-op — the good NVS value is left
+ * intact and a later clean boot resumes from it. */
+static bool m_persist_disabled;
 
 /* Collect the live totalizers from app_hall / app_input into a blob. */
 static void gather(struct counters_blob *blob)
@@ -92,6 +98,12 @@ static struct settings_handler m_sh = {
 
 int app_counters_save(bool force)
 {
+	if (m_persist_disabled) {
+		/* L-30: a boot load failure means we don't know the true baseline; never
+		 * overwrite the last-good NVS value with the from-zero live counts. */
+		return -EIO;
+	}
+
 	struct counters_blob blob;
 	gather(&blob);
 
@@ -124,7 +136,10 @@ int app_counters_init(void)
 
 	ret = settings_load_subtree(SETTINGS_SUBTREE);
 	if (ret) {
+		/* L-30: don't let the from-zero live counters be persisted over the
+		 * last-good NVS value — disable saving until a clean boot reloads it. */
 		LOG_ERR_CALL_FAILED_INT("settings_load_subtree", ret);
+		m_persist_disabled = true;
 		return ret;
 	}
 
