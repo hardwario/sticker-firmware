@@ -339,6 +339,17 @@ static const struct {{ module.name }} m_{{ module.name }}_defaults = {
  * migrated config so the stored version is bumped exactly once. */
 static bool m_{{ module.name }}_migrated;
 
+/* Set by init when settings_load fails (corrupt/unreadable NVS): the device then
+ * boots on compile-time defaults with its identity + provisioning gone. Queryable
+ * so the app can surface a distinct state (LED / GetInfo) instead of silently
+ * looking like a blank device (H-4). */
+static bool m_{{ module.name }}_load_failed;
+
+bool {{ module.name }}_load_failed(void)
+{
+	return m_{{ module.name }}_load_failed;
+}
+
 {% endif %}
 static struct {{ module.name }} m_{{ module.name }} = {
 {% if module.version is defined %}
@@ -813,8 +824,13 @@ static int {{ module.name }}_init(void)
 
 	ret = settings_load_subtree(SETTINGS_PFX);
 	if (ret) {
-		LOG_ERR("Call `settings_load_subtree` failed: %d", ret);
-		return ret;
+		/* H-4: do not silently swallow a load failure. SYS_INIT discards our
+		 * return value, so returning here just lets the device boot on defaults
+		 * (identity + provisioning gone) with no signal. Flag it instead so the
+		 * app can show a distinct state; the in-RAM defaults keep the device
+		 * running rather than dead. */
+		LOG_ERR("Call `settings_load_subtree` failed: %d — booting on defaults", ret);
+		m_{{ module.name }}_load_failed = true;
 	}
 
 {% if module.version is defined %}

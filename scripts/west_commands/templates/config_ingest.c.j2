@@ -173,11 +173,24 @@ bool {{ module.name }}_ingest(const {{ message }} *message)
 		return true;
 	}
 
-	/* NFC keeps best-effort semantics: apply valid fields, ignore invalid. */
+	/* Atomic ingest (H-11): apply every present group but capture the first fault,
+	 * and roll the whole record back on any invalid field. A config record written
+	 * over NFC with a bad field is now rejected outright (nothing applied) instead
+	 * of half-applying the valid fields and silently looking like success — which
+	 * left the device mis-provisioned with no indication. */
+	struct {{ module.name }} snapshot = *{{ module.name }}();
+	uint32_t fault = 0;
+	int rc = 0;
+
 {% for g in ingest_groups %}
-	if (message->has_{{ g.key }}) {
-		{{ g.apply_fn }}(&message->{{ g.key }}, NULL);
+	if (rc == 0 && message->has_{{ g.key }}) {
+		rc = {{ g.apply_fn }}(&message->{{ g.key }}, &fault);
 	}
 {% endfor %}
+	if (rc) {
+		*{{ module.name }}() = snapshot;
+		LOG_WRN("NFC config ingest rejected: invalid field (fault %u) — no change applied",
+			fault);
+	}
 	return false;
 }

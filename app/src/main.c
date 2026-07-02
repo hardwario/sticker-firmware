@@ -494,6 +494,29 @@ int main(void)
 
 		bool led_handled = false;
 
+		/* Config NVS failed to load at boot (H-4): the device is running on
+		 * compile-time defaults with its identity + provisioning gone. Signal it
+		 * with a distinct red+yellow alternating pattern (highest priority) so a
+		 * technician sees a corrupt-config fault rather than a silently blank or
+		 * merely "not provisioned" device. */
+		if (app_config_load_failed()) {
+			struct app_led_play_req req = {
+				.commands = {{.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
+					     {.type = APP_LED_CMD_DELAY, .duration = 60},
+					     {.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
+					     {.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
+					     {.type = APP_LED_CMD_DELAY, .duration = 60},
+					     {.type = APP_LED_CMD_SET,
+					      .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
+					     {.type = APP_LED_CMD_END}},
+				.repetitions = 2};
+			app_led_play(&req);
+			led_handled = true;
+		}
+
 #if defined(CONFIG_LORAWAN)
 		enum app_lrw_state lrw_state = app_lrw_get_state();
 
