@@ -97,6 +97,14 @@ void app_cmd_get_info(struct app_cmd_info *info)
 		     "claim_token size mismatch");
 	memcpy(info->claim_token, g_app_config.claim_token, sizeof(info->claim_token));
 
+#ifdef CONFIG_LORAWAN
+	info->lrw_state = (uint8_t)app_lrw_get_state();
+#endif
+
+	BUILD_ASSERT(sizeof(info->dev_eui) == sizeof(g_app_config.lrw_deveui),
+		     "dev_eui size mismatch");
+	memcpy(info->dev_eui, g_app_config.lrw_deveui, sizeof(info->dev_eui));
+
 	/* Fresh battery reading (mV). 0 if the ADC is unavailable (e.g. host test);
 	 * the proto omits a 0 so the host treats it as "unknown". */
 	float v;
@@ -111,8 +119,12 @@ void app_cmd_get_info(struct app_cmd_info *info)
 #endif
 }
 
-/* Map the plain-C info snapshot onto the protobuf Response_Info. */
-static void fill_info(Response_Info *info)
+/* Map the plain-C info snapshot onto the protobuf Response_Info. The transport
+ * splits the Info: a LoRaWAN uplink carries only the fields the network side needs
+ * (firmware / serial / uptime / battery / reset-cause / clock), while the NFC
+ * (commissioning) channel additionally gets lrw_state and dev_eui — see the
+ * NFC-only block below. */
+static void fill_info(enum app_cmd_transport tp, Response_Info *info)
 {
 	struct app_cmd_info i;
 	app_cmd_get_info(&i);
@@ -138,6 +150,23 @@ static void fill_info(Response_Info *info)
 			info->has_claim_token = true;
 			memcpy(info->claim_token, i.claim_token, sizeof(info->claim_token));
 			break;
+		}
+	}
+
+	/* NFC-only Info fields. The phone/commissioning channel gets the full picture;
+	 * a LoRaWAN uplink omits them — dev_eui would leak the identity onto the air
+	 * (and the LNS already knows it), and lrw_state is redundant on a frame the
+	 * network just received. dev_eui is further omitted when unset (all-zero). */
+	if (tp == APP_CMD_TRANSPORT_NFC) {
+		info->has_lrw_state = true;
+		info->lrw_state = (Response_Info_LrwState)i.lrw_state;
+
+		for (size_t j = 0; j < sizeof(i.dev_eui); j++) {
+			if (i.dev_eui[j] != 0) {
+				info->has_dev_eui = true;
+				memcpy(info->dev_eui, i.dev_eui, sizeof(info->dev_eui));
+				break;
+			}
 		}
 	}
 }
@@ -241,12 +270,11 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 static void app_cmd_handle_get_info(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				    enum app_cmd_action *action)
 {
-	ARG_UNUSED(tp);
 	ARG_UNUSED(cmd);
 	ARG_UNUSED(action);
 
 	resp->which_body = Response_info_tag;
-	fill_info(&resp->body.info);
+	fill_info(tp, &resp->body.info);
 }
 
 /* Dumpable config fields in fixed order, each with a conservative upper bound
@@ -647,7 +675,7 @@ static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *
 			return;
 		}
 		resp->which_body = Response_info_tag;
-		fill_info(&resp->body.info);
+		fill_info(tp, &resp->body.info);
 		return;
 	}
 #ifdef CONFIG_LORAWAN
@@ -883,7 +911,8 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
 	Response resp = Response_init_zero;
 	resp.seq = 0;
 	resp.which_body = Response_info_tag;
-	fill_info(&resp.body.info);
+	/* Autonomous GetInfo on join goes out over LoRaWAN, so dev_eui is omitted. */
+	fill_info(APP_CMD_TRANSPORT_LRW, &resp.body.info);
 
 	return encode_response(&resp, out, out_cap, out_len);
 }

@@ -57,6 +57,8 @@ struct app_cmd_info {
 	uint8_t claim_token[16]; /* 128-bit device claim token (#170); all-zero = uncommissioned */
 	uint32_t battery_mv;     /* supply voltage in mV; 0 = measurement unavailable */
 	uint32_t reset_cause; /* hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown */
+	uint8_t lrw_state;    /* current LoRaWAN state (enum app_lrw_state) */
+	uint8_t dev_eui[8];   /* LoRaWAN DevEUI; all-zero = unset */
 };
 
 /* Cache the hwinfo reset-cause bitmask read once at boot (RESET_* flags from

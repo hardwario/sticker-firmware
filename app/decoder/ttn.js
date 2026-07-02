@@ -61,6 +61,7 @@ function _pbReadFloat(bytes, offset) {
 }
 
 var _BUILD_TYPES = ["main", "dev", "custom"];
+var _LRW_STATES = ["idle", "joining", "healthy", "warning", "reconnect"];
 
 // Config submessage maps: proto field tag -> name. The flat C struct is split
 // across submessages lorawan/application/sensors/alarms; device identity stays
@@ -230,11 +231,15 @@ function _decodeInfo(bytes, start, end) {
       else if (field === 8) info.debug = v.value !== 0;
       else if (field === 10) info.battery = v.value; // supply voltage in mV (0/absent = unavailable)
       else if (field === 11) info.reset_cause = v.value; // hwinfo reset-cause bitmask of last boot (#88)
+      else if (field === 12) info.lrw_state = v.value; // LoRaWAN network state; emitted over NFC only, absent from LoRaWAN uplinks
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       // field 9 = claim_token (#170): 128-bit device claim token, presented as
       // hex. Omitted by the device until commissioned.
       if (field === 9) info.claim_token = _pbBytesToHex(bytes.slice(pos, pos + len.value));
+      // field 13 = dev_eui: 8-byte DevEUI as hex. Emitted over NFC only, so it
+      // is absent from LoRaWAN uplinks.
+      else if (field === 13) info.dev_eui = _pbBytesToHex(bytes.slice(pos, pos + len.value));
       // else: skip unknown length-delimited fields (forward compatibility).
       pos += len.value;
     } else {
@@ -243,6 +248,11 @@ function _decodeInfo(bytes, start, end) {
   }
   info.fw_version = info.fw_major + "." + info.fw_minor + "." + info.fw_patch;
   info.build_type_name = _BUILD_TYPES[info.build_type] || "unknown";
+  // lrw_state is NFC-only, so it is absent from LoRaWAN uplinks — only name it
+  // when the field was actually present (leave both undefined otherwise).
+  if (info.lrw_state !== undefined) {
+    info.lrw_state_name = _LRW_STATES[info.lrw_state] || "unknown";
+  }
   return info;
 }
 
