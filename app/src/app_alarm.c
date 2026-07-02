@@ -634,8 +634,12 @@ static bool nodata_enabled(uint8_t source, uint8_t quantity)
 	case APP_ALARM_SRC_SLOT2:
 	case APP_ALARM_SRC_SLOT3:
 	case APP_ALARM_SRC_SLOT4:
+		/* H-5: gate on the *configured* (persisted) ROM, not the runtime type. A
+		 * probe taught to this slot but absent from the bus has runtime type EMPTY;
+		 * keying on that silently dropped it from monitoring. Keying on the
+		 * configured ROM keeps it monitored so its absence raises a no_data alarm. */
 		return g_app_config.cap_w1_sensors &&
-		       app_w1_slot_get_type(source - APP_ALARM_SRC_SLOT1) != APP_W1_SLOT_EMPTY;
+		       app_w1_slot_is_configured(source - APP_ALARM_SRC_SLOT1);
 	default:
 		return false;
 	}

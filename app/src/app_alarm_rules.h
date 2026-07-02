@@ -102,8 +102,10 @@ int app_alarm_rules_init(void);
 
 /* Rebuild the rule cache from the app_config alarm_N slots. Call after a
  * SetParam that touched the alarms group so the runtime reflects it without a
- * reboot. */
-void app_alarm_rules_reload_from_config(void);
+ * reboot. Returns the count of non-empty slots that failed validation and were
+ * sanitized, so a SetParam caller can report a fault instead of a misleading ACK
+ * (H-10). */
+int app_alarm_rules_reload_from_config(void);
 
 /* The kind implied by a quantity (THRESHOLD / STATE / RATE). */
 enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q);

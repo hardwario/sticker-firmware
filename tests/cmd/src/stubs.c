@@ -131,9 +131,11 @@ void app_alarm_rules_clear_all(void)
 }
 
 /* handle_set_param refreshes the runtime rule cache from config after an apply;
- * inert in the unit test. */
-void app_alarm_rules_reload_from_config(void)
+ * inert in the unit test. Returns the count of invalid slots dropped (H-10);
+ * 0 here so a staged alarms batch always acks in the unit test. */
+int app_alarm_rules_reload_from_config(void)
 {
+	return 0;
 }
 
 /* Read-back path (handle_req_alarm_rules): no rules in the unit test, so the
