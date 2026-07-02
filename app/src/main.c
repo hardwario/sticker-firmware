@@ -530,7 +530,16 @@ int main(void)
 		}
 #endif /* defined(CONFIG_LORAWAN) */
 
-		if (!led_handled && app_alarm_poll()) {
+		/* Always evaluate alarms — do NOT short-circuit on led_handled. The poll
+		 * is the only place thresholds/state/count rules, the no-data watchdog and
+		 * the low-battery watchdog run and latch/queue their fPort-3 events. Gating
+		 * it behind the LRW LED (JOINING/RECONNECT/WARNING) left the device blind to
+		 * real alarms exactly while the network was down, and edge-triggered
+		 * threshold crossings during that window were lost forever. The red alarm
+		 * LED is still suppressed while the LRW LED owns the indicator. */
+		bool alarm_active = app_alarm_poll();
+
+		if (!led_handled && alarm_active) {
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_R,
 							.duration = 5,
 							.space = 0,

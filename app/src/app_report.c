@@ -85,12 +85,10 @@ static void report_work_handler(struct k_work *work)
 		return;
 	}
 
-	/* State-gated cadence: skip while the link is joining/reconnecting/disabled.
-	 * app_lrw kicks us (report_kick) on the link-ready edge to resume promptly. */
-	if (!app_lrw_is_ready()) {
-		LOG_DBG("Report skipped: link not ready (%d)", app_lrw_get_state());
-		return;
-	}
+	/* Sample + capture history BEFORE the link gate, so store-and-forward works
+	 * offline: a device that has not joined (weak/absent gateway) still records
+	 * history at the report cadence and replays it after join. Only the transport
+	 * is link-gated below. (Same rationale as app_counters_save above.) */
 
 	/* Lazy sampling: when interval_sample == 0 the sensors are read here, in the
 	 * report cycle, instead of on a dedicated sensor timer. */
@@ -101,6 +99,14 @@ static void report_work_handler(struct k_work *work)
 	/* Capture one history record at the report cadence (self-skips while a
 	 * replay is active, #126). */
 	app_history_capture();
+
+	/* State-gated cadence: skip the UPLINK while the link is joining/
+	 * reconnecting/disabled. app_lrw kicks us (report_kick) on the link-ready
+	 * edge to resume promptly and drain the buffered history. */
+	if (!app_lrw_is_ready()) {
+		LOG_DBG("Report skipped: link not ready (%d)", app_lrw_get_state());
+		return;
+	}
 
 	/* Hand off to the transport: app_lrw composes the snapshot and splits it
 	 * into DR-budget frames (LC piggyback + duty-cycle retry live there). */

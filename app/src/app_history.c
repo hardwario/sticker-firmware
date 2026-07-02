@@ -359,7 +359,11 @@ static void recompute_sizing(void)
 		}
 	}
 	m_sample_size = size;
-	m_capacity = backend_capacity(size);
+	/* An empty mask (no history sensor enabled) gives size 0; the RAM backend's
+	 * capacity is sizeof(m_ram)/sample_size, so guard the divisor here. capacity 0
+	 * disables the buffer (checked by capture/replay), which is the correct
+	 * behaviour for "nothing to record". */
+	m_capacity = size ? backend_capacity(size) : 0;
 }
 
 /* ---- Record codec ------------------------------------------------------- */
