@@ -6,7 +6,6 @@
 
 #include "app_nfc.h"
 #include "app_cmd.h"
-#include "app_config_ingest.h"
 #include "app_config.h"
 #include "app_nfc_parser.h"
 #include "app_settings.h"
@@ -149,7 +148,6 @@ static const char *cmd_action_str(enum app_cmd_action a)
  * (512 B total) — leaving more room for the encrypted config payload — while
  * staying typed/filterable: Web NFC exposes them as record.recordType. */
 #define NDEF_TNF_EXT        0x04
-#define NDEF_SUPPORTED_TYPE "hio.stck:cfg"
 
 /* Plaintext info record the firmware keeps on the tag so a phone learns the
  * sticker identity and schema version the moment it taps, without decrypting
@@ -1016,7 +1014,7 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 {
 	int ret;
 
-	enum app_nfc_action *action = (enum app_nfc_action *)user_data;
+	ARG_UNUSED(user_data);
 
 	/* Only our NFC Forum external-type records carry sticker payloads. */
 	if (record_info->tnf != NDEF_TNF_EXT) {
@@ -1119,54 +1117,11 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 		return 0;
 	}
 
-	size_t expected_type_len = strlen(NDEF_SUPPORTED_TYPE);
-
-	/* Check if type matches */
-	if (record_info->type_len != expected_type_len ||
-	    strncmp((const char *)record_info->type, NDEF_SUPPORTED_TYPE, expected_type_len) != 0) {
-		return 0;
-	}
-
-	LOG_INF("Found supported MIME record - length: %u byte(s)", record_info->payload_len);
-
-	const uint8_t *cfg_data;
-	size_t cfg_len;
-#ifdef CONFIG_APP_NFC_ENCRYPTION
-	NFC_REPORT("NFC read: config record (%u B encrypted)", record_info->payload_len);
-	static uint8_t buf[512];
-	size_t len;
-	ret = decrypt(record_info->payload, record_info->payload_len, buf, sizeof(buf), &len);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("decrypt", ret);
-		NFC_REPORT("  -> decrypt failed: %d (rejected, tag left untouched)", ret);
-		return ret;
-	}
-	cfg_data = buf;
-	cfg_len = len;
-#else
-	/* Plaintext channel (validation build): the record is a bare AppConfigMessage
-	 * protobuf — no secret key, serial check or nonce anti-replay. */
-	NFC_REPORT("NFC read: config record (%u B plaintext)", record_info->payload_len);
-	cfg_data = record_info->payload;
-	cfg_len = record_info->payload_len;
-#endif /* CONFIG_APP_NFC_ENCRYPTION */
-
-	pb_istream_t stream = pb_istream_from_buffer(cfg_data, cfg_len);
-	AppConfigMessage message = AppConfigMessage_init_zero;
-	if (!pb_decode(&stream, AppConfigMessage_fields, &message)) {
-
-		LOG_ERR_CALL_FAILED_STR("pb_decode", PB_GET_ERROR(&stream));
-		return -EIO;
-	}
-
-	if (app_config_ingest(&message)) {
-		*action = APP_NFC_ACTION_RESET;
-		NFC_REPORT("  -> config decoded & ingested, action: factory reset");
-	} else {
-		*action = APP_NFC_ACTION_SAVE;
-		NFC_REPORT("  -> config decoded & ingested, action: apply + save");
-	}
-
+	/* #250: the legacy bare-AppConfigMessage config record (hio.stck:cmd's sibling
+	 * "hio.stck:cfg") has been retired — offline/boot-staged provisioning now goes
+	 * through the encrypted Command/SetParam record handled above, so any other
+	 * record type is just unrecognized data. */
+	NFC_REPORT("NFC read: unrecognized record type (%u B) -> ignored", record_info->payload_len);
 	return 0;
 }
 
@@ -1319,7 +1274,7 @@ static int nfc_write_response(void)
 
 /* Core NFC check: read the tag, parse/ingest a pending config, and restore the
  * info record. Caller must hold the access lock (nfc_access_begin). */
-static int nfc_check_locked(enum app_nfc_action *action)
+static int nfc_check_locked(void)
 {
 	int ret;
 	int res = 0;
@@ -1387,7 +1342,7 @@ static int nfc_check_locked(enum app_nfc_action *action)
 	/* Pending data written by a phone: parse it. parser_callback may ingest a
 	 * config (sets *action), or process a command (stages m_resp_buf), or flag
 	 * that the tag already holds our response (m_seen_resp). */
-	ret = app_nfc_parser_run(m_buf, ST25DV_USER_MEM_SIZE, parser_callback, action);
+	ret = app_nfc_parser_run(m_buf, ST25DV_USER_MEM_SIZE, parser_callback, NULL);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_nfc_parser_run", ret);
 		res = ret;
@@ -1438,25 +1393,6 @@ static int nfc_check_locked(enum app_nfc_action *action)
 		return res;
 	}
 
-	/* A recognized config was consumed (ingest set *action): clear it right away
-	 * for anti-replay, restoring the info record. */
-	if (*action != APP_NFC_ACTION_NONE) {
-		m_unknown_count = 0;
-		m_info_restore_pending = false; /* #164: writing info record below */
-		LOG_INF("Writing info record to NFC (consumed config)...");
-		NFC_REPORT("NFC wrote: info record (%zu B) - cleared consumed config, restored "
-			   "metadata",
-			   info_len);
-		if (info_len) {
-			ret = write_mem(0, info, info_len);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
-				res = ret;
-			}
-		}
-		return res;
-	}
-
 	/* Unrecognized data and nothing actionable. This is usually a poll catching
 	 * the tag mid-write while the phone lays down a command/config record, which
 	 * resolves on the next poll. Debounce: only restore the info record (which
@@ -1486,16 +1422,14 @@ static int nfc_check_locked(enum app_nfc_action *action)
 
 /* Full NFC check: always reads the tag. Used at boot and by `nfc check`
  * (an I2C-side `nfc write` does not set the RF IT_STS_Dyn flags). */
-int app_nfc_check(enum app_nfc_action *action)
+int app_nfc_check(void)
 {
-	*action = APP_NFC_ACTION_NONE;
-
 	int ret = nfc_access_begin();
 	if (ret) {
 		return ret;
 	}
 
-	int res = nfc_check_locked(action);
+	int res = nfc_check_locked();
 
 	nfc_access_end();
 	return res;
@@ -1508,11 +1442,11 @@ int app_nfc_check(enum app_nfc_action *action)
  * useless here (the register reads 0x00 every pass, cleared by the LPD
  * power-cycle in nfc_access_begin), and a command can only be read / answered
  * while the RF field is briefly off, which IT_STS wouldn't flag anyway. */
-int app_nfc_poll(enum app_nfc_action *action)
+int app_nfc_poll(void)
 {
 	/* Identical to app_nfc_check() — both do a full tag read under the access
 	 * lock; kept as a separate entry point for call-site clarity (#220.F). */
-	return app_nfc_check(action);
+	return app_nfc_check();
 }
 
 /* #164: true while a response record is left on the tag and the info record has
@@ -1714,25 +1648,38 @@ static int cmd_nfc_check(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	enum app_nfc_action action;
-
 	/* Route the check's read/decode/react/write trace to this shell. */
 	m_report_sh = sh;
-	int ret = app_nfc_check(&action);
+	int ret = app_nfc_check();
 	m_report_sh = NULL;
 	if (ret) {
 		shell_error(sh, "nfc check failed: %d", ret);
 		return ret;
 	}
 
-	if (action == APP_NFC_ACTION_SAVE) {
-		ret = app_settings_save(true);
-		shell_print(sh, "config applied%s", ret ? " (save failed!)" : " and saved");
-	} else if (action == APP_NFC_ACTION_RESET) {
+	/* #250: a staged hio.stck:cmd leaves a response on the tag with the deferred
+	 * action gated. Mirror the boot path — restore the info record (opens the gate)
+	 * and apply the provisioning action here so a bench `nfc check` behaves like a
+	 * boot-staged provision. */
+	if (app_nfc_info_restore_pending()) {
+		app_nfc_restore_info();
+	}
+	enum app_cmd_action act = app_nfc_take_cmd_action();
+	switch (act) {
+	case APP_CMD_ACTION_SETTINGS_SAVE:
+		ret = app_settings_save(true); /* reboots on success */
+		shell_print(sh, "staged config applied%s", ret ? " (save failed!)" : " and saved");
+		break;
+	case APP_CMD_ACTION_FACTORY_RESET:
 		ret = app_settings_reset();
 		shell_print(sh, "factory reset%s", ret ? " (failed!)" : "");
-	} else {
-		shell_print(sh, "no config on tag (no action)");
+		break;
+	case APP_CMD_ACTION_NONE:
+		shell_print(sh, "no staged command on tag (no action)");
+		break;
+	default:
+		shell_print(sh, "staged command action %d (applied by poll thread)", (int)act);
+		break;
 	}
 
 	return 0;
