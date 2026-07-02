@@ -604,6 +604,11 @@ static uint16_t backend_capacity(uint16_t sample_size)
 	return (uint16_t)MIN(cap, UINT16_MAX);
 }
 
+bool app_history_is_ready(void)
+{
+	return m_fs_ready;
+}
+
 #else /* RAM fallback */
 
 static uint8_t __noinit m_ram[CONFIG_APP_HISTORY_BYTES];
@@ -660,6 +665,11 @@ static void backend_erase(void)
 {
 	m_ram_start = 0;
 	m_ram_count = 0;
+}
+
+bool app_history_is_ready(void)
+{
+	return true; /* RAM backend always available; no flash mount to fail */
 }
 
 #endif

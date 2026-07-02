@@ -9,6 +9,7 @@
 
 /* Standard includes */
 #include <stdbool.h>
+#include <stdint.h>
 
 /* The alarm source/quantity enums + the rule model live in app_alarm_rules.h —
  * alarms are now driven by a dynamic rule list, not a fixed source enum. */
@@ -34,6 +35,12 @@ int app_alarm_set_event_callback(app_alarm_event_cb cb, void *user_data);
 
 /* True if the rule for (source, quantity) currently has its alarm latched. */
 bool app_alarm_is_active(enum app_alarm_source source, enum app_alarm_quantity quantity);
+
+/* Aggregated alarm state as an APP_DEVICE_STATUS_ALARM_* bitmask, read-only:
+ * unlike app_alarm_poll() it does NOT evaluate rules, expire one-shot latches,
+ * or send an fPort-3 report. Just reads the latched state (rule slots + no-data
+ * / low-battery watchdogs) under the alarm locks. Safe to call from fill_info. */
+uint32_t app_alarm_status_flags(void);
 
 #ifdef __cplusplus
 }

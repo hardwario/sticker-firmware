@@ -59,6 +59,10 @@ bool app_nfc_info_restore_pending(void);
 bool app_nfc_resp_write_pending(void);
 int app_nfc_restore_info(void);
 
+/* True once app_nfc_init() has succeeded (ST25DV tag usable). False means the
+ * tag is unavailable and the device runs degraded (#88). */
+bool app_nfc_ready(void);
+
 #ifdef __cplusplus
 }
 #endif

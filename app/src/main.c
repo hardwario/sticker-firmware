@@ -67,10 +67,10 @@ enum app_mode {
 	APP_MODE_CALIBRATION,
 };
 
-/* Set once app_nfc_init() succeeds. The NFC tag is non-essential (#88): on init
- * failure we degrade instead of die()-ing, and the poll thread self-exits when
- * this stays false so a broken ST25DV can't keep the device awake/looping. */
-static bool m_nfc_ready;
+/* NFC-ready state lives in app_nfc.c (app_nfc_ready()); the tag is non-essential
+ * (#88): on init failure we degrade instead of die()-ing, and the poll thread
+ * self-exits when it stays false so a broken ST25DV can't keep the device
+ * awake/looping. */
 
 static void die(void)
 {
@@ -179,9 +179,9 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 
 	/* NFC init failed at boot (#88): the tag is unusable, so exit instead of
 	 * polling a dead ST25DV (which would error every wake and keep the CPU busy).
-	 * The thread starts after NFC_POLL_START_DELAY_MS, so main() has already set
-	 * m_nfc_ready by now. */
-	if (!m_nfc_ready) {
+	 * The thread starts after NFC_POLL_START_DELAY_MS, so main() has already run
+	 * app_nfc_init() by now. */
+	if (!app_nfc_ready()) {
 		LOG_WRN("NFC unavailable; poll thread not started");
 		return;
 	}
@@ -348,14 +348,12 @@ int main(void)
 	/* The NFC tag (ST25DV) is non-essential: a broken tag must not brick an
 	 * otherwise-healthy device (radio + sensors fine) into a die() reboot loop
 	 * (#88). On init failure, log and continue with NFC disabled — the poll
-	 * thread self-exits (m_nfc_ready stays false) and the boot config check is
+	 * thread self-exits (app_nfc_ready() stays false) and the boot config check is
 	 * skipped. die() stays reserved for wdog / LED / LRW init. */
 	ret = app_nfc_init();
 	if (ret) {
 		LOG_WRN("app_nfc_init failed: %d (NFC unavailable, continuing)", ret);
 	} else {
-		m_nfc_ready = true;
-
 		/* A stale/replay command left on the tag makes app_nfc_check() fail
 		 * (anti-replay) on every boot. Do NOT die() here — that would brick the
 		 * device into a reboot loop. Log and continue, like the periodic check

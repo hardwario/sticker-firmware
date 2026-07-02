@@ -1171,6 +1171,16 @@ static int nfc_gpo_irq_setup(void)
 	return 0;
 }
 
+/* Set once app_nfc_init() succeeds. The ST25DV tag is non-essential (#88): on
+ * init failure we degrade instead of die()-ing. Single source of truth for the
+ * NFC-ready state; main.c and the device_status bit read it via app_nfc_ready(). */
+static bool m_ready;
+
+bool app_nfc_ready(void)
+{
+	return m_ready;
+}
+
 int app_nfc_init(void)
 {
 	int ret;
@@ -1221,6 +1231,7 @@ int app_nfc_init(void)
 	 * first. Writing the info record at init would overwrite that pending record
 	 * before it is read, breaking power-off provisioning (SetParam-applied-at-boot,
 	 * #147). */
+	m_ready = true;
 	return 0;
 }
 

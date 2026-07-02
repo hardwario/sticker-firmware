@@ -5,6 +5,7 @@
  */
 
 #include "app_cmd.h"
+#include "app_alarm.h"
 #include "app_alarm_rules.h"
 #include "app_battery.h"
 #include "app_compose.h"
@@ -13,6 +14,7 @@
 #include "app_input.h"
 #include "app_log.h"
 #include "app_lrw.h"
+#include "app_nfc.h"
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_config_ingest.h"
@@ -126,6 +128,31 @@ void app_cmd_get_info(struct app_cmd_info *info)
 		info->unix_time = unix_s;
 	}
 #endif
+
+	/* Aggregate device status (APP_DEVICE_STATUS_* bitmask). Built here so the
+	 * GetInfo response and `ats device info` share one source of truth. Alarm
+	 * bits come from the read-only app_alarm_status_flags() (no side effects,
+	 * unlike app_alarm_poll). Runs after the clock block so TIME_UNSYNCED
+	 * reflects has_unix_time. */
+	uint32_t status = app_alarm_status_flags();
+	if (!app_nfc_ready()) {
+		status |= APP_DEVICE_STATUS_NFC_DOWN;
+	}
+#ifdef APP_CMD_HAVE_HISTORY
+	if (!app_history_is_ready()) {
+		status |= APP_DEVICE_STATUS_HISTORY_DOWN;
+	}
+#endif
+	if (app_sensor_i2c_wedged()) {
+		status |= APP_DEVICE_STATUS_I2C_WEDGED;
+	}
+	if (!info->has_unix_time) {
+		status |= APP_DEVICE_STATUS_TIME_UNSYNCED;
+	}
+	if (info->lrw_state == APP_LRW_STATE_DISABLED) {
+		status |= APP_DEVICE_STATUS_LRW_DISABLED;
+	}
+	info->device_status = status;
 }
 
 /* Map the plain-C info snapshot onto the protobuf Response_Info. The transport
@@ -147,6 +174,7 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info)
 	info->debug = i.debug;
 	info->battery = i.battery_mv;
 	info->reset_cause = i.reset_cause;
+	info->device_status = i.device_status;
 	if (i.has_unix_time) {
 		info->unix_time = i.unix_time;
 	}
