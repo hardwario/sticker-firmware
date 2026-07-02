@@ -213,7 +213,7 @@ function _decodeConfigDump(bytes, start, end) {
 }
 
 function _decodeInfo(bytes, start, end) {
-  var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false, lrw_state: 0 };
+  var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false };
   var pos = start;
   while (pos < end) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
@@ -231,7 +231,7 @@ function _decodeInfo(bytes, start, end) {
       else if (field === 8) info.debug = v.value !== 0;
       else if (field === 10) info.battery = v.value; // supply voltage in mV (0/absent = unavailable)
       else if (field === 11) info.reset_cause = v.value; // hwinfo reset-cause bitmask of last boot (#88)
-      else if (field === 12) info.lrw_state = v.value; // LoRaWAN network state (mirrors app_lrw_state)
+      else if (field === 12) info.lrw_state = v.value; // LoRaWAN network state; emitted over NFC only, absent from LoRaWAN uplinks
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       // field 9 = claim_token (#170): 128-bit device claim token, presented as
@@ -248,7 +248,11 @@ function _decodeInfo(bytes, start, end) {
   }
   info.fw_version = info.fw_major + "." + info.fw_minor + "." + info.fw_patch;
   info.build_type_name = _BUILD_TYPES[info.build_type] || "unknown";
-  info.lrw_state_name = _LRW_STATES[info.lrw_state] || "unknown";
+  // lrw_state is NFC-only, so it is absent from LoRaWAN uplinks — only name it
+  // when the field was actually present (leave both undefined otherwise).
+  if (info.lrw_state !== undefined) {
+    info.lrw_state_name = _LRW_STATES[info.lrw_state] || "unknown";
+  }
   return info;
 }
 

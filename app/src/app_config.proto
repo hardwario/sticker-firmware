@@ -217,8 +217,10 @@ message Response {
 
     message Info {
         // Firmware version (semver components). board is omitted on purpose —
-        // the LNS already knows it from the device context. dev_eui is emitted
-        // over NFC only (see below).
+        // the LNS already knows it from the device context. lrw_state and dev_eui
+        // are emitted over NFC only (see below) — a LoRaWAN uplink omits them: the
+        // LNS already knows the DevEUI, and the link state is redundant on a frame
+        // it just received.
         uint32 fw_major = 1;
         uint32 fw_minor = 2;
         uint32 fw_patch = 3;
@@ -231,7 +233,8 @@ message Response {
         }
         BuildType build_type = 4;
 
-        // LoRaWAN network state (mirrors app_lrw_state).
+        // LoRaWAN network state (mirrors app_lrw_state). Emitted over NFC only
+        // (see lrw_state below).
         enum LrwState {
             IDLE      = 0;   // not joined / init
             JOINING   = 1;   // join/rejoin in progress
@@ -247,7 +250,7 @@ message Response {
         optional bytes claim_token = 9;   // 128-bit device claim token (#170); omitted until commissioned
         uint32 battery       = 10;  // supply voltage in mV (0 = unavailable)
         uint32 reset_cause   = 11;  // hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown
-        LrwState lrw_state   = 12;  // current LoRaWAN network state
+        optional LrwState lrw_state = 12;  // current LoRaWAN network state; emitted over NFC only
         optional bytes dev_eui = 13;  // 8-byte DevEUI; emitted over NFC only, omitted if unset
     }
 

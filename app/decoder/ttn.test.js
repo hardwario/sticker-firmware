@@ -198,7 +198,7 @@ test("decodeUplink decodes get_info battery + reset_cause (fPort 85)", () => {
 });
 
 // Info carries lrw_state (field 12, mirrors app_lrw_state) and dev_eui (field 13,
-// 8 bytes). dev_eui is emitted over NFC only. Inner Info: fw 1.4.2,
+// 8 bytes). Both are emitted over NFC only. Inner Info: fw 1.4.2,
 // lrw_state=2 (HEALTHY), dev_eui=0102030405060708.
 test("decodeUplink decodes get_info lrw_state + dev_eui (NFC)", () => {
   const got = codec.decodeUplink({
@@ -211,15 +211,17 @@ test("decodeUplink decodes get_info lrw_state + dev_eui (NFC)", () => {
   assert.equal(got.info.dev_eui, "0102030405060708");
 });
 
-// Over LoRaWAN the device omits dev_eui but still reports lrw_state.
-test("decodeUplink get_info omits dev_eui over LoRaWAN, keeps lrw_state (fPort 85)", () => {
+// Over LoRaWAN the device omits BOTH lrw_state and dev_eui (NFC-only fields):
+// the LNS already knows the DevEUI, and the link state is redundant on a frame it
+// just received. Inner Info: fw 1.4.2 only.
+test("decodeUplink get_info omits lrw_state + dev_eui over LoRaWAN (fPort 85)", () => {
   const got = codec.decodeUplink({
-    bytes: hex("0108031a080801100418026002"),
+    bytes: hex("0108031a06080110041802"),
     fPort: 85,
   }).data;
   assert.equal(got.seq, 3);
-  assert.equal(got.info.lrw_state, 2);
-  assert.equal(got.info.lrw_state_name, "healthy");
+  assert.equal(got.info.lrw_state, undefined);
+  assert.equal(got.info.lrw_state_name, undefined);
   assert.equal(got.info.dev_eui, undefined);
 });
 

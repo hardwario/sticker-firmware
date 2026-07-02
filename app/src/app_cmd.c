@@ -97,7 +97,9 @@ void app_cmd_get_info(struct app_cmd_info *info)
 		     "claim_token size mismatch");
 	memcpy(info->claim_token, g_app_config.claim_token, sizeof(info->claim_token));
 
+#ifdef CONFIG_LORAWAN
 	info->lrw_state = (uint8_t)app_lrw_get_state();
+#endif
 
 	BUILD_ASSERT(sizeof(info->dev_eui) == sizeof(g_app_config.lrw_deveui),
 		     "dev_eui size mismatch");
@@ -118,8 +120,10 @@ void app_cmd_get_info(struct app_cmd_info *info)
 }
 
 /* Map the plain-C info snapshot onto the protobuf Response_Info. The transport
- * gates dev_eui: it is emitted over the encrypted NFC channel only (a LoRaWAN
- * uplink would leak it, and the LNS already knows it from the device context). */
+ * splits the Info: a LoRaWAN uplink carries only the fields the network side needs
+ * (firmware / serial / uptime / battery / reset-cause / clock), while the NFC
+ * (commissioning) channel additionally gets lrw_state and dev_eui — see the
+ * NFC-only block below. */
 static void fill_info(enum app_cmd_transport tp, Response_Info *info)
 {
 	struct app_cmd_info i;
@@ -134,7 +138,6 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info)
 	info->debug = i.debug;
 	info->battery = i.battery_mv;
 	info->reset_cause = i.reset_cause;
-	info->lrw_state = (Response_Info_LrwState)i.lrw_state;
 	if (i.has_unix_time) {
 		info->unix_time = i.unix_time;
 	}
@@ -150,9 +153,14 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info)
 		}
 	}
 
-	/* dev_eui: NFC-only, and omitted when unset (all-zero), mirroring the
-	 * claim_token treatment above. */
+	/* NFC-only Info fields. The phone/commissioning channel gets the full picture;
+	 * a LoRaWAN uplink omits them — dev_eui would leak the identity onto the air
+	 * (and the LNS already knows it), and lrw_state is redundant on a frame the
+	 * network just received. dev_eui is further omitted when unset (all-zero). */
 	if (tp == APP_CMD_TRANSPORT_NFC) {
+		info->has_lrw_state = true;
+		info->lrw_state = (Response_Info_LrwState)i.lrw_state;
+
 		for (size_t j = 0; j < sizeof(i.dev_eui); j++) {
 			if (i.dev_eui[j] != 0) {
 				info->has_dev_eui = true;
