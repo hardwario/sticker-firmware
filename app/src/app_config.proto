@@ -129,6 +129,12 @@ message Command {
     }
 // END GENERATED COMMANDS
 
+    // L-54: field numbers of removed commands (enter_mailbox / exit_mailbox /
+    // enter_dfu, dropped in #239). Reserved so they are never silently re-used for
+    // a different command — an old app still sending 19/20/22 would otherwise be
+    // mis-decoded once the number is reassigned.
+    reserved 19, 20, 22;
+
     message SetParam {
         optional AppConfigMessage.Lorawan     lorawan     = 1;
         optional AppConfigMessage.Application application = 2;
@@ -260,6 +266,7 @@ message Response {
             HISTORY_UNAVAILABLE = 4;
             UNSUPPORTED_FIELD   = 5;
             PERSIST_FAILED      = 6;
+            NOT_SUPPORTED       = 7;   // command tag unknown / removed (L-54)
         }
 
         Code   code         = 1;
