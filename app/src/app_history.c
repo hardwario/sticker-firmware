@@ -635,9 +635,21 @@ size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t star
 		}
 		uint16_t slot = (m_start + ord) % m_capacity;
 		if (backend_read_slot(slot, buf + pos, m_sample_size) != 0) {
-			/* Don't ship an uninitialised buffer on the wire (#96) — end the
-			 * page here; the host gets the records read so far. */
-			break;
+			/* M-13: a single unreadable slot (NVS -EIO/-ENOENT on a GC-damaged
+			 * record) must not truncate the whole replay. Skip it instead of
+			 * ending the page — but never leave a gap *inside* a frame, since the
+			 * host reconstructs times as t0 + j*interval (contiguous). If we
+			 * already packed records, close this frame and resume AFTER the bad
+			 * slot; otherwise skip it and keep looking for the frame's first good
+			 * record. (pos/written are not advanced, so the uninitialised bytes are
+			 * overwritten by the next good read — #96 still holds.) */
+			LOG_WRN("history slot %u (ord %zu) read failed — skipping (M-13)",
+				(unsigned)slot, ord);
+			if (written > 0) {
+				ord++; /* resume past the bad slot on the next page */
+				break;
+			}
+			continue; /* for-loop advances ord */
 		}
 		if (!have_t0) {
 			t0 = t;

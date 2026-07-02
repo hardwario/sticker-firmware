@@ -139,11 +139,13 @@ int app_alarm_rules_reload_from_config(void)
 }
 
 /* Read-back path (handle_req_alarm_rules): no rules in the unit test, so the
- * dump comes back empty. quantity_kind only needs to resolve for the linker. */
-const struct app_alarm_rule *app_alarm_rules_get(uint8_t slot)
+ * dump comes back empty. quantity_kind only needs to resolve for the linker.
+ * Signature follows the M-6 lock-copy API (bool + out param). */
+bool app_alarm_rules_get(uint8_t slot, struct app_alarm_rule *out)
 {
 	(void)slot;
-	return NULL;
+	(void)out;
+	return false;
 }
 
 enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
