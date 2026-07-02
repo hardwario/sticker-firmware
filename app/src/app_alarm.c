@@ -901,6 +901,48 @@ bool app_alarm_is_active(enum app_alarm_source source, enum app_alarm_quantity q
 	return a;
 }
 
+uint32_t app_alarm_status_flags(void)
+{
+	uint32_t flags = 0;
+
+	/* Watchdog latches are written under g_app_sensor_data_lock in poll();
+	 * take it first to keep the same lock order (data_lock -> m_lock) and avoid
+	 * inversion. Read-only here: no evaluation, no one-shot expiry, no send. */
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	for (size_t i = 0; i < NODATA_COUNT; i++) {
+		if (m_nodata_active[i]) {
+			flags |= APP_DEVICE_STATUS_ALARM_NO_DATA | APP_DEVICE_STATUS_ALARM_ANY;
+			break;
+		}
+	}
+	if (m_battery_low_active) {
+		flags |= APP_DEVICE_STATUS_ALARM_LOW_BATT | APP_DEVICE_STATUS_ALARM_ANY;
+	}
+	k_mutex_unlock(&g_app_sensor_data_lock);
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	for (int i = 0; i < APP_ALARM_SLOT_COUNT; i++) {
+		if (!m_rt[i].used || !m_rt[i].active) {
+			continue;
+		}
+		flags |= APP_DEVICE_STATUS_ALARM_ANY;
+		switch (app_alarm_quantity_kind((enum app_alarm_quantity)m_rt[i].quantity)) {
+		case APP_ALARM_KIND_THRESHOLD:
+			flags |= APP_DEVICE_STATUS_ALARM_THRESHOLD;
+			break;
+		case APP_ALARM_KIND_STATE:
+			flags |= APP_DEVICE_STATUS_ALARM_STATE;
+			break;
+		case APP_ALARM_KIND_RATE:
+			flags |= APP_DEVICE_STATUS_ALARM_RATE;
+			break;
+		}
+	}
+	k_mutex_unlock(&m_lock);
+
+	return flags;
+}
+
 /* ---- shell -------------------------------------------------------------- */
 
 #if defined(CONFIG_SHELL)

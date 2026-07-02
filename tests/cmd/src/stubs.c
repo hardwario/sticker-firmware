@@ -6,11 +6,17 @@
  * (so range validation is exercised); everything else app_cmd reaches is stubbed.
  */
 
+#include "app_alarm.h"
 #include "app_alarm_rules.h"
 #include "app_config.h"
+#include "app_history.h"
+#include "app_lrw.h"
+#include "app_nfc.h"
+#include "app_sensor.h"
 
 #include "src/app_config.pb.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -152,4 +158,31 @@ enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
 {
 	(void)q;
 	return APP_ALARM_KIND_THRESHOLD;
+}
+
+enum app_lrw_state app_lrw_get_state(void)
+{
+	return APP_LRW_STATE_HEALTHY;
+}
+
+/* device_status inputs: app_cmd_get_info() aggregates these into the status
+ * bitmask. Stubbed to the "all healthy / nothing active" baseline. */
+uint32_t app_alarm_status_flags(void)
+{
+	return 0;
+}
+
+bool app_nfc_ready(void)
+{
+	return true;
+}
+
+bool app_history_is_ready(void)
+{
+	return true;
+}
+
+bool app_sensor_i2c_wedged(void)
+{
+	return false;
 }

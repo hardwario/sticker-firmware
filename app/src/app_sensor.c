@@ -162,6 +162,14 @@ void app_sensor_suspend(void)
 	k_timer_stop(&m_sensor_timer);
 }
 
+bool app_sensor_i2c_wedged(void)
+{
+	/* Non-zero streak = the most recent sweep saw every I2C read fail, i.e. the
+	 * bus is currently wedged (cleared on the next good sweep or after recovery).
+	 * int read is atomic; a stale value only mislabels one Info snapshot. */
+	return m_i2c_fail_streak > 0;
+}
+
 int app_sensor_init(void)
 {
 	int ret;

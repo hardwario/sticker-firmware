@@ -811,6 +811,39 @@ static void print_reset_cause(const struct shell *sh, uint32_t cause)
 		    buf[0] != '\0' ? buf : (cause ? "other" : "unknown"));
 }
 
+static void print_device_status(const struct shell *sh, uint32_t status)
+{
+	static const struct {
+		uint32_t flag;
+		const char *name;
+	} names[] = {
+		{APP_DEVICE_STATUS_ALARM_ANY, "alarm-any"},
+		{APP_DEVICE_STATUS_ALARM_THRESHOLD, "alarm-threshold"},
+		{APP_DEVICE_STATUS_ALARM_STATE, "alarm-state"},
+		{APP_DEVICE_STATUS_ALARM_RATE, "alarm-rate"},
+		{APP_DEVICE_STATUS_ALARM_NO_DATA, "alarm-no-data"},
+		{APP_DEVICE_STATUS_ALARM_LOW_BATT, "alarm-low-battery"},
+		{APP_DEVICE_STATUS_NFC_DOWN, "nfc-down"},
+		{APP_DEVICE_STATUS_HISTORY_DOWN, "history-down"},
+		{APP_DEVICE_STATUS_I2C_WEDGED, "i2c-wedged"},
+		{APP_DEVICE_STATUS_TIME_UNSYNCED, "time-unsynced"},
+		{APP_DEVICE_STATUS_LRW_DISABLED, "lrw-disabled"},
+	};
+
+	char buf[128] = "";
+
+	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+		if (status & names[i].flag) {
+			if (buf[0] != '\0') {
+				strlcat(buf, ", ", sizeof(buf));
+			}
+			strlcat(buf, names[i].name, sizeof(buf));
+		}
+	}
+
+	shell_print(sh, "Device status: 0x%08x (%s)", status, buf[0] != '\0' ? buf : "ok");
+}
+
 /* Prints the same device info a GetInfo command returns over LoRaWAN, via the
  * shared app_cmd_get_info() (single source of truth). */
 static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
@@ -844,6 +877,7 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	print_reset_cause(sh, info.reset_cause);
+	print_device_status(sh, info.device_status);
 
 	if (info.has_unix_time) {
 		time_t t = (time_t)info.unix_time;

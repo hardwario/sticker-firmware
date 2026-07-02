@@ -61,7 +61,22 @@ function _pbReadFloat(bytes, offset) {
 }
 
 var _BUILD_TYPES = ["main", "dev", "custom"];
-var _LRW_STATES = ["idle", "joining", "healthy", "warning", "reconnect"];
+var _LRW_STATES = ["idle", "joining", "healthy", "warning", "reconnect", "disabled"];
+
+// device_status (Info field 14) bit -> name. Keep in sync with APP_DEVICE_STATUS_*.
+var _DEVICE_STATUS = [
+  [1 << 0, "alarm_any"],
+  [1 << 1, "alarm_threshold"],
+  [1 << 2, "alarm_state"],
+  [1 << 3, "alarm_rate"],
+  [1 << 4, "alarm_no_data"],
+  [1 << 5, "alarm_low_battery"],
+  [1 << 8, "nfc_down"],
+  [1 << 9, "history_down"],
+  [1 << 10, "i2c_wedged"],
+  [1 << 11, "time_unsynced"],
+  [1 << 12, "lrw_disabled"],
+];
 
 // Config submessage maps: proto field tag -> name. The flat C struct is split
 // across submessages lorawan/application/sensors/alarms; device identity stays
@@ -213,7 +228,7 @@ function _decodeConfigDump(bytes, start, end) {
 }
 
 function _decodeInfo(bytes, start, end) {
-  var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false };
+  var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false, device_status: 0 };
   var pos = start;
   while (pos < end) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
@@ -232,6 +247,7 @@ function _decodeInfo(bytes, start, end) {
       else if (field === 10) info.battery = v.value; // supply voltage in mV (0/absent = unavailable)
       else if (field === 11) info.reset_cause = v.value; // hwinfo reset-cause bitmask of last boot (#88)
       else if (field === 12) info.lrw_state = v.value; // LoRaWAN network state; emitted over NFC only, absent from LoRaWAN uplinks
+      else if (field === 14) info.device_status = v.value; // aggregated device status bitmask
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       // field 9 = claim_token (#170): 128-bit device claim token, presented as
@@ -253,6 +269,9 @@ function _decodeInfo(bytes, start, end) {
   if (info.lrw_state !== undefined) {
     info.lrw_state_name = _LRW_STATES[info.lrw_state] || "unknown";
   }
+  info.device_status_flags = _DEVICE_STATUS
+    .filter(function (f) { return (info.device_status & f[0]) !== 0; })
+    .map(function (f) { return f[1]; });
   return info;
 }
 
