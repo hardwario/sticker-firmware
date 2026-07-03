@@ -26,6 +26,9 @@ struct app_config *app_config(void)
 	return &g_app_config;
 }
 
+/* F-1 staging-dirty guard: the flag + test_set_lrw_dirty() hook now live in the
+ * real app_cmd.c (linked here), so no stub is needed. */
+
 /* Sensor sampling + telemetry snapshot (sample command). app_sensor_sample is
  * inert; app_compose_snapshot fills a recognisable reading so the test can check
  * the Sample response carries the snapshot. */

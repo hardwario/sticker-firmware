@@ -800,6 +800,11 @@ void app_history_capture(void)
 		m_interval = (uint32_t)g_app_config.interval_report;
 		m_base_time = 0;
 		m_base_synced = false;
+		/* This is a fresh this-boot rebase, so the "base derived from a previous
+		 * boot's uptime" flag no longer applies — clear it like the other reset
+		 * paths (app_history_clear / app_history_set_mask) do, else a buffer
+		 * restored with it set keeps stamping the first new records as stale. */
+		m_base_stale_uptime = false;
 		backend_reset_logical();
 		m_count = 0;
 	}

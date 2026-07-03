@@ -1257,6 +1257,10 @@ static void m_hist_work_handler(struct k_work *work)
 		return;
 	}
 	m_hist_retries = 0;
+	/* M-2: a history frame on air proves the channel is alive just as a telemetry
+	 * frame does. Without this, a long replay (which pauses telemetry) can trip the
+	 * stale-uplink watchdog and rejoin a perfectly healthy session mid-replay. */
+	m_last_uplink_ms = k_uptime_get();
 
 	LOG_INF("History frame %u/%u sent (%u rec, %zu B)", (unsigned)(m_hist_idx + 1),
 		(unsigned)m_hist_count, (unsigned)n, len);

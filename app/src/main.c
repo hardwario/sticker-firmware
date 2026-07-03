@@ -260,6 +260,10 @@ static void orange_event_handler(enum app_alarm_source source, bool active, void
 	static int64_t last_blink_ms;
 	int64_t now = k_uptime_get();
 
+	/* Commissioning-only diagnostic: the yellow event LED confirms input
+	 * activations for the first hour after power-up, then goes quiet. The cutoff
+	 * is deliberately measured from boot (uptime), NOT from the event — once a
+	 * unit is commissioned the blink is no longer wanted. */
 	if (now > APP_ALARM_ORANGE_AUTO_OFF_MS) {
 		return;
 	}
