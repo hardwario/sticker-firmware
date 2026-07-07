@@ -633,6 +633,67 @@ static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command 
 #endif
 }
 
+/* NFC-only paged history read (#260). Unlike req_history (LRW device-driven
+ * streaming), this is client-driven and stateless: each tap returns exactly one
+ * HistoryFrame and the phone advances the cursor by passing the response's
+ * next_ord back as start_ord on the next request, looping until has_more=false.
+ * The device keeps NO replay session (nothing to wedge) and does NOT pause
+ * capture — new records may be appended between taps. Edge case: if the flash
+ * ring evicts its oldest page between taps, the logical ordinal cursor shifts
+ * down; over a short on-site readout (interval is minutes) this is negligible. */
+static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Command *cmd,
+					    Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+#if defined(APP_CMD_HAVE_HISTORY)
+	const Command_ReqHistoryPage *rq = &cmd->body.req_history_page;
+	uint32_t from = rq->has_from_unix ? rq->from_unix : 0;
+	uint32_t to = rq->has_to_unix ? rq->to_unix : UINT32_MAX;
+	size_t start = rq->has_start_ord ? rq->start_ord : 0;
+	uint32_t present = app_history_get_mask();
+	uint32_t interval = app_history_get_interval();
+
+	Response_HistoryFrame *hf = &resp->body.history_frame;
+
+	/* Clamp the sample byte budget to what one HistoryFrame encodes into the NFC
+	 * response, further clamped to the samples field capacity (242 B). Worst-case
+	 * (max-varint) header values keep the bound stable regardless of the actual
+	 * ordinal/time values. */
+	size_t cap = app_cmd_history_sample_capacity(cmd->seq, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+						     present, interval, DUMP_PAGE_BUDGET_NFC);
+	cap = MIN(cap, sizeof(hf->samples.bytes));
+
+	uint32_t t0 = 0;
+	uint16_t n_written = 0;
+	size_t next_ord = start;
+	size_t written = app_history_export_page(from, to, start, hf->samples.bytes, cap, &t0,
+						 &n_written, &next_ord);
+
+	resp->which_body = Response_history_frame_tag;
+	hf->frame_index = 0; /* informational only over NFC; the phone counts its own pages */
+	hf->frame_count = app_history_count_frames(from, to, cap); /* progress hint */
+	hf->t0_unix = t0;
+	hf->samples.size = written;
+	hf->present = present;
+	hf->interval_s = interval;
+	hf->has_time_synced = true;
+	hf->time_synced = app_history_base_synced();
+	/* Authoritative cursor for the phone: pass next_ord back as start_ord. When a
+	 * page returns no records (buffer empty, cursor past the window/end) or no
+	 * ordinals remain, has_more=false stops the tap loop (no wedge, no infinite
+	 * loop). A page that fills at the to_unix boundary may cost one extra empty
+	 * tap, which then reports has_more=false. */
+	hf->has_next_ord = true;
+	hf->next_ord = (uint32_t)next_ord;
+	hf->has_has_more = true;
+	hf->has_more = (n_written > 0) && (next_ord < app_history_count());
+#else
+	ARG_UNUSED(cmd);
+	make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no history");
+#endif
+}
+
 #if defined(APP_CMD_HAVE_W1)
 /* w1_scan ROM-discovery callback: append each ROM (8 bytes: family + 6-byte
  * serial + CRC) to the response, capped at the field's max_count. */
@@ -783,6 +844,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_req_history(tp, cmd, resp, action);
+		break;
+	case Command_req_history_page_tag:
+		/* transports: [nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_req_history_page(tp, cmd, resp, action);
 		break;
 	case Command_clock_sync_tag:
 		/* transports: [lrw, nfc] — reject on any other transport */

@@ -95,13 +95,14 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
  * NULL argument, or -EMSGSIZE if `out_cap` is too small. */
 int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len);
 
-/* Buffer size that always holds one fully-populated history-replay frame
- * (version byte + maximal Response{ seq, history_frame } protobuf). Sized from
- * the nanopb-generated Response_HistoryFrame_size (80) plus the Response
- * envelope (seq + submessage tag/len) plus the 1-byte version prefix, rounded
- * up. The transmit path still clamps the payload to the current data rate; this
- * macro only guarantees the staging buffer is never the binding limit (#89). */
-#define APP_CMD_HISTORY_FRAME_BUF_SIZE 96
+/* Staging buffer for one LoRaWAN history-replay frame (version byte + Response{
+ * seq, history_frame } protobuf). Sized to exceed the largest EU868 payload (242 B
+ * at DR4/5) so it holds a full frame at every LoRaWAN data rate and the transmit
+ * limit history_frame_cap() = MIN(DR payload, this) is always the DR, never this
+ * buffer (#89). Intentionally decoupled from Response.HistoryFrame.samples (440 B
+ * for the NFC paged read, #260): the LoRaWAN replay is bounded by the DR (~14
+ * records/frame at DR4/5), the NFC pull by its own larger per-tap budget. */
+#define APP_CMD_HISTORY_FRAME_BUF_SIZE 256
 
 /* Largest `samples_len` that app_cmd_build_history_frame() can encode into
  * `out_cap` bytes for these frame fields, clamped to the HistoryFrame.samples
