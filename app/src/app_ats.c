@@ -15,6 +15,7 @@
 #include "app_machine_probe.h"
 #include "app_sensor.h"
 #include "app_sht4x.h"
+#include "app_ccm.h"
 #include "app_cmd.h"
 #include "app_compose.h"
 #include "app_config.h"
@@ -775,6 +776,73 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      0),
 	SHELL_CMD_ARG(nfc, NULL, "Inject over NFC transport. Usage: nfc <hex>", cmd_cmd_nfc, 2, 0),
 	SHELL_SUBCMD_SET_END);
+
+/* On-target self-test for app_ccm over the STM32WL HW AES peripheral (#261). Runs
+ * the published nfc_crypto golden vectors through the real hardware and checks the
+ * output is byte-identical to the RFC 3610 / mbedTLS reference — this is the bench
+ * check the HW register byte-order (KEYR big-endian, DINR/DOUTR little-endian +
+ * DATATYPE byte-swap) is correct on silicon, which native_sim cannot exercise. The
+ * key here is the PUBLISHED TEST key (00..0f), never a device secret. */
+static int cmd_ccm_selftest(const struct shell *sh, size_t argc, char **argv)
+{
+	static const uint8_t key[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+					0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+	static const uint8_t hdr[8] = {0, 0, 0, 0, 0, 0, 0, 1}; /* serial 0, counter 1 */
+	const struct {
+		const char *name;
+		uint8_t dir;
+		uint8_t pt[8];
+		size_t pt_len;
+		const char *want_ct_tag; /* golden ciphertext||tag16, hex */
+	} vec[] = {
+		{"request",
+		 0x00,
+		 {0x01, 0x08, 0x01, 0x22, 0x0a},
+		 5,
+		 "9e91d455b31b7eb34212a122abc064170eed1ed238"},
+		{"response",
+		 0x01,
+		 {0x01, 0x08, 0x01, 0x12, 0x00},
+		 5,
+		 "d67a6dd3cce76a8bae20443086737ea584e195dfa0"},
+	};
+	int fails = 0;
+
+	for (size_t i = 0; i < ARRAY_SIZE(vec); i++) {
+		uint8_t nonce[9], ct[16], tag[16], got[64], rt[16];
+		char got_hex[2 * 64 + 1];
+
+		memcpy(nonce, hdr, 8);
+		nonce[8] = vec[i].dir;
+
+		int ret = app_ccm_encrypt_and_tag(key, nonce, 9, hdr, 8, vec[i].pt, vec[i].pt_len,
+						  ct, tag, 16);
+		if (ret) {
+			shell_error(sh, "%s: encrypt failed %d", vec[i].name, ret);
+			fails++;
+			continue;
+		}
+
+		memcpy(got, ct, vec[i].pt_len);
+		memcpy(&got[vec[i].pt_len], tag, 16);
+		bin2hex(got, vec[i].pt_len + 16, got_hex, sizeof(got_hex));
+
+		bool enc_ok = strcmp(got_hex, vec[i].want_ct_tag) == 0;
+
+		/* Round-trip: HW AES must also decrypt+authenticate its own output. */
+		ret = app_ccm_auth_decrypt(key, nonce, 9, hdr, 8, ct, vec[i].pt_len, tag, 16, rt);
+		bool dec_ok = ret == 0 && memcmp(rt, vec[i].pt, vec[i].pt_len) == 0;
+
+		shell_print(sh, "%-8s encrypt %s  roundtrip %s  got %s", vec[i].name,
+			    enc_ok ? "PASS" : "FAIL", dec_ok ? "PASS" : "FAIL", got_hex);
+		if (!enc_ok || !dec_ok) {
+			fails++;
+		}
+	}
+
+	shell_print(sh, "ccm selftest: %s (%d failure(s))", fails == 0 ? "PASS" : "FAIL", fails);
+	return fails == 0 ? 0 : -EIO;
+}
 #endif /* CONFIG_APP_CMD_DEBUG_SHELL */
 
 /* Decode a hwinfo reset-cause bitmask (from app_cmd_info.reset_cause, read at
@@ -914,6 +982,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_ats,
 #endif /* defined(CONFIG_LORAWAN) */
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
 			       SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
+			       SHELL_CMD(ccm, NULL, "app_ccm HW AES self-test (golden vectors).",
+					 cmd_ccm_selftest),
 #endif
 			       SHELL_SUBCMD_SET_END);
 
