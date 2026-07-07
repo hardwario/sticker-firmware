@@ -9,6 +9,7 @@
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_config_ingest.h"
+#include "app_sensor.h"
 
 #include <pb_decode.h>
 #include "src/app_config.pb.h"
@@ -244,6 +245,8 @@ ZTEST(cmd, test_build_info)
 	g_app_config.serial_number = 1234567890;
 	test_battery_v = 3.3f;
 	test_battery_ret = 0;
+	/* get_info reads the cached sample voltage, not a fresh ADC read. */
+	g_app_sensor_data.voltage = 3.3f;
 
 	int ret = app_cmd_build_info(out, sizeof(out), &out_len);
 	zassert_equal(ret, 0, "build_info ret %d", ret);
@@ -255,7 +258,7 @@ ZTEST(cmd, test_build_info)
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
 	zassert_equal(r.which_body, Response_info_tag, "expected Info");
 	zassert_equal(r.body.info.serial_number, 1234567890, "serial");
-	/* Battery (mV) from the fresh ADC reading; 3.3 V -> 3300 mV. */
+	/* Battery (mV) from the cached sample voltage; 3.3 V -> 3300 mV. */
 	zassert_equal(r.body.info.battery, 3300, "battery %u", r.body.info.battery);
 	/* #170: uncommissioned device (all-zero claim_token) omits the field. */
 	zassert_false(r.body.info.has_claim_token, "claim_token must be omitted when unset");

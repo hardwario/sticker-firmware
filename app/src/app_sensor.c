@@ -352,12 +352,19 @@ int app_sensor_init(void)
 			      K_SECONDS(g_app_config.interval_sample));
 	}
 
-	/* L-51: take one full sample now (all sensors + battery) so g_app_sensor_data
-	 * holds real readings before any telemetry can be composed. Otherwise the
-	 * first report — which may fire on the join edge before the 1 s sensor-timer
-	 * tick — would ship the pre-sample sentinels (e.g. voltage 0 → a bogus
-	 * low-battery on the dashboard). */
-	app_sensor_sample();
+	/* L-51: take one full sample so g_app_sensor_data holds real readings before
+	 * telemetry is composed (otherwise the first report — which may fire on the
+	 * join edge before the 1 s sensor-timer tick — would ship the pre-sample
+	 * sentinels, e.g. voltage 0 → a bogus low-battery on the dashboard).
+	 *
+	 * Submit it to the sensor work queue instead of running it inline:
+	 * app_sensor_sample() does a battery ADC read, and a synchronous ADC read
+	 * this early in boot hangs the release build (the ADC clock has not settled
+	 * yet; CONFIG_LOG timing hides it in debug), starving the watchdog and
+	 * reset-looping before main(). Deferring lets init finish; the sample (with a
+	 * valid battery reading) then runs once on the work queue, well after the ADC
+	 * is ready, and populates the cache before DeviceInfo is sent. */
+	k_work_submit_to_queue(&m_sensor_work_q, &m_sensor_work);
 
 	return res;
 }

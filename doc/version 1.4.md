@@ -239,7 +239,7 @@ After every LoRaWAN join the device automatically sends a device-info message on
 | `serial_number` | Device serial |
 | `uptime_s` | Seconds since boot |
 | `unix_time` | Wall-clock UTC (0 until the clock is synced) |
-| `battery` | Supply voltage in **mV**, measured fresh on each `get_info` (0/absent = unavailable) |
+| `battery` | Supply voltage in **mV**, taken from the latest sensor sample's cached reading (0/absent = unavailable — e.g. before the first sample completes) |
 | `reset_cause` | hwinfo reset-cause bitmask of the last boot (#88) — see below; 0/absent = unknown |
 | `claim_token` | 128-bit device claim token, hex (#170) — **omitted** until the device is commissioned |
 | `lrw_state` (`lrw_state_name`) | Current LoRaWAN network state: `idle` / `joining` / `healthy` / `warning` / `reconnect` — **NFC only** (absent from LoRaWAN uplinks) |
@@ -250,6 +250,8 @@ The **`reset_cause`** field (proto field 11) carries the hardware reset-cause bi
 The **`lrw_state`** field (proto field 12) mirrors the firmware's LoRaWAN state machine (`app_lrw_state`): `idle` (not joined), `joining`, `healthy` (joined, link OK), `warning` (link check failing) and `reconnect` (rejoining with backoff). Like `dev_eui` it is emitted **over the NFC channel only** and is absent from LoRaWAN uplinks — the link state is redundant on a frame the network just received, and the on-join autonomous `get_info` (which goes out over LoRaWAN) therefore omits it. Over NFC it is an `optional` field, so even the `idle` (zero) state is transmitted explicitly; when the field is absent (any LoRaWAN uplink) the decoder leaves `lrw_state`/`lrw_state_name` `undefined` rather than defaulting to `idle`.
 
 The **`dev_eui`** field (proto field 13) is the 8-byte LoRaWAN DevEUI. It is emitted **only over the encrypted NFC channel** — a LoRaWAN uplink would leak it (the fPort-85 payload is plain protobuf) and the network server already knows it from the device context. It is also omitted when the DevEUI is still all-zero (unset).
+
+The **`battery`** field (proto field 10) reports the **cached** supply voltage from the most recent sensor sample rather than a fresh ADC read taken inside `get_info`. `get_info` runs on the boot path (it builds both the NFC identity record and the on-join LoRaWAN DeviceInfo), and a synchronous battery ADC read that early — before the ADC clock has settled — hangs a **Release** build (which lacks the timing slack of the debug logging), starving the watchdog into a reset loop before `main()`. The first sensor sample is therefore taken on the sensor work queue just after init (deferred, not inline), so the ADC is ready by the time it runs and the DeviceInfo/`inf` record carry a real reading; the field is `0`/absent only in the brief window before that first sample completes.
 
 The same message is returned on demand by the `get_info` command (over LoRaWAN **and** NFC), so a backend can read the claim token over either channel. **`lrw_state` and `dev_eui` are the exceptions**: they appear in the `get_info` reply over NFC only, giving a clean split — a LoRaWAN Info carries what the network needs (firmware / serial / uptime / battery / reset-cause / clock / claim token), while the NFC Info adds the commissioning view (link state + DevEUI).
 

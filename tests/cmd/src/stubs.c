@@ -8,9 +8,13 @@
 
 #include "app_alarm_rules.h"
 #include "app_config.h"
+#include "app_sensor.h"
 
 #include "src/app_config.pb.h"
 
+#include <zephyr/kernel.h>
+
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -65,8 +69,13 @@ void app_clock_force_resync(void)
 {
 }
 
-/* Battery (GetInfo battery field). Seedable per test; default reports a value so
- * the encoded Info carries a non-zero battery. */
+/* Battery (GetInfo battery field). get_info now reads the cached
+ * g_app_sensor_data.voltage rather than a fresh app_battery_measure(), so the
+ * test seeds the cache (see main.c setUp). The measure stub + test_battery_v are
+ * kept for any caller that still measures directly. */
+struct app_sensor_data g_app_sensor_data = {.voltage = NAN};
+K_MUTEX_DEFINE(g_app_sensor_data_lock);
+
 float test_battery_v = 3.3f;
 int test_battery_ret;
 
