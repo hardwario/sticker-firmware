@@ -30,8 +30,8 @@
 #include <zephyr/shell/shell.h>
 #endif
 
-/* PSA Crypto includes */
-#include <mbedtls/ccm.h>
+/* NFC channel AES-CCM (RFC 3610), HW AES / soft-SE backed (#261) */
+#include "app_ccm.h"
 
 /* Standard includes */
 #include <errno.h>
@@ -739,6 +739,19 @@ static size_t build_info_ndef(uint8_t *out, size_t out_size)
 #define NFC_NONCE_DIR_REQUEST  0x00
 #define NFC_NONCE_DIR_RESPONSE 0x01
 
+/* Largest forward jump accepted for the anti-replay nonce counter (#266, N-2).
+ * decrypt() accepts a received counter only in (current, current + this]. Without
+ * an upper bound a single accepted command carrying a counter near UINT32_MAX
+ * would store that high-water and make every future (necessarily larger) counter
+ * impossible — permanently bricking the encrypted NFC channel, recoverable only
+ * by a debug `settings erase` or JTAG mass-erase (the counter is
+ * preserve_on_reset). The Manager-App reads the current high-water from the
+ * plaintext `inf` record before every command and always sends current + 1, so
+ * legitimate jumps are 1; this window is generous headroom yet negligible vs.
+ * UINT32_MAX, so it eliminates the brick without constraining real use. The
+ * nfc_crypto ztest mirrors this constant — keep them in lockstep. */
+#define NFC_NONCE_MAX_SKIP 1024
+
 #define NFC_CCM_TAG_LEN 16
 
 /* An all-zero secret key means the device has not been provisioned yet. Mirror
@@ -760,30 +773,10 @@ static bool secret_key_is_set(void)
 	return false;
 }
 
-/* Initialise an AES-CCM context with the device secret key. The caller frees it
- * with mbedtls_ccm_free(). Returns 0 or a negative errno. Shared by
- * decrypt()/encrypt() so the key setup lives in one place.
- *
- * We use mbedtls_ccm directly rather than the PSA crypto API: the PSA dispatch
- * layer + key-slot management costs ~2.5 KB of flash the release image can't
- * spare, and CCM produces identical wire bytes either way (PSA's CCM backend is
- * this same mbedtls_ccm), so the phone-side contract and the nfc_crypto golden
- * vectors are unchanged. */
-static int ccm_setkey(mbedtls_ccm_context *ctx)
-{
-	mbedtls_ccm_init(ctx);
-
-	int ret = mbedtls_ccm_setkey(ctx, MBEDTLS_CIPHER_ID_AES, g_app_config.secret_key,
-				     8 * sizeof(g_app_config.secret_key));
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("mbedtls_ccm_setkey", ret);
-		mbedtls_ccm_free(ctx);
-		return -EIO;
-	}
-
-	return 0;
-}
-
+/* CCM is provided by app_ccm (RFC 3610 over the STM32WL HW AES or the soft-SE AES,
+ * #261), replacing mbedTLS. The 128-bit key is g_app_config.secret_key and the wire
+ * bytes are byte-identical to the previous mbedtls_ccm, so the phone-side contract
+ * and the nfc_crypto golden vectors are unchanged. */
 static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size, size_t *out_len)
 {
 	int res = 0;
@@ -824,6 +817,17 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 		return -EACCES;
 	}
 
+	/* Bound the forward jump (#266, N-2). Reject a counter implausibly far ahead
+	 * of the high-water so a buggy/malicious provisioning tool cannot store a
+	 * near-UINT32_MAX value and permanently brick the channel. The subtraction is
+	 * overflow-safe: the check above guarantees nonce_counter > current, so the
+	 * unsigned difference never wraps. */
+	if (nonce_counter - app_config()->nonce_counter > NFC_NONCE_MAX_SKIP) {
+		LOG_ERR("Nonce counter jumps too far ahead: %u > %u + %u", nonce_counter,
+			app_config()->nonce_counter, NFC_NONCE_MAX_SKIP);
+		return -EACCES;
+	}
+
 	/* Wire after the 8 B header is [ciphertext || 16 B tag]. */
 	size_t pt_len = in_len - 8 - NFC_CCM_TAG_LEN;
 	if (out_size < pt_len) {
@@ -831,22 +835,15 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 		return -ENOMEM;
 	}
 
-	mbedtls_ccm_context ctx;
-	res = ccm_setkey(&ctx);
-	if (res) {
-		return res;
-	}
-
 	uint8_t nonce[NFC_NONCE_LEN];
 	memcpy(nonce, in, 8);
 	nonce[8] = NFC_NONCE_DIR_REQUEST;
 
-	int ret = mbedtls_ccm_auth_decrypt(&ctx, pt_len, nonce, sizeof(nonce), /* AAD */ in, 8,
-					   &in[8], out, &in[8 + pt_len], NFC_CCM_TAG_LEN);
-	mbedtls_ccm_free(&ctx);
+	int ret = app_ccm_auth_decrypt(g_app_config.secret_key, nonce, sizeof(nonce), /* AAD */ in,
+				       8, &in[8], pt_len, &in[8 + pt_len], NFC_CCM_TAG_LEN, out);
 
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("mbedtls_ccm_auth_decrypt", ret);
+		LOG_ERR_CALL_FAILED_INT("app_ccm_auth_decrypt", ret);
 		res = -EIO;
 	} else {
 		*out_len = pt_len;
@@ -897,23 +894,17 @@ static int encrypt(const uint8_t *in, size_t in_len, uint32_t nonce_counter, uin
 	sys_put_be32(g_app_config.serial_number, &out[0]);
 	sys_put_be32(nonce_counter, &out[4]);
 
-	mbedtls_ccm_context ctx;
-	res = ccm_setkey(&ctx);
-	if (res) {
-		return res;
-	}
-
 	uint8_t nonce[NFC_NONCE_LEN];
 	memcpy(nonce, out, 8);
 	nonce[8] = NFC_NONCE_DIR_RESPONSE;
 
 	/* Ciphertext (== plaintext length) into &out[8], the 16 B tag right after it. */
-	int ret = mbedtls_ccm_encrypt_and_tag(&ctx, in_len, nonce, sizeof(nonce), /* AAD */ out, 8,
-					      in, &out[8], &out[8 + in_len], NFC_CCM_TAG_LEN);
-	mbedtls_ccm_free(&ctx);
+	int ret = app_ccm_encrypt_and_tag(g_app_config.secret_key, nonce, sizeof(nonce),
+					  /* AAD */ out, 8, in, in_len, &out[8], &out[8 + in_len],
+					  NFC_CCM_TAG_LEN);
 
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("mbedtls_ccm_encrypt_and_tag", ret);
+		LOG_ERR_CALL_FAILED_INT("app_ccm_encrypt_and_tag", ret);
 		res = -EIO;
 	}
 

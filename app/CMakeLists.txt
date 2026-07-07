@@ -77,6 +77,19 @@ target_sources(app PRIVATE src/app_mpl3115a2.c)
 target_sources(app PRIVATE src/app_nfc_parser.c)
 target_sources(app PRIVATE src/app_config_ingest.c)
 target_sources(app PRIVATE src/app_nfc.c)
+target_sources(app PRIVATE src/app_ccm.c)
+
+# app_ccm's block cipher: the STM32WL HW AES peripheral by default. When it is
+# disabled (CONFIG_APP_CCM_HW_AES=n, e.g. the variant-A soft fallback) the CCM
+# layer uses the LoRaMac soft-SE AES instead — pull that source + its prekeyed
+# API in (the HW build needs neither).
+if(NOT CONFIG_APP_CCM_HW_AES)
+  set(SOFT_SE_DIR ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/peripherals/soft-se)
+  target_sources(app PRIVATE ${SOFT_SE_DIR}/aes.c)
+  target_include_directories(app PRIVATE ${SOFT_SE_DIR})
+  set_source_files_properties(src/app_ccm.c ${SOFT_SE_DIR}/aes.c
+    PROPERTIES COMPILE_DEFINITIONS "AES_ENC_PREKEYED")
+endif()
 target_sources(app PRIVATE src/app_pyq1648.c)
 target_sources(app PRIVATE src/app_sensor.c)
 target_sources(app PRIVATE src/app_settings.c)
