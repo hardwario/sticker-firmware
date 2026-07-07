@@ -78,6 +78,19 @@ var _DEVICE_STATUS = [
   [1 << 12, "lrw_disabled"],
 ];
 
+// reset_cause (Info field 11) bit -> name. Zephyr hwinfo RESET_* bitmask of the
+// last boot, so the backend can see WHY the device restarted (e.g. watchdog vs
+// brownout vs power-on) from the on-join GetInfo. Keep in sync with app_ats.c.
+var _RESET_CAUSES = [
+  [1 << 0, "pin"],
+  [1 << 1, "software"],
+  [1 << 2, "brownout"],
+  [1 << 3, "power_on"],
+  [1 << 4, "watchdog"],
+  [1 << 6, "security"],
+  [1 << 7, "low_power_wake"],
+];
+
 // Config submessage maps: proto field tag -> name. The flat C struct is split
 // across submessages lorawan/application/sensors/alarms; device identity stays
 // at the AppConfigMessage root (not addressable via SetParam/GetConfig).
@@ -272,6 +285,13 @@ function _decodeInfo(bytes, start, end) {
   info.device_status_flags = _DEVICE_STATUS
     .filter(function (f) { return (info.device_status & f[0]) !== 0; })
     .map(function (f) { return f[1]; });
+  // Decode the reset-cause bitmask into names so the backend sees why the device
+  // rebooted (present on every join GetInfo). 0 = unknown; omitted if absent.
+  if (info.reset_cause !== undefined) {
+    info.reset_cause_flags = _RESET_CAUSES
+      .filter(function (f) { return (info.reset_cause & f[0]) !== 0; })
+      .map(function (f) { return f[1]; });
+  }
   return info;
 }
 
