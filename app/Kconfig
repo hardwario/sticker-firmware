@@ -66,6 +66,19 @@ config APP_NFC_ENCRYPTION
 	  managing nonces. Such a build logs a loud boot warning. NEVER ship a
 	  build with this turned off.
 
+config APP_CCM_HW_AES
+	bool "Use the STM32WL hardware AES peripheral for NFC AES-CCM"
+	depends on APP_NFC_ENCRYPTION && SOC_SERIES_STM32WLX
+	default y
+	help
+	  Back the app_ccm (RFC 3610 AES-CCM) block cipher with the STM32WL on-die
+	  AES peripheral (register-level, no HAL/Zephyr-crypto dependency). This is
+	  what lets the build drop mbedTLS entirely (~6.5 KB flash, #261).
+
+	  Disable (n) to fall back to the LoRaMac soft-SE AES (peripherals/soft-se,
+	  already in flash) as the block cipher instead — the CCM layer is identical,
+	  only the primitive differs. The host unit tests use this software path.
+
 config APP_CMD_DEBUG_SHELL
 	bool "Shell injector for downlink command dispatcher"
 	depends on SHELL

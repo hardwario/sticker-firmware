@@ -1,0 +1,5 @@
+common:
+  tags: sticker nfc crypto ccm
+  platform_allow: native_sim
+tests:
+  sticker.ccm: {}
