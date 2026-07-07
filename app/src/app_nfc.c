@@ -739,6 +739,19 @@ static size_t build_info_ndef(uint8_t *out, size_t out_size)
 #define NFC_NONCE_DIR_REQUEST  0x00
 #define NFC_NONCE_DIR_RESPONSE 0x01
 
+/* Largest forward jump accepted for the anti-replay nonce counter (#266, N-2).
+ * decrypt() accepts a received counter only in (current, current + this]. Without
+ * an upper bound a single accepted command carrying a counter near UINT32_MAX
+ * would store that high-water and make every future (necessarily larger) counter
+ * impossible — permanently bricking the encrypted NFC channel, recoverable only
+ * by a debug `settings erase` or JTAG mass-erase (the counter is
+ * preserve_on_reset). The Manager-App reads the current high-water from the
+ * plaintext `inf` record before every command and always sends current + 1, so
+ * legitimate jumps are 1; this window is generous headroom yet negligible vs.
+ * UINT32_MAX, so it eliminates the brick without constraining real use. The
+ * nfc_crypto ztest mirrors this constant — keep them in lockstep. */
+#define NFC_NONCE_MAX_SKIP 1024
+
 #define NFC_CCM_TAG_LEN 16
 
 /* An all-zero secret key means the device has not been provisioned yet. Mirror
@@ -821,6 +834,17 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 	if (app_config()->nonce_counter >= nonce_counter) {
 		LOG_ERR("Nonce counter is not greater than the last used nonce: %u >= %u",
 			app_config()->nonce_counter, nonce_counter);
+		return -EACCES;
+	}
+
+	/* Bound the forward jump (#266, N-2). Reject a counter implausibly far ahead
+	 * of the high-water so a buggy/malicious provisioning tool cannot store a
+	 * near-UINT32_MAX value and permanently brick the channel. The subtraction is
+	 * overflow-safe: the check above guarantees nonce_counter > current, so the
+	 * unsigned difference never wraps. */
+	if (nonce_counter - app_config()->nonce_counter > NFC_NONCE_MAX_SKIP) {
+		LOG_ERR("Nonce counter jumps too far ahead: %u > %u + %u", nonce_counter,
+			app_config()->nonce_counter, NFC_NONCE_MAX_SKIP);
 		return -EACCES;
 	}
 
