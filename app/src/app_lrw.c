@@ -141,7 +141,13 @@ static struct k_work_delayable
  * HISTORY_MAX_RETRIES so a permanent TX error can't be retried forever. */
 #define FRAME_MAX_RETRIES 8
 
-static uint8_t m_frame_buf[64];
+/* Sized for the largest LoRaWAN application payload (EU868 DR4-6 / US915 DR4 =
+ * 242 B). app_compose() caps each frame at MIN(this, live DR budget) - 1, so a
+ * too-small buffer (was 64 B) needlessly fragmented a snapshot into extra uplinks
+ * on the higher data rates the radio could carry in one frame — more TX + RX
+ * windows + duty cycle + battery (#267 power). */
+#define FRAME_BUF_SIZE 242
+static uint8_t m_frame_buf[FRAME_BUF_SIZE];
 static size_t m_frame_len;
 static bool m_frame_more;
 static bool m_frame_first;
