@@ -176,6 +176,16 @@ int app_nfc_parser_run(const uint8_t *buffer, size_t buffer_len, app_nfc_parser_
 			return -ENODATA;
 		}
 
+		/* Reject chunked records (CF flag): a chunked payload is split across
+		 * several records that must be reassembled, which this parser does not do —
+		 * treating a chunk as a whole record would mis-read its payload. STICKER
+		 * never emits chunked NDEF, so refuse it explicitly rather than silently
+		 * mis-parse (#267). */
+		if (header & NDEF_RECORD_HEADER_CF_FLAG) {
+			LOG_ERR("Chunked NDEF record (CF) not supported");
+			return -ENOTSUP;
+		}
+
 		info.tnf = header & NDEF_RECORD_HEADER_TNF_MASK;
 
 		/* Get type length */

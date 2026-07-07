@@ -536,6 +536,14 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
 		 * previous one is still latched so we emit at most one alarm per notif-time
 		 * window regardless of event rate. from/to are not meaningful for a source
 		 * that never reports a level, so edge (0->1) and level (1->1) behave alike. */
+		/* Expire a lapsed one-shot here, in the event path, not only in the 3 s
+		 * app_alarm_poll: otherwise an alarm_notif_time shorter than the poll cadence
+		 * is silently clamped to it (a new event within ~3 s of the window elapsing
+		 * stays suppressed), so notif_time < 3 s was ineffective (#267). */
+		if (rt->active && rt->oneshot_expiry != 0 && k_uptime_get() >= rt->oneshot_expiry) {
+			rt->active = false;
+			rt->oneshot_expiry = 0;
+		}
 		if (cur && !rt->active) {
 			rt->active = true;
 			rt->oneshot_expiry = k_uptime_get() + notif_hold_ms();

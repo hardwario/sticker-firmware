@@ -120,6 +120,7 @@ static struct k_timer m_rejoin_timer;
 /* --- Works --- */
 static struct k_work m_send_work;            /* drains response/alarm, then composes telemetry */
 static struct k_work_delayable m_frame_work; /* multi-frame snapshot continuation */
+static struct k_work_delayable m_tx_jitter_work; /* #267: random pre-send delay (fleet de-corr) */
 static struct k_work m_join_work;
 static struct k_work m_link_check_work;       /* LC timeout (from m_lc_timeout_timer) */
 static struct k_work m_downlink_success_work; /* deferred from downlink_callback */
@@ -135,13 +136,27 @@ static struct k_work_delayable
 
 /* Multi-frame telemetry: gap before the next frame of the same snapshot (covers
  * RX1/RX2 windows) and backoff when a send is refused (duty cycle / MAC busy). */
-#define FRAME_GAP_SEC     3
-#define FRAME_RETRY_SEC   15
+#define FRAME_GAP_SEC   3
+#define FRAME_RETRY_SEC 15
+
+/* Fleet-uplink de-correlation: cap on the random pre-send jitter (#267). The
+ * window is min(interval_report/10, this) — 10% for short intervals, but an
+ * absolute ceiling so a long interval_report (e.g. 900 s) doesn't push the jitter
+ * to 90 s (excessive spread + telemetry staleness). 10 s already de-correlates a
+ * fleet well vs. the ~sub-second per-uplink airtime, and keeps the added staleness
+ * negligible even at long report intervals. */
+#define TX_JITTER_MAX_SEC 10
 /* Duty-cycle/MAC-busy retries before abandoning a telemetry frame (#219); mirrors
  * HISTORY_MAX_RETRIES so a permanent TX error can't be retried forever. */
 #define FRAME_MAX_RETRIES 8
 
-static uint8_t m_frame_buf[64];
+/* Sized for the largest LoRaWAN application payload (EU868 DR4-6 / US915 DR4 =
+ * 242 B). app_compose() caps each frame at MIN(this, live DR budget) - 1, so a
+ * too-small buffer (was 64 B) needlessly fragmented a snapshot into extra uplinks
+ * on the higher data rates the radio could carry in one frame — more TX + RX
+ * windows + duty cycle + battery (#267 power). */
+#define FRAME_BUF_SIZE 242
+static uint8_t m_frame_buf[FRAME_BUF_SIZE];
 static size_t m_frame_len;
 static bool m_frame_more;
 static bool m_frame_first;
@@ -1020,7 +1035,14 @@ static void tx_telemetry_frame(bool first_frame)
 
 	m_frame_resend = false;
 	m_frame_retries = 0;
-	m_message_count++;
+	/* Count reports, not frames (#267): m_message_count drives the link-check
+	 * cadence (should_request_link_check: msg_num % lrw_link_check_interval), which
+	 * is meant to be "every N reports". Advancing it on every frame made a
+	 * multi-frame snapshot count as N messages, so the LC cadence drifted with the
+	 * payload size. Advance once per report, on the final frame. */
+	if (!m_frame_more) {
+		m_message_count++;
+	}
 	m_last_uplink_ms = k_uptime_get(); /* M-2: telemetry actually went out */
 
 	if (m_frame_more) {
@@ -1045,6 +1067,13 @@ static void frame_work_handler(struct k_work *work)
 }
 
 static void tx_retry_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	k_work_submit_to_queue(&m_work_q, &m_send_work);
+}
+
+/* Fires after the random pre-send delay (#267): kick the normal send path. */
+static void tx_jitter_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
@@ -1582,6 +1611,7 @@ int app_lrw_init(void)
 	k_work_init(&m_join_work, join_work_handler);
 	k_work_init(&m_send_work, send_work_handler);
 	k_work_init_delayable(&m_frame_work, frame_work_handler);
+	k_work_init_delayable(&m_tx_jitter_work, tx_jitter_work_handler);
 	k_work_init_delayable(&m_hist_work, m_hist_work_handler);
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
@@ -1626,8 +1656,23 @@ void app_lrw_send_telemetry(void)
 {
 	/* Compose + split + send a telemetry snapshot from the current sensor data.
 	 * Runs on m_work_q; send_work_handler drains response/alarm first, then falls
-	 * through to the telemetry compose when both queues are empty. */
-	k_work_submit_to_queue(&m_work_q, &m_send_work);
+	 * through to the telemetry compose when both queues are empty.
+	 *
+	 * De-correlate fleet uplinks with a random PRE-SEND delay (#267). The jitter
+	 * lives here, on the transmission — NOT on the report timer in app_report, which
+	 * must stay a fixed interval so the history-capture cadence matches the fixed
+	 * interval that replay reconstructs (base + ord*interval_report); jittering the
+	 * period would drift every stored sample's timestamp. A fixed cadence also means
+	 * a report is never emitted early. send_work_handler still drains queued
+	 * responses/alarms first.
+	 *
+	 * Window = min(interval_report/10, TX_JITTER_MAX_SEC): 10% for short intervals,
+	 * but capped absolutely so a long interval (e.g. 900 s) doesn't yield a 90 s
+	 * delay (excessive spread + stale telemetry). */
+	uint32_t span_ms = (uint32_t)g_app_config.interval_report * 100U; /* interval/10, in ms */
+	span_ms = MIN(span_ms, (uint32_t)TX_JITTER_MAX_SEC * 1000U);
+	uint32_t delay_ms = span_ms ? (sys_rand32_get() % span_ms) : 0U;
+	k_work_reschedule_for_queue(&m_work_q, &m_tx_jitter_work, K_MSEC(delay_ms));
 }
 
 void app_lrw_register_ready_cb(void (*cb)(void))

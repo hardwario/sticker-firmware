@@ -553,6 +553,19 @@ static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *c
 	uint32_t cur_page = 0, used = 0;
 	for (uint8_t s = 0; s < 4; s++) {
 		for (size_t j = 0; j < req_n[s]; j++) {
+			/* Skip a field id already requested earlier in this section: a
+			 * duplicate would otherwise be counted twice against the page budget
+			 * (inflating page_count) and emitted twice (#267). */
+			bool dup = false;
+			for (size_t k = 0; k < j; k++) {
+				if (req_ids[s][k] == req_ids[s][j]) {
+					dup = true;
+					break;
+				}
+			}
+			if (dup) {
+				continue;
+			}
 			uint8_t sz;
 			bool nfc_only;
 			if (!dump_field_size(s, req_ids[s][j], &sz, &nfc_only)) {

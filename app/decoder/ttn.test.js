@@ -197,6 +197,18 @@ test("decodeUplink decodes get_info battery + reset_cause (fPort 85)", () => {
   assert.equal(got.info.reset_cause, 0x20);
 });
 
+// reset_cause is decoded into named flags so the backend sees WHY the device
+// rebooted, straight off the on-join GetInfo (fPort 85 over LoRaWAN). Inner Info:
+// fw 1.4.2, battery=3062 mV, reset_cause=0x09 (RESET_PIN | RESET_POR).
+test("decodeUplink decodes get_info reset_cause_flags (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a0b08011004180250f6175809"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.info.reset_cause, 0x09);
+  assert.deepEqual(got.info.reset_cause_flags, ["pin", "power_on"]);
+});
+
 // Info carries lrw_state (field 12, mirrors app_lrw_state) and dev_eui (field 13,
 // 8 bytes). Both are emitted over NFC only. Inner Info: fw 1.4.2,
 // lrw_state=2 (HEALTHY), dev_eui=0102030405060708.

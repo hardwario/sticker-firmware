@@ -739,7 +739,12 @@ static int scan_callback(struct w1_rom rom, void *user_data)
 		LOG_ERR_CALL_FAILED_INT("lis2dh12_enable_alert", ret);
 	}
 
-	m_sensors[m_count++].serial_number = serial_number;
+	/* Re-detect the SHT variant on every (re)scan: the cached sht_type is only
+	 * probed while UNKNOWN, so a slot reused for a swapped probe would otherwise
+	 * keep the previous part's type and issue the wrong SHT command (#267). */
+	m_sensors[m_count].sht_type = SHT_TYPE_UNKNOWN;
+	m_sensors[m_count].serial_number = serial_number;
+	m_count++;
 
 	LOG_DBG("Registered serial number: %llu", serial_number);
 
