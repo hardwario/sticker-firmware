@@ -1026,7 +1026,14 @@ static void tx_telemetry_frame(bool first_frame)
 
 	m_frame_resend = false;
 	m_frame_retries = 0;
-	m_message_count++;
+	/* Count reports, not frames (#267): m_message_count drives the link-check
+	 * cadence (should_request_link_check: msg_num % lrw_link_check_interval), which
+	 * is meant to be "every N reports". Advancing it on every frame made a
+	 * multi-frame snapshot count as N messages, so the LC cadence drifted with the
+	 * payload size. Advance once per report, on the final frame. */
+	if (!m_frame_more) {
+		m_message_count++;
+	}
 	m_last_uplink_ms = k_uptime_get(); /* M-2: telemetry actually went out */
 
 	if (m_frame_more) {
