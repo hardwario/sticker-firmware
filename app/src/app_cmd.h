@@ -28,6 +28,27 @@ enum app_cmd_transport {
 	APP_CMD_TRANSPORT_SHELL_DEBUG,
 };
 
+/* Aggregated device status reported in Device Info (device_status, fPort 85 +
+ * NFC). uint32 bitmask; proto3 omits a 0 so an empty field means "all OK /
+ * nothing active". Low bits are alarm categories (derived read-only from the
+ * alarm latches, no side effects), high bits are health/degradation. The raw
+ * LoRaWAN link state is NOT duplicated here (it has its own lrw_state field);
+ * only the derived LRW_DISABLED bit is included. Bit positions are stable --
+ * never renumber; new states take new bits. Plain (1u << n), not zephyr BIT(),
+ * so this header stays free of zephyr includes. */
+#define APP_DEVICE_STATUS_ALARM_ANY       (1u << 0) /* any alarm latched active */
+#define APP_DEVICE_STATUS_ALARM_THRESHOLD (1u << 1) /* analog threshold rule active */
+#define APP_DEVICE_STATUS_ALARM_STATE     (1u << 2) /* discrete state rule active */
+#define APP_DEVICE_STATUS_ALARM_RATE      (1u << 3) /* counter-rate rule active */
+#define APP_DEVICE_STATUS_ALARM_NO_DATA   (1u << 4) /* no-data watchdog latched */
+#define APP_DEVICE_STATUS_ALARM_LOW_BATT  (1u << 5) /* low-battery watchdog latched (#210) */
+/* bits 6..7 reserved for future alarm categories */
+#define APP_DEVICE_STATUS_NFC_DOWN        (1u << 8)  /* NFC (ST25DV) init failed, degraded */
+#define APP_DEVICE_STATUS_HISTORY_DOWN    (1u << 9)  /* history flash mount failed */
+#define APP_DEVICE_STATUS_I2C_WEDGED      (1u << 10) /* I2C bus wedged (fail streak >= threshold) */
+#define APP_DEVICE_STATUS_TIME_UNSYNCED   (1u << 11) /* RTC not synced (no wall-clock) */
+#define APP_DEVICE_STATUS_LRW_DISABLED    (1u << 12) /* radio-silent: DevEUI all-zero (#98) */
+
 /* Action the caller must perform AFTER the response has been sent (so the Ack
  * leaves before the device reboots). Set by app_cmd_handle(). */
 enum app_cmd_action {
@@ -56,9 +77,10 @@ struct app_cmd_info {
 	uint32_t unix_time;      /* UTC seconds since epoch */
 	uint8_t claim_token[16]; /* 128-bit device claim token (#170); all-zero = uncommissioned */
 	uint32_t battery_mv;     /* supply voltage in mV; 0 = measurement unavailable */
-	uint32_t reset_cause; /* hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown */
-	uint8_t lrw_state;    /* current LoRaWAN state (enum app_lrw_state) */
-	uint8_t dev_eui[8];   /* LoRaWAN DevEUI; all-zero = unset */
+	uint32_t reset_cause;   /* hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown */
+	uint8_t lrw_state;      /* current LoRaWAN state (enum app_lrw_state) */
+	uint8_t dev_eui[8];     /* LoRaWAN DevEUI; all-zero = unset */
+	uint32_t device_status; /* aggregated status (APP_DEVICE_STATUS_* bitmask) */
 };
 
 /* Cache the hwinfo reset-cause bitmask read once at boot (RESET_* flags from

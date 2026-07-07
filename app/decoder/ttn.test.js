@@ -225,6 +225,38 @@ test("decodeUplink get_info omits lrw_state + dev_eui over LoRaWAN (fPort 85)", 
   assert.equal(got.info.dev_eui, undefined);
 });
 
+// Info carries device_status (field 14, bitmask). Inner Info: fw 1.4.2,
+// device_status=0x03 (alarm_any | alarm_threshold).
+test("decodeUplink decodes get_info device_status (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a080801100418027003"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.seq, 3);
+  assert.equal(got.info.device_status, 0x03);
+  assert.deepEqual(got.info.device_status_flags, ["alarm_any", "alarm_threshold"]);
+});
+
+// lrw_state = 5 decodes to "disabled" (DevEUI all-zero radio-silent, #98).
+test("decodeUplink get_info lrw_state=5 decodes as disabled (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a080801100418026005"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.info.lrw_state, 5);
+  assert.equal(got.info.lrw_state_name, "disabled");
+});
+
+// A healthy device omits device_status (0 -> proto3 drops it); decoder defaults to 0/[].
+test("decodeUplink get_info device_status defaults to 0 when absent (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a080801100418026002"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.info.device_status, 0);
+  assert.deepEqual(got.info.device_status_flags, []);
+});
+
 // --- Uplink: protobuf telemetry (fPort 2) ---------------------------------
 // Real HW capture (#78/#80 verification, device sticker-2162165131, 2026-06-09):
 // a non-boot report with hall-left + hall-right capabilities enabled but no

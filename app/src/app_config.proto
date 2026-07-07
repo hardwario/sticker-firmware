@@ -237,6 +237,7 @@ message Response {
             HEALTHY   = 2;   // joined, link OK
             WARNING   = 3;   // joined, link check failing
             RECONNECT = 4;   // reconnecting with backoff
+            DISABLED  = 5;   // DevEUI all-zero: radio-silent, no join/TX (#98)
         }
 
         uint32 serial_number = 5;
@@ -248,6 +249,7 @@ message Response {
         uint32 reset_cause   = 11;  // hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown
         optional LrwState lrw_state = 12;  // current LoRaWAN network state; emitted over NFC only
         optional bytes dev_eui = 13;  // 8-byte DevEUI; emitted over NFC only, omitted if unset
+        uint32 device_status = 14;  // aggregated device status (APP_DEVICE_STATUS_* bitmask); 0 = all OK
     }
 
     message ConfigDump {

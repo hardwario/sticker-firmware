@@ -53,6 +53,10 @@ void app_sensor_sample(void);
 /* Stop the periodic sample timer ahead of a deep-sleep poweroff. */
 void app_sensor_suspend(void);
 
+/* True if the I2C bus is currently wedged (the latest sensor sweep saw every
+ * I2C read fail). Cleared on the next good sweep or after bus recovery. */
+bool app_sensor_i2c_wedged(void);
+
 #ifdef __cplusplus
 }
 #endif

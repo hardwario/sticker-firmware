@@ -85,6 +85,10 @@ int app_history_get(size_t idx, struct app_history_record *out);
 
 /* Master enable (mirrors g_app_config.history_enable at boot). */
 bool app_history_is_enabled(void);
+
+/* True if the history backend is ready. Flash backend: the partition mounted OK
+ * (false = mount failed, history degraded, #88 style). RAM backend: always true. */
+bool app_history_is_ready(void);
 void app_history_set_enabled(bool enable);
 
 /* Sensor selection mask (bit i = enum app_history_sensor i). Setting a new mask
