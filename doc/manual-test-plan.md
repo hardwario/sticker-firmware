@@ -9,6 +9,9 @@ Claude Code session that has the sticker attached over `rttt` and access to TTN
 (TTS MCP) and ChirpStack, and Claude will drive the scenario autonomously and report
 pass/fail. The tester only watches.
 
+> Agent-driven automated/HIL execution of these scenarios (bench intake, tooling, coverage
+> matrix, adversarial & power extensions): see [`automated-test-playbook.md`](automated-test-playbook.md).
+
 ---
 
 ## How to use
