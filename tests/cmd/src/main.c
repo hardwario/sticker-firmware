@@ -416,16 +416,18 @@ ZTEST(cmd, test_history_frame_full_fits_buffer)
  * given out_cap, and one more byte does not. */
 ZTEST(cmd, test_history_sample_capacity_is_exact)
 {
-	uint8_t samples[64];
+	uint8_t samples[APP_CMD_HISTORY_FRAME_BUF_SIZE];
 	uint8_t out[APP_CMD_HISTORY_FRAME_BUF_SIZE];
 	size_t out_len = 0;
 
 	memset(samples, 0x5A, sizeof(samples));
 
-	/* Worst-case varints, mirroring history_frame_cap() in app_lrw.c. */
+	/* Worst-case varints, mirroring history_frame_cap() in app_lrw.c. cap is
+	 * bounded by out_cap minus the frame envelope and by the samples field size
+	 * (440 B, #260) — for this out_cap the buffer, not the field, binds. */
 	size_t cap = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,
 						     900, sizeof(out));
-	zassert_true(cap > 0 && cap <= 48, "cap %zu out of range", cap);
+	zassert_true(cap > 0 && cap < sizeof(out), "cap %zu out of range", cap);
 
 	/* Exactly `cap` samples must encode within out_cap. */
 	int ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7, 900,
@@ -433,6 +435,12 @@ ZTEST(cmd, test_history_sample_capacity_is_exact)
 					      &out_len);
 	zassert_equal(ret, 0, "cap samples did not fit (ret %d)", ret);
 	zassert_true(out_len <= sizeof(out), "out_len %zu > out_cap", out_len);
+
+	/* Exactness: one more sample byte must NOT fit the same out_cap. */
+	ret = app_cmd_build_history_frame(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7, 900,
+					  /*time_synced*/ true, samples, cap + 1, out, sizeof(out),
+					  &out_len);
+	zassert_equal(ret, -EMSGSIZE, "cap+1 samples should overflow (ret %d)", ret);
 
 	/* A tighter budget yields a strictly smaller (or zero) capacity. */
 	size_t tight = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,

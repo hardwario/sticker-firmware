@@ -1010,23 +1010,26 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 	 * bytes here (value 0/1 both encode to 1 byte) or the frame could overflow. */
 	hf->has_time_synced = true;
 	hf->time_synced = true;
-	hf->samples.size = 0; /* empty bytes field is omitted in proto3 */
 
-	size_t base = 0;
-	if (!pb_get_encoded_size(&base, Response_fields, &resp)) {
-		return 0;
+	/* Binary-search the largest samples payload whose fully-encoded frame
+	 * (version byte + Response) still fits out_cap, measuring each candidate with
+	 * pb_get_encoded_size. Measuring beats hand-accounting the length varints:
+	 * BOTH the samples field length AND the enclosing history_frame submessage
+	 * length grow with the payload and cross the 1->2 byte varint boundary as it
+	 * passes 127 B — reachable since #260 raised the samples field to 440 B. */
+	size_t lo = 0, hi = sizeof(hf->samples.bytes);
+	while (lo < hi) {
+		size_t mid = (lo + hi + 1) / 2;
+		size_t sz = 0;
+		hf->samples.size = mid;
+		if (pb_get_encoded_size(&sz, Response_fields, &resp) &&
+		    (size_t)(1 + sz) <= out_cap) {
+			lo = mid;
+		} else {
+			hi = mid - 1;
+		}
 	}
-
-	/* The encoded frame is: version(1) + base + samples field. With 1..N
-	 * sample bytes (N <= 48 < 128) the samples field adds tag(1) + len(1) + N.
-	 * The empty-field omission above means `base` excludes those 2 bytes. */
-	const size_t fixed = 1 + base + 2;
-	if (out_cap <= fixed) {
-		return 0;
-	}
-
-	size_t avail = out_cap - fixed;
-	return MIN(avail, sizeof(hf->samples.bytes));
+	return lo;
 }
 
 int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
