@@ -102,8 +102,9 @@ def test_no_shell_omits_shell_command():
     # alarm_0 is declared no_shell: no shell function or sub-command entry...
     assert "cmd_alarm_0(" not in c
     assert "print_alarm_0(" not in c
-    # ...but it still round-trips through SetParam/GetParam ingest.
-    assert "config->alarm_0" in ingest
+    # ...but it still round-trips through SetParam/GetParam ingest (a table-driven
+    # descriptor row mapping the proto field to the struct member, #262).
+    assert "offsetof(struct app_config, alarm_0)" in ingest
     # A normal param in the same group keeps its shell command.
     assert "cmd_alarm_limit(" in c
 

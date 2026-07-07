@@ -664,29 +664,61 @@ def build_ingest_model(config):
                 "no_write_lrw": bool(p.get("no_write_lrw")),
                 "no_write_nfc": bool(p.get("no_write_nfc")),
             }
+            # Descriptor for the table-driven interpreter (#262): map the YAML type
+            # to a cfg_kind + optional [min, max]. bool/bytes/enum and integer
+            # ranges/bitmasks are table-driven; float/double/64-bit are not
+            # supported by the interpreter (none exist in config today) and error
+            # out loudly rather than silently mis-generate.
+            desc_kind = None
+            desc_min = 0
+            desc_max = 0
             if t == "bool":
                 e["kind"] = "bool"
+                desc_kind = "CFG_KIND_BOOL"
             elif t == "enum":
                 e["kind"] = "enum"
                 e["enum_max"] = max(v["value"] for v in enums[p["enum"]])
                 e["c_enum_type"] = filter_c_type(p, module)
                 e["proto_enum_type"] = f"{c_message}_{enum_proto_name[p['enum']]}"
+                desc_kind = "CFG_KIND_RANGED"
+                desc_min, desc_max = 0, e["enum_max"]
             elif t == "bytes":
                 e["kind"] = "bytes"
-            elif t in FLOAT_TYPES:
-                e["kind"] = "float"
-                e["min"] = filter_min_value(p)
-                e["max"] = filter_max_value(p)
+                desc_kind = "CFG_KIND_BYTES"
+            elif t in FLOAT_TYPES or t in {"int64", "uint64"}:
+                log.die(f"parameter '{p['name']}' type '{t}' is not supported by "
+                        f"the table-driven config interpreter (#262); add a kind "
+                        f"to app_config_table.c/.h if a {t} config field is needed")
             elif t in NUMERIC_TYPES:
-                if p.get("min") is not None or p.get("max") is not None:
+                if p.get("min") is not None and p.get("max") is not None:
                     e["kind"] = "int_ranged"
                     e["min"] = filter_min_value(p)
                     e["max"] = filter_max_value(p)
                     e["zero_allowed"] = bool(p.get("extras", {}).get("zero_allowed"))
+                    desc_kind = "CFG_KIND_RANGED"
+                    desc_min, desc_max = p["min"], p["max"]
                 else:
                     e["kind"] = "plain"
+                    desc_kind = "CFG_KIND_PLAIN"
             else:
                 e["kind"] = "plain"
+                desc_kind = "CFG_KIND_PLAIN"
+
+            flags = []
+            if e["dump"] or e["dump_nfc_only"]:
+                flags.append("CFG_F_DUMP")
+            if e["no_write_lrw"]:
+                flags.append("CFG_F_NO_WR_LRW")
+            if e["no_write_nfc"]:
+                flags.append("CFG_F_NO_WR_NFC")
+            if e.get("zero_allowed"):
+                flags.append("CFG_F_ZERO_OK")
+            if e["omit_if_zero"]:
+                flags.append("CFG_F_OMIT_ZERO")
+            e["desc_kind"] = desc_kind
+            e["desc_flags"] = " | ".join(flags) if flags else "0"
+            e["desc_min"] = desc_min
+            e["desc_max"] = desc_max
             params.append(e)
         groups.append({
             "key": g["key"],

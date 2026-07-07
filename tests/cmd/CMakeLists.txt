@@ -19,6 +19,7 @@ target_sources(app PRIVATE
   ${proto_srcs}
   ${APP_DIR}/src/app_cmd.c
   ${APP_DIR}/src/app_config_ingest.c   # real APPLY_*/FILL_* range validation
+  ${APP_DIR}/src/app_config_table.c    # generic table-driven apply/fill interpreter
   src/main.c
   src/stubs.c
 )
