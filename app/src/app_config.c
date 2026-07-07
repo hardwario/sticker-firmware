@@ -320,11 +320,53 @@ static const char m_msg_invalid_range[] = "invalid argument range";
 static const char m_msg_invalid_value[] = "invalid argument value";
 static const char m_msg_cmd_success[] = "command succeeded";
 
-typedef void (*print_func_t)(const struct shell *shell);
+/* Table-driven config shell (#262 Phase 3): one generic getter (print_field) +
+ * setter (cmd_field) walk a rodata descriptor per settable field, replacing the
+ * per-parameter print_<name>()/cmd_<name>() pair. Validation, messages and
+ * display formats are preserved 1:1. */
 
 /* Largest shell-settable byte field is 16 B (the LoRaWAN keys); the guard keeps
  * the fixed scratch safe should a longer field ever be added. */
 #define CMD_BYTES_MAX 32
+
+enum cfg_shell_kind {
+	CSK_BOOL = 0,
+	CSK_INT,   /* signed, range [min, max] (0 always allowed if CSK_F_ZERO_OK) */
+	CSK_UINT,  /* unsigned, range [min, max]; exactly `digits` decimals if digits > 0 */
+	CSK_ENUM,  /* token <-> value via cfg_enum_tokens */
+	CSK_BYTES, /* hex <-> raw; write-once if CSK_F_WRITE_ONCE */
+};
+
+#define CSK_F_READONLY   (1U << 0) /* shell read-only: any invocation just prints */
+#define CSK_F_HIDDEN     (1U << 1) /* omitted from `config show` */
+#define CSK_F_WRITE_ONCE (1U << 2) /* BYTES: refuse to overwrite a non-zero value */
+#define CSK_F_ZERO_OK    (1U << 3) /* INT: value 0 accepted regardless of [min, max] */
+
+struct cfg_enum_tokens {
+	const char *const *tokens; /* index = enum value (contiguous from 0) */
+	const char *valid;         /* comma-joined list for help / error output */
+	uint8_t count;
+};
+
+struct cfg_shell_field {
+	const char *key;
+	uint16_t off;
+	uint16_t size;
+	uint8_t kind;
+	uint8_t flags;
+	uint8_t digits;
+	int64_t min;
+	int64_t max;
+	const struct cfg_enum_tokens *tokens;
+};
+
+static uint32_t cfg_load32(const void *p, uint8_t size)
+{
+	uint32_t v = 0;
+
+	memcpy(&v, p, size);
+	return v;
+}
 
 static void print_bytes(const struct shell *shell, const char *key, const uint8_t *value,
 			size_t size)
@@ -344,16 +386,141 @@ static void print_bytes(const struct shell *shell, const char *key, const uint8_
 	shell_print(shell, SETTINGS_PFX " %s %s", key, buf);
 }
 
-static int cmd_bytes(const struct shell *shell, size_t argc, char **argv, uint8_t *value,
-		     size_t size, bool write_once, print_func_t print_func)
-{
-	if (argc == 1) {
-		if (print_func) {
-			print_func(shell);
-		}
-		return 0;
-	}
+static const char *const cfg_tokens_lrw_region[] = {
+	"eu868",
+	"us915",
+	"au915",
+};
+static const struct cfg_enum_tokens cfg_enumtok_lrw_region = {
+	cfg_tokens_lrw_region,
+	"eu868, us915, au915",
+	ARRAY_SIZE(cfg_tokens_lrw_region),
+};
+static const char *const cfg_tokens_lrw_network[] = {
+	"public",
+	"private",
+};
+static const struct cfg_enum_tokens cfg_enumtok_lrw_network = {
+	cfg_tokens_lrw_network,
+	"public, private",
+	ARRAY_SIZE(cfg_tokens_lrw_network),
+};
+static const char *const cfg_tokens_lrw_activation[] = {
+	"otaa",
+	"abp",
+};
+static const struct cfg_enum_tokens cfg_enumtok_lrw_activation = {
+	cfg_tokens_lrw_activation,
+	"otaa, abp",
+	ARRAY_SIZE(cfg_tokens_lrw_activation),
+};
+static const char *const cfg_tokens_motion_sensitivity[] = {
+	"off",
+	"low",
+	"medium",
+	"high",
+};
+static const struct cfg_enum_tokens cfg_enumtok_motion_sensitivity = {
+	cfg_tokens_motion_sensitivity,
+	"off, low, medium, high",
+	ARRAY_SIZE(cfg_tokens_motion_sensitivity),
+};
 
+#define CFG_SHELL(_key, _member, _kind, _flags, _digits, _min, _max, _tok)                         \
+	{(_key),                                                                                   \
+	 offsetof(struct app_config, _member),                                                     \
+	 sizeof(m_app_config._member),                                                             \
+	 (_kind),                                                                                  \
+	 (_flags),                                                                                 \
+	 (_digits),                                                                                \
+	 (_min),                                                                                   \
+	 (_max),                                                                                   \
+	 (_tok)}
+
+static const struct cfg_shell_field m_app_config_shell[] = {
+	CFG_SHELL("secret-key", secret_key, CSK_BYTES, 0, 0, 0, 0, NULL),
+	CFG_SHELL("serial-number", serial_number, CSK_UINT, 0, 10, 0, UINT32_MAX, NULL),
+	CFG_SHELL("nonce-counter", nonce_counter, CSK_UINT, 0, 0, 0, UINT32_MAX, NULL),
+	CFG_SHELL("claim-token", claim_token, CSK_BYTES, CSK_F_WRITE_ONCE, 0, 0, 0, NULL),
+	CFG_SHELL("calibration", calibration, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("interval-sample", interval_sample, CSK_INT, CSK_F_ZERO_OK, 0, 5, 3600, NULL),
+	CFG_SHELL("interval-report", interval_report, CSK_INT, 0, 0, 60, 86400, NULL),
+	CFG_SHELL("history-enable", history_enable, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("history-sensors", history_sensors, CSK_UINT, 0, 0, 0, UINT32_MAX, NULL),
+	CFG_SHELL("battery-level", battery_level, CSK_INT, 0, 0, 1000, 3600, NULL),
+	CFG_SHELL("alarm-limit", alarm_limit, CSK_INT, 0, 0, 0, 3600, NULL),
+	CFG_SHELL("alarm-notif-time", alarm_notif_time, CSK_INT, 0, 0, 1, 60, NULL),
+	CFG_SHELL("lrw-region", lrw_region, CSK_ENUM, 0, 0, 0, 0, &cfg_enumtok_lrw_region),
+	CFG_SHELL("lrw-sub-band", lrw_sub_band, CSK_INT, 0, 0, 0, 8, NULL),
+	CFG_SHELL("lrw-network", lrw_network, CSK_ENUM, 0, 0, 0, 0, &cfg_enumtok_lrw_network),
+	CFG_SHELL("lrw-adr", lrw_adr, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("lrw-activation", lrw_activation, CSK_ENUM, 0, 0, 0, 0,
+		  &cfg_enumtok_lrw_activation),
+	CFG_SHELL("lrw-deveui", lrw_deveui, CSK_BYTES, 0, 0, 0, 0, NULL),
+	CFG_SHELL("lrw-joineui", lrw_joineui, CSK_BYTES, 0, 0, 0, 0, NULL),
+	CFG_SHELL("lrw-nwkkey", lrw_nwkkey, CSK_BYTES, 0, 0, 0, 0, NULL),
+	CFG_SHELL("lrw-appkey", lrw_appkey, CSK_BYTES, 0, 0, 0, 0, NULL),
+	CFG_SHELL("lrw-devaddr", lrw_devaddr, CSK_BYTES, 0, 0, 0, 0, NULL),
+	CFG_SHELL("lrw-nwkskey", lrw_nwkskey, CSK_BYTES, 0, 0, 0, 0, NULL),
+	CFG_SHELL("lrw-appskey", lrw_appskey, CSK_BYTES, 0, 0, 0, 0, NULL),
+	CFG_SHELL("lrw-link-check-interval", lrw_link_check_interval, CSK_INT, 0, 0, 0, 255, NULL),
+	CFG_SHELL("lrw-link-check-fail-rejoin", lrw_link_check_fail_rejoin, CSK_INT, 0, 0, 1, 255,
+		  NULL),
+	CFG_SHELL("cap-hall-left", cap_hall_left, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("cap-hall-right", cap_hall_right, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("cap-input-a", cap_input_a, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("cap-input-b", cap_input_b, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("cap-light-sensor", cap_light_sensor, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("cap-barometer", cap_barometer, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("cap-pir-detector", cap_pir_detector, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("cap-w1-sensors", cap_w1_sensors, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("cap-accelerometer", cap_accelerometer, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("accel-motion-sensitivity", accel_motion_sensitivity, CSK_ENUM, 0, 0, 0, 0,
+		  &cfg_enumtok_motion_sensitivity),
+	CFG_SHELL("sensor1-rom", sensor1_rom, CSK_BYTES, 0, 0, 0, 0, NULL),
+	CFG_SHELL("sensor2-rom", sensor2_rom, CSK_BYTES, 0, 0, 0, 0, NULL),
+	CFG_SHELL("sensor3-rom", sensor3_rom, CSK_BYTES, 0, 0, 0, 0, NULL),
+	CFG_SHELL("sensor4-rom", sensor4_rom, CSK_BYTES, 0, 0, 0, 0, NULL),
+	CFG_SHELL("hall-left-counter", hall_left_counter, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("hall-right-counter", hall_right_counter, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("input-a-counter", input_a_counter, CSK_BOOL, 0, 0, 0, 0, NULL),
+	CFG_SHELL("input-b-counter", input_b_counter, CSK_BOOL, 0, 0, 0, 0, NULL),
+};
+
+static void print_field(const struct shell *shell, const struct cfg_shell_field *f)
+{
+	const uint8_t *p = (const uint8_t *)&m_app_config + f->off;
+
+	switch (f->kind) {
+	case CSK_BYTES:
+		print_bytes(shell, f->key, p, f->size);
+		break;
+	case CSK_BOOL:
+		shell_print(shell, SETTINGS_PFX " %s %s", f->key,
+			    *(const bool *)p ? "true" : "false");
+		break;
+	case CSK_ENUM: {
+		uint32_t v = cfg_load32(p, f->size);
+		const char *str = (v < f->tokens->count) ? f->tokens->tokens[v] : "unknown";
+
+		shell_print(shell, SETTINGS_PFX " %s %s", f->key, str);
+		break;
+	}
+	case CSK_INT:
+		shell_print(shell, SETTINGS_PFX " %s %d", f->key, (int)cfg_load32(p, f->size));
+		break;
+	case CSK_UINT:
+		/* `%0*u` folds "%u" (digits==0) and the zero-padded fixed-width form
+		 * (e.g. serial-number's "%010u", digits==10) into one literal format. */
+		shell_print(shell, SETTINGS_PFX " %s %0*u", f->key, f->digits,
+			    (unsigned int)cfg_load32(p, f->size));
+		break;
+	}
+}
+
+static int cmd_bytes(const struct shell *shell, size_t argc, char **argv, uint8_t *value,
+		     size_t size, bool write_once)
+{
 	if (argc != 2) {
 		shell_error(shell, "%s", m_msg_invalid_args);
 		return -EINVAL;
@@ -394,14 +561,30 @@ static int cmd_bytes(const struct shell *shell, size_t argc, char **argv, uint8_
 	return 0;
 }
 
-static int cmd_bool(const struct shell *shell, size_t argc, char **argv, bool *param,
-		    print_func_t print_func)
+static int cmd_field(const struct shell *shell, size_t argc, char **argv)
 {
-	if (argc == 1) {
-		if (print_func) {
-			print_func(shell);
+	const struct cfg_shell_field *f = NULL;
+
+	for (size_t i = 0; i < ARRAY_SIZE(m_app_config_shell); i++) {
+		if (!strcmp(argv[0], m_app_config_shell[i].key)) {
+			f = &m_app_config_shell[i];
+			break;
 		}
+	}
+	if (!f) {
+		return -ENOENT; /* unreachable: the shell only dispatches known subcommands */
+	}
+
+	uint8_t *p = (uint8_t *)&m_app_config + f->off;
+
+	/* A read-only field, or a bare `config <key>` (get): print and return. */
+	if ((f->flags & CSK_F_READONLY) || argc == 1) {
+		print_field(shell, f);
 		return 0;
+	}
+
+	if (f->kind == CSK_BYTES) {
+		return cmd_bytes(shell, argc, argv, p, f->size, (f->flags & CSK_F_WRITE_ONCE) != 0);
 	}
 
 	if (argc != 2) {
@@ -409,883 +592,114 @@ static int cmd_bool(const struct shell *shell, size_t argc, char **argv, bool *p
 		return -EINVAL;
 	}
 
-	if (!strcmp(argv[1], "true")) {
-		*param = true;
-	} else if (!strcmp(argv[1], "false")) {
-		*param = false;
-	} else {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
+	switch (f->kind) {
+	case CSK_BOOL:
+		if (!strcmp(argv[1], "true")) {
+			*(bool *)p = true;
+		} else if (!strcmp(argv[1], "false")) {
+			*(bool *)p = false;
+		} else {
+			shell_error(shell, "%s", m_msg_invalid_value);
+			return -EINVAL;
+		}
+		shell_print(shell, "%s", m_msg_cmd_success);
+		return 0;
+
+	case CSK_INT: {
+		char *endptr;
+		long value = strtol(argv[1], &endptr, 10);
+
+		if (*endptr != '\0' || endptr == argv[1]) {
+			shell_error(shell, "%s", m_msg_invalid_value);
+			return -EINVAL;
+		}
+		if (!((f->flags & CSK_F_ZERO_OK) && value == 0) &&
+		    (value < f->min || value > f->max)) {
+			shell_error(shell, "%s", m_msg_invalid_range);
+			return -EINVAL;
+		}
+
+		uint32_t v = (uint32_t)value;
+
+		memcpy(p, &v, f->size);
+		shell_print(shell, "%s", m_msg_cmd_success);
+		return 0;
 	}
 
-	shell_print(shell, "%s", m_msg_cmd_success);
-	return 0;
-}
+	case CSK_UINT: {
+		char *endptr;
 
-static int cmd_int(const struct shell *shell, size_t argc, char **argv, int *param, int min,
-		   int max, print_func_t print_func)
-{
-	if (argc == 1) {
-		if (print_func) {
-			print_func(shell);
+		if (f->digits) {
+			if (strlen(argv[1]) != f->digits) {
+				shell_error(shell, "%s", m_msg_invalid_value);
+				return -EINVAL;
+			}
+			for (size_t i = 0; argv[1][i] != '\0'; i++) {
+				if (!isdigit((int)argv[1][i])) {
+					shell_error(shell, "%s", m_msg_invalid_value);
+					return -EINVAL;
+				}
+			}
+		} else if (argv[1][0] == '-') {
+			shell_error(shell, "%s", m_msg_invalid_range);
+			return -EINVAL;
+		}
+
+		errno = 0;
+		unsigned long long value = strtoull(argv[1], &endptr, 10);
+
+		if (!f->digits && (*endptr != '\0' || endptr == argv[1])) {
+			shell_error(shell, "%s", m_msg_invalid_value);
+			return -EINVAL;
+		}
+		/* errno==ERANGE catches strtoull saturating a giant input; the max
+		 * bound then rejects values above the field width (e.g. > UINT32_MAX). */
+		if (errno == ERANGE || value < (unsigned long long)f->min ||
+		    value > (unsigned long long)f->max) {
+			shell_error(shell, "%s",
+				    f->digits ? m_msg_invalid_value : m_msg_invalid_range);
+			return -EINVAL;
+		}
+
+		uint32_t v = (uint32_t)value;
+
+		memcpy(p, &v, f->size);
+		if (!f->digits) {
+			shell_print(shell, "%s", m_msg_cmd_success);
 		}
 		return 0;
 	}
 
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
+	case CSK_ENUM:
+		if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+			shell_print(shell, "valid values: %s", f->tokens->valid);
+			return 0;
+		}
+		for (uint8_t i = 0; i < f->tokens->count; i++) {
+			if (!strcmp(argv[1], f->tokens->tokens[i])) {
+				uint32_t v = i;
 
-	char *endptr;
-	long value = strtol(argv[1], &endptr, 10);
-
-	if (*endptr != '\0' || endptr == argv[1]) {
+				memcpy(p, &v, f->size);
+				return 0;
+			}
+		}
 		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: %s", f->tokens->valid);
 		return -EINVAL;
 	}
 
-	if (value < min || value > max) {
-		shell_error(shell, "%s", m_msg_invalid_range);
-		return -EINVAL;
-	}
-
-	*param = (int)value;
-	shell_print(shell, "%s", m_msg_cmd_success);
-	return 0;
-}
-
-static void print_secret_key(const struct shell *shell)
-{
-	print_bytes(shell, "secret-key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
-}
-
-static void print_serial_number(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " serial-number %010u", m_app_config.serial_number);
-}
-
-static void print_nonce_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " nonce-counter %u", m_app_config.nonce_counter);
-}
-
-static void print_claim_token(const struct shell *shell)
-{
-	print_bytes(shell, "claim-token", m_app_config.claim_token,
-		    sizeof(m_app_config.claim_token));
-}
-
-static void print_calibration(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " calibration %s",
-		    m_app_config.calibration ? "true" : "false");
-}
-
-static void print_interval_sample(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " interval-sample %d", m_app_config.interval_sample);
-}
-
-static void print_interval_report(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " interval-report %d", m_app_config.interval_report);
-}
-
-static void print_history_enable(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " history-enable %s",
-		    m_app_config.history_enable ? "true" : "false");
-}
-
-static void print_history_sensors(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " history-sensors %u", m_app_config.history_sensors);
-}
-
-static void print_battery_level(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " battery-level %d", m_app_config.battery_level);
-}
-
-static void print_alarm_limit(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-limit %d", m_app_config.alarm_limit);
-}
-
-static void print_alarm_notif_time(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-notif-time %d", m_app_config.alarm_notif_time);
-}
-
-static void print_lrw_region(const struct shell *shell)
-{
-	const char *str;
-	switch (m_app_config.lrw_region) {
-	case APP_CONFIG_LRW_REGION_EU868:
-		str = "eu868";
-		break;
-	case APP_CONFIG_LRW_REGION_US915:
-		str = "us915";
-		break;
-	case APP_CONFIG_LRW_REGION_AU915:
-		str = "au915";
-		break;
-	default:
-		str = "unknown";
-		break;
-	}
-	shell_print(shell, SETTINGS_PFX " lrw-region %s", str);
-}
-
-static void print_lrw_sub_band(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " lrw-sub-band %d", m_app_config.lrw_sub_band);
-}
-
-static void print_lrw_network(const struct shell *shell)
-{
-	const char *str;
-	switch (m_app_config.lrw_network) {
-	case APP_CONFIG_LRW_NETWORK_PUBLIC:
-		str = "public";
-		break;
-	case APP_CONFIG_LRW_NETWORK_PRIVATE:
-		str = "private";
-		break;
-	default:
-		str = "unknown";
-		break;
-	}
-	shell_print(shell, SETTINGS_PFX " lrw-network %s", str);
-}
-
-static void print_lrw_adr(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " lrw-adr %s", m_app_config.lrw_adr ? "true" : "false");
-}
-
-static void print_lrw_activation(const struct shell *shell)
-{
-	const char *str;
-	switch (m_app_config.lrw_activation) {
-	case APP_CONFIG_LRW_ACTIVATION_OTAA:
-		str = "otaa";
-		break;
-	case APP_CONFIG_LRW_ACTIVATION_ABP:
-		str = "abp";
-		break;
-	default:
-		str = "unknown";
-		break;
-	}
-	shell_print(shell, SETTINGS_PFX " lrw-activation %s", str);
-}
-
-static void print_lrw_deveui(const struct shell *shell)
-{
-	print_bytes(shell, "lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
-}
-
-static void print_lrw_joineui(const struct shell *shell)
-{
-	print_bytes(shell, "lrw-joineui", m_app_config.lrw_joineui,
-		    sizeof(m_app_config.lrw_joineui));
-}
-
-static void print_lrw_nwkkey(const struct shell *shell)
-{
-	print_bytes(shell, "lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
-}
-
-static void print_lrw_appkey(const struct shell *shell)
-{
-	print_bytes(shell, "lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
-}
-
-static void print_lrw_devaddr(const struct shell *shell)
-{
-	print_bytes(shell, "lrw-devaddr", m_app_config.lrw_devaddr,
-		    sizeof(m_app_config.lrw_devaddr));
-}
-
-static void print_lrw_nwkskey(const struct shell *shell)
-{
-	print_bytes(shell, "lrw-nwkskey", m_app_config.lrw_nwkskey,
-		    sizeof(m_app_config.lrw_nwkskey));
-}
-
-static void print_lrw_appskey(const struct shell *shell)
-{
-	print_bytes(shell, "lrw-appskey", m_app_config.lrw_appskey,
-		    sizeof(m_app_config.lrw_appskey));
-}
-
-static void print_lrw_link_check_interval(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " lrw-link-check-interval %d",
-		    m_app_config.lrw_link_check_interval);
-}
-
-static void print_lrw_link_check_fail_rejoin(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " lrw-link-check-fail-rejoin %d",
-		    m_app_config.lrw_link_check_fail_rejoin);
-}
-
-static void print_cap_hall_left(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-hall-left %s",
-		    m_app_config.cap_hall_left ? "true" : "false");
-}
-
-static void print_cap_hall_right(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-hall-right %s",
-		    m_app_config.cap_hall_right ? "true" : "false");
-}
-
-static void print_cap_input_a(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-input-a %s",
-		    m_app_config.cap_input_a ? "true" : "false");
-}
-
-static void print_cap_input_b(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-input-b %s",
-		    m_app_config.cap_input_b ? "true" : "false");
-}
-
-static void print_cap_light_sensor(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-light-sensor %s",
-		    m_app_config.cap_light_sensor ? "true" : "false");
-}
-
-static void print_cap_barometer(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-barometer %s",
-		    m_app_config.cap_barometer ? "true" : "false");
-}
-
-static void print_cap_pir_detector(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-pir-detector %s",
-		    m_app_config.cap_pir_detector ? "true" : "false");
-}
-
-static void print_cap_w1_sensors(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-w1-sensors %s",
-		    m_app_config.cap_w1_sensors ? "true" : "false");
-}
-
-static void print_cap_accelerometer(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " cap-accelerometer %s",
-		    m_app_config.cap_accelerometer ? "true" : "false");
-}
-
-static void print_accel_motion_sensitivity(const struct shell *shell)
-{
-	const char *str;
-	switch (m_app_config.accel_motion_sensitivity) {
-	case APP_CONFIG_MOTION_SENSITIVITY_OFF:
-		str = "off";
-		break;
-	case APP_CONFIG_MOTION_SENSITIVITY_LOW:
-		str = "low";
-		break;
-	case APP_CONFIG_MOTION_SENSITIVITY_MEDIUM:
-		str = "medium";
-		break;
-	case APP_CONFIG_MOTION_SENSITIVITY_HIGH:
-		str = "high";
-		break;
-	default:
-		str = "unknown";
-		break;
-	}
-	shell_print(shell, SETTINGS_PFX " accel-motion-sensitivity %s", str);
-}
-
-static void print_sensor1_rom(const struct shell *shell)
-{
-	print_bytes(shell, "sensor1-rom", m_app_config.sensor1_rom,
-		    sizeof(m_app_config.sensor1_rom));
-}
-
-static void print_sensor2_rom(const struct shell *shell)
-{
-	print_bytes(shell, "sensor2-rom", m_app_config.sensor2_rom,
-		    sizeof(m_app_config.sensor2_rom));
-}
-
-static void print_sensor3_rom(const struct shell *shell)
-{
-	print_bytes(shell, "sensor3-rom", m_app_config.sensor3_rom,
-		    sizeof(m_app_config.sensor3_rom));
-}
-
-static void print_sensor4_rom(const struct shell *shell)
-{
-	print_bytes(shell, "sensor4-rom", m_app_config.sensor4_rom,
-		    sizeof(m_app_config.sensor4_rom));
-}
-
-static void print_hall_left_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-left-counter %s",
-		    m_app_config.hall_left_counter ? "true" : "false");
-}
-
-static void print_hall_right_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-right-counter %s",
-		    m_app_config.hall_right_counter ? "true" : "false");
-}
-
-static void print_input_a_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-a-counter %s",
-		    m_app_config.input_a_counter ? "true" : "false");
-}
-
-static void print_input_b_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-b-counter %s",
-		    m_app_config.input_b_counter ? "true" : "false");
+	return -EINVAL;
 }
 
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
-	print_secret_key(shell);
-	print_serial_number(shell);
-	print_nonce_counter(shell);
-	print_claim_token(shell);
-	print_calibration(shell);
-	print_interval_sample(shell);
-	print_interval_report(shell);
-	print_history_enable(shell);
-	print_history_sensors(shell);
-	print_battery_level(shell);
-	print_alarm_limit(shell);
-	print_alarm_notif_time(shell);
-	print_lrw_region(shell);
-	print_lrw_sub_band(shell);
-	print_lrw_network(shell);
-	print_lrw_adr(shell);
-	print_lrw_activation(shell);
-	print_lrw_deveui(shell);
-	print_lrw_joineui(shell);
-	print_lrw_nwkkey(shell);
-	print_lrw_appkey(shell);
-	print_lrw_devaddr(shell);
-	print_lrw_nwkskey(shell);
-	print_lrw_appskey(shell);
-	print_lrw_link_check_interval(shell);
-	print_lrw_link_check_fail_rejoin(shell);
-	print_cap_hall_left(shell);
-	print_cap_hall_right(shell);
-	print_cap_input_a(shell);
-	print_cap_input_b(shell);
-	print_cap_light_sensor(shell);
-	print_cap_barometer(shell);
-	print_cap_pir_detector(shell);
-	print_cap_w1_sensors(shell);
-	print_cap_accelerometer(shell);
-	print_accel_motion_sensitivity(shell);
-	print_sensor1_rom(shell);
-	print_sensor2_rom(shell);
-	print_sensor3_rom(shell);
-	print_sensor4_rom(shell);
-	print_hall_left_counter(shell);
-	print_hall_right_counter(shell);
-	print_input_a_counter(shell);
-	print_input_b_counter(shell);
-
-	return 0;
-}
-
-static int cmd_secret_key(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.secret_key,
-			 sizeof(m_app_config.secret_key), false, print_secret_key);
-}
-
-static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_serial_number(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	size_t len = strlen(argv[1]);
-
-	if (len != 10) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	for (size_t i = 0; i < len; i++) {
-		if (!isdigit((int)argv[1][i])) {
-			shell_error(shell, "%s", m_msg_invalid_value);
-			return -EINVAL;
+	for (size_t i = 0; i < ARRAY_SIZE(m_app_config_shell); i++) {
+		if (!(m_app_config_shell[i].flags & CSK_F_HIDDEN)) {
+			print_field(shell, &m_app_config_shell[i]);
 		}
 	}
 
-	errno = 0;
-	unsigned long value = strtoul(argv[1], NULL, 10);
-
-	if (errno == ERANGE || value > UINT32_MAX) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	m_app_config.serial_number = (uint32_t)value;
-
 	return 0;
-}
-
-static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_nonce_counter(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (argv[1][0] == '-') {
-		shell_error(shell, "%s", m_msg_invalid_range);
-		return -EINVAL;
-	}
-
-	char *endptr;
-
-	errno = 0;
-	unsigned long value = strtoul(argv[1], &endptr, 10);
-
-	if (*endptr != '\0' || endptr == argv[1]) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* errno==ERANGE catches strtoul saturating an out-of-range input to
-	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
-	 * slip past the max check when max is itself UINT32_MAX. */
-	if (errno == ERANGE || value < 0 || value > UINT32_MAX) {
-		shell_error(shell, "%s", m_msg_invalid_range);
-		return -EINVAL;
-	}
-
-	m_app_config.nonce_counter = (uint32_t)value;
-	shell_print(shell, "%s", m_msg_cmd_success);
-	return 0;
-}
-
-static int cmd_claim_token(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.claim_token,
-			 sizeof(m_app_config.claim_token), true, print_claim_token);
-}
-
-static int cmd_calibration(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.calibration, print_calibration);
-}
-
-static int cmd_interval_sample(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_interval_sample(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	char *endptr;
-	int a = strtol(argv[1], &endptr, 10);
-
-	if (*endptr != '\0' || endptr == argv[1]) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	if (a != 0 && (a < 5 || a > 3600)) {
-		shell_error(shell, "%s", m_msg_invalid_range);
-		return -EINVAL;
-	}
-
-	m_app_config.interval_sample = a;
-
-	return 0;
-}
-
-static int cmd_interval_report(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_int(shell, argc, argv, &m_app_config.interval_report, 60, 86400,
-		       print_interval_report);
-}
-
-static int cmd_history_enable(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.history_enable, print_history_enable);
-}
-
-static int cmd_history_sensors(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_history_sensors(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (argv[1][0] == '-') {
-		shell_error(shell, "%s", m_msg_invalid_range);
-		return -EINVAL;
-	}
-
-	char *endptr;
-
-	errno = 0;
-	unsigned long value = strtoul(argv[1], &endptr, 10);
-
-	if (*endptr != '\0' || endptr == argv[1]) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	/* errno==ERANGE catches strtoul saturating an out-of-range input to
-	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
-	 * slip past the max check when max is itself UINT32_MAX. */
-	if (errno == ERANGE || value < 0 || value > UINT32_MAX) {
-		shell_error(shell, "%s", m_msg_invalid_range);
-		return -EINVAL;
-	}
-
-	m_app_config.history_sensors = (uint32_t)value;
-	shell_print(shell, "%s", m_msg_cmd_success);
-	return 0;
-}
-
-static int cmd_battery_level(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_int(shell, argc, argv, &m_app_config.battery_level, 1000, 3600,
-		       print_battery_level);
-}
-
-static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_int(shell, argc, argv, &m_app_config.alarm_limit, 0, 3600, print_alarm_limit);
-}
-
-static int cmd_alarm_notif_time(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_int(shell, argc, argv, &m_app_config.alarm_notif_time, 1, 60,
-		       print_alarm_notif_time);
-}
-
-static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_lrw_region(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	/* `help`/`?` lists the accepted tokens. */
-	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
-		shell_print(shell, "valid values: eu868, us915, au915");
-		return 0;
-	}
-
-	if (!strcmp(argv[1], "eu868")) {
-		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_EU868;
-	} else if (!strcmp(argv[1], "us915")) {
-		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_US915;
-	} else if (!strcmp(argv[1], "au915")) {
-		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_AU915;
-	} else {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		shell_print(shell, "valid values: eu868, us915, au915");
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int cmd_lrw_sub_band(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_int(shell, argc, argv, &m_app_config.lrw_sub_band, 0, 8, print_lrw_sub_band);
-}
-
-static int cmd_lrw_network(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_lrw_network(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	/* `help`/`?` lists the accepted tokens. */
-	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
-		shell_print(shell, "valid values: public, private");
-		return 0;
-	}
-
-	if (!strcmp(argv[1], "public")) {
-		m_app_config.lrw_network = APP_CONFIG_LRW_NETWORK_PUBLIC;
-	} else if (!strcmp(argv[1], "private")) {
-		m_app_config.lrw_network = APP_CONFIG_LRW_NETWORK_PRIVATE;
-	} else {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		shell_print(shell, "valid values: public, private");
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int cmd_lrw_adr(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.lrw_adr, print_lrw_adr);
-}
-
-static int cmd_lrw_activation(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_lrw_activation(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	/* `help`/`?` lists the accepted tokens. */
-	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
-		shell_print(shell, "valid values: otaa, abp");
-		return 0;
-	}
-
-	if (!strcmp(argv[1], "otaa")) {
-		m_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_OTAA;
-	} else if (!strcmp(argv[1], "abp")) {
-		m_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_ABP;
-	} else {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		shell_print(shell, "valid values: otaa, abp");
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.lrw_deveui,
-			 sizeof(m_app_config.lrw_deveui), false, print_lrw_deveui);
-}
-
-static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.lrw_joineui,
-			 sizeof(m_app_config.lrw_joineui), false, print_lrw_joineui);
-}
-
-static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.lrw_nwkkey,
-			 sizeof(m_app_config.lrw_nwkkey), false, print_lrw_nwkkey);
-}
-
-static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.lrw_appkey,
-			 sizeof(m_app_config.lrw_appkey), false, print_lrw_appkey);
-}
-
-static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.lrw_devaddr,
-			 sizeof(m_app_config.lrw_devaddr), false, print_lrw_devaddr);
-}
-
-static int cmd_lrw_nwkskey(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.lrw_nwkskey,
-			 sizeof(m_app_config.lrw_nwkskey), false, print_lrw_nwkskey);
-}
-
-static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.lrw_appskey,
-			 sizeof(m_app_config.lrw_appskey), false, print_lrw_appskey);
-}
-
-static int cmd_lrw_link_check_interval(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_int(shell, argc, argv, &m_app_config.lrw_link_check_interval, 0, 255,
-		       print_lrw_link_check_interval);
-}
-
-static int cmd_lrw_link_check_fail_rejoin(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_int(shell, argc, argv, &m_app_config.lrw_link_check_fail_rejoin, 1, 255,
-		       print_lrw_link_check_fail_rejoin);
-}
-
-static int cmd_cap_hall_left(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_hall_left, print_cap_hall_left);
-}
-
-static int cmd_cap_hall_right(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_hall_right, print_cap_hall_right);
-}
-
-static int cmd_cap_input_a(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_input_a, print_cap_input_a);
-}
-
-static int cmd_cap_input_b(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_input_b, print_cap_input_b);
-}
-
-static int cmd_cap_light_sensor(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_light_sensor, print_cap_light_sensor);
-}
-
-static int cmd_cap_barometer(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_barometer, print_cap_barometer);
-}
-
-static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_pir_detector, print_cap_pir_detector);
-}
-
-static int cmd_cap_w1_sensors(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_w1_sensors, print_cap_w1_sensors);
-}
-
-static int cmd_cap_accelerometer(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_accelerometer,
-			print_cap_accelerometer);
-}
-
-static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
-{
-	if (argc == 1) {
-		print_accel_motion_sensitivity(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	/* `help`/`?` lists the accepted tokens. */
-	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
-		shell_print(shell, "valid values: off, low, medium, high");
-		return 0;
-	}
-
-	if (!strcmp(argv[1], "off")) {
-		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
-	} else if (!strcmp(argv[1], "low")) {
-		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_LOW;
-	} else if (!strcmp(argv[1], "medium")) {
-		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_MEDIUM;
-	} else if (!strcmp(argv[1], "high")) {
-		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_HIGH;
-	} else {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		shell_print(shell, "valid values: off, low, medium, high");
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int cmd_sensor1_rom(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.sensor1_rom,
-			 sizeof(m_app_config.sensor1_rom), false, print_sensor1_rom);
-}
-
-static int cmd_sensor2_rom(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.sensor2_rom,
-			 sizeof(m_app_config.sensor2_rom), false, print_sensor2_rom);
-}
-
-static int cmd_sensor3_rom(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.sensor3_rom,
-			 sizeof(m_app_config.sensor3_rom), false, print_sensor3_rom);
-}
-
-static int cmd_sensor4_rom(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bytes(shell, argc, argv, m_app_config.sensor4_rom,
-			 sizeof(m_app_config.sensor4_rom), false, print_sensor4_rom);
-}
-
-static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_counter,
-			print_hall_left_counter);
-}
-
-static int cmd_hall_right_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_counter,
-			print_hall_right_counter);
-}
-
-static int cmd_input_a_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_a_counter, print_input_a_counter);
-}
-
-static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_b_counter, print_input_b_counter);
 }
 
 static int print_help(const struct shell *shell, size_t argc, char **argv)
@@ -1312,179 +726,179 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 
 	SHELL_CMD_ARG(secret-key, NULL,
 	              "Get/Set device secret key (32 hexadecimal digits).",
-	              cmd_secret_key, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(serial-number, NULL,
 	              "Get/Set device serial number (10 decimal digits).",
-	              cmd_serial_number, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(nonce-counter, NULL,
 	              "Get/Set nonce counter (unsigned integer).",
-	              cmd_nonce_counter, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(claim-token, NULL,
 	              "Get/Set device claim token (32 hexadecimal digits); write-once at commissioning.",
-	              cmd_claim_token, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(calibration, NULL,
 	              "Get/Set calibration mode (true/false).",
-	              cmd_calibration, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(interval-sample, NULL,
 	              "Get/Set sample interval (range 5 to 3600 seconds; 0 = precede report).",
-	              cmd_interval_sample, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(interval-report, NULL,
 	              "Get/Set report interval (range 60 to 86400 seconds).",
-	              cmd_interval_report, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(history-enable, NULL,
 	              "Get/Set sensor history store-and-forward (true/false).",
-	              cmd_history_enable, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(history-sensors, NULL,
 	              "Get/Set history sensor selection bitmask (0 = all capability-available).",
-	              cmd_history_sensors, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(battery-level, NULL,
 	              "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this.",
-	              cmd_battery_level, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(alarm-limit, NULL,
 	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
-	              cmd_alarm_limit, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(alarm-notif-time, NULL,
 	              "Get/Set alarm red-LED hold time in seconds (both-mode and pulse sources).",
-	              cmd_alarm_notif_time, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-region, NULL,
 	              "Get/Set LoRaWAN region (eu868/us915/au915).",
-	              cmd_lrw_region, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-sub-band, NULL,
 	              "Get/Set US915/AU915 sub-band (1-8, 0 = all channels). Default 2 matches TTN/Helium/ChirpStack.",
-	              cmd_lrw_sub_band, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-network, NULL,
 	              "Get/Set LoRaWAN network (public/private).",
-	              cmd_lrw_network, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-adr, NULL,
 	              "Get/Set LoRaWAN ADR (true/false).",
-	              cmd_lrw_adr, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-activation, NULL,
 	              "Get/Set LoRaWAN activation (otaa/abp).",
-	              cmd_lrw_activation, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-deveui, NULL,
 	              "Get/Set LoRaWAN DevEUI (16 hex digits).",
-	              cmd_lrw_deveui, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-joineui, NULL,
 	              "Get/Set LoRaWAN JoinEUI (16 hex digits).",
-	              cmd_lrw_joineui, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-nwkkey, NULL,
 	              "Get/Set LoRaWAN NwkKey (32 hex digits).",
-	              cmd_lrw_nwkkey, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-appkey, NULL,
 	              "Get/Set LoRaWAN AppKey (32 hex digits).",
-	              cmd_lrw_appkey, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-devaddr, NULL,
 	              "Get/Set LoRaWAN DevAddr (8 hex digits).",
-	              cmd_lrw_devaddr, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-nwkskey, NULL,
 	              "Get/Set LoRaWAN NwkSKey (32 hexadecimal digits).",
-	              cmd_lrw_nwkskey, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-appskey, NULL,
 	              "Get/Set LoRaWAN AppSKey (32 hexadecimal digits).",
-	              cmd_lrw_appskey, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-link-check-interval, NULL,
 	              "Get/Set link-check cadence: request a LinkCheckReq every N-th uplink (0 = disabled).",
-	              cmd_lrw_link_check_interval, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(lrw-link-check-fail-rejoin, NULL,
 	              "Get/Set link-check failures (while degraded) before an OTAA rejoin is attempted.",
-	              cmd_lrw_link_check_fail_rejoin, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(cap-hall-left, NULL,
 	              "Get/Set hall left capability (true/false).",
-	              cmd_cap_hall_left, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(cap-hall-right, NULL,
 	              "Get/Set hall right capability (true/false).",
-	              cmd_cap_hall_right, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(cap-input-a, NULL,
 	              "Get/Set input A capability (true/false).",
-	              cmd_cap_input_a, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(cap-input-b, NULL,
 	              "Get/Set input B capability (true/false).",
-	              cmd_cap_input_b, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(cap-light-sensor, NULL,
 	              "Get/Set light sensor capability (true/false).",
-	              cmd_cap_light_sensor, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(cap-barometer, NULL,
 	              "Get/Set barometer capability (true/false).",
-	              cmd_cap_barometer, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(cap-pir-detector, NULL,
 	              "Get/Set PIR detector capability (true/false).",
-	              cmd_cap_pir_detector, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(cap-w1-sensors, NULL,
 	              "Get/Set 1-Wire sensor bus capability — enables the bus + auto-detects attached sensors (true/false).",
-	              cmd_cap_w1_sensors, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(cap-accelerometer, NULL,
 	              "Get/Set accelerometer capability — orientation, motion and free-fall (true/false).",
-	              cmd_cap_accelerometer, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",
-	              cmd_accel_motion_sensitivity, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(sensor1-rom, NULL,
 	              "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty).",
-	              cmd_sensor1_rom, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(sensor2-rom, NULL,
 	              "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty).",
-	              cmd_sensor2_rom, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(sensor3-rom, NULL,
 	              "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty).",
-	              cmd_sensor3_rom, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(sensor4-rom, NULL,
 	              "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty).",
-	              cmd_sensor4_rom, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(hall-left-counter, NULL,
 	              "Get/Set hall left switch counter enabled (true/false).",
-	              cmd_hall_left_counter, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(hall-right-counter, NULL,
 	              "Get/Set hall right switch counter enabled (true/false).",
-	              cmd_hall_right_counter, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(input-a-counter, NULL,
 	              "Get/Set input A counter enabled (true/false).",
-	              cmd_input_a_counter, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_CMD_ARG(input-b-counter, NULL,
 	              "Get/Set input B counter enabled (true/false).",
-	              cmd_input_b_counter, 1, 1),
+	              cmd_field, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );

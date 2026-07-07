@@ -99,14 +99,16 @@ def test_no_shell_omits_shell_command():
     command (used by the packed alarm slots to stay within the FLASH budget)."""
     c = (APP_SRC / "app_config.c").read_text()
     ingest = (APP_SRC / "app_config_ingest.c").read_text()
-    # alarm_0 is declared no_shell: no shell function or sub-command entry...
-    assert "cmd_alarm_0(" not in c
-    assert "print_alarm_0(" not in c
+    # alarm_0 is declared no_shell: no shell descriptor row or sub-command entry
+    # (the table-driven shell dispatches every field through one cmd_field, #262)...
+    assert 'CFG_SHELL("alarm-0"' not in c
+    assert "SHELL_CMD_ARG(alarm-0," not in c
     # ...but it still round-trips through SetParam/GetParam ingest (a table-driven
     # descriptor row mapping the proto field to the struct member, #262).
     assert "offsetof(struct app_config, alarm_0)" in ingest
-    # A normal param in the same group keeps its shell command.
-    assert "cmd_alarm_limit(" in c
+    # A normal param in the same group keeps its shell descriptor + sub-command.
+    assert 'CFG_SHELL("alarm-limit"' in c
+    assert "SHELL_CMD_ARG(alarm-limit," in c
 
 
 def test_normalize_access_derives_internal_flags():
