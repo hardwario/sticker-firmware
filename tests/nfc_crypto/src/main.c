@@ -24,9 +24,26 @@
 #include <string.h>
 
 /* Mirror of app_nfc.c. */
-#define NFC_NONCE_LEN	       9
+#define NFC_NONCE_LEN          9
 #define NFC_NONCE_DIR_REQUEST  0x00
 #define NFC_NONCE_DIR_RESPONSE 0x01
+
+/* Mirror of app_nfc.c NFC_NONCE_MAX_SKIP (#266, N-2) — keep in lockstep. */
+#define NFC_NONCE_MAX_SKIP 1024
+
+/* Mirror of decrypt()'s anti-replay acceptance decision: accept a received
+ * counter only in (current, current + NFC_NONCE_MAX_SKIP]. The subtraction is
+ * overflow-safe because the first clause proves received > current. */
+static bool nonce_accept(uint32_t current, uint32_t received)
+{
+	if (received <= current) {
+		return false; /* replay / stale */
+	}
+	if (received - current > NFC_NONCE_MAX_SKIP) {
+		return false; /* implausibly far ahead — would risk a lockout */
+	}
+	return true;
+}
 
 /* Published TEST key only (not a device secret). */
 static const uint8_t KEY[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
@@ -175,6 +192,36 @@ ZTEST(nfc_crypto, test_aad_binding)
 	zassert_not_equal(
 		ccm_open(wire, wlen, NFC_NONCE_DIR_RESPONSE, bad_aad, pt, sizeof(pt), &out_len),
 		PSA_SUCCESS, "decrypt accepted a tampered AAD");
+}
+
+/* Anti-replay window (#266, N-2). Without an upper bound a single accepted
+ * near-UINT32_MAX counter would permanently brick the channel; decrypt() now
+ * accepts only (current, current + NFC_NONCE_MAX_SKIP]. */
+ZTEST(nfc_crypto, test_nonce_window)
+{
+	/* Replay / stale — must be rejected. */
+	zassert_false(nonce_accept(10, 10), "equal counter accepted (replay)");
+	zassert_false(nonce_accept(10, 9), "lower counter accepted (replay)");
+	zassert_false(nonce_accept(10, 0), "zero counter accepted (replay)");
+
+	/* The normal Manager-App path is always current + 1. */
+	zassert_true(nonce_accept(10, 11), "current + 1 rejected");
+	zassert_true(nonce_accept(0, 1), "first command (0 -> 1) rejected");
+
+	/* Small forward gaps within the window stay accepted. */
+	zassert_true(nonce_accept(10, 10 + NFC_NONCE_MAX_SKIP), "current + MAX_SKIP rejected");
+
+	/* One past the window is the reject-far boundary. */
+	zassert_false(nonce_accept(10, 10 + NFC_NONCE_MAX_SKIP + 1),
+		      "current + MAX_SKIP + 1 accepted (lockout risk)");
+
+	/* The brick vector: a jump to near UINT32_MAX must be refused. */
+	zassert_false(nonce_accept(10, UINT32_MAX), "near-UINT32_MAX jump accepted (brick)");
+	zassert_false(nonce_accept(0, UINT32_MAX - 1), "far jump from zero accepted (brick)");
+
+	/* Overflow safety: current near the top still accepts current + 1 without
+	 * the (current + MAX_SKIP) sum wrapping. */
+	zassert_true(nonce_accept(UINT32_MAX - 1, UINT32_MAX), "top-of-range current + 1 rejected");
 }
 
 static void *setup(void)
