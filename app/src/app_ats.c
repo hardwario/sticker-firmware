@@ -19,7 +19,13 @@
 #include "app_cmd.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_history.h"
 #include "app_w1_slots.h"
+
+/* Nanopb (ats cmd history bench driver) */
+#include <pb_decode.h>
+#include <pb_encode.h>
+#include "src/app_config.pb.h"
 
 /* Zephyr includes */
 #include <zephyr/drivers/hwinfo.h>
@@ -770,11 +776,124 @@ static int cmd_cmd_nfc(const struct shell *sh, size_t argc, char **argv)
 	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_NFC, argv[1]);
 }
 
+/* Bench driver for the NFC paged history read (#260): drives the same
+ * client-side loop the Manager-App runs — build a req_history_page Command,
+ * feed it through app_cmd_handle(NFC), decode the HistoryFrame, advance the
+ * cursor by next_ord, repeat until has_more=false. Exercises reassembly order,
+ * empty-window termination and the response fitting the NFC buffer, all without
+ * a phone. Usage: history [<from_unix> [<to_unix>]] (default whole buffer). */
+static int cmd_cmd_history(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t from = (argc > 1) ? (uint32_t)strtoul(argv[1], NULL, 0) : 0;
+	uint32_t to = (argc > 2) ? (uint32_t)strtoul(argv[2], NULL, 0) : UINT32_MAX;
+
+	uint32_t cursor = 0;
+	uint32_t total_bytes = 0;
+	uint32_t prev_cursor = UINT32_MAX;
+	int page = 0;
+	const int max_pages = 512; /* safety bound against a wedge/infinite loop */
+
+	shell_print(sh, "NFC history read [from=%u to=%u], stored=%zu records", from, to,
+		    app_history_count());
+
+	/* Static, not on-stack: a Command + Response are ~1.2 KB together and the
+	 * shell_rtt thread stack is small (app_cmd_handle also holds its own pair
+	 * internally). The shell is serial, so reusing them across iterations is safe;
+	 * memset re-zeroes each pass (== Command_init_zero / Response_init_zero). */
+	static Command cmd;
+	static Response resp;
+
+	for (; page < max_pages; page++) {
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.seq = (uint32_t)page;
+		cmd.which_body = Command_req_history_page_tag;
+		Command_ReqHistoryPage *rq = &cmd.body.req_history_page;
+		if (from != 0) {
+			rq->has_from_unix = true;
+			rq->from_unix = from;
+		}
+		if (to != UINT32_MAX) {
+			rq->has_to_unix = true;
+			rq->to_unix = to;
+		}
+		rq->has_start_ord = true;
+		rq->start_ord = cursor;
+
+		static uint8_t in[32];
+		pb_ostream_t os = pb_ostream_from_buffer(in, sizeof(in));
+		if (!pb_encode(&os, Command_fields, &cmd)) {
+			shell_error(sh, "encode Command: %s", PB_GET_ERROR(&os));
+			return -EINVAL;
+		}
+
+		/* Holds one encoded HistoryFrame (<= 242 B samples + envelope); the NFC
+		 * rsp record itself lives in the 512 B ST25DV user memory. */
+		static uint8_t out[512];
+		size_t out_len = 0;
+		enum app_cmd_action action = APP_CMD_ACTION_NONE;
+		int ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, in, os.bytes_written, out,
+					 sizeof(out), &out_len, &action);
+		if (ret) {
+			shell_error(sh, "app_cmd_handle: %d", ret);
+			return ret;
+		}
+
+		/* Strip the 1-byte APP_PROTO_VERSION prefix, then decode the Response. */
+		if (out_len < 1) {
+			shell_error(sh, "empty response");
+			return -EIO;
+		}
+		memset(&resp, 0, sizeof(resp));
+		pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+		if (!pb_decode(&is, Response_fields, &resp)) {
+			shell_error(sh, "decode Response: %s", PB_GET_ERROR(&is));
+			return -EIO;
+		}
+
+		if (resp.which_body == Response_error_tag) {
+			shell_error(sh, "page %d: Error code %d", page, (int)resp.body.error.code);
+			return -EIO;
+		}
+		if (resp.which_body != Response_history_frame_tag) {
+			shell_error(sh, "page %d: unexpected body tag %d", page,
+				    (int)resp.which_body);
+			return -EIO;
+		}
+
+		const Response_HistoryFrame *hf = &resp.body.history_frame;
+		shell_print(sh,
+			    "  page %d: %u B samples, t0=%u present=0x%x interval=%u synced=%d "
+			    "next_ord=%u has_more=%d (resp %zu B)",
+			    page, (unsigned)hf->samples.size, hf->t0_unix, hf->present,
+			    hf->interval_s, hf->time_synced, hf->next_ord, hf->has_more, out_len);
+		total_bytes += hf->samples.size;
+
+		if (!hf->has_more) {
+			shell_print(sh, "done: %d page(s), %u sample byte(s)", page + 1,
+				    total_bytes);
+			return 0;
+		}
+		/* Guard against a non-advancing cursor that would loop forever. */
+		if (hf->next_ord == prev_cursor || hf->next_ord == cursor) {
+			shell_error(sh, "cursor did not advance (%u); aborting", hf->next_ord);
+			return -EIO;
+		}
+		prev_cursor = cursor;
+		cursor = hf->next_ord;
+	}
+
+	shell_warn(sh, "stopped at page cap (%d) — has_more never cleared", max_pages);
+	return -EAGAIN;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_cmd,
 	SHELL_CMD_ARG(lrw, NULL, "Inject over LoRaWAN transport. Usage: lrw <hex>", cmd_cmd_lrw, 2,
 		      0),
 	SHELL_CMD_ARG(nfc, NULL, "Inject over NFC transport. Usage: nfc <hex>", cmd_cmd_nfc, 2, 0),
+	SHELL_CMD_ARG(history, NULL,
+		      "Drive the NFC paged history read (#260). Usage: history [<from> [<to>]]",
+		      cmd_cmd_history, 1, 2),
 	SHELL_SUBCMD_SET_END);
 
 /* On-target self-test for app_ccm over the STM32WL HW AES peripheral (#261). Runs

@@ -115,6 +115,7 @@ commands:
     - {name: force_send,     proto_id: 9,  body: ForceSend,     kind: handler, response: none, transports: [lrw]}
     - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
     - {name: req_history,    proto_id: 11, body: ReqHistory,    kind: handler, response: none, transports: [lrw]}
+    - {name: req_history_page, proto_id: 13, body: ReqHistoryPage, kind: handler, response: none, transports: [nfc]}
     - {name: clock_sync,     proto_id: 12, body: ClockSync,     kind: handler, response: info_deferred, transports: [lrw, nfc]}
     - {name: w1_scan,        proto_id: 14, body: W1Scan,        kind: handler, response: w1_scan}
     # F-1: handler (not plain action) so the dispatch calls app_cmd_handle_lrw_{reset,join},

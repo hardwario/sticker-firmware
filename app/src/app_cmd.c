@@ -705,6 +705,67 @@ static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command 
 #endif
 }
 
+/* NFC-only paged history read (#260). Unlike req_history (LRW device-driven
+ * streaming), this is client-driven and stateless: each tap returns exactly one
+ * HistoryFrame and the phone advances the cursor by passing the response's
+ * next_ord back as start_ord on the next request, looping until has_more=false.
+ * The device keeps NO replay session (nothing to wedge) and does NOT pause
+ * capture — new records may be appended between taps. Edge case: if the flash
+ * ring evicts its oldest page between taps, the logical ordinal cursor shifts
+ * down; over a short on-site readout (interval is minutes) this is negligible. */
+static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Command *cmd,
+					    Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+#if defined(APP_CMD_HAVE_HISTORY)
+	const Command_ReqHistoryPage *rq = &cmd->body.req_history_page;
+	uint32_t from = rq->has_from_unix ? rq->from_unix : 0;
+	uint32_t to = rq->has_to_unix ? rq->to_unix : UINT32_MAX;
+	size_t start = rq->has_start_ord ? rq->start_ord : 0;
+	uint32_t present = app_history_get_mask();
+	uint32_t interval = app_history_get_interval();
+
+	Response_HistoryFrame *hf = &resp->body.history_frame;
+
+	/* Clamp the sample byte budget to what one HistoryFrame encodes into the NFC
+	 * response, further clamped to the samples field capacity (242 B). Worst-case
+	 * (max-varint) header values keep the bound stable regardless of the actual
+	 * ordinal/time values. */
+	size_t cap = app_cmd_history_sample_capacity(cmd->seq, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+						     present, interval, DUMP_PAGE_BUDGET_NFC);
+	cap = MIN(cap, sizeof(hf->samples.bytes));
+
+	uint32_t t0 = 0;
+	uint16_t n_written = 0;
+	size_t next_ord = start;
+	size_t written = app_history_export_page(from, to, start, hf->samples.bytes, cap, &t0,
+						 &n_written, &next_ord);
+
+	resp->which_body = Response_history_frame_tag;
+	hf->frame_index = 0; /* informational only over NFC; the phone counts its own pages */
+	hf->frame_count = app_history_count_frames(from, to, cap); /* progress hint */
+	hf->t0_unix = t0;
+	hf->samples.size = written;
+	hf->present = present;
+	hf->interval_s = interval;
+	hf->has_time_synced = true;
+	hf->time_synced = app_history_base_synced();
+	/* Authoritative cursor for the phone: pass next_ord back as start_ord. When a
+	 * page returns no records (buffer empty, cursor past the window/end) or no
+	 * ordinals remain, has_more=false stops the tap loop (no wedge, no infinite
+	 * loop). A page that fills at the to_unix boundary may cost one extra empty
+	 * tap, which then reports has_more=false. */
+	hf->has_next_ord = true;
+	hf->next_ord = (uint32_t)next_ord;
+	hf->has_has_more = true;
+	hf->has_more = (n_written > 0) && (next_ord < app_history_count());
+#else
+	ARG_UNUSED(cmd);
+	make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no history");
+#endif
+}
+
 #if defined(APP_CMD_HAVE_W1)
 /* w1_scan ROM-discovery callback: append each ROM (8 bytes: family + 6-byte
  * serial + CRC) to the response, capped at the field's max_count. */
@@ -891,6 +952,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		}
 		app_cmd_handle_req_history(tp, cmd, resp, action);
 		break;
+	case Command_req_history_page_tag:
+		/* transports: [nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_req_history_page(tp, cmd, resp, action);
+		break;
 	case Command_clock_sync_tag:
 		/* transports: [lrw, nfc] — reject on any other transport */
 		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC) {
@@ -1046,23 +1115,26 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 	 * bytes here (value 0/1 both encode to 1 byte) or the frame could overflow. */
 	hf->has_time_synced = true;
 	hf->time_synced = true;
-	hf->samples.size = 0; /* empty bytes field is omitted in proto3 */
 
-	size_t base = 0;
-	if (!pb_get_encoded_size(&base, Response_fields, &resp)) {
-		return 0;
+	/* Binary-search the largest samples payload whose fully-encoded frame
+	 * (version byte + Response) still fits out_cap, measuring each candidate with
+	 * pb_get_encoded_size. Measuring beats hand-accounting the length varints:
+	 * BOTH the samples field length AND the enclosing history_frame submessage
+	 * length grow with the payload and cross the 1->2 byte varint boundary as it
+	 * passes 127 B — reachable since #260 raised the samples field to 440 B. */
+	size_t lo = 0, hi = sizeof(hf->samples.bytes);
+	while (lo < hi) {
+		size_t mid = (lo + hi + 1) / 2;
+		size_t sz = 0;
+		hf->samples.size = mid;
+		if (pb_get_encoded_size(&sz, Response_fields, &resp) &&
+		    (size_t)(1 + sz) <= out_cap) {
+			lo = mid;
+		} else {
+			hi = mid - 1;
+		}
 	}
-
-	/* The encoded frame is: version(1) + base + samples field. With 1..N
-	 * sample bytes (N <= 48 < 128) the samples field adds tag(1) + len(1) + N.
-	 * The empty-field omission above means `base` excludes those 2 bytes. */
-	const size_t fixed = 1 + base + 2;
-	if (out_cap <= fixed) {
-		return 0;
-	}
-
-	size_t avail = out_cap - fixed;
-	return MIN(avail, sizeof(hf->samples.bytes));
+	return lo;
 }
 
 int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
