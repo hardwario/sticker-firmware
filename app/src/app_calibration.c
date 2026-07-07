@@ -334,13 +334,22 @@ int app_calibration_init(void)
 	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
 
-	/* One-time 5x fast yellow blink to indicate calibration entry */
+	/* One-time 5x fast ORANGE (R+G) blink to indicate calibration entry (#278):
+	 * matches the orange calibration-running heartbeat (m_orange_blink), so both
+	 * "entering" and "in" calibration read as the same orange service colour
+	 * instead of joining the overloaded set of yellow signals. */
 	{
-		struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
-						.duration = 100,
-						.space = 100,
-						.repetitions = ENTRY_BLINKS};
-		app_led_blink(&req);
+		struct app_led_play_req req = {
+			.commands =
+				{{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
+				 {.type = APP_LED_CMD_DELAY, .duration = 100},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
+				 {.type = APP_LED_CMD_DELAY, .duration = 100},
+				 {.type = APP_LED_CMD_END}},
+			.repetitions = ENTRY_BLINKS};
+		app_led_play(&req);
 	}
 
 	/* Initial battery measurement so the first TX already carries a real value */

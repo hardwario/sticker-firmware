@@ -725,6 +725,35 @@ The hall (`hall-left` / `hall-right`) and input (`input-a` / `input-b`) pulse to
 - **Flash wear:** the dirty-flagged, per-report write costs at most one tiny NVS record per cycle. Worst case (continuous counting at the 900 s default) is well within the storage partition's ~10 k erase budget for the life of the device; an idle counter costs nothing. A future brownout/PVD flush (to capture the last window's pulses on supply collapse) is possible but needs HW hold-up verification and is **not** in this version.
 - **Width:** counters stay **`uint32_t`** (max 4 294 967 295, then wraps), matching the telemetry/history encoding.
 
+## 16. LED signalling reference (#278)
+
+The STICKER has **three independent on/off LEDs** — red (R), yellow (Y), green (G); no brightness/PWM. "Orange" is R+G lit together. Blinks are short (~5–100 ms). The main loop shows one **heartbeat** every 3 s, chosen by priority (top-down); one-shot signals and the input-event LED are separate.
+
+**Heartbeat (every 3 s, first matching row wins)**
+
+| Priority | Pattern | Meaning |
+|:-:|---------|---------|
+| 1 | 🔴🟡 red/yellow alternating, 2× | **Config NVS load failed** — running on defaults, identity/provisioning lost |
+| 2 | 🟡🔴 yellow then red | **LoRaWAN joining / reconnect** — *not on the network* (initial join or rejoin); the severe network state |
+| 3 | 🟡 yellow ×2 | **LoRaWAN warning** — link-check streak failing but session still up; the mild network state |
+| 4 | 🟡 yellow ×1 | **Radio off** — `lrw-mode off`/`p2p` (deliberate); lowest rung of the yellow scale |
+| 5 | 🔴 red ×1 | **Alarm active** — any of threshold / low-battery (#210) / no-data / dead-sensor (#211); detail travels on fPort 3 |
+| 6 | 🟢 green ×1 | **Healthy** — joined, link OK (debug build: green + yellow) |
+
+The three yellow network states form a **severity scale**: radio-off (1× yellow, deliberate) < warning (2× yellow, session alive) < joining/reconnect (yellow + red, off the network).
+
+**One-shot / modes**
+
+| Pattern | Meaning |
+|---------|---------|
+| 🔴→🟡→🟢 carousel (once) | Boot self-test (exercises all three LEDs) |
+| 🟢 green ×10 | NFC config applied (success) |
+| 🟠 orange ×5 | Entering calibration mode |
+| 🟠 orange, once/s | Calibration mode running |
+| 🟢 + 🟠 green and orange | **Input activity** — PIR / hall / digital input / accelerometer activation or release |
+
+The input-event LED is a **commissioning diagnostic**: it blinks only for the first hour after power-up (rate-limited to 2/s), then goes quiet. It shows **green and orange together** (a two-colour blink, so it can't be mistaken for the single-yellow radio-off heartbeat). The firmware does drive the two colours in a different order for an activation (0→1) versus a release (1→0), but the order is **not visually distinguishable in practice** — treat any green+orange blink simply as "an input changed".
+
 ---
 
 *Applies to firmware v1.4.0. Reflects the v1.4.0 source. For full configuration parameters and base behaviour, see the device datasheet / v1.3.x documentation.*
