@@ -63,7 +63,16 @@ static void schedule_next_report(void)
 {
 	int timeout = g_app_config.interval_report;
 #if defined(CONFIG_ENTROPY_GENERATOR)
-	timeout += (int32_t)sys_rand32_get() % (g_app_config.interval_report / 10);
+	/* Add up to +10% jitter to de-correlate fleet uplinks. Use UNSIGNED modulo:
+	 * the previous (int32_t) cast made the random value negative ~half the time,
+	 * so the modulo (which keeps the dividend's sign in C) produced negative
+	 * jitter and fired reports EARLY — raising the real uplink rate above
+	 * interval_report (#267). Also guard the divisor: interval_report < 10 would
+	 * make span 0 → modulo-by-zero. Jitter is now 0..span-1, always non-negative. */
+	uint32_t span = (uint32_t)g_app_config.interval_report / 10U;
+	if (span > 0U) {
+		timeout += (int)(sys_rand32_get() % span);
+	}
 #endif
 	k_timer_start(&m_report_timer, K_SECONDS(timeout), K_FOREVER);
 }
