@@ -544,25 +544,16 @@ int main(void)
 			app_led_blink(&req);
 			led_handled = true;
 		} else if (lrw_state == APP_LRW_STATE_DISABLED) {
-			/* Not provisioned / radio-silent (C-1): a distinct red double-blink so
-			 * an operator can tell "LoRaWAN is off" apart from a healthy device
-			 * (green) — previously DISABLED fell through to the green blink and an
-			 * ABP device with no DevEUI looked perfectly healthy while silent. */
-			struct app_led_play_req req = {
-				.commands = {{.type = APP_LED_CMD_SET,
-					      .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
-					     {.type = APP_LED_CMD_DELAY, .duration = 30},
-					     {.type = APP_LED_CMD_SET,
-					      .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
-					     {.type = APP_LED_CMD_DELAY, .duration = 150},
-					     {.type = APP_LED_CMD_SET,
-					      .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
-					     {.type = APP_LED_CMD_DELAY, .duration = 30},
-					     {.type = APP_LED_CMD_SET,
-					      .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
-					     {.type = APP_LED_CMD_END}},
-				.repetitions = 1};
-			app_led_play(&req);
+			/* Radio disabled by lrw-mode (#271): same single heartbeat blink as a
+			 * healthy device but ORANGE instead of green, so an operator can tell
+			 * "radio is off (by config)" apart from a joined device at a glance.
+			 * DISABLED now means lrw-mode OFF/P2P — the old blank-DevEUI radio-
+			 * silent guard is gone (#98/#175 superseded by #271). */
+			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
+							.duration = 5,
+							.space = 0,
+							.repetitions = 1};
+			app_led_blink(&req);
 			led_handled = true;
 		}
 #endif /* defined(CONFIG_LORAWAN) */

@@ -920,8 +920,8 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 
 	static const char *const build_type_name[] = {"main", "dev", "custom"};
-	static const char *const lrw_state_name[] = {"idle", "joining", "healthy", "warning",
-						     "reconnect"};
+	static const char *const lrw_state_name[] = {"idle",    "joining",   "healthy",
+						     "warning", "reconnect", "disabled"};
 
 	struct app_cmd_info info;
 	app_cmd_get_info(&info);
