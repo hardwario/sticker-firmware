@@ -243,23 +243,31 @@ stm32_lp_tick_source: &lptim1 {
 		 * build on overflow), because flash regions written at runtime
 		 * corrupt an image leaking into them — the device then hard-faults
 		 * on the next boot (recoverable only by mass erase):
-		 *  - release (CONFIG_APP_HISTORY_FLASH=y) writes history NVS
-		 *    here: budget = history_partition offset (prj.conf, 0x28000)
+		 *  - release (CONFIG_APP_HISTORY_FLASH=y) writes the history ring
+		 *    here: budget = history_partition offset (prj.conf, 0x2C000)
 		 *  - debug keeps history in RAM but NVS settings + LoRaWAN NVM
 		 *    always write storage: budget = storage_partition offset
 		 *    (debug.conf, 0x3C000)
+		 *
+		 * The history partition shrank 80 KB → 64 KB (#265): the raw flash
+		 * ring backend packs ~10× more records per byte than the old NVS
+		 * backend, so 64 KB now holds far more history than the old 80 KB,
+		 * and the freed 16 KB goes to code (160 KB → 176 KB).
 		 */
 		code_partition: partition@0 {
 			label = "code";
-			reg = <0x00000000 DT_SIZE_K(160)>;
+			reg = <0x00000000 DT_SIZE_K(176)>;
 			read-only;
 		};
 
 		/* Sensor history store-and-forward buffer (app_history.c,
-		 * FIXED_PARTITION_ID(history_partition)). */
-		history_partition: partition@28000 {
+		 * FIXED_PARTITION_ID(history_partition)) — raw flash page ring (#265).
+		 * 64 KB = 32 × 2 KB erase pages. Erasing on the first boot after the
+		 * remap (old NVS data at 0x28000 is now garbage) is handled by the
+		 * #96 mount-fail → erase → remount recovery path. */
+		history_partition: partition@2c000 {
 			label = "history";
-			reg = <0x00028000 DT_SIZE_K(80)>;
+			reg = <0x0002c000 DT_SIZE_K(64)>;
 		};
 
 		storage_partition: partition@3c000 {
