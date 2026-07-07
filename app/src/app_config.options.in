@@ -33,6 +33,9 @@ Response.HistoryFrame.samples max_size:48
 Response.Info.claim_token   max_size:16 fixed_length:true
 Response.Info.dev_eui       max_size:8 fixed_length:true
 
+# NFC clm provisioning record (#247): fixed 16-byte claim token, no callback.
+ClaimInfo.claim_token       max_size:16 fixed_length:true
+
 # Alarm-detail batch (fPort 3, #27). 8 events fit the smallest practical DR; the
 # encoder further caps by the live payload budget.
 AlarmReport.events max_count:8

@@ -429,3 +429,14 @@ message SensorReading {
     optional sint32 accel_y        = 9;  // m/s^2 x100
     optional sint32 accel_z        = 10; // m/s^2 x100
 }
+
+// Provisioning claim record (#247). Carried plaintext in the NFC `hio.stck:clm`
+// NDEF record during the factory -> first-claim window so the provisioning app
+// can claim the device (first-claim-wins). The phone deletes the record from the
+// ST25DV over RF once the server confirms the claim; the firmware never rewrites
+// it afterwards. Not carried over LoRaWAN (the owner reads claim_token via the
+// encrypted get_info Info instead).
+message ClaimInfo {
+    uint32 serial_number = 1;
+    bytes  claim_token   = 2;  // 128-bit device claim token (#170)
+}

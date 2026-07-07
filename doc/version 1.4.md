@@ -528,8 +528,35 @@ The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel �
 | Info | `hio.stck:inf` |
 | Command (phone → device) | `hio.stck:cmd` |
 | Response (device → phone) | `hio.stck:rsp` |
+| Claim (provisioning, #247) | `hio.stck:clm` |
 
-A phone's Web NFC reader sees each as `record.recordType === "hio.stck:…"`.
+A phone's Web NFC reader sees each as `record.recordType === "hio.stck:…"`. The idle
+tag holds a **single record** at a time (info, or a response mid-exchange) — except
+during the claim window, when it holds **two** records (info **and** claim, #247).
+
+**Claim record — first-claim-wins provisioning (`hio.stck:clm`, #247).** So a provisioning
+app can claim the device into a cloud account, the firmware exposes the `claim_token` (#170)
+in a dedicated **plaintext** record next to the info record — a small protobuf
+`ClaimInfo { serial_number, claim_token }` (the token is otherwise readable only over the
+**encrypted** `get_info` channel). It exists only during the **factory → first-claim window**:
+
+- **Lay-down.** Once a `claim_token` is provisioned, the firmware writes `clm` alongside `inf`
+  (a two-record NDEF message) whenever it lays down the resting tag content.
+- **Claim + delete.** The Manager-App reads `clm`, claims with the backend (which enforces
+  first-claim-wins via an ownership check), and — **after the server confirms** — deletes the
+  `clm` record straight from the ST25DV EEPROM over RF. Because the tag is RF-powered, this
+  works **even with the sticker powered off**; the phone must keep the `inf` record (delete
+  `clm` only).
+- **No resurrection.** The firmware never rewrites `clm` after it is gone. A small persisted
+  latch (`UNSET → PENDING → CONSUMED`, in its own `clm` settings key, outside the config blob
+  so a config reset that preserves identity leaves it intact) tracks this: when a poll finds the
+  tag settled (info present) but `clm` absent while it was `PENDING`, the state latches
+  `CONSUMED` and `clm` is never emitted again — only a full NVS erase re-opens provisioning.
+- **Threat model.** Read and delete are unauthenticated over RF (accepted: the claim window
+  relies on physical proximity + the backend ownership check). A rogue phone can delete `clm`
+  (a nuisance/DoS), but the token is **not lost** — the owner still reads it over the encrypted
+  `get_info` channel with `secret_key`. An ST25DV RF-password on that area is a possible future
+  hardening. The shell `nfc clm` command shows the latch state for bring-up.
 
 **Power.** The poll thread sleeps on the ST25DV **GPO interrupt** (wired to the STM32, EXTI) and only wakes to read the tag when RF activity occurs — so an untouched tag costs almost nothing and the CPU stays asleep when no phone is present. A periodic fallback timer (30 s) is a safety net in case an edge is missed; each wake still does the cheap gated check (one `IT_STS_Dyn` byte; full read + NDEF parse only on RF activity).
 
