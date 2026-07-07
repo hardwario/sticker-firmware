@@ -1476,10 +1476,16 @@ static int nfc_check_locked(void)
 	/* #247: once a claim token is provisioned, start exposing the clm record
 	 * (UNSET -> PENDING). Driven purely by the token being set (not tag content),
 	 * so it fires on the first check after commissioning; build_resting_ndef then
-	 * includes clm. CONSUMED (phone deleted clm) is terminal. */
+	 * includes clm. CONSUMED (phone deleted clm) is terminal. `just_armed` guards
+	 * the settled-consume branch below: on the very check that arms PENDING the tag
+	 * still holds the pre-provisioning info-only record (clm not laid down yet), so
+	 * without this guard a stale info record would be misread as "phone deleted
+	 * clm" and latch CONSUMED before clm is ever written. */
+	bool just_armed = false;
 	if (m_clm_state == CLM_UNSET && claim_token_is_set()) {
 		m_clm_state = CLM_PENDING;
 		clm_state_save();
+		just_armed = true;
 		LOG_INF("NFC clm record armed (claim token provisioned) (#247)");
 	}
 
@@ -1594,7 +1600,10 @@ static int nfc_check_locked(void)
 	if (m_seen_inf) {
 		m_unknown_count = 0;
 		m_info_restore_pending = false;
-		if (m_clm_state == CLM_PENDING && !m_seen_clm) {
+		/* clm absent while PENDING = the phone deleted it after claiming -> latch
+		 * CONSUMED. Not on the arming cycle (just_armed): clm has not been laid down
+		 * yet, so the stale info-only tag is not a deletion. */
+		if (m_clm_state == CLM_PENDING && !m_seen_clm && !just_armed) {
 			m_clm_state = CLM_CONSUMED;
 			clm_state_save();
 			LOG_INF("NFC clm record consumed (phone deleted after claim) (#247)");
