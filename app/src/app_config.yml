@@ -106,8 +106,10 @@ commands:
     - {name: req_history,    proto_id: 11, body: ReqHistory,    kind: handler, response: none, transports: [lrw]}
     - {name: clock_sync,     proto_id: 12, body: ClockSync,     kind: handler, response: info_deferred, transports: [lrw, nfc]}
     - {name: w1_scan,        proto_id: 14, body: W1Scan,        kind: handler, response: w1_scan}
-    - {name: lrw_reset,      proto_id: 16, body: LrwReset,      kind: action,  action: LRW_RESET, response: ack}
-    - {name: lrw_join,       proto_id: 17, body: LrwJoin,       kind: action,  action: LRW_JOIN, response: ack}
+    # F-1: handler (not plain action) so the dispatch calls app_cmd_handle_lrw_{reset,join},
+    # which reject the (re)join while unsaved LoRaWAN staging changes exist.
+    - {name: lrw_reset,      proto_id: 16, body: LrwReset,      kind: handler, response: ack}
+    - {name: lrw_join,       proto_id: 17, body: LrwJoin,       kind: handler, response: ack}
     - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: action, action: ENTER_CALIBRATION, response: ack, transports: [lrw, nfc]}
     - {name: sample,         proto_id: 21, body: Sample,        kind: handler, response: sample, transports: [lrw, nfc]}
 parameters:

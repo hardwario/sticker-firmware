@@ -25,6 +25,7 @@ extern bool test_clock_has;
 extern uint32_t test_clock_unix;
 extern float test_battery_v;
 extern int test_battery_ret;
+extern void test_set_lrw_dirty(bool v);
 
 static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 {
@@ -67,6 +68,7 @@ static void reset_cfg(void)
 {
 	memset(&g_app_config, 0, sizeof(g_app_config));
 	test_clock_has = false;
+	test_set_lrw_dirty(false);
 }
 
 ZTEST(cmd, test_set_param_applies_and_acks)
@@ -329,6 +331,30 @@ ZTEST(cmd, test_deferred_actions)
 
 	zassert_equal(handle("08083a00", &r), APP_CMD_ACTION_REBOOT, "reboot");
 	zassert_equal(handle("08094200", &r), APP_CMD_ACTION_FACTORY_RESET, "factory");
+}
+
+/* F-1: lrw_join (proto_id 17) / lrw_reset (16) must be rejected with NOT_READY
+ * while unsaved LoRaWAN staging changes exist — otherwise the (re)join would
+ * silently use the OLD credentials while GetParam already echoes the NEW ones.
+ * With clean staging they fire their deferred actions as before. */
+ZTEST(cmd, test_lrw_join_rejected_when_staging_dirty)
+{
+	Response r;
+
+	reset_cfg();
+	zassert_equal(handle("08018a0100", &r), APP_CMD_ACTION_LRW_JOIN, "clean join acts");
+	zassert_equal(r.which_body, Response_ack_tag, "clean join acks");
+	zassert_equal(handle("0801820100", &r), APP_CMD_ACTION_LRW_RESET, "clean reset acts");
+
+	reset_cfg();
+	test_set_lrw_dirty(true);
+	zassert_equal(handle("08018a0100", &r), APP_CMD_ACTION_NONE, "dirty join no action");
+	zassert_equal(r.which_body, Response_error_tag, "dirty join errors (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+	zassert_equal(handle("0801820100", &r), APP_CMD_ACTION_NONE, "dirty reset no action");
+	zassert_equal(r.which_body, Response_error_tag, "dirty reset errors");
 }
 
 /* force_send / req_history answer only via a LoRaWAN uplink, so over NFC they

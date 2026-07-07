@@ -79,6 +79,29 @@ void app_cmd_set_reset_cause(uint32_t cause)
 	m_reset_cause = cause;
 }
 
+/* F-1: SetParam mutates the staging config (m_app_config); the running copy
+ * (g_app_config) — which lrw_join/lrw_reset build the join from — is only
+ * re-synced from staging at boot (h_commit) or factory reset, both of which
+ * reboot. This flag tracks "staging has LoRaWAN changes not yet in the running
+ * copy" so a join issued before `settings save` (persist + reboot → re-sync)
+ * is rejected loudly instead of silently joining with the OLD keys while
+ * GetParam echoes the NEW ones. It is a plain static: every g_app_config
+ * re-sync path reboots (settings save / factory reset both sys_reboot COLD),
+ * which zeroes it — so there is no non-reboot re-sync to clear it on. Kept
+ * local to app_cmd.c (the only setter + reader) so the generated app_config.c
+ * stays byte-identical to configen output. */
+static bool m_lrw_staging_dirty;
+
+#ifdef CONFIG_ZTEST
+/* Test hook: drive the F-1 dirty flag directly. Production sets it only on the
+ * SetParam(lorawan) apply path and clears it via reboot; the ztest has no
+ * reboot, so it toggles the flag through here (reset_cfg clears it). */
+void test_set_lrw_dirty(bool v)
+{
+	m_lrw_staging_dirty = v;
+}
+#endif
+
 void app_cmd_get_info(struct app_cmd_info *info)
 {
 	if (!info) {
@@ -287,6 +310,13 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 			make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid alarm rule");
 			resp->body.error.fault_field = 4 * 100; /* group 4 = alarms */
 			return;
+		}
+		/* F-1: LoRaWAN staging changed but the running copy (used by
+		 * lrw_join/lrw_reset) only re-syncs on save+reboot. Flag it so a join
+		 * before save is rejected instead of silently using the OLD keys. If
+		 * this batch saves below, the reboot zeroes the flag. */
+		if (sp->has_lorawan) {
+			m_lrw_staging_dirty = true;
 		}
 		resp->which_body = Response_ack_tag;
 		/* Optional one-shot commit: persist staged config + reboot, same path
@@ -762,6 +792,41 @@ static void app_cmd_handle_w1_scan(enum app_cmd_transport tp, const Command *cmd
 #endif
 }
 
+/* F-1: lrw_join / lrw_reset both re-establish the LoRaWAN session using the
+ * running config (g_app_config), which only re-syncs from staging on
+ * save+reboot. If SetParam changed LoRaWAN credentials without saving, acting
+ * now would silently use the OLD keys while GetParam/GetConfig already echo the
+ * NEW ones — a misleading "confirmed" for the installer. Reject loudly so the
+ * host saves (which reboots and re-syncs) before (re)joining. These are
+ * `kind: handler` in app_config.yml so the guard lives outside the generated
+ * dispatch; they otherwise mirror the old `kind: action` behaviour. */
+static void lrw_action_guarded(Response *resp, enum app_cmd_action *action,
+			       enum app_cmd_action want)
+{
+	if (m_lrw_staging_dirty) {
+		make_error(resp, Response_Error_Code_NOT_READY, "unsaved lrw config; save first");
+		return;
+	}
+	*action = want;
+	resp->which_body = Response_ack_tag;
+}
+
+static void app_cmd_handle_lrw_join(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				    enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	lrw_action_guarded(resp, action, APP_CMD_ACTION_LRW_JOIN);
+}
+
+static void app_cmd_handle_lrw_reset(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				     enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	lrw_action_guarded(resp, action, APP_CMD_ACTION_LRW_RESET);
+}
+
 // BEGIN GENERATED DISPATCH
 static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 			     enum app_cmd_action *action)
@@ -824,12 +889,10 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_w1_scan(tp, cmd, resp, action);
 		break;
 	case Command_lrw_reset_tag:
-		*action = APP_CMD_ACTION_LRW_RESET;
-		resp->which_body = Response_ack_tag;
+		app_cmd_handle_lrw_reset(tp, cmd, resp, action);
 		break;
 	case Command_lrw_join_tag:
-		*action = APP_CMD_ACTION_LRW_JOIN;
-		resp->which_body = Response_ack_tag;
+		app_cmd_handle_lrw_join(tp, cmd, resp, action);
 		break;
 	case Command_enter_calibration_tag:
 		/* transports: [lrw, nfc] — reject on any other transport */

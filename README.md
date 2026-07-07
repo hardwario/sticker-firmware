@@ -190,6 +190,31 @@ make format
 
 ---
 
+## Firmware update & security model
+
+STICKER ships a **flat application image with no bootloader** (linked from the
+base of flash; no MCUboot, no DFU partition). The **only** way to update the
+firmware is physically over SWD with a J-Link (`make flash`). There is **no
+in-field / over-the-air update**: no LoRaWAN FUOTA, no NFC firmware update. The
+`enter_dfu` command was deliberately removed (#239).
+
+This is an **intentional design decision, not a limitation to be worked around**:
+
+- **Benefit** — zero remote update attack surface. An image cannot be replaced,
+  downgraded, or tampered with over the radio or NFC; only someone with physical
+  access to the SWD pads can reprogram the device.
+- **Cost** — a defect found in the field cannot be fixed remotely; it requires
+  physical access. Weigh this when triaging field issues.
+
+Because there is no bootloader, there is likewise **no image signature check and
+no anti-downgrade protection** — those live in a bootloader, which this product
+does not have. If in-field update is ever introduced, design it with MCUboot
+from the start: **signed images + monotonic anti-downgrade versioning**, wired to
+the existing `config-version` scheme. Until then, the security model relies on
+the image being immutable in the field.
+
+---
+
 ## Continuous Integration
 
 This repository uses **GitHub Actions** for CI:
