@@ -120,6 +120,7 @@ static struct k_timer m_rejoin_timer;
 /* --- Works --- */
 static struct k_work m_send_work;            /* drains response/alarm, then composes telemetry */
 static struct k_work_delayable m_frame_work; /* multi-frame snapshot continuation */
+static struct k_work_delayable m_tx_jitter_work; /* #267: random pre-send delay (fleet de-corr) */
 static struct k_work m_join_work;
 static struct k_work m_link_check_work;       /* LC timeout (from m_lc_timeout_timer) */
 static struct k_work m_downlink_success_work; /* deferred from downlink_callback */
@@ -1063,6 +1064,13 @@ static void tx_retry_work_handler(struct k_work *work)
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
 }
 
+/* Fires after the random pre-send delay (#267): kick the normal send path. */
+static void tx_jitter_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	k_work_submit_to_queue(&m_work_q, &m_send_work);
+}
+
 /* Send one queued response/alarm with a DR-budget guard and a bounded
  * duty-cycle retry (#93.1). Returns true if the message was consumed (sent or
  * dropped); false if it was requeued for a later retry (a backoff re-drain is
@@ -1595,6 +1603,7 @@ int app_lrw_init(void)
 	k_work_init(&m_join_work, join_work_handler);
 	k_work_init(&m_send_work, send_work_handler);
 	k_work_init_delayable(&m_frame_work, frame_work_handler);
+	k_work_init_delayable(&m_tx_jitter_work, tx_jitter_work_handler);
 	k_work_init_delayable(&m_hist_work, m_hist_work_handler);
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
@@ -1639,8 +1648,18 @@ void app_lrw_send_telemetry(void)
 {
 	/* Compose + split + send a telemetry snapshot from the current sensor data.
 	 * Runs on m_work_q; send_work_handler drains response/alarm first, then falls
-	 * through to the telemetry compose when both queues are empty. */
-	k_work_submit_to_queue(&m_work_q, &m_send_work);
+	 * through to the telemetry compose when both queues are empty.
+	 *
+	 * De-correlate fleet uplinks with a random PRE-SEND delay of up to 10% of
+	 * interval_report (#267). The jitter lives here, on the transmission — NOT on
+	 * the report timer in app_report, which must stay a fixed interval so the
+	 * history-capture cadence matches the fixed interval that replay reconstructs
+	 * (base + ord*interval_report); jittering the period would drift every stored
+	 * sample's timestamp. A fixed cadence also means a report is never emitted
+	 * early. send_work_handler still drains queued responses/alarms first. */
+	uint32_t span_ms = (uint32_t)g_app_config.interval_report * 100U; /* interval/10, in ms */
+	uint32_t delay_ms = span_ms ? (sys_rand32_get() % span_ms) : 0U;
+	k_work_reschedule_for_queue(&m_work_q, &m_tx_jitter_work, K_MSEC(delay_ms));
 }
 
 void app_lrw_register_ready_cb(void (*cb)(void))
