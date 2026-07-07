@@ -210,6 +210,23 @@ ZTEST(cmd, test_get_param_paging)
 		      r.body.error.code);
 }
 
+/* #267: a duplicate field id in one get_param must not be counted twice against
+ * the page budget. deveui (tag 6, 10 B) requested 4× would be 40 B > the ~30 B DR0
+ * page budget and split into 2 pages before the dedup fix; deduped it is a single
+ * 10 B field on one page. */
+ZTEST(cmd, test_get_param_duplicate_field_deduped)
+{
+	Response r;
+
+	reset_cfg();
+	/* seq2 get_param{ lorawan_field=[6, 6, 6, 6] }, page 0. */
+	handle("08021a060a0406060606", &r);
+	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.config_dump.page_count, 1, "duplicates inflated page_count to %u",
+		      r.body.config_dump.page_count);
+	zassert_true(r.body.config_dump.lorawan.has_deveui, "deveui not dumped");
+}
+
 /* The LoRaWAN crypto keys are read-back over NFC only — never over LoRaWAN
  * (the fPort-85 payload is plain protobuf). A get_param requesting nwkkey (tag 8)
  * must dump it over NFC and omit it over LoRaWAN. (#162) */
