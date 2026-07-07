@@ -62,7 +62,12 @@ int app_wdog_init(void)
 
 	m_wdog_channel = ret;
 
-	ret = wdt_setup(dev, 0);
+	/* On a debug build, freeze the IWDG while a debugger has the core halted so a
+	 * breakpoint doesn't reset the SoC out from under the debugger (#267, dev QoL).
+	 * The option only takes effect with a debugger attached, so a Release build is
+	 * unaffected either way; gate it to the debug build to keep production's DBGMCU
+	 * state untouched. STM32WL supports it (wdt_iwdg_stm32 else-branch). */
+	ret = wdt_setup(dev, IS_ENABLED(CONFIG_FW_DEBUG) ? WDT_OPT_PAUSE_HALTED_BY_DBG : 0);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("wdt_setup", ret);
 		return ret;
