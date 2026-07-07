@@ -767,38 +767,21 @@ static void join_complete_work_handler(struct k_work *work)
 	on_join_success();
 }
 
-static bool deveui_is_zero(void)
+/* Radio disabled by the lrw-mode config (#271). This replaces the old
+ * DevEUI/DevAddr-zero radio-silent guard (#98/#175): whether the radio comes up
+ * is now an explicit user choice, not inferred from a blank identifier. OFF is
+ * radio-silent (sensor/history still run); P2P is reserved until the raw-LoRa
+ * transport lands (#118/#228) and falls back to OFF with a warning; LORAWAN
+ * (default) brings the stack up normally. A LORAWAN device with an all-zero
+ * DevEUI therefore now attempts to join and fails loudly instead of silently
+ * disabling — provisioning problems surface instead of masquerading as OFF. */
+static bool radio_disabled(void)
 {
-	for (size_t i = 0; i < sizeof(g_app_config.lrw_deveui); i++) {
-		if (g_app_config.lrw_deveui[i] != 0) {
-			return false;
-		}
+	if (g_app_config.lrw_mode == APP_CONFIG_LRW_MODE_P2P) {
+		LOG_WRN("lrw-mode P2P not yet implemented (#118/#228) — radio stays off");
+		return true;
 	}
-	return true;
-}
-
-static bool devaddr_is_zero(void)
-{
-	for (size_t i = 0; i < sizeof(g_app_config.lrw_devaddr); i++) {
-		if (g_app_config.lrw_devaddr[i] != 0) {
-			return false;
-		}
-	}
-	return true;
-}
-
-/* "Never provisioned" — the identifier that MUST be set for the configured
- * activation mode is all-zero. For OTAA that is the DevEUI; for ABP the DevEUI is
- * unused (and legitimately left blank), so provisioning is keyed on the DevAddr
- * instead. Applying the DevEUI test to ABP (the #98 radio-silent guard did) left
- * a correctly-configured ABP device permanently DISABLED — no uplinks, but a
- * healthy-looking green LED (C-1). */
-static bool lrw_unprovisioned(void)
-{
-	if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP) {
-		return devaddr_is_zero();
-	}
-	return deveui_is_zero();
+	return g_app_config.lrw_mode == APP_CONFIG_LRW_MODE_OFF;
 }
 
 static void join_work_handler(struct k_work *work)
@@ -806,15 +789,12 @@ static void join_work_handler(struct k_work *work)
 	ARG_UNUSED(work);
 	int ret;
 
-	/* Radio-silent mode (#98): an unprovisioned device (OTAA with no DevEUI, or
-	 * ABP with no DevAddr) can never succeed — don't burn power on join requests.
-	 * Enter DISABLED and stay there until reprovisioned + rebooted. */
-	if (lrw_unprovisioned()) {
+	/* Radio-silent mode (#271): lrw-mode is OFF (or reserved P2P) — don't burn
+	 * power on join requests. Enter DISABLED and stay there until lrw-mode is set
+	 * back to LORAWAN + rebooted. */
+	if (radio_disabled()) {
 		if ((enum app_lrw_state)atomic_get(&m_state) != APP_LRW_STATE_DISABLED) {
-			LOG_WRN("LoRaWAN not provisioned (%s): disabled (radio-silent)",
-				g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_ABP
-					? "ABP/DevAddr"
-					: "OTAA/DevEUI");
+			LOG_WRN("lrw-mode not LORAWAN: disabled (radio-silent)");
 			state_transition(APP_LRW_STATE_DISABLED);
 		}
 		return;
@@ -1532,14 +1512,14 @@ int app_lrw_init(void)
 		return -ENODEV;
 	}
 
-	/* #175: when the device is unprovisioned (#98 radio-silent) skip the entire
-	 * LoRaMac/radio bring-up. The work queue, works and timers below are still set
-	 * up so the public API stays safe (app_lrw_join / send hit the DISABLED guard
-	 * and no-op), but clear_stale_lorawan_nvm() / lorawan_set_region() /
+	/* #271: when lrw-mode is OFF (or reserved P2P) skip the entire LoRaMac/radio
+	 * bring-up. The work queue, works and timers below are still set up so the
+	 * public API stays safe (app_lrw_join / send hit the DISABLED guard and
+	 * no-op), but clear_stale_lorawan_nvm() / lorawan_set_region() /
 	 * lorawan_start() are never called — the SubGHz radio is never powered, so
-	 * there is no boot radio burst. Provisioning is activation-aware (C-1): OTAA
-	 * needs a DevEUI, ABP needs a DevAddr. */
-	const bool radio_silent = lrw_unprovisioned();
+	 * there is no boot radio burst. (Replaces the #98/#175 DevEUI-zero guard: the
+	 * radio is now enabled/disabled explicitly, not inferred from a blank ID.) */
+	const bool radio_silent = radio_disabled();
 
 	if (!radio_silent) {
 		clear_stale_lorawan_nvm();
@@ -1592,7 +1572,7 @@ int app_lrw_init(void)
 		lorawan_register_dr_changed_callback(datarate_changed_callback);
 		lorawan_register_link_check_ans_callback(link_check_callback);
 	} else {
-		LOG_WRN("DevEUI is all-zero: skipping LoRaWAN bring-up (radio-silent, #98/#175)");
+		LOG_WRN("lrw-mode not LORAWAN: skipping LoRaWAN bring-up (radio-silent, #271)");
 	}
 
 	k_work_queue_init(&m_work_q);

@@ -33,6 +33,12 @@ enum app_config_lrw_activation {
 	APP_CONFIG_LRW_ACTIVATION_ABP = 1,
 };
 
+enum app_config_lrw_mode {
+	APP_CONFIG_LRW_MODE_OFF = 0,
+	APP_CONFIG_LRW_MODE_LORAWAN = 1,
+	APP_CONFIG_LRW_MODE_P2P = 2,
+};
+
 enum app_config_motion_sensitivity {
 	APP_CONFIG_MOTION_SENSITIVITY_OFF = 0,
 	APP_CONFIG_MOTION_SENSITIVITY_LOW = 1,
@@ -57,6 +63,7 @@ struct app_config {
 	int alarm_limit;
 	int alarm_notif_time;
 	enum app_config_lrw_region lrw_region;
+	enum app_config_lrw_mode lrw_mode;
 	int lrw_sub_band;
 	enum app_config_lrw_network lrw_network;
 	bool lrw_adr;
