@@ -52,6 +52,7 @@
 
 /* Standard includes */
 #include <errno.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -105,10 +106,18 @@ void app_cmd_get_info(struct app_cmd_info *info)
 		     "dev_eui size mismatch");
 	memcpy(info->dev_eui, g_app_config.lrw_deveui, sizeof(info->dev_eui));
 
-	/* Fresh battery reading (mV). 0 if the ADC is unavailable (e.g. host test);
-	 * the proto omits a 0 so the host treats it as "unknown". */
-	float v;
-	info->battery_mv = (app_battery_measure(&v) == 0) ? (uint32_t)(v * 1000.0f) : 0;
+	/* Battery reading (mV) from the last sensor sample's cached value, NOT a
+	 * fresh app_battery_measure() here. get_info runs on the boot path (NFC inf
+	 * record + LoRaWAN DeviceInfo) before the ADC clock has settled, and a
+	 * synchronous ADC read that early hangs the release build (no CONFIG_LOG
+	 * timing slack), starving the watchdog and reset-looping before main(). The
+	 * sensor work queue takes the first sample right after init, so the cache
+	 * holds a real reading by the time DeviceInfo is sent. 0/NaN before the first
+	 * sample -> proto omits it and the host treats battery as "unknown". */
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	float v = g_app_sensor_data.voltage;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+	info->battery_mv = (isfinite(v) && v > 0.f) ? (uint32_t)(v * 1000.0f) : 0;
 
 #ifdef APP_CMD_HAVE_CLOCK
 	uint32_t unix_s;
