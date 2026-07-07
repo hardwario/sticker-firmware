@@ -142,9 +142,10 @@ static struct k_work_delayable
 /* Fleet-uplink de-correlation: cap on the random pre-send jitter (#267). The
  * window is min(interval_report/10, this) — 10% for short intervals, but an
  * absolute ceiling so a long interval_report (e.g. 900 s) doesn't push the jitter
- * to 90 s (excessive spread + telemetry staleness). A few tens of seconds already
- * de-correlates a fleet well vs. the ~sub-second per-uplink airtime. */
-#define TX_JITTER_MAX_SEC 30
+ * to 90 s (excessive spread + telemetry staleness). 10 s already de-correlates a
+ * fleet well vs. the ~sub-second per-uplink airtime, and keeps the added staleness
+ * negligible even at long report intervals. */
+#define TX_JITTER_MAX_SEC 10
 /* Duty-cycle/MAC-busy retries before abandoning a telemetry frame (#219); mirrors
  * HISTORY_MAX_RETRIES so a permanent TX error can't be retried forever. */
 #define FRAME_MAX_RETRIES 8
