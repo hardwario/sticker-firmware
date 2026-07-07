@@ -136,8 +136,15 @@ static struct k_work_delayable
 
 /* Multi-frame telemetry: gap before the next frame of the same snapshot (covers
  * RX1/RX2 windows) and backoff when a send is refused (duty cycle / MAC busy). */
-#define FRAME_GAP_SEC     3
-#define FRAME_RETRY_SEC   15
+#define FRAME_GAP_SEC   3
+#define FRAME_RETRY_SEC 15
+
+/* Fleet-uplink de-correlation: cap on the random pre-send jitter (#267). The
+ * window is min(interval_report/10, this) — 10% for short intervals, but an
+ * absolute ceiling so a long interval_report (e.g. 900 s) doesn't push the jitter
+ * to 90 s (excessive spread + telemetry staleness). A few tens of seconds already
+ * de-correlates a fleet well vs. the ~sub-second per-uplink airtime. */
+#define TX_JITTER_MAX_SEC 30
 /* Duty-cycle/MAC-busy retries before abandoning a telemetry frame (#219); mirrors
  * HISTORY_MAX_RETRIES so a permanent TX error can't be retried forever. */
 #define FRAME_MAX_RETRIES 8
@@ -1650,14 +1657,19 @@ void app_lrw_send_telemetry(void)
 	 * Runs on m_work_q; send_work_handler drains response/alarm first, then falls
 	 * through to the telemetry compose when both queues are empty.
 	 *
-	 * De-correlate fleet uplinks with a random PRE-SEND delay of up to 10% of
-	 * interval_report (#267). The jitter lives here, on the transmission — NOT on
-	 * the report timer in app_report, which must stay a fixed interval so the
-	 * history-capture cadence matches the fixed interval that replay reconstructs
-	 * (base + ord*interval_report); jittering the period would drift every stored
-	 * sample's timestamp. A fixed cadence also means a report is never emitted
-	 * early. send_work_handler still drains queued responses/alarms first. */
+	 * De-correlate fleet uplinks with a random PRE-SEND delay (#267). The jitter
+	 * lives here, on the transmission — NOT on the report timer in app_report, which
+	 * must stay a fixed interval so the history-capture cadence matches the fixed
+	 * interval that replay reconstructs (base + ord*interval_report); jittering the
+	 * period would drift every stored sample's timestamp. A fixed cadence also means
+	 * a report is never emitted early. send_work_handler still drains queued
+	 * responses/alarms first.
+	 *
+	 * Window = min(interval_report/10, TX_JITTER_MAX_SEC): 10% for short intervals,
+	 * but capped absolutely so a long interval (e.g. 900 s) doesn't yield a 90 s
+	 * delay (excessive spread + stale telemetry). */
 	uint32_t span_ms = (uint32_t)g_app_config.interval_report * 100U; /* interval/10, in ms */
+	span_ms = MIN(span_ms, (uint32_t)TX_JITTER_MAX_SEC * 1000U);
 	uint32_t delay_ms = span_ms ? (sys_rand32_get() % span_ms) : 0U;
 	k_work_reschedule_for_queue(&m_work_q, &m_tx_jitter_work, K_MSEC(delay_ms));
 }
