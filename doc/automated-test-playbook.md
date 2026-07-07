@@ -326,6 +326,7 @@ Proven procedure (source-meter mode):
 | PPK2 current signature (boot, join burst, TX period) | ✅ (but PM=n distorts) | ✅ — **release-FW liveness proof without RTT** |
 | Power management / sleep behaviour | ⚠ PM disabled in debug — not representative | ✅ |
 | SWD attach | ✅ anytime | ⚠ only in boot/awake window (Stop2 blocks it) |
+| **History persistence across reboot/power-loss** | ❌ **`CONFIG_APP_HISTORY_FLASH=n`** in debug.conf — history lives in RAM only and is always lost on any reboot (this is intentional: debug trades the 64 KB history-flash budget for extra code space, `boards/sticker/sticker.dts` code_partition comment). `history-enable`/accumulation/read/stats all work fine *within* a boot, but AT-HIS-03/H8 (flash persistence) is **not testable on debug** — confirmed by direct test (44 records → 0 after a clean `ats device reboot`, raw flash at 0x2C000 shows plain firmware rodata, not a history ring) | ✅ `CONFIG_APP_HISTORY_FLASH=y` — dedicated 64 KB page-ring partition @0x2C000, survives reboot/power-loss by design (#265) |
 
 **Why release testing is non-negotiable:** two historical release-only bugs — the TX-stop
 wedge (masked by `CONFIG_LOG` timing and PM=n) and the boot ADC IWDG reset loop — were
@@ -778,25 +779,42 @@ boot.
   timestamps fixed-interval (TX jitter must NOT contaminate history timing).
 
 ### AT-HIS-02 — record/read/stats/clear (D, A; maps H3, H4, H5)
-- **Steps:** accumulate ≥ 50 records; `history stats`; `history read 10`; `history clear`;
-  `history count`.
-- **Expect:** stats coherent (count, base time, interval); read returns newest-first per
-  spec; clear zeroes and survives reboot as zero.
+- **Steps:** accumulate ≥ 50 records (note: on debug this is the RAM ring,
+  `CONFIG_APP_HISTORY_RAM_COUNT`-sized, not the 64 KB flash ring — see the variant caveat
+  below); `history stats`; `history read 10`; `history clear`; `history count`.
+- **Expect:** stats coherent (count, base time, interval); `history read <N>` returns the
+  last N records in **ascending chronological order** (oldest of the window first — verified
+  empirically, not newest-first); clear zeroes immediately.
+- **Debug/release caveat:** on debug, `clear` zeroing does NOT need a reboot to prove itself
+  and a reboot is a separate, expected wipe (see AT-HIS-03) — don't conflate the two.
 
-### AT-HIS-03 — persistence across reboot & power-cut (D+PPK2, A; maps H8)
-- **Steps:** accumulate N records → note count → (a) `ats device reboot`; (b) PPK2 hard
-  power-cut mid-run → repower; `history count` after each.
+### AT-HIS-03 — persistence across reboot & power-cut (**R**, A; maps H8)
+- **Pre:** **release FW required.** Debug builds have `CONFIG_APP_HISTORY_FLASH=n`
+  (`app/debug.conf`) — history lives in RAM only and is *always* lost on any reset, by
+  design (the 64 KB history-flash budget is reallocated to code space on debug, see
+  `boards/sticker/sticker.dts` code_partition comment). This was empirically confirmed
+  2026-07-07: 44 RAM-accumulated records on a debug build → 0 after a clean
+  `ats device reboot`; a raw flash dump at the history_partition offset (0x2C000) showed
+  plain firmware rodata/log strings, not a history ring — i.e. on debug that address range
+  is inside the code image, not a separate partition. **Do not run this scenario on debug
+  and report the result as a history bug** — it is expected behavior, not a finding.
+- **Steps (release only):** accumulate N records → note count → (a) `ats device reboot`;
+  (b) PPK2 hard power-cut mid-run → repower; `history count` after each.
 - **Expect:** count and base time re-anchored exactly (a) and to within the last completed
   double-word (b) — a torn tail is dropped, never garbage-decoded.
 
-### AT-HIS-04 — wrap & eviction (D, A; maps #265 HW-valid set)
+### AT-HIS-04 — wrap & eviction (**R**, A; maps #265 HW-valid set)
+- **Pre:** release FW (the 64 KB flash ring only exists with `CONFIG_APP_HISTORY_FLASH=y`;
+  the debug RAM ring is a different, much smaller capacity — wrap behavior there is a
+  distinct, lower-value scenario and not a substitute for this one).
 - **Steps:** `interval-sample 5`, all sensors on, run until count plateaus (capacity of the
   64 KB ring) + one more page worth.
 - **Expect:** oldest page evicted, count stable at capacity, newest records intact,
-  `history stats` shows the moved base time. (Long: ~hours — schedule inside a soak run,
-  or temporarily shrink the window using a debug build with a smaller partition if provided.)
+  `history stats` shows the moved base time. (Long: ~hours — schedule inside a soak run.)
 
-### AT-HIS-05 — torn-tail injection (D, A; adversarial-adjacent)
+### AT-HIS-05 — torn-tail injection (**R**, A; adversarial-adjacent)
+- **Pre:** release FW (boot-time re-anchor from flash page headers is meaningless on the
+  debug RAM ring, which has no persistence to re-anchor from).
 - **Steps:** while records are streaming (1 s effective cadence via minimum
   interval-sample), JLinkExe `halt` mid-write, then `r;g`.
 - **Expect:** boot re-anchor drops at most the in-flight record; no CRC/parse errors in the
@@ -1147,7 +1165,7 @@ automated; *(excluded)* items are listed with reasons below the table.
 | H1, H2 | AT-HIS-01 | A | D | – | |
 | H3–H5 | AT-HIS-02 | A | D | – | |
 | H6, H7 | AT-HIS-06 | A | DR | – | |
-| H8 | AT-HIS-03 | A | D | – | |
+| H8 | AT-HIS-03 | A | R | – | |
 | A1 | AT-ALM-01 | SA | D | finger | |
 | A2 | AT-ALM-02 | SA | D | probe | |
 | A3, A4, A13 | AT-ALM-03 | SA | D | magnet/jumper | |
