@@ -318,6 +318,7 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -360,43 +361,56 @@ static struct {{ module.name }} m_{{ module.name }} = {
 {% endfor %}
 };
 
+/* Flat settings descriptor: maps each NVS key to its offset+size in the config
+ * struct. One rodata table drives both load (h_set) and export (h_export),
+ * replacing the per-key SETTINGS_SET/EXPORT_FUNC expansions (table-driven config,
+ * #262 Phase 2). config-version is the LAST entry so h_export writes it after
+ * every value (its schema-marker ordering guarantee, see h_export). */
+struct {{ module.name }}_setting {
+	const char *key;
+	uint16_t off;
+	uint16_t size;
+};
+
+#define CFG_SETTING(_key, _member)                                                                  \
+	{                                                                                          \
+		(_key), offsetof(struct {{ module.name }}, _member),                                \
+			sizeof(m_{{ module.name }}._member)                                         \
+	}
+
+static const struct {{ module.name }}_setting m_{{ module.name }}_settings[] = {
+{% for param in parameters %}
+	CFG_SETTING("{{ param.name | settings_key }}", {{ param.name | c_name }}),
+{% endfor %}
+{% if module.version is defined %}
+	CFG_SETTING("config-version", config_version),
+{% endif %}
+};
+
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
-	int ret;
 	const char *next;
 
-#define SETTINGS_SET(_key, _var, _size)                                                            \
-	do {                                                                                       \
-		if (settings_name_steq(key, _key, &next) && !next) {                               \
-			if (len != _size) {                                                        \
-				return -EINVAL;                                                    \
-			}                                                                          \
-                                                                                                   \
-			ret = read_cb(cb_arg, _var, len);                                          \
-                                                                                                   \
-			if (ret < 0) {                                                             \
-				LOG_ERR("Call `read_cb` failed: %d", ret);                         \
-				return ret;                                                        \
-			}                                                                          \
-                                                                                                   \
-			return 0;                                                                  \
-		}                                                                                  \
-	} while (0)
+	for (size_t i = 0; i < ARRAY_SIZE(m_{{ module.name }}_settings); i++) {
+		const struct {{ module.name }}_setting *s = &m_{{ module.name }}_settings[i];
 
-{% if module.version is defined %}
-	SETTINGS_SET("config-version", &m_{{ module.name }}.config_version,
-		     sizeof(m_{{ module.name }}.config_version));
-{% endif %}
-{% for param in parameters %}
-{% if param.type == 'bytes' or param.type == 'string' %}
-	SETTINGS_SET("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
-{% else %}
-	SETTINGS_SET("{{ param.name | settings_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
-		     sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
-{% endif %}
-{% endfor %}
+		if (!settings_name_steq(key, s->key, &next) || next) {
+			continue;
+		}
 
-#undef SETTINGS_SET
+		if (len != s->size) {
+			return -EINVAL;
+		}
+
+		int ret = read_cb(cb_arg, (uint8_t *)&m_{{ module.name }} + s->off, len);
+
+		if (ret < 0) {
+			LOG_ERR("Call `read_cb` failed: %d", ret);
+			return ret;
+		}
+
+		return 0;
+	}
 
 	return -ENOENT;
 }
@@ -459,29 +473,24 @@ static int h_commit(void)
 
 static int h_export(int (*export_func)(const char *name, const void *val, size_t val_len))
 {
-#define EXPORT_FUNC(_key, _var, _size)                                                             \
-	do {                                                                                       \
-		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
-	} while (0)
-
+	/* m_{{ module.name }}_settings lists config-version LAST: settings_save is
+	 * per-key atomic, so writing the schema marker after every value means a
+	 * brownout mid-save leaves an old version with a partial new payload rather
+	 * than a new version flagging data as fully migrated. Paired with the
+	 * migration restore in h_commit. */
+{% set ns = namespace(keymax = 'config-version' | length) %}
 {% for param in parameters %}
-{% if param.type == 'bytes' or param.type == 'string' %}
-	EXPORT_FUNC("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
-{% else %}
-	EXPORT_FUNC("{{ param.name | settings_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
-		    sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
-{% endif %}
+{% set kl = param.name | settings_key | length %}
+{% if kl > ns.keymax %}{% set ns.keymax = kl %}{% endif %}
 {% endfor %}
-{% if module.version is defined %}
-	/* Export config-version LAST: settings_save is per-key atomic, so writing
-	 * the schema marker after every value means a brownout mid-save leaves an
-	 * old version with a partial new payload rather than a new version flagging
-	 * data as fully migrated. Paired with the migration restore in h_commit. */
-	EXPORT_FUNC("config-version", &m_{{ module.name }}.config_version,
-		    sizeof(m_{{ module.name }}.config_version));
-{% endif %}
+	for (size_t i = 0; i < ARRAY_SIZE(m_{{ module.name }}_settings); i++) {
+		const struct {{ module.name }}_setting *s = &m_{{ module.name }}_settings[i];
+		/* buffer = "{{ module.settings_prefix | default(module.name | replace('_', '-')) }}/" + longest key ({{ ns.keymax }}) + NUL */
+		char name[sizeof(SETTINGS_PFX "/") + {{ ns.keymax }}];
 
-#undef EXPORT_FUNC
+		(void)snprintf(name, sizeof(name), SETTINGS_PFX "/%s", s->key);
+		(void)export_func(name, (const uint8_t *)&m_{{ module.name }} + s->off, s->size);
+	}
 
 	return 0;
 }

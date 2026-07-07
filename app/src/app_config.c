@@ -23,6 +23,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -75,116 +76,108 @@ static struct app_config m_app_config = {
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
 
+/* Flat settings descriptor: maps each NVS key to its offset+size in the config
+ * struct. One rodata table drives both load (h_set) and export (h_export),
+ * replacing the per-key SETTINGS_SET/EXPORT_FUNC expansions (table-driven config,
+ * #262 Phase 2). config-version is the LAST entry so h_export writes it after
+ * every value (its schema-marker ordering guarantee, see h_export). */
+struct app_config_setting {
+	const char *key;
+	uint16_t off;
+	uint16_t size;
+};
+
+#define CFG_SETTING(_key, _member)                                                                 \
+	{(_key), offsetof(struct app_config, _member), sizeof(m_app_config._member)}
+
+static const struct app_config_setting m_app_config_settings[] = {
+	CFG_SETTING("secret-key", secret_key),
+	CFG_SETTING("serial-number", serial_number),
+	CFG_SETTING("nonce-counter", nonce_counter),
+	CFG_SETTING("claim-token", claim_token),
+	CFG_SETTING("calibration", calibration),
+	CFG_SETTING("interval-sample", interval_sample),
+	CFG_SETTING("interval-report", interval_report),
+	CFG_SETTING("history-enable", history_enable),
+	CFG_SETTING("history-sensors", history_sensors),
+	CFG_SETTING("battery-level", battery_level),
+	CFG_SETTING("alarm-limit", alarm_limit),
+	CFG_SETTING("alarm-notif-time", alarm_notif_time),
+	CFG_SETTING("lrw-region", lrw_region),
+	CFG_SETTING("lrw-sub-band", lrw_sub_band),
+	CFG_SETTING("lrw-network", lrw_network),
+	CFG_SETTING("lrw-adr", lrw_adr),
+	CFG_SETTING("lrw-activation", lrw_activation),
+	CFG_SETTING("lrw-deveui", lrw_deveui),
+	CFG_SETTING("lrw-joineui", lrw_joineui),
+	CFG_SETTING("lrw-nwkkey", lrw_nwkkey),
+	CFG_SETTING("lrw-appkey", lrw_appkey),
+	CFG_SETTING("lrw-devaddr", lrw_devaddr),
+	CFG_SETTING("lrw-nwkskey", lrw_nwkskey),
+	CFG_SETTING("lrw-appskey", lrw_appskey),
+	CFG_SETTING("lrw-link-check-interval", lrw_link_check_interval),
+	CFG_SETTING("lrw-link-check-fail-rejoin", lrw_link_check_fail_rejoin),
+	CFG_SETTING("cap-hall-left", cap_hall_left),
+	CFG_SETTING("cap-hall-right", cap_hall_right),
+	CFG_SETTING("cap-input-a", cap_input_a),
+	CFG_SETTING("cap-input-b", cap_input_b),
+	CFG_SETTING("cap-light-sensor", cap_light_sensor),
+	CFG_SETTING("cap-barometer", cap_barometer),
+	CFG_SETTING("cap-pir-detector", cap_pir_detector),
+	CFG_SETTING("cap-w1-sensors", cap_w1_sensors),
+	CFG_SETTING("cap-accelerometer", cap_accelerometer),
+	CFG_SETTING("alarm-0", alarm_0),
+	CFG_SETTING("alarm-1", alarm_1),
+	CFG_SETTING("alarm-2", alarm_2),
+	CFG_SETTING("alarm-3", alarm_3),
+	CFG_SETTING("alarm-4", alarm_4),
+	CFG_SETTING("alarm-5", alarm_5),
+	CFG_SETTING("alarm-6", alarm_6),
+	CFG_SETTING("alarm-7", alarm_7),
+	CFG_SETTING("alarm-8", alarm_8),
+	CFG_SETTING("alarm-9", alarm_9),
+	CFG_SETTING("alarm-10", alarm_10),
+	CFG_SETTING("alarm-11", alarm_11),
+	CFG_SETTING("alarm-12", alarm_12),
+	CFG_SETTING("alarm-13", alarm_13),
+	CFG_SETTING("alarm-14", alarm_14),
+	CFG_SETTING("alarm-15", alarm_15),
+	CFG_SETTING("accel-motion-sensitivity", accel_motion_sensitivity),
+	CFG_SETTING("sensor1-rom", sensor1_rom),
+	CFG_SETTING("sensor2-rom", sensor2_rom),
+	CFG_SETTING("sensor3-rom", sensor3_rom),
+	CFG_SETTING("sensor4-rom", sensor4_rom),
+	CFG_SETTING("hall-left-counter", hall_left_counter),
+	CFG_SETTING("hall-right-counter", hall_right_counter),
+	CFG_SETTING("input-a-counter", input_a_counter),
+	CFG_SETTING("input-b-counter", input_b_counter),
+	CFG_SETTING("config-version", config_version),
+};
+
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
-	int ret;
 	const char *next;
 
-#define SETTINGS_SET(_key, _var, _size)                                                            \
-	do {                                                                                       \
-		if (settings_name_steq(key, _key, &next) && !next) {                               \
-			if (len != _size) {                                                        \
-				return -EINVAL;                                                    \
-			}                                                                          \
-                                                                                                   \
-			ret = read_cb(cb_arg, _var, len);                                          \
-                                                                                                   \
-			if (ret < 0) {                                                             \
-				LOG_ERR("Call `read_cb` failed: %d", ret);                         \
-				return ret;                                                        \
-			}                                                                          \
-                                                                                                   \
-			return 0;                                                                  \
-		}                                                                                  \
-	} while (0)
+	for (size_t i = 0; i < ARRAY_SIZE(m_app_config_settings); i++) {
+		const struct app_config_setting *s = &m_app_config_settings[i];
 
-	SETTINGS_SET("config-version", &m_app_config.config_version,
-		     sizeof(m_app_config.config_version));
-	SETTINGS_SET("secret-key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
-	SETTINGS_SET("serial-number", &m_app_config.serial_number,
-		     sizeof(m_app_config.serial_number));
-	SETTINGS_SET("nonce-counter", &m_app_config.nonce_counter,
-		     sizeof(m_app_config.nonce_counter));
-	SETTINGS_SET("claim-token", m_app_config.claim_token, sizeof(m_app_config.claim_token));
-	SETTINGS_SET("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
-	SETTINGS_SET("interval-sample", &m_app_config.interval_sample,
-		     sizeof(m_app_config.interval_sample));
-	SETTINGS_SET("interval-report", &m_app_config.interval_report,
-		     sizeof(m_app_config.interval_report));
-	SETTINGS_SET("history-enable", &m_app_config.history_enable,
-		     sizeof(m_app_config.history_enable));
-	SETTINGS_SET("history-sensors", &m_app_config.history_sensors,
-		     sizeof(m_app_config.history_sensors));
-	SETTINGS_SET("battery-level", &m_app_config.battery_level,
-		     sizeof(m_app_config.battery_level));
-	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
-	SETTINGS_SET("alarm-notif-time", &m_app_config.alarm_notif_time,
-		     sizeof(m_app_config.alarm_notif_time));
-	SETTINGS_SET("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
-	SETTINGS_SET("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
-	SETTINGS_SET("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
-	SETTINGS_SET("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
-	SETTINGS_SET("lrw-activation", &m_app_config.lrw_activation,
-		     sizeof(m_app_config.lrw_activation));
-	SETTINGS_SET("lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
-	SETTINGS_SET("lrw-joineui", m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui));
-	SETTINGS_SET("lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
-	SETTINGS_SET("lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
-	SETTINGS_SET("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
-	SETTINGS_SET("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
-	SETTINGS_SET("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
-	SETTINGS_SET("lrw-link-check-interval", &m_app_config.lrw_link_check_interval,
-		     sizeof(m_app_config.lrw_link_check_interval));
-	SETTINGS_SET("lrw-link-check-fail-rejoin", &m_app_config.lrw_link_check_fail_rejoin,
-		     sizeof(m_app_config.lrw_link_check_fail_rejoin));
-	SETTINGS_SET("cap-hall-left", &m_app_config.cap_hall_left,
-		     sizeof(m_app_config.cap_hall_left));
-	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
-		     sizeof(m_app_config.cap_hall_right));
-	SETTINGS_SET("cap-input-a", &m_app_config.cap_input_a, sizeof(m_app_config.cap_input_a));
-	SETTINGS_SET("cap-input-b", &m_app_config.cap_input_b, sizeof(m_app_config.cap_input_b));
-	SETTINGS_SET("cap-light-sensor", &m_app_config.cap_light_sensor,
-		     sizeof(m_app_config.cap_light_sensor));
-	SETTINGS_SET("cap-barometer", &m_app_config.cap_barometer,
-		     sizeof(m_app_config.cap_barometer));
-	SETTINGS_SET("cap-pir-detector", &m_app_config.cap_pir_detector,
-		     sizeof(m_app_config.cap_pir_detector));
-	SETTINGS_SET("cap-w1-sensors", &m_app_config.cap_w1_sensors,
-		     sizeof(m_app_config.cap_w1_sensors));
-	SETTINGS_SET("cap-accelerometer", &m_app_config.cap_accelerometer,
-		     sizeof(m_app_config.cap_accelerometer));
-	SETTINGS_SET("alarm-0", m_app_config.alarm_0, sizeof(m_app_config.alarm_0));
-	SETTINGS_SET("alarm-1", m_app_config.alarm_1, sizeof(m_app_config.alarm_1));
-	SETTINGS_SET("alarm-2", m_app_config.alarm_2, sizeof(m_app_config.alarm_2));
-	SETTINGS_SET("alarm-3", m_app_config.alarm_3, sizeof(m_app_config.alarm_3));
-	SETTINGS_SET("alarm-4", m_app_config.alarm_4, sizeof(m_app_config.alarm_4));
-	SETTINGS_SET("alarm-5", m_app_config.alarm_5, sizeof(m_app_config.alarm_5));
-	SETTINGS_SET("alarm-6", m_app_config.alarm_6, sizeof(m_app_config.alarm_6));
-	SETTINGS_SET("alarm-7", m_app_config.alarm_7, sizeof(m_app_config.alarm_7));
-	SETTINGS_SET("alarm-8", m_app_config.alarm_8, sizeof(m_app_config.alarm_8));
-	SETTINGS_SET("alarm-9", m_app_config.alarm_9, sizeof(m_app_config.alarm_9));
-	SETTINGS_SET("alarm-10", m_app_config.alarm_10, sizeof(m_app_config.alarm_10));
-	SETTINGS_SET("alarm-11", m_app_config.alarm_11, sizeof(m_app_config.alarm_11));
-	SETTINGS_SET("alarm-12", m_app_config.alarm_12, sizeof(m_app_config.alarm_12));
-	SETTINGS_SET("alarm-13", m_app_config.alarm_13, sizeof(m_app_config.alarm_13));
-	SETTINGS_SET("alarm-14", m_app_config.alarm_14, sizeof(m_app_config.alarm_14));
-	SETTINGS_SET("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
-	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
-		     sizeof(m_app_config.accel_motion_sensitivity));
-	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
-	SETTINGS_SET("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
-	SETTINGS_SET("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
-	SETTINGS_SET("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
-	SETTINGS_SET("hall-left-counter", &m_app_config.hall_left_counter,
-		     sizeof(m_app_config.hall_left_counter));
-	SETTINGS_SET("hall-right-counter", &m_app_config.hall_right_counter,
-		     sizeof(m_app_config.hall_right_counter));
-	SETTINGS_SET("input-a-counter", &m_app_config.input_a_counter,
-		     sizeof(m_app_config.input_a_counter));
-	SETTINGS_SET("input-b-counter", &m_app_config.input_b_counter,
-		     sizeof(m_app_config.input_b_counter));
+		if (!settings_name_steq(key, s->key, &next) || next) {
+			continue;
+		}
 
-#undef SETTINGS_SET
+		if (len != s->size) {
+			return -EINVAL;
+		}
+
+		int ret = read_cb(cb_arg, (uint8_t *)&m_app_config + s->off, len);
+
+		if (ret < 0) {
+			LOG_ERR("Call `read_cb` failed: %d", ret);
+			return ret;
+		}
+
+		return 0;
+	}
 
 	return -ENOENT;
 }
@@ -303,102 +296,19 @@ static int h_commit(void)
 
 static int h_export(int (*export_func)(const char *name, const void *val, size_t val_len))
 {
-#define EXPORT_FUNC(_key, _var, _size)                                                             \
-	do {                                                                                       \
-		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
-	} while (0)
+	/* m_app_config_settings lists config-version LAST: settings_save is
+	 * per-key atomic, so writing the schema marker after every value means a
+	 * brownout mid-save leaves an old version with a partial new payload rather
+	 * than a new version flagging data as fully migrated. Paired with the
+	 * migration restore in h_commit. */
+	for (size_t i = 0; i < ARRAY_SIZE(m_app_config_settings); i++) {
+		const struct app_config_setting *s = &m_app_config_settings[i];
+		/* buffer = "config/" + longest key (26) + NUL */
+		char name[sizeof(SETTINGS_PFX "/") + 26];
 
-	EXPORT_FUNC("secret-key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
-	EXPORT_FUNC("serial-number", &m_app_config.serial_number,
-		    sizeof(m_app_config.serial_number));
-	EXPORT_FUNC("nonce-counter", &m_app_config.nonce_counter,
-		    sizeof(m_app_config.nonce_counter));
-	EXPORT_FUNC("claim-token", m_app_config.claim_token, sizeof(m_app_config.claim_token));
-	EXPORT_FUNC("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
-	EXPORT_FUNC("interval-sample", &m_app_config.interval_sample,
-		    sizeof(m_app_config.interval_sample));
-	EXPORT_FUNC("interval-report", &m_app_config.interval_report,
-		    sizeof(m_app_config.interval_report));
-	EXPORT_FUNC("history-enable", &m_app_config.history_enable,
-		    sizeof(m_app_config.history_enable));
-	EXPORT_FUNC("history-sensors", &m_app_config.history_sensors,
-		    sizeof(m_app_config.history_sensors));
-	EXPORT_FUNC("battery-level", &m_app_config.battery_level,
-		    sizeof(m_app_config.battery_level));
-	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
-	EXPORT_FUNC("alarm-notif-time", &m_app_config.alarm_notif_time,
-		    sizeof(m_app_config.alarm_notif_time));
-	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
-	EXPORT_FUNC("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
-	EXPORT_FUNC("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
-	EXPORT_FUNC("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
-	EXPORT_FUNC("lrw-activation", &m_app_config.lrw_activation,
-		    sizeof(m_app_config.lrw_activation));
-	EXPORT_FUNC("lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
-	EXPORT_FUNC("lrw-joineui", m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui));
-	EXPORT_FUNC("lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
-	EXPORT_FUNC("lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
-	EXPORT_FUNC("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
-	EXPORT_FUNC("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
-	EXPORT_FUNC("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
-	EXPORT_FUNC("lrw-link-check-interval", &m_app_config.lrw_link_check_interval,
-		    sizeof(m_app_config.lrw_link_check_interval));
-	EXPORT_FUNC("lrw-link-check-fail-rejoin", &m_app_config.lrw_link_check_fail_rejoin,
-		    sizeof(m_app_config.lrw_link_check_fail_rejoin));
-	EXPORT_FUNC("cap-hall-left", &m_app_config.cap_hall_left,
-		    sizeof(m_app_config.cap_hall_left));
-	EXPORT_FUNC("cap-hall-right", &m_app_config.cap_hall_right,
-		    sizeof(m_app_config.cap_hall_right));
-	EXPORT_FUNC("cap-input-a", &m_app_config.cap_input_a, sizeof(m_app_config.cap_input_a));
-	EXPORT_FUNC("cap-input-b", &m_app_config.cap_input_b, sizeof(m_app_config.cap_input_b));
-	EXPORT_FUNC("cap-light-sensor", &m_app_config.cap_light_sensor,
-		    sizeof(m_app_config.cap_light_sensor));
-	EXPORT_FUNC("cap-barometer", &m_app_config.cap_barometer,
-		    sizeof(m_app_config.cap_barometer));
-	EXPORT_FUNC("cap-pir-detector", &m_app_config.cap_pir_detector,
-		    sizeof(m_app_config.cap_pir_detector));
-	EXPORT_FUNC("cap-w1-sensors", &m_app_config.cap_w1_sensors,
-		    sizeof(m_app_config.cap_w1_sensors));
-	EXPORT_FUNC("cap-accelerometer", &m_app_config.cap_accelerometer,
-		    sizeof(m_app_config.cap_accelerometer));
-	EXPORT_FUNC("alarm-0", m_app_config.alarm_0, sizeof(m_app_config.alarm_0));
-	EXPORT_FUNC("alarm-1", m_app_config.alarm_1, sizeof(m_app_config.alarm_1));
-	EXPORT_FUNC("alarm-2", m_app_config.alarm_2, sizeof(m_app_config.alarm_2));
-	EXPORT_FUNC("alarm-3", m_app_config.alarm_3, sizeof(m_app_config.alarm_3));
-	EXPORT_FUNC("alarm-4", m_app_config.alarm_4, sizeof(m_app_config.alarm_4));
-	EXPORT_FUNC("alarm-5", m_app_config.alarm_5, sizeof(m_app_config.alarm_5));
-	EXPORT_FUNC("alarm-6", m_app_config.alarm_6, sizeof(m_app_config.alarm_6));
-	EXPORT_FUNC("alarm-7", m_app_config.alarm_7, sizeof(m_app_config.alarm_7));
-	EXPORT_FUNC("alarm-8", m_app_config.alarm_8, sizeof(m_app_config.alarm_8));
-	EXPORT_FUNC("alarm-9", m_app_config.alarm_9, sizeof(m_app_config.alarm_9));
-	EXPORT_FUNC("alarm-10", m_app_config.alarm_10, sizeof(m_app_config.alarm_10));
-	EXPORT_FUNC("alarm-11", m_app_config.alarm_11, sizeof(m_app_config.alarm_11));
-	EXPORT_FUNC("alarm-12", m_app_config.alarm_12, sizeof(m_app_config.alarm_12));
-	EXPORT_FUNC("alarm-13", m_app_config.alarm_13, sizeof(m_app_config.alarm_13));
-	EXPORT_FUNC("alarm-14", m_app_config.alarm_14, sizeof(m_app_config.alarm_14));
-	EXPORT_FUNC("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
-	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
-		    sizeof(m_app_config.accel_motion_sensitivity));
-	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
-	EXPORT_FUNC("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
-	EXPORT_FUNC("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
-	EXPORT_FUNC("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
-	EXPORT_FUNC("hall-left-counter", &m_app_config.hall_left_counter,
-		    sizeof(m_app_config.hall_left_counter));
-	EXPORT_FUNC("hall-right-counter", &m_app_config.hall_right_counter,
-		    sizeof(m_app_config.hall_right_counter));
-	EXPORT_FUNC("input-a-counter", &m_app_config.input_a_counter,
-		    sizeof(m_app_config.input_a_counter));
-	EXPORT_FUNC("input-b-counter", &m_app_config.input_b_counter,
-		    sizeof(m_app_config.input_b_counter));
-	/* Export config-version LAST: settings_save is per-key atomic, so writing
-	 * the schema marker after every value means a brownout mid-save leaves an
-	 * old version with a partial new payload rather than a new version flagging
-	 * data as fully migrated. Paired with the migration restore in h_commit. */
-	EXPORT_FUNC("config-version", &m_app_config.config_version,
-		    sizeof(m_app_config.config_version));
-
-#undef EXPORT_FUNC
+		(void)snprintf(name, sizeof(name), SETTINGS_PFX "/%s", s->key);
+		(void)export_func(name, (const uint8_t *)&m_app_config + s->off, s->size);
+	}
 
 	return 0;
 }
