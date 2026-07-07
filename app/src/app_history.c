@@ -606,7 +606,7 @@ static uint16_t backend_capacity(uint16_t sample_size)
 
 bool app_history_is_ready(void)
 {
-	return m_fs_ready;
+	return m_ready;
 }
 
 #else /* RAM fallback */
