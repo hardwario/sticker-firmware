@@ -1,82 +1,74 @@
-# Design: table-driven config apply/fill (#262)
+# Table-driven config apply/fill/settings/shell (#262)
 
-> Scaffold / working design note. To be refined during implementation and
-> removed (or folded into `scripts/west_commands/README`) before this PR leaves
-> draft.
+Replaces the per-field **generated code** in the config machinery with per-field
+**rodata descriptor tables** walked by hand-written generic interpreters. No
+wire-format and no NVS-format change: the descriptors encode exactly the
+validation/mapping/ordering the generated code did.
 
-## Goal
+## Result (measured @ base v1.4.0 `3a25890`)
 
-Replace the per-field **generated code** in `app_config_ingest.c` (and later the
-settings + debug-shell duplication in `app_config.c`) with a per-field **rodata
-descriptor table** walked by one hand-written generic interpreter.
+| Build | Flash before | Flash after | Saved |
+|-------|-------------|-------------|-------|
+| Release | 99.93 % (163 720 B) | **95.40 % (156 296 B)** | **−7 424 B** |
+| Debug   | ~99 %              | **92.36 % (226 972 B)** | (Phase 1+2+3) |
 
-Target saving: **2–4 KB release flash** (release is at 99.93 % @ `3a25890`),
-more in debug where the shell handlers deduplicate over the same table. No
-wire-format change of any kind — verifiable 1:1 by the existing configen pytest
-round-trip suite and the `tests/cmd` ztest.
+Per generated object (release / debug text):
 
-## Current shape (baseline @ `3a25890`)
+| File | Before | After |
+|------|--------|-------|
+| `app_config_ingest.c` | 6 664 B | 1 436 B |
+| `app_config_table.c` (new interpreter) | — | 534 B |
+| `app_config.c` (release) | 6 040 B | 2 406 B |
+| `app_config.c` (debug, incl. shell) | 12 154 B | 9 786 B |
 
-`scripts/west_commands/templates/config_ingest.c.j2` emits, per field, an inline
-block whose shape is always: `has_` guard → write-transport check (M-3, #172) →
-range/enum/bytes handling → assignment or `FAULT(tag)`. The same field metadata
-is repeated on the fill (read) side and a third time in `config.c.j2`
-(settings load/save + shell).
+## Phases
 
-The metadata is already computed in `configen.py` (`_ingest_model`, ~line 629)
-and is exactly what a descriptor needs:
+### Phase 1 — apply/fill interpreter (release −4 688 B)
+- configen emits `struct cfg_field_desc <group>_desc[]` (rodata) per proto
+  submessage group in `app_config_ingest.c`.
+- Hand-written generic `cfg_apply` / `cfg_fill` / `cfg_slot_empty` in
+  `app_config_table.c` walk it. `app_config_apply_*()` / `fill_*()` /
+  `*_slot_empty()` become thin wrappers — public API and signatures unchanged.
+- Descriptor: tag, kind (BOOL/PLAIN/RANGED/BYTES), size (`sizeof`), flags
+  (no-write-lrw/nfc, dump, zero-ok, omit-if-zero), `offsetof` for has_/src_ (proto
+  submessage) and dst_ (struct app_config), and [min,max] for RANGED (enums use
+  [0, enum_max]). Enum = RANGED; scalar load/store via `memcpy` (no alignment /
+  aliasing assumptions). float/double/64-bit are rejected loudly by configen (no
+  such config field exists) rather than silently mis-generated.
 
-| descriptor field | source in configen param dict |
-|---|---|
-| `tag`            | `p["tag"]` (`proto_id`) |
-| `kind`           | `p["kind"]` — `bool`/`enum`/`bytes`/`float`/`int_ranged`/`plain` |
-| `has_off`        | `offsetof(<c_message>, has_<proto_name>)` |
-| `src_off`        | `offsetof(<c_message>, <proto_name>)` |
-| `dst_off`        | `offsetof(struct app_config, <c_name>)` |
-| `size`           | `sizeof` value / bytes length |
-| `min` / `max`    | `p["min"]` / `p["max"]` (INT), `0` / `enum_max` (ENUM) |
-| `wr_transports`  | derived from `no_write_lrw` / `no_write_nfc` |
-| flags            | `zero_allowed`, `omit_if_zero`, `dump`, `dump_nfc_only` |
+### Phase 2 — settings load/save (release −2 736 B)
+- One flat `struct app_config_setting { key; off; size; }` table drives both
+  `h_set` (load) and `h_export` (export) as loops, replacing the per-key
+  `SETTINGS_SET` / `EXPORT_FUNC` macro expansions.
+- `config-version` is the last table entry, preserving the "export schema marker
+  last" brownout-safety ordering. `h_commit` clamping, migration and
+  `factory_reset` preserve_on_reset stay generated (unchanged, still tested).
 
-## Plan
+### Phase 3 — debug shell (debug −2 392 B, release unaffected)
+- One generic getter (`print_field`) + setter (`cmd_field`) walk a
+  `struct cfg_shell_field[]` descriptor plus per-enum token tables, replacing the
+  per-parameter `print_<name>()` / `cmd_<name>()` pair (93 → ~3 functions). Every
+  `SHELL_CMD_ARG` dispatches to `cmd_field`, keyed by the sub-command name.
+- Validation, error messages and display formats are preserved 1:1 (including
+  `serial-number`'s zero-padded width via `%0*u`, `interval-sample`'s zero_allowed,
+  `claim-token`'s write-once, and the enum token/help lists).
 
-### Phase 1 — apply/fill interpreter (this PR, core ~2–4 KB)
-1. configen emits `struct cfg_field_desc <group>_desc[]` (rodata) per group,
-   plus a group table (`{ desc, n, c_message size }`), instead of the inline
-   `apply_*` / `fill_*` bodies.
-2. Hand-write the generic interpreter in a **non-generated** file
-   (`app/src/app_config_table.c` + header): `cfg_apply(desc, n, tp, src, config,
-   fault)` and `cfg_fill(desc, n, dst, ids, n_ids, config)`. Enum validates via
-   `min..max` and casts on assignment; bytes via `size` + `memcpy`.
-3. `app_config_apply_<group>()` / `fill_<group>()` become thin wrappers that call
-   the interpreter with the group's descriptor table (keeps the public API and
-   `app_config_ingest.h` stable).
-4. Keep the omit-if-zero `slot_empty` helper driven off the same table.
-
-### Phase 2 — settings load/save (follow-up)
-Drive the `settings_*` load/save handlers in `config.c.j2` off the same
-descriptor (add the settings key name to the descriptor).
-
-### Phase 3 — debug shell (follow-up, biggest *debug* win)
-Deduplicate the `cmd_*` / `print_*` shell handlers over the table.
-
-## Explicitly NOT in the table (stay hand-written / generated)
-- `app_config_alarms_slot_empty()` special casing.
-- Claim-token write-once semantics (#170).
-- NFC-only key readback lists (#162).
-
-## Gotchas
-- Template work MUST use `west configen -t <worktree>/scripts/west_commands/templates`
-  — the default lookup uses the manifest repo and silently ignores worktree
-  template edits.
-- `__packed` the descriptor so the rodata cost is the ~14–16 B/field claimed;
-  measure actual `.rodata` vs `.text` delta with `arm-zephyr-eabi-size` on the
-  release build before/after.
-- Regenerate via local `python -c` (not `west configen` / `tools/test.sh`) to
-  avoid the known stale-dispatch rewrite of `app_cmd.c`.
+## Not in the tables (stay hand-written / generated)
+Claim-token write-once (#170, via `cmd_bytes`), NFC-only key readback (#162, the
+`CFG_F_DUMP`+DUMP_FIELDS split), `h_commit` clamp/migration, `factory_reset`.
 
 ## Validation
-- `pytest scripts/west_commands/tests` (configen round-trip).
-- `tests/cmd` ztest on `native_sim/native/64`.
-- Release build flash delta via `arm-zephyr-eabi-size`.
-- Diff the generated `.pb.c`/proto — must be byte-identical (no wire change).
+- configen pytest round-trip: **24/24** (incl. regen-matches-committed).
+- `tests/cmd` ztest (real apply/fill/paging/nfc-only/range/transport): **15/15**.
+- JS decoder: **38/38**. clang-format (CI-pinned 22.1.5) over all `app/src`: clean.
+- Release + debug firmware build clean.
+- **Not yet runtime-tested:** Phase 3 shell has no ztest harness (none exists for
+  the shell). The code is logic-preserving; a `config <key> <val>` + `config show`
+  + `settings save` smoke test on target is recommended before release.
+
+## Gotchas (for maintainers)
+- Regenerate with the **worktree** templates: `west configen -t
+  <worktree>/scripts/west_commands/templates` (the default lookup uses the
+  manifest repo and silently ignores worktree template edits).
+- Adding a config field is now one YAML row → one descriptor row in each table;
+  the access model (#172) is enforced in exactly one place (`cfg_apply`).
