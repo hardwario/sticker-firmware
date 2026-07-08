@@ -9,6 +9,7 @@
 
 /* Standard includes */
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* The alarm source/quantity enums + the rule model live in app_alarm_rules.h —
@@ -41,6 +42,21 @@ bool app_alarm_is_active(enum app_alarm_source source, enum app_alarm_quantity q
  * or send an fPort-3 report. Just reads the latched state (rule slots + no-data
  * / low-battery watchdogs) under the alarm locks. Safe to call from fill_info. */
 uint32_t app_alarm_status_flags(void);
+
+/* One currently-active alarm, for a status snapshot (Response.Info.active_alarms).
+ * Same taxonomy as a configured rule / fPort 3 AlarmEvent: source and quantity are
+ * enum app_alarm_source / app_alarm_quantity; type is the AlarmEvent.Type value
+ * (1=low, 2=high, 3=trigger, 4=no_data). */
+struct app_alarm_active {
+	uint8_t source;
+	uint8_t quantity;
+	uint8_t type;
+};
+
+/* Snapshot the alarms latched active right now (rule slots + no-data / low-battery
+ * watchdogs) into out[0..max-1]. Read-only, like app_alarm_status_flags() (no
+ * evaluation / expiry / send). Returns the number of entries written (<= max). */
+size_t app_alarm_active_snapshot(struct app_alarm_active *out, size_t max);
 
 #ifdef __cplusplus
 }

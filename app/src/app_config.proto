@@ -269,6 +269,24 @@ message Response {
         optional LrwState lrw_state = 12;  // current LoRaWAN network state; emitted over NFC only
         optional bytes dev_eui = 13;  // 8-byte DevEUI; emitted over NFC only, omitted if unset
         uint32 device_status = 14;  // aggregated device status (APP_DEVICE_STATUS_* bitmask); 0 = all OK
+
+        // Currently-active alarms, one entry per latched alarm at the moment the
+        // Info was built (rule slots + no-data / low-battery watchdogs). Only the
+        // active ones are emitted, so the list is empty when all is well and its
+        // length varies. Each entry names its source/quantity/type using the same
+        // enums as the alarm rules and the fPort 3 AlarmReport (app_alarm_source,
+        // app_alarm_quantity, AlarmEvent.Type) — see AlarmStatus.
+        repeated AlarmStatus active_alarms = 15;
+    }
+
+    // A single active alarm as reported in Info.active_alarms. Same taxonomy as a
+    // configured alarm rule / fPort 3 AlarmEvent, trimmed to just what a status
+    // read needs: no slot/value/edge/time (this is a live snapshot, not an edge
+    // report). Encoded as a nanopb callback so only the active alarms are sent.
+    message AlarmStatus {
+        uint32 source   = 1;  // enum app_alarm_source: onboard/s1..s4/hall-l/r/input-a/b/pir/accel/battery
+        uint32 quantity = 2;  // enum app_alarm_quantity: temperature/humidity/.../state/count/voltage
+        uint32 type     = 3;  // AlarmEvent.Type: low(1)/high(2)/trigger(3)/no_data(4)
     }
 
     message ConfigDump {
