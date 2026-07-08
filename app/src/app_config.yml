@@ -218,8 +218,8 @@ parameters:
     proto_group: application
     proto_id: 5
     type: uint32
-    default: 0
-    help: "Get/Set history sensor selection bitmask (0 = all capability-available)."
+    default: 3
+    help: "Get/Set history sensor selection bitmask (literal, bit i = enum app_history_sensor i; 0 = no channels). Default 0x0003 = temperature + humidity."
 
   - name: battery_level
     proto_group: application
