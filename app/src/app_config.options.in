@@ -29,7 +29,16 @@ AppConfigMessage.Sensors.sensor4_rom max_size:8 fixed_length:true
 # END GENERATED CONFIG
 
 Response.Error.detail       max_size:32
-Response.HistoryFrame.samples max_size:48
+# Sized so the NFC paged read (#260) fills a whole NFC response per tap (fewest
+# pages). The binding limit is the ST25DV 512 B tag memory: the rsp NDEF record is
+# ~22 B framing + encrypted(8 B nonce + plaintext + 16 B CCM tag), so plaintext
+# <= ~466 B; minus the ~26 B Response/HistoryFrame protobuf envelope leaves ~440 B
+# for samples. The runtime cap (app_cmd_history_sample_capacity, out_cap =
+# DUMP_PAGE_BUDGET_NFC 450) is the real binding value; this field just must not be
+# smaller. The LoRaWAN replay is separately capped to its DR budget (m_hist_tx_buf,
+# 96 B) so it never fills this. RAM-free: the Response oneof is dominated by
+# ConfigDump (~563 B), so HistoryFrame growing to ~472 B does not enlarge Response.
+Response.HistoryFrame.samples max_size:440
 Response.Info.claim_token   max_size:16 fixed_length:true
 Response.Info.dev_eui       max_size:8 fixed_length:true
 

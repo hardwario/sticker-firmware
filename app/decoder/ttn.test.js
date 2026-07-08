@@ -197,6 +197,18 @@ test("decodeUplink decodes get_info battery + reset_cause (fPort 85)", () => {
   assert.equal(got.info.reset_cause, 0x20);
 });
 
+// reset_cause is decoded into named flags so the backend sees WHY the device
+// rebooted, straight off the on-join GetInfo (fPort 85 over LoRaWAN). Inner Info:
+// fw 1.4.2, battery=3062 mV, reset_cause=0x09 (RESET_PIN | RESET_POR).
+test("decodeUplink decodes get_info reset_cause_flags (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a0b08011004180250f6175809"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.info.reset_cause, 0x09);
+  assert.deepEqual(got.info.reset_cause_flags, ["pin", "power_on"]);
+});
+
 // Info carries lrw_state (field 12, mirrors app_lrw_state) and dev_eui (field 13,
 // 8 bytes). Both are emitted over NFC only. Inner Info: fw 1.4.2,
 // lrw_state=2 (HEALTHY), dev_eui=0102030405060708.
@@ -392,7 +404,8 @@ function histRec(tempC, humPct) {
   const t = Math.round(tempC * 100);
   return [t & 0xff, (t >> 8) & 0xff, Math.round(humPct * 2)]; // int16 LE temp, u8 hum
 }
-function buildHistoryFrame(seq, idx, count, t0, present, interval, samples, synced) {
+function buildHistoryFrame(seq, idx, count, t0, present, interval, samples, synced, nextOrd,
+                           hasMore) {
   // proto3 omits a zero field — mirror that for frame_index so the decoder's
   // default-to-0 is exercised (the firmware sends frame 0 with no field 1).
   let hf = idx ? pbTV(1, idx) : [];
@@ -401,6 +414,10 @@ function buildHistoryFrame(seq, idx, count, t0, present, interval, samples, sync
   // time_synced (field 7). Omitted when `synced` is undefined so the old-FW
   // "absent = treat as synced" default is exercised by the other vectors.
   if (synced !== undefined) hf = hf.concat(pbTV(7, synced ? 1 : 0));
+  // next_ord (field 8) / has_more (field 9): NFC paged read (#260) only; omitted
+  // over the device-driven LoRaWAN replay.
+  if (nextOrd !== undefined) hf = hf.concat(pbTV(8, nextOrd));
+  if (hasMore !== undefined) hf = hf.concat(pbTV(9, hasMore ? 1 : 0));
   // 0x01 = APP_PROTO_VERSION prefix (#55); Response.history_frame = field 5.
   return [0x01].concat(pbTV(1, seq)).concat(pbLD(5, hf));
 }
@@ -435,6 +452,33 @@ test("decodeUplink decodes + reassembles multi-frame history (fPort 85)", () => 
   const all = d0.history_frame.records.concat(d1.history_frame.records);
   assert.equal(all.length, 3);
   assert.deepEqual(all.map((r) => r.time), [t0a, t0a + interval, t0b]);
+});
+
+// #260: an NFC paged-read frame carries next_ord + has_more (fields 8/9). The
+// shared decoder must surface them for the phone's cursor while still decoding
+// records unchanged; a device-driven LoRaWAN frame omits them (has_more absent).
+test("NFC paged history frame surfaces next_ord + has_more (#260)", () => {
+  const present = 0x03;
+  const interval = 900;
+  const t0 = 1780000000;
+  const mid = buildHistoryFrame(0, 0, 0, t0, present, interval, histRec(21.5, 45), true, 4, true);
+  const dmid = codec.decodeUplink({ bytes: mid, fPort: 85 }).data;
+  assert.equal(dmid.history_frame.next_ord, 4);
+  assert.equal(dmid.history_frame.has_more, true);
+  assert.equal(dmid.history_frame.records[0].temperature, 21.5);
+  assert.equal(dmid.history_frame.records[0].time, t0);
+
+  // Final page: has_more=false tells the phone to stop tapping.
+  const last = buildHistoryFrame(1, 0, 0, t0, present, interval, histRec(21.7, 47), true, 9, false);
+  const dlast = codec.decodeUplink({ bytes: last, fPort: 85 }).data;
+  assert.equal(dlast.history_frame.next_ord, 9);
+  assert.equal(dlast.history_frame.has_more, false);
+
+  // Device-driven LoRaWAN replay omits both fields (undefined, not present).
+  const lrw = buildHistoryFrame(2, 0, 1, t0, present, interval, histRec(20.0, 40));
+  const dlrw = codec.decodeUplink({ bytes: lrw, fPort: 85 }).data;
+  assert.equal(dlrw.history_frame.next_ord, undefined);
+  assert.equal(dlrw.history_frame.has_more, undefined);
 });
 
 test("history sentinel values decode to null", () => {

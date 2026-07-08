@@ -35,6 +35,17 @@ enums:
       value: 1
       shell: abp
 
+  lrw_mode:
+    - name: "OFF"
+      value: 0
+      shell: "off"
+    - name: LORAWAN
+      value: 1
+      shell: lorawan
+    - name: P2P
+      value: 2
+      shell: p2p
+
   motion_sensitivity:
     - name: "OFF"
       value: 0
@@ -104,6 +115,7 @@ commands:
     - {name: force_send,     proto_id: 9,  body: ForceSend,     kind: handler, response: none, transports: [lrw]}
     - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
     - {name: req_history,    proto_id: 11, body: ReqHistory,    kind: handler, response: none, transports: [lrw]}
+    - {name: req_history_page, proto_id: 13, body: ReqHistoryPage, kind: handler, response: none, transports: [nfc]}
     - {name: clock_sync,     proto_id: 12, body: ClockSync,     kind: handler, response: info_deferred, transports: [lrw, nfc]}
     - {name: w1_scan,        proto_id: 14, body: W1Scan,        kind: handler, response: w1_scan}
     # F-1: handler (not plain action) so the dispatch calls app_cmd_handle_lrw_{reset,join},
@@ -244,6 +256,16 @@ parameters:
     enum: lrw_region
     preserve_on_reset: true
     help: "Get/Set LoRaWAN region (eu868/us915/au915)."
+
+  - name: lrw_mode
+    proto_group: lorawan
+    writable: [shell, nfc]  # never over a LoRaWAN downlink: setting OFF/P2P would sever the link that carries it (#271)
+    proto_id: 15
+    type: enum
+    enum: lrw_mode
+    default: LORAWAN
+    preserve_on_reset: true
+    help: "Get/Set radio mode (off/lorawan/p2p). off = radio-silent, sensor/history still run."
 
   - name: lrw_sub_band
     proto_group: lorawan

@@ -39,6 +39,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `reset_counters` | Clear selected hall/input counters | `ack` |
 | `clock_sync` | Sync the wall-clock. **Empty** (LoRaWAN): request a network time sync. **With `unix_time`** (NFC): set the RTC directly from the phone's clock (UTC seconds) | LoRaWAN: **`info`, deferred** — sent once the network time lands. NFC: **`info`** immediately — carries the new `unix_time` |
 | `req_history` | Replay stored history for a time window | `history_frame` (multiple) |
+| `req_history_page` | **NFC only.** Read one page of stored history for a time window; the phone drives the cursor across taps (see §6) | `history_frame` (one per request) |
 | `w1_scan` | Enumerate the 1-Wire bus; returns the discovered ROMs so you can teach a slot via `set_param sensorN_rom` | `w1_scan` |
 | `lrw_reset` | Reset the LoRaWAN NVM — frame counters + `DevNonce` + session (same as `ats lrw reset`); **reboots** so the MAC re-initialises clean | `ack` |
 | `lrw_join` | Trigger a forced (re)join immediately instead of waiting for the next scheduled attempt; **no reboot** | `ack` |
@@ -46,15 +47,29 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 
 > After `set_param`, send `settings_save` to persist (it reboots). If a command fails, the device returns an `error` with a code (1 = BAD_REQUEST, 2 = OUT_OF_RANGE, 3 = NOT_READY, 4 = HISTORY_UNAVAILABLE, 5 = UNSUPPORTED_FIELD, 6 = PERSIST_FAILED, 7 = NOT_SUPPORTED, 8 = NOT_WRITABLE), an optional `fault_field`, and a `detail` string. `fault_field` encodes **`group × 100 + tag`** (group 1 = lorawan, 2 = application, 3 = sensors, 4 = alarms; 0 = not group-scoped) so one value identifies the offending field unambiguously across groups — e.g. `203` = application `interval_report`, `102` = lorawan `sub_band`. `ttn.js` splits it back into `fault_group` + `fault_field`.
 >
-> **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `sample`, `clock_sync`, `req_history`, `w1_scan`) do **not** also send an `ack`, to save an uplink. `sample` is dual: over LoRaWAN the fPort-2 report is the only reply (no fPort-85 body, like `force_send`); over NFC it additionally returns the readings synchronously so a phone can show them on the spot.
+> **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `sample`, `clock_sync`, `req_history`, `req_history_page`, `w1_scan`) do **not** also send an `ack`, to save an uplink. `sample` is dual: over LoRaWAN the fPort-2 report is the only reply (no fPort-85 body, like `force_send`); over NFC it additionally returns the readings synchronously so a phone can show them on the spot.
 >
-> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC (previously such transport-scoped commands could be wrongly accepted on the other transport with a misleading `Ack`).
+> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC (previously such transport-scoped commands could be wrongly accepted on the other transport with a misleading `Ack`). Conversely `req_history_page` is **NFC-only** — the NFC channel has no streaming path, so history is read there one page per tap (§6).
 >
 > **Setting the clock over NFC:** `clock_sync` with a `unix_time` field sets the RTC directly from a phone, bootstrapping wall-clock time before/without a network (epoch sanity-bounded to 2024-01-01 … 2100-01-01; out-of-range → `BAD_REQUEST` "bad epoch"). A later network `DeviceTimeReq`/`DeviceTimeAns` stays authoritative and may refine it. Empty `clock_sync` over NFC just confirms (no network to query).
 >
 > **Commissioning a device with just a phone (NFC):** the LoRaWAN identifiers/keys are written through the encrypted NFC config channel (`set_param`/config ingest covers every `lorawan` field — DevEUI, JoinEUI, AppKey, NwkKey, DevAddr, NwkSKey, AppSKey, region, sub-band, network, activation, ADR, link-check). The typical order is **set params → `lrw_reset` → `lrw_join`**: write the keys, reset the counters/`DevNonce` (so a re-keyed or relocated device starts a clean session), then force the join. `lrw_reset` reboots; the `ack` is written back to the tag first, and the reset + reboot run only **after the phone has read the reply** — it acks over NDEF, or a quiet-field backstop fires if it leaves — so the phone reliably sees the reply before the device restarts. `lrw_reset` and `lrw_join` work over both NFC and a LoRaWAN downlink.
 >
 > **`get_param` is paged** like `get_config`: the reply carries `page_index`/`page_count`, and an optional `page` field in the request selects which page (omit = 0). When the selected fields don't all fit one data-rate frame they are split across pages — fetch the rest by re-sending with the next `page`. A page out of range returns `OUT_OF_RANGE`. If any response still doesn't fit the buffer it is replaced by an `error` (same `seq`) rather than dropped silently.
+
+### Radio mode — `lrw-mode` (#271)
+
+A persisted `lrw-mode` config enum selects the radio network mode at boot:
+
+| Value | Shell | Meaning |
+|-------|-------|---------|
+| `off` | `config lrw-mode off` | Radio disabled — no LoRaWAN join, radio never powered. Sensor + history logging still run. Heartbeat LED blinks **orange**. |
+| `lorawan` | `config lrw-mode lorawan` | Classic LoRaWAN (**default**, current behaviour). |
+| `p2p` | `config lrw-mode p2p` | Reserved for the raw-LoRa peer-to-peer transport (#118 / #228); until it lands, `p2p` warns and falls back to `off`. |
+
+Set it over the **shell or NFC only** — never over a LoRaWAN downlink (it would sever the link that carries the command). It is `preserve_on_reset` (survives a factory reset like the other identity keys) and needs `settings save` (reboot) to take effect.
+
+This **replaces the old "blank DevEUI ⇒ radio-silent" guard** (#98/#175): the radio is now enabled/disabled by explicit config, not inferred from an all-zero DevEUI. A `lorawan`-mode device with an unset DevEUI therefore now **attempts to join and fails loudly** instead of silently disabling — so a provisioning gap surfaces rather than looking like an intentional off state. To keep a provisioned device radio-silent (storage, bench, power measurement) without erasing its identity, set `lrw-mode off`.
 
 **Ready-to-use hex downlinks (fPort 85):**
 
@@ -246,9 +261,9 @@ After every LoRaWAN join the device automatically sends a device-info message on
 | `dev_eui` | 8-byte DevEUI, hex — **NFC only** (never sent over LoRaWAN); omitted when unset |
 | `device_status` (`device_status_flags`) | Aggregated device status (uint32 bitmask) — active-alarm categories + health/degradation; 0/absent = all OK |
 
-The **`reset_cause`** field (proto field 11) carries the hardware reset-cause bitmask read once at boot via `hwinfo_get_reset_cause()`, so a watchdog/brownout reset is visible in the field instead of being silent. On the STM32WLE5 the bits that can appear are `pin` (0x01), `software` (0x02), `brownout` (0x04), `power-on`/POR (0x08), `watchdog` (0x10), `security` (0x40) and `low-power-wake` (0x80); several can be set at once (a cold power-up typically asserts power-on + pin + brownout). `ats device info` decodes the mask to names, e.g. `Reset cause: 0x00000010 (watchdog)`.
+The **`reset_cause`** field (proto field 11) carries the hardware reset-cause bitmask read once at boot via `hwinfo_get_reset_cause()`, so a watchdog/brownout reset is visible in the field instead of being silent. On the STM32WLE5 the bits that can appear are `pin` (0x01), `software` (0x02), `brownout` (0x04), `power-on`/POR (0x08), `watchdog` (0x10), `security` (0x40) and `low-power-wake` (0x80); several can be set at once (a cold power-up typically asserts power-on + pin + brownout). `ats device info` decodes the mask to names, e.g. `Reset cause: 0x00000010 (watchdog)`. It ships **over LoRaWAN too** — the device queues an autonomous `get_info` on every join, so after any unexpected reboot the very first fPort-85 uplink tells the backend **why** it restarted; `ttn.js` decodes the mask into `reset_cause_flags` (e.g. `["watchdog"]`) alongside the raw `reset_cause` (#267 observability, L-44).
 
-The **`lrw_state`** field (proto field 12) mirrors the firmware's LoRaWAN state machine (`app_lrw_state`): `idle` (not joined), `joining`, `healthy` (joined, link OK), `warning` (link check failing), `reconnect` (rejoining with backoff) and `disabled` (DevEUI all-zero, radio-silent — #98). Like `dev_eui` it is emitted **over the NFC channel only** and is absent from LoRaWAN uplinks — the link state is redundant on a frame the network just received, and the on-join autonomous `get_info` (which goes out over LoRaWAN) therefore omits it. Over NFC it is an `optional` field, so even the `idle` (zero) state is transmitted explicitly; when the field is absent (any LoRaWAN uplink) the decoder leaves `lrw_state`/`lrw_state_name` `undefined` rather than defaulting to `idle`.
+The **`lrw_state`** field (proto field 12) mirrors the firmware's LoRaWAN state machine (`app_lrw_state`): `idle` (not joined), `joining`, `healthy` (joined, link OK), `warning` (link check failing), `reconnect` (rejoining with backoff) and `disabled` (radio-silent because `lrw-mode` is `off`/`p2p` — #271). Like `dev_eui` it is emitted **over the NFC channel only** and is absent from LoRaWAN uplinks — the link state is redundant on a frame the network just received, and the on-join autonomous `get_info` (which goes out over LoRaWAN) therefore omits it. Over NFC it is an `optional` field, so even the `idle` (zero) state is transmitted explicitly; when the field is absent (any LoRaWAN uplink) the decoder leaves `lrw_state`/`lrw_state_name` `undefined` rather than defaulting to `idle`.
 
 The **`dev_eui`** field (proto field 13) is the 8-byte LoRaWAN DevEUI. It is emitted **only over the encrypted NFC channel** — a LoRaWAN uplink would leak it (the fPort-85 payload is plain protobuf) and the network server already knows it from the device context. It is also omitted when the DevEUI is still all-zero (unset).
 
@@ -268,7 +283,7 @@ The **`device_status`** field (proto field 14) is a uint32 bitmask aggregating t
 | 9 | `history_down` | history flash mount failed |
 | 10 | `i2c_wedged` | I2C bus currently wedged (last sweep all-fail) |
 | 11 | `time_unsynced` | RTC not synced (no wall-clock) |
-| 12 | `lrw_disabled` | LoRaWAN radio-silent (DevEUI all-zero, #98) |
+| 12 | `lrw_disabled` | LoRaWAN radio-silent (`lrw-mode` off/p2p, #271) |
 
 The raw LoRaWAN link state is **not** duplicated here — it has its own `lrw_state` field; only the derived `lrw_disabled` bit is mirrored into the status word.
 
@@ -323,6 +338,8 @@ New `history` shell command:
 Recordable channels (the `history-sensors` bitmask, one bit each): `temperature`, `humidity`, the per-slot 1-Wire channels `s1-temp`/`s1-hum` … `s4-temp`/`s4-hum` (ROM-bound slots, mirror the telemetry slot model; a Dallas slot has no humidity), `hall-left`, `hall-right`, `input-a`, `input-b`, `motion`. The mask is **32-bit** (room for future channels). A Dallas slot's humidity, or any channel whose capability is off, is simply not recorded.
 
 Replay over LoRaWAN with the `req_history` downlink command (§1): the device streams the matching records back as `history_frame` messages on fPort 85. Each frame carries a shared `present` mask + `interval_s` once; samples are fixed-size values-only records, time(j) = `t0_unix + j*interval_s`. The replay splits across as many frames as the data rate needs and terminates when the window is exhausted (a data-rate change mid-replay only changes records-per-frame; the consumer concatenates by `frame_index`). Each frame also carries **`time_synced`** (proto field 7): when `false`, the buffer was captured before the RTC synced so `t0_unix` is only uptime-relative — the decoder then emits `time: null` for that frame's records instead of a bogus ~1970 date (L-1/L-3). Absent (older firmware) is treated as `true`.
+
+**Read over NFC — paged pull (`req_history_page`, NFC only, #260).** The NFC channel is single-request/single-response per tap, so it has no equivalent of the LoRaWAN streaming replay. Instead a phone reads history a page at a time: it sends `req_history_page { from_unix, to_unix, start_ord }` and gets back **one** `history_frame`. Unlike `req_history` this is **client-driven and stateless** — the device keeps no replay session (nothing to wedge); the phone advances the cursor by passing the response's **`next_ord`** (proto field 8) back as `start_ord` on the next tap, and stops when **`has_more`** (field 9) is `false` (an exhausted or empty window returns `has_more=false` with no records — no infinite loop). Each frame decodes exactly like the LoRaWAN one (same `present`/`interval_s`/`samples`/`time_synced`), so a consumer reuses the same record decoder and reassembles the window in `start_ord` order. Records outside `[from_unix, to_unix]` are filtered once the clock is synced (until then the whole buffer is returned). The `samples` field caps at **440 bytes/frame**, so one tap carries up to ~28 records at the 15-byte layout (bounded by the ~466 B NFC response budget); the LoRaWAN replay is unaffected and stays capped to the data-rate payload. `next_ord`/`has_more` are absent on the LoRaWAN `req_history` frames (they carry `frame_index`/`frame_count` instead).
 
 > **Note on `interval-report`:** the LoRaWAN stack persists frame counters to NVS on every uplink; at the 60 s minimum interval with multi-frame reports the storage partition reaches its ~10 k erase budget in roughly 1–2 years. The default (900 s) is decades. History flash wear is fine even at 60 s.
 >
@@ -423,7 +440,7 @@ Author with `ttn.js` `encodeDownlink`: the formatter takes the packed rule as a 
 
 The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.4.0:
 
-- **`decodeUplink`** now decodes the new ports — fPort 2 (protobuf telemetry), fPort 3 (alarm batch), and fPort 85 (command responses: `info`, `ack`, `config_dump`, `history_frame`, `w1_scan`, `alarm_rules_dump`, `error`) — in addition to the legacy fPort 1.
+- **`decodeUplink`** now decodes the new ports — fPort 2 (protobuf telemetry), fPort 3 (alarm batch), and fPort 85 (command responses: `info`, `ack`, `config_dump`, `history_frame`, `w1_scan`, `alarm_rules_dump`, `error`) — in addition to the legacy fPort 1. The `info` response additionally exposes `device_status_flags` and `reset_cause_flags` — the `device_status` (field 14) and `reset_cause` (field 11) bitmasks decoded to name arrays, so a dashboard reads the device's health and its last reboot reason without bit-twiddling.
 - **`encodeDownlink`** (new) lets you author commands as JSON; the formatter encodes them to bytes on fPort 85.
 - **`decodeDownlink`** (new) lets the network server display a queued command.
 
@@ -632,7 +649,17 @@ Not user-facing, but worth recording: v1.4.0 grew enough that the debug image RA
   - **NFC pending-action preservation (M-5)** — a second NFC command that arrives before the phone acks the first no longer **clobbers the first command's deferred action** (reboot / save) — the pending action is kept (it still fires on the ack) and the new command's action is dropped, so a misbehaving app can't silently lose a reboot.
   - **Plaintext-NFC build guard (M-11)** — `CONFIG_APP_NFC_ENCRYPTION=n` (the bench validation mode) now **fails the build unless `CONFIG_FW_DEBUG` is set** (`BUILD_ASSERT`), so a release image can never ship a fully unencrypted NFC channel — previously the "encryption disabled" warning was a `LOG_WRN` that compiles away in release.
   - **History replay skips a bad slot (M-13)** — a single unreadable history record (NVS `-EIO`/`-ENOENT` on a GC-damaged slot) no longer **truncates the whole replay**; the reader skips it (closing the current frame first, since the host reconstructs times contiguously) and resumes after it, so one damaged record can't hide all later history.
+- **Audit small-fixes batch (#267)** — a set of small, independent correctness / power / robustness fixes from the v1.4.0 audit tracker:
+  - **Fleet-uplink jitter moved off the report/capture cadence** — the ±10% jitter that de-correlates fleet uplinks was added to the **`interval_report` timer**, which also drives `app_sensor_sample()` and `app_history_capture()`. But history replay reconstructs each record's time as `base + ordinal * interval_report` — a **fixed** interval — so jittering the period made the stored samples drift from their reconstructed timestamps (and the pre-existing *signed* modulo also fired some reports early). The jitter now lives on the **uplink**: the report timer is a fixed `interval_report` (sample + history capture at an exact cadence, reports never early), and `app_lrw_send_telemetry()` applies a random **pre-send delay** of `0..min(interval_report/10, 10 s)` so the transmission is de-correlated without touching the sample/capture timing (the absolute cap keeps a long `interval_report` — e.g. 900 s — from delaying the uplink by up to 90 s). Guarded by a new `tests/history` fixed-interval-reconstruction test.
+  - **Telemetry frame buffer sizing** — the fPort-2 compose buffer was a hardcoded 64 B; `app_compose()` caps a frame at `min(buffer, live DR budget) − 1`, so on higher DRs (EU868 DR4–6 carry up to 242 B) the 64 B buffer **fragmented a snapshot into more uplinks than the radio needed** — extra TX + RX windows + duty cycle + battery. Sized to the max LoRaWAN application payload (242 B); each frame now fills the actual DR budget (RAM +178 B, no flash change).
+  - **Link-check cadence counts reports, not frames** — `m_message_count` (which drives the every-`lrw_link_check_interval` link-check via `msg_num % interval`) was advanced on **every frame**, so a multi-frame snapshot counted as several messages and the LC cadence drifted with payload size. It now advances once per report (on the final frame).
+  - **GetParam duplicate-field budget** — a field id repeated in one `get_param` was counted twice against the page budget (inflating `page_count`) and emitted twice; duplicates within a section are now skipped.
+  - **NDEF chunked-record reject** — the NDEF parser silently accepted a record with the **CF (chunked)** flag as if whole, mis-reading its payload. It now rejects a chunked record (`-ENOTSUP`); STICKER never emits chunked NDEF.
+  - **Machine-probe SHT type re-detect on rescan** — the cached `sht_type` (probed only while UNKNOWN) was not reset on a bus re-scan, so a slot reused for a **swapped** probe kept the previous part's type and issued the wrong SHT command. Each (re)scan now re-detects it.
+  - **Momentary alarm notif-time** — a PIR/ACCEL one-shot latch was only expired in the 3 s `app_alarm_poll`, so an `alarm_notif_time` shorter than the poll cadence was silently clamped to it (a new event within ~3 s of the window lapsing stayed suppressed). The latch is now also expired in the event path, so `notif_time` is honored regardless of poll cadence.
+  - **IWDG debug freeze** — on a debug build the IWDG is now set up with `WDT_OPT_PAUSE_HALTED_BY_DBG`, so a breakpoint doesn't reset the SoC while the debugger has the core halted (the option only takes effect with a debugger attached, so Release is unaffected).
 - **Link-Time Optimization (#263)** — `prj.conf` enables `CONFIG_LTO=y` + `CONFIG_ISR_TABLES_LOCAL_DECLARATION=y` (the latter is required for the vector table under LTO). Without LTO the compiler optimizes each translation unit alone and the linker only drops whole unused functions (`--gc-sections`); with LTO the final optimization is deferred to link time, where the compiler sees the whole program and eliminates dead code across TU boundaries — the LoRaMac Class B/C + FUOTA paths and the mbedTLS cipher variants STICKER never calls. Reclaims **~19 KB flash** (release **99.93 % → 88.43 %** of the `0x28000` budget, all three EU868/US915/AU915 regions kept), restoring the headroom that subsequent features had consumed back to the flash wall. The debug build inherits it from `prj.conf` too (debug **96.4 % → 88.5 %** of `0x3C000`). HW-validated on a real STICKER (OTAA join, fPort-2 telemetry, fPort-3 alarm, on-target NFC AES-CCM command round-trip, history replay, reset-cause) with no behavioural difference from the non-LTO image. Two notes for developers: setting `CONFIG_LTO=y` on the `west build` command line silently does **not** apply — it must live in `prj.conf`/an overlay; and whole-program optimization relocates the `_SEGGER_RTT` control block (observed `0x20000800` → `0x20000000`), so an RTT viewer attached to an LTO build needs the address re-read from the ELF (`nm zephyr.elf | grep _SEGGER_RTT`).
+- **Production script alignment (#283)** — `app/production/run.sh` had drifted from the firmware it flashes: it sent the now-nonexistent `config save` shell command (settings are persisted via `settings save`, which also cold-reboots the device — the follow-up `sleep` was bumped from 0.2 s to 2 s to match) and still prompted for the `corr-temperature`/`corr-ext-temperature-1/2` offsets removed by 4ab1e77. It also hardcoded the pre-LTO `JLinkRTTLogger -RTTAddress 0x20000800` for the debug-build RTT session it opens mid-script; since the debug overlay inherits `CONFIG_LTO=y` from `prj.conf` (previous bullet), the control block had already moved to `0x20000000` and the logger was silently failing to attach. Both addresses in the script are updated to match.
 
 ---
 
@@ -728,6 +755,35 @@ The hall (`hall-left` / `hall-right`) and input (`input-a` / `input-b`) pulse to
 - **Guarantee / trade-off:** the worst-case lost-pulse window is **one `interval_sample`** when sampling is enabled, otherwise **one `interval_report`** — pulses counted between the last periodic save and an abrupt power loss are lost. A tighter interval narrows the window at the cost of more flash wear. Saving runs on the sensor / report work queue (not the system work queue), so it never delays LoRaWAN RX-window timing.
 - **Flash wear:** the dirty-flagged, per-report write costs at most one tiny NVS record per cycle. Worst case (continuous counting at the 900 s default) is well within the storage partition's ~10 k erase budget for the life of the device; an idle counter costs nothing. A future brownout/PVD flush (to capture the last window's pulses on supply collapse) is possible but needs HW hold-up verification and is **not** in this version.
 - **Width:** counters stay **`uint32_t`** (max 4 294 967 295, then wraps), matching the telemetry/history encoding.
+
+## 16. LED signalling reference (#278)
+
+The STICKER has **three independent on/off LEDs** — red (R), yellow (Y), green (G); no brightness/PWM. "Orange" is R+G lit together. Blinks are short (~5–100 ms). The main loop shows one **heartbeat** every 3 s, chosen by priority (top-down); one-shot signals and the input-event LED are separate.
+
+**Heartbeat (every 3 s, first matching row wins)**
+
+| Priority | Pattern | Meaning |
+|:-:|---------|---------|
+| 1 | 🔴🟡 red/yellow alternating, 2× | **Config NVS load failed** — running on defaults, identity/provisioning lost |
+| 2 | 🟡🔴 yellow then red | **LoRaWAN joining / reconnect** — *not on the network* (initial join or rejoin); the severe network state |
+| 3 | 🟡 yellow ×2 | **LoRaWAN warning** — link-check streak failing but session still up; the mild network state |
+| 4 | 🟡 yellow ×1 | **Radio off** — `lrw-mode off`/`p2p` (deliberate); lowest rung of the yellow scale |
+| 5 | 🔴 red ×1 | **Alarm active** — any of threshold / low-battery (#210) / no-data / dead-sensor (#211); detail travels on fPort 3 |
+| 6 | 🟢 green ×1 | **Healthy** — joined, link OK (debug build: green + yellow) |
+
+The three yellow network states form a **severity scale**: radio-off (1× yellow, deliberate) < warning (2× yellow, session alive) < joining/reconnect (yellow + red, off the network).
+
+**One-shot / modes**
+
+| Pattern | Meaning |
+|---------|---------|
+| 🔴→🟡→🟢 carousel (once) | Boot self-test (exercises all three LEDs) |
+| 🟢 green ×10 | NFC config applied (success) |
+| 🟠 orange ×5 | Entering calibration mode |
+| 🟠 orange, once/s | Calibration mode running |
+| 🟢 + 🟠 green and orange | **Input activity** — PIR / hall / digital input / accelerometer activation or release |
+
+The input-event LED is a **commissioning diagnostic**: it blinks only for the first hour after power-up (rate-limited to 2/s), then goes quiet. It shows **green and orange together** (a two-colour blink, so it can't be mistaken for the single-yellow radio-off heartbeat). The firmware does drive the two colours in a different order for an activation (0→1) versus a release (1→0), but the order is **not visually distinguishable in practice** — treat any green+orange blink simply as "an input changed".
 
 ---
 

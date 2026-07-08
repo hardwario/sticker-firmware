@@ -213,6 +213,16 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(14);
 		}
 	}
+	/* M-3: this field is not writable over lrw. */
+	if (src->has_mode && (tp == APP_CMD_TRANSPORT_LRW)) {
+		FAULT_TRANSPORT(15);
+	} else if (src->has_mode) {
+		if ((int)src->mode >= 0 && (int)src->mode <= 2) {
+			config->lrw_mode = (enum app_config_lrw_mode)src->mode;
+		} else {
+			FAULT(15);
+		}
+	}
 	return ret;
 }
 
@@ -275,6 +285,10 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 	if (requested(ids, n, 14)) {
 		dst->has_link_check_fail_rejoin = true;
 		dst->link_check_fail_rejoin = c->lrw_link_check_fail_rejoin;
+	}
+	if (requested(ids, n, 15)) {
+		dst->has_mode = true;
+		dst->mode = (AppConfigMessage_Lorawan_Mode)c->lrw_mode;
 	}
 }
 

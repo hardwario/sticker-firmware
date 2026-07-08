@@ -25,6 +25,12 @@ message AppConfigMessage {
             ABP = 1;
         }
 
+        enum Mode {
+            OFF = 0;
+            LORAWAN = 1;
+            P2P = 2;
+        }
+
         optional Region region = 1;
         optional uint32 sub_band = 2;
         optional Network network = 3;
@@ -39,6 +45,7 @@ message AppConfigMessage {
         optional bytes appskey = 12;
         optional uint32 link_check_interval = 13;
         optional uint32 link_check_fail_rejoin = 14;
+        optional Mode mode = 15;
     }
 
     message Application {
@@ -117,6 +124,7 @@ message Command {
         ResetCounters    reset_counters    = 10;
         ReqHistory       req_history       = 11;
         ClockSync        clock_sync        = 12;
+        ReqHistoryPage   req_history_page  = 13;
         W1Scan           w1_scan           = 14;
         LrwReset         lrw_reset         = 16;
         LrwJoin          lrw_join          = 17;
@@ -179,6 +187,17 @@ message Command {
         optional bool input_b    = 4;
     }
     message ReqHistory   { optional uint32 from_unix = 1; optional uint32 to_unix = 2; }
+    // NFC paged history read (#260). Client-driven, stateless: the phone taps
+    // repeatedly, passing start_ord = the previous response's next_ord each time,
+    // until the response reports has_more=false. Unlike req_history (LRW,
+    // device-driven streaming) the device keeps no replay session. from_unix/to_unix
+    // bound the window (omitted => whole buffer); start_ord (omitted => 0) is the
+    // record cursor.
+    message ReqHistoryPage {
+        optional uint32 from_unix = 1;
+        optional uint32 to_unix   = 2;
+        optional uint32 start_ord = 3;
+    }
     // Empty (LRW): re-sync the RTC from the network (DeviceTimeReq). With
     // unix_time set (NFC): the phone supplies the wall-clock time (UTC seconds)
     // and the RTC is set from it directly — a one-shot bootstrap before/without
@@ -273,6 +292,13 @@ message Response {
         // treat as synced. The decoder emits time=null for the whole frame when
         // this is present and false, instead of bogus ~1970 timestamps.
         optional bool time_synced = 7;
+        // NFC paged read (#260, req_history_page) only. The device-driven LoRaWAN
+        // replay (req_history) leaves both unset. next_ord is the record cursor the
+        // phone passes back as ReqHistoryPage.start_ord on the next tap; export_page
+        // may skip records outside [from,to], so the phone cannot derive it locally.
+        // has_more=false means the window is exhausted — stop tapping (no wedge).
+        optional uint32 next_ord = 8;
+        optional bool   has_more = 9;
     }
 
     message Error {

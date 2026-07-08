@@ -214,3 +214,15 @@ ZTEST(ndef, test_multi_record_inf_clm)
 	zassert_str_equal(m_multi_type[1], "hio.stck:clm", "record 1 type");
 	zassert_equal(m_multi_plen[1], 20, "clm payload len");
 }
+
+/* #267: a chunked record (CF flag, 0x20, in the record header) is rejected — this
+ * parser does not reassemble chunks, so treating a chunk as a whole record would
+ * mis-read its payload. Same TLV as TLV_AREA but the record header d4 -> b4
+ * (MB|CF|SR|TNF=4). */
+ZTEST(ndef, test_chunked_record_rejected)
+{
+	int ret = run_hex("0313b40c0468696f2e7374636b3a63666700010203fe");
+
+	zassert_equal(ret, -ENOTSUP, "chunked record must be rejected, got %d", ret);
+	zassert_equal(m_cb_count, 0, "no record should be delivered for a chunked frame");
+}

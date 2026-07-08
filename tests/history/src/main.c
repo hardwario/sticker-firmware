@@ -120,6 +120,35 @@ ZTEST(history, test_clock_sync_base_fixup)
 	zassert_within((double)r.time_unix, (double)unix_now, 5.0, "time_unix %u", r.time_unix);
 }
 
+/* #267: history reconstructs each record's time as base + ordinal*interval_report
+ * — a FIXED interval, independent of the actual capture wall-time. This is why the
+ * report timer must stay a fixed cadence (the fleet-uplink jitter was moved onto
+ * the uplink in app_lrw): a jittered capture period would make the real sample
+ * times drift from this fixed-interval reconstruction, biasing every timestamp.
+ * Guard the invariant: consecutive records are exactly interval_report apart. */
+ZTEST(history, test_fixed_interval_reconstruction)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	for (int i = 0; i < 4; i++) {
+		set_th(20.0f + (float)i, 40.0f);
+		app_history_capture();
+	}
+	app_history_on_clock_sync(1735689600);
+
+	struct app_history_record r0, r1, r2, r3;
+	zassert_equal(app_history_get(0, &r0), 0, "get0");
+	zassert_equal(app_history_get(1, &r1), 0, "get1");
+	zassert_equal(app_history_get(2, &r2), 0, "get2");
+	zassert_equal(app_history_get(3, &r3), 0, "get3");
+	zassert_equal(r1.time_unix - r0.time_unix, 60, "rec 0->1 spacing %u",
+		      r1.time_unix - r0.time_unix);
+	zassert_equal(r2.time_unix - r1.time_unix, 60, "rec 1->2 spacing %u",
+		      r2.time_unix - r1.time_unix);
+	zassert_equal(r3.time_unix - r2.time_unix, 60, "rec 2->3 spacing %u",
+		      r3.time_unix - r2.time_unix);
+}
+
 ZTEST(history, test_export)
 {
 	setup();

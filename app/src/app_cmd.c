@@ -362,34 +362,35 @@ static const struct {
 	bool nfc_only; /* only dumped over NFC (e.g. LoRaWAN keys) — never over LoRaWAN */
 } DUMP_FIELDS[] = {
 	// BEGIN GENERATED DUMP_FIELDS
-	{DUMP_SECTION_LORAWAN, 1, 2, false},     {DUMP_SECTION_LORAWAN, 2, 2, false},
-	{DUMP_SECTION_LORAWAN, 3, 2, false},     {DUMP_SECTION_LORAWAN, 4, 2, false},
-	{DUMP_SECTION_LORAWAN, 5, 2, false},     {DUMP_SECTION_LORAWAN, 6, 10, false},
-	{DUMP_SECTION_LORAWAN, 7, 10, false},    {DUMP_SECTION_LORAWAN, 8, 18, true},
-	{DUMP_SECTION_LORAWAN, 9, 18, true},     {DUMP_SECTION_LORAWAN, 10, 6, false},
-	{DUMP_SECTION_LORAWAN, 11, 18, true},    {DUMP_SECTION_LORAWAN, 12, 18, true},
-	{DUMP_SECTION_LORAWAN, 13, 3, false},    {DUMP_SECTION_LORAWAN, 14, 3, false},
-	{DUMP_SECTION_APPLICATION, 1, 2, false}, {DUMP_SECTION_APPLICATION, 2, 3, false},
-	{DUMP_SECTION_APPLICATION, 3, 4, false}, {DUMP_SECTION_APPLICATION, 4, 2, false},
-	{DUMP_SECTION_APPLICATION, 5, 6, false}, {DUMP_SECTION_APPLICATION, 6, 3, false},
-	{DUMP_SECTION_SENSORS, 1, 2, false},     {DUMP_SECTION_SENSORS, 2, 2, false},
-	{DUMP_SECTION_SENSORS, 3, 2, false},     {DUMP_SECTION_SENSORS, 4, 2, false},
-	{DUMP_SECTION_SENSORS, 5, 2, false},     {DUMP_SECTION_SENSORS, 6, 2, false},
-	{DUMP_SECTION_SENSORS, 7, 2, false},     {DUMP_SECTION_SENSORS, 8, 2, false},
-	{DUMP_SECTION_SENSORS, 9, 2, false},     {DUMP_SECTION_SENSORS, 10, 2, false},
-	{DUMP_SECTION_SENSORS, 11, 10, false},   {DUMP_SECTION_SENSORS, 12, 10, false},
-	{DUMP_SECTION_SENSORS, 13, 10, false},   {DUMP_SECTION_SENSORS, 14, 10, false},
-	{DUMP_SECTION_SENSORS, 15, 2, false},    {DUMP_SECTION_SENSORS, 16, 3, false},
-	{DUMP_SECTION_SENSORS, 17, 3, false},    {DUMP_SECTION_SENSORS, 18, 3, false},
-	{DUMP_SECTION_ALARMS, 1, 3, false},      {DUMP_SECTION_ALARMS, 2, 2, false},
-	{DUMP_SECTION_ALARMS, 3, 19, false},     {DUMP_SECTION_ALARMS, 4, 19, false},
-	{DUMP_SECTION_ALARMS, 5, 19, false},     {DUMP_SECTION_ALARMS, 6, 19, false},
-	{DUMP_SECTION_ALARMS, 7, 19, false},     {DUMP_SECTION_ALARMS, 8, 19, false},
-	{DUMP_SECTION_ALARMS, 9, 19, false},     {DUMP_SECTION_ALARMS, 10, 19, false},
-	{DUMP_SECTION_ALARMS, 11, 19, false},    {DUMP_SECTION_ALARMS, 12, 19, false},
-	{DUMP_SECTION_ALARMS, 13, 19, false},    {DUMP_SECTION_ALARMS, 14, 19, false},
-	{DUMP_SECTION_ALARMS, 15, 19, false},    {DUMP_SECTION_ALARMS, 16, 20, false},
-	{DUMP_SECTION_ALARMS, 17, 20, false},    {DUMP_SECTION_ALARMS, 18, 20, false},
+	{DUMP_SECTION_LORAWAN, 1, 2, false},     {DUMP_SECTION_LORAWAN, 15, 2, false},
+	{DUMP_SECTION_LORAWAN, 2, 2, false},     {DUMP_SECTION_LORAWAN, 3, 2, false},
+	{DUMP_SECTION_LORAWAN, 4, 2, false},     {DUMP_SECTION_LORAWAN, 5, 2, false},
+	{DUMP_SECTION_LORAWAN, 6, 10, false},    {DUMP_SECTION_LORAWAN, 7, 10, false},
+	{DUMP_SECTION_LORAWAN, 8, 18, true},     {DUMP_SECTION_LORAWAN, 9, 18, true},
+	{DUMP_SECTION_LORAWAN, 10, 6, false},    {DUMP_SECTION_LORAWAN, 11, 18, true},
+	{DUMP_SECTION_LORAWAN, 12, 18, true},    {DUMP_SECTION_LORAWAN, 13, 3, false},
+	{DUMP_SECTION_LORAWAN, 14, 3, false},    {DUMP_SECTION_APPLICATION, 1, 2, false},
+	{DUMP_SECTION_APPLICATION, 2, 3, false}, {DUMP_SECTION_APPLICATION, 3, 4, false},
+	{DUMP_SECTION_APPLICATION, 4, 2, false}, {DUMP_SECTION_APPLICATION, 5, 6, false},
+	{DUMP_SECTION_APPLICATION, 6, 3, false}, {DUMP_SECTION_SENSORS, 1, 2, false},
+	{DUMP_SECTION_SENSORS, 2, 2, false},     {DUMP_SECTION_SENSORS, 3, 2, false},
+	{DUMP_SECTION_SENSORS, 4, 2, false},     {DUMP_SECTION_SENSORS, 5, 2, false},
+	{DUMP_SECTION_SENSORS, 6, 2, false},     {DUMP_SECTION_SENSORS, 7, 2, false},
+	{DUMP_SECTION_SENSORS, 8, 2, false},     {DUMP_SECTION_SENSORS, 9, 2, false},
+	{DUMP_SECTION_SENSORS, 10, 2, false},    {DUMP_SECTION_SENSORS, 11, 10, false},
+	{DUMP_SECTION_SENSORS, 12, 10, false},   {DUMP_SECTION_SENSORS, 13, 10, false},
+	{DUMP_SECTION_SENSORS, 14, 10, false},   {DUMP_SECTION_SENSORS, 15, 2, false},
+	{DUMP_SECTION_SENSORS, 16, 3, false},    {DUMP_SECTION_SENSORS, 17, 3, false},
+	{DUMP_SECTION_SENSORS, 18, 3, false},    {DUMP_SECTION_ALARMS, 1, 3, false},
+	{DUMP_SECTION_ALARMS, 2, 2, false},      {DUMP_SECTION_ALARMS, 3, 19, false},
+	{DUMP_SECTION_ALARMS, 4, 19, false},     {DUMP_SECTION_ALARMS, 5, 19, false},
+	{DUMP_SECTION_ALARMS, 6, 19, false},     {DUMP_SECTION_ALARMS, 7, 19, false},
+	{DUMP_SECTION_ALARMS, 8, 19, false},     {DUMP_SECTION_ALARMS, 9, 19, false},
+	{DUMP_SECTION_ALARMS, 10, 19, false},    {DUMP_SECTION_ALARMS, 11, 19, false},
+	{DUMP_SECTION_ALARMS, 12, 19, false},    {DUMP_SECTION_ALARMS, 13, 19, false},
+	{DUMP_SECTION_ALARMS, 14, 19, false},    {DUMP_SECTION_ALARMS, 15, 19, false},
+	{DUMP_SECTION_ALARMS, 16, 20, false},    {DUMP_SECTION_ALARMS, 17, 20, false},
+	{DUMP_SECTION_ALARMS, 18, 20, false},
 	// END GENERATED DUMP_FIELDS
 };
 
@@ -552,6 +553,19 @@ static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *c
 	uint32_t cur_page = 0, used = 0;
 	for (uint8_t s = 0; s < 4; s++) {
 		for (size_t j = 0; j < req_n[s]; j++) {
+			/* Skip a field id already requested earlier in this section: a
+			 * duplicate would otherwise be counted twice against the page budget
+			 * (inflating page_count) and emitted twice (#267). */
+			bool dup = false;
+			for (size_t k = 0; k < j; k++) {
+				if (req_ids[s][k] == req_ids[s][j]) {
+					dup = true;
+					break;
+				}
+			}
+			if (dup) {
+				continue;
+			}
 			uint8_t sz;
 			bool nfc_only;
 			if (!dump_field_size(s, req_ids[s][j], &sz, &nfc_only)) {
@@ -685,6 +699,67 @@ static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command 
 	if (!app_lrw_start_history_replay(from, to, cmd->seq)) {
 		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no records");
 	}
+#else
+	ARG_UNUSED(cmd);
+	make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no history");
+#endif
+}
+
+/* NFC-only paged history read (#260). Unlike req_history (LRW device-driven
+ * streaming), this is client-driven and stateless: each tap returns exactly one
+ * HistoryFrame and the phone advances the cursor by passing the response's
+ * next_ord back as start_ord on the next request, looping until has_more=false.
+ * The device keeps NO replay session (nothing to wedge) and does NOT pause
+ * capture — new records may be appended between taps. Edge case: if the flash
+ * ring evicts its oldest page between taps, the logical ordinal cursor shifts
+ * down; over a short on-site readout (interval is minutes) this is negligible. */
+static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Command *cmd,
+					    Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+#if defined(APP_CMD_HAVE_HISTORY)
+	const Command_ReqHistoryPage *rq = &cmd->body.req_history_page;
+	uint32_t from = rq->has_from_unix ? rq->from_unix : 0;
+	uint32_t to = rq->has_to_unix ? rq->to_unix : UINT32_MAX;
+	size_t start = rq->has_start_ord ? rq->start_ord : 0;
+	uint32_t present = app_history_get_mask();
+	uint32_t interval = app_history_get_interval();
+
+	Response_HistoryFrame *hf = &resp->body.history_frame;
+
+	/* Clamp the sample byte budget to what one HistoryFrame encodes into the NFC
+	 * response, further clamped to the samples field capacity (242 B). Worst-case
+	 * (max-varint) header values keep the bound stable regardless of the actual
+	 * ordinal/time values. */
+	size_t cap = app_cmd_history_sample_capacity(cmd->seq, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+						     present, interval, DUMP_PAGE_BUDGET_NFC);
+	cap = MIN(cap, sizeof(hf->samples.bytes));
+
+	uint32_t t0 = 0;
+	uint16_t n_written = 0;
+	size_t next_ord = start;
+	size_t written = app_history_export_page(from, to, start, hf->samples.bytes, cap, &t0,
+						 &n_written, &next_ord);
+
+	resp->which_body = Response_history_frame_tag;
+	hf->frame_index = 0; /* informational only over NFC; the phone counts its own pages */
+	hf->frame_count = app_history_count_frames(from, to, cap); /* progress hint */
+	hf->t0_unix = t0;
+	hf->samples.size = written;
+	hf->present = present;
+	hf->interval_s = interval;
+	hf->has_time_synced = true;
+	hf->time_synced = app_history_base_synced();
+	/* Authoritative cursor for the phone: pass next_ord back as start_ord. When a
+	 * page returns no records (buffer empty, cursor past the window/end) or no
+	 * ordinals remain, has_more=false stops the tap loop (no wedge, no infinite
+	 * loop). A page that fills at the to_unix boundary may cost one extra empty
+	 * tap, which then reports has_more=false. */
+	hf->has_next_ord = true;
+	hf->next_ord = (uint32_t)next_ord;
+	hf->has_has_more = true;
+	hf->has_more = (n_written > 0) && (next_ord < app_history_count());
 #else
 	ARG_UNUSED(cmd);
 	make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no history");
@@ -877,6 +952,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		}
 		app_cmd_handle_req_history(tp, cmd, resp, action);
 		break;
+	case Command_req_history_page_tag:
+		/* transports: [nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_req_history_page(tp, cmd, resp, action);
+		break;
 	case Command_clock_sync_tag:
 		/* transports: [lrw, nfc] — reject on any other transport */
 		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC) {
@@ -1032,23 +1115,26 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 	 * bytes here (value 0/1 both encode to 1 byte) or the frame could overflow. */
 	hf->has_time_synced = true;
 	hf->time_synced = true;
-	hf->samples.size = 0; /* empty bytes field is omitted in proto3 */
 
-	size_t base = 0;
-	if (!pb_get_encoded_size(&base, Response_fields, &resp)) {
-		return 0;
+	/* Binary-search the largest samples payload whose fully-encoded frame
+	 * (version byte + Response) still fits out_cap, measuring each candidate with
+	 * pb_get_encoded_size. Measuring beats hand-accounting the length varints:
+	 * BOTH the samples field length AND the enclosing history_frame submessage
+	 * length grow with the payload and cross the 1->2 byte varint boundary as it
+	 * passes 127 B — reachable since #260 raised the samples field to 440 B. */
+	size_t lo = 0, hi = sizeof(hf->samples.bytes);
+	while (lo < hi) {
+		size_t mid = (lo + hi + 1) / 2;
+		size_t sz = 0;
+		hf->samples.size = mid;
+		if (pb_get_encoded_size(&sz, Response_fields, &resp) &&
+		    (size_t)(1 + sz) <= out_cap) {
+			lo = mid;
+		} else {
+			hi = mid - 1;
+		}
 	}
-
-	/* The encoded frame is: version(1) + base + samples field. With 1..N
-	 * sample bytes (N <= 48 < 128) the samples field adds tag(1) + len(1) + N.
-	 * The empty-field omission above means `base` excludes those 2 bytes. */
-	const size_t fixed = 1 + base + 2;
-	if (out_cap <= fixed) {
-		return 0;
-	}
-
-	size_t avail = out_cap - fixed;
-	return MIN(avail, sizeof(hf->samples.bytes));
+	return lo;
 }
 
 int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,

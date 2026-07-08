@@ -109,8 +109,10 @@ static void play_carousel_boot(void)
 
 static void play_carousel_nfc(void)
 {
+	/* #278: green (was yellow) — an applied NFC config is a SUCCESS, so it reads
+	 * as green rather than joining the overloaded set of yellow signals. */
 	struct app_led_blink_req req = {
-		.color = APP_LED_CHANNEL_Y, .duration = 100, .space = 100, .repetitions = 10};
+		.color = APP_LED_CHANNEL_G, .duration = 100, .space = 100, .repetitions = 10};
 	app_led_blink(&req);
 	k_sleep(K_MSEC(10 * 200 - 100));
 }
@@ -126,7 +128,7 @@ static void nfc_run_deferred_cmd_actions(void)
 	while (cmd_action != APP_CMD_ACTION_NONE) {
 		switch (cmd_action) {
 		case APP_CMD_ACTION_SETTINGS_SAVE:
-			/* #250: yellow NFC carousel as operator feedback that an
+			/* #250: green NFC carousel (#278) as operator feedback that an
 			 * (offline-)staged config was applied — was previously only
 			 * shown for the retired hio.stck:cfg record. */
 			play_carousel_nfc();
@@ -251,19 +253,18 @@ static enum app_mode detect_mode(void)
 	return APP_MODE_NORMAL;
 }
 
-static void orange_event_handler(enum app_alarm_source source, bool active, void *user_data)
+static void event_led_handler(enum app_alarm_source source, bool active, void *user_data)
 {
 	ARG_UNUSED(source);
-	ARG_UNUSED(active);
 	ARG_UNUSED(user_data);
 
 	static int64_t last_blink_ms;
 	int64_t now = k_uptime_get();
 
-	/* Commissioning-only diagnostic: the yellow event LED confirms input
-	 * activations for the first hour after power-up, then goes quiet. The cutoff
-	 * is deliberately measured from boot (uptime), NOT from the event — once a
-	 * unit is commissioned the blink is no longer wanted. */
+	/* Commissioning-only diagnostic: the event LED confirms input activations for
+	 * the first hour after power-up, then goes quiet. The cutoff is deliberately
+	 * measured from boot (uptime), NOT from the event — once a unit is
+	 * commissioned the blink is no longer wanted. */
 	if (now > APP_ALARM_ORANGE_AUTO_OFF_MS) {
 		return;
 	}
@@ -272,11 +273,47 @@ static void orange_event_handler(enum app_alarm_source source, bool active, void
 		return;
 	}
 
-	struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
-					.duration = APP_ALARM_ORANGE_BLINK_MS,
-					.space = 0,
-					.repetitions = 1};
-	app_led_blink(&req);
+	/* #278: encode the input EDGE in the colour order so an installer can tell an
+	 * activation from a release at a glance — and so this event blink can never be
+	 * mistaken for the single-yellow radio-off heartbeat (it is a two-colour
+	 * green/orange sequence, not plain yellow). Orange = R+G lit together.
+	 *   activation (0->1, active=true):  green -> orange
+	 *   release    (1->0, active=false): orange -> green
+	 * Momentary sources (PIR, accelerometer) only ever send active=true, so they
+	 * always show the green->orange activation sequence; hall/input send both
+	 * edges. */
+	const uint16_t d = APP_ALARM_ORANGE_BLINK_MS;
+	struct app_led_play_req req;
+	if (active) {
+		/* green, then orange (R+G) */
+		req = (struct app_led_play_req){
+			.commands =
+				{{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
+				 {.type = APP_LED_CMD_DELAY, .duration = d},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
+				 {.type = APP_LED_CMD_DELAY, .duration = d},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
+				 {.type = APP_LED_CMD_END}},
+			.repetitions = 1};
+	} else {
+		/* orange (R+G), then green */
+		req = (struct app_led_play_req){
+			.commands =
+				{{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
+				 {.type = APP_LED_CMD_DELAY, .duration = d},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
+				 {.type = APP_LED_CMD_DELAY, .duration = d},
+				 {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
+				 {.type = APP_LED_CMD_END}},
+			.repetitions = 1};
+	}
+	app_led_play(&req);
 
 	last_blink_ms = now;
 }
@@ -457,7 +494,7 @@ int main(void)
 	app_lrw_join();
 #endif /* defined(CONFIG_LORAWAN) */
 
-	app_alarm_set_event_callback(orange_event_handler, NULL);
+	app_alarm_set_event_callback(event_led_handler, NULL);
 
 	/* Normal mode main loop */
 	for (;;) {
@@ -514,14 +551,14 @@ int main(void)
 		enum app_lrw_state lrw_state = app_lrw_get_state();
 
 		if (lrw_state == APP_LRW_STATE_JOINING || lrw_state == APP_LRW_STATE_RECONNECT) {
+			/* Not on the network — initial join or a rejoin after the link was
+			 * lost (#278). This is the SEVERE LoRaWAN state (worse than WARNING,
+			 * which keeps its session), so it carries a red accent: one yellow
+			 * blink followed by one red. The severity scale across the three
+			 * yellow states is radio-off (1× yellow) < warning (2× yellow) <
+			 * joining/reconnect (yellow + red). */
 			struct app_led_play_req req = {
 				.commands = {{.type = APP_LED_CMD_SET,
-					      .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
-					     {.type = APP_LED_CMD_DELAY, .duration = 10},
-					     {.type = APP_LED_CMD_SET,
-					      .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
-					     {.type = APP_LED_CMD_DELAY, .duration = 200},
-					     {.type = APP_LED_CMD_SET,
 					      .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
 					     {.type = APP_LED_CMD_DELAY, .duration = 10},
 					     {.type = APP_LED_CMD_SET,
@@ -537,32 +574,26 @@ int main(void)
 			app_led_play(&req);
 			led_handled = true;
 		} else if (lrw_state == APP_LRW_STATE_WARNING) {
+			/* Link-check streak failing but the session is still up (#278) — the
+			 * MILD network state. Two yellow blinks, no red (one step above
+			 * radio-off's single yellow, one below joining's yellow+red). */
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
 							.duration = 10,
 							.space = 200,
-							.repetitions = 3};
+							.repetitions = 2};
 			app_led_blink(&req);
 			led_handled = true;
 		} else if (lrw_state == APP_LRW_STATE_DISABLED) {
-			/* Not provisioned / radio-silent (C-1): a distinct red double-blink so
-			 * an operator can tell "LoRaWAN is off" apart from a healthy device
-			 * (green) — previously DISABLED fell through to the green blink and an
-			 * ABP device with no DevEUI looked perfectly healthy while silent. */
-			struct app_led_play_req req = {
-				.commands = {{.type = APP_LED_CMD_SET,
-					      .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
-					     {.type = APP_LED_CMD_DELAY, .duration = 30},
-					     {.type = APP_LED_CMD_SET,
-					      .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
-					     {.type = APP_LED_CMD_DELAY, .duration = 150},
-					     {.type = APP_LED_CMD_SET,
-					      .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
-					     {.type = APP_LED_CMD_DELAY, .duration = 30},
-					     {.type = APP_LED_CMD_SET,
-					      .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
-					     {.type = APP_LED_CMD_END}},
-				.repetitions = 1};
-			app_led_play(&req);
+			/* Radio disabled by lrw-mode (#271/#278): a single yellow blink — the
+			 * lowest rung of the yellow severity scale, since this is a deliberate
+			 * operator choice (lrw-mode off/p2p), not a network fault. DISABLED
+			 * means lrw-mode off/p2p; the old blank-DevEUI radio-silent guard is
+			 * gone (#98/#175 superseded by #271). */
+			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
+							.duration = 5,
+							.space = 0,
+							.repetitions = 1};
+			app_led_blink(&req);
 			led_handled = true;
 		}
 #endif /* defined(CONFIG_LORAWAN) */

@@ -1,0 +1,39 @@
+/*
+ * Copyright (c) 2026 HARDWARIO a.s.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Debug-only test variant: shrink the history_partition to 16 KB (8 x 2 KB
+ * erase pages) instead of the release 64 KB, and grow code_partition to
+ * absorb the difference, so a debug image (~214 KB) can keep
+ * CONFIG_APP_HISTORY_FLASH=y instead of falling back to the RAM ring.
+ *
+ * storage_partition stays fixed at its release offset/size (0x3C000, 16 KB) —
+ * NVS/identity must not move. Pair with debug-history-flash.conf, which sets
+ * CONFIG_APP_HISTORY_FLASH=y and CONFIG_FLASH_LOAD_SIZE=0x38000 to match.
+ *
+ * Purpose: a small ring (8 pages) wraps/evicts in minutes instead of hours,
+ * making AT-HIS-03/04/05 (persistence, wrap, torn-tail) and the
+ * clock-sync base-time backfill (app_history_on_clock_sync) practical to
+ * exercise on a debug build with full RTT shell access, instead of needing
+ * a release build (no shell) for anything history-related.
+ */
+
+&flash0 {
+	partitions {
+		/* code_partition keeps its base address (0x0) — just grow it, which
+		 * merges into the existing node rather than needing a delete. */
+		code_partition: partition@0 {
+			reg = <0x00000000 DT_SIZE_K(224)>;
+		};
+
+		/* history_partition moves (0x2c000 -> 0x38000) and shrinks, so the old
+		 * node must be deleted before the new one can reuse the label.
+		 * storage_partition (0x3c000, 16 KB) is untouched. */
+		/delete-node/ partition@2c000;
+
+		history_partition: partition@38000 {
+			label = "history";
+			reg = <0x00038000 DT_SIZE_K(16)>;
+		};
+	};
+};

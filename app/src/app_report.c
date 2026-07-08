@@ -16,7 +16,6 @@
 /* Zephyr includes */
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/random/random.h>
 
 /* Standard includes */
 #include <stdbool.h>
@@ -61,11 +60,16 @@ static void heartbeat_work_handler(struct k_work *work)
  * doesn't get a second cycle stacked behind it. */
 static void schedule_next_report(void)
 {
-	int timeout = g_app_config.interval_report;
-#if defined(CONFIG_ENTROPY_GENERATOR)
-	timeout += (int32_t)sys_rand32_get() % (g_app_config.interval_report / 10);
-#endif
-	k_timer_start(&m_report_timer, K_SECONDS(timeout), K_FOREVER);
+	/* FIXED cadence, no jitter. This timer also drives app_sensor_sample() and
+	 * app_history_capture() below, and history replay reconstructs each record's
+	 * time as base + ordinal * interval_report — a *fixed* interval. Jittering the
+	 * period would make the stored samples land at 60..66 s (for a 60 s interval)
+	 * while replay assumes exactly 60 s, drifting every timestamp cumulatively
+	 * (the old signed jitter averaged out; a one-sided jitter biases it). Fleet-
+	 * uplink de-correlation is instead a random *pre-send* delay applied in app_lrw
+	 * (app_lrw_send_telemetry), which shifts only the transmission, not the sample/
+	 * history-capture cadence (#267). */
+	k_timer_start(&m_report_timer, K_SECONDS(g_app_config.interval_report), K_FOREVER);
 }
 
 static void report_work_handler(struct k_work *work)

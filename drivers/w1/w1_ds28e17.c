@@ -115,6 +115,13 @@ static int ds28e17_i2c_write_(const struct device *dev, uint8_t dev_addr, const 
 	buf[0] = DEV_CMD_WRITE_DATA_STOP;
 	buf[1] = dev_addr << 1;
 	buf[2] = write_len;
+	/* `status`/`write_status` below report the DS28E17's *downstream I2C*
+	 * result (e.g. no ACK from the addressed chip), not a 1-Wire bus fault —
+	 * LOG_DBG, not LOG_ERR: callers that auto-probe several candidate I2C
+	 * addresses to detect a sensor type (app_machine_probe_scan trying
+	 * LIS2DH12/SHT30/SHT43/...) expect most addresses to come back nonzero,
+	 * and already log at their own level if a failure is unexpected for their
+	 * caller. The -EIO return still carries the fault. */
 
 	memcpy(&buf[3], write_buf, write_len);
 
@@ -144,7 +151,7 @@ static int ds28e17_i2c_write_(const struct device *dev, uint8_t dev_addr, const 
 	}
 
 	if (status != 0) {
-		LOG_ERR("Error in status: 0x%02x", status);
+		LOG_DBG("Error in status: 0x%02x", status);
 		w1_unlock_bus(get_config(dev)->bus);
 		return -EIO;
 	}
@@ -158,7 +165,7 @@ static int ds28e17_i2c_write_(const struct device *dev, uint8_t dev_addr, const 
 	}
 
 	if (write_status != 0) {
-		LOG_ERR("Error in write status: 0x%02x", write_status);
+		LOG_DBG("Error in write status: 0x%02x", write_status);
 		w1_unlock_bus(get_config(dev)->bus);
 		return -EIO;
 	}
@@ -226,7 +233,7 @@ static int ds28e17_i2c_read_(const struct device *dev, uint8_t dev_addr, uint8_t
 	}
 
 	if (status != 0) {
-		LOG_ERR("Error in status: 0x%02x", status);
+		LOG_DBG("Error in status: 0x%02x", status);
 		w1_unlock_bus(get_config(dev)->bus);
 		return -EIO;
 	}
@@ -306,7 +313,7 @@ static int ds28e17_i2c_write_read_(const struct device *dev, uint8_t dev_addr,
 	}
 
 	if (status != 0) {
-		LOG_ERR("Error in status: 0x%02x", status);
+		LOG_DBG("Error in status: 0x%02x", status);
 		w1_unlock_bus(get_config(dev)->bus);
 		return -EIO;
 	}
@@ -320,7 +327,7 @@ static int ds28e17_i2c_write_read_(const struct device *dev, uint8_t dev_addr,
 	}
 
 	if (write_status != 0) {
-		LOG_ERR("Error in write status: 0x%02x", write_status);
+		LOG_DBG("Error in write status: 0x%02x", write_status);
 		w1_unlock_bus(get_config(dev)->bus);
 		return -EIO;
 	}
