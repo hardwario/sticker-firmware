@@ -260,6 +260,7 @@ After every LoRaWAN join the device automatically sends a device-info message on
 | `lrw_state` (`lrw_state_name`) | Current LoRaWAN network state: `idle` / `joining` / `healthy` / `warning` / `reconnect` / `disabled` — **NFC only** (absent from LoRaWAN uplinks) |
 | `dev_eui` | 8-byte DevEUI, hex — **NFC only** (never sent over LoRaWAN); omitted when unset |
 | `device_status` (`device_status_flags`) | Aggregated device status (uint32 bitmask) — active-alarm categories + health/degradation; 0/absent = all OK |
+| `active_alarms` | Itemized list of currently-active alarms — `{ source, quantity, type }` per entry (#288); empty when all OK |
 
 The **`reset_cause`** field (proto field 11) carries the hardware reset-cause bitmask read once at boot via `hwinfo_get_reset_cause()`, so a watchdog/brownout reset is visible in the field instead of being silent. On the STM32WLE5 the bits that can appear are `pin` (0x01), `software` (0x02), `brownout` (0x04), `power-on`/POR (0x08), `watchdog` (0x10), `security` (0x40) and `low-power-wake` (0x80); several can be set at once (a cold power-up typically asserts power-on + pin + brownout). `ats device info` decodes the mask to names, e.g. `Reset cause: 0x00000010 (watchdog)`. It ships **over LoRaWAN too** — the device queues an autonomous `get_info` on every join, so after any unexpected reboot the very first fPort-85 uplink tells the backend **why** it restarted; `ttn.js` decodes the mask into `reset_cause_flags` (e.g. `["watchdog"]`) alongside the raw `reset_cause` (#267 observability, L-44).
 
@@ -286,6 +287,8 @@ The **`device_status`** field (proto field 14) is a uint32 bitmask aggregating t
 | 12 | `lrw_disabled` | LoRaWAN radio-silent (`lrw-mode` off/p2p, #271) |
 
 The raw LoRaWAN link state is **not** duplicated here — it has its own `lrw_state` field; only the derived `lrw_disabled` bit is mirrored into the status word.
+
+The **`active_alarms`** field (proto field 15) complements `device_status`: the bitmask says *that* an alarm category is active, `active_alarms` says **which** ones — one `AlarmStatus { source, quantity, type }` entry per alarm currently latched (rule slots plus the no-data / low-battery watchdogs), reusing the same `app_alarm_source` / `app_alarm_quantity` / `AlarmEvent.Type` enums as the alarm rules and the fPort 3 `AlarmReport`. It is encoded as a nanopb callback, so only the active alarms are emitted — the list is empty when all is well and no large static array is carried in the `Info` struct. `ttn.js` decodes each entry to names, e.g. `active_alarms: [{ "source": "s1", "quantity": "temperature", "type": "no_data" }]`. Available over both NFC and LoRaWAN (#288).
 
 The same message is returned on demand by the `get_info` command (over LoRaWAN **and** NFC), so a backend can read the claim token and `device_status` over either channel. **`lrw_state` and `dev_eui` are the exceptions**: they appear in the `get_info` reply over NFC only, giving a clean split — a LoRaWAN Info carries what the network needs (firmware / serial / uptime / battery / reset-cause / clock / claim token / device status), while the NFC Info adds the commissioning view (link state + DevEUI).
 
@@ -440,7 +443,7 @@ Author with `ttn.js` `encodeDownlink`: the formatter takes the packed rule as a 
 
 The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.4.0:
 
-- **`decodeUplink`** now decodes the new ports — fPort 2 (protobuf telemetry), fPort 3 (alarm batch), and fPort 85 (command responses: `info`, `ack`, `config_dump`, `history_frame`, `w1_scan`, `alarm_rules_dump`, `error`) — in addition to the legacy fPort 1. The `info` response additionally exposes `device_status_flags` and `reset_cause_flags` — the `device_status` (field 14) and `reset_cause` (field 11) bitmasks decoded to name arrays, so a dashboard reads the device's health and its last reboot reason without bit-twiddling.
+- **`decodeUplink`** now decodes the new ports — fPort 2 (protobuf telemetry), fPort 3 (alarm batch), and fPort 85 (command responses: `info`, `ack`, `config_dump`, `history_frame`, `w1_scan`, `alarm_rules_dump`, `error`) — in addition to the legacy fPort 1. The `info` response additionally exposes `device_status_flags` and `reset_cause_flags` — the `device_status` (field 14) and `reset_cause` (field 11) bitmasks decoded to name arrays, so a dashboard reads the device's health and its last reboot reason without bit-twiddling — plus `active_alarms` (field 15, #288), the itemized `{ source, quantity, type }` list decoded via the same `_ALARM_SOURCES` / `_ALARM_QUANTITIES` / `_ALARM_TYPES` maps used for the fPort 3 `AlarmReport`.
 - **`encodeDownlink`** (new) lets you author commands as JSON; the formatter encodes them to bytes on fPort 85.
 - **`decodeDownlink`** (new) lets the network server display a queued command.
 
