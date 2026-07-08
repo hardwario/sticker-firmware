@@ -178,6 +178,35 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	info->device_status = status;
 }
 
+/* nanopb encode callback for Response_Info.active_alarms (field 15): emit one
+ * AlarmStatus submessage per alarm latched active at encode time. Snapshotting
+ * here keeps the list variable-length (only the active alarms are sent, empty
+ * when all is well) and avoids a large static array in the Info struct — the
+ * debug build's RAM is tight. Shared by the LoRaWAN and NFC info paths. */
+#define ACTIVE_ALARM_SNAPSHOT_MAX (APP_ALARM_SLOT_COUNT + 9) /* +8 no-data +1 battery */
+
+static bool encode_active_alarms(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
+{
+	ARG_UNUSED(arg);
+
+	struct app_alarm_active list[ACTIVE_ALARM_SNAPSHOT_MAX];
+	size_t n = app_alarm_active_snapshot(list, ARRAY_SIZE(list));
+
+	for (size_t i = 0; i < n; i++) {
+		Response_AlarmStatus e = Response_AlarmStatus_init_zero;
+		e.source = list[i].source;
+		e.quantity = list[i].quantity;
+		e.type = list[i].type;
+		if (!pb_encode_tag_for_field(stream, field)) {
+			return false;
+		}
+		if (!pb_encode_submessage(stream, Response_AlarmStatus_fields, &e)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /* Map the plain-C info snapshot onto the protobuf Response_Info. The transport
  * splits the Info: a LoRaWAN uplink carries only the fields the network side needs
  * (firmware / serial / uptime / battery / reset-cause / clock), while the NFC
@@ -198,6 +227,9 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info)
 	info->battery = i.battery_mv;
 	info->reset_cause = i.reset_cause;
 	info->device_status = i.device_status;
+	/* Itemized active alarms (field 15), emitted on both transports via a
+	 * callback that snapshots the live alarm state at encode time. */
+	info->active_alarms.funcs.encode = encode_active_alarms;
 	if (i.has_unix_time) {
 		info->unix_time = i.unix_time;
 	}

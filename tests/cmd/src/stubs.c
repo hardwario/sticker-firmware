@@ -213,6 +213,15 @@ uint32_t app_alarm_status_flags(void)
 	return 0;
 }
 
+/* Info.active_alarms input: stubbed to "nothing active", matching
+ * app_alarm_status_flags() above. */
+size_t app_alarm_active_snapshot(struct app_alarm_active *out, size_t max)
+{
+	(void)out;
+	(void)max;
+	return 0;
+}
+
 bool app_nfc_ready(void)
 {
 	return true;

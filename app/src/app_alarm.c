@@ -971,6 +971,61 @@ uint32_t app_alarm_status_flags(void)
 	return flags;
 }
 
+size_t app_alarm_active_snapshot(struct app_alarm_active *out, size_t max)
+{
+	if (!out || max == 0) {
+		return 0;
+	}
+
+	size_t n = 0;
+
+	/* No-data + low-battery watchdogs read g_app_sensor_data-backed latches;
+	 * take that lock first, like app_alarm_status_flags() (keeps lock order
+	 * data_lock -> m_lock and avoids holding both). */
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	for (size_t i = 0; i < NODATA_COUNT && n < max; i++) {
+		if (!m_nodata_active[i]) {
+			continue;
+		}
+		out[n].source = m_nodata_tab[i].source;
+		out[n].quantity = m_nodata_tab[i].quantity;
+		out[n].type = ALARM_TYPE_NO_DATA;
+		n++;
+	}
+	if (m_battery_low_active && n < max) {
+		out[n].source = APP_ALARM_SRC_BATTERY;
+		out[n].quantity = APP_ALARM_Q_VOLTAGE;
+		out[n].type = ALARM_TYPE_LOW;
+		n++;
+	}
+	k_mutex_unlock(&g_app_sensor_data_lock);
+
+	/* Dynamic alarm-rule slots. type: threshold rules latch LOW/HIGH in
+	 * rt->type; state/count rules report TRIGGER. */
+	k_mutex_lock(&m_lock, K_FOREVER);
+	for (int i = 0; i < APP_ALARM_SLOT_COUNT && n < max; i++) {
+		if (!m_rt[i].used || !m_rt[i].active) {
+			continue;
+		}
+		uint8_t type;
+		switch (app_alarm_quantity_kind((enum app_alarm_quantity)m_rt[i].quantity)) {
+		case APP_ALARM_KIND_THRESHOLD:
+			type = m_rt[i].type;
+			break;
+		default:
+			type = ALARM_TYPE_TRIGGER;
+			break;
+		}
+		out[n].source = m_rt[i].source;
+		out[n].quantity = m_rt[i].quantity;
+		out[n].type = type;
+		n++;
+	}
+	k_mutex_unlock(&m_lock);
+
+	return n;
+}
+
 /* ---- shell -------------------------------------------------------------- */
 
 #if defined(CONFIG_SHELL)

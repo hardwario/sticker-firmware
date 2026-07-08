@@ -249,6 +249,31 @@ test("decodeUplink decodes get_info device_status (fPort 85)", () => {
   assert.deepEqual(got.info.device_status_flags, ["alarm_any", "alarm_threshold"]);
 });
 
+// Info carries active_alarms (field 15, repeated AlarmStatus, #288). Inner Info:
+// fw 1.4.2, device_status=0x11 (alarm_any | alarm_no_data), one active alarm
+// AlarmStatus{ source=1 (s1), quantity=0 (temperature, proto3-omitted), type=4
+// (no_data) } = 7a04 08011804. Mirrors an absent 1-Wire sensor in slot 1.
+test("decodeUplink decodes get_info active_alarms (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a0e08011004180270117a0408011804"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.info.device_status, 0x11);
+  assert.deepEqual(got.info.device_status_flags, ["alarm_any", "alarm_no_data"]);
+  assert.deepEqual(got.info.active_alarms, [
+    { source: "s1", quantity: "temperature", type: "no_data" },
+  ]);
+});
+
+// A healthy device sends no active_alarms (empty repeated field) -> [].
+test("decodeUplink get_info active_alarms defaults to [] when absent (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a080801100418027000"),
+    fPort: 85,
+  }).data;
+  assert.deepEqual(got.info.active_alarms, []);
+});
+
 // lrw_state = 5 decodes to "disabled" (DevEUI all-zero radio-silent, #98).
 test("decodeUplink get_info lrw_state=5 decodes as disabled (fPort 85)", () => {
   const got = codec.decodeUplink({

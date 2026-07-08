@@ -242,7 +242,7 @@ function _decodeConfigDump(bytes, start, end) {
 }
 
 function _decodeInfo(bytes, start, end) {
-  var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false, device_status: 0 };
+  var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false, device_status: 0, active_alarms: [] };
   var pos = start;
   while (pos < end) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
@@ -270,6 +270,9 @@ function _decodeInfo(bytes, start, end) {
       // field 13 = dev_eui: 8-byte DevEUI as hex. Emitted over NFC only, so it
       // is absent from LoRaWAN uplinks.
       else if (field === 13) info.dev_eui = _pbBytesToHex(bytes.slice(pos, pos + len.value));
+      // field 15 = repeated AlarmStatus active_alarms (#288): one entry per alarm
+      // latched active when Info was built. Same enums as the fPort 3 AlarmReport.
+      else if (field === 15) info.active_alarms.push(_decodeAlarmStatus(bytes, pos, pos + len.value));
       // else: skip unknown length-delimited fields (forward compatibility).
       pos += len.value;
     } else {
@@ -925,6 +928,31 @@ function _alarmUnscale(quantity, raw) {
     case 8: return raw / 100;           // voltage (V×100)
     default: return raw;                // illuminance / state / count
   }
+}
+
+// Response.Info.active_alarms entry (#288): a live alarm snapshot trimmed to
+// source(1)/quantity(2)/type(3) — no slot/value/edge/time (that is the fPort 3
+// AlarmEvent). Reuses the fPort 3 enum name maps for a consistent JSON shape.
+function _decodeAlarmStatus(bytes, start, end) {
+  var a = { source: 0, quantity: 0, type: 0 };
+  var p = start;
+  while (p < end) {
+    var t = _pbReadVarint(bytes, p); p = t.next;
+    var field = t.value >>> 3, wire = t.value & 0x7;
+    if (wire === 0) {
+      var v = _pbReadVarint(bytes, p); p = v.next;
+      if (field === 1) a.source = v.value;
+      else if (field === 2) a.quantity = v.value;
+      else if (field === 3) a.type = v.value;
+    } else if (wire === 2) {
+      var l = _pbReadVarint(bytes, p); p = l.next + l.value;
+    } else { break; }
+  }
+  return {
+    source: _ALARM_SOURCES[a.source] || ("src" + a.source),
+    quantity: _ALARM_QUANTITIES[a.quantity] || ("q" + a.quantity),
+    type: _ALARM_TYPES[a.type] || "none",
+  };
 }
 
 function _decodeAlarmEvent(bytes, start, end) {
