@@ -86,7 +86,7 @@ echo -e "${BLUE}JLinkRTTLogger -Device STM32WLE5CC -If SWD -Speed 1000 -RTTAddre
 
 sleep 2
 
-zsh -c "source ~/.zshrc && setsid stdbuf -oL JLinkRTTLogger -Device STM32WLE5CC -If SWD -Speed 1000 -RTTAddress 0x20000800 -RTTChannel 1 ~/.sticker.log >~/.JLink.log 2>&1 &"
+sh -c "setsid stdbuf -oL JLinkRTTLogger -Device STM32WLE5CC -If SWD -Speed 1000 -RTTAddress 0x20000800 -RTTChannel 1 ~/.sticker.log >~/.JLink.log 2>&1 &"
 
 echo
 echo -e "${CYAN}Watch the log:${RESET}"
@@ -108,29 +108,14 @@ echo -e "config serial-number $serial_number" | socat - TCP:localhost:19021
 
 row=$(csvgrep -c "Serial number" -m "$serial_number" devices.csv)
 
-offset_temp=$(echo -e "$row" | csvcut -c "Offset / Temperature" | sed 1d | sed 's/^""$//')
-offset_ext_temp1=$(echo -e "$row" | csvcut -c "Offset / Ext. temperature 1" | sed 1d | sed 's/^""$//')
-offset_ext_temp2=$(echo -e "$row" | csvcut -c "Offset / Ext. temperature 2" | sed 1d | sed 's/^""$//')
+# Temperature-correction offsets are no longer programmed: the firmware removed
+# the temperature_corr/t1_corr/t2_corr config parameters (commit 4ab1e77);
+# any offset columns in devices.csv are ignored.
 dev_eui=$(echo -e "$row" | csvcut -c "LoRaWAN / DevEUI" | sed 1d | sed 's/^""$//')
 dev_addr=$(echo -e "$row" | csvcut -c "LoRaWAN / DevAddr" | sed 1d | sed 's/^""$//')
 app_skey=$(echo -e "$row" | csvcut -c "LoRaWAN / AppSKey" | sed 1d | sed 's/^""$//')
 nwk_skey=$(echo -e "$row" | csvcut -c "LoRaWAN / NwkSKey" | sed 1d | sed 's/^""$//')
 
-if [ -n "$offset_temp" ]; then
-    echo -e "Offset / Temperature: $offset_temp"
-    echo -e "config corr-temperature $offset_temp" | socat - TCP:localhost:19021
-    sleep 0.2
-fi
-if [ -n "$offset_ext_temp1" ]; then
-    echo -e "Offset / Ext. temperature 1: $offset_ext_temp1"
-    echo -e "config corr-ext-temperature-1 $offset_ext_temp1" | socat - TCP:localhost:19021
-    sleep 0.2
-fi
-if [ -n "$offset_ext_temp2" ]; then
-    echo -e "Offset / Ext. temperature 2: $offset_ext_temp2"
-    echo -e "config corr-ext-temperature-1 $offset_ext_temp2" | socat - TCP:localhost:19021
-    sleep 0.2
-fi
 if [ -n "$dev_eui" ]; then
     echo -e "LoRaWAN / DevEUI: $dev_eui"
     echo -e "config lrw-deveui $dev_eui" | socat - TCP:localhost:19021
@@ -152,8 +137,10 @@ if [ -n "$app_skey" ]; then
     sleep 0.2
 fi
 
-echo -e "config save" | socat - TCP:localhost:19021
-sleep 0.2
+# `settings save` persists all settings to NVS and cold-reboots the device
+# (the old `config save` command no longer exists in the firmware shell)
+echo -e "settings save" | socat - TCP:localhost:19021
+sleep 2
 
 echo
 echo
@@ -176,21 +163,6 @@ JLinkExe -commanderscript flash-release.jlink
 echo -e "${YELLOW}*******************************************************************************${RESET}"
 echo -e "${YELLOW}Serial number read:${RESET} $serial_number"
 
-if [ -n "$offset_temp" ]; then
-    echo -e "${GREEN}Offset / Temperature:${RESET} $offset_temp"
-else
-    echo -e "${RED}Offset / Temperature Nonexistent!    ${RESET}"
-fi
-if [ -n "$offset_ext_temp1" ]; then
-    echo -e "${GREEN}Offset / Ext. temperature 1:${RESET} $offset_ext_temp1"
-else
-    echo -e "${RED}Offset / Ext. temperature 1 Nonexistent! ${RESET}"
-fi
-if [ -n "$offset_ext_temp2" ]; then
-    echo -e "${GREEN}Offset / Ext. temperature 2:${RESET} $offset_ext_temp2"
-else
-    echo -e "${RED}Offset / Ext. temperature 2 Nonexistent! ${RESET}"
-fi
 if [ -n "$dev_eui" ]; then
     echo -e "${GREEN}LoRaWAN / DevEUI:${RESET} $dev_eui"
 else
