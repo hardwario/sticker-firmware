@@ -574,6 +574,13 @@ in a dedicated **plaintext** record next to the info record — a small protobuf
   (a nuisance/DoS), but the token is **not lost** — the owner still reads it over the encrypted
   `get_info` channel with `secret_key`. An ST25DV RF-password on that area is a possible future
   hardening. The shell `nfc clm` command shows the latch state for bring-up.
+- **HW-validated** (2026-07-07, J-Link 822005109, debug image): `settings erase` → `config
+  claim-token` + `settings save` → reboot arms `PENDING`, `nfc dump` shows the two-record
+  `[inf, clm]` message; a targeted delete (info-only rewrite) latches `CONSUMED` with no
+  resurrection across reboot, and `claim_token` remains readable via `get_info`. Surfaced and
+  fixed one bug in the process: the arming boot could see the pre-provisioning info-only tag
+  and immediately mis-latch `CONSUMED` before `clm` was ever laid down; a `just_armed` guard
+  on the consume branch distinguishes "not laid down yet" from "phone deleted it".
 
 **Power.** The poll thread sleeps on the ST25DV **GPO interrupt** (wired to the STM32, EXTI) and only wakes to read the tag when RF activity occurs — so an untouched tag costs almost nothing and the CPU stays asleep when no phone is present. A periodic fallback timer (30 s) is a safety net in case an edge is missed; each wake still does the cheap gated check (one `IT_STS_Dyn` byte; full read + NDEF parse only on RF activity).
 
