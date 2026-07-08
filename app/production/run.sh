@@ -82,11 +82,11 @@ echo -e "${YELLOW}Starting RTT session...${RESET}"
 echo -e "${YELLOW}*******************************************************************************${RESET}"
 
 echo -e "${CYAN}Start this command in another terminal:${RESET}"
-echo -e "${BLUE}JLinkRTTLogger -Device STM32WLE5CC -If SWD -Speed 1000 -RTTAddress 0x20000800 -RTTChannel 1 ~/.sticker.log${RESET}"
+echo -e "${BLUE}JLinkRTTLogger -Device STM32WLE5CC -If SWD -Speed 1000 -RTTAddress 0x20000000 -RTTChannel 1 ~/.sticker.log${RESET}"
 
 sleep 2
 
-sh -c "setsid stdbuf -oL JLinkRTTLogger -Device STM32WLE5CC -If SWD -Speed 1000 -RTTAddress 0x20000800 -RTTChannel 1 ~/.sticker.log >~/.JLink.log 2>&1 &"
+sh -c "setsid stdbuf -oL JLinkRTTLogger -Device STM32WLE5CC -If SWD -Speed 1000 -RTTAddress 0x20000000 -RTTChannel 1 ~/.sticker.log >~/.JLink.log 2>&1 &"
 
 echo
 echo -e "${CYAN}Watch the log:${RESET}"
