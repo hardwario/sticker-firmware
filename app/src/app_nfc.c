@@ -14,6 +14,7 @@
 
 /* Nanopb includes */
 #include <pb_decode.h>
+#include <pb_encode.h>
 #include "src/app_config.pb.h"
 
 /* Zephyr includes */
@@ -23,6 +24,7 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
@@ -177,6 +179,15 @@ static const char *cmd_action_str(enum app_cmd_action a)
  * raced the phone's read and clobbered the reply mid-exchange). */
 #define NDEF_ACK_TYPE      "hio.stck:ack"
 
+/* Provisioning claim record (#247): a plaintext protobuf ClaimInfo{serial_number,
+ * claim_token} the firmware lays down alongside `inf` while a claim token is
+ * provisioned but not yet claimed. The provisioning phone reads it, claims the
+ * device (first-claim-wins), then deletes it from the ST25DV over RF — which
+ * works even with the MCU powered off. Once gone, the firmware never rewrites it
+ * (latched via m_clm_state). The token stays owner-readable over the encrypted
+ * get_info channel, so deleting clm only removes the plaintext convenience. */
+#define NDEF_CLAIM_TYPE "hio.stck:clm"
+
 /* NFC Forum Type 5 Capability Container (4-byte form) for ST25DV04K:
  *   [0] 0xE1 magic, [1] 0x40 mapping v1.0 + read/write,
  *   [2] MLEN = user_memory / 8 = 512/8 = 0x40, [3] 0x01 (MBREAD feature).
@@ -218,6 +229,55 @@ static size_t m_resp_len;
 static bool m_have_resp; /* a command was processed; m_resp_buf holds the reply to write */
 static bool m_seen_resp; /* tag already holds a response record; leave it for the phone */
 static bool m_seen_ack;  /* tag holds the phone's ack: reply consumed, restore info now */
+static bool m_seen_clm;  /* #247: tag holds our clm provisioning record */
+static bool m_seen_inf;  /* #247: tag holds our info record (settled resting state) */
+
+/* #247 claim-record lifecycle, persisted in its own "clm" settings subtree (not
+ * the config blob, so a factory reset that preserves identity leaves it intact —
+ * only a full NVS erase re-opens provisioning):
+ *   UNSET    no token provisioned yet, or clm never laid down
+ *   PENDING  clm laid down on the tag, awaiting the phone's claim + delete
+ *   CONSUMED phone deleted clm after claiming — never rewrite it again */
+enum clm_state {
+	CLM_UNSET = 0,
+	CLM_PENDING = 1,
+	CLM_CONSUMED = 2,
+};
+static uint8_t m_clm_state;
+
+/* Load handler for the "clm" settings subtree (key "clm/state"). */
+static int clm_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	if (settings_name_steq(name, "state", NULL)) {
+		if (len != sizeof(m_clm_state)) {
+			return -EINVAL;
+		}
+		ssize_t r = read_cb(cb_arg, &m_clm_state, sizeof(m_clm_state));
+		return (r < 0) ? (int)r : 0;
+	}
+	return -ENOENT;
+}
+SETTINGS_STATIC_HANDLER_DEFINE(app_clm, "clm", NULL, clm_settings_set, NULL, NULL);
+
+static void clm_state_save(void)
+{
+	int ret = settings_save_one("clm/state", &m_clm_state, sizeof(m_clm_state));
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("settings_save_one(clm/state)", ret);
+	}
+}
+
+/* A claim token is provisioned once any byte is non-zero (all-zero = unset, the
+ * same sentinel the write-once shell guard uses, #170). */
+static bool claim_token_is_set(void)
+{
+	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
+		if (g_app_config.claim_token[i] != 0) {
+			return true;
+		}
+	}
+	return false;
+}
 /* A response is staged in m_resp_buf/m_resp_len but not yet fully written to the
  * tag (the RF field came back before the write landed). While set, the poll
  * re-attempts the write in the next field-off window WITHOUT re-reading or
@@ -646,17 +706,34 @@ static bool nfc_wait_field_off(void)
  * dump (encrypted ConfigDump can exceed 255 B) still fits the 512 B EEPROM;
  * the NDEF Message TLV likewise switches to its 3-byte length form when needed.
  * Shared by the info and command-response writers. */
-static size_t build_ndef_record(uint8_t *out, size_t out_size, const char *type,
-				const uint8_t *payload, size_t payload_len)
+/* One NFC Forum external-type record in an NDEF message. */
+struct ndef_rec {
+	const char *type;
+	const uint8_t *payload;
+	size_t payload_len;
+};
+
+/* Frame `n_recs` records into a single NDEF message (CC + Message TLV + records +
+ * Terminator TLV) at `out`. Message-Begin is set on the first record, Message-End
+ * on the last, so a single record (n_recs==1) is byte-identical to the previous
+ * single-record framer (0xD4 short / 0xC4 normal). Returns bytes written, 0 on
+ * overflow / empty. */
+static size_t build_ndef_message(uint8_t *out, size_t out_size, const struct ndef_rec *recs,
+				 size_t n_recs)
 {
-	size_t type_len = strlen(type);
+	if (n_recs == 0) {
+		return 0;
+	}
 
-	/* Short record encodes the payload length in 1 byte; a normal record in 4. */
-	bool short_record = payload_len <= 0xFF;
-	size_t len_field = short_record ? 1 : 4;
-
-	/* NDEF record: flags + type_len + payload_len_field + type + payload */
-	size_t msg_len = 1 + 1 + len_field + type_len + payload_len;
+	/* Sum every record's encoded length to size the NDEF Message TLV. Each
+	 * record: flags + type_len + payload_len_field (1 short / 4 normal) + type +
+	 * payload. */
+	size_t msg_len = 0;
+	for (size_t r = 0; r < n_recs; r++) {
+		size_t type_len = strlen(recs[r].type);
+		size_t len_field = (recs[r].payload_len <= 0xFF) ? 1 : 4;
+		msg_len += 1 + 1 + len_field + type_len + recs[r].payload_len;
+	}
 
 	/* NDEF Message TLV length: single byte below 0xFF, else the 3-byte form
 	 * (0xFF + 2-byte big-endian length, max 0xFFFE). */
@@ -682,36 +759,61 @@ static size_t build_ndef_record(uint8_t *out, size_t out_size, const char *type,
 	} else {
 		out[i++] = (uint8_t)msg_len;
 	}
-	/* MB | ME | [SR] | TNF=NFC Forum external (0x04). */
-	out[i++] = short_record ? 0xD4 : 0xC4;
-	out[i++] = (uint8_t)type_len;
-	if (short_record) {
-		out[i++] = (uint8_t)payload_len;
-	} else {
-		out[i++] = (uint8_t)(payload_len >> 24);
-		out[i++] = (uint8_t)(payload_len >> 16);
-		out[i++] = (uint8_t)(payload_len >> 8);
-		out[i++] = (uint8_t)(payload_len & 0xFF);
+
+	for (size_t r = 0; r < n_recs; r++) {
+		size_t type_len = strlen(recs[r].type);
+		bool short_record = recs[r].payload_len <= 0xFF;
+		/* TNF = NFC Forum external (0x04); MB on the first record, ME on the last,
+		 * SR when the payload length fits one byte. */
+		uint8_t flags = NDEF_TNF_EXT;
+		if (r == 0) {
+			flags |= 0x80; /* Message Begin */
+		}
+		if (r == n_recs - 1) {
+			flags |= 0x40; /* Message End */
+		}
+		if (short_record) {
+			flags |= 0x10; /* Short Record */
+		}
+		out[i++] = flags;
+		out[i++] = (uint8_t)type_len;
+		if (short_record) {
+			out[i++] = (uint8_t)recs[r].payload_len;
+		} else {
+			out[i++] = (uint8_t)(recs[r].payload_len >> 24);
+			out[i++] = (uint8_t)(recs[r].payload_len >> 16);
+			out[i++] = (uint8_t)(recs[r].payload_len >> 8);
+			out[i++] = (uint8_t)(recs[r].payload_len & 0xFF);
+		}
+		memcpy(&out[i], recs[r].type, type_len);
+		i += type_len;
+		memcpy(&out[i], recs[r].payload, recs[r].payload_len);
+		i += recs[r].payload_len;
 	}
-	memcpy(&out[i], type, type_len);
-	i += type_len;
-	memcpy(&out[i], payload, payload_len);
-	i += payload_len;
 	out[i++] = 0xFE; /* Terminator TLV */
 
 	return i;
+}
+
+static size_t build_ndef_record(uint8_t *out, size_t out_size, const char *type,
+				const uint8_t *payload, size_t payload_len)
+{
+	struct ndef_rec r = {.type = type, .payload = payload, .payload_len = payload_len};
+	return build_ndef_message(out, out_size, &r, 1);
 }
 
 /* Build the plaintext info NDEF into `out`. Stable between accepted NFC commands
  * (no uptime/clock; the nonce counter advances only on an accepted command), so
  * app_nfc_check() can compare it to the tag content and skip rewriting when
  * already present, and rewrite it when the counter has moved. */
-static size_t build_info_ndef(uint8_t *out, size_t out_size)
+#define NDEF_INFO_PAYLOAD_LEN 15
+
+/* Fill the 15-byte plaintext info payload (see NDEF_INFO_TYPE comment). */
+static void build_info_payload(uint8_t payload[NDEF_INFO_PAYLOAD_LEN])
 {
 	struct app_cmd_info info;
 	app_cmd_get_info(&info);
 
-	uint8_t payload[15];
 	payload[0] = NDEF_INFO_FORMAT;
 	sys_put_be32(info.serial_number, &payload[1]);
 	payload[5] = info.fw_major;
@@ -723,8 +825,51 @@ static size_t build_info_ndef(uint8_t *out, size_t out_size)
 	/* Anti-replay counter high-water (live source of truth, == what decrypt()
 	 * checks against) so the phone can resync after a reboot/cache-miss. */
 	sys_put_be32(app_config()->nonce_counter, &payload[11]);
+}
 
-	return build_ndef_record(out, out_size, NDEF_INFO_TYPE, payload, sizeof(payload));
+/* #247: encode the ClaimInfo protobuf {serial_number, claim_token} into `out`.
+ * Plaintext in every build (like the info record) — the claim window relies on
+ * physical proximity + the backend first-claim check, not on the NFC key. */
+static size_t build_claim_payload(uint8_t *out, size_t out_size)
+{
+	ClaimInfo msg = ClaimInfo_init_zero;
+	msg.serial_number = g_app_config.serial_number;
+	BUILD_ASSERT(sizeof(msg.claim_token) == sizeof(g_app_config.claim_token),
+		     "ClaimInfo.claim_token size mismatch");
+	memcpy(msg.claim_token, g_app_config.claim_token, sizeof(g_app_config.claim_token));
+
+	pb_ostream_t stream = pb_ostream_from_buffer(out, out_size);
+	if (!pb_encode(&stream, ClaimInfo_fields, &msg)) {
+		LOG_ERR("pb_encode(ClaimInfo) failed: %s", PB_GET_ERROR(&stream));
+		return 0;
+	}
+	return stream.bytes_written;
+}
+
+/* Build the "resting" NDEF the tag holds between phone exchanges: the info
+ * record, plus the clm provisioning record while m_clm_state == CLM_PENDING
+ * (#247). Stable input (advances only with the nonce counter / claim state) so
+ * nfc_check_locked can compare it to the tag and skip rewriting when present. */
+static size_t build_resting_ndef(uint8_t *out, size_t out_size)
+{
+	uint8_t inf[NDEF_INFO_PAYLOAD_LEN];
+	build_info_payload(inf);
+
+	struct ndef_rec recs[2];
+	size_t n = 0;
+	recs[n++] = (struct ndef_rec){
+		.type = NDEF_INFO_TYPE, .payload = inf, .payload_len = sizeof(inf)};
+
+	uint8_t clm[ClaimInfo_size];
+	if (m_clm_state == CLM_PENDING) {
+		size_t clm_len = build_claim_payload(clm, sizeof(clm));
+		if (clm_len) {
+			recs[n++] = (struct ndef_rec){
+				.type = NDEF_CLAIM_TYPE, .payload = clm, .payload_len = clm_len};
+		}
+	}
+
+	return build_ndef_message(out, out_size, recs, n);
 }
 
 #ifdef CONFIG_APP_NFC_ENCRYPTION
@@ -1108,6 +1253,29 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 		return 0;
 	}
 
+	/* #247: our provisioning claim record. Presence detection only — the phone
+	 * reads and deletes it; the firmware never parses it back. Its absence in an
+	 * otherwise-settled tag (info present, no clm) is how nfc_check_locked latches
+	 * CLM_CONSUMED. */
+	size_t clm_type_len = strlen(NDEF_CLAIM_TYPE);
+	if (record_info->type_len == clm_type_len &&
+	    strncmp((const char *)record_info->type, NDEF_CLAIM_TYPE, clm_type_len) == 0) {
+		m_seen_clm = true;
+		NFC_REPORT("NFC read: our clm provisioning record (%u B)",
+			   record_info->payload_len);
+		return 0;
+	}
+
+	/* Our info record: marks a settled resting tag (vs a phone mid-write, which
+	 * shows neither inf nor clm). nfc_check_locked uses this to reconcile the clm
+	 * lifecycle and refresh a stale info record (#247). */
+	size_t inf_type_len = strlen(NDEF_INFO_TYPE);
+	if (record_info->type_len == inf_type_len &&
+	    strncmp((const char *)record_info->type, NDEF_INFO_TYPE, inf_type_len) == 0) {
+		m_seen_inf = true;
+		return 0;
+	}
+
 	/* #250: the legacy bare-AppConfigMessage config record (hio.stck:cmd's sibling
 	 * "hio.stck:cfg") has been retired — offline/boot-staged provisioning now goes
 	 * through the encrypted Command/SetParam record handled above, so any other
@@ -1192,6 +1360,15 @@ int app_nfc_init(void)
 	LOG_WRN("== Do NOT ship this build.                                ==");
 	LOG_WRN("============================================================");
 #endif
+
+	/* #247: restore the claim-record lifecycle latch from its own settings subtree
+	 * (settings subsystem already brought up by app_config_init; idempotent here). */
+	(void)settings_subsys_init();
+	ret = settings_load_subtree("clm");
+	if (ret) {
+		LOG_WRN("NFC: clm state load failed: %d (defaulting UNSET)", ret);
+	}
+	LOG_INF("NFC: clm state = %u", m_clm_state);
 
 	if (!gpio_is_ready_dt(&m_lpd)) {
 		LOG_ERR("GPIO device not ready (LPD)");
@@ -1293,6 +1470,24 @@ static int nfc_check_locked(void)
 	m_have_resp = false;
 	m_seen_resp = false;
 	m_seen_ack = false;
+	m_seen_clm = false;
+	m_seen_inf = false;
+
+	/* #247: once a claim token is provisioned, start exposing the clm record
+	 * (UNSET -> PENDING). Driven purely by the token being set (not tag content),
+	 * so it fires on the first check after commissioning; build_resting_ndef then
+	 * includes clm. CONSUMED (phone deleted clm) is terminal. `just_armed` guards
+	 * the settled-consume branch below: on the very check that arms PENDING the tag
+	 * still holds the pre-provisioning info-only record (clm not laid down yet), so
+	 * without this guard a stale info record would be misread as "phone deleted
+	 * clm" and latch CONSUMED before clm is ever written. */
+	bool just_armed = false;
+	if (m_clm_state == CLM_UNSET && claim_token_is_set()) {
+		m_clm_state = CLM_PENDING;
+		clm_state_save();
+		just_armed = true;
+		LOG_INF("NFC clm record armed (claim token provisioned) (#247)");
+	}
 
 	/* read_mem / write_mem below gate every EEPROM chunk on the RF field being
 	 * off (see nfc_wait_field_off): a 512 B access during RF collides with the
@@ -1300,10 +1495,11 @@ static int nfc_check_locked(void)
 	 * in the main loop (all sensors share i2c1) -> a 10 s SoC reset with no panic
 	 * dump. The sensors keep using i2c1 unaffected. */
 
-	/* Build the expected info record up front (no I2C); used both to detect
-	 * "tag already holds our info" and to (re)write it. */
-	uint8_t info[80];
-	size_t info_len = build_info_ndef(info, sizeof(info));
+	/* Build the expected resting NDEF up front (no I2C): info record, plus the
+	 * clm record while PENDING (#247). Used both to detect "tag already holds our
+	 * resting content" and to (re)write it. */
+	uint8_t info[128];
+	size_t info_len = build_resting_ndef(info, sizeof(info));
 
 	ret = read_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
 	if (ret == -EBUSY) {
@@ -1396,6 +1592,34 @@ static int nfc_check_locked(void)
 		return res;
 	}
 
+	/* #247: settled resting state — our info record is on the tag (so this is not
+	 * a phone mid-write, which would show neither inf nor clm). If clm is absent
+	 * while we were exposing it (PENDING), the phone deleted it after claiming ->
+	 * latch CONSUMED so it is never rewritten. Then refresh the resting record if
+	 * the tag copy is stale (e.g. an older nonce high-water). */
+	if (m_seen_inf) {
+		m_unknown_count = 0;
+		m_info_restore_pending = false;
+		/* clm absent while PENDING = the phone deleted it after claiming -> latch
+		 * CONSUMED. Not on the arming cycle (just_armed): clm has not been laid down
+		 * yet, so the stale info-only tag is not a deletion. */
+		if (m_clm_state == CLM_PENDING && !m_seen_clm && !just_armed) {
+			m_clm_state = CLM_CONSUMED;
+			clm_state_save();
+			LOG_INF("NFC clm record consumed (phone deleted after claim) (#247)");
+		}
+		info_len = build_resting_ndef(info, sizeof(info));
+		if (info_len && memcmp(m_buf, info, info_len) != 0) {
+			NFC_REPORT("NFC refreshing resting record (%zu B)", info_len);
+			ret = write_mem(0, info, info_len);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+				res = ret;
+			}
+		}
+		return res;
+	}
+
 	/* Unrecognized data and nothing actionable. This is usually a poll catching
 	 * the tag mid-write while the phone lays down a command/config record, which
 	 * resolves on the next poll. Debounce: only restore the info record (which
@@ -1469,15 +1693,16 @@ bool app_nfc_resp_write_pending(void)
 	return m_resp_write_pending;
 }
 
-/* #164: rewrite the plaintext info record over whatever is on the tag (a stale
- * response record), so a later passive read finds valid metadata. Called by the
- * poll thread only after the RF field has been quiet for the debounce window
- * (no GPO events ~10 s → the phone has left), which avoids the #144 race of
- * clobbering the reply while the phone may still be reading it. */
+/* #164: rewrite the resting NDEF (info record, plus clm while PENDING — #247)
+ * over whatever is on the tag (a stale response record), so a later passive read
+ * finds valid metadata. Called by the poll thread only after the RF field has
+ * been quiet for the debounce window (no GPO events ~10 s → the phone has left),
+ * which avoids the #144 race of clobbering the reply while the phone may still
+ * be reading it. */
 int app_nfc_restore_info(void)
 {
-	uint8_t info[80];
-	size_t info_len = build_info_ndef(info, sizeof(info));
+	uint8_t info[128];
+	size_t info_len = build_resting_ndef(info, sizeof(info));
 
 	if (!info_len) {
 		return -EINVAL;
@@ -1748,6 +1973,18 @@ static int cmd_nfc_regw(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* #247: show the claim-record lifecycle latch (debug/HW-test visibility). */
+static int cmd_nfc_clm(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	static const char *const names[] = {"unset", "pending", "consumed"};
+	shell_print(sh, "clm state:   %s (%u)",
+		    m_clm_state <= CLM_CONSUMED ? names[m_clm_state] : "?", m_clm_state);
+	shell_print(sh, "claim token: %s", claim_token_is_set() ? "set" : "unset");
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_nfc, SHELL_CMD_ARG(dump, NULL, "Hex dump all 512 B of NFC memory.", cmd_nfc_dump, 1, 0),
 	SHELL_CMD_ARG(read, NULL, "Read a range. Usage: read <offset> <len>", cmd_nfc_read, 3, 0),
@@ -1762,6 +1999,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_nfc_reg, 2, 1),
 	SHELL_CMD_ARG(regw, NULL, "Write system/dynamic register (E1). Usage: regw <addr> <hex>",
 		      cmd_nfc_regw, 3, 0),
+	SHELL_CMD_ARG(clm, NULL, "Show claim-record (#247) lifecycle state.", cmd_nfc_clm, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC memory access (debug).", NULL);

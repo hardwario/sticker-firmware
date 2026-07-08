@@ -139,6 +139,82 @@ ZTEST(ndef, test_cc_only_no_tlv)
 	zassert_equal(m_cb_count, 0, "no record expected");
 }
 
+/* ---- #247 multi-record (inf + clm) ------------------------------------- */
+
+/* Append one NFC Forum external-type short record, mirroring the byte layout of
+ * app_nfc.c build_ndef_message(): flags (MB/ME/SR|TNF=0x04), type_len, payload_len,
+ * type, payload. */
+static void emit_ext_record(uint8_t *buf, size_t *off, const char *type, const uint8_t *payload,
+			    size_t plen, bool mb, bool me)
+{
+	uint8_t flags = 0x04; /* TNF external */
+	if (mb) {
+		flags |= 0x80;
+	}
+	if (me) {
+		flags |= 0x40;
+	}
+	flags |= 0x10; /* short record (payloads here are < 256 B) */
+	buf[(*off)++] = flags;
+	buf[(*off)++] = (uint8_t)strlen(type);
+	buf[(*off)++] = (uint8_t)plen;
+	memcpy(&buf[*off], type, strlen(type));
+	*off += strlen(type);
+	memcpy(&buf[*off], payload, plen);
+	*off += plen;
+}
+
+#define MAX_REC 4
+static int m_multi_n;
+static char m_multi_type[MAX_REC][16];
+static uint32_t m_multi_plen[MAX_REC];
+
+static int multi_cb(const struct app_nfc_parser_record_info *info, void *user_data)
+{
+	ARG_UNUSED(user_data);
+	if (m_multi_n < MAX_REC && info->type_len < sizeof(m_multi_type[0])) {
+		memcpy(m_multi_type[m_multi_n], info->type, info->type_len);
+		m_multi_type[m_multi_n][info->type_len] = '\0';
+		m_multi_plen[m_multi_n] = info->payload_len;
+	}
+	m_multi_n++;
+	return 0;
+}
+
+/* A two-record message [inf, clm] (MB on inf, ME on clm) parses back into both
+ * records in order with the right types and payload lengths — the wire shape the
+ * firmware lays down during the provisioning window (#247). */
+ZTEST(ndef, test_multi_record_inf_clm)
+{
+	uint8_t inf[15] = {0x02, 0, 0, 0, 1};       /* format ver + serial=1 (rest zero) */
+	uint8_t clm[20] = {0x08, 0x2a, 0x12, 0x10}; /* ClaimInfo-ish: serial + 16 B token */
+
+	uint8_t msg[128];
+	size_t moff = 0;
+	emit_ext_record(msg, &moff, "hio.stck:inf", inf, sizeof(inf), true, false);
+	emit_ext_record(msg, &moff, "hio.stck:clm", clm, sizeof(clm), false, true);
+
+	uint8_t tag[160];
+	size_t off = 0;
+	tag[off++] = 0xE1; /* CC */
+	tag[off++] = 0x40;
+	tag[off++] = 0x40;
+	tag[off++] = 0x01;
+	tag[off++] = 0x03;          /* NDEF Message TLV */
+	tag[off++] = (uint8_t)moff; /* msg_len < 0xFF */
+	memcpy(&tag[off], msg, moff);
+	off += moff;
+	tag[off++] = 0xFE; /* terminator */
+
+	m_multi_n = 0;
+	zassert_ok(app_nfc_parser_run(tag, off, multi_cb, NULL));
+	zassert_equal(m_multi_n, 2, "expected 2 records, got %d", m_multi_n);
+	zassert_str_equal(m_multi_type[0], "hio.stck:inf", "record 0 type");
+	zassert_equal(m_multi_plen[0], 15, "inf payload len");
+	zassert_str_equal(m_multi_type[1], "hio.stck:clm", "record 1 type");
+	zassert_equal(m_multi_plen[1], 20, "clm payload len");
+}
+
 /* #267: a chunked record (CF flag, 0x20, in the record header) is rejected — this
  * parser does not reassemble chunks, so treating a chunk as a whole record would
  * mis-read its payload. Same TLV as TLV_AREA but the record header d4 -> b4
