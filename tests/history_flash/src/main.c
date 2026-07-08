@@ -63,7 +63,7 @@ static void before(void *unused)
 	ARG_UNUSED(unused);
 	memset(&g_app_config, 0, sizeof(g_app_config));
 	g_app_config.history_enable = true;
-	g_app_config.history_sensors = 0; /* all capability-available (temp+hum) */
+	g_app_config.history_sensors = BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY);
 	g_app_config.interval_report = 60;
 	g_app_sensor_data = (struct app_sensor_data){0};
 	g_app_sensor_data.temperature = 20.0f;

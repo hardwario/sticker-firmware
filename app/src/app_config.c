@@ -36,7 +36,7 @@ static const struct app_config m_app_config_defaults = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
 	.history_enable = false,
-	.history_sensors = 0,
+	.history_sensors = 3,
 	.battery_level = 2400,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
@@ -66,7 +66,7 @@ static struct app_config m_app_config = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
 	.history_enable = false,
-	.history_sensors = 0,
+	.history_sensors = 3,
 	.battery_level = 2400,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
@@ -1495,7 +1495,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_history_enable, 1, 1),
 
 	SHELL_CMD_ARG(history-sensors, NULL,
-	              "Get/Set history sensor selection bitmask (0 = all capability-available).",
+	              "Get/Set history sensor selection bitmask (literal, bit i = enum app_history_sensor i; 0 = no channels). Default 0x0003 = temperature + humidity.",
 	              cmd_history_sensors, 1, 1),
 
 	SHELL_CMD_ARG(battery-level, NULL,

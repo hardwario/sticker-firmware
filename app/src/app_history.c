@@ -1047,6 +1047,13 @@ void app_history_set_enabled(bool enable)
  * config.history_sensors. Adding a 33rd channel would silently overflow it. */
 BUILD_ASSERT(APP_HISTORY_SENSOR_COUNT <= 32, "history mask is 32-bit");
 
+/* Record size scales with the number of selected channels (m_desc[].size: 2 B
+ * temperature, 1 B humidity, 4 B counter) — worst case, all 15 channels selected,
+ * is ~35 B/record; the factory default (temperature + humidity) is 3 B/record.
+ * This directly bounds records-per-tap on the NFC paged readout (req_history_page),
+ * whose samples payload is capped well under 512 B (see DUMP_PAGE_BUDGET_NFC in
+ * app_cmd.c) — selecting more channels trades off history depth per NFC tap. */
+
 uint32_t app_history_get_mask(void)
 {
 	return m_mask;
@@ -1102,10 +1109,9 @@ int app_history_init(void)
 
 	m_enabled = g_app_config.history_enable;
 
-	/* Seed mask: explicit config bitmask, or "all available" when 0. */
+	/* Seed mask: explicit config bitmask, intersected with capability. */
 	uint32_t avail = app_history_available_mask();
-	uint32_t cfg = g_app_config.history_sensors;
-	m_mask = (cfg == 0) ? avail : (cfg & avail);
+	m_mask = g_app_config.history_sensors & avail;
 
 	int ret = backend_init();
 	if (ret) {

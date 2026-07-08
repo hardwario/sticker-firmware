@@ -30,7 +30,7 @@ static void setup(void)
 {
 	memset(&g_app_config, 0, sizeof(g_app_config));
 	g_app_config.history_enable = true;
-	g_app_config.history_sensors = 0; /* 0 => all capability-available */
+	g_app_config.history_sensors = BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY);
 
 	g_app_sensor_data = (struct app_sensor_data){0};
 	test_clock_has = false;
@@ -177,6 +177,8 @@ ZTEST(history, test_per_slot_w1_channels)
 {
 	setup();
 	g_app_config.cap_w1_sensors = true;
+	g_app_config.history_sensors |= BIT(APP_HISTORY_S1_TEMP) | BIT(APP_HISTORY_S1_HUM) |
+					BIT(APP_HISTORY_S3_TEMP) | BIT(APP_HISTORY_S3_HUM);
 	zassert_equal(app_history_init(), 0, "re-init with cap_w1_sensors");
 	app_history_clear();
 
