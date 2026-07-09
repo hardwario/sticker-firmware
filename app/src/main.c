@@ -42,9 +42,13 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 /* NFC poll runs on its own thread (not tied to the LED blink loop). It sleeps
  * on the ST25DV GPO interrupt (app_nfc_wait_event) and only wakes to read the
- * tag when the phone touches it — low power. The fallback is a safety net in
- * case an edge is missed. */
-#define NFC_EVENT_FALLBACK_MS        30000
+ * tag when the phone touches it — low power. When idle it waits FOREVER (-1):
+ * event-driven, so a sticker with no phone near it never wakes to poll the tag
+ * and stays in Stop2 indefinitely. The GPO EXTI (PB12) wakes it on RF field-on,
+ * and the initial info-record write is done once at boot before the wait loop.
+ * (Was a 30 s periodic fallback, which on the release build meant a Stop2 wake
+ * every 30 s for nothing.) */
+#define NFC_EVENT_FALLBACK_MS        (-1)
 /* #164: once a response record is left on the tag, poll this often so the info
  * record is restored ~10 s after the phone leaves (no GPO events in this window
  * = field lost). The debounce avoids the #144 race with the phone still reading
@@ -188,12 +192,23 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 		return;
 	}
 
+	/* Lay down the plaintext info record once at boot. The wait loop below is
+	 * event-driven (waits forever on the GPO when idle), so without this initial
+	 * check a freshly-booted tag would keep whatever was on it — or stay blank —
+	 * until the first phone tap. */
+	if (app_nfc_periodic_enabled()) {
+		int ret = app_nfc_poll();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_nfc_poll", ret);
+		}
+	}
+
 	for (;;) {
 		/* Sleep until the GPO interrupt fires (phone touched the tag) or the
 		 * fallback elapses. While a response is mid-write or a stale response
 		 * record is on the tag (#164), use a short ~10 s fallback so we retry the
-		 * deferred write / restore the info record soon; otherwise the long
-		 * low-power fallback. */
+		 * deferred write / restore the info record soon; otherwise wait forever
+		 * (event-driven — only the GPO wakes us). */
 		bool nfc_busy = app_nfc_info_restore_pending() || app_nfc_resp_write_pending();
 		int fallback = nfc_busy ? NFC_INFO_RESTORE_DEBOUNCE_MS : NFC_EVENT_FALLBACK_MS;
 		int wret = app_nfc_wait_event(fallback);
@@ -522,14 +537,18 @@ int main(void)
 			app_calibration_check_trigger();
 		}
 
-		bool led_handled = false;
+		/* While a phone is interacting over NFC, the NFC interaction LED (app_nfc.c)
+		 * owns the indicator — suppress the periodic status/heartbeat blinks below so
+		 * they do not fight it. Alarm polling still runs (its latch/queue side
+		 * effects), only its LED is gated like the rest. */
+		bool led_handled = app_nfc_session_active();
 
 		/* Config NVS failed to load at boot (H-4): the device is running on
 		 * compile-time defaults with its identity + provisioning gone. Signal it
 		 * with a distinct red+yellow alternating pattern (highest priority) so a
 		 * technician sees a corrupt-config fault rather than a silently blank or
 		 * merely "not provisioned" device. */
-		if (app_config_load_failed()) {
+		if (!led_handled && app_config_load_failed()) {
 			struct app_led_play_req req = {
 				.commands = {{.type = APP_LED_CMD_SET,
 					      .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
@@ -550,7 +569,10 @@ int main(void)
 #if defined(CONFIG_LORAWAN)
 		enum app_lrw_state lrw_state = app_lrw_get_state();
 
-		if (lrw_state == APP_LRW_STATE_JOINING || lrw_state == APP_LRW_STATE_RECONNECT) {
+		if (led_handled) {
+			/* NFC interaction (or a higher-priority indicator) owns the LED. */
+		} else if (lrw_state == APP_LRW_STATE_JOINING ||
+			   lrw_state == APP_LRW_STATE_RECONNECT) {
 			/* Not on the network — initial join or a rejoin after the link was
 			 * lost (#278). This is the SEVERE LoRaWAN state (worse than WARNING,
 			 * which keeps its session), so it carries a red accent: one yellow
@@ -586,9 +608,7 @@ int main(void)
 		} else if (lrw_state == APP_LRW_STATE_DISABLED) {
 			/* Radio disabled by lrw-mode (#271/#278): a single yellow blink — the
 			 * lowest rung of the yellow severity scale, since this is a deliberate
-			 * operator choice (lrw-mode off/p2p), not a network fault. DISABLED
-			 * means lrw-mode off/p2p; the old blank-DevEUI radio-silent guard is
-			 * gone (#98/#175 superseded by #271). */
+			 * operator choice (lrw-mode off/p2p), not a network fault. */
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
 							.duration = 5,
 							.space = 0,

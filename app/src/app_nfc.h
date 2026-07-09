@@ -63,6 +63,11 @@ int app_nfc_restore_info(void);
  * tag is unavailable and the device runs degraded (#88). */
 bool app_nfc_ready(void);
 
+/* True while an NFC exchange is in progress (a phone is interacting). The main
+ * loop suppresses its periodic status/heartbeat LED blink while this is set so it
+ * does not fight the NFC interaction LED (app_nfc.c). */
+bool app_nfc_session_active(void);
+
 #ifdef __cplusplus
 }
 #endif

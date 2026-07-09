@@ -7,6 +7,7 @@
 #include "app_nfc.h"
 #include "app_cmd.h"
 #include "app_config.h"
+#include "app_led.h" /* NFC interaction LED signalling */
 #include "app_nfc_parser.h"
 #include "app_settings.h"
 #include "app_version.h"
@@ -24,6 +25,8 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
+#include <zephyr/pm/policy.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
@@ -138,12 +141,22 @@ static const char *cmd_action_str(enum app_cmd_action a)
 #define NFC_FIELD_OFF_WAIT_MS 1800
 #define NFC_FIELD_POLL_MS     20
 
-/* Static system config (device E1 0x57). Writing it needs an open I2C security
- * session (present password). GPO bit6 RF_WRITE_EN makes RF EEPROM writes show
- * up in IT_STS_Dyn, letting the poll gate on writes specifically. */
-#define ST25DV_GPO_REG         0x0000
-#define ST25DV_GPO_RF_WRITE_EN 0x40
-#define ST25DV_I2C_PWD_REG     0x0900
+/* ST25DV (non-C, IC_REF 0x24) GPO configuration. Bit positions per the ST driver
+ * st25dv_reg.h. The STATIC GPO register (0x0000, E1 0x57, EEPROM) needs an open
+ * I2C security session (present password) to write; the DYNAMIC GPO_CTRL_Dyn
+ * (0x2000, E0 0x53, volatile) mirrors the same bit layout and takes effect at
+ * runtime. GPO_EN (bit7) is the MASTER output enable — WITHOUT it the GPO pin
+ * never pulses regardless of the event bits. The event bits: RF_WRITE (bit6)
+ * reports RF EEPROM writes (also in IT_STS_Dyn), FIELD_CHANGE (bit3) pulses on RF
+ * field on/off. */
+#define ST25DV_GPO_REG          0x0000
+#define ST25DV_GPO_CTRL_DYN_REG 0x2000
+#define ST25DV_GPO_EN           0x80
+#define ST25DV_GPO_RF_WRITE_EN  0x40
+#define ST25DV_GPO_FIELD_EN     0x08
+/* Master enable + both event sources. GPO_EN MUST be included or the pin is mute. */
+#define ST25DV_GPO_WANT         (ST25DV_GPO_EN | ST25DV_GPO_RF_WRITE_EN | ST25DV_GPO_FIELD_EN)
+#define ST25DV_I2C_PWD_REG      0x0900
 
 /* NFC Forum external type (TNF=0x04, urn:nfc:ext:) records. Short type names
  * ("hio.stck:<kind>") instead of full MIME media-types save ST25DV user memory
@@ -216,6 +229,102 @@ static struct gpio_callback m_gpo_cb;
  * CPU only wakes to service the tag when the phone is actually doing something
  * (max count 1 — bursts coalesce into one wake, which is fine). */
 static K_SEM_DEFINE(m_gpo_sem, 0, 1);
+
+/* Keep-awake window for an NFC exchange. Servicing one encrypted command is many
+ * back-to-back i2c1 transfers with short field-off polls (k_sleep) between them;
+ * on the release build the CPU would otherwise drop into Stop2 in those gaps, and
+ * a Stop2 landing mid-operation corrupts the i2c1 (ST25DV) tag I/O so the command
+ * never gets a reply — release-only (debug runs PM=n and never sleeps). The GPO
+ * ISR fires on RF field-on (before the phone's command write even lands) and on
+ * every RF write; each event (re)arms this window, during which a
+ * SUSPEND_TO_IDLE policy lock keeps the CPU out of Stop2. After NFC_AWAKE_WINDOW_MS
+ * of RF quiet the lock is dropped and the sticker returns to deep sleep. Idle
+ * current is unchanged (the lock is only held for a few tens of seconds around a
+ * phone tap). */
+#define NFC_AWAKE_WINDOW_MS 30000
+static atomic_t m_awake_held; /* 1 while the SUSPEND_TO_IDLE lock is held */
+static void nfc_awake_timeout(struct k_timer *timer);
+static K_TIMER_DEFINE(m_awake_timer, nfc_awake_timeout, NULL);
+
+/* --- NFC interaction LED signalling --------------------------------------
+ * Guides an operator through an NFC exchange:
+ *   phone detected (RF field / GPO)      -> green solid
+ *   command being serviced               -> fast green blink
+ *   response written, waiting for phone   -> green + yellow solid
+ *   response consumed / session quiet     -> LED off
+ * The "processing" blink runs on a k_timer so it never blocks the NFC critical
+ * path. app_led_set is a plain gpio write (ISR-safe); k_timer start/stop are
+ * ISR-safe too, so these may be called from the GPO ISR / timer handlers. */
+#define NFC_LED_BLINK_MS 90
+static bool m_led_blink_on;
+static void nfc_led_blink_timer(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	m_led_blink_on = !m_led_blink_on;
+	app_led_set(APP_LED_CHANNEL_G, m_led_blink_on ? APP_LED_ON : APP_LED_OFF);
+}
+static K_TIMER_DEFINE(m_led_blink_timer, nfc_led_blink_timer, NULL);
+
+static void nfc_led_detected(void)
+{
+	k_timer_stop(&m_led_blink_timer);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_G, APP_LED_ON);
+}
+
+static void nfc_led_processing(void)
+{
+	m_led_blink_on = true;
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_G, APP_LED_ON);
+	k_timer_start(&m_led_blink_timer, K_MSEC(NFC_LED_BLINK_MS), K_MSEC(NFC_LED_BLINK_MS));
+}
+
+static void nfc_led_response_ready(void)
+{
+	k_timer_stop(&m_led_blink_timer);
+	app_led_set(APP_LED_CHANNEL_G, APP_LED_ON);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_ON);
+}
+
+static void nfc_led_off(void)
+{
+	k_timer_stop(&m_led_blink_timer);
+	app_led_set(APP_LED_CHANNEL_G, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+}
+
+/* True while an NFC exchange is in progress (the keep-awake lock is held). The
+ * main-loop status/heartbeat blinks defer to this so they do not fight the NFC
+ * interaction LED. */
+bool app_nfc_session_active(void)
+{
+	return atomic_get(&m_awake_held) != 0;
+}
+
+/* Take the deep-sleep lock (once) and (re)arm the inactivity window. Safe from
+ * ISR context: pm_policy_state_lock_get and k_timer_start are irq-safe, and the
+ * atomic_cas guards against a double get. The 0->1 edge is the start of an NFC
+ * session (phone just arrived) -> light the "detected" LED. */
+static void nfc_keep_awake(void)
+{
+	if (atomic_cas(&m_awake_held, 0, 1)) {
+		pm_policy_state_lock_get(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
+		nfc_led_detected();
+	}
+	k_timer_start(&m_awake_timer, K_MSEC(NFC_AWAKE_WINDOW_MS), K_NO_WAIT);
+}
+
+/* Inactivity window elapsed with no further RF activity: drop the lock (once) so
+ * the sticker can go back to deep sleep, and clear the interaction LED. */
+static void nfc_awake_timeout(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	if (atomic_cas(&m_awake_held, 1, 0)) {
+		pm_policy_state_lock_put(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
+		nfc_led_off();
+	}
+}
 
 /* Periodic NFC check enable (toggled via `nfc autocheck`). Lets a config blob
  * be written over several `nfc write` calls without the periodic check racing
@@ -578,9 +687,14 @@ static int nfc_present_password(const uint8_t pwd[8])
 	return 0;
 }
 
-/* Set GPO RF_WRITE_EN so RF EEPROM writes are reported in IT_STS_Dyn. Needs the
- * default (all-zero) I2C password. Returns 0 if RF_WRITE reporting is active.
- * Caller must hold the access lock. */
+/* Configure the GPO so the pin actually pulses on RF write / field change — the
+ * wake source for the event-driven NFC poll. Sets GPO_EN (master output enable) +
+ * RF_WRITE + FIELD_CHANGE in BOTH the static EEPROM register (persists across
+ * power-up) and the dynamic GPO_CTRL_Dyn register (takes effect immediately: the
+ * dynamic GPO_EN only loads from the static one at power-up, so a freshly-written
+ * static GPO_EN would otherwise not enable the GPO until the next reboot). Needs
+ * the default (all-zero) I2C password for the static (EEPROM) write. Returns 0
+ * once GPO_EN + events are active. Caller must hold the access lock. */
 static int nfc_enable_rf_write_it(void)
 {
 	static const uint8_t default_pwd[8] = {0};
@@ -595,33 +709,53 @@ static int nfc_enable_rf_write_it(void)
 	 * a system-area probe confirmed 10 ms is enough, so allow a safe margin. */
 	k_msleep(15);
 
-	uint8_t gpo;
+	/* 1) Static (EEPROM) GPO register: persist the config so it is active from
+	 *    every power-up. */
+	uint8_t gpo = 0;
 	ret = read_reg(ST25DV_GPO_REG, &gpo, 1);
 	if (ret) {
 		return ret;
 	}
 
-	if (gpo & ST25DV_GPO_RF_WRITE_EN) {
-		return 0; /* already enabled */
+	if ((gpo & ST25DV_GPO_WANT) != ST25DV_GPO_WANT) {
+		gpo |= ST25DV_GPO_WANT;
+		ret = write_reg(ST25DV_GPO_REG, &gpo, 1);
+		if (ret) {
+			return ret;
+		}
+
+		/* GPO is held in EEPROM: wait the write time before reading it back,
+		 * or the verify read sees the stale value. */
+		k_msleep(ST25DV_TW_MS_PER_PAGE + 5);
+
+		ret = read_reg(ST25DV_GPO_REG, &gpo, 1);
+		if (ret) {
+			return ret;
+		}
+		if ((gpo & ST25DV_GPO_WANT) != ST25DV_GPO_WANT) {
+			return -EIO;
+		}
 	}
 
-	gpo |= ST25DV_GPO_RF_WRITE_EN;
-	ret = write_reg(ST25DV_GPO_REG, &gpo, 1);
+	/* 2) Dynamic GPO_CTRL_Dyn (volatile, E0, no password): enable GPO_EN now so
+	 *    the output is live for this power cycle without waiting for a reboot. */
+	uint8_t dyn = 0;
+	ret = read_reg(ST25DV_GPO_CTRL_DYN_REG, &dyn, 1);
 	if (ret) {
 		return ret;
 	}
-
-	/* GPO is a system-config register held in EEPROM: wait the write time
-	 * before reading it back, or the verify read sees the stale value. */
-	k_msleep(ST25DV_TW_MS_PER_PAGE + 5);
-
-	uint8_t check = 0;
-	ret = read_reg(ST25DV_GPO_REG, &check, 1);
-	if (ret) {
-		return ret;
+	if (!(dyn & ST25DV_GPO_EN)) {
+		dyn |= ST25DV_GPO_EN;
+		ret = write_reg(ST25DV_GPO_CTRL_DYN_REG, &dyn, 1);
+		if (ret) {
+			return ret;
+		}
 	}
 
-	return (check & ST25DV_GPO_RF_WRITE_EN) ? 0 : -EIO;
+	LOG_INF("NFC: GPO cfg static=0x%02x dyn=0x%02x (GPO_EN=%d)", gpo, dyn,
+		!!(dyn & ST25DV_GPO_EN));
+
+	return 0;
 }
 
 /* Power the ST25DV up for I2C access (LPD low) and take the access lock. On
@@ -1166,6 +1300,8 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 	    strncmp((const char *)record_info->type, NDEF_COMMAND_TYPE, cmd_type_len) == 0) {
 		LOG_INF("Found command record - length: %u byte(s)", record_info->payload_len);
 		NFC_DBG("parsed: command record, payload=%u B", record_info->payload_len);
+		/* Servicing a command: fast green blink until the reply is written. */
+		nfc_led_processing();
 		NFC_REPORT("NFC read: command record (%u B)", record_info->payload_len);
 		NFC_REPORT_HEX("  command (protobuf):", record_info->payload,
 			       record_info->payload_len);
@@ -1296,21 +1432,34 @@ static bool is_buffer_zero(const void *buf, size_t len)
 	return true;
 }
 
-/* ST25DV GPO interrupt handler: wake the NFC poll thread to service the tag. */
+/* ST25DV GPO interrupt handler: wake the NFC poll thread to service the tag and
+ * hold the CPU out of Stop2 for the RF session (nfc_keep_awake) so the tag I/O
+ * of the command isn't torn by a mid-operation deep-sleep. The GPO fires on RF
+ * field-on/off and RF writes (configured in nfc_enable_rf_write_it). The EXTI on
+ * PB12 wakes the CPU from Stop2, so this ISR is what turns a phone tap into a
+ * serviced command with no periodic polling. */
 static void gpo_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
 	ARG_UNUSED(dev);
 	ARG_UNUSED(cb);
 	ARG_UNUSED(pins);
+	/* The GPO EXTI (PB12) fired on an RF event — wake the poll thread and keep the
+	 * CPU out of Stop2 for the session. nfc_keep_awake lights the "phone detected"
+	 * LED on the session's first event. */
+	nfc_keep_awake();
 	k_sem_give(&m_gpo_sem);
 }
 
-/* Block the NFC poll thread until the GPO line signals RF activity, or until
- * `fallback_ms` elapses (a safety net so a missed edge can't stall the
- * channel). Returns 0 if woken by GPO, -EAGAIN on the fallback timeout. */
+/* Block the NFC poll thread until the GPO line signals RF activity. A negative
+ * `fallback_ms` waits forever (event-driven: the thread only wakes on the GPO
+ * EXTI, so an idle sticker never polls the tag and stays in Stop2); a
+ * non-negative value is a bounded safety net (used while a response/info-restore
+ * is pending). Returns 0 if woken by GPO, -EAGAIN on the fallback timeout. */
 int app_nfc_wait_event(int fallback_ms)
 {
-	return k_sem_take(&m_gpo_sem, K_MSEC(fallback_ms));
+	k_timeout_t timeout = (fallback_ms < 0) ? K_FOREVER : K_MSEC(fallback_ms);
+
+	return k_sem_take(&m_gpo_sem, timeout);
 }
 
 /* Configure the GPO line (PB12) as an input with an edge interrupt. */
@@ -1401,6 +1550,19 @@ int app_nfc_init(void)
 		LOG_INF("NFC: GPO IRQ on PB12 ready");
 	}
 
+#ifdef CONFIG_PM_DEVICE
+	/* Keep GPIOB (the PB12 GPO port) out of the Stop2 device-suspend sweep so its
+	 * EXTI can wake the MCU from deep sleep on an RF event — the basis for the
+	 * event-driven, low-power NFC pickup. Needs `wakeup-source` on &gpiob (app.overlay)
+	 * to be WS-capable; the return value reports whether the flag actually took. */
+	const struct device *gpiob = DEVICE_DT_GET(DT_NODELABEL(gpiob));
+	if (device_is_ready(gpiob)) {
+		bool ok = pm_device_wakeup_enable(gpiob, true);
+
+		LOG_INF("NFC: gpiob wake-source enable %s", ok ? "ok" : "FAILED (not WS-capable)");
+	}
+#endif /* CONFIG_PM_DEVICE */
+
 	/* NOTE: do NOT write the info record here. The boot-time app_nfc_check() (and
 	 * the poll thread) already lay it down on a blank tag and restore it after a
 	 * consumed config/command — and crucially they run AFTER reading the tag, so a
@@ -1443,6 +1605,8 @@ static int nfc_write_response(void)
 	}
 
 	NFC_DBG("resp: wrote %zu B record to tag", out_len);
+	/* Reply is on the tag, waiting for the phone to read it: green + yellow. */
+	nfc_led_response_ready();
 	NFC_REPORT("NFC wrote: response record (%zu B NDEF, %zu B payload)", out_len, m_resp_len);
 	m_resp_write_pending = false;
 	/* #164: a response record now sits on the tag -> arm the info-restore. It is
@@ -1566,6 +1730,8 @@ static int nfc_check_locked(void)
 	if (m_seen_ack) {
 		m_unknown_count = 0;
 		m_info_restore_pending = false;
+		/* Phone read and acked the reply: exchange complete, clear the LED. */
+		nfc_led_off();
 		/* The phone has read and acked the reply: a deferred action (reboot/save)
 		 * may now fire without cutting off an unread response. */
 		if (m_cmd_action != APP_CMD_ACTION_NONE) {
@@ -1718,6 +1884,8 @@ int app_nfc_restore_info(void)
 		LOG_ERR_CALL_FAILED_INT("write_mem", ret);
 	} else {
 		m_info_restore_pending = false;
+		/* Exchange fully done (reply consumed / phone gone): clear the LED. */
+		nfc_led_off();
 		/* Backstop: the phone left without acking the reply. Release any deferred
 		 * action now so a reboot/save is never stuck waiting for an ack that will
 		 * not come. */
