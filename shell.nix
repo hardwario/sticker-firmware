@@ -30,7 +30,7 @@ let
 
   # Libraries needed at runtime by manylinux pip wheels (grpcio-tools,
   # clang-format, rttt) so they load under a NixOS-provided interpreter.
-  wheelLibs = lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ];
+  wheelLibs = lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib pkgs.segger-jlink ];
 in
 pkgs.mkShell {
   name = "sticker-fw";
