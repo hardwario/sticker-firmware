@@ -238,10 +238,12 @@ static K_SEM_DEFINE(m_gpo_sem, 0, 1);
  * ISR fires on RF field-on (before the phone's command write even lands) and on
  * every RF write; each event (re)arms this window, during which a
  * SUSPEND_TO_IDLE policy lock keeps the CPU out of Stop2. After NFC_AWAKE_WINDOW_MS
- * of RF quiet the lock is dropped and the sticker returns to deep sleep. Idle
- * current is unchanged (the lock is only held for a few tens of seconds around a
- * phone tap). */
-#define NFC_AWAKE_WINDOW_MS 30000
+ * of RF quiet the lock is dropped and the sticker returns to deep sleep. Kept
+ * short: RF events during an exchange are <2 s apart so they re-arm it, so the
+ * window only needs to outlast that gap plus a small margin; a longer tail just
+ * burns ~mA (CPU held awake) after the phone has already left. Idle current is
+ * unchanged (the lock is never taken without an RF event). */
+#define NFC_AWAKE_WINDOW_MS 5000
 static atomic_t m_awake_held; /* 1 while the SUSPEND_TO_IDLE lock is held */
 static void nfc_awake_timeout(struct k_timer *timer);
 static K_TIMER_DEFINE(m_awake_timer, nfc_awake_timeout, NULL);
