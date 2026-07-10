@@ -946,6 +946,47 @@ Regression tolerance: ±20 % on µA-class averages, flag anything beyond.
 - **Expect:** mA-class (CPU never sleeps) — recorded only to catch gross anomalies (e.g. a
   busy-loop regression doubling debug draw).
 
+### Feature/variant power sweep (AT-PWR-08..10)
+
+**Release FW + J-Link physically detached, no exception** (§15 preamble). Debug PM=n never sleeps
+→ mA-class garbage; any attached probe adds 60–100 µA and wakes the device from Stop2 → the numbers
+are meaningless. Power-cycle after the last SWD session (DBGMCU latch). Toggle config between runs
+**over NFC** (or set before the final release flash) so no SWD re-attach is needed mid-sweep. Every
+delta is appended to the power annex / `doc/power-consumption.md` as the new baseline.
+
+### AT-PWR-08 — LoRaWAN radio power delta, on vs off (R, A; maps #271)
+- **Steps:** measure the 5-min idle average in two modes (toggle via NFC + save): `lrw-mode
+  lorawan` (joined, `interval-report 900`) vs `lrw-mode off` (radio silent — no join, no periodic
+  TX). In the `lorawan` run also capture ≥ 1 full report interval so the per-uplink TX burst energy
+  is included and integrated.
+- **Expect:** `off` idle ≤ `lorawan` idle (no radio housekeeping); the idle delta **and** the
+  per-TX burst energy (mJ/uplink) recorded. This quantifies the radio's idle overhead and the cost
+  of each uplink — the dominant energy term at short report intervals.
+
+### AT-PWR-09 — 1-Wire sensor variants: none / 1× Dallas / 2× Dallas / machine probe (R, SA; maps #295)
+- **Setup:** operator swaps the 1-Wire fixture between runs (semi-assisted).
+- **Steps:** for each variant — (a) **no 1-Wire sensor**, (b) **1× Dallas DS18B20**, (c) **2×
+  Dallas**, (d) **machine probe** — provision the matching `cap-w1-sensors` + taught ROMs (config
+  save reboots; 1-Wire inits at boot only), then measure both the **idle band** (5 min) and the
+  **per-sample burst energy** at `interval-sample 60` (the DS2484 bridge + bus power up per sample).
+- **Expect:** idle floor ≈ equal across variants (the bus is powered only during a sample, not at
+  idle); per-sample burst energy grows with sensor count / probe type — this is the #295
+  characterization. A variant that raises the **idle** floor (bus/bridge left powered) = HIGH finding.
+- **Evidence:** variant × {idle µA, mJ/sample} table into the annex.
+- **Cleanup:** restore the bench-default sensor config.
+
+### AT-PWR-10 — configuration power matrix, bare floor → full (R, A/SA)
+- **Steps:** build the annex power matrix from 5-min idle averages, adding one feature at a time
+  (toggle via NFC + save): **bare floor** (no sensors, `lrw-mode off`, accel off, history off) →
+  + LRW on → + accel on → + history on (`interval-sample 60`) → + SHT4x cap → + 1-Wire (per
+  AT-PWR-09). Also record the fully-loaded config (everything on).
+- **Expect:** the **bare floor** ≈ the idle/Stop2 baseline in `doc/power-consumption.md` (nothing
+  but the housekeeping tick); each single-feature delta is additive and matches
+  AT-PWR-05/08/09; the full config ≈ sum of deltas within ±20 %. Non-additive jumps or a bare floor
+  above baseline → §20 improvement item.
+- **Evidence:** variant × idle-µA matrix appended to the annex (the headline "how much does each
+  option cost" deliverable).
+
 ## 16. Adversarial & "unrealistic" scenarios (AT-ADV)
 
 Purpose: not to pass — to **find soft spots**. Any crash, wedge, reboot loop, or silent
