@@ -50,6 +50,15 @@ STICKER platform highlights (hardware + firmware):
 
 ## Getting Started
 
+> **NixOS / Nix users:** a `shell.nix` at the repository root provides a
+> reproducible development environment. Running `nix-shell` sets up the ARM
+> toolchain, CMake/Ninja, J-Link and — on first entry — bootstraps the Python
+> venv and the west workspace (`west init`/`west update`), so you can skip the
+> manual steps below and go straight to `cd app && make`. Note that this
+> environment builds with the **`gnuarmemb`** toolchain (GNU Arm Embedded)
+> rather than the Zephyr SDK used by CI, so binary size may differ slightly;
+> use the standard setup below for size-sensitive verification.
+
 ### 1. Create a workspace
 
 Create a workspace directory:
