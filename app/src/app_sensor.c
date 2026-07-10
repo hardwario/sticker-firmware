@@ -288,7 +288,16 @@ int app_sensor_init(void)
 		}
 	}
 
-	if (g_app_config.cap_w1_sensors) {
+	/* Bring up the 1-Wire *sensor* drivers and scan the bus only when at least one
+	 * slot is actually taught (a non-zero sensorN-rom). With cap-w1-sensors on but
+	 * nothing enrolled the scan results have nowhere to go (no slot to bind, the
+	 * no-data watchdog keys on taught ROMs), so it is wasted boot work and log
+	 * spam. The DS2484 master above is still initialised whenever cap-w1-sensors is
+	 * on, so on-demand discovery (`w1 scan` / the NFC W1Scan command, which scan
+	 * the raw bus via the master) still works to teach a new sensor. */
+	bool w1_taught = g_app_config.cap_w1_sensors && app_w1_slots_any_taught();
+
+	if (w1_taught) {
 		const struct device *dev_0 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_0));
 
 		ret = device_init(dev_0);
@@ -312,7 +321,7 @@ int app_sensor_init(void)
 		}
 	}
 
-	if (g_app_config.cap_w1_sensors) {
+	if (w1_taught) {
 		const struct device *dev_0 = DEVICE_DT_GET(DT_NODELABEL(machine_probe_0));
 
 		ret = device_init(dev_0);
@@ -343,7 +352,7 @@ int app_sensor_init(void)
 	/* Bind discovered 1-Wire devices to logical slots by their persisted ROM
 	 * (sensorN_rom), so a slot keeps the same physical sensor across reboots /
 	 * rescans. Must run after both driver scans. */
-	if (g_app_config.cap_w1_sensors) {
+	if (w1_taught) {
 		int present = app_w1_slots_rebind();
 
 		LOG_INF("1-Wire slots: %d sensor(s) bound", present);

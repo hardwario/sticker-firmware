@@ -286,6 +286,16 @@ static void cfg_rom_set(int slot, uint64_t serial)
 	sys_put_be64(serial, cfg_rom_staging(slot));
 }
 
+bool app_w1_slots_any_taught(void)
+{
+	for (int slot = 0; slot < APP_W1_SLOT_COUNT; slot++) {
+		if (cfg_rom_get(slot) != 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* ---- discovery (registry-driven) --------------------------------------- */
 
 struct discovered {
