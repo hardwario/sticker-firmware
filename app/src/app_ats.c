@@ -983,19 +983,22 @@ static void print_reset_cause(const struct shell *sh, uint32_t cause)
 		{RESET_LOW_POWER_WAKE, "low-power-wake"},
 	};
 
-	char buf[96] = "";
+	char buf[96];
+	size_t len = 0;
 
 	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
 		if (cause & names[i].flag) {
-			if (buf[0] != '\0') {
-				strlcat(buf, ", ", sizeof(buf));
+			int n = snprintf(buf + len, sizeof(buf) - len, "%s%s", len ? ", " : "",
+					 names[i].name);
+			if (n < 0 || (size_t)n >= sizeof(buf) - len) {
+				break; /* truncated */
 			}
-			strlcat(buf, names[i].name, sizeof(buf));
+			len += n;
 		}
 	}
 
 	shell_print(sh, "Reset cause:   0x%08x (%s)", cause,
-		    buf[0] != '\0' ? buf : (cause ? "other" : "unknown"));
+		    len ? buf : (cause ? "other" : "unknown"));
 }
 
 static void print_device_status(const struct shell *sh, uint32_t status)
@@ -1017,18 +1020,21 @@ static void print_device_status(const struct shell *sh, uint32_t status)
 		{APP_DEVICE_STATUS_LRW_DISABLED, "lrw-disabled"},
 	};
 
-	char buf[128] = "";
+	char buf[128];
+	size_t len = 0;
 
 	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
 		if (status & names[i].flag) {
-			if (buf[0] != '\0') {
-				strlcat(buf, ", ", sizeof(buf));
+			int n = snprintf(buf + len, sizeof(buf) - len, "%s%s", len ? ", " : "",
+					 names[i].name);
+			if (n < 0 || (size_t)n >= sizeof(buf) - len) {
+				break; /* truncated */
 			}
-			strlcat(buf, names[i].name, sizeof(buf));
+			len += n;
 		}
 	}
 
-	shell_print(sh, "Device status: 0x%08x (%s)", status, buf[0] != '\0' ? buf : "ok");
+	shell_print(sh, "Device status: 0x%08x (%s)", status, len ? buf : "ok");
 }
 
 /* Prints the same device info a GetInfo command returns over LoRaWAN, via the
