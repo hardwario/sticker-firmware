@@ -585,7 +585,7 @@ in a dedicated **plaintext** record next to the info record — a small protobuf
   and immediately mis-latch `CONSUMED` before `clm` was ever laid down; a `just_armed` guard
   on the consume branch distinguishes "not laid down yet" from "phone deleted it".
 
-**Power.** The poll thread sleeps on the ST25DV **GPO interrupt** (wired to the STM32, EXTI) and only wakes to read the tag when RF activity occurs — so an untouched tag costs almost nothing and the CPU stays asleep when no phone is present. A periodic fallback timer (30 s) is a safety net in case an edge is missed; each wake still does the cheap gated check (one `IT_STS_Dyn` byte; full read + NDEF parse only on RF activity).
+**Power.** The NFC poll is fully **event-driven**: the poll thread sleeps forever on the ST25DV **GPO interrupt** (PB12, EXTI) and only wakes when RF activity occurs, so an untouched tag costs nothing and the CPU stays in Stop2 between taps (no periodic poll). For this to work the ST25DV **GPO output must be enabled** — the `GPO_EN` master-enable bit is set alongside the RF-write / field-change event bits, in **both** the static config register and the dynamic `GPO_CTRL_Dyn`. (A missing `GPO_EN` left the pin mute, so the MCU never woke and encrypted NFC failed on the **release** build — debug worked only because `CONFIG_PM=n` keeps the CPU polling. This was the root cause of the long-standing "NFC works on debug, not release" bug.) While a phone is engaged, a short **keep-awake** window — a `SUSPEND_TO_IDLE` policy lock, re-armed on each RF event and released after ~5 s of RF quiet — holds the CPU out of Stop2 so a mid-command Stop2 can't tear the multi-transfer i2c1 tag I/O; GPIOB is marked a PM wake-up source so the port isn't suspended and its EXTI stays armed in Stop2. Idle current is unchanged (the lock is never taken without an RF event; the sticker reaches the same Stop2 floor as before).
 
 **Robustness.** The command/response round-trip hardens the ST25DV write path (RF_WRITE_EN enable timing after present-password, an "unrecognized data" debounce so a poll that catches a half-written record doesn't clobber it, and an always-read poll). The earlier *immediate* auto-restore of the info record over a just-written response was dropped because it raced the phone reading the reply (#144); it is now done **on a ~10 s field-loss debounce** instead — once no RF (GPO) activity has occurred for the debounce window the phone has left, so restoring the info record can no longer clobber an in-flight read (#164). A restart-style command (`reboot`, `settings_save`, `factory_reset`, `enter_calibration`, `lrw_reset`) extends this handshake to its **action**: the reboot/save runs only once the reply has been delivered — the phone acks it over NDEF (info record restored) or the quiet-field backstop fires if the phone leaves — instead of the earlier blind fixed delay that raced the phone read, so a successful restart command is no longer seen as a failure by the app. A same-counter retransmission of the command replays the cached reply without dropping the pending action.
 
@@ -794,6 +794,19 @@ The three yellow network states form a **severity scale**: radio-off (1× yellow
 | 🟢 + 🟠 green and orange | **Input activity** — PIR / hall / digital input / accelerometer activation or release |
 
 The input-event LED is a **commissioning diagnostic**: it blinks only for the first hour after power-up (rate-limited to 2/s), then goes quiet. It shows **green and orange together** (a two-colour blink, so it can't be mistaken for the single-yellow radio-off heartbeat). The firmware does drive the two colours in a different order for an activation (0→1) versus a release (1→0), but the order is **not visually distinguishable in practice** — treat any green+orange blink simply as "an input changed".
+
+**NFC interaction**
+
+An NFC exchange with a phone shows a four-step sequence so an operator can follow it:
+
+| Pattern | Meaning |
+|---------|---------|
+| 🟢 green solid | **Phone detected** — RF field present, exchange started |
+| 🟢 green fast blink | **Servicing** — decrypting / handling the command, writing the reply |
+| 🟢🟡 green + yellow | **Reply ready** — response written to the tag, waiting for the phone to read it |
+| ⚫ off | **Done** — phone read the reply (ack) or left (RF quiet) |
+
+The periodic heartbeat above is **suppressed while an NFC exchange is in progress** so it doesn't fight the interaction LED.
 
 ---
 
