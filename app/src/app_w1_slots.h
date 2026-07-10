@@ -48,6 +48,11 @@ struct app_w1_slot_reading {
 	bool present;
 };
 
+/* True if at least one 1-Wire slot is taught (has a non-zero configured ROM,
+ * `sensorN-rom`). Used to skip the pointless boot sensor init+scan when
+ * `cap-w1-sensors` is on but nothing is enrolled. */
+bool app_w1_slots_any_taught(void);
+
 /* Re-bind logical slots to discovered driver indices by ROM-serial match.
  * Call once at init AFTER app_ds18b20_scan() / app_machine_probe_scan() have
  * run. For each configured slot (sensorN_rom != 0) finds the driver index
