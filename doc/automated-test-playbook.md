@@ -582,6 +582,44 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 - **Expect:** drain order = fPort-85 response first, then fPort-3 alarm; alarm batch decodes
   (type, source, value, time_synced handling).
 
+### US915 region tests (AT-LRW-13..15; maps #303)
+
+US915 is compiled in (`CONFIG_LORAMAC_REGION_US915=y`) and selectable
+(`config lrw-region us915`, `lrw-sub-band` 1–8 / 0 = all, default 2), but the bench RF is EU868
+(§2). These scenarios need a **US915-capable gateway + LNS** (ChirpStack region `us915_0`, or TTN
+US915). Per Step 0 (§0, gateway question): if no US915 gateway is in RF range, all three are
+**SKIPPED (RF)** — record the skip, do not silently pass. The region-switch order is always
+**set region → `lrw_reset` → `lrw_join`** (the reset clears the stale EU868 session / DevNonce /
+frame counters via `clear_stale_lorawan_nvm`, else the join uses the wrong channel plan).
+
+### AT-LRW-13 — US915 OTAA join on sub-band 2 (DR, A; maps #303, L2)
+- **Pre:** US915 LNS + gateway online (`{GW_ID}` is US915); OTAA creds provisioned for the US915
+  application. `config lrw-region us915`, `config lrw-sub-band 2`.
+- **Steps:** `lrw_reset` → `lrw_join` (shell/`ats cmd lrw` or downlink); poll `GetActivation`
+  until DevAddr appears (≤ 2 min).
+- **Expect:** join accept using **only sub-band 2** (channels 8–15 + 500 kHz channel 65); first
+  uplink = autonomous GetInfo on fPort 85. A join that never completes with a US915 gateway present
+  = HIGH finding.
+- **Evidence:** DevAddr, join channels seen LNS-side, RSSI/SNR of first uplink.
+
+### AT-LRW-14 — US915 sub-band selection & channel mask (D, A; maps #303)
+- **Steps:** set `lrw-sub-band` to a non-default value matching the gateway (e.g. 1), save,
+  `lrw_reset` + `lrw_join`; then repeat with `0` (all 64+8 channels) if the gateway supports it.
+- **Expect:** the device joins/uplinks only on the selected sub-band's 8 channels (LNS-side channel
+  mask matches); `0` uses the full plan. Mismatched sub-band vs gateway = no join (expected — proves
+  the mask is applied, not ignored).
+- **Cleanup:** restore `lrw-sub-band 2`.
+
+### AT-LRW-15 — US915 up/downlink, DR budget & RX2 (DR, A; maps #303, L5, L6, L10)
+- **Steps:** after AT-LRW-13, capture periodic fPort-2 telemetry and run the AT-LRW-06 downlink
+  matrix (get_info, set_param+readback, reboot, lrw_reset, …) over the US915 LNS; note the negotiated
+  uplink DR and confirm a downlink is received in RX2.
+- **Expect:** uplinks flow and decode identically to EU868 (`ttn.js` is region-agnostic — any
+  divergence = HIGH); telemetry fits the smallest US915 uplink DR max payload (DR0 ≈ 11 B → payload
+  splits across frames, never silently dropped — cross-check with `ats lrw compose 11` on debug);
+  RX2 downlink lands (US915 RX2 fixed at **DR8**, 500 kHz); ADR behaves.
+- **Evidence:** DR per uplink, one decoded downlink response hex, multi-frame split at DR0.
+
 ## 10. NFC + Manager-App (AT-NFC)
 
 All scenarios need the phone fixtured on the tag (one §18 assist batch covers the whole
@@ -1151,6 +1189,7 @@ automated; *(excluded)* items are listed with reasons below the table.
 | L14 | AT-LRW-08 | A | D | – | |
 | L15 | AT-LRW-09 (lrw-mode supersedes DevEUI-zero guard) | A | D | – | |
 | L16 | AT-LRW-10 | A | R | – | ✅ |
+| #303 (US915) | AT-LRW-13, AT-LRW-14, AT-LRW-15 | A | DR | – | SKIP (RF) unless US915 gateway present |
 | S1 | AT-SEN-01 | SA | D | finger | |
 | S2, S3, S4 | AT-SEN-05 | SA | D | tilt/shake/drop | |
 | S5 | AT-SEN-04 | SA | D | wave | |
