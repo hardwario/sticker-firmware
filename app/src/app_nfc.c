@@ -85,8 +85,14 @@ static const char *cmd_action_str(enum app_cmd_action a)
 		return "save+reboot";
 	case APP_CMD_ACTION_REBOOT:
 		return "reboot";
+	case APP_CMD_ACTION_DEVICE_RESET:
+		return "device-reset";
 	case APP_CMD_ACTION_FACTORY_RESET:
 		return "factory-reset";
+	case APP_CMD_ACTION_VENDOR_RESET:
+		return "vendor-reset";
+	case APP_CMD_ACTION_SECRET_KEY_SAVE:
+		return "secret-key-save";
 	case APP_CMD_ACTION_ENTER_CALIBRATION:
 		return "enter-calibration";
 	case APP_CMD_ACTION_LRW_RESET:
@@ -209,6 +215,28 @@ static const char *cmd_action_str(enum app_cmd_action a)
  * (latched via m_clm_state). The token stays owner-readable over the encrypted
  * get_info channel, so deleting clm only removes the plaintext convenience. */
 #define NDEF_CLAIM_TYPE "hio.stck:clm"
+
+/* Vendor-token security channel (#299): a separate, dedicated record from the
+ * secret_key-authenticated hio.stck:cmd above, because vendor_reset must stay
+ * reachable even after the owner has changed (or lost) secret_key. Same
+ * AES-CCM wire framing (decrypt()/encrypt() parameterized by key) and the same
+ * shared nonce_counter window/persist — no separate vendor nonce. The phone
+ * writes this in place of a normal command record; the reply is a normal
+ * hio.stck:rsp (this time encrypted with vendor_token, not secret_key), so the
+ * rest of the read/ack/restore-info state machine below is unchanged. Gated
+ * behind CONFIG_APP_NFC_ENCRYPTION like hio.stck:cmd — there is no plaintext
+ * fallback for something this destructive. */
+#define NDEF_RESET_TYPE "hio.stck:rst"
+
+/* Plaintext payload once decrypted with vendor_token: a fixed format marker
+ * (catches a version/format mismatch with a clear rejection instead of an
+ * ambiguous "key looks wrong") followed by the replacement secret_key (#299 —
+ * vendor_reset always drops secret_key to all-zero, which would otherwise lock
+ * the device out of its own encrypted hio.stck:cmd channel; the caller MUST
+ * supply the next one in the same request). The 8-byte wire header already
+ * authenticates `serial_number` as AAD, so it is not repeated in the payload. */
+#define NFC_VENDOR_RESET_MAGIC       0x56455230u /* "VER0" */
+#define NFC_VENDOR_RESET_PAYLOAD_LEN (4 + 16)
 
 /* NFC Forum Type 5 Capability Container (4-byte form) for ST25DV04K:
  *   [0] 0xE1 magic, [1] 0x40 mapping v1.0 + read/write,
@@ -387,6 +415,12 @@ static void clm_state_save(void)
 	}
 }
 
+void app_nfc_clm_reset(void)
+{
+	m_clm_state = CLM_UNSET;
+	clm_state_save();
+}
+
 /* A claim token is provisioned once any byte is non-zero (all-zero = unset, the
  * same sentinel the write-once shell guard uses, #170). */
 static bool claim_token_is_set(void)
@@ -451,6 +485,18 @@ enum app_cmd_action app_nfc_take_cmd_action(void)
 	m_cmd_action = APP_CMD_ACTION_NONE;
 	m_cmd_action_ready = false;
 	return a;
+}
+
+/* Replacement secret_key from a successful hio.stck:rst request (#299), staged
+ * alongside m_cmd_action = APP_CMD_ACTION_VENDOR_RESET by handle_vendor_reset()
+ * below and consumed once the deferred action fires — same gating as
+ * m_cmd_action itself, so the caller only ever reads a key that belongs to the
+ * action it just took. */
+static uint8_t m_pending_vendor_secret_key[16];
+
+const uint8_t *app_nfc_take_pending_vendor_secret_key(void)
+{
+	return m_pending_vendor_secret_key;
 }
 
 bool app_nfc_periodic_enabled(void)
@@ -1053,35 +1099,44 @@ static size_t build_resting_ndef(uint8_t *out, size_t out_size)
 
 #define NFC_CCM_TAG_LEN 16
 
-/* An all-zero secret key means the device has not been provisioned yet. Mirror
- * the bootloader's auth.c (all_zero() -> unkeyed): refuse to take part in the
+static bool is_buffer_zero(const void *buf, size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		if (((const uint8_t *)buf)[i] != 0) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+/* An all-zero key means it has not been provisioned yet. Mirror the
+ * bootloader's auth.c (all_zero() -> unkeyed): refuse to take part in the
  * encrypted channel at all while unkeyed. Otherwise, with
  * CONFIG_APP_NFC_ENCRYPTION=y (default), the device would AES-CCM-decrypt and
  * execute any command forged under the public all-zero key (serial is public,
  * nonce_counter starts at 0) — an attacker in NFC range could rewrite LoRaWAN
- * keys, factory-reset or wedge the device with valid CCM tags. In the unkeyed
- * state only the plaintext info record is served. */
-static bool secret_key_is_set(void)
+ * keys, device-reset or wedge the device with valid CCM tags. In the unkeyed
+ * state only the plaintext info record is served. Same guard applies to
+ * vendor_token (#299): an unprovisioned device also refuses hio.stck:rst. */
+static bool key_is_provisioned(const uint8_t *key, size_t key_len)
 {
-	for (size_t i = 0; i < sizeof(g_app_config.secret_key); i++) {
-		if (g_app_config.secret_key[i] != 0) {
-			return true;
-		}
-	}
-
-	return false;
+	return !is_buffer_zero(key, key_len);
 }
 
 /* CCM is provided by app_ccm (RFC 3610 over the STM32WL HW AES or the soft-SE AES,
- * #261), replacing mbedTLS. The 128-bit key is g_app_config.secret_key and the wire
- * bytes are byte-identical to the previous mbedtls_ccm, so the phone-side contract
- * and the nfc_crypto golden vectors are unchanged. */
-static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size, size_t *out_len)
+ * #261), replacing mbedTLS. The wire bytes are byte-identical to the previous
+ * mbedtls_ccm, so the phone-side contract and the nfc_crypto golden vectors are
+ * unchanged. `key` is g_app_config.secret_key for the hio.stck:cmd channel or
+ * g_app_config.vendor_token for the hio.stck:rst channel (#299) — both are
+ * 128-bit, and this function is otherwise identical either way. */
+static int decrypt(const uint8_t *key, const uint8_t *in, size_t in_len, uint8_t *out,
+		   size_t out_size, size_t *out_len)
 {
 	int res = 0;
 
-	if (!secret_key_is_set()) {
-		LOG_ERR("Secret key not provisioned; rejecting encrypted request");
+	if (!key_is_provisioned(key, 16)) {
+		LOG_ERR("Key not provisioned; rejecting encrypted request");
 		return -EACCES;
 	}
 
@@ -1138,8 +1193,8 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
 	memcpy(nonce, in, 8);
 	nonce[8] = NFC_NONCE_DIR_REQUEST;
 
-	int ret = app_ccm_auth_decrypt(g_app_config.secret_key, nonce, sizeof(nonce), /* AAD */ in,
-				       8, &in[8], pt_len, &in[8 + pt_len], NFC_CCM_TAG_LEN, out);
+	int ret = app_ccm_auth_decrypt(key, nonce, sizeof(nonce), /* AAD */ in, 8, &in[8], pt_len,
+				       &in[8 + pt_len], NFC_CCM_TAG_LEN, out);
 
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_ccm_auth_decrypt", ret);
@@ -1173,13 +1228,13 @@ static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_si
  * direction byte, so the reply never shares a (key, nonce) pair with the request.
  * The phone knows the counter (echoed in the header) and the implicit RESPONSE
  * direction, so it can decrypt. Returns the wire length in *out_len, or errno. */
-static int encrypt(const uint8_t *in, size_t in_len, uint32_t nonce_counter, uint8_t *out,
-		   size_t out_size, size_t *out_len)
+static int encrypt(const uint8_t *key, const uint8_t *in, size_t in_len, uint32_t nonce_counter,
+		   uint8_t *out, size_t out_size, size_t *out_len)
 {
 	int res = 0;
 
-	if (!secret_key_is_set()) {
-		LOG_ERR("Secret key not provisioned; refusing to emit encrypted response");
+	if (!key_is_provisioned(key, 16)) {
+		LOG_ERR("Key not provisioned; refusing to emit encrypted response");
 		return -EACCES;
 	}
 
@@ -1198,9 +1253,8 @@ static int encrypt(const uint8_t *in, size_t in_len, uint32_t nonce_counter, uin
 	nonce[8] = NFC_NONCE_DIR_RESPONSE;
 
 	/* Ciphertext (== plaintext length) into &out[8], the 16 B tag right after it. */
-	int ret = app_ccm_encrypt_and_tag(g_app_config.secret_key, nonce, sizeof(nonce),
-					  /* AAD */ out, 8, in, in_len, &out[8], &out[8 + in_len],
-					  NFC_CCM_TAG_LEN);
+	int ret = app_ccm_encrypt_and_tag(key, nonce, sizeof(nonce), /* AAD */ out, 8, in, in_len,
+					  &out[8], &out[8 + in_len], NFC_CCM_TAG_LEN);
 
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_ccm_encrypt_and_tag", ret);
@@ -1263,7 +1317,8 @@ static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_b
 	static uint8_t cmd_plain[512];
 	static uint8_t resp_plain[512];
 	size_t cmd_len = 0;
-	int ret = decrypt(in, in_len, cmd_plain, sizeof(cmd_plain), &cmd_len);
+	int ret = decrypt(g_app_config.secret_key, in, in_len, cmd_plain, sizeof(cmd_plain),
+			  &cmd_len);
 	if (ret) {
 		NFC_DBG("cmd: decrypt failed=%d", ret);
 		return ret;
@@ -1283,7 +1338,8 @@ static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_b
 		return 0;
 	}
 
-	ret = encrypt(resp_plain, resp_len, req_nonce, out_buf, out_cap, out_len);
+	ret = encrypt(g_app_config.secret_key, resp_plain, resp_len, req_nonce, out_buf, out_cap,
+		      out_len);
 	if (ret) {
 		return ret;
 	}
@@ -1297,6 +1353,65 @@ static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_b
 		m_resp_cache_len = 0;
 	}
 	return 0;
+}
+
+/* Process one hio.stck:rst frame (#299): decrypt with vendor_token (not
+ * secret_key), validate the fixed-format payload (magic + replacement
+ * secret_key), and — unless the payload is malformed or vendor_reset_allow is
+ * false — stage the deferred APP_CMD_ACTION_VENDOR_RESET (ack-before-reboot,
+ * same m_cmd_action/m_cmd_action_ready gating in parser_callback as every
+ * other reset). Writes the encrypted reply (Ack or Error) into
+ * out_buf/out_len, same wire framing as handle_encrypted_cmd but keyed by
+ * vendor_token both ways. No response cache: unlike hio.stck:cmd, a retried
+ * vendor_reset naturally re-decrypts to the same outcome (the config it reads
+ * hasn't changed yet — the actual reset is still deferred), so there is
+ * nothing a cache would save. Returns 0 or -errno; a non-zero return means
+ * nothing is written to out_buf — a request that fails to even authenticate
+ * gets silent drop, same contract as handle_encrypted_cmd's decrypt failure
+ * (no information leak to an unauthenticated caller). */
+static int handle_vendor_reset(const uint8_t *in, size_t in_len, uint8_t *out_buf, size_t out_cap,
+			       size_t *out_len, enum app_cmd_action *action)
+{
+	*out_len = 0;
+	*action = APP_CMD_ACTION_NONE;
+
+	static uint8_t plain[32];
+	size_t plain_len = 0;
+	int ret = decrypt(g_app_config.vendor_token, in, in_len, plain, sizeof(plain), &plain_len);
+	if (ret) {
+		NFC_DBG("rst: decrypt failed=%d", ret);
+		return ret;
+	}
+	uint32_t req_nonce = app_config()->nonce_counter;
+
+	Response resp = Response_init_zero;
+	if (plain_len != NFC_VENDOR_RESET_PAYLOAD_LEN ||
+	    sys_get_be32(plain) != NFC_VENDOR_RESET_MAGIC) {
+		LOG_ERR("vendor_reset payload malformed (len=%zu)", plain_len);
+		NFC_REPORT("  -> vendor_reset rejected: malformed payload");
+		resp.which_body = Response_error_tag;
+		resp.body.error.code = Response_Error_Code_BAD_REQUEST;
+	} else if (!app_config()->vendor_reset_allow) {
+		NFC_REPORT("  -> vendor_reset rejected: vendor_reset_allow is false");
+		resp.which_body = Response_error_tag;
+		resp.body.error.code = Response_Error_Code_NOT_READY;
+	} else {
+		memcpy(m_pending_vendor_secret_key, &plain[4], sizeof(m_pending_vendor_secret_key));
+		resp.which_body = Response_ack_tag;
+		*action = APP_CMD_ACTION_VENDOR_RESET;
+		NFC_REPORT("  -> vendor_reset accepted, deferred until ack");
+	}
+
+	static uint8_t resp_plain[32];
+	resp_plain[0] = APP_PROTO_VERSION;
+	pb_ostream_t os = pb_ostream_from_buffer(resp_plain + 1, sizeof(resp_plain) - 1);
+	if (!pb_encode(&os, Response_fields, &resp)) {
+		LOG_ERR("pb_encode(Response) failed: %s", PB_GET_ERROR(&os));
+		return -EIO;
+	}
+
+	return encrypt(g_app_config.vendor_token, resp_plain, 1 + os.bytes_written, req_nonce,
+		       out_buf, out_cap, out_len);
 }
 #endif /* CONFIG_APP_NFC_ENCRYPTION */
 
@@ -1401,6 +1516,46 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 		return 0;
 	}
 
+#ifdef CONFIG_APP_NFC_ENCRYPTION
+	/* Vendor-token reset record (#299): decrypt/validate/reply exactly like the
+	 * command branch above, but keyed by vendor_token and with its own tiny
+	 * fixed-format payload instead of a protobuf Command — see
+	 * handle_vendor_reset. No plaintext fallback: without encryption compiled in
+	 * there is no vendor_token channel at all (falls through to "unrecognized
+	 * record type" below). */
+	size_t rst_type_len = strlen(NDEF_RESET_TYPE);
+	if (record_info->type_len == rst_type_len &&
+	    strncmp((const char *)record_info->type, NDEF_RESET_TYPE, rst_type_len) == 0) {
+		LOG_INF("Found vendor_reset record - length: %u byte(s)", record_info->payload_len);
+		nfc_led_processing();
+		NFC_REPORT("NFC read: vendor_reset record (%u B)", record_info->payload_len);
+
+		enum app_cmd_action cmd_action = APP_CMD_ACTION_NONE;
+		ret = handle_vendor_reset(record_info->payload, record_info->payload_len,
+					  m_resp_buf, sizeof(m_resp_buf), &m_resp_len, &cmd_action);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("handle_vendor_reset", ret);
+			NFC_REPORT("  -> vendor_reset request rejected: %d", ret);
+			m_resp_len = 0;
+			return ret;
+		}
+
+		m_have_resp = (m_resp_len > 0);
+		/* Same M-5 guard as the command branch above: never clobber an
+		 * already-pending action still awaiting the phone's ack. */
+		if (m_cmd_action == APP_CMD_ACTION_NONE) {
+			m_cmd_action = cmd_action;
+			m_cmd_action_ready = (cmd_action != APP_CMD_ACTION_NONE && !m_have_resp);
+		} else if (cmd_action != APP_CMD_ACTION_NONE) {
+			LOG_WRN("NFC: action %d still pending; ignoring vendor_reset action",
+				(int)m_cmd_action);
+		}
+		NFC_REPORT("  -> handled, response %zu B, deferred action: %s", m_resp_len,
+			   cmd_action_str(cmd_action));
+		return 0;
+	}
+#endif /* CONFIG_APP_NFC_ENCRYPTION */
+
 	/* Response record already on the tag (our previous reply): leave it so the
 	 * phone can read it; don't overwrite with the info record. */
 	size_t resp_type_len = strlen(NDEF_RESPONSE_TYPE);
@@ -1444,17 +1599,6 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 	NFC_REPORT("NFC read: unrecognized record type (%u B) -> ignored",
 		   record_info->payload_len);
 	return 0;
-}
-
-static bool is_buffer_zero(const void *buf, size_t len)
-{
-	for (size_t i = 0; i < len; i++) {
-		if (((const uint8_t *)buf)[i] != 0) {
-			return false;
-		}
-	}
-
-	return true;
 }
 
 /* ST25DV GPO interrupt handler: wake the NFC poll thread to service the tag and
@@ -2091,9 +2235,24 @@ static int cmd_nfc_check(const struct shell *sh, size_t argc, char **argv)
 		ret = app_settings_save(true); /* reboots on success */
 		shell_print(sh, "staged config applied%s", ret ? " (save failed!)" : " and saved");
 		break;
+	case APP_CMD_ACTION_DEVICE_RESET:
+		ret = app_settings_device_reset();
+		shell_print(sh, "device reset%s", ret ? " (failed!)" : "");
+		break;
 	case APP_CMD_ACTION_FACTORY_RESET:
-		ret = app_settings_reset();
+		/* #299, narrower than device_reset above: drops LoRaWAN too. */
+		ret = app_settings_factory_reset();
 		shell_print(sh, "factory reset%s", ret ? " (failed!)" : "");
+		break;
+	case APP_CMD_ACTION_VENDOR_RESET:
+		/* #299, narrowest tier: the replacement secret_key came from the
+		 * hio.stck:rst request itself (app_nfc_take_pending_vendor_secret_key). */
+		ret = app_settings_vendor_reset(app_nfc_take_pending_vendor_secret_key());
+		shell_print(sh, "vendor reset%s", ret ? " (failed!)" : "");
+		break;
+	case APP_CMD_ACTION_SECRET_KEY_SAVE:
+		ret = app_settings_save_secret_key();
+		shell_print(sh, "secret_key saved%s", ret ? " (failed!)" : "");
 		break;
 	case APP_CMD_ACTION_NONE:
 		shell_print(sh, "no staged command on tag (no action)");

@@ -32,6 +32,14 @@ Parameter options:
 - format: display format (hex/dec for integers, printf format for uint)
 - write_once: once the field holds a non-zero value the shell setter refuses to
   overwrite it (commission-once identity fields, e.g. claim_token)
+- persistent: list of reset operations (subset of RESET_OPS below) the field
+  survives. Replaces the old boolean `preserve_on_reset`: a field's tier is now
+  explicit per-operation instead of a single all-or-nothing flag. configen
+  generates one preserve/restore routine per operation (`<module>_device_reset`,
+  `<module>_factory_reset`, `<module>_vendor_reset`) plus the h_commit schema-
+  migration restore (which uses the `device_reset` tier — the broadest, matching
+  today's migration behavior). Omitted/empty = reset to compiled default by every
+  operation (the common case for application/alarm/sensor config).
 - proto_field: whether the parameter is a field in the generated config protobuf
   (AppConfigMessage). Default true. `proto_field: false` keeps it in the C struct
   + settings (still shell-managed) but emits NO proto field and reserves its
@@ -63,6 +71,12 @@ from pathlib import Path
 
 import yaml
 from jinja2 import Environment, FileSystemLoader
+
+# The STICKER reset severity ladder (#299). `device_reboot` (wipes nothing) and
+# `settings erase` (survives nothing) are outside this enum — only the tiers
+# that need a per-field preserve list are named here. Order = broadest first,
+# matching the ladder in the issue.
+RESET_OPS = ["device_reset", "factory_reset", "vendor_reset"]
 from west import log
 from west.commands import WestCommand
 
@@ -343,6 +357,11 @@ def filter_printf_cast(param):
         "double": "(double)",
     }
     return casts.get(ptype, "")
+
+
+def filter_persists(param, op):
+    """True if `param` survives reset operation `op` (#299 persistent tiers)."""
+    return op in (param.get("persistent") or [])
 
 
 # ---------------------------------------------------------------------------
@@ -1076,6 +1095,7 @@ class Configen(WestCommand):
         env.filters["max_value"] = filter_max_value
         env.filters["needs_cast"] = filter_needs_cast
         env.filters["printf_cast"] = filter_printf_cast
+        env.filters["persists"] = filter_persists
 
         # Prepare template context
         context = {
@@ -1088,6 +1108,7 @@ class Configen(WestCommand):
             "INTEGER_TYPES": INTEGER_TYPES,
             "FLOAT_TYPES": FLOAT_TYPES,
             "NUMERIC_TYPES": NUMERIC_TYPES,
+            "RESET_OPS": RESET_OPS,
         }
 
         # Render templates
@@ -1317,3 +1338,17 @@ class Configen(WestCommand):
 
         if ptype == "enum" and not param.get("enum"):
             log.die(f"Parameter '{name}' of type 'enum' must have an 'enum' field")
+
+        if "preserve_on_reset" in param:
+            log.die(f"Parameter '{name}' uses removed 'preserve_on_reset' — "
+                     f"use 'persistent: [{', '.join(RESET_OPS)}]' instead (#299)")
+
+        persistent = param.get("persistent")
+        if persistent is not None:
+            if not isinstance(persistent, list):
+                log.die(f"Parameter '{name}' 'persistent' must be a list, got {type(persistent).__name__}")
+            invalid = sorted(set(persistent) - set(RESET_OPS))
+            if invalid:
+                log.die(f"Parameter '{name}' has invalid persistent op(s) {invalid}. Valid: {RESET_OPS}")
+            if len(set(persistent)) != len(persistent):
+                log.die(f"Parameter '{name}' has duplicate entries in 'persistent'")

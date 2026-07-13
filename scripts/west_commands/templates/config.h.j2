@@ -47,12 +47,17 @@ struct {{ module.name }} *{{ module.name }}(void);
  * surface a distinct state instead of silently looking like a blank device (H-4). */
 bool {{ module.name }}_load_failed(void);
 
-/* Reset every parameter to its compiled-in default EXCEPT the factory identity
- * and network credentials (preserve_on_reset), then persist. Backs the
- * factory_reset command so the device keeps its LoRaWAN session; the shell
- * `settings erase` still does a full NVS wipe. Returns 0 or a negative errno.
- * The caller reboots so every module re-reads the restored config. */
-int {{ module.name }}_factory_reset(void);
+/* Reset severity ladder (#299): each function keeps only the fields tagged
+ * with the matching op in the YAML `persistent: [...]` list, resets everything
+ * else to its compiled default, and persists. Returns 0 or a negative errno;
+ * the caller reboots so every module re-reads the restored config.
+ *   device_reset  - keeps factory identity + full LoRaWAN (today's factory_reset).
+ *   factory_reset - keeps identity only; drops the LoRaWAN session/keys.
+ *   vendor_reset  - keeps serial_number + vendor_token only; caller erases the
+ *                   storage+history flash areas first and re-provisions this. */
+{% for op in RESET_OPS %}
+int {{ module.name }}_{{ op }}(void);
+{% endfor %}
 
 #ifdef __cplusplus
 }

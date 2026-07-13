@@ -46,7 +46,7 @@ enum app_config_motion_sensitivity {
 	APP_CONFIG_MOTION_SENSITIVITY_HIGH = 3,
 };
 
-#define APP_CONFIG_VERSION 3
+#define APP_CONFIG_VERSION 4
 
 struct app_config {
 	uint32_t config_version;
@@ -54,12 +54,14 @@ struct app_config {
 	uint32_t serial_number;
 	uint32_t nonce_counter;
 	uint8_t claim_token[16];
+	uint8_t vendor_token[16];
 	bool calibration;
 	int interval_sample;
 	int interval_report;
 	bool history_enable;
 	uint32_t history_sensors;
 	int battery_level;
+	bool vendor_reset_allow;
 	int alarm_limit;
 	int alarm_notif_time;
 	enum app_config_lrw_region lrw_region;
@@ -122,12 +124,17 @@ struct app_config *app_config(void);
  * surface a distinct state instead of silently looking like a blank device (H-4). */
 bool app_config_load_failed(void);
 
-/* Reset every parameter to its compiled-in default EXCEPT the factory identity
- * and network credentials (preserve_on_reset), then persist. Backs the
- * factory_reset command so the device keeps its LoRaWAN session; the shell
- * `settings erase` still does a full NVS wipe. Returns 0 or a negative errno.
- * The caller reboots so every module re-reads the restored config. */
+/* Reset severity ladder (#299): each function keeps only the fields tagged
+ * with the matching op in the YAML `persistent: [...]` list, resets everything
+ * else to its compiled default, and persists. Returns 0 or a negative errno;
+ * the caller reboots so every module re-reads the restored config.
+ *   device_reset  - keeps factory identity + full LoRaWAN (today's factory_reset).
+ *   factory_reset - keeps identity only; drops the LoRaWAN session/keys.
+ *   vendor_reset  - keeps serial_number + vendor_token only; caller erases the
+ *                   storage+history flash areas first and re-provisions this. */
+int app_config_device_reset(void);
 int app_config_factory_reset(void);
+int app_config_vendor_reset(void);
 
 #ifdef __cplusplus
 }

@@ -339,6 +339,9 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 			FAULT(6);
 		}
 	}
+	if (src->has_vendor_reset_allow) {
+		config->vendor_reset_allow = src->vendor_reset_allow;
+	}
 	return ret;
 }
 
@@ -369,6 +372,10 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	if (requested(ids, n, 6)) {
 		dst->has_battery_level = true;
 		dst->battery_level = c->battery_level;
+	}
+	if (requested(ids, n, 7)) {
+		dst->has_vendor_reset_allow = true;
+		dst->vendor_reset_allow = c->vendor_reset_allow;
 	}
 }
 

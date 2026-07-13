@@ -156,10 +156,11 @@ fPort-2 `Telemetry` frame and **no** fPort-85 response.
 
 - [ ] Pass
 
-### G6 — Reset keeps identity (`settings reset` / FactoryReset)
+### G6 — Reset keeps identity (`settings device-reset` / DeviceReset)
 
-**Goal:** `settings reset` and the FactoryReset command restore application config + alarm rules to
-defaults but **keep** the device identity (`serial-number`, `secret-key`) and LoRaWAN provisioning
+**Goal:** `settings device-reset` (renamed from `settings reset`, #299) and the DeviceReset command
+(same wire id as the old, single FactoryReset) restore application config + alarm rules to defaults
+but **keep** the device identity (`serial-number`, `secret-key`) and LoRaWAN provisioning
 (`lrw-deveui`, keys, region, …), so the unit stays provisioned and on the network (issue #108).
 **Observable:** changed app/alarm values back to defaults; DevEUI/keys/serial unchanged; device
 stays joined / rejoins with the same credentials.
@@ -167,12 +168,63 @@ stays joined / rejoins with the same credentials.
 **Prompt for Claude:**
 > First capture the identity + a couple of app values via `config` (e.g. `config lrw-deveui`,
 > `config serial-number`, `config interval-report`) and change `interval-report` to a non-default.
-> Then run `settings reset` over the RTT shell. After reboot confirm: `interval-report` is back to
-> default, but `config lrw-deveui` / `config serial-number` are **unchanged**, and the device
-> rejoins with the same DevEUI. Repeat using a FactoryReset downlink on fPort 85 and confirm the
+> Then run `settings device-reset` over the RTT shell. After reboot confirm: `interval-report` is
+> back to default, but `config lrw-deveui` / `config serial-number` are **unchanged**, and the device
+> rejoins with the same DevEUI. Repeat using a DeviceReset downlink on fPort 85 and confirm the
 > `Response.Ack` precedes the reboot and identity again survives.
 
 - [ ] Pass
+
+### G6a — Reset ladder's narrower tiers (`factory_reset` / `vendor_reset` / `set_secret_key`, #299)
+
+**Goal:** `factory_reset` (new, narrower than device_reset above) keeps identity only and drops the
+LoRaWAN session/keys — the device must re-join after it. `vendor_reset` keeps only
+`serial-number` + `vendor-token` (goes through the live settings API, not a raw storage erase — only
+`history` is raw-erased), and is refused unless the caller supplies a replacement `secret-key` in the
+same call, or if `vendor-reset-allow` is false. `set_secret_key` rotates `secret-key` over the
+already-encrypted nfc/shell channel.
+**Observable:** `factory_reset` — identity survives, DevEUI/keys/region reset to defaults, device
+re-joins. `vendor_reset` without a key, or with `vendor-reset-allow false`, is refused (no reboot,
+nothing erased). `vendor_reset` with a key — only serial+vendor-token survive, new secret_key is
+live after reboot. `set_secret_key` — new key takes effect immediately (old key no longer decrypts).
+
+**Prompt for Claude:**
+> `settings factory-reset` over the RTT shell: confirm `config serial-number`/`config secret-key`
+> survive but `config lrw-deveui` and the LoRaWAN keys reset to all-zero/defaults, and the device
+> re-joins. Then `config vendor-reset-allow false` + `settings save`, and confirm
+> `settings vendor-reset <32-hex-key>` is refused (shell reports failure, no reboot). Set
+> `config vendor-reset-allow true` + `settings save`, then `settings vendor-reset` with **no**
+> argument — confirm it's rejected (missing key) — then with a key: confirm after reboot
+> `config serial-number`/`config vendor-token` are unchanged but everything else (incl.
+> `config secret-key`, which should now read the supplied key) is back to defaults/blank.
+
+- [ ] Pass
+
+### G6a-NFC — vendor_reset over the `hio.stck:rst` channel (#299)
+
+**Goal:** the same `vendor_reset` operation as G6a above, but driven over NFC through its own
+vendor-token-authenticated record (`hio.stck:rst`) instead of the shell — the one reset tier that
+never goes over the generic `hio.stck:cmd`/LoRaWAN command channel at all.
+**Observable:** the tag holds a plaintext info record, then a `hio.stck:rst` write, then a
+`hio.stck:rsp` reply (`Ack` on success, `Error{NOT_READY}` if `vendor-reset-allow` is false,
+`Error{BAD_REQUEST}` for a malformed payload) — the actual reset only fires after the phone acks the
+reply (same ack-before-reboot handshake as every other reset), never immediately from the tap.
+
+**HIL-verified 2026-07-13** without a phone — hand-crafted the AES-CCM frame in Python
+(`cryptography.hazmat.AESCCM`, mirroring the `nfc_crypto` golden-vector construction) and injected it
+directly into ST25DV memory via the `nfc write <offset> <hex>` shell command (`ats cmd nfc <hex>`
+would NOT have worked here — it injects a *plaintext* `Command` straight into `app_cmd_handle`,
+bypassing the NFC tag/encryption entirely). Confirmed all three outcomes: (1) a valid request is
+recognized ("vendor_reset record"), decrypted, accepted, and the reply written — but the device does
+**not** reset until a `hio.stck:ack` record is written back, at which point the deferred action fires
+and `serial_number`/`vendor_token` survive with the new `secret_key` live; (2) with
+`vendor-reset-allow=false`, the request is decrypted but rejected (`Error{NOT_READY}`) with no
+deferred action and no config change; (3) a stale/reused nonce is rejected by `decrypt()` same as the
+`cmd` channel. See `reference_nfc_rst_hil_test_299` (memory) for the exact frame-construction recipe
+and the shell-command-line-length gotcha it surfaced (long `nfc write` hex strings silently truncate —
+split into multiple writes at sequential offsets).
+
+- [x] Pass (HIL-verified via hand-crafted frame, 2026-07-13)
 
 ### G6b — Full erase un-provisions (`settings erase`)
 

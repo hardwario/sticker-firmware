@@ -34,10 +34,17 @@ int app_nfc_poll(void);
 int app_nfc_wait_event(int fallback_ms);
 
 /* Take (and clear) the deferred action requested by the last NFC command
- * (reboot/save/factory-reset). The caller runs it after the response is on the
- * tag, so the phone can still read the Ack first. Returns APP_CMD_ACTION_NONE
- * when there is nothing pending. */
+ * (reboot/save/device-reset/factory-reset/...). The caller runs it after the
+ * response is on the tag, so the phone can still read the Ack first. Returns
+ * APP_CMD_ACTION_NONE when there is nothing pending. */
 enum app_cmd_action app_nfc_take_cmd_action(void);
+
+/* The replacement secret_key staged by a successful hio.stck:rst vendor_reset
+ * request (#299) — call exactly once, when handling the deferred
+ * APP_CMD_ACTION_VENDOR_RESET returned by app_nfc_take_cmd_action() above.
+ * Returns a pointer to a static 16-byte buffer valid until the next NFC
+ * vendor_reset request. */
+const uint8_t *app_nfc_take_pending_vendor_secret_key(void);
 
 /* Whether the main loop should run the periodic NFC check. Toggled by the
  * `nfc autocheck on|off` shell command so a multi-step `nfc write` of a config
@@ -67,6 +74,12 @@ bool app_nfc_ready(void);
  * loop suppresses its periodic status/heartbeat LED blink while this is set so it
  * does not fight the NFC interaction LED (app_nfc.c). */
 bool app_nfc_session_active(void);
+
+/* Reset the claim-record lifecycle (#247) back to CLM_UNSET and persist, so the
+ * device re-opens provisioning (as if freshly manufactured) — used by
+ * app_settings_vendor_reset() (#299), the one reset tier deep enough to matter;
+ * device_reset/factory_reset deliberately leave clm state alone (see app_nfc.c). */
+void app_nfc_clm_reset(void);
 
 #ifdef __cplusplus
 }

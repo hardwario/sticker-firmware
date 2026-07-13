@@ -42,6 +42,10 @@ Response.HistoryFrame.samples max_size:440
 Response.Info.claim_token   max_size:16 fixed_length:true
 Response.Info.dev_eui       max_size:8 fixed_length:true
 
+# set_secret_key command (#299): fixed 16-byte key, no callback (mirrors the
+# LoRaWAN keys / ClaimInfo.claim_token below).
+Command.SetSecretKey.key    max_size:16 fixed_length:true
+
 # NFC clm provisioning record (#247): fixed 16-byte claim token, no callback.
 ClaimInfo.claim_token       max_size:16 fixed_length:true
 

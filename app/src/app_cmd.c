@@ -404,25 +404,25 @@ static const struct {
 	{DUMP_SECTION_LORAWAN, 14, 3, false},    {DUMP_SECTION_APPLICATION, 1, 2, false},
 	{DUMP_SECTION_APPLICATION, 2, 3, false}, {DUMP_SECTION_APPLICATION, 3, 4, false},
 	{DUMP_SECTION_APPLICATION, 4, 2, false}, {DUMP_SECTION_APPLICATION, 5, 6, false},
-	{DUMP_SECTION_APPLICATION, 6, 3, false}, {DUMP_SECTION_SENSORS, 1, 2, false},
-	{DUMP_SECTION_SENSORS, 2, 2, false},     {DUMP_SECTION_SENSORS, 3, 2, false},
-	{DUMP_SECTION_SENSORS, 4, 2, false},     {DUMP_SECTION_SENSORS, 5, 2, false},
-	{DUMP_SECTION_SENSORS, 6, 2, false},     {DUMP_SECTION_SENSORS, 7, 2, false},
-	{DUMP_SECTION_SENSORS, 8, 2, false},     {DUMP_SECTION_SENSORS, 9, 2, false},
-	{DUMP_SECTION_SENSORS, 10, 2, false},    {DUMP_SECTION_SENSORS, 11, 10, false},
-	{DUMP_SECTION_SENSORS, 12, 10, false},   {DUMP_SECTION_SENSORS, 13, 10, false},
-	{DUMP_SECTION_SENSORS, 14, 10, false},   {DUMP_SECTION_SENSORS, 15, 2, false},
-	{DUMP_SECTION_SENSORS, 16, 3, false},    {DUMP_SECTION_SENSORS, 17, 3, false},
-	{DUMP_SECTION_SENSORS, 18, 3, false},    {DUMP_SECTION_ALARMS, 1, 3, false},
-	{DUMP_SECTION_ALARMS, 2, 2, false},      {DUMP_SECTION_ALARMS, 3, 19, false},
-	{DUMP_SECTION_ALARMS, 4, 19, false},     {DUMP_SECTION_ALARMS, 5, 19, false},
-	{DUMP_SECTION_ALARMS, 6, 19, false},     {DUMP_SECTION_ALARMS, 7, 19, false},
-	{DUMP_SECTION_ALARMS, 8, 19, false},     {DUMP_SECTION_ALARMS, 9, 19, false},
-	{DUMP_SECTION_ALARMS, 10, 19, false},    {DUMP_SECTION_ALARMS, 11, 19, false},
-	{DUMP_SECTION_ALARMS, 12, 19, false},    {DUMP_SECTION_ALARMS, 13, 19, false},
-	{DUMP_SECTION_ALARMS, 14, 19, false},    {DUMP_SECTION_ALARMS, 15, 19, false},
-	{DUMP_SECTION_ALARMS, 16, 20, false},    {DUMP_SECTION_ALARMS, 17, 20, false},
-	{DUMP_SECTION_ALARMS, 18, 20, false},
+	{DUMP_SECTION_APPLICATION, 6, 3, false}, {DUMP_SECTION_APPLICATION, 7, 2, false},
+	{DUMP_SECTION_SENSORS, 1, 2, false},     {DUMP_SECTION_SENSORS, 2, 2, false},
+	{DUMP_SECTION_SENSORS, 3, 2, false},     {DUMP_SECTION_SENSORS, 4, 2, false},
+	{DUMP_SECTION_SENSORS, 5, 2, false},     {DUMP_SECTION_SENSORS, 6, 2, false},
+	{DUMP_SECTION_SENSORS, 7, 2, false},     {DUMP_SECTION_SENSORS, 8, 2, false},
+	{DUMP_SECTION_SENSORS, 9, 2, false},     {DUMP_SECTION_SENSORS, 10, 2, false},
+	{DUMP_SECTION_SENSORS, 11, 10, false},   {DUMP_SECTION_SENSORS, 12, 10, false},
+	{DUMP_SECTION_SENSORS, 13, 10, false},   {DUMP_SECTION_SENSORS, 14, 10, false},
+	{DUMP_SECTION_SENSORS, 15, 2, false},    {DUMP_SECTION_SENSORS, 16, 3, false},
+	{DUMP_SECTION_SENSORS, 17, 3, false},    {DUMP_SECTION_SENSORS, 18, 3, false},
+	{DUMP_SECTION_ALARMS, 1, 3, false},      {DUMP_SECTION_ALARMS, 2, 2, false},
+	{DUMP_SECTION_ALARMS, 3, 19, false},     {DUMP_SECTION_ALARMS, 4, 19, false},
+	{DUMP_SECTION_ALARMS, 5, 19, false},     {DUMP_SECTION_ALARMS, 6, 19, false},
+	{DUMP_SECTION_ALARMS, 7, 19, false},     {DUMP_SECTION_ALARMS, 8, 19, false},
+	{DUMP_SECTION_ALARMS, 9, 19, false},     {DUMP_SECTION_ALARMS, 10, 19, false},
+	{DUMP_SECTION_ALARMS, 11, 19, false},    {DUMP_SECTION_ALARMS, 12, 19, false},
+	{DUMP_SECTION_ALARMS, 13, 19, false},    {DUMP_SECTION_ALARMS, 14, 19, false},
+	{DUMP_SECTION_ALARMS, 15, 19, false},    {DUMP_SECTION_ALARMS, 16, 20, false},
+	{DUMP_SECTION_ALARMS, 17, 20, false},    {DUMP_SECTION_ALARMS, 18, 20, false},
 	// END GENERATED DUMP_FIELDS
 };
 
@@ -667,6 +667,28 @@ static void app_cmd_handle_reset_counters(enum app_cmd_transport tp, const Comma
 	 * the post-command action (off this stack frame) because settings_save_one
 	 * is too stack-heavy to run inline on the m_work_q. */
 	*action = APP_CMD_ACTION_COUNTERS_SAVE;
+	resp->which_body = Response_ack_tag;
+}
+
+/* #299: rotate secret_key over the already-encrypted channel (the caller already
+ * authenticated with the CURRENT key — decrypt() runs before app_cmd_handle() is
+ * ever reached). The new key is applied to staging immediately but persisted by
+ * the deferred action below (same stack-cost reason as reset_counters above);
+ * never echoed back — secret_key stays proto_field:false on every read path. */
+static void app_cmd_handle_set_secret_key(enum app_cmd_transport tp, const Command *cmd,
+					  Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	const Command_SetSecretKey *ssk = &cmd->body.set_secret_key;
+
+	if (!ssk->has_key) {
+		make_error(resp, Response_Error_Code_BAD_REQUEST, "missing key");
+		return;
+	}
+
+	memcpy(app_config()->secret_key, ssk->key, sizeof(app_config()->secret_key));
+
+	*action = APP_CMD_ACTION_SECRET_KEY_SAVE;
 	resp->which_body = Response_ack_tag;
 }
 
@@ -961,8 +983,8 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		*action = APP_CMD_ACTION_REBOOT;
 		resp->which_body = Response_ack_tag;
 		break;
-	case Command_factory_reset_tag:
-		*action = APP_CMD_ACTION_FACTORY_RESET;
+	case Command_device_reset_tag:
+		*action = APP_CMD_ACTION_DEVICE_RESET;
 		resp->which_body = Response_ack_tag;
 		break;
 	case Command_force_send_tag:
@@ -1025,6 +1047,23 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_sample(tp, cmd, resp, action);
+		break;
+	case Command_factory_reset_tag:
+		/* transports: [nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		*action = APP_CMD_ACTION_FACTORY_RESET;
+		resp->which_body = Response_ack_tag;
+		break;
+	case Command_set_secret_key_tag:
+		/* transports: [nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_set_secret_key(tp, cmd, resp, action);
 		break;
 	default:
 		/* L-54: an unknown command tag (e.g. a removed command like the old
