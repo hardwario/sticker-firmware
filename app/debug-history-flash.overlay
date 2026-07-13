@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Debug-only test variant: shrink the history_partition to 16 KB (8 x 2 KB
- * erase pages) instead of the release 64 KB, and grow code_partition to
+ * erase pages) instead of the release 32 KB, and grow code_partition to
  * absorb the difference, so a debug image (~214 KB) can keep
  * CONFIG_APP_HISTORY_FLASH=y instead of falling back to the RAM ring.
  *
@@ -26,10 +26,10 @@
 			reg = <0x00000000 DT_SIZE_K(224)>;
 		};
 
-		/* history_partition moves (0x2c000 -> 0x38000) and shrinks, so the old
+		/* history_partition moves (0x34000 -> 0x38000) and shrinks, so the old
 		 * node must be deleted before the new one can reuse the label.
 		 * storage_partition (0x3c000, 16 KB) is untouched. */
-		/delete-node/ partition@2c000;
+		/delete-node/ partition@34000;
 
 		history_partition: partition@38000 {
 			label = "history";
