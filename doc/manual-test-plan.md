@@ -1260,17 +1260,15 @@ rejected with `error` `BAD_REQUEST` "bad epoch".
 
 - [ ] Pass
 
-### N2 — NFC config delivery: RESET
+### N2 — NFC config delivery: RESET — SUPERSEDED
 
-**Goal:** A RESET NFC tag triggers factory reset.
-**Observable:** RTT `NFC action: RESET`; ~10 yellow blinks; config back to defaults; reboot.
+The dedicated plaintext "RESET NFC tag" NDEF type this test described predates the reset ladder
+(#299) and no longer exists in `app_nfc.c` (no `NFC action: RESET` string, no 10-blink pattern).
+Resetting over NFC now goes through the encrypted `hio.stck:cmd` channel's `device_reset` /
+`factory_reset` commands (ack-before-reboot, same as every other command) or the separate
+vendor-token-authenticated `hio.stck:rst` channel for `vendor_reset` — see **N9** and **G6a-NFC**.
 
-**Prompt for Claude:**
-> Tell me how to present a RESET NFC tag. On tap, confirm the RTT log shows `NFC action: RESET`,
-> the yellow LED blinks ~10×, the device factory-resets and reboots, and config returns to
-> defaults. (Destructive — confirm OK on this bench.)
-
-- [ ] Pass
+- [x] N/A (superseded by N9 / G6a-NFC)
 
 ### N3 — NFC firmware update — REMOVED
 
@@ -1377,6 +1375,43 @@ idempotent via a response cache.
 > device, re-send the same counter, and confirm it is now **rejected** (`-EACCES`, cache gone) and the
 > phone resyncs from the info-record counter (`stored+1`). Capture a request and its response and confirm
 > they cannot be cross-decrypted (direction separation). Report results.
+
+- [ ] Pass
+
+### N9 — Reset ladder over `hio.stck:cmd`: `device_reset` / `factory_reset` / `set_secret_key`, ack-before-reboot (#299)
+
+**Goal:** unlike `vendor_reset` (its own `hio.stck:rst` channel, see G6a-NFC), `device_reset` and
+`factory_reset` are ordinary `Command`s dispatched over the standard encrypted `hio.stck:cmd`
+channel — `factory_reset` is additionally **nfc/shell-only** (rejected as a LoRaWAN downlink,
+since a downlink that drops its own LoRaWAN session could never confirm delivery). `set_secret_key`
+is also nfc/shell-only and reachable the same way, but does **not** reboot. All three must follow
+the same **ack-before-reboot** handshake as `lrw_reset`/`lrw_join` (N5): the device writes its
+encrypted response to the tag *first*, and only reboots once the phone reads it (`hio.stck:ack`)
+or a ~10 s quiet-field timeout fires — never immediately off the tap.
+**Observable:** `device_reset` — encrypted `ack` written back, RTT shows the deferred action
+staged, reboot only after the ack/timeout, then config/alarm defaults restored but identity +
+LoRaWAN provisioning intact (same postconditions as G6, driven over NFC instead of shell/LRW).
+`factory_reset` — same ack-before-reboot gate, but LoRaWAN keys/session also reset and the device
+re-joins after reboot (same postconditions as G6a's `factory_reset`, driven over NFC); presenting
+it as a LoRaWAN downlink is rejected with `Error{NOT_READY}` (transport not allowed), never
+silently accepted. `set_secret_key` — encrypted `ack` written back with **no** reboot, and the
+*next* `hio.stck:cmd` frame must be encrypted with the **new** key (the old key no longer
+decrypts).
+
+**Prompt for Claude:**
+> Build an AES-CCM `hio.stck:cmd` frame carrying `device_reset` (mirror the golden-vector
+> construction in `tests/nfc_crypto` / `reference_nfc_rst_hil_test_299`, encrypted with the
+> current `secret-key`) and inject it via sequential `nfc write` calls (long hex truncates
+> silently past ~128 chars — split into ~40-byte chunks). Confirm the encrypted `ack` is on the
+> tag **before** any reboot happens; only after reading it back (or waiting out the ~10 s
+> quiet-field timeout) does RTT show the reboot. After reboot confirm config/alarm defaults are
+> restored but `config lrw-deveui`/`config serial-number` are unchanged. Repeat for
+> `factory_reset`: confirm the same ack-then-reboot ordering, and that LoRaWAN keys reset and the
+> device re-joins after reboot. Then present `factory_reset` as a fPort-85 LoRaWAN downlink instead
+> and confirm it is rejected with `Error{NOT_READY}` rather than silently executed. Finally send
+> `set_secret_key` with a new 16-byte key over `hio.stck:cmd`: confirm the `ack` is written with
+> **no** reboot, and that a follow-up frame encrypted with the *old* key is now rejected while one
+> encrypted with the *new* key succeeds. Report all results.
 
 - [ ] Pass
 
