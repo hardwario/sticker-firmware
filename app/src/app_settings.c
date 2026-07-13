@@ -205,12 +205,15 @@ int app_settings_reset(void)
 	int ret;
 
 	/* Config: defaults for everything except the preserved identity + LoRaWAN
-	 * fields (see app_config_factory_reset). This is the only reset reachable
+	 * fields (see app_config_device_reset). This is the only reset reachable
 	 * over LoRaWAN/NFC, so a remote command can never un-provision the device;
-	 * a full wipe (incl. identity) stays shell-only via `settings erase`. */
-	ret = app_config_factory_reset();
+	 * a full wipe (incl. identity) stays shell-only via `settings erase`.
+	 * NOTE (#299): app_config_factory_reset()/vendor_reset() now exist as the
+	 * narrower ladder tiers but are not wired up yet — that is Phase 2
+	 * (app_settings_factory_reset/vendor_reset + the new proto commands). */
+	ret = app_config_device_reset();
 	if (ret) {
-		LOG_ERR("Call `app_config_factory_reset` failed: %d", ret);
+		LOG_ERR("Call `app_config_device_reset` failed: %d", ret);
 		return ret;
 	}
 

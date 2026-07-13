@@ -172,10 +172,11 @@ def test_build_proto_model_structure():
     assert model["message"] == "AppConfigMessage"
     root = {f["name"]: f["id"] for f in model["root_fields"]}
     # #250 Part B: the off-wire root fields (factory/secret_key/serial_number/
-    # nonce_counter/claim_token) are dropped from the proto and their ids reserved;
-    # only the 4 submessage containers remain in the root message.
+    # nonce_counter/claim_token/vendor_token, #299) are dropped from the proto
+    # and their ids reserved; only the 4 submessage containers remain in the
+    # root message.
     assert "factory" not in root and "secret_key" not in root
-    assert model["root_reserved"] == [1, 2, 3, 4, 9]
+    assert model["root_reserved"] == [1, 2, 3, 4, 9, 10]
     assert root["lorawan"] == 5 and root["application"] == 6
     subs = {s["name"]: s for s in model["submessages"]}
     assert subs["Lorawan"]["fields"][0]["name"] == "region"
@@ -184,7 +185,8 @@ def test_build_proto_model_structure():
     ids = {f["name"]: f["id"] for f in app["fields"]}
     assert ids["history_enable"] == 4 and ids["history_sensors"] == 5
     assert ids["battery_level"] == 6  # low-battery alarm threshold (#210)
-    assert sorted(ids.values()) == [1, 2, 3, 4, 5, 6]  # contiguous
+    assert ids["allow_vendor_reset"] == 7  # NFC vendor_reset gate (#299)
+    assert sorted(ids.values()) == [1, 2, 3, 4, 5, 6, 7]  # contiguous
 
 
 # --- allocator + guard ----------------------------------------------------
@@ -282,13 +284,14 @@ def test_generated_c_matches_committed(workdir):
 
 
 def test_migration_preserves_factory_fields(workdir):
-    """Issue #87/#108: h_commit must restore every preserve_on_reset parameter
-    after the defaults reset, and must not restore anything else."""
+    """Issue #87/#108: h_commit must restore every field persisting across
+    `device_reset` (the broadest tier, #299) after the defaults reset, and
+    must not restore anything else."""
     _run_configen(workdir)
     generated = (workdir / "app_config.c").read_text()
     cfg = _load_config()
 
-    preserved = [p for p in cfg["parameters"] if p.get("preserve_on_reset")]
+    preserved = [p for p in cfg["parameters"] if "device_reset" in (p.get("persistent") or [])]
     # The whole point of #87: identity/credentials are flagged in the YAML.
     assert {p["name"] for p in preserved} >= {
         "secret_key", "serial_number", "nonce_counter",
@@ -297,7 +300,7 @@ def test_migration_preserves_factory_fields(workdir):
     }
 
     for p in cfg["parameters"]:
-        if p.get("preserve_on_reset"):
+        if "device_reset" in (p.get("persistent") or []):
             if p["type"] in ("bytes", "string"):
                 marker = f"memcpy(m_app_config.{p['name']}, stored.{p['name']}"
             else:
@@ -305,11 +308,55 @@ def test_migration_preserves_factory_fields(workdir):
             assert marker in generated, f"{p['name']} not restored on migration"
         else:
             assert f"stored.{p['name']}" not in generated, \
-                f"{p['name']} restored but not flagged preserve_on_reset"
+                f"{p['name']} restored but not flagged persistent: [device_reset, ...]"
 
     # The migration must be persisted exactly once, from init, not from h_commit.
     assert "settings_save_subtree(SETTINGS_PFX)" in generated
     assert generated.count("m_app_config_migrated = true") == 1
+
+
+def test_reset_ops_preserve_only_their_tier(workdir):
+    """#299: each generated `app_config_<op>()` must copy back exactly the
+    fields tagged with that op in `persistent: [...]`, and nothing else —
+    the single-source-of-truth point of the persistent-tier mechanism."""
+    _run_configen(workdir)
+    generated = (workdir / "app_config.c").read_text()
+    cfg = _load_config()
+
+    for op in configen.RESET_OPS:
+        start = generated.index(f"int app_config_{op}(void)")
+        end = generated.index("\n}\n", start)
+        body = generated[start:end]
+
+        for p in cfg["parameters"]:
+            marker = (f"memcpy(m_app_config.{p['name']}, preserved.{p['name']}"
+                      if p["type"] in ("bytes", "string")
+                      else f"m_app_config.{p['name']} = preserved.{p['name']};")
+            if op in (p.get("persistent") or []):
+                assert marker in body, f"{op}: {p['name']} not preserved"
+            else:
+                assert marker not in body, f"{op}: {p['name']} preserved but not tagged for it"
+
+
+def test_persistent_rejects_invalid_op_and_stray_preserve_on_reset(tmp_path):
+    """configen must reject the removed `preserve_on_reset` key and any
+    `persistent` entry outside configen.RESET_OPS, so a typo in the YAML
+    fails loudly instead of silently dropping a field from every tier."""
+    cfg = _load_config()
+
+    with pytest.raises(SystemExit):
+        configen.Configen()._validate_param({"name": "x", "type": "bool", "preserve_on_reset": True})
+
+    with pytest.raises(SystemExit):
+        configen.Configen()._validate_param({"name": "x", "type": "bool", "persistent": ["not_a_real_op"]})
+
+    with pytest.raises(SystemExit):
+        configen.Configen()._validate_param(
+            {"name": "x", "type": "bool", "persistent": ["device_reset", "device_reset"]})
+
+    # Sanity: every real param in the committed YAML still validates clean.
+    for p in cfg["parameters"]:
+        configen.Configen()._validate_param(p)
 
 
 def test_h_commit_clamps_loaded_values(workdir):

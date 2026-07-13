@@ -5,7 +5,7 @@ module:
   settings_prefix: config
   shell_command: config
   log_module: app_config
-  version: 3
+  version: 4
 
 enums:
   lrw_region:
@@ -105,37 +105,37 @@ commands:
   response: Response
   reserved: []
   list:
-    - {name: set_param,      proto_id: 2,  body: SetParam,      kind: handler, response: ack}
-    - {name: get_param,      proto_id: 3,  body: GetParam,      kind: handler, response: config_dump}
-    - {name: get_info,       proto_id: 4,  body: GetInfo,       kind: handler, response: info}
-    - {name: get_config,     proto_id: 5,  body: GetConfig,     kind: handler, response: config_dump}
-    - {name: settings_save,  proto_id: 6,  body: SettingsSave,  kind: action,  action: SETTINGS_SAVE, response: ack}
-    - {name: reboot,         proto_id: 7,  body: Reboot,        kind: action,  action: REBOOT, response: ack}
-    - {name: factory_reset,  proto_id: 8,  body: FactoryReset,  kind: action,  action: FACTORY_RESET, response: ack}
-    - {name: force_send,     proto_id: 9,  body: ForceSend,     kind: handler, response: none, transports: [lrw]}
+    - {name: set_param, proto_id: 2, body: SetParam, kind: handler, response: ack}
+    - {name: get_param, proto_id: 3, body: GetParam, kind: handler, response: config_dump}
+    - {name: get_info, proto_id: 4, body: GetInfo, kind: handler, response: info}
+    - {name: get_config, proto_id: 5, body: GetConfig, kind: handler, response: config_dump}
+    - {name: settings_save, proto_id: 6, body: SettingsSave, kind: action, action: SETTINGS_SAVE, response: ack}
+    - {name: reboot, proto_id: 7, body: Reboot, kind: action, action: REBOOT, response: ack}
+    - {name: factory_reset, proto_id: 8, body: FactoryReset, kind: action, action: FACTORY_RESET, response: ack}
+    - {name: force_send, proto_id: 9, body: ForceSend, kind: handler, response: none, transports: [lrw]}
     - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
-    - {name: req_history,    proto_id: 11, body: ReqHistory,    kind: handler, response: none, transports: [lrw]}
+    - {name: req_history, proto_id: 11, body: ReqHistory, kind: handler, response: none, transports: [lrw]}
     - {name: req_history_page, proto_id: 13, body: ReqHistoryPage, kind: handler, response: none, transports: [nfc]}
-    - {name: clock_sync,     proto_id: 12, body: ClockSync,     kind: handler, response: info_deferred, transports: [lrw, nfc]}
-    - {name: w1_scan,        proto_id: 14, body: W1Scan,        kind: handler, response: w1_scan}
+    - {name: clock_sync, proto_id: 12, body: ClockSync, kind: handler, response: info_deferred, transports: [lrw, nfc]}
+    - {name: w1_scan, proto_id: 14, body: W1Scan, kind: handler, response: w1_scan}
     # F-1: handler (not plain action) so the dispatch calls app_cmd_handle_lrw_{reset,join},
     # which reject the (re)join while unsaved LoRaWAN staging changes exist.
-    - {name: lrw_reset,      proto_id: 16, body: LrwReset,      kind: handler, response: ack}
-    - {name: lrw_join,       proto_id: 17, body: LrwJoin,       kind: handler, response: ack}
+    - {name: lrw_reset, proto_id: 16, body: LrwReset, kind: handler, response: ack}
+    - {name: lrw_join, proto_id: 17, body: LrwJoin, kind: handler, response: ack}
     - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: action, action: ENTER_CALIBRATION, response: ack, transports: [lrw, nfc]}
-    - {name: sample,         proto_id: 21, body: Sample,        kind: handler, response: sample, transports: [lrw, nfc]}
+    - {name: sample, proto_id: 21, body: Sample, kind: handler, response: sample, transports: [lrw, nfc]}
 parameters:
-  # Root identity fields (secret_key / serial_number / nonce_counter / claim_token)
-  # are OFF the config wire (`proto_field: false`, #250 Part B): configen keeps them in the C
-  # struct + settings and reserves their proto ids, but they are NOT fields in
-  # AppConfigMessage — so they can never be read or written via SetParam / GetParam /
-  # GetConfig. Their `readable`/`writable` lists therefore only govern the `config`
-  # shell command, hence both `[shell]`. Their real air exposure is a SEPARATE,
+  # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /
+  # vendor_token) are OFF the config wire (`proto_field: false`, #250 Part B): configen
+  # keeps them in the C struct + settings and reserves their proto ids, but they are
+  # NOT fields in AppConfigMessage — so they can never be read or written via SetParam /
+  # GetParam / GetConfig. Their `readable`/`writable` lists therefore only govern the
+  # `config` shell command, hence both `[shell]`. Their real air exposure is a SEPARATE,
   # hand-written channel that does NOT consult these lists: serial + nonce high-water
   # are published in the plaintext `hio.stck:inf` record, and serial + claim_token in
   # the GetInfo `Info` message (over nfc + lrw). Writes come from the shell (`config
-  # <name>`), firmware provisioning, or a full NVS erase — `preserve_on_reset` keeps
-  # them across a factory_reset.
+  # <name>`), firmware provisioning, or a full NVS erase — `persistent: [...]` (#299)
+  # keeps each across the matching reset tier (device_reset/factory_reset/vendor_reset).
   - name: secret_key
     proto_group: root
     proto_id: 2
@@ -144,7 +144,7 @@ parameters:
     writable: [shell]
     type: bytes
     size: 16
-    preserve_on_reset: true
+    persistent: [device_reset, factory_reset]
     help: "Get/Set device secret key (32 hexadecimal digits)."
 
   - name: serial_number
@@ -155,7 +155,7 @@ parameters:
     writable: [shell]
     type: uint32
     format: "%010u"
-    preserve_on_reset: true
+    persistent: [device_reset, factory_reset, vendor_reset]
     help: "Get/Set device serial number (10 decimal digits)."
     extras:
       digits: 10
@@ -167,7 +167,7 @@ parameters:
     readable: [shell]
     writable: [shell]
     type: uint32
-    preserve_on_reset: true
+    persistent: [device_reset, factory_reset]
     help: "Get/Set nonce counter (unsigned integer)."
 
   - name: claim_token
@@ -179,8 +179,25 @@ parameters:
     type: bytes
     size: 16
     write_once: true   # written once at commissioning via `config claim-token`, then immutable
-    preserve_on_reset: true
+    persistent: [device_reset, factory_reset]
     help: "Get/Set device claim token (32 hexadecimal digits); write-once at commissioning."
+
+  # #299 vendor-token security model: per-device, factory-unique, 128-bit,
+  # immutable (write-once, never re-writable even after a reset). Authenticates
+  # `vendor_reset` (NFC hio.stck:rst + shell) so HARDWARIO can recover a device
+  # without knowing a possibly user-changed secret_key. Survives every tier —
+  # it is the one thing every reset (short of `settings erase`) always keeps.
+  - name: vendor_token
+    proto_group: root
+    proto_id: 10
+    proto_field: false
+    readable: [shell]
+    writable: [shell]
+    type: bytes
+    size: 16
+    write_once: true
+    persistent: [device_reset, factory_reset, vendor_reset]
+    help: "Get/Set vendor token (32 hexadecimal digits); write-once at commissioning."
 
   - name: calibration
     proto_group: application
@@ -230,6 +247,16 @@ parameters:
     max: 3600
     help: "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this."
 
+  # #299: gates the NFC vendor_reset (hio.stck:rst) channel. false = vendor
+  # recovery over NFC is refused; only a J-Link full-erase can then recover
+  # a device whose secret_key was changed and forgotten.
+  - name: allow_vendor_reset
+    proto_group: application
+    proto_id: 7
+    type: bool
+    default: true
+    help: "Get/Set whether the NFC vendor_reset channel is accepted (true/false)."
+
   - name: alarm_limit
     proto_group: alarms
     proto_id: 1
@@ -254,7 +281,7 @@ parameters:
     proto_id: 1
     type: enum
     enum: lrw_region
-    preserve_on_reset: true
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN region (eu868/us915/au915)."
 
   - name: lrw_mode
@@ -264,7 +291,7 @@ parameters:
     type: enum
     enum: lrw_mode
     default: LORAWAN
-    preserve_on_reset: true
+    persistent: [device_reset]
     help: "Get/Set radio mode (off/lorawan/p2p). off = radio-silent, sensor/history still run."
 
   - name: lrw_sub_band
@@ -275,7 +302,7 @@ parameters:
     default: 2
     min: 0
     max: 8
-    preserve_on_reset: true
+    persistent: [device_reset]
     help: "Get/Set US915/AU915 sub-band (1-8, 0 = all channels). Default 2 matches TTN/Helium/ChirpStack."
 
   - name: lrw_network
@@ -284,7 +311,7 @@ parameters:
     proto_id: 3
     type: enum
     enum: lrw_network
-    preserve_on_reset: true
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN network (public/private)."
 
   - name: lrw_adr
@@ -292,7 +319,7 @@ parameters:
     writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 4
     type: bool
-    preserve_on_reset: true
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN ADR (true/false)."
 
   - name: lrw_activation
@@ -301,7 +328,7 @@ parameters:
     proto_id: 5
     type: enum
     enum: lrw_activation
-    preserve_on_reset: true
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN activation (otaa/abp)."
 
   - name: lrw_deveui
@@ -310,7 +337,7 @@ parameters:
     proto_id: 6
     type: bytes
     size: 8
-    preserve_on_reset: true
+    persistent: [device_reset, factory_reset]
     help: "Get/Set LoRaWAN DevEUI (16 hex digits)."
 
   - name: lrw_joineui
@@ -319,7 +346,7 @@ parameters:
     proto_id: 7
     type: bytes
     size: 8
-    preserve_on_reset: true
+    persistent: [device_reset, factory_reset]
     help: "Get/Set LoRaWAN JoinEUI (16 hex digits)."
 
   - name: lrw_nwkkey
@@ -329,7 +356,7 @@ parameters:
     readable: [shell, nfc]
     type: bytes
     size: 16
-    preserve_on_reset: true
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN NwkKey (32 hex digits)."
 
   - name: lrw_appkey
@@ -339,7 +366,7 @@ parameters:
     readable: [shell, nfc]
     type: bytes
     size: 16
-    preserve_on_reset: true
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN AppKey (32 hex digits)."
 
   - name: lrw_devaddr
@@ -348,7 +375,7 @@ parameters:
     proto_id: 10
     type: bytes
     size: 4
-    preserve_on_reset: true
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN DevAddr (8 hex digits)."
 
   - name: lrw_nwkskey
@@ -358,7 +385,7 @@ parameters:
     readable: [shell, nfc]
     type: bytes
     size: 16
-    preserve_on_reset: true
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN NwkSKey (32 hexadecimal digits)."
 
   - name: lrw_appskey
@@ -368,7 +395,7 @@ parameters:
     readable: [shell, nfc]
     type: bytes
     size: 16
-    preserve_on_reset: true
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN AppSKey (32 hexadecimal digits)."
 
   - name: lrw_link_check_interval

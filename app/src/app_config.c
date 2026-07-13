@@ -38,6 +38,7 @@ static const struct app_config m_app_config_defaults = {
 	.history_enable = false,
 	.history_sensors = 3,
 	.battery_level = 2400,
+	.allow_vendor_reset = true,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.lrw_mode = APP_CONFIG_LRW_MODE_LORAWAN,
@@ -68,6 +69,7 @@ static struct app_config m_app_config = {
 	.history_enable = false,
 	.history_sensors = 3,
 	.battery_level = 2400,
+	.allow_vendor_reset = true,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.lrw_mode = APP_CONFIG_LRW_MODE_LORAWAN,
@@ -108,6 +110,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("nonce-counter", &m_app_config.nonce_counter,
 		     sizeof(m_app_config.nonce_counter));
 	SETTINGS_SET("claim-token", m_app_config.claim_token, sizeof(m_app_config.claim_token));
+	SETTINGS_SET("vendor-token", m_app_config.vendor_token, sizeof(m_app_config.vendor_token));
 	SETTINGS_SET("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
 	SETTINGS_SET("interval-sample", &m_app_config.interval_sample,
 		     sizeof(m_app_config.interval_sample));
@@ -119,6 +122,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.history_sensors));
 	SETTINGS_SET("battery-level", &m_app_config.battery_level,
 		     sizeof(m_app_config.battery_level));
+	SETTINGS_SET("allow-vendor-reset", &m_app_config.allow_vendor_reset,
+		     sizeof(m_app_config.allow_vendor_reset));
 	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	SETTINGS_SET("alarm-notif-time", &m_app_config.alarm_notif_time,
 		     sizeof(m_app_config.alarm_notif_time));
@@ -205,8 +210,9 @@ static int h_commit(void)
 			m_app_config.config_version, APP_CONFIG_VERSION);
 
 		/* Reset application parameters to defaults, but carry over factory
-		 * identity and network credentials (preserve_on_reset in the
-		 * YAML) so a schema bump never un-provisions a field device. */
+		 * identity and network credentials (the `device_reset` persistent
+		 * tier in the YAML, #299) so a schema bump never un-provisions a
+		 * field device. */
 		struct app_config stored = m_app_config;
 
 		m_app_config = m_app_config_defaults;
@@ -215,6 +221,8 @@ static int h_commit(void)
 		m_app_config.nonce_counter = stored.nonce_counter;
 		memcpy(m_app_config.claim_token, stored.claim_token,
 		       sizeof(m_app_config.claim_token));
+		memcpy(m_app_config.vendor_token, stored.vendor_token,
+		       sizeof(m_app_config.vendor_token));
 		m_app_config.lrw_region = stored.lrw_region;
 		m_app_config.lrw_mode = stored.lrw_mode;
 		m_app_config.lrw_sub_band = stored.lrw_sub_band;
@@ -321,6 +329,7 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("nonce-counter", &m_app_config.nonce_counter,
 		    sizeof(m_app_config.nonce_counter));
 	EXPORT_FUNC("claim-token", m_app_config.claim_token, sizeof(m_app_config.claim_token));
+	EXPORT_FUNC("vendor-token", m_app_config.vendor_token, sizeof(m_app_config.vendor_token));
 	EXPORT_FUNC("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
 	EXPORT_FUNC("interval-sample", &m_app_config.interval_sample,
 		    sizeof(m_app_config.interval_sample));
@@ -332,6 +341,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.history_sensors));
 	EXPORT_FUNC("battery-level", &m_app_config.battery_level,
 		    sizeof(m_app_config.battery_level));
+	EXPORT_FUNC("allow-vendor-reset", &m_app_config.allow_vendor_reset,
+		    sizeof(m_app_config.allow_vendor_reset));
 	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	EXPORT_FUNC("alarm-notif-time", &m_app_config.alarm_notif_time,
 		    sizeof(m_app_config.alarm_notif_time));
@@ -574,6 +585,12 @@ static void print_claim_token(const struct shell *shell)
 		    sizeof(m_app_config.claim_token));
 }
 
+static void print_vendor_token(const struct shell *shell)
+{
+	print_bytes(shell, "vendor-token", m_app_config.vendor_token,
+		    sizeof(m_app_config.vendor_token));
+}
+
 static void print_calibration(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " calibration %s",
@@ -604,6 +621,12 @@ static void print_history_sensors(const struct shell *shell)
 static void print_battery_level(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " battery-level %d", m_app_config.battery_level);
+}
+
+static void print_allow_vendor_reset(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " allow-vendor-reset %s",
+		    m_app_config.allow_vendor_reset ? "true" : "false");
 }
 
 static void print_alarm_limit(const struct shell *shell)
@@ -882,12 +905,14 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_serial_number(shell);
 	print_nonce_counter(shell);
 	print_claim_token(shell);
+	print_vendor_token(shell);
 	print_calibration(shell);
 	print_interval_sample(shell);
 	print_interval_report(shell);
 	print_history_enable(shell);
 	print_history_sensors(shell);
 	print_battery_level(shell);
+	print_allow_vendor_reset(shell);
 	print_alarm_limit(shell);
 	print_alarm_notif_time(shell);
 	print_lrw_region(shell);
@@ -1018,6 +1043,12 @@ static int cmd_claim_token(const struct shell *shell, size_t argc, char **argv)
 			 sizeof(m_app_config.claim_token), true, print_claim_token);
 }
 
+static int cmd_vendor_token(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bytes(shell, argc, argv, m_app_config.vendor_token,
+			 sizeof(m_app_config.vendor_token), true, print_vendor_token);
+}
+
 static int cmd_calibration(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.calibration, print_calibration);
@@ -1108,6 +1139,12 @@ static int cmd_battery_level(const struct shell *shell, size_t argc, char **argv
 {
 	return cmd_int(shell, argc, argv, &m_app_config.battery_level, 1000, 3600,
 		       print_battery_level);
+}
+
+static int cmd_allow_vendor_reset(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.allow_vendor_reset,
+			print_allow_vendor_reset);
 }
 
 static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
@@ -1478,6 +1515,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set device claim token (32 hexadecimal digits); write-once at commissioning.",
 	              cmd_claim_token, 1, 1),
 
+	SHELL_CMD_ARG(vendor-token, NULL,
+	              "Get/Set vendor token (32 hexadecimal digits); write-once at commissioning.",
+	              cmd_vendor_token, 1, 1),
+
 	SHELL_CMD_ARG(calibration, NULL,
 	              "Get/Set calibration mode (true/false).",
 	              cmd_calibration, 1, 1),
@@ -1501,6 +1542,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(battery-level, NULL,
 	              "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this.",
 	              cmd_battery_level, 1, 1),
+
+	SHELL_CMD_ARG(allow-vendor-reset, NULL,
+	              "Get/Set whether the NFC vendor_reset channel is accepted (true/false).",
+	              cmd_allow_vendor_reset, 1, 1),
 
 	SHELL_CMD_ARG(alarm-limit, NULL,
 	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
@@ -1656,15 +1701,16 @@ struct app_config *app_config(void)
 	return &m_app_config;
 }
 
-int app_config_factory_reset(void)
+/* Reset every parameter to its compiled-in default EXCEPT the fields tagged
+ * `persistent: [device_reset, ...]` in the YAML (factory identity + full
+ * LoRaWAN), then persist. Backs the `device_reset` command (renamed from
+ * today's `factory_reset`, #299) so the device keeps its LoRaWAN session; the
+ * shell `settings erase` still does a full NVS wipe. Returns 0 or a negative
+ * errno. The caller reboots so every module re-reads the restored config. */
+int app_config_device_reset(void)
 {
 	int ret;
 
-	/* Reset every parameter to its compiled-in default, but carry over the
-	 * factory identity and network credentials (preserve_on_reset in the
-	 * YAML) so the reset never un-provisions the device or drops it off the
-	 * LoRaWAN network. A full wipe (incl. identity) stays shell-only via
-	 * `settings erase`. Mirrors the migration restore in h_commit. */
 	struct app_config preserved = m_app_config;
 
 	m_app_config = m_app_config_defaults;
@@ -1672,6 +1718,8 @@ int app_config_factory_reset(void)
 	m_app_config.serial_number = preserved.serial_number;
 	m_app_config.nonce_counter = preserved.nonce_counter;
 	memcpy(m_app_config.claim_token, preserved.claim_token, sizeof(m_app_config.claim_token));
+	memcpy(m_app_config.vendor_token, preserved.vendor_token,
+	       sizeof(m_app_config.vendor_token));
 	m_app_config.lrw_region = preserved.lrw_region;
 	m_app_config.lrw_mode = preserved.lrw_mode;
 	m_app_config.lrw_sub_band = preserved.lrw_sub_band;
@@ -1694,7 +1742,66 @@ int app_config_factory_reset(void)
 		return ret;
 	}
 
-	LOG_INF("Factory reset: config restored to defaults (identity + LoRaWAN kept)");
+	LOG_INF("device_reset: config restored to defaults");
+	return 0;
+}
+
+/* Narrower than device_reset (#299): also drops the LoRaWAN session/keys,
+ * keeping only identity (serial_number/vendor_token/secret_key/DevEUI/
+ * JoinEUI/claim_token) — the device must re-join after this. Returns 0 or a
+ * negative errno; the caller reboots. */
+int app_config_factory_reset(void)
+{
+	int ret;
+
+	struct app_config preserved = m_app_config;
+
+	m_app_config = m_app_config_defaults;
+	memcpy(m_app_config.secret_key, preserved.secret_key, sizeof(m_app_config.secret_key));
+	m_app_config.serial_number = preserved.serial_number;
+	m_app_config.nonce_counter = preserved.nonce_counter;
+	memcpy(m_app_config.claim_token, preserved.claim_token, sizeof(m_app_config.claim_token));
+	memcpy(m_app_config.vendor_token, preserved.vendor_token,
+	       sizeof(m_app_config.vendor_token));
+	memcpy(m_app_config.lrw_deveui, preserved.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	memcpy(m_app_config.lrw_joineui, preserved.lrw_joineui, sizeof(m_app_config.lrw_joineui));
+
+	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
+
+	ret = settings_save_subtree(SETTINGS_PFX);
+	if (ret) {
+		LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		return ret;
+	}
+
+	LOG_INF("factory_reset: config restored to defaults");
+	return 0;
+}
+
+/* Narrowest tier (#299): keeps only serial_number + vendor_token. The caller
+ * (app_settings_vendor_reset) erases the storage+history flash areas first,
+ * then calls this to re-provision the snapshot before saving + rebooting.
+ * Returns 0 or a negative errno. */
+int app_config_vendor_reset(void)
+{
+	int ret;
+
+	struct app_config preserved = m_app_config;
+
+	m_app_config = m_app_config_defaults;
+	m_app_config.serial_number = preserved.serial_number;
+	memcpy(m_app_config.vendor_token, preserved.vendor_token,
+	       sizeof(m_app_config.vendor_token));
+
+	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
+
+	ret = settings_save_subtree(SETTINGS_PFX);
+	if (ret) {
+		LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		return ret;
+	}
+
+	LOG_INF("vendor_reset: config restored to defaults");
 	return 0;
 }
 

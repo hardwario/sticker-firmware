@@ -2,7 +2,7 @@ syntax = "proto3";
 
 // BEGIN GENERATED CONFIG
 message AppConfigMessage {
-    reserved 1, 2, 3, 4, 9;
+    reserved 1, 2, 3, 4, 9, 10;
     optional Lorawan lorawan = 5;
     optional Application application = 6;
     optional Sensors sensors = 7;
@@ -55,6 +55,7 @@ message AppConfigMessage {
         optional bool history_enable = 4;
         optional uint32 history_sensors = 5;
         optional uint32 battery_level = 6;
+        optional bool allow_vendor_reset = 7;
     }
 
     message Sensors {
