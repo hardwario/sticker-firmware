@@ -544,6 +544,24 @@ The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel �
 
 **Encryption (`CONFIG_APP_NFC_ENCRYPTION`, default on).** The **command** (`hio.stck:cmd`) record — and the **response** (`hio.stck:rsp`) written back — are **AES-CCM** encrypted (AES-128, 16-byte tag) with the device `secret_key`. The 8-byte wire header is `serial (4) + nonce_counter (4)`; the serial must match and the nonce must be strictly greater than the last accepted one (anti-replay) **and no more than 1024 ahead** of it (`NFC_NONCE_MAX_SKIP` — the accepted window is `(current, current + 1024]`), after which the counter is **persisted to NVS before the command runs**, so a captured command cannot be replayed after a power-cycle — including `lrw_reset`, which reboots immediately (#184). The upper bound stops a buggy/malicious provisioning tool from storing a counter near `UINT32_MAX`, which — because `nonce_counter` is `persistent: [device_reset, factory_reset]` (#299) — would make every future (necessarily larger) counter impossible and **permanently brick** the encrypted channel; the phone always sends `current + 1` (read from the info-record high-water), so the window never constrains normal use (N-2, #266). The **CCM nonce is `serial ‖ nonce_counter ‖ direction`**: a 9-byte value whose trailing direction byte (`0x00` request, `0x01` response — not transmitted; each side derives it from its role) keeps the request and its reply on **separate keystreams** even though both carry the same counter, and the 8-byte header is additionally passed as **AAD** so it is authenticated by the tag (#179). The phone reconstructs the same nonce/AAD from the header it sent. A same-counter **retransmission** (e.g. the phone never read the reply over a lossy RF link) is answered from a one-entry **response cache** *without re-running the command*, so a retry is idempotent — no double execution of a `set_param`/action (#194); after a reboot the cache is empty, so a stale retry is rejected and the phone resyncs from the info-record counter. Without the key a phone can therefore only read the plaintext **info** record (`hio.stck:inf`) — it can neither run a command nor write config. An **all-zero `secret_key` (a device not yet provisioned) counts as no key**: the encrypted channel is refused with `-EACCES` (no command runs, no encrypted response is emitted) until a non-zero key is set, so a pre-commissioning device cannot be driven with commands forged under the public all-zero key (mirrors the bootloader's unkeyed handling).
 
+**Vendor-token reset channel (`hio.stck:rst`, #299).** `vendor_reset` — the narrowest reset tier
+(§14) — is authenticated by `vendor_token`, not `secret_key`, so it stays reachable even after the
+owner has changed (or lost) the secret key. It is a **separate** record from `hio.stck:cmd`, not a
+`Command` on the generic channel: same AES-CCM wire framing (`decrypt()`/`encrypt()` parameterized
+by key instead of hardcoding `secret_key`) and the same shared `nonce_counter` window/persist (no
+separate vendor-token nonce), but its own tiny fixed-format plaintext payload instead of a protobuf
+`Command` — a format marker followed by the **replacement `secret_key`**, which the caller must
+supply in the same request (`vendor_reset` drops `secret_key` to all-zero, and an all-zero key would
+otherwise lock the device out of its own `hio.stck:cmd` channel). The reply reuses the normal
+`hio.stck:rsp` record type (this time encrypted with `vendor_token`), carrying an `Ack` on success or
+an `Error` — `BAD_REQUEST` for a malformed payload, `NOT_READY` when `vendor_reset_allow` is false.
+Like every other reset, the actual erase/reset only runs **after** the phone has read the reply
+(ack-before-reboot, same deferred-action mechanism as `device_reset`/`factory_reset`) — never
+immediately from the NDEF parser callback. An all-zero `vendor_token` (unprovisioned) is refused the
+same way an all-zero `secret_key` is on the command channel. Gated behind
+`CONFIG_APP_NFC_ENCRYPTION` like the command channel — there is no plaintext fallback for something
+this destructive.
+
 > **Crypto implementation (dev note).** The AES-CCM is computed by **`app_ccm`**, a small in-tree RFC 3610 implementation (`app/src/app_ccm.{c,h}`), which replaced mbedTLS entirely as of **#261** (mbedTLS was the last ~6.5 KB of flash pinned to the release image purely for the NFC channel, and dropping it — on top of LTO — recovers headroom the `0x28000` budget once had none of). The CCM layer is block-cipher agnostic; its single AES-128 forward-block primitive is by default the **STM32WL on-die AES peripheral** driven at the register level (`CONFIG_APP_CCM_HW_AES`, no HAL / no Zephyr crypto API) — CCM needs only the forward cipher for both encrypt and decrypt. A build-time fallback (`CONFIG_APP_CCM_HW_AES=n`) instead uses the LoRaMac soft-SE AES already in flash; the host unit tests (`tests/ccm`) exercise that software path. CCM output is fully specified by RFC 3610, so it is **byte-identical** to the mbedTLS it replaced regardless of the primitive — the on-tag wire format, the phone-side contract and the `nfc_crypto` golden-vector tests are unchanged, and `tests/ccm` additionally cross-checks `app_ccm` against a PSA (RFC 3610) oracle across a nonce/AAD/plaintext/tag-length matrix. History: mbedtls `mbedtls_ccm` directly (#179) → dropped the dead PSA dispatch layer (#220) → dropped mbedTLS for `app_ccm` (#261, see §11).
 
 > **Validation builds.** `CONFIG_APP_NFC_ENCRYPTION=n` turns the channel to **plaintext** — command records are accepted with no key, serial check or nonce, and the response is written back in the clear. This is **bench-only**: such a build logs a loud boot banner (`NFC ENCRYPTION DISABLED - VALIDATION BUILD ONLY`) and must never be shipped. Build it with `west build … -- -DCONFIG_APP_NFC_ENCRYPTION=n`.
@@ -555,6 +573,7 @@ The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel �
 | Info | `hio.stck:inf` |
 | Command (phone → device) | `hio.stck:cmd` |
 | Response (device → phone) | `hio.stck:rsp` |
+| Vendor-token reset (phone → device, #299) | `hio.stck:rst` |
 | Claim (provisioning, #247) | `hio.stck:clm` |
 
 A phone's Web NFC reader sees each as `record.recordType === "hio.stck:…"`. The idle
@@ -731,10 +750,14 @@ no hand-maintained C list.
 | Tier | Keeps | Reachable via | Notes |
 |---|---|---|---|
 | `device_reboot` | everything (no wipe) | shell `settings save`, LoRaWAN/NFC `reboot` | plain reboot |
-| `device_reset` | identity + **full LoRaWAN** (region/keys/session) | shell `settings device-reset`, LoRaWAN/NFC `device_reset` | renamed from the old, single `factory_reset` command/`settings reset` — same behavior, same wire id. This is the only reset reachable remotely, so no command can un-provision a device past this tier |
+| `device_reset` | identity + **full LoRaWAN** (region/keys/session) | shell `settings device-reset`, LoRaWAN/NFC `device_reset` | renamed from the old, single `factory_reset` command/`settings reset` — same behavior, same wire id |
 | `factory_reset` | identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI); drops the LoRaWAN session/keys | shell `settings factory-reset`, LoRaWAN/NFC `factory_reset` (new, id 23) | forces a re-join |
-| `vendor_reset` | `serial-number` + `vendor-token` only | shell `settings vendor-reset <new-secret-key>` (HIL) | **not** a Command — erases the whole `storage` + `history` flash areas (not just the "config" subtree), then re-provisions the kept identity. Refused (`-EACCES`) if `vendor-reset-allow` is false, or if the caller doesn't supply a replacement `secret-key` in the same call (vendor_reset drops `secret-key` too — leaving it all-zero would lock the device out of its own encrypted NFC channel). The NFC `hio.stck:rst` vendor-token channel that reaches this remotely is a later stage |
+| `vendor_reset` | `serial-number` + `vendor-token` only | shell `settings vendor-reset <new-secret-key>`, NFC `hio.stck:rst` (vendor-token authenticated — **not** a `Command`, never over LoRaWAN) | goes through the live settings API like the two tiers above — NOT a raw flash erase of the settings-backed `storage` partition (that would desync Zephyr's NVS mid-boot, see the GOTCHA note in `app_settings.c`); only the separate, non-NVS `history` partition is raw-erased. Also wipes the pulse totalizers and the NFC claim-record state via their own live APIs. Refused (`-EACCES`) if `vendor-reset-allow` is false, or if the caller doesn't supply a replacement `secret-key` in the same call (vendor_reset drops `secret-key` too — leaving it all-zero would lock the device out of its own encrypted NFC channel) |
 | `settings erase` (shell) | nothing, incl. serial | shell only | full NVS wipe; the deliberate "return to blank" escape hatch, never wired to LoRaWAN/NFC |
+
+`device_reset` and `factory_reset` are both reachable over LoRaWAN/NFC/shell like any other Command;
+`vendor_reset` is the one tier that never goes over the generic command channel at all — only its own
+NFC `hio.stck:rst` vendor-token channel, or the shell, ever reach it.
 
 Also new in #299: `set_secret_key` (nfc/shell only, never a LoRaWAN downlink) rotates `secret-key`
 over the already-encrypted channel — authenticated by the *current* key, so a lost/rotated key never

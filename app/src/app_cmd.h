@@ -57,11 +57,13 @@ enum app_cmd_action {
 	APP_CMD_ACTION_REBOOT,        /* reboot (discards staged edits) */
 	/* Reset ladder (#299) — device_reset (renamed from the old, single
 	 * factory_reset) keeps identity+full LoRaWAN; factory_reset (new, narrower)
-	 * keeps identity only, drops the LoRaWAN session/keys. vendor_reset has no
-	 * action here: it is never reachable via the generic Command channel (NFC
-	 * hio.stck:rst / shell settings vendor-reset only). */
+	 * keeps identity only, drops the LoRaWAN session/keys. vendor_reset is never
+	 * reachable via the generic Command channel — only NFC hio.stck:rst (its own
+	 * vendor-token-authenticated record, app_nfc.c) or the shell `settings
+	 * vendor-reset` set it. */
 	APP_CMD_ACTION_DEVICE_RESET,      /* defaults (keep identity+LoRaWAN) + reboot */
 	APP_CMD_ACTION_FACTORY_RESET,     /* defaults (keep identity only) + reboot */
+	APP_CMD_ACTION_VENDOR_RESET,      /* defaults (keep serial+vendor_token) + reboot */
 	APP_CMD_ACTION_ENTER_CALIBRATION, /* persist calibration=true + reboot */
 	APP_CMD_ACTION_LRW_RESET,       /* reset LoRaWAN NVM (counters+DevNonce) + reboot (#109) */
 	APP_CMD_ACTION_LRW_JOIN,        /* trigger a forced (re)join, no reboot (#109) */
