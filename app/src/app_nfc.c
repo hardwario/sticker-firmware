@@ -42,6 +42,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -164,28 +165,36 @@ static const char *cmd_action_str(enum app_cmd_action a)
 #define ST25DV_GPO_WANT         (ST25DV_GPO_EN | ST25DV_GPO_RF_WRITE_EN | ST25DV_GPO_FIELD_EN)
 #define ST25DV_I2C_PWD_REG      0x0900
 
-/* NFC Forum external type (TNF=0x04, urn:nfc:ext:) records. Short type names
- * ("hio.stck:<kind>") instead of full MIME media-types save ST25DV user memory
- * (512 B total) — leaving more room for the encrypted config payload — while
- * staying typed/filterable: Web NFC exposes them as record.recordType. */
-#define NDEF_TNF_EXT 0x04
+/* NFC Forum external type (TNF=0x04, urn:nfc:ext:) records carry the functional
+ * protocol (cmd/rsp/ack/clm). Short type names ("hio.stck:<kind>") instead of full
+ * MIME media-types save ST25DV user memory (512 B total) — leaving more room for
+ * the encrypted config payload — while staying typed/filterable: Web NFC exposes
+ * them as record.recordType. The resting identity record (inf) is the one
+ * exception: it is a MIME media-type record (TNF 0x02, see below). */
+#define NDEF_TNF_EXT  0x04
+#define NDEF_TNF_MIME 0x02
 
-/* Plaintext info record the firmware keeps on the tag so a phone learns the
- * sticker identity and schema version the moment it taps, without decrypting
- * anything. Payload layout (15 bytes):
- *   [0]     format version (NDEF_INFO_FORMAT)
- *   [1..4]  serial number (big-endian uint32)
- *   [5]     fw major   [6] fw minor   [7] fw patch
- *   [8]     build type (0=main, 1=dev, 2=custom)
- *   [9]     config/schema version (APP_CONFIG_VERSION)
- *   [10]    flags: bit0 = debug build
- *   [11..14] NFC anti-replay counter high-water (big-endian uint32) — the last
- *            accepted nonce_counter, so a phone can resync its counter (= this
- *            value + 1) after a device reboot/cache-miss without an encrypted
- *            exchange. Not secret (it travels in plaintext in every header).
- */
-#define NDEF_INFO_TYPE   "hio.stck:inf"
-#define NDEF_INFO_FORMAT 0x02
+/* Resting identity record (#298, supersedes #293). Unlike the functional protocol,
+ * `inf` is a MIME media-type record (TNF 0x02, application/vnd.hardwario.sticker)
+ * so Android can tap-to-launch the Manager-App via an intent-filter on the media
+ * type, and the payload is human-readable. It is what the tag holds at rest, read
+ * by the phone before it decrypts anything.
+ *
+ * Payload is ASCII, colon-delimited: "<serial>:<config_ver>:<nonce>", e.g.
+ * "0002162165:03:0000001A":
+ *   serial      10-digit decimal (%010u).
+ *   config_ver  APP_CONFIG_VERSION, hex (%02X). Doubles as the bootstrap "comms
+ *               version": the phone reads it before decryption to know the config
+ *               schema, so bump it on ANY breaking wire change (protobuf/encryption)
+ *               even without a config-field change, or the phone won't detect it.
+ *   nonce       NFC anti-replay counter high-water, hex (%08X) — the last accepted
+ *               nonce_counter, so a phone can resync its counter (= value + 1) after
+ *               a reboot/cache-miss. Not secret (it travels in plaintext anyway).
+ *
+ * The "<serial>:<config_ver>" prefix is format-stable forever, so a phone of any
+ * generation can read those two fields and then decide how to parse the rest. FW
+ * version / build type / flags are intentionally NOT here — obtain them via GetInfo. */
+#define NDEF_INFO_TYPE "application/vnd.hardwario.sticker"
 
 /* Command/response over NDEF. The phone writes a command record (raw protobuf
  * Command, like a LoRaWAN downlink); the firmware processes it via app_cmd and
@@ -890,7 +899,8 @@ static bool nfc_wait_field_off(void)
  * Shared by the info and command-response writers. */
 /* One NFC Forum external-type record in an NDEF message. */
 struct ndef_rec {
-	const char *type;
+	uint8_t tnf;      /* NDEF_TNF_EXT (external type) or NDEF_TNF_MIME (media type) */
+	const char *type; /* external type name, or media-type string when tnf == MIME */
 	const uint8_t *payload;
 	size_t payload_len;
 };
@@ -945,9 +955,9 @@ static size_t build_ndef_message(uint8_t *out, size_t out_size, const struct nde
 	for (size_t r = 0; r < n_recs; r++) {
 		size_t type_len = strlen(recs[r].type);
 		bool short_record = recs[r].payload_len <= 0xFF;
-		/* TNF = NFC Forum external (0x04); MB on the first record, ME on the last,
-		 * SR when the payload length fits one byte. */
-		uint8_t flags = NDEF_TNF_EXT;
+		/* TNF per record (external 0x04 or MIME 0x02); MB on the first record, ME on
+		 * the last, SR when the payload length fits one byte. */
+		uint8_t flags = recs[r].tnf;
 		if (r == 0) {
 			flags |= 0x80; /* Message Begin */
 		}
@@ -980,33 +990,36 @@ static size_t build_ndef_message(uint8_t *out, size_t out_size, const struct nde
 static size_t build_ndef_record(uint8_t *out, size_t out_size, const char *type,
 				const uint8_t *payload, size_t payload_len)
 {
-	struct ndef_rec r = {.type = type, .payload = payload, .payload_len = payload_len};
+	struct ndef_rec r = {
+		.tnf = NDEF_TNF_EXT, .type = type, .payload = payload, .payload_len = payload_len};
 	return build_ndef_message(out, out_size, &r, 1);
 }
 
-/* Build the plaintext info NDEF into `out`. Stable between accepted NFC commands
- * (no uptime/clock; the nonce counter advances only on an accepted command), so
- * app_nfc_check() can compare it to the tag content and skip rewriting when
- * already present, and rewrite it when the counter has moved. */
-#define NDEF_INFO_PAYLOAD_LEN 15
+/* Build the info payload (see NDEF_INFO_TYPE comment) into `out`. Stable between
+ * accepted NFC commands (no uptime/clock; the nonce counter advances only on an
+ * accepted command), so app_nfc_check() can compare it to the tag content and skip
+ * rewriting when already present, and rewrite it when the counter has moved.
+ * Buffer for "<10 serial>:<hex config_ver>:<8 hex nonce>" + NUL (config_ver is a
+ * uint32 so allow its full 8 hex digits, though it is normally 1–2). */
+#define NDEF_INFO_PAYLOAD_MAX 32
 
-/* Fill the 15-byte plaintext info payload (see NDEF_INFO_TYPE comment). */
-static void build_info_payload(uint8_t payload[NDEF_INFO_PAYLOAD_LEN])
+/* Format the ASCII info payload; returns its length (excluding the NUL), 0 on
+ * overflow. */
+static size_t build_info_payload(char *payload, size_t size)
 {
 	struct app_cmd_info info;
 	app_cmd_get_info(&info);
 
-	payload[0] = NDEF_INFO_FORMAT;
-	sys_put_be32(info.serial_number, &payload[1]);
-	payload[5] = info.fw_major;
-	payload[6] = info.fw_minor;
-	payload[7] = info.fw_patch;
-	payload[8] = info.build_type;
-	payload[9] = (uint8_t)g_app_config.config_version;
-	payload[10] = info.debug ? 0x01 : 0x00;
-	/* Anti-replay counter high-water (live source of truth, == what decrypt()
+	/* Anti-replay counter high-water read live (app_config(), == what decrypt()
 	 * checks against) so the phone can resync after a reboot/cache-miss. */
-	sys_put_be32(app_config()->nonce_counter, &payload[11]);
+	int n = snprintf(payload, size, "%010u:%02X:%08X", (unsigned int)info.serial_number,
+			 (unsigned int)g_app_config.config_version,
+			 (unsigned int)app_config()->nonce_counter);
+	if (n <= 0 || (size_t)n >= size) {
+		return 0;
+	}
+
+	return (size_t)n;
 }
 
 /* #247: encode the ClaimInfo protobuf {serial_number, claim_token} into `out`.
@@ -1034,20 +1047,25 @@ static size_t build_claim_payload(uint8_t *out, size_t out_size)
  * nfc_check_locked can compare it to the tag and skip rewriting when present. */
 static size_t build_resting_ndef(uint8_t *out, size_t out_size)
 {
-	uint8_t inf[NDEF_INFO_PAYLOAD_LEN];
-	build_info_payload(inf);
+	char inf[NDEF_INFO_PAYLOAD_MAX];
+	size_t inf_len = build_info_payload(inf, sizeof(inf));
 
+	/* inf first (Message Begin) so Android tap-to-launch keys off it. */
 	struct ndef_rec recs[2];
 	size_t n = 0;
-	recs[n++] = (struct ndef_rec){
-		.type = NDEF_INFO_TYPE, .payload = inf, .payload_len = sizeof(inf)};
+	recs[n++] = (struct ndef_rec){.tnf = NDEF_TNF_MIME,
+				      .type = NDEF_INFO_TYPE,
+				      .payload = (const uint8_t *)inf,
+				      .payload_len = inf_len};
 
 	uint8_t clm[ClaimInfo_size];
 	if (m_clm_state == CLM_PENDING) {
 		size_t clm_len = build_claim_payload(clm, sizeof(clm));
 		if (clm_len) {
-			recs[n++] = (struct ndef_rec){
-				.type = NDEF_CLAIM_TYPE, .payload = clm, .payload_len = clm_len};
+			recs[n++] = (struct ndef_rec){.tnf = NDEF_TNF_EXT,
+						      .type = NDEF_CLAIM_TYPE,
+						      .payload = clm,
+						      .payload_len = clm_len};
 		}
 	}
 
@@ -1403,7 +1421,22 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 
 	ARG_UNUSED(user_data);
 
-	/* Only our NFC Forum external-type records carry sticker payloads. */
+	/* Sticker records are either the MIME identity record (inf, TNF 0x02) or our
+	 * external-type protocol (cmd/rsp/ack/clm, TNF 0x04). Handle the MIME inf here;
+	 * everything else must be external or we ignore it (a MIME record can never
+	 * match the external cmd/rsp/ack/clm branches below). */
+	if (record_info->tnf == NDEF_TNF_MIME) {
+		/* Our info record: marks a settled resting tag (vs a phone mid-write, which
+		 * shows neither inf nor clm). nfc_check_locked uses this to reconcile the clm
+		 * lifecycle and refresh a stale info record (#247, #298). */
+		size_t inf_type_len = strlen(NDEF_INFO_TYPE);
+		if (record_info->type_len == inf_type_len &&
+		    strncmp((const char *)record_info->type, NDEF_INFO_TYPE, inf_type_len) == 0) {
+			m_seen_inf = true;
+		}
+		return 0;
+	}
+
 	if (record_info->tnf != NDEF_TNF_EXT) {
 		return 0;
 	}
@@ -1556,16 +1589,6 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 		m_seen_clm = true;
 		NFC_REPORT("NFC read: our clm provisioning record (%u B)",
 			   record_info->payload_len);
-		return 0;
-	}
-
-	/* Our info record: marks a settled resting tag (vs a phone mid-write, which
-	 * shows neither inf nor clm). nfc_check_locked uses this to reconcile the clm
-	 * lifecycle and refresh a stale info record (#247). */
-	size_t inf_type_len = strlen(NDEF_INFO_TYPE);
-	if (record_info->type_len == inf_type_len &&
-	    strncmp((const char *)record_info->type, NDEF_INFO_TYPE, inf_type_len) == 0) {
-		m_seen_inf = true;
 		return 0;
 	}
 
