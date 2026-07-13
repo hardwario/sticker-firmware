@@ -156,10 +156,11 @@ fPort-2 `Telemetry` frame and **no** fPort-85 response.
 
 - [ ] Pass
 
-### G6 — Reset keeps identity (`settings reset` / FactoryReset)
+### G6 — Reset keeps identity (`settings device-reset` / DeviceReset)
 
-**Goal:** `settings reset` and the FactoryReset command restore application config + alarm rules to
-defaults but **keep** the device identity (`serial-number`, `secret-key`) and LoRaWAN provisioning
+**Goal:** `settings device-reset` (renamed from `settings reset`, #299) and the DeviceReset command
+(same wire id as the old, single FactoryReset) restore application config + alarm rules to defaults
+but **keep** the device identity (`serial-number`, `secret-key`) and LoRaWAN provisioning
 (`lrw-deveui`, keys, region, …), so the unit stays provisioned and on the network (issue #108).
 **Observable:** changed app/alarm values back to defaults; DevEUI/keys/serial unchanged; device
 stays joined / rejoins with the same credentials.
@@ -167,10 +168,34 @@ stays joined / rejoins with the same credentials.
 **Prompt for Claude:**
 > First capture the identity + a couple of app values via `config` (e.g. `config lrw-deveui`,
 > `config serial-number`, `config interval-report`) and change `interval-report` to a non-default.
-> Then run `settings reset` over the RTT shell. After reboot confirm: `interval-report` is back to
-> default, but `config lrw-deveui` / `config serial-number` are **unchanged**, and the device
-> rejoins with the same DevEUI. Repeat using a FactoryReset downlink on fPort 85 and confirm the
+> Then run `settings device-reset` over the RTT shell. After reboot confirm: `interval-report` is
+> back to default, but `config lrw-deveui` / `config serial-number` are **unchanged**, and the device
+> rejoins with the same DevEUI. Repeat using a DeviceReset downlink on fPort 85 and confirm the
 > `Response.Ack` precedes the reboot and identity again survives.
+
+- [ ] Pass
+
+### G6a — Reset ladder's narrower tiers (`factory_reset` / `vendor_reset` / `set_secret_key`, #299)
+
+**Goal:** `factory_reset` (new, narrower than device_reset above) keeps identity only and drops the
+LoRaWAN session/keys — the device must re-join after it. `vendor_reset` keeps only
+`serial-number` + `vendor-token`, erases storage+history first, and is refused unless the caller
+supplies a replacement `secret-key` in the same call, or if `vendor-reset-allow` is false.
+`set_secret_key` rotates `secret-key` over the already-encrypted nfc/shell channel.
+**Observable:** `factory_reset` — identity survives, DevEUI/keys/region reset to defaults, device
+re-joins. `vendor_reset` without a key, or with `vendor-reset-allow false`, is refused (no reboot,
+nothing erased). `vendor_reset` with a key — only serial+vendor-token survive, new secret_key is
+live after reboot. `set_secret_key` — new key takes effect immediately (old key no longer decrypts).
+
+**Prompt for Claude:**
+> `settings factory-reset` over the RTT shell: confirm `config serial-number`/`config secret-key`
+> survive but `config lrw-deveui` and the LoRaWAN keys reset to all-zero/defaults, and the device
+> re-joins. Then `config vendor-reset-allow false` + `settings save`, and confirm
+> `settings vendor-reset <32-hex-key>` is refused (shell reports failure, no reboot). Set
+> `config vendor-reset-allow true` + `settings save`, then `settings vendor-reset` with **no**
+> argument — confirm it's rejected (missing key) — then with a key: confirm after reboot
+> `config serial-number`/`config vendor-token` are unchanged but everything else (incl.
+> `config secret-key`, which should now read the supplied key) is back to defaults/blank.
 
 - [ ] Pass
 

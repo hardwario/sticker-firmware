@@ -670,6 +670,28 @@ static void app_cmd_handle_reset_counters(enum app_cmd_transport tp, const Comma
 	resp->which_body = Response_ack_tag;
 }
 
+/* #299: rotate secret_key over the already-encrypted channel (the caller already
+ * authenticated with the CURRENT key — decrypt() runs before app_cmd_handle() is
+ * ever reached). The new key is applied to staging immediately but persisted by
+ * the deferred action below (same stack-cost reason as reset_counters above);
+ * never echoed back — secret_key stays proto_field:false on every read path. */
+static void app_cmd_handle_set_secret_key(enum app_cmd_transport tp, const Command *cmd,
+					  Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	const Command_SetSecretKey *ssk = &cmd->body.set_secret_key;
+
+	if (!ssk->has_key) {
+		make_error(resp, Response_Error_Code_BAD_REQUEST, "missing key");
+		return;
+	}
+
+	memcpy(app_config()->secret_key, ssk->key, sizeof(app_config()->secret_key));
+
+	*action = APP_CMD_ACTION_SECRET_KEY_SAVE;
+	resp->which_body = Response_ack_tag;
+}
+
 /* force_send / req_history are LRW-only (transports: [lrw] in the YAML); the
  * generated dispatch enforces that before calling the handler, so the handlers
  * below assume the LoRaWAN transport. (clock_sync also runs over NFC — see its
@@ -961,8 +983,8 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		*action = APP_CMD_ACTION_REBOOT;
 		resp->which_body = Response_ack_tag;
 		break;
-	case Command_factory_reset_tag:
-		*action = APP_CMD_ACTION_FACTORY_RESET;
+	case Command_device_reset_tag:
+		*action = APP_CMD_ACTION_DEVICE_RESET;
 		resp->which_body = Response_ack_tag;
 		break;
 	case Command_force_send_tag:
@@ -1025,6 +1047,18 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_sample(tp, cmd, resp, action);
+		break;
+	case Command_factory_reset_tag:
+		*action = APP_CMD_ACTION_FACTORY_RESET;
+		resp->which_body = Response_ack_tag;
+		break;
+	case Command_set_secret_key_tag:
+		/* transports: [nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_set_secret_key(tp, cmd, resp, action);
 		break;
 	default:
 		/* L-54: an unknown command tag (e.g. a removed command like the old

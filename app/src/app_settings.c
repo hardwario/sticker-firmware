@@ -8,6 +8,11 @@
 #include "app_alarm_rules.h"
 #include "app_config.h"
 #include "app_config_ingest.h"
+#include "app_counters.h"
+#include "app_hall.h"
+#include "app_history.h"
+#include "app_input.h"
+#include "app_nfc.h"
 
 /* Zephyr includes */
 #include <zephyr/fs/fs.h>
@@ -20,6 +25,7 @@
 
 /* Standard includes */
 #include <errno.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(app_settings, LOG_LEVEL_DBG);
 
@@ -48,7 +54,13 @@ static int save(bool reboot)
 	return 0;
 }
 
-static int erase(bool reboot)
+/* Wipe the whole "config" settings backing store (identity + LoRaWAN credentials
+ * included). Split out from erase() below only so a future caller could erase
+ * without rebooting immediately — but see the GOTCHA in app_settings_vendor_reset()
+ * (#299) for why "erase raw flash, then keep using the settings API this same
+ * boot" is NOT actually safe; every current caller erases only right before a
+ * reboot with no further settings_save_*() in between. */
+static int erase_storage(void)
 {
 	int ret;
 
@@ -91,6 +103,16 @@ static int erase(bool reboot)
 	flash_area_close(fa);
 #endif /* defined(CONFIG_SETTINGS_FILE) */
 
+	return 0;
+}
+
+static int erase(bool reboot)
+{
+	int ret = erase_storage();
+	if (ret) {
+		return ret;
+	}
+
 	if (reboot) {
 		sys_reboot(SYS_REBOOT_COLD);
 	}
@@ -114,13 +136,53 @@ static int cmd_save(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-static int cmd_reset(const struct shell *shell, size_t argc, char **argv)
+static int cmd_device_reset(const struct shell *shell, size_t argc, char **argv)
 {
 	int ret;
 
-	ret = app_settings_reset();
+	ret = app_settings_device_reset();
 	if (ret) {
-		LOG_ERR("Call `app_settings_reset` failed: %d", ret);
+		LOG_ERR("Call `app_settings_device_reset` failed: %d", ret);
+		shell_error(shell, "%s", m_shell_msg_error);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int cmd_factory_reset(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+
+	ret = app_settings_factory_reset();
+	if (ret) {
+		LOG_ERR("Call `app_settings_factory_reset` failed: %d", ret);
+		shell_error(shell, "%s", m_shell_msg_error);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int cmd_vendor_reset(const struct shell *shell, size_t argc, char **argv)
+{
+	int ret;
+	uint8_t key[16];
+
+	if (argc != 2 || strlen(argv[1]) != 2 * sizeof(key)) {
+		shell_error(shell, "usage: settings vendor-reset <new-secret-key (32 hex digits)>");
+		return -EINVAL;
+	}
+
+	ret = hex2bin(argv[1], strlen(argv[1]), key, sizeof(key));
+	if (ret != (int)sizeof(key)) {
+		shell_error(shell, "invalid key");
+		return -EINVAL;
+	}
+
+	ret = app_settings_vendor_reset(key);
+	if (ret) {
+		LOG_ERR("Call `app_settings_vendor_reset` failed: %d", ret);
 		shell_error(shell, "%s", m_shell_msg_error);
 		return ret;
 	}
@@ -164,9 +226,17 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Save all settings and reboot.",
 	              cmd_save, 1, 0),
 
-	SHELL_CMD_ARG(reset, NULL,
+	SHELL_CMD_ARG(device-reset, NULL,
 	              "Reset config + alarm rules to defaults (keeps identity + LoRaWAN) and reboot.",
-	              cmd_reset, 1, 0),
+	              cmd_device_reset, 1, 0),
+
+	SHELL_CMD_ARG(factory-reset, NULL,
+	              "Reset config + alarm rules to defaults (keeps identity only, drops LoRaWAN) and reboot.",
+	              cmd_factory_reset, 1, 0),
+
+	SHELL_CMD_ARG(vendor-reset, NULL,
+	              "Erase storage+history and re-provision (keeps serial_number + vendor_token only), then reboot. Usage: settings vendor-reset <new-secret-key (32 hex digits)>",
+	              cmd_vendor_reset, 2, 0),
 
 	SHELL_CMD_ARG(erase, NULL,
 	              "Erase the whole NVS partition incl. identity + LoRaWAN credentials, then reboot.",
@@ -195,30 +265,163 @@ int app_settings_save_nonce_counter(void)
 				 sizeof(app_config()->nonce_counter));
 }
 
+int app_settings_save_secret_key(void)
+{
+	/* Same single-key rationale as nonce_counter above (#299 set_secret_key). */
+	return settings_save_one("config/secret-key", app_config()->secret_key,
+				 sizeof(app_config()->secret_key));
+}
+
 int app_settings_erase(void)
 {
 	return erase(true);
 }
 
-int app_settings_reset(void)
+/* Shared by every reset-ladder tier: clear the decoded alarm-rule cache so the
+ * running state matches the just-reset config slots immediately, then persist.
+ * Returns 0 or a negative errno; the caller reboots. */
+static int clear_and_save_alarm_rules(void)
 {
 	int ret;
 
-	/* Config: defaults for everything except the preserved identity + LoRaWAN
-	 * fields (see app_config_device_reset). This is the only reset reachable
-	 * over LoRaWAN/NFC, so a remote command can never un-provision the device;
-	 * a full wipe (incl. identity) stays shell-only via `settings erase`.
-	 * NOTE (#299): app_config_factory_reset()/vendor_reset() now exist as the
-	 * narrower ladder tiers but are not wired up yet — that is Phase 2
-	 * (app_settings_factory_reset/vendor_reset + the new proto commands). */
+	app_alarm_rules_clear_all();
+	ret = app_alarm_rules_save();
+	if (ret) {
+		LOG_ERR("Call `app_alarm_rules_save` failed: %d", ret);
+	}
+
+	return ret;
+}
+
+int app_settings_device_reset(void)
+{
+	int ret;
+
+	/* Config: defaults for everything except the persistent device_reset fields
+	 * (identity + full LoRaWAN, see app_config_device_reset). This is the only
+	 * reset reachable over LoRaWAN/NFC, so a remote command can never
+	 * un-provision the device past this tier; a full wipe (incl. identity) stays
+	 * shell-only via `settings erase`. */
 	ret = app_config_device_reset();
 	if (ret) {
 		LOG_ERR("Call `app_config_device_reset` failed: %d", ret);
 		return ret;
 	}
 
-	/* Alarm rules live in the config slots (cleared to defaults above); also
-	 * drop the decoded rule cache so the running state matches immediately. */
+	ret = clear_and_save_alarm_rules();
+	if (ret) {
+		return ret;
+	}
+
+	sys_reboot(SYS_REBOOT_COLD);
+
+	return 0;
+}
+
+int app_settings_factory_reset(void)
+{
+	int ret;
+
+	/* Narrower than device_reset (#299): also drops the LoRaWAN session/keys —
+	 * only the persistent factory_reset fields (identity) survive. */
+	ret = app_config_factory_reset();
+	if (ret) {
+		LOG_ERR("Call `app_config_factory_reset` failed: %d", ret);
+		return ret;
+	}
+
+	ret = clear_and_save_alarm_rules();
+	if (ret) {
+		return ret;
+	}
+
+	sys_reboot(SYS_REBOOT_COLD);
+
+	return 0;
+}
+
+static bool key_is_set(const uint8_t *key, size_t size)
+{
+	if (!key) {
+		return false;
+	}
+
+	for (size_t i = 0; i < size; i++) {
+		if (key[i] != 0) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+int app_settings_vendor_reset(const uint8_t *new_secret_key)
+{
+	int ret;
+
+	/* Policy gate (#299): a device that disabled vendor recovery, or a caller
+	 * that didn't supply the mandatory replacement key, gets -EACCES before
+	 * anything destructive happens — same failure for both, deliberately: never
+	 * hint which check failed to an unauthenticated/unauthorized caller. */
+	if (!app_config()->vendor_reset_allow) {
+		LOG_WRN("vendor_reset refused: vendor_reset_allow is false");
+		return -EACCES;
+	}
+
+	if (!key_is_set(new_secret_key, sizeof(app_config()->secret_key))) {
+		LOG_WRN("vendor_reset refused: no replacement secret_key supplied");
+		return -EACCES;
+	}
+
+	/* GOTCHA (found on hardware): do NOT flash_area_erase() the live-mounted
+	 * "storage" partition and then keep using the settings API in the same boot
+	 * session. Zephyr's NVS caches its write pointers/sector state in RAM at
+	 * mount time and does not know the flash changed under it — every
+	 * settings_save_*() call after a raw erase silently stops persisting
+	 * correctly for the rest of the session (confirmed empirically: an earlier
+	 * version of this function erased first, then called app_config_vendor_reset()
+	 * + app_settings_save_secret_key() same as below, and EVERY field — including
+	 * serial_number/vendor_token, which should have survived — came back all-zero
+	 * after reboot). So, narrowest tier (#299) or not, this goes through the same
+	 * live settings API as device_reset/factory_reset above: no raw erase of the
+	 * settings-backed "storage" partition at all. */
+	ret = app_config_vendor_reset();
+	if (ret) {
+		LOG_ERR("Call `app_config_vendor_reset` failed: %d", ret);
+		return ret;
+	}
+
+	/* secret_key is NOT in the vendor_reset persistent tier (app_config.yml), so
+	 * the call above just zeroed it — the all-zero "unprovisioned" sentinel that
+	 * would lock the encrypted NFC channel out from ever reaching set_secret_key
+	 * again. Apply + persist the caller-supplied replacement now, separately
+	 * (single-key save, same rationale as nonce_counter/set_secret_key above). */
+	memcpy(app_config()->secret_key, new_secret_key, sizeof(app_config()->secret_key));
+	ret = app_settings_save_secret_key();
+	if (ret) {
+		LOG_ERR("Call `app_settings_save_secret_key` failed: %d", ret);
+		return ret;
+	}
+
+	/* The pulse totalizers and the NFC claim-record state each live in their own
+	 * settings subtree, outside "config" — device_reset/factory_reset leave them
+	 * alone on purpose, but vendor_reset is the deep tier meant to look like a
+	 * freshly manufactured device, so wipe both explicitly through their own live
+	 * APIs (same reasoning as the GOTCHA above: no raw erase). */
+	app_hall_reset_counts();
+	app_input_reset_counts();
+	ret = app_counters_save(true);
+	if (ret) {
+		LOG_ERR("Call `app_counters_save` failed: %d", ret);
+		return ret;
+	}
+	app_nfc_clm_reset();
+
+	/* History is a separate, non-NVS flash ring (its own on-flash format, not
+	 * settings-API-backed), so a raw erase here is safe — app_history_clear()
+	 * also resets its own in-RAM bookkeeping to match. */
+	app_history_clear();
+
 	app_alarm_rules_clear_all();
 	ret = app_alarm_rules_save();
 	if (ret) {

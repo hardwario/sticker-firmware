@@ -657,9 +657,19 @@ static void post_cmd_work_handler(struct k_work *work)
 		LOG_INF("Command: saving settings + reboot");
 		app_settings_save(true);
 		break;
+	case APP_CMD_ACTION_DEVICE_RESET:
+		LOG_INF("Command: device reset (keep identity + LoRaWAN) + reboot");
+		app_settings_device_reset();
+		break;
 	case APP_CMD_ACTION_FACTORY_RESET:
-		LOG_INF("Command: factory reset (keep identity + LoRaWAN) + reboot");
-		app_settings_reset();
+		/* #299, narrower than device_reset above: drops LoRaWAN too. */
+		LOG_INF("Command: factory reset (keep identity only) + reboot");
+		app_settings_factory_reset();
+		break;
+	case APP_CMD_ACTION_SECRET_KEY_SAVE:
+		/* Persist the new secret_key (#299 set_secret_key), no reboot. */
+		LOG_INF("Command: saving new secret_key");
+		app_settings_save_secret_key();
 		break;
 	case APP_CMD_ACTION_REBOOT:
 		LOG_INF("Command: reboot");

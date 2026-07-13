@@ -38,7 +38,7 @@ static const struct app_config m_app_config_defaults = {
 	.history_enable = false,
 	.history_sensors = 3,
 	.battery_level = 2400,
-	.allow_vendor_reset = true,
+	.vendor_reset_allow = true,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.lrw_mode = APP_CONFIG_LRW_MODE_LORAWAN,
@@ -69,7 +69,7 @@ static struct app_config m_app_config = {
 	.history_enable = false,
 	.history_sensors = 3,
 	.battery_level = 2400,
-	.allow_vendor_reset = true,
+	.vendor_reset_allow = true,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.lrw_mode = APP_CONFIG_LRW_MODE_LORAWAN,
@@ -122,8 +122,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.history_sensors));
 	SETTINGS_SET("battery-level", &m_app_config.battery_level,
 		     sizeof(m_app_config.battery_level));
-	SETTINGS_SET("allow-vendor-reset", &m_app_config.allow_vendor_reset,
-		     sizeof(m_app_config.allow_vendor_reset));
+	SETTINGS_SET("vendor-reset-allow", &m_app_config.vendor_reset_allow,
+		     sizeof(m_app_config.vendor_reset_allow));
 	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	SETTINGS_SET("alarm-notif-time", &m_app_config.alarm_notif_time,
 		     sizeof(m_app_config.alarm_notif_time));
@@ -341,8 +341,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.history_sensors));
 	EXPORT_FUNC("battery-level", &m_app_config.battery_level,
 		    sizeof(m_app_config.battery_level));
-	EXPORT_FUNC("allow-vendor-reset", &m_app_config.allow_vendor_reset,
-		    sizeof(m_app_config.allow_vendor_reset));
+	EXPORT_FUNC("vendor-reset-allow", &m_app_config.vendor_reset_allow,
+		    sizeof(m_app_config.vendor_reset_allow));
 	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	EXPORT_FUNC("alarm-notif-time", &m_app_config.alarm_notif_time,
 		    sizeof(m_app_config.alarm_notif_time));
@@ -623,10 +623,10 @@ static void print_battery_level(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " battery-level %d", m_app_config.battery_level);
 }
 
-static void print_allow_vendor_reset(const struct shell *shell)
+static void print_vendor_reset_allow(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " allow-vendor-reset %s",
-		    m_app_config.allow_vendor_reset ? "true" : "false");
+	shell_print(shell, SETTINGS_PFX " vendor-reset-allow %s",
+		    m_app_config.vendor_reset_allow ? "true" : "false");
 }
 
 static void print_alarm_limit(const struct shell *shell)
@@ -912,7 +912,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_history_enable(shell);
 	print_history_sensors(shell);
 	print_battery_level(shell);
-	print_allow_vendor_reset(shell);
+	print_vendor_reset_allow(shell);
 	print_alarm_limit(shell);
 	print_alarm_notif_time(shell);
 	print_lrw_region(shell);
@@ -1141,10 +1141,10 @@ static int cmd_battery_level(const struct shell *shell, size_t argc, char **argv
 		       print_battery_level);
 }
 
-static int cmd_allow_vendor_reset(const struct shell *shell, size_t argc, char **argv)
+static int cmd_vendor_reset_allow(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.allow_vendor_reset,
-			print_allow_vendor_reset);
+	return cmd_bool(shell, argc, argv, &m_app_config.vendor_reset_allow,
+			print_vendor_reset_allow);
 }
 
 static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
@@ -1543,9 +1543,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this.",
 	              cmd_battery_level, 1, 1),
 
-	SHELL_CMD_ARG(allow-vendor-reset, NULL,
-	              "Get/Set whether the NFC vendor_reset channel is accepted (true/false).",
-	              cmd_allow_vendor_reset, 1, 1),
+	SHELL_CMD_ARG(vendor-reset-allow, NULL,
+	              "Get/Set whether vendor_reset (NFC + shell) is accepted (true/false).",
+	              cmd_vendor_reset_allow, 1, 1),
 
 	SHELL_CMD_ARG(alarm-limit, NULL,
 	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",

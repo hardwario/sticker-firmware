@@ -141,9 +141,18 @@ static void nfc_run_deferred_cmd_actions(void)
 		case APP_CMD_ACTION_REBOOT:
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
-		case APP_CMD_ACTION_FACTORY_RESET:
+		case APP_CMD_ACTION_DEVICE_RESET:
 			play_carousel_nfc();
-			app_settings_reset();
+			app_settings_device_reset();
+			break;
+		case APP_CMD_ACTION_FACTORY_RESET:
+			/* #299, narrower than device_reset above: drops LoRaWAN too. */
+			play_carousel_nfc();
+			app_settings_factory_reset();
+			break;
+		case APP_CMD_ACTION_SECRET_KEY_SAVE:
+			/* Persist the new secret_key (#299 set_secret_key), no reboot. */
+			app_settings_save_secret_key();
 			break;
 		case APP_CMD_ACTION_ENTER_CALIBRATION:
 			/* Persist calibration=true + reboot; next boot enters

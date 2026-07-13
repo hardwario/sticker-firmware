@@ -55,7 +55,7 @@ message AppConfigMessage {
         optional bool history_enable = 4;
         optional uint32 history_sensors = 5;
         optional uint32 battery_level = 6;
-        optional bool allow_vendor_reset = 7;
+        optional bool vendor_reset_allow = 7;
     }
 
     message Sensors {
@@ -120,7 +120,7 @@ message Command {
         GetConfig        get_config        = 5;
         SettingsSave     settings_save     = 6;
         Reboot           reboot            = 7;
-        FactoryReset     factory_reset     = 8;
+        DeviceReset      device_reset      = 8;
         ForceSend        force_send        = 9;
         ResetCounters    reset_counters    = 10;
         ReqHistory       req_history       = 11;
@@ -131,6 +131,8 @@ message Command {
         LrwJoin          lrw_join          = 17;
         EnterCalibration enter_calibration = 18;
         Sample           sample            = 21;
+        FactoryReset     factory_reset     = 23;
+        SetSecretKey     set_secret_key    = 24;
     }
 // END GENERATED COMMANDS
 
@@ -168,7 +170,10 @@ message Command {
     message GetConfig    { optional uint32 page = 1; }
     message SettingsSave { }
     message Reboot       { }
-    message FactoryReset { }
+    // #299 reset ladder: keeps identity + full LoRaWAN (renamed from the old
+    // factory_reset, same wire id 8 — the new, narrower FactoryReset below is a
+    // separate message/id).
+    message DeviceReset  { }
     message ForceSend    { }
     // Persist calibration=true + cold reboot, so the next boot enters
     // calibration mode (same end state as set_param calibration=true +
@@ -214,6 +219,17 @@ message Command {
     // so the phone can display them on the spot. Over LoRaWAN the fPort-2 uplink
     // is the answer (no fPort-85 body, like ForceSend).
     message Sample { }
+
+    // #299 reset ladder, new middle tier: keeps identity only (serial_number/
+    // vendor_token/secret_key/nonce_counter/claim_token/DevEUI/JoinEUI), drops the
+    // LoRaWAN session/keys — the device must re-join after this. Narrower than
+    // DeviceReset above.
+    message FactoryReset { }
+
+    // Change secret_key over the already-encrypted channel (authenticated by the
+    // CURRENT key). The new key is never readable back via GetParam/GetConfig
+    // (secret_key stays proto_field:false — see AppConfigMessage.reserved).
+    message SetSecretKey { optional bytes key = 1; }
 }
 
 message Response {

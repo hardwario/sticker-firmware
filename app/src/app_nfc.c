@@ -84,8 +84,12 @@ static const char *cmd_action_str(enum app_cmd_action a)
 		return "save+reboot";
 	case APP_CMD_ACTION_REBOOT:
 		return "reboot";
+	case APP_CMD_ACTION_DEVICE_RESET:
+		return "device-reset";
 	case APP_CMD_ACTION_FACTORY_RESET:
 		return "factory-reset";
+	case APP_CMD_ACTION_SECRET_KEY_SAVE:
+		return "secret-key-save";
 	case APP_CMD_ACTION_ENTER_CALIBRATION:
 		return "enter-calibration";
 	case APP_CMD_ACTION_LRW_RESET:
@@ -376,6 +380,12 @@ static void clm_state_save(void)
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("settings_save_one(clm/state)", ret);
 	}
+}
+
+void app_nfc_clm_reset(void)
+{
+	m_clm_state = CLM_UNSET;
+	clm_state_save();
 }
 
 /* A claim token is provisioned once any byte is non-zero (all-zero = unset, the
@@ -2068,9 +2078,18 @@ static int cmd_nfc_check(const struct shell *sh, size_t argc, char **argv)
 		ret = app_settings_save(true); /* reboots on success */
 		shell_print(sh, "staged config applied%s", ret ? " (save failed!)" : " and saved");
 		break;
+	case APP_CMD_ACTION_DEVICE_RESET:
+		ret = app_settings_device_reset();
+		shell_print(sh, "device reset%s", ret ? " (failed!)" : "");
+		break;
 	case APP_CMD_ACTION_FACTORY_RESET:
-		ret = app_settings_reset();
+		/* #299, narrower than device_reset above: drops LoRaWAN too. */
+		ret = app_settings_factory_reset();
 		shell_print(sh, "factory reset%s", ret ? " (failed!)" : "");
+		break;
+	case APP_CMD_ACTION_SECRET_KEY_SAVE:
+		ret = app_settings_save_secret_key();
+		shell_print(sh, "secret_key saved%s", ret ? " (failed!)" : "");
 		break;
 	case APP_CMD_ACTION_NONE:
 		shell_print(sh, "no staged command on tag (no action)");

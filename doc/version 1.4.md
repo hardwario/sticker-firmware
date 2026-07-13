@@ -33,7 +33,9 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `get_config` | Dump the whole configuration (paged) | `config_dump` |
 | `settings_save` | Persist staged changes (**reboots**) | `ack` |
 | `reboot` | Cold reboot | `ack` |
-| `factory_reset` | Reset config to defaults but **keep device identity + LoRaWAN keys** (stays provisioned/connected); clears dynamic alarm rules; **reboots** | `ack` |
+| `device_reset` | Reset config to defaults but **keep device identity + LoRaWAN keys** (stays provisioned/connected); clears dynamic alarm rules; **reboots**. Renamed from the single `factory_reset` (#299) — same wire id, same behavior | `ack` |
+| `factory_reset` | **NEW (#299), narrower than `device_reset`.** Reset config to defaults, keeping identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI) — drops the LoRaWAN session/keys, forcing a re-join; clears dynamic alarm rules; **reboots** | `ack` |
+| `set_secret_key` | **NEW (#299), NFC/shell only** — rejected over LoRaWAN. Rotates `secret_key` over the already-encrypted channel (authenticated by the *current* key); the new key is never readable back via `get_param`/`get_config` | `ack` |
 | `force_send` | Send a telemetry report immediately | **none** — the report itself is the reply |
 | `sample` | Take a fresh reading: send a `Telemetry` report on fPort 2 **and** (over NFC) return the same readings in the reply. Works over LoRaWAN and NFC | LoRaWAN: **none** — the fPort-2 report is the reply. NFC: **`sample`** — a full `Telemetry` with the fresh readings |
 | `reset_counters` | Clear selected hall/input counters | `ack` |
@@ -56,6 +58,11 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 > **Commissioning a device with just a phone (NFC):** the LoRaWAN identifiers/keys are written through the encrypted NFC config channel (`set_param`/config ingest covers every `lorawan` field — DevEUI, JoinEUI, AppKey, NwkKey, DevAddr, NwkSKey, AppSKey, region, sub-band, network, activation, ADR, link-check). The typical order is **set params → `lrw_reset` → `lrw_join`**: write the keys, reset the counters/`DevNonce` (so a re-keyed or relocated device starts a clean session), then force the join. `lrw_reset` reboots; the `ack` is written back to the tag first, and the reset + reboot run only **after the phone has read the reply** — it acks over NDEF, or a quiet-field backstop fires if it leaves — so the phone reliably sees the reply before the device restarts. `lrw_reset` and `lrw_join` work over both NFC and a LoRaWAN downlink.
 >
 > **`get_param` is paged** like `get_config`: the reply carries `page_index`/`page_count`, and an optional `page` field in the request selects which page (omit = 0). When the selected fields don't all fit one data-rate frame they are split across pages — fetch the rest by re-sending with the next `page`. A page out of range returns `OUT_OF_RANGE`. If any response still doesn't fit the buffer it is replaced by an `error` (same `seq`) rather than dropped silently.
+>
+> **`vendor_reset` (#299) is not in this table** — unlike the other reset tiers above it is not a
+> `Command` at all: it is shell-only for now (`settings vendor-reset`), reachable remotely only via a
+> future dedicated NFC record (`hio.stck:rst`, vendor-token authenticated) rather than the generic
+> encrypted command channel. See §14 for the full reset ladder.
 
 ### Radio mode — `lrw-mode` (#271)
 
@@ -587,7 +594,7 @@ in a dedicated **plaintext** record next to the info record — a small protobuf
 
 **Power.** The NFC poll is fully **event-driven**: the poll thread sleeps forever on the ST25DV **GPO interrupt** (PB12, EXTI) and only wakes when RF activity occurs, so an untouched tag costs nothing and the CPU stays in Stop2 between taps (no periodic poll). For this to work the ST25DV **GPO output must be enabled** — the `GPO_EN` master-enable bit is set alongside the RF-write / field-change event bits, in **both** the static config register and the dynamic `GPO_CTRL_Dyn`. (A missing `GPO_EN` left the pin mute, so the MCU never woke and encrypted NFC failed on the **release** build — debug worked only because `CONFIG_PM=n` keeps the CPU polling. This was the root cause of the long-standing "NFC works on debug, not release" bug.) While a phone is engaged, a short **keep-awake** window — a `SUSPEND_TO_IDLE` policy lock, re-armed on each RF event and released after ~5 s of RF quiet — holds the CPU out of Stop2 so a mid-command Stop2 can't tear the multi-transfer i2c1 tag I/O; GPIOB is marked a PM wake-up source so the port isn't suspended and its EXTI stays armed in Stop2. Idle current is unchanged (the lock is never taken without an RF event; the sticker reaches the same Stop2 floor as before).
 
-**Robustness.** The command/response round-trip hardens the ST25DV write path (RF_WRITE_EN enable timing after present-password, an "unrecognized data" debounce so a poll that catches a half-written record doesn't clobber it, and an always-read poll). The earlier *immediate* auto-restore of the info record over a just-written response was dropped because it raced the phone reading the reply (#144); it is now done **on a ~10 s field-loss debounce** instead — once no RF (GPO) activity has occurred for the debounce window the phone has left, so restoring the info record can no longer clobber an in-flight read (#164). A restart-style command (`reboot`, `settings_save`, `factory_reset`, `enter_calibration`, `lrw_reset`) extends this handshake to its **action**: the reboot/save runs only once the reply has been delivered — the phone acks it over NDEF (info record restored) or the quiet-field backstop fires if the phone leaves — instead of the earlier blind fixed delay that raced the phone read, so a successful restart command is no longer seen as a failure by the app. A same-counter retransmission of the command replays the cached reply without dropping the pending action.
+**Robustness.** The command/response round-trip hardens the ST25DV write path (RF_WRITE_EN enable timing after present-password, an "unrecognized data" debounce so a poll that catches a half-written record doesn't clobber it, and an always-read poll). The earlier *immediate* auto-restore of the info record over a just-written response was dropped because it raced the phone reading the reply (#144); it is now done **on a ~10 s field-loss debounce** instead — once no RF (GPO) activity has occurred for the debounce window the phone has left, so restoring the info record can no longer clobber an in-flight read (#164). A restart-style command (`reboot`, `settings_save`, `device_reset`, `factory_reset`, `enter_calibration`, `lrw_reset`) extends this handshake to its **action**: the reboot/save runs only once the reply has been delivered — the phone acks it over NDEF (info record restored) or the quiet-field backstop fires if the phone leaves — instead of the earlier blind fixed delay that raced the phone read, so a successful restart command is no longer seen as a failure by the app. A same-counter retransmission of the command replays the cached reply without dropping the pending action.
 
 **Reading the LoRaWAN keys back (NFC only, #162).** So an operator can verify which keys a device holds, `get_config` / `get_param` now return the LoRaWAN crypto keys (`nwkkey`, `appkey`, `nwkskey`, `appskey`) — but **only over NFC**, never over LoRaWAN:
 
@@ -595,10 +602,10 @@ in a dedicated **plaintext** record next to the info record — a small protobuf
 - The keys are flagged `dump_nfc_only`: the dump path emits them only when the transport is NFC. A `get_config`/`get_param` arriving as a **LoRaWAN downlink never selects the key tags**, so they can never leave in an uplink — important because the fPort-85 payload is plain protobuf (the LoRaWAN MAC layer would expose the keys to the network server). The DevEUI/JoinEUI/DevAddr identifiers remain readable over both transports as before.
 - **`secret_key` itself is never readable** on any transport (it is the master key for the whole NFC channel).
 
-**Provisioning while powered off (boot-staged command, #250).** Because the ST25DV is powered by the phone's RF field, a STICKER can be configured **while it is unpowered** — on the shelf, before first power-on, or with the battery removed. A phone (Manager-App) writes an encrypted **command** record (`hio.stck:cmd`, e.g. `set_param … save=true`, or `factory_reset`) into the tag's user EEPROM over RF; the write lands and persists with no MCU power. On the **next boot** the firmware applies it through the **same validated command path** used at runtime — there is no longer a separate bare-`AppConfigMessage` config record (`hio.stck:cfg` is retired): one envelope, one crypto, one atomic/`fault_field`-validated apply for both online and offline provisioning.
+**Provisioning while powered off (boot-staged command, #250).** Because the ST25DV is powered by the phone's RF field, a STICKER can be configured **while it is unpowered** — on the shelf, before first power-on, or with the battery removed. A phone (Manager-App) writes an encrypted **command** record (`hio.stck:cmd`, e.g. `set_param … save=true`, or `device_reset`) into the tag's user EEPROM over RF; the write lands and persists with no MCU power. On the **next boot** the firmware applies it through the **same validated command path** used at runtime — there is no longer a separate bare-`AppConfigMessage` config record (`hio.stck:cfg` is retired): one envelope, one crypto, one atomic/`fault_field`-validated apply for both online and offline provisioning.
 
 - The boot sequence runs a synchronous NFC check (`app_nfc_check()` in `main.c`) **early — before the LED boot carousel and before the LoRaWAN stack starts** — decrypts the staged command, runs it through `app_cmd_handle()`, then applies the deferred action **synchronously right there** (see below), so a staged config (including LoRaWAN keys) takes effect *before the first join attempt*, not one poll cycle later.
-- The command is decrypted and **nonce-checked** (same anti-replay as the runtime channel: `nonce_counter` must be strictly greater than the last accepted, then persisted), and `SetParam` is applied **atomically** with `fault_field` validation (H-3/H-10/H-11) — an invalid field rejects the whole record instead of half-applying it. `save=true` (or the `FactoryReset` command) then persists (`settings_save`, which reboots).
+- The command is decrypted and **nonce-checked** (same anti-replay as the runtime channel: `nonce_counter` must be strictly greater than the last accepted, then persisted), and `SetParam` is applied **atomically** with `fault_field` validation (H-3/H-10/H-11) — an invalid field rejects the whole record instead of half-applying it. `save=true` (or a restart-style command like `DeviceReset`) then persists (`settings_save`, which reboots).
 - The runtime command path gates its restart action on the phone reading the response (#242). At **boot** the phone that wrote the record is gone (the device was off), so there is nobody to ack — the firmware restores the info record (which opens the deferred-action gate, #164) and runs the staged action **immediately**, without waiting. The response the command produced is written to the tag but simply overwritten by the info-record restore; no phone reads it.
 - A **stale or replayed** record left on the tag is rejected by the nonce anti-replay on every subsequent boot (the counter is persisted before the action runs), so the staged command applies **at most once**; the firmware logs it and **continues booting** (it never bricks into a reboot loop).
 - The yellow NFC LED carousel blinks when a staged command is applied, as operator feedback.
@@ -707,29 +714,34 @@ The report cadence is unified with `interval_report` (there is no separate `inte
 
 ---
 
-## 14. Identity & provisioning preservation (NEW)
+## 14. Identity & provisioning preservation / reset ladder (#299)
 
-A firmware update or a reset must **never** un-provision a field device. The device identity
-(`serial-number`, `secret-key`, `nonce-counter`) and the LoRaWAN provisioning (`lrw-deveui`,
-`lrw-joineui`, all keys, `lrw-devaddr`, session keys, `region`, `sub-band`, `network`,
-`activation`, `adr`) are a **protected set** that survives every reset and migration path
-(issue #108). These parameters are flagged `persistent: [device_reset, ...]` in `app_config.yml`
-(the reset-severity-ladder mechanism, #299 — previously a single `preserve_on_reset` boolean), and
-`configen` generates one preserve/restore routine per reset tier from that single source of truth —
-adding a new protected field, or changing which tier protects it, is a one-line YAML change, no
-hand-maintained C list. #299 is landing in stages: this schema/codegen mechanism first, then the
-`factory_reset`/`vendor_reset` command wiring and NFC `vendor_token` channel — until that lands, the
-table below still reflects today's single `factory_reset` command/tier.
+A firmware update or a reset must **never** un-provision a field device past an explicit,
+named tier. The device identity (`serial-number`, `secret-key`, `nonce-counter`, `vendor-token`) and
+the LoRaWAN provisioning (`lrw-deveui`, `lrw-joineui`, all keys, `lrw-devaddr`, session keys,
+`region`, `sub-band`, `network`, `activation`, `adr`) each carry a `persistent: [device_reset,
+factory_reset, vendor_reset]` tag in `app_config.yml` (issue #108's original protected set, now
+split into a severity ladder by #299 — the tag replaces the old single `preserve_on_reset`
+boolean). `configen` generates one preserve/restore routine per tier from that single source of
+truth — adding a new protected field, or changing which tier protects it, is a one-line YAML change,
+no hand-maintained C list.
 
-**Reset semantics**
+**Reset ladder** — each tier keeps a strict subset of the one above it:
 
-| Path | Reaches | Effect on identity + LoRaWAN credentials |
-|---|---|---|
-| `settings reset` (shell) | local | **Kept** — only app config + alarm rules go back to defaults |
-| `factory_reset` command | LoRaWAN **and** NFC | **Kept** — same as `settings reset`; this is the only reset reachable remotely, so no command can un-provision a device |
-| NFC config-tag reset | NFC | **Kept** |
-| schema migration (config-version bump) | automatic on boot | **Kept** — a firmware update that bumps the config schema restores the protected set after applying new defaults |
-| `settings erase` (shell) | local **only** | **Wiped** — full NVS erase incl. identity; the deliberate "return to blank" escape hatch, never wired to LoRaWAN/NFC |
+| Tier | Keeps | Reachable via | Notes |
+|---|---|---|---|
+| `device_reboot` | everything (no wipe) | shell `settings save`, LoRaWAN/NFC `reboot` | plain reboot |
+| `device_reset` | identity + **full LoRaWAN** (region/keys/session) | shell `settings device-reset`, LoRaWAN/NFC `device_reset` | renamed from the old, single `factory_reset` command/`settings reset` — same behavior, same wire id. This is the only reset reachable remotely, so no command can un-provision a device past this tier |
+| `factory_reset` | identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI); drops the LoRaWAN session/keys | shell `settings factory-reset`, LoRaWAN/NFC `factory_reset` (new, id 23) | forces a re-join |
+| `vendor_reset` | `serial-number` + `vendor-token` only | shell `settings vendor-reset <new-secret-key>` (HIL) | **not** a Command — erases the whole `storage` + `history` flash areas (not just the "config" subtree), then re-provisions the kept identity. Refused (`-EACCES`) if `vendor-reset-allow` is false, or if the caller doesn't supply a replacement `secret-key` in the same call (vendor_reset drops `secret-key` too — leaving it all-zero would lock the device out of its own encrypted NFC channel). The NFC `hio.stck:rst` vendor-token channel that reaches this remotely is a later stage |
+| `settings erase` (shell) | nothing, incl. serial | shell only | full NVS wipe; the deliberate "return to blank" escape hatch, never wired to LoRaWAN/NFC |
+
+Also new in #299: `set_secret_key` (nfc/shell only, never a LoRaWAN downlink) rotates `secret-key`
+over the already-encrypted channel — authenticated by the *current* key, so a lost/rotated key never
+needs a J-Link short of `vendor_reset`. The new key is never readable back via GetParam/GetConfig.
+
+A schema migration (config-version bump) restores the `device_reset` tier's protected set after
+applying new defaults, same as today.
 
 **Partition-map contract** (256 KB internal flash, single flat image, no bootloader yet):
 
@@ -740,6 +752,9 @@ table below still reflects today's single `factory_reset` command/tier.
 | `storage` | `0x3C000` | 16 KB | **NVS — the protected set lives here** |
 
 The contract every update path must honour: **never erase the `storage` region at `0x3C000`.**
+The sanctioned exception is `vendor_reset` (#299): it deliberately erases both `storage` and
+`history` before re-provisioning just `serial-number` + `vendor-token`, which is the whole point of
+that tier.
 
 - **J-Link / SWD** — a plain `west flash` (no `--erase`) writes only the sectors covered by the
   image, and the image can never overflow into `storage` (the linker fails the build on overflow).

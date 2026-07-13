@@ -347,7 +347,52 @@ ZTEST(cmd, test_deferred_actions)
 	zassert_equal(r.which_body, Response_ack_tag, "save acks");
 
 	zassert_equal(handle("08083a00", &r), APP_CMD_ACTION_REBOOT, "reboot");
-	zassert_equal(handle("08094200", &r), APP_CMD_ACTION_FACTORY_RESET, "factory");
+
+	/* device_reset (field 8, same wire id as the old, single factory_reset,
+	 * renamed #299) — was tag=0x42 (field8, LEN), still is: only the C enum/oneof
+	 * case name changed, not the wire byte. */
+	zassert_equal(handle("08094200", &r), APP_CMD_ACTION_DEVICE_RESET, "device_reset");
+
+	/* factory_reset (field 23, NEW #299 tier — narrower than device_reset above,
+	 * a different command/id, not a renumbering of it). */
+	zassert_equal(handle("080aba0100", &r), APP_CMD_ACTION_FACTORY_RESET, "factory_reset");
+}
+
+/* #299 set_secret_key (field 24): nfc/shell only (rejected over lrw, like
+ * force_send/req_history are rejected the other way in
+ * test_lrw_only_commands_rejected_over_nfc); applies the new key to staging
+ * immediately and defers the persist; missing key -> BAD_REQUEST, no action. */
+ZTEST(cmd, test_set_secret_key)
+{
+	Response r;
+	uint8_t expect_key[16];
+
+	memset(expect_key, 0x11, sizeof(expect_key));
+
+	reset_cfg();
+	zassert_equal(handle("080bc201120a1011111111111111111111111111111111", &r),
+		      APP_CMD_ACTION_NONE, "set_secret_key rejected over lrw");
+	zassert_equal(r.which_body, Response_error_tag, "lrw should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+
+	reset_cfg();
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_NFC,
+					   "080bc201120a1011111111111111111111111111111111", &r);
+	zassert_equal(a, APP_CMD_ACTION_SECRET_KEY_SAVE, "set_secret_key over nfc");
+	zassert_equal(r.which_body, Response_ack_tag, "set_secret_key acks (which=%d)",
+		      r.which_body);
+	zassert_mem_equal(g_app_config.secret_key, expect_key, sizeof(expect_key),
+			  "secret_key not applied to staging");
+
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_NFC, "080cc20100", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "missing key: no action");
+	zassert_equal(r.which_body, Response_error_tag, "missing key should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
+		      r.body.error.code);
 }
 
 /* F-1: lrw_join (proto_id 17) / lrw_reset (16) must be rejected with NOT_READY

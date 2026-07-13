@@ -185,7 +185,7 @@ def test_build_proto_model_structure():
     ids = {f["name"]: f["id"] for f in app["fields"]}
     assert ids["history_enable"] == 4 and ids["history_sensors"] == 5
     assert ids["battery_level"] == 6  # low-battery alarm threshold (#210)
-    assert ids["allow_vendor_reset"] == 7  # NFC vendor_reset gate (#299)
+    assert ids["vendor_reset_allow"] == 7  # NFC vendor_reset gate (#299)
     assert sorted(ids.values()) == [1, 2, 3, 4, 5, 6, 7]  # contiguous
 
 

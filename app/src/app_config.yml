@@ -111,7 +111,11 @@ commands:
     - {name: get_config, proto_id: 5, body: GetConfig, kind: handler, response: config_dump}
     - {name: settings_save, proto_id: 6, body: SettingsSave, kind: action, action: SETTINGS_SAVE, response: ack}
     - {name: reboot, proto_id: 7, body: Reboot, kind: action, action: REBOOT, response: ack}
-    - {name: factory_reset, proto_id: 8, body: FactoryReset, kind: action, action: FACTORY_RESET, response: ack}
+    # #299 reset ladder: proto_id 8 is the same wire slot as today's factory_reset,
+    # renamed to match its actual behavior (keeps identity + full LoRaWAN — the
+    # NEW, narrower factory_reset below is a different command/id). Breaking:
+    # Manager-App must follow the rename.
+    - {name: device_reset, proto_id: 8, body: DeviceReset, kind: action, action: DEVICE_RESET, response: ack}
     - {name: force_send, proto_id: 9, body: ForceSend, kind: handler, response: none, transports: [lrw]}
     - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
     - {name: req_history, proto_id: 11, body: ReqHistory, kind: handler, response: none, transports: [lrw]}
@@ -124,6 +128,16 @@ commands:
     - {name: lrw_join, proto_id: 17, body: LrwJoin, kind: handler, response: ack}
     - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: action, action: ENTER_CALIBRATION, response: ack, transports: [lrw, nfc]}
     - {name: sample, proto_id: 21, body: Sample, kind: handler, response: sample, transports: [lrw, nfc]}
+    # #299 reset ladder, new middle tier: keeps identity only (serial/vendor_token/
+    # secret_key/nonce_counter/claim_token/DevEUI/JoinEUI), drops the LoRaWAN
+    # session/keys — forces a re-join. vendor_reset is NOT a Command: it is driven
+    # by its own NFC record (hio.stck:rst, vendor-token authenticated) and a
+    # shell-only `settings vendor-reset` for HIL, never over the generic cmd channel.
+    - {name: factory_reset, proto_id: 23, body: FactoryReset, kind: action, action: FACTORY_RESET, response: ack}
+    # Change the secret_key over the already-encrypted channel (authenticated by
+    # the CURRENT key), so a lost/rotated key never needs a J-Link. The new key is
+    # never readable back via GetParam/GetConfig (secret_key stays proto_field:false).
+    - {name: set_secret_key, proto_id: 24, body: SetSecretKey, kind: handler, response: ack, transports: [nfc, shell]}
 parameters:
   # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /
   # vendor_token) are OFF the config wire (`proto_field: false`, #250 Part B): configen
@@ -250,12 +264,12 @@ parameters:
   # #299: gates the NFC vendor_reset (hio.stck:rst) channel. false = vendor
   # recovery over NFC is refused; only a J-Link full-erase can then recover
   # a device whose secret_key was changed and forgotten.
-  - name: allow_vendor_reset
+  - name: vendor_reset_allow
     proto_group: application
     proto_id: 7
     type: bool
     default: true
-    help: "Get/Set whether the NFC vendor_reset channel is accepted (true/false)."
+    help: "Get/Set whether vendor_reset (NFC + shell) is accepted (true/false)."
 
   - name: alarm_limit
     proto_group: alarms
