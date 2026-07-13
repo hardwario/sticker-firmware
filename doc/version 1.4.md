@@ -353,7 +353,20 @@ Replay over LoRaWAN with the `req_history` downlink command (§1): the device st
 
 > **Note on `interval-report`:** the LoRaWAN stack persists frame counters to NVS on every uplink; at the 60 s minimum interval with multi-frame reports the storage partition reaches its ~10 k erase budget in roughly 1–2 years. The default (900 s) is decades. History flash wear is fine even at 60 s.
 >
-> **Storage backend (raw flash ring, #265):** history is stored in a dedicated 64 KB flash partition as a raw ring of 2 KB erase pages — records are packed densely (no NVS per-entry allocation table, no half-partition GC reserve), so the partition holds roughly **10× more records** than the old NVS backend held in 80 KB. Capacity depends on the enabled channels (record size): e.g. temperature + humidity (3 B) ≈ 18 k records (~275 days at 15-min interval); 3× temperature + humidity (7 B) ≈ 9 k records (~3 months). `history info` reports the live capacity. The freed 16 KB went to the code partition (160 KB → 176 KB).
+> **Storage backend (raw flash ring, #265):** history is stored in a dedicated flash partition as a raw ring of 2 KB erase pages — records are packed densely (no NVS per-entry allocation table, no half-partition GC reserve), so the partition holds roughly **10× more records** than the old NVS backend held in 80 KB. `history info` reports the live capacity for the currently-selected channels.
+>
+> **Partition size (#302):** the `history` partition was shrunk **64 KB → 32 KB** (16 pages) to grow the code budget instead — headroom for future features mattered more than months of extra buffered history the LoRaWAN replay/NFC paged-pull already drains opportunistically. Record size is fixed per channel regardless of the physical sensor (temperature = 2 B, humidity = 1 B, a 1-Wire/hall/input/motion channel = its own fixed width), so capacity and retention scale with how many channels `history-sensors` selects:
+>
+> | Channels recorded | Record size | Capacity (32 KB) | Retention @ 15 min interval |
+> |---|---|---|---|
+> | humidity only | 1 B | 28 224 records | ~294 days |
+> | temperature only | 2 B | 14 112 records | ~147 days |
+> | temperature + humidity (factory default) | 3 B | 9 408 records | ~98 days |
+> | 2× temperature + 2× humidity | 6 B | 4 704 records | ~49 days |
+> | 3× temperature + 1× humidity | 7 B | 4 032 records | ~42 days |
+> | all 15 channels | ~35 B | 800 records | ~8 days |
+>
+> At the old 64 KB size every row above was roughly double (e.g. the factory default was ~275 days). Even the worst case (all channels, 32 KB) still covers over a week unattended, and the common single/dual-channel configurations comfortably exceed the typical reporting/maintenance cadence. The 32 KB freed by this change, plus the 16 KB #265 already freed, brought the code partition from its original 160 KB up to **208 KB**.
 >
 > **Note on durability:** each record is durable as soon as its 8 B flash double word is programmed; page headers carry the time base and ordinal, so on reboot the count and time base are recovered by scanning headers — no separate index record. An *unclean* reboot loses only the still-staged tail (the < 7 B not yet flushed into a double word ≈ up to ~2 records). A `clock_sync` fixup to the time base is snapshotted into the next opened page; if a reboot intervenes first, the next clock sync re-anchors it. `clear` erases the whole partition; a sensor-mask or interval change is a logical reset (the ring starts a fresh page, the stale pages are reclaimed as it wraps) with no full-erase stall.
 >
@@ -780,9 +793,11 @@ applying new defaults, same as today.
 
 | Partition | Offset | Size | Contents |
 |---|---|---|---|
-| `code` | `0x00000` | 160 KB | application image (`CONFIG_FLASH_LOAD_SIZE` link-time budget) |
-| `history` | `0x28000` | 80 KB | sensor history buffer (future FUOTA DFU slot) |
+| `code` | `0x00000` | 208 KB | application image (`CONFIG_FLASH_LOAD_SIZE` link-time budget) |
+| `history` | `0x34000` | 32 KB | sensor history ring buffer (§6) |
 | `storage` | `0x3C000` | 16 KB | **NVS — the protected set lives here** |
+
+(`history` shrank 80 KB → 64 KB → 32 KB and moved `0x28000` → `0x2C000` → `0x34000` across #265 and #302, each time growing `code` instead; `storage` has stayed fixed at `0x3C000`/16 KB throughout.)
 
 The contract every update path must honour: **never erase the `storage` region at `0x3C000`.**
 The sanctioned exception is `vendor_reset` (#299): it deliberately erases both `storage` and
