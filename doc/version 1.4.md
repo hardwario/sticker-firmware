@@ -34,7 +34,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `settings_save` | Persist staged changes (**reboots**) | `ack` |
 | `reboot` | Cold reboot | `ack` |
 | `device_reset` | Reset config to defaults but **keep device identity + LoRaWAN keys** (stays provisioned/connected); clears dynamic alarm rules; **reboots**. Renamed from the single `factory_reset` (#299) — same wire id, same behavior | `ack` |
-| `factory_reset` | **NEW (#299), narrower than `device_reset`.** Reset config to defaults, keeping identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI) — drops the LoRaWAN session/keys, forcing a re-join; clears dynamic alarm rules; **reboots** | `ack` |
+| `factory_reset` | **NEW (#299), narrower than `device_reset`, NFC/shell only** — rejected over LoRaWAN (it drops the very session/keys a downlink would need to confirm delivery). Reset config to defaults, keeping identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI) — drops the LoRaWAN session/keys, forcing a re-join; clears dynamic alarm rules; **reboots** | `ack` |
 | `set_secret_key` | **NEW (#299), NFC/shell only** — rejected over LoRaWAN. Rotates `secret_key` over the already-encrypted channel (authenticated by the *current* key); the new key is never readable back via `get_param`/`get_config` | `ack` |
 | `force_send` | Send a telemetry report immediately | **none** — the report itself is the reply |
 | `sample` | Take a fresh reading: send a `Telemetry` report on fPort 2 **and** (over NFC) return the same readings in the reply. Works over LoRaWAN and NFC | LoRaWAN: **none** — the fPort-2 report is the reply. NFC: **`sample`** — a full `Telemetry` with the fresh readings |
@@ -51,7 +51,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 >
 > **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `sample`, `clock_sync`, `req_history`, `req_history_page`, `w1_scan`) do **not** also send an `ack`, to save an uplink. `sample` is dual: over LoRaWAN the fPort-2 report is the only reply (no fPort-85 body, like `force_send`); over NFC it additionally returns the readings synchronously so a phone can show them on the spot.
 >
-> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC (previously such transport-scoped commands could be wrongly accepted on the other transport with a misleading `Ack`). Conversely `req_history_page` is **NFC-only** — the NFC channel has no streaming path, so history is read there one page per tap (§6).
+> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC (previously such transport-scoped commands could be wrongly accepted on the other transport with a misleading `Ack`). Conversely `req_history_page`, `factory_reset` and `set_secret_key` are **NFC/shell-only** — `req_history_page` because the NFC channel has no streaming path, so history is read there one page per tap (§6); `factory_reset` (#299) because a LoRaWAN downlink that drops the LoRaWAN session/keys carrying it could never confirm its own delivery; `set_secret_key` because provisioning a new key over the network it is meant to protect defeats the point.
 >
 > **Setting the clock over NFC:** `clock_sync` with a `unix_time` field sets the RTC directly from a phone, bootstrapping wall-clock time before/without a network (epoch sanity-bounded to 2024-01-01 … 2100-01-01; out-of-range → `BAD_REQUEST` "bad epoch"). A later network `DeviceTimeReq`/`DeviceTimeAns` stays authoritative and may refine it. Empty `clock_sync` over NFC just confirms (no network to query).
 >
@@ -751,13 +751,16 @@ no hand-maintained C list.
 |---|---|---|---|
 | `device_reboot` | everything (no wipe) | shell `settings save`, LoRaWAN/NFC `reboot` | plain reboot |
 | `device_reset` | identity + **full LoRaWAN** (region/keys/session) | shell `settings device-reset`, LoRaWAN/NFC `device_reset` | renamed from the old, single `factory_reset` command/`settings reset` — same behavior, same wire id |
-| `factory_reset` | identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI); drops the LoRaWAN session/keys | shell `settings factory-reset`, LoRaWAN/NFC `factory_reset` (new, id 23) | forces a re-join |
+| `factory_reset` | identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI); drops the LoRaWAN session/keys | shell `settings factory-reset`, NFC `factory_reset` (new, id 23) — **not** LoRaWAN | forces a re-join; rejected over LoRaWAN (`NOT_READY`) because the downlink carrying it would destroy the very session/keys needed to confirm delivery |
 | `vendor_reset` | `serial-number` + `vendor-token` only | shell `settings vendor-reset <new-secret-key>`, NFC `hio.stck:rst` (vendor-token authenticated — **not** a `Command`, never over LoRaWAN) | goes through the live settings API like the two tiers above — NOT a raw flash erase of the settings-backed `storage` partition (that would desync Zephyr's NVS mid-boot, see the GOTCHA note in `app_settings.c`); only the separate, non-NVS `history` partition is raw-erased. Also wipes the pulse totalizers and the NFC claim-record state via their own live APIs. Refused (`-EACCES`) if `vendor-reset-allow` is false, or if the caller doesn't supply a replacement `secret-key` in the same call (vendor_reset drops `secret-key` too — leaving it all-zero would lock the device out of its own encrypted NFC channel) |
 | `settings erase` (shell) | nothing, incl. serial | shell only | full NVS wipe; the deliberate "return to blank" escape hatch, never wired to LoRaWAN/NFC |
 
-`device_reset` and `factory_reset` are both reachable over LoRaWAN/NFC/shell like any other Command;
-`vendor_reset` is the one tier that never goes over the generic command channel at all — only its own
-NFC `hio.stck:rst` vendor-token channel, or the shell, ever reach it.
+`device_reset` is reachable over LoRaWAN/NFC/shell like any other Command — it keeps the LoRaWAN
+session, so a downlink triggering it can still be acked normally. `factory_reset` is NFC/shell only
+(rejected over LoRaWAN, `NOT_READY`): dropping the LoRaWAN keys/session in response to a LoRaWAN
+downlink would destroy the channel before the ack could ever confirm delivery. `vendor_reset` is the
+narrowest tier and never goes over the generic command channel at all — only its own NFC
+`hio.stck:rst` vendor-token channel, or the shell, ever reach it.
 
 Also new in #299: `set_secret_key` (nfc/shell only, never a LoRaWAN downlink) rotates `secret-key`
 over the already-encrypted channel — authenticated by the *current* key, so a lost/rotated key never

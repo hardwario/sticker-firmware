@@ -625,7 +625,9 @@ function decodeTelemetry(bytes) {
 //   { "command": "get_info", "seq": 1 }
 //   { "command": "force_send" }
 //   { "command": "clock_sync" }
-//   { "command": "reboot" }                 // also settings_save / device_reset / factory_reset
+//   { "command": "reboot" }                 // also settings_save / device_reset
+//                                            // (factory_reset/set_secret_key are nfc/shell only —
+//                                            // rejected over LoRaWAN, so no downlink for them here)
 //   { "command": "reset_counters", "hall_left": true, "input_a": true }
 //   { "command": "get_config", "page": 0 }
 //   { "command": "req_history", "from_unix": 1780000000, "to_unix": 1780003600 }
@@ -787,9 +789,11 @@ function encodeDownlinkCommand(cmd) {
     if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
   }
-  // get_info / settings_save / reboot / device_reset / factory_reset / force_send /
-  // clock_sync / w1_scan: empty body. (set_secret_key is nfc/shell only — never a
-  // LoRaWAN downlink — so it has no encoder branch here.)
+  // get_info / settings_save / reboot / device_reset / force_send / clock_sync /
+  // w1_scan: empty body. (factory_reset and set_secret_key are nfc/shell only —
+  // never a LoRaWAN downlink — so they have no encoder branch here; sending either
+  // by tag/id still round-trips through the command map above for decoding an
+  // NFC-side exchange, just not as a buildable downlink.)
 
   out = out.concat(_encLenDelim(tag, body));
   return { bytes: out, error: null };

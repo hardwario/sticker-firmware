@@ -350,12 +350,33 @@ ZTEST(cmd, test_deferred_actions)
 
 	/* device_reset (field 8, same wire id as the old, single factory_reset,
 	 * renamed #299) — was tag=0x42 (field8, LEN), still is: only the C enum/oneof
-	 * case name changed, not the wire byte. */
+	 * case name changed, not the wire byte. Reachable over LoRaWAN (unlike
+	 * factory_reset below): it keeps the LoRaWAN session, so a downlink
+	 * triggering it can still be acked normally. */
 	zassert_equal(handle("08094200", &r), APP_CMD_ACTION_DEVICE_RESET, "device_reset");
+}
 
-	/* factory_reset (field 23, NEW #299 tier — narrower than device_reset above,
-	 * a different command/id, not a renumbering of it). */
-	zassert_equal(handle("080aba0100", &r), APP_CMD_ACTION_FACTORY_RESET, "factory_reset");
+/* factory_reset (field 23, NEW #299 tier — narrower than device_reset above, a
+ * different command/id, not a renumbering of it) is nfc/shell only: a LoRaWAN
+ * downlink triggering it would destroy the very session/keys carrying it, so
+ * it could never even confirm delivery. */
+ZTEST(cmd, test_factory_reset_nfc_shell_only)
+{
+	Response r;
+
+	reset_cfg();
+	zassert_equal(handle("080aba0100", &r), APP_CMD_ACTION_NONE,
+		      "factory_reset rejected over lrw");
+	zassert_equal(r.which_body, Response_error_tag, "lrw should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+
+	reset_cfg();
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_NFC, "080aba0100", &r);
+	zassert_equal(a, APP_CMD_ACTION_FACTORY_RESET, "factory_reset over nfc");
+	zassert_equal(r.which_body, Response_ack_tag, "factory_reset acks (which=%d)",
+		      r.which_body);
 }
 
 /* #299 set_secret_key (field 24): nfc/shell only (rejected over lrw, like

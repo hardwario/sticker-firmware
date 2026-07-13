@@ -1049,6 +1049,11 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_sample(tp, cmd, resp, action);
 		break;
 	case Command_factory_reset_tag:
+		/* transports: [nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		*action = APP_CMD_ACTION_FACTORY_RESET;
 		resp->which_body = Response_ack_tag;
 		break;

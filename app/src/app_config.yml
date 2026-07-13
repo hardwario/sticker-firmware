@@ -130,10 +130,13 @@ commands:
     - {name: sample, proto_id: 21, body: Sample, kind: handler, response: sample, transports: [lrw, nfc]}
     # #299 reset ladder, new middle tier: keeps identity only (serial/vendor_token/
     # secret_key/nonce_counter/claim_token/DevEUI/JoinEUI), drops the LoRaWAN
-    # session/keys — forces a re-join. vendor_reset is NOT a Command: it is driven
-    # by its own NFC record (hio.stck:rst, vendor-token authenticated) and a
-    # shell-only `settings vendor-reset` for HIL, never over the generic cmd channel.
-    - {name: factory_reset, proto_id: 23, body: FactoryReset, kind: action, action: FACTORY_RESET, response: ack}
+    # session/keys — forces a re-join. NFC + shell only, never LoRaWAN: a LoRaWAN
+    # downlink triggering this would destroy the very session/keys carrying it,
+    # so it could never even confirm delivery. vendor_reset is NOT a Command: it
+    # is driven by its own NFC record (hio.stck:rst, vendor-token authenticated)
+    # and a shell-only `settings vendor-reset` for HIL, never over the generic
+    # cmd channel.
+    - {name: factory_reset, proto_id: 23, body: FactoryReset, kind: action, action: FACTORY_RESET, response: ack, transports: [nfc, shell]}
     # Change the secret_key over the already-encrypted channel (authenticated by
     # the CURRENT key), so a lost/rotated key never needs a J-Link. The new key is
     # never readable back via GetParam/GetConfig (secret_key stays proto_field:false).
