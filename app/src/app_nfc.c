@@ -421,6 +421,31 @@ void app_nfc_clm_reset(void)
 	clm_state_save();
 }
 
+/* Shared PENDING->CONSUMED transition (#308): three independent triggers all
+ * funnel through here so the latch/log/persist logic lives in one place.
+ *   1. delete-detected (below, in nfc_check_locked) - the original #247 signal.
+ *   2. clm_ack command (app_nfc_clm_ack) - explicit, authenticated (secret_key).
+ *   3. any successfully-decrypted hio.stck:cmd (handle_encrypted_cmd) - implicit:
+ *      decrypting at all already proves the caller holds secret_key, which is
+ *      already the "provisioning operator" bar the rest of this file uses, so a
+ *      claim window left open after a phone has already run a real command is
+ *      just noise on the tag.
+ * A no-op outside PENDING (already CONSUMED, or never armed). */
+static void clm_consume(const char *reason)
+{
+	if (m_clm_state != CLM_PENDING) {
+		return;
+	}
+	m_clm_state = CLM_CONSUMED;
+	clm_state_save();
+	LOG_INF("NFC clm record consumed (%s) (#308)", reason);
+}
+
+void app_nfc_clm_ack(void)
+{
+	clm_consume("clm_ack command");
+}
+
 /* A claim token is provisioned once any byte is non-zero (all-zero = unset, the
  * same sentinel the write-once shell guard uses, #170). */
 static bool claim_token_is_set(void)
@@ -1326,6 +1351,11 @@ static int handle_encrypted_cmd(const uint8_t *in, size_t in_len, uint8_t *out_b
 	uint32_t req_nonce = app_config()->nonce_counter;
 	NFC_DBG("cmd: decrypt ok, cmd_len=%zu", cmd_len);
 
+	/* #308: decrypting at all already proves the caller holds secret_key,
+	 * regardless of which command it turns out to be or whether it succeeds -
+	 * that is already the bar the rest of the claim window relies on. */
+	clm_consume("valid hio.stck:cmd received");
+
 	size_t resp_len = 0;
 	ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, cmd_plain, cmd_len, resp_plain,
 			     sizeof(resp_plain), &resp_len, action);
@@ -1938,10 +1968,8 @@ static int nfc_check_locked(void)
 		/* clm absent while PENDING = the phone deleted it after claiming -> latch
 		 * CONSUMED. Not on the arming cycle (just_armed): clm has not been laid down
 		 * yet, so the stale info-only tag is not a deletion. */
-		if (m_clm_state == CLM_PENDING && !m_seen_clm && !just_armed) {
-			m_clm_state = CLM_CONSUMED;
-			clm_state_save();
-			LOG_INF("NFC clm record consumed (phone deleted after claim) (#247)");
+		if (!m_seen_clm && !just_armed) {
+			clm_consume("phone deleted after claim");
 		}
 		info_len = build_resting_ndef(info, sizeof(info));
 		if (info_len && memcmp(m_buf, info, info_len) != 0) {

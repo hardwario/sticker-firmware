@@ -141,6 +141,17 @@ commands:
     # the CURRENT key), so a lost/rotated key never needs a J-Link. The new key is
     # never readable back via GetParam/GetConfig (secret_key stays proto_field:false).
     - {name: set_secret_key, proto_id: 24, body: SetSecretKey, kind: handler, response: ack, transports: [nfc, shell]}
+    # #308: explicit, authenticated end of the claim window (a companion to the
+    # #247 clm-record delete-detection, which stays as-is for backward
+    # compatibility with older Manager-App builds). Runs over the already-
+    # encrypted hio.stck:cmd channel like set_secret_key above, so only a phone
+    # that already holds secret_key can send it — decrypting at all already
+    # proves that, so app_nfc.c also fires the same transition as a side effect
+    # of any successfully-decrypted command, not just this one. No reboot, no
+    # deferred action: the underlying settings_save_one() write is the same
+    # narrow single-key persist app_nfc.c already does synchronously for the
+    # #247 delete-detection path.
+    - {name: clm_ack, proto_id: 25, body: ClmAck, kind: handler, response: ack, transports: [nfc, shell]}
 parameters:
   # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /
   # vendor_token) are OFF the config wire (`proto_field: false`, #250 Part B): configen

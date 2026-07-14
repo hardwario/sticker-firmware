@@ -36,6 +36,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `device_reset` | Reset config to defaults but **keep device identity + LoRaWAN keys** (stays provisioned/connected); clears dynamic alarm rules; **reboots**. Renamed from the single `factory_reset` (#299) — same wire id, same behavior | `ack` |
 | `factory_reset` | **NEW (#299), narrower than `device_reset`, NFC/shell only** — rejected over LoRaWAN (it drops the very session/keys a downlink would need to confirm delivery). Reset config to defaults, keeping identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI) — drops the LoRaWAN session/keys, forcing a re-join; clears dynamic alarm rules; **reboots** | `ack` |
 | `set_secret_key` | **NEW (#299), NFC/shell only** — rejected over LoRaWAN. Rotates `secret_key` over the already-encrypted channel (authenticated by the *current* key); the new key is never readable back via `get_param`/`get_config` | `ack` |
+| `clm_ack` | **NEW (#308), NFC/shell only** — rejected over LoRaWAN. Explicit, authenticated end of the claim window (§10 Claim record): ends `PENDING`→`CONSUMED` without an RF delete. Empty body — decrypting it at all is the whole signal | `ack` |
 | `force_send` | Send a telemetry report immediately | **none** — the report itself is the reply |
 | `sample` | Take a fresh reading: send a `Telemetry` report on fPort 2 **and** (over NFC) return the same readings in the reply. Works over LoRaWAN and NFC | LoRaWAN: **none** — the fPort-2 report is the reply. NFC: **`sample`** — a full `Telemetry` with the fresh readings |
 | `reset_counters` | Clear selected hall/input counters | `ack` |
@@ -51,7 +52,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 >
 > **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `sample`, `clock_sync`, `req_history`, `req_history_page`, `w1_scan`) do **not** also send an `ack`, to save an uplink. `sample` is dual: over LoRaWAN the fPort-2 report is the only reply (no fPort-85 body, like `force_send`); over NFC it additionally returns the readings synchronously so a phone can show them on the spot.
 >
-> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC (previously such transport-scoped commands could be wrongly accepted on the other transport with a misleading `Ack`). Conversely `req_history_page`, `factory_reset` and `set_secret_key` are **NFC/shell-only** — `req_history_page` because the NFC channel has no streaming path, so history is read there one page per tap (§6); `factory_reset` (#299) because a LoRaWAN downlink that drops the LoRaWAN session/keys carrying it could never confirm its own delivery; `set_secret_key` because provisioning a new key over the network it is meant to protect defeats the point.
+> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC (previously such transport-scoped commands could be wrongly accepted on the other transport with a misleading `Ack`). Conversely `req_history_page`, `factory_reset`, `set_secret_key` and `clm_ack` are **NFC/shell-only** — `req_history_page` because the NFC channel has no streaming path, so history is read there one page per tap (§6); `factory_reset` (#299) because a LoRaWAN downlink that drops the LoRaWAN session/keys carrying it could never confirm its own delivery; `set_secret_key` because provisioning a new key over the network it is meant to protect defeats the point; `clm_ack` (#308) because ending the claim window is inherently tied to the physical NFC tap that started it.
 >
 > **Setting the clock over NFC:** `clock_sync` with a `unix_time` field sets the RTC directly from a phone, bootstrapping wall-clock time before/without a network (epoch sanity-bounded to 2024-01-01 … 2100-01-01; out-of-range → `BAD_REQUEST` "bad epoch"). A later network `DeviceTimeReq`/`DeviceTimeAns` stays authoritative and may refine it. Empty `clock_sync` over NFC just confirms (no network to query).
 >
@@ -612,18 +613,32 @@ in a dedicated **plaintext** record next to the info record — a small protobuf
   `clm` record straight from the ST25DV EEPROM over RF. Because the tag is RF-powered, this
   works **even with the sticker powered off**; the phone must keep the `inf` record (delete
   `clm` only).
+- **Three independent end-of-claim triggers (#308).** The delete-detection above still works
+  unmodified (kept for backward compatibility with older Manager-App builds), but an RF delete is
+  unauthenticated — a rogue phone could delete `clm` as a nuisance, and the app needs an extra RF
+  write after claiming just to end the window. Two better alternatives now also end it:
+  - **`clm_ack` command** — an explicit, empty `Command` sent over the already-encrypted
+    `hio.stck:cmd` channel (same authentication as `set_secret_key`/`factory_reset`: only a phone
+    holding `secret_key` can send it). The app can send this right after the backend confirms the
+    claim instead of an RF delete.
+  - **Implicit consume on any authenticated command.** Decrypting *any* `hio.stck:cmd` frame at
+    all already proves the caller holds `secret_key` — the same bar the rest of this section
+    relies on — so the firmware ends the claim window as a side effect of the *first* real
+    command a paired phone sends, even one that isn't `clm_ack`.
+
+  All three triggers funnel through the same latch transition, so the rest of this section
+  applies identically regardless of which one fired.
 - **No resurrection.** The firmware never rewrites `clm` after it is gone. A small persisted
   latch (`UNSET → PENDING → CONSUMED`, in its own `clm` settings key, outside the config blob
-  so `device_reset`/`factory_reset` leave it intact) tracks this: when a poll finds the
-  tag settled (info present) but `clm` absent while it was `PENDING`, the state latches
-  `CONSUMED` and `clm` is never emitted again — a full NVS erase, or `vendor_reset` (#299, which
-  explicitly resets it back to `UNSET` via its own live-API reset, alongside the pulse totalizers),
-  re-opens provisioning.
-- **Threat model.** Read and delete are unauthenticated over RF (accepted: the claim window
-  relies on physical proximity + the backend ownership check). A rogue phone can delete `clm`
-  (a nuisance/DoS), but the token is **not lost** — the owner still reads it over the encrypted
-  `get_info` channel with `secret_key`. An ST25DV RF-password on that area is a possible future
-  hardening. The shell `nfc clm` command shows the latch state for bring-up.
+  so `device_reset`/`factory_reset` leave it intact) tracks this: once `CONSUMED`, `clm` is never
+  emitted again — a full NVS erase, or `vendor_reset` (#299, which explicitly resets it back to
+  `UNSET` via its own live-API reset, alongside the pulse totalizers), re-opens provisioning.
+- **Threat model.** The delete-detection path is unauthenticated over RF (accepted: the claim
+  window relies on physical proximity + the backend ownership check for that path). A rogue phone
+  deleting `clm` is a nuisance/DoS at worst — the token is **not lost** (still readable over the
+  encrypted `get_info` channel with `secret_key`), and a legitimate `clm_ack` or any real command
+  still ends the window correctly afterwards. The shell `nfc clm` command shows the latch state
+  for bring-up.
 - **HW-validated** (2026-07-07, J-Link 822005109, debug image): `settings erase` → `config
   claim-token` + `settings save` → reboot arms `PENDING`, `nfc dump` shows the two-record
   `[inf, clm]` message; a targeted delete (info-only rewrite) latches `CONSUMED` with no

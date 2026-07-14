@@ -26,6 +26,7 @@ extern uint32_t test_clock_unix;
 extern float test_battery_v;
 extern int test_battery_ret;
 extern void test_set_lrw_dirty(bool v);
+extern int g_clm_ack_calls;
 
 static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 {
@@ -69,6 +70,7 @@ static void reset_cfg(void)
 	memset(&g_app_config, 0, sizeof(g_app_config));
 	test_clock_has = false;
 	test_set_lrw_dirty(false);
+	g_clm_ack_calls = 0;
 }
 
 ZTEST(cmd, test_set_param_applies_and_acks)
@@ -414,6 +416,30 @@ ZTEST(cmd, test_set_secret_key)
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
 		      r.body.error.code);
+}
+
+/* #308 clm_ack (field 25): nfc/shell only (rejected over lrw, like
+ * factory_reset/set_secret_key above). The actual clm-latch transition lives in
+ * app_nfc.c (HIL-verified, #247/#308 — see manual-test-plan.md); here we only
+ * confirm the command reaches app_nfc_clm_ack() and acks, via the stub call
+ * counter (g_clm_ack_calls). */
+ZTEST(cmd, test_clm_ack)
+{
+	Response r;
+
+	reset_cfg();
+	zassert_equal(handle("080cca0100", &r), APP_CMD_ACTION_NONE, "clm_ack rejected over lrw");
+	zassert_equal(r.which_body, Response_error_tag, "lrw should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+	zassert_equal(g_clm_ack_calls, 0, "must not call app_nfc_clm_ack over lrw");
+
+	reset_cfg();
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_NFC, "080cca0100", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "clm_ack over nfc: no deferred action");
+	zassert_equal(r.which_body, Response_ack_tag, "clm_ack acks (which=%d)", r.which_body);
+	zassert_equal(g_clm_ack_calls, 1, "app_nfc_clm_ack called exactly once");
 }
 
 /* F-1: lrw_join (proto_id 17) / lrw_reset (16) must be rejected with NOT_READY

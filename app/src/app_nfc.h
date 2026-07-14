@@ -81,6 +81,11 @@ bool app_nfc_session_active(void);
  * device_reset/factory_reset deliberately leave clm state alone (see app_nfc.c). */
 void app_nfc_clm_reset(void);
 
+/* Explicit claim-ack (#308, clm_ack command): transitions CLM_PENDING -> CLM_CONSUMED
+ * and persists, no reboot. A no-op if not currently PENDING (already consumed, or
+ * never armed) - always safe to call. */
+void app_nfc_clm_ack(void);
+
 #ifdef __cplusplus
 }
 #endif

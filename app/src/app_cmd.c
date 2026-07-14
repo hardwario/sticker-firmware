@@ -692,6 +692,23 @@ static void app_cmd_handle_set_secret_key(enum app_cmd_transport tp, const Comma
 	resp->which_body = Response_ack_tag;
 }
 
+/* #308: explicit end of the claim window. Decrypting this command at all
+ * already proves the caller holds secret_key, so app_nfc_clm_ack() does the
+ * same narrow settings_save_one() persist the #247 delete-detection path
+ * already does synchronously elsewhere in app_nfc.c — no deferred action, no
+ * reboot. A no-op if the claim window isn't currently open (already consumed,
+ * or claim_token never provisioned), so this is always safe to send. */
+static void app_cmd_handle_clm_ack(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				   enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(action);
+
+	app_nfc_clm_ack();
+	resp->which_body = Response_ack_tag;
+}
+
 /* force_send / req_history are LRW-only (transports: [lrw] in the YAML); the
  * generated dispatch enforces that before calling the handler, so the handlers
  * below assume the LoRaWAN transport. (clock_sync also runs over NFC — see its
@@ -1064,6 +1081,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_set_secret_key(tp, cmd, resp, action);
+		break;
+	case Command_clm_ack_tag:
+		/* transports: [nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_clm_ack(tp, cmd, resp, action);
 		break;
 	default:
 		/* L-54: an unknown command tag (e.g. a removed command like the old
