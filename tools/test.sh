@@ -63,18 +63,43 @@ else
 fi
 
 # 5. Generated config in sync with app_config.yml
-if have west; then
+#
+# Deliberately NOT `west configen`: the west-command extension resolves to
+# whichever checkout the west manifest's "self" project points at (fixed by
+# west.yml, independent of $REPO) — in a git worktree that is the OTHER
+# checkout sharing this workspace, not this one. Running it here would
+# silently regenerate app_config.c/h/proto/options.in/app_cmd.c/ttn.js from
+# THAT (possibly older/different) copy of configen.py and overwrite this
+# worktree's files with it, in place, even when this very check then reports
+# FAIL. Importing scripts/west_commands/configen.py directly by path always
+# uses this worktree's own copy, exactly like `west configen` would from the
+# manifest project itself. Also checks app_cmd.c/ttn.js, which the old bare
+# `west configen` invocation silently regenerated (via its own default output
+# paths) without ever being included in the sync check below.
+if have python3; then
   banner "configen output in sync"
-  if west configen "$REPO/app/src/app_config.yml" -o "$REPO/app/src/" >/dev/null 2>&1 \
+  if python3 -c "
+import sys, argparse
+from pathlib import Path
+sys.path.insert(0, '$REPO/scripts/west_commands')
+import configen
+ns = argparse.Namespace(
+    yaml_file=Path('$REPO/app/src/app_config.yml'), output_dir=Path('$REPO/app/src'),
+    templates_dir=None, proto=None, options=None, no_proto=False,
+    decoder=Path('$REPO/app/decoder/ttn.js'), app_cmd=Path('$REPO/app/src/app_cmd.c'), dry_run=False,
+)
+configen.Configen().do_run(ns, [])
+" >/dev/null 2>&1 \
      && git -C "$REPO" diff --quiet -- \
         app/src/app_config.c app/src/app_config.h \
-        app/src/app_config.proto app/src/app_config.options.in; then
+        app/src/app_config.proto app/src/app_config.options.in \
+        app/src/app_cmd.c app/decoder/ttn.js; then
     ok "configen output in sync"
   else
-    bad "configen output in sync — regenerate and commit (git diff app/src/app_config.*)"
+    bad "configen output in sync — regenerate and commit (git diff app/src/app_config.* app/src/app_cmd.c app/decoder/ttn.js)"
   fi
 else
-  skip "configen sync — 'west' not found"
+  skip "configen sync — 'python3' not found"
 fi
 
 banner "summary"
