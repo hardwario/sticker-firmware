@@ -33,6 +33,7 @@
 
 /* Standard includes */
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -44,9 +45,15 @@ LOG_MODULE_REGISTER(app_history, LOG_LEVEL_INF);
 /* ---- Sensor descriptor table -------------------------------------------- */
 
 enum hist_enc {
-	ENC_TEMP, /* float -> int16 x100, sentinel 0x7FFF, 2 B */
-	ENC_HUM,  /* float -> uint8 x2,   sentinel 0xFF,   1 B */
-	ENC_COUNT /* uint32 absolute,                       4 B */
+	ENC_TEMP,  /* float -> int16 x100, sentinel 0x7FFF, 2 B */
+	ENC_HUM,   /* float -> uint8 x2,   sentinel 0xFF,   1 B */
+	ENC_COUNT, /* uint32 absolute,                       4 B */
+	/* #311: same wire scale as the Telemetry message (app_compose.c) so a
+	 * consumer can share one conversion for both, just a fixed-width field
+	 * instead of a proto3-presence one. */
+	ENC_PRESSURE, /* float kPa -> uint16 hPa x10, sentinel 0xFFFF, 2 B */
+	ENC_LUX,      /* float lux -> uint16 lux/2,   sentinel 0xFFFF, 2 B */
+	ENC_ORIENT,   /* int (INT_MAX=absent) -> uint8 raw & 0xf, sentinel 0xFF, 1 B */
 };
 
 #define NO_CAP SIZE_MAX
@@ -93,11 +100,25 @@ static const struct hist_desc m_desc[APP_HISTORY_SENSOR_COUNT] = {
 				 ENC_COUNT, 4, offsetof(struct app_config, cap_input_b)},
 	[APP_HISTORY_MOTION] = {"motion", offsetof(struct app_sensor_data, motion_count), ENC_COUNT,
 				4, offsetof(struct app_config, cap_pir_detector)},
+	/* #311: barometer (MPL3115A2), light sensor (OPT3001), accelerometer
+	 * (LIS2DH) — all already sampled + in telemetry, newly recordable here. */
+	[APP_HISTORY_PRESSURE] = {"pressure", offsetof(struct app_sensor_data, pressure),
+				  ENC_PRESSURE, 2, offsetof(struct app_config, cap_barometer)},
+	[APP_HISTORY_ILLUMINANCE] = {"illuminance", offsetof(struct app_sensor_data, illuminance),
+				     ENC_LUX, 2, offsetof(struct app_config, cap_light_sensor)},
+	[APP_HISTORY_ORIENTATION] = {"orientation", offsetof(struct app_sensor_data, orientation),
+				     ENC_ORIENT, 1, offsetof(struct app_config, cap_accelerometer)},
+	[APP_HISTORY_ACCEL_MOTION] = {"accel-motion",
+				      offsetof(struct app_sensor_data, accel_motion_count),
+				      ENC_COUNT, 4, offsetof(struct app_config, cap_accelerometer)},
 };
 
-#define TEMP_SENTINEL   0x7FFF
-#define HUM_SENTINEL    0xFF
-#define MAX_RECORD_SIZE (APP_HISTORY_SENSOR_COUNT * 4) /* worst case all channels, values only */
+#define TEMP_SENTINEL     0x7FFF
+#define HUM_SENTINEL      0xFF
+#define PRESSURE_SENTINEL 0xFFFF
+#define LUX_SENTINEL      0xFFFF
+#define ORIENT_SENTINEL   0xFF
+#define MAX_RECORD_SIZE   (APP_HISTORY_SENSOR_COUNT * 4) /* worst case all channels, values only */
 
 /* ---- Module state ------------------------------------------------------- */
 
@@ -733,6 +754,28 @@ static size_t encode_value(uint8_t *p, int i)
 		sys_put_le32(c, p);
 		return 4;
 	}
+	case ENC_PRESSURE: {
+		float f;
+		memcpy(&f, src, sizeof(f));
+		uint16_t v = isnan(f) ? (uint16_t)PRESSURE_SENTINEL
+				      : (uint16_t)CLAMP(lroundf(f * 100.0f), 0, 65534);
+		sys_put_le16(v, p);
+		return 2;
+	}
+	case ENC_LUX: {
+		float f;
+		memcpy(&f, src, sizeof(f));
+		uint16_t v = isnan(f) ? (uint16_t)LUX_SENTINEL
+				      : (uint16_t)CLAMP(lroundf(f / 2.0f), 0, 65534);
+		sys_put_le16(v, p);
+		return 2;
+	}
+	case ENC_ORIENT: {
+		int iv;
+		memcpy(&iv, src, sizeof(iv));
+		p[0] = (iv == INT_MAX) ? ORIENT_SENTINEL : (uint8_t)(iv & 0xf);
+		return 1;
+	}
 	}
 	return 0;
 }
@@ -771,6 +814,33 @@ static void decode_record(const uint8_t *rec, struct app_history_record *out)
 			out->value[i] = (double)v;
 			out->present |= BIT(i);
 			p += 4;
+			break;
+		}
+		case ENC_PRESSURE: {
+			uint16_t v = sys_get_le16(p);
+			if (v != PRESSURE_SENTINEL) {
+				out->value[i] = v / 10.0;
+				out->present |= BIT(i);
+			}
+			p += 2;
+			break;
+		}
+		case ENC_LUX: {
+			uint16_t v = sys_get_le16(p);
+			if (v != LUX_SENTINEL) {
+				out->value[i] = v * 2.0;
+				out->present |= BIT(i);
+			}
+			p += 2;
+			break;
+		}
+		case ENC_ORIENT: {
+			uint8_t v = p[0];
+			if (v != ORIENT_SENTINEL) {
+				out->value[i] = v;
+				out->present |= BIT(i);
+			}
+			p += 1;
 			break;
 		}
 		}
@@ -1159,7 +1229,8 @@ static void print_value(const struct shell *sh, char *buf, size_t cap, int i, bo
 {
 	if (!present) {
 		snprintf(buf, cap, "--");
-	} else if (m_desc[i].enc == ENC_COUNT) {
+	} else if (m_desc[i].enc == ENC_COUNT || m_desc[i].enc == ENC_ORIENT) {
+		/* orientation is a discrete 0..15 code, not a fractional measurement. */
 		snprintf(buf, cap, "%d", APP_FP0(v));
 	} else {
 		snprintf(buf, cap, "%s%d.%02d", APP_FP2(v));

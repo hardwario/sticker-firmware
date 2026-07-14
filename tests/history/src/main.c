@@ -13,6 +13,7 @@
 #include <zephyr/ztest.h>
 #include <zephyr/kernel.h>
 
+#include <limits.h>
 #include <math.h>
 #include <string.h>
 
@@ -23,7 +24,11 @@ K_MUTEX_DEFINE(g_app_sensor_data_lock);
 extern bool test_clock_has;
 extern uint32_t test_clock_unix;
 
-#define BIT16(n) ((uint16_t)(1u << (n)))
+/* NOTE (#311): `present` is uint32_t — this used to narrow to uint16_t, which
+ * silently truncated to 0 for any channel index >= 16 (e.g. ILLUMINANCE, enum
+ * value 16: `(uint16_t)(1u << 16)` wraps to 0). Widened when adding the first
+ * channels past index 15. */
+#define BIT16(n) ((uint32_t)(1u << (n)))
 
 /* Fresh start: temperature+humidity only (NO_CAP), all caps off, clock unsynced. */
 static void setup(void)
@@ -204,6 +209,60 @@ ZTEST(history, test_per_slot_w1_channels)
 	zassert_within(r.value[APP_HISTORY_S3_TEMP], 30.0, 0.01, "s3-temp %g",
 		       r.value[APP_HISTORY_S3_TEMP]);
 	zassert_false(r.present & BIT16(APP_HISTORY_S3_HUM), "s3-hum absent (NaN sentinel)");
+}
+
+/* #311: pressure/illuminance/orientation/accel-motion — same fixed-width
+ * present/absent pattern as the other channels, gated on their own caps. */
+ZTEST(history, test_pressure_illuminance_orientation_accel_channels)
+{
+	setup();
+	g_app_config.cap_barometer = true;
+	g_app_config.cap_light_sensor = true;
+	g_app_config.cap_accelerometer = true;
+	g_app_config.history_sensors |= BIT(APP_HISTORY_PRESSURE) | BIT(APP_HISTORY_ILLUMINANCE) |
+					BIT(APP_HISTORY_ORIENTATION) |
+					BIT(APP_HISTORY_ACCEL_MOTION);
+	zassert_equal(app_history_init(), 0, "re-init with new caps");
+	app_history_clear();
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	g_app_sensor_data.pressure = 101.32f; /* kPa -> 1013.2 hPa on the wire */
+	g_app_sensor_data.illuminance = 450.0f;
+	g_app_sensor_data.orientation = 3;
+	g_app_sensor_data.accel_motion_count = 7;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+	app_history_capture();
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0, "get");
+	zassert_true(r.present & BIT16(APP_HISTORY_PRESSURE), "pressure present");
+	zassert_within(r.value[APP_HISTORY_PRESSURE], 1013.2, 0.1, "pressure %g",
+		       r.value[APP_HISTORY_PRESSURE]);
+	zassert_true(r.present & BIT16(APP_HISTORY_ILLUMINANCE), "illuminance present");
+	zassert_within(r.value[APP_HISTORY_ILLUMINANCE], 450.0, 2.0, "illuminance %g",
+		       r.value[APP_HISTORY_ILLUMINANCE]);
+	zassert_true(r.present & BIT16(APP_HISTORY_ORIENTATION), "orientation present");
+	zassert_within(r.value[APP_HISTORY_ORIENTATION], 3.0, 0.01, "orientation %g",
+		       r.value[APP_HISTORY_ORIENTATION]);
+	zassert_true(r.present & BIT16(APP_HISTORY_ACCEL_MOTION), "accel-motion present");
+	zassert_within(r.value[APP_HISTORY_ACCEL_MOTION], 7.0, 0.01, "accel-motion %g",
+		       r.value[APP_HISTORY_ACCEL_MOTION]);
+
+	/* Absent sentinels: NaN pressure/illuminance, INT_MAX orientation (the
+	 * app_sensor_data default when the capability is off). */
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	g_app_sensor_data.pressure = NAN;
+	g_app_sensor_data.illuminance = NAN;
+	g_app_sensor_data.orientation = INT_MAX;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+	app_history_capture();
+
+	zassert_equal(app_history_get(1, &r), 0, "get1");
+	zassert_false(r.present & BIT16(APP_HISTORY_PRESSURE), "pressure absent (NaN sentinel)");
+	zassert_false(r.present & BIT16(APP_HISTORY_ILLUMINANCE),
+		      "illuminance absent (NaN sentinel)");
+	zassert_false(r.present & BIT16(APP_HISTORY_ORIENTATION),
+		      "orientation absent (INT_MAX sentinel)");
 }
 
 ZTEST_SUITE(history, NULL, NULL, NULL, NULL, NULL);

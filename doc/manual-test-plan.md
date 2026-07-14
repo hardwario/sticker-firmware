@@ -813,6 +813,29 @@ it resets to 0.
 
 - [ ] Pass
 
+### H9 — Pressure / illuminance / orientation / accel-motion channels (#311)
+
+**Goal:** the 4 new history channels (barometer pressure, light-sensor illuminance, accelerometer
+orientation, accelerometer any-motion event count) record and read back correctly, gated on their
+own capability flags (`cap_barometer`, `cap_light_sensor`, `cap_accelerometer` — the last one gates
+both `orientation` and `accel-motion`), and are absent (not recorded) when the capability is off.
+**Observable:** `history sensors` lists all 4 new names; enabling them + capturing records values
+consistent with a live sensor read; disabling the capability drops the channel from both the
+selection list and stored records.
+
+**Prompt for Claude:**
+> Confirm the board's `cap_barometer`/`cap_light_sensor`/`cap_accelerometer` are on (`config` shell
+> or `get_config`). Run `history sensors` and confirm `pressure`, `illuminance`, `orientation`,
+> `accel-motion` are all listed and available. Enable all 4 (`history sensors pressure on`, etc.),
+> `history capture`, then `history read 1` and confirm the printed values are in a plausible range
+> (pressure ~950–1050 hPa, illuminance a small non-negative number, orientation 0–5, accel-motion a
+> non-negative count) and roughly match a fresh sensor reading (`sample` command or `get_info`).
+> Then flip `cap_accelerometer` off via `config` + `settings save`, reboot, and confirm
+> `orientation`/`accel-motion` no longer appear in `history sensors` and are silently dropped from
+> the selection mask (no crash, no stale values). Report all observations.
+
+- [ ] Pass
+
 ---
 
 ## Alarms

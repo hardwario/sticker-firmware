@@ -514,6 +514,43 @@ test("history sentinel values decode to null", () => {
   assert.equal(rec.humidity, null);    // 0xff sentinel
 });
 
+// #311: pressure (uint16 LE hPa×10), illuminance (uint16 LE lux/2), orientation
+// (uint8 raw), accel_motion_count (uint32 LE) — bits 15..18.
+function histRecNew(pressureHpa, lux, orient, accelCount) {
+  const p = Math.round(pressureHpa * 10);
+  const l = Math.round(lux / 2);
+  return [
+    p & 0xff, (p >> 8) & 0xff,
+    l & 0xff, (l >> 8) & 0xff,
+    orient & 0xff,
+    accelCount & 0xff, (accelCount >> 8) & 0xff, (accelCount >> 16) & 0xff,
+    (accelCount >> 24) & 0xff
+  ];
+}
+const _PRESENT_NEW = 0x78000; // bit15 pressure | bit16 illuminance | bit17 orientation | bit18 accel_motion_count
+
+test("history decodes pressure/illuminance/orientation/accel_motion_count (#311)", () => {
+  const t0 = 1780000000;
+  const f = buildHistoryFrame(1, 0, 1, t0, _PRESENT_NEW, 900,
+    histRecNew(1013.2, 450, 3, 7));
+  const rec = codec.decodeUplink({ bytes: f, fPort: 85 }).data.history_frame.records[0];
+  assert.equal(rec.pressure, 1013.2);
+  assert.equal(rec.illuminance, 450);
+  assert.equal(rec.orientation, 3);
+  assert.equal(rec.accel_motion_count, 7);
+});
+
+test("history sentinels for pressure/illuminance/orientation decode to null (#311)", () => {
+  const t0 = 1780000000;
+  const f = buildHistoryFrame(1, 0, 1, t0, _PRESENT_NEW, 900,
+    [0xff, 0xff, 0xff, 0xff, 0xff, 7, 0, 0, 0]);
+  const rec = codec.decodeUplink({ bytes: f, fPort: 85 }).data.history_frame.records[0];
+  assert.equal(rec.pressure, null);
+  assert.equal(rec.illuminance, null);
+  assert.equal(rec.orientation, null);
+  assert.equal(rec.accel_motion_count, 7); // counters have no sentinel, 0 is valid
+});
+
 test("history time_synced=false decodes record times as null (L-1/L-3)", () => {
   const present = 0x03;
   // t0 is uptime-relative here; the frame flags it unsynced, so times must be null
