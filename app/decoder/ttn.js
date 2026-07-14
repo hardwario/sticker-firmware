@@ -366,15 +366,27 @@ var _HIST_SENSORS = [
   { name: "hall_right_count", enc: "count" },
   { name: "input_a_count", enc: "count" },
   { name: "input_b_count", enc: "count" },
-  { name: "motion_count", enc: "count" }
+  { name: "motion_count", enc: "count" },
+  // #311: barometer/light/accelerometer — already sampled + in telemetry,
+  // newly recordable in history. accel_motion_count is the LIS2DH any-motion
+  // event counter, distinct from motion_count above (PIR person-detection).
+  { name: "pressure", enc: "pressure" },
+  { name: "illuminance", enc: "lux" },
+  { name: "orientation", enc: "orient" },
+  { name: "accel_motion_count", enc: "count" }
 ];
 var _HIST_TEMP_SENTINEL = 0x7fff;
 var _HIST_HUM_SENTINEL = 0xff;
+var _HIST_PRESSURE_SENTINEL = 0xffff;
+var _HIST_LUX_SENTINEL = 0xffff;
+var _HIST_ORIENT_SENTINEL = 0xff;
 
 // HistoryFrame carries a shared `present` mask + `interval_s` once; samples is a
 // sequence of fixed-size, values-only records (no per-record time or mask):
 //   [per present sensor: scaled value]   int16 LE ×100 (temp), uint8 ×2 (hum),
-//                                         uint32 LE (counter); sentinel = null.
+//                                         uint32 LE (counter), uint16 LE ×10
+//                                         (pressure, hPa), uint16 LE /2 (lux),
+//                                         uint8 raw (orientation); sentinel = null.
 // Record j's time is t0_unix + j*interval_s (records are periodic). One
 // ReqHistory yields N such frames (frame_index 0..frame_count-1); the consumer
 // concatenates their records to reconstruct the requested window.
@@ -384,7 +396,8 @@ function _decodeHistorySamples(bytes, t0, present, interval, synced) {
   for (var s = 0; s < _HIST_SENSORS.length; s++) {
     if (!(present & (1 << s))) continue;
     var e = _HIST_SENSORS[s].enc;
-    recSize += (e === "temp") ? 2 : (e === "hum") ? 1 : 4;
+    recSize += (e === "temp" || e === "pressure" || e === "lux") ? 2
+      : (e === "hum" || e === "orient") ? 1 : 4;
   }
   if (recSize === 0) return out;
 
@@ -403,6 +416,15 @@ function _decodeHistorySamples(bytes, t0, present, interval, synced) {
       } else if (d.enc === "hum") {
         var hv = bytes[p]; p += 1;
         rec[d.name] = hv === _HIST_HUM_SENTINEL ? null : hv / 2;
+      } else if (d.enc === "pressure") {
+        var pv = bytes[p] | (bytes[p + 1] << 8); p += 2;
+        rec[d.name] = pv === _HIST_PRESSURE_SENTINEL ? null : pv / 10;
+      } else if (d.enc === "lux") {
+        var lv = bytes[p] | (bytes[p + 1] << 8); p += 2;
+        rec[d.name] = lv === _HIST_LUX_SENTINEL ? null : lv * 2;
+      } else if (d.enc === "orient") {
+        var ov = bytes[p]; p += 1;
+        rec[d.name] = ov === _HIST_ORIENT_SENTINEL ? null : ov;
       } else { // count
         rec[d.name] = (bytes[p] | (bytes[p + 1] << 8) | (bytes[p + 2] << 16) |
                        (bytes[p + 3] << 24)) >>> 0; p += 4;

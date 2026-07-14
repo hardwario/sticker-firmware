@@ -38,6 +38,13 @@ enum app_history_sensor {
 	APP_HISTORY_INPUT_A,
 	APP_HISTORY_INPUT_B,
 	APP_HISTORY_MOTION,
+	/* #311: barometer/light/accelerometer — already sampled + in telemetry,
+	 * newly recordable in history. accel_motion is the LIS2DH any-motion event
+	 * counter, distinct from MOTION above (PIR person-detection). */
+	APP_HISTORY_PRESSURE,
+	APP_HISTORY_ILLUMINANCE,
+	APP_HISTORY_ORIENTATION,
+	APP_HISTORY_ACCEL_MOTION,
 	APP_HISTORY_SENSOR_COUNT
 };
 
