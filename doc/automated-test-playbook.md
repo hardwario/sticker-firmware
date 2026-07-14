@@ -1269,12 +1269,13 @@ automated; *(excluded)* items are listed with reasons below the table.
 | K4 | AT-CLK-04 | A | D | – | |
 | K5 | AT-CLK-03 | A | D | – | |
 | N1 | AT-NFC-03 | SA | DR | phone | ✅ (AT-NFC-02) |
-| N2 | *(partial)* covered by AT-NFC-03 pattern with a reset payload — schedule with AT-BOOT-03 | SA | DR | phone | |
+| N2 | *(retired)* superseded by **N9** (#299) — the plaintext dedicated RESET NDEF type it described no longer exists; reset commands now go through the encrypted `hio.stck:cmd` channel (device_reset/factory_reset/set_secret_key), covered by AT-NFC-03's pattern with those payloads | SA | DR | phone | |
 | N3, N6 | n/a — features removed by design | – | – | – | |
 | N4 | AT-NFC-02 | SA | DR | phone | ✅ |
 | N5 | *(partial)* lrw_reset/lrw_join over NFC via `ats cmd nfc` on debug; phone control server has no op for it yet (improvement item) | A | D | – | |
 | N7 | *(on-request)* power-off boot-staged provisioning — needs a scripted power-off staging session | SA | DR | phone+power | |
 | N8 | AT-NFC-05, AT-NFC-06, AT-ADV-05 | SA | DR | phone | |
+| N9 | *(new, #299)* device_reset/factory_reset/set_secret_key over `hio.stck:cmd` with the ack-before-reboot handshake — same AT-NFC-03 injection pattern as N1, plus confirming factory_reset is rejected over a LoRaWAN downlink | SA | DR | phone | |
 | F1 | AT-LRW-03 | A | DR | – | |
 | F2, F3 | AT-HOST-03, AT-HOST-06 | A | host | – | |
 | — (new, no manual ID) | AT-BOOT-04/06, AT-CFG-06, AT-HIS-04/05, AT-PWR-01..07, AT-ADV-01..12, AT-SOAK-01..03, AT-NFC-08 | | | | AT-BOOT-04 ✅, AT-PWR-04 ✅ |
