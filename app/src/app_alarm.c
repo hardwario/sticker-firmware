@@ -10,7 +10,6 @@
 #include "app_config.h"
 #include "app_log.h"
 #include "app_lrw.h"
-#include "app_opt3001.h"
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_w1_slots.h"
@@ -132,10 +131,12 @@ static int64_t m_window_start_ms;
 static bool m_window_open;
 static struct k_work_delayable m_alarm_batch_work;
 
-/* Light-increase confirmation (#319): on a rising on-board-illuminance threshold we arm a
- * per-rule deadline (rstate.confirm_deadline) instead of latching, then this shared
- * delayable re-samples the OPT3001 once and latches only if still bright. One work item +
- * one fresh read serves every on-board-illuminance rule (all share the same source). */
+/* Light-increase confirmation (#319): on a rising illuminance threshold (on-board OPT3001
+ * or a 1-Wire slot light sensor) we arm a per-rule deadline (rstate.confirm_deadline)
+ * instead of latching, then this shared delayable re-samples once and latches only if the
+ * light is still bright. It runs on the sensor work queue (app_sensor_work_queue()) so its
+ * fresh re-sample is serialized with the periodic sweep — the 1-Wire bus is never shared
+ * concurrently, and a slow (1-Wire) read may block without stalling the system work queue. */
 static struct k_work_delayable m_light_confirm_work;
 
 static inline int64_t notif_hold_ms(void)
@@ -464,13 +465,16 @@ static bool read_poll_state(uint8_t source, uint8_t quantity, bool *out)
 
 /* ---- rule evaluation ---------------------------------------------------- */
 
-/* Light-increase confirmation delay (#319) applies only to the on-board OPT3001
- * illuminance threshold, and only when a non-zero delay is configured. All other
- * quantities/sources keep the immediate-latch behavior. */
+/* Light-increase confirmation delay (#319) applies to any illuminance threshold — the
+ * on-board OPT3001 and the 1-Wire slot light sensors (a machine-probe's OPT3001) — and only
+ * when a non-zero delay is configured. All other quantities/sources keep the immediate-latch
+ * behavior. */
 static inline bool dwell_eligible(const struct app_alarm_rule *rule)
 {
-	return rule->source == APP_ALARM_SRC_ONBOARD &&
-	       rule->quantity == APP_ALARM_Q_ILLUMINANCE &&
+	bool light_source =
+		rule->source == APP_ALARM_SRC_ONBOARD ||
+		(rule->source >= APP_ALARM_SRC_SLOT1 && rule->source <= APP_ALARM_SRC_SLOT4);
+	return light_source && rule->quantity == APP_ALARM_Q_ILLUMINANCE &&
 	       g_app_config.alarm_light_confirm_delay > 0;
 }
 
@@ -520,8 +524,9 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 				rt->confirm_deadline =
 					k_uptime_get() +
 					(int64_t)g_app_config.alarm_light_confirm_delay * 1000;
-				k_work_schedule(&m_light_confirm_work,
-						K_SECONDS(g_app_config.alarm_light_confirm_delay));
+				k_work_schedule_for_queue(
+					app_sensor_work_queue(), &m_light_confirm_work,
+					K_SECONDS(g_app_config.alarm_light_confirm_delay));
 			}
 		} else {
 			rt->active = true;
@@ -535,20 +540,24 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 }
 
 /* Light-increase confirmation (#319): fires alarm_light_confirm_delay seconds after a
- * rising on-board-illuminance edge armed rstate.confirm_deadline. Takes ONE fresh OPT3001
- * reading (continuous-conversion, sub-ms, off-lock) and latches only the due rules whose
- * light is still above hi+hst; a transient (door shut again) leaves nothing latched.
- * Lock: m_lock only (never with g_app_sensor_data_lock); radio kick after unlock. */
+ * rising illuminance edge (on-board OPT3001 or a 1-Wire slot light sensor) armed
+ * rstate.confirm_deadline. Runs on the sensor work queue, so one full app_sensor_sample()
+ * re-reads every source (on-board + 1-Wire slots) serialized with the periodic sweep — no
+ * 1-Wire bus contention — and also refreshes g_app_sensor_data so a later poll sees truth.
+ * It then latches only the due rules still above hi+hst; a transient (door shut again)
+ * leaves nothing latched. Locks: sample first (it takes g_app_sensor_data_lock itself),
+ * then g_app_sensor_data_lock -> m_lock for the decision; radio kick after unlock. */
 static void light_confirm_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	float lux = NAN;
-	int rret = app_opt3001_read(&lux); /* -ENODEV if cap_light_sensor was off at boot */
+	app_sensor_sample(); /* fresh read of every source; refreshes g_app_sensor_data */
+
 	bool should_send = false;
 	int64_t now = k_uptime_get();
 	int64_t earliest = 0;
 
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 	k_mutex_lock(&m_lock, K_FOREVER);
 	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
 		struct app_alarm_rule r;
@@ -570,22 +579,26 @@ static void light_confirm_work_handler(struct k_work *work)
 			continue; /* not due yet */
 		}
 		rt->confirm_deadline = 0; /* consume the window */
+		float v = NAN;
+		read_threshold_value(r.source, r.quantity, &v); /* fresh: sampled just above */
 		float hst = (r.hst >= 0.0f) ? r.hst : 0.0f;
-		if (rret == 0 && !isnan(lux) && lux > r.hi + hst && !rt->active) {
+		if (!isnan(v) && v > r.hi + hst && !rt->active) {
 			rt->active = true;
 			rt->type = ALARM_TYPE_HIGH;
 			alarm_collect(slot, r.source, r.quantity, true, ALARM_TYPE_HIGH, true,
-				      alarm_scale(r.quantity, lux));
+				      alarm_scale(r.quantity, v));
 			should_send = true;
 		}
 	}
 	k_mutex_unlock(&m_lock);
+	k_mutex_unlock(&g_app_sensor_data_lock);
 
 	if (should_send) {
 		alarm_lrw_send();
 	}
 	if (earliest != 0) {
-		k_work_reschedule(&m_light_confirm_work, K_MSEC(earliest - now));
+		k_work_reschedule_for_queue(app_sensor_work_queue(), &m_light_confirm_work,
+					    K_MSEC(earliest - now));
 	}
 }
 

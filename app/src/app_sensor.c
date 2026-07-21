@@ -386,6 +386,11 @@ int app_sensor_init(void)
 	return res;
 }
 
+struct k_work_q *app_sensor_work_queue(void)
+{
+	return &m_sensor_work_q;
+}
+
 void app_sensor_sample(void)
 {
 	int ret;

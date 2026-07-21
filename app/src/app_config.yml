@@ -299,7 +299,7 @@ parameters:
     default: 60
     min: 0
     max: 3600
-    help: "Get/Set light-increase alarm confirmation delay in seconds (0 = immediate). On a rising on-board illuminance threshold the device waits this long, re-samples, and only alarms if still bright."
+    help: "Get/Set light-increase alarm confirmation delay in seconds (0 = immediate). On a rising illuminance threshold (on-board OPT3001 or a 1-Wire slot light sensor) the device waits this long, re-samples, and only alarms if still bright."
 
   - name: lrw_region
     proto_group: lorawan

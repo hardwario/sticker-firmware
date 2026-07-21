@@ -50,6 +50,11 @@ extern struct k_mutex g_app_sensor_data_lock;
 int app_sensor_init(void);
 void app_sensor_sample(void);
 
+/* The sensor work queue (single-threaded). Exposed so another module can run a fresh
+ * sensor read serialized with the periodic sweep — e.g. the alarm engine's light-increase
+ * confirmation re-sample, which must not share the 1-Wire bus with the sweep concurrently. */
+struct k_work_q *app_sensor_work_queue(void);
+
 /* Stop the periodic sample timer ahead of a deep-sleep poweroff. */
 void app_sensor_suspend(void);
 

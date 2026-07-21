@@ -1581,7 +1581,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_alarm_notif_time, 1, 1),
 
 	SHELL_CMD_ARG(alarm-light-confirm-delay, NULL,
-	              "Get/Set light-increase alarm confirmation delay in seconds (0 = immediate). On a rising on-board illuminance threshold the device waits this long, re-samples, and only alarms if still bright.",
+	              "Get/Set light-increase alarm confirmation delay in seconds (0 = immediate). On a rising illuminance threshold (on-board OPT3001 or a 1-Wire slot light sensor) the device waits this long, re-samples, and only alarms if still bright.",
 	              cmd_alarm_light_confirm_delay, 1, 1),
 
 	SHELL_CMD_ARG(lrw-region, NULL,
