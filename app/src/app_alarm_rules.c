@@ -120,7 +120,7 @@ bool app_alarm_rule_valid(enum app_alarm_source source, enum app_alarm_quantity 
 	switch (source) {
 	case APP_ALARM_SRC_ONBOARD:
 		return quantity == APP_ALARM_Q_TEMPERATURE || quantity == APP_ALARM_Q_HUMIDITY ||
-		       quantity == APP_ALARM_Q_PRESSURE;
+		       quantity == APP_ALARM_Q_PRESSURE || quantity == APP_ALARM_Q_ILLUMINANCE;
 	case APP_ALARM_SRC_SLOT1:
 	case APP_ALARM_SRC_SLOT2:
 	case APP_ALARM_SRC_SLOT3:

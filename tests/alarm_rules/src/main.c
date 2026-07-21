@@ -93,6 +93,24 @@ ZTEST(alarm_rules, test_threshold_nan_bound_rejected)
 	zassert_equal(app_alarm_rules_set(0, &r), -EINVAL, "NaN bound accepted");
 }
 
+/* ---- #319: on-board illuminance is now a valid THRESHOLD source --------- */
+
+ZTEST(alarm_rules, test_onboard_illuminance_accepted)
+{
+	/* Part A of #319 made the on-board OPT3001 alarm-capable. A high-illuminance
+	 * band on the onboard source must now validate (it was rejected before). */
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_ONBOARD,
+		.quantity = APP_ALARM_Q_ILLUMINANCE,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 50.0f,
+		.hst = 5.0f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "onboard illuminance rule rejected");
+	zassert_true(app_alarm_rules_occupied(0), "onboard illuminance slot not occupied");
+}
+
 /* ---- non-THRESHOLD kinds must NOT be band-checked ----------------------- */
 
 ZTEST(alarm_rules, test_rate_rule_ignores_band)

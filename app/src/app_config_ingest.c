@@ -629,6 +629,15 @@ int app_config_apply_alarms(enum app_cmd_transport tp, const AppConfigMessage_Al
 	if (src->has_alarm_15) {
 		memcpy(config->alarm_15, src->alarm_15, sizeof(config->alarm_15));
 	}
+	if (src->has_alarm_light_confirm_delay) {
+		int val = src->alarm_light_confirm_delay;
+
+		if ((val >= 0 && val <= 3600)) {
+			config->alarm_light_confirm_delay = val;
+		} else {
+			FAULT(19);
+		}
+	}
 	return ret;
 }
 
@@ -707,6 +716,10 @@ void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, s
 	if (requested(ids, n, 18) && !slot_all_zero(c->alarm_15, sizeof(c->alarm_15))) {
 		dst->has_alarm_15 = true;
 		memcpy(dst->alarm_15, c->alarm_15, sizeof(c->alarm_15));
+	}
+	if (requested(ids, n, 19)) {
+		dst->has_alarm_light_confirm_delay = true;
+		dst->alarm_light_confirm_delay = c->alarm_light_confirm_delay;
 	}
 }
 

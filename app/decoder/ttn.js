@@ -115,7 +115,7 @@ var _SEN_HEX = { 11: "sensor1_rom", 12: "sensor2_rom", 13: "sensor3_rom", 14: "s
 var _SEN_HEX_ENC = { sensor1_rom: 11, sensor2_rom: 12, sensor3_rom: 13, sensor4_rom: 14 };
 
 var _ALM_NAMES = {
-  1: "alarm_limit", 2: "alarm_notif_time"
+  1: "alarm_limit", 2: "alarm_notif_time", 19: "alarm_light_confirm_delay"
 };
 var _ALM_ENUMS = {};
 var _ALM_FLOAT = {};
