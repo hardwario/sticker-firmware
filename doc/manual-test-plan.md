@@ -1040,6 +1040,26 @@ each edge sent immediately as its own one-event fPort 3 frame, fPort 2 not rate-
 
 - [ ] Pass
 
+### A14 — Auto-report local alarm-config change (#320)
+
+**Goal:** A LOCAL alarm-config change (shell `alarm …` or NFC SetParam) auto-reports the new alarm
+settings over LoRaWAN so the backend can reconcile; a downlink-originated change is never echoed.
+**Observable:** With `config_report_on_change = true` and joined, a local alarm-rule edit emits, in
+order: (1) an fPort-3 AlarmReport with a single `config_changed` event (slot `0xFF` — a marker, not
+a rule trip), then (2) the current alarms group as a `ConfigDump` on fPort 85 (paged if >1 rule). A
+downlink SetParam produces no such report.
+
+**Prompt for Claude:**
+> Ask me to set `config_report_on_change = true`, then edit an alarm rule locally (NFC or `alarm
+> new/clear`). Confirm the fPort-3 `config_changed` marker (slot `0xFF`) arrives first, then the
+> fPort-85 config report carrying the new alarms (paged if more than one rule). Then have me
+> SetParam an alarm over a downlink and confirm no extra config report follows. Decode and report
+> the frames.
+
+- [x] Pass — HW-verified 2026-07-22 on ChirpStack: NFC edit → save+reboot → re-join → fPort-3
+  `config_changed` (slot `0xFF`) then fPort-85 `ConfigDump` in two pages (`alarm_0` accel/state,
+  `alarm_1` hall-left/state), in that order.
+
 ---
 
 ## Config / Remote control
