@@ -186,7 +186,8 @@ def test_build_proto_model_structure():
     assert ids["history_enable"] == 4 and ids["history_sensors"] == 5
     assert ids["battery_level"] == 6  # low-battery alarm threshold (#210)
     assert ids["vendor_reset_allow"] == 7  # NFC vendor_reset gate (#299)
-    assert sorted(ids.values()) == [1, 2, 3, 4, 5, 6, 7]  # contiguous
+    assert ids["config_report_on_change"] == 8  # #320 local alarm-config-change report gate
+    assert sorted(ids.values()) == [1, 2, 3, 4, 5, 6, 7, 8]  # contiguous
 
 
 # --- allocator + guard ----------------------------------------------------
