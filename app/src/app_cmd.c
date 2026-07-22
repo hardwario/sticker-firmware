@@ -356,6 +356,19 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 		if (sp->has_save && sp->save) {
 			*action = APP_CMD_ACTION_SETTINGS_SAVE;
 		}
+
+		/* #320: a LOCAL alarm-config change auto-reports the new alarm settings so
+		 * the backend can reconcile. NFC (any non-LoRaWAN transport) is local; a
+		 * downlink is the backend's own change and is never echoed. A save+reboot
+		 * batch would lose an in-RAM report, so persist a marker and emit after
+		 * re-join; a live (no-save) change coalesces and emits now. */
+		if (sp->has_alarms && tp != APP_CMD_TRANSPORT_LRW) {
+			if (sp->has_save && sp->save) {
+				app_lrw_arm_config_report_after_reboot();
+			} else {
+				app_lrw_arm_config_report();
+			}
+		}
 	}
 }
 
@@ -405,24 +418,25 @@ static const struct {
 	{DUMP_SECTION_APPLICATION, 2, 3, false}, {DUMP_SECTION_APPLICATION, 3, 4, false},
 	{DUMP_SECTION_APPLICATION, 4, 2, false}, {DUMP_SECTION_APPLICATION, 5, 6, false},
 	{DUMP_SECTION_APPLICATION, 6, 3, false}, {DUMP_SECTION_APPLICATION, 7, 2, false},
-	{DUMP_SECTION_SENSORS, 1, 2, false},     {DUMP_SECTION_SENSORS, 2, 2, false},
-	{DUMP_SECTION_SENSORS, 3, 2, false},     {DUMP_SECTION_SENSORS, 4, 2, false},
-	{DUMP_SECTION_SENSORS, 5, 2, false},     {DUMP_SECTION_SENSORS, 6, 2, false},
-	{DUMP_SECTION_SENSORS, 7, 2, false},     {DUMP_SECTION_SENSORS, 8, 2, false},
-	{DUMP_SECTION_SENSORS, 9, 2, false},     {DUMP_SECTION_SENSORS, 10, 2, false},
-	{DUMP_SECTION_SENSORS, 11, 10, false},   {DUMP_SECTION_SENSORS, 12, 10, false},
-	{DUMP_SECTION_SENSORS, 13, 10, false},   {DUMP_SECTION_SENSORS, 14, 10, false},
-	{DUMP_SECTION_SENSORS, 15, 2, false},    {DUMP_SECTION_SENSORS, 16, 3, false},
-	{DUMP_SECTION_SENSORS, 17, 3, false},    {DUMP_SECTION_SENSORS, 18, 3, false},
-	{DUMP_SECTION_ALARMS, 1, 3, false},      {DUMP_SECTION_ALARMS, 2, 2, false},
-	{DUMP_SECTION_ALARMS, 3, 19, false},     {DUMP_SECTION_ALARMS, 4, 19, false},
-	{DUMP_SECTION_ALARMS, 5, 19, false},     {DUMP_SECTION_ALARMS, 6, 19, false},
-	{DUMP_SECTION_ALARMS, 7, 19, false},     {DUMP_SECTION_ALARMS, 8, 19, false},
-	{DUMP_SECTION_ALARMS, 9, 19, false},     {DUMP_SECTION_ALARMS, 10, 19, false},
-	{DUMP_SECTION_ALARMS, 11, 19, false},    {DUMP_SECTION_ALARMS, 12, 19, false},
-	{DUMP_SECTION_ALARMS, 13, 19, false},    {DUMP_SECTION_ALARMS, 14, 19, false},
-	{DUMP_SECTION_ALARMS, 15, 19, false},    {DUMP_SECTION_ALARMS, 16, 20, false},
-	{DUMP_SECTION_ALARMS, 17, 20, false},    {DUMP_SECTION_ALARMS, 18, 20, false},
+	{DUMP_SECTION_APPLICATION, 8, 2, false}, {DUMP_SECTION_SENSORS, 1, 2, false},
+	{DUMP_SECTION_SENSORS, 2, 2, false},     {DUMP_SECTION_SENSORS, 3, 2, false},
+	{DUMP_SECTION_SENSORS, 4, 2, false},     {DUMP_SECTION_SENSORS, 5, 2, false},
+	{DUMP_SECTION_SENSORS, 6, 2, false},     {DUMP_SECTION_SENSORS, 7, 2, false},
+	{DUMP_SECTION_SENSORS, 8, 2, false},     {DUMP_SECTION_SENSORS, 9, 2, false},
+	{DUMP_SECTION_SENSORS, 10, 2, false},    {DUMP_SECTION_SENSORS, 11, 10, false},
+	{DUMP_SECTION_SENSORS, 12, 10, false},   {DUMP_SECTION_SENSORS, 13, 10, false},
+	{DUMP_SECTION_SENSORS, 14, 10, false},   {DUMP_SECTION_SENSORS, 15, 2, false},
+	{DUMP_SECTION_SENSORS, 16, 3, false},    {DUMP_SECTION_SENSORS, 17, 3, false},
+	{DUMP_SECTION_SENSORS, 18, 3, false},    {DUMP_SECTION_ALARMS, 1, 3, false},
+	{DUMP_SECTION_ALARMS, 2, 2, false},      {DUMP_SECTION_ALARMS, 3, 19, false},
+	{DUMP_SECTION_ALARMS, 4, 19, false},     {DUMP_SECTION_ALARMS, 5, 19, false},
+	{DUMP_SECTION_ALARMS, 6, 19, false},     {DUMP_SECTION_ALARMS, 7, 19, false},
+	{DUMP_SECTION_ALARMS, 8, 19, false},     {DUMP_SECTION_ALARMS, 9, 19, false},
+	{DUMP_SECTION_ALARMS, 10, 19, false},    {DUMP_SECTION_ALARMS, 11, 19, false},
+	{DUMP_SECTION_ALARMS, 12, 19, false},    {DUMP_SECTION_ALARMS, 13, 19, false},
+	{DUMP_SECTION_ALARMS, 14, 19, false},    {DUMP_SECTION_ALARMS, 15, 19, false},
+	{DUMP_SECTION_ALARMS, 16, 20, false},    {DUMP_SECTION_ALARMS, 17, 20, false},
+	{DUMP_SECTION_ALARMS, 18, 20, false},
 	// END GENERATED DUMP_FIELDS
 };
 
@@ -455,12 +469,22 @@ static inline uint32_t dump_page_budget(enum app_cmd_transport tp)
 	return (tp == APP_CMD_TRANSPORT_NFC) ? DUMP_PAGE_BUDGET_NFC : DUMP_PAGE_BUDGET;
 }
 
-static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *cmd, Response *resp,
-				      enum app_cmd_action *action)
+/* All four ConfigDump groups — a full snapshot, as GetConfig requests. */
+#define DUMP_SECTION_MASK_ALL                                                                      \
+	(BIT(DUMP_SECTION_LORAWAN) | BIT(DUMP_SECTION_APPLICATION) | BIT(DUMP_SECTION_SENSORS) |   \
+	 BIT(DUMP_SECTION_ALARMS))
+
+/* Build one page of a ConfigDump into `resp`, restricted to the groups whose bit
+ * is set in `section_mask` (BIT(DUMP_SECTION_*)). Returns the total page count
+ * for that group set on this transport; on an out-of-range `page` it fills an
+ * Error into `resp` instead (the caller sees which_body != config_dump). Shared
+ * by GetConfig (all groups) and the #320 local-change alarm report (alarms only)
+ * so both page identically: the same greedy DUMP_PAGE_BUDGET packing, the same
+ * nfc_only exclusion (keys never leave over LoRaWAN), and the same empty-alarm-
+ * slot skip, keeping page_count exact. */
+static uint32_t config_dump_build_page(enum app_cmd_transport tp, uint32_t section_mask,
+				       uint32_t page, Response *resp)
 {
-	ARG_UNUSED(action);
-	const Command_GetConfig *gc = &cmd->body.get_config;
-	uint32_t page = gc->has_page ? gc->page : 0;
 	/* NFC-only fields (LoRaWAN keys) are read-back exclusively over the encrypted
 	 * NFC channel; never include them in a LoRaWAN response (the fPort-85 payload
 	 * is plain protobuf — the network server would see the keys). They are skipped
@@ -480,6 +504,11 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 	 * the requested page's tags per section, and learn the total page count. */
 	uint32_t cur_page = 0, used = 0;
 	for (size_t i = 0; i < ARRAY_SIZE(DUMP_FIELDS); i++) {
+		/* Only the requested groups: GetConfig asks for all, the #320 alarm
+		 * report asks for alarms only. */
+		if (!(section_mask & BIT(DUMP_FIELDS[i].section))) {
+			continue;
+		}
 		if (DUMP_FIELDS[i].nfc_only && !allow_nfc_only) {
 			continue;
 		}
@@ -510,7 +539,7 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 	if (page >= page_count) {
 		make_error(resp, Response_Error_Code_OUT_OF_RANGE, "page");
 		resp->body.error.fault_field = 1;
-		return;
+		return page_count;
 	}
 
 	Response_ConfigDump *cd = &resp->body.config_dump;
@@ -538,6 +567,18 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 		app_config_fill_alarms(&cd->alarms, &ids[off[DUMP_SECTION_ALARMS]],
 				       n[DUMP_SECTION_ALARMS]);
 	}
+	return page_count;
+}
+
+static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				      enum app_cmd_action *action)
+{
+	ARG_UNUSED(action);
+	const Command_GetConfig *gc = &cmd->body.get_config;
+	uint32_t page = gc->has_page ? gc->page : 0;
+
+	/* A full snapshot: every group, paged for this transport. */
+	(void)config_dump_build_page(tp, DUMP_SECTION_MASK_ALL, page, resp);
 }
 
 /* Encoded-size bound for a (section, tag) from DUMP_FIELDS. Returns false for a
@@ -1163,6 +1204,28 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
 	resp.which_body = Response_info_tag;
 	/* Autonomous GetInfo on join goes out over LoRaWAN, so dev_eui is omitted. */
 	fill_info(APP_CMD_TRANSPORT_LRW, &resp.body.info);
+
+	return encode_response(&resp, out, out_cap, out_len);
+}
+
+int app_cmd_build_alarm_config_report(uint8_t *out, size_t out_cap, size_t *out_len, uint32_t page,
+				      uint32_t *page_count)
+{
+	if (!out || !out_len || !page_count) {
+		return -EINVAL;
+	}
+
+	Response resp = Response_init_zero;
+	resp.seq = 0; /* unsolicited, like build_info: no request seq to echo */
+
+	/* Alarms group only, over the LoRaWAN page budget (the report always leaves
+	 * over the radio). *page_count is the total number of pages so the caller can
+	 * enqueue every one (loop 0..page_count-1). */
+	*page_count = config_dump_build_page(APP_CMD_TRANSPORT_LRW, BIT(DUMP_SECTION_ALARMS), page,
+					     &resp);
+	if (resp.which_body != Response_config_dump_tag) {
+		return -EINVAL; /* page out of range — caller looped past page_count */
+	}
 
 	return encode_response(&resp, out, out_cap, out_len);
 }

@@ -206,6 +206,16 @@ enum app_lrw_state app_lrw_get_state(void)
 	return APP_LRW_STATE_HEALTHY;
 }
 
+/* #320: the local-change alarm-config report is armed from app_cmd's set_param;
+ * the unit test exercises the report builder directly, so arming is inert here. */
+void app_lrw_arm_config_report(void)
+{
+}
+
+void app_lrw_arm_config_report_after_reboot(void)
+{
+}
+
 /* device_status inputs: app_cmd_get_info() aggregates these into the status
  * bitmask. Stubbed to the "all healthy / nothing active" baseline. */
 uint32_t app_alarm_status_flags(void)

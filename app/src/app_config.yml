@@ -274,6 +274,18 @@ parameters:
     default: true
     help: "Get/Set whether vendor_reset (NFC + shell) is accepted (true/false)."
 
+  # #320: when true, a LOCAL alarm-config change (shell `alarm` commands or an
+  # NFC SetParam) makes the device auto-send its current alarm settings up on
+  # fPort 85 (a ConfigDump Response, exactly as GetConfig would) so the backend
+  # can reconcile its shadow without polling. Downlink-originated changes are
+  # never echoed (the backend issued them; the SetParam Ack suffices).
+  - name: config_report_on_change
+    proto_group: application
+    proto_id: 8
+    type: bool
+    default: false
+    help: "Get/Set auto-report of alarm settings over LoRaWAN (fPort 85) when changed LOCALLY via shell or NFC (true/false). Downlink-originated changes are never echoed back."
+
   - name: alarm_limit
     proto_group: alarms
     proto_id: 1

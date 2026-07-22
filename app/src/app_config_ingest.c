@@ -342,6 +342,9 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 	if (src->has_vendor_reset_allow) {
 		config->vendor_reset_allow = src->vendor_reset_allow;
 	}
+	if (src->has_config_report_on_change) {
+		config->config_report_on_change = src->config_report_on_change;
+	}
 	return ret;
 }
 
@@ -376,6 +379,10 @@ void app_config_fill_application(AppConfigMessage_Application *dst, const uint32
 	if (requested(ids, n, 7)) {
 		dst->has_vendor_reset_allow = true;
 		dst->vendor_reset_allow = c->vendor_reset_allow;
+	}
+	if (requested(ids, n, 8)) {
+		dst->has_config_report_on_change = true;
+		dst->config_report_on_change = c->config_report_on_change;
 	}
 }
 

@@ -133,6 +133,8 @@ static struct k_work_delayable m_join_complete_work;
 static struct k_work_delayable m_hist_work;
 static struct k_work_delayable
 	m_tx_retry_work; /* re-drains response/alarm after a -EAGAIN backoff */
+/* #320: coalesce a burst of local alarm edits into one paged fPort-85 report. */
+static struct k_work_delayable m_config_report_work;
 
 /* Multi-frame telemetry: gap before the next frame of the same snapshot (covers
  * RX1/RX2 windows) and backoff when a send is refused (duty cycle / MAC busy). */
@@ -258,6 +260,20 @@ static enum app_cmd_action m_post_cmd_action;
 /* #193: set from a command-handler thread, test-and-cleared in the LoRaMac
  * downlink callback (another context) — an atomic bit closes the lost-update race. */
 static atomic_t m_clock_sync_info_pending;
+
+/* #320: a LOCAL alarm-config change (shell/NFC) pushes the current alarm settings
+ * up on fPort 85 so the backend can reconcile. m_config_report_start (set from
+ * any thread) tells config_report_work_handler to (re)start a report cycle at
+ * page 0 — coalescing a burst and restarting an in-flight cycle with the newest
+ * config. m_config_report_page (the next page to send) is owned by the work
+ * handler on m_work_q. A durable edit (SetParam save=true) persists a one-shot
+ * marker (CONFIG_REPORT_PENDING_KEY) across its save+reboot so the report is
+ * emitted once after re-join; m_config_report_reboot_checked makes that NVS read
+ * happen on the first join only. */
+static atomic_t m_config_report_start;
+static uint32_t m_config_report_page;
+static bool m_config_report_reboot_checked;
+#define CONFIG_REPORT_PENDING_KEY "app/alarm_report_pending"
 
 /* Kicked on a link-ready edge (join success / history-replay finish) so
  * app_report can resume the report cadence with an immediate uplink. */
@@ -436,6 +452,97 @@ static int queue_info_uplink(void)
 	return ret;
 }
 
+/* #320 alarm-config report: page the current alarms group out on fPort 85, one
+ * response frame per page, paced by FRAME_GAP_SEC and gated on the link being
+ * ready. Runs on m_work_q. A fresh local edit (or the post-reboot resume) sets
+ * m_config_report_start so the cycle (re)starts at page 0 with the latest config;
+ * restarting an in-flight cycle is harmless — the backend overwrites its shadow
+ * from the full dump. */
+static void config_report_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (atomic_test_and_clear_bit(&m_config_report_start, 0)) {
+		m_config_report_page = 0;
+	}
+
+	/* Emit only once the link can carry it; otherwise wait and retry. Also covers
+	 * the post-reboot case where the report is armed before the re-join. */
+	if (!app_lrw_is_ready()) {
+		k_work_reschedule_for_queue(&m_work_q, &m_config_report_work,
+					    K_SECONDS(FRAME_RETRY_SEC));
+		return;
+	}
+
+	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
+	size_t len;
+	uint32_t page_count = 0;
+	int ret = app_cmd_build_alarm_config_report(buf, sizeof(buf), &len, m_config_report_page,
+						    &page_count);
+	if (ret) {
+		LOG_WRN("alarm-config report page %u build failed: %d", m_config_report_page, ret);
+		m_config_report_page = 0;
+		return;
+	}
+
+	ret = app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len);
+	if (ret == -ENOMEM) {
+		/* Response queue full: retry the SAME page once it drains. */
+		k_work_reschedule_for_queue(&m_work_q, &m_config_report_work,
+					    K_SECONDS(FRAME_GAP_SEC));
+		return;
+	}
+	if (ret) {
+		LOG_WRN("alarm-config report page %u queue failed: %d", m_config_report_page, ret);
+		m_config_report_page = 0;
+		return;
+	}
+
+	if (++m_config_report_page < page_count) {
+		/* Pace the remaining pages so each clears the queue + duty cycle. */
+		k_work_reschedule_for_queue(&m_work_q, &m_config_report_work,
+					    K_SECONDS(FRAME_GAP_SEC));
+	} else {
+		LOG_INF("alarm-config report sent (%u page(s), fPort %d)", page_count,
+			APP_LRW_DOWNLINK_CMD_PORT);
+		m_config_report_page = 0;
+	}
+}
+
+/* settings_load_subtree_direct callback for the #320 report-pending marker. */
+static int config_report_pending_read_cb(const char *key, size_t len, settings_read_cb read_cb,
+					 void *cb_arg, void *param)
+{
+	ARG_UNUSED(key);
+	bool *found = param;
+	uint8_t v = 0;
+
+	if (len >= 1 && read_cb(cb_arg, &v, 1) >= 0 && v) {
+		*found = true;
+	}
+	return 0;
+}
+
+/* On the first join after boot, consume the persisted report-pending marker (set
+ * before a durable local alarm edit's save+reboot) and, if present, arm the
+ * report so it goes out now that we are joined. One-shot. */
+static void config_report_consume_reboot_flag(void)
+{
+	if (m_config_report_reboot_checked) {
+		return;
+	}
+	m_config_report_reboot_checked = true;
+
+	bool pending = false;
+	(void)settings_load_subtree_direct(CONFIG_REPORT_PENDING_KEY, config_report_pending_read_cb,
+					   &pending);
+	if (!pending) {
+		return;
+	}
+	(void)settings_delete(CONFIG_REPORT_PENDING_KEY);
+	app_lrw_arm_config_report();
+}
+
 static void on_join_success(void)
 {
 	LOG_INF("Join successful");
@@ -457,6 +564,10 @@ static void on_join_success(void)
 	if (queue_info_uplink() != 0) {
 		LOG_WRN("app_cmd_build_info failed; skipping GetInfo-on-join");
 	}
+
+	/* #320: emit a deferred alarm-config report if a durable local edit rebooted
+	 * us before it could leave (one-shot; consumes the persisted marker). */
+	config_report_consume_reboot_flag();
 
 	/* Kick app_report to start the report cadence with an immediate uplink (its
 	 * cycle samples, captures and triggers app_lrw_send_telemetry; the first
@@ -1632,6 +1743,7 @@ int app_lrw_init(void)
 	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
 	k_work_init_delayable(&m_tx_retry_work, tx_retry_work_handler);
+	k_work_init_delayable(&m_config_report_work, config_report_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_dbg_lc_work, dbg_lc_work_handler);
 #endif
@@ -1788,6 +1900,33 @@ void app_lrw_send_info_on_clock_sync(void)
 	/* Arm the deferred Info; downlink_callback sends it once LORAWAN_TIME_UPDATED
 	 * arrives (the ClockSync command answer). */
 	atomic_set_bit(&m_clock_sync_info_pending, 0);
+}
+
+void app_lrw_arm_config_report(void)
+{
+	if (!g_app_config.config_report_on_change) {
+		return;
+	}
+	/* Coalesce a burst of edits into one cycle and (re)start at page 0 with the
+	 * newest config. Safe from any thread: the bit is atomic and k_work_reschedule
+	 * is thread-safe; the page counter is touched only on m_work_q. */
+	atomic_set_bit(&m_config_report_start, 0);
+	k_work_reschedule_for_queue(&m_work_q, &m_config_report_work, K_SECONDS(2));
+}
+
+void app_lrw_arm_config_report_after_reboot(void)
+{
+	if (!g_app_config.config_report_on_change) {
+		return;
+	}
+	/* A durable local alarm edit (SetParam save=true) persists by cold-rebooting,
+	 * which would lose an in-RAM report. Persist a one-shot marker so the report
+	 * goes out once after the re-join (consumed in on_join_success). */
+	uint8_t pending = 1;
+	int ret = settings_save_one(CONFIG_REPORT_PENDING_KEY, &pending, sizeof(pending));
+	if (ret) {
+		LOG_WRN("persist #320 report-pending failed: %d", ret);
+	}
 }
 
 int app_lrw_send_alarm(const uint8_t *buf, size_t len)

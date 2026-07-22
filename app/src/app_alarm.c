@@ -1158,6 +1158,7 @@ static int store_rule(const struct shell *sh, uint8_t slot, const struct app_ala
 	}
 	ret = app_alarm_rules_save();
 	shell_print(sh, "rule set in slot %u%s", slot, ret ? " (NOT persisted!)" : "");
+	app_lrw_arm_config_report(); /* #320: push the local change to the backend */
 	return 0;
 }
 
@@ -1212,6 +1213,7 @@ static int cmd_alarm_clear(const struct shell *sh, size_t argc, char **argv)
 		app_alarm_rules_clear_all();
 		(void)app_alarm_rules_save();
 		shell_print(sh, "all rules cleared");
+		app_lrw_arm_config_report(); /* #320: push the local change to the backend */
 		return 0;
 	}
 	char *end;
@@ -1227,6 +1229,7 @@ static int cmd_alarm_clear(const struct shell *sh, size_t argc, char **argv)
 	}
 	(void)app_alarm_rules_save();
 	shell_print(sh, "slot %lu cleared", slot);
+	app_lrw_arm_config_report(); /* #320: push the local change to the backend */
 	return 0;
 }
 

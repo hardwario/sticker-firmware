@@ -85,6 +85,17 @@ int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len);
  * command itself does not ack (saves an uplink; a bare ack can't carry the time). */
 void app_lrw_send_info_on_clock_sync(void);
 
+/* #320: a LOCAL alarm-config change (shell `alarm` command or NFC SetParam) →
+ * push the current alarm settings up on fPort 85 so the backend reconciles its
+ * shadow. Coalesces a burst of edits into one paged report emitted on the next
+ * jitter window; no-op unless config_report_on_change is set. Any thread. */
+void app_lrw_arm_config_report(void);
+
+/* #320 variant for a durable local edit that persists by rebooting (SetParam
+ * save=true): persist a one-shot marker so the report is emitted once after the
+ * re-join rather than lost in the reboot. No-op unless config_report_on_change. */
+void app_lrw_arm_config_report_after_reboot(void);
+
 /* Stage an alarm-detail batch (issue #27) for the next uplink on fPort 3. Own
  * slot, drained after the command response and before telemetry, so it never
  * collides with app_lrw_queue_response(). Returns 0, -EINVAL, or -EMSGSIZE. */

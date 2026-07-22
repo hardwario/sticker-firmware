@@ -39,6 +39,7 @@ static const struct app_config m_app_config_defaults = {
 	.history_sensors = 3,
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
+	.config_report_on_change = false,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.lrw_mode = APP_CONFIG_LRW_MODE_LORAWAN,
@@ -70,6 +71,7 @@ static struct app_config m_app_config = {
 	.history_sensors = 3,
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
+	.config_report_on_change = false,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
 	.lrw_mode = APP_CONFIG_LRW_MODE_LORAWAN,
@@ -124,6 +126,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.battery_level));
 	SETTINGS_SET("vendor-reset-allow", &m_app_config.vendor_reset_allow,
 		     sizeof(m_app_config.vendor_reset_allow));
+	SETTINGS_SET("config-report-on-change", &m_app_config.config_report_on_change,
+		     sizeof(m_app_config.config_report_on_change));
 	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	SETTINGS_SET("alarm-notif-time", &m_app_config.alarm_notif_time,
 		     sizeof(m_app_config.alarm_notif_time));
@@ -343,6 +347,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.battery_level));
 	EXPORT_FUNC("vendor-reset-allow", &m_app_config.vendor_reset_allow,
 		    sizeof(m_app_config.vendor_reset_allow));
+	EXPORT_FUNC("config-report-on-change", &m_app_config.config_report_on_change,
+		    sizeof(m_app_config.config_report_on_change));
 	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	EXPORT_FUNC("alarm-notif-time", &m_app_config.alarm_notif_time,
 		    sizeof(m_app_config.alarm_notif_time));
@@ -629,6 +635,12 @@ static void print_vendor_reset_allow(const struct shell *shell)
 		    m_app_config.vendor_reset_allow ? "true" : "false");
 }
 
+static void print_config_report_on_change(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " config-report-on-change %s",
+		    m_app_config.config_report_on_change ? "true" : "false");
+}
+
 static void print_alarm_limit(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " alarm-limit %d", m_app_config.alarm_limit);
@@ -913,6 +925,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_history_sensors(shell);
 	print_battery_level(shell);
 	print_vendor_reset_allow(shell);
+	print_config_report_on_change(shell);
 	print_alarm_limit(shell);
 	print_alarm_notif_time(shell);
 	print_lrw_region(shell);
@@ -1145,6 +1158,12 @@ static int cmd_vendor_reset_allow(const struct shell *shell, size_t argc, char *
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.vendor_reset_allow,
 			print_vendor_reset_allow);
+}
+
+static int cmd_config_report_on_change(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.config_report_on_change,
+			print_config_report_on_change);
 }
 
 static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
@@ -1546,6 +1565,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(vendor-reset-allow, NULL,
 	              "Get/Set whether vendor_reset (NFC + shell) is accepted (true/false).",
 	              cmd_vendor_reset_allow, 1, 1),
+
+	SHELL_CMD_ARG(config-report-on-change, NULL,
+	              "Get/Set auto-report of alarm settings over LoRaWAN (fPort 85) when changed LOCALLY via shell or NFC (true/false). Downlink-originated changes are never echoed back.",
+	              cmd_config_report_on_change, 1, 1),
 
 	SHELL_CMD_ARG(alarm-limit, NULL,
 	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",

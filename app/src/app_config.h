@@ -62,6 +62,7 @@ struct app_config {
 	uint32_t history_sensors;
 	int battery_level;
 	bool vendor_reset_allow;
+	bool config_report_on_change;
 	int alarm_limit;
 	int alarm_notif_time;
 	enum app_config_lrw_region lrw_region;

@@ -126,6 +126,16 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
  * NULL argument, or -EMSGSIZE if `out_cap` is too small. */
 int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len);
 
+/* Build one page of an unsolicited alarm-config report (Response{ seq=0,
+ * config_dump={ alarms } } — byte-identical to a GetConfig reply for the alarms
+ * group) into `out` for fPort 85. `page` selects the page; *page_count is set to
+ * the total page count (loop 0..page_count-1 to push the whole group). Returns 0
+ * with *out_len set, -EINVAL on a NULL arg or out-of-range page, or -EMSGSIZE if
+ * the page will not fit `out_cap`. Lets app_lrw push a locally-made alarm-config
+ * change up so the backend can reconcile its shadow (#320). */
+int app_cmd_build_alarm_config_report(uint8_t *out, size_t out_cap, size_t *out_len, uint32_t page,
+				      uint32_t *page_count);
+
 /* Staging buffer for one LoRaWAN history-replay frame (version byte + Response{
  * seq, history_frame } protobuf). Sized to exceed the largest EU868 payload (242 B
  * at DR4/5) so it holds a full frame at every LoRaWAN data rate and the transmit

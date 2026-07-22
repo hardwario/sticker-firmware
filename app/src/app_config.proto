@@ -56,6 +56,7 @@ message AppConfigMessage {
         optional uint32 history_sensors = 5;
         optional uint32 battery_level = 6;
         optional bool vendor_reset_allow = 7;
+        optional bool config_report_on_change = 8;
     }
 
     message Sensors {
