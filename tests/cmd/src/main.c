@@ -424,6 +424,29 @@ ZTEST(cmd, test_build_alarm_config_report_paged)
 	zassert_equal(r.body.config_dump.alarms.alarm_1[0], 0x22, "alarm_1 bytes");
 }
 
+/* #320: app_cmd_build_config_changed_report() builds the fPort-3 marker sent just
+ * before the config report on a local alarm-config change: an AlarmReport with one
+ * event of type CONFIG_CHANGED, slot 0xFF (a marker, not a real rule trip). */
+ZTEST(cmd, test_build_config_changed_report)
+{
+	uint8_t out[128];
+	size_t out_len = 0;
+
+	reset_cfg();
+	int ret = app_cmd_build_config_changed_report(out, sizeof(out), &out_len);
+	zassert_equal(ret, 0, "build ret %d", ret);
+
+	zassert_equal(out[0], APP_PROTO_VERSION, "bad version 0x%02x", out[0]);
+	AlarmReport rep = AlarmReport_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, AlarmReport_fields, &rep), "AlarmReport decode");
+	zassert_equal(rep.events_count, 1, "expected 1 event, got %d", rep.events_count);
+	zassert_equal(rep.events[0].type, AlarmEvent_Type_TYPE_CONFIG_CHANGED, "type=%d",
+		      rep.events[0].type);
+	zassert_equal(rep.events[0].slot, 0xFF, "slot=%d", rep.events[0].slot);
+	zassert_equal(rep.total, 1, "total=%d", rep.total);
+}
+
 ZTEST(cmd, test_deferred_actions)
 {
 	Response r;

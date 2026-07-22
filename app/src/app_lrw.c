@@ -272,6 +272,7 @@ static atomic_t m_clock_sync_info_pending;
  * happen on the first join only. */
 static atomic_t m_config_report_start;
 static uint32_t m_config_report_page;
+static bool m_config_report_marker_sent; /* #320: fPort-3 config-changed marker queued this cycle */
 static bool m_config_report_reboot_checked;
 #define CONFIG_REPORT_PENDING_KEY "app/alarm_report_pending"
 
@@ -464,6 +465,7 @@ static void config_report_work_handler(struct k_work *work)
 
 	if (atomic_test_and_clear_bit(&m_config_report_start, 0)) {
 		m_config_report_page = 0;
+		m_config_report_marker_sent = false;
 	}
 
 	/* Emit only once the link can carry it; otherwise wait and retry. Also covers
@@ -474,6 +476,35 @@ static void config_report_work_handler(struct k_work *work)
 		return;
 	}
 
+	/* #320 step 1: an fPort-3 "config changed" alarm goes out FIRST, as a signal on
+	 * the alarm channel, then the fPort-85 config report follows. The TX loop drains
+	 * fPort 85 before fPort 3, so the marker must actually leave (alarm queue empty)
+	 * before the config is queued — otherwise the config would overtake it. */
+	if (!m_config_report_marker_sent) {
+		uint8_t mbuf[APP_LRW_RESPONSE_BUF_SIZE];
+		size_t mlen;
+		int mret = app_cmd_build_config_changed_report(mbuf, sizeof(mbuf), &mlen);
+		if (mret != 0) {
+			LOG_WRN("config-changed marker build failed: %d; sending config anyway",
+				mret);
+			m_config_report_marker_sent = true;
+		} else if (app_lrw_send_alarm(mbuf, mlen) == 0) {
+			m_config_report_marker_sent = true;
+		}
+		/* else the fPort-3 queue was full — retry the marker shortly. */
+		k_work_reschedule_for_queue(&m_work_q, &m_config_report_work,
+					    K_SECONDS(FRAME_GAP_SEC));
+		return;
+	}
+	if (k_msgq_num_used_get(&m_alarm_msgq) > 0) {
+		/* Marker (or a real alarm ahead of it) still pending TX — let the fPort-3
+		 * queue drain so the config report transmits after it, not before. */
+		k_work_reschedule_for_queue(&m_work_q, &m_config_report_work,
+					    K_SECONDS(FRAME_GAP_SEC));
+		return;
+	}
+
+	/* #320 step 2: page the fPort-85 config report. */
 	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t len;
 	uint32_t page_count = 0;

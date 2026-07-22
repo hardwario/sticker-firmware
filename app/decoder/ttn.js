@@ -948,7 +948,7 @@ var _ALARM_SOURCES = ["onboard", "s1", "s2", "s3", "s4", "hall-left", "hall-righ
 var _ALARM_QUANTITIES = ["temperature", "humidity", "pressure", "illuminance",
   "magnetic-field", "tilt", "state", "count", "voltage"];
 var _ALARM_EDGES = ["activate", "deactivate"];
-var _ALARM_TYPES = ["none", "low", "high", "trigger", "no_data"];
+var _ALARM_TYPES = ["none", "low", "high", "trigger", "no_data", "config_changed"];
 
 function _alarmUnscale(quantity, raw) {
   switch (quantity) {

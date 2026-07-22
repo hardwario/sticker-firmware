@@ -409,6 +409,7 @@ message AlarmEvent {
         TYPE_HIGH    = 2;
         TYPE_TRIGGER = 3;
         TYPE_NO_DATA = 4;
+        TYPE_CONFIG_CHANGED = 5; // #320: marks a local alarm-config change (not a rule trip)
     }
 
     reserved 3, 8;               // was: side (3), no_data (8) — folded into type (#212)

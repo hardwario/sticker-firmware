@@ -176,7 +176,8 @@ struct app_cmd_alarm_event {
 	uint8_t source;   /* enum app_alarm_source (onboard/s1..s4/hall/input/pir/accel) */
 	uint8_t quantity; /* enum app_alarm_quantity */
 	uint8_t edge;     /* AlarmEvent_Edge: 0=activate, 1=deactivate */
-	uint8_t type;     /* AlarmEvent_Type: 0=none, 1=low, 2=high, 3=trigger, 4=no_data (#212) */
+	uint8_t type;     /* AlarmEvent_Type: 0=none, 1=low, 2=high, 3=trigger, 4=no_data (#212),
+			   * 5=config_changed (#320) */
 	bool has_value;   /* value present */
 	int32_t value;    /* scaled value (×100 temp/hum, ×10 pressure, digital 0/1, counter) */
 	uint32_t rel_s;   /* seconds since base_time */
@@ -191,6 +192,13 @@ struct app_cmd_alarm_event {
 int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
 			       uint8_t *out, size_t out_cap, size_t *out_len);
+
+/* Build an fPort-3 AlarmReport that marks a LOCAL alarm-config change (#320): a
+ * single AlarmEvent with type=CONFIG_CHANGED and slot=0xFF (not a rule trip). The
+ * device sends it just before the fPort-85 config report so the backend gets a
+ * signal on the alarm channel that the alarm config changed, then the new config.
+ * Returns 0 with *out_len set, -EINVAL on a NULL arg, or -EMSGSIZE. */
+int app_cmd_build_config_changed_report(uint8_t *out, size_t out_cap, size_t *out_len);
 
 #ifdef __cplusplus
 }

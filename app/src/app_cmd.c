@@ -1349,3 +1349,31 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 	*out_len = ostream.bytes_written + 1;
 	return 0;
 }
+
+int app_cmd_build_config_changed_report(uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	uint32_t base = 0;
+	bool synced = false;
+#ifdef APP_CMD_HAVE_CLOCK
+	uint32_t unix_s;
+	if (app_clock_get_unix(&unix_s) == 0) {
+		base = unix_s;
+		synced = true;
+	}
+#endif
+	/* One synthetic marker event — not a rule trip. slot 0xFF = "no specific rule
+	 * slot" (same sentinel as the no-data watchdog); type CONFIG_CHANGED tells the
+	 * backend this fPort-3 frame announces a local alarm-config change, with the
+	 * new config following on fPort 85. */
+	struct app_cmd_alarm_event ev = {
+		.slot = 0xFF,
+		.source = 0,
+		.quantity = 0,
+		.edge = 0, /* activate */
+		.type = AlarmEvent_Type_TYPE_CONFIG_CHANGED,
+		.has_value = false,
+		.value = 0,
+		.rel_s = 0,
+	};
+	return app_cmd_build_alarm_report(base, 1, synced, &ev, 1, out, out_cap, out_len);
+}
