@@ -622,9 +622,9 @@ int main(void)
 			app_led_blink(&req);
 			led_handled = true;
 		} else if (lrw_state == APP_LRW_STATE_DISABLED) {
-			/* Radio disabled by lrw-mode (#271/#278): a single yellow blink — the
+			/* Radio disabled by radio-mode (#271/#278): a single yellow blink — the
 			 * lowest rung of the yellow severity scale, since this is a deliberate
-			 * operator choice (lrw-mode off/p2p), not a network fault. */
+			 * operator choice (radio-mode off/p2p), not a network fault. */
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
 							.duration = 5,
 							.space = 0,

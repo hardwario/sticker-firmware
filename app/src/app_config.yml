@@ -35,7 +35,7 @@ enums:
       value: 1
       shell: abp
 
-  lrw_mode:
+  radio_mode:
     - name: "OFF"
       value: 0
       shell: "off"
@@ -301,12 +301,12 @@ parameters:
     persistent: [device_reset]
     help: "Get/Set LoRaWAN region (eu868/us915/au915)."
 
-  - name: lrw_mode
+  - name: radio_mode
     proto_group: lorawan
     writable: [shell, nfc]  # never over a LoRaWAN downlink: setting OFF/P2P would sever the link that carries it (#271)
     proto_id: 15
     type: enum
-    enum: lrw_mode
+    enum: radio_mode
     default: LORAWAN
     persistent: [device_reset]
     help: "Get/Set radio mode (off/lorawan/p2p). off = radio-silent, sensor/history still run."
