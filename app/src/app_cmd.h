@@ -126,15 +126,19 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
  * NULL argument, or -EMSGSIZE if `out_cap` is too small. */
 int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len);
 
-/* Build one page of an unsolicited alarm-config report (Response{ seq=0,
- * config_dump={ alarms } } — byte-identical to a GetConfig reply for the alarms
- * group) into `out` for fPort 85. `page` selects the page; *page_count is set to
- * the total page count (loop 0..page_count-1 to push the whole group). Returns 0
- * with *out_len set, -EINVAL on a NULL arg or out-of-range page, or -EMSGSIZE if
- * the page will not fit `out_cap`. Lets app_lrw push a locally-made alarm-config
- * change up so the backend can reconcile its shadow (#320). */
-int app_cmd_build_alarm_config_report(uint8_t *out, size_t out_cap, size_t *out_len, uint32_t page,
-				      uint32_t *page_count);
+/* Build one frame of a LOCAL alarm-config change report (Response{ seq=0,
+ * config_dump={ alarms } }) into `out` for fPort 85 (#320). Carries the alarm scalars
+ * plus ONLY the slots whose bit is set in `slot_mask` AND that are non-empty — i.e. the
+ * locally-changed rules, not the whole config (a cleared slot is empty, so it is not
+ * reported: #320's delta contract). Slots are packed starting at `start_slot`, adding as
+ * many as still fit `max_frame` bytes (measured, so a frame never overflows the current
+ * data rate); `*next_slot` is set to the first slot NOT included (== APP_ALARM_SLOT_COUNT
+ * when the whole delta fit), so the caller emits frames until it reaches the end. At
+ * least one slot rides each frame so a long delta always makes progress. Returns 0 with
+ * *out_len set, -EINVAL on a NULL arg, or -EMSGSIZE if it will not fit `out_cap`. */
+int app_cmd_build_alarm_config_report(uint8_t *out, size_t out_cap, size_t *out_len,
+				      uint16_t slot_mask, uint8_t start_slot, size_t max_frame,
+				      uint8_t *next_slot);
 
 /* Staging buffer for one LoRaWAN history-replay frame (version byte + Response{
  * seq, history_frame } protobuf). Sized to exceed the largest EU868 payload (242 B
@@ -192,13 +196,6 @@ struct app_cmd_alarm_event {
 int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
 			       uint8_t *out, size_t out_cap, size_t *out_len);
-
-/* Build an fPort-3 AlarmReport that marks a LOCAL alarm-config change (#320): a
- * single AlarmEvent with type=CONFIG_CHANGED and slot=0xFF (not a rule trip). The
- * device sends it just before the fPort-85 config report so the backend gets a
- * signal on the alarm channel that the alarm config changed, then the new config.
- * Returns 0 with *out_len set, -EINVAL on a NULL arg, or -EMSGSIZE. */
-int app_cmd_build_config_changed_report(uint8_t *out, size_t out_cap, size_t *out_len);
 
 #ifdef __cplusplus
 }

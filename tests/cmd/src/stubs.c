@@ -208,12 +208,14 @@ enum app_lrw_state app_lrw_get_state(void)
 
 /* #320: the local-change alarm-config report is armed from app_cmd's set_param;
  * the unit test exercises the report builder directly, so arming is inert here. */
-void app_lrw_arm_config_report(void)
+void app_lrw_arm_config_report(uint16_t slot_mask)
 {
+	ARG_UNUSED(slot_mask);
 }
 
-void app_lrw_arm_config_report_after_reboot(void)
+void app_lrw_arm_config_report_after_reboot(uint16_t slot_mask)
 {
+	ARG_UNUSED(slot_mask);
 }
 
 /* device_status inputs: app_cmd_get_info() aggregates these into the status

@@ -1042,23 +1042,26 @@ each edge sent immediately as its own one-event fPort 3 frame, fPort 2 not rate-
 
 ### A14 — Auto-report local alarm-config change (#320)
 
-**Goal:** A LOCAL alarm-config change (shell `alarm …` or NFC SetParam) auto-reports the new alarm
-settings over LoRaWAN so the backend can reconcile; a downlink-originated change is never echoed.
-**Observable:** With `config_report_on_change = true` and joined, a local alarm-rule edit emits, in
-order: (1) an fPort-3 AlarmReport with a single `config_changed` event (slot `0xFF` — a marker, not
-a rule trip), then (2) the current alarms group as a `ConfigDump` on fPort 85 (paged if >1 rule). A
-downlink SetParam produces no such report.
+**Goal:** A LOCAL alarm-config change (shell `alarm set/new` or NFC SetParam) auto-reports **only the
+changed rules** over LoRaWAN so the backend can reconcile; a downlink-originated change is never
+echoed. **Observable:** With `config_report_on_change = true` and joined, editing one rule emits a
+**single** `ConfigDump` on **fPort 85** carrying **only that slot** (plus the alarm scalars) — not
+the whole config, and no fPort-3 frame. Editing several rules coalesces into one report that packs
+as many changed slots per frame as the data rate allows (DR0 ≈ 2 rules/frame), spilling to a second
+fPort-85 frame only when they don't fit — e.g. **3 changed rules → 2 frames**, never one-per-frame.
+A set-but-unchanged rule is not resent; a **cleared** rule is not reported (delta contract — clears
+don't sync via this path). A downlink SetParam produces no report.
 
 **Prompt for Claude:**
-> Ask me to set `config_report_on_change = true`, then edit an alarm rule locally (NFC or `alarm
-> new/clear`). Confirm the fPort-3 `config_changed` marker (slot `0xFF`) arrives first, then the
-> fPort-85 config report carrying the new alarms (paged if more than one rule). Then have me
-> SetParam an alarm over a downlink and confirm no extra config report follows. Decode and report
-> the frames.
+> Ask me to set `config_report_on_change = true`, then edit ONE alarm rule locally (`alarm set N …`
+> or NFC). Confirm exactly one fPort-85 `ConfigDump` arrives carrying only that slot, no fPort-3.
+> Then have me add 3 rules and confirm the report carries only the changed slots in ≤2 fPort-85
+> frames (not 4). Confirm a set-but-unchanged rule is not resent. Then SetParam an alarm over a
+> downlink and confirm no config report follows. Decode and report the frames.
 
-- [x] Pass — HW-verified 2026-07-22 on ChirpStack: NFC edit → save+reboot → re-join → fPort-3
-  `config_changed` (slot `0xFF`) then fPort-85 `ConfigDump` in two pages (`alarm_0` accel/state,
-  `alarm_1` hall-left/state), in that order.
+- [ ] Pass — behavior reworked to a changed-slot delta packed to the frame (was: fPort-3 marker +
+  full-snapshot paged one-rule-per-frame). Needs HW re-verification on ChirpStack (1 edit → 1 frame
+  of that slot only; 3 edits → 2 frames only-changed; no fPort-3; downlink silent).
 
 ---
 

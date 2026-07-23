@@ -277,6 +277,33 @@ static void make_error(Response *resp, Response_Error_Code code, const char *det
 	}
 }
 
+/* #320: bitmask of alarm slots present in a SetParam's alarms submessage (bit i set when
+ * has_alarm_i is set) — the slots a local NFC change touched, so the config report carries
+ * just those changed slots. Kept here (not in the generated app_config_ingest) since the
+ * has_alarm_N flags are enumerated by hand. */
+static uint16_t setparam_alarm_changed_mask(const AppConfigMessage_Alarms *a)
+{
+	uint16_t m = 0;
+
+	m |= a->has_alarm_0 ? (uint16_t)(1u << 0) : 0;
+	m |= a->has_alarm_1 ? (uint16_t)(1u << 1) : 0;
+	m |= a->has_alarm_2 ? (uint16_t)(1u << 2) : 0;
+	m |= a->has_alarm_3 ? (uint16_t)(1u << 3) : 0;
+	m |= a->has_alarm_4 ? (uint16_t)(1u << 4) : 0;
+	m |= a->has_alarm_5 ? (uint16_t)(1u << 5) : 0;
+	m |= a->has_alarm_6 ? (uint16_t)(1u << 6) : 0;
+	m |= a->has_alarm_7 ? (uint16_t)(1u << 7) : 0;
+	m |= a->has_alarm_8 ? (uint16_t)(1u << 8) : 0;
+	m |= a->has_alarm_9 ? (uint16_t)(1u << 9) : 0;
+	m |= a->has_alarm_10 ? (uint16_t)(1u << 10) : 0;
+	m |= a->has_alarm_11 ? (uint16_t)(1u << 11) : 0;
+	m |= a->has_alarm_12 ? (uint16_t)(1u << 12) : 0;
+	m |= a->has_alarm_13 ? (uint16_t)(1u << 13) : 0;
+	m |= a->has_alarm_14 ? (uint16_t)(1u << 14) : 0;
+	m |= a->has_alarm_15 ? (uint16_t)(1u << 15) : 0;
+	return m;
+}
+
 /* Command handlers share a uniform signature (transport, cmd, resp, action) so
  * the generated app_cmd_dispatch() switch can call any of them the same way; a
  * handler simply ignores the parameters it does not need. They fill `resp`
@@ -363,10 +390,11 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 		 * batch would lose an in-RAM report, so persist a marker and emit after
 		 * re-join; a live (no-save) change coalesces and emits now. */
 		if (sp->has_alarms && tp != APP_CMD_TRANSPORT_LRW) {
+			uint16_t changed = setparam_alarm_changed_mask(&sp->alarms);
 			if (sp->has_save && sp->save) {
-				app_lrw_arm_config_report_after_reboot();
+				app_lrw_arm_config_report_after_reboot(changed);
 			} else {
-				app_lrw_arm_config_report();
+				app_lrw_arm_config_report(changed);
 			}
 		}
 	}
@@ -475,15 +503,17 @@ static inline uint32_t dump_page_budget(enum app_cmd_transport tp)
 	 BIT(DUMP_SECTION_ALARMS))
 
 /* Build one page of a ConfigDump into `resp`, restricted to the groups whose bit
- * is set in `section_mask` (BIT(DUMP_SECTION_*)). Returns the total page count
- * for that group set on this transport; on an out-of-range `page` it fills an
- * Error into `resp` instead (the caller sees which_body != config_dump). Shared
- * by GetConfig (all groups) and the #320 local-change alarm report (alarms only)
- * so both page identically: the same greedy DUMP_PAGE_BUDGET packing, the same
- * nfc_only exclusion (keys never leave over LoRaWAN), and the same empty-alarm-
- * slot skip, keeping page_count exact. */
+ * is set in `section_mask` (BIT(DUMP_SECTION_*)), packing fields up to `budget`
+ * bytes per page. Returns the total page count for that group set; on an
+ * out-of-range `page` it fills an Error into `resp` instead (the caller sees
+ * which_body != config_dump). Shared by GetConfig (all groups, tight
+ * DUMP_PAGE_BUDGET) and the #320 local-change alarm report (alarms only): the
+ * report passes an unlimited budget to fit every set slot in one frame, and falls
+ * back to the tight budget for the rare multi-frame case. Same greedy packing,
+ * the same nfc_only exclusion (keys never leave over LoRaWAN), and the same
+ * empty-alarm-slot skip, keeping page_count exact. */
 static uint32_t config_dump_build_page(enum app_cmd_transport tp, uint32_t section_mask,
-				       uint32_t page, Response *resp)
+				       uint32_t page, uint32_t budget, Response *resp)
 {
 	/* NFC-only fields (LoRaWAN keys) are read-back exclusively over the encrypted
 	 * NFC channel; never include them in a LoRaWAN response (the fPort-85 payload
@@ -519,7 +549,7 @@ static uint32_t config_dump_build_page(enum app_cmd_transport tp, uint32_t secti
 		    app_config_alarms_slot_empty(DUMP_FIELDS[i].tag)) {
 			continue;
 		}
-		if (used > 0 && used + DUMP_FIELDS[i].size > dump_page_budget(tp)) {
+		if (used > 0 && used + DUMP_FIELDS[i].size > budget) {
 			cur_page++;
 			used = 0;
 		}
@@ -578,7 +608,7 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 	uint32_t page = gc->has_page ? gc->page : 0;
 
 	/* A full snapshot: every group, paged for this transport. */
-	(void)config_dump_build_page(tp, DUMP_SECTION_MASK_ALL, page, resp);
+	(void)config_dump_build_page(tp, DUMP_SECTION_MASK_ALL, page, dump_page_budget(tp), resp);
 }
 
 /* Encoded-size bound for a (section, tag) from DUMP_FIELDS. Returns false for a
@@ -1208,25 +1238,55 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
 	return encode_response(&resp, out, out_cap, out_len);
 }
 
-int app_cmd_build_alarm_config_report(uint8_t *out, size_t out_cap, size_t *out_len, uint32_t page,
-				      uint32_t *page_count)
+int app_cmd_build_alarm_config_report(uint8_t *out, size_t out_cap, size_t *out_len,
+				      uint16_t slot_mask, uint8_t start_slot, size_t max_frame,
+				      uint8_t *next_slot)
 {
-	if (!out || !out_len || !page_count) {
+	if (!out || !out_len || !next_slot) {
 		return -EINVAL;
 	}
 
 	Response resp = Response_init_zero;
 	resp.seq = 0; /* unsolicited, like build_info: no request seq to echo */
+	resp.which_body = Response_config_dump_tag;
+	Response_ConfigDump *cd = &resp.body.config_dump;
+	cd->has_alarms = true;
 
-	/* Alarms group only, over the LoRaWAN page budget (the report always leaves
-	 * over the radio). *page_count is the total number of pages so the caller can
-	 * enqueue every one (loop 0..page_count-1). */
-	*page_count = config_dump_build_page(APP_CMD_TRANSPORT_LRW, BIT(DUMP_SECTION_ALARMS), page,
-					     &resp);
-	if (resp.which_body != Response_config_dump_tag) {
-		return -EINVAL; /* page out of range — caller looped past page_count */
+	/* Scalars always ride the frame; alarm slots are appended one at a time and kept
+	 * only while the fully-encoded frame still fits max_frame. Measured (not a byte
+	 * estimate) because both the slot's length prefix and the enclosing alarms
+	 * submessage length grow as slots are added. Only slots set in slot_mask AND
+	 * non-empty are considered, so the report carries just the locally-changed rules;
+	 * a cleared slot is empty -> skipped -> not reported (#320 delta contract). */
+	uint32_t ids[2 + APP_ALARM_SLOT_COUNT];
+	size_t nids = 0;
+	ids[nids++] = 1; /* alarm_limit */
+	ids[nids++] = 2; /* alarm_notif_time */
+
+	uint8_t slot = start_slot;
+	for (; slot < APP_ALARM_SLOT_COUNT; slot++) {
+		uint32_t tag = (uint32_t)slot + 3;
+		if (!(slot_mask & (1u << slot)) || app_config_alarms_slot_empty(tag)) {
+			continue;
+		}
+		ids[nids] = tag; /* tentatively include this slot */
+		memset(&cd->alarms, 0, sizeof(cd->alarms));
+		app_config_fill_alarms(&cd->alarms, ids, nids + 1);
+		size_t sz = 0;
+		if (!pb_get_encoded_size(&sz, Response_fields, &resp)) {
+			return -EMSGSIZE;
+		}
+		/* 1 + sz = version byte + Response. Keep at least one slot per frame (nids>2)
+		 * so a long delta always advances, even if a lone rule nears the DR limit. */
+		if ((size_t)(1 + sz) > max_frame && nids > 2) {
+			break; /* frame full; this slot rolls to the next frame (uncommitted) */
+		}
+		nids++;
 	}
+	*next_slot = slot; /* first slot NOT in this frame; == APP_ALARM_SLOT_COUNT when done */
 
+	memset(&cd->alarms, 0, sizeof(cd->alarms));
+	app_config_fill_alarms(&cd->alarms, ids, nids); /* final committed set */
 	return encode_response(&resp, out, out_cap, out_len);
 }
 
@@ -1348,32 +1408,4 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 
 	*out_len = ostream.bytes_written + 1;
 	return 0;
-}
-
-int app_cmd_build_config_changed_report(uint8_t *out, size_t out_cap, size_t *out_len)
-{
-	uint32_t base = 0;
-	bool synced = false;
-#ifdef APP_CMD_HAVE_CLOCK
-	uint32_t unix_s;
-	if (app_clock_get_unix(&unix_s) == 0) {
-		base = unix_s;
-		synced = true;
-	}
-#endif
-	/* One synthetic marker event — not a rule trip. slot 0xFF = "no specific rule
-	 * slot" (same sentinel as the no-data watchdog); type CONFIG_CHANGED tells the
-	 * backend this fPort-3 frame announces a local alarm-config change, with the
-	 * new config following on fPort 85. */
-	struct app_cmd_alarm_event ev = {
-		.slot = 0xFF,
-		.source = 0,
-		.quantity = 0,
-		.edge = 0, /* activate */
-		.type = AlarmEvent_Type_TYPE_CONFIG_CHANGED,
-		.has_value = false,
-		.value = 0,
-		.rel_s = 0,
-	};
-	return app_cmd_build_alarm_report(base, 1, synced, &ev, 1, out, out_cap, out_len);
 }

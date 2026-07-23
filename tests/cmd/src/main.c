@@ -338,26 +338,31 @@ ZTEST(cmd, test_build_info_claim_token)
 	zassert_mem_equal(r.body.info.claim_token, token, sizeof(token), "claim_token bytes");
 }
 
-/* #320: app_cmd_build_alarm_config_report() produces a ConfigDump carrying ONLY
- * the alarms group (byte-identical to a GetConfig alarms reply), paged for the
- * LoRaWAN budget, with empty slots omitted. This is the unsolicited uplink the
- * device sends when alarm settings are changed locally. */
+/* #320: the alarm-config report carries ONLY the changed (masked) non-empty slots — a
+ * delta, not the whole config. A slot that is set but NOT in the changed mask is omitted;
+ * a slot in the mask but empty (a cleared rule) is omitted too (clears aren't reported).
+ * With a roomy frame the whole delta fits one frame (next_slot == slot count = done). */
 ZTEST(cmd, test_build_alarm_config_report)
 {
 	uint8_t out[128];
 	size_t out_len = 0;
-	uint32_t page_count = 0;
+	uint8_t next = 0;
 
 	reset_cfg();
 	g_app_config.alarm_limit = 30;
 	g_app_config.alarm_notif_time = 15;
-	/* One configured rule in slot 0 (opaque packed bytes; only non-zero matters
-	 * for the dump). Slots 1..15 stay empty and must be omitted. */
+	/* Slots 0, 2, 5 configured (opaque bytes; only non-zero matters); slot 1 empty. */
 	memset(g_app_config.alarm_0, 0xA5, sizeof(g_app_config.alarm_0));
+	memset(g_app_config.alarm_2, 0x5A, sizeof(g_app_config.alarm_2));
+	memset(g_app_config.alarm_5, 0x11, sizeof(g_app_config.alarm_5));
 
-	int ret = app_cmd_build_alarm_config_report(out, sizeof(out), &out_len, 0, &page_count);
+	/* Changed mask = slots 0 and 2 only. Slot 5 is set but NOT changed -> must be
+	 * excluded; slot 1 is in-range but empty. Roomy frame (200 B) fits the whole delta. */
+	uint16_t mask = (uint16_t)((1u << 0) | (1u << 2));
+	int ret =
+		app_cmd_build_alarm_config_report(out, sizeof(out), &out_len, mask, 0, 200, &next);
 	zassert_equal(ret, 0, "build ret %d", ret);
-	zassert_equal(page_count, 1, "page_count %u (limit+notif+1 rule fit one page)", page_count);
+	zassert_equal(next, 16, "whole delta should fit one frame, next=%u", next);
 
 	zassert_equal(out[0], APP_PROTO_VERSION, "bad version 0x%02x", out[0]);
 	Response r = Response_init_zero;
@@ -366,85 +371,65 @@ ZTEST(cmd, test_build_alarm_config_report)
 
 	zassert_equal(r.which_body, Response_config_dump_tag, "expected ConfigDump, which=%d",
 		      r.which_body);
-	zassert_equal(r.body.config_dump.page_index, 0, "page_index");
-	zassert_equal(r.body.config_dump.page_count, 1, "page_count");
 	/* Alarms group only — no other config group is echoed. */
 	zassert_true(r.body.config_dump.has_alarms, "alarms section missing");
 	zassert_false(r.body.config_dump.has_lorawan, "lorawan must not be in an alarm report");
-	zassert_false(r.body.config_dump.has_application,
-		      "application must not be in an alarm report");
-	zassert_false(r.body.config_dump.has_sensors, "sensors must not be in an alarm report");
-	/* Scalars + the one non-empty slot are present; empty slots are omitted. */
+	zassert_false(r.body.config_dump.has_application, "application must not be present");
+	zassert_false(r.body.config_dump.has_sensors, "sensors must not be present");
+	/* Scalars + the two CHANGED slots; the set-but-unchanged slot 5 and empty slot 1 out. */
 	zassert_true(r.body.config_dump.alarms.has_alarm_limit, "alarm_limit missing");
 	zassert_equal(r.body.config_dump.alarms.alarm_limit, 30, "alarm_limit value");
 	zassert_true(r.body.config_dump.alarms.has_alarm_notif_time, "alarm_notif_time missing");
-	zassert_equal(r.body.config_dump.alarms.alarm_notif_time, 15, "alarm_notif_time value");
-	zassert_true(r.body.config_dump.alarms.has_alarm_0, "configured alarm_0 missing");
+	zassert_true(r.body.config_dump.alarms.has_alarm_0, "changed alarm_0 missing");
+	zassert_true(r.body.config_dump.alarms.has_alarm_2, "changed alarm_2 missing");
 	zassert_false(r.body.config_dump.alarms.has_alarm_1, "empty alarm_1 must be omitted");
+	zassert_false(r.body.config_dump.alarms.has_alarm_5,
+		      "set-but-unchanged alarm_5 must NOT be reported (delta)");
 	zassert_equal(r.body.config_dump.alarms.alarm_0[0], 0xA5, "alarm_0 bytes");
+	zassert_equal(r.body.config_dump.alarms.alarm_2[0], 0x5A, "alarm_2 bytes");
 }
 
-/* #320: a full alarms dump pages when it exceeds one DR0 frame; every page is a
- * valid alarms-only ConfigDump reporting the same total page_count, so the emit
- * loop (app_lrw) can walk 0..page_count-1. Two rules: limit+notif+alarm_0 fill
- * page 0, alarm_1 overflows to page 1. */
-ZTEST(cmd, test_build_alarm_config_report_paged)
+/* #320: when more changed slots than fit one frame, the report packs each frame to the
+ * given max_frame (measured) and reports next_slot so the emitter walks the rest. Three
+ * changed rules at a DR0-sized frame (51 B) => 2 frames (2 rules + 1), not 1 rule/frame. */
+ZTEST(cmd, test_build_alarm_config_report_packs_to_frame)
 {
 	uint8_t out[128];
 	size_t out_len = 0;
-	uint32_t pc = 0;
+	uint8_t next = 0;
 
 	reset_cfg();
 	g_app_config.alarm_limit = 5;
 	g_app_config.alarm_notif_time = 10;
 	memset(g_app_config.alarm_0, 0x11, sizeof(g_app_config.alarm_0));
 	memset(g_app_config.alarm_1, 0x22, sizeof(g_app_config.alarm_1));
+	memset(g_app_config.alarm_2, 0x33, sizeof(g_app_config.alarm_2));
+	uint16_t mask = (uint16_t)((1u << 0) | (1u << 1) | (1u << 2));
 
-	/* Page 0: scalars + alarm_0, alarm_1 overflows. */
-	zassert_equal(app_cmd_build_alarm_config_report(out, sizeof(out), &out_len, 0, &pc), 0,
-		      "page0 build");
-	zassert_equal(pc, 2, "page_count %u (two rules span two DR0 pages)", pc);
+	/* Frame 0: pack as many as fit 51 B. Two 17-byte rules + scalars (~49 B) fit; the
+	 * third overflows, so next_slot points at it. */
+	int ret = app_cmd_build_alarm_config_report(out, sizeof(out), &out_len, mask, 0, 51, &next);
+	zassert_equal(ret, 0, "frame0 build");
+	zassert_true(out_len <= 51, "frame0 %zu B must fit 51", out_len);
+	zassert_equal(next, 2, "frame0 should hold slots 0-1, next=%u", next);
 	Response r = Response_init_zero;
 	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
-	zassert_true(pb_decode(&is, Response_fields, &r), "page0 decode");
-	zassert_equal(r.body.config_dump.page_index, 0, "page0 index");
-	zassert_true(r.body.config_dump.alarms.has_alarm_0, "alarm_0 on page 0");
-	zassert_false(r.body.config_dump.alarms.has_alarm_1, "alarm_1 must overflow off page 0");
+	zassert_true(pb_decode(&is, Response_fields, &r), "frame0 decode");
+	zassert_true(r.body.config_dump.alarms.has_alarm_0, "alarm_0 in frame0");
+	zassert_true(r.body.config_dump.alarms.has_alarm_1, "alarm_1 in frame0");
+	zassert_false(r.body.config_dump.alarms.has_alarm_2, "alarm_2 overflows to frame1");
 
-	/* Page 1: alarm_1 only. */
-	zassert_equal(app_cmd_build_alarm_config_report(out, sizeof(out), &out_len, 1, &pc), 0,
-		      "page1 build");
-	zassert_equal(pc, 2, "page1 page_count");
+	/* Frame 1: the remaining slot; next reaches the slot count => delta complete. */
+	ret = app_cmd_build_alarm_config_report(out, sizeof(out), &out_len, mask, next, 51, &next);
+	zassert_equal(ret, 0, "frame1 build");
+	zassert_equal(next, 16, "frame1 finishes the delta, next=%u", next);
 	r = (Response)Response_init_zero;
 	is = pb_istream_from_buffer(out + 1, out_len - 1);
-	zassert_true(pb_decode(&is, Response_fields, &r), "page1 decode");
-	zassert_equal(r.body.config_dump.page_index, 1, "page1 index");
-	zassert_false(r.body.config_dump.alarms.has_alarm_0, "alarm_0 only on page 0");
-	zassert_true(r.body.config_dump.alarms.has_alarm_1, "alarm_1 on page 1");
-	zassert_equal(r.body.config_dump.alarms.alarm_1[0], 0x22, "alarm_1 bytes");
-}
-
-/* #320: app_cmd_build_config_changed_report() builds the fPort-3 marker sent just
- * before the config report on a local alarm-config change: an AlarmReport with one
- * event of type CONFIG_CHANGED, slot 0xFF (a marker, not a real rule trip). */
-ZTEST(cmd, test_build_config_changed_report)
-{
-	uint8_t out[128];
-	size_t out_len = 0;
-
-	reset_cfg();
-	int ret = app_cmd_build_config_changed_report(out, sizeof(out), &out_len);
-	zassert_equal(ret, 0, "build ret %d", ret);
-
-	zassert_equal(out[0], APP_PROTO_VERSION, "bad version 0x%02x", out[0]);
-	AlarmReport rep = AlarmReport_init_zero;
-	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
-	zassert_true(pb_decode(&is, AlarmReport_fields, &rep), "AlarmReport decode");
-	zassert_equal(rep.events_count, 1, "expected 1 event, got %d", rep.events_count);
-	zassert_equal(rep.events[0].type, AlarmEvent_Type_TYPE_CONFIG_CHANGED, "type=%d",
-		      rep.events[0].type);
-	zassert_equal(rep.events[0].slot, 0xFF, "slot=%d", rep.events[0].slot);
-	zassert_equal(rep.total, 1, "total=%d", rep.total);
+	zassert_true(pb_decode(&is, Response_fields, &r), "frame1 decode");
+	zassert_false(r.body.config_dump.alarms.has_alarm_0, "alarm_0 only in frame0");
+	zassert_false(r.body.config_dump.alarms.has_alarm_1, "alarm_1 only in frame0");
+	zassert_true(r.body.config_dump.alarms.has_alarm_2, "alarm_2 in frame1");
+	zassert_equal(r.body.config_dump.alarms.alarm_2[0], 0x33, "alarm_2 bytes");
 }
 
 ZTEST(cmd, test_deferred_actions)

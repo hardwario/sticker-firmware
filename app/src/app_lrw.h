@@ -86,15 +86,17 @@ int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len);
 void app_lrw_send_info_on_clock_sync(void);
 
 /* #320: a LOCAL alarm-config change (shell `alarm` command or NFC SetParam) →
- * push the current alarm settings up on fPort 85 so the backend reconciles its
- * shadow. Coalesces a burst of edits into one paged report emitted on the next
- * jitter window; no-op unless config_report_on_change is set. Any thread. */
-void app_lrw_arm_config_report(void);
+ * push the CHANGED alarm slots up on fPort 85 so the backend reconciles its shadow.
+ * `slot_mask` bit i marks slot i as changed; masks from a burst of edits are OR'd and
+ * coalesced into one report (only the changed, non-empty slots, packed into as few
+ * frames as the data rate allows) emitted on the next jitter window. No-op unless
+ * config_report_on_change is set. Any thread. */
+void app_lrw_arm_config_report(uint16_t slot_mask);
 
 /* #320 variant for a durable local edit that persists by rebooting (SetParam
- * save=true): persist a one-shot marker so the report is emitted once after the
+ * save=true): persist the changed-slot mask so the report is emitted once after the
  * re-join rather than lost in the reboot. No-op unless config_report_on_change. */
-void app_lrw_arm_config_report_after_reboot(void);
+void app_lrw_arm_config_report_after_reboot(uint16_t slot_mask);
 
 /* Stage an alarm-detail batch (issue #27) for the next uplink on fPort 3. Own
  * slot, drained after the command response and before telemetry, so it never

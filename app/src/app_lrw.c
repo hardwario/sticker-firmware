@@ -10,6 +10,7 @@
 #include "app_clock.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_config_ingest.h"
 #include "app_counters.h"
 #include "app_history.h"
 #include "app_log.h"
@@ -261,18 +262,20 @@ static enum app_cmd_action m_post_cmd_action;
  * downlink callback (another context) — an atomic bit closes the lost-update race. */
 static atomic_t m_clock_sync_info_pending;
 
-/* #320: a LOCAL alarm-config change (shell/NFC) pushes the current alarm settings
- * up on fPort 85 so the backend can reconcile. m_config_report_start (set from
- * any thread) tells config_report_work_handler to (re)start a report cycle at
- * page 0 — coalescing a burst and restarting an in-flight cycle with the newest
- * config. m_config_report_page (the next page to send) is owned by the work
- * handler on m_work_q. A durable edit (SetParam save=true) persists a one-shot
- * marker (CONFIG_REPORT_PENDING_KEY) across its save+reboot so the report is
- * emitted once after re-join; m_config_report_reboot_checked makes that NVS read
- * happen on the first join only. */
+/* #320: a LOCAL alarm-config change (shell/NFC) pushes the CHANGED alarm slots up on
+ * fPort 85 so the backend can reconcile. m_config_report_dirty (atomic, OR'd from any
+ * thread) accumulates the changed-slot bitmask; m_config_report_start tells
+ * config_report_work_handler to (re)start a cycle — it snapshots the accumulator into
+ * m_config_report_mask (work-queue-owned) and clears it, so a burst coalesces into one
+ * report and an in-flight cycle restarts with the newest set. m_config_report_slot is
+ * the next slot to pack (frames advance through the mask). A durable edit (SetParam
+ * save=true) persists the mask (CONFIG_REPORT_PENDING_KEY) across its save+reboot so the
+ * report is emitted once after re-join; m_config_report_reboot_checked makes that NVS
+ * read happen on the first join only. */
 static atomic_t m_config_report_start;
-static uint32_t m_config_report_page;
-static bool m_config_report_marker_sent; /* #320: fPort-3 config-changed marker queued this cycle */
+static atomic_t m_config_report_dirty; /* changed-slot mask accumulator (bit i = slot i) */
+static uint16_t m_config_report_mask;  /* snapshot being emitted this cycle */
+static uint8_t m_config_report_slot;   /* next slot to pack into a frame */
 static bool m_config_report_reboot_checked;
 #define CONFIG_REPORT_PENDING_KEY "app/alarm_report_pending"
 
@@ -453,19 +456,38 @@ static int queue_info_uplink(void)
 	return ret;
 }
 
-/* #320 alarm-config report: page the current alarms group out on fPort 85, one
- * response frame per page, paced by FRAME_GAP_SEC and gated on the link being
- * ready. Runs on m_work_q. A fresh local edit (or the post-reboot resume) sets
- * m_config_report_start so the cycle (re)starts at page 0 with the latest config;
- * restarting an in-flight cycle is harmless — the backend overwrites its shadow
- * from the full dump. */
+/* True if `mask` has at least one bit whose slot holds a non-empty (set) rule. A mask of
+ * only-cleared slots reports nothing (#320 delta contract: clears are not reported). */
+static bool config_report_mask_has_content(uint16_t mask)
+{
+	for (uint8_t s = 0; s < APP_ALARM_SLOT_COUNT; s++) {
+		if ((mask & (1u << s)) && !app_config_alarms_slot_empty((uint32_t)s + 3)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* #320 alarm-config report: after a LOCAL (shell/NFC) change, push ONLY the changed,
+ * non-empty slots out on fPort 85 so the backend reconciles. Packs as many changed slots
+ * per frame as the live DR allows (measured), emitting one frame per pass paced by
+ * FRAME_GAP_SEC until the whole delta is out. Runs on m_work_q, gated on the link being
+ * ready. A fresh edit (or post-reboot resume) sets m_config_report_start, which snapshots
+ * the accumulated changed-slot mask and restarts at its first slot; restarting an
+ * in-flight cycle is harmless — the backend merges whatever changed slots it receives. */
 static void config_report_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
 	if (atomic_test_and_clear_bit(&m_config_report_start, 0)) {
-		m_config_report_page = 0;
-		m_config_report_marker_sent = false;
+		/* Snapshot + clear the accumulator: this cycle owns these slots; new edits
+		 * re-arm and restart with a fresh snapshot. */
+		m_config_report_mask = (uint16_t)atomic_clear(&m_config_report_dirty);
+		m_config_report_slot = 0;
+		/* Only-cleared (or empty) delta -> nothing to report. */
+		if (!config_report_mask_has_content(m_config_report_mask)) {
+			return;
+		}
 	}
 
 	/* Emit only once the link can carry it; otherwise wait and retry. Also covers
@@ -476,87 +498,62 @@ static void config_report_work_handler(struct k_work *work)
 		return;
 	}
 
-	/* #320 step 1: an fPort-3 "config changed" alarm goes out FIRST, as a signal on
-	 * the alarm channel, then the fPort-85 config report follows. The TX loop drains
-	 * fPort 85 before fPort 3, so the marker must actually leave (alarm queue empty)
-	 * before the config is queued — otherwise the config would overtake it. */
-	if (!m_config_report_marker_sent) {
-		uint8_t mbuf[APP_LRW_RESPONSE_BUF_SIZE];
-		size_t mlen;
-		int mret = app_cmd_build_config_changed_report(mbuf, sizeof(mbuf), &mlen);
-		if (mret != 0) {
-			LOG_WRN("config-changed marker build failed: %d; sending config anyway",
-				mret);
-			m_config_report_marker_sent = true;
-		} else if (app_lrw_send_alarm(mbuf, mlen) == 0) {
-			m_config_report_marker_sent = true;
-		}
-		/* else the fPort-3 queue was full — retry the marker shortly. */
-		k_work_reschedule_for_queue(&m_work_q, &m_config_report_work,
-					    K_SECONDS(FRAME_GAP_SEC));
-		return;
-	}
-	if (k_msgq_num_used_get(&m_alarm_msgq) > 0) {
-		/* Marker (or a real alarm ahead of it) still pending TX — let the fPort-3
-		 * queue drain so the config report transmits after it, not before. */
-		k_work_reschedule_for_queue(&m_work_q, &m_config_report_work,
-					    K_SECONDS(FRAME_GAP_SEC));
-		return;
-	}
-
-	/* #320 step 2: page the fPort-85 config report. */
 	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t len;
-	uint32_t page_count = 0;
-	int ret = app_cmd_build_alarm_config_report(buf, sizeof(buf), &len, m_config_report_page,
-						    &page_count);
+	uint8_t next = m_config_report_slot;
+	/* Cap the per-frame budget at the response buffer, not just the DR payload: at a
+	 * high DR the DR budget (up to 242 B) exceeds this 64 B build/queue buffer, so pack
+	 * to whichever is smaller or the frame would over-pack and fail to encode. */
+	size_t dr_budget = refresh_payload_budget();
+	size_t max_frame = dr_budget < sizeof(buf) ? dr_budget : sizeof(buf);
+	int ret = app_cmd_build_alarm_config_report(buf, sizeof(buf), &len, m_config_report_mask,
+						    m_config_report_slot, max_frame, &next);
 	if (ret) {
-		LOG_WRN("alarm-config report page %u build failed: %d", m_config_report_page, ret);
-		m_config_report_page = 0;
-		return;
+		LOG_WRN("alarm-config report build failed at slot %u: %d", m_config_report_slot,
+			ret);
+		return; /* abandon this cycle; a later edit re-arms */
 	}
 
 	ret = app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len);
 	if (ret == -ENOMEM) {
-		/* Response queue full: retry the SAME page once it drains. */
+		/* Response queue full: retry the SAME frame once it drains. */
 		k_work_reschedule_for_queue(&m_work_q, &m_config_report_work,
 					    K_SECONDS(FRAME_GAP_SEC));
 		return;
 	}
 	if (ret) {
-		LOG_WRN("alarm-config report page %u queue failed: %d", m_config_report_page, ret);
-		m_config_report_page = 0;
+		LOG_WRN("alarm-config report queue failed at slot %u: %d", m_config_report_slot,
+			ret);
 		return;
 	}
 
-	if (++m_config_report_page < page_count) {
-		/* Pace the remaining pages so each clears the queue + duty cycle. */
+	if (next < APP_ALARM_SLOT_COUNT) {
+		/* More changed slots remain — pace the next frame so each clears the queue. */
+		m_config_report_slot = next;
 		k_work_reschedule_for_queue(&m_work_q, &m_config_report_work,
 					    K_SECONDS(FRAME_GAP_SEC));
 	} else {
-		LOG_INF("alarm-config report sent (%u page(s), fPort %d)", page_count,
-			APP_LRW_DOWNLINK_CMD_PORT);
-		m_config_report_page = 0;
+		LOG_INF("alarm-config report sent (fPort %d)", APP_LRW_DOWNLINK_CMD_PORT);
 	}
 }
 
-/* settings_load_subtree_direct callback for the #320 report-pending marker. */
+/* settings_load_subtree_direct callback for the #320 report-pending changed-slot mask. */
 static int config_report_pending_read_cb(const char *key, size_t len, settings_read_cb read_cb,
 					 void *cb_arg, void *param)
 {
 	ARG_UNUSED(key);
-	bool *found = param;
-	uint8_t v = 0;
+	uint16_t *mask = param;
+	uint16_t v = 0;
 
-	if (len >= 1 && read_cb(cb_arg, &v, 1) >= 0 && v) {
-		*found = true;
+	if (len >= sizeof(v) && read_cb(cb_arg, &v, sizeof(v)) >= 0) {
+		*mask = v;
 	}
 	return 0;
 }
 
-/* On the first join after boot, consume the persisted report-pending marker (set
- * before a durable local alarm edit's save+reboot) and, if present, arm the
- * report so it goes out now that we are joined. One-shot. */
+/* On the first join after boot, consume the persisted report-pending mask (set before a
+ * durable local alarm edit's save+reboot) and, if any slot is pending, arm the report so
+ * it goes out now that we are joined. One-shot. */
 static void config_report_consume_reboot_flag(void)
 {
 	if (m_config_report_reboot_checked) {
@@ -564,14 +561,14 @@ static void config_report_consume_reboot_flag(void)
 	}
 	m_config_report_reboot_checked = true;
 
-	bool pending = false;
+	uint16_t pending = 0;
 	(void)settings_load_subtree_direct(CONFIG_REPORT_PENDING_KEY, config_report_pending_read_cb,
 					   &pending);
 	if (!pending) {
 		return;
 	}
 	(void)settings_delete(CONFIG_REPORT_PENDING_KEY);
-	app_lrw_arm_config_report();
+	app_lrw_arm_config_report(pending);
 }
 
 static void on_join_success(void)
@@ -1933,28 +1930,30 @@ void app_lrw_send_info_on_clock_sync(void)
 	atomic_set_bit(&m_clock_sync_info_pending, 0);
 }
 
-void app_lrw_arm_config_report(void)
+void app_lrw_arm_config_report(uint16_t slot_mask)
 {
 	if (!g_app_config.config_report_on_change) {
 		return;
 	}
-	/* Coalesce a burst of edits into one cycle and (re)start at page 0 with the
-	 * newest config. Safe from any thread: the bit is atomic and k_work_reschedule
-	 * is thread-safe; the page counter is touched only on m_work_q. */
+	/* Accumulate the changed slots and coalesce a burst of edits into one cycle that
+	 * (re)starts with the newest snapshot. Safe from any thread: the accumulator OR and
+	 * the start bit are atomic and k_work_reschedule is thread-safe; the snapshot mask
+	 * and slot cursor are touched only on m_work_q. */
+	atomic_or(&m_config_report_dirty, slot_mask);
 	atomic_set_bit(&m_config_report_start, 0);
 	k_work_reschedule_for_queue(&m_work_q, &m_config_report_work, K_SECONDS(2));
 }
 
-void app_lrw_arm_config_report_after_reboot(void)
+void app_lrw_arm_config_report_after_reboot(uint16_t slot_mask)
 {
 	if (!g_app_config.config_report_on_change) {
 		return;
 	}
 	/* A durable local alarm edit (SetParam save=true) persists by cold-rebooting,
-	 * which would lose an in-RAM report. Persist a one-shot marker so the report
+	 * which would lose an in-RAM report. Persist the changed-slot mask so the report
 	 * goes out once after the re-join (consumed in on_join_success). */
-	uint8_t pending = 1;
-	int ret = settings_save_one(CONFIG_REPORT_PENDING_KEY, &pending, sizeof(pending));
+	uint16_t mask = slot_mask;
+	int ret = settings_save_one(CONFIG_REPORT_PENDING_KEY, &mask, sizeof(mask));
 	if (ret) {
 		LOG_WRN("persist #320 report-pending failed: %d", ret);
 	}
