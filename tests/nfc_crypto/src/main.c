@@ -49,6 +49,11 @@ static bool nonce_accept(uint32_t current, uint32_t received)
 static const uint8_t KEY[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
 				0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
 
+/* Published TEST vendor_token key (#316) — distinct from KEY, same 16 bytes; the
+ * vendor channel (hio.stck:vnd) uses the identical framing keyed by vendor_token. */
+static const uint8_t VND_KEY[16] = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+				    0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f};
+
 /* serial = 0, counter = 1  ->  header = AAD = 00 00 00 00 00 00 00 01 */
 static const uint8_t HDR[8] = {0, 0, 0, 0, 0, 0, 0, 1};
 
@@ -68,9 +73,17 @@ static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 #define RSP_PLAIN "0108011200"
 #define RSP_WIRE  "0000000000000001d67a6dd3cce76a8bae20443086737ea584e195dfa0"
 
+/* #316 vendor channel (hio.stck:vnd), sealed under VND_KEY (dir=REQUEST): the
+ * plaintext is APP_PROTO_VERSION + Command{ seq=1, vendor_reset{ key = 16x0xAB } }
+ * (field 25, SetSecretKey shape). Same nonce/AAD/tag construction as REQ_WIRE. */
+#define VND_REQ_PLAIN "010801ca01120a10abababababababababababababababab"
+/* clang-format off */
+#define VND_REQ_WIRE "0000000000000001ee1ffd315e8201868ec3520156a2fec3ff856bcbdd327b92f14df3765923ed59ac63824553481d58"
+/* clang-format on */
+
 /* Seal `pt` into the wire frame [header(8) || ciphertext+tag]; mirrors encrypt(). */
-static int ccm_seal(uint8_t dir, const uint8_t *pt, size_t pt_len, uint8_t *wire, size_t cap,
-		    size_t *wire_len)
+static int ccm_seal(const uint8_t *key_bytes, uint8_t dir, const uint8_t *pt, size_t pt_len,
+		    uint8_t *wire, size_t cap, size_t *wire_len)
 {
 	uint8_t nonce[NFC_NONCE_LEN];
 	memcpy(nonce, HDR, 8);
@@ -83,7 +96,7 @@ static int ccm_seal(uint8_t dir, const uint8_t *pt, size_t pt_len, uint8_t *wire
 	psa_set_key_bits(&attr, 128);
 
 	psa_key_id_t key;
-	if (psa_import_key(&attr, KEY, sizeof(KEY), &key) != PSA_SUCCESS) {
+	if (psa_import_key(&attr, key_bytes, sizeof(KEY), &key) != PSA_SUCCESS) {
 		return -EIO;
 	}
 
@@ -134,7 +147,7 @@ ZTEST(nfc_crypto, test_request_vector)
 	size_t want_len = unhex(REQ_WIRE, want, sizeof(want));
 	size_t wire_len = 0;
 
-	zassert_ok(ccm_seal(NFC_NONCE_DIR_REQUEST, pt, pt_len, wire, sizeof(wire), &wire_len));
+	zassert_ok(ccm_seal(KEY, NFC_NONCE_DIR_REQUEST, pt, pt_len, wire, sizeof(wire), &wire_len));
 	zassert_equal(wire_len, want_len, "request wire length %zu != %zu", wire_len, want_len);
 	zassert_mem_equal(wire, want, want_len, "request wire bytes differ from golden vector");
 }
@@ -146,9 +159,27 @@ ZTEST(nfc_crypto, test_response_vector)
 	size_t want_len = unhex(RSP_WIRE, want, sizeof(want));
 	size_t wire_len = 0;
 
-	zassert_ok(ccm_seal(NFC_NONCE_DIR_RESPONSE, pt, pt_len, wire, sizeof(wire), &wire_len));
+	zassert_ok(
+		ccm_seal(KEY, NFC_NONCE_DIR_RESPONSE, pt, pt_len, wire, sizeof(wire), &wire_len));
 	zassert_equal(wire_len, want_len, "response wire length %zu != %zu", wire_len, want_len);
 	zassert_mem_equal(wire, want, want_len, "response wire bytes differ from golden vector");
+}
+
+/* #316: the vendor channel (hio.stck:vnd) uses the identical CCM framing keyed by
+ * vendor_token instead of secret_key. Sealing a real vendor_reset Command under a
+ * distinct vendor key must reproduce the golden wire bytes — pins the vnd contract
+ * for the Manager-App the same way test_request_vector pins hio.stck:cmd. */
+ZTEST(nfc_crypto, test_vendor_channel_vector)
+{
+	uint8_t pt[64], want[64], wire[128];
+	size_t pt_len = unhex(VND_REQ_PLAIN, pt, sizeof(pt));
+	size_t want_len = unhex(VND_REQ_WIRE, want, sizeof(want));
+	size_t wire_len = 0;
+
+	zassert_ok(ccm_seal(VND_KEY, NFC_NONCE_DIR_REQUEST, pt, pt_len, wire, sizeof(wire),
+			    &wire_len));
+	zassert_equal(wire_len, want_len, "vendor wire length %zu != %zu", wire_len, want_len);
+	zassert_mem_equal(wire, want, want_len, "vendor wire bytes differ from golden vector");
 }
 
 ZTEST(nfc_crypto, test_roundtrip)

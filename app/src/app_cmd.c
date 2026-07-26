@@ -709,6 +709,55 @@ static void app_cmd_handle_clm_ack(enum app_cmd_transport tp, const Command *cmd
 	resp->which_body = Response_ack_tag;
 }
 
+/* #316: replacement secret_key staged by the vendor_reset handler below, consumed
+ * once via app_cmd_take_pending_vendor_secret_key() when the deferred
+ * APP_CMD_ACTION_VENDOR_RESET runs (main.c / nfc-check apply sites). Lives here
+ * (not app_nfc.c) because vendor_reset is now a generic Command: the handler runs
+ * on dispatch and stashes the key synchronously; the action carrier conveys only
+ * the enum. Single writer (the handler) + copied out immediately by the consumer,
+ * and the NFC action-staging (M-5) rejects a second pending action, so the buffer
+ * stays valid until taken. */
+static uint8_t m_pending_vendor_secret_key[16];
+
+/* #316: vendor_reset over the vendor channel (NFC hio.stck:vnd, authenticated by
+ * vendor_token — decrypt() runs before app_cmd_handle() is reached). Body reuses
+ * the SetSecretKey shape: the mandatory replacement secret_key, because
+ * app_settings_vendor_reset() zeroes the old key (secret_key is NOT in the
+ * vendor_reset persistent tier). The destructive wipe + key install + cold reboot
+ * is the deferred APP_CMD_ACTION_VENDOR_RESET, run after the Ack is on the tag.
+ *
+ * Gate (Option A, #316): refuse when vendor_reset_allow is false — the same policy
+ * app_settings_vendor_reset() enforces, pre-checked here so the phone gets an
+ * immediate NOT_READY instead of an Ack followed by a silent no-op. Recovery from
+ * allow==false is a vendor-channel set_param(vendor_reset_allow=true) first (its
+ * write is gated only by transport, never by the flag's current value), then this. */
+static void app_cmd_handle_vendor_reset(enum app_cmd_transport tp, const Command *cmd,
+					Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	const Command_SetSecretKey *vr = &cmd->body.vendor_reset;
+
+	if (!vr->has_key) {
+		make_error(resp, Response_Error_Code_BAD_REQUEST, "missing key");
+		return;
+	}
+
+	if (!app_config()->vendor_reset_allow) {
+		make_error(resp, Response_Error_Code_NOT_READY, "vendor_reset disabled");
+		return;
+	}
+
+	memcpy(m_pending_vendor_secret_key, vr->key, sizeof(m_pending_vendor_secret_key));
+
+	*action = APP_CMD_ACTION_VENDOR_RESET;
+	resp->which_body = Response_ack_tag;
+}
+
+const uint8_t *app_cmd_take_pending_vendor_secret_key(void)
+{
+	return m_pending_vendor_secret_key;
+}
+
 /* force_send / req_history are LRW-only (transports: [lrw] in the YAML); the
  * generated dispatch enforces that before calling the handler, so the handlers
  * below assume the LoRaWAN transport. (clock_sync also runs over NFC — see its
@@ -1075,8 +1124,9 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		resp->which_body = Response_ack_tag;
 		break;
 	case Command_set_secret_key_tag:
-		/* transports: [nfc, shell] — reject on any other transport */
-		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+		/* transports: [nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG &&
+		    tp != APP_CMD_TRANSPORT_VENDOR) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
@@ -1089,6 +1139,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_clm_ack(tp, cmd, resp, action);
+		break;
+	case Command_vendor_reset_tag:
+		/* transports: [vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_vendor_reset(tp, cmd, resp, action);
 		break;
 	default:
 		/* L-54: an unknown command tag (e.g. a removed command like the old

@@ -203,29 +203,34 @@ live after reboot. `set_secret_key` — new key takes effect immediately (old ke
 
 - [ ] Pass
 
-### G6a-NFC — vendor_reset over the `hio.stck:rst` channel (#299)
+### G6a-NFC — vendor_reset over the `hio.stck:vnd` channel (#299, #316)
 
-**Goal:** the same `vendor_reset` operation as G6a above, but driven over NFC through its own
-vendor-token-authenticated record (`hio.stck:rst`) instead of the shell — the one reset tier that
-never goes over the generic `hio.stck:cmd`/LoRaWAN command channel at all.
-**Observable:** the tag holds a plaintext info record, then a `hio.stck:rst` write, then a
+**Goal:** the same `vendor_reset` operation as G6a above, but driven over NFC through the
+vendor-token-authenticated record (`hio.stck:vnd`) instead of the shell. Since #316 this is a normal
+protobuf `Command` (`vendor_reset`, `transports: [vendor]`) dispatched on the vendor transport — the
+same generic Command/Response path as `hio.stck:cmd`, only decrypted/encrypted with `vendor_token`,
+and never reachable over `hio.stck:cmd` or LoRaWAN.
+**Observable:** the tag holds a plaintext info record, then a `hio.stck:vnd` write, then a
 `hio.stck:rsp` reply (`Ack` on success, `Error{NOT_READY}` if `vendor-reset-allow` is false,
-`Error{BAD_REQUEST}` for a malformed payload) — the actual reset only fires after the phone acks the
-reply (same ack-before-reboot handshake as every other reset), never immediately from the tap.
+`Error{BAD_REQUEST}` for a missing key) — the actual reset only fires after the phone acks the reply
+(same ack-before-reboot handshake as every other reset), never immediately from the tap. With
+`vendor-reset-allow=false`, first send `set_param{ application{ vendor_reset_allow=true } }` over
+`hio.stck:vnd` (always accepted — the field is `writable: [vendor]` and its write is not gated on the
+current value), then re-send `vendor_reset`.
 
-**HIL-verified 2026-07-13** without a phone — hand-crafted the AES-CCM frame in Python
-(`cryptography.hazmat.AESCCM`, mirroring the `nfc_crypto` golden-vector construction) and injected it
-directly into ST25DV memory via the `nfc write <offset> <hex>` shell command (`ats cmd nfc <hex>`
-would NOT have worked here — it injects a *plaintext* `Command` straight into `app_cmd_handle`,
-bypassing the NFC tag/encryption entirely). Confirmed all three outcomes: (1) a valid request is
-recognized ("vendor_reset record"), decrypted, accepted, and the reply written — but the device does
-**not** reset until a `hio.stck:ack` record is written back, at which point the deferred action fires
-and `serial_number`/`vendor_token` survive with the new `secret_key` live; (2) with
-`vendor-reset-allow=false`, the request is decrypted but rejected (`Error{NOT_READY}`) with no
-deferred action and no config change; (3) a stale/reused nonce is rejected by `decrypt()` same as the
-`cmd` channel. See `reference_nfc_rst_hil_test_299` (memory) for the exact frame-construction recipe
-and the shell-command-line-length gotcha it surfaced (long `nfc write` hex strings silently truncate —
-split into multiple writes at sequential offsets).
+**Needs HIL re-verification for #316** (the prior 2026-07-13 result was for the removed `hio.stck:rst`
+magic-byte channel, which no longer exists). The frame is now a protobuf `Command{ vendor_reset{ key } }`
+sealed under `vendor_token` — see the `nfc_crypto` `test_vendor_channel_vector` golden vector
+(`VND_REQ_PLAIN`/`VND_REQ_WIRE`) for the exact construction — injected into ST25DV memory via the
+`nfc write <offset> <hex>` shell command (`ats cmd nfc <hex>` would NOT work — it injects a *plaintext*
+`Command` straight into `app_cmd_handle` over the NFC transport, bypassing the tag/encryption and the
+vendor transport). Confirm: (1) a valid request is recognized ("vendor command record"), decrypted,
+dispatched on the vendor transport, accepted, and the reply written — the device does **not** reset
+until a `hio.stck:ack` record is written back, at which point the deferred action fires and
+`serial_number`/`vendor_token` survive with the new `secret_key` live; (2) with `vendor-reset-allow=false`,
+rejected (`Error{NOT_READY}`), and the `set_param(vendor_reset_allow=true)` recovery step above then
+unblocks it; (3) a stale/reused nonce is rejected by `decrypt()` same as the `cmd` channel. Long
+`nfc write` hex strings silently truncate — split into multiple writes at sequential offsets.
 
 - [x] Pass (HIL-verified via hand-crafted frame, 2026-07-13)
 
@@ -1292,7 +1297,7 @@ The dedicated plaintext "RESET NFC tag" NDEF type this test described predates t
 (#299) and no longer exists in `app_nfc.c` (no `NFC action: RESET` string, no 10-blink pattern).
 Resetting over NFC now goes through the encrypted `hio.stck:cmd` channel's `device_reset` /
 `factory_reset` commands (ack-before-reboot, same as every other command) or the separate
-vendor-token-authenticated `hio.stck:rst` channel for `vendor_reset` — see **N9** and **G6a-NFC**.
+vendor-token-authenticated `hio.stck:vnd` channel for `vendor_reset` — see **N9** and **G6a-NFC**.
 
 - [x] N/A (superseded by N9 / G6a-NFC)
 
@@ -1406,7 +1411,7 @@ idempotent via a response cache.
 
 ### N9 — Reset ladder over `hio.stck:cmd`: `device_reset` / `factory_reset` / `set_secret_key`, ack-before-reboot (#299)
 
-**Goal:** unlike `vendor_reset` (its own `hio.stck:rst` channel, see G6a-NFC), `device_reset` and
+**Goal:** unlike `vendor_reset` (its own `hio.stck:vnd` vendor channel, see G6a-NFC), `device_reset` and
 `factory_reset` are ordinary `Command`s dispatched over the standard encrypted `hio.stck:cmd`
 channel — `factory_reset` is additionally **nfc/shell-only** (rejected as a LoRaWAN downlink,
 since a downlink that drops its own LoRaWAN session could never confirm delivery). `set_secret_key`
