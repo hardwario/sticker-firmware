@@ -670,11 +670,26 @@ static void app_cmd_handle_reset_counters(enum app_cmd_transport tp, const Comma
 	resp->which_body = Response_ack_tag;
 }
 
+static bool buffer_is_zero(const uint8_t *buf, size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		if (buf[i]) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 /* #299: rotate secret_key over the already-encrypted channel (the caller already
  * authenticated with the CURRENT key — decrypt() runs before app_cmd_handle() is
  * ever reached). The new key is applied to staging immediately but persisted by
  * the deferred action below (same stack-cost reason as reset_counters above);
- * never echoed back — secret_key stays proto_field:false on every read path. */
+ * never echoed back — secret_key stays proto_field:false on every read path.
+ * #322: that deferred action also reboots, which is what actually makes the new
+ * key live — the NFC channel authenticates from g_app_config (the boot-time
+ * copy), so a persist alone would leave the device answering to the OLD key
+ * until some later, unrelated reboot. */
 static void app_cmd_handle_set_secret_key(enum app_cmd_transport tp, const Command *cmd,
 					  Response *resp, enum app_cmd_action *action)
 {
@@ -683,6 +698,16 @@ static void app_cmd_handle_set_secret_key(enum app_cmd_transport tp, const Comma
 
 	if (!ssk->has_key) {
 		make_error(resp, Response_Error_Code_BAD_REQUEST, "missing key");
+		return;
+	}
+
+	/* #322: an all-zero key is the "unprovisioned" sentinel that makes
+	 * key_is_provisioned() (app_nfc.c) refuse the encrypted channel outright —
+	 * accepting one here would lock the caller out of the very channel it just
+	 * used, with no way back short of the vendor_token channel or a J-Link. Same
+	 * bar app_settings_vendor_reset() already enforces on its replacement key. */
+	if (buffer_is_zero(ssk->key, sizeof(ssk->key))) {
+		make_error(resp, Response_Error_Code_BAD_REQUEST, "zero key");
 		return;
 	}
 

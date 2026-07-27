@@ -185,11 +185,14 @@ LoRaWAN session/keys — the device must re-join after it. `vendor_reset` keeps 
 `serial-number` + `vendor-token` (goes through the live settings API, not a raw storage erase — only
 `history` is raw-erased), and is refused unless the caller supplies a replacement `secret-key` in the
 same call, or if `vendor-reset-allow` is false. `set_secret_key` rotates `secret-key` over the
-already-encrypted nfc/shell channel.
+already-encrypted nfc/shell channel, then reboots so the new key is live (#322); an all-zero
+replacement is refused.
 **Observable:** `factory_reset` — identity survives, DevEUI/keys/region reset to defaults, device
 re-joins. `vendor_reset` without a key, or with `vendor-reset-allow false`, is refused (no reboot,
 nothing erased). `vendor_reset` with a key — only serial+vendor-token survive, new secret_key is
-live after reboot. `set_secret_key` — new key takes effect immediately (old key no longer decrypts).
+live after reboot. `set_secret_key` — the device saves and cold-reboots, and the new key is in
+effect once it comes back (old key no longer decrypts); an all-zero key is rejected with
+`BAD_REQUEST` and nothing is saved or rebooted (#322).
 
 **Prompt for Claude:**
 > `settings factory-reset` over the RTT shell: confirm `config serial-number`/`config secret-key`
@@ -1415,7 +1418,9 @@ idempotent via a response cache.
 `factory_reset` are ordinary `Command`s dispatched over the standard encrypted `hio.stck:cmd`
 channel — `factory_reset` is additionally **nfc/shell-only** (rejected as a LoRaWAN downlink,
 since a downlink that drops its own LoRaWAN session could never confirm delivery). `set_secret_key`
-is also nfc/shell-only and reachable the same way, but does **not** reboot. All three must follow
+is also nfc/shell-only and reachable the same way, and since #322 it reboots too — that reboot is
+what makes the rotated key live, because the encrypted channel authenticates from the boot-time
+`g_app_config` copy. All three must follow
 the same **ack-before-reboot** handshake as `lrw_reset`/`lrw_join` (N5): the device writes its
 encrypted response to the tag *first*, and only reboots once the phone reads it (`hio.stck:ack`)
 or a ~10 s quiet-field timeout fires — never immediately off the tap.
@@ -1425,9 +1430,10 @@ LoRaWAN provisioning intact (same postconditions as G6, driven over NFC instead 
 `factory_reset` — same ack-before-reboot gate, but LoRaWAN keys/session also reset and the device
 re-joins after reboot (same postconditions as G6a's `factory_reset`, driven over NFC); presenting
 it as a LoRaWAN downlink is rejected with `Error{NOT_READY}` (transport not allowed), never
-silently accepted. `set_secret_key` — encrypted `ack` written back with **no** reboot, and the
-*next* `hio.stck:cmd` frame must be encrypted with the **new** key (the old key no longer
-decrypts).
+silently accepted. `set_secret_key` — encrypted `ack` written back **first** (still under the *old*
+key, since the rotation is not live yet), reboot only after the ack/quiet-field timeout, and *after*
+that reboot the **new** key decrypts while the old one is rejected (#322). An all-zero key is
+refused with `Error{BAD_REQUEST}` — no save, no reboot, key unchanged.
 
 **Prompt for Claude:**
 > Build an AES-CCM `hio.stck:cmd` frame carrying `device_reset` (mirror the golden-vector
@@ -1440,9 +1446,12 @@ decrypts).
 > `factory_reset`: confirm the same ack-then-reboot ordering, and that LoRaWAN keys reset and the
 > device re-joins after reboot. Then present `factory_reset` as a fPort-85 LoRaWAN downlink instead
 > and confirm it is rejected with `Error{NOT_READY}` rather than silently executed. Finally send
-> `set_secret_key` with a new 16-byte key over `hio.stck:cmd`: confirm the `ack` is written with
-> **no** reboot, and that a follow-up frame encrypted with the *old* key is now rejected while one
-> encrypted with the *new* key succeeds. Report all results.
+> `set_secret_key` with a new 16-byte key over `hio.stck:cmd`: confirm the `ack` is written to the
+> tag **before** the reboot and is still decryptable with the *old* key, that the reboot fires only
+> after the ack/quiet-field timeout, and that after it a frame encrypted with the *old* key is
+> rejected while one encrypted with the *new* key succeeds (#322). Repeat `set_secret_key` with an
+> all-zero key and confirm `Error{BAD_REQUEST}`, no reboot, and `config secret-key` unchanged.
+> Report all results.
 
 - [ ] Pass
 
