@@ -1453,6 +1453,19 @@ refused with `Error{BAD_REQUEST}` — no save, no reboot, key unchanged.
 > all-zero key and confirm `Error{BAD_REQUEST}`, no reboot, and `config secret-key` unchanged.
 > Report all results.
 
+**`set_secret_key` portion HIL-verified 2026-07-27** (#322), same frame-construction recipe as
+G6a-NFC above — hand-crafted AES-CCM `hio.stck:cmd` records injected with chunked
+`nfc write <offset> <hex>` and driven with `nfc check`. Confirmed: (1) an all-zero key is refused
+with `Error{BAD_REQUEST}` detail `"zero key"`, deferred action `none`, no reboot, `secret-key`
+unchanged; (2) a valid rotation reports deferred action `secret-key-save+reboot`, the `Ack` is
+written to the tag **first** and still decrypts under the *old* key, then the device cold-reboots
+and `config secret-key` reads the new key — i.e. the new key is live immediately rather than at
+some later unrelated reboot; (3) after that reboot a frame sealed with the *old* key is refused
+(`command rejected: -5`, nonce high-water not advanced) while the same frame sealed with the *new*
+key is handled normally; (4) `nonce-counter` is preserved across the rotation reboot (persisted by
+`decrypt()` before the command runs). The `device_reset` / `factory_reset` legs of N9 were **not**
+re-exercised in this session — unchanged by #322.
+
 - [ ] Pass
 
 ### N10 — Claim window: `hio.stck:clm` lay-down + all three end-of-claim triggers (#247, #308)
