@@ -1441,6 +1441,58 @@ decrypts).
 
 - [ ] Pass
 
+### N10 — Claim window: `hio.stck:clm` lay-down + all three end-of-claim triggers (#247, #308)
+
+**Goal:** once `claim_token` is provisioned, the firmware publishes `hio.stck:clm` alongside the
+plaintext info record on every resting-tag write (including after a reboot/reflash), and the claim
+window ends via **any** of three independent triggers: (1) the phone deletes `clm` off the tag
+(#247, unauthenticated over RF, kept for backward compatibility), (2) the phone sends the explicit
+`clm_ack` command over the encrypted `hio.stck:cmd` channel (#308), or (3) the phone sends **any**
+other authenticated command at all — decrypting it already proves `secret_key` possession (#308).
+All three latch the same persisted `UNSET → PENDING → CONSUMED` state; once `CONSUMED`, `clm` is
+never republished, even across reboot/reflash — only a full NVS erase or `vendor_reset` reopens it.
+**Observable:** `nfc clm` shell command reports the latch state throughout. `nfc dump` shows a
+two-record `[inf, clm]` NDEF message while `PENDING`, `inf`-only once `CONSUMED`.
+
+**Prompt for Claude:**
+> `settings erase`, then `config claim-token <32-hex>` + `settings save`. After reboot confirm
+> `nfc clm` reports `PENDING` and `nfc dump` shows the two-record `[inf, clm]` message. Reflash the
+> firmware (plain `west flash`, no `--erase`) and confirm `PENDING` and the two-record tag survive
+> the reflash unchanged (#308 "publish until claimed" guarantee).
+>
+> Trigger 1 (delete-detection, #247): rewrite the tag with an info-only NDEF message (simulating
+> the phone deleting `clm` after claiming) via `nfc write`, then `nfc check`. Confirm `nfc clm`
+> latches `CONSUMED` and reboot doesn't resurrect `clm`.
+>
+> Reset to `PENDING` again (`settings erase` + re-provision) for the next two triggers so each is
+> tested from a clean arm. Trigger 2 (`clm_ack`, #308): build an AES-CCM `hio.stck:cmd` frame
+> carrying `clm_ack` (mirror the golden-vector construction in `tests/nfc_crypto` /
+> `reference_nfc_rst_hil_test_299`; split into sequential `nfc write` calls — long hex truncates
+> silently past ~128 chars) and inject it. Confirm the encrypted `ack` comes back and `nfc clm`
+> latches `CONSUMED` — with **no** RF delete needed.
+>
+> Trigger 3 (implicit consume, #308): re-arm to `PENDING` once more, then send an *unrelated*
+> authenticated command (e.g. `get_info`) over `hio.stck:cmd` instead of `clm_ack`. Confirm that
+> merely decrypting this command also latches `CONSUMED`, even though the command itself was never
+> `clm_ack`. Report all three trigger outcomes and the reflash-survival result.
+
+**HIL-verified 2026-07-14** (debug image, J-Link 822005109), hand-crafted AES-CCM frames (no phone,
+same recipe as `reference_nfc_rst_hil_test_299`): `settings erase` → `config claim-token` +
+`config secret-key` + `settings save` → reboot arms `PENDING`; `nfc dump` confirmed the two-record
+`[inf, clm]` message (`TLV len=0x5b`, second record `54 0c 12 68 69 6f 2e 73 74 63 6b 3a 63 6c 6d`
+= `hio.stck:clm`, payload `12 10` + the 16-byte test token, byte-exact). **Reflash survival**:
+re-flashed the same image (no `--erase`) and confirmed `PENDING` + the identical two-record content
+survived unchanged. **Trigger 2 (`clm_ack`)**: injected an encrypted `hio.stck:cmd` frame carrying
+`clm_ack` → `handled, response 5 B` (bare ack, `deferred action: none`) → `clm state: consumed (2)`.
+**Trigger 3 (implicit consume)**: re-armed to `PENDING`, injected an encrypted `get_info` command
+instead (67 B `Info` response, clearly not `clm_ack`) → `clm state: consumed (2)` all the same,
+confirming any authenticated command ends the window. Trigger 1 (delete-detection) was not
+re-exercised standalone this session — its logic is unchanged from #247 (only moved into the shared
+`clm_consume()` helper also used by triggers 2/3, both of which passed) — see the original #247
+HW-validation note above for its own direct HIL run.
+
+- [x] Pass (HIL-verified via hand-crafted frames, 2026-07-14; triggers 2 and 3 + reflash survival)
+
 ---
 
 ## Payload formatter (`ttn.js`)

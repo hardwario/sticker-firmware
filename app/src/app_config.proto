@@ -133,6 +133,7 @@ message Command {
         Sample           sample            = 21;
         FactoryReset     factory_reset     = 23;
         SetSecretKey     set_secret_key    = 24;
+        ClmAck           clm_ack           = 25;
     }
 // END GENERATED COMMANDS
 
@@ -230,6 +231,11 @@ message Command {
     // CURRENT key). The new key is never readable back via GetParam/GetConfig
     // (secret_key stays proto_field:false — see AppConfigMessage.reserved).
     message SetSecretKey { optional bytes key = 1; }
+
+    // #308: explicit end of the claim window (companion to the #247 clm-record
+    // delete-detection). Empty — the token itself never travels on this command,
+    // only the fact that an authenticated caller sent it.
+    message ClmAck { }
 }
 
 message Response {

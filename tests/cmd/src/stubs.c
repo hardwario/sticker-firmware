@@ -227,6 +227,16 @@ bool app_nfc_ready(void)
 	return true;
 }
 
+/* #308: call counter so the test can confirm clm_ack dispatch reached app_nfc
+ * without linking the real app_nfc.c (its clm latch is HIL-verified, like the
+ * rest of that file — see #247). */
+int g_clm_ack_calls;
+
+void app_nfc_clm_ack(void)
+{
+	g_clm_ack_calls++;
+}
+
 bool app_history_is_ready(void)
 {
 	return true;
