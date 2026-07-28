@@ -35,7 +35,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `reboot` | Cold reboot | `ack` |
 | `device_reset` | Reset config to defaults but **keep device identity + LoRaWAN keys** (stays provisioned/connected); clears dynamic alarm rules; **reboots**. Renamed from the single `factory_reset` (#299) — same wire id, same behavior | `ack` |
 | `factory_reset` | **NEW (#299), narrower than `device_reset`, NFC/shell only** — rejected over LoRaWAN (it drops the very session/keys a downlink would need to confirm delivery). Reset config to defaults, keeping identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI) — drops the LoRaWAN session/keys, forcing a re-join; clears dynamic alarm rules; **reboots** | `ack` |
-| `set_secret_key` | **NEW (#299), NFC/shell only** — rejected over LoRaWAN. Rotates `secret_key` over the already-encrypted channel (authenticated by the *current* key); the new key is never readable back via `get_param`/`get_config` | `ack` |
+| `set_secret_key` | **NEW (#299), NFC/shell only** — rejected over LoRaWAN. Rotates `secret_key` over the already-encrypted channel (authenticated by the *current* key); the new key is never readable back via `get_param`/`get_config`. **Reboots** (#322) — that is what makes the rotated key live, so the `ack` is the last frame under the old key; an all-zero replacement is rejected with `BAD_REQUEST` | `ack` |
 | `clm_ack` | **NEW (#308), NFC/shell only** — rejected over LoRaWAN. Explicit, authenticated end of the claim window (§10 Claim record): ends `PENDING`→`CONSUMED` without an RF delete. Empty body — decrypting it at all is the whole signal | `ack` |
 | `force_send` | Send a telemetry report immediately | **none** — the report itself is the reply |
 | `sample` | Take a fresh reading: send a `Telemetry` report on fPort 2 **and** (over NFC) return the same readings in the reply. Works over LoRaWAN and NFC | LoRaWAN: **none** — the fPort-2 report is the reply. NFC: **`sample`** — a full `Telemetry` with the fresh readings |
@@ -814,7 +814,13 @@ Also new in #299: `set_secret_key` (nfc/shell, and vendor over `hio.stck:vnd` si
 LoRaWAN downlink) rotates `secret-key` over an already-encrypted channel — authenticated by the
 *current* `secret-key` on `hio.stck:cmd`, or by `vendor_token` on `hio.stck:vnd` — so a lost/rotated
 key never needs a J-Link short of `vendor_reset`. The new key is never readable back via
-GetParam/GetConfig.
+GetParam/GetConfig. It **saves and cold-reboots** (#322, same ack-before-reboot gate as the tiers
+above): the encrypted channel authenticates from the boot-time `g_app_config` copy, so without the
+reboot the device would keep answering to the *old* key until some later, unrelated restart. The
+`ack` the phone reads is therefore still encrypted with the old key — by design, and it is delivered
+before the reboot fires. An **all-zero replacement is rejected** with `BAD_REQUEST` (#322): all-zero
+is the unprovisioned sentinel that makes the device refuse the encrypted channel outright, so
+accepting one would lock the caller out of the very channel it just used.
 
 A schema migration (config-version bump) restores the `device_reset` tier's protected set after
 applying new defaults, same as today.

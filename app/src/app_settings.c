@@ -265,9 +265,14 @@ int app_settings_save_nonce_counter(void)
 				 sizeof(app_config()->nonce_counter));
 }
 
-int app_settings_save_secret_key(void)
+/* Persist only secret_key to NVS as a single settings key — same single-key
+ * rationale as nonce_counter above. Internal to vendor_reset below: the
+ * set_secret_key command (#299) used to persist through here too, but a narrow
+ * persist alone never made the new key live (it does not touch g_app_config,
+ * which is what the NFC channel authenticates from), so it now goes through the
+ * full app_settings_save(true) save+reboot instead (#322). */
+static int save_secret_key(void)
 {
-	/* Same single-key rationale as nonce_counter above (#299 set_secret_key). */
 	return settings_save_one("config/secret-key", app_config()->secret_key,
 				 sizeof(app_config()->secret_key));
 }
@@ -380,7 +385,7 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 	 * settings_save_*() call after a raw erase silently stops persisting
 	 * correctly for the rest of the session (confirmed empirically: an earlier
 	 * version of this function erased first, then called app_config_vendor_reset()
-	 * + app_settings_save_secret_key() same as below, and EVERY field — including
+	 * + save_secret_key() same as below, and EVERY field — including
 	 * serial_number/vendor_token, which should have survived — came back all-zero
 	 * after reboot). So, narrowest tier (#299) or not, this goes through the same
 	 * live settings API as device_reset/factory_reset above: no raw erase of the
@@ -397,9 +402,9 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 	 * again. Apply + persist the caller-supplied replacement now, separately
 	 * (single-key save, same rationale as nonce_counter/set_secret_key above). */
 	memcpy(app_config()->secret_key, new_secret_key, sizeof(app_config()->secret_key));
-	ret = app_settings_save_secret_key();
+	ret = save_secret_key();
 	if (ret) {
-		LOG_ERR("Call `app_settings_save_secret_key` failed: %d", ret);
+		LOG_ERR("Call `save_secret_key` failed: %d", ret);
 		return ret;
 	}
 

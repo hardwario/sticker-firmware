@@ -92,7 +92,7 @@ static const char *cmd_action_str(enum app_cmd_action a)
 	case APP_CMD_ACTION_VENDOR_RESET:
 		return "vendor-reset";
 	case APP_CMD_ACTION_SECRET_KEY_SAVE:
-		return "secret-key-save";
+		return "secret-key-save+reboot";
 	case APP_CMD_ACTION_ENTER_CALIBRATION:
 		return "enter-calibration";
 	case APP_CMD_ACTION_LRW_RESET:
@@ -2224,8 +2224,10 @@ static int cmd_nfc_check(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "vendor reset%s", ret ? " (failed!)" : "");
 		break;
 	case APP_CMD_ACTION_SECRET_KEY_SAVE:
-		ret = app_settings_save_secret_key();
-		shell_print(sh, "secret_key saved%s", ret ? " (failed!)" : "");
+		/* #322: same save+reboot as SETTINGS_SAVE above — the reboot is what
+		 * makes the rotated key live (h_commit re-syncs g_app_config). */
+		ret = app_settings_save(true); /* reboots on success */
+		shell_print(sh, "secret_key saved%s", ret ? " (save failed!)" : " and applied");
 		break;
 	case APP_CMD_ACTION_NONE:
 		shell_print(sh, "no staged command on tag (no action)");

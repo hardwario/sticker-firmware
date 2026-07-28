@@ -72,7 +72,7 @@ enum app_cmd_action {
 	APP_CMD_ACTION_LRW_RESET,       /* reset LoRaWAN NVM (counters+DevNonce) + reboot (#109) */
 	APP_CMD_ACTION_LRW_JOIN,        /* trigger a forced (re)join, no reboot (#109) */
 	APP_CMD_ACTION_COUNTERS_SAVE,   /* persist pulse totalizers (no reboot) */
-	APP_CMD_ACTION_SECRET_KEY_SAVE, /* persist the new secret_key (no reboot, #299) */
+	APP_CMD_ACTION_SECRET_KEY_SAVE, /* persist the new secret_key + reboot (#299, #322) */
 };
 
 /* Plain-C device info snapshot (no protobuf dependency), filled by

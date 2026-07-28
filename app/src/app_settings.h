@@ -65,10 +65,6 @@ int app_settings_erase(void);
  * Returns 0 or a negative errno. */
 int app_settings_save_nonce_counter(void);
 
-/* Persist only secret_key to NVS as a single settings key (#299, set_secret_key
- * command). Returns 0 or a negative errno. */
-int app_settings_save_secret_key(void);
-
 #ifdef __cplusplus
 }
 #endif

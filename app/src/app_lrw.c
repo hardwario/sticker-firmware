@@ -667,9 +667,12 @@ static void post_cmd_work_handler(struct k_work *work)
 		app_settings_factory_reset();
 		break;
 	case APP_CMD_ACTION_SECRET_KEY_SAVE:
-		/* Persist the new secret_key (#299 set_secret_key), no reboot. */
-		LOG_INF("Command: saving new secret_key");
-		app_settings_save_secret_key();
+		/* #322: persist the staged new secret_key + reboot, so it goes live now
+		 * instead of at the next unrelated reboot. Unreachable over LoRaWAN today
+		 * (set_secret_key is transports: [nfc, shell]) — kept in lockstep with
+		 * main.c so the two dispatch tables cannot drift. */
+		LOG_INF("Command: saving new secret_key + reboot");
+		app_settings_save(true);
 		break;
 	case APP_CMD_ACTION_REBOOT:
 		LOG_INF("Command: reboot");

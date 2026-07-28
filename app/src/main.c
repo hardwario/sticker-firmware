@@ -158,8 +158,15 @@ static void nfc_run_deferred_cmd_actions(void)
 			app_settings_vendor_reset(app_cmd_take_pending_vendor_secret_key());
 			break;
 		case APP_CMD_ACTION_SECRET_KEY_SAVE:
-			/* Persist the new secret_key (#299 set_secret_key), no reboot. */
-			app_settings_save_secret_key();
+			/* #322: persist the staged new secret_key (#299 set_secret_key) and
+			 * cold-reboot, so the rotated key is live right away via h_commit's
+			 * normal g_app_config sync. A bare persist left the device
+			 * authenticating with the OLD key until some later, unrelated
+			 * reboot. The Ack the phone already read was encrypted with that old
+			 * key — deliberately: this action only runs once the response has
+			 * been delivered (#242), so the reply is never cut off. */
+			play_carousel_nfc();
+			app_settings_save(true);
 			break;
 		case APP_CMD_ACTION_ENTER_CALIBRATION:
 			/* Persist calibration=true + reboot; next boot enters

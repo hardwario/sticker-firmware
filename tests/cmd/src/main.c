@@ -384,7 +384,9 @@ ZTEST(cmd, test_factory_reset_nfc_shell_only)
 /* #299 set_secret_key (field 24): nfc/shell only (rejected over lrw, like
  * force_send/req_history are rejected the other way in
  * test_lrw_only_commands_rejected_over_nfc); applies the new key to staging
- * immediately and defers the persist; missing key -> BAD_REQUEST, no action. */
+ * immediately and defers the persist+reboot (#322 — the reboot is what makes the
+ * new key live, since the NFC channel authenticates from g_app_config); missing
+ * key -> BAD_REQUEST, no action; all-zero key -> BAD_REQUEST, no action (#322). */
 ZTEST(cmd, test_set_secret_key)
 {
 	Response r;
@@ -416,6 +418,27 @@ ZTEST(cmd, test_set_secret_key)
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
 		      r.body.error.code);
+
+	/* #322: an all-zero key is the "unprovisioned" sentinel that makes
+	 * key_is_provisioned() refuse the encrypted NFC channel outright — accepting
+	 * it would lock the caller out of the channel it just used (and, now that the
+	 * deferred action reboots, immediately). Rejected, key left untouched. */
+	uint8_t keep_key[16];
+	memset(keep_key, 0x22, sizeof(keep_key));
+
+	reset_cfg();
+	memcpy(g_app_config.secret_key, keep_key, sizeof(keep_key));
+	a = handle_via(APP_CMD_TRANSPORT_NFC, "080dc201120a1000000000000000000000000000000000", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "zero key: no action");
+	zassert_equal(r.which_body, Response_error_tag, "zero key should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
+		      r.body.error.code);
+	/* seq echoed back proves the frame decoded and the handler rejected it, rather
+	 * than a malformed frame failing to decode into the same BAD_REQUEST. */
+	zassert_equal(r.seq, 13, "seq %u", r.seq);
+	zassert_mem_equal(g_app_config.secret_key, keep_key, sizeof(keep_key),
+			  "zero key must not overwrite the current secret_key");
 }
 
 /* #308 clm_ack (field 25): nfc/shell only (rejected over lrw, like
