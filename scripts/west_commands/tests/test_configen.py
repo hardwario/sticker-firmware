@@ -532,8 +532,9 @@ def test_build_commands_model_shape():
     assert by_name["set_param"]["lrw_only"] is False
     assert by_name["set_param"]["emits_response"] is True
     # #316: vendor_reset routes to the vendor transport only; set_secret_key now
-    # also admits vendor (both dispatch through the generic path).
-    assert by_name["vendor_reset"]["proto_id"] == 25
+    # also admits vendor (both dispatch through the generic path). proto_id 26,
+    # not 25 — 25 is clm_ack (#308), merged into v1.4.0 first.
+    assert by_name["vendor_reset"]["proto_id"] == 26
     assert by_name["vendor_reset"]["tag"] == "Command_vendor_reset_tag"
     assert by_name["vendor_reset"]["handler"] == "app_cmd_handle_vendor_reset"
     assert by_name["vendor_reset"]["kind"] == "handler"

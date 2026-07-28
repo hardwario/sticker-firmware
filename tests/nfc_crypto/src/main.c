@@ -75,10 +75,11 @@ static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 
 /* #316 vendor channel (hio.stck:vnd), sealed under VND_KEY (dir=REQUEST): the
  * plaintext is APP_PROTO_VERSION + Command{ seq=1, vendor_reset{ key = 16x0xAB } }
- * (field 25, SetSecretKey shape). Same nonce/AAD/tag construction as REQ_WIRE. */
-#define VND_REQ_PLAIN "010801ca01120a10abababababababababababababababab"
+ * (field 26, SetSecretKey shape — 25 is clm_ack, #308, so vendor_reset is 26).
+ * Same nonce/AAD/tag construction as REQ_WIRE. */
+#define VND_REQ_PLAIN "010801d201120a10abababababababababababababababab"
 /* clang-format off */
-#define VND_REQ_WIRE "0000000000000001ee1ffd315e8201868ec3520156a2fec3ff856bcbdd327b92f14df3765923ed59ac63824553481d58"
+#define VND_REQ_WIRE "0000000000000001ee1ffd295e8201868ec3520156a2fec3ff856bcbdd327b929c9487fe1fddb3487c5ccc7473eafc5d"
 /* clang-format on */
 
 /* Seal `pt` into the wire frame [header(8) || ciphertext+tag]; mirrors encrypt(). */
