@@ -131,14 +131,6 @@ static int64_t m_window_start_ms;
 static bool m_window_open;
 static struct k_work_delayable m_alarm_batch_work;
 
-/* Light-increase confirmation (#319): on a rising illuminance threshold (on-board OPT3001
- * or a 1-Wire slot light sensor) we arm a per-rule deadline (rstate.confirm_deadline)
- * instead of latching, then this shared delayable re-samples once and latches only if the
- * light is still bright. It runs on the sensor work queue (app_sensor_work_queue()) so its
- * fresh re-sample is serialized with the periodic sweep — the 1-Wire bus is never shared
- * concurrently, and a slow (1-Wire) read may block without stalling the system work queue. */
-static struct k_work_delayable m_light_confirm_work;
-
 static inline int64_t notif_hold_ms(void)
 {
 	return (int64_t)g_app_config.alarm_notif_time * 1000;
@@ -490,6 +482,7 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 			alarm_collect(slot, rule->source, rule->quantity, false, rt->type, false,
 				      0);
 		}
+		rt->confirm_deadline = 0;
 		return false;
 	}
 
@@ -500,6 +493,27 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 	float hst = rule->hst;
 	if (!(hst >= 0.0f)) {
 		hst = 0.0f;
+	}
+
+	/* Light-increase dwell (#319): a deadline armed on a prior rising edge is
+	 * resolved against THIS poll's already-fresh `value` — read_threshold_value()
+	 * pulls from g_app_sensor_data/w1[], refreshed on the same interval_sample
+	 * cadence every other threshold quantity (temperature/humidity/pressure,
+	 * including 1-Wire) already relies on for its own rising-edge check. No
+	 * separate re-sample or work item is needed for illuminance specifically.
+	 * dwell_eligible() is rechecked so a confirm-delay config change (or a
+	 * disabled rule, handled above) to 0 mid-flight drops the window instead of
+	 * latching on stale intent. */
+	if (rt->confirm_deadline != 0 && k_uptime_get() >= rt->confirm_deadline) {
+		rt->confirm_deadline = 0;
+		if (dwell_eligible(rule) && value > hi + hst && !rt->active) {
+			rt->active = true;
+			rt->type = ALARM_TYPE_HIGH;
+			*should_send = true;
+			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_HIGH,
+				      true, alarm_scale(rule->quantity, value));
+		}
+		return rt->active;
 	}
 
 	if (rt->active) {
@@ -518,15 +532,12 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 	} else if (value > hi + hst) {
 		if (dwell_eligible(rule)) {
 			/* Light-increase dwell (#319): don't latch yet. Arm the confirmation
-			 * window once (don't push the deadline out on every poll); the
-			 * delayable re-samples and latches only if the light is still high. */
+			 * deadline once (don't push it out on every poll); it is resolved
+			 * above, against a later poll's fresh value, once due. */
 			if (rt->confirm_deadline == 0) {
 				rt->confirm_deadline =
 					k_uptime_get() +
 					(int64_t)g_app_config.alarm_light_confirm_delay * 1000;
-				k_work_schedule_for_queue(
-					app_sensor_work_queue(), &m_light_confirm_work,
-					K_SECONDS(g_app_config.alarm_light_confirm_delay));
 			}
 		} else {
 			rt->active = true;
@@ -537,69 +548,6 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 		}
 	}
 	return rt->active;
-}
-
-/* Light-increase confirmation (#319): fires alarm_light_confirm_delay seconds after a
- * rising illuminance edge (on-board OPT3001 or a 1-Wire slot light sensor) armed
- * rstate.confirm_deadline. Runs on the sensor work queue, so one full app_sensor_sample()
- * re-reads every source (on-board + 1-Wire slots) serialized with the periodic sweep — no
- * 1-Wire bus contention — and also refreshes g_app_sensor_data so a later poll sees truth.
- * It then latches only the due rules still above hi+hst; a transient (door shut again)
- * leaves nothing latched. Locks: sample first (it takes g_app_sensor_data_lock itself),
- * then g_app_sensor_data_lock -> m_lock for the decision; radio kick after unlock. */
-static void light_confirm_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	app_sensor_sample(); /* fresh read of every source; refreshes g_app_sensor_data */
-
-	bool should_send = false;
-	int64_t now = k_uptime_get();
-	int64_t earliest = 0;
-
-	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	k_mutex_lock(&m_lock, K_FOREVER);
-	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
-		struct app_alarm_rule r;
-		if (!rt_sync(slot, &r)) {
-			continue; /* empty/repointed slot: rt_sync cleared confirm_deadline */
-		}
-		struct rstate *rt = &m_rt[slot];
-		if (rt->confirm_deadline == 0) {
-			continue;
-		}
-		if (!r.enabled || !dwell_eligible(&r)) {
-			rt->confirm_deadline = 0; /* rule disabled/retargeted: drop the window */
-			continue;
-		}
-		if (now < rt->confirm_deadline) {
-			if (earliest == 0 || rt->confirm_deadline < earliest) {
-				earliest = rt->confirm_deadline;
-			}
-			continue; /* not due yet */
-		}
-		rt->confirm_deadline = 0; /* consume the window */
-		float v = NAN;
-		read_threshold_value(r.source, r.quantity, &v); /* fresh: sampled just above */
-		float hst = (r.hst >= 0.0f) ? r.hst : 0.0f;
-		if (!isnan(v) && v > r.hi + hst && !rt->active) {
-			rt->active = true;
-			rt->type = ALARM_TYPE_HIGH;
-			alarm_collect(slot, r.source, r.quantity, true, ALARM_TYPE_HIGH, true,
-				      alarm_scale(r.quantity, v));
-			should_send = true;
-		}
-	}
-	k_mutex_unlock(&m_lock);
-	k_mutex_unlock(&g_app_sensor_data_lock);
-
-	if (should_send) {
-		alarm_lrw_send();
-	}
-	if (earliest != 0) {
-		k_work_reschedule_for_queue(app_sensor_work_queue(), &m_light_confirm_work,
-					    K_MSEC(earliest - now));
-	}
 }
 
 /* Momentary/pulse sources only ever assert (app_alarm_event(src, true)) and never
@@ -1356,7 +1304,6 @@ SHELL_CMD_REGISTER(alarm, &sub_alarm, "Dynamic alarm rules.", NULL);
 static int app_alarm_init(void)
 {
 	k_work_init_delayable(&m_alarm_batch_work, alarm_batch_work_handler);
-	k_work_init_delayable(&m_light_confirm_work, light_confirm_work_handler);
 	return 0;
 }
 
