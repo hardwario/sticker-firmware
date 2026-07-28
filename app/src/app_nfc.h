@@ -39,13 +39,6 @@ int app_nfc_wait_event(int fallback_ms);
  * APP_CMD_ACTION_NONE when there is nothing pending. */
 enum app_cmd_action app_nfc_take_cmd_action(void);
 
-/* The replacement secret_key staged by a successful hio.stck:rst vendor_reset
- * request (#299) — call exactly once, when handling the deferred
- * APP_CMD_ACTION_VENDOR_RESET returned by app_nfc_take_cmd_action() above.
- * Returns a pointer to a static 16-byte buffer valid until the next NFC
- * vendor_reset request. */
-const uint8_t *app_nfc_take_pending_vendor_secret_key(void);
-
 /* Whether the main loop should run the periodic NFC check. Toggled by the
  * `nfc autocheck on|off` shell command so a multi-step `nfc write` of a config
  * blob is not raced (and overwritten) by the periodic check mid-write. */

@@ -151,11 +151,11 @@ static void nfc_run_deferred_cmd_actions(void)
 			app_settings_factory_reset();
 			break;
 		case APP_CMD_ACTION_VENDOR_RESET:
-			/* #299, narrowest tier: only ever set by the NFC hio.stck:rst
-			 * channel (app_nfc.c) — never reachable over LoRaWAN. The
-			 * replacement secret_key travelled in the same request. */
+			/* #299/#316, narrowest tier: set by the vendor_reset Command over the
+			 * NFC hio.stck:vnd (vendor-token) channel — never reachable over
+			 * LoRaWAN. The replacement secret_key travelled in the same request. */
 			play_carousel_nfc();
-			app_settings_vendor_reset(app_nfc_take_pending_vendor_secret_key());
+			app_settings_vendor_reset(app_cmd_take_pending_vendor_secret_key());
 			break;
 		case APP_CMD_ACTION_SECRET_KEY_SAVE:
 			/* Persist the new secret_key (#299 set_secret_key), no reboot. */

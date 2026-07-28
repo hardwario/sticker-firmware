@@ -424,7 +424,7 @@ def _proto_groups(config):
     return proto, {g["key"]: g for g in proto["groups"]}
 
 
-TRANSPORTS = ("shell", "nfc", "lrw")
+TRANSPORTS = ("shell", "nfc", "lrw", "vendor")
 
 
 def normalize_access(config):
@@ -810,6 +810,7 @@ _TRANSPORT_ENUM = {
     "lrw": "APP_CMD_TRANSPORT_LRW",
     "nfc": "APP_CMD_TRANSPORT_NFC",
     "shell": "APP_CMD_TRANSPORT_SHELL_DEBUG",
+    "vendor": "APP_CMD_TRANSPORT_VENDOR",
 }
 _ALL_TRANSPORTS = set(_TRANSPORT_ENUM)
 

@@ -134,6 +134,7 @@ message Command {
         FactoryReset     factory_reset     = 23;
         SetSecretKey     set_secret_key    = 24;
         ClmAck           clm_ack           = 25;
+        SetSecretKey     vendor_reset      = 26;
     }
 // END GENERATED COMMANDS
 

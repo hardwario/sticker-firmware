@@ -297,7 +297,6 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 {
 	struct app_config *config = app_config();
 	int ret = 0;
-	ARG_UNUSED(tp);
 
 	if (fault_field) {
 		*fault_field = 0;
@@ -339,7 +338,11 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 			FAULT(6);
 		}
 	}
-	if (src->has_vendor_reset_allow) {
+	/* M-3: this field is not writable over lrw/nfc. */
+	if (src->has_vendor_reset_allow &&
+	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_NFC)) {
+		FAULT_TRANSPORT(7);
+	} else if (src->has_vendor_reset_allow) {
 		config->vendor_reset_allow = src->vendor_reset_allow;
 	}
 	return ret;
