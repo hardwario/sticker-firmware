@@ -792,7 +792,7 @@ static void join_complete_work_handler(struct k_work *work)
 	on_join_success();
 }
 
-/* Radio disabled by the lrw-mode config (#271). This replaces the old
+/* Radio disabled by the radio-mode config (#271). This replaces the old
  * DevEUI/DevAddr-zero radio-silent guard (#98/#175): whether the radio comes up
  * is now an explicit user choice, not inferred from a blank identifier. OFF is
  * radio-silent (sensor/history still run); P2P is reserved until the raw-LoRa
@@ -802,11 +802,11 @@ static void join_complete_work_handler(struct k_work *work)
  * disabling — provisioning problems surface instead of masquerading as OFF. */
 static bool radio_disabled(void)
 {
-	if (g_app_config.lrw_mode == APP_CONFIG_LRW_MODE_P2P) {
-		LOG_WRN("lrw-mode P2P not yet implemented (#118/#228) — radio stays off");
+	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_P2P) {
+		LOG_WRN("radio-mode P2P not yet implemented (#118/#228) — radio stays off");
 		return true;
 	}
-	return g_app_config.lrw_mode == APP_CONFIG_LRW_MODE_OFF;
+	return g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_OFF;
 }
 
 static void join_work_handler(struct k_work *work)
@@ -814,12 +814,12 @@ static void join_work_handler(struct k_work *work)
 	ARG_UNUSED(work);
 	int ret;
 
-	/* Radio-silent mode (#271): lrw-mode is OFF (or reserved P2P) — don't burn
-	 * power on join requests. Enter DISABLED and stay there until lrw-mode is set
+	/* Radio-silent mode (#271): radio-mode is OFF (or reserved P2P) — don't burn
+	 * power on join requests. Enter DISABLED and stay there until radio-mode is set
 	 * back to LORAWAN + rebooted. */
 	if (radio_disabled()) {
 		if ((enum app_lrw_state)atomic_get(&m_state) != APP_LRW_STATE_DISABLED) {
-			LOG_WRN("lrw-mode not LORAWAN: disabled (radio-silent)");
+			LOG_WRN("radio-mode not LORAWAN: disabled (radio-silent)");
 			state_transition(APP_LRW_STATE_DISABLED);
 		}
 		return;
@@ -1551,7 +1551,7 @@ int app_lrw_init(void)
 		return -ENODEV;
 	}
 
-	/* #271: when lrw-mode is OFF (or reserved P2P) skip the entire LoRaMac/radio
+	/* #271: when radio-mode is OFF (or reserved P2P) skip the entire LoRaMac/radio
 	 * bring-up. The work queue, works and timers below are still set up so the
 	 * public API stays safe (app_lrw_join / send hit the DISABLED guard and
 	 * no-op), but clear_stale_lorawan_nvm() / lorawan_set_region() /
@@ -1611,7 +1611,7 @@ int app_lrw_init(void)
 		lorawan_register_dr_changed_callback(datarate_changed_callback);
 		lorawan_register_link_check_ans_callback(link_check_callback);
 	} else {
-		LOG_WRN("lrw-mode not LORAWAN: skipping LoRaWAN bring-up (radio-silent, #271)");
+		LOG_WRN("radio-mode not LORAWAN: skipping LoRaWAN bring-up (radio-silent, #271)");
 	}
 
 	k_work_queue_init(&m_work_q);

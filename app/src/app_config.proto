@@ -25,7 +25,7 @@ message AppConfigMessage {
             ABP = 1;
         }
 
-        enum Mode {
+        enum RadioMode {
             OFF = 0;
             LORAWAN = 1;
             P2P = 2;
@@ -45,7 +45,7 @@ message AppConfigMessage {
         optional bytes appskey = 12;
         optional uint32 link_check_interval = 13;
         optional uint32 link_check_fail_rejoin = 14;
-        optional Mode mode = 15;
+        optional RadioMode radio_mode = 15;
     }
 
     message Application {

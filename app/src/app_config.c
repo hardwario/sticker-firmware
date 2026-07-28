@@ -41,7 +41,7 @@ static const struct app_config m_app_config_defaults = {
 	.vendor_reset_allow = true,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
-	.lrw_mode = APP_CONFIG_LRW_MODE_LORAWAN,
+	.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN,
 	.lrw_sub_band = 2,
 	.lrw_link_check_interval = 5,
 	.lrw_link_check_fail_rejoin = 5,
@@ -72,7 +72,7 @@ static struct app_config m_app_config = {
 	.vendor_reset_allow = true,
 	.alarm_limit = 0,
 	.alarm_notif_time = 10,
-	.lrw_mode = APP_CONFIG_LRW_MODE_LORAWAN,
+	.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN,
 	.lrw_sub_band = 2,
 	.lrw_link_check_interval = 5,
 	.lrw_link_check_fail_rejoin = 5,
@@ -128,7 +128,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("alarm-notif-time", &m_app_config.alarm_notif_time,
 		     sizeof(m_app_config.alarm_notif_time));
 	SETTINGS_SET("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
-	SETTINGS_SET("lrw-mode", &m_app_config.lrw_mode, sizeof(m_app_config.lrw_mode));
+	SETTINGS_SET("radio-mode", &m_app_config.radio_mode, sizeof(m_app_config.radio_mode));
 	SETTINGS_SET("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
 	SETTINGS_SET("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
 	SETTINGS_SET("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
@@ -224,7 +224,7 @@ static int h_commit(void)
 		memcpy(m_app_config.vendor_token, stored.vendor_token,
 		       sizeof(m_app_config.vendor_token));
 		m_app_config.lrw_region = stored.lrw_region;
-		m_app_config.lrw_mode = stored.lrw_mode;
+		m_app_config.radio_mode = stored.radio_mode;
 		m_app_config.lrw_sub_band = stored.lrw_sub_band;
 		m_app_config.lrw_network = stored.lrw_network;
 		m_app_config.lrw_adr = stored.lrw_adr;
@@ -280,8 +280,8 @@ static int h_commit(void)
 	if ((int)m_app_config.lrw_region < 0 || (int)m_app_config.lrw_region > 2) {
 		m_app_config.lrw_region = 0;
 	}
-	if ((int)m_app_config.lrw_mode < 0 || (int)m_app_config.lrw_mode > 2) {
-		m_app_config.lrw_mode = APP_CONFIG_LRW_MODE_LORAWAN;
+	if ((int)m_app_config.radio_mode < 0 || (int)m_app_config.radio_mode > 2) {
+		m_app_config.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN;
 	}
 	if (m_app_config.lrw_sub_band < 0) {
 		m_app_config.lrw_sub_band = 0;
@@ -347,7 +347,7 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("alarm-notif-time", &m_app_config.alarm_notif_time,
 		    sizeof(m_app_config.alarm_notif_time));
 	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
-	EXPORT_FUNC("lrw-mode", &m_app_config.lrw_mode, sizeof(m_app_config.lrw_mode));
+	EXPORT_FUNC("radio-mode", &m_app_config.radio_mode, sizeof(m_app_config.radio_mode));
 	EXPORT_FUNC("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
 	EXPORT_FUNC("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
 	EXPORT_FUNC("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
@@ -659,24 +659,24 @@ static void print_lrw_region(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " lrw-region %s", str);
 }
 
-static void print_lrw_mode(const struct shell *shell)
+static void print_radio_mode(const struct shell *shell)
 {
 	const char *str;
-	switch (m_app_config.lrw_mode) {
-	case APP_CONFIG_LRW_MODE_OFF:
+	switch (m_app_config.radio_mode) {
+	case APP_CONFIG_RADIO_MODE_OFF:
 		str = "off";
 		break;
-	case APP_CONFIG_LRW_MODE_LORAWAN:
+	case APP_CONFIG_RADIO_MODE_LORAWAN:
 		str = "lorawan";
 		break;
-	case APP_CONFIG_LRW_MODE_P2P:
+	case APP_CONFIG_RADIO_MODE_P2P:
 		str = "p2p";
 		break;
 	default:
 		str = "unknown";
 		break;
 	}
-	shell_print(shell, SETTINGS_PFX " lrw-mode %s", str);
+	shell_print(shell, SETTINGS_PFX " radio-mode %s", str);
 }
 
 static void print_lrw_sub_band(const struct shell *shell)
@@ -916,7 +916,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_alarm_limit(shell);
 	print_alarm_notif_time(shell);
 	print_lrw_region(shell);
-	print_lrw_mode(shell);
+	print_radio_mode(shell);
 	print_lrw_sub_band(shell);
 	print_lrw_network(shell);
 	print_lrw_adr(shell);
@@ -1191,10 +1191,10 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-static int cmd_lrw_mode(const struct shell *shell, size_t argc, char **argv)
+static int cmd_radio_mode(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
-		print_lrw_mode(shell);
+		print_radio_mode(shell);
 		return 0;
 	}
 
@@ -1210,11 +1210,11 @@ static int cmd_lrw_mode(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	if (!strcmp(argv[1], "off")) {
-		m_app_config.lrw_mode = APP_CONFIG_LRW_MODE_OFF;
+		m_app_config.radio_mode = APP_CONFIG_RADIO_MODE_OFF;
 	} else if (!strcmp(argv[1], "lorawan")) {
-		m_app_config.lrw_mode = APP_CONFIG_LRW_MODE_LORAWAN;
+		m_app_config.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN;
 	} else if (!strcmp(argv[1], "p2p")) {
-		m_app_config.lrw_mode = APP_CONFIG_LRW_MODE_P2P;
+		m_app_config.radio_mode = APP_CONFIG_RADIO_MODE_P2P;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
 		shell_print(shell, "valid values: off, lorawan, p2p");
@@ -1559,9 +1559,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set LoRaWAN region (eu868/us915/au915).",
 	              cmd_lrw_region, 1, 1),
 
-	SHELL_CMD_ARG(lrw-mode, NULL,
+	SHELL_CMD_ARG(radio-mode, NULL,
 	              "Get/Set radio mode (off/lorawan/p2p). off = radio-silent, sensor/history still run.",
-	              cmd_lrw_mode, 1, 1),
+	              cmd_radio_mode, 1, 1),
 
 	SHELL_CMD_ARG(lrw-sub-band, NULL,
 	              "Get/Set US915/AU915 sub-band (1-8, 0 = all channels). Default 2 matches TTN/Helium/ChirpStack.",
@@ -1721,7 +1721,7 @@ int app_config_device_reset(void)
 	memcpy(m_app_config.vendor_token, preserved.vendor_token,
 	       sizeof(m_app_config.vendor_token));
 	m_app_config.lrw_region = preserved.lrw_region;
-	m_app_config.lrw_mode = preserved.lrw_mode;
+	m_app_config.radio_mode = preserved.radio_mode;
 	m_app_config.lrw_sub_band = preserved.lrw_sub_band;
 	m_app_config.lrw_network = preserved.lrw_network;
 	m_app_config.lrw_adr = preserved.lrw_adr;
