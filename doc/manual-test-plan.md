@@ -1520,6 +1520,33 @@ HW-validation note above for its own direct HIL run.
 
 - [x] Pass (HIL-verified via hand-crafted frames, 2026-07-14; triggers 2 and 3 + reflash survival)
 
+### N11 — Rejected tap blinks red, not green (#315)
+
+**Goal:** a command that fails authentication is visually distinguishable from one that succeeded.
+Both encrypted channels (`hio.stck:cmd` keyed by `secret_key`, `hio.stck:vnd` keyed by
+`vendor_token`) write **nothing** back to the tag when the frame is rejected — wrong key, stale or
+out-of-window `nonce_counter`, unprovisioned (all-zero) key, malformed frame — so before #315 the
+green "servicing" blink simply kept running until the RF-quiet backstop and a failed tap looked
+exactly like a successful one.
+**Observable:** on rejection the green fast blink is replaced by a **red fast blink** (same ~90 ms
+cadence) held ~2 s, then the LED clears; RTT shows `-> command rejected: <errno>` (or
+`-> vendor command rejected:`) for the same tap. An *authenticated* command that merely fails at the
+application level (e.g. `NOT_WRITABLE`) is **not** a rejection: it returns an encrypted `error`
+response and still shows the reply-ready green+yellow (`doc/version 1.4.md` §16).
+
+**Prompt for Claude:**
+> On the debug build over RTT, inject a *tampered* encrypted `hio.stck:cmd` frame (take a valid
+> hand-crafted frame — same recipe as N9/N10 — and flip one ciphertext byte so the CCM tag fails)
+> via sequential `nfc write` calls, then `nfc check`. Confirm RTT reports the rejection
+> (`handle_encrypted_cmd` failed / `-> command rejected: -5`) and that the red LED is driven
+> instead of green: read the LED GPIO state over J-Link (or watch the unit) during the ~2 s window,
+> then confirm all three channels are off afterwards. Repeat with a **stale** counter (`<=` the
+> stored high-water → `-EACCES`) and with a `hio.stck:vnd` frame under a wrong `vendor_token`.
+> Finally send one *valid* command and confirm the normal green → green+yellow sequence still
+> happens (no red, no orange blend from a leftover red channel). Report each outcome.
+
+- [ ] Pass
+
 ---
 
 ## Payload formatter (`ttn.js`)
