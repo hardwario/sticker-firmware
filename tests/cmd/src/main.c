@@ -26,6 +26,7 @@ extern uint32_t test_clock_unix;
 extern float test_battery_v;
 extern int test_battery_ret;
 extern void test_set_lrw_dirty(bool v);
+extern int g_clm_ack_calls;
 
 static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 {
@@ -69,6 +70,7 @@ static void reset_cfg(void)
 	memset(&g_app_config, 0, sizeof(g_app_config));
 	test_clock_has = false;
 	test_set_lrw_dirty(false);
+	g_clm_ack_calls = 0;
 }
 
 ZTEST(cmd, test_set_param_applies_and_acks)
@@ -382,7 +384,9 @@ ZTEST(cmd, test_factory_reset_nfc_shell_only)
 /* #299 set_secret_key (field 24): nfc/shell only (rejected over lrw, like
  * force_send/req_history are rejected the other way in
  * test_lrw_only_commands_rejected_over_nfc); applies the new key to staging
- * immediately and defers the persist; missing key -> BAD_REQUEST, no action. */
+ * immediately and defers the persist+reboot (#322 — the reboot is what makes the
+ * new key live, since the NFC channel authenticates from g_app_config); missing
+ * key -> BAD_REQUEST, no action; all-zero key -> BAD_REQUEST, no action (#322). */
 ZTEST(cmd, test_set_secret_key)
 {
 	Response r;
@@ -414,6 +418,187 @@ ZTEST(cmd, test_set_secret_key)
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
 		      r.body.error.code);
+
+	/* #322: an all-zero key is the "unprovisioned" sentinel that makes
+	 * key_is_provisioned() refuse the encrypted NFC channel outright — accepting
+	 * it would lock the caller out of the channel it just used (and, now that the
+	 * deferred action reboots, immediately). Rejected, key left untouched. */
+	uint8_t keep_key[16];
+	memset(keep_key, 0x22, sizeof(keep_key));
+
+	reset_cfg();
+	memcpy(g_app_config.secret_key, keep_key, sizeof(keep_key));
+	a = handle_via(APP_CMD_TRANSPORT_NFC, "080dc201120a1000000000000000000000000000000000", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "zero key: no action");
+	zassert_equal(r.which_body, Response_error_tag, "zero key should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
+		      r.body.error.code);
+	/* seq echoed back proves the frame decoded and the handler rejected it, rather
+	 * than a malformed frame failing to decode into the same BAD_REQUEST. */
+	zassert_equal(r.seq, 13, "seq %u", r.seq);
+	zassert_mem_equal(g_app_config.secret_key, keep_key, sizeof(keep_key),
+			  "zero key must not overwrite the current secret_key");
+}
+
+/* #308 clm_ack (field 25): nfc/shell only (rejected over lrw, like
+ * factory_reset/set_secret_key above). The actual clm-latch transition lives in
+ * app_nfc.c (HIL-verified, #247/#308 — see manual-test-plan.md); here we only
+ * confirm the command reaches app_nfc_clm_ack() and acks, via the stub call
+ * counter (g_clm_ack_calls). */
+ZTEST(cmd, test_clm_ack)
+{
+	Response r;
+
+	reset_cfg();
+	zassert_equal(handle("080cca0100", &r), APP_CMD_ACTION_NONE, "clm_ack rejected over lrw");
+	zassert_equal(r.which_body, Response_error_tag, "lrw should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+	zassert_equal(g_clm_ack_calls, 0, "must not call app_nfc_clm_ack over lrw");
+
+	reset_cfg();
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_NFC, "080cca0100", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "clm_ack over nfc: no deferred action");
+	zassert_equal(r.which_body, Response_ack_tag, "clm_ack acks (which=%d)", r.which_body);
+	zassert_equal(g_clm_ack_calls, 1, "app_nfc_clm_ack called exactly once");
+}
+
+/* #316: vendor_reset is a generic Command reachable ONLY over the vendor
+ * transport (NFC hio.stck:vnd). Its body reuses SetSecretKey (field 26 — 25 was
+ * taken by clm_ack, #308) — the replacement secret_key, mandatory because
+ * vendor_reset zeroes the old one. The handler stages the key + defers
+ * APP_CMD_ACTION_VENDOR_RESET; a missing key is BAD_REQUEST (checked before the
+ * allow gate). */
+ZTEST(cmd, test_vendor_reset_command)
+{
+	Response r;
+	uint8_t expect_key[16];
+
+	memset(expect_key, 0x22, sizeof(expect_key));
+
+	reset_cfg();
+	g_app_config.vendor_reset_allow = true;
+	/* seq1 vendor_reset{ key = 16x0x22 } */
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_VENDOR,
+					   "0801d201120a1022222222222222222222222222222222", &r);
+	zassert_equal(a, APP_CMD_ACTION_VENDOR_RESET, "vendor_reset over vendor acts");
+	zassert_equal(r.which_body, Response_ack_tag, "vendor_reset acks (which=%d)", r.which_body);
+	zassert_mem_equal(app_cmd_take_pending_vendor_secret_key(), expect_key, sizeof(expect_key),
+			  "replacement key not staged");
+
+	reset_cfg();
+	g_app_config.vendor_reset_allow = true;
+	/* seq2 vendor_reset{} — no key */
+	a = handle_via(APP_CMD_TRANSPORT_VENDOR, "0802d20100", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "missing key: no action");
+	zassert_equal(r.which_body, Response_error_tag, "missing key should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
+		      r.body.error.code);
+}
+
+/* #316 Option A: the vendor_reset Command still honors vendor_reset_allow — when
+ * false it is refused with NOT_READY (immediate feedback, not a silent no-op). The
+ * vendor re-enables it via a vendor-channel set_param (test_vendor_reset_allow_
+ * write_gate) and then vendor_reset succeeds. */
+ZTEST(cmd, test_vendor_reset_gated_by_allow)
+{
+	Response r;
+
+	reset_cfg(); /* vendor_reset_allow = false */
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_VENDOR,
+					   "0801d201120a1022222222222222222222222222222222", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "disabled: no action");
+	zassert_equal(r.which_body, Response_error_tag, "disabled should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+}
+
+/* #316: vendor_reset (transports:[vendor]) is rejected on every other transport by
+ * the generated dispatch guard, before the handler runs. */
+ZTEST(cmd, test_vendor_reset_rejected_off_vendor)
+{
+	Response r;
+	const char *hex = "0801d201120a1022222222222222222222222222222222";
+
+	reset_cfg();
+	g_app_config.vendor_reset_allow = true;
+	zassert_equal(handle_via(APP_CMD_TRANSPORT_LRW, hex, &r), APP_CMD_ACTION_NONE,
+		      "vendor_reset rejected over lrw");
+	zassert_equal(r.which_body, Response_error_tag, "lrw should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+
+	reset_cfg();
+	g_app_config.vendor_reset_allow = true;
+	zassert_equal(handle_via(APP_CMD_TRANSPORT_NFC, hex, &r), APP_CMD_ACTION_NONE,
+		      "vendor_reset rejected over nfc");
+	zassert_equal(r.which_body, Response_error_tag, "nfc should error (which=%d)",
+		      r.which_body);
+}
+
+/* #316: set_secret_key gains the vendor transport ([nfc, shell, vendor]) so the
+ * vendor can rotate the key over hio.stck:vnd (authenticated by vendor_token). */
+ZTEST(cmd, test_set_secret_key_over_vendor)
+{
+	Response r;
+	uint8_t expect_key[16];
+
+	memset(expect_key, 0x11, sizeof(expect_key));
+
+	reset_cfg();
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_VENDOR,
+					   "080bc201120a1011111111111111111111111111111111", &r);
+	zassert_equal(a, APP_CMD_ACTION_SECRET_KEY_SAVE, "set_secret_key over vendor");
+	zassert_equal(r.which_body, Response_ack_tag, "set_secret_key acks (which=%d)",
+		      r.which_body);
+	zassert_mem_equal(g_app_config.secret_key, expect_key, sizeof(expect_key),
+			  "secret_key not applied to staging");
+}
+
+/* #316: vendor_reset_allow is writable ONLY over the vendor transport, and the
+ * write is never gated on its current value (recovery from false must always
+ * succeed). Over lrw/nfc it is NOT_WRITABLE with fault_field 207 (application
+ * group *100 + tag 7) and the batch rolls back. */
+ZTEST(cmd, test_vendor_reset_allow_write_gate)
+{
+	Response r;
+	/* seq1 set_param{ application{ vendor_reset_allow = true } } */
+	const char *hex = "0801120412023801";
+
+	/* vendor: false -> true always succeeds (no current-value check). */
+	reset_cfg();
+	g_app_config.vendor_reset_allow = false;
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_VENDOR, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_ack_tag, "vendor write acks (which=%d)", r.which_body);
+	zassert_true(g_app_config.vendor_reset_allow, "vendor set_param did not flip false->true");
+
+	/* lrw: rejected as NOT_WRITABLE, nothing applied. */
+	reset_cfg();
+	g_app_config.vendor_reset_allow = false;
+	handle_via(APP_CMD_TRANSPORT_LRW, hex, &r);
+	zassert_equal(r.which_body, Response_error_tag, "lrw should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.fault_field, 207, "fault_field %u (want 207)",
+		      r.body.error.fault_field);
+	zassert_false(g_app_config.vendor_reset_allow, "lrw write applied despite gate");
+
+	/* nfc: also rejected — writable is vendor-only. */
+	reset_cfg();
+	g_app_config.vendor_reset_allow = false;
+	handle_via(APP_CMD_TRANSPORT_NFC, hex, &r);
+	zassert_equal(r.which_body, Response_error_tag, "nfc should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "code %d",
+		      r.body.error.code);
+	zassert_false(g_app_config.vendor_reset_allow, "nfc write applied despite gate");
 }
 
 /* F-1: lrw_join (proto_id 17) / lrw_reset (16) must be rejected with NOT_READY

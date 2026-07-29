@@ -35,7 +35,7 @@ enums:
       value: 1
       shell: abp
 
-  lrw_mode:
+  radio_mode:
     - name: "OFF"
       value: 0
       shell: "off"
@@ -97,7 +97,7 @@ proto:
 #   body          : protobuf sub-message type (hand-written in the proto).
 #   kind          : handler (calls app_cmd_handle_<name>) | action (sets *action).
 #   action        : APP_CMD_ACTION_* to set (action kind, or a handler that defers).
-#   transports    : optional allow-list (lrw/nfc/shell); omitted = all.
+#   transports    : optional allow-list (lrw/nfc/shell/vendor); omitted = all.
 #   response      : success body — ack | info | config_dump | none | info_deferred |
 #                   w1_scan (drives the decoder/docs; the FW emits it in the handler).
 commands:
@@ -132,15 +132,33 @@ commands:
     # secret_key/nonce_counter/claim_token/DevEUI/JoinEUI), drops the LoRaWAN
     # session/keys — forces a re-join. NFC + shell only, never LoRaWAN: a LoRaWAN
     # downlink triggering this would destroy the very session/keys carrying it,
-    # so it could never even confirm delivery. vendor_reset is NOT a Command: it
-    # is driven by its own NFC record (hio.stck:rst, vendor-token authenticated)
-    # and a shell-only `settings vendor-reset` for HIL, never over the generic
-    # cmd channel.
+    # so it could never even confirm delivery.
     - {name: factory_reset, proto_id: 23, body: FactoryReset, kind: action, action: FACTORY_RESET, response: ack, transports: [nfc, shell]}
-    # Change the secret_key over the already-encrypted channel (authenticated by
-    # the CURRENT key), so a lost/rotated key never needs a J-Link. The new key is
-    # never readable back via GetParam/GetConfig (secret_key stays proto_field:false).
-    - {name: set_secret_key, proto_id: 24, body: SetSecretKey, kind: handler, response: ack, transports: [nfc, shell]}
+    # Change the secret_key over an already-encrypted channel: authenticated by the
+    # CURRENT secret_key on hio.stck:cmd, or by vendor_token on hio.stck:vnd (#316),
+    # so a lost/rotated key never needs a J-Link. The new key is never readable back
+    # via GetParam/GetConfig (secret_key stays proto_field:false).
+    - {name: set_secret_key, proto_id: 24, body: SetSecretKey, kind: handler, response: ack, transports: [nfc, shell, vendor]}
+    # #308: explicit, authenticated end of the claim window (a companion to the
+    # #247 clm-record delete-detection, which stays as-is for backward
+    # compatibility with older Manager-App builds). Runs over the already-
+    # encrypted hio.stck:cmd channel like set_secret_key above, so only a phone
+    # that already holds secret_key can send it — decrypting at all already
+    # proves that, so app_nfc.c also fires the same transition as a side effect
+    # of any successfully-decrypted command, not just this one. No reboot, no
+    # deferred action: the underlying settings_save_one() write is the same
+    # narrow single-key persist app_nfc.c already does synchronously for the
+    # #247 delete-detection path.
+    - {name: clm_ack, proto_id: 25, body: ClmAck, kind: handler, response: ack, transports: [nfc, shell]}
+    # #316 vendor_reset: deepest reset tier — wipes everything except serial_number
+    # + vendor_token and installs the replacement secret_key carried in the body
+    # (reusing the SetSecretKey shape, since vendor_reset zeroes the old key).
+    # Reachable ONLY over the vendor transport (NFC hio.stck:vnd, vendor-token
+    # authenticated); the shell `settings vendor-reset` remains for HIL. Gated by
+    # vendor_reset_allow (in the handler + app_settings_vendor_reset); recovery from
+    # allow==false is a vendor-channel set_param(vendor_reset_allow=true) first.
+    # proto_id 26 (not 25): 25 was taken by clm_ack (#308) merged into v1.4.0 first.
+    - {name: vendor_reset, proto_id: 26, body: SetSecretKey, kind: handler, response: ack, transports: [vendor]}
 parameters:
   # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /
   # vendor_token) are OFF the config wire (`proto_field: false`, #250 Part B): configen
@@ -201,7 +219,7 @@ parameters:
 
   # #299 vendor-token security model: per-device, factory-unique, 128-bit,
   # immutable (write-once, never re-writable even after a reset). Authenticates
-  # `vendor_reset` (NFC hio.stck:rst + shell) so HARDWARIO can recover a device
+  # `vendor_reset` (NFC hio.stck:vnd + shell) so HARDWARIO can recover a device
   # without knowing a possibly user-changed secret_key. Survives every tier —
   # it is the one thing every reset (short of `settings erase`) always keeps.
   - name: vendor_token
@@ -264,15 +282,19 @@ parameters:
     max: 3600
     help: "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this."
 
-  # #299: gates the NFC vendor_reset (hio.stck:rst) channel. false = vendor
-  # recovery over NFC is refused; only a J-Link full-erase can then recover
-  # a device whose secret_key was changed and forgotten.
+  # #299/#316: gates whether vendor_reset is accepted. Writable ONLY over the
+  # vendor transport (NFC hio.stck:vnd, vendor-token) — so a secret_key holder can
+  # no longer disable recovery over a LoRaWAN downlink / NFC SetParam; readable
+  # everywhere (config show / GetConfig). The write is never gated on the current
+  # value, so a vendor set_param can always re-enable it. false + no vendor access
+  # => only a J-Link full-erase recovers a device whose secret_key was forgotten.
   - name: vendor_reset_allow
     proto_group: application
     proto_id: 7
     type: bool
     default: true
-    help: "Get/Set whether vendor_reset (NFC + shell) is accepted (true/false)."
+    writable: [vendor]
+    help: "Get whether vendor_reset is accepted; settable only over the vendor NFC channel (true/false)."
 
   - name: alarm_limit
     proto_group: alarms
@@ -310,12 +332,12 @@ parameters:
     persistent: [device_reset]
     help: "Get/Set LoRaWAN region (eu868/us915/au915)."
 
-  - name: lrw_mode
+  - name: radio_mode
     proto_group: lorawan
     writable: [shell, nfc]  # never over a LoRaWAN downlink: setting OFF/P2P would sever the link that carries it (#271)
     proto_id: 15
     type: enum
-    enum: lrw_mode
+    enum: radio_mode
     default: LORAWAN
     persistent: [device_reset]
     help: "Get/Set radio mode (off/lorawan/p2p). off = radio-silent, sensor/history still run."

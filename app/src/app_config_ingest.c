@@ -214,11 +214,11 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 		}
 	}
 	/* M-3: this field is not writable over lrw. */
-	if (src->has_mode && (tp == APP_CMD_TRANSPORT_LRW)) {
+	if (src->has_radio_mode && (tp == APP_CMD_TRANSPORT_LRW)) {
 		FAULT_TRANSPORT(15);
-	} else if (src->has_mode) {
-		if ((int)src->mode >= 0 && (int)src->mode <= 2) {
-			config->lrw_mode = (enum app_config_lrw_mode)src->mode;
+	} else if (src->has_radio_mode) {
+		if ((int)src->radio_mode >= 0 && (int)src->radio_mode <= 2) {
+			config->radio_mode = (enum app_config_radio_mode)src->radio_mode;
 		} else {
 			FAULT(15);
 		}
@@ -287,8 +287,8 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 		dst->link_check_fail_rejoin = c->lrw_link_check_fail_rejoin;
 	}
 	if (requested(ids, n, 15)) {
-		dst->has_mode = true;
-		dst->mode = (AppConfigMessage_Lorawan_Mode)c->lrw_mode;
+		dst->has_radio_mode = true;
+		dst->radio_mode = (AppConfigMessage_Lorawan_RadioMode)c->radio_mode;
 	}
 }
 
@@ -297,7 +297,6 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 {
 	struct app_config *config = app_config();
 	int ret = 0;
-	ARG_UNUSED(tp);
 
 	if (fault_field) {
 		*fault_field = 0;
@@ -339,7 +338,11 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 			FAULT(6);
 		}
 	}
-	if (src->has_vendor_reset_allow) {
+	/* M-3: this field is not writable over lrw/nfc. */
+	if (src->has_vendor_reset_allow &&
+	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_NFC)) {
+		FAULT_TRANSPORT(7);
+	} else if (src->has_vendor_reset_allow) {
 		config->vendor_reset_allow = src->vendor_reset_allow;
 	}
 	return ret;

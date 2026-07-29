@@ -25,7 +25,7 @@ message AppConfigMessage {
             ABP = 1;
         }
 
-        enum Mode {
+        enum RadioMode {
             OFF = 0;
             LORAWAN = 1;
             P2P = 2;
@@ -45,7 +45,7 @@ message AppConfigMessage {
         optional bytes appskey = 12;
         optional uint32 link_check_interval = 13;
         optional uint32 link_check_fail_rejoin = 14;
-        optional Mode mode = 15;
+        optional RadioMode radio_mode = 15;
     }
 
     message Application {
@@ -134,6 +134,8 @@ message Command {
         Sample           sample            = 21;
         FactoryReset     factory_reset     = 23;
         SetSecretKey     set_secret_key    = 24;
+        ClmAck           clm_ack           = 25;
+        SetSecretKey     vendor_reset      = 26;
     }
 // END GENERATED COMMANDS
 
@@ -231,6 +233,11 @@ message Command {
     // CURRENT key). The new key is never readable back via GetParam/GetConfig
     // (secret_key stays proto_field:false — see AppConfigMessage.reserved).
     message SetSecretKey { optional bytes key = 1; }
+
+    // #308: explicit end of the claim window (companion to the #247 clm-record
+    // delete-detection). Empty — the token itself never travels on this command,
+    // only the fact that an authenticated caller sent it.
+    message ClmAck { }
 }
 
 message Response {

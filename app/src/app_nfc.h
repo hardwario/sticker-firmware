@@ -39,13 +39,6 @@ int app_nfc_wait_event(int fallback_ms);
  * APP_CMD_ACTION_NONE when there is nothing pending. */
 enum app_cmd_action app_nfc_take_cmd_action(void);
 
-/* The replacement secret_key staged by a successful hio.stck:rst vendor_reset
- * request (#299) — call exactly once, when handling the deferred
- * APP_CMD_ACTION_VENDOR_RESET returned by app_nfc_take_cmd_action() above.
- * Returns a pointer to a static 16-byte buffer valid until the next NFC
- * vendor_reset request. */
-const uint8_t *app_nfc_take_pending_vendor_secret_key(void);
-
 /* Whether the main loop should run the periodic NFC check. Toggled by the
  * `nfc autocheck on|off` shell command so a multi-step `nfc write` of a config
  * blob is not raced (and overwritten) by the periodic check mid-write. */
@@ -80,6 +73,11 @@ bool app_nfc_session_active(void);
  * app_settings_vendor_reset() (#299), the one reset tier deep enough to matter;
  * device_reset/factory_reset deliberately leave clm state alone (see app_nfc.c). */
 void app_nfc_clm_reset(void);
+
+/* Explicit claim-ack (#308, clm_ack command): transitions CLM_PENDING -> CLM_CONSUMED
+ * and persists, no reboot. A no-op if not currently PENDING (already consumed, or
+ * never armed) - always safe to call. */
+void app_nfc_clm_ack(void);
 
 #ifdef __cplusplus
 }

@@ -185,11 +185,14 @@ LoRaWAN session/keys — the device must re-join after it. `vendor_reset` keeps 
 `serial-number` + `vendor-token` (goes through the live settings API, not a raw storage erase — only
 `history` is raw-erased), and is refused unless the caller supplies a replacement `secret-key` in the
 same call, or if `vendor-reset-allow` is false. `set_secret_key` rotates `secret-key` over the
-already-encrypted nfc/shell channel.
+already-encrypted nfc/shell channel, then reboots so the new key is live (#322); an all-zero
+replacement is refused.
 **Observable:** `factory_reset` — identity survives, DevEUI/keys/region reset to defaults, device
 re-joins. `vendor_reset` without a key, or with `vendor-reset-allow false`, is refused (no reboot,
 nothing erased). `vendor_reset` with a key — only serial+vendor-token survive, new secret_key is
-live after reboot. `set_secret_key` — new key takes effect immediately (old key no longer decrypts).
+live after reboot. `set_secret_key` — the device saves and cold-reboots, and the new key is in
+effect once it comes back (old key no longer decrypts); an all-zero key is rejected with
+`BAD_REQUEST` and nothing is saved or rebooted (#322).
 
 **Prompt for Claude:**
 > `settings factory-reset` over the RTT shell: confirm `config serial-number`/`config secret-key`
@@ -203,29 +206,34 @@ live after reboot. `set_secret_key` — new key takes effect immediately (old ke
 
 - [ ] Pass
 
-### G6a-NFC — vendor_reset over the `hio.stck:rst` channel (#299)
+### G6a-NFC — vendor_reset over the `hio.stck:vnd` channel (#299, #316)
 
-**Goal:** the same `vendor_reset` operation as G6a above, but driven over NFC through its own
-vendor-token-authenticated record (`hio.stck:rst`) instead of the shell — the one reset tier that
-never goes over the generic `hio.stck:cmd`/LoRaWAN command channel at all.
-**Observable:** the tag holds a plaintext info record, then a `hio.stck:rst` write, then a
+**Goal:** the same `vendor_reset` operation as G6a above, but driven over NFC through the
+vendor-token-authenticated record (`hio.stck:vnd`) instead of the shell. Since #316 this is a normal
+protobuf `Command` (`vendor_reset`, `transports: [vendor]`) dispatched on the vendor transport — the
+same generic Command/Response path as `hio.stck:cmd`, only decrypted/encrypted with `vendor_token`,
+and never reachable over `hio.stck:cmd` or LoRaWAN.
+**Observable:** the tag holds a plaintext info record, then a `hio.stck:vnd` write, then a
 `hio.stck:rsp` reply (`Ack` on success, `Error{NOT_READY}` if `vendor-reset-allow` is false,
-`Error{BAD_REQUEST}` for a malformed payload) — the actual reset only fires after the phone acks the
-reply (same ack-before-reboot handshake as every other reset), never immediately from the tap.
+`Error{BAD_REQUEST}` for a missing key) — the actual reset only fires after the phone acks the reply
+(same ack-before-reboot handshake as every other reset), never immediately from the tap. With
+`vendor-reset-allow=false`, first send `set_param{ application{ vendor_reset_allow=true } }` over
+`hio.stck:vnd` (always accepted — the field is `writable: [vendor]` and its write is not gated on the
+current value), then re-send `vendor_reset`.
 
-**HIL-verified 2026-07-13** without a phone — hand-crafted the AES-CCM frame in Python
-(`cryptography.hazmat.AESCCM`, mirroring the `nfc_crypto` golden-vector construction) and injected it
-directly into ST25DV memory via the `nfc write <offset> <hex>` shell command (`ats cmd nfc <hex>`
-would NOT have worked here — it injects a *plaintext* `Command` straight into `app_cmd_handle`,
-bypassing the NFC tag/encryption entirely). Confirmed all three outcomes: (1) a valid request is
-recognized ("vendor_reset record"), decrypted, accepted, and the reply written — but the device does
-**not** reset until a `hio.stck:ack` record is written back, at which point the deferred action fires
-and `serial_number`/`vendor_token` survive with the new `secret_key` live; (2) with
-`vendor-reset-allow=false`, the request is decrypted but rejected (`Error{NOT_READY}`) with no
-deferred action and no config change; (3) a stale/reused nonce is rejected by `decrypt()` same as the
-`cmd` channel. See `reference_nfc_rst_hil_test_299` (memory) for the exact frame-construction recipe
-and the shell-command-line-length gotcha it surfaced (long `nfc write` hex strings silently truncate —
-split into multiple writes at sequential offsets).
+**Needs HIL re-verification for #316** (the prior 2026-07-13 result was for the removed `hio.stck:rst`
+magic-byte channel, which no longer exists). The frame is now a protobuf `Command{ vendor_reset{ key } }`
+sealed under `vendor_token` — see the `nfc_crypto` `test_vendor_channel_vector` golden vector
+(`VND_REQ_PLAIN`/`VND_REQ_WIRE`) for the exact construction — injected into ST25DV memory via the
+`nfc write <offset> <hex>` shell command (`ats cmd nfc <hex>` would NOT work — it injects a *plaintext*
+`Command` straight into `app_cmd_handle` over the NFC transport, bypassing the tag/encryption and the
+vendor transport). Confirm: (1) a valid request is recognized ("vendor command record"), decrypted,
+dispatched on the vendor transport, accepted, and the reply written — the device does **not** reset
+until a `hio.stck:ack` record is written back, at which point the deferred action fires and
+`serial_number`/`vendor_token` survive with the new `secret_key` live; (2) with `vendor-reset-allow=false`,
+rejected (`Error{NOT_READY}`), and the `set_param(vendor_reset_allow=true)` recovery step above then
+unblocks it; (3) a stale/reused nonce is rejected by `decrypt()` same as the `cmd` channel. Long
+`nfc write` hex strings silently truncate — split into multiple writes at sequential offsets.
 
 - [x] Pass (HIL-verified via hand-crafted frame, 2026-07-13)
 
@@ -1292,7 +1300,7 @@ The dedicated plaintext "RESET NFC tag" NDEF type this test described predates t
 (#299) and no longer exists in `app_nfc.c` (no `NFC action: RESET` string, no 10-blink pattern).
 Resetting over NFC now goes through the encrypted `hio.stck:cmd` channel's `device_reset` /
 `factory_reset` commands (ack-before-reboot, same as every other command) or the separate
-vendor-token-authenticated `hio.stck:rst` channel for `vendor_reset` — see **N9** and **G6a-NFC**.
+vendor-token-authenticated `hio.stck:vnd` channel for `vendor_reset` — see **N9** and **G6a-NFC**.
 
 - [x] N/A (superseded by N9 / G6a-NFC)
 
@@ -1406,11 +1414,13 @@ idempotent via a response cache.
 
 ### N9 — Reset ladder over `hio.stck:cmd`: `device_reset` / `factory_reset` / `set_secret_key`, ack-before-reboot (#299)
 
-**Goal:** unlike `vendor_reset` (its own `hio.stck:rst` channel, see G6a-NFC), `device_reset` and
+**Goal:** unlike `vendor_reset` (its own `hio.stck:vnd` vendor channel, see G6a-NFC), `device_reset` and
 `factory_reset` are ordinary `Command`s dispatched over the standard encrypted `hio.stck:cmd`
 channel — `factory_reset` is additionally **nfc/shell-only** (rejected as a LoRaWAN downlink,
 since a downlink that drops its own LoRaWAN session could never confirm delivery). `set_secret_key`
-is also nfc/shell-only and reachable the same way, but does **not** reboot. All three must follow
+is also nfc/shell-only and reachable the same way, and since #322 it reboots too — that reboot is
+what makes the rotated key live, because the encrypted channel authenticates from the boot-time
+`g_app_config` copy. All three must follow
 the same **ack-before-reboot** handshake as `lrw_reset`/`lrw_join` (N5): the device writes its
 encrypted response to the tag *first*, and only reboots once the phone reads it (`hio.stck:ack`)
 or a ~10 s quiet-field timeout fires — never immediately off the tap.
@@ -1420,9 +1430,10 @@ LoRaWAN provisioning intact (same postconditions as G6, driven over NFC instead 
 `factory_reset` — same ack-before-reboot gate, but LoRaWAN keys/session also reset and the device
 re-joins after reboot (same postconditions as G6a's `factory_reset`, driven over NFC); presenting
 it as a LoRaWAN downlink is rejected with `Error{NOT_READY}` (transport not allowed), never
-silently accepted. `set_secret_key` — encrypted `ack` written back with **no** reboot, and the
-*next* `hio.stck:cmd` frame must be encrypted with the **new** key (the old key no longer
-decrypts).
+silently accepted. `set_secret_key` — encrypted `ack` written back **first** (still under the *old*
+key, since the rotation is not live yet), reboot only after the ack/quiet-field timeout, and *after*
+that reboot the **new** key decrypts while the old one is rejected (#322). An all-zero key is
+refused with `Error{BAD_REQUEST}` — no save, no reboot, key unchanged.
 
 **Prompt for Claude:**
 > Build an AES-CCM `hio.stck:cmd` frame carrying `device_reset` (mirror the golden-vector
@@ -1435,11 +1446,79 @@ decrypts).
 > `factory_reset`: confirm the same ack-then-reboot ordering, and that LoRaWAN keys reset and the
 > device re-joins after reboot. Then present `factory_reset` as a fPort-85 LoRaWAN downlink instead
 > and confirm it is rejected with `Error{NOT_READY}` rather than silently executed. Finally send
-> `set_secret_key` with a new 16-byte key over `hio.stck:cmd`: confirm the `ack` is written with
-> **no** reboot, and that a follow-up frame encrypted with the *old* key is now rejected while one
-> encrypted with the *new* key succeeds. Report all results.
+> `set_secret_key` with a new 16-byte key over `hio.stck:cmd`: confirm the `ack` is written to the
+> tag **before** the reboot and is still decryptable with the *old* key, that the reboot fires only
+> after the ack/quiet-field timeout, and that after it a frame encrypted with the *old* key is
+> rejected while one encrypted with the *new* key succeeds (#322). Repeat `set_secret_key` with an
+> all-zero key and confirm `Error{BAD_REQUEST}`, no reboot, and `config secret-key` unchanged.
+> Report all results.
+
+**`set_secret_key` portion HIL-verified 2026-07-27** (#322), same frame-construction recipe as
+G6a-NFC above — hand-crafted AES-CCM `hio.stck:cmd` records injected with chunked
+`nfc write <offset> <hex>` and driven with `nfc check`. Confirmed: (1) an all-zero key is refused
+with `Error{BAD_REQUEST}` detail `"zero key"`, deferred action `none`, no reboot, `secret-key`
+unchanged; (2) a valid rotation reports deferred action `secret-key-save+reboot`, the `Ack` is
+written to the tag **first** and still decrypts under the *old* key, then the device cold-reboots
+and `config secret-key` reads the new key — i.e. the new key is live immediately rather than at
+some later unrelated reboot; (3) after that reboot a frame sealed with the *old* key is refused
+(`command rejected: -5`, nonce high-water not advanced) while the same frame sealed with the *new*
+key is handled normally; (4) `nonce-counter` is preserved across the rotation reboot (persisted by
+`decrypt()` before the command runs). The `device_reset` / `factory_reset` legs of N9 were **not**
+re-exercised in this session — unchanged by #322.
 
 - [ ] Pass
+
+### N10 — Claim window: `hio.stck:clm` lay-down + all three end-of-claim triggers (#247, #308)
+
+**Goal:** once `claim_token` is provisioned, the firmware publishes `hio.stck:clm` alongside the
+plaintext info record on every resting-tag write (including after a reboot/reflash), and the claim
+window ends via **any** of three independent triggers: (1) the phone deletes `clm` off the tag
+(#247, unauthenticated over RF, kept for backward compatibility), (2) the phone sends the explicit
+`clm_ack` command over the encrypted `hio.stck:cmd` channel (#308), or (3) the phone sends **any**
+other authenticated command at all — decrypting it already proves `secret_key` possession (#308).
+All three latch the same persisted `UNSET → PENDING → CONSUMED` state; once `CONSUMED`, `clm` is
+never republished, even across reboot/reflash — only a full NVS erase or `vendor_reset` reopens it.
+**Observable:** `nfc clm` shell command reports the latch state throughout. `nfc dump` shows a
+two-record `[inf, clm]` NDEF message while `PENDING`, `inf`-only once `CONSUMED`.
+
+**Prompt for Claude:**
+> `settings erase`, then `config claim-token <32-hex>` + `settings save`. After reboot confirm
+> `nfc clm` reports `PENDING` and `nfc dump` shows the two-record `[inf, clm]` message. Reflash the
+> firmware (plain `west flash`, no `--erase`) and confirm `PENDING` and the two-record tag survive
+> the reflash unchanged (#308 "publish until claimed" guarantee).
+>
+> Trigger 1 (delete-detection, #247): rewrite the tag with an info-only NDEF message (simulating
+> the phone deleting `clm` after claiming) via `nfc write`, then `nfc check`. Confirm `nfc clm`
+> latches `CONSUMED` and reboot doesn't resurrect `clm`.
+>
+> Reset to `PENDING` again (`settings erase` + re-provision) for the next two triggers so each is
+> tested from a clean arm. Trigger 2 (`clm_ack`, #308): build an AES-CCM `hio.stck:cmd` frame
+> carrying `clm_ack` (mirror the golden-vector construction in `tests/nfc_crypto` /
+> `reference_nfc_rst_hil_test_299`; split into sequential `nfc write` calls — long hex truncates
+> silently past ~128 chars) and inject it. Confirm the encrypted `ack` comes back and `nfc clm`
+> latches `CONSUMED` — with **no** RF delete needed.
+>
+> Trigger 3 (implicit consume, #308): re-arm to `PENDING` once more, then send an *unrelated*
+> authenticated command (e.g. `get_info`) over `hio.stck:cmd` instead of `clm_ack`. Confirm that
+> merely decrypting this command also latches `CONSUMED`, even though the command itself was never
+> `clm_ack`. Report all three trigger outcomes and the reflash-survival result.
+
+**HIL-verified 2026-07-14** (debug image, J-Link 822005109), hand-crafted AES-CCM frames (no phone,
+same recipe as `reference_nfc_rst_hil_test_299`): `settings erase` → `config claim-token` +
+`config secret-key` + `settings save` → reboot arms `PENDING`; `nfc dump` confirmed the two-record
+`[inf, clm]` message (`TLV len=0x5b`, second record `54 0c 12 68 69 6f 2e 73 74 63 6b 3a 63 6c 6d`
+= `hio.stck:clm`, payload `12 10` + the 16-byte test token, byte-exact). **Reflash survival**:
+re-flashed the same image (no `--erase`) and confirmed `PENDING` + the identical two-record content
+survived unchanged. **Trigger 2 (`clm_ack`)**: injected an encrypted `hio.stck:cmd` frame carrying
+`clm_ack` → `handled, response 5 B` (bare ack, `deferred action: none`) → `clm state: consumed (2)`.
+**Trigger 3 (implicit consume)**: re-armed to `PENDING`, injected an encrypted `get_info` command
+instead (67 B `Info` response, clearly not `clm_ack`) → `clm state: consumed (2)` all the same,
+confirming any authenticated command ends the window. Trigger 1 (delete-detection) was not
+re-exercised standalone this session — its logic is unchanged from #247 (only moved into the shared
+`clm_consume()` helper also used by triggers 2/3, both of which passed) — see the original #247
+HW-validation note above for its own direct HIL run.
+
+- [x] Pass (HIL-verified via hand-crafted frames, 2026-07-14; triggers 2 and 3 + reflash survival)
 
 ---
 

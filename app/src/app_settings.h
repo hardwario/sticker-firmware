@@ -37,9 +37,9 @@ int app_settings_save(bool reboot);
  *                    Zephyr's NVS for the rest of the boot — see the comment
  *                    in app_settings.c); only the separate, non-NVS history
  *                    partition is raw-erased. Never reachable over LoRaWAN or
- *                    the generic hio.stck:cmd channel — only the shell
- *                    (`settings vendor-reset`) or NFC's own vendor-token
- *                    hio.stck:rst record (app_nfc.c) ever reach it. */
+ *                    the secret_key hio.stck:cmd channel — only the shell
+ *                    (`settings vendor-reset`) or a vendor_reset Command on the
+ *                    NFC vendor-token hio.stck:vnd channel (#316) reach it. */
 int app_settings_device_reset(void);
 int app_settings_factory_reset(void);
 
@@ -64,10 +64,6 @@ int app_settings_erase(void);
  * accepted command so a captured command can't be replayed after a power-cycle.
  * Returns 0 or a negative errno. */
 int app_settings_save_nonce_counter(void);
-
-/* Persist only secret_key to NVS as a single settings key (#299, set_secret_key
- * command). Returns 0 or a negative errno. */
-int app_settings_save_secret_key(void);
 
 #ifdef __cplusplus
 }

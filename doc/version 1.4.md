@@ -35,7 +35,8 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `reboot` | Cold reboot | `ack` |
 | `device_reset` | Reset config to defaults but **keep device identity + LoRaWAN keys** (stays provisioned/connected); clears dynamic alarm rules; **reboots**. Renamed from the single `factory_reset` (#299) — same wire id, same behavior | `ack` |
 | `factory_reset` | **NEW (#299), narrower than `device_reset`, NFC/shell only** — rejected over LoRaWAN (it drops the very session/keys a downlink would need to confirm delivery). Reset config to defaults, keeping identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI) — drops the LoRaWAN session/keys, forcing a re-join; clears dynamic alarm rules; **reboots** | `ack` |
-| `set_secret_key` | **NEW (#299), NFC/shell only** — rejected over LoRaWAN. Rotates `secret_key` over the already-encrypted channel (authenticated by the *current* key); the new key is never readable back via `get_param`/`get_config` | `ack` |
+| `set_secret_key` | **NEW (#299), NFC/shell only** — rejected over LoRaWAN. Rotates `secret_key` over the already-encrypted channel (authenticated by the *current* key); the new key is never readable back via `get_param`/`get_config`. **Reboots** (#322) — that is what makes the rotated key live, so the `ack` is the last frame under the old key; an all-zero replacement is rejected with `BAD_REQUEST` | `ack` |
+| `clm_ack` | **NEW (#308), NFC/shell only** — rejected over LoRaWAN. Explicit, authenticated end of the claim window (§10 Claim record): ends `PENDING`→`CONSUMED` without an RF delete. Empty body — decrypting it at all is the whole signal | `ack` |
 | `force_send` | Send a telemetry report immediately | **none** — the report itself is the reply |
 | `sample` | Take a fresh reading: send a `Telemetry` report on fPort 2 **and** (over NFC) return the same readings in the reply. Works over LoRaWAN and NFC | LoRaWAN: **none** — the fPort-2 report is the reply. NFC: **`sample`** — a full `Telemetry` with the fresh readings |
 | `reset_counters` | Clear selected hall/input counters | `ack` |
@@ -51,7 +52,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 >
 > **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `sample`, `clock_sync`, `req_history`, `req_history_page`, `w1_scan`) do **not** also send an `ack`, to save an uplink. `sample` is dual: over LoRaWAN the fPort-2 report is the only reply (no fPort-85 body, like `force_send`); over NFC it additionally returns the readings synchronously so a phone can show them on the spot.
 >
-> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC (previously such transport-scoped commands could be wrongly accepted on the other transport with a misleading `Ack`). Conversely `req_history_page`, `factory_reset` and `set_secret_key` are **NFC/shell-only** — `req_history_page` because the NFC channel has no streaming path, so history is read there one page per tap (§6); `factory_reset` (#299) because a LoRaWAN downlink that drops the LoRaWAN session/keys carrying it could never confirm its own delivery; `set_secret_key` because provisioning a new key over the network it is meant to protect defeats the point.
+> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC (previously such transport-scoped commands could be wrongly accepted on the other transport with a misleading `Ack`). Conversely `req_history_page`, `factory_reset`, `set_secret_key` and `clm_ack` are **NFC/shell-only** — `req_history_page` because the NFC channel has no streaming path, so history is read there one page per tap (§6); `factory_reset` (#299) because a LoRaWAN downlink that drops the LoRaWAN session/keys carrying it could never confirm its own delivery; `set_secret_key` because provisioning a new key over the network it is meant to protect defeats the point; `clm_ack` (#308) because ending the claim window is inherently tied to the physical NFC tap that started it.
 >
 > **Setting the clock over NFC:** `clock_sync` with a `unix_time` field sets the RTC directly from a phone, bootstrapping wall-clock time before/without a network (epoch sanity-bounded to 2024-01-01 … 2100-01-01; out-of-range → `BAD_REQUEST` "bad epoch"). A later network `DeviceTimeReq`/`DeviceTimeAns` stays authoritative and may refine it. Empty `clock_sync` over NFC just confirms (no network to query).
 >
@@ -59,24 +60,25 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 >
 > **`get_param` is paged** like `get_config`: the reply carries `page_index`/`page_count`, and an optional `page` field in the request selects which page (omit = 0). When the selected fields don't all fit one data-rate frame they are split across pages — fetch the rest by re-sending with the next `page`. A page out of range returns `OUT_OF_RANGE`. If any response still doesn't fit the buffer it is replaced by an `error` (same `seq`) rather than dropped silently.
 >
-> **`vendor_reset` (#299) is not in this table** — unlike the other reset tiers above it is not a
-> `Command` at all: it is shell-only for now (`settings vendor-reset`), reachable remotely only via a
-> future dedicated NFC record (`hio.stck:rst`, vendor-token authenticated) rather than the generic
-> encrypted command channel. See §14 for the full reset ladder.
+> **`vendor_reset` (#299, #316) is a Command reachable only over the vendor channel** — it is omitted
+> from this table because it is not accepted on `hio.stck:cmd` or a LoRaWAN downlink. It is a generic
+> `Command` (`transports: [vendor]`) carried on a dedicated NFC record (`hio.stck:vnd`) authenticated
+> by `vendor_token` instead of `secret_key`, plus the shell `settings vendor-reset` for HIL. See §14
+> for the full reset ladder.
 
-### Radio mode — `lrw-mode` (#271)
+### Radio mode — `radio-mode` (#271)
 
-A persisted `lrw-mode` config enum selects the radio network mode at boot:
+A persisted `radio-mode` config enum selects the radio network mode at boot:
 
 | Value | Shell | Meaning |
 |-------|-------|---------|
-| `off` | `config lrw-mode off` | Radio disabled — no LoRaWAN join, radio never powered. Sensor + history logging still run. Heartbeat LED blinks **orange**. |
-| `lorawan` | `config lrw-mode lorawan` | Classic LoRaWAN (**default**, current behaviour). |
-| `p2p` | `config lrw-mode p2p` | Reserved for the raw-LoRa peer-to-peer transport (#118 / #228); until it lands, `p2p` warns and falls back to `off`. |
+| `off` | `config radio-mode off` | Radio disabled — no LoRaWAN join, radio never powered. Sensor + history logging still run. Heartbeat LED blinks **orange**. |
+| `lorawan` | `config radio-mode lorawan` | Classic LoRaWAN (**default**, current behaviour). |
+| `p2p` | `config radio-mode p2p` | Reserved for the raw-LoRa peer-to-peer transport (#118 / #228); until it lands, `p2p` warns and falls back to `off`. |
 
 Set it over the **shell or NFC only** — never over a LoRaWAN downlink (it would sever the link that carries the command). It is `persistent: [device_reset]` (survives a factory reset like the other identity keys, #299) and needs `settings save` (reboot) to take effect.
 
-This **replaces the old "blank DevEUI ⇒ radio-silent" guard** (#98/#175): the radio is now enabled/disabled by explicit config, not inferred from an all-zero DevEUI. A `lorawan`-mode device with an unset DevEUI therefore now **attempts to join and fails loudly** instead of silently disabling — so a provisioning gap surfaces rather than looking like an intentional off state. To keep a provisioned device radio-silent (storage, bench, power measurement) without erasing its identity, set `lrw-mode off`.
+This **replaces the old "blank DevEUI ⇒ radio-silent" guard** (#98/#175): the radio is now enabled/disabled by explicit config, not inferred from an all-zero DevEUI. A `lorawan`-mode device with an unset DevEUI therefore now **attempts to join and fails loudly** instead of silently disabling — so a provisioning gap surfaces rather than looking like an intentional off state. To keep a provisioned device radio-silent (storage, bench, power measurement) without erasing its identity, set `radio-mode off`.
 
 **Ready-to-use hex downlinks (fPort 85):**
 
@@ -271,7 +273,7 @@ After every LoRaWAN join the device automatically sends a device-info message on
 
 The **`reset_cause`** field (proto field 11) carries the hardware reset-cause bitmask read once at boot via `hwinfo_get_reset_cause()`, so a watchdog/brownout reset is visible in the field instead of being silent. On the STM32WLE5 the bits that can appear are `pin` (0x01), `software` (0x02), `brownout` (0x04), `power-on`/POR (0x08), `watchdog` (0x10), `security` (0x40) and `low-power-wake` (0x80); several can be set at once (a cold power-up typically asserts power-on + pin + brownout). `ats device info` decodes the mask to names, e.g. `Reset cause: 0x00000010 (watchdog)`. It ships **over LoRaWAN too** — the device queues an autonomous `get_info` on every join, so after any unexpected reboot the very first fPort-85 uplink tells the backend **why** it restarted; `ttn.js` decodes the mask into `reset_cause_flags` (e.g. `["watchdog"]`) alongside the raw `reset_cause` (#267 observability, L-44).
 
-The **`lrw_state`** field (proto field 12) mirrors the firmware's LoRaWAN state machine (`app_lrw_state`): `idle` (not joined), `joining`, `healthy` (joined, link OK), `warning` (link check failing), `reconnect` (rejoining with backoff) and `disabled` (radio-silent because `lrw-mode` is `off`/`p2p` — #271). Like `dev_eui` it is emitted **over the NFC channel only** and is absent from LoRaWAN uplinks — the link state is redundant on a frame the network just received, and the on-join autonomous `get_info` (which goes out over LoRaWAN) therefore omits it. Over NFC it is an `optional` field, so even the `idle` (zero) state is transmitted explicitly; when the field is absent (any LoRaWAN uplink) the decoder leaves `lrw_state`/`lrw_state_name` `undefined` rather than defaulting to `idle`.
+The **`lrw_state`** field (proto field 12) mirrors the firmware's LoRaWAN state machine (`app_lrw_state`): `idle` (not joined), `joining`, `healthy` (joined, link OK), `warning` (link check failing), `reconnect` (rejoining with backoff) and `disabled` (radio-silent because `radio-mode` is `off`/`p2p` — #271). Like `dev_eui` it is emitted **over the NFC channel only** and is absent from LoRaWAN uplinks — the link state is redundant on a frame the network just received, and the on-join autonomous `get_info` (which goes out over LoRaWAN) therefore omits it. Over NFC it is an `optional` field, so even the `idle` (zero) state is transmitted explicitly; when the field is absent (any LoRaWAN uplink) the decoder leaves `lrw_state`/`lrw_state_name` `undefined` rather than defaulting to `idle`.
 
 The **`dev_eui`** field (proto field 13) is the 8-byte LoRaWAN DevEUI. It is emitted **only over the encrypted NFC channel** — a LoRaWAN uplink would leak it (the fPort-85 payload is plain protobuf) and the network server already knows it from the device context. It is also omitted when the DevEUI is still all-zero (unset).
 
@@ -291,7 +293,7 @@ The **`device_status`** field (proto field 14) is a uint32 bitmask aggregating t
 | 9 | `history_down` | history flash mount failed |
 | 10 | `i2c_wedged` | I2C bus currently wedged (last sweep all-fail) |
 | 11 | `time_unsynced` | RTC not synced (no wall-clock) |
-| 12 | `lrw_disabled` | LoRaWAN radio-silent (`lrw-mode` off/p2p, #271) |
+| 12 | `lrw_disabled` | LoRaWAN radio-silent (`radio-mode` off/p2p, #271) |
 
 The raw LoRaWAN link state is **not** duplicated here — it has its own `lrw_state` field; only the derived `lrw_disabled` bit is mirrored into the status word.
 
@@ -558,17 +560,22 @@ The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel �
 
 **Encryption (`CONFIG_APP_NFC_ENCRYPTION`, default on).** The **command** (`hio.stck:cmd`) record — and the **response** (`hio.stck:rsp`) written back — are **AES-CCM** encrypted (AES-128, 16-byte tag) with the device `secret_key`. The 8-byte wire header is `serial (4) + nonce_counter (4)`; the serial must match and the nonce must be strictly greater than the last accepted one (anti-replay) **and no more than 1024 ahead** of it (`NFC_NONCE_MAX_SKIP` — the accepted window is `(current, current + 1024]`), after which the counter is **persisted to NVS before the command runs**, so a captured command cannot be replayed after a power-cycle — including `lrw_reset`, which reboots immediately (#184). The upper bound stops a buggy/malicious provisioning tool from storing a counter near `UINT32_MAX`, which — because `nonce_counter` is `persistent: [device_reset, factory_reset]` (#299) — would make every future (necessarily larger) counter impossible and **permanently brick** the encrypted channel; the phone always sends `current + 1` (read from the info-record high-water), so the window never constrains normal use (N-2, #266). The **CCM nonce is `serial ‖ nonce_counter ‖ direction`**: a 9-byte value whose trailing direction byte (`0x00` request, `0x01` response — not transmitted; each side derives it from its role) keeps the request and its reply on **separate keystreams** even though both carry the same counter, and the 8-byte header is additionally passed as **AAD** so it is authenticated by the tag (#179). The phone reconstructs the same nonce/AAD from the header it sent. A same-counter **retransmission** (e.g. the phone never read the reply over a lossy RF link) is answered from a one-entry **response cache** *without re-running the command*, so a retry is idempotent — no double execution of a `set_param`/action (#194); after a reboot the cache is empty, so a stale retry is rejected and the phone resyncs from the info-record counter. Without the key a phone can therefore only read the plaintext **info** record (`application/vnd.hardwario.sticker`) — it can neither run a command nor write config. An **all-zero `secret_key` (a device not yet provisioned) counts as no key**: the encrypted channel is refused with `-EACCES` (no command runs, no encrypted response is emitted) until a non-zero key is set, so a pre-commissioning device cannot be driven with commands forged under the public all-zero key (mirrors the bootloader's unkeyed handling).
 
-**Vendor-token reset channel (`hio.stck:rst`, #299).** `vendor_reset` — the narrowest reset tier
-(§14) — is authenticated by `vendor_token`, not `secret_key`, so it stays reachable even after the
-owner has changed (or lost) the secret key. It is a **separate** record from `hio.stck:cmd`, not a
-`Command` on the generic channel: same AES-CCM wire framing (`decrypt()`/`encrypt()` parameterized
-by key instead of hardcoding `secret_key`) and the same shared `nonce_counter` window/persist (no
-separate vendor-token nonce), but its own tiny fixed-format plaintext payload instead of a protobuf
-`Command` — a format marker followed by the **replacement `secret_key`**, which the caller must
-supply in the same request (`vendor_reset` drops `secret_key` to all-zero, and an all-zero key would
-otherwise lock the device out of its own `hio.stck:cmd` channel). The reply reuses the normal
-`hio.stck:rsp` record type (this time encrypted with `vendor_token`), carrying an `Ack` on success or
-an `Error` — `BAD_REQUEST` for a malformed payload, `NOT_READY` when `vendor_reset_allow` is false.
+**Vendor-token command channel (`hio.stck:vnd`, #299, #316).** A dedicated NFC record authenticated by
+`vendor_token`, not `secret_key`, so it stays reachable even after the owner has changed (or lost) the
+secret key. It is a **separate** record from `hio.stck:cmd` but runs the **same** generic
+Command/Response dispatch: same AES-CCM wire framing (`decrypt()`/`encrypt()` parameterized by key
+instead of hardcoding `secret_key`) and the same shared `nonce_counter` window/persist (no separate
+vendor-token nonce), carrying a normal protobuf `Command` dispatched on the **vendor transport**
+(`APP_CMD_TRANSPORT_VENDOR`). That transport gates the `vendor_reset` command (`transports: [vendor]`)
+and the `vendor_reset_allow` field (`writable: [vendor]`); every command without an explicit
+`transports:` list (`set_param`, `get_info`, `set_secret_key`, …) is also reachable, all authenticated
+by `vendor_token`. `vendor_reset`'s body reuses the `SetSecretKey` shape to carry the **replacement
+`secret_key`**, which the caller must supply in the same request (`vendor_reset` drops `secret_key` to
+all-zero, and an all-zero key would otherwise lock the device out of its own `hio.stck:cmd` channel).
+The reply reuses the normal `hio.stck:rsp` record type (this time encrypted with `vendor_token`),
+carrying an `Ack` on success or an `Error` — `BAD_REQUEST` for a missing key, `NOT_READY` when
+`vendor_reset_allow` is false. Unlike `hio.stck:cmd`, the vendor channel does not use the response
+cache; a same-counter retry re-decrypts to `-EACCES` and the phone retries at `counter + 1`.
 Like every other reset, the actual erase/reset only runs **after** the phone has read the reply
 (ack-before-reboot, same deferred-action mechanism as `device_reset`/`factory_reset`) — never
 immediately from the NDEF parser callback. An all-zero `vendor_token` (unprovisioned) is refused the
@@ -587,7 +594,7 @@ this destructive.
 | Info | MIME (0x02) | `application/vnd.hardwario.sticker` |
 | Command (phone → device) | external (0x04) | `hio.stck:cmd` |
 | Response (device → phone) | external (0x04) | `hio.stck:rsp` |
-| Vendor-token reset (phone → device, #299) | external (0x04) | `hio.stck:rst` |
+| Vendor command (phone → device, #299, #316) | external (0x04) | `hio.stck:vnd` |
 | Claim (provisioning, #247) | external (0x04) | `hio.stck:clm` |
 
 A phone's Web NFC reader sees the info record as `record.recordType === "mime"` with
@@ -612,18 +619,32 @@ in a dedicated **plaintext** record next to the info record — a small protobuf
   `clm` record straight from the ST25DV EEPROM over RF. Because the tag is RF-powered, this
   works **even with the sticker powered off**; the phone must keep the `inf` record (delete
   `clm` only).
+- **Three independent end-of-claim triggers (#308).** The delete-detection above still works
+  unmodified (kept for backward compatibility with older Manager-App builds), but an RF delete is
+  unauthenticated — a rogue phone could delete `clm` as a nuisance, and the app needs an extra RF
+  write after claiming just to end the window. Two better alternatives now also end it:
+  - **`clm_ack` command** — an explicit, empty `Command` sent over the already-encrypted
+    `hio.stck:cmd` channel (same authentication as `set_secret_key`/`factory_reset`: only a phone
+    holding `secret_key` can send it). The app can send this right after the backend confirms the
+    claim instead of an RF delete.
+  - **Implicit consume on any authenticated command.** Decrypting *any* `hio.stck:cmd` frame at
+    all already proves the caller holds `secret_key` — the same bar the rest of this section
+    relies on — so the firmware ends the claim window as a side effect of the *first* real
+    command a paired phone sends, even one that isn't `clm_ack`.
+
+  All three triggers funnel through the same latch transition, so the rest of this section
+  applies identically regardless of which one fired.
 - **No resurrection.** The firmware never rewrites `clm` after it is gone. A small persisted
   latch (`UNSET → PENDING → CONSUMED`, in its own `clm` settings key, outside the config blob
-  so `device_reset`/`factory_reset` leave it intact) tracks this: when a poll finds the
-  tag settled (info present) but `clm` absent while it was `PENDING`, the state latches
-  `CONSUMED` and `clm` is never emitted again — a full NVS erase, or `vendor_reset` (#299, which
-  explicitly resets it back to `UNSET` via its own live-API reset, alongside the pulse totalizers),
-  re-opens provisioning.
-- **Threat model.** Read and delete are unauthenticated over RF (accepted: the claim window
-  relies on physical proximity + the backend ownership check). A rogue phone can delete `clm`
-  (a nuisance/DoS), but the token is **not lost** — the owner still reads it over the encrypted
-  `get_info` channel with `secret_key`. An ST25DV RF-password on that area is a possible future
-  hardening. The shell `nfc clm` command shows the latch state for bring-up.
+  so `device_reset`/`factory_reset` leave it intact) tracks this: once `CONSUMED`, `clm` is never
+  emitted again — a full NVS erase, or `vendor_reset` (#299, which explicitly resets it back to
+  `UNSET` via its own live-API reset, alongside the pulse totalizers), re-opens provisioning.
+- **Threat model.** The delete-detection path is unauthenticated over RF (accepted: the claim
+  window relies on physical proximity + the backend ownership check for that path). A rogue phone
+  deleting `clm` is a nuisance/DoS at worst — the token is **not lost** (still readable over the
+  encrypted `get_info` channel with `secret_key`), and a legitimate `clm_ack` or any real command
+  still ends the window correctly afterwards. The shell `nfc clm` command shows the latch state
+  for bring-up.
 - **HW-validated** (2026-07-07, J-Link 822005109, debug image): `settings erase` → `config
   claim-token` + `settings save` → reboot arms `PENDING`, `nfc dump` shows the two-record
   `[inf, clm]` message; a targeted delete (info-only rewrite) latches `CONSUMED` with no
@@ -773,19 +794,33 @@ no hand-maintained C list.
 | `device_reboot` | everything (no wipe) | shell `settings save`, LoRaWAN/NFC `reboot` | plain reboot |
 | `device_reset` | identity + **full LoRaWAN** (region/keys/session) | shell `settings device-reset`, LoRaWAN/NFC `device_reset` | renamed from the old, single `factory_reset` command/`settings reset` — same behavior, same wire id |
 | `factory_reset` | identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI); drops the LoRaWAN session/keys | shell `settings factory-reset`, NFC `factory_reset` (new, id 23) — **not** LoRaWAN | forces a re-join; rejected over LoRaWAN (`NOT_READY`) because the downlink carrying it would destroy the very session/keys needed to confirm delivery |
-| `vendor_reset` | `serial-number` + `vendor-token` only | shell `settings vendor-reset <new-secret-key>`, NFC `hio.stck:rst` (vendor-token authenticated — **not** a `Command`, never over LoRaWAN) | goes through the live settings API like the two tiers above — NOT a raw flash erase of the settings-backed `storage` partition (that would desync Zephyr's NVS mid-boot, see the GOTCHA note in `app_settings.c`); only the separate, non-NVS `history` partition is raw-erased. Also wipes the pulse totalizers and the NFC claim-record state via their own live APIs. Refused (`-EACCES`) if `vendor-reset-allow` is false, or if the caller doesn't supply a replacement `secret-key` in the same call (vendor_reset drops `secret-key` too — leaving it all-zero would lock the device out of its own encrypted NFC channel) |
+| `vendor_reset` | `serial-number` + `vendor-token` only | shell `settings vendor-reset <new-secret-key>`, or the NFC `hio.stck:vnd` vendor-token channel as a generic `Command` (`transports: [vendor]`, #316) — never over LoRaWAN or `hio.stck:cmd` | goes through the live settings API like the two tiers above — NOT a raw flash erase of the settings-backed `storage` partition (that would desync Zephyr's NVS mid-boot, see the GOTCHA note in `app_settings.c`); only the separate, non-NVS `history` partition is raw-erased. Also wipes the pulse totalizers and the NFC claim-record state via their own live APIs. Refused (`-EACCES`) if `vendor-reset-allow` is false, or if the caller doesn't supply a replacement `secret-key` in the same call (vendor_reset drops `secret-key` too — leaving it all-zero would lock the device out of its own encrypted NFC channel) |
 | `settings erase` (shell) | nothing, incl. serial | shell only | full NVS wipe; the deliberate "return to blank" escape hatch, never wired to LoRaWAN/NFC |
 
 `device_reset` is reachable over LoRaWAN/NFC/shell like any other Command — it keeps the LoRaWAN
 session, so a downlink triggering it can still be acked normally. `factory_reset` is NFC/shell only
 (rejected over LoRaWAN, `NOT_READY`): dropping the LoRaWAN keys/session in response to a LoRaWAN
 downlink would destroy the channel before the ack could ever confirm delivery. `vendor_reset` is the
-narrowest tier and never goes over the generic command channel at all — only its own NFC
-`hio.stck:rst` vendor-token channel, or the shell, ever reach it.
+narrowest tier and never goes over `hio.stck:cmd` or LoRaWAN — it is a `Command` on the vendor
+transport, reached only via its own NFC `hio.stck:vnd` (vendor-token) channel or the shell (#316).
 
-Also new in #299: `set_secret_key` (nfc/shell only, never a LoRaWAN downlink) rotates `secret-key`
-over the already-encrypted channel — authenticated by the *current* key, so a lost/rotated key never
-needs a J-Link short of `vendor_reset`. The new key is never readable back via GetParam/GetConfig.
+Security (#316): `vendor-reset-allow` is now `writable: [vendor]` — only a `set_param` over the vendor
+channel can change it, closing the gap where any `secret-key` holder could disable vendor recovery over
+a plain LoRaWAN downlink / NFC SetParam. Its write is never gated on the *current* value, so the vendor
+can always re-enable recovery: set it true over `hio.stck:vnd`, then send `vendor_reset` on the same
+channel (`vendor_reset` still honors the flag, refusing with `NOT_READY` while it is false).
+
+Also new in #299: `set_secret_key` (nfc/shell, and vendor over `hio.stck:vnd` since #316; never a
+LoRaWAN downlink) rotates `secret-key` over an already-encrypted channel — authenticated by the
+*current* `secret-key` on `hio.stck:cmd`, or by `vendor_token` on `hio.stck:vnd` — so a lost/rotated
+key never needs a J-Link short of `vendor_reset`. The new key is never readable back via
+GetParam/GetConfig. It **saves and cold-reboots** (#322, same ack-before-reboot gate as the tiers
+above): the encrypted channel authenticates from the boot-time `g_app_config` copy, so without the
+reboot the device would keep answering to the *old* key until some later, unrelated restart. The
+`ack` the phone reads is therefore still encrypted with the old key — by design, and it is delivered
+before the reboot fires. An **all-zero replacement is rejected** with `BAD_REQUEST` (#322): all-zero
+is the unprovisioned sentinel that makes the device refuse the encrypted channel outright, so
+accepting one would lock the caller out of the very channel it just used.
 
 A schema migration (config-version bump) restores the `device_reset` tier's protected set after
 applying new defaults, same as today.
@@ -845,7 +880,7 @@ The STICKER has **three independent on/off LEDs** — red (R), yellow (Y), green
 | 1 | 🔴🟡 red/yellow alternating, 2× | **Config NVS load failed** — running on defaults, identity/provisioning lost |
 | 2 | 🟡🔴 yellow then red | **LoRaWAN joining / reconnect** — *not on the network* (initial join or rejoin); the severe network state |
 | 3 | 🟡 yellow ×2 | **LoRaWAN warning** — link-check streak failing but session still up; the mild network state |
-| 4 | 🟡 yellow ×1 | **Radio off** — `lrw-mode off`/`p2p` (deliberate); lowest rung of the yellow scale |
+| 4 | 🟡 yellow ×1 | **Radio off** — `radio-mode off`/`p2p` (deliberate); lowest rung of the yellow scale |
 | 5 | 🔴 red ×1 | **Alarm active** — any of threshold / low-battery (#210) / no-data / dead-sensor (#211); detail travels on fPort 3 |
 | 6 | 🟢 green ×1 | **Healthy** — joined, link OK (debug build: green + yellow) |
 

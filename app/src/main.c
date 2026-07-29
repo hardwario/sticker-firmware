@@ -151,15 +151,22 @@ static void nfc_run_deferred_cmd_actions(void)
 			app_settings_factory_reset();
 			break;
 		case APP_CMD_ACTION_VENDOR_RESET:
-			/* #299, narrowest tier: only ever set by the NFC hio.stck:rst
-			 * channel (app_nfc.c) — never reachable over LoRaWAN. The
-			 * replacement secret_key travelled in the same request. */
+			/* #299/#316, narrowest tier: set by the vendor_reset Command over the
+			 * NFC hio.stck:vnd (vendor-token) channel — never reachable over
+			 * LoRaWAN. The replacement secret_key travelled in the same request. */
 			play_carousel_nfc();
-			app_settings_vendor_reset(app_nfc_take_pending_vendor_secret_key());
+			app_settings_vendor_reset(app_cmd_take_pending_vendor_secret_key());
 			break;
 		case APP_CMD_ACTION_SECRET_KEY_SAVE:
-			/* Persist the new secret_key (#299 set_secret_key), no reboot. */
-			app_settings_save_secret_key();
+			/* #322: persist the staged new secret_key (#299 set_secret_key) and
+			 * cold-reboot, so the rotated key is live right away via h_commit's
+			 * normal g_app_config sync. A bare persist left the device
+			 * authenticating with the OLD key until some later, unrelated
+			 * reboot. The Ack the phone already read was encrypted with that old
+			 * key — deliberately: this action only runs once the response has
+			 * been delivered (#242), so the reply is never cut off. */
+			play_carousel_nfc();
+			app_settings_save(true);
 			break;
 		case APP_CMD_ACTION_ENTER_CALIBRATION:
 			/* Persist calibration=true + reboot; next boot enters
@@ -622,9 +629,9 @@ int main(void)
 			app_led_blink(&req);
 			led_handled = true;
 		} else if (lrw_state == APP_LRW_STATE_DISABLED) {
-			/* Radio disabled by lrw-mode (#271/#278): a single yellow blink — the
+			/* Radio disabled by radio-mode (#271/#278): a single yellow blink — the
 			 * lowest rung of the yellow severity scale, since this is a deliberate
-			 * operator choice (lrw-mode off/p2p), not a network fault. */
+			 * operator choice (radio-mode off/p2p), not a network fault. */
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
 							.duration = 5,
 							.space = 0,

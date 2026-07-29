@@ -130,6 +130,11 @@ def test_normalize_access_derives_internal_flags():
          "writable": ["shell", "nfc"]},
         # plain param: lists omitted -> all transports, normal flags
         {"name": "interval_report", "proto_group": "application", "type": "int"},
+        # #316 vendor-only writable: writable:[vendor] blocks lrw+nfc writes and,
+        # since shell is not in writable, makes the shell setter read-only; still
+        # readable (dumpable) everywhere because readable defaults to all.
+        {"name": "vendor_reset_allow", "proto_group": "application", "type": "bool",
+         "writable": ["vendor"]},
     ]}
     configen.normalize_access(cfg)
     by = {p["name"]: p for p in cfg["parameters"]}
@@ -158,6 +163,16 @@ def test_normalize_access_derives_internal_flags():
     assert "no_write_nfc" not in by["lrw_region"]       # nfc still writable
     assert "no_write_lrw" not in by["interval_report"]  # writable everywhere
     assert "no_write_nfc" not in by["interval_report"]
+
+    # #316 vendor-only write gate: writable:[vendor] blocks lrw + nfc (leaving only
+    # the vendor transport in the negative-flag model) and, since shell is not in
+    # writable, makes the shell setter read-only; still air-readable (dump).
+    assert by["vendor_reset_allow"]["no_write_lrw"] is True
+    assert by["vendor_reset_allow"]["no_write_nfc"] is True
+    assert by["vendor_reset_allow"]["readonly"] is True
+    assert by["vendor_reset_allow"]["dump"] is True
+    # negative-flag model: no positive vendor write-gate flag is introduced
+    assert "no_write_vendor" not in by["vendor_reset_allow"]
 
 
 def test_normalize_access_rejects_bad_transport():
@@ -516,6 +531,17 @@ def test_build_commands_model_shape():
     assert by_name["clock_sync"]["emits_response"] is False  # info_deferred
     assert by_name["set_param"]["lrw_only"] is False
     assert by_name["set_param"]["emits_response"] is True
+    # #316: vendor_reset routes to the vendor transport only; set_secret_key now
+    # also admits vendor (both dispatch through the generic path). proto_id 26,
+    # not 25 — 25 is clm_ack (#308), merged into v1.4.0 first.
+    assert by_name["vendor_reset"]["proto_id"] == 26
+    assert by_name["vendor_reset"]["tag"] == "Command_vendor_reset_tag"
+    assert by_name["vendor_reset"]["handler"] == "app_cmd_handle_vendor_reset"
+    assert by_name["vendor_reset"]["kind"] == "handler"
+    assert by_name["vendor_reset"]["lrw_only"] is False
+    assert by_name["vendor_reset"]["transport_guard"] == ["APP_CMD_TRANSPORT_VENDOR"]
+    assert by_name["set_secret_key"]["transport_guard"] == [
+        "APP_CMD_TRANSPORT_NFC", "APP_CMD_TRANSPORT_SHELL_DEBUG", "APP_CMD_TRANSPORT_VENDOR"]
     # proto-id order for the oneof
     assert [c["proto_id"] for c in model["commands_by_id"]] == \
         sorted(c["proto_id"] for c in model["commands"])
@@ -589,3 +615,10 @@ def test_dispatch_template_routes_every_command():
             # the guard precedes this command's handler/action body
             head = out.split(f"case {c['tag']}:", 1)[1]
             assert "tp != APP_CMD_TRANSPORT_LRW" in head.split("break;", 1)[0]
+
+    # #316: vendor_reset is guarded to the vendor transport, and set_secret_key now
+    # admits vendor (the generic loop above only asserts the lrw_only guard shape).
+    vnd = out.split("case Command_vendor_reset_tag:", 1)[1].split("break;", 1)[0]
+    assert "tp != APP_CMD_TRANSPORT_VENDOR" in vnd
+    ssk = out.split("case Command_set_secret_key_tag:", 1)[1].split("break;", 1)[0]
+    assert "tp != APP_CMD_TRANSPORT_VENDOR" in ssk

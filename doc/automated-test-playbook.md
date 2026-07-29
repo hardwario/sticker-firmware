@@ -79,7 +79,7 @@ operator action, see §18); `M` = manual observation only (rare — LED checks o
 **FW applicability:** `D` = debug build only, `R` = release build only, `DR` = both.
 
 **Baseline state** (the state every scenario should start from and Cleanup should restore):
-device provisioned (serial + secret key + LoRaWAN keys set), `lrw-mode lorawan`, activation
+device provisioned (serial + secret key + LoRaWAN keys set), `radio-mode lorawan`, activation
 per current run plan, `interval-report 900` or the run's chosen value, `history-enable false`,
 all 16 alarm slots empty, `alarm-limit 0`, clock synced if a network is available.
 
@@ -461,7 +461,7 @@ source of truth — read it before testing so parameter names/ranges are current
 
 ### AT-CFG-03 — transport access model (D, A; maps C1, C10, H-3)
 - **Steps:** attempt over `ats cmd lrw`: (a) SetParam on a `lorawan`-group field (e.g.
-  lrw_mode, lrw_appkey); (b) GetParam of `lrw_appkey`. Then the same over `ats cmd nfc`.
+  radio_mode, lrw_appkey); (b) GetParam of `lrw_appkey`. Then the same over `ats cmd nfc`.
 - **Expect:** LRW transport: both refused (lorawan group is shell+nfc writable only; keys
   NFC-readable only). NFC transport: allowed. Any key readable over LRW = **CRIT** finding.
 
@@ -555,14 +555,14 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   sending.
 - **Expect:** TX continues; no stuck semaphore (the historical overloaded-timer wedge).
 
-### AT-LRW-09 — lrw-mode off/lorawan/p2p (D, A; maps #271, supersedes L15)
-- **Steps:** `config lrw-mode off` + save → confirm radio-silent (no uplinks ≥ 3× report
+### AT-LRW-09 — radio-mode off/lorawan/p2p (D, A; maps #271, supersedes L15)
+- **Steps:** `config radio-mode off` + save → confirm radio-silent (no uplinks ≥ 3× report
   interval; sensors/history still run via `ats sensors sample`, `history count`). Then
-  `lrw-mode p2p` → boot into P2P transport (if bench has a P2P receiver; else just confirm
+  `radio-mode p2p` → boot into P2P transport (if bench has a P2P receiver; else just confirm
   no LoRaWAN traffic + no crash). Back to `lorawan`.
 - **Expect:** mode changes only via shell/NFC (LRW SetParam refused — AT-CFG-03); each mode
   boots clean.
-- **Cleanup:** `lrw-mode lorawan`, save, confirm rejoin.
+- **Cleanup:** `radio-mode lorawan`, save, confirm rejoin.
 
 ### AT-LRW-10 — release sustained TX (R, A; maps L16 — decisive TX-stop regression)
 - **Pre:** release FW, `interval-report 60` (set over NFC or before flashing release).
@@ -955,8 +955,8 @@ are meaningless. Power-cycle after the last SWD session (DBGMCU latch). Toggle c
 delta is appended to the power annex / `doc/power-consumption.md` as the new baseline.
 
 ### AT-PWR-08 — LoRaWAN radio power delta, on vs off (R, A; maps #271)
-- **Steps:** measure the 5-min idle average in two modes (toggle via NFC + save): `lrw-mode
-  lorawan` (joined, `interval-report 900`) vs `lrw-mode off` (radio silent — no join, no periodic
+- **Steps:** measure the 5-min idle average in two modes (toggle via NFC + save): `radio-mode
+  lorawan` (joined, `interval-report 900`) vs `radio-mode off` (radio silent — no join, no periodic
   TX). In the `lorawan` run also capture ≥ 1 full report interval so the per-uplink TX burst energy
   is included and integrated.
 - **Expect:** `off` idle ≤ `lorawan` idle (no radio housekeeping); the idle delta **and** the
@@ -977,7 +977,7 @@ delta is appended to the power annex / `doc/power-consumption.md` as the new bas
 
 ### AT-PWR-10 — configuration power matrix, bare floor → full (R, A/SA)
 - **Steps:** build the annex power matrix from 5-min idle averages, adding one feature at a time
-  (toggle via NFC + save): **bare floor** (no sensors, `lrw-mode off`, accel off, history off) →
+  (toggle via NFC + save): **bare floor** (no sensors, `radio-mode off`, accel off, history off) →
   + LRW on → + accel on → + history on (`interval-sample 60`) → + SHT4x cap → + 1-Wire (per
   AT-PWR-09). Also record the fully-loaded config (everything on).
 - **Expect:** the **bare floor** ≈ the idle/Stop2 baseline in `doc/power-consumption.md` (nothing
@@ -1228,7 +1228,7 @@ automated; *(excluded)* items are listed with reasons below the table.
 | L11 | AT-LRW-07/11 + AT-BOOT-01 (`ats lrw` surface) | A | D | – | |
 | L12 | asserted inside AT-LRW-05 | A | DR | – | |
 | L14 | AT-LRW-08 | A | D | – | |
-| L15 | AT-LRW-09 (lrw-mode supersedes DevEUI-zero guard) | A | D | – | |
+| L15 | AT-LRW-09 (radio-mode supersedes DevEUI-zero guard) | A | D | – | |
 | L16 | AT-LRW-10 | A | R | – | ✅ |
 | #303 (US915) | AT-LRW-13, AT-LRW-14, AT-LRW-15 | A | DR | – | SKIP (RF) unless US915 gateway present |
 | S1 | AT-SEN-01 | SA | D | finger | |
@@ -1275,7 +1275,7 @@ automated; *(excluded)* items are listed with reasons below the table.
 | N5 | *(partial)* lrw_reset/lrw_join over NFC via `ats cmd nfc` on debug; phone control server has no op for it yet (improvement item) | A | D | – | |
 | N7 | *(on-request)* power-off boot-staged provisioning — needs a scripted power-off staging session | SA | DR | phone+power | |
 | N8 | AT-NFC-05, AT-NFC-06, AT-ADV-05 | SA | DR | phone | |
-| N9 | *(new, #299)* device_reset/factory_reset/set_secret_key over `hio.stck:cmd` with the ack-before-reboot handshake — same AT-NFC-03 injection pattern as N1, plus confirming factory_reset is rejected over a LoRaWAN downlink | SA | DR | phone | |
+| N9 | *(new, #299)* device_reset/factory_reset/set_secret_key over `hio.stck:cmd` with the ack-before-reboot handshake — all three reboot (set_secret_key since #322, which is what makes the rotated key live) — same AT-NFC-03 injection pattern as N1, plus confirming factory_reset is rejected over a LoRaWAN downlink and an all-zero set_secret_key is rejected | SA | DR | phone | |
 | F1 | AT-LRW-03 | A | DR | – | |
 | F2, F3 | AT-HOST-03, AT-HOST-06 | A | host | – | |
 | — (new, no manual ID) | AT-BOOT-04/06, AT-CFG-06, AT-HIS-04/05, AT-PWR-01..07, AT-ADV-01..12, AT-SOAK-01..03, AT-NFC-08 | | | | AT-BOOT-04 ✅, AT-PWR-04 ✅ |
