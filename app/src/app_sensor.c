@@ -269,14 +269,23 @@ int app_sensor_init(void)
 #endif /* defined(CONFIG_LIS2DH) */
 
 	if (g_app_config.cap_w1_sensors) {
-		/* The DS2484 1-Wire master's device reset — and every later 1-Wire
-		 * transaction — spans several back-to-back I2C transfers. i2c1 runtime PM
-		 * would suspend the bus between them (gate the peripheral clock + apply
-		 * the analog sleep pinctrl), which corrupts the multi-transfer sequence
-		 * and makes the DS2484 reset fail with -EIO. Hold i2c1 resumed for as
-		 * long as the 1-Wire master is enabled so the bus never drops mid-
-		 * transaction. (Regression since the v1.4.0 PM rework; 1-Wire was silent
-		 * on release until this.) */
+		/* The DS2484 1-Wire master's device reset spans several back-to-back I2C
+		 * transfers. i2c1 runtime PM would suspend the bus between them (gate the
+		 * peripheral clock + apply the analog sleep pinctrl), which corrupts the
+		 * multi-transfer sequence and makes the reset fail with -EIO (#224). Hold
+		 * i2c1 resumed across the reset — but only across it.
+		 *
+		 * #329: this hold used to be permanent (never put), which pinned i2c1's
+		 * runtime-PM usage count above zero for the whole uptime. That removed the
+		 * only PM_DEVICE_ACTION_RESUME edge i2c1 ever gets, and that edge is what
+		 * re-applies the bus configuration after a Stop2 — which on STM32WLE5
+		 * wipes the I2C peripheral's registers (measured: CR1=0, TIMINGR=0 while
+		 * RCC I2C1EN and the PB6/PB7 AF mux survive). With no resume, TIMINGR
+		 * stayed 0 and *every* i2c1 slave NACKed for the rest of the boot: the
+		 * ST25DV (NFC unreachable), the on-board SHT4x, and the DS2484 itself. The
+		 * per-transaction hold in app_w1_acquire()/app_w1_release() keeps #224
+		 * fixed while letting the bus suspend — and therefore self-heal — in
+		 * between. */
 		(void)pm_device_runtime_get(m_i2c_dev);
 
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
@@ -286,6 +295,8 @@ int app_sensor_init(void)
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "ds2484", ret);
 			res = res ? res : ret;
 		}
+
+		(void)pm_device_runtime_put(m_i2c_dev);
 	}
 
 	/* Bring up the 1-Wire *sensor* drivers and scan the bus only when at least one
