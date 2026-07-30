@@ -14,6 +14,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
 #include <zephyr/pm/device_runtime.h>
+#include <zephyr/pm/policy.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -47,6 +48,17 @@ static atomic_t m_i2c_held;
 static void i2c_hold_get(void)
 {
 	if (atomic_cas(&m_i2c_held, 0, 1)) {
+		/* Block every Stop state for exactly as long as i2c1 is pinned resumed.
+		 * These two have to go together: a Stop2 wipes the I2C1 registers, and the
+		 * only thing that re-applies them is the PM_DEVICE_ACTION_RESUME edge that
+		 * this very hold suppresses. Without the policy lock, a Stop2 landing in
+		 * the ACQUIRE_DELAY sleep below (3 ms, well past the 900 us stop2
+		 * min-residency) leaves TIMINGR at 0 with no way back, and every transfer
+		 * for the rest of the window NACKs -- which is why the DS2484 failed while
+		 * the SHT4x, whose transfer gets its own resume edge, did not.
+		 * i2c_stm32_transfer() takes this identical lock per transfer; this just
+		 * extends the cover to the gaps between them. Refcounted, so it nests. */
+		pm_policy_state_lock_get(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
 		(void)pm_device_runtime_get(m_i2c_dev);
 	}
 }
@@ -54,7 +66,10 @@ static void i2c_hold_get(void)
 static void i2c_hold_put(void)
 {
 	if (atomic_cas(&m_i2c_held, 1, 0)) {
+		/* Strict LIFO: let the bus suspend first (that is what arms the resume edge
+		 * for the next transfer), then allow Stop again. */
 		(void)pm_device_runtime_put(m_i2c_dev);
+		pm_policy_state_lock_put(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
 	}
 }
 

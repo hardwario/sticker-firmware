@@ -28,6 +28,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device_runtime.h>
+#include <zephyr/pm/policy.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -285,7 +286,13 @@ int app_sensor_init(void)
 		 * ST25DV (NFC unreachable), the on-board SHT4x, and the DS2484 itself. The
 		 * per-transaction hold in app_w1_acquire()/app_w1_release() keeps #224
 		 * fixed while letting the bus suspend — and therefore self-heal — in
-		 * between. */
+		 * between.
+		 *
+		 * The Stop lock goes with the hold for the same reason as in
+		 * app_w1_acquire(): while i2c1 is pinned resumed there is no resume edge
+		 * left to re-apply TIMINGR, so a Stop landing inside the DS2484 reset
+		 * sequence would wipe the bus configuration with no way back. */
+		pm_policy_state_lock_get(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
 		(void)pm_device_runtime_get(m_i2c_dev);
 
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
@@ -297,6 +304,7 @@ int app_sensor_init(void)
 		}
 
 		(void)pm_device_runtime_put(m_i2c_dev);
+		pm_policy_state_lock_put(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
 	}
 
 	/* Bring up the 1-Wire *sensor* drivers and scan the bus only when at least one
