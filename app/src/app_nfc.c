@@ -165,6 +165,22 @@ static const char *cmd_action_str(enum app_cmd_action a)
 #define ST25DV_GPO_WANT         (ST25DV_GPO_EN | ST25DV_GPO_RF_WRITE_EN | ST25DV_GPO_FIELD_EN)
 #define ST25DV_I2C_PWD_REG      0x0900
 
+/* ST25DV system registers whose effect is ONE-WAY and PERMANENT (#331).
+ *
+ * LOCK_CFG (0x000F) bit0 freezes the entire system configuration for the life of
+ * the part: no I2C write, with any password, ever changes RF_AxSS / ENDAx / GPO /
+ * I2CSS again. A unit locked into a bad configuration — e.g. one with the NDEF
+ * area RF-write-protected, which would kill this command channel — is scrap, and
+ * there is no recovery path in firmware, at the factory or via RMA.
+ * LOCK_CCFILE (0x000C) likewise permanently RF-write-protects the CC blocks.
+ *
+ * Nothing in this firmware needs either, and the debug shell's `nfc regw` puts
+ * them one typo away, so write_reg() refuses both outright. Keep that refusal
+ * even if area configuration is added later (#331 Phase 1): that work writes
+ * ENDAx / RF_AxSS, never these. */
+#define ST25DV_LOCK_CCFILE_REG 0x000C
+#define ST25DV_LOCK_CFG_REG    0x000F
+
 /* NFC Forum external type (TNF=0x04, urn:nfc:ext:) records carry the functional
  * protocol (cmd/rsp/ack/clm). Short type names ("hio.stck:<kind>") instead of full
  * MIME media-types save ST25DV user memory (512 B total) — leaving more room for
@@ -731,6 +747,14 @@ static int read_reg(uint16_t reg, void *buf, size_t len)
  * system config area requires an open I2C security session (not handled here). */
 static int write_reg(uint16_t reg, const void *buf, size_t len)
 {
+	/* #331: refuse the permanent one-way locks here, at the single choke point
+	 * every register write goes through, rather than only at the shell — so no
+	 * present or future caller can brick the tag's configuration. */
+	if (reg == ST25DV_LOCK_CFG_REG || reg == ST25DV_LOCK_CCFILE_REG) {
+		LOG_ERR("refusing write to permanent ST25DV lock register 0x%04x (#331)", reg);
+		return -EPERM;
+	}
+
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 	if (!device_is_ready(dev)) {
 		LOG_ERR("Device not ready");
@@ -866,6 +890,31 @@ static int nfc_enable_rf_write_it(void)
 		!!(dyn & ST25DV_GPO_EN));
 
 	return 0;
+}
+
+/* #331: LOCK_CFG must read 0x00 on every unit, forever. If it is ever set the
+ * tag's system configuration is frozen for the life of the device, so say so
+ * loudly — factory QA scraps such a unit, and in the field it explains why area
+ * configuration can never be applied. Reads need no password, so this is safe to
+ * call from any access window. Advisory only: nothing here can undo it. Caller
+ * must hold the access lock. */
+static void nfc_lock_cfg_assert(void)
+{
+	uint8_t lock = 0;
+	int ret = read_reg(ST25DV_LOCK_CFG_REG, &lock, 1);
+
+	if (ret) {
+		LOG_WRN("NFC: LOCK_CFG read failed: %d (cannot verify config is unlocked)", ret);
+		return;
+	}
+
+	if (lock) {
+		LOG_ERR("NFC: LOCK_CFG=0x%02x - ST25DV system config is PERMANENTLY frozen, "
+			"scrap this unit (#331)",
+			lock);
+	} else {
+		LOG_INF("NFC: LOCK_CFG=0x00 (system config still writable)");
+	}
 }
 
 /* Power the ST25DV up for I2C access (LPD low) and take the access lock. On
@@ -1755,6 +1804,7 @@ int app_nfc_init(void)
 		} else {
 			LOG_WRN("NFC: RF_WRITE_EN config failed (not used by the poll)");
 		}
+		nfc_lock_cfg_assert();
 		nfc_access_end();
 	}
 
@@ -2346,6 +2396,16 @@ static int cmd_nfc_regw(const struct shell *sh, size_t argc, char **argv)
 
 	unsigned long addr = strtoul(argv[1], NULL, 0);
 
+	/* #331: write_reg() refuses these anyway, but a bare -EPERM prints as "-1" and
+	 * reads like an I2C fault — say why instead. */
+	if (addr == ST25DV_LOCK_CFG_REG || addr == ST25DV_LOCK_CCFILE_REG) {
+		shell_error(sh,
+			    "refused: reg 0x%04lx is a PERMANENT one-way lock. Setting it freezes "
+			    "the ST25DV config for the life of the part (#331).",
+			    addr);
+		return -EPERM;
+	}
+
 	uint8_t buf[16];
 	size_t n = hex2bin(argv[2], strlen(argv[2]), buf, sizeof(buf));
 	if (n == 0) {
@@ -2371,7 +2431,43 @@ static int cmd_nfc_regw(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-/* #247: show the claim-record lifecycle latch (debug/HW-test visibility). */
+/* #331: capture the on-tag hio.stck:clm payload so `nfc clm` can verify what
+ * actually reached the ST25DV, not just what the MCU believes. */
+struct clm_verify_ctx {
+	bool found;
+	uint32_t len;
+	uint8_t payload[ClaimInfo_size];
+};
+
+static int clm_verify_cb(const struct app_nfc_parser_record_info *record_info, void *user_data)
+{
+	struct clm_verify_ctx *ctx = user_data;
+	size_t clm_type_len = strlen(NDEF_CLAIM_TYPE);
+
+	if (record_info->type_len != clm_type_len ||
+	    strncmp((const char *)record_info->type, NDEF_CLAIM_TYPE, clm_type_len) != 0) {
+		return 0;
+	}
+
+	ctx->found = true;
+	ctx->len = record_info->payload_len;
+	if (record_info->payload_len <= sizeof(ctx->payload)) {
+		memcpy(ctx->payload, record_info->payload, record_info->payload_len);
+	}
+
+	return 0;
+}
+
+/* #247/#331: show the claim-record lifecycle latch AND verify the tag against it.
+ *
+ * The latch alone proves nothing about the ST25DV — a unit whose claim token was
+ * never provisioned simply publishes no record, silently, which is exactly the
+ * production mis-step this has to catch (#308 Q3). So read the tag back and
+ * compare the on-tag clm payload with a freshly encoded ClaimInfo: same encoder,
+ * so a match is byte-exact and no protobuf decode is needed.
+ *
+ * Emits exactly one `clm verify:` line, `ok ...` or `FAIL <reason>`, so the
+ * production flash tool can assert on it without parsing NDEF. */
 static int cmd_nfc_clm(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -2380,6 +2476,68 @@ static int cmd_nfc_clm(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "clm state:   %s (%u)",
 		    m_clm_state <= CLM_CONSUMED ? names[m_clm_state] : "?", m_clm_state);
 	shell_print(sh, "claim token: %s", claim_token_is_set() ? "set" : "unset");
+
+	if (!claim_token_is_set()) {
+		shell_print(sh, "clm verify:  FAIL claim token unset (not provisioned)");
+		return 0;
+	}
+
+	/* Read the tag under the access lock (m_buf is lock-protected); print after
+	 * releasing it, so the lock window stays as short as the other nfc commands. */
+	struct clm_verify_ctx ctx = {0};
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_print(sh, "clm verify:  FAIL nfc access failed (%d)", ret);
+		return 0;
+	}
+
+	ret = read_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
+	if (ret == 0) {
+		ret = app_nfc_parser_run(m_buf, ST25DV_USER_MEM_SIZE, clm_verify_cb, &ctx);
+	}
+	nfc_access_end();
+
+	if (ret) {
+		shell_print(sh, "clm verify:  FAIL tag read failed (%d)", ret);
+		return 0;
+	}
+
+	/* CONSUMED: the record must be gone and must stay gone. */
+	if (m_clm_state == CLM_CONSUMED) {
+		shell_print(sh, ctx.found ? "clm verify:  FAIL clm record still on tag after "
+					    "consume"
+					  : "clm verify:  ok consumed (no clm record on tag)");
+		return 0;
+	}
+
+	if (m_clm_state != CLM_PENDING) {
+		shell_print(sh,
+			    "clm verify:  FAIL state %u with token provisioned (run `nfc "
+			    "check` to arm)",
+			    m_clm_state);
+		return 0;
+	}
+
+	if (!ctx.found) {
+		shell_print(sh, "clm verify:  FAIL clm record absent from tag");
+		return 0;
+	}
+
+	uint8_t expect[ClaimInfo_size];
+	size_t expect_len = build_claim_payload(expect, sizeof(expect));
+	if (expect_len == 0) {
+		shell_print(sh, "clm verify:  FAIL could not encode expected ClaimInfo");
+		return 0;
+	}
+
+	if (ctx.len != expect_len || memcmp(ctx.payload, expect, expect_len) != 0) {
+		shell_print(sh, "clm verify:  FAIL clm payload mismatch (tag %u B, expected %zu B)",
+			    ctx.len, expect_len);
+		return 0;
+	}
+
+	shell_print(sh, "clm verify:  ok serial=%u token=match (%u B on tag)",
+		    (unsigned int)g_app_config.serial_number, ctx.len);
 	return 0;
 }
 
@@ -2397,7 +2555,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_nfc_reg, 2, 1),
 	SHELL_CMD_ARG(regw, NULL, "Write system/dynamic register (E1). Usage: regw <addr> <hex>",
 		      cmd_nfc_regw, 3, 0),
-	SHELL_CMD_ARG(clm, NULL, "Show claim-record (#247) lifecycle state.", cmd_nfc_clm, 1, 0),
+	SHELL_CMD_ARG(clm, NULL, "Show claim-record state + verify it on the tag (#247, #331).",
+		      cmd_nfc_clm, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC memory access (debug).", NULL);
