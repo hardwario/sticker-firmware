@@ -281,46 +281,94 @@ static K_TIMER_DEFINE(m_awake_timer, nfc_awake_timeout, NULL);
  * Guides an operator through an NFC exchange:
  *   phone detected (RF field / GPO)      -> green solid
  *   command being serviced               -> fast green blink
+ *   command rejected (auth/nonce, #315)  -> fast red blink, then off
  *   response written, waiting for phone   -> green + yellow solid
  *   response consumed / session quiet     -> LED off
- * The "processing" blink runs on a k_timer so it never blocks the NFC critical
- * path. app_led_set is a plain gpio write (ISR-safe); k_timer start/stop are
- * ISR-safe too, so these may be called from the GPO ISR / timer handlers. */
+ * The "processing"/"rejected" blink runs on a k_timer so it never blocks the NFC
+ * critical path. app_led_set is a plain gpio write (ISR-safe); k_timer start/stop
+ * are ISR-safe too, so these may be called from the GPO ISR / timer handlers.
+ * One timer drives whichever channel the current state blinks (m_led_blink_ch),
+ * and every state helper leaves the two channels it does not use turned off, so
+ * a state change can never blend into a colour of its own (red + green = orange). */
 #define NFC_LED_BLINK_MS 90
+
+/* How long the rejection blink is held (#315). Long enough to be unmistakable to
+ * whoever is holding the phone against the sticker, and self-limiting: unlike the
+ * green processing blink it is not left for the RF-quiet backstop to clear, because
+ * the boot-staged path (app_nfc_check() from main(), no RF field and therefore no
+ * awake window running) has no backstop and would otherwise blink forever. */
+#define NFC_LED_REJECT_MS 2000
+
 static bool m_led_blink_on;
+static enum app_led_channel m_led_blink_ch = APP_LED_CHANNEL_G;
 static void nfc_led_blink_timer(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
 	m_led_blink_on = !m_led_blink_on;
-	app_led_set(APP_LED_CHANNEL_G, m_led_blink_on ? APP_LED_ON : APP_LED_OFF);
+	app_led_set(m_led_blink_ch, m_led_blink_on ? APP_LED_ON : APP_LED_OFF);
 }
 static K_TIMER_DEFINE(m_led_blink_timer, nfc_led_blink_timer, NULL);
 
+static void nfc_led_off(void);
+static void nfc_led_reject_timeout(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	nfc_led_off();
+}
+static K_TIMER_DEFINE(m_led_reject_timer, nfc_led_reject_timeout, NULL);
+
 static void nfc_led_detected(void)
 {
+	k_timer_stop(&m_led_reject_timer);
 	k_timer_stop(&m_led_blink_timer);
+	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
 	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
 	app_led_set(APP_LED_CHANNEL_G, APP_LED_ON);
 }
 
 static void nfc_led_processing(void)
 {
+	k_timer_stop(&m_led_reject_timer);
 	m_led_blink_on = true;
+	m_led_blink_ch = APP_LED_CHANNEL_G;
+	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
 	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
 	app_led_set(APP_LED_CHANNEL_G, APP_LED_ON);
 	k_timer_start(&m_led_blink_timer, K_MSEC(NFC_LED_BLINK_MS), K_MSEC(NFC_LED_BLINK_MS));
 }
 
+/* #315: the command was rejected before it ever ran (wrong secret_key /
+ * vendor_token, stale or out-of-window nonce_counter, malformed frame) and no
+ * reply is written back to the tag. Without this the green "servicing" blink from
+ * nfc_led_processing() would simply keep running until the RF-quiet backstop —
+ * visually identical to a successful command for whoever is holding the phone.
+ * Same blink cadence in red (same rhythm, different colour = rejected), held for
+ * NFC_LED_REJECT_MS and then cleared. */
+static void nfc_led_rejected(void)
+{
+	m_led_blink_on = true;
+	m_led_blink_ch = APP_LED_CHANNEL_R;
+	app_led_set(APP_LED_CHANNEL_G, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_R, APP_LED_ON);
+	k_timer_start(&m_led_blink_timer, K_MSEC(NFC_LED_BLINK_MS), K_MSEC(NFC_LED_BLINK_MS));
+	k_timer_start(&m_led_reject_timer, K_MSEC(NFC_LED_REJECT_MS), K_NO_WAIT);
+}
+
 static void nfc_led_response_ready(void)
 {
+	k_timer_stop(&m_led_reject_timer);
 	k_timer_stop(&m_led_blink_timer);
+	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
 	app_led_set(APP_LED_CHANNEL_G, APP_LED_ON);
 	app_led_set(APP_LED_CHANNEL_Y, APP_LED_ON);
 }
 
 static void nfc_led_off(void)
 {
+	k_timer_stop(&m_led_reject_timer);
 	k_timer_stop(&m_led_blink_timer);
+	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
 	app_led_set(APP_LED_CHANNEL_G, APP_LED_OFF);
 	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
 }
@@ -1428,6 +1476,14 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("handle_encrypted_cmd", ret);
 			NFC_REPORT("  -> command rejected: %d", ret);
+			/* #315: rejected here means wrong secret_key, a stale/out-of-window
+			 * nonce_counter or a malformed frame — the command never ran and
+			 * nothing is written back to the tag, so the operator gets the red
+			 * blink instead of a green one that would look like success. The
+			 * app-level failures that do return an encrypted Error response
+			 * (unknown field, NOT_WRITABLE, ...) come back with ret == 0 and keep
+			 * the normal success signalling; the network reports those. */
+			nfc_led_rejected();
 			m_resp_len = 0;
 			return ret;
 		}
@@ -1442,6 +1498,9 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
 			NFC_REPORT("  -> app_cmd_handle failed: %d", ret);
+			/* No auth on this build, but the failure is just as silent (no reply
+			 * written) — clear the green blink the same way (#315). */
+			nfc_led_rejected();
 			m_resp_len = 0;
 			return ret;
 		}
@@ -1507,6 +1566,10 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("handle_encrypted_cmd", ret);
 			NFC_REPORT("  -> vendor command rejected: %d", ret);
+			/* #315: same as the hio.stck:cmd branch above, keyed by vendor_token —
+			 * a wrong token / stale nonce blinks red instead of silently holding
+			 * the green servicing blink. */
+			nfc_led_rejected();
 			m_resp_len = 0;
 			return ret;
 		}
