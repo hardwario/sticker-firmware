@@ -105,6 +105,7 @@ message AppConfigMessage {
         optional bytes alarm_13 = 16;
         optional bytes alarm_14 = 17;
         optional bytes alarm_15 = 18;
+        optional uint32 alarm_light_confirm_delay = 19;
     }
 }
 // END GENERATED CONFIG

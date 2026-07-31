@@ -84,6 +84,7 @@ struct rstate {
 	bool have_prev_count;
 	int64_t count_window_start; /* COUNT: start of the current interval_report window (#195) */
 	int64_t oneshot_expiry;     /* STATE edge one-shot: auto-clear time (0 = none) */
+	int64_t confirm_deadline;   /* THRESHOLD illuminance dwell (#319): fire time (0 = none) */
 };
 
 static struct rstate m_rt[APP_ALARM_SLOT_COUNT];
@@ -377,6 +378,9 @@ static bool read_threshold_value(uint8_t source, uint8_t quantity, float *out)
 		case APP_ALARM_Q_PRESSURE:
 			*out = d->pressure * 10.0f; /* kPa -> hPa (config thresholds are hPa) */
 			return true;
+		case APP_ALARM_Q_ILLUMINANCE:
+			*out = d->illuminance; /* on-board OPT3001 (lux) */
+			return true;
 		default:
 			return false;
 		}
@@ -453,6 +457,19 @@ static bool read_poll_state(uint8_t source, uint8_t quantity, bool *out)
 
 /* ---- rule evaluation ---------------------------------------------------- */
 
+/* Light-increase confirmation delay (#319) applies to any illuminance threshold — the
+ * on-board OPT3001 and the 1-Wire slot light sensors (a machine-probe's OPT3001) — and only
+ * when a non-zero delay is configured. All other quantities/sources keep the immediate-latch
+ * behavior. */
+static inline bool dwell_eligible(const struct app_alarm_rule *rule)
+{
+	bool light_source =
+		rule->source == APP_ALARM_SRC_ONBOARD ||
+		(rule->source >= APP_ALARM_SRC_SLOT1 && rule->source <= APP_ALARM_SRC_SLOT4);
+	return light_source && rule->quantity == APP_ALARM_Q_ILLUMINANCE &&
+	       g_app_config.alarm_light_confirm_delay > 0;
+}
+
 /* Threshold rule with hysteresis (reuses the previous eval_threshold logic,
  * keyed to the rule's runtime state). Returns latched state. */
 static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, struct rstate *rt,
@@ -465,6 +482,7 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 			alarm_collect(slot, rule->source, rule->quantity, false, rt->type, false,
 				      0);
 		}
+		rt->confirm_deadline = 0;
 		return false;
 	}
 
@@ -475,6 +493,27 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 	float hst = rule->hst;
 	if (!(hst >= 0.0f)) {
 		hst = 0.0f;
+	}
+
+	/* Light-increase dwell (#319): a deadline armed on a prior rising edge is
+	 * resolved against THIS poll's already-fresh `value` — read_threshold_value()
+	 * pulls from g_app_sensor_data/w1[], refreshed on the same interval_sample
+	 * cadence every other threshold quantity (temperature/humidity/pressure,
+	 * including 1-Wire) already relies on for its own rising-edge check. No
+	 * separate re-sample or work item is needed for illuminance specifically.
+	 * dwell_eligible() is rechecked so a confirm-delay config change (or a
+	 * disabled rule, handled above) to 0 mid-flight drops the window instead of
+	 * latching on stale intent. */
+	if (rt->confirm_deadline != 0 && k_uptime_get() >= rt->confirm_deadline) {
+		rt->confirm_deadline = 0;
+		if (dwell_eligible(rule) && value > hi + hst && !rt->active) {
+			rt->active = true;
+			rt->type = ALARM_TYPE_HIGH;
+			*should_send = true;
+			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_HIGH,
+				      true, alarm_scale(rule->quantity, value));
+		}
+		return rt->active;
 	}
 
 	if (rt->active) {
@@ -491,11 +530,22 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_LOW, true,
 			      alarm_scale(rule->quantity, value));
 	} else if (value > hi + hst) {
-		rt->active = true;
-		rt->type = ALARM_TYPE_HIGH;
-		*should_send = true;
-		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_HIGH, true,
-			      alarm_scale(rule->quantity, value));
+		if (dwell_eligible(rule)) {
+			/* Light-increase dwell (#319): don't latch yet. Arm the confirmation
+			 * deadline once (don't push it out on every poll); it is resolved
+			 * above, against a later poll's fresh value, once due. */
+			if (rt->confirm_deadline == 0) {
+				rt->confirm_deadline =
+					k_uptime_get() +
+					(int64_t)g_app_config.alarm_light_confirm_delay * 1000;
+			}
+		} else {
+			rt->active = true;
+			rt->type = ALARM_TYPE_HIGH;
+			*should_send = true;
+			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_HIGH,
+				      true, alarm_scale(rule->quantity, value));
+		}
 	}
 	return rt->active;
 }
