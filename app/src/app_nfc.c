@@ -890,8 +890,7 @@ static bool nfc_wait_field_off(void)
 		uint8_t eh;
 		int ret = read_reg(ST25DV_EH_CTRL_DYN, &eh, 1);
 		if (ret != 0) {
-			NFC_DBG("field: EH_CTRL_Dyn read=%d after retries -> abort (fail-closed, "
-				"#329)",
+			NFC_DBG("field: EH_CTRL_Dyn read=%d after retries -> abort (fail-closed)",
 				ret);
 			return false; /* persistently unreadable -> don't touch a possibly-wedged
 					 bus */
