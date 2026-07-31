@@ -1386,8 +1386,16 @@ static int handle_encrypted_cmd(const uint8_t *key, enum app_cmd_transport trans
 
 	/* #308: decrypting at all already proves the caller holds secret_key,
 	 * regardless of which command it turns out to be or whether it succeeds -
-	 * that is already the bar the rest of the claim window relies on. */
-	clm_consume("valid hio.stck:cmd received");
+	 * that is already the bar the rest of the claim window relies on.
+	 *
+	 * #332: only on the secret_key channel. #316 made this function SHARED with
+	 * hio.stck:vnd, where a successful decrypt proves possession of HARDWARIO's
+	 * vendor_token - not the customer's secret_key. Without this gate any vendor,
+	 * support or diagnostic command on an unclaimed unit would permanently consume
+	 * the claim window before the customer ever tapped the device. */
+	if (transport == APP_CMD_TRANSPORT_NFC) {
+		clm_consume("valid hio.stck:cmd received");
+	}
 
 	size_t resp_len = 0;
 	ret = app_cmd_handle(transport, cmd_plain, cmd_len, resp_plain, sizeof(resp_plain),
