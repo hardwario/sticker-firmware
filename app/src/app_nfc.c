@@ -225,11 +225,16 @@ static const char *cmd_action_str(enum app_cmd_action a)
 
 /* Provisioning claim record (#247): a plaintext protobuf ClaimInfo{serial_number,
  * claim_token} the firmware lays down alongside `inf` while a claim token is
- * provisioned but not yet claimed. The provisioning phone reads it, claims the
- * device (first-claim-wins), then deletes it from the ST25DV over RF — which
- * works even with the MCU powered off. Once gone, the firmware never rewrites it
- * (latched via m_clm_state). The token stays owner-readable over the encrypted
- * get_info channel, so deleting clm only removes the plaintext convenience. */
+ * provisioned but not yet claimed. The provisioning phone reads it and claims the
+ * device (first-claim-wins) against the backend.
+ *
+ * #331: the tag is a CACHE of NVS, never the master. The record's absence means
+ * nothing — units ship powered off and the ST25DV is RF-powered, so anyone with a
+ * phone can wipe the record in the sealed box with no MCU running to notice. If
+ * the tag disagrees with what m_clm_state says it should hold, the poll rewrites
+ * it (rate-limited, see NFC_RESTING_REFRESH_MAX). Only an authenticated
+ * interaction ends the claim window — see clm_consume(). The token stays
+ * owner-readable over the encrypted get_info channel either way. */
 #define NDEF_CLAIM_TYPE "hio.stck:clm"
 
 /* Vendor-token command channel (#299, #316): a separate, dedicated record from
@@ -477,15 +482,24 @@ void app_nfc_clm_reset(void)
 	clm_state_save();
 }
 
-/* Shared PENDING->CONSUMED transition (#308): three independent triggers all
- * funnel through here so the latch/log/persist logic lives in one place.
- *   1. delete-detected (below, in nfc_check_locked) - the original #247 signal.
- *   2. clm_ack command (app_nfc_clm_ack) - explicit, authenticated (secret_key).
- *   3. any successfully-decrypted hio.stck:cmd (handle_encrypted_cmd) - implicit:
+/* Shared PENDING->CONSUMED transition (#308): both triggers funnel through here
+ * so the latch/log/persist logic lives in one place. Both are authenticated —
+ * that is the point:
+ *   1. clm_ack command (app_nfc_clm_ack) - explicit, authenticated (secret_key).
+ *   2. any successfully-decrypted hio.stck:cmd (handle_encrypted_cmd) - implicit:
  *      decrypting at all already proves the caller holds secret_key, which is
  *      already the "provisioning operator" bar the rest of this file uses, so a
  *      claim window left open after a phone has already run a real command is
- *      just noise on the tag.
+ *      just noise on the tag. Gated on the NFC transport - the vendor channel
+ *      shares that code path but proves possession of HARDWARIO's vendor_token,
+ *      not the customer's secret_key (#332).
+ *
+ * #331 removed a third trigger: "clm absent from the tag" used to be read as
+ * "the phone deleted it after claiming". It inferred intent from absence, so a
+ * single unauthenticated RF write latched CONSUMED (terminal - recoverable only
+ * by vendor_reset or an NVS erase) and killed tap-to-claim for good. Deleting
+ * the record is now simply repaired from NVS.
+ *
  * A no-op outside PENDING (already CONSUMED, or never armed). */
 static void clm_consume(const char *reason)
 {
@@ -550,6 +564,51 @@ static uint8_t m_unknown_count;
  * edge" heuristic was dropped: it raced the phone's read and clobbered the
  * reply mid-exchange (#144). */
 static bool m_info_restore_pending;
+
+/* #331: the resting record is a cache of NVS, so a tampered or deleted clm is
+ * rewritten on the next poll. That turns what used to be a one-shot latch into an
+ * unbounded loop: an attacker looping delete -> rewrite costs an ~85 B ST25DV
+ * EEPROM write plus a Stop2 wake per iteration, which grinds tag endurance and
+ * drains the battery. So bound the refresh rate — after NFC_RESTING_REFRESH_MAX
+ * rewrites inside one window, skip until the window rolls over.
+ *
+ * Normal use is ~1 rewrite per accepted command (the nonce high-water in `inf`
+ * moves), so a legitimate operator never approaches the cap. While the limiter is
+ * engaged the tag can hold a stale nonce high-water, which makes the phone's next
+ * counter stale and gets it refused by decrypt() — acceptable, because reaching
+ * the cap already means someone is hammering the tag. */
+#define NFC_RESTING_REFRESH_MAX       20
+#define NFC_RESTING_REFRESH_WINDOW_MS 60000
+static int64_t m_refresh_window_start;
+static uint32_t m_refresh_count;
+static bool m_refresh_limited;
+
+/* True when a resting-record refresh may proceed, charging it against the current
+ * window. Logs once per window when the limiter engages. Call it LAST in a
+ * condition — it has side effects, so it must only be charged when a rewrite is
+ * actually needed. */
+static bool resting_refresh_allowed(void)
+{
+	int64_t now = k_uptime_get();
+
+	if (now - m_refresh_window_start >= NFC_RESTING_REFRESH_WINDOW_MS) {
+		m_refresh_window_start = now;
+		m_refresh_count = 0;
+		m_refresh_limited = false;
+	}
+
+	if (m_refresh_count >= NFC_RESTING_REFRESH_MAX) {
+		if (!m_refresh_limited) {
+			m_refresh_limited = true;
+			LOG_WRN("NFC resting-record refresh rate-limited (%u in %d ms) (#331)",
+				m_refresh_count, NFC_RESTING_REFRESH_WINDOW_MS);
+		}
+		return false;
+	}
+
+	m_refresh_count++;
+	return true;
+}
 
 /* Take (and clear) the deferred action from the last processed NFC command, so
  * the poll thread can run reboot/save AFTER the response was written and read.
@@ -1675,9 +1734,10 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 	}
 
 	/* #247: our provisioning claim record. Presence detection only — the phone
-	 * reads and deletes it; the firmware never parses it back. Its absence in an
-	 * otherwise-settled tag (info present, no clm) is how nfc_check_locked latches
-	 * CLM_CONSUMED. */
+	 * reads it and claims against the backend; the firmware never parses it back
+	 * here. #331: its absence in an otherwise-settled tag no longer means anything
+	 * about the claim, it just tells nfc_check_locked the tag needs repairing from
+	 * NVS. (`nfc clm` does parse the payload back, to verify what reached the tag.) */
 	size_t clm_type_len = strlen(NDEF_CLAIM_TYPE);
 	if (record_info->type_len == clm_type_len &&
 	    strncmp((const char *)record_info->type, NDEF_CLAIM_TYPE, clm_type_len) == 0) {
@@ -1905,16 +1965,13 @@ static int nfc_check_locked(void)
 	/* #247: once a claim token is provisioned, start exposing the clm record
 	 * (UNSET -> PENDING). Driven purely by the token being set (not tag content),
 	 * so it fires on the first check after commissioning; build_resting_ndef then
-	 * includes clm. CONSUMED (phone deleted clm) is terminal. `just_armed` guards
-	 * the settled-consume branch below: on the very check that arms PENDING the tag
-	 * still holds the pre-provisioning info-only record (clm not laid down yet), so
-	 * without this guard a stale info record would be misread as "phone deleted
-	 * clm" and latch CONSUMED before clm is ever written. */
-	bool just_armed = false;
+	 * includes clm. CONSUMED is terminal, and only an authenticated interaction
+	 * gets there (clm_consume). On the arming check the tag still holds the
+	 * pre-provisioning info-only record — the refresh below simply writes clm in,
+	 * the same path that repairs a tampered tag (#331). */
 	if (m_clm_state == CLM_UNSET && claim_token_is_set()) {
 		m_clm_state = CLM_PENDING;
 		clm_state_save();
-		just_armed = true;
 		LOG_INF("NFC clm record armed (claim token provisioned) (#247)");
 	}
 
@@ -2024,21 +2081,25 @@ static int nfc_check_locked(void)
 	}
 
 	/* #247: settled resting state — our info record is on the tag (so this is not
-	 * a phone mid-write, which would show neither inf nor clm). If clm is absent
-	 * while we were exposing it (PENDING), the phone deleted it after claiming ->
-	 * latch CONSUMED so it is never rewritten. Then refresh the resting record if
-	 * the tag copy is stale (e.g. an older nonce high-water). */
+	 * a phone mid-write, which would show neither inf nor clm). Refresh the resting
+	 * record whenever the tag copy differs from what it should hold: a stale nonce
+	 * high-water, or a clm record that was deleted/garbled over RF (#331 — the tag
+	 * is a cache, NVS is the master, so this repairs tampering instead of inferring
+	 * a claim from it). Rate-limited so a delete/rewrite loop cannot grind the
+	 * EEPROM. */
 	if (m_seen_inf) {
 		m_unknown_count = 0;
 		m_info_restore_pending = false;
-		/* clm absent while PENDING = the phone deleted it after claiming -> latch
-		 * CONSUMED. Not on the arming cycle (just_armed): clm has not been laid down
-		 * yet, so the stale info-only tag is not a deletion. */
-		if (!m_seen_clm && !just_armed) {
-			clm_consume("phone deleted after claim");
+		/* Worded to be true both on the arming cycle (first lay-down) and on a
+		 * tamper repair, so no extra state is needed to tell them apart. LOG_WRN
+		 * deliberately: the debug image pins CONFIG_LOG_MAX_LEVEL=2, and this is
+		 * the observable the #331 self-heal HIL test asserts on. */
+		if (!m_seen_clm && m_clm_state == CLM_PENDING) {
+			LOG_WRN("NFC clm record not on tag while PENDING -> writing it from NVS "
+				"(#331)");
 		}
 		info_len = build_resting_ndef(info, sizeof(info));
-		if (info_len && memcmp(m_buf, info, info_len) != 0) {
+		if (info_len && memcmp(m_buf, info, info_len) != 0 && resting_refresh_allowed()) {
 			NFC_REPORT("NFC refreshing resting record (%zu B)", info_len);
 			ret = write_mem(0, info, info_len);
 			if (ret) {
