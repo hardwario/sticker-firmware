@@ -523,7 +523,9 @@ bool app_nfc_periodic_enabled(void)
  * write_mem gate every chunk on it: if the field reappears mid-transfer they
  * pause before the next chunk and resume once it clears, so no EEPROM chunk
  * ever runs on the bus while RF is active. Returns false if the field stays on
- * past the wait (the chunk loop then aborts with -EBUSY; the caller skips). */
+ * past the wait, or if the status register itself is persistently unreadable
+ * (fail-closed, #329) — either way the chunk loop aborts with -EBUSY and the
+ * caller skips this cycle. */
 static bool nfc_wait_field_off(void);
 
 static int read_mem(uint16_t reg, void *buf, size_t len)
@@ -865,10 +867,22 @@ static void nfc_access_end(void)
  * dual-port dynamic register, safe to poll during RF.
  *
  * Returns true once the field is absent (safe to access). Returns false if the
- * field is still present after NFC_FIELD_OFF_WAIT_MS (caller should skip this
- * cycle). FAIL-OPEN: if the status read itself fails, returns true so the path
- * falls back to the existing I2C-retry behaviour (never worse than before). The
- * caller must already hold the access lock (tag powered via nfc_access_begin). */
+ * field is still present after NFC_FIELD_OFF_WAIT_MS, or if the status read
+ * itself never succeeds (caller should skip this cycle either way).
+ *
+ * FAIL-CLOSED (#329/#330): read_reg() already retries the transfer
+ * ST25DV_I2C_RETRIES times internally before giving up, so a `ret != 0` here
+ * is not routine dual-port RF contention (that would have been absorbed by
+ * those retries) — it is a persistently unreadable register, the same
+ * symptom a wedged i2c1 produces (Stop2 wiping TIMINGR with no resume edge
+ * to reapply it, #329). Proceeding into the EEPROM chunk access on that
+ * evidence used to be fail-open (assume field-off, go ahead); that just
+ * traded one silent failure for another doomed transfer a few chunks later.
+ * Failing closed costs nothing a genuinely-live bus would have needed anyway
+ * (the caller's -EBUSY path already exists for "field still on" and simply
+ * retries next poll cycle), and it stops masking a real bus fault as if it
+ * were expected RF contention. The caller must already hold the access lock
+ * (tag powered via nfc_access_begin). */
 static bool nfc_wait_field_off(void)
 {
 	bool waited_for_field = false;
@@ -876,8 +890,11 @@ static bool nfc_wait_field_off(void)
 		uint8_t eh;
 		int ret = read_reg(ST25DV_EH_CTRL_DYN, &eh, 1);
 		if (ret != 0) {
-			NFC_DBG("field: EH_CTRL_Dyn read=%d -> proceed (fail-open)", ret);
-			return true; /* can't tell -> proceed (fall back to I2C retry) */
+			NFC_DBG("field: EH_CTRL_Dyn read=%d after retries -> abort (fail-closed, "
+				"#329)",
+				ret);
+			return false; /* persistently unreadable -> don't touch a possibly-wedged
+					 bus */
 		}
 		if (!(eh & ST25DV_FIELD_ON)) {
 			if (waited_for_field) {
