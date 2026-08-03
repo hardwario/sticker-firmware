@@ -13,6 +13,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
+#include <zephyr/pm/device_runtime.h>
+#include <zephyr/pm/policy.h>
 
 /* Standard includes */
 #include <errno.h>
@@ -22,6 +24,54 @@
 LOG_MODULE_REGISTER(app_w1, LOG_LEVEL_DBG);
 
 #define ACQUIRE_DELAY K_MSEC(3)
+
+/* The DS2484 sits on i2c1 and every 1-Wire operation is several back-to-back I2C
+ * transfers with short sleeps between them. i2c1 runtime PM would suspend the bus
+ * in those gaps (gate the peripheral clock + park SCL/SDA in analog mode), which
+ * corrupts the sequence and fails with -EIO (#224). So the bus is held resumed for
+ * the whole acquire..release window — and released again afterwards, which is the
+ * part that matters for #329: the release lets i2c1 suspend, so the next transfer
+ * produces a PM_DEVICE_ACTION_RESUME edge, and that edge is what re-applies the
+ * bus configuration (TIMINGR) after a Stop2 has wiped the I2C registers. Holding
+ * it permanently, as app_sensor.c used to, removed that edge and left every i2c1
+ * slave NACKing for the rest of the boot. */
+static const struct device *const m_i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+
+/* Guards the i2c1 runtime-PM reference so it is taken and released exactly once
+ * per acquire..release window. Needed because callers invoke app_w1_release()
+ * even when app_w1_acquire() failed (the same reason w1_unlock_bus then returns
+ * -EINVAL), so a naive put in both paths double-releases and trips
+ * "pm_device: Unbalanced suspend", leaving the bus suspended under a caller that
+ * still thinks it owns it. Same one-shot idiom as m_awake_held in app_nfc.c. */
+static atomic_t m_i2c_held;
+
+static void i2c_hold_get(void)
+{
+	if (atomic_cas(&m_i2c_held, 0, 1)) {
+		/* Block every Stop state for exactly as long as i2c1 is pinned resumed.
+		 * These two have to go together: a Stop2 wipes the I2C1 registers, and the
+		 * only thing that re-applies them is the PM_DEVICE_ACTION_RESUME edge that
+		 * this very hold suppresses. Without the policy lock, a Stop2 landing in
+		 * the ACQUIRE_DELAY sleep below (3 ms, well past the 900 us stop2
+		 * min-residency) leaves TIMINGR at 0 with no way back, and every transfer
+		 * for the rest of the window NACKs -- which is why the DS2484 failed while
+		 * the SHT4x, whose transfer gets its own resume edge, did not.
+		 * i2c_stm32_transfer() takes this identical lock per transfer; this just
+		 * extends the cover to the gaps between them. Refcounted, so it nests. */
+		pm_policy_state_lock_get(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
+		(void)pm_device_runtime_get(m_i2c_dev);
+	}
+}
+
+static void i2c_hold_put(void)
+{
+	if (atomic_cas(&m_i2c_held, 1, 0)) {
+		/* Strict LIFO: let the bus suspend first (that is what arms the resume edge
+		 * for the next transfer), then allow Stop again. */
+		(void)pm_device_runtime_put(m_i2c_dev);
+		pm_policy_state_lock_put(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
+	}
+}
 
 /* Upper bound on devices recorded in a single bus scan (#201). The real bus
  * holds a handful of sensors; this caps per-ROM k_malloc so a noisy bus (EMI
@@ -50,6 +100,9 @@ int app_w1_acquire(struct app_w1 *w1, const struct device *dev)
 		return ret;
 	}
 
+	/* Keep i2c1 resumed for the whole 1-Wire window (see m_i2c_dev above). */
+	i2c_hold_get();
+
 	ret = pm_device_action_run(dev, PM_DEVICE_ACTION_RESUME);
 	if (ret && ret != -EALREADY) {
 		LOG_ERR_CALL_FAILED_INT("pm_device_action_run", ret);
@@ -73,6 +126,8 @@ int app_w1_acquire(struct app_w1 *w1, const struct device *dev)
 	return 0;
 
 error:
+	i2c_hold_put();
+
 	ret = w1_unlock_bus(dev);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("w1_unlock_bus", ret);
@@ -117,6 +172,13 @@ int app_w1_release(struct app_w1 *w1, const struct device *dev)
 	}
 
 error:
+	/* Release i2c1 so it can suspend again — this is what restores the
+	 * PM_DEVICE_ACTION_RESUME edge that re-applies TIMINGR after a Stop2 (#329).
+	 * Placed after the label so both the success and error paths balance the get
+	 * taken in app_w1_acquire(); the one-shot guard makes a release-after-failed-
+	 * acquire a no-op rather than a double put. */
+	i2c_hold_put();
+
 	ret = w1_unlock_bus(dev);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("w1_unlock_bus", ret);
