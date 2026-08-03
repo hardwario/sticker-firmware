@@ -347,15 +347,17 @@ invisible on debug builds. Rules:
 
 Run these first in every session; they gate everything else. All `A`/host-only.
 
-### AT-HOST-01 — CI superset (`tools/test.sh`)
+### AT-HOST-01 — CI superset (direct commands)
 - **Pre:** venv active, repo at `{FW_REF}`.
-- **Steps:** `tools/test.sh` (full) or `SKIP_BUILD=1 tools/test.sh` (quick pass without the
-  two firmware builds).
-- **Expect:** exit 0 — builds (release+debug), JS decoder `node --test`, configen pytest,
-  clang-format check, configen-in-sync check all green.
-- **Evidence:** last 30 lines of output; on failure the full failing step output.
-- **Cleanup:** `git status` must stay clean (configen sync check can rewrite generated
-  files on mismatch — `git checkout` them if it does).
+- **Steps:** run each CI step directly — `cd app/decoder && node --test`;
+  `pytest scripts/west_commands/tests` (includes the configen-vs-committed sync check,
+  `test_generated_c_matches_committed`); `git ls-files 'app/src/*.c' 'app/src/*.h' | xargs
+  clang-format --dry-run --Werror`; plus `west build` (release and debug) if not already
+  covered by the `build` job for this ref.
+- **Expect:** every step exits 0 — decoder tests, configen pytest (incl. sync check),
+  clang-format, and both firmware builds all green.
+- **Evidence:** last 30 lines of output per step; on failure the full failing step output.
+- **Cleanup:** `git status` must stay clean.
 
 ### AT-HOST-02 — native_sim ztest suites
 - **Steps:** `bash tests/run_native.sh` (iterates tests/cmd, alarm_rules, ccm, nfc_crypto,

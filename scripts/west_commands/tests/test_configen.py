@@ -293,8 +293,14 @@ def test_proto_region_preserves_all_field_numbers(workdir):
 @pytest.mark.skipif(shutil.which("clang-format") is None,
                     reason="clang-format not available")
 def test_generated_c_matches_committed(workdir):
+    """Regenerated from the committed app_config.yml, these must equal what's
+    committed. Catches drift the other sync tests miss: they only lock the
+    command-routing/decoder/proto-oneof regions each touches, not a change to
+    a parameter's default/min/max/persistent tier that reaches app_config.c/h,
+    the ingest routing, or the nanopb .options.in without regenerating."""
     _run_configen(workdir)
-    for name in ["app_config.c", "app_config.h", "app_config_ingest.c"]:
+    for name in ["app_config.c", "app_config.h", "app_config_ingest.c",
+                 "app_config.options.in"]:
         assert (workdir / name).read_text() == (APP_SRC / name).read_text(), name
 
 

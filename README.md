@@ -48,6 +48,36 @@ STICKER platform highlights (hardware + firmware):
 
 ---
 
+## Firmware Capabilities (v1.4.0)
+
+Beyond the hardware highlights above, the current firmware adds:
+
+* **Remote control over LoRaWAN** — configure and query the device via downlink/uplink commands
+  (fPort 85: `set_param`/`get_param`/`get_config`/`get_info`, LoRaWAN reset/join, factory/vendor
+  reset), no NFC tap or physical access required
+* **Device info on join** — an `Info` uplink (serial, firmware version, reset cause, claim token,
+  radio mode, battery) is sent automatically on every join and clock sync
+- **Real-time clock**, synced from the LoRaWAN network and readable/settable over NFC or LoRaWAN
+* **Sensor history (store-and-forward)** — samples are captured on a fixed cadence and buffered
+  (RAM or flash ring, depending on build) so a temporary LoRaWAN outage doesn't lose data; replay
+  on request
+* **Alarm engine** — per-channel threshold/state/rate rules with hysteresis, rate-limiting, a
+  no-data watchdog, and a low-battery alarm, reported on fPort 3
+* **Encrypted local access over NFC** — a phone can read/write configuration and send commands via
+  an AES-CCM encrypted channel (`hio.stck:cmd`/`hio.stck:rsp`), with a separate anti-replay nonce
+  and a vendor-token-authenticated channel for factory/claim operations
+* **Claim-token provisioning** — a write-once claim token ties a physical unit to its first
+  claiming backend without requiring a LoRaWAN join first
+* **LED signalling scheme** — a unified severity-ordered heartbeat (join state, alarms, radio
+  mode) plus one-shot patterns for NFC interaction and input events
+
+See [`doc/version 1.4.md`](doc/version%201.4.md) for the full changelog and wire-level detail, and
+[`doc/manual-test-plan.md`](doc/manual-test-plan.md) /
+[`doc/automated-test-playbook.md`](doc/automated-test-playbook.md) for how each of these is
+verified.
+
+---
+
 ## Getting Started
 
 > **NixOS / Nix users:** a `shell.nix` at the repository root provides a
