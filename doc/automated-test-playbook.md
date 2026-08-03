@@ -438,6 +438,22 @@ Run these first in every session; they gate everything else. All `A`/host-only.
   at new defaults; no boot loop.
 - **Cleanup:** restore run-plan config.
 
+### AT-BOOT-07 — i2c1 survives real Stop2 (R; maps #329/#330)
+- **Pre:** `{FLASH_OK}`; release image, `cap-w1-sensors true` with at least one 1-Wire
+  device on the bus; debug-in-stop **off** (the shipped default — do not add
+  `STM32_ENABLE_DEBUG_SLEEP_STOP`, it masks this regression); PPK2 powering the DUT so the
+  device actually reaches Stop2 (a debug build with `CONFIG_PM=n` never sleeps and cannot
+  exercise this path).
+- **Steps:** power-cycle; wait past at least one real Stop2 idle period (tens of seconds,
+  clear of boot/join activity); then in one pass: `ats sensors sample` (on-board SHT4x),
+  `w1 scan` (DS2484/1-Wire), and a real NFC tap (§18 assist or manager-app debug control)
+  reading `/info`.
+- **Expect:** all three succeed on the first attempt — no `-EIO`/`-5` on the SHT4x read or
+  `w1_reset_bus`, tag read succeeds first try. A regression that reinstates a permanent
+  i2c1 `pm_device_runtime_get()` (e.g. hoisting the #330 hold back to whole-uptime scope in
+  `app_sensor_init`) wedges all three simultaneously after the first Stop2.
+- **Evidence:** sample output + w1 scan output + NFC read result from the same pass.
+
 ## 8. Config & remote control (AT-CFG)
 
 The config tree has ~60 parameters in 5 groups (`app/src/app_config.yml` is the single
