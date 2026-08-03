@@ -1294,25 +1294,6 @@ rejected with `error` `BAD_REQUEST` "bad epoch".
 
 - [ ] Pass
 
-### N2 — NFC config delivery: RESET — SUPERSEDED
-
-The dedicated plaintext "RESET NFC tag" NDEF type this test described predates the reset ladder
-(#299) and no longer exists in `app_nfc.c` (no `NFC action: RESET` string, no 10-blink pattern).
-Resetting over NFC now goes through the encrypted `hio.stck:cmd` channel's `device_reset` /
-`factory_reset` commands (ack-before-reboot, same as every other command) or the separate
-vendor-token-authenticated `hio.stck:vnd` channel for `vendor_reset` — see **N9** and **G6a-NFC**.
-
-- [x] N/A (superseded by N9 / G6a-NFC)
-
-### N3 — NFC firmware update — REMOVED
-
-The NFC firmware-update path (erase-in-place bootloader + DFU protocol + ST25DV FTM mailbox) was
-implemented during v1.4.0 and **removed before release**: it could not be shipped safely without
-asymmetric image signing, which does not fit the flash budget. The device is **not NFC-updatable**.
-Revival is tracked in #237.
-
-- [x] N/A (feature removed)
-
 ### N4 — NFC channel encryption (`CONFIG_APP_NFC_ENCRYPTION`)
 
 **Goal:** The command/config channel is AES-CCM encrypted by default; only info reads without a key. A validation build (`=n`) accepts plaintext (#135).
@@ -1342,12 +1323,6 @@ Revival is tracked in #237.
 > counter restarts at 0 after reboot. Also verify both commands work as fPort-85 downlinks. Report results.
 
 - [ ] Pass
-
-### N6 — Mailbox (Fast-Transfer-Mode) command channel — REMOVED
-
-The ST25DV mailbox (Fast-Transfer-Mode) channel and the `enter_mailbox` / `exit_mailbox` commands
-were removed together with the NFC firmware-update path (they shared the FTM machinery). All
-config/command exchange goes over the NDEF channel only (see N4 / N5 / N8). Revival is tracked in #237.
 
 - [x] N/A (feature removed)
 
