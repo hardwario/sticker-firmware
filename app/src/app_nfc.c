@@ -108,10 +108,10 @@ static const char *cmd_action_str(enum app_cmd_action a)
 #define NFC_REPORT_HEX(label, data, len) ((void)0)
 #endif
 
-/* Temporary poll-thread diagnostics for the GetConfig-vs-GetInfo i2c -5 hunt
- * (#204). The debug build pins CONFIG_LOG_MAX_LEVEL=2, so LOG_INF/LOG_DBG are
- * compiled out and only LOG_WRN/LOG_ERR reach RTT — route these through LOG_WRN
- * so they are visible. Remove once the read-wedge is understood. */
+/* Poll-thread diagnostics for app_nfc. The debug build pins
+ * CONFIG_LOG_MAX_LEVEL=2, so LOG_INF/LOG_DBG are compiled out and only
+ * LOG_WRN/LOG_ERR reach RTT — route these through LOG_WRN so they stay
+ * visible. */
 #define NFC_DBG(...) LOG_WRN(__VA_ARGS__)
 
 #define ST25DV_I2C_ADDR_E0 0x53
