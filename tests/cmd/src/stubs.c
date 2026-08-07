@@ -213,13 +213,31 @@ uint32_t app_alarm_status_flags(void)
 	return 0;
 }
 
-/* Info.active_alarms input: stubbed to "nothing active", matching
- * app_alarm_status_flags() above. */
+/* Info.active_alarms input: defaults to "nothing active" (matching
+ * app_alarm_status_flags() above), but test_set_active_alarm_count() lets a
+ * test report N synthetic alarms to exercise the DR-budget trimming in
+ * app_cmd_build_info() / app_cmd_handle() (#335 tier-2) without needing the
+ * real rule-evaluation pipeline. Fixed non-zero (source, quantity, type) so
+ * every entry costs its real 8 B on the wire. */
+static size_t m_test_active_alarm_count;
+
+void test_set_active_alarm_count(size_t n)
+{
+	m_test_active_alarm_count = n;
+}
+
 size_t app_alarm_active_snapshot(struct app_alarm_active *out, size_t max)
 {
-	(void)out;
-	(void)max;
-	return 0;
+	size_t n = m_test_active_alarm_count;
+	if (n > max) {
+		n = max;
+	}
+	for (size_t i = 0; i < n; i++) {
+		out[i].source = APP_ALARM_SRC_SLOT1;
+		out[i].quantity = APP_ALARM_Q_HUMIDITY;
+		out[i].type = 2; /* ALARM_TYPE_HIGH */
+	}
+	return n;
 }
 
 bool app_nfc_ready(void)
