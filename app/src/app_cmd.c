@@ -187,10 +187,16 @@ void app_cmd_get_info(struct app_cmd_info *info)
 
 static bool encode_active_alarms(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
 {
-	ARG_UNUSED(arg);
+	/* Cap set by the caller (fill_info's max_alarms) when the encode didn't fit
+	 * the transport's byte budget with every active alarm included — see the
+	 * retry loop in app_cmd_build_info()/app_cmd_handle(). SIZE_MAX = no cap. */
+	size_t max_alarms = (size_t)(uintptr_t)*arg;
 
 	struct app_alarm_active list[ACTIVE_ALARM_SNAPSHOT_MAX];
 	size_t n = app_alarm_active_snapshot(list, ARRAY_SIZE(list));
+	if (n > max_alarms) {
+		n = max_alarms;
+	}
 
 	for (size_t i = 0; i < n; i++) {
 		Response_AlarmStatus e = Response_AlarmStatus_init_zero;
@@ -211,8 +217,12 @@ static bool encode_active_alarms(pb_ostream_t *stream, const pb_field_t *field, 
  * splits the Info: a LoRaWAN uplink carries only the fields the network side needs
  * (firmware / serial / uptime / battery / reset-cause / clock), while the NFC
  * (commissioning) channel additionally gets lrw_state and dev_eui — see the
- * NFC-only block below. */
-static void fill_info(enum app_cmd_transport tp, Response_Info *info)
+ * NFC-only block below. max_alarms caps Response_AlarmStatus entries encoded
+ * into active_alarms (field 15) — pass SIZE_MAX for "no cap"; a caller that hit
+ * -EMSGSIZE at the current DR budget retries with a smaller value so the alarm
+ * list is what gets trimmed, not the rest of Info (see app_cmd_build_info() /
+ * app_cmd_handle()). */
+static void fill_info(enum app_cmd_transport tp, Response_Info *info, size_t max_alarms)
 {
 	struct app_cmd_info i;
 	app_cmd_get_info(&i);
@@ -230,6 +240,7 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info)
 	/* Itemized active alarms (field 15), emitted on both transports via a
 	 * callback that snapshots the live alarm state at encode time. */
 	info->active_alarms.funcs.encode = encode_active_alarms;
+	info->active_alarms.arg = (void *)(uintptr_t)max_alarms;
 	if (i.has_unix_time) {
 		info->unix_time = i.unix_time;
 	}
@@ -383,7 +394,7 @@ static void app_cmd_handle_get_info(enum app_cmd_transport tp, const Command *cm
 	ARG_UNUSED(action);
 
 	resp->which_body = Response_info_tag;
-	fill_info(tp, &resp->body.info);
+	fill_info(tp, &resp->body.info, SIZE_MAX);
 }
 
 /* Dumpable config fields in fixed order, each with a conservative upper bound
@@ -973,7 +984,7 @@ static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *
 			return;
 		}
 		resp->which_body = Response_info_tag;
-		fill_info(tp, &resp->body.info);
+		fill_info(tp, &resp->body.info, SIZE_MAX);
 		return;
 	}
 #ifdef CONFIG_LORAWAN
@@ -1254,6 +1265,18 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	}
 
 	int ret = encode_response(&resp, out, out_cap, out_len);
+
+	/* An Info response (explicit GetInfo / ClockSync-answer) that overflows the
+	 * transport budget: drop active alarms one at a time and re-encode before
+	 * giving up, same as the autonomous join/clock-sync uplink in
+	 * app_cmd_build_info() — the rest of Info is worth far more than the alarm
+	 * list. */
+	for (size_t max_alarms = ACTIVE_ALARM_SNAPSHOT_MAX;
+	     ret == -EMSGSIZE && resp.which_body == Response_info_tag && max_alarms-- > 0;) {
+		resp.body.info.active_alarms.arg = (void *)(uintptr_t)max_alarms;
+		ret = encode_response(&resp, out, out_cap, out_len);
+	}
+
 	if (ret == -EMSGSIZE) {
 		/* The composed response doesn't fit the transport buffer. Don't fail
 		 * silently (#93.3) — replace it with a compact Error carrying the same
@@ -1285,9 +1308,21 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
 	resp.seq = 0;
 	resp.which_body = Response_info_tag;
 	/* Autonomous GetInfo on join goes out over LoRaWAN, so dev_eui is omitted. */
-	fill_info(APP_CMD_TRANSPORT_LRW, &resp.body.info);
+	fill_info(APP_CMD_TRANSPORT_LRW, &resp.body.info, SIZE_MAX);
 
-	return encode_response(&resp, out, out_cap, out_len);
+	int ret = encode_response(&resp, out, out_cap, out_len);
+
+	/* out_cap is the current DR's payload budget (see queue_info_uplink()), not
+	 * just the software buffer size. If every active alarm doesn't fit, drop them
+	 * one at a time and re-encode rather than lose the whole uplink — identity /
+	 * firmware / battery / device_status are far more valuable than a redundant
+	 * alarm list also readable over NFC and on fPort 3 (AlarmReport). */
+	for (size_t max_alarms = ACTIVE_ALARM_SNAPSHOT_MAX; ret == -EMSGSIZE && max_alarms-- > 0;) {
+		fill_info(APP_CMD_TRANSPORT_LRW, &resp.body.info, max_alarms);
+		ret = encode_response(&resp, out, out_cap, out_len);
+	}
+
+	return ret;
 }
 
 #if defined(APP_CMD_HAVE_HISTORY)

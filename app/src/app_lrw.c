@@ -424,12 +424,24 @@ static void state_transition(enum app_lrw_state new_state)
 
 /* Build a GetInfo response and stage it on the command port. Shared by the
  * on-join announce and the deferred clock-sync uplink so the encode buffer and
- * queue call live in one place (#220.F). Returns the app_cmd_build_info() result. */
+ * queue call live in one place (#220.F). Returns the app_cmd_build_info() result.
+ *
+ * Encodes against the current DR's payload budget, not just the software
+ * buffer size: app_cmd_build_info() drops active_alarms entries one at a time
+ * when they don't fit, so a low DR (e.g. EU868 DR0's 51 B) trims the alarm list
+ * instead of tx_send_queued() silently dropping this whole uplink later. */
 static int queue_info_uplink(void)
 {
 	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t info_len;
-	int ret = app_cmd_build_info(info_buf, sizeof(info_buf), &info_len);
+
+	uint8_t budget = refresh_payload_budget();
+	size_t cap = sizeof(info_buf);
+	if (budget > 0 && budget < cap) {
+		cap = budget;
+	}
+
+	int ret = app_cmd_build_info(info_buf, cap, &info_len);
 	if (ret == 0) {
 		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len);
 	}
@@ -724,8 +736,18 @@ static void dl_request_work_handler(struct k_work *work)
 		size_t resp_len = 0;
 		enum app_cmd_action action = APP_CMD_ACTION_NONE;
 
-		int ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, msg.buf, msg.len, resp,
-					 sizeof(resp), &resp_len, &action);
+		/* Cap to the current DR's payload budget, not just the software buffer,
+		 * so an explicit GetInfo command gets the same active_alarms trimming as
+		 * the autonomous join/clock-sync uplink (queue_info_uplink()) instead of
+		 * tx_send_queued() dropping the whole response later. */
+		uint8_t budget = refresh_payload_budget();
+		size_t resp_cap = sizeof(resp);
+		if (budget > 0 && budget < resp_cap) {
+			resp_cap = budget;
+		}
+
+		int ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, msg.buf, msg.len, resp, resp_cap,
+					 &resp_len, &action);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
 			continue;
