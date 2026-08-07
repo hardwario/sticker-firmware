@@ -26,6 +26,7 @@ extern uint32_t test_clock_unix;
 extern float test_battery_v;
 extern int test_battery_ret;
 extern void test_set_lrw_dirty(bool v);
+extern void test_set_active_alarm_count(size_t n);
 extern int g_clm_ack_calls;
 
 static size_t unhex(const char *hex, uint8_t *out, size_t cap)
@@ -70,6 +71,7 @@ static void reset_cfg(void)
 	memset(&g_app_config, 0, sizeof(g_app_config));
 	test_clock_has = false;
 	test_set_lrw_dirty(false);
+	test_set_active_alarm_count(0);
 	g_clm_ack_calls = 0;
 }
 
@@ -321,8 +323,12 @@ ZTEST(cmd, test_sample_over_lrw_emits_no_body)
 	zassert_equal(action, APP_CMD_ACTION_NONE, "no deferred action");
 }
 
-/* #170: once commissioned, the Info carries the 16-byte claim_token. */
-ZTEST(cmd, test_build_info_claim_token)
+/* #170: claim_token is NFC-only. app_cmd_build_info() is the
+ * device-info-on-join uplink and is hardcoded to APP_CMD_TRANSPORT_LRW, so it
+ * must NOT carry the token — at 18 B it pushed the Info past the EU868 DR0
+ * payload budget, and an over-budget Info is dropped whole (Info has no paging
+ * fields). Keeping it out is what makes the LoRaWAN Info fit at every DR. */
+ZTEST(cmd, test_build_info_claim_token_omitted_over_lrw)
 {
 	uint8_t out[128];
 	size_t out_len = 0;
@@ -336,8 +342,184 @@ ZTEST(cmd, test_build_info_claim_token)
 	Response r = Response_init_zero;
 	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
-	zassert_true(r.body.info.has_claim_token, "claim_token must be present once set");
+	zassert_false(r.body.info.has_claim_token, "claim_token must not be emitted over LoRaWAN");
+
+	/* And the whole join Info must fit the tightest budget it can face: EU868
+	 * DR0 carries 51 B of application payload. */
+	zassert_true(out_len <= 51, "join Info is %zu B, over the DR0 budget", out_len);
+}
+
+/* #170: over NFC the token is still emitted once commissioned — that is now the
+ * only channel a backend can learn it from. */
+ZTEST(cmd, test_get_info_claim_token_present_over_nfc)
+{
+	uint8_t out[256];
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	const uint8_t token[16] = {0x15, 0x8a, 0x6a, 0x5d, 0x5b, 0x54, 0xc5, 0x11,
+				   0x8e, 0x62, 0xa8, 0xf4, 0xaf, 0x0d, 0xe8, 0xd2};
+	/* seq=1, get_info (field 4, empty body) */
+	const uint8_t req[] = {0x08, 0x01, 0x22, 0x00};
+
+	reset_cfg();
+	memcpy(g_app_config.claim_token, token, sizeof(token));
+
+	int ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, req, sizeof(req), out, sizeof(out),
+				 &out_len, &action);
+	zassert_equal(ret, 0, "app_cmd_handle ret %d", ret);
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_true(r.body.info.has_claim_token, "claim_token must be present over NFC");
 	zassert_mem_equal(r.body.info.claim_token, token, sizeof(token), "claim_token bytes");
+}
+
+/* Count Response.Info.active_alarms (field 15) entries by walking the raw
+ * wire bytes, rather than via a pb_decode callback: nanopb's oneof decoder
+ * memsets the whole target submessage struct -- wiping out any pre-set field
+ * callback -- whenever which_body does not already match the incoming tag,
+ * and Response_init_zero has already zeroed which_body by the time a caller
+ * could set it, so there is no window where both survive (pb_decode.c,
+ * PB_HTYPE_ONEOF case: "We memset to zero so that any callbacks are set to
+ * NULL..."). A minimal wire walk sidesteps that nanopb quirk entirely. */
+struct wire_field {
+	uint32_t number;
+	uint32_t wire_type;
+	size_t content_off; /* wire_type 2 (length-delimited) only */
+	size_t content_len;
+	size_t next_off;
+};
+
+static bool wire_next_field(const uint8_t *buf, size_t len, size_t pos, struct wire_field *out)
+{
+	if (pos >= len) {
+		return false;
+	}
+
+	uint32_t tag = 0;
+	int shift = 0;
+	while (pos < len) {
+		uint8_t b = buf[pos++];
+		tag |= (uint32_t)(b & 0x7f) << shift;
+		shift += 7;
+		if (!(b & 0x80)) {
+			break;
+		}
+	}
+	out->number = tag >> 3;
+	out->wire_type = tag & 0x7;
+
+	if (out->wire_type == 2) {
+		uint32_t sublen = 0;
+		shift = 0;
+		while (pos < len) {
+			uint8_t b = buf[pos++];
+			sublen |= (uint32_t)(b & 0x7f) << shift;
+			shift += 7;
+			if (!(b & 0x80)) {
+				break;
+			}
+		}
+		out->content_off = pos;
+		out->content_len = sublen;
+		pos += sublen;
+	} else if (out->wire_type == 0) {
+		while (pos < len && (buf[pos] & 0x80)) {
+			pos++;
+		}
+		pos++;
+	} else if (out->wire_type == 5) {
+		pos += 4;
+	} else if (out->wire_type == 1) {
+		pos += 8;
+	}
+	out->next_off = pos;
+	return true;
+}
+
+static size_t count_wire_field(const uint8_t *buf, size_t len, uint32_t field_no)
+{
+	size_t pos = 0, count = 0;
+	struct wire_field f;
+
+	while (wire_next_field(buf, len, pos, &f)) {
+		if (f.number == field_no) {
+			count++;
+		}
+		pos = f.next_off;
+	}
+	return count;
+}
+
+static bool find_wire_submsg(const uint8_t *buf, size_t len, uint32_t field_no,
+			     const uint8_t **content, size_t *content_len)
+{
+	size_t pos = 0;
+	struct wire_field f;
+
+	while (wire_next_field(buf, len, pos, &f)) {
+		if (f.number == field_no && f.wire_type == 2) {
+			*content = buf + f.content_off;
+			*content_len = f.content_len;
+			return true;
+		}
+		pos = f.next_off;
+	}
+	return false;
+}
+
+static size_t count_info_active_alarms(const uint8_t *out, size_t out_len)
+{
+	const uint8_t *info_content;
+	size_t info_len;
+
+	zassert_true(
+		find_wire_submsg(out + 1, out_len - 1, Response_info_tag, &info_content, &info_len),
+		"Response.info field not found");
+	return count_wire_field(info_content, info_len, 15);
+}
+
+/* #335 tier-2: active_alarms is repeated/unbounded (~8 B/entry) and can push
+ * Info back over a low DR's budget on its own, even with claim_token now
+ * NFC-only. app_cmd_build_info() must drop alarm entries one at a time to fit
+ * out_cap instead of failing (and losing firmware/serial/battery too). */
+ZTEST(cmd, test_build_info_trims_alarms_over_dr_budget)
+{
+	uint8_t out[256];
+	size_t full_len = 0, out_len = 0;
+
+	reset_cfg();
+	g_app_config.serial_number = 1234567890;
+	test_battery_v = 3.3f;
+	test_battery_ret = 0;
+	g_app_sensor_data.voltage = 3.3f;
+	test_set_active_alarm_count(5);
+
+	/* Baseline: plenty of room, all 5 alarms present. */
+	int ret = app_cmd_build_info(out, sizeof(out), &full_len);
+	zassert_equal(ret, 0, "baseline build_info ret %d", ret);
+	zassert_equal(count_info_active_alarms(out, full_len), 5,
+		      "expected all 5 alarms unconstrained");
+
+	/* One byte short of the untrimmed size: must still succeed, with fewer
+	 * alarms (dropping even one entry frees far more than 1 B of headroom). */
+	ret = app_cmd_build_info(out, full_len - 1, &out_len);
+	zassert_equal(ret, 0, "trimmed build_info ret %d", ret);
+	zassert_true(out_len <= full_len - 1, "out_len %zu over cap %zu", out_len, full_len - 1);
+	size_t trimmed_count = count_info_active_alarms(out, out_len);
+	zassert_true(trimmed_count < 5, "expected alarms to be trimmed, got %zu", trimmed_count);
+
+	/* The rest of Info survives untouched -- alarms are what gets cut. */
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode trimmed Info");
+	zassert_equal(r.body.info.serial_number, 1234567890, "serial must survive trimming");
+	zassert_equal(r.body.info.battery, 3300, "battery must survive trimming");
+
+	/* A cap too small even for zero alarms genuinely fails -- no silent
+	 * truncation of the rest of Info. */
+	ret = app_cmd_build_info(out, 2, &out_len);
+	zassert_equal(ret, -EMSGSIZE, "expected -EMSGSIZE for an impossible cap, got %d", ret);
 }
 
 ZTEST(cmd, test_deferred_actions)
