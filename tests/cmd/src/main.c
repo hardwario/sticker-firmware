@@ -321,8 +321,12 @@ ZTEST(cmd, test_sample_over_lrw_emits_no_body)
 	zassert_equal(action, APP_CMD_ACTION_NONE, "no deferred action");
 }
 
-/* #170: once commissioned, the Info carries the 16-byte claim_token. */
-ZTEST(cmd, test_build_info_claim_token)
+/* #170: claim_token is NFC-only. app_cmd_build_info() is the
+ * device-info-on-join uplink and is hardcoded to APP_CMD_TRANSPORT_LRW, so it
+ * must NOT carry the token — at 18 B it pushed the Info past the EU868 DR0
+ * payload budget, and an over-budget Info is dropped whole (Info has no paging
+ * fields). Keeping it out is what makes the LoRaWAN Info fit at every DR. */
+ZTEST(cmd, test_build_info_claim_token_omitted_over_lrw)
 {
 	uint8_t out[128];
 	size_t out_len = 0;
@@ -336,7 +340,36 @@ ZTEST(cmd, test_build_info_claim_token)
 	Response r = Response_init_zero;
 	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
-	zassert_true(r.body.info.has_claim_token, "claim_token must be present once set");
+	zassert_false(r.body.info.has_claim_token,
+		      "claim_token must not be emitted over LoRaWAN");
+
+	/* And the whole join Info must fit the tightest budget it can face: EU868
+	 * DR0 carries 51 B of application payload. */
+	zassert_true(out_len <= 51, "join Info is %zu B, over the DR0 budget", out_len);
+}
+
+/* #170: over NFC the token is still emitted once commissioned — that is now the
+ * only channel a backend can learn it from. */
+ZTEST(cmd, test_get_info_claim_token_present_over_nfc)
+{
+	uint8_t out[256];
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	const uint8_t token[16] = {0x15, 0x8a, 0x6a, 0x5d, 0x5b, 0x54, 0xc5, 0x11,
+				   0x8e, 0x62, 0xa8, 0xf4, 0xaf, 0x0d, 0xe8, 0xd2};
+	/* seq=1, get_info (field 4, empty body) */
+	const uint8_t req[] = {0x08, 0x01, 0x22, 0x00};
+
+	reset_cfg();
+	memcpy(g_app_config.claim_token, token, sizeof(token));
+
+	int ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, req, sizeof(req), out, sizeof(out),
+				 &out_len, &action);
+	zassert_equal(ret, 0, "app_cmd_handle ret %d", ret);
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_true(r.body.info.has_claim_token, "claim_token must be present over NFC");
 	zassert_mem_equal(r.body.info.claim_token, token, sizeof(token), "claim_token bytes");
 }
 

@@ -288,7 +288,11 @@ message Response {
         uint32 uptime_s      = 6;   // seconds since boot
         uint32 unix_time     = 7;   // wall-clock (UTC); 0/absent until RTC synced
         bool   debug         = 8;   // true = debug build, false = release
-        optional bytes claim_token = 9;   // 128-bit device claim token (#170); omitted until commissioned
+        // 128-bit device claim token (#170); omitted until commissioned. Emitted
+        // over NFC only: at 18 B it is the largest Info field and pushed the
+        // response past the EU868 DR0 payload budget, and Info has no page_index/
+        // page_count to split with, so an over-budget Info is dropped whole.
+        optional bytes claim_token = 9;
         uint32 battery       = 10;  // supply voltage in mV (0 = unavailable)
         uint32 reset_cause   = 11;  // hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown
         optional LrwState lrw_state = 12;  // current LoRaWAN network state; emitted over NFC only

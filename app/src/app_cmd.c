@@ -234,17 +234,6 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info)
 		info->unix_time = i.unix_time;
 	}
 
-	/* claim_token (#170): emit only once commissioned (any non-zero byte). The
-	 * all-zero "unset" state is omitted so an uncommissioned device's Info stays
-	 * compact. fixed_length bytes -> plain 16-byte array, no .size. */
-	for (size_t j = 0; j < sizeof(i.claim_token); j++) {
-		if (i.claim_token[j] != 0) {
-			info->has_claim_token = true;
-			memcpy(info->claim_token, i.claim_token, sizeof(info->claim_token));
-			break;
-		}
-	}
-
 	/* NFC-only Info fields. The phone/commissioning channel gets the full picture;
 	 * a LoRaWAN uplink omits them — dev_eui would leak the identity onto the air
 	 * (and the LNS already knows it), and lrw_state is redundant on a frame the
@@ -257,6 +246,31 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info)
 			if (i.dev_eui[j] != 0) {
 				info->has_dev_eui = true;
 				memcpy(info->dev_eui, i.dev_eui, sizeof(info->dev_eui));
+				break;
+			}
+		}
+
+		/* claim_token (#170): emit only once commissioned (any non-zero byte).
+		 * The all-zero "unset" state is omitted so an uncommissioned device's
+		 * Info stays compact. fixed_length bytes -> plain 16-byte array, no
+		 * .size.
+		 *
+		 * NFC-only: at 18 B on the wire this is the single largest
+		 * Info field, and it pushed the response past the EU868 DR0 application
+		 * payload budget (56 B vs 50 B). Info has no page_index/page_count (only
+		 * ConfigDump and HistoryFrame do), so an over-budget Info cannot be split
+		 * and tx_send_queued() simply drops it — leaving a downlink get_info, and
+		 * the device-info-on-join uplink, silently unanswered at DR0. Restricting
+		 * the token to NFC keeps the LoRaWAN Info inside the budget at every DR.
+		 *
+		 * Trade-off (deliberate): a backend can no longer learn claim_token over
+		 * the air; claiming becomes an NFC-only flow. This reverses the LoRaWAN
+		 * half of 636dd5d (#170) — if over-the-air claiming is still required,
+		 * page the Info response instead of trimming it. */
+		for (size_t j = 0; j < sizeof(i.claim_token); j++) {
+			if (i.claim_token[j] != 0) {
+				info->has_claim_token = true;
+				memcpy(info->claim_token, i.claim_token, sizeof(info->claim_token));
 				break;
 			}
 		}
