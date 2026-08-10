@@ -97,7 +97,8 @@ var _RESET_CAUSES = [
 // proto_ids are contiguous 1..N per submessage (aligned in #166).
 var _APP_NAMES = {
   1: "calibration", 2: "interval_sample", 3: "interval_report",
-  4: "history_enable", 5: "history_sensors"
+  4: "history_enable", 5: "history_sensors", 6: "battery_level",
+  7: "vendor_reset_allow"
 };
 var _APP_ENUMS = {};
 var _APP_FLOAT = {};
@@ -127,7 +128,11 @@ var _ALM_HEX_ENC = {};
   for (var i = 0; i < 16; i++) { _ALM_HEX[3 + i] = "alarm_" + i; _ALM_HEX_ENC["alarm_" + i] = 3 + i; }
 })();
 
-var _LRW_NAMES = { 1: "region", 2: "sub_band", 3: "network", 4: "adr", 5: "activation" };
+// Names drop the `lrw_` prefix the YAML carries (region <- lrw_region, ...).
+var _LRW_NAMES = {
+  1: "region", 2: "sub_band", 3: "network", 4: "adr", 5: "activation",
+  13: "link_check_interval", 14: "link_check_fail_rejoin", 15: "radio_mode"
+};
 var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
 
 // Reverse maps (name -> tag) for encoding SetParam. The LoRaWAN hex set adds the
@@ -137,7 +142,8 @@ var _LRW_HEX_ENC = { deveui: 6, joineui: 7, nwkkey: 8, appkey: 9, devaddr: 10, n
 var _LRW_ENUM = {
   region: { EU868: 0, US915: 1, AU915: 2 },
   network: { PUBLIC: 0, PRIVATE: 1 },
-  activation: { OTAA: 0, ABP: 1 }
+  activation: { OTAA: 0, ABP: 1 },
+  radio_mode: { OFF: 0, LORAWAN: 1, P2P: 2 }
 };
 function _invert(map) {
   var out = {};
@@ -730,6 +736,10 @@ function _encLorawan(lrw) {
       if (typeof val === "string" && _LRW_ENUM[name]) num = _LRW_ENUM[name][val];
       if (typeof val === "boolean") num = val ? 1 : 0;
       out = out.concat(_encTag(_LRW_TAGS[name], 0)).concat(_encVarint(num));
+    } else {
+      // Unknown field: fail loudly instead of emitting an empty submessage the
+      // device silently acks — the operator must know the SetParam did nothing.
+      throw new Error("unknown lorawan field: " + name);
     }
   }
   return out;
@@ -748,7 +758,11 @@ function _encCfgGroup(obj, TAGS, FLOAT, ENUMS, HEXENC) {
       continue;
     }
     var tag = TAGS[name];
-    if (tag === undefined) continue;
+    if (tag === undefined) {
+      // Unknown field: fail loudly instead of emitting an empty submessage the
+      // device silently acks — the operator must know the SetParam did nothing.
+      throw new Error("unknown config field: " + name);
+    }
     if (FLOAT && FLOAT[tag]) {
       out = out.concat(_encTag(tag, 5)).concat(_encFloat(val));
     } else {
@@ -782,6 +796,7 @@ function encodeDownlinkCommand(cmd) {
   // sub-object.
   var b = cmd[name] || {};
   var body = [];
+  try {
   if (name === "set_param") {
     if (b.lorawan) body = body.concat(_encLenDelim(1, _encLorawan(b.lorawan)));
     if (b.application) body = body.concat(_encLenDelim(2, _encApplication(b.application)));
@@ -802,6 +817,8 @@ function encodeDownlinkCommand(cmd) {
     _packField(b.application_field, 2);
     _packField(b.sensors_field, 3);
     _packField(b.alarms_field, 4);
+    // page (field 5, #93.3): request page N of an over-budget field list.
+    if (b.page) body = body.concat(_encTag(5, 0)).concat(_encVarint(b.page));
   } else if (name === "get_config") {
     if (b.page) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.page));
   } else if (name === "reset_counters") {
@@ -812,6 +829,9 @@ function encodeDownlinkCommand(cmd) {
   } else if (name === "req_history") {
     if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
+  }
+  } catch (e) {
+    return { bytes: null, error: e.message };
   }
   // get_info / settings_save / reboot / device_reset / force_send / clock_sync /
   // w1_scan: empty body. (factory_reset and set_secret_key are nfc/shell only —
@@ -874,7 +894,8 @@ function decodeDownlinkCommand(bytes) {
                   : (f3 === 3) ? gp.sensors_field : (f3 === 4) ? gp.alarms_field : null;
           if (w3 === 0) {
             var v3 = _pbReadVarint(bytes, q); q = v3.next;
-            if (dst) dst.push(v3.value);
+            if (f3 === 5) gp.page = v3.value; // #93.3 pagination cursor
+            else if (dst) dst.push(v3.value);
           } else if (w3 === 2) {
             var pl3 = _pbReadVarint(bytes, q); q = pl3.next;
             var e3 = q + pl3.value;

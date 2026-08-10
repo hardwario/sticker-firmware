@@ -798,3 +798,55 @@ test("fPort-3 alarm: no_data type decodes (sensor stopped reporting)", () => {
   assert.equal(d.alarms[0].quantity, "temperature");
   assert.equal(d.alarms[0].value, null);
 });
+
+// --- H2: config maps no longer drop LoRaWAN-readable fields ----------------
+test("set_param application.battery_level round-trips (#H2)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 1, command: "set_param", set_param: { application: { battery_level: 2000 } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.application.battery_level, 2000);
+});
+
+test("set_param application.vendor_reset_allow round-trips (#H2)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 2, command: "set_param", set_param: { application: { vendor_reset_allow: true } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.application.vendor_reset_allow, 1);
+});
+
+test("set_param lorawan.radio_mode (enum) + link-check fields round-trip (#H2)", () => {
+  const enc = codec.encodeDownlink({
+    data: {
+      seq: 3, command: "set_param",
+      set_param: { lorawan: { radio_mode: "P2P", link_check_interval: 7, link_check_fail_rejoin: 3 } },
+    },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.lorawan.radio_mode, 2); // P2P index
+  assert.equal(back.set_param.lorawan.link_check_interval, 7);
+  assert.equal(back.set_param.lorawan.link_check_fail_rejoin, 3);
+});
+
+test("encode surfaces an error on an unknown config field instead of a silent no-op (#H2)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 4, command: "set_param", set_param: { application: { not_a_field: 1 } } },
+  });
+  assert.equal(enc.errors.length, 1, "expected one error");
+  assert.match(enc.errors[0], /unknown config field: not_a_field/);
+  assert.deepEqual(enc.bytes, []);
+});
+
+test("get_param.page encodes and decodes (#93.3 / M12)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 5, command: "get_param", get_param: { application_field: [6, 7], page: 1 } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.deepEqual(back.get_param.application_field, [6, 7]);
+  assert.equal(back.get_param.page, 1);
+});
