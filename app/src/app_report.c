@@ -35,7 +35,13 @@ static K_THREAD_STACK_DEFINE(m_work_stack, 3072);
 static struct k_work_q m_work_q;
 
 static struct k_timer m_report_timer; /* interval_report cadence */
-static struct k_work m_report_work;   /* one report cycle (sample + capture + trigger) */
+/* Two entry points into the same report body, distinguished by whether the run
+ * is on the fixed cadence or an ad-hoc trigger. Only the periodic path captures
+ * history and re-arms the cadence, so off-cadence triggers (alarm / force_send /
+ * sample / link-ready kick) can neither append an out-of-cadence record nor
+ * shift the timer — history stays at exactly interval_report (#H1). */
+static struct k_work m_periodic_work; /* fixed-cadence cycle: sample + capture + send */
+static struct k_work m_trigger_work;  /* ad-hoc cycle: sample + send, no history capture */
 
 #if defined(CONFIG_WATCHDOG)
 /* Liveness heartbeat (#182): mirror of the app_lrw guard for the report queue, so
@@ -72,12 +78,19 @@ static void schedule_next_report(void)
 	k_timer_start(&m_report_timer, K_SECONDS(g_app_config.interval_report), K_FOREVER);
 }
 
-static void report_work_handler(struct k_work *work)
+/* One report cycle. `periodic` is true only on the fixed-cadence timer path;
+ * ad-hoc triggers pass false and therefore neither capture history nor re-arm
+ * the cadence, so the history inter-record interval stays exactly
+ * interval_report regardless of how many alarms / force_sends / samples fire in
+ * between (#H1). */
+static void run_report(bool periodic)
 {
-	ARG_UNUSED(work);
-
-	/* Re-arm the cadence up front so a skipped cycle still keeps ticking. */
-	schedule_next_report();
+	/* Re-arm the cadence up front (periodic path only) so a skipped cycle still
+	 * keeps ticking; a trigger must NOT restart it, or the next periodic record
+	 * would land < interval_report after the previous one. */
+	if (periodic) {
+		schedule_next_report();
+	}
 
 	/* Persist the pulse totalizers at the report cadence (dirty-flagged, no-op
 	 * when unchanged). Done before the link/calibration gates below so counters
@@ -89,10 +102,10 @@ static void report_work_handler(struct k_work *work)
 		return;
 	}
 
-	/* Sample + capture history BEFORE the link gate, so store-and-forward works
-	 * offline: a device that has not joined (weak/absent gateway) still records
-	 * history at the report cadence and replays it after join. Only the transport
-	 * is link-gated below. (Same rationale as app_counters_save above.) */
+	/* Sample BEFORE the link gate, so store-and-forward works offline: a device
+	 * that has not joined (weak/absent gateway) still records history at the
+	 * report cadence and replays it after join. Only the transport is link-gated
+	 * below. (Same rationale as app_counters_save above.) */
 
 	/* Lazy sampling: when interval_sample == 0 the sensors are read here, in the
 	 * report cycle, instead of on a dedicated sensor timer. */
@@ -100,9 +113,12 @@ static void report_work_handler(struct k_work *work)
 		app_sensor_sample();
 	}
 
-	/* Capture one history record at the report cadence (self-skips while a
-	 * replay is active, #126). */
-	app_history_capture();
+	/* Capture one history record — ONLY on the fixed cadence, so records are
+	 * spaced at exactly interval_report and replay's base + ord*interval time
+	 * reconstruction holds. Self-skips while a replay is active (#126). */
+	if (periodic) {
+		app_history_capture();
+	}
 
 	/* State-gated cadence: skip the UPLINK while the link is joining/
 	 * reconnecting/disabled. app_lrw kicks us (report_kick) on the link-ready
@@ -117,22 +133,35 @@ static void report_work_handler(struct k_work *work)
 	app_lrw_send_telemetry();
 }
 
+static void periodic_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	run_report(true);
+}
+
+static void trigger_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	run_report(false);
+}
+
 static void report_timer_handler(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
-	k_work_submit_to_queue(&m_work_q, &m_report_work);
+	k_work_submit_to_queue(&m_work_q, &m_periodic_work);
 }
 
 /* Link-ready edge from the transport (join success / history-replay finish):
- * resume the cadence with an immediate report. */
+ * send an immediate report to drain the buffered history, but leave the fixed
+ * cadence (and its history capture) untouched. */
 static void report_kick(void)
 {
-	k_work_submit_to_queue(&m_work_q, &m_report_work);
+	k_work_submit_to_queue(&m_work_q, &m_trigger_work);
 }
 
 void app_report_trigger(void)
 {
-	k_work_submit_to_queue(&m_work_q, &m_report_work);
+	k_work_submit_to_queue(&m_work_q, &m_trigger_work);
 }
 
 void app_report_suspend(void)
@@ -149,7 +178,8 @@ int app_report_init(void)
 	k_work_queue_start(&m_work_q, m_work_stack, K_THREAD_STACK_SIZEOF(m_work_stack),
 			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
 
-	k_work_init(&m_report_work, report_work_handler);
+	k_work_init(&m_periodic_work, periodic_work_handler);
+	k_work_init(&m_trigger_work, trigger_work_handler);
 	k_timer_init(&m_report_timer, report_timer_handler, NULL);
 
 #if defined(CONFIG_WATCHDOG)
