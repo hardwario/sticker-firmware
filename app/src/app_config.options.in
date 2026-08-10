@@ -36,7 +36,7 @@ Response.Error.detail       max_size:32
 # for samples. The runtime cap (app_cmd_history_sample_capacity, out_cap =
 # DUMP_PAGE_BUDGET_NFC 450) is the real binding value; this field just must not be
 # smaller. The LoRaWAN replay is separately capped to its DR budget (m_hist_tx_buf,
-# 96 B) so it never fills this. RAM-free: the Response oneof is dominated by
+# APP_CMD_HISTORY_FRAME_BUF_SIZE = 256 B) so it never fills this. RAM-free: the Response oneof is dominated by
 # ConfigDump (~563 B), so HistoryFrame growing to ~472 B does not enlarge Response.
 Response.HistoryFrame.samples max_size:440
 Response.Info.claim_token   max_size:16 fixed_length:true
