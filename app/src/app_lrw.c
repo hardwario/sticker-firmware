@@ -170,8 +170,13 @@ static void tx_telemetry_frame(bool first_frame);
 
 /* History replay (#52): one ReqHistory streams all matching records back as N
  * HistoryFrame uplinks on the command port, ASAP. */
-#define HISTORY_SAMPLES_MAX 48 /* nanopb Response.HistoryFrame.samples bound */
-#define HISTORY_MAX_RETRIES 8  /* duty-cycle/MAC-busy retries before aborting a frame (#89) */
+/* Staging buffer for the raw sample bytes of one HistoryFrame before it is
+ * protobuf-encoded into m_hist_tx_buf. history_frame_cap() bounds the export to
+ * MIN(DR budget, sizeof(m_hist_tx_buf)), so this must be at least as large as
+ * m_hist_tx_buf — a fixed 48 B (the pre-#260 nanopb bound) under-sized it and let
+ * app_history_export_page() overrun the stack on any DR whose budget exceeds 48 B. */
+#define HISTORY_SAMPLES_MAX APP_CMD_HISTORY_FRAME_BUF_SIZE
+#define HISTORY_MAX_RETRIES 8 /* duty-cycle/MAC-busy retries before aborting a frame (#89) */
 
 static bool m_hist_active;
 static uint32_t m_hist_from, m_hist_to, m_hist_seq;
@@ -1256,8 +1261,8 @@ static void m_hist_work_handler(struct k_work *work)
 		return; /* the (re)join → HEALTHY entry / send path restarts cadence */
 	}
 
-	size_t cap = history_frame_cap();
 	uint8_t samples[HISTORY_SAMPLES_MAX];
+	size_t cap = MIN(history_frame_cap(), sizeof(samples));
 	uint32_t t0 = 0;
 	uint16_t n = 0;
 	size_t next = m_hist_cursor;
