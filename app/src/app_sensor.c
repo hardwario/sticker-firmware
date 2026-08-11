@@ -307,53 +307,53 @@ int app_sensor_init(void)
 		pm_policy_state_lock_put(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
 	}
 
-	/* Bring up the 1-Wire *sensor* drivers and scan the bus only when at least one
-	 * slot is actually taught (a non-zero sensorN-rom). With cap-w1-sensors on but
-	 * nothing enrolled the scan results have nowhere to go (no slot to bind, the
-	 * no-data watchdog keys on taught ROMs), so it is wasted boot work and log
-	 * spam. The DS2484 master above is still initialised whenever cap-w1-sensors is
-	 * on, so on-demand discovery (`w1 scan` / the NFC W1Scan command, which scan
-	 * the raw bus via the master) still works to teach a new sensor. */
-	bool w1_taught = g_app_config.cap_w1_sensors && app_w1_slots_any_taught();
-
-	if (w1_taught) {
-		const struct device *dev_0 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_0));
-
-		ret = device_init(dev_0);
+	/* Bring up the 1-Wire *sensor* drivers whenever cap-w1-sensors is on — even
+	 * before any slot is taught — so on-demand discovery (`w1 scan` / the NFC
+	 * W1Scan command) can register a freshly-plugged sensor. Previously these were
+	 * gated on w1_taught, which made the FIRST sensor impossible to enroll: the
+	 * scan callbacks (app_ds18b20_scan / app_machine_probe_scan -> scan_callback)
+	 * need the sensor device ready, so on an untaught unit `w1 scan` found nothing
+	 * and `w1 enroll` bound nothing (M7). The driver init is pure software (it only
+	 * checks the DS2484 master is ready), so initialising devices for empty slots
+	 * is harmless; the physical bus is only touched by the scans below. */
+	if (g_app_config.cap_w1_sensors) {
+		ret = device_init(DEVICE_DT_GET(DT_NODELABEL(ds18b20_0)));
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "ds18b20_0", ret);
 			res = res ? res : ret;
 		}
 
-		const struct device *dev_1 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_1));
-
-		ret = device_init(dev_1);
+		ret = device_init(DEVICE_DT_GET(DT_NODELABEL(ds18b20_1)));
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "ds18b20_1", ret);
 			res = res ? res : ret;
 		}
 
-		ret = app_ds18b20_scan();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_ds18b20_scan", ret);
-			res = res ? res : ret;
-		}
-	}
-
-	if (w1_taught) {
-		const struct device *dev_0 = DEVICE_DT_GET(DT_NODELABEL(machine_probe_0));
-
-		ret = device_init(dev_0);
+		ret = device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_0)));
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "machine_probe_0", ret);
 			res = res ? res : ret;
 		}
 
-		const struct device *dev_1 = DEVICE_DT_GET(DT_NODELABEL(machine_probe_1));
-
-		ret = device_init(dev_1);
+		ret = device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_1)));
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "machine_probe_1", ret);
+			res = res ? res : ret;
+		}
+	}
+
+	/* Boot-time scan + slot rebind runs only when a slot is already taught: an
+	 * untaught unit has nowhere to bind results (the no-data watchdog keys on
+	 * taught ROMs), so scanning at boot is just log spam. First enrollment now
+	 * goes through on-demand `w1 scan` (the sensor devices above are ready). Tilt
+	 * alert is armed per probe inside app_machine_probe_scan() (scan_callback), so
+	 * it survives on-demand re-scans/enrolls too. */
+	bool w1_taught = g_app_config.cap_w1_sensors && app_w1_slots_any_taught();
+
+	if (w1_taught) {
+		ret = app_ds18b20_scan();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_ds18b20_scan", ret);
 			res = res ? res : ret;
 		}
 
@@ -363,15 +363,6 @@ int app_sensor_init(void)
 			res = res ? res : ret;
 		}
 
-		/* Tilt alert is armed per probe inside app_machine_probe_scan() (see
-		 * scan_callback), so it survives runtime re-scans too — no separate
-		 * arming pass is needed here. */
-	}
-
-	/* Bind discovered 1-Wire devices to logical slots by their persisted ROM
-	 * (sensorN_rom), so a slot keeps the same physical sensor across reboots /
-	 * rescans. Must run after both driver scans. */
-	if (w1_taught) {
 		int present = app_w1_slots_rebind();
 
 		LOG_INF("1-Wire slots: %d sensor(s) bound", present);
