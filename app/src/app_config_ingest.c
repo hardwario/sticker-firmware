@@ -559,15 +559,6 @@ int app_config_apply_alarms(enum app_cmd_transport tp, const AppConfigMessage_Al
 			FAULT(1);
 		}
 	}
-	if (src->has_alarm_notif_time) {
-		int val = src->alarm_notif_time;
-
-		if ((val >= 1 && val <= 60)) {
-			config->alarm_notif_time = val;
-		} else {
-			FAULT(2);
-		}
-	}
 	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 	if (src->has_alarm_0) {
 		memcpy(config->alarm_0, src->alarm_0, sizeof(config->alarm_0));
@@ -632,15 +623,6 @@ int app_config_apply_alarms(enum app_cmd_transport tp, const AppConfigMessage_Al
 	if (src->has_alarm_15) {
 		memcpy(config->alarm_15, src->alarm_15, sizeof(config->alarm_15));
 	}
-	if (src->has_alarm_light_confirm_delay) {
-		int val = src->alarm_light_confirm_delay;
-
-		if ((val >= 0 && val <= 3600)) {
-			config->alarm_light_confirm_delay = val;
-		} else {
-			FAULT(19);
-		}
-	}
 	return ret;
 }
 
@@ -651,10 +633,6 @@ void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, s
 	if (requested(ids, n, 1)) {
 		dst->has_alarm_limit = true;
 		dst->alarm_limit = c->alarm_limit;
-	}
-	if (requested(ids, n, 2)) {
-		dst->has_alarm_notif_time = true;
-		dst->alarm_notif_time = c->alarm_notif_time;
 	}
 	if (requested(ids, n, 3) && !slot_all_zero(c->alarm_0, sizeof(c->alarm_0))) {
 		dst->has_alarm_0 = true;
@@ -719,10 +697,6 @@ void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, s
 	if (requested(ids, n, 18) && !slot_all_zero(c->alarm_15, sizeof(c->alarm_15))) {
 		dst->has_alarm_15 = true;
 		memcpy(dst->alarm_15, c->alarm_15, sizeof(c->alarm_15));
-	}
-	if (requested(ids, n, 19)) {
-		dst->has_alarm_light_confirm_delay = true;
-		dst->alarm_light_confirm_delay = c->alarm_light_confirm_delay;
 	}
 }
 

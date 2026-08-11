@@ -133,7 +133,7 @@ Readings are range-checked before they reach telemetry, history and alarms, so a
 - **Onboard SHT4x** — temperature/humidity outside the sensor's spec window are rejected.
 - **Accelerometer** — free-fall detection is armed/torn down together with any-motion (no spurious free-fall while motion detection is off); accel **and orientation** are still read into the periodic sample even when motion detection is off.
 - **Si7210 magnetometer (machine probe)** — the magnetic read checks the `Dspsigm` *Fresh* flag (set by the sensor on a new conversion) before trusting the value, and rejects the read otherwise (#219). The DS28E17 1-Wire readback is not CRC-protected, so a flipped bit on a long machine-probe cable could otherwise inject a silent bad field value and a false hall alarm — mirrors the LIS2DH `INT1_SRC` reserved-bit guard.
-- **Alarms** — a THRESHOLD rule whose clear band is empty (`hi − lo ≤ 2·hst`, including inverted or NaN bounds) is **rejected** on the write path and sanitized on reload, so a latched alarm can always clear (`hst = 0` is honoured verbatim = no dead-band); momentary STATE rules (PIR/accel) reject a `from==to` shape; the 1-Wire bus scan caps the number of recorded ROMs so a noisy bus can't exhaust memory. A `set_param` that stages an **invalid alarm rule** (a slot that fails validation on the rule-cache rebuild) is now answered with an **`OUT_OF_RANGE` error** (`detail = "invalid alarm rule"`, `fault_field = 400` = alarms group) and the **whole batch is rolled back** — previously the rule was silently dropped and the host still got a misleading `Ack`, so it believed a rule was set that never took effect (HW-verified over NFC and LoRaWAN).
+- **Alarms** — a THRESHOLD rule whose band is empty or inverted (`hi ≤ lo`, including a NaN bound) is **rejected** on the write path and sanitized on reload, so a latched alarm can always clear on the plain-band deactivate check (post-#348: was `hi − lo ≤ 2·hst` against the since-removed hysteresis band, now checked directly on `lo`/`hi`); `hst` itself (now a per-rule dwell/hold in seconds, all kinds, #348) is range-checked to 0–3600 s; momentary STATE rules (PIR/accel) reject a `from==to` shape; the 1-Wire bus scan caps the number of recorded ROMs so a noisy bus can't exhaust memory. A `set_param` that stages an **invalid alarm rule** (a slot that fails validation on the rule-cache rebuild) is now answered with an **`OUT_OF_RANGE` error** (`detail = "invalid alarm rule"`, `fault_field = 400` = alarms group) and the **whole batch is rolled back** — previously the rule was silently dropped and the host still got a misleading `Ack`, so it believed a rule was set that never took effect (HW-verified over NFC and LoRaWAN).
 
 ### 1-Wire sensors — repeated, self-describing (changed)
 
@@ -380,16 +380,17 @@ Replay over LoRaWAN with the `req_history` downlink command (§1): the device st
 
 ---
 
-## 7. Alarm rate-limiting & PIR alarm (NEW)
+## 7. Alarm rate-limiting, PIR alarm & per-rule dwell/hold (NEW; dwell/hold model added post-#348, pending a future release — see note below)
 
-Two configuration parameters control alarm uplink frequency:
+One configuration parameter controls alarm uplink frequency:
 
 | Shell key | Type | Default | Range | Description |
 |---|---|---|---|---|
 | `alarm-limit` | int (s) | `10` | 0–3600 | Minimum interval between alarm uplinks (**0 = disabled**). The first alarm goes out immediately; further alarms within the window are suppressed (counters/LED still update). Prevents message floods from a chattering sensor. |
-| `alarm-notif-time` | int (s) | `10` | 1–60 | Red-LED hold time for pulse/momentary alarms (PIR, accel) and the one-shot re-arm interval |
 
 > **PIR / motion alarms** are set as **dynamic alarm rules** (below), not a config flag: `alarm set <i> pir state 0 1` (or `accel state 0 1`). The old per-source `*-notify-act` flags were removed with the move to dynamic rules.
+
+> **#348 — `alarm-notif-time` and the illuminance-only `alarm-light-confirm-delay` were removed.** Both were global timings (one red-LED hold time for every pulse/edge alarm on the device; one confirm-delay for illuminance only). They are replaced by the per-rule `hst` field already present in every alarm slot — see the per-kind `hst` description under **"Dynamic alarm rules"** below. This is a breaking change to the `alarms` config group (proto ids 2 and 19 are now `reserved`, never reused) — acceptable because no device is provisioned with alarm rules in the field yet (all rules default to `hst = 0`, which reproduces the pre-#348 immediate-fire behavior for every kind except THRESHOLD, where it also drops the old hysteresis band — see below).
 
 > **PIR and the digital inputs share the same GPIO pins** (PB4 / PA11). If both `cap-pir-detector` and `cap-input-a`/`cap-input-b` are enabled, **PIR wins** and the inputs are not initialised. The runtime now also **clears the input capabilities** in that case, so telemetry and `get_config` stop reporting a non-functional input as an enabled channel — previously a shadowed input showed up "enabled" with a frozen count of 0 and the operator never learned it was dead. The persisted config is left untouched (the conflict is resolved by changing the configuration); only the running copy is corrected.
 
@@ -404,9 +405,11 @@ Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields
 **Sources** (`source`): `0` onboard · `1–4` s1–s4 (1-Wire) · `5` hall-left · `6` hall-right · `7` input-a · `8` input-b · `9` pir · `10` accel · `11` battery *(watchdog only, see §3 — not a configurable rule source)*.
 **Quantities** (`quantity`): `0` temperature · `1` humidity · `2` pressure · `3` illuminance · `4` magnetic-field · `5` tilt · `6` state · `7` count · `8` voltage *(battery watchdog only)*.
 **Kind** (follows the quantity):
-- **threshold** (analog) — `lo`/`hi`/`hst` band with hysteresis; alarm when the value leaves `[lo, hi]`.
-- **state** (digital: tilt + discrete inputs) — `from_state`/`to_state`. **`from != to` = edge** (fires once on that transition: `0→1` rising, `1→0` falling); **`from == to` = level** (active while the line equals `to`: `1→1` active-high, `0→0` active-low). PIR and accel are *momentary* sources (they only pulse), so any state rule there fires a **per-pulse one-shot** that re-arms after `alarm-notif-time` (edge and level behave alike).
-- **count / rate** (counters: hall, input) — `hi` = maximum events allowed per report interval. The increase is assessed once per **`interval_report` window** (a tumbling window that re-baselines each report), not on every internal poll, so the rate is counted consistently regardless of the sample cadence.
+- **threshold** (analog) — plain `lo`/`hi` band, no hysteresis; alarm when the value leaves `[lo, hi]`. `hst` (seconds) is a **dwell**: the value must stay continuously outside the band for `hst` seconds before the alarm activates (`0` = immediate, the pre-#348 behavior minus hysteresis). **Deactivation is always immediate** on returning inside `[lo, hi]` — dwell only guards the activating edge against a transient spike/dip; there is no reason to also delay clearing an alarm once the value has recovered.
+- **state** (digital: tilt + discrete inputs) — `from_state`/`to_state`. **`from != to` = edge** (fires once on that transition: `0→1` rising, `1→0` falling); **`from == to` = level** (active while the line equals `to`: `1→1` active-high, `0→0` active-low). `hst` (seconds) here is a **confirm + hold**: for an edge, the raw transition must persist at `to_state` for `hst` seconds before it fires (debounce), and firing then holds the alarm active — and blocks a new transition from re-arming — for that same `hst` seconds; for a level, `hst` gates activation the same way (dwell before activating), but deactivation is immediate once the state leaves `to_state` (same asymmetry as threshold). PIR and accel are *momentary* sources (they only pulse, nothing to debounce), so any state rule there **fires immediately** on each pulse and instead uses `hst` purely as the **post-fire hold/re-arm window** (a burst of pulses within that window is suppressed).
+- **count / rate** (counters: hall, input) — `hi` = maximum events allowed per report interval. The increase is assessed once per **`interval_report` window** (a tumbling window that re-baselines each report), not on every internal poll, so the rate is counted consistently regardless of the sample cadence. `hst` (seconds) is the **hold/re-arm window** after firing, the same role as a momentary source.
+
+`hst = 0` means "no timing" throughout: immediate threshold activation (no dwell), immediate state edge/level firing with no confirm and no re-arm block, immediate momentary/count re-arm. `hst` is range-checked to **0–3600 s** on write, for every kind.
 
 > **Hall/input polarity fix (#352):** `hall-left`/`hall-right`/`input-a`/`input-b` state `1` now
 > correctly means "magnet present" / "input asserted". Before this fix, `app_hall.c`/`app_input.c`
@@ -429,7 +432,7 @@ Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields
 | 4 | to_state | state kind only |
 | 5–8 | lo | float32 (threshold) |
 | 9–12 | hi | float32 (threshold; rate limit for count) |
-| 13–16 | hst | float32 (threshold hysteresis) |
+| 13–16 | hst | float32 — **dwell/hold in seconds** (#348; all kinds, see above). Same offset and size as the pre-#348 threshold-hysteresis field it replaces — no wire-format change, only the FW-side interpretation of the value changed. |
 
 #### How to …
 
@@ -442,32 +445,33 @@ Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields
 | **Deactivate** (keep the rule, stop evaluating) | — *(the shell always enables)* | write `alarm_<i>` packed with flags = present only (`01…`, enabled bit clear) |
 | **Read** | `alarm list [<i>]` | `get_param.alarms_field = [3+i]` → `config_dump.alarms.alarm_<i>` |
 
-Shell `<args>` by kind: threshold `<lo> <hi> [hst]` · state `<from> <to>` · count `<N>`.
+Shell `<args>` by kind: threshold `<lo> <hi> [hst]` · state `<from> <to> [hst]` · count `<N> [hst]`. `hst` defaults to `0` (immediate) when omitted, for every kind.
 
 > The `alarm_<i>` slots are intentionally **not** in the `config` shell tree (no `config alarm-0`); edit them locally with the readable `alarm` command, or over the air with SetParam.
 
 #### Examples — `alarm` shell
 ```
-alarm set 0 onboard temperature 5 30 1   # threshold: alarm < 5 °C or > 30 °C, 1° hysteresis
-alarm set 1 input-a state 0 1            # binary edge:  fire when input-a goes 0 → 1
-alarm set 2 input-a state 1 1            # binary level: active while input-a = 1
-alarm new hall-left count 10             # rate: ≥ 10 pulses per report interval
+alarm set 0 onboard temperature 5 30 10  # threshold: alarm < 5 °C or > 30 °C, 10 s dwell before activating
+alarm set 1 input-a state 0 1 5          # binary edge:  input-a 0→1, confirmed for 5 s, then holds 5 s
+alarm set 2 input-a state 1 1 30         # binary level: active while input-a = 1, dwell 30 s before activating
+alarm set 3 pir state 0 1 60             # momentary: fires immediately per pulse, re-arms after 60 s
+alarm new hall-left count 10 5           # rate: ≥ 10 pulses per report interval, 5 s hold before re-arm
 alarm clear 1                            # delete slot 1
 alarm clear all
-alarm list                               # [i] <source> <quantity> …  en=<0|1>  active=<0|1>
+alarm list                               # [i] <source> <quantity> … hst=<s>  en=<0|1>  active=<0|1>
 ```
 
 #### Examples — SetParam over LoRaWAN / NFC
 Author with `ttn.js` `encodeDownlink`: the formatter takes the packed rule as a 34-char hex string and encodes it as native bytes (the same message is written to the NFC tag). Add `"save": true` to persist across reboot (reboots, like any config save); without it the rule still applies live but is not persisted.
 ```jsonc
-// Set slot 0: onboard temperature 5–30 °C, hysteresis 1 °C, enabled
-{ "command": "set_param", "set_param": { "alarms": { "alarm_0": "03000000000000a0400000f0410000803f" } } }
+// Set slot 0: onboard temperature 5–30 °C, 10 s dwell before activating, enabled
+{ "command": "set_param", "set_param": { "alarms": { "alarm_0": "03000000000000a0400000f04100002041" } } }
 // Deactivate slot 0 — keep the definition, stop evaluating (flags = present only, 01…)
-{ "command": "set_param", "set_param": { "alarms": { "alarm_0": "01000000000000a0400000f0410000803f" } } }
+{ "command": "set_param", "set_param": { "alarms": { "alarm_0": "01000000000000a0400000f04100002041" } } }
 // Delete slot 0 (all zeros → present=0)
 { "command": "set_param", "set_param": { "alarms": { "alarm_0": "0000000000000000000000000000000000" } } }
-// Multi-level: a second, critical band on the same sensor in slot 1
-{ "command": "set_param", "set_param": { "alarms": { "alarm_1": "0300000000000000400000084200008040" } } }
+// Multi-level: a second, critical band on the same sensor in slot 1 (2–34 °C, 5 s dwell)
+{ "command": "set_param", "set_param": { "alarms": { "alarm_1": "030000000000000040000008420000a040" } } }
 // Read slots 0 and 1
 { "command": "get_param", "get_param": { "alarms_field": [54, 55] } }
 ```
@@ -529,7 +533,7 @@ The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.
 | `ats lrw reset` | **New** — clear LoRaWAN frame counters + DevNonce (reboots) |
 | `ats cmd lrw \| nfc <hex>` | **New** (debug) — inject a command over the LoRaWAN/NFC transport for bench testing |
 | `nfc dump` / `read` / `write` / `clear` / `check` / `autocheck` / `reg` / `regw` | **New** (debug) — direct ST25DV tag access; `nfc check` prints a readable trace of what it read, decoded and wrote back (see §10) |
-| `config history-enable` / `history-sensors` / `alarm-limit` / `alarm-notif-time` / `pir-notify-act` | **New** parameters (see §6, §7) |
+| `config history-enable` / `history-sensors` / `alarm-limit` / `pir-notify-act` | **New** parameters (see §6, §7) |
 | `config claim-token <32-hex>` | **New** — set the 128-bit claim token once at commissioning; **write-once** (immutable after first set, see §4) |
 | `ats claim active` / `done` / `status` | **New (#351), debug-only** — bench equivalents of the `clm_rearm`/`clm_ack` commands (see §10 Claim record) for testing the claim lifecycle without a phone or NFC round-trip. Replaces `nfc clm` (removed — `ats claim status` now shows the latch state) |
 | `settings reset` | **Changed** — now keeps device identity + LoRaWAN credentials (see §13); restores only application config + alarm rules to defaults |
@@ -552,7 +556,7 @@ v1.4.0 organizes configuration keys **by sensor/source** rather than under a glo
 | `alarm-t2-temperature-*` | `t2-alarm-*` |
 | `motion-sensitivity` | `accel-motion-sensitivity` |
 
-**Unchanged:** discrete sources (`hall-*`, `input-*`, `pir-notify-act`) and global params (`alarm-limit`, `alarm-notif-time`). `accel-motion-sensitivity` defaults to `off` (no accelerometer detection).
+**Unchanged:** discrete sources (`hall-*`, `input-*`, `pir-notify-act`) and the global `alarm-limit`. `accel-motion-sensitivity` defaults to `off` (no accelerometer detection). (`alarm-notif-time` itself was later removed — #348, see §7.)
 
 > **Accelerometer power (#90).** The LIS2DH is now power-managed on demand: it idles in power-down (ODR=0) and is only resumed for an orientation read or while motion detection is armed — saving ~30 µA of continuous idle current when the accelerometer would otherwise run free. **Consequence:** free-fall detection is active only when `accel-motion-sensitivity != off` (it shares the single motion-sensitivity knob); with sensitivity `off` the accelerometer is fully powered down.
 
@@ -770,7 +774,7 @@ Not user-facing, but worth recording: v1.4.0 grew enough that the debug image RA
   - **GetParam duplicate-field budget** — a field id repeated in one `get_param` was counted twice against the page budget (inflating `page_count`) and emitted twice; duplicates within a section are now skipped.
   - **NDEF chunked-record reject** — the NDEF parser silently accepted a record with the **CF (chunked)** flag as if whole, mis-reading its payload. It now rejects a chunked record (`-ENOTSUP`); STICKER never emits chunked NDEF.
   - **Machine-probe SHT type re-detect on rescan** — the cached `sht_type` (probed only while UNKNOWN) was not reset on a bus re-scan, so a slot reused for a **swapped** probe kept the previous part's type and issued the wrong SHT command. Each (re)scan now re-detects it.
-  - **Momentary alarm notif-time** — a PIR/ACCEL one-shot latch was only expired in the 3 s `app_alarm_poll`, so an `alarm_notif_time` shorter than the poll cadence was silently clamped to it (a new event within ~3 s of the window lapsing stayed suppressed). The latch is now also expired in the event path, so `notif_time` is honored regardless of poll cadence.
+  - **Momentary alarm notif-time** — a PIR/ACCEL one-shot latch was only expired in the 3 s `app_alarm_poll`, so an `alarm_notif_time` shorter than the poll cadence was silently clamped to it (a new event within ~3 s of the window lapsing stayed suppressed). The latch is now also expired in the event path, so `notif_time` is honored regardless of poll cadence. (`alarm_notif_time` was later removed and this hold became the per-rule `hst`, #348 — the fix described here still applies verbatim to `hst`.)
   - **IWDG debug freeze** — on a debug build the IWDG is now set up with `WDT_OPT_PAUSE_HALTED_BY_DBG`, so a breakpoint doesn't reset the SoC while the debugger has the core halted (the option only takes effect with a debugger attached, so Release is unaffected).
 - **Link-Time Optimization (#263)** — `prj.conf` enables `CONFIG_LTO=y` + `CONFIG_ISR_TABLES_LOCAL_DECLARATION=y` (the latter is required for the vector table under LTO). Without LTO the compiler optimizes each translation unit alone and the linker only drops whole unused functions (`--gc-sections`); with LTO the final optimization is deferred to link time, where the compiler sees the whole program and eliminates dead code across TU boundaries — the LoRaMac Class B/C + FUOTA paths and the mbedTLS cipher variants STICKER never calls. Reclaims **~19 KB flash** (release **99.93 % → 88.43 %** of the `0x28000` budget, all three EU868/US915/AU915 regions kept), restoring the headroom that subsequent features had consumed back to the flash wall. The debug build inherits it from `prj.conf` too (debug **96.4 % → 88.5 %** of `0x3C000`). HW-validated on a real STICKER (OTAA join, fPort-2 telemetry, fPort-3 alarm, on-target NFC AES-CCM command round-trip, history replay, reset-cause) with no behavioural difference from the non-LTO image. Two notes for developers: setting `CONFIG_LTO=y` on the `west build` command line silently does **not** apply — it must live in `prj.conf`/an overlay; and whole-program optimization relocates the `_SEGGER_RTT` control block (observed `0x20000800` → `0x20000000`), so an RTT viewer attached to an LTO build needs the address re-read from the ELF (`nm zephyr.elf | grep _SEGGER_RTT`).
 - **Production script alignment (#283)** — `app/production/run.sh` had drifted from the firmware it flashes: it sent the now-nonexistent `config save` shell command (settings are persisted via `settings save`, which also cold-reboots the device — the follow-up `sleep` was bumped from 0.2 s to 2 s to match) and still prompted for the `corr-temperature`/`corr-ext-temperature-1/2` offsets removed by 4ab1e77. It also hardcoded the pre-LTO `JLinkRTTLogger -RTTAddress 0x20000800` for the debug-build RTT session it opens mid-script; since the debug overlay inherits `CONFIG_LTO=y` from `prj.conf` (previous bullet), the control block had already moved to `0x20000000` and the logger was silently failing to attach. Both addresses in the script are updated to match. (The whole `app/production/` toolkit was later removed as orphaned/unmaintained in the pre-production cleanup pass.)

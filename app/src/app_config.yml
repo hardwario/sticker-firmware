@@ -86,6 +86,10 @@ proto:
       message: Alarms
       field: alarms
       proto_id: 8
+      # #348: alarm_notif_time (2) and alarm_light_confirm_delay (19) removed —
+      # both timings are now the per-rule `hst` field (alarm_0..15 bytes blob),
+      # unified as a dwell/hold duration across THRESHOLD/STATE/RATE kinds.
+      reserved: [2, 19]
 
 # Command protocol (LoRaWAN fPort 85 downlink + NFC). The single source of truth
 # for which commands exist, their wire id, dispatch routing and availability.
@@ -311,24 +315,6 @@ parameters:
     min: 0
     max: 3600
     help: "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled)."
-
-  - name: alarm_notif_time
-    proto_group: alarms
-    proto_id: 2
-    type: int
-    default: 10
-    min: 1
-    max: 60
-    help: "Get/Set alarm red-LED hold time in seconds (both-mode and pulse sources)."
-
-  - name: alarm_light_confirm_delay
-    proto_group: alarms
-    proto_id: 19
-    type: int
-    default: 60
-    min: 0
-    max: 3600
-    help: "Get/Set light-increase alarm confirmation delay in seconds (0 = immediate). On a rising illuminance threshold (on-board OPT3001 or a 1-Wire slot light sensor) the device waits this long, re-samples, and only alarms if still bright."
 
   - name: lrw_region
     proto_group: lorawan

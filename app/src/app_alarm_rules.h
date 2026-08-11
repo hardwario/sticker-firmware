@@ -29,12 +29,19 @@
  * rule index.
  *
  * A rule's kind is derived from its quantity:
- *  - THRESHOLD (analog): lo/hi/hst hysteresis band — temperature, humidity,
- *    pressure, illuminance, magnetic_field.
- *  - STATE (digital 0/1): from_state/to_state — from != to is an edge (one-shot
- *    alarm; the red LED blinks for alarm_notif_time), from == to is a level
- *    (alarm active while the state == to). tilt and the discrete inputs.
- *  - COUNT (rate): hi = max counter increase allowed per report interval.
+ *  - THRESHOLD (analog): lo/hi band, no hysteresis; hst = dwell seconds the
+ *    value must stay outside [lo,hi] before activating (0 = immediate).
+ *    Deactivation is always immediate on returning inside the band. Applies to
+ *    temperature, humidity, pressure, illuminance, magnetic_field, voltage.
+ *  - STATE (digital 0/1): from_state/to_state — from != to is an edge (hst =
+ *    confirm dwell before firing, then the same duration holds the alarm
+ *    active/re-arm-blocked, no separate deactivate event); from == to is a
+ *    level (hst = dwell before activating; deactivate is immediate once
+ *    state != to). tilt and the discrete inputs. A momentary source (pir/
+ *    accel) fires immediately on each pulse (nothing to confirm) and instead
+ *    uses hst purely as the post-fire hold/re-arm window.
+ *  - COUNT (rate): hi = max counter increase allowed per report interval; hst
+ *    = hold/re-arm window after firing, same role as a momentary source.
  */
 
 #include <stdbool.h>
@@ -93,7 +100,7 @@ struct app_alarm_rule {
 	uint8_t enabled;
 	uint8_t from_state; /* STATE only: previous level (0/1) */
 	uint8_t to_state;   /* STATE only: triggering level (0/1); from==to => level */
-	float lo, hi, hst;  /* THRESHOLD (and hi for RATE) */
+	float lo, hi, hst;  /* THRESHOLD/RATE use hi; hst is a dwell/hold in seconds, all kinds */
 };
 
 /* Build the rule cache from the app_config slots (called once at init, after

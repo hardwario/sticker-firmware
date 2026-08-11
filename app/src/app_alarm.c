@@ -83,8 +83,12 @@ struct rstate {
 	uint32_t prev_count; /* COUNT: baseline counter at window start */
 	bool have_prev_count;
 	int64_t count_window_start; /* COUNT: start of the current interval_report window (#195) */
-	int64_t oneshot_expiry;     /* STATE edge one-shot: auto-clear time (0 = none) */
-	int64_t confirm_deadline;   /* THRESHOLD illuminance dwell (#319): fire time (0 = none) */
+	int64_t oneshot_expiry;     /* STATE edge / momentary / COUNT one-shot: auto-clear time (0 =
+				       none) */
+	int64_t confirm_deadline; /* dwell-before-activation deadline (#348, 0 = none). While armed,
+				   * `type` doubles as the pending THRESHOLD side (LOW/HIGH) being
+				   * confirmed, since it is otherwise unused until the rule latches.
+				   */
 };
 
 static struct rstate m_rt[APP_ALARM_SLOT_COUNT];
@@ -131,9 +135,18 @@ static int64_t m_window_start_ms;
 static bool m_window_open;
 static struct k_work_delayable m_alarm_batch_work;
 
-static inline int64_t notif_hold_ms(void)
+/* Per-rule dwell/hold duration in ms (#348): `hst` is now a plain duration in
+ * seconds, unified across every kind that uses a timer (THRESHOLD dwell-before-
+ * activate, STATE edge confirm+hold, STATE level dwell-before-activate,
+ * momentary-source hold/re-arm, RATE hold/re-arm). Negative/NaN clamps to 0
+ * (immediate — never widens a window from garbage data). */
+static inline int64_t rule_hold_ms(const struct app_alarm_rule *rule)
 {
-	return (int64_t)g_app_config.alarm_notif_time * 1000;
+	float s = rule->hst;
+	if (!(s >= 0.0f)) {
+		s = 0.0f;
+	}
+	return (int64_t)(s * 1000.0f);
 }
 
 static void alarm_lrw_send(void)
@@ -457,21 +470,13 @@ static bool read_poll_state(uint8_t source, uint8_t quantity, bool *out)
 
 /* ---- rule evaluation ---------------------------------------------------- */
 
-/* Light-increase confirmation delay (#319) applies to any illuminance threshold — the
- * on-board OPT3001 and the 1-Wire slot light sensors (a machine-probe's OPT3001) — and only
- * when a non-zero delay is configured. All other quantities/sources keep the immediate-latch
- * behavior. */
-static inline bool dwell_eligible(const struct app_alarm_rule *rule)
-{
-	bool light_source =
-		rule->source == APP_ALARM_SRC_ONBOARD ||
-		(rule->source >= APP_ALARM_SRC_SLOT1 && rule->source <= APP_ALARM_SRC_SLOT4);
-	return light_source && rule->quantity == APP_ALARM_Q_ILLUMINANCE &&
-	       g_app_config.alarm_light_confirm_delay > 0;
-}
-
-/* Threshold rule with hysteresis (reuses the previous eval_threshold logic,
- * keyed to the rule's runtime state). Returns latched state. */
+/* Threshold rule (#348): lo/hi are a plain band, no hysteresis. `hst` (seconds)
+ * is a dwell that must elapse, with the value continuously outside [lo, hi]
+ * the whole time, before the rule activates; 0 = immediate. Deactivation is
+ * always immediate on returning to [lo, hi] — dwell only guards against a
+ * spurious/transient excursion causing a false activation, and there is no
+ * matching reason to delay clearing an alarm once the value has recovered.
+ * Returns latched state. */
 static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, struct rstate *rt,
 			   float value, bool *should_send)
 {
@@ -487,67 +492,60 @@ static bool eval_threshold(uint8_t slot, const struct app_alarm_rule *rule, stru
 	}
 
 	float lo = rule->lo, hi = rule->hi;
-	/* Use the rule's hysteresis verbatim (0 = no dead-band, as configured). The
-	 * negated comparison still captures NaN/negative (NaN >= 0 is false), so a
-	 * garbage value can't widen the band, but we no longer force a minimum. */
-	float hst = rule->hst;
-	if (!(hst >= 0.0f)) {
-		hst = 0.0f;
-	}
-
-	/* Light-increase dwell (#319): a deadline armed on a prior rising edge is
-	 * resolved against THIS poll's already-fresh `value` — read_threshold_value()
-	 * pulls from g_app_sensor_data/w1[], refreshed on the same interval_sample
-	 * cadence every other threshold quantity (temperature/humidity/pressure,
-	 * including 1-Wire) already relies on for its own rising-edge check. No
-	 * separate re-sample or work item is needed for illuminance specifically.
-	 * dwell_eligible() is rechecked so a confirm-delay config change (or a
-	 * disabled rule, handled above) to 0 mid-flight drops the window instead of
-	 * latching on stale intent. */
-	if (rt->confirm_deadline != 0 && k_uptime_get() >= rt->confirm_deadline) {
-		rt->confirm_deadline = 0;
-		if (dwell_eligible(rule) && value > hi + hst && !rt->active) {
-			rt->active = true;
-			rt->type = ALARM_TYPE_HIGH;
-			*should_send = true;
-			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_HIGH,
-				      true, alarm_scale(rule->quantity, value));
-		}
-		return rt->active;
-	}
 
 	if (rt->active) {
-		if (value > lo + hst && value < hi - hst) {
+		if (value >= lo && value <= hi) {
 			rt->active = false;
+			rt->confirm_deadline = 0;
 			*should_send = true;
 			alarm_collect(slot, rule->source, rule->quantity, false, rt->type, true,
 				      alarm_scale(rule->quantity, value));
 		}
-	} else if (value < lo - hst) {
-		rt->active = true;
-		rt->type = ALARM_TYPE_LOW;
-		*should_send = true;
-		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_LOW, true,
-			      alarm_scale(rule->quantity, value));
-	} else if (value > hi + hst) {
-		if (dwell_eligible(rule)) {
-			/* Light-increase dwell (#319): don't latch yet. Arm the confirmation
-			 * deadline once (don't push it out on every poll); it is resolved
-			 * above, against a later poll's fresh value, once due. */
-			if (rt->confirm_deadline == 0) {
-				rt->confirm_deadline =
-					k_uptime_get() +
-					(int64_t)g_app_config.alarm_light_confirm_delay * 1000;
-			}
-		} else {
-			rt->active = true;
-			rt->type = ALARM_TYPE_HIGH;
-			*should_send = true;
-			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_HIGH,
-				      true, alarm_scale(rule->quantity, value));
-		}
+		return rt->active;
 	}
-	return rt->active;
+
+	uint8_t want_type = ALARM_TYPE_NONE;
+	if (value < lo) {
+		want_type = ALARM_TYPE_LOW;
+	} else if (value > hi) {
+		want_type = ALARM_TYPE_HIGH;
+	}
+
+	if (want_type == ALARM_TYPE_NONE) {
+		/* Back in bounds: any pending dwell was on a false alarm — drop it. */
+		rt->confirm_deadline = 0;
+		return false;
+	}
+
+	int64_t hold_ms = rule_hold_ms(rule);
+	if (hold_ms <= 0) {
+		rt->active = true;
+		rt->type = want_type;
+		*should_send = true;
+		alarm_collect(slot, rule->source, rule->quantity, true, want_type, true,
+			      alarm_scale(rule->quantity, value));
+		return true;
+	}
+
+	/* `type` doubles as the pending side while a dwell is armed (struct rstate
+	 * comment) — a change of side (e.g. dwelling HIGH, briefly back in bounds,
+	 * now LOW) restarts the window rather than reusing a stale deadline. */
+	if (rt->confirm_deadline == 0 || rt->type != want_type) {
+		rt->type = want_type;
+		rt->confirm_deadline = k_uptime_get() + hold_ms;
+		return false;
+	}
+
+	if (k_uptime_get() >= rt->confirm_deadline) {
+		rt->confirm_deadline = 0;
+		rt->active = true;
+		*should_send = true;
+		alarm_collect(slot, rule->source, rule->quantity, true, want_type, true,
+			      alarm_scale(rule->quantity, value));
+		return true;
+	}
+
+	return false; /* still dwelling */
 }
 
 /* Momentary/pulse sources only ever assert (app_alarm_event(src, true)) and never
@@ -558,14 +556,20 @@ static inline bool source_is_momentary(uint8_t source)
 	return source == APP_ALARM_SRC_ACCEL || source == APP_ALARM_SRC_PIR;
 }
 
-/* STATE rule: from/to over a digital level. from != to is an edge (one-shot:
- * activate, auto-clear after alarm_notif_time, no deactivate); from == to is a
- * level (active while cur == to). */
+/* STATE rule: from/to over a digital level (#348). from != to is an edge: the
+ * raw from->to transition arms a confirm dwell (`hst` seconds, continuously at
+ * to_state) before it fires, then the SAME duration holds the alarm active
+ * (auto-clear, no deactivate event) before it can re-arm — one field driving
+ * both the pre-fire debounce and the post-fire hold. from == to is a level:
+ * active while cur == to, gated by the same confirm dwell before activating;
+ * deactivation is immediate once cur != to (see eval_threshold: no reason to
+ * delay clearing). `hst` == 0 keeps the pre-#348 immediate behavior throughout. */
 static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct rstate *rt, bool cur,
 		       bool *should_send)
 {
 	bool is_edge = (rule->from_state != rule->to_state);
 	uint8_t cur_lvl = cur ? 1 : 0;
+	int64_t hold_ms = rule_hold_ms(rule);
 
 	if (!rule->enabled) {
 		if (rt->active) {
@@ -575,28 +579,31 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
 			alarm_collect(slot, rule->source, rule->quantity, false, ALARM_TYPE_TRIGGER,
 				      true, 0);
 		}
+		rt->confirm_deadline = 0;
 		rt->have_prev_state = true;
 		rt->prev_state = cur_lvl;
 		return;
 	}
 
 	if (source_is_momentary(rule->source)) {
-		/* Pulse source: each asserted event is a discrete trigger. Fire a one-shot
-		 * (auto-cleared after alarm_notif_time in app_alarm_poll), suppressed while a
-		 * previous one is still latched so we emit at most one alarm per notif-time
-		 * window regardless of event rate. from/to are not meaningful for a source
-		 * that never reports a level, so edge (0->1) and level (1->1) behave alike. */
+		/* Pulse source: each asserted event is a discrete, already-debounced
+		 * trigger (there is nothing to dwell-confirm) — fire immediately, then
+		 * hold for `hst` seconds (re-arm window), suppressed while a previous
+		 * one is still latched so we emit at most one alarm per hold window
+		 * regardless of event rate. from/to are not meaningful for a source
+		 * that never reports a level, so edge (0->1) and level (1->1) behave
+		 * alike. */
 		/* Expire a lapsed one-shot here, in the event path, not only in the 3 s
-		 * app_alarm_poll: otherwise an alarm_notif_time shorter than the poll cadence
-		 * is silently clamped to it (a new event within ~3 s of the window elapsing
-		 * stays suppressed), so notif_time < 3 s was ineffective (#267). */
+		 * app_alarm_poll: otherwise a hold shorter than the poll cadence is
+		 * silently clamped to it (a new event within ~3 s of the window
+		 * elapsing stays suppressed), so hold < 3 s was ineffective (#267). */
 		if (rt->active && rt->oneshot_expiry != 0 && k_uptime_get() >= rt->oneshot_expiry) {
 			rt->active = false;
 			rt->oneshot_expiry = 0;
 		}
 		if (cur && !rt->active) {
 			rt->active = true;
-			rt->oneshot_expiry = k_uptime_get() + notif_hold_ms();
+			rt->oneshot_expiry = k_uptime_get() + hold_ms;
 			*should_send = true;
 			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_TRIGGER,
 				      true, cur_lvl);
@@ -607,28 +614,57 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
 	}
 
 	if (is_edge) {
-		/* Fire one-shot when the configured transition occurs. */
-		if (rt->have_prev_state && rt->prev_state == rule->from_state &&
-		    cur_lvl == rule->to_state) {
+		bool raw_transition = rt->have_prev_state && rt->prev_state == rule->from_state &&
+				      cur_lvl == rule->to_state;
+
+		if (raw_transition && rt->confirm_deadline == 0) {
+			if (hold_ms <= 0) {
+				rt->active = true;
+				rt->oneshot_expiry = k_uptime_get();
+				*should_send = true;
+				alarm_collect(slot, rule->source, rule->quantity, true,
+					      ALARM_TYPE_TRIGGER, true, cur_lvl);
+			} else {
+				rt->confirm_deadline = k_uptime_get() + hold_ms;
+			}
+		} else if (rt->confirm_deadline != 0 && cur_lvl != rule->to_state) {
+			/* Reverted before the dwell elapsed: not a real transition. */
+			rt->confirm_deadline = 0;
+		} else if (rt->confirm_deadline != 0 && k_uptime_get() >= rt->confirm_deadline) {
+			rt->confirm_deadline = 0;
 			rt->active = true;
-			rt->oneshot_expiry = k_uptime_get() + notif_hold_ms();
+			rt->oneshot_expiry = k_uptime_get() + hold_ms;
 			*should_send = true;
 			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_TRIGGER,
 				      true, cur_lvl);
 		}
 	} else {
-		/* Level: active while cur == to. */
+		/* Level: active while cur == to, gated by the same confirm dwell. */
 		bool want = (cur_lvl == rule->to_state);
-		if (want && !rt->active) {
-			rt->active = true;
-			*should_send = true;
-			alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_TRIGGER,
-				      true, cur_lvl);
-		} else if (!want && rt->active) {
-			rt->active = false;
-			*should_send = true;
-			alarm_collect(slot, rule->source, rule->quantity, false, ALARM_TYPE_TRIGGER,
-				      true, cur_lvl);
+
+		if (!want) {
+			rt->confirm_deadline = 0;
+			if (rt->active) {
+				rt->active = false;
+				*should_send = true;
+				alarm_collect(slot, rule->source, rule->quantity, false,
+					      ALARM_TYPE_TRIGGER, true, cur_lvl);
+			}
+		} else if (!rt->active) {
+			if (hold_ms <= 0) {
+				rt->active = true;
+				*should_send = true;
+				alarm_collect(slot, rule->source, rule->quantity, true,
+					      ALARM_TYPE_TRIGGER, true, cur_lvl);
+			} else if (rt->confirm_deadline == 0) {
+				rt->confirm_deadline = k_uptime_get() + hold_ms;
+			} else if (k_uptime_get() >= rt->confirm_deadline) {
+				rt->confirm_deadline = 0;
+				rt->active = true;
+				*should_send = true;
+				alarm_collect(slot, rule->source, rule->quantity, true,
+					      ALARM_TYPE_TRIGGER, true, cur_lvl);
+			}
 		}
 	}
 
@@ -642,8 +678,9 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
  * poll — otherwise with interval_sample < 3 s the counts split across polls and
  * the threshold under-counts (#195). So we accumulate across polls and evaluate
  * the delta only once a full interval_report window has elapsed (tumbling
- * window), re-baselining the counter and window each time. One-shot
- * (auto-clear). */
+ * window), re-baselining the counter and window each time. One-shot: fires and
+ * then holds for `hst` seconds (#348, same hold/re-arm role as a momentary
+ * source) before it can fire again — 0 re-arms immediately. */
 static void eval_count(uint8_t slot, const struct app_alarm_rule *rule, struct rstate *rt,
 		       uint32_t cur, bool *should_send)
 {
@@ -681,7 +718,7 @@ static void eval_count(uint8_t slot, const struct app_alarm_rule *rule, struct r
 	uint32_t delta = cur - rt->prev_count; /* wraps correctly on uint32 */
 	if (rule->hi > 0 && delta >= (uint32_t)rule->hi) {
 		rt->active = true;
-		rt->oneshot_expiry = now + notif_hold_ms();
+		rt->oneshot_expiry = now + rule_hold_ms(rule);
 		*should_send = true;
 		alarm_collect(slot, rule->source, rule->quantity, true, ALARM_TYPE_TRIGGER, true,
 			      (int32_t)cur);
@@ -1110,13 +1147,14 @@ static void print_slot(const struct shell *sh, uint8_t slot, const struct app_al
 			active);
 		break;
 	case APP_ALARM_KIND_STATE:
-		shell_print(sh, "  [%u] %s %s  %u->%u (%s)  en=%d  active=%d", slot, src, q,
-			    r->from_state, r->to_state,
-			    r->from_state == r->to_state ? "level" : "edge", r->enabled, active);
+		shell_print(sh, "  [%u] %s %s  %u->%u (%s) hst=%s%d.%02d  en=%d  active=%d", slot,
+			    src, q, r->from_state, r->to_state,
+			    r->from_state == r->to_state ? "level" : "edge", APP_FP2(r->hst),
+			    r->enabled, active);
 		break;
 	case APP_ALARM_KIND_RATE:
-		shell_print(sh, "  [%u] %s %s  rate>=%d/interval  en=%d  active=%d", slot, src, q,
-			    (int)r->hi, r->enabled, active);
+		shell_print(sh, "  [%u] %s %s  rate>=%d/interval hst=%s%d.%02d  en=%d  active=%d",
+			    slot, src, q, (int)r->hi, APP_FP2(r->hst), r->enabled, active);
 		break;
 	}
 }
@@ -1171,7 +1209,8 @@ static int parse_rule_spec(const struct shell *sh, size_t argc, char **argv, siz
 	switch (app_alarm_quantity_kind((enum app_alarm_quantity)qty)) {
 	case APP_ALARM_KIND_THRESHOLD:
 		if (argc < a + 2) {
-			shell_error(sh, "threshold args: <lo> <hi> [hst]");
+			shell_error(sh, "threshold args: <lo> <hi> [hst]  (hst = dwell seconds "
+					"outside the band before activating, 0 = immediate)");
 			return -EINVAL;
 		}
 		r->lo = strtof(argv[a], NULL);
@@ -1181,18 +1220,21 @@ static int parse_rule_spec(const struct shell *sh, size_t argc, char **argv, siz
 	case APP_ALARM_KIND_STATE:
 		if (argc < a + 2) {
 			shell_error(sh,
-				    "state args: <from> <to> (0/1; from!=to=edge, from==to=level)");
+				    "state args: <from> <to> [hst]  (0/1; from!=to=edge, "
+				    "from==to=level; hst = confirm+hold seconds, 0 = immediate)");
 			return -EINVAL;
 		}
 		r->from_state = (uint8_t)(strtoul(argv[a], NULL, 10) ? 1 : 0);
 		r->to_state = (uint8_t)(strtoul(argv[a + 1], NULL, 10) ? 1 : 0);
+		r->hst = (argc > a + 2) ? strtof(argv[a + 2], NULL) : 0.0f;
 		break;
 	case APP_ALARM_KIND_RATE:
 		if (argc < a + 1) {
-			shell_error(sh, "count args: <N-per-interval>");
+			shell_error(sh, "count args: <N-per-interval> [hst]");
 			return -EINVAL;
 		}
 		r->hi = (float)strtoul(argv[a], NULL, 10);
+		r->hst = (argc > a + 1) ? strtof(argv[a + 1], NULL) : 0.0f;
 		break;
 	}
 	return 0;
@@ -1286,11 +1328,17 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_alarm_list, 1, 1),
 	SHELL_CMD_ARG(set, NULL,
 		      "Set a rule in a slot. Usage: set <index> <source> <quantity> <args>\n"
-		      "  threshold: <lo> <hi> [hst]   state: <from> <to>   count: <N>",
+		      "  threshold: <lo> <hi> [hst]   state: <from> <to> [hst]   count: <N> [hst]\n"
+		      "  hst = dwell/hold seconds (0 = immediate), see 'alarm new' help",
 		      cmd_alarm_set, 5, 2),
 	SHELL_CMD_ARG(new, NULL,
 		      "Set a rule in the first free slot. Usage: new <source> <quantity> <args>\n"
-		      "  threshold: <lo> <hi> [hst]   state: <from> <to>   count: <N>",
+		      "  threshold: <lo> <hi> [hst]   state: <from> <to> [hst]   count: <N> [hst]\n"
+		      "  hst: threshold = dwell seconds outside [lo,hi] before activating;\n"
+		      "       state edge = confirm dwell before firing AND hold before re-arm;\n"
+		      "       state level = dwell before activating (deactivate is immediate);\n"
+		      "       pir/accel (momentary source) = hold before re-arm, no confirm;\n"
+		      "       count = hold before re-arm. 0 = immediate/no hold throughout.",
 		      cmd_alarm_new, 4, 2),
 	SHELL_CMD_ARG(clear, NULL, "Clear a slot (or all). Usage: clear <index>|all",
 		      cmd_alarm_clear, 1, 1),

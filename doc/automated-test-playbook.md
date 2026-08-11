@@ -778,37 +778,80 @@ Alarm rules live in 16 packed byte-slots (`alarm-0`…`alarm-15`); layout
 On debug, manage via `alarm new/set/list/clear/poll`; over transports via SetParam on the
 slot bytes (the manual plan's set_param vector includes a worked alarm_0 example).
 
-### AT-ALM-01 — onboard temperature threshold + hysteresis (D, SA; maps A1)
-- **Steps:** arm slot 0: onboard temp, hi = ambient + 3 °C, hst 1; `alarm poll` for
-  baseline (no alarm); assist: finger on sensor until it crosses; then cool down.
-- **Expect:** exactly one alarm on crossing (fPort 3 decoded: type/threshold/value); no
-  re-fire inside the hysteresis band; a "cleared" transition per spec on cool-down.
+**#348: `hst` is a per-rule dwell/hold in seconds, not a hysteresis band.** `alarm-notif-time`
+and the illuminance-only `alarm-light-confirm-delay` config keys are removed — every kind now
+reads its own timing from the rule's `hst` field (see `doc/version 1.4.md` §7 for the full
+per-kind table). The scenarios below test each kind's specific `hst` role, plus the "early
+revert resets the window" behavior that a naive check-once-at-expiry timer would get wrong
+(AT-ALM-01b/03b). `alarm poll` forces one evaluation pass immediately — use it to pin down
+timing without waiting for the 3 s main-loop cadence, but note the dwell/hold deadlines
+themselves are still wall-clock (`k_uptime_get()`), so waiting real time past the deadline is
+still required before the next `alarm poll` will observe it as elapsed.
+
+### AT-ALM-01 — onboard temperature threshold + dwell (D, SA; maps A1)
+- **Steps:** arm slot 0: onboard temp, hi = ambient + 3 °C, hst = 5 (`alarm set 0 onboard
+  temperature <lo> <hi> 5`); `alarm poll` for baseline (no alarm); assist: finger on sensor
+  until it crosses; `alarm poll` immediately (before 5 s), then again after 5 s; then cool
+  down and `alarm poll` once more.
+- **Expect:** the immediate poll (before the dwell elapses) shows no alarm yet; the poll
+  after ~5 s shows exactly one alarm (fPort 3 decoded: type/threshold/value); the poll after
+  cooling shows an immediate "cleared" transition, no matching dwell on the way down.
+- **Cleanup:** `alarm clear 0`.
+
+### AT-ALM-01b — dwell window resets on an early revert (D, SA; maps A1)
+- **Steps:** same slot 0 as AT-ALM-01 (hst = 5); assist: cross the bound, hold ~2 s, release
+  back inside the bound, `alarm poll` (expect no alarm — dwell interrupted); wait a further
+  4 s and `alarm poll` again (still expect no alarm — the window was reset, not just paused,
+  so the ~2 s spent outside the bound the first time does NOT carry over).
+- **Expect:** no alarm fires from the combined ~6 s of intermittent exposure, since no single
+  continuous stretch reached 5 s. This directly exercises the #348 "continuous, not
+  check-once-at-expiry" dwell requirement — a regression here would silently readmit the old
+  illuminance-dwell weakness (#319) across every threshold quantity.
 - **Cleanup:** `alarm clear 0`.
 
 ### AT-ALM-02 — 1-Wire slot threshold (D, SA; maps A2)
 - Same as AT-ALM-01 with source = enrolled slot 1 (warm the probe in hand).
 
-### AT-ALM-03 — state alarms hall/input, edge & level (D, SA; maps A3, A4)
-- **Steps:** arm state rules (from/to) for hall-left and input-A; assist: magnet/short per
-  AT-SEN-02/03.
-- **Expect:** edge rule fires on the configured transition only; level semantics per spec;
-  with `alarm-limit 0` (explicitly set, not the baseline since #346) ⇒ dual uplink per edge
-  (A13 behaviour).
+### AT-ALM-03 — state alarms hall/input, edge & level with confirm+hold (D, SA; maps A3, A4)
+- **Steps:** arm an edge rule with a confirm+hold window, `alarm set 0 hall-left state 0 1 5`;
+  assist: apply the magnet, `alarm poll` immediately (expect no alarm — confirm not yet
+  elapsed), `alarm poll` again after 5 s (expect exactly one alarm), then re-apply the magnet
+  within the next 5 s and `alarm poll` (expect no second alarm — hold/re-arm-blocked). Then
+  arm a level rule `alarm set 0 hall-left state 1 1 5` and confirm it only activates once the
+  magnet has been held continuously past 5 s, clearing immediately on removal.
+- **Expect:** edge fires only after the 5 s confirm, then blocks re-arming for the same 5 s;
+  level dwells the same way on activation but clears immediately; with `alarm-limit 0`
+  (explicitly set, not the baseline since #346) ⇒ dual uplink per edge (A13 behaviour).
 
-### AT-ALM-04 — momentary PIR/accel one-shot (D, SA; maps A5)
-- **Steps:** arm PIR state one-shot; wave once.
-- **Expect:** one alarm; auto-rearm per `alarm-notif-time`; red/orange event LED per §16
-  for `alarm-notif-time` seconds.
+### AT-ALM-03b — edge confirm resets on an early revert (D, SA; maps A1b analogue for STATE)
+- **Steps:** same edge rule as AT-ALM-03 (hst = 5); assist: apply the magnet, hold ~2 s,
+  remove it before 5 s, `alarm poll` (expect no alarm); re-apply and hold the full 5 s,
+  `alarm poll` (expect exactly one alarm, timed from this second application, not credited
+  for the earlier partial hold).
+- **Expect:** the interrupted first attempt contributes nothing to the second — same
+  continuous-dwell requirement as AT-ALM-01b, now verified for the STATE edge path.
 
-### AT-ALM-05 — rate (count) alarm (D, SA; maps A6)
-- **Steps:** rule: hall count rate hi=2 per report interval; assist: 3 magnet passes within
-  one interval.
-- **Expect:** fires when delta > 2; not on 2 or fewer.
+### AT-ALM-04 — momentary PIR/accel one-shot, hst as hold/re-arm only (D, SA; maps A5)
+- **Steps:** arm PIR state one-shot with a hold window, `alarm set 0 pir state 0 1 8`; wave
+  once and `alarm poll` immediately.
+- **Expect:** the alarm fires on the very same poll as the pulse (no confirm delay — momentary
+  sources fire immediately, unlike AT-ALM-01/03); a second wave within 8 s produces no second
+  alarm; a wave after 8 s does. Red/orange event LED behaviour is covered separately in A12
+  (commissioning-only orange diagnostic, fixed timing) vs A14 (red alarm-active blink, tracks
+  `active` — i.e. tracks this same 8 s hold, not a separate LED timer).
+
+### AT-ALM-05 — rate (count) alarm, hst as hold/re-arm (D, SA; maps A6)
+- **Steps:** rule: hall count rate hi=2 per report interval, hst = 10 (`alarm new hall-left
+  count 2 10`); assist: 3 magnet passes within one interval, then another 3-pass over-rate
+  window within 10 s of the first firing, then one more after 10 s.
+- **Expect:** fires on the first over-rate window (delta > 2, not on 2 or fewer); the second
+  over-rate window within the 10 s hold produces no second alarm; the one after 10 s does.
 
 ### AT-ALM-06 — rate limiting (D, SA; maps A11)
 - **Steps:** `config alarm-limit 60`, save; trigger the same alarm 3× within 60 s.
 - **Expect:** first uplink immediate, subsequent suppressed until the window elapses;
-  suppressed events still counted/batched per spec.
+  suppressed events still counted/batched per spec. (Unaffected by #348 — `alarm-limit` is a
+  separate, still-global uplink throttle, not a per-rule timing.)
 - **Cleanup:** restore baseline `alarm-limit 10` (not `0` — that was the pre-#346 default).
 
 ### AT-ALM-07 — undervoltage latch (DR+PPK2, A; maps #210, S11)
@@ -817,13 +860,20 @@ slot bytes (the manual plan's set_param vector includes a worked alarm_0 example
   low-battery + red LED (assist confirm on release) + device_status low-batt bit in
   GetInfo; then `V 3000` → verify hysteresis-based recovery.
 - **Expect:** alarm exactly once (latched, not repeating every sample); status bit tracks.
+  (Unaffected by #348 — the battery watchdog is independent of the 16 rule slots and keeps
+  its own fixed 0.3 V hysteresis, not `hst`.)
 - **Evidence:** decoded alarm + before/after GetInfo.
 
-### AT-ALM-08 — invalid slot sanitisation & rules reload (D, A; maps H-10)
-- **Steps:** write a malformed 17-byte blob into `alarm-15` via SetParam (bad
-  source/quantity, flags=present); read `alarm list`.
-- **Expect:** invalid slot sanitised/ignored with a report (reload returns invalid count);
-  the other 15 slots unaffected; no crash on the next poll.
+### AT-ALM-08 — invalid rule rejected/sanitised (D, A; maps H-10, #203)
+- **Steps:** (a) via SetParam, attempt slot 15 with an inverted/collapsed THRESHOLD band
+  (`hi <= lo`, e.g. `lo=20, hi=20`) — expect rejection, not silent acceptance (#348 replaces
+  the old `hi-lo <= 2*hst` band-collapse guard with a direct `hi > lo` check, since `hst` no
+  longer offsets the band); (b) attempt a rule with `hst` outside `[0, 3600]` (e.g. `-1` or
+  `4000`) on any kind — expect rejection; (c) write a malformed 17-byte blob into `alarm-15`
+  directly via SetParam (bad source/quantity, flags=present) and read `alarm list`.
+- **Expect:** (a) and (b) rejected with an error, slot NOT stored; (c) invalid slot
+  sanitised/ignored with a report (reload returns invalid count); the other 15 slots
+  unaffected; no crash on the next poll.
 - **Cleanup:** clear slot 15.
 
 ## 13. History (AT-HIS)
@@ -1268,9 +1318,9 @@ automated; *(excluded)* items are listed with reasons below the table.
 | H3–H5 | AT-HIS-02 | A | D | – | |
 | H6, H7 | AT-HIS-06 | A | DR | – | |
 | H8 | AT-HIS-03 | A | R | – | |
-| A1 | AT-ALM-01 | SA | D | finger | |
+| A1 | AT-ALM-01, AT-ALM-01b | SA | D | finger | |
 | A2 | AT-ALM-02 | SA | D | probe | |
-| A3, A4, A13 | AT-ALM-03 | SA | D | magnet/jumper | |
+| A3, A4, A13 | AT-ALM-03, AT-ALM-03b | SA | D | magnet/jumper | |
 | A5, A12 | AT-ALM-04 | SA | D | wave + LED | |
 | A6 | AT-ALM-05 | SA | D | magnet | |
 | A7 | arming path of AT-ALM-01..03 via SetParam + AT-NFC-03 | A/SA | D | phone | |
@@ -1278,6 +1328,7 @@ automated; *(excluded)* items are listed with reasons below the table.
 | A9 | *(partial)* run AT-ALM-01 with a second slot on the same source when time allows | SA | D | finger | |
 | A10 | AT-LRW-12 | SA | DR | magnet | |
 | A11 | AT-ALM-06 | SA | D | magnet | |
+| A14 | AT-ALM-04 (same wave, watch `active=`/LED correlation) | SA | D | wave + LED | |
 | C1 | AT-CFG-03, AT-LRW-06 | A | DR | – | |
 | C2 | AT-CFG-04 | A | D | – | |
 | C3, C6, C7 | AT-LRW-06 | A | DR | – | ✅ |
