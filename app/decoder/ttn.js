@@ -1,3 +1,6 @@
+// Strict ES5 only in this whole file — the ChirpStack v3 JS engine (otto)
+// rejects any ES6 syntax at parse time, even in code that never executes.
+
 // ChirpStack v3 entry point — delegates to the TTS v3 / ChirpStack v4 codec below.
 function Decode(fPort, bytes, variables) {
   return decodeUplink({ fPort: fPort, bytes: bytes }).data;
@@ -654,13 +657,16 @@ function decodeTelemetry(bytes) {
 // Examples (the object passed as input.data):
 //   { "command": "get_info", "seq": 1 }
 //   { "command": "force_send" }
-//   { "command": "clock_sync" }
+//   { "command": "clock_sync" }             // empty: network re-sync (LRW or NFC)
+//   { "command": "clock_sync", "clock_sync": { "unix_time": 1780000000 } }  // one-shot bootstrap
 //   { "command": "reboot" }                 // also settings_save / device_reset
 //                                            // (factory_reset/set_secret_key are nfc/shell only —
 //                                            // rejected over LoRaWAN, so no downlink for them here)
 //   { "command": "reset_counters", "hall_left": true, "input_a": true }
 //   { "command": "get_config", "page": 0 }
 //   { "command": "req_history", "from_unix": 1780000000, "to_unix": 1780003600 }
+//   { "command": "req_history_page", "req_history_page": { "start_ord": 440 } }
+//                                            // nfc-only transport — rejected over LoRaWAN too
 //   { "command": "get_param", "lorawan_field": [3], "application_field": [4, 7] }
 //   { "command": "set_param", "seq": 5,
 //     "lorawan": { "adr": true },
@@ -829,14 +835,25 @@ function encodeDownlinkCommand(cmd) {
   } else if (name === "req_history") {
     if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
+  } else if (name === "clock_sync") {
+    // Empty body (LRW): re-sync the RTC from the network (DeviceTimeReq). With
+    // unix_time set: one-shot RTC bootstrap (normally an NFC-only use case, but
+    // encodable here too since the field is transport-agnostic).
+    if (b.unix_time) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.unix_time));
+  } else if (name === "req_history_page") {
+    // #260 — NFC-only transport (rejected with NOT_READY over LoRaWAN), encoded
+    // here so the same builder can produce a hand-injected NFC payload.
+    if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
+    if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
+    if (b.start_ord) body = body.concat(_encTag(3, 0)).concat(_encVarint(b.start_ord));
   }
   } catch (e) {
     return { bytes: null, error: e.message };
   }
-  // get_info / settings_save / reboot / device_reset / force_send / clock_sync /
-  // w1_scan: empty body. (factory_reset and set_secret_key are nfc/shell only —
-  // never a LoRaWAN downlink — so they have no encoder branch here; sending either
-  // by tag/id still round-trips through the command map above for decoding an
+  // get_info / settings_save / reboot / device_reset / force_send / w1_scan:
+  // empty body. (factory_reset and set_secret_key are nfc/shell only — never a
+  // LoRaWAN downlink — so they have no encoder branch here; sending either by
+  // tag/id still round-trips through the command map above for decoding an
   // NFC-side exchange, just not as a buildable downlink.)
 
   out = out.concat(_encLenDelim(tag, body));
@@ -940,6 +957,30 @@ function decodeDownlinkCommand(bytes) {
           } else { break; }
         }
         cmd.req_history = rh;
+      } else if (field === 12) { // clock_sync (empty = network re-sync; unix_time = NFC bootstrap)
+        var cs = {}, cp = pos;
+        while (cp < end) {
+          var t12 = _pbReadVarint(bytes, cp); cp = t12.next;
+          var f12 = t12.value >>> 3, w12 = t12.value & 0x7;
+          if (w12 === 0) {
+            var v12 = _pbReadVarint(bytes, cp); cp = v12.next;
+            if (f12 === 1) cs.unix_time = v12.value;
+          } else { break; }
+        }
+        cmd.clock_sync = cs;
+      } else if (field === 13) { // req_history_page (#260, NFC-only transport)
+        var rp = {}, pp = pos;
+        while (pp < end) {
+          var t13 = _pbReadVarint(bytes, pp); pp = t13.next;
+          var f13 = t13.value >>> 3, w13 = t13.value & 0x7;
+          if (w13 === 0) {
+            var v13 = _pbReadVarint(bytes, pp); pp = v13.next;
+            if (f13 === 1) rp.from_unix = v13.value;
+            else if (f13 === 2) rp.to_unix = v13.value;
+            else if (f13 === 3) rp.start_ord = v13.value;
+          } else { break; }
+        }
+        cmd.req_history_page = rp;
       }
       pos = end;
     } else {
@@ -1324,10 +1365,16 @@ function decodeUplink(input) {
 }
 
 // Make the codec importable from Node (tests) without affecting the
-// TTN/ChirpStack sandbox, which has no `module`.
+// TTN/ChirpStack sandbox, which has no `module`. No ES6 shorthand properties
+// here — see the ES5-only note at the top of the file.
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
-    decodeUplink, encodeDownlink, decodeDownlink, Decode,
-    decodeTelemetry, decodeDownlinkResponse, decodeAlarmBatch,
+    decodeUplink: decodeUplink,
+    encodeDownlink: encodeDownlink,
+    decodeDownlink: decodeDownlink,
+    Decode: Decode,
+    decodeTelemetry: decodeTelemetry,
+    decodeDownlinkResponse: decodeDownlinkResponse,
+    decodeAlarmBatch: decodeAlarmBatch
   };
 }
