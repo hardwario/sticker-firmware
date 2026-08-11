@@ -1,3 +1,6 @@
+// Strict ES5 only in this whole file — the ChirpStack v3 JS engine (otto)
+// rejects any ES6 syntax at parse time, even in code that never executes.
+
 // ChirpStack v3 entry point — delegates to the TTS v3 / ChirpStack v4 codec below.
 function Decode(fPort, bytes, variables) {
   return decodeUplink({ fPort: fPort, bytes: bytes }).data;
@@ -1324,10 +1327,16 @@ function decodeUplink(input) {
 }
 
 // Make the codec importable from Node (tests) without affecting the
-// TTN/ChirpStack sandbox, which has no `module`.
+// TTN/ChirpStack sandbox, which has no `module`. No ES6 shorthand properties
+// here — see the ES5-only note at the top of the file.
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
-    decodeUplink, encodeDownlink, decodeDownlink, Decode,
-    decodeTelemetry, decodeDownlinkResponse, decodeAlarmBatch,
+    decodeUplink: decodeUplink,
+    encodeDownlink: encodeDownlink,
+    decodeDownlink: decodeDownlink,
+    Decode: Decode,
+    decodeTelemetry: decodeTelemetry,
+    decodeDownlinkResponse: decodeDownlinkResponse,
+    decodeAlarmBatch: decodeAlarmBatch
   };
 }
