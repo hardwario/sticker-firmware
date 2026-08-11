@@ -70,7 +70,7 @@ const COMMANDS = [
   },
   { name: "get_info", hex: "08032200", data: { seq: 3, command: "get_info" } },
   { name: "settings_save", hex: "08043200", data: { seq: 4, command: "settings_save" } },
-  { name: "clock_sync", hex: "08056200", data: { seq: 5, command: "clock_sync" } },
+  { name: "clock_sync", hex: "08056200", data: { seq: 5, command: "clock_sync", clock_sync: {} } },
   { name: "force_send", hex: "08064a00", data: { seq: 6, command: "force_send" } },
   { name: "reboot", hex: "08083a00", data: { seq: 8, command: "reboot" } },
   { name: "w1_scan", hex: "08097200", data: { seq: 9, command: "w1_scan" } },
@@ -849,4 +849,39 @@ test("get_param.page encodes and decodes (#93.3 / M12)", () => {
   const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
   assert.deepEqual(back.get_param.application_field, [6, 7]);
   assert.equal(back.get_param.page, 1);
+});
+
+// --- #345: encodeDownlinkCommand/decodeDownlinkCommand previously dropped
+// clock_sync.unix_time and req_history_page's fields entirely (silent no-op
+// body instead of an error) -------------------------------------------------
+test("clock_sync.unix_time round-trips instead of encoding an empty body (#345)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 6, command: "clock_sync", clock_sync: { unix_time: 1786449445 } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  assert.ok(enc.bytes.length > 2, "body must not be empty");
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.clock_sync.unix_time, 1786449445);
+});
+
+test("clock_sync with no unix_time still encodes an empty body (network re-sync)", () => {
+  const enc = codec.encodeDownlink({ data: { seq: 7, command: "clock_sync" } });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.command, "clock_sync");
+  assert.equal(back.clock_sync.unix_time, undefined);
+});
+
+test("req_history_page.from_unix/to_unix/start_ord round-trip (#345, #260)", () => {
+  const enc = codec.encodeDownlink({
+    data: {
+      seq: 8, command: "req_history_page",
+      req_history_page: { from_unix: 1780000000, to_unix: 1780003600, start_ord: 440 },
+    },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.req_history_page.from_unix, 1780000000);
+  assert.equal(back.req_history_page.to_unix, 1780003600);
+  assert.equal(back.req_history_page.start_ord, 440);
 });
