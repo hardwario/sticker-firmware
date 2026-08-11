@@ -36,6 +36,20 @@ pass/fail. The tester only watches.
   `get_uplinks`, `get_device`, …) for TTN, and through the ChirpStack API for ChirpStack.
 - **Safety rules**: never `pkill -9 JLink`; `rttt --reset` is broken (reboot via shell/downlink
   instead); flash without `--erase` to preserve NVS keys/config unless a clean state is required.
+- **RTT shell timing gotchas**: (1) `ats sensors sample` with a 1-Wire machine probe attached can
+  take well over 15–20 s (multiple sequential 1-Wire/I²C reads) — the RTT tooling may return an
+  empty result before the real output lands even with a generous timeout; prefer `ats cmd lrw
+  08032200` (local `GetInfo`) when only battery/alarm/status fields are needed, since it responds
+  fast. (2) Commands that persist to NVS or reboot (`reboot`, `settings save`,
+  `device_reset`/`factory_reset`/`vendor_reset`, `w1 enroll`) are **deferred actions** when
+  injected via `ats cmd lrw <hex>` / `ats cmd nfc <hex>` — the debug-shell injection path
+  deliberately does not execute them (only real transport-delivered commands do), so use the
+  native shell command (`settings save`, etc.) or a real downlink to actually exercise the
+  persist/reboot behavior; the local injection path is for protocol/response-shape checks only.
+- **History backend**: check `history info`'s `backend:` field before planning any multi-step
+  history scenario (H6/H8/H9/K5/K5b/C1-style checks) — a **RAM** backend means any `settings
+  save`-triggered reboot wipes accumulated records, so sequence config changes that need a reboot
+  *before* starting to accumulate records, not in the middle.
 
 ### fPort map (quick reference)
 
@@ -60,7 +74,7 @@ byte is the `seq` and is echoed in the reply.
 | `sample` | `0805aa0100` |
 | `reboot` | `08083a00` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
-| `set_param`: ADR on, `interval_report`=120 s, `alarm_0`=onboard temp 5–30 °C (hyst 1) | `0801121e0a021801120220782a14b2031103000000000000a0400000f0410000803f` |
+| `set_param`: ADR on, `interval_report`=120 s, `alarm_0`=onboard temp 5–30 °C (hyst 1) | `0801121d0a022001120218782a131a1100000100000000a0400000f0410000803f` |
 | `lrw_reset` | `0801820100` |
 | `lrw_join` | `08018a0100` |
 
@@ -421,6 +435,36 @@ consecutive fails; `LC FAIL in WARNING (total: n/5)` → `State: WARNING -> RECO
 
 - [ ] Pass
 
+### L9b — Recovery after a rapid rejoin storm (bench congestion / duty-cycle stress)
+
+**Goal:** A short burst of back-to-back reboot/rejoin-triggering events (e.g. several `reboot` /
+`device_reset` / `settings save` cycles fired minutes apart while iterating on other tests)
+should not leave the device stuck outside HEALTHY indefinitely — it must keep retrying with
+backoff and eventually recover once a clear TX/RX window is available, bounded by the L9 backoff
+schedule (base 60 s, ×2, capped 3600 s).
+**Observable:** After the storm, `ats lrw status` cycles through `RECONNECT`/join attempts and
+returns to `HEALTHY` within the expected backoff-schedule bound — it should not sit at
+`devaddr=00000000`/`fcnt up` frozen far beyond one full backoff cap (3600 s) with zero visible
+join attempts. A filtered RTT log (`lorawan|Join|MlmeConfirm`) taken on a **freshly-booted**
+session (so it can't be stale) should show periodic `JoinReq`/`MlmeConfirm` activity, not silence.
+**Prompt for Claude:**
+> Deliberately trigger 4–5 reboot/rejoin events within a short window (a mix of `reboot`,
+> `device_reset`, and `settings save`, spaced ~1–2 min apart — e.g. while exercising G5/G6/S-caps
+> in the same session). Afterward, check `ats lrw status` repeatedly over several minutes. If it
+> stays in `RECONNECT` well past the point a single 60 s (or even a few escalated) backoff cycle
+> should have resolved it: (a) confirm the device is otherwise alive (GetInfo/config keep working
+> locally — this is NOT a crash), (b) pull a **fresh** (post-reboot) filtered log for
+> `lorawan|Join|MlmeConfirm` and report exactly what it shows (e.g. `MlmeConfirm failed: Rx 2
+> timeout` indicates a JoinReq WAS sent but no JoinAccept arrived — check whether this is
+> gateway/RF congestion — e.g. a shared bench gateway busy with other devices' traffic, visible via
+> the LNS's raw gateway-frame log — rather than the device failing to transmit at all). Note
+> whether a genuine PPK2 power-cycle (not just a soft reboot) changes anything. If the device
+> never recovers on a bench with an otherwise-idle/dedicated gateway, this is a candidate real
+> defect in the rejoin/backoff logic or the EU868 join-channel duty-cycle accounting under rapid
+> repeated join attempts — worth its own issue with the captured log evidence.
+
+- [ ] Pass
+
 ### L10 — Downlink reception
 
 **Goal:** Device receives and logs downlinks.
@@ -599,6 +643,24 @@ conditions (release build masks-off: no `CONFIG_LOG`, `PM=y`).
 > Confirm `cap_w1_sensors` is enabled and the probes are wired. Run `ats sensors sample` and
 > report `ext1`/`ext2` temperatures; sanity-check them. Ask me to warm one probe (e.g. by hand)
 > and confirm that channel's reading rises. Confirm the values reach fPort 2 telemetry.
+
+- [ ] Pass
+
+### S6b — First-ever 1-Wire sensor enrollment on an untaught unit (regression guard, #M7)
+
+**Goal:** A fresh unit with `cap_w1_sensors` on but **no slot taught yet** can still discover and
+enroll its first sensor — the sensor driver devices must be initialised whenever the capability
+is on, not only after a slot is already taught (that was a chicken-and-egg bug: the scan callback
+needs the sensor device ready, but the device was only made ready once a slot was taught).
+**Observable:** On a unit with all four `sensorN-rom` still all-zero, `w1 scan` finds the
+connected sensor and `w1 enroll <slot>` successfully binds it (not "0 slot(s) bound" / `-EAGAIN`
+forever); `ats sensors serial` shows a non-zero DS18B20/Machine Probe count.
+**Prompt for Claude:**
+> Start from (or force via `settings device-reset`/`factory-reset`) a state where
+> `cap_w1_sensors` is on but all `sensorN-rom` are zero. With a DS18B20 or machine probe
+> connected, run `w1 scan` and `w1 enroll <slot>`. Confirm the sensor is found and bound (not "no
+> devices found" / "0 slot(s) bound"), `config sensorN-rom` shows the new ROM, and after
+> `settings save` the sensor's readings reach fPort 2 telemetry.
 
 - [ ] Pass
 
@@ -801,6 +863,29 @@ fPort 85 with `frame_index/frame_count/t0_unix/interval_s/present/samples`.
 
 - [ ] Pass
 
+### H6b — ReqHistory replay at a high data rate (large-payload regression guard, #C1)
+
+**Goal:** The replay's per-frame staging buffer is sized to the DR payload budget, not a stale
+fixed bound — a prior bug (`HISTORY_SAMPLES_MAX` fixed at 48 B while the real per-frame budget at
+higher DRs is 150–220+ B) overran a stack buffer and could hard-fault the device. This scenario
+pins that class of regression.
+**Observable:** With ADR converged to a high DR (EU868 DR3+, ideally DR5) and ≥15–20 stored
+records, `ReqHistory` returns one or more `HistoryFrame`s with **no reset/hard-fault** and the
+device stays fully responsive (RTT shell/GetInfo keep working) throughout and immediately after.
+**Prompt for Claude:**
+> Enable ADR (`config lrw-adr true`, `settings save`) and let it converge to DR3 or higher (check
+> `ats lrw status`). Accumulate ≥15–20 history records (raise `interval_report` beforehand if
+> needed for speed — note this is a **RAM-backend debug build**, so any `settings save` reboot
+> wipes accumulated records; do config changes needing a reboot *before* starting the count).
+> Send `req_history` covering the whole stored range (`to_unix` must be a valid `uint32` — use
+> `4294967295` for "no upper bound", not a JS-native huge number, or the device correctly rejects
+> it with `Error{BAD_REQUEST,"integer too large"}` rather than crashing). Confirm: (a) the device
+> does not reset (RTT `status`/a shell command still responds immediately before and after), (b)
+> the returned frame(s) decode correctly and byte-match `history read`'s records one-for-one
+> (temperature/humidity/timestamps). Report the DR used, record count, and frame count.
+
+- [ ] Pass
+
 ### H7 — ReqHistory empty window
 
 **Goal:** Requesting an empty range returns a clean error.
@@ -869,6 +954,22 @@ selection list and stored records.
 > description); the scenarios below (A1, A3, A5, A6) each call out what `dwell` does for that kind
 > and give a concrete recipe to observe it, including the "canceled by an early revert" case that a
 > naive check-once-at-expiry implementation would get wrong.
+>
+> **Shell syntax gotcha:** `alarm new <source> <quantity> <kind-args>` / `alarm set <i> <source>
+> <quantity> <kind-args>` — `<source>`/`<quantity>` are **names** (e.g. `onboard`,
+> `temperature`), not numeric indices, and there is **no** literal `threshold`/`state`/`count`
+> keyword in the actual command line — the kind is inferred from the quantity. Threshold args are
+> `<lo> <hi> [dwell]` (e.g. `alarm new onboard temperature 0 20 1`); adding a `threshold` token as
+> if it were a positional argument shifts everything and fails with "wrong parameter count".
+>
+> **Bench tip — testing alarms without a network join:** the alarm-poll loop in the main
+> application only runs while the LoRaWAN state is HEALTHY, so on a device that hasn't joined (or
+> has dropped to RECONNECT) `alarm new`/`alarm set` + the local **`alarm poll`** command (force a
+> sample + one evaluation pass now) still fully exercises rule activation — check the result via
+> `alarm list` (shows `active=0/1`) or a local `GetInfo` (`ats cmd lrw 08032200`, works without a
+> radio session) and read its `active_alarms`/`device_status_flags`. This decouples alarm-engine
+> correctness from LoRaWAN connectivity entirely — useful when the bench gateway is congested or
+> the device is mid-rejoin.
 
 ### A1 — Threshold alarm (onboard temperature): band + dwell
 
@@ -1176,6 +1277,11 @@ each edge sent immediately as its own one-event fPort 3 frame, fPort 2 not rate-
 > SetParam with `save=true` (or a SettingsSave command). Confirm a `Response.Ack`, that the device
 > persists and reboots, and that the new value survives the reboot (read back via `config`). Report
 > the before/after across the reboot.
+>
+> **Negative check:** stage a SetParam **without** `save=true`, then trigger a **plain `reboot`**
+> command (not SettingsSave, not a save-triggering command like `device_reset`). Confirm the
+> staged value has **reverted** to the last genuinely-saved value after the reboot — a plain
+> reboot must not accidentally commit an unsaved stage.
 
 - [ ] Pass
 
@@ -1355,6 +1461,27 @@ network: unix=<...>`. Per `doc/version 1.4.md` §5 the sync is **requested autom
 > After syncing the clock, let a few records accumulate, then `history read` and confirm the
 > record timestamps are real UNIX times consistent with the synced clock (not boot-relative
 > uptime). Report a couple of timestamps.
+
+- [ ] Pass
+
+### K5b — Off-cadence triggers never disturb the history interval (regression guard, #H1)
+
+**Goal:** History captures only on the fixed `interval_report` cadence — an ad-hoc trigger
+(alarm uplink, `force_send`, `sample`) must sample and send but must **not** append an extra
+history record or shift the cadence timer, since replay reconstructs each record's time as
+`base + ordinal * interval_report` with no per-record timestamp on the wire.
+**Observable:** `history count` is unchanged immediately after firing several off-cadence
+triggers mid-interval, and the next periodic record still lands exactly `interval_report` seconds
+after the previous one (no skip, no extra entry, no skew) — checked over several consecutive
+intervals, not just once.
+**Prompt for Claude:**
+> Let 2–3 records accumulate on a known cadence and note `history read`'s timestamps. Mid-way
+> through the next interval, fire `force_send` and `sample` two or three times in quick
+> succession (`ats cmd lrw <hex>` locally, or real downlinks). Immediately re-check `history
+> count` — it must be unchanged. Wait for the next periodic tick and confirm it lands exactly
+> `interval_report` seconds after the prior record (not early, not skewed). Repeat once more to
+> confirm the cadence holds over multiple intervals despite the interleaved triggers. Report the
+> full timestamp sequence.
 
 - [ ] Pass
 
