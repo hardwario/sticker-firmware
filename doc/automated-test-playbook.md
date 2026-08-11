@@ -239,8 +239,20 @@ incl. `decoded_payload` from `ttn.js`), `mcp__tts__send_downlink` (`f_port`, hex
 
 - Purpose here: **decoder parity** (same uplink must decode identically on both LNS — both
   run `app/decoder/ttn.js`) and a second-opinion join path.
-- Known bench quirk: TTN does not reliably answer LinkCheckReq (`gateways=0`) — do NOT run
-  LC state-machine tests against TTN; use ChirpStack.
+- **Correction (2026-08-11), supersedes the old "TTN doesn't answer LinkCheckReq" note**: after
+  the `hm-sticker-otaa-test` device recreate on 2026-07-07, TTN answers `LinkCheckReq`
+  correctly and reliably — confirmed decisive on 2026-08-11: `ats lrw check` got an immediate
+  `LinkCheckAns` (margin 26 dB, 2 gateways), and the session then held **HEALTHY on the same
+  DevAddr for 438 s / 9 uplinks with zero link-check failures** (`healthy->warning: 0/3`
+  throughout). **On the same bench, ChirpStack (`hm-sticker-otaa-cs`) showed the opposite**: a
+  freshly release-flashed device with stock `lrw-link-check-interval`/`lrw-link-check-fail-rejoin`
+  defaults (both `5`, per `app_config.yml`) rejoined OTAA (fresh DevAddr each time) roughly every
+  5-16 minutes, with device uptime climbing continuously across rejoins (confirmed via
+  `unix_time - uptime_s` staying self-consistent — this is LoRaWAN-layer RECONNECT churn, not
+  an MCU reboot loop). **Net effect: TTN is currently the more reliable LNS on this bench for LC
+  state-machine work (AT-LRW-07/AT-LRW-08); ChirpStack is the one that needs the caveat now.**
+  Not root-caused further (gateway duty-cycle vs genuine ChirpStack LinkCheckAns handling both
+  remain open) — flag if picking this up.
 
 ### 3.6 Manager-App debug control server (real-NFC path)
 
@@ -467,13 +479,27 @@ Run these first in every session; they gate everything else. All `A`/host-only.
   after each, `config show`.
 - **Expect:** serial, secret key, claim token, LoRaWAN identity keys survive both;
   application params reset to defaults after factory reset (interval-report back to 900).
+- **Result (2026-08-11, real debug→release reflash, not just factory-reset)**: built a genuine
+  `prj.conf`-only release image (`.config` confirmed `CONFIG_SHELL`/`CONFIG_USE_SEGGER_RTT` both
+  unset — release truly has zero RTT/shell surface, not just no shell commands), flashed it over
+  a provisioned debug device via `JLinkExe loadfile` (sector-erase, no `--erase`). After a real
+  power cycle (see AT-BOOT-04's PPK2 correction below), the autonomous post-join GetInfo uplink
+  decoded to `debug: false`, `serial_number: 2162199999` (unchanged) and a successful OTAA join
+  on the preserved `lrw_deveui`/`lrw_appkey` — full identity survived a real firmware-variant
+  swap, not just a same-image reflash. Since release has no shell/RTT, post-release verification
+  had to go through LRW (autonomous GetInfo) — there is currently no way to inspect NFC state on
+  a release device without a phone or external reader.
 - **Cleanup:** restore run-plan config values, `settings save`.
 
 ### AT-BOOT-04 — release boot sanity / no reset loop (R; maps regression a42dde6)
 - **Pre:** release FW just flashed; PPK2 powering the DUT.
-- **Steps:** power-cycle via PPK2 (`QUIT`+relaunch holder or voltage 0→{PPK2_MV}); watch the
-  PPK2 current trace ~60 s (or, without measurement mode, watch the LNS for the boot
-  uplink and ask the operator to confirm a single LED carousel).
+- **Steps:** power-cycle via PPK2 — **use `QUIT` then relaunch the holder, or a live `OFF` then
+  `ON` command (both call `toggle_DUT_power` directly); do NOT rely on setting the source
+  voltage to 0 and back** (confirmed 2026-08-11: `set_source_voltage(0)` alone does not power
+  off the DUT — LED kept blinking and the device kept transmitting on LoRaWAN for 90+ s at
+  commanded 0 mV; only an explicit `toggle_DUT_power("OFF")` is a real cut). Watch the PPK2
+  current trace ~60 s (or, without measurement mode, watch the LNS for the boot uplink and ask
+  the operator to confirm a single LED carousel).
 - **Expect:** exactly one boot signature (single carousel, single join/uplink burst) — no
   periodic ~8 s IWDG reset pattern (the historical release-only boot-ADC hang).
 - **Evidence:** current trace segment or LNS first-uplink timestamp.
@@ -1119,13 +1145,16 @@ cycle) to prove the device recovered. Run these LAST in a session.
   leakage in any response.
 
 ### AT-ADV-06 — power-cut during settings save (R+PPK2, A)
-- **Steps:** issue SettingsSave via NFC and cut power ~50 ms later (scripted PPK2 `V 0`);
-  repower; read full config. Repeat 5× with varied delays (0–500 ms).
+- **Steps:** issue SettingsSave via NFC and cut power ~50 ms later (scripted PPK2, **real
+  `toggle_DUT_power("OFF")` — see the §22 correction, NOT `set_source_voltage(0)`, which does
+  not actually remove power and would make this whole scenario silently test nothing**);
+  repower (`toggle_DUT_power("ON")`); read full config. Repeat 5× with varied delays (0–500 ms).
 - **Expect:** config is either fully-old or fully-new (NVS atomicity) — never a mix, never
   identity loss, never a boot loop.
 
 ### AT-ADV-07 — power-cut storms (R+PPK2, A)
-- **Steps:** 20 random power cycles (on-time uniform 1–30 s); then full smoke + AT-HIS-03
+- **Steps:** 20 random power cycles (real `toggle_DUT_power` off/on, not source-voltage-0 — see
+  AT-ADV-06's note; on-time uniform 1–30 s); then full smoke + AT-HIS-03
   + AT-CFG-07 checks.
 - **Expect:** no identity/config/history corruption; no reset-cause anomalies; joins recover.
 
@@ -1398,10 +1427,23 @@ PPK2 + J-Link detached).
   never open-set-exit.
 - **A killed rttt can leave the CPU halted** → next JLinkExe connect hangs; recover by
   re-flashing via a resetting flasher rather than fighting `connect`.
+- **A one-off `JLinkExe -CommanderScript` (flash/readback) while a persistent `rttt` daemon
+  holds the same J-Link SN breaks `rttt`'s connection** — next `send_command` returns
+  `"J-Link: Unspecified error."` even though a fresh raw JLinkExe connect works fine (target/
+  probe are OK, only rttt's session is stale). Fix: kill rttt's two PIDs (the `script` wrapper
+  + the python process) **by PID**, not `pkill -f` (see next gotcha), and restart it.
 - **`pkill -f` with jlink/rttt/script patterns kills your own shell** (exit 144/1 with no
   output). Kill by PID or `-x`.
-- **ChirpStack ABP needs `skip_fcnt_check`**; TTN doesn't answer LinkCheckReq on this bench;
-  OTAA DevAddr changes on every rejoin — never cache.
+- **ChirpStack ABP needs `skip_fcnt_check`**; OTAA DevAddr changes on every rejoin — never
+  cache. TTN's "doesn't answer LinkCheckReq" reputation is **stale** — see §3.5's 2026-08-11
+  correction; if anything, ChirpStack is now the LNS that churns through OTAA rejoins on this
+  bench with stock link-check defaults.
+- **PPK2 "cut power" via `set_source_voltage(0)` alone does NOT reliably power off the DUT**
+  (source-meter regulation floor / DUT decoupling keeps it alive) — confirmed directly: LED kept
+  blinking and the device kept transmitting on LoRaWAN for 90+ s at commanded 0 mV. Only
+  `toggle_DUT_power("OFF")` is a real power-cut; the scratchpad `ppk_hold.py` holder previously
+  only wired that to its `QUIT` command (which also kills the daemon) — it now also exposes
+  live `OFF`/`ON` commands that call `toggle_DUT_power` directly without restarting the holder.
 - **Capability-gated peripherals (DS2484 1-Wire bridge, LIS2DH) initialise only at boot** —
   `config cap-… true` + `settings save` (reboot) before they exist.
 - **Debug FLASH is ~99 % full** — adding test overlays may need
