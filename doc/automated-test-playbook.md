@@ -608,17 +608,26 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   (unlike `factory_reset`/`set_secret_key`, `device_reset`'s dispatch in `app_cmd.c` has no
   transport gate — it IS reachable over a LoRaWAN downlink, and hasn't been tried that way);
   after each, trigger an uplink and capture the fPort-85 response.
-- Also deliberately try **`factory_reset`** and **`set_secret_key`** over this same LRW path —
-  `app_cmd.c` gates both to `[nfc, shell]`/`[nfc, shell, vendor]` only, so the expected result
-  is `Response.Error{NOT_READY,"transport not allowed"}`, not silence or a crash. Confirms the
+- Also deliberately try **`factory_reset`**, **`set_secret_key`**, and **`req_history_page`**
+  over this same LRW path — `app_cmd.c` gates all three to `[nfc, shell]`/`[nfc, shell,
+  vendor]`/`[nfc]` respectively, so the expected result is
+  `Response.Error{NOT_READY,"transport not allowed"}`, not silence or a crash. Confirms the
   transport allowlist from the read-through, not just from source.
 - **Expect:** every command acks/responds with the echoed seq; exactly **one command
   consumed per RX window** (queue two → second arrives one uplink later); refused
   transports (per AT-CFG-03) return errors, not silence. `device_reset` over LRW is expected
   to succeed and reboot — since LRW has no `hio.stck:ack` concept, watch whether the deferred
   reboot fires immediately after the response uplink is handed to the MAC layer or waits for
-  something else; this differs from the NFC ack-gate path (§3.6 phone-free recipe) and hasn't
-  been characterized yet.
+  something else; this differs from the NFC ack-gate path (§3.6 phone-free recipe).
+- **Result (2026-08-11, real ChirpStack downlinks, sticker 2162199999):** all four confirmed.
+  `factory_reset`/`set_secret_key`/`req_history_page` each got back
+  `Response.Error{NOT_READY,"transport not allowed"}` with the seq echoed correctly, no state
+  change. `device_reset` succeeded: the `Response{seq,ack:{}}` uplink landed, then the device
+  rebooted and rejoined OTAA cleanly, with its autonomous post-join GetInfo uplink arriving
+  ~35s after the ack — i.e. LRW also does response-before-reboot ordering, just via ordinary
+  uplink-then-deferred-action sequencing rather than NFC's ack/backstop gate. Config diff
+  matched `app_config_device_reset()`'s preserve-list exactly (`cap-w1-sensors`/
+  `interval-report` reset, `lrw-appkey`/secret_key/serial/nonce_counter preserved).
 - **Evidence:** command → response-hex → decoded table. This is the core release-FW
   functional suite.
 
@@ -1345,7 +1354,7 @@ automated; *(excluded)* items are listed with reasons below the table.
 | C9 | AT-CFG-07 | A | D | – | |
 | C10 | AT-CFG-03, AT-NFC-07 | A/SA | D | phone | |
 | K1 | AT-CLK-01 | A | D | – | |
-| K2, K3, K6 | AT-CLK-02 | A/SA | DR | phone (K6) | |
+| K2, K3, K6 | AT-CLK-02 | A/SA | DR | phone (K6), or phone-free §3.6 | K6 ✅ (2026-08-11, phone-free: RTC set from injected unix_time, confirmed ticking forward afterward) |
 | K4 | AT-CLK-04 | A | D | – | |
 | K5 | AT-CLK-03 | A | D | – | |
 | N1 | AT-NFC-03 | SA | DR | phone | ✅ (AT-NFC-02) |
@@ -1354,8 +1363,8 @@ automated; *(excluded)* items are listed with reasons below the table.
 | N4 | AT-NFC-02 | SA | DR | phone | ✅ |
 | N5 | *(partial)* lrw_reset/lrw_join over NFC via `ats cmd nfc` on debug; phone control server has no op for it yet (improvement item) | A | D | – | |
 | N7 | *(on-request)* power-off boot-staged provisioning — needs a scripted power-off staging session | SA | DR | phone+power | |
-| N8 | AT-NFC-05, AT-NFC-06, AT-ADV-05 | SA | DR | phone (or phone-free frame-crafting, §3.6 — same protocol coverage, not the phone's own codec) | |
-| N9 | *(new, #299)* device_reset/factory_reset/set_secret_key over `hio.stck:cmd` with the ack-before-reboot handshake — all three reboot (set_secret_key since #322, which is what makes the rotated key live) — same AT-NFC-03 injection pattern as N1, plus confirming factory_reset is rejected over a LoRaWAN downlink and an all-zero set_secret_key is rejected | SA | DR | phone for the true ack path; §3.6 phone-free recipe covers decrypt/execute/config-diff decisively but always exercises the field-loss backstop, not `hio.stck:ack`, per its own limitation note | |
+| N8 | AT-NFC-05, AT-NFC-06, AT-ADV-05 | SA | DR | phone (or phone-free frame-crafting, §3.6 — same protocol coverage, not the phone's own codec) | ✅ (2026-08-11, phone-free: retransmission cache, stale-nonce rejection, and anti-brick window all decisive) |
+| N9 | *(new, #299)* device_reset/factory_reset/set_secret_key over `hio.stck:cmd` with the ack-before-reboot handshake — all three reboot (set_secret_key since #322, which is what makes the rotated key live) — same AT-NFC-03 injection pattern as N1, plus confirming factory_reset is rejected over a LoRaWAN downlink and an all-zero set_secret_key is rejected | SA | DR | phone for the true ack path; §3.6 phone-free recipe covers decrypt/execute/config-diff decisively but always exercises the field-loss backstop, not `hio.stck:ack`, per its own limitation note | ✅ (2026-08-11, phone-free: all three commands decisive over `hio.stck:cmd`; factory_reset/set_secret_key rejection + device_reset success independently re-confirmed over a real LRW downlink, see AT-LRW-06; all-zero set_secret_key rejected with `BAD_REQUEST,"zero key"` per #322) |
 | F1 | AT-LRW-03 | A | DR | – | |
 | F2, F3 | AT-HOST-03, AT-HOST-06 | A | host | – | |
 | — (new, no manual ID) | AT-BOOT-04/06, AT-CFG-06, AT-HIS-04/05, AT-PWR-01..07, AT-ADV-01..12, AT-SOAK-01..03, AT-NFC-08 | | | | AT-BOOT-04 ✅, AT-PWR-04 ✅ |
