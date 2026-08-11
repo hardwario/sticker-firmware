@@ -81,7 +81,7 @@ operator action, see §18); `M` = manual observation only (rare — LED checks o
 **Baseline state** (the state every scenario should start from and Cleanup should restore):
 device provisioned (serial + secret key + LoRaWAN keys set), `radio-mode lorawan`, activation
 per current run plan, `interval-report 900` or the run's chosen value, `history-enable false`,
-all 16 alarm slots empty, `alarm-limit 0`, clock synced if a network is available.
+all 16 alarm slots empty, `alarm-limit 10` (factory default, #346), clock synced if a network is available.
 
 ## 2. Bench architecture
 
@@ -789,7 +789,8 @@ slot bytes (the manual plan's set_param vector includes a worked alarm_0 example
 - **Steps:** arm state rules (from/to) for hall-left and input-A; assist: magnet/short per
   AT-SEN-02/03.
 - **Expect:** edge rule fires on the configured transition only; level semantics per spec;
-  `alarm-limit 0` ⇒ dual uplink per edge (A13 behaviour).
+  with `alarm-limit 0` (explicitly set, not the baseline since #346) ⇒ dual uplink per edge
+  (A13 behaviour).
 
 ### AT-ALM-04 — momentary PIR/accel one-shot (D, SA; maps A5)
 - **Steps:** arm PIR state one-shot; wave once.
@@ -805,7 +806,7 @@ slot bytes (the manual plan's set_param vector includes a worked alarm_0 example
 - **Steps:** `config alarm-limit 60`, save; trigger the same alarm 3× within 60 s.
 - **Expect:** first uplink immediate, subsequent suppressed until the window elapses;
   suppressed events still counted/batched per spec.
-- **Cleanup:** `alarm-limit 0`.
+- **Cleanup:** restore baseline `alarm-limit 10` (not `0` — that was the pre-#346 default).
 
 ### AT-ALM-07 — undervoltage latch (DR+PPK2, A; maps #210, S11)
 - **Pre:** `battery-level 2400` (default); PPK2 holder running.
