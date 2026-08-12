@@ -8,6 +8,8 @@
 #include "app_alarm_rules.h"
 #include "app_cmd.h"
 #include "app_config.h"
+#include "app_hall.h"
+#include "app_input.h"
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_report.h"
@@ -455,15 +457,57 @@ static bool read_counter(uint8_t source, uint32_t *out)
 	}
 }
 
-/* Current digital level for a STATE rule polled in app_alarm_poll (slot tilt).
- * hall/input/pir/accel STATE arrives via app_alarm_event, not here. */
+/* Current digital level for a STATE rule, re-sampled every app_alarm_poll (#348).
+ * hall/input additionally arrive event-driven via app_alarm_event() for immediate
+ * reaction (fall-through cancel, momentary fire), but a confirm/dwell armed by
+ * eval_state() only gets *resolved* once its deadline elapses — which, without
+ * this poll-time re-evaluation, would never happen while the level simply holds
+ * steady with no further edge to re-invoke eval_state(). Feeding the unchanged
+ * current level back in here every ~3s is what lets that "now >= deadline" check
+ * actually run. pir/accel are momentary (fire immediately, no confirm phase, see
+ * source_is_momentary()) so they have no deadline to resolve this way — their
+ * only timer is oneshot_expiry, already swept centrally in app_alarm_poll().
+ *
+ * Hall/input read their OWN live data (app_hall_get_data()/app_input_get_data()),
+ * not g_app_sensor_data: that cache is only refreshed by app_sensor_sample(),
+ * which runs on the interval_sample timer (started only if interval_sample != 0,
+ * app_sensor.c) or a manual sample/`alarm poll` — with interval_sample == 0 (a
+ * valid, common config) g_app_sensor_data.hall_*_is_active would stay frozen at
+ * its boot-time value between app_alarm_poll() calls, silently defeating this
+ * exact re-evaluation. app_hall.c/app_input.c run their own independent 100 ms
+ * GPIO timer regardless of interval_sample, so their getters are always fresh. */
 static bool read_poll_state(uint8_t source, uint8_t quantity, bool *out)
 {
-	const struct app_sensor_data *d = &g_app_sensor_data;
 	if (quantity == APP_ALARM_Q_TILT && source >= APP_ALARM_SRC_SLOT1 &&
 	    source <= APP_ALARM_SRC_SLOT4) {
-		*out = d->w1[source - APP_ALARM_SRC_SLOT1].is_tilt_alert;
+		*out = g_app_sensor_data.w1[source - APP_ALARM_SRC_SLOT1].is_tilt_alert;
 		return true;
+	}
+	if (quantity == APP_ALARM_Q_STATE) {
+		switch (source) {
+		case APP_ALARM_SRC_HALL_LEFT:
+		case APP_ALARM_SRC_HALL_RIGHT: {
+			struct app_hall_data hd;
+			if (app_hall_get_data(&hd)) {
+				return false;
+			}
+			*out = (source == APP_ALARM_SRC_HALL_LEFT) ? hd.left_is_active
+								   : hd.right_is_active;
+			return true;
+		}
+		case APP_ALARM_SRC_INPUT_A:
+		case APP_ALARM_SRC_INPUT_B: {
+			struct app_input_data id;
+			if (app_input_get_data(&id)) {
+				return false;
+			}
+			*out = (source == APP_ALARM_SRC_INPUT_A) ? id.input_a_is_active
+								 : id.input_b_is_active;
+			return true;
+		}
+		default:
+			return false;
+		}
 	}
 	return false;
 }
@@ -885,8 +929,10 @@ bool app_alarm_poll(void)
 			break;
 		}
 		case APP_ALARM_KIND_STATE: {
-			/* Only slot tilt is polled here; hall/input/pir/accel come via
-			 * app_alarm_event(). */
+			/* Slot tilt, hall and input are re-sampled here every poll (#348,
+			 * see read_poll_state()) so an armed confirm/dwell deadline gets
+			 * resolved even without a fresh edge; pir/accel are momentary and
+			 * event-only (read_poll_state() returns false for them). */
 			bool st;
 			if (read_poll_state(rule->source, rule->quantity, &st)) {
 				eval_state(slot, rule, rt, st, &should_send);
