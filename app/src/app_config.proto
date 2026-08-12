@@ -136,6 +136,7 @@ message Command {
         SetSecretKey     set_secret_key    = 24;
         ClmAck           clm_ack           = 25;
         SetSecretKey     vendor_reset      = 26;
+        ClmRearm         clm_rearm         = 27;
     }
 // END GENERATED COMMANDS
 
@@ -238,6 +239,11 @@ message Command {
     // delete-detection). Empty — the token itself never travels on this command,
     // only the fact that an authenticated caller sent it.
     message ClmAck { }
+
+    // #351: symmetric counterpart to ClmAck — re-opens the claim window.
+    // new_claim_token omitted/zero re-arms with the existing token; a non-zero
+    // value replaces it (see app_cmd_handle_clm_rearm for the save+reboot path).
+    message ClmRearm { optional bytes new_claim_token = 1; }
 }
 
 message Response {

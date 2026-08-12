@@ -28,6 +28,7 @@ extern int test_battery_ret;
 extern void test_set_lrw_dirty(bool v);
 extern void test_set_active_alarm_count(size_t n);
 extern int g_clm_ack_calls;
+extern int g_clm_rearm_calls;
 
 static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 {
@@ -73,6 +74,7 @@ static void reset_cfg(void)
 	test_set_lrw_dirty(false);
 	test_set_active_alarm_count(0);
 	g_clm_ack_calls = 0;
+	g_clm_rearm_calls = 0;
 }
 
 ZTEST(cmd, test_set_param_applies_and_acks)
@@ -645,6 +647,44 @@ ZTEST(cmd, test_clm_ack)
 	zassert_equal(a, APP_CMD_ACTION_NONE, "clm_ack over nfc: no deferred action");
 	zassert_equal(r.which_body, Response_ack_tag, "clm_ack acks (which=%d)", r.which_body);
 	zassert_equal(g_clm_ack_calls, 1, "app_nfc_clm_ack called exactly once");
+}
+
+/* #351 clm_rearm (field 27): nfc/shell only (rejected over lrw, same pattern as
+ * clm_ack/set_secret_key above). No/zero new_claim_token re-arms immediately via
+ * app_nfc_clm_reset() (no deferred action, staging untouched); a non-zero
+ * new_claim_token stages it into g_app_config and defers
+ * APP_CMD_ACTION_CLM_REARM_SAVE INSTEAD of calling app_nfc_clm_reset()
+ * synchronously (see app_cmd_handle_clm_rearm for why: avoids exposing the
+ * still-live OLD token via an NFC poll before the deferred reboot lands it). */
+ZTEST(cmd, test_clm_rearm)
+{
+	Response r;
+	uint8_t expect_token[16];
+
+	memset(expect_token, 0x33, sizeof(expect_token));
+
+	reset_cfg();
+	zassert_equal(handle("080dda0100", &r), APP_CMD_ACTION_NONE, "clm_rearm rejected over lrw");
+	zassert_equal(r.which_body, Response_error_tag, "lrw should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+	zassert_equal(g_clm_rearm_calls, 0, "must not call app_nfc_clm_reset over lrw");
+
+	reset_cfg();
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_NFC, "080dda0100", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "clm_rearm without token: no deferred action");
+	zassert_equal(r.which_body, Response_ack_tag, "clm_rearm acks (which=%d)", r.which_body);
+	zassert_equal(g_clm_rearm_calls, 1, "app_nfc_clm_reset called exactly once");
+
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_NFC, "080eda01120a1033333333333333333333333333333333", &r);
+	zassert_equal(a, APP_CMD_ACTION_CLM_REARM_SAVE, "clm_rearm with token defers save+reboot");
+	zassert_equal(r.which_body, Response_ack_tag, "clm_rearm acks (which=%d)", r.which_body);
+	zassert_mem_equal(g_app_config.claim_token, expect_token, sizeof(expect_token),
+			  "new_claim_token not staged");
+	zassert_equal(g_clm_rearm_calls, 0,
+		      "app_nfc_clm_reset must NOT run synchronously when staging a new token");
 }
 
 /* #316: vendor_reset is a generic Command reachable ONLY over the vendor
