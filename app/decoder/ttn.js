@@ -182,6 +182,7 @@ var _CMD_NAMES = {
   24: "set_secret_key",
   25: "clm_ack",
   26: "vendor_reset",
+  27: "clm_rearm",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);

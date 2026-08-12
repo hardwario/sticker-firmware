@@ -760,6 +760,35 @@ static void app_cmd_handle_clm_ack(enum app_cmd_transport tp, const Command *cmd
 	resp->which_body = Response_ack_tag;
 }
 
+/* #351: re-open the claim window (symmetric counterpart to clm_ack's close).
+ * Two branches, deliberately different timing:
+ *   - no/zero new_claim_token: re-arm NOW with the EXISTING (already-live)
+ *     token — app_nfc_clm_reset() synchronously, no deferred action.
+ *   - non-zero new_claim_token: stage it into app_config() (like
+ *     set_secret_key) and defer BOTH the latch flip and the reboot together
+ *     (APP_CMD_ACTION_CLM_REARM_SAVE, executed in main.c) — flipping the latch
+ *     here instead would risk an NFC poll re-arming PENDING with the STILL-OLD
+ *     live token before the reboot makes the new one live (claim_token_is_set()
+ *     reads g_app_config, only synced at the next boot's h_commit, same as
+ *     #322's secret_key rotation). */
+static void app_cmd_handle_clm_rearm(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				     enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	const Command_ClmRearm *rearm = &cmd->body.clm_rearm;
+
+	if (rearm->has_new_claim_token &&
+	    !buffer_is_zero(rearm->new_claim_token, sizeof(rearm->new_claim_token))) {
+		memcpy(app_config()->claim_token, rearm->new_claim_token,
+		       sizeof(app_config()->claim_token));
+		*action = APP_CMD_ACTION_CLM_REARM_SAVE;
+	} else {
+		app_nfc_clm_reset();
+	}
+
+	resp->which_body = Response_ack_tag;
+}
+
 /* #316: replacement secret_key staged by the vendor_reset handler below, consumed
  * once via app_cmd_take_pending_vendor_secret_key() when the deferred
  * APP_CMD_ACTION_VENDOR_RESET runs (main.c / nfc-check apply sites). Lives here
@@ -1198,6 +1227,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_vendor_reset(tp, cmd, resp, action);
+		break;
+	case Command_clm_rearm_tag:
+		/* transports: [nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_clm_rearm(tp, cmd, resp, action);
 		break;
 	default:
 		/* L-54: an unknown command tag (e.g. a removed command like the old

@@ -159,6 +159,13 @@ commands:
     # allow==false is a vendor-channel set_param(vendor_reset_allow=true) first.
     # proto_id 26 (not 25): 25 was taken by clm_ack (#308) merged into v1.4.0 first.
     - {name: vendor_reset, proto_id: 26, body: SetSecretKey, kind: handler, response: ack, transports: [vendor]}
+    # #351: symmetric counterpart to clm_ack above — re-opens the claim window
+    # instead of closing it, over the same secret_key-authenticated hio.stck:cmd
+    # channel. Optional new_claim_token: empty/omitted re-arms with the EXISTING
+    # token (immediate, no reboot); a non-zero value replaces it (staged +
+    # save+reboot, same pattern as set_secret_key/#322 — see app_cmd_handle_clm_rearm
+    # for why the latch flip is deferred together with the reboot in that case).
+    - {name: clm_rearm, proto_id: 27, body: ClmRearm, kind: handler, response: ack, transports: [nfc, shell]}
 parameters:
   # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /
   # vendor_token) are OFF the config wire (`proto_field: false`, #250 Part B): configen

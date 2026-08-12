@@ -2308,6 +2308,14 @@ static int cmd_nfc_check(const struct shell *sh, size_t argc, char **argv)
 		ret = app_settings_save(true); /* reboots on success */
 		shell_print(sh, "secret_key saved%s", ret ? " (save failed!)" : " and applied");
 		break;
+	case APP_CMD_ACTION_CLM_REARM_SAVE:
+		/* #351: same save+reboot as SECRET_KEY_SAVE above, plus the latch flip
+		 * app_cmd_handle_clm_rearm deliberately deferred to this same point
+		 * (see its comment) — mirrors main.c's real apply site exactly. */
+		app_nfc_clm_reset();
+		ret = app_settings_save(true); /* reboots on success */
+		shell_print(sh, "claim_token saved%s", ret ? " (save failed!)" : " and applied");
+		break;
 	case APP_CMD_ACTION_NONE:
 		shell_print(sh, "no staged command on tag (no action)");
 		break;
