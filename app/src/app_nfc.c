@@ -486,6 +486,11 @@ void app_nfc_clm_ack(void)
 	clm_consume("clm_ack command");
 }
 
+uint8_t app_nfc_clm_state_get(void)
+{
+	return m_clm_state;
+}
+
 /* A claim token is provisioned once any byte is non-zero (all-zero = unset, the
  * same sentinel the write-once shell guard uses, #170). */
 static bool claim_token_is_set(void)
@@ -2379,18 +2384,6 @@ static int cmd_nfc_regw(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-/* #247: show the claim-record lifecycle latch (debug/HW-test visibility). */
-static int cmd_nfc_clm(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-	static const char *const names[] = {"unset", "pending", "consumed"};
-	shell_print(sh, "clm state:   %s (%u)",
-		    m_clm_state <= CLM_CONSUMED ? names[m_clm_state] : "?", m_clm_state);
-	shell_print(sh, "claim token: %s", claim_token_is_set() ? "set" : "unset");
-	return 0;
-}
-
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_nfc, SHELL_CMD_ARG(dump, NULL, "Hex dump all 512 B of NFC memory.", cmd_nfc_dump, 1, 0),
 	SHELL_CMD_ARG(read, NULL, "Read a range. Usage: read <offset> <len>", cmd_nfc_read, 3, 0),
@@ -2405,7 +2398,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_nfc_reg, 2, 1),
 	SHELL_CMD_ARG(regw, NULL, "Write system/dynamic register (E1). Usage: regw <addr> <hex>",
 		      cmd_nfc_regw, 3, 0),
-	SHELL_CMD_ARG(clm, NULL, "Show claim-record (#247) lifecycle state.", cmd_nfc_clm, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC memory access (debug).", NULL);

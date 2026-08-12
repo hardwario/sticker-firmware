@@ -79,6 +79,11 @@ void app_nfc_clm_reset(void);
  * never armed) - always safe to call. */
 void app_nfc_clm_ack(void);
 
+/* Current claim-record lifecycle state (0=unset, 1=pending, 2=consumed), for
+ * `ats claim status` (moved out of the nfc shell group so claim commands live
+ * in one place). */
+uint8_t app_nfc_clm_state_get(void);
+
 #ifdef __cplusplus
 }
 #endif
