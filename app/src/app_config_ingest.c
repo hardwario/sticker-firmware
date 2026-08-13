@@ -85,8 +85,8 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 		*fault_field = 0;
 	}
 
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_region && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_region && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(1);
 	} else if (src->has_region) {
 		if ((int)src->region >= 0 && (int)src->region <= 2) {
@@ -95,8 +95,8 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(1);
 		}
 	}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_sub_band && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_sub_band && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(2);
 	} else if (src->has_sub_band) {
 		int val = src->sub_band;
@@ -107,8 +107,8 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(2);
 		}
 	}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_network && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_network && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(3);
 	} else if (src->has_network) {
 		if ((int)src->network >= 0 && (int)src->network <= 1) {
@@ -117,14 +117,15 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(3);
 		}
 	}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_adr && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_adr && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(4);
 	} else if (src->has_adr) {
 		config->lrw_adr = src->adr;
 	}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_activation && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_activation &&
+	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(5);
 	} else if (src->has_activation) {
 		if ((int)src->activation >= 0 && (int)src->activation <= 1) {
@@ -133,64 +134,65 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(5);
 		}
 	}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_deveui && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_deveui && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(6);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_deveui) {
 			memcpy(config->lrw_deveui, src->deveui, sizeof(config->lrw_deveui));
 		}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_joineui && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_joineui && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(7);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_joineui) {
 			memcpy(config->lrw_joineui, src->joineui, sizeof(config->lrw_joineui));
 		}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_nwkkey && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_nwkkey && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(8);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_nwkkey) {
 			memcpy(config->lrw_nwkkey, src->nwkkey, sizeof(config->lrw_nwkkey));
 		}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_appkey && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_appkey && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(9);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_appkey) {
 			memcpy(config->lrw_appkey, src->appkey, sizeof(config->lrw_appkey));
 		}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_devaddr && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_devaddr && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(10);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_devaddr) {
 			memcpy(config->lrw_devaddr, src->devaddr, sizeof(config->lrw_devaddr));
 		}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_nwkskey && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_nwkskey && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(11);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_nwkskey) {
 			memcpy(config->lrw_nwkskey, src->nwkskey, sizeof(config->lrw_nwkskey));
 		}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_appskey && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_appskey && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(12);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_appskey) {
 			memcpy(config->lrw_appskey, src->appskey, sizeof(config->lrw_appskey));
 		}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_link_check_interval && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_link_check_interval &&
+	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(13);
 	} else if (src->has_link_check_interval) {
 		int val = src->link_check_interval;
@@ -201,8 +203,9 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(13);
 		}
 	}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_link_check_fail_rejoin && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_link_check_fail_rejoin &&
+	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(14);
 	} else if (src->has_link_check_fail_rejoin) {
 		int val = src->link_check_fail_rejoin;
@@ -213,8 +216,9 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(14);
 		}
 	}
-	/* M-3: this field is not writable over lrw. */
-	if (src->has_radio_mode && (tp == APP_CMD_TRANSPORT_LRW)) {
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_radio_mode &&
+	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(15);
 	} else if (src->has_radio_mode) {
 		if ((int)src->radio_mode >= 0 && (int)src->radio_mode <= 2) {
@@ -551,7 +555,6 @@ int app_config_apply_alarms(enum app_cmd_transport tp, const AppConfigMessage_Al
 {
 	struct app_config *config = app_config();
 	int ret = 0;
-	ARG_UNUSED(tp);
 
 	if (fault_field) {
 		*fault_field = 0;
@@ -566,70 +569,134 @@ int app_config_apply_alarms(enum app_cmd_transport tp, const AppConfigMessage_Al
 			FAULT(1);
 		}
 	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_0) {
-		memcpy(config->alarm_0, src->alarm_0, sizeof(config->alarm_0));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_1) {
-		memcpy(config->alarm_1, src->alarm_1, sizeof(config->alarm_1));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_2) {
-		memcpy(config->alarm_2, src->alarm_2, sizeof(config->alarm_2));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_3) {
-		memcpy(config->alarm_3, src->alarm_3, sizeof(config->alarm_3));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_4) {
-		memcpy(config->alarm_4, src->alarm_4, sizeof(config->alarm_4));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_5) {
-		memcpy(config->alarm_5, src->alarm_5, sizeof(config->alarm_5));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_6) {
-		memcpy(config->alarm_6, src->alarm_6, sizeof(config->alarm_6));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_7) {
-		memcpy(config->alarm_7, src->alarm_7, sizeof(config->alarm_7));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_8) {
-		memcpy(config->alarm_8, src->alarm_8, sizeof(config->alarm_8));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_9) {
-		memcpy(config->alarm_9, src->alarm_9, sizeof(config->alarm_9));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_10) {
-		memcpy(config->alarm_10, src->alarm_10, sizeof(config->alarm_10));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_11) {
-		memcpy(config->alarm_11, src->alarm_11, sizeof(config->alarm_11));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_12) {
-		memcpy(config->alarm_12, src->alarm_12, sizeof(config->alarm_12));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_13) {
-		memcpy(config->alarm_13, src->alarm_13, sizeof(config->alarm_13));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_14) {
-		memcpy(config->alarm_14, src->alarm_14, sizeof(config->alarm_14));
-	}
-	/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
-	if (src->has_alarm_15) {
-		memcpy(config->alarm_15, src->alarm_15, sizeof(config->alarm_15));
-	}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_0 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(3);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_0) {
+			memcpy(config->alarm_0, src->alarm_0, sizeof(config->alarm_0));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_1 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(4);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_1) {
+			memcpy(config->alarm_1, src->alarm_1, sizeof(config->alarm_1));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_2 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(5);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_2) {
+			memcpy(config->alarm_2, src->alarm_2, sizeof(config->alarm_2));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_3 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(6);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_3) {
+			memcpy(config->alarm_3, src->alarm_3, sizeof(config->alarm_3));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_4 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(7);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_4) {
+			memcpy(config->alarm_4, src->alarm_4, sizeof(config->alarm_4));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_5 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(8);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_5) {
+			memcpy(config->alarm_5, src->alarm_5, sizeof(config->alarm_5));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_6 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(9);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_6) {
+			memcpy(config->alarm_6, src->alarm_6, sizeof(config->alarm_6));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_7 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(10);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_7) {
+			memcpy(config->alarm_7, src->alarm_7, sizeof(config->alarm_7));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_8 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(11);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_8) {
+			memcpy(config->alarm_8, src->alarm_8, sizeof(config->alarm_8));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_9 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(12);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_9) {
+			memcpy(config->alarm_9, src->alarm_9, sizeof(config->alarm_9));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_10 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(13);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_10) {
+			memcpy(config->alarm_10, src->alarm_10, sizeof(config->alarm_10));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_11 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(14);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_11) {
+			memcpy(config->alarm_11, src->alarm_11, sizeof(config->alarm_11));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_12 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(15);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_12) {
+			memcpy(config->alarm_12, src->alarm_12, sizeof(config->alarm_12));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_13 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(16);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_13) {
+			memcpy(config->alarm_13, src->alarm_13, sizeof(config->alarm_13));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_14 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(17);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_14) {
+			memcpy(config->alarm_14, src->alarm_14, sizeof(config->alarm_14));
+		}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_alarm_15 && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(18);
+	} else
+		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
+		if (src->has_alarm_15) {
+			memcpy(config->alarm_15, src->alarm_15, sizeof(config->alarm_15));
+		}
 	return ret;
 }
 

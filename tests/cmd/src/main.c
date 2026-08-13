@@ -1046,4 +1046,117 @@ ZTEST(cmd, test_history_sample_capacity_is_exact)
 		      0, "tiny budget should give 0");
 }
 
+/* C2 regression (audit 2026-08-13): the generated per-field SetParam
+ * write-transport gate (config_ingest.c.j2 + configen.py normalize_access)
+ * used to derive only no_write_lrw/no_write_nfc from a field's `writable`
+ * list, never no_write_vendor. alarm_0 (proto_group alarms, proto_id 3) is
+ * `writable: [nfc, lrw]` -- vendor is meant to be excluded. Because both nfc
+ * and lrw are already in the writable set, neither no_write_lrw nor
+ * no_write_nfc used to get set, so the template's write-gate block never
+ * fired for this field at all: app_config_apply_alarms() had a bare
+ * ARG_UNUSED(tp) and an unconditional memcpy for alarm_0..alarm_15. This test
+ * constructs `set_param{ alarms{ alarm_0 = <17 bytes> } }` over lrw/nfc
+ * (control, must still be accepted) and vendor (must now be rejected). */
+ZTEST(cmd, test_alarm_slot_writable_excludes_vendor)
+{
+	Response r;
+	uint8_t payload[17];
+	uint8_t zero17[17];
+
+	memset(payload, 0x01, sizeof(payload));
+	memset(zero17, 0, sizeof(zero17));
+
+	/* seq1 set_param{ alarms{ alarm_0 = 17x0x01 } }
+	 * Command:  08 01                      seq=1
+	 *           12 15                      set_param, len 21
+	 *             2a 13                    .alarms (SetParam field5), len 19
+	 *               1a 11 <17x01>           .alarm_0 (Alarms field3), len 17
+	 */
+	const char *hex = "080112152a131a110101010101010101010101010101010101";
+
+	/* Control: lrw is IN writable -> correctly accepted. */
+	reset_cfg();
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_LRW, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_ack_tag, "lrw write should ack (which=%d)",
+		      r.which_body);
+	zassert_mem_equal(g_app_config.alarm_0, payload, sizeof(payload),
+			  "alarm_0 not applied over lrw (control)");
+
+	/* Control: nfc is IN writable -> correctly accepted. */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_NFC, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_ack_tag, "nfc write should ack (which=%d)",
+		      r.which_body);
+	zassert_mem_equal(g_app_config.alarm_0, payload, sizeof(payload),
+			  "alarm_0 not applied over nfc (control)");
+
+	/* vendor is NOT in alarm_0's writable:[nfc, lrw] -> must be rejected. */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_VENDOR, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_mem_equal(g_app_config.alarm_0, zero17, sizeof(zero17),
+			  "C2 REGRESSION: alarm_0 was written to 0x%02x... over VENDOR "
+			  "transport despite writable:[nfc,lrw] excluding vendor",
+			  g_app_config.alarm_0[0]);
+	zassert_equal(r.which_body, Response_error_tag,
+		      "C2 REGRESSION: EXPECTED vendor write of alarm_0 to be rejected "
+		      "(writable:[nfc,lrw] excludes vendor); got which=%d",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE,
+		      "C2 REGRESSION: EXPECTED NOT_WRITABLE over vendor; code=%d",
+		      r.body.error.code);
+}
+
+/* C2 companion: lrw_region (proto_group lorawan, proto_id 1) is
+ * `writable: [shell, nfc]` -- vendor (and lrw) are meant to be excluded. Here
+ * only ONE of {lrw, nfc} is missing from writable, so normalize_access DOES
+ * set no_write_lrw and the generated gate correctly rejects tp==LRW; it used
+ * to have no tp==VENDOR arm at all, so a vendor SetParam sailed straight
+ * through the `else` branch and got applied. Same C2 root cause on a scalar
+ * (enum) field, via the "one transport missing" shape rather than the
+ * "template gate omitted entirely" shape above. */
+ZTEST(cmd, test_lrw_region_writable_excludes_vendor)
+{
+	Response r;
+
+	/* seq1 set_param{ lorawan{ region = US915(1) } }
+	 * Command: 08 01              seq=1
+	 *          12 04              set_param, len 4
+	 *            0a 02            .lorawan (SetParam field1), len 2
+	 *              08 01          .region (Lorawan field1) = 1 (US915)
+	 */
+	const char *hex = "080112040a020801";
+
+	/* Control: lrw is explicitly excluded from writable:[shell,nfc] -> the
+	 * generated no_write_lrw gate correctly rejects it. */
+	reset_cfg();
+	g_app_config.lrw_region = APP_CONFIG_LRW_REGION_EU868;
+	handle_via(APP_CMD_TRANSPORT_LRW, hex, &r);
+	zassert_equal(r.which_body, Response_error_tag, "lrw should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "code %d",
+		      r.body.error.code);
+	zassert_equal(g_app_config.lrw_region, APP_CONFIG_LRW_REGION_EU868,
+		      "lrw write applied despite writable:[shell,nfc] excluding lrw");
+
+	/* vendor is also excluded from writable:[shell,nfc] -> must be rejected. */
+	reset_cfg();
+	g_app_config.lrw_region = APP_CONFIG_LRW_REGION_EU868;
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_VENDOR, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(g_app_config.lrw_region, APP_CONFIG_LRW_REGION_EU868,
+		      "C2 REGRESSION: lrw_region set to %d (US915) over VENDOR transport "
+		      "despite writable:[shell,nfc] excluding vendor",
+		      g_app_config.lrw_region);
+	zassert_equal(r.which_body, Response_error_tag,
+		      "C2 REGRESSION: EXPECTED vendor write of lrw_region to be rejected "
+		      "(writable:[shell,nfc] excludes vendor); got which=%d",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE,
+		      "C2 REGRESSION: EXPECTED NOT_WRITABLE over vendor; code=%d",
+		      r.body.error.code);
+}
+
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);
