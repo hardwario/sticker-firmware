@@ -303,6 +303,19 @@ static void make_error(Response *resp, Response_Error_Code code, const char *det
 	}
 }
 
+/* Guards the snapshot->apply->(rollback|commit) sequence in
+ * app_cmd_handle_set_param() against the shared *app_config() staging struct
+ * being mutated concurrently by another transport (shell/app_ats.c, LRW
+ * m_work_q/app_lrw.c, NFC poll thread/app_nfc.c all reach this handler with no
+ * other synchronization). Without it, a rollback on transport A's failed batch
+ * blindly does `*app_config() = snapshot`, wiping out fields transport B may
+ * have already applied and committed in between A's snapshot and A's rollback.
+ *
+ * Outer lock; app_alarm_rules_reload_from_config() (called within this
+ * critical section) takes its own inner lock (app_alarm_rules.c's m_lock) and
+ * never calls back into app_cmd.c — no deadlock cycle. */
+static K_MUTEX_DEFINE(m_set_param_lock);
+
 /* Command handlers share a uniform signature (transport, cmd, resp, action) so
  * the generated app_cmd_dispatch() switch can call any of them the same way; a
  * handler simply ignores the parameters it does not need. They fill `resp`
@@ -318,6 +331,8 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	 * 2=application 3=sensors 4=alarms. */
 	uint32_t fault_group = 0;
 	int rc = 0;
+
+	k_mutex_lock(&m_set_param_lock, K_FOREVER);
 
 	/* Apply atomically: snapshot the staging config, apply both sections. On any
 	 * fault, restore the snapshot so a rejected batch leaves nothing partially
@@ -367,7 +382,7 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 			(void)app_alarm_rules_reload_from_config(); /* resync cache to it */
 			make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid alarm rule");
 			resp->body.error.fault_field = 4 * 100; /* group 4 = alarms */
-			return;
+			goto out;
 		}
 		/* F-1: LoRaWAN staging changed but the running copy (used by
 		 * lrw_join/lrw_reset) only re-syncs on save+reboot. Flag it so a join
@@ -383,6 +398,9 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 			*action = APP_CMD_ACTION_SETTINGS_SAVE;
 		}
 	}
+
+out:
+	k_mutex_unlock(&m_set_param_lock);
 }
 
 /* app_cmd_handle_get_param is defined after DUMP_FIELDS (it pages like

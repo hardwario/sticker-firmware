@@ -33,6 +33,7 @@ extern int g_buzzer_play_calls;
 extern uint32_t g_buzzer_play_last_kind;
 extern uint16_t g_buzzer_play_last_repeat_s;
 extern int test_buzzer_play_ret;
+extern int test_alarm_reload_dropped;
 
 static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 {
@@ -83,6 +84,7 @@ static void reset_cfg(void)
 	g_buzzer_play_last_kind = 0;
 	g_buzzer_play_last_repeat_s = 0;
 	test_buzzer_play_ret = 0;
+	test_alarm_reload_dropped = 0;
 }
 
 ZTEST(cmd, test_set_param_applies_and_acks)
@@ -159,6 +161,81 @@ ZTEST(cmd, test_set_param_out_of_range)
 	zassert_equal(r.body.error.fault_field, 203, "fault_field %u", r.body.error.fault_field);
 	/* invalid value must NOT be applied */
 	zassert_not_equal(g_app_config.interval_report, 10, "out-of-range value leaked");
+}
+
+/* Regression coverage for the m_set_param_lock added around
+ * app_cmd_handle_set_param()'s snapshot->apply->(rollback|commit) sequence
+ * (cross-transport SetParam rollback race fix). This exercises the SECOND
+ * rollback path (~line 380 in app_cmd.c: the alarm-shape check after
+ * app_alarm_rules_reload_from_config()), which used to `return` directly and
+ * is now a `goto out` into the shared unlock -- the exit point most at risk of
+ * skipping the unlock.
+ *
+ * The real app_alarm_rules.c is not linked into this suite (stubs.c stands in
+ * for it), so app_config_apply_alarms() never rejects a rule's shape by
+ * itself -- test_alarm_reload_dropped forces the stubbed
+ * app_alarm_rules_reload_from_config() to report a dropped rule, which is
+ * exactly the signal app_cmd.c's rollback branch keys off of. */
+ZTEST(cmd, test_set_param_alarm_rule_rollback_restores_snapshot)
+{
+	Response r;
+
+	reset_cfg();
+	/* seed a committed baseline: interval_report=120, cap_barometer=true */
+	handle("080112081202187822023001", &r);
+	zassert_equal(r.which_body, Response_ack_tag, "seed apply failed, which=%d", r.which_body);
+	zassert_equal(g_app_config.interval_report, 120, "seed not applied");
+
+	/* seq5 set_param{ application{interval_report=200}, alarms{alarm_0=<17
+	 * packed rule bytes>} }. app_config_apply_alarms() just memcpy's the raw
+	 * bytes (no shape validation at apply time), so rc==0 for the whole batch
+	 * and interval_report=200 lands in the staging struct; the forced dropped
+	 * count then rolls the whole batch back. */
+	test_alarm_reload_dropped = 1;
+	const char *hex = "0805121a120318c8012a131a110100060000000000000000000000000000";
+	enum app_cmd_action a = handle(hex, &r);
+
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action expected");
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.fault_field, 400, "fault_field %u (want 400 = alarms group)",
+		      r.body.error.fault_field);
+	/* whole batch rolled back: the application write that structurally
+	 * succeeded before the alarm-shape check failed must NOT stick, and the
+	 * pre-call seed must be restored intact */
+	zassert_equal(g_app_config.interval_report, 120,
+		      "interval_report leaked from a batch that rolled back on alarm shape");
+	zassert_true(g_app_config.cap_barometer, "unrelated seeded field clobbered by rollback");
+	uint8_t zero_alarm[sizeof(g_app_config.alarm_0)] = {0};
+	zassert_mem_equal(g_app_config.alarm_0, zero_alarm, sizeof(zero_alarm),
+			  "invalid alarm rule bytes leaked into config after rollback");
+}
+
+/* Two back-to-back SetParam calls: the first fails and rolls back, the second
+ * is a fresh valid call. If m_set_param_lock were left held on the first
+ * call's rollback exit path, this second call would hang forever on
+ * k_mutex_lock(K_FOREVER) instead of completing. This only guards the lock's
+ * own bookkeeping (every exit path unlocks exactly once) -- the actual
+ * cross-thread race the lock defends against needs a second thread, which
+ * this single-threaded ztest run cannot provide. */
+ZTEST(cmd, test_set_param_rollback_then_valid_succeeds)
+{
+	Response r;
+
+	reset_cfg();
+	/* first: out-of-range application.interval_report -> rollback path */
+	handle("080312041202180a", &r);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
+		      r.body.error.code);
+
+	/* second: fresh valid SetParam must still succeed normally */
+	enum app_cmd_action a = handle("080112081202187822023001", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action expected");
+	zassert_equal(r.which_body, Response_ack_tag, "expected Ack, which=%d", r.which_body);
+	zassert_equal(g_app_config.interval_report, 120, "interval_report not applied");
+	zassert_true(g_app_config.cap_barometer, "cap_barometer not applied");
 }
 
 ZTEST(cmd, test_get_param_config_dump)
