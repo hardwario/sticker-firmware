@@ -1,0 +1,5 @@
+common:
+  tags: sticker alarm
+  platform_allow: native_sim
+tests:
+  sticker.alarm_eval: {}
