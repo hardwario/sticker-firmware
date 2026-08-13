@@ -680,6 +680,12 @@ fPort 10 every 30 s using fixed ABP keys.
 > Confirm normal telemetry is suppressed while in calibration mode. Also verify the
 > config-flag path: `config calibration on` + reboot logs `Calibration flag set in config`.
 
+**Regression note (#352):** this path reads the hall pins via `app_calibration.c`'s own
+`read_hall_gpio()`, which never had the double-`GPIO_ACTIVE_LOW`-negation bug that `app_hall.c`
+had — so dual-magnet detection should be unaffected by the #352 fix. Re-run this scenario once
+after the fix regardless, since it's the one boot-time path that reads raw hall GPIOs outside
+`app_hall.c` and is cheap to confirm didn't regress alongside it.
+
 - [ ] Pass
 
 ### S12b — `enter_calibration` command (remote)
@@ -890,12 +896,18 @@ selection list and stored records.
 (level).
 **Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`, quantity `state`.
 
+**Polarity (#352):** `state 1` = magnet **present**, `state 0` = magnet **absent** —
+`ats sensors sample`/`alarm poll` reading `hall_left=1` while no magnet is applied (or `=0` while
+one is) is a regression of the double-inverted-`GPIO_ACTIVE_LOW` bug this issue fixed.
+
 **Prompt for Claude:**
-> Arm an **edge** rule `alarm set 0 hall-left state 0 1` (fires on 0→1) and confirm with
-> `alarm list` it reads `0->1 (edge)`. Ask me to apply/remove a magnet; confirm an AlarmReport on
-> fPort 3 (source `hall-left`) on the rising edge. Then arm a **level** rule
-> `alarm set 0 hall-left state 1 1` (`1->1 (level)`) and confirm it stays active while the magnet is
-> present. Report both.
+> First confirm the raw polarity: `ats sensors sample` with no magnet must show `hall_left=0`, and
+> `=1` only while a magnet is held against it. Then arm an **edge** rule
+> `alarm set 0 hall-left state 0 1` (fires on 0→1) and confirm with `alarm list` it reads
+> `0->1 (edge)`. Ask me to apply/remove a magnet; confirm an AlarmReport on fPort 3 (source
+> `hall-left`) on the rising edge, i.e. when the magnet is **applied**, not removed. Then arm a
+> **level** rule `alarm set 0 hall-left state 1 1` (`1->1 (level)`) and confirm it stays active
+> while the magnet is present, and clears as soon as it's removed. Report all three checks.
 
 - [ ] Pass
 
@@ -904,9 +916,14 @@ selection list and stored records.
 **Goal:** Input edges/levels raise `state` alarms.
 **Observable:** AlarmReport fPort 3, source `input-a`/`input-b`, quantity `state`.
 
+**Polarity (#352):** `state 1` = input **asserted** (shorted to GND), `state 0` = input **idle** —
+same fix/regression check as A3's hall polarity note.
+
 **Prompt for Claude:**
-> With PIR disabled (shared pins), arm `alarm set <i> input-a state 0 1` (and `input-b`). Toggle
-> each input and confirm AlarmReports on fPort 3 with source `input-a`/`input-b`. Report results.
+> With PIR disabled (shared pins), confirm `ats sensors sample` shows `input_a=0`/`input_b=0` idle,
+> and `=1` only while shorted to GND. Then arm `alarm set <i> input-a state 0 1` (and `input-b`).
+> Toggle each input and confirm AlarmReports on fPort 3 with source `input-a`/`input-b` fire on
+> **assertion**, not release. Report results.
 
 - [ ] Pass
 

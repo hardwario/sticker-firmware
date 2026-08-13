@@ -49,7 +49,10 @@ static int poll(void)
 			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
 			return val;
 		}
-		input_a_is_active = !val;
+		/* gpio_pin_get_dt() already applies the devicetree GPIO_ACTIVE_LOW
+		 * flag (sw2/gp_a), so val is 1 when the input is actually asserted —
+		 * do not negate again (#352, matches app_hall.c). */
+		input_a_is_active = val;
 	}
 
 	if (g_app_config.cap_input_b) {
@@ -58,7 +61,7 @@ static int poll(void)
 			LOG_ERR_CALL_FAILED_INT("gpio_pin_get_dt", val);
 			return val;
 		}
-		input_b_is_active = !val;
+		input_b_is_active = val;
 	}
 
 	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
