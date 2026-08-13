@@ -456,23 +456,14 @@ int main(void)
 			LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
 		}
 
-		/* #250: offline/boot-staged provisioning is unified on the encrypted
-		 * hio.stck:cmd record (SetParam save=true / FactoryReset), applied through
-		 * the validated app_cmd_handle() path in app_nfc_check() above. The phone
-		 * that wrote the record is gone (the device was off), so there is nobody to
-		 * ack the response — restore the info record now, which opens the deferred-
-		 * action gate (#164), and run the staged action synchronously *here*, before
-		 * the LoRaWAN stack starts, so staged keys are in place before the first
-		 * join (preserves the #147 property the retired hio.stck:cfg path had).
-		 * A SETTINGS_SAVE/FACTORY_RESET reboots; the record is then replay-rejected
-		 * on the next boot, so this runs at most once. */
+		/* Open deferred-action gate: restore the info record after apply check.
+		 * The phone that staged the command is gone (device was powered off). */
 		if (app_nfc_info_restore_pending()) {
 			ret = app_nfc_restore_info();
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("app_nfc_restore_info", ret);
 			}
 		}
-		nfc_run_deferred_cmd_actions();
 	}
 
 #if defined(CONFIG_WATCHDOG)
@@ -537,6 +528,12 @@ int main(void)
 	if (ret) {
 		LOG_WRN("app_counters_init failed: %d (counter persistence unavailable)", ret);
 	}
+
+	/* Run deferred NFC command actions. Must occur after counters_init and
+	 * sensor_init so selective resets (COUNTERS_SAVE) don't persist zero
+	 * counters. Rebooting actions still fire before app_lrw_join(), keeping
+	 * staged LoRaWAN keys in place (#147, #250). */
+	nfc_run_deferred_cmd_actions();
 
 #if defined(CONFIG_WATCHDOG)
 	app_wdog_feed();
