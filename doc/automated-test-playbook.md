@@ -360,8 +360,11 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 - **Cleanup:** `git status` must stay clean.
 
 ### AT-HOST-02 — native_sim ztest suites
-- **Steps:** `bash tests/run_native.sh` (iterates tests/cmd, alarm_rules, ccm, nfc_crypto,
-  compose, history, history_flash, ndef on `native_sim/native/64`).
+- **Steps:** `bash tests/run_native.sh` (iterates tests/alarm_eval, alarm_rules, ccm, cmd,
+  compose, history, history_flash, ndef, nfc_crypto on `native_sim/native/64`). `alarm_eval`
+  (#348) drives the real `app_alarm.c` dwell/confirm/hold state machine directly
+  (`app_alarm_event()`/`app_alarm_poll()`) with hall/sensor GPIO stubbed — `alarm_rules` only
+  covers the static rule-validation layer.
 - **Expect:** every suite prints `PROJECT EXECUTION SUCCESSFUL`.
 - **Evidence:** per-suite pass/fail table.
 
