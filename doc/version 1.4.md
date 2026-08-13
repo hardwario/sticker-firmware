@@ -408,6 +408,16 @@ Each slot is a `bytes` **config parameter `alarm_0 … alarm_15`** (proto fields
 - **state** (digital: tilt + discrete inputs) — `from_state`/`to_state`. **`from != to` = edge** (fires once on that transition: `0→1` rising, `1→0` falling); **`from == to` = level** (active while the line equals `to`: `1→1` active-high, `0→0` active-low). PIR and accel are *momentary* sources (they only pulse), so any state rule there fires a **per-pulse one-shot** that re-arms after `alarm-notif-time` (edge and level behave alike).
 - **count / rate** (counters: hall, input) — `hi` = maximum events allowed per report interval. The increase is assessed once per **`interval_report` window** (a tumbling window that re-baselines each report), not on every internal poll, so the rate is counted consistently regardless of the sample cadence.
 
+> **Hall/input polarity fix (#352):** `hall-left`/`hall-right`/`input-a`/`input-b` state `1` now
+> correctly means "magnet present" / "input asserted". Before this fix, `app_hall.c`/`app_input.c`
+> double-applied the devicetree `GPIO_ACTIVE_LOW` polarity (`gpio_pin_get_dt()` already returns the
+> logical, polarity-corrected value, and the driver negated it again), so `state 1` actually meant
+> "at rest" and vice versa — every `state`/`count` rule on these four sources was armed backwards
+> from what its `from_state`/`to_state` args suggested. `app_calibration.c`'s own hall reader was
+> unaffected (it never had the extra negation). No wire-format or config-key change — existing rule
+> slots keep the same bytes, but their *meaning* now matches the documented "magnet applied =
+> active" convention (also see §16 event example) instead of the inverted one.
+
 **Packed slot format** — each `alarm_N` is **17 bytes, little-endian**:
 
 | Offset | Field | Notes |

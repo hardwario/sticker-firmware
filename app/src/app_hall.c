@@ -72,7 +72,10 @@ static int poll(void)
 			ret = val;
 			goto restore;
 		}
-		left_is_active = !val;
+		/* gpio_pin_get_dt() already applies the devicetree GPIO_ACTIVE_LOW
+		 * flag (sw0/hall_l), so val is 1 when the magnet is present — do not
+		 * negate again (#352, matches app_calibration.c's read_hall_gpio()). */
+		left_is_active = val;
 	}
 
 	if (g_app_config.cap_hall_right) {
@@ -82,7 +85,7 @@ static int poll(void)
 			ret = val;
 			goto restore;
 		}
-		right_is_active = !val;
+		right_is_active = val;
 	}
 
 restore:

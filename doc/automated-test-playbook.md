@@ -715,12 +715,15 @@ on release FW verify via the next fPort-2 telemetry (slower — prefer debug for
 ### AT-SEN-02 — hall left/right (D, SA; maps S8)
 - **Steps:** assist: "approach the LEFT sensor with the magnet, hold 2 s, remove; repeat 3×;
   then the RIGHT one." Watch `ats sensors check hall_left 60`, then sample.
-- **Expect:** state edges detected with correct polarity; per-side counters +3 each; no
-  cross-talk (left magnet must not count on right).
+- **Expect:** state edges detected with correct polarity (#352: `hall_left`/`hall_right` = `1`
+  while the magnet is present, `0` at rest — a device reading `1` at rest, or `0` while a
+  magnet is held, is the double-`GPIO_ACTIVE_LOW`-negation regression this issue fixed); per-side
+  counters +3 each; no cross-talk (left magnet must not count on right).
 
 ### AT-SEN-03 — inputs A/B (D, SA; maps S9)
 - **Steps:** assist: "short input A to GND 3×, then input B". Watch check/sample.
-- **Expect:** counts +3 per input; state reflects level while held.
+- **Expect:** counts +3 per input; state reflects level while held (#352: `input_a`/`input_b` =
+  `1` while shorted to GND, `0` idle — same polarity regression check as AT-SEN-02).
 
 ### AT-SEN-04 — PIR (D, SA; maps S5)
 - **Pre:** `cap-pir-detector` on.
