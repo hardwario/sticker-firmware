@@ -114,6 +114,15 @@ void app_lrw_suspend(void);
  * transitions (HEALTHY->WARNING->RECONNECT->rejoin and the late-LC-in-RECONNECT
  * guard, #71) deterministically from the shell without a real RF outage. */
 void app_lrw_debug_inject_lc(bool ok);
+
+/* Debug/test only: submit an arbitrary work item onto m_work_q. Lets shell
+ * commands (e.g. `ats lrw compose`) run logic that app_compose.c documents as
+ * "solely on m_work_q" from the shell thread without racing the real
+ * telemetry TX path — the caller submits its own struct k_work and then
+ * k_work_flush()es it to wait for completion. Returns k_work_submit_to_queue()'s
+ * result: >=0 queued/running, a negative errno if the queue rejected it (in
+ * which case the caller must not flush — nothing was submitted). */
+int app_lrw_run_on_work_q(struct k_work *work);
 #endif
 
 #ifdef __cplusplus

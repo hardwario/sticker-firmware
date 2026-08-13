@@ -618,6 +618,11 @@ void app_lrw_debug_inject_lc(bool ok)
 	m_dbg_lc_ok = ok;
 	k_work_submit_to_queue(&m_work_q, &m_dbg_lc_work);
 }
+
+int app_lrw_run_on_work_q(struct k_work *work)
+{
+	return k_work_submit_to_queue(&m_work_q, work);
+}
 #endif /* CONFIG_SHELL */
 
 /* ======================================================================== */
@@ -1258,6 +1263,7 @@ static void m_hist_work_handler(struct k_work *work)
 	if (state == APP_LRW_STATE_JOINING || state == APP_LRW_STATE_RECONNECT) {
 		LOG_WRN("History replay aborted: %s", state_name(state));
 		m_hist_active = false;
+		app_history_set_replay_active(false);
 		return; /* the (re)join → HEALTHY entry / send path restarts cadence */
 	}
 
