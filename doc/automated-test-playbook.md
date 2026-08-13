@@ -138,8 +138,9 @@ west build -p always -b sticker . -- -DEXTRA_CONF_FILE=debug.conf # debug (RTT, 
 
 - `-p always` after any Kconfig/overlay change.
 - Record the flash/RAM usage lines from the build report — they feed AT-HOST-05.
-- Flash map (256 KB): code 176 KB @ 0x0 · history ring 64 KB @ 0x2C000 · NVS/settings 16 KB
-  @ 0x3C000. NVS holds identity + config and is **shared between debug and release** —
+- Flash map (256 KB): code 208 KB @ 0x0 · history ring 32 KB @ 0x34000 · NVS/settings 16 KB
+  @ 0x3C000 (history shrank 64→32 KB / code grew 176→208 KB via #302/PR#306; `CONFIG_FLASH_LOAD_SIZE=0x34000`
+  release, `0x3C000` debug). NVS holds identity + config and is **shared between debug and release** —
   reflashing code does not lose provisioning.
 - Version stamping (CI parity): add `-DAPP_FW_VERSION=...` defines only if the scenario
   needs a specific version string; otherwise the default build is fine.
@@ -229,6 +230,10 @@ dev.Enqueue(api.EnqueueDeviceQueueItemRequest(queue_item=api.DeviceQueueItem(
 - Uplink payload events: use the application event stream/API of the bench instance, or
   poll `GetActivation` f_cnt_up for liveness plus read decoded events from the CS UI/API.
 - ABP device must have `skip_fcnt_check=True` (FW resets FCnt on reboot).
+- **OTAA re-join gotcha:** re-pointing the bench to a *previously-used* CS OTAA device fails with
+  `ERROR OTAA DevNonce has already been used` (CS remembers past DevNonces; the FW sends monotonic
+  persisted DevNonces — spec-correct, not a FW bug). Fix: `dev.FlushDevNonces(api.FlushDevNoncesRequest(
+  dev_eui=...))`, then reboot → immediate join. (OTAA analog of `skip_fcnt_check`.)
 - On OTAA rejoin the DevAddr changes — re-read activation, never cache it across joins.
 
 ### 3.5 TTN / The Things Stack — secondary LNS
@@ -380,7 +385,7 @@ Proven procedure (source-meter mode):
 | PPK2 current signature (boot, join burst, TX period) | ✅ (but PM=n distorts) | ✅ — **release-FW liveness proof without RTT** |
 | Power management / sleep behaviour | ⚠ PM disabled in debug — not representative | ✅ |
 | SWD attach | ✅ anytime | ⚠ only in boot/awake window (Stop2 blocks it) |
-| **History persistence across reboot/power-loss** | ❌ **`CONFIG_APP_HISTORY_FLASH=n`** in debug.conf — history lives in RAM only and is always lost on any reboot (this is intentional: debug trades the 64 KB history-flash budget for extra code space, `boards/sticker/sticker.dts` code_partition comment). `history-enable`/accumulation/read/stats all work fine *within* a boot, but AT-HIS-03/H8 (flash persistence) is **not testable on debug** — confirmed by direct test (44 records → 0 after a clean `ats device reboot`, raw flash at 0x2C000 shows plain firmware rodata, not a history ring) | ✅ `CONFIG_APP_HISTORY_FLASH=y` — dedicated 64 KB page-ring partition @0x2C000, survives reboot/power-loss by design (#265) |
+| **History persistence across reboot/power-loss** | ❌ **`CONFIG_APP_HISTORY_FLASH=n`** in debug.conf — history lives in RAM only and is always lost on any reboot (this is intentional: debug trades the 32 KB history-flash budget for extra code space, `boards/sticker/sticker.dts` code_partition comment). `history-enable`/accumulation/read/stats all work fine *within* a boot, but AT-HIS-03/H8 (flash persistence) is **not testable on debug** — confirmed by direct test (records → 0 after a clean `ats device reboot`, raw flash at 0x34000 shows plain firmware rodata, not a history ring) | ✅ `CONFIG_APP_HISTORY_FLASH=y` — dedicated 32 KB page-ring partition @0x34000, survives reboot/power-loss by design (#265, shrunk #302) |
 
 **Why release testing is non-negotiable:** two historical release-only bugs — the TX-stop
 wedge (masked by `CONFIG_LOG` timing and PM=n) and the boot ADC IWDG reset loop — were
@@ -993,9 +998,9 @@ still required before the next `alarm poll` will observe it as elapsed.
 
 ## 13. History (AT-HIS)
 
-Backend: raw-flash page ring, 64 KB @ 0x2C000, 2 KB pages, 32 B header + 1764 B data/page,
-double-word self-persisting records (marker 0xA5), count re-anchored from page headers on
-boot.
+Backend: raw-flash page ring, 32 KB @ 0x34000 (16 × 2 KB pages, shrunk from 64 KB via #302/PR#306),
+32 B header + 1764 B data/page, double-word self-persisting records (marker 0xA5), count re-anchored
+from page headers on boot. Record ≈ 44 B all-caps-on → ~40 records/page → ~600 captures to fully wrap.
 
 ### AT-HIS-01 — enable / sensor selection (D, A; maps H1, H2)
 - **Steps:** `config history-enable true` (+ `history-sensors <bitmask>` variant), save;
@@ -1016,10 +1021,10 @@ boot.
 ### AT-HIS-03 — persistence across reboot & power-cut (**R**, A; maps H8)
 - **Pre:** **release FW required.** Debug builds have `CONFIG_APP_HISTORY_FLASH=n`
   (`app/debug.conf`) — history lives in RAM only and is *always* lost on any reset, by
-  design (the 64 KB history-flash budget is reallocated to code space on debug, see
+  design (the 32 KB history-flash budget is reallocated to code space on debug, see
   `boards/sticker/sticker.dts` code_partition comment). This was empirically confirmed
   2026-07-07: 44 RAM-accumulated records on a debug build → 0 after a clean
-  `ats device reboot`; a raw flash dump at the history_partition offset (0x2C000) showed
+  `ats device reboot`; a raw flash dump at the history_partition offset (0x34000) showed
   plain firmware rodata/log strings, not a history ring — i.e. on debug that address range
   is inside the code image, not a separate partition. **Do not run this scenario on debug
   and report the result as a history bug** — it is expected behavior, not a finding.
@@ -1290,6 +1295,49 @@ cycle) to prove the device recovered. Run these LAST in a session.
 - **Expect:** every stack ≥ 15 % headroom; compare against the recorded baseline; shrinkage
   over the run = leak-suspect finding.
 
+---
+
+## 18. v1.4.0 critical-analysis scenarios (AT-REG / AT-LRW-18 / AT-DEF)
+
+Added from the 2026-08-13 static+dynamic+HIL analysis campaign (baseline `origin/v1.4.0` @ `a6c684b`; full
+findings report in the analysis note). These are regression guards for freshly-merged code, an LNS-portability
+round-trip, and targeted repros for confirmed defects. Legend as elsewhere: D=debug, R=release, A/SA=assist.
+
+### AT-REG-355 — hall/input polarity boot-transient guard (D; maps S8, #355) — **HW PASS 2026-08-13**
+- **Why:** #355 fixed a double-inverted `GPIO_ACTIVE_LOW`; the pre-fix bug registered a spurious counter edge on
+  the first poll after every boot (would corrupt every deployed door-counter on upgrade).
+- **Steps:** `ats sensors sample` (note hall-left/right counts, no magnet) → `ats device reboot` (magnet-free) →
+  reconnect → `ats sensors sample` again.
+- **Pass/Fail:** counts must be **unchanged** across the magnet-free reboot. FAIL on any increment (pre-#355 signature).
+- **Result 2026-08-13:** PASS on 2162199999 (hall-left 30→30, hall-right 6→6). Apply-on-magnet truth table still needs an operator magnet (assist §18).
+
+### AT-LRW-18 — LNS migration round-trip: ChirpStack OTAA → TTN OTAA → TTN ABP (D, A) — **HW PASS 2026-08-13**
+- **Why:** verify identity/key re-provisioning and LNS portability across activation modes; exercises the shell
+  `config lrw-*` + `settings save` provisioning path end-to-end.
+- **Steps:** for each leg, set the LRW keys over the shell (see [[reference_lrw_test_devices]]) + `settings save`,
+  then confirm uplinks on the target LNS (CS: `GetActivation` dev_addr change + f_cnt_up rising; TTN: `get_uplinks`).
+  1. **CS OTAA** (DevEUI …0010): if join fails with `Rx 2 timeout`, check CS `StreamDeviceFrames` — JoinRequests
+     arriving + a `log` event `OTAA DevNonce has already been used` ⇒ `FlushDevNonces` on CS (§3.4 gotcha), reboot.
+  2. **TTN OTAA** (DevEUI …0001): join (may need a 2nd attempt at SF12), confirm fPort-85 GetInfo-on-join + fPort-2.
+  3. **TTN ABP** (DevEUI …C3AB, DevAddr 98DE812E): no join — HEALTHY immediately, confirm fPort-2 (decoder decodes
+     hall/humidity), LinkCheck margin/gateways > 0.
+- **Pass/Fail:** each leg joins (OTAA) / transmits (ABP) and delivers a decodable uplink on the target LNS; the
+  re-provisioning must not disturb serial/secret_key. Restore to baseline TTN OTAA at the end.
+- **Result 2026-08-13:** all three legs PASS on 2162199999. Root-cause found+fixed for the CS-OTAA DevNonce replay.
+
+### AT-DEF-* — targeted repros for confirmed analysis defects (native_sim executable, HW = confirmation only)
+These already have **executable native_sim repros** (in the analysis worktree `tests/`), so a HW pass is confirmation, not discovery:
+- **AT-DEF-cfggate** (CRITICAL): SetParam over `APP_CMD_TRANSPORT_VENDOR`/`SHELL_DEBUG` on a field whose `writable:`
+  list excludes that transport is wrongly **accepted** — the generated write-gate is a denylist (only LRW/NFC arms;
+  `configen.py` `normalize_access` derives no `no_write_vendor`/`no_write_shell`). Repro: `tests/cmd` (3 failing ZTESTs).
+- **AT-DEF-histoob** (CRITICAL, release): a `flash_area_write()` failure in `backend_append()` leaves `m_stage_len=7`
+  → OOB write into `m_stage[]` on the next capture. HW: pair with AT-ADV-06/PPK2 power-cut during a history flash write.
+- **AT-DEF-dechang** (HIGH): the payload decoder (`ttn.js`) infinite-loops on a malformed length-delimited uplink
+  (`while(pos<end)` with `end` > buffer). Repro: `node -e '…decodeUplink({fPort:85,bytes:[1,0x1a,0x7f]})'` hangs.
+- **AT-DEF-349** (HIGH): #349 `rt_sync` keeps a stale latch on an in-place STATE-rule edit; `eval_count` re-fires
+  without `!rt->active` (ignores dwell/hold). Repro: `tests/alarm_eval` (2 ZTESTs).
+- **AT-DEF-buzz** (HIGH): a `buzzer_play` downlink built via `encodeDownlink` drops `kind`/`repeat_s` → empty
+  BuzzerPlay = STOP, acked success. HW: queue a `buzzer_play` downlink over LRW, confirm no beep + ack.
 
 ---
 
