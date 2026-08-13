@@ -166,9 +166,10 @@ commands:
     # #351: symmetric counterpart to clm_ack above — re-opens the claim window
     # instead of closing it, over the same secret_key-authenticated hio.stck:cmd
     # channel. Optional new_claim_token: empty/omitted re-arms with the EXISTING
-    # token (immediate, no reboot); a non-zero value replaces it (staged +
-    # save+reboot, same pattern as set_secret_key/#322 — see app_cmd_handle_clm_rearm
-    # for why the latch flip is deferred together with the reboot in that case).
+    # token, a non-zero value replaces it — either way the latch flip + reboot
+    # are deferred together until after the Ack is delivered (same restart-style
+    # pattern as reboot/set_secret_key, see app_cmd_handle_clm_rearm), so the
+    # phone always sees "ack read -> reboot" regardless of which case it took.
     - {name: clm_rearm, proto_id: 27, body: ClmRearm, kind: handler, response: ack, transports: [nfc, shell]}
 parameters:
   # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /

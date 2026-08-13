@@ -650,12 +650,13 @@ ZTEST(cmd, test_clm_ack)
 }
 
 /* #351 clm_rearm (field 27): nfc/shell only (rejected over lrw, same pattern as
- * clm_ack/set_secret_key above). No/zero new_claim_token re-arms immediately via
- * app_nfc_clm_reset() (no deferred action, staging untouched); a non-zero
- * new_claim_token stages it into g_app_config and defers
- * APP_CMD_ACTION_CLM_REARM_SAVE INSTEAD of calling app_nfc_clm_reset()
- * synchronously (see app_cmd_handle_clm_rearm for why: avoids exposing the
- * still-live OLD token via an NFC poll before the deferred reboot lands it). */
+ * clm_ack/set_secret_key above). Both the no/zero-new_claim_token and the
+ * non-zero-new_claim_token cases now defer APP_CMD_ACTION_CLM_REARM_SAVE the
+ * same way — restart-style, Ack delivered to the phone first, then main.c
+ * flips the latch (app_nfc_clm_reset()) and reboots — so the phone can always
+ * assume "ack read -> reboot" regardless of which case it took. A non-zero
+ * new_claim_token additionally stages it into g_app_config synchronously in
+ * the handler, before the deferred reboot lands it via h_commit. */
 ZTEST(cmd, test_clm_rearm)
 {
 	Response r;
@@ -673,9 +674,11 @@ ZTEST(cmd, test_clm_rearm)
 
 	reset_cfg();
 	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_NFC, "080dda0100", &r);
-	zassert_equal(a, APP_CMD_ACTION_NONE, "clm_rearm without token: no deferred action");
+	zassert_equal(a, APP_CMD_ACTION_CLM_REARM_SAVE,
+		      "clm_rearm without token also defers save+reboot");
 	zassert_equal(r.which_body, Response_ack_tag, "clm_rearm acks (which=%d)", r.which_body);
-	zassert_equal(g_clm_rearm_calls, 1, "app_nfc_clm_reset called exactly once");
+	zassert_equal(g_clm_rearm_calls, 0,
+		      "app_nfc_clm_reset must NOT run synchronously in the handler");
 
 	reset_cfg();
 	a = handle_via(APP_CMD_TRANSPORT_NFC, "080eda01120a1033333333333333333333333333333333", &r);

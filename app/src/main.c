@@ -169,10 +169,15 @@ static void nfc_run_deferred_cmd_actions(void)
 			app_settings_save(true);
 			break;
 		case APP_CMD_ACTION_CLM_REARM_SAVE:
-			/* #351: flip the clm latch to UNSET and persist+reboot together so
+			/* #351: flip the clm latch to UNSET and persist+reboot together,
+			 * always (both the same-token and new-token clm_rearm cases run
+			 * this action, see app_cmd_handle_clm_rearm) so the phone can
+			 * always assume "ack read -> reboot" regardless of which case it
+			 * took. When a new token was staged, this also ensures
 			 * g_app_config.claim_token becomes live (h_commit) in the same
 			 * breath the latch clears — no window where a poll could
-			 * re-expose the OLD token (see app_cmd_handle_clm_rearm). */
+			 * re-expose the OLD token; when no new token was given this is a
+			 * same-value no-op re-persist. */
 			play_carousel_nfc();
 			app_nfc_clm_reset();
 			app_settings_save(true);
