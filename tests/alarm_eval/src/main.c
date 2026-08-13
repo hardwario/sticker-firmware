@@ -14,7 +14,9 @@
 
 #include "app_alarm.h"
 #include "app_alarm_rules.h"
+#include "app_config.h"
 #include "app_hall.h"
+#include "app_sensor.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/ztest.h>
@@ -26,14 +28,16 @@ static void before(void *unused)
 	ARG_UNUSED(unused);
 	app_alarm_rules_clear_all();
 	test_hall = (struct app_hall_data){0};
+	g_app_sensor_data = (struct app_sensor_data){0};
+	g_app_config.interval_report = 0;
 	/* app_alarm.c's per-slot runtime latch (m_rt[]) is static file-scope state
 	 * that outlives a single ztest case. rt_sync() only resets a slot when its
-	 * (source, quantity) changes or the slot was never used — every test here
-	 * reuses slot 0 with the SAME (hall-left, state), only from/to differ, so
-	 * without this poll a leftover active=true from a previous test would leak
-	 * in and falsely look like "fired immediately". Polling once here, with no
-	 * rule present yet, drives rt_sync()'s "rule cleared" branch, which does
-	 * reset it. */
+	 * (source, quantity) changes or the slot was never used — several tests
+	 * here reuse the same (source, quantity) across cases (only from/to or
+	 * quantity/source combos vary within a family), so without this poll a
+	 * leftover latch from a previous test could leak in and falsely look like
+	 * "fired immediately". Polling once here, with no rule present yet, drives
+	 * rt_sync()'s "rule cleared" branch for every slot, which does reset it. */
 	app_alarm_poll();
 }
 
@@ -140,4 +144,125 @@ ZTEST(alarm_eval, test_state_edge_early_revert_cancels_confirm)
 	app_alarm_poll();
 	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_STATE),
 		      "reverted edge fired anyway — confirm window was paused, not reset");
+}
+
+/* Momentary source (PIR): fires immediately on the pulse (no confirm — the
+ * source already reports a discrete event, not a raw level), then holds for
+ * `hst` seconds before it can re-arm. Not HIL-tested in the #348 session. */
+ZTEST(alarm_eval, test_momentary_pir_fires_immediately_then_holds)
+{
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_PIR,
+		.quantity = APP_ALARM_Q_STATE,
+		.enabled = 1,
+		.from_state = 0,
+		.to_state = 1,
+		.hst = 0.3f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	app_alarm_event(APP_ALARM_SRC_PIR, true); /* pulse: fires on this same call */
+	zassert_true(app_alarm_is_active(APP_ALARM_SRC_PIR, APP_ALARM_Q_STATE),
+		     "momentary source did not fire immediately");
+
+	app_alarm_event(APP_ALARM_SRC_PIR, true); /* a second pulse within the hold */
+	zassert_true(app_alarm_is_active(APP_ALARM_SRC_PIR, APP_ALARM_Q_STATE),
+		     "held pulse dropped active early");
+
+	k_sleep(K_MSEC(400)); /* past the hold */
+	app_alarm_poll();     /* central oneshot-expiry sweep clears it */
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_PIR, APP_ALARM_Q_STATE),
+		      "momentary source never re-armed after the hold elapsed");
+}
+
+/* RATE (count): fires when the counter delta within one interval_report
+ * window reaches `hi`, then holds/re-arm-blocks for `hst` seconds — same
+ * hold/re-arm role as a momentary source. Not HIL-tested in the #348
+ * session. */
+ZTEST(alarm_eval, test_rate_count_fires_after_window_then_holds)
+{
+	g_app_config.interval_report = 1; /* 1 s tumbling window */
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_HALL_LEFT,
+		.quantity = APP_ALARM_Q_COUNT,
+		.enabled = 1,
+		.hi = 2, /* alarm when the window's delta >= 2 */
+		.hst = 0.3f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	g_app_sensor_data.hall_left_count = 0;
+	app_alarm_poll(); /* first poll only seeds the baseline + window start */
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
+		      "spuriously active before any window elapsed");
+
+	g_app_sensor_data.hall_left_count = 3; /* 3 pulses within this window */
+	k_sleep(K_MSEC(1100));                 /* past the 1 s window */
+	app_alarm_poll();
+	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
+		     "rate alarm never fired after an over-limit window elapsed");
+
+	k_sleep(K_MSEC(400)); /* past the hold, but still within the SAME 1 s window */
+	app_alarm_poll();
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
+		      "rate alarm never re-armed after the hold elapsed");
+}
+
+/* THRESHOLD (onboard temperature): dwell before activating outside [lo, hi],
+ * immediate deactivate, and the early-revert-resets-the-window guarantee —
+ * the HIL-confirmed behavior (project_issue348_alarm_dwell_unify.md), now
+ * also covered deterministically. */
+ZTEST(alarm_eval, test_threshold_dwell_activate_immediate_deactivate)
+{
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_ONBOARD,
+		.quantity = APP_ALARM_Q_TEMPERATURE,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 30.0f,
+		.hst = 0.3f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	g_app_sensor_data.temperature = 35.0f; /* above hi: arms the dwell */
+	app_alarm_poll();
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
+		      "threshold fired before the dwell elapsed");
+
+	k_sleep(K_MSEC(400));
+	app_alarm_poll();
+	zassert_true(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
+		     "threshold never fired after the dwell elapsed");
+
+	g_app_sensor_data.temperature = 20.0f; /* back in band */
+	app_alarm_poll();
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
+		      "threshold deactivation was not immediate");
+}
+
+ZTEST(alarm_eval, test_threshold_early_revert_resets_window)
+{
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_ONBOARD,
+		.quantity = APP_ALARM_Q_TEMPERATURE,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 30.0f,
+		.hst = 0.3f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	g_app_sensor_data.temperature = 35.0f; /* arm the dwell */
+	app_alarm_poll();
+
+	k_sleep(K_MSEC(100));                  /* well short of the 300 ms dwell */
+	g_app_sensor_data.temperature = 20.0f; /* reverts: back in band, cancel */
+	app_alarm_poll();
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
+		      "revert did not cancel the pending dwell");
+
+	k_sleep(K_MSEC(400)); /* past the ORIGINAL deadline */
+	app_alarm_poll();
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
+		      "reverted threshold fired anyway — window was paused, not reset");
 }
