@@ -481,6 +481,22 @@ static void clm_consume(const char *reason)
 	LOG_INF("NFC clm record consumed (%s) (#308)", reason);
 }
 
+/* #340 M3: arming (UNSET->PENDING) is split into an in-RAM step (so
+ * build_resting_ndef sees PENDING immediately) and a deferred persist that
+ * only happens once nfc_check_locked has confirmed the clm-bearing resting
+ * NDEF actually landed on the tag. These two helpers are that persist/undo,
+ * called only on the poll cycle that just armed (just_armed == true). */
+static void clm_arm_commit(void)
+{
+	m_clm_state = CLM_PENDING;
+	clm_state_save();
+}
+
+static void clm_arm_revert(void)
+{
+	m_clm_state = CLM_UNSET;
+}
+
 void app_nfc_clm_ack(void)
 {
 	clm_consume("clm_ack command");
@@ -1407,8 +1423,14 @@ static int handle_encrypted_cmd(const uint8_t *key, enum app_cmd_transport trans
 
 	/* #308: decrypting at all already proves the caller holds secret_key,
 	 * regardless of which command it turns out to be or whether it succeeds -
-	 * that is already the bar the rest of the claim window relies on. */
-	clm_consume("valid hio.stck:cmd received");
+	 * that is already the bar the rest of the claim window relies on. Excludes
+	 * the vendor_token channel (#316): a vendor_token holder is a narrower,
+	 * separate principal (HARDWARIO recovery), not proof of secret_key
+	 * possession, so a vendor touch must not silently close a claim window
+	 * meant for the actual device owner. */
+	if (transport != APP_CMD_TRANSPORT_VENDOR) {
+		clm_consume("valid hio.stck:cmd received");
+	}
 
 	size_t resp_len = 0;
 	ret = app_cmd_handle(transport, cmd_plain, cmd_len, resp_plain, sizeof(resp_plain),
@@ -1872,11 +1894,23 @@ static int nfc_check_locked(void)
 	 * the settled-consume branch below: on the very check that arms PENDING the tag
 	 * still holds the pre-provisioning info-only record (clm not laid down yet), so
 	 * without this guard a stale info record would be misread as "phone deleted
-	 * clm" and latch CONSUMED before clm is ever written. */
+	 * clm" and latch CONSUMED before clm is ever written.
+	 *
+	 * #340 M3: the PENDING state is set in RAM only here (build_resting_ndef right
+	 * below needs it immediately to include the clm record) - it is NOT persisted
+	 * yet. If the tag write that lays down that clm-bearing record never lands
+	 * (RF field up -> -EBUSY, I2C error, ...) and CLM_PENDING was already saved to
+	 * flash, the next poll would find an info-only tag and misread it via the
+	 * "phone deleted after claim" branch below, latching CONSUMED on a device that
+	 * was never actually claimed. So every path below reachable while just_armed
+	 * is true must either confirm the write succeeded and call clm_arm_commit()
+	 * (persist PENDING), or call clm_arm_revert() (undo back to UNSET in RAM so
+	 * the next poll retries arming from scratch) - see #351/#357 clm_rearm, which
+	 * made this arming sequence run on every re-provisioning, not just once at
+	 * factory commissioning. */
 	bool just_armed = false;
 	if (m_clm_state == CLM_UNSET && claim_token_is_set()) {
 		m_clm_state = CLM_PENDING;
-		clm_state_save();
 		just_armed = true;
 		LOG_INF("NFC clm record armed (claim token provisioned) (#247)");
 	}
@@ -1896,11 +1930,18 @@ static int nfc_check_locked(void)
 	ret = read_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
 	if (ret == -EBUSY) {
 		/* RF field stayed on through the read -> skip this cycle (benign); the
-		 * GPO event / fallback re-polls once the field is quiet again. */
+		 * GPO event / fallback re-polls once the field is quiet again. No write
+		 * happened, so an arm this cycle (#340 M3) is not yet confirmed - retry. */
+		if (just_armed) {
+			clm_arm_revert();
+		}
 		return 0;
 	}
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("read_mem", ret);
+		if (just_armed) {
+			clm_arm_revert();
+		}
 		return ret;
 	}
 	NFC_DBG("poll: tag read ok, CC=%02x TLV=%02x len=%02x rec=%02x", m_buf[0], m_buf[4],
@@ -1911,11 +1952,25 @@ static int nfc_check_locked(void)
 		m_unknown_count = 0;
 		m_info_restore_pending = false; /* #164: writing info record below */
 		NFC_REPORT("NFC tag empty -> writing info record (%zu B)", info_len);
+		bool write_ok = false;
 		if (info_len) {
 			ret = write_mem(0, info, info_len);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
 				res = ret;
+			} else {
+				write_ok = true;
+			}
+		}
+		/* #340 M3: commit the arm only once the clm-bearing record actually landed
+		 * on the tag (info_len == 0 would mean nothing was ever written either).
+		 * Tracked via a dedicated flag, not `res`, since `res` is not touched on
+		 * the write's own success path (only on failure). */
+		if (just_armed) {
+			if (write_ok) {
+				clm_arm_commit();
+			} else {
+				clm_arm_revert();
 			}
 		}
 		return res;
@@ -1927,6 +1982,11 @@ static int nfc_check_locked(void)
 		m_unknown_count = 0;
 		m_info_restore_pending = false; /* #164: info record is present */
 		NFC_REPORT("NFC tag holds our info record (nothing pending) -> no action");
+		/* #340 M3: tag content already matches what we'd write (clm included when
+		 * PENDING) - confirmed correct, not a race. */
+		if (just_armed) {
+			clm_arm_commit();
+		}
 		return 0;
 	}
 
@@ -1949,6 +2009,11 @@ static int nfc_check_locked(void)
 		NFC_REPORT_HEX("  response (0x01 ver + protobuf Response):", m_resp_buf,
 			       m_resp_len);
 		m_resp_write_pending = true;
+		/* #340 M3: this writes the command reply, not the clm-bearing resting
+		 * NDEF - an arm this cycle is not confirmed by it, so retry next poll. */
+		if (just_armed) {
+			clm_arm_revert();
+		}
 		return nfc_write_response();
 	}
 
@@ -1967,11 +2032,25 @@ static int nfc_check_locked(void)
 		}
 		LOG_INF("Restoring info record after phone ack (#164)...");
 		NFC_REPORT("NFC wrote: info record (%zu B) - restored after phone ack", info_len);
+		bool write_ok = false;
 		if (info_len) {
 			ret = write_mem(0, info, info_len);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
 				res = ret;
+			} else {
+				write_ok = true;
+			}
+		}
+		/* #340 M3: `info` here is the clm-bearing record built at the top of this
+		 * call - commit the arm once it is confirmed written, else retry. Tracked
+		 * via a dedicated flag: `res` may already carry an unrelated error from
+		 * app_nfc_parser_run above and would falsely look like a failed write. */
+		if (just_armed) {
+			if (write_ok) {
+				clm_arm_commit();
+			} else {
+				clm_arm_revert();
 			}
 		}
 		return res;
@@ -1983,6 +2062,10 @@ static int nfc_check_locked(void)
 	if (m_seen_resp) {
 		m_unknown_count = 0;
 		m_info_restore_pending = true;
+		/* #340 M3: no write happened this cycle - an arm is not confirmed. */
+		if (just_armed) {
+			clm_arm_revert();
+		}
 		return res;
 	}
 
@@ -2001,12 +2084,27 @@ static int nfc_check_locked(void)
 			clm_consume("phone deleted after claim");
 		}
 		info_len = build_resting_ndef(info, sizeof(info));
-		if (info_len && memcmp(m_buf, info, info_len) != 0) {
+		bool matched = info_len && memcmp(m_buf, info, info_len) == 0;
+		bool write_ok = false;
+		if (!matched && info_len) {
 			NFC_REPORT("NFC refreshing resting record (%zu B)", info_len);
 			ret = write_mem(0, info, info_len);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
 				res = ret;
+			} else {
+				write_ok = true;
+			}
+		}
+		/* #340 M3: commit once the clm-bearing record is confirmed on the tag,
+		 * either because it already matched or because the refresh write above
+		 * just landed it; otherwise retry next poll. Tracked via a dedicated flag,
+		 * not `res` (which may carry an unrelated earlier parser error). */
+		if (just_armed) {
+			if (matched || write_ok) {
+				clm_arm_commit();
+			} else {
+				clm_arm_revert();
 			}
 		}
 		return res;
@@ -2020,6 +2118,10 @@ static int nfc_check_locked(void)
 	if (++m_unknown_count < NFC_UNKNOWN_DEBOUNCE) {
 		NFC_REPORT("NFC unrecognized data (%u/%u) -> waiting (likely mid-write)",
 			   m_unknown_count, NFC_UNKNOWN_DEBOUNCE);
+		/* #340 M3: no write happened this cycle - an arm is not confirmed. */
+		if (just_armed) {
+			clm_arm_revert();
+		}
 		return res;
 	}
 
@@ -2028,11 +2130,25 @@ static int nfc_check_locked(void)
 	LOG_INF("Writing info record to NFC (cleared unknown data)...");
 	NFC_REPORT("NFC wrote: info record (%zu B) - cleared unknown data, restored metadata",
 		   info_len);
+	bool write_ok = false;
 	if (info_len) {
 		ret = write_mem(0, info, info_len);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("write_mem", ret);
 			res = ret;
+		} else {
+			write_ok = true;
+		}
+	}
+
+	/* #340 M3: commit the arm once this final restore write is confirmed, else
+	 * revert so the next poll retries from scratch. Tracked via a dedicated
+	 * flag, not `res` (which may carry an unrelated earlier parser error). */
+	if (just_armed) {
+		if (write_ok) {
+			clm_arm_commit();
+		} else {
+			clm_arm_revert();
 		}
 	}
 
