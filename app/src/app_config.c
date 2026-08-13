@@ -40,8 +40,6 @@ static const struct app_config m_app_config_defaults = {
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
 	.alarm_limit = 10,
-	.alarm_notif_time = 10,
-	.alarm_light_confirm_delay = 60,
 	.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN,
 	.lrw_sub_band = 2,
 	.lrw_link_check_interval = 5,
@@ -72,8 +70,6 @@ static struct app_config m_app_config = {
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
 	.alarm_limit = 10,
-	.alarm_notif_time = 10,
-	.alarm_light_confirm_delay = 60,
 	.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN,
 	.lrw_sub_band = 2,
 	.lrw_link_check_interval = 5,
@@ -127,10 +123,6 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("vendor-reset-allow", &m_app_config.vendor_reset_allow,
 		     sizeof(m_app_config.vendor_reset_allow));
 	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
-	SETTINGS_SET("alarm-notif-time", &m_app_config.alarm_notif_time,
-		     sizeof(m_app_config.alarm_notif_time));
-	SETTINGS_SET("alarm-light-confirm-delay", &m_app_config.alarm_light_confirm_delay,
-		     sizeof(m_app_config.alarm_light_confirm_delay));
 	SETTINGS_SET("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
 	SETTINGS_SET("radio-mode", &m_app_config.radio_mode, sizeof(m_app_config.radio_mode));
 	SETTINGS_SET("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
@@ -275,18 +267,6 @@ static int h_commit(void)
 	if (m_app_config.alarm_limit > 3600) {
 		m_app_config.alarm_limit = 3600;
 	}
-	if (m_app_config.alarm_notif_time < 1) {
-		m_app_config.alarm_notif_time = 1;
-	}
-	if (m_app_config.alarm_notif_time > 60) {
-		m_app_config.alarm_notif_time = 60;
-	}
-	if (m_app_config.alarm_light_confirm_delay < 0) {
-		m_app_config.alarm_light_confirm_delay = 0;
-	}
-	if (m_app_config.alarm_light_confirm_delay > 3600) {
-		m_app_config.alarm_light_confirm_delay = 3600;
-	}
 	if ((int)m_app_config.lrw_region < 0 || (int)m_app_config.lrw_region > 2) {
 		m_app_config.lrw_region = 0;
 	}
@@ -354,10 +334,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("vendor-reset-allow", &m_app_config.vendor_reset_allow,
 		    sizeof(m_app_config.vendor_reset_allow));
 	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
-	EXPORT_FUNC("alarm-notif-time", &m_app_config.alarm_notif_time,
-		    sizeof(m_app_config.alarm_notif_time));
-	EXPORT_FUNC("alarm-light-confirm-delay", &m_app_config.alarm_light_confirm_delay,
-		    sizeof(m_app_config.alarm_light_confirm_delay));
 	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
 	EXPORT_FUNC("radio-mode", &m_app_config.radio_mode, sizeof(m_app_config.radio_mode));
 	EXPORT_FUNC("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
@@ -646,17 +622,6 @@ static void print_alarm_limit(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " alarm-limit %d", m_app_config.alarm_limit);
 }
 
-static void print_alarm_notif_time(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-notif-time %d", m_app_config.alarm_notif_time);
-}
-
-static void print_alarm_light_confirm_delay(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-light-confirm-delay %d",
-		    m_app_config.alarm_light_confirm_delay);
-}
-
 static void print_lrw_region(const struct shell *shell)
 {
 	const char *str;
@@ -932,8 +897,6 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_battery_level(shell);
 	print_vendor_reset_allow(shell);
 	print_alarm_limit(shell);
-	print_alarm_notif_time(shell);
-	print_alarm_light_confirm_delay(shell);
 	print_lrw_region(shell);
 	print_radio_mode(shell);
 	print_lrw_sub_band(shell);
@@ -1169,18 +1132,6 @@ static int cmd_vendor_reset_allow(const struct shell *shell, size_t argc, char *
 static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_int(shell, argc, argv, &m_app_config.alarm_limit, 0, 3600, print_alarm_limit);
-}
-
-static int cmd_alarm_notif_time(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_int(shell, argc, argv, &m_app_config.alarm_notif_time, 1, 60,
-		       print_alarm_notif_time);
-}
-
-static int cmd_alarm_light_confirm_delay(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_int(shell, argc, argv, &m_app_config.alarm_light_confirm_delay, 0, 3600,
-		       print_alarm_light_confirm_delay);
 }
 
 static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
@@ -1575,14 +1526,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(alarm-limit, NULL,
 	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
 	              cmd_alarm_limit, 1, 1),
-
-	SHELL_CMD_ARG(alarm-notif-time, NULL,
-	              "Get/Set alarm red-LED hold time in seconds (both-mode and pulse sources).",
-	              cmd_alarm_notif_time, 1, 1),
-
-	SHELL_CMD_ARG(alarm-light-confirm-delay, NULL,
-	              "Get/Set light-increase alarm confirmation delay in seconds (0 = immediate). On a rising illuminance threshold (on-board OPT3001 or a 1-Wire slot light sensor) the device waits this long, re-samples, and only alarms if still bright.",
-	              cmd_alarm_light_confirm_delay, 1, 1),
 
 	SHELL_CMD_ARG(lrw-region, NULL,
 	              "Get/Set LoRaWAN region (eu868/us915/au915).",

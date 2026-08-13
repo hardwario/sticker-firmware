@@ -29,12 +29,19 @@
  * rule index.
  *
  * A rule's kind is derived from its quantity:
- *  - THRESHOLD (analog): lo/hi/hst hysteresis band — temperature, humidity,
- *    pressure, illuminance, magnetic_field.
- *  - STATE (digital 0/1): from_state/to_state — from != to is an edge (one-shot
- *    alarm; the red LED blinks for alarm_notif_time), from == to is a level
- *    (alarm active while the state == to). tilt and the discrete inputs.
- *  - COUNT (rate): hi = max counter increase allowed per report interval.
+ *  - THRESHOLD (analog): lo/hi band, no hysteresis; dwell = seconds the
+ *    value must stay outside [lo,hi] before activating (0 = immediate).
+ *    Deactivation is always immediate on returning inside the band. Applies to
+ *    temperature, humidity, pressure, illuminance, magnetic_field, voltage.
+ *  - STATE (digital 0/1): from_state/to_state — from != to is an edge (dwell =
+ *    confirm time before firing, then the same duration holds the alarm
+ *    active/re-arm-blocked, no separate deactivate event); from == to is a
+ *    level (dwell = time before activating; deactivate is immediate once
+ *    state != to). tilt and the discrete inputs. A momentary source (pir/
+ *    accel) fires immediately on each pulse (nothing to confirm) and instead
+ *    uses dwell purely as the post-fire hold/re-arm window.
+ *  - COUNT (rate): hi = max counter increase allowed per report interval;
+ *    dwell = hold/re-arm window after firing, same role as a momentary source.
  */
 
 #include <stdbool.h>
@@ -65,7 +72,7 @@ enum app_alarm_source {
 	APP_ALARM_SRC_COUNT
 };
 
-/* What is measured. THRESHOLD quantities use lo/hi/hst; STATE uses from/to;
+/* What is measured. THRESHOLD quantities use lo/hi/dwell; STATE uses from/to;
  * COUNT uses hi as the per-interval rate limit. Extend here + in the validity
  * table; the wire (AlarmEvent.quantity) and ttn.js mirror these values. */
 enum app_alarm_quantity {
@@ -82,7 +89,7 @@ enum app_alarm_quantity {
 };
 
 enum app_alarm_kind {
-	APP_ALARM_KIND_THRESHOLD, /* lo/hi/hst */
+	APP_ALARM_KIND_THRESHOLD, /* lo/hi/dwell */
 	APP_ALARM_KIND_STATE,     /* from_state/to_state */
 	APP_ALARM_KIND_RATE,      /* hi = max delta per report interval */
 };
@@ -91,9 +98,9 @@ struct app_alarm_rule {
 	uint8_t source;   /* enum app_alarm_source */
 	uint8_t quantity; /* enum app_alarm_quantity */
 	uint8_t enabled;
-	uint8_t from_state; /* STATE only: previous level (0/1) */
-	uint8_t to_state;   /* STATE only: triggering level (0/1); from==to => level */
-	float lo, hi, hst;  /* THRESHOLD (and hi for RATE) */
+	uint8_t from_state;  /* STATE only: previous level (0/1) */
+	uint8_t to_state;    /* STATE only: triggering level (0/1); from==to => level */
+	float lo, hi, dwell; /* THRESHOLD/RATE use hi; dwell is a hold in seconds, all kinds */
 };
 
 /* Build the rule cache from the app_config slots (called once at init, after

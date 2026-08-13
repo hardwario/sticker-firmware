@@ -87,8 +87,9 @@ message AppConfigMessage {
     }
 
     message Alarms {
+        reserved 2;
+        reserved 19;
         optional uint32 alarm_limit = 1;
-        optional uint32 alarm_notif_time = 2;
         optional bytes alarm_0 = 3;
         optional bytes alarm_1 = 4;
         optional bytes alarm_2 = 5;
@@ -105,7 +106,6 @@ message AppConfigMessage {
         optional bytes alarm_13 = 16;
         optional bytes alarm_14 = 17;
         optional bytes alarm_15 = 18;
-        optional uint32 alarm_light_confirm_delay = 19;
     }
 }
 // END GENERATED CONFIG

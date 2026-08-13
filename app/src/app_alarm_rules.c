@@ -158,26 +158,39 @@ static bool rule_state_shape_valid(const struct app_alarm_rule *r)
 	return true;
 }
 
-/* A THRESHOLD rule latches when value < lo-hst or > hi+hst and clears only in
- * the open band (lo+hst, hi-hst). If that band is empty — hi <= lo + 2*hst,
- * which also catches inverted (hi < lo) and NaN bounds — a latched alarm can
- * never clear except via NaN/disable, so the device stays stuck in alarm. Such
- * a rule is rejected at the write path rather than stored. Non-THRESHOLD kinds
- * (STATE/RATE) don't use the lo/hi band, so they pass. */
-static bool rule_threshold_shape_valid(const struct app_alarm_rule *r)
+/* `dwell` (#348) is a plain dwell/hold duration in seconds across every kind
+ * that uses it — bound it to a sane range regardless of kind (same cap as the
+ * old alarm_light_confirm_delay it replaces) rather than the previous
+ * THRESHOLD-only "band can't collapse" check, which no longer applies now that
+ * activation/deactivation don't use dwell as a value offset. */
+#define RULE_DWELL_MAX_S 3600.0f
+
+static bool rule_dwell_range_valid(const struct app_alarm_rule *r)
+{
+	return r->dwell >= 0.0f && r->dwell <= RULE_DWELL_MAX_S;
+}
+
+/* eval_threshold() activates outside [lo, hi] and deactivates only inside it
+ * (value >= lo && value <= hi). hi <= lo (empty or inverted band, or a NaN
+ * bound making both comparisons false) makes that deactivate condition
+ * unsatisfiable by any real reading, so a rule that ever activates would
+ * latch forever — the same class of stuck-alarm bug the old hysteresis
+ * band-collapse guard caught (#203), now checked directly on the plain band
+ * since dwell no longer offsets it. Non-THRESHOLD kinds don't use the band. */
+static bool rule_threshold_band_valid(const struct app_alarm_rule *r)
 {
 	if (app_alarm_quantity_kind((enum app_alarm_quantity)r->quantity) !=
 	    APP_ALARM_KIND_THRESHOLD) {
 		return true;
 	}
-	float hst = (r->hst >= 0.0f) ? r->hst : 0.0f;
-	return r->hi - r->lo > 2.0f * hst;
+	return r->hi > r->lo;
 }
 
 /* All shape checks a decoded rule must pass before it is stored or accepted. */
 static bool rule_shape_valid(const struct app_alarm_rule *r)
 {
-	return rule_state_shape_valid(r) && rule_threshold_shape_valid(r);
+	return rule_state_shape_valid(r) && rule_dwell_range_valid(r) &&
+	       rule_threshold_band_valid(r);
 }
 
 /* ---- app_config storage (per-slot bytes) -------------------------------- */
@@ -236,7 +249,7 @@ static void pack_rule(const struct app_alarm_rule *r, uint8_t out[RULE_PACK_LEN]
 	out[4] = r->to_state;
 	memcpy(&out[5], &r->lo, sizeof(float));
 	memcpy(&out[9], &r->hi, sizeof(float));
-	memcpy(&out[13], &r->hst, sizeof(float));
+	memcpy(&out[13], &r->dwell, sizeof(float));
 }
 
 /* Decode `in` into `*r`. Returns true if the slot is present (occupied). */
@@ -252,7 +265,7 @@ static bool unpack_rule(const uint8_t in[RULE_PACK_LEN], struct app_alarm_rule *
 	r->to_state = in[4];
 	memcpy(&r->lo, &in[5], sizeof(float));
 	memcpy(&r->hi, &in[9], sizeof(float));
-	memcpy(&r->hst, &in[13], sizeof(float));
+	memcpy(&r->dwell, &in[13], sizeof(float));
 	return true;
 }
 

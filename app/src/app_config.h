@@ -63,8 +63,6 @@ struct app_config {
 	int battery_level;
 	bool vendor_reset_allow;
 	int alarm_limit;
-	int alarm_notif_time;
-	int alarm_light_confirm_delay;
 	enum app_config_lrw_region lrw_region;
 	enum app_config_radio_mode radio_mode;
 	int lrw_sub_band;
