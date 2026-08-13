@@ -365,9 +365,20 @@ int app_buzzer_play_repeating(uint32_t kind, uint16_t repeat_s)
 		/* 0 = "silence": the remote stop. Kill any queued request plus the
 		 * in-flight playback and pending repeat cycle — release builds have
 		 * no shell, so this is the only way to stop a repeating melody over
-		 * NFC/LRW. repeat_s is ignored here. */
+		 * NFC/LRW. repeat_s is ignored here.
+		 *
+		 * ORDER MATTERS (found on real HW): app_buzzer_set(false) MUST run
+		 * before k_msgq_purge(). k_msgq_get() blocks a getter on the SAME
+		 * msgq->wait_q used for blocked putters (kernel/msg_q.c) — a getter
+		 * waiting out a repeat interval IS parked there — so purge() wakes
+		 * it (arch_thread_return_value_set(..., -ENOMSG)) exactly like
+		 * k_wakeup() does for k_sleep(). Purging first raced the thread
+		 * loop's abort check against m_abort still being 0, so the wakeup
+		 * was read as "repeat interval elapsed" and replayed the melody —
+		 * observed live as a `buzzer off` that never stopped a repeat. */
+		int ret = app_buzzer_set(false);
 		k_msgq_purge(&m_buzzer_msgq);
-		return app_buzzer_set(false);
+		return ret;
 	}
 
 	if (kind >= ARRAY_SIZE(MELODY_TABLE) || !MELODY_TABLE[kind].commands) {
