@@ -84,6 +84,7 @@ message AppConfigMessage {
         optional bool hall_right_counter = 16;
         optional bool input_a_counter = 17;
         optional bool input_b_counter = 18;
+        optional bool cap_buzzer = 19;
     }
 
     message Alarms {

@@ -457,6 +457,9 @@ int app_config_apply_sensors(enum app_cmd_transport tp, const AppConfigMessage_S
 	if (src->has_input_b_counter) {
 		config->input_b_counter = src->input_b_counter;
 	}
+	if (src->has_cap_buzzer) {
+		config->cap_buzzer = src->cap_buzzer;
+	}
 	return ret;
 }
 
@@ -536,6 +539,10 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 	if (requested(ids, n, 18)) {
 		dst->has_input_b_counter = true;
 		dst->input_b_counter = c->input_b_counter;
+	}
+	if (requested(ids, n, 19)) {
+		dst->has_cap_buzzer = true;
+		dst->cap_buzzer = c->cap_buzzer;
 	}
 }
 

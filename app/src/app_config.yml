@@ -501,6 +501,12 @@ parameters:
     type: bool
     help: "Get/Set PIR detector capability (true/false)."
 
+  - name: cap_buzzer
+    proto_group: sensors
+    proto_id: 19
+    type: bool
+    help: "Get/Set buzzer capability (true/false). Shares GPIO pins with the PIR detector — mutually exclusive with cap_pir_detector (PIR wins if both are enabled)."
+
   - name: cap_w1_sensors
     proto_group: sensors
     proto_id: 8

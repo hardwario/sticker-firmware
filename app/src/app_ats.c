@@ -6,6 +6,7 @@
 
 #include "app_accel.h"
 #include "app_log.h"
+#include "app_buzzer.h"
 #include "app_ds18b20.h"
 #include "app_hall.h"
 #include "app_input.h"
@@ -963,6 +964,108 @@ static int cmd_ccm_selftest(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "ccm selftest: %s (%d failure(s))", fails == 0 ? "PASS" : "FAIL", fails);
 	return fails == 0 ? 0 : -EIO;
 }
+
+/* Debug control surface for the HW variant with a CMI-9605IC-0380T buzzer wired
+ * directly across the former PIR pins (app_buzzer.c, #338). Only meaningful with
+ * cap_buzzer=true — otherwise app_buzzer_init() was never called (either
+ * cap_pir_detector owns the pins, or neither capability is on) and driving the
+ * GPIOs here would race whatever else configured them. */
+static int cmd_buzzer_on(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!g_app_config.cap_buzzer) {
+		shell_error(sh, "cap_buzzer is not enabled");
+		return -ENODEV;
+	}
+
+	int ret = app_buzzer_set(true);
+	if (ret) {
+		shell_error(sh, "app_buzzer_set failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int cmd_buzzer_off(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!g_app_config.cap_buzzer) {
+		shell_error(sh, "cap_buzzer is not enabled");
+		return -ENODEV;
+	}
+
+	int ret = app_buzzer_set(false);
+	if (ret) {
+		shell_error(sh, "app_buzzer_set failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int cmd_buzzer_beep(const struct shell *sh, size_t argc, char **argv)
+{
+	if (!g_app_config.cap_buzzer) {
+		shell_error(sh, "cap_buzzer is not enabled");
+		return -ENODEV;
+	}
+
+	unsigned long ms = strtoul(argv[1], NULL, 0);
+	if (ms == 0 || ms > 5000) {
+		shell_error(sh, "duration must be 1-5000 ms");
+		return -EINVAL;
+	}
+
+	int ret = app_buzzer_on((uint32_t)ms);
+	if (ret) {
+		shell_error(sh, "app_buzzer_on failed: %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int cmd_buzzer_play(const struct shell *sh, size_t argc, char **argv)
+{
+	if (!g_app_config.cap_buzzer) {
+		shell_error(sh, "cap_buzzer is not enabled");
+		return -ENODEV;
+	}
+
+	int ret;
+
+	if (strcmp(argv[1], "info") == 0) {
+		ret = app_buzzer_play_info();
+	} else if (strcmp(argv[1], "warning") == 0) {
+		ret = app_buzzer_play_warning();
+	} else if (strcmp(argv[1], "alarm") == 0) {
+		ret = app_buzzer_play_alarm();
+	} else {
+		shell_error(sh, "unknown melody: %s (expected info|warning|alarm)", argv[1]);
+		return -EINVAL;
+	}
+
+	if (ret) {
+		shell_error(sh, "app_buzzer_play_%s failed: %d", argv[1], ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_buzzer, SHELL_CMD_ARG(on, NULL, "Drive the buzzer continuously.", cmd_buzzer_on, 1, 0),
+	SHELL_CMD_ARG(off, NULL, "Stop driving the buzzer.", cmd_buzzer_off, 1, 0),
+	SHELL_CMD_ARG(beep, NULL, "Pulse the buzzer. Usage: beep <ms> (1-5000)", cmd_buzzer_beep, 2,
+		      0),
+	SHELL_CMD_ARG(play, NULL, "Play a fixed melody. Usage: play <info|warning|alarm>",
+		      cmd_buzzer_play, 2, 0),
+	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_APP_CMD_DEBUG_SHELL */
 
 /* Decode a hwinfo reset-cause bitmask (from app_cmd_info.reset_cause, read at
@@ -1215,6 +1318,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
 	SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
 	SHELL_CMD(ccm, NULL, "app_ccm HW AES self-test (golden vectors).", cmd_ccm_selftest),
+	SHELL_CMD(buzzer, &sub_buzzer, "Buzzer HW variant commands (#338).", NULL),
 #endif
 	SHELL_SUBCMD_SET_END);
 

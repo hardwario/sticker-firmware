@@ -153,6 +153,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_barometer));
 	SETTINGS_SET("cap-pir-detector", &m_app_config.cap_pir_detector,
 		     sizeof(m_app_config.cap_pir_detector));
+	SETTINGS_SET("cap-buzzer", &m_app_config.cap_buzzer, sizeof(m_app_config.cap_buzzer));
 	SETTINGS_SET("cap-w1-sensors", &m_app_config.cap_w1_sensors,
 		     sizeof(m_app_config.cap_w1_sensors));
 	SETTINGS_SET("cap-accelerometer", &m_app_config.cap_accelerometer,
@@ -364,6 +365,7 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_barometer));
 	EXPORT_FUNC("cap-pir-detector", &m_app_config.cap_pir_detector,
 		    sizeof(m_app_config.cap_pir_detector));
+	EXPORT_FUNC("cap-buzzer", &m_app_config.cap_buzzer, sizeof(m_app_config.cap_buzzer));
 	EXPORT_FUNC("cap-w1-sensors", &m_app_config.cap_w1_sensors,
 		    sizeof(m_app_config.cap_w1_sensors));
 	EXPORT_FUNC("cap-accelerometer", &m_app_config.cap_accelerometer,
@@ -799,6 +801,12 @@ static void print_cap_pir_detector(const struct shell *shell)
 		    m_app_config.cap_pir_detector ? "true" : "false");
 }
 
+static void print_cap_buzzer(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-buzzer %s",
+		    m_app_config.cap_buzzer ? "true" : "false");
+}
+
 static void print_cap_w1_sensors(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " cap-w1-sensors %s",
@@ -919,6 +927,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_light_sensor(shell);
 	print_cap_barometer(shell);
 	print_cap_pir_detector(shell);
+	print_cap_buzzer(shell);
 	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
 	print_accel_motion_sensitivity(shell);
@@ -1361,6 +1370,11 @@ static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **a
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_pir_detector, print_cap_pir_detector);
 }
 
+static int cmd_cap_buzzer(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_buzzer, print_cap_buzzer);
+}
+
 static int cmd_cap_w1_sensors(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_w1_sensors, print_cap_w1_sensors);
@@ -1614,6 +1628,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(cap-pir-detector, NULL,
 	              "Get/Set PIR detector capability (true/false).",
 	              cmd_cap_pir_detector, 1, 1),
+
+	SHELL_CMD_ARG(cap-buzzer, NULL,
+	              "Get/Set buzzer capability (true/false). Shares GPIO pins with the PIR detector — mutually exclusive with cap_pir_detector (PIR wins if both are enabled).",
+	              cmd_cap_buzzer, 1, 1),
 
 	SHELL_CMD_ARG(cap-w1-sensors, NULL,
 	              "Get/Set 1-Wire sensor bus capability — enables the bus + auto-detects attached sensors (true/false).",
