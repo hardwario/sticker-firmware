@@ -239,8 +239,20 @@ incl. `decoded_payload` from `ttn.js`), `mcp__tts__send_downlink` (`f_port`, hex
 
 - Purpose here: **decoder parity** (same uplink must decode identically on both LNS — both
   run `app/decoder/ttn.js`) and a second-opinion join path.
-- Known bench quirk: TTN does not reliably answer LinkCheckReq (`gateways=0`) — do NOT run
-  LC state-machine tests against TTN; use ChirpStack.
+- **Correction (2026-08-11), supersedes the old "TTN doesn't answer LinkCheckReq" note**: after
+  the `hm-sticker-otaa-test` device recreate on 2026-07-07, TTN answers `LinkCheckReq`
+  correctly and reliably — confirmed decisive on 2026-08-11: `ats lrw check` got an immediate
+  `LinkCheckAns` (margin 26 dB, 2 gateways), and the session then held **HEALTHY on the same
+  DevAddr for 438 s / 9 uplinks with zero link-check failures** (`healthy->warning: 0/3`
+  throughout). **On the same bench, ChirpStack (`hm-sticker-otaa-cs`) showed the opposite**: a
+  freshly release-flashed device with stock `lrw-link-check-interval`/`lrw-link-check-fail-rejoin`
+  defaults (both `5`, per `app_config.yml`) rejoined OTAA (fresh DevAddr each time) roughly every
+  5-16 minutes, with device uptime climbing continuously across rejoins (confirmed via
+  `unix_time - uptime_s` staying self-consistent — this is LoRaWAN-layer RECONNECT churn, not
+  an MCU reboot loop). **Net effect: TTN is currently the more reliable LNS on this bench for LC
+  state-machine work (AT-LRW-07/AT-LRW-08); ChirpStack is the one that needs the caveat now.**
+  Not root-caused further (gateway duty-cycle vs genuine ChirpStack LinkCheckAns handling both
+  remain open) — flag if picking this up.
 
 ### 3.6 Manager-App debug control server (real-NFC path)
 
@@ -272,6 +284,48 @@ curl -s -XPOST localhost:8429/nav -d '{"route":"/sticker/nfc/config"}'   # drive
   block, or ask the operator to fixture the phone on the device for a batch.
 - `.sfu` firmware update and ATELOS claim are NOT implemented in the app yet — no scenarios
   for them (see also README: no in-field FW update, by design).
+
+**Phone-free alternative (debug FW, no phone needed).** Everything the phone does to build an
+`hio.stck:cmd` exchange can be hand-crafted and injected via the debug shell's `nfc write
+<offset> <hex>` — useful for AT-NFC-05/06 (nonce/anti-replay) and the AT-NFC-03-style
+device_reset/factory_reset/set_secret_key legs of N9, where the point of the test is the
+*protocol/crypto* behavior, not the phone's own UI/codec:
+
+1. Build the plaintext `Command` protobuf bytes (see `app_config.proto`'s `Command` oneof for
+   field numbers).
+2. AES-CCM-encrypt exactly as `app_nfc.c`'s `decrypt()`/`encrypt()` do: 9-byte nonce =
+   `serial(4B BE) || nonce_counter(4B BE) || direction(1B)` (`0x00`=request, `0x01`=response),
+   AAD = the 8-byte `serial||nonce_counter` header, 16-byte CCM tag, wire =
+   `header || ciphertext+tag`.
+3. Wrap in an NDEF record (TNF=`EXTERNAL` (`0x04`), type `hio.stck:cmd`, 12 bytes) inside a TLV
+   (`0x03`, length, record bytes, `0xFE` terminator), and `nfc write 4 <hex>` it onto the tag
+   (offset 4, right after the 4-byte Capability Container).
+4. `nfc check` to trigger processing; read the response back with `nfc dump` and decrypt it the
+   same way with direction `0x01`.
+
+```python
+# AESCCM(key, tag_length=16).encrypt(nonce, plaintext, aad) — cryptography package
+header = struct.pack(">II", serial_number, nonce_counter)
+nonce = header + bytes([0x00])          # 0x01 for decrypting a response
+wire = header + AESCCM(key, 16).encrypt(nonce, plaintext, aad=header)
+```
+
+Gotchas specific to this method: `nfc write` silently **truncates** hex args over ~128
+characters (command-line buffer limit) with no error — split into ≤40-byte chunks at
+sequential offsets and verify each `wrote N byte(s)` count. Protobuf tag bytes for `Command`
+oneof fields **≥ 16** (e.g. `factory_reset`=23, `set_secret_key`=24) exceed 127 and need
+2-byte varint encoding, not a single raw byte — encoding the tag as one byte silently produces
+a garbled frame the firmware correctly rejects as `Response.Error{BAD_REQUEST,
+"end-of-stream"}`, which looks exactly like a firmware bug but is a bug in the hand-rolled
+encoder (see §22).
+
+This method **cannot** distinguish the true `hio.stck:ack`-driven release path from the
+field-loss backstop (`m_seen_ack` vs `m_info_restore_pending` in `app_nfc.c`) — there is no
+real RF field to hold open between writes, so the backstop always wins the race. Both paths
+correctly release a pending deferred action (reboot/save), so this is fine for confirming *that*
+device_reset/factory_reset/set_secret_key execute correctly and are gated behind the response
+write — but confirming the specific *ack* code path (not just the backstop) still needs a real
+phone tap (§3.6, N9).
 
 ### 3.7 PPK2 — supply control & current measurement
 
@@ -372,6 +426,16 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 - **Steps:** `cd app/decoder && node --test`; then
   `pytest scripts/west_commands/tests -k proto_and_decoder_agree`.
 - **Expect:** all decoder cases pass; the firmware proto schema and `ttn.js` agree on the wire.
+- **Known gap (2026-08-11, not yet fixed):** `encodeDownlinkCommand` silently builds an
+  **empty body** for two `Command` oneof members that actually carry fields in the firmware
+  proto: `clock_sync` (drops `unix_time`) and `req_history_page` (drops
+  `from_unix`/`to_unix`/`start_ord`). Both are reachable today only by hand-building the
+  Command bytes (§3.6 phone-free recipe, or a raw hex downlink) — round-trip via the LNS
+  downlink builder silently produces a no-op command instead of erroring. Add an assertion to
+  this suite that every `Command` field with a non-trivial message body either has an
+  `_enc*`/`encodeDownlinkCommand` branch or is explicitly documented as encoder-excluded (like
+  `factory_reset`/`set_secret_key`/`vendor_reset` already are, per the comment in the source) —
+  this would have caught `req_history_page` immediately.
 
 ### AT-HOST-04 — configen round-trip
 - **Steps:** `pytest scripts/west_commands/tests` (full suite: idempotence, append-only
@@ -418,13 +482,27 @@ Run these first in every session; they gate everything else. All `A`/host-only.
   after each, `config show`.
 - **Expect:** serial, secret key, claim token, LoRaWAN identity keys survive both;
   application params reset to defaults after factory reset (interval-report back to 900).
+- **Result (2026-08-11, real debug→release reflash, not just factory-reset)**: built a genuine
+  `prj.conf`-only release image (`.config` confirmed `CONFIG_SHELL`/`CONFIG_USE_SEGGER_RTT` both
+  unset — release truly has zero RTT/shell surface, not just no shell commands), flashed it over
+  a provisioned debug device via `JLinkExe loadfile` (sector-erase, no `--erase`). After a real
+  power cycle (see AT-BOOT-04's PPK2 correction below), the autonomous post-join GetInfo uplink
+  decoded to `debug: false`, `serial_number: 2162199999` (unchanged) and a successful OTAA join
+  on the preserved `lrw_deveui`/`lrw_appkey` — full identity survived a real firmware-variant
+  swap, not just a same-image reflash. Since release has no shell/RTT, post-release verification
+  had to go through LRW (autonomous GetInfo) — there is currently no way to inspect NFC state on
+  a release device without a phone or external reader.
 - **Cleanup:** restore run-plan config values, `settings save`.
 
 ### AT-BOOT-04 — release boot sanity / no reset loop (R; maps regression a42dde6)
 - **Pre:** release FW just flashed; PPK2 powering the DUT.
-- **Steps:** power-cycle via PPK2 (`QUIT`+relaunch holder or voltage 0→{PPK2_MV}); watch the
-  PPK2 current trace ~60 s (or, without measurement mode, watch the LNS for the boot
-  uplink and ask the operator to confirm a single LED carousel).
+- **Steps:** power-cycle via PPK2 — **use `QUIT` then relaunch the holder, or a live `OFF` then
+  `ON` command (both call `toggle_DUT_power` directly); do NOT rely on setting the source
+  voltage to 0 and back** (confirmed 2026-08-11: `set_source_voltage(0)` alone does not power
+  off the DUT — LED kept blinking and the device kept transmitting on LoRaWAN for 90+ s at
+  commanded 0 mV; only an explicit `toggle_DUT_power("OFF")` is a real cut). Watch the PPK2
+  current trace ~60 s (or, without measurement mode, watch the LNS for the boot uplink and ask
+  the operator to confirm a single LED carousel).
 - **Expect:** exactly one boot signature (single carousel, single join/uplink burst) — no
   periodic ~8 s IWDG reset pattern (the historical release-only boot-ADC hang).
 - **Evidence:** current trace segment or LNS first-uplink timestamp.
@@ -555,11 +633,30 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 ### AT-LRW-06 — downlink command matrix (DR, A; maps L10, C1–C7, G4b, G5)
 - **Steps:** over ChirpStack enqueue, one at a time, each command: get_info, sample,
   set_param(+readback), get_param, get_config, settings_save, reboot, reset_counters,
-  force_send, clock_sync, lrw_reset, lrw_join, enter_calibration, w1_scan; after each,
-  trigger an uplink and capture the fPort-85 response.
+  force_send, clock_sync, lrw_reset, lrw_join, enter_calibration, w1_scan, **device_reset**
+  (unlike `factory_reset`/`set_secret_key`, `device_reset`'s dispatch in `app_cmd.c` has no
+  transport gate — it IS reachable over a LoRaWAN downlink, and hasn't been tried that way);
+  after each, trigger an uplink and capture the fPort-85 response.
+- Also deliberately try **`factory_reset`**, **`set_secret_key`**, and **`req_history_page`**
+  over this same LRW path — `app_cmd.c` gates all three to `[nfc, shell]`/`[nfc, shell,
+  vendor]`/`[nfc]` respectively, so the expected result is
+  `Response.Error{NOT_READY,"transport not allowed"}`, not silence or a crash. Confirms the
+  transport allowlist from the read-through, not just from source.
 - **Expect:** every command acks/responds with the echoed seq; exactly **one command
   consumed per RX window** (queue two → second arrives one uplink later); refused
-  transports (per AT-CFG-03) return errors, not silence.
+  transports (per AT-CFG-03) return errors, not silence. `device_reset` over LRW is expected
+  to succeed and reboot — since LRW has no `hio.stck:ack` concept, watch whether the deferred
+  reboot fires immediately after the response uplink is handed to the MAC layer or waits for
+  something else; this differs from the NFC ack-gate path (§3.6 phone-free recipe).
+- **Result (2026-08-11, real ChirpStack downlinks, sticker 2162199999):** all four confirmed.
+  `factory_reset`/`set_secret_key`/`req_history_page` each got back
+  `Response.Error{NOT_READY,"transport not allowed"}` with the seq echoed correctly, no state
+  change. `device_reset` succeeded: the `Response{seq,ack:{}}` uplink landed, then the device
+  rebooted and rejoined OTAA cleanly, with its autonomous post-join GetInfo uplink arriving
+  ~35s after the ack — i.e. LRW also does response-before-reboot ordering, just via ordinary
+  uplink-then-deferred-action sequencing rather than NFC's ack/backstop gate. Config diff
+  matched `app_config_device_reset()`'s preserve-list exactly (`cap-w1-sensors`/
+  `interval-report` reset, `lrw-appkey`/secret_key/serial/nonce_counter preserved).
 - **Evidence:** command → response-hex → decoded table. This is the core release-FW
   functional suite.
 
@@ -1120,13 +1217,16 @@ cycle) to prove the device recovered. Run these LAST in a session.
   leakage in any response.
 
 ### AT-ADV-06 — power-cut during settings save (R+PPK2, A)
-- **Steps:** issue SettingsSave via NFC and cut power ~50 ms later (scripted PPK2 `V 0`);
-  repower; read full config. Repeat 5× with varied delays (0–500 ms).
+- **Steps:** issue SettingsSave via NFC and cut power ~50 ms later (scripted PPK2, **real
+  `toggle_DUT_power("OFF")` — see the §22 correction, NOT `set_source_voltage(0)`, which does
+  not actually remove power and would make this whole scenario silently test nothing**);
+  repower (`toggle_DUT_power("ON")`); read full config. Repeat 5× with varied delays (0–500 ms).
 - **Expect:** config is either fully-old or fully-new (NVS atomicity) — never a mix, never
   identity loss, never a boot loop.
 
 ### AT-ADV-07 — power-cut storms (R+PPK2, A)
-- **Steps:** 20 random power cycles (on-time uniform 1–30 s); then full smoke + AT-HIS-03
+- **Steps:** 20 random power cycles (real `toggle_DUT_power` off/on, not source-voltage-0 — see
+  AT-ADV-06's note; on-time uniform 1–30 s); then full smoke + AT-HIS-03
   + AT-CFG-07 checks.
 - **Expect:** no identity/config/history corruption; no reset-cause anomalies; joins recover.
 
@@ -1356,7 +1456,7 @@ automated; *(excluded)* items are listed with reasons below the table.
 | C9 | AT-CFG-07 | A | D | – | |
 | C10 | AT-CFG-03, AT-NFC-07 | A/SA | D | phone | |
 | K1 | AT-CLK-01 | A | D | – | |
-| K2, K3, K6 | AT-CLK-02 | A/SA | DR | phone (K6) | |
+| K2, K3, K6 | AT-CLK-02 | A/SA | DR | phone (K6), or phone-free §3.6 | K6 ✅ (2026-08-11, phone-free: RTC set from injected unix_time, confirmed ticking forward afterward) |
 | K4 | AT-CLK-04 | A | D | – | |
 | K5 | AT-CLK-03 | A | D | – | |
 | N1 | AT-NFC-03 | SA | DR | phone | ✅ (AT-NFC-02) |
@@ -1365,8 +1465,8 @@ automated; *(excluded)* items are listed with reasons below the table.
 | N4 | AT-NFC-02 | SA | DR | phone | ✅ |
 | N5 | *(partial)* lrw_reset/lrw_join over NFC via `ats cmd nfc` on debug; phone control server has no op for it yet (improvement item) | A | D | – | |
 | N7 | *(on-request)* power-off boot-staged provisioning — needs a scripted power-off staging session | SA | DR | phone+power | |
-| N8 | AT-NFC-05, AT-NFC-06, AT-ADV-05 | SA | DR | phone | |
-| N9 | *(new, #299)* device_reset/factory_reset/set_secret_key over `hio.stck:cmd` with the ack-before-reboot handshake — all three reboot (set_secret_key since #322, which is what makes the rotated key live) — same AT-NFC-03 injection pattern as N1, plus confirming factory_reset is rejected over a LoRaWAN downlink and an all-zero set_secret_key is rejected | SA | DR | phone | |
+| N8 | AT-NFC-05, AT-NFC-06, AT-ADV-05 | SA | DR | phone (or phone-free frame-crafting, §3.6 — same protocol coverage, not the phone's own codec) | ✅ (2026-08-11, phone-free: retransmission cache, stale-nonce rejection, and anti-brick window all decisive) |
+| N9 | *(new, #299)* device_reset/factory_reset/set_secret_key over `hio.stck:cmd` with the ack-before-reboot handshake — all three reboot (set_secret_key since #322, which is what makes the rotated key live) — same AT-NFC-03 injection pattern as N1, plus confirming factory_reset is rejected over a LoRaWAN downlink and an all-zero set_secret_key is rejected | SA | DR | phone for the true ack path; §3.6 phone-free recipe covers decrypt/execute/config-diff decisively but always exercises the field-loss backstop, not `hio.stck:ack`, per its own limitation note | ✅ (2026-08-11, phone-free: all three commands decisive over `hio.stck:cmd`; factory_reset/set_secret_key rejection + device_reset success independently re-confirmed over a real LRW downlink, see AT-LRW-06; all-zero set_secret_key rejected with `BAD_REQUEST,"zero key"` per #322) |
 | F1 | AT-LRW-03 | A | DR | – | |
 | F2, F3 | AT-HOST-03, AT-HOST-06 | A | host | – | |
 | — (new, no manual ID) | AT-BOOT-04/06, AT-CFG-06, AT-HIS-04/05, AT-PWR-01..07, AT-ADV-01..12, AT-SOAK-01..03, AT-NFC-08 | | | | AT-BOOT-04 ✅, AT-PWR-04 ✅ |
@@ -1400,10 +1500,23 @@ PPK2 + J-Link detached).
   never open-set-exit.
 - **A killed rttt can leave the CPU halted** → next JLinkExe connect hangs; recover by
   re-flashing via a resetting flasher rather than fighting `connect`.
+- **A one-off `JLinkExe -CommanderScript` (flash/readback) while a persistent `rttt` daemon
+  holds the same J-Link SN breaks `rttt`'s connection** — next `send_command` returns
+  `"J-Link: Unspecified error."` even though a fresh raw JLinkExe connect works fine (target/
+  probe are OK, only rttt's session is stale). Fix: kill rttt's two PIDs (the `script` wrapper
+  + the python process) **by PID**, not `pkill -f` (see next gotcha), and restart it.
 - **`pkill -f` with jlink/rttt/script patterns kills your own shell** (exit 144/1 with no
   output). Kill by PID or `-x`.
-- **ChirpStack ABP needs `skip_fcnt_check`**; TTN doesn't answer LinkCheckReq on this bench;
-  OTAA DevAddr changes on every rejoin — never cache.
+- **ChirpStack ABP needs `skip_fcnt_check`**; OTAA DevAddr changes on every rejoin — never
+  cache. TTN's "doesn't answer LinkCheckReq" reputation is **stale** — see §3.5's 2026-08-11
+  correction; if anything, ChirpStack is now the LNS that churns through OTAA rejoins on this
+  bench with stock link-check defaults.
+- **PPK2 "cut power" via `set_source_voltage(0)` alone does NOT reliably power off the DUT**
+  (source-meter regulation floor / DUT decoupling keeps it alive) — confirmed directly: LED kept
+  blinking and the device kept transmitting on LoRaWAN for 90+ s at commanded 0 mV. Only
+  `toggle_DUT_power("OFF")` is a real power-cut; the scratchpad `ppk_hold.py` holder previously
+  only wired that to its `QUIT` command (which also kills the daemon) — it now also exposes
+  live `OFF`/`ON` commands that call `toggle_DUT_power` directly without restarting the holder.
 - **Capability-gated peripherals (DS2484 1-Wire bridge, LIS2DH) initialise only at boot** —
   `config cap-… true` + `settings save` (reboot) before they exist.
 - **Debug FLASH is ~99 % full** — adding test overlays may need
@@ -1413,4 +1526,16 @@ PPK2 + J-Link detached).
 - **No OTA/DFU exists by design** (flat image, SWD-only updates — see README "Firmware
   update & security model"). Do not "discover" its absence as a finding; improvement ideas
   there must reference the documented trade-off.
+- **ABP DevAddr must use a Type-0 NetID prefix (MSB `0`) on this bench's ChirpStack/gateway
+  setup** — a Type-1-prefixed address (MSB `10`, e.g. `80D550B0`) is silently never seen by the
+  network (device fCnt climbs locally, ChirpStack's `f_cnt_up`/`last_seen_at` stay frozen; no
+  error anywhere) while a Type-0 address in the same range as OTAA-assigned addresses (e.g.
+  `0081E51D`) joins instantly. Looks exactly like an ABP config bug; isn't — always pick the
+  bench's ABP DevAddr from the `0x00xxxxxx`–`0x01xxxxxx` range (found 2026-08-11).
+- **Hand-crafted `Command` protobuf frames need varint-encoded tag bytes for oneof fields
+  ≥ 16** (tag = `(field<<3)|2` exceeds 127 for field ≥ 16, e.g. `factory_reset`=23 →
+  tag=186 needs 2 bytes: `[0xBA, 0x01]`, not `[0xBA]`) — see §3.6 phone-free recipe. A
+  single-byte tag for these fields decodes as a truncated stream and the firmware correctly
+  rejects it with `Response.Error{BAD_REQUEST,"end-of-stream"}`; this reads exactly like a
+  firmware bug until you check the tag encoding of your own test frame (found 2026-08-11).
 
