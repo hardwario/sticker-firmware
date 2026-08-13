@@ -20,7 +20,18 @@ int app_settings_save(bool reboot);
 /* Reset ladder (#299) for the shell `settings <op>` and the matching LoRaWAN/NFC
  * command. Each restores every config parameter (and clears all dynamic alarm
  * rules) to defaults, keeping only the tier's persistent fields (app_config.yml
- * `persistent: [...]`), then reboots:
+ * `persistent: [...]`), then reboots.
+ *
+ * Atomicity: a nonzero return from any of the three below now only happens for
+ * a refusal BEFORE any destructive step (vendor_reset's -EACCES pre-checks, or
+ * the initial app_config_*_reset() call itself failing before it touches
+ * anything). Once the reset has actually begun, any internal failure reboots
+ * (SYS_REBOOT_COLD) rather than returning and leaving the device running live
+ * with a half-applied reset — a reboot re-reads whatever DID get persisted,
+ * which is closer to a consistent state than continuing to run. Callers'
+ * existing `if (ret) { ... }` checks after these calls remain meaningful only
+ * for that pre-destructive-refusal case now.
+ *
  *   device_reset  - keeps identity + full LoRaWAN. Renamed from the old,
  *                    single `app_settings_reset()` (was: today's factory_reset
  *                    command / `settings reset`) — same wire id, reachable over
