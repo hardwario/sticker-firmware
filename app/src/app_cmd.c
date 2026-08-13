@@ -760,16 +760,21 @@ static void app_cmd_handle_clm_ack(enum app_cmd_transport tp, const Command *cmd
 }
 
 /* #351: re-open the claim window (symmetric counterpart to clm_ack's close).
- * Two branches, deliberately different timing:
- *   - no/zero new_claim_token: re-arm NOW with the EXISTING (already-live)
- *     token — app_nfc_clm_reset() synchronously, no deferred action.
- *   - non-zero new_claim_token: stage it into app_config() (like
- *     set_secret_key) and defer BOTH the latch flip and the reboot together
- *     (APP_CMD_ACTION_CLM_REARM_SAVE, executed in main.c) — flipping the latch
- *     here instead would risk an NFC poll re-arming PENDING with the STILL-OLD
- *     live token before the reboot makes the new one live (claim_token_is_set()
- *     reads g_app_config, only synced at the next boot's h_commit, same as
- *     #322's secret_key rotation). */
+ * Always deferred via APP_CMD_ACTION_CLM_REARM_SAVE — same restart-style
+ * pattern as reboot/device_reset/set_secret_key: the Ack is written and
+ * delivered to the phone first (app_nfc_take_cmd_action() only releases the
+ * action once that round-trip completes, #242), and only then does main.c
+ * flip the latch + reboot. This used to short-circuit to a synchronous
+ * app_nfc_clm_reset() (no reboot) when no new_claim_token was given, on the
+ * reasoning that nothing in g_app_config was changing so there was nothing to
+ * wait on — but that made the two branches behave differently for no
+ * functional reason. Deferring both the same way costs one reboot in the
+ * no-new-token case and buys consistent, predictable timing instead: the
+ * phone can always assume "ack read -> reboot happens" regardless of which
+ * branch it took, mirroring the non-new-token branch's rebuilt of
+ * app_config()->claim_token being a same-value no-op (h_commit just re-syncs
+ * the value that's already live), so a plain re-arm still leaves
+ * claim_token unchanged. */
 static void app_cmd_handle_clm_rearm(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				     enum app_cmd_action *action)
 {
@@ -780,10 +785,8 @@ static void app_cmd_handle_clm_rearm(enum app_cmd_transport tp, const Command *c
 	    !buffer_is_zero(rearm->new_claim_token, sizeof(rearm->new_claim_token))) {
 		memcpy(app_config()->claim_token, rearm->new_claim_token,
 		       sizeof(app_config()->claim_token));
-		*action = APP_CMD_ACTION_CLM_REARM_SAVE;
-	} else {
-		app_nfc_clm_reset();
 	}
+	*action = APP_CMD_ACTION_CLM_REARM_SAVE;
 
 	resp->which_body = Response_ack_tag;
 }

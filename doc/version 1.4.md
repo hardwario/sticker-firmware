@@ -37,7 +37,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `factory_reset` | **NEW (#299), narrower than `device_reset`, NFC/shell only** — rejected over LoRaWAN (it drops the very session/keys a downlink would need to confirm delivery). Reset config to defaults, keeping identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI) — drops the LoRaWAN session/keys, forcing a re-join; clears dynamic alarm rules; **reboots** | `ack` |
 | `set_secret_key` | **NEW (#299), NFC/shell only** — rejected over LoRaWAN. Rotates `secret_key` over the already-encrypted channel (authenticated by the *current* key); the new key is never readable back via `get_param`/`get_config`. **Reboots** (#322) — that is what makes the rotated key live, so the `ack` is the last frame under the old key; an all-zero replacement is rejected with `BAD_REQUEST` | `ack` |
 | `clm_ack` | **NEW (#308), NFC/shell only** — rejected over LoRaWAN. Explicit, authenticated end of the claim window (§10 Claim record): ends `PENDING`→`CONSUMED` without an RF delete. Empty body — decrypting it at all is the whole signal | `ack` |
-| `clm_rearm` | **NEW (#351), NFC/shell only** — rejected over LoRaWAN. Symmetric counterpart to `clm_ack`: re-opens the claim window (§10 Claim record) instead of closing it, same authentication (current `secret_key`). Optional `new_claim_token`: omitted/all-zero re-arms immediately with the *existing* token (no reboot); a non-zero 16-byte value stages a replacement and **reboots** (mirrors `set_secret_key`/#322) so the new token only goes live once, atomically with the re-arm | `ack` |
+| `clm_rearm` | **NEW (#351), NFC/shell only** — rejected over LoRaWAN. Symmetric counterpart to `clm_ack`: re-opens the claim window (§10 Claim record) instead of closing it, same authentication (current `secret_key`). Optional `new_claim_token`: a non-zero 16-byte value stages a replacement (mirrors `set_secret_key`/#322); omitted/all-zero re-arms with the *existing* token. Either way the `ack` is delivered first and the latch flip + **reboot** happen together afterwards — the two cases behave identically from the phone's perspective (fixed in a follow-up: re-arming with the existing token used to skip the reboot, an asymmetry with no functional reason) | `ack` |
 | `force_send` | Send a telemetry report immediately | **none** — the report itself is the reply |
 | `sample` | Take a fresh reading: send a `Telemetry` report on fPort 2 **and** (over NFC) return the same readings in the reply. Works over LoRaWAN and NFC | LoRaWAN: **none** — the fPort-2 report is the reply. NFC: **`sample`** — a full `Telemetry` with the fresh readings |
 | `reset_counters` | Clear selected hall/input counters | `ack` |
@@ -663,16 +663,23 @@ in a dedicated **plaintext** record next to the info record — a small protobuf
   without touching `secret_key`, LoRaWAN, alarm rules or history. `clm_rearm` is a new `Command`
   (proto_id 27, NFC/shell only), authenticated the same way as `clm_ack` (current `secret_key`
   over `hio.stck:cmd`), that flips the latch back towards `UNSET`. An optional `new_claim_token`
-  field controls which token reappears:
-  - **omitted / all-zero** — re-exposes the **existing** token immediately: the handler calls the
-    same latch-reset used internally for `vendor_reset`, and the next poll auto-arms `PENDING`
-    with the token already live in `g_app_config`. No reboot.
+  field controls which token reappears, but **both cases now reboot the same way** (fixed after a
+  first pass shipped them asymmetric — see below):
   - **non-zero (16 B)** — stages a **replacement** token (mirrors the `set_secret_key`/#322
-    pattern) and defers the latch flip *together with* a `settings save` + reboot, deliberately in
-    that order: `claim_token_is_set()` (the auto-arm check) reads the live `g_app_config`, which
-    only picks up the staged value at the next boot's `h_commit` — flipping the latch any earlier
-    would risk an NFC poll re-arming `PENDING` with the **still-old** live token before the reboot
-    lands the new one.
+    pattern) synchronously in the handler.
+  - **omitted / all-zero** — the *existing* token stays as-is; nothing to stage.
+
+  Either way the handler defers the latch flip *together with* a `settings save` + reboot
+  (restart-style: the `ack` is written and delivered to the phone first, #242, then `main.c` flips
+  the latch and reboots), deliberately in that order for the non-zero case:
+  `claim_token_is_set()` (the auto-arm check) reads the live `g_app_config`, which only picks up
+  the staged value at the next boot's `h_commit` — flipping the latch any earlier would risk an NFC
+  poll re-arming `PENDING` with the **still-old** live token before the reboot lands the new one.
+  The all-zero case doesn't need that protection (nothing changed in `g_app_config`), but defers
+  the same way anyway: an earlier version short-circuited it to an immediate, no-reboot latch reset,
+  which meant the phone could not assume a consistent "ack read → reboot" timing across the two
+  cases for no functional reason — unified so it always reboots, at the cost of one extra reboot
+  for the common re-arm-with-the-same-token case.
 
   Debug-only bench equivalent (no phone/NFC round-trip needed): **`ats claim active`** (re-arm,
   always with the existing token — the bench tool has no way to pass a new one),
