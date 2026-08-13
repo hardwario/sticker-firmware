@@ -8,6 +8,7 @@
 #include "app_alarm.h"
 #include "app_alarm_rules.h"
 #include "app_battery.h"
+#include "app_buzzer.h"
 #include "app_compose.h"
 #include "app_config.h"
 #include "app_hall.h"
@@ -788,6 +789,42 @@ static void app_cmd_handle_clm_rearm(enum app_cmd_transport tp, const Command *c
 	resp->which_body = Response_ack_tag;
 }
 
+/* #338: remote-triggered buzzer melody (NFC/LRW). kind selects one of the
+ * fixed severity melodies (the buzzer is DC self-oscillating only — no custom
+ * tones); repeat_s (0-999s), if non-zero, keeps re-playing the melody that
+ * many seconds after each playback finishes, until stopped locally
+ * (`ats buzzer off`, which also aborts a beep/melody mid-playback rather than
+ * waiting it out) — there's no protocol-level "stop", by design: this is a
+ * fire-and-forget trigger, not a persisted alarm state on the wire. */
+static void app_cmd_handle_buzzer_play(enum app_cmd_transport tp, const Command *cmd,
+				       Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+	const Command_BuzzerPlay *play = &cmd->body.buzzer_play;
+
+	if (play->repeat_s > 999) {
+		make_error(resp, Response_Error_Code_BAD_REQUEST, "repeat_s out of range");
+		return;
+	}
+
+	/* kind is a raw id (0-15, #338) — this dispatch layer never validates or
+	 * interprets it; app_buzzer_play_repeating() (app_buzzer.c MELODY_TABLE)
+	 * is the sole authority on which ids exist, so a new melody never needs a
+	 * change here. */
+	int ret = app_buzzer_play_repeating((uint8_t)play->kind, (uint16_t)play->repeat_s);
+	if (ret == -ENOENT) {
+		make_error(resp, Response_Error_Code_BAD_REQUEST, "unknown melody kind");
+		return;
+	}
+	if (ret) {
+		make_error(resp, Response_Error_Code_NOT_READY, "buzzer not active");
+		return;
+	}
+
+	resp->which_body = Response_ack_tag;
+}
+
 /* #316: replacement secret_key staged by the vendor_reset handler below, consumed
  * once via app_cmd_take_pending_vendor_secret_key() when the deferred
  * APP_CMD_ACTION_VENDOR_RESET runs (main.c / nfc-check apply sites). Lives here
@@ -1234,6 +1271,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_clm_rearm(tp, cmd, resp, action);
+		break;
+	case Command_buzzer_play_tag:
+		/* transports: [lrw, nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_buzzer_play(tp, cmd, resp, action);
 		break;
 	default:
 		/* L-54: an unknown command tag (e.g. a removed command like the old

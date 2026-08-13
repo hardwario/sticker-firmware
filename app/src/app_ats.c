@@ -970,25 +970,6 @@ static int cmd_ccm_selftest(const struct shell *sh, size_t argc, char **argv)
  * cap_buzzer=true — otherwise app_buzzer_init() was never called (either
  * cap_pir_detector owns the pins, or neither capability is on) and driving the
  * GPIOs here would race whatever else configured them. */
-static int cmd_buzzer_on(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	if (!g_app_config.cap_buzzer) {
-		shell_error(sh, "cap_buzzer is not enabled");
-		return -ENODEV;
-	}
-
-	int ret = app_buzzer_set(true);
-	if (ret) {
-		shell_error(sh, "app_buzzer_set failed: %d", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
 static int cmd_buzzer_off(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -999,6 +980,8 @@ static int cmd_buzzer_off(const struct shell *sh, size_t argc, char **argv)
 		return -ENODEV;
 	}
 
+	/* Stops the pins immediately, even if a beep/melody is mid-playback on
+	 * the buzzer thread (app_buzzer_set(false) aborts + wakes it). */
 	int ret = app_buzzer_set(false);
 	if (ret) {
 		shell_error(sh, "app_buzzer_set failed: %d", ret);
@@ -1040,18 +1023,18 @@ static int cmd_buzzer_play(const struct shell *sh, size_t argc, char **argv)
 	int ret;
 
 	if (strcmp(argv[1], "info") == 0) {
-		ret = app_buzzer_play_info();
+		ret = app_buzzer_play(APP_BUZZER_KIND_INFO);
 	} else if (strcmp(argv[1], "warning") == 0) {
-		ret = app_buzzer_play_warning();
+		ret = app_buzzer_play(APP_BUZZER_KIND_WARNING);
 	} else if (strcmp(argv[1], "alarm") == 0) {
-		ret = app_buzzer_play_alarm();
+		ret = app_buzzer_play(APP_BUZZER_KIND_ALARM);
 	} else {
 		shell_error(sh, "unknown melody: %s (expected info|warning|alarm)", argv[1]);
 		return -EINVAL;
 	}
 
 	if (ret) {
-		shell_error(sh, "app_buzzer_play_%s failed: %d", argv[1], ret);
+		shell_error(sh, "app_buzzer_play(%s) failed: %d", argv[1], ret);
 		return ret;
 	}
 
@@ -1059,8 +1042,9 @@ static int cmd_buzzer_play(const struct shell *sh, size_t argc, char **argv)
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_buzzer, SHELL_CMD_ARG(on, NULL, "Drive the buzzer continuously.", cmd_buzzer_on, 1, 0),
-	SHELL_CMD_ARG(off, NULL, "Stop driving the buzzer.", cmd_buzzer_off, 1, 0),
+	sub_buzzer,
+	SHELL_CMD_ARG(off, NULL, "Stop the buzzer immediately (even mid-beep/-melody).",
+		      cmd_buzzer_off, 1, 0),
 	SHELL_CMD_ARG(beep, NULL, "Pulse the buzzer. Usage: beep <ms> (1-5000)", cmd_buzzer_beep, 2,
 		      0),
 	SHELL_CMD_ARG(play, NULL, "Play a fixed melody. Usage: play <info|warning|alarm>",

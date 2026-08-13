@@ -170,6 +170,12 @@ commands:
     # save+reboot, same pattern as set_secret_key/#322 — see app_cmd_handle_clm_rearm
     # for why the latch flip is deferred together with the reboot in that case).
     - {name: clm_rearm, proto_id: 27, body: ClmRearm, kind: handler, response: ack, transports: [nfc, shell]}
+    # #338: remote-triggered buzzer melody. kind selects one of the fixed
+    # severity melodies (app_buzzer_play_info/warning/alarm); repeat_s, if
+    # non-zero (1-999), re-plays it that many seconds after it finishes,
+    # indefinitely, until stopped (a set_param write is not involved — stop is
+    # local-only via `ats buzzer off`, which aborts a mid-playback beep too).
+    - {name: buzzer_play, proto_id: 28, body: BuzzerPlay, kind: handler, response: ack, transports: [lrw, nfc]}
 parameters:
   # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /
   # vendor_token) are OFF the config wire (`proto_field: false`, #250 Part B): configen

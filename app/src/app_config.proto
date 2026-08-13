@@ -138,6 +138,7 @@ message Command {
         ClmAck           clm_ack           = 25;
         SetSecretKey     vendor_reset      = 26;
         ClmRearm         clm_rearm         = 27;
+        BuzzerPlay       buzzer_play       = 28;
     }
 // END GENERATED COMMANDS
 
@@ -245,6 +246,22 @@ message Command {
     // new_claim_token omitted/zero re-arms with the existing token; a non-zero
     // value replaces it (see app_cmd_handle_clm_rearm for the save+reboot path).
     message ClmRearm { optional bytes new_claim_token = 1; }
+
+    // #338: remote-triggered buzzer melody (NFC/LRW). kind is a raw melody id,
+    // deliberately NOT a proto enum: app_buzzer.c (MELODY_TABLE) is the only
+    // place that maps an id to an actual pattern, so assigning a new melody
+    // never needs a wire-format change here. 0 = no-op ("play nothing" — also
+    // proto3's default for an omitted field, so silence-by-default is never an
+    // error); 1 = info; 2 = warning; 3 = alarm; 4-15 reserved for future
+    // melodies (unassigned ids are rejected by app_buzzer_play(), not here).
+    // repeat_s, if non-zero (1-999), re-plays the melody that many seconds
+    // after it finishes, indefinitely, until stopped locally (`ats buzzer
+    // off`, which also aborts a beep/melody mid-playback rather than waiting
+    // it out).
+    message BuzzerPlay {
+        optional uint32 kind     = 1; // melody id, 0-15 (see comment above)
+        optional uint32 repeat_s = 2; // 0 = no repeat; 1-999 = repeat interval (s)
+    }
 }
 
 message Response {

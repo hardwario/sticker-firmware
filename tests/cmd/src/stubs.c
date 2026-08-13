@@ -8,6 +8,7 @@
 
 #include "app_alarm.h"
 #include "app_alarm_rules.h"
+#include "app_buzzer.h"
 #include "app_config.h"
 #include "app_history.h"
 #include "app_lrw.h"
@@ -93,6 +94,22 @@ int app_battery_measure(float *voltage)
 		*voltage = test_battery_v;
 	}
 	return test_battery_ret;
+}
+
+/* #338 buzzer_play command. Records the args it was called with + returns
+ * test_buzzer_play_ret, so the test can both check what app_cmd forwarded and
+ * simulate app_buzzer.c rejecting an unknown melody id (-ENOENT). */
+int g_buzzer_play_calls;
+uint8_t g_buzzer_play_last_kind;
+uint16_t g_buzzer_play_last_repeat_s;
+int test_buzzer_play_ret;
+
+int app_buzzer_play_repeating(uint8_t kind, uint16_t repeat_s)
+{
+	g_buzzer_play_calls++;
+	g_buzzer_play_last_kind = kind;
+	g_buzzer_play_last_repeat_s = repeat_s;
+	return test_buzzer_play_ret;
 }
 
 /* Counters. */
