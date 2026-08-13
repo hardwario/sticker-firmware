@@ -158,16 +158,16 @@ static bool rule_state_shape_valid(const struct app_alarm_rule *r)
 	return true;
 }
 
-/* `hst` (#348) is a plain dwell/hold duration in seconds across every kind
+/* `dwell` (#348) is a plain dwell/hold duration in seconds across every kind
  * that uses it — bound it to a sane range regardless of kind (same cap as the
  * old alarm_light_confirm_delay it replaces) rather than the previous
  * THRESHOLD-only "band can't collapse" check, which no longer applies now that
- * activation/deactivation don't use hst as a value offset. */
-#define RULE_HST_MAX_S 3600.0f
+ * activation/deactivation don't use dwell as a value offset. */
+#define RULE_DWELL_MAX_S 3600.0f
 
-static bool rule_hst_range_valid(const struct app_alarm_rule *r)
+static bool rule_dwell_range_valid(const struct app_alarm_rule *r)
 {
-	return r->hst >= 0.0f && r->hst <= RULE_HST_MAX_S;
+	return r->dwell >= 0.0f && r->dwell <= RULE_DWELL_MAX_S;
 }
 
 /* eval_threshold() activates outside [lo, hi] and deactivates only inside it
@@ -176,7 +176,7 @@ static bool rule_hst_range_valid(const struct app_alarm_rule *r)
  * unsatisfiable by any real reading, so a rule that ever activates would
  * latch forever — the same class of stuck-alarm bug the old hysteresis
  * band-collapse guard caught (#203), now checked directly on the plain band
- * since hst no longer offsets it. Non-THRESHOLD kinds don't use the band. */
+ * since dwell no longer offsets it. Non-THRESHOLD kinds don't use the band. */
 static bool rule_threshold_band_valid(const struct app_alarm_rule *r)
 {
 	if (app_alarm_quantity_kind((enum app_alarm_quantity)r->quantity) !=
@@ -189,7 +189,8 @@ static bool rule_threshold_band_valid(const struct app_alarm_rule *r)
 /* All shape checks a decoded rule must pass before it is stored or accepted. */
 static bool rule_shape_valid(const struct app_alarm_rule *r)
 {
-	return rule_state_shape_valid(r) && rule_hst_range_valid(r) && rule_threshold_band_valid(r);
+	return rule_state_shape_valid(r) && rule_dwell_range_valid(r) &&
+	       rule_threshold_band_valid(r);
 }
 
 /* ---- app_config storage (per-slot bytes) -------------------------------- */
@@ -248,7 +249,7 @@ static void pack_rule(const struct app_alarm_rule *r, uint8_t out[RULE_PACK_LEN]
 	out[4] = r->to_state;
 	memcpy(&out[5], &r->lo, sizeof(float));
 	memcpy(&out[9], &r->hi, sizeof(float));
-	memcpy(&out[13], &r->hst, sizeof(float));
+	memcpy(&out[13], &r->dwell, sizeof(float));
 }
 
 /* Decode `in` into `*r`. Returns true if the slot is present (occupied). */
@@ -264,7 +265,7 @@ static bool unpack_rule(const uint8_t in[RULE_PACK_LEN], struct app_alarm_rule *
 	r->to_state = in[4];
 	memcpy(&r->lo, &in[5], sizeof(float));
 	memcpy(&r->hi, &in[9], sizeof(float));
-	memcpy(&r->hst, &in[13], sizeof(float));
+	memcpy(&r->dwell, &in[13], sizeof(float));
 	return true;
 }
 

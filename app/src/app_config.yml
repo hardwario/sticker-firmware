@@ -87,7 +87,7 @@ proto:
       field: alarms
       proto_id: 8
       # #348: alarm_notif_time (2) and alarm_light_confirm_delay (19) removed —
-      # both timings are now the per-rule `hst` field (alarm_0..15 bytes blob),
+      # both timings are now the per-rule `dwell` field (alarm_0..15 bytes blob),
       # unified as a dwell/hold duration across THRESHOLD/STATE/RATE kinds.
       reserved: [2, 19]
 
@@ -519,7 +519,7 @@ parameters:
   #   [1] source (enum app_alarm_source)
   #   [2] quantity (enum app_alarm_quantity)
   #   [3] from_state, [4] to_state (STATE only)
-  #   [5..8] lo, [9..12] hi, [13..16] hst (IEEE-754 float LE)
+  #   [5..8] lo, [9..12] hi, [13..16] dwell (IEEE-754 float LE)
   # An empty slot is 34 zero hex chars (present=0). The rule cache in
   # app_alarm_rules.c is rebuilt from these on load and after every SetParam.
   - name: alarm_0

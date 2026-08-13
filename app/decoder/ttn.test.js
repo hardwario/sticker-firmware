@@ -757,7 +757,7 @@ test("a truncated buffer is handled without throwing", () => {
 });
 
 test("alarm slot set_param encodes as native bytes and round-trips (LRW)", () => {
-  // Packed 17-byte rule: flags present|enabled, onboard temperature, lo=5 hi=30 hst=1.
+  // Packed 17-byte rule: flags present|enabled, onboard temperature, lo=5 hi=30 dwell=1.
   const rule = "03000000000000a0400000f0410000803f";
   const enc = codec.encodeDownlink({ data: { command: "set_param", seq: 1, set_param: { alarms: { alarm_0: rule } } } });
   assert.equal(enc.errors.length, 0, "encode errors");

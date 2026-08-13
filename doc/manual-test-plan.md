@@ -863,28 +863,28 @@ selection list and stored records.
 > the source/quantity enums, the kinds (threshold / state / count) and the packed-slot layout.
 > `alarm-limit` (rate-limit) still applies globally.
 >
-> **#348: `hst` is now a per-rule dwell/hold in seconds, not a hysteresis band** —
+> **#348: `dwell` is a per-rule dwell/hold duration in seconds, not a hysteresis band** —
 > `alarm-notif-time` and the illuminance-only `alarm-light-confirm-delay` config keys are gone.
-> `hst` behaves differently per kind (see `doc/version 1.4.md` §7 for the full per-kind
-> description); the scenarios below (A1, A3, A5, A6) each call out what `hst` does for that kind
+> `dwell` behaves differently per kind (see `doc/version 1.4.md` §7 for the full per-kind
+> description); the scenarios below (A1, A3, A5, A6) each call out what `dwell` does for that kind
 > and give a concrete recipe to observe it, including the "canceled by an early revert" case that a
 > naive check-once-at-expiry implementation would get wrong.
 
 ### A1 — Threshold alarm (onboard temperature): band + dwell
 
 **Goal:** Crossing a plain `[lo, hi]` band raises an alarm only after it has stayed outside the
-band continuously for `hst` seconds; a value that dips back inside the band before `hst` elapses
+band continuously for `dwell` seconds; a value that dips back inside the band before `dwell` elapses
 must NOT fire, and must NOT get credit toward a later attempt (the dwell window resets).
 Deactivation is always immediate.
 **Observable:** AlarmReport on fPort 3, source `onboard`, quantity `temperature`, edge + side
 (LO/HI); RTT alarm log; red LED while active.
 
 **Prompt for Claude:**
-> Arm `alarm set 0 onboard temperature <lo> <hi> <hst>` with bounds near the current room
-> temperature and `hst` a few seconds (note the values); confirm with `alarm list`. Then, in order:
-> (1) push the sensor just past the bound and back inside within less than `hst` seconds — confirm
+> Arm `alarm set 0 onboard temperature <lo> <hi> <dwell>` with bounds near the current room
+> temperature and `dwell` a few seconds (note the values); confirm with `alarm list`. Then, in order:
+> (1) push the sensor just past the bound and back inside within less than `dwell` seconds — confirm
 > **no** AlarmReport fires (the dwell was interrupted); (2) push it past the bound and hold it there
-> for longer than `hst` — confirm an AlarmReport fires only after roughly `hst` seconds have
+> for longer than `dwell` — confirm an AlarmReport fires only after roughly `dwell` seconds have
 > elapsed, with source `onboard`/quantity `temperature` and the correct side (LO/HI); (3) bring the
 > value back inside the band and confirm the alarm clears **immediately** (no matching dwell on the
 > way down). Decode and report all three events/non-events with their timing.
@@ -898,17 +898,17 @@ Deactivation is always immediate.
 
 **Prompt for Claude:**
 > For each present analog quantity (onboard humidity/pressure, and 1-Wire slot s1…s4 temperature/
-> humidity), arm `alarm set <i> <source> <quantity> <lo> <hi> [hst]`, stimulate a crossing held past
-> `hst`, and confirm an AlarmReport on fPort 3 with the correct source/quantity and LO/HI side after
+> humidity), arm `alarm set <i> <source> <quantity> <lo> <hi> [dwell]`, stimulate a crossing held past
+> `dwell`, and confirm an AlarmReport on fPort 3 with the correct source/quantity and LO/HI side after
 > the dwell. Summarize per source; mark any sensor not fitted as N/A.
 
 - [ ] Pass
 
 ### A3 — Binary alarm: Hall (state edge & level, with confirm + hold)
 
-**Goal:** A `state` rule with `hst > 0` requires the transition (edge) or the target state (level)
-to persist for `hst` seconds before it fires; an edge that fires then also **holds** the alarm
-active (and blocks re-arming) for that same `hst`. `hst = 0` reproduces the old immediate
+**Goal:** A `state` rule with `dwell > 0` requires the transition (edge) or the target state (level)
+to persist for `dwell` seconds before it fires; an edge that fires then also **holds** the alarm
+active (and blocks re-arming) for that same `dwell`. `dwell = 0` reproduces the old immediate
 behavior. Level deactivation is always immediate.
 **Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`, quantity `state`.
 
@@ -920,12 +920,12 @@ one is) is a regression of the double-inverted-`GPIO_ACTIVE_LOW` bug this issue 
 > First confirm the raw polarity: `ats sensors sample` with no magnet must show `hall_left=0`, and
 > `=1` only while a magnet is held against it. Then arm an **edge** rule with a confirm+hold
 > window, `alarm set 0 hall-left state 0 1 5` (fires on 0→1, 5 s confirm+hold) and confirm with
-> `alarm list` it reads `0->1 (edge) hst=5.00`. Ask me to briefly tap the magnet on and off within
+> `alarm list` it reads `0->1 (edge) dwell=5.00`. Ask me to briefly tap the magnet on and off within
 > less than 5 s — confirm **no** AlarmReport fires (the confirm was interrupted). Then ask me to
 > apply the magnet and hold it past 5 s — confirm one AlarmReport fires roughly 5 s after the raw
 > transition, i.e. when the magnet is **applied**, not removed, and that reapplying the magnet
 > within the next 5 s produces **no** second report (holding/re-arm-blocked). Then arm a **level**
-> rule `alarm set 0 hall-left state 1 1 5` (`1->1 (level) hst=5.00`) and confirm it only activates
+> rule `alarm set 0 hall-left state 1 1 5` (`1->1 (level) dwell=5.00`) and confirm it only activates
 > after the magnet has been present continuously for ~5 s, and clears immediately on removal.
 > Report all four checks with timing.
 
@@ -949,20 +949,20 @@ same fix/regression check as A3's hall polarity note.
 
 **Prompt for Claude:**
 > With PIR disabled (shared pins), confirm `ats sensors sample` shows `input_a=0`/`input_b=0` idle,
-> and `=1` only while shorted to GND. Then arm `alarm set <i> input-a state 0 1 [hst]` (and
-> `input-b`). Toggle each input (past `hst` if set) and confirm AlarmReports on fPort 3 with source
+> and `=1` only while shorted to GND. Then arm `alarm set <i> input-a state 0 1 [dwell]` (and
+> `input-b`). Toggle each input (past `dwell` if set) and confirm AlarmReports on fPort 3 with source
 > `input-a`/`input-b` fire on **assertion**, not release. Report results.
 
 - [ ] Pass
 
-### A5 — Momentary alarm: PIR / accel (state one-shot, #150) — hst as hold/re-arm only
+### A5 — Momentary alarm: PIR / accel (state one-shot, #150) — dwell as hold/re-arm only
 
 **Goal:** PIR and accel `state` alarms fire **immediately** on each pulse (nothing to debounce —
-the sensor already reports a discrete event, not a raw level) and then use `hst` purely as the
-hold/re-arm window: a further pulse within `hst` seconds of the last is suppressed. `hst = 0` re-
+the sensor already reports a discrete event, not a raw level) and then use `dwell` purely as the
+hold/re-arm window: a further pulse within `dwell` seconds of the last is suppressed. `dwell = 0` re-
 arms on the very next poll.
 **Observable:** AlarmReport fPort 3, source `pir`/`accel`, quantity `state`, edge ACTIVATE; one
-report per pulse, suppressed for `hst` seconds, then re-armed; a motion burst is flood-suppressed
+report per pulse, suppressed for `dwell` seconds, then re-armed; a motion burst is flood-suppressed
 (no permanent latch).
 
 **Gotcha (accel):** `cap-accelerometer true` alone is not enough — `accel-motion-sensitivity`
@@ -975,19 +975,19 @@ its own fire.
 **Prompt for Claude:**
 > Enable the sensor (`config cap-pir-detector true` / `cap-accelerometer true` **and**
 > `accel-motion-sensitivity medium`, save). Arm
-> `alarm set 0 pir state 0 1 <hst>` (or `accel state 0 1 <hst>`, note the value) — edge and level
+> `alarm set 0 pir state 0 1 <dwell>` (or `accel state 0 1 <dwell>`, note the value) — edge and level
 > behave alike for these momentary sources. Ask me to trigger motion repeatedly; confirm the FIRST
 > pulse fires an AlarmReport immediately (no confirm delay, unlike A1/A3), that reports within
-> `hst` seconds of it are suppressed, that it re-arms and fires again once `hst` has elapsed, and
+> `dwell` seconds of it are suppressed, that it re-arms and fires again once `dwell` has elapsed, and
 > that a sustained burst produces only periodic reports (not a flood, not a stuck `active`). Report
-> the cadence against the configured `hst`.
+> the cadence against the configured `dwell`.
 
 - [ ] Pass
 
-### A6 — Count / rate alarm (hall / input) — hst as hold/re-arm
+### A6 — Count / rate alarm (hall / input) — dwell as hold/re-arm
 
 **Goal:** A `count` rule fires when a counter exceeds the per-interval rate, then holds/re-arm-
-blocks for `hst` seconds (same role as A5). `hst = 0` re-arms on the next report interval.
+blocks for `dwell` seconds (same role as A5). `dwell = 0` re-arms on the next report interval.
 **Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`/`input-a`/`input-b`, quantity
 `count`.
 
@@ -1001,12 +1001,12 @@ previous test run. Insert an `alarm poll` **between** `alarm clear all` and `ala
 true reset before timing a fresh window.
 
 **Prompt for Claude:**
-> Arm `alarm new hall-left count <N> <hst>` (small N, note both values; `alarm list` shows
-> `rate>=N/interval hst=…`) — if re-arming an existing rate rule, `alarm clear all` then
+> Arm `alarm new hall-left count <N> <dwell>` (small N, note both values; `alarm list` shows
+> `rate>=N/interval dwell=…`) — if re-arming an existing rate rule, `alarm clear all` then
 > `alarm poll` then `alarm new` (not `clear` immediately followed by `new`, see gotcha above).
 > Ask me to pulse the hall sensor more than N times within a report interval and confirm an
 > AlarmReport on fPort 3 for that source/quantity, then confirm a second over-rate interval
-> within `hst` seconds of the first does **not** produce a second report while one after `hst`
+> within `dwell` seconds of the first does **not** produce a second report while one after `dwell`
 > has elapsed does. Report the result.
 
 - [ ] Pass
@@ -1091,7 +1091,7 @@ on the air (LED + counters still update); RTT `Alarm uplink rate-limited; next b
 red alarm-active blink (see A14) — it fires on every discrete input activation/release regardless
 of whether any alarm rule is armed for that source, and only during the first hour after boot. It
 is driven by fixed firmware constants, not by any config parameter (in particular, **not** by
-`hst` or the removed `alarm-notif-time`).
+`dwell` or the removed `alarm-notif-time`).
 **Observable:** A short green→orange (activation) or orange→green (release) two-colour sequence
 (orange = red+green together, ~50 ms per phase) on any discrete source event (hall/input/pir/accel,
 independent of whether an alarm rule exists for it); rate-limited to at most one sequence per
@@ -1103,7 +1103,7 @@ independent of whether an alarm rule exists for it); rate-limited to at most one
 > green on release, each phase ~50 ms. Toggle it rapidly a few times and confirm bursts faster than
 > ~500 ms apart are rate-limited to one sequence. Then — this part takes time, only if asked — wait
 > past 60 minutes of uptime and confirm the same toggle produces **no** blink anymore. Report all
-> three observations, and confirm this sequence is independent of any `hst` value on an alarm rule
+> three observations, and confirm this sequence is independent of any `dwell` value on an alarm rule
 > for that source (see A14 for the *other*, alarm-driven red blink).
 
 - [ ] Pass
@@ -1113,21 +1113,21 @@ independent of whether an alarm rule exists for it); rate-limited to at most one
 **Goal:** Unlike A12, the **red** alarm LED has no timer of its own — the main loop blinks it red
 on every ~3 s poll for as long as `app_alarm_poll()` reports any rule `active`. Post-#348, "how
 long the red blink appears to hold" for a given rule is now entirely a function of that rule's own
-`hst` (via the dwell-before-activate delaying the start, and the hold/re-arm delaying the end for
+`dwell` (via the dwell-before-activate delaying the start, and the hold/re-arm delaying the end for
 edge/momentary/count kinds) — there is no independent LED hold duration to configure.
 **Observable:** Red blink starts only once a rule's `active` latches (after any configured dwell)
 and stops the poll cycle after `active` clears (after any configured hold), tracking `alarm list`'s
 `active=` column throughout.
 
 **Prompt for Claude:**
-> Arm a momentary rule with a several-second `hst`, e.g. `alarm set 0 pir state 0 1 8`. Trigger one
+> Arm a momentary rule with a several-second `dwell`, e.g. `alarm set 0 pir state 0 1 8`. Trigger one
 > pulse and, in parallel, watch both the red LED and repeated `alarm list` output. Confirm the red
 > blink starts immediately (momentary sources have no dwell) and `alarm list` shows `active=1`,
 > then confirm both the blink and `active=1` persist for ~8 s and clear together (not
 > independently) once the hold elapses. Repeat with a threshold rule that has a dwell (e.g. A1's
 > slot 0) and confirm the red blink only starts once the dwell has elapsed and `active` has
 > latched, not at the moment the value first crossed the bound. Report the correlation between the
-> LED, `alarm list active=`, and the configured `hst` in each case.
+> LED, `alarm list active=`, and the configured `dwell` in each case.
 
 - [ ] Pass
 

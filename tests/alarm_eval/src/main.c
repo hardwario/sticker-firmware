@@ -43,7 +43,7 @@ static void before(void *unused)
 
 ZTEST_SUITE(alarm_eval, NULL, NULL, before, NULL, NULL);
 
-static void set_hall_left_edge_rule(uint8_t from, uint8_t to, float hst_s)
+static void set_hall_left_edge_rule(uint8_t from, uint8_t to, float dwell_s)
 {
 	struct app_alarm_rule r = {
 		.source = APP_ALARM_SRC_HALL_LEFT,
@@ -51,7 +51,7 @@ static void set_hall_left_edge_rule(uint8_t from, uint8_t to, float hst_s)
 		.enabled = 1,
 		.from_state = from,
 		.to_state = to,
-		.hst = hst_s,
+		.dwell = dwell_s,
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 }
@@ -92,7 +92,7 @@ ZTEST(alarm_eval, test_state_edge_fires_after_confirm_via_poll)
 	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_STATE),
 		      "edge fired before the confirm dwell elapsed");
 
-	k_sleep(K_MSEC(400)); /* past hst, level still held (no second edge) */
+	k_sleep(K_MSEC(400)); /* past dwell, level still held (no second edge) */
 	app_alarm_poll();     /* the real re-check path: read_poll_state() -> eval_state() */
 	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_STATE),
 		     "edge never fired after the confirm dwell elapsed (#348 HIL bug #3)");
@@ -118,7 +118,7 @@ ZTEST(alarm_eval, test_state_edge_reverse_direction_fires_after_confirm)
 	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_STATE),
 		      "edge fired before the confirm dwell elapsed");
 
-	k_sleep(K_MSEC(400)); /* past hst, level still held (no second edge) */
+	k_sleep(K_MSEC(400)); /* past dwell, level still held (no second edge) */
 	app_alarm_poll();
 	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_STATE),
 		     "reverse-direction (1->0) edge never fired after the confirm dwell elapsed");
@@ -179,7 +179,7 @@ ZTEST(alarm_eval, test_state_edge_early_revert_cancels_confirm)
 
 /* Momentary source (PIR): fires immediately on the pulse (no confirm — the
  * source already reports a discrete event, not a raw level), then holds for
- * `hst` seconds before it can re-arm. Not HIL-tested in the #348 session. */
+ * `dwell` seconds before it can re-arm. Not HIL-tested in the #348 session. */
 ZTEST(alarm_eval, test_momentary_pir_fires_immediately_then_holds)
 {
 	struct app_alarm_rule r = {
@@ -188,7 +188,7 @@ ZTEST(alarm_eval, test_momentary_pir_fires_immediately_then_holds)
 		.enabled = 1,
 		.from_state = 0,
 		.to_state = 1,
-		.hst = 0.3f,
+		.dwell = 0.3f,
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
@@ -207,7 +207,7 @@ ZTEST(alarm_eval, test_momentary_pir_fires_immediately_then_holds)
 }
 
 /* RATE (count): fires when the counter delta within one interval_report
- * window reaches `hi`, then holds/re-arm-blocks for `hst` seconds — same
+ * window reaches `hi`, then holds/re-arm-blocks for `dwell` seconds — same
  * hold/re-arm role as a momentary source. Not HIL-tested in the #348
  * session. */
 ZTEST(alarm_eval, test_rate_count_fires_after_window_then_holds)
@@ -218,7 +218,7 @@ ZTEST(alarm_eval, test_rate_count_fires_after_window_then_holds)
 		.quantity = APP_ALARM_Q_COUNT,
 		.enabled = 1,
 		.hi = 2, /* alarm when the window's delta >= 2 */
-		.hst = 0.3f,
+		.dwell = 0.3f,
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
@@ -251,7 +251,7 @@ ZTEST(alarm_eval, test_threshold_dwell_activate_immediate_deactivate)
 		.enabled = 1,
 		.lo = 0.0f,
 		.hi = 30.0f,
-		.hst = 0.3f,
+		.dwell = 0.3f,
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 
@@ -279,7 +279,7 @@ ZTEST(alarm_eval, test_threshold_early_revert_resets_window)
 		.enabled = 1,
 		.lo = 0.0f,
 		.hi = 30.0f,
-		.hst = 0.3f,
+		.dwell = 0.3f,
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
 

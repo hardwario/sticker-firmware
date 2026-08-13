@@ -6,7 +6,7 @@
  *  - THRESHOLD: hi > lo (a collapsed/inverted/NaN band can never satisfy the
  *    deactivate check in eval_threshold(), so a rule that ever activates would
  *    latch forever, #203).
- *  - All kinds: hst is a plain dwell/hold duration in seconds, bounded to
+ *  - All kinds: dwell is a plain dwell/hold duration in seconds, bounded to
  *    [0, 3600] regardless of kind.
  */
 
@@ -19,7 +19,7 @@
 #include <string.h>
 
 /* A canonical valid THRESHOLD rule (onboard temperature). */
-static struct app_alarm_rule threshold(float lo, float hi, float hst)
+static struct app_alarm_rule threshold(float lo, float hi, float dwell)
 {
 	return (struct app_alarm_rule){
 		.source = APP_ALARM_SRC_ONBOARD,
@@ -27,7 +27,7 @@ static struct app_alarm_rule threshold(float lo, float hi, float hst)
 		.enabled = 1,
 		.lo = lo,
 		.hi = hi,
-		.hst = hst,
+		.dwell = dwell,
 	};
 }
 
@@ -71,40 +71,40 @@ ZTEST(alarm_rules, test_threshold_nan_bound_rejected)
 
 ZTEST(alarm_rules, test_threshold_narrow_but_open_band_accepted)
 {
-	/* A narrow but non-empty band is fine now — hst no longer eats into it. */
+	/* A narrow but non-empty band is fine now — dwell no longer eats into it. */
 	struct app_alarm_rule r = threshold(10.0f, 10.01f, 60.0f);
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "narrow-but-open band rejected");
 }
 
-/* ---- hst: plain dwell/hold seconds, bounded [0, 3600], all kinds --------- */
+/* ---- dwell: plain dwell/hold seconds, bounded [0, 3600], all kinds --------- */
 
-ZTEST(alarm_rules, test_threshold_zero_hst_accepted)
+ZTEST(alarm_rules, test_threshold_zero_dwell_accepted)
 {
 	struct app_alarm_rule r = threshold(10.0f, 30.0f, 0.0f); /* 0 = immediate */
-	zassert_equal(app_alarm_rules_set(0, &r), 0, "zero-hst rule rejected");
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "zero-dwell rule rejected");
 }
 
-ZTEST(alarm_rules, test_threshold_negative_hst_rejected)
+ZTEST(alarm_rules, test_threshold_negative_dwell_rejected)
 {
 	struct app_alarm_rule r = threshold(10.0f, 30.0f, -5.0f);
-	zassert_equal(app_alarm_rules_set(0, &r), -EINVAL, "negative hst accepted");
+	zassert_equal(app_alarm_rules_set(0, &r), -EINVAL, "negative dwell accepted");
 }
 
-ZTEST(alarm_rules, test_threshold_hst_at_max_accepted)
+ZTEST(alarm_rules, test_threshold_dwell_at_max_accepted)
 {
 	struct app_alarm_rule r = threshold(10.0f, 30.0f, 3600.0f);
-	zassert_equal(app_alarm_rules_set(0, &r), 0, "hst at max rejected");
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "dwell at max rejected");
 }
 
-ZTEST(alarm_rules, test_threshold_hst_over_max_rejected)
+ZTEST(alarm_rules, test_threshold_dwell_over_max_rejected)
 {
 	struct app_alarm_rule r = threshold(10.0f, 30.0f, 3600.01f);
-	zassert_equal(app_alarm_rules_set(0, &r), -EINVAL, "hst over max accepted");
+	zassert_equal(app_alarm_rules_set(0, &r), -EINVAL, "dwell over max accepted");
 }
 
-ZTEST(alarm_rules, test_state_hst_range_enforced)
+ZTEST(alarm_rules, test_state_dwell_range_enforced)
 {
-	/* STATE rules now also carry a meaningful hst (confirm/hold seconds, #348)
+	/* STATE rules now also carry a meaningful dwell (confirm/hold seconds, #348)
 	 * and must pass the same range check. */
 	struct app_alarm_rule r = {
 		.source = APP_ALARM_SRC_INPUT_A,
@@ -112,30 +112,30 @@ ZTEST(alarm_rules, test_state_hst_range_enforced)
 		.enabled = 1,
 		.from_state = 0,
 		.to_state = 1,
-		.hst = 30.0f,
+		.dwell = 30.0f,
 	};
-	zassert_equal(app_alarm_rules_set(0, &r), 0, "valid STATE hst rejected");
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "valid STATE dwell rejected");
 
-	r.hst = -1.0f;
-	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "negative STATE hst accepted");
+	r.dwell = -1.0f;
+	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "negative STATE dwell accepted");
 }
 
-ZTEST(alarm_rules, test_rate_hst_range_enforced)
+ZTEST(alarm_rules, test_rate_dwell_range_enforced)
 {
 	/* COUNT (RATE): hi is the max delta, lo is unused — lo > hi is fine, only
-	 * hst is range-checked. */
+	 * dwell is range-checked. */
 	struct app_alarm_rule r = {
 		.source = APP_ALARM_SRC_HALL_LEFT,
 		.quantity = APP_ALARM_Q_COUNT,
 		.enabled = 1,
 		.lo = 99.0f,
 		.hi = 5.0f,
-		.hst = 10.0f,
+		.dwell = 10.0f,
 	};
-	zassert_equal(app_alarm_rules_set(0, &r), 0, "valid RATE hst rejected");
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "valid RATE dwell rejected");
 
-	r.hst = 99999.0f;
-	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "out-of-range RATE hst accepted");
+	r.dwell = 99999.0f;
+	zassert_equal(app_alarm_rules_set(1, &r), -EINVAL, "out-of-range RATE dwell accepted");
 }
 
 /* ---- #319: on-board illuminance is a valid THRESHOLD source ------------- */
@@ -148,7 +148,7 @@ ZTEST(alarm_rules, test_onboard_illuminance_accepted)
 		.enabled = 1,
 		.lo = 0.0f,
 		.hi = 50.0f,
-		.hst = 5.0f,
+		.dwell = 5.0f,
 	};
 	zassert_equal(app_alarm_rules_set(0, &r), 0, "onboard illuminance rule rejected");
 	zassert_true(app_alarm_rules_occupied(0), "onboard illuminance slot not occupied");

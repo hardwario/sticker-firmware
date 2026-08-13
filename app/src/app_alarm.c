@@ -137,14 +137,14 @@ static int64_t m_window_start_ms;
 static bool m_window_open;
 static struct k_work_delayable m_alarm_batch_work;
 
-/* Per-rule dwell/hold duration in ms (#348): `hst` is now a plain duration in
+/* Per-rule dwell/hold duration in ms (#348): `dwell` is a plain duration in
  * seconds, unified across every kind that uses a timer (THRESHOLD dwell-before-
  * activate, STATE edge confirm+hold, STATE level dwell-before-activate,
  * momentary-source hold/re-arm, RATE hold/re-arm). Negative/NaN clamps to 0
  * (immediate — never widens a window from garbage data). */
 static inline int64_t rule_hold_ms(const struct app_alarm_rule *rule)
 {
-	float s = rule->hst;
+	float s = rule->dwell;
 	if (!(s >= 0.0f)) {
 		s = 0.0f;
 	}
@@ -514,8 +514,8 @@ static bool read_poll_state(uint8_t source, uint8_t quantity, bool *out)
 
 /* ---- rule evaluation ---------------------------------------------------- */
 
-/* Threshold rule (#348): lo/hi are a plain band, no hysteresis. `hst` (seconds)
- * is a dwell that must elapse, with the value continuously outside [lo, hi]
+/* Threshold rule (#348): lo/hi are a plain band, no hysteresis. `dwell`
+ * (seconds) is a dwell that must elapse, with the value continuously outside [lo, hi]
  * the whole time, before the rule activates; 0 = immediate. Deactivation is
  * always immediate on returning to [lo, hi] — dwell only guards against a
  * spurious/transient excursion causing a false activation, and there is no
@@ -601,13 +601,13 @@ static inline bool source_is_momentary(uint8_t source)
 }
 
 /* STATE rule: from/to over a digital level (#348). from != to is an edge: the
- * raw from->to transition arms a confirm dwell (`hst` seconds, continuously at
- * to_state) before it fires, then the SAME duration holds the alarm active
+ * raw from->to transition arms a confirm dwell (`dwell` seconds, continuously
+ * at to_state) before it fires, then the SAME duration holds the alarm active
  * (auto-clear, no deactivate event) before it can re-arm — one field driving
  * both the pre-fire debounce and the post-fire hold. from == to is a level:
  * active while cur == to, gated by the same confirm dwell before activating;
  * deactivation is immediate once cur != to (see eval_threshold: no reason to
- * delay clearing). `hst` == 0 keeps the pre-#348 immediate behavior throughout. */
+ * delay clearing). `dwell` == 0 keeps the pre-#348 immediate behavior throughout. */
 static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct rstate *rt, bool cur,
 		       bool *should_send)
 {
@@ -632,7 +632,7 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
 	if (source_is_momentary(rule->source)) {
 		/* Pulse source: each asserted event is a discrete, already-debounced
 		 * trigger (there is nothing to dwell-confirm) — fire immediately, then
-		 * hold for `hst` seconds (re-arm window), suppressed while a previous
+		 * hold for `dwell` seconds (re-arm window), suppressed while a previous
 		 * one is still latched so we emit at most one alarm per hold window
 		 * regardless of event rate. from/to are not meaningful for a source
 		 * that never reports a level, so edge (0->1) and level (1->1) behave
@@ -723,7 +723,7 @@ static void eval_state(uint8_t slot, const struct app_alarm_rule *rule, struct r
  * the threshold under-counts (#195). So we accumulate across polls and evaluate
  * the delta only once a full interval_report window has elapsed (tumbling
  * window), re-baselining the counter and window each time. One-shot: fires and
- * then holds for `hst` seconds (#348, same hold/re-arm role as a momentary
+ * then holds for `dwell` seconds (#348, same hold/re-arm role as a momentary
  * source) before it can fire again — 0 re-arms immediately. */
 static void eval_count(uint8_t slot, const struct app_alarm_rule *rule, struct rstate *rt,
 		       uint32_t cur, bool *should_send)
@@ -1188,19 +1188,19 @@ static void print_slot(const struct shell *sh, uint8_t slot, const struct app_al
 	case APP_ALARM_KIND_THRESHOLD:
 		shell_print(
 			sh,
-			"  [%u] %s %s  lo=%s%d.%02d hi=%s%d.%02d hst=%s%d.%02d  en=%d  active=%d",
-			slot, src, q, APP_FP2(r->lo), APP_FP2(r->hi), APP_FP2(r->hst), r->enabled,
+			"  [%u] %s %s  lo=%s%d.%02d hi=%s%d.%02d dwell=%s%d.%02d  en=%d  active=%d",
+			slot, src, q, APP_FP2(r->lo), APP_FP2(r->hi), APP_FP2(r->dwell), r->enabled,
 			active);
 		break;
 	case APP_ALARM_KIND_STATE:
-		shell_print(sh, "  [%u] %s %s  %u->%u (%s) hst=%s%d.%02d  en=%d  active=%d", slot,
+		shell_print(sh, "  [%u] %s %s  %u->%u (%s) dwell=%s%d.%02d  en=%d  active=%d", slot,
 			    src, q, r->from_state, r->to_state,
-			    r->from_state == r->to_state ? "level" : "edge", APP_FP2(r->hst),
+			    r->from_state == r->to_state ? "level" : "edge", APP_FP2(r->dwell),
 			    r->enabled, active);
 		break;
 	case APP_ALARM_KIND_RATE:
-		shell_print(sh, "  [%u] %s %s  rate>=%d/interval hst=%s%d.%02d  en=%d  active=%d",
-			    slot, src, q, (int)r->hi, APP_FP2(r->hst), r->enabled, active);
+		shell_print(sh, "  [%u] %s %s  rate>=%d/interval dwell=%s%d.%02d  en=%d  active=%d",
+			    slot, src, q, (int)r->hi, APP_FP2(r->dwell), r->enabled, active);
 		break;
 	}
 }
@@ -1255,32 +1255,32 @@ static int parse_rule_spec(const struct shell *sh, size_t argc, char **argv, siz
 	switch (app_alarm_quantity_kind((enum app_alarm_quantity)qty)) {
 	case APP_ALARM_KIND_THRESHOLD:
 		if (argc < a + 2) {
-			shell_error(sh, "threshold args: <lo> <hi> [hst]  (hst = dwell seconds "
+			shell_error(sh, "threshold args: <lo> <hi> [dwell]  (dwell = seconds "
 					"outside the band before activating, 0 = immediate)");
 			return -EINVAL;
 		}
 		r->lo = strtof(argv[a], NULL);
 		r->hi = strtof(argv[a + 1], NULL);
-		r->hst = (argc > a + 2) ? strtof(argv[a + 2], NULL) : 0.0f;
+		r->dwell = (argc > a + 2) ? strtof(argv[a + 2], NULL) : 0.0f;
 		break;
 	case APP_ALARM_KIND_STATE:
 		if (argc < a + 2) {
 			shell_error(sh,
-				    "state args: <from> <to> [hst]  (0/1; from!=to=edge, "
-				    "from==to=level; hst = confirm+hold seconds, 0 = immediate)");
+				    "state args: <from> <to> [dwell]  (0/1; from!=to=edge, "
+				    "from==to=level; dwell = confirm+hold seconds, 0 = immediate)");
 			return -EINVAL;
 		}
 		r->from_state = (uint8_t)(strtoul(argv[a], NULL, 10) ? 1 : 0);
 		r->to_state = (uint8_t)(strtoul(argv[a + 1], NULL, 10) ? 1 : 0);
-		r->hst = (argc > a + 2) ? strtof(argv[a + 2], NULL) : 0.0f;
+		r->dwell = (argc > a + 2) ? strtof(argv[a + 2], NULL) : 0.0f;
 		break;
 	case APP_ALARM_KIND_RATE:
 		if (argc < a + 1) {
-			shell_error(sh, "count args: <N-per-interval> [hst]");
+			shell_error(sh, "count args: <N-per-interval> [dwell]");
 			return -EINVAL;
 		}
 		r->hi = (float)strtoul(argv[a], NULL, 10);
-		r->hst = (argc > a + 1) ? strtof(argv[a + 1], NULL) : 0.0f;
+		r->dwell = (argc > a + 1) ? strtof(argv[a + 1], NULL) : 0.0f;
 		break;
 	}
 	return 0;
@@ -1372,20 +1372,22 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_alarm,
 	SHELL_CMD_ARG(list, NULL, "List alarm rules, or one slot. Usage: list [<index>]",
 		      cmd_alarm_list, 1, 1),
-	SHELL_CMD_ARG(set, NULL,
-		      "Set a rule in a slot. Usage: set <index> <source> <quantity> <args>\n"
-		      "  threshold: <lo> <hi> [hst]   state: <from> <to> [hst]   count: <N> [hst]\n"
-		      "  hst = dwell/hold seconds (0 = immediate), see 'alarm new' help",
-		      cmd_alarm_set, 5, 2),
-	SHELL_CMD_ARG(new, NULL,
-		      "Set a rule in the first free slot. Usage: new <source> <quantity> <args>\n"
-		      "  threshold: <lo> <hi> [hst]   state: <from> <to> [hst]   count: <N> [hst]\n"
-		      "  hst: threshold = dwell seconds outside [lo,hi] before activating;\n"
-		      "       state edge = confirm dwell before firing AND hold before re-arm;\n"
-		      "       state level = dwell before activating (deactivate is immediate);\n"
-		      "       pir/accel (momentary source) = hold before re-arm, no confirm;\n"
-		      "       count = hold before re-arm. 0 = immediate/no hold throughout.",
-		      cmd_alarm_new, 4, 2),
+	SHELL_CMD_ARG(
+		set, NULL,
+		"Set a rule in a slot. Usage: set <index> <source> <quantity> <args>\n"
+		"  threshold: <lo> <hi> [dwell]   state: <from> <to> [dwell]   count: <N> [dwell]\n"
+		"  dwell = dwell/hold seconds (0 = immediate), see 'alarm new' help",
+		cmd_alarm_set, 5, 2),
+	SHELL_CMD_ARG(
+		new, NULL,
+		"Set a rule in the first free slot. Usage: new <source> <quantity> <args>\n"
+		"  threshold: <lo> <hi> [dwell]   state: <from> <to> [dwell]   count: <N> [dwell]\n"
+		"  dwell: threshold = seconds outside [lo,hi] before activating;\n"
+		"       state edge = confirm dwell before firing AND hold before re-arm;\n"
+		"       state level = dwell before activating (deactivate is immediate);\n"
+		"       pir/accel (momentary source) = hold before re-arm, no confirm;\n"
+		"       count = hold before re-arm. 0 = immediate/no hold throughout.",
+		cmd_alarm_new, 4, 2),
 	SHELL_CMD_ARG(clear, NULL, "Clear a slot (or all). Usage: clear <index>|all",
 		      cmd_alarm_clear, 1, 1),
 	SHELL_CMD_ARG(poll, NULL, "Sample + evaluate rules now (bench test).", cmd_alarm_poll, 1,
