@@ -8,6 +8,7 @@
 #include "app_alarm.h"
 #include "app_alarm_rules.h"
 #include "app_battery.h"
+#include "app_buzzer.h"
 #include "app_compose.h"
 #include "app_config.h"
 #include "app_hall.h"
@@ -433,21 +434,21 @@ static const struct {
 	{DUMP_SECTION_SENSORS, 1, 2, false},     {DUMP_SECTION_SENSORS, 2, 2, false},
 	{DUMP_SECTION_SENSORS, 3, 2, false},     {DUMP_SECTION_SENSORS, 4, 2, false},
 	{DUMP_SECTION_SENSORS, 5, 2, false},     {DUMP_SECTION_SENSORS, 6, 2, false},
-	{DUMP_SECTION_SENSORS, 7, 2, false},     {DUMP_SECTION_SENSORS, 8, 2, false},
-	{DUMP_SECTION_SENSORS, 9, 2, false},     {DUMP_SECTION_SENSORS, 10, 2, false},
-	{DUMP_SECTION_SENSORS, 11, 10, false},   {DUMP_SECTION_SENSORS, 12, 10, false},
-	{DUMP_SECTION_SENSORS, 13, 10, false},   {DUMP_SECTION_SENSORS, 14, 10, false},
-	{DUMP_SECTION_SENSORS, 15, 2, false},    {DUMP_SECTION_SENSORS, 16, 3, false},
-	{DUMP_SECTION_SENSORS, 17, 3, false},    {DUMP_SECTION_SENSORS, 18, 3, false},
-	{DUMP_SECTION_ALARMS, 1, 3, false},      {DUMP_SECTION_ALARMS, 3, 19, false},
-	{DUMP_SECTION_ALARMS, 4, 19, false},     {DUMP_SECTION_ALARMS, 5, 19, false},
-	{DUMP_SECTION_ALARMS, 6, 19, false},     {DUMP_SECTION_ALARMS, 7, 19, false},
-	{DUMP_SECTION_ALARMS, 8, 19, false},     {DUMP_SECTION_ALARMS, 9, 19, false},
-	{DUMP_SECTION_ALARMS, 10, 19, false},    {DUMP_SECTION_ALARMS, 11, 19, false},
-	{DUMP_SECTION_ALARMS, 12, 19, false},    {DUMP_SECTION_ALARMS, 13, 19, false},
-	{DUMP_SECTION_ALARMS, 14, 19, false},    {DUMP_SECTION_ALARMS, 15, 19, false},
-	{DUMP_SECTION_ALARMS, 16, 20, false},    {DUMP_SECTION_ALARMS, 17, 20, false},
-	{DUMP_SECTION_ALARMS, 18, 20, false},
+	{DUMP_SECTION_SENSORS, 7, 2, false},     {DUMP_SECTION_SENSORS, 19, 3, false},
+	{DUMP_SECTION_SENSORS, 8, 2, false},     {DUMP_SECTION_SENSORS, 9, 2, false},
+	{DUMP_SECTION_SENSORS, 10, 2, false},    {DUMP_SECTION_SENSORS, 11, 10, false},
+	{DUMP_SECTION_SENSORS, 12, 10, false},   {DUMP_SECTION_SENSORS, 13, 10, false},
+	{DUMP_SECTION_SENSORS, 14, 10, false},   {DUMP_SECTION_SENSORS, 15, 2, false},
+	{DUMP_SECTION_SENSORS, 16, 3, false},    {DUMP_SECTION_SENSORS, 17, 3, false},
+	{DUMP_SECTION_SENSORS, 18, 3, false},    {DUMP_SECTION_ALARMS, 1, 3, false},
+	{DUMP_SECTION_ALARMS, 3, 19, false},     {DUMP_SECTION_ALARMS, 4, 19, false},
+	{DUMP_SECTION_ALARMS, 5, 19, false},     {DUMP_SECTION_ALARMS, 6, 19, false},
+	{DUMP_SECTION_ALARMS, 7, 19, false},     {DUMP_SECTION_ALARMS, 8, 19, false},
+	{DUMP_SECTION_ALARMS, 9, 19, false},     {DUMP_SECTION_ALARMS, 10, 19, false},
+	{DUMP_SECTION_ALARMS, 11, 19, false},    {DUMP_SECTION_ALARMS, 12, 19, false},
+	{DUMP_SECTION_ALARMS, 13, 19, false},    {DUMP_SECTION_ALARMS, 14, 19, false},
+	{DUMP_SECTION_ALARMS, 15, 19, false},    {DUMP_SECTION_ALARMS, 16, 20, false},
+	{DUMP_SECTION_ALARMS, 17, 20, false},    {DUMP_SECTION_ALARMS, 18, 20, false},
 	// END GENERATED DUMP_FIELDS
 };
 
@@ -787,6 +788,43 @@ static void app_cmd_handle_clm_rearm(enum app_cmd_transport tp, const Command *c
 		       sizeof(app_config()->claim_token));
 	}
 	*action = APP_CMD_ACTION_CLM_REARM_SAVE;
+
+	resp->which_body = Response_ack_tag;
+}
+
+/* #338: remote-triggered buzzer melody (NFC/LRW). kind selects one of the
+ * fixed severity melodies (the buzzer is DC self-oscillating only — no custom
+ * tones); kind 0 (or any id >= 16) is the STOP request — the remote
+ * counterpart of `ats buzzer off`, silencing a beep/melody mid-playback and
+ * cancelling a pending repeat cycle. repeat_s (0-999s), if non-zero, keeps
+ * re-playing the melody that many seconds after each playback finishes, until
+ * stopped. Fire-and-forget: the Ack confirms the request was accepted, not
+ * that it audibly played (a newer request supersedes an older queued one). */
+static void app_cmd_handle_buzzer_play(enum app_cmd_transport tp, const Command *cmd,
+				       Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+	const Command_BuzzerPlay *play = &cmd->body.buzzer_play;
+
+	if (play->repeat_s > 999) {
+		make_error(resp, Response_Error_Code_BAD_REQUEST, "repeat_s out of range");
+		return;
+	}
+
+	/* kind is a raw id (#338) — this dispatch layer never validates or
+	 * interprets it; app_buzzer_play_repeating() (app_buzzer.c MELODY_TABLE)
+	 * is the sole authority on which ids exist (0 / >=16 = stop, 1-3 =
+	 * melodies, 4-15 reserved), so a new melody never needs a change here. */
+	int ret = app_buzzer_play_repeating(play->kind, (uint16_t)play->repeat_s);
+	if (ret == -ENOENT) {
+		make_error(resp, Response_Error_Code_BAD_REQUEST, "unknown melody kind");
+		return;
+	}
+	if (ret) {
+		make_error(resp, Response_Error_Code_NOT_READY, "buzzer not active");
+		return;
+	}
 
 	resp->which_body = Response_ack_tag;
 }
@@ -1237,6 +1275,14 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_clm_rearm(tp, cmd, resp, action);
+		break;
+	case Command_buzzer_play_tag:
+		/* transports: [lrw, nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_buzzer_play(tp, cmd, resp, action);
 		break;
 	default:
 		/* L-54: an unknown command tag (e.g. a removed command like the old

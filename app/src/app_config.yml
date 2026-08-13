@@ -171,6 +171,13 @@ commands:
     # pattern as reboot/set_secret_key, see app_cmd_handle_clm_rearm), so the
     # phone always sees "ack read -> reboot" regardless of which case it took.
     - {name: clm_rearm, proto_id: 27, body: ClmRearm, kind: handler, response: ack, transports: [nfc, shell]}
+    # #338: remote-triggered buzzer melody. kind is a raw melody id (0 = stop —
+    # silences immediately + cancels a pending repeat; 1-3 = fixed severity
+    # melodies; 4-15 reserved; >=16 collapses to 0), owned entirely by
+    # app_buzzer.c's MELODY_TABLE. repeat_s, if non-zero (1-999), re-plays the
+    # melody that many seconds after it finishes, until stopped (kind 0 or
+    # `ats buzzer off`).
+    - {name: buzzer_play, proto_id: 28, body: BuzzerPlay, kind: handler, response: ack, transports: [lrw, nfc]}
 parameters:
   # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /
   # vendor_token) are OFF the config wire (`proto_field: false`, #250 Part B): configen
@@ -501,6 +508,12 @@ parameters:
     proto_id: 7
     type: bool
     help: "Get/Set PIR detector capability (true/false)."
+
+  - name: cap_buzzer
+    proto_group: sensors
+    proto_id: 19
+    type: bool
+    help: "Get/Set buzzer capability (true/false). Shares GPIO pins with the PIR detector — mutually exclusive with cap_pir_detector (PIR wins if both are enabled)."
 
   - name: cap_w1_sensors
     proto_group: sensors

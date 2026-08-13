@@ -29,6 +29,10 @@ extern void test_set_lrw_dirty(bool v);
 extern void test_set_active_alarm_count(size_t n);
 extern int g_clm_ack_calls;
 extern int g_clm_rearm_calls;
+extern int g_buzzer_play_calls;
+extern uint32_t g_buzzer_play_last_kind;
+extern uint16_t g_buzzer_play_last_repeat_s;
+extern int test_buzzer_play_ret;
 
 static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 {
@@ -75,6 +79,10 @@ static void reset_cfg(void)
 	test_set_active_alarm_count(0);
 	g_clm_ack_calls = 0;
 	g_clm_rearm_calls = 0;
+	g_buzzer_play_calls = 0;
+	g_buzzer_play_last_kind = 0;
+	g_buzzer_play_last_repeat_s = 0;
+	test_buzzer_play_ret = 0;
 }
 
 ZTEST(cmd, test_set_param_applies_and_acks)
@@ -688,6 +696,72 @@ ZTEST(cmd, test_clm_rearm)
 			  "new_claim_token not staged");
 	zassert_equal(g_clm_rearm_calls, 0,
 		      "app_nfc_clm_reset must NOT run synchronously when staging a new token");
+}
+
+/* #338 buzzer_play (field 28): lrw/nfc only (rejected over shell, like
+ * clock_sync/enter_calibration are lrw/nfc-only too). app_cmd never validates
+ * `kind` itself — it forwards the raw id to app_buzzer_play_repeating()
+ * unchanged (stubbed here) and only turns -ENOENT into BAD_REQUEST; repeat_s
+ * is the one field app_cmd DOES range-check (0-999) before forwarding. */
+ZTEST(cmd, test_buzzer_play)
+{
+	Response r;
+
+	/* seq1 buzzer_play{kind=2 (warning), repeat_s=15} over lrw -> forwarded
+	 * as-is, acks. */
+	reset_cfg();
+	enum app_cmd_action a = handle("0801e201040802100f", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_ack_tag, "buzzer_play acks (which=%d)", r.which_body);
+	zassert_equal(g_buzzer_play_calls, 1, "app_buzzer_play_repeating called exactly once");
+	zassert_equal(g_buzzer_play_last_kind, 2, "kind not forwarded (%d)",
+		      g_buzzer_play_last_kind);
+	zassert_equal(g_buzzer_play_last_repeat_s, 15, "repeat_s not forwarded (%d)",
+		      g_buzzer_play_last_repeat_s);
+
+	/* kind=0 (the stop request) is forwarded like any other id — the
+	 * dispatch layer does not special-case it; app_buzzer.c decides it
+	 * means "silence + cancel repeat". */
+	reset_cfg();
+	a = handle("0801e201020800", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_ack_tag, "stop acks (which=%d)", r.which_body);
+	zassert_equal(g_buzzer_play_calls, 1, "app_buzzer_play_repeating called for stop");
+	zassert_equal(g_buzzer_play_last_kind, 0, "kind 0 not forwarded (%d)",
+		      g_buzzer_play_last_kind);
+
+	/* repeat_s=1000 (over the 0-999 range) -> BAD_REQUEST, never reaches
+	 * app_buzzer.c. */
+	reset_cfg();
+	a = handle("0801e20105080110e807", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_error_tag, "out-of-range repeat_s -> error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
+		      r.body.error.code);
+	zassert_equal(g_buzzer_play_calls, 0, "must not call app_buzzer_play_repeating");
+
+	/* kind=5 (reserved/unassigned) -> app_buzzer.c (stubbed) rejects with
+	 * -ENOENT, app_cmd turns that into BAD_REQUEST. */
+	reset_cfg();
+	test_buzzer_play_ret = -ENOENT;
+	a = handle("0801e201020805", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_error_tag, "unknown kind -> error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
+		      r.body.error.code);
+	zassert_equal(g_buzzer_play_calls, 1, "app_buzzer_play_repeating still called once");
+
+	/* Rejected over shell (not in [lrw, nfc]). */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_SHELL_DEBUG, "0801e201040802100f", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "buzzer_play rejected over shell");
+	zassert_equal(r.which_body, Response_error_tag, "shell should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+	zassert_equal(g_buzzer_play_calls, 0, "must not call app_buzzer_play_repeating over shell");
 }
 
 /* #316: vendor_reset is a generic Command reachable ONLY over the vendor

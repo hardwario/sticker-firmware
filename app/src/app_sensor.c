@@ -7,6 +7,7 @@
 #include "app_accel.h"
 #include "app_alarm.h"
 #include "app_battery.h"
+#include "app_buzzer.h"
 #include "app_config.h"
 #include "app_counters.h"
 #include "app_ds18b20.h"
@@ -205,14 +206,15 @@ int app_sensor_init(void)
 	}
 
 	if ((g_app_config.cap_input_a || g_app_config.cap_input_b) &&
-	    g_app_config.cap_pir_detector) {
-		/* PIR and the digital inputs share PB4/PA11 (#90). PIR wins; the inputs
-		 * are not initialised. Clear their runtime enables too (H-7) so telemetry
-		 * and GetConfig stop reporting a non-functional input as active — otherwise
-		 * the operator sees the input "enabled" with count 0 and never learns it is
-		 * silently dead. The persisted config is untouched (g_app_config is the
-		 * runtime copy); fixing the pin conflict is a config change. */
-		LOG_WRN("PIR and input share GPIO pins — inputs disabled (PIR takes the pins)");
+	    (g_app_config.cap_pir_detector || g_app_config.cap_buzzer)) {
+		/* PIR, the buzzer HW variant (#338), and the digital inputs all share
+		 * PB4/PA11 (#90). PIR/buzzer win; the inputs are not initialised. Clear
+		 * their runtime enables too (H-7) so telemetry and GetConfig stop
+		 * reporting a non-functional input as active — otherwise the operator
+		 * sees the input "enabled" with count 0 and never learns it is silently
+		 * dead. The persisted config is untouched (g_app_config is the runtime
+		 * copy); fixing the pin conflict is a config change. */
+		LOG_WRN("PIR/buzzer and input share GPIO pins — inputs disabled");
 		g_app_config.cap_input_a = false;
 		g_app_config.cap_input_b = false;
 	} else if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
@@ -223,6 +225,15 @@ int app_sensor_init(void)
 		}
 	}
 
+	if (g_app_config.cap_buzzer && g_app_config.cap_pir_detector) {
+		/* The buzzer HW variant (#338) sits on the same PB4/PA11 pins as the
+		 * PIR sensor. PIR wins — a device fitted with a real PIR never also
+		 * carries the buzzer HW variant, so this only guards against a
+		 * misconfigured cap_buzzer write. */
+		LOG_WRN("PIR and buzzer share GPIO pins — buzzer disabled (PIR takes the pins)");
+		g_app_config.cap_buzzer = false;
+	}
+
 	if (g_app_config.cap_pir_detector) {
 		ret = app_pyq1648_init();
 		if (ret) {
@@ -230,6 +241,12 @@ int app_sensor_init(void)
 			res = res ? res : ret;
 		} else {
 			app_pyq1648_set_callback(pyq1648_event_handler, NULL);
+		}
+	} else if (g_app_config.cap_buzzer) {
+		ret = app_buzzer_init();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_buzzer_init", ret);
+			res = res ? res : ret;
 		}
 	}
 
