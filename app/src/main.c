@@ -168,6 +168,15 @@ static void nfc_run_deferred_cmd_actions(void)
 			play_carousel_nfc();
 			app_settings_save(true);
 			break;
+		case APP_CMD_ACTION_CLM_REARM_SAVE:
+			/* #351: flip the clm latch to UNSET and persist+reboot together so
+			 * g_app_config.claim_token becomes live (h_commit) in the same
+			 * breath the latch clears — no window where a poll could
+			 * re-expose the OLD token (see app_cmd_handle_clm_rearm). */
+			play_carousel_nfc();
+			app_nfc_clm_reset();
+			app_settings_save(true);
+			break;
 		case APP_CMD_ACTION_ENTER_CALIBRATION:
 			/* Persist calibration=true + reboot; next boot enters
 			 * calibration mode (app_calibration_init() clears it).

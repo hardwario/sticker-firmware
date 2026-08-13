@@ -255,6 +255,14 @@ void app_nfc_clm_ack(void)
 	g_clm_ack_calls++;
 }
 
+/* #351: mirrors g_clm_ack_calls above, for clm_rearm's "no new token" branch. */
+int g_clm_rearm_calls;
+
+void app_nfc_clm_reset(void)
+{
+	g_clm_rearm_calls++;
+}
+
 bool app_history_is_ready(void)
 {
 	return true;

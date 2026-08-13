@@ -37,6 +37,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 | `factory_reset` | **NEW (#299), narrower than `device_reset`, NFC/shell only** — rejected over LoRaWAN (it drops the very session/keys a downlink would need to confirm delivery). Reset config to defaults, keeping identity **only** (serial/vendor-token/secret-key/nonce/claim-token/DevEUI/JoinEUI) — drops the LoRaWAN session/keys, forcing a re-join; clears dynamic alarm rules; **reboots** | `ack` |
 | `set_secret_key` | **NEW (#299), NFC/shell only** — rejected over LoRaWAN. Rotates `secret_key` over the already-encrypted channel (authenticated by the *current* key); the new key is never readable back via `get_param`/`get_config`. **Reboots** (#322) — that is what makes the rotated key live, so the `ack` is the last frame under the old key; an all-zero replacement is rejected with `BAD_REQUEST` | `ack` |
 | `clm_ack` | **NEW (#308), NFC/shell only** — rejected over LoRaWAN. Explicit, authenticated end of the claim window (§10 Claim record): ends `PENDING`→`CONSUMED` without an RF delete. Empty body — decrypting it at all is the whole signal | `ack` |
+| `clm_rearm` | **NEW (#351), NFC/shell only** — rejected over LoRaWAN. Symmetric counterpart to `clm_ack`: re-opens the claim window (§10 Claim record) instead of closing it, same authentication (current `secret_key`). Optional `new_claim_token`: omitted/all-zero re-arms immediately with the *existing* token (no reboot); a non-zero 16-byte value stages a replacement and **reboots** (mirrors `set_secret_key`/#322) so the new token only goes live once, atomically with the re-arm | `ack` |
 | `force_send` | Send a telemetry report immediately | **none** — the report itself is the reply |
 | `sample` | Take a fresh reading: send a `Telemetry` report on fPort 2 **and** (over NFC) return the same readings in the reply. Works over LoRaWAN and NFC | LoRaWAN: **none** — the fPort-2 report is the reply. NFC: **`sample`** — a full `Telemetry` with the fresh readings |
 | `reset_counters` | Clear selected hall/input counters | `ack` |
@@ -52,7 +53,7 @@ The device now accepts commands as **LoRaWAN downlinks on fPort 85** and replies
 >
 > **No redundant acks:** commands whose real answer is the data they produce (`get_info`, `force_send`, `sample`, `clock_sync`, `req_history`, `req_history_page`, `w1_scan`) do **not** also send an `ack`, to save an uplink. `sample` is dual: over LoRaWAN the fPort-2 report is the only reply (no fPort-85 body, like `force_send`); over NFC it additionally returns the readings synchronously so a phone can show them on the spot.
 >
-> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC (previously such transport-scoped commands could be wrongly accepted on the other transport with a misleading `Ack`). Conversely `req_history_page`, `factory_reset`, `set_secret_key` and `clm_ack` are **NFC/shell-only** — `req_history_page` because the NFC channel has no streaming path, so history is read there one page per tap (§6); `factory_reset` (#299) because a LoRaWAN downlink that drops the LoRaWAN session/keys carrying it could never confirm its own delivery; `set_secret_key` because provisioning a new key over the network it is meant to protect defeats the point; `clm_ack` (#308) because ending the claim window is inherently tied to the physical NFC tap that started it.
+> **Per-command transport restrictions:** each command is gated to the transports that make sense for it and rejected elsewhere with `NOT_READY` "transport not allowed". `force_send` and `req_history` are **LoRaWAN-only** (their answer is an uplink) → rejected over NFC (previously such transport-scoped commands could be wrongly accepted on the other transport with a misleading `Ack`). Conversely `req_history_page`, `factory_reset`, `set_secret_key`, `clm_ack` and `clm_rearm` are **NFC/shell-only** — `req_history_page` because the NFC channel has no streaming path, so history is read there one page per tap (§6); `factory_reset` (#299) because a LoRaWAN downlink that drops the LoRaWAN session/keys carrying it could never confirm its own delivery; `set_secret_key` because provisioning a new key over the network it is meant to protect defeats the point; `clm_ack`/`clm_rearm` (#308, #351) because opening/closing the claim window is inherently tied to the physical NFC tap that started it.
 >
 > **Setting the clock over NFC:** `clock_sync` with a `unix_time` field sets the RTC directly from a phone, bootstrapping wall-clock time before/without a network (epoch sanity-bounded to 2024-01-01 … 2100-01-01; out-of-range → `BAD_REQUEST` "bad epoch"). A later network `DeviceTimeReq`/`DeviceTimeAns` stays authoritative and may refine it. Empty `clock_sync` over NFC just confirms (no network to query).
 >
@@ -520,6 +521,7 @@ The TTN/ChirpStack payload formatter (`app/decoder/ttn.js`) was extended for v1.
 | `nfc dump` / `read` / `write` / `clear` / `check` / `autocheck` / `reg` / `regw` | **New** (debug) — direct ST25DV tag access; `nfc check` prints a readable trace of what it read, decoded and wrote back (see §10) |
 | `config history-enable` / `history-sensors` / `alarm-limit` / `alarm-notif-time` / `pir-notify-act` | **New** parameters (see §6, §7) |
 | `config claim-token <32-hex>` | **New** — set the 128-bit claim token once at commissioning; **write-once** (immutable after first set, see §4) |
+| `ats claim active` / `done` / `status` | **New (#351), debug-only** — bench equivalents of the `clm_rearm`/`clm_ack` commands (see §10 Claim record) for testing the claim lifecycle without a phone or NFC round-trip. Replaces `nfc clm` (removed — `ats claim status` now shows the latch state) |
 | `settings reset` | **Changed** — now keeps device identity + LoRaWAN credentials (see §13); restores only application config + alarm rules to defaults |
 | `settings erase` | **New** — full NVS wipe incl. identity + LoRaWAN credentials; shell-only, destructive (see §13) |
 
@@ -636,11 +638,33 @@ in a dedicated **plaintext** record next to the info record — a small protobuf
 
   All three triggers funnel through the same latch transition, so the rest of this section
   applies identically regardless of which one fired.
-- **No resurrection.** The firmware never rewrites `clm` after it is gone. A small persisted
-  latch (`UNSET → PENDING → CONSUMED`, in its own `clm` settings key, outside the config blob
-  so `device_reset`/`factory_reset` leave it intact) tracks this: once `CONSUMED`, `clm` is never
-  emitted again — a full NVS erase, or `vendor_reset` (#299, which explicitly resets it back to
-  `UNSET` via its own live-API reset, alongside the pulse totalizers), re-opens provisioning.
+- **No resurrection (unless re-armed).** The firmware never rewrites `clm` on its own once it is
+  gone. A small persisted latch (`UNSET → PENDING → CONSUMED`, in its own `clm` settings key,
+  outside the config blob so `device_reset`/`factory_reset` leave it intact) tracks this: once
+  `CONSUMED`, `clm` stays gone until something explicitly re-arms it — a full NVS erase,
+  `vendor_reset` (#299, resets it back to `UNSET` alongside the pulse totalizers, but also wipes
+  identity/LoRaWAN — see §14), or the narrower **`clm_rearm` command** below.
+- **Re-opening the window without a destructive reset (`clm_rearm`, #351).** A device that
+  already closed its claim window — a customer return, a resale — can be made claimable again
+  without touching `secret_key`, LoRaWAN, alarm rules or history. `clm_rearm` is a new `Command`
+  (proto_id 27, NFC/shell only), authenticated the same way as `clm_ack` (current `secret_key`
+  over `hio.stck:cmd`), that flips the latch back towards `UNSET`. An optional `new_claim_token`
+  field controls which token reappears:
+  - **omitted / all-zero** — re-exposes the **existing** token immediately: the handler calls the
+    same latch-reset used internally for `vendor_reset`, and the next poll auto-arms `PENDING`
+    with the token already live in `g_app_config`. No reboot.
+  - **non-zero (16 B)** — stages a **replacement** token (mirrors the `set_secret_key`/#322
+    pattern) and defers the latch flip *together with* a `settings save` + reboot, deliberately in
+    that order: `claim_token_is_set()` (the auto-arm check) reads the live `g_app_config`, which
+    only picks up the staged value at the next boot's `h_commit` — flipping the latch any earlier
+    would risk an NFC poll re-arming `PENDING` with the **still-old** live token before the reboot
+    lands the new one.
+
+  Debug-only bench equivalent (no phone/NFC round-trip needed): **`ats claim active`** (re-arm,
+  always with the existing token — the bench tool has no way to pass a new one),
+  **`ats claim done`** (force-close, mirrors `clm_ack`), **`ats claim status`** (show the latch
+  state — replaces the old `nfc clm` command). These only exist on debug builds (no shell in
+  release); `clm_rearm` is reachable from real NFC on release firmware too.
 - **Threat model.** The delete-detection path is unauthenticated over RF (accepted: the claim
   window relies on physical proximity + the backend ownership check for that path). A rogue phone
   deleting `clm` is a nuisance/DoS at worst — the token is **not lost** (still readable over the

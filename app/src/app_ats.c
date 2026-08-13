@@ -11,6 +11,7 @@
 #include "app_input.h"
 #include "app_led.h"
 #include "app_lrw.h"
+#include "app_nfc.h"
 #include "app_report.h"
 #include "app_machine_probe.h"
 #include "app_sensor.h"
@@ -1132,19 +1133,90 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(reboot, NULL, "Cold-reboot the device.", cmd_device_reboot, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
-SHELL_STATIC_SUBCMD_SET_CREATE(sub_ats,
-			       SHELL_CMD(device, &sub_device, "Device info & control.", NULL),
-			       SHELL_CMD(led, &sub_led, "LED commands.", NULL),
-			       SHELL_CMD(sensors, &sub_sensors, "Sensor commands.", NULL),
+/* Re-arm the claim record (#247/#351): drops the clm latch back to UNSET, which
+ * auto-advances to PENDING (clm reappears on NFC) on the next nfc_check_locked()
+ * poll, as long as claim_token is still set. Non-destructive alternative to
+ * app_settings_vendor_reset() for bench re-testing the claim flow. */
+static int cmd_claim_active(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	app_nfc_clm_reset();
+
+	bool claim_set = false;
+	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
+		if (g_app_config.claim_token[i] != 0) {
+			claim_set = true;
+			break;
+		}
+	}
+	shell_print(sh, "clm state -> unset (re-arms to pending on next NFC poll)");
+	if (!claim_set) {
+		shell_print(sh, "warning: claim_token is unset - clm record will NOT reappear "
+				"until one is provisioned (`config claim-token <hex>`)");
+	}
+	return 0;
+}
+
+/* Force the claim window closed (#308) without a phone deleting the clm record. */
+static int cmd_claim_done(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	app_nfc_clm_ack();
+	shell_print(sh, "clm state -> consumed");
+	return 0;
+}
+
+/* #247: show the claim-record lifecycle latch (debug/HW-test visibility). Moved
+ * here from `nfc clm` (#351) so claim-lifecycle commands live in one place. */
+static int cmd_claim_status(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	static const char *const names[] = {"unset", "pending", "consumed"};
+	uint8_t state = app_nfc_clm_state_get();
+
+	bool claim_set = false;
+	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
+		if (g_app_config.claim_token[i] != 0) {
+			claim_set = true;
+			break;
+		}
+	}
+	shell_print(sh, "clm state:   %s (%u)", state < ARRAY_SIZE(names) ? names[state] : "?",
+		    state);
+	shell_print(sh, "claim token: %s", claim_set ? "set" : "unset");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_claim,
+	SHELL_CMD_ARG(active, NULL,
+		      "Re-arm the claim record (clm UNSET; auto-pending next NFC poll).",
+		      cmd_claim_active, 1, 0),
+	SHELL_CMD_ARG(done, NULL, "Force the claim window closed (clm CONSUMED).", cmd_claim_done,
+		      1, 0),
+	SHELL_CMD_ARG(status, NULL, "Show claim-record (#247) lifecycle state.", cmd_claim_status,
+		      1, 0),
+	SHELL_SUBCMD_SET_END);
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_ats, SHELL_CMD(device, &sub_device, "Device info & control.", NULL),
+	SHELL_CMD(claim, &sub_claim, "Claim-lifecycle test commands (#247/#351).", NULL),
+	SHELL_CMD(led, &sub_led, "LED commands.", NULL),
+	SHELL_CMD(sensors, &sub_sensors, "Sensor commands.", NULL),
 #if defined(CONFIG_LORAWAN)
-			       SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
+	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
 #endif /* defined(CONFIG_LORAWAN) */
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
-			       SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
-			       SHELL_CMD(ccm, NULL, "app_ccm HW AES self-test (golden vectors).",
-					 cmd_ccm_selftest),
+	SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
+	SHELL_CMD(ccm, NULL, "app_ccm HW AES self-test (golden vectors).", cmd_ccm_selftest),
 #endif
-			       SHELL_SUBCMD_SET_END);
+	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(ats, &sub_ats, "Automated test system commands.", NULL);
 
