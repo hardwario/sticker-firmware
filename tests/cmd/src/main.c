@@ -30,7 +30,7 @@ extern void test_set_active_alarm_count(size_t n);
 extern int g_clm_ack_calls;
 extern int g_clm_rearm_calls;
 extern int g_buzzer_play_calls;
-extern uint8_t g_buzzer_play_last_kind;
+extern uint32_t g_buzzer_play_last_kind;
 extern uint16_t g_buzzer_play_last_repeat_s;
 extern int test_buzzer_play_ret;
 
@@ -715,6 +715,17 @@ ZTEST(cmd, test_buzzer_play)
 		      g_buzzer_play_last_kind);
 	zassert_equal(g_buzzer_play_last_repeat_s, 15, "repeat_s not forwarded (%d)",
 		      g_buzzer_play_last_repeat_s);
+
+	/* kind=0 (the stop request) is forwarded like any other id — the
+	 * dispatch layer does not special-case it; app_buzzer.c decides it
+	 * means "silence + cancel repeat". */
+	reset_cfg();
+	a = handle("0801e201020800", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_ack_tag, "stop acks (which=%d)", r.which_body);
+	zassert_equal(g_buzzer_play_calls, 1, "app_buzzer_play_repeating called for stop");
+	zassert_equal(g_buzzer_play_last_kind, 0, "kind 0 not forwarded (%d)",
+		      g_buzzer_play_last_kind);
 
 	/* repeat_s=1000 (over the 0-999 range) -> BAD_REQUEST, never reaches
 	 * app_buzzer.c. */

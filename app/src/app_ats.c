@@ -980,11 +980,11 @@ static int cmd_buzzer_off(const struct shell *sh, size_t argc, char **argv)
 		return -ENODEV;
 	}
 
-	/* Stops the pins immediately, even if a beep/melody is mid-playback on
-	 * the buzzer thread (app_buzzer_set(false) aborts + wakes it). */
-	int ret = app_buzzer_set(false);
+	/* Same as the remote kind-0 stop: silences immediately (even mid-beep/
+	 * -melody), drops a queued request, and cancels a pending repeat cycle. */
+	int ret = app_buzzer_play(APP_BUZZER_KIND_STOP);
 	if (ret) {
-		shell_error(sh, "app_buzzer_set failed: %d", ret);
+		shell_error(sh, "app_buzzer_play(stop) failed: %d", ret);
 		return ret;
 	}
 
@@ -1020,21 +1020,31 @@ static int cmd_buzzer_play(const struct shell *sh, size_t argc, char **argv)
 		return -ENODEV;
 	}
 
-	int ret;
+	uint32_t kind;
 
 	if (strcmp(argv[1], "info") == 0) {
-		ret = app_buzzer_play(APP_BUZZER_KIND_INFO);
+		kind = APP_BUZZER_KIND_INFO;
 	} else if (strcmp(argv[1], "warning") == 0) {
-		ret = app_buzzer_play(APP_BUZZER_KIND_WARNING);
+		kind = APP_BUZZER_KIND_WARNING;
 	} else if (strcmp(argv[1], "alarm") == 0) {
-		ret = app_buzzer_play(APP_BUZZER_KIND_ALARM);
+		kind = APP_BUZZER_KIND_ALARM;
 	} else {
 		shell_error(sh, "unknown melody: %s (expected info|warning|alarm)", argv[1]);
 		return -EINVAL;
 	}
 
+	unsigned long repeat_s = 0;
+	if (argc >= 3) {
+		repeat_s = strtoul(argv[2], NULL, 0);
+		if (repeat_s > 999) {
+			shell_error(sh, "repeat_s must be 0-999");
+			return -EINVAL;
+		}
+	}
+
+	int ret = app_buzzer_play_repeating(kind, (uint16_t)repeat_s);
 	if (ret) {
-		shell_error(sh, "app_buzzer_play(%s) failed: %d", argv[1], ret);
+		shell_error(sh, "app_buzzer_play_repeating(%s) failed: %d", argv[1], ret);
 		return ret;
 	}
 
@@ -1047,8 +1057,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_buzzer_off, 1, 0),
 	SHELL_CMD_ARG(beep, NULL, "Pulse the buzzer. Usage: beep <ms> (1-5000)", cmd_buzzer_beep, 2,
 		      0),
-	SHELL_CMD_ARG(play, NULL, "Play a fixed melody. Usage: play <info|warning|alarm>",
-		      cmd_buzzer_play, 2, 0),
+	SHELL_CMD_ARG(play, NULL,
+		      "Play a fixed melody. Usage: play <info|warning|alarm> [repeat_s 0-999]",
+		      cmd_buzzer_play, 2, 1),
 	SHELL_SUBCMD_SET_END);
 #endif /* CONFIG_APP_CMD_DEBUG_SHELL */
 

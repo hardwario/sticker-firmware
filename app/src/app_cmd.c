@@ -791,11 +791,12 @@ static void app_cmd_handle_clm_rearm(enum app_cmd_transport tp, const Command *c
 
 /* #338: remote-triggered buzzer melody (NFC/LRW). kind selects one of the
  * fixed severity melodies (the buzzer is DC self-oscillating only — no custom
- * tones); repeat_s (0-999s), if non-zero, keeps re-playing the melody that
- * many seconds after each playback finishes, until stopped locally
- * (`ats buzzer off`, which also aborts a beep/melody mid-playback rather than
- * waiting it out) — there's no protocol-level "stop", by design: this is a
- * fire-and-forget trigger, not a persisted alarm state on the wire. */
+ * tones); kind 0 (or any id >= 16) is the STOP request — the remote
+ * counterpart of `ats buzzer off`, silencing a beep/melody mid-playback and
+ * cancelling a pending repeat cycle. repeat_s (0-999s), if non-zero, keeps
+ * re-playing the melody that many seconds after each playback finishes, until
+ * stopped. Fire-and-forget: the Ack confirms the request was accepted, not
+ * that it audibly played (a newer request supersedes an older queued one). */
 static void app_cmd_handle_buzzer_play(enum app_cmd_transport tp, const Command *cmd,
 				       Response *resp, enum app_cmd_action *action)
 {
@@ -808,11 +809,11 @@ static void app_cmd_handle_buzzer_play(enum app_cmd_transport tp, const Command 
 		return;
 	}
 
-	/* kind is a raw id (0-15, #338) — this dispatch layer never validates or
+	/* kind is a raw id (#338) — this dispatch layer never validates or
 	 * interprets it; app_buzzer_play_repeating() (app_buzzer.c MELODY_TABLE)
-	 * is the sole authority on which ids exist, so a new melody never needs a
-	 * change here. */
-	int ret = app_buzzer_play_repeating((uint8_t)play->kind, (uint16_t)play->repeat_s);
+	 * is the sole authority on which ids exist (0 / >=16 = stop, 1-3 =
+	 * melodies, 4-15 reserved), so a new melody never needs a change here. */
+	int ret = app_buzzer_play_repeating(play->kind, (uint16_t)play->repeat_s);
 	if (ret == -ENOENT) {
 		make_error(resp, Response_Error_Code_BAD_REQUEST, "unknown melody kind");
 		return;

@@ -250,16 +250,18 @@ message Command {
     // #338: remote-triggered buzzer melody (NFC/LRW). kind is a raw melody id,
     // deliberately NOT a proto enum: app_buzzer.c (MELODY_TABLE) is the only
     // place that maps an id to an actual pattern, so assigning a new melody
-    // never needs a wire-format change here. 0 = no-op ("play nothing" — also
-    // proto3's default for an omitted field, so silence-by-default is never an
-    // error); 1 = info; 2 = warning; 3 = alarm; 4-15 reserved for future
-    // melodies (unassigned ids are rejected by app_buzzer_play(), not here).
-    // repeat_s, if non-zero (1-999), re-plays the melody that many seconds
-    // after it finishes, indefinitely, until stopped locally (`ats buzzer
-    // off`, which also aborts a beep/melody mid-playback rather than waiting
-    // it out).
+    // never needs a wire-format change here. 0 = STOP — silences the buzzer
+    // immediately (aborts a beep/melody mid-playback) and cancels a pending
+    // repeat cycle; it is also proto3's default for an omitted field, so an
+    // empty BuzzerPlay is a stop. 1 = info; 2 = warning; 3 = alarm; 4-15
+    // reserved for future melodies (rejected by app_buzzer_play(), not here);
+    // anything >= 16 collapses to 0. repeat_s, if non-zero (1-999), re-plays
+    // the melody that many seconds after it finishes, indefinitely, until
+    // stopped (kind 0, or locally `ats buzzer off`). Fire-and-forget: the Ack
+    // confirms acceptance, not audible playback — a newer request supersedes
+    // an older one that has not started yet.
     message BuzzerPlay {
-        optional uint32 kind     = 1; // melody id, 0-15 (see comment above)
+        optional uint32 kind     = 1; // melody id: 0 stop, 1-3 melodies, 4-15 reserved, >=16 -> 0
         optional uint32 repeat_s = 2; // 0 = no repeat; 1-999 = repeat interval (s)
     }
 }

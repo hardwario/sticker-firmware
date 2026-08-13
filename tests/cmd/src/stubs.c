@@ -100,11 +100,11 @@ int app_battery_measure(float *voltage)
  * test_buzzer_play_ret, so the test can both check what app_cmd forwarded and
  * simulate app_buzzer.c rejecting an unknown melody id (-ENOENT). */
 int g_buzzer_play_calls;
-uint8_t g_buzzer_play_last_kind;
+uint32_t g_buzzer_play_last_kind;
 uint16_t g_buzzer_play_last_repeat_s;
 int test_buzzer_play_ret;
 
-int app_buzzer_play_repeating(uint8_t kind, uint16_t repeat_s)
+int app_buzzer_play_repeating(uint32_t kind, uint16_t repeat_s)
 {
 	g_buzzer_play_calls++;
 	g_buzzer_play_last_kind = kind;

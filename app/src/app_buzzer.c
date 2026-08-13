@@ -350,20 +350,34 @@ int app_buzzer_on(uint32_t duration_ms)
 	return enqueue_request(BUZZER_KIND_ON, duration_ms, 0);
 }
 
-int app_buzzer_play_repeating(uint8_t kind, uint16_t repeat_s)
+int app_buzzer_play_repeating(uint32_t kind, uint16_t repeat_s)
 {
+	if (!m_buzzer_thread_id) {
+		return -EAGAIN;
+	}
+
+	/* Wire ids are a nibble (0-15); anything wider collapses to 0. */
+	if (kind >= 16) {
+		kind = 0;
+	}
+
 	if (kind == 0) {
-		return 0; /* explicit no-op, not an error */
+		/* 0 = "silence": the remote stop. Kill any queued request plus the
+		 * in-flight playback and pending repeat cycle — release builds have
+		 * no shell, so this is the only way to stop a repeating melody over
+		 * NFC/LRW. repeat_s is ignored here. */
+		k_msgq_purge(&m_buzzer_msgq);
+		return app_buzzer_set(false);
 	}
 
 	if (kind >= ARRAY_SIZE(MELODY_TABLE) || !MELODY_TABLE[kind].commands) {
 		return -ENOENT;
 	}
 
-	return enqueue_request(kind, 0, repeat_s);
+	return enqueue_request((uint8_t)kind, 0, repeat_s);
 }
 
-int app_buzzer_play(uint8_t kind)
+int app_buzzer_play(uint32_t kind)
 {
 	return app_buzzer_play_repeating(kind, 0);
 }
