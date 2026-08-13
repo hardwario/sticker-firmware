@@ -129,7 +129,8 @@ static k_tid_t m_buzzer_thread_id;
 /* Set by app_buzzer_set(false) so an in-flight pattern on the playback thread
  * bails out immediately instead of sleeping out its remaining commands —
  * paired with k_wakeup() to cut a pattern short mid-k_sleep(), not just
- * between commands. Cleared before each new request starts executing. */
+ * between commands. Consumed (atomic_clear) ONLY by the thread loop — see
+ * thread_entry for why execute_request must not clear it. */
 static atomic_t m_abort;
 
 static void set(bool on)
@@ -206,8 +207,6 @@ static void execute_pattern(const struct buzzer_cmd *commands, int repetitions)
 
 static void execute_request(const struct buzzer_request *request)
 {
-	atomic_set(&m_abort, 0);
-
 	if (request->kind == BUZZER_KIND_ON) {
 		const struct buzzer_cmd commands[] = {
 			{.type = BUZZER_CMD_SET, .on = true},
@@ -242,11 +241,19 @@ static void thread_entry(void *p1, void *p2, void *p3)
 		k_timeout_t wait = repeating ? K_SECONDS(active.repeat_s) : K_FOREVER;
 		int ret = k_msgq_get(&m_buzzer_msgq, &incoming, wait);
 
-		if (atomic_get(&m_abort)) {
-			/* app_buzzer_set(false) woke us — don't (re)play anything,
-			 * go back to waiting for a fresh request. */
+		/* Consume a pending abort (app_buzzer_set(false)): it cancels the
+		 * repeat cycle, but a freshly fetched request supersedes it (the two
+		 * can only race within one queue hop — newest action wins). The flag
+		 * MUST be consumed here with atomic_clear, never merely read and
+		 * never cleared in execute_request: k_wakeup() only interrupts
+		 * k_sleep(), not a msgq pend, so an off landing while this thread
+		 * is blocked above leaves the flag set — if it were not consumed on
+		 * the way through this loop, it would poison every later request. */
+		if (atomic_clear(&m_abort)) {
 			repeating = false;
-			continue;
+			if (ret != 0) {
+				continue;
+			}
 		}
 
 		if (ret == 0) {
@@ -255,6 +262,9 @@ static void thread_entry(void *p1, void *p2, void *p3)
 				continue;
 			}
 			active = incoming;
+		} else if (!repeating) {
+			/* Defensive: a non-timeout error with no repeat pending. */
+			continue;
 		}
 		/* else: the repeat_s wait elapsed naturally — replay `active` as-is. */
 
