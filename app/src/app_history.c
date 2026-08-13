@@ -562,11 +562,14 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
 			int ret = flash_area_write(
 				m_fa, page_off(phys) + HIST_HDR_SIZE + (off_t)m_head_dw * DW_SIZE,
 				dw, DW_SIZE);
+			/* Drop the staged double word on error too -- leaving m_stage_len
+			 * stuck at DW_DATA would run this loop's next byte past the end of
+			 * m_stage[] on the following capture (C1). */
+			m_stage_len = 0;
 			if (ret) {
 				return ret;
 			}
 			m_head_dw++;
-			m_stage_len = 0;
 		}
 	}
 	m_abs_ord++;
