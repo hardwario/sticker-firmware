@@ -10,7 +10,7 @@ This document lists **only the changes introduced in firmware v1.4.0** relative 
 |---|---|
 | Remote control | **New** bidirectional command protocol over LoRaWAN downlinks (fPort 85) |
 | Telemetry | **New** protobuf telemetry on **fPort 2** (legacy fPort 1 bitmap no longer emitted); large reports split across frames; absent analog readings sent as a `null` sentinel |
-| Alarms | **New** alarm-detail batch on **fPort 3**; **new** global alarm rate-limit; **new** PIR motion alarm; **new** no-data watchdog; sensor-reading validation hardening |
+| Alarms | **New** alarm-detail batch on **fPort 3**; **new** global alarm rate-limit; **new** PIR motion alarm; **new** no-data watchdog; sensor-reading validation hardening; **changed** (#348) — per-rule `dwell` field unifies dwell/confirm/hold timing across every alarm kind, replacing the THRESHOLD-only hysteresis band and the global `alarm-notif-time`/`alarm-light-confirm-delay` config keys (removed) |
 | Device info | **New** automatic device-info uplink on every join |
 | Time | **New** real-time clock, synced from the network |
 | History | **New** sensor history store-and-forward with on-request replay |
