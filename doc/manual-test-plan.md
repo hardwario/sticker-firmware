@@ -929,6 +929,14 @@ one is) is a regression of the double-inverted-`GPIO_ACTIVE_LOW` bug this issue 
 > after the magnet has been present continuously for ~5 s, and clears immediately on removal.
 > Report all four checks with timing.
 
+**Reverse direction (edge on removal, `alarm set 0 hall-left state 1 0 5`):** symmetric to the
+`0→1` case above — confirmed to fire ~5 s after the magnet is removed (not reapplied), with the
+same early-revert-cancel on a quick remove+reapply within 5 s. Worth testing explicitly at least
+once, not just assuming symmetry: a bounce-prone reed switch has different release vs. close
+mechanical characteristics, and a **falling** edge gives no counter-increment tell (the hall
+counter only counts rises), so `ats sensors sample`'s `active` field, not the counter, is the only
+way to confirm the physical transition actually settled before timing the dwell.
+
 - [ ] Pass
 
 ### A4 — Binary alarm: Input A/B (state)
@@ -957,8 +965,16 @@ arms on the very next poll.
 report per pulse, suppressed for `hst` seconds, then re-armed; a motion burst is flood-suppressed
 (no permanent latch).
 
+**Gotcha (accel):** `cap-accelerometer true` alone is not enough — `accel-motion-sensitivity`
+defaults to `off` and must also be set (`low`/`medium`/`high`) for the LIS2DH12 any-motion
+interrupt to fire at all; both need `settings save` + reboot (deferred init). A real shake
+produces many rapid any-motion interrupts (the `accel-motion` counter jumps by dozens per shake) —
+only the first activates, confirming the rest are correctly hold-suppressed, not each attempting
+its own fire.
+
 **Prompt for Claude:**
-> Enable the sensor (`config cap-pir-detector true` / `cap-accelerometer true`, save). Arm
+> Enable the sensor (`config cap-pir-detector true` / `cap-accelerometer true` **and**
+> `accel-motion-sensitivity medium`, save). Arm
 > `alarm set 0 pir state 0 1 <hst>` (or `accel state 0 1 <hst>`, note the value) — edge and level
 > behave alike for these momentary sources. Ask me to trigger motion repeatedly; confirm the FIRST
 > pulse fires an AlarmReport immediately (no confirm delay, unlike A1/A3), that reports within
@@ -975,12 +991,23 @@ blocks for `hst` seconds (same role as A5). `hst = 0` re-arms on the next report
 **Observable:** AlarmReport fPort 3, source `hall-left`/`hall-right`/`input-a`/`input-b`, quantity
 `count`.
 
+**Gotcha:** `interval_report` has a hard shell-enforced minimum of 60 s (`config interval-report`,
+`cmd_int` min=60) — it cannot be shrunk for a faster manual test cycle, so each rate-window
+iteration costs a real 60+ s wait. Also: re-arming a rule via `alarm clear all` immediately
+followed by `alarm new <same source+quantity>` does **not** reset the runtime dwell/window
+state — `rt_sync()` only resets on a `(source, quantity)` mismatch, and nothing re-syncs while the
+rule is briefly absent — so a "fresh" rule can silently inherit a stale window baseline from the
+previous test run. Insert an `alarm poll` **between** `alarm clear all` and `alarm new` to force a
+true reset before timing a fresh window.
+
 **Prompt for Claude:**
 > Arm `alarm new hall-left count <N> <hst>` (small N, note both values; `alarm list` shows
-> `rate>=N/interval hst=…`). Ask me to pulse the hall sensor more than N times within a report
-> interval and confirm an AlarmReport on fPort 3 for that source/quantity, then confirm a second
-> over-rate interval within `hst` seconds of the first does **not** produce a second report while
-> one after `hst` has elapsed does. Report the result.
+> `rate>=N/interval hst=…`) — if re-arming an existing rate rule, `alarm clear all` then
+> `alarm poll` then `alarm new` (not `clear` immediately followed by `new`, see gotcha above).
+> Ask me to pulse the hall sensor more than N times within a report interval and confirm an
+> AlarmReport on fPort 3 for that source/quantity, then confirm a second over-rate interval
+> within `hst` seconds of the first does **not** produce a second report while one after `hst`
+> has elapsed does. Report the result.
 
 - [ ] Pass
 

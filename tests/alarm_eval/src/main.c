@@ -98,6 +98,37 @@ ZTEST(alarm_eval, test_state_edge_fires_after_confirm_via_poll)
 		     "edge never fired after the confirm dwell elapsed (#348 HIL bug #3)");
 }
 
+/* Reverse direction: STATE EDGE armed on a 1->0 transition (alarm-on-removal,
+ * e.g. "magnet taken away"), not just the 0->1 case above. eval_state()'s
+ * comparisons are symmetric in from_state/to_state, but this was only
+ * confirmed on real hardware after an HIL retest scare (project_
+ * issue348_alarm_dwell_unify.md, 2026-08-13 session) — worth a dedicated
+ * regression test rather than relying on the 0->1 case as a stand-in. */
+ZTEST(alarm_eval, test_state_edge_reverse_direction_fires_after_confirm)
+{
+	set_hall_left_edge_rule(1, 0, 0.3f);
+
+	test_hall.left_is_active = true;
+	app_alarm_event(APP_ALARM_SRC_HALL_LEFT, true); /* seed prev_state = 1 */
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_STATE),
+		      "spuriously active before any transition");
+
+	test_hall.left_is_active = false;
+	app_alarm_event(APP_ALARM_SRC_HALL_LEFT, false); /* raw 1->0 transition: arms confirm */
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_STATE),
+		      "edge fired before the confirm dwell elapsed");
+
+	k_sleep(K_MSEC(400)); /* past hst, level still held (no second edge) */
+	app_alarm_poll();
+	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_STATE),
+		     "reverse-direction (1->0) edge never fired after the confirm dwell elapsed");
+
+	k_sleep(K_MSEC(400)); /* past the hold */
+	app_alarm_poll();
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_STATE),
+		      "reverse-direction edge never re-armed after the hold elapsed");
+}
+
 /* Variant: the raw transition is observed ONLY through app_alarm_poll()'s
  * ~3 s cadence (read_poll_state() -> eval_state()), never through
  * app_alarm_event() — models a missed/debounced GPIO edge callback where the

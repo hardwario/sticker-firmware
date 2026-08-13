@@ -825,6 +825,10 @@ still required before the next `alarm poll` will observe it as elapsed.
 - **Expect:** edge fires only after the 5 s confirm, then blocks re-arming for the same 5 s;
   level dwells the same way on activation but clears immediately; with `alarm-limit 0`
   (explicitly set, not the baseline since #346) ⇒ dual uplink per edge (A13 behaviour).
+- **Reverse direction** (`alarm set 0 hall-left state 1 0 5`, edge on removal): HW-confirmed
+  symmetric to the `0->1` case. A falling edge gives no counter tell (hall counter only counts
+  rises) — use `ats sensors sample`'s `active` field, not the counter, to confirm the physical
+  transition has genuinely settled before timing the 5 s dwell.
 
 ### AT-ALM-03b — edge confirm resets on an early revert (D, SA; maps A1b analogue for STATE)
 - **Steps:** same edge rule as AT-ALM-03 (hst = 5); assist: apply the magnet, hold ~2 s,
@@ -835,18 +839,29 @@ still required before the next `alarm poll` will observe it as elapsed.
   continuous-dwell requirement as AT-ALM-01b, now verified for the STATE edge path.
 
 ### AT-ALM-04 — momentary PIR/accel one-shot, hst as hold/re-arm only (D, SA; maps A5)
+- **Pre (accel):** `cap-accelerometer true` alone is not enough — `accel-motion-sensitivity`
+  defaults to `off` and must also be set (`low`/`medium`/`high`) for the LIS2DH12 any-motion
+  interrupt to fire; both need `settings save` + reboot (deferred init).
 - **Steps:** arm PIR state one-shot with a hold window, `alarm set 0 pir state 0 1 8`; wave
   once and `alarm poll` immediately.
 - **Expect:** the alarm fires on the very same poll as the pulse (no confirm delay — momentary
-  sources fire immediately, unlike AT-ALM-01/03); a second wave within 8 s produces no second
-  alarm; a wave after 8 s does. Red/orange event LED behaviour is covered separately in A12
-  (commissioning-only orange diagnostic, fixed timing) vs A14 (red alarm-active blink, tracks
-  `active` — i.e. tracks this same 8 s hold, not a separate LED timer).
+  sources fire immediately, unlike AT-ALM-01/03); a real shake/wave produces many rapid pulse
+  events (`accel-motion`/`motion-count` can jump by dozens for one shake) — only the first
+  activates, the rest are correctly hold-suppressed, not each attempting its own fire; a second
+  wave within 8 s produces no second alarm; a wave after 8 s does. Red/orange event LED behaviour
+  is covered separately in A12 (commissioning-only orange diagnostic, fixed timing) vs A14 (red
+  alarm-active blink, tracks `active` — i.e. tracks this same 8 s hold, not a separate LED timer).
 
 ### AT-ALM-05 — rate (count) alarm, hst as hold/re-arm (D, SA; maps A6)
-- **Steps:** rule: hall count rate hi=2 per report interval, hst = 10 (`alarm new hall-left
-  count 2 10`); assist: 3 magnet passes within one interval, then another 3-pass over-rate
-  window within 10 s of the first firing, then one more after 10 s.
+- **Gotcha:** `interval_report` has a hard shell-enforced 60 s minimum — cannot be shrunk for a
+  faster cycle, each window costs a real 60+ s wait. Re-arming via `alarm clear all` immediately
+  followed by `alarm new <same source+quantity>` does **not** reset the runtime window state
+  (`rt_sync()` only resets on a source/quantity mismatch) — insert `alarm poll` between `clear
+  all` and `new` to force a true reset, otherwise a "fresh" rule silently inherits a stale
+  `count_window_start`/baseline from the previous run and appears to not fire.
+- **Steps:** rule: hall count rate hi=2 per report interval, hst = 10 (`alarm clear all`,
+  `alarm poll`, `alarm new hall-left count 2 10`); assist: 3 magnet passes within one interval,
+  then another 3-pass over-rate window within 10 s of the first firing, then one more after 10 s.
 - **Expect:** fires on the first over-rate window (delta > 2, not on 2 or fewer); the second
   over-rate window within the 10 s hold produces no second alarm; the one after 10 s does.
 
