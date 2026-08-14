@@ -1,0 +1,42 @@
+/* Emulated hardware for app_nfc.c's ST25DV (NFC tag EEPROM/registers over I2C,
+ * plus the LPD power-switch pin and the GPO interrupt pin). Two devicetree
+ * "instances" of the same st25dv-emul compatible model one physical chip
+ * answering at two I2C addresses (E0=0x53 memory+dynamic regs, E1=0x57 static
+ * system regs) — see tests/nfc_hw/src/emul_st25dv.c for why they share one
+ * global model instead of per-instance data. lpd/nfc_gpo reuse native_sim's
+ * built-in gpio0 (zephyr,gpio-emul) on two otherwise-unused pins. */
+
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	i2c1: i2c@1000 {
+		status = "okay";
+		compatible = "zephyr,i2c-emul-controller";
+		clock-frequency = <I2C_BITRATE_STANDARD>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		reg = <0x1000 4>;
+
+		st25dv_e0: st25dv-e0@53 {
+			compatible = "hardwario,st25dv-emul";
+			reg = <0x53>;
+			status = "okay";
+		};
+
+		st25dv_e1: st25dv-e1@57 {
+			compatible = "hardwario,st25dv-emul";
+			reg = <0x57>;
+			status = "okay";
+		};
+	};
+
+	lpd: lpd {
+		compatible = "power-switch";
+		gpios = <&gpio0 1 GPIO_ACTIVE_HIGH>;
+	};
+
+	zephyr,user {
+		nfc-gpo-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+	};
+};
