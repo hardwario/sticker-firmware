@@ -166,10 +166,20 @@ void app_report_trigger(void)
 
 void app_report_suspend(void)
 {
-	/* Stop the cadence so it can't fire and re-arm the radio during poweroff.
-	 * Pending work on m_work_q is abandoned (the MCU is about to shut down;
-	 * wake is a clean boot). */
+	/* Stop the cadence so it can't fire and re-arm the radio during poweroff,
+	 * then cancel any report cycle already queued on m_work_q. Without this,
+	 * a cycle submitted just before suspend runs (report_timer_handler /
+	 * report_kick / app_report_trigger) would still dequeue afterward and
+	 * reach app_lrw_send_telemetry() (radio) while app_power_suspend() is
+	 * tearing the radio down or after sys_poweroff() has been called.
+	 * Fire-and-forget, same as the other suspend/teardown cancels in this
+	 * codebase (state_transition() in app_lrw.c, app_ats.c's LED-cycle stop):
+	 * if a cycle is already RUNNING this can't un-run it, but that is no
+	 * worse than the previous behavior and the timer stop above prevents any
+	 * further cycles from being queued. */
 	k_timer_stop(&m_report_timer);
+	k_work_cancel(&m_periodic_work);
+	k_work_cancel(&m_trigger_work);
 }
 
 int app_report_init(void)
