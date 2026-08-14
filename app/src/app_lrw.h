@@ -11,6 +11,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* struct k_work (app_lrw_run_on_work_q()'s parameter) - included here rather
+ * than relying on callers to have pulled in kernel.h before this header;
+ * app_lrw_run_on_work_q() used to be CONFIG_SHELL-gated, so no non-Zephyr
+ * caller had ever included this header first before (#340 M22). */
+#include <zephyr/kernel.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -114,16 +120,17 @@ void app_lrw_suspend(void);
  * transitions (HEALTHY->WARNING->RECONNECT->rejoin and the late-LC-in-RECONNECT
  * guard, #71) deterministically from the shell without a real RF outage. */
 void app_lrw_debug_inject_lc(bool ok);
-
-/* Debug/test only: submit an arbitrary work item onto m_work_q. Lets shell
- * commands (e.g. `ats lrw compose`) run logic that app_compose.c documents as
- * "solely on m_work_q" from the shell thread without racing the real
- * telemetry TX path — the caller submits its own struct k_work and then
- * k_work_flush()es it to wait for completion. Returns k_work_submit_to_queue()'s
- * result: >=0 queued/running, a negative errno if the queue rejected it (in
- * which case the caller must not flush — nothing was submitted). */
-int app_lrw_run_on_work_q(struct k_work *work);
 #endif
+
+/* Submit an arbitrary work item onto m_work_q. Lets a caller (a shell command
+ * like `ats lrw compose`, or calibration mode's own send path, #340 M22) run
+ * logic that app_compose.c documents as "solely on m_work_q" without racing
+ * the real telemetry TX path and without standing up a second queue - the
+ * caller submits its own struct k_work and (if it needs to wait)
+ * k_work_flush()es it. Returns k_work_submit_to_queue()'s result: >=0
+ * queued/running, a negative errno if the queue rejected it (in which case
+ * the caller must not flush — nothing was submitted). */
+int app_lrw_run_on_work_q(struct k_work *work);
 
 #ifdef __cplusplus
 }
