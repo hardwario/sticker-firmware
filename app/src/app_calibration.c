@@ -57,6 +57,23 @@ static int m_count_ds18b20;
 static int m_count_machine_probe;
 static uint16_t m_battery_mv = BATTERY_INVALID_MV;
 
+/* #340 M22: lorawan_send() blocks on a MAC-confirm semaphore that can hang
+ * forever (app_lrw.c's own documented hazard). app_calibration_run() IS the
+ * whole calibration thread - if the send hung there directly, the loop could
+ * never feed the watchdog, blink its status LED, or re-check its own
+ * deadline-based clean reboot again. Running the send via
+ * app_lrw_run_on_work_q() (app_lrw.c's own m_work_q, mode is mutually
+ * exclusive with normal app_lrw operation so there's no contention) decouples
+ * the main loop's liveness from whether the send ever completes, at no extra
+ * RAM cost - m_work_q's own existing heartbeat/wdog liveness channel
+ * (#181/#182) already forces a fast IWDG reset if it wedges, instead of
+ * silently waiting out the full multi-hour calibration deadline. A dedicated
+ * queue+stack for this was considered and rejected: it cost ~2.3 KB of static
+ * RAM the debug build budget can't absorb (confirmed by CI), for protection
+ * m_work_q's existing heartbeat already provides. */
+static struct k_work m_cal_send_work;
+static uint8_t m_cal_tx_buf[PAYLOAD_SIZE];
+
 static struct app_led_play_req m_orange_blink = {
 	.commands = {{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
 		     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
@@ -255,6 +272,22 @@ static void compose_calibration_payload(uint8_t *buf)
 	sys_put_le16(m_battery_mv, &buf[24]);
 }
 
+/* #340 M22: runs the actual (possibly-hanging) lorawan_send() off the
+ * calibration thread, on app_lrw.c's m_work_q - see the comment above
+ * m_cal_send_work. app_lrw_is_ready() is checked here rather than by the
+ * caller so the readiness snapshot is taken as close as possible to the
+ * actual send attempt. */
+static void cal_send_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+#if defined(CONFIG_LORAWAN)
+	if (app_lrw_is_ready()) {
+		lorawan_send(CALIBRATION_PORT, m_cal_tx_buf, PAYLOAD_SIZE, LORAWAN_MSG_UNCONFIRMED);
+	}
+#endif /* defined(CONFIG_LORAWAN) */
+}
+
 int app_calibration_init(void)
 {
 	int ret;
@@ -297,6 +330,11 @@ int app_calibration_init(void)
 	lorawan_enable_adr(false);
 	ret = lorawan_set_datarate(LORAWAN_DR_5);
 #endif /* defined(CONFIG_LORAWAN) */
+
+	/* #340 M22: work item for the calibration TX send, run on app_lrw.c's
+	 * m_work_q via app_lrw_run_on_work_q() - see cal_send_work_handler()'s
+	 * comment. */
+	k_work_init(&m_cal_send_work, cal_send_work_handler);
 
 	/* Init 1-Wire bus (DS2484) — non-fatal on failure */
 	bool w1_ready = false;
@@ -378,15 +416,12 @@ void app_calibration_run(void)
 		if (++counter >= SEND_INTERVAL_SEC) {
 			counter = 0;
 
-			uint8_t buf[PAYLOAD_SIZE];
-			compose_calibration_payload(buf);
-
-#if defined(CONFIG_LORAWAN)
-			if (app_lrw_is_ready()) {
-				lorawan_send(CALIBRATION_PORT, buf, PAYLOAD_SIZE,
-					     LORAWAN_MSG_UNCONFIRMED);
-			}
-#endif /* defined(CONFIG_LORAWAN) */
+			/* #340 M22: compose here (fast, bounded I2C/1-Wire reads), but
+			 * submit the actual send to app_lrw.c's m_work_q instead of
+			 * calling the potentially-hanging lorawan_send() directly on
+			 * this thread - see cal_send_work_handler(). */
+			compose_calibration_payload(m_cal_tx_buf);
+			app_lrw_run_on_work_q(&m_cal_send_work);
 
 			if (++battery_tx_counter >= BATTERY_REMEASURE_TX_COUNT) {
 				battery_tx_counter = 0;

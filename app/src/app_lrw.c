@@ -619,12 +619,19 @@ void app_lrw_debug_inject_lc(bool ok)
 	m_dbg_lc_ok = ok;
 	k_work_submit_to_queue(&m_work_q, &m_dbg_lc_work);
 }
+#endif /* CONFIG_SHELL */
 
+/* #340 M22: not CONFIG_SHELL-gated (unlike the debug helpers above) - lets a
+ * caller outside app_lrw.c run its own work serialized with the real
+ * telemetry TX path on m_work_q, without standing up a second queue+stack of
+ * its own. Originally shell-only (`ats lrw compose`); calibration mode's
+ * send path needs the same thing in Release builds, where CONFIG_SHELL is
+ * off. Returns k_work_submit_to_queue()'s result: >=0 queued/running, a
+ * negative errno if the queue rejected it. */
 int app_lrw_run_on_work_q(struct k_work *work)
 {
 	return k_work_submit_to_queue(&m_work_q, work);
 }
-#endif /* CONFIG_SHELL */
 
 /* ======================================================================== */
 /* Work handlers                                                            */
