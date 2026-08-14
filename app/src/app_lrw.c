@@ -664,6 +664,19 @@ static void lc_response_work_handler(struct k_work *work)
 		return;
 	}
 
+	/* #340 M13: on_downlink_received() treats ANY downlink as an implicit LC
+	 * confirmation and may have already resolved (and cleared) this same
+	 * request via on_lc_success()/on_lc_failure() before the real LinkCheckAns
+	 * got here. Without this guard the genuine-but-late answer would run the
+	 * success/failure path a second time for one physical round-trip,
+	 * double-incrementing m_consecutive_lc_ok/m_consecutive_lc_fail and
+	 * potentially causing an unearned state transition. Mirrors the same
+	 * already-resolved check in on_lc_timeout() above. */
+	if (!m_link_check_pending) {
+		LOG_DBG("LC answer arrived but already resolved (implicit via downlink)");
+		return;
+	}
+
 	if (m_lc_response_gw_count == 0) {
 		on_lc_failure();
 	} else {
