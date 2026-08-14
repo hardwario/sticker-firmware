@@ -5,6 +5,7 @@
  */
 
 #include "app_alarm_rules.h"
+#include "app_battery.h"
 #include "app_cmd.h"
 #include "app_clock.h"
 #include "app_compose.h"
@@ -13,7 +14,6 @@
 #include "app_history.h"
 #include "app_log.h"
 #include "app_lrw.h"
-#include "app_sensor.h"
 #include "app_settings.h"
 #include "app_wdog.h"
 
@@ -1446,19 +1446,13 @@ static uint8_t battery_level_callback(void)
 	 * (1 ~ empty, 254 ~ full), 255 = unable to measure. Map the measured cell
 	 * voltage linearly over the operational window.
 	 *
-	 * #340 M9: read the periodic sampler's cached voltage instead of calling
+	 * #340 M9: read the last-measured voltage instead of calling
 	 * app_battery_measure() directly. This runs on LoRaMacProcess()'s context
 	 * (the system workqueue, via the radio driver's DIO IRQ work item) and a
 	 * raw, non-refcounted RESUME/adc_read/SUSPEND racing the sensor thread's
 	 * own concurrent app_battery_measure() call can wedge the ADC and hang
-	 * that workqueue forever (IWDG reset). Mirrors app_cmd_get_info()'s
-	 * battery_mv field, which already reads this same cache for the same
-	 * reason (there, a fresh ADC read too early in boot could hang instead). */
-	float v;
-
-	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	v = g_app_sensor_data.voltage;
-	k_mutex_unlock(&g_app_sensor_data_lock);
+	 * that workqueue forever (IWDG reset). */
+	float v = app_battery_last_sample();
 
 	if (!isfinite(v) || v <= 0.0f) {
 		return 255; /* no sample yet / last measurement failed */

@@ -14,6 +14,11 @@ extern "C" {
 int app_battery_init(void);
 int app_battery_measure(float *voltage);
 
+/* Last successfully measured voltage (NAN if none yet) - for callers that must
+ * not do a live ADC read from a context where it can hang (#340 M9), e.g. a
+ * LoRaWAN MAC callback running on the system workqueue. */
+float app_battery_last_sample(void);
+
 #ifdef __cplusplus
 }
 #endif
