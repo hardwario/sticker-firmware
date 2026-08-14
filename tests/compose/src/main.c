@@ -328,4 +328,62 @@ ZTEST(compose, test_budget_unknown_pre_join)
 	zassert_equal(ret, -EAGAIN, "expected -EAGAIN, got %d", ret);
 }
 
+ZTEST(compose, test_reset_after_abandon_forces_fresh_snapshot)
+{
+	Telemetry fr[16];
+	size_t n;
+	uint8_t buf[256];
+	size_t len;
+	bool more;
+
+	/* #340 M6: app_lrw.c's tx_telemetry_frame() abandons a telemetry frame
+	 * after FRAME_MAX_RETRIES failed lorawan_send() attempts. Before the fix
+	 * it cleared only its own m_frame_* state and left app_compose.c's
+	 * in-progress snapshot (m_active/m_pending/m_w1_sent) untouched, so the
+	 * NEXT report cycle resumed packing the abandoned cycle's stale sensor
+	 * data instead of taking a fresh reading. The fix adds an
+	 * app_compose_reset() call in that abandon branch (mirroring the
+	 * existing rejoin-path call, #93.5). This test reproduces the abandon
+	 * setup directly against app_compose.c/app_compose_reset() and confirms
+	 * the reset actually forces a fresh snapshot on the next compose call. */
+	set_clean();
+	/* Same multi-group setup as test_multiframe_split: proven to leave a
+	 * pending snapshot (more=true) after a single app_compose() call at this
+	 * budget. */
+	g_app_sensor_data.temperature = 20.0f;
+	g_app_sensor_data.humidity = 40.0f;
+	g_app_config.cap_barometer = true;
+	g_app_sensor_data.pressure = 990.0f;
+	g_app_config.cap_light_sensor = true;
+	g_app_sensor_data.illuminance = 300.0f;
+	g_app_config.cap_w1_sensors = true;
+	test_w1_types[0] = APP_W1_SLOT_DALLAS;
+	g_app_sensor_data.w1[0].temperature = 11.0f;
+	g_app_config.cap_hall_left = true;
+	test_hall.left_count = 42; /* "abandoned cycle" value */
+
+	test_budget = 16;
+	int ret = app_compose(buf, sizeof(buf), &len, &more);
+	zassert_equal(ret, 0, "app_compose ret %d", ret);
+	zassert_true(more, "setup must leave a pending multi-frame snapshot; "
+			   "hall_left (low priority) should still be unpacked");
+
+	/* This is the fix under test. Without it, app_compose.c's m_active stays
+	 * true and the next app_compose() call below would resume packing the
+	 * leftover pending groups from the stale snapshot above (hall_left=42)
+	 * instead of taking a fresh reading. */
+	app_compose_reset();
+
+	/* Fresh sensor state for the next report cycle. */
+	test_hall.left_count = 100; /* "current" value, distinct from 42 */
+	test_budget = 200;          /* ample: the whole fresh report fits in one frame */
+	run_report(fr, 16, &n);
+
+	zassert_equal(n, 1, "expected one fresh frame, got %zu", n);
+	zassert_true(fr[0].has_hall_left_count, "hall_left missing from fresh report");
+	zassert_equal(fr[0].hall_left_count, 100,
+		      "stale snapshot reused after reset: got %u, expected the fresh count",
+		      fr[0].hall_left_count);
+}
+
 ZTEST_SUITE(compose, NULL, NULL, NULL, NULL, NULL);
