@@ -455,10 +455,24 @@ static void clm_state_save(void)
 	}
 }
 
+/* #340 M24: m_clm_state is also mutated by nfc_check_locked()'s poll-thread
+ * arm sequence (clm_arm_commit/revert below) - guarded by m_lock across that
+ * whole sequence (nfc_access_begin/end). app_nfc_clm_reset() and clm_consume()
+ * are reachable directly from other threads (shell app_ats.c commands, the
+ * main thread's deferred-action dispatch, app_settings_vendor_reset()) with
+ * no synchronization of their own, so a reset/consume from one of those could
+ * race a poll-thread commit/revert and be silently clobbered by whichever ran
+ * last. Take m_lock here too - Zephyr's k_mutex is recursive for the owning
+ * thread, so this is a safe no-op when already called from within the poll
+ * thread's own locked sequence (clm_consume() from handle_encrypted_cmd() or
+ * the delete-detected path), and correctly serializes against a genuinely
+ * different thread otherwise. */
 void app_nfc_clm_reset(void)
 {
+	k_mutex_lock(&m_lock, K_FOREVER);
 	m_clm_state = CLM_UNSET;
 	clm_state_save();
+	k_mutex_unlock(&m_lock);
 }
 
 /* Shared PENDING->CONSUMED transition (#308): three independent triggers all
@@ -470,14 +484,18 @@ void app_nfc_clm_reset(void)
  *      already the "provisioning operator" bar the rest of this file uses, so a
  *      claim window left open after a phone has already run a real command is
  *      just noise on the tag.
- * A no-op outside PENDING (already CONSUMED, or never armed). */
+ * A no-op outside PENDING (already CONSUMED, or never armed). See #340 M24
+ * above for why this takes m_lock. */
 static void clm_consume(const char *reason)
 {
+	k_mutex_lock(&m_lock, K_FOREVER);
 	if (m_clm_state != CLM_PENDING) {
+		k_mutex_unlock(&m_lock);
 		return;
 	}
 	m_clm_state = CLM_CONSUMED;
 	clm_state_save();
+	k_mutex_unlock(&m_lock);
 	LOG_INF("NFC clm record consumed (%s) (#308)", reason);
 }
 
@@ -504,7 +522,13 @@ void app_nfc_clm_ack(void)
 
 uint8_t app_nfc_clm_state_get(void)
 {
-	return m_clm_state;
+	uint8_t state;
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	state = m_clm_state;
+	k_mutex_unlock(&m_lock);
+
+	return state;
 }
 
 /* A claim token is provisioned once any byte is non-zero (all-zero = unset, the

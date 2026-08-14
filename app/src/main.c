@@ -177,10 +177,22 @@ static void nfc_run_deferred_cmd_actions(void)
 			 * g_app_config.claim_token becomes live (h_commit) in the same
 			 * breath the latch clears — no window where a poll could
 			 * re-expose the OLD token; when no new token was given this is a
-			 * same-value no-op re-persist. */
+			 * same-value no-op re-persist.
+			 *
+			 * #340 M15: app_nfc_clm_reset() already persisted clm/state=UNSET
+			 * to flash by the time app_settings_save() runs. If that save
+			 * then fails, don't keep running live with the clm latch reset
+			 * but the (possibly new) claim_token never persisted - mirrors
+			 * app_settings.c's post-destructive-step convention (34a1ed8):
+			 * force a reboot so the device re-reads whatever DID actually
+			 * get persisted, instead of a silent, un-rebooted return leaving
+			 * flash and live state out of sync until some later, unrelated
+			 * reboot. */
 			play_carousel_nfc();
 			app_nfc_clm_reset();
-			app_settings_save(true);
+			if (app_settings_save(true)) {
+				sys_reboot(SYS_REBOOT_COLD);
+			}
 			break;
 		case APP_CMD_ACTION_ENTER_CALIBRATION:
 			/* Persist calibration=true + reboot; next boot enters
