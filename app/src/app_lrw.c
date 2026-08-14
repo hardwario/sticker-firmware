@@ -121,6 +121,18 @@ static struct k_timer m_rejoin_timer;
 static struct k_work m_send_work;            /* drains response/alarm, then composes telemetry */
 static struct k_work_delayable m_frame_work; /* multi-frame snapshot continuation */
 static struct k_work_delayable m_tx_jitter_work; /* #267: random pre-send delay (fleet de-corr) */
+
+/* #340 M5: m_send_work is shared between the response/alarm drain and the
+ * telemetry-compose trigger. k_work_submit() coalesces a re-submit while the
+ * item is already pending, so a telemetry trigger arriving mid-drain can
+ * collapse into that same run and never reach tx_telemetry_frame(). This flag
+ * survives the coalescing: tx_jitter_work_handler() sets it whenever it asks
+ * for a compose, and send_work_handler() checks/clears it after a drain
+ * leaves both queues empty, so the request is honored on this same pass
+ * instead of being silently dropped. Plain bool is safe without atomics: both
+ * the setter and the clearer run exclusively on this file's own single-
+ * threaded m_work_q, never concurrently with each other. */
+static bool m_telemetry_pending;
 static struct k_work m_join_work;
 static struct k_work m_link_check_work;       /* LC timeout (from m_lc_timeout_timer) */
 static struct k_work m_downlink_success_work; /* deferred from downlink_callback */
@@ -1117,10 +1129,16 @@ static void tx_retry_work_handler(struct k_work *work)
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
 }
 
-/* Fires after the random pre-send delay (#267): kick the normal send path. */
+/* Fires after the random pre-send delay (#267): kick the normal send path.
+ * This is the sole trigger for a telemetry compose, so set the pending flag
+ * BEFORE submitting (#340 M5) — if m_send_work is already pending because of
+ * an in-flight response/alarm drain, the submit below coalesces into that
+ * run instead of scheduling a new one, and the flag is what lets that run
+ * still honor the request. */
 static void tx_jitter_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
+	m_telemetry_pending = true;
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
 }
 
@@ -1161,6 +1179,11 @@ static void send_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
+	/* Calibration/disabled/joining below are hard transmit gates, not drain
+	 * bookkeeping: they return without touching m_telemetry_pending, so a
+	 * request that arrives while gated simply stays pending for whichever
+	 * later m_send_work run finds the radio usable again (#340 M5). */
+
 	/* Block normal transmissions during calibration mode (flag-based). */
 	if (g_app_config.calibration) {
 		return;
@@ -1181,30 +1204,45 @@ static void send_work_handler(struct k_work *work)
 	struct lrw_tx_msg tx;
 
 	/* Priority drain: command response (port 85) first, then alarm (port 3). One
-	 * TX per call; if more are queued, re-submit. A drain never falls through to
-	 * telemetry — telemetry is composed only when this handler runs with both
-	 * queues already empty (i.e. when app_report triggered the send). */
+	 * TX per call; if more are queued, re-submit. A drain falls through to
+	 * telemetry below only when it leaves both queues empty AND a telemetry
+	 * trigger got coalesced into this same run (m_telemetry_pending, #340 M5) —
+	 * otherwise telemetry is composed only when this handler runs with both
+	 * queues already empty from the start (i.e. when app_report triggered the
+	 * send with nothing else queued). */
 	if (k_msgq_get(&m_response_msgq, &tx, K_NO_WAIT) == 0) {
 		if (!tx_send_queued(&m_response_msgq, &tx, tx.port)) {
 			return; /* requeued; a backoff retry is scheduled */
 		}
 		if (k_msgq_num_used_get(&m_response_msgq) || k_msgq_num_used_get(&m_alarm_msgq)) {
 			k_work_submit_to_queue(&m_work_q, &m_send_work);
+			return;
 		}
-		return;
-	}
-
-	if (k_msgq_get(&m_alarm_msgq, &tx, K_NO_WAIT) == 0) {
+		if (!m_telemetry_pending) {
+			return;
+		}
+		/* #340 M5: the response queue is now empty, but a telemetry trigger
+		 * coalesced into this run (its own m_send_work submit got merged
+		 * with this drain's) — fall through to the same gates/compose the
+		 * natural "queues empty" path below uses, instead of returning and
+		 * silently losing this interval's report. */
+	} else if (k_msgq_get(&m_alarm_msgq, &tx, K_NO_WAIT) == 0) {
 		if (!tx_send_queued(&m_alarm_msgq, &tx, APP_LRW_ALARM_PORT)) {
 			return; /* requeued; a backoff retry is scheduled */
 		}
 		if (k_msgq_num_used_get(&m_alarm_msgq)) {
 			k_work_submit_to_queue(&m_work_q, &m_send_work);
+			return;
 		}
-		return;
+		if (!m_telemetry_pending) {
+			return;
+		}
+		/* #340 M5: same coalescing recovery as the response branch above. */
 	}
 
-	/* MED-9: history replay owns the radio; don't inject telemetry. */
+	/* MED-9: history replay owns the radio; don't inject telemetry. Leave
+	 * m_telemetry_pending set if it was — the request isn't lost, it's honored
+	 * on whichever later m_send_work run finds the radio free. */
 	if (m_hist_active) {
 		return;
 	}
@@ -1214,14 +1252,16 @@ static void send_work_handler(struct k_work *work)
 	 * backoff. Re-entering compose now would clobber the snapshot cursor flags
 	 * (m_frame_resend/m_frame_first/m_frame_with_lc) and the LC piggyback, yielding
 	 * a malformed multi-frame sequence. Let the in-flight snapshot finish; app_report
-	 * re-triggers the next one. */
+	 * re-triggers the next one (m_telemetry_pending, if set, stays set until then). */
 	if (k_work_delayable_is_pending(&m_frame_work)) {
 		LOG_DBG("Snapshot continuation pending; skipping new telemetry compose");
 		return;
 	}
 
-	/* Both queues empty: compose + split the telemetry snapshot built from the
-	 * sensor data app_report just sampled/captured. */
+	/* Both queues empty (from the start, or after a drain that recovered a
+	 * coalesced trigger above): compose + split the telemetry snapshot built
+	 * from the sensor data app_report just sampled/captured. */
+	m_telemetry_pending = false;
 	m_frame_resend = false; /* start a new snapshot */
 	tx_telemetry_frame(true);
 }
