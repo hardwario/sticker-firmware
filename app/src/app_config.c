@@ -1818,6 +1818,7 @@ int app_config_vendor_reset(void)
 
 	m_app_config = m_app_config_defaults;
 	m_app_config.serial_number = preserved.serial_number;
+	m_app_config.nonce_counter = preserved.nonce_counter;
 	memcpy(m_app_config.vendor_token, preserved.vendor_token,
 	       sizeof(m_app_config.vendor_token));
 
