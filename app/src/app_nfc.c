@@ -417,7 +417,6 @@ static size_t m_resp_len;
 static bool m_have_resp; /* a command was processed; m_resp_buf holds the reply to write */
 static bool m_seen_resp; /* tag already holds a response record; leave it for the phone */
 static bool m_seen_ack;  /* tag holds the phone's ack: reply consumed, restore info now */
-static bool m_seen_clm;  /* #247: tag holds our clm provisioning record */
 static bool m_seen_inf;  /* #247: tag holds our info record (settled resting state) */
 
 /* #247 claim-record lifecycle, persisted in its own "clm" settings subtree (not
@@ -461,14 +460,14 @@ void app_nfc_clm_reset(void)
 	clm_state_save();
 }
 
-/* Shared PENDING->CONSUMED transition (#308): three independent triggers all
- * funnel through here so the latch/log/persist logic lives in one place.
- *   1. delete-detected (below, in nfc_check_locked) - the original #247 signal,
- *      unauthenticated. Gated on CONFIG_APP_NFC_CLM_UNAUTH_CONSUME (#360) -
- *      Manager-App's only path today, so on by default; drop once the app
- *      migrates to path 2 for claim confirmation.
- *   2. clm_ack command (app_nfc_clm_ack) - explicit, authenticated (secret_key).
- *   3. any successfully-decrypted hio.stck:cmd (handle_encrypted_cmd) - implicit:
+/* Shared PENDING->CONSUMED transition (#308): two independent triggers funnel
+ * through here so the latch/log/persist logic lives in one place. (#360: the
+ * original third trigger - unauthenticated delete-detection in
+ * nfc_check_locked, the #247 signal - was removed; it let any NFC write that
+ * removed the clm record, not just the claiming phone, latch CONSUMED with no
+ * secret_key involved.)
+ *   1. clm_ack command (app_nfc_clm_ack) - explicit, authenticated (secret_key).
+ *   2. any successfully-decrypted hio.stck:cmd (handle_encrypted_cmd) - implicit:
  *      decrypting at all already proves the caller holds secret_key, which is
  *      already the "provisioning operator" bar the rest of this file uses, so a
  *      claim window left open after a phone has already run a real command is
@@ -1641,14 +1640,14 @@ static int parser_callback(const struct app_nfc_parser_record_info *record_info,
 		return 0;
 	}
 
-	/* #247: our provisioning claim record. Presence detection only — the phone
-	 * reads and deletes it; the firmware never parses it back. Its absence in an
-	 * otherwise-settled tag (info present, no clm) is how nfc_check_locked latches
-	 * CLM_CONSUMED. */
+	/* #247/#360: our provisioning claim record. Presence detection only — the
+	 * phone reads and (in older app versions) deletes it; the firmware never
+	 * parses it back and no longer reacts to its absence (that unauthenticated
+	 * consume trigger was removed by #360). Recognized here purely so it doesn't
+	 * fall through to the "unrecognized record" log line below. */
 	size_t clm_type_len = strlen(NDEF_CLAIM_TYPE);
 	if (record_info->type_len == clm_type_len &&
 	    strncmp((const char *)record_info->type, NDEF_CLAIM_TYPE, clm_type_len) == 0) {
-		m_seen_clm = true;
 		NFC_REPORT("NFC read: our clm provisioning record (%u B)",
 			   record_info->payload_len);
 		return 0;
@@ -1865,22 +1864,15 @@ static int nfc_check_locked(void)
 	m_have_resp = false;
 	m_seen_resp = false;
 	m_seen_ack = false;
-	m_seen_clm = false;
 	m_seen_inf = false;
 
 	/* #247: once a claim token is provisioned, start exposing the clm record
 	 * (UNSET -> PENDING). Driven purely by the token being set (not tag content),
 	 * so it fires on the first check after commissioning; build_resting_ndef then
-	 * includes clm. CONSUMED (phone deleted clm) is terminal. `just_armed` guards
-	 * the settled-consume branch below: on the very check that arms PENDING the tag
-	 * still holds the pre-provisioning info-only record (clm not laid down yet), so
-	 * without this guard a stale info record would be misread as "phone deleted
-	 * clm" and latch CONSUMED before clm is ever written. */
-	bool just_armed = false;
+	 * includes clm. CONSUMED (via clm_ack or a decrypted command, #360) is terminal. */
 	if (m_clm_state == CLM_UNSET && claim_token_is_set()) {
 		m_clm_state = CLM_PENDING;
 		clm_state_save();
-		just_armed = true;
 		LOG_INF("NFC clm record armed (claim token provisioned) (#247)");
 	}
 
@@ -1990,21 +1982,14 @@ static int nfc_check_locked(void)
 	}
 
 	/* #247: settled resting state — our info record is on the tag (so this is not
-	 * a phone mid-write, which would show neither inf nor clm). If clm is absent
-	 * while we were exposing it (PENDING), the phone deleted it after claiming ->
-	 * latch CONSUMED so it is never rewritten. Then refresh the resting record if
-	 * the tag copy is stale (e.g. an older nonce high-water). */
+	 * a phone mid-write, which would show neither inf nor clm). Refresh the
+	 * resting record if the tag copy is stale (e.g. an older nonce high-water).
+	 * (#360: this used to also latch CLM_CONSUMED here when clm was absent —
+	 * removed, since that trigger fired on unauthenticated presence/absence of
+	 * the plaintext clm record with no secret_key check at all.) */
 	if (m_seen_inf) {
 		m_unknown_count = 0;
 		m_info_restore_pending = false;
-		/* clm absent while PENDING = the phone deleted it after claiming -> latch
-		 * CONSUMED. Not on the arming cycle (just_armed): clm has not been laid down
-		 * yet, so the stale info-only tag is not a deletion. Unauthenticated
-		 * (#360) - CONFIG_APP_NFC_CLM_UNAUTH_CONSUME gates it off once
-		 * Manager-App confirms claims via clm_ack instead. */
-		if (IS_ENABLED(CONFIG_APP_NFC_CLM_UNAUTH_CONSUME) && !m_seen_clm && !just_armed) {
-			clm_consume("phone deleted after claim");
-		}
 		info_len = build_resting_ndef(info, sizeof(info));
 		if (info_len && memcmp(m_buf, info, info_len) != 0) {
 			NFC_REPORT("NFC refreshing resting record (%zu B)", info_len);

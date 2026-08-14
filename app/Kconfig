@@ -112,26 +112,6 @@ config APP_HISTORY_BYTES
 	  Size of the in-RAM history ring used when CONFIG_APP_HISTORY_FLASH=n.
 	  Record size is variable (5-33 B) depending on the enabled sensor set.
 
-config APP_NFC_CLM_UNAUTH_CONSUME
-	bool "Allow unauthenticated NFC clm-delete to consume the claim window (#360)"
-	default y
-	help
-	  Path 1 of #308's three clm-consume triggers: if the phone deletes the
-	  hio.stck:clm record from the tag (leaving only hio.stck:inf) while the
-	  claim is PENDING, latch CONSUMED. This trigger only observes plaintext
-	  record presence/absence — no secret_key or authentication involved.
-
-	  This is currently the only path Manager-App calls to confirm a claim,
-	  so this stays on (y) in production. It also means any NFC write that
-	  removes the clm record (not necessarily the claiming phone) can
-	  permanently latch CONSUMED on a device nobody actually claimed, and
-	  the app has no way to notice an ATELOS-issued secret_key mismatch
-	  before it deletes the record.
-
-	  Once Manager-App switches to sending the authenticated `clm_ack`
-	  command (path 2, gated on secret_key) to confirm a claim, disable (n)
-	  this option to drop the unauthenticated path entirely. See #360.
-
 endmenu
 
 menu "Zephyr Kernel"
