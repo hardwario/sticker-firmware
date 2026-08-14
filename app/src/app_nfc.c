@@ -1362,10 +1362,21 @@ static int encrypt(const uint8_t *key, const uint8_t *in, size_t in_len, uint32_
  * phone never read the reply over a lossy RF link) replays the cached reply instead
  * of re-running the command. RAM-only and serialised by the tag lock (m_lock); on a
  * reboot it is empty, so a post-reboot retransmission falls through to -EACCES and
- * the phone resyncs from the info-record counter. */
+ * the phone resyncs from the info-record counter.
+ *
+ * #340 M1: `m_resp_cache_req`/`m_resp_cache_req_len` hold the exact request frame
+ * (ciphertext + CCM tag) that produced the cached reply. A cache hit requires a
+ * byte-exact match against it, not just the plaintext (serial, counter) header —
+ * both of those are public (readable from the resting hio.stck:inf record), so
+ * matching on them alone would let anyone forge an 8-byte frame and get the cached
+ * reply served without ever proving key possession. A genuine retransmission from
+ * the phone resends the identical frame, so this doesn't affect the legitimate
+ * case. */
 static uint32_t m_resp_cache_counter;
 static uint8_t m_resp_cache_buf[512];
 static size_t m_resp_cache_len;
+static uint8_t m_resp_cache_req[512];
+static size_t m_resp_cache_req_len;
 
 /* Process one encrypted command frame for a keyed NDEF channel: secret_key over
  * hio.stck:cmd, or vendor_token over hio.stck:vnd (#316). `key` selects the
@@ -1374,9 +1385,13 @@ static size_t m_resp_cache_len;
  * passes true, the vendor channel passes false so it neither serves from nor
  * writes the (single, shared) cache slot, avoiding a cross-key mix-up.
  * Three-way on the nonce counter vs the stored high-water:
- *   counter == cached  -> retransmission: replay the cached response, do NOT re-run
+ *   counter == cached AND frame byte-identical to the cached request
+ *                       -> retransmission: replay the cached response, do NOT re-run
  *   counter  > stored  -> new: decrypt (advances+persists the counter), run, cache
- *   counter <= stored  -> stale replay: decrypt() rejects with -EACCES
+ *   counter <= stored, or counter == cached with a mismatched frame
+ *                       -> stale/forged: falls through to decrypt(), which rejects
+ *                          with -EACCES (the monotonic counter check never re-admits
+ *                          a counter <= stored)
  * Writes the encrypted reply into out_buf/out_len and the deferred action into
  * *action (NONE on a replay — the original already ran). Sets *replayed=true on a
  * same-counter retransmission so the caller keeps a deferred action still waiting
@@ -1398,8 +1413,14 @@ static int handle_encrypted_cmd(const uint8_t *key, enum app_cmd_transport trans
 	NFC_DBG("cmd: in_len=%zu serial=%u counter=%u (cache=%u stored=%u)", in_len, serial,
 		counter, m_resp_cache_counter, app_config()->nonce_counter);
 
+	/* #340 M1: serial+counter alone are not proof of key possession (both are
+	 * public, readable off the resting hio.stck:inf record) - require the whole
+	 * incoming frame to match the one that produced the cached reply. A genuine
+	 * retransmission resends the identical ciphertext+tag; a forged header-only
+	 * frame does not and falls through to decrypt(), which rejects it below. */
 	if (cache && serial == g_app_config.serial_number && m_resp_cache_len > 0 &&
-	    counter == m_resp_cache_counter) {
+	    counter == m_resp_cache_counter && in_len == m_resp_cache_req_len &&
+	    memcmp(in, m_resp_cache_req, in_len) == 0) {
 		if (m_resp_cache_len > out_cap) {
 			return -ENOMEM;
 		}
@@ -1450,14 +1471,19 @@ static int handle_encrypted_cmd(const uint8_t *key, enum app_cmd_transport trans
 	}
 
 	/* Cache for an idempotent retransmission of this counter (hio.stck:cmd only;
-	 * the vendor channel passes cache=false — see the header). */
+	 * the vendor channel passes cache=false — see the header). Store the request
+	 * frame alongside the reply (#340 M1) so a later retransmission can be
+	 * verified byte-exact instead of trusting the plaintext header alone. */
 	if (cache) {
-		if (*out_len <= sizeof(m_resp_cache_buf)) {
+		if (*out_len <= sizeof(m_resp_cache_buf) && in_len <= sizeof(m_resp_cache_req)) {
 			memcpy(m_resp_cache_buf, out_buf, *out_len);
 			m_resp_cache_len = *out_len;
+			memcpy(m_resp_cache_req, in, in_len);
+			m_resp_cache_req_len = in_len;
 			m_resp_cache_counter = req_nonce;
 		} else {
 			m_resp_cache_len = 0;
+			m_resp_cache_req_len = 0;
 		}
 	}
 	return 0;
