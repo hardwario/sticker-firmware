@@ -1071,6 +1071,11 @@ static void tx_telemetry_frame(bool first_frame)
 			m_frame_resend = false;
 			m_frame_more = false;
 			m_frame_retries = 0;
+			/* #340 M6: drop the in-progress compose snapshot, same as the
+			 * rejoin path (#93.5) — otherwise the next report cycle resumes
+			 * packing this abandoned cycle's stale sensor data instead of
+			 * taking a fresh reading. */
+			app_compose_reset();
 			return;
 		}
 		m_frame_resend = true;
