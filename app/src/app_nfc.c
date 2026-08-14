@@ -463,7 +463,10 @@ void app_nfc_clm_reset(void)
 
 /* Shared PENDING->CONSUMED transition (#308): three independent triggers all
  * funnel through here so the latch/log/persist logic lives in one place.
- *   1. delete-detected (below, in nfc_check_locked) - the original #247 signal.
+ *   1. delete-detected (below, in nfc_check_locked) - the original #247 signal,
+ *      unauthenticated. Gated on CONFIG_APP_NFC_CLM_UNAUTH_CONSUME (#360) -
+ *      Manager-App's only path today, so on by default; drop once the app
+ *      migrates to path 2 for claim confirmation.
  *   2. clm_ack command (app_nfc_clm_ack) - explicit, authenticated (secret_key).
  *   3. any successfully-decrypted hio.stck:cmd (handle_encrypted_cmd) - implicit:
  *      decrypting at all already proves the caller holds secret_key, which is
@@ -1996,8 +1999,10 @@ static int nfc_check_locked(void)
 		m_info_restore_pending = false;
 		/* clm absent while PENDING = the phone deleted it after claiming -> latch
 		 * CONSUMED. Not on the arming cycle (just_armed): clm has not been laid down
-		 * yet, so the stale info-only tag is not a deletion. */
-		if (!m_seen_clm && !just_armed) {
+		 * yet, so the stale info-only tag is not a deletion. Unauthenticated
+		 * (#360) - CONFIG_APP_NFC_CLM_UNAUTH_CONSUME gates it off once
+		 * Manager-App confirms claims via clm_ack instead. */
+		if (IS_ENABLED(CONFIG_APP_NFC_CLM_UNAUTH_CONSUME) && !m_seen_clm && !just_armed) {
 			clm_consume("phone deleted after claim");
 		}
 		info_len = build_resting_ndef(info, sizeof(info));
