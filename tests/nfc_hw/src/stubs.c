@@ -39,6 +39,22 @@ struct app_config *app_config(void)
 	return &g_app_config;
 }
 
+/* #340 M27: app_cmd_handle_set_param() takes the real app_config_lock()/
+ * _unlock() (shared with app_config.c's reset ops) instead of its own local
+ * mutex — stub it here since the real app_config.c isn't linked (mirrors
+ * tests/cmd/src/stubs.c). */
+static K_MUTEX_DEFINE(m_app_config_lock);
+
+void app_config_lock(void)
+{
+	k_mutex_lock(&m_app_config_lock, K_FOREVER);
+}
+
+void app_config_unlock(void)
+{
+	k_mutex_unlock(&m_app_config_lock);
+}
+
 /* Sensor sampling + telemetry snapshot (sample command via app_cmd). */
 void app_sensor_sample(void)
 {
