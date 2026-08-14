@@ -221,7 +221,7 @@ parameters:
     readable: [shell]
     writable: [shell]
     type: uint32
-    persistent: [device_reset, factory_reset]
+    persistent: [device_reset, factory_reset, vendor_reset]
     help: "Get/Set nonce counter (unsigned integer)."
 
   - name: claim_token
