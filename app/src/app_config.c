@@ -77,6 +77,22 @@ static struct app_config m_app_config = {
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
 
+/* Guards m_app_config/g_app_config against concurrent mutation:
+ * SetParam (app_cmd.c) and the reset ops below are both reachable from
+ * shell/LRW/NFC on different threads with no other synchronization (#340
+ * M27) — SetParam takes this via app_config_lock()/_unlock(). */
+static K_MUTEX_DEFINE(m_app_config_lock);
+
+void app_config_lock(void)
+{
+	k_mutex_lock(&m_app_config_lock, K_FOREVER);
+}
+
+void app_config_unlock(void)
+{
+	k_mutex_unlock(&m_app_config_lock);
+}
+
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	int ret;
@@ -1701,6 +1717,12 @@ int app_config_device_reset(void)
 {
 	int ret;
 
+	/* #340 M27: brackets the whole read-modify-write against concurrent
+	 * mutation from another transport (mirrors SetParam's own lock scope,
+	 * which likewise snapshots-then-mutates under the same lock and saves
+	 * outside of it). */
+	app_config_lock();
+
 	struct app_config preserved = m_app_config;
 
 	m_app_config = m_app_config_defaults;
@@ -1726,6 +1748,8 @@ int app_config_device_reset(void)
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
 
+	app_config_unlock();
+
 	ret = settings_save_subtree(SETTINGS_PFX);
 	if (ret) {
 		LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
@@ -1744,6 +1768,12 @@ int app_config_factory_reset(void)
 {
 	int ret;
 
+	/* #340 M27: brackets the whole read-modify-write against concurrent
+	 * mutation from another transport (mirrors SetParam's own lock scope,
+	 * which likewise snapshots-then-mutates under the same lock and saves
+	 * outside of it). */
+	app_config_lock();
+
 	struct app_config preserved = m_app_config;
 
 	m_app_config = m_app_config_defaults;
@@ -1757,6 +1787,8 @@ int app_config_factory_reset(void)
 	memcpy(m_app_config.lrw_joineui, preserved.lrw_joineui, sizeof(m_app_config.lrw_joineui));
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
+
+	app_config_unlock();
 
 	ret = settings_save_subtree(SETTINGS_PFX);
 	if (ret) {
@@ -1776,6 +1808,12 @@ int app_config_vendor_reset(void)
 {
 	int ret;
 
+	/* #340 M27: brackets the whole read-modify-write against concurrent
+	 * mutation from another transport (mirrors SetParam's own lock scope,
+	 * which likewise snapshots-then-mutates under the same lock and saves
+	 * outside of it). */
+	app_config_lock();
+
 	struct app_config preserved = m_app_config;
 
 	m_app_config = m_app_config_defaults;
@@ -1784,6 +1822,8 @@ int app_config_vendor_reset(void)
 	       sizeof(m_app_config.vendor_token));
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
+
+	app_config_unlock();
 
 	ret = settings_save_subtree(SETTINGS_PFX);
 	if (ret) {

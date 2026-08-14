@@ -119,6 +119,13 @@ extern struct app_config g_app_config;
 
 struct app_config *app_config(void);
 
+/* Guards m_app_config/g_app_config against concurrent mutation
+ * across transports (#340 M27): callers that read-modify-write the config
+ * (SetParam in app_cmd.c; the reset ops below) must hold this around the
+ * whole sequence, not just their own copy of it. */
+void app_config_lock(void);
+void app_config_unlock(void);
+
 /* True if settings_load failed at boot (corrupt/unreadable NVS) and the device is
  * running on compile-time defaults — identity + provisioning lost. Lets the app
  * surface a distinct state instead of silently looking like a blank device (H-4). */
