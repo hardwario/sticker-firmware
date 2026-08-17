@@ -104,8 +104,28 @@ void app_clock_request_sync(void)
 #endif /* defined(CONFIG_LORAWAN) */
 }
 
+/* #340 L11: minimum spacing between forced resyncs. m_time_synced is the only
+ * anti-pileup guard in this file, and app_clock_force_resync() unconditionally
+ * defeats it every call by clearing it first -- app_cmd_handle_clock_sync()
+ * calls force_resync() on every NFC/LoRaWAN clock_sync command, so repeated
+ * taps or downlinks could each queue a fresh DeviceTimeReq with no spacing,
+ * piling up MAC commands on the next uplink (Length error). */
+#define FORCE_RESYNC_MIN_INTERVAL_SEC 60U
+
+/* -1 = "never force-resynced yet" sentinel (same idiom as app_alarm.c). */
+static int64_t m_last_forced_ms = -1;
+
 void app_clock_force_resync(void)
 {
+	int64_t now = k_uptime_get();
+
+	if (m_last_forced_ms >= 0 &&
+	    (now - m_last_forced_ms) < (int64_t)FORCE_RESYNC_MIN_INTERVAL_SEC * 1000) {
+		LOG_WRN("force_resync: cooldown active, ignoring (#340 L11)");
+		return;
+	}
+	m_last_forced_ms = now;
+
 	/* Drop the guard so a fresh DeviceTimeReq is queued even if already synced. */
 	m_time_synced = false;
 	app_clock_request_sync();
