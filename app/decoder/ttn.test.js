@@ -107,6 +107,27 @@ test("set_param cap_w1_sensors (tag 8) is reachable both ways (#92)", () => {
   assert.equal(back.set_param.sensors.cap_w1_sensors, 1);
 });
 
+// #340 M20: cap_buzzer (sensors tag 19) had no _SEN_NAMES entry, so ConfigDump
+// rendering silently dropped it and no downlink-builder could construct it either
+// (_SEN_TAGS is _SEN_NAMES inverted).
+test("set_param cap_buzzer (tag 19) is reachable both ways (#340 M20)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 1, command: "set_param", set_param: { sensors: { cap_buzzer: true } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors");
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.sensors.cap_buzzer, 1);
+});
+
+test("config_dump renders cap_buzzer (sensors tag 19) (#340 M20)", () => {
+  // Response{ seq:1, config_dump: ConfigDump{ page_count:1, sensors: Sensors{ cap_buzzer:true } } },
+  // with the 1-byte APP_PROTO_VERSION prefix (uplink framing): 01 08 01 22 07 10 01 2a 03 98 01 01
+  // (field19 tag 0x98 0x01: field numbers >= 16 need a 2-byte varint tag).
+  const dump = hex("010801220710012a03980101");
+  const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
+  assert.equal(u.config_dump.sensors.cap_buzzer, 1);
+});
+
 // --- Uplink: legacy bitmap (fPort 1) --------------------------------------
 test("decodeUplink decodes legacy bitmap (fPort 1)", () => {
   const got = codec.decodeUplink({ bytes: hex("7a01a109fa580258"), fPort: 1 });

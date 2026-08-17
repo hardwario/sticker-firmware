@@ -111,7 +111,7 @@ var _SEN_NAMES = {
   5: "cap_light_sensor", 6: "cap_barometer", 7: "cap_pir_detector",
   8: "cap_w1_sensors", 9: "cap_accelerometer", 10: "accel_motion_sensitivity",
   15: "hall_left_counter", 16: "hall_right_counter",
-  17: "input_a_counter", 18: "input_b_counter"
+  17: "input_a_counter", 18: "input_b_counter", 19: "cap_buzzer"
 };
 var _SEN_ENUMS = { 10: ["off", "low", "medium", "high"] };
 var _SEN_FLOAT = {};
