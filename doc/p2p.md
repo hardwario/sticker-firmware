@@ -96,8 +96,8 @@ Build: dual-stack image gated by `CONFIG_APP_LORA_P2P` (default `y` on
 release; `n` on the flash-tight debug overlay). `CONFIG_LORA=y` (Zephyr raw
 LoRa driver) is already present in the release configuration today, so no new
 driver Kconfig is needed. Flash headroom against the current `0x34000` budget
-must be re-measured before implementation — PR #228 fought for every byte
-against the old 160 KB budget.
+was re-measured — see §11 — release has room, debug does not and keeps
+`CONFIG_APP_LORA_P2P=n`.
 
 ---
 
@@ -274,8 +274,12 @@ crypto:  AES-CCM under join_key (encrypted + tagged; nonce bound to dev_nonce,
   allocator, so cross-gateway collisions cannot happen) and answers through
   the gateway that heard the JoinRequest best.
 - Both sides derive `session_key` (§4) and persist: node → NVS (`net_id`,
-  `dev_addr`, `session_key`, counter bases), central → session DB. Gateways
-  persist nothing.
+  `dev_addr`, `session_key`, `rx1_delay`, counter bases), central → session
+  DB. Gateways persist nothing. `rx1_delay` must be persisted alongside the
+  rest — a re-join isn't triggered by every reboot (§7: the session survives
+  RF outages and normal power cycles), so a node computing RX1 timing from a
+  forgotten/default value after reboot would drift from what the central
+  actually assigned.
 - The `reserved` field is the v2 hook for assigning data-channel radio
   parameters (§11).
 
@@ -463,6 +467,20 @@ again.
   not — confirms debug keeps `CONFIG_APP_LORA_P2P=n` (same lever already used
   to drop AU915/US915 from debug.conf, see the debug build RAM+flash coupling
   fix from issue #340) unless debug frees up budget elsewhere first.
+- **Device-side duty-cycle enforcement** — §6/§8 only describe duty-cycle
+  *bookkeeping* on the central/gateway side; LoRaWAN's own EU868 1 % limit is
+  enforced inside LoRaMac today, which P2P mode bypasses entirely (raw LoRa
+  driver, no network server, §1). Nothing in this design yet gives the node
+  itself an equivalent tracker for its own uplink/retry/re-join traffic.
+  **Deferred to phase 2** (§13, FW join + ACK state machine) — must land
+  before this ships, not before the design is accepted.
+- **RX2-equivalent downlink fallback** — v1 is RX1-only (§6): a missed
+  ~1 s gateway↔central round trip (LAN/MQTT jitter) just counts as an
+  unacknowledged uplink and falls back to the normal retry path, unlike
+  LoRaWAN Class-A's RX1+RX2 pair. **Deferred to a later phase** — ship
+  RX1-only for v1 (already implied by §13's Class-A-equivalent scope) and
+  revisit only if phase 6 HW validation shows LAN-jitter-driven RX1 misses
+  are frequent enough to matter.
 
 ---
 
@@ -572,7 +590,8 @@ Implementation phasing (each independently reviewable):
    (`radio_mode`, `app_ccm`, `app_transport` facade), still unpaired/unACKed
    behind a build flag; salvage `app_p2p.c` logic, `p2p.js` + tests.
 2. **FW join + ACK state machine** — §5–§7 (RX1, retries, NVS pairing state,
-   join triggers, self-healing rejoin).
+   join triggers, self-healing rejoin), including the device-side EU868
+   duty-cycle tracker (§11) LoRaMac would otherwise have provided for free.
 3. **Northbridge RX-stream + scheduled TX** — UART protocol extension.
 4. **Central service** — enrollment API, session DB, dedup/ACK routing,
    management MQTT, northbound decode.
