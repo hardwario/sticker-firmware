@@ -534,6 +534,13 @@ uint8_t app_nfc_clm_state_get(void)
 	return state;
 }
 
+/* #340 L1 test support: whether the "processing"/"rejected" blink timer is
+ * currently armed. Same testability idiom as app_nfc_clm_state_get() above. */
+bool app_nfc_led_blink_active(void)
+{
+	return k_timer_remaining_get(&m_led_blink_timer) != 0;
+}
+
 /* A claim token is provisioned once any byte is non-zero (all-zero = unset, the
  * same sentinel the write-once shell guard uses, #170). */
 static bool claim_token_is_set(void)
@@ -1891,6 +1898,11 @@ static int nfc_write_response(void)
 	if (out_len == 0) {
 		LOG_ERR("NFC response record too large (%zu B payload)", m_resp_len);
 		m_resp_write_pending = false;
+		/* #340 L1: the boot-staged path (app_nfc_check() from main(), no RF field
+		 * and therefore no m_awake_timer session running) has no other backstop to
+		 * clear the "processing" blink nfc_led_processing() started -- stop it here
+		 * on a hard failure instead of leaving it running forever. */
+		nfc_led_off();
 		return -EMSGSIZE;
 	}
 
@@ -1904,6 +1916,8 @@ static int nfc_write_response(void)
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("write_mem", ret);
 		m_resp_write_pending = false;
+		/* #340 L1: same backstop gap as above. */
+		nfc_led_off();
 		return ret;
 	}
 

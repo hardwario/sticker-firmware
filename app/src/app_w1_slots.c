@@ -584,6 +584,23 @@ bool app_w1_slot_is_replaced(int slot)
 
 /* ---- enrollment (sensor shell) ----------------------------------------- */
 
+/* #340 L4: teach()/assign() below call app_w1_slots_scan() to discover the
+ * requested device, and scan()'s own trailing rebind() auto-enrolls any
+ * not-yet-configured device into the lowest empty slot as a side effect --
+ * including the very device teach()/assign() is about to bind into the
+ * caller's requested slot. Clear any OTHER slot still holding this ROM after
+ * writing it into keep_slot, so it never lives in two slots at once. */
+static void dedupe_rom(uint64_t serial, int keep_slot)
+{
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		if (s != keep_slot && cfg_rom_get(s) == serial) {
+			LOG_WRN("ROM %012llx also enrolled in slot %d; clearing (kept in slot %d)",
+				serial, s + 1, keep_slot + 1);
+			cfg_rom_set(s, 0);
+		}
+	}
+}
+
 /* Which configured slot (staging config) holds this ROM, or -1. */
 static int slot_of_rom(uint64_t serial)
 {
@@ -657,6 +674,7 @@ int app_w1_slots_teach(int slot, struct app_w1_scan_entry *bound)
 	}
 
 	cfg_rom_set(slot, e[new_idx].serial);
+	dedupe_rom(e[new_idx].serial, slot);
 	if (bound != NULL) {
 		*bound = e[new_idx];
 	}
@@ -684,6 +702,7 @@ int app_w1_slots_assign(int slot, uint64_t serial)
 	for (int i = 0; i < n; i++) {
 		if (e[i].serial == serial) {
 			cfg_rom_set(slot, serial);
+			dedupe_rom(serial, slot);
 			(void)app_w1_slots_rebind();
 			return 0;
 		}

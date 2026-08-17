@@ -219,4 +219,44 @@ ZTEST(nfc_hw, test_vendor_token_command_does_not_consume_clm)
 		      "device owner (#316, PR #358 a499f43)");
 }
 
+/* #340 L1: the boot-staged path (app_nfc_check() from main(), no RF field and
+ * therefore no m_awake_timer session) has no other backstop to clear the
+ * "processing" blink nfc_led_processing() starts -- a hard response-write
+ * failure must stop it itself (nfc_write_response()'s error paths), or it
+ * blinks forever. */
+ZTEST(nfc_hw, test_response_write_failure_stops_the_processing_blink)
+{
+	arm_clm_pending();
+
+	unhex(KEY_HEX, g_app_config.secret_key, sizeof(g_app_config.secret_key));
+	g_app_config.serial_number = 0;
+	g_app_config.nonce_counter = 0;
+
+	/* A distinct counter (not REQ_WIRE's 1, shared by the two command tests
+	 * above) -- m_resp_cache_* in app_nfc.c is a file-scope static that
+	 * outlives a single test, so reusing counter=1 here risks a same-counter
+	 * "retransmission" replay against whichever of those tests runs first,
+	 * instead of a fresh decrypt. Same plaintext/key as REQ_WIRE, counter=99,
+	 * sealed with the same seal() helper as sticker_nfc_frame.py. */
+	const char *write_fail_req_wire = "0000000000000063e656f7390a22d21e38553a1635cab62af5dd4f7d2f";
+	uint8_t wire[64];
+	size_t wire_len = unhex(write_fail_req_wire, wire, sizeof(wire));
+	uint8_t tag[ST25DV_EMUL_MEM_SIZE] = {0};
+
+	(void)write_single_record_ndef(tag, sizeof(tag), "hio.stck:cmd", wire, wire_len);
+	st25dv_emul_mem_set(tag, 0, sizeof(tag));
+
+	/* Exhaust write_mem()'s internal I2C retries so the reply write hard-fails
+	 * (same injection count as test_clm_arm_reverts_on_write_failure_commits_on_success). */
+	st25dv_emul_inject_write_fail(25);
+
+	int ret = app_nfc_check();
+
+	zassert_not_equal(ret, 0,
+			   "app_nfc_check should surface the injected response-write failure");
+	zassert_false(app_nfc_led_blink_active(),
+		       "a hard response-write failure must stop the processing blink timer "
+		       "(#340 L1) -- nothing else will on the boot-staged, no-RF-session path");
+}
+
 ZTEST_SUITE(nfc_hw, NULL, NULL, nfc_hw_before, NULL, NULL);

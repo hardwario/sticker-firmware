@@ -94,12 +94,9 @@ This **replaces the old "blank DevEUI ⇒ radio-silent" guard** (#98/#175): the 
 | `w1_scan` | `08097200` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
 | `set_param`: ADR on, `interval_report`=120 s, `cap_barometer` on | `0801120c0a0220011202187822023001` |
-| `alarm_rule` SET slot 0 = s1 temperature 15–25 °C, hyst 0.5 | `08016a15100120012d00007041350000c8413d0000003f5000` |
-| `alarm_rule` CLEAR slot 0 | `08016a0408015000` |
-| `alarm_rule` CLEAR_ALL | `08016a020802` |
-| `req_alarm_rules` (all rules, page 0) | `08017a00` |
-| `req_alarm_rules` (slot 0 only) | `08017a022000` |
-| `req_alarm_rules` (all slots on onboard temperature) | `08017a0408001000` |
+| `set_param`: write `alarm_0` (onboard temperature, threshold 15–25 °C) — see §Alarms for the packed slot format | `080112152a131a1103000000000000a0400000f04100002041` |
+| `set_param`: clear `alarm_0` (all-zero 17 B = disabled slot) | `080112142a121a1000000000000000000000000000000000` |
+| `get_param`: read `alarm_0` back | `08011a03220103` |
 | `lrw_reset` | `0801820100` |
 | `lrw_join` | `08018a0100` |
 | `enter_calibration` | `0801920100` |

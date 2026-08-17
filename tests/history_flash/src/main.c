@@ -265,3 +265,43 @@ ZTEST(history_flash, test_mask_change_resets)
 	zassert_equal(app_history_get(0, &r), 0, "get(0)");
 	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 11.0, 0.01, "temp after reset");
 }
+
+/* #340 L7 regression: a logical reset that does NOT change the mask/layout (e.g.
+ * `history sensors <same> on`) left m_next_seq/m_last_phys untouched, so the next
+ * page written after the reset continued the pre-reset seq numbering exactly one
+ * step above the last pre-reset page. backend_mount()'s backward chain walk
+ * matches on a seq delta of exactly 1 (plus matching mask/interval/sample_size),
+ * so after a reboot it wrongly re-attached that stale pre-reset page to the new
+ * one. Force several real page wraps first so the stale chain's first_ord is
+ * large (mirrors production where the device has run a while before a reset),
+ * then reset with the SAME mask, capture a small aligned batch, and reboot: the
+ * count must reflect only the post-reset batch, and its oldest record must carry
+ * the post-reset value, not a resurrected pre-reset one.
+ */
+ZTEST(history_flash, test_same_mask_reset_does_not_chain_stale_page)
+{
+	size_t cap = app_history_capacity();
+
+	set_temp(5.0f);
+	capture_n(cap + cap / 2); /* force real wraps -> large first_ord baseline */
+
+	uint32_t mask = app_history_get_mask();
+	app_history_set_mask(mask); /* logical reset, mask unchanged */
+	zassert_equal(app_history_count(), 0, "same-mask reset must still empty the buffer");
+
+	set_temp(99.0f);
+	capture_n(7); /* 21 B = 3 double words -> fully durable */
+	zassert_equal(app_history_count(), 7, "count right after the post-reset batch");
+
+	reboot();
+
+	zassert_equal(app_history_count(), 7,
+		      "post-reset count must not be corrupted by a stale pre-reset page chain");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0, "get(0) after reboot");
+	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 99.0, 0.01,
+		       "oldest surviving record must be from the post-reset batch, got %g "
+		       "(stale pre-reset page leaked in)",
+		       r.value[APP_HISTORY_TEMPERATURE]);
+}

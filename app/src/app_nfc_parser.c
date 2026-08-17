@@ -224,18 +224,19 @@ int app_nfc_parser_run(const uint8_t *buffer, size_t buffer_len, app_nfc_parser_
 			advance_buffer(&record, &records_len, 4);
 		}
 
-		/* Get ID length if present (we will just skip it) */
+		/* Get ID length if present (we will just skip the ID bytes themselves,
+		 * once we know where they actually are). */
 		bool id_present = (header & NDEF_RECORD_HEADER_IL_FLAG);
+		uint8_t id_len = 0;
 		if (id_present) {
 			if (records_len == 0) {
 				return -EMSGSIZE;
 			}
 
-			uint8_t id_len = *record;
+			id_len = *record;
 
-			if (!advance_buffer(&record, &records_len, 1 + id_len)) {
-				LOG_WRN("Record ID length exceeds buffer");
-				return -EMSGSIZE;
+			if (!advance_buffer(&record, &records_len, 1)) {
+				return -ENODATA;
 			}
 		}
 
@@ -245,6 +246,15 @@ int app_nfc_parser_run(const uint8_t *buffer, size_t buffer_len, app_nfc_parser_
 		if (!advance_buffer(&record, &records_len, info.type_len)) {
 			LOG_ERR("Record type length exceeds buffer");
 			return -EMSGSIZE;
+		}
+
+		/* #340 L2: the ID bytes (if IL is set) sit after TYPE, not right after
+		 * ID_LENGTH, per the NFC Forum record layout — skip them here. */
+		if (id_present) {
+			if (!advance_buffer(&record, &records_len, id_len)) {
+				LOG_WRN("Record ID length exceeds buffer");
+				return -EMSGSIZE;
+			}
 		}
 
 		/* Get payload */

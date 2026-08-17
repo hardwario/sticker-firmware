@@ -1834,19 +1834,28 @@ int app_lrw_get_info(struct app_lrw_info *info)
 
 	info->state = (enum app_lrw_state)atomic_get(&m_state);
 
-	mib_req.Type = MIB_DEV_ADDR;
-	if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK) {
-		info->dev_addr = mib_req.Param.DevAddr;
-	} else {
+	/* #340 L3: radio-mode OFF/P2P (#271) never calls lorawan_start(), so
+	 * LoRaMac's own state (incl. CryptoNvm) was never initialized -- querying
+	 * it here would deref a NULL CryptoNvm. Zero-fill instead of touching
+	 * LoRaMac's MIB/crypto API when the MAC was never started. */
+	if (info->state == APP_LRW_STATE_DISABLED) {
 		info->dev_addr = 0;
-	}
-
-	uint32_t fcnt_up;
-
-	if (LoRaMacCryptoGetFCntUp(&fcnt_up) == LORAMAC_CRYPTO_SUCCESS) {
-		info->fcnt_up = fcnt_up;
-	} else {
 		info->fcnt_up = 0;
+	} else {
+		mib_req.Type = MIB_DEV_ADDR;
+		if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK) {
+			info->dev_addr = mib_req.Param.DevAddr;
+		} else {
+			info->dev_addr = 0;
+		}
+
+		uint32_t fcnt_up;
+
+		if (LoRaMacCryptoGetFCntUp(&fcnt_up) == LORAMAC_CRYPTO_SUCCESS) {
+			info->fcnt_up = fcnt_up;
+		} else {
+			info->fcnt_up = 0;
+		}
 	}
 
 	info->datarate = m_current_dr;

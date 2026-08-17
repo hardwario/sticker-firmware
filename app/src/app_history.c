@@ -625,14 +625,25 @@ static uint16_t backend_stored(void)
 
 static void backend_reset_logical(void)
 {
-	/* Drop the live set without erasing. The next append starts a fresh page
-	 * whose differing layout/interval header breaks mount-time contiguity with
-	 * the stale pages, which are reclaimed as the ring wraps over them. */
+	/* Drop the live set without erasing. When the reset also changes the
+	 * layout/interval, the next page's differing header already breaks
+	 * mount-time contiguity with the stale pages, which are then reclaimed as
+	 * the ring wraps over them.
+	 *
+	 * #340 L7: that isn't true for a no-layout-change reset (e.g. `history
+	 * sensors <same> on`) -- m_next_seq/m_last_phys are left untouched here, so
+	 * the next page written continues the OLD seq numbering exactly one past
+	 * the last pre-reset page. backend_mount()'s backward chain walk matches
+	 * on `cur.seq - h.seq == 1`, so after a reboot it reattaches that stale
+	 * page to the new one, producing an m_abs_ord/m_live[0].first_ord mismatch
+	 * that underflows backend_stored(). Burn one seq value so no future page
+	 * can ever land exactly 1 above the last pre-reset page's seq. */
 	m_nlive = 0;
 	m_abs_ord = 0;
 	m_head_dw = 0;
 	m_stage_len = 0;
 	m_head_full = false;
+	m_next_seq++;
 }
 
 static void backend_erase(void)
@@ -935,6 +946,12 @@ void app_history_capture(void)
 	uint32_t evicted = 0;
 	if (backend_append(rec, m_sample_size, &evicted) != 0) {
 		LOG_WRN("history append failed — record dropped");
+		/* #340 L8: advance_page() may have already committed a real eviction
+		 * before the per-record write that actually failed (backend_append()
+		 * still reports it via *evicted) — apply the same base_time fixup here
+		 * too, or the oldest-record time base goes stale relative to the live
+		 * page set that was already shifted. */
+		m_base_time += evicted * m_interval;
 		k_mutex_unlock(&m_lock);
 		return;
 	}
@@ -1334,7 +1351,13 @@ static int cmd_history_read(const struct shell *sh, size_t argc, char **argv)
 				 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
 				 tm.tm_min, tm.tm_sec);
 		} else {
-			snprintf(tbuf, sizeof(tbuf), "+%us (no-rtc)", r.time_unix - m_base_time);
+			/* #340 L9: r.time_unix already folds in the m_base_time snapshotted
+			 * under m_lock at fetch time (base + k*m_interval); re-reading the
+			 * live m_base_time here instead can use a base that changed since
+			 * the fetch (or between rows of this same loop), producing a
+			 * mismatched/non-monotonic offset. idx==k and m_interval are both
+			 * already known and stable, so derive the offset directly. */
+			snprintf(tbuf, sizeof(tbuf), "+%us (no-rtc)", (unsigned)(k * m_interval));
 		}
 
 		char line[160];
