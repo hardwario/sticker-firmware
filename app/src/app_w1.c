@@ -147,6 +147,18 @@ int app_w1_release(struct app_w1 *w1, const struct device *dev)
 		return -ENODEV;
 	}
 
+	/* #340 L5: a failed app_w1_acquire() never actually took the bus lock / PM
+	 * hold (its own error path already put m_i2c_held back to 0), so it may be
+	 * held by a concurrent legitimate owner right now. Driving DS28E17 bus
+	 * traffic or a PM_DEVICE_ACTION_SUSPEND below regardless would race that
+	 * owner. m_i2c_held is exactly the acquire/release one-shot state this
+	 * needs -- skip straight to the already-idempotent unlock when it's not
+	 * held. */
+	if (!atomic_get(&m_i2c_held)) {
+		(void)w1_unlock_bus(dev);
+		return 0;
+	}
+
 	if (w1->is_ds28e17_present) {
 		ret = w1_reset_bus(dev);
 		if (ret == 1) {
