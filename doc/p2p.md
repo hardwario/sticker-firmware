@@ -204,12 +204,32 @@ Modeled on TOWER's pairing-request/ACK exchange, hardened to OTAA-grade.
 
 ### 5.2 Join triggers (node side)
 
-- Magnet hold (the TOWER "pairing button" equivalent),
+Deliberately narrower than TOWER's magnet/button gesture: **only** an
+explicit NFC command, or a bounded window right after boot — no
+gesture-based trigger (same reasoning as #252's removal of the boot-time
+dual-magnet calibration entry: a magnet is an easy *accidental* trigger, and
+here it would also mean an unbounded radio-retry loop for a device that
+never finds a gateway, see below).
+
 - NFC command `p2p_join` (staged like any command — works battery-off, applied
-  at next boot),
-- automatically at boot when `radio-mode p2p` and no valid pairing state in
-  NVS,
-- automatically as self-healing after persistent ACK loss (§7).
+  at next boot). Battery-cheapest and timing-safest path: the join burst is a
+  single bounded attempt at the node's own next boot, so there is no window to
+  miss.
+- Automatically at boot when `radio-mode p2p` and no valid pairing state in
+  NVS, but **only for 120 s after boot** (mirrors the central's own pairing
+  window default, §5.1) — after that the node stops retrying entirely and
+  goes back to sleep/idle until the next boot or an NFC `p2p_join`. Without
+  this cap, a device that is provisioned but never brought within range of an
+  open pairing window (in transit, in a warehouse, deployed before the
+  central side is set up) would otherwise keep transmitting JoinRequest +
+  listening RX1 on backoff for its *entire remaining battery life* — the
+  120 s window turns an unbounded worst-case drain into a fixed, small,
+  once-per-boot cost. (No HW power numbers yet — see §13 phase 6, "power
+  delta vs. the 92 µA baseline".)
+- Automatically as self-healing after persistent ACK loss (§7) — unaffected
+  by the above: that is a *re-join* of an already-paired device recovering
+  from lost sync, already bounded by "N consecutive failed uplink cycles"
+  (default 8), not the open-ended never-paired case this cap targets.
 
 ### 5.3 Handshake
 
@@ -225,7 +245,17 @@ tag:     CCM tag under join_key (body sent as AAD, empty plaintext)
   the join-key registry.
 - `dev_nonce` is a **monotonic persisted counter** in NVS (LoRaWAN 1.0.4
   style), giving JoinRequest replay protection: the central stores the last
-  seen `dev_nonce` per device and rejects non-increasing values.
+  seen `dev_nonce` per device and rejects non-increasing values. That accept
+  rule must itself be **bounded, not a bare `>`** — same fix as #266/PR #268
+  on the NFC command channel's `nonce_counter` (`NFC_NONCE_MAX_SKIP`, capped
+  to `(current, current+1024]`): an unbounded jump lets a single forged or
+  buggy JoinRequest (still requires `join_key`, so a compromised/misbehaving
+  enrollment tool rather than an outside attacker) push the central's stored
+  high-water to near `UINT32_MAX`, after which no legitimate `dev_nonce` can
+  ever be `>` it again — and because `join_key` doesn't change on
+  `factory_reset` (§4, §7), this is a *permanent* per-device join lock the
+  device itself cannot recover from; only manual central-side DB surgery
+  fixes it. Apply the same capped-skip window here.
 - `product_type` + `fw_version` mirror TOWER's "firmware name + version in the
   pairing request" so the central can auto-name and manage the node with zero
   configuration (§9), and make the join generic across future products
@@ -249,8 +279,11 @@ crypto:  AES-CCM under join_key (encrypted + tagged; nonce bound to dev_nonce,
 - The `reserved` field is the v2 hook for assigning data-channel radio
   parameters (§11).
 
-A failed window (no JoinAccept) retries with jittered exponential backoff,
-duty-cycle-aware.
+A failed attempt (no JoinAccept) retries with jittered, duty-cycle-aware
+backoff — but only for the trigger's own bounded lifetime: within the 120 s
+boot window (§5.2) for an auto-boot join, or a single attempt for an
+NFC-staged `p2p_join` (no standing retry loop once that boot's window/attempt
+is spent — the node goes back to idle and waits for the next trigger).
 
 ### 5.4 Detach
 
@@ -282,7 +315,12 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   accounting are what keep this affordable.
 - **Anti-replay**: the central keeps a per-device counter high-water;
   anything ≤ high-water (except the retransmission case above) is dropped.
-  This is the replay protection TOWER never had.
+  This is the replay protection TOWER never had. Same capped-skip window as
+  the JoinRequest `dev_nonce` (§5.3) applies here too, for consistency — lower
+  blast radius (`session_key` rotates on every re-join, so a jammed high-water
+  self-heals via `Detach`/`RejoinRequest` rather than needing central DB
+  surgery), but no reason to leave a second unbounded `>` check in the same
+  design.
 - **Downlink commands** (`0x56`): flagged in the ACK, delivered in the RX1
   window of the *next* uplink (Class-A downlink queue on the central). Same
   body format as LoRaWAN fPort 86, so `app_cmd` ingest is transport-agnostic.
