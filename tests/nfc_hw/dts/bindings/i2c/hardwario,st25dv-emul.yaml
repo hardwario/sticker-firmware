@@ -1,0 +1,11 @@
+# Copyright (c) 2026 HARDWARIO a.s.
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  i2c_emul model of the ST25DV NFC tag chip (test-only, see
+  tests/nfc_hw/src/emul_st25dv.c). One instance is declared per I2C address
+  the real chip answers on (E0=0x53, E1=0x57); both share one C-level model.
+
+compatible: "hardwario,st25dv-emul"
+
+include: base.yaml

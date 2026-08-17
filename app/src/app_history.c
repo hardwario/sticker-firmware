@@ -340,10 +340,15 @@ static void flush_stage_pad(void)
 }
 
 /* Roll over to a fresh head page, evicting the tail page if the ring wraps onto
- * it. Returns the number of records evicted. */
-static uint32_t advance_page(void)
+ * it. On success (0 returned) *evicted holds the number of records evicted and
+ * all in-RAM ring state (m_live[], m_nlive, m_next_seq, m_last_phys, m_head_dw,
+ * m_stage_len, m_head_full) reflects the new head page. On failure, the flash
+ * erase/write itself may or may not have partially completed, but no in-RAM
+ * state is mutated — the caller can safely retry on the next append (the
+ * candidate physical page is not yet claimed as live). */
+static int advance_page(uint32_t *evicted)
 {
-	uint32_t evicted = 0;
+	*evicted = 0;
 
 	/* Absolute wall time of the new page's first record, computed against the
 	 * CURRENT (pre-eviction) oldest record so it is unaffected by the eviction
@@ -358,18 +363,19 @@ static uint32_t advance_page(void)
 
 	uint16_t next = (uint16_t)((m_last_phys + 1) % HIST_NPAGES);
 
-	if (m_nlive > 0 && next == m_live[0].phys) {
-		/* Ring wrapped onto the oldest page — evict it. */
-		uint32_t tail_recs = (m_nlive > 1) ? (m_live[1].first_ord - m_live[0].first_ord)
-						   : (m_abs_ord - m_live[0].first_ord);
-		evicted = tail_recs;
-		for (uint16_t i = 1; i < m_nlive; i++) {
-			m_live[i - 1] = m_live[i];
-		}
-		m_nlive--;
+	bool will_evict = (m_nlive > 0 && next == m_live[0].phys);
+	uint32_t tail_recs = 0;
+	if (will_evict) {
+		/* Ring wraps onto the oldest page — compute (but don't yet commit) its
+		 * eviction. */
+		tail_recs = (m_nlive > 1) ? (m_live[1].first_ord - m_live[0].first_ord)
+					  : (m_abs_ord - m_live[0].first_ord);
 	}
 
-	(void)flash_area_erase(m_fa, page_off(next), PAGE_SIZE);
+	int ret = flash_area_erase(m_fa, page_off(next), PAGE_SIZE);
+	if (ret) {
+		return ret;
+	}
 
 	struct hist_page_hdr h = {
 		.magic = PAGE_MAGIC,
@@ -382,8 +388,19 @@ static uint32_t advance_page(void)
 		.base_synced = m_base_synced ? 1 : 0,
 	};
 	hdr_crc_set(&h);
-	(void)flash_area_write(m_fa, page_off(next), &h, sizeof(h));
+	ret = flash_area_write(m_fa, page_off(next), &h, sizeof(h));
+	if (ret) {
+		return ret;
+	}
 
+	/* Both the erase and header write landed — commit the new page. */
+	if (will_evict) {
+		*evicted = tail_recs;
+		for (uint16_t i = 1; i < m_nlive; i++) {
+			m_live[i - 1] = m_live[i];
+		}
+		m_nlive--;
+	}
 	m_next_seq++;
 	m_last_phys = next;
 	m_live[m_nlive].phys = next;
@@ -392,7 +409,7 @@ static uint32_t advance_page(void)
 	m_head_dw = 0;
 	m_stage_len = 0;
 	m_head_full = false;
-	return evicted;
+	return 0;
 }
 
 static int backend_init(void)
@@ -548,7 +565,12 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
 	}
 
 	if (m_nlive == 0 || m_head_full || (head_records() + 1) > rpp) {
-		*evicted += advance_page();
+		uint32_t adv_evicted = 0;
+		int ret = advance_page(&adv_evicted);
+		if (ret) {
+			return ret;
+		}
+		*evicted += adv_evicted;
 	}
 
 	/* Stream `len` bytes into the head page, flushing full double words. */
@@ -562,11 +584,14 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
 			int ret = flash_area_write(
 				m_fa, page_off(phys) + HIST_HDR_SIZE + (off_t)m_head_dw * DW_SIZE,
 				dw, DW_SIZE);
+			/* Drop the staged double word on error too -- leaving m_stage_len
+			 * stuck at DW_DATA would run this loop's next byte past the end of
+			 * m_stage[] on the following capture (C1). */
+			m_stage_len = 0;
 			if (ret) {
 				return ret;
 			}
 			m_head_dw++;
-			m_stage_len = 0;
 		}
 	}
 	m_abs_ord++;

@@ -12,6 +12,7 @@
 #include "app_hall.h"
 #include "app_history.h"
 #include "app_input.h"
+#include "app_lrw.h"
 #include "app_nfc.h"
 
 /* Zephyr includes */
@@ -298,6 +299,33 @@ static int clear_and_save_alarm_rules(void)
 	return ret;
 }
 
+/* factory_reset and vendor_reset both reset the LoRaWAN identity/keys back to
+ * defaults (app_config.yml persistent tiers) — unlike device_reset, whose
+ * persistent tier keeps ALL lorawan_* fields untouched. Without this, the
+ * LoRaMac stack would keep running with its own persisted NVM (frame
+ * counters + DevNonce + session state) built under the OLD keys, risking a
+ * frame-counter desync with the network server after re-provisioning. Call
+ * this immediately before every `sys_reboot()` in those two tiers, including
+ * the reboot-on-error paths: app_config_factory_reset()/
+ * app_config_vendor_reset() may already have zeroed the keys on flash even if
+ * a later step in the same function then fails and reboots.
+ *
+ * Deliberately NOT wired into a live SetParam key change (e.g. someone
+ * changing lrw_nwkskey via NFC/shell without going through a reset tier) —
+ * that would need a synchronous cross-module call from app_cmd.c into
+ * app_lrw.c's NVM handling from an arbitrary caller thread, which is riskier
+ * and out of scope here. Left as a follow-up. */
+#if defined(CONFIG_LORAWAN)
+static void lrw_reset_nvm_before_reboot(void)
+{
+	app_lrw_reset_nvm();
+}
+#else
+static void lrw_reset_nvm_before_reboot(void)
+{
+}
+#endif /* defined(CONFIG_LORAWAN) */
+
 int app_settings_device_reset(void)
 {
 	int ret;
@@ -313,10 +341,15 @@ int app_settings_device_reset(void)
 		return ret;
 	}
 
-	ret = clear_and_save_alarm_rules();
-	if (ret) {
-		return ret;
-	}
+	/* Past this point the reset has already begun: app_config_device_reset()
+	 * already wrote to flash. A nonzero return from here on would leave the
+	 * device running live with a half-applied reset, so any further failure
+	 * reboots instead (see the atomicity note in app_settings.h). No
+	 * lrw_reset_nvm_before_reboot() here: device_reset's persistent tier keeps
+	 * every lorawan_* field, so the LoRaMac NVM stays valid across it. */
+	/* Error already logged inside; this tier reboots either way (see the
+	 * atomicity note in app_settings.h). */
+	clear_and_save_alarm_rules();
 
 	sys_reboot(SYS_REBOOT_COLD);
 
@@ -335,11 +368,17 @@ int app_settings_factory_reset(void)
 		return ret;
 	}
 
-	ret = clear_and_save_alarm_rules();
-	if (ret) {
-		return ret;
-	}
+	/* Past this point the reset has already begun: app_config_factory_reset()
+	 * already wrote to flash (including zeroing the LoRaWAN keys back to
+	 * defaults). A nonzero return from here on would leave the device running
+	 * live with a half-applied reset, so any further failure reboots instead
+	 * (see the atomicity note in app_settings.h) — and every reboot from here
+	 * on must also wipe the LoRaMac stack's own NVM, since the keys it was
+	 * built under are already gone. */
+	/* Error already logged inside; this tier reboots either way. */
+	clear_and_save_alarm_rules();
 
+	lrw_reset_nvm_before_reboot();
 	sys_reboot(SYS_REBOOT_COLD);
 
 	return 0;
@@ -396,6 +435,15 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 		return ret;
 	}
 
+	/* Past this point the reset has already begun: app_config_vendor_reset()
+	 * already wrote to flash (including zeroing the LoRaWAN keys back to
+	 * defaults and secret_key to the all-zero sentinel below). A nonzero return
+	 * from here on would leave the device running live with a half-applied
+	 * reset, so any further failure reboots instead (see the atomicity note in
+	 * app_settings.h) — and every reboot from here on must also wipe the
+	 * LoRaMac stack's own NVM, since the keys it was built under are already
+	 * gone. */
+
 	/* secret_key is NOT in the vendor_reset persistent tier (app_config.yml), so
 	 * the call above just zeroed it — the all-zero "unprovisioned" sentinel that
 	 * would lock the encrypted NFC channel out from ever reaching set_secret_key
@@ -405,7 +453,8 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 	ret = save_secret_key();
 	if (ret) {
 		LOG_ERR("Call `save_secret_key` failed: %d", ret);
-		return ret;
+		lrw_reset_nvm_before_reboot();
+		sys_reboot(SYS_REBOOT_COLD);
 	}
 
 	/* The pulse totalizers and the NFC claim-record state each live in their own
@@ -418,7 +467,8 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 	ret = app_counters_save(true);
 	if (ret) {
 		LOG_ERR("Call `app_counters_save` failed: %d", ret);
-		return ret;
+		lrw_reset_nvm_before_reboot();
+		sys_reboot(SYS_REBOOT_COLD);
 	}
 	app_nfc_clm_reset();
 
@@ -431,9 +481,11 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 	ret = app_alarm_rules_save();
 	if (ret) {
 		LOG_ERR("Call `app_alarm_rules_save` failed: %d", ret);
-		return ret;
+		lrw_reset_nvm_before_reboot();
+		sys_reboot(SYS_REBOOT_COLD);
 	}
 
+	lrw_reset_nvm_before_reboot();
 	sys_reboot(SYS_REBOOT_COLD);
 
 	return 0;

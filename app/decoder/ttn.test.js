@@ -885,3 +885,71 @@ test("req_history_page.from_unix/to_unix/start_ord round-trip (#345, #260)", () 
   assert.equal(back.req_history_page.to_unix, 1780003600);
   assert.equal(back.req_history_page.start_ord, 440);
 });
+
+// --- buzzer_play: encodeDownlinkCommand previously had no branch for it, so
+// the body stayed empty (silently producing a STOP instead of the requested
+// melody). BuzzerPlay has no oneof/nesting quirks decodeDownlinkCommand
+// special-cases (unlike set_param/get_param/etc.), and there is no per-command
+// decode branch for tag 28 — so a round-trip via decodeDownlink is not
+// available; assert directly on the encoded wire bytes instead.
+test("buzzer_play encodes a non-empty body (kind + repeat_s)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 1, command: "buzzer_play", buzzer_play: { kind: 5, repeat_s: 30 } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  assert.equal(enc.fPort, 85);
+  assert.ok(enc.bytes.length > 0, "body must not be empty (old bug: silent STOP)");
+  // seq=1 (tag 0x08, varint 1), then field 28 length-delimited (tag (28<<3)|2 =
+  // 0xe2 0x01, varint-encoded as two bytes since 226 > 127), then the body:
+  // tag 1 varint (0x08) value 5, tag 2 varint (0x10) value 30.
+  const hexOut = toHex(enc.bytes);
+  assert.equal(hexOut, "0801e201040805101e");
+  // Manually decode the BuzzerPlay body (bytes after the outer length prefix)
+  // to confirm kind/repeat_s land at the documented tag positions.
+  const body = enc.bytes.slice(enc.bytes.length - 4); // last 4 bytes: 08 05 10 1e
+  assert.deepEqual(Array.from(body), [0x08, 0x05, 0x10, 0x1e]);
+});
+
+test("buzzer_play with empty body encodes a stop (proto3 default)", () => {
+  const enc = codec.encodeDownlink({ data: { seq: 2, command: "buzzer_play" } });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  // seq=2 (0x08 0x02) + field 28 length-delimited with length 0 (0xe2 0x01 0x00).
+  assert.equal(toHex(enc.bytes), "0802e20100");
+});
+
+// --- Fix for a systemic decoder hang: _pbReadVarint(bytes, offset) with
+// offset >= bytes.length returned {next: offset} UNCHANGED (loop body never
+// ran), so any `while (p < end)` loop bounded by a length taken FROM the
+// payload (not bytes.length) spun forever once `end` exceeded the real
+// buffer — a malformed/truncated frame could hang the ChirpStack/TTN sandbox,
+// which has no execution timeout. Every such loop now also requires
+// `idx < bytes.length`. These three cases exercise three different decoders
+// (Info, set_param SetParam-in-DownlinkCommand, and the fPort-3 AlarmEvent
+// decoder) with a declared length that overruns the real byte array.
+test("decodeUplink (fPort 85, Info) terminates on an over-length declared field (#hang)", () => {
+  // version 0x01 stripped; remaining bytes: tag=0x1a (field 3 Info, wire 2),
+  // len=0x7f (127) -- far beyond the 0-byte remainder that actually follows.
+  const got = codec.decodeUplink({ bytes: hex("011a7f"), fPort: 85 });
+  assert.equal(typeof got, "object");
+  assert.equal(typeof got.data, "object");
+  // Info decode bails out immediately (no bytes left) but still returns the
+  // well-formed Info skeleton with its defaults.
+  assert.equal(got.data.info.fw_major, 0);
+  assert.deepEqual(got.data.info.active_alarms, []);
+});
+
+test("decodeDownlink (fPort 85, set_param body) terminates on an over-length declared field (#hang)", () => {
+  // tag=0x12 (field 2 set_param, wire 2), len=0x7f (127) -- no bytes follow.
+  const got = codec.decodeDownlink({ bytes: hex("127f"), fPort: 85 });
+  assert.equal(got.data.command, "set_param");
+  assert.deepEqual(got.data.set_param, {});
+});
+
+test("decodeUplink (fPort 3, AlarmEvent) terminates on an over-length declared field (#hang)", () => {
+  // version 0x01 stripped; remaining bytes: tag=0x1a (field 3 events, wire 2),
+  // len=0x7f (127) -- no bytes follow, so the AlarmEvent decodes to defaults.
+  const got = codec.decodeUplink({ bytes: hex("011a7f"), fPort: 3 });
+  assert.equal(got.data.alarms.length, 1);
+  assert.equal(got.data.alarms[0].source, "onboard");
+  assert.equal(got.data.alarms[0].type, "none");
+});

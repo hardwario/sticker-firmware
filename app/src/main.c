@@ -177,10 +177,22 @@ static void nfc_run_deferred_cmd_actions(void)
 			 * g_app_config.claim_token becomes live (h_commit) in the same
 			 * breath the latch clears — no window where a poll could
 			 * re-expose the OLD token; when no new token was given this is a
-			 * same-value no-op re-persist. */
+			 * same-value no-op re-persist.
+			 *
+			 * #340 M15: app_nfc_clm_reset() already persisted clm/state=UNSET
+			 * to flash by the time app_settings_save() runs. If that save
+			 * then fails, don't keep running live with the clm latch reset
+			 * but the (possibly new) claim_token never persisted - mirrors
+			 * app_settings.c's post-destructive-step convention (34a1ed8):
+			 * force a reboot so the device re-reads whatever DID actually
+			 * get persisted, instead of a silent, un-rebooted return leaving
+			 * flash and live state out of sync until some later, unrelated
+			 * reboot. */
 			play_carousel_nfc();
 			app_nfc_clm_reset();
-			app_settings_save(true);
+			if (app_settings_save(true)) {
+				sys_reboot(SYS_REBOOT_COLD);
+			}
 			break;
 		case APP_CMD_ACTION_ENTER_CALIBRATION:
 			/* Persist calibration=true + reboot; next boot enters
@@ -456,23 +468,14 @@ int main(void)
 			LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
 		}
 
-		/* #250: offline/boot-staged provisioning is unified on the encrypted
-		 * hio.stck:cmd record (SetParam save=true / FactoryReset), applied through
-		 * the validated app_cmd_handle() path in app_nfc_check() above. The phone
-		 * that wrote the record is gone (the device was off), so there is nobody to
-		 * ack the response — restore the info record now, which opens the deferred-
-		 * action gate (#164), and run the staged action synchronously *here*, before
-		 * the LoRaWAN stack starts, so staged keys are in place before the first
-		 * join (preserves the #147 property the retired hio.stck:cfg path had).
-		 * A SETTINGS_SAVE/FACTORY_RESET reboots; the record is then replay-rejected
-		 * on the next boot, so this runs at most once. */
+		/* Open deferred-action gate: restore the info record after apply check.
+		 * The phone that staged the command is gone (device was powered off). */
 		if (app_nfc_info_restore_pending()) {
 			ret = app_nfc_restore_info();
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("app_nfc_restore_info", ret);
 			}
 		}
-		nfc_run_deferred_cmd_actions();
 	}
 
 #if defined(CONFIG_WATCHDOG)
@@ -537,6 +540,12 @@ int main(void)
 	if (ret) {
 		LOG_WRN("app_counters_init failed: %d (counter persistence unavailable)", ret);
 	}
+
+	/* Run deferred NFC command actions. Must occur after counters_init and
+	 * sensor_init so selective resets (COUNTERS_SAVE) don't persist zero
+	 * counters. Rebooting actions still fire before app_lrw_join(), keeping
+	 * staged LoRaWAN keys in place (#147, #250). */
+	nfc_run_deferred_cmd_actions();
 
 #if defined(CONFIG_WATCHDOG)
 	app_wdog_feed();

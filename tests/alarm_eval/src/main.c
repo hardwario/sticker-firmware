@@ -297,3 +297,124 @@ ZTEST(alarm_eval, test_threshold_early_revert_resets_window)
 	zassert_false(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
 		      "reverted threshold fired anyway — window was paused, not reset");
 }
+
+/* Bug A regression (today's PR#349 same-day finding): rt_sync() must reset the
+ * per-slot runtime latch (m_rt[]) on ANY rule edit, not just a source/quantity
+ * change. Before the fix, rt_sync() compared only source+quantity, so a live
+ * edit that keeps those the same but changes e.g. dwell left a stale
+ * confirm_deadline/active latch from the OLD rule in place.
+ *
+ * Demonstrated here with a STATE level rule on hall-left: arm a confirm
+ * deadline under a LONG dwell (2.0 s), then edit the SAME slot (same
+ * source+quantity) to a SHORT dwell (0.1 s) before the long one would ever
+ * elapse. With the pre-fix rt_sync(), the stale long-dwell deadline keeps
+ * gating firing (since the edit doesn't touch source/quantity), so the alarm
+ * would still be pending well past when the NEW, shorter dwell says it should
+ * already have fired. With the fix, rt_sync() detects the dwell field changed
+ * (full-struct compare) and resets the latch, so the rule re-arms fresh under
+ * the new dwell and fires on schedule. */
+ZTEST(alarm_eval, test_rt_sync_resets_latch_on_same_source_rule_edit)
+{
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_HALL_LEFT,
+		.quantity = APP_ALARM_Q_STATE,
+		.enabled = 1,
+		.from_state = 1,
+		.to_state = 1, /* level */
+		.dwell = 2.0f, /* long: must NOT have elapsed by the time we check below */
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	test_hall.left_is_active = true; /* already at the target level */
+	app_alarm_poll();                /* arms the (long) confirm deadline */
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_STATE),
+		      "level fired before any dwell elapsed");
+
+	/* Edit the SAME slot: same source+quantity+from/to, only dwell changes
+	 * (2.0 s -> 0.1 s). Bug A: rt_sync() only reset the latch on a
+	 * source/quantity change, so the stale 2 s deadline armed above would
+	 * otherwise still gate firing below instead of the new 0.1 s one. */
+	r.dwell = 0.1f;
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule edit rejected");
+	app_alarm_poll(); /* observes the edit; with the fix, re-arms under the NEW (short) dwell */
+
+	k_sleep(K_MSEC(250)); /* past the NEW 0.1 s dwell, nowhere near the stale 2 s one */
+	app_alarm_poll();
+	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_STATE),
+		     "stale latch from before the rule edit blocked firing under the new dwell "
+		     "(rt_sync did not reset on a same-source/quantity edit)");
+}
+
+/* Bug B regression (today's PR#349 same-day finding): eval_count()'s one-shot-
+ * then-hold guarantee ("fires and then holds for dwell seconds ... before it
+ * can fire again", app_alarm_rules.h) had no `!rt->active` gate on the firing
+ * condition, so a counter that stays over the per-window rate limit across
+ * MULTIPLE consecutive interval_report windows kept re-triggering every
+ * window and re-extending oneshot_expiry indefinitely, instead of holding for
+ * a single `dwell` period from the FIRST fire and then re-arming.
+ *
+ * Demonstrated by choosing dwell (1.5 s) longer than interval_report (1 s), so
+ * a second over-threshold window lands while the first fire's hold is still
+ * running: with the bug, that second window re-extends the hold so it never
+ * naturally expires as long as the condition keeps holding; fixed, the second
+ * window is suppressed (no re-extension) and the ORIGINAL hold expires on
+ * schedule — observed via an intermediate poll (not itself a window
+ * boundary) that only exercises the central oneshot-expiry sweep. A third,
+ * later window then re-arms and fires again, proving the hold isn't just
+ * suppressing forever but genuinely re-arms. */
+ZTEST(alarm_eval, test_rate_count_one_shot_then_hold_across_multiple_windows)
+{
+	g_app_config.interval_report = 1; /* 1 s tumbling window */
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_HALL_LEFT,
+		.quantity = APP_ALARM_Q_COUNT,
+		.enabled = 1,
+		.hi = 2,       /* alarm when the window's delta >= 2 */
+		.dwell = 1.5f, /* hold LONGER than the 1 s window, so it spans window 2 */
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	g_app_sensor_data.hall_left_count = 0;
+	app_alarm_poll(); /* seeds the baseline + window start, no rule evaluated yet */
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
+		      "spuriously active before any window elapsed");
+
+	/* Window 1: over-threshold delta (3 >= hi 2) -> first fire. */
+	g_app_sensor_data.hall_left_count = 3;
+	k_sleep(K_MSEC(1100));
+	app_alarm_poll();
+	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
+		     "rate alarm never fired after the first over-limit window elapsed");
+
+	/* Window 2: STILL over-threshold (another delta of 3) while window 1's
+	 * 1.5 s hold is still running (only ~1.1 s elapsed). Bug: this
+	 * unconditionally re-fires and pushes oneshot_expiry another 1.5 s out.
+	 * Fixed: the `!rt->active` gate suppresses this re-fire, so the hold set
+	 * by window 1 is left untouched. */
+	g_app_sensor_data.hall_left_count = 6;
+	k_sleep(K_MSEC(1100));
+	app_alarm_poll();
+	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
+		     "alarm dropped active mid-hold (unexpected)");
+
+	/* Intermediate poll, deliberately NOT at a window boundary (only ~0.5 s
+	 * into the new 1 s window, so eval_count's own window-hold check returns
+	 * early and does not touch the latch) — this isolates app_alarm_poll()'s
+	 * central oneshot-expiry sweep, which fires purely off oneshot_expiry vs.
+	 * now. Only the FIXED code's un-extended window-1 expiry (~2.6 s from
+	 * start) has elapsed by here (~2.7 s from start); the buggy code's
+	 * window-2-extended expiry (~3.7 s from start) has not. */
+	k_sleep(K_MSEC(500));
+	app_alarm_poll();
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
+		      "hold from window 1 never expired — a still-over-threshold window 2 "
+		      "re-extended it instead of being suppressed by the one-shot-then-hold gate");
+
+	/* Window 3: still over-threshold -> having genuinely gone inactive above,
+	 * the rule must re-arm and fire again (not just suppress forever). */
+	g_app_sensor_data.hall_left_count = 9;
+	k_sleep(K_MSEC(600)); /* 500 + 600 = 1.1 s since window 2's re-baseline: window elapsed */
+	app_alarm_poll();
+	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
+		     "rate alarm never re-armed after the hold genuinely expired");
+}

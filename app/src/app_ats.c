@@ -609,6 +609,40 @@ static int cmd_lrw_reset(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+/* app_compose.c documents app_compose_ex()/app_compose_reset() as running
+ * "solely on m_work_q" (owned by app_lrw.c) and mutating static state
+ * (m_active/m_pending/m_snapshot/a static frame buffer) with no lock on that
+ * assumption. Calling app_compose_ex() directly from the shell thread below
+ * would race the real telemetry TX path, which composes on m_work_q too. So
+ * each frame is composed as a work item on m_work_q (via
+ * app_lrw_run_on_work_q()); the shell thread blocks on it (k_work_flush),
+ * prints that one frame, and loops for the next — mirroring the original
+ * per-frame streaming print, one m_work_q round-trip per frame instead of
+ * buffering the whole multi-frame report (which a full report can run to
+ * several KB of static RAM the debug build cannot spare). */
+struct compose_result {
+	uint8_t budget;
+	uint8_t buf[243];
+	size_t len;
+	bool more;
+	int ret; /* app_compose_ex() error, 0 on success */
+};
+
+static struct compose_result m_compose_result;
+static struct k_work m_compose_work;
+
+/* Runs on m_work_q — must not touch the shell pointer (not the caller's
+ * thread by the time this executes). Composes exactly one frame per call;
+ * app_compose_ex()'s own static state tracks progress across calls. */
+static void compose_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	struct compose_result *res = &m_compose_result;
+
+	res->ret = app_compose_ex(res->buf, sizeof(res->buf), &res->len, &res->more, res->budget);
+}
+
 /* Build the telemetry uplink WITHOUT sending it and dump the raw fPort-2 bytes
  * (decodable with ttn.js) — lets the tester verify exactly what would go on the
  * wire. Samples first so the payload reflects the current sensors. Optional
@@ -629,27 +663,37 @@ static int cmd_lrw_compose(const struct shell *shell, size_t argc, char **argv)
 
 	app_sensor_sample();
 
-	uint8_t buf[243];
-	size_t len = 0;
+	struct compose_result *res = &m_compose_result;
 	bool more = true;
 	int frame = 0;
 
 	shell_print(shell, "Telemetry uplink (fPort 2, budget %u B):", budget);
 	while (more) {
-		int ret = app_compose_ex(buf, sizeof(buf), &len, &more, budget);
-		if (ret) {
-			shell_error(shell, "compose failed: %d", ret);
-			return ret;
+		res->budget = budget;
+
+		int sret = app_lrw_run_on_work_q(&m_compose_work);
+		if (sret < 0) {
+			shell_error(shell, "compose submit failed: %d", sret);
+			return sret;
 		}
-		if (len == 0) {
+
+		struct k_work_sync sync;
+		k_work_flush(&m_compose_work, &sync);
+
+		if (res->ret) {
+			shell_error(shell, "compose failed: %d", res->ret);
+			return res->ret;
+		}
+		if (res->len == 0) {
 			shell_print(shell, "  (nothing to report)");
 			break;
 		}
-		shell_fprintf(shell, SHELL_NORMAL, "  frame %d (%zu B): ", frame++, len);
-		for (size_t i = 0; i < len; i++) {
-			shell_fprintf(shell, SHELL_NORMAL, "%02x", buf[i]);
+		shell_fprintf(shell, SHELL_NORMAL, "  frame %d (%zu B): ", frame++, res->len);
+		for (size_t i = 0; i < res->len; i++) {
+			shell_fprintf(shell, SHELL_NORMAL, "%02x", res->buf[i]);
 		}
 		shell_fprintf(shell, SHELL_NORMAL, "\n");
+		more = res->more;
 	}
 	return 0;
 }
@@ -1322,6 +1366,9 @@ SHELL_CMD_REGISTER(ats, &sub_ats, "Automated test system commands.", NULL);
 static int app_ats_init(void)
 {
 	k_work_init_delayable(&g_led_cycle_work, led_cycle_work_handler);
+#if defined(CONFIG_LORAWAN)
+	k_work_init(&m_compose_work, compose_work_handler);
+#endif /* defined(CONFIG_LORAWAN) */
 	return 0;
 }
 

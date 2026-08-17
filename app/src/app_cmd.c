@@ -319,6 +319,15 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	uint32_t fault_group = 0;
 	int rc = 0;
 
+	/* Shared with app_config.c's reset ops (#340 M27) — a rollback here
+	 * blindly doing `*app_config() = snapshot` must not race a concurrent
+	 * device_reset/factory_reset/vendor_reset, or either operation's result
+	 * can silently clobber the other's. app_alarm_rules_reload_from_config()
+	 * (called within this critical section) takes its own inner lock
+	 * (app_alarm_rules.c's m_lock) and never calls back into app_cmd.c or
+	 * app_config.c — no deadlock cycle. */
+	app_config_lock();
+
 	/* Apply atomically: snapshot the staging config, apply both sections. On any
 	 * fault, restore the snapshot so a rejected batch leaves nothing partially
 	 * staged for a later SettingsSave to persist. (Threshold-pair cross-validation
@@ -367,7 +376,7 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 			(void)app_alarm_rules_reload_from_config(); /* resync cache to it */
 			make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid alarm rule");
 			resp->body.error.fault_field = 4 * 100; /* group 4 = alarms */
-			return;
+			goto out;
 		}
 		/* F-1: LoRaWAN staging changed but the running copy (used by
 		 * lrw_join/lrw_reset) only re-syncs on save+reboot. Flag it so a join
@@ -383,6 +392,9 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 			*action = APP_CMD_ACTION_SETTINGS_SAVE;
 		}
 	}
+
+out:
+	app_config_unlock();
 }
 
 /* app_cmd_handle_get_param is defined after DUMP_FIELDS (it pages like

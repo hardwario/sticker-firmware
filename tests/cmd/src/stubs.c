@@ -32,6 +32,21 @@ struct app_config *app_config(void)
 	return &g_app_config;
 }
 
+/* #340 M27: app_cmd_handle_set_param() now takes the real app_config_lock()/
+ * _unlock() (shared with app_config.c's reset ops) instead of its own local
+ * mutex — stub it here since the real app_config.c isn't linked. */
+static K_MUTEX_DEFINE(m_app_config_lock);
+
+void app_config_lock(void)
+{
+	k_mutex_lock(&m_app_config_lock, K_FOREVER);
+}
+
+void app_config_unlock(void)
+{
+	k_mutex_unlock(&m_app_config_lock);
+}
+
 /* F-1 staging-dirty guard: the flag + test_set_lrw_dirty() hook now live in the
  * real app_cmd.c (linked here), so no stub is needed. */
 
@@ -196,10 +211,15 @@ void app_alarm_rules_clear_all(void)
 
 /* handle_set_param refreshes the runtime rule cache from config after an apply;
  * inert in the unit test. Returns the count of invalid slots dropped (H-10);
- * 0 here so a staged alarms batch always acks in the unit test. */
+ * 0 by default so a staged alarms batch acks normally. test_alarm_reload_dropped
+ * lets a test force a nonzero drop count to exercise app_cmd.c's alarm-shape
+ * rollback path (the second rollback/`goto out` exit of
+ * app_cmd_handle_set_param) without needing the real app_alarm_rules.c linked. */
+int test_alarm_reload_dropped;
+
 int app_alarm_rules_reload_from_config(void)
 {
-	return 0;
+	return test_alarm_reload_dropped;
 }
 
 /* Read-back path (handle_req_alarm_rules): no rules in the unit test, so the
