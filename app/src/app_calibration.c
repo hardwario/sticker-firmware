@@ -143,6 +143,16 @@ void app_calibration_check_trigger(void)
 		return;
 	}
 
+	/* #340 M21: a genuine both-magnets-present event must always trigger,
+	 * even while a single-magnet hold's expiry is still latched — checked
+	 * before the magnet_expired gate below, which otherwise swallowed it (the
+	 * operator would have had to release both magnets first, then re-present
+	 * them, to clear magnet_expired before this branch was ever reachable). */
+	if (left && right) {
+		LOG_WRN("Both magnets detected — rebooting into calibration mode");
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+
 	if (magnet_expired) {
 		if (!left && !right) {
 			magnet_expired = false;
@@ -150,10 +160,7 @@ void app_calibration_check_trigger(void)
 		return;
 	}
 
-	if (left && right) {
-		LOG_WRN("Both magnets detected — rebooting into calibration mode");
-		sys_reboot(SYS_REBOOT_COLD);
-	} else if (left || right) {
+	if (left || right) {
 		if (!magnet_pending) {
 			magnet_pending = true;
 			magnet_pending_cycles = 0;

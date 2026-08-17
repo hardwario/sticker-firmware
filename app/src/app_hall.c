@@ -30,7 +30,10 @@ static struct app_hall_data m_hall_data;
 
 K_MUTEX_DEFINE(m_hall_data_mutex);
 
-static int poll(void)
+/* #340 M14: `prime` seeds m_hall_data from the real GPIO level without treating
+ * it as a rise/fall edge — used once at init so a magnet already seated before
+ * boot isn't reported as a brand-new activation on the first periodic poll. */
+static int poll_impl(bool prime)
 {
 	int ret = 0;
 
@@ -115,10 +118,10 @@ restore:
 
 	k_mutex_lock(&m_hall_data_mutex, K_FOREVER);
 
-	bool left_rise = (!m_hall_data.left_is_active && left_is_active);
-	bool left_fall = (m_hall_data.left_is_active && !left_is_active);
-	bool right_rise = (!m_hall_data.right_is_active && right_is_active);
-	bool right_fall = (m_hall_data.right_is_active && !right_is_active);
+	bool left_rise = !prime && (!m_hall_data.left_is_active && left_is_active);
+	bool left_fall = !prime && (m_hall_data.left_is_active && !left_is_active);
+	bool right_rise = !prime && (!m_hall_data.right_is_active && right_is_active);
+	bool right_fall = !prime && (m_hall_data.right_is_active && !right_is_active);
 
 	m_hall_data.left_is_active = left_is_active;
 	m_hall_data.right_is_active = right_is_active;
@@ -158,6 +161,11 @@ restore:
 	}
 
 	return 0;
+}
+
+static int poll(void)
+{
+	return poll_impl(false);
 }
 
 static void hall_poll_work_handler(struct k_work *work)
@@ -204,6 +212,15 @@ int app_hall_init(void)
 	ret = gpio_pin_configure_dt(&m_hall_right, GPIO_INPUT | GPIO_PULL_DOWN);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
+		return ret;
+	}
+
+	/* #340 M14: seed m_hall_data from the real level before the periodic timer's
+	 * first tick, so a magnet already seated at boot isn't latched as a fresh
+	 * activation edge (spurious counter increment + alarm event). */
+	ret = poll_impl(true);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("poll_impl", ret);
 		return ret;
 	}
 
