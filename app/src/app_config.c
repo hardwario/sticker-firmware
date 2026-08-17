@@ -1150,8 +1150,8 @@ static int cmd_battery_level(const struct shell *shell, size_t argc, char **argv
 
 static int cmd_vendor_reset_allow(const struct shell *shell, size_t argc, char **argv)
 {
-	print_vendor_reset_allow(shell);
-	return 0;
+	return cmd_bool(shell, argc, argv, &m_app_config.vendor_reset_allow,
+			print_vendor_reset_allow);
 }
 
 static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
@@ -1550,8 +1550,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_battery_level, 1, 1),
 
 	SHELL_CMD_ARG(vendor-reset-allow, NULL,
-	              "Get whether vendor_reset is accepted; settable only over the vendor NFC channel (true/false).",
-	              cmd_vendor_reset_allow, 1, 0),
+	              "Get/Set whether vendor_reset is accepted (true/false); over the air, settable only over the vendor NFC channel.",
+	              cmd_vendor_reset_allow, 1, 1),
 
 	SHELL_CMD_ARG(alarm-limit, NULL,
 	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
