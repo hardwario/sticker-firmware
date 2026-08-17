@@ -119,7 +119,14 @@ commands:
     # renamed to match its actual behavior (keeps identity + full LoRaWAN — the
     # NEW, narrower factory_reset below is a different command/id). Breaking:
     # Manager-App must follow the rename.
-    - {name: device_reset, proto_id: 8, body: DeviceReset, kind: action, action: DEVICE_RESET, response: ack}
+    # #340 L12: no transports key meant "omitted = all transports" per the
+    # generator's own rule, so device_reset (broader than factory_reset -- wipes
+    # sensors/alarms/intervals/history config, keeping only identity+LoRaWAN)
+    # was reachable over a plain LoRaWAN downlink and the vendor channel, unlike
+    # its narrower sibling factory_reset below (nfc/shell only, since a
+    # downlink triggering a session-destroying reset could never confirm its
+    # own delivery -- the same argument applies here, arguably more so).
+    - {name: device_reset, proto_id: 8, body: DeviceReset, kind: action, action: DEVICE_RESET, response: ack, transports: [nfc, shell]}
     - {name: force_send, proto_id: 9, body: ForceSend, kind: handler, response: none, transports: [lrw]}
     - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
     - {name: req_history, proto_id: 11, body: ReqHistory, kind: handler, response: none, transports: [lrw]}

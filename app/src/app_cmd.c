@@ -1182,6 +1182,11 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		resp->which_body = Response_ack_tag;
 		break;
 	case Command_device_reset_tag:
+		/* transports: [nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		*action = APP_CMD_ACTION_DEVICE_RESET;
 		resp->which_body = Response_ack_tag;
 		break;
