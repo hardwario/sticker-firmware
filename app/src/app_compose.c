@@ -289,13 +289,22 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	}
 }
 
-/* Take a fresh snapshot into m_snapshot and arm the multi-frame packer. Runs
- * solely on m_work_q. */
-static void fill_snapshot(void)
-{
-	static bool boot = true;
+/* #340 M16: the one-shot "first uplink after boot" marker. Module-level (not a
+ * fill_snapshot()-local static) so app_compose_ex()'s debug/test callers (e.g.
+ * `ats lrw compose`) can read it without being the ones who clear it — only a
+ * real report (app_compose(), consume_boot=true below) may consume it. Without
+ * this split, a bench tech running `ats lrw compose` before the real first
+ * post-boot cycle silently stole the marker: the debug dump got
+ * SYSTEM_FLAG_BOOT and the real first uplink went out with system_flags=0. */
+static bool m_boot_pending = true;
 
-	fill_telemetry(&m_snapshot, boot);
+/* Take a fresh snapshot into m_snapshot and arm the multi-frame packer. Runs
+ * solely on m_work_q. `consume_boot` is true only for the real report path
+ * (app_compose()) — a debug/test probe (app_compose_ex()) must not clear the
+ * one-shot marker for the real uplink that hasn't happened yet. */
+static void fill_snapshot(bool consume_boot)
+{
+	fill_telemetry(&m_snapshot, m_boot_pending);
 
 	m_pending = 0;
 	for (enum tlm_group g = 0; g < G_COUNT; g++) {
@@ -305,7 +314,9 @@ static void fill_snapshot(void)
 	}
 	m_w1_sent = 0;
 	m_active = true;
-	boot = false;
+	if (consume_boot) {
+		m_boot_pending = false;
+	}
 }
 
 void app_compose_reset(void)
@@ -330,19 +341,15 @@ void app_compose_snapshot(Telemetry *out)
 	fill_telemetry(out, false);
 }
 
-int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
-{
-	return app_compose_ex(buf, size, len, more, app_lrw_get_max_payload());
-}
-
-int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)
+static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget,
+			   bool consume_boot)
 {
 	if (budget == 0) {
 		return -EAGAIN;
 	}
 
 	if (!m_active) {
-		fill_snapshot();
+		fill_snapshot(consume_boot);
 		if (m_pending == 0 && m_snapshot.w1_sensors_count == 0) {
 			/* Nothing to report (e.g. all sensors NaN pre-sample). */
 			*len = 0;
@@ -442,4 +449,14 @@ int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t b
 	LOG_HEXDUMP_DBG(buf, *len, "Telemetry frame:");
 
 	return 0;
+}
+
+int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
+{
+	return compose_ex_impl(buf, size, len, more, app_lrw_get_max_payload(), true);
+}
+
+int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)
+{
+	return compose_ex_impl(buf, size, len, more, budget, false);
 }

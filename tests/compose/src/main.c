@@ -94,8 +94,31 @@ static void run_report(Telemetry *frames, size_t max, size_t *n)
 	}
 }
 
-/* NOTE: tests run in source order; the very first report carries the one-shot
- * boot flag, so test_boot_internal must come first. */
+/* NOTE: tests run in source order. test_debug_probe_before_first_uplink_preserves_boot_flag
+ * must come before test_boot_internal (it deliberately drains a report via
+ * app_compose_ex() first, simulating a bench tech running `ats lrw compose`
+ * before the real first post-boot uplink); test_boot_internal must then still
+ * see the one-shot boot flag on the real app_compose() path. */
+
+ZTEST(compose, test_debug_probe_before_first_uplink_preserves_boot_flag)
+{
+	uint8_t buf[256];
+	bool more = true;
+
+	set_clean();
+	g_app_sensor_data.temperature = 23.5f;
+
+	/* Mirrors `ats lrw compose` (app_ats.c): drains a full report via
+	 * app_compose_ex(), the same entry point the debug shell command uses. */
+	while (more) {
+		size_t len = 0;
+		int ret = app_compose_ex(buf, sizeof(buf), &len, &more, test_budget);
+		zassert_equal(ret, 0, "app_compose_ex ret %d", ret);
+		if (len == 0) {
+			break;
+		}
+	}
+}
 
 ZTEST(compose, test_boot_internal)
 {
