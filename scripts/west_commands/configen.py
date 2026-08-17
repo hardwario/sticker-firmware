@@ -708,9 +708,19 @@ def build_ingest_model(config):
             elif t == "bytes":
                 e["kind"] = "bytes"
             elif t in FLOAT_TYPES:
-                e["kind"] = "float"
-                e["min"] = filter_min_value(p)
-                e["max"] = filter_max_value(p)
+                # #340 M23: mirror the int branch below — only take the ranged
+                # path when explicit bounds are declared. Falling back to the
+                # -FLT_MAX/FLT_MAX (or DBL_) macro strings here (as the
+                # unconditional version used to) produces invalid C tokens once
+                # the template appends its numeric-literal 'f' suffix
+                # (-FLT_MAXf). Currently latent: no float/double param exists
+                # in app_config.yml today.
+                if p.get("min") is not None or p.get("max") is not None:
+                    e["kind"] = "float"
+                    e["min"] = filter_min_value(p)
+                    e["max"] = filter_max_value(p)
+                else:
+                    e["kind"] = "plain"
             elif t in NUMERIC_TYPES:
                 if p.get("min") is not None or p.get("max") is not None:
                     e["kind"] = "int_ranged"

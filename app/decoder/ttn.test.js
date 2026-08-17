@@ -107,6 +107,27 @@ test("set_param cap_w1_sensors (tag 8) is reachable both ways (#92)", () => {
   assert.equal(back.set_param.sensors.cap_w1_sensors, 1);
 });
 
+// #340 M20: cap_buzzer (sensors tag 19) had no _SEN_NAMES entry, so ConfigDump
+// rendering silently dropped it and no downlink-builder could construct it either
+// (_SEN_TAGS is _SEN_NAMES inverted).
+test("set_param cap_buzzer (tag 19) is reachable both ways (#340 M20)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 1, command: "set_param", set_param: { sensors: { cap_buzzer: true } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors");
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.sensors.cap_buzzer, 1);
+});
+
+test("config_dump renders cap_buzzer (sensors tag 19) (#340 M20)", () => {
+  // Response{ seq:1, config_dump: ConfigDump{ page_count:1, sensors: Sensors{ cap_buzzer:true } } },
+  // with the 1-byte APP_PROTO_VERSION prefix (uplink framing): 01 08 01 22 07 10 01 2a 03 98 01 01
+  // (field19 tag 0x98 0x01: field numbers >= 16 need a 2-byte varint tag).
+  const dump = hex("010801220710012a03980101");
+  const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
+  assert.equal(u.config_dump.sensors.cap_buzzer, 1);
+});
+
 // --- Uplink: legacy bitmap (fPort 1) --------------------------------------
 test("decodeUplink decodes legacy bitmap (fPort 1)", () => {
   const got = codec.decodeUplink({ bytes: hex("7a01a109fa580258"), fPort: 1 });
@@ -119,6 +140,37 @@ test("decodeUplink decodes legacy bitmap (fPort 1)", () => {
   // sensors absent in this frame decode to null
   assert.equal(got.data.illuminance, null);
   assert.equal(got.data.pressure, null);
+});
+
+// #340 M26: every declared-present field read past the end of a truncated
+// buffer used to silently produce NaN (bytes[index++] === undefined) instead
+// of null. Progressively truncate a real captured frame (all header bits set,
+// so every field is declared present and gets read) and assert no field is
+// ever NaN, at every truncation length.
+test("decodeUplink legacy bitmap (fPort 1): truncated buffer never yields NaN (#340 M26)", () => {
+  const full = hex("7a01a109fa580258");
+  for (let len = 0; len <= full.length; len++) {
+    const truncated = full.subarray(0, len);
+    const got = codec.decodeUplink({ bytes: truncated, fPort: 1 });
+    for (const [key, value] of Object.entries(got.data)) {
+      assert.ok(!Number.isNaN(value), `${key} is NaN at truncated length ${len}`);
+    }
+  }
+});
+
+// All-0xff bytes -> header = all bits set: extended packet, every optional
+// field (incl. machine-probe/hall/input, tag=(1<<20)) declared present. Covers
+// every readOrNull() call site the first test's real-world capture doesn't
+// reach (it has several header bits clear).
+test("decodeUplink legacy bitmap (fPort 1): truncated all-bits-set extended frame never yields NaN (#340 M26)", () => {
+  const full = Buffer.alloc(40, 0xff);
+  for (let len = 0; len <= full.length; len++) {
+    const truncated = full.subarray(0, len);
+    const got = codec.decodeUplink({ bytes: truncated, fPort: 1 });
+    for (const [key, value] of Object.entries(got.data)) {
+      assert.ok(!Number.isNaN(value), `${key} is NaN at truncated length ${len}`);
+    }
+  }
 });
 
 // --- Uplink: command response (fPort 85) ----------------------------------

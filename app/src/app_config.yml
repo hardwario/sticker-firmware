@@ -301,19 +301,22 @@ parameters:
     max: 3600
     help: "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this."
 
-  # #299/#316: gates whether vendor_reset is accepted. Writable ONLY over the
-  # vendor transport (NFC hio.stck:vnd, vendor-token) — so a secret_key holder can
-  # no longer disable recovery over a LoRaWAN downlink / NFC SetParam; readable
-  # everywhere (config show / GetConfig). The write is never gated on the current
-  # value, so a vendor set_param can always re-enable it. false + no vendor access
-  # => only a J-Link full-erase recovers a device whose secret_key was forgotten.
+  # #299/#316: gates whether vendor_reset is accepted. Writable over the vendor
+  # transport (NFC hio.stck:vnd, vendor-token) and shell — so a secret_key holder
+  # can no longer disable recovery over a LoRaWAN downlink / NFC SetParam (#340
+  # M10: shell is dev/commissioning-only and already implies full physical
+  # access, same reasoning as every other shell-ungated command, so it stays
+  # fully privileged here too); readable everywhere (config show / GetConfig).
+  # The write is never gated on the current value, so a vendor set_param can
+  # always re-enable it. false + no vendor/shell access => only a J-Link
+  # full-erase recovers a device whose secret_key was forgotten.
   - name: vendor_reset_allow
     proto_group: application
     proto_id: 7
     type: bool
     default: true
-    writable: [vendor]
-    help: "Get whether vendor_reset is accepted; settable only over the vendor NFC channel (true/false)."
+    writable: [shell, vendor]
+    help: "Get/Set whether vendor_reset is accepted (true/false); over the air, settable only over the vendor NFC channel."
 
   - name: alarm_limit
     proto_group: alarms

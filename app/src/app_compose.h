@@ -29,7 +29,9 @@ int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more);
 /* As app_compose(), but with an explicit payload budget instead of the live
  * LoRaWAN one. Lets a test/debug path (e.g. `ats lrw compose`) build the exact
  * uplink bytes for a chosen data rate without a network join. budget == 0 still
- * returns -EAGAIN. */
+ * returns -EAGAIN. #340 M16: unlike app_compose(), this never consumes the
+ * one-shot post-boot marker (SYSTEM_FLAG_BOOT) — a debug probe run before the
+ * real first uplink must not steal it. */
 int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget);
 
 /* Take a fresh, full reading of every sensor group into `*out` (a complete
