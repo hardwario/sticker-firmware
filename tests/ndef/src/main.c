@@ -289,3 +289,17 @@ ZTEST(ndef, test_chunked_record_rejected)
 	zassert_equal(ret, -ENOTSUP, "chunked record must be rejected, got %d", ret);
 	zassert_equal(m_cb_count, 0, "no record should be delivered for a chunked frame");
 }
+
+/* #340 L2: a spec-conformant record with the IL flag set carries an ID field.
+ * Per the NFC Forum record layout, ID bytes sit AFTER type, not right after
+ * ID_LENGTH — the parser used to skip them too early, shifting TYPE/PAYLOAD by
+ * id_len and dropping the record as "unrecognized". Same TLV as TLV_AREA but
+ * with IL set (d4 -> dc), an inserted 1-byte ID_LENGTH (01) right after
+ * payload_len, and a 1-byte ID (ab) between TYPE and PAYLOAD. */
+ZTEST(ndef, test_il_flagged_record_parses_type_and_payload_correctly)
+{
+	int ret = run_hex("0315dc0c040168696f2e7374636b3a636667ab00010203fe");
+
+	zassert_ok(ret, "IL-flagged record must parse, got %d", ret);
+	expect_canonical_record();
+}
