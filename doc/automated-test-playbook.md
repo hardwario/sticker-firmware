@@ -1205,6 +1205,12 @@ cycle) to prove the device recovered. Run these LAST in a session.
 - **Steps:** enqueue 10 command downlinks at once on ChirpStack; run 10 uplink cycles.
 - **Expect:** exactly one consumed per RX window, in order, none lost/duplicated, queue
   drains fully.
+- **HW-verified (2026-08-17, SN 2162199999)**: enqueued 10 raw fPort-85 `SetParam` downlinks
+  (unencrypted, `interval_report` 70..79) via ChirpStack `Enqueue`, drained with repeated
+  `ats lrw check` + polling `config show`. Observed sequence was monotonically increasing
+  (70,71,72,74,76,77,77,79,79,79,79 — some intermediate values missed by 5s poll granularity, not
+  by the device), final value stable at **79** (the last item queued) and ChirpStack's
+  `GetQueue` afterward returned empty — full drain, in order, no duplicates in final state.
 
 ### AT-ADV-04 — oversized/boundary config values (D, A)
 - **Steps:** SetParam every int param at exact min/max (valid) and every bytes param at
@@ -1240,12 +1246,31 @@ cycle) to prove the device recovered. Run these LAST in a session.
   observe backoff for 15 min → re-enable.
 - **Expect:** exponential backoff per L9 (no hammering); join succeeds promptly after
   re-enable; no watchdog trips while backing off.
+- **HW-verified (2026-08-17, SN 2162199999)**: disabled the device on ChirpStack
+  (`Device.is_disabled=true`), forced `ats lrw reset` — `Join failed (not activated)` each
+  attempt, backoff grew attempt 1 (~60-72s incl. jitter) → attempt 2 (105s), confirming genuine
+  exponential growth, not a fixed retry. Re-enabled the device, forced one more `ats lrw reset` —
+  rejoined promptly (`state: HEALTHY`, fresh devaddr) within ~20s. `Reset cause` stayed
+  `0x00000003` (pin, software) throughout — no watchdog trip during the whole backoff window.
 
 ### AT-ADV-09 — time abuse (D, A)
 - **Steps:** `clock set` to: 0, 1, year-2038 boundary (0x7FFFFFFF), far future (0xFFFFFFF0);
   after each: one telemetry + one history record + decoder pass.
 - **Expect:** firmware clamps/handles; decoder yields null or a correct date — never a
   crash or a negative interval; history base-time stays coherent.
+- **HW-verified (2026-08-17, SN 2162199999)**: `clock set 0`/`1` correctly rejected (`-22`); the
+  2038/`UINT32_MAX` boundaries in the steps above set/read back fine. **But the untested
+  year-2100 boundary (RTC's 2-digit BCD year field only covers 2000-2099) is a real bug**: the
+  first `clock set 4102444800` (2100-01-01) caused an **intermittent watchdog reset**
+  (`Reset cause: 0x00000011`), 1 hit in ~7 attempts at/near that boundary — filed as **#386**.
+  Always check `Reset cause` after a boundary clock test, not just `clock get`'s displayed
+  value — a clean-looking readback doesn't rule out a hang on a repeat attempt.
+- **Fixed + re-verified (2026-08-17)**: `app_clock_set_unix()` now rejects `unix_s >=
+  APP_CLOCK_UNIX_MAX` before touching the RTC. `clock set 4102444800` re-tested post-fix —
+  cleanly rejected (`-22`), no reset. Severity corrected on the issue: the real `clock_sync`
+  Command path (LRW/NFC) already bounded `unix_time` via `APP_CMD_CLOCK_UNIX_MAX` in
+  `app_cmd.c`; only the debug `clock set` shell path (dev/commissioning-trusted) was actually
+  wide open — see the issue comment for detail.
 
 ### AT-ADV-10 — concurrency pile-up (D, SA)
 - **Steps:** simultaneously: phone holds an NFC config walk, ChirpStack has a queued
