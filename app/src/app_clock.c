@@ -201,17 +201,19 @@ int app_clock_set_unix(uint32_t unix_s)
 	 * produces an out-of-range BCD nibble with no hardware-side validation,
 	 * which was observed on real hardware to intermittently destabilize the
 	 * calendar shadow register badly enough to hang rtc_stm32_get_time()'s
-	 * read-twice-and-compare loop until the watchdog fires. Reuses the same
-	 * APP_CLOCK_UNIX_MAX bound app_clock_handle_downlink() already enforces for
-	 * network time (L-5) — this closes the one remaining path to it, the debug
-	 * `clock set` shell command, which calls this function directly. The
-	 * `clock_sync` Command (the real LoRaWAN/NFC-reachable path,
-	 * app_cmd_handle_clock_sync()) already validates the same bound before
-	 * ever calling here, so it was never actually exposed to this bug. Mirrors
+	 * read-twice-and-compare loop until the watchdog fires. APP_CLOCK_UNIX_MAX
+	 * (4102444800 = 2100-01-01T00:00:00Z) is itself the first INVALID instant,
+	 * not the last valid one (matches its use as an inclusive lower bound in
+	 * app_clock_handle_downlink()'s L-5 check and app_cmd_handle_clock_sync()'s
+	 * bound — both use `>`, which lets exactly this instant through to here;
+	 * `>=` below is the actual backstop for it). Reuses the same bound those two
+	 * already enforce for their own paths (network DeviceTimeAns and the real
+	 * `clock_sync` Command) — this closes the one remaining path, the debug
+	 * `clock set` shell command, which calls this function directly. Mirrors
 	 * the symmetric lower-bound rejection rtc_stm32_set_time() already does for
 	 * years < 2000 (real_year < RTC_YEAR_REF), which is why `clock set 0`/
 	 * `clock set 1` already failed cleanly before this fix. */
-	if (unix_s > APP_CLOCK_UNIX_MAX) {
+	if (unix_s >= APP_CLOCK_UNIX_MAX) {
 		LOG_ERR("unix_time %u is beyond the RTC's representable range (year 2099)", unix_s);
 		return -EINVAL;
 	}
