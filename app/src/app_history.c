@@ -322,21 +322,32 @@ static int page_read_stream(uint16_t phys, size_t off, uint8_t *dst, size_t len)
 	return 0;
 }
 
-/* Flush any staged bytes as one padded double word (page finalize). */
-static void flush_stage_pad(void)
+/* Flush any staged bytes as one padded double word (page finalize). #384: must
+ * propagate a write failure — the caller (advance_page()) is documented to leave
+ * all in-RAM ring state untouched on error so the operation can be retried; if
+ * this write silently "succeeded" from the caller's point of view, m_head_dw/
+ * m_stage_len would advance past a page whose last bytes were never actually
+ * committed to flash, and a later read would return corrupted/uninitialized
+ * data for those bytes (same class of bug backend_append() already guards
+ * against, C1). */
+static int flush_stage_pad(void)
 {
 	if (m_stage_len == 0) {
-		return;
+		return 0;
 	}
 	uint8_t dw[DW_SIZE];
 	memset(dw, 0, DW_DATA);
 	memcpy(dw, m_stage, m_stage_len);
 	dw[DW_DATA] = FRAME_BYTE;
 	uint16_t phys = m_live[m_nlive - 1].phys;
-	(void)flash_area_write(m_fa, page_off(phys) + HIST_HDR_SIZE + (off_t)m_head_dw * DW_SIZE,
-			       dw, DW_SIZE);
+	int ret = flash_area_write(
+		m_fa, page_off(phys) + HIST_HDR_SIZE + (off_t)m_head_dw * DW_SIZE, dw, DW_SIZE);
+	if (ret) {
+		return ret;
+	}
 	m_head_dw++;
 	m_stage_len = 0;
+	return 0;
 }
 
 /* Roll over to a fresh head page, evicting the tail page if the ring wraps onto
@@ -356,9 +367,15 @@ static int advance_page(uint32_t *evicted)
 	uint32_t new_base =
 		m_base_time + (m_nlive ? (m_abs_ord - m_live[0].first_ord) : 0) * m_interval;
 
-	/* Durably close the current head so its committed records survive. */
+	/* Durably close the current head so its committed records survive. #384: a
+	 * failure here must abort the rollover (return early, no in-RAM state
+	 * mutated yet) rather than proceeding to claim a new head page while the
+	 * old one's tail bytes were never actually flushed. */
 	if (m_nlive > 0) {
-		flush_stage_pad();
+		int ret = flush_stage_pad();
+		if (ret) {
+			return ret;
+		}
 	}
 
 	uint16_t next = (uint16_t)((m_last_phys + 1) % HIST_NPAGES);
