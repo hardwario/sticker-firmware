@@ -634,26 +634,26 @@ in a dedicated **plaintext** record next to the info record — a small protobuf
 
 - **Lay-down.** Once a `claim_token` is provisioned, the firmware writes `clm` alongside `inf`
   (a two-record NDEF message) whenever it lays down the resting tag content.
-- **Claim + delete.** The Manager-App reads `clm`, claims with the backend (which enforces
-  first-claim-wins via an ownership check), and — **after the server confirms** — deletes the
-  `clm` record straight from the ST25DV EEPROM over RF. Because the tag is RF-powered, this
-  works **even with the sticker powered off**; the phone must keep the `inf` record (delete
-  `clm` only).
-- **Three independent end-of-claim triggers (#308).** The delete-detection above still works
-  unmodified (kept for backward compatibility with older Manager-App builds), but an RF delete is
-  unauthenticated — a rogue phone could delete `clm` as a nuisance, and the app needs an extra RF
-  write after claiming just to end the window. Two better alternatives now also end it:
+- **Claim.** The Manager-App reads `clm` and claims with the backend, which enforces
+  first-claim-wins via an ownership check.
+- **Two authenticated end-of-claim triggers (#308, #360).** An earlier design also ended the
+  window on an unauthenticated RF delete of the `clm` record — removed (#360): deleting `clm`
+  proved nothing about `secret_key` possession, so a rogue phone could nuisance-close a claim
+  window, or an app pairing with the wrong `secret_key` could "confirm" a claim it doesn't
+  actually control. `CLM_PENDING → CLM_CONSUMED` is reachable only via:
   - **`clm_ack` command** — an explicit, empty `Command` sent over the already-encrypted
     `hio.stck:cmd` channel (same authentication as `set_secret_key`/`factory_reset`: only a phone
-    holding `secret_key` can send it). The app can send this right after the backend confirms the
-    claim instead of an RF delete.
+    holding `secret_key` can send it). The app sends this right after the backend confirms the
+    claim.
   - **Implicit consume on any authenticated command.** Decrypting *any* `hio.stck:cmd` frame at
     all already proves the caller holds `secret_key` — the same bar the rest of this section
     relies on — so the firmware ends the claim window as a side effect of the *first* real
     command a paired phone sends, even one that isn't `clm_ack`.
 
-  All three triggers funnel through the same latch transition, so the rest of this section
-  applies identically regardless of which one fired.
+  Both triggers funnel through the same latch transition, so the rest of this section applies
+  identically regardless of which one fired. The `hio.stck:clm` NDEF record type is still
+  recognized on read (so it doesn't fall into the "unrecognized record" log path), but is now
+  purely informational — deleting it from the tag has no effect on the latch.
 - **No resurrection (unless re-armed).** The firmware never rewrites `clm` on its own once it is
   gone. A small persisted latch (`UNSET → PENDING → CONSUMED`, in its own `clm` settings key,
   outside the config blob so `device_reset`/`factory_reset` leave it intact) tracks this: once
@@ -688,19 +688,17 @@ in a dedicated **plaintext** record next to the info record — a small protobuf
   **`ats claim done`** (force-close, mirrors `clm_ack`), **`ats claim status`** (show the latch
   state — replaces the old `nfc clm` command). These only exist on debug builds (no shell in
   release); `clm_rearm` is reachable from real NFC on release firmware too.
-- **Threat model.** The delete-detection path is unauthenticated over RF (accepted: the claim
-  window relies on physical proximity + the backend ownership check for that path). A rogue phone
-  deleting `clm` is a nuisance/DoS at worst — the token is **not lost** (still readable over the
-  encrypted `get_info` channel with `secret_key`), and a legitimate `clm_ack` or any real command
-  still ends the window correctly afterwards. The shell `nfc clm` command shows the latch state
-  for bring-up.
-- **HW-validated** (2026-07-07, J-Link 822005109, debug image): `settings erase` → `config
+- **HW-validated** (2026-07-07, J-Link 822005109, debug image; describes the mechanism as it
+  existed **before** #360 removed the unauthenticated delete trigger — kept here as the historical
+  record of that validation, not current behavior): `settings erase` → `config
   claim-token` + `settings save` → reboot arms `PENDING`, `nfc dump` shows the two-record
-  `[inf, clm]` message; a targeted delete (info-only rewrite) latches `CONSUMED` with no
-  resurrection across reboot, and `claim_token` remains readable via `get_info`. Surfaced and
+  `[inf, clm]` message; a targeted delete (info-only rewrite) latched `CONSUMED` with no
+  resurrection across reboot, and `claim_token` remained readable via `get_info`. Surfaced and
   fixed one bug in the process: the arming boot could see the pre-provisioning info-only tag
   and immediately mis-latch `CONSUMED` before `clm` was ever laid down; a `just_armed` guard
-  on the consume branch distinguishes "not laid down yet" from "phone deleted it".
+  on the consume branch distinguished "not laid down yet" from "phone deleted it" — that guard
+  now protects the deferred-persist mechanism described above (#340 M3) instead, since the
+  branch it originally guarded no longer exists.
 
 **Power.** The NFC poll is fully **event-driven**: the poll thread sleeps forever on the ST25DV **GPO interrupt** (PB12, EXTI) and only wakes when RF activity occurs, so an untouched tag costs nothing and the CPU stays in Stop2 between taps (no periodic poll). For this to work the ST25DV **GPO output must be enabled** — the `GPO_EN` master-enable bit is set alongside the RF-write / field-change event bits, in **both** the static config register and the dynamic `GPO_CTRL_Dyn`. (A missing `GPO_EN` left the pin mute, so the MCU never woke and encrypted NFC failed on the **release** build — debug worked only because `CONFIG_PM=n` keeps the CPU polling. This was the root cause of the long-standing "NFC works on debug, not release" bug.) While a phone is engaged, a short **keep-awake** window — a `SUSPEND_TO_IDLE` policy lock, re-armed on each RF event and released after ~5 s of RF quiet — holds the CPU out of Stop2 so a mid-command Stop2 can't tear the multi-transfer i2c1 tag I/O; GPIOB is marked a PM wake-up source so the port isn't suspended and its EXTI stays armed in Stop2. Idle current is unchanged (the lock is never taken without an RF event; the sticker reaches the same Stop2 floor as before).
 
