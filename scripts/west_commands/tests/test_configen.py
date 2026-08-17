@@ -204,6 +204,38 @@ def test_build_proto_model_structure():
     assert sorted(ids.values()) == [1, 2, 3, 4, 5, 6, 7]  # contiguous
 
 
+# #340 M23: a float/double param with no explicit min/max must NOT take the
+# ranged 'float' kind (which falls back to the -FLT_MAX/FLT_MAX macro strings
+# and, once the template appends its 'f' literal suffix, produces an invalid
+# C token like `-FLT_MAXf`) — it must fall back to 'plain', mirroring the int
+# branch. Currently latent in the real schema (zero float/double params), so
+# this exercises build_ingest_model() directly with a temporary one.
+def test_float_param_without_bounds_is_plain_not_ranged():
+    cfg = _load_config()
+    cfg["parameters"].append({
+        "name": "temp_float_no_bounds", "type": "float",
+        "proto_group": "application", "proto_id": 9999,
+    })
+    model = configen.build_ingest_model(cfg)
+    app = next(g for g in model["ingest_groups"] if g["c_message"].endswith("Application"))
+    param = next(p for p in app["params"] if p["c_name"] == "temp_float_no_bounds")
+    assert param["kind"] == "plain"
+    assert "min" not in param and "max" not in param
+
+
+def test_float_param_with_bounds_is_ranged():
+    cfg = _load_config()
+    cfg["parameters"].append({
+        "name": "temp_float_bounds", "type": "float", "min": -40.0, "max": 85.0,
+        "proto_group": "application", "proto_id": 9998,
+    })
+    model = configen.build_ingest_model(cfg)
+    app = next(g for g in model["ingest_groups"] if g["c_message"].endswith("Application"))
+    param = next(p for p in app["params"] if p["c_name"] == "temp_float_bounds")
+    assert param["kind"] == "float"
+    assert param["min"] == -40.0 and param["max"] == 85.0
+
+
 # --- allocator + guard ----------------------------------------------------
 
 def test_allocator_appends_next_free():
