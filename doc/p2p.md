@@ -588,14 +588,88 @@ Implementation phasing (each independently reviewable):
 
 1. **FW transport port** — re-implement PR #228's TX path on mainline
    (`radio_mode`, `app_ccm`, `app_transport` facade), still unpaired/unACKed
-   behind a build flag; salvage `app_p2p.c` logic, `p2p.js` + tests.
+   behind a build flag; salvage `app_p2p.c` logic, `p2p.js` + tests. Bench
+   HIL from day one via the two-STICKER rig (§14) — no need to wait for
+   phase 3/4's real gateway/central to start validating the wire format.
 2. **FW join + ACK state machine** — §5–§7 (RX1, retries, NVS pairing state,
    join triggers, self-healing rejoin), including the device-side EU868
    duty-cycle tracker (§11) LoRaMac would otherwise have provided for free.
+   Also HIL-testable on the two-STICKER rig (§14): join handshake, ACK/retry,
+   anti-replay.
 3. **Northbridge RX-stream + scheduled TX** — UART protocol extension.
 4. **Central service** — enrollment API, session DB, dedup/ACK routing,
    management MQTT, northbound decode.
 5. **App-side** — join-key derivation + central registration (Manager-App
    coupling issue to be filed when phase 4 starts).
 6. **HW validation** — range, RX1 timing, power delta vs. the 92 µA baseline,
-   multi-gateway dedup/roaming.
+   multi-gateway dedup/roaming. This is where the two-STICKER rig's
+   optimistic RX1 timing must be re-validated against the real
+   northbridge+RPi+central round trip (§14).
+
+---
+
+## 14. Bench validation strategy: two-STICKER rig (pre-hardware)
+
+FIBER v2 gateway hardware and the central service don't exist yet for this
+project, and phases 3–5 (§13) build them. That would otherwise block *any*
+HIL testing of phases 1–2's firmware work (wire format, crypto, join/ACK
+state machine) until they land. It doesn't have to: the gateway's
+STM32WL5MOC (STM32WL55xx) and the STICKER's STM32WLE5 are the **same SX126x
+sub-GHz radio family, fully PHY-compatible** (§1) — a second STICKER can
+stand in for "the network side" on the radio link well enough to validate
+everything except real round-trip timing.
+
+### Setup
+
+- **Device A ("node")** — mainline P2P firmware, `radio-mode p2p`, behaves
+  exactly like a deployed unit.
+- **Device B ("gw-sim")** — same firmware image, debug build, with two new
+  debug-shell commands (`CONFIG_APP_CMD_DEBUG_SHELL`-gated, same idiom as the
+  existing `tester cmd <transport> <hex>` command-dispatch injector and the
+  `ats lrw lc ...` link-check debug helpers):
+  - `ats p2p listen` — puts the radio into continuous RX on the P2P channel
+    params (§3.3) and logs every received frame (raw hex + parsed
+    `net_id`/`dev_addr`/`frame_type`/`counter` header) over RTT.
+  - `ats p2p reply <hex>` — transmits a hand-built frame immediately, so a
+    human (or a bench script) can inject a JoinAccept/Ack/Detach/
+    RejoinRequest in response to what `listen` just logged, without a real
+    central.
+- Both devices need independent J-Link/RTT access (two probes, or one probe
+  swapped between them) — same bench pattern as any other two-unit HIL
+  session.
+
+### What this validates
+
+- Wire format (§3): header framing, AES-CCM tag verification, payload
+  budget.
+- `dev_nonce`/uplink-counter anti-replay and its capped-skip window (§5.3,
+  §6).
+- JoinRequest/JoinAccept handshake (§5.3) and `session_key` derivation
+  matching on both sides.
+- ACK (§6) and the retry/backoff state machine, including the 120 s
+  boot-window / NFC-`p2p_join` trigger cap (§5.2).
+- `Detach`/`RejoinRequest` (§5.4, §7).
+
+Test frames for device B's `ats p2p reply` (JoinAccept, Ack, etc.) can be
+hand-crafted offline the same way `sticker_nfc_frame.py` hand-crafts NFC
+AES-CCM frames for phone-free NFC testing — same primitive
+(`app_ccm_encrypt_and_tag`/`app_ccm_auth_decrypt`), different frame layout.
+
+### What this does NOT validate — still needs real FIBER v2 hardware (phase 6)
+
+- **RX1 timing margin.** Two STICKERs sitting next to each other respond
+  far faster than the real gateway→central→gateway round trip over
+  UART+MQTT+LAN (§6, ~1 s budget) — this rig's timing is optimistic and must
+  not be mistaken for a validated margin.
+- **Multi-gateway dedup, central DB, MQTT management surface** (§8/§9) —
+  there is no second radio "gateway" role in this rig, and no central
+  service at all.
+- **Northbridge UART protocol** (§8) — irrelevant here; device B is a
+  STICKER, not a STM32WL5MOC northbridge.
+
+### Turning this into a tracked test plan
+
+Once phase 1–2 code actually lands, the scenarios above become concrete,
+numbered HIL test cases in `doc/manual-test-plan.md` (same X1-style format
+as the PR #358 regression scenarios) rather than the prose method described
+here.
