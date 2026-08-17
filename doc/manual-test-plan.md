@@ -1801,6 +1801,297 @@ on the resulting downlink.
 
 ---
 
+## PR #358 regression scenarios (2026-08-13 critical-analysis campaign)
+
+PR #358 merged into `v1.4.0` on 2026-08-17 (`5d14b24`): 2 CRITICAL, 12 HIGH, and 16 of issue
+[#340](https://github.com/hardwario/sticker-firmware/issues/340)'s MEDIUM findings
+(M1/M2/M3/M4/M5/M6/M8/M9/M13/M15/M17/M18/M19/M22/M24/M27). **None of these have HIL confirmation
+yet** — code-review/native_sim/build-verified only. This section is the checklist for closing that
+gap before `v1.4.0 → main`. Test IDs `X1`-`X20`; `[HIL-only]` items have no automated regression
+coverage at all (native_sim can't reach them), the rest already have a unit/native_sim test but
+still need HW confirmation that the real device behaves the same way.
+
+### X1 — C1: history OOB write on flash write failure
+
+**Goal:** A `flash_area_write()` failure inside `backend_append()`'s streaming loop no longer
+leaves `m_stage_len` stuck, so the next capture doesn't index `m_stage[]` out of bounds.
+**Observable:** No crash/HardFault after a forced write failure; the device keeps sampling and
+capturing normally afterward.
+
+**Prompt for Claude:** Enable `history` (flash backend, release or debug), force a flash write
+error (temporarily bad `flash_area_write` return, or an out-of-range history flash offset via
+shell if available), capture a few more records, confirm no HardFault/reset and `history stats`
+stays sane afterward.
+
+- [ ] Pass
+
+### X2 — C2: SetParam vendor-transport write gate
+
+**Goal:** `vendor`-transport `SetParam` can no longer write fields excluded from `vendor` (e.g. any
+`alarm_0..15` slot, `lorawan` identity/session fields), only `nfc`/`lrw`-writable ones.
+**Observable:** A vendor-authenticated `SetParam` targeting `alarm_0` (or a LoRaWAN identity field)
+is rejected; the same field set via `nfc`/`lrw` succeeds.
+
+**Prompt for Claude:** Using the vendor channel (`hio.stck:vnd`, vendor_token auth — see
+[[reference_nfc_inf_record]] framing), attempt `SetParam alarm_0=...`; confirm rejection. Repeat
+the identical write over NFC secret_key auth; confirm success.
+
+- [ ] Pass
+
+### X3 — H: history replay-active flag cleared on RECONNECT abort (M4)
+
+**Goal:** A history replay aborted by a RECONNECT transition clears `app_history_set_replay_active
+(false)` too, so `app_history_capture()` doesn't self-skip for the whole rejoin backoff.
+**Observable:** After a RECONNECT-triggered replay abort, new samples ARE captured into history
+during the backoff window (`history stats` count climbs), not frozen until rejoin.
+
+**Prompt for Claude:** Trigger a history replay (`ReqHistoryPage` or `ats` equivalent), force a
+RECONNECT mid-replay (radio-silence / bad gateway), then keep sampling during the backoff and
+confirm `history stats` count keeps climbing.
+
+- [ ] Pass
+
+### X4 — H: `ats lrw compose` runs on `m_work_q`, no longer races real TX
+
+**Goal:** The debug `ats lrw compose` shell command composes on `m_work_q` instead of the shell
+thread, so it can't race a real TX in flight.
+**Observable:** Running `ats lrw compose` while a real telemetry send is in flight does not corrupt
+the frame or crash; both complete cleanly.
+
+**Prompt for Claude:** With a short `interval-report`, fire `ats lrw compose` repeatedly while
+telemetry is actively sending; confirm no corruption/crash and both the manual and periodic frames
+land on the LNS.
+
+- [ ] Pass
+
+### X5 — H `[HIL-only]`: `advance_page()` doesn't commit a ring page on flash erase/write failure
+
+**Goal:** A flash erase/write failure during page eviction no longer commits the (bad) page to the
+ring — success-path behavior is unit-tested, only the error path needs HW confirmation.
+**Observable:** Forcing a page-evict failure leaves the ring state consistent (`history stats`
+doesn't show a phantom committed page); no OOB/corruption on subsequent captures.
+
+**Prompt for Claude:** Fill history to force page eviction, inject a flash erase/write failure at
+that exact moment (may need a temporary build hook), confirm no page falsely committed and no
+follow-on corruption.
+
+- [ ] Pass
+
+### X6 — H: deferred NFC actions run after counters/sensor init (boot-staged `reset_counters`, #340 M8)
+
+**Goal:** A boot-staged offline `reset_counters{hall_left:true}` no longer wipes ALL totalizers —
+the deferred-action dispatch now runs after `app_counters_init()`/`app_sensor_init()`.
+**Observable:** After staging `reset_counters` for hall_left only (NFC while powered off, then
+boot), only `hall_left` resets to 0; `hall_right`/input counters keep their pre-boot NVS values.
+
+**Prompt for Claude:** With non-zero counters on ≥2 channels, stage `reset_counters{hall_left}`
+over NFC while powered off, reboot, confirm ONLY hall_left is zeroed — the others must survive.
+
+- [ ] Pass
+
+### X7 — H + M3 + M15 + M24: clm arm/rearm persist-after-confirmed-write + vendor decrypt doesn't consume + `m_clm_state` locked
+
+**Goal:** (a) `clm_consume()` no longer fires on a vendor-authenticated decrypt (only `clm_ack` /
+successfully-decrypted `hio.stck:cmd`); (b) the arm sequence (M3) and rearm sequence (M15) persist
+`CLM_PENDING`/`UNSET` only after the tag write / config-save is confirmed, reverting instead of
+latching a bad terminal state on failure; (c) `m_clm_state` is now locked against the shell
+`ats claim active/done` commands racing the NFC poll thread (M24).
+**Observable:** A vendor-channel decrypt on a claimed device does NOT flip `clm` state; an
+inf-write failure during arm reverts to `CLM_UNSET` (retries next poll) instead of latching
+`CLM_CONSUMED`; concurrent shell claim commands + NFC poll don't corrupt `clm` state.
+
+**Prompt for Claude:** Reproduce the vendor-decrypt-doesn't-consume path per
+[[project_pr362_hil_verify_0814]]'s 3 scenarios (already HW-confirmed once for the PR#362 test
+suite itself — this is confirming the same behavior survived the subsequent M24 lock rework
+merged in via PR#358). Then race `ats claim active`/`ats claim done` against live NFC field
+activity and confirm no corrupted `clm` state (check via `ats claim status` / NVS readback).
+
+- [ ] Pass
+
+### X8 — H: reset tiers reboot on mid-sequence failure; LoRaMac NVM wiped on factory/vendor reset
+
+**Goal:** `settings reset`/`factory_reset`/`vendor_reset` now reboot (never return) even on a
+mid-sequence failure, and wipe LoRaMac's own NVM (frame counters/DevNonce) alongside the key reset.
+**Observable:** After `factory_reset`/`vendor_reset`, a fresh OTAA join uses `DevNonce`/frame
+counters starting from 0 (no "already used" rejection from a network server that remembers the
+old ones — see [[reference_cs_otaa_devnonce_flush]] for the failure mode this prevents).
+
+**Prompt for Claude:** Join OTAA, exchange a few frames, `factory_reset` (or `vendor_reset`),
+rejoin OTAA on the SAME network server without a manual DevNonce flush, confirm the join succeeds
+cleanly (proving LoRaMac NVM was actually wiped, not just the app config).
+
+- [ ] Pass
+
+### X9 — H: alarm `rt_sync()` resets stale latch on any rule edit; RATE/COUNT holds after firing
+
+**Goal:** Editing an alarm rule (not just source/quantity changes) resets its runtime latch; a
+RATE/COUNT alarm holds after firing instead of re-firing every window.
+**Observable:** Editing any field of an armed rule clears its latched state cleanly; a RATE/COUNT
+alarm fires once per window then stays quiet (no report spam) until the condition genuinely
+re-triggers.
+
+**Prompt for Claude:** Arm a RATE or COUNT alarm (hall/input), trigger it, confirm it does NOT
+re-fire every subsequent window while the condition persists — only once, then re-arms cleanly
+after edit. Regression-tested in `tests/alarm_eval` already; this is HW confirmation only.
+
+- [ ] Pass
+
+### X10 — H: SetParam snapshot/apply/rollback mutex-guarded against cross-transport races
+
+**Goal:** `app_cmd_handle_set_param()`'s snapshot/apply/rollback sequence can't be torn by a
+concurrent `SetParam` on a different transport.
+**Observable:** No corrupted config after firing `SetParam` on two transports back-to-back/
+concurrently (e.g. NFC + LoRaWAN downlink landing close together).
+
+**Prompt for Claude:** Fire a `SetParam` over NFC and a different `SetParam` over a LoRaWAN
+downlink as close together as practically achievable; confirm both apply cleanly with no
+torn/partial config afterward (`config show`/`GetConfig`).
+
+- [ ] Pass
+
+### X11 — M1: NFC encrypted-cmd response cache requires byte-exact match
+
+**Goal:** A forged 8-byte `BE32(serial)||BE32(counter)` header frame at the cached counter is
+rejected — the cache only serves a retransmission on a byte-exact ciphertext match.
+**Observable:** Writing just the 8-byte header (no valid CCM tag) at the last-used counter does
+NOT get served a cached reply / does NOT light the success LED.
+
+**Prompt for Claude:** Send one legitimate encrypted command, note the response + counter. Craft
+an 8-byte header-only frame `BE32(serial)||BE32(same counter)` (per
+[[project_nfc_phone_free_testing_0811]]'s hand-crafted-frame technique) and write it; confirm it's
+rejected (red LED / no cached reply), not silently accepted.
+
+- [ ] Pass
+
+### X12 — M2: `nonce_counter` preserved across `vendor_reset`
+
+**Goal:** `vendor_reset` no longer restarts the AES-CCM nonce counter from 0 under the unchanged
+`vendor_token` key.
+**Observable:** A previously-recorded `hio.stck:vnd` frame does NOT verify/replay after a
+`vendor_reset`; `nonce_counter` reads back unchanged (not 0) post-reset.
+
+**Prompt for Claude:** Record a legitimate vendor-channel frame + its nonce counter, perform
+`vendor_reset`, replay the recorded frame — confirm rejection (nonce already used / out of window),
+and confirm `nonce_counter` in `get_info`/`config show` did NOT drop to 0.
+
+- [ ] Pass
+
+### X13 — M5: telemetry trigger coalesced with a queued drain still composes
+
+**Goal:** A telemetry-compose trigger that coalesces with an already-queued alarm/history drain on
+`m_send_work` no longer gets silently dropped.
+**Observable:** An interval boundary landing during an active drain still produces its fPort-2
+telemetry frame on the LNS — no missing report for that interval.
+
+**Prompt for Claude:** Arrange an alarm/history drain to be in flight right as `interval-report`
+elapses (e.g. trigger several alarms right before the interval boundary), confirm the periodic
+telemetry frame still appears on the LNS for that interval.
+
+- [ ] Pass
+
+### X14 — M6: compose resets on frame abandon (regression-tested, HW confirmation only)
+
+**Goal:** A frame abandoned after `FRAME_MAX_RETRIES` calls `app_compose_reset()`, so the next
+cycle composes from a fresh snapshot instead of shipping the previous cycle's stale one.
+**Observable:** After an abandoned frame (e.g. radio-silenced past max retries), the NEXT uplink's
+sensor values reflect current readings, not the abandoned cycle's stale snapshot.
+
+**Prompt for Claude:** Force a frame to exhaust `FRAME_MAX_RETRIES` (radio-silence during a
+multi-frame send), then change a sensor value and confirm the next cycle's uplink reflects the NEW
+value, not the abandoned frame's stale one. Already covered by `tests/compose`'s
+`test_reset_after_abandon_forces_fresh_snapshot` — this is HW confirmation only.
+
+- [ ] Pass
+
+### X15 — M9: DevStatusReq reads cached battery voltage (ADC race eliminated)
+
+**Goal:** `DevStatusReq`'s battery answer no longer triggers a live ADC read racing the sensor
+thread — it reads the periodic sampler's cached voltage instead.
+**Observable:** No hang/IWDG reset when a DevStatusReq lands during an active sensor sample; the
+reported battery level in the LinkADRReq/DevStatusAns matches the last `ats sensors sample`
+voltage reading (not stale/garbage).
+
+**Prompt for Claude:** With a short `interval-sample`, request `DevStatusReq` from the network
+server repeatedly while sampling is active; confirm no hangs/resets over an extended run, and the
+reported battery level tracks `ats sensors sample`'s voltage.
+
+- [ ] Pass
+
+### X16 — M13: late `LinkCheckAns` not reprocessed
+
+**Goal:** `lc_response_work_handler()` no longer double-applies a late `LinkCheckAns` that arrives
+after the same link-check was already resolved implicitly by an intervening downlink.
+**Observable:** In WARNING state, a downlink resolves LC implicitly, then a genuinely late
+`LinkCheckAns` for that same request does NOT also count — no unearned WARNING→HEALTHY jump from
+a single physical round trip.
+
+**Prompt for Claude:** Drive into WARNING (L8), arrange a downlink to land right as a link-check
+is pending (so it resolves LC implicitly), then confirm a late/duplicate `LinkCheckAns` doesn't
+also increment `m_consecutive_lc_ok` a second time (`ats lrw status` consecutive-ok counter).
+
+- [ ] Pass
+
+### X17 — M17: `app_report_suspend()` cancels pending report work
+
+**Goal:** `app_power_suspend()`'s call into `app_report_suspend()` now actually cancels
+`m_periodic_work`/`m_trigger_work` on `m_work_q`, not just the timer — no radio touch after
+suspend.
+**Observable:** Triggering a report right before power-off/suspend does NOT cause a send after the
+suspend call — no radio activity (TX log lines) following the suspend log line.
+
+**Prompt for Claude:** Queue a report trigger, immediately invoke device suspend/poweroff, confirm
+via RTT log that no compose/TX happens after the suspend log line.
+
+- [ ] Pass
+
+### X18 — M18: SHT4x implausible-but-valid reading no longer triggers a "no data" alarm
+
+**Goal:** An out-of-range-but-CRC-valid SHT4x reading (`-ERANGE`) no longer overwrites the live
+temperature/humidity with `NaN`, so it can't spuriously trip `APP_ALARM_NO_DATA_MS`.
+**Observable:** Forcing one implausible-but-valid reading does not raise a no-data alarm; the
+reported value holds the last known-good reading instead of going `NaN`.
+
+**Prompt for Claude:** If a way exists to force an out-of-plausible-range SHT4x reading (extreme
+thermal/humidity stimulus, or a debug hook), do one bad-but-valid sample and confirm no no-data
+alarm fires and `ats sensors sample` shows the last good value, not NaN.
+
+- [ ] Pass
+
+### X19 — M19 + M27 `[HIL-only, best-effort]`: `m_i2c_fail_streak` + config reset ops locked (concurrency)
+
+**Goal:** `m_i2c_fail_streak` is now lock-protected against concurrent sensor-WQ/report-timer/
+shell/cmd-dispatch access (M19); `app_config_device_reset()`/`factory_reset()`/`vendor_reset()`
+share a lock with `SetParam`'s snapshot/apply/rollback so neither can clobber the other (M27).
+**Observable:** No missed/spurious I2C-bus-recovery trigger under concurrent shell+timer sampling
+with forced I2C failures; no corrupted config from a `SetParam` racing a shell `settings reset`.
+True races are inherently hard to force manually — treat this as a soak/stress best-effort, not a
+guaranteed repro.
+
+**Prompt for Claude:** Run `ats sensors sample` in a tight loop from the shell while the periodic
+report timer also samples, with the I2C bus forced into failure (disconnect a sensor) — confirm
+`i2c_recover_bus()` eventually fires (not stuck forever below threshold). Separately, fire
+`SetParam` repeatedly while issuing `settings reset` from another channel — confirm no crash/torn
+config.
+
+- [ ] Pass
+
+### X20 — M22: calibration TX decoupled from the blocking main loop
+
+**Goal:** `app_calibration_run()` no longer calls the blocking `lorawan_send()` directly in its
+main loop — a MAC-confirm stall can no longer wedge the calibration thread past its own watchdog
+feed/deadline reboot.
+**Observable:** Calibration mode stays responsive (LED blink continues, watchdog doesn't fire
+unexpectedly) even if a send stalls; it self-recovers via its deadline reboot rather than hanging
+silently.
+
+**Prompt for Claude:** Enter calibration mode (S12/S12b), force a MAC-confirm stall (radio-silence
+during calibration's send), confirm the calibration LED/heartbeat keeps running and the session
+ends via its own deadline reboot rather than an unexplained hang/IWDG reset.
+
+- [ ] Pass
+
+---
+
 ## Run record
 
 | Field | Value |
