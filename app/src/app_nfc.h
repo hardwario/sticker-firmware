@@ -84,6 +84,11 @@ void app_nfc_clm_ack(void);
  * in one place). */
 uint8_t app_nfc_clm_state_get(void);
 
+/* Whether the "processing"/"rejected" NFC LED blink timer is currently armed
+ * (#340 L1 regression test support: a hard response-write failure on the
+ * boot-staged path, which has no RF-session backstop, must stop it). */
+bool app_nfc_led_blink_active(void);
+
 #ifdef __cplusplus
 }
 #endif
