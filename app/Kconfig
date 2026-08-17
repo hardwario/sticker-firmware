@@ -24,7 +24,7 @@ config FW_DEBUG
 
 config APP_DEBUG_AUTOSUSPEND_S
 	int "Debug auto-suspend idle timeout (seconds, 0 = disabled)"
-	depends on FW_DEBUG && POWEROFF
+	depends on FW_DEBUG && POWEROFF && SHELL_BACKEND_RTT
 	default 7200
 	help
 	  On the Debug build, after this many seconds with no RTT/shell
