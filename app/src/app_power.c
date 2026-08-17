@@ -9,8 +9,8 @@
 #include "app_log.h"
 #include "app_sensor.h"
 #if defined(CONFIG_LORAWAN)
-#include "app_lrw.h"
 #include "app_report.h"
+#include "app_transport.h"
 #endif
 
 #include <zephyr/kernel.h>
@@ -37,7 +37,7 @@ void app_power_suspend(void)
 
 #if defined(CONFIG_LORAWAN)
 	app_report_suspend(); /* stop the report cadence before the radio teardown */
-	app_lrw_suspend();
+	app_transport_suspend();
 #endif
 	app_sensor_suspend();
 

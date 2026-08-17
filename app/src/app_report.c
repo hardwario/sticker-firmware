@@ -8,7 +8,7 @@
 #include "app_counters.h"
 #include "app_history.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_transport.h"
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_wdog.h"
@@ -121,16 +121,17 @@ static void run_report(bool periodic)
 	}
 
 	/* State-gated cadence: skip the UPLINK while the link is joining/
-	 * reconnecting/disabled. app_lrw kicks us (report_kick) on the link-ready
-	 * edge to resume promptly and drain the buffered history. */
-	if (!app_lrw_is_ready()) {
-		LOG_DBG("Report skipped: link not ready (%d)", app_lrw_get_state());
+	 * reconnecting/disabled. The transport kicks us (report_kick) on the
+	 * link-ready edge to resume promptly and drain the buffered history. */
+	if (!app_transport_is_ready()) {
+		LOG_DBG("Report skipped: link not ready (%d)", app_transport_get_state());
 		return;
 	}
 
-	/* Hand off to the transport: app_lrw composes the snapshot and splits it
-	 * into DR-budget frames (LC piggyback + duty-cycle retry live there). */
-	app_lrw_send_telemetry();
+	/* Hand off to the transport: it composes the snapshot and splits it into
+	 * budget frames (DR-budget + LC piggyback + duty-cycle retry for LoRaWAN;
+	 * fixed MTU + app-side duty-cycle for P2P). */
+	app_transport_send_telemetry();
 }
 
 static void periodic_work_handler(struct k_work *work)
@@ -205,9 +206,10 @@ int app_report_init(void)
 	 * app_counters_save before the link gate) fires even on a device that never
 	 * joins — the worst-case lost-pulse window is interval_report regardless of
 	 * the link state. Reporting itself still self-skips at the link gate until
-	 * joined; app_lrw's ready kick re-arms with an immediate report on join. */
+	 * joined; the transport's ready kick re-arms with an immediate report on
+	 * join (LoRaWAN) or start (P2P). */
 	schedule_next_report();
-	app_lrw_register_ready_cb(report_kick);
+	app_transport_register_ready_cb(report_kick);
 
 	return 0;
 }

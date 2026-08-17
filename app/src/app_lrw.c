@@ -863,17 +863,17 @@ static void join_complete_work_handler(struct k_work *work)
 /* Radio disabled by the radio-mode config (#271). This replaces the old
  * DevEUI/DevAddr-zero radio-silent guard (#98/#175): whether the radio comes up
  * is now an explicit user choice, not inferred from a blank identifier. OFF is
- * radio-silent (sensor/history still run); P2P is reserved until the raw-LoRa
- * transport lands (#118/#228) and falls back to OFF with a warning; LORAWAN
- * (default) brings the stack up normally. A LORAWAN device with an all-zero
- * DevEUI therefore now attempts to join and fails loudly instead of silently
- * disabling — provisioning problems surface instead of masquerading as OFF. */
+ * radio-silent (sensor/history still run); LORAWAN (default) brings the stack
+ * up normally. A LORAWAN device with an all-zero DevEUI therefore attempts to
+ * join and fails loudly instead of silently disabling — provisioning problems
+ * surface instead of masquerading as OFF.
+ *
+ * radio_mode == P2P never reaches this function at all (#118): the
+ * app_transport facade routes it to app_p2p_init()/app_p2p_join() instead of
+ * app_lrw_init()/app_lrw_join(), so app_lrw.c's own state machine never runs
+ * in that mode. */
 static bool radio_disabled(void)
 {
-	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_P2P) {
-		LOG_WRN("radio-mode P2P not yet implemented (#118/#228) — radio stays off");
-		return true;
-	}
 	return g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_OFF;
 }
 
