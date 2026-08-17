@@ -525,7 +525,8 @@ static void heartbeat_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 	app_wdog_ping(m_wdog_channel);
-	k_work_schedule_for_queue(&m_work_q, &m_heartbeat_work, K_SECONDS(P2P_HEARTBEAT_PERIOD_SEC));
+	k_work_schedule_for_queue(&m_work_q, &m_heartbeat_work,
+				  K_SECONDS(P2P_HEARTBEAT_PERIOD_SEC));
 }
 #endif /* defined(CONFIG_WATCHDOG) */
 

@@ -225,7 +225,7 @@ ZTEST(ccm, test_ciphertext_tamper)
  * three (C, JS, and the independent Python oracle) agree on the same 16 bytes. */
 ZTEST(ccm, test_ecb_encrypt_block_known_answer)
 {
-	static const uint8_t block[16] = {'H', 'I', 'O', '-', 'P', '2', 'P', '-',
+	static const uint8_t block[16] = {'H', 'I', 'O', '-', 'P',  '2',  'P',  '-',
 					  'J', 'O', 'I', 'N', 0x12, 0x34, 0x56, 0x78};
 	static const uint8_t expected[16] = {0xec, 0xf6, 0xd6, 0xe6, 0x03, 0x6b, 0x54, 0xe2,
 					     0xba, 0x69, 0xb4, 0x3b, 0xd5, 0x16, 0x18, 0xa9};
