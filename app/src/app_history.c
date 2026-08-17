@@ -946,6 +946,12 @@ void app_history_capture(void)
 	uint32_t evicted = 0;
 	if (backend_append(rec, m_sample_size, &evicted) != 0) {
 		LOG_WRN("history append failed — record dropped");
+		/* #340 L8: advance_page() may have already committed a real eviction
+		 * before the per-record write that actually failed (backend_append()
+		 * still reports it via *evicted) — apply the same base_time fixup here
+		 * too, or the oldest-record time base goes stale relative to the live
+		 * page set that was already shifted. */
+		m_base_time += evicted * m_interval;
 		k_mutex_unlock(&m_lock);
 		return;
 	}
