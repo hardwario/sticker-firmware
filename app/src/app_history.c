@@ -625,14 +625,25 @@ static uint16_t backend_stored(void)
 
 static void backend_reset_logical(void)
 {
-	/* Drop the live set without erasing. The next append starts a fresh page
-	 * whose differing layout/interval header breaks mount-time contiguity with
-	 * the stale pages, which are reclaimed as the ring wraps over them. */
+	/* Drop the live set without erasing. When the reset also changes the
+	 * layout/interval, the next page's differing header already breaks
+	 * mount-time contiguity with the stale pages, which are then reclaimed as
+	 * the ring wraps over them.
+	 *
+	 * #340 L7: that isn't true for a no-layout-change reset (e.g. `history
+	 * sensors <same> on`) -- m_next_seq/m_last_phys are left untouched here, so
+	 * the next page written continues the OLD seq numbering exactly one past
+	 * the last pre-reset page. backend_mount()'s backward chain walk matches
+	 * on `cur.seq - h.seq == 1`, so after a reboot it reattaches that stale
+	 * page to the new one, producing an m_abs_ord/m_live[0].first_ord mismatch
+	 * that underflows backend_stored(). Burn one seq value so no future page
+	 * can ever land exactly 1 above the last pre-reset page's seq. */
 	m_nlive = 0;
 	m_abs_ord = 0;
 	m_head_dw = 0;
 	m_stage_len = 0;
 	m_head_full = false;
+	m_next_seq++;
 }
 
 static void backend_erase(void)
