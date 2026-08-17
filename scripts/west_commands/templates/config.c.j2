@@ -826,7 +826,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 {% for param in parameters if not param.no_shell %}
 	SHELL_CMD_ARG({{ param.name | settings_key }}, NULL,
 	              "{{ param.help | default('Get/Set ' ~ param.name ~ '.') }}",
-	              cmd_{{ param.name | c_name }}, 1, 1),
+	              cmd_{{ param.name | c_name }}, 1, {{ 0 if param.readonly else 1 }}),
 
 {% endfor %}
 	SHELL_SUBCMD_SET_END

@@ -1551,7 +1551,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 
 	SHELL_CMD_ARG(vendor-reset-allow, NULL,
 	              "Get whether vendor_reset is accepted; settable only over the vendor NFC channel (true/false).",
-	              cmd_vendor_reset_allow, 1, 1),
+	              cmd_vendor_reset_allow, 1, 0),
 
 	SHELL_CMD_ARG(alarm-limit, NULL,
 	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
