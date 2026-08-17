@@ -29,6 +29,10 @@
 
 LOG_MODULE_REGISTER(app_machine_probe, LOG_LEVEL_DBG);
 
+/* #340 M25: bounded retry around lis2dh12_init() in scan_callback() below. */
+#define LIS2DH12_INIT_MAX_ATTEMPTS   3
+#define LIS2DH12_INIT_RETRY_DELAY_MS 20
+
 static uint8_t sht_crc8(const uint8_t *data, size_t len)
 {
 	uint8_t crc = 0xff;
@@ -724,7 +728,23 @@ static int scan_callback(struct w1_rom rom, void *user_data)
 		return ret;
 	}
 
-	ret = lis2dh12_init(m_sensors[m_count].dev);
+	/* #340 M25: a single transient I2C error (rail settling, bus contention)
+	 * used to drop the whole probe (temp/humidity/illuminance/accel/tilt, not
+	 * just tilt) for this scan, with no retry — permanently disabled until a
+	 * manual rescan or reboot, since app_machine_probe_scan() only runs once at
+	 * boot for an already-taught slot. Retry a bounded number of times with a
+	 * short settle delay before giving up. */
+	for (int attempt = 1; attempt <= LIS2DH12_INIT_MAX_ATTEMPTS; attempt++) {
+		ret = lis2dh12_init(m_sensors[m_count].dev);
+		if (!ret) {
+			break;
+		}
+		if (attempt < LIS2DH12_INIT_MAX_ATTEMPTS) {
+			LOG_WRN("lis2dh12_init attempt %d/%d failed: %d, retrying", attempt,
+				LIS2DH12_INIT_MAX_ATTEMPTS, ret);
+			k_sleep(K_MSEC(LIS2DH12_INIT_RETRY_DELAY_MS));
+		}
+	}
 	if (ret) {
 		LOG_DBG("Skipping serial number: %llu", serial_number);
 		return 0;
