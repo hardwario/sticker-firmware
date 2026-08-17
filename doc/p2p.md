@@ -436,16 +436,33 @@ again.
   ACK-every-Nth, or sink-driven TDMA (Piyare et al., §10 related work).
 - **Multi-channel** — should JoinAccept's reserved field assign per-device
   data channels (frequency/SF) to spread load? v1 says single shared channel.
+  **Resolved: yes** — keep building for it. The `reserved` field (§5.3) stays
+  the assignment hook; §13's v1/v2 split is unaffected (single shared channel
+  ships first, per-device assignment is the v2 consumer of a field v1 already
+  reserves), this just confirms the direction is worth the reserved bytes.
 - **Multiple *networks* in RF range** — `net_id` filtering handles it, but the
   join channel is shared; JoinRequests are answered only by the central that
   knows the serial, which resolves ownership implicitly. Confirm this is
   acceptable (a device enrolled at two centrals joins whichever answers
-  first).
+  first). **Resolved: yes** — accepted as designed, no change needed.
 - **Northbridge scheduled-TX precision** — RX1 hit accuracy over
   UART+MQTT+LAN needs a prototype measurement before freezing `rx1_delay`
-  at 1 s.
+  at 1 s. **Resolved:** `rx1_delay` is already per-device and
+  central-assigned (JoinAccept, §5.3), but that alone means changing it
+  needs a live central + a registered device — too slow for bench tuning.
+  Add a debug-only shell override on the node side (same idiom as the
+  existing `ats lrw lc ...` debug helpers, `CONFIG_APP_CMD_DEBUG_SHELL`-gated)
+  so `rx1_delay` can be swept without a full re-join, while measuring
+  northbridge scheduled-TX precision during phase 3 (§13).
 - **Flash budget** — re-measure the dual-stack image against `0x34000`;
-  decide whether debug keeps `CONFIG_APP_LORA_P2P=n`.
+  decide whether debug keeps `CONFIG_APP_LORA_P2P=n`. **Measured 2026-08-17**
+  (current `v1.4.0` tip, no P2P code yet — this is the baseline the dual-stack
+  addition must fit into): release `153116 B / 212992 B (0x34000) = 71.89%`,
+  **~58.5 KB (28.1 %) free**; debug `240900 B / 245760 B = 98.02%`, only
+  **~4.75 KB (1.98 %) free**. Release has comfortable headroom; debug does
+  not — confirms debug keeps `CONFIG_APP_LORA_P2P=n` (same lever already used
+  to drop AU915/US915 from debug.conf, see the debug build RAM+flash coupling
+  fix from issue #340) unless debug frees up budget elsewhere first.
 
 ---
 
