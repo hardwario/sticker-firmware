@@ -134,6 +134,16 @@ int app_counters_init(void)
 		return ret;
 	}
 
+	/* #340 L10: app_hall_init()/app_input_init() (run earlier in main(), from
+	 * app_sensor_init()) arm live GPIO-polling timers that start counting from
+	 * zero immediately, so real pulses can accrue into the live counters before
+	 * this function runs. Capture that boot-window baseline now and add the
+	 * persisted totalizer as an offset below, instead of overwriting it. */
+	struct app_hall_data hall_baseline = {0};
+	struct app_input_data input_baseline = {0};
+	(void)app_hall_get_data(&hall_baseline);
+	(void)app_input_get_data(&input_baseline);
+
 	ret = settings_load_subtree(SETTINGS_SUBTREE);
 	if (ret) {
 		/* L-30: don't let the from-zero live counters be persisted over the
@@ -144,12 +154,15 @@ int app_counters_init(void)
 	}
 
 	if (m_loaded) {
-		/* Restore the totalizers into the live modules. Safe because this
-		 * runs after app_hall_init / app_input_init. */
-		app_hall_set_counts(m_last_saved.hall_left, m_last_saved.hall_right);
-		app_input_set_counts(m_last_saved.input_a, m_last_saved.input_b);
-		LOG_INF("Counters restored: hl=%u hr=%u a=%u b=%u", m_last_saved.hall_left,
-			m_last_saved.hall_right, m_last_saved.input_a, m_last_saved.input_b);
+		uint32_t hall_left = m_last_saved.hall_left + hall_baseline.left_count;
+		uint32_t hall_right = m_last_saved.hall_right + hall_baseline.right_count;
+		uint32_t input_a = m_last_saved.input_a + input_baseline.input_a_count;
+		uint32_t input_b = m_last_saved.input_b + input_baseline.input_b_count;
+
+		app_hall_set_counts(hall_left, hall_right);
+		app_input_set_counts(input_a, input_b);
+		LOG_INF("Counters restored: hl=%u hr=%u a=%u b=%u", hall_left, hall_right, input_a,
+			input_b);
 	}
 
 	return 0;
