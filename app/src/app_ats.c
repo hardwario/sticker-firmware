@@ -474,7 +474,19 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 
 	app_sensor_sample();
 
-	const struct app_sensor_data *d = &g_app_sensor_data;
+	/* #340 L13: snapshot the whole struct under the lock so every field below
+	 * reflects one consistent point in time, instead of reading the live,
+	 * unlocked global across ~20 fields — unlike every other reader here
+	 * (the sensor-watch loop, app_sensor_sample()'s own writers), which take
+	 * g_app_sensor_data_lock. A concurrent sample on another thread mid-write
+	 * could otherwise produce a torn read (mixed pre/post-sample values). */
+	struct app_sensor_data snapshot;
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	snapshot = g_app_sensor_data;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+
+	const struct app_sensor_data *d = &snapshot;
 
 	/* On-device sensors + the device's own discrete inputs. */
 	shell_print(shell, "== Device ==");
