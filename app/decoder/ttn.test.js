@@ -142,6 +142,37 @@ test("decodeUplink decodes legacy bitmap (fPort 1)", () => {
   assert.equal(got.data.pressure, null);
 });
 
+// #340 M26: every declared-present field read past the end of a truncated
+// buffer used to silently produce NaN (bytes[index++] === undefined) instead
+// of null. Progressively truncate a real captured frame (all header bits set,
+// so every field is declared present and gets read) and assert no field is
+// ever NaN, at every truncation length.
+test("decodeUplink legacy bitmap (fPort 1): truncated buffer never yields NaN (#340 M26)", () => {
+  const full = hex("7a01a109fa580258");
+  for (let len = 0; len <= full.length; len++) {
+    const truncated = full.subarray(0, len);
+    const got = codec.decodeUplink({ bytes: truncated, fPort: 1 });
+    for (const [key, value] of Object.entries(got.data)) {
+      assert.ok(!Number.isNaN(value), `${key} is NaN at truncated length ${len}`);
+    }
+  }
+});
+
+// All-0xff bytes -> header = all bits set: extended packet, every optional
+// field (incl. machine-probe/hall/input, tag=(1<<20)) declared present. Covers
+// every readOrNull() call site the first test's real-world capture doesn't
+// reach (it has several header bits clear).
+test("decodeUplink legacy bitmap (fPort 1): truncated all-bits-set extended frame never yields NaN (#340 M26)", () => {
+  const full = Buffer.alloc(40, 0xff);
+  for (let len = 0; len <= full.length; len++) {
+    const truncated = full.subarray(0, len);
+    const got = codec.decodeUplink({ bytes: truncated, fPort: 1 });
+    for (const [key, value] of Object.entries(got.data)) {
+      assert.ok(!Number.isNaN(value), `${key} is NaN at truncated length ${len}`);
+    }
+  }
+});
+
 // --- Uplink: command response (fPort 85) ----------------------------------
 test("decodeUplink decodes an Ack response (fPort 85)", () => {
   // 01 = APP_PROTO_VERSION prefix, then Response{ seq=1, ack={} }.

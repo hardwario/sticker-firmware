@@ -1172,6 +1172,27 @@ function decodeUplink(input) {
   var data = {};
   var bytes = input.bytes;
   var index = 0;
+
+  // #340 M26: a straight-line sequence of bytes[index++] reads gated by header
+  // bits (no while loop, so unaffected by the 2026-08-13 while-loop DoS sweep
+  // elsewhere in this file). On a truncated buffer bytes[index++] used to
+  // return undefined, and undefined-tainted arithmetic silently produced NaN
+  // instead of null across every optional field below. readOrNull() bounds-
+  // checks before combining bytes (same bit layout as before for a
+  // non-truncated buffer) and returns null — indistinguishable from "field
+  // absent" — the moment the declared width doesn't fit in what's left.
+  function readOrNull(width) {
+    if (index + width > bytes.length) {
+      index += width;
+      return null;
+    }
+    var v = bytes[index];
+    for (var i = 1; i < width; i++) {
+      v = (v << 8) | bytes[index + i];
+    }
+    index += width;
+    return v;
+  }
   var isExtendedPacket = false;
   var header = 0;
 
@@ -1203,73 +1224,73 @@ function decodeUplink(input) {
   }
 
   if (isExtendedPacket ? (header & (1 << 29)) : (header & (1 << 13))) {
-    var voltage = bytes[index++];
-    data.voltage = voltage === 0xff ? null : voltage / 50;
+    var voltage = readOrNull(1);
+    data.voltage = (voltage === null || voltage === 0xff) ? null : voltage / 50;
   } else {
     data.voltage = null;
   }
 
   if (isExtendedPacket ? (header & (1 << 28)) : (header & (1 << 12))) {
-    var temperature = (bytes[index++] << 8) | bytes[index++];
-    data.temperature = temperature === 0x7fff ? null : toSignedInt16(temperature) / 100;
+    var temperature = readOrNull(2);
+    data.temperature = (temperature === null || temperature === 0x7fff) ? null : toSignedInt16(temperature) / 100;
   } else {
     data.temperature = null;
   }
 
   if (isExtendedPacket ? (header & (1 << 27)) : (header & (1 << 11))) {
-    var humidity = bytes[index++];
-    data.humidity = humidity === 0xff ? null : humidity / 2;
+    var humidity = readOrNull(1);
+    data.humidity = (humidity === null || humidity === 0xff) ? null : humidity / 2;
   } else {
     data.humidity = null;
   }
 
   if (isExtendedPacket ? (header & (1 << 26)) : (header & (1 << 10))) {
-    var illuminance = (bytes[index++] << 8) | bytes[index++];
-    data.illuminance = illuminance === 0xffff ? null : illuminance * 2;
+    var illuminance = readOrNull(2);
+    data.illuminance = (illuminance === null || illuminance === 0xffff) ? null : illuminance * 2;
   } else {
     data.illuminance = null;
   }
 
   if (isExtendedPacket ? (header & (1 << 25)) : (header & (1 << 9))) {
-    var ext_temperature_1 = (bytes[index++] << 8) | bytes[index++];
-    data.ext_temperature_1 = ext_temperature_1 === 0x7fff ? null : toSignedInt16(ext_temperature_1) / 100;
+    var ext_temperature_1 = readOrNull(2);
+    data.ext_temperature_1 = (ext_temperature_1 === null || ext_temperature_1 === 0x7fff) ? null : toSignedInt16(ext_temperature_1) / 100;
   } else {
     data.ext_temperature_1 = null;
   }
 
   if (isExtendedPacket ? (header & (1 << 24)) : (header & (1 << 8))) {
-    var ext_temperature_2 = (bytes[index++] << 8) | bytes[index++];
-    data.ext_temperature_2 = ext_temperature_2 === 0x7fff ? null : toSignedInt16(ext_temperature_2) / 100;
+    var ext_temperature_2 = readOrNull(2);
+    data.ext_temperature_2 = (ext_temperature_2 === null || ext_temperature_2 === 0x7fff) ? null : toSignedInt16(ext_temperature_2) / 100;
   } else {
     data.ext_temperature_2 = null;
   }
 
   if (isExtendedPacket ? (header & (1 << 23)) : (header & (1 << 7))) {
-    var motion_count = (bytes[index++] << 24) | (bytes[index++] << 16) | (bytes[index++] << 8) | bytes[index++];
-    data.motion_count = motion_count === 0xffffffff ? null : motion_count;
+    var motion_count = readOrNull(4);
+    data.motion_count = (motion_count === null || motion_count === 0xffffffff) ? null : motion_count;
   } else {
     data.motion_count = null;
   }
 
   if (isExtendedPacket ? (header & (1 << 22)) : (header & (1 << 6))) {
-    var altitude = (bytes[index++] << 8) | bytes[index++];
-    data.altitude = altitude === 0x7fff ? null : toSignedInt16(altitude) / 10;
+    var altitude = readOrNull(2);
+    data.altitude = (altitude === null || altitude === 0x7fff) ? null : toSignedInt16(altitude) / 10;
   } else {
     data.altitude = null;
   }
 
   if (isExtendedPacket ? (header & (1 << 21)) : (header & (1 << 5))) {
-    var pressure = (bytes[index++] << 24) | (bytes[index++] << 16) | (bytes[index++] << 8) | bytes[index++];
-    data.pressure = pressure === 0xffffffff ? null : pressure;
+    var pressure = readOrNull(4);
+    data.pressure = (pressure === null || pressure === 0xffffffff) ? null : pressure;
   } else {
     data.pressure = null;
   }
 
   if (isExtendedPacket) {
     if (header & (1 << 19)) {
-      var machine_probe_temperature_1 = (bytes[index++] << 8) | bytes[index++];
+      var machine_probe_temperature_1 = readOrNull(2);
       data.machine_probe_temperature_1 =
-        machine_probe_temperature_1 === 0x7fff
+        (machine_probe_temperature_1 === null || machine_probe_temperature_1 === 0x7fff)
           ? null
           : toSignedInt16(machine_probe_temperature_1) / 100;
     } else {
@@ -1277,9 +1298,9 @@ function decodeUplink(input) {
     }
 
     if (header & (1 << 18)) {
-      var machine_probe_temperature_2 = (bytes[index++] << 8) | bytes[index++];
+      var machine_probe_temperature_2 = readOrNull(2);
       data.machine_probe_temperature_2 =
-        machine_probe_temperature_2 === 0x7fff
+        (machine_probe_temperature_2 === null || machine_probe_temperature_2 === 0x7fff)
           ? null
           : toSignedInt16(machine_probe_temperature_2) / 100;
     } else {
@@ -1287,15 +1308,15 @@ function decodeUplink(input) {
     }
 
     if (header & (1 << 17)) {
-      var machine_probe_humidity_1 = bytes[index++];
-      data.machine_probe_humidity_1 = machine_probe_humidity_1 === 0xff ? null : machine_probe_humidity_1 / 2;
+      var machine_probe_humidity_1 = readOrNull(1);
+      data.machine_probe_humidity_1 = (machine_probe_humidity_1 === null || machine_probe_humidity_1 === 0xff) ? null : machine_probe_humidity_1 / 2;
     } else {
       data.machine_probe_humidity_1 = null;
     }
 
     if (header & (1 << 16)) {
-      var machine_probe_humidity_2 = bytes[index++];
-      data.machine_probe_humidity_2 = machine_probe_humidity_2 === 0xff ? null : machine_probe_humidity_2 / 2;
+      var machine_probe_humidity_2 = readOrNull(1);
+      data.machine_probe_humidity_2 = (machine_probe_humidity_2 === null || machine_probe_humidity_2 === 0xff) ? null : machine_probe_humidity_2 / 2;
     } else {
       data.machine_probe_humidity_2 = null;
     }
@@ -1312,15 +1333,13 @@ function decodeUplink(input) {
     }
 
     if (header & (1 << 13)) {
-      var hall_left_count = (bytes[index++] << 24) | (bytes[index++] << 16) | (bytes[index++] << 8) | bytes[index++];
-      data.hall_left_count = hall_left_count;
+      data.hall_left_count = readOrNull(4);
     } else {
       data.hall_left_count = null;
     }
 
     if (header & (1 << 12)) {
-      var hall_right_count = (bytes[index++] << 24) | (bytes[index++] << 16) | (bytes[index++] << 8) | bytes[index++];
-      data.hall_right_count = hall_right_count;
+      data.hall_right_count = readOrNull(4);
     } else {
       data.hall_right_count = null;
     }
@@ -1334,9 +1353,8 @@ function decodeUplink(input) {
     data.hall_right_is_active = (header & (1 << 6)) ? true : false;
 
     if (header & (1 << 5)) {
-      var input_a_count = (bytes[index++] << 24) | (bytes[index++] << 16) | (bytes[index++] << 8) | bytes[index++];
-      data.input_a_count = input_a_count;
-      var status_a = bytes[index++];
+      data.input_a_count = readOrNull(4);
+      var status_a = readOrNull(1);
       data.input_a_notify_act = (status_a & (1 << 3)) ? true : false;
       data.input_a_notify_deact = (status_a & (1 << 2)) ? true : false;
       data.input_a_is_active = (status_a & (1 << 0)) ? true : false;
@@ -1348,9 +1366,8 @@ function decodeUplink(input) {
     }
 
     if (header & (1 << 4)) {
-      var input_b_count = (bytes[index++] << 24) | (bytes[index++] << 16) | (bytes[index++] << 8) | bytes[index++];
-      data.input_b_count = input_b_count;
-      var status_b = bytes[index++];
+      data.input_b_count = readOrNull(4);
+      var status_b = readOrNull(1);
       data.input_b_notify_act = (status_b & (1 << 3)) ? true : false;
       data.input_b_notify_deact = (status_b & (1 << 2)) ? true : false;
       data.input_b_is_active = (status_b & (1 << 0)) ? true : false;
