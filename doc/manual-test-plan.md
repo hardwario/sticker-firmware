@@ -1862,7 +1862,12 @@ the frame or crash; both complete cleanly.
 telemetry is actively sending; confirm no corruption/crash and both the manual and periodic frames
 land on the LNS.
 
-- [ ] Pass
+- [x] Pass
+
+> **HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):** fired `ats lrw
+> compose` three times back-to-back over RTT shell while the periodic 60 s telemetry cadence was
+> live; a real periodic uplink landed concurrently (`fcnt up` 10→11 mid-sequence). All composes
+> returned clean fPort-2 hex frames, `ats lrw status` stayed HEALTHY throughout, no crash/corruption.
 
 ### X5 — H `[HIL-only]`: `advance_page()` doesn't commit a ring page on flash erase/write failure
 
@@ -1886,6 +1891,15 @@ boot), only `hall_left` resets to 0; `hall_right`/input counters keep their pre-
 
 **Prompt for Claude:** With non-zero counters on ≥2 channels, stage `reset_counters{hall_left}`
 over NFC while powered off, reboot, confirm ONLY hall_left is zeroed — the others must survive.
+
+> **Code-verified only (2026-08-17):** confirmed in `main.c` at the `5d14b24` tip that
+> `nfc_run_deferred_cmd_actions()` is called at line 548, after `app_sensor_init()`/
+> `app_counters_init()` (lines 532/539) and before `app_lrw_join()` (line 555) — the exact ordering
+> the fix describes. **Full behavioral HIL still owed**: this bench's hall/input counters are
+> currently all 0 (no physical pulse actuator connected this session), so the "only the targeted
+> channel resets, others survive" behavior couldn't be demonstrated end-to-end; also needs a
+> hand-crafted `reset_counters` Command protobuf hex for `ats cmd nfc`/a real boot-staged NFC write
+> to exercise the actual deferred-action path rather than just the source ordering.
 
 - [ ] Pass
 
@@ -2042,7 +2056,14 @@ suspend call — no radio activity (TX log lines) following the suspend log line
 **Prompt for Claude:** Queue a report trigger, immediately invoke device suspend/poweroff, confirm
 via RTT log that no compose/TX happens after the suspend log line.
 
-- [ ] Pass
+- [x] Pass
+
+> **HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):** `ats lrw check`
+> (forces a link check + `app_report_trigger()`, queuing `m_trigger_work`) immediately followed by
+> `power suspend`. Terminal log shows `Sending data with link check request` → `Suspending (deep
+> sleep). Wake via NRST / power-cycle.` with **no** compose/TX line in between or after — the
+> queued trigger work never ran. Woke via a full PPK2 power-cycle (OFF→ON), device rebooted cleanly
+> (`Reset cause: pin, brownout`), rejoined LRW HEALTHY.
 
 ### X18 — M18: SHT4x implausible-but-valid reading no longer triggers a "no data" alarm
 
@@ -2088,7 +2109,18 @@ silently.
 during calibration's send), confirm the calibration LED/heartbeat keeps running and the session
 ends via its own deadline reboot rather than an unexplained hang/IWDG reset.
 
-- [ ] Pass
+- [~] Partial
+
+> **Partially HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):**
+> `config calibration true` + `settings save` rebooted cleanly into calibration mode (temporary
+> calibration DevEUI `02403b84fd451f37`, `Device status: nfc-down` as expected, `LRW state:
+> healthy`) — the decoupled `app_lrw_run_on_work_q()` send path works with no hang on the normal
+> (non-stalled) path, and a plain `ats device reboot` cleanly exited back to normal
+> (`app_calibration_init()` auto-clears the flag). **Not yet confirmed:** the actual regression
+> target — a forced MAC-confirm stall — needs reproducible radio silence (e.g. detach antenna or
+> block the gateway) that wasn't set up this session.
+
+- [ ] Pass (full stall scenario, still owed)
 
 ---
 
