@@ -1334,7 +1334,13 @@ static int cmd_history_read(const struct shell *sh, size_t argc, char **argv)
 				 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
 				 tm.tm_min, tm.tm_sec);
 		} else {
-			snprintf(tbuf, sizeof(tbuf), "+%us (no-rtc)", r.time_unix - m_base_time);
+			/* #340 L9: r.time_unix already folds in the m_base_time snapshotted
+			 * under m_lock at fetch time (base + k*m_interval); re-reading the
+			 * live m_base_time here instead can use a base that changed since
+			 * the fetch (or between rows of this same loop), producing a
+			 * mismatched/non-monotonic offset. idx==k and m_interval are both
+			 * already known and stable, so derive the offset directly. */
+			snprintf(tbuf, sizeof(tbuf), "+%us (no-rtc)", (unsigned)(k * m_interval));
 		}
 
 		char line[160];
