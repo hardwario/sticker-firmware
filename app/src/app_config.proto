@@ -7,6 +7,7 @@ message AppConfigMessage {
     optional Application application = 6;
     optional Sensors sensors = 7;
     optional Alarms alarms = 8;
+    optional P2P p2p = 11;
 
     message Lorawan {
         enum Region {
@@ -107,6 +108,12 @@ message AppConfigMessage {
         optional bytes alarm_13 = 16;
         optional bytes alarm_14 = 17;
         optional bytes alarm_15 = 18;
+    }
+
+    message P2P {
+        optional uint32 frequency = 1;
+        optional uint32 spreading_factor = 2;
+        optional uint32 tx_power = 3;
     }
 }
 // END GENERATED CONFIG

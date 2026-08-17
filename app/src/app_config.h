@@ -113,6 +113,9 @@ struct app_config {
 	bool hall_right_counter;
 	bool input_a_counter;
 	bool input_b_counter;
+	int p2p_frequency;
+	int p2p_spreading_factor;
+	int p2p_tx_power;
 };
 
 extern struct app_config g_app_config;
