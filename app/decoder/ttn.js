@@ -190,7 +190,7 @@ var _CMD_TAGS = _invert(_CMD_NAMES);
 
 function _decodeLorawan(bytes, start, end) {
   var o = {}, pos = start;
-  while (pos < end) {
+  while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var f = tag.value >>> 3, w = tag.value & 0x7;
     if (w === 0) {
@@ -209,7 +209,7 @@ function _decodeLorawan(bytes, start, end) {
 // float (wire 5), and bytes -> hex (HEX map). Used for application/sensors/alarms.
 function _decodeCfgGroup(bytes, start, end, NAMES, ENUMS, HEX) {
   var o = {}, pos = start;
-  while (pos < end) {
+  while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var f = tag.value >>> 3, w = tag.value & 0x7;
     if (w === 0) {
@@ -236,7 +236,7 @@ function _decodeAlarms(b, s, e) { return _decodeCfgGroup(b, s, e, _ALM_NAMES, _A
 
 function _decodeConfigDump(bytes, start, end) {
   var cd = {}, pos = start;
-  while (pos < end) {
+  while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var f = tag.value >>> 3, w = tag.value & 0x7;
     if (w === 0) {
@@ -259,7 +259,7 @@ function _decodeConfigDump(bytes, start, end) {
 function _decodeInfo(bytes, start, end) {
   var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false, device_status: 0, active_alarms: [] };
   var pos = start;
-  while (pos < end) {
+  while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
@@ -317,7 +317,7 @@ function _decodeInfo(bytes, start, end) {
 function _decodeError(bytes, start, end) {
   var err = {};
   var pos = start;
-  while (pos < end) {
+  while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
@@ -348,7 +348,7 @@ function _decodeError(bytes, start, end) {
 function _decodeW1Scan(bytes, start, end) {
   var roms = [];
   var pos = start;
-  while (pos < end) {
+  while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
@@ -461,7 +461,7 @@ function _decodeHistoryFrame(bytes, start, end) {
   // decoder is a complete reference for the NFC (Manager-App) paging cursor.
   var samples = null;
   var pos = start;
-  while (pos < end) {
+  while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var f = tag.value >>> 3, w = tag.value & 0x7;
     if (w === 0) {
@@ -533,7 +533,7 @@ var _W1_SLOT_TYPES = { 1: "dallas", 2: "machine-probe" };
 function _decodeSensorReading(bytes, start, end) {
   var sr = {};
   var pos = start;
-  while (pos < end) {
+  while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
@@ -848,6 +848,9 @@ function encodeDownlinkCommand(cmd) {
     if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
     if (b.start_ord) body = body.concat(_encTag(3, 0)).concat(_encVarint(b.start_ord));
+  } else if (name === "buzzer_play") {
+    if (b.kind) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.kind));
+    if (b.repeat_s) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.repeat_s));
   }
   } catch (e) {
     return { bytes: null, error: e.message };
@@ -887,7 +890,7 @@ function decodeDownlinkCommand(bytes) {
       cmd.command = _CMD_NAMES[field] || ("field_" + field);
       if (field === 2) { // set_param
         var sp = {}, p = pos;
-        while (p < end) {
+        while (p < end && p < bytes.length) {
           var t = _pbReadVarint(bytes, p); p = t.next;
           var f2 = t.value >>> 3, w2 = t.value & 0x7;
           if (w2 === 2) {
@@ -906,7 +909,7 @@ function decodeDownlinkCommand(bytes) {
       } else if (field === 3) { // get_param (repeated uint32, packed or not)
         var gp = { lorawan_field: [], application_field: [], sensors_field: [], alarms_field: [] },
             q = pos;
-        while (q < end) {
+        while (q < end && q < bytes.length) {
           var t3 = _pbReadVarint(bytes, q); q = t3.next;
           var f3 = t3.value >>> 3, w3 = t3.value & 0x7;
           var dst = (f3 === 1) ? gp.lorawan_field : (f3 === 2) ? gp.application_field
@@ -918,7 +921,7 @@ function decodeDownlinkCommand(bytes) {
           } else if (w3 === 2) {
             var pl3 = _pbReadVarint(bytes, q); q = pl3.next;
             var e3 = q + pl3.value;
-            while (q < e3) { var pv = _pbReadVarint(bytes, q); q = pv.next; if (dst) dst.push(pv.value); }
+            while (q < e3 && q < bytes.length) { var pv = _pbReadVarint(bytes, q); q = pv.next; if (dst) dst.push(pv.value); }
           } else { break; }
         }
         ["lorawan_field", "application_field", "sensors_field", "alarms_field"].forEach(
@@ -935,7 +938,7 @@ function decodeDownlinkCommand(bytes) {
         cmd.get_config = gc;
       } else if (field === 10) { // reset_counters
         var rc = {}, s = pos;
-        while (s < end) {
+        while (s < end && s < bytes.length) {
           var t10 = _pbReadVarint(bytes, s); s = t10.next;
           var f10 = t10.value >>> 3, w10 = t10.value & 0x7;
           if (w10 === 0) {
@@ -949,7 +952,7 @@ function decodeDownlinkCommand(bytes) {
         cmd.reset_counters = rc;
       } else if (field === 11) { // req_history
         var rh = {}, u = pos;
-        while (u < end) {
+        while (u < end && u < bytes.length) {
           var t11 = _pbReadVarint(bytes, u); u = t11.next;
           var f11 = t11.value >>> 3, w11 = t11.value & 0x7;
           if (w11 === 0) {
@@ -961,7 +964,7 @@ function decodeDownlinkCommand(bytes) {
         cmd.req_history = rh;
       } else if (field === 12) { // clock_sync (empty = network re-sync; unix_time = NFC bootstrap)
         var cs = {}, cp = pos;
-        while (cp < end) {
+        while (cp < end && cp < bytes.length) {
           var t12 = _pbReadVarint(bytes, cp); cp = t12.next;
           var f12 = t12.value >>> 3, w12 = t12.value & 0x7;
           if (w12 === 0) {
@@ -972,7 +975,7 @@ function decodeDownlinkCommand(bytes) {
         cmd.clock_sync = cs;
       } else if (field === 13) { // req_history_page (#260, NFC-only transport)
         var rp = {}, pp = pos;
-        while (pp < end) {
+        while (pp < end && pp < bytes.length) {
           var t13 = _pbReadVarint(bytes, pp); pp = t13.next;
           var f13 = t13.value >>> 3, w13 = t13.value & 0x7;
           if (w13 === 0) {
@@ -1031,7 +1034,7 @@ function _alarmUnscale(quantity, raw) {
 function _decodeAlarmStatus(bytes, start, end) {
   var a = { source: 0, quantity: 0, type: 0 };
   var p = start;
-  while (p < end) {
+  while (p < end && p < bytes.length) {
     var t = _pbReadVarint(bytes, p); p = t.next;
     var field = t.value >>> 3, wire = t.value & 0x7;
     if (wire === 0) {
@@ -1053,7 +1056,7 @@ function _decodeAlarmStatus(bytes, start, end) {
 function _decodeAlarmEvent(bytes, start, end) {
   var ev = { slot: 0, source: 0, quantity: 0, edge: 0, type: 0, rel_s: 0, value: null };
   var p = start;
-  while (p < end) {
+  while (p < end && p < bytes.length) {
     var t = _pbReadVarint(bytes, p); p = t.next;
     var field = t.value >>> 3, wire = t.value & 0x7;
     if (wire === 0) {

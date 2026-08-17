@@ -317,6 +317,12 @@ int {{ module.name }}_{{ op }}(void)
 {
 	int ret;
 
+	/* #340 M27: brackets the whole read-modify-write against concurrent
+	 * mutation from another transport (mirrors SetParam's own lock scope,
+	 * which likewise snapshots-then-mutates under the same lock and saves
+	 * outside of it). */
+	{{ module.name }}_lock();
+
 	struct {{ module.name }} preserved = m_{{ module.name }};
 
 	m_{{ module.name }} = m_{{ module.name }}_defaults;
@@ -330,6 +336,8 @@ int {{ module.name }}_{{ op }}(void)
 {% endfor %}
 
 	memcpy(&g_{{ module.name }}, &m_{{ module.name }}, sizeof(g_{{ module.name }}));
+
+	{{ module.name }}_unlock();
 
 	ret = settings_save_subtree(SETTINGS_PFX);
 	if (ret) {
@@ -407,6 +415,22 @@ static struct {{ module.name }} m_{{ module.name }} = {
 	.{{ param.name | c_name }} = {{ param | default_value(module.name) }},
 {% endfor %}
 };
+
+/* Guards m_{{ module.name }}/g_{{ module.name }} against concurrent mutation:
+ * SetParam (app_cmd.c) and the reset ops below are both reachable from
+ * shell/LRW/NFC on different threads with no other synchronization (#340
+ * M27) — SetParam takes this via {{ module.name }}_lock()/_unlock(). */
+static K_MUTEX_DEFINE(m_{{ module.name }}_lock);
+
+void {{ module.name }}_lock(void)
+{
+	k_mutex_lock(&m_{{ module.name }}_lock, K_FOREVER);
+}
+
+void {{ module.name }}_unlock(void)
+{
+	k_mutex_unlock(&m_{{ module.name }}_lock);
+}
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {

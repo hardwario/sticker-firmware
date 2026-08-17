@@ -32,6 +32,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(app_alarm, LOG_LEVEL_DBG);
 
@@ -91,6 +92,10 @@ struct rstate {
 				   * `type` doubles as the pending THRESHOLD side (LOW/HIGH) being
 				   * confirmed, since it is otherwise unused until the rule latches.
 				   */
+	struct app_alarm_rule last_rule; /* full rule snapshot as of the last rt_sync() reset, so a
+					  * same-source/quantity edit that only changes e.g.
+					  * lo/hi/dwell/enabled/from_state/to_state is still
+					  * detected and resets the stale latch below. */
 };
 
 static struct rstate m_rt[APP_ALARM_SLOT_COUNT];
@@ -104,8 +109,11 @@ static void *m_event_cb_user_data;
 K_MUTEX_DEFINE(m_lock);
 
 /* Return the rule in `slot`, syncing its runtime latch: an empty slot (or one
- * now pointing at a different source/quantity than its latch tracked) is reset.
- * Returns NULL for an empty slot. */
+ * whose rule changed at all since the latch was last reset — not just
+ * source/quantity, but any field, e.g. a live edit of lo/hi/dwell/enabled/
+ * from_state/to_state on the SAME source+quantity) is reset. Without this, an
+ * already-active/pending latch would carry over under the edited rule's new
+ * parameters. Returns NULL for an empty slot. */
 static bool rt_sync(uint8_t slot, struct app_alarm_rule *out)
 {
 	struct rstate *rt = &m_rt[slot];
@@ -116,9 +124,11 @@ static bool rt_sync(uint8_t slot, struct app_alarm_rule *out)
 		}
 		return false;
 	}
-	if (!rt->used || rt->source != out->source || rt->quantity != out->quantity) {
-		*rt = (struct rstate){
-			.used = true, .source = out->source, .quantity = out->quantity};
+	if (!rt->used || memcmp(&rt->last_rule, out, sizeof(*out)) != 0) {
+		*rt = (struct rstate){.used = true,
+				      .source = out->source,
+				      .quantity = out->quantity,
+				      .last_rule = *out};
 	}
 	return true;
 }
@@ -759,8 +769,17 @@ static void eval_count(uint8_t slot, const struct app_alarm_rule *rule, struct r
 		return;
 	}
 
+	/* Expire a lapsed one-shot before the firing check, mirroring the momentary/
+	 * STATE pattern (eval_state()): otherwise a sustained over-limit condition
+	 * across multiple consecutive windows would re-fire every window instead of
+	 * once-then-hold. */
+	if (rt->active && rt->oneshot_expiry != 0 && now >= rt->oneshot_expiry) {
+		rt->active = false;
+		rt->oneshot_expiry = 0;
+	}
+
 	uint32_t delta = cur - rt->prev_count; /* wraps correctly on uint32 */
-	if (rule->hi > 0 && delta >= (uint32_t)rule->hi) {
+	if (rule->hi > 0 && delta >= (uint32_t)rule->hi && !rt->active) {
 		rt->active = true;
 		rt->oneshot_expiry = now + rule_hold_ms(rule);
 		*should_send = true;
@@ -1164,7 +1183,6 @@ size_t app_alarm_active_snapshot(struct app_alarm_active *out, size_t max)
 #if defined(CONFIG_SHELL)
 #include <zephyr/shell/shell.h>
 #include <stdlib.h>
-#include <string.h>
 
 /* Per-slot latch state, for the shell list (distinct from the any-slot
  * app_alarm_is_active used by callers that key on source+quantity). */

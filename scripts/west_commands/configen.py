@@ -49,16 +49,21 @@ Parameter options:
 
 Access control (readable / writable):
   Each parameter declares who may read and who may write it, as a subset of the
-  transports {shell, nfc, lrw}. Both lists default to all three (the common
-  case, so they are usually omitted):
+  transports {shell, nfc, lrw, vendor}. Both lists default to all four (the
+  common case, so they are usually omitted) -- a field only loses a transport
+  by explicitly narrowing its `writable`/`readable` list, e.g. to keep it off
+  vendor's narrow recovery surface (#299/#316) or off a LoRaWAN downlink:
     readable: [shell, nfc, lrw]   # shell = `config <name>` / `config show`;
-                                  # nfc/lrw = ConfigDump (get_param/get_config)
-    writable: [shell, nfc, lrw]   # shell = `config <name>` set; nfc/lrw = SetParam
+                                  # nfc/lrw/vendor = ConfigDump (get_param/get_config)
+    writable: [shell, nfc, lrw]   # shell = `config <name>` set; nfc/lrw/vendor = SetParam
   configen derives the internal generator flags from these (see normalize_access):
     - no_shell      <- shell in neither list
     - readonly      <- shell readable but not writable
     - dump          <- readable over nfc or lrw
     - dump_nfc_only <- readable over nfc but not lrw (e.g. LoRaWAN keys)
+    - no_write_lrw/no_write_nfc/no_write_vendor <- lrw/nfc/vendor not in writable
+      (per-field SetParam transport gate, M-3; shell has no such gate -- see
+      normalize_access)
   Root `bytes` identity blobs (secret_key, claim_token) are emitted as a nanopb
   callback and kept off the wire automatically (their air read, if any, goes via
   a hand-written message such as Info). `proto_group` is a layout choice only
@@ -431,14 +436,15 @@ def normalize_access(config):
     """Derive the internal per-parameter flags from the `readable`/`writable`
     transport lists (the single source of truth for who may read/write a field).
 
-    Each list is a subset of {shell, nfc, lrw}; an omitted list defaults to all
-    three (the common case). From them we compute the legacy flags the code
+    Each list is a subset of TRANSPORTS; an omitted list defaults to all four
+    (the common case). From them we compute the legacy flags the code
     generators already consume, so the templates stay unchanged:
 
       - no_shell      = shell in neither readable nor writable (no `config` entry)
       - readonly      = shell may read but not write
       - dump          = field is readable over the air (nfc or lrw) -> ConfigDump
       - dump_nfc_only = readable over nfc but NOT lrw (keys: LNS must not see them)
+      - no_write_lrw/no_write_nfc/no_write_vendor = that transport not in writable
       - proto_callback = root `bytes` (identity blobs stay off the wire, as
                          before) — structural, independent of the access lists
 
@@ -466,12 +472,20 @@ def normalize_access(config):
 
         # Per-transport WRITE gating (M-3): the generated apply_<group>() rejects a
         # SetParam that tries to write this field over a transport not in `writable`.
-        # shell is not represented — shell writes never go through the OTA apply_*
-        # path (no_shell/readonly already govern shell). Mirrors dump/dump_nfc_only.
+        # shell is not represented: SHELL_DEBUG only exists in debug firmware, and
+        # whoever has physical UART access to a debug build already has full
+        # control of the device (J-Link, RAM readout, reflash) -- gating individual
+        # fields against it would not be a real security boundary. vendor IS gated:
+        # it authenticates with vendor_token (not secret_key) and is deliberately
+        # scoped to a narrow recovery surface (#299/#316), so a field that omits
+        # vendor from `writable` must reject it like any other excluded transport.
+        # Mirrors dump/dump_nfc_only.
         if "lrw" not in w:
             p["no_write_lrw"] = True
         if "nfc" not in w:
             p["no_write_nfc"] = True
+        if "vendor" not in w:
+            p["no_write_vendor"] = True
 
         # Root byte blobs (secret_key / claim_token) stay off the wire: emitted as
         # a nanopb callback in the proto, never in SetParam/ConfigDump. The air
@@ -682,6 +696,7 @@ def build_ingest_model(config):
                 "omit_if_zero": bool(p.get("dump_omit_if_zero")),
                 "no_write_lrw": bool(p.get("no_write_lrw")),
                 "no_write_nfc": bool(p.get("no_write_nfc")),
+                "no_write_vendor": bool(p.get("no_write_vendor")),
             }
             if t == "bool":
                 e["kind"] = "bool"
@@ -714,7 +729,8 @@ def build_ingest_model(config):
             "fill_fn": f"app_config_fill_{g['key']}",
             "slot_empty_fn": f"app_config_{g['key']}_slot_empty",
             "has_omit_if_zero": any(e["omit_if_zero"] for e in params),
-            "any_write_gated": any(e["no_write_lrw"] or e["no_write_nfc"] for e in params),
+            "any_write_gated": any(e["no_write_lrw"] or e["no_write_nfc"] or e["no_write_vendor"]
+                                    for e in params),
             "params": params,
         })
     has_omit_if_zero = any(g["has_omit_if_zero"] for g in groups)

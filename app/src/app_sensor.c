@@ -168,8 +168,18 @@ bool app_sensor_i2c_wedged(void)
 {
 	/* Non-zero streak = the most recent sweep saw every I2C read fail, i.e. the
 	 * bus is currently wedged (cleared on the next good sweep or after recovery).
-	 * int read is atomic; a stale value only mislabels one Info snapshot. */
-	return m_i2c_fail_streak > 0;
+	 * #340 M19: m_i2c_fail_streak is now folded into g_app_sensor_data_lock's
+	 * critical section (app_sensor_sample()), so read it under the same lock
+	 * instead of relying on a plain int read being "close enough" - callers
+	 * (app_cmd.c, a different thread) get a consistent snapshot rather than a
+	 * torn/racy one. */
+	bool wedged;
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	wedged = m_i2c_fail_streak > 0;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+
+	return wedged;
 }
 
 int app_sensor_init(void)
@@ -432,6 +442,11 @@ void app_sensor_sample(void)
 	/* Track I2C sensor reads this sweep to detect a wedged bus. */
 	int i2c_tried = 0, i2c_failed = 0;
 
+	/* #340 M18: set false only when SHT4x rejects a CRC-valid, comm-successful
+	 * reading as outside its plausible window (-ERANGE) - see below. Stays
+	 * true (write-through, same as today) whenever CONFIG_SHT4X is off. */
+	bool sht4x_valid = true;
+
 	struct app_w1_slot_reading w1[APP_W1_SLOT_COUNT];
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 		w1[s] = (struct app_w1_slot_reading){.temperature = NAN,
@@ -461,10 +476,23 @@ void app_sensor_sample(void)
 
 #if defined(CONFIG_SHT4X)
 	ret = app_sht4x_read(&temperature, &humidity);
-	i2c_tried++;
-	if (ret) {
-		i2c_failed++;
-		LOG_ERR_CALL_FAILED_INT("app_sht4x_read", ret);
+	if (ret == -ERANGE) {
+		/* #340 M18: comm succeeded and the CRC was valid - this is a
+		 * plausibility rejection, not a bus failure. Don't count it toward
+		 * the wedged-bus streak below (a real, working bus that just
+		 * returned one implausible-but-valid sample isn't "wedged"), and
+		 * don't let the NaN temperature/humidity locals overwrite the last
+		 * known-good reading further down - that would otherwise trip the
+		 * no-data alarm (APP_ALARM_NO_DATA_MS) off one implausible sample,
+		 * exactly like a genuinely disconnected sensor. */
+		sht4x_valid = false;
+		LOG_WRN("SHT4x reading rejected as implausible; keeping last value");
+	} else {
+		i2c_tried++;
+		if (ret) {
+			i2c_failed++;
+			LOG_ERR_CALL_FAILED_INT("app_sht4x_read", ret);
+		}
 	}
 #endif /* defined(CONFIG_SHT4X) */
 
@@ -521,6 +549,14 @@ void app_sensor_sample(void)
 		}
 	}
 
+	/* #340 M19: m_i2c_fail_streak is read/written by app_sensor_i2c_wedged()
+	 * (app_cmd.c, a different thread context) with no protection of its own;
+	 * folding it into the same g_app_sensor_data_lock critical section as the
+	 * rest of this sweep's results (acquired below, instead of only around
+	 * the data-copy that used to follow) closes that gap without adding a
+	 * second lock. */
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+
 	/* A whole sweep where every attempted I2C read failed points at a wedged
 	 * bus (slave holding SDA low). After a few such sweeps, bit-bang it free —
 	 * otherwise every I2C sensor stays dead until a reboot that may never come. */
@@ -540,13 +576,15 @@ void app_sensor_sample(void)
 		m_i2c_fail_streak = 0;
 	}
 
-	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-
 	g_app_sensor_data.orientation = orientation;
 	g_app_sensor_data.voltage = voltage;
 
-	g_app_sensor_data.temperature = temperature;
-	g_app_sensor_data.humidity = humidity;
+	/* #340 M18: keep the last known-good reading on a plausibility reject
+	 * instead of overwriting it with this sweep's NaN locals. */
+	if (sht4x_valid) {
+		g_app_sensor_data.temperature = temperature;
+		g_app_sensor_data.humidity = humidity;
+	}
 	g_app_sensor_data.illuminance = illuminance;
 	g_app_sensor_data.altitude = altitude;
 	g_app_sensor_data.pressure = pressure;

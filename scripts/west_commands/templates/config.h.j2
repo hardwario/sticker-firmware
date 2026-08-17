@@ -42,6 +42,13 @@ extern struct {{ module.name }} g_{{ module.name }};
 
 struct {{ module.name }} *{{ module.name }}(void);
 
+/* Guards m_{{ module.name }}/g_{{ module.name }} against concurrent mutation
+ * across transports (#340 M27): callers that read-modify-write the config
+ * (SetParam in app_cmd.c; the reset ops below) must hold this around the
+ * whole sequence, not just their own copy of it. */
+void {{ module.name }}_lock(void);
+void {{ module.name }}_unlock(void);
+
 /* True if settings_load failed at boot (corrupt/unreadable NVS) and the device is
  * running on compile-time defaults — identity + provisioning lost. Lets the app
  * surface a distinct state instead of silently looking like a blank device (H-4). */

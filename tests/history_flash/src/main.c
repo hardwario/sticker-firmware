@@ -183,6 +183,53 @@ ZTEST(history_flash, test_wrap_advances_time_base)
 		     r0.time_unix);
 }
 
+/* Regression for advance_page()'s success-path reorder (page rollover now
+ * defers all in-RAM commits — m_live[] eviction shift, m_nlive, m_next_seq,
+ * m_last_phys, the new live entry, m_head_dw/m_stage_len reset — until AFTER
+ * both flash_area_erase() and flash_area_write() report success). This test
+ * has no way to force either call to fail (the native_sim flash simulator
+ * only exposes operation-count stats, not fault injection — see
+ * flash_simulator.c), so it only exercises the happy path: several page
+ * rollovers, one right after another, must evict exactly one page's worth of
+ * records each time and leave the ring's ordinal/time bookkeeping identical to
+ * what test_wrap_evicts_oldest / test_wrap_advances_time_base already expect.
+ * The failure path itself (early return, zero mutation) is verified by
+ * inspection only, not by this suite. */
+ZTEST(history_flash, test_advance_page_multi_wrap_consistent)
+{
+	test_clock_has = true;
+	test_clock_unix = 2000000;
+
+	size_t cap = app_history_capacity();
+
+	/* Drive several full-ring wraps back to back (multiple advance_page() page
+	 * rollovers, several of which evict the tail page). */
+	capture_n(cap * 3);
+
+	size_t count = app_history_count();
+	zassert_true(count <= cap, "count %zu must not exceed capacity %zu", count, cap);
+	zassert_true(count > 0, "buffer must not be empty after repeated wraps");
+
+	/* The ring must still be internally consistent: oldest and newest records
+	 * both decode, and time strictly increases across the whole live window. */
+	struct app_history_record r0, rlast;
+	zassert_equal(app_history_get(0, &r0), 0, "get(0) after repeated wraps");
+	zassert_equal(app_history_get(count - 1, &rlast), 0, "get(last) after repeated wraps");
+	zassert_true(rlast.time_unix > r0.time_unix,
+		     "time must advance across the retained window (%u -> %u)", r0.time_unix,
+		     rlast.time_unix);
+	zassert_true(r0.time_unix > 2000000,
+		     "oldest surviving record's time base must have advanced past the very "
+		     "first capture (%u)",
+		     r0.time_unix);
+
+	/* Ring stays mountable/consistent across a reboot after the repeated
+	 * rollovers, and the logical count is unaffected by re-scanning headers. */
+	reboot();
+	zassert_equal(app_history_count(), count,
+		      "count must be stable across reboot after repeated wraps");
+}
+
 /* clear() erases the partition; the empty state survives a reboot. */
 ZTEST(history_flash, test_clear_persists)
 {
