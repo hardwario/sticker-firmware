@@ -216,6 +216,25 @@ ZTEST(ccm, test_ciphertext_tamper)
 	zassert_mem_equal(rt, zero, sizeof(zero), "plaintext not cleared on auth failure");
 }
 
+/* #118 (P2P transport, doc/p2p.md §4): known-answer vector for the public
+ * single-block AES-ECB wrapper used to derive join_key = AES128-ECB(secret_key,
+ * "HIO-P2P-JOIN" || serial_number(4 BE)). Vector computed independently via
+ * PyCryptodome's AES.new(key, AES.MODE_ECB).encrypt(block) — same KEY as the
+ * golden vectors above, serial_number 0x12345678 — and cross-checked against
+ * app_p2p.js's deriveJoinKey() unit test (app/decoder/p2p.test.js), so all
+ * three (C, JS, and the independent Python oracle) agree on the same 16 bytes. */
+ZTEST(ccm, test_ecb_encrypt_block_known_answer)
+{
+	static const uint8_t block[16] = {'H', 'I', 'O', '-', 'P', '2', 'P', '-',
+					  'J', 'O', 'I', 'N', 0x12, 0x34, 0x56, 0x78};
+	static const uint8_t expected[16] = {0xec, 0xf6, 0xd6, 0xe6, 0x03, 0x6b, 0x54, 0xe2,
+					     0xba, 0x69, 0xb4, 0x3b, 0xd5, 0x16, 0x18, 0xa9};
+	uint8_t out[16];
+
+	zassert_equal(app_ccm_ecb_encrypt_block(KEY, block, out), 0, "ecb_encrypt_block failed");
+	zassert_mem_equal(out, expected, sizeof(expected), "join_key KAT mismatch");
+}
+
 /* Parameter guards. */
 ZTEST(ccm, test_param_validation)
 {
