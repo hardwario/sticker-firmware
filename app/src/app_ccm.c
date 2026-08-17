@@ -212,6 +212,14 @@ static bool params_ok(size_t nonce_len, size_t aad_len, size_t tag_len)
 	       tag_len >= 4 && tag_len <= 16 && (tag_len % 2) == 0;
 }
 
+int app_ccm_ecb_encrypt_block(const uint8_t key[16], const uint8_t in[16], uint8_t out[16])
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+	aes128_ecb_encrypt(key, in, out);
+	k_mutex_unlock(&m_lock);
+	return 0;
+}
+
 int app_ccm_encrypt_and_tag(const uint8_t key[16], const uint8_t *nonce, size_t nonce_len,
 			    const uint8_t *aad, size_t aad_len, const uint8_t *pt, size_t pt_len,
 			    uint8_t *ct, uint8_t *tag, size_t tag_len)

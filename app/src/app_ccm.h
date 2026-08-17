@@ -32,6 +32,13 @@ extern "C" {
  * mutex, so it is safe even though NFC command processing is the only caller today.
  */
 
+/* Single-block AES-128 ECB forward encrypt: `out` = AES(`key`, `in`), no CCM
+ * framing (no nonce/AAD/tag). Uses the same backend (HW peripheral or soft-SE
+ * fallback) and mutex as the CCM calls below. For key derivation only (e.g. the
+ * P2P transport's one-block PRF, doc/p2p.md §4) — never for bulk encryption,
+ * where CCM's chaining/authentication is required. Always returns 0. */
+int app_ccm_ecb_encrypt_block(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]);
+
 /* Encrypt `pt_len` plaintext bytes and produce a `tag_len`-byte tag. `ct` receives
  * `pt_len` ciphertext bytes; `tag` receives `tag_len` bytes. `ct` may alias `pt`.
  * Returns 0, or -EINVAL on a parameter violation. */
