@@ -194,6 +194,28 @@ int app_clock_get_unix(uint32_t *unix_s)
 
 int app_clock_set_unix(uint32_t unix_s)
 {
+	/* #386: reject years the RTC hardware can't represent before ever touching
+	 * gmtime_r()/rtc_set_time(). The STM32 RTC's year field is 2 BCD digits
+	 * (2000-2099 only — rtc_stm32_set_time()'s `real_year - RTC_YEAR_REF` ->
+	 * bin2bcd() assumes a 0-99 input); a unix_time whose UTC year is >= 2100
+	 * produces an out-of-range BCD nibble with no hardware-side validation,
+	 * which was observed on real hardware to intermittently destabilize the
+	 * calendar shadow register badly enough to hang rtc_stm32_get_time()'s
+	 * read-twice-and-compare loop until the watchdog fires. Reuses the same
+	 * APP_CLOCK_UNIX_MAX bound app_clock_handle_downlink() already enforces for
+	 * network time (L-5) — this closes the one remaining path to it, the debug
+	 * `clock set` shell command, which calls this function directly. The
+	 * `clock_sync` Command (the real LoRaWAN/NFC-reachable path,
+	 * app_cmd_handle_clock_sync()) already validates the same bound before
+	 * ever calling here, so it was never actually exposed to this bug. Mirrors
+	 * the symmetric lower-bound rejection rtc_stm32_set_time() already does for
+	 * years < 2000 (real_year < RTC_YEAR_REF), which is why `clock set 0`/
+	 * `clock set 1` already failed cleanly before this fix. */
+	if (unix_s > APP_CLOCK_UNIX_MAX) {
+		LOG_ERR("unix_time %u is beyond the RTC's representable range (year 2099)", unix_s);
+		return -EINVAL;
+	}
+
 	time_t t = (time_t)unix_s;
 	struct tm tm_utc;
 
