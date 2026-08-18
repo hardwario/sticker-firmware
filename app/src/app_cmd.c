@@ -874,6 +874,16 @@ static void app_cmd_handle_vendor_reset(enum app_cmd_transport tp, const Command
 		return;
 	}
 
+	/* #385: same bar as app_cmd_handle_set_secret_key() above — reject a
+	 * zero key synchronously instead of Ack'ing and letting
+	 * app_settings_vendor_reset()'s own key_is_set() check silently no-op the
+	 * deferred action later (the caller would see a success Ack for a reset
+	 * that never actually happened). */
+	if (buffer_is_zero(vr->key, sizeof(vr->key))) {
+		make_error(resp, Response_Error_Code_BAD_REQUEST, "zero key");
+		return;
+	}
+
 	if (!app_config()->vendor_reset_allow) {
 		make_error(resp, Response_Error_Code_NOT_READY, "vendor_reset disabled");
 		return;
