@@ -40,8 +40,9 @@ static const struct app_config m_app_config_defaults = {
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
 	.alarm_limit = 10,
-	.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN,
+	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
+	.lrw_adr = true,
 	.lrw_link_check_interval = 5,
 	.lrw_link_check_fail_rejoin = 5,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
@@ -70,8 +71,9 @@ static struct app_config m_app_config = {
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
 	.alarm_limit = 10,
-	.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN,
+	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
+	.lrw_adr = true,
 	.lrw_link_check_interval = 5,
 	.lrw_link_check_fail_rejoin = 5,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
@@ -289,7 +291,7 @@ static int h_commit(void)
 		m_app_config.lrw_region = 0;
 	}
 	if ((int)m_app_config.radio_mode < 0 || (int)m_app_config.radio_mode > 2) {
-		m_app_config.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN;
+		m_app_config.radio_mode = APP_CONFIG_RADIO_MODE_OFF;
 	}
 	if (m_app_config.lrw_sub_band < 0) {
 		m_app_config.lrw_sub_band = 0;
