@@ -2217,11 +2217,31 @@ same worktree/bench used for X1–X20 above (SN 2162199999, J-Link 822005109).
 (#340 M14) — `app_input_init()` now seeds `m_input_data` from the real GPIO level once before
 starting the periodic poll timer, without treating that seed as a rise/fall edge.
 
-- [~] Partial — code-pattern match to an already-HIL-proven fix, direct re-confirmation pending
-  physical assist (needs Input A shorted to GND across a reboot; device owner was not physically
-  present this session; there's no dedicated `app_input` ztest suite to exercise it host-side
-  either — the fix mirrors `app_hall.c`'s HIL-proven #340 M14 fix line-for-line). Full
-  `run_native.sh` (10 suites, 116 tests) and `clang-format --dry-run --Werror` both clean.
+> **HW-verified, decisive A/B (2026-08-18, SN 2162199999)**: user physically shorted Input A
+> (PB4) to GND (confirmed independent of firmware via direct J-Link `mem32 0x48000410,1` GPIOB
+> IDR read = `0x00000000`, bit 4 low = active per `GPIO_ACTIVE_LOW`), then `cap-input-a`/
+> `input-a-counter` were enabled and committed via `settings save` (reboots) while the short stayed
+> in place across the reboot — the exact #383 scenario.
+> - **Fixed build (this branch's actual code)**: post-boot `ats sensors sample` showed
+>   `input-a: count=0 active=true` — level correctly read as active, but no rise counted. No
+>   `LOG_WRN`/`LOG_DBG` rise event in the RTT log either.
+> - **Negative control**: temporarily swapped in the pre-#383 `app_input.c` (parent commit
+>   `abe4f4a^`, unfixed `poll()`/`app_input_init()`) with the same reboot conditions (Input A still
+>   shorted) — this time the RTT log showed `XTEST: Input A activated (rise), count: 1`
+>   immediately at boot, i.e. the bug reproduces exactly as described. (Note: the *final*, steady
+>   -state `input-a-count` alone is not a usable observable for this — `app_counters_init()`
+>   overwrites it from the persisted NVS totalizer shortly after boot (issue #340 L10) — the
+>   transient rise had to be caught via a direct log at the decision point, not the settled count.)
+> - Restored the real fix afterward and reconfirmed clean (`count=0 active=true`, no rise) before
+>   moving on.
+>
+> This is a fully decisive fixed-vs-unfixed HIL comparison, not just a code-pattern match to the
+> hall fix anymore.
+
+- [x] Pass — HW-verified decisive (see above). Full `run_native.sh` (10 suites, 116 tests) and
+  `clang-format --dry-run --Werror` both clean (there's no dedicated `app_input` ztest suite; this
+  fix mirrors `app_hall.c`'s already-HIL-proven #340 M14 fix line-for-line, and is now separately
+  HIL-confirmed itself, above).
 
 ### #384 — `flush_stage_pad()` silently swallows a flash-write failure at page rollover
 
@@ -2234,23 +2254,32 @@ been durably closed.
 > records 1164-1168 read back as implausible temperatures (195-203°C), 1169-1175 as the no-data
 > sentinel. This is the original decisive evidence the issue was filed on (see X5 above).
 >
-> **Post-fix re-verification attempt**: re-armed the same fault-injection hook against the fixed
-> code and drove three consecutive page rollovers (records 588, 1176, 1764) — none fired the
-> injected failure. Root-caused mathematically, not a test miss: this build's active sensor set
-> (temperature+humidity, `sample_size=3`) makes `records_per_page() * sample_size` an exact
-> multiple of `DW_DATA` (7) on every page (588×3=1764=7×252), so `m_stage_len` is *always* exactly
-> 0 at every rollover in this configuration — `flush_stage_pad()`'s early return
-> (`if (m_stage_len == 0) return 0;`) means the padded write this fix guards is structurally
-> unreachable for a 3-byte sample size. The bug (and the fix) only bites configurations where
-> `sample_size` doesn't evenly divide into a `DW_DATA`-aligned page (e.g. a single 5-byte-sample
-> sensor: `441*5=2205`, `2205 mod 7 = 3` staged bytes at every rollover). Fix accepted on: (a) the
-> pre-fix HIL corruption repro above, (b) straightforward, low-risk error-propagation code review,
-> (c) `native_sim` history suite green. A follow-up re-run with a sample_size that doesn't divide
-> `DW_DATA` evenly would give a fully clean post-fix HIL repro but wasn't pursued further this
-> session for time.
+> **Post-fix re-verification, decisive (2026-08-18, SN 2162199999)**: the first re-verify attempt
+> (still on the default temperature+humidity sensor set, `sample_size=3`) confirmed the injection
+> point is structurally unreachable there — `records_per_page()*sample_size` is an exact multiple
+> of `DW_DATA` (7) every rollover (588×3=1764=7×252), so `m_stage_len` is always exactly 0 and
+> `flush_stage_pad()`'s early return (`if (m_stage_len == 0) return 0;`) bypasses the padded write
+> this fix guards. Reconfigured the history sensor set to temperature+pressure+orientation
+> (`sample_size=5`, via `history sensors humidity off`/`pressure on`/`orientation on`, backed by
+> live-enabled `cap-barometer`/`cap-accelerometer`) — `records_per_page()=352`,
+> `352×5=1760`, `1760 mod 7 = 3`, so `m_stage_len` is nonzero at every rollover in this config.
+> Filled to the 3rd page-rollover boundary (record 1056→1057) with one fault armed
+> (`history debugfail 1`): the injection fired on an *automatic* periodic capture (not a manual
+> shell one) — RTT log showed `XTEST: injecting flush_stage_pad write failure (0 left)` followed
+> by `history append failed — record dropped`, and the stored count correctly stayed at 1056 (not
+> silently advanced). The very next capture attempt safely retried the identical rollover (fault
+> already consumed) and succeeded cleanly, advancing to 1057. `history read` across the boundary
+> (records 1043-1057) showed all-plausible temperatures (20.16-20.90°C) with no implausible
+> garbage and no unexpected no-data run — a clean pass, in stark contrast to the original pre-fix
+> repro's corruption at the same kind of boundary. This is now a fully decisive post-fix HIL
+> confirmation, not just repro + review.
+>
+> Bench restored to its pre-test sensor/capability configuration (temperature+humidity,
+> `cap-barometer`/`cap-accelerometer`/`cap-input-a` back to `false`) and the debug-only fault
+> -injection hook (`history debugfail`) reverted out of the tree before the final clean reflash.
 
-- [x] Pass (fix verified by repro + review; post-fix re-injection structurally unreachable under
-  this build's sensor configuration — see note)
+- [x] Pass — HW-verified decisive post-fix repro (see above), on top of the original pre-fix
+  corruption repro + code review + `native_sim` history suites green.
 
 ### #385 — `vendor_reset` with an all-zero key returns a false-positive `Ack`
 
