@@ -141,10 +141,11 @@ static void rx_work_handler(struct k_work *work)
 	ARG_UNUSED(work);
 
 	struct rx_msg msg;
+	static char hex[2 * FRAME_MAX + 1];
+	static uint8_t pt[MAX_BODY];
+	static char body_hex[2 * MAX_BODY + 1];
 
 	while (k_msgq_get(&m_rx_msgq, &msg, K_NO_WAIT) == 0) {
-		char hex[2 * FRAME_MAX + 1];
-
 		to_hex(hex, msg.buf, msg.len);
 
 		if (msg.len < HDR_LEN + TAG_LEN) {
@@ -167,7 +168,6 @@ static void rx_work_handler(struct k_work *work)
 		}
 
 		size_t ct_len = msg.len - HDR_LEN - TAG_LEN;
-		uint8_t pt[MAX_BODY];
 		uint8_t nonce[NONCE_LEN];
 		uint8_t key[KEY_LEN];
 
@@ -182,8 +182,6 @@ static void rx_work_handler(struct k_work *work)
 			LOG_WRN("  auth failed: %d (wrong key/serial_number, or not DIR_TX)", ret);
 			continue;
 		}
-
-		char body_hex[2 * MAX_BODY + 1];
 
 		to_hex(body_hex, pt, ct_len);
 		LOG_INF("  body (%zu B): %s", ct_len, body_hex);
@@ -325,7 +323,7 @@ static int cmd_p2p_tx(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	size_t body_len = body_hex_len / 2;
-	uint8_t body[MAX_BODY];
+	static uint8_t body[MAX_BODY];
 
 	for (size_t i = 0; i < body_len; i++) {
 		char b[3] = {argv[2][2 * i], argv[2][2 * i + 1], 0};
@@ -338,7 +336,7 @@ static int cmd_p2p_tx(const struct shell *sh, size_t argc, char **argv)
 	uint32_t counter = (argc >= 4) ? (uint32_t)strtoul(argv[3], NULL, 0) : m_tx_counter++;
 	uint8_t dir = (argc >= 5) ? (uint8_t)atoi(argv[4]) : DIR_RX;
 
-	uint8_t frame[FRAME_MAX];
+	static uint8_t frame[FRAME_MAX];
 
 	sys_put_be32(0, &frame[0]); /* net_id: phase 1 fixed pre-join value (§5.3) */
 	sys_put_be16(0, &frame[4]); /* dev_addr: ditto */
@@ -371,7 +369,7 @@ static int cmd_p2p_tx(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	char hex[2 * FRAME_MAX + 1];
+	static char hex[2 * FRAME_MAX + 1];
 
 	to_hex(hex, frame, wire_len);
 	shell_print(sh, "TX %zu B (type=%d counter=%u dir=%u): %s", wire_len, frame_type, counter,
