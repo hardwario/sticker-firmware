@@ -192,5 +192,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: STICKER Firmware ${{ steps.version.outputs.value }}
+          generate_release_notes: true
           files: |
             artifacts/*.hex
