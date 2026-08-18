@@ -16,9 +16,10 @@ sniffer — this design adds **on-air pairing**, **acknowledged uplinks** and a
 way HARDWARIO TOWER nodes pair to a Radio Dongle, but with real cryptography
 (TOWER's sub-GHz link has none).
 
-Status: **design document**. No firmware/gateway code implements this yet;
-mainline `radio-mode p2p` is reserved and falls back to radio-off with a
-warning (`app_lrw.c`, #271).
+Status: **design document**, phase 1 (§13) implemented and HIL-validated on a
+two-STICKER bench (§14.1) — `radio-mode p2p` now routes through a real
+`app_p2p`/`app_transport` facade instead of the `app_lrw.c` (#271) fallback
+warning; phases 2+ (join/ACK, northbridge, central) remain unimplemented.
 
 ---
 
@@ -621,22 +622,35 @@ everything except real round-trip timing.
 
 ### Setup
 
-- **Device A ("node")** — mainline P2P firmware, `radio-mode p2p`, behaves
+- **Device A ("node" / DUT)** — mainline firmware, `radio-mode p2p`, behaves
   exactly like a deployed unit.
-- **Device B ("gw-sim")** — same firmware image, debug build, with two new
-  debug-shell commands (`CONFIG_APP_CMD_DEBUG_SHELL`-gated, same idiom as the
-  existing `tester cmd <transport> <hex>` command-dispatch injector and the
-  `ats lrw lc ...` link-check debug helpers):
-  - `ats p2p listen` — puts the radio into continuous RX on the P2P channel
-    params (§3.3) and logs every received frame (raw hex + parsed
-    `net_id`/`dev_addr`/`frame_type`/`counter` header) over RTT.
-  - `ats p2p reply <hex>` — transmits a hand-built frame immediately, so a
-    human (or a bench script) can inject a JoinAccept/Ack/Detach/
-    RejoinRequest in response to what `listen` just logged, without a real
-    central.
-- Both devices need independent J-Link/RTT access (two probes, or one probe
-  swapped between them) — same bench pattern as any other two-unit HIL
-  session.
+- **Device B ("gw-sim")** — **a separate, standalone firmware**
+  (`sticker/tests/p2p/`, `west build -b sticker tests/p2p`), *not* a debug
+  build of the mainline app with extra `ats p2p ...` shell commands as
+  originally planned here. That plan turned out to be impractical in
+  practice: mainline `debug.conf` already sits at ~99%+ RAM even before
+  adding P2P (§11, and see "First HIL session" below — this margin turned out to
+  be *unsafe*, not just tight), so bolting a second debug-shell
+  surface onto it wasn't viable. The standalone firmware shares only the
+  crypto primitive (`app_ccm.c`, via a `KCONFIG_ROOT` pointing at the main
+  app's `Kconfig` — same idiom as `tests/nfc_hw`) and reimplements the wire
+  format locally (kept in sync by hand, documented in its own README) — no
+  sensors/NFC/LoRaWAN/history/protobuf, ~24% flash/RAM instead of fighting
+  for the last few hundred bytes. Its RTT shell:
+  - `p2p listen on|off` — continuous RX on the P2P channel params (§3.3),
+    decrypts and logs every received frame (raw hex + parsed
+    `net_id`/`dev_addr`/`frame_type`/`counter` header + RSSI/SNR + decrypted
+    body).
+  - `p2p tx <frame_type> <hex_body> [counter] [dir]` — encrypts and
+    transmits a hand-built frame, so a human (or a bench script) can inject
+    a JoinAccept/Ack/Detach/RejoinRequest in response to what `listen` just
+    logged, without a real central, once phase 2 lands.
+  - `p2p key <secret_key> <serial_number>` — derives `join_key` (§4) to
+    match device A's identity; `p2p radio`/`p2p status` for the rest.
+    Nothing persists across reboot — re-enter every bench session.
+- Both devices need independent J-Link/RTT access (two probes) — same bench
+  pattern as any other two-unit HIL session. See "First HIL session" below
+  for what a first real session on this rig found.
 
 ### What this validates
 
@@ -650,10 +664,91 @@ everything except real round-trip timing.
   boot-window / NFC-`p2p_join` trigger cap (§5.2).
 - `Detach`/`RejoinRequest` (§5.4, §7).
 
-Test frames for device B's `ats p2p reply` (JoinAccept, Ack, etc.) can be
-hand-crafted offline the same way `sticker_nfc_frame.py` hand-crafts NFC
-AES-CCM frames for phone-free NFC testing — same primitive
+Test frames for device B's `p2p tx` (JoinAccept, Ack, etc., once phase 2
+lands) can be hand-crafted offline the same way `sticker_nfc_frame.py`
+hand-crafts NFC AES-CCM frames for phone-free NFC testing — same primitive
 (`app_ccm_encrypt_and_tag`/`app_ccm_auth_decrypt`), different frame layout.
+
+### First HIL session (2026-08-18)
+
+First run of this rig, against the phase-1 transport-port implementation
+(#118). DUT = STICKER 2162199999 (`radio-mode p2p`, `secret_key`
+`dddd...dddd`), gw-sim = a second STICKER on `tests/p2p`. Findings:
+
+**Wire protocol: validated.** A DUT `send` (RTT shell) produced a frame the
+gw-sim correctly received and decrypted end-to-end on real silicon (not
+just the native_sim ztest suite):
+
+```
+RX 44 B, RSSI -23 dBm, SNR 9 dB
+net_id=0 dev_addr=0 frame_type=3 counter=257
+body (29 B): 01088af490d40610021a07080238ff0148041a07080338ff0148042001
+```
+
+`frame_type=3` is **alarm** (§3.2, fPort 3 mirror) — the DUT had an active
+`alarm-no-data` condition, so the transport-ready callback's first report
+was an alarm frame, not telemetry (`0x02`). This is a useful confirmation
+in itself: it means `app_transport_send_alarm()` and
+`app_transport_send_telemetry()` are *both* independently exercised by
+ordinary device state, not just the explicit `send` command. Radio config
+(868.1 MHz/SF10/BW125/CR4-5), the 11 B AAD header, and the `join_key` KDF
+all matched between the two independently-flashed devices, confirming §3–§4
+end to end.
+
+**Frame-counter persistence: confirmed.** The counter kept climbing across
+multiple DUT resets (crash-forced and deliberate) instead of resetting to
+0 — consistent with the NVS reservation-window design (§3.1, `p2pfc/base`,
++256 per boot). The visible jumps between reads (e.g. 257 → 7453 → 7710 →
+8224 → 8481 → 8738, deltas clustering around 257/514) are exactly what a
++256-per-boot reservation predicts across several reboots between
+observations — not a bug, just the reservation window being consumed by
+reboot count rather than frame count.
+
+**Duty-cycle enforcement: inconclusive on this bench, code looks correct.**
+Tried to force back-to-back `send`s to observe the `-EAGAIN`/block-until
+gate (§3.1, `app_p2p.c`'s 1‰-configured EU868 duty-cycle math — at SF10 a
+44 B wire frame airtime is ≈535 ms, so the block window is
+≈53 s, not the ≈25 s a rougher airtime guess would suggest — **recompute
+this from `frame_toa_ms()`, don't estimate**, next time). Never got a clean
+isolated repro of "duty-cycle blocked an otherwise-pending frame": once the
+DUT's reportable state (alarm/telemetry deltas) settled, `app_compose_budget`
+legitimately had nothing new to send, which is silent at the same log level
+as the duty-cycle gate itself (both effectively invisible without a
+temporary `LOG_WRN` — the existing `LOG_WRN("TX duty-cycle blocked...")` at
+`app_p2p.c` line ~316 is real and did not fire during this session, which is
+consistent with "nothing to send" rather than "actively blocked", but the
+two are hard to tell apart from outside without forcing a genuine sensor
+delta — a hall/input toggle or similar physical stimulus this session
+couldn't provide unattended). Re-run with a way to force fresh reportable
+data (physical sensor trigger, or a temporary shell command that force-marks
+a report-worthy delta) to get a clean before/after duty-cycle trace.
+
+**gw-sim firmware bugs found + fixed** (both real stack overflows on real
+HW, both fixed by moving large scratch buffers to `static` plus a modest
+explicit stack-size bump — see `tests/p2p/prj.conf`'s comments for the
+exact sizing):
+- `rx_work_handler()` (system work queue, default 1024 B stack) overflowed
+  decrypting the very first real RX frame — >1.5 KB of stack-local scratch
+  (hex dump + plaintext + body-hex buffers) plus AES-CCM call depth on a
+  1024 B stack. Fixed: buffers moved to `static`,
+  `CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE=2048`.
+- `cmd_p2p_tx()` (shell's own thread, default 2048 B stack) overflowed the
+  first real `p2p tx` call — same class of bug, smaller margin violation.
+  Fixed the same way, `CONFIG_SHELL_STACK_SIZE=3072`.
+
+**Separate, pre-existing bug found — NOT specific to P2P, filed as
+issue #394.** While chasing what looked like TX silence, the DUT's shell
+went completely unresponsive a few seconds after boot. Turned out to be a
+reproducible BusFault/UsageFault from the *mainline* `debug.conf`'s system
+heap writing past the physical end of RAM (`0x20010000` on this 64 KB
+part) — reproduced identically with `CONFIG_APP_LORA_P2P` entirely
+disabled, so this is a `debug.conf` RAM-budget problem, not a P2P bug. The
+bench overlay (`app/debug_p2p_bench.conf`) has its own local fix (trimmed
+history/log/RTT buffers + `CONFIG_MAIN_STACK_SIZE`, verified via
+`k_thread_stack_space_get()` to leave >2 KB of the 3 KB main stack free on
+real HW) so P2P bench sessions aren't blocked by it, but the underlying
+`debug.conf` issue is unresolved upstream — see issue #394 before relying
+on any other debug-build HIL session's RAM margin at face value.
 
 ### What this does NOT validate — still needs real FIBER v2 hardware (phase 6)
 
