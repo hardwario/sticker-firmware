@@ -236,6 +236,7 @@ static int h_commit(void)
 		       sizeof(m_app_config.claim_token));
 		memcpy(m_app_config.vendor_token, stored.vendor_token,
 		       sizeof(m_app_config.vendor_token));
+		m_app_config.vendor_reset_allow = stored.vendor_reset_allow;
 		m_app_config.lrw_region = stored.lrw_region;
 		m_app_config.radio_mode = stored.radio_mode;
 		m_app_config.lrw_sub_band = stored.lrw_sub_band;
@@ -1732,6 +1733,7 @@ int app_config_device_reset(void)
 	memcpy(m_app_config.claim_token, preserved.claim_token, sizeof(m_app_config.claim_token));
 	memcpy(m_app_config.vendor_token, preserved.vendor_token,
 	       sizeof(m_app_config.vendor_token));
+	m_app_config.vendor_reset_allow = preserved.vendor_reset_allow;
 	m_app_config.lrw_region = preserved.lrw_region;
 	m_app_config.radio_mode = preserved.radio_mode;
 	m_app_config.lrw_sub_band = preserved.lrw_sub_band;
@@ -1783,6 +1785,7 @@ int app_config_factory_reset(void)
 	memcpy(m_app_config.claim_token, preserved.claim_token, sizeof(m_app_config.claim_token));
 	memcpy(m_app_config.vendor_token, preserved.vendor_token,
 	       sizeof(m_app_config.vendor_token));
+	m_app_config.vendor_reset_allow = preserved.vendor_reset_allow;
 	memcpy(m_app_config.lrw_deveui, preserved.lrw_deveui, sizeof(m_app_config.lrw_deveui));
 	memcpy(m_app_config.lrw_joineui, preserved.lrw_joineui, sizeof(m_app_config.lrw_joineui));
 

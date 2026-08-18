@@ -323,6 +323,11 @@ parameters:
     type: bool
     default: true
     writable: [shell, vendor]
+    # A deliberately-set interlock survives the non-vendor reset tiers: without
+    # this, a plain device_reset/factory_reset would silently flip an owner's
+    # allow=false back to the default true. vendor_reset itself still restores
+    # the default (it only runs when allow was true anyway).
+    persistent: [device_reset, factory_reset]
     help: "Get/Set whether vendor_reset is accepted (true/false); over the air, settable only over the vendor NFC channel."
 
   - name: alarm_limit
