@@ -1133,7 +1133,10 @@ and NFC.
 **Goal:** A slot can be overwritten, cleared, and disabled-without-losing-its-definition.
 **Observable:** Overwriting `alarm_<i>` changes the rule; `alarm clear <i>` (or `alarm_<i>` = 34
 zero hex chars) removes it; a packed rule with flags = present-only (enabled bit clear, e.g.
-`01…`) keeps the slot listed with `en=0` and is **not** evaluated.
+`01…`) keeps the slot listed with `en=0` and is **not** evaluated. Since the 2026-08-18
+final-review fix, clearing/disabling/editing a rule whose latch is currently ACTIVE also emits
+the matching fPort-3 deactivate edge on the next poll (previously the activate was left
+dangling for edge-pairing backends).
 
 **Prompt for Claude:**
 > Using slot 0: (1) **change** it — `alarm set 0 onboard temperature 0 10 5` then re-set to
@@ -2155,7 +2158,17 @@ voltage reading (not stale/garbage).
 server repeatedly while sampling is active; confirm no hangs/resets over an extended run, and the
 reported battery level tracks `ats sensors sample`'s voltage.
 
-- [ ] Pass
+- [x] Pass
+
+> **HW-verified (2026-08-18, sticker SN 2162199999, debug build @ `ac9307f`, ChirpStack):**
+> device-profile `device_status_req_interval` temporarily 1→96 (restored to 1 afterwards,
+> verified by re-Get). `ats sensors sample` read 3.03 V; the FW mapping
+> (`battery_level_callback()` reads `app_battery_last_sample()`,
+> `raw = 1 + round(clamp((v−2.4)/1.2, 0, 1)·253)`) predicts raw 134 ≈ 52.6 %. Three
+> uplink/downlink rounds ~60–90 s apart reported ChirpStack `device_status.battery_level`
+> 53.14 % / 52.75 % / 52.75 % — all within one raw battery unit (~0.4 pp) of the prediction,
+> rounds 2–3 byte-identical (consistent with a cached value, not per-request ADC noise).
+> Uptime strictly increasing, reset cause unchanged, shell responsive throughout — no hang.
 
 ### X16 — M13: late `LinkCheckAns` not reprocessed
 
@@ -2169,7 +2182,20 @@ a single physical round trip.
 is pending (so it resolves LC implicitly), then confirm a late/duplicate `LinkCheckAns` doesn't
 also increment `m_consecutive_lc_ok` a second time (`ats lrw status` consecutive-ok counter).
 
-- [ ] Pass
+- [~] Pass (best-effort — race precondition achieved, magnitude structurally unobservable)
+
+> **HW-attempted, best-effort PASS (2026-08-18, SN 2162199999, ChirpStack):** unlike the
+> 2026-08-17 TTN/ChirpStack attempts, the precondition WAS achieved this time: in WARNING
+> (3× `ats lrw lc fail`, ≥3 s apart), one enqueued fPort-85 downlink (`1a020801`, harmless
+> GetParam) was delivered in the same RX window as the `ats lrw check` LinkCheckAns (queue
+> confirmed drained). Result: exactly one clean WARNING→HEALTHY transition, `healthy->warning`
+> stayed 0/3 (no spurious failure path), no reset, no bounce. Caveat: with
+> `OK_THRESHOLD_HEALTHY = 1` a single LC success transitions immediately and resets
+> `m_consecutive_lc_ok`, so +1 vs. a buggy +2 lands on the same visible `0/1` — the counter
+> magnitude cannot distinguish the two on this config, and `debug.conf`'s
+> `CONFIG_LOG_MAX_LEVEL=2` compiles out the guard's `LOG_DBG` line. The guard itself
+> (`app_lrw.c` `lc_response_work_handler()`, `if (!m_link_check_pending) return;`) is
+> statically confirmed; no anomaly was observable on hardware with the race forced.
 
 ### X17 — M17: `app_report_suspend()` cancels pending report work
 
@@ -2375,6 +2401,88 @@ the deferred action later with no error surfaced to the caller.
 > bound check the network-time path uses.
 
 - [x] Pass (HW-verified, boundary + off-by-one both confirmed)
+
+---
+
+## Final-review fixes (2026-08-18 pre-merge deep review)
+
+A multi-agent static review of the whole `v1.4.0` surface (8 subsystem finders, each finding
+adversarially verified) ran as the last gate before the merge to `main`. Five confirmed defects
+were fixed; every fix carries native regression coverage where the logic is host-testable.
+
+### FR-1 — deactivate edge lost when an ACTIVE rule is cleared/disabled/edited (`app_alarm.c`)
+
+`rt_sync()` reset an active latch *before* `eval_threshold()`/`eval_state()` ran, so their
+`!rule->enabled` deactivate branches could never see the pre-reset latch — the fPort-3
+deactivate edge for that alarm instance was silently skipped (dangling activate for any backend
+pairing edges; the LED/status snapshot cleared correctly, only the event was lost).
+**Fix:** `rt_sync()` emits the deactivate edge itself when resetting an active latch (clear,
+disable, and in-place edit all covered). Covered by 3 new `tests/alarm_eval` cases
+(`test_clearing/disabling/editing_active_rule_emits_deactivate_edge*`) via a new event-capture
+stub.
+
+> **HW-verified (2026-08-18, SN 2162199999, debug build @ this branch, ChirpStack):**
+> `alarm set 0 onboard temperature -50 10 0` with the bench at 22.7 °C + `alarm poll` →
+> fPort-3 activate uplink captured live via the gRPC event stream
+> (`{"event":"activate","quantity":"temperature","slot":0,...}`); `alarm clear 0` at unix
+> 1787036234 → fPort-3 **deactivate** uplink captured with device-side event time 1787036235
+> (1 s after the clear, decisively attributable):
+> `{"slot":0,"event":"deactivate","quantity":"temperature","source":"onboard","type":"high"}`.
+> No reset, uptime monotonic.
+
+### FR-2 — mid-record flash-write failure misaligns the rest of the history page (`app_history.c`)
+
+`backend_append()` streams a record as multiple double words; a write failure past the record's
+first byte left the already-flushed DWs (and, on a first-DW failure, the previous record's
+staged tail) as an unaccounted gap in the page byte stream — every later record in that page
+read back shifted/garbage (sibling of the #384 rollover bug, one layer deeper).
+**Fix:** on such a failure the page is closed (`m_head_full = true`), so the next append opens a
+fresh page and the stream re-aligns; a no-bytes-lost failure keeps the page open. Blast radius
+shrinks from "rest of the page" to "at most the failed record".
+
+### FR-3 — command Ack lost when a duty-cycle backoff outlives the reboot deferral (`app_lrw.c`)
+
+The post-command action (reboot/save/reset over the fPort-85 downlink port) fired at a fixed
+8 s, but a failed `lorawan_send()` requeues the Ack with a 15 s retry backoff — the reboot always
+won and dropped the RAM-only queued Ack. **Fix:** the action defers in 8 s steps (max 6, ~56 s
+cap) while the response queue is non-empty or a TX retry is pending.
+
+### FR-4 — `vendor_reset_allow` silently re-enabled by device/factory reset (`app_config.yml`)
+
+The field had no `persistent:` tier, so `device_reset`/`factory_reset` reset an owner's
+deliberate `false` back to the default `true`. **Fix:** `persistent: [device_reset,
+factory_reset]` (+ configen regen). `vendor_reset` still restores the default (it only runs when
+allow was true anyway). Guarded by the existing generic
+`test_reset_ops_preserve_only_their_tier` pytest.
+
+> **HW-verified (2026-08-18, SN 2162199999):** `config vendor-reset-allow false` +
+> `settings save` → `settings device-reset` → `vendor-reset-allow` still `false` after the
+> reset (other volatile config correctly back at defaults, identity/LoRaWAN keys untouched).
+> Restored to `true` afterwards.
+
+### FR-5 — debug `ats lrw compose` could feed the real uplink a stale snapshot (`app_compose.c`)
+
+The debug probe and the real TX path share one snapshot state machine as interleavable per-frame
+work items on `m_work_q`; a periodic report landing mid-debug-session drained the *debug*
+session's remaining groups as the real over-the-air uplink (milder sibling of #340 M16).
+**Fix:** the active session is tagged debug/real — the real path drops a leftover debug snapshot
+and composes fresh; the debug probe returns `-EBUSY` during an in-flight real report.
+
+### FR-6 — smaller items in the same batch
+
+- `nfc read <off> <len>` shell: `off + len` integer wraparound bypassed the range check →
+  potential 512 B+ read past `m_buf` (dev-shell only). Bounds now checked per-operand.
+  HW-verified 2026-08-18: `nfc read 10 4294967286` rejected; boundary `496 16` accepted,
+  `496 17` rejected; no crash, uptime monotonic.
+- Boot path: extra IWDG feed after the 5 s LED carousel — the init chain below gets the full
+  10 s budget instead of the remainder (thin-margin hardening, no observed overrun).
+- Dead code removed: `app_history_is_enabled()`, `app_history_sensor_name()`,
+  `app_settings_erase()` (the shell command uses the internal `erase()` directly),
+  `app_machine_probe_enable/disable_tilt_alert()` (+ the orphaned static
+  `lis2dh12_disable_alert()`; tilt alert is armed internally at scan time, `get` stays).
+- Noted, deliberately NOT changed: `tx_send_queued()` retries responses/alarms without a cap —
+  unlike bulk telemetry/history these are low-volume and precious, and the backoff retry
+  eventually succeeds; a cap would only convert late delivery into silent loss.
 
 ---
 

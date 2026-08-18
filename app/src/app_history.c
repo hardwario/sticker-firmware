@@ -592,6 +592,8 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
 
 	/* Stream `len` bytes into the head page, flushing full double words. */
 	uint16_t phys = m_live[m_nlive - 1].phys;
+	uint16_t start_head_dw = m_head_dw;
+	uint8_t start_stage_len = m_stage_len;
 	for (size_t i = 0; i < len; i++) {
 		m_stage[m_stage_len++] = rec[i];
 		if (m_stage_len == DW_DATA) {
@@ -606,6 +608,19 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
 			 * m_stage[] on the following capture (C1). */
 			m_stage_len = 0;
 			if (ret) {
+				/* A failure past the record's first byte leaves a gap in the
+				 * page's byte stream: this record's already-flushed double
+				 * words (m_head_dw advanced past them while m_abs_ord never
+				 * counted the record), and/or the previous record's staged
+				 * tail bytes just dropped above. Every later record in this
+				 * page would then read back shifted/garbage. NOR flash cannot
+				 * be rewound, so contain the damage: close the page, forcing
+				 * the next append onto a fresh one whose stream starts
+				 * aligned again. A failure with nothing flushed and an empty
+				 * pre-record stage leaves no gap -- keep the page open. */
+				if (m_head_dw != start_head_dw || start_stage_len != 0) {
+					m_head_full = true;
+				}
 				return ret;
 			}
 			m_head_dw++;
@@ -1162,11 +1177,6 @@ uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t c
 	return (uint16_t)((matched + per_frame - 1) / per_frame);
 }
 
-bool app_history_is_enabled(void)
-{
-	return m_enabled;
-}
-
 void app_history_set_enabled(bool enable)
 {
 	m_enabled = enable;
@@ -1204,14 +1214,6 @@ void app_history_set_mask(uint32_t mask)
 	recompute_sizing();
 	backend_reset_logical();
 	k_mutex_unlock(&m_lock);
-}
-
-const char *app_history_sensor_name(enum app_history_sensor s)
-{
-	if (s < 0 || s >= APP_HISTORY_SENSOR_COUNT) {
-		return "?";
-	}
-	return m_desc[s].name;
 }
 
 enum app_history_sensor app_history_sensor_by_name(const char *name)

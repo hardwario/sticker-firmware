@@ -108,23 +108,42 @@ static void *m_event_cb_user_data;
 
 K_MUTEX_DEFINE(m_lock);
 
+static void alarm_collect(uint8_t slot, uint8_t source, uint8_t quantity, bool active, uint8_t type,
+			  bool has_value, int32_t value);
+
 /* Return the rule in `slot`, syncing its runtime latch: an empty slot (or one
  * whose rule changed at all since the latch was last reset — not just
  * source/quantity, but any field, e.g. a live edit of lo/hi/dwell/enabled/
  * from_state/to_state on the SAME source+quantity) is reset. Without this, an
  * already-active/pending latch would carry over under the edited rule's new
- * parameters. Returns NULL for an empty slot. */
-static bool rt_sync(uint8_t slot, struct app_alarm_rule *out)
+ * parameters. Returns NULL for an empty slot.
+ *
+ * Resetting an ACTIVE latch must also emit the fPort-3 deactivate edge here:
+ * this reset runs before the eval_* dispatch, so eval_threshold()/eval_state()'s
+ * own !rule->enabled deactivate branches can never see the pre-reset latch for
+ * the disable/clear/edit transition — without this, a backend pairing
+ * activate/deactivate edges is left with a dangling activate. Runs under m_lock
+ * (recursive), so the nested alarm_collect() re-lock is fine. */
+static bool rt_sync(uint8_t slot, struct app_alarm_rule *out, bool *should_send)
 {
 	struct rstate *rt = &m_rt[slot];
 
 	if (!app_alarm_rules_get(slot, out)) {
 		if (rt->used) {
+			if (rt->active) {
+				alarm_collect(slot, rt->source, rt->quantity, false, rt->type,
+					      false, 0);
+				*should_send = true;
+			}
 			*rt = (struct rstate){0};
 		}
 		return false;
 	}
 	if (!rt->used || memcmp(&rt->last_rule, out, sizeof(*out)) != 0) {
+		if (rt->active) {
+			alarm_collect(slot, rt->source, rt->quantity, false, rt->type, false, 0);
+			*should_send = true;
+		}
 		*rt = (struct rstate){.used = true,
 				      .source = out->source,
 				      .quantity = out->quantity,
@@ -934,7 +953,7 @@ bool app_alarm_poll(void)
 
 	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
 		struct app_alarm_rule rule_copy;
-		if (!rt_sync(slot, &rule_copy)) {
+		if (!rt_sync(slot, &rule_copy, &should_send)) {
 			continue;
 		}
 		const struct app_alarm_rule *rule = &rule_copy;
@@ -1036,7 +1055,7 @@ void app_alarm_event(enum app_alarm_source source, bool active)
 
 	for (uint8_t slot = 0; slot < APP_ALARM_SLOT_COUNT; slot++) {
 		struct app_alarm_rule rule_copy;
-		if (!rt_sync(slot, &rule_copy)) {
+		if (!rt_sync(slot, &rule_copy, &should_send)) {
 			continue;
 		}
 		const struct app_alarm_rule *rule = &rule_copy;

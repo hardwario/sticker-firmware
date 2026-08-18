@@ -14,6 +14,7 @@
 
 #include "app_alarm.h"
 #include "app_alarm_rules.h"
+#include "app_cmd.h"
 #include "app_config.h"
 #include "app_hall.h"
 #include "app_sensor.h"
@@ -417,4 +418,104 @@ ZTEST(alarm_eval, test_rate_count_one_shot_then_hold_across_multiple_windows)
 	app_alarm_poll();
 	zassert_true(app_alarm_is_active(APP_ALARM_SRC_HALL_LEFT, APP_ALARM_Q_COUNT),
 		     "rate alarm never re-armed after the hold genuinely expired");
+}
+
+/* Deactivate edge on rule removal/disable/edit (2026-08-18 final-review fix):
+ * rt_sync() resets an ACTIVE latch when its rule is cleared, disabled, or
+ * edited — and must emit the matching fPort-3 deactivate edge itself, because
+ * eval_threshold()/eval_state()'s own !rule->enabled deactivate branches run
+ * only AFTER rt_sync() already zeroed rt->active for exactly that transition
+ * (they can never see the pre-reset latch). Without the emission, a backend
+ * pairing activate/deactivate edges is left with a dangling activate. */
+
+extern struct app_cmd_alarm_event test_alarm_events[16];
+extern size_t test_alarm_event_count;
+
+static void activate_threshold_slot0(void)
+{
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_ONBOARD,
+		.quantity = APP_ALARM_Q_TEMPERATURE,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 30.0f,
+		.dwell = 0.0f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule setup rejected");
+
+	g_app_sensor_data.temperature = 35.0f; /* above hi, dwell 0: fires now */
+	app_alarm_poll();
+	zassert_true(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
+		     "threshold did not activate");
+}
+
+static const struct app_cmd_alarm_event *last_event(void)
+{
+	zassert_true(test_alarm_event_count > 0, "no alarm event captured");
+	return &test_alarm_events[test_alarm_event_count - 1];
+}
+
+ZTEST(alarm_eval, test_clearing_active_rule_emits_deactivate_edge)
+{
+	g_app_config.alarm_limit = 0; /* flush synchronously inside poll */
+	activate_threshold_slot0();
+
+	test_alarm_event_count = 0;
+	zassert_equal(app_alarm_rules_clear(0), 0, "rule clear rejected");
+	zassert_false(app_alarm_poll(), "cleared rule still reported active");
+
+	const struct app_cmd_alarm_event *ev = last_event();
+	zassert_equal(ev->edge, 1, "expected deactivate edge (1), got %u", ev->edge);
+	zassert_equal(ev->slot, 0, "deactivate edge on wrong slot %u", ev->slot);
+	zassert_equal(ev->source, APP_ALARM_SRC_ONBOARD, "wrong source %u", ev->source);
+	zassert_equal(ev->quantity, APP_ALARM_Q_TEMPERATURE, "wrong quantity %u", ev->quantity);
+}
+
+ZTEST(alarm_eval, test_disabling_active_rule_emits_deactivate_edge)
+{
+	g_app_config.alarm_limit = 0;
+	activate_threshold_slot0();
+
+	struct app_alarm_rule r;
+	zassert_true(app_alarm_rules_get(0, &r), "rule readback failed");
+	r.enabled = 0;
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule disable rejected");
+
+	test_alarm_event_count = 0;
+	zassert_false(app_alarm_poll(), "disabled rule still reported active");
+
+	const struct app_cmd_alarm_event *ev = last_event();
+	zassert_equal(ev->edge, 1, "expected deactivate edge (1), got %u", ev->edge);
+	zassert_equal(ev->slot, 0, "deactivate edge on wrong slot %u", ev->slot);
+}
+
+ZTEST(alarm_eval, test_editing_active_rule_emits_deactivate_edge_then_rearms)
+{
+	g_app_config.alarm_limit = 0;
+	activate_threshold_slot0();
+
+	/* In-place edit (same source+quantity, new band): X9's HIL-confirmed
+	 * latch reset — now paired with the deactivate edge for the old latch. */
+	struct app_alarm_rule r;
+	zassert_true(app_alarm_rules_get(0, &r), "rule readback failed");
+	r.hi = 40.0f;
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "rule edit rejected");
+
+	test_alarm_event_count = 0;
+	app_alarm_poll();
+	zassert_true(test_alarm_event_count > 0, "no deactivate edge on rule edit");
+	zassert_equal(test_alarm_events[0].edge, 1, "expected deactivate edge first, got %u",
+		      test_alarm_events[0].edge);
+	zassert_false(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
+		      "latch survived the edit (35.0 is inside the new 0..40 band)");
+
+	/* The edited rule must still evaluate and re-fire cleanly. */
+	test_alarm_event_count = 0;
+	g_app_sensor_data.temperature = 45.0f; /* above the NEW hi */
+	app_alarm_poll();
+	zassert_true(app_alarm_is_active(APP_ALARM_SRC_ONBOARD, APP_ALARM_Q_TEMPERATURE),
+		     "edited rule never re-fired");
+	zassert_true(test_alarm_event_count > 0, "no activate edge after re-fire");
+	zassert_equal(last_event()->edge, 0, "expected activate edge (0), got %u",
+		      last_event()->edge);
 }
