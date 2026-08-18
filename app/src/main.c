@@ -484,6 +484,12 @@ int main(void)
 
 	play_carousel_boot();
 
+#if defined(CONFIG_WATCHDOG)
+	/* The carousel just blocked for 5 s of the 10 s IWDG window; feed again so
+	 * the init chain below gets the full budget rather than the remainder. */
+	app_wdog_feed();
+#endif /* defined(CONFIG_WATCHDOG) */
+
 	ret = app_clock_init();
 	if (ret) {
 		LOG_WRN("app_clock_init failed: %d (wall-clock unavailable)", ret);
