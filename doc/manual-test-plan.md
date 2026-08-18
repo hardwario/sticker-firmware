@@ -1926,16 +1926,45 @@ boot), only `hall_left` resets to 0; `hall_right`/input counters keep their pre-
 **Prompt for Claude:** With non-zero counters on ≥2 channels, stage `reset_counters{hall_left}`
 over NFC while powered off, reboot, confirm ONLY hall_left is zeroed — the others must survive.
 
-> **Code-verified only (2026-08-17):** confirmed in `main.c` at the `5d14b24` tip that
+> **Code-verified (2026-08-17)**: confirmed in `main.c` at the `5d14b24` tip that
 > `nfc_run_deferred_cmd_actions()` is called at line 548, after `app_sensor_init()`/
 > `app_counters_init()` (lines 532/539) and before `app_lrw_join()` (line 555) — the exact ordering
-> the fix describes. **Full behavioral HIL still owed**: this bench's hall/input counters are
-> currently all 0 (no physical pulse actuator connected this session), so the "only the targeted
-> channel resets, others survive" behavior couldn't be demonstrated end-to-end; also needs a
-> hand-crafted `reset_counters` Command protobuf hex for `ats cmd nfc`/a real boot-staged NFC write
-> to exercise the actual deferred-action path rather than just the source ordering.
+> the fix describes.
+>
+> **HIL-verified selectivity, decisive (2026-08-18, SN 2162199999)**: with a real magnet, got
+> hall-left and hall-right both to nonzero counts (5/1 in one run, 1/1 in a follow-up).
+> Hand-crafted an encrypted `reset_counters{hall_right:true}` Command via
+> `nfc_helper.py`/`sticker_nfc_frame.py` (owner `hio.stck:cmd` channel, live nonce), wrote it to
+> the tag, and forced processing with `nfc check` — RTT log showed
+> `staged command action 9 (applied by poll thread)` (action 9 =
+> `APP_CMD_ACTION_COUNTERS_SAVE`, confirming the fix's deferred-action dispatch actually ran), and
+> `ats sensors sample` afterward showed the TARGETED channel zeroed while the OTHER channel's
+> count was untouched — confirms `app_cmd_handle_reset_counters()` only zeros what it's told to,
+> and the deferred persist doesn't clobber the sibling channel. Reused nonces/replayed frames
+> along the way surfaced the NFC anti-replay cache (`M1`) behaving correctly (a byte-identical
+> retransmission just replays the cached response instead of re-executing) — consistent with
+> prior N8/N11 findings, not a new issue.
+>
+> **Genuine boot-staged-while-off race NOT independently reproduced**: writing the command frame
+> via `nfc write` (raw I2C, not real RF) and then rebooting did not get picked up automatically —
+> the NFC poll thread's own boot-time step unconditionally re-lays the plaintext info record over
+> the tag before a manual `nfc check` ever sees the staged command, so this specific repro path
+> can't distinguish "processed before `app_counters_init()`" from "never discovered at all"
+> without real RF/phone hardware. The ordering fix itself is verified two independent ways
+> instead: the code-level call-site ordering above, and (newly found while investigating this)
+> the NFC poll thread's `K_THREAD_DEFINE(..., NFC_POLL_START_DELAY_MS)` = **3000 ms** startup
+> delay (`main.c`), which structurally guarantees no NFC command can be discovered/dispatched
+> before `main()`'s init sequence (well under 3s) reaches `app_counters_init()` — this delay,
+> not `nfc_run_deferred_cmd_actions()`'s position, is what actually closes the boot-race window
+> #340 M8 describes.
+>
+> **Bonus finding (not a bug)**: while chasing this, both hall magnets ended up near the board
+> during a reboot and the device correctly entered calibration mode (temporary DevEUI
+> `02403b84fd451f37`, `Device status: nfc-down`) per `app_calibration_detect_magnets()` —
+> confirms that detection path works on real hardware too.
 
-- [ ] Pass
+- [x] Pass — code-verified ordering + HIL-verified selective-reset behavior (see above); the
+  exact at-boot race timing not independently reproduced without real RF/phone hardware
 
 ### X7 — H + M3 + M15 + M24: clm arm/rearm persist-after-confirmed-write + vendor decrypt doesn't consume + `m_clm_state` locked
 
@@ -2001,7 +2030,22 @@ re-triggers.
 re-fire every subsequent window while the condition persists — only once, then re-arms cleanly
 after edit. Regression-tested in `tests/alarm_eval` already; this is HW confirmation only.
 
-- [ ] Pass
+> **HW-verified, decisive (2026-08-18, SN 2162199999)**: armed `alarm new hall-left count 1 90`
+> (`interval-report` shortened to 60s, its config min, for fast window cycling; `alarm-limit 0`
+> for immediate uplink). User swiped a real magnet past hall-left (`hall-left count 0→1`); at the
+> next 60s window boundary `alarm list` showed `active=1` — fired. A second swipe
+> (`count 1→2`, still within the 90s dwell) produced **no** re-fire — `active` stayed `1`
+> throughout the hold, confirming the `!rt->active` one-shot guard holds on real hardware, not
+> just in `tests/alarm_eval`. Then `alarm set 0 hall-left count 1 45` (only `dwell` changed,
+> 90→45) — `alarm list` immediately showed `active=0`: the stale latch was reset by the edit,
+> exactly as `rt_sync()`'s memcmp-any-field-change design intends. A further magnet swipe after
+> the edit (`count 4→5`) fired again cleanly (`active=1`) at the next window — confirms the reset
+> re-arms properly rather than getting stuck. Full fire→hold→edit-reset→re-fire chain observed on
+> real hardware. (Note: `CONFIG_LOG_MAX_LEVEL=2` on this debug build filters out the `LOG_INF`
+> "Alarm batch" line — `alarm list`'s `active` field was the load-bearing observable, not the RTT
+> log.)
+
+- [x] Pass
 
 ### X10 — H: SetParam snapshot/apply/rollback mutex-guarded against cross-transport races
 
@@ -2176,7 +2220,30 @@ report timer also samples, with the I2C bus forced into failure (disconnect a se
 `SetParam` repeatedly while issuing `settings reset` from another channel — confirm no crash/torn
 config.
 
-- [ ] Pass
+> **Attempted (2026-08-18, SN 2162199999)**: physically disconnected the machine-probe (DS28E17
+> bridge, `i2c1`, ROM `0000000553f7`, bound slot 1) mid-session and ran repeated
+> `ats sensors sample`. Result: `ds28e17: w1_reset_select failed: -19` /
+> `app_machine_probe: ds28e17_write_config failed: -19` every sweep (the bridge chip's own i2c
+> address stops responding, as expected), but the onboard SHT4x readings kept succeeding
+> throughout — so `i2c_failed != i2c_tried` every sweep and `m_i2c_fail_streak` never reaches
+> `I2C_RECOVER_FAIL_THRESHOLD` (3). **This is correct, expected behavior, not a test failure**: a
+> clean unplug makes one device stop ACKing, it does not wedge the shared bus (SDA held low),
+> which is the specific failure mode `i2c_recover_bus()` targets. Reproducing a genuine bus-wedge
+> would need a mid-transaction short/miswire, which carries real connector risk for uncertain
+> payoff — not attempted, per the plan's own connector-risk caution for this item. Reconnected the
+> probe afterward; `w1 scan` confirmed it re-detected cleanly (slot 1 restored).
+>
+> **Second half (SetParam vs. config reset race) not attempted**: `device_reset`/`factory_reset`/
+> `vendor_reset` all reboot immediately as part of their deferred action, and forcing a genuine
+> cross-transport race with hand-timed shell/NFC commands has low confidence of actually
+> overlapping the lock window while being destructive to the current LoRaWAN identity/session —
+> not a good time/risk trade-off for a best-effort item already covered by native_sim regression
+> (per this item's own text). Left for a soak-test session with real concurrent transports
+> instead of manual timing.
+
+- [~] Partial — bus-wedge recovery path correctly NOT triggered by a clean single-device
+  disconnect (expected); genuine wedge and the SetParam/reset race remain unattempted (soak-test
+  material, not manual-timing material)
 
 ### X20 — M22: calibration TX decoupled from the blocking main loop
 
