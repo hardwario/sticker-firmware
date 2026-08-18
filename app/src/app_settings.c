@@ -278,11 +278,6 @@ static int save_secret_key(void)
 				 sizeof(app_config()->secret_key));
 }
 
-int app_settings_erase(void)
-{
-	return erase(true);
-}
-
 /* Shared by every reset-ladder tier: clear the decoded alarm-rule cache so the
  * running state matches the just-reset config slots immediately, then persist.
  * Returns 0 or a negative errno; the caller reboots. */

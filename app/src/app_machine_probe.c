@@ -646,24 +646,6 @@ static int lis2dh12_enable_alert(const struct device *dev, int threshold, int du
 	return 0;
 }
 
-static int lis2dh12_disable_alert(const struct device *dev)
-{
-	int ret;
-
-	uint8_t write_buf[2];
-
-	write_buf[0] = LIS2DH12_INT1_CFG;
-	write_buf[1] = 0x00;
-
-	ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 2);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
 static int lis2dh12_get_interrupt(const struct device *dev, bool *is_active)
 {
 	int ret;
@@ -1210,47 +1192,6 @@ int app_machine_probe_read_accelerometer(int index, uint64_t *serial_number, flo
 
 	if (!res && accel_z) {
 		LOG_DBG("Acceleration in Z-axis: %s%d.%03d m/s^2", APP_FP3(*accel_z));
-	}
-
-	COMM_EPILOGUE
-}
-
-int app_machine_probe_enable_tilt_alert(int index, uint64_t *serial_number, int threshold,
-					int duration)
-{
-	if (serial_number) {
-		*serial_number = UINT64_MAX;
-	}
-
-	COMM_PROLOGUE
-
-	if (!res) {
-		ret = lis2dh12_enable_alert(m_sensors[index].dev, threshold, duration);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("lis2dh12_enable_alert", ret);
-			res = ret;
-			goto error;
-		}
-	}
-
-	COMM_EPILOGUE
-}
-
-int app_machine_probe_disable_tilt_alert(int index, uint64_t *serial_number)
-{
-	if (serial_number) {
-		*serial_number = UINT64_MAX;
-	}
-
-	COMM_PROLOGUE
-
-	if (!res) {
-		ret = lis2dh12_disable_alert(m_sensors[index].dev);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("lis2dh12_disable_alert", ret);
-			res = ret;
-			goto error;
-		}
 	}
 
 	COMM_EPILOGUE

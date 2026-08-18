@@ -64,12 +64,6 @@ int app_settings_factory_reset(void);
  * all-zero, otherwise 0 or a negative errno from the erase/reset itself. */
 int app_settings_vendor_reset(const uint8_t *new_secret_key);
 
-/* Full NVS wipe: erase the whole storage partition (identity + LoRaWAN
- * credentials included), then reboot. Destructive and un-provisions the device,
- * so it is reserved for the local shell `settings erase` only — never wired to
- * any LoRaWAN or NFC path. */
-int app_settings_erase(void);
-
 /* Persist only the NFC anti-replay nonce counter to NVS as a single settings
  * key (not the whole config blob). Called from the NFC decrypt path on every
  * accepted command so a captured command can't be replayed after a power-cycle.
