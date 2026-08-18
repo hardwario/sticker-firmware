@@ -73,11 +73,13 @@ A persisted `radio-mode` config enum selects the radio network mode at boot:
 
 | Value | Shell | Meaning |
 |-------|-------|---------|
-| `off` | `config radio-mode off` | Radio disabled — no LoRaWAN join, radio never powered. Sensor + history logging still run. Heartbeat LED blinks **orange**. |
-| `lorawan` | `config radio-mode lorawan` | Classic LoRaWAN (**default**, current behaviour). |
+| `off` | `config radio-mode off` | Radio disabled — no LoRaWAN join, radio never powered. Sensor + history logging still run. Heartbeat LED blinks **orange**. **Factory default (#350).** |
+| `lorawan` | `config radio-mode lorawan` | Classic LoRaWAN. |
 | `p2p` | `config radio-mode p2p` | Reserved for the raw-LoRa peer-to-peer transport (#118 / #228); until it lands, `p2p` warns and falls back to `off`. |
 
 Set it over the **shell or NFC only** — never over a LoRaWAN downlink (it would sever the link that carries the command). It is `persistent: [device_reset]` (survives a factory reset like the other identity keys, #299) and needs `settings save` (reboot) to take effect.
+
+> **Factory default is `off` (#350).** A freshly provisioned unit ships **radio-silent** — it never joins or beacons on an unintended network out of the box, and draws no radio power until an operator deliberately sets `radio-mode lorawan` (or `p2p`) and saves. Provisioning therefore includes enabling the radio: e.g. NFC `set_param{radio_mode=lorawan}` alongside the LoRaWAN keys, then `settings save`/`lrw_join`. LoRaWAN ADR also now **defaults on** (#350) — a stationary battery node lets the network optimise its data rate/TX power.
 
 This **replaces the old "blank DevEUI ⇒ radio-silent" guard** (#98/#175): the radio is now enabled/disabled by explicit config, not inferred from an all-zero DevEUI. A `lorawan`-mode device with an unset DevEUI therefore now **attempts to join and fails loudly** instead of silently disabling — so a provisioning gap surfaces rather than looking like an intentional off state. To keep a provisioned device radio-silent (storage, bench, power measurement) without erasing its identity, set `radio-mode off`.
 
