@@ -354,7 +354,10 @@ parameters:
     proto_id: 15
     type: enum
     enum: radio_mode
-    default: LORAWAN
+    # #350: ship radio-silent — a freshly provisioned unit does not transmit until an
+    # operator deliberately enables LoRaWAN (or P2P), so it can never join/beacon on an
+    # unintended network out of the box. Sensor sampling + history still run.
+    default: "OFF"
     persistent: [device_reset]
     help: "Get/Set radio mode (off/lorawan/p2p). off = radio-silent, sensor/history still run."
 
@@ -383,6 +386,10 @@ parameters:
     writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 4
     type: bool
+    # #350: ADR on by default — a stationary battery-powered end-node wants the network to
+    # optimise its data rate/TX power for airtime and battery, rather than sitting at a
+    # fixed conservative DR regardless of link quality.
+    default: true
     persistent: [device_reset]
     help: "Get/Set LoRaWAN ADR (true/false)."
 
