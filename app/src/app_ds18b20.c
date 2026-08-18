@@ -193,7 +193,7 @@ int app_ds18b20_read(int index, uint64_t *serial_number, float *temperature)
 
 	float temperature_ = val.val1 + val.val2 / 1000000.f;
 
-	LOG_DBG("Temperature: %.2f C", (double)temperature_);
+	LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(temperature_));
 
 	if (temperature) {
 		*temperature = temperature_;

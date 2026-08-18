@@ -20,17 +20,15 @@ struct app_hall_data {
 	bool right_is_active;
 	uint32_t left_count;
 	uint32_t right_count;
-	bool left_notify_act;
-	bool left_notify_deact;
-	bool right_notify_act;
-	bool right_notify_deact;
 };
 
 int app_hall_init(void);
 int app_hall_get_data(struct app_hall_data *data);
-int app_hall_get_data_and_clear_notify(struct app_hall_data *data);
-void app_hall_clear_notify_flags(struct app_hall_data *data);
 void app_hall_reset_counts(void);
+void app_hall_reset_count(bool left, bool right);
+
+/* Seed the totalizers (used to restore persisted counts on boot). */
+void app_hall_set_counts(uint32_t left, uint32_t right);
 
 #ifdef __cplusplus
 }

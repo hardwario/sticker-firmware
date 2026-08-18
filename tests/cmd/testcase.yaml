@@ -1,0 +1,5 @@
+common:
+  tags: sticker cmd
+  platform_allow: native_sim
+tests:
+  sticker.cmd: {}

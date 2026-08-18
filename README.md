@@ -48,7 +48,46 @@ STICKER platform highlights (hardware + firmware):
 
 ---
 
+## Firmware Capabilities (v1.4.0)
+
+Beyond the hardware highlights above, the current firmware adds:
+
+* **Remote control over LoRaWAN** — configure and query the device via downlink/uplink commands
+  (fPort 85: `set_param`/`get_param`/`get_config`/`get_info`, LoRaWAN reset/join, factory/vendor
+  reset), no NFC tap or physical access required
+* **Device info on join** — an `Info` uplink (serial, firmware version, reset cause, claim token,
+  radio mode, battery) is sent automatically on every join and clock sync
+- **Real-time clock**, synced from the LoRaWAN network and readable/settable over NFC or LoRaWAN
+* **Sensor history (store-and-forward)** — samples are captured on a fixed cadence and buffered
+  (RAM or flash ring, depending on build) so a temporary LoRaWAN outage doesn't lose data; replay
+  on request
+* **Alarm engine** — per-channel threshold/state/rate rules with hysteresis, rate-limiting, a
+  no-data watchdog, and a low-battery alarm, reported on fPort 3
+* **Encrypted local access over NFC** — a phone can read/write configuration and send commands via
+  an AES-CCM encrypted channel (`hio.stck:cmd`/`hio.stck:rsp`), with a separate anti-replay nonce
+  and a vendor-token-authenticated channel for factory/claim operations
+* **Claim-token provisioning** — a write-once claim token ties a physical unit to its first
+  claiming backend without requiring a LoRaWAN join first
+* **LED signalling scheme** — a unified severity-ordered heartbeat (join state, alarms, radio
+  mode) plus one-shot patterns for NFC interaction and input events
+
+See [`doc/version 1.4.md`](doc/version%201.4.md) for the full changelog and wire-level detail, and
+[`doc/manual-test-plan.md`](doc/manual-test-plan.md) /
+[`doc/automated-test-playbook.md`](doc/automated-test-playbook.md) for how each of these is
+verified.
+
+---
+
 ## Getting Started
+
+> **NixOS / Nix users:** a `shell.nix` at the repository root provides a
+> reproducible development environment. Running `nix-shell` sets up the ARM
+> toolchain, CMake/Ninja, J-Link and — on first entry — bootstraps the Python
+> venv and the west workspace (`west init`/`west update`), so you can skip the
+> manual steps below and go straight to `cd app && make`. Note that this
+> environment builds with the **`gnuarmemb`** toolchain (GNU Arm Embedded)
+> rather than the Zephyr SDK used by CI, so binary size may differ slightly;
+> use the standard setup below for size-sensitive verification.
 
 ### 1. Create a workspace
 
@@ -187,6 +226,31 @@ make format
 ```
 
 > Available `make` targets may evolve over time; inspect the `Makefile` for details.
+
+---
+
+## Firmware update & security model
+
+STICKER ships a **flat application image with no bootloader** (linked from the
+base of flash; no MCUboot, no DFU partition). The **only** way to update the
+firmware is physically over SWD with a J-Link (`make flash`). There is **no
+in-field / over-the-air update**: no LoRaWAN FUOTA, no NFC firmware update. The
+`enter_dfu` command was deliberately removed (#239).
+
+This is an **intentional design decision, not a limitation to be worked around**:
+
+- **Benefit** — zero remote update attack surface. An image cannot be replaced,
+  downgraded, or tampered with over the radio or NFC; only someone with physical
+  access to the SWD pads can reprogram the device.
+- **Cost** — a defect found in the field cannot be fixed remotely; it requires
+  physical access. Weigh this when triaging field issues.
+
+Because there is no bootloader, there is likewise **no image signature check and
+no anti-downgrade protection** — those live in a bootloader, which this product
+does not have. If in-field update is ever introduced, design it with MCUboot
+from the start: **signed images + monotonic anti-downgrade versioning**, wired to
+the existing `config-version` scheme. Until then, the security model relies on
+the image being immutable in the field.
 
 ---
 

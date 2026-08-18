@@ -5,14 +5,18 @@
  */
 
 #include "app_nfc.h"
-#include "app_nfc_ingest.h"
+#include "app_cmd.h"
 #include "app_config.h"
-#include "app_ndef_parser.h"
+#include "app_led.h" /* NFC interaction LED signalling */
+#include "app_nfc_parser.h"
+#include "app_settings.h"
+#include "app_version.h"
 #include "app_log.h"
 
 /* Nanopb includes */
 #include <pb_decode.h>
-#include "src/nfc_config.pb.h"
+#include <pb_encode.h>
+#include "src/app_config.pb.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -21,35 +25,614 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
+#include <zephyr/pm/policy.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/util.h>
 
-/* PSA Crypto includes */
-#include <psa/crypto.h>
+#if defined(CONFIG_SHELL)
+#include <zephyr/shell/shell.h>
+#endif
+
+/* NFC channel AES-CCM (RFC 3610), HW AES / soft-SE backed (#261) */
+#include "app_ccm.h"
 
 /* Standard includes */
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(app_nfc, LOG_LEVEL_DBG);
 
+/* M-11: the NFC command/config channel may only run in plaintext on a debug /
+ * validation build. In a release build the boot warning is a LOG_WRN that
+ * preprocesses away (no CONFIG_LOG), so a release with encryption off would ship
+ * a fully unencrypted NFC channel with no runtime signal. Fail the build instead
+ * — plaintext NFC requires CONFIG_FW_DEBUG. */
+BUILD_ASSERT(IS_ENABLED(CONFIG_APP_NFC_ENCRYPTION) || IS_ENABLED(CONFIG_FW_DEBUG),
+	     "plaintext NFC (CONFIG_APP_NFC_ENCRYPTION=n) is only allowed with CONFIG_FW_DEBUG");
+
+#if defined(CONFIG_SHELL)
+/* When set (by `nfc check`), nfc_check_locked()/parser_callback emit a human-
+ * readable trace to this shell: what was read & decoded off the tag, how the
+ * firmware reacted, and what it wrote back. NULL for boot/poll-thread checks
+ * (those only log over RTT). Set/cleared around the app_nfc_check() call. */
+static const struct shell *m_report_sh;
+#define NFC_REPORT(...)                                                                            \
+	do {                                                                                       \
+		if (m_report_sh) {                                                                 \
+			shell_print(m_report_sh, __VA_ARGS__);                                     \
+		}                                                                                  \
+	} while (0)
+#define NFC_REPORT_HEX(label, data, len)                                                           \
+	do {                                                                                       \
+		if (m_report_sh) {                                                                 \
+			shell_print(m_report_sh, label);                                           \
+			shell_hexdump(m_report_sh, (data), (len));                                 \
+		}                                                                                  \
+	} while (0)
+
+static const char *cmd_action_str(enum app_cmd_action a)
+{
+	switch (a) {
+	case APP_CMD_ACTION_NONE:
+		return "none";
+	case APP_CMD_ACTION_SETTINGS_SAVE:
+		return "save+reboot";
+	case APP_CMD_ACTION_REBOOT:
+		return "reboot";
+	case APP_CMD_ACTION_DEVICE_RESET:
+		return "device-reset";
+	case APP_CMD_ACTION_FACTORY_RESET:
+		return "factory-reset";
+	case APP_CMD_ACTION_VENDOR_RESET:
+		return "vendor-reset";
+	case APP_CMD_ACTION_SECRET_KEY_SAVE:
+		return "secret-key-save+reboot";
+	case APP_CMD_ACTION_ENTER_CALIBRATION:
+		return "enter-calibration";
+	case APP_CMD_ACTION_LRW_RESET:
+		return "lrw-reset+reboot";
+	case APP_CMD_ACTION_LRW_JOIN:
+		return "lrw-join";
+	default:
+		return "?";
+	}
+}
+#else
+#define NFC_REPORT(...)                  ((void)0)
+#define NFC_REPORT_HEX(label, data, len) ((void)0)
+#endif
+
+/* Poll-thread diagnostics for app_nfc. The debug build pins
+ * CONFIG_LOG_MAX_LEVEL=2, so LOG_INF/LOG_DBG are compiled out and only
+ * LOG_WRN/LOG_ERR reach RTT — route these through LOG_WRN so they stay
+ * visible. */
+#define NFC_DBG(...) LOG_WRN(__VA_ARGS__)
+
 #define ST25DV_I2C_ADDR_E0 0x53
-#define ST25DV_I2C_ADDR_E1 0x55
+/* System/dynamic register device address. With user memory at 0x53 (E2=1),
+ * the system area is at 0x57 (the prior 0x55 was the E2=0 value and NACKed). */
+#define ST25DV_I2C_ADDR_E1 0x57
 
 #define ST25DV_MAX_SEQ_WRITE_BYTES 256
 #define ST25DV_INT_PAGE_BYTES      4
 #define ST25DV_TW_MS_PER_PAGE      5
 
-#define NDEF_TNF_MIME       0x02
-#define NDEF_SUPPORTED_TYPE "application/vnd.hardwario.sticker-config.v1"
+#define ST25DV_USER_MEM_SIZE 512
 
-typedef void (*ndef_text_callback_t)(const char *text, size_t len);
+/* Dynamic register IT_STS_Dyn (device E0, addr 0x2005): interrupt status,
+ * read-clears. Non-zero => RF activity since last read (field change / RF
+ * write / etc.). Used to skip the full 512 B read when nothing happened. */
+#define ST25DV_IT_STS_DYN  0x2005
+#define ST25DV_IT_RF_WRITE 0x80 /* IT_STS_Dyn bit7: RF wrote to the EEPROM */
+
+/* Dynamic register EH_CTRL_Dyn (device E0, addr 0x2002): bit2 FIELD_ON reports
+ * whether an RF field is currently present. Dynamic registers live in the
+ * dual-port area and are safe to read while RF is active (unlike the 512 B
+ * user-memory EEPROM, whose reads/writes collide with RF on the shared i2c1 bus
+ * and can wedge it). The poll gates EEPROM access on this bit so the firmware
+ * only touches the tag while the field is off — see nfc_wait_field_off(). */
+#define ST25DV_EH_CTRL_DYN 0x2002
+#define ST25DV_FIELD_ON    0x04
+
+/* Bound the wait for the RF field to clear before an EEPROM access. The phone's
+ * protocol drops the field for ~1500 ms after writing a command so the firmware
+ * can read/answer cleanly; wait a little longer than that, polling the FIELD_ON
+ * bit. Only short dynamic-register reads happen during the wait, so the shared
+ * i2c1 bus stays free for the sensors. */
+#define NFC_FIELD_OFF_WAIT_MS 1800
+#define NFC_FIELD_POLL_MS     20
+
+/* ST25DV (non-C, IC_REF 0x24) GPO configuration. Bit positions per the ST driver
+ * st25dv_reg.h. The STATIC GPO register (0x0000, E1 0x57, EEPROM) needs an open
+ * I2C security session (present password) to write; the DYNAMIC GPO_CTRL_Dyn
+ * (0x2000, E0 0x53, volatile) mirrors the same bit layout and takes effect at
+ * runtime. GPO_EN (bit7) is the MASTER output enable — WITHOUT it the GPO pin
+ * never pulses regardless of the event bits. The event bits: RF_WRITE (bit6)
+ * reports RF EEPROM writes (also in IT_STS_Dyn), FIELD_CHANGE (bit3) pulses on RF
+ * field on/off. */
+#define ST25DV_GPO_REG          0x0000
+#define ST25DV_GPO_CTRL_DYN_REG 0x2000
+#define ST25DV_GPO_EN           0x80
+#define ST25DV_GPO_RF_WRITE_EN  0x40
+#define ST25DV_GPO_FIELD_EN     0x08
+/* Master enable + both event sources. GPO_EN MUST be included or the pin is mute. */
+#define ST25DV_GPO_WANT         (ST25DV_GPO_EN | ST25DV_GPO_RF_WRITE_EN | ST25DV_GPO_FIELD_EN)
+#define ST25DV_I2C_PWD_REG      0x0900
+
+/* NFC Forum external type (TNF=0x04, urn:nfc:ext:) records carry the functional
+ * protocol (cmd/rsp/ack/clm). Short type names ("hio.stck:<kind>") instead of full
+ * MIME media-types save ST25DV user memory (512 B total) — leaving more room for
+ * the encrypted config payload — while staying typed/filterable: Web NFC exposes
+ * them as record.recordType. The resting identity record (inf) is the one
+ * exception: it is a MIME media-type record (TNF 0x02, see below). */
+#define NDEF_TNF_EXT  0x04
+#define NDEF_TNF_MIME 0x02
+
+/* Resting identity record (#298, supersedes #293). Unlike the functional protocol,
+ * `inf` is a MIME media-type record (TNF 0x02, application/vnd.hardwario.sticker)
+ * so Android can tap-to-launch the Manager-App via an intent-filter on the media
+ * type, and the payload is human-readable. It is what the tag holds at rest, read
+ * by the phone before it decrypts anything.
+ *
+ * Payload is ASCII, colon-delimited: "<serial>:<config_ver>:<nonce>", e.g.
+ * "0002162165:03:0000001A":
+ *   serial      10-digit decimal (%010u).
+ *   config_ver  APP_CONFIG_VERSION, hex (%02X). Doubles as the bootstrap "comms
+ *               version": the phone reads it before decryption to know the config
+ *               schema, so bump it on ANY breaking wire change (protobuf/encryption)
+ *               even without a config-field change, or the phone won't detect it.
+ *   nonce       NFC anti-replay counter high-water, hex (%08X) — the last accepted
+ *               nonce_counter, so a phone can resync its counter (= value + 1) after
+ *               a reboot/cache-miss. Not secret (it travels in plaintext anyway).
+ *
+ * The "<serial>:<config_ver>" prefix is format-stable forever, so a phone of any
+ * generation can read those two fields and then decide how to parse the rest. FW
+ * version / build type / flags are intentionally NOT here — obtain them via GetInfo. */
+#define NDEF_INFO_TYPE "application/vnd.hardwario.sticker"
+
+/* Command/response over NDEF. The phone writes a command record (raw protobuf
+ * Command, like a LoRaWAN downlink); the firmware processes it via app_cmd and
+ * replaces it with a response record (0x01 version + protobuf Response). */
+#define NDEF_COMMAND_TYPE  "hio.stck:cmd"
+#define NDEF_RESPONSE_TYPE "hio.stck:rsp"
+/* The phone writes this over the response record once it has read and accepted
+ * the reply (#164): an explicit "consumed" ack, so the firmware restores the
+ * info record deterministically instead of guessing from RF-field timing (which
+ * raced the phone's read and clobbered the reply mid-exchange). */
+#define NDEF_ACK_TYPE      "hio.stck:ack"
+
+/* Provisioning claim record (#247): a plaintext protobuf ClaimInfo{serial_number,
+ * claim_token} the firmware lays down alongside `inf` while a claim token is
+ * provisioned but not yet claimed. The provisioning phone reads it, claims the
+ * device (first-claim-wins), then deletes it from the ST25DV over RF — which
+ * works even with the MCU powered off. Once gone, the firmware never rewrites it
+ * (latched via m_clm_state). The token stays owner-readable over the encrypted
+ * get_info channel, so deleting clm only removes the plaintext convenience. */
+#define NDEF_CLAIM_TYPE "hio.stck:clm"
+
+/* Vendor-token command channel (#299, #316): a separate, dedicated record from
+ * the secret_key-authenticated hio.stck:cmd above, so vendor operations stay
+ * reachable even after the owner has changed (or lost) secret_key. It carries the
+ * SAME protobuf Command as hio.stck:cmd and runs the SAME generic app_cmd
+ * dispatch — only decrypted/encrypted with vendor_token instead of secret_key and
+ * dispatched on the vendor transport (which gates vendor_reset and the
+ * writable:[vendor] fields). Same AES-CCM wire framing (decrypt()/encrypt()
+ * parameterized by key) and the same shared nonce_counter window/persist — no
+ * separate vendor nonce. The reply is a normal hio.stck:rsp (encrypted with
+ * vendor_token, not secret_key), so the read/ack/restore-info state machine below
+ * is unchanged. Gated behind CONFIG_APP_NFC_ENCRYPTION like hio.stck:cmd — there
+ * is no plaintext fallback for a vendor-authenticated channel. */
+#define NDEF_VENDOR_TYPE "hio.stck:vnd"
+
+/* NFC Forum Type 5 Capability Container (4-byte form) for ST25DV04K:
+ *   [0] 0xE1 magic, [1] 0x40 mapping v1.0 + read/write,
+ *   [2] MLEN = user_memory / 8 = 512/8 = 0x40, [3] 0x01 (MBREAD feature).
+ * A phone's Web NFC (Type 5) reader requires a valid CC at offset 0 before the
+ * NDEF TLV; without it the tag reads as unformatted/empty over RF. */
+#define ST25DV_CC0 0xE1
+#define ST25DV_CC1 0x40
+#define ST25DV_CC2 (ST25DV_USER_MEM_SIZE / 8)
+#define ST25DV_CC3 0x01
+
+/* Single shared 512-byte scratch buffer for all ST25DV memory access. Always
+ * used while holding m_lock, which serialises app_nfc_check() (main loop) and
+ * the `nfc` shell commands against each other on the I2C bus and LPD pin. */
+static uint8_t m_buf[ST25DV_USER_MEM_SIZE];
+static K_MUTEX_DEFINE(m_lock);
+
+static const struct gpio_dt_spec m_lpd = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
+
+/* ST25DV GPO interrupt line (PB12). Asserts on the RF events enabled in the GPO
+ * config (RF write, field change, ...), letting us wake on demand instead of
+ * polling. Handled directly here. */
+static const struct gpio_dt_spec m_gpo = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), nfc_gpo_gpios);
+static struct gpio_callback m_gpo_cb;
+
+/* Given by the GPO ISR on each RF event; the NFC poll thread sleeps on it so the
+ * CPU only wakes to service the tag when the phone is actually doing something
+ * (max count 1 — bursts coalesce into one wake, which is fine). */
+static K_SEM_DEFINE(m_gpo_sem, 0, 1);
+
+/* Keep-awake window for an NFC exchange. Servicing one encrypted command is many
+ * back-to-back i2c1 transfers with short field-off polls (k_sleep) between them;
+ * on the release build the CPU would otherwise drop into Stop2 in those gaps, and
+ * a Stop2 landing mid-operation corrupts the i2c1 (ST25DV) tag I/O so the command
+ * never gets a reply — release-only (debug runs PM=n and never sleeps). The GPO
+ * ISR fires on RF field-on (before the phone's command write even lands) and on
+ * every RF write; each event (re)arms this window, during which a
+ * SUSPEND_TO_IDLE policy lock keeps the CPU out of Stop2. After NFC_AWAKE_WINDOW_MS
+ * of RF quiet the lock is dropped and the sticker returns to deep sleep. Kept
+ * short: RF events during an exchange are <2 s apart so they re-arm it, so the
+ * window only needs to outlast that gap plus a small margin; a longer tail just
+ * burns ~mA (CPU held awake) after the phone has already left. Idle current is
+ * unchanged (the lock is never taken without an RF event). */
+#define NFC_AWAKE_WINDOW_MS 5000
+static atomic_t m_awake_held; /* 1 while the SUSPEND_TO_IDLE lock is held */
+static void nfc_awake_timeout(struct k_timer *timer);
+static K_TIMER_DEFINE(m_awake_timer, nfc_awake_timeout, NULL);
+
+/* --- NFC interaction LED signalling --------------------------------------
+ * Guides an operator through an NFC exchange:
+ *   phone detected (RF field / GPO)      -> green solid
+ *   command being serviced               -> fast green blink
+ *   command rejected (auth/nonce, #315)  -> fast red blink, then off
+ *   response written, waiting for phone   -> green + yellow solid
+ *   response consumed / session quiet     -> LED off
+ * The "processing"/"rejected" blink runs on a k_timer so it never blocks the NFC
+ * critical path. app_led_set is a plain gpio write (ISR-safe); k_timer start/stop
+ * are ISR-safe too, so these may be called from the GPO ISR / timer handlers.
+ * One timer drives whichever channel the current state blinks (m_led_blink_ch),
+ * and every state helper leaves the two channels it does not use turned off, so
+ * a state change can never blend into a colour of its own (red + green = orange). */
+#define NFC_LED_BLINK_MS 90
+
+/* How long the rejection blink is held (#315). Long enough to be unmistakable to
+ * whoever is holding the phone against the sticker, and self-limiting: unlike the
+ * green processing blink it is not left for the RF-quiet backstop to clear, because
+ * the boot-staged path (app_nfc_check() from main(), no RF field and therefore no
+ * awake window running) has no backstop and would otherwise blink forever. */
+#define NFC_LED_REJECT_MS 2000
+
+static bool m_led_blink_on;
+static enum app_led_channel m_led_blink_ch = APP_LED_CHANNEL_G;
+static void nfc_led_blink_timer(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	m_led_blink_on = !m_led_blink_on;
+	app_led_set(m_led_blink_ch, m_led_blink_on ? APP_LED_ON : APP_LED_OFF);
+}
+static K_TIMER_DEFINE(m_led_blink_timer, nfc_led_blink_timer, NULL);
+
+static void nfc_led_off(void);
+static void nfc_led_reject_timeout(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	nfc_led_off();
+}
+static K_TIMER_DEFINE(m_led_reject_timer, nfc_led_reject_timeout, NULL);
+
+static void nfc_led_detected(void)
+{
+	k_timer_stop(&m_led_reject_timer);
+	k_timer_stop(&m_led_blink_timer);
+	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_G, APP_LED_ON);
+}
+
+static void nfc_led_processing(void)
+{
+	k_timer_stop(&m_led_reject_timer);
+	m_led_blink_on = true;
+	m_led_blink_ch = APP_LED_CHANNEL_G;
+	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_G, APP_LED_ON);
+	k_timer_start(&m_led_blink_timer, K_MSEC(NFC_LED_BLINK_MS), K_MSEC(NFC_LED_BLINK_MS));
+}
+
+/* #315: the command was rejected before it ever ran (wrong secret_key /
+ * vendor_token, stale or out-of-window nonce_counter, malformed frame) and no
+ * reply is written back to the tag. Without this the green "servicing" blink from
+ * nfc_led_processing() would simply keep running until the RF-quiet backstop —
+ * visually identical to a successful command for whoever is holding the phone.
+ * Same blink cadence in red (same rhythm, different colour = rejected), held for
+ * NFC_LED_REJECT_MS and then cleared. */
+static void nfc_led_rejected(void)
+{
+	m_led_blink_on = true;
+	m_led_blink_ch = APP_LED_CHANNEL_R;
+	app_led_set(APP_LED_CHANNEL_G, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_R, APP_LED_ON);
+	k_timer_start(&m_led_blink_timer, K_MSEC(NFC_LED_BLINK_MS), K_MSEC(NFC_LED_BLINK_MS));
+	k_timer_start(&m_led_reject_timer, K_MSEC(NFC_LED_REJECT_MS), K_NO_WAIT);
+}
+
+static void nfc_led_response_ready(void)
+{
+	k_timer_stop(&m_led_reject_timer);
+	k_timer_stop(&m_led_blink_timer);
+	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_G, APP_LED_ON);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_ON);
+}
+
+static void nfc_led_off(void)
+{
+	k_timer_stop(&m_led_reject_timer);
+	k_timer_stop(&m_led_blink_timer);
+	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_G, APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+}
+
+/* True while an NFC exchange is in progress (the keep-awake lock is held). The
+ * main-loop status/heartbeat blinks defer to this so they do not fight the NFC
+ * interaction LED. */
+bool app_nfc_session_active(void)
+{
+	return atomic_get(&m_awake_held) != 0;
+}
+
+/* Take the deep-sleep lock (once) and (re)arm the inactivity window. Safe from
+ * ISR context: pm_policy_state_lock_get and k_timer_start are irq-safe, and the
+ * atomic_cas guards against a double get. The 0->1 edge is the start of an NFC
+ * session (phone just arrived) -> light the "detected" LED. */
+static void nfc_keep_awake(void)
+{
+	if (atomic_cas(&m_awake_held, 0, 1)) {
+		pm_policy_state_lock_get(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
+		nfc_led_detected();
+	}
+	k_timer_start(&m_awake_timer, K_MSEC(NFC_AWAKE_WINDOW_MS), K_NO_WAIT);
+}
+
+/* Inactivity window elapsed with no further RF activity: drop the lock (once) so
+ * the sticker can go back to deep sleep, and clear the interaction LED. */
+static void nfc_awake_timeout(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	if (atomic_cas(&m_awake_held, 1, 0)) {
+		pm_policy_state_lock_put(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
+		nfc_led_off();
+	}
+}
+
+/* Periodic NFC check enable (toggled via `nfc autocheck`). Lets a config blob
+ * be written over several `nfc write` calls without the periodic check racing
+ * it and rewriting the tag to the info record mid-write. */
+static bool m_periodic = true;
+
+/* Command/response state, filled by parser_callback when an NDEF command record
+ * is found and consumed by nfc_check_locked (writes the response to the tag). */
+static uint8_t m_resp_buf[512];
+static size_t m_resp_len;
+static bool m_have_resp; /* a command was processed; m_resp_buf holds the reply to write */
+static bool m_seen_resp; /* tag already holds a response record; leave it for the phone */
+static bool m_seen_ack;  /* tag holds the phone's ack: reply consumed, restore info now */
+static bool m_seen_inf;  /* #247: tag holds our info record (settled resting state) */
+
+/* #247 claim-record lifecycle, persisted in its own "clm" settings subtree (not
+ * the config blob, so a factory reset that preserves identity leaves it intact —
+ * only a full NVS erase re-opens provisioning):
+ *   UNSET    no token provisioned yet, or clm never laid down
+ *   PENDING  clm laid down on the tag, awaiting an authenticated claim confirm
+ *   CONSUMED clm_ack command or any successfully-decrypted hio.stck:cmd (#360)
+ *            — never rewrite it again */
+enum clm_state {
+	CLM_UNSET = 0,
+	CLM_PENDING = 1,
+	CLM_CONSUMED = 2,
+};
+static uint8_t m_clm_state;
+
+/* Load handler for the "clm" settings subtree (key "clm/state"). */
+static int clm_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	if (settings_name_steq(name, "state", NULL)) {
+		if (len != sizeof(m_clm_state)) {
+			return -EINVAL;
+		}
+		ssize_t r = read_cb(cb_arg, &m_clm_state, sizeof(m_clm_state));
+		return (r < 0) ? (int)r : 0;
+	}
+	return -ENOENT;
+}
+SETTINGS_STATIC_HANDLER_DEFINE(app_clm, "clm", NULL, clm_settings_set, NULL, NULL);
+
+static void clm_state_save(void)
+{
+	int ret = settings_save_one("clm/state", &m_clm_state, sizeof(m_clm_state));
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("settings_save_one(clm/state)", ret);
+	}
+}
+
+/* #340 M24: m_clm_state is also mutated by nfc_check_locked()'s poll-thread
+ * arm sequence (clm_arm_commit/revert below) - guarded by m_lock across that
+ * whole sequence (nfc_access_begin/end). app_nfc_clm_reset() and clm_consume()
+ * are reachable directly from other threads (shell app_ats.c commands, the
+ * main thread's deferred-action dispatch, app_settings_vendor_reset()) with
+ * no synchronization of their own, so a reset/consume from one of those could
+ * race a poll-thread commit/revert and be silently clobbered by whichever ran
+ * last. Take m_lock here too - Zephyr's k_mutex is recursive for the owning
+ * thread, so this is a safe no-op when already called from within the poll
+ * thread's own locked sequence (clm_consume() from handle_encrypted_cmd() or
+ * the delete-detected path), and correctly serializes against a genuinely
+ * different thread otherwise. */
+void app_nfc_clm_reset(void)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+	m_clm_state = CLM_UNSET;
+	clm_state_save();
+	k_mutex_unlock(&m_lock);
+}
+
+/* Shared PENDING->CONSUMED transition (#308): two independent triggers funnel
+ * through here so the latch/log/persist logic lives in one place. (#360: the
+ * original third trigger - unauthenticated delete-detection in
+ * nfc_check_locked, the #247 signal - was removed; it let any NFC write that
+ * removed the clm record, not just the claiming phone, latch CONSUMED with no
+ * secret_key involved.)
+ *   1. clm_ack command (app_nfc_clm_ack) - explicit, authenticated (secret_key).
+ *   2. any successfully-decrypted hio.stck:cmd (handle_encrypted_cmd) - implicit:
+ *      decrypting at all already proves the caller holds secret_key, which is
+ *      already the "provisioning operator" bar the rest of this file uses, so a
+ *      claim window left open after a phone has already run a real command is
+ *      just noise on the tag.
+ * A no-op outside PENDING (already CONSUMED, or never armed). See #340 M24
+ * above for why this takes m_lock. */
+static void clm_consume(const char *reason)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+	if (m_clm_state != CLM_PENDING) {
+		k_mutex_unlock(&m_lock);
+		return;
+	}
+	m_clm_state = CLM_CONSUMED;
+	clm_state_save();
+	k_mutex_unlock(&m_lock);
+	LOG_INF("NFC clm record consumed (%s) (#308)", reason);
+}
+
+/* #340 M3: arming (UNSET->PENDING) is split into an in-RAM step (so
+ * build_resting_ndef sees PENDING immediately) and a deferred persist that
+ * only happens once nfc_check_locked has confirmed the clm-bearing resting
+ * NDEF actually landed on the tag. These two helpers are that persist/undo,
+ * called only on the poll cycle that just armed (just_armed == true). */
+static void clm_arm_commit(void)
+{
+	m_clm_state = CLM_PENDING;
+	clm_state_save();
+}
+
+static void clm_arm_revert(void)
+{
+	m_clm_state = CLM_UNSET;
+}
+
+void app_nfc_clm_ack(void)
+{
+	clm_consume("clm_ack command");
+}
+
+uint8_t app_nfc_clm_state_get(void)
+{
+	uint8_t state;
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	state = m_clm_state;
+	k_mutex_unlock(&m_lock);
+
+	return state;
+}
+
+/* #340 L1 test support: whether the "processing"/"rejected" blink timer is
+ * currently armed. Same testability idiom as app_nfc_clm_state_get() above. */
+bool app_nfc_led_blink_active(void)
+{
+	return k_timer_remaining_get(&m_led_blink_timer) != 0;
+}
+
+/* A claim token is provisioned once any byte is non-zero (all-zero = unset, the
+ * same sentinel the write-once shell guard uses, #170). */
+static bool claim_token_is_set(void)
+{
+	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
+		if (g_app_config.claim_token[i] != 0) {
+			return true;
+		}
+	}
+	return false;
+}
+/* A response is staged in m_resp_buf/m_resp_len but not yet fully written to the
+ * tag (the RF field came back before the write landed). While set, the poll
+ * re-attempts the write in the next field-off window WITHOUT re-reading or
+ * re-running the command — same principle as the gated read: don't regenerate,
+ * retry the EEPROM transfer until a clean window lands it. */
+static bool m_resp_write_pending;
+static enum app_cmd_action m_cmd_action; /* deferred action from app_cmd_handle */
+
+/* Gate for m_cmd_action. A deferred action (reboot/save/factory-reset/...) is
+ * only handed to the poll thread once its response has actually been delivered
+ * to the phone: after the phone acks the reply and we restore the info record,
+ * or after the quiet backstop restores it if the phone leaves without acking.
+ * This makes a reboot fire *after* the phone has read the response — extending
+ * the #164 read handshake to the action — instead of the old blind fixed delay
+ * that raced the phone read. */
+static bool m_cmd_action_ready;
+
+/* Debounce for the "unrecognized data -> restore info" path. A poll can catch
+ * the tag mid-write (the phone is still laying down a command/config record),
+ * which parses as garbage; restoring the info record then would clobber what
+ * the phone is writing (and any reply we just produced). So only restore info
+ * after the data stays unrecognized for this many consecutive polls — a real
+ * partial write resolves within one poll. A recognized consumed config (sets
+ * *action) is still cleared immediately for anti-replay. */
+#define NFC_UNKNOWN_DEBOUNCE 3
+static uint8_t m_unknown_count;
+
+/* #164: after a command/response exchange the response record is left on the tag
+ * for the phone to read. This flag is set while it sits unread and cleared when
+ * the info record is (re)written. The info record is restored deterministically
+ * when the phone writes its ack (NDEF_ACK_TYPE — it has read the reply); the
+ * poll thread also restores it after a long RF-quiet window (~10 s, no GPO →
+ * phone gone) as a backstop for when no ack arrives, so a later tap always finds
+ * valid info instead of a stale response. The earlier "restore on the field
+ * edge" heuristic was dropped: it raced the phone's read and clobbered the
+ * reply mid-exchange (#144). */
+static bool m_info_restore_pending;
+
+/* Take (and clear) the deferred action from the last processed NFC command, so
+ * the poll thread can run reboot/save AFTER the response was written and read.
+ * Returns APP_CMD_ACTION_NONE until the response has been delivered to the phone
+ * (m_cmd_action_ready), so a reboot never cuts off a reply the phone has not yet
+ * read. */
+enum app_cmd_action app_nfc_take_cmd_action(void)
+{
+	if (!m_cmd_action_ready) {
+		return APP_CMD_ACTION_NONE;
+	}
+
+	enum app_cmd_action a = m_cmd_action;
+	m_cmd_action = APP_CMD_ACTION_NONE;
+	m_cmd_action_ready = false;
+	return a;
+}
+
+bool app_nfc_periodic_enabled(void)
+{
+	return m_periodic;
+}
+
+/* The ST25DV is dual-port: an I2C access concurrent with an RF transaction can
+ * be NACKed (-EIO) by the arbiter — common while a phone holds its field open
+ * waiting for our reply. The transfers are short-lived, so a brief retry rides
+ * out the contention. Chunking a long read also means a collision only retries
+ * a small block, not the whole 512 B (which would otherwise fail repeatedly
+ * under continuous RF). */
+#define ST25DV_I2C_RETRIES  20
+#define ST25DV_I2C_RETRY_MS 2
+#define ST25DV_READ_CHUNK   64
+
+/* Bounded wait for the RF field to be off (defined further below). read_mem /
+ * write_mem gate every chunk on it: if the field reappears mid-transfer they
+ * pause before the next chunk and resume once it clears, so no EEPROM chunk
+ * ever runs on the bus while RF is active. Returns false if the field stays on
+ * past the wait, or if the status register itself is persistently unreadable
+ * (fail-closed, #329) — either way the chunk loop aborts with -EBUSY and the
+ * caller skips this cycle. */
+static bool nfc_wait_field_off(void);
 
 static int read_mem(uint16_t reg, void *buf, size_t len)
 {
-	int ret;
-
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 
 	if (!device_is_ready(dev)) {
@@ -57,13 +640,37 @@ static int read_mem(uint16_t reg, void *buf, size_t len)
 		return -ENODEV;
 	}
 
-	uint8_t reg_[2];
-	sys_put_be16(reg, reg_);
+	uint8_t *p = buf;
+	size_t off = 0;
+	while (off < len) {
+		/* Pause before this chunk if the RF field is back; resume once it clears.
+		 * Keeps every EEPROM read off the dual-port bus during RF. */
+		if (!nfc_wait_field_off()) {
+			return -EBUSY;
+		}
 
-	ret = i2c_write_read(dev, ST25DV_I2C_ADDR_E0, reg_, sizeof(reg_), buf, len);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("i2c_write_read", ret);
-		return ret;
+		size_t chunk = MIN(len - off, (size_t)ST25DV_READ_CHUNK);
+		uint8_t reg_[2];
+		sys_put_be16((uint16_t)(reg + off), reg_);
+
+		int ret = -EIO;
+		int attempt = 0;
+		for (; attempt < ST25DV_I2C_RETRIES; attempt++) {
+			ret = i2c_write_read(dev, ST25DV_I2C_ADDR_E0, reg_, sizeof(reg_), p + off,
+					     chunk);
+			if (ret == 0) {
+				break;
+			}
+			k_msleep(ST25DV_I2C_RETRY_MS); /* let RF yield the dual port */
+		}
+		if (ret) {
+			LOG_ERR("read_mem @0x%04x +%u: i2c -EIO after %d retries (RF contention?)",
+				(unsigned)(reg + off), (unsigned)chunk, ST25DV_I2C_RETRIES);
+			return ret;
+		}
+		NFC_DBG("rd @0x%04x +%u ok (tries=%d)", (unsigned)(reg + off), (unsigned)chunk,
+			attempt + 1);
+		off += chunk;
 	}
 
 	return 0;
@@ -91,6 +698,12 @@ static int write_mem(uint16_t reg, const void *buf, size_t len)
 	size_t remaining = len;
 
 	while (remaining) {
+		/* Pause before this chunk if the RF field is back; resume once it clears.
+		 * Keeps every EEPROM write off the dual-port bus during RF. */
+		if (!nfc_wait_field_off()) {
+			return -EBUSY;
+		}
+
 		size_t within_256 =
 			ST25DV_MAX_SEQ_WRITE_BYTES - (reg & (ST25DV_MAX_SEQ_WRITE_BYTES - 1));
 
@@ -104,11 +717,22 @@ static int write_mem(uint16_t reg, const void *buf, size_t len)
 		sys_put_be16(reg, frame);
 		memcpy(&frame[2], p, chunk);
 
-		ret = i2c_write(dev, frame, 2 + chunk, ST25DV_I2C_ADDR_E0);
+		ret = -EIO;
+		int attempt = 0;
+		for (; attempt < ST25DV_I2C_RETRIES; attempt++) {
+			ret = i2c_write(dev, frame, 2 + chunk, ST25DV_I2C_ADDR_E0);
+			if (ret == 0) {
+				break;
+			}
+			k_msleep(ST25DV_I2C_RETRY_MS); /* RF contention on the dual port */
+		}
 		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("i2c_write", ret);
+			LOG_ERR("write_mem @0x%04x +%u: i2c -EIO after %d retries", (unsigned)reg,
+				(unsigned)chunk, ST25DV_I2C_RETRIES);
 			return ret;
 		}
+		NFC_DBG("wr @0x%04x +%u ok (tries=%d)", (unsigned)reg, (unsigned)chunk,
+			attempt + 1);
 
 		uint32_t wait_ms = calc_prog_time_ms(reg, chunk);
 		if (wait_ms) {
@@ -123,127 +747,481 @@ static int write_mem(uint16_t reg, const void *buf, size_t len)
 	return 0;
 }
 
-static int decrypt(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_size, size_t *out_len)
+/* ST25DV register device select: dynamic registers (>=0x2000, e.g. IT_STS_Dyn
+ * 0x2005, GPO_Dyn 0x2000) live on the user-memory device (E0 0x53); the static
+ * system configuration area (<0x2000, e.g. GPO 0x0000) is on the system device
+ * (E1 0x57). */
+static inline uint8_t reg_dev_addr(uint16_t reg)
 {
-	int res = 0;
-
-	if (in_len < 8) {
-		LOG_ERR("Buffer too short for decryption: %zu byte(s)", in_len);
-		return -EINVAL;
-	}
-
-	/* Verify serial number (part of nonce) */
-	uint32_t serial_number = sys_get_be32(&in[0]);
-	LOG_INF("Serial number: %u", serial_number);
-
-	if (g_app_config.serial_number != serial_number) {
-		LOG_ERR("Serial number does not match: %u != %u", serial_number,
-			g_app_config.serial_number);
-		return -EACCES;
-	}
-
-	/* Verify nonce counter (part of nonce) */
-	uint32_t nonce_counter = sys_get_be32(&in[4]);
-	LOG_INF("Nonce counter: %u", nonce_counter);
-
-	if (g_app_config.nonce_counter >= nonce_counter) {
-		LOG_ERR("Nonce counter is not greater than the last used nonce: %u >= %u",
-			g_app_config.nonce_counter, nonce_counter);
-		return -EACCES;
-	}
-
-	psa_status_t status;
-	psa_status_t destroy_status;
-
-	status = psa_crypto_init();
-	if (status != PSA_SUCCESS) {
-		LOG_ERR_CALL_FAILED_INT("psa_crypto_init", status);
-		return -EIO;
-	}
-
-	psa_key_attributes_t key_attributes = PSA_KEY_ATTRIBUTES_INIT;
-	psa_set_key_usage_flags(&key_attributes, PSA_KEY_USAGE_DECRYPT);
-	psa_set_key_algorithm(&key_attributes, PSA_ALG_CCM);
-	psa_set_key_type(&key_attributes, PSA_KEY_TYPE_AES);
-	psa_set_key_bits(&key_attributes, PSA_BYTES_TO_BITS(sizeof(g_app_config.secret_key)));
-
-	psa_key_id_t key_id;
-	status = psa_import_key(&key_attributes, g_app_config.secret_key,
-				sizeof(g_app_config.secret_key), &key_id);
-	if (status != PSA_SUCCESS) {
-		LOG_ERR_CALL_FAILED_INT("psa_import_key", status);
-		return -EIO;
-	}
-
-	psa_reset_key_attributes(&key_attributes);
-
-	status = psa_aead_decrypt(key_id, PSA_ALG_CCM, &in[0], 8, NULL, 0, &in[8], in_len - 8, out,
-				  out_size, out_len);
-
-	destroy_status = psa_destroy_key(key_id);
-
-	if (status != PSA_SUCCESS) {
-		LOG_ERR_CALL_FAILED_INT("psa_aead_decrypt", status);
-		res = -EIO;
-	}
-
-	if (destroy_status != PSA_SUCCESS) {
-		LOG_ERR_CALL_FAILED_INT("psa_destroy_key", destroy_status);
-		res = -EIO;
-	}
-
-	if (!res) {
-		app_config()->nonce_counter = nonce_counter;
-	}
-
-	return res;
+	return (reg >= 0x2000) ? ST25DV_I2C_ADDR_E0 : ST25DV_I2C_ADDR_E1;
 }
 
-static int parser_callback(const struct app_ndef_parser_record_info *record_info, void *user_data)
+/* Read ST25DV system/dynamic register(s). No password needed for reads. */
+static int read_reg(uint16_t reg, void *buf, size_t len)
 {
-	int ret;
-
-	enum app_nfc_action *action = (enum app_nfc_action *)user_data;
-
-	/* Check if TNF type is MIME */
-	if (record_info->tnf != NDEF_TNF_MIME) {
-		return 0;
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
 	}
 
-	size_t expected_type_len = strlen(NDEF_SUPPORTED_TYPE);
+	uint8_t reg_[2];
+	sys_put_be16(reg, reg_);
 
-	/* Check if type matches */
-	if (record_info->type_len != expected_type_len ||
-	    strncmp((const char *)record_info->type, NDEF_SUPPORTED_TYPE, expected_type_len) != 0) {
-		return 0;
+	int ret = -EIO;
+	for (int attempt = 0; attempt < ST25DV_I2C_RETRIES; attempt++) {
+		ret = i2c_write_read(dev, reg_dev_addr(reg), reg_, sizeof(reg_), buf, len);
+		if (ret == 0) {
+			break;
+		}
+		k_msleep(ST25DV_I2C_RETRY_MS); /* RF contention on the dual port */
 	}
-
-	LOG_INF("Found supported MIME record - length: %u byte(s)", record_info->payload_len);
-
-	static uint8_t buf[448];
-	size_t len;
-	ret = decrypt(record_info->payload, record_info->payload_len, buf, sizeof(buf), &len);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("decrypt", ret);
+		LOG_ERR_CALL_FAILED_INT("i2c_write_read", ret);
 		return ret;
-	}
-
-	pb_istream_t stream = pb_istream_from_buffer(buf, len);
-	NfcConfigMessage message = NfcConfigMessage_init_zero;
-	if (!pb_decode(&stream, NfcConfigMessage_fields, &message)) {
-
-		LOG_ERR_CALL_FAILED_STR("pb_decode", PB_GET_ERROR(&stream));
-		return -EIO;
-	}
-
-	if (app_nfc_ingest(&message)) {
-		*action = APP_NFC_ACTION_RESET;
-	} else {
-		*action = APP_NFC_ACTION_SAVE;
 	}
 
 	return 0;
 }
+
+/* Write an ST25DV register. Dynamic registers need no password; the static
+ * system config area requires an open I2C security session (not handled here). */
+static int write_reg(uint16_t reg, const void *buf, size_t len)
+{
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
+	}
+	if (len > 16) {
+		return -EINVAL;
+	}
+
+	uint8_t frame[2 + 16];
+	sys_put_be16(reg, frame);
+	memcpy(&frame[2], buf, len);
+
+	int ret = -EIO;
+	for (int attempt = 0; attempt < ST25DV_I2C_RETRIES; attempt++) {
+		ret = i2c_write(dev, frame, 2 + len, reg_dev_addr(reg));
+		if (ret == 0) {
+			break;
+		}
+		k_msleep(ST25DV_I2C_RETRY_MS); /* RF contention on the dual port */
+	}
+	if (ret) {
+		/* Name the register + I2C device select so a NACK is identifiable on RTT
+		 * (E0=0x53 data/dynamic, E1=0x57 system/password-protected). */
+		LOG_ERR("i2c_write reg 0x%04x (E%c addr 0x%02x, %u B) failed after %d retries: %d",
+			reg, reg_dev_addr(reg) == ST25DV_I2C_ADDR_E0 ? '0' : '1', reg_dev_addr(reg),
+			(unsigned)len, ST25DV_I2C_RETRIES, ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+/* Open the I2C security session by presenting an 8-byte password (required to
+ * write the static system config such as GPO). Frame: addr(2) + pwd(8) + 0x09
+ * (present code) + pwd(8). */
+static int nfc_present_password(const uint8_t pwd[8])
+{
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Device not ready");
+		return -ENODEV;
+	}
+
+	uint8_t frame[2 + 8 + 1 + 8];
+	sys_put_be16(ST25DV_I2C_PWD_REG, frame);
+	memcpy(&frame[2], pwd, 8);
+	frame[10] = 0x09;
+	memcpy(&frame[11], pwd, 8);
+
+	int ret = -EIO;
+	for (int attempt = 0; attempt < ST25DV_I2C_RETRIES; attempt++) {
+		ret = i2c_write(dev, frame, sizeof(frame), ST25DV_I2C_ADDR_E1);
+		if (ret == 0) {
+			break;
+		}
+		k_msleep(ST25DV_I2C_RETRY_MS); /* RF contention / chip-busy on the dual port */
+	}
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("i2c_write(password)", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+/* Configure the GPO so the pin actually pulses on RF write / field change — the
+ * wake source for the event-driven NFC poll. Sets GPO_EN (master output enable) +
+ * RF_WRITE + FIELD_CHANGE in BOTH the static EEPROM register (persists across
+ * power-up) and the dynamic GPO_CTRL_Dyn register (takes effect immediately: the
+ * dynamic GPO_EN only loads from the static one at power-up, so a freshly-written
+ * static GPO_EN would otherwise not enable the GPO until the next reboot). Needs
+ * the default (all-zero) I2C password for the static (EEPROM) write. Returns 0
+ * once GPO_EN + events are active. Caller must hold the access lock. */
+static int nfc_enable_rf_write_it(void)
+{
+	static const uint8_t default_pwd[8] = {0};
+
+	int ret = nfc_present_password(default_pwd);
+	if (ret) {
+		return ret;
+	}
+
+	/* The chip needs a moment after a present-password write before the next
+	 * I2C access is ACKed. 5 ms was too short (the next read NACKed with -EIO);
+	 * a system-area probe confirmed 10 ms is enough, so allow a safe margin. */
+	k_msleep(15);
+
+	/* 1) Static (EEPROM) GPO register: persist the config so it is active from
+	 *    every power-up. */
+	uint8_t gpo = 0;
+	ret = read_reg(ST25DV_GPO_REG, &gpo, 1);
+	if (ret) {
+		return ret;
+	}
+
+	if ((gpo & ST25DV_GPO_WANT) != ST25DV_GPO_WANT) {
+		gpo |= ST25DV_GPO_WANT;
+		ret = write_reg(ST25DV_GPO_REG, &gpo, 1);
+		if (ret) {
+			return ret;
+		}
+
+		/* GPO is held in EEPROM: wait the write time before reading it back,
+		 * or the verify read sees the stale value. */
+		k_msleep(ST25DV_TW_MS_PER_PAGE + 5);
+
+		ret = read_reg(ST25DV_GPO_REG, &gpo, 1);
+		if (ret) {
+			return ret;
+		}
+		if ((gpo & ST25DV_GPO_WANT) != ST25DV_GPO_WANT) {
+			return -EIO;
+		}
+	}
+
+	/* 2) Dynamic GPO_CTRL_Dyn (volatile, E0, no password): enable GPO_EN now so
+	 *    the output is live for this power cycle without waiting for a reboot. */
+	uint8_t dyn = 0;
+	ret = read_reg(ST25DV_GPO_CTRL_DYN_REG, &dyn, 1);
+	if (ret) {
+		return ret;
+	}
+	if (!(dyn & ST25DV_GPO_EN)) {
+		dyn |= ST25DV_GPO_EN;
+		ret = write_reg(ST25DV_GPO_CTRL_DYN_REG, &dyn, 1);
+		if (ret) {
+			return ret;
+		}
+	}
+
+	LOG_INF("NFC: GPO cfg static=0x%02x dyn=0x%02x (GPO_EN=%d)", gpo, dyn,
+		!!(dyn & ST25DV_GPO_EN));
+
+	return 0;
+}
+
+/* Power the ST25DV up for I2C access (LPD low) and take the access lock. On
+ * success the caller must pair this with nfc_access_end(). */
+static int nfc_access_begin(void)
+{
+	int ret;
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+
+	if (!gpio_is_ready_dt(&m_lpd)) {
+		LOG_ERR("GPIO device not ready (LPD)");
+		k_mutex_unlock(&m_lock);
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_set_dt(&m_lpd, 0);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
+		k_mutex_unlock(&m_lock);
+		return ret;
+	}
+
+	k_sleep(K_MSEC(150));
+
+	return 0;
+}
+
+/* Power the ST25DV back down (LPD high) and release the access lock. */
+static void nfc_access_end(void)
+{
+	int ret = gpio_pin_set_dt(&m_lpd, 1);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
+	}
+
+	k_mutex_unlock(&m_lock);
+}
+
+/* Wait (bounded) for the RF field to be absent before the caller touches the
+ * user-memory EEPROM. The 512 B EEPROM reads/writes collide with a present RF
+ * field on the shared i2c1 bus (arbitration NACK / bus wedge), and a wedged
+ * transaction can starve the watchdog feeder in the main loop (all the sensors
+ * share i2c1) -> a 10 s SoC reset with no panic dump. EH_CTRL_Dyn.FIELD_ON is a
+ * dual-port dynamic register, safe to poll during RF.
+ *
+ * Returns true once the field is absent (safe to access). Returns false if the
+ * field is still present after NFC_FIELD_OFF_WAIT_MS, or if the status read
+ * itself never succeeds (caller should skip this cycle either way).
+ *
+ * FAIL-CLOSED (#329/#330): read_reg() already retries the transfer
+ * ST25DV_I2C_RETRIES times internally before giving up, so a `ret != 0` here
+ * is not routine dual-port RF contention (that would have been absorbed by
+ * those retries) — it is a persistently unreadable register, the same
+ * symptom a wedged i2c1 produces (Stop2 wiping TIMINGR with no resume edge
+ * to reapply it, #329). Proceeding into the EEPROM chunk access on that
+ * evidence used to be fail-open (assume field-off, go ahead); that just
+ * traded one silent failure for another doomed transfer a few chunks later.
+ * Failing closed costs nothing a genuinely-live bus would have needed anyway
+ * (the caller's -EBUSY path already exists for "field still on" and simply
+ * retries next poll cycle), and it stops masking a real bus fault as if it
+ * were expected RF contention. The caller must already hold the access lock
+ * (tag powered via nfc_access_begin). */
+static bool nfc_wait_field_off(void)
+{
+	bool waited_for_field = false;
+	for (int waited = 0; waited <= NFC_FIELD_OFF_WAIT_MS; waited += NFC_FIELD_POLL_MS) {
+		uint8_t eh;
+		int ret = read_reg(ST25DV_EH_CTRL_DYN, &eh, 1);
+		if (ret != 0) {
+			NFC_DBG("field: EH_CTRL_Dyn read=%d after retries -> abort (fail-closed)",
+				ret);
+			return false; /* persistently unreadable -> don't touch a possibly-wedged
+					 bus */
+		}
+		if (!(eh & ST25DV_FIELD_ON)) {
+			if (waited_for_field) {
+				NFC_DBG("field: cleared after %d ms (EH=0x%02x)", waited, eh);
+			}
+			return true; /* field absent -> safe to access the EEPROM */
+		}
+		if (!waited_for_field) {
+			NFC_DBG("field: FIELD_ON set (EH=0x%02x) -> waiting for RF off", eh);
+			waited_for_field = true;
+		}
+		k_msleep(NFC_FIELD_POLL_MS);
+	}
+	NFC_DBG("field: still on after %d ms -> abort EEPROM chunk", NFC_FIELD_OFF_WAIT_MS);
+	return false;
+}
+
+/* Build CC + NDEF Message TLV + a single NFC-Forum-external-type record +
+ * terminator into `out`. Returns the byte length, or 0 if it would not fit the
+ * tag (out_size). Uses an NDEF short record (1-byte payload length) when the
+ * payload is <= 255 B, else a normal record (4-byte length) so a full config
+ * dump (encrypted ConfigDump can exceed 255 B) still fits the 512 B EEPROM;
+ * the NDEF Message TLV likewise switches to its 3-byte length form when needed.
+ * Shared by the info and command-response writers. */
+/* One NFC Forum external-type record in an NDEF message. */
+struct ndef_rec {
+	uint8_t tnf;      /* NDEF_TNF_EXT (external type) or NDEF_TNF_MIME (media type) */
+	const char *type; /* external type name, or media-type string when tnf == MIME */
+	const uint8_t *payload;
+	size_t payload_len;
+};
+
+/* Frame `n_recs` records into a single NDEF message (CC + Message TLV + records +
+ * Terminator TLV) at `out`. Message-Begin is set on the first record, Message-End
+ * on the last, so a single record (n_recs==1) is byte-identical to the previous
+ * single-record framer (0xD4 short / 0xC4 normal). Returns bytes written, 0 on
+ * overflow / empty. */
+static size_t build_ndef_message(uint8_t *out, size_t out_size, const struct ndef_rec *recs,
+				 size_t n_recs)
+{
+	if (n_recs == 0) {
+		return 0;
+	}
+
+	/* Sum every record's encoded length to size the NDEF Message TLV. Each
+	 * record: flags + type_len + payload_len_field (1 short / 4 normal) + type +
+	 * payload. */
+	size_t msg_len = 0;
+	for (size_t r = 0; r < n_recs; r++) {
+		size_t type_len = strlen(recs[r].type);
+		size_t len_field = (recs[r].payload_len <= 0xFF) ? 1 : 4;
+		msg_len += 1 + 1 + len_field + type_len + recs[r].payload_len;
+	}
+
+	/* NDEF Message TLV length: single byte below 0xFF, else the 3-byte form
+	 * (0xFF + 2-byte big-endian length, max 0xFFFE). */
+	bool tlv_long = msg_len >= 0xFF;
+	size_t tlv_len_field = tlv_long ? 3 : 1;
+
+	/* Tag content: CC (4) + TLV type (0x03) + TLV length + message + Terminator. */
+	size_t total = 4 + 1 + tlv_len_field + msg_len + 1;
+	if (msg_len > 0xFFFE || total > out_size) {
+		return 0;
+	}
+
+	size_t i = 0;
+	out[i++] = ST25DV_CC0; /* Type 5 Capability Container */
+	out[i++] = ST25DV_CC1;
+	out[i++] = ST25DV_CC2;
+	out[i++] = ST25DV_CC3;
+	out[i++] = 0x03; /* NDEF Message TLV type */
+	if (tlv_long) {
+		out[i++] = 0xFF;
+		out[i++] = (uint8_t)(msg_len >> 8);
+		out[i++] = (uint8_t)(msg_len & 0xFF);
+	} else {
+		out[i++] = (uint8_t)msg_len;
+	}
+
+	for (size_t r = 0; r < n_recs; r++) {
+		size_t type_len = strlen(recs[r].type);
+		bool short_record = recs[r].payload_len <= 0xFF;
+		/* TNF per record (external 0x04 or MIME 0x02); MB on the first record, ME on
+		 * the last, SR when the payload length fits one byte. */
+		uint8_t flags = recs[r].tnf;
+		if (r == 0) {
+			flags |= 0x80; /* Message Begin */
+		}
+		if (r == n_recs - 1) {
+			flags |= 0x40; /* Message End */
+		}
+		if (short_record) {
+			flags |= 0x10; /* Short Record */
+		}
+		out[i++] = flags;
+		out[i++] = (uint8_t)type_len;
+		if (short_record) {
+			out[i++] = (uint8_t)recs[r].payload_len;
+		} else {
+			out[i++] = (uint8_t)(recs[r].payload_len >> 24);
+			out[i++] = (uint8_t)(recs[r].payload_len >> 16);
+			out[i++] = (uint8_t)(recs[r].payload_len >> 8);
+			out[i++] = (uint8_t)(recs[r].payload_len & 0xFF);
+		}
+		memcpy(&out[i], recs[r].type, type_len);
+		i += type_len;
+		memcpy(&out[i], recs[r].payload, recs[r].payload_len);
+		i += recs[r].payload_len;
+	}
+	out[i++] = 0xFE; /* Terminator TLV */
+
+	return i;
+}
+
+static size_t build_ndef_record(uint8_t *out, size_t out_size, const char *type,
+				const uint8_t *payload, size_t payload_len)
+{
+	struct ndef_rec r = {
+		.tnf = NDEF_TNF_EXT, .type = type, .payload = payload, .payload_len = payload_len};
+	return build_ndef_message(out, out_size, &r, 1);
+}
+
+/* Build the info payload (see NDEF_INFO_TYPE comment) into `out`. Stable between
+ * accepted NFC commands (no uptime/clock; the nonce counter advances only on an
+ * accepted command), so app_nfc_check() can compare it to the tag content and skip
+ * rewriting when already present, and rewrite it when the counter has moved.
+ * Buffer for "<10 serial>:<hex config_ver>:<8 hex nonce>" + NUL (config_ver is a
+ * uint32 so allow its full 8 hex digits, though it is normally 1–2). */
+#define NDEF_INFO_PAYLOAD_MAX 32
+
+/* Format the ASCII info payload; returns its length (excluding the NUL), 0 on
+ * overflow. */
+static size_t build_info_payload(char *payload, size_t size)
+{
+	struct app_cmd_info info;
+	app_cmd_get_info(&info);
+
+	/* Anti-replay counter high-water read live (app_config(), == what decrypt()
+	 * checks against) so the phone can resync after a reboot/cache-miss. */
+	int n = snprintf(payload, size, "%010u:%02X:%08X", (unsigned int)info.serial_number,
+			 (unsigned int)g_app_config.config_version,
+			 (unsigned int)app_config()->nonce_counter);
+	if (n <= 0 || (size_t)n >= size) {
+		return 0;
+	}
+
+	return (size_t)n;
+}
+
+/* #247: encode the ClaimInfo protobuf {serial_number, claim_token} into `out`.
+ * Plaintext in every build (like the info record) — the claim window relies on
+ * physical proximity + the backend first-claim check, not on the NFC key. */
+static size_t build_claim_payload(uint8_t *out, size_t out_size)
+{
+	ClaimInfo msg = ClaimInfo_init_zero;
+	msg.serial_number = g_app_config.serial_number;
+	BUILD_ASSERT(sizeof(msg.claim_token) == sizeof(g_app_config.claim_token),
+		     "ClaimInfo.claim_token size mismatch");
+	memcpy(msg.claim_token, g_app_config.claim_token, sizeof(g_app_config.claim_token));
+
+	pb_ostream_t stream = pb_ostream_from_buffer(out, out_size);
+	if (!pb_encode(&stream, ClaimInfo_fields, &msg)) {
+		LOG_ERR("pb_encode(ClaimInfo) failed: %s", PB_GET_ERROR(&stream));
+		return 0;
+	}
+	return stream.bytes_written;
+}
+
+/* Build the "resting" NDEF the tag holds between phone exchanges: the info
+ * record, plus the clm provisioning record while m_clm_state == CLM_PENDING
+ * (#247). Stable input (advances only with the nonce counter / claim state) so
+ * nfc_check_locked can compare it to the tag and skip rewriting when present. */
+static size_t build_resting_ndef(uint8_t *out, size_t out_size)
+{
+	char inf[NDEF_INFO_PAYLOAD_MAX];
+	size_t inf_len = build_info_payload(inf, sizeof(inf));
+
+	/* inf first (Message Begin) so Android tap-to-launch keys off it. */
+	struct ndef_rec recs[2];
+	size_t n = 0;
+	recs[n++] = (struct ndef_rec){.tnf = NDEF_TNF_MIME,
+				      .type = NDEF_INFO_TYPE,
+				      .payload = (const uint8_t *)inf,
+				      .payload_len = inf_len};
+
+	uint8_t clm[ClaimInfo_size];
+	if (m_clm_state == CLM_PENDING) {
+		size_t clm_len = build_claim_payload(clm, sizeof(clm));
+		if (clm_len) {
+			recs[n++] = (struct ndef_rec){.tnf = NDEF_TNF_EXT,
+						      .type = NDEF_CLAIM_TYPE,
+						      .payload = clm,
+						      .payload_len = clm_len};
+		}
+	}
+
+	return build_ndef_message(out, out_size, recs, n);
+}
+
+#ifdef CONFIG_APP_NFC_ENCRYPTION
+
+/* AES-CCM nonce layout: serial(4) || nonce_counter(4) || direction(1). The
+ * direction byte separates the request keystream from the response keystream so
+ * a request and its reply can never share a (key, nonce) pair (which would leak
+ * both plaintexts via keystream XOR). It is implicit — NOT transmitted — each
+ * side fills it in from its own role. The 8-byte wire header is additionally
+ * fed as AAD so serial/counter are authenticated by the tag. */
+#define NFC_NONCE_LEN          9
+#define NFC_NONCE_DIR_REQUEST  0x00
+#define NFC_NONCE_DIR_RESPONSE 0x01
+
+/* Largest forward jump accepted for the anti-replay nonce counter (#266, N-2).
+ * decrypt() accepts a received counter only in (current, current + this]. Without
+ * an upper bound a single accepted command carrying a counter near UINT32_MAX
+ * would store that high-water and make every future (necessarily larger) counter
+ * impossible — permanently bricking the encrypted NFC channel, recoverable only
+ * by a debug `settings erase` or JTAG mass-erase (the counter is
+ * preserve_on_reset). The Manager-App reads the current high-water from the
+ * plaintext `inf` record before every command and always sends current + 1, so
+ * legitimate jumps are 1; this window is generous headroom yet negligible vs.
+ * UINT32_MAX, so it eliminates the brick without constraining real use. The
+ * nfc_crypto ztest mirrors this constant — keep them in lockstep. */
+#define NFC_NONCE_MAX_SKIP 1024
+
+#define NFC_CCM_TAG_LEN 16
 
 static bool is_buffer_zero(const void *buf, size_t len)
 {
@@ -256,94 +1234,1355 @@ static bool is_buffer_zero(const void *buf, size_t len)
 	return true;
 }
 
+/* An all-zero key means it has not been provisioned yet. Mirror the
+ * bootloader's auth.c (all_zero() -> unkeyed): refuse to take part in the
+ * encrypted channel at all while unkeyed. Otherwise, with
+ * CONFIG_APP_NFC_ENCRYPTION=y (default), the device would AES-CCM-decrypt and
+ * execute any command forged under the public all-zero key (serial is public,
+ * nonce_counter starts at 0) — an attacker in NFC range could rewrite LoRaWAN
+ * keys, device-reset or wedge the device with valid CCM tags. In the unkeyed
+ * state only the plaintext info record is served. Same guard applies to
+ * vendor_token (#299, #316): an unprovisioned device also refuses hio.stck:vnd. */
+static bool key_is_provisioned(const uint8_t *key, size_t key_len)
+{
+	return !is_buffer_zero(key, key_len);
+}
+
+/* CCM is provided by app_ccm (RFC 3610 over the STM32WL HW AES or the soft-SE AES,
+ * #261), replacing mbedTLS. The wire bytes are byte-identical to the previous
+ * mbedtls_ccm, so the phone-side contract and the nfc_crypto golden vectors are
+ * unchanged. `key` is g_app_config.secret_key for the hio.stck:cmd channel or
+ * g_app_config.vendor_token for the hio.stck:vnd channel (#299, #316) — both are
+ * 128-bit, and this function is otherwise identical either way. */
+static int decrypt(const uint8_t *key, const uint8_t *in, size_t in_len, uint8_t *out,
+		   size_t out_size, size_t *out_len)
+{
+	int res = 0;
+
+	if (!key_is_provisioned(key, 16)) {
+		LOG_ERR("Key not provisioned; rejecting encrypted request");
+		return -EACCES;
+	}
+
+	if (in_len < 8 + NFC_CCM_TAG_LEN) {
+		LOG_ERR("Buffer too short for decryption: %zu byte(s)", in_len);
+		return -EINVAL;
+	}
+
+	/* Verify serial number (part of nonce) */
+	uint32_t serial_number = sys_get_be32(&in[0]);
+	LOG_INF("Serial number: %u", serial_number);
+	NFC_REPORT("  serial: %u (expected %u)", serial_number, g_app_config.serial_number);
+
+	if (g_app_config.serial_number != serial_number) {
+		LOG_ERR("Serial number does not match: %u != %u", serial_number,
+			g_app_config.serial_number);
+		return -EACCES;
+	}
+
+	/* Verify nonce counter (part of nonce) */
+	uint32_t nonce_counter = sys_get_be32(&in[4]);
+	LOG_INF("Nonce counter: %u", nonce_counter);
+	NFC_REPORT("  nonce: %u (last used %u)", nonce_counter, app_config()->nonce_counter);
+
+	/* Compare against the live high-water mark (app_config()/m_app_config) — the
+	 * same struct decrypt() advances below. Using g_app_config here would read a
+	 * stale boot-time value (g is only synced from m at commit/reset), which would
+	 * let any already-used counter be replayed within a session. */
+	if (app_config()->nonce_counter >= nonce_counter) {
+		LOG_ERR("Nonce counter is not greater than the last used nonce: %u >= %u",
+			app_config()->nonce_counter, nonce_counter);
+		return -EACCES;
+	}
+
+	/* Bound the forward jump (#266, N-2). Reject a counter implausibly far ahead
+	 * of the high-water so a buggy/malicious provisioning tool cannot store a
+	 * near-UINT32_MAX value and permanently brick the channel. The subtraction is
+	 * overflow-safe: the check above guarantees nonce_counter > current, so the
+	 * unsigned difference never wraps. */
+	if (nonce_counter - app_config()->nonce_counter > NFC_NONCE_MAX_SKIP) {
+		LOG_ERR("Nonce counter jumps too far ahead: %u > %u + %u", nonce_counter,
+			app_config()->nonce_counter, NFC_NONCE_MAX_SKIP);
+		return -EACCES;
+	}
+
+	/* Wire after the 8 B header is [ciphertext || 16 B tag]. */
+	size_t pt_len = in_len - 8 - NFC_CCM_TAG_LEN;
+	if (out_size < pt_len) {
+		LOG_ERR("Output buffer too short: need %zu, have %zu", pt_len, out_size);
+		return -ENOMEM;
+	}
+
+	uint8_t nonce[NFC_NONCE_LEN];
+	memcpy(nonce, in, 8);
+	nonce[8] = NFC_NONCE_DIR_REQUEST;
+
+	int ret = app_ccm_auth_decrypt(key, nonce, sizeof(nonce), /* AAD */ in, 8, &in[8], pt_len,
+				       &in[8 + pt_len], NFC_CCM_TAG_LEN, out);
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_ccm_auth_decrypt", ret);
+		res = -EIO;
+	} else {
+		*out_len = pt_len;
+	}
+
+	if (!res) {
+		/* Advance and persist the anti-replay counter NOW, before the caller runs
+		 * the command — otherwise a command that reboots (e.g. lrw_reset) would
+		 * lose the bump and stay replayable. Persist a single NVS key, not the
+		 * whole settings blob. If the persist fails, roll the counter back and
+		 * reject so we never accept a counter we couldn't make durable. */
+		uint32_t prev = app_config()->nonce_counter;
+		app_config()->nonce_counter = nonce_counter;
+		int sret = app_settings_save_nonce_counter();
+		if (sret) {
+			LOG_ERR_CALL_FAILED_INT("app_settings_save_nonce_counter", sret);
+			app_config()->nonce_counter = prev;
+			res = sret;
+		}
+	}
+
+	return res;
+}
+
+/* Encrypt `in_len` plaintext bytes into the response wire format:
+ * [serial(4)][nonce_counter(4)][AES-CCM ciphertext + 16 B tag]. The CCM nonce is
+ * serial||nonce_counter||RESPONSE — same counter as the request but a distinct
+ * direction byte, so the reply never shares a (key, nonce) pair with the request.
+ * The phone knows the counter (echoed in the header) and the implicit RESPONSE
+ * direction, so it can decrypt. Returns the wire length in *out_len, or errno. */
+static int encrypt(const uint8_t *key, const uint8_t *in, size_t in_len, uint32_t nonce_counter,
+		   uint8_t *out, size_t out_size, size_t *out_len)
+{
+	int res = 0;
+
+	if (!key_is_provisioned(key, 16)) {
+		LOG_ERR("Key not provisioned; refusing to emit encrypted response");
+		return -EACCES;
+	}
+
+	/* 8 B header + ciphertext (== plaintext) + 16 B CCM tag. */
+	if (out_size < 8 + in_len + 16) {
+		LOG_ERR("Buffer too short for encryption: need %zu, have %zu", 8 + in_len + 16,
+			out_size);
+		return -ENOMEM;
+	}
+
+	sys_put_be32(g_app_config.serial_number, &out[0]);
+	sys_put_be32(nonce_counter, &out[4]);
+
+	uint8_t nonce[NFC_NONCE_LEN];
+	memcpy(nonce, out, 8);
+	nonce[8] = NFC_NONCE_DIR_RESPONSE;
+
+	/* Ciphertext (== plaintext length) into &out[8], the 16 B tag right after it. */
+	int ret = app_ccm_encrypt_and_tag(key, nonce, sizeof(nonce), /* AAD */ out, 8, in, in_len,
+					  &out[8], &out[8 + in_len], NFC_CCM_TAG_LEN);
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_ccm_encrypt_and_tag", ret);
+		res = -EIO;
+	}
+
+	if (!res) {
+		*out_len = 8 + in_len + NFC_CCM_TAG_LEN;
+	}
+
+	return res;
+}
+
+/* Last encrypted response, kept so a retransmission (same nonce_counter, e.g. the
+ * phone never read the reply over a lossy RF link) replays the cached reply instead
+ * of re-running the command. RAM-only and serialised by the tag lock (m_lock); on a
+ * reboot it is empty, so a post-reboot retransmission falls through to -EACCES and
+ * the phone resyncs from the info-record counter.
+ *
+ * #340 M1: `m_resp_cache_req`/`m_resp_cache_req_len` hold the exact request frame
+ * (ciphertext + CCM tag) that produced the cached reply. A cache hit requires a
+ * byte-exact match against it, not just the plaintext (serial, counter) header —
+ * both of those are public (readable from the resting hio.stck:inf record), so
+ * matching on them alone would let anyone forge an 8-byte frame and get the cached
+ * reply served without ever proving key possession. A genuine retransmission from
+ * the phone resends the identical frame, so this doesn't affect the legitimate
+ * case. */
+static uint32_t m_resp_cache_counter;
+static uint8_t m_resp_cache_buf[512];
+static size_t m_resp_cache_len;
+static uint8_t m_resp_cache_req[512];
+static size_t m_resp_cache_req_len;
+
+/* Process one encrypted command frame for a keyed NDEF channel: secret_key over
+ * hio.stck:cmd, or vendor_token over hio.stck:vnd (#316). `key` selects the
+ * AES-CCM key; `transport` is passed to app_cmd_handle() (NFC vs VENDOR command/
+ * writable gating); `cache` enables the same-counter response cache — hio.stck:cmd
+ * passes true, the vendor channel passes false so it neither serves from nor
+ * writes the (single, shared) cache slot, avoiding a cross-key mix-up.
+ * Three-way on the nonce counter vs the stored high-water:
+ *   counter == cached AND frame byte-identical to the cached request
+ *                       -> retransmission: replay the cached response, do NOT re-run
+ *   counter  > stored  -> new: decrypt (advances+persists the counter), run, cache
+ *   counter <= stored, or counter == cached with a mismatched frame
+ *                       -> stale/forged: falls through to decrypt(), which rejects
+ *                          with -EACCES (the monotonic counter check never re-admits
+ *                          a counter <= stored)
+ * Writes the encrypted reply into out_buf/out_len and the deferred action into
+ * *action (NONE on a replay — the original already ran). Sets *replayed=true on a
+ * same-counter retransmission so the caller keeps a deferred action still waiting
+ * for the phone's ack instead of clearing it. Returns 0 or -errno. */
+static int handle_encrypted_cmd(const uint8_t *key, enum app_cmd_transport transport, bool cache,
+				const uint8_t *in, size_t in_len, uint8_t *out_buf, size_t out_cap,
+				size_t *out_len, enum app_cmd_action *action, bool *replayed)
+{
+	*out_len = 0;
+	*action = APP_CMD_ACTION_NONE;
+	*replayed = false;
+
+	if (in_len < 8) {
+		return -EINVAL;
+	}
+
+	uint32_t serial = sys_get_be32(&in[0]);
+	uint32_t counter = sys_get_be32(&in[4]);
+	NFC_DBG("cmd: in_len=%zu serial=%u counter=%u (cache=%u stored=%u)", in_len, serial,
+		counter, m_resp_cache_counter, app_config()->nonce_counter);
+
+	/* #340 M1: serial+counter alone are not proof of key possession (both are
+	 * public, readable off the resting hio.stck:inf record) - require the whole
+	 * incoming frame to match the one that produced the cached reply. A genuine
+	 * retransmission resends the identical ciphertext+tag; a forged header-only
+	 * frame does not and falls through to decrypt(), which rejects it below. */
+	if (cache && serial == g_app_config.serial_number && m_resp_cache_len > 0 &&
+	    counter == m_resp_cache_counter && in_len == m_resp_cache_req_len &&
+	    memcmp(in, m_resp_cache_req, in_len) == 0) {
+		if (m_resp_cache_len > out_cap) {
+			return -ENOMEM;
+		}
+		memcpy(out_buf, m_resp_cache_buf, m_resp_cache_len);
+		*out_len = m_resp_cache_len;
+		*replayed = true;
+		NFC_REPORT("  -> retransmission (counter %u): replaying cached response", counter);
+		return 0;
+	}
+
+	static uint8_t cmd_plain[512];
+	static uint8_t resp_plain[512];
+	size_t cmd_len = 0;
+	int ret = decrypt(key, in, in_len, cmd_plain, sizeof(cmd_plain), &cmd_len);
+	if (ret) {
+		NFC_DBG("cmd: decrypt failed=%d", ret);
+		return ret;
+	}
+	uint32_t req_nonce = app_config()->nonce_counter;
+	NFC_DBG("cmd: decrypt ok, cmd_len=%zu", cmd_len);
+
+	/* #308: decrypting at all already proves the caller holds secret_key,
+	 * regardless of which command it turns out to be or whether it succeeds -
+	 * that is already the bar the rest of the claim window relies on. Excludes
+	 * the vendor_token channel (#316): a vendor_token holder is a narrower,
+	 * separate principal (HARDWARIO recovery), not proof of secret_key
+	 * possession, so a vendor touch must not silently close a claim window
+	 * meant for the actual device owner. */
+	if (transport != APP_CMD_TRANSPORT_VENDOR) {
+		clm_consume("valid hio.stck:cmd received");
+	}
+
+	size_t resp_len = 0;
+	ret = app_cmd_handle(transport, cmd_plain, cmd_len, resp_plain, sizeof(resp_plain),
+			     &resp_len, action);
+	if (ret) {
+		NFC_DBG("cmd: app_cmd_handle failed=%d", ret);
+		return ret;
+	}
+	NFC_DBG("cmd: handled, resp_len=%zu", resp_len);
+	if (resp_len == 0) {
+		return 0;
+	}
+
+	ret = encrypt(key, resp_plain, resp_len, req_nonce, out_buf, out_cap, out_len);
+	if (ret) {
+		return ret;
+	}
+
+	/* Cache for an idempotent retransmission of this counter (hio.stck:cmd only;
+	 * the vendor channel passes cache=false — see the header). Store the request
+	 * frame alongside the reply (#340 M1) so a later retransmission can be
+	 * verified byte-exact instead of trusting the plaintext header alone. */
+	if (cache) {
+		if (*out_len <= sizeof(m_resp_cache_buf) && in_len <= sizeof(m_resp_cache_req)) {
+			memcpy(m_resp_cache_buf, out_buf, *out_len);
+			m_resp_cache_len = *out_len;
+			memcpy(m_resp_cache_req, in, in_len);
+			m_resp_cache_req_len = in_len;
+			m_resp_cache_counter = req_nonce;
+		} else {
+			m_resp_cache_len = 0;
+			m_resp_cache_req_len = 0;
+		}
+	}
+	return 0;
+}
+
+#endif /* CONFIG_APP_NFC_ENCRYPTION */
+
+static int parser_callback(const struct app_nfc_parser_record_info *record_info, void *user_data)
+{
+	int ret;
+
+	ARG_UNUSED(user_data);
+
+	/* Sticker records are either the MIME identity record (inf, TNF 0x02) or our
+	 * external-type protocol (cmd/rsp/ack/clm, TNF 0x04). Handle the MIME inf here;
+	 * everything else must be external or we ignore it (a MIME record can never
+	 * match the external cmd/rsp/ack/clm branches below). */
+	if (record_info->tnf == NDEF_TNF_MIME) {
+		/* Our info record: marks a settled resting tag (vs a phone mid-write, which
+		 * shows neither inf nor clm). nfc_check_locked uses this to reconcile the clm
+		 * lifecycle and refresh a stale info record (#247, #298). */
+		size_t inf_type_len = strlen(NDEF_INFO_TYPE);
+		if (record_info->type_len == inf_type_len &&
+		    strncmp((const char *)record_info->type, NDEF_INFO_TYPE, inf_type_len) == 0) {
+			m_seen_inf = true;
+		}
+		return 0;
+	}
+
+	if (record_info->tnf != NDEF_TNF_EXT) {
+		return 0;
+	}
+
+	/* Command record: run the protobuf Command through app_cmd and stage the
+	 * response for nfc_check_locked to write back to the tag. With encryption on
+	 * (default) the record is decrypted first and the reply encrypted back;
+	 * without it (validation build) both are plaintext. */
+	size_t cmd_type_len = strlen(NDEF_COMMAND_TYPE);
+	if (record_info->type_len == cmd_type_len &&
+	    strncmp((const char *)record_info->type, NDEF_COMMAND_TYPE, cmd_type_len) == 0) {
+		LOG_INF("Found command record - length: %u byte(s)", record_info->payload_len);
+		NFC_DBG("parsed: command record, payload=%u B", record_info->payload_len);
+		/* Servicing a command: fast green blink until the reply is written. */
+		nfc_led_processing();
+		NFC_REPORT("NFC read: command record (%u B)", record_info->payload_len);
+		NFC_REPORT_HEX("  command (protobuf):", record_info->payload,
+			       record_info->payload_len);
+
+		enum app_cmd_action cmd_action = APP_CMD_ACTION_NONE;
+		bool replayed = false;
+#ifdef CONFIG_APP_NFC_ENCRYPTION
+		/* Encrypted channel: decrypt, run, encrypt the reply (RESPONSE-direction
+		 * nonce so it never reuses the request nonce), with same-counter
+		 * retransmission served from the response cache. */
+		ret = handle_encrypted_cmd(g_app_config.secret_key, APP_CMD_TRANSPORT_NFC,
+					   /*cache=*/true, record_info->payload,
+					   record_info->payload_len, m_resp_buf, sizeof(m_resp_buf),
+					   &m_resp_len, &cmd_action, &replayed);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("handle_encrypted_cmd", ret);
+			NFC_REPORT("  -> command rejected: %d", ret);
+			/* #315: rejected here means wrong secret_key, a stale/out-of-window
+			 * nonce_counter or a malformed frame — the command never ran and
+			 * nothing is written back to the tag, so the operator gets the red
+			 * blink instead of a green one that would look like success. The
+			 * app-level failures that do return an encrypted Error response
+			 * (unknown field, NOT_WRITABLE, ...) come back with ret == 0 and keep
+			 * the normal success signalling; the network reports those. */
+			nfc_led_rejected();
+			m_resp_len = 0;
+			return ret;
+		}
+#else
+		/* Plaintext channel (validation build): hand the raw protobuf Command
+		 * to app_cmd and stage the plaintext response. No response cache, so no
+		 * replay handling. */
+		(void)replayed;
+		ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, record_info->payload,
+				     record_info->payload_len, m_resp_buf, sizeof(m_resp_buf),
+				     &m_resp_len, &cmd_action);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
+			NFC_REPORT("  -> app_cmd_handle failed: %d", ret);
+			/* No auth on this build, but the failure is just as silent (no reply
+			 * written) — clear the green blink the same way (#315). */
+			nfc_led_rejected();
+			m_resp_len = 0;
+			return ret;
+		}
+#endif /* CONFIG_APP_NFC_ENCRYPTION */
+
+		m_have_resp = (m_resp_len > 0);
+		/* A same-counter retransmission replays the cached reply without
+		 * re-running the command — keep any action still awaiting the phone's ack
+		 * instead of clearing it. A fresh execution sets the action: it waits for
+		 * the ack (set ready in the m_seen_ack / backstop paths) when there is a
+		 * reply to deliver, or fires immediately when there is nothing to read. */
+		if (!replayed) {
+			/* M-5: don't clobber a deferred action from an earlier command that
+			 * has not been dispatched yet (the phone sent another command before
+			 * acking the first reply). Overwriting it would silently drop a pending
+			 * reboot/save. Keep the pending action — it still fires once the phone
+			 * acks (m_seen_ack) — and drop the new command's own action instead.
+			 * A well-behaved app acks between commands (#242), so this only guards
+			 * the misbehaving case. */
+			if (m_cmd_action == APP_CMD_ACTION_NONE) {
+				m_cmd_action = cmd_action;
+				m_cmd_action_ready =
+					(cmd_action != APP_CMD_ACTION_NONE && !m_have_resp);
+			} else if (cmd_action != APP_CMD_ACTION_NONE) {
+				LOG_WRN("NFC: action %d still pending; ignoring new command action "
+					"%d",
+					(int)m_cmd_action, (int)cmd_action);
+			}
+		}
+		NFC_REPORT("  -> handled, response %zu B, deferred action: %s", m_resp_len,
+			   cmd_action_str(cmd_action));
+		return 0;
+	}
+
+#ifdef CONFIG_APP_NFC_ENCRYPTION
+	/* Vendor-token command record (#299, #316): decrypt/dispatch/reply exactly
+	 * like the command branch above, but keyed by vendor_token and dispatched on
+	 * the vendor transport, so it carries a normal protobuf Command through the
+	 * generic app_cmd path (vendor_reset, set_secret_key, set_param on
+	 * writable:[vendor] fields, ...). No plaintext fallback: without encryption
+	 * compiled in there is no vendor_token channel at all (falls through to
+	 * "unrecognized record type" below). cache=false: the vendor channel never
+	 * touches the shared response cache — a same-counter retry re-decrypts to
+	 * -EACCES like every channel and the phone retries at counter+1. */
+	size_t vnd_type_len = strlen(NDEF_VENDOR_TYPE);
+	if (record_info->type_len == vnd_type_len &&
+	    strncmp((const char *)record_info->type, NDEF_VENDOR_TYPE, vnd_type_len) == 0) {
+		LOG_INF("Found vendor command record - length: %u byte(s)",
+			record_info->payload_len);
+		NFC_DBG("parsed: vendor command record, payload=%u B", record_info->payload_len);
+		/* Servicing a command: fast green blink until the reply is written. */
+		nfc_led_processing();
+		NFC_REPORT("NFC read: vendor command record (%u B)", record_info->payload_len);
+		NFC_REPORT_HEX("  command (protobuf):", record_info->payload,
+			       record_info->payload_len);
+
+		enum app_cmd_action cmd_action = APP_CMD_ACTION_NONE;
+		bool replayed = false;
+		ret = handle_encrypted_cmd(g_app_config.vendor_token, APP_CMD_TRANSPORT_VENDOR,
+					   /*cache=*/false, record_info->payload,
+					   record_info->payload_len, m_resp_buf, sizeof(m_resp_buf),
+					   &m_resp_len, &cmd_action, &replayed);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("handle_encrypted_cmd", ret);
+			NFC_REPORT("  -> vendor command rejected: %d", ret);
+			/* #315: same as the hio.stck:cmd branch above, keyed by vendor_token —
+			 * a wrong token / stale nonce blinks red instead of silently holding
+			 * the green servicing blink. */
+			nfc_led_rejected();
+			m_resp_len = 0;
+			return ret;
+		}
+
+		m_have_resp = (m_resp_len > 0);
+		/* Same action-staging + M-5 guard as the command branch above. cache=false
+		 * makes `replayed` always false here, but keep the guard for parity. */
+		if (!replayed) {
+			if (m_cmd_action == APP_CMD_ACTION_NONE) {
+				m_cmd_action = cmd_action;
+				m_cmd_action_ready =
+					(cmd_action != APP_CMD_ACTION_NONE && !m_have_resp);
+			} else if (cmd_action != APP_CMD_ACTION_NONE) {
+				LOG_WRN("NFC: action %d still pending; ignoring vendor command "
+					"action %d",
+					(int)m_cmd_action, (int)cmd_action);
+			}
+		}
+		NFC_REPORT("  -> handled, response %zu B, deferred action: %s", m_resp_len,
+			   cmd_action_str(cmd_action));
+		return 0;
+	}
+#endif /* CONFIG_APP_NFC_ENCRYPTION */
+
+	/* Response record already on the tag (our previous reply): leave it so the
+	 * phone can read it; don't overwrite with the info record. */
+	size_t resp_type_len = strlen(NDEF_RESPONSE_TYPE);
+	if (record_info->type_len == resp_type_len &&
+	    strncmp((const char *)record_info->type, NDEF_RESPONSE_TYPE, resp_type_len) == 0) {
+		m_seen_resp = true;
+		NFC_REPORT("NFC read: our response record still on tag (%u B) - leaving it for "
+			   "the phone",
+			   record_info->payload_len);
+		return 0;
+	}
+
+	/* Ack record: the phone wrote it over our response to confirm it read the
+	 * reply (#164). nfc_check_locked restores the info record now — deterministic,
+	 * no RF-timing guess, so the restore can never clobber an unread reply. */
+	size_t ack_type_len = strlen(NDEF_ACK_TYPE);
+	if (record_info->type_len == ack_type_len &&
+	    strncmp((const char *)record_info->type, NDEF_ACK_TYPE, ack_type_len) == 0) {
+		m_seen_ack = true;
+		NFC_REPORT("NFC read: phone ack record - reply consumed, restoring info");
+		return 0;
+	}
+
+	/* #247/#360: our provisioning claim record. Presence detection only — the
+	 * phone reads and (in older app versions) deletes it; the firmware never
+	 * parses it back and no longer reacts to its absence (that unauthenticated
+	 * consume trigger was removed by #360). Recognized here purely so it doesn't
+	 * fall through to the "unrecognized record" log line below. */
+	size_t clm_type_len = strlen(NDEF_CLAIM_TYPE);
+	if (record_info->type_len == clm_type_len &&
+	    strncmp((const char *)record_info->type, NDEF_CLAIM_TYPE, clm_type_len) == 0) {
+		NFC_REPORT("NFC read: our clm provisioning record (%u B)",
+			   record_info->payload_len);
+		return 0;
+	}
+
+	/* #250: the legacy bare-AppConfigMessage config record (hio.stck:cmd's sibling
+	 * "hio.stck:cfg") has been retired — offline/boot-staged provisioning now goes
+	 * through the encrypted Command/SetParam record handled above, so any other
+	 * record type is just unrecognized data. */
+	NFC_REPORT("NFC read: unrecognized record type (%u B) -> ignored",
+		   record_info->payload_len);
+	return 0;
+}
+
+/* ST25DV GPO interrupt handler: wake the NFC poll thread to service the tag and
+ * hold the CPU out of Stop2 for the RF session (nfc_keep_awake) so the tag I/O
+ * of the command isn't torn by a mid-operation deep-sleep. The GPO fires on RF
+ * field-on/off and RF writes (configured in nfc_enable_rf_write_it). The EXTI on
+ * PB12 wakes the CPU from Stop2, so this ISR is what turns a phone tap into a
+ * serviced command with no periodic polling. */
+static void gpo_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(cb);
+	ARG_UNUSED(pins);
+	/* The GPO EXTI (PB12) fired on an RF event — wake the poll thread and keep the
+	 * CPU out of Stop2 for the session. nfc_keep_awake lights the "phone detected"
+	 * LED on the session's first event. */
+	nfc_keep_awake();
+	k_sem_give(&m_gpo_sem);
+}
+
+/* Block the NFC poll thread until the GPO line signals RF activity. A negative
+ * `fallback_ms` waits forever (event-driven: the thread only wakes on the GPO
+ * EXTI, so an idle sticker never polls the tag and stays in Stop2); a
+ * non-negative value is a bounded safety net (used while a response/info-restore
+ * is pending). Returns 0 if woken by GPO, -EAGAIN on the fallback timeout. */
+int app_nfc_wait_event(int fallback_ms)
+{
+	k_timeout_t timeout = (fallback_ms < 0) ? K_FOREVER : K_MSEC(fallback_ms);
+
+	return k_sem_take(&m_gpo_sem, timeout);
+}
+
+/* Configure the GPO line (PB12) as an input with an edge interrupt. */
+static int nfc_gpo_irq_setup(void)
+{
+	if (!gpio_is_ready_dt(&m_gpo)) {
+		LOG_ERR("GPO gpio not ready");
+		return -ENODEV;
+	}
+	int ret = gpio_pin_configure_dt(&m_gpo, GPIO_INPUT);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt(gpo)", ret);
+		return ret;
+	}
+	ret = gpio_pin_interrupt_configure_dt(&m_gpo, GPIO_INT_EDGE_BOTH);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_pin_interrupt_configure_dt(gpo)", ret);
+		return ret;
+	}
+	gpio_init_callback(&m_gpo_cb, gpo_isr, BIT(m_gpo.pin));
+	ret = gpio_add_callback(m_gpo.port, &m_gpo_cb);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("gpio_add_callback(gpo)", ret);
+		return ret;
+	}
+	return 0;
+}
+
+/* Set once app_nfc_init() succeeds. The ST25DV tag is non-essential (#88): on
+ * init failure we degrade instead of die()-ing. Single source of truth for the
+ * NFC-ready state; main.c and the device_status bit read it via app_nfc_ready(). */
+static bool m_ready;
+
+bool app_nfc_ready(void)
+{
+	return m_ready;
+}
+
 int app_nfc_init(void)
 {
 	int ret;
 
-	const struct gpio_dt_spec lpd_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
+#ifndef CONFIG_APP_NFC_ENCRYPTION
+	LOG_WRN("============================================================");
+	LOG_WRN("== NFC ENCRYPTION DISABLED - VALIDATION BUILD ONLY        ==");
+	LOG_WRN("== Command & config records are accepted in PLAINTEXT.    ==");
+	LOG_WRN("== Do NOT ship this build.                                ==");
+	LOG_WRN("============================================================");
+#endif
 
-	if (!gpio_is_ready_dt(&lpd_spec)) {
+	/* #247: restore the claim-record lifecycle latch from its own settings subtree
+	 * (settings subsystem already brought up by app_config_init; idempotent here). */
+	(void)settings_subsys_init();
+	ret = settings_load_subtree("clm");
+	if (ret) {
+		LOG_WRN("NFC: clm state load failed: %d (defaulting UNSET)", ret);
+	}
+	LOG_INF("NFC: clm state = %u", m_clm_state);
+
+	if (!gpio_is_ready_dt(&m_lpd)) {
 		LOG_ERR("GPIO device not ready (LPD)");
 		return -ENODEV;
 	}
 
-	ret = gpio_pin_configure_dt(&lpd_spec, GPIO_OUTPUT_ACTIVE);
+	ret = gpio_pin_configure_dt(&m_lpd, GPIO_OUTPUT_ACTIVE);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
+		return ret;
+	}
+
+	/* Configure GPO RF_WRITE_EN so RF EEPROM writes are reported (sets the GPO
+	 * pin / IT_STS_Dyn). The poll no longer gates on it (it reads 0x00 here, see
+	 * app_nfc_poll), but keeping it set readies the GPO pin for a future
+	 * hardware-interrupt-driven, low-power command pickup. Not fatal. */
+	if (nfc_access_begin() == 0) {
+		if (nfc_enable_rf_write_it() == 0) {
+			LOG_INF("NFC: RF_WRITE_EN configured");
+		} else {
+			LOG_WRN("NFC: RF_WRITE_EN config failed (not used by the poll)");
+		}
+		nfc_access_end();
+	}
+
+	ret = nfc_gpo_irq_setup();
+	if (ret) {
+		LOG_WRN("NFC: GPO IRQ setup failed: %d", ret);
+	} else {
+		LOG_INF("NFC: GPO IRQ on PB12 ready");
+	}
+
+#ifdef CONFIG_PM_DEVICE
+	/* Keep GPIOB (the PB12 GPO port) out of the Stop2 device-suspend sweep so its
+	 * EXTI can wake the MCU from deep sleep on an RF event — the basis for the
+	 * event-driven, low-power NFC pickup. Needs `wakeup-source` on &gpiob (app.overlay)
+	 * to be WS-capable; the return value reports whether the flag actually took. */
+	const struct device *gpiob = DEVICE_DT_GET(DT_NODELABEL(gpiob));
+	if (device_is_ready(gpiob)) {
+		bool ok = pm_device_wakeup_enable(gpiob, true);
+
+		LOG_INF("NFC: gpiob wake-source enable %s", ok ? "ok" : "FAILED (not WS-capable)");
+	}
+#endif /* CONFIG_PM_DEVICE */
+
+	/* NOTE: do NOT write the info record here. The boot-time app_nfc_check() (and
+	 * the poll thread) already lay it down on a blank tag and restore it after a
+	 * consumed config/command — and crucially they run AFTER reading the tag, so a
+	 * config/command written over NFC while the device was powered off is ingested
+	 * first. Writing the info record at init would overwrite that pending record
+	 * before it is read, breaking power-off provisioning (SetParam-applied-at-boot,
+	 * #147). */
+	m_ready = true;
+	return 0;
+}
+
+/* Write the staged response (m_resp_buf/m_resp_len) to the tag as a response
+ * record. write_mem gates every EEPROM chunk on the RF field being off; if the
+ * field is up the write defers (-EBUSY) and m_resp_write_pending stays set so the
+ * next field-off poll re-attempts it — the encrypted reply is never regenerated,
+ * just rewritten, the same principle as the gated read. Returns 0 (deferred or
+ * done) or -errno on a hard error. Caller holds the access lock; m_buf is free
+ * scratch (a pending write skips the tag read, so its contents are unused). */
+static int nfc_write_response(void)
+{
+	size_t out_len = build_ndef_record(m_buf, ST25DV_USER_MEM_SIZE, NDEF_RESPONSE_TYPE,
+					   m_resp_buf, m_resp_len);
+	if (out_len == 0) {
+		LOG_ERR("NFC response record too large (%zu B payload)", m_resp_len);
+		m_resp_write_pending = false;
+		/* #340 L1: the boot-staged path (app_nfc_check() from main(), no RF field
+		 * and therefore no m_awake_timer session running) has no other backstop to
+		 * clear the "processing" blink nfc_led_processing() started -- stop it here
+		 * on a hard failure instead of leaving it running forever. */
+		nfc_led_off();
+		return -EMSGSIZE;
+	}
+
+	int ret = write_mem(0, m_buf, out_len);
+	if (ret == -EBUSY) {
+		/* RF field up -> the write could not land this window; keep it pending and
+		 * retry on the next field-off poll (no re-read, no regeneration). */
+		NFC_DBG("resp: write deferred (field on), %zu B still pending", out_len);
+		return 0;
+	}
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+		m_resp_write_pending = false;
+		/* #340 L1: same backstop gap as above. */
+		nfc_led_off();
+		return ret;
+	}
+
+	NFC_DBG("resp: wrote %zu B record to tag", out_len);
+	/* Reply is on the tag, waiting for the phone to read it: green + yellow. */
+	nfc_led_response_ready();
+	NFC_REPORT("NFC wrote: response record (%zu B NDEF, %zu B payload)", out_len, m_resp_len);
+	m_resp_write_pending = false;
+	/* #164: a response record now sits on the tag -> arm the info-restore. It is
+	 * restored when the phone acks the reply (NDEF_ACK_TYPE), or after the quiet
+	 * backstop if no ack arrives. */
+	m_info_restore_pending = true;
+	return 0;
+}
+
+/* Core NFC check: read the tag, parse/ingest a pending config, and restore the
+ * info record. Caller must hold the access lock (nfc_access_begin). */
+static int nfc_check_locked(void)
+{
+	int ret;
+	int res = 0;
+
+	/* A response from an earlier cycle is still waiting to be written (the RF
+	 * field came back before the write landed). Retry it in this field-off window
+	 * WITHOUT re-reading the tag or re-running the command — the reply is cached
+	 * in m_resp_buf, so just rewrite it until a clean window lands it. */
+	if (m_resp_write_pending) {
+		return nfc_write_response();
+	}
+
+	m_have_resp = false;
+	m_seen_resp = false;
+	m_seen_ack = false;
+	m_seen_inf = false;
+
+	/* #247: once a claim token is provisioned, start exposing the clm record
+	 * (UNSET -> PENDING). Driven purely by the token being set (not tag content),
+	 * so it fires on the first check after commissioning; build_resting_ndef then
+	 * includes clm. CONSUMED (via clm_ack or a decrypted command, #360) is
+	 * terminal. `just_armed` guards the deferred-persist step below (#340 M3):
+	 * the PENDING state is set in RAM only here (build_resting_ndef right below
+	 * needs it immediately to include the clm record) - it is NOT persisted yet.
+	 * If the tag write that lays down that clm-bearing record never lands (RF
+	 * field up -> -EBUSY, I2C error, ...), persisting PENDING now would leave
+	 * flash out of sync with what's actually on the tag. So every path below
+	 * reachable while just_armed is true must either confirm the write succeeded
+	 * and call clm_arm_commit() (persist PENDING), or call clm_arm_revert() (undo
+	 * back to UNSET in RAM so the next poll retries arming from scratch) - see
+	 * #351/#357 clm_rearm, which made this arming sequence run on every
+	 * re-provisioning, not just once at factory commissioning. */
+	bool just_armed = false;
+	if (m_clm_state == CLM_UNSET && claim_token_is_set()) {
+		m_clm_state = CLM_PENDING;
+		just_armed = true;
+		LOG_INF("NFC clm record armed (claim token provisioned) (#247)");
+	}
+
+	/* read_mem / write_mem below gate every EEPROM chunk on the RF field being
+	 * off (see nfc_wait_field_off): a 512 B access during RF collides with the
+	 * phone on the shared i2c1 bus and can wedge it, starving the watchdog feeder
+	 * in the main loop (all sensors share i2c1) -> a 10 s SoC reset with no panic
+	 * dump. The sensors keep using i2c1 unaffected. */
+
+	/* Build the expected resting NDEF up front (no I2C): info record, plus the
+	 * clm record while PENDING (#247). Used both to detect "tag already holds our
+	 * resting content" and to (re)write it. */
+	uint8_t info[128];
+	size_t info_len = build_resting_ndef(info, sizeof(info));
+
+	ret = read_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
+	if (ret == -EBUSY) {
+		/* RF field stayed on through the read -> skip this cycle (benign); the
+		 * GPO event / fallback re-polls once the field is quiet again. No write
+		 * happened, so an arm this cycle (#340 M3) is not yet confirmed - retry. */
+		if (just_armed) {
+			clm_arm_revert();
+		}
+		return 0;
+	}
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("read_mem", ret);
+		if (just_armed) {
+			clm_arm_revert();
+		}
+		return ret;
+	}
+	NFC_DBG("poll: tag read ok, CC=%02x TLV=%02x len=%02x rec=%02x", m_buf[0], m_buf[4],
+		m_buf[5], m_buf[6]);
+
+	/* Empty tag: lay down the info record so a phone always finds metadata. */
+	if (is_buffer_zero(m_buf, ST25DV_USER_MEM_SIZE)) {
+		m_unknown_count = 0;
+		m_info_restore_pending = false; /* #164: writing info record below */
+		NFC_REPORT("NFC tag empty -> writing info record (%zu B)", info_len);
+		bool write_ok = false;
+		if (info_len) {
+			ret = write_mem(0, info, info_len);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+				res = ret;
+			} else {
+				write_ok = true;
+			}
+		}
+		/* #340 M3: commit the arm only once the clm-bearing record actually landed
+		 * on the tag (info_len == 0 would mean nothing was ever written either).
+		 * Tracked via a dedicated flag, not `res`, since `res` is not touched on
+		 * the write's own success path (only on failure). */
+		if (just_armed) {
+			if (write_ok) {
+				clm_arm_commit();
+			} else {
+				clm_arm_revert();
+			}
+		}
+		return res;
+	}
+
+	/* Tag already holds exactly our info record: nothing pending, leave it
+	 * (avoids rewriting the EEPROM on every check). */
+	if (info_len && memcmp(m_buf, info, info_len) == 0) {
+		m_unknown_count = 0;
+		m_info_restore_pending = false; /* #164: info record is present */
+		NFC_REPORT("NFC tag holds our info record (nothing pending) -> no action");
+		/* #340 M3: tag content already matches what we'd write (clm included when
+		 * PENDING) - confirmed correct, not a race. */
+		if (just_armed) {
+			clm_arm_commit();
+		}
+		return 0;
+	}
+
+	/* Pending data written by a phone: parse it. parser_callback may ingest a
+	 * config (sets *action), or process a command (stages m_resp_buf), or flag
+	 * that the tag already holds our response (m_seen_resp). */
+	ret = app_nfc_parser_run(m_buf, ST25DV_USER_MEM_SIZE, parser_callback, NULL);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_nfc_parser_run", ret);
+		res = ret;
+	}
+
+	/* A command was processed: stage the reply for writing. The reply is in
+	 * m_resp_buf; mark it pending and write it (resuming across field-off windows
+	 * if the field interrupts — see nfc_write_response). The record is built into
+	 * m_buf there (its parsed contents are no longer needed). */
+	if (m_have_resp) {
+		m_unknown_count = 0;
+		LOG_INF("Writing command response to NFC (%zu B)...", m_resp_len);
+		NFC_REPORT_HEX("  response (0x01 ver + protobuf Response):", m_resp_buf,
+			       m_resp_len);
+		m_resp_write_pending = true;
+		/* #340 M3: this writes the command reply, not the clm-bearing resting
+		 * NDEF - an arm this cycle is not confirmed by it, so retry next poll. */
+		if (just_armed) {
+			clm_arm_revert();
+		}
+		return nfc_write_response();
+	}
+
+	/* The phone wrote its ack over our response: it has read and accepted the
+	 * reply, so restore the info record now (#164). Deterministic — unlike the
+	 * dropped field-timing heuristic, this can never clobber an unread reply. */
+	if (m_seen_ack) {
+		m_unknown_count = 0;
+		m_info_restore_pending = false;
+		/* Phone read and acked the reply: exchange complete, clear the LED. */
+		nfc_led_off();
+		/* The phone has read and acked the reply: a deferred action (reboot/save)
+		 * may now fire without cutting off an unread response. */
+		if (m_cmd_action != APP_CMD_ACTION_NONE) {
+			m_cmd_action_ready = true;
+		}
+		LOG_INF("Restoring info record after phone ack (#164)...");
+		NFC_REPORT("NFC wrote: info record (%zu B) - restored after phone ack", info_len);
+		bool write_ok = false;
+		if (info_len) {
+			ret = write_mem(0, info, info_len);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+				res = ret;
+			} else {
+				write_ok = true;
+			}
+		}
+		/* #340 M3: `info` here is the clm-bearing record built at the top of this
+		 * call - commit the arm once it is confirmed written, else retry. Tracked
+		 * via a dedicated flag: `res` may already carry an unrelated error from
+		 * app_nfc_parser_run above and would falsely look like a failed write. */
+		if (just_armed) {
+			if (write_ok) {
+				clm_arm_commit();
+			} else {
+				clm_arm_revert();
+			}
+		}
+		return res;
+	}
+
+	/* Our response is already on the tag (awaiting the phone read): leave it.
+	 * It is restored to the info record on the phone's ack, or by the quiet
+	 * backstop if the phone leaves without acking. */
+	if (m_seen_resp) {
+		m_unknown_count = 0;
+		m_info_restore_pending = true;
+		/* #340 M3: no write happened this cycle - an arm is not confirmed. */
+		if (just_armed) {
+			clm_arm_revert();
+		}
+		return res;
+	}
+
+	/* #247: settled resting state — our info record is on the tag (so this is not
+	 * a phone mid-write, which would show neither inf nor clm). Refresh the
+	 * resting record if the tag copy is stale (e.g. an older nonce high-water).
+	 * (#360: this used to also latch CLM_CONSUMED here when clm was absent —
+	 * removed, since that trigger fired on unauthenticated presence/absence of
+	 * the plaintext clm record with no secret_key check at all.) */
+	if (m_seen_inf) {
+		m_unknown_count = 0;
+		m_info_restore_pending = false;
+		info_len = build_resting_ndef(info, sizeof(info));
+		bool matched = info_len && memcmp(m_buf, info, info_len) == 0;
+		bool write_ok = false;
+		if (!matched && info_len) {
+			NFC_REPORT("NFC refreshing resting record (%zu B)", info_len);
+			ret = write_mem(0, info, info_len);
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+				res = ret;
+			} else {
+				write_ok = true;
+			}
+		}
+		/* #340 M3: commit once the clm-bearing record is confirmed on the tag,
+		 * either because it already matched or because the refresh write above
+		 * just landed it; otherwise retry next poll. Tracked via a dedicated flag,
+		 * not `res` (which may carry an unrelated earlier parser error). */
+		if (just_armed) {
+			if (matched || write_ok) {
+				clm_arm_commit();
+			} else {
+				clm_arm_revert();
+			}
+		}
+		return res;
+	}
+
+	/* Unrecognized data and nothing actionable. This is usually a poll catching
+	 * the tag mid-write while the phone lays down a command/config record, which
+	 * resolves on the next poll. Debounce: only restore the info record (which
+	 * would clobber the in-progress write) after the data stays unrecognized for
+	 * NFC_UNKNOWN_DEBOUNCE consecutive polls. */
+	if (++m_unknown_count < NFC_UNKNOWN_DEBOUNCE) {
+		NFC_REPORT("NFC unrecognized data (%u/%u) -> waiting (likely mid-write)",
+			   m_unknown_count, NFC_UNKNOWN_DEBOUNCE);
+		/* #340 M3: no write happened this cycle - an arm is not confirmed. */
+		if (just_armed) {
+			clm_arm_revert();
+		}
+		return res;
+	}
+
+	m_unknown_count = 0;
+	m_info_restore_pending = false; /* #164: writing info record below */
+	LOG_INF("Writing info record to NFC (cleared unknown data)...");
+	NFC_REPORT("NFC wrote: info record (%zu B) - cleared unknown data, restored metadata",
+		   info_len);
+	bool write_ok = false;
+	if (info_len) {
+		ret = write_mem(0, info, info_len);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+			res = ret;
+		} else {
+			write_ok = true;
+		}
+	}
+
+	/* #340 M3: commit the arm once this final restore write is confirmed, else
+	 * revert so the next poll retries from scratch. Tracked via a dedicated
+	 * flag, not `res` (which may carry an unrelated earlier parser error). */
+	if (just_armed) {
+		if (write_ok) {
+			clm_arm_commit();
+		} else {
+			clm_arm_revert();
+		}
+	}
+
+	return res;
+}
+
+/* Full NFC check: always reads the tag. Used at boot and by `nfc check`
+ * (an I2C-side `nfc write` does not set the RF IT_STS_Dyn flags). */
+int app_nfc_check(void)
+{
+	int ret = nfc_access_begin();
+	if (ret) {
+		return ret;
+	}
+
+	int res = nfc_check_locked();
+
+	nfc_access_end();
+	return res;
+}
+
+/* NFC service pass: read the tag and process any pending command / config,
+ * restoring the info record otherwise. The poll thread calls this after
+ * app_nfc_wait_event() wakes it on the GPO interrupt (low-power; no busy
+ * polling). It always does the full read — software gating on IT_STS_Dyn is
+ * useless here (the register reads 0x00 every pass, cleared by the LPD
+ * power-cycle in nfc_access_begin), and a command can only be read / answered
+ * while the RF field is briefly off, which IT_STS wouldn't flag anyway. */
+int app_nfc_poll(void)
+{
+	/* Identical to app_nfc_check() — both do a full tag read under the access
+	 * lock; kept as a separate entry point for call-site clarity (#220.F). */
+	return app_nfc_check();
+}
+
+/* #164: true while a response record is left on the tag and the info record has
+ * not yet been restored. The poll thread uses this to shorten its wait and to
+ * decide whether to restore the info record once the field goes quiet. */
+bool app_nfc_info_restore_pending(void)
+{
+	return m_info_restore_pending;
+}
+
+/* True while a command response is staged but not yet fully written to the tag
+ * (the RF field interrupted the write). The poll thread uses this to shorten its
+ * wait and to re-run app_nfc_poll() — which rewrites the cached reply — instead
+ * of restoring the info record (which would clobber the pending response). */
+bool app_nfc_resp_write_pending(void)
+{
+	return m_resp_write_pending;
+}
+
+/* #164: rewrite the resting NDEF (info record, plus clm while PENDING — #247)
+ * over whatever is on the tag (a stale response record), so a later passive read
+ * finds valid metadata. Called by the poll thread only after the RF field has
+ * been quiet for the debounce window (no GPO events ~10 s → the phone has left),
+ * which avoids the #144 race of clobbering the reply while the phone may still
+ * be reading it. */
+int app_nfc_restore_info(void)
+{
+	uint8_t info[128];
+	size_t info_len = build_resting_ndef(info, sizeof(info));
+
+	if (!info_len) {
+		return -EINVAL;
+	}
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		return ret;
+	}
+
+	ret = write_mem(0, info, info_len);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("write_mem", ret);
+	} else {
+		m_info_restore_pending = false;
+		/* Exchange fully done (reply consumed / phone gone): clear the LED. */
+		nfc_led_off();
+		/* Backstop: the phone left without acking the reply. Release any deferred
+		 * action now so a reboot/save is never stuck waiting for an ack that will
+		 * not come. */
+		if (m_cmd_action != APP_CMD_ACTION_NONE) {
+			m_cmd_action_ready = true;
+		}
+		LOG_INF("NFC: restored info record after field loss (#164)");
+	}
+
+	nfc_access_end();
+	return ret;
+}
+
+#if defined(CONFIG_SHELL)
+
+static int cmd_nfc_dump(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	ret = read_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
+	if (ret == 0) {
+		shell_hexdump(sh, m_buf, ST25DV_USER_MEM_SIZE);
+	}
+
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "read failed: %d", ret);
 		return ret;
 	}
 
 	return 0;
 }
 
-int app_nfc_check(enum app_nfc_action *action)
+static int cmd_nfc_read(const struct shell *sh, size_t argc, char **argv)
 {
-	int ret;
-	int res = 0;
+	ARG_UNUSED(argc);
 
-	*action = APP_NFC_ACTION_NONE;
+	unsigned long off = strtoul(argv[1], NULL, 0);
+	unsigned long len = strtoul(argv[2], NULL, 0);
 
-	const struct gpio_dt_spec lpd_spec = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
-
-	if (!gpio_is_ready_dt(&lpd_spec)) {
-		LOG_ERR("GPIO device not ready (LPD)");
-		return -ENODEV;
+	/* Bound each operand before the sum: `off + len` wraps modulo the word size
+	 * for a huge `len`, which would slip past a combined check and overrun
+	 * m_buf. */
+	if (len == 0 || len > ST25DV_USER_MEM_SIZE || off >= ST25DV_USER_MEM_SIZE ||
+	    off > ST25DV_USER_MEM_SIZE - len) {
+		shell_error(sh, "range out of 0..%d", ST25DV_USER_MEM_SIZE);
+		return -EINVAL;
 	}
 
-	ret = gpio_pin_set_dt(&lpd_spec, 0);
+	int ret = nfc_access_begin();
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
+		shell_error(sh, "nfc access failed: %d", ret);
 		return ret;
 	}
 
-	k_sleep(K_MSEC(150));
+	ret = read_mem((uint16_t)off, m_buf, len);
+	if (ret == 0) {
+		shell_hexdump(sh, m_buf, len);
+	}
 
-	static uint8_t buf[512];
-	ret = read_mem(0, buf, sizeof(buf));
+	nfc_access_end();
+
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("read_mem", ret);
-		res = ret;
-
-		ret = gpio_pin_set_dt(&lpd_spec, 1);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
-			return ret;
-		}
-
-		return res;
+		shell_error(sh, "read failed: %d", ret);
+		return ret;
 	}
 
-	if (is_buffer_zero(buf, sizeof(buf))) {
-		ret = gpio_pin_set_dt(&lpd_spec, 1);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
-			return ret;
-		}
-
-		return 0;
-	}
-
-	ret = app_ndef_parser_run(buf, sizeof(buf), parser_callback, action);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_ndef_parser_run", ret);
-		res = ret;
-	}
-
-	LOG_INF("Clearing memory...");
-
-	memset(buf, 0, sizeof(buf));
-
-	ret = write_mem(0, buf, sizeof(buf));
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("write_mem", ret);
-		res = ret;
-	}
-
-	ret = gpio_pin_set_dt(&lpd_spec, 1);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
-		res = ret;
-	}
-
-	return res;
+	return 0;
 }
+
+static int cmd_nfc_write(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	unsigned long off = strtoul(argv[1], NULL, 0);
+
+	size_t n = hex2bin(argv[2], strlen(argv[2]), m_buf, ST25DV_USER_MEM_SIZE);
+	if (n == 0) {
+		shell_error(sh, "bad hex (or empty)");
+		return -EINVAL;
+	}
+
+	if (off >= ST25DV_USER_MEM_SIZE || off + n > ST25DV_USER_MEM_SIZE) {
+		shell_error(sh, "range out of 0..%d", ST25DV_USER_MEM_SIZE);
+		return -EINVAL;
+	}
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	ret = write_mem((uint16_t)off, m_buf, n);
+
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "write failed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "wrote %zu byte(s) at offset %lu", n, off);
+	return 0;
+}
+
+static int cmd_nfc_clear(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	memset(m_buf, 0, ST25DV_USER_MEM_SIZE);
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	ret = write_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
+
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "clear failed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "cleared %d bytes", ST25DV_USER_MEM_SIZE);
+	return 0;
+}
+
+static int cmd_nfc_autocheck(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	if (strcmp(argv[1], "on") == 0) {
+		m_periodic = true;
+	} else if (strcmp(argv[1], "off") == 0) {
+		m_periodic = false;
+	} else {
+		shell_error(sh, "usage: nfc autocheck on|off");
+		return -EINVAL;
+	}
+
+	shell_print(sh, "periodic NFC check %s", m_periodic ? "on" : "off");
+	return 0;
+}
+
+static int cmd_nfc_check(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	/* Route the check's read/decode/react/write trace to this shell. */
+	m_report_sh = sh;
+	int ret = app_nfc_check();
+	m_report_sh = NULL;
+	if (ret) {
+		shell_error(sh, "nfc check failed: %d", ret);
+		return ret;
+	}
+
+	/* #250: a staged hio.stck:cmd leaves a response on the tag with the deferred
+	 * action gated. Mirror the boot path — restore the info record (opens the gate)
+	 * and apply the provisioning action here so a bench `nfc check` behaves like a
+	 * boot-staged provision. */
+	if (app_nfc_info_restore_pending()) {
+		app_nfc_restore_info();
+	}
+	enum app_cmd_action act = app_nfc_take_cmd_action();
+	switch (act) {
+	case APP_CMD_ACTION_SETTINGS_SAVE:
+		ret = app_settings_save(true); /* reboots on success */
+		shell_print(sh, "staged config applied%s", ret ? " (save failed!)" : " and saved");
+		break;
+	case APP_CMD_ACTION_DEVICE_RESET:
+		ret = app_settings_device_reset();
+		shell_print(sh, "device reset%s", ret ? " (failed!)" : "");
+		break;
+	case APP_CMD_ACTION_FACTORY_RESET:
+		/* #299, narrower than device_reset above: drops LoRaWAN too. */
+		ret = app_settings_factory_reset();
+		shell_print(sh, "factory reset%s", ret ? " (failed!)" : "");
+		break;
+	case APP_CMD_ACTION_VENDOR_RESET:
+		/* #299/#316, narrowest tier: the replacement secret_key came from the
+		 * vendor_reset Command itself (app_cmd_take_pending_vendor_secret_key). */
+		ret = app_settings_vendor_reset(app_cmd_take_pending_vendor_secret_key());
+		shell_print(sh, "vendor reset%s", ret ? " (failed!)" : "");
+		break;
+	case APP_CMD_ACTION_SECRET_KEY_SAVE:
+		/* #322: same save+reboot as SETTINGS_SAVE above — the reboot is what
+		 * makes the rotated key live (h_commit re-syncs g_app_config). */
+		ret = app_settings_save(true); /* reboots on success */
+		shell_print(sh, "secret_key saved%s", ret ? " (save failed!)" : " and applied");
+		break;
+	case APP_CMD_ACTION_CLM_REARM_SAVE:
+		/* #351: same save+reboot as SECRET_KEY_SAVE above, plus the latch flip
+		 * app_cmd_handle_clm_rearm deliberately deferred to this same point
+		 * (see its comment) — mirrors main.c's real apply site exactly. */
+		app_nfc_clm_reset();
+		ret = app_settings_save(true); /* reboots on success */
+		shell_print(sh, "claim_token saved%s", ret ? " (save failed!)" : " and applied");
+		break;
+	case APP_CMD_ACTION_NONE:
+		shell_print(sh, "no staged command on tag (no action)");
+		break;
+	default:
+		shell_print(sh, "staged command action %d (applied by poll thread)", (int)act);
+		break;
+	}
+
+	return 0;
+}
+
+static int cmd_nfc_reg(const struct shell *sh, size_t argc, char **argv)
+{
+	unsigned long addr = strtoul(argv[1], NULL, 0);
+	unsigned long count = (argc >= 3) ? strtoul(argv[2], NULL, 0) : 1;
+
+	if (count == 0 || count > 64) {
+		shell_error(sh, "count must be 1..64");
+		return -EINVAL;
+	}
+
+	uint8_t buf[64];
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	ret = read_reg((uint16_t)addr, buf, count);
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "reg read failed: %d", ret);
+		return ret;
+	}
+
+	shell_hexdump(sh, buf, count);
+	return 0;
+}
+
+static int cmd_nfc_regw(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	unsigned long addr = strtoul(argv[1], NULL, 0);
+
+	uint8_t buf[16];
+	size_t n = hex2bin(argv[2], strlen(argv[2]), buf, sizeof(buf));
+	if (n == 0) {
+		shell_error(sh, "bad hex (or empty / too long, max 16 B)");
+		return -EINVAL;
+	}
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	ret = write_reg((uint16_t)addr, buf, n);
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "reg write failed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "wrote %zu byte(s) to reg 0x%lx", n, addr);
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_nfc, SHELL_CMD_ARG(dump, NULL, "Hex dump all 512 B of NFC memory.", cmd_nfc_dump, 1, 0),
+	SHELL_CMD_ARG(read, NULL, "Read a range. Usage: read <offset> <len>", cmd_nfc_read, 3, 0),
+	SHELL_CMD_ARG(write, NULL, "Write hex bytes. Usage: write <offset> <hexbytes>",
+		      cmd_nfc_write, 3, 0),
+	SHELL_CMD_ARG(clear, NULL, "Zero all 512 B of NFC memory.", cmd_nfc_clear, 1, 0),
+	SHELL_CMD_ARG(autocheck, NULL, "Enable/disable periodic check. Usage: autocheck on|off",
+		      cmd_nfc_autocheck, 2, 0),
+	SHELL_CMD_ARG(check, NULL, "Run the NFC check now (parse + apply config).", cmd_nfc_check,
+		      1, 0),
+	SHELL_CMD_ARG(reg, NULL, "Read system/dynamic register (E1). Usage: reg <addr> [count]",
+		      cmd_nfc_reg, 2, 1),
+	SHELL_CMD_ARG(regw, NULL, "Write system/dynamic register (E1). Usage: regw <addr> <hex>",
+		      cmd_nfc_regw, 3, 0),
+	SHELL_SUBCMD_SET_END);
+
+SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC memory access (debug).", NULL);
+
+#endif /* CONFIG_SHELL */

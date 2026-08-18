@@ -1,0 +1,13 @@
+# Dev/test dependencies for the configen west command test suite (issue #51).
+# Enough to run `pytest scripts/west_commands/tests` standalone (e.g. in the CI
+# `test` job, which does not run the full Zephyr build setup).
+pytest>=8.0
+west>=1.2
+PyYAML>=6.0
+Jinja2>=3.1
+ruamel.yaml>=0.18
+protobuf>=5.26.1
+grpcio-tools>=1.68.0
+# Pinned so the generated-C-matches-committed test formats identically to the
+# committed files (configen runs clang-format on its C output).
+clang-format==22.1.5

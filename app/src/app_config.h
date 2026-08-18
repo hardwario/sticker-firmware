@@ -33,17 +33,38 @@ enum app_config_lrw_activation {
 	APP_CONFIG_LRW_ACTIVATION_ABP = 1,
 };
 
-#define APP_CONFIG_VERSION 1
+enum app_config_radio_mode {
+	APP_CONFIG_RADIO_MODE_OFF = 0,
+	APP_CONFIG_RADIO_MODE_LORAWAN = 1,
+	APP_CONFIG_RADIO_MODE_P2P = 2,
+};
+
+enum app_config_motion_sensitivity {
+	APP_CONFIG_MOTION_SENSITIVITY_OFF = 0,
+	APP_CONFIG_MOTION_SENSITIVITY_LOW = 1,
+	APP_CONFIG_MOTION_SENSITIVITY_MEDIUM = 2,
+	APP_CONFIG_MOTION_SENSITIVITY_HIGH = 3,
+};
+
+#define APP_CONFIG_VERSION 4
 
 struct app_config {
 	uint32_t config_version;
 	uint8_t secret_key[16];
 	uint32_t serial_number;
 	uint32_t nonce_counter;
+	uint8_t claim_token[16];
+	uint8_t vendor_token[16];
 	bool calibration;
 	int interval_sample;
 	int interval_report;
+	bool history_enable;
+	uint32_t history_sensors;
+	int battery_level;
+	bool vendor_reset_allow;
+	int alarm_limit;
 	enum app_config_lrw_region lrw_region;
+	enum app_config_radio_mode radio_mode;
 	int lrw_sub_band;
 	enum app_config_lrw_network lrw_network;
 	bool lrw_adr;
@@ -55,41 +76,8 @@ struct app_config {
 	uint8_t lrw_devaddr[4];
 	uint8_t lrw_nwkskey[16];
 	uint8_t lrw_appskey[16];
-	bool alarm_temperature_enabled;
-	float alarm_temperature_lo;
-	float alarm_temperature_hi;
-	float alarm_temperature_hst;
-	bool alarm_humidity_enabled;
-	float alarm_humidity_lo;
-	float alarm_humidity_hi;
-	float alarm_humidity_hst;
-	bool alarm_pressure_enabled;
-	float alarm_pressure_lo;
-	float alarm_pressure_hi;
-	float alarm_pressure_hst;
-	bool alarm_t1_temperature_enabled;
-	float alarm_t1_temperature_lo;
-	float alarm_t1_temperature_hi;
-	float alarm_t1_temperature_hst;
-	bool alarm_t2_temperature_enabled;
-	float alarm_t2_temperature_lo;
-	float alarm_t2_temperature_hi;
-	float alarm_t2_temperature_hst;
-	bool hall_left_counter;
-	bool hall_left_notify_act;
-	bool hall_left_notify_deact;
-	bool hall_right_counter;
-	bool hall_right_notify_act;
-	bool hall_right_notify_deact;
-	bool input_a_counter;
-	bool input_a_notify_act;
-	bool input_a_notify_deact;
-	bool input_b_counter;
-	bool input_b_notify_act;
-	bool input_b_notify_deact;
-	float corr_temperature;
-	float corr_t1_temperature;
-	float corr_t2_temperature;
+	int lrw_link_check_interval;
+	int lrw_link_check_fail_rejoin;
 	bool cap_hall_left;
 	bool cap_hall_right;
 	bool cap_input_a;
@@ -97,13 +85,63 @@ struct app_config {
 	bool cap_light_sensor;
 	bool cap_barometer;
 	bool cap_pir_detector;
-	bool cap_1w_thermometer;
-	bool cap_1w_machine_probe;
+	bool cap_buzzer;
+	bool cap_w1_sensors;
+	bool cap_accelerometer;
+	uint8_t alarm_0[17];
+	uint8_t alarm_1[17];
+	uint8_t alarm_2[17];
+	uint8_t alarm_3[17];
+	uint8_t alarm_4[17];
+	uint8_t alarm_5[17];
+	uint8_t alarm_6[17];
+	uint8_t alarm_7[17];
+	uint8_t alarm_8[17];
+	uint8_t alarm_9[17];
+	uint8_t alarm_10[17];
+	uint8_t alarm_11[17];
+	uint8_t alarm_12[17];
+	uint8_t alarm_13[17];
+	uint8_t alarm_14[17];
+	uint8_t alarm_15[17];
+	enum app_config_motion_sensitivity accel_motion_sensitivity;
+	uint8_t sensor1_rom[8];
+	uint8_t sensor2_rom[8];
+	uint8_t sensor3_rom[8];
+	uint8_t sensor4_rom[8];
+	bool hall_left_counter;
+	bool hall_right_counter;
+	bool input_a_counter;
+	bool input_b_counter;
 };
 
 extern struct app_config g_app_config;
 
 struct app_config *app_config(void);
+
+/* Guards m_app_config/g_app_config against concurrent mutation
+ * across transports (#340 M27): callers that read-modify-write the config
+ * (SetParam in app_cmd.c; the reset ops below) must hold this around the
+ * whole sequence, not just their own copy of it. */
+void app_config_lock(void);
+void app_config_unlock(void);
+
+/* True if settings_load failed at boot (corrupt/unreadable NVS) and the device is
+ * running on compile-time defaults — identity + provisioning lost. Lets the app
+ * surface a distinct state instead of silently looking like a blank device (H-4). */
+bool app_config_load_failed(void);
+
+/* Reset severity ladder (#299): each function keeps only the fields tagged
+ * with the matching op in the YAML `persistent: [...]` list, resets everything
+ * else to its compiled default, and persists. Returns 0 or a negative errno;
+ * the caller reboots so every module re-reads the restored config.
+ *   device_reset  - keeps factory identity + full LoRaWAN (today's factory_reset).
+ *   factory_reset - keeps identity only; drops the LoRaWAN session/keys.
+ *   vendor_reset  - keeps serial_number + vendor_token only; caller erases the
+ *                   storage+history flash areas first and re-provisions this. */
+int app_config_device_reset(void);
+int app_config_factory_reset(void);
+int app_config_vendor_reset(void);
 
 #ifdef __cplusplus
 }

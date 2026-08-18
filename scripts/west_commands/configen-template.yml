@@ -113,6 +113,30 @@ parameters:
     readonly: true      # Cannot be modified via shell
 
   # ---------------------------------------------------------------------------
+  # Access control: who may read / write a parameter, over which transport.
+  # Each list is a subset of {shell, nfc, lrw}; omit a list to allow all three
+  # (the common case). configen derives the internal dump / dump_nfc_only /
+  # no_shell / readonly flags from these. proto_group is layout only and does
+  # not affect access.
+  # ---------------------------------------------------------------------------
+  - name: claim_token_example
+    proto_group: root
+    type: bytes
+    size: 16
+    readable: [shell, nfc, lrw]   # readable everywhere
+    writable: [shell]             # set only locally (commissioning)
+    write_once: true              # ...and only once; then immutable
+    help: "Write-once identity token set at commissioning"
+
+  - name: lorawan_key_example
+    proto_group: lorawan
+    type: bytes
+    size: 16
+    readable: [shell, nfc]        # never dumped over LoRaWAN (LNS would see it)
+    # writable omitted -> [shell, nfc, lrw]
+    help: "Secret key: NFC-readable, settable over any transport"
+
+  # ---------------------------------------------------------------------------
   # Floating Point Types: float, double
   # ---------------------------------------------------------------------------
   - name: temperature_hi

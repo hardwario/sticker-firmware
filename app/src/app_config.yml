@@ -5,7 +5,7 @@ module:
   settings_prefix: config
   shell_command: config
   log_module: app_config
-  version: 1
+  version: 4
 
 enums:
   lrw_region:
@@ -35,28 +35,240 @@ enums:
       value: 1
       shell: abp
 
+  radio_mode:
+    - name: "OFF"
+      value: 0
+      shell: "off"
+    - name: LORAWAN
+      value: 1
+      shell: lorawan
+    - name: P2P
+      value: 2
+      shell: p2p
+
+  motion_sensitivity:
+    - name: "OFF"
+      value: 0
+      shell: "off"
+    - name: LOW
+      value: 1
+      shell: low
+    - name: MEDIUM
+      value: 2
+      shell: medium
+    - name: HIGH
+      value: 3
+      shell: high
+
+proto:
+  message: AppConfigMessage
+  extra_fields:
+    # #250 Part B: `factory` was the config-record factory-reset flag, read only by
+    # the now-removed app_config_ingest(). Kept here as `proto_field: false` so configen
+    # reserves proto id 1 in AppConfigMessage (never re-used) but emits no field.
+    - {name: factory, type: bool, proto_id: 1, proto_group: root, proto_field: false}
+  groups:
+    - key: root
+    - key: lorawan
+      message: Lorawan
+      field: lorawan
+      proto_id: 5
+      strip_prefix: lrw_
+    - key: application
+      message: Application
+      field: application
+      proto_id: 6
+    - key: sensors
+      message: Sensors
+      field: sensors
+      proto_id: 7
+    - key: alarms
+      message: Alarms
+      field: alarms
+      proto_id: 8
+      # #348: alarm_notif_time (2) and alarm_light_confirm_delay (19) removed —
+      # both timings are now the per-rule `dwell` field (alarm_0..15 bytes blob),
+      # unified as a dwell/hold duration across THRESHOLD/STATE/RATE kinds.
+      reserved: [2, 19]
+
+# Command protocol (LoRaWAN fPort 85 downlink + NFC). The single source of truth
+# for which commands exist, their wire id, dispatch routing and availability.
+# configen generates from `list`: the proto `Command` oneof, the decoder
+# _CMD_NAMES/_CMD_TAGS maps, and the app_cmd_dispatch() switch. The per-command
+# body sub-messages and handler bodies stay hand-written (see configen-commands
+# design). Per-entry fields:
+#   name/proto_id : wire identity (append-only; reserved on removal).
+#   body          : protobuf sub-message type (hand-written in the proto).
+#   kind          : handler (calls app_cmd_handle_<name>) | action (sets *action).
+#   action        : APP_CMD_ACTION_* to set (action kind, or a handler that defers).
+#   transports    : optional allow-list (lrw/nfc/shell/vendor); omitted = all.
+#   response      : success body — ack | info | config_dump | none | info_deferred |
+#                   w1_scan (drives the decoder/docs; the FW emits it in the handler).
+commands:
+  message: Command
+  response: Response
+  reserved: []
+  list:
+    - {name: set_param, proto_id: 2, body: SetParam, kind: handler, response: ack}
+    - {name: get_param, proto_id: 3, body: GetParam, kind: handler, response: config_dump}
+    - {name: get_info, proto_id: 4, body: GetInfo, kind: handler, response: info}
+    - {name: get_config, proto_id: 5, body: GetConfig, kind: handler, response: config_dump}
+    - {name: settings_save, proto_id: 6, body: SettingsSave, kind: action, action: SETTINGS_SAVE, response: ack}
+    - {name: reboot, proto_id: 7, body: Reboot, kind: action, action: REBOOT, response: ack}
+    # #299 reset ladder: proto_id 8 is the same wire slot as today's factory_reset,
+    # renamed to match its actual behavior (keeps identity + full LoRaWAN — the
+    # NEW, narrower factory_reset below is a different command/id). Breaking:
+    # Manager-App must follow the rename.
+    # #340 L12: no transports key meant "omitted = all transports" per the
+    # generator's own rule, so device_reset (broader than factory_reset -- wipes
+    # sensors/alarms/intervals/history config, keeping only identity+LoRaWAN)
+    # was reachable over a plain LoRaWAN downlink and the vendor channel, unlike
+    # its narrower sibling factory_reset below (nfc/shell only, since a
+    # downlink triggering a session-destroying reset could never confirm its
+    # own delivery -- the same argument applies here, arguably more so).
+    - {name: device_reset, proto_id: 8, body: DeviceReset, kind: action, action: DEVICE_RESET, response: ack, transports: [nfc, shell]}
+    - {name: force_send, proto_id: 9, body: ForceSend, kind: handler, response: none, transports: [lrw]}
+    - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
+    - {name: req_history, proto_id: 11, body: ReqHistory, kind: handler, response: none, transports: [lrw]}
+    - {name: req_history_page, proto_id: 13, body: ReqHistoryPage, kind: handler, response: none, transports: [nfc]}
+    - {name: clock_sync, proto_id: 12, body: ClockSync, kind: handler, response: info_deferred, transports: [lrw, nfc]}
+    - {name: w1_scan, proto_id: 14, body: W1Scan, kind: handler, response: w1_scan}
+    # F-1: handler (not plain action) so the dispatch calls app_cmd_handle_lrw_{reset,join},
+    # which reject the (re)join while unsaved LoRaWAN staging changes exist.
+    - {name: lrw_reset, proto_id: 16, body: LrwReset, kind: handler, response: ack}
+    - {name: lrw_join, proto_id: 17, body: LrwJoin, kind: handler, response: ack}
+    - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: action, action: ENTER_CALIBRATION, response: ack, transports: [lrw, nfc]}
+    - {name: sample, proto_id: 21, body: Sample, kind: handler, response: sample, transports: [lrw, nfc]}
+    # #299 reset ladder, new middle tier: keeps identity only (serial/vendor_token/
+    # secret_key/nonce_counter/claim_token/DevEUI/JoinEUI), drops the LoRaWAN
+    # session/keys — forces a re-join. NFC + shell only, never LoRaWAN: a LoRaWAN
+    # downlink triggering this would destroy the very session/keys carrying it,
+    # so it could never even confirm delivery.
+    - {name: factory_reset, proto_id: 23, body: FactoryReset, kind: action, action: FACTORY_RESET, response: ack, transports: [nfc, shell]}
+    # Change the secret_key over an already-encrypted channel: authenticated by the
+    # CURRENT secret_key on hio.stck:cmd, or by vendor_token on hio.stck:vnd (#316),
+    # so a lost/rotated key never needs a J-Link. The new key is never readable back
+    # via GetParam/GetConfig (secret_key stays proto_field:false).
+    - {name: set_secret_key, proto_id: 24, body: SetSecretKey, kind: handler, response: ack, transports: [nfc, shell, vendor]}
+    # #308: explicit, authenticated end of the claim window (a companion to the
+    # #247 clm-record delete-detection, which stays as-is for backward
+    # compatibility with older Manager-App builds). Runs over the already-
+    # encrypted hio.stck:cmd channel like set_secret_key above, so only a phone
+    # that already holds secret_key can send it — decrypting at all already
+    # proves that, so app_nfc.c also fires the same transition as a side effect
+    # of any successfully-decrypted command, not just this one. No reboot, no
+    # deferred action: the underlying settings_save_one() write is the same
+    # narrow single-key persist app_nfc.c already does synchronously for the
+    # #247 delete-detection path.
+    - {name: clm_ack, proto_id: 25, body: ClmAck, kind: handler, response: ack, transports: [nfc, shell]}
+    # #316 vendor_reset: deepest reset tier — wipes everything except serial_number
+    # + vendor_token and installs the replacement secret_key carried in the body
+    # (reusing the SetSecretKey shape, since vendor_reset zeroes the old key).
+    # Reachable ONLY over the vendor transport (NFC hio.stck:vnd, vendor-token
+    # authenticated); the shell `settings vendor-reset` remains for HIL. Gated by
+    # vendor_reset_allow (in the handler + app_settings_vendor_reset); recovery from
+    # allow==false is a vendor-channel set_param(vendor_reset_allow=true) first.
+    # proto_id 26 (not 25): 25 was taken by clm_ack (#308) merged into v1.4.0 first.
+    - {name: vendor_reset, proto_id: 26, body: SetSecretKey, kind: handler, response: ack, transports: [vendor]}
+    # #351: symmetric counterpart to clm_ack above — re-opens the claim window
+    # instead of closing it, over the same secret_key-authenticated hio.stck:cmd
+    # channel. Optional new_claim_token: empty/omitted re-arms with the EXISTING
+    # token, a non-zero value replaces it — either way the latch flip + reboot
+    # are deferred together until after the Ack is delivered (same restart-style
+    # pattern as reboot/set_secret_key, see app_cmd_handle_clm_rearm), so the
+    # phone always sees "ack read -> reboot" regardless of which case it took.
+    - {name: clm_rearm, proto_id: 27, body: ClmRearm, kind: handler, response: ack, transports: [nfc, shell]}
+    # #338: remote-triggered buzzer melody. kind is a raw melody id (0 = stop —
+    # silences immediately + cancels a pending repeat; 1-3 = fixed severity
+    # melodies; 4-15 reserved; >=16 collapses to 0), owned entirely by
+    # app_buzzer.c's MELODY_TABLE. repeat_s, if non-zero (1-999), re-plays the
+    # melody that many seconds after it finishes, until stopped (kind 0 or
+    # `ats buzzer off`).
+    - {name: buzzer_play, proto_id: 28, body: BuzzerPlay, kind: handler, response: ack, transports: [lrw, nfc]}
 parameters:
+  # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /
+  # vendor_token) are OFF the config wire (`proto_field: false`, #250 Part B): configen
+  # keeps them in the C struct + settings and reserves their proto ids, but they are
+  # NOT fields in AppConfigMessage — so they can never be read or written via SetParam /
+  # GetParam / GetConfig. Their `readable`/`writable` lists therefore only govern the
+  # `config` shell command, hence both `[shell]`. Their real air exposure is a SEPARATE,
+  # hand-written channel that does NOT consult these lists: serial + nonce high-water
+  # are published in the plaintext `hio.stck:inf` record, and serial + claim_token in
+  # the GetInfo `Info` message (over nfc + lrw). Writes come from the shell (`config
+  # <name>`), firmware provisioning, or a full NVS erase — `persistent: [...]` (#299)
+  # keeps each across the matching reset tier (device_reset/factory_reset/vendor_reset).
   - name: secret_key
+    proto_group: root
+    proto_id: 2
+    proto_field: false
+    readable: [shell]
+    writable: [shell]
     type: bytes
     size: 16
+    persistent: [device_reset, factory_reset]
     help: "Get/Set device secret key (32 hexadecimal digits)."
 
   - name: serial_number
+    proto_group: root
+    proto_id: 3
+    proto_field: false
+    readable: [shell]
+    writable: [shell]
     type: uint32
     format: "%010u"
+    persistent: [device_reset, factory_reset, vendor_reset]
     help: "Get/Set device serial number (10 decimal digits)."
     extras:
       digits: 10
 
   - name: nonce_counter
+    proto_group: root
+    proto_id: 4
+    proto_field: false
+    readable: [shell]
+    writable: [shell]
     type: uint32
+    persistent: [device_reset, factory_reset, vendor_reset]
     help: "Get/Set nonce counter (unsigned integer)."
 
+  - name: claim_token
+    proto_group: root
+    proto_id: 9
+    proto_field: false
+    readable: [shell]
+    writable: [shell]
+    type: bytes
+    size: 16
+    write_once: true   # written once at commissioning via `config claim-token`, then immutable
+    persistent: [device_reset, factory_reset]
+    help: "Get/Set device claim token (32 hexadecimal digits); write-once at commissioning."
+
+  # #299 vendor-token security model: per-device, factory-unique, 128-bit,
+  # immutable (write-once, never re-writable even after a reset). Authenticates
+  # `vendor_reset` (NFC hio.stck:vnd + shell) so HARDWARIO can recover a device
+  # without knowing a possibly user-changed secret_key. Survives every tier —
+  # it is the one thing every reset (short of `settings erase`) always keeps.
+  - name: vendor_token
+    proto_group: root
+    proto_id: 10
+    proto_field: false
+    readable: [shell]
+    writable: [shell]
+    type: bytes
+    size: 16
+    write_once: true
+    persistent: [device_reset, factory_reset, vendor_reset]
+    help: "Get/Set vendor token (32 hexadecimal digits); write-once at commissioning."
+
   - name: calibration
+    proto_group: application
+    proto_id: 1
     type: bool
     help: "Get/Set calibration mode (true/false)."
 
   - name: interval_sample
+    proto_group: application
+    proto_id: 2
     type: int
     min: 5
     max: 3600
@@ -65,296 +277,507 @@ parameters:
       zero_allowed: true
 
   - name: interval_report
+    proto_group: application
+    proto_id: 3
     type: int
     default: 900
     min: 60
     max: 86400
     help: "Get/Set report interval (range 60 to 86400 seconds)."
 
+  - name: history_enable
+    proto_group: application
+    proto_id: 4
+    type: bool
+    default: false
+    help: "Get/Set sensor history store-and-forward (true/false)."
+
+  - name: history_sensors
+    proto_group: application
+    proto_id: 5
+    type: uint32
+    default: 3
+    help: "Get/Set history sensor selection bitmask (literal, bit i = enum app_history_sensor i; 0 = no channels). Default 0x0003 = temperature + humidity."
+
+  - name: battery_level
+    proto_group: application
+    proto_id: 6
+    type: int
+    default: 2400
+    min: 1000
+    max: 3600
+    help: "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this."
+
+  # #299/#316: gates whether vendor_reset is accepted. Writable over the vendor
+  # transport (NFC hio.stck:vnd, vendor-token) and shell — so a secret_key holder
+  # can no longer disable recovery over a LoRaWAN downlink / NFC SetParam (#340
+  # M10: shell is dev/commissioning-only and already implies full physical
+  # access, same reasoning as every other shell-ungated command, so it stays
+  # fully privileged here too); readable everywhere (config show / GetConfig).
+  # The write is never gated on the current value, so a vendor set_param can
+  # always re-enable it. false + no vendor/shell access => only a J-Link
+  # full-erase recovers a device whose secret_key was forgotten.
+  - name: vendor_reset_allow
+    proto_group: application
+    proto_id: 7
+    type: bool
+    default: true
+    writable: [shell, vendor]
+    # A deliberately-set interlock survives the non-vendor reset tiers: without
+    # this, a plain device_reset/factory_reset would silently flip an owner's
+    # allow=false back to the default true. vendor_reset itself still restores
+    # the default (it only runs when allow was true anyway).
+    persistent: [device_reset, factory_reset]
+    help: "Get/Set whether vendor_reset is accepted (true/false); over the air, settable only over the vendor NFC channel."
+
+  - name: alarm_limit
+    proto_group: alarms
+    proto_id: 1
+    type: int
+    default: 10
+    min: 0
+    max: 3600
+    help: "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled)."
+
   - name: lrw_region
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 1
     type: enum
     enum: lrw_region
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN region (eu868/us915/au915)."
 
+  - name: radio_mode
+    proto_group: lorawan
+    writable: [shell, nfc]  # never over a LoRaWAN downlink: setting OFF/P2P would sever the link that carries it (#271)
+    proto_id: 15
+    type: enum
+    enum: radio_mode
+    # #350: ship radio-silent — a freshly provisioned unit does not transmit until an
+    # operator deliberately enables LoRaWAN (or P2P), so it can never join/beacon on an
+    # unintended network out of the box. Sensor sampling + history still run.
+    default: "OFF"
+    persistent: [device_reset]
+    help: "Get/Set radio mode (off/lorawan/p2p). off = radio-silent, sensor/history still run."
+
   - name: lrw_sub_band
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 2
     type: int
     default: 2
     min: 0
     max: 8
+    persistent: [device_reset]
     help: "Get/Set US915/AU915 sub-band (1-8, 0 = all channels). Default 2 matches TTN/Helium/ChirpStack."
 
   - name: lrw_network
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 3
     type: enum
     enum: lrw_network
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN network (public/private)."
 
   - name: lrw_adr
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 4
     type: bool
+    # #350: ADR on by default — a stationary battery-powered end-node wants the network to
+    # optimise its data rate/TX power for airtime and battery, rather than sitting at a
+    # fixed conservative DR regardless of link quality.
+    default: true
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN ADR (true/false)."
 
   - name: lrw_activation
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 5
     type: enum
     enum: lrw_activation
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN activation (otaa/abp)."
 
   - name: lrw_deveui
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 6
     type: bytes
     size: 8
+    persistent: [device_reset, factory_reset]
     help: "Get/Set LoRaWAN DevEUI (16 hex digits)."
 
   - name: lrw_joineui
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 7
     type: bytes
     size: 8
+    persistent: [device_reset, factory_reset]
     help: "Get/Set LoRaWAN JoinEUI (16 hex digits)."
 
   - name: lrw_nwkkey
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 8
+    readable: [shell, nfc]
     type: bytes
     size: 16
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN NwkKey (32 hex digits)."
 
   - name: lrw_appkey
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 9
+    readable: [shell, nfc]
     type: bytes
     size: 16
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN AppKey (32 hex digits)."
 
   - name: lrw_devaddr
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 10
     type: bytes
     size: 4
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN DevAddr (8 hex digits)."
 
   - name: lrw_nwkskey
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 11
+    readable: [shell, nfc]
     type: bytes
     size: 16
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN NwkSKey (32 hexadecimal digits)."
 
   - name: lrw_appskey
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 12
+    readable: [shell, nfc]
     type: bytes
     size: 16
+    persistent: [device_reset]
     help: "Get/Set LoRaWAN AppSKey (32 hexadecimal digits)."
 
-  - name: alarm_temperature_enabled
-    type: bool
-    help: "Get/Set temperature alarm enabled (true/false)."
+  - name: lrw_link_check_interval
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 13
+    type: int
+    default: 5
+    min: 0
+    max: 255
+    help: "Get/Set link-check cadence: request a LinkCheckReq every N-th uplink (0 = disabled)."
 
-  - name: alarm_temperature_lo
-    type: float
-    default: 15.0
-    min: -30.0
-    max: 70.0
-    help: "Get/Set temperature low threshold (-30 to 70 deg. C)."
-
-  - name: alarm_temperature_hi
-    type: float
-    default: 25.0
-    min: -30.0
-    max: 70.0
-    help: "Get/Set temperature high threshold (-30 to 70 deg. C)."
-
-  - name: alarm_temperature_hst
-    type: float
-    default: 0.5
-    min: 0.0
-    max: 5.0
-    help: "Get/Set T1 temperature hysteresis (0 to 5 deg. C)."
-
-  - name: alarm_humidity_enabled
-    type: bool
-    help: "Get/Set humidity alarm enabled (true/false)."
-
-  - name: alarm_humidity_lo
-    type: float
-    default: 30.0
-    min: 0.0
-    max: 100.0
-    help: "Get/Set humidity low threshold (0 to 100 %)."
-
-  - name: alarm_humidity_hi
-    type: float
-    default: 75.0
-    min: 0.0
-    max: 100.0
-    help: "Get/Set humidity high threshold (0 to 100 %)."
-
-  - name: alarm_humidity_hst
-    type: float
-    default: 5.0
-    min: 0.0
-    max: 20.0
-    help: "Get/Set humidity hysteresis (0 to 20 %)."
-
-  - name: alarm_pressure_enabled
-    type: bool
-    help: "Get/Set pressure alarm enabled (true/false)."
-
-  - name: alarm_pressure_lo
-    type: float
-    default: 700.0
-    min: 500.0
-    max: 1200.0
-    help: "Get/Set pressure low threshold (500 to 1200 hPa)."
-
-  - name: alarm_pressure_hi
-    type: float
-    default: 1060.0
-    min: 500.0
-    max: 1200.0
-    help: "Get/Set pressure high threshold (500 to 1200 hPa)."
-
-  - name: alarm_pressure_hst
-    type: float
-    default: 10.0
-    min: 0.0
-    max: 50.0
-    help: "Get/Set pressure hysteresis (0 to 50 hPa)."
-
-  - name: alarm_t1_temperature_enabled
-    type: bool
-    help: "Get/Set T1 temperature alarm enabled (true/false)."
-
-  - name: alarm_t1_temperature_lo
-    type: float
-    default: 15.0
-    min: -30.0
-    max: 70.0
-    help: "Get/Set T1 temperature low threshold (-30 to 70 deg. C)."
-
-  - name: alarm_t1_temperature_hi
-    type: float
-    default: 25.0
-    min: -30.0
-    max: 70.0
-    help: "Get/Set T1 temperature high threshold (-30 to 70 deg. C)."
-
-  - name: alarm_t1_temperature_hst
-    type: float
-    default: 0.5
-    min: 0.0
-    max: 5.0
-    help: "Get/Set T1 temperature hysteresis (0 to 5 deg. C)."
-
-  - name: alarm_t2_temperature_enabled
-    type: bool
-    help: "Get/Set T2 temperature alarm enabled (true/false)."
-
-  - name: alarm_t2_temperature_lo
-    type: float
-    default: 15.0
-    min: -30.0
-    max: 70.0
-    help: "Get/Set T2 temperature low threshold (-30 to 70 deg. C)."
-
-  - name: alarm_t2_temperature_hi
-    type: float
-    default: 25.0
-    min: -30.0
-    max: 70.0
-    help: "Get/Set T2 temperature high threshold (-30 to 70 deg. C)."
-
-  - name: alarm_t2_temperature_hst
-    type: float
-    default: 0.5
-    min: 0.0
-    max: 5.0
-    help: "Get/Set T2 temperature hysteresis (0 to 5 deg. C)."
-
-  - name: hall_left_counter
-    type: bool
-    help: "Get/Set hall left switch counter enabled (true/false)."
-
-  - name: hall_left_notify_act
-    type: bool
-    help: "Get/Set hall left switch notify on activation (true/false)."
-
-  - name: hall_left_notify_deact
-    type: bool
-    help: "Get/Set hall left switch notify on deactivation (true/false)."
-
-  - name: hall_right_counter
-    type: bool
-    help: "Get/Set hall right switch counter enabled (true/false)."
-
-  - name: hall_right_notify_act
-    type: bool
-    help: "Get/Set hall right switch notify on activation (true/false)."
-
-  - name: hall_right_notify_deact
-    type: bool
-    help: "Get/Set hall right switch notify on deactivation (true/false)."
-
-  - name: input_a_counter
-    type: bool
-    help: "Get/Set input A counter enabled (true/false)."
-
-  - name: input_a_notify_act
-    type: bool
-    help: "Get/Set input A notify on activation (true/false)."
-
-  - name: input_a_notify_deact
-    type: bool
-    help: "Get/Set input A notify on deactivation (true/false)."
-
-  - name: input_b_counter
-    type: bool
-    help: "Get/Set input B counter enabled (true/false)."
-
-  - name: input_b_notify_act
-    type: bool
-    help: "Get/Set input B notify on activation (true/false)."
-
-  - name: input_b_notify_deact
-    type: bool
-    help: "Get/Set input B notify on deactivation (true/false)."
-
-  - name: corr_temperature
-    type: float
-    min: -5.0
-    max: 5.0
-    help: "Get/Set temperature correction (range -5.0 to +5.0 deg. C)."
-
-  - name: corr_t1_temperature
-    type: float
-    min: -5.0
-    max: 5.0
-    help: "Get/Set T1 temperature correction (range -5.0 to +5.0 deg. C)."
-
-  - name: corr_t2_temperature
-    type: float
-    min: -5.0
-    max: 5.0
-    help: "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C)."
+  - name: lrw_link_check_fail_rejoin
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 14
+    type: int
+    default: 5
+    min: 1
+    max: 255
+    help: "Get/Set link-check failures (while degraded) before an OTAA rejoin is attempted."
 
   - name: cap_hall_left
+    proto_group: sensors
+    proto_id: 1
     type: bool
     help: "Get/Set hall left capability (true/false)."
 
   - name: cap_hall_right
+    proto_group: sensors
+    proto_id: 2
     type: bool
     help: "Get/Set hall right capability (true/false)."
 
   - name: cap_input_a
+    proto_group: sensors
+    proto_id: 3
     type: bool
     help: "Get/Set input A capability (true/false)."
 
   - name: cap_input_b
+    proto_group: sensors
+    proto_id: 4
     type: bool
     help: "Get/Set input B capability (true/false)."
 
   - name: cap_light_sensor
+    proto_group: sensors
+    proto_id: 5
     type: bool
     help: "Get/Set light sensor capability (true/false)."
 
   - name: cap_barometer
+    proto_group: sensors
+    proto_id: 6
     type: bool
     help: "Get/Set barometer capability (true/false)."
 
   - name: cap_pir_detector
+    proto_group: sensors
+    proto_id: 7
     type: bool
     help: "Get/Set PIR detector capability (true/false)."
 
-  - name: cap_1w_thermometer
+  - name: cap_buzzer
+    proto_group: sensors
+    proto_id: 19
     type: bool
-    help: "Get/Set 1-wire thermometer capability (true/false)."
+    help: "Get/Set buzzer capability (true/false). Shares GPIO pins with the PIR detector — mutually exclusive with cap_pir_detector (PIR wins if both are enabled)."
 
-  - name: cap_1w_machine_probe
+  - name: cap_w1_sensors
+    proto_group: sensors
+    proto_id: 8
     type: bool
-    help: "Get/Set 1-wire machine probe capability (true/false)."
+    help: "Get/Set 1-Wire sensor bus capability — enables the bus + auto-detects attached sensors (true/false)."
+
+  - name: cap_accelerometer
+    proto_group: sensors
+    proto_id: 9
+    type: bool
+    help: "Get/Set accelerometer capability — orientation, motion and free-fall (true/false)."
+
+  # Dynamic alarm rule slots. One packed-hex rule per slot (the slot index is the
+  # rule's stable identity). 17 bytes little-endian:
+  #   [0] flags  bit0=present (slot occupied), bit1=enabled
+  #   [1] source (enum app_alarm_source)
+  #   [2] quantity (enum app_alarm_quantity)
+  #   [3] from_state, [4] to_state (STATE only)
+  #   [5..8] lo, [9..12] hi, [13..16] dwell (IEEE-754 float LE)
+  # An empty slot is 34 zero hex chars (present=0). The rule cache in
+  # app_alarm_rules.c is rebuilt from these on load and after every SetParam.
+  - name: alarm_0
+    proto_group: alarms
+    proto_id: 3
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 0 (packed hex, see app_config.yml)."
+
+  - name: alarm_1
+    proto_group: alarms
+    proto_id: 4
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 1 (packed hex, see app_config.yml)."
+
+  - name: alarm_2
+    proto_group: alarms
+    proto_id: 5
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 2 (packed hex, see app_config.yml)."
+
+  - name: alarm_3
+    proto_group: alarms
+    proto_id: 6
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 3 (packed hex, see app_config.yml)."
+
+  - name: alarm_4
+    proto_group: alarms
+    proto_id: 7
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 4 (packed hex, see app_config.yml)."
+
+  - name: alarm_5
+    proto_group: alarms
+    proto_id: 8
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 5 (packed hex, see app_config.yml)."
+
+  - name: alarm_6
+    proto_group: alarms
+    proto_id: 9
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 6 (packed hex, see app_config.yml)."
+
+  - name: alarm_7
+    proto_group: alarms
+    proto_id: 10
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 7 (packed hex, see app_config.yml)."
+
+  - name: alarm_8
+    proto_group: alarms
+    proto_id: 11
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 8 (packed hex, see app_config.yml)."
+
+  - name: alarm_9
+    proto_group: alarms
+    proto_id: 12
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 9 (packed hex, see app_config.yml)."
+
+  - name: alarm_10
+    proto_group: alarms
+    proto_id: 13
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 10 (packed hex, see app_config.yml)."
+
+  - name: alarm_11
+    proto_group: alarms
+    proto_id: 14
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 11 (packed hex, see app_config.yml)."
+
+  - name: alarm_12
+    proto_group: alarms
+    proto_id: 15
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 12 (packed hex, see app_config.yml)."
+
+  - name: alarm_13
+    proto_group: alarms
+    proto_id: 16
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 13 (packed hex, see app_config.yml)."
+
+  - name: alarm_14
+    proto_group: alarms
+    proto_id: 17
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 14 (packed hex, see app_config.yml)."
+
+  - name: alarm_15
+    proto_group: alarms
+    proto_id: 18
+    type: bytes
+    dump_omit_if_zero: true   # empty (all-zero) slots omitted from ConfigDump
+    size: 17
+    readable: [nfc, lrw]
+    writable: [nfc, lrw]
+    help: "Get/Set alarm rule slot 15 (packed hex, see app_config.yml)."
+
+  - name: accel_motion_sensitivity
+    proto_group: sensors
+    proto_id: 10
+    type: enum
+    enum: motion_sensitivity
+    default: "off"
+    help: "Get/Set accelerometer motion detection sensitivity (off/low/medium/high)."
+
+  # --- 1-Wire sensor slots (1wire-sensors) --------------------------------
+  # Each slot binds a physical 1-Wire sensor to a logical position by its ROM
+  # serial (stable across reboots/rescans). ONLY the ROM is persisted — the
+  # sensor type (dallas / machine-probe / …) and SHT variant are auto-detected
+  # at runtime from the ROM family code during the bus scan. all-zero = empty.
+  - name: sensor1_rom
+    proto_group: sensors
+    proto_id: 11
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor2_rom
+    proto_group: sensors
+    proto_id: 12
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor3_rom
+    proto_group: sensors
+    proto_id: 13
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty)."
+  - name: sensor4_rom
+    proto_group: sensors
+    proto_id: 14
+    type: bytes
+    size: 8
+    help: "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty)."
+
+  # Pulse totalizer enables (#49) — a sensor feature, not an alarm. Grouped with
+  # the sensors they belong to (moved out of `alarms`).
+  - name: hall_left_counter
+    proto_group: sensors
+    proto_id: 15
+    type: bool
+    help: "Get/Set hall left switch counter enabled (true/false)."
+
+  - name: hall_right_counter
+    proto_group: sensors
+    proto_id: 16
+    type: bool
+    help: "Get/Set hall right switch counter enabled (true/false)."
+
+  - name: input_a_counter
+    proto_group: sensors
+    proto_id: 17
+    type: bool
+    help: "Get/Set input A counter enabled (true/false)."
+
+  - name: input_b_counter
+    proto_group: sensors
+    proto_id: 18
+    type: bool
+    help: "Get/Set input B counter enabled (true/false)."

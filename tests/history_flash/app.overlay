@@ -1,0 +1,18 @@
+/* Model the STM32WL flash geometry the raw ring backend targets (#265): 2 KB
+ * erase pages, 8 B (double word) write unit. A dedicated history partition sits
+ * in the 1 MB of flash0 left free above storage_partition (0x100000 ..
+ * 0x200000) on native_sim.
+ *
+ * 4 × 2 KB pages — small enough to exercise page eviction / ring wrap within a
+ * few thousand fast in-process captures. */
+&flash0 {
+	erase-block-size = <2048>;
+	write-block-size = <8>;
+
+	partitions {
+		history_partition: partition@100000 {
+			label = "history";
+			reg = <0x00100000 0x00002000>;
+		};
+	};
+};

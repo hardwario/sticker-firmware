@@ -29,6 +29,10 @@
 
 LOG_MODULE_REGISTER(app_machine_probe, LOG_LEVEL_DBG);
 
+/* #340 M25: bounded retry around lis2dh12_init() in scan_callback() below. */
+#define LIS2DH12_INIT_MAX_ATTEMPTS   3
+#define LIS2DH12_INIT_RETRY_DELAY_MS 20
+
 static uint8_t sht_crc8(const uint8_t *data, size_t len)
 {
 	uint8_t crc = 0xff;
@@ -61,7 +65,10 @@ static uint8_t sht_crc8(const uint8_t *data, size_t len)
 
 #define OPT3001_I2C_ADDR  0x44
 #define OPT3001_INIT_TIME K_MSEC(10)
-#define OPT3001_CONV_TIME K_MSEC(2000)
+/* Single-shot conversion time. The convert config uses CT=0 (100 ms integration);
+ * allow margin for the conversion-ready poll. Keeps the 1-Wire bus held ~150 ms
+ * instead of 2 s per lux sample. */
+#define OPT3001_CONV_TIME K_MSEC(150)
 
 #define SI7210_I2C_ADDR 0x32
 
@@ -78,6 +85,11 @@ static uint8_t sht_crc8(const uint8_t *data, size_t len)
 #define LIS2DH12_INT1_SRC      0x31
 #define LIS2DH12_INT1_THS      0x32
 #define LIS2DH12_INT1_DURATION 0x33
+
+/* Tilt-alert defaults — armed per probe inside the bus scan (see scan_callback)
+ * so the alert survives runtime re-scans, not just the boot scan. */
+#define MP_TILT_THRESHOLD 7
+#define MP_TILT_DURATION  1
 
 enum sht_type {
 	SHT_TYPE_UNKNOWN = 0,
@@ -223,8 +235,7 @@ static int sht30_read(const struct device *dev, float *temperature, float *humid
 		return ret;
 	}
 
-	if (sht_crc8(&read_buf[0], 2) != read_buf[2] ||
-	    sht_crc8(&read_buf[3], 2) != read_buf[5]) {
+	if (sht_crc8(&read_buf[0], 2) != read_buf[2] || sht_crc8(&read_buf[3], 2) != read_buf[5]) {
 		LOG_ERR("CRC mismatch");
 		return -EIO;
 	}
@@ -288,8 +299,7 @@ static int sht43_read(const struct device *dev, float *temperature, float *humid
 		return ret;
 	}
 
-	if (sht_crc8(&read_buf[0], 2) != read_buf[2] ||
-	    sht_crc8(&read_buf[3], 2) != read_buf[5]) {
+	if (sht_crc8(&read_buf[0], 2) != read_buf[2] || sht_crc8(&read_buf[3], 2) != read_buf[5]) {
 		LOG_ERR("CRC mismatch");
 		return -EIO;
 	}
@@ -338,7 +348,11 @@ static int sht_read_serial(const struct device *dev, uint32_t *serial_number,
 	write_buf[0] = 0x37;
 	write_buf[1] = 0x80;
 	ret = ds28e17_i2c_write_read(dev, SHT33_I2C_ADDR, write_buf, 2, read_buf, 6);
-	if (ret == 0) {
+	if (ret == 0 && sht_crc8(&read_buf[0], 2) == read_buf[2] &&
+	    sht_crc8(&read_buf[3], 2) == read_buf[5]) {
+		/* CRC-check the serial read (same as the SHT43 branch) — addr 0x45 can
+		 * collide with an OPT3001 on some probes, so an un-validated response
+		 * must not be accepted as an SHT. */
 		LOG_DBG("SHT33 detected");
 		if (detected_type) {
 			*detected_type = SHT_TYPE_SHT30;
@@ -384,7 +398,9 @@ static int opt3001_convert(const struct device *dev)
 	uint8_t write_buf[3];
 
 	write_buf[0] = 0x01;
-	write_buf[1] = 0xca;
+	/* 0xC2 0x10: RN=auto, CT=0 (100 ms), M=01 single-shot. CT=1 (0xCA) would be
+	 * an 800 ms integration — unnecessary here and it pins the 1-Wire bus. */
+	write_buf[1] = 0xc2;
 	write_buf[2] = 0x10;
 
 	ret = ds28e17_i2c_write(dev, OPT3001_I2C_ADDR, write_buf, 3);
@@ -466,6 +482,16 @@ static int si7210_read(const struct device *dev, float *magnetic_field)
 	}
 
 	uint8_t reg_dspsigm = read_buf[0];
+
+	/* Dspsigm bit 7 is the "Fresh" flag: the Si7210 sets it when a new ONEBURST
+	 * conversion result is available. The DS28E17 1-Wire readback is not
+	 * CRC-protected, so a flipped bit on a long machine-probe cable could inject a
+	 * silent bad field value (and a false hall alarm). If Fresh is clear the byte
+	 * is stale or corrupt on the wire — reject the read rather than trust it (#219). */
+	if (!(reg_dspsigm & BIT(7))) {
+		LOG_WRN("Si7210 Dspsigm not fresh (0x%02x), discarding read", reg_dspsigm);
+		return -EIO;
+	}
 
 	write_buf[0] = 0xc2;
 
@@ -620,24 +646,6 @@ static int lis2dh12_enable_alert(const struct device *dev, int threshold, int du
 	return 0;
 }
 
-static int lis2dh12_disable_alert(const struct device *dev)
-{
-	int ret;
-
-	uint8_t write_buf[2];
-
-	write_buf[0] = LIS2DH12_INT1_CFG;
-	write_buf[1] = 0x00;
-
-	ret = ds28e17_i2c_write(dev, LIS2DH12_I2C_ADDR, write_buf, 2);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
 static int lis2dh12_get_interrupt(const struct device *dev, bool *is_active)
 {
 	int ret;
@@ -651,6 +659,17 @@ static int lis2dh12_get_interrupt(const struct device *dev, bool *is_active)
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("ds28e17_i2c_write_read", ret);
 		return ret;
+	}
+
+	/* The DS28E17 1-Wire data readback is not CRC-protected and tilt is a single
+	 * bit, so a flipped bit on a long cable would inject a false tilt alert.
+	 * INT1_SRC bit 7 is reserved-zero: a set bit 7 means the byte was corrupted
+	 * on the wire — discard it rather than trust the IA bit. (A true double-read
+	 * can't help here: INT1_SRC is latched and clears on read.) */
+	if (read_buf[0] & BIT(7)) {
+		LOG_WRN("LIS2DH INT1_SRC readback corrupt (0x%02x), ignoring", read_buf[0]);
+		*is_active = false;
+		return 0;
 	}
 
 	*is_active = read_buf[0] & BIT(6) ? true : false;
@@ -691,13 +710,43 @@ static int scan_callback(struct w1_rom rom, void *user_data)
 		return ret;
 	}
 
-	ret = lis2dh12_init(m_sensors[m_count].dev);
+	/* #340 M25: a single transient I2C error (rail settling, bus contention)
+	 * used to drop the whole probe (temp/humidity/illuminance/accel/tilt, not
+	 * just tilt) for this scan, with no retry — permanently disabled until a
+	 * manual rescan or reboot, since app_machine_probe_scan() only runs once at
+	 * boot for an already-taught slot. Retry a bounded number of times with a
+	 * short settle delay before giving up. */
+	for (int attempt = 1; attempt <= LIS2DH12_INIT_MAX_ATTEMPTS; attempt++) {
+		ret = lis2dh12_init(m_sensors[m_count].dev);
+		if (!ret) {
+			break;
+		}
+		if (attempt < LIS2DH12_INIT_MAX_ATTEMPTS) {
+			LOG_WRN("lis2dh12_init attempt %d/%d failed: %d, retrying", attempt,
+				LIS2DH12_INIT_MAX_ATTEMPTS, ret);
+			k_sleep(K_MSEC(LIS2DH12_INIT_RETRY_DELAY_MS));
+		}
+	}
 	if (ret) {
 		LOG_DBG("Skipping serial number: %llu", serial_number);
 		return 0;
 	}
 
-	m_sensors[m_count++].serial_number = serial_number;
+	/* Arm tilt detection here, on every scan (incl. runtime re-scan/enroll).
+	 * lis2dh12_init just BOOTed CTRL_REG5 and wiped the INT1 config, so arming
+	 * only from app_sensor_init would silently disable tilt after any later
+	 * `w1 scan`. Non-fatal: register the probe even if arming fails. */
+	ret = lis2dh12_enable_alert(m_sensors[m_count].dev, MP_TILT_THRESHOLD, MP_TILT_DURATION);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("lis2dh12_enable_alert", ret);
+	}
+
+	/* Re-detect the SHT variant on every (re)scan: the cached sht_type is only
+	 * probed while UNKNOWN, so a slot reused for a swapped probe would otherwise
+	 * keep the previous part's type and issue the wrong SHT command (#267). */
+	m_sensors[m_count].sht_type = SHT_TYPE_UNKNOWN;
+	m_sensors[m_count].serial_number = serial_number;
+	m_count++;
 
 	LOG_DBG("Registered serial number: %llu", serial_number);
 
@@ -764,53 +813,87 @@ int app_machine_probe_get_count(void)
 	return count;
 }
 
+/* Shared 1-Wire/DS28E17 access prologue+epilogue for every machine-probe read.
+ * Was previously a COMM_PROLOGUE/COMM_EPILOGUE macro pair inlined into each of
+ * the five read_* functions; pulling it into real functions saves ~1 KB of flash
+ * (#220.D) with no behaviour change. On success the bus mutex stays held and the
+ * 1-Wire master is acquired — the caller runs its sensor sequence, then must call
+ * mp_comm_end() to release the bus and unlock. */
+static int mp_comm_begin(int index, uint64_t *serial_number, const struct device **out_bus)
+{
+	if (k_is_in_isr()) {
+		return -EWOULDBLOCK;
+	}
+	k_mutex_lock(&m_lock, K_FOREVER);
+	if (index < 0 || index >= m_count || !m_count) {
+		k_mutex_unlock(&m_lock);
+		return -ERANGE;
+	}
+	static const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));
+	*out_bus = dev;
+	if (!device_is_ready(dev)) {
+		LOG_ERR("Device not ready");
+		k_mutex_unlock(&m_lock);
+		return -ENODEV;
+	}
+	if (serial_number) {
+		*serial_number = m_sensors[index].serial_number;
+	}
+	int ret = app_w1_acquire(&m_w1, dev);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_w1_acquire", ret);
+		goto error;
+	}
+	if (!device_is_ready(m_sensors[index].dev)) {
+		LOG_ERR("Device not ready");
+		ret = -ENODEV;
+		goto error;
+	}
+	ret = ds28e17_write_config(m_sensors[index].dev, DS28E17_I2C_SPEED_100_KHZ);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("ds28e17_write_config", ret);
+		goto error;
+	}
+	return 0;
+error:
+	/* Mirror the old macro: release on any post-lock failure, then unlock. */
+	(void)app_w1_release(&m_w1, dev);
+	k_mutex_unlock(&m_lock);
+	return ret;
+}
+
+static int mp_comm_end(const struct device *bus, int res)
+{
+	int ret = app_w1_release(&m_w1, bus);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_w1_release", ret);
+		res = res ? res : ret;
+	}
+	k_mutex_unlock(&m_lock);
+	return res;
+}
+
 #define COMM_PROLOGUE                                                                              \
+	const struct device *bus;                                                                  \
 	int ret;                                                                                   \
-	int res = 0;                                                                               \
-	if (k_is_in_isr()) {                                                                       \
-		return -EWOULDBLOCK;                                                               \
-	}                                                                                          \
-	k_mutex_lock(&m_lock, K_FOREVER);                                                          \
-	if (index < 0 || index >= m_count || !m_count) {                                           \
-		k_mutex_unlock(&m_lock);                                                           \
-		return -ERANGE;                                                                    \
-	}                                                                                          \
-	static const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(ds2484));                     \
-	if (!device_is_ready(dev)) {                                                               \
-		LOG_ERR("Device not ready");                                                       \
-		k_mutex_unlock(&m_lock);                                                           \
-		return -ENODEV;                                                                    \
-	}                                                                                          \
-	if (serial_number) {                                                                       \
-		*serial_number = m_sensors[index].serial_number;                                   \
-	}                                                                                          \
-	ret = app_w1_acquire(&m_w1, dev);                                                          \
-	if (ret) {                                                                                 \
-		LOG_ERR_CALL_FAILED_INT("app_w1_acquire", ret);                                    \
-		res = ret;                                                                         \
-		goto error;                                                                        \
-	}                                                                                          \
-	if (!device_is_ready(m_sensors[index].dev)) {                                              \
-		LOG_ERR("Device not ready");                                                       \
-		res = -ENODEV;                                                                     \
-		goto error;                                                                        \
-	}                                                                                          \
-	ret = ds28e17_write_config(m_sensors[index].dev, DS28E17_I2C_SPEED_100_KHZ);               \
-	if (ret) {                                                                                 \
-		LOG_ERR_CALL_FAILED_INT("ds28e17_write_config", ret);                              \
-		res = ret;                                                                         \
-		goto error;                                                                        \
+	int res = mp_comm_begin(index, serial_number, &bus);                                       \
+	if (res) {                                                                                 \
+		return res;                                                                        \
 	}
 
 #define COMM_EPILOGUE                                                                              \
 error:                                                                                             \
-	ret = app_w1_release(&m_w1, dev);                                                          \
-	if (ret) {                                                                                 \
-		LOG_ERR_CALL_FAILED_INT("app_w1_release", ret);                                    \
-		res = res ? res : ret;                                                             \
-	}                                                                                          \
-	k_mutex_unlock(&m_lock);                                                                   \
-	return res;
+	return mp_comm_end(bus, res);
+
+/* L-25: application-level plausibility gate, mirroring the onboard SHT4x (#202)
+ * and DS18B20 (#180). A stuck machine-probe part can return a finite but
+ * out-of-range value that would otherwise feed a false threshold alarm; reject
+ * it to NaN instead, so the reading reads as absent (→ no_data watchdog) rather
+ * than plausibly-wrong. */
+#define MP_TEMP_MIN (-45.0f)
+#define MP_TEMP_MAX 130.0f
+#define MP_HUM_MIN  0.0f
+#define MP_HUM_MAX  100.0f
 
 int app_machine_probe_read_thermometer(int index, uint64_t *serial_number, float *temperature)
 {
@@ -856,7 +939,12 @@ int app_machine_probe_read_thermometer(int index, uint64_t *serial_number, float
 	}
 
 	if (!res && temperature) {
-		LOG_DBG("Temperature: %.2f C", (double)*temperature);
+		LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(*temperature));
+		if (*temperature < MP_TEMP_MIN || *temperature > MP_TEMP_MAX) {
+			LOG_WRN("Implausible machine-probe temperature %s%d.%02d C rejected (L-25)",
+				APP_FP2(*temperature));
+			*temperature = NAN;
+		}
 	}
 
 	COMM_EPILOGUE
@@ -880,8 +968,7 @@ int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float 
 	COMM_PROLOGUE
 
 	if (!res && m_sensors[index].sht_type == SHT_TYPE_UNKNOWN) {
-		ret = sht_read_serial(m_sensors[index].dev, NULL,
-				      &m_sensors[index].sht_type);
+		ret = sht_read_serial(m_sensors[index].dev, NULL, &m_sensors[index].sht_type);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("sht_read_serial", ret);
 			res = ret;
@@ -933,11 +1020,21 @@ int app_machine_probe_read_hygrometer(int index, uint64_t *serial_number, float 
 	}
 
 	if (!res && temperature) {
-		LOG_DBG("Temperature: %.2f C", (double)*temperature);
+		LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(*temperature));
+		if (*temperature < MP_TEMP_MIN || *temperature > MP_TEMP_MAX) {
+			LOG_WRN("Implausible machine-probe temperature %s%d.%02d C rejected (L-25)",
+				APP_FP2(*temperature));
+			*temperature = NAN;
+		}
 	}
 
 	if (!res && humidity) {
-		LOG_DBG("Humidity: %.1f %%", (double)*humidity);
+		LOG_DBG("Humidity: %s%d.%01d %%", APP_FP1(*humidity));
+		if (*humidity < MP_HUM_MIN || *humidity > MP_HUM_MAX) {
+			LOG_WRN("Implausible machine-probe humidity %s%d.%01d %% rejected (L-25)",
+				APP_FP1(*humidity));
+			*humidity = NAN;
+		}
 	}
 
 	COMM_EPILOGUE
@@ -1017,7 +1114,7 @@ int app_machine_probe_read_lux_meter(int index, uint64_t *serial_number, float *
 	}
 
 	if (!res && illuminance) {
-		LOG_DBG("Illuminance: %.0f lux", (double)*illuminance);
+		LOG_DBG("Illuminance: %d lux", APP_FP0(*illuminance));
 	}
 
 	COMM_EPILOGUE
@@ -1045,7 +1142,7 @@ int app_machine_probe_read_magnetometer(int index, uint64_t *serial_number, floa
 	}
 
 	if (!res && magnetic_field) {
-		LOG_DBG("Magnetic field: %.2f mT", (double)*magnetic_field);
+		LOG_DBG("Magnetic field: %s%d.%02d mT", APP_FP2(*magnetic_field));
 	}
 
 	COMM_EPILOGUE
@@ -1086,56 +1183,15 @@ int app_machine_probe_read_accelerometer(int index, uint64_t *serial_number, flo
 	}
 
 	if (!res && accel_x) {
-		LOG_DBG("Acceleration in X-axis: %.3f m/s^2", (double)*accel_x);
+		LOG_DBG("Acceleration in X-axis: %s%d.%03d m/s^2", APP_FP3(*accel_x));
 	}
 
 	if (!res && accel_y) {
-		LOG_DBG("Acceleration in Y-axis: %.3f m/s^2", (double)*accel_y);
+		LOG_DBG("Acceleration in Y-axis: %s%d.%03d m/s^2", APP_FP3(*accel_y));
 	}
 
 	if (!res && accel_z) {
-		LOG_DBG("Acceleration in Z-axis: %.3f m/s^2", (double)*accel_z);
-	}
-
-	COMM_EPILOGUE
-}
-
-int app_machine_probe_enable_tilt_alert(int index, uint64_t *serial_number, int threshold,
-					int duration)
-{
-	if (serial_number) {
-		*serial_number = UINT64_MAX;
-	}
-
-	COMM_PROLOGUE
-
-	if (!res) {
-		ret = lis2dh12_enable_alert(m_sensors[index].dev, threshold, duration);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("lis2dh12_enable_alert", ret);
-			res = ret;
-			goto error;
-		}
-	}
-
-	COMM_EPILOGUE
-}
-
-int app_machine_probe_disable_tilt_alert(int index, uint64_t *serial_number)
-{
-	if (serial_number) {
-		*serial_number = UINT64_MAX;
-	}
-
-	COMM_PROLOGUE
-
-	if (!res) {
-		ret = lis2dh12_disable_alert(m_sensors[index].dev);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("lis2dh12_disable_alert", ret);
-			res = ret;
-			goto error;
-		}
+		LOG_DBG("Acceleration in Z-axis: %s%d.%03d m/s^2", APP_FP3(*accel_z));
 	}
 
 	COMM_EPILOGUE

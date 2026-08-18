@@ -11,5 +11,17 @@
 	zephyr,user {
 		pir-si-gpios = <&gpioa 11 GPIO_ACTIVE_HIGH>;
 		pir-dl-gpios = <&gpiob 4 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		/* ST25DV GPO interrupt output (U11 pin 11 -> STM32 PB12, EXTI12),
+		 * handled in app_nfc.c to wake the NFC handler on RF events. */
+		nfc-gpo-gpios = <&gpiob 12 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
 	};
+};
+
+/* Mark GPIOB (hosts the ST25DV GPO on PB12) as a system wake-up source so the
+ * PM subsystem does NOT suspend the port when the CPU enters Stop2. Without this
+ * the system-managed PM suspend sweep gates the port and the PB12 EXTI cannot
+ * wake the MCU from Stop2 — so a phone tap on a sleeping (release) sticker went
+ * unserviced. Paired with pm_device_wakeup_enable(gpiob) in app_nfc_init. */
+&gpiob {
+	wakeup-source;
 };

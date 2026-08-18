@@ -109,10 +109,69 @@ jobs:
           path: sticker/artifacts/hio-sticker-${{ steps.version.outputs.value }}-${{ matrix.config }}.hex
           if-no-files-found: error
 
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: JS decoder tests
+        working-directory: app/decoder
+        run: node --test
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install configen test deps
+        run: pip install -r scripts/west_commands/requirements-dev.txt
+
+      - name: configen + proto tests
+        run: pytest scripts/west_commands/tests
+
+      - name: clang-format check (app/src)
+        run: |
+          git ls-files 'app/src/*.c' 'app/src/*.h' \
+            | xargs clang-format --dry-run --Werror
+
+  unit-tests:
+    name: Unit tests (native_sim)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          path: sticker
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Setup Zephyr project
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: sticker
+          toolchains: arm-zephyr-eabi
+
+      - name: Run native_sim ztest suites
+        working-directory: sticker
+        run: bash tests/run_native.sh
+
   release:
     name: Create release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, test, unit-tests]
     runs-on: ubuntu-latest
 
     steps:
@@ -133,4 +192,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: STICKER Firmware ${{ steps.version.outputs.value }}
-          files: artifacts/*.hex
+          files: |
+            artifacts/*.hex

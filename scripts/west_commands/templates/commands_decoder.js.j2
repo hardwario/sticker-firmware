@@ -1,0 +1,5 @@
+var _CMD_NAMES = {
+{% for c in commands_by_id %}
+  {{ c.proto_id }}: "{{ c.name }}",
+{% endfor %}
+};

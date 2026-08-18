@@ -6,6 +6,7 @@
 
 #include "app_sht4x.h"
 #include "app_log.h"
+#include "app_sensor_read.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -21,6 +22,17 @@
 #include <stdint.h>
 
 LOG_MODULE_REGISTER(app_sht4x, LOG_LEVEL_DBG);
+
+/* Application-level plausibility gate (#202), mirroring the DS18B20 fix (#180).
+ * The Zephyr driver CRC-checks the I2C transfer, so a missing sensor errors out
+ * — but a stuck/faulty part can return a finite out-of-range value that would
+ * feed a false onboard-temp/humidity alarm. Reject readings outside the SHT4x
+ * spec window (slightly widened for measurement margin) so the sample is treated
+ * as a failed read rather than a valid sample. */
+#define SHT4X_TEMP_MIN (-45.0f)
+#define SHT4X_TEMP_MAX 130.0f
+#define SHT4X_HUM_MIN  0.0f
+#define SHT4X_HUM_MAX  100.0f
 
 static uint8_t sht_crc8(const uint8_t *data, size_t len)
 {
@@ -42,45 +54,38 @@ static uint8_t sht_crc8(const uint8_t *data, size_t len)
 
 int app_sht4x_read(float *temperature, float *humidity)
 {
-	int ret;
-
-	struct sensor_value val;
-
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(sht40));
-	if (!device_is_ready(dev)) {
-		LOG_ERR("Device not ready");
-		return -ENODEV;
-	}
+	static const enum sensor_channel chans[] = {SENSOR_CHAN_AMBIENT_TEMP, SENSOR_CHAN_HUMIDITY};
+	float vals[ARRAY_SIZE(chans)];
 
-	ret = sensor_sample_fetch(dev);
+	int ret = app_sensor_read_channels(dev, chans, vals, ARRAY_SIZE(chans));
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("sensor_sample_fetch", ret);
 		return ret;
 	}
 
-	ret = sensor_channel_get(dev, SENSOR_CHAN_AMBIENT_TEMP, &val);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("sensor_channel_get", ret);
-		return ret;
+	float temperature_ = vals[0];
+	float humidity_ = vals[1];
+
+	/* Application-level plausibility gate (#202): a stuck part can return a
+	 * finite out-of-range value that would feed a false onboard-temp/humidity
+	 * alarm, so reject implausible channels. */
+	LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(temperature_));
+
+	if (temperature_ < SHT4X_TEMP_MIN || temperature_ > SHT4X_TEMP_MAX) {
+		LOG_WRN("Implausible temperature %s%d.%02d C rejected", APP_FP2(temperature_));
+		return -ERANGE;
 	}
-
-	float temperature_ = sensor_value_to_float(&val);
-
-	LOG_DBG("Temperature: %.2f C", (double)temperature_);
 
 	if (temperature) {
 		*temperature = temperature_;
 	}
 
-	ret = sensor_channel_get(dev, SENSOR_CHAN_HUMIDITY, &val);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("sensor_channel_get", ret);
-		return ret;
+	LOG_DBG("Humidity: %s%d.%01d %%", APP_FP1(humidity_));
+
+	if (humidity_ < SHT4X_HUM_MIN || humidity_ > SHT4X_HUM_MAX) {
+		LOG_WRN("Implausible humidity %s%d.%01d %% rejected", APP_FP1(humidity_));
+		return -ERANGE;
 	}
-
-	float humidity_ = sensor_value_to_float(&val);
-
-	LOG_DBG("Humidity: %.1f %%", (double)humidity_);
 
 	if (humidity) {
 		*humidity = humidity_;
@@ -122,8 +127,7 @@ int app_sht4x_read_serial(uint32_t *serial_number)
 		return ret;
 	}
 
-	if (sht_crc8(&data[0], 2) != data[2] ||
-	    sht_crc8(&data[3], 2) != data[5]) {
+	if (sht_crc8(&data[0], 2) != data[2] || sht_crc8(&data[3], 2) != data[5]) {
 		LOG_ERR("CRC mismatch");
 		return -EIO;
 	}

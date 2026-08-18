@@ -1,0 +1,9 @@
+{
+  "name": "sticker-decoder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "STICKER LoRaWAN payload codec (TTN/ChirpStack) + tests",
+  "scripts": {
+    "test": "node --test"
+  }
+}

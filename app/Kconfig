@@ -22,6 +22,20 @@ config FW_DEBUG
 	  When enabled, the periodic LED blink shows green + yellow
 	  instead of just green to indicate debug build.
 
+config APP_DEBUG_AUTOSUSPEND_S
+	int "Debug auto-suspend idle timeout (seconds, 0 = disabled)"
+	depends on FW_DEBUG && POWEROFF && SHELL_BACKEND_RTT
+	default 7200
+	help
+	  On the Debug build, after this many seconds with no RTT/shell
+	  activity the device enters deep-sleep (STM32 Shutdown via
+	  sys_poweroff) so a forgotten bench unit stops draining its
+	  battery — Debug FW runs with CONFIG_PM=n, so the CPU never sleeps
+	  and the quiescent draw is high. Default 7200 s (2 h). 0 disables
+	  the auto-suspend.
+	  Wake is by NRST / power-cycle (clean boot; NVS identity and
+	  LoRaWAN keys survive in flash).
+
 config APP_LORAWAN_1_1
 	bool "Use LoRaWAN 1.1.x crypto for OTAA"
 	default n
@@ -36,6 +50,67 @@ config APP_LORAWAN_1_1
 	  Enabling this also requires the LoRaMac library to be built with
 	  USE_LRWAN_1_1_X_CRYPTO=1; the Kconfig only flips the app-level
 	  key wiring.
+
+config APP_NFC_ENCRYPTION
+	bool "Encrypt the NFC command/config channel (AES-CCM)"
+	default y
+	help
+	  Production default (y): NFC command records (hio.stck:cmd) and config
+	  records (hio.stck:cfg) must be AES-CCM encrypted with the device
+	  secret_key and a strictly increasing nonce, and the response written
+	  back (hio.stck:rsp) is encrypted the same way. Without the key, the
+	  only thing a phone can read is the plaintext info record (hio.stck:inf).
+
+	  Disable (n) ONLY for a bench validation build, to drive the NFC command
+	  and config channel in plaintext without provisioning a secret key or
+	  managing nonces. Such a build logs a loud boot warning. NEVER ship a
+	  build with this turned off.
+
+config APP_CCM_HW_AES
+	bool "Use the STM32WL hardware AES peripheral for NFC AES-CCM"
+	depends on APP_NFC_ENCRYPTION && SOC_SERIES_STM32WLX
+	default y
+	help
+	  Back the app_ccm (RFC 3610 AES-CCM) block cipher with the STM32WL on-die
+	  AES peripheral (register-level, no HAL/Zephyr-crypto dependency). This is
+	  what lets the build drop mbedTLS entirely (~6.5 KB flash, #261).
+
+	  Disable (n) to fall back to the LoRaMac soft-SE AES (peripherals/soft-se,
+	  already in flash) as the block cipher instead — the CCM layer is identical,
+	  only the primitive differs. The host unit tests use this software path.
+
+config APP_CMD_DEBUG_SHELL
+	bool "Shell injector for downlink command dispatcher"
+	depends on SHELL
+	default n
+	help
+	  Enable `tester cmd <transport> <hex>` for end-to-end testing
+	  of the downlink command dispatcher without a LoRaWAN gateway.
+	  The hex payload is fed to app_cmd_handle as if it had arrived
+	  from the given transport (lrw or nfc) and the encoded response
+	  is logged and (for lrw) queued on port 85.
+
+config APP_HISTORY_FLASH
+	bool "Persist sensor history in the history_partition flash"
+	default y
+	help
+	  Store the sensor history store-and-forward buffer in the dedicated
+	  history_partition flash (NVS), surviving reboot and power loss.
+	  Disable to use a __noinit RAM ring of CONFIG_APP_HISTORY_BYTES
+	  instead; data is then lost on power loss.
+
+	  Builds with this enabled must keep CONFIG_FLASH_LOAD_SIZE at the
+	  history_partition offset so the linker stops the image from growing
+	  into the runtime-written flash (see prj.conf); builds with it
+	  disabled (debug.conf) may relax the budget up to the
+	  storage_partition offset.
+
+config APP_HISTORY_BYTES
+	int "History RAM fallback ring size (bytes)"
+	default 1024
+	help
+	  Size of the in-RAM history ring used when CONFIG_APP_HISTORY_FLASH=n.
+	  Record size is variable (5-33 B) depending on the enabled sensor set.
 
 endmenu
 

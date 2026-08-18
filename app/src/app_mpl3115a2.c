@@ -6,6 +6,7 @@
 
 #include "app_mpl3115a2.h"
 #include "app_log.h"
+#include "app_sensor_read.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -21,62 +22,33 @@ LOG_MODULE_REGISTER(app_mpl3115a2, LOG_LEVEL_DBG);
 
 int app_mpl3115a2_read(float *altitude, float *pressure, float *temperature)
 {
-	int ret;
-
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(mpl3115a2));
-	if (!device_is_ready(dev)) {
-		LOG_ERR("Device not ready");
-		return -ENODEV;
-	}
+	static const enum sensor_channel chans[] = {
+		SENSOR_CHAN_ALTITUDE,
+		SENSOR_CHAN_PRESS,
+		SENSOR_CHAN_AMBIENT_TEMP,
+	};
+	float vals[ARRAY_SIZE(chans)];
 
-	ret = sensor_sample_fetch(dev);
+	int ret = app_sensor_read_channels(dev, chans, vals, ARRAY_SIZE(chans));
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("sensor_sample_fetch", ret);
 		return ret;
 	}
 
-	struct sensor_value val;
-
-	ret = sensor_channel_get(dev, SENSOR_CHAN_ALTITUDE, &val);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("sensor_channel_get", ret);
-		return ret;
-	}
-
-	float altitude_ = sensor_value_to_float(&val);
-
-	LOG_DBG("Altitude: %.1f m", (double)altitude_);
+	LOG_DBG("Altitude: %s%d.%01d m", APP_FP1(vals[0]));
+	LOG_DBG("Pressure: %s%d.%02d hPa", APP_FP2(vals[1] * 10.f));
+	LOG_DBG("Temperature: %s%d.%02d C", APP_FP2(vals[2]));
 
 	if (altitude) {
-		*altitude = altitude_;
+		*altitude = vals[0];
 	}
-
-	ret = sensor_channel_get(dev, SENSOR_CHAN_PRESS, &val);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("sensor_channel_get", ret);
-		return ret;
-	}
-
-	float pressure_ = sensor_value_to_float(&val);
-
-	LOG_DBG("Pressure: %.2f hPa", (double)(pressure_ * 10.f));
 
 	if (pressure) {
-		*pressure = pressure_;
+		*pressure = vals[1];
 	}
-
-	ret = sensor_channel_get(dev, SENSOR_CHAN_AMBIENT_TEMP, &val);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("sensor_channel_get", ret);
-		return ret;
-	}
-
-	float temperature_ = sensor_value_to_float(&val);
-
-	LOG_DBG("Temperature: %.2f C", (double)temperature_);
 
 	if (temperature) {
-		*temperature = temperature_;
+		*temperature = vals[2];
 	}
 
 	return 0;

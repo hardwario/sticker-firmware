@@ -32,8 +32,8 @@ extern "C" {
 
 /* Source of the build (orthogonal to the debug/release config). */
 enum app_build_type {
-	APP_BUILD_TYPE_MAIN   = 0, /* tagged build from main */
-	APP_BUILD_TYPE_DEV    = 1, /* CI build from a branch / PR */
+	APP_BUILD_TYPE_MAIN = 0,   /* tagged build from main */
+	APP_BUILD_TYPE_DEV = 1,    /* CI build from a branch / PR */
 	APP_BUILD_TYPE_CUSTOM = 2, /* local / modified firmware */
 };
 

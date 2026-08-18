@@ -42,6 +42,30 @@ extern struct {{ module.name }} g_{{ module.name }};
 
 struct {{ module.name }} *{{ module.name }}(void);
 
+/* Guards m_{{ module.name }}/g_{{ module.name }} against concurrent mutation
+ * across transports (#340 M27): callers that read-modify-write the config
+ * (SetParam in app_cmd.c; the reset ops below) must hold this around the
+ * whole sequence, not just their own copy of it. */
+void {{ module.name }}_lock(void);
+void {{ module.name }}_unlock(void);
+
+/* True if settings_load failed at boot (corrupt/unreadable NVS) and the device is
+ * running on compile-time defaults — identity + provisioning lost. Lets the app
+ * surface a distinct state instead of silently looking like a blank device (H-4). */
+bool {{ module.name }}_load_failed(void);
+
+/* Reset severity ladder (#299): each function keeps only the fields tagged
+ * with the matching op in the YAML `persistent: [...]` list, resets everything
+ * else to its compiled default, and persists. Returns 0 or a negative errno;
+ * the caller reboots so every module re-reads the restored config.
+ *   device_reset  - keeps factory identity + full LoRaWAN (today's factory_reset).
+ *   factory_reset - keeps identity only; drops the LoRaWAN session/keys.
+ *   vendor_reset  - keeps serial_number + vendor_token only; caller erases the
+ *                   storage+history flash areas first and re-provisions this. */
+{% for op in RESET_OPS %}
+int {{ module.name }}_{{ op }}(void);
+{% endfor %}
+
 #ifdef __cplusplus
 }
 #endif

@@ -5,312 +5,478 @@
  */
 
 #include "app_compose.h"
+#include "app_cmd.h"
+#include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
+#include "app_lrw.h"
 #include "app_sensor.h"
+
+/* Nanopb includes */
+#include <pb_encode.h>
+#include "src/app_config.pb.h"
 
 /* Zephyr includes */
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/net_buf.h>
+#include <zephyr/sys/util.h>
 
 /* Standard includes */
+#include <errno.h>
 #include <limits.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 
-int app_compose(uint8_t *buf, size_t size, size_t *len)
+/* "Value not available" sentinels (mirrored in ttn.js → null). An enabled analog
+ * sensor is always present on the wire so the configured-sensor list is stable
+ * across reports; a missing/NaN reading is sent as the sentinel rather than
+ * dropping the field (which would be indistinguishable from a disabled sensor). */
+#define TM_S32_NA INT32_MIN  /* sint32 fields: temperature, altitude */
+#define TM_U32_NA UINT32_MAX /* uint32 fields: humidity, pressure, illuminance */
+
+/* Per-group flag bit positions (mirrored in ttn.js). */
+#define SYSTEM_FLAG_BOOT BIT(0)
+/* MP_FLAG_TILT moved to app_w1_slots.c with the per-type SensorReading encode. */
+/* Counter flag bits 0/1 (notify act/deact) retired with the dynamic-alarms
+ * migration — notify is now an alarm rule, not a per-counter telemetry flag.
+ * ACTIVE stays at bit 2 to keep the wire bit position stable. */
+#define CNT_FLAG_ACTIVE  BIT(2)
+
+/* Sensor groups, in priority order (packed into frames first → last). A group
+ * is the atomic unit: all its fields go into one frame, or none. */
+enum tlm_group {
+	G_INTERNAL = 0, /* temperature, humidity */
+	G_SYSTEM,       /* voltage, system_flags */
+	G_BAROMETER,    /* pressure, altitude */
+	G_LIGHT,        /* illuminance */
+	G_ACCEL,        /* orientation */
+	G_PIR,          /* motion_count */
+	G_HALL_L,       /* hall_left_count, hall_left_flags */
+	G_HALL_R,       /* hall_right_count, hall_right_flags */
+	G_INPUT_A,      /* input_a_count, input_a_flags */
+	G_INPUT_B,      /* input_b_count, input_b_flags */
+	G_COUNT,
+};
+
+/* Copy (on=true) or clear (on=false) a group's fields from src into dst. With a
+ * frozen snapshot src this both selects a group into a frame and reverts it. */
+static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, bool on)
 {
-	static bool boot = true;
+#define SEL(field)                                                                                 \
+	do {                                                                                       \
+		dst->has_##field = on && src->has_##field;                                         \
+		if (on) {                                                                          \
+			dst->field = src->field;                                                   \
+		}                                                                                  \
+	} while (0)
 
-	uint32_t header = boot ? BIT(31) : 0;
+	switch (g) {
+	case G_INTERNAL:
+		SEL(temperature);
+		SEL(humidity);
+		break;
+	case G_SYSTEM:
+		SEL(voltage);
+		SEL(system_flags);
+		break;
+	case G_BAROMETER:
+		SEL(pressure);
+		SEL(altitude);
+		break;
+	case G_LIGHT:
+		SEL(illuminance);
+		break;
+	case G_ACCEL:
+		SEL(orientation);
+		SEL(accel_motion_count);
+		break;
+	case G_PIR:
+		SEL(motion_count);
+		break;
+	case G_HALL_L:
+		SEL(hall_left_count);
+		SEL(hall_left_flags);
+		break;
+	case G_HALL_R:
+		SEL(hall_right_count);
+		SEL(hall_right_flags);
+		break;
+	case G_INPUT_A:
+		SEL(input_a_count);
+		SEL(input_a_flags);
+		break;
+	case G_INPUT_B:
+		SEL(input_b_count);
+		SEL(input_b_flags);
+		break;
+	default:
+		break;
+	}
+#undef SEL
+}
 
-	/* For compatibility reasons (indicates header extension from 16 bits to 32 bits) */
-	header |= BIT(20);
+/* True if a group carries any data in the snapshot (any of its fields present). */
+static bool group_present(const Telemetry *s, enum tlm_group g)
+{
+	/* Compose runs solely on m_work_q; static keeps this large struct off the
+	 * tight work-queue stack (it grew with the w1_sensors array). */
+	static Telemetry probe;
 
-	uint8_t orientation = 0;
-	uint8_t voltage = 0xff;
+	memset(&probe, 0, sizeof(probe));
+	apply_group(&probe, s, g, true);
 
-	int16_t temperature = 0x7fff;
-	uint8_t humidity = 0xff;
-	uint16_t illuminance = 0xffff;
-	int16_t altitude = 0x7fff;
-	uint32_t pressure = 0xffffffff;
+	/* Re-encode the probe: empty (no has_ set) → 0 bytes. */
+	size_t sz = 0;
+	pb_get_encoded_size(&sz, Telemetry_fields, &probe);
+	return sz > 0;
+}
 
-	struct app_hall_data hall_data;
-	uint32_t hall_left_count = 0;
-	uint32_t hall_right_count = 0;
+/* Snapshot held across the frames of one report (consistency). */
+static Telemetry m_snapshot;
+static uint16_t m_pending;  /* bitmask of enum tlm_group still to send */
+static pb_size_t m_w1_sent; /* repeated w1_sensors already emitted (split cursor) */
+static bool m_active;
 
-	struct app_input_data input_data;
-	uint32_t input_a_count = 0;
-	uint32_t input_b_count = 0;
+/* Map the current sensor + counter readings into `t`. Pure mapping with no
+ * compose state-machine side effects, so it backs both the LoRaWAN snapshot
+ * (fill_snapshot) and the synchronous Sample response (app_compose_snapshot).
+ * `boot` sets the one-shot system boot flag. */
+static void fill_telemetry(Telemetry *t, bool boot)
+{
+	memset(t, 0, sizeof(*t));
+	uint32_t system_flags = boot ? SYSTEM_FLAG_BOOT : 0;
 
-	uint32_t motion_count = 0xffffffff;
-	int16_t t1_temperature = 0x7fff;
-	int16_t t2_temperature = 0x7fff;
-
-	int16_t mp1_temperature = 0x7fff;
-	int16_t mp2_temperature = 0x7fff;
-	uint8_t mp1_humidity = 0xff;
-	uint8_t mp2_humidity = 0xff;
-
-	app_hall_get_data_and_clear_notify(&hall_data);
-	app_input_get_data_and_clear_notify(&input_data);
+	struct app_hall_data hall;
+	struct app_input_data input;
+	app_hall_get_data(&hall);
+	app_input_get_data(&input);
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-
-	if (g_app_sensor_data.orientation != INT_MAX) {
-		orientation = g_app_sensor_data.orientation & 0xf;
-		header |= BIT(30);
-	}
-
-	if (!isnan(g_app_sensor_data.voltage)) {
-		float v = g_app_sensor_data.voltage * 50;
-		if (v > 255.f) {
-			v = 255.f;
-		} else if (v < 0.f) {
-			v = 0.f;
-		}
-		voltage = (uint8_t)v;
-		header |= BIT(29);
-	}
-
-	if (!isnan(g_app_sensor_data.temperature)) {
-		temperature = (int16_t)(g_app_sensor_data.temperature * 100);
-		header |= BIT(28);
-	}
-
-	if (!isnan(g_app_sensor_data.humidity)) {
-		humidity = (uint8_t)(g_app_sensor_data.humidity * 2);
-		header |= BIT(27);
-	}
-
-	if (!isnan(g_app_sensor_data.illuminance)) {
-		illuminance = (uint16_t)(g_app_sensor_data.illuminance / 2);
-		header |= BIT(26);
-	}
-
-	if (!isnan(g_app_sensor_data.t1_temperature)) {
-		t1_temperature = (int16_t)(g_app_sensor_data.t1_temperature * 100);
-		header |= BIT(25);
-	}
-
-	if (!isnan(g_app_sensor_data.t2_temperature)) {
-		t2_temperature = (int16_t)(g_app_sensor_data.t2_temperature * 100);
-		header |= BIT(24);
-	}
-
-	motion_count = g_app_sensor_data.motion_count;
-	if (motion_count > 0) {
-		header |= BIT(23);
-	}
-
-	if (!isnan(g_app_sensor_data.altitude)) {
-		float alt_scaled = g_app_sensor_data.altitude * 10;
-
-		if (alt_scaled > INT16_MAX) {
-			alt_scaled = INT16_MAX;
-		} else if (alt_scaled < INT16_MIN) {
-			alt_scaled = INT16_MIN;
-		}
-
-		altitude = (int16_t)alt_scaled;
-		header |= BIT(22);
-	}
-
-	if (!isnan(g_app_sensor_data.pressure)) {
-		pressure = (uint32_t)(g_app_sensor_data.pressure * 1000.f);
-		header |= BIT(21);
-	}
-
-	if (!isnan(g_app_sensor_data.mp1_temperature)) {
-		mp1_temperature = (int16_t)(g_app_sensor_data.mp1_temperature * 100);
-		header |= BIT(19);
-	}
-
-	if (!isnan(g_app_sensor_data.mp2_temperature)) {
-		mp2_temperature = (int16_t)(g_app_sensor_data.mp2_temperature * 100);
-		header |= BIT(18);
-	}
-
-	if (!isnan(g_app_sensor_data.mp1_humidity)) {
-		mp1_humidity = (uint8_t)(g_app_sensor_data.mp1_humidity * 2);
-		header |= BIT(17);
-	}
-
-	if (!isnan(g_app_sensor_data.mp2_humidity)) {
-		mp2_humidity = (uint8_t)(g_app_sensor_data.mp2_humidity * 2);
-		header |= BIT(16);
-	}
-
-	if (g_app_sensor_data.mp1_is_tilt_alert) {
-		header |= BIT(15);
-	}
-
-	if (g_app_sensor_data.mp2_is_tilt_alert) {
-		header |= BIT(14);
-	}
-
-	hall_left_count = hall_data.left_count;
-	hall_right_count = hall_data.right_count;
-
-	if (hall_left_count > 0) {
-		header |= BIT(13);
-	}
-
-	if (hall_right_count > 0) {
-		header |= BIT(12);
-	}
-
-	input_a_count = input_data.input_a_count;
-	input_b_count = input_data.input_b_count;
-
-	if (input_a_count > 0 || input_data.input_a_notify_act || input_data.input_a_notify_deact) {
-		header |= BIT(5);
-	}
-
-	if (input_b_count > 0 || input_data.input_b_notify_act || input_data.input_b_notify_deact) {
-		header |= BIT(4);
-	}
-
+	struct app_sensor_data d = g_app_sensor_data;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	/* Add hall notify events to header */
-	if (hall_data.left_notify_act) {
-		header |= BIT(11);
-	}
-	if (hall_data.left_notify_deact) {
-		header |= BIT(10);
-	}
-	if (hall_data.right_notify_act) {
-		header |= BIT(9);
-	}
-	if (hall_data.right_notify_deact) {
-		header |= BIT(8);
-	}
+	/* system — always sent as one group; boot=false is encoded explicitly.
+	 * voltage uses 0 as a "no sample" sentinel (only the pre-sample case). */
+	t->has_voltage = true;
+	t->voltage = isnan(d.voltage) ? 0 : (uint32_t)CLAMP(d.voltage * 50.0f, 0.0f, 255.0f);
+	t->has_system_flags = true;
+	t->system_flags = system_flags;
 
-	/* Add hall active states to header */
-	if (hall_data.left_is_active) {
-		header |= BIT(7);
-	}
-	if (hall_data.right_is_active) {
-		header |= BIT(6);
-	}
+	/* internal — onboard SHT4x is always present, so temperature/humidity are
+	 * always on the wire; a NaN reading (sensor fault) goes out as the sentinel
+	 * (decoder → null) instead of dropping the field. */
+	t->has_temperature = true;
+	t->temperature = isnan(d.temperature) ? TM_S32_NA : (int32_t)(d.temperature * 100.0f);
+	t->has_humidity = true;
+	/* Clamp before the unsigned cast: the SHT4x formula can yield a slightly
+	 * negative %RH, and a negative float->uint cast is UB. */
+	t->humidity =
+		isnan(d.humidity) ? TM_U32_NA : (uint32_t)CLAMP(d.humidity * 2.0f, 0.0f, 200.0f);
 
-	header |= orientation;
-
-	LOG_DBG("Header: 0x%08x", header);
-
-	struct net_buf_simple nbuf;
-
-	net_buf_simple_init_with_data(&nbuf, buf, size);
-	net_buf_simple_reset(&nbuf);
-
-	net_buf_simple_add_be32(&nbuf, header);
-
-	if (header & BIT(29)) {
-		net_buf_simple_add_u8(&nbuf, voltage);
+	/* barometer — sent whenever enabled (sentinel on NaN). */
+	if (g_app_config.cap_barometer) {
+		t->has_pressure = true;
+		/* d.pressure is kPa from the driver; the wire unit is hPa x10
+		 * (0.1 hPa resolution). hPa = kPa x10, so hPa x10 = kPa x100. */
+		t->pressure = isnan(d.pressure)
+				      ? TM_U32_NA
+				      : (uint32_t)CLAMP(d.pressure * 100.0f, 0.0f, 200000.0f);
+		t->has_altitude = true;
+		t->altitude = isnan(d.altitude)
+				      ? TM_S32_NA
+				      : (int32_t)CLAMP(d.altitude * 10.0f, (float)INT16_MIN,
+						       (float)INT16_MAX);
 	}
 
-	if (header & BIT(28)) {
-		net_buf_simple_add_be16(&nbuf, (uint16_t)temperature);
+	/* light — sent whenever enabled (sentinel on NaN). */
+	if (g_app_config.cap_light_sensor) {
+		t->has_illuminance = true;
+		t->illuminance = isnan(d.illuminance)
+					 ? TM_U32_NA
+					 : (uint32_t)CLAMP(d.illuminance / 2.0f, 0.0f, 1000000.0f);
 	}
 
-	if (header & BIT(27)) {
-		net_buf_simple_add_u8(&nbuf, humidity);
+	/* accel (gated by the accelerometer capability) */
+	if (g_app_config.cap_accelerometer && d.orientation != INT_MAX) {
+		t->has_orientation = true;
+		t->orientation = (uint32_t)(d.orientation & 0xf);
+	}
+	/* Always send the count when the accelerometer is enabled (0 included) —
+	 * the #78/#80 "whole group every report" policy that the other digital
+	 * counters already follow; this was the lone holdout. */
+	if (g_app_config.cap_accelerometer) {
+		t->has_accel_motion_count = true;
+		t->accel_motion_count = d.accel_motion_count;
 	}
 
-	if (header & BIT(26)) {
-		net_buf_simple_add_be16(&nbuf, illuminance);
+	/* pir — whole group sent whenever the detector is enabled (0 is valid) */
+	if (g_app_config.cap_pir_detector) {
+		t->has_motion_count = true;
+		t->motion_count = d.motion_count;
 	}
 
-	if (header & BIT(25)) {
-		net_buf_simple_add_be16(&nbuf, (uint16_t)t1_temperature);
-	}
-
-	if (header & BIT(24)) {
-		net_buf_simple_add_be16(&nbuf, (uint16_t)t2_temperature);
-	}
-
-	if (header & BIT(23)) {
-		net_buf_simple_add_be32(&nbuf, motion_count);
-	}
-
-	if (header & BIT(22)) {
-		net_buf_simple_add_be16(&nbuf, (uint16_t)altitude);
-	}
-
-	if (header & BIT(21)) {
-		net_buf_simple_add_be32(&nbuf, pressure);
-	}
-
-	if (header & BIT(19)) {
-		net_buf_simple_add_be16(&nbuf, (uint16_t)mp1_temperature);
-	}
-
-	if (header & BIT(18)) {
-		net_buf_simple_add_be16(&nbuf, (uint16_t)mp2_temperature);
-	}
-
-	if (header & BIT(17)) {
-		net_buf_simple_add_u8(&nbuf, mp1_humidity);
-	}
-
-	if (header & BIT(16)) {
-		net_buf_simple_add_u8(&nbuf, mp2_humidity);
-	}
-
-	if (header & BIT(13)) {
-		net_buf_simple_add_be32(&nbuf, hall_left_count);
-	}
-
-	if (header & BIT(12)) {
-		net_buf_simple_add_be32(&nbuf, hall_right_count);
-	}
-
-	if (header & BIT(5)) {
-		net_buf_simple_add_be32(&nbuf, input_a_count);
-		/* Append status byte: bit 3=notify_act, bit 2=notify_deact, bit 1=reserved, bit
-		 * 0=is_active */
-		uint8_t status_a = 0;
-		if (input_data.input_a_notify_act) {
-			status_a |= BIT(3);
+	/* 1-wire ROM-bound slots → one repeated SensorReading per populated slot.
+	 * The composer owns the slot index, type and the repeated array; the
+	 * per-type value fields are filled by the slot's driver via the registry
+	 * vtable (app_w1_slot_encode), so adding a sensor type needs no change here.
+	 * type travels with the reading; the composer may split the list across
+	 * frames (each reading is indivisible). Absent quantities stay omitted. */
+	if (g_app_config.cap_w1_sensors) {
+		for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
+			enum app_w1_slot_type type = app_w1_slot_get_type(i);
+			if (type == APP_W1_SLOT_EMPTY) {
+				continue; /* unconfigured slot → no reading */
+			}
+			SensorReading *sr = &t->w1_sensors[t->w1_sensors_count];
+			*sr = (SensorReading)SensorReading_init_zero;
+			/* 1-based on the wire to match the sensorN config keys and
+			 * `w1 list` (which both number slots from 1); the array index i
+			 * stays 0-based internally. */
+			sr->slot = i + 1;
+			sr->type = type;
+			app_w1_slot_encode(i, &d.w1[i], sr);
+			t->w1_sensors_count++;
 		}
-		if (input_data.input_a_notify_deact) {
-			status_a |= BIT(2);
-		}
-		if (input_data.input_a_is_active) {
-			status_a |= BIT(0);
-		}
-		net_buf_simple_add_u8(&nbuf, status_a);
 	}
 
-	if (header & BIT(4)) {
-		net_buf_simple_add_be32(&nbuf, input_b_count);
-		/* Append status byte: bit 3=notify_act, bit 2=notify_deact, bit 1=reserved, bit
-		 * 0=is_active */
-		uint8_t status_b = 0;
-		if (input_data.input_b_notify_act) {
-			status_b |= BIT(3);
+	/* hall left / right */
+	if (g_app_config.cap_hall_left) {
+		uint32_t f = 0;
+		if (hall.left_is_active) {
+			f |= CNT_FLAG_ACTIVE;
 		}
-		if (input_data.input_b_notify_deact) {
-			status_b |= BIT(2);
+		t->has_hall_left_count = true;
+		t->hall_left_count = hall.left_count;
+		t->has_hall_left_flags = true;
+		t->hall_left_flags = f;
+	}
+	if (g_app_config.cap_hall_right) {
+		uint32_t f = 0;
+		if (hall.right_is_active) {
+			f |= CNT_FLAG_ACTIVE;
 		}
-		if (input_data.input_b_is_active) {
-			status_b |= BIT(0);
-		}
-		net_buf_simple_add_u8(&nbuf, status_b);
+		t->has_hall_right_count = true;
+		t->hall_right_count = hall.right_count;
+		t->has_hall_right_flags = true;
+		t->hall_right_flags = f;
 	}
 
-	*len = nbuf.len;
+	/* input A / B */
+	if (g_app_config.cap_input_a) {
+		uint32_t f = 0;
+		if (input.input_a_is_active) {
+			f |= CNT_FLAG_ACTIVE;
+		}
+		t->has_input_a_count = true;
+		t->input_a_count = input.input_a_count;
+		t->has_input_a_flags = true;
+		t->input_a_flags = f;
+	}
+	if (g_app_config.cap_input_b) {
+		uint32_t f = 0;
+		if (input.input_b_is_active) {
+			f |= CNT_FLAG_ACTIVE;
+		}
+		t->has_input_b_count = true;
+		t->input_b_count = input.input_b_count;
+		t->has_input_b_flags = true;
+		t->input_b_flags = f;
+	}
+}
 
-	LOG_HEXDUMP_DBG(buf, *len, "Composed buffer:");
+/* #340 M16: the one-shot "first uplink after boot" marker. Module-level (not a
+ * fill_snapshot()-local static) so app_compose_ex()'s debug/test callers (e.g.
+ * `ats lrw compose`) can read it without being the ones who clear it — only a
+ * real report (app_compose(), consume_boot=true below) may consume it. Without
+ * this split, a bench tech running `ats lrw compose` before the real first
+ * post-boot cycle silently stole the marker: the debug dump got
+ * SYSTEM_FLAG_BOOT and the real first uplink went out with system_flags=0. */
+static bool m_boot_pending = true;
 
-	boot = false;
+/* True while the in-progress snapshot belongs to the shell's debug probe
+ * (app_compose_ex()) rather than the real TX path. Both paths run their
+ * multi-frame sessions as separate per-frame work items on m_work_q, so they
+ * can interleave — without this tag the real report would silently drain the
+ * remainder of a debug session's snapshot over the air (and vice versa). */
+static bool m_active_debug;
+
+/* Take a fresh snapshot into m_snapshot and arm the multi-frame packer. Runs
+ * solely on m_work_q. `consume_boot` is true only for the real report path
+ * (app_compose()) — a debug/test probe (app_compose_ex()) must not clear the
+ * one-shot marker for the real uplink that hasn't happened yet. */
+static void fill_snapshot(bool consume_boot)
+{
+	fill_telemetry(&m_snapshot, m_boot_pending);
+
+	m_pending = 0;
+	for (enum tlm_group g = 0; g < G_COUNT; g++) {
+		if (group_present(&m_snapshot, g)) {
+			m_pending |= BIT(g);
+		}
+	}
+	m_w1_sent = 0;
+	m_active = true;
+	if (consume_boot) {
+		m_boot_pending = false;
+	}
+}
+
+void app_compose_reset(void)
+{
+	/* Drop the in-progress snapshot; the next app_compose() takes a fresh one.
+	 * These run solely on m_work_q (as does the join path that calls this), so
+	 * no lock is needed. */
+	m_active = false;
+	m_pending = 0;
+	m_w1_sent = 0;
+}
+
+void app_compose_snapshot(Telemetry *out)
+{
+	if (!out) {
+		return;
+	}
+	/* Full reading (all groups) for a synchronous response — e.g. the Sample
+	 * command over NFC, where the whole Telemetry fits in one frame and
+	 * there is no DR budget to bin-pack against. Pure mapping: it neither
+	 * disturbs the in-progress LoRaWAN snapshot nor consumes the boot flag. */
+	fill_telemetry(out, false);
+}
+
+static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget,
+			   bool consume_boot)
+{
+	if (budget == 0) {
+		return -EAGAIN;
+	}
+
+	bool debug_probe = !consume_boot;
+
+	/* Cross-session guard: the real path drops a leftover debug snapshot and
+	 * composes fresh (the debug probe simply restarts on its next call); the
+	 * debug probe must never steal frames from an in-flight real report. */
+	if (m_active && m_active_debug != debug_probe) {
+		if (debug_probe) {
+			return -EBUSY;
+		}
+		app_compose_reset();
+	}
+
+	if (!m_active) {
+		fill_snapshot(consume_boot);
+		m_active_debug = debug_probe;
+		if (m_pending == 0 && m_snapshot.w1_sensors_count == 0) {
+			/* Nothing to report (e.g. all sensors NaN pre-sample). */
+			*len = 0;
+			*more = false;
+			m_active = false;
+			return 0;
+		}
+	}
+
+	/* Reserve 1 byte for the version prefix (buf[0]); the protobuf is encoded
+	 * from buf+1, so the group-packing budget loses that byte. */
+	size_t cap = MIN(size, (size_t)budget) - 1;
+
+	/* Greedily pack whole pending groups, highest priority first, that fit.
+	 * Static for the same reason as the snapshot: app_compose runs solely on
+	 * m_work_q and the struct is too big for that stack. */
+	static Telemetry frame;
+	memset(&frame, 0, sizeof(frame));
+	uint16_t frame_groups = 0;
+
+	for (enum tlm_group g = 0; g < G_COUNT; g++) {
+		if (!(m_pending & BIT(g))) {
+			continue;
+		}
+		apply_group(&frame, &m_snapshot, g, true); /* tentatively add */
+		size_t sz = 0;
+		pb_get_encoded_size(&sz, Telemetry_fields, &frame);
+		if (sz <= cap) {
+			frame_groups |= BIT(g);
+		} else {
+			apply_group(&frame, &m_snapshot, g, false); /* revert */
+		}
+	}
+
+	/* Append pending 1-Wire readings one at a time (lowest priority, after the
+	 * whole-group scalars). The repeated list may split across frames: stop at
+	 * the first reading that no longer fits and carry the rest (kept contiguous
+	 * from frame.w1_sensors[0]). */
+	pb_size_t w1_added = 0;
+	for (pb_size_t i = m_w1_sent; i < m_snapshot.w1_sensors_count; i++) {
+		pb_size_t at = frame.w1_sensors_count;
+		frame.w1_sensors[at] = m_snapshot.w1_sensors[i];
+		frame.w1_sensors_count = at + 1;
+		size_t sz = 0;
+		pb_get_encoded_size(&sz, Telemetry_fields, &frame);
+		if (sz <= cap) {
+			w1_added++;
+		} else {
+			frame.w1_sensors_count = at; /* revert; stop, keep order */
+			break;
+		}
+	}
+
+	/* A single unit bigger than the budget would stall forever: force the
+	 * highest-priority pending group — or, if none, the next 1-Wire reading —
+	 * out alone and log it. */
+	if (frame_groups == 0 && w1_added == 0) {
+		bool forced = false;
+		for (enum tlm_group g = 0; g < G_COUNT; g++) {
+			if (m_pending & BIT(g)) {
+				apply_group(&frame, &m_snapshot, g, true);
+				frame_groups = BIT(g);
+				LOG_WRN("Group %d exceeds budget %uB, sending alone", (int)g,
+					budget);
+				forced = true;
+				break;
+			}
+		}
+		if (!forced && m_w1_sent < m_snapshot.w1_sensors_count) {
+			frame.w1_sensors[0] = m_snapshot.w1_sensors[m_w1_sent];
+			frame.w1_sensors_count = 1;
+			w1_added = 1;
+			LOG_WRN("w1 reading slot=%u exceeds budget %uB, sending alone",
+				(unsigned)m_snapshot.w1_sensors[m_w1_sent].slot, budget);
+		}
+	}
+
+	buf[0] = APP_PROTO_VERSION;
+	pb_ostream_t os = pb_ostream_from_buffer(buf + 1, size - 1);
+	if (!pb_encode(&os, Telemetry_fields, &frame)) {
+		LOG_ERR("pb_encode failed: %s", PB_GET_ERROR(&os));
+		m_active = false;
+		return -EMSGSIZE;
+	}
+
+	m_pending &= ~frame_groups;
+	m_w1_sent += w1_added;
+	*len = os.bytes_written + 1;
+	*more = (m_pending != 0) || (m_w1_sent < m_snapshot.w1_sensors_count);
+	if (!*more) {
+		m_active = false;
+	}
+
+	LOG_INF("TX: budget=%uB (from system), frame=%zuB, groups=0x%04x, w1=%u/%u, more=%d",
+		budget, *len, frame_groups, (unsigned)m_w1_sent,
+		(unsigned)m_snapshot.w1_sensors_count, (int)*more);
+	LOG_HEXDUMP_DBG(buf, *len, "Telemetry frame:");
 
 	return 0;
+}
+
+int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
+{
+	return compose_ex_impl(buf, size, len, more, app_lrw_get_max_payload(), true);
+}
+
+int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)
+{
+	return compose_ex_impl(buf, size, len, more, budget, false);
 }

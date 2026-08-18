@@ -9,7 +9,7 @@ function decodeUplink(input) {
   var BATTERY_INVALID = 0xFFFF;
 
   function readUint32LE(b, o) {
-    return b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | ((b[o + 3] << 24) >>> 0);
+    return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
   }
 
   function readUint16LE(b, o) {
@@ -44,4 +44,10 @@ function decodeUplink(input) {
       battery_voltage: battery_mv === BATTERY_INVALID ? null : battery_mv / 1000,
     }
   };
+}
+
+// Make the codec importable from Node (tests) without affecting the
+// TTN/ChirpStack sandbox, which has no `module`.
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { decodeUplink };
 }

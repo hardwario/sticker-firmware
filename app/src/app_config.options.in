@@ -1,0 +1,79 @@
+# BEGIN GENERATED CONFIG
+AppConfigMessage.Lorawan.deveui max_size:8 fixed_length:true
+AppConfigMessage.Lorawan.joineui max_size:8 fixed_length:true
+AppConfigMessage.Lorawan.nwkkey max_size:16 fixed_length:true
+AppConfigMessage.Lorawan.appkey max_size:16 fixed_length:true
+AppConfigMessage.Lorawan.devaddr max_size:4 fixed_length:true
+AppConfigMessage.Lorawan.nwkskey max_size:16 fixed_length:true
+AppConfigMessage.Lorawan.appskey max_size:16 fixed_length:true
+AppConfigMessage.Alarms.alarm_0 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_1 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_2 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_3 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_4 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_5 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_6 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_7 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_8 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_9 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_10 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_11 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_12 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_13 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_14 max_size:17 fixed_length:true
+AppConfigMessage.Alarms.alarm_15 max_size:17 fixed_length:true
+AppConfigMessage.Sensors.sensor1_rom max_size:8 fixed_length:true
+AppConfigMessage.Sensors.sensor2_rom max_size:8 fixed_length:true
+AppConfigMessage.Sensors.sensor3_rom max_size:8 fixed_length:true
+AppConfigMessage.Sensors.sensor4_rom max_size:8 fixed_length:true
+# END GENERATED CONFIG
+
+Response.Error.detail       max_size:32
+# Sized so the NFC paged read (#260) fills a whole NFC response per tap (fewest
+# pages). The binding limit is the ST25DV 512 B tag memory: the rsp NDEF record is
+# ~22 B framing + encrypted(8 B nonce + plaintext + 16 B CCM tag), so plaintext
+# <= ~466 B; minus the ~26 B Response/HistoryFrame protobuf envelope leaves ~440 B
+# for samples. The runtime cap (app_cmd_history_sample_capacity, out_cap =
+# DUMP_PAGE_BUDGET_NFC 450) is the real binding value; this field just must not be
+# smaller. The LoRaWAN replay is separately capped to its DR budget (m_hist_tx_buf,
+# APP_CMD_HISTORY_FRAME_BUF_SIZE = 256 B) so it never fills this. RAM-free: the Response oneof is dominated by
+# ConfigDump (~563 B), so HistoryFrame growing to ~472 B does not enlarge Response.
+Response.HistoryFrame.samples max_size:440
+Response.Info.claim_token   max_size:16 fixed_length:true
+Response.Info.dev_eui       max_size:8 fixed_length:true
+
+# set_secret_key command (#299): fixed 16-byte key, no callback (mirrors the
+# LoRaWAN keys / ClaimInfo.claim_token below).
+Command.SetSecretKey.key    max_size:16 fixed_length:true
+
+# clm_rearm command (#351): fixed 16-byte optional new claim token, no callback.
+Command.ClmRearm.new_claim_token max_size:16 fixed_length:true
+
+# NFC clm provisioning record (#247): fixed 16-byte claim token, no callback.
+ClaimInfo.claim_token       max_size:16 fixed_length:true
+
+# Alarm-detail batch (fPort 3, #27). 8 events fit the smallest practical DR; the
+# encoder further caps by the live payload budget.
+AlarmReport.events max_count:8
+
+# 1-Wire telemetry: one SensorReading per ROM-bound slot (APP_W1_SLOT_COUNT).
+# Static array; the composer splits readings across frames to fit the budget.
+Telemetry.w1_sensors max_count:4
+
+# GetParam field-id lists as static arrays (no nanopb callback). A batch is
+# bounded by the LoRaWAN downlink size anyway, so 16 ids each is plenty.
+Command.GetParam.lorawan_field     max_count:16
+Command.GetParam.application_field max_count:16
+Command.GetParam.sensors_field     max_count:16
+Command.GetParam.alarms_field      max_count:16
+
+# W1Scan response: discovered 1-Wire ROMs (8 B each). Capped to the slot count;
+# the encoded reply must fit the fPort-85 response buffer (64 B).
+Response.W1Scan.rom max_count:4 max_size:8
+
+# Alarm-rules read-back: up to 5 RuleEntry per AlarmRulesDump page (paged like
+# ConfigDump; the handler further caps a page by a per-transport byte budget).
+# 5 is the sweet spot: 5*sizeof(RuleEntry) keeps AlarmRulesDump <= ConfigDump, so
+# the Response union (and the Command+Response stack frame in app_cmd_handle, on
+# the 2048 B m_work_q) does NOT grow versus the rest of the protocol.
+Response.AlarmRulesDump.rules max_count:5

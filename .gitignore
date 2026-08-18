@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 /app/deploy/
 build/
+twister-out/

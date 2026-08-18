@@ -3,16 +3,7 @@
 static void print_{{ param.name | c_name }}(const struct shell *shell)
 {
 {% if param.type == 'bytes' %}
-	char buf[2 * sizeof(m_{{ module.name }}.{{ param.name | c_name }}) + 1];
-
-	int ret =
-		bin2hex(m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}), buf, sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " {{ param.name | settings_key }} %s", buf);
+	print_bytes(shell, "{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% elif param.type == 'string' %}
 	shell_print(shell, SETTINGS_PFX " {{ param.name | settings_key }} %s", m_{{ module.name }}.{{ param.name | c_name }});
 {% elif param.type == 'bool' %}
@@ -179,6 +170,8 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 	}
 
 	char *endptr;
+
+	errno = 0;
 {% if param.type == 'uint64' %}
 	unsigned long long value = strtoull(argv[1], &endptr, 10);
 {% else %}
@@ -190,7 +183,10 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 		return -EINVAL;
 	}
 
-	if (value < {{ param | min_value }} || value > {{ param | max_value }}) {
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < {{ param | min_value }} || value > {{ param | max_value }}) {
 		shell_error(shell, "%s", m_msg_invalid_range);
 		return -EINVAL;
 	}
@@ -258,34 +254,11 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 
 	return 0;
 {% elif param.type == 'bytes' %}
-	int ret;
-
-	if (argc == 1) {
-		print_{{ param.name | c_name }}(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_{{ module.name }}.{{ param.name | c_name }})) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	ret = hex2bin(argv[1], strlen(argv[1]), m_{{ module.name }}.{{ param.name | c_name }},
-		      sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
-	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}), {{ 'true' if param.write_once | default(false) else 'false' }}, print_{{ param.name | c_name }});
 {% elif param.type == 'enum' %}
 {% set enum_values = enums[param.enum] %}
+{% set ns = namespace(tokens=[]) %}
+{% for val in enum_values %}{% set ns.tokens = ns.tokens + [val.shell | default(val.name | lower)] %}{% endfor %}
 	if (argc == 1) {
 		print_{{ param.name | c_name }}(shell);
 		return 0;
@@ -294,6 +267,12 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 	if (argc != 2) {
 		shell_error(shell, "%s", m_msg_invalid_args);
 		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: {{ ns.tokens | join(', ') }}");
+		return 0;
 	}
 
 {% for val in enum_values %}
@@ -306,11 +285,68 @@ static int cmd_{{ param.name | c_name }}(const struct shell *shell, size_t argc,
 {% endfor %}
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: {{ ns.tokens | join(', ') }}");
 		return -EINVAL;
 	}
 
 	return 0;
 {% endif %}
+}
+{% endmacro %}
+{#- Generate one preserve/restore reset function for a `persistent` tier (#299) -#}
+{% macro reset_function(op, module) -%}
+{% if op == 'device_reset' %}
+/* Reset every parameter to its compiled-in default EXCEPT the fields tagged
+ * `persistent: [device_reset, ...]` in the YAML (factory identity + full
+ * LoRaWAN), then persist. Backs the `device_reset` command (renamed from
+ * today's `factory_reset`, #299) so the device keeps its LoRaWAN session; the
+ * shell `settings erase` still does a full NVS wipe. Returns 0 or a negative
+ * errno. The caller reboots so every module re-reads the restored config. */
+{% elif op == 'factory_reset' %}
+/* Narrower than device_reset (#299): also drops the LoRaWAN session/keys,
+ * keeping only identity (serial_number/vendor_token/secret_key/DevEUI/
+ * JoinEUI/claim_token) — the device must re-join after this. Returns 0 or a
+ * negative errno; the caller reboots. */
+{% else %}
+/* Narrowest tier (#299): keeps only serial_number + vendor_token. The caller
+ * (app_settings_vendor_reset) erases the storage+history flash areas first,
+ * then calls this to re-provision the snapshot before saving + rebooting.
+ * Returns 0 or a negative errno. */
+{% endif %}
+int {{ module.name }}_{{ op }}(void)
+{
+	int ret;
+
+	/* #340 M27: brackets the whole read-modify-write against concurrent
+	 * mutation from another transport (mirrors SetParam's own lock scope,
+	 * which likewise snapshots-then-mutates under the same lock and saves
+	 * outside of it). */
+	{{ module.name }}_lock();
+
+	struct {{ module.name }} preserved = m_{{ module.name }};
+
+	m_{{ module.name }} = m_{{ module.name }}_defaults;
+{% for param in parameters if param | persists(op) %}
+{% if param.type == 'bytes' or param.type == 'string' %}
+	memcpy(m_{{ module.name }}.{{ param.name | c_name }}, preserved.{{ param.name | c_name }},
+	       sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+{% else %}
+	m_{{ module.name }}.{{ param.name | c_name }} = preserved.{{ param.name | c_name }};
+{% endif %}
+{% endfor %}
+
+	memcpy(&g_{{ module.name }}, &m_{{ module.name }}, sizeof(g_{{ module.name }}));
+
+	{{ module.name }}_unlock();
+
+	ret = settings_save_subtree(SETTINGS_PFX);
+	if (ret) {
+		LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		return ret;
+	}
+
+	LOG_INF("{{ op }}: config restored to defaults");
+	return 0;
 }
 {% endmacro %}
 /* WARNING: This file is auto-generated by `west configen`. Do not modify manually. */
@@ -355,6 +391,21 @@ static const struct {{ module.name }} m_{{ module.name }}_defaults = {
 {% endfor %}
 };
 
+/* Set by h_commit when a schema version migration ran; init persists the
+ * migrated config so the stored version is bumped exactly once. */
+static bool m_{{ module.name }}_migrated;
+
+/* Set by init when settings_load fails (corrupt/unreadable NVS): the device then
+ * boots on compile-time defaults with its identity + provisioning gone. Queryable
+ * so the app can surface a distinct state (LED / GetInfo) instead of silently
+ * looking like a blank device (H-4). */
+static bool m_{{ module.name }}_load_failed;
+
+bool {{ module.name }}_load_failed(void)
+{
+	return m_{{ module.name }}_load_failed;
+}
+
 {% endif %}
 static struct {{ module.name }} m_{{ module.name }} = {
 {% if module.version is defined %}
@@ -364,6 +415,22 @@ static struct {{ module.name }} m_{{ module.name }} = {
 	.{{ param.name | c_name }} = {{ param | default_value(module.name) }},
 {% endfor %}
 };
+
+/* Guards m_{{ module.name }}/g_{{ module.name }} against concurrent mutation:
+ * SetParam (app_cmd.c) and the reset ops below are both reachable from
+ * shell/LRW/NFC on different threads with no other synchronization (#340
+ * M27) — SetParam takes this via {{ module.name }}_lock()/_unlock(). */
+static K_MUTEX_DEFINE(m_{{ module.name }}_lock);
+
+void {{ module.name }}_lock(void)
+{
+	k_mutex_lock(&m_{{ module.name }}_lock, K_FOREVER);
+}
+
+void {{ module.name }}_unlock(void)
+{
+	k_mutex_unlock(&m_{{ module.name }}_lock);
+}
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
@@ -411,13 +478,54 @@ static int h_commit(void)
 	LOG_DBG("Loaded settings in full");
 
 {% if module.version is defined %}
-	if (m_{{ module.name }}.config_version != {{ module.name | upper }}_VERSION) {
-		LOG_WRN("Config version mismatch (stored=%u, expected=%u), resetting to defaults",
+	/* L-33: migrate only on an UPGRADE (stored < current). Using != also fired on
+	 * a downgrade and reset the application parameters to the older firmware's
+	 * defaults; a downgrade should keep the stored config as-is (values are clamped
+	 * below anyway). */
+	if (m_{{ module.name }}.config_version < {{ module.name | upper }}_VERSION) {
+		LOG_WRN("Config version older than firmware (stored=%u, expected=%u), migrating",
 			m_{{ module.name }}.config_version, {{ module.name | upper }}_VERSION);
+
+		/* Reset application parameters to defaults, but carry over factory
+		 * identity and network credentials (the `device_reset` persistent
+		 * tier in the YAML, #299) so a schema bump never un-provisions a
+		 * field device. */
+		struct {{ module.name }} stored = m_{{ module.name }};
+
 		m_{{ module.name }} = m_{{ module.name }}_defaults;
+{% for param in parameters if param | persists('device_reset') %}
+{% if param.type == 'bytes' or param.type == 'string' %}
+		memcpy(m_{{ module.name }}.{{ param.name | c_name }}, stored.{{ param.name | c_name }},
+		       sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
+{% else %}
+		m_{{ module.name }}.{{ param.name | c_name }} = stored.{{ param.name | c_name }};
+{% endif %}
+{% endfor %}
+
+		m_{{ module.name }}_migrated = true;
 	}
 
 {% endif %}
+	/* Clamp loaded values into their configured ranges so a corrupted or forged
+	 * NVS record can't leave the device in a broken state (e.g. interval=0 ->
+	 * K_SECONDS(0), or an out-of-range enum that no code path expects). */
+{% for param in parameters %}
+{% if param.type == 'enum' %}
+	if ((int)m_{{ module.name }}.{{ param.name | c_name }} < 0 ||
+	    (int)m_{{ module.name }}.{{ param.name | c_name }} > {{ (enums[param.enum] | length) - 1 }}) {
+		m_{{ module.name }}.{{ param.name | c_name }} = {{ param | default_value(module.name) or 0 }};
+	}
+{% elif (param.min is defined or param.max is defined) and (param | is_numeric) %}
+{% set sfx = 'f' if (param | is_float) else '' %}
+	if (m_{{ module.name }}.{{ param.name | c_name }} < {{ param | min_value }}{{ sfx }}{% if param.extras and param.extras.zero_allowed %} && m_{{ module.name }}.{{ param.name | c_name }} != 0{% endif %}) {
+		m_{{ module.name }}.{{ param.name | c_name }} = {{ param | min_value }}{{ sfx }};
+	}
+	if (m_{{ module.name }}.{{ param.name | c_name }} > {{ param | max_value }}{{ sfx }}) {
+		m_{{ module.name }}.{{ param.name | c_name }} = {{ param | max_value }}{{ sfx }};
+	}
+{% endif %}
+{% endfor %}
+
 	memcpy(&g_{{ module.name }}, &m_{{ module.name }}, sizeof(g_{{ module.name }}));
 	return 0;
 }
@@ -429,10 +537,6 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
 	} while (0)
 
-{% if module.version is defined %}
-	EXPORT_FUNC("config-version", &m_{{ module.name }}.config_version,
-		    sizeof(m_{{ module.name }}.config_version));
-{% endif %}
 {% for param in parameters %}
 {% if param.type == 'bytes' or param.type == 'string' %}
 	EXPORT_FUNC("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
@@ -441,6 +545,14 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% endif %}
 {% endfor %}
+{% if module.version is defined %}
+	/* Export config-version LAST: settings_save is per-key atomic, so writing
+	 * the schema marker after every value means a brownout mid-save leaves an
+	 * old version with a partial new payload rather than a new version flagging
+	 * data as fully migrated. Paired with the migration restore in h_commit. */
+	EXPORT_FUNC("config-version", &m_{{ module.name }}.config_version,
+		    sizeof(m_{{ module.name }}.config_version));
+{% endif %}
 
 #undef EXPORT_FUNC
 
@@ -460,6 +572,84 @@ typedef void (*print_func_t)(const struct shell *shell);
 {% set needs_cmd_int = parameters | selectattr('type', 'equalto', 'int') | rejectattr('readonly', 'defined') | rejectattr('extras', 'defined') | list | length > 0 %}
 {% set needs_cmd_uint = parameters | selectattr('type', 'equalto', 'uint') | rejectattr('readonly', 'defined') | rejectattr('extras', 'defined') | list | length > 0 %}
 {% set needs_cmd_float = parameters | selectattr('type', 'equalto', 'float') | rejectattr('readonly', 'defined') | list | length > 0 %}
+{% set needs_print_bytes = parameters | selectattr('type', 'equalto', 'bytes') | list | length > 0 %}
+{% set needs_cmd_bytes = parameters | selectattr('type', 'equalto', 'bytes') | rejectattr('readonly', 'defined') | list | length > 0 %}
+{% if needs_print_bytes %}
+/* Largest shell-settable byte field is 16 B (the LoRaWAN keys); the guard keeps
+ * the fixed scratch safe should a longer field ever be added. */
+#define CMD_BYTES_MAX 32
+
+static void print_bytes(const struct shell *shell, const char *key, const uint8_t *value,
+			size_t size)
+{
+	char buf[2 * CMD_BYTES_MAX + 1];
+
+	if (size > CMD_BYTES_MAX) {
+		return;
+	}
+
+	int ret = bin2hex(value, size, buf, sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " %s %s", key, buf);
+}
+
+{% endif %}
+{% if needs_cmd_bytes %}
+static int cmd_bytes(const struct shell *shell, size_t argc, char **argv, uint8_t *value,
+		     size_t size, bool write_once, print_func_t print_func)
+{
+	if (argc == 1) {
+		if (print_func) {
+			print_func(shell);
+		}
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (size > CMD_BYTES_MAX || strlen(argv[1]) != 2 * size) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[CMD_BYTES_MAX];
+
+	int ret = hex2bin(argv[1], strlen(argv[1]), tmp, size);
+	if (ret != (int)size) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (write_once) {
+		/* write-once (#170): refuse to overwrite a value that is already set. The
+		 * all-zero state is the "unset" sentinel; once any byte is non-zero the
+		 * field is locked (commission once, then immutable). */
+		for (size_t i = 0; i < size; i++) {
+			if (value[i] != 0) {
+				shell_error(shell, "%s already set (immutable)", argv[0]);
+				return -EACCES;
+			}
+		}
+	}
+
+	memcpy(value, tmp, size);
+
+	return 0;
+}
+
+{% endif %}
 {% if needs_cmd_bool %}
 static int cmd_bool(const struct shell *shell, size_t argc, char **argv, bool *param,
 		    print_func_t print_func)
@@ -596,19 +786,19 @@ static int cmd_float(const struct shell *shell, size_t argc, char **argv, float 
 
 {% endif %}
 
-{% for param in parameters %}
+{% for param in parameters if not param.no_shell %}
 {{ print_function(param, module, enums) }}
 {% endfor %}
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
-{% for param in parameters if not param.hidden %}
+{% for param in parameters if not param.hidden and not param.no_shell %}
 	print_{{ param.name | c_name }}(shell);
 {% endfor %}
 
 	return 0;
 }
 
-{% for param in parameters %}
+{% for param in parameters if not param.no_shell %}
 {{ cmd_function(param, module, enums) }}
 {% endfor %}
 static int print_help(const struct shell *shell, size_t argc, char **argv)
@@ -633,10 +823,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Show all configuration.",
 	              cmd_show, 1, 0),
 
-{% for param in parameters %}
+{% for param in parameters if not param.no_shell %}
 	SHELL_CMD_ARG({{ param.name | settings_key }}, NULL,
 	              "{{ param.help | default('Get/Set ' ~ param.name ~ '.') }}",
-	              cmd_{{ param.name | c_name }}, 1, 1),
+	              cmd_{{ param.name | c_name }}, 1, {{ 0 if param.readonly else 1 }}),
 
 {% endfor %}
 	SHELL_SUBCMD_SET_END
@@ -653,6 +843,9 @@ struct {{ module.name }} *{{ module.name }}(void)
 	return &m_{{ module.name }};
 }
 
+{% for op in RESET_OPS %}
+{{ reset_function(op, module) }}
+{% endfor %}
 static int {{ module.name }}_init(void)
 {
 	int ret;
@@ -678,10 +871,33 @@ static int {{ module.name }}_init(void)
 
 	ret = settings_load_subtree(SETTINGS_PFX);
 	if (ret) {
-		LOG_ERR("Call `settings_load_subtree` failed: %d", ret);
-		return ret;
+		/* H-4: do not silently swallow a load failure. SYS_INIT discards our
+		 * return value, so returning here just lets the device boot on defaults
+		 * (identity + provisioning gone) with no signal. Flag it instead so the
+		 * app can show a distinct state; the in-RAM defaults keep the device
+		 * running rather than dead. */
+		LOG_ERR("Call `settings_load_subtree` failed: %d — booting on defaults", ret);
+		m_{{ module.name }}_load_failed = true;
 	}
 
+{% if module.version is defined %}
+	if (m_{{ module.name }}_migrated) {
+		m_{{ module.name }}_migrated = false;
+
+		/* Persist the migrated config right away so the stored schema
+		 * version is bumped and the migration does not repeat on every
+		 * boot. A failure here is not fatal: the in-RAM config is valid
+		 * and the migration simply runs again next boot. */
+		ret = settings_save_subtree(SETTINGS_PFX);
+		if (ret) {
+			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		} else {
+			LOG_INF("Config migrated to version %u and persisted",
+				{{ module.name | upper }}_VERSION);
+		}
+	}
+
+{% endif %}
 	return 0;
 }
 

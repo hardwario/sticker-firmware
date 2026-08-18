@@ -17,7 +17,7 @@
 	chosen {
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
-		zephyr,code-partition = &slot0_partition;
+		zephyr,code-partition = &code_partition;
 	};
 
 	leds {
@@ -112,15 +112,35 @@ stm32_lp_tick_source: &lptim1 {
 	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
 	pinctrl-1 = <&analog_pb6 &analog_pb7>;
 	pinctrl-names = "default", "sleep";
+	/* Bus-recovery bit-bang pins (H-6, CONFIG_I2C_STM32_BUS_RECOVERY): same SCL
+	 * PB6 / SDA PB7, driven as open-drain GPIOs to clock a wedged slave free. The
+	 * bus has external pull-ups (onboard sensors). */
+	scl-gpios = <&gpiob 6 GPIO_OPEN_DRAIN>;
+	sda-gpios = <&gpiob 7 GPIO_OPEN_DRAIN>;
 	status = "okay";
 
 	lis2dh12: lis2dh12@19 {
 		compatible = "st,lis2dh";
 		reg = <0x19>;
-		anym-mode = <LIS2DH_DT_ANYM_6D_MOVEMENT>;
+		/* Any-motion = OR of |X|/|Y|/|Z| high events on the HP-filtered
+		 * signal (app_accel.c enables the HPF on the IA2 path), i.e. the
+		 * classic ST wake-up recipe. 6D_MOVEMENT would compare absolute
+		 * axes against the threshold — with sub-1g thresholds gravity
+		 * keeps the interrupt asserted permanently. */
+		anym-mode = <LIS2DH_DT_ANYM_OR_COMBINATION>;
+		/* INT2 (PA2) is active-high and latched (no anym-no-latch); the
+		 * driver de-asserts it by reading INT2_SRC in its work handler.
+		 * Rising-edge only: with the EDGE_BOTH default that SRC-read
+		 * generates a falling edge that re-pends the (masked) EXTI line
+		 * and immediately re-fires on re-enable. STM32 EXTI has no
+		 * level-trigger support, so LEVEL_HIGH is not an option. */
+		int2-gpio-config = <LIS2DH_DT_GPIO_INT_EDGE_RISING>;
 		irq-gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>,
 			    <&gpioa 2 GPIO_ACTIVE_HIGH>;
 		disconnect-sdo-sa0-pull-up;
+		/* Deferred so the accel stays powered down (no ODR_5 sampling)
+		 * unless cap-accelerometer is on; device_init() in app_sensor. */
+		zephyr,deferred-init;
 	};
 
 	sht40: sht40@44 {
@@ -216,20 +236,40 @@ stm32_lp_tick_source: &lptim1 {
 		#address-cells = <1>;
 		#size-cells = <1>;
 
-		boot_partition: partition@0 {
-			label = "mcuboot";
-			reg = <0x00000000 DT_SIZE_K(32)>;
+		/* Flat application image from the flash base — no bootloader is
+		 * active (NFC firmware update / variant-B bootloader was removed;
+		 * a future MCUboot/FUOTA layout would redesign this map). The image
+		 * is linked against CONFIG_FLASH_LOAD_SIZE (the linker fails the
+		 * build on overflow), because flash regions written at runtime
+		 * corrupt an image leaking into them — the device then hard-faults
+		 * on the next boot (recoverable only by mass erase):
+		 *  - release (CONFIG_APP_HISTORY_FLASH=y) writes the history ring
+		 *    here: budget = history_partition offset (prj.conf, 0x34000)
+		 *  - debug keeps history in RAM but NVS settings + LoRaWAN NVM
+		 *    always write storage: budget = storage_partition offset
+		 *    (debug.conf, 0x3C000)
+		 *
+		 * The history partition shrank 80 KB → 64 KB (#265) then 64 KB →
+		 * 32 KB (#302): the raw flash ring backend packs ~10x more records
+		 * per byte than the old NVS backend, so even 32 KB retains 42+ days
+		 * of history at the worst-case channel count (15 min interval), and
+		 * the freed flash goes to code (160 KB → 176 KB → 208 KB).
+		 */
+		code_partition: partition@0 {
+			label = "code";
+			reg = <0x00000000 DT_SIZE_K(208)>;
 			read-only;
 		};
 
-		slot0_partition: partition@8000 {
-			label = "image-0";
-			reg = <0x00008000 DT_SIZE_K(104)>;
-		};
-
-		slot1_partition: partition@22000 {
-			label = "image-1";
-			reg = <0x00022000 DT_SIZE_K(104)>;
+		/* Sensor history store-and-forward buffer (app_history.c,
+		 * FIXED_PARTITION_ID(history_partition)) — raw flash page ring (#265).
+		 * 32 KB = 16 × 2 KB erase pages (#302, shrunk from 64 KB / 32 pages).
+		 * Erasing on the first boot after a remap (old data at the previous
+		 * offset is now garbage) is handled by the #96 mount-fail → erase →
+		 * remount recovery path. */
+		history_partition: partition@34000 {
+			label = "history";
+			reg = <0x00034000 DT_SIZE_K(32)>;
 		};
 
 		storage_partition: partition@3c000 {

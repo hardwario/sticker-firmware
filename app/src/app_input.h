@@ -20,17 +20,15 @@ struct app_input_data {
 	bool input_b_is_active;
 	uint32_t input_a_count;
 	uint32_t input_b_count;
-	bool input_a_notify_act;
-	bool input_a_notify_deact;
-	bool input_b_notify_act;
-	bool input_b_notify_deact;
 };
 
 int app_input_init(void);
 int app_input_get_data(struct app_input_data *data);
-int app_input_get_data_and_clear_notify(struct app_input_data *data);
-void app_input_clear_notify_flags(struct app_input_data *data);
 void app_input_reset_counts(void);
+void app_input_reset_count(bool input_a, bool input_b);
+
+/* Seed the totalizers (used to restore persisted counts on boot). */
+void app_input_set_counts(uint32_t input_a, uint32_t input_b);
 
 #ifdef __cplusplus
 }

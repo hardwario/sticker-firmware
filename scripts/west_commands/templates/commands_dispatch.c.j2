@@ -1,0 +1,33 @@
+static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+			     enum app_cmd_action *action)
+{
+	resp->seq = cmd->seq;
+
+	switch (cmd->which_body) {
+{% for c in commands %}
+	case {{ c.tag }}:
+{% if c.transport_guard %}
+		/* transports: [{{ c.transports | join(", ") }}] — reject on any other transport */
+		if ({% for e in c.transport_guard %}tp != {{ e }}{{ " && " if not loop.last }}{% endfor %}) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+{% endif %}
+{% if c.kind == 'action' %}
+		*action = APP_CMD_ACTION_{{ c.action }};
+		resp->which_body = Response_ack_tag;
+{% else %}
+		{{ c.handler }}(tp, cmd, resp, action);
+{% endif %}
+		break;
+{% endfor %}
+	default:
+		/* L-54: an unknown command tag (e.g. a removed command like the old
+		 * enter_dfu/enter_mailbox 19/20/22 sent by an older app) is a distinct,
+		 * expected outcome — report NOT_SUPPORTED so the host can tell "command
+		 * removed/unknown" apart from a generic UNKNOWN failure. */
+		LOG_WRN("Command tag %u not supported", cmd->which_body);
+		make_error(resp, Response_Error_Code_NOT_SUPPORTED, "command not supported");
+		break;
+	}
+}

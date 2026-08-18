@@ -35,44 +35,65 @@ struct app_config g_app_config;
 static const struct app_config m_app_config_defaults = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
+	.history_enable = false,
+	.history_sensors = 3,
+	.battery_level = 2400,
+	.vendor_reset_allow = true,
+	.alarm_limit = 10,
+	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
-	.alarm_temperature_lo = 15.0f,
-	.alarm_temperature_hi = 25.0f,
-	.alarm_temperature_hst = 0.5f,
-	.alarm_humidity_lo = 30.0f,
-	.alarm_humidity_hi = 75.0f,
-	.alarm_humidity_hst = 5.0f,
-	.alarm_pressure_lo = 700.0f,
-	.alarm_pressure_hi = 1060.0f,
-	.alarm_pressure_hst = 10.0f,
-	.alarm_t1_temperature_lo = 15.0f,
-	.alarm_t1_temperature_hi = 25.0f,
-	.alarm_t1_temperature_hst = 0.5f,
-	.alarm_t2_temperature_lo = 15.0f,
-	.alarm_t2_temperature_hi = 25.0f,
-	.alarm_t2_temperature_hst = 0.5f,
+	.lrw_adr = true,
+	.lrw_link_check_interval = 5,
+	.lrw_link_check_fail_rejoin = 5,
+	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
+
+/* Set by h_commit when a schema version migration ran; init persists the
+ * migrated config so the stored version is bumped exactly once. */
+static bool m_app_config_migrated;
+
+/* Set by init when settings_load fails (corrupt/unreadable NVS): the device then
+ * boots on compile-time defaults with its identity + provisioning gone. Queryable
+ * so the app can surface a distinct state (LED / GetInfo) instead of silently
+ * looking like a blank device (H-4). */
+static bool m_app_config_load_failed;
+
+bool app_config_load_failed(void)
+{
+	return m_app_config_load_failed;
+}
 
 static struct app_config m_app_config = {
 	.config_version = APP_CONFIG_VERSION,
 	.interval_report = 900,
+	.history_enable = false,
+	.history_sensors = 3,
+	.battery_level = 2400,
+	.vendor_reset_allow = true,
+	.alarm_limit = 10,
+	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
-	.alarm_temperature_lo = 15.0f,
-	.alarm_temperature_hi = 25.0f,
-	.alarm_temperature_hst = 0.5f,
-	.alarm_humidity_lo = 30.0f,
-	.alarm_humidity_hi = 75.0f,
-	.alarm_humidity_hst = 5.0f,
-	.alarm_pressure_lo = 700.0f,
-	.alarm_pressure_hi = 1060.0f,
-	.alarm_pressure_hst = 10.0f,
-	.alarm_t1_temperature_lo = 15.0f,
-	.alarm_t1_temperature_hi = 25.0f,
-	.alarm_t1_temperature_hst = 0.5f,
-	.alarm_t2_temperature_lo = 15.0f,
-	.alarm_t2_temperature_hi = 25.0f,
-	.alarm_t2_temperature_hst = 0.5f,
+	.lrw_adr = true,
+	.lrw_link_check_interval = 5,
+	.lrw_link_check_fail_rejoin = 5,
+	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
+
+/* Guards m_app_config/g_app_config against concurrent mutation:
+ * SetParam (app_cmd.c) and the reset ops below are both reachable from
+ * shell/LRW/NFC on different threads with no other synchronization (#340
+ * M27) — SetParam takes this via app_config_lock()/_unlock(). */
+static K_MUTEX_DEFINE(m_app_config_lock);
+
+void app_config_lock(void)
+{
+	k_mutex_lock(&m_app_config_lock, K_FOREVER);
+}
+
+void app_config_unlock(void)
+{
+	k_mutex_unlock(&m_app_config_lock);
+}
 
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
@@ -104,12 +125,24 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.serial_number));
 	SETTINGS_SET("nonce-counter", &m_app_config.nonce_counter,
 		     sizeof(m_app_config.nonce_counter));
+	SETTINGS_SET("claim-token", m_app_config.claim_token, sizeof(m_app_config.claim_token));
+	SETTINGS_SET("vendor-token", m_app_config.vendor_token, sizeof(m_app_config.vendor_token));
 	SETTINGS_SET("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
 	SETTINGS_SET("interval-sample", &m_app_config.interval_sample,
 		     sizeof(m_app_config.interval_sample));
 	SETTINGS_SET("interval-report", &m_app_config.interval_report,
 		     sizeof(m_app_config.interval_report));
+	SETTINGS_SET("history-enable", &m_app_config.history_enable,
+		     sizeof(m_app_config.history_enable));
+	SETTINGS_SET("history-sensors", &m_app_config.history_sensors,
+		     sizeof(m_app_config.history_sensors));
+	SETTINGS_SET("battery-level", &m_app_config.battery_level,
+		     sizeof(m_app_config.battery_level));
+	SETTINGS_SET("vendor-reset-allow", &m_app_config.vendor_reset_allow,
+		     sizeof(m_app_config.vendor_reset_allow));
+	SETTINGS_SET("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	SETTINGS_SET("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
+	SETTINGS_SET("radio-mode", &m_app_config.radio_mode, sizeof(m_app_config.radio_mode));
 	SETTINGS_SET("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
 	SETTINGS_SET("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
 	SETTINGS_SET("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
@@ -122,76 +155,10 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	SETTINGS_SET("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	SETTINGS_SET("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
-	SETTINGS_SET("alarm-temperature-enabled", &m_app_config.alarm_temperature_enabled,
-		     sizeof(m_app_config.alarm_temperature_enabled));
-	SETTINGS_SET("alarm-temperature-lo", &m_app_config.alarm_temperature_lo,
-		     sizeof(m_app_config.alarm_temperature_lo));
-	SETTINGS_SET("alarm-temperature-hi", &m_app_config.alarm_temperature_hi,
-		     sizeof(m_app_config.alarm_temperature_hi));
-	SETTINGS_SET("alarm-temperature-hst", &m_app_config.alarm_temperature_hst,
-		     sizeof(m_app_config.alarm_temperature_hst));
-	SETTINGS_SET("alarm-humidity-enabled", &m_app_config.alarm_humidity_enabled,
-		     sizeof(m_app_config.alarm_humidity_enabled));
-	SETTINGS_SET("alarm-humidity-lo", &m_app_config.alarm_humidity_lo,
-		     sizeof(m_app_config.alarm_humidity_lo));
-	SETTINGS_SET("alarm-humidity-hi", &m_app_config.alarm_humidity_hi,
-		     sizeof(m_app_config.alarm_humidity_hi));
-	SETTINGS_SET("alarm-humidity-hst", &m_app_config.alarm_humidity_hst,
-		     sizeof(m_app_config.alarm_humidity_hst));
-	SETTINGS_SET("alarm-pressure-enabled", &m_app_config.alarm_pressure_enabled,
-		     sizeof(m_app_config.alarm_pressure_enabled));
-	SETTINGS_SET("alarm-pressure-lo", &m_app_config.alarm_pressure_lo,
-		     sizeof(m_app_config.alarm_pressure_lo));
-	SETTINGS_SET("alarm-pressure-hi", &m_app_config.alarm_pressure_hi,
-		     sizeof(m_app_config.alarm_pressure_hi));
-	SETTINGS_SET("alarm-pressure-hst", &m_app_config.alarm_pressure_hst,
-		     sizeof(m_app_config.alarm_pressure_hst));
-	SETTINGS_SET("alarm-t1-temperature-enabled", &m_app_config.alarm_t1_temperature_enabled,
-		     sizeof(m_app_config.alarm_t1_temperature_enabled));
-	SETTINGS_SET("alarm-t1-temperature-lo", &m_app_config.alarm_t1_temperature_lo,
-		     sizeof(m_app_config.alarm_t1_temperature_lo));
-	SETTINGS_SET("alarm-t1-temperature-hi", &m_app_config.alarm_t1_temperature_hi,
-		     sizeof(m_app_config.alarm_t1_temperature_hi));
-	SETTINGS_SET("alarm-t1-temperature-hst", &m_app_config.alarm_t1_temperature_hst,
-		     sizeof(m_app_config.alarm_t1_temperature_hst));
-	SETTINGS_SET("alarm-t2-temperature-enabled", &m_app_config.alarm_t2_temperature_enabled,
-		     sizeof(m_app_config.alarm_t2_temperature_enabled));
-	SETTINGS_SET("alarm-t2-temperature-lo", &m_app_config.alarm_t2_temperature_lo,
-		     sizeof(m_app_config.alarm_t2_temperature_lo));
-	SETTINGS_SET("alarm-t2-temperature-hi", &m_app_config.alarm_t2_temperature_hi,
-		     sizeof(m_app_config.alarm_t2_temperature_hi));
-	SETTINGS_SET("alarm-t2-temperature-hst", &m_app_config.alarm_t2_temperature_hst,
-		     sizeof(m_app_config.alarm_t2_temperature_hst));
-	SETTINGS_SET("hall-left-counter", &m_app_config.hall_left_counter,
-		     sizeof(m_app_config.hall_left_counter));
-	SETTINGS_SET("hall-left-notify-act", &m_app_config.hall_left_notify_act,
-		     sizeof(m_app_config.hall_left_notify_act));
-	SETTINGS_SET("hall-left-notify-deact", &m_app_config.hall_left_notify_deact,
-		     sizeof(m_app_config.hall_left_notify_deact));
-	SETTINGS_SET("hall-right-counter", &m_app_config.hall_right_counter,
-		     sizeof(m_app_config.hall_right_counter));
-	SETTINGS_SET("hall-right-notify-act", &m_app_config.hall_right_notify_act,
-		     sizeof(m_app_config.hall_right_notify_act));
-	SETTINGS_SET("hall-right-notify-deact", &m_app_config.hall_right_notify_deact,
-		     sizeof(m_app_config.hall_right_notify_deact));
-	SETTINGS_SET("input-a-counter", &m_app_config.input_a_counter,
-		     sizeof(m_app_config.input_a_counter));
-	SETTINGS_SET("input-a-notify-act", &m_app_config.input_a_notify_act,
-		     sizeof(m_app_config.input_a_notify_act));
-	SETTINGS_SET("input-a-notify-deact", &m_app_config.input_a_notify_deact,
-		     sizeof(m_app_config.input_a_notify_deact));
-	SETTINGS_SET("input-b-counter", &m_app_config.input_b_counter,
-		     sizeof(m_app_config.input_b_counter));
-	SETTINGS_SET("input-b-notify-act", &m_app_config.input_b_notify_act,
-		     sizeof(m_app_config.input_b_notify_act));
-	SETTINGS_SET("input-b-notify-deact", &m_app_config.input_b_notify_deact,
-		     sizeof(m_app_config.input_b_notify_deact));
-	SETTINGS_SET("corr-temperature", &m_app_config.corr_temperature,
-		     sizeof(m_app_config.corr_temperature));
-	SETTINGS_SET("corr-t1-temperature", &m_app_config.corr_t1_temperature,
-		     sizeof(m_app_config.corr_t1_temperature));
-	SETTINGS_SET("corr-t2-temperature", &m_app_config.corr_t2_temperature,
-		     sizeof(m_app_config.corr_t2_temperature));
+	SETTINGS_SET("lrw-link-check-interval", &m_app_config.lrw_link_check_interval,
+		     sizeof(m_app_config.lrw_link_check_interval));
+	SETTINGS_SET("lrw-link-check-fail-rejoin", &m_app_config.lrw_link_check_fail_rejoin,
+		     sizeof(m_app_config.lrw_link_check_fail_rejoin));
 	SETTINGS_SET("cap-hall-left", &m_app_config.cap_hall_left,
 		     sizeof(m_app_config.cap_hall_left));
 	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
@@ -204,10 +171,41 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.cap_barometer));
 	SETTINGS_SET("cap-pir-detector", &m_app_config.cap_pir_detector,
 		     sizeof(m_app_config.cap_pir_detector));
-	SETTINGS_SET("cap-1w-thermometer", &m_app_config.cap_1w_thermometer,
-		     sizeof(m_app_config.cap_1w_thermometer));
-	SETTINGS_SET("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
-		     sizeof(m_app_config.cap_1w_machine_probe));
+	SETTINGS_SET("cap-buzzer", &m_app_config.cap_buzzer, sizeof(m_app_config.cap_buzzer));
+	SETTINGS_SET("cap-w1-sensors", &m_app_config.cap_w1_sensors,
+		     sizeof(m_app_config.cap_w1_sensors));
+	SETTINGS_SET("cap-accelerometer", &m_app_config.cap_accelerometer,
+		     sizeof(m_app_config.cap_accelerometer));
+	SETTINGS_SET("alarm-0", m_app_config.alarm_0, sizeof(m_app_config.alarm_0));
+	SETTINGS_SET("alarm-1", m_app_config.alarm_1, sizeof(m_app_config.alarm_1));
+	SETTINGS_SET("alarm-2", m_app_config.alarm_2, sizeof(m_app_config.alarm_2));
+	SETTINGS_SET("alarm-3", m_app_config.alarm_3, sizeof(m_app_config.alarm_3));
+	SETTINGS_SET("alarm-4", m_app_config.alarm_4, sizeof(m_app_config.alarm_4));
+	SETTINGS_SET("alarm-5", m_app_config.alarm_5, sizeof(m_app_config.alarm_5));
+	SETTINGS_SET("alarm-6", m_app_config.alarm_6, sizeof(m_app_config.alarm_6));
+	SETTINGS_SET("alarm-7", m_app_config.alarm_7, sizeof(m_app_config.alarm_7));
+	SETTINGS_SET("alarm-8", m_app_config.alarm_8, sizeof(m_app_config.alarm_8));
+	SETTINGS_SET("alarm-9", m_app_config.alarm_9, sizeof(m_app_config.alarm_9));
+	SETTINGS_SET("alarm-10", m_app_config.alarm_10, sizeof(m_app_config.alarm_10));
+	SETTINGS_SET("alarm-11", m_app_config.alarm_11, sizeof(m_app_config.alarm_11));
+	SETTINGS_SET("alarm-12", m_app_config.alarm_12, sizeof(m_app_config.alarm_12));
+	SETTINGS_SET("alarm-13", m_app_config.alarm_13, sizeof(m_app_config.alarm_13));
+	SETTINGS_SET("alarm-14", m_app_config.alarm_14, sizeof(m_app_config.alarm_14));
+	SETTINGS_SET("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
+	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
+		     sizeof(m_app_config.accel_motion_sensitivity));
+	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
+	SETTINGS_SET("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
+	SETTINGS_SET("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
+	SETTINGS_SET("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
+	SETTINGS_SET("hall-left-counter", &m_app_config.hall_left_counter,
+		     sizeof(m_app_config.hall_left_counter));
+	SETTINGS_SET("hall-right-counter", &m_app_config.hall_right_counter,
+		     sizeof(m_app_config.hall_right_counter));
+	SETTINGS_SET("input-a-counter", &m_app_config.input_a_counter,
+		     sizeof(m_app_config.input_a_counter));
+	SETTINGS_SET("input-b-counter", &m_app_config.input_b_counter,
+		     sizeof(m_app_config.input_b_counter));
 
 #undef SETTINGS_SET
 
@@ -218,10 +216,110 @@ static int h_commit(void)
 {
 	LOG_DBG("Loaded settings in full");
 
-	if (m_app_config.config_version != APP_CONFIG_VERSION) {
-		LOG_WRN("Config version mismatch (stored=%u, expected=%u), resetting to defaults",
+	/* L-33: migrate only on an UPGRADE (stored < current). Using != also fired on
+	 * a downgrade and reset the application parameters to the older firmware's
+	 * defaults; a downgrade should keep the stored config as-is (values are clamped
+	 * below anyway). */
+	if (m_app_config.config_version < APP_CONFIG_VERSION) {
+		LOG_WRN("Config version older than firmware (stored=%u, expected=%u), migrating",
 			m_app_config.config_version, APP_CONFIG_VERSION);
+
+		/* Reset application parameters to defaults, but carry over factory
+		 * identity and network credentials (the `device_reset` persistent
+		 * tier in the YAML, #299) so a schema bump never un-provisions a
+		 * field device. */
+		struct app_config stored = m_app_config;
+
 		m_app_config = m_app_config_defaults;
+		memcpy(m_app_config.secret_key, stored.secret_key, sizeof(m_app_config.secret_key));
+		m_app_config.serial_number = stored.serial_number;
+		m_app_config.nonce_counter = stored.nonce_counter;
+		memcpy(m_app_config.claim_token, stored.claim_token,
+		       sizeof(m_app_config.claim_token));
+		memcpy(m_app_config.vendor_token, stored.vendor_token,
+		       sizeof(m_app_config.vendor_token));
+		m_app_config.vendor_reset_allow = stored.vendor_reset_allow;
+		m_app_config.lrw_region = stored.lrw_region;
+		m_app_config.radio_mode = stored.radio_mode;
+		m_app_config.lrw_sub_band = stored.lrw_sub_band;
+		m_app_config.lrw_network = stored.lrw_network;
+		m_app_config.lrw_adr = stored.lrw_adr;
+		m_app_config.lrw_activation = stored.lrw_activation;
+		memcpy(m_app_config.lrw_deveui, stored.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+		memcpy(m_app_config.lrw_joineui, stored.lrw_joineui,
+		       sizeof(m_app_config.lrw_joineui));
+		memcpy(m_app_config.lrw_nwkkey, stored.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
+		memcpy(m_app_config.lrw_appkey, stored.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+		memcpy(m_app_config.lrw_devaddr, stored.lrw_devaddr,
+		       sizeof(m_app_config.lrw_devaddr));
+		memcpy(m_app_config.lrw_nwkskey, stored.lrw_nwkskey,
+		       sizeof(m_app_config.lrw_nwkskey));
+		memcpy(m_app_config.lrw_appskey, stored.lrw_appskey,
+		       sizeof(m_app_config.lrw_appskey));
+
+		m_app_config_migrated = true;
+	}
+
+	/* Clamp loaded values into their configured ranges so a corrupted or forged
+	 * NVS record can't leave the device in a broken state (e.g. interval=0 ->
+	 * K_SECONDS(0), or an out-of-range enum that no code path expects). */
+	if (m_app_config.interval_sample < 5 && m_app_config.interval_sample != 0) {
+		m_app_config.interval_sample = 5;
+	}
+	if (m_app_config.interval_sample > 3600) {
+		m_app_config.interval_sample = 3600;
+	}
+	if (m_app_config.interval_report < 60) {
+		m_app_config.interval_report = 60;
+	}
+	if (m_app_config.interval_report > 86400) {
+		m_app_config.interval_report = 86400;
+	}
+	if (m_app_config.battery_level < 1000) {
+		m_app_config.battery_level = 1000;
+	}
+	if (m_app_config.battery_level > 3600) {
+		m_app_config.battery_level = 3600;
+	}
+	if (m_app_config.alarm_limit < 0) {
+		m_app_config.alarm_limit = 0;
+	}
+	if (m_app_config.alarm_limit > 3600) {
+		m_app_config.alarm_limit = 3600;
+	}
+	if ((int)m_app_config.lrw_region < 0 || (int)m_app_config.lrw_region > 2) {
+		m_app_config.lrw_region = 0;
+	}
+	if ((int)m_app_config.radio_mode < 0 || (int)m_app_config.radio_mode > 2) {
+		m_app_config.radio_mode = APP_CONFIG_RADIO_MODE_OFF;
+	}
+	if (m_app_config.lrw_sub_band < 0) {
+		m_app_config.lrw_sub_band = 0;
+	}
+	if (m_app_config.lrw_sub_band > 8) {
+		m_app_config.lrw_sub_band = 8;
+	}
+	if ((int)m_app_config.lrw_network < 0 || (int)m_app_config.lrw_network > 1) {
+		m_app_config.lrw_network = 0;
+	}
+	if ((int)m_app_config.lrw_activation < 0 || (int)m_app_config.lrw_activation > 1) {
+		m_app_config.lrw_activation = 0;
+	}
+	if (m_app_config.lrw_link_check_interval < 0) {
+		m_app_config.lrw_link_check_interval = 0;
+	}
+	if (m_app_config.lrw_link_check_interval > 255) {
+		m_app_config.lrw_link_check_interval = 255;
+	}
+	if (m_app_config.lrw_link_check_fail_rejoin < 1) {
+		m_app_config.lrw_link_check_fail_rejoin = 1;
+	}
+	if (m_app_config.lrw_link_check_fail_rejoin > 255) {
+		m_app_config.lrw_link_check_fail_rejoin = 255;
+	}
+	if ((int)m_app_config.accel_motion_sensitivity < 0 ||
+	    (int)m_app_config.accel_motion_sensitivity > 3) {
+		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
 	}
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
@@ -235,19 +333,29 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		(void)export_func(SETTINGS_PFX "/" _key, _var, _size);                             \
 	} while (0)
 
-	EXPORT_FUNC("config-version", &m_app_config.config_version,
-		    sizeof(m_app_config.config_version));
 	EXPORT_FUNC("secret-key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
 	EXPORT_FUNC("serial-number", &m_app_config.serial_number,
 		    sizeof(m_app_config.serial_number));
 	EXPORT_FUNC("nonce-counter", &m_app_config.nonce_counter,
 		    sizeof(m_app_config.nonce_counter));
+	EXPORT_FUNC("claim-token", m_app_config.claim_token, sizeof(m_app_config.claim_token));
+	EXPORT_FUNC("vendor-token", m_app_config.vendor_token, sizeof(m_app_config.vendor_token));
 	EXPORT_FUNC("calibration", &m_app_config.calibration, sizeof(m_app_config.calibration));
 	EXPORT_FUNC("interval-sample", &m_app_config.interval_sample,
 		    sizeof(m_app_config.interval_sample));
 	EXPORT_FUNC("interval-report", &m_app_config.interval_report,
 		    sizeof(m_app_config.interval_report));
+	EXPORT_FUNC("history-enable", &m_app_config.history_enable,
+		    sizeof(m_app_config.history_enable));
+	EXPORT_FUNC("history-sensors", &m_app_config.history_sensors,
+		    sizeof(m_app_config.history_sensors));
+	EXPORT_FUNC("battery-level", &m_app_config.battery_level,
+		    sizeof(m_app_config.battery_level));
+	EXPORT_FUNC("vendor-reset-allow", &m_app_config.vendor_reset_allow,
+		    sizeof(m_app_config.vendor_reset_allow));
+	EXPORT_FUNC("alarm-limit", &m_app_config.alarm_limit, sizeof(m_app_config.alarm_limit));
 	EXPORT_FUNC("lrw-region", &m_app_config.lrw_region, sizeof(m_app_config.lrw_region));
+	EXPORT_FUNC("radio-mode", &m_app_config.radio_mode, sizeof(m_app_config.radio_mode));
 	EXPORT_FUNC("lrw-sub-band", &m_app_config.lrw_sub_band, sizeof(m_app_config.lrw_sub_band));
 	EXPORT_FUNC("lrw-network", &m_app_config.lrw_network, sizeof(m_app_config.lrw_network));
 	EXPORT_FUNC("lrw-adr", &m_app_config.lrw_adr, sizeof(m_app_config.lrw_adr));
@@ -260,76 +368,10 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	EXPORT_FUNC("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	EXPORT_FUNC("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
-	EXPORT_FUNC("alarm-temperature-enabled", &m_app_config.alarm_temperature_enabled,
-		    sizeof(m_app_config.alarm_temperature_enabled));
-	EXPORT_FUNC("alarm-temperature-lo", &m_app_config.alarm_temperature_lo,
-		    sizeof(m_app_config.alarm_temperature_lo));
-	EXPORT_FUNC("alarm-temperature-hi", &m_app_config.alarm_temperature_hi,
-		    sizeof(m_app_config.alarm_temperature_hi));
-	EXPORT_FUNC("alarm-temperature-hst", &m_app_config.alarm_temperature_hst,
-		    sizeof(m_app_config.alarm_temperature_hst));
-	EXPORT_FUNC("alarm-humidity-enabled", &m_app_config.alarm_humidity_enabled,
-		    sizeof(m_app_config.alarm_humidity_enabled));
-	EXPORT_FUNC("alarm-humidity-lo", &m_app_config.alarm_humidity_lo,
-		    sizeof(m_app_config.alarm_humidity_lo));
-	EXPORT_FUNC("alarm-humidity-hi", &m_app_config.alarm_humidity_hi,
-		    sizeof(m_app_config.alarm_humidity_hi));
-	EXPORT_FUNC("alarm-humidity-hst", &m_app_config.alarm_humidity_hst,
-		    sizeof(m_app_config.alarm_humidity_hst));
-	EXPORT_FUNC("alarm-pressure-enabled", &m_app_config.alarm_pressure_enabled,
-		    sizeof(m_app_config.alarm_pressure_enabled));
-	EXPORT_FUNC("alarm-pressure-lo", &m_app_config.alarm_pressure_lo,
-		    sizeof(m_app_config.alarm_pressure_lo));
-	EXPORT_FUNC("alarm-pressure-hi", &m_app_config.alarm_pressure_hi,
-		    sizeof(m_app_config.alarm_pressure_hi));
-	EXPORT_FUNC("alarm-pressure-hst", &m_app_config.alarm_pressure_hst,
-		    sizeof(m_app_config.alarm_pressure_hst));
-	EXPORT_FUNC("alarm-t1-temperature-enabled", &m_app_config.alarm_t1_temperature_enabled,
-		    sizeof(m_app_config.alarm_t1_temperature_enabled));
-	EXPORT_FUNC("alarm-t1-temperature-lo", &m_app_config.alarm_t1_temperature_lo,
-		    sizeof(m_app_config.alarm_t1_temperature_lo));
-	EXPORT_FUNC("alarm-t1-temperature-hi", &m_app_config.alarm_t1_temperature_hi,
-		    sizeof(m_app_config.alarm_t1_temperature_hi));
-	EXPORT_FUNC("alarm-t1-temperature-hst", &m_app_config.alarm_t1_temperature_hst,
-		    sizeof(m_app_config.alarm_t1_temperature_hst));
-	EXPORT_FUNC("alarm-t2-temperature-enabled", &m_app_config.alarm_t2_temperature_enabled,
-		    sizeof(m_app_config.alarm_t2_temperature_enabled));
-	EXPORT_FUNC("alarm-t2-temperature-lo", &m_app_config.alarm_t2_temperature_lo,
-		    sizeof(m_app_config.alarm_t2_temperature_lo));
-	EXPORT_FUNC("alarm-t2-temperature-hi", &m_app_config.alarm_t2_temperature_hi,
-		    sizeof(m_app_config.alarm_t2_temperature_hi));
-	EXPORT_FUNC("alarm-t2-temperature-hst", &m_app_config.alarm_t2_temperature_hst,
-		    sizeof(m_app_config.alarm_t2_temperature_hst));
-	EXPORT_FUNC("hall-left-counter", &m_app_config.hall_left_counter,
-		    sizeof(m_app_config.hall_left_counter));
-	EXPORT_FUNC("hall-left-notify-act", &m_app_config.hall_left_notify_act,
-		    sizeof(m_app_config.hall_left_notify_act));
-	EXPORT_FUNC("hall-left-notify-deact", &m_app_config.hall_left_notify_deact,
-		    sizeof(m_app_config.hall_left_notify_deact));
-	EXPORT_FUNC("hall-right-counter", &m_app_config.hall_right_counter,
-		    sizeof(m_app_config.hall_right_counter));
-	EXPORT_FUNC("hall-right-notify-act", &m_app_config.hall_right_notify_act,
-		    sizeof(m_app_config.hall_right_notify_act));
-	EXPORT_FUNC("hall-right-notify-deact", &m_app_config.hall_right_notify_deact,
-		    sizeof(m_app_config.hall_right_notify_deact));
-	EXPORT_FUNC("input-a-counter", &m_app_config.input_a_counter,
-		    sizeof(m_app_config.input_a_counter));
-	EXPORT_FUNC("input-a-notify-act", &m_app_config.input_a_notify_act,
-		    sizeof(m_app_config.input_a_notify_act));
-	EXPORT_FUNC("input-a-notify-deact", &m_app_config.input_a_notify_deact,
-		    sizeof(m_app_config.input_a_notify_deact));
-	EXPORT_FUNC("input-b-counter", &m_app_config.input_b_counter,
-		    sizeof(m_app_config.input_b_counter));
-	EXPORT_FUNC("input-b-notify-act", &m_app_config.input_b_notify_act,
-		    sizeof(m_app_config.input_b_notify_act));
-	EXPORT_FUNC("input-b-notify-deact", &m_app_config.input_b_notify_deact,
-		    sizeof(m_app_config.input_b_notify_deact));
-	EXPORT_FUNC("corr-temperature", &m_app_config.corr_temperature,
-		    sizeof(m_app_config.corr_temperature));
-	EXPORT_FUNC("corr-t1-temperature", &m_app_config.corr_t1_temperature,
-		    sizeof(m_app_config.corr_t1_temperature));
-	EXPORT_FUNC("corr-t2-temperature", &m_app_config.corr_t2_temperature,
-		    sizeof(m_app_config.corr_t2_temperature));
+	EXPORT_FUNC("lrw-link-check-interval", &m_app_config.lrw_link_check_interval,
+		    sizeof(m_app_config.lrw_link_check_interval));
+	EXPORT_FUNC("lrw-link-check-fail-rejoin", &m_app_config.lrw_link_check_fail_rejoin,
+		    sizeof(m_app_config.lrw_link_check_fail_rejoin));
 	EXPORT_FUNC("cap-hall-left", &m_app_config.cap_hall_left,
 		    sizeof(m_app_config.cap_hall_left));
 	EXPORT_FUNC("cap-hall-right", &m_app_config.cap_hall_right,
@@ -342,10 +384,47 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.cap_barometer));
 	EXPORT_FUNC("cap-pir-detector", &m_app_config.cap_pir_detector,
 		    sizeof(m_app_config.cap_pir_detector));
-	EXPORT_FUNC("cap-1w-thermometer", &m_app_config.cap_1w_thermometer,
-		    sizeof(m_app_config.cap_1w_thermometer));
-	EXPORT_FUNC("cap-1w-machine-probe", &m_app_config.cap_1w_machine_probe,
-		    sizeof(m_app_config.cap_1w_machine_probe));
+	EXPORT_FUNC("cap-buzzer", &m_app_config.cap_buzzer, sizeof(m_app_config.cap_buzzer));
+	EXPORT_FUNC("cap-w1-sensors", &m_app_config.cap_w1_sensors,
+		    sizeof(m_app_config.cap_w1_sensors));
+	EXPORT_FUNC("cap-accelerometer", &m_app_config.cap_accelerometer,
+		    sizeof(m_app_config.cap_accelerometer));
+	EXPORT_FUNC("alarm-0", m_app_config.alarm_0, sizeof(m_app_config.alarm_0));
+	EXPORT_FUNC("alarm-1", m_app_config.alarm_1, sizeof(m_app_config.alarm_1));
+	EXPORT_FUNC("alarm-2", m_app_config.alarm_2, sizeof(m_app_config.alarm_2));
+	EXPORT_FUNC("alarm-3", m_app_config.alarm_3, sizeof(m_app_config.alarm_3));
+	EXPORT_FUNC("alarm-4", m_app_config.alarm_4, sizeof(m_app_config.alarm_4));
+	EXPORT_FUNC("alarm-5", m_app_config.alarm_5, sizeof(m_app_config.alarm_5));
+	EXPORT_FUNC("alarm-6", m_app_config.alarm_6, sizeof(m_app_config.alarm_6));
+	EXPORT_FUNC("alarm-7", m_app_config.alarm_7, sizeof(m_app_config.alarm_7));
+	EXPORT_FUNC("alarm-8", m_app_config.alarm_8, sizeof(m_app_config.alarm_8));
+	EXPORT_FUNC("alarm-9", m_app_config.alarm_9, sizeof(m_app_config.alarm_9));
+	EXPORT_FUNC("alarm-10", m_app_config.alarm_10, sizeof(m_app_config.alarm_10));
+	EXPORT_FUNC("alarm-11", m_app_config.alarm_11, sizeof(m_app_config.alarm_11));
+	EXPORT_FUNC("alarm-12", m_app_config.alarm_12, sizeof(m_app_config.alarm_12));
+	EXPORT_FUNC("alarm-13", m_app_config.alarm_13, sizeof(m_app_config.alarm_13));
+	EXPORT_FUNC("alarm-14", m_app_config.alarm_14, sizeof(m_app_config.alarm_14));
+	EXPORT_FUNC("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
+	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
+		    sizeof(m_app_config.accel_motion_sensitivity));
+	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
+	EXPORT_FUNC("sensor2-rom", m_app_config.sensor2_rom, sizeof(m_app_config.sensor2_rom));
+	EXPORT_FUNC("sensor3-rom", m_app_config.sensor3_rom, sizeof(m_app_config.sensor3_rom));
+	EXPORT_FUNC("sensor4-rom", m_app_config.sensor4_rom, sizeof(m_app_config.sensor4_rom));
+	EXPORT_FUNC("hall-left-counter", &m_app_config.hall_left_counter,
+		    sizeof(m_app_config.hall_left_counter));
+	EXPORT_FUNC("hall-right-counter", &m_app_config.hall_right_counter,
+		    sizeof(m_app_config.hall_right_counter));
+	EXPORT_FUNC("input-a-counter", &m_app_config.input_a_counter,
+		    sizeof(m_app_config.input_a_counter));
+	EXPORT_FUNC("input-b-counter", &m_app_config.input_b_counter,
+		    sizeof(m_app_config.input_b_counter));
+	/* Export config-version LAST: settings_save is per-key atomic, so writing
+	 * the schema marker after every value means a brownout mid-save leaves an
+	 * old version with a partial new payload rather than a new version flagging
+	 * data as fully migrated. Paired with the migration restore in h_commit. */
+	EXPORT_FUNC("config-version", &m_app_config.config_version,
+		    sizeof(m_app_config.config_version));
 
 #undef EXPORT_FUNC
 
@@ -360,6 +439,78 @@ static const char m_msg_invalid_value[] = "invalid argument value";
 static const char m_msg_cmd_success[] = "command succeeded";
 
 typedef void (*print_func_t)(const struct shell *shell);
+
+/* Largest shell-settable byte field is 16 B (the LoRaWAN keys); the guard keeps
+ * the fixed scratch safe should a longer field ever be added. */
+#define CMD_BYTES_MAX 32
+
+static void print_bytes(const struct shell *shell, const char *key, const uint8_t *value,
+			size_t size)
+{
+	char buf[2 * CMD_BYTES_MAX + 1];
+
+	if (size > CMD_BYTES_MAX) {
+		return;
+	}
+
+	int ret = bin2hex(value, size, buf, sizeof(buf));
+	if (!ret) {
+		LOG_ERR("Call `bin2hex` failed: %d", ret);
+		return;
+	}
+
+	shell_print(shell, SETTINGS_PFX " %s %s", key, buf);
+}
+
+static int cmd_bytes(const struct shell *shell, size_t argc, char **argv, uint8_t *value,
+		     size_t size, bool write_once, print_func_t print_func)
+{
+	if (argc == 1) {
+		if (print_func) {
+			print_func(shell);
+		}
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (size > CMD_BYTES_MAX || strlen(argv[1]) != 2 * size) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* Decode into a temp buffer first. hex2bin writes byte-by-byte straight
+	 * into the destination and bails (returning 0) on the first invalid nibble,
+	 * so decoding into the config would leave a half-overwritten key that a
+	 * later `save` would persist. Commit only on a fully valid decode. */
+	uint8_t tmp[CMD_BYTES_MAX];
+
+	int ret = hex2bin(argv[1], strlen(argv[1]), tmp, size);
+	if (ret != (int)size) {
+		LOG_ERR("Call `hex2bin` failed: %d", ret);
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	if (write_once) {
+		/* write-once (#170): refuse to overwrite a value that is already set. The
+		 * all-zero state is the "unset" sentinel; once any byte is non-zero the
+		 * field is locked (commission once, then immutable). */
+		for (size_t i = 0; i < size; i++) {
+			if (value[i] != 0) {
+				shell_error(shell, "%s already set (immutable)", argv[0]);
+				return -EACCES;
+			}
+		}
+	}
+
+	memcpy(value, tmp, size);
+
+	return 0;
+}
 
 static int cmd_bool(const struct shell *shell, size_t argc, char **argv, bool *param,
 		    print_func_t print_func)
@@ -422,51 +573,9 @@ static int cmd_int(const struct shell *shell, size_t argc, char **argv, int *par
 	return 0;
 }
 
-static int cmd_float(const struct shell *shell, size_t argc, char **argv, float *param, float min,
-		     float max, print_func_t print_func)
-{
-	if (argc == 1) {
-		if (print_func) {
-			print_func(shell);
-		}
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	char *endptr;
-	float value = strtof(argv[1], &endptr);
-
-	if (*endptr != '\0' || endptr == argv[1]) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	if (value < min || value > max) {
-		shell_error(shell, "%s", m_msg_invalid_range);
-		return -EINVAL;
-	}
-
-	*param = value;
-	shell_print(shell, "%s", m_msg_cmd_success);
-	return 0;
-}
-
 static void print_secret_key(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.secret_key) + 1];
-
-	int ret =
-		bin2hex(m_app_config.secret_key, sizeof(m_app_config.secret_key), buf, sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " secret-key %s", buf);
+	print_bytes(shell, "secret-key", m_app_config.secret_key, sizeof(m_app_config.secret_key));
 }
 
 static void print_serial_number(const struct shell *shell)
@@ -477,6 +586,18 @@ static void print_serial_number(const struct shell *shell)
 static void print_nonce_counter(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " nonce-counter %u", m_app_config.nonce_counter);
+}
+
+static void print_claim_token(const struct shell *shell)
+{
+	print_bytes(shell, "claim-token", m_app_config.claim_token,
+		    sizeof(m_app_config.claim_token));
+}
+
+static void print_vendor_token(const struct shell *shell)
+{
+	print_bytes(shell, "vendor-token", m_app_config.vendor_token,
+		    sizeof(m_app_config.vendor_token));
 }
 
 static void print_calibration(const struct shell *shell)
@@ -493,6 +614,33 @@ static void print_interval_sample(const struct shell *shell)
 static void print_interval_report(const struct shell *shell)
 {
 	shell_print(shell, SETTINGS_PFX " interval-report %d", m_app_config.interval_report);
+}
+
+static void print_history_enable(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " history-enable %s",
+		    m_app_config.history_enable ? "true" : "false");
+}
+
+static void print_history_sensors(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " history-sensors %u", m_app_config.history_sensors);
+}
+
+static void print_battery_level(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " battery-level %d", m_app_config.battery_level);
+}
+
+static void print_vendor_reset_allow(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " vendor-reset-allow %s",
+		    m_app_config.vendor_reset_allow ? "true" : "false");
+}
+
+static void print_alarm_limit(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " alarm-limit %d", m_app_config.alarm_limit);
 }
 
 static void print_lrw_region(const struct shell *shell)
@@ -513,6 +661,26 @@ static void print_lrw_region(const struct shell *shell)
 		break;
 	}
 	shell_print(shell, SETTINGS_PFX " lrw-region %s", str);
+}
+
+static void print_radio_mode(const struct shell *shell)
+{
+	const char *str;
+	switch (m_app_config.radio_mode) {
+	case APP_CONFIG_RADIO_MODE_OFF:
+		str = "off";
+		break;
+	case APP_CONFIG_RADIO_MODE_LORAWAN:
+		str = "lorawan";
+		break;
+	case APP_CONFIG_RADIO_MODE_P2P:
+		str = "p2p";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " radio-mode %s", str);
 }
 
 static void print_lrw_sub_band(const struct shell *shell)
@@ -561,310 +729,53 @@ static void print_lrw_activation(const struct shell *shell)
 
 static void print_lrw_deveui(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_deveui) + 1];
-
-	int ret =
-		bin2hex(m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui), buf, sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-deveui %s", buf);
+	print_bytes(shell, "lrw-deveui", m_app_config.lrw_deveui, sizeof(m_app_config.lrw_deveui));
 }
 
 static void print_lrw_joineui(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_joineui) + 1];
-
-	int ret = bin2hex(m_app_config.lrw_joineui, sizeof(m_app_config.lrw_joineui), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-joineui %s", buf);
+	print_bytes(shell, "lrw-joineui", m_app_config.lrw_joineui,
+		    sizeof(m_app_config.lrw_joineui));
 }
 
 static void print_lrw_nwkkey(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_nwkkey) + 1];
-
-	int ret =
-		bin2hex(m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey), buf, sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-nwkkey %s", buf);
+	print_bytes(shell, "lrw-nwkkey", m_app_config.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
 }
 
 static void print_lrw_appkey(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_appkey) + 1];
-
-	int ret =
-		bin2hex(m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey), buf, sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-appkey %s", buf);
+	print_bytes(shell, "lrw-appkey", m_app_config.lrw_appkey, sizeof(m_app_config.lrw_appkey));
 }
 
 static void print_lrw_devaddr(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_devaddr) + 1];
-
-	int ret = bin2hex(m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-devaddr %s", buf);
+	print_bytes(shell, "lrw-devaddr", m_app_config.lrw_devaddr,
+		    sizeof(m_app_config.lrw_devaddr));
 }
 
 static void print_lrw_nwkskey(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_nwkskey) + 1];
-
-	int ret = bin2hex(m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-nwkskey %s", buf);
+	print_bytes(shell, "lrw-nwkskey", m_app_config.lrw_nwkskey,
+		    sizeof(m_app_config.lrw_nwkskey));
 }
 
 static void print_lrw_appskey(const struct shell *shell)
 {
-	char buf[2 * sizeof(m_app_config.lrw_appskey) + 1];
-
-	int ret = bin2hex(m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey), buf,
-			  sizeof(buf));
-	if (!ret) {
-		LOG_ERR("Call `bin2hex` failed: %d", ret);
-		return;
-	}
-
-	shell_print(shell, SETTINGS_PFX " lrw-appskey %s", buf);
+	print_bytes(shell, "lrw-appskey", m_app_config.lrw_appskey,
+		    sizeof(m_app_config.lrw_appskey));
 }
 
-static void print_alarm_temperature_enabled(const struct shell *shell)
+static void print_lrw_link_check_interval(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " alarm-temperature-enabled %s",
-		    m_app_config.alarm_temperature_enabled ? "true" : "false");
+	shell_print(shell, SETTINGS_PFX " lrw-link-check-interval %d",
+		    m_app_config.lrw_link_check_interval);
 }
 
-static void print_alarm_temperature_lo(const struct shell *shell)
+static void print_lrw_link_check_fail_rejoin(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " alarm-temperature-lo %.2f",
-		    (double)m_app_config.alarm_temperature_lo);
-}
-
-static void print_alarm_temperature_hi(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-temperature-hi %.2f",
-		    (double)m_app_config.alarm_temperature_hi);
-}
-
-static void print_alarm_temperature_hst(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-temperature-hst %.2f",
-		    (double)m_app_config.alarm_temperature_hst);
-}
-
-static void print_alarm_humidity_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-humidity-enabled %s",
-		    m_app_config.alarm_humidity_enabled ? "true" : "false");
-}
-
-static void print_alarm_humidity_lo(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-humidity-lo %.2f",
-		    (double)m_app_config.alarm_humidity_lo);
-}
-
-static void print_alarm_humidity_hi(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-humidity-hi %.2f",
-		    (double)m_app_config.alarm_humidity_hi);
-}
-
-static void print_alarm_humidity_hst(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-humidity-hst %.2f",
-		    (double)m_app_config.alarm_humidity_hst);
-}
-
-static void print_alarm_pressure_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-pressure-enabled %s",
-		    m_app_config.alarm_pressure_enabled ? "true" : "false");
-}
-
-static void print_alarm_pressure_lo(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-pressure-lo %.2f",
-		    (double)m_app_config.alarm_pressure_lo);
-}
-
-static void print_alarm_pressure_hi(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-pressure-hi %.2f",
-		    (double)m_app_config.alarm_pressure_hi);
-}
-
-static void print_alarm_pressure_hst(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-pressure-hst %.2f",
-		    (double)m_app_config.alarm_pressure_hst);
-}
-
-static void print_alarm_t1_temperature_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t1-temperature-enabled %s",
-		    m_app_config.alarm_t1_temperature_enabled ? "true" : "false");
-}
-
-static void print_alarm_t1_temperature_lo(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t1-temperature-lo %.2f",
-		    (double)m_app_config.alarm_t1_temperature_lo);
-}
-
-static void print_alarm_t1_temperature_hi(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t1-temperature-hi %.2f",
-		    (double)m_app_config.alarm_t1_temperature_hi);
-}
-
-static void print_alarm_t1_temperature_hst(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t1-temperature-hst %.2f",
-		    (double)m_app_config.alarm_t1_temperature_hst);
-}
-
-static void print_alarm_t2_temperature_enabled(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t2-temperature-enabled %s",
-		    m_app_config.alarm_t2_temperature_enabled ? "true" : "false");
-}
-
-static void print_alarm_t2_temperature_lo(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t2-temperature-lo %.2f",
-		    (double)m_app_config.alarm_t2_temperature_lo);
-}
-
-static void print_alarm_t2_temperature_hi(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t2-temperature-hi %.2f",
-		    (double)m_app_config.alarm_t2_temperature_hi);
-}
-
-static void print_alarm_t2_temperature_hst(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " alarm-t2-temperature-hst %.2f",
-		    (double)m_app_config.alarm_t2_temperature_hst);
-}
-
-static void print_hall_left_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-left-counter %s",
-		    m_app_config.hall_left_counter ? "true" : "false");
-}
-
-static void print_hall_left_notify_act(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-left-notify-act %s",
-		    m_app_config.hall_left_notify_act ? "true" : "false");
-}
-
-static void print_hall_left_notify_deact(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-left-notify-deact %s",
-		    m_app_config.hall_left_notify_deact ? "true" : "false");
-}
-
-static void print_hall_right_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-right-counter %s",
-		    m_app_config.hall_right_counter ? "true" : "false");
-}
-
-static void print_hall_right_notify_act(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-right-notify-act %s",
-		    m_app_config.hall_right_notify_act ? "true" : "false");
-}
-
-static void print_hall_right_notify_deact(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " hall-right-notify-deact %s",
-		    m_app_config.hall_right_notify_deact ? "true" : "false");
-}
-
-static void print_input_a_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-a-counter %s",
-		    m_app_config.input_a_counter ? "true" : "false");
-}
-
-static void print_input_a_notify_act(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-a-notify-act %s",
-		    m_app_config.input_a_notify_act ? "true" : "false");
-}
-
-static void print_input_a_notify_deact(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-a-notify-deact %s",
-		    m_app_config.input_a_notify_deact ? "true" : "false");
-}
-
-static void print_input_b_counter(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-b-counter %s",
-		    m_app_config.input_b_counter ? "true" : "false");
-}
-
-static void print_input_b_notify_act(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-b-notify-act %s",
-		    m_app_config.input_b_notify_act ? "true" : "false");
-}
-
-static void print_input_b_notify_deact(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " input-b-notify-deact %s",
-		    m_app_config.input_b_notify_deact ? "true" : "false");
-}
-
-static void print_corr_temperature(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " corr-temperature %.2f",
-		    (double)m_app_config.corr_temperature);
-}
-
-static void print_corr_t1_temperature(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " corr-t1-temperature %.2f",
-		    (double)m_app_config.corr_t1_temperature);
-}
-
-static void print_corr_t2_temperature(const struct shell *shell)
-{
-	shell_print(shell, SETTINGS_PFX " corr-t2-temperature %.2f",
-		    (double)m_app_config.corr_t2_temperature);
+	shell_print(shell, SETTINGS_PFX " lrw-link-check-fail-rejoin %d",
+		    m_app_config.lrw_link_check_fail_rejoin);
 }
 
 static void print_cap_hall_left(const struct shell *shell)
@@ -909,16 +820,93 @@ static void print_cap_pir_detector(const struct shell *shell)
 		    m_app_config.cap_pir_detector ? "true" : "false");
 }
 
-static void print_cap_1w_thermometer(const struct shell *shell)
+static void print_cap_buzzer(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " cap-1w-thermometer %s",
-		    m_app_config.cap_1w_thermometer ? "true" : "false");
+	shell_print(shell, SETTINGS_PFX " cap-buzzer %s",
+		    m_app_config.cap_buzzer ? "true" : "false");
 }
 
-static void print_cap_1w_machine_probe(const struct shell *shell)
+static void print_cap_w1_sensors(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " cap-1w-machine-probe %s",
-		    m_app_config.cap_1w_machine_probe ? "true" : "false");
+	shell_print(shell, SETTINGS_PFX " cap-w1-sensors %s",
+		    m_app_config.cap_w1_sensors ? "true" : "false");
+}
+
+static void print_cap_accelerometer(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " cap-accelerometer %s",
+		    m_app_config.cap_accelerometer ? "true" : "false");
+}
+
+static void print_accel_motion_sensitivity(const struct shell *shell)
+{
+	const char *str;
+	switch (m_app_config.accel_motion_sensitivity) {
+	case APP_CONFIG_MOTION_SENSITIVITY_OFF:
+		str = "off";
+		break;
+	case APP_CONFIG_MOTION_SENSITIVITY_LOW:
+		str = "low";
+		break;
+	case APP_CONFIG_MOTION_SENSITIVITY_MEDIUM:
+		str = "medium";
+		break;
+	case APP_CONFIG_MOTION_SENSITIVITY_HIGH:
+		str = "high";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " accel-motion-sensitivity %s", str);
+}
+
+static void print_sensor1_rom(const struct shell *shell)
+{
+	print_bytes(shell, "sensor1-rom", m_app_config.sensor1_rom,
+		    sizeof(m_app_config.sensor1_rom));
+}
+
+static void print_sensor2_rom(const struct shell *shell)
+{
+	print_bytes(shell, "sensor2-rom", m_app_config.sensor2_rom,
+		    sizeof(m_app_config.sensor2_rom));
+}
+
+static void print_sensor3_rom(const struct shell *shell)
+{
+	print_bytes(shell, "sensor3-rom", m_app_config.sensor3_rom,
+		    sizeof(m_app_config.sensor3_rom));
+}
+
+static void print_sensor4_rom(const struct shell *shell)
+{
+	print_bytes(shell, "sensor4-rom", m_app_config.sensor4_rom,
+		    sizeof(m_app_config.sensor4_rom));
+}
+
+static void print_hall_left_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " hall-left-counter %s",
+		    m_app_config.hall_left_counter ? "true" : "false");
+}
+
+static void print_hall_right_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " hall-right-counter %s",
+		    m_app_config.hall_right_counter ? "true" : "false");
+}
+
+static void print_input_a_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " input-a-counter %s",
+		    m_app_config.input_a_counter ? "true" : "false");
+}
+
+static void print_input_b_counter(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " input-b-counter %s",
+		    m_app_config.input_b_counter ? "true" : "false");
 }
 
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
@@ -926,10 +914,18 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_secret_key(shell);
 	print_serial_number(shell);
 	print_nonce_counter(shell);
+	print_claim_token(shell);
+	print_vendor_token(shell);
 	print_calibration(shell);
 	print_interval_sample(shell);
 	print_interval_report(shell);
+	print_history_enable(shell);
+	print_history_sensors(shell);
+	print_battery_level(shell);
+	print_vendor_reset_allow(shell);
+	print_alarm_limit(shell);
 	print_lrw_region(shell);
+	print_radio_mode(shell);
 	print_lrw_sub_band(shell);
 	print_lrw_network(shell);
 	print_lrw_adr(shell);
@@ -941,41 +937,8 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_lrw_devaddr(shell);
 	print_lrw_nwkskey(shell);
 	print_lrw_appskey(shell);
-	print_alarm_temperature_enabled(shell);
-	print_alarm_temperature_lo(shell);
-	print_alarm_temperature_hi(shell);
-	print_alarm_temperature_hst(shell);
-	print_alarm_humidity_enabled(shell);
-	print_alarm_humidity_lo(shell);
-	print_alarm_humidity_hi(shell);
-	print_alarm_humidity_hst(shell);
-	print_alarm_pressure_enabled(shell);
-	print_alarm_pressure_lo(shell);
-	print_alarm_pressure_hi(shell);
-	print_alarm_pressure_hst(shell);
-	print_alarm_t1_temperature_enabled(shell);
-	print_alarm_t1_temperature_lo(shell);
-	print_alarm_t1_temperature_hi(shell);
-	print_alarm_t1_temperature_hst(shell);
-	print_alarm_t2_temperature_enabled(shell);
-	print_alarm_t2_temperature_lo(shell);
-	print_alarm_t2_temperature_hi(shell);
-	print_alarm_t2_temperature_hst(shell);
-	print_hall_left_counter(shell);
-	print_hall_left_notify_act(shell);
-	print_hall_left_notify_deact(shell);
-	print_hall_right_counter(shell);
-	print_hall_right_notify_act(shell);
-	print_hall_right_notify_deact(shell);
-	print_input_a_counter(shell);
-	print_input_a_notify_act(shell);
-	print_input_a_notify_deact(shell);
-	print_input_b_counter(shell);
-	print_input_b_notify_act(shell);
-	print_input_b_notify_deact(shell);
-	print_corr_temperature(shell);
-	print_corr_t1_temperature(shell);
-	print_corr_t2_temperature(shell);
+	print_lrw_link_check_interval(shell);
+	print_lrw_link_check_fail_rejoin(shell);
 	print_cap_hall_left(shell);
 	print_cap_hall_right(shell);
 	print_cap_input_a(shell);
@@ -983,40 +946,26 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_light_sensor(shell);
 	print_cap_barometer(shell);
 	print_cap_pir_detector(shell);
-	print_cap_1w_thermometer(shell);
-	print_cap_1w_machine_probe(shell);
+	print_cap_buzzer(shell);
+	print_cap_w1_sensors(shell);
+	print_cap_accelerometer(shell);
+	print_accel_motion_sensitivity(shell);
+	print_sensor1_rom(shell);
+	print_sensor2_rom(shell);
+	print_sensor3_rom(shell);
+	print_sensor4_rom(shell);
+	print_hall_left_counter(shell);
+	print_hall_right_counter(shell);
+	print_input_a_counter(shell);
+	print_input_b_counter(shell);
 
 	return 0;
 }
 
 static int cmd_secret_key(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_secret_key(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.secret_key)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.secret_key,
-		      sizeof(m_app_config.secret_key));
-	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.secret_key,
+			 sizeof(m_app_config.secret_key), false, print_secret_key);
 }
 
 static int cmd_serial_number(const struct shell *shell, size_t argc, char **argv)
@@ -1076,6 +1025,8 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 	}
 
 	char *endptr;
+
+	errno = 0;
 	unsigned long value = strtoul(argv[1], &endptr, 10);
 
 	if (*endptr != '\0' || endptr == argv[1]) {
@@ -1083,7 +1034,10 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 		return -EINVAL;
 	}
 
-	if (value < 0 || value > UINT32_MAX) {
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < 0 || value > UINT32_MAX) {
 		shell_error(shell, "%s", m_msg_invalid_range);
 		return -EINVAL;
 	}
@@ -1091,6 +1045,18 @@ static int cmd_nonce_counter(const struct shell *shell, size_t argc, char **argv
 	m_app_config.nonce_counter = (uint32_t)value;
 	shell_print(shell, "%s", m_msg_cmd_success);
 	return 0;
+}
+
+static int cmd_claim_token(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bytes(shell, argc, argv, m_app_config.claim_token,
+			 sizeof(m_app_config.claim_token), true, print_claim_token);
+}
+
+static int cmd_vendor_token(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bytes(shell, argc, argv, m_app_config.vendor_token,
+			 sizeof(m_app_config.vendor_token), true, print_vendor_token);
 }
 
 static int cmd_calibration(const struct shell *shell, size_t argc, char **argv)
@@ -1134,6 +1100,68 @@ static int cmd_interval_report(const struct shell *shell, size_t argc, char **ar
 		       print_interval_report);
 }
 
+static int cmd_history_enable(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.history_enable, print_history_enable);
+}
+
+static int cmd_history_sensors(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_history_sensors(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	if (argv[1][0] == '-') {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	char *endptr;
+
+	errno = 0;
+	unsigned long value = strtoul(argv[1], &endptr, 10);
+
+	if (*endptr != '\0' || endptr == argv[1]) {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		return -EINVAL;
+	}
+
+	/* errno==ERANGE catches strtoul saturating an out-of-range input to
+	 * ULONG_MAX on 32-bit (e.g. a giant nonce-counter), which would otherwise
+	 * slip past the max check when max is itself UINT32_MAX. */
+	if (errno == ERANGE || value < 0 || value > UINT32_MAX) {
+		shell_error(shell, "%s", m_msg_invalid_range);
+		return -EINVAL;
+	}
+
+	m_app_config.history_sensors = (uint32_t)value;
+	shell_print(shell, "%s", m_msg_cmd_success);
+	return 0;
+}
+
+static int cmd_battery_level(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.battery_level, 1000, 3600,
+		       print_battery_level);
+}
+
+static int cmd_vendor_reset_allow(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.vendor_reset_allow,
+			print_vendor_reset_allow);
+}
+
+static int cmd_alarm_limit(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.alarm_limit, 0, 3600, print_alarm_limit);
+}
+
 static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -1146,6 +1174,12 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: eu868, us915, au915");
+		return 0;
+	}
+
 	if (!strcmp(argv[1], "eu868")) {
 		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_EU868;
 	} else if (!strcmp(argv[1], "us915")) {
@@ -1154,6 +1188,40 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_AU915;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: eu868, us915, au915");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_radio_mode(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_radio_mode(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: off, lorawan, p2p");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "off")) {
+		m_app_config.radio_mode = APP_CONFIG_RADIO_MODE_OFF;
+	} else if (!strcmp(argv[1], "lorawan")) {
+		m_app_config.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN;
+	} else if (!strcmp(argv[1], "p2p")) {
+		m_app_config.radio_mode = APP_CONFIG_RADIO_MODE_P2P;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: off, lorawan, p2p");
 		return -EINVAL;
 	}
 
@@ -1177,12 +1245,19 @@ static int cmd_lrw_network(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: public, private");
+		return 0;
+	}
+
 	if (!strcmp(argv[1], "public")) {
 		m_app_config.lrw_network = APP_CONFIG_LRW_NETWORK_PUBLIC;
 	} else if (!strcmp(argv[1], "private")) {
 		m_app_config.lrw_network = APP_CONFIG_LRW_NETWORK_PRIVATE;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: public, private");
 		return -EINVAL;
 	}
 
@@ -1206,12 +1281,19 @@ static int cmd_lrw_activation(const struct shell *shell, size_t argc, char **arg
 		return -EINVAL;
 	}
 
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: otaa, abp");
+		return 0;
+	}
+
 	if (!strcmp(argv[1], "otaa")) {
 		m_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_OTAA;
 	} else if (!strcmp(argv[1], "abp")) {
 		m_app_config.lrw_activation = APP_CONFIG_LRW_ACTIVATION_ABP;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: otaa, abp");
 		return -EINVAL;
 	}
 
@@ -1220,420 +1302,56 @@ static int cmd_lrw_activation(const struct shell *shell, size_t argc, char **arg
 
 static int cmd_lrw_deveui(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_deveui(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_deveui)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_deveui,
-		      sizeof(m_app_config.lrw_deveui));
-	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_deveui,
+			 sizeof(m_app_config.lrw_deveui), false, print_lrw_deveui);
 }
 
 static int cmd_lrw_joineui(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_joineui(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_joineui)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_joineui,
-		      sizeof(m_app_config.lrw_joineui));
-	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_joineui,
+			 sizeof(m_app_config.lrw_joineui), false, print_lrw_joineui);
 }
 
 static int cmd_lrw_nwkkey(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_nwkkey(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_nwkkey)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_nwkkey,
-		      sizeof(m_app_config.lrw_nwkkey));
-	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_nwkkey,
+			 sizeof(m_app_config.lrw_nwkkey), false, print_lrw_nwkkey);
 }
 
 static int cmd_lrw_appkey(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_appkey(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_appkey)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_appkey,
-		      sizeof(m_app_config.lrw_appkey));
-	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_appkey,
+			 sizeof(m_app_config.lrw_appkey), false, print_lrw_appkey);
 }
 
 static int cmd_lrw_devaddr(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_devaddr(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_devaddr)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_devaddr,
-		      sizeof(m_app_config.lrw_devaddr));
-	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_devaddr,
+			 sizeof(m_app_config.lrw_devaddr), false, print_lrw_devaddr);
 }
 
 static int cmd_lrw_nwkskey(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_nwkskey(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_nwkskey)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_nwkskey,
-		      sizeof(m_app_config.lrw_nwkskey));
-	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_nwkskey,
+			 sizeof(m_app_config.lrw_nwkskey), false, print_lrw_nwkskey);
 }
 
 static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 {
-	int ret;
-
-	if (argc == 1) {
-		print_lrw_appskey(shell);
-		return 0;
-	}
-
-	if (argc != 2) {
-		shell_error(shell, "%s", m_msg_invalid_args);
-		return -EINVAL;
-	}
-
-	if (strlen(argv[1]) != 2 * sizeof(m_app_config.lrw_appskey)) {
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	ret = hex2bin(argv[1], strlen(argv[1]), m_app_config.lrw_appskey,
-		      sizeof(m_app_config.lrw_appskey));
-	if (!ret) {
-		LOG_ERR("Call `hex2bin` failed: %d", ret);
-		shell_error(shell, "%s", m_msg_invalid_value);
-		return -EINVAL;
-	}
-
-	return 0;
+	return cmd_bytes(shell, argc, argv, m_app_config.lrw_appskey,
+			 sizeof(m_app_config.lrw_appskey), false, print_lrw_appskey);
 }
 
-static int cmd_alarm_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
+static int cmd_lrw_link_check_interval(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.alarm_temperature_enabled,
-			print_alarm_temperature_enabled);
+	return cmd_int(shell, argc, argv, &m_app_config.lrw_link_check_interval, 0, 255,
+		       print_lrw_link_check_interval);
 }
 
-static int cmd_alarm_temperature_lo(const struct shell *shell, size_t argc, char **argv)
+static int cmd_lrw_link_check_fail_rejoin(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_lo, -30.0f, 70.0f,
-			 print_alarm_temperature_lo);
-}
-
-static int cmd_alarm_temperature_hi(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_hi, -30.0f, 70.0f,
-			 print_alarm_temperature_hi);
-}
-
-static int cmd_alarm_temperature_hst(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_temperature_hst, 0.0f, 5.0f,
-			 print_alarm_temperature_hst);
-}
-
-static int cmd_alarm_humidity_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.alarm_humidity_enabled,
-			print_alarm_humidity_enabled);
-}
-
-static int cmd_alarm_humidity_lo(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_lo, 0.0f, 100.0f,
-			 print_alarm_humidity_lo);
-}
-
-static int cmd_alarm_humidity_hi(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_hi, 0.0f, 100.0f,
-			 print_alarm_humidity_hi);
-}
-
-static int cmd_alarm_humidity_hst(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_humidity_hst, 0.0f, 20.0f,
-			 print_alarm_humidity_hst);
-}
-
-static int cmd_alarm_pressure_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.alarm_pressure_enabled,
-			print_alarm_pressure_enabled);
-}
-
-static int cmd_alarm_pressure_lo(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_lo, 500.0f, 1200.0f,
-			 print_alarm_pressure_lo);
-}
-
-static int cmd_alarm_pressure_hi(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_hi, 500.0f, 1200.0f,
-			 print_alarm_pressure_hi);
-}
-
-static int cmd_alarm_pressure_hst(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_pressure_hst, 0.0f, 50.0f,
-			 print_alarm_pressure_hst);
-}
-
-static int cmd_alarm_t1_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.alarm_t1_temperature_enabled,
-			print_alarm_t1_temperature_enabled);
-}
-
-static int cmd_alarm_t1_temperature_lo(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_lo, -30.0f, 70.0f,
-			 print_alarm_t1_temperature_lo);
-}
-
-static int cmd_alarm_t1_temperature_hi(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_hi, -30.0f, 70.0f,
-			 print_alarm_t1_temperature_hi);
-}
-
-static int cmd_alarm_t1_temperature_hst(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_t1_temperature_hst, 0.0f, 5.0f,
-			 print_alarm_t1_temperature_hst);
-}
-
-static int cmd_alarm_t2_temperature_enabled(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.alarm_t2_temperature_enabled,
-			print_alarm_t2_temperature_enabled);
-}
-
-static int cmd_alarm_t2_temperature_lo(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_lo, -30.0f, 70.0f,
-			 print_alarm_t2_temperature_lo);
-}
-
-static int cmd_alarm_t2_temperature_hi(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_hi, -30.0f, 70.0f,
-			 print_alarm_t2_temperature_hi);
-}
-
-static int cmd_alarm_t2_temperature_hst(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.alarm_t2_temperature_hst, 0.0f, 5.0f,
-			 print_alarm_t2_temperature_hst);
-}
-
-static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_counter,
-			print_hall_left_counter);
-}
-
-static int cmd_hall_left_notify_act(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_notify_act,
-			print_hall_left_notify_act);
-}
-
-static int cmd_hall_left_notify_deact(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_notify_deact,
-			print_hall_left_notify_deact);
-}
-
-static int cmd_hall_right_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_counter,
-			print_hall_right_counter);
-}
-
-static int cmd_hall_right_notify_act(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_notify_act,
-			print_hall_right_notify_act);
-}
-
-static int cmd_hall_right_notify_deact(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_notify_deact,
-			print_hall_right_notify_deact);
-}
-
-static int cmd_input_a_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_a_counter, print_input_a_counter);
-}
-
-static int cmd_input_a_notify_act(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_a_notify_act,
-			print_input_a_notify_act);
-}
-
-static int cmd_input_a_notify_deact(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_a_notify_deact,
-			print_input_a_notify_deact);
-}
-
-static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_b_counter, print_input_b_counter);
-}
-
-static int cmd_input_b_notify_act(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_b_notify_act,
-			print_input_b_notify_act);
-}
-
-static int cmd_input_b_notify_deact(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_bool(shell, argc, argv, &m_app_config.input_b_notify_deact,
-			print_input_b_notify_deact);
-}
-
-static int cmd_corr_temperature(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.corr_temperature, -5.0f, 5.0f,
-			 print_corr_temperature);
-}
-
-static int cmd_corr_t1_temperature(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.corr_t1_temperature, -5.0f, 5.0f,
-			 print_corr_t1_temperature);
-}
-
-static int cmd_corr_t2_temperature(const struct shell *shell, size_t argc, char **argv)
-{
-	return cmd_float(shell, argc, argv, &m_app_config.corr_t2_temperature, -5.0f, 5.0f,
-			 print_corr_t2_temperature);
+	return cmd_int(shell, argc, argv, &m_app_config.lrw_link_check_fail_rejoin, 1, 255,
+		       print_lrw_link_check_fail_rejoin);
 }
 
 static int cmd_cap_hall_left(const struct shell *shell, size_t argc, char **argv)
@@ -1671,16 +1389,101 @@ static int cmd_cap_pir_detector(const struct shell *shell, size_t argc, char **a
 	return cmd_bool(shell, argc, argv, &m_app_config.cap_pir_detector, print_cap_pir_detector);
 }
 
-static int cmd_cap_1w_thermometer(const struct shell *shell, size_t argc, char **argv)
+static int cmd_cap_buzzer(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_thermometer,
-			print_cap_1w_thermometer);
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_buzzer, print_cap_buzzer);
 }
 
-static int cmd_cap_1w_machine_probe(const struct shell *shell, size_t argc, char **argv)
+static int cmd_cap_w1_sensors(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_bool(shell, argc, argv, &m_app_config.cap_1w_machine_probe,
-			print_cap_1w_machine_probe);
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_w1_sensors, print_cap_w1_sensors);
+}
+
+static int cmd_cap_accelerometer(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.cap_accelerometer,
+			print_cap_accelerometer);
+}
+
+static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_accel_motion_sensitivity(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: off, low, medium, high");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "off")) {
+		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
+	} else if (!strcmp(argv[1], "low")) {
+		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_LOW;
+	} else if (!strcmp(argv[1], "medium")) {
+		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_MEDIUM;
+	} else if (!strcmp(argv[1], "high")) {
+		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_HIGH;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: off, low, medium, high");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cmd_sensor1_rom(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bytes(shell, argc, argv, m_app_config.sensor1_rom,
+			 sizeof(m_app_config.sensor1_rom), false, print_sensor1_rom);
+}
+
+static int cmd_sensor2_rom(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bytes(shell, argc, argv, m_app_config.sensor2_rom,
+			 sizeof(m_app_config.sensor2_rom), false, print_sensor2_rom);
+}
+
+static int cmd_sensor3_rom(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bytes(shell, argc, argv, m_app_config.sensor3_rom,
+			 sizeof(m_app_config.sensor3_rom), false, print_sensor3_rom);
+}
+
+static int cmd_sensor4_rom(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bytes(shell, argc, argv, m_app_config.sensor4_rom,
+			 sizeof(m_app_config.sensor4_rom), false, print_sensor4_rom);
+}
+
+static int cmd_hall_left_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.hall_left_counter,
+			print_hall_left_counter);
+}
+
+static int cmd_hall_right_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.hall_right_counter,
+			print_hall_right_counter);
+}
+
+static int cmd_input_a_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.input_a_counter, print_input_a_counter);
+}
+
+static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.input_b_counter, print_input_b_counter);
 }
 
 static int print_help(const struct shell *shell, size_t argc, char **argv)
@@ -1717,6 +1520,14 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set nonce counter (unsigned integer).",
 	              cmd_nonce_counter, 1, 1),
 
+	SHELL_CMD_ARG(claim-token, NULL,
+	              "Get/Set device claim token (32 hexadecimal digits); write-once at commissioning.",
+	              cmd_claim_token, 1, 1),
+
+	SHELL_CMD_ARG(vendor-token, NULL,
+	              "Get/Set vendor token (32 hexadecimal digits); write-once at commissioning.",
+	              cmd_vendor_token, 1, 1),
+
 	SHELL_CMD_ARG(calibration, NULL,
 	              "Get/Set calibration mode (true/false).",
 	              cmd_calibration, 1, 1),
@@ -1729,9 +1540,33 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set report interval (range 60 to 86400 seconds).",
 	              cmd_interval_report, 1, 1),
 
+	SHELL_CMD_ARG(history-enable, NULL,
+	              "Get/Set sensor history store-and-forward (true/false).",
+	              cmd_history_enable, 1, 1),
+
+	SHELL_CMD_ARG(history-sensors, NULL,
+	              "Get/Set history sensor selection bitmask (literal, bit i = enum app_history_sensor i; 0 = no channels). Default 0x0003 = temperature + humidity.",
+	              cmd_history_sensors, 1, 1),
+
+	SHELL_CMD_ARG(battery-level, NULL,
+	              "Get/Set low-battery alarm threshold in mV (default 2400; Li cells discharge non-linearly). Alarm on fPort 3 (source=battery) when supply drops below this.",
+	              cmd_battery_level, 1, 1),
+
+	SHELL_CMD_ARG(vendor-reset-allow, NULL,
+	              "Get/Set whether vendor_reset is accepted (true/false); over the air, settable only over the vendor NFC channel.",
+	              cmd_vendor_reset_allow, 1, 1),
+
+	SHELL_CMD_ARG(alarm-limit, NULL,
+	              "Get/Set minimum interval between alarm uplinks in seconds (0 = disabled).",
+	              cmd_alarm_limit, 1, 1),
+
 	SHELL_CMD_ARG(lrw-region, NULL,
 	              "Get/Set LoRaWAN region (eu868/us915/au915).",
 	              cmd_lrw_region, 1, 1),
+
+	SHELL_CMD_ARG(radio-mode, NULL,
+	              "Get/Set radio mode (off/lorawan/p2p). off = radio-silent, sensor/history still run.",
+	              cmd_radio_mode, 1, 1),
 
 	SHELL_CMD_ARG(lrw-sub-band, NULL,
 	              "Get/Set US915/AU915 sub-band (1-8, 0 = all channels). Default 2 matches TTN/Helium/ChirpStack.",
@@ -1777,145 +1612,13 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set LoRaWAN AppSKey (32 hexadecimal digits).",
 	              cmd_lrw_appskey, 1, 1),
 
-	SHELL_CMD_ARG(alarm-temperature-enabled, NULL,
-	              "Get/Set temperature alarm enabled (true/false).",
-	              cmd_alarm_temperature_enabled, 1, 1),
+	SHELL_CMD_ARG(lrw-link-check-interval, NULL,
+	              "Get/Set link-check cadence: request a LinkCheckReq every N-th uplink (0 = disabled).",
+	              cmd_lrw_link_check_interval, 1, 1),
 
-	SHELL_CMD_ARG(alarm-temperature-lo, NULL,
-	              "Get/Set temperature low threshold (-30 to 70 deg. C).",
-	              cmd_alarm_temperature_lo, 1, 1),
-
-	SHELL_CMD_ARG(alarm-temperature-hi, NULL,
-	              "Get/Set temperature high threshold (-30 to 70 deg. C).",
-	              cmd_alarm_temperature_hi, 1, 1),
-
-	SHELL_CMD_ARG(alarm-temperature-hst, NULL,
-	              "Get/Set T1 temperature hysteresis (0 to 5 deg. C).",
-	              cmd_alarm_temperature_hst, 1, 1),
-
-	SHELL_CMD_ARG(alarm-humidity-enabled, NULL,
-	              "Get/Set humidity alarm enabled (true/false).",
-	              cmd_alarm_humidity_enabled, 1, 1),
-
-	SHELL_CMD_ARG(alarm-humidity-lo, NULL,
-	              "Get/Set humidity low threshold (0 to 100 %).",
-	              cmd_alarm_humidity_lo, 1, 1),
-
-	SHELL_CMD_ARG(alarm-humidity-hi, NULL,
-	              "Get/Set humidity high threshold (0 to 100 %).",
-	              cmd_alarm_humidity_hi, 1, 1),
-
-	SHELL_CMD_ARG(alarm-humidity-hst, NULL,
-	              "Get/Set humidity hysteresis (0 to 20 %).",
-	              cmd_alarm_humidity_hst, 1, 1),
-
-	SHELL_CMD_ARG(alarm-pressure-enabled, NULL,
-	              "Get/Set pressure alarm enabled (true/false).",
-	              cmd_alarm_pressure_enabled, 1, 1),
-
-	SHELL_CMD_ARG(alarm-pressure-lo, NULL,
-	              "Get/Set pressure low threshold (500 to 1200 hPa).",
-	              cmd_alarm_pressure_lo, 1, 1),
-
-	SHELL_CMD_ARG(alarm-pressure-hi, NULL,
-	              "Get/Set pressure high threshold (500 to 1200 hPa).",
-	              cmd_alarm_pressure_hi, 1, 1),
-
-	SHELL_CMD_ARG(alarm-pressure-hst, NULL,
-	              "Get/Set pressure hysteresis (0 to 50 hPa).",
-	              cmd_alarm_pressure_hst, 1, 1),
-
-	SHELL_CMD_ARG(alarm-t1-temperature-enabled, NULL,
-	              "Get/Set T1 temperature alarm enabled (true/false).",
-	              cmd_alarm_t1_temperature_enabled, 1, 1),
-
-	SHELL_CMD_ARG(alarm-t1-temperature-lo, NULL,
-	              "Get/Set T1 temperature low threshold (-30 to 70 deg. C).",
-	              cmd_alarm_t1_temperature_lo, 1, 1),
-
-	SHELL_CMD_ARG(alarm-t1-temperature-hi, NULL,
-	              "Get/Set T1 temperature high threshold (-30 to 70 deg. C).",
-	              cmd_alarm_t1_temperature_hi, 1, 1),
-
-	SHELL_CMD_ARG(alarm-t1-temperature-hst, NULL,
-	              "Get/Set T1 temperature hysteresis (0 to 5 deg. C).",
-	              cmd_alarm_t1_temperature_hst, 1, 1),
-
-	SHELL_CMD_ARG(alarm-t2-temperature-enabled, NULL,
-	              "Get/Set T2 temperature alarm enabled (true/false).",
-	              cmd_alarm_t2_temperature_enabled, 1, 1),
-
-	SHELL_CMD_ARG(alarm-t2-temperature-lo, NULL,
-	              "Get/Set T2 temperature low threshold (-30 to 70 deg. C).",
-	              cmd_alarm_t2_temperature_lo, 1, 1),
-
-	SHELL_CMD_ARG(alarm-t2-temperature-hi, NULL,
-	              "Get/Set T2 temperature high threshold (-30 to 70 deg. C).",
-	              cmd_alarm_t2_temperature_hi, 1, 1),
-
-	SHELL_CMD_ARG(alarm-t2-temperature-hst, NULL,
-	              "Get/Set T2 temperature hysteresis (0 to 5 deg. C).",
-	              cmd_alarm_t2_temperature_hst, 1, 1),
-
-	SHELL_CMD_ARG(hall-left-counter, NULL,
-	              "Get/Set hall left switch counter enabled (true/false).",
-	              cmd_hall_left_counter, 1, 1),
-
-	SHELL_CMD_ARG(hall-left-notify-act, NULL,
-	              "Get/Set hall left switch notify on activation (true/false).",
-	              cmd_hall_left_notify_act, 1, 1),
-
-	SHELL_CMD_ARG(hall-left-notify-deact, NULL,
-	              "Get/Set hall left switch notify on deactivation (true/false).",
-	              cmd_hall_left_notify_deact, 1, 1),
-
-	SHELL_CMD_ARG(hall-right-counter, NULL,
-	              "Get/Set hall right switch counter enabled (true/false).",
-	              cmd_hall_right_counter, 1, 1),
-
-	SHELL_CMD_ARG(hall-right-notify-act, NULL,
-	              "Get/Set hall right switch notify on activation (true/false).",
-	              cmd_hall_right_notify_act, 1, 1),
-
-	SHELL_CMD_ARG(hall-right-notify-deact, NULL,
-	              "Get/Set hall right switch notify on deactivation (true/false).",
-	              cmd_hall_right_notify_deact, 1, 1),
-
-	SHELL_CMD_ARG(input-a-counter, NULL,
-	              "Get/Set input A counter enabled (true/false).",
-	              cmd_input_a_counter, 1, 1),
-
-	SHELL_CMD_ARG(input-a-notify-act, NULL,
-	              "Get/Set input A notify on activation (true/false).",
-	              cmd_input_a_notify_act, 1, 1),
-
-	SHELL_CMD_ARG(input-a-notify-deact, NULL,
-	              "Get/Set input A notify on deactivation (true/false).",
-	              cmd_input_a_notify_deact, 1, 1),
-
-	SHELL_CMD_ARG(input-b-counter, NULL,
-	              "Get/Set input B counter enabled (true/false).",
-	              cmd_input_b_counter, 1, 1),
-
-	SHELL_CMD_ARG(input-b-notify-act, NULL,
-	              "Get/Set input B notify on activation (true/false).",
-	              cmd_input_b_notify_act, 1, 1),
-
-	SHELL_CMD_ARG(input-b-notify-deact, NULL,
-	              "Get/Set input B notify on deactivation (true/false).",
-	              cmd_input_b_notify_deact, 1, 1),
-
-	SHELL_CMD_ARG(corr-temperature, NULL,
-	              "Get/Set temperature correction (range -5.0 to +5.0 deg. C).",
-	              cmd_corr_temperature, 1, 1),
-
-	SHELL_CMD_ARG(corr-t1-temperature, NULL,
-	              "Get/Set T1 temperature correction (range -5.0 to +5.0 deg. C).",
-	              cmd_corr_t1_temperature, 1, 1),
-
-	SHELL_CMD_ARG(corr-t2-temperature, NULL,
-	              "Get/Set T2 temperature correction (range -5.0 to +5.0 deg. C).",
-	              cmd_corr_t2_temperature, 1, 1),
+	SHELL_CMD_ARG(lrw-link-check-fail-rejoin, NULL,
+	              "Get/Set link-check failures (while degraded) before an OTAA rejoin is attempted.",
+	              cmd_lrw_link_check_fail_rejoin, 1, 1),
 
 	SHELL_CMD_ARG(cap-hall-left, NULL,
 	              "Get/Set hall left capability (true/false).",
@@ -1945,13 +1648,53 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set PIR detector capability (true/false).",
 	              cmd_cap_pir_detector, 1, 1),
 
-	SHELL_CMD_ARG(cap-1w-thermometer, NULL,
-	              "Get/Set 1-wire thermometer capability (true/false).",
-	              cmd_cap_1w_thermometer, 1, 1),
+	SHELL_CMD_ARG(cap-buzzer, NULL,
+	              "Get/Set buzzer capability (true/false). Shares GPIO pins with the PIR detector — mutually exclusive with cap_pir_detector (PIR wins if both are enabled).",
+	              cmd_cap_buzzer, 1, 1),
 
-	SHELL_CMD_ARG(cap-1w-machine-probe, NULL,
-	              "Get/Set 1-wire machine probe capability (true/false).",
-	              cmd_cap_1w_machine_probe, 1, 1),
+	SHELL_CMD_ARG(cap-w1-sensors, NULL,
+	              "Get/Set 1-Wire sensor bus capability — enables the bus + auto-detects attached sensors (true/false).",
+	              cmd_cap_w1_sensors, 1, 1),
+
+	SHELL_CMD_ARG(cap-accelerometer, NULL,
+	              "Get/Set accelerometer capability — orientation, motion and free-fall (true/false).",
+	              cmd_cap_accelerometer, 1, 1),
+
+	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
+	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",
+	              cmd_accel_motion_sensitivity, 1, 1),
+
+	SHELL_CMD_ARG(sensor1-rom, NULL,
+	              "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty).",
+	              cmd_sensor1_rom, 1, 1),
+
+	SHELL_CMD_ARG(sensor2-rom, NULL,
+	              "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty).",
+	              cmd_sensor2_rom, 1, 1),
+
+	SHELL_CMD_ARG(sensor3-rom, NULL,
+	              "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty).",
+	              cmd_sensor3_rom, 1, 1),
+
+	SHELL_CMD_ARG(sensor4-rom, NULL,
+	              "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty).",
+	              cmd_sensor4_rom, 1, 1),
+
+	SHELL_CMD_ARG(hall-left-counter, NULL,
+	              "Get/Set hall left switch counter enabled (true/false).",
+	              cmd_hall_left_counter, 1, 1),
+
+	SHELL_CMD_ARG(hall-right-counter, NULL,
+	              "Get/Set hall right switch counter enabled (true/false).",
+	              cmd_hall_right_counter, 1, 1),
+
+	SHELL_CMD_ARG(input-a-counter, NULL,
+	              "Get/Set input A counter enabled (true/false).",
+	              cmd_input_a_counter, 1, 1),
+
+	SHELL_CMD_ARG(input-b-counter, NULL,
+	              "Get/Set input B counter enabled (true/false).",
+	              cmd_input_b_counter, 1, 1),
 
 	SHELL_SUBCMD_SET_END
 );
@@ -1965,6 +1708,137 @@ SHELL_CMD_REGISTER(config, &sub_config, "Configuration commands.", print_help);
 struct app_config *app_config(void)
 {
 	return &m_app_config;
+}
+
+/* Reset every parameter to its compiled-in default EXCEPT the fields tagged
+ * `persistent: [device_reset, ...]` in the YAML (factory identity + full
+ * LoRaWAN), then persist. Backs the `device_reset` command (renamed from
+ * today's `factory_reset`, #299) so the device keeps its LoRaWAN session; the
+ * shell `settings erase` still does a full NVS wipe. Returns 0 or a negative
+ * errno. The caller reboots so every module re-reads the restored config. */
+int app_config_device_reset(void)
+{
+	int ret;
+
+	/* #340 M27: brackets the whole read-modify-write against concurrent
+	 * mutation from another transport (mirrors SetParam's own lock scope,
+	 * which likewise snapshots-then-mutates under the same lock and saves
+	 * outside of it). */
+	app_config_lock();
+
+	struct app_config preserved = m_app_config;
+
+	m_app_config = m_app_config_defaults;
+	memcpy(m_app_config.secret_key, preserved.secret_key, sizeof(m_app_config.secret_key));
+	m_app_config.serial_number = preserved.serial_number;
+	m_app_config.nonce_counter = preserved.nonce_counter;
+	memcpy(m_app_config.claim_token, preserved.claim_token, sizeof(m_app_config.claim_token));
+	memcpy(m_app_config.vendor_token, preserved.vendor_token,
+	       sizeof(m_app_config.vendor_token));
+	m_app_config.vendor_reset_allow = preserved.vendor_reset_allow;
+	m_app_config.lrw_region = preserved.lrw_region;
+	m_app_config.radio_mode = preserved.radio_mode;
+	m_app_config.lrw_sub_band = preserved.lrw_sub_band;
+	m_app_config.lrw_network = preserved.lrw_network;
+	m_app_config.lrw_adr = preserved.lrw_adr;
+	m_app_config.lrw_activation = preserved.lrw_activation;
+	memcpy(m_app_config.lrw_deveui, preserved.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	memcpy(m_app_config.lrw_joineui, preserved.lrw_joineui, sizeof(m_app_config.lrw_joineui));
+	memcpy(m_app_config.lrw_nwkkey, preserved.lrw_nwkkey, sizeof(m_app_config.lrw_nwkkey));
+	memcpy(m_app_config.lrw_appkey, preserved.lrw_appkey, sizeof(m_app_config.lrw_appkey));
+	memcpy(m_app_config.lrw_devaddr, preserved.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
+	memcpy(m_app_config.lrw_nwkskey, preserved.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
+	memcpy(m_app_config.lrw_appskey, preserved.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+
+	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
+
+	app_config_unlock();
+
+	ret = settings_save_subtree(SETTINGS_PFX);
+	if (ret) {
+		LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		return ret;
+	}
+
+	LOG_INF("device_reset: config restored to defaults");
+	return 0;
+}
+
+/* Narrower than device_reset (#299): also drops the LoRaWAN session/keys,
+ * keeping only identity (serial_number/vendor_token/secret_key/DevEUI/
+ * JoinEUI/claim_token) — the device must re-join after this. Returns 0 or a
+ * negative errno; the caller reboots. */
+int app_config_factory_reset(void)
+{
+	int ret;
+
+	/* #340 M27: brackets the whole read-modify-write against concurrent
+	 * mutation from another transport (mirrors SetParam's own lock scope,
+	 * which likewise snapshots-then-mutates under the same lock and saves
+	 * outside of it). */
+	app_config_lock();
+
+	struct app_config preserved = m_app_config;
+
+	m_app_config = m_app_config_defaults;
+	memcpy(m_app_config.secret_key, preserved.secret_key, sizeof(m_app_config.secret_key));
+	m_app_config.serial_number = preserved.serial_number;
+	m_app_config.nonce_counter = preserved.nonce_counter;
+	memcpy(m_app_config.claim_token, preserved.claim_token, sizeof(m_app_config.claim_token));
+	memcpy(m_app_config.vendor_token, preserved.vendor_token,
+	       sizeof(m_app_config.vendor_token));
+	m_app_config.vendor_reset_allow = preserved.vendor_reset_allow;
+	memcpy(m_app_config.lrw_deveui, preserved.lrw_deveui, sizeof(m_app_config.lrw_deveui));
+	memcpy(m_app_config.lrw_joineui, preserved.lrw_joineui, sizeof(m_app_config.lrw_joineui));
+
+	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
+
+	app_config_unlock();
+
+	ret = settings_save_subtree(SETTINGS_PFX);
+	if (ret) {
+		LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		return ret;
+	}
+
+	LOG_INF("factory_reset: config restored to defaults");
+	return 0;
+}
+
+/* Narrowest tier (#299): keeps only serial_number + vendor_token. The caller
+ * (app_settings_vendor_reset) erases the storage+history flash areas first,
+ * then calls this to re-provision the snapshot before saving + rebooting.
+ * Returns 0 or a negative errno. */
+int app_config_vendor_reset(void)
+{
+	int ret;
+
+	/* #340 M27: brackets the whole read-modify-write against concurrent
+	 * mutation from another transport (mirrors SetParam's own lock scope,
+	 * which likewise snapshots-then-mutates under the same lock and saves
+	 * outside of it). */
+	app_config_lock();
+
+	struct app_config preserved = m_app_config;
+
+	m_app_config = m_app_config_defaults;
+	m_app_config.serial_number = preserved.serial_number;
+	m_app_config.nonce_counter = preserved.nonce_counter;
+	memcpy(m_app_config.vendor_token, preserved.vendor_token,
+	       sizeof(m_app_config.vendor_token));
+
+	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
+
+	app_config_unlock();
+
+	ret = settings_save_subtree(SETTINGS_PFX);
+	if (ret) {
+		LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		return ret;
+	}
+
+	LOG_INF("vendor_reset: config restored to defaults");
+	return 0;
 }
 
 static int app_config_init(void)
@@ -1992,8 +1866,28 @@ static int app_config_init(void)
 
 	ret = settings_load_subtree(SETTINGS_PFX);
 	if (ret) {
-		LOG_ERR("Call `settings_load_subtree` failed: %d", ret);
-		return ret;
+		/* H-4: do not silently swallow a load failure. SYS_INIT discards our
+		 * return value, so returning here just lets the device boot on defaults
+		 * (identity + provisioning gone) with no signal. Flag it instead so the
+		 * app can show a distinct state; the in-RAM defaults keep the device
+		 * running rather than dead. */
+		LOG_ERR("Call `settings_load_subtree` failed: %d — booting on defaults", ret);
+		m_app_config_load_failed = true;
+	}
+
+	if (m_app_config_migrated) {
+		m_app_config_migrated = false;
+
+		/* Persist the migrated config right away so the stored schema
+		 * version is bumped and the migration does not repeat on every
+		 * boot. A failure here is not fatal: the in-RAM config is valid
+		 * and the migration simply runs again next boot. */
+		ret = settings_save_subtree(SETTINGS_PFX);
+		if (ret) {
+			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		} else {
+			LOG_INF("Config migrated to version %u and persisted", APP_CONFIG_VERSION);
+		}
 	}
 
 	return 0;

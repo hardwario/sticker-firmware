@@ -1,0 +1,15 @@
+# Copyright (c) 2026 HARDWARIO a.s.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Mirror the app's history Kconfig symbols so app_history.c compiles standalone.
+# Default to the RAM ring backend with a small ring (forces wrap in tests).
+
+config APP_HISTORY_FLASH
+	bool
+	default n
+
+config APP_HISTORY_BYTES
+	int
+	default 64
+
+source "Kconfig.zephyr"

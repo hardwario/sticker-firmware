@@ -28,16 +28,60 @@ Parameter options:
 - minlen/maxlen: length constraints for string type
 - array: array size for numeric types
 - hidden: hide from shell 'show' command
-- readonly: prevent shell modification
 - precision: decimal places for float/double display
 - format: display format (hex/dec for integers, printf format for uint)
+- write_once: once the field holds a non-zero value the shell setter refuses to
+  overwrite it (commission-once identity fields, e.g. claim_token)
+- persistent: list of reset operations (subset of RESET_OPS below) the field
+  survives. Replaces the old boolean `preserve_on_reset`: a field's tier is now
+  explicit per-operation instead of a single all-or-nothing flag. configen
+  generates one preserve/restore routine per operation (`<module>_device_reset`,
+  `<module>_factory_reset`, `<module>_vendor_reset`) plus the h_commit schema-
+  migration restore (which uses the `device_reset` tier — the broadest, matching
+  today's migration behavior). Omitted/empty = reset to compiled default by every
+  operation (the common case for application/alarm/sensor config).
+- proto_field: whether the parameter is a field in the generated config protobuf
+  (AppConfigMessage). Default true. `proto_field: false` keeps it in the C struct
+  + settings (still shell-managed) but emits NO proto field and reserves its
+  proto_id, so it can never be read/written via SetParam/GetParam/GetConfig — for
+  identity fields whose only channels are the shell and hand-written messages
+  (Info / inf), not the config wire.
+
+Access control (readable / writable):
+  Each parameter declares who may read and who may write it, as a subset of the
+  transports {shell, nfc, lrw, vendor}. Both lists default to all four (the
+  common case, so they are usually omitted) -- a field only loses a transport
+  by explicitly narrowing its `writable`/`readable` list, e.g. to keep it off
+  vendor's narrow recovery surface (#299/#316) or off a LoRaWAN downlink:
+    readable: [shell, nfc, lrw]   # shell = `config <name>` / `config show`;
+                                  # nfc/lrw/vendor = ConfigDump (get_param/get_config)
+    writable: [shell, nfc, lrw]   # shell = `config <name>` set; nfc/lrw/vendor = SetParam
+  configen derives the internal generator flags from these (see normalize_access):
+    - no_shell      <- shell in neither list
+    - readonly      <- shell readable but not writable
+    - dump          <- readable over nfc or lrw
+    - dump_nfc_only <- readable over nfc but not lrw (e.g. LoRaWAN keys)
+    - no_write_lrw/no_write_nfc/no_write_vendor <- lrw/nfc/vendor not in writable
+      (per-field SetParam transport gate, M-3; shell has no such gate -- see
+      normalize_access)
+  Root `bytes` identity blobs (secret_key, claim_token) are emitted as a nanopb
+  callback and kept off the wire automatically (their air read, if any, goes via
+  a hand-written message such as Info). `proto_group` is a layout choice only
+  (root vs submessage); it no longer implies anything about access.
 """
 
 import argparse
+import re
 from pathlib import Path
 
 import yaml
 from jinja2 import Environment, FileSystemLoader
+
+# The STICKER reset severity ladder (#299). `device_reboot` (wipes nothing) and
+# `settings erase` (survives nothing) are outside this enum — only the tiers
+# that need a per-field preserve list are named here. Order = broadest first,
+# matching the ladder in the issue.
+RESET_OPS = ["device_reset", "factory_reset", "vendor_reset"]
 from west import log
 from west.commands import WestCommand
 
@@ -320,6 +364,613 @@ def filter_printf_cast(param):
     return casts.get(ptype, "")
 
 
+def filter_persists(param, op):
+    """True if `param` survives reset operation `op` (#299 persistent tiers)."""
+    return op in (param.get("persistent") or [])
+
+
+# ---------------------------------------------------------------------------
+# Protobuf config generation (issue #44)
+#
+# configen also emits the config section of the .proto (and the nanopb
+# max_length options for hex-key fields) from the same YAML, so app_config.yml
+# is the single source of truth for both the C struct and the wire schema.
+# Existing field numbers are locked via per-parameter `proto_id`; the allocator
+# only appends new ones (never renumbers) and writes them back into the YAML.
+# ---------------------------------------------------------------------------
+
+# Marker pair delimiting the generated region in the .proto / .options files.
+PROTO_BEGIN = "BEGIN GENERATED CONFIG"
+PROTO_END = "END GENERATED CONFIG"
+
+# YAML type -> proto3 scalar type (mirrors the hand-written proto: every integer
+# maps to uint32, byte arrays / strings become `string` with a nanopb option).
+PROTO_SCALAR = {
+    "bool": "bool",
+    "float": "float",
+    "double": "double",
+    "bytes": "string",
+    "string": "string",
+}
+
+
+def _pascal(name):
+    """snake_case -> PascalCase (lrw_region -> Region after prefix strip)."""
+    return "".join(w.capitalize() for w in name.split("_") if w)
+
+
+def _proto_field_name(param, group):
+    """Proto field name = YAML name with the group's strip_prefix removed."""
+    name = param["name"]
+    prefix = group.get("strip_prefix", "")
+    if prefix and name.startswith(prefix):
+        name = name[len(prefix):]
+    return param.get("proto_name", name)
+
+
+def _proto_type(param, enum_proto_name):
+    ptype = param.get("type")
+    if ptype == "enum":
+        return enum_proto_name[param["enum"]]
+    # Non-callback bytes use native protobuf `bytes` (nanopb fixed_length, see
+    # build_options_lines) to avoid the 2x hex-string overhead on the wire.
+    # Callback bytes (e.g. secret_key) stay `string` — their hand-written
+    # callback handles the raw stream and they are off the SetParam/dump paths.
+    if ptype == "bytes" and not param.get("proto_callback"):
+        return "bytes"
+    return PROTO_SCALAR.get(ptype, "uint32")
+
+
+def _proto_groups(config):
+    """Return (proto_block, {group_key: group_cfg}) or (None, None)."""
+    proto = config.get("proto")
+    if not proto:
+        return None, None
+    return proto, {g["key"]: g for g in proto["groups"]}
+
+
+TRANSPORTS = ("shell", "nfc", "lrw", "vendor")
+
+
+def normalize_access(config):
+    """Derive the internal per-parameter flags from the `readable`/`writable`
+    transport lists (the single source of truth for who may read/write a field).
+
+    Each list is a subset of TRANSPORTS; an omitted list defaults to all four
+    (the common case). From them we compute the legacy flags the code
+    generators already consume, so the templates stay unchanged:
+
+      - no_shell      = shell in neither readable nor writable (no `config` entry)
+      - readonly      = shell may read but not write
+      - dump          = field is readable over the air (nfc or lrw) -> ConfigDump
+      - dump_nfc_only = readable over nfc but NOT lrw (keys: LNS must not see them)
+      - no_write_lrw/no_write_nfc/no_write_vendor = that transport not in writable
+      - proto_callback = root `bytes` (identity blobs stay off the wire, as
+                         before) — structural, independent of the access lists
+
+    Idempotent: callable more than once (the model builders and do_run share it).
+    """
+    for p in config.get("parameters", []):
+        readable = p.get("readable", list(TRANSPORTS))
+        writable = p.get("writable", list(TRANSPORTS))
+        for which, lst in (("readable", readable), ("writable", writable)):
+            bad = set(lst) - set(TRANSPORTS)
+            if bad:
+                log.die(f"parameter '{p.get('name')}' has invalid {which} "
+                        f"transport(s) {sorted(bad)}; valid: {list(TRANSPORTS)}")
+        r, w = set(readable), set(writable)
+
+        if "shell" not in r and "shell" not in w:
+            p["no_shell"] = True
+        if "shell" in r and "shell" not in w:
+            p["readonly"] = True
+
+        air_read = ("nfc" in r) or ("lrw" in r)
+        p["dump"] = air_read
+        if ("nfc" in r) and ("lrw" not in r):
+            p["dump_nfc_only"] = True
+
+        # Per-transport WRITE gating (M-3): the generated apply_<group>() rejects a
+        # SetParam that tries to write this field over a transport not in `writable`.
+        # shell is not represented: SHELL_DEBUG only exists in debug firmware, and
+        # whoever has physical UART access to a debug build already has full
+        # control of the device (J-Link, RAM readout, reflash) -- gating individual
+        # fields against it would not be a real security boundary. vendor IS gated:
+        # it authenticates with vendor_token (not secret_key) and is deliberately
+        # scoped to a narrow recovery surface (#299/#316), so a field that omits
+        # vendor from `writable` must reject it like any other excluded transport.
+        # Mirrors dump/dump_nfc_only.
+        if "lrw" not in w:
+            p["no_write_lrw"] = True
+        if "nfc" not in w:
+            p["no_write_nfc"] = True
+        if "vendor" not in w:
+            p["no_write_vendor"] = True
+
+        # Root byte blobs (secret_key / claim_token) stay off the wire: emitted as
+        # a nanopb callback in the proto, never in SetParam/ConfigDump. The air
+        # read for these identity fields (claim_token) goes via the hand-written
+        # Info message, not the generated config path.
+        if p.get("proto_group") == "root" and p.get("type") == "bytes":
+            p["proto_callback"] = True
+
+
+def allocate_proto_ids(config, rt_doc):
+    """Assign a proto_id to every parameter missing one (append-only) and mirror
+    the assignment back into `rt_doc` (a ruamel round-trip doc) for write-back.
+
+    Returns the list of (name, id) newly assigned. Mutates `config` parameters
+    in place so the proto model sees the final numbers.
+    """
+    proto, gmap = _proto_groups(config)
+
+    # Collect the used field numbers per message namespace. The root message
+    # namespace holds extra_fields(root), the root-group params and the
+    # submessage container fields; each submessage namespace holds its own
+    # params plus any `reserved` numbers.
+    used = {g["key"]: set() for g in proto["groups"]}
+    for ef in proto.get("extra_fields", []):
+        used[ef.get("proto_group", "root")].add(ef["proto_id"])
+    for g in proto["groups"]:
+        if g["key"] != "root":
+            used.setdefault("root", set()).add(g["proto_id"])
+        for r in g.get("reserved", []):
+            used[g["key"]].add(r)
+
+    # Lock existing ids + detect duplicates within a namespace.
+    for p in config["parameters"]:
+        group = p.get("proto_group")
+        if group is None:
+            log.die(f"parameter '{p['name']}' is missing 'proto_group'")
+        if group not in used:
+            log.die(f"parameter '{p['name']}' has unknown proto_group '{group}'")
+        pid = p.get("proto_id")
+        if pid is not None:
+            if pid in used[group]:
+                log.die(f"duplicate proto_id {pid} in group '{group}' "
+                        f"(parameter '{p['name']}')")
+            used[group].add(pid)
+
+    # Append-only allocation for parameters without an id, in YAML order.
+    assigned = []
+    for p in config["parameters"]:
+        if p.get("proto_id") is None:
+            group = p["proto_group"]
+            nid = (max(used[group]) + 1) if used[group] else 1
+            used[group].add(nid)
+            p["proto_id"] = nid
+            assigned.append((p["name"], nid))
+
+    # Write the new ids back into the round-trip doc (after proto_group).
+    if assigned:
+        new_ids = dict(assigned)
+        for p in rt_doc["parameters"]:
+            if p["name"] in new_ids and "proto_id" not in p:
+                idx = list(p.keys()).index("proto_group") + 1
+                p.insert(idx, "proto_id", new_ids[p["name"]])
+
+    return assigned
+
+
+def _parse_proto_field_ids(text):
+    """Extract {field_name: number} from `optional <type> <name> = <n>;` lines in
+    the existing generated region (used by the no-renumber guard)."""
+    ids = {}
+    region = text
+    if PROTO_BEGIN in text and PROTO_END in text:
+        region = text.split(PROTO_BEGIN, 1)[1].split(PROTO_END, 1)[0]
+    for m in re.finditer(r"optional\s+\S+\s+(\w+)\s*=\s*(\d+)\s*;", region):
+        ids[m.group(1)] = int(m.group(2))
+    return ids
+
+
+def guard_no_renumber(config, proto_path):
+    """Fail the run if a parameter's locked proto field number differs from the
+    one already in the target .proto (someone edited a YAML proto_id)."""
+    if not proto_path.exists():
+        return
+    old_ids = _parse_proto_field_ids(proto_path.read_text())
+    if not old_ids:
+        return
+    _, gmap = _proto_groups(config)
+    for p in config["parameters"]:
+        fname = _proto_field_name(p, gmap[p["proto_group"]])
+        if fname in old_ids and old_ids[fname] != p["proto_id"]:
+            log.die(f"proto_id for '{fname}' changed {old_ids[fname]} -> "
+                    f"{p['proto_id']} — renumbering is forbidden (NFC tags / "
+                    f"downlinks already deployed)")
+
+
+def build_proto_model(config):
+    """Build the jinja2 context for config.proto.j2 from the YAML config."""
+    proto, gmap = _proto_groups(config)
+    enums = config.get("enums", {})
+
+    by_group = {g["key"]: [] for g in proto["groups"]}
+    for p in config["parameters"]:
+        by_group[p["proto_group"]].append(p)
+
+    # Map each YAML enum to its proto type name, derived in the group that uses
+    # it (strip that group's prefix, PascalCase the remainder).
+    enum_proto_name = {}
+    for gkey, plist in by_group.items():
+        for p in plist:
+            if p.get("type") == "enum" and p["enum"] not in enum_proto_name:
+                base = p["enum"]
+                prefix = gmap[gkey].get("strip_prefix", "")
+                if prefix and base.startswith(prefix):
+                    base = base[len(prefix):]
+                enum_proto_name[p["enum"]] = _pascal(base)
+
+    def field(name, ptype, fid):
+        return {"name": name, "ptype": ptype, "id": fid}
+
+    # Root message: extra_fields(root) + root-group params + submessage
+    # containers, all in the root namespace, ordered by field number. A field with
+    # `proto_field: false` (#250 Part B) stays in the C struct/settings but is kept off the
+    # proto — its id goes to the message `reserved` list so it is never re-used.
+    root_fields = []
+    root_reserved = []
+    for ef in proto.get("extra_fields", []):
+        if ef.get("proto_group", "root") == "root":
+            if ef.get("proto_field", True):
+                root_fields.append(field(ef["name"], ef["type"], ef["proto_id"]))
+            else:
+                root_reserved.append(ef["proto_id"])
+    for p in by_group.get("root", []):
+        if not p.get("proto_field", True):
+            root_reserved.append(p["proto_id"])
+            continue
+        root_fields.append(field(_proto_field_name(p, gmap["root"]),
+                                  _proto_type(p, enum_proto_name), p["proto_id"]))
+    for g in proto["groups"]:
+        if g["key"] != "root":
+            root_fields.append(field(g["field"], g["message"], g["proto_id"]))
+    root_fields.sort(key=lambda f: f["id"])
+    root_reserved.sort()
+
+    submessages = []
+    for g in proto["groups"]:
+        if g["key"] == "root":
+            continue
+        plist = sorted(by_group.get(g["key"], []), key=lambda p: p["proto_id"])
+        genums, seen = [], set()
+        for p in plist:
+            if p.get("type") == "enum" and p["enum"] not in seen:
+                seen.add(p["enum"])
+                genums.append({
+                    "name": enum_proto_name[p["enum"]],
+                    "members": [{"name": v["name"], "value": v["value"]}
+                                for v in enums[p["enum"]]],
+                })
+        fields = [field(_proto_field_name(p, g), _proto_type(p, enum_proto_name),
+                        p["proto_id"]) for p in plist]
+        submessages.append({
+            "name": g["message"],
+            "enums": genums,
+            "reserved": list(g.get("reserved", [])),
+            "fields": fields,
+        })
+
+    return {"message": proto["message"], "root_fields": root_fields,
+            "root_reserved": root_reserved, "submessages": submessages}
+
+
+def build_ingest_model(config):
+    """jinja context for config_ingest.c.j2: the non-root submessage groups with
+    everything the generated apply_/fill_ functions need (proto field name, C
+    field name, per-type handling kind, range/enum metadata)."""
+    proto, gmap = _proto_groups(config)
+    module = config["module"]["name"]
+    enums = config.get("enums", {})
+
+    by_group = {g["key"]: [] for g in proto["groups"]}
+    for p in config["parameters"]:
+        by_group[p["proto_group"]].append(p)
+
+    enum_proto_name = {}
+    for gkey, plist in by_group.items():
+        for p in plist:
+            if p.get("type") == "enum" and p["enum"] not in enum_proto_name:
+                base = p["enum"]
+                prefix = gmap[gkey].get("strip_prefix", "")
+                if prefix and base.startswith(prefix):
+                    base = base[len(prefix):]
+                enum_proto_name[p["enum"]] = _pascal(base)
+
+    groups = []
+    for g in proto["groups"]:
+        if g["key"] == "root":
+            continue
+        c_message = f"{proto['message']}_{g['message']}"
+        params = []
+        for p in sorted(by_group.get(g["key"], []), key=lambda x: x["proto_id"]):
+            t = p.get("type")
+            e = {
+                "c_name": filter_c_name(p["name"]),
+                "proto_name": _proto_field_name(p, g),
+                "tag": p["proto_id"],
+                "dump": p.get("dump", True),
+                "dump_nfc_only": bool(p.get("dump_nfc_only")),
+                "callback": bool(p.get("proto_callback")),
+                "omit_if_zero": bool(p.get("dump_omit_if_zero")),
+                "no_write_lrw": bool(p.get("no_write_lrw")),
+                "no_write_nfc": bool(p.get("no_write_nfc")),
+                "no_write_vendor": bool(p.get("no_write_vendor")),
+            }
+            if t == "bool":
+                e["kind"] = "bool"
+            elif t == "enum":
+                e["kind"] = "enum"
+                e["enum_max"] = max(v["value"] for v in enums[p["enum"]])
+                e["c_enum_type"] = filter_c_type(p, module)
+                e["proto_enum_type"] = f"{c_message}_{enum_proto_name[p['enum']]}"
+            elif t == "bytes":
+                e["kind"] = "bytes"
+            elif t in FLOAT_TYPES:
+                # #340 M23: mirror the int branch below — only take the ranged
+                # path when explicit bounds are declared. Falling back to the
+                # -FLT_MAX/FLT_MAX (or DBL_) macro strings here (as the
+                # unconditional version used to) produces invalid C tokens once
+                # the template appends its numeric-literal 'f' suffix
+                # (-FLT_MAXf). Currently latent: no float/double param exists
+                # in app_config.yml today.
+                if p.get("min") is not None or p.get("max") is not None:
+                    e["kind"] = "float"
+                    e["min"] = filter_min_value(p)
+                    e["max"] = filter_max_value(p)
+                else:
+                    e["kind"] = "plain"
+            elif t in NUMERIC_TYPES:
+                if p.get("min") is not None or p.get("max") is not None:
+                    e["kind"] = "int_ranged"
+                    e["min"] = filter_min_value(p)
+                    e["max"] = filter_max_value(p)
+                    e["zero_allowed"] = bool(p.get("extras", {}).get("zero_allowed"))
+                else:
+                    e["kind"] = "plain"
+            else:
+                e["kind"] = "plain"
+            params.append(e)
+        groups.append({
+            "key": g["key"],
+            "c_message": c_message,
+            "apply_fn": f"app_config_apply_{g['key']}",
+            "fill_fn": f"app_config_fill_{g['key']}",
+            "slot_empty_fn": f"app_config_{g['key']}_slot_empty",
+            "has_omit_if_zero": any(e["omit_if_zero"] for e in params),
+            "any_write_gated": any(e["no_write_lrw"] or e["no_write_nfc"] or e["no_write_vendor"]
+                                    for e in params),
+            "params": params,
+        })
+    has_omit_if_zero = any(g["has_omit_if_zero"] for g in groups)
+    return {"message": proto["message"], "ingest_groups": groups,
+            "has_omit_if_zero": has_omit_if_zero}
+
+
+def build_options_lines(config):
+    """nanopb options for bytes fields: native `bytes` with fixed_length (a plain
+    `pb_byte_t[size]`, no length word) — half the wire size of the old hex string
+    and the C struct stays `uint8_t[size]`. Fields flagged `proto_callback: true`
+    are left as nanopb callbacks (no option emitted)."""
+    proto, gmap = _proto_groups(config)
+    msg = proto["message"]
+    lines = []
+    for p in config["parameters"]:
+        if p.get("type") != "bytes" or p.get("proto_callback"):
+            continue
+        g = gmap[p["proto_group"]]
+        fname = _proto_field_name(p, g)
+        path = (f"{msg}.{fname}" if g["key"] == "root"
+                else f"{msg}.{g['message']}.{fname}")
+        lines.append(f"{path} max_size:{p['size']} fixed_length:true")
+    return lines
+
+
+def rewrite_marked_text(text, body, comment, begin_label, end_label, where=""):
+    """Replace the text between the BEGIN/END markers in `text` with `body`."""
+    begin = f"{comment} {begin_label}"
+    end = f"{comment} {end_label}"
+    if begin not in text or end not in text:
+        log.die(f"{where or 'input'} is missing the generated-region markers "
+                f"({begin} / {end})")
+    head, rest = text.split(begin, 1)
+    _, tail = rest.split(end, 1)
+    return f"{head}{begin}\n{body}\n{end}{tail}"
+
+
+def rewrite_marked_region(path, body, comment,
+                          begin_label=PROTO_BEGIN, end_label=PROTO_END):
+    """Replace the text between the BEGIN/END markers in `path` with `body`,
+    keeping everything outside (hand-written messages / options). `begin_label`
+    / `end_label` select which marker pair (a file may hold several, e.g. the
+    config region and the Command-oneof region in the .proto)."""
+    if not path.exists():
+        log.die(f"target {path} not found — seed it with the "
+                f"'{comment} {begin_label}' / '{comment} {end_label}' markers first")
+    return rewrite_marked_text(path.read_text(), body, comment,
+                               begin_label, end_label, str(path))
+
+
+# Marker labels for the command-codegen regions (each lives in its own file:
+# the Command oneof in the .proto, the dispatch switch in app_cmd.c, the
+# name<->tag maps in ttn.js). All use line comments so one rewrite helper fits.
+COMMANDS_BEGIN = "BEGIN GENERATED COMMANDS"
+COMMANDS_END = "END GENERATED COMMANDS"
+DISPATCH_BEGIN = "BEGIN GENERATED DISPATCH"
+DISPATCH_END = "END GENERATED DISPATCH"
+DUMP_FIELDS_BEGIN = "BEGIN GENERATED DUMP_FIELDS"
+DUMP_FIELDS_END = "END GENERATED DUMP_FIELDS"
+
+# Response-body kinds whose dispatch emits no immediate Response (the command's
+# effect — telemetry, history frames, a deferred Info — is the answer).
+COMMAND_RESPONSE_NONE = {"none", "info_deferred"}
+
+
+def guard_no_renumber_commands(model, proto_path):
+    """Fail the run if a command's proto_id differs from the one already in the
+    Command oneof region of the target .proto (a deployed downlink / NFC tag
+    encodes the tag, so renumbering silently breaks the field protocol)."""
+    if not proto_path.exists():
+        return
+    text = proto_path.read_text()
+    begin = f"// {COMMANDS_BEGIN}"
+    end = f"// {COMMANDS_END}"
+    if begin not in text or end not in text:
+        return
+    region = text.split(begin, 1)[1].split(end, 1)[0]
+    old = {}
+    for m in re.finditer(r"^\s*\w+\s+(\w+)\s*=\s*(\d+)\s*;", region, re.MULTILINE):
+        old[m.group(1)] = int(m.group(2))
+    for c in model["commands"]:
+        if c["name"] in old and old[c["name"]] != c["proto_id"]:
+            log.die(f"command proto_id for '{c['name']}' changed "
+                    f"{old[c['name']]} -> {c['proto_id']} — renumbering is "
+                    f"forbidden (downlinks / NFC tags already deployed)")
+
+
+# Maps the YAML `transports:` tokens to the enum app_cmd_transport constants the
+# generated dispatch guard compares `tp` against. Order here is the canonical
+# "all transports" set; a command whose list is a proper subset gets a guard.
+_TRANSPORT_ENUM = {
+    "lrw": "APP_CMD_TRANSPORT_LRW",
+    "nfc": "APP_CMD_TRANSPORT_NFC",
+    "shell": "APP_CMD_TRANSPORT_SHELL_DEBUG",
+    "vendor": "APP_CMD_TRANSPORT_VENDOR",
+}
+_ALL_TRANSPORTS = set(_TRANSPORT_ENUM)
+
+
+def build_commands_model(config):
+    """jinja context for the command codegen (proto Command oneof, decoder
+    _CMD_NAMES/_CMD_TAGS, app_cmd_dispatch switch) from the YAML `commands:`
+    section. Returns None when the YAML has no command list."""
+    commands = config.get("commands")
+    if not commands:
+        return None
+
+    msg = commands["message"]
+    seen_ids, seen_names = {}, set()
+    cmds = []
+    for c in commands["list"]:
+        name = c["name"]
+        pid = c["proto_id"]
+        if name in seen_names:
+            log.die(f"duplicate command name '{name}'")
+        if pid in seen_ids:
+            log.die(f"duplicate command proto_id {pid} "
+                    f"('{name}' vs '{seen_ids[pid]}')")
+        seen_names.add(name)
+        seen_ids[pid] = name
+
+        kind = c["kind"]
+        if kind not in ("handler", "action"):
+            log.die(f"command '{name}' has invalid kind '{kind}' "
+                    f"(expected handler|action)")
+        if kind == "action" and not c.get("action"):
+            log.die(f"action command '{name}' must set 'action'")
+
+        transports = c.get("transports")
+        # Emit a transport guard for every command whose allow-list is a proper
+        # subset of all transports (#183): the dispatch must reject the command on
+        # any disallowed transport, not just the [lrw]-only case. `None` (omitted)
+        # means all transports → no guard.
+        transport_guard = None
+        if transports is not None:
+            unknown = [t for t in transports if t not in _TRANSPORT_ENUM]
+            if unknown:
+                log.die(f"command '{name}' has unknown transport(s) {unknown} "
+                        f"(expected any of {sorted(_TRANSPORT_ENUM)})")
+            if set(transports) != _ALL_TRANSPORTS:
+                transport_guard = [_TRANSPORT_ENUM[t] for t in transports]
+        cmds.append({
+            "name": name,
+            "proto_id": pid,
+            "body": c["body"],
+            "kind": kind,
+            "action": c.get("action"),
+            "response": c.get("response", "ack"),
+            "transports": transports,
+            "transport_guard": transport_guard,
+            "lrw_only": transports == ["lrw"],
+            "emits_response": c.get("response", "ack") not in COMMAND_RESPONSE_NONE,
+            "tag": f"{msg}_{name}_tag",
+            "handler": f"app_cmd_handle_{name}",
+        })
+
+    by_id = sorted(cmds, key=lambda c: c["proto_id"])
+    return {
+        "message": msg,
+        "response_message": commands["response"],
+        "reserved": list(commands.get("reserved", [])),
+        "commands": cmds,        # YAML order (decoder/dispatch)
+        "commands_by_id": by_id, # proto_id order (proto oneof)
+        # Column widths so the generated .proto oneof aligns like the rest.
+        "type_width": max(len(c["body"]) for c in cmds),
+        "name_width": max(len(c["name"]) for c in cmds),
+    }
+
+
+# get_config DUMP_FIELDS[] codegen ------------------------------------------
+# Section order MUST match the DUMP_SECTION_* enum in app_cmd.c.
+DUMP_SECTIONS = ["lorawan", "application", "sensors", "alarms"]
+
+
+def _varint_bytes(value):
+    """Encoded length of `value` as an unsigned protobuf varint (>= 1 byte)."""
+    v = int(value)
+    n = 1
+    while v >= 0x80:
+        v >>= 7
+        n += 1
+    return n
+
+
+def _dump_field_size(p):
+    """Conservative upper bound on the encoded bytes of one config field inside a
+    ConfigDump: proto tag + value, matching the on-wire encoding configen emits.
+    Tags for proto_id >= 16 take two bytes; integers up to their declared max;
+    bytes are emitted as native fixed_length protobuf bytes (tag + length + size)."""
+    tag = 1 if p["proto_id"] <= 15 else 2
+    t = p.get("type")
+    if t == "bytes":
+        n = int(p["size"])
+        return tag + _varint_bytes(n) + n
+    if t in ("bool", "enum"):
+        return tag + 1
+    # Integers map to a varint. All current config ints are non-negative, so the
+    # declared max bounds the width; fall back to the uint32 worst case (5 B)
+    # when unbounded or potentially negative.
+    mx = p.get("max")
+    mn = p.get("min")
+    if mx is not None and (mn is None or mn >= 0):
+        return tag + _varint_bytes(int(mx))
+    return tag + 5
+
+
+def build_dump_fields_model(config):
+    """Rows for the get_config DUMP_FIELDS[] table: every dumpable parameter
+    (proto_group in a ConfigDump section and not `dump: false`), grouped by
+    section in DUMP_SECTION order, YAML declaration order within a section.
+
+    A `dump_nfc_only: true` field is included with nfc_only=1; the handler only
+    selects it when the transport is NFC, so it never enters a LoRaWAN response
+    (e.g. the LoRaWAN crypto keys — readable over the encrypted NFC channel only).
+    A plain `dump: false` field stays excluded from every transport."""
+    rows = []
+    for section in DUMP_SECTIONS:
+        macro = "DUMP_SECTION_" + section.upper()
+        for p in config["parameters"]:
+            if p.get("proto_group") != section or "proto_id" not in p:
+                continue
+            nfc_only = bool(p.get("dump_nfc_only"))
+            if p.get("dump") is False and not nfc_only:
+                continue
+            rows.append({"section": macro, "tag": p["proto_id"],
+                         "size": _dump_field_size(p), "nfc_only": nfc_only})
+    return {"dump_fields": rows}
+
+
 class Configen(WestCommand):
     def __init__(self):
         super().__init__(
@@ -354,6 +1005,43 @@ class Configen(WestCommand):
             type=Path,
             default=None,
             help="custom templates directory (default: built-in templates)",
+        )
+        parser.add_argument(
+            "--proto",
+            type=Path,
+            default=None,
+            help="path to the .proto whose generated region is rewritten "
+            "(default: <output-dir>/<module>.proto). Only used when the YAML "
+            "has a 'proto:' block.",
+        )
+        parser.add_argument(
+            "--options",
+            type=Path,
+            default=None,
+            help="path to the nanopb .options.in whose generated region is "
+            "rewritten (default: <output-dir>/<module>.options.in)",
+        )
+        parser.add_argument(
+            "--no-proto",
+            action="store_true",
+            help="skip proto/options generation even if the YAML has a "
+            "'proto:' block",
+        )
+        parser.add_argument(
+            "--decoder",
+            type=Path,
+            default=None,
+            help="path to the JS decoder whose _CMD_NAMES/_CMD_TAGS region is "
+            "rewritten from the YAML 'commands:' list "
+            "(default: <output-dir>/../decoder/ttn.js)",
+        )
+        parser.add_argument(
+            "--app-cmd",
+            type=Path,
+            default=None,
+            help="path to the C command file whose app_cmd_dispatch() region is "
+            "rewritten from the YAML 'commands:' list "
+            "(default: <output-dir>/app_cmd.c)",
         )
         parser.add_argument(
             "--dry-run",
@@ -400,6 +1088,10 @@ class Configen(WestCommand):
         for param in parameters:
             self._validate_param(param)
 
+        # Derive the internal access flags (dump / no_shell / ...) from the
+        # readable/writable transport lists before any model is built.
+        normalize_access(config)
+
         # Setup Jinja2 environment
         templates_dir = args.templates_dir or TEMPLATES_DIR
         if not templates_dir.exists():
@@ -430,6 +1122,7 @@ class Configen(WestCommand):
         env.filters["max_value"] = filter_max_value
         env.filters["needs_cast"] = filter_needs_cast
         env.filters["printf_cast"] = filter_printf_cast
+        env.filters["persists"] = filter_persists
 
         # Prepare template context
         context = {
@@ -442,6 +1135,7 @@ class Configen(WestCommand):
             "INTEGER_TYPES": INTEGER_TYPES,
             "FLOAT_TYPES": FLOAT_TYPES,
             "NUMERIC_TYPES": NUMERIC_TYPES,
+            "RESET_OPS": RESET_OPS,
         }
 
         # Render templates
@@ -481,6 +1175,155 @@ class Configen(WestCommand):
             log.inf(f"Generated: {source_path}")
 
             self._clang_format([header_path, source_path])
+
+        # Config ingest (apply/fill per proto submessage) — generated so the
+        # SetParam/NFC/GetConfig mapping can't drift from the YAML (#44/#91).
+        ingest_path = output_dir / f"{module_name}_ingest.c"
+        if config.get("proto"):
+            try:
+                ingest_template = env.get_template("config_ingest.c.j2")
+            except Exception as e:
+                log.die(f"Failed to load config_ingest.c.j2: {e}")
+            ingest_content = ingest_template.render(**build_ingest_model(config),
+                                                    module=module)
+            if args.dry_run:
+                log.inf(f"Would generate: {ingest_path}")
+                print(ingest_content)
+            else:
+                with open(ingest_path, "w") as f:
+                    f.write(ingest_content)
+                log.inf(f"Generated: {ingest_path}")
+                self._clang_format([ingest_path])
+
+        # Proto + nanopb options generation (issue #44).
+        if config.get("proto") and not args.no_proto:
+            proto_path = args.proto or (output_dir / f"{module_name}.proto")
+            options_path = args.options or (output_dir / f"{module_name}.options.in")
+            self._generate_proto(env, config, yaml_path, proto_path.resolve(),
+                                 options_path.resolve(), args.dry_run)
+
+        # Command protocol codegen (decoder maps, dispatch switch, Command oneof)
+        # from the YAML `commands:` section — keeps the wire id / routing /
+        # availability of every command in one place (configen-commands design).
+        commands_model = build_commands_model(config)
+        if commands_model:
+            commands_model.update(build_dump_fields_model(config))
+            self._generate_commands(env, commands_model, output_dir, args)
+
+    def _generate_proto(self, env, config, yaml_path, proto_path, options_path,
+                        dry_run):
+        """Generate the .proto config region + nanopb options from the YAML,
+        with an append-only proto_id allocator that writes new ids back."""
+        from ruamel.yaml import YAML
+
+        ryaml = YAML()
+        ryaml.preserve_quotes = True
+        ryaml.width = 4096
+        ryaml.indent(mapping=2, sequence=4, offset=2)
+        with open(yaml_path) as f:
+            rt_doc = ryaml.load(f)
+
+        # Allocate ids for new params, guard against renumbering existing ones.
+        assigned = allocate_proto_ids(config, rt_doc)
+        guard_no_renumber(config, proto_path)
+
+        model = build_proto_model(config)
+        body = env.get_template("config.proto.j2").render(proto=model).rstrip("\n")
+        proto_text = rewrite_marked_region(proto_path, body, "//")
+
+        # Command oneof: a second generated region in the same .proto (the body
+        # sub-messages + Response stay hand-written). Rewritten in-memory on top
+        # of the config region, when the YAML has a commands list and the file
+        # carries the markers.
+        commands_model = build_commands_model(config)
+        if commands_model and f"// {COMMANDS_BEGIN}" in proto_text:
+            guard_no_renumber_commands(commands_model, proto_path)
+            cmd_body = env.get_template("commands_proto.j2").render(
+                **commands_model).rstrip("\n")
+            proto_text = rewrite_marked_text(proto_text, cmd_body, "//",
+                                             COMMANDS_BEGIN, COMMANDS_END,
+                                             str(proto_path))
+
+        options_body = "\n".join(build_options_lines(config))
+        options_text = rewrite_marked_region(options_path, options_body, "#")
+
+        if dry_run:
+            for name, fid in assigned:
+                log.inf(f"Would assign proto_id {fid} to '{name}'")
+            log.inf(f"Would generate: {proto_path}")
+            log.inf("--- Proto generated region ---")
+            print(body)
+            log.inf(f"\nWould generate: {options_path}")
+            print(options_body)
+            return
+
+        for name, fid in assigned:
+            log.inf(f"Assigned proto_id {fid} to new parameter '{name}'")
+        if assigned:
+            with open(yaml_path, "w") as f:
+                ryaml.dump(rt_doc, f)
+            log.inf(f"Wrote new proto_id(s) back into: {yaml_path}")
+
+        proto_path.write_text(proto_text)
+        log.inf(f"Generated: {proto_path}")
+        options_path.write_text(options_text)
+        log.inf(f"Generated: {options_path}")
+
+    def _generate_commands(self, env, model, output_dir, args):
+        """Rewrite the command-codegen regions from the YAML `commands:` list:
+        the decoder _CMD_NAMES map (ttn.js) and the app_cmd_dispatch() switch
+        (app_cmd.c). The proto Command oneof is rewritten by _generate_proto."""
+        # Decoder: _CMD_NAMES / _CMD_TAGS region in ttn.js.
+        decoder_path = args.decoder or (output_dir.parent / "decoder" / "ttn.js")
+        decoder_path = decoder_path.resolve()
+        if decoder_path.exists():
+            body = env.get_template("commands_decoder.js.j2").render(**model)
+            body = body.rstrip("\n")
+            text = rewrite_marked_region(decoder_path, body, "//",
+                                         COMMANDS_BEGIN, COMMANDS_END)
+            if args.dry_run:
+                log.inf(f"Would generate decoder region in: {decoder_path}")
+                print(body)
+            else:
+                decoder_path.write_text(text)
+                log.inf(f"Generated decoder command region: {decoder_path}")
+        else:
+            log.wrn(f"decoder not found ({decoder_path}); "
+                    "skipping _CMD_NAMES region")
+
+        # Firmware: app_cmd_dispatch() switch region in app_cmd.c. Only rewritten
+        # once the file carries the markers (seeded when the dispatch codegen
+        # lands); skipped gracefully otherwise so the decoder region can ship
+        # ahead of it.
+        app_cmd_path = args.app_cmd or (output_dir / "app_cmd.c")
+        app_cmd_path = app_cmd_path.resolve()
+        if app_cmd_path.exists():
+            text = app_cmd_path.read_text()
+            changed = False
+
+            if f"// {DISPATCH_BEGIN}" in text:
+                body = env.get_template("commands_dispatch.c.j2").render(**model).rstrip("\n")
+                text = rewrite_marked_text(text, body, "//", DISPATCH_BEGIN, DISPATCH_END,
+                                           str(app_cmd_path))
+                changed = True
+                if args.dry_run:
+                    log.inf(f"Would generate dispatch region in: {app_cmd_path}")
+                    print(body)
+
+            # get_config DUMP_FIELDS[] paging table (#112).
+            if "dump_fields" in model and f"// {DUMP_FIELDS_BEGIN}" in text:
+                body = env.get_template("dump_fields.c.j2").render(**model).rstrip("\n")
+                text = rewrite_marked_text(text, body, "//", DUMP_FIELDS_BEGIN, DUMP_FIELDS_END,
+                                           str(app_cmd_path))
+                changed = True
+                if args.dry_run:
+                    log.inf(f"Would generate DUMP_FIELDS region in: {app_cmd_path}")
+                    print(body)
+
+            if changed and not args.dry_run:
+                app_cmd_path.write_text(text)
+                log.inf(f"Generated app_cmd regions: {app_cmd_path}")
+                self._clang_format([app_cmd_path])
 
     def _clang_format(self, paths):
         """Run clang-format on generated files if available."""
@@ -522,3 +1365,17 @@ class Configen(WestCommand):
 
         if ptype == "enum" and not param.get("enum"):
             log.die(f"Parameter '{name}' of type 'enum' must have an 'enum' field")
+
+        if "preserve_on_reset" in param:
+            log.die(f"Parameter '{name}' uses removed 'preserve_on_reset' — "
+                     f"use 'persistent: [{', '.join(RESET_OPS)}]' instead (#299)")
+
+        persistent = param.get("persistent")
+        if persistent is not None:
+            if not isinstance(persistent, list):
+                log.die(f"Parameter '{name}' 'persistent' must be a list, got {type(persistent).__name__}")
+            invalid = sorted(set(persistent) - set(RESET_OPS))
+            if invalid:
+                log.die(f"Parameter '{name}' has invalid persistent op(s) {invalid}. Valid: {RESET_OPS}")
+            if len(set(persistent)) != len(persistent):
+                log.die(f"Parameter '{name}' has duplicate entries in 'persistent'")

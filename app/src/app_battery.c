@@ -17,6 +17,7 @@
 
 /* Standard includes */
 #include <errno.h>
+#include <math.h>
 
 LOG_MODULE_REGISTER(app_battery, LOG_LEVEL_DBG);
 
@@ -26,6 +27,14 @@ LOG_MODULE_REGISTER(app_battery, LOG_LEVEL_DBG);
 #define R2_KOHM 100
 
 static const struct device *m_dev = DEVICE_DT_GET(DT_NODELABEL(adc1));
+
+/* Last successfully measured voltage, for callers that must not do a live ADC
+ * read from a context where it can hang (#340 M9) - e.g. LoRaWAN DevStatusReq,
+ * which runs on the system workqueue and would otherwise race the periodic
+ * sensor sampler's own app_battery_measure() call on the same ADC. Own lock so
+ * app_battery.c stays self-contained (no dependency on app_sensor.c). */
+static float m_last_voltage = NAN;
+static K_MUTEX_DEFINE(m_last_voltage_lock);
 
 static const struct adc_channel_cfg m_channel_cfg = {
 	.gain = ADC_GAIN_1,
@@ -109,7 +118,11 @@ int app_battery_measure(float *voltage)
 	if (voltage) {
 		*voltage = voltage_ / 1000.f;
 		*voltage = *voltage / R2_KOHM * (R1_KOHM + R2_KOHM);
-		LOG_DBG("Battery voltage: %.2f V", (double)*voltage);
+		LOG_DBG("Battery voltage: %s%d.%02d V", APP_FP2(*voltage));
+
+		k_mutex_lock(&m_last_voltage_lock, K_FOREVER);
+		m_last_voltage = *voltage;
+		k_mutex_unlock(&m_last_voltage_lock);
 	}
 
 suspend:
@@ -122,4 +135,15 @@ suspend:
 #endif /* defined(CONFIG_PM_DEVICE) */
 
 	return res;
+}
+
+float app_battery_last_sample(void)
+{
+	float v;
+
+	k_mutex_lock(&m_last_voltage_lock, K_FOREVER);
+	v = m_last_voltage;
+	k_mutex_unlock(&m_last_voltage_lock);
+
+	return v;
 }
