@@ -1234,12 +1234,27 @@ cycle) to prove the device recovered. Run these LAST in a session.
   repower (`toggle_DUT_power("ON")`); read full config. Repeat 5× with varied delays (0–500 ms).
 - **Expect:** config is either fully-old or fully-new (NVS atomicity) — never a mix, never
   identity loss, never a boot loop.
+- **HW-verified (2026-08-18, SN 2162199999, debug @ hynek/v140-final-review-fixes)**: shell
+  `settings save` variant, cuts driven by `ppk2_orchestrator.py` (FIFO `cutin <delay> <off_ms>`,
+  timestamped log). 6 cycles total: delays 0/100/250/400/550 ms all landed **pre-commit** →
+  the OLD value survived, `config show` fully consistent (47 lines) every time; one extra
+  cycle at **1500 ms** landed **post-commit** → the NEW value survived cleanly — both
+  branches of the atomicity contract exercised, never a mix, identity intact every cycle.
+  Reset causes cleanly discriminated: `0x00000005` (pin, brownout) for every cut vs
+  `0x00000003` (pin, software) for the deliberate no-cut restore save. Note for repeats:
+  with the ~0.2–0.5 s MCP/shell dispatch latency, delays ≤550 ms never reached the commit —
+  use ~1.5 s to hit the post-commit window.
 
 ### AT-ADV-07 — power-cut storms (R+PPK2, A)
 - **Steps:** 20 random power cycles (real `toggle_DUT_power` off/on, not source-voltage-0 — see
   AT-ADV-06's note; on-time uniform 1–30 s); then full smoke + AT-HIS-03
   + AT-CFG-07 checks.
 - **Expect:** no identity/config/history corruption; no reset-cause anomalies; joins recover.
+- **HW-verified (2026-08-18, SN 2162199999, 12 cycles — reduced from 20)**: on-times drawn
+  uniform 2–25 s, 700 ms cuts, 3 cuts landed <5 s after power-up (mid-boot). Full smoke after
+  the storm: identity/keys intact verbatim, `config show` 47 consistent lines, alarms clean,
+  history clean, LRW RECONNECT→HEALTHY within ~30 s, RTC resynced via network time after
+  rejoin, reset cause `0x00000005` (pin, brownout) as expected. No corruption, no boot loop.
 
 ### AT-ADV-08 — RF denial during join backoff (DR, semi-A)
 - **Steps:** disable the device on the LNS (or take the gateway offline) → force rejoin →
