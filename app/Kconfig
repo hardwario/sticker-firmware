@@ -6,6 +6,41 @@
 
 menu "Application"
 
+config RADIO_LORAWAN
+	bool "LoRaWAN radio transport"
+	default y
+	select LORAWAN if LORA
+	help
+	  App-level name for the LoRaWAN transport (issue #395) — pairs with
+	  RADIO_P2P below as the two selectable radio transports. `select
+	  LORAWAN if LORA` only forces the underlying Zephyr subsystem ON
+	  when this is y AND the LORA radio driver is present (native_sim
+	  test builds have neither — `select` on a symbol whose own
+	  dependencies aren't met is a hard Kconfig error, not a silent
+	  no-op, hence the `if LORA` guard); turning this off on real HW
+	  (nothing else in this tree selects LORAWAN) leaves it at its own
+	  default (off), disabling all radio transmission. Telemetry/alarm
+	  sampling and history capture keep working with no radio
+	  (app_report.c owns that cadence, not the uplink) — only the actual
+	  send is skipped.
+
+	  ~41 KB flash / ~15 KB RAM when off (issue #395) — the single
+	  biggest lever of any toggle in this tree, but also the biggest
+	  behavioral change (no radio at all), which is why it stays on by
+	  default rather than joining debug.conf's OFF-by-default set.
+
+config RADIO_P2P
+	bool "Raw-LoRa P2P radio transport (reserved, not yet implemented)"
+	default n
+	help
+	  Reserved app-level name for the raw-LoRa P2P transport (issue
+	  #118), pairing with RADIO_LORAWAN above. The P2P implementation
+	  (app_p2p.c, app_transport.c) lives on a separate, unmerged branch
+	  (hynek/issue118-p2p-phase1) and is NOT present here — this option
+	  currently has no effect (nothing depends on or selects anything
+	  from it). Wire it to that branch's CONFIG_APP_LORA_P2P once it
+	  merges, mirroring how RADIO_LORAWAN wraps CONFIG_LORAWAN.
+
 config APP_VERBOSE_LOGGING
 	bool "Enable verbose parameter logging"
 	default y
