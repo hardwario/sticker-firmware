@@ -84,6 +84,11 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_TX_QUEUE_DEPTH 2
 #define P2P_RX_QUEUE_DEPTH 1
 
+/* Small margin added on top of the exact remaining duty-cycle block when
+ * rescheduling a deferred response/alarm frame (#118) -- avoids retrying a
+ * few ms too early and getting -EAGAIN again right back. */
+#define P2P_TX_RETRY_MARGIN_MS 50
+
 #if defined(CONFIG_WATCHDOG)
 #define P2P_HEARTBEAT_PERIOD_SEC 5
 #define P2P_HEARTBEAT_TIMEOUT_MS 30000
@@ -97,8 +102,8 @@ static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
  * not stack-allocated), so 2048 B (the pre-#265 LoRaWAN default) is ample. */
 static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
 static struct k_work_q m_work_q;
-static struct k_work m_send_work; /* compose + send telemetry */
-static struct k_work m_tx_work;   /* drain response/alarm queue */
+static struct k_work m_send_work;         /* compose + send telemetry */
+static struct k_work_delayable m_tx_work; /* drain response/alarm queue, retries on -EAGAIN */
 #if defined(CONFIG_SHELL)
 static struct k_work m_rx_work; /* drain received frames (listen) */
 #endif
@@ -124,6 +129,16 @@ struct p2p_tx_msg {
 };
 
 K_MSGQ_DEFINE(m_tx_msgq, sizeof(struct p2p_tx_msg), P2P_TX_QUEUE_DEPTH, 4);
+
+/* A frame that tx_frame() bounced with -EAGAIN (duty-cycle blocked): already
+ * dequeued from m_tx_msgq, so it must be retried explicitly instead of
+ * dropped, or the response/alarm frame is lost outright (#118 -- confirmed
+ * on real HW: the default alarm-limit batch window is shorter than a single
+ * SF10 frame's duty-cycle block, so every alarm detail frame was silently
+ * dropped). Single slot: tx_work_handler() only ever defers the one message
+ * it was mid-send on, then stops draining until that retry succeeds. */
+static struct p2p_tx_msg m_tx_deferred;
+static bool m_tx_deferred_valid;
 
 #if defined(CONFIG_SHELL)
 struct p2p_rx_msg {
@@ -392,12 +407,40 @@ static void send_work_handler(struct k_work *work)
 
 static void tx_work_handler(struct k_work *work)
 {
-	ARG_UNUSED(work);
-
+	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
 	struct p2p_tx_msg msg;
 
-	while (k_msgq_get(&m_tx_msgq, &msg, K_NO_WAIT) == 0) {
-		(void)tx_frame(msg.type, msg.buf, msg.len);
+	if (m_tx_deferred_valid) {
+		msg = m_tx_deferred;
+		m_tx_deferred_valid = false;
+	} else if (k_msgq_get(&m_tx_msgq, &msg, K_NO_WAIT) != 0) {
+		return;
+	}
+
+	for (;;) {
+		int ret = tx_frame(msg.type, msg.buf, msg.len);
+
+		if (ret == -EAGAIN) {
+			/* Stash and retry this exact frame once the duty-cycle window
+			 * clears, instead of dropping it — see m_tx_deferred's comment.
+			 * Stop draining the rest of the queue until this one is sent,
+			 * so frames stay in order. */
+			m_tx_deferred = msg;
+			m_tx_deferred_valid = true;
+
+			int64_t delay_ms = m_dc_blocked_until - k_uptime_get();
+
+			if (delay_ms < 0) {
+				delay_ms = 0;
+			}
+			k_work_reschedule_for_queue(&m_work_q, dwork,
+						    K_MSEC(delay_ms + P2P_TX_RETRY_MARGIN_MS));
+			return;
+		}
+
+		if (k_msgq_get(&m_tx_msgq, &msg, K_NO_WAIT) != 0) {
+			return;
+		}
 	}
 }
 
@@ -563,7 +606,7 @@ int app_p2p_init(void)
 			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
 
 	k_work_init(&m_send_work, send_work_handler);
-	k_work_init(&m_tx_work, tx_work_handler);
+	k_work_init_delayable(&m_tx_work, tx_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
 #endif
@@ -622,7 +665,10 @@ static int queue_frame(uint8_t type, const uint8_t *buf, size_t len)
 		LOG_WRN("TX queue full (type %u); dropping", type);
 		return -ENOMEM;
 	}
-	k_work_submit_to_queue(&m_work_q, &m_tx_work);
+	/* If a retry is already scheduled (deferred frame waiting out a duty-cycle
+	 * block), this is a no-op — the queue drains in order once that retry
+	 * fires, same as an immediate submit would have. */
+	k_work_schedule_for_queue(&m_work_q, &m_tx_work, K_NO_WAIT);
 	return 0;
 }
 
