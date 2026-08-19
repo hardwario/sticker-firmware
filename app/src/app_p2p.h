@@ -29,35 +29,51 @@ extern "C" {
  * AES-CCM encrypts+authenticates the body under the derived `join_key`
  * (doc/p2p.md §4 -- there is no manual p2p_key config parameter).
  *
- * Phase 1 is deliberately unpaired/unACKed fire-and-forget: net_id/dev_addr
- * are the fixed pre-join value 0 (doc/p2p.md §5.3's own JoinRequest
- * convention); the join/ACK handshake and net_id/dev_addr allocation are
- * phase 2. The optional listen mode (CONFIG_SHELL) puts the radio in
- * continuous RX for the two-STICKER bench rig (doc/p2p.md §14) -- it
- * decrypts and logs received frames but does not dispatch COMMAND frames to
- * app_cmd (that arrives with phase 2's real, anti-replay-protected channel).
+ * Phase 1 shipped deliberately unpaired/unACKed fire-and-forget: net_id/
+ * dev_addr were the fixed pre-join value 0 (doc/p2p.md §5.3's own
+ * JoinRequest convention), with no join/ACK handshake at all. Phase 2
+ * (#118) adds the join handshake itself: on first start with no persisted
+ * pairing state, the device sends JoinRequest, opens a bounded RX1 window
+ * for JoinAccept, and on success persists net_id/dev_addr/session_key/
+ * rx1_delay to NVS and switches from join_key to session_key for the data
+ * plane (doc/p2p.md §5.3). app_p2p_is_ready() (and therefore the report
+ * cadence) only goes true once paired -- a device stuck unpaired past its
+ * boot join window (§5.2, 120 s) stays silent until the next boot or an NFC
+ * `p2p_join` trigger (not yet wired). The confirmed-uplink Ack/retry (§6),
+ * self-healing re-join (§7) and Detach (§5.4) are not implemented yet. The
+ * optional listen mode (CONFIG_SHELL) puts the radio in continuous RX for
+ * the two-STICKER bench rig (doc/p2p.md §14) -- it decrypts and logs
+ * received frames but does not dispatch COMMAND frames to app_cmd (that
+ * arrives with a later, real anti-replay-protected command channel).
  */
 
 /* Wire frame types -- mirror the LoRaWAN fPort values so the off-device
- * decoder logic is shared (doc/p2p.md §3.2). 0xF0-0xFE are reserved for the
- * phase-2 join/ACK link control and not implemented yet. */
+ * decoder logic is shared (doc/p2p.md §3.2). 0xF0-0xFE are reserved for
+ * link control; JOIN_REQUEST/JOIN_ACCEPT are implemented (#118 phase 2,
+ * doc/p2p.md §5.3), the rest (Ack/Detach/RejoinRequest, §6/§7) are not yet. */
 enum app_p2p_frame_type {
 	APP_P2P_FRAME_TELEMETRY = 2,
 	APP_P2P_FRAME_ALARM = 3,
 	APP_P2P_FRAME_RESPONSE = 85,
-	APP_P2P_FRAME_COMMAND = 86, /* inbound (RX): reserved, not dispatched in phase 1 */
+	APP_P2P_FRAME_COMMAND = 86, /* inbound (RX): reserved, not dispatched yet */
+	APP_P2P_FRAME_JOIN_REQUEST = 0xF0,
+	APP_P2P_FRAME_JOIN_ACCEPT = 0xF1,
 };
 
 /* Configure the radio from the p2p config group and set up the work queue.
  * Returns 0 or a negative errno. */
 int app_p2p_init(void);
 
-/* Mark the transport ready and kick the report cadence (there is no join, so
- * the link is "up" immediately). Mirrors app_lrw_join() on the transport
- * facade. */
+/* If already paired (persisted NVS state from a prior join), mark the
+ * transport ready and kick the report cadence immediately -- mirrors
+ * app_lrw_join() on the transport facade. Otherwise starts the join
+ * handshake (#118 phase 2, doc/p2p.md §5.3); the ready callback fires later,
+ * only once JoinAccept succeeds. */
 void app_p2p_start(void);
 
-/* Always true once started (no join handshake in phase 1). */
+/* True once paired and started -- immediately if NVS already had a valid
+ * pairing, otherwise only after the join handshake (#118 phase 2)
+ * completes. */
 bool app_p2p_is_ready(void);
 
 /* Fixed application-payload budget for one frame (LoRa MTU minus the P2P

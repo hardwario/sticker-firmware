@@ -262,6 +262,14 @@ tag:     CCM tag under join_key (body sent as AAD, empty plaintext)
   pairing request" so the central can auto-name and manage the node with zero
   configuration (§9), and make the join generic across future products
   (identity envelope per `claiming_process.md` §11).
+  - **`product_type` registry** (no central schema exists yet, so this is a
+    placeholder pending one, #118 phase 2 HIL): `1` = STICKER, the only value
+    in use today (`P2P_PRODUCT_TYPE_STICKER`, app_p2p.c). HW-confirmed on the
+    wire (decoded correctly by an independent central-side decoder).
+  - `fw_version(4)` is packed as `fw_major(1) | fw_minor(1) | fw_patch(1) |
+    reserved(1)`, matching the existing `Info` command's version fields
+    (app_cmd.c) — not itself broken down further above since it is a plain
+    byte layout, not a registry. HW-confirmed (`1.4.0` decoded correctly).
 
 **JoinAccept** (`frame_type 0xF1`, downlink, sent in the node's RX1 window):
 

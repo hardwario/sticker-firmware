@@ -5,10 +5,12 @@
  */
 
 #include "app_ccm.h"
+#include "app_cmd.h"
 #include "app_compose.h"
 #include "app_config.h"
 #include "app_log.h"
 #include "app_p2p.h"
+#include "app_version.h"
 #include "app_wdog.h"
 
 /* Zephyr includes */
@@ -17,6 +19,7 @@
 #include <zephyr/drivers/lora.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
@@ -42,10 +45,11 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * it is authenticated by the tag. The body is the exact app_compose payload
  * (version byte + protobuf Telemetry) LoRaWAN would put on fPort 2.
  *
- * Phase 1 (doc/p2p.md §13): net_id/dev_addr are the fixed pre-join value 0
- * (§5.3's own JoinRequest convention) -- join-assigned allocation is phase 2.
- * The body is AES-CCM'd under `join_key`, derived on demand from `secret_key`
- * (§4), never a manual config secret.
+ * net_id/dev_addr are the fixed pre-join value 0 (§5.3's own JoinRequest
+ * convention) until a successful join assigns real ones (#118 phase 2,
+ * doc/p2p.md §5.3) -- see m_net_id/m_dev_addr below. The body is AES-CCM'd
+ * under `join_key` before pairing and the join handshake itself; the derived
+ * `session_key` once paired (§4), never a manual config secret.
  *
  * The AES-CCM nonce is counter(4 BE) || dev_addr(2 BE) || frame_type(1) ||
  * direction(1) || zeros(5) = 13 B. `counter` is a strictly increasing 32-bit
@@ -62,14 +66,17 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_MAX_BODY  (P2P_LORA_MTU - P2P_HDR_LEN - P2P_TAG_LEN) /* 240 */
 #define P2P_FRAME_MAX (P2P_HDR_LEN + P2P_MAX_BODY + P2P_TAG_LEN)
 
-/* Phase 1: no join yet, so net_id/dev_addr are the fixed pre-join value (§5.3). */
-#define P2P_NET_ID   0
-#define P2P_DEV_ADDR 0
+/* Pre-join fixed value (§5.3): both header fields are 0 until JoinAccept
+ * allocates real ones. m_net_id/m_dev_addr (below) hold the CURRENT value --
+ * 0 while UNPAIRED/JOINING, the assigned value once PAIRED. */
+#define P2P_PREJOIN_NET_ID   0
+#define P2P_PREJOIN_DEV_ADDR 0
 
-/* join_key = AES128-ECB(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE)),
- * doc/p2p.md §4 -- a one-block PRF over the hardware AES already in flash. Used
- * directly as the phase-1 frame key (no session established yet); phase 2's
- * real JoinRequest/JoinAccept reuse the identical derivation. */
+/* join_key = AES128-CMAC(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE)),
+ * doc/p2p.md §4 -- keys the join handshake itself (JoinRequest/JoinAccept,
+ * §5.3) always; the data plane (telemetry/alarm/response/command) uses it
+ * only pre-pairing (phase 1 behavior) and switches to the derived
+ * session_key once PAIRED (#118 phase 2). */
 #define P2P_JOIN_KEY_LABEL "HIO-P2P-JOIN"
 
 /* EU868 1% duty cycle, enforced app-side (raw LoRa bypasses LoRaMac). After a
@@ -94,6 +101,63 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_HEARTBEAT_TIMEOUT_MS 30000
 #endif
 
+/* ---- Join/session persistence (#118 phase 2, doc/p2p.md §5.3) ---- */
+
+#define P2P_JOIN_SUBTREE    "p2pjoin"
+#define P2P_JOIN_DNONCE_KEY "p2pjoin/dnonce"
+#define P2P_JOIN_STATE_KEY  "p2pjoin/state"
+/* net_id(4 BE) | dev_addr(2 BE) | session_key(16) | rx1_delay_s(1) */
+#define P2P_JOIN_STATE_LEN  (4 + 2 + P2P_KEY_LEN + 1)
+
+/* JoinRequest body (§5.3): product_type(1) | proto_version(1) |
+ * serial_number(4 BE) | fw_version(4). product_type has no existing
+ * registry in this codebase yet (single-product today) -- 1 = STICKER, a
+ * placeholder pending the central's actual product-type schema (#118
+ * follow-up; doc/p2p.md §5.3 cites claiming_process.md §11's identity
+ * envelope for the intended generalization). */
+#define P2P_PRODUCT_TYPE_STICKER 1
+#define P2P_JOIN_REQ_BODY_LEN    10
+
+/* JoinAccept body (§5.3): net_id(4 BE) | dev_addr(2 BE) | central_nonce(4 BE)
+ * | rx1_delay_s(1) | reserved(4) -- reserved is the v2 data-channel
+ * assignment hook (§11), unused/ignored today. */
+#define P2P_JOIN_ACCEPT_BODY_LEN 15
+
+/* Boot-trigger join window (§5.2): an unpaired device retries for at most
+ * this long after boot, then goes idle until the next boot or an NFC
+ * `p2p_join` (not yet wired) -- caps the worst-case radio-retry drain for a
+ * device that never finds a gateway. */
+#define P2P_JOIN_BOOT_WINDOW_MS (120 * 1000)
+
+/* Retry cadence for an unanswered JoinRequest. doc/p2p.md §5.3 specifies
+ * "jittered, duty-cycle-aware backoff" without exact numbers: retry as soon
+ * as the duty cycle clears (the dominant wait at SF10 -- tens of seconds),
+ * plus this jitter so devices booting together don't collide on retry. */
+#define P2P_JOIN_RETRY_JITTER_MS 2000
+
+/* RX1 window (§6, reused for JoinAccept per §5.3): opened this many ms
+ * before the nominal rx1_delay deadline to absorb node-side timing error
+ * (crystal drift, work-queue scheduling jitter), sized generously against
+ * the gateway-side ±10 ms design ceiling (proximos-v2#20). All
+ * debug-shell-overridable (not yet wired) for bench sweeping without a full
+ * re-join, same idiom as `ats lrw lc`.
+ *
+ * HW finding (#118 phase 2 HIL): this driver's lora_recv() has NO hardware
+ * symbol-timeout -- SetRxConfig always runs continuous RX
+ * (sx12xx_lora_recv(), loramac-node/sx12xx_common.c) and the "timeout" is a
+ * pure k_poll() software deadline that ABORTS an in-flight reception unless
+ * RxDone is already firing. So the window can't just be sized to catch a
+ * preamble (that's how a HW-symbol-timeout Class-A RX1 works, which is NOT
+ * this driver) -- it must stay open for the *whole* expected frame's
+ * time-on-air, or a real JoinAccept/Ack that starts right on time still gets
+ * killed mid-reception. P2P_RX1_WINDOW_SYMBOLS is now only the
+ * preamble-catch/open-timing-slop budget; frame_toa_ms() of the EXPECTED
+ * frame's length is added on top (p2p_rx1_timeout_ms()). */
+#define P2P_RX1_OPEN_MARGIN_MS     8
+#define P2P_RX1_WINDOW_SYMBOLS     12
+#define P2P_RX1_TRAILING_MARGIN_MS 40
+#define P2P_RX1_DELAY_DEFAULT_S    1
+
 static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 
 /* Shallower than app_lrw.c's own m_work_q (4096 B, sized for LoRaMac's deep call
@@ -102,8 +166,9 @@ static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
  * not stack-allocated), so 2048 B (the pre-#265 LoRaWAN default) is ample. */
 static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
 static struct k_work_q m_work_q;
-static struct k_work m_send_work;         /* compose + send telemetry */
-static struct k_work_delayable m_tx_work; /* drain response/alarm queue, retries on -EAGAIN */
+static struct k_work m_send_work;           /* compose + send telemetry */
+static struct k_work_delayable m_tx_work;   /* drain response/alarm queue, retries on -EAGAIN */
+static struct k_work_delayable m_join_work; /* JoinRequest attempt + retry (#118 phase 2) */
 #if defined(CONFIG_SHELL)
 static struct k_work m_rx_work; /* drain received frames (listen) */
 #endif
@@ -121,6 +186,21 @@ static void (*m_ready_cb)(void);
 /* --- Persistent frame counter (nonce uniqueness across reboots) --- */
 static uint32_t m_fcnt;          /* next counter value to use */
 static uint32_t m_fcnt_reserved; /* persisted high-water; m_fcnt < this is durable */
+
+/* --- Join/session state (#118 phase 2, doc/p2p.md §5.3) --- */
+enum p2p_link_state {
+	P2P_LINK_UNPAIRED, /* no valid pairing in NVS; not currently joining */
+	P2P_LINK_JOINING,  /* boot-window join attempts in progress */
+	P2P_LINK_PAIRED,   /* net_id/dev_addr/session_key valid, data plane live */
+};
+
+static enum p2p_link_state m_link_state = P2P_LINK_UNPAIRED;
+static uint32_t m_net_id;   /* 0 (pre-join) until PAIRED */
+static uint16_t m_dev_addr; /* 0 (pre-join) until PAIRED */
+static uint8_t m_session_key[P2P_KEY_LEN];
+static uint8_t m_rx1_delay_s = P2P_RX1_DELAY_DEFAULT_S;
+static uint32_t m_dev_nonce;      /* next JoinRequest counter; persisted, device lifetime */
+static int64_t m_join_started_at; /* uptime ms; start of the current boot join window */
 
 struct p2p_tx_msg {
 	uint8_t type;
@@ -176,6 +256,31 @@ static void derive_join_key(uint8_t out[P2P_KEY_LEN])
 	(void)app_ccm_cmac(g_app_config.secret_key, block, sizeof(block), out);
 }
 
+/* session_key = AES128-CMAC(join_key, 0x01 || dev_nonce(4 BE) ||
+ * central_nonce(4 BE) || serial_number(4 BE) || zeros(3)) (doc/p2p.md §4) --
+ * derived once per successful join, keyed under join_key so a session_key
+ * leak never exposes join_key. Rotates every re-join (fresh dev_nonce and
+ * central_nonce each time), which is also why resetting the frame counter to
+ * 0 on every new pairing is safe: CCM's nonce-uniqueness requirement is on
+ * the (key, nonce) pair, not the nonce alone (confirmed w/ #118 phase 2
+ * review). */
+static void derive_session_key(uint32_t dev_nonce, uint32_t central_nonce, uint8_t out[P2P_KEY_LEN])
+{
+	uint8_t join_key[P2P_KEY_LEN];
+
+	derive_join_key(join_key);
+
+	uint8_t block[16] = {0};
+
+	block[0] = 0x01;
+	sys_put_be32(dev_nonce, &block[1]);
+	sys_put_be32(central_nonce, &block[5]);
+	sys_put_be32(g_app_config.serial_number, &block[9]);
+	/* block[13..15] = zeros(3), already zero-initialized. */
+
+	(void)app_ccm_cmac(join_key, block, sizeof(block), out);
+}
+
 /* ======================================================================== */
 /* Frame counter persistence                                                */
 /* ======================================================================== */
@@ -227,6 +332,92 @@ static uint32_t fcnt_next(void)
 		fcnt_reserve(m_fcnt + P2P_FCNT_RESERVE);
 	}
 	return c;
+}
+
+/* ======================================================================== */
+/* Join/session persistence (#118 phase 2, doc/p2p.md §5.3)                 */
+/* ======================================================================== */
+
+static int join_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	const char *next;
+
+	if (settings_name_steq(name, "dnonce", &next) && !next) {
+		uint32_t v;
+
+		if (len == sizeof(v) && read_cb(cb_arg, &v, sizeof(v)) == (ssize_t)sizeof(v)) {
+			m_dev_nonce = v;
+		}
+		return 0;
+	}
+
+	if (settings_name_steq(name, "state", &next) && !next) {
+		uint8_t buf[P2P_JOIN_STATE_LEN];
+
+		if (len == sizeof(buf) &&
+		    read_cb(cb_arg, buf, sizeof(buf)) == (ssize_t)sizeof(buf)) {
+			m_net_id = sys_get_be32(&buf[0]);
+			m_dev_addr = sys_get_be16(&buf[4]);
+			memcpy(m_session_key, &buf[6], P2P_KEY_LEN);
+			m_rx1_delay_s = buf[6 + P2P_KEY_LEN];
+			m_link_state = P2P_LINK_PAIRED;
+		}
+		return 0;
+	}
+
+	return -ENOENT;
+}
+
+static struct settings_handler m_join_sh = {
+	.name = P2P_JOIN_SUBTREE,
+	.h_set = join_settings_set,
+};
+
+/* dev_nonce increments only on a JoinRequest attempt (rare -- not a per-frame
+ * event like the data-plane frame counter), so a plain synchronous save is
+ * cheap enough; no need for p2pfc's reservation-window trick (confirmed
+ * #118 phase 2 review). Never resets across pairings -- it is the central's
+ * JoinRequest replay-protection handle (§5.3), so re-joining must never
+ * present a dev_nonce the central could have already seen. */
+static void dnonce_persist(uint32_t v)
+{
+	m_dev_nonce = v;
+	int ret = settings_save_one(P2P_JOIN_DNONCE_KEY, &v, sizeof(v));
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("settings_save_one(p2pjoin/dnonce)", ret);
+	}
+}
+
+/* Persist a successful JoinAccept's pairing state and switch the module to
+ * PAIRED. Resets the data-plane frame counter to 0 -- safe because
+ * session_key is fresh (see derive_session_key()'s comment) and keeps the
+ * on-air counter values small. */
+static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
+			    const uint8_t session_key[P2P_KEY_LEN], uint8_t rx1_delay_s)
+{
+	uint8_t buf[P2P_JOIN_STATE_LEN];
+
+	sys_put_be32(net_id, &buf[0]);
+	sys_put_be16(dev_addr, &buf[4]);
+	memcpy(&buf[6], session_key, P2P_KEY_LEN);
+	buf[6 + P2P_KEY_LEN] = rx1_delay_s;
+
+	int ret = settings_save_one(P2P_JOIN_STATE_KEY, buf, sizeof(buf));
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("settings_save_one(p2pjoin/state)", ret);
+		return;
+	}
+
+	m_net_id = net_id;
+	m_dev_addr = dev_addr;
+	memcpy(m_session_key, session_key, P2P_KEY_LEN);
+	m_rx1_delay_s = rx1_delay_s;
+	m_link_state = P2P_LINK_PAIRED;
+
+	m_fcnt = 0;
+	fcnt_reserve(P2P_FCNT_RESERVE);
 }
 
 /* ======================================================================== */
@@ -304,16 +495,39 @@ static uint32_t frame_toa_ms(uint8_t payload_len)
 	return (uint32_t)((t_preamble_us + t_payload_us + 500) / 1000);
 }
 
+/* Preamble-catch / open-timing-slop budget in ms, P2P_RX1_WINDOW_SYMBOLS
+ * symbols at the live SF/BW -- only ONE component of the real lora_recv()
+ * timeout (see p2p_rx1_timeout_ms() and the #define comment above: this
+ * driver has no HW symbol-timeout, so this alone is NOT a valid window). */
+static uint32_t rx1_preamble_catch_ms(void)
+{
+	int sf = sf_from_cfg();
+	uint64_t tsym_us = ((uint64_t)(1u << sf) * 1000000ULL) / P2P_BANDWIDTH_HZ;
+
+	return (uint32_t)((tsym_us * P2P_RX1_WINDOW_SYMBOLS + 500) / 1000);
+}
+
+/* Full lora_recv() timeout for an RX1 wait expecting a frame of
+ * `expected_frame_len` bytes: preamble-catch budget + that frame's whole
+ * time-on-air + a trailing margin (#118 phase 2 HW finding -- this driver's
+ * "timeout" aborts an in-flight reception, so it must outlast the entire
+ * expected frame, not just its preamble). */
+static uint32_t p2p_rx1_timeout_ms(uint8_t expected_frame_len)
+{
+	return rx1_preamble_catch_ms() + frame_toa_ms(expected_frame_len) +
+	       P2P_RX1_TRAILING_MARGIN_MS;
+}
+
 /* ======================================================================== */
 /* Frame TX                                                                 */
 /* ======================================================================== */
 
-static void build_nonce(uint8_t nonce[P2P_NONCE_LEN], uint32_t counter, uint8_t frame_type,
-			uint8_t dir)
+static void build_nonce(uint8_t nonce[P2P_NONCE_LEN], uint32_t counter, uint16_t dev_addr,
+			uint8_t frame_type, uint8_t dir)
 {
 	memset(nonce, 0, P2P_NONCE_LEN);
 	sys_put_be32(counter, &nonce[0]);
-	sys_put_be16(P2P_DEV_ADDR, &nonce[4]);
+	sys_put_be16(dev_addr, &nonce[4]);
 	nonce[6] = frame_type;
 	nonce[7] = dir;
 }
@@ -337,24 +551,28 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len)
 		return -EAGAIN;
 	}
 
+	if (m_link_state != P2P_LINK_PAIRED) {
+		/* Callers gate on app_p2p_is_ready(), so this should never happen --
+		 * defensive only (no session_key to encrypt the data plane under
+		 * yet). */
+		LOG_ERR("TX skipped: not paired (#118 phase 2)");
+		return -ENOTCONN;
+	}
+
 	uint8_t frame[P2P_FRAME_MAX];
 	uint32_t counter = fcnt_next();
 
-	sys_put_be32(P2P_NET_ID, &frame[0]);
-	sys_put_be16(P2P_DEV_ADDR, &frame[4]);
+	sys_put_be32(m_net_id, &frame[0]);
+	sys_put_be16(m_dev_addr, &frame[4]);
 	frame[6] = frame_type;
 	sys_put_be32(counter, &frame[7]);
 
 	uint8_t nonce[P2P_NONCE_LEN];
 
-	build_nonce(nonce, counter, frame_type, P2P_DIR_TX);
+	build_nonce(nonce, counter, m_dev_addr, frame_type, P2P_DIR_TX);
 
-	uint8_t key[P2P_KEY_LEN];
-
-	derive_join_key(key);
-
-	int ret = app_ccm_encrypt_and_tag(key, nonce, P2P_NONCE_LEN, /* AAD */ frame, P2P_HDR_LEN,
-					  body, body_len, &frame[P2P_HDR_LEN],
+	int ret = app_ccm_encrypt_and_tag(m_session_key, nonce, P2P_NONCE_LEN, /* AAD */ frame,
+					  P2P_HDR_LEN, body, body_len, &frame[P2P_HDR_LEN],
 					  &frame[P2P_HDR_LEN + body_len], P2P_TAG_LEN);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_ccm_encrypt_and_tag", ret);
@@ -471,7 +689,7 @@ static void rx_work_handler(struct k_work *work)
 		uint8_t frame_type = msg.buf[6];
 		uint32_t counter = sys_get_be32(&msg.buf[7]);
 
-		if (net_id != P2P_NET_ID) {
+		if (net_id != m_net_id) {
 			LOG_DBG("RX foreign net_id %u; ignored", net_id);
 			continue;
 		}
@@ -488,6 +706,11 @@ static void rx_work_handler(struct k_work *work)
 		nonce[6] = frame_type;
 		nonce[7] = P2P_DIR_TX;
 
+		/* Tries join_key only -- a PAIRED device's own data-plane traffic is
+		 * under session_key instead and will correctly fail here (#118
+		 * phase 2; this listen mode is diagnostic/bench-only and was never
+		 * extended to try both keys, out of the reviewed A-D join-handshake
+		 * scope). */
 		uint8_t key[P2P_KEY_LEN];
 
 		derive_join_key(key);
@@ -553,7 +776,7 @@ int app_p2p_listen(bool enable)
 			return ret;
 		}
 		m_listening = true;
-		LOG_INF("P2P listen: ON (net_id=%u)", P2P_NET_ID);
+		LOG_INF("P2P listen: ON (net_id=%u)", m_net_id);
 	} else {
 		(void)lora_recv_async(m_lora_dev, NULL, NULL);
 		m_listening = false;
@@ -563,6 +786,239 @@ int app_p2p_listen(bool enable)
 	return 0;
 }
 #endif /* defined(CONFIG_SHELL) */
+
+/* ======================================================================== */
+/* Join handshake (#118 phase 2, doc/p2p.md §5.3)                           */
+/* ======================================================================== */
+
+static void mark_ready(void)
+{
+	m_started = true;
+	if (m_ready_cb) {
+		m_ready_cb();
+	}
+}
+
+/* Open a bounded RX window `rx1_delay_s - open_margin_ms` after `tx_end_ms`
+ * (uptime ms), sleeping until it opens then blocking on lora_recv() for
+ * p2p_rx1_timeout_ms(expected_frame_len) -- reused for both JoinAccept (this
+ * file) and, later, §6's data-plane Ack (pass THAT frame's expected length).
+ * Runs on m_work_q like everything else here; the whole call blocks that
+ * queue for up to ~rx1_delay_s (dominant) + the frame's ToA (#118 phase 2 HW
+ * finding, see p2p_rx1_timeout_ms()) -- fine for a JoinRequest attempt (rare,
+ * and both the duty-cycle retry's multi-second reschedule and the
+ * heartbeat's 30 s timeout tolerate it easily), reconsider if #6 reuses this
+ * per-uplink on a hot report cadence. Restores TX radio config before
+ * returning either way. Returns the received length (>=0) or a negative
+ * errno (notably a timeout if nothing arrived within the window). */
+static int p2p_rx_window(int64_t tx_end_ms, uint8_t rx1_delay_s, uint8_t expected_frame_len,
+			 uint8_t *buf, size_t buf_size, int16_t *rssi, int8_t *snr)
+{
+	int64_t open_at = tx_end_ms + (int64_t)rx1_delay_s * 1000 - P2P_RX1_OPEN_MARGIN_MS;
+	int64_t sleep_ms = open_at - k_uptime_get();
+
+	if (sleep_ms > 0) {
+		k_sleep(K_MSEC(sleep_ms));
+	}
+
+	int ret = radio_configure(false);
+
+	if (ret) {
+		return ret;
+	}
+
+	ret = lora_recv(m_lora_dev, buf, (uint8_t)MIN(buf_size, 255),
+			K_MSEC(p2p_rx1_timeout_ms(expected_frame_len)), rssi, snr);
+
+	(void)radio_configure(true);
+
+	return ret;
+}
+
+/* Send one JoinRequest (doc/p2p.md §5.3): header net_id=0/dev_addr=0,
+ * counter=dev_nonce; body product_type|proto_version|serial_be32|fw_version
+ * sent as AAD with an EMPTY ciphertext (the body is authenticated, not
+ * encrypted -- there is nothing secret in it, it is the central's lookup
+ * key). Persists the advanced dev_nonce BEFORE sending: once a JoinRequest
+ * *could* have reached the central, that nonce value must never be reused,
+ * even if the TX or the round-trip afterward fails. Returns 0 (with
+ * `*used_nonce`/`*tx_end_ms` set) or -EAGAIN (duty-cycle blocked) or an
+ * errno. */
+static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
+{
+	int64_t now = k_uptime_get();
+
+	if (now < m_dc_blocked_until) {
+		return -EAGAIN;
+	}
+
+	uint32_t nonce_val = m_dev_nonce;
+
+	dnonce_persist(nonce_val + 1);
+
+	uint8_t frame[P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_TAG_LEN];
+
+	sys_put_be32(P2P_PREJOIN_NET_ID, &frame[0]);
+	sys_put_be16(P2P_PREJOIN_DEV_ADDR, &frame[4]);
+	frame[6] = APP_P2P_FRAME_JOIN_REQUEST;
+	sys_put_be32(nonce_val, &frame[7]);
+
+	uint8_t *body = &frame[P2P_HDR_LEN];
+
+	body[0] = P2P_PRODUCT_TYPE_STICKER;
+	body[1] = APP_PROTO_VERSION;
+	sys_put_be32(g_app_config.serial_number, &body[2]);
+	body[6] = APP_VERSION_MAJOR;
+	body[7] = APP_VERSION_MINOR;
+	body[8] = APP_VERSION_PATCH;
+	body[9] = 0; /* reserved */
+
+	uint8_t nonce[P2P_NONCE_LEN];
+
+	build_nonce(nonce, nonce_val, P2P_PREJOIN_DEV_ADDR, APP_P2P_FRAME_JOIN_REQUEST, P2P_DIR_TX);
+
+	uint8_t key[P2P_KEY_LEN];
+
+	derive_join_key(key);
+
+	/* Whole body is AAD; ciphertext is empty (doc/p2p.md §5.3). */
+	int ret = app_ccm_encrypt_and_tag(key, nonce, P2P_NONCE_LEN, frame,
+					  sizeof(frame) - P2P_TAG_LEN, NULL, 0, NULL,
+					  &frame[sizeof(frame) - P2P_TAG_LEN], P2P_TAG_LEN);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_ccm_encrypt_and_tag", ret);
+		return ret;
+	}
+
+	ret = lora_send(m_lora_dev, frame, sizeof(frame));
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("lora_send", ret);
+		return ret;
+	}
+
+	int64_t end = k_uptime_get();
+	uint32_t air = frame_toa_ms(sizeof(frame));
+
+	m_dc_blocked_until = end + (int64_t)air * (1000 / P2P_DUTY_CYCLE_PERMILLE - 1);
+
+	LOG_INF("JoinRequest sent (dev_nonce %u, %u ms air)", nonce_val, air);
+
+	*used_nonce = nonce_val;
+	*tx_end_ms = end;
+	return 0;
+}
+
+/* Wait for and process JoinAccept in the RX1 window following a JoinRequest.
+ * On success, derives session_key and persists the new pairing (NVS + module
+ * state, via pairing_persist()). Returns 0 on a valid, matching JoinAccept;
+ * a negative errno otherwise (timeout, malformed frame, or auth failure --
+ * all just mean "no accept this attempt", not a hard error). */
+static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
+{
+	uint8_t buf[P2P_FRAME_MAX];
+	int16_t rssi;
+	int8_t snr;
+	size_t want = P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN + P2P_TAG_LEN;
+
+	int len = p2p_rx_window(tx_end_ms, P2P_RX1_DELAY_DEFAULT_S, (uint8_t)want, buf, sizeof(buf),
+				&rssi, &snr);
+
+	if (len < 0) {
+		return len;
+	}
+
+	if ((size_t)len != want) {
+		LOG_WRN("JoinAccept: unexpected length %d (want %zu)", len, want);
+		return -EBADMSG;
+	}
+
+	uint32_t net_id_hdr = sys_get_be32(&buf[0]);
+	uint16_t dev_addr_hdr = sys_get_be16(&buf[4]);
+	uint8_t frame_type = buf[6];
+	uint32_t counter = sys_get_be32(&buf[7]);
+
+	if (net_id_hdr != P2P_PREJOIN_NET_ID || dev_addr_hdr != P2P_PREJOIN_DEV_ADDR ||
+	    frame_type != APP_P2P_FRAME_JOIN_ACCEPT || counter != dev_nonce) {
+		LOG_WRN("JoinAccept: header mismatch (type %u, ctr %u, want ctr %u)", frame_type,
+			counter, dev_nonce);
+		return -EBADMSG;
+	}
+
+	uint8_t nonce[P2P_NONCE_LEN];
+
+	build_nonce(nonce, counter, P2P_PREJOIN_DEV_ADDR, frame_type, P2P_DIR_RX);
+
+	uint8_t key[P2P_KEY_LEN];
+
+	derive_join_key(key);
+
+	uint8_t body[P2P_JOIN_ACCEPT_BODY_LEN];
+	int ret = app_ccm_auth_decrypt(key, nonce, P2P_NONCE_LEN, buf, P2P_HDR_LEN,
+				       &buf[P2P_HDR_LEN], P2P_JOIN_ACCEPT_BODY_LEN,
+				       &buf[P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN], P2P_TAG_LEN,
+				       body);
+	if (ret) {
+		LOG_WRN("JoinAccept: auth failed");
+		return ret;
+	}
+
+	uint32_t net_id = sys_get_be32(&body[0]);
+	uint16_t dev_addr = sys_get_be16(&body[4]);
+	uint32_t central_nonce = sys_get_be32(&body[6]);
+	uint8_t rx1_delay_s = body[10];
+	/* body[11..14] = reserved (v2 data-channel assignment hook, §11), unused. */
+
+	uint8_t session_key[P2P_KEY_LEN];
+
+	derive_session_key(dev_nonce, central_nonce, session_key);
+	pairing_persist(net_id, dev_addr, session_key, rx1_delay_s);
+
+	LOG_INF("Joined: net_id=%u dev_addr=%u rx1_delay=%us (RSSI %d dBm, SNR %d dB)", net_id,
+		dev_addr, rx1_delay_s, rssi, snr);
+	return 0;
+}
+
+static void join_work_handler(struct k_work *work)
+{
+	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+
+	if (m_link_state != P2P_LINK_JOINING) {
+		return; /* paired (or reverted) while a retry was already in flight */
+	}
+
+	if (k_uptime_get() - m_join_started_at >= P2P_JOIN_BOOT_WINDOW_MS) {
+		LOG_WRN("P2P join: boot window (%d s) expired without a JoinAccept; giving up "
+			"until next boot/trigger",
+			P2P_JOIN_BOOT_WINDOW_MS / 1000);
+		m_link_state = P2P_LINK_UNPAIRED;
+		return;
+	}
+
+	uint32_t used_nonce;
+	int64_t tx_end;
+	int ret = send_join_request(&used_nonce, &tx_end);
+
+	if (ret == 0) {
+		ret = recv_join_accept(used_nonce, tx_end);
+		if (ret == 0) {
+			mark_ready();
+			return; /* paired; no more retries */
+		}
+		LOG_INF("JoinAccept not received/invalid (%d); retrying", ret);
+	} else if (ret != -EAGAIN) {
+		LOG_ERR_CALL_FAILED_INT("send_join_request", ret);
+	}
+
+	int64_t wait_ms = (ret == -EAGAIN) ? (m_dc_blocked_until - k_uptime_get()) : 0;
+
+	if (wait_ms < 0) {
+		wait_ms = 0;
+	}
+
+	uint32_t jitter = sys_rand32_get() % P2P_JOIN_RETRY_JITTER_MS;
+
+	k_work_reschedule_for_queue(&m_work_q, dwork, K_MSEC(wait_ms + jitter));
+}
 
 /* ======================================================================== */
 /* Watchdog heartbeat (mirrors app_lrw.c's m_work_q liveness pattern)        */
@@ -601,6 +1057,17 @@ int app_p2p_init(void)
 		return ret;
 	}
 
+	ret = settings_register(&m_join_sh);
+	if (ret && ret != -EEXIST) {
+		LOG_ERR_CALL_FAILED_INT("settings_register", ret);
+		return ret;
+	}
+	ret = settings_load_subtree(P2P_JOIN_SUBTREE);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("settings_load_subtree", ret);
+		return ret;
+	}
+
 	ret = radio_configure(true);
 	if (ret) {
 		return ret;
@@ -612,6 +1079,7 @@ int app_p2p_init(void)
 
 	k_work_init(&m_send_work, send_work_handler);
 	k_work_init_delayable(&m_tx_work, tx_work_handler);
+	k_work_init_delayable(&m_join_work, join_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
 #endif
@@ -632,10 +1100,19 @@ int app_p2p_init(void)
 
 void app_p2p_start(void)
 {
-	m_started = true;
-	if (m_ready_cb) {
-		m_ready_cb();
+	if (m_link_state == P2P_LINK_PAIRED) {
+		/* Persisted pairing from a prior boot: no re-join needed (§7 --
+		 * a session survives normal power cycles). */
+		mark_ready();
+		return;
 	}
+
+	/* Unpaired: kick off the boot-window join handshake (#118 phase 2,
+	 * §5.2). app_p2p_is_ready() only goes true once JoinAccept lands
+	 * (mark_ready(), called from join_work_handler()). */
+	m_link_state = P2P_LINK_JOINING;
+	m_join_started_at = k_uptime_get();
+	k_work_schedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
 }
 
 bool app_p2p_is_ready(void)
@@ -695,8 +1172,8 @@ void app_p2p_register_ready_cb(void (*cb)(void))
 
 void app_p2p_suspend(void)
 {
-	/* Nothing queued survives a poweroff; the work queue itself is torn down
-	 * with the reboot that follows deep-sleep entry, same as app_lrw_suspend()
-	 * relies on for its own timers. No-op today; kept as an explicit facade
-	 * hook so a future phase 2 heartbeat/timer has a defined shutdown point. */
+	/* Nothing queued survives a poweroff -- the work queue itself (including
+	 * any pending m_join_work retry, #118 phase 2) is torn down with the
+	 * reboot that follows deep-sleep entry, same as app_lrw_suspend() relies
+	 * on for its own timers. No-op today; kept as an explicit facade hook. */
 }
