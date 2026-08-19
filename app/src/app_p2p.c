@@ -155,10 +155,15 @@ K_MSGQ_DEFINE(m_rx_msgq, sizeof(struct p2p_rx_msg), P2P_RX_QUEUE_DEPTH, 4);
 /* Key derivation                                                            */
 /* ======================================================================== */
 
-/* join_key = AES128-ECB(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE)),
- * zero-padded to one 16 B block. Derived fresh on demand (cheap, one AES
- * block) rather than cached -- secret_key can change (#299) without this
- * module needing to know. */
+/* join_key = AES128-CMAC(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE))
+ * (doc/p2p.md §4, NIST SP 800-38B / RFC 4493) -- a proper PRF with
+ * domain-separated subkeys, not the bare one-block AES-ECB PRF phase 1
+ * shipped (a crypto review flagged the plain ECB construction as
+ * under-specified; CMAC needs only the same AES-ECB forward primitive
+ * underneath, so this costs no new backend, #118 phase 2). Breaking change
+ * vs. phase 1's join_key, accepted pre-ship (phase 1 was bench-only, no
+ * central to migrate). Derived fresh on demand (cheap) rather than cached --
+ * secret_key can change (#299) without this module needing to know. */
 static void derive_join_key(uint8_t out[P2P_KEY_LEN])
 {
 	uint8_t block[16] = {0};
@@ -168,7 +173,7 @@ static void derive_join_key(uint8_t out[P2P_KEY_LEN])
 	memcpy(block, P2P_JOIN_KEY_LABEL, label_len);
 	sys_put_be32(g_app_config.serial_number, &block[label_len]);
 
-	(void)app_ccm_ecb_encrypt_block(g_app_config.secret_key, block, out);
+	(void)app_ccm_cmac(g_app_config.secret_key, block, sizeof(block), out);
 }
 
 /* ======================================================================== */

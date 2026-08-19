@@ -11,7 +11,7 @@
 // Phase 1 (doc/p2p.md §13): net_id/dev_addr are the fixed pre-join value 0
 // (§5.3's own JoinRequest convention); there is no manual p2p_key config
 // parameter (§4) -- the frame key is `join_key`, derived on demand from the
-// device's secret_key via deriveJoinKey() below (the same one-block AES-ECB PRF
+// device's secret_key via deriveJoinKey() below (the same AES-CMAC PRF
 // app_p2p.c's derive_join_key() computes, so both sides always agree without
 // provisioning a separate secret).
 //
@@ -53,12 +53,80 @@ function asKey(key) {
   return key;
 }
 
-// join_key = AES128-ECB(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE)),
-// doc/p2p.md §4 -- a one-block PRF over the device's existing secret_key.
-// `secretKey` is a Buffer or 32-hex-digit string; `serialNumber` a uint32.
-// Returns the 16-byte join_key as a Buffer. Matches app_p2p.c's
-// derive_join_key() exactly (same label, same big-endian serial encoding, same
-// single AES-128-ECB block, no padding).
+// Single-block AES-128 ECB forward encrypt, no padding: `block` must be
+// exactly 16 B. The one primitive both aes128Cmac() below and (on the device
+// side) app_ccm_ecb_encrypt_block() are built from.
+function aesEcbEncryptBlock(key, block) {
+  const cipher = crypto.createCipheriv("aes-128-ecb", key, null);
+  cipher.setAutoPadding(false);
+  return Buffer.concat([cipher.update(block), cipher.final()]).subarray(0, 16);
+}
+
+function xor16(a, b) {
+  const out = Buffer.alloc(16);
+  for (let i = 0; i < 16; i++) {
+    out[i] = a[i] ^ b[i];
+  }
+  return out;
+}
+
+// GF(2^128) "shift left 1, XOR Rb if the vacated MSB was 1" doubling used to
+// derive both CMAC subkeys from L = E(K, 0^128). Rb = 0x87 (RFC 4493 §2.3).
+// Mirrors app_ccm.c's double_gf128() exactly.
+function doubleGf128(v) {
+  const out = Buffer.alloc(16);
+  const msb = (v[0] & 0x80) !== 0;
+
+  for (let i = 0; i < 15; i++) {
+    out[i] = ((v[i] << 1) | (v[i + 1] >>> 7)) & 0xff;
+  }
+  out[15] = (v[15] << 1) & 0xff;
+  if (msb) {
+    out[15] ^= 0x87;
+  }
+  return out;
+}
+
+// AES-128 CMAC (NIST SP 800-38B / RFC 4493). `key` a Buffer or 32-hex-digit
+// string; `msg` a Buffer (any length, including 0). Mirrors app_ccm.c's
+// app_ccm_cmac() exactly (same subkey derivation, same 10...0 padding on a
+// partial final block).
+function aes128Cmac(key, msg) {
+  key = asKey(key);
+  if (!Buffer.isBuffer(msg)) {
+    msg = Buffer.from(msg);
+  }
+
+  const k1 = doubleGf128(aesEcbEncryptBlock(key, Buffer.alloc(16)));
+  const k2 = doubleGf128(k1);
+
+  const nBlocks = msg.length === 0 ? 1 : Math.ceil(msg.length / 16);
+  const lastFull = msg.length !== 0 && msg.length % 16 === 0;
+
+  let x = Buffer.alloc(16);
+  for (let i = 0; i < nBlocks - 1; i++) {
+    x = aesEcbEncryptBlock(key, xor16(x, msg.subarray(i * 16, i * 16 + 16)));
+  }
+
+  const lastOff = (nBlocks - 1) * 16;
+  let lastBlock;
+  if (lastFull) {
+    lastBlock = xor16(msg.subarray(lastOff, lastOff + 16), k1);
+  } else {
+    const padded = Buffer.alloc(16);
+    msg.subarray(lastOff).copy(padded, 0);
+    padded[msg.length - lastOff] = 0x80;
+    lastBlock = xor16(padded, k2);
+  }
+  return aesEcbEncryptBlock(key, xor16(x, lastBlock));
+}
+
+// join_key = AES128-CMAC(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE)),
+// doc/p2p.md §4 -- a proper PRF with domain-separated subkeys (#118 phase 2;
+// phase 1 used a bare one-block AES-ECB PRF, replaced pre-ship after a crypto
+// review). `secretKey` is a Buffer or 32-hex-digit string; `serialNumber` a
+// uint32. Returns the 16-byte join_key as a Buffer. Matches app_p2p.c's
+// derive_join_key() exactly (same label, same big-endian serial encoding).
 function deriveJoinKey(secretKey, serialNumber) {
   secretKey = asKey(secretKey);
 
@@ -71,13 +139,7 @@ function deriveJoinKey(secretKey, serialNumber) {
   label.copy(block, 0);
   block.writeUInt32BE(serialNumber >>> 0, label.length);
 
-  // Single-block AES-128 ECB with no padding: aes-128-ecb encrypts a whole
-  // number of 16 B blocks, and our input is exactly one, so disable the
-  // library's PKCS#7 padding (which would otherwise append a spurious 16 B
-  // padding block) and take just the first 16 bytes of output.
-  const cipher = crypto.createCipheriv("aes-128-ecb", secretKey, null);
-  cipher.setAutoPadding(false);
-  return Buffer.concat([cipher.update(block), cipher.final()]).subarray(0, 16);
+  return aes128Cmac(secretKey, block);
 }
 
 // Decode one raw P2P frame. `frame` is a Buffer / hex string / byte array, `key`
@@ -169,6 +231,7 @@ module.exports = {
   decodeP2pFrame,
   encodeP2pFrame,
   deriveJoinKey,
+  aes128Cmac,
   buildNonce,
   P2P_HDR_LEN,
   P2P_TAG_LEN,

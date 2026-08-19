@@ -21,6 +21,7 @@
 #include <zephyr/sys/util.h>
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -204,6 +205,68 @@ static void ccm_tag(const uint8_t key[AES_BLOCK], const uint8_t *nonce, size_t n
 	for (size_t i = 0; i < tag_len; i++) {
 		tag[i] = x[i] ^ s0[i];
 	}
+}
+
+/* ---- AES-128 CMAC (NIST SP 800-38B / RFC 4493) ------------------------------ */
+
+/* GF(2^128) "shift left 1, XOR Rb if the vacated MSB was 1" doubling used to
+ * derive both subkeys from L = E(K, 0^128). Rb = 0x87 is the reduction
+ * constant for a 128-bit block (RFC 4493 §2.3). */
+static void double_gf128(uint8_t v[AES_BLOCK])
+{
+	uint8_t msb = v[0] & 0x80;
+
+	for (int i = 0; i < AES_BLOCK - 1; i++) {
+		v[i] = (uint8_t)((v[i] << 1) | (v[i + 1] >> 7));
+	}
+	v[AES_BLOCK - 1] = (uint8_t)(v[AES_BLOCK - 1] << 1);
+	if (msb) {
+		v[AES_BLOCK - 1] ^= 0x87;
+	}
+}
+
+int app_ccm_cmac(const uint8_t key[16], const uint8_t *msg, size_t msg_len, uint8_t out[16])
+{
+	uint8_t k1[AES_BLOCK], k2[AES_BLOCK];
+	uint8_t x[AES_BLOCK] = {0};
+	uint8_t block[AES_BLOCK];
+	size_t n_blocks = (msg_len + AES_BLOCK - 1) / AES_BLOCK;
+	bool last_full = msg_len != 0 && (msg_len % AES_BLOCK) == 0;
+
+	if (n_blocks == 0) {
+		n_blocks = 1; /* empty message still MACs one padded block */
+	}
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+
+	memset(k1, 0, sizeof(k1));
+	aes128_ecb_encrypt(key, k1, k1); /* L = E(K, 0^128) */
+	double_gf128(k1);                /* K1 = dbl(L) */
+	memcpy(k2, k1, AES_BLOCK);
+	double_gf128(k2); /* K2 = dbl(K1) */
+
+	for (size_t i = 0; i + 1 < n_blocks; i++) {
+		cbc_step(key, x, &msg[i * AES_BLOCK]);
+	}
+
+	size_t last_off = (n_blocks - 1) * AES_BLOCK;
+	size_t last_len = msg_len - last_off;
+
+	memset(block, 0, sizeof(block));
+	if (last_full) {
+		memcpy(block, &msg[last_off], AES_BLOCK);
+		xor16(block, k1);
+	} else {
+		memcpy(block, &msg[last_off], last_len);
+		block[last_len] = 0x80; /* 10...0 padding */
+		xor16(block, k2);
+	}
+	cbc_step(key, x, block);
+
+	memcpy(out, x, AES_BLOCK);
+
+	k_mutex_unlock(&m_lock);
+	return 0;
 }
 
 static bool params_ok(size_t nonce_len, size_t aad_len, size_t tag_len)

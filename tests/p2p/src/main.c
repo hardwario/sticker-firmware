@@ -20,7 +20,7 @@
  *   header:  net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | counter(4 BE)
  *   nonce:   counter(4 BE) | dev_addr(2 BE) | frame_type(1) | direction(1) | 0*5
  *   crypto:  AES-CCM (AES-128, 4 B tag) under join_key, 11 B header as AAD
- *   join_key = AES128-ECB(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE))
+ *   join_key = AES128-CMAC(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE))
  *
  * `p2p key` sets the identity (secret_key + serial_number) of the DEVICE UNDER
  * TEST -- read it off the DUT (e.g. `ats device info` / bench records) and
@@ -86,7 +86,7 @@ struct rx_msg {
 K_MSGQ_DEFINE(m_rx_msgq, sizeof(struct rx_msg), 4, 4);
 static struct k_work m_rx_work;
 
-/* join_key = AES128-ECB(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE)),
+/* join_key = AES128-CMAC(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE)),
  * doc/p2p.md §4 -- identical derivation to app_p2p.c's derive_join_key(). */
 static void derive_join_key(uint8_t out[KEY_LEN])
 {
@@ -95,7 +95,7 @@ static void derive_join_key(uint8_t out[KEY_LEN])
 
 	memcpy(block, JOIN_KEY_LABEL, label_len);
 	sys_put_be32(m_serial_number, &block[label_len]);
-	(void)app_ccm_ecb_encrypt_block(m_secret_key, block, out);
+	(void)app_ccm_cmac(m_secret_key, block, sizeof(block), out);
 }
 
 static void build_nonce(uint8_t nonce[NONCE_LEN], uint32_t counter, uint16_t dev_addr,

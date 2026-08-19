@@ -26,16 +26,32 @@ test("nonce layout: counter(4 BE) || dev_addr(2 BE) || type(1) || dir(1) || 0*5"
   assert.equal(n.length, p2p.P2P_NONCE_LEN);
 });
 
-test("deriveJoinKey: known-answer vector (cross-checked against a reference AES-ECB implementation)", () => {
+test("deriveJoinKey: known-answer vector (cross-checked against a reference AES-CMAC implementation)", () => {
   // block = "HIO-P2P-JOIN" (12 B, ASCII) || serial_number(4 BE) = 16 B exactly;
-  // join_key = AES-128-ECB(secret_key, block). Vector computed independently
-  // via PyCryptodome's AES.new(key, AES.MODE_ECB).encrypt(block).
+  // join_key = AES-128-CMAC(secret_key, block). Vector computed independently
+  // via PyCryptodome's CMAC.new(key, ciphermod=AES) (#118 phase 2, replacing
+  // the phase-1 plain-ECB PRF after a crypto review).
   const secretKey = KEY;
   const serialNumber = 0x12345678;
   const joinKey = p2p.deriveJoinKey(secretKey, serialNumber);
 
   assert.equal(joinKey.length, 16);
-  assert.equal(toHex(joinKey), "ecf6d6e6036b54e2ba69b43bd51618a9");
+  assert.equal(toHex(joinKey), "3815437f5476f37b7744a3c5b0935867");
+});
+
+test("aes128Cmac: RFC 4493 known-answer vectors", () => {
+  const key = "2b7e151628aed2a6abf7158809cf4f3c";
+  const msg = hex(
+    "6bc1bee22e409f96e93d7e117393172a" +
+      "ae2d8a571e03ac9c9eb76fac45af8e51" +
+      "30c81c46a35ce411e5fbc1191a0a52ef" +
+      "f69f2445df4f9b17ad2b417be66c3710"
+  );
+
+  assert.equal(toHex(p2p.aes128Cmac(key, msg.subarray(0, 0))), "bb1d6929e95937287fa37d129b756746");
+  assert.equal(toHex(p2p.aes128Cmac(key, msg.subarray(0, 16))), "070a16b46b4d4144f79bdd9dd04a287c");
+  assert.equal(toHex(p2p.aes128Cmac(key, msg.subarray(0, 40))), "dfa66747de9ae63030ca32611497c827");
+  assert.equal(toHex(p2p.aes128Cmac(key, msg)), "51f0bebf7e3b9d92fc49741779363cfe");
 });
 
 test("deriveJoinKey: distinct secret_key or serial_number gives a distinct join_key", () => {

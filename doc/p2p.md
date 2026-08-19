@@ -138,16 +138,17 @@ was re-measured — see §11 — release has room, debug does not and keeps
 | `0x02` | up | telemetry (mirrors LoRaWAN fPort 2, body byte-identical) |
 | `0x03` | up | alarm (fPort 3 mirror) |
 | `0x55` | up | command response (fPort 85 mirror) |
-| `0x56` | down | command (fPort 86 mirror) |
+| `0x56` | down | command (same protobuf Command shape as fPort 85's Command oneof; P2P-only surface, no real LoRaWAN fPort counterpart -- see §6) |
 | `0xF0` | up | **JoinRequest** (link control, §5) |
 | `0xF1` | down | **JoinAccept** |
 | `0xFA` | down | **Ack** |
 | `0xFD` | down | **Detach** (authenticated) |
 | `0xFE` | down | **RejoinRequest** (network asks the node to rejoin) |
 
-`0x02`–`0x56` mirror fPorts so the off-device decoder reuses the LoRaWAN codec
-(`ttn.js` via `p2p.js`); `0xF0`–`0xFF` is reserved for link control and never
-collides with an fPort mirror.
+`0x02`, `0x03`, `0x55` mirror fPorts byte-for-byte so the off-device decoder
+reuses the LoRaWAN codec (`ttn.js` via `p2p.js`); `0x56` reuses the same
+protobuf shape but has no fPort of its own (§6); `0xF0`–`0xFF` is reserved
+for link control and never collides with an fPort mirror.
 
 ### 3.3 Radio parameters
 
@@ -169,8 +170,8 @@ form a strict one-way hierarchy rooted in the per-unit factory secret:
 | Key | Who holds it | Origin / distribution |
 |---|---|---|
 | `secret_key` (16 B, existing) | device, ATELOS/inventory, phone app after claim | Set at the tester; the NFC command channel key. **Never leaves the NFC/claim world — the central and gateways never see it.** |
-| `p2p_join_key` (16 B, derived) | device (derives on demand), phone app (derives after claim), **central (registered by the app)** | `join_key = AES128-ECB(secret_key, "HIO-P2P-JOIN" ‖ serial_number(4 BE))` — a one-block PRF over the hardware AES already in flash. The app derives it after claiming the device and registers `{product_type, serial, join_key}` with the central over its management API (TLS, operator-authenticated). One-time per device lifetime. |
-| `p2p_session_key` (16 B, per pairing) | device + central | Derived during the join handshake: `session_key = AES128-ECB(join_key, 0x01 ‖ dev_nonce(4) ‖ central_nonce(4) ‖ serial(4) ‖ zeros(3))`. Rotates on every re-join. |
+| `p2p_join_key` (16 B, derived) | device (derives on demand), phone app (derives after claim), **central (registered by the app)** | `join_key = AES128-CMAC(secret_key, "HIO-P2P-JOIN" ‖ serial_number(4 BE))` (NIST SP 800-38B / RFC 4493) — CMAC needs only the AES-ECB forward primitive already in flash (subkey generation + one CBC-MAC pass over the single 16 B block), so this is a library/driver change, not a new crypto dependency (§11's KDF review, resolved #118 phase 2; phase 1 shipped a bare one-block AES-ECB PRF, breaking change accepted pre-ship). The app derives it after claiming the device and registers `{product_type, serial, join_key}` with the central over its management API (TLS, operator-authenticated). One-time per device lifetime. |
+| `p2p_session_key` (16 B, per pairing) | device + central | Derived during the join handshake: `session_key = AES128-CMAC(join_key, 0x01 ‖ dev_nonce(4) ‖ central_nonce(4) ‖ serial(4) ‖ zeros(3))` — same CMAC construction, keyed under `join_key`. Rotates on every re-join. |
 
 Properties this buys:
 
@@ -328,7 +329,11 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   design.
 - **Downlink commands** (`0x56`): flagged in the ACK, delivered in the RX1
   window of the *next* uplink (Class-A downlink queue on the central). Same
-  body format as LoRaWAN fPort 86, so `app_cmd` ingest is transport-agnostic.
+  protobuf Command shape as LoRaWAN fPort 85's Command oneof; `frame_type
+  0x56` is a P2P-only surface with no real LoRaWAN fPort counterpart (the
+  directional `0x55`/`0x56` split exists because P2P lacks ChirpStack's
+  topic-based direction separation) -- `app_cmd` ingest is still
+  transport-agnostic, just not a literal fPort mirror on the downlink side.
 - **Dedup across gateways**: every gateway that hears a frame forwards it;
   the central keys dedup on `(dev_addr, counter)` and records per-gateway
   RSSI/SNR (which also feeds ACK routing).
@@ -433,9 +438,12 @@ again.
 
 ## 11. Open questions
 
-- **KDF construction review** — the one-block AES-ECB PRF (§4) is simple and
-  uses only primitives already in flash; confirm with a crypto review that the
-  label/serial domain separation is sufficient (vs. e.g. AES-CMAC).
+- **KDF construction review** — **Resolved (#118 phase 2):** switched `§4`'s
+  `join_key`/`session_key` derivation from the bare one-block AES-ECB PRF to
+  AES-CMAC (NIST SP 800-38B / RFC 4493), still built on only the AES-ECB
+  forward primitive already in flash (`app_ccm_cmac()`), so no new crypto
+  backend. Breaking change vs. phase 1's `join_key`, accepted pre-ship (phase
+  1 was bench-only, no central to migrate).
 - **ACK economics at scale** — at what node count per network does confirmed-
   uplink eat the gateways' 1 % duty cycle (§6/§10)? Options if it binds:
   ACK-every-Nth, or sink-driven TDMA (Piyare et al., §10 related work).
