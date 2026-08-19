@@ -304,6 +304,7 @@ K_THREAD_DEFINE(nfc_poll_tid, NFC_POLL_THREAD_STACK_SIZE, nfc_poll_thread_fn, NU
 
 static enum app_mode detect_mode(void)
 {
+#if defined(CONFIG_APP_CALIBRATION)
 	if (app_calibration_detect_magnets()) {
 		LOG_WRN("Both magnets detected at boot — entering calibration mode");
 		return APP_MODE_CALIBRATION;
@@ -313,6 +314,7 @@ static enum app_mode detect_mode(void)
 		LOG_WRN("Calibration flag set in config — entering calibration mode");
 		return APP_MODE_CALIBRATION;
 	}
+#endif /* defined(CONFIG_APP_CALIBRATION) */
 
 	return APP_MODE_NORMAL;
 }
@@ -434,14 +436,15 @@ int main(void)
 
 	switch (mode) {
 	case APP_MODE_CALIBRATION:
+#if defined(CONFIG_APP_CALIBRATION)
 		ret = app_calibration_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_calibration_init", ret);
 			die();
 		}
-
 		app_calibration_run();
 		/* Never reached */
+#endif /* defined(CONFIG_APP_CALIBRATION) */
 		break;
 
 	case APP_MODE_NORMAL:
@@ -584,10 +587,12 @@ int main(void)
 
 		/* NFC is polled on its own thread (nfc_poll_thread_fn), not here. */
 
+#if defined(CONFIG_APP_CALIBRATION)
 		/* Detect magnet on BOTH Hall sensors → reboot into calibration mode */
 		if (k_uptime_get() < (int64_t)APP_CALIBRATION_ACTIVATION_WINDOW_MIN * 60 * 1000) {
 			app_calibration_check_trigger();
 		}
+#endif /* defined(CONFIG_APP_CALIBRATION) */
 
 		/* While a phone is interacting over NFC, the NFC interaction LED (app_nfc.c)
 		 * owns the indicator — suppress the periodic status/heartbeat blinks below so
