@@ -190,6 +190,7 @@ static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char
 	}
 #endif /* defined(CONFIG_SHT4X) */
 
+#if defined(CONFIG_W1)
 	/* DS18B20 sensors (T1, T2) */
 	count = app_ds18b20_get_count();
 	shell_print(shell, "DS18B20 count: %d", count);
@@ -207,6 +208,7 @@ static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char
 		shell_print(shell, "DS18B20[%d] serial: %llu", i, serial_number);
 	}
 
+#if defined(CONFIG_DS28E17)
 	/* Machine Probe sensors (MP1, MP2) */
 	count = app_machine_probe_get_count();
 	shell_print(shell, "Machine Probe count: %d", count);
@@ -234,6 +236,8 @@ static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char
 			shell_print(shell, "Machine Probe[%d] SHT serial: %u", i, sht_serial);
 		}
 	}
+#endif /* defined(CONFIG_DS28E17) */
+#endif /* defined(CONFIG_W1) */
 
 	return 0;
 }
@@ -498,6 +502,7 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	print_float(shell, "illuminance:", d->illuminance, "lux");
 	/* orientation + raw axes are meaningful only with the accelerometer enabled;
 	 * read live (the onboard accel x/y/z are not cached in g_app_sensor_data). */
+#if defined(CONFIG_LIS2DH)
 	if (g_app_config.cap_accelerometer) {
 		float ax = NAN, ay = NAN, az = NAN;
 		int ori = d->orientation;
@@ -505,7 +510,9 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 		shell_print(shell, "  %-16s %d", "orientation:", ori);
 		shell_print(shell, "  %-16s x=%s%d.%02d y=%s%d.%02d z=%s%d.%02d m/s^2",
 			    "accel:", APP_FP2(ax), APP_FP2(ay), APP_FP2(az));
-	} else {
+	} else
+#endif /* defined(CONFIG_LIS2DH) */
+	{
 		shell_print(shell, "  %-16s nan", "orientation:");
 		shell_print(shell, "  %-16s nan", "accel:");
 	}
@@ -520,6 +527,7 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "  %-16s count=%u active=%s", "input-b:", d->input_b_count,
 		    d->input_b_is_active ? "true" : "false");
 
+#if defined(CONFIG_W1)
 	/* 1-Wire ROM-bound slots s1..s4 — only the quantities the bound sensor
 	 * actually provides are non-NaN (a thermometer shows temperature only; a
 	 * machine probe shows the full cluster). */
@@ -545,6 +553,7 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 		shell_print(shell, "  %-16s %s",
 			    "tilt-alert:", s->is_tilt_alert ? "true" : "false");
 	}
+#endif /* defined(CONFIG_W1) */
 
 	return 0;
 }
@@ -1026,6 +1035,7 @@ static int cmd_ccm_selftest(const struct shell *sh, size_t argc, char **argv)
  * cap_buzzer=true — otherwise app_buzzer_init() was never called (either
  * cap_pir_detector owns the pins, or neither capability is on) and driving the
  * GPIOs here would race whatever else configured them. */
+#if defined(CONFIG_APP_BUZZER)
 static int cmd_buzzer_off(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -1117,6 +1127,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      "Play a fixed melody. Usage: play <info|warning|alarm> [repeat_s 0-999]",
 		      cmd_buzzer_play, 2, 1),
 	SHELL_SUBCMD_SET_END);
+#endif /* defined(CONFIG_APP_BUZZER) */
 #endif /* CONFIG_APP_CMD_DEBUG_SHELL */
 
 /* Decode a hwinfo reset-cause bitmask (from app_cmd_info.reset_cause, read at
@@ -1369,7 +1380,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
 	SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
 	SHELL_CMD(ccm, NULL, "app_ccm HW AES self-test (golden vectors).", cmd_ccm_selftest),
+#if defined(CONFIG_APP_BUZZER)
 	SHELL_CMD(buzzer, &sub_buzzer, "Buzzer HW variant commands (#338).", NULL),
+#endif /* defined(CONFIG_APP_BUZZER) */
 #endif
 	SHELL_SUBCMD_SET_END);
 
