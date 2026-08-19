@@ -90,6 +90,7 @@ static void sensor_timer_handler(struct k_timer *timer)
 
 static K_TIMER_DEFINE(m_sensor_timer, sensor_timer_handler, NULL);
 
+#if defined(CONFIG_APP_PYQ1648)
 static void pyq1648_event_handler(void *user_data)
 {
 	LOG_INF("Motion detected");
@@ -100,6 +101,7 @@ static void pyq1648_event_handler(void *user_data)
 
 	app_alarm_event(APP_ALARM_SRC_PIR, true);
 }
+#endif /* defined(CONFIG_APP_PYQ1648) */
 
 #if defined(CONFIG_LIS2DH)
 /* Event-classification thresholds on total acceleration magnitude (m/s^2).

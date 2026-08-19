@@ -45,7 +45,11 @@ target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
 target_sources_ifdef(CONFIG_LIS2DH app PRIVATE src/app_accel.c)
 target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw.c)
-target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_report.c)
+# app_report.c owns the periodic sample/history cadence, not just the
+# LoRaWAN uplink (issue #395: CONFIG_LORAWAN=n toggle) -- compiled
+# unconditionally so history/sampling keep working with no radio; its own
+# app_lrw_* calls are internally CONFIG_LORAWAN-gated.
+target_sources(app PRIVATE src/app_report.c)
 target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/region

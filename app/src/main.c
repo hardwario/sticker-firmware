@@ -203,6 +203,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			app_config()->calibration = true;
 			app_settings_save(true);
 			break;
+#if defined(CONFIG_LORAWAN)
 		case APP_CMD_ACTION_LRW_RESET:
 			/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). */
 			app_lrw_reset_nvm();
@@ -212,6 +213,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			/* Force a (re)join now, no reboot (#109). */
 			app_lrw_join();
 			break;
+#endif /* defined(CONFIG_LORAWAN) */
 		case APP_CMD_ACTION_COUNTERS_SAVE:
 			/* Persist the (reset) pulse totalizers, no reboot. */
 			app_counters_save(true);
