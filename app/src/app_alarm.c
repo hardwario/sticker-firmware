@@ -848,12 +848,16 @@ static bool nodata_enabled(uint8_t source, uint8_t quantity)
 	case APP_ALARM_SRC_SLOT2:
 	case APP_ALARM_SRC_SLOT3:
 	case APP_ALARM_SRC_SLOT4:
+#if defined(CONFIG_W1)
 		/* H-5: gate on the *configured* (persisted) ROM, not the runtime type. A
 		 * probe taught to this slot but absent from the bus has runtime type EMPTY;
 		 * keying on that silently dropped it from monitoring. Keying on the
 		 * configured ROM keeps it monitored so its absence raises a no_data alarm. */
 		return g_app_config.cap_w1_sensors &&
 		       app_w1_slot_is_configured(source - APP_ALARM_SRC_SLOT1);
+#else
+		return false;
+#endif /* defined(CONFIG_W1) */
 	case APP_ALARM_SRC_BATTERY:
 		return true; /* L-41: battery monitor always expected to report */
 	default:
