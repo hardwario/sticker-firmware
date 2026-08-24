@@ -164,28 +164,61 @@ option, §11).
 ## 4. Key hierarchy & enrollment
 
 TOWER's whitelist is the *only* authorization gate on its radio — an
-eavesdropper can spoof any enrolled ID. Here every hop is keyed, and the keys
-form a strict one-way hierarchy rooted in the per-unit factory secret:
+eavesdropper can spoof any enrolled ID. Here every hop is keyed.
+
+**Revision (#118 phase 2 revision, proximos-v2 MR!7 §7):** the hierarchy
+below replaces an earlier design that rooted P2P in a *separate* `join_key`
+derived from `secret_key` (the NFC command channel's key) and registered
+with the central by the phone app after claiming. That intermediate key is
+gone. P2P's root secret is now the device's **existing LoRaWAN OTAA AppKey**
+(`lrw_appkey`) — the same key the network already needs for ordinary
+LoRaWAN OTAA join, and (assuming the P2P central has access to the same
+AppKey registry as the LoRaWAN join server — see the open question in §11)
+already known to it, with **no new app-mediated derivation/registration
+step at all**. `secret_key` is not used anywhere in P2P any more; it remains
+purely the NFC command channel's key (`hio.stck:cmd`), never involved in
+the radio-side protocol.
 
 | Key | Who holds it | Origin / distribution |
 |---|---|---|
-| `secret_key` (16 B, existing) | device, ATELOS/inventory, phone app after claim | Set at the tester; the NFC command channel key. **Never leaves the NFC/claim world — the central and gateways never see it.** |
-| `p2p_join_key` (16 B, derived) | device (derives on demand), phone app (derives after claim), **central (registered by the app)** | `join_key = AES128-CMAC(secret_key, "HIO-P2P-JOIN" ‖ serial_number(4 BE))` (NIST SP 800-38B / RFC 4493) — CMAC needs only the AES-ECB forward primitive already in flash (subkey generation + one CBC-MAC pass over the single 16 B block), so this is a library/driver change, not a new crypto dependency (§11's KDF review, resolved #118 phase 2; phase 1 shipped a bare one-block AES-ECB PRF, breaking change accepted pre-ship). The app derives it after claiming the device and registers `{product_type, serial, join_key}` with the central over its management API (TLS, operator-authenticated). One-time per device lifetime. |
-| `p2p_session_key` (16 B, per pairing) | device + central | Derived during the join handshake: `session_key = AES128-CMAC(join_key, 0x01 ‖ dev_nonce(4) ‖ central_nonce(4) ‖ serial(4) ‖ zeros(3))` — same CMAC construction, keyed under `join_key`. Rotates on every re-join. |
+| `secret_key` (16 B, existing) | device, ATELOS/inventory, phone app after claim | Set at the tester; the NFC command channel key only. **Never leaves the NFC/claim world — the central, gateways, and the P2P protocol never see it.** |
+| `lrw_appkey` (16 B, existing) | device, network/join-server infrastructure (already, via ordinary LoRaWAN OTAA provisioning) | Set at the tester (same provisioning step as any LoRaWAN-capable device), `persistent: [device_reset]` — **wiped by `factory_reset`, unlike `secret_key`** (§7 lifecycle table has the consequence). This is P2P's sole root secret; there is no P2P-specific enrollment credential any more. |
+| `p2p_session_key` (16 B, per pairing) | device + central | Derived during the join handshake, directly under `app_key`: `session_key = AES128-CMAC(app_key, "HIO-P2P-SES" ‖ 0x01 ‖ dev_nonce(4 BE) ‖ central_nonce(4 BE) ‖ serial(4 BE) ‖ zeros(8))` — the trailing zero-pad brings the 24 B unpadded message up to 32 B (two full CMAC blocks); no `join_key` intermediate. Rotates on every re-join. |
+
+JoinRequest/JoinAccept (§5.3) authenticate under `app_key` directly too —
+via a full 16 B plain AES-CMAC tag over a domain-separated label plus the
+frame's own header+body, **not AES-CCM encryption**: neither handshake frame
+carries an actual secret (JoinRequest is the device's own public identity;
+JoinAccept is the assigned `net_id`/`dev_addr`/`central_nonce`, none of
+which are sensitive) — only `app_key` is secret, and it is never
+transmitted, so there is nothing to encrypt, only to authenticate. This is a
+genuinely new construction introduced with this revision: JoinRequest's
+`CMAC(app_key, label ‖ header ‖ body)` tag mirrors an existing reference
+implementation (the `control-radio` crate's `join_tag()`), but **JoinAccept's
+identical-shaped tag is a new proposal made here** — no pre-existing spec
+for JoinAccept's authentication was found to match, so it was kept
+symmetric with JoinRequest's for the same "nothing secret in the body"
+reason, with its own domain-separation label (`"HIO-P2P-ACC"`) so a tag
+computed for one frame type can never be replayed as the other's.
 
 Properties this buys:
 
 - **Compromised gateway leaks nothing** (stateless, keyless).
-- **Compromised central cannot speak NFC** to any device (it knows `join_key`,
-  not `secret_key`) — bounded blast radius.
-- **Enrollment is one-time; pairing is repeatable without the app.** The
-  device can re-derive `join_key` from `secret_key` at any moment, and the
-  central keeps it registered — so any re-join (§7) is fully automatic, no
-  phone, no NFC tap.
-- Rotating `secret_key` (`set_secret_key`, #299) implicitly rotates
-  `join_key`; the app must re-register the new derivation and the device must
-  re-join (§7).
-- There is **no `p2p_key` config parameter** any more (PR #228 had one). Link
+- **Compromised central cannot speak NFC to any device** (it knows
+  `app_key`, not `secret_key`) — bounded blast radius, same property as
+  before, just against a different (and already network-known) key.
+- **Enrollment needs no new app-side step at all**, as long as the central
+  has access to `app_key` (see the §11 open question on that dependency) —
+  pairing (§5) is then fully automatic the moment a provisioned device is in
+  range and the central's pairing window is open, no phone, no NFC tap, no
+  registration API call.
+- `secret_key` rotation (`set_secret_key`, #299) has **no effect on P2P at
+  all** any more — a clean decoupling that did not exist under the old
+  `join_key`-from-`secret_key` design (that design's rotation cascade, and
+  the "`join_key` doesn't change on `factory_reset`" self-healing property it
+  relied on, are both gone; §7's lifecycle table covers what replaces them).
+- There is **no `p2p_key` config parameter** any more (PR #228 had one, and
+  neither did the earlier `join_key`-registry design add one back). Link
   identity (`net_id`, `dev_addr`) and keys are assigned/derived, not
   hand-typed — the whole "operator must configure matching values on both
   ends" model from the epic is gone.
@@ -198,7 +231,9 @@ Modeled on TOWER's pairing-request/ACK exchange, hardened to OTAA-grade.
 
 ### 5.1 Preconditions
 
-1. Device enrolled at the central (its `join_key` registered by the app, §4).
+1. Device provisioned with `app_key` (`lrw_appkey`), and the central has
+   access to it (§4 — via ordinary LoRaWAN OTAA provisioning, no separate
+   enrollment step).
 2. Central pairing window **open** — bounded, default 120 s, auto-close,
    opened via the management API/MQTT (§9). Gateways forward JoinRequests at
    all times; the *central* ignores them outside the window (except automatic
@@ -239,25 +274,40 @@ never finds a gateway, see below).
 
 ```
 header:  net_id = 0, dev_addr = 0, counter = dev_nonce
-body:    product_type(1) | proto_version(1) | serial_number(4 BE) | fw_version(4)
-tag:     CCM tag under join_key (body sent as AAD, empty plaintext)
+body:    product_type(1) | proto_version(1) | serial_number(4 BE) | fw_version(4)   [CLEARTEXT]
+tag:     16 B plain AES-CMAC tag = CMAC(app_key, "HIO-P2P-JOIN" ‖ header ‖ body)
 ```
 
+Deliberately **not AES-CCM**: the body carries nothing secret (it is the
+device's own public identity), so it is authenticated only, not encrypted
+(§4). The tag is a full 16 B CMAC output, not a truncated 4 B CCM tag.
+
 - `serial_number` must be cleartext — it is the central's lookup handle into
-  the join-key registry.
+  its device/`app_key` registry (the same registry LoRaWAN OTAA provisioning
+  already populates, §4 — there is no separate P2P-specific registry).
 - `dev_nonce` is a **monotonic persisted counter** in NVS (LoRaWAN 1.0.4
   style), giving JoinRequest replay protection: the central stores the last
   seen `dev_nonce` per device and rejects non-increasing values. That accept
   rule must itself be **bounded, not a bare `>`** — same fix as #266/PR #268
   on the NFC command channel's `nonce_counter` (`NFC_NONCE_MAX_SKIP`, capped
   to `(current, current+1024]`): an unbounded jump lets a single forged or
-  buggy JoinRequest (still requires `join_key`, so a compromised/misbehaving
-  enrollment tool rather than an outside attacker) push the central's stored
-  high-water to near `UINT32_MAX`, after which no legitimate `dev_nonce` can
-  ever be `>` it again — and because `join_key` doesn't change on
-  `factory_reset` (§4, §7), this is a *permanent* per-device join lock the
-  device itself cannot recover from; only manual central-side DB surgery
-  fixes it. Apply the same capped-skip window here.
+  buggy JoinRequest (still requires `app_key`, so a compromised/misbehaving
+  provisioning tool rather than an outside attacker) push the central's
+  stored high-water to near `UINT32_MAX`, after which no legitimate
+  `dev_nonce` can ever be `>` it again. Whether this is still a *permanent*
+  lock (as it was under the earlier `join_key` design) now depends on how
+  the central keys its stored high-water: `app_key` (`lrw_appkey`) IS wiped
+  by `factory_reset` (§4, §7), so a fresh re-provisioning gives the device a
+  new `app_key` and a fresh `dev_nonce` sequence — but that only unlocks the
+  device if the central treats a re-registered `app_key` for a given
+  `serial_number` as resetting (or re-keying) that serial's `dev_nonce`
+  high-water too. **Recommendation for the central implementation:** key the
+  high-water by `(serial_number, app_key)`, or explicitly reset it whenever
+  a serial's registered `app_key` changes, specifically so this recovery
+  path exists — keying purely by `serial_number` would reproduce the old
+  design's *permanent* lock. Apply the same capped-skip window here either
+  way, since re-provisioning is a much heavier fallback than just not
+  needing it.
 - `product_type` + `fw_version` mirror TOWER's "firmware name + version in the
   pairing request" so the central can auto-name and manage the node with zero
   configuration (§9), and make the join generic across future products
@@ -275,10 +325,20 @@ tag:     CCM tag under join_key (body sent as AAD, empty plaintext)
 
 ```
 header:  net_id = 0, dev_addr = 0, counter = dev_nonce (echo)
-body:    net_id(4) | dev_addr(2) | central_nonce(4) | rx1_delay(1) | reserved(4)
-crypto:  AES-CCM under join_key (encrypted + tagged; nonce bound to dev_nonce,
-         direction = 1)
+body:    net_id(4) | dev_addr(2) | central_nonce(4) | rx1_delay(1) | reserved(4)   [CLEARTEXT]
+tag:     16 B plain AES-CMAC tag = CMAC(app_key, "HIO-P2P-ACC" ‖ header ‖ body)
 ```
+
+Same construction as JoinRequest and for the same reason (§4): nothing in
+this body is secret either (`net_id`/`dev_addr`/`central_nonce`/`rx1_delay`
+are all assignments, not secrets), so it is authenticated only, not
+AES-CCM-encrypted. **This specific tag construction for JoinAccept is a new
+proposal introduced with this revision** — no pre-existing reference (in
+either the `control-radio` crate or the earlier version of this plan) covers
+JoinAccept's authentication; it was designed here to be symmetric with
+JoinRequest's (which does mirror an existing reference), using its own
+domain-separation label (`"HIO-P2P-ACC"`) so the two frame types' tags can
+never be confused with each other.
 
 - The central allocates `dev_addr` (unique per network — it is the global
   allocator, so cross-gateway collisions cannot happen) and answers through
@@ -358,15 +418,18 @@ sides; a node that loses coverage keeps transmitting on schedule (retries,
 then gives up per-uplink), and any gateway that hears it again resumes the
 session untouched. Data heard by *any* gateway during the outage still flows.
 
-Re-join happens only on genuine state loss, and — because the node re-derives
-`join_key` from `secret_key` on demand and the central keeps it registered —
-it is always automatic, requiring no app interaction:
+Re-join happens only on genuine state loss, and — because the central
+already has `app_key` from ordinary LoRaWAN OTAA provisioning (§4, no
+P2P-specific registration step at all) — it is always automatic, requiring
+no app interaction, **as long as `app_key` itself is still the value the
+central knows** (see the `factory_reset` row below for the case where it
+isn't):
 
 | Trigger | Behavior |
 |---|---|
-| `secret_key` rotation (#299) | `join_key` changes ⇒ app re-registers the new derivation with the central, node re-joins on its next boot (rotation already forces a reboot, #322). |
-| `factory_reset` | Pairing state is wiped (`persistent:` tiering: P2P pairing state **survives `device_reset`**, is **cleared by `factory_reset`**, like the LoRaWAN session). Node returns to unpaired boot behavior. |
-| Central DB loss/restore | Node's uplinks stop being ACKed (or ACK under an unknown session fails MIC). Self-healing: after **N consecutive fully-failed uplink cycles** (default 8) the node starts re-join attempts with exponential backoff. Known devices' re-joins are accepted outside the pairing window. |
+| `lrw_appkey` change (`set_param`/`config`, e.g. re-provisioning) | `session_key` on the *next* join changes; an already-`PAIRED` session is unaffected until something else forces a re-join (unlike `secret_key` rotation on the NFC channel, which forces a reboot, #322 — changing `app_key` does not by itself). The central must have the new `app_key` registered before the node's next JoinRequest will authenticate. |
+| `factory_reset` | Pairing state is wiped (`persistent:` tiering: P2P pairing state **survives `device_reset`**, is **cleared by `factory_reset`**, like the LoRaWAN session) — **and, unlike the earlier `join_key`-from-`secret_key` design, `app_key` (`lrw_appkey`) itself is *also* wiped** (`persistent: [device_reset]` only, app_config.yml). The node returns to unpaired boot behavior but now has **no valid `app_key` at all** until re-provisioned (fresh LoRaWAN OTAA join, or an explicit NFC/shell `lrw_appkey` set) — it cannot even construct a JoinRequest tag the central would accept in the meantime. This is a genuine behavior change from the old design, where `secret_key` (and therefore the derivable `join_key`) survived `factory_reset`, so the device could always self-heal without new provisioning; that property is gone. |
+| Central DB loss/restore | Node's uplinks stop being ACKed (or ACK under an unknown session fails authentication). Self-healing: after **N consecutive fully-failed uplink cycles** (default 8) the node starts re-join attempts with exponential backoff. Known devices' re-joins are accepted outside the pairing window. |
 | Explicit `Detach` / `RejoinRequest` downlink | Authenticated; immediate. `RejoinRequest` is the network-initiated rekey lever (counter hygiene, key rotation policy). |
 | Counter approaching 32-bit wrap | Practically unreachable; policy is a network-initiated `RejoinRequest` rekey long before wrap. |
 
@@ -386,9 +449,10 @@ extended one level:
 - **Forwarder daemon (RPi)**: a thin radio↔MQTT bridge. Subscribes
   `p2p/gw/<gw_id>/tx`, publishes `p2p/gw/<gw_id>/rx`. Stateless; a gateway is
   fully described by its MQTT identity.
-- **Central service**: join-key registry + enrollment API (`POST` of
-  `{product_type, serial, join_key}` from the phone app; TLS + operator
-  auth), session DB, `dev_addr` allocation, pairing window state, dedup, ACK
+- **Central service**: access to the device/`app_key` registry (§4 — either
+  the LoRaWAN join server's own registry, or a synced copy; see the §11 open
+  question on this dependency — there is no separate P2P enrollment API any
+  more), session DB, `dev_addr` allocation, pairing window state, dedup, ACK
   routing (best RSSI/SNR gateway, per-gateway duty-cycle bookkeeping),
   payload decrypt + decode (reusing `p2p.js`/`ttn.js`), northbound publish
   `p2p/net/<net_id>/device/<serial-or-alias>/...` — the same back-office
@@ -413,45 +477,75 @@ The TOWER gateway's MQTT surface maps almost 1:1 onto the central:
 | `alias/set` / `alias/remove` | same | auto-assigned `<product-or-fw>:<n>` on first join, TOWER-style; aliases live in the central DB, northbound topics subscribe both id and alias |
 | `scan/start` / `stop` | same | passive: report unknown `serial`/`dev_addr` traffic without enrolling |
 
-(Manual `nodes/add` from TOWER is intentionally absent — enrollment goes
-through the app + join-key registration, never by unauthenticated fiat.)
+(Manual `nodes/add` from TOWER is intentionally absent — enrollment is
+implicit: any device whose `app_key` the central already has access to
+(§4, from ordinary LoRaWAN OTAA provisioning, no separate registration step)
+can join the moment the pairing window is open, never by unauthenticated
+fiat.)
 
 ---
 
 ## 10. End-to-end enrollment flow
 
+**Revision (#118 phase 2 revision):** the app-mediated "derive + register"
+step this section originally described is gone along with `join_key` (§4).
+P2P enrollment now piggybacks entirely on ordinary LoRaWAN OTAA provisioning
+— `lrw_appkey` is written at the tester exactly like any LoRaWAN-capable
+device, and (per the §11 open question) is assumed already known to the P2P
+central through the same channel the LoRaWAN join server gets it from:
+
 ```
- tester            ATELOS/inventory        phone app                central              device
-   |  secret_key,        |                     |                       |                    |
-   |  claim_token  ----> |                     |                       |                    |
-   |                     |   claim (NFC clm    |                       |                    |
-   |                     | <-- record + token) |                       |                    |
-   |                     |  secret_key ------> |                       |                    |
-   |                     |                     | derive join_key       |                    |
-   |                     |                     | register {product,    |                    |
-   |                     |                     |  serial, join_key} -> |                    |
-   |                     |                     |                       |  pairing window    |
-   |                     |                     |                       | <--- JoinRequest --|
-   |                     |                     |                       | ---- JoinAccept -->|
-   |                     |                     |                       |   session up       |
-   |                     |                     |                       | <== data + ACKs ==>|
+ tester                                                       central              device
+   |  secret_key, claim_token,                                    |                    |
+   |  lrw_appkey  --------------------------------------------->  |                    |
+   |  (ordinary provisioning; central already has app_key,        |                    |
+   |   via the LoRaWAN join server registry or a synced copy)     |                    |
+   |                                                               |  pairing window    |
+   |                                                               | <--- JoinRequest --|
+   |                                                               | ---- JoinAccept -->|
+   |                                                               |   session up       |
+   |                                                               | <== data + ACKs ==>|
 ```
 
-Steps 1–3 are the **existing, shipped** claiming flow (`hio.stck:clm`,
-`claiming_process.md`) — nothing new. Step 4 (derive + register) is the only
-new app-side obligation, one-time per device. Step 5+ never needs the app
-again.
+The `hio.stck:clm` claiming flow (`claiming_process.md`) still happens as
+before for `secret_key`/`claim_token`/the NFC world, but it is now entirely
+**orthogonal** to P2P — no step in it feeds P2P enrollment any more, and no
+phone app step is needed for P2P at all, one-time or otherwise.
 
 ---
 
 ## 11. Open questions
 
-- **KDF construction review** — **Resolved (#118 phase 2):** switched `§4`'s
+- **KDF construction review** — **Resolved (#118 phase 2):** switched §4's
   `join_key`/`session_key` derivation from the bare one-block AES-ECB PRF to
   AES-CMAC (NIST SP 800-38B / RFC 4493), still built on only the AES-ECB
   forward primitive already in flash (`app_ccm_cmac()`), so no new crypto
   backend. Breaking change vs. phase 1's `join_key`, accepted pre-ship (phase
   1 was bench-only, no central to migrate).
+  **Superseded (#118 phase 2 revision, proximos-v2 MR!7 §7):** removed the
+  `join_key` intermediate entirely — `session_key` now derives directly from
+  `app_key` (`lrw_appkey`), and JoinRequest/JoinAccept authenticate under
+  `app_key` with a full 16 B plain AES-CMAC tag over label‖header‖body,
+  dropping AES-CCM (and the nonce/direction machinery it needed) from the
+  handshake entirely — see §4/§5.3. JoinRequest's tag construction mirrors
+  an existing reference (the `control-radio` crate's `join_tag()`);
+  JoinAccept's identically-shaped tag is a new proposal introduced here,
+  with no pre-existing spec to match. Breaking change vs. the prior
+  `join_key`-rooted design, accepted pre-ship for the same reason as before
+  (bench-only, no central to migrate).
+- **Central's access to `app_key`** — **new, unresolved.** §4/§8/§10 now
+  assume the P2P central can obtain a device's `app_key` (`lrw_appkey`)
+  through the same channel the LoRaWAN join server already gets it from
+  (shared registry, synced copy, or similar) — this removes the old
+  design's app-mediated `join_key` registration step, but only holds if that
+  assumption is actually true for however this ships. If the real P2P
+  central turns out to be a genuinely separate system with no such access
+  (e.g. a different vendor's join server, or a deployment where the P2P
+  central legitimately must not hold LoRaWAN key material), this whole
+  simplification breaks down and an explicit, app-mediated enrollment/
+  registration step — conceptually the old `join_key` registry, just without
+  needing its own derived key — would have to come back. Needs a decision
+  once phase 4's central service (§13) is actually being built, not before.
 - **ACK economics at scale** — at what node count per network does confirmed-
   uplink eat the gateways' 1 % duty cycle (§6/§10)? Options if it binds:
   ACK-every-Nth, or sink-driven TDMA (Piyare et al., §10 related work).
@@ -616,8 +710,12 @@ Implementation phasing (each independently reviewable):
 3. **Northbridge RX-stream + scheduled TX** — UART protocol extension.
 4. **Central service** — enrollment API, session DB, dedup/ACK routing,
    management MQTT, northbound decode.
-5. **App-side** — join-key derivation + central registration (Manager-App
-   coupling issue to be filed when phase 4 starts).
+5. **App-side** — **superseded (#118 phase 2 revision):** no app-side
+   derivation/registration step is needed any more (§4/§10) as long as the
+   central has access to `app_key` via the LoRaWAN join server path (§11's
+   open question); if that assumption turns out not to hold, this phase
+   comes back as an app-mediated enrollment step and a Manager-App coupling
+   issue would need filing when phase 4 starts.
 6. **HW validation** — range, RX1 timing, power delta vs. the 92 µA baseline,
    multi-gateway dedup/roaming. This is where the two-STICKER rig's
    optimistic RX1 timing must be re-validated against the real
@@ -654,15 +752,27 @@ everything except real round-trip timing.
   sensors/NFC/LoRaWAN/history/protobuf, ~24% flash/RAM instead of fighting
   for the last few hundred bytes. Its RTT shell:
   - `p2p listen on|off` — continuous RX on the P2P channel params (§3.3),
-    decrypts and logs every received frame (raw hex + parsed
-    `net_id`/`dev_addr`/`frame_type`/`counter` header + RSSI/SNR + decrypted
-    body).
-  - `p2p tx <frame_type> <hex_body> [counter] [dir]` — encrypts and
-    transmits a hand-built frame, so a human (or a bench script) can inject
-    a JoinAccept/Ack/Detach/RejoinRequest in response to what `listen` just
-    logged, without a real central, once phase 2 lands.
-  - `p2p key <secret_key> <serial_number>` — derives `join_key` (§4) to
-    match device A's identity; `p2p radio`/`p2p status` for the rest.
+    logs every received frame (raw hex + parsed
+    `net_id`/`dev_addr`/`frame_type`/`counter` header + RSSI/SNR). For
+    JoinRequest/JoinAccept the body is cleartext, verified against its
+    16 B CMAC tag and logged as-is (§4/§5.3); any other frame_type is a
+    session_key-encrypted data-plane frame, decrypted if `p2p session` has
+    been set.
+  - `p2p tx <frame_type> <hex_body> [counter] [dir]` — crafts and transmits
+    a hand-built frame, so a human (or a bench script) can inject a
+    JoinAccept/Ack/Detach/RejoinRequest in response to what `listen` just
+    logged, without a real central, once phase 2 lands. JoinRequest/
+    JoinAccept get a cleartext body + CMAC tag under `app_key`; any other
+    frame_type gets AES-CCM under `session_key` (`p2p session` must be set
+    first).
+  - `p2p key <app_key> <serial_number>` — sets the DUT's identity: its
+    LoRaWAN OTAA AppKey (§4), used directly for the JoinRequest/JoinAccept
+    CMAC tags (no derivation step any more — `join_key` is gone). Also the
+    input to `p2p session` below.
+  - `p2p session <dev_nonce> <central_nonce>` — derives `session_key` (§4)
+    from `app_key` + those nonces (read off the join exchange `listen` just
+    showed, or hand-crafted via `p2p tx`), for decrypting/encrypting
+    post-join data-plane frames. `p2p radio`/`p2p status` for the rest.
     Nothing persists across reboot — re-enter every bench session.
 - Both devices need independent J-Link/RTT access (two probes) — same bench
   pattern as any other two-unit HIL session. See "First HIL session" below
