@@ -1,22 +1,29 @@
-// Reference receiver / decoder for the raw-LoRa P2P transport (#118, phase 1,
-// doc/p2p.md).
+// Reference receiver / decoder for the raw-LoRa P2P transport (#118, doc/p2p.md).
 //
 // Mirrors the on-air frame app_p2p.c produces:
 //   [ net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | counter(4 BE) ]  11 B header
 //   [ AES-CCM ciphertext (= plaintext) ] [ AES-CCM tag (4 B) ]
 // The header is cleartext and fed as AAD; the body is AES-CCM (AES-128). The CCM
 // nonce is counter(4 BE) || dev_addr(2 BE) || frame_type(1) || direction(1) ||
-// zeros(5) = 13 B (direction 0 = device TX).
+// zeros(5) = 13 B (direction 0 = device TX). decodeP2pFrame()/encodeP2pFrame()
+// below implement this CCM framing for the DATA PLANE (telemetry/alarm/
+// response/ack) once a device is joined, keyed under `session_key`.
 //
-// Phase 1 (doc/p2p.md §13): net_id/dev_addr are the fixed pre-join value 0
-// (§5.3's own JoinRequest convention); there is no manual p2p_key config
-// parameter (§4) -- the frame key is `join_key`, derived on demand from the
-// device's secret_key via deriveJoinKey() below (the same AES-CMAC PRF
-// app_p2p.c's derive_join_key() computes, so both sides always agree without
-// provisioning a separate secret).
+// The join handshake (JoinRequest/JoinAccept, doc/p2p.md §5.3, #118 phase 2
+// revision) is a DIFFERENT, simpler construction: the SAME 11 B header, but a
+// CLEARTEXT body followed by a full 16 B plain AES-CMAC tag (joinTag() below)
+// -- NOT AES-CCM, neither frame carries an actual secret. There is no manual
+// p2p_key config parameter and no separate join_key any more: the root secret
+// for the whole transport is the device's existing LoRaWAN OTAA AppKey
+// (app_key), which the central already knows from the OTAA/claim flow.
+// deriveSessionKey() below computes the data-plane key from app_key once
+// dev_nonce/central_nonce are known from a successful join -- mirrors
+// app_p2p.c's derive_session_key() exactly (same label, same big-endian field
+// encoding, same zero-padding).
 //
-// The decrypted body is the exact payload LoRaWAN would carry, so frame types
-// reuse the LoRaWAN fPort decoders in ttn.js (telemetry=2, alarm=3, response=85).
+// The decrypted data-plane body is the exact payload LoRaWAN would carry, so
+// frame types reuse the LoRaWAN fPort decoders in ttn.js (telemetry=2, alarm=3,
+// response=85).
 //
 // Zero-dependency (Node >= 18 built-in crypto). Run the tests with `node --test`.
 
@@ -26,11 +33,18 @@ const crypto = require("crypto");
 const ttn = require("./ttn.js");
 
 const P2P_HDR_LEN = 11;
-const P2P_TAG_LEN = 4;
+const P2P_TAG_LEN = 4; // data-plane (session_key) CCM tag length only
 const P2P_NONCE_LEN = 13;
 const P2P_DIR_TX = 0x00;
 const P2P_DIR_RX = 0x01;
-const P2P_JOIN_KEY_LABEL = "HIO-P2P-JOIN";
+
+// Join handshake constants (doc/p2p.md §4/§5.3) -- see the file header comment
+// and app_p2p.c's identical P2P_JOIN_TAG_LABEL/P2P_JOINACCEPT_TAG_LABEL/
+// P2P_SESSION_KEY_LABEL comment for the full rationale.
+const P2P_JOIN_TAG_LEN = 16; // full CMAC output, NOT P2P_TAG_LEN
+const P2P_JOIN_TAG_LABEL = "HIO-P2P-JOIN"; // JoinRequest tag
+const P2P_JOINACCEPT_TAG_LABEL = "HIO-P2P-ACC"; // JoinAccept tag
+const P2P_SESSION_KEY_LABEL = "HIO-P2P-SES";
 
 const FRAME_TYPE_NAMES = { 2: "telemetry", 3: "alarm", 85: "response", 86: "command" };
 
@@ -121,32 +135,56 @@ function aes128Cmac(key, msg) {
   return aesEcbEncryptBlock(key, xor16(x, lastBlock));
 }
 
-// join_key = AES128-CMAC(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE)),
-// doc/p2p.md §4 -- a proper PRF with domain-separated subkeys (#118 phase 2;
-// phase 1 used a bare one-block AES-ECB PRF, replaced pre-ship after a crypto
-// review). `secretKey` is a Buffer or 32-hex-digit string; `serialNumber` a
-// uint32. Returns the 16-byte join_key as a Buffer. Matches app_p2p.c's
-// derive_join_key() exactly (same label, same big-endian serial encoding).
-function deriveJoinKey(secretKey, serialNumber) {
-  secretKey = asKey(secretKey);
-
-  const block = Buffer.alloc(16);
-  const label = Buffer.from(P2P_JOIN_KEY_LABEL, "ascii");
-
-  if (label.length + 4 > block.length) {
-    throw new Error("join-key label too long"); // defensive; label is fixed at 12 B
+// tag = AES128-CMAC(appKey, label + headerAndBody) -- the JoinRequest/
+// JoinAccept authentication tag (doc/p2p.md §4/§5.3, #118 phase 2 revision).
+// `appKey` a Buffer or 32-hex-digit string; `label` a Buffer or ASCII string
+// (P2P_JOIN_TAG_LABEL or P2P_JOINACCEPT_TAG_LABEL); `headerAndBody` the
+// frame's 11 B header immediately followed by its (cleartext) body. Returns
+// the full 16-byte tag as a Buffer -- NOT truncated like the data plane's
+// P2P_TAG_LEN. Matches app_p2p.c's send_join_request()/recv_join_accept()
+// tag construction exactly.
+function joinTag(appKey, label, headerAndBody) {
+  appKey = asKey(appKey);
+  if (typeof label === "string") {
+    label = Buffer.from(label, "ascii");
   }
-  label.copy(block, 0);
-  block.writeUInt32BE(serialNumber >>> 0, label.length);
+  if (!Buffer.isBuffer(headerAndBody)) {
+    headerAndBody = Buffer.from(headerAndBody);
+  }
 
-  return aes128Cmac(secretKey, block);
+  return aes128Cmac(appKey, Buffer.concat([label, headerAndBody]));
 }
 
-// Decode one raw P2P frame. `frame` is a Buffer / hex string / byte array, `key`
-// the 16-byte AES-CCM key (Buffer or hex; phase 1: deriveJoinKey(secretKey,
-// serialNumber)). Returns the parsed header, the decrypted body and (for known
-// frame types) the decoded payload. Throws if the frame is malformed or the
-// AES-CCM tag does not verify.
+// session_key = AES128-CMAC(appKey, "HIO-P2P-SES" || 0x01 || devNonce(4 BE) ||
+// centralNonce(4 BE) || serialNumber(4 BE) || zero-pad to 32 B), doc/p2p.md §4
+// -- derived DIRECTLY from the device's existing LoRaWAN OTAA AppKey (no
+// join_key intermediate any more, #118 phase 2 revision), once per successful
+// join. `appKey` a Buffer or 32-hex-digit string; `devNonce`/`centralNonce`/
+// `serialNumber` uint32s. Returns the 16-byte session_key as a Buffer.
+// Matches app_p2p.c's derive_session_key() exactly (same label, same
+// big-endian field encoding, same zero-padding to a 32 B/2-block message).
+function deriveSessionKey(appKey, devNonce, centralNonce, serialNumber) {
+  appKey = asKey(appKey);
+
+  const label = Buffer.from(P2P_SESSION_KEY_LABEL, "ascii");
+  const block = Buffer.alloc(32);
+
+  label.copy(block, 0);
+  block[label.length] = 0x01;
+  block.writeUInt32BE(devNonce >>> 0, label.length + 1);
+  block.writeUInt32BE(centralNonce >>> 0, label.length + 5);
+  block.writeUInt32BE(serialNumber >>> 0, label.length + 9);
+  // block[label.length+13 .. 31] = zero padding, already zero-initialized.
+
+  return aes128Cmac(appKey, block);
+}
+
+// Decode one raw P2P DATA-PLANE frame (telemetry/alarm/response/ack -- NOT
+// JoinRequest/JoinAccept, which use joinTag() instead, see the file header
+// comment). `frame` is a Buffer / hex string / byte array, `key` the 16-byte
+// AES-CCM session_key (Buffer or hex; see deriveSessionKey()). Returns the
+// parsed header, the decrypted body and (for known frame types) the decoded
+// payload. Throws if the frame is malformed or the AES-CCM tag does not verify.
 function decodeP2pFrame(frame, key, opts) {
   opts = opts || {};
   if (typeof frame === "string") {
@@ -230,7 +268,8 @@ function encodeP2pFrame(params) {
 module.exports = {
   decodeP2pFrame,
   encodeP2pFrame,
-  deriveJoinKey,
+  joinTag,
+  deriveSessionKey,
   aes128Cmac,
   buildNonce,
   P2P_HDR_LEN,
@@ -238,4 +277,8 @@ module.exports = {
   P2P_NONCE_LEN,
   P2P_DIR_TX,
   P2P_DIR_RX,
+  P2P_JOIN_TAG_LEN,
+  P2P_JOIN_TAG_LABEL,
+  P2P_JOINACCEPT_TAG_LABEL,
+  P2P_SESSION_KEY_LABEL,
 };

@@ -216,13 +216,19 @@ ZTEST(ccm, test_ciphertext_tamper)
 	zassert_mem_equal(rt, zero, sizeof(zero), "plaintext not cleared on auth failure");
 }
 
-/* #118 (P2P transport, doc/p2p.md §4): known-answer vector for the public
- * single-block AES-ECB wrapper used to derive join_key = AES128-ECB(secret_key,
- * "HIO-P2P-JOIN" || serial_number(4 BE)). Vector computed independently via
+/* Known-answer vector for the public single-block AES-ECB wrapper
+ * (app_ccm_ecb_encrypt_block()) -- a pure RFC/FIPS-197 primitive KAT,
+ * independent of any particular caller. Vector computed independently via
  * PyCryptodome's AES.new(key, AES.MODE_ECB).encrypt(block) — same KEY as the
- * golden vectors above, serial_number 0x12345678 — and cross-checked against
- * app_p2p.js's deriveJoinKey() unit test (app/decoder/p2p.test.js), so all
- * three (C, JS, and the independent Python oracle) agree on the same 16 bytes. */
+ * golden vectors above; `block` is an arbitrary but fixed 16 B input (kept
+ * unchanged from when this doubled as a P2P join_key KAT -- join_key no
+ * longer exists as a concept in this codebase at all: #118 phase 2 first
+ * moved the P2P transport off this bare ECB PRF onto AES-CMAC (see
+ * test_cmac_rfc4493_vectors/test_cmac_psa_cross below), and #118 phase 2's
+ * later revision (proximos-v2 MR!7 §7) removed the join_key intermediate
+ * entirely in favor of deriving session_key directly from app_key). Only
+ * `app_ccm_ecb_encrypt_block()` itself -- the ECB primitive -- is under
+ * test here; it has no bearing on P2P key derivation any more. */
 ZTEST(ccm, test_ecb_encrypt_block_known_answer)
 {
 	static const uint8_t block[16] = {'H', 'I', 'O', '-', 'P',  '2',  'P',  '-',
@@ -232,7 +238,7 @@ ZTEST(ccm, test_ecb_encrypt_block_known_answer)
 	uint8_t out[16];
 
 	zassert_equal(app_ccm_ecb_encrypt_block(KEY, block, out), 0, "ecb_encrypt_block failed");
-	zassert_mem_equal(out, expected, sizeof(expected), "join_key KAT mismatch");
+	zassert_mem_equal(out, expected, sizeof(expected), "ECB single-block KAT mismatch");
 }
 
 /* #118 phase 2 (doc/p2p.md §4, crypto review): RFC 4493 §4 official AES-128
@@ -270,6 +276,68 @@ ZTEST(ccm, test_cmac_rfc4493_vectors)
 
 	zassert_ok(app_ccm_cmac(key, msg, 64, out));
 	zassert_mem_equal(out, mac_64, 16, "CMAC Mlen=64 mismatch");
+}
+
+/* #118 phase 2 revision (proximos-v2 MR!7 §7): known-answer vector for the
+ * P2P transport's session_key = AES128-CMAC(app_key, "HIO-P2P-SES" || 0x01
+ * || dev_nonce(4 BE) || central_nonce(4 BE) || serial_number(4 BE) ||
+ * zero-pad to 32 B) -- pins app_p2p.c's derive_session_key() construction
+ * (root key is now the device's LoRaWAN AppKey directly, no join_key
+ * intermediate). Vector computed independently via PyCryptodome's
+ * CMAC.new(key, ciphermod=AES) and cross-checked against app/decoder/
+ * p2p.js's deriveSessionKey() unit test (app/decoder/p2p.test.js), so C, JS
+ * and the independent Python oracle all agree on the same 16 bytes. */
+ZTEST(ccm, test_session_key_known_answer)
+{
+	static const uint8_t block[32] = {
+		'H',  'I',  'O',  '-',  'P',  '2',  'P',  '-',  'S',  'E',  'S',
+		0x01, 0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22, 0x12, 0x34,
+		0x56, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	};
+	static const uint8_t expected[16] = {0x80, 0x88, 0x7b, 0x1e, 0x99, 0xb6, 0x1b, 0x0b,
+					     0x19, 0xf4, 0x2e, 0x45, 0x7f, 0xeb, 0x40, 0x6f};
+	uint8_t out[16];
+
+	zassert_ok(app_ccm_cmac(KEY, block, sizeof(block), out));
+	zassert_mem_equal(out, expected, sizeof(expected), "session_key KAT mismatch");
+}
+
+/* #118 phase 2 revision (proximos-v2 MR!7 §7): known-answer vectors for the
+ * JoinRequest/JoinAccept plain-CMAC handshake tags -- tag = AES128-CMAC(
+ * app_key, label || header || body), pins app_p2p.c's send_join_request()/
+ * recv_join_accept() tag construction (a NEW proposal introduced with this
+ * revision, NOT AES-CCM -- see app_p2p.c's P2P_JOIN_TAG_LABEL comment).
+ * Vectors computed independently via PyCryptodome and cross-checked against
+ * app/decoder/p2p.js's joinTag() unit test (app/decoder/p2p.test.js). */
+ZTEST(ccm, test_join_tag_known_answer)
+{
+	/* JoinRequest: label "HIO-P2P-JOIN" (12 B) || header (net_id=0,
+	 * dev_addr=0, frame_type=0xF0, counter=7) || body (product_type=1,
+	 * proto_version=1, serial=0x12345678, fw=1.2.3, reserved=0). */
+	static const uint8_t msg_req[33] = {
+		'H',  'I',  'O',  '-',  'P',  '2',  'P',  '-',  'J',  'O',  'I',
+		'N',  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0x00,
+		0x07, 0x01, 0x01, 0x12, 0x34, 0x56, 0x78, 0x01, 0x02, 0x03, 0x00,
+	};
+	static const uint8_t expected_req[16] = {0xfd, 0x02, 0x84, 0x3b, 0x75, 0x6c, 0x81, 0xa9,
+						 0x97, 0x88, 0x2c, 0x28, 0xed, 0xaf, 0x28, 0xf8};
+	/* JoinAccept: label "HIO-P2P-ACC" (11 B) || header (net_id=0,
+	 * dev_addr=0, frame_type=0xF1, counter=7) || body (net_id=100,
+	 * dev_addr=5, central_nonce=0x22222222, rx1_delay_s=1, reserved=0). */
+	static const uint8_t msg_acc[37] = {
+		'H',  'I',  'O',  '-',  'P',  '2',  'P',  '-',  'A',  'C',  'C',  0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0xf1, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x64,
+		0x00, 0x05, 0x22, 0x22, 0x22, 0x22, 0x01, 0x00, 0x00, 0x00, 0x00,
+	};
+	static const uint8_t expected_acc[16] = {0xca, 0x91, 0xd3, 0x0e, 0x19, 0x5f, 0x4f, 0x38,
+						 0xbf, 0x2a, 0xf3, 0x8f, 0xc4, 0xea, 0xd0, 0xe0};
+	uint8_t out[16];
+
+	zassert_ok(app_ccm_cmac(KEY, msg_req, sizeof(msg_req), out));
+	zassert_mem_equal(out, expected_req, sizeof(expected_req), "JoinRequest tag KAT mismatch");
+
+	zassert_ok(app_ccm_cmac(KEY, msg_acc, sizeof(msg_acc), out));
+	zassert_mem_equal(out, expected_acc, sizeof(expected_acc), "JoinAccept tag KAT mismatch");
 }
 
 /* Cross-check app_ccm_cmac() against PSA's AES-CMAC (a certified RFC 4493
