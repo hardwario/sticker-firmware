@@ -159,6 +159,16 @@ inverted** (device-side defaults `p2p-frequency` / `p2p-spreading-factor` /
 reserves room to assign data-channel parameters later (multi-channel is a v2
 option, §11).
 
+**Single band, no region table — unlike the LoRaWAN side of this same
+firmware.** `p2p_frequency` is constrained to 863–870 MHz (`app_config.yml`:
+"EU868 band"), and the duty-cycle math (§6) hardcodes the EU868 1 % rule —
+there is no US915/AU915/other-region equivalent for P2P, and no runtime
+region selection the way LoRaMac's region tables give the LoRaWAN stack
+(`app_lrw.c`) on this same device. A deployment needing P2P outside EU868
+would need a new duty-cycle (or duty-cycle-free) model for that region's
+rules, not just a different `p2p_frequency` value — the two aren't
+interchangeable the way LoRaWAN's region selection is.
+
 ---
 
 ## 4. Key hierarchy & enrollment
