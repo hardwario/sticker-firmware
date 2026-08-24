@@ -472,7 +472,7 @@ again.
   central-assigned (JoinAccept, §5.3), but that alone means changing it
   needs a live central + a registered device — too slow for bench tuning.
   Add a debug-only shell override on the node side (same idiom as the
-  existing `ats lrw lc ...` debug helpers, `CONFIG_APP_CMD_DEBUG_SHELL`-gated)
+  existing `ats radio lc ...` debug helpers, `CONFIG_APP_CMD_DEBUG_SHELL`-gated)
   so `rx1_delay` can be swept without a full re-join, while measuring
   northbridge scheduled-TX precision during phase 3 (§13).
 - **Flash budget** — re-measure the dual-stack image against `0x34000`;

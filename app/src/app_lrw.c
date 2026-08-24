@@ -608,7 +608,7 @@ static void on_downlink_received(void)
 
 #if defined(CONFIG_SHELL)
 /* Debug: inject a synthetic link-check outcome onto m_work_q so the state
- * machine can be driven deterministically from the shell (`ats lrw lc ...`)
+ * machine can be driven deterministically from the shell (`ats radio lc ...`)
  * without a real RF outage — including the late-LC-in-RECONNECT case (#71
  * HIGH-1), which is otherwise practically impossible to trigger on the bench.
  * The handlers themselves are state-guarded, so an injected event in
@@ -636,7 +636,7 @@ void app_lrw_debug_inject_lc(bool ok)
 /* #340 M22: not CONFIG_SHELL-gated (unlike the debug helpers above) - lets a
  * caller outside app_lrw.c run its own work serialized with the real
  * telemetry TX path on m_work_q, without standing up a second queue+stack of
- * its own. Originally shell-only (`ats lrw compose`); calibration mode's
+ * its own. Originally shell-only (`ats radio compose`); calibration mode's
  * send path needs the same thing in Release builds, where CONFIG_SHELL is
  * off. Returns k_work_submit_to_queue()'s result: >=0 queued/running, a
  * negative errno if the queue rejected it. */
@@ -745,7 +745,7 @@ static void post_cmd_work_handler(struct k_work *work)
 	case APP_CMD_ACTION_LRW_RESET:
 		/* Wipe the LoRaWAN NVM (frame counters + DevNonce + session), then cold
 		 * reboot so the MAC re-initialises from a clean NVM (#109). Same path as
-		 * `ats lrw reset`. The Ack uplink has already left (deferred 8s). */
+		 * `ats radio reset`. The Ack uplink has already left (deferred 8s). */
 		LOG_INF("Command: LoRaWAN reset (NVM wipe) + reboot");
 		app_lrw_reset_nvm();
 		sys_reboot(SYS_REBOOT_COLD);

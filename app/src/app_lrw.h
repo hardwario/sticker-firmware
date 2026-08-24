@@ -123,7 +123,7 @@ void app_lrw_debug_inject_lc(bool ok);
 #endif
 
 /* Submit an arbitrary work item onto m_work_q. Lets a caller (a shell command
- * like `ats lrw compose`, or calibration mode's own send path, #340 M22) run
+ * like `ats radio compose`, or calibration mode's own send path, #340 M22) run
  * logic that app_compose.c documents as "solely on m_work_q" without racing
  * the real telemetry TX path and without standing up a second queue - the
  * caller submits its own struct k_work and (if it needs to wait)

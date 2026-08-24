@@ -140,7 +140,7 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * (crystal drift, work-queue scheduling jitter), sized generously against
  * the gateway-side ±10 ms design ceiling (proximos-v2#20). All
  * debug-shell-overridable (not yet wired) for bench sweeping without a full
- * re-join, same idiom as `ats lrw lc`.
+ * re-join, same idiom as `ats radio lc`.
  *
  * HW finding (#118 phase 2 HIL): this driver's lora_recv() has NO hardware
  * symbol-timeout -- SetRxConfig always runs continuous RX

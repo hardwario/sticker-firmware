@@ -13,6 +13,7 @@
 #include "app_led.h"
 #include "app_lrw.h"
 #include "app_nfc.h"
+#include "app_radio.h"
 #if defined(CONFIG_APP_LORA_P2P)
 #include "app_p2p.h"
 #endif
@@ -552,6 +553,8 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+#if defined(CONFIG_LORAWAN) || defined(CONFIG_APP_LORA_P2P)
+
 #if defined(CONFIG_LORAWAN)
 static const char *lrw_state_to_str(enum app_lrw_state state)
 {
@@ -572,9 +575,27 @@ static const char *lrw_state_to_str(enum app_lrw_state state)
 		return "UNKNOWN";
 	}
 }
+#endif /* defined(CONFIG_LORAWAN) */
 
-static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
+/* Universal across whichever stack radio_mode selected at boot (app_radio
+ * facade, #118) -- the one status command a tester runs regardless of
+ * build/config. LoRaWAN exposes rich link diagnostics (devaddr/fcnt/rssi/
+ * margin/...); P2P only the coarse ready/payload facade surface, since the
+ * raw-LoRa protocol has no per-frame link-quality feedback (doc/p2p.md). */
+static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 {
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+#if defined(CONFIG_APP_LORA_P2P)
+	if (app_radio_get_kind() == APP_RADIO_P2P) {
+		shell_print(shell, "kind: P2P");
+		shell_print(shell, "ready: %s", app_radio_is_ready() ? "yes" : "no");
+		shell_print(shell, "max payload: %u B", app_radio_get_max_payload());
+		return 0;
+	}
+#endif /* defined(CONFIG_APP_LORA_P2P) */
+#if defined(CONFIG_LORAWAN)
 	struct app_lrw_info info;
 	int ret = app_lrw_get_info(&info);
 
@@ -583,6 +604,7 @@ static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 		return ret;
 	}
 
+	shell_print(shell, "kind: LoRaWAN");
 	shell_print(shell, "state: %s", lrw_state_to_str(info.state));
 	shell_print(shell, "devaddr: %08x", info.dev_addr);
 	shell_print(shell, "fcnt up: %u", info.fcnt_up);
@@ -599,8 +621,12 @@ static int cmd_lrw_status(const struct shell *shell, size_t argc, char **argv)
 		    info.thresh_reconnect);
 
 	return 0;
+#else
+	return -ENODEV;
+#endif /* defined(CONFIG_LORAWAN) */
 }
 
+#if defined(CONFIG_LORAWAN)
 static int cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 {
 	app_lrw_force_link_check();
@@ -732,22 +758,9 @@ static int cmd_lrw_lc(const struct shell *shell, size_t argc, char **argv)
 	}
 
 	app_lrw_debug_inject_lc(ok);
-	shell_print(shell, "Injected link-check %s (see 'ats lrw status')", argv[1]);
+	shell_print(shell, "Injected link-check %s (see 'ats radio status')", argv[1]);
 	return 0;
 }
-
-SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_lrw, SHELL_CMD_ARG(status, NULL, "Print LoRaWAN status.", cmd_lrw_status, 1, 0),
-	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
-	SHELL_CMD_ARG(lc, NULL, "Debug: inject link-check result. Usage: lc ok|fail", cmd_lrw_lc, 2,
-		      0),
-	SHELL_CMD_ARG(compose, NULL,
-		      "Build telemetry uplink without sending; dump fPort-2 hex. "
-		      "Usage: compose [budget]",
-		      cmd_lrw_compose, 1, 1),
-	SHELL_CMD_ARG(reset, NULL, "Reset LoRaWAN frame counters + DevNonce (reboots).",
-		      cmd_lrw_reset, 1, 0),
-	SHELL_SUBCMD_SET_END);
 #endif /* defined(CONFIG_LORAWAN) */
 
 #if defined(CONFIG_APP_LORA_P2P)
@@ -765,7 +778,7 @@ static int cmd_p2p_listen(const struct shell *shell, size_t argc, char **argv)
 	} else if (strcmp(argv[1], "off") == 0) {
 		enable = false;
 	} else {
-		shell_error(shell, "usage: p2p listen on|off");
+		shell_error(shell, "usage: radio listen on|off");
 		return -EINVAL;
 	}
 
@@ -777,15 +790,35 @@ static int cmd_p2p_listen(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "P2P listen %s", enable ? "ON" : "OFF");
 	return 0;
 }
+#endif /* defined(CONFIG_APP_LORA_P2P) */
 
+/* Single ATS entry point for both radio stacks (#118): `ats radio status`
+ * works no matter which one radio_mode picked at boot; the rest are
+ * necessarily stack-specific (LoRaWAN link-check/NVM reset vs. P2P's raw-RX
+ * bench listener) and only compiled in for the stack that provides them. */
 SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_p2p,
+	sub_radio,
+	SHELL_CMD_ARG(status, NULL, "Print radio status (LoRaWAN or P2P).", cmd_radio_status, 1, 0),
+#if defined(CONFIG_LORAWAN)
+	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
+	SHELL_CMD_ARG(lc, NULL, "Debug: inject link-check result. Usage: lc ok|fail", cmd_lrw_lc, 2,
+		      0),
+	SHELL_CMD_ARG(compose, NULL,
+		      "Build telemetry uplink without sending; dump fPort-2 hex. "
+		      "Usage: compose [budget]",
+		      cmd_lrw_compose, 1, 1),
+	SHELL_CMD_ARG(reset, NULL, "Reset LoRaWAN frame counters + DevNonce (reboots).",
+		      cmd_lrw_reset, 1, 0),
+#endif /* defined(CONFIG_LORAWAN) */
+#if defined(CONFIG_APP_LORA_P2P)
 	SHELL_CMD_ARG(listen, NULL,
 		      "Toggle continuous-RX reference receiver (bench two-STICKER rig, "
 		      "doc/p2p.md §14). Usage: listen on|off",
 		      cmd_p2p_listen, 2, 0),
-	SHELL_SUBCMD_SET_END);
 #endif /* defined(CONFIG_APP_LORA_P2P) */
+	SHELL_SUBCMD_SET_END);
+
+#endif /* defined(CONFIG_LORAWAN) || defined(CONFIG_APP_LORA_P2P) */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_sensors,
@@ -1403,12 +1436,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(claim, &sub_claim, "Claim-lifecycle test commands (#247/#351).", NULL),
 	SHELL_CMD(led, &sub_led, "LED commands.", NULL),
 	SHELL_CMD(sensors, &sub_sensors, "Sensor commands.", NULL),
-#if defined(CONFIG_LORAWAN)
-	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
-#endif /* defined(CONFIG_LORAWAN) */
-#if defined(CONFIG_APP_LORA_P2P)
-	SHELL_CMD(p2p, &sub_p2p, "Raw-LoRa P2P transport commands (#118).", NULL),
-#endif /* defined(CONFIG_APP_LORA_P2P) */
+#if defined(CONFIG_LORAWAN) || defined(CONFIG_APP_LORA_P2P)
+	SHELL_CMD(radio, &sub_radio, "Radio (LoRaWAN/P2P) commands.", NULL),
+#endif /* defined(CONFIG_LORAWAN) || defined(CONFIG_APP_LORA_P2P) */
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
 	SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
 	SHELL_CMD(ccm, NULL, "app_ccm HW AES self-test (golden vectors).", cmd_ccm_selftest),
