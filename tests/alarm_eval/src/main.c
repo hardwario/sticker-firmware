@@ -14,6 +14,7 @@
 
 #include "app_alarm.h"
 #include "app_alarm_rules.h"
+#include "app_buzzer.h"
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_hall.h"
@@ -23,6 +24,9 @@
 #include <zephyr/ztest.h>
 
 extern struct app_hall_data test_hall;
+extern int g_buzzer_play_calls;
+extern uint32_t g_buzzer_play_last_kind;
+extern uint16_t g_buzzer_play_last_repeat_s;
 
 static void before(void *unused)
 {
@@ -31,6 +35,11 @@ static void before(void *unused)
 	test_hall = (struct app_hall_data){0};
 	g_app_sensor_data = (struct app_sensor_data){0};
 	g_app_config.interval_report = 0;
+	g_app_config.cap_buzzer = false;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
+	g_buzzer_play_calls = 0;
+	g_buzzer_play_last_kind = 0;
+	g_buzzer_play_last_repeat_s = 0;
 	/* app_alarm.c's per-slot runtime latch (m_rt[]) is static file-scope state
 	 * that outlives a single ztest case. rt_sync() only resets a slot when its
 	 * (source, quantity) changes or the slot was never used — several tests
@@ -518,4 +527,75 @@ ZTEST(alarm_eval, test_editing_active_rule_emits_deactivate_edge_then_rearms)
 	zassert_true(test_alarm_event_count > 0, "no activate edge after re-fire");
 	zassert_equal(last_event()->edge, 0, "expected activate edge (0), got %u",
 		      last_event()->edge);
+}
+
+/* ---- #397: alarm-event -> buzzer melody trigger/stop plumbing -----------
+ *
+ * alarm_buzzer_sync() (app_alarm.c) drives the buzzer as a side effect of
+ * app_alarm_poll()'s aggregate "any alarm active" result. app_buzzer_play_
+ * repeating() itself is stubbed (stubs.c) so these assert on the call
+ * pattern rather than real GPIO/thread behavior — that side is covered by
+ * tests/buzzer's real app_buzzer.c + gpio_emul. */
+
+ZTEST(alarm_eval, test_buzzer_suppressed_without_cap_buzzer)
+{
+	g_app_config.cap_buzzer = false;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ON;
+
+	activate_threshold_slot0();
+
+	zassert_equal(g_buzzer_play_calls, 0, "buzzer played without cap_buzzer");
+}
+
+ZTEST(alarm_eval, test_buzzer_suppressed_when_mode_off)
+{
+	g_app_config.cap_buzzer = true;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
+
+	activate_threshold_slot0();
+
+	zassert_equal(g_buzzer_play_calls, 0, "buzzer played with alarm_buzzer_mode = off");
+}
+
+ZTEST(alarm_eval, test_buzzer_plays_alarm_melody_on_activation)
+{
+	g_app_config.cap_buzzer = true;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ON;
+
+	activate_threshold_slot0();
+
+	zassert_equal(g_buzzer_play_calls, 1, "activation must trigger exactly one buzzer call");
+	zassert_equal(g_buzzer_play_last_kind, APP_BUZZER_KIND_ALARM, "wrong melody kind");
+	zassert_equal(g_buzzer_play_last_repeat_s, 30, "wrong repeat interval");
+}
+
+ZTEST(alarm_eval, test_buzzer_does_not_retrigger_while_still_active)
+{
+	g_app_config.cap_buzzer = true;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ON;
+
+	activate_threshold_slot0();
+	zassert_equal(g_buzzer_play_calls, 1, "activation must trigger exactly one buzzer call");
+
+	g_buzzer_play_calls = 0;
+	zassert_true(app_alarm_poll(), "alarm unexpectedly cleared");
+	zassert_true(app_alarm_poll(), "alarm unexpectedly cleared");
+	zassert_equal(g_buzzer_play_calls, 0,
+		      "buzzer re-triggered on a poll with no activation edge");
+}
+
+ZTEST(alarm_eval, test_buzzer_stops_on_deactivation)
+{
+	g_app_config.cap_buzzer = true;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ON;
+
+	activate_threshold_slot0();
+	g_buzzer_play_calls = 0;
+
+	g_app_sensor_data.temperature = 20.0f; /* back in band: deactivates */
+	zassert_false(app_alarm_poll(), "alarm did not clear");
+
+	zassert_equal(g_buzzer_play_calls, 1, "deactivation must trigger exactly one buzzer call");
+	zassert_equal(g_buzzer_play_last_kind, APP_BUZZER_KIND_STOP,
+		      "expected a stop, not a melody");
 }
