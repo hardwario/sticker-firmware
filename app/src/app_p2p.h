@@ -78,11 +78,13 @@ enum p2p_link_state {
  * Returns 0 or a negative errno. */
 int app_p2p_init(void);
 
-/* If already paired (persisted NVS state from a prior join), mark the
- * radio ready and kick the report cadence immediately -- mirrors
- * app_lrw_join() on the radio facade. Otherwise starts the join
- * handshake (#118 phase 2, doc/p2p.md §5.3); the ready callback fires later,
- * only once JoinAccept succeeds. */
+/* Boot-time bring-up: if already paired (persisted NVS state from a prior
+ * join), mark the radio ready and kick the report cadence immediately --
+ * unlike app_lrw_join() on the radio facade, an existing pairing is treated
+ * as sufficient, so a normal power cycle never wastes a JoinRequest
+ * (doc/p2p.md §7). Otherwise starts the join handshake (#118 phase 2,
+ * doc/p2p.md §5.3); the ready callback fires later, only once JoinAccept
+ * succeeds. See app_p2p_rejoin() below for forcing a fresh join on demand. */
 void app_p2p_start(void);
 
 /* True once paired and started -- immediately if NVS already had a valid
@@ -139,13 +141,21 @@ void app_p2p_get_info(struct app_p2p_info *info);
  * send_alarm) is refused with -EBUSY while listening. */
 int app_p2p_listen(bool enable);
 
+/* Force a fresh join handshake RIGHT NOW, even if currently PAIRED --
+ * unlike app_p2p_start(), an existing pairing is not treated as sufficient.
+ * A successful JoinAccept overwrites the old pairing via pairing_persist(),
+ * so this never needs a reboot or NVS wipe (contrast with app_p2p_unjoin()
+ * below). This is what makes the shell's `join` command genuinely force a
+ * fresh session on both radio stacks. */
+void app_p2p_rejoin(void);
+
 /* Clear the persisted pairing (net_id/dev_addr/session_key/rx1_delay) so the
  * next boot starts a fresh JoinRequest. NEVER touches the dev_nonce
  * anti-replay counter -- see dnonce_persist()'s comment in app_p2p.c for why
  * a re-join must never risk presenting a dev_nonce the central already saw.
  * Mirrors app_lrw_reset_nvm(): settings only, reboot required to take
  * effect. Returns 0 or a negative errno. */
-int app_p2p_unpair(void);
+int app_p2p_unjoin(void);
 
 /* Debug: override the live rx1_delay used for the next TX's RX window,
  * without persisting it or requiring a re-join (doc/p2p.md §13). A real

@@ -818,20 +818,22 @@ static int cmd_p2p_listen(const struct shell *shell, size_t argc, char **argv)
 }
 
 /* Clears the persisted pairing and reboots -- the P2P analogue of
- * cmd_lrw_reset(), and the fix for a real gap (#118): `factory_reset`
+ * cmd_lrw_reset(), named to match P2P's own join/JoinRequest/JoinAccept
+ * vocabulary rather than "pairing". Fixes a real gap (#118): `factory_reset`
  * does NOT clear P2P pairing (doc/p2p.md's claim otherwise is wrong, the
  * pairing subtree is never wired into app_settings_factory_reset()), so
  * this was previously only reachable via a whole-NVS `settings erase` or a
- * live GDB call. */
-static int cmd_radio_unpair(const struct shell *shell, size_t argc, char **argv)
+ * live GDB call. For a LIVE re-join that doesn't need a reboot, see the
+ * top-level `join` command (app_radio_rejoin()) instead. */
+static int cmd_radio_unjoin(const struct shell *shell, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	int ret = app_p2p_unpair();
+	int ret = app_p2p_unjoin();
 
 	if (ret) {
-		shell_warn(shell, "Unpair reported errors: %d", ret);
+		shell_warn(shell, "Unjoin reported errors: %d", ret);
 	}
 	shell_print(shell, "P2P pairing cleared; rebooting...");
 	k_sleep(K_MSEC(200)); /* let the shell flush */
@@ -967,15 +969,15 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      "Toggle continuous-RX reference receiver (bench two-STICKER rig, "
 		      "doc/p2p.md §14). Usage: listen on|off",
 		      cmd_p2p_listen, 2, 0),
-	SHELL_CMD_ARG(unpair, NULL,
+	SHELL_CMD_ARG(unjoin, NULL,
 		      "Clear P2P pairing state (reboots); NOT covered by factory_reset.",
-		      cmd_radio_unpair, 1, 0),
-	SHELL_CMD_ARG(rx1 - delay, NULL,
-		      "Debug: override rx1_delay, not persisted. Usage: rx1-delay <seconds>",
+		      cmd_radio_unjoin, 1, 0),
+	SHELL_CMD_ARG(rx1_delay, NULL,
+		      "Debug: override rx1_delay, not persisted. Usage: rx1_delay <seconds>",
 		      cmd_radio_rx1_delay, 2, 0),
-	SHELL_CMD_ARG(ack - drop, NULL,
+	SHELL_CMD_ARG(ack_drop, NULL,
 		      "Debug: force the next N confirmed-uplink Acks to appear dropped. "
-		      "Usage: ack-drop <count>",
+		      "Usage: ack_drop <count>",
 		      cmd_radio_ack_drop, 2, 0),
 #endif /* defined(CONFIG_APP_LORA_P2P) */
 	SHELL_SUBCMD_SET_END);

@@ -726,20 +726,24 @@ int main(void)
 
 #if defined(CONFIG_SHELL) && (defined(CONFIG_LORAWAN) || defined(CONFIG_APP_LORA_P2P))
 
-/* app_radio_start() is transport-agnostic (routes through app_radio, #118
- * phase 2): LoRaWAN join or P2P ready-kick/join, whichever radio_mode
- * selected at boot. Mirrors the `send` fix below -- this used to call
+/* app_radio_rejoin() is transport-agnostic (routes through app_radio, #118)
+ * and, unlike app_radio_start() (boot-time bring-up), always forces a fresh
+ * join attempt even if the radio already has a live session/pairing --
+ * LoRaWAN already worked that way unconditionally; P2P needed the explicit
+ * rejoin entry point since app_p2p_start() intentionally treats an existing
+ * pairing as sufficient (a session persists across a normal power cycle,
+ * doc/p2p.md §7). Mirrors the `send` fix below -- this used to call
  * app_lrw_join() directly and was compiled out on P2P-only builds. */
 static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 {
-	app_radio_start();
+	app_radio_rejoin();
 
 	shell_print(shell, "command succeeded");
 
 	return 0;
 }
 
-SHELL_CMD_REGISTER(join, NULL, "(Re)join/start the radio link.", cmd_join);
+SHELL_CMD_REGISTER(join, NULL, "Force a fresh (re)join, even if already joined/paired.", cmd_join);
 
 /* app_report_trigger() is transport-agnostic too (routes through app_radio,
  * #118 phase 2), so it stays available on a P2P-only (CONFIG_LORAWAN=n) build

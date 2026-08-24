@@ -37,8 +37,22 @@ enum app_radio_kind {
  * radio_disabled() check keeps radio-silent. Returns 0 or a negative errno. */
 int app_radio_init(void);
 
-/* Start the link: LoRaWAN join, or P2P ready-kick (no join in phase 1). */
+/* Start the link at boot: LoRaWAN always (re)joins; P2P only starts the join
+ * handshake if NVS has no valid pairing yet, otherwise just marks ready --
+ * a P2P session persists across a normal power cycle (doc/p2p.md §7), so
+ * boot-time app_p2p_start() must not waste a JoinRequest on every reboot. */
 void app_radio_start(void);
+
+#if defined(CONFIG_SHELL)
+/* Force a fresh join attempt RIGHT NOW, regardless of current state --
+ * unlike app_radio_start(), an existing P2P pairing is not treated as
+ * sufficient. LoRaWAN already behaves this way unconditionally (every
+ * app_lrw_join() call deinits and rejoins); this is what makes `join`
+ * genuinely symmetric across both stacks for the interactive shell command.
+ * A successful P2P JoinAccept simply overwrites the old pairing via
+ * pairing_persist(), so this never needs a reboot or NVS wipe. */
+void app_radio_rejoin(void);
+#endif
 
 /* Which stack was selected at boot. */
 enum app_radio_kind app_radio_get_kind(void);

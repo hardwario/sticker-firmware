@@ -214,7 +214,7 @@ static struct k_work_delayable m_join_work; /* JoinRequest attempt + retry (#118
 static struct k_work m_rx_work; /* drain received frames (listen) */
 
 /* ats radio ... debug/bench helpers (#118) */
-static uint32_t m_debug_drop_acks; /* ats radio ack-drop: remaining forced Ack drops */
+static uint32_t m_debug_drop_acks; /* ats radio ack_drop: remaining forced Ack drops */
 
 struct p2p_compose_result {
 	uint8_t frame[P2P_FRAME_MAX];
@@ -1507,7 +1507,14 @@ void app_p2p_get_info(struct app_p2p_info *info)
 
 #if defined(CONFIG_SHELL)
 
-int app_p2p_unpair(void)
+void app_p2p_rejoin(void)
+{
+	m_link_state = P2P_LINK_JOINING;
+	m_join_started_at = k_uptime_get();
+	k_work_schedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
+}
+
+int app_p2p_unjoin(void)
 {
 	int ret = settings_delete(P2P_JOIN_STATE_KEY);
 
