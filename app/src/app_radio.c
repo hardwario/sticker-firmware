@@ -15,6 +15,8 @@
 
 #include <zephyr/logging/log.h>
 
+#include <errno.h>
+
 LOG_MODULE_REGISTER(app_radio, LOG_LEVEL_INF);
 
 /* Kept out of a static entirely when CONFIG_APP_LORA_P2P=n: with P2P not even
@@ -45,8 +47,16 @@ int app_radio_init(void)
 		LOG_WRN("radio-mode=p2p but CONFIG_APP_LORA_P2P=n; falling back to LoRaWAN");
 	}
 #endif
+#if defined(CONFIG_LORAWAN)
 	LOG_INF("Radio: LoRaWAN");
 	return app_lrw_init();
+#else
+	/* Neither transport compiled in -- only reachable on a P2P-only build
+	 * (CONFIG_LORAWAN=n, #118 phase 2 flash budget) with radio_mode not set
+	 * to p2p, which is a misconfiguration rather than a real deployment. */
+	LOG_ERR("Radio: neither P2P nor LoRaWAN compiled in");
+	return -ENODEV;
+#endif
 }
 
 void app_radio_start(void)
@@ -57,7 +67,9 @@ void app_radio_start(void)
 		return;
 	}
 #endif
+#if defined(CONFIG_LORAWAN)
 	app_lrw_join();
+#endif
 }
 
 enum app_radio_kind app_radio_get_kind(void)
@@ -76,7 +88,11 @@ enum app_lrw_state app_radio_get_state(void)
 		return app_p2p_is_ready() ? APP_LRW_STATE_HEALTHY : APP_LRW_STATE_IDLE;
 	}
 #endif
+#if defined(CONFIG_LORAWAN)
 	return app_lrw_get_state();
+#else
+	return APP_LRW_STATE_IDLE;
+#endif
 }
 
 bool app_radio_is_ready(void)
@@ -86,7 +102,11 @@ bool app_radio_is_ready(void)
 		return app_p2p_is_ready();
 	}
 #endif
+#if defined(CONFIG_LORAWAN)
 	return app_lrw_is_ready();
+#else
+	return false;
+#endif
 }
 
 uint8_t app_radio_get_max_payload(void)
@@ -96,7 +116,11 @@ uint8_t app_radio_get_max_payload(void)
 		return app_p2p_get_max_payload();
 	}
 #endif
+#if defined(CONFIG_LORAWAN)
 	return app_lrw_get_max_payload();
+#else
+	return 0;
+#endif
 }
 
 void app_radio_send_telemetry(void)
@@ -107,7 +131,9 @@ void app_radio_send_telemetry(void)
 		return;
 	}
 #endif
+#if defined(CONFIG_LORAWAN)
 	app_lrw_send_telemetry();
+#endif
 }
 
 int app_radio_queue_response(uint8_t port, const uint8_t *buf, size_t len)
@@ -117,7 +143,11 @@ int app_radio_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 		return app_p2p_queue_response(port, buf, len);
 	}
 #endif
+#if defined(CONFIG_LORAWAN)
 	return app_lrw_queue_response(port, buf, len);
+#else
+	return -ENODEV;
+#endif
 }
 
 int app_radio_send_alarm(const uint8_t *buf, size_t len)
@@ -127,7 +157,11 @@ int app_radio_send_alarm(const uint8_t *buf, size_t len)
 		return app_p2p_send_alarm(buf, len);
 	}
 #endif
+#if defined(CONFIG_LORAWAN)
 	return app_lrw_send_alarm(buf, len);
+#else
+	return -ENODEV;
+#endif
 }
 
 void app_radio_register_ready_cb(void (*cb)(void))
@@ -138,7 +172,9 @@ void app_radio_register_ready_cb(void (*cb)(void))
 		return;
 	}
 #endif
+#if defined(CONFIG_LORAWAN)
 	app_lrw_register_ready_cb(cb);
+#endif
 }
 
 void app_radio_suspend(void)
@@ -149,5 +185,7 @@ void app_radio_suspend(void)
 		return;
 	}
 #endif
+#if defined(CONFIG_LORAWAN)
 	app_lrw_suspend();
+#endif
 }

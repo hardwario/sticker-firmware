@@ -205,13 +205,20 @@ static void nfc_run_deferred_cmd_actions(void)
 			app_settings_save(true);
 			break;
 		case APP_CMD_ACTION_LRW_RESET:
-			/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). */
+			/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). Only
+			 * reachable via a LoRaWAN-specific NFC command, so a no-op when
+			 * LoRaWAN itself isn't compiled in (#118 phase 2 flash budget). */
+#if defined(CONFIG_LORAWAN)
 			app_lrw_reset_nvm();
+#endif /* defined(CONFIG_LORAWAN) */
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
 		case APP_CMD_ACTION_LRW_JOIN:
-			/* Force a (re)join now, no reboot (#109). */
+			/* Force a (re)join now, no reboot (#109). Same LoRaWAN-only
+			 * reachability note as above. */
+#if defined(CONFIG_LORAWAN)
 			app_lrw_join();
+#endif /* defined(CONFIG_LORAWAN) */
 			break;
 		case APP_CMD_ACTION_COUNTERS_SAVE:
 			/* Persist the (reset) pulse totalizers, no reboot. */
@@ -728,6 +735,17 @@ static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
+SHELL_CMD_REGISTER(join, NULL, "Join LoRaWAN network.", cmd_join);
+
+#endif /* defined(CONFIG_SHELL) && defined(CONFIG_LORAWAN) */
+
+#if defined(CONFIG_SHELL) && (defined(CONFIG_LORAWAN) || defined(CONFIG_APP_LORA_P2P))
+
+/* app_report_trigger() is transport-agnostic (routes through app_radio,
+ * #118 phase 2) -- unlike `join` (a LoRaWAN-specific action), `send` must
+ * stay available on a P2P-only (CONFIG_LORAWAN=n) build too. Regression
+ * found via #118 phase 2 HIL after CONFIG_LORAWAN became toggleable: this
+ * command was silently compiled out on the P2P bench overlay. */
 static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 {
 	app_report_trigger();
@@ -737,7 +755,6 @@ static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-SHELL_CMD_REGISTER(join, NULL, "Join LoRaWAN network.", cmd_join);
-SHELL_CMD_REGISTER(send, NULL, "Send LoRaWAN data.", cmd_send);
+SHELL_CMD_REGISTER(send, NULL, "Trigger an ad-hoc report send.", cmd_send);
 
-#endif /* defined(CONFIG_SHELL) && defined(CONFIG_LORAWAN) */
+#endif /* defined(CONFIG_SHELL) && (defined(CONFIG_LORAWAN) || defined(CONFIG_APP_LORA_P2P)) */

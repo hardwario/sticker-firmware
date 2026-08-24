@@ -161,17 +161,22 @@ static inline int64_t rule_hold_ms(const struct app_alarm_rule *rule)
 	return (int64_t)(s * 1000.0f);
 }
 
+/* Transport-agnostic (app_report_trigger() routes through app_radio) --
+ * NOT CONFIG_LORAWAN-gated. Regression found via #118 phase 2 HIL after
+ * CONFIG_LORAWAN became toggleable on the P2P bench overlay: this stale
+ * guard (a leftover from before app_report_trigger()/app_radio existed,
+ * when this called app_lrw_* directly) compiled out ALL alarm TX on a
+ * LoRaWAN-off build -- alarms are the highest-priority safety frame. */
 static void alarm_lrw_send(void)
 {
-#if defined(CONFIG_LORAWAN)
 	int limit = g_app_config.alarm_limit;
 	int64_t now = k_uptime_get();
 	bool send;
 
 	/* m_last_alarm_send_ms is read-modify-written from three contexts (main
 	 * poll, PIR thread, system WQ). A 64-bit RMW is not atomic on Cortex-M4, so
-	 * guard it under m_lock (#93.6); release before app_lrw_send() so the radio
-	 * call never runs while holding the alarm lock. */
+	 * guard it under m_lock (#93.6); release before app_report_trigger() so the
+	 * radio call never runs while holding the alarm lock. */
 	k_mutex_lock(&m_lock, K_FOREVER);
 	if (limit > 0 && m_last_alarm_send_ms != -1 &&
 	    (now - m_last_alarm_send_ms) < (int64_t)limit * 1000) {
@@ -187,7 +192,6 @@ static void alarm_lrw_send(void)
 		return;
 	}
 	app_report_trigger();
-#endif
 }
 
 /* Current time in seconds. Returns absolute UTC when the RTC has synced (and sets
@@ -215,12 +219,14 @@ static void alarm_batch_flush(void)
 	}
 
 	size_t cap = ALARM_FRAME_MAX;
-#if defined(CONFIG_LORAWAN)
+	/* Transport-agnostic (app_radio_get_max_payload(), unconditionally
+	 * compiled) -- see alarm_lrw_send()'s comment on the stale CONFIG_LORAWAN
+	 * guard this used to have. */
 	uint8_t dr = app_radio_get_max_payload();
+
 	if (dr > 0 && dr < cap) {
 		cap = dr;
 	}
-#endif
 
 	/* L-4: if the window opened before the RTC synced but the clock is known
 	 * now, re-anchor base_time to absolute UTC (rel_s offsets are unaffected).
@@ -251,9 +257,8 @@ static void alarm_batch_flush(void)
 	}
 
 	if (ret == 0) {
-#if defined(CONFIG_LORAWAN)
+		/* Transport-agnostic, see alarm_lrw_send()'s comment. */
 		(void)app_radio_send_alarm(buf, len);
-#endif
 		LOG_INF("Alarm batch: %u/%u events on fPort 3 (%u B)", n, m_window_total,
 			(unsigned)len);
 	} else {

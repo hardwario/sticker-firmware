@@ -4,10 +4,14 @@
  *
  * Minimal environment for app_alarm.c host tests (#348 dwell/confirm/hold
  * state machine): the config store, sensor-data globals, and the hall/input/
- * clock/report call surface app_alarm.c uses. CONFIG_LORAWAN and CONFIG_SHELL
- * are off in this test's prj.conf, so the LoRaWAN send path and the shell
- * commands (and their extra dependencies, e.g. app_sensor_sample()) are
- * compiled out entirely — only what's left is stubbed here.
+ * clock/report call surface app_alarm.c uses. CONFIG_SHELL is off in this
+ * test's prj.conf, so the shell commands (and their extra dependencies, e.g.
+ * app_sensor_sample()) are compiled out entirely — only what's left is
+ * stubbed here. app_alarm.c's transport calls (app_radio_*,
+ * app_report_trigger()) are transport-agnostic and NOT CONFIG_LORAWAN-gated
+ * (#118 phase 2 -- a prior stale guard here compiled out all alarm TX on a
+ * LoRaWAN-off build, fixed), so they always link and need stubs regardless
+ * of this test's Kconfig.
  */
 
 #include "app_alarm_rules.h"
@@ -16,8 +20,9 @@
 #include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
-#include "app_lrw.h"
+#include "app_report.h"
 #include "app_sensor.h"
+#include "app_radio.h"
 #include "app_w1_slots.h"
 
 #include <zephyr/kernel.h>
@@ -79,20 +84,25 @@ int app_clock_get_unix(uint32_t *unix_s)
 	return -1;
 }
 
-/* ---- LoRaWAN (CONFIG_LORAWAN is off, so alarm_lrw_send() compiles to an
- * empty function and never calls these — kept only so the batch-flush code,
- * which is NOT LoRaWAN-gated, links). ---- */
+/* ---- transport (app_radio_ calls and app_report_trigger() are
+ * transport-agnostic and always linked, #118 phase 2 -- see this file's
+ * header comment). Test assertions never inspect what would have gone over
+ * the air. ---- */
 
-uint8_t app_lrw_get_max_payload(void)
+uint8_t app_radio_get_max_payload(void)
 {
 	return 51;
 }
 
-int app_lrw_send_alarm(const uint8_t *buf, size_t len)
+int app_radio_send_alarm(const uint8_t *buf, size_t len)
 {
 	(void)buf;
 	(void)len;
 	return 0;
+}
+
+void app_report_trigger(void)
+{
 }
 
 /* ---- alarm-report encoding: alarm_batch_flush() calls this unconditionally
