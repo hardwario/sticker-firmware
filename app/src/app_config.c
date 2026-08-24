@@ -45,6 +45,7 @@ static const struct app_config m_app_config_defaults = {
 	.lrw_adr = true,
 	.lrw_link_check_interval = 5,
 	.lrw_link_check_fail_rejoin = 5,
+	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
 
@@ -76,6 +77,7 @@ static struct app_config m_app_config = {
 	.lrw_adr = true,
 	.lrw_link_check_interval = 5,
 	.lrw_link_check_fail_rejoin = 5,
+	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 };
 
@@ -192,6 +194,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("alarm-13", m_app_config.alarm_13, sizeof(m_app_config.alarm_13));
 	SETTINGS_SET("alarm-14", m_app_config.alarm_14, sizeof(m_app_config.alarm_14));
 	SETTINGS_SET("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
+	SETTINGS_SET("alarm-buzzer-mode", &m_app_config.alarm_buzzer_mode,
+		     sizeof(m_app_config.alarm_buzzer_mode));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
 	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -317,6 +321,9 @@ static int h_commit(void)
 	if (m_app_config.lrw_link_check_fail_rejoin > 255) {
 		m_app_config.lrw_link_check_fail_rejoin = 255;
 	}
+	if ((int)m_app_config.alarm_buzzer_mode < 0 || (int)m_app_config.alarm_buzzer_mode > 7) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
+	}
 	if ((int)m_app_config.accel_motion_sensitivity < 0 ||
 	    (int)m_app_config.accel_motion_sensitivity > 3) {
 		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
@@ -405,6 +412,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("alarm-13", m_app_config.alarm_13, sizeof(m_app_config.alarm_13));
 	EXPORT_FUNC("alarm-14", m_app_config.alarm_14, sizeof(m_app_config.alarm_14));
 	EXPORT_FUNC("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
+	EXPORT_FUNC("alarm-buzzer-mode", &m_app_config.alarm_buzzer_mode,
+		    sizeof(m_app_config.alarm_buzzer_mode));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
 	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -838,6 +847,41 @@ static void print_cap_accelerometer(const struct shell *shell)
 		    m_app_config.cap_accelerometer ? "true" : "false");
 }
 
+static void print_alarm_buzzer_mode(const struct shell *shell)
+{
+	const char *str;
+	switch (m_app_config.alarm_buzzer_mode) {
+	case APP_CONFIG_ALARM_BUZZER_MODE_OFF:
+		str = "off";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_ON:
+		str = "on";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_CONTINUOUS:
+		str = "continuous";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_BRIEF:
+		str = "brief";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_SLOW:
+		str = "slow";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_FREQUENT:
+		str = "frequent";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_ON_NEW_ALARM:
+		str = "on-new-alarm";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_7:
+		str = "reserved7";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " alarm-buzzer-mode %s", str);
+}
+
 static void print_accel_motion_sensitivity(const struct shell *shell)
 {
 	const char *str;
@@ -949,6 +993,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_buzzer(shell);
 	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
+	print_alarm_buzzer_mode(shell);
 	print_accel_motion_sensitivity(shell);
 	print_sensor1_rom(shell);
 	print_sensor2_rom(shell);
@@ -1405,6 +1450,51 @@ static int cmd_cap_accelerometer(const struct shell *shell, size_t argc, char **
 			print_cap_accelerometer);
 }
 
+static int cmd_alarm_buzzer_mode(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_buzzer_mode(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: off, on, continuous, brief, slow, frequent, "
+				   "on-new-alarm, reserved7");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "off")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
+	} else if (!strcmp(argv[1], "on")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ON;
+	} else if (!strcmp(argv[1], "continuous")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_CONTINUOUS;
+	} else if (!strcmp(argv[1], "brief")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_BRIEF;
+	} else if (!strcmp(argv[1], "slow")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_SLOW;
+	} else if (!strcmp(argv[1], "frequent")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_FREQUENT;
+	} else if (!strcmp(argv[1], "on-new-alarm")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ON_NEW_ALARM;
+	} else if (!strcmp(argv[1], "reserved7")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_7;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: off, on, continuous, brief, slow, frequent, "
+				   "on-new-alarm, reserved7");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -1659,6 +1749,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(cap-accelerometer, NULL,
 	              "Get/Set accelerometer capability — orientation, motion and free-fall (true/false).",
 	              cmd_cap_accelerometer, 1, 1),
+
+	SHELL_CMD_ARG(alarm-buzzer-mode, NULL,
+	              "Get/Set buzzer alarm indication mode while any alarm is active (off/on implemented; continuous/brief/slow/frequent/on-new-alarm/reserved7 reserved for future timing variants — modes 2-7 currently behave identically to 'on'). Requires cap_buzzer.",
+	              cmd_alarm_buzzer_mode, 1, 1),
 
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",

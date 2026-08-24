@@ -46,6 +46,17 @@ enum app_config_motion_sensitivity {
 	APP_CONFIG_MOTION_SENSITIVITY_HIGH = 3,
 };
 
+enum app_config_alarm_buzzer_mode {
+	APP_CONFIG_ALARM_BUZZER_MODE_OFF = 0,
+	APP_CONFIG_ALARM_BUZZER_MODE_ON = 1,
+	APP_CONFIG_ALARM_BUZZER_MODE_CONTINUOUS = 2,
+	APP_CONFIG_ALARM_BUZZER_MODE_BRIEF = 3,
+	APP_CONFIG_ALARM_BUZZER_MODE_SLOW = 4,
+	APP_CONFIG_ALARM_BUZZER_MODE_FREQUENT = 5,
+	APP_CONFIG_ALARM_BUZZER_MODE_ON_NEW_ALARM = 6,
+	APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_7 = 7,
+};
+
 #define APP_CONFIG_VERSION 4
 
 struct app_config {
@@ -104,6 +115,7 @@ struct app_config {
 	uint8_t alarm_13[17];
 	uint8_t alarm_14[17];
 	uint8_t alarm_15[17];
+	enum app_config_alarm_buzzer_mode alarm_buzzer_mode;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
 	uint8_t sensor1_rom[8];
 	uint8_t sensor2_rom[8];

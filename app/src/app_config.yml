@@ -60,6 +60,35 @@ enums:
       value: 3
       shell: high
 
+  # #397: 0-7 wire range, only OFF/ON implemented today. 2-7 are pre-named so a
+  # future firmware can assign them real timing/melody variants without a
+  # renumbering/proto change; until then they behave identically to ON.
+  alarm_buzzer_mode:
+    - name: "OFF"
+      value: 0
+      shell: "off"
+    - name: "ON"
+      value: 1
+      shell: "on"
+    - name: CONTINUOUS
+      value: 2
+      shell: continuous
+    - name: BRIEF
+      value: 3
+      shell: brief
+    - name: SLOW
+      value: 4
+      shell: slow
+    - name: FREQUENT
+      value: 5
+      shell: frequent
+    - name: ON_NEW_ALARM
+      value: 6
+      shell: on-new-alarm
+    - name: RESERVED_7
+      value: 7
+      shell: reserved7
+
 proto:
   message: AppConfigMessage
   extra_fields:
@@ -717,6 +746,14 @@ parameters:
     readable: [nfc, lrw]
     writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 15 (packed hex, see app_config.yml)."
+
+  - name: alarm_buzzer_mode
+    proto_group: alarms
+    proto_id: 20
+    type: enum
+    enum: alarm_buzzer_mode
+    default: "off"
+    help: "Get/Set buzzer alarm indication mode while any alarm is active (off/on implemented; continuous/brief/slow/frequent/on-new-alarm/reserved7 reserved for future timing variants — modes 2-7 currently behave identically to 'on'). Requires cap_buzzer."
 
   - name: accel_motion_sensitivity
     proto_group: sensors

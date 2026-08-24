@@ -461,6 +461,7 @@ static const struct {
 	{DUMP_SECTION_ALARMS, 13, 19, false},    {DUMP_SECTION_ALARMS, 14, 19, false},
 	{DUMP_SECTION_ALARMS, 15, 19, false},    {DUMP_SECTION_ALARMS, 16, 20, false},
 	{DUMP_SECTION_ALARMS, 17, 20, false},    {DUMP_SECTION_ALARMS, 18, 20, false},
+	{DUMP_SECTION_ALARMS, 20, 3, false},
 	// END GENERATED DUMP_FIELDS
 };
 
