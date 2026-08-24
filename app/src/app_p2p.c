@@ -36,6 +36,9 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 /*
  * Wire frame (raw LoRa has no addressing/MIC/encryption of its own, doc/p2p.md §3):
  *
+ * Data plane (telemetry/alarm/response/ack, always PAIRED -- see
+ * tx_frame_at()'s P2P_LINK_PAIRED gate):
+ *
  *   [ net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | counter(4 BE) ]  11 B header
  *   [ AES-CCM ciphertext (= plaintext length) ]
  *   [ AES-CCM tag (4 B) ]
@@ -43,21 +46,31 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * The header is cleartext (a receiver filters foreign traffic by net_id and
  * routes by dev_addr/frame_type before spending a decrypt) and is fed as AAD so
  * it is authenticated by the tag. The body is the exact app_compose payload
- * (version byte + protobuf Telemetry) LoRaWAN would put on fPort 2.
- *
- * net_id/dev_addr are the fixed pre-join value 0 (§5.3's own JoinRequest
- * convention) until a successful join assigns real ones (#118 phase 2,
- * doc/p2p.md §5.3) -- see m_net_id/m_dev_addr below. The body is AES-CCM'd
- * under `join_key` before pairing and the join handshake itself; the derived
- * `session_key` once paired (§4), never a manual config secret.
+ * (version byte + protobuf Telemetry) LoRaWAN would put on fPort 2. Keyed
+ * under `session_key` (§4) once a successful join assigns it -- never a
+ * manual config secret.
  *
  * The AES-CCM nonce is counter(4 BE) || dev_addr(2 BE) || frame_type(1) ||
  * direction(1) || zeros(5) = 13 B. `counter` is a strictly increasing 32-bit
  * frame counter persisted with a reservation window (fcnt_*) so a reboot never
  * reuses a (key, nonce) pair. The direction byte separates TX from RX keystream.
+ *
+ * Join handshake (JoinRequest/JoinAccept, §5.3; net_id=dev_addr=0 always,
+ * see P2P_PREJOIN_NET_ID/P2P_PREJOIN_DEV_ADDR below): the SAME 11 B header,
+ * but the body is CLEARTEXT (not AES-CCM'd -- neither frame carries an
+ * actual secret: JoinRequest is the device's own public identity,
+ * JoinAccept is the assigned net_id/dev_addr/central_nonce; only `app_key`
+ * is secret and it is never transmitted) followed by a full 16 B plain
+ * AES-CMAC tag (P2P_JOIN_TAG_LEN, NOT a truncated 4 B CCM tag) over a
+ * domain-separation label || header || body -- see
+ * send_join_request()/recv_join_accept() and the
+ * P2P_JOIN_TAG_LABEL/P2P_JOINACCEPT_TAG_LABEL comment below. Deliberately a
+ * simpler, different construction than the data plane's AES-CCM above
+ * (#118 phase 2 revision, proximos-v2 MR!7 §7) precisely because there is
+ * nothing to encrypt in either handshake frame, only to authenticate.
  */
 #define P2P_HDR_LEN   11
-#define P2P_TAG_LEN   4
+#define P2P_TAG_LEN   4 /* data-plane (session_key) CCM tag length only */
 #define P2P_NONCE_LEN 13
 #define P2P_KEY_LEN   16
 #define P2P_DIR_TX    0x00
@@ -72,12 +85,35 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_PREJOIN_NET_ID   0
 #define P2P_PREJOIN_DEV_ADDR 0
 
-/* join_key = AES128-CMAC(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE)),
- * doc/p2p.md §4 -- keys the join handshake itself (JoinRequest/JoinAccept,
- * §5.3) always; the data plane (telemetry/alarm/response/command) uses it
- * only pre-pairing (phase 1 behavior) and switches to the derived
- * session_key once PAIRED (#118 phase 2). */
-#define P2P_JOIN_KEY_LABEL "HIO-P2P-JOIN"
+/* The STICKER's existing LoRaWAN OTAA AppKey (g_app_config.lrw_appkey) is the
+ * ONLY root secret for the whole P2P transport -- there is no separate
+ * join_key (#118 phase 2 revision, per proximos-v2 MR!7 §7). The central
+ * already knows app_key from the device's OTAA/claim flow, so nothing new
+ * needs provisioning; app_config's `secret_key` (the NFC command channel's
+ * key, #299) is NOT used in P2P at all any more.
+ *
+ * JoinRequest/JoinAccept authenticate with a full 16 B plain AES-CMAC tag
+ * (P2P_JOIN_TAG_LEN) over label || header || (cleartext) body -- see
+ * send_join_request()/recv_join_accept(). Each frame type gets its own
+ * domain-separation label so a tag computed for one can never be replayed
+ * as the other's. This exact construction (label || header || body, plain
+ * CMAC, no CCM/nonce) is a NEW proposal introduced with this revision --
+ * there is no pre-existing spec for JoinAccept's authentication to match
+ * (kept symmetric with JoinRequest's for the same "nothing secret in the
+ * body" reason). See doc/p2p.md §4/§5.3. */
+#define P2P_JOIN_TAG_LABEL       "HIO-P2P-JOIN" /* 12 B -- JoinRequest tag */
+#define P2P_JOINACCEPT_TAG_LABEL "HIO-P2P-ACC"  /* 11 B -- JoinAccept tag */
+#define P2P_JOIN_TAG_LEN         16             /* full CMAC output; NOT P2P_TAG_LEN */
+
+/* session_key = AES128-CMAC(app_key, "HIO-P2P-SES" || 0x01 || dev_nonce(4 BE)
+ * || central_nonce(4 BE) || serial_number(4 BE) || zero-pad to 32 B),
+ * doc/p2p.md §4 -- keys the data plane (telemetry/alarm/response/ack) once
+ * PAIRED, derived directly from app_key (see above), never from a bare
+ * config secret. Label(11 B) + 0x01(1 B) + 3*4 B nonces/serial = 24 B,
+ * zero-padded to 32 B (two full CMAC blocks) -- app_ccm_cmac() already
+ * handles multi-block messages (its RFC4493 Mlen-40/64 KAT vectors in
+ * tests/ccm), so no new primitive is needed, just the wider buffer. */
+#define P2P_SESSION_KEY_LABEL "HIO-P2P-SES"
 
 /* EU868 1% duty cycle, enforced app-side (raw LoRa bypasses LoRaMac). After a
  * frame of air-time A we must stay off the air for A*(100/1 - 1) = A*99 ms. */
@@ -308,50 +344,43 @@ K_MSGQ_DEFINE(m_rx_msgq, sizeof(struct p2p_rx_msg), P2P_RX_QUEUE_DEPTH, 4);
 /* Key derivation                                                            */
 /* ======================================================================== */
 
-/* join_key = AES128-CMAC(secret_key, "HIO-P2P-JOIN" || serial_number(4 BE))
- * (doc/p2p.md §4, NIST SP 800-38B / RFC 4493) -- a proper PRF with
- * domain-separated subkeys, not the bare one-block AES-ECB PRF phase 1
- * shipped (a crypto review flagged the plain ECB construction as
- * under-specified; CMAC needs only the same AES-ECB forward primitive
- * underneath, so this costs no new backend, #118 phase 2). Breaking change
- * vs. phase 1's join_key, accepted pre-ship (phase 1 was bench-only, no
- * central to migrate). Derived fresh on demand (cheap) rather than cached --
- * secret_key can change (#299) without this module needing to know. */
-static void derive_join_key(uint8_t out[P2P_KEY_LEN])
+/* Constant-time 16 B tag compare (mirrors app_ccm_auth_decrypt()'s own
+ * accumulate-the-XOR pattern in app_ccm.c) -- used to verify the plain
+ * AES-CMAC tags on JoinRequest/JoinAccept below. A short-circuiting memcmp()
+ * would leak how many leading bytes matched via timing; that is exactly the
+ * kind of side channel a MAC verification must not have. */
+static bool p2p_tag_eq(const uint8_t a[P2P_JOIN_TAG_LEN], const uint8_t b[P2P_JOIN_TAG_LEN])
 {
-	uint8_t block[16] = {0};
-	/* "HIO-P2P-JOIN" (12 B) + serial_number (4 B) = 16 B, exactly one block. */
-	size_t label_len = strlen(P2P_JOIN_KEY_LABEL);
+	uint8_t diff = 0;
 
-	memcpy(block, P2P_JOIN_KEY_LABEL, label_len);
-	sys_put_be32(g_app_config.serial_number, &block[label_len]);
-
-	(void)app_ccm_cmac(g_app_config.secret_key, block, sizeof(block), out);
+	for (size_t i = 0; i < P2P_JOIN_TAG_LEN; i++) {
+		diff |= a[i] ^ b[i];
+	}
+	return diff == 0;
 }
 
-/* session_key = AES128-CMAC(join_key, 0x01 || dev_nonce(4 BE) ||
- * central_nonce(4 BE) || serial_number(4 BE) || zeros(3)) (doc/p2p.md §4) --
- * derived once per successful join, keyed under join_key so a session_key
- * leak never exposes join_key. Rotates every re-join (fresh dev_nonce and
- * central_nonce each time), which is also why resetting the frame counter to
- * 0 on every new pairing is safe: CCM's nonce-uniqueness requirement is on
- * the (key, nonce) pair, not the nonce alone (confirmed w/ #118 phase 2
- * review). */
+/* See P2P_SESSION_KEY_LABEL above for the formula and rationale. Label (11 B)
+ * + 0x01 (1 B) + dev_nonce/central_nonce/serial_number (4 B each) = 24 B,
+ * zero-padded to 32 B (two full CMAC blocks) -- app_ccm_cmac() already
+ * handles multi-block messages (see its RFC4493 Mlen-40/64 KAT vectors in
+ * tests/ccm), so this needs no new primitive, just the wider buffer.
+ * Rotates every re-join (fresh dev_nonce and central_nonce each time), which
+ * is also why resetting the frame counter to 0 on every new pairing is
+ * safe: CCM's nonce-uniqueness requirement is on the (key, nonce) pair, not
+ * the nonce alone (confirmed w/ #118 phase 2 review). */
 static void derive_session_key(uint32_t dev_nonce, uint32_t central_nonce, uint8_t out[P2P_KEY_LEN])
 {
-	uint8_t join_key[P2P_KEY_LEN];
+	uint8_t block[32] = {0};
+	size_t label_len = strlen(P2P_SESSION_KEY_LABEL);
 
-	derive_join_key(join_key);
+	memcpy(block, P2P_SESSION_KEY_LABEL, label_len);
+	block[label_len] = 0x01;
+	sys_put_be32(dev_nonce, &block[label_len + 1]);
+	sys_put_be32(central_nonce, &block[label_len + 5]);
+	sys_put_be32(g_app_config.serial_number, &block[label_len + 9]);
+	/* block[label_len+13 .. 31] = zero padding, already zero-initialized. */
 
-	uint8_t block[16] = {0};
-
-	block[0] = 0x01;
-	sys_put_be32(dev_nonce, &block[1]);
-	sys_put_be32(central_nonce, &block[5]);
-	sys_put_be32(g_app_config.serial_number, &block[9]);
-	/* block[13..15] = zeros(3), already zero-initialized. */
-
-	(void)app_ccm_cmac(join_key, block, sizeof(block), out);
+	(void)app_ccm_cmac(g_app_config.lrw_appkey, block, sizeof(block), out);
 }
 
 /* ======================================================================== */
@@ -993,7 +1022,7 @@ static void rx_work_handler(struct k_work *work)
 	struct p2p_rx_msg msg;
 
 	while (k_msgq_get(&m_rx_msgq, &msg, K_NO_WAIT) == 0) {
-		if (msg.len < P2P_HDR_LEN + P2P_TAG_LEN) {
+		if (msg.len < P2P_HDR_LEN) {
 			LOG_WRN("RX runt frame (%u B)", msg.len);
 			continue;
 		}
@@ -1008,47 +1037,38 @@ static void rx_work_handler(struct k_work *work)
 			continue;
 		}
 
-		size_t ct_len = msg.len - P2P_HDR_LEN - P2P_TAG_LEN;
-		uint8_t pt[P2P_MAX_BODY];
-		uint8_t nonce[P2P_NONCE_LEN];
+		/* JoinRequest/JoinAccept carry a CLEARTEXT body + a 16 B plain
+		 * AES-CMAC tag (P2P_JOIN_TAG_LEN, see the P2P_JOIN_TAG_LABEL comment
+		 * above), not AES-CCM -- there is nothing secret to decrypt, so just
+		 * log the body as-is (no tag verification here: this listen mode is
+		 * diagnostic/bench-only eavesdropping, not a protocol participant).
+		 * Any other frame_type is a data-plane frame under session_key,
+		 * which tx_frame_at() only ever sends once PAIRED (#118 phase 2) --
+		 * this listen mode has no peer's session_key to try, and there is no
+		 * longer a join_key fallback either (#118 phase 2 revision), so such
+		 * a frame can never be decoded here and is just noted. */
+		if (frame_type == APP_P2P_FRAME_JOIN_REQUEST ||
+		    frame_type == APP_P2P_FRAME_JOIN_ACCEPT) {
+			if (msg.len < P2P_HDR_LEN + P2P_JOIN_TAG_LEN) {
+				LOG_WRN("RX runt join frame (%u B)", msg.len);
+				continue;
+			}
 
-		/* Sender's frames are TX-direction; a receiver decrypts with the
-		 * sender's nonce, so use the addr/type that came in the header. */
-		memset(nonce, 0, sizeof(nonce));
-		sys_put_be32(counter, &nonce[0]);
-		sys_put_be16(dev_addr, &nonce[4]);
-		nonce[6] = frame_type;
-		nonce[7] = P2P_DIR_TX;
+			size_t body_len = msg.len - P2P_HDR_LEN - P2P_JOIN_TAG_LEN;
 
-		/* Tries join_key only -- a PAIRED device's own data-plane traffic is
-		 * under session_key instead and will correctly fail here (#118
-		 * phase 2; this listen mode is diagnostic/bench-only and was never
-		 * extended to try both keys, out of the reviewed A-D join-handshake
-		 * scope). */
-		uint8_t key[P2P_KEY_LEN];
-
-		derive_join_key(key);
-
-		int ret = app_ccm_auth_decrypt(key, nonce, P2P_NONCE_LEN, /* AAD */ msg.buf,
-					       P2P_HDR_LEN, &msg.buf[P2P_HDR_LEN], ct_len,
-					       &msg.buf[P2P_HDR_LEN + ct_len], P2P_TAG_LEN, pt);
-		if (ret) {
-			LOG_WRN("RX auth failed (addr %u, type %u)", dev_addr, frame_type);
+			LOG_INF("RX %s from addr %u, ctr %u (RSSI %d dBm, SNR %d dB, %zu B "
+				"body)",
+				frame_type == APP_P2P_FRAME_JOIN_REQUEST ? "JoinRequest"
+									 : "JoinAccept",
+				dev_addr, counter, msg.rssi, msg.snr, body_len);
+			LOG_HEXDUMP_INF(&msg.buf[P2P_HDR_LEN], body_len,
+					"P2P join body (cleartext, tag not verified):");
 			continue;
 		}
 
-		LOG_INF("RX type %u from addr %u (RSSI %d dBm, SNR %d dB, %zu B)", frame_type,
-			dev_addr, msg.rssi, msg.snr, ct_len);
-		LOG_HEXDUMP_INF(pt, ct_len, "P2P body:");
-
-		/* #118 phase 1: COMMAND frames are logged only, not dispatched to
-		 * app_cmd -- that arrives with phase 2's real, anti-replay-protected
-		 * (session-keyed) channel; dispatching against a bare join_key-only
-		 * decrypt here would have no replay protection at all (no per-session
-		 * counter high-water yet, just the monotonic TX-side fcnt). */
-		if (frame_type == APP_P2P_FRAME_COMMAND) {
-			LOG_INF("COMMAND frame received (not dispatched, phase 1)");
-		}
+		LOG_DBG("RX data-plane frame_type %u pre-pairing; no session_key to try, "
+			"ignored",
+			frame_type);
 	}
 }
 
@@ -1114,12 +1134,15 @@ static void mark_ready(void)
 }
 
 /* Send one JoinRequest (doc/p2p.md §5.3): header net_id=0/dev_addr=0,
- * counter=dev_nonce; body product_type|proto_version|serial_be32|fw_version
- * sent as AAD with an EMPTY ciphertext (the body is authenticated, not
- * encrypted -- there is nothing secret in it, it is the central's lookup
- * key). Persists the advanced dev_nonce BEFORE sending: once a JoinRequest
- * *could* have reached the central, that nonce value must never be reused,
- * even if the TX or the round-trip afterward fails. Returns 0 (with
+ * counter=dev_nonce; CLEARTEXT body product_type|proto_version|serial_be32|
+ * fw_version (nothing secret in it -- it is the central's lookup key)
+ * followed by a full 16 B plain AES-CMAC tag = CMAC(app_key,
+ * P2P_JOIN_TAG_LABEL || header || body) -- see the P2P_JOIN_TAG_LABEL
+ * comment above; deliberately NOT AES-CCM, there is no ciphertext and no
+ * nonce involved at all (#118 phase 2 revision, proximos-v2 MR!7 §7).
+ * Persists the advanced dev_nonce BEFORE sending: once a JoinRequest *could*
+ * have reached the central, that nonce value must never be reused, even if
+ * the TX or the round-trip afterward fails. Returns 0 (with
  * `*used_nonce`/`*tx_end_ms` set) or -EAGAIN (duty-cycle blocked) or an
  * errno. */
 static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
@@ -1134,7 +1157,7 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 
 	dnonce_persist(nonce_val + 1);
 
-	uint8_t frame[P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_TAG_LEN];
+	uint8_t frame[P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN]; /* 37 B */
 
 	sys_put_be32(P2P_PREJOIN_NET_ID, &frame[0]);
 	sys_put_be16(P2P_PREJOIN_DEV_ADDR, &frame[4]);
@@ -1151,24 +1174,19 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 	body[8] = APP_VERSION_PATCH;
 	body[9] = 0; /* reserved */
 
-	uint8_t nonce[P2P_NONCE_LEN];
+	/* tag = CMAC(app_key, label || header || body); header+body are already
+	 * contiguous in frame[0 .. P2P_HDR_LEN+P2P_JOIN_REQ_BODY_LEN). */
+	uint8_t tag_in[sizeof(P2P_JOIN_TAG_LABEL) - 1 + P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN];
 
-	build_nonce(nonce, nonce_val, P2P_PREJOIN_DEV_ADDR, APP_P2P_FRAME_JOIN_REQUEST, P2P_DIR_TX);
+	memcpy(tag_in, P2P_JOIN_TAG_LABEL, sizeof(P2P_JOIN_TAG_LABEL) - 1);
+	memcpy(&tag_in[sizeof(P2P_JOIN_TAG_LABEL) - 1], frame, P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN);
 
-	uint8_t key[P2P_KEY_LEN];
+	uint8_t tag[P2P_JOIN_TAG_LEN];
 
-	derive_join_key(key);
+	(void)app_ccm_cmac(g_app_config.lrw_appkey, tag_in, sizeof(tag_in), tag);
+	memcpy(&frame[P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN], tag, P2P_JOIN_TAG_LEN);
 
-	/* Whole body is AAD; ciphertext is empty (doc/p2p.md §5.3). */
-	int ret = app_ccm_encrypt_and_tag(key, nonce, P2P_NONCE_LEN, frame,
-					  sizeof(frame) - P2P_TAG_LEN, NULL, 0, NULL,
-					  &frame[sizeof(frame) - P2P_TAG_LEN], P2P_TAG_LEN);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_ccm_encrypt_and_tag", ret);
-		return ret;
-	}
-
-	ret = lora_send(m_lora_dev, frame, sizeof(frame));
+	int ret = lora_send(m_lora_dev, frame, sizeof(frame));
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lora_send", ret);
 		return ret;
@@ -1196,7 +1214,7 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	uint8_t buf[P2P_FRAME_MAX];
 	int16_t rssi;
 	int8_t snr;
-	size_t want = P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN + P2P_TAG_LEN;
+	size_t want = P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN + P2P_JOIN_TAG_LEN; /* 42 B */
 
 	int len = p2p_rx_window(tx_end_ms, P2P_RX1_DELAY_DEFAULT_S, (uint8_t)want, buf, sizeof(buf),
 				&rssi, &snr);
@@ -1222,24 +1240,26 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 		return -EBADMSG;
 	}
 
-	uint8_t nonce[P2P_NONCE_LEN];
+	/* Body is CLEARTEXT (see the P2P_JOIN_TAG_LABEL comment above) -- verify
+	 * the trailing 16 B plain AES-CMAC tag = CMAC(app_key,
+	 * P2P_JOINACCEPT_TAG_LABEL || header || body) before trusting it. */
+	uint8_t tag_in[sizeof(P2P_JOINACCEPT_TAG_LABEL) - 1 + P2P_HDR_LEN +
+		       P2P_JOIN_ACCEPT_BODY_LEN];
 
-	build_nonce(nonce, counter, P2P_PREJOIN_DEV_ADDR, frame_type, P2P_DIR_RX);
+	memcpy(tag_in, P2P_JOINACCEPT_TAG_LABEL, sizeof(P2P_JOINACCEPT_TAG_LABEL) - 1);
+	memcpy(&tag_in[sizeof(P2P_JOINACCEPT_TAG_LABEL) - 1], buf,
+	       P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN);
 
-	uint8_t key[P2P_KEY_LEN];
+	uint8_t expected_tag[P2P_JOIN_TAG_LEN];
 
-	derive_join_key(key);
+	(void)app_ccm_cmac(g_app_config.lrw_appkey, tag_in, sizeof(tag_in), expected_tag);
 
-	uint8_t body[P2P_JOIN_ACCEPT_BODY_LEN];
-	int ret = app_ccm_auth_decrypt(key, nonce, P2P_NONCE_LEN, buf, P2P_HDR_LEN,
-				       &buf[P2P_HDR_LEN], P2P_JOIN_ACCEPT_BODY_LEN,
-				       &buf[P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN], P2P_TAG_LEN,
-				       body);
-	if (ret) {
+	if (!p2p_tag_eq(expected_tag, &buf[P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN])) {
 		LOG_WRN("JoinAccept: auth failed");
-		return ret;
+		return -EBADMSG;
 	}
 
+	const uint8_t *body = &buf[P2P_HDR_LEN];
 	uint32_t net_id = sys_get_be32(&body[0]);
 	uint16_t dev_addr = sys_get_be16(&body[4]);
 	uint32_t central_nonce = sys_get_be32(&body[6]);

@@ -775,12 +775,15 @@ parameters:
     type: bool
     help: "Get/Set input B counter enabled (true/false)."
 
-  # Raw-LoRa P2P transport (#118), phase 1 (see doc/p2p.md). Radio tuning only —
+  # Raw-LoRa P2P transport (#118, see doc/p2p.md). Radio tuning only —
   # net_id/dev_addr/link key are NOT config parameters: net_id/dev_addr are
-  # join-assigned (phase 2) and the link key derives from secret_key (§4), never
-  # hand-typed. shell-only (readable/writable) for this phase: no NFC/LRW
-  # SetParam/ConfigDump wiring yet, and changing radio params over the very link
-  # they configure would sever it (same #271 argument as radio_mode above).
+  # join-assigned (phase 2) and the link key (session_key) derives from the
+  # device's existing LoRaWAN AppKey (lrw_appkey below, §4, #118 phase 2
+  # revision) — never hand-typed, and there is no separate join_key/secret_key
+  # involved in P2P at all. shell-only (readable/writable) for this phase: no
+  # NFC/LRW SetParam/ConfigDump wiring yet, and changing radio params over the
+  # very link they configure would sever it (same #271 argument as radio_mode
+  # above).
   - name: p2p_frequency
     proto_group: p2p
     readable: [shell]

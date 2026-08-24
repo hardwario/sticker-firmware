@@ -26,8 +26,10 @@ extern "C" {
  * The payload layer is reused unchanged: app_compose builds the protobuf
  * Telemetry snapshot exactly as for LoRaWAN; this module only frames it (an
  * 11 B cleartext header replacing the LoRaWAN fPort, see app_p2p.c) and
- * AES-CCM encrypts+authenticates the body under the derived `join_key`
- * (doc/p2p.md §4 -- there is no manual p2p_key config parameter).
+ * AES-CCM encrypts+authenticates the body under the derived `session_key`
+ * (doc/p2p.md §4, derived directly from the device's existing LoRaWAN OTAA
+ * AppKey -- there is no manual p2p_key config parameter and no separate
+ * join_key).
  *
  * Phase 1 shipped deliberately unpaired/unACKed fire-and-forget: net_id/
  * dev_addr were the fixed pre-join value 0 (doc/p2p.md §5.3's own
@@ -35,8 +37,8 @@ extern "C" {
  * (#118) adds the join handshake itself: on first start with no persisted
  * pairing state, the device sends JoinRequest, opens a bounded RX1 window
  * for JoinAccept, and on success persists net_id/dev_addr/session_key/
- * rx1_delay to NVS and switches from join_key to session_key for the data
- * plane (doc/p2p.md §5.3). app_p2p_is_ready() (and therefore the report
+ * rx1_delay to NVS and switches the data plane on to session_key
+ * (doc/p2p.md §5.3). app_p2p_is_ready() (and therefore the report
  * cadence) only goes true once paired -- a device stuck unpaired past its
  * boot join window (§5.2, 120 s) stays silent until the next boot or an NFC
  * `p2p_join` trigger (not yet wired). The confirmed-uplink Ack/retry (§6),
@@ -103,8 +105,11 @@ void app_p2p_suspend(void);
 #if defined(CONFIG_SHELL)
 /* Bench-rig reference receiver (doc/p2p.md §14): enable=true reconfigures the
  * radio for continuous RX and starts async receive -- each frame is
- * validated, AES-CCM decrypted under the derived join_key and logged with
- * RSSI/SNR/frame_type/counter; enable=false stops it and returns to TX
+ * filtered by net_id and logged with RSSI/SNR/frame_type/counter.
+ * JoinRequest/JoinAccept bodies are cleartext (see app_p2p.c's
+ * P2P_JOIN_TAG_LABEL comment) and are logged as-is; any other frame_type is
+ * a session_key-encrypted data-plane frame this diagnostic listener has no
+ * key for and cannot decode. enable=false stops it and returns to TX
  * config. Returns 0 or a negative errno. TX (send_telemetry/queue_response/
  * send_alarm) is refused with -EBUSY while listening. */
 int app_p2p_listen(bool enable);
