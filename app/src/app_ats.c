@@ -13,6 +13,9 @@
 #include "app_led.h"
 #include "app_lrw.h"
 #include "app_nfc.h"
+#if defined(CONFIG_APP_LORA_P2P)
+#include "app_p2p.h"
+#endif
 #include "app_report.h"
 #include "app_machine_probe.h"
 #include "app_sensor.h"
@@ -474,7 +477,19 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 
 	app_sensor_sample();
 
-	const struct app_sensor_data *d = &g_app_sensor_data;
+	/* #340 L13: snapshot the whole struct under the lock so every field below
+	 * reflects one consistent point in time, instead of reading the live,
+	 * unlocked global across ~20 fields — unlike every other reader here
+	 * (the sensor-watch loop, app_sensor_sample()'s own writers), which take
+	 * g_app_sensor_data_lock. A concurrent sample on another thread mid-write
+	 * could otherwise produce a torn read (mixed pre/post-sample values). */
+	struct app_sensor_data snapshot;
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	snapshot = g_app_sensor_data;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+
+	const struct app_sensor_data *d = &snapshot;
 
 	/* On-device sensors + the device's own discrete inputs. */
 	shell_print(shell, "== Device ==");
@@ -734,6 +749,43 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_lrw_reset, 1, 0),
 	SHELL_SUBCMD_SET_END);
 #endif /* defined(CONFIG_LORAWAN) */
+
+#if defined(CONFIG_APP_LORA_P2P)
+/* Bench two-STICKER rig (doc/p2p.md §14): drives the reference receiver on a
+ * second STICKER without a real gateway/central. Not registered when P2P
+ * transport is compiled out (flash-tight debug builds, doc/p2p.md §11). */
+static int cmd_p2p_listen(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	bool enable;
+
+	if (strcmp(argv[1], "on") == 0) {
+		enable = true;
+	} else if (strcmp(argv[1], "off") == 0) {
+		enable = false;
+	} else {
+		shell_error(shell, "usage: p2p listen on|off");
+		return -EINVAL;
+	}
+
+	int ret = app_p2p_listen(enable);
+	if (ret) {
+		shell_error(shell, "listen %s failed: %d", enable ? "on" : "off", ret);
+		return ret;
+	}
+	shell_print(shell, "P2P listen %s", enable ? "ON" : "OFF");
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_p2p,
+	SHELL_CMD_ARG(listen, NULL,
+		      "Toggle continuous-RX reference receiver (bench two-STICKER rig, "
+		      "doc/p2p.md §14). Usage: listen on|off",
+		      cmd_p2p_listen, 2, 0),
+	SHELL_SUBCMD_SET_END);
+#endif /* defined(CONFIG_APP_LORA_P2P) */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_sensors,
@@ -1354,6 +1406,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #if defined(CONFIG_LORAWAN)
 	SHELL_CMD(lrw, &sub_lrw, "LoRaWAN commands.", NULL),
 #endif /* defined(CONFIG_LORAWAN) */
+#if defined(CONFIG_APP_LORA_P2P)
+	SHELL_CMD(p2p, &sub_p2p, "Raw-LoRa P2P transport commands (#118).", NULL),
+#endif /* defined(CONFIG_APP_LORA_P2P) */
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
 	SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
 	SHELL_CMD(ccm, NULL, "app_ccm HW AES self-test (golden vectors).", cmd_ccm_selftest),

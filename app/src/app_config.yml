@@ -90,6 +90,11 @@ proto:
       # both timings are now the per-rule `dwell` field (alarm_0..15 bytes blob),
       # unified as a dwell/hold duration across THRESHOLD/STATE/RATE kinds.
       reserved: [2, 19]
+    - key: p2p
+      message: P2P
+      field: p2p
+      proto_id: 11
+      strip_prefix: p2p_
 
 # Command protocol (LoRaWAN fPort 85 downlink + NFC). The single source of truth
 # for which commands exist, their wire id, dispatch routing and availability.
@@ -119,7 +124,14 @@ commands:
     # renamed to match its actual behavior (keeps identity + full LoRaWAN — the
     # NEW, narrower factory_reset below is a different command/id). Breaking:
     # Manager-App must follow the rename.
-    - {name: device_reset, proto_id: 8, body: DeviceReset, kind: action, action: DEVICE_RESET, response: ack}
+    # #340 L12: no transports key meant "omitted = all transports" per the
+    # generator's own rule, so device_reset (broader than factory_reset -- wipes
+    # sensors/alarms/intervals/history config, keeping only identity+LoRaWAN)
+    # was reachable over a plain LoRaWAN downlink and the vendor channel, unlike
+    # its narrower sibling factory_reset below (nfc/shell only, since a
+    # downlink triggering a session-destroying reset could never confirm its
+    # own delivery -- the same argument applies here, arguably more so).
+    - {name: device_reset, proto_id: 8, body: DeviceReset, kind: action, action: DEVICE_RESET, response: ack, transports: [nfc, shell]}
     - {name: force_send, proto_id: 9, body: ForceSend, kind: handler, response: none, transports: [lrw]}
     - {name: reset_counters, proto_id: 10, body: ResetCounters, kind: handler, response: ack}
     - {name: req_history, proto_id: 11, body: ReqHistory, kind: handler, response: none, transports: [lrw]}
@@ -762,3 +774,45 @@ parameters:
     proto_id: 18
     type: bool
     help: "Get/Set input B counter enabled (true/false)."
+
+  # Raw-LoRa P2P transport (#118), phase 1 (see doc/p2p.md). Radio tuning only —
+  # net_id/dev_addr/link key are NOT config parameters: net_id/dev_addr are
+  # join-assigned (phase 2) and the link key derives from secret_key (§4), never
+  # hand-typed. shell-only (readable/writable) for this phase: no NFC/LRW
+  # SetParam/ConfigDump wiring yet, and changing radio params over the very link
+  # they configure would sever it (same #271 argument as radio_mode above).
+  - name: p2p_frequency
+    proto_group: p2p
+    readable: [shell]
+    writable: [shell]
+    proto_id: 1
+    type: int
+    default: 868100000
+    min: 863000000
+    max: 870000000
+    persistent: [device_reset]
+    help: "Get/Set P2P carrier frequency in Hz (EU868 band)."
+
+  - name: p2p_spreading_factor
+    proto_group: p2p
+    readable: [shell]
+    writable: [shell]
+    proto_id: 2
+    type: int
+    default: 10
+    min: 6
+    max: 12
+    persistent: [device_reset]
+    help: "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate)."
+
+  - name: p2p_tx_power
+    proto_group: p2p
+    readable: [shell]
+    writable: [shell]
+    proto_id: 3
+    type: int
+    default: 14
+    min: 2
+    max: 22
+    persistent: [device_reset]
+    help: "Get/Set P2P TX power in dBm."

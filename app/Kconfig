@@ -24,7 +24,7 @@ config FW_DEBUG
 
 config APP_DEBUG_AUTOSUSPEND_S
 	int "Debug auto-suspend idle timeout (seconds, 0 = disabled)"
-	depends on FW_DEBUG && POWEROFF
+	depends on FW_DEBUG && POWEROFF && SHELL_BACKEND_RTT
 	default 7200
 	help
 	  On the Debug build, after this many seconds with no RTT/shell
@@ -111,6 +111,21 @@ config APP_HISTORY_BYTES
 	help
 	  Size of the in-RAM history ring used when CONFIG_APP_HISTORY_FLASH=n.
 	  Record size is variable (5-33 B) depending on the enabled sensor set.
+
+config APP_LORA_P2P
+	bool "Raw-LoRa P2P transport (#118)"
+	depends on LORA
+	default y
+	help
+	  Compile in the raw-LoRa point-to-point transport (app_p2p.c), selected
+	  at boot by `radio-mode p2p` (an alternative to LoRaWAN for deployments
+	  with no LoRaWAN infrastructure, see doc/p2p.md). Both stacks link into
+	  the same image; only the one selected by radio-mode actually brings up
+	  the shared SX126x radio.
+
+	  Disable (n) to drop the P2P transport and reclaim flash on a build
+	  that never needs it — the flash-tight debug overlay does this today
+	  (doc/p2p.md §11: release has ~58.5 KB headroom, debug only ~4.75 KB).
 
 endmenu
 

@@ -18,7 +18,7 @@ way HARDWARIO TOWER nodes pair to a Radio Dongle, but with real cryptography
 
 Status: **design document**, phase 1 (§13) implemented and HIL-validated on a
 two-STICKER bench (§14.1) — `radio-mode p2p` now routes through a real
-`app_p2p`/`app_transport` facade instead of the `app_lrw.c` (#271) fallback
+`app_p2p`/`app_radio` facade instead of the `app_lrw.c` (#271) fallback
 warning; phases 2+ (join/ACK, northbridge, central) remain unimplemented.
 
 ---
@@ -90,7 +90,7 @@ On boot the firmware brings up **only** the selected stack — the SX126x radio
 is shared between LoRaMac and raw LoRa, so there is no live switch. The
 payload layer is unchanged: `app_compose` builds the same protobuf snapshots
 and `app_report` owns the `interval_report` cadence for both transports,
-behind an `app_transport` facade (shape carried over from PR #228; mainline
+behind an `app_radio` facade (shape carried over from PR #228; mainline
 has ~40 direct `app_lrw_*` call sites that the facade must absorb).
 
 Build: dual-stack image gated by `CONFIG_APP_LORA_P2P` (default `y` on
@@ -138,16 +138,17 @@ was re-measured — see §11 — release has room, debug does not and keeps
 | `0x02` | up | telemetry (mirrors LoRaWAN fPort 2, body byte-identical) |
 | `0x03` | up | alarm (fPort 3 mirror) |
 | `0x55` | up | command response (fPort 85 mirror) |
-| `0x56` | down | command (fPort 86 mirror) |
+| `0x56` | down | command (same protobuf Command shape as fPort 85's Command oneof; P2P-only surface, no real LoRaWAN fPort counterpart -- see §6) |
 | `0xF0` | up | **JoinRequest** (link control, §5) |
 | `0xF1` | down | **JoinAccept** |
 | `0xFA` | down | **Ack** |
 | `0xFD` | down | **Detach** (authenticated) |
 | `0xFE` | down | **RejoinRequest** (network asks the node to rejoin) |
 
-`0x02`–`0x56` mirror fPorts so the off-device decoder reuses the LoRaWAN codec
-(`ttn.js` via `p2p.js`); `0xF0`–`0xFF` is reserved for link control and never
-collides with an fPort mirror.
+`0x02`, `0x03`, `0x55` mirror fPorts byte-for-byte so the off-device decoder
+reuses the LoRaWAN codec (`ttn.js` via `p2p.js`); `0x56` reuses the same
+protobuf shape but has no fPort of its own (§6); `0xF0`–`0xFF` is reserved
+for link control and never collides with an fPort mirror.
 
 ### 3.3 Radio parameters
 
@@ -169,8 +170,8 @@ form a strict one-way hierarchy rooted in the per-unit factory secret:
 | Key | Who holds it | Origin / distribution |
 |---|---|---|
 | `secret_key` (16 B, existing) | device, ATELOS/inventory, phone app after claim | Set at the tester; the NFC command channel key. **Never leaves the NFC/claim world — the central and gateways never see it.** |
-| `p2p_join_key` (16 B, derived) | device (derives on demand), phone app (derives after claim), **central (registered by the app)** | `join_key = AES128-ECB(secret_key, "HIO-P2P-JOIN" ‖ serial_number(4 BE))` — a one-block PRF over the hardware AES already in flash. The app derives it after claiming the device and registers `{product_type, serial, join_key}` with the central over its management API (TLS, operator-authenticated). One-time per device lifetime. |
-| `p2p_session_key` (16 B, per pairing) | device + central | Derived during the join handshake: `session_key = AES128-ECB(join_key, 0x01 ‖ dev_nonce(4) ‖ central_nonce(4) ‖ serial(4) ‖ zeros(3))`. Rotates on every re-join. |
+| `p2p_join_key` (16 B, derived) | device (derives on demand), phone app (derives after claim), **central (registered by the app)** | `join_key = AES128-CMAC(secret_key, "HIO-P2P-JOIN" ‖ serial_number(4 BE))` (NIST SP 800-38B / RFC 4493) — CMAC needs only the AES-ECB forward primitive already in flash (subkey generation + one CBC-MAC pass over the single 16 B block), so this is a library/driver change, not a new crypto dependency (§11's KDF review, resolved #118 phase 2; phase 1 shipped a bare one-block AES-ECB PRF, breaking change accepted pre-ship). The app derives it after claiming the device and registers `{product_type, serial, join_key}` with the central over its management API (TLS, operator-authenticated). One-time per device lifetime. |
+| `p2p_session_key` (16 B, per pairing) | device + central | Derived during the join handshake: `session_key = AES128-CMAC(join_key, 0x01 ‖ dev_nonce(4) ‖ central_nonce(4) ‖ serial(4) ‖ zeros(3))` — same CMAC construction, keyed under `join_key`. Rotates on every re-join. |
 
 Properties this buys:
 
@@ -261,6 +262,14 @@ tag:     CCM tag under join_key (body sent as AAD, empty plaintext)
   pairing request" so the central can auto-name and manage the node with zero
   configuration (§9), and make the join generic across future products
   (identity envelope per `claiming_process.md` §11).
+  - **`product_type` registry** (no central schema exists yet, so this is a
+    placeholder pending one, #118 phase 2 HIL): `1` = STICKER, the only value
+    in use today (`P2P_PRODUCT_TYPE_STICKER`, app_p2p.c). HW-confirmed on the
+    wire (decoded correctly by an independent central-side decoder).
+  - `fw_version(4)` is packed as `fw_major(1) | fw_minor(1) | fw_patch(1) |
+    reserved(1)`, matching the existing `Info` command's version fields
+    (app_cmd.c) — not itself broken down further above since it is a plain
+    byte layout, not a registry. HW-confirmed (`1.4.0` decoded correctly).
 
 **JoinAccept** (`frame_type 0xF1`, downlink, sent in the node's RX1 window):
 
@@ -328,7 +337,11 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   design.
 - **Downlink commands** (`0x56`): flagged in the ACK, delivered in the RX1
   window of the *next* uplink (Class-A downlink queue on the central). Same
-  body format as LoRaWAN fPort 86, so `app_cmd` ingest is transport-agnostic.
+  protobuf Command shape as LoRaWAN fPort 85's Command oneof; `frame_type
+  0x56` is a P2P-only surface with no real LoRaWAN fPort counterpart (the
+  directional `0x55`/`0x56` split exists because P2P lacks ChirpStack's
+  topic-based direction separation) -- `app_cmd` ingest is still
+  transport-agnostic, just not a literal fPort mirror on the downlink side.
 - **Dedup across gateways**: every gateway that hears a frame forwards it;
   the central keys dedup on `(dev_addr, counter)` and records per-gateway
   RSSI/SNR (which also feeds ACK routing).
@@ -433,9 +446,12 @@ again.
 
 ## 11. Open questions
 
-- **KDF construction review** — the one-block AES-ECB PRF (§4) is simple and
-  uses only primitives already in flash; confirm with a crypto review that the
-  label/serial domain separation is sufficient (vs. e.g. AES-CMAC).
+- **KDF construction review** — **Resolved (#118 phase 2):** switched `§4`'s
+  `join_key`/`session_key` derivation from the bare one-block AES-ECB PRF to
+  AES-CMAC (NIST SP 800-38B / RFC 4493), still built on only the AES-ECB
+  forward primitive already in flash (`app_ccm_cmac()`), so no new crypto
+  backend. Breaking change vs. phase 1's `join_key`, accepted pre-ship (phase
+  1 was bench-only, no central to migrate).
 - **ACK economics at scale** — at what node count per network does confirmed-
   uplink eat the gateways' 1 % duty cycle (§6/§10)? Options if it binds:
   ACK-every-Nth, or sink-driven TDMA (Piyare et al., §10 related work).
@@ -588,7 +604,7 @@ Deliberately out of scope for v1:
 Implementation phasing (each independently reviewable):
 
 1. **FW transport port** — re-implement PR #228's TX path on mainline
-   (`radio_mode`, `app_ccm`, `app_transport` facade), still unpaired/unACKed
+   (`radio_mode`, `app_ccm`, `app_radio` facade), still unpaired/unACKed
    behind a build flag; salvage `app_p2p.c` logic, `p2p.js` + tests. Bench
    HIL from day one via the two-STICKER rig (§14) — no need to wait for
    phase 3/4's real gateway/central to start validating the wire format.
@@ -688,8 +704,8 @@ body (29 B): 01088af490d40610021a07080238ff0148041a07080338ff0148042001
 `frame_type=3` is **alarm** (§3.2, fPort 3 mirror) — the DUT had an active
 `alarm-no-data` condition, so the transport-ready callback's first report
 was an alarm frame, not telemetry (`0x02`). This is a useful confirmation
-in itself: it means `app_transport_send_alarm()` and
-`app_transport_send_telemetry()` are *both* independently exercised by
+in itself: it means `app_radio_send_alarm()` and
+`app_radio_send_telemetry()` are *both* independently exercised by
 ordinary device state, not just the explicit `send` command. Radio config
 (868.1 MHz/SF10/BW125/CR4-5), the 11 B AAD header, and the `join_key` KDF
 all matched between the two independently-flashed devices, confirming §3–§4
