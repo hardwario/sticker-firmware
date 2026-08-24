@@ -29,8 +29,8 @@ pass/fail. The tester only watches.
 - **Build**: debug variant. Some shell commands used below (`ats cmd lrw <hex>`,
   `ats cmd nfc <hex>`) exist only when `CONFIG_APP_CMD_DEBUG_SHELL=y` (debug builds).
 - **RTT shell**: available commands are `ats`, `config`, `clock`, `history`, `settings`,
-  `join`, `send`. Note there is **no** `ats device` command — device info is obtained via the
-  GetInfo downlink command (fPort 85), not the shell.
+  `join`, `send`. `ats device info` prints local device info too (see G4), but GetInfo over
+  the downlink command (fPort 85) is the cross-check that matters for a real join/network path.
 - **Networks**: the device must be provisioned on **both** TTN and ChirpStack. Claude sends
   downlinks / reads uplinks through the TTS MCP tools (`send_downlink`, `send_downlink_json`,
   `get_uplinks`, `get_device`, …) for TTN, and through the ChirpStack API for ChirpStack.
@@ -122,7 +122,7 @@ byte is the `seq` and is echoed in the reply.
 **Prompt for Claude:**
 > Connect to the RTT shell and run `help`. Confirm the root commands `ats`, `config`, `clock`,
 > `history`, `settings`, `join`, `send` are all present. Then run `ats` with no args and confirm
-> the `led`, `sensors`, `lrw` (and in debug builds `cmd`) subcommands are listed. Report anything
+> the `led`, `sensors`, `radio` (and in debug builds `cmd`) subcommands are listed. Report anything
 > missing.
 
 - [ ] Pass

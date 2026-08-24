@@ -1561,6 +1561,13 @@ static void debug_compose_work_handler(struct k_work *work)
 	if (res->ret) {
 		return;
 	}
+	if (body_len == 0) {
+		/* Nothing to report -- mirror send_work_handler()'s own `len == 0`
+		 * skip, so the preview never shows a frame the real send path
+		 * would not actually transmit. */
+		res->frame_len = 0;
+		return;
+	}
 
 	res->ret = build_frame(APP_P2P_FRAME_TELEMETRY, body, body_len, m_fcnt, res->frame);
 	res->frame_len = P2P_HDR_LEN + body_len + P2P_TAG_LEN;
