@@ -854,23 +854,23 @@ static void print_alarm_buzzer_mode(const struct shell *shell)
 	case APP_CONFIG_ALARM_BUZZER_MODE_OFF:
 		str = "off";
 		break;
-	case APP_CONFIG_ALARM_BUZZER_MODE_ON:
-		str = "on";
-		break;
-	case APP_CONFIG_ALARM_BUZZER_MODE_CONTINUOUS:
-		str = "continuous";
-		break;
-	case APP_CONFIG_ALARM_BUZZER_MODE_BRIEF:
-		str = "brief";
+	case APP_CONFIG_ALARM_BUZZER_MODE_ONCE:
+		str = "once";
 		break;
 	case APP_CONFIG_ALARM_BUZZER_MODE_SLOW:
 		str = "slow";
 		break;
-	case APP_CONFIG_ALARM_BUZZER_MODE_FREQUENT:
-		str = "frequent";
+	case APP_CONFIG_ALARM_BUZZER_MODE_NORMAL:
+		str = "normal";
 		break;
-	case APP_CONFIG_ALARM_BUZZER_MODE_ON_NEW_ALARM:
-		str = "on-new-alarm";
+	case APP_CONFIG_ALARM_BUZZER_MODE_FAST:
+		str = "fast";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_CONTINUOUS:
+		str = "continuous";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_6:
+		str = "reserved6";
 		break;
 	case APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_7:
 		str = "reserved7";
@@ -1464,31 +1464,31 @@ static int cmd_alarm_buzzer_mode(const struct shell *shell, size_t argc, char **
 
 	/* `help`/`?` lists the accepted tokens. */
 	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
-		shell_print(shell, "valid values: off, on, continuous, brief, slow, frequent, "
-				   "on-new-alarm, reserved7");
+		shell_print(shell, "valid values: off, once, slow, normal, fast, continuous, "
+				   "reserved6, reserved7");
 		return 0;
 	}
 
 	if (!strcmp(argv[1], "off")) {
 		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
-	} else if (!strcmp(argv[1], "on")) {
-		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ON;
-	} else if (!strcmp(argv[1], "continuous")) {
-		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_CONTINUOUS;
-	} else if (!strcmp(argv[1], "brief")) {
-		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_BRIEF;
+	} else if (!strcmp(argv[1], "once")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ONCE;
 	} else if (!strcmp(argv[1], "slow")) {
 		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_SLOW;
-	} else if (!strcmp(argv[1], "frequent")) {
-		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_FREQUENT;
-	} else if (!strcmp(argv[1], "on-new-alarm")) {
-		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ON_NEW_ALARM;
+	} else if (!strcmp(argv[1], "normal")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
+	} else if (!strcmp(argv[1], "fast")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_FAST;
+	} else if (!strcmp(argv[1], "continuous")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_CONTINUOUS;
+	} else if (!strcmp(argv[1], "reserved6")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_6;
 	} else if (!strcmp(argv[1], "reserved7")) {
 		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_7;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
-		shell_print(shell, "valid values: off, on, continuous, brief, slow, frequent, "
-				   "on-new-alarm, reserved7");
+		shell_print(shell, "valid values: off, once, slow, normal, fast, continuous, "
+				   "reserved6, reserved7");
 		return -EINVAL;
 	}
 
@@ -1751,7 +1751,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_cap_accelerometer, 1, 1),
 
 	SHELL_CMD_ARG(alarm-buzzer-mode, NULL,
-	              "Get/Set buzzer alarm indication mode while any alarm is active (off/on implemented; continuous/brief/slow/frequent/on-new-alarm/reserved7 reserved for future timing variants — modes 2-7 currently behave identically to 'on'). Requires cap_buzzer.",
+	              "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap_buzzer.",
 	              cmd_alarm_buzzer_mode, 1, 1),
 
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,

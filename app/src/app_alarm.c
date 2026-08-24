@@ -210,38 +210,58 @@ static void alarm_lrw_send(void)
 #endif
 }
 
-#define ALARM_BUZZER_REPEAT_S 30
+/* #397: melody replay interval per alarm_buzzer_mode while any alarm stays
+ * active. 0 = play once per new activation. RESERVED_6/7 fall back to NORMAL
+ * until a future firmware assigns them their own behavior. */
+static uint16_t alarm_buzzer_repeat_s(enum app_config_alarm_buzzer_mode mode)
+{
+	switch (mode) {
+	case APP_CONFIG_ALARM_BUZZER_MODE_ONCE:
+		return 0;
+	case APP_CONFIG_ALARM_BUZZER_MODE_SLOW:
+		return 120;
+	case APP_CONFIG_ALARM_BUZZER_MODE_FAST:
+		return 10;
+	case APP_CONFIG_ALARM_BUZZER_MODE_CONTINUOUS:
+		return 1;
+	case APP_CONFIG_ALARM_BUZZER_MODE_NORMAL:
+	default:
+		return 30;
+	}
+}
 
 /* #397: drive the local buzzer as an audible alarm indicator, edge-detected on
- * the same aggregate app_alarm_poll() computes for its caller (covers
- * threshold/state/rate rules and the no-data/low-battery watchdogs — unlike
- * app_alarm_event()'s per-source callback, which only sees raw GPIO edges and
- * would miss most alarm types). Modes CONTINUOUS/BRIEF/SLOW/FREQUENT/
- * ON_NEW_ALARM/RESERVED_7 (2-7) are wire-reserved for future timing variants;
- * they currently behave identically to ON. */
-static void alarm_buzzer_sync(bool active)
+ * the per-alarm active bitmask app_alarm_poll() assembles during its latch
+ * sweep (bits 0-15 rule slots, then the no-data watchdogs, then low-battery —
+ * covering every alarm type, unlike app_alarm_event()'s per-source callback,
+ * which only sees raw GPIO edges). Every non-off mode replays the melody
+ * whenever a NEW bit appears — even while other alarms are already active —
+ * which also restarts the mode's repeat cycle; the modes differ only in the
+ * replay interval (alarm_buzzer_repeat_s above). Once the last bit clears,
+ * stop immediately. */
+static void alarm_buzzer_sync(uint32_t active_mask)
 {
-	static bool m_buzzer_active;
+	static uint32_t m_buzzer_mask;
+
+	uint32_t new_bits = active_mask & ~m_buzzer_mask;
+	bool all_cleared = active_mask == 0 && m_buzzer_mask != 0;
+
+	/* Track the mask even while cap_buzzer is off, so enabling it mid-alarm
+	 * doesn't fire a spurious start on the next poll. */
+	m_buzzer_mask = active_mask;
 
 	if (!g_app_config.cap_buzzer) {
-		/* Keep edge tracking in sync even while disabled, so enabling
-		 * cap_buzzer mid-alarm doesn't fire a spurious start on the next
-		 * poll (we'd otherwise see false -> true immediately). */
-		m_buzzer_active = active;
 		return;
 	}
 
-	if (active == m_buzzer_active) {
-		return;
-	}
-	m_buzzer_active = active;
-
-	if (!active) {
+	if (all_cleared) {
+		/* Sent regardless of mode: covers a mode switched to off (or a
+		 * repeat cycle from a previous mode) while the alarm was active. */
 		app_buzzer_play_repeating(APP_BUZZER_KIND_STOP, 0);
 		return;
 	}
 
-	if (g_app_config.alarm_buzzer_mode == APP_CONFIG_ALARM_BUZZER_MODE_OFF) {
+	if (new_bits == 0 || g_app_config.alarm_buzzer_mode == APP_CONFIG_ALARM_BUZZER_MODE_OFF) {
 		return;
 	}
 
@@ -251,7 +271,8 @@ static void alarm_buzzer_sync(bool active)
 	 * not-yet-started"), so this naturally preempts an unrelated melody. A
 	 * later deactivation's STOP can also silence an unrelated queued remote
 	 * melody — symmetric trade-off, not worth extra source-tracking. */
-	app_buzzer_play_repeating(APP_BUZZER_KIND_ALARM, ALARM_BUZZER_REPEAT_S);
+	app_buzzer_play_repeating(APP_BUZZER_KIND_ALARM,
+				  alarm_buzzer_repeat_s(g_app_config.alarm_buzzer_mode));
 }
 
 /* Current time in seconds. Returns absolute UTC when the RTC has synced (and sets
@@ -982,10 +1003,18 @@ static void battery_poll(bool *should_send)
 	}
 }
 
+/* #397: per-alarm bit layout of the active mask handed to alarm_buzzer_sync()
+ * — rule slots first, then the no-data watchdogs, then low-battery. 16 + 8 + 1
+ * bits today; BUILD_ASSERT below guards a future m_nodata_tab growth past what
+ * a uint32_t holds. */
+#define ALARM_MASK_NODATA_SHIFT  APP_ALARM_SLOT_COUNT
+#define ALARM_MASK_BATTERY_SHIFT (APP_ALARM_SLOT_COUNT + NODATA_COUNT)
+BUILD_ASSERT(ALARM_MASK_BATTERY_SHIFT < 32, "alarm active mask no longer fits in uint32_t");
+
 bool app_alarm_poll(void)
 {
 	bool should_send = false;
-	bool alarm = false;
+	uint32_t active_mask = 0;
 	int64_t now = k_uptime_get();
 
 	/* m_rt[] is shared with app_alarm_event() (system WQ / PIR thread); hold
@@ -1043,18 +1072,19 @@ bool app_alarm_poll(void)
 
 	/* A latched no-data watchdog event also counts as "active", so the main
 	 * loop lights the red LED (blinks every BLINK_INTERVAL_SECONDS) until the
-	 * sensor resumes. Read here under g_app_sensor_data_lock, like nodata_poll (#211). */
+	 * sensor resumes. Read here under g_app_sensor_data_lock, like nodata_poll
+	 * (#211). Collected per-watchdog into the mask (#397) so a NEW no-data
+	 * alarm is distinguishable from one already sounding. */
 	for (size_t i = 0; i < NODATA_COUNT; i++) {
 		if (m_nodata_active[i]) {
-			alarm = true;
-			break;
+			active_mask |= BIT(ALARM_MASK_NODATA_SHIFT + i);
 		}
 	}
 
 	/* A latched low-battery alarm also lights the red LED (#210) — it is an
 	 * alarm. Read here under g_app_sensor_data_lock, like the no-data sweep. */
 	if (m_battery_low_active) {
-		alarm = true;
+		active_mask |= BIT(ALARM_MASK_BATTERY_SHIFT);
 	}
 
 	/* Sensor data no longer needed; keep m_lock for the latch sweep (#185). */
@@ -1070,7 +1100,7 @@ bool app_alarm_poll(void)
 			m_rt[i].oneshot_expiry = 0;
 		}
 		if (m_rt[i].active) {
-			alarm = true;
+			active_mask |= BIT(i);
 		}
 	}
 	k_mutex_unlock(&m_lock);
@@ -1079,9 +1109,9 @@ bool app_alarm_poll(void)
 		alarm_lrw_send();
 	}
 
-	alarm_buzzer_sync(alarm);
+	alarm_buzzer_sync(active_mask);
 
-	return alarm;
+	return active_mask != 0;
 }
 
 void app_alarm_event(enum app_alarm_source source, bool active)

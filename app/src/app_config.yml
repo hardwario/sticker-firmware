@@ -60,31 +60,34 @@ enums:
       value: 3
       shell: high
 
-  # #397: 0-7 wire range, only OFF/ON implemented today. 2-7 are pre-named so a
-  # future firmware can assign them real timing/melody variants without a
-  # renumbering/proto change; until then they behave identically to ON.
+  # #397: 0-7 wire range, ordered by intensity. Every non-off mode replays the
+  # melody immediately whenever a NEW alarm activates (even while another is
+  # already active) and differs only in how often it repeats while any alarm
+  # stays active: once = no repeat, slow/normal/fast = 120/30/10 s,
+  # continuous = back-to-back. 6-7 are reserved for future variants (they
+  # currently behave like normal).
   alarm_buzzer_mode:
     - name: "OFF"
       value: 0
       shell: "off"
-    - name: "ON"
+    - name: ONCE
       value: 1
-      shell: "on"
-    - name: CONTINUOUS
-      value: 2
-      shell: continuous
-    - name: BRIEF
-      value: 3
-      shell: brief
+      shell: once
     - name: SLOW
-      value: 4
+      value: 2
       shell: slow
-    - name: FREQUENT
+    - name: NORMAL
+      value: 3
+      shell: normal
+    - name: FAST
+      value: 4
+      shell: fast
+    - name: CONTINUOUS
       value: 5
-      shell: frequent
-    - name: ON_NEW_ALARM
+      shell: continuous
+    - name: RESERVED_6
       value: 6
-      shell: on-new-alarm
+      shell: reserved6
     - name: RESERVED_7
       value: 7
       shell: reserved7
@@ -753,7 +756,7 @@ parameters:
     type: enum
     enum: alarm_buzzer_mode
     default: "off"
-    help: "Get/Set buzzer alarm indication mode while any alarm is active (off/on implemented; continuous/brief/slow/frequent/on-new-alarm/reserved7 reserved for future timing variants — modes 2-7 currently behave identically to 'on'). Requires cap_buzzer."
+    help: "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap_buzzer."
 
   - name: accel_motion_sensitivity
     proto_group: sensors

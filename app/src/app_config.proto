@@ -90,12 +90,12 @@ message AppConfigMessage {
     message Alarms {
         enum AlarmBuzzerMode {
             OFF = 0;
-            ON = 1;
-            CONTINUOUS = 2;
-            BRIEF = 3;
-            SLOW = 4;
-            FREQUENT = 5;
-            ON_NEW_ALARM = 6;
+            ONCE = 1;
+            SLOW = 2;
+            NORMAL = 3;
+            FAST = 4;
+            CONTINUOUS = 5;
+            RESERVED_6 = 6;
             RESERVED_7 = 7;
         }
 
