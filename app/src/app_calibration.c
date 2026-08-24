@@ -428,7 +428,9 @@ void app_calibration_run(void)
 			 * calling the potentially-hanging lorawan_send() directly on
 			 * this thread - see cal_send_work_handler(). */
 			compose_calibration_payload(m_cal_tx_buf);
+#if defined(CONFIG_LORAWAN)
 			app_lrw_run_on_work_q(&m_cal_send_work);
+#endif /* defined(CONFIG_LORAWAN) */
 
 			if (++battery_tx_counter >= BATTERY_REMEASURE_TX_COUNT) {
 				battery_tx_counter = 0;
