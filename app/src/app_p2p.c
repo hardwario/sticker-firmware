@@ -152,11 +152,52 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * time-on-air, or a real JoinAccept/Ack that starts right on time still gets
  * killed mid-reception. P2P_RX1_WINDOW_SYMBOLS is now only the
  * preamble-catch/open-timing-slop budget; frame_toa_ms() of the EXPECTED
- * frame's length is added on top (p2p_rx1_timeout_ms()). */
-#define P2P_RX1_OPEN_MARGIN_MS     8
+ * frame's length is added on top (p2p_rx1_timeout_ms()).
+ *
+ * HW finding #2 (#118 phase 2 HIL, §6 Ack testing): tx_end_ms is captured
+ * AFTER lora_send() returns, not at the actual TxDone instant -- lora_send()
+ * is a blocking call, but there is a small driver-return latency between
+ * the real end of the on-air transmission and our code resuming. That
+ * latency shows up as OUR window opening slightly later than it should
+ * relative to the sender's actual TxDone, which can marginally clip the
+ * start of an on-time Ack (observed as an intermittent miss on an
+ * on-time-per-the-sender's-own-radio-trace Ack). Bumped from 8 to 25 ms as
+ * a quick app-level absorption of that latency; the precise fix (anchor
+ * tx_end_ms on a TxDone IRQ/callback instead of the blocking call's return)
+ * would need driver-level changes, tracked as a follow-up, not done here. */
+#define P2P_RX1_OPEN_MARGIN_MS     25
 #define P2P_RX1_WINDOW_SYMBOLS     12
 #define P2P_RX1_TRAILING_MARGIN_MS 40
 #define P2P_RX1_DELAY_DEFAULT_S    1
+
+/* Confirmed uplink (§6): the Ack (0xFA) body is a single flags byte (bit 0:
+ * downlink pending, read-and-logged only -- 0x56 dispatch stays out of scope,
+ * same decision as §5.3). */
+#define P2P_ACK_BODY_LEN 1
+
+/* Unacknowledged uplinks retransmit the SAME counter (byte-identical frame)
+ * up to this many times (§6) -- interpreted as retries AFTER the first send
+ * (so up to 1 + P2P_ACK_MAX_RETRIES total transmissions), matching doc/p2p.md
+ * §6's "retransmit ... up to 3 times". */
+#define P2P_ACK_MAX_RETRIES 3
+
+/* Jitter added to a retry's wait, on top of any remaining duty-cycle block. */
+#define P2P_ACK_RETRY_JITTER_MS 1000
+
+/* HW-informed finding (#118 phase 2 HIL): a single MAX-size telemetry
+ * frame's duty-cycle block can be ~227 s (240 B body, SF10/BW125 --
+ * frame_toa_ms(255) ~=2296 ms, block = air*99); a REAL SF10 send's block is
+ * routinely ~39-45 s even for smaller frames (measured on the bench). An
+ * earlier design capped how long a retry would wait for duty-cycle
+ * clearance and gave up past the cap -- but any workable cap short enough to
+ * be safe on a shared work queue is *always* shorter than a real SF10 duty-
+ * cycle block, making "retry up to 3 times" silently never retry in
+ * practice (found via HIL, not reasoning -- the whole point of testing on
+ * real silicon). Fixed by making the wait itself ASYNCHRONOUS instead of
+ * capped: schedule_ack_retry() reschedules a dedicated work item
+ * (m_ack_retry_work) for whenever the duty cycle actually clears, however
+ * long that is, rather than blocking m_work_q with a k_sleep(). No cap
+ * needed because nothing blocks while waiting -- see send_confirmed(). */
 
 static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 
@@ -219,6 +260,38 @@ K_MSGQ_DEFINE(m_tx_msgq, sizeof(struct p2p_tx_msg), P2P_TX_QUEUE_DEPTH, 4);
  * it was mid-send on, then stops draining until that retry succeeds. */
 static struct p2p_tx_msg m_tx_deferred;
 static bool m_tx_deferred_valid;
+
+/* §6 Ack-retry state: a frame that was TRANSMITTED but not yet Acked,
+ * awaiting an asynchronous retry once the duty cycle clears (see
+ * schedule_ack_retry()). Distinct from m_tx_deferred above -- that one is a
+ * frame that never even got a first TX attempt (duty-cycle blocked before
+ * sending); this one already went out at least once and is waiting on a
+ * confirmation retry.
+ *
+ * A QUEUE, not a single slot (#118 phase 2 HIL finding): telemetry (its own
+ * send_work_handler loop) and the alarm/response queue (tx_work_handler) are
+ * independent call paths that can each have one frame awaiting an Ack retry
+ * at the same time (e.g. an alarm firing during the same window a telemetry
+ * chunk went unacked) -- a single slot would silently drop whichever one
+ * schedule_ack_retry() overwrote. Depth 3 covers telemetry + alarm +
+ * response each having one in flight; the shared duty-cycle gate still only
+ * lets one physical TX happen at a time, so ack_retry_work_handler() drains
+ * this FIFO one entry per fire, re-queueing (to the tail, so multiple
+ * pending frames get serviced round-robin, not starved) whichever one still
+ * needs another attempt. */
+#define P2P_ACK_RETRY_QUEUE_DEPTH 3
+
+struct p2p_ack_retry_state {
+	uint8_t frame_type;
+	uint8_t body[P2P_MAX_BODY];
+	uint16_t body_len;
+	uint32_t counter;
+	int attempt; /* retries already sent; 0 on the first scheduled retry */
+};
+
+static struct k_work_delayable m_ack_retry_work;
+
+K_MSGQ_DEFINE(m_ack_retry_msgq, sizeof(struct p2p_ack_retry_state), P2P_ACK_RETRY_QUEUE_DEPTH, 4);
 
 #if defined(CONFIG_SHELL)
 struct p2p_rx_msg {
@@ -518,6 +591,45 @@ static uint32_t p2p_rx1_timeout_ms(uint8_t expected_frame_len)
 	       P2P_RX1_TRAILING_MARGIN_MS;
 }
 
+/* Open a bounded RX window `rx1_delay_s - open_margin_ms` after `tx_end_ms`
+ * (uptime ms), sleeping until it opens then blocking on lora_recv() for
+ * p2p_rx1_timeout_ms(expected_frame_len) -- shared by JoinAccept and §6's
+ * data-plane Ack (each passes its own expected frame length). Runs on
+ * m_work_q like everything else here; the whole call blocks that queue for
+ * up to ~rx1_delay_s (dominant) + the frame's ToA (#118 phase 2 HW finding,
+ * see p2p_rx1_timeout_ms()) -- an explicit watchdog feed covers this (and
+ * any caller's own backoff sleep) since the periodic heartbeat_work_handler
+ * can't run until this returns (single-threaded m_work_q). Restores TX radio
+ * config before returning either way. Returns the received length (>=0) or a
+ * negative errno (notably a timeout if nothing arrived within the window). */
+static int p2p_rx_window(int64_t tx_end_ms, uint8_t rx1_delay_s, uint8_t expected_frame_len,
+			 uint8_t *buf, size_t buf_size, int16_t *rssi, int8_t *snr)
+{
+	int64_t open_at = tx_end_ms + (int64_t)rx1_delay_s * 1000 - P2P_RX1_OPEN_MARGIN_MS;
+	int64_t sleep_ms = open_at - k_uptime_get();
+
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_ping(m_wdog_channel);
+#endif
+
+	if (sleep_ms > 0) {
+		k_sleep(K_MSEC(sleep_ms));
+	}
+
+	int ret = radio_configure(false);
+
+	if (ret) {
+		return ret;
+	}
+
+	ret = lora_recv(m_lora_dev, buf, (uint8_t)MIN(buf_size, 255),
+			K_MSEC(p2p_rx1_timeout_ms(expected_frame_len)), rssi, snr);
+
+	(void)radio_configure(true);
+
+	return ret;
+}
+
 /* ======================================================================== */
 /* Frame TX                                                                 */
 /* ======================================================================== */
@@ -532,8 +644,22 @@ static void build_nonce(uint8_t nonce[P2P_NONCE_LEN], uint32_t counter, uint16_t
 	nonce[7] = dir;
 }
 
-/* Frame + encrypt + transmit one body. Returns 0, -EAGAIN (duty cycle), or errno. */
-static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len)
+static bool duty_cycle_blocked(void)
+{
+	return k_uptime_get() < m_dc_blocked_until;
+}
+
+/* Frame + encrypt + transmit one body under an EXPLICIT counter (no
+ * fcnt_next() call) -- shared by the first send (tx_frame(), below, picks a
+ * fresh counter) and a §6 Ack retry (send_confirmed(), which must resend a
+ * byte-identical frame under the SAME counter: CCM under a fixed (key,
+ * nonce, plaintext) is deterministic, so reusing the counter alone
+ * reproduces the exact same ciphertext, no cached buffer needed). Caller
+ * must have already checked !duty_cycle_blocked(). Returns 0 or errno; on
+ * success reports the send-completion time via `tx_end_ms` (uptime ms, for
+ * the caller's RX1/Ack wait) and charges the duty-cycle budget. */
+static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t counter,
+		       int64_t *tx_end_ms)
 {
 	if (m_listening) {
 		LOG_WRN("TX skipped: radio in listen mode");
@@ -543,14 +669,6 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len)
 		LOG_ERR("Body %zu B over P2P budget %d B", body_len, P2P_MAX_BODY);
 		return -EMSGSIZE;
 	}
-
-	int64_t now = k_uptime_get();
-
-	if (now < m_dc_blocked_until) {
-		LOG_WRN("TX duty-cycle blocked for %lld ms", m_dc_blocked_until - now);
-		return -EAGAIN;
-	}
-
 	if (m_link_state != P2P_LINK_PAIRED) {
 		/* Callers gate on app_p2p_is_ready(), so this should never happen --
 		 * defensive only (no session_key to encrypt the data plane under
@@ -560,7 +678,6 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len)
 	}
 
 	uint8_t frame[P2P_FRAME_MAX];
-	uint32_t counter = fcnt_next();
 
 	sys_put_be32(m_net_id, &frame[0]);
 	sys_put_be16(m_dev_addr, &frame[4]);
@@ -587,12 +704,206 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len)
 		return ret;
 	}
 
-	/* Charge the air-time against the 1% budget. */
+	int64_t end = k_uptime_get();
 	uint32_t air = frame_toa_ms((uint8_t)wire_len);
 
-	m_dc_blocked_until = now + (int64_t)air * (1000 / P2P_DUTY_CYCLE_PERMILLE - 1);
+	/* Charge the air-time against the 1% budget. */
+	m_dc_blocked_until = end + (int64_t)air * (1000 / P2P_DUTY_CYCLE_PERMILLE - 1);
 
 	LOG_INF("TX type %u, %zu B (counter %u, %u ms air)", frame_type, wire_len, counter, air);
+
+	*tx_end_ms = end;
+	return 0;
+}
+
+/* Frame + encrypt + transmit one body under a FRESH counter. Returns 0,
+ * -EAGAIN (duty cycle), or errno; on success reports the counter used and
+ * the send-completion time via the out-params (see tx_frame_at()). */
+static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t *counter_out,
+		    int64_t *tx_end_ms)
+{
+	if (duty_cycle_blocked()) {
+		LOG_WRN("TX duty-cycle blocked for %lld ms", m_dc_blocked_until - k_uptime_get());
+		return -EAGAIN;
+	}
+
+	uint32_t counter = fcnt_next();
+	int ret = tx_frame_at(frame_type, body, body_len, counter, tx_end_ms);
+
+	if (ret == 0) {
+		*counter_out = counter;
+	}
+	return ret;
+}
+
+/* Wait for and validate an Ack (0xFA) for `counter` in the RX1 window after
+ * `tx_end_ms` (doc/p2p.md §6): header must match (net_id/dev_addr/frame_type/
+ * counter echo), then AES-CCM decrypt under session_key, direction=RX (it is
+ * a downlink). The 1-byte flags body's bit 0 (downlink pending) is read and
+ * logged only -- 0x56 dispatch stays out of scope, same decision as §5.3.
+ * Returns true iff a valid, matching Ack was received. */
+static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
+{
+	uint8_t buf[P2P_FRAME_MAX];
+	int16_t rssi;
+	int8_t snr;
+	size_t want = P2P_HDR_LEN + P2P_ACK_BODY_LEN + P2P_TAG_LEN;
+
+	int len = p2p_rx_window(tx_end_ms, m_rx1_delay_s, (uint8_t)want, buf, sizeof(buf), &rssi,
+				&snr);
+
+	if (len < 0 || (size_t)len != want) {
+		return false;
+	}
+
+	uint32_t net_id_hdr = sys_get_be32(&buf[0]);
+	uint16_t dev_addr_hdr = sys_get_be16(&buf[4]);
+	uint8_t frame_type = buf[6];
+	uint32_t ctr = sys_get_be32(&buf[7]);
+
+	if (net_id_hdr != m_net_id || dev_addr_hdr != m_dev_addr ||
+	    frame_type != APP_P2P_FRAME_ACK || ctr != counter) {
+		return false;
+	}
+
+	uint8_t nonce[P2P_NONCE_LEN];
+
+	build_nonce(nonce, ctr, m_dev_addr, frame_type, P2P_DIR_RX);
+
+	uint8_t flags;
+	int ret = app_ccm_auth_decrypt(m_session_key, nonce, P2P_NONCE_LEN, buf, P2P_HDR_LEN,
+				       &buf[P2P_HDR_LEN], P2P_ACK_BODY_LEN,
+				       &buf[P2P_HDR_LEN + P2P_ACK_BODY_LEN], P2P_TAG_LEN, &flags);
+	if (ret) {
+		LOG_WRN("Ack auth failed (counter %u)", counter);
+		return false;
+	}
+
+	LOG_INF("Ack received (counter %u)%s", counter,
+		(flags & 0x01) ? " [downlink pending]" : "");
+	return true;
+}
+
+/* (Re)schedule m_ack_retry_work for whenever the duty cycle clears (plus
+ * jitter), if the queue has anything pending -- a no-op otherwise. Called
+ * after every enqueue/dequeue so the timer always reflects the current
+ * queue state and duty-cycle estimate. */
+static void reschedule_ack_retry_work(void)
+{
+	if (k_msgq_num_used_get(&m_ack_retry_msgq) == 0) {
+		return;
+	}
+
+	int64_t wait_ms = m_dc_blocked_until - k_uptime_get();
+
+	if (wait_ms < 0) {
+		wait_ms = 0;
+	}
+
+	uint32_t jitter = sys_rand32_get() % P2P_ACK_RETRY_JITTER_MS;
+
+	k_work_reschedule_for_queue(&m_work_q, &m_ack_retry_work, K_MSEC(wait_ms + jitter));
+}
+
+/* Queue an asynchronous Ack retry for `counter` (doc/p2p.md §6) -- NOT a
+ * blocking wait, so no cap is needed (see the P2P_ACK_RETRY_JITTER_MS
+ * #define comment for why an earlier capped-sleep design was wrong).
+ * `attempt` is how many retries have already been sent (0 for the first). */
+static void schedule_ack_retry(uint8_t frame_type, const uint8_t *body, size_t body_len,
+			       uint32_t counter, int attempt)
+{
+	struct p2p_ack_retry_state st = {
+		.frame_type = frame_type,
+		.body_len = (uint16_t)body_len,
+		.counter = counter,
+		.attempt = attempt,
+	};
+
+	memcpy(st.body, body, body_len);
+
+	if (k_msgq_put(&m_ack_retry_msgq, &st, K_NO_WAIT) != 0) {
+		LOG_WRN("Ack retry queue full; giving up on counter %u", counter);
+		return;
+	}
+
+	reschedule_ack_retry_work();
+}
+
+static void ack_retry_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	struct p2p_ack_retry_state st;
+
+	if (k_msgq_peek(&m_ack_retry_msgq, &st) != 0) {
+		return; /* queue empty */
+	}
+
+	if (duty_cycle_blocked()) {
+		reschedule_ack_retry_work();
+		return;
+	}
+
+	/* Committed to sending st now -- actually dequeue it (peek() above only
+	 * looked, so a still-blocked duty cycle above leaves it in place). */
+	(void)k_msgq_get(&m_ack_retry_msgq, &st, K_NO_WAIT);
+
+	int64_t tx_end;
+	int ret = tx_frame_at(st.frame_type, st.body, st.body_len, st.counter, &tx_end);
+
+	if (ret) {
+		LOG_WRN("Ack retry (counter %u) send failed: %d", st.counter, ret);
+	} else {
+		LOG_INF("Uplink retry %d/%d sent (counter %u)", st.attempt + 1, P2P_ACK_MAX_RETRIES,
+			st.counter);
+
+		if (!recv_ack(st.counter, tx_end)) {
+			if (st.attempt + 1 < P2P_ACK_MAX_RETRIES) {
+				st.attempt++;
+				/* Re-queue at the TAIL (not retried in place): with more
+				 * than one frame pending, this services them round-robin
+				 * instead of one starving the others. */
+				if (k_msgq_put(&m_ack_retry_msgq, &st, K_NO_WAIT) != 0) {
+					LOG_WRN("Ack retry queue full re-queueing counter %u; "
+						"giving up",
+						st.counter);
+				}
+			} else {
+				LOG_WRN("Uplink counter %u unacked after %d retries; giving "
+					"up",
+					st.counter, P2P_ACK_MAX_RETRIES);
+			}
+		}
+	}
+
+	/* Whether this entry is done, gave up, or got re-queued, other frames
+	 * may still be waiting -- keep the timer aligned with the queue. */
+	reschedule_ack_retry_work();
+}
+
+/* Confirmed uplink (§6): send one frame and wait once for its Ack. If
+ * unacknowledged, hand off to schedule_ack_retry() instead of blocking here
+ * -- returns 0 either way (the frame WAS transmitted; confirmation, if a
+ * retry is needed, continues asynchronously on m_ack_retry_work). Callers
+ * (send_work_handler/tx_work_handler) move on immediately rather than
+ * waiting for the eventual outcome. Returns -EAGAIN only if the FIRST send
+ * itself was duty-cycle blocked (unchanged pre-existing semantics, same as
+ * tx_frame()), or a hard errno from that first send. */
+static int send_confirmed(uint8_t frame_type, const uint8_t *body, size_t body_len)
+{
+	uint32_t counter;
+	int64_t tx_end;
+
+	int ret = tx_frame(frame_type, body, body_len, &counter, &tx_end);
+
+	if (ret) {
+		return ret;
+	}
+
+	if (!recv_ack(counter, tx_end)) {
+		schedule_ack_retry(frame_type, body, body_len, counter, 0);
+	}
+
 	return 0;
 }
 
@@ -622,8 +933,9 @@ static void send_work_handler(struct k_work *work)
 		if (len == 0) {
 			return; /* nothing to report */
 		}
-		if (tx_frame(APP_P2P_FRAME_TELEMETRY, buf, len) != 0) {
-			return; /* duty cycle / radio error — drop the rest of the snapshot */
+		if (send_confirmed(APP_P2P_FRAME_TELEMETRY, buf, len) != 0) {
+			return; /* duty cycle / unacked / radio error — drop the rest of the
+				 * snapshot */
 		}
 	} while (more);
 }
@@ -641,13 +953,15 @@ static void tx_work_handler(struct k_work *work)
 	}
 
 	for (;;) {
-		int ret = tx_frame(msg.type, msg.buf, msg.len);
+		int ret = send_confirmed(msg.type, msg.buf, msg.len);
 
 		if (ret == -EAGAIN) {
-			/* Stash and retry this exact frame once the duty-cycle window
-			 * clears, instead of dropping it — see m_tx_deferred's comment.
-			 * Stop draining the rest of the queue until this one is sent,
-			 * so frames stay in order. */
+			/* Only the FIRST send attempt returns -EAGAIN (send_confirmed()'s
+			 * own Ack-retry loop never re-raises it, see its cap). Stash and
+			 * retry this exact frame once the duty-cycle window clears,
+			 * instead of dropping it — see m_tx_deferred's comment. Stop
+			 * draining the rest of the queue until this one is sent, so
+			 * frames stay in order. */
 			m_tx_deferred = msg;
 			m_tx_deferred_valid = true;
 
@@ -797,42 +1111,6 @@ static void mark_ready(void)
 	if (m_ready_cb) {
 		m_ready_cb();
 	}
-}
-
-/* Open a bounded RX window `rx1_delay_s - open_margin_ms` after `tx_end_ms`
- * (uptime ms), sleeping until it opens then blocking on lora_recv() for
- * p2p_rx1_timeout_ms(expected_frame_len) -- reused for both JoinAccept (this
- * file) and, later, §6's data-plane Ack (pass THAT frame's expected length).
- * Runs on m_work_q like everything else here; the whole call blocks that
- * queue for up to ~rx1_delay_s (dominant) + the frame's ToA (#118 phase 2 HW
- * finding, see p2p_rx1_timeout_ms()) -- fine for a JoinRequest attempt (rare,
- * and both the duty-cycle retry's multi-second reschedule and the
- * heartbeat's 30 s timeout tolerate it easily), reconsider if #6 reuses this
- * per-uplink on a hot report cadence. Restores TX radio config before
- * returning either way. Returns the received length (>=0) or a negative
- * errno (notably a timeout if nothing arrived within the window). */
-static int p2p_rx_window(int64_t tx_end_ms, uint8_t rx1_delay_s, uint8_t expected_frame_len,
-			 uint8_t *buf, size_t buf_size, int16_t *rssi, int8_t *snr)
-{
-	int64_t open_at = tx_end_ms + (int64_t)rx1_delay_s * 1000 - P2P_RX1_OPEN_MARGIN_MS;
-	int64_t sleep_ms = open_at - k_uptime_get();
-
-	if (sleep_ms > 0) {
-		k_sleep(K_MSEC(sleep_ms));
-	}
-
-	int ret = radio_configure(false);
-
-	if (ret) {
-		return ret;
-	}
-
-	ret = lora_recv(m_lora_dev, buf, (uint8_t)MIN(buf_size, 255),
-			K_MSEC(p2p_rx1_timeout_ms(expected_frame_len)), rssi, snr);
-
-	(void)radio_configure(true);
-
-	return ret;
 }
 
 /* Send one JoinRequest (doc/p2p.md §5.3): header net_id=0/dev_addr=0,
@@ -1080,6 +1358,7 @@ int app_p2p_init(void)
 	k_work_init(&m_send_work, send_work_handler);
 	k_work_init_delayable(&m_tx_work, tx_work_handler);
 	k_work_init_delayable(&m_join_work, join_work_handler);
+	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
 #endif

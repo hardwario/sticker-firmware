@@ -58,6 +58,7 @@ enum app_p2p_frame_type {
 	APP_P2P_FRAME_COMMAND = 86, /* inbound (RX): reserved, not dispatched yet */
 	APP_P2P_FRAME_JOIN_REQUEST = 0xF0,
 	APP_P2P_FRAME_JOIN_ACCEPT = 0xF1,
+	APP_P2P_FRAME_ACK = 0xFA,
 };
 
 /* Configure the radio from the p2p config group and set up the work queue.
