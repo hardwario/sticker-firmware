@@ -6,6 +6,7 @@
 
 #include "app_alarm.h"
 #include "app_alarm_rules.h"
+#include "app_buzzer.h"
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_hall.h"
@@ -207,6 +208,50 @@ static void alarm_lrw_send(void)
 	}
 	app_report_trigger();
 #endif
+}
+
+#define ALARM_BUZZER_REPEAT_S 30
+
+/* #397: drive the local buzzer as an audible alarm indicator, edge-detected on
+ * the same aggregate app_alarm_poll() computes for its caller (covers
+ * threshold/state/rate rules and the no-data/low-battery watchdogs — unlike
+ * app_alarm_event()'s per-source callback, which only sees raw GPIO edges and
+ * would miss most alarm types). Modes CONTINUOUS/BRIEF/SLOW/FREQUENT/
+ * ON_NEW_ALARM/RESERVED_7 (2-7) are wire-reserved for future timing variants;
+ * they currently behave identically to ON. */
+static void alarm_buzzer_sync(bool active)
+{
+	static bool m_buzzer_active;
+
+	if (!g_app_config.cap_buzzer) {
+		/* Keep edge tracking in sync even while disabled, so enabling
+		 * cap_buzzer mid-alarm doesn't fire a spurious start on the next
+		 * poll (we'd otherwise see false -> true immediately). */
+		m_buzzer_active = active;
+		return;
+	}
+
+	if (active == m_buzzer_active) {
+		return;
+	}
+	m_buzzer_active = active;
+
+	if (!active) {
+		app_buzzer_play_repeating(APP_BUZZER_KIND_STOP, 0);
+		return;
+	}
+
+	if (g_app_config.alarm_buzzer_mode == APP_CONFIG_ALARM_BUZZER_MODE_OFF) {
+		return;
+	}
+
+	/* No special arbitration against a concurrent remote buzzer_play: the
+	 * melody engine's single-slot queue already wakes a getter (idle or
+	 * mid repeat-wait) immediately on any new request ("newest replaces
+	 * not-yet-started"), so this naturally preempts an unrelated melody. A
+	 * later deactivation's STOP can also silence an unrelated queued remote
+	 * melody — symmetric trade-off, not worth extra source-tracking. */
+	app_buzzer_play_repeating(APP_BUZZER_KIND_ALARM, ALARM_BUZZER_REPEAT_S);
 }
 
 /* Current time in seconds. Returns absolute UTC when the RTC has synced (and sets
@@ -1033,6 +1078,9 @@ bool app_alarm_poll(void)
 	if (should_send) {
 		alarm_lrw_send();
 	}
+
+	alarm_buzzer_sync(alarm);
+
 	return alarm;
 }
 
