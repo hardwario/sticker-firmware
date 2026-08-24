@@ -348,6 +348,10 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
 - Power impact: one RX1 per report against the 92 µA idle baseline
   (`doc/power-consumption.md`) must be measured on HW; the RX window is the
   main new consumer vs. the TX-only draft.
+- **Bench testing**: `ats radio ack-drop <count>` (CONFIG_SHELL) makes the
+  next `count` Acks appear dropped without a real RF outage, exercising the
+  retry/backoff path above deterministically -- the P2P analogue of `ats
+  radio lc fail` for the LoRaWAN link-check FSM.
 
 ---
 
@@ -365,7 +369,7 @@ it is always automatic, requiring no app interaction:
 | Trigger | Behavior |
 |---|---|
 | `secret_key` rotation (#299) | `join_key` changes ⇒ app re-registers the new derivation with the central, node re-joins on its next boot (rotation already forces a reboot, #322). |
-| `factory_reset` | Pairing state is wiped (`persistent:` tiering: P2P pairing state **survives `device_reset`**, is **cleared by `factory_reset`**, like the LoRaWAN session). Node returns to unpaired boot behavior. |
+| `factory_reset` | **Does NOT clear P2P pairing** (doc/code mismatch found 2026-08-24: the `p2pjoin/*` settings subtree is registered entirely inside `app_p2p.c` and is never referenced by `app_settings_factory_reset()`, unlike the LoRaWAN NVM it was assumed to mirror). Only a whole-NVS `settings erase`, or the debug shell's `ats radio unpair` (clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required), actually forces a fresh JoinRequest. |
 | Central DB loss/restore | Node's uplinks stop being ACKed (or ACK under an unknown session fails MIC). Self-healing: after **N consecutive fully-failed uplink cycles** (default 8) the node starts re-join attempts with exponential backoff. Known devices' re-joins are accepted outside the pairing window. |
 | Explicit `Detach` / `RejoinRequest` downlink | Authenticated; immediate. `RejoinRequest` is the network-initiated rekey lever (counter hygiene, key rotation policy). |
 | Counter approaching 32-bit wrap | Practically unreachable; policy is a network-initiated `RejoinRequest` rekey long before wrap. |
@@ -468,13 +472,14 @@ again.
   first). **Resolved: yes** — accepted as designed, no change needed.
 - **Northbridge scheduled-TX precision** — RX1 hit accuracy over
   UART+MQTT+LAN needs a prototype measurement before freezing `rx1_delay`
-  at 1 s. **Resolved:** `rx1_delay` is already per-device and
+  at 1 s. **Resolved + implemented:** `rx1_delay` is already per-device and
   central-assigned (JoinAccept, §5.3), but that alone means changing it
   needs a live central + a registered device — too slow for bench tuning.
-  Add a debug-only shell override on the node side (same idiom as the
-  existing `ats radio lc ...` debug helpers, `CONFIG_APP_CMD_DEBUG_SHELL`-gated)
-  so `rx1_delay` can be swept without a full re-join, while measuring
-  northbridge scheduled-TX precision during phase 3 (§13).
+  `ats radio rx1-delay <seconds>` (CONFIG_SHELL-gated, same idiom as the
+  existing `ats radio lc ...` debug helper) overrides the live value
+  in-RAM only — not persisted, restored by the next real JoinAccept — so it
+  can be swept without a full re-join while measuring northbridge
+  scheduled-TX precision during phase 3 (§13).
 - **Flash budget** — re-measure the dual-stack image against `0x34000`;
   decide whether debug keeps `CONFIG_APP_LORA_P2P=n`. **Measured 2026-08-17**
   (current `v1.4.0` tip, no P2P code yet — this is the baseline the dual-stack

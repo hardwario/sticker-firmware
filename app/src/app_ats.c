@@ -577,11 +577,27 @@ static const char *lrw_state_to_str(enum app_lrw_state state)
 }
 #endif /* defined(CONFIG_LORAWAN) */
 
+#if defined(CONFIG_APP_LORA_P2P)
+static const char *p2p_state_to_str(enum p2p_link_state state)
+{
+	switch (state) {
+	case P2P_LINK_UNPAIRED:
+		return "UNPAIRED";
+	case P2P_LINK_JOINING:
+		return "JOINING";
+	case P2P_LINK_PAIRED:
+		return "PAIRED";
+	default:
+		return "UNKNOWN";
+	}
+}
+#endif /* defined(CONFIG_APP_LORA_P2P) */
+
 /* Universal across whichever stack radio_mode selected at boot (app_radio
  * facade, #118) -- the one status command a tester runs regardless of
  * build/config. LoRaWAN exposes rich link diagnostics (devaddr/fcnt/rssi/
- * margin/...); P2P only the coarse ready/payload facade surface, since the
- * raw-LoRa protocol has no per-frame link-quality feedback (doc/p2p.md). */
+ * margin/...); P2P only pairing/session state, since the raw-LoRa protocol
+ * has no per-frame link-quality feedback (doc/p2p.md). */
 static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -589,8 +605,18 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 
 #if defined(CONFIG_APP_LORA_P2P)
 	if (app_radio_get_kind() == APP_RADIO_P2P) {
+		struct app_p2p_info info;
+
+		app_p2p_get_info(&info);
+
 		shell_print(shell, "kind: P2P");
-		shell_print(shell, "ready: %s", app_radio_is_ready() ? "yes" : "no");
+		shell_print(shell, "state: %s", p2p_state_to_str(info.link_state));
+		shell_print(shell, "net_id: %08x", info.net_id);
+		shell_print(shell, "dev_addr: %04x", info.dev_addr);
+		shell_print(shell, "rx1_delay: %u s", info.rx1_delay_s);
+		shell_print(shell, "fcnt: %u", info.fcnt);
+		shell_print(shell, "dev_nonce: %u", info.dev_nonce);
+		shell_print(shell, "ack retry pending: %u", info.ack_retry_pending);
 		shell_print(shell, "max payload: %u B", app_radio_get_max_payload());
 		return 0;
 	}
@@ -753,7 +779,7 @@ static int cmd_lrw_lc(const struct shell *shell, size_t argc, char **argv)
 	} else if (strcmp(argv[1], "fail") == 0) {
 		ok = false;
 	} else {
-		shell_error(shell, "usage: lrw lc ok|fail");
+		shell_error(shell, "usage: radio lc ok|fail");
 		return -EINVAL;
 	}
 
@@ -790,23 +816,149 @@ static int cmd_p2p_listen(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "P2P listen %s", enable ? "ON" : "OFF");
 	return 0;
 }
+
+/* Clears the persisted pairing and reboots -- the P2P analogue of
+ * cmd_lrw_reset(), and the fix for a real gap (#118): `factory_reset`
+ * does NOT clear P2P pairing (doc/p2p.md's claim otherwise is wrong, the
+ * pairing subtree is never wired into app_settings_factory_reset()), so
+ * this was previously only reachable via a whole-NVS `settings erase` or a
+ * live GDB call. */
+static int cmd_radio_unpair(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = app_p2p_unpair();
+
+	if (ret) {
+		shell_warn(shell, "Unpair reported errors: %d", ret);
+	}
+	shell_print(shell, "P2P pairing cleared; rebooting...");
+	k_sleep(K_MSEC(200)); /* let the shell flush */
+	sys_reboot(SYS_REBOOT_COLD);
+	return 0;
+}
+
+/* Debug: sweep rx1_delay on the bench without a full re-join (doc/p2p.md
+ * §13's own proposal for this, "same idiom as the existing ats radio lc
+ * debug helpers"). */
+static int cmd_radio_rx1_delay(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	int s = atoi(argv[1]);
+
+	if (s < 0 || s > 255) {
+		shell_error(shell, "rx1_delay must be 0..255 s");
+		return -EINVAL;
+	}
+
+	app_p2p_debug_set_rx1_delay((uint8_t)s);
+	shell_print(shell,
+		    "rx1_delay override -> %d s (not persisted; a real JoinAccept "
+		    "restores it)",
+		    s);
+	return 0;
+}
+
+/* Debug: exercise the confirmed-uplink retry path (doc/p2p.md §6) without a
+ * real RF outage, same idea as `ats radio lc` for the LoRaWAN link-check FSM. */
+static int cmd_radio_ack_drop(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	int n = atoi(argv[1]);
+
+	if (n < 0) {
+		shell_error(shell, "count must be >= 0");
+		return -EINVAL;
+	}
+
+	app_p2p_debug_drop_acks((uint32_t)n);
+	shell_print(shell, "Next %d confirmed-uplink Ack(s) will appear dropped", n);
+	return 0;
+}
+
+/* Build (frame + encrypt) telemetry frames WITHOUT transmitting or advancing
+ * the frame counter -- lets a bench tech inspect the exact bytes that would
+ * go on air. The P2P counterpart of cmd_lrw_compose(); dispatched from the
+ * same universal `compose` entry as cmd_radio_compose() below. */
+static int cmd_p2p_compose(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	app_sensor_sample();
+
+	bool more = true;
+	int frame = 0;
+
+	shell_print(shell, "P2P TELEMETRY frame preview:");
+	while (more) {
+		uint8_t buf[APP_P2P_FRAME_MAX_LEN];
+		size_t len = 0;
+
+		int ret = app_p2p_debug_compose(buf, sizeof(buf), &len, &more);
+
+		if (ret == -ENOTCONN) {
+			shell_error(shell, "not paired yet");
+			return ret;
+		}
+		if (ret) {
+			shell_error(shell, "compose failed: %d", ret);
+			return ret;
+		}
+		if (len == 0) {
+			shell_print(shell, "  (nothing to report)");
+			break;
+		}
+		shell_fprintf(shell, SHELL_NORMAL, "  frame %d (%zu B): ", frame++, len);
+		for (size_t i = 0; i < len; i++) {
+			shell_fprintf(shell, SHELL_NORMAL, "%02x", buf[i]);
+		}
+		shell_fprintf(shell, SHELL_NORMAL, "\n");
+	}
+	return 0;
+}
 #endif /* defined(CONFIG_APP_LORA_P2P) */
 
+/* Universal `compose`, same dispatch idiom as cmd_radio_status(): a name
+ * collision would otherwise be unavoidable on a dual-stack build, since both
+ * cmd_lrw_compose() and cmd_p2p_compose() would need to register under the
+ * same `ats radio compose` slot. */
+static int cmd_radio_compose(const struct shell *shell, size_t argc, char **argv)
+{
+#if defined(CONFIG_APP_LORA_P2P)
+	if (app_radio_get_kind() == APP_RADIO_P2P) {
+		return cmd_p2p_compose(shell, argc, argv);
+	}
+#endif /* defined(CONFIG_APP_LORA_P2P) */
+#if defined(CONFIG_LORAWAN)
+	return cmd_lrw_compose(shell, argc, argv);
+#else
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	shell_error(shell, "no radio stack compiled in");
+	return -ENODEV;
+#endif /* defined(CONFIG_LORAWAN) */
+}
+
 /* Single ATS entry point for both radio stacks (#118): `ats radio status`
- * works no matter which one radio_mode picked at boot; the rest are
- * necessarily stack-specific (LoRaWAN link-check/NVM reset vs. P2P's raw-RX
- * bench listener) and only compiled in for the stack that provides them. */
+ * and `ats radio compose` work no matter which one radio_mode picked at
+ * boot; the rest are necessarily stack-specific (LoRaWAN link-check/NVM
+ * reset vs. P2P's pairing/retry/timing bench helpers) and only compiled in
+ * for the stack that provides them. */
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_radio,
 	SHELL_CMD_ARG(status, NULL, "Print radio status (LoRaWAN or P2P).", cmd_radio_status, 1, 0),
+	SHELL_CMD_ARG(compose, NULL,
+		      "Build a telemetry frame without sending; dump hex. "
+		      "Usage: compose [budget] (budget: LoRaWAN only)",
+		      cmd_radio_compose, 1, 1),
 #if defined(CONFIG_LORAWAN)
 	SHELL_CMD_ARG(check, NULL, "Send data with link check.", cmd_lrw_check, 1, 0),
 	SHELL_CMD_ARG(lc, NULL, "Debug: inject link-check result. Usage: lc ok|fail", cmd_lrw_lc, 2,
 		      0),
-	SHELL_CMD_ARG(compose, NULL,
-		      "Build telemetry uplink without sending; dump fPort-2 hex. "
-		      "Usage: compose [budget]",
-		      cmd_lrw_compose, 1, 1),
 	SHELL_CMD_ARG(reset, NULL, "Reset LoRaWAN frame counters + DevNonce (reboots).",
 		      cmd_lrw_reset, 1, 0),
 #endif /* defined(CONFIG_LORAWAN) */
@@ -815,6 +967,16 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      "Toggle continuous-RX reference receiver (bench two-STICKER rig, "
 		      "doc/p2p.md §14). Usage: listen on|off",
 		      cmd_p2p_listen, 2, 0),
+	SHELL_CMD_ARG(unpair, NULL,
+		      "Clear P2P pairing state (reboots); NOT covered by factory_reset.",
+		      cmd_radio_unpair, 1, 0),
+	SHELL_CMD_ARG(rx1 - delay, NULL,
+		      "Debug: override rx1_delay, not persisted. Usage: rx1-delay <seconds>",
+		      cmd_radio_rx1_delay, 2, 0),
+	SHELL_CMD_ARG(ack - drop, NULL,
+		      "Debug: force the next N confirmed-uplink Acks to appear dropped. "
+		      "Usage: ack-drop <count>",
+		      cmd_radio_ack_drop, 2, 0),
 #endif /* defined(CONFIG_APP_LORA_P2P) */
 	SHELL_SUBCMD_SET_END);
 

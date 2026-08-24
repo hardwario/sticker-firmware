@@ -50,7 +50,7 @@ extern "C" {
 /* Wire frame types -- mirror the LoRaWAN fPort values so the off-device
  * decoder logic is shared (doc/p2p.md §3.2). 0xF0-0xFE are reserved for
  * link control; JOIN_REQUEST/JOIN_ACCEPT are implemented (#118 phase 2,
- * doc/p2p.md §5.3), the rest (Ack/Detach/RejoinRequest, §6/§7) are not yet. */
+ * doc/p2p.md §5.3), the rest (Detach/RejoinRequest, §7) are not yet. */
 enum app_p2p_frame_type {
 	APP_P2P_FRAME_TELEMETRY = 2,
 	APP_P2P_FRAME_ALARM = 3,
@@ -59,6 +59,19 @@ enum app_p2p_frame_type {
 	APP_P2P_FRAME_JOIN_REQUEST = 0xF0,
 	APP_P2P_FRAME_JOIN_ACCEPT = 0xF1,
 	APP_P2P_FRAME_ACK = 0xFA,
+};
+
+/* LoRa PHY max payload -- the largest a single P2P wire frame (header + body
+ * + tag) can ever be. Keep in sync with P2P_FRAME_MAX in app_p2p.c; sizes a
+ * caller's dry-run compose buffer (app_p2p_debug_compose() below). */
+#define APP_P2P_FRAME_MAX_LEN 255
+
+/* Join/session state (#118 phase 2, doc/p2p.md §5.3) -- public so `ats radio
+ * status` can report it via struct app_p2p_info below. */
+enum p2p_link_state {
+	P2P_LINK_UNPAIRED, /* no valid pairing in NVS; not currently joining */
+	P2P_LINK_JOINING,  /* boot-window join attempts in progress */
+	P2P_LINK_PAIRED,   /* net_id/dev_addr/session_key valid, data plane live */
 };
 
 /* Configure the radio from the p2p config group and set up the work queue.
@@ -100,6 +113,23 @@ void app_p2p_register_ready_cb(void (*cb)(void));
 /* Stop P2P radio activity ahead of a deep-sleep poweroff. */
 void app_p2p_suspend(void);
 
+/* Snapshot for `ats radio status` (#118) -- the P2P analogue of struct
+ * app_lrw_info, but the raw-LoRa protocol has no per-frame link-quality
+ * feedback (no ADR/margin/gateway count), so this only surfaces
+ * pairing/session state. */
+struct app_p2p_info {
+	enum p2p_link_state link_state;
+	uint32_t net_id;   /* 0 pre-pairing */
+	uint16_t dev_addr; /* 0 pre-pairing */
+	uint8_t rx1_delay_s;
+	uint32_t fcnt;              /* next data-plane TX counter */
+	uint32_t dev_nonce;         /* JoinRequest anti-replay counter, never resets */
+	uint32_t ack_retry_pending; /* frames currently awaiting an Ack retry */
+};
+
+/* Fill `info` with the current pairing/session snapshot. Always succeeds. */
+void app_p2p_get_info(struct app_p2p_info *info);
+
 #if defined(CONFIG_SHELL)
 /* Bench-rig reference receiver (doc/p2p.md §14): enable=true reconfigures the
  * radio for continuous RX and starts async receive -- each frame is
@@ -108,6 +138,35 @@ void app_p2p_suspend(void);
  * config. Returns 0 or a negative errno. TX (send_telemetry/queue_response/
  * send_alarm) is refused with -EBUSY while listening. */
 int app_p2p_listen(bool enable);
+
+/* Clear the persisted pairing (net_id/dev_addr/session_key/rx1_delay) so the
+ * next boot starts a fresh JoinRequest. NEVER touches the dev_nonce
+ * anti-replay counter -- see dnonce_persist()'s comment in app_p2p.c for why
+ * a re-join must never risk presenting a dev_nonce the central already saw.
+ * Mirrors app_lrw_reset_nvm(): settings only, reboot required to take
+ * effect. Returns 0 or a negative errno. */
+int app_p2p_unpair(void);
+
+/* Debug: override the live rx1_delay used for the next TX's RX window,
+ * without persisting it or requiring a re-join (doc/p2p.md §13). A real
+ * JoinAccept overwrites it back to the paired value. */
+void app_p2p_debug_set_rx1_delay(uint8_t rx1_delay_s);
+
+/* Debug: make the next `count` confirmed-uplink Acks appear dropped (as if
+ * the central never replied), to exercise the retry path (doc/p2p.md §6)
+ * deterministically without a real RF outage. 0 disables the injection. */
+void app_p2p_debug_drop_acks(uint32_t count);
+
+/* Debug: build (frame + encrypt) one TELEMETRY frame under the CURRENT
+ * session state WITHOUT transmitting or advancing the frame counter -- lets
+ * a bench tech inspect the exact bytes that would go on air. Runs on the P2P
+ * work queue like a real send (app_compose.c's "solely on m_work_q"
+ * invariant, mirrored here for P2P's own queue). `*more` reports whether
+ * app_compose has additional frames pending (call again to drain them, same
+ * idiom as app_compose_ex()/app_lrw_run_on_work_q()). Returns 0, -ENOTCONN
+ * if not paired yet, -ENOMEM if `out_size` is too small, or a negative
+ * errno. */
+int app_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, bool *more);
 #endif
 
 #ifdef __cplusplus

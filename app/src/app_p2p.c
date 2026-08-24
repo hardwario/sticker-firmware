@@ -212,6 +212,20 @@ static struct k_work_delayable m_tx_work;   /* drain response/alarm queue, retri
 static struct k_work_delayable m_join_work; /* JoinRequest attempt + retry (#118 phase 2) */
 #if defined(CONFIG_SHELL)
 static struct k_work m_rx_work; /* drain received frames (listen) */
+
+/* ats radio ... debug/bench helpers (#118) */
+static uint32_t m_debug_drop_acks; /* ats radio ack-drop: remaining forced Ack drops */
+
+struct p2p_compose_result {
+	uint8_t frame[P2P_FRAME_MAX];
+	size_t frame_len;
+	bool more;
+	int ret; /* build_frame()/app_compose_budget() error, 0 on success */
+};
+
+static struct p2p_compose_result m_debug_compose_result; /* ats radio compose dry-run */
+static struct k_work m_debug_compose_work;
+static void debug_compose_work_handler(struct k_work *work); /* defined near EOF */
 #endif
 
 #if defined(CONFIG_WATCHDOG)
@@ -229,12 +243,7 @@ static uint32_t m_fcnt;          /* next counter value to use */
 static uint32_t m_fcnt_reserved; /* persisted high-water; m_fcnt < this is durable */
 
 /* --- Join/session state (#118 phase 2, doc/p2p.md §5.3) --- */
-enum p2p_link_state {
-	P2P_LINK_UNPAIRED, /* no valid pairing in NVS; not currently joining */
-	P2P_LINK_JOINING,  /* boot-window join attempts in progress */
-	P2P_LINK_PAIRED,   /* net_id/dev_addr/session_key valid, data plane live */
-};
-
+/* enum p2p_link_state is public (app_p2p.h) so app_p2p_get_info() can report it. */
 static enum p2p_link_state m_link_state = P2P_LINK_UNPAIRED;
 static uint32_t m_net_id;   /* 0 (pre-join) until PAIRED */
 static uint16_t m_dev_addr; /* 0 (pre-join) until PAIRED */
@@ -649,6 +658,31 @@ static bool duty_cycle_blocked(void)
 	return k_uptime_get() < m_dc_blocked_until;
 }
 
+/* Build header+encrypt one frame into `frame` (>= P2P_HDR_LEN + body_len +
+ * P2P_TAG_LEN bytes). Pure -- no radio/queue/counter side effects -- shared
+ * by the real TX path (tx_frame_at) and the `ats radio compose` dry-run
+ * (debug_compose_work_handler). */
+static int build_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t counter,
+		       uint8_t *frame)
+{
+	sys_put_be32(m_net_id, &frame[0]);
+	sys_put_be16(m_dev_addr, &frame[4]);
+	frame[6] = frame_type;
+	sys_put_be32(counter, &frame[7]);
+
+	uint8_t nonce[P2P_NONCE_LEN];
+
+	build_nonce(nonce, counter, m_dev_addr, frame_type, P2P_DIR_TX);
+
+	int ret = app_ccm_encrypt_and_tag(m_session_key, nonce, P2P_NONCE_LEN, /* AAD */ frame,
+					  P2P_HDR_LEN, body, body_len, &frame[P2P_HDR_LEN],
+					  &frame[P2P_HDR_LEN + body_len], P2P_TAG_LEN);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_ccm_encrypt_and_tag", ret);
+	}
+	return ret;
+}
+
 /* Frame + encrypt + transmit one body under an EXPLICIT counter (no
  * fcnt_next() call) -- shared by the first send (tx_frame(), below, picks a
  * fresh counter) and a §6 Ack retry (send_confirmed(), which must resend a
@@ -679,20 +713,9 @@ static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len,
 
 	uint8_t frame[P2P_FRAME_MAX];
 
-	sys_put_be32(m_net_id, &frame[0]);
-	sys_put_be16(m_dev_addr, &frame[4]);
-	frame[6] = frame_type;
-	sys_put_be32(counter, &frame[7]);
+	int ret = build_frame(frame_type, body, body_len, counter, frame);
 
-	uint8_t nonce[P2P_NONCE_LEN];
-
-	build_nonce(nonce, counter, m_dev_addr, frame_type, P2P_DIR_TX);
-
-	int ret = app_ccm_encrypt_and_tag(m_session_key, nonce, P2P_NONCE_LEN, /* AAD */ frame,
-					  P2P_HDR_LEN, body, body_len, &frame[P2P_HDR_LEN],
-					  &frame[P2P_HDR_LEN + body_len], P2P_TAG_LEN);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_ccm_encrypt_and_tag", ret);
 		return ret;
 	}
 
@@ -744,6 +767,15 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, ui
  * Returns true iff a valid, matching Ack was received. */
 static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 {
+#if defined(CONFIG_SHELL)
+	if (m_debug_drop_acks > 0) {
+		m_debug_drop_acks--;
+		LOG_WRN("Debug: dropping Ack (counter %u), %u drop(s) left", counter,
+			m_debug_drop_acks);
+		return false;
+	}
+#endif /* defined(CONFIG_SHELL) */
+
 	uint8_t buf[P2P_FRAME_MAX];
 	int16_t rssi;
 	int8_t snr;
@@ -1361,6 +1393,7 @@ int app_p2p_init(void)
 	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
+	k_work_init(&m_debug_compose_work, debug_compose_work_handler);
 #endif
 
 #if defined(CONFIG_WATCHDOG)
@@ -1456,3 +1489,101 @@ void app_p2p_suspend(void)
 	 * reboot that follows deep-sleep entry, same as app_lrw_suspend() relies
 	 * on for its own timers. No-op today; kept as an explicit facade hook. */
 }
+
+void app_p2p_get_info(struct app_p2p_info *info)
+{
+	info->link_state = m_link_state;
+	info->net_id = m_net_id;
+	info->dev_addr = m_dev_addr;
+	info->rx1_delay_s = m_rx1_delay_s;
+	info->fcnt = m_fcnt;
+	info->dev_nonce = m_dev_nonce;
+	info->ack_retry_pending = k_msgq_num_used_get(&m_ack_retry_msgq);
+}
+
+/* ======================================================================== */
+/* Debug / bench helpers (ats radio ..., #118, CONFIG_SHELL)                */
+/* ======================================================================== */
+
+#if defined(CONFIG_SHELL)
+
+int app_p2p_unpair(void)
+{
+	int ret = settings_delete(P2P_JOIN_STATE_KEY);
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("settings_delete(p2pjoin/state)", ret);
+		return ret;
+	}
+	LOG_INF("P2P pairing cleared; reboot required");
+	return 0;
+}
+
+void app_p2p_debug_set_rx1_delay(uint8_t rx1_delay_s)
+{
+	m_rx1_delay_s = rx1_delay_s;
+	LOG_WRN("Debug: rx1_delay override -> %u s (not persisted)", rx1_delay_s);
+}
+
+void app_p2p_debug_drop_acks(uint32_t count)
+{
+	m_debug_drop_acks = count;
+	LOG_WRN("Debug: forcing next %u Ack(s) to appear dropped", count);
+}
+
+/* Runs on m_work_q, same as a real send (app_compose.c's "solely on
+ * m_work_q" invariant -- see app_ats.c's `ats radio compose` for the
+ * LoRaWAN side of the same rule). Previews the frame under the CURRENT fcnt
+ * WITHOUT advancing it, so a dry-run can never desync the real data-plane
+ * sequence with the peer. */
+static void debug_compose_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	struct p2p_compose_result *res = &m_debug_compose_result;
+
+	if (m_link_state != P2P_LINK_PAIRED) {
+		res->ret = -ENOTCONN;
+		return;
+	}
+
+	uint8_t body[P2P_MAX_BODY];
+	size_t body_len = 0;
+
+	res->ret = app_compose_budget(body, sizeof(body), &body_len, &res->more, P2P_MAX_BODY);
+	if (res->ret) {
+		return;
+	}
+
+	res->ret = build_frame(APP_P2P_FRAME_TELEMETRY, body, body_len, m_fcnt, res->frame);
+	res->frame_len = P2P_HDR_LEN + body_len + P2P_TAG_LEN;
+}
+
+int app_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, bool *more)
+{
+	struct p2p_compose_result *res = &m_debug_compose_result;
+
+	int ret = k_work_submit_to_queue(&m_work_q, &m_debug_compose_work);
+
+	if (ret < 0) {
+		return ret;
+	}
+
+	struct k_work_sync sync;
+
+	k_work_flush(&m_debug_compose_work, &sync);
+
+	if (res->ret) {
+		return res->ret;
+	}
+	if (res->frame_len > out_size) {
+		return -ENOMEM;
+	}
+
+	memcpy(out, res->frame, res->frame_len);
+	*out_len = res->frame_len;
+	*more = res->more;
+	return 0;
+}
+
+#endif /* defined(CONFIG_SHELL) */
