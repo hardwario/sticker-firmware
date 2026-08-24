@@ -18,7 +18,7 @@ way HARDWARIO TOWER nodes pair to a Radio Dongle, but with real cryptography
 
 Status: **design document**, phase 1 (§13) implemented and HIL-validated on a
 two-STICKER bench (§14.1) — `radio-mode p2p` now routes through a real
-`app_p2p`/`app_transport` facade instead of the `app_lrw.c` (#271) fallback
+`app_p2p`/`app_radio` facade instead of the `app_lrw.c` (#271) fallback
 warning; phases 2+ (join/ACK, northbridge, central) remain unimplemented.
 
 ---
@@ -90,7 +90,7 @@ On boot the firmware brings up **only** the selected stack — the SX126x radio
 is shared between LoRaMac and raw LoRa, so there is no live switch. The
 payload layer is unchanged: `app_compose` builds the same protobuf snapshots
 and `app_report` owns the `interval_report` cadence for both transports,
-behind an `app_transport` facade (shape carried over from PR #228; mainline
+behind an `app_radio` facade (shape carried over from PR #228; mainline
 has ~40 direct `app_lrw_*` call sites that the facade must absorb).
 
 Build: dual-stack image gated by `CONFIG_APP_LORA_P2P` (default `y` on
@@ -604,7 +604,7 @@ Deliberately out of scope for v1:
 Implementation phasing (each independently reviewable):
 
 1. **FW transport port** — re-implement PR #228's TX path on mainline
-   (`radio_mode`, `app_ccm`, `app_transport` facade), still unpaired/unACKed
+   (`radio_mode`, `app_ccm`, `app_radio` facade), still unpaired/unACKed
    behind a build flag; salvage `app_p2p.c` logic, `p2p.js` + tests. Bench
    HIL from day one via the two-STICKER rig (§14) — no need to wait for
    phase 3/4's real gateway/central to start validating the wire format.
@@ -704,8 +704,8 @@ body (29 B): 01088af490d40610021a07080238ff0148041a07080338ff0148042001
 `frame_type=3` is **alarm** (§3.2, fPort 3 mirror) — the DUT had an active
 `alarm-no-data` condition, so the transport-ready callback's first report
 was an alarm frame, not telemetry (`0x02`). This is a useful confirmation
-in itself: it means `app_transport_send_alarm()` and
-`app_transport_send_telemetry()` are *both* independently exercised by
+in itself: it means `app_radio_send_alarm()` and
+`app_radio_send_telemetry()` are *both* independently exercised by
 ordinary device state, not just the explicit `send` command. Radio config
 (868.1 MHz/SF10/BW125/CR4-5), the 11 B AAD header, and the `join_key` KDF
 all matched between the two independently-flashed devices, confirming §3–§4

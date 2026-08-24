@@ -869,7 +869,7 @@ static void join_complete_work_handler(struct k_work *work)
  * surface instead of masquerading as OFF.
  *
  * radio_mode == P2P never reaches this function at all (#118): the
- * app_transport facade routes it to app_p2p_init()/app_p2p_join() instead of
+ * app_radio facade routes it to app_p2p_init()/app_p2p_join() instead of
  * app_lrw_init()/app_lrw_join(), so app_lrw.c's own state machine never runs
  * in that mode. */
 static bool radio_disabled(void)

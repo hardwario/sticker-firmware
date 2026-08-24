@@ -17,8 +17,8 @@ extern "C" {
 
 /* Raw-LoRa point-to-point transport, phase 1 (#118, doc/p2p.md). A drop-in
  * alternative to app_lrw for deployments without LoRaWAN infrastructure,
- * selected at boot by `radio-mode p2p` via the app_transport facade. It
- * mirrors the slice of the app_lrw public surface the transport-agnostic
+ * selected at boot by `radio-mode p2p` via the app_radio facade. It
+ * mirrors the slice of the app_lrw public surface the radio-agnostic
  * layers (app_report / app_compose / app_alarm) need, but talks raw LoRa via
  * the Zephyr drivers/lora API instead of LoRaMac -- no join, no network
  * server, no per-DR payload budget.
@@ -65,8 +65,8 @@ enum app_p2p_frame_type {
 int app_p2p_init(void);
 
 /* If already paired (persisted NVS state from a prior join), mark the
- * transport ready and kick the report cadence immediately -- mirrors
- * app_lrw_join() on the transport facade. Otherwise starts the join
+ * radio ready and kick the report cadence immediately -- mirrors
+ * app_lrw_join() on the radio facade. Otherwise starts the join
  * handshake (#118 phase 2, doc/p2p.md §5.3); the ready callback fires later,
  * only once JoinAccept succeeds. */
 void app_p2p_start(void);

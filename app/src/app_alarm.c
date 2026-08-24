@@ -11,7 +11,7 @@
 #include "app_hall.h"
 #include "app_input.h"
 #include "app_log.h"
-#include "app_transport.h"
+#include "app_radio.h"
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_w1_slots.h"
@@ -216,7 +216,7 @@ static void alarm_batch_flush(void)
 
 	size_t cap = ALARM_FRAME_MAX;
 #if defined(CONFIG_LORAWAN)
-	uint8_t dr = app_transport_get_max_payload();
+	uint8_t dr = app_radio_get_max_payload();
 	if (dr > 0 && dr < cap) {
 		cap = dr;
 	}
@@ -252,7 +252,7 @@ static void alarm_batch_flush(void)
 
 	if (ret == 0) {
 #if defined(CONFIG_LORAWAN)
-		(void)app_transport_send_alarm(buf, len);
+		(void)app_radio_send_alarm(buf, len);
 #endif
 		LOG_INF("Alarm batch: %u/%u events on fPort 3 (%u B)", n, m_window_total,
 			(unsigned)len);

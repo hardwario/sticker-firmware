@@ -9,7 +9,7 @@
 #include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
-#include "app_transport.h"
+#include "app_radio.h"
 #include "app_sensor.h"
 
 /* Nanopb includes */
@@ -453,7 +453,7 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 
 int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 {
-	return compose_ex_impl(buf, size, len, more, app_transport_get_max_payload(), true);
+	return compose_ex_impl(buf, size, len, more, app_radio_get_max_payload(), true);
 }
 
 int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)

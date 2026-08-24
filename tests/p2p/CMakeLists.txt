@@ -7,7 +7,7 @@
 # like this directory's siblings would be: it needs the real STM32WL radio.
 #
 # Deliberately minimal: only app_ccm.c (the AES-CCM/ECB primitive) is reused
-# from the main app. No app_p2p.c/app_transport.c, no sensors/NFC/LoRaWAN/
+# from the main app. No app_p2p.c/app_radio.c, no sensors/NFC/LoRaWAN/
 # history/protobuf — none of that RAM/flash budget the main app.CMakeLists.txt
 # has to juggle applies here, which is the whole point of a separate firmware
 # instead of yet another Kconfig combination of the real one.

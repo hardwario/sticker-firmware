@@ -21,7 +21,7 @@
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_settings.h"
-#include "app_transport.h"
+#include "app_radio.h"
 #include "app_wdog.h"
 
 /* Zephyr includes */
@@ -500,17 +500,17 @@ int main(void)
 		LOG_WRN("app_alarm_rules_init failed: %d (alarms unavailable)", ret);
 	}
 
-	/* Transport (#118): bring up the stack selected by `radio_mode` (LoRaWAN or
+	/* Radio (#118): bring up the stack selected by `radio_mode` (LoRaWAN or
 	 * raw-LoRa P2P). Both are linked; only the chosen one is started. */
-	ret = app_transport_init();
+	ret = app_radio_init();
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_transport_init", ret);
+		LOG_ERR_CALL_FAILED_INT("app_radio_init", ret);
 		die();
 	}
 
 	/* Report orchestration (#126): owns the interval_report cadence and hands
-	 * telemetry frames to the transport. Register before the start so the
-	 * link-ready kick is wired when the transport comes up. */
+	 * telemetry frames to the radio. Register before the start so the
+	 * link-ready kick is wired when the radio comes up. */
 	ret = app_report_init();
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_report_init", ret);
@@ -552,7 +552,7 @@ int main(void)
 	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
 
-	app_transport_start();
+	app_radio_start();
 
 	app_alarm_set_event_callback(event_led_handler, NULL);
 
@@ -612,9 +612,9 @@ int main(void)
 		}
 
 #if defined(CONFIG_LORAWAN)
-		/* Status LED reflects the active transport: P2P maps to HEALTHY (no
+		/* Status LED reflects the active radio: P2P maps to HEALTHY (no
 		 * join), so the join/warning animations below stay LoRaWAN-only. */
-		enum app_lrw_state lrw_state = app_transport_get_state();
+		enum app_lrw_state lrw_state = app_radio_get_state();
 
 		if (led_handled) {
 			/* NFC interaction (or a higher-priority indicator) owns the LED. */
