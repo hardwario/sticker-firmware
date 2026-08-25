@@ -10,6 +10,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 |---|---|
 | Buzzer | **New** — alarm-driven melodies (#397, Phase 2 of #338): the buzzer HW variant now sounds automatically while any alarm is active, gated on a new global `alarm-buzzer-mode` config key |
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
+| LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). Not wired into any automatic runtime path yet — the LoRaWAN-off idle blink is unchanged. |
 
 ---
 
@@ -73,6 +74,52 @@ The four OFF-by-default toggles (W1, LIS2DH, buzzer, PIR) were picked for the be
 **Remote commands respect these toggles too**, not just local builds: `enter_calibration` (LoRaWAN/NFC) and `buzzer_play` (LoRaWAN/NFC/vendor) both report `NOT_SUPPORTED` instead of silently no-op'ing (or, in `enter_calibration`'s case, persisting a flag nothing would ever consume) when their subsystem is compiled out.
 
 **Not independently toggleable** (deliberately out of scope, see issue #395): `CONFIG_DS28E17=n` alone (use `CONFIG_W1=n`, which drops both together — `app_w1_slots.c`'s sensor-type registry references the machine-probe API unconditionally); NFC, the alarm engine itself, hall/input counters, and history (each referenced from many more call sites than a single flag away); `CONFIG_ADC=n` / battery voltage (near-universally wanted in every telemetry frame).
+
+---
+
+## 3. LED PWM primitives (#301)
+
+Red (PA5/TIM2_CH1) and green (PA6/TIM16_CH1) status LEDs gained a hardware-PWM
+path (`app.overlay`'s new `pwmleds` node) alongside their existing plain-GPIO
+control, so they can be dimmed and smoothly faded instead of a hard on/off
+blink. Yellow (PA4) has no timer channel and stays GPIO-only. "On" now drives
+the PWM at a ~20% duty (`LED_DIM_PERCENT`) instead of full brightness — about
+1/5 the LED current while staying clearly visible.
+
+New `app_led` primitives (`app_led.h`):
+
+| Function | Behaviour |
+|---|---|
+| `app_led_fade(channel, from%, to%, duration_ms)` | Smooth PWM ramp (~5 ms step), red/green only, blocking |
+| `app_led_heartbeat(channel)` | One pulse: 0→100% over 80 ms, 100→0% over 120 ms (200 ms total) |
+| `app_led_idle_config()` / `_get()` / `_pulse()` | Runtime-only (not persisted) style knob for a periodic indicator: `off` / `gpio` (short blink) / `pwm` (heartbeat), any colour |
+
+Debug-build shell (`ats led fade|heartbeat|idle`) exercises all three directly
+on hardware, for comparing visual behaviour and power live.
+
+**Deliberately not wired into the app.** The original goal (#301) was to drive
+the LoRaWAN-off idle indicator with the PWM heartbeat by default, once per
+3 s. A review of the software fade implementation found a concrete power risk
+before that could ship: `app_led_fade()`'s 5 ms step granularity is *shorter*
+than this SoC's own ~9 ms Stop-mode wake cost (`power-consumption.md` §5,
+`stm32_clock_control_init` re-running on every Stop0/1/2 exit) — so a periodic
+200 ms/3 s heartbeat would likely keep the MCU out of deep sleep for most of
+every pulse, an estimated 100+ µA average adder on top of this board's
+~74–119 µA measured idle floor (`power-consumption.md` §1). That is exactly
+the risk #301 flagged as the merge blocker, and it remains unmeasured on real
+hardware.
+
+Rather than ship the periodic path unvalidated, this PR ships **only the
+primitives**: the LoRaWAN-off branch keeps its original single yellow GPIO
+blink, unchanged. The functions stay available for a future event-driven
+caller (an NFC tap, an alarm transition — moments the device is already awake
+for other reasons) to invoke on demand, paying the pulse cost only when that
+event actually happens rather than on a fixed cadence while otherwise idle.
+This closes out #301's own documented fallback option ("restrict PWM to
+interactive moments... keep a plain GPIO blink for the idle heartbeat").
+Picking a first event-driven caller, and/or doing the PPK2 measurement to
+settle whether a periodic heartbeat is viable after all, is unscheduled
+future work — not tracked by an open issue for now.
 
 ---
 
