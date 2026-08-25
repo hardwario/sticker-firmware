@@ -133,11 +133,18 @@ bool app_alarm_rule_valid(enum app_alarm_source source, enum app_alarm_quantity 
 		       quantity == APP_ALARM_Q_MAGNETIC_FIELD || quantity == APP_ALARM_Q_TILT;
 	case APP_ALARM_SRC_HALL_LEFT:
 	case APP_ALARM_SRC_HALL_RIGHT:
-	case APP_ALARM_SRC_INPUT_A:
-	case APP_ALARM_SRC_INPUT_B:
 	case APP_ALARM_SRC_PIR:
 	case APP_ALARM_SRC_ACCEL:
 		return quantity == APP_ALARM_Q_STATE || quantity == APP_ALARM_Q_COUNT;
+	case APP_ALARM_SRC_INPUT_A:
+	case APP_ALARM_SRC_INPUT_B:
+		/* #396: analog voltage measurement (THRESHOLD) alongside the existing
+		 * digital state/count monitoring on the same physical pin — mutually
+		 * exclusive at runtime (app_sensor_init()), but both are structurally
+		 * valid rule targets so a rule can be provisioned ahead of the config
+		 * choice. */
+		return quantity == APP_ALARM_Q_STATE || quantity == APP_ALARM_Q_COUNT ||
+		       quantity == APP_ALARM_Q_VOLTAGE;
 	default:
 		return false;
 	}

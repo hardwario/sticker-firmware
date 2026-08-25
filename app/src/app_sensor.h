@@ -40,6 +40,10 @@ struct app_sensor_data {
 	uint32_t input_b_count;
 	bool input_a_is_active;
 	bool input_b_is_active;
+	/* Analog voltage on GP_A/GP_B (#396), NaN when the capability is off or the
+	 * pin is owned by the digital input / PIR / buzzer instead (app_sensor.c). */
+	float input_a_voltage;
+	float input_b_voltage;
 	uint32_t motion_count;       /* PIR (PYQ1648) motion events */
 	uint32_t accel_motion_count; /* accelerometer (LIS2DH) any-motion events */
 };

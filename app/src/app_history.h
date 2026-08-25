@@ -45,6 +45,11 @@ enum app_history_sensor {
 	APP_HISTORY_ILLUMINANCE,
 	APP_HISTORY_ORIENTATION,
 	APP_HISTORY_ACCEL_MOTION,
+	/* #396: analog voltage on GP_A/GP_B — mutually exclusive at runtime with the
+	 * digital APP_HISTORY_INPUT_A/B above (same physical pin), but both channels
+	 * are always valid selection-mask bits. */
+	APP_HISTORY_INPUT_A_VOLTAGE,
+	APP_HISTORY_INPUT_B_VOLTAGE,
 	APP_HISTORY_SENSOR_COUNT
 };
 

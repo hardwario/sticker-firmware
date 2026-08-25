@@ -395,6 +395,21 @@ test("fPort-2 telemetry decodes accel_motion_count (field 26)", () => {
   assert.equal(got.data.accel_motion_count, 3);
 });
 
+// #396: input_a_voltage (field 28) / input_b_voltage (field 29), mV on the wire.
+test("fPort-2 telemetry decodes input_a_voltage/input_b_voltage (fields 28/29)", () => {
+  // tag (28<<3|0)=224 -> varint "e0 01", value 1650 -> varint "f2 0c" (1.65 V)
+  // tag (29<<3|0)=232 -> varint "e8 01", value 3300 -> varint "e4 19" (3.30 V)
+  const got = codec.decodeUplink({ bytes: hex("01e001f20ce801e419"), fPort: 2 }).data;
+  assert.equal(got.input_a_voltage, 1.65);
+  assert.equal(got.input_b_voltage, 3.3);
+});
+
+test("fPort-2 telemetry: input_a_voltage sentinel decodes to null (#396)", () => {
+  // tag "e0 01" (field 28), value UINT32_MAX varint "ff ff ff ff 0f"
+  const got = codec.decodeUplink({ bytes: hex("01e001ffffffff0f"), fPort: 2 }).data;
+  assert.equal(got.input_a_voltage, null);
+});
+
 // #92: pin the numeric scaling of barometer/light fields — these were never
 // asserted, which is why the pressure unit could drift 10x. Frame: version 01,
 // pressure (field 5, tag 0x28) raw 10135 -> 1013.5 hPa (hPa x10),
@@ -601,6 +616,30 @@ test("history sentinels for pressure/illuminance/orientation decode to null (#31
   assert.equal(rec.illuminance, null);
   assert.equal(rec.orientation, null);
   assert.equal(rec.accel_motion_count, 7); // counters have no sentinel, 0 is valid
+});
+
+// #396: input_a_voltage/input_b_voltage (uint16 LE mV) — bits 19/20.
+function histRecVoltage(vA, vB) {
+  const a = Math.round(vA * 1000);
+  const b = Math.round(vB * 1000);
+  return [a & 0xff, (a >> 8) & 0xff, b & 0xff, (b >> 8) & 0xff];
+}
+const _PRESENT_ANALOG = 0x180000; // bit19 input_a_voltage | bit20 input_b_voltage
+
+test("history decodes input_a_voltage/input_b_voltage (#396)", () => {
+  const t0 = 1780000000;
+  const f = buildHistoryFrame(1, 0, 1, t0, _PRESENT_ANALOG, 900, histRecVoltage(1.65, 3.30));
+  const rec = codec.decodeUplink({ bytes: f, fPort: 85 }).data.history_frame.records[0];
+  assert.equal(rec.input_a_voltage, 1.65);
+  assert.equal(rec.input_b_voltage, 3.3);
+});
+
+test("history sentinels for input_a_voltage/input_b_voltage decode to null (#396)", () => {
+  const t0 = 1780000000;
+  const f = buildHistoryFrame(1, 0, 1, t0, _PRESENT_ANALOG, 900, [0xff, 0xff, 0xff, 0xff]);
+  const rec = codec.decodeUplink({ bytes: f, fPort: 85 }).data.history_frame.records[0];
+  assert.equal(rec.input_a_voltage, null);
+  assert.equal(rec.input_b_voltage, null);
 });
 
 test("history time_synced=false decodes record times as null (L-1/L-3)", () => {

@@ -154,6 +154,38 @@ ZTEST(alarm_rules, test_onboard_illuminance_accepted)
 	zassert_true(app_alarm_rules_occupied(0), "onboard illuminance slot not occupied");
 }
 
+/* ---- #396: analog voltage on the digital input sources ------------------ */
+
+ZTEST(alarm_rules, test_input_voltage_threshold_accepted)
+{
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_INPUT_A,
+		.quantity = APP_ALARM_Q_VOLTAGE,
+		.enabled = 1,
+		.lo = 0.5f,
+		.hi = 2.5f,
+		.dwell = 5.0f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "input A voltage rule rejected");
+	zassert_true(app_alarm_rules_occupied(0), "input A voltage slot not occupied");
+
+	r.source = APP_ALARM_SRC_INPUT_B;
+	zassert_equal(app_alarm_rules_set(1, &r), 0, "input B voltage rule rejected");
+}
+
+ZTEST(alarm_rules, test_input_count_and_state_still_accepted)
+{
+	/* #396 must not have narrowed the pre-existing digital validity. */
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_INPUT_A,
+		.quantity = APP_ALARM_Q_COUNT,
+		.enabled = 1,
+		.hi = 5.0f,
+		.dwell = 0.0f,
+	};
+	zassert_equal(app_alarm_rules_set(0, &r), 0, "input A count rule rejected");
+}
+
 /* ---- reload path must sanitize a persisted bad band ---------------------- */
 
 ZTEST(alarm_rules, test_reload_sanitizes_collapsed_band)

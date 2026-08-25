@@ -54,6 +54,7 @@ enum hist_enc {
 	ENC_PRESSURE, /* float kPa -> uint16 hPa x10, sentinel 0xFFFF, 2 B */
 	ENC_LUX,      /* float lux -> uint16 lux/2,   sentinel 0xFFFF, 2 B */
 	ENC_ORIENT,   /* int (INT_MAX=absent) -> uint8 raw & 0xf, sentinel 0xFF, 1 B */
+	ENC_VOLTAGE,  /* float V -> uint16 mV, sentinel 0xFFFF, 2 B (#396) */
 };
 
 #define NO_CAP SIZE_MAX
@@ -111,6 +112,13 @@ static const struct hist_desc m_desc[APP_HISTORY_SENSOR_COUNT] = {
 	[APP_HISTORY_ACCEL_MOTION] = {"accel-motion",
 				      offsetof(struct app_sensor_data, accel_motion_count),
 				      ENC_COUNT, 4, offsetof(struct app_config, cap_accelerometer)},
+	/* #396: GP_A/GP_B analog voltage. */
+	[APP_HISTORY_INPUT_A_VOLTAGE] = {"input-a-voltage",
+					 offsetof(struct app_sensor_data, input_a_voltage),
+					 ENC_VOLTAGE, 2, offsetof(struct app_config, cap_analog_a)},
+	[APP_HISTORY_INPUT_B_VOLTAGE] = {"input-b-voltage",
+					 offsetof(struct app_sensor_data, input_b_voltage),
+					 ENC_VOLTAGE, 2, offsetof(struct app_config, cap_analog_b)},
 };
 
 #define TEMP_SENTINEL     0x7FFF
@@ -118,6 +126,7 @@ static const struct hist_desc m_desc[APP_HISTORY_SENSOR_COUNT] = {
 #define PRESSURE_SENTINEL 0xFFFF
 #define LUX_SENTINEL      0xFFFF
 #define ORIENT_SENTINEL   0xFF
+#define VOLTAGE_SENTINEL  0xFFFF
 #define MAX_RECORD_SIZE   (APP_HISTORY_SENSOR_COUNT * 4) /* worst case all channels, values only */
 
 /* ---- Module state ------------------------------------------------------- */
@@ -844,6 +853,14 @@ static size_t encode_value(uint8_t *p, int i)
 		p[0] = (iv == INT_MAX) ? ORIENT_SENTINEL : (uint8_t)(iv & 0xf);
 		return 1;
 	}
+	case ENC_VOLTAGE: {
+		float f;
+		memcpy(&f, src, sizeof(f));
+		uint16_t v = isnan(f) ? (uint16_t)VOLTAGE_SENTINEL
+				      : (uint16_t)CLAMP(lroundf(f * 1000.0f), 0, 65534);
+		sys_put_le16(v, p);
+		return 2;
+	}
 	}
 	return 0;
 }
@@ -909,6 +926,15 @@ static void decode_record(const uint8_t *rec, struct app_history_record *out)
 				out->present |= BIT(i);
 			}
 			p += 1;
+			break;
+		}
+		case ENC_VOLTAGE: {
+			uint16_t v = sys_get_le16(p);
+			if (v != VOLTAGE_SENTINEL) {
+				out->value[i] = v / 1000.0;
+				out->present |= BIT(i);
+			}
+			p += 2;
 			break;
 		}
 		}

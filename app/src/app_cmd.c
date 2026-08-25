@@ -448,6 +448,7 @@ static const struct {
 	{DUMP_SECTION_SENSORS, 5, 2, false},     {DUMP_SECTION_SENSORS, 6, 2, false},
 	{DUMP_SECTION_SENSORS, 7, 2, false},     {DUMP_SECTION_SENSORS, 19, 3, false},
 	{DUMP_SECTION_SENSORS, 8, 2, false},     {DUMP_SECTION_SENSORS, 9, 2, false},
+	{DUMP_SECTION_SENSORS, 20, 3, false},    {DUMP_SECTION_SENSORS, 21, 3, false},
 	{DUMP_SECTION_SENSORS, 10, 2, false},    {DUMP_SECTION_SENSORS, 11, 10, false},
 	{DUMP_SECTION_SENSORS, 12, 10, false},   {DUMP_SECTION_SENSORS, 13, 10, false},
 	{DUMP_SECTION_SENSORS, 14, 10, false},   {DUMP_SECTION_SENSORS, 15, 2, false},

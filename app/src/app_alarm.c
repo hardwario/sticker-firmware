@@ -532,6 +532,14 @@ static bool read_threshold_value(uint8_t source, uint8_t quantity, float *out)
 		*out = d->voltage;
 		return true;
 	}
+	/* #396: GP_A/GP_B analog voltage. NaN (capability off, or the pin lost the
+	 * pin-sharing conflict to digital input/PIR/buzzer) behaves like any other
+	 * absent analog reading — eval_threshold() below treats NaN as inert. */
+	if (quantity == APP_ALARM_Q_VOLTAGE &&
+	    (source == APP_ALARM_SRC_INPUT_A || source == APP_ALARM_SRC_INPUT_B)) {
+		*out = (source == APP_ALARM_SRC_INPUT_A) ? d->input_a_voltage : d->input_b_voltage;
+		return true;
+	}
 	return false;
 }
 

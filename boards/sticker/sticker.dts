@@ -100,7 +100,16 @@ stm32_lp_tick_source: &lptim1 {
 };
 
 &adc1 {
-	pinctrl-0 = <&adc_in2_pb3>;
+	/* adc_in3_pb4 / adc_in7_pa11 (#396): GP_A / GP_B external input pins,
+	 * analog voltage measurement (cap_analog_a/cap_analog_b). Putting them in
+	 * the ADC's default pinctrl state also parks the pins in analog mode (the
+	 * lowest-power pin state) whenever the digital cap_input_a/b isn't using
+	 * them instead — app_input_init() only reconfigures a pin to GPIO_INPUT
+	 * when its own capability is on (app_sensor.c owns the mutual exclusion
+	 * between cap_input_a/b, cap_analog_a/b, and cap_pir_detector/cap_buzzer,
+	 * which all share these same two pins, #90).
+	 */
+	pinctrl-0 = <&adc_in2_pb3 &adc_in3_pb4 &adc_in7_pa11>;
 	pinctrl-names = "default";
 	st,adc-clock-source = "SYNC";
 	st,adc-prescaler = <4>;

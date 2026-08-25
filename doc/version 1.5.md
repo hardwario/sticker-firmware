@@ -10,6 +10,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 |---|---|
 | Buzzer | **New** — alarm-driven melodies (#397, Phase 2 of #338): the buzzer HW variant now sounds automatically while any alarm is active, gated on a new global `alarm-buzzer-mode` config key |
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
+| Analog inputs | **New** — analog voltage measurement on the external inputs GP_A/GP_B (#396), gated by `cap-analog-a`/`cap-analog-b`, mutually exclusive with the existing digital `cap-input-a`/`cap-input-b` on the same pins. |
 
 ---
 
@@ -73,6 +74,44 @@ The four OFF-by-default toggles (W1, LIS2DH, buzzer, PIR) were picked for the be
 **Remote commands respect these toggles too**, not just local builds: `enter_calibration` (LoRaWAN/NFC) and `buzzer_play` (LoRaWAN/NFC/vendor) both report `NOT_SUPPORTED` instead of silently no-op'ing (or, in `enter_calibration`'s case, persisting a flag nothing would ever consume) when their subsystem is compiled out.
 
 **Not independently toggleable** (deliberately out of scope, see issue #395): `CONFIG_DS28E17=n` alone (use `CONFIG_W1=n`, which drops both together — `app_w1_slots.c`'s sensor-type registry references the machine-probe API unconditionally); NFC, the alarm engine itself, hall/input counters, and history (each referenced from many more call sites than a single flag away); `CONFIG_ADC=n` / battery voltage (near-universally wanted in every telemetry frame).
+
+---
+
+## 3. Analog voltage measurement on external inputs GP_A/GP_B (#396)
+
+The external inputs GP_A (PB4/ADC1_IN3) and GP_B (PA11/ADC1_IN7) — previously digital-only via `cap-input-a`/`cap-input-b` — can now instead be read as an analog voltage, 0–3.3 V (VDD from the TPS7A2033 LDO), 12-bit, no divider or protection on either pin (0–10 V / 4–20 mA industrial signals need external conditioning). The hall pins (PA3/PA7) are not ADC-capable on the WLE5 and stay digital-only.
+
+Two new configuration parameters (`sensors` proto group):
+
+| Shell key | Type | Default | Description |
+|---|---|---|---|
+| `cap-analog-a` | bool | `false` | Enable analog voltage measurement on GP_A. |
+| `cap-analog-b` | bool | `false` | Enable analog voltage measurement on GP_B. |
+
+**Pin sharing (#90).** GP_A/GP_B are also wired (via solder jumpers S1/S2 + series resistors) to the PIR PYD-1698 and to the buzzer HW variant (#338); the ADC pins park in analog mode (the lowest-power pin state) whenever nothing digital claims them. `app_sensor_init()` resolves a device with more than one of these capabilities enabled at once, in this priority order, same "the more established capability keeps the pin" logic that already applied between PIR and the buzzer:
+
+1. `cap-pir-detector` / `cap-buzzer` — win over everything else on both pins.
+2. `cap-input-a` / `cap-input-b` (digital) — win over the corresponding analog capability on the same pin.
+3. `cap-analog-a` / `cap-analog-b` — only take effect when nothing above claims that pin.
+
+A capability that loses a conflict is cleared at runtime (not persisted) and logged (`LOG_WRN`), so `GetConfig`/telemetry never show a capability as "enabled" while it is silently non-functional.
+
+**Telemetry** (`Telemetry` proto, new group, always sent whole when its capability is on — sentinel on a failed/absent reading, same policy as the other analog scalars):
+
+| Field | Wire | Unit |
+|---|:-:|---|
+| `input_a_voltage` | 28 | mV |
+| `input_b_voltage` | 29 | mV |
+
+**History:** two new selectable channels, `input-a-voltage` / `input-b-voltage` (uint16 LE mV, sentinel `0xFFFF`), appended after `accel-motion` in `history-sensors` — existing channel bit positions are unchanged.
+
+**Alarms:** `APP_ALARM_Q_VOLTAGE` (already used for the low-battery watchdog) is now also a valid quantity for `APP_ALARM_SRC_INPUT_A`/`APP_ALARM_SRC_INPUT_B`, alongside the existing digital `state`/`count` quantities — a threshold rule (lo/hi/dwell) can be provisioned on either input regardless of which capability (digital or analog) is currently active on it.
+
+**Power:** one one-shot ADC read per `interval_sample`, same resume→read→suspend pattern as the existing battery measurement — the issue's own estimate is idle impact ~zero, not yet independently re-measured for this change (HIL still pending, see below).
+
+**Not yet done / left for HIL verification:** the functional test plan (`ats sample` / a live report with a potentiometer or voltage source on JP2, comparing the decoded value against a known input) and confirming the power estimate above on real hardware. No-data-watchdog coverage for a failed/absent analog reading was deliberately left out of scope, matching the existing gap for other non-monitored analog sensors (e.g. the light sensor).
+
+**Test coverage:** `tests/alarm_rules` (voltage rule on `INPUT_A`/`INPUT_B` accepted, existing digital validity unchanged), `tests/compose` (capability gating + mV scaling + sentinel), `tests/history` (channel present/absent), decoder (`ttn.test.js`, telemetry + history decode + sentinels), and the `configen` round-trip (`app_config.yml` ↔ generated `app_config.{c,h,proto}`).
 
 ---
 
