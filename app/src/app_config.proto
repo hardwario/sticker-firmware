@@ -85,6 +85,8 @@ message AppConfigMessage {
         optional bool input_a_counter = 17;
         optional bool input_b_counter = 18;
         optional bool cap_buzzer = 19;
+        optional bool cap_analog_a = 20;
+        optional bool cap_analog_b = 21;
     }
 
     message Alarms {
@@ -521,7 +523,12 @@ message Telemetry {
     // future sensor types need no new fields. The composer may split the list
     // across frames (each reading is indivisible). Replaces fields 10-17.
     repeated SensorReading w1_sensors = 27;
-    // New sensors append at field >= 28 as new groups; never renumber.
+    // input A/B analog voltage (cap_analog_a/cap_analog_b, #396). Mutually
+    // exclusive with the corresponding digital input/PIR/buzzer capability
+    // (app_sensor.c) — the two never carry data on the same report.
+    optional uint32 input_a_voltage = 28;  // mV
+    optional uint32 input_b_voltage = 29;  // mV
+    // New sensors append at field >= 30 as new groups; never renumber.
 }
 
 // One ROM-bound 1-Wire slot's reading. type = enum app_w1_slot_type

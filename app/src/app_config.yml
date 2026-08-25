@@ -585,6 +585,18 @@ parameters:
     type: bool
     help: "Get/Set accelerometer capability — orientation, motion and free-fall (true/false)."
 
+  - name: cap_analog_a
+    proto_group: sensors
+    proto_id: 20
+    type: bool
+    help: "Get/Set input A analog voltage measurement capability (0-3.3V, GP_A/PB4/ADC1_IN3). Shares GPIO pins with cap_input_a / cap_pir_detector / cap_buzzer — mutually exclusive (#396)."
+
+  - name: cap_analog_b
+    proto_group: sensors
+    proto_id: 21
+    type: bool
+    help: "Get/Set input B analog voltage measurement capability (0-3.3V, GP_B/PA11/ADC1_IN7). Shares GPIO pins with cap_input_b / cap_pir_detector / cap_buzzer — mutually exclusive (#396)."
+
   # Dynamic alarm rule slots. One packed-hex rule per slot (the slot index is the
   # rule's stable identity). 17 bytes little-endian:
   #   [0] flags  bit0=present (slot occupied), bit1=enabled

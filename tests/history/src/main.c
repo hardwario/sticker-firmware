@@ -265,4 +265,42 @@ ZTEST(history, test_pressure_illuminance_orientation_accel_channels)
 		      "orientation absent (INT_MAX sentinel)");
 }
 
+/* #396: GP_A/GP_B analog voltage — same fixed-width present/absent pattern,
+ * gated on cap_analog_a/cap_analog_b. */
+ZTEST(history, test_analog_input_voltage_channels)
+{
+	setup();
+	g_app_config.cap_analog_a = true;
+	g_app_config.cap_analog_b = true;
+	g_app_config.history_sensors |=
+		BIT(APP_HISTORY_INPUT_A_VOLTAGE) | BIT(APP_HISTORY_INPUT_B_VOLTAGE);
+	zassert_equal(app_history_init(), 0, "re-init with cap_analog_a/b");
+	app_history_clear();
+
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	g_app_sensor_data.input_a_voltage = 1.65f;
+	g_app_sensor_data.input_b_voltage = 3.3f;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+	app_history_capture();
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0, "get");
+	zassert_true(r.present & BIT16(APP_HISTORY_INPUT_A_VOLTAGE), "input-a-voltage present");
+	zassert_within(r.value[APP_HISTORY_INPUT_A_VOLTAGE], 1.65, 0.001, "input-a-voltage %g",
+		       r.value[APP_HISTORY_INPUT_A_VOLTAGE]);
+	zassert_true(r.present & BIT16(APP_HISTORY_INPUT_B_VOLTAGE), "input-b-voltage present");
+	zassert_within(r.value[APP_HISTORY_INPUT_B_VOLTAGE], 3.3, 0.001, "input-b-voltage %g",
+		       r.value[APP_HISTORY_INPUT_B_VOLTAGE]);
+
+	/* Absent sentinel: NaN voltage (capability off or ADC/pin conflict). */
+	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
+	g_app_sensor_data.input_a_voltage = NAN;
+	k_mutex_unlock(&g_app_sensor_data_lock);
+	app_history_capture();
+
+	zassert_equal(app_history_get(1, &r), 0, "get1");
+	zassert_false(r.present & BIT16(APP_HISTORY_INPUT_A_VOLTAGE),
+		      "input-a-voltage absent (NaN sentinel)");
+}
+
 ZTEST_SUITE(history, NULL, NULL, NULL, NULL, NULL);

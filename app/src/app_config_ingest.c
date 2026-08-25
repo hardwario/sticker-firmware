@@ -464,6 +464,12 @@ int app_config_apply_sensors(enum app_cmd_transport tp, const AppConfigMessage_S
 	if (src->has_cap_buzzer) {
 		config->cap_buzzer = src->cap_buzzer;
 	}
+	if (src->has_cap_analog_a) {
+		config->cap_analog_a = src->cap_analog_a;
+	}
+	if (src->has_cap_analog_b) {
+		config->cap_analog_b = src->cap_analog_b;
+	}
 	return ret;
 }
 
@@ -547,6 +553,14 @@ void app_config_fill_sensors(AppConfigMessage_Sensors *dst, const uint32_t *ids,
 	if (requested(ids, n, 19)) {
 		dst->has_cap_buzzer = true;
 		dst->cap_buzzer = c->cap_buzzer;
+	}
+	if (requested(ids, n, 20)) {
+		dst->has_cap_analog_a = true;
+		dst->cap_analog_a = c->cap_analog_a;
+	}
+	if (requested(ids, n, 21)) {
+		dst->has_cap_analog_b = true;
+		dst->cap_analog_b = c->cap_analog_b;
 	}
 }
 

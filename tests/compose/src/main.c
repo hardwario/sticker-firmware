@@ -54,6 +54,8 @@ static void set_clean(void)
 	g_app_sensor_data.illuminance = NAN;
 	g_app_sensor_data.altitude = NAN;
 	g_app_sensor_data.pressure = NAN;
+	g_app_sensor_data.input_a_voltage = NAN;
+	g_app_sensor_data.input_b_voltage = NAN;
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 		g_app_sensor_data.w1[s].temperature = NAN;
 		g_app_sensor_data.w1[s].humidity = NAN;
@@ -197,6 +199,59 @@ ZTEST(compose, test_counter_flags)
 		}
 	}
 	zassert_true(seen, "hall_left missing");
+}
+
+/* #396: analog voltage on GP_A/GP_B — same sentinel-on-NaN / cap-gated pattern
+ * as pressure/illuminance. */
+ZTEST(compose, test_input_analog_voltage)
+{
+	Telemetry fr[8];
+	size_t n;
+
+	/* cap off -> field dropped even with valid data */
+	set_clean();
+	g_app_sensor_data.input_a_voltage = 1.65f;
+	g_app_config.cap_analog_a = false;
+	run_report(fr, 8, &n);
+	for (size_t i = 0; i < n; i++) {
+		zassert_false(fr[i].has_input_a_voltage, "input_a_voltage leaked with cap off");
+	}
+
+	/* cap on -> voltage present, scaled to mV */
+	set_clean();
+	g_app_sensor_data.input_a_voltage = 1.65f;
+	g_app_sensor_data.input_b_voltage = 3.3f;
+	g_app_config.cap_analog_a = true;
+	g_app_config.cap_analog_b = true;
+	run_report(fr, 8, &n);
+	bool seen_a = false, seen_b = false;
+	for (size_t i = 0; i < n; i++) {
+		if (fr[i].has_input_a_voltage) {
+			seen_a = true;
+			zassert_equal(fr[i].input_a_voltage, 1650, "input_a_voltage scale");
+		}
+		if (fr[i].has_input_b_voltage) {
+			seen_b = true;
+			zassert_equal(fr[i].input_b_voltage, 3300, "input_b_voltage scale");
+		}
+	}
+	zassert_true(seen_a, "input_a_voltage missing with cap on");
+	zassert_true(seen_b, "input_b_voltage missing with cap on");
+
+	/* cap on but NaN (no valid sample) -> sentinel, not dropped */
+	set_clean();
+	g_app_config.cap_analog_a = true;
+	run_report(fr, 8, &n);
+	bool seen_sentinel = false;
+	for (size_t i = 0; i < n; i++) {
+		if (fr[i].has_input_a_voltage) {
+			seen_sentinel = true;
+			zassert_equal(fr[i].input_a_voltage, UINT32_MAX,
+				      "absent input_a_voltage -> sentinel, got %u",
+				      fr[i].input_a_voltage);
+		}
+	}
+	zassert_true(seen_sentinel, "input_a_voltage sentinel missing with cap on");
 }
 
 ZTEST(compose, test_multiframe_split)

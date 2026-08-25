@@ -6,6 +6,7 @@
 
 #include "app_accel.h"
 #include "app_alarm.h"
+#include "app_analog.h"
 #include "app_battery.h"
 #include "app_buzzer.h"
 #include "app_config.h"
@@ -56,6 +57,8 @@ struct app_sensor_data g_app_sensor_data = {
 	.illuminance = NAN,
 	.altitude = NAN,
 	.pressure = NAN,
+	.input_a_voltage = NAN,
+	.input_b_voltage = NAN,
 	.w1 =
 		{
 			[0 ... APP_W1_SLOT_COUNT - 1] = {.temperature = NAN, .humidity = NAN},
@@ -219,24 +222,55 @@ int app_sensor_init(void)
 		}
 	}
 
-	if ((g_app_config.cap_input_a || g_app_config.cap_input_b) &&
+	if ((g_app_config.cap_input_a || g_app_config.cap_input_b || g_app_config.cap_analog_a ||
+	     g_app_config.cap_analog_b) &&
 	    (g_app_config.cap_pir_detector || g_app_config.cap_buzzer)) {
-		/* PIR, the buzzer HW variant (#338), and the digital inputs all share
-		 * PB4/PA11 (#90). PIR/buzzer win; the inputs are not initialised. Clear
-		 * their runtime enables too (H-7) so telemetry and GetConfig stop
-		 * reporting a non-functional input as active — otherwise the operator
-		 * sees the input "enabled" with count 0 and never learns it is silently
-		 * dead. The persisted config is untouched (g_app_config is the runtime
-		 * copy); fixing the pin conflict is a config change. */
-		LOG_WRN("PIR/buzzer and input share GPIO pins — inputs disabled");
+		/* PIR, the buzzer HW variant (#338), the digital inputs, and the analog
+		 * voltage inputs (#396) all share PB4/PA11 (#90). PIR/buzzer win; nothing
+		 * else is initialised. Clear their runtime enables too (H-7) so telemetry
+		 * and GetConfig stop reporting a non-functional input/analog reading as
+		 * active — otherwise the operator sees it "enabled" (count 0 / stale
+		 * voltage) and never learns it is silently dead. The persisted config is
+		 * untouched (g_app_config is the runtime copy); fixing the pin conflict
+		 * is a config change. */
+		LOG_WRN("PIR/buzzer and input/analog share GPIO pins — input/analog disabled");
 		g_app_config.cap_input_a = false;
 		g_app_config.cap_input_b = false;
-	} else if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
-		ret = app_input_init();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_input_init", ret);
-			res = res ? res : ret;
+		g_app_config.cap_analog_a = false;
+		g_app_config.cap_analog_b = false;
+	} else {
+		/* #396: a pin can't be a GPIO digital input and an ADC analog input at
+		 * once. Digital wins per pin when both are misconfigured together —
+		 * same "the more established capability keeps the pin" precedent as
+		 * PIR winning over the buzzer above. */
+		if (g_app_config.cap_input_a && g_app_config.cap_analog_a) {
+			LOG_WRN("cap_input_a and cap_analog_a share GP_A — input wins, analog "
+				"disabled");
+			g_app_config.cap_analog_a = false;
 		}
+		if (g_app_config.cap_input_b && g_app_config.cap_analog_b) {
+			LOG_WRN("cap_input_b and cap_analog_b share GP_B — input wins, analog "
+				"disabled");
+			g_app_config.cap_analog_b = false;
+		}
+
+		if (g_app_config.cap_input_a || g_app_config.cap_input_b) {
+			ret = app_input_init();
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_input_init", ret);
+				res = res ? res : ret;
+			}
+		}
+
+#if defined(CONFIG_ADC)
+		if (g_app_config.cap_analog_a || g_app_config.cap_analog_b) {
+			ret = app_analog_init();
+			if (ret) {
+				LOG_ERR_CALL_FAILED_INT("app_analog_init", ret);
+				res = res ? res : ret;
+			}
+		}
+#endif /* defined(CONFIG_ADC) */
 	}
 
 	if (g_app_config.cap_buzzer && g_app_config.cap_pir_detector) {
@@ -455,6 +489,8 @@ void app_sensor_sample(void)
 	float illuminance = NAN;
 	float altitude = NAN;
 	float pressure = NAN;
+	float input_a_voltage = NAN;
+	float input_b_voltage = NAN;
 
 	struct app_hall_data hall_data = {0};
 	struct app_input_data input_data = {0};
@@ -479,6 +515,22 @@ void app_sensor_sample(void)
 	ret = app_battery_measure(&voltage);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_battery_measure", ret);
+	}
+
+	/* #396: one-shot reads, same cadence as the battery measurement above —
+	 * app_sensor_init() already resolved the pin-sharing conflicts, so both
+	 * flags being true here means both pins are genuinely available. */
+	if (g_app_config.cap_analog_a) {
+		ret = app_analog_measure_a(&input_a_voltage);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_analog_measure_a", ret);
+		}
+	}
+	if (g_app_config.cap_analog_b) {
+		ret = app_analog_measure_b(&input_b_voltage);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_analog_measure_b", ret);
+		}
 	}
 #endif /* defined(CONFIG_ADC) */
 
@@ -622,6 +674,8 @@ void app_sensor_sample(void)
 	g_app_sensor_data.input_b_count = input_data.input_b_count;
 	g_app_sensor_data.input_a_is_active = input_data.input_a_is_active;
 	g_app_sensor_data.input_b_is_active = input_data.input_b_is_active;
+	g_app_sensor_data.input_a_voltage = input_a_voltage;
+	g_app_sensor_data.input_b_voltage = input_b_voltage;
 
 	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 		g_app_sensor_data.w1[s] = w1[s];

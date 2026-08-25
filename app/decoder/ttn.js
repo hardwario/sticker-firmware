@@ -111,7 +111,8 @@ var _SEN_NAMES = {
   5: "cap_light_sensor", 6: "cap_barometer", 7: "cap_pir_detector",
   8: "cap_w1_sensors", 9: "cap_accelerometer", 10: "accel_motion_sensitivity",
   15: "hall_left_counter", 16: "hall_right_counter",
-  17: "input_a_counter", 18: "input_b_counter", 19: "cap_buzzer"
+  17: "input_a_counter", 18: "input_b_counter", 19: "cap_buzzer",
+  20: "cap_analog_a", 21: "cap_analog_b"
 };
 var _SEN_ENUMS = { 10: ["off", "low", "medium", "high"] };
 var _SEN_FLOAT = {};
@@ -386,20 +387,25 @@ var _HIST_SENSORS = [
   { name: "pressure", enc: "pressure" },
   { name: "illuminance", enc: "lux" },
   { name: "orientation", enc: "orient" },
-  { name: "accel_motion_count", enc: "count" }
+  { name: "accel_motion_count", enc: "count" },
+  // #396: GP_A/GP_B analog voltage.
+  { name: "input_a_voltage", enc: "voltage" },
+  { name: "input_b_voltage", enc: "voltage" }
 ];
 var _HIST_TEMP_SENTINEL = 0x7fff;
 var _HIST_HUM_SENTINEL = 0xff;
 var _HIST_PRESSURE_SENTINEL = 0xffff;
 var _HIST_LUX_SENTINEL = 0xffff;
 var _HIST_ORIENT_SENTINEL = 0xff;
+var _HIST_VOLTAGE_SENTINEL = 0xffff;
 
 // HistoryFrame carries a shared `present` mask + `interval_s` once; samples is a
 // sequence of fixed-size, values-only records (no per-record time or mask):
 //   [per present sensor: scaled value]   int16 LE ×100 (temp), uint8 ×2 (hum),
 //                                         uint32 LE (counter), uint16 LE ×10
 //                                         (pressure, hPa), uint16 LE /2 (lux),
-//                                         uint8 raw (orientation); sentinel = null.
+//                                         uint8 raw (orientation), uint16 LE mV
+//                                         (voltage); sentinel = null.
 // Record j's time is t0_unix + j*interval_s (records are periodic). One
 // ReqHistory yields N such frames (frame_index 0..frame_count-1); the consumer
 // concatenates their records to reconstruct the requested window.
@@ -409,7 +415,7 @@ function _decodeHistorySamples(bytes, t0, present, interval, synced) {
   for (var s = 0; s < _HIST_SENSORS.length; s++) {
     if (!(present & (1 << s))) continue;
     var e = _HIST_SENSORS[s].enc;
-    recSize += (e === "temp" || e === "pressure" || e === "lux") ? 2
+    recSize += (e === "temp" || e === "pressure" || e === "lux" || e === "voltage") ? 2
       : (e === "hum" || e === "orient") ? 1 : 4;
   }
   if (recSize === 0) return out;
@@ -438,6 +444,9 @@ function _decodeHistorySamples(bytes, t0, present, interval, synced) {
       } else if (d.enc === "orient") {
         var ov = bytes[p]; p += 1;
         rec[d.name] = ov === _HIST_ORIENT_SENTINEL ? null : ov;
+      } else if (d.enc === "voltage") {
+        var vv = bytes[p] | (bytes[p + 1] << 8); p += 2;
+        rec[d.name] = vv === _HIST_VOLTAGE_SENTINEL ? null : vv / 1000;
       } else { // count
         rec[d.name] = (bytes[p] | (bytes[p + 1] << 8) | (bytes[p + 2] << 16) |
                        (bytes[p + 3] << 24)) >>> 0; p += 4;
@@ -646,6 +655,10 @@ function decodeTelemetry(bytes) {
         d.input_b_is_active = (v.value & (1 << 2)) !== 0;
         break;
       case 26: d.accel_motion_count = v.value; break;
+      // input A/B analog voltage (#396) — sentinel -> null (capability enabled
+      // but no valid sample, e.g. lost the pin-sharing conflict at boot).
+      case 28: d.input_a_voltage = (v.value === _TM_U32_NA) ? null : v.value / 1000; break;
+      case 29: d.input_b_voltage = (v.value === _TM_U32_NA) ? null : v.value / 1000; break;
       default: break; /* unknown field: ignore (forward-compatible) */
     }
   }

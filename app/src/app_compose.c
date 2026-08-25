@@ -60,6 +60,8 @@ enum tlm_group {
 	G_HALL_R,       /* hall_right_count, hall_right_flags */
 	G_INPUT_A,      /* input_a_count, input_a_flags */
 	G_INPUT_B,      /* input_b_count, input_b_flags */
+	G_ANALOG_A,     /* input_a_voltage (#396) */
+	G_ANALOG_B,     /* input_b_voltage (#396) */
 	G_COUNT,
 };
 
@@ -113,6 +115,12 @@ static void apply_group(Telemetry *dst, const Telemetry *src, enum tlm_group g, 
 	case G_INPUT_B:
 		SEL(input_b_count);
 		SEL(input_b_flags);
+		break;
+	case G_ANALOG_A:
+		SEL(input_a_voltage);
+		break;
+	case G_ANALOG_B:
+		SEL(input_b_voltage);
 		break;
 	default:
 		break;
@@ -288,6 +296,24 @@ static void fill_telemetry(Telemetry *t, bool boot)
 		t->input_b_count = input.input_b_count;
 		t->has_input_b_flags = true;
 		t->input_b_flags = f;
+	}
+
+	/* analog A / B (#396) — sentinel on NaN (capability off, ADC fault, or the
+	 * pin lost the pin-sharing conflict to digital input/PIR/buzzer), same
+	 * "whole group every report" policy as the other analog scalars above. */
+	if (g_app_config.cap_analog_a) {
+		t->has_input_a_voltage = true;
+		t->input_a_voltage =
+			isnan(d.input_a_voltage)
+				? TM_U32_NA
+				: (uint32_t)CLAMP(d.input_a_voltage * 1000.0f, 0.0f, 65534.0f);
+	}
+	if (g_app_config.cap_analog_b) {
+		t->has_input_b_voltage = true;
+		t->input_b_voltage =
+			isnan(d.input_b_voltage)
+				? TM_U32_NA
+				: (uint32_t)CLAMP(d.input_b_voltage * 1000.0f, 0.0f, 65534.0f);
 	}
 }
 
