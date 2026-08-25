@@ -10,7 +10,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 |---|---|
 | Buzzer | **New** — alarm-driven melodies (#397, Phase 2 of #338): the buzzer HW variant now sounds automatically while any alarm is active, gated on a new global `alarm-buzzer-mode` config key |
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
-| LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). Not wired into any automatic runtime path yet — the LoRaWAN-off idle blink is unchanged. |
+| LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
 
 ---
 
@@ -111,15 +111,24 @@ hardware.
 
 Rather than ship the periodic path unvalidated, this PR ships **only the
 primitives**: the LoRaWAN-off branch keeps its original single yellow GPIO
-blink, unchanged. The functions stay available for a future event-driven
-caller (an NFC tap, an alarm transition — moments the device is already awake
-for other reasons) to invoke on demand, paying the pulse cost only when that
-event actually happens rather than on a fixed cadence while otherwise idle.
-This closes out #301's own documented fallback option ("restrict PWM to
-interactive moments... keep a plain GPIO blink for the idle heartbeat").
-Picking a first event-driven caller, and/or doing the PPK2 measurement to
-settle whether a periodic heartbeat is viable after all, is unscheduled
-future work — not tracked by an open issue for now.
+blink, unchanged. This closes out #301's own documented fallback option
+("restrict PWM to interactive moments... keep a plain GPIO blink for the idle
+heartbeat"). Doing the PPK2 measurement to settle whether a periodic heartbeat
+is viable after all is unscheduled future work — not tracked by an open issue
+for now.
+
+**First event-driven consumer: the boot carousel.** `main.c`'s
+`play_carousel_boot()` — the one-shot red/yellow/green sequence played once
+at boot, before the app's normal idle behaviour starts — now fades red and
+green in/out (`app_led_fade`) instead of a hard on/off blink; yellow keeps its
+plain GPIO blink (no timer channel). This is exactly the kind of caller the
+power concern above doesn't apply to: it runs once per boot, not on a 3 s
+idle cadence, and the CPU is already fully awake for NFC/radio bring-up during
+that window regardless. Per-colour timing (500/250/500/250/1500 ms) is
+unchanged from the previous hard-blink carousel, so the overall boot animation
+length is identical — only the red/green transitions are now smooth. HW-
+confirmed on the bench (J-Link EDU Mini 801053709, SN 2162165627): red and
+green fade smoothly, yellow blinks as before.
 
 ---
 

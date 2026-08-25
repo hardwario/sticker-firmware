@@ -92,22 +92,25 @@ static void die(void)
 
 static void play_carousel_boot(void)
 {
-	struct app_led_play_req req = {
-		.commands = {{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 500},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 250},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 500},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 250},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 1500},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
-			     {.type = APP_LED_CMD_END}},
-		.repetitions = 1};
+	/* Red and green are HW PWM: fade in/hold/fade out instead of a hard blink
+	 * (#301). Yellow (PA4) has no timer channel and stays a plain GPIO blink,
+	 * same timing as before. Durations match the old hard-blink carousel
+	 * (500/250/500/250/1500 ms) so the overall boot animation length is
+	 * unchanged. */
+	app_led_fade(APP_LED_CHANNEL_R, 0, 100, 150);
+	k_sleep(K_MSEC(200));
+	app_led_fade(APP_LED_CHANNEL_R, 100, 0, 150);
+	k_sleep(K_MSEC(250));
 
-	app_led_play(&req);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_ON);
+	k_sleep(K_MSEC(500));
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+	k_sleep(K_MSEC(250));
+
+	app_led_fade(APP_LED_CHANNEL_G, 0, 100, 300);
+	k_sleep(K_MSEC(900));
+	app_led_fade(APP_LED_CHANNEL_G, 100, 0, 300);
+
 	k_sleep(K_MSEC(5000));
 }
 
