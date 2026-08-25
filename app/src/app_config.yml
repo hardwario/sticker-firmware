@@ -137,7 +137,11 @@ commands:
     # which reject the (re)join while unsaved LoRaWAN staging changes exist.
     - {name: lrw_reset, proto_id: 16, body: LrwReset, kind: handler, response: ack}
     - {name: lrw_join, proto_id: 17, body: LrwJoin, kind: handler, response: ack}
-    - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: action, action: ENTER_CALIBRATION, response: ack, transports: [lrw, nfc]}
+    # #395: handler (not plain action) so the dispatch calls
+    # app_cmd_handle_enter_calibration, which reports NOT_SUPPORTED when the
+    # calibration mode isn't compiled in (CONFIG_APP_CALIBRATION=n) instead of
+    # ACKing and persisting a calibration flag nothing would ever consume.
+    - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: handler, response: ack, transports: [lrw, nfc]}
     - {name: sample, proto_id: 21, body: Sample, kind: handler, response: sample, transports: [lrw, nfc]}
     # #299 reset ladder, new middle tier: keeps identity only (serial/vendor_token/
     # secret_key/nonce_counter/claim_token/DevEUI/JoinEUI), drops the LoRaWAN
