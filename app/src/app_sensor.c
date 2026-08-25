@@ -257,6 +257,10 @@ int app_sensor_init(void)
 		} else {
 			app_pyq1648_set_callback(pyq1648_event_handler, NULL);
 		}
+#else
+		/* #395: don't leave a configured PIR silently dead on a lean bench
+		 * build — no motion events would look like a HW fault otherwise. */
+		LOG_WRN("cap_pir_detector set but PIR not built in (CONFIG_APP_PYQ1648=n)");
 #endif /* defined(CONFIG_APP_PYQ1648) */
 	} else if (g_app_config.cap_buzzer) {
 #if defined(CONFIG_APP_BUZZER)
