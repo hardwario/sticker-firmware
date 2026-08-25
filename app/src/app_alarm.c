@@ -99,10 +99,12 @@ struct rstate {
 };
 
 static struct rstate m_rt[APP_ALARM_SLOT_COUNT];
+#if defined(CONFIG_LORAWAN)
 /* -1 = "never sent" sentinel; k_uptime_get() legitimately returns 0 in the first
  * millisecond after boot, so 0 cannot mark "never sent" without a window where the
  * rate limit is silently skipped (#219). */
 static int64_t m_last_alarm_send_ms = -1;
+#endif /* defined(CONFIG_LORAWAN) */
 static app_alarm_event_cb m_event_cb;
 static void *m_event_cb_user_data;
 

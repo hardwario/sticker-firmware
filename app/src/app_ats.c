@@ -176,8 +176,12 @@ static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
+#if defined(CONFIG_SHT4X) || defined(CONFIG_W1)
 	int ret;
+#endif /* defined(CONFIG_SHT4X) || defined(CONFIG_W1) */
+#if defined(CONFIG_W1)
 	int count;
+#endif /* defined(CONFIG_W1) */
 
 #if defined(CONFIG_SHT4X)
 	/* SHT40 (onboard temperature/humidity sensor) */

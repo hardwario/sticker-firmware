@@ -53,8 +53,12 @@ static const uint8_t m_cal_nwkskey[] = {0xaf, 0x4f, 0x05, 0x0b, 0xd3, 0x74, 0x0d
 static const uint8_t m_cal_appskey[] = {0xd9, 0xa9, 0xc4, 0x1a, 0xcf, 0x55, 0x99, 0xdc,
 					0xe1, 0x16, 0x8e, 0xfe, 0x6d, 0x29, 0x1d, 0xab};
 
+#if defined(CONFIG_W1)
 static int m_count_ds18b20;
+#endif /* defined(CONFIG_W1) */
+#if defined(CONFIG_DS28E17)
 static int m_count_machine_probe;
+#endif /* defined(CONFIG_DS28E17) */
 static uint16_t m_battery_mv = BATTERY_INVALID_MV;
 
 /* #340 M22: lorawan_send() blocks on a MAC-confirm semaphore that can hang
