@@ -35,11 +35,10 @@ config RADIO_P2P
 	help
 	  Reserved app-level name for the raw-LoRa P2P transport (issue
 	  #118), pairing with RADIO_LORAWAN above. The P2P implementation
-	  (app_p2p.c, app_transport.c) lives on a separate, unmerged branch
-	  (hynek/issue118-p2p-phase1) and is NOT present here — this option
-	  currently has no effect (nothing depends on or selects anything
-	  from it). Wire it to that branch's CONFIG_APP_LORA_P2P once it
-	  merges, mirroring how RADIO_LORAWAN wraps CONFIG_LORAWAN.
+	  is not merged yet — this option currently has no effect (nothing
+	  depends on or selects anything from it). Wire it to the P2P
+	  transport's own Kconfig once that work merges, mirroring how
+	  RADIO_LORAWAN wraps CONFIG_LORAWAN.
 
 config APP_VERBOSE_LOGGING
 	bool "Enable verbose parameter logging"
