@@ -72,6 +72,21 @@ void app_radio_start(void)
 #endif
 }
 
+#if defined(CONFIG_SHELL)
+void app_radio_rejoin(void)
+{
+#if defined(CONFIG_APP_LORA_P2P)
+	if (is_p2p()) {
+		app_p2p_rejoin();
+		return;
+	}
+#endif
+#if defined(CONFIG_LORAWAN)
+	app_lrw_join(); /* already unconditional -- see app_radio_start() above */
+#endif
+}
+#endif /* defined(CONFIG_SHELL) */
+
 enum app_radio_kind app_radio_get_kind(void)
 {
 #if defined(CONFIG_APP_LORA_P2P)

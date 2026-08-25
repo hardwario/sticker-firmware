@@ -193,7 +193,7 @@ message Command {
     // settings_save). One-shot: app_calibration_init() clears the flag on entry.
     message EnterCalibration { }
     // Reset the LoRaWAN NVM (frame counters + DevNonce + session) and reboot,
-    // equivalent of `ats lrw reset`. Used during (re)commissioning after re-keying
+    // equivalent of `ats radio reset`. Used during (re)commissioning after re-keying
     // or moving the device to another network/session (#109).
     message LrwReset     { }
     // Trigger a forced (re)join immediately instead of waiting for the next

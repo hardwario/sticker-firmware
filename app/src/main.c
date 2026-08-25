@@ -724,28 +724,32 @@ int main(void)
 	return 0;
 }
 
-#if defined(CONFIG_SHELL) && defined(CONFIG_LORAWAN)
+#if defined(CONFIG_SHELL) && (defined(CONFIG_LORAWAN) || defined(CONFIG_APP_LORA_P2P))
 
+/* app_radio_rejoin() is transport-agnostic (routes through app_radio, #118)
+ * and, unlike app_radio_start() (boot-time bring-up), always forces a fresh
+ * join attempt even if the radio already has a live session/pairing --
+ * LoRaWAN already worked that way unconditionally; P2P needed the explicit
+ * rejoin entry point since app_p2p_start() intentionally treats an existing
+ * pairing as sufficient (a session persists across a normal power cycle,
+ * doc/p2p.md §7). Mirrors the `send` fix below -- this used to call
+ * app_lrw_join() directly and was compiled out on P2P-only builds. */
 static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 {
-	app_lrw_join();
+	app_radio_rejoin();
 
 	shell_print(shell, "command succeeded");
 
 	return 0;
 }
 
-SHELL_CMD_REGISTER(join, NULL, "Join LoRaWAN network.", cmd_join);
+SHELL_CMD_REGISTER(join, NULL, "Force a fresh (re)join, even if already joined/paired.", cmd_join);
 
-#endif /* defined(CONFIG_SHELL) && defined(CONFIG_LORAWAN) */
-
-#if defined(CONFIG_SHELL) && (defined(CONFIG_LORAWAN) || defined(CONFIG_APP_LORA_P2P))
-
-/* app_report_trigger() is transport-agnostic (routes through app_radio,
- * #118 phase 2) -- unlike `join` (a LoRaWAN-specific action), `send` must
- * stay available on a P2P-only (CONFIG_LORAWAN=n) build too. Regression
- * found via #118 phase 2 HIL after CONFIG_LORAWAN became toggleable: this
- * command was silently compiled out on the P2P bench overlay. */
+/* app_report_trigger() is transport-agnostic too (routes through app_radio,
+ * #118 phase 2), so it stays available on a P2P-only (CONFIG_LORAWAN=n) build
+ * just like `join` above. Regression found via #118 phase 2 HIL after
+ * CONFIG_LORAWAN became toggleable: this command was silently compiled out on
+ * the P2P bench overlay. */
 static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 {
 	app_report_trigger();
