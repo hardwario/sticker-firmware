@@ -665,12 +665,14 @@ int main(void)
 			app_led_blink(&req);
 			led_handled = true;
 		} else if (lrw_state == APP_LRW_STATE_DISABLED) {
-			/* Radio disabled by radio-mode (#271/#278): a deliberate operator choice
-			 * (radio-mode off/p2p), not a network fault — so this is the benign "OK
-			 * idle" state and gets the configurable idle indicator (default: green
-			 * PWM heartbeat). Transport/colour/style are a runtime shell knob
-			 * (`ats led idle ...`) for comparing LED power at the 3 s cadence. */
-			app_led_idle_pulse();
+			/* Radio disabled by radio-mode (#271/#278): a single yellow blink — the
+			 * lowest rung of the yellow severity scale, since this is a deliberate
+			 * operator choice (radio-mode off/p2p), not a network fault. */
+			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
+							.duration = 5,
+							.space = 0,
+							.repetitions = 1};
+			app_led_blink(&req);
 			led_handled = true;
 		}
 #endif /* defined(CONFIG_LORAWAN) */
