@@ -11,6 +11,7 @@
  */
 
 #include "app_alarm_rules.h"
+#include "app_buzzer.h"
 #include "app_clock.h"
 #include "app_cmd.h"
 #include "app_config.h"
@@ -122,5 +123,22 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 	}
 	out[0] = 0;
 	*out_len = 1;
+	return 0;
+}
+
+/* ---- buzzer (#397): app_alarm_poll() drives the local buzzer as a side
+ * effect (alarm_buzzer_sync() in app_alarm.c). Track every call so cases can
+ * assert on the alarm-event -> melody trigger/stop plumbing without a real
+ * GPIO thread. ---- */
+
+int g_buzzer_play_calls;
+uint32_t g_buzzer_play_last_kind;
+uint16_t g_buzzer_play_last_repeat_s;
+
+int app_buzzer_play_repeating(uint32_t kind, uint16_t repeat_s)
+{
+	g_buzzer_play_calls++;
+	g_buzzer_play_last_kind = kind;
+	g_buzzer_play_last_repeat_s = repeat_s;
 	return 0;
 }
