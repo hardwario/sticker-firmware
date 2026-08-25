@@ -14,6 +14,7 @@
 
 #include "app_alarm.h"
 #include "app_alarm_rules.h"
+#include "app_buzzer.h"
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_hall.h"
@@ -23,6 +24,9 @@
 #include <zephyr/ztest.h>
 
 extern struct app_hall_data test_hall;
+extern int g_buzzer_play_calls;
+extern uint32_t g_buzzer_play_last_kind;
+extern uint16_t g_buzzer_play_last_repeat_s;
 
 static void before(void *unused)
 {
@@ -31,6 +35,11 @@ static void before(void *unused)
 	test_hall = (struct app_hall_data){0};
 	g_app_sensor_data = (struct app_sensor_data){0};
 	g_app_config.interval_report = 0;
+	g_app_config.cap_buzzer = false;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
+	g_buzzer_play_calls = 0;
+	g_buzzer_play_last_kind = 0;
+	g_buzzer_play_last_repeat_s = 0;
 	/* app_alarm.c's per-slot runtime latch (m_rt[]) is static file-scope state
 	 * that outlives a single ztest case. rt_sync() only resets a slot when its
 	 * (source, quantity) changes or the slot was never used — several tests
@@ -518,4 +527,193 @@ ZTEST(alarm_eval, test_editing_active_rule_emits_deactivate_edge_then_rearms)
 	zassert_true(test_alarm_event_count > 0, "no activate edge after re-fire");
 	zassert_equal(last_event()->edge, 0, "expected activate edge (0), got %u",
 		      last_event()->edge);
+}
+
+/* ---- #397: alarm-event -> buzzer melody trigger/stop plumbing -----------
+ *
+ * alarm_buzzer_sync() (app_alarm.c) drives the buzzer as a side effect of
+ * app_alarm_poll()'s per-alarm active bitmask. app_buzzer_play_repeating()
+ * itself is stubbed (stubs.c) so these assert on the call pattern rather
+ * than real GPIO/thread behavior — that side is covered by tests/buzzer's
+ * real app_buzzer.c + gpio_emul. */
+
+ZTEST(alarm_eval, test_buzzer_suppressed_without_cap_buzzer)
+{
+	g_app_config.cap_buzzer = false;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
+
+	activate_threshold_slot0();
+
+	zassert_equal(g_buzzer_play_calls, 0, "buzzer played without cap_buzzer");
+}
+
+ZTEST(alarm_eval, test_buzzer_suppressed_when_mode_off)
+{
+	g_app_config.cap_buzzer = true;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
+
+	activate_threshold_slot0();
+
+	zassert_equal(g_buzzer_play_calls, 0, "buzzer played with alarm_buzzer_mode = off");
+}
+
+ZTEST(alarm_eval, test_buzzer_plays_alarm_melody_on_activation)
+{
+	g_app_config.cap_buzzer = true;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
+
+	activate_threshold_slot0();
+
+	zassert_equal(g_buzzer_play_calls, 1, "activation must trigger exactly one buzzer call");
+	zassert_equal(g_buzzer_play_last_kind, APP_BUZZER_KIND_ALARM, "wrong melody kind");
+	zassert_equal(g_buzzer_play_last_repeat_s, 30, "wrong repeat interval");
+}
+
+ZTEST(alarm_eval, test_buzzer_mode_repeat_intervals)
+{
+	/* Each non-off mode maps to its own melody-engine repeat interval;
+	 * reserved modes fall back to normal's. Walk them all on the same
+	 * activation edge (deactivate + reactivate between modes). */
+	static const struct {
+		enum app_config_alarm_buzzer_mode mode;
+		uint16_t repeat_s;
+	} cases[] = {
+		{APP_CONFIG_ALARM_BUZZER_MODE_ONCE, 0},
+		{APP_CONFIG_ALARM_BUZZER_MODE_SLOW, 120},
+		{APP_CONFIG_ALARM_BUZZER_MODE_NORMAL, 30},
+		{APP_CONFIG_ALARM_BUZZER_MODE_FAST, 10},
+		{APP_CONFIG_ALARM_BUZZER_MODE_CONTINUOUS, 1},
+		{APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_6, 30},
+		{APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_7, 30},
+	};
+
+	g_app_config.cap_buzzer = true;
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		g_app_config.alarm_buzzer_mode = cases[i].mode;
+		g_buzzer_play_calls = 0;
+
+		activate_threshold_slot0();
+		zassert_equal(g_buzzer_play_calls, 1, "mode %d: expected one melody call",
+			      cases[i].mode);
+		zassert_equal(g_buzzer_play_last_kind, APP_BUZZER_KIND_ALARM,
+			      "mode %d: wrong melody kind", cases[i].mode);
+		zassert_equal(g_buzzer_play_last_repeat_s, cases[i].repeat_s,
+			      "mode %d: wrong repeat interval", cases[i].mode);
+
+		g_app_sensor_data.temperature = 20.0f; /* clear for the next round */
+		app_alarm_poll();
+	}
+}
+
+ZTEST(alarm_eval, test_buzzer_does_not_retrigger_while_still_active)
+{
+	g_app_config.cap_buzzer = true;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
+
+	activate_threshold_slot0();
+	zassert_equal(g_buzzer_play_calls, 1, "activation must trigger exactly one buzzer call");
+
+	g_buzzer_play_calls = 0;
+	zassert_true(app_alarm_poll(), "alarm unexpectedly cleared");
+	zassert_true(app_alarm_poll(), "alarm unexpectedly cleared");
+	zassert_equal(g_buzzer_play_calls, 0,
+		      "buzzer re-triggered on a poll with no activation edge");
+}
+
+ZTEST(alarm_eval, test_buzzer_replays_on_new_alarm_while_another_active)
+{
+	/* A SECOND alarm activating while the first is still active must replay
+	 * the melody immediately (per-alarm bitmask edge, not the aggregate
+	 * bool) — in every non-off mode, here demonstrated with `once`, whose
+	 * repeat_s=0 means the replay could not come from the engine's own
+	 * repeat cycle. */
+	g_app_config.cap_buzzer = true;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ONCE;
+
+	activate_threshold_slot0(); /* alarm #1: onboard temperature, slot 0 */
+	zassert_equal(g_buzzer_play_calls, 1, "first activation must play once");
+
+	/* Alarm #2 in slot 1: onboard humidity, dwell 0, fires on this poll. */
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_ONBOARD,
+		.quantity = APP_ALARM_Q_HUMIDITY,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 60.0f,
+		.dwell = 0.0f,
+	};
+	zassert_equal(app_alarm_rules_set(1, &r), 0, "rule setup rejected");
+	g_app_sensor_data.humidity = 90.0f; /* above hi */
+
+	g_buzzer_play_calls = 0;
+	zassert_true(app_alarm_poll(), "aggregate unexpectedly cleared");
+	zassert_equal(g_buzzer_play_calls, 1, "a NEW alarm while another is active must replay");
+	zassert_equal(g_buzzer_play_last_kind, APP_BUZZER_KIND_ALARM, "wrong melody kind");
+
+	/* Alarm #2 clearing while #1 stays active: no new melody, no stop. */
+	g_app_sensor_data.humidity = 40.0f;
+	g_buzzer_play_calls = 0;
+	zassert_true(app_alarm_poll(), "alarm #1 should still be active");
+	zassert_equal(g_buzzer_play_calls, 0, "partial deactivation must not touch the buzzer");
+}
+
+ZTEST(alarm_eval, test_active_mask_and_activation_seq)
+{
+	/* #397: the per-alarm active mask + monotonic activation sequence are
+	 * readable anywhere via app_alarm_active_mask()/app_alarm_activation_seq()
+	 * — the same central edge the buzzer replays on. seq is a static that
+	 * persists across test cases, so compare relatively, never absolutely. */
+	zassert_equal(app_alarm_active_mask(), 0, "mask not empty at test start");
+	uint32_t seq0 = app_alarm_activation_seq();
+
+	activate_threshold_slot0(); /* slot 0 latches */
+	zassert_equal(app_alarm_active_mask(), BIT(0), "slot 0 bit not set");
+	uint32_t seq1 = app_alarm_activation_seq();
+	zassert_true(seq1 != seq0, "activation did not bump the sequence");
+
+	/* Polls with no change must bump nothing. */
+	app_alarm_poll();
+	app_alarm_poll();
+	zassert_equal(app_alarm_activation_seq(), seq1, "seq bumped without a new activation");
+	zassert_equal(app_alarm_active_mask(), BIT(0), "mask changed without a state change");
+
+	/* A second alarm (slot 1, onboard humidity) sets its own bit + bumps seq. */
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_ONBOARD,
+		.quantity = APP_ALARM_Q_HUMIDITY,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 60.0f,
+		.dwell = 0.0f,
+	};
+	zassert_equal(app_alarm_rules_set(1, &r), 0, "rule setup rejected");
+	g_app_sensor_data.humidity = 90.0f;
+	app_alarm_poll();
+	zassert_equal(app_alarm_active_mask(), BIT(0) | BIT(1), "slot 1 bit not added");
+	uint32_t seq2 = app_alarm_activation_seq();
+	zassert_true(seq2 != seq1, "second activation did not bump the sequence");
+
+	/* Deactivations clear bits but never bump the sequence. */
+	g_app_sensor_data.temperature = 20.0f;
+	g_app_sensor_data.humidity = 40.0f;
+	zassert_false(app_alarm_poll(), "alarms did not clear");
+	zassert_equal(app_alarm_active_mask(), 0, "mask not empty after deactivation");
+	zassert_equal(app_alarm_activation_seq(), seq2, "deactivation bumped the sequence");
+}
+
+ZTEST(alarm_eval, test_buzzer_stops_on_deactivation)
+{
+	g_app_config.cap_buzzer = true;
+	g_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
+
+	activate_threshold_slot0();
+	g_buzzer_play_calls = 0;
+
+	g_app_sensor_data.temperature = 20.0f; /* back in band: deactivates */
+	zassert_false(app_alarm_poll(), "alarm did not clear");
+
+	zassert_equal(g_buzzer_play_calls, 1, "deactivation must trigger exactly one buzzer call");
+	zassert_equal(g_buzzer_play_last_kind, APP_BUZZER_KIND_STOP,
+		      "expected a stop, not a melody");
 }

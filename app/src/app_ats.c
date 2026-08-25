@@ -171,13 +171,140 @@ static void cmd_switch_led(const struct shell *shell, size_t argc, char **argv)
 	}
 }
 
+static int parse_pwm_channel(const struct shell *shell, const char *name, enum app_led_channel *out)
+{
+	if (strcmp(name, "red") == 0) {
+		*out = APP_LED_CHANNEL_R;
+		return 0;
+	}
+	if (strcmp(name, "green") == 0) {
+		*out = APP_LED_CHANNEL_G;
+		return 0;
+	}
+	shell_error(shell, "invalid channel (red|green only; yellow has no PWM)");
+	return -EINVAL;
+}
+
+/* ats led fade <red|green> <from%> <to%> <ms> — ramp one PWM LED for testing. */
+static void cmd_fade_led(const struct shell *shell, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	enum app_led_channel channel;
+	if (parse_pwm_channel(shell, argv[1], &channel)) {
+		return;
+	}
+
+	int from = atoi(argv[2]);
+	int to = atoi(argv[3]);
+	int ms = atoi(argv[4]);
+
+	shell_print(shell, SHELL_PFX " fade %s %d%%->%d%% over %d ms", argv[1], from, to, ms);
+	app_led_fade(channel, from, to, ms);
+}
+
+/* ats led heartbeat <red|green> [reps] — heartbeat pulse(s) for testing. */
+static void cmd_heartbeat_led(const struct shell *shell, size_t argc, char **argv)
+{
+	enum app_led_channel channel;
+	if (parse_pwm_channel(shell, argv[1], &channel)) {
+		return;
+	}
+
+	int reps = (argc >= 3) ? atoi(argv[2]) : 1;
+	if (reps < 1) {
+		reps = 1;
+	} else if (reps > 20) {
+		reps = 20;
+	}
+
+	shell_print(shell, SHELL_PFX " heartbeat %s x%d", argv[1], reps);
+	for (int i = 0; i < reps; i++) {
+		app_led_heartbeat(channel);
+		if (i < reps - 1) {
+			k_sleep(K_MSEC(300)); /* gap between beats */
+		}
+	}
+}
+
+static int parse_any_channel(const struct shell *shell, const char *name, enum app_led_channel *out)
+{
+	if (strcmp(name, "red") == 0) {
+		*out = APP_LED_CHANNEL_R;
+		return 0;
+	}
+	if (strcmp(name, "green") == 0) {
+		*out = APP_LED_CHANNEL_G;
+		return 0;
+	}
+	if (strcmp(name, "yellow") == 0) {
+		*out = APP_LED_CHANNEL_Y;
+		return 0;
+	}
+	shell_error(shell, "invalid channel (red|green|yellow)");
+	return -EINVAL;
+}
+
+/* ats led idle [off|gpio|pwm] [red|green|yellow] [on_ms] — configure the
+ * periodic lrw-mode-off indicator (bench power knob). No args = show current. */
+static void cmd_idle_led(const struct shell *shell, size_t argc, char **argv)
+{
+	static const char *const mode_name[] = {"off", "gpio", "pwm"};
+	static const char *const chan_name[] = {"red", "green", "yellow"};
+
+	if (argc < 2) {
+		enum app_led_idle_mode mode;
+		enum app_led_channel ch;
+		int on_ms;
+		app_led_idle_get(&mode, &ch, &on_ms);
+		shell_print(shell, SHELL_PFX " idle mode=%s color=%s on_ms=%d (period=3s)",
+			    mode_name[mode], chan_name[ch], on_ms);
+		return;
+	}
+
+	enum app_led_idle_mode mode;
+	if (strcmp(argv[1], "off") == 0) {
+		mode = APP_LED_IDLE_OFF;
+	} else if (strcmp(argv[1], "gpio") == 0) {
+		mode = APP_LED_IDLE_GPIO;
+	} else if (strcmp(argv[1], "pwm") == 0) {
+		mode = APP_LED_IDLE_PWM;
+	} else {
+		shell_error(shell, "invalid mode (off|gpio|pwm)");
+		return;
+	}
+
+	/* Keep current colour/on_ms unless overridden. */
+	enum app_led_channel channel;
+	int on_ms;
+	app_led_idle_get(NULL, &channel, &on_ms);
+
+	if (argc >= 3 && parse_any_channel(shell, argv[2], &channel)) {
+		return;
+	}
+	if (argc >= 4) {
+		on_ms = atoi(argv[3]);
+	}
+
+	app_led_idle_config(mode, channel, on_ms);
+
+	/* Read back the effective config (PWM+yellow falls back to green). */
+	app_led_idle_get(&mode, &channel, &on_ms);
+	shell_print(shell, SHELL_PFX " idle mode=%s color=%s on_ms=%d (period=3s)", mode_name[mode],
+		    chan_name[channel], on_ms);
+}
+
 static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
+#if defined(CONFIG_SHT4X) || defined(CONFIG_W1)
 	int ret;
+#endif /* defined(CONFIG_SHT4X) || defined(CONFIG_W1) */
+#if defined(CONFIG_W1)
 	int count;
+#endif /* defined(CONFIG_W1) */
 
 #if defined(CONFIG_SHT4X)
 	/* SHT40 (onboard temperature/humidity sensor) */
@@ -190,6 +317,7 @@ static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char
 	}
 #endif /* defined(CONFIG_SHT4X) */
 
+#if defined(CONFIG_W1)
 	/* DS18B20 sensors (T1, T2) */
 	count = app_ds18b20_get_count();
 	shell_print(shell, "DS18B20 count: %d", count);
@@ -207,6 +335,7 @@ static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char
 		shell_print(shell, "DS18B20[%d] serial: %llu", i, serial_number);
 	}
 
+#if defined(CONFIG_DS28E17)
 	/* Machine Probe sensors (MP1, MP2) */
 	count = app_machine_probe_get_count();
 	shell_print(shell, "Machine Probe count: %d", count);
@@ -234,6 +363,8 @@ static int cmd_print_serial_numbers(const struct shell *shell, size_t argc, char
 			shell_print(shell, "Machine Probe[%d] SHT serial: %u", i, sht_serial);
 		}
 	}
+#endif /* defined(CONFIG_DS28E17) */
+#endif /* defined(CONFIG_W1) */
 
 	return 0;
 }
@@ -498,6 +629,7 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	print_float(shell, "illuminance:", d->illuminance, "lux");
 	/* orientation + raw axes are meaningful only with the accelerometer enabled;
 	 * read live (the onboard accel x/y/z are not cached in g_app_sensor_data). */
+#if defined(CONFIG_LIS2DH)
 	if (g_app_config.cap_accelerometer) {
 		float ax = NAN, ay = NAN, az = NAN;
 		int ori = d->orientation;
@@ -505,7 +637,9 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 		shell_print(shell, "  %-16s %d", "orientation:", ori);
 		shell_print(shell, "  %-16s x=%s%d.%02d y=%s%d.%02d z=%s%d.%02d m/s^2",
 			    "accel:", APP_FP2(ax), APP_FP2(ay), APP_FP2(az));
-	} else {
+	} else
+#endif /* defined(CONFIG_LIS2DH) */
+	{
 		shell_print(shell, "  %-16s nan", "orientation:");
 		shell_print(shell, "  %-16s nan", "accel:");
 	}
@@ -520,6 +654,7 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "  %-16s count=%u active=%s", "input-b:", d->input_b_count,
 		    d->input_b_is_active ? "true" : "false");
 
+#if defined(CONFIG_W1)
 	/* 1-Wire ROM-bound slots s1..s4 — only the quantities the bound sensor
 	 * actually provides are non-NaN (a thermometer shows temperature only; a
 	 * machine probe shows the full cluster). */
@@ -545,6 +680,7 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 		shell_print(shell, "  %-16s %s",
 			    "tilt-alert:", s->is_tilt_alert ? "true" : "false");
 	}
+#endif /* defined(CONFIG_W1) */
 
 	return 0;
 }
@@ -764,6 +900,16 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		cmd_cycle_led, 1, 1),
 	SHELL_CMD_ARG(switch, NULL, "Switch LED channel (format red|yellow|green on|off).",
 		      cmd_switch_led, 3, 0),
+	SHELL_CMD_ARG(fade, NULL, "Fade a PWM LED. Usage: fade <red|green> <from%> <to%> <ms>",
+		      cmd_fade_led, 5, 0),
+	SHELL_CMD_ARG(heartbeat, NULL,
+		      "Heartbeat pulse (0->100->0, ~200ms). Usage: heartbeat <red|green> [reps]",
+		      cmd_heartbeat_led, 2, 1),
+	SHELL_CMD_ARG(
+		idle, NULL,
+		"Idle (radio-off) indicator @3s. Usage: idle [off|gpio|pwm] [red|green|yellow] "
+		"[on_ms]",
+		cmd_idle_led, 1, 3),
 	SHELL_SUBCMD_SET_END);
 
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
@@ -1026,6 +1172,7 @@ static int cmd_ccm_selftest(const struct shell *sh, size_t argc, char **argv)
  * cap_buzzer=true — otherwise app_buzzer_init() was never called (either
  * cap_pir_detector owns the pins, or neither capability is on) and driving the
  * GPIOs here would race whatever else configured them. */
+#if defined(CONFIG_APP_BUZZER)
 static int cmd_buzzer_off(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -1117,6 +1264,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      "Play a fixed melody. Usage: play <info|warning|alarm> [repeat_s 0-999]",
 		      cmd_buzzer_play, 2, 1),
 	SHELL_SUBCMD_SET_END);
+#endif /* defined(CONFIG_APP_BUZZER) */
 #endif /* CONFIG_APP_CMD_DEBUG_SHELL */
 
 /* Decode a hwinfo reset-cause bitmask (from app_cmd_info.reset_cause, read at
@@ -1369,7 +1517,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 #ifdef CONFIG_APP_CMD_DEBUG_SHELL
 	SHELL_CMD(cmd, &sub_cmd, "Inject Command (protobuf hex).", NULL),
 	SHELL_CMD(ccm, NULL, "app_ccm HW AES self-test (golden vectors).", cmd_ccm_selftest),
+#if defined(CONFIG_APP_BUZZER)
 	SHELL_CMD(buzzer, &sub_buzzer, "Buzzer HW variant commands (#338).", NULL),
+#endif /* defined(CONFIG_APP_BUZZER) */
 #endif
 	SHELL_SUBCMD_SET_END);
 

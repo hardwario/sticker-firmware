@@ -92,22 +92,25 @@ static void die(void)
 
 static void play_carousel_boot(void)
 {
-	struct app_led_play_req req = {
-		.commands = {{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 500},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 250},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 500},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 250},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 1500},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
-			     {.type = APP_LED_CMD_END}},
-		.repetitions = 1};
+	/* Red and green are HW PWM: fade in/hold/fade out instead of a hard blink
+	 * (#301). Yellow (PA4) has no timer channel and stays a plain GPIO blink,
+	 * same timing as before. Durations match the old hard-blink carousel
+	 * (500/250/500/250/1500 ms) so the overall boot animation length is
+	 * unchanged. */
+	app_led_fade(APP_LED_CHANNEL_R, 0, 100, 150);
+	k_sleep(K_MSEC(200));
+	app_led_fade(APP_LED_CHANNEL_R, 100, 0, 150);
+	k_sleep(K_MSEC(250));
 
-	app_led_play(&req);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_ON);
+	k_sleep(K_MSEC(500));
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+	k_sleep(K_MSEC(250));
+
+	app_led_fade(APP_LED_CHANNEL_G, 0, 100, 300);
+	k_sleep(K_MSEC(900));
+	app_led_fade(APP_LED_CHANNEL_G, 100, 0, 300);
+
 	k_sleep(K_MSEC(5000));
 }
 
@@ -203,6 +206,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			app_config()->calibration = true;
 			app_settings_save(true);
 			break;
+#if defined(CONFIG_LORAWAN)
 		case APP_CMD_ACTION_LRW_RESET:
 			/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). */
 			app_lrw_reset_nvm();
@@ -212,6 +216,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			/* Force a (re)join now, no reboot (#109). */
 			app_lrw_join();
 			break;
+#endif /* defined(CONFIG_LORAWAN) */
 		case APP_CMD_ACTION_COUNTERS_SAVE:
 			/* Persist the (reset) pulse totalizers, no reboot. */
 			app_counters_save(true);
@@ -304,6 +309,7 @@ K_THREAD_DEFINE(nfc_poll_tid, NFC_POLL_THREAD_STACK_SIZE, nfc_poll_thread_fn, NU
 
 static enum app_mode detect_mode(void)
 {
+#if defined(CONFIG_APP_CALIBRATION)
 	if (app_calibration_detect_magnets()) {
 		LOG_WRN("Both magnets detected at boot — entering calibration mode");
 		return APP_MODE_CALIBRATION;
@@ -313,6 +319,7 @@ static enum app_mode detect_mode(void)
 		LOG_WRN("Calibration flag set in config — entering calibration mode");
 		return APP_MODE_CALIBRATION;
 	}
+#endif /* defined(CONFIG_APP_CALIBRATION) */
 
 	return APP_MODE_NORMAL;
 }
@@ -434,14 +441,15 @@ int main(void)
 
 	switch (mode) {
 	case APP_MODE_CALIBRATION:
+#if defined(CONFIG_APP_CALIBRATION)
 		ret = app_calibration_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_calibration_init", ret);
 			die();
 		}
-
 		app_calibration_run();
 		/* Never reached */
+#endif /* defined(CONFIG_APP_CALIBRATION) */
 		break;
 
 	case APP_MODE_NORMAL:
@@ -584,10 +592,12 @@ int main(void)
 
 		/* NFC is polled on its own thread (nfc_poll_thread_fn), not here. */
 
+#if defined(CONFIG_APP_CALIBRATION)
 		/* Detect magnet on BOTH Hall sensors → reboot into calibration mode */
 		if (k_uptime_get() < (int64_t)APP_CALIBRATION_ACTIVATION_WINDOW_MIN * 60 * 1000) {
 			app_calibration_check_trigger();
 		}
+#endif /* defined(CONFIG_APP_CALIBRATION) */
 
 		/* While a phone is interacting over NFC, the NFC interaction LED (app_nfc.c)
 		 * owns the indicator — suppress the periodic status/heartbeat blinks below so

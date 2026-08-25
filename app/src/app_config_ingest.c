@@ -697,6 +697,14 @@ int app_config_apply_alarms(enum app_cmd_transport tp, const AppConfigMessage_Al
 		if (src->has_alarm_15) {
 			memcpy(config->alarm_15, src->alarm_15, sizeof(config->alarm_15));
 		}
+	if (src->has_alarm_buzzer_mode) {
+		if ((int)src->alarm_buzzer_mode >= 0 && (int)src->alarm_buzzer_mode <= 7) {
+			config->alarm_buzzer_mode =
+				(enum app_config_alarm_buzzer_mode)src->alarm_buzzer_mode;
+		} else {
+			FAULT(20);
+		}
+	}
 	return ret;
 }
 
@@ -771,6 +779,11 @@ void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, s
 	if (requested(ids, n, 18) && !slot_all_zero(c->alarm_15, sizeof(c->alarm_15))) {
 		dst->has_alarm_15 = true;
 		memcpy(dst->alarm_15, c->alarm_15, sizeof(c->alarm_15));
+	}
+	if (requested(ids, n, 20)) {
+		dst->has_alarm_buzzer_mode = true;
+		dst->alarm_buzzer_mode =
+			(AppConfigMessage_Alarms_AlarmBuzzerMode)c->alarm_buzzer_mode;
 	}
 }
 

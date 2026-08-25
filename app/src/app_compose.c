@@ -226,6 +226,7 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	 * vtable (app_w1_slot_encode), so adding a sensor type needs no change here.
 	 * type travels with the reading; the composer may split the list across
 	 * frames (each reading is indivisible). Absent quantities stay omitted. */
+#if defined(CONFIG_W1)
 	if (g_app_config.cap_w1_sensors) {
 		for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
 			enum app_w1_slot_type type = app_w1_slot_get_type(i);
@@ -243,6 +244,7 @@ static void fill_telemetry(Telemetry *t, bool boot)
 			t->w1_sensors_count++;
 		}
 	}
+#endif /* defined(CONFIG_W1) */
 
 	/* hall left / right */
 	if (g_app_config.cap_hall_left) {
