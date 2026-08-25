@@ -817,7 +817,9 @@ static void app_cmd_handle_buzzer_play(enum app_cmd_transport tp, const Command 
 				       Response *resp, enum app_cmd_action *action)
 {
 	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
 	ARG_UNUSED(action);
+#if defined(CONFIG_APP_BUZZER)
 	const Command_BuzzerPlay *play = &cmd->body.buzzer_play;
 
 	if (play->repeat_s > 999) {
@@ -840,6 +842,9 @@ static void app_cmd_handle_buzzer_play(enum app_cmd_transport tp, const Command 
 	}
 
 	resp->which_body = Response_ack_tag;
+#else
+	make_error(resp, Response_Error_Code_NOT_SUPPORTED, "buzzer not built into this FW");
+#endif /* defined(CONFIG_APP_BUZZER) */
 }
 
 /* #316: replacement secret_key staged by the vendor_reset handler below, consumed
@@ -1165,6 +1170,25 @@ static void app_cmd_handle_lrw_reset(enum app_cmd_transport tp, const Command *c
 	lrw_action_guarded(resp, action, APP_CMD_ACTION_LRW_RESET);
 }
 
+/* #395: with CONFIG_APP_CALIBRATION=n the flag's only consumers (main.c's
+ * detect_mode() and app_calibration_init(), which also clears it) are compiled
+ * out — ACKing here would persist calibration=true into NVS where it lurks
+ * until some later full-featured FW boots straight into calibration mode.
+ * Reject up front instead. */
+static void app_cmd_handle_enter_calibration(enum app_cmd_transport tp, const Command *cmd,
+					     Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(action);
+#if defined(CONFIG_APP_CALIBRATION)
+	*action = APP_CMD_ACTION_ENTER_CALIBRATION;
+	resp->which_body = Response_ack_tag;
+#else
+	make_error(resp, Response_Error_Code_NOT_SUPPORTED, "calibration not built into this FW");
+#endif /* defined(CONFIG_APP_CALIBRATION) */
+}
+
 // BEGIN GENERATED DISPATCH
 static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 			     enum app_cmd_action *action)
@@ -1251,8 +1275,7 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
-		*action = APP_CMD_ACTION_ENTER_CALIBRATION;
-		resp->which_body = Response_ack_tag;
+		app_cmd_handle_enter_calibration(tp, cmd, resp, action);
 		break;
 	case Command_sample_tag:
 		/* transports: [lrw, nfc] — reject on any other transport */

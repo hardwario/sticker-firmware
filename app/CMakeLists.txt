@@ -45,7 +45,11 @@ target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
 target_sources_ifdef(CONFIG_LIS2DH app PRIVATE src/app_accel.c)
 target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw.c)
-target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_report.c)
+# app_report.c owns the periodic sample/history cadence, not just the
+# LoRaWAN uplink (issue #395: CONFIG_LORAWAN=n toggle) -- compiled
+# unconditionally so history/sampling keep working with no radio; its own
+# app_lrw_* calls are internally CONFIG_LORAWAN-gated.
+target_sources(app PRIVATE src/app_report.c)
 target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/region
@@ -60,10 +64,10 @@ target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_ds18b20.c)
 target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_w1.c)
 target_sources_ifdef(CONFIG_W1 app PRIVATE src/app_w1_slots.c)
 target_sources_ifdef(CONFIG_WATCHDOG app PRIVATE src/app_wdog.c)
+target_sources_ifdef(CONFIG_APP_BUZZER app PRIVATE src/app_buzzer.c)
+target_sources_ifdef(CONFIG_APP_CALIBRATION app PRIVATE src/app_calibration.c)
 target_sources(app PRIVATE src/app_alarm.c)
 target_sources(app PRIVATE src/app_alarm_rules.c)
-target_sources(app PRIVATE src/app_buzzer.c)
-target_sources(app PRIVATE src/app_calibration.c)
 target_sources(app PRIVATE src/app_clock.c)
 target_sources(app PRIVATE src/app_cmd.c)
 target_sources(app PRIVATE src/app_compose.c)
@@ -91,7 +95,7 @@ if(NOT CONFIG_APP_CCM_HW_AES)
   set_source_files_properties(src/app_ccm.c ${SOFT_SE_DIR}/aes.c
     PROPERTIES COMPILE_DEFINITIONS "AES_ENC_PREKEYED")
 endif()
-target_sources(app PRIVATE src/app_pyq1648.c)
+target_sources_ifdef(CONFIG_APP_PYQ1648 app PRIVATE src/app_pyq1648.c)
 target_sources(app PRIVATE src/app_sensor.c)
 target_sources(app PRIVATE src/app_settings.c)
 target_sources(app PRIVATE src/main.c)

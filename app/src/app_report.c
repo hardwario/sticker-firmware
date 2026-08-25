@@ -120,6 +120,7 @@ static void run_report(bool periodic)
 		app_history_capture();
 	}
 
+#if defined(CONFIG_LORAWAN)
 	/* State-gated cadence: skip the UPLINK while the link is joining/
 	 * reconnecting/disabled. app_lrw kicks us (report_kick) on the link-ready
 	 * edge to resume promptly and drain the buffered history. */
@@ -131,6 +132,7 @@ static void run_report(bool periodic)
 	/* Hand off to the transport: app_lrw composes the snapshot and splits it
 	 * into DR-budget frames (LC piggyback + duty-cycle retry live there). */
 	app_lrw_send_telemetry();
+#endif /* defined(CONFIG_LORAWAN) */
 }
 
 static void periodic_work_handler(struct k_work *work)
@@ -151,6 +153,7 @@ static void report_timer_handler(struct k_timer *timer)
 	k_work_submit_to_queue(&m_work_q, &m_periodic_work);
 }
 
+#if defined(CONFIG_LORAWAN)
 /* Link-ready edge from the transport (join success / history-replay finish):
  * send an immediate report to drain the buffered history, but leave the fixed
  * cadence (and its history capture) untouched. */
@@ -158,6 +161,7 @@ static void report_kick(void)
 {
 	k_work_submit_to_queue(&m_work_q, &m_trigger_work);
 }
+#endif /* defined(CONFIG_LORAWAN) */
 
 void app_report_trigger(void)
 {
@@ -207,7 +211,9 @@ int app_report_init(void)
 	 * the link state. Reporting itself still self-skips at the link gate until
 	 * joined; app_lrw's ready kick re-arms with an immediate report on join. */
 	schedule_next_report();
+#if defined(CONFIG_LORAWAN)
 	app_lrw_register_ready_cb(report_kick);
+#endif /* defined(CONFIG_LORAWAN) */
 
 	return 0;
 }
