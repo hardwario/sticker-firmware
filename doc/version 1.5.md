@@ -53,7 +53,7 @@ The moment the **last** active alarm clears, the buzzer silences immediately (no
 
 `debug.conf` (RTT log + shell, `CONFIG_PM=n`) used to compile in every optional subsystem unconditionally, alongside the app's own always-on code — by the end of v1.4.0 that left only ~20–170 B of "free" flash/RAM per the linker's own report (98.48% flash / 99.92% RAM). That margin turned out to be unsafe in practice, not just tight: a system-heap write past the end of RAM crashed real hardware at exactly that margin (issue #394).
 
-Eight subsystems are now independently toggleable via Kconfig — off in Release (`prj.conf`), where every one of them defaults to `y` and behavior is unchanged (verified byte-identical release build):
+Eight subsystems are now independently toggleable via Kconfig — Release (`prj.conf`) is untouched: every one of them defaults to `y` there, and behavior is unchanged (verified byte-identical release build):
 
 | Toggle | Flash saved | RAM saved | What it drops | Default in `debug.conf` |
 |---|---:|---:|---|:-:|
