@@ -219,6 +219,7 @@ static void alarm_lrw_send(void)
 #endif
 }
 
+#if defined(CONFIG_APP_BUZZER)
 /* #397: melody replay interval per alarm_buzzer_mode while any alarm stays
  * active. 0 = play once per new activation. RESERVED_6/7 fall back to NORMAL
  * until a future firmware assigns them their own behavior. */
@@ -275,6 +276,15 @@ static void alarm_buzzer_sync(uint32_t new_bits, bool all_cleared)
 	app_buzzer_play_repeating(APP_BUZZER_KIND_ALARM,
 				  alarm_buzzer_repeat_s(g_app_config.alarm_buzzer_mode));
 }
+#else
+/* #395: buzzer not built into this FW — alarm indication over the buzzer is a
+ * no-op (the alarm engine itself, uplinks and the active mask are unaffected). */
+static void alarm_buzzer_sync(uint32_t new_bits, bool all_cleared)
+{
+	ARG_UNUSED(new_bits);
+	ARG_UNUSED(all_cleared);
+}
+#endif /* defined(CONFIG_APP_BUZZER) */
 
 /* Current time in seconds. Returns absolute UTC when the RTC has synced (and sets
  * *synced), else uptime-seconds (*synced=false) so alarm times stay monotonic
