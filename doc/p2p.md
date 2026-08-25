@@ -20,6 +20,10 @@ Status: **design document**, phase 1 (§13) implemented and HIL-validated on a
 two-STICKER bench (§14.1) — `radio-mode p2p` now routes through a real
 `app_p2p`/`app_radio` facade instead of the `app_lrw.c` (#271) fallback
 warning; phases 2+ (join/ACK, northbridge, central) remain unimplemented.
+**Targeting v1.5.0** (#118): the unified `ats radio ...` shell surface —
+covering both LoRaWAN and P2P, including the new `unjoin`/`rx1_delay`/
+`ack_drop`/universal `compose` bench helpers below — ships in v1.5.0, not
+v1.4.0.
 
 ---
 
@@ -348,7 +352,7 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
 - Power impact: one RX1 per report against the 92 µA idle baseline
   (`doc/power-consumption.md`) must be measured on HW; the RX window is the
   main new consumer vs. the TX-only draft.
-- **Bench testing**: `ats radio ack_drop <count>` (CONFIG_SHELL) makes the
+- **Bench testing (v1.5.0)**: `ats radio ack_drop <count>` (CONFIG_SHELL) makes the
   next `count` Acks appear dropped without a real RF outage, exercising the
   retry/backoff path above deterministically -- the P2P analogue of `ats
   radio lc fail` for the LoRaWAN link-check FSM.
@@ -369,7 +373,7 @@ it is always automatic, requiring no app interaction:
 | Trigger | Behavior |
 |---|---|
 | `secret_key` rotation (#299) | `join_key` changes ⇒ app re-registers the new derivation with the central, node re-joins on its next boot (rotation already forces a reboot, #322). |
-| `factory_reset` | **Does NOT clear P2P pairing** (doc/code mismatch found 2026-08-24: the `p2pjoin/*` settings subtree is registered entirely inside `app_p2p.c` and is never referenced by `app_settings_factory_reset()`, unlike the LoRaWAN NVM it was assumed to mirror). The debug shell's `ats radio join` forces a fresh join live, no reboot needed (mirrors LoRaWAN's `join`, which always rejoins unconditionally); `ats radio unjoin` (clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) additionally simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears it. |
+| `factory_reset` | **Does NOT clear P2P pairing** (doc/code mismatch found 2026-08-24: the `p2pjoin/*` settings subtree is registered entirely inside `app_p2p.c` and is never referenced by `app_settings_factory_reset()`, unlike the LoRaWAN NVM it was assumed to mirror). The debug shell's `ats radio join` (v1.5.0) forces a fresh join live, no reboot needed (mirrors LoRaWAN's `join`, which always rejoins unconditionally); `ats radio unjoin` (v1.5.0; clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) additionally simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears it. |
 | Central DB loss/restore | Node's uplinks stop being ACKed (or ACK under an unknown session fails MIC). Self-healing: after **N consecutive fully-failed uplink cycles** (default 8) the node starts re-join attempts with exponential backoff. Known devices' re-joins are accepted outside the pairing window. |
 | Explicit `Detach` / `RejoinRequest` downlink | Authenticated; immediate. `RejoinRequest` is the network-initiated rekey lever (counter hygiene, key rotation policy). |
 | Counter approaching 32-bit wrap | Practically unreachable; policy is a network-initiated `RejoinRequest` rekey long before wrap. |
@@ -472,7 +476,7 @@ again.
   first). **Resolved: yes** — accepted as designed, no change needed.
 - **Northbridge scheduled-TX precision** — RX1 hit accuracy over
   UART+MQTT+LAN needs a prototype measurement before freezing `rx1_delay`
-  at 1 s. **Resolved + implemented:** `rx1_delay` is already per-device and
+  at 1 s. **Resolved + implemented (v1.5.0):** `rx1_delay` is already per-device and
   central-assigned (JoinAccept, §5.3), but that alone means changing it
   needs a live central + a registered device — too slow for bench tuning.
   `ats radio rx1_delay <seconds>` (CONFIG_SHELL-gated, same idiom as the
