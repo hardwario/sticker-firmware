@@ -11,6 +11,7 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/pwm.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -29,8 +30,13 @@ LOG_MODULE_REGISTER(app_led, LOG_LEVEL_DBG);
 #define LED_THREAD_STACK_SIZE 2048
 #define LED_THREAD_PRIORITY   K_PRIO_PREEMPT(5)
 
-static const struct gpio_dt_spec m_led_r = GPIO_DT_SPEC_GET(DT_NODELABEL(led_r), gpios);
-static const struct gpio_dt_spec m_led_g = GPIO_DT_SPEC_GET(DT_NODELABEL(led_g), gpios);
+/* Red + green are HW PWM (TIM2/TIM16) so they can be dimmed; yellow is plain
+ * GPIO (PA4 has no timer channel). "On" drives the PWM at LED_DIM_PERCENT duty
+ * instead of full brightness, cutting LED current to ~1/5 while staying clearly
+ * visible. */
+#define LED_DIM_PERCENT 20
+static const struct pwm_dt_spec m_led_r = PWM_DT_SPEC_GET(DT_NODELABEL(led_r_pwm));
+static const struct pwm_dt_spec m_led_g = PWM_DT_SPEC_GET(DT_NODELABEL(led_g_pwm));
 static const struct gpio_dt_spec m_led_y = GPIO_DT_SPEC_GET(DT_NODELABEL(led_y), gpios);
 
 struct blink_request {
@@ -50,11 +56,62 @@ static K_THREAD_STACK_DEFINE(m_led_thread_stack, LED_THREAD_STACK_SIZE);
 
 static k_tid_t m_led_thread_id;
 
+/* Drive a PWM LED (red/green) to a raw duty percent (0..100). The pulse is the
+ * on-time; polarity-inverted in DT for the active-low LED, so pulse=period is
+ * full brightness and pulse=0 is off. */
+static void set_pwm_pct(const struct pwm_dt_spec *led, int pct)
+{
+	if (pct < 0) {
+		pct = 0;
+	} else if (pct > 100) {
+		pct = 100;
+	}
+
+	uint32_t pulse = (uint32_t)((uint64_t)led->period * pct / 100);
+	int ret = pwm_set_dt(led, led->period, pulse);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("pwm_set_dt", ret);
+	}
+}
+
 static void set(enum app_led_channel channel, int state)
 {
 	int ret;
 
-	const struct gpio_dt_spec *led;
+	switch (channel) {
+	case APP_LED_CHANNEL_R:
+	case APP_LED_CHANNEL_G: {
+		/* "on" = LED_DIM_PERCENT duty (dimmed), "off" = 0. */
+		const struct pwm_dt_spec *led =
+			(channel == APP_LED_CHANNEL_R) ? &m_led_r : &m_led_g;
+
+		set_pwm_pct(led, state ? LED_DIM_PERCENT : 0);
+		break;
+	}
+	case APP_LED_CHANNEL_Y:
+		ret = gpio_pin_set_dt(&m_led_y, state);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
+		}
+		break;
+	default:
+		LOG_ERR("Invalid channel: %d", channel);
+		return;
+	}
+}
+
+void app_led_set(enum app_led_channel channel, int state)
+{
+	set(channel, state);
+}
+
+/* Fade granularity: one PWM update every ~5 ms is smooth to the eye without
+ * flooding the bus. A 200 ms heartbeat is then ~40 steps. */
+#define LED_FADE_STEP_MS 5
+
+int app_led_fade(enum app_led_channel channel, int from_pct, int to_pct, int duration_ms)
+{
+	const struct pwm_dt_spec *led;
 
 	switch (channel) {
 	case APP_LED_CHANNEL_R:
@@ -63,23 +120,96 @@ static void set(enum app_led_channel channel, int state)
 	case APP_LED_CHANNEL_G:
 		led = &m_led_g;
 		break;
-	case APP_LED_CHANNEL_Y:
-		led = &m_led_y;
-		break;
 	default:
-		LOG_ERR("Invalid channel: %d", channel);
-		return;
+		/* Yellow is plain GPIO (no timer channel) — cannot be dimmed. */
+		return -EINVAL;
 	}
 
-	ret = gpio_pin_set_dt(led, state);
+	if (duration_ms < 0) {
+		duration_ms = 0;
+	}
+
+	int steps = duration_ms / LED_FADE_STEP_MS;
+	if (steps < 1) {
+		steps = 1;
+	}
+
+	for (int i = 0; i <= steps; i++) {
+		int pct = from_pct + (to_pct - from_pct) * i / steps;
+		set_pwm_pct(led, pct);
+		if (i < steps) {
+			k_sleep(K_MSEC(duration_ms / steps));
+		}
+	}
+
+	return 0;
+}
+
+int app_led_heartbeat(enum app_led_channel channel)
+{
+	/* One beat: quick rise to full, slightly slower fall to off — 200 ms total,
+	 * which reads as a heartbeat pulse. */
+	int ret = app_led_fade(channel, 0, 100, 80);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("gpio_pin_set_dt", ret);
+		return ret;
+	}
+
+	return app_led_fade(channel, 100, 0, 120);
+}
+
+/* --- Periodic idle-state indicator (lrw-mode off) -------------------------- */
+
+/* Default: green PWM heartbeat — the "OK" pulse. Runtime-tunable via shell to
+ * compare power against a plain GPIO blink / different colours / dark. */
+static enum app_led_idle_mode m_idle_mode = APP_LED_IDLE_PWM;
+static enum app_led_channel m_idle_channel = APP_LED_CHANNEL_G;
+static int m_idle_on_ms = 5;
+
+void app_led_idle_config(enum app_led_idle_mode mode, enum app_led_channel channel, int on_ms)
+{
+	/* The PWM heartbeat needs a dimmable channel; yellow is GPIO-only. */
+	if (mode == APP_LED_IDLE_PWM && channel == APP_LED_CHANNEL_Y) {
+		channel = APP_LED_CHANNEL_G;
+	}
+
+	m_idle_mode = mode;
+	m_idle_channel = channel;
+	if (on_ms > 0) {
+		m_idle_on_ms = on_ms;
 	}
 }
 
-void app_led_set(enum app_led_channel channel, int state)
+void app_led_idle_get(enum app_led_idle_mode *mode, enum app_led_channel *channel, int *on_ms)
 {
-	set(channel, state);
+	if (mode) {
+		*mode = m_idle_mode;
+	}
+	if (channel) {
+		*channel = m_idle_channel;
+	}
+	if (on_ms) {
+		*on_ms = m_idle_on_ms;
+	}
+}
+
+void app_led_idle_pulse(void)
+{
+	switch (m_idle_mode) {
+	case APP_LED_IDLE_GPIO: {
+		struct app_led_blink_req req = {.color = m_idle_channel,
+						.duration = m_idle_on_ms,
+						.space = 0,
+						.repetitions = 1};
+		app_led_blink(&req);
+		break;
+	}
+	case APP_LED_IDLE_PWM:
+		app_led_heartbeat(m_idle_channel);
+		break;
+	case APP_LED_IDLE_OFF:
+	default:
+		break;
+	}
 }
 
 static void execute_blink(const struct app_led_blink_req *req)
@@ -181,21 +311,22 @@ int app_led_init(void)
 {
 	int ret;
 
-	if (!gpio_is_ready_dt(&m_led_r) || !gpio_is_ready_dt(&m_led_g) ||
+	if (!pwm_is_ready_dt(&m_led_r) || !pwm_is_ready_dt(&m_led_g) ||
 	    !gpio_is_ready_dt(&m_led_y)) {
 		LOG_ERR("Device not ready");
 		return -ENODEV;
 	}
 
-	ret = gpio_pin_configure_dt(&m_led_r, GPIO_OUTPUT_INACTIVE);
+	/* Start with all LEDs off: PWM pulse 0 (red/green), GPIO inactive (yellow). */
+	ret = pwm_set_dt(&m_led_r, m_led_r.period, 0);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
+		LOG_ERR_CALL_FAILED_INT("pwm_set_dt", ret);
 		return ret;
 	}
 
-	ret = gpio_pin_configure_dt(&m_led_g, GPIO_OUTPUT_INACTIVE);
+	ret = pwm_set_dt(&m_led_g, m_led_g.period, 0);
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
+		LOG_ERR_CALL_FAILED_INT("pwm_set_dt", ret);
 		return ret;
 	}
 
