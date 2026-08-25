@@ -60,6 +60,38 @@ enums:
       value: 3
       shell: high
 
+  # #397: 0-7 wire range, ordered by intensity. Every non-off mode replays the
+  # melody immediately whenever a NEW alarm activates (even while another is
+  # already active) and differs only in how often it repeats while any alarm
+  # stays active: once = no repeat, slow/normal/fast = 120/30/10 s,
+  # continuous = back-to-back. 6-7 are reserved for future variants (they
+  # currently behave like normal).
+  alarm_buzzer_mode:
+    - name: "OFF"
+      value: 0
+      shell: "off"
+    - name: ONCE
+      value: 1
+      shell: once
+    - name: SLOW
+      value: 2
+      shell: slow
+    - name: NORMAL
+      value: 3
+      shell: normal
+    - name: FAST
+      value: 4
+      shell: fast
+    - name: CONTINUOUS
+      value: 5
+      shell: continuous
+    - name: RESERVED_6
+      value: 6
+      shell: reserved6
+    - name: RESERVED_7
+      value: 7
+      shell: reserved7
+
 proto:
   message: AppConfigMessage
   extra_fields:
@@ -721,6 +753,14 @@ parameters:
     readable: [nfc, lrw]
     writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 15 (packed hex, see app_config.yml)."
+
+  - name: alarm_buzzer_mode
+    proto_group: alarms
+    proto_id: 20
+    type: enum
+    enum: alarm_buzzer_mode
+    default: "off"
+    help: "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap_buzzer."
 
   - name: accel_motion_sensitivity
     proto_group: sensors

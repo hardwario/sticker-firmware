@@ -419,11 +419,14 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 - **Cleanup:** `git status` must stay clean.
 
 ### AT-HOST-02 — native_sim ztest suites
-- **Steps:** `bash tests/run_native.sh` (iterates tests/alarm_eval, alarm_rules, ccm, cmd,
-  compose, history, history_flash, ndef, nfc_crypto on `native_sim/native/64`). `alarm_eval`
-  (#348) drives the real `app_alarm.c` dwell/confirm/hold state machine directly
-  (`app_alarm_event()`/`app_alarm_poll()`) with hall/sensor GPIO stubbed — `alarm_rules` only
-  covers the static rule-validation layer.
+- **Steps:** `bash tests/run_native.sh` (iterates tests/alarm_eval, alarm_rules, buzzer, ccm,
+  cmd, compose, history, history_flash, ndef, nfc_crypto, nfc_hw on `native_sim/native/64`).
+  `alarm_eval` (#348) drives the real `app_alarm.c` dwell/confirm/hold state machine directly
+  (`app_alarm_event()`/`app_alarm_poll()`) with hall/sensor GPIO stubbed, plus (#397) the
+  alarm-driven buzzer plumbing (`app_buzzer_play_repeating()` stubbed there) — `alarm_rules`
+  only covers the static rule-validation layer. `buzzer` (#397) drives the real
+  `app_buzzer.c` melody engine against a `gpio_emul`-backed fake GPIO: melody sequencing,
+  abort ordering, queue-replace policy, and `buzzer_play` id bounds.
 - **Expect:** every suite prints `PROJECT EXECUTION SUCCESSFUL`.
 - **Evidence:** per-suite pass/fail table.
 
@@ -995,6 +998,27 @@ still required before the next `alarm poll` will observe it as elapsed.
   sanitised/ignored with a report (reload returns invalid count); the other 15 slots
   unaffected; no crash on the next poll.
 - **Cleanup:** clear slot 15.
+
+### AT-ALM-09 — alarm-driven buzzer melody (D, SA; maps #397)
+- **Pre:** `cap-buzzer true` (buzzer HW variant fitted), `alarm-buzzer-mode normal`,
+  save/reboot (#154, config save reboots). One armed rule, e.g. AT-ALM-01's
+  onboard-temperature slot 0.
+- **Steps:** cross the threshold to activate the rule (same assist as AT-ALM-01); assist:
+  "listen for a repeating fast 5x-beep melody starting within a couple of seconds of the red
+  alarm LED"; wait > 30 s and assist-confirm it repeats; release the threshold to clear the
+  alarm; assist: "confirm the buzzer goes silent immediately, not fading out or finishing its
+  current repeat cycle". Mode sweep (spot-check): repeat the activation with
+  `alarm-buzzer-mode once` (single melody, no repeat) and `fast` (repeats every ~10 s).
+  New-alarm replay: with `normal` and the first alarm still active, activate a SECOND rule on
+  a different source — assist-confirm the melody replays right away (within the 3 s poll
+  cadence) instead of waiting out the 30 s repeat.
+- **Expect:** melody starts on each newly activated alarm, replays per the mode's interval
+  (`once` = never, `slow`/`normal`/`fast` = 120/30/10 s, `continuous` ≈ every 2.4 s) while
+  any alarm stays active, stops immediately once the last one clears. Negative case:
+  `alarm-buzzer-mode off` (or `cap-buzzer false`) → same rule activation produces the red
+  LED as normal but stays silent.
+- **Evidence:** operator confirmation of beep timing per mode + the negative (silent) case.
+- **Cleanup:** clear the rules; `alarm-buzzer-mode off` (factory default).
 
 ## 13. History (AT-HIS)
 
