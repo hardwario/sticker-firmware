@@ -658,6 +658,50 @@ ZTEST(alarm_eval, test_buzzer_replays_on_new_alarm_while_another_active)
 	zassert_equal(g_buzzer_play_calls, 0, "partial deactivation must not touch the buzzer");
 }
 
+ZTEST(alarm_eval, test_active_mask_and_activation_seq)
+{
+	/* #397: the per-alarm active mask + monotonic activation sequence are
+	 * readable anywhere via app_alarm_active_mask()/app_alarm_activation_seq()
+	 * — the same central edge the buzzer replays on. seq is a static that
+	 * persists across test cases, so compare relatively, never absolutely. */
+	zassert_equal(app_alarm_active_mask(), 0, "mask not empty at test start");
+	uint32_t seq0 = app_alarm_activation_seq();
+
+	activate_threshold_slot0(); /* slot 0 latches */
+	zassert_equal(app_alarm_active_mask(), BIT(0), "slot 0 bit not set");
+	uint32_t seq1 = app_alarm_activation_seq();
+	zassert_true(seq1 != seq0, "activation did not bump the sequence");
+
+	/* Polls with no change must bump nothing. */
+	app_alarm_poll();
+	app_alarm_poll();
+	zassert_equal(app_alarm_activation_seq(), seq1, "seq bumped without a new activation");
+	zassert_equal(app_alarm_active_mask(), BIT(0), "mask changed without a state change");
+
+	/* A second alarm (slot 1, onboard humidity) sets its own bit + bumps seq. */
+	struct app_alarm_rule r = {
+		.source = APP_ALARM_SRC_ONBOARD,
+		.quantity = APP_ALARM_Q_HUMIDITY,
+		.enabled = 1,
+		.lo = 0.0f,
+		.hi = 60.0f,
+		.dwell = 0.0f,
+	};
+	zassert_equal(app_alarm_rules_set(1, &r), 0, "rule setup rejected");
+	g_app_sensor_data.humidity = 90.0f;
+	app_alarm_poll();
+	zassert_equal(app_alarm_active_mask(), BIT(0) | BIT(1), "slot 1 bit not added");
+	uint32_t seq2 = app_alarm_activation_seq();
+	zassert_true(seq2 != seq1, "second activation did not bump the sequence");
+
+	/* Deactivations clear bits but never bump the sequence. */
+	g_app_sensor_data.temperature = 20.0f;
+	g_app_sensor_data.humidity = 40.0f;
+	zassert_false(app_alarm_poll(), "alarms did not clear");
+	zassert_equal(app_alarm_active_mask(), 0, "mask not empty after deactivation");
+	zassert_equal(app_alarm_activation_seq(), seq2, "deactivation bumped the sequence");
+}
+
 ZTEST(alarm_eval, test_buzzer_stops_on_deactivation)
 {
 	g_app_config.cap_buzzer = true;

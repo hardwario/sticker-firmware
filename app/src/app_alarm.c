@@ -107,6 +107,13 @@ static int64_t m_last_alarm_send_ms = -1;
 static app_alarm_event_cb m_event_cb;
 static void *m_event_cb_user_data;
 
+/* #397: per-alarm active bitmask as of the last app_alarm_poll() + monotonic
+ * activation sequence (bumped once per poll that latched a NEW alarm). Both
+ * written by app_alarm_poll() under m_lock and exposed read-only via
+ * app_alarm_active_mask()/app_alarm_activation_seq(). */
+static uint32_t m_active_mask;
+static uint32_t m_activation_seq;
+
 K_MUTEX_DEFINE(m_lock);
 
 static void alarm_collect(uint8_t slot, uint8_t source, uint8_t quantity, bool active, uint8_t type,
@@ -230,26 +237,18 @@ static uint16_t alarm_buzzer_repeat_s(enum app_config_alarm_buzzer_mode mode)
 	}
 }
 
-/* #397: drive the local buzzer as an audible alarm indicator, edge-detected on
- * the per-alarm active bitmask app_alarm_poll() assembles during its latch
- * sweep (bits 0-15 rule slots, then the no-data watchdogs, then low-battery —
- * covering every alarm type, unlike app_alarm_event()'s per-source callback,
- * which only sees raw GPIO edges). Every non-off mode replays the melody
- * whenever a NEW bit appears — even while other alarms are already active —
- * which also restarts the mode's repeat cycle; the modes differ only in the
- * replay interval (alarm_buzzer_repeat_s above). Once the last bit clears,
- * stop immediately. */
-static void alarm_buzzer_sync(uint32_t active_mask)
+/* #397: drive the local buzzer as an audible alarm indicator off the central
+ * activation-edge detection in app_alarm_poll() (new_bits / all_cleared come
+ * from the per-alarm active bitmask — covering every alarm type, unlike
+ * app_alarm_event()'s per-source callback, which only sees raw GPIO edges).
+ * Every non-off mode replays the melody whenever a NEW bit appears — even
+ * while other alarms are already active — which also restarts the mode's
+ * repeat cycle; the modes differ only in the replay interval
+ * (alarm_buzzer_repeat_s above). Once the last bit clears, stop immediately.
+ * new_bits is non-zero only in the one poll where an alarm actually latched,
+ * so enabling cap_buzzer mid-alarm never fires a spurious start. */
+static void alarm_buzzer_sync(uint32_t new_bits, bool all_cleared)
 {
-	static uint32_t m_buzzer_mask;
-
-	uint32_t new_bits = active_mask & ~m_buzzer_mask;
-	bool all_cleared = active_mask == 0 && m_buzzer_mask != 0;
-
-	/* Track the mask even while cap_buzzer is off, so enabling it mid-alarm
-	 * doesn't fire a spurious start on the next poll. */
-	m_buzzer_mask = active_mask;
-
 	if (!g_app_config.cap_buzzer) {
 		return;
 	}
@@ -1103,15 +1102,42 @@ bool app_alarm_poll(void)
 			active_mask |= BIT(i);
 		}
 	}
+
+	/* #397: central activation-edge detection over the finished mask, under
+	 * the same m_lock the readers (app_alarm_active_mask/activation_seq)
+	 * take — a new bit bumps the sequence exactly once per poll. */
+	uint32_t new_bits = active_mask & ~m_active_mask;
+	bool all_cleared = active_mask == 0 && m_active_mask != 0;
+
+	m_active_mask = active_mask;
+	if (new_bits != 0) {
+		m_activation_seq++;
+	}
 	k_mutex_unlock(&m_lock);
 
 	if (should_send) {
 		alarm_lrw_send();
 	}
 
-	alarm_buzzer_sync(active_mask);
+	alarm_buzzer_sync(new_bits, all_cleared);
 
 	return active_mask != 0;
+}
+
+uint32_t app_alarm_active_mask(void)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+	uint32_t mask = m_active_mask;
+	k_mutex_unlock(&m_lock);
+	return mask;
+}
+
+uint32_t app_alarm_activation_seq(void)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+	uint32_t seq = m_activation_seq;
+	k_mutex_unlock(&m_lock);
+	return seq;
 }
 
 void app_alarm_event(enum app_alarm_source source, bool active)
