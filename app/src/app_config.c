@@ -1779,11 +1779,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_cap_accelerometer, 1, 1),
 
 	SHELL_CMD_ARG(cap-analog-a, NULL,
-	              "Get/Set input A analog voltage measurement capability (0-3.3V, GP_A/PB4/ADC1_IN3). Shares GPIO pins with cap_input_a / cap_pir_detector / cap_buzzer — mutually exclusive (#396).",
+	              "Get/Set input A analog voltage measurement capability (input-referred 0-24V via 33k/1k divider, GP_A/PB4/ADC1_IN3). Shares GPIO pins with cap_input_a / cap_pir_detector / cap_buzzer — mutually exclusive (#396).",
 	              cmd_cap_analog_a, 1, 1),
 
 	SHELL_CMD_ARG(cap-analog-b, NULL,
-	              "Get/Set input B analog voltage measurement capability (0-3.3V, GP_B/PA11/ADC1_IN7). Shares GPIO pins with cap_input_b / cap_pir_detector / cap_buzzer — mutually exclusive (#396).",
+	              "Get/Set input B analog voltage measurement capability (input-referred 0-24V via 33k/1k divider, GP_B/PA11/ADC1_IN7). Shares GPIO pins with cap_input_b / cap_pir_detector / cap_buzzer — mutually exclusive (#396).",
 	              cmd_cap_analog_b, 1, 1),
 
 	SHELL_CMD_ARG(alarm-buzzer-mode, NULL,

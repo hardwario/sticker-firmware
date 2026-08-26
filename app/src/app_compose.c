@@ -300,7 +300,11 @@ static void fill_telemetry(Telemetry *t, bool boot)
 
 	/* analog A / B (#396) — sentinel on NaN (capability off, ADC fault, or the
 	 * pin lost the pin-sharing conflict to digital input/PIR/buzzer), same
-	 * "whole group every report" policy as the other analog scalars above. */
+	 * "whole group every report" policy as the other analog scalars above.
+	 * Wire: uint32 mV (0..65534), TM_U32_NA on absent. Example payload — 1.000 V
+	 * on GP_A / 2.000 V on GP_B encode as the byte run `e0 01 e8 07 e8 01 d0 0f`
+	 * (field 28 tag + varint 1000, field 29 tag + varint 2000); ttn.js decodes
+	 * it to input_a_voltage: 1.0 / input_b_voltage: 2.0. */
 	if (g_app_config.cap_analog_a) {
 		t->has_input_a_voltage = true;
 		t->input_a_voltage =

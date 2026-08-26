@@ -530,6 +530,10 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 		    d->input_a_is_active ? "true" : "false");
 	shell_print(shell, "  %-16s count=%u active=%s", "input-b:", d->input_b_count,
 		    d->input_b_is_active ? "true" : "false");
+	/* #396: GP_A/GP_B analog voltage (input-referred, divider-corrected). nan
+	 * when the analog capability is off or the pin lost the sharing conflict. */
+	print_float(shell, "input-a-voltage:", d->input_a_voltage, "V");
+	print_float(shell, "input-b-voltage:", d->input_b_voltage, "V");
 
 #if defined(CONFIG_W1)
 	/* 1-Wire ROM-bound slots s1..s4 — only the quantities the bound sensor
