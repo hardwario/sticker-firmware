@@ -20,10 +20,21 @@
 
 LOG_MODULE_REGISTER(app_analog, LOG_LEVEL_DBG);
 
-/* GP_A = PB4 = ADC1_IN3, GP_B = PA11 = ADC1_IN7 (schematic + #396 analysis). No
- * external divider on either pin, so the measured range is 0..VDD directly. */
+/* GP_A = PB4 = ADC1_IN3, GP_B = PA11 = ADC1_IN7 (schematic + #396 analysis). */
 #define ADC_CHANNEL_A 3
 #define ADC_CHANNEL_B 7
+
+/* External resistor divider on the GP_A/GP_B front-end (schematic: series R2/R3
+ * = 33k, shunt R5/R7 = 1k to GND), which scales the 0..24 V input at the JP11
+ * connector down into the pin's 0..VDD ADC range. The firmware reports the
+ * input-referred voltage, i.e. V_in = V_pin * (R_SERIES + R_SHUNT) / R_SHUNT
+ * (= x34) — same divider-correction pattern as app_battery.c's 560k/100k.
+ * Assumes both channels are populated identically (R8/R9 are DNP); a HW variant
+ * with a different divider would need this constant adjusted to match. Any zero
+ * offset from R4/R6 (560k bias to VDD, ~6 mV at the pin) is left uncompensated,
+ * same as the battery path. */
+#define R_SERIES_KOHM 33
+#define R_SHUNT_KOHM  1
 
 static const struct device *m_dev = DEVICE_DT_GET(DT_NODELABEL(adc1));
 
@@ -117,10 +128,14 @@ static int measure_channel(uint8_t channel_id, float *voltage)
 		goto suspend;
 	}
 
-	LOG_DBG("Channel %u voltage: %d mV (raw: %d)", channel_id, voltage_, sample);
+	/* Divider-correct to the input-referred voltage at the JP11 connector. */
+	int32_t input_mv = voltage_ * (R_SERIES_KOHM + R_SHUNT_KOHM) / R_SHUNT_KOHM;
+
+	LOG_DBG("Channel %u: input %d mV (pin %d mV, raw: %d)", channel_id, input_mv, voltage_,
+		sample);
 
 	if (voltage) {
-		*voltage = voltage_ / 1000.f;
+		*voltage = input_mv / 1000.f;
 	}
 
 suspend:
