@@ -79,7 +79,7 @@ The four OFF-by-default toggles (W1, LIS2DH, buzzer, PIR) were picked for the be
 
 ## 3. Analog voltage measurement on external inputs GP_A/GP_B (#396)
 
-The external inputs GP_A (PB4/ADC1_IN3) and GP_B (PA11/ADC1_IN7) — previously digital-only via `cap-input-a`/`cap-input-b` — can now instead be read as an analog voltage, 0–3.3 V (VDD from the TPS7A2033 LDO), 12-bit, no divider or protection on either pin (0–10 V / 4–20 mA industrial signals need external conditioning). The hall pins (PA3/PA7) are not ADC-capable on the WLE5 and stay digital-only.
+The external inputs GP_A (PB4/ADC1_IN3) and GP_B (PA11/ADC1_IN7) — previously digital-only via `cap-input-a`/`cap-input-b` — can now instead be read as an analog voltage. A 33k/1k resistor divider on the front-end (series 33k, shunt 1k to GND) scales the 0–24 V input at the connector down into the pin's 0..VDD (3.3 V, TPS7A2033 LDO) ADC range; the firmware reports the **input-referred** voltage — `V_in = V_pin × (33+1)/1 = V_pin × 34`, mirroring `app_battery.c`'s 560k/100k correction — 12-bit. Signals beyond 0–24 V (e.g. 4–20 mA loop shunts) need external conditioning. The hall pins (PA3/PA7) are not ADC-capable on the WLE5 and stay digital-only.
 
 Two new configuration parameters (`sensors` proto group):
 
@@ -103,13 +103,27 @@ A capability that loses a conflict is cleared at runtime (not persisted) and log
 | `input_a_voltage` | 28 | mV |
 | `input_b_voltage` | 29 | mV |
 
+Both are `uint32` mV on the wire (clamped 0..65534; `TM_U32_NA` = `0xFFFFFFFF` for a failed/absent reading → `null` in the decoder). They ride the periodic fPort-2 telemetry uplink **and** the synchronous `Sample`-command response over NFC (`app_compose_snapshot()` → `fill_telemetry()`, the same encoder), and are printed by `ats sensors sample` (`input-a-voltage` / `input-b-voltage`).
+
+Example payload — 1.000 V on GP_A, 2.000 V on GP_B encode (protobuf, tag carries the field number) as the byte run:
+
+```
+… e0 01 e8 07   e8 01 d0 0f …
+  ├──┬──┤├──┬─┤  ├──┬──┤├──┬─┤
+  fld 28 1000mV  fld 29 2000mV   (value = mV as a varint)
+```
+
+which `ttn.js decodeUplink({fPort: 2})` decodes to `{ input_a_voltage: 1.0, input_b_voltage: 2.0 }` (mV ÷ 1000 → V). HIL-captured frames matched the PPK2 source within ADC quantization (see below).
+
 **History:** two new selectable channels, `input-a-voltage` / `input-b-voltage` (uint16 LE mV, sentinel `0xFFFF`), appended after `accel-motion` in `history-sensors` — existing channel bit positions are unchanged.
 
 **Alarms:** `APP_ALARM_Q_VOLTAGE` (already used for the low-battery watchdog) is now also a valid quantity for `APP_ALARM_SRC_INPUT_A`/`APP_ALARM_SRC_INPUT_B`, alongside the existing digital `state`/`count` quantities — a threshold rule (lo/hi/dwell) can be provisioned on either input regardless of which capability (digital or analog) is currently active on it.
 
 **Power:** one one-shot ADC read per `interval_sample`, same resume→read→suspend pattern as the existing battery measurement — the issue's own estimate is idle impact ~zero, not yet independently re-measured for this change (HIL still pending, see below).
 
-**Not yet done / left for HIL verification:** the functional test plan (`ats sample` / a live report with a potentiometer or voltage source on JP2, comparing the decoded value against a known input) and confirming the power estimate above on real hardware. No-data-watchdog coverage for a failed/absent analog reading was deliberately left out of scope, matching the existing gap for other non-monitored analog sensors (e.g. the light sensor).
+**HIL verification (done).** A PPK2 driven as a controlled source on the input connector (before the divider) confirmed the full chain: the divider correction is exact (`V_report = V_pin × 34` at every measured point), and the reported voltage tracks the applied source with a ratio ≈ 1.00–1.02 across the 1.0–5.0 V PPK2 range — within resistor tolerance plus ADC quantization (~34 mV/LSB referred to the input, i.e. coarse at the low end, inherent to the ×34 attenuation). Propagation was verified end-to-end: telemetry (`ats lrw compose` → ttn.js-decoded `input_a/b_voltage`), history (`history read` of the `input-a/b-voltage` channels), and a threshold alarm on `input-b voltage` (active below the band, recovery inside it). No-data-watchdog coverage for a failed/absent analog reading was deliberately left out of scope, matching the existing gap for other non-monitored analog sensors (e.g. the light sensor).
+
+**Still pending:** confirming the idle-power estimate on real hardware (needs the J-Link detached and a current meter on the battery rail — not covered by the source-injection test above).
 
 **Test coverage:** `tests/alarm_rules` (voltage rule on `INPUT_A`/`INPUT_B` accepted, existing digital validity unchanged), `tests/compose` (capability gating + mV scaling + sentinel), `tests/history` (channel present/absent), decoder (`ttn.test.js`, telemetry + history decode + sentinels), and the `configen` round-trip (`app_config.yml` ↔ generated `app_config.{c,h,proto}`).
 
