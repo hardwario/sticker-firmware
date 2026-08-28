@@ -1,4 +1,4 @@
-# HARDWARIO STICKER — LoRa Improvements Proposal
+# HARDWARIO STICKER — LoRa Improvements: P2P Hardening and TOWER Transport
 
 A survey of the HARDWARIO TOWER radio stack and the `twr-sdk` LoRaWAN driver, and what
 STICKER should adopt from them. Covers the LoRaWAN side (regions, datarate, confirmed
@@ -12,6 +12,12 @@ uplinks, diagnostics) and the LoRa P2P side (duty cycle, ACK metadata, downlink,
 opened as a survey and stays here as the rationale and reference for the code that follows;
 the tracking checklist is in §6. Every claim is backed by a source citation, and feasibility
 was verified against the actual APIs in this workspace before anything was scheduled.
+
+**Base:** this branch stacks on `feat-p2p` (the P2P umbrella, PR #400), not directly on
+`v1.5.0` — the P2P transport this work extends lives there, and PR #401/#403/#404 all landed
+the same way. Line citations to `app/src/app_p2p.c` are against `feat-p2p` as of the #404
+merge (`e3fb42d`); they will drift as the code changes, so treat the surrounding identifiers
+as authoritative and the numbers as a hint.
 
 ---
 
@@ -236,9 +242,9 @@ deployment/diagnostic tool.
 
 The RX metadata is already plumbed: `lora_recv(dev, buf, size, timeout, &rssi, &snr)`
 (`zephyr/include/zephyr/drivers/lora.h:284-286`) is already used in `p2p_rx_window()`
-(`app_p2p.c:634-635`) and captured at `:780-785`.
+(`app_p2p.c:181-183`) and captured at `:780-785`.
 
-**Compatibility gotcha:** `recv_ack()` does a strict length check (`app_p2p.c:787`, `len != want`
+**Compatibility gotcha:** `recv_ack()` does a strict length check (`app_p2p.c:846`, `len != want`
 → reject), so an old node would treat a 3-byte ACK as no ACK at all, retry, and give up. The
 central must key the ACK size off the session's `proto_version` (sent in the JoinRequest body
 and persisted centrally). Consider a P2P-specific wire version — `APP_PROTO_VERSION` is
@@ -246,27 +252,27 @@ currently shared with the fPort-85/NFC command protocol.
 
 ### B2 — Token-bucket duty governor
 
-The current model is a single "blocked until" timestamp (`app_p2p.c:238`): after each TX the
+The current model is a single "blocked until" timestamp (`app_p2p.c:274`): after each TX the
 device is hard-blocked for 99× the airtime. TOWER instead runs a token bucket (36 000 ms per
 hour for EU 1 %, with sub-millisecond residue carry so repeated small charges do not round
 away). The practical difference: a token bucket permits a legitimate burst — an alarm
 immediately after a telemetry frame — while still holding the hourly average.
 
 This matters more than it sounds: the code notes a 240 B SF10 frame blocks for **~227 s**
-under the current model (`app_p2p.c:187-189`).
+under the current model (`app_p2p.c:181-183`).
 
 Implementation note: the duty gate currently runs before the frame length is known
-(`tx_frame`, `app_p2p.c:748`). Either gate coarsely (`tokens <= 0`) or move the check into
+(`tx_frame`, `app_p2p.c:807`). Either gate coarsely (`tokens <= 0`) or move the check into
 `tx_frame_at()` where `wire_len` exists.
 
 ### B3 — Self-healing rejoin
 
 `doc/p2p.md` §7 already specifies this ("N consecutive fully-failed uplink cycles, default
 8"), but it is not implemented — link loss is visible exactly once, in the give-up log after
-`P2P_ACK_MAX_RETRIES` (`app_p2p.c:903-907`). A device whose session goes stale stays mute
+`P2P_ACK_MAX_RETRIES` (`app_p2p.c:962-965`). A device whose session goes stale stays mute
 until someone power-cycles it.
 
-The machinery already exists: `app_p2p_rejoin()` (`app_p2p.c:1510-1515`) does exactly the
+The machinery already exists: `app_p2p_rejoin()` (`app_p2p.c:1579`) does exactly the
 right thing but is `CONFIG_SHELL`-gated. Needed: a consecutive-failure counter, promotion of
 `app_p2p_rejoin()` out of the shell gate, and exponential backoff between rounds (§7 requires
 it; nothing exists today). §5.2 explicitly exempts self-healing rejoin from the 120 s
@@ -274,7 +280,7 @@ never-paired boot window.
 
 ### B4 — Pending-downlink chaining and COMMAND dispatch
 
-Today the ACK's pending bit is read and logged only (`app_p2p.c:814-815`), and
+Today the ACK's pending bit is read and logged only (`app_p2p.c:824`, `:874`), and
 `APP_P2P_FRAME_COMMAND` (0x56) is reserved but never dispatched (`app_p2p.h:58`). So P2P is
 effectively uplink-only: no remote configuration, no remote commands. TOWER chains RX windows
 while the pending flag stays set, and gets a remote shell over the air out of it.
@@ -301,7 +307,7 @@ ClockSync command over 0x56 (pairs with B4). `app_clock.c` itself needs no chang
 
 Correction to a common assumption: the P2P frequency is **already a runtime parameter**
 (`p2p_frequency`, default 868.1 MHz, bounds 863–870 MHz). What is hardcoded is the bandwidth,
-coding rate, and the EU 1 % duty model (`app_p2p.c:512-515`, `:82-84`).
+coding rate, and the EU 1 % duty model (`app_p2p.c:571-573`, `:120`).
 
 `doc/p2p.md` §3.3 states the constraint plainly: a deployment outside EU868 needs a new
 duty-cycle model, not just a different frequency.
@@ -317,7 +323,7 @@ frame-size cap. And US915 compliance under FCC §15.247 means either frequency h
 recommendation is BW500 single-channel plus a compliance review with the certification lab —
 this is a regulatory decision, not just a firmware one.
 
-The JoinAccept's `reserved(4)` field (`app_p2p.c:1279`) is the confirmed hook for per-node
+The JoinAccept's `reserved(4)` field (`app_p2p.c:158-160`) is the confirmed hook for per-node
 channel assignment (`doc/p2p.md` §5.3) and comfortably fits channel index, SF, TX power, and
 flags.
 
