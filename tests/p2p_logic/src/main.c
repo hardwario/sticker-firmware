@@ -367,4 +367,57 @@ ZTEST(p2p_logic, test_fcnt_saturates_no_wrap)
 	zassert_equal(p2p_test_get_fcnt(), UINT32_MAX, "counter must not wrap past UINT32_MAX");
 }
 
+/* ---- Ack body parse (B1 rssi/snr + B5 time) --------------------------- */
+
+ZTEST(p2p_logic, test_ack_body_base)
+{
+	uint8_t body[P2P_ACK_BODY_BASE_LEN] = {P2P_ACK_FLAG_PENDING, (uint8_t)(int8_t)-57,
+					       (uint8_t)(int8_t)9};
+	struct p2p_ack_info info;
+
+	zassert_true(p2p_parse_ack_body(body, sizeof(body), &info), "base body must parse");
+	zassert_equal(info.flags, P2P_ACK_FLAG_PENDING, "flags wrong");
+	zassert_equal(info.rssi, -57, "rssi wrong (signed)");
+	zassert_equal(info.snr, 9, "snr wrong");
+	zassert_false(info.time_present, "no time tail in a base body");
+}
+
+ZTEST(p2p_logic, test_ack_body_with_time)
+{
+	uint8_t body[P2P_ACK_BODY_MAX_LEN] = {0};
+
+	body[0] = P2P_ACK_FLAG_TIME;
+	body[1] = (uint8_t)(int8_t)-110; /* rssi */
+	body[2] = (uint8_t)(int8_t)-3;   /* snr */
+	sys_put_be32(1735689600u, &body[3]);
+	struct p2p_ack_info info;
+
+	zassert_true(p2p_parse_ack_body(body, sizeof(body), &info), "7 B body must parse");
+	zassert_equal(info.rssi, -110, "rssi wrong");
+	zassert_equal(info.snr, -3, "snr wrong");
+	zassert_true(info.time_present, "time tail must be reported present");
+	zassert_equal(info.unix_time, 1735689600u, "unix time decoded wrong");
+}
+
+ZTEST(p2p_logic, test_ack_body_time_bit_without_tail_is_ignored)
+{
+	/* 3-byte body but the time bit set: no tail bytes, so time must NOT be
+	 * reported present (length is authoritative, not the flag). */
+	uint8_t body[P2P_ACK_BODY_BASE_LEN] = {P2P_ACK_FLAG_TIME, 0, 0};
+	struct p2p_ack_info info;
+
+	zassert_true(p2p_parse_ack_body(body, sizeof(body), &info), "base body must parse");
+	zassert_false(info.time_present, "time flag with no tail must be ignored");
+}
+
+ZTEST(p2p_logic, test_ack_body_bad_length_rejected)
+{
+	uint8_t body[8] = {0};
+	struct p2p_ack_info info;
+
+	zassert_false(p2p_parse_ack_body(body, 1, &info), "1 B body must be rejected");
+	zassert_false(p2p_parse_ack_body(body, 4, &info), "4 B body must be rejected");
+	zassert_false(p2p_parse_ack_body(body, 8, &info), "8 B body must be rejected");
+}
+
 ZTEST_SUITE(p2p_logic, NULL, NULL, NULL, NULL, NULL);

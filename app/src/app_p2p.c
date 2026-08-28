@@ -5,6 +5,7 @@
  */
 
 #include "app_ccm.h"
+#include "app_clock.h"
 #include "app_cmd.h"
 #include "app_compose.h"
 #include "app_config.h"
@@ -235,10 +236,16 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_RX1_TRAILING_MARGIN_MS 40
 #define P2P_RX1_DELAY_DEFAULT_S    1
 
-/* Confirmed uplink (§6): the Ack (0xFA) body is a single flags byte (bit 0:
- * downlink pending, read-and-logged only -- 0x56 dispatch stays out of scope,
- * same decision as §5.3). */
-#define P2P_ACK_BODY_LEN 1
+/* Confirmed uplink (§6): the Ack (0xFA) body (B1/B5, PR #408, matches the
+ * central in proximos-v2 MR!30). Base body is flags(1) | rssi(i8) | snr(i8) --
+ * the RSSI/SNR the central measured on the uplink being acknowledged (a free
+ * link-quality sample, TOWER's pattern). An optional 4-byte big-endian Unix
+ * time tail rides when flags bit 1 is set (B5 clock sync). The frame is
+ * self-describing: the node derives the body length from the received frame
+ * length, so no wire version is needed (P2P is pre-deployment). */
+/* P2P_ACK_FLAG_PENDING / P2P_ACK_FLAG_TIME / P2P_ACK_BODY_BASE_LEN /
+ * P2P_ACK_TIME_LEN / P2P_ACK_BODY_MAX_LEN are in app_p2p.h (shared with the
+ * pure p2p_parse_ack_body() helper and tests/p2p_logic). */
 
 /* Unacknowledged uplinks retransmit the SAME counter (byte-identical frame)
  * up to this many times (§6) -- interpreted as retries AFTER the first send
@@ -326,6 +333,17 @@ static int64_t m_join_started_at; /* uptime ms; start of the current boot join w
 static uint16_t m_consec_uplink_fail; /* consecutive fully-failed uplink cycles */
 static bool m_self_healing;           /* current JOINING episode is a self-heal */
 static uint8_t m_rejoin_attempt;      /* backoff step within a self-heal episode */
+
+/* B1: RSSI/SNR the central reported in the last Ack (its measurement of our
+ * uplink). m_last_ack_valid is false until the first Ack of this session. */
+static int8_t m_last_ack_rssi;
+static int8_t m_last_ack_snr;
+static bool m_last_ack_valid;
+
+/* B4: the last Ack's "downlink pending" flag -- when set, the central will
+ * deliver a 0x56 COMMAND in the RX1 window of the NEXT uplink (replacing that
+ * uplink's Ack), so that window must be sized for a full command frame. */
+static bool m_downlink_pending;
 
 struct p2p_tx_msg {
 	uint8_t type;
@@ -879,6 +897,24 @@ P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
 	return MIN(ms, (uint32_t)P2P_REJOIN_BACKOFF_MAX_MS);
 }
 
+/* Parse a decrypted Ack body (B1/B5): base (3 B, flags|rssi|snr) or
+ * time-extended (7 B, + big-endian Unix seconds when flags bit 1 is set).
+ * Pure -- exposed to tests/p2p_logic. Returns false on any other length. */
+P2P_TESTABLE bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out)
+{
+	if (body_len != P2P_ACK_BODY_BASE_LEN && body_len != P2P_ACK_BODY_MAX_LEN) {
+		return false;
+	}
+
+	out->flags = body[0];
+	out->rssi = (int8_t)body[1];
+	out->snr = (int8_t)body[2];
+	out->time_present =
+		(body_len == P2P_ACK_BODY_MAX_LEN) && ((out->flags & P2P_ACK_FLAG_TIME) != 0);
+	out->unix_time = out->time_present ? sys_get_be32(&body[3]) : 0;
+	return true;
+}
+
 /* Duty-cycle budget (ms) still needed before a `wire_len`-byte frame can be
  * sent at the current SF -- 0 if it can go now. */
 static int64_t duty_wait_ms_for(size_t wire_len)
@@ -1058,12 +1094,49 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, ui
 	return ret;
 }
 
-/* Wait for and validate an Ack (0xFA) for `counter` in the RX1 window after
- * `tx_end_ms` (doc/p2p.md §6): header must match (net_id/dev_addr/frame_type/
- * counter echo), then AES-CCM decrypt under session_key, direction=RX (it is
- * a downlink). The 1-byte flags body's bit 0 (downlink pending) is read and
- * logged only -- 0x56 dispatch stays out of scope, same decision as §5.3.
- * Returns true iff a valid, matching Ack was received. */
+/* B4: dispatch a received 0x56 COMMAND (already decrypted into `body`) through
+ * the transport-generic command handler and queue the 0x55 RESPONSE for the
+ * next uplink. P2P reuses the LoRaWAN over-the-air writability gating --
+ * APP_CMD_TRANSPORT_P2P shares the M-3 no_write_lrw field gate (configen), and
+ * the command-level allow-lists reject P2P for every LRW/NFC/vendor-only
+ * command (positive `tp == ...` checks), so only the unrestricted management
+ * commands (get/set_param, get/get_config, settings_save, reboot) run here.
+ * A deferred command action (settings_save/reboot/reset) is logged but NOT yet
+ * executed -- the reboot-after-response deferral is a B4 follow-up, paired with
+ * the central's structured-command phase-2 (proximos-v2 MR!30 S2). */
+static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
+{
+	uint8_t resp[P2P_TX_BUF_SIZE];
+	size_t resp_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	int ret = app_cmd_handle(APP_CMD_TRANSPORT_P2P, body, body_len, resp, sizeof(resp),
+				 &resp_len, &action);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_cmd_handle(p2p)", ret);
+		return;
+	}
+
+	if (resp_len > 0) {
+		(void)app_p2p_queue_response(0, resp, resp_len);
+	}
+
+	if (action != APP_CMD_ACTION_NONE) {
+		LOG_WRN("P2P command action %d not executed yet (B4 follow-up)", (int)action);
+	}
+}
+
+/* Wait for and validate the RX1 downlink for `counter` after `tx_end_ms`
+ * (doc/p2p.md §6): header must match (net_id/dev_addr/counter echo), then
+ * AES-CCM decrypt under session_key, direction=RX. Two frame types are
+ * accepted, both confirming the uplink got through:
+ *  - Ack (0xFA): body flags(1) | rssi_i8 | snr_i8 (B1) + optional 4-byte Unix
+ *    time tail when flags bit 1 is set (B5); length derived from the frame
+ *    length (self-describing). The pending flag (bit 0) sizes the NEXT uplink's
+ *    window for a command (B4).
+ *  - Command (0x56, B4): only when a pending downlink was announced -- decrypt,
+ *    dispatch (dispatch_p2p_command), and treat as an implicit Ack.
+ * Returns true iff a valid, matching downlink was received. */
 static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 {
 #if defined(CONFIG_SHELL)
@@ -1078,13 +1151,19 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	uint8_t buf[P2P_FRAME_MAX];
 	int16_t rssi;
 	int8_t snr;
-	size_t want = P2P_HDR_LEN + P2P_ACK_BODY_LEN + P2P_TAG_LEN;
+	/* Size the window for the largest downlink the central may send. Normally
+	 * that is the time-extended Ack; once a downlink has been announced (B4),
+	 * a full-size 0x56 command may arrive INSTEAD, so size for a max frame --
+	 * that longer RX-on is the measurable power cost of a pending downlink
+	 * (doc/p2p.md §6), which is why the central only sets pending deliberately. */
+	uint8_t want_max = m_downlink_pending
+				   ? P2P_FRAME_MAX
+				   : (uint8_t)(P2P_HDR_LEN + P2P_ACK_BODY_MAX_LEN + P2P_TAG_LEN);
 
-	int len = p2p_rx_window(tx_end_ms, m_rx1_delay_s, (uint8_t)want, buf, sizeof(buf), &rssi,
-				&snr);
+	int len = p2p_rx_window(tx_end_ms, m_rx1_delay_s, want_max, buf, sizeof(buf), &rssi, &snr);
 
-	if (len < 0 || (size_t)len != want) {
-		return false;
+	if (len < P2P_HDR_LEN + P2P_TAG_LEN) {
+		return false; /* timeout or too short to hold a header + tag */
 	}
 
 	uint32_t net_id_hdr = sys_get_be32(&buf[0]);
@@ -1092,8 +1171,40 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	uint8_t frame_type = buf[6];
 	uint32_t ctr = sys_get_be32(&buf[7]);
 
-	if (net_id_hdr != m_net_id || dev_addr_hdr != m_dev_addr ||
-	    frame_type != APP_P2P_FRAME_ACK || ctr != counter) {
+	if (net_id_hdr != m_net_id || dev_addr_hdr != m_dev_addr || ctr != counter) {
+		return false;
+	}
+
+	size_t body_len = (size_t)len - P2P_HDR_LEN - P2P_TAG_LEN;
+
+	/* --- B4: a 0x56 COMMAND takes this window instead of the Ack --- */
+	if (frame_type == APP_P2P_FRAME_COMMAND) {
+		uint8_t nonce[P2P_NONCE_LEN];
+		uint8_t body[P2P_MAX_BODY];
+
+		build_nonce(nonce, ctr, m_dev_addr, frame_type, P2P_DIR_RX);
+
+		int ret = app_ccm_auth_decrypt(m_session_key, nonce, P2P_NONCE_LEN, buf,
+					       P2P_HDR_LEN, &buf[P2P_HDR_LEN], body_len,
+					       &buf[P2P_HDR_LEN + body_len], P2P_TAG_LEN, body);
+		if (ret) {
+			LOG_WRN("Command auth failed (counter %u)", counter);
+			return false;
+		}
+
+		LOG_INF("Command received (counter %u, %zu B)", counter, body_len);
+		dispatch_p2p_command(body, body_len);
+
+		/* The command replaced this uplink's Ack; receiving it confirms the
+		 * uplink reached the central. The 0x55 response is now queued; the
+		 * next Ack re-announces any further pending downlink. */
+		m_downlink_pending = false;
+		return true;
+	}
+
+	/* --- Ack (0xFA): B1 rssi/snr + B5 time tail --- */
+	if (frame_type != APP_P2P_FRAME_ACK ||
+	    (body_len != P2P_ACK_BODY_BASE_LEN && body_len != P2P_ACK_BODY_MAX_LEN)) {
 		return false;
 	}
 
@@ -1101,17 +1212,36 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 
 	build_nonce(nonce, ctr, m_dev_addr, frame_type, P2P_DIR_RX);
 
-	uint8_t flags;
+	uint8_t body[P2P_ACK_BODY_MAX_LEN];
 	int ret = app_ccm_auth_decrypt(m_session_key, nonce, P2P_NONCE_LEN, buf, P2P_HDR_LEN,
-				       &buf[P2P_HDR_LEN], P2P_ACK_BODY_LEN,
-				       &buf[P2P_HDR_LEN + P2P_ACK_BODY_LEN], P2P_TAG_LEN, &flags);
+				       &buf[P2P_HDR_LEN], body_len, &buf[P2P_HDR_LEN + body_len],
+				       P2P_TAG_LEN, body);
 	if (ret) {
 		LOG_WRN("Ack auth failed (counter %u)", counter);
 		return false;
 	}
 
-	LOG_INF("Ack received (counter %u)%s", counter,
-		(flags & 0x01) ? " [downlink pending]" : "");
+	struct p2p_ack_info ack;
+
+	if (!p2p_parse_ack_body(body, body_len, &ack)) {
+		return false;
+	}
+
+	/* B1: the RSSI/SNR the central measured on this uplink. */
+	m_last_ack_rssi = ack.rssi;
+	m_last_ack_snr = ack.snr;
+	m_last_ack_valid = true;
+
+	/* B4: remember whether to size the NEXT uplink's window for a command. */
+	m_downlink_pending = (ack.flags & P2P_ACK_FLAG_PENDING) != 0;
+
+	/* B5: apply the wall-clock time tail if present. */
+	if (ack.time_present) {
+		(void)app_clock_set_unix(ack.unix_time);
+	}
+
+	LOG_INF("Ack (counter %u) rssi=%d snr=%d%s%s", counter, m_last_ack_rssi, m_last_ack_snr,
+		m_downlink_pending ? " [pending]" : "", ack.time_present ? " [time]" : "");
 	return true;
 }
 
@@ -1434,6 +1564,11 @@ static void mark_ready(void)
 	m_self_healing = false;
 	m_rejoin_attempt = 0;
 	m_consec_uplink_fail = 0;
+
+	/* Fresh session: last Ack's link quality and any pending-downlink hint
+	 * from the old session no longer apply. */
+	m_last_ack_valid = false;
+	m_downlink_pending = false;
 
 	m_started = true;
 	if (m_ready_cb) {
@@ -1825,6 +1960,9 @@ void app_p2p_get_info(struct app_p2p_info *info)
 	info->fcnt = m_fcnt;
 	info->dev_nonce = m_dev_nonce;
 	info->ack_retry_pending = k_msgq_num_used_get(&m_ack_retry_msgq);
+	info->last_ack_rssi = m_last_ack_rssi;
+	info->last_ack_snr = m_last_ack_snr;
+	info->last_ack_valid = m_last_ack_valid;
 	info->app_key_set = app_key_is_set();
 }
 

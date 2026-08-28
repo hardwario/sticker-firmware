@@ -93,7 +93,7 @@ int {{ g.apply_fn }}(enum app_cmd_transport tp, const {{ g.c_message }} *src, ui
 {% for p in g.params %}
 {% if p.no_write_lrw or p.no_write_nfc or p.no_write_vendor %}
 {% set denied = [] %}
-{% if p.no_write_lrw %}{% set _ = denied.append(('lrw', 'LRW')) %}{% endif %}
+{% if p.no_write_lrw %}{% set _ = denied.append(('lrw', 'LRW')) %}{% set _ = denied.append(('p2p', 'P2P')) %}{% endif %}
 {% if p.no_write_nfc %}{% set _ = denied.append(('nfc', 'NFC')) %}{% endif %}
 {% if p.no_write_vendor %}{% set _ = denied.append(('vendor', 'VENDOR')) %}{% endif %}
 	/* M-3: this field is not writable over {{ denied | map(attribute=0) | join('/') }}. */

@@ -31,6 +31,23 @@ extern "C" {
 #define P2P_DUTY_PERMILLE  10    /* 1% duty cycle (per mille) */
 #define P2P_DUTY_BUDGET_MS 36000 /* bucket capacity = 1% of one hour */
 
+/* Ack (0xFA) body layout (B1 rssi/snr + B5 optional time tail), doc/p2p.md §6.
+ * Shared with the pure parser and tests/p2p_logic. */
+#define P2P_ACK_FLAG_PENDING  0x01 /* bit 0: a downlink command is pending (B4) */
+#define P2P_ACK_FLAG_TIME     0x02 /* bit 1: 4-byte Unix time tail present (B5) */
+#define P2P_ACK_BODY_BASE_LEN 3    /* flags | rssi_i8 | snr_i8 */
+#define P2P_ACK_TIME_LEN      4    /* optional big-endian Unix seconds */
+#define P2P_ACK_BODY_MAX_LEN  (P2P_ACK_BODY_BASE_LEN + P2P_ACK_TIME_LEN) /* 7 */
+
+/* Parsed Ack body (B1/B5), filled by p2p_parse_ack_body(). */
+struct p2p_ack_info {
+	uint8_t flags;      /* raw flags byte (P2P_ACK_FLAG_*) */
+	int8_t rssi;        /* central-measured uplink RSSI, dBm */
+	int8_t snr;         /* central-measured uplink SNR, dB */
+	bool time_present;  /* a valid Unix time tail was present */
+	uint32_t unix_time; /* wall-clock seconds (valid iff time_present) */
+};
+
 /* Token-bucket duty-cycle governor state (B2). Defined here so tests/p2p_logic
  * can declare one; the governor functions are internal to app_p2p.c (given
  * external linkage only under CONFIG_ZTEST -- see the block at the end of this
@@ -82,7 +99,7 @@ enum app_p2p_frame_type {
 	APP_P2P_FRAME_TELEMETRY = 2,
 	APP_P2P_FRAME_ALARM = 3,
 	APP_P2P_FRAME_RESPONSE = 85,
-	APP_P2P_FRAME_COMMAND = 86, /* inbound (RX): reserved, not dispatched yet */
+	APP_P2P_FRAME_COMMAND = 86, /* inbound (RX): downlink command, dispatched (B4) */
 	APP_P2P_FRAME_JOIN_REQUEST = 0xF0,
 	APP_P2P_FRAME_JOIN_ACCEPT = 0xF1,
 	APP_P2P_FRAME_ACK = 0xFA,
@@ -162,6 +179,12 @@ struct app_p2p_info {
 	uint32_t fcnt;              /* next data-plane TX counter */
 	uint32_t dev_nonce;         /* JoinRequest anti-replay counter, never resets */
 	uint32_t ack_retry_pending; /* frames currently awaiting an Ack retry */
+	/* B1: RSSI/SNR the central reported in the last Ack (its measurement of
+	 * this device's uplink). last_ack_valid is false until the first Ack of
+	 * the current session. */
+	int8_t last_ack_rssi;
+	int8_t last_ack_snr;
+	bool last_ack_valid;
 	/* False means lrw_appkey is all-zero, i.e. the device has no root key
 	 * for P2P at all and app_p2p_start()/app_p2p_rejoin() refuse to bring
 	 * the radio up (doc/p2p.md §4). Without this, such a device is
@@ -239,6 +262,7 @@ void p2p_duty_refill(struct p2p_duty *d, int64_t now_ms);
 void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 uint32_t p2p_rejoin_backoff_ms(uint8_t attempt);
+bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
 void p2p_test_set_fcnt(uint32_t next, uint32_t reserved);
 uint32_t p2p_test_get_fcnt(void);
 int p2p_test_fcnt_next(uint32_t *counter_out);
