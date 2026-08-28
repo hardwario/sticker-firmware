@@ -12,5 +12,6 @@ A plan is renamed if its PR is renamed, so the two stay in step.
 
 | Plan | PR |
 |---|---|
-| `408 - LoRa improvements - P2P hardening and TOWER transport.md` | [#408](https://github.com/hardwario/sticker-firmware/pull/408) |
+| `408 - LoRa improvements - P2P hardening.md` | [#408](https://github.com/hardwario/sticker-firmware/pull/408) |
 | `409 - LoRaWAN improvements - regions, datarate, diagnostics.md` | [#409](https://github.com/hardwario/sticker-firmware/pull/409) |
+| `410 - TOWER GFSK transport (radio-mode tower).md` | [#410](https://github.com/hardwario/sticker-firmware/pull/410) |
