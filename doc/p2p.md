@@ -237,6 +237,26 @@ Properties this buys:
   hand-typed — the whole "operator must configure matching values on both
   ends" model from the epic is gone.
 
+**Zero-`app_key` guard.** Rooting everything in `app_key` makes an all-zero
+`lrw_appkey` dangerous rather than merely useless: it is a *publicly known*
+key, so every tag and every `session_key` derived under it is forgeable by
+anyone in radio range — a forged JoinAccept would pair the node into a
+hostile network and hand the attacker the very `session_key` the node
+computes. Nor is it a theoretical state: all-zero is the config default, so
+any device switched to `radio-mode p2p` before `lrw_appkey` was provisioned
+lands here — the ordinary case on a bench or a P2P-only build — and it is
+also what `factory_reset` leaves behind for a device later re-enabled into
+`radio-mode p2p` (§7). `app_p2p_start()` therefore refuses
+to bring the radio up at all while `lrw_appkey` is all-zero, and
+`app_p2p_rejoin()` (the `ats radio join` shell path) refuses for the same
+reason so the debug surface is not a way around it. The refusal is loud —
+`LOG_ERR` at boot, plus an `app_key: MISSING (radio refused to start)` line
+in `ats radio status` — following the same rule as app_lrw.c's
+`radio_disabled()` (#271/#98): a provisioning problem must surface, never
+masquerade as a radio that is simply off. This gate did not exist under the
+old design and was not needed there, since its root (`secret_key`) is set at
+the tester and survives `factory_reset`.
+
 ---
 
 ## 5. Pairing (on-air join)
@@ -551,6 +571,16 @@ phone app step is needed for P2P at all, one-time or otherwise.
   with no pre-existing spec to match. Breaking change vs. the prior
   `join_key`-rooted design, accepted pre-ship for the same reason as before
   (bench-only, no central to migrate).
+- **Zero-`app_key` exposure** — **found and closed while reviewing the merge
+  of this revision.** Moving the root from `secret_key` to `lrw_appkey` made
+  an all-zero root key reachable for the first time (`factory_reset` wipes
+  `lrw_appkey` but preserves `secret_key`), and an all-zero root is publicly
+  known, so a bystander could have forged a JoinAccept and owned the session.
+  Closed by §4's zero-`app_key` guard in `app_p2p_start()`/`app_p2p_rejoin()`.
+  The related *availability* consequence — no self-healing back onto the air
+  without re-provisioning — is real, deliberate, and documented in §7's
+  lifecycle table; it is a property of the key hierarchy change itself, not
+  something the guard introduced.
 - **Central's access to `app_key`** — **new, unresolved.** §4/§8/§10 now
   assume the P2P central can obtain a device's `app_key` (`lrw_appkey`)
   through the same channel the LoRaWAN join server already gets it from

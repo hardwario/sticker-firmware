@@ -80,7 +80,15 @@ enum p2p_link_state {
  * Returns 0 or a negative errno. */
 int app_p2p_init(void);
 
-/* Boot-time bring-up: if already paired (persisted NVS state from a prior
+/* Boot-time bring-up. Refuses outright, and logs an error, if `lrw_appkey`
+ * is all-zero: it is the root key for the whole transport, so an all-zero one
+ * is a publicly known key and joining under it is forgeable by anyone in
+ * range (doc/p2p.md §4). This is checked before the paired shortcut below, so
+ * a device re-enabled into `radio-mode p2p` after a factory_reset -- which
+ * wipes lrw_appkey but leaves the persisted pairing intact -- refuses rather
+ * than resuming a session it can never renew (doc/p2p.md §7).
+ *
+ * Otherwise: if already paired (persisted NVS state from a prior
  * join), mark the radio ready and kick the report cadence immediately --
  * unlike app_lrw_join() on the radio facade, an existing pairing is treated
  * as sufficient, so a normal power cycle never wastes a JoinRequest
@@ -129,6 +137,11 @@ struct app_p2p_info {
 	uint32_t fcnt;              /* next data-plane TX counter */
 	uint32_t dev_nonce;         /* JoinRequest anti-replay counter, never resets */
 	uint32_t ack_retry_pending; /* frames currently awaiting an Ack retry */
+	/* False means lrw_appkey is all-zero, i.e. the device has no root key
+	 * for P2P at all and app_p2p_start()/app_p2p_rejoin() refuse to bring
+	 * the radio up (doc/p2p.md §4). Without this, such a device is
+	 * indistinguishable from a plain UNPAIRED one on the bench. */
+	bool app_key_set;
 };
 
 /* Fill `info` with the current pairing/session snapshot. Always succeeds. */
@@ -146,7 +159,9 @@ void app_p2p_get_info(struct app_p2p_info *info);
  * send_alarm) is refused with -EBUSY while listening. */
 int app_p2p_listen(bool enable);
 
-/* Force a fresh join handshake RIGHT NOW, even if currently PAIRED --
+/* Force a fresh join handshake RIGHT NOW, even if currently PAIRED. Subject
+ * to the same all-zero `lrw_appkey` refusal as app_p2p_start() -- the shell
+ * is not a way around it --
  * unlike app_p2p_start(), an existing pairing is not treated as sufficient.
  * A successful JoinAccept overwrites the old pairing via pairing_persist(),
  * so this never needs a reboot or NVS wipe (contrast with app_p2p_unjoin()

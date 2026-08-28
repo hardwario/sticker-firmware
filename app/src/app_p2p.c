@@ -353,6 +353,36 @@ K_MSGQ_DEFINE(m_rx_msgq, sizeof(struct p2p_rx_msg), P2P_RX_QUEUE_DEPTH, 4);
 /* Key derivation                                                            */
 /* ======================================================================== */
 
+/* The whole transport is rooted in app_key (see the P2P_JOIN_TAG_LABEL comment
+ * above), so an all-zero lrw_appkey is not merely "unset" -- it is a PUBLICLY
+ * KNOWN root key. Anything derived under it (both handshake tags and every
+ * session_key) is forgeable by anyone in radio range: a forged JoinAccept
+ * would pair the node into a hostile network and hand the attacker the same
+ * session_key the node computes.
+ *
+ * It is also a genuinely reachable state, not a theoretical one. All-zero is
+ * the config default, so any device set to `radio-mode p2p` before its
+ * lrw_appkey was provisioned lands here -- the ordinary case on a bench or a
+ * P2P-only build. It is also what a factory_reset leaves behind (lrw_appkey
+ * is `persistent: [device_reset]` only and is absent from
+ * app_config_factory_reset()'s preserve list, unlike secret_key, which the
+ * earlier join_key-rooted design could always fall back on).
+ *
+ * So the radio must not come up at all until the device is provisioned --
+ * see app_p2p_start()/app_p2p_rejoin(). Refusing loudly rather than silently
+ * idling follows radio_disabled()'s rule in app_lrw.c (#271/#98): a
+ * provisioning problem should surface, not masquerade as a radio that is
+ * merely off. */
+static bool app_key_is_set(void)
+{
+	for (size_t i = 0; i < sizeof(g_app_config.lrw_appkey); i++) {
+		if (g_app_config.lrw_appkey[i] != 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* Constant-time 16 B tag compare (mirrors app_ccm_auth_decrypt()'s own
  * accumulate-the-XOR pattern in app_ccm.c) -- used to verify the plain
  * AES-CMAC tags on JoinRequest/JoinAccept below. A short-circuiting memcmp()
@@ -1432,6 +1462,24 @@ int app_p2p_init(void)
 
 void app_p2p_start(void)
 {
+	/* No usable root key -- see app_key_is_set() above for why this refuses
+	 * outright instead of trying.
+	 *
+	 * Deliberately checked BEFORE the PAIRED branch. factory_reset does not
+	 * clear the p2pjoin/* subtree (doc/p2p.md §7), so a device that is set
+	 * back to `radio-mode p2p` after one boots with join_settings_set()
+	 * having already restored the old pairing to PAIRED -- and would take
+	 * that shortcut and resume transmitting under a session the operator
+	 * explicitly reset, with a root key it can never re-derive. Note this
+	 * needs the explicit re-enable: factory_reset also reverts radio_mode to
+	 * its LORAWAN default, so it does not by itself leave a live P2P node in
+	 * this state. */
+	if (!app_key_is_set()) {
+		LOG_ERR("P2P not started: lrw_appkey is all-zero (device unprovisioned). "
+			"Set lrw-appkey over NFC or shell, then reboot.");
+		return;
+	}
+
 	if (m_link_state == P2P_LINK_PAIRED) {
 		/* Persisted pairing from a prior boot: no re-join needed (§7 --
 		 * a session survives normal power cycles). */
@@ -1519,6 +1567,7 @@ void app_p2p_get_info(struct app_p2p_info *info)
 	info->fcnt = m_fcnt;
 	info->dev_nonce = m_dev_nonce;
 	info->ack_retry_pending = k_msgq_num_used_get(&m_ack_retry_msgq);
+	info->app_key_set = app_key_is_set();
 }
 
 /* ======================================================================== */
@@ -1529,6 +1578,14 @@ void app_p2p_get_info(struct app_p2p_info *info)
 
 void app_p2p_rejoin(void)
 {
+	/* Same gate as app_p2p_start() -- the shell must not be a way around it
+	 * (a JoinRequest tagged under an all-zero app_key is forgeable by
+	 * anyone; see app_key_is_set()). */
+	if (!app_key_is_set()) {
+		LOG_ERR("P2P rejoin refused: lrw_appkey is all-zero (device unprovisioned)");
+		return;
+	}
+
 	m_link_state = P2P_LINK_JOINING;
 	m_join_started_at = k_uptime_get();
 	k_work_schedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
