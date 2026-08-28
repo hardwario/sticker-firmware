@@ -304,4 +304,67 @@ ZTEST(p2p_logic, test_duty_burst_after_idle)
 	zassert_true(p2p_duty_wait_ms(&d, 5000, 1) > 0, "after the burst the bucket must be empty");
 }
 
+/* ---- Self-healing rejoin backoff (B3) --------------------------------- */
+
+ZTEST(p2p_logic, test_rejoin_backoff_doubles_then_caps)
+{
+	/* base, 2x, 4x, ... capped at 1 h. */
+	zassert_equal(p2p_rejoin_backoff_ms(0), 60000u, "attempt 0 should be the 60 s base");
+	zassert_equal(p2p_rejoin_backoff_ms(1), 120000u, "attempt 1 should double to 120 s");
+	zassert_equal(p2p_rejoin_backoff_ms(2), 240000u, "attempt 2 should be 240 s");
+	zassert_equal(p2p_rejoin_backoff_ms(3), 480000u, "attempt 3 should be 480 s");
+
+	/* Monotonic non-decreasing, and never above the 1 h cap, for any attempt. */
+	uint32_t prev = 0;
+
+	for (int a = 0; a <= 255; a++) {
+		uint32_t ms = p2p_rejoin_backoff_ms((uint8_t)a);
+
+		zassert_true(ms >= prev, "backoff not monotonic at attempt %d (%u < %u)", a, ms,
+			     prev);
+		zassert_true(ms <= 3600000u, "backoff %u at attempt %d exceeds the 1 h cap", ms, a);
+		prev = ms;
+	}
+	zassert_equal(p2p_rejoin_backoff_ms(255), 3600000u, "a large attempt must saturate at 1 h");
+}
+
+/* ---- Frame-counter fail-closed / saturation (B9) ---------------------- */
+
+ZTEST(p2p_logic, test_fcnt_normal_advance)
+{
+	uint32_t c;
+
+	/* Within the reserved window: hands out the value and advances, no reserve
+	 * needed (so no dependency on the settings backend). */
+	p2p_test_set_fcnt(100, 200);
+	zassert_ok(p2p_test_fcnt_next(&c), "fcnt_next should succeed within the window");
+	zassert_equal(c, 100u, "counter value wrong");
+	zassert_equal(p2p_test_get_fcnt(), 101u, "counter not advanced");
+}
+
+ZTEST(p2p_logic, test_fcnt_fail_closed_on_reserve_failure)
+{
+	uint32_t c = 0xDEADBEEF;
+
+	/* At the window edge a durable reserve is required; with CONFIG_SETTINGS_NONE
+	 * the save fails, so fcnt_next must refuse rather than hand out an
+	 * unreserved counter -- and must NOT advance the counter. */
+	p2p_test_set_fcnt(200, 200);
+	zassert_true(p2p_test_fcnt_next(&c) != 0,
+		     "fcnt_next must fail closed when the reservation can't be persisted");
+	zassert_equal(p2p_test_get_fcnt(), 200u, "counter advanced despite a failed reservation");
+}
+
+ZTEST(p2p_logic, test_fcnt_saturates_no_wrap)
+{
+	uint32_t c = 0xDEADBEEF;
+
+	/* At the ceiling the counter must refuse rather than wrap (a wrap repeats
+	 * every (key, nonce) -- a full CCM break). */
+	p2p_test_set_fcnt(UINT32_MAX, UINT32_MAX);
+	zassert_equal(p2p_test_fcnt_next(&c), -EOVERFLOW,
+		      "exhausted counter must return -EOVERFLOW");
+	zassert_equal(p2p_test_get_fcnt(), UINT32_MAX, "counter must not wrap past UINT32_MAX");
+}
+
 ZTEST_SUITE(p2p_logic, NULL, NULL, NULL, NULL, NULL);

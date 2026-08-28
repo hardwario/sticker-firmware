@@ -238,6 +238,10 @@ void p2p_duty_init(struct p2p_duty *d, int64_t now_ms);
 void p2p_duty_refill(struct p2p_duty *d, int64_t now_ms);
 void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
+uint32_t p2p_rejoin_backoff_ms(uint8_t attempt);
+void p2p_test_set_fcnt(uint32_t next, uint32_t reserved);
+uint32_t p2p_test_get_fcnt(void);
+int p2p_test_fcnt_next(uint32_t *counter_out);
 #endif /* defined(CONFIG_ZTEST) */
 
 #ifdef __cplusplus

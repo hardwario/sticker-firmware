@@ -292,12 +292,12 @@ The scope of this PR is the P2P work; the LoRaWAN items (A1–A7) are tracked in
 **Quick wins**
 
 - [x] B2 — token-bucket duty governor ✅ (+ Step 1 native test suite)
-- [ ] B3 — self-healing rejoin
+- [x] B3 — self-healing rejoin ✅
 - [ ] B1 — ACK carries RSSI/SNR *(needs central, S1)*
 
 **Medium** — needs central/gateway coordination or a larger change
 
-- [ ] B9 — counter/replay hardening audit
+- [x] B9 — counter/replay hardening audit ✅
 - [ ] B4 — pending-downlink chaining + `0x56` COMMAND dispatch *(needs central, S2)*
 - [ ] B5 — clock sync over P2P *(needs central, S3)*
 
@@ -373,40 +373,47 @@ Replaced the single `m_dc_blocked_until` deadline with a refilling token bucket,
 `debug.conf+debug_p2p_bench.conf` all build (Release +≈0.3 KB flash / +64 B RAM vs baseline;
 P2P-only unchanged); clang-format 22.1.5 clean.
 
-### Step 3 — B3: self-healing rejoin
+### Step 3 — B3: self-healing rejoin ✅ DONE
 
-The link-loss signal exists but nothing acts on it: the give-up branch at `app_p2p.c:962-965`
-only logs.
+The link-loss signal existed but nothing acted on it (the ACK give-up branch only logged).
 
-- Add `m_consec_uplink_fail`; increment at the give-up branch, reset on any successful
-  `recv_ack()`.
-- At the threshold (8 consecutive fully-failed uplink cycles, `doc/p2p.md` §7) drop to
-  `P2P_LINK_JOINING` and schedule `m_join_work` — the work `app_p2p_rejoin()` (`:1579`)
-  already does. Promote it out of its `#if defined(CONFIG_SHELL)` guard so the non-shell
-  Release build can self-heal.
-- Add exponential backoff between rejoin rounds (nothing exists today). Keep
-  `app_key_is_set()` and the per-round boot-window cap (`:1345-1353`) intact; §5.2 exempts
-  self-healing from the never-paired 120 s cap, but each round still bounds itself.
+- Added `m_consec_uplink_fail` (+ `m_self_healing`, `m_rejoin_attempt`): incremented at both
+  give-up branches (`note_uplink_cycle_failed()`), reset on any Ack (`note_uplink_acked()`,
+  wired into `send_confirmed` and `ack_retry_work_handler`) and on pairing (`mark_ready`).
+- At `P2P_REJOIN_FAIL_THRESHOLD = 8` an already-PAIRED node self-heals: a shared
+  `start_join_episode(self_healing=true)` drops to JOINING and schedules the join work. The
+  trigger fires only while PAIRED, so once re-joining it can't re-trigger itself.
+- `app_p2p_rejoin()` (shell) and `app_p2p_start()` (boot) both route through the same
+  `start_join_episode(false)`; the self-heal path is compiled unconditionally (Release can
+  self-heal — no CONFIG_SHELL dependency). `app_key_is_set()` guard preserved.
+- `join_work_handler` now branches on `m_self_healing`: self-heal is exempt from the 120 s
+  boot-window cap (§5.2/§7) and uses exponential backoff `p2p_rejoin_backoff_ms(attempt)`
+  (60 s → ×2 → 3600 s, pure/testable) with ±25 % jitter; the boot/shell join keeps its
+  window cap + tight jitter.
 
-**Verify:** standard, plus a `tests/p2p_logic/` case for the counter/threshold/backoff state
-machine. Real link loss stays a bench test — `ats radio ack_drop <n>` already forces it.
+**Verified:** `p2p_logic` covers the backoff curve (double-then-cap, monotonic, saturates).
+Real link loss stays a bench test — `ats radio ack_drop <n>` forces the give-up path.
 
-### Step 4 — B9: counter and replay hardening audit
+### Step 4 — B9: counter and replay hardening audit ✅ DONE
 
-An audit with targeted fixes, not a feature. Doing it before the server-facing work means the
-data plane is sound before we extend it.
+- **Fail-closed** (fix): `fcnt_reserve()` now advances the in-RAM watermark ONLY after the
+  durable `settings_save_one` succeeds, and `fcnt_next()` returns an errno (refuses TX) if a
+  needed reservation can't be persisted — was previously bumping the watermark before the
+  save and ignoring its failure, so a reboot could reuse a counter. `tx_frame()` propagates
+  the refusal.
+- **Saturate, don't wrap** (fix): `fcnt_next()` returns `-EOVERFLOW` at `UINT32_MAX` instead
+  of wrapping (a wrap repeats every `(key, nonce)`); reserve target clamped so it can't
+  overflow near the ceiling.
+- **Verify-then-classify** (already correct): `recv_join_accept()` verifies the CMAC tag
+  before `pairing_persist()`; `recv_ack()` authenticates before returning and mutates no
+  persistent state. Device-side has no replay window to poison (the central holds it).
+- **Counter consumed at seal time** (already correct): `fcnt_next()` runs in `tx_frame()`
+  before build/send; retries reuse the same counter via `tx_frame_at()`, so a failed send
+  burns a counter rather than reusing one.
 
-- **Fail-closed** on a failed frame-counter reserve write. TOWER refuses to transmit
-  (`NonceLocked`) rather than risk a `(key, nonce)` repeat; confirm ours does the same at
-  `:449-460` and make it explicit if not.
-- **Saturate, don't wrap**, at `UINT32_MAX`.
-- **Verify-then-classify**: confirm CCM verification precedes any replay-state update, so a
-  forged high counter cannot poison the window.
-- **Counter consumed at seal time**, not send time, so a cancelled or failed send burns a
-  counter instead of reusing one.
-
-**Verify:** standard, plus a `tests/p2p_logic/` case per fix. Each fix that turns out to be
-already correct gets recorded as a test, not a code change.
+**Verified:** `p2p_logic` fcnt cases — normal advance, fail-closed on a failed reserve (the
+`CONFIG_SETTINGS_NONE` backend makes saves fail), and saturation at `UINT32_MAX` (via
+CONFIG_ZTEST hooks `p2p_test_set_fcnt`/`p2p_test_fcnt_next`).
 
 ### Step 5 — B1: ACK carrying RSSI/SNR *(needs S1)*
 

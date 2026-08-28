@@ -188,6 +188,18 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * plus this jitter so devices booting together don't collide on retry. */
 #define P2P_JOIN_RETRY_JITTER_MS 2000
 
+/* Self-healing re-join (B3, doc/p2p.md §7): after this many CONSECUTIVE
+ * fully-failed confirmed-uplink cycles (all P2P_ACK_MAX_RETRIES exhausted with
+ * no Ack), an already-PAIRED node concludes its session is stale (central DB
+ * loss/restore, key change, lost sync) and starts re-join attempts on its own.
+ * Unlike the never-paired boot join (§5.2), this is NOT bounded by the 120 s
+ * boot window -- a paired device recovers for its whole life -- so it must use
+ * exponential backoff (base -> x2 -> cap) instead of the tight boot-window
+ * jitter, to keep the duty budget and battery sane over a long outage. */
+#define P2P_REJOIN_FAIL_THRESHOLD  8       /* consecutive failed uplink cycles */
+#define P2P_REJOIN_BACKOFF_BASE_MS 60000   /* first re-join round: 60 s */
+#define P2P_REJOIN_BACKOFF_MAX_MS  3600000 /* cap: 1 h */
+
 /* RX1 window (§6, reused for JoinAccept per §5.3): opened this many ms
  * before the nominal rx1_delay deadline to absorb node-side timing error
  * (crystal drift, work-queue scheduling jitter), sized generously against
@@ -307,6 +319,13 @@ static uint8_t m_session_key[P2P_KEY_LEN];
 static uint8_t m_rx1_delay_s = P2P_RX1_DELAY_DEFAULT_S;
 static uint32_t m_dev_nonce;      /* next JoinRequest counter; persisted, device lifetime */
 static int64_t m_join_started_at; /* uptime ms; start of the current boot join window */
+
+/* Self-healing re-join state (B3, §7). m_self_healing distinguishes a
+ * self-healing episode (exponential backoff, no boot-window cap) from a
+ * boot/shell join (120 s boot window, tight jitter). */
+static uint16_t m_consec_uplink_fail; /* consecutive fully-failed uplink cycles */
+static bool m_self_healing;           /* current JOINING episode is a self-heal */
+static uint8_t m_rejoin_attempt;      /* backoff step within a self-heal episode */
 
 struct p2p_tx_msg {
 	uint8_t type;
@@ -475,25 +494,72 @@ static struct settings_handler m_fcnt_sh = {
 	.h_set = fcnt_settings_set,
 };
 
-static void fcnt_reserve(uint32_t high_water)
+/* Persist a new reservation high-water. FAIL-CLOSED (B9): the in-RAM watermark
+ * is advanced ONLY if the durable write succeeded -- otherwise a reboot would
+ * resume from the older persisted value and could hand out a counter this run
+ * already used, and a repeated (key, nonce) pair is a full CCM break. Returns
+ * 0 or the settings errno. */
+static int fcnt_reserve(uint32_t high_water)
 {
-	m_fcnt_reserved = high_water;
 	int ret = settings_save_one(P2P_FCNT_KEY, &high_water, sizeof(high_water));
 
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("settings_save_one(p2pfc)", ret);
+		return ret;
 	}
+	m_fcnt_reserved = high_water;
+	return 0;
 }
 
-static uint32_t fcnt_next(void)
+/* Hand out the next frame counter into `*counter_out`. Guarantees the value is
+ * within the durably-reserved window before returning it (B9): if the window
+ * must be extended and that durable write fails, refuses (returns the errno)
+ * rather than reuse a counter across a reboot. Saturates at UINT32_MAX and
+ * refuses rather than wrapping (a wrap repeats every (key, nonce) -- a rekey
+ * via re-join is the intended recovery long before this is reachable). */
+static int fcnt_next(uint32_t *counter_out)
 {
-	uint32_t c = m_fcnt++;
+	if (m_fcnt == UINT32_MAX) {
+		LOG_ERR("P2P frame counter exhausted; refusing TX (re-join to rekey)");
+		return -EOVERFLOW;
+	}
 
 	if (m_fcnt >= m_fcnt_reserved) {
-		fcnt_reserve(m_fcnt + P2P_FCNT_RESERVE);
+		uint32_t target = (m_fcnt > UINT32_MAX - P2P_FCNT_RESERVE)
+					  ? UINT32_MAX
+					  : m_fcnt + P2P_FCNT_RESERVE;
+		int ret = fcnt_reserve(target);
+
+		if (ret) {
+			return ret; /* fail closed -- do not use an unreserved counter */
+		}
 	}
-	return c;
+
+	*counter_out = m_fcnt++;
+	return 0;
 }
+
+#if defined(CONFIG_ZTEST)
+/* Test hooks for the frame-counter fail-closed/saturation logic (B9). With the
+ * CONFIG_SETTINGS_NONE backend in tests/p2p_logic, settings_save_one() fails,
+ * so any path that must extend the reservation exercises the fail-closed
+ * branch. */
+void p2p_test_set_fcnt(uint32_t next, uint32_t reserved)
+{
+	m_fcnt = next;
+	m_fcnt_reserved = reserved;
+}
+
+uint32_t p2p_test_get_fcnt(void)
+{
+	return m_fcnt;
+}
+
+int p2p_test_fcnt_next(uint32_t *counter_out)
+{
+	return fcnt_next(counter_out);
+}
+#endif /* defined(CONFIG_ZTEST) */
 
 /* ======================================================================== */
 /* Join/session persistence (#118 phase 2, doc/p2p.md §5.3)                 */
@@ -577,8 +643,13 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
 	m_rx1_delay_s = rx1_delay_s;
 	m_link_state = P2P_LINK_PAIRED;
 
+	/* Fresh pairing: counter restarts at 0 under the just-rotated session_key,
+	 * so reuse vs. the old session is impossible. Best-effort reserve here --
+	 * if it fails, the old (higher) persisted watermark conservatively still
+	 * covers these low counters, and fcnt_next() re-reserves fail-closed once
+	 * m_fcnt catches up to it. */
 	m_fcnt = 0;
-	fcnt_reserve(P2P_FCNT_RESERVE);
+	(void)fcnt_reserve(P2P_FCNT_RESERVE);
 }
 
 /* ======================================================================== */
@@ -795,6 +866,19 @@ P2P_TESTABLE int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32
 	return (deficit_us + P2P_DUTY_ACCRUE_US_PER_MS - 1) / P2P_DUTY_ACCRUE_US_PER_MS;
 }
 
+/* Exponential backoff (ms) for self-healing re-join round `attempt` (0-based):
+ * BASE, 2*BASE, 4*BASE, ... capped at MAX. Pure -- exposed to tests/p2p_logic.
+ * The caller adds jitter. */
+P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
+{
+	uint32_t ms = P2P_REJOIN_BACKOFF_BASE_MS;
+
+	for (uint8_t i = 0; i < attempt && ms < P2P_REJOIN_BACKOFF_MAX_MS; i++) {
+		ms *= 2;
+	}
+	return MIN(ms, (uint32_t)P2P_REJOIN_BACKOFF_MAX_MS);
+}
+
 /* Duty-cycle budget (ms) still needed before a `wire_len`-byte frame can be
  * sent at the current SF -- 0 if it can go now. */
 static int64_t duty_wait_ms_for(size_t wire_len)
@@ -806,6 +890,51 @@ static int64_t duty_wait_ms_for(size_t wire_len)
 static void duty_charge(uint32_t air_ms)
 {
 	p2p_duty_charge(&m_duty, k_uptime_get(), air_ms);
+}
+
+/* Start a JOINING episode and schedule the first JoinRequest. `self_healing`
+ * selects the retry policy in join_work_handler(): a boot/shell join is capped
+ * at the 120 s boot window with tight jitter (§5.2); a self-heal runs with
+ * exponential backoff and no window cap (§7). Shared by app_p2p_start(),
+ * app_p2p_rejoin() (shell), and the self-heal trigger below. */
+static void start_join_episode(bool self_healing)
+{
+	m_self_healing = self_healing;
+	m_rejoin_attempt = 0;
+	m_consec_uplink_fail = 0;
+	m_link_state = P2P_LINK_JOINING;
+	m_join_started_at = k_uptime_get();
+	k_work_schedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
+}
+
+/* A confirmed-uplink cycle completed successfully (Ack received) -- clear the
+ * self-healing failure streak. */
+static void note_uplink_acked(void)
+{
+	m_consec_uplink_fail = 0;
+}
+
+/* A confirmed-uplink cycle failed completely (all retries exhausted, no Ack).
+ * After P2P_REJOIN_FAIL_THRESHOLD consecutive such failures an already-PAIRED
+ * node self-heals by re-joining (B3, §7). Only fires while PAIRED, so once a
+ * self-heal is under way further give-ups don't re-trigger it. */
+static void note_uplink_cycle_failed(void)
+{
+	if (m_link_state != P2P_LINK_PAIRED) {
+		return; /* already re-joining (or never paired) */
+	}
+	if (++m_consec_uplink_fail < P2P_REJOIN_FAIL_THRESHOLD) {
+		return;
+	}
+	if (!app_key_is_set()) {
+		/* Can't re-join under an all-zero app_key (§4); stay put and keep
+		 * counting so a later re-provision + success resets the streak. */
+		LOG_ERR("P2P self-heal refused: lrw_appkey is all-zero (unprovisioned)");
+		return;
+	}
+	LOG_WRN("P2P: %u consecutive failed uplinks -- self-healing re-join (§7)",
+		m_consec_uplink_fail);
+	start_join_episode(true);
 }
 
 /* Build header+encrypt one frame into `frame` (>= P2P_HDR_LEN + body_len +
@@ -914,8 +1043,14 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, ui
 		return -EAGAIN;
 	}
 
-	uint32_t counter = fcnt_next();
-	int ret = tx_frame_at(frame_type, body, body_len, counter, tx_end_ms);
+	uint32_t counter;
+	int ret = fcnt_next(&counter);
+
+	if (ret) {
+		return ret; /* fail-closed: no durably-reserved counter available */
+	}
+
+	ret = tx_frame_at(frame_type, body, body_len, counter, tx_end_ms);
 
 	if (ret == 0) {
 		*counter_out = counter;
@@ -1051,7 +1186,9 @@ static void ack_retry_work_handler(struct k_work *work)
 		LOG_INF("Uplink retry %d/%d sent (counter %u)", st.attempt + 1, P2P_ACK_MAX_RETRIES,
 			st.counter);
 
-		if (!recv_ack(st.counter, tx_end)) {
+		if (recv_ack(st.counter, tx_end)) {
+			note_uplink_acked();
+		} else {
 			if (st.attempt + 1 < P2P_ACK_MAX_RETRIES) {
 				st.attempt++;
 				/* Re-queue at the TAIL (not retried in place): with more
@@ -1061,11 +1198,13 @@ static void ack_retry_work_handler(struct k_work *work)
 					LOG_WRN("Ack retry queue full re-queueing counter %u; "
 						"giving up",
 						st.counter);
+					note_uplink_cycle_failed();
 				}
 			} else {
 				LOG_WRN("Uplink counter %u unacked after %d retries; giving "
 					"up",
 					st.counter, P2P_ACK_MAX_RETRIES);
+				note_uplink_cycle_failed();
 			}
 		}
 	}
@@ -1094,7 +1233,9 @@ static int send_confirmed(uint8_t frame_type, const uint8_t *body, size_t body_l
 		return ret;
 	}
 
-	if (!recv_ack(counter, tx_end)) {
+	if (recv_ack(counter, tx_end)) {
+		note_uplink_acked();
+	} else {
 		schedule_ack_retry(frame_type, body, body_len, counter, 0);
 	}
 
@@ -1289,6 +1430,11 @@ int app_p2p_listen(bool enable)
 
 static void mark_ready(void)
 {
+	/* Paired: end any self-healing episode and clear the failure streak. */
+	m_self_healing = false;
+	m_rejoin_attempt = 0;
+	m_consec_uplink_fail = 0;
+
 	m_started = true;
 	if (m_ready_cb) {
 		m_ready_cb();
@@ -1444,7 +1590,10 @@ static void join_work_handler(struct k_work *work)
 		return; /* paired (or reverted) while a retry was already in flight */
 	}
 
-	if (k_uptime_get() - m_join_started_at >= P2P_JOIN_BOOT_WINDOW_MS) {
+	/* A never-paired boot/shell join gives up after the 120 s boot window
+	 * (§5.2); a self-healing re-join is exempt (§7) -- a paired device that
+	 * lost its session keeps trying, with exponential backoff, for its life. */
+	if (!m_self_healing && k_uptime_get() - m_join_started_at >= P2P_JOIN_BOOT_WINDOW_MS) {
 		LOG_WRN("P2P join: boot window (%d s) expired without a JoinAccept; giving up "
 			"until next boot/trigger",
 			P2P_JOIN_BOOT_WINDOW_MS / 1000);
@@ -1467,14 +1616,26 @@ static void join_work_handler(struct k_work *work)
 		LOG_ERR_CALL_FAILED_INT("send_join_request", ret);
 	}
 
-	int64_t wait_ms =
-		(ret == -EAGAIN)
-			? duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN)
-			: 0;
+	int64_t wait_ms;
 
-	uint32_t jitter = sys_rand32_get() % P2P_JOIN_RETRY_JITTER_MS;
+	if (m_self_healing) {
+		/* Exponential backoff between rounds, +/-25% jitter. Duty-cycle-blocked
+		 * (-EAGAIN) rounds also wait the backoff -- at 60 s+ it always exceeds
+		 * the join frame's duty wait anyway. */
+		uint32_t base = p2p_rejoin_backoff_ms(m_rejoin_attempt);
 
-	k_work_reschedule_for_queue(&m_work_q, dwork, K_MSEC(wait_ms + jitter));
+		if (m_rejoin_attempt < UINT8_MAX) {
+			m_rejoin_attempt++;
+		}
+		wait_ms = (int64_t)base - base / 4 + (sys_rand32_get() % (base / 2 + 1));
+	} else {
+		wait_ms = (ret == -EAGAIN) ? duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN +
+							      P2P_JOIN_TAG_LEN)
+					   : 0;
+		wait_ms += sys_rand32_get() % P2P_JOIN_RETRY_JITTER_MS;
+	}
+
+	k_work_reschedule_for_queue(&m_work_q, dwork, K_MSEC(wait_ms));
 }
 
 /* ======================================================================== */
@@ -1589,9 +1750,7 @@ void app_p2p_start(void)
 	/* Unpaired: kick off the boot-window join handshake (#118 phase 2,
 	 * §5.2). app_p2p_is_ready() only goes true once JoinAccept lands
 	 * (mark_ready(), called from join_work_handler()). */
-	m_link_state = P2P_LINK_JOINING;
-	m_join_started_at = k_uptime_get();
-	k_work_schedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
+	start_join_episode(false);
 }
 
 bool app_p2p_is_ready(void)
@@ -1685,9 +1844,8 @@ void app_p2p_rejoin(void)
 		return;
 	}
 
-	m_link_state = P2P_LINK_JOINING;
-	m_join_started_at = k_uptime_get();
-	k_work_schedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
+	/* Explicit operator-forced fresh join: boot-window policy, not self-heal. */
+	start_join_episode(false);
 }
 
 int app_p2p_unjoin(void)
