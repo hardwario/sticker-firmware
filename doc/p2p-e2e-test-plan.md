@@ -79,6 +79,41 @@ prefix `P2E-` (P2P end-to-end).
 - Real USART1 transport (vs. the RTT-bridge) is not exercised until a USB-UART adapter is
   attached; the protocol is identical, only the northbridge transport differs.
 
+## 6. Live HIL results — 2026-08-28
+
+First live run of the real STICKER (this firmware) ↔ northbridge ↔ Proximos `control-radio`
+central, over a custom RTT↔PTY bridge (see §8's runbook and the bench notes below). DUT on
+J-Link 822005109, northbridge on 822005110.
+
+| ID | Item | Result | Evidence |
+|----|------|--------|----------|
+| P2E-01 | join | ✅ PASS | DUT `ats radio status` → `state PAIRED, net_id b595cf19, dev_addr 0001`; central `JoinAccept -> serial=80e007b2 net_id=0xb595cf19` + `EVT_TX_DONE status=Ok` |
+| P2E-02 | data plane | ✅ PASS | central `telemetry decrypted+authenticated serial=80e007b2 counter=N`; DUT fcnt advances |
+| P2E-03 | **B1** ACK RSSI/SNR | ✅ PASS | central `ACK … flags=0x00 (3 B body)`; DUT `last ack rssi -56 dBm / snr 9 dB` |
+| P2E-04 | **B5** clock sync | ✅ PASS | with `--deliver-time`: `ACK … flags=0x03 (7 B body)`; DUT `clock get` → `unix=1787921251 UTC 2026-08-28 12:47:31` (was "RTC not set yet") |
+| P2E-05 | **B4** 0x56 downlink | ◑ PARTIAL | central `TX_SCHEDULE ok: COMMAND(0x56) counter=4 (2 B body)` + `EVT_TX_DONE status=Ok` — the 0x56 radiated; the DUT's `0x55` RESPONSE was not confirmed at the central (see below). Full round-trip proven in the central's FakeModem tests + FW unit tests. |
+| P2E-09/10/11 | B2 duty / B3 self-heal / persistence | ⏳ not run | left for a follow-up bench pass |
+
+### Bench findings (carry into the runbook / firmware)
+
+- **Northbridge RTT-bridge build MUST set `CONFIG_SEGGER_RTT_BUFFER_SIZE_DOWN=256`** (default 16).
+  With the 16 B down-buffer a host `p2p_inject` chunks too slowly, so the JoinAccept
+  `TX_SCHEDULE` reaches the NB after its `aim_t_ms` → the NB silently skips the TX (`tx`=0, no
+  `EVT_TX_DONE`) and the join never completes. With 256 B the inject lands in one write, the
+  JoinAccept radiates, and the DUT pairs. Same class of fix as PR #404's down-buffer note.
+  **Gotcha:** the larger buffer moves `_SEGGER_RTT` — re-read the address from the `.elf`
+  (`nm | grep _SEGGER_RTT`) for the bridge (it moved 0x20000410 → 0x20000500 here).
+- **RTT↔PTY bridge (`nb_rtt_bridge.py`) essentials:** the PTY must be raw (`tty.setraw`) or the
+  line discipline mangles binary HDLC; the bridge must `os.close(sfd)` so the central can open
+  the slave with `TIOCEXCL`; chunk the RTT down-write and retry.
+- **B4 cross-process note (server side, MR!30):** a `node-send`-queued downlink is picked up by
+  the host at **startup** (from `sessions.db`), so a restarted host delivered the 0x56 fine —
+  the cross-process gap only blocks *live* injection into an already-running host, which is
+  exactly what the central's control-socket routing (MR!30 phase-2) addresses.
+- **B4 0x55 open item:** the DUT's RESPONSE completing the round-trip was not observed at the
+  central. Likely the bench runtime filters the FW's `<inf>` logs (so `Command received` wasn't
+  visible) or RX-window timing for the larger 0x56 frame; to be confirmed on a follow-up pass.
+
 ## 7. Central runbook (Proximos `control-radio`, MR!30)
 
 Two binaries from crate `control-radio`: **`control-radio-p2p-host`** (the always-on runtime;

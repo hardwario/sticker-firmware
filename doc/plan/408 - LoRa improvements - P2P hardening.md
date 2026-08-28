@@ -322,6 +322,11 @@ driver work and should be planned together.
 
 Section 7 breaks this into ordered, commit-sized steps.
 
+**Live HIL (2026-08-28):** B1, B5 and the join + data plane are validated end-to-end against
+the Proximos central (real STICKER ↔ northbridge ↔ `control-radio`, MR!30); B4's 0x56 downlink
+radiated but the 0x55 round-trip is unconfirmed live. Full results in
+`doc/p2p-e2e-test-plan.md` §6.
+
 ## 7. Implementation steps
 
 One step per commit, in order. Each step states what changes, which files, and how it is
