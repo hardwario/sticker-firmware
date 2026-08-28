@@ -26,8 +26,10 @@ extern "C" {
  * The payload layer is reused unchanged: app_compose builds the protobuf
  * Telemetry snapshot exactly as for LoRaWAN; this module only frames it (an
  * 11 B cleartext header replacing the LoRaWAN fPort, see app_p2p.c) and
- * AES-CCM encrypts+authenticates the body under the derived `join_key`
- * (doc/p2p.md §4 -- there is no manual p2p_key config parameter).
+ * AES-CCM encrypts+authenticates the body under the derived `session_key`
+ * (doc/p2p.md §4, derived directly from the device's existing LoRaWAN OTAA
+ * AppKey -- there is no manual p2p_key config parameter and no separate
+ * join_key).
  *
  * Phase 1 shipped deliberately unpaired/unACKed fire-and-forget: net_id/
  * dev_addr were the fixed pre-join value 0 (doc/p2p.md §5.3's own
@@ -35,8 +37,8 @@ extern "C" {
  * (#118) adds the join handshake itself: on first start with no persisted
  * pairing state, the device sends JoinRequest, opens a bounded RX1 window
  * for JoinAccept, and on success persists net_id/dev_addr/session_key/
- * rx1_delay to NVS and switches from join_key to session_key for the data
- * plane (doc/p2p.md §5.3). app_p2p_is_ready() (and therefore the report
+ * rx1_delay to NVS and switches the data plane on to session_key
+ * (doc/p2p.md §5.3). app_p2p_is_ready() (and therefore the report
  * cadence) only goes true once paired -- a device stuck unpaired past its
  * boot join window (§5.2, 120 s) stays silent until the next boot or an NFC
  * `p2p_join` trigger (not yet wired). The confirmed-uplink Ack/retry (§6),
@@ -78,7 +80,15 @@ enum p2p_link_state {
  * Returns 0 or a negative errno. */
 int app_p2p_init(void);
 
-/* Boot-time bring-up: if already paired (persisted NVS state from a prior
+/* Boot-time bring-up. Refuses outright, and logs an error, if `lrw_appkey`
+ * is all-zero: it is the root key for the whole transport, so an all-zero one
+ * is a publicly known key and joining under it is forgeable by anyone in
+ * range (doc/p2p.md §4). This is checked before the paired shortcut below, so
+ * a device re-enabled into `radio-mode p2p` after a factory_reset -- which
+ * wipes lrw_appkey but leaves the persisted pairing intact -- refuses rather
+ * than resuming a session it can never renew (doc/p2p.md §7).
+ *
+ * Otherwise: if already paired (persisted NVS state from a prior
  * join), mark the radio ready and kick the report cadence immediately --
  * unlike app_lrw_join() on the radio facade, an existing pairing is treated
  * as sufficient, so a normal power cycle never wastes a JoinRequest
@@ -127,6 +137,11 @@ struct app_p2p_info {
 	uint32_t fcnt;              /* next data-plane TX counter */
 	uint32_t dev_nonce;         /* JoinRequest anti-replay counter, never resets */
 	uint32_t ack_retry_pending; /* frames currently awaiting an Ack retry */
+	/* False means lrw_appkey is all-zero, i.e. the device has no root key
+	 * for P2P at all and app_p2p_start()/app_p2p_rejoin() refuse to bring
+	 * the radio up (doc/p2p.md §4). Without this, such a device is
+	 * indistinguishable from a plain UNPAIRED one on the bench. */
+	bool app_key_set;
 };
 
 /* Fill `info` with the current pairing/session snapshot. Always succeeds. */
@@ -135,13 +150,18 @@ void app_p2p_get_info(struct app_p2p_info *info);
 #if defined(CONFIG_SHELL)
 /* Bench-rig reference receiver (doc/p2p.md §14): enable=true reconfigures the
  * radio for continuous RX and starts async receive -- each frame is
- * validated, AES-CCM decrypted under the derived join_key and logged with
- * RSSI/SNR/frame_type/counter; enable=false stops it and returns to TX
+ * filtered by net_id and logged with RSSI/SNR/frame_type/counter.
+ * JoinRequest/JoinAccept bodies are cleartext (see app_p2p.c's
+ * P2P_JOIN_TAG_LABEL comment) and are logged as-is; any other frame_type is
+ * a session_key-encrypted data-plane frame this diagnostic listener has no
+ * key for and cannot decode. enable=false stops it and returns to TX
  * config. Returns 0 or a negative errno. TX (send_telemetry/queue_response/
  * send_alarm) is refused with -EBUSY while listening. */
 int app_p2p_listen(bool enable);
 
-/* Force a fresh join handshake RIGHT NOW, even if currently PAIRED --
+/* Force a fresh join handshake RIGHT NOW, even if currently PAIRED. Subject
+ * to the same all-zero `lrw_appkey` refusal as app_p2p_start() -- the shell
+ * is not a way around it --
  * unlike app_p2p_start(), an existing pairing is not treated as sufficient.
  * A successful JoinAccept overwrites the old pairing via pairing_persist(),
  * so this never needs a reboot or NVS wipe (contrast with app_p2p_unjoin()

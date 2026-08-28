@@ -611,6 +611,8 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 
 		shell_print(shell, "kind: P2P");
 		shell_print(shell, "state: %s", p2p_state_to_str(info.link_state));
+		shell_print(shell, "app_key: %s",
+			    info.app_key_set ? "set" : "MISSING (radio refused to start)");
 		shell_print(shell, "net_id: %08x", info.net_id);
 		shell_print(shell, "dev_addr: %04x", info.dev_addr);
 		shell_print(shell, "rx1_delay: %u s", info.rx1_delay_s);
