@@ -20,6 +20,10 @@ Status: **design document**, phase 1 (§13) implemented and HIL-validated on a
 two-STICKER bench (§14.1) — `radio-mode p2p` now routes through a real
 `app_p2p`/`app_radio` facade instead of the `app_lrw.c` (#271) fallback
 warning; phases 2+ (join/ACK, northbridge, central) remain unimplemented.
+**Targeting v1.5.0** (#118): the unified `ats radio ...` shell surface —
+covering both LoRaWAN and P2P, including the new `unjoin`/`rx1_delay`/
+`ack_drop`/universal `compose` bench helpers below — ships in v1.5.0, not
+v1.4.0.
 
 ---
 
@@ -418,6 +422,10 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
 - Power impact: one RX1 per report against the 92 µA idle baseline
   (`doc/power-consumption.md`) must be measured on HW; the RX window is the
   main new consumer vs. the TX-only draft.
+- **Bench testing (v1.5.0)**: `ats radio ack_drop <count>` (CONFIG_SHELL) makes the
+  next `count` Acks appear dropped without a real RF outage, exercising the
+  retry/backoff path above deterministically -- the P2P analogue of `ats
+  radio lc fail` for the LoRaWAN link-check FSM.
 
 ---
 
@@ -438,7 +446,7 @@ isn't):
 | Trigger | Behavior |
 |---|---|
 | `lrw_appkey` change (`set_param`/`config`, e.g. re-provisioning) | `session_key` on the *next* join changes; an already-`PAIRED` session is unaffected until something else forces a re-join (unlike `secret_key` rotation on the NFC channel, which forces a reboot, #322 — changing `app_key` does not by itself). The central must have the new `app_key` registered before the node's next JoinRequest will authenticate. |
-| `factory_reset` | Pairing state is wiped (`persistent:` tiering: P2P pairing state **survives `device_reset`**, is **cleared by `factory_reset`**, like the LoRaWAN session) — **and, unlike the earlier `join_key`-from-`secret_key` design, `app_key` (`lrw_appkey`) itself is *also* wiped** (`persistent: [device_reset]` only, app_config.yml). The node returns to unpaired boot behavior but now has **no valid `app_key` at all** until re-provisioned (fresh LoRaWAN OTAA join, or an explicit NFC/shell `lrw_appkey` set) — it cannot even construct a JoinRequest tag the central would accept in the meantime. This is a genuine behavior change from the old design, where `secret_key` (and therefore the derivable `join_key`) survived `factory_reset`, so the device could always self-heal without new provisioning; that property is gone. |
+| `factory_reset` | **A P2P node stops being a P2P node.** `radio_mode` is `persistent: [device_reset]` only and is absent from `app_config_factory_reset()`'s preserve list, so it reverts to its `LORAWAN` default: `app_radio_init()` routes to app_lrw.c and `app_p2p_start()` is never called at all. Two leftovers survive and matter later. (a) **The P2P pairing is NOT cleared** (doc/code mismatch found 2026-08-24: the `p2pjoin/*` subtree is registered entirely inside `app_p2p.c` and `app_settings_factory_reset()` never references it) — inert while `radio_mode` is not `p2p`, but `join_settings_set()` still restores it straight to `PAIRED` the moment someone sets `radio_mode p2p` again. (b) **`app_key` (`lrw_appkey`) IS wiped** — also `persistent: [device_reset]` only and also absent from that preserve list, unlike `secret_key`, which the earlier `join_key`-rooted design could always fall back on. So re-enabling P2P after a `factory_reset` without re-provisioning `lrw_appkey` would otherwise resume a pairing the operator explicitly reset, under a root key that is now all-zero and therefore public; §4's zero-`app_key` guard refuses to start in exactly that state, which is why it is checked *before* `app_p2p_start()`'s already-`PAIRED` shortcut. The old design's self-healing property — the device could always re-derive its way back on its own — is gone regardless. Bench levers: `ats radio join` (v1.5.0) forces a fresh join live, no reboot needed (mirrors LoRaWAN's `join`, which always rejoins unconditionally); `ats radio unjoin` (v1.5.0; clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears the pairing. |
 | Central DB loss/restore | Node's uplinks stop being ACKed (or ACK under an unknown session fails authentication). Self-healing: after **N consecutive fully-failed uplink cycles** (default 8) the node starts re-join attempts with exponential backoff. Known devices' re-joins are accepted outside the pairing window. |
 | Explicit `Detach` / `RejoinRequest` downlink | Authenticated; immediate. `RejoinRequest` is the network-initiated rekey lever (counter hygiene, key rotation policy). |
 | Counter approaching 32-bit wrap | Practically unreachable; policy is a network-initiated `RejoinRequest` rekey long before wrap. |
@@ -572,13 +580,14 @@ phone app step is needed for P2P at all, one-time or otherwise.
   first). **Resolved: yes** — accepted as designed, no change needed.
 - **Northbridge scheduled-TX precision** — RX1 hit accuracy over
   UART+MQTT+LAN needs a prototype measurement before freezing `rx1_delay`
-  at 1 s. **Resolved:** `rx1_delay` is already per-device and
+  at 1 s. **Resolved + implemented (v1.5.0):** `rx1_delay` is already per-device and
   central-assigned (JoinAccept, §5.3), but that alone means changing it
   needs a live central + a registered device — too slow for bench tuning.
-  Add a debug-only shell override on the node side (same idiom as the
-  existing `ats lrw lc ...` debug helpers, `CONFIG_APP_CMD_DEBUG_SHELL`-gated)
-  so `rx1_delay` can be swept without a full re-join, while measuring
-  northbridge scheduled-TX precision during phase 3 (§13).
+  `ats radio rx1_delay <seconds>` (CONFIG_SHELL-gated, same idiom as the
+  existing `ats radio lc ...` debug helper) overrides the live value
+  in-RAM only — not persisted, restored by the next real JoinAccept — so it
+  can be swept without a full re-join while measuring northbridge
+  scheduled-TX precision during phase 3 (§13).
 - **Flash budget** — re-measure the dual-stack image against `0x34000`;
   decide whether debug keeps `CONFIG_APP_LORA_P2P=n`. **Measured 2026-08-17**
   (current `v1.4.0` tip, no P2P code yet — this is the baseline the dual-stack
