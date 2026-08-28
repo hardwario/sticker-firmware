@@ -471,7 +471,142 @@ dependency, so they can land first. B1 needs the central to key the ACK size off
 `proto_version`, so it should land alongside S1. B7 and Section 5 share the same Zephyr
 driver work and should be planned together.
 
-## 7. Explicit non-goals
+Section 7 breaks this into ordered, commit-sized steps.
+
+## 7. Implementation steps
+
+One step per commit, in order. Each step states what changes, which files, and how it is
+verified. Steps 1–4 have no external dependency; 5–7 need their server-side counterpart in
+[MR !30](https://gitlab.hardwario.com/proximos/proximos-v2/-/merge_requests/30) to land first.
+
+Standard verification for every step, unless noted: the three build configs (Release
+dual-stack, `debug.conf`, `debug.conf + debug_p2p_bench.conf`), `bash tests/run_native.sh`,
+and `clang-format --dry-run --Werror`.
+
+### Step 1 — a native test suite for the P2P logic
+
+**Why first:** `app_p2p.c` has *no* native test coverage today. `tests/p2p/` is a bench
+firmware for a second STICKER, not a ztest suite (no `testcase.yaml`, so `run_native.sh`
+skips it), which is why memory records this file as "HW/HIL only". Every P2P change below is
+currently verifiable only on a bench. This step buys a safety net before anything moves, and
+is TOWER's host-testable-decision-kernel lesson (§4) applied to us.
+
+- Add `tests/p2p_logic/` (`testcase.yaml`, `prj.conf`, `CMakeLists.txt`, `src/main.c`), picked
+  up automatically by `tests/run_native.sh`.
+- Characterise the pure helpers **as they behave today**: `frame_toa_ms()`
+  (`app_p2p.c:611`), the CCM nonce layout (`:700-713`), the frame counter reserve/resume math
+  (`:449-460`), and the current duty-cycle arithmetic (`:793`).
+- Extract only what the tests need into a header-visible or `static`-free form; no behaviour
+  change in this step.
+
+**Verify:** the new suite passes and the other ten still do — 11 suites green.
+
+### Step 2 — B2: token-bucket duty governor
+
+Replaces the single `m_dc_blocked_until` deadline (`app_p2p.c:274`) with a refilling budget.
+
+- New state: `m_duty_tokens_ms` + `m_duty_last_refill`; helpers `duty_refill()`,
+  `duty_available_ms()`, `duty_wait_ms(payload_len)`, `duty_charge(air_ms)`.
+- Rewrite the nine touch points: gates at `:715`, `:807`, `:933`, `:1214`; charges at `:793`,
+  `:1260`; wait computations at `:888`, `:1059`, `:1372`.
+- **Known wrinkle:** the gate in `tx_frame()` (`:807`) runs *before* the frame is built, so
+  the payload length is unknown there. Keep that one coarse (`duty_available_ms() <= 0`) and
+  do the exact check in `tx_frame_at()`, where `wire_len` exists.
+- **Decision needed — the bucket cap.** Today's model blocks for `air × 99` after *every*
+  frame, so an alarm queued behind a 240 B SF10 telemetry frame waits ~227 s (`:225`). A
+  bucket lets the alarm go immediately as long as budget remains, which is the actual point
+  of this change. How much burst to allow is a regulatory question, not a coding one: start
+  the cap low (a few seconds of air-time), which keeps us at least as conservative as today
+  while still fixing the alarm-latency case, and raise it only with a compliance review.
+
+**Verify:** standard, plus new duty cases in `tests/p2p_logic/` — refill accrual, burst then
+starve, and that the hourly total never exceeds 1 %.
+
+### Step 3 — B3: self-healing rejoin
+
+The link-loss signal exists but nothing acts on it: the give-up branch at `app_p2p.c:962-965`
+only logs.
+
+- Add `m_consec_uplink_fail`; increment at the give-up branch, reset on any successful
+  `recv_ack()`.
+- At the threshold (8 consecutive fully-failed uplink cycles, `doc/p2p.md` §7) drop to
+  `P2P_LINK_JOINING` and schedule `m_join_work` — the work `app_p2p_rejoin()` (`:1579`)
+  already does. Promote it out of its `#if defined(CONFIG_SHELL)` guard so the non-shell
+  Release build can self-heal.
+- Add exponential backoff between rejoin rounds (nothing exists today). Keep
+  `app_key_is_set()` and the per-round boot-window cap (`:1345-1353`) intact; §5.2 exempts
+  self-healing from the never-paired 120 s cap, but each round still bounds itself.
+
+**Verify:** standard, plus a `tests/p2p_logic/` case for the counter/threshold/backoff state
+machine. Real link loss stays a bench test — `ats radio ack_drop <n>` already forces it.
+
+### Step 4 — B9: counter and replay hardening audit
+
+An audit with targeted fixes, not a feature. Doing it before the server-facing work means the
+data plane is sound before we extend it.
+
+- **Fail-closed** on a failed frame-counter reserve write. TOWER refuses to transmit
+  (`NonceLocked`) rather than risk a `(key, nonce)` repeat; confirm ours does the same at
+  `:449-460` and make it explicit if not.
+- **Saturate, don't wrap**, at `UINT32_MAX`.
+- **Verify-then-classify**: confirm CCM verification precedes any replay-state update, so a
+  forged high counter cannot poison the window.
+- **Counter consumed at seal time**, not send time, so a cancelled or failed send burns a
+  counter instead of reusing one.
+
+**Verify:** standard, plus a `tests/p2p_logic/` case per fix. Each fix that turns out to be
+already correct gets recorded as a test, not a code change.
+
+### Step 5 — B1: ACK carrying RSSI/SNR *(needs S1)*
+
+- Node side: relax the strict `len != want` check (`app_p2p.c:846`) to accept **either** the
+  current 1-byte ACK body or the new 3-byte one. Accepting both is what makes this
+  deployable — a new node must still work against a not-yet-updated gateway, and an old node
+  must not be broken by a new one.
+- Store the reported RSSI/SNR, surface via `app_p2p_get_info()` and `ats radio status`.
+- Version the wire change off the session's `proto_version`, and consider a P2P-specific wire
+  version rather than reusing `APP_PROTO_VERSION`, which is shared with the fPort-85/NFC
+  command protocol.
+
+**Verify:** standard, plus round-trip cases against both body lengths. Bench test with the
+gw-sim in `tests/p2p/`.
+
+### Step 6 — B4: pending-downlink chaining and `0x56` COMMAND dispatch *(needs S2)*
+
+- Add `APP_CMD_TRANSPORT_P2P` to `app_cmd.h`, so P2P gets its own writability gating rather
+  than borrowing the LoRaWAN transport's.
+- On ACK flags bit 0 — read and logged only today (`app_p2p.c:824`, `:874`) — open a further
+  RX window, decrypt under the session key with `P2P_DIR_RX`, dispatch through the existing
+  transport-generic `app_cmd_handle()`, and return the reply via `app_p2p_queue_response()`.
+- **Cost to weigh:** `p2p_rx_window()` sizes its timeout from the *expected* frame length
+  because the driver has no hardware symbol timeout (`:181-183`). Commands are
+  variable-length, so the window must be sized for the largest one — that is real
+  receiver-on time, and therefore real battery, per pending downlink.
+
+**Verify:** standard, plus a command round-trip over the bench rig.
+
+### Step 7 — B5: clock sync over P2P *(needs S3)*
+
+The sink already exists and is public: `app_clock_set_unix()` (`app_clock.h:44`). Only the
+wire format is new — either 4 bytes of unix time on the extended ACK (pairs with Step 5) or a
+ClockSync command over `0x56` (pairs with Step 6). Pick whichever of those two lands first.
+
+### Later — design and compliance gated
+
+- **B6 (P2P region model)** is blocked on the regulatory decision in §3: an SF10/BW125 frame
+  is ~2.3 s of air, which AU915's 400 ms dwell forbids outright. Needs a certification-lab
+  answer before the server-side channel-assignment policy (S4) can be finalised.
+- **B7 (CAD/LBT)** and **the TOWER GFSK PHY (§5)** both need the same in-workspace Zephyr LoRa
+  driver extension, so plan them as one piece of work rather than opening that driver twice.
+- **`radio-mode tower` / `app_tower`** follows the driver work.
+
+### Not in this PR
+
+Track A is LoRaWAN work in `app_lrw.c`, and this branch is based on `feat-p2p`. A1, A2, A3,
+A5 and A6 (AS923) should therefore go to their own PRs against `v1.5.0` rather than ride
+along here.
+
+## 8. Explicit non-goals
 
 - **Class C / multicast** — STICKER is a battery device and Class A only is a deliberate
   choice; LTO strips the Class B/C code paths today.
@@ -482,7 +617,7 @@ driver work and should be planned together.
 
 ---
 
-## 8. References
+## 9. References
 
 **External**
 
