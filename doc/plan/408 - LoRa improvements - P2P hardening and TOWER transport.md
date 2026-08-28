@@ -1,8 +1,9 @@
 # HARDWARIO STICKER — LoRa Improvements: P2P Hardening and TOWER Transport
 
 A survey of the HARDWARIO TOWER radio stack and the `twr-sdk` LoRaWAN driver, and what
-STICKER should adopt from them. Covers the LoRaWAN side (regions, datarate, confirmed
-uplinks, diagnostics) and the LoRa P2P side (duty cycle, ACK metadata, downlink, self-healing).
+STICKER should adopt from them. This PR carries the LoRa P2P side (duty cycle, ACK metadata,
+downlink, self-healing) and the future TOWER transport; the LoRaWAN side moved to
+[PR #409](https://github.com/hardwario/sticker-firmware/pull/409) (§2).
 
 > Requested 2026-08-27: "review the LoRa implementation on TOWER, propose what we could add
 > to STICKER (band switching, US915 and AU regulations), and propose improvements to LoRa
@@ -74,145 +75,16 @@ open work is elsewhere, and is enumerated below.
 
 ---
 
-## 2. Track A — LoRaWAN improvements
+## 2. Track A — LoRaWAN improvements (moved to PR #409)
 
-Inspired by the `twr-sdk` parameter surface (`AT$BAND`, `AT$DR`, `AT$REPC`, `AT$RFQ`).
+The LoRaWAN items (A1–A7: region guard, AS923, manual datarate, RSSI/SNR in GetInfo, the
+AU915 fragment-not-drop gap, confirmed alarms, RX2 override) moved to their own PR so that
+`app_lrw.c` work targets `v1.5.0` directly instead of riding on `feat-p2p`:
 
-| # | Proposal | Feasibility | Blast radius |
-|---|---|---|---|
-| A1 | **Build-vs-runtime region guard** | API ready | `app_lrw.c`, ~15 lines |
-| A2 | **RSSI/SNR in GetInfo** (like `AT$RFQ`) | API ready | proto + `app_cmd`, 3–4 files |
-| A3 | **Manual datarate parameter** (like `AT$DR`) | API ready | yml + configen + `app_lrw.c` |
-| A4 | **Confirmed uplinks for alarms** (like `AT$REPC`) | API ready, 2 gotchas | `app_lrw.c` + config param |
-| A5 | **AU915 dwell-time compliance** | (a) needs code, (b) validation | `app_lrw.c` + playbook |
-| A6 | **AS923 region** | mechanical plumbing | ~5 files, **+2576 B flash** |
-| A7 | **RX2 override** (expert knob) | precedent exists | `app_lrw.c` + param |
+**[PR #409](https://github.com/hardwario/sticker-firmware/pull/409)** —
+`doc/plan/409 - LoRaWAN improvements - regions, datarate, diagnostics.md`.
 
-### A1 — Build-vs-runtime region guard
-
-`lorawan_set_region()` returns `-ENOTSUP` for a region that was not compiled in
-(`zephyr/subsys/lorawan/lorawan.c:395-397`; each case is `#if defined(CONFIG_LORAMAC_REGION_x)`
-gated). Today the app hard-fails the whole radio init on that error
-(`app/src/app_lrw.c:1573-1577`), which means a stored `lrw-region us915` on a debug image
-silently produces a device with no radio at all.
-
-This is **not theoretical**: `debug.conf` on v1.5.0 already drops AU915/US915 to reclaim
-~5.9 KB flash / ~0.7 KB RAM.
-
-Proposal: gate each `case` on `IS_ENABLED(CONFIG_LORAMAC_REGION_*)` (the pattern is already
-used elsewhere in this codebase) and fall back to EU868 with a loud `LOG_ERR` instead of
-failing init.
-
-### A2 — RSSI/SNR in GetInfo
-
-The Zephyr downlink callback already carries them —
-`struct lorawan_downlink_cb.cb(port, flags, int16_t rssi, int8_t snr, len, data)`
-(`zephyr/include/zephyr/lorawan/lorawan.h:198`) — and the values are already stored and
-exposed on the shell. The remaining gap is the over-the-air `Info` message: neither the
-`Info` proto message nor `app_cmd_get_info()` carries them, so an operator with only a
-phone (NFC) or the LNS cannot see link quality.
-
-Caveat to document: the values come from the **last downlink**, which on a Class-A sensor
-may be hours old. Consider pairing them with a timestamp or a staleness flag.
-
-### A3 — Manual datarate parameter
-
-`lorawan_set_datarate()` exists (`lorawan.h:382`, impl `lorawan.c:595`) and returns `-EINVAL`
-if ADR is enabled (`lorawan.c:600-602`). Hook it in `on_join_success()`
-(`app_lrw.c:439`) immediately after `lorawan_enable_adr()` and before
-`refresh_payload_budget()`, so the budget reflects the manual DR. It re-applies on every
-rejoin for free.
-
-Precedent: `app_calibration.c:298` already calls `lorawan_set_datarate(LORAWAN_DR_5)`.
-
-Gotcha: DR validity is region- and dwell-dependent — AU915 with dwell=1 rejects DR0/DR1
-(`RegionAU915.c:412-423`), so a config value of 0–1 fails at join with only an `-EINVAL`.
-Validate per region, or log loudly.
-
-### A4 — Confirmed uplinks for alarms
-
-Alarms (fPort 3) are currently sent unconfirmed like everything else
-(`app_lrw.c:1098`) — an alarm lost to RF is lost silently. `lorawan_set_conf_msg_tries()`
-(`lorawan.h:343`) plus `LORAWAN_MSG_CONFIRMED` in `tx_send_queued()` (`app_lrw.c:1086`)
-would fix that; the existing failure path already requeues with backoff, so a NOACK
-(`-ETIMEDOUT`) is handled.
-
-**Two gotchas that must be in the implementation plan:**
-
-1. `MIB_CHANNELS_NB_TRANS` also repeats **unconfirmed** uplinks —
-   `CheckRetransUnconfirmedUplink()` uses the same limit
-   (`modules/lib/loramac-node/src/mac/LoRaMac.c:3614-3618`). Setting tries globally would
-   triple *telemetry* airtime too. Use a set → send → restore sequence around the confirmed
-   send (`lorawan_send()` is synchronous). A `LinkADRReq` can also overwrite NbTrans
-   (`LoRaMac.c:2262`).
-2. A confirmed send blocks `m_work_q` for the whole retry sequence, and the watchdog
-   heartbeat runs on the same queue with a 30 s timeout (`app_lrw.c:100-101`). Verify the
-   worst-case NbTrans duration at DR0 before shipping.
-
-### A5 — AU915 dwell time ("AU regulations")
-
-Investigated in detail, and the conclusion corrects a common assumption: **dwell time is
-already fully MAC-enforced and needs no app changes for telemetry.**
-
-- `AU915_DEFAULT_UPLINK_DWELL_TIME = 1` (`RegionAU915.h:111`), dwell-limited minimum
-  datarate `AU915_DWELL_LIMIT_DATARATE = DR_2` (`RegionAU915.h:81`).
-- The Dwell1 payload table (`RegionAU915.h:256`) gives DR0/DR1 = 0 B, **DR2 = 11 B**,
-  DR3 = 53, DR4 = 125, DR5/6 = 242.
-- That table already flows into the app: `GetPhyParam(PHY_MAX_PAYLOAD)` selects it from
-  `UplinkDwellTime` (`RegionAU915.c:153-159`) → `LoRaMacQueryTxPossible` →
-  `lorawan_get_payload_sizes()` (`lorawan.c:618-628`) → `refresh_payload_budget()`
-  (`app_lrw.c:308`) → compose. `PHY_MIN_TX_DR` is dwell-aware too, so the ADR floor and
-  `lorawan_set_datarate()` validation both respect DR2.
-
-**The real gap** is elsewhere: `tx_send_queued()` **drops** over-budget response and alarm
-frames instead of fragmenting them (`app_lrw.c:1090-1095`). At an 11 B DR2 budget, the
-GetInfo-on-join frame and most alarm frames are near-guaranteed drops. That is the actual
-AU915 work item — and it is shared with AS923, which also defaults to dwell=1.
-
-Second item: HIL validation for AU915 mirroring what #303 did for US915 (playbook scenarios,
-a gateway on an AU915 plan).
-
-### A6 — AS923 region
-
-Feasible and cheap. **Measured**, not estimated — two release builds of `sticker-v150/app`
-(LTO, same tree, only the Kconfig differs):
-
-| Build | FLASH | RAM |
-|---|---|---|
-| Baseline (EU868 + US915 + AU915) | 153 844 B (72.23 % of 208 KB) | 52 620 B (80.29 %) |
-| `+ CONFIG_LORAMAC_REGION_AS923=y` | 156 420 B (73.44 %) | 52 620 B (80.29 %) |
-| **Delta** | **+2 576 B (+1.21 pp)** | **+0 B** |
-
-RAM delta is zero because loramac-node's channel structures are already sized for the
-largest enabled region (US915 = 72 channels; AS923 has at most 16). The figure is the pure
-compile-time region cost — app plumbing (enum value, switch case, decoder map) would add a
-few hundred bytes more.
-
-What is needed: the `lrw-region` enum value, the `app_lrw.c` switch case, `prj.conf`, and the
-`_LRW_ENUM.region` map in `app/decoder/ttn.js` (hand-maintained). The Zephyr Kconfig
-(`zephyr/subsys/lorawan/Kconfig:47`), CMake sourcing, and the `lorawan_set_region()` case
-already exist.
-
-Two notes:
-
-- The **channel-mask concern does not apply** — `apply_subband()` is gated to US915/AU915
-  (`app_lrw.c:1585-1587`), and AS923 uses a size-1 mask it never touches.
-- The **channel plan group** (AS923-1/2/3/4) is compile-time only in loramac-node
-  (`RegionAS923.c:54-55`), injectable via
-  `zephyr_compile_definitions(REGION_AS923_DEFAULT_CHANNEL_PLAN=…)`. One group per build —
-  build variants, not a runtime setting.
-- AS923 also defaults to dwell=1, so the A5 fragmentation gap applies here too.
-
-### A7 — RX2 override
-
-No Zephyr API exists, but `app_lrw.c` already includes `<LoRaMac.h>` and calls
-`LoRaMacMibSetRequestConfirm` directly for the RX delays and public-network flag
-(`app_lrw.c:888-905`) — exact precedent. `MIB_RX2_CHANNEL` (and `MIB_RX2_DEFAULT_CHANNEL`,
-so a MAC reset does not revert it) would work the same way, re-applied after join because
-JoinAccept DLSettings and `RXParamSetupReq` both overwrite RX2.
-
-Low priority, and it should stay a debug/expert knob: an override that does not match the
-LNS silently kills all downlinks.
+Section numbering below is kept stable to preserve cross-references.
 
 ---
 
@@ -430,26 +302,20 @@ commit. And the 96 B frame limit constrains payloads relative to what P2P allows
 
 ## 6. Priorities and tracking
 
-The scope of this PR is the P2P and TOWER work; the LoRaWAN items are listed for
-completeness and may be split into their own PRs if they grow.
+The scope of this PR is the P2P and TOWER work; the LoRaWAN items (A1–A7) are tracked in
+[PR #409](https://github.com/hardwario/sticker-firmware/pull/409).
 
 **Quick wins**
 
 - [ ] B2 — token-bucket duty governor
 - [ ] B3 — self-healing rejoin
 - [ ] B1 — ACK carries RSSI/SNR *(needs central, S1)*
-- [ ] A1 — build-vs-runtime region guard
-- [ ] A2 — RSSI/SNR in GetInfo
-- [ ] A3 — manual datarate parameter
 
 **Medium** — needs central/gateway coordination or a larger change
 
 - [ ] B9 — counter/replay hardening audit
 - [ ] B4 — pending-downlink chaining + `0x56` COMMAND dispatch *(needs central, S2)*
 - [ ] B5 — clock sync over P2P *(needs central, S3)*
-- [ ] A5 — AU915 dwell: fragment instead of dropping over-budget frames
-- [ ] A6 — AS923 region (+2 576 B flash, +0 B RAM)
-- [ ] A4 — confirmed uplinks for alarms
 
 **Large — design and compliance first**
 
@@ -460,7 +326,7 @@ completeness and may be split into their own PRs if they grow.
 
 - [ ] `radio-mode tower` — GFSK PHY + `app_tower` transport (Section 5)
 
-**Deferred / v2:** A7 (RX2 override), B8 (bulk transfer).
+**Deferred / v2:** B8 (bulk transfer).
 
 Server-side counterparts for B1, B4, B5, and B6 are defined in
 [proximos-v2 MR !30](https://gitlab.hardwario.com/proximos/proximos-v2/-/merge_requests/30)
@@ -602,9 +468,9 @@ ClockSync command over `0x56` (pairs with Step 6). Pick whichever of those two l
 
 ### Not in this PR
 
-Track A is LoRaWAN work in `app_lrw.c`, and this branch is based on `feat-p2p`. A1, A2, A3,
-A5 and A6 (AS923) should therefore go to their own PRs against `v1.5.0` rather than ride
-along here.
+Track A is LoRaWAN work in `app_lrw.c`, and this branch is based on `feat-p2p`. It moved to
+[PR #409](https://github.com/hardwario/sticker-firmware/pull/409) against `v1.5.0`, with its
+own plan and ordered steps.
 
 ## 8. Explicit non-goals
 
@@ -612,8 +478,6 @@ along here.
   choice; LTO strips the Class B/C code paths today.
 - **FHSS for P2P in EU** — TOWER's FHSS exists to satisfy FCC §15.247. Under ETSI the duty
   cycle model is sufficient, and FHSS would add complexity for nothing.
-- **Runtime AS923 channel-plan switching** — loramac-node fixes the plan group at compile
-  time; build variants cover the need.
 
 ---
 
