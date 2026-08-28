@@ -8,8 +8,10 @@ uplinks, diagnostics) and the LoRa P2P side (duty cycle, ACK metadata, downlink,
 > to STICKER (band switching, US915 and AU regulations), and propose improvements to LoRa
 > P2P for STICKER."
 
-This is a **proposal document, not an implementation**. Every claim below is backed by a
-source citation; feasibility was verified against the actual APIs in this workspace.
+**Status:** this document is the plan for PR #408, which implements the accepted items. It
+opened as a survey and stays here as the rationale and reference for the code that follows;
+the tracking checklist is in §6. Every claim is backed by a source citation, and feasibility
+was verified against the actual APIs in this workspace before anything was scheduled.
 
 ---
 
@@ -420,18 +422,48 @@ commit. And the 96 B frame limit constrains payloads relative to what P2P allows
 
 ---
 
-## 6. Priorities
+## 6. Priorities and tracking
 
-| Tier | Items |
-|---|---|
-| **Quick wins** (days) | A1, A2, A3, B1, B2, B3 |
-| **Medium** (needs central/gateway coordination) | A4, A5, A6, B4, B5, B9 |
-| **Large / design + compliance** | B6, B7 |
-| **Next phase** | `radio-mode tower` (Section 5) |
-| **Deferred / v2** | A7, B8 |
+The scope of this PR is the P2P and TOWER work; the LoRaWAN items are listed for
+completeness and may be split into their own PRs if they grow.
+
+**Quick wins**
+
+- [ ] B2 — token-bucket duty governor
+- [ ] B3 — self-healing rejoin
+- [ ] B1 — ACK carries RSSI/SNR *(needs central, S1)*
+- [ ] A1 — build-vs-runtime region guard
+- [ ] A2 — RSSI/SNR in GetInfo
+- [ ] A3 — manual datarate parameter
+
+**Medium** — needs central/gateway coordination or a larger change
+
+- [ ] B9 — counter/replay hardening audit
+- [ ] B4 — pending-downlink chaining + `0x56` COMMAND dispatch *(needs central, S2)*
+- [ ] B5 — clock sync over P2P *(needs central, S3)*
+- [ ] A5 — AU915 dwell: fragment instead of dropping over-budget frames
+- [ ] A6 — AS923 region (+2 576 B flash, +0 B RAM)
+- [ ] A4 — confirmed uplinks for alarms
+
+**Large — design and compliance first**
+
+- [ ] B6 — multi-channel / P2P region model *(blocked on the regulatory decision, §3 B6; needs central, S4)*
+- [ ] B7 — CAD / listen-before-talk *(Zephyr driver patch)*
+
+**Next phase**
+
+- [ ] `radio-mode tower` — GFSK PHY + `app_tower` transport (Section 5)
+
+**Deferred / v2:** A7 (RX2 override), B8 (bulk transfer).
 
 Server-side counterparts for B1, B4, B5, and B6 are defined in
-[proximos-v2 MR !30](https://gitlab.hardwario.com/proximos/proximos-v2/-/merge_requests/30).
+[proximos-v2 MR !30](https://gitlab.hardwario.com/proximos/proximos-v2/-/merge_requests/30)
+as S1–S4.
+
+Suggested order: B2 and B3 are self-contained device-side changes with no external
+dependency, so they can land first. B1 needs the central to key the ACK size off the session
+`proto_version`, so it should land alongside S1. B7 and Section 5 share the same Zephyr
+driver work and should be planned together.
 
 ## 7. Explicit non-goals
 
