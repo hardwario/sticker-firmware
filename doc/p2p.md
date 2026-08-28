@@ -838,6 +838,17 @@ everything except real round-trip timing.
 - ACK (§6) and the retry/backoff state machine, including the 120 s
   boot-window / NFC-`p2p_join` trigger cap (§5.2).
 - `Detach`/`RejoinRequest` (§5.4, §7).
+- The zero-`app_key` guard (§4). This one has **no automated coverage at
+  all** — `app_p2p.c` needs the LoRa driver, so no native_sim suite reaches
+  it — which makes the rig the only place it is ever exercised. On the DUT:
+  set `lrw-appkey 00000000000000000000000000000000`, `settings save` (which
+  reboots), and confirm the boot log carries `P2P not started: lrw_appkey is
+  all-zero`, that `ats radio status` reports `app_key: MISSING (radio
+  refused to start)`, that device B hears no JoinRequest at all, and that
+  `ats radio join` is refused rather than transmitting. Then restore a real
+  `lrw-appkey` and confirm the join proceeds normally. Worth running once
+  with a pairing already in NVS (§7's re-enable path) so the check ahead of
+  `app_p2p_start()`'s already-`PAIRED` shortcut is covered too.
 
 Test frames for device B's `p2p tx` (JoinAccept, Ack, etc., once phase 2
 lands) can be hand-crafted offline the same way `sticker_nfc_frame.py`

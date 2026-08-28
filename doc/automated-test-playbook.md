@@ -685,6 +685,18 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   no LoRaWAN traffic + no crash). Back to `lorawan`.
 - **Expect:** mode changes only via shell/NFC (LRW SetParam refused — AT-CFG-03); each mode
   boots clean.
+- **Also covers the zero-`app_key` guard (#118, doc/p2p.md §4)** — no automated coverage
+  exists for it (`app_p2p.c` needs the LoRa driver, so no native_sim suite reaches it), so
+  this is the only place it gets exercised. In `radio-mode p2p`, set
+  `lrw-appkey 00000000000000000000000000000000` + save: expect `P2P not started: lrw_appkey
+  is all-zero` in the boot log, `app_key: MISSING (radio refused to start)` from `ats radio
+  status`, no JoinRequest on air, and `ats radio join` refused rather than transmitting.
+  Restore a real `lrw-appkey` and confirm the join proceeds.
+- **Note:** `factory_reset` reverts `radio-mode` to its `LORAWAN` default (it is
+  `persistent: [device_reset]` and is not in `app_config_factory_reset()`'s preserve list),
+  so it never leaves a live P2P node behind — but it does wipe `lrw_appkey` while leaving
+  the `p2pjoin/*` pairing intact, which is the state the guard above exists for
+  (doc/p2p.md §7).
 - **Cleanup:** `radio-mode lorawan`, save, confirm rejoin.
 
 ### AT-LRW-10 — release sustained TX (R, A; maps L16 — decisive TX-stop regression)
