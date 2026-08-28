@@ -293,13 +293,13 @@ The scope of this PR is the P2P work; the LoRaWAN items (A1–A7) are tracked in
 
 - [x] B2 — token-bucket duty governor ✅ (+ Step 1 native test suite)
 - [x] B3 — self-healing rejoin ✅
-- [ ] B1 — ACK carries RSSI/SNR *(needs central, S1)*
+- [x] B1 — ACK carries RSSI/SNR ✅ (central S1 done)
 
 **Medium** — needs central/gateway coordination or a larger change
 
 - [x] B9 — counter/replay hardening audit ✅
-- [ ] B4 — pending-downlink chaining + `0x56` COMMAND dispatch *(needs central, S2)*
-- [ ] B5 — clock sync over P2P *(needs central, S3)*
+- [x] B4 — pending-downlink chaining + `0x56` COMMAND dispatch ✅ (central S2 done; deferred-action execution is a follow-up)
+- [x] B5 — clock sync over P2P ✅ (central S3 done)
 
 **Large — design and compliance first**
 

@@ -409,11 +409,19 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
 (Class-A pattern).
 
 - **RX1**: opens `rx1_delay` seconds (default 1 s, assigned in JoinAccept)
-  after uplink end, same channel/SF. The ACK (`0xFA`) is a header + a 1-byte
-  flags body (bit 0: downlink pending) + tag under the session key, `counter`
-  echoing the uplink counter. At SF10/125 kHz an ACK is ≈ 250 ms
-  time-on-air — the gateway→central→gateway decision must fit inside the
-  ~1 s budget, hence the LAN requirement.
+  after uplink end, same channel/SF. The ACK (`0xFA`) is a header + body + tag
+  under the session key, `counter` echoing the uplink counter. At SF10/125 kHz
+  an ACK is ≈ 250 ms time-on-air — the gateway→central→gateway decision must
+  fit inside the ~1 s budget, hence the LAN requirement.
+  **Implemented (B1/B5, PR #408, v1.5.0; matches proximos-v2 MR!30 S1/S3):**
+  the ACK body is `flags(1) | rssi(i8) | snr(i8)` — bit 0 downlink pending, bit
+  1 a Unix-time tail present — with an optional 4-byte big-endian Unix-time
+  tail (B5 clock sync → `app_clock_set_unix()`). `rssi`/`snr` are the central's
+  measurement of the acknowledged uplink (B1), surfaced by `ats radio status`.
+  The body is **not wire-versioned** (P2P is pre-deployment): its length is
+  self-describing (3 B or 7 B), so the node derives it from the received frame
+  length. Node-side layout: `header | flags | rssi | snr | [unix_be32 if bit1]
+  | tag`.
 - **Retries**: unacknowledged uplinks retransmit **the same counter value**
   (byte-identical frame) up to 3 times with randomized backoff. The central
   treats `counter == high-water` as a duplicate: re-ACK, don't re-process.
@@ -449,6 +457,20 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   directional `0x55`/`0x56` split exists because P2P lacks ChirpStack's
   topic-based direction separation) -- `app_cmd` ingest is still
   transport-agnostic, just not a literal fPort mirror on the downlink side.
+  **Implemented (B4, PR #408, v1.5.0; matches proximos-v2 MR!30 S2):** on a
+  pending-flagged Ack the node sizes its next RX1 window for a full frame; if
+  the central sends a `0x56` there instead of the Ack, `recv_ack()` decrypts it
+  (direction RX), dispatches through the transport-generic `app_cmd_handle()`
+  as `APP_CMD_TRANSPORT_P2P`, and queues the `0x55` RESPONSE, treating the
+  command as an implicit Ack of that uplink. **Security:** the P2P transport
+  reuses the LoRaWAN over-the-air gating — the per-command allow-lists reject
+  P2P for every LRW/NFC/vendor-only command, and the M-3 field gate denies P2P
+  writes of any field not writable over LoRaWAN (configen `no_write_lrw` also
+  denies `p2p`), so a `0x56` `set_param` cannot touch region/keys/`radio_mode`.
+  **Follow-up:** a command whose handler returns a deferred action
+  (settings_save/reboot/reset) is logged but not yet executed over P2P — the
+  reboot-after-response deferral pairs with the central's structured-command
+  phase-2.
 - **Dedup across gateways**: every gateway that hears a frame forwards it;
   the central keys dedup on `(dev_addr, counter)` and records per-gateway
   RSSI/SNR (which also feeds ACK routing).
