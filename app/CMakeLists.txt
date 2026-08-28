@@ -42,13 +42,17 @@ include(nanopb)
 zephyr_nanopb_sources(app src/app_config.proto)
 
 target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
+target_sources_ifdef(CONFIG_RADIO_P2P app PRIVATE src/app_p2p.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
 target_sources_ifdef(CONFIG_LIS2DH app PRIVATE src/app_accel.c)
 target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw.c)
-# app_report.c owns the periodic sample/history cadence, not just the
-# LoRaWAN uplink (issue #395: CONFIG_LORAWAN=n toggle) -- compiled
-# unconditionally so history/sampling keep working with no radio; its own
-# app_lrw_* calls are internally CONFIG_LORAWAN-gated.
+# app_report.c owns the periodic sample/history cadence via app_radio, not
+# just the LoRaWAN uplink -- compiled unconditionally so sampling,
+# history capture and store-and-forward keep working with no radio linked in
+# at all. Two independent reasons converge here: #395's CONFIG_RADIO_LORAWAN=n
+# debug variant, and #118's P2P bench overlay (CONFIG_RADIO_LORAWAN=n +
+# CONFIG_RADIO_P2P=y). Its own app_radio_* calls route to whichever transport
+# is compiled in, and app_radio.c handles "neither" itself.
 target_sources(app PRIVATE src/app_report.c)
 target_include_directories_ifdef(CONFIG_LORAWAN app PRIVATE
   ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac
@@ -98,4 +102,5 @@ endif()
 target_sources_ifdef(CONFIG_APP_PYQ1648 app PRIVATE src/app_pyq1648.c)
 target_sources(app PRIVATE src/app_sensor.c)
 target_sources(app PRIVATE src/app_settings.c)
+target_sources(app PRIVATE src/app_radio.c)
 target_sources(app PRIVATE src/main.c)

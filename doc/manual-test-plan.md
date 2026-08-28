@@ -29,8 +29,8 @@ pass/fail. The tester only watches.
 - **Build**: debug variant. Some shell commands used below (`ats cmd lrw <hex>`,
   `ats cmd nfc <hex>`) exist only when `CONFIG_APP_CMD_DEBUG_SHELL=y` (debug builds).
 - **RTT shell**: available commands are `ats`, `config`, `clock`, `history`, `settings`,
-  `join`, `send`. Note there is **no** `ats device` command — device info is obtained via the
-  GetInfo downlink command (fPort 85), not the shell.
+  `join`, `send`. `ats device info` prints local device info too (see G4), but GetInfo over
+  the downlink command (fPort 85) is the cross-check that matters for a real join/network path.
 - **Networks**: the device must be provisioned on **both** TTN and ChirpStack. Claude sends
   downlinks / reads uplinks through the TTS MCP tools (`send_downlink`, `send_downlink_json`,
   `get_uplinks`, `get_device`, …) for TTN, and through the ChirpStack API for ChirpStack.
@@ -94,7 +94,7 @@ byte is the `seq` and is echoed in the reply.
 **Observable:** RTT boot line `Firmware version: X.Y.Z (MAIN, release)` and `Build time: ...`.
 
 **Prompt for Claude:**
-> Over the `rttt` RTT shell, reboot the sticker (`ats lrw reset`, or power-cycle if you can't),
+> Over the `rttt` RTT shell, reboot the sticker (`ats radio reset`, or power-cycle if you can't),
 > then read the boot log. Confirm a line matching `Firmware version: <major>.<minor>.<patch>
 > (<build_type>, <release|debug>)` appears, followed by `Build time:`. Report the exact version
 > string and whether the build type and debug/release flag are what we expect for this build.
@@ -107,7 +107,7 @@ byte is the `seq` and is echoed in the reply.
 **Observable:** Red (≈0.5 s) → Yellow (≈0.5 s) → Green (≈1.5 s), ~5 s total right after boot.
 
 **Prompt for Claude:**
-> Trigger a reboot over the RTT shell (`ats lrw reset`). I (the tester) will watch the LEDs.
+> Trigger a reboot over the RTT shell (`ats radio reset`). I (the tester) will watch the LEDs.
 > Tell me exactly what sequence to expect (colors, order, approximate timing) and at what point
 > in the boot log it starts, so I can confirm the carousel visually. Collect the boot log to
 > correlate timing.
@@ -122,7 +122,7 @@ byte is the `seq` and is echoed in the reply.
 **Prompt for Claude:**
 > Connect to the RTT shell and run `help`. Confirm the root commands `ats`, `config`, `clock`,
 > `history`, `settings`, `join`, `send` are all present. Then run `ats` with no args and confirm
-> the `led`, `sensors`, `lrw` (and in debug builds `cmd`) subcommands are listed. Report anything
+> the `led`, `sensors`, `radio` (and in debug builds `cmd`) subcommands are listed. Report anything
 > missing.
 
 - [ ] Pass
@@ -311,13 +311,13 @@ re-flashing firmware keeps the device provisioned (issue #108 partition-map cont
 ### L1 — OTAA join on TTN
 
 **Goal:** Device joins via OTAA on TTN and reaches HEALTHY.
-**Observable:** RTT `Using OTAA activation`; `ats lrw status` → state HEALTHY; join event visible
+**Observable:** RTT `Using OTAA activation`; `ats radio status` → state HEALTHY; join event visible
 on TTN.
 
 **Prompt for Claude:**
 > Ensure the device is configured for OTAA against TTN. Trigger a join (`join` over the RTT shell,
 > or reboot). Confirm the RTT log shows `Using OTAA activation` and the join completes. Run
-> `ats lrw status` and confirm the state is HEALTHY. Cross-check on TTN via the TTS MCP that a
+> `ats radio status` and confirm the state is HEALTHY. Cross-check on TTN via the TTS MCP that a
 > join-accept / first uplink was received for this device. Report DR/RSSI/SNR from the status.
 
 - [ ] Pass
@@ -330,7 +330,7 @@ on TTN.
 **Prompt for Claude:**
 > Repeat the OTAA join but pointed at ChirpStack (switch the device's network keys/config if
 > needed and note what you changed). Confirm `Using OTAA activation`, HEALTHY state via
-> `ats lrw status`, and that ChirpStack shows the join and a first uplink (use the ChirpStack
+> `ats radio status`, and that ChirpStack shows the join and a first uplink (use the ChirpStack
 > API). Report any differences from the TTN run.
 
 - [ ] Pass
@@ -405,14 +405,14 @@ RTT LC logs.
 **Goal:** Link-check failures escalate state correctly.
 **Observable:** RTT `LC FAIL in HEALTHY (streak: n/3)` → `State: HEALTHY -> WARNING` after 3
 consecutive fails; `LC FAIL in WARNING (total: n/5)` → `State: WARNING -> RECONNECT` after
-`lrw-link-check-fail-rejoin` fails; `ats lrw status` mirrors the counters.
+`lrw-link-check-fail-rejoin` fails; `ats radio status` mirrors the counters.
 
 **Prompt for Claude:**
-> On a debug build, drive the failures deterministically with `ats lrw lc fail` (space them ~2 s
+> On a debug build, drive the failures deterministically with `ats radio lc fail` (space them ~2 s
 > apart — the hook reuses one work item, rapid injects coalesce); set
 > `config lrw-link-check-interval 0` + `settings save` first so real link-checks don't reset the
-> streak. Watching the RTT log / `ats lrw status`, confirm HEALTHY → WARNING (3 consecutive) →
-> RECONNECT (after `lrw-link-check-fail-rejoin` more). Then `ats lrw lc ok` and confirm one success
+> streak. Watching the RTT log / `ats radio status`, confirm HEALTHY → WARNING (3 consecutive) →
+> RECONNECT (after `lrw-link-check-fail-rejoin` more). Then `ats radio lc ok` and confirm one success
 > returns WARNING → HEALTHY. (Alternatively provoke real failures by taking the gateway out of
 > range — note the method.) Report the observed thresholds.
 
@@ -442,7 +442,7 @@ consecutive fails; `LC FAIL in WARNING (total: n/5)` → `State: WARNING -> RECO
 should not leave the device stuck outside HEALTHY indefinitely — it must keep retrying with
 backoff and eventually recover once a clear TX/RX window is available, bounded by the L9 backoff
 schedule (base 60 s, ×2, capped 3600 s).
-**Observable:** After the storm, `ats lrw status` cycles through `RECONNECT`/join attempts and
+**Observable:** After the storm, `ats radio status` cycles through `RECONNECT`/join attempts and
 returns to `HEALTHY` within the expected backoff-schedule bound — it should not sit at
 `devaddr=00000000`/`fcnt up` frozen far beyond one full backoff cap (3600 s) with zero visible
 join attempts. A filtered RTT log (`lorawan|Join|MlmeConfirm`) taken on a **freshly-booted**
@@ -450,7 +450,7 @@ session (so it can't be stale) should show periodic `JoinReq`/`MlmeConfirm` acti
 **Prompt for Claude:**
 > Deliberately trigger 4–5 reboot/rejoin events within a short window (a mix of `reboot`,
 > `device_reset`, and `settings save`, spaced ~1–2 min apart — e.g. while exercising G5/G6/S-caps
-> in the same session). Afterward, check `ats lrw status` repeatedly over several minutes. If it
+> in the same session). Afterward, check `ats radio status` repeatedly over several minutes. If it
 > stays in `RECONNECT` well past the point a single 60 s (or even a few escalated) backoff cycle
 > should have resolved it: (a) confirm the device is otherwise alive (GetInfo/config keep working
 > locally — this is NOT a crash), (b) pull a **fresh** (post-reboot) filtered log for
@@ -477,15 +477,15 @@ session (so it can't be stale) should show periodic `JoinReq`/`MlmeConfirm` acti
 
 - [ ] Pass
 
-### L11 — `ats lrw` shell commands
+### L11 — `ats radio` shell commands
 
 **Goal:** LoRaWAN shell utilities work.
-**Observable:** `ats lrw status` prints state/FCnt/DR/RSSI/SNR; `ats lrw check` sends with link
-check; `ats lrw reset` resets counters + DevNonce and reboots.
+**Observable:** `ats radio status` prints state/FCnt/DR/RSSI/SNR; `ats radio check` sends with link
+check; `ats radio reset` resets counters + DevNonce and reboots.
 
 **Prompt for Claude:**
-> Run `ats lrw status` and report the fields. Run `ats lrw check` and confirm an uplink with a
-> link check is sent (verify on the server). Finally run `ats lrw reset` and confirm the frame
+> Run `ats radio status` and report the fields. Run `ats radio check` and confirm an uplink with a
+> link check is sent (verify on the server). Finally run `ats radio reset` and confirm the frame
 > counters / DevNonce reset and the device reboots. (Reset is destructive to FCnt — confirm it's
 > OK on this bench.)
 
@@ -506,12 +506,12 @@ check; `ats lrw reset` resets counters + DevNonce and reboots.
 ### L13 — Configurable link-check cadence & rejoin threshold
 
 **Goal:** `lrw-link-check-interval` and `lrw-link-check-fail-rejoin` drive the state machine.
-**Observable:** `ats lrw status` reports `healthy->warning: n/3` and `warning->reconnect: n/M`
+**Observable:** `ats radio status` reports `healthy->warning: n/3` and `warning->reconnect: n/M`
 where M = `lrw-link-check-fail-rejoin`; a LinkCheckReq is sent every Nth uplink (0 = none).
 
 **Prompt for Claude:**
 > Set e.g. `config lrw-link-check-interval 1`, `config lrw-link-check-fail-rejoin 3`,
-> `settings save`. Confirm `ats lrw status` shows `warning->reconnect: n/3`. With interval 1,
+> `settings save`. Confirm `ats radio status` shows `warning->reconnect: n/3`. With interval 1,
 > confirm a link check rides every uplink; with interval 0, confirm none are requested. Then drive
 > failures (L8) and confirm RECONNECT now triggers after 3 (not 5) WARNING fails.
 
@@ -521,12 +521,12 @@ where M = `lrw-link-check-fail-rejoin`; a LinkCheckReq is sent every Nth uplink 
 
 **Goal:** A link-check result arriving while in RECONNECT is ignored and never cancels the rejoin
 (the root cause of the old "TX stops" bug).
-**Observable:** In RECONNECT, `ats lrw lc ok`/`fail` is logged as ignored; state stays RECONNECT,
+**Observable:** In RECONNECT, `ats radio lc ok`/`fail` is logged as ignored; state stays RECONNECT,
 the rejoin timer keeps running and the device rejoins.
 
 **Prompt for Claude:**
-> Drive the device into RECONNECT (L8). While it waits for the rejoin timer, inject `ats lrw lc ok`
-> and `ats lrw lc fail`. Confirm via `ats lrw status` the state stays RECONNECT (not back to
+> Drive the device into RECONNECT (L8). While it waits for the rejoin timer, inject `ats radio lc ok`
+> and `ats radio lc fail`. Confirm via `ats radio status` the state stays RECONNECT (not back to
 > HEALTHY/WARNING) and the rejoin still fires on schedule → HEALTHY. This must NOT wedge or stop TX.
 
 - [ ] Pass
@@ -536,19 +536,19 @@ the rejoin timer keeps running and the device rejoins.
 **Goal:** An un-provisioned device (DevEUI all-zero) does not burn power on impossible joins, and
 (#175) does not even bring up the radio.
 **Observable:** RTT `DevEUI is all-zero: skipping LoRaWAN bring-up (radio-silent, #98/#175)`;
-`ats lrw status` state **DISABLED**; **no** `lorawan_start`/region/JoinRequest activity at all, no
+`ats radio status` state **DISABLED**; **no** `lorawan_start`/region/JoinRequest activity at all, no
 rejoin timer; on a power trace (PPK2, J-Link detached) **no boot radio burst** in the first second.
 
 **Prompt for Claude:**
 > Set `config lrw-deveui 0000000000000000`, `settings save`. After reboot confirm the boot RTT log
 > shows `skipping LoRaWAN bring-up (radio-silent, #98/#175)` (debug build) and **no** region /
 > `lorawan_start` / join lines follow — `app_lrw_init` takes the radio-silent path. Confirm
-> `ats lrw status` = `DISABLED`. Restore a real DevEUI + `settings save` and confirm it joins again.
+> `ats radio status` = `DISABLED`. Restore a real DevEUI + `settings save` and confirm it joins again.
 
 - [ ] Pass
 
 > **HW-verified (2026-06-23, #175):** debug build on Base Compact, `lrw-deveui = 00…00` — RTT showed
-> `skipping LoRaWAN bring-up (radio-silent, #98/#175)`, no radio/region/join logs, `ats lrw status`
+> `skipping LoRaWAN bring-up (radio-silent, #98/#175)`, no radio/region/join logs, `ats radio status`
 > = DISABLED. The `DIAG_NO_RADIO` build (skips the whole `app_lrw_init` call) confirmed via a
 > sentinel log that `app_lrw_init` is never even entered.
 
@@ -874,7 +874,7 @@ records, `ReqHistory` returns one or more `HistoryFrame`s with **no reset/hard-f
 device stays fully responsive (RTT shell/GetInfo keep working) throughout and immediately after.
 **Prompt for Claude:**
 > Enable ADR (`config lrw-adr true`, `settings save`) and let it converge to DR3 or higher (check
-> `ats lrw status`). Accumulate ≥15–20 history records (raise `interval_report` beforehand if
+> `ats radio status`). Accumulate ≥15–20 history records (raise `interval_report` beforehand if
 > needed for speed — note this is a **RAM-backend debug build**, so any `settings save` reboot
 > wipes accumulated records; do config changes needing a reboot *before* starting the count).
 > Send `req_history` covering the whole stored range (`to_unix` must be a valid `uint32` — use
@@ -906,7 +906,7 @@ it resets to 0.
 
 **Prompt for Claude:**
 > Determine the active history backend (RAM vs flash/NVS) from `history info` and the build
-> config. Store some records, note `history count`, reboot (`ats lrw reset`), and confirm the
+> config. Store some records, note `history count`, reboot (`ats radio reset`), and confirm the
 > count behaves as the backend implies — preserved on flash, reset to 0 on RAM. Report which
 > backend is active and the observed behavior.
 
@@ -1877,23 +1877,23 @@ confirm `history stats` count keeps climbing.
 
 
 
-### X4 — H: `ats lrw compose` runs on `m_work_q`, no longer races real TX
+### X4 — H: `ats radio compose` runs on `m_work_q`, no longer races real TX
 
-**Goal:** The debug `ats lrw compose` shell command composes on `m_work_q` instead of the shell
+**Goal:** The debug `ats radio compose` shell command composes on `m_work_q` instead of the shell
 thread, so it can't race a real TX in flight.
-**Observable:** Running `ats lrw compose` while a real telemetry send is in flight does not corrupt
+**Observable:** Running `ats radio compose` while a real telemetry send is in flight does not corrupt
 the frame or crash; both complete cleanly.
 
-**Prompt for Claude:** With a short `interval-report`, fire `ats lrw compose` repeatedly while
+**Prompt for Claude:** With a short `interval-report`, fire `ats radio compose` repeatedly while
 telemetry is actively sending; confirm no corruption/crash and both the manual and periodic frames
 land on the LNS.
 
 - [x] Pass
 
-> **HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):** fired `ats lrw
+> **HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):** fired `ats radio
 > compose` three times back-to-back over RTT shell while the periodic 60 s telemetry cadence was
 > live; a real periodic uplink landed concurrently (`fcnt up` 10→11 mid-sequence). All composes
-> returned clean fPort-2 hex frames, `ats lrw status` stayed HEALTHY throughout, no crash/corruption.
+> returned clean fPort-2 hex frames, `ats radio status` stayed HEALTHY throughout, no crash/corruption.
 
 ### X5 — H `[HIL-only]`: `advance_page()` doesn't commit a ring page on flash erase/write failure
 
@@ -2180,7 +2180,7 @@ a single physical round trip.
 
 **Prompt for Claude:** Drive into WARNING (L8), arrange a downlink to land right as a link-check
 is pending (so it resolves LC implicitly), then confirm a late/duplicate `LinkCheckAns` doesn't
-also increment `m_consecutive_lc_ok` a second time (`ats lrw status` consecutive-ok counter).
+also increment `m_consecutive_lc_ok` a second time (`ats radio status` consecutive-ok counter).
 
 - [~] Pass (best-effort — race precondition achieved, magnitude structurally unobservable)
 
@@ -2210,7 +2210,7 @@ via RTT log that no compose/TX happens after the suspend log line.
 
 - [x] Pass
 
-> **HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):** `ats lrw check`
+> **HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):** `ats radio check`
 > (forces a link check + `app_report_trigger()`, queuing `m_trigger_work`) immediately followed by
 > `power suspend`. Terminal log shows `Sending data with link check request` → `Suspending (deep
 > sleep). Wake via NRST / power-cycle.` with **no** compose/TX line in between or after — the

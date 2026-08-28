@@ -8,7 +8,7 @@
 #include "app_counters.h"
 #include "app_history.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_radio.h"
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_wdog.h"
@@ -120,19 +120,19 @@ static void run_report(bool periodic)
 		app_history_capture();
 	}
 
-#if defined(CONFIG_LORAWAN)
 	/* State-gated cadence: skip the UPLINK while the link is joining/
-	 * reconnecting/disabled. app_lrw kicks us (report_kick) on the link-ready
-	 * edge to resume promptly and drain the buffered history. */
-	if (!app_lrw_is_ready()) {
-		LOG_DBG("Report skipped: link not ready (%d)", app_lrw_get_state());
+	 * reconnecting/disabled. The transport kicks us (report_kick) on the
+	 * link-ready edge to resume promptly and drain the buffered history. */
+	if (!app_radio_is_ready()) {
+		LOG_DBG("Report skipped: link not ready (%d)", app_radio_get_state());
 		return;
 	}
 
-	/* Hand off to the transport: app_lrw composes the snapshot and splits it
-	 * into DR-budget frames (LC piggyback + duty-cycle retry live there). */
-	app_lrw_send_telemetry();
-#endif /* defined(CONFIG_LORAWAN) */
+	/* Hand off to the transport: it composes the snapshot and splits it into
+	 * budget frames (DR-budget + LC piggyback + duty-cycle retry for LoRaWAN;
+	 * fixed MTU + app-side duty-cycle for P2P). app_radio dispatches, and
+	 * handles a build with neither transport compiled in. */
+	app_radio_send_telemetry();
 }
 
 static void periodic_work_handler(struct k_work *work)
@@ -153,15 +153,15 @@ static void report_timer_handler(struct k_timer *timer)
 	k_work_submit_to_queue(&m_work_q, &m_periodic_work);
 }
 
-#if defined(CONFIG_LORAWAN)
 /* Link-ready edge from the transport (join success / history-replay finish):
  * send an immediate report to drain the buffered history, but leave the fixed
- * cadence (and its history capture) untouched. */
+ * cadence (and its history capture) untouched. Registered via app_radio, so
+ * this is needed on a P2P-only build too -- it must not be CONFIG_LORAWAN
+ * gated (as it was before #118's app_radio facade). */
 static void report_kick(void)
 {
 	k_work_submit_to_queue(&m_work_q, &m_trigger_work);
 }
-#endif /* defined(CONFIG_LORAWAN) */
 
 void app_report_trigger(void)
 {
@@ -209,11 +209,10 @@ int app_report_init(void)
 	 * app_counters_save before the link gate) fires even on a device that never
 	 * joins — the worst-case lost-pulse window is interval_report regardless of
 	 * the link state. Reporting itself still self-skips at the link gate until
-	 * joined; app_lrw's ready kick re-arms with an immediate report on join. */
+	 * joined; the transport's ready kick re-arms with an immediate report on
+	 * join (LoRaWAN) or start (P2P). */
 	schedule_next_report();
-#if defined(CONFIG_LORAWAN)
-	app_lrw_register_ready_cb(report_kick);
-#endif /* defined(CONFIG_LORAWAN) */
+	app_radio_register_ready_cb(report_kick);
 
 	return 0;
 }

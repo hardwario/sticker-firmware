@@ -831,3 +831,61 @@ bool app_config_alarms_slot_empty(uint32_t tag)
 		return false;
 	}
 }
+
+int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *src,
+			 uint32_t *fault_field)
+{
+	struct app_config *config = app_config();
+	int ret = 0;
+
+	if (fault_field) {
+		*fault_field = 0;
+	}
+
+	/* M-3: this field is not writable over lrw/nfc/vendor. */
+	if (src->has_frequency && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_NFC ||
+				   tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(1);
+	} else if (src->has_frequency) {
+		int val = src->frequency;
+
+		if ((val >= 863000000 && val <= 870000000)) {
+			config->p2p_frequency = val;
+		} else {
+			FAULT(1);
+		}
+	}
+	/* M-3: this field is not writable over lrw/nfc/vendor. */
+	if (src->has_spreading_factor &&
+	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_NFC ||
+	     tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(2);
+	} else if (src->has_spreading_factor) {
+		int val = src->spreading_factor;
+
+		if ((val >= 6 && val <= 12)) {
+			config->p2p_spreading_factor = val;
+		} else {
+			FAULT(2);
+		}
+	}
+	/* M-3: this field is not writable over lrw/nfc/vendor. */
+	if (src->has_tx_power && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_NFC ||
+				  tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(3);
+	} else if (src->has_tx_power) {
+		int val = src->tx_power;
+
+		if ((val >= 2 && val <= 22)) {
+			config->p2p_tx_power = val;
+		} else {
+			FAULT(3);
+		}
+	}
+	return ret;
+}
+
+void app_config_fill_p2p(AppConfigMessage_P2P *dst, const uint32_t *ids, size_t n)
+{
+	const struct app_config *c = app_config();
+}

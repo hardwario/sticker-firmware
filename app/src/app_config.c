@@ -47,6 +47,9 @@ static const struct app_config m_app_config_defaults = {
 	.lrw_link_check_fail_rejoin = 5,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
+	.p2p_frequency = 868100000,
+	.p2p_spreading_factor = 10,
+	.p2p_tx_power = 14,
 };
 
 /* Set by h_commit when a schema version migration ran; init persists the
@@ -79,6 +82,9 @@ static struct app_config m_app_config = {
 	.lrw_link_check_fail_rejoin = 5,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
+	.p2p_frequency = 868100000,
+	.p2p_spreading_factor = 10,
+	.p2p_tx_power = 14,
 };
 
 /* Guards m_app_config/g_app_config against concurrent mutation:
@@ -210,6 +216,11 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		     sizeof(m_app_config.input_a_counter));
 	SETTINGS_SET("input-b-counter", &m_app_config.input_b_counter,
 		     sizeof(m_app_config.input_b_counter));
+	SETTINGS_SET("p2p-frequency", &m_app_config.p2p_frequency,
+		     sizeof(m_app_config.p2p_frequency));
+	SETTINGS_SET("p2p-spreading-factor", &m_app_config.p2p_spreading_factor,
+		     sizeof(m_app_config.p2p_spreading_factor));
+	SETTINGS_SET("p2p-tx-power", &m_app_config.p2p_tx_power, sizeof(m_app_config.p2p_tx_power));
 
 #undef SETTINGS_SET
 
@@ -260,6 +271,9 @@ static int h_commit(void)
 		       sizeof(m_app_config.lrw_nwkskey));
 		memcpy(m_app_config.lrw_appskey, stored.lrw_appskey,
 		       sizeof(m_app_config.lrw_appskey));
+		m_app_config.p2p_frequency = stored.p2p_frequency;
+		m_app_config.p2p_spreading_factor = stored.p2p_spreading_factor;
+		m_app_config.p2p_tx_power = stored.p2p_tx_power;
 
 		m_app_config_migrated = true;
 	}
@@ -327,6 +341,24 @@ static int h_commit(void)
 	if ((int)m_app_config.accel_motion_sensitivity < 0 ||
 	    (int)m_app_config.accel_motion_sensitivity > 3) {
 		m_app_config.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF;
+	}
+	if (m_app_config.p2p_frequency < 863000000) {
+		m_app_config.p2p_frequency = 863000000;
+	}
+	if (m_app_config.p2p_frequency > 870000000) {
+		m_app_config.p2p_frequency = 870000000;
+	}
+	if (m_app_config.p2p_spreading_factor < 6) {
+		m_app_config.p2p_spreading_factor = 6;
+	}
+	if (m_app_config.p2p_spreading_factor > 12) {
+		m_app_config.p2p_spreading_factor = 12;
+	}
+	if (m_app_config.p2p_tx_power < 2) {
+		m_app_config.p2p_tx_power = 2;
+	}
+	if (m_app_config.p2p_tx_power > 22) {
+		m_app_config.p2p_tx_power = 22;
 	}
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
@@ -428,6 +460,11 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 		    sizeof(m_app_config.input_a_counter));
 	EXPORT_FUNC("input-b-counter", &m_app_config.input_b_counter,
 		    sizeof(m_app_config.input_b_counter));
+	EXPORT_FUNC("p2p-frequency", &m_app_config.p2p_frequency,
+		    sizeof(m_app_config.p2p_frequency));
+	EXPORT_FUNC("p2p-spreading-factor", &m_app_config.p2p_spreading_factor,
+		    sizeof(m_app_config.p2p_spreading_factor));
+	EXPORT_FUNC("p2p-tx-power", &m_app_config.p2p_tx_power, sizeof(m_app_config.p2p_tx_power));
 	/* Export config-version LAST: settings_save is per-key atomic, so writing
 	 * the schema marker after every value means a brownout mid-save leaves an
 	 * old version with a partial new payload rather than a new version flagging
@@ -953,6 +990,22 @@ static void print_input_b_counter(const struct shell *shell)
 		    m_app_config.input_b_counter ? "true" : "false");
 }
 
+static void print_p2p_frequency(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " p2p-frequency %d", m_app_config.p2p_frequency);
+}
+
+static void print_p2p_spreading_factor(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " p2p-spreading-factor %d",
+		    m_app_config.p2p_spreading_factor);
+}
+
+static void print_p2p_tx_power(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " p2p-tx-power %d", m_app_config.p2p_tx_power);
+}
+
 static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 {
 	print_secret_key(shell);
@@ -1003,6 +1056,9 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_hall_right_counter(shell);
 	print_input_a_counter(shell);
 	print_input_b_counter(shell);
+	print_p2p_frequency(shell);
+	print_p2p_spreading_factor(shell);
+	print_p2p_tx_power(shell);
 
 	return 0;
 }
@@ -1576,6 +1632,23 @@ static int cmd_input_b_counter(const struct shell *shell, size_t argc, char **ar
 	return cmd_bool(shell, argc, argv, &m_app_config.input_b_counter, print_input_b_counter);
 }
 
+static int cmd_p2p_frequency(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.p2p_frequency, 863000000, 870000000,
+		       print_p2p_frequency);
+}
+
+static int cmd_p2p_spreading_factor(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.p2p_spreading_factor, 6, 12,
+		       print_p2p_spreading_factor);
+}
+
+static int cmd_p2p_tx_power(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_int(shell, argc, argv, &m_app_config.p2p_tx_power, 2, 22, print_p2p_tx_power);
+}
+
 static int print_help(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc > 1) {
@@ -1790,6 +1863,18 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set input B counter enabled (true/false).",
 	              cmd_input_b_counter, 1, 1),
 
+	SHELL_CMD_ARG(p2p-frequency, NULL,
+	              "Get/Set P2P carrier frequency in Hz (EU868 band).",
+	              cmd_p2p_frequency, 1, 1),
+
+	SHELL_CMD_ARG(p2p-spreading-factor, NULL,
+	              "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate).",
+	              cmd_p2p_spreading_factor, 1, 1),
+
+	SHELL_CMD_ARG(p2p-tx-power, NULL,
+	              "Get/Set P2P TX power in dBm.",
+	              cmd_p2p_tx_power, 1, 1),
+
 	SHELL_SUBCMD_SET_END
 );
 
@@ -1843,6 +1928,9 @@ int app_config_device_reset(void)
 	memcpy(m_app_config.lrw_devaddr, preserved.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	memcpy(m_app_config.lrw_nwkskey, preserved.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	memcpy(m_app_config.lrw_appskey, preserved.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+	m_app_config.p2p_frequency = preserved.p2p_frequency;
+	m_app_config.p2p_spreading_factor = preserved.p2p_spreading_factor;
+	m_app_config.p2p_tx_power = preserved.p2p_tx_power;
 
 	memcpy(&g_app_config, &m_app_config, sizeof(g_app_config));
 

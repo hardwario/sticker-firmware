@@ -7,6 +7,7 @@ message AppConfigMessage {
     optional Application application = 6;
     optional Sensors sensors = 7;
     optional Alarms alarms = 8;
+    optional P2P p2p = 11;
 
     message Lorawan {
         enum Region {
@@ -120,6 +121,12 @@ message AppConfigMessage {
         optional bytes alarm_15 = 18;
         optional AlarmBuzzerMode alarm_buzzer_mode = 20;
     }
+
+    message P2P {
+        optional uint32 frequency = 1;
+        optional uint32 spreading_factor = 2;
+        optional uint32 tx_power = 3;
+    }
 }
 // END GENERATED CONFIG
 
@@ -198,7 +205,7 @@ message Command {
     // settings_save). One-shot: app_calibration_init() clears the flag on entry.
     message EnterCalibration { }
     // Reset the LoRaWAN NVM (frame counters + DevNonce + session) and reboot,
-    // equivalent of `ats lrw reset`. Used during (re)commissioning after re-keying
+    // equivalent of `ats radio reset`. Used during (re)commissioning after re-keying
     // or moving the device to another network/session (#109).
     message LrwReset     { }
     // Trigger a forced (re)join immediately instead of waiting for the next

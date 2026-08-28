@@ -246,7 +246,7 @@ incl. `decoded_payload` from `ttn.js`), `mcp__tts__send_downlink` (`f_port`, hex
   run `app/decoder/ttn.js`) and a second-opinion join path.
 - **Correction (2026-08-11), supersedes the old "TTN doesn't answer LinkCheckReq" note**: after
   the `hm-sticker-otaa-test` device recreate on 2026-07-07, TTN answers `LinkCheckReq`
-  correctly and reliably — confirmed decisive on 2026-08-11: `ats lrw check` got an immediate
+  correctly and reliably — confirmed decisive on 2026-08-11: `ats radio check` got an immediate
   `LinkCheckAns` (margin 26 dB, 2 gateways), and the session then held **HEALTHY on the same
   DevAddr for 438 s / 9 uplinks with zero link-check failures** (`healthy->warning: 0/3`
   throughout). **On the same bench, ChirpStack (`hm-sticker-otaa-cs`) showed the opposite**: a
@@ -631,7 +631,7 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 
 ### AT-LRW-05 — periodic + multi-frame telemetry (DR, A; maps L5, L6)
 - **Steps:** set `interval-report 60`, save; enable enough sensors that the fPort-2 payload
-  exceeds one frame at the current DR (or use `ats lrw compose <budget>` on debug to
+  exceeds one frame at the current DR (or use `ats radio compose <budget>` on debug to
   verify the split logic directly with a tiny budget).
 - **Expect:** uplinks every ~60 s (+TX jitter 0..min(interval/10,10 s) — jitter delays TX
   only, never the sampling timestamps); multi-frame sequences reassemble in the decoder.
@@ -671,13 +671,13 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 ### AT-LRW-07 — link-check state machine (D, A; maps L7, L8, L13)
 - **Pre:** ChirpStack (answers LinkCheckReq); `lrw-link-check-interval 5`,
   `lrw-link-check-fail-rejoin 5` or run-plan values.
-- **Steps:** `ats lrw check` (real LC); then drive the FSM synthetically: `ats lrw lc fail`
-  × N → status via `ats lrw status` after each; then `ats lrw lc ok`.
+- **Steps:** `ats radio check` (real LC); then drive the FSM synthetically: `ats radio lc fail`
+  × N → status via `ats radio status` after each; then `ats radio lc ok`.
 - **Expect:** HEALTHY → WARNING (with 🟡2× LED per §16) → RECONNECT (rejoin with backoff)
   transitions at the configured thresholds; `ok` recovers to HEALTHY.
 
 ### AT-LRW-08 — late LC in RECONNECT does not wedge (D, A; maps L14, HIGH-1 regression)
-- **Steps:** per manual L14: force RECONNECT, then inject a late `ats lrw lc ok`; continue
+- **Steps:** per manual L14: force RECONNECT, then inject a late `ats radio lc ok`; continue
   sending.
 - **Expect:** TX continues; no stuck semaphore (the historical overloaded-timer wedge).
 
@@ -688,6 +688,18 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   no LoRaWAN traffic + no crash). Back to `lorawan`.
 - **Expect:** mode changes only via shell/NFC (LRW SetParam refused — AT-CFG-03); each mode
   boots clean.
+- **Also covers the zero-`app_key` guard (#118, doc/p2p.md §4)** — no automated coverage
+  exists for it (`app_p2p.c` needs the LoRa driver, so no native_sim suite reaches it), so
+  this is the only place it gets exercised. In `radio-mode p2p`, set
+  `lrw-appkey 00000000000000000000000000000000` + save: expect `P2P not started: lrw_appkey
+  is all-zero` in the boot log, `app_key: MISSING (radio refused to start)` from `ats radio
+  status`, no JoinRequest on air, and `ats radio join` refused rather than transmitting.
+  Restore a real `lrw-appkey` and confirm the join proceeds.
+- **Note:** `factory_reset` reverts `radio-mode` to its `LORAWAN` default (it is
+  `persistent: [device_reset]` and is not in `app_config_factory_reset()`'s preserve list),
+  so it never leaves a live P2P node behind — but it does wipe `lrw_appkey` while leaving
+  the `p2pjoin/*` pairing intact, which is the state the guard above exists for
+  (doc/p2p.md §7).
 - **Cleanup:** `radio-mode lorawan`, save, confirm rejoin.
 
 ### AT-LRW-10 — release sustained TX (R, A; maps L16 — decisive TX-stop regression)
@@ -697,7 +709,7 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 - **Evidence:** uplink timestamp list + max-gap stat.
 
 ### AT-LRW-11 — DR/payload budget behaviour (D, A; maps L6)
-- **Steps:** `ats lrw compose 51` / `ats lrw compose 242` (DR0 vs DR5-class budgets) with
+- **Steps:** `ats radio compose 51` / `ats radio compose 242` (DR0 vs DR5-class budgets) with
   many sensors enabled.
 - **Expect:** frames never exceed the budget; split points are clean protobuf boundaries;
   the 2-byte-varint capacity case (>127 B frames) composes correctly.
@@ -742,7 +754,7 @@ frame counters via `clear_stale_lorawan_nvm`, else the join uses the wrong chann
   uplink DR and confirm a downlink is received in RX2.
 - **Expect:** uplinks flow and decode identically to EU868 (`ttn.js` is region-agnostic — any
   divergence = HIGH); telemetry fits the smallest US915 uplink DR max payload (DR0 ≈ 11 B → payload
-  splits across frames, never silently dropped — cross-check with `ats lrw compose 11` on debug);
+  splits across frames, never silently dropped — cross-check with `ats radio compose 11` on debug);
   RX2 downlink lands (US915 RX2 fixed at **DR8**, 500 kHz); ADR behaves.
 - **Evidence:** DR per uplink, one decoded downlink response hex, multi-frame split at DR0.
 
@@ -1527,7 +1539,7 @@ automated; *(excluded)* items are listed with reasons below the table.
 | L7, L8, L13 | AT-LRW-07 | A | D | – | |
 | L9 | AT-ADV-08 | A | DR | – | |
 | L10 | AT-LRW-06 | A | DR | – | ✅ |
-| L11 | AT-LRW-07/11 + AT-BOOT-01 (`ats lrw` surface) | A | D | – | |
+| L11 | AT-LRW-07/11 + AT-BOOT-01 (`ats radio` surface) | A | D | – | |
 | L12 | asserted inside AT-LRW-05 | A | DR | – | |
 | L14 | AT-LRW-08 | A | D | – | |
 | L15 | AT-LRW-09 (radio-mode supersedes DevEUI-zero guard) | A | D | – | |
