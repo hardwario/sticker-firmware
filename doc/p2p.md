@@ -429,6 +429,19 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   self-heals via `Detach`/`RejoinRequest` rather than needing central DB
   surgery), but no reason to leave a second unbounded `>` check in the same
   design.
+- **Device-side duty cycle** (B2, PR #408, **v1.5.0**): raw LoRa bypasses
+  LoRaMac's duty enforcement, so the node enforces the EU868 1 % limit itself
+  with a **token bucket** (`struct p2p_duty` in `app_p2p.c`). Budget accrues at
+  1 % of wall time and is capped at the full hourly allowance
+  (`P2P_DUTY_BUDGET_MS = 36000`, Tower's `DutyGovernor::eu()` model); every TX
+  (data, ACK retry, JoinRequest) is charged its measured air-time and gated on
+  affordability. This replaces the earlier "block for air×99 ms after every
+  frame" rule, whose fixed post-frame block made an alarm queued behind a long
+  telemetry frame wait minutes. **Deliberate trade-off:** a full bucket permits
+  a burst of up to 36 s of air after a long idle, so the worst-case *sliding*
+  hour can reach ~2 % even though the long-run average holds at 1 %. This is
+  accepted (matches TOWER's field-proven governor); a stricter model would cap
+  the bucket lower at the cost of burst latency for alarms.
 - **Downlink commands** (`0x56`): flagged in the ACK, delivered in the RX1
   window of the *next* uplink (Class-A downlink queue on the central). Same
   protobuf Command shape as LoRaWAN fPort 85's Command oneof; `frame_type
@@ -627,13 +640,12 @@ phone app step is needed for P2P at all, one-time or otherwise.
   not — confirms debug keeps `CONFIG_RADIO_P2P=n` (same lever already used
   to drop AU915/US915 from debug.conf, see the debug build RAM+flash coupling
   fix from issue #340) unless debug frees up budget elsewhere first.
-- **Device-side duty-cycle enforcement** — §6/§8 only describe duty-cycle
-  *bookkeeping* on the central/gateway side; LoRaWAN's own EU868 1 % limit is
-  enforced inside LoRaMac today, which P2P mode bypasses entirely (raw LoRa
-  driver, no network server, §1). Nothing in this design yet gives the node
-  itself an equivalent tracker for its own uplink/retry/re-join traffic.
-  **Deferred to phase 2** (§13, FW join + ACK state machine) — must land
-  before this ships, not before the design is accepted.
+- **Device-side duty-cycle enforcement** — LoRaWAN's own EU868 1 % limit is
+  enforced inside LoRaMac, which P2P mode bypasses entirely (raw LoRa driver,
+  no network server, §1). **RESOLVED (B2, PR #408, v1.5.0):** the node now
+  enforces its own 1 % limit with a token bucket over all TX (data, ACK retry,
+  JoinRequest) — see §6. §6/§8's central/gateway-side duty *bookkeeping* is a
+  separate concern and still applies.
 - **RX2-equivalent downlink fallback** — v1 is RX1-only (§6): a missed
   ~1 s gateway↔central round trip (LAN/MQTT jitter) just counts as an
   unacknowledged uplink and falls back to the normal retry path, unlike

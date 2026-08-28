@@ -291,7 +291,7 @@ The scope of this PR is the P2P work; the LoRaWAN items (A1–A7) are tracked in
 
 **Quick wins**
 
-- [ ] B2 — token-bucket duty governor
+- [x] B2 — token-bucket duty governor ✅ (+ Step 1 native test suite)
 - [ ] B3 — self-healing rejoin
 - [ ] B1 — ACK carries RSSI/SNR *(needs central, S1)*
 
@@ -332,44 +332,46 @@ Standard verification for every step, unless noted: the three build configs (Rel
 dual-stack, `debug.conf`, `debug.conf + debug_p2p_bench.conf`), `bash tests/run_native.sh`,
 and `clang-format --dry-run --Werror`.
 
-### Step 1 — a native test suite for the P2P logic
+### Step 1 — a native test suite for the P2P logic ✅ DONE
 
-**Why first:** `app_p2p.c` has *no* native test coverage today. `tests/p2p/` is a bench
-firmware for a second STICKER, not a ztest suite (no `testcase.yaml`, so `run_native.sh`
-skips it), which is why memory records this file as "HW/HIL only". Every P2P change below is
-currently verifiable only on a bench. This step buys a safety net before anything moves, and
-is TOWER's host-testable-decision-kernel lesson (§4) applied to us.
+**Why first:** `app_p2p.c` had *no* native test coverage. `tests/p2p/` is a bench firmware
+for a second STICKER, not a ztest suite (no `testcase.yaml`, so `run_native.sh` skips it).
+Every P2P change below was verifiable only on a bench. This step buys a safety net before
+anything moves, and is TOWER's host-testable-decision-kernel lesson (§4) applied to us.
 
-- Add `tests/p2p_logic/` (`testcase.yaml`, `prj.conf`, `CMakeLists.txt`, `src/main.c`), picked
-  up automatically by `tests/run_native.sh`.
-- Characterise the pure helpers **as they behave today**: `frame_toa_ms()`
-  (`app_p2p.c:611`), the CCM nonce layout (`:700-713`), the frame counter reserve/resume math
-  (`:449-460`), and the current duty-cycle arithmetic (`:793`).
-- Extract only what the tests need into a header-visible or `static`-free form; no behaviour
-  change in this step.
+- **Everything stays in `app_p2p.*`** (no new production source file — an initial extraction
+  into `app_p2p_wire.{c,h}` was reverted on request). The pure helpers stay `static` in the
+  firmware and are given external linkage **only under `CONFIG_ZTEST`** (a `P2P_TESTABLE`
+  macro + a guarded declaration block in `app_p2p.h`), the same idiom as `app_cmd.c`'s
+  existing CONFIG_ZTEST hook. Frame-geometry + duty constants and `struct p2p_duty` moved into
+  `app_p2p.h` as the shared single source of truth.
+- Added `tests/p2p_logic/` which **compiles the real `app_p2p.c`** against a no-op fake LoRa
+  device (`src/emul_lora.c` + a test-local DTS binding/overlay, like `tests/nfc_hw`) and thin
+  stubs (`src/stubs.c`: `g_app_config`, `app_compose_*`); `app_ccm.c` + soft-SE linked for
+  real crypto. Picked up automatically by `run_native.sh`. Tests: ToA reference/monotonicity,
+  nonce layout + direction, frame codec round-trip + tamper + max body.
+- Verified: 12/12 native suites, all three build configs, clang-format 22.1.5 clean.
 
-**Verify:** the new suite passes and the other ten still do — 11 suites green.
+### Step 2 — B2: token-bucket duty governor ✅ DONE
 
-### Step 2 — B2: token-bucket duty governor
+Replaced the single `m_dc_blocked_until` deadline with a refilling token bucket, **Tower-style
+36 000 ms cap** (user decision).
 
-Replaces the single `m_dc_blocked_until` deadline (`app_p2p.c:274`) with a refilling budget.
+- `struct p2p_duty { tokens_us; last_ms; }` + `p2p_duty_init/refill/charge/wait_ms` in
+  `app_p2p.c` (budget in µs, refills 10 µs per elapsed ms = exact 1 %, capped at
+  `P2P_DUTY_BUDGET_MS = 36000`). Thin `duty_wait_ms_for(wire_len)` / `duty_charge(air)`
+  wrappers over the live `m_duty`.
+- Rewrote all nine `m_dc_blocked_until` sites to gate/charge/wait per-frame (each site knows
+  its frame size — the "coarse gate" wrinkle from the original plan turned out unnecessary,
+  `tx_frame()` has `body_len`). Bucket started full at `app_p2p_init`.
+- Comments in `app_p2p.c` + `doc/p2p.md` §6/§11 updated; the ~2 % worst-case sliding hour is
+  documented as the deliberate Tower-model trade-off.
+- Tests: refill accrual, burst-then-starve, cap, and a simulated-hour loop asserting the
+  transmitted air never exceeds the 1 % budget. 15/15 in `p2p_logic`.
 
-- New state: `m_duty_tokens_ms` + `m_duty_last_refill`; helpers `duty_refill()`,
-  `duty_available_ms()`, `duty_wait_ms(payload_len)`, `duty_charge(air_ms)`.
-- Rewrite the nine touch points: gates at `:715`, `:807`, `:933`, `:1214`; charges at `:793`,
-  `:1260`; wait computations at `:888`, `:1059`, `:1372`.
-- **Known wrinkle:** the gate in `tx_frame()` (`:807`) runs *before* the frame is built, so
-  the payload length is unknown there. Keep that one coarse (`duty_available_ms() <= 0`) and
-  do the exact check in `tx_frame_at()`, where `wire_len` exists.
-- **Decision needed — the bucket cap.** Today's model blocks for `air × 99` after *every*
-  frame, so an alarm queued behind a 240 B SF10 telemetry frame waits ~227 s (`:225`). A
-  bucket lets the alarm go immediately as long as budget remains, which is the actual point
-  of this change. How much burst to allow is a regulatory question, not a coding one: start
-  the cap low (a few seconds of air-time), which keeps us at least as conservative as today
-  while still fixing the alarm-latency case, and raise it only with a compliance review.
-
-**Verify:** standard, plus new duty cases in `tests/p2p_logic/` — refill accrual, burst then
-starve, and that the hourly total never exceeds 1 %.
+**Verify (both steps):** 12/12 native suites; Release dual-stack + `debug.conf` +
+`debug.conf+debug_p2p_bench.conf` all build (Release +≈0.3 KB flash / +64 B RAM vs baseline;
+P2P-only unchanged); clang-format 22.1.5 clean.
 
 ### Step 3 — B3: self-healing rejoin
 
