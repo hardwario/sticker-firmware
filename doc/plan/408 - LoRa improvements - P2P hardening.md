@@ -1,9 +1,10 @@
-# HARDWARIO STICKER — LoRa Improvements: P2P Hardening and TOWER Transport
+# HARDWARIO STICKER — LoRa Improvements: P2P Hardening
 
 A survey of the HARDWARIO TOWER radio stack and the `twr-sdk` LoRaWAN driver, and what
 STICKER should adopt from them. This PR carries the LoRa P2P side (duty cycle, ACK metadata,
-downlink, self-healing) and the future TOWER transport; the LoRaWAN side moved to
-[PR #409](https://github.com/hardwario/sticker-firmware/pull/409) (§2).
+downlink, self-healing). The LoRaWAN side moved to
+[PR #409](https://github.com/hardwario/sticker-firmware/pull/409) (§2) and the TOWER
+transport to [PR #410](https://github.com/hardwario/sticker-firmware/pull/410) (§5).
 
 > Requested 2026-08-27: "review the LoRa implementation on TOWER, propose what we could add
 > to STICKER (band switching, US915 and AU regulations), and propose improvements to LoRa
@@ -266,44 +267,27 @@ importing.
 
 ---
 
-## 5. Next phase — a `radio-mode tower` transport
+## 5. Next phase — a `radio-mode tower` transport (moved to PR #410)
 
-Decision (2026-08-27): **no protocol merge.** STICKER P2P stays its own protocol and simply
-absorbs the good ideas above. Talking to a TOWER network is a separate, later feature: a
-fourth transport mode in which STICKER speaks the TOWER protocol natively.
+The TOWER transport (fourth `radio_mode` value, the `app_tower` module, the verified GFSK
+PHY path, the bench interop gate) moved to its own PR so the P2P hardening and the TOWER
+work are separate, independently reviewable streams:
 
-**Shape of the work:**
+**[PR #410](https://github.com/hardwario/sticker-firmware/pull/410)** —
+`doc/plan/410 - TOWER GFSK transport (radio-mode tower).md`.
 
-- A fourth value in the `radio_mode` enum {off, lorawan, p2p, **tower**}, selected at boot —
-  consistent with the current design (one radio, no concurrent modes). The decoder's enum map
-  needs the new value.
-- **The PHY is reachable — verified.** TOWER is GFSK 19.2 kbps / ±20 kHz deviation / ~216 kHz
-  RX bandwidth / 4-byte sync word `0xDB624715` / CRC-16 `0x1021` / PN9 whitening
-  (`tower-firmware`, `src/radio/config.rs`). The STM32WLE5's SX126x has a full GFSK modem and
-  the in-tree loramac-node HAL already drives it: the `MODEM_FSK` paths in
-  `modules/lib/loramac-node/src/radio/sx126x/radio.c`, sync words up to 8 bytes
-  (`SX126xSetSyncWord`, `:692`), whitening (`RADIO_DC_FREEWHITENING` + `SX126xSetWhiteningSeed`,
-  `:686`, `:693`), and configurable CRC. The nearest RX bandwidth is 234.3 kHz.
-- **A new `app_tower` transport module**, structured like `app_p2p` and plugged into the
-  existing `app_radio` facade: frame codec (96 B cap), AES-128-CCM with an 8-byte tag (our
-  `app_ccm` hardware engine is the same primitive, only the nonce layout differs), replay
-  lanes, the 3-way JOIN pairing, and a duty governor.
-- **Radio access**: Zephyr's `lora.h` is LoRa-only and has no FSK, so this needs either direct
-  `Radio.*` HAL calls or an extension to the in-workspace Zephyr driver — the same driver work
-  as B7 (CAD), so plan them together.
+One dependency stays shared: #410's Step 1 (radio-driver FSK access) and B7 here (CAD) are
+**one driver change** — design them together, open the driver once.
 
-**Open risks:** bit-level PHY interop must be validated on the bench against a real TOWER
-dongle (PN9 implementation, bit order, length-field placement in the SPIRIT1 Basic packet
-format versus the SX126x packet engine, and CRC-versus-whitening ordering are the classic
-traps). `tower-firmware` is under active development, so the work must be pinned to a specific
-commit. And the 96 B frame limit constrains payloads relative to what P2P allows today.
+Section numbering below is kept stable to preserve cross-references.
 
 ---
 
 ## 6. Priorities and tracking
 
-The scope of this PR is the P2P and TOWER work; the LoRaWAN items (A1–A7) are tracked in
-[PR #409](https://github.com/hardwario/sticker-firmware/pull/409).
+The scope of this PR is the P2P work; the LoRaWAN items (A1–A7) are tracked in
+[PR #409](https://github.com/hardwario/sticker-firmware/pull/409) and the TOWER transport in
+[PR #410](https://github.com/hardwario/sticker-firmware/pull/410).
 
 **Quick wins**
 
@@ -322,9 +306,8 @@ The scope of this PR is the P2P and TOWER work; the LoRaWAN items (A1–A7) are 
 - [ ] B6 — multi-channel / P2P region model *(blocked on the regulatory decision, §3 B6; needs central, S4)*
 - [ ] B7 — CAD / listen-before-talk *(Zephyr driver patch)*
 
-**Next phase**
-
-- [ ] `radio-mode tower` — GFSK PHY + `app_tower` transport (Section 5)
+**Next phase:** the TOWER transport is tracked in
+[PR #410](https://github.com/hardwario/sticker-firmware/pull/410) (§5).
 
 **Deferred / v2:** B8 (bulk transfer).
 
@@ -334,7 +317,7 @@ as S1–S4.
 
 Suggested order: B2 and B3 are self-contained device-side changes with no external
 dependency, so they can land first. B1 needs the central to key the ACK size off the session
-`proto_version`, so it should land alongside S1. B7 and Section 5 share the same Zephyr
+`proto_version`, so it should land alongside S1. B7 and #410's Step 1 share the same Zephyr
 driver work and should be planned together.
 
 Section 7 breaks this into ordered, commit-sized steps.
@@ -462,15 +445,15 @@ ClockSync command over `0x56` (pairs with Step 6). Pick whichever of those two l
 - **B6 (P2P region model)** is blocked on the regulatory decision in §3: an SF10/BW125 frame
   is ~2.3 s of air, which AU915's 400 ms dwell forbids outright. Needs a certification-lab
   answer before the server-side channel-assignment policy (S4) can be finalised.
-- **B7 (CAD/LBT)** and **the TOWER GFSK PHY (§5)** both need the same in-workspace Zephyr LoRa
+- **B7 (CAD/LBT)** and **#410's TOWER GFSK PHY** both need the same in-workspace Zephyr LoRa
   driver extension, so plan them as one piece of work rather than opening that driver twice.
-- **`radio-mode tower` / `app_tower`** follows the driver work.
 
 ### Not in this PR
 
-Track A is LoRaWAN work in `app_lrw.c`, and this branch is based on `feat-p2p`. It moved to
-[PR #409](https://github.com/hardwario/sticker-firmware/pull/409) against `v1.5.0`, with its
-own plan and ordered steps.
+Track A is LoRaWAN work in `app_lrw.c` and moved to
+[PR #409](https://github.com/hardwario/sticker-firmware/pull/409) against `v1.5.0`; the TOWER
+transport moved to [PR #410](https://github.com/hardwario/sticker-firmware/pull/410) against
+`feat-p2p`. Each has its own plan and ordered steps.
 
 ## 8. Explicit non-goals
 
