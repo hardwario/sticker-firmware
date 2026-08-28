@@ -37,9 +37,9 @@ start; never reuse a stale pairing (always fresh join per bench convention).
   zero app_key makes the radio refuse to start.
 - `radio-mode p2p` set + saved on the DUT; reboot into P2P.
 - Central: started against the northbridge, with the DUT's serial→app_key registered
-  (`node-add`). Time delivery **on** for the S3 step (see the host runbook the server agent
-  provides — a `with_time_delivery`/config flag).
-- Both sides logging: DUT over RTT (Terminal 0), central to stdout.
+  (`node-add`). Time delivery **on** for the S3 step (`control-radio-p2p-host --deliver-time`,
+  MR!30 commit `dff883c`). Full central commands in §7.
+- Both sides logging: DUT over RTT (Terminal 0), central `eprintln!` to **stderr** (`2>`).
 
 ## 3. Scenario table
 
@@ -79,7 +79,53 @@ prefix `P2E-` (P2P end-to-end).
 - Real USART1 transport (vs. the RTT-bridge) is not exercised until a USB-UART adapter is
   attached; the protocol is identical, only the northbridge transport differs.
 
-## 6. References
+## 7. Central runbook (Proximos `control-radio`, MR!30)
+
+Two binaries from crate `control-radio`: **`control-radio-p2p-host`** (the always-on runtime;
+observability on stderr) and **`control-radio-harness`** (the `control.radio …` operator CLI;
+JSON on stdout). Both read the same env:
+
+| Var | Meaning | Bench value |
+|---|---|---|
+| `PROXIMOS_CONFIG` | device YAML — **must** set `radio.mode: p2p` (fixtures default to `lorawan`, else CLI fails `P2pUnavailable`) | copy `crates/control-radio/tests/integration/radio.yaml`, `mode: lorawan`→`p2p` |
+| `PROXIMOS_RADIO_DATA` | state dir (`p2p/net_id`, `p2p/sessions.db`) — **identical** for the host and every CLI call | e.g. `/data/proximos/radio` |
+| `PROXIMOS_P2P_UART` | northbridge serial 115200 8N1 (host `--uart` overrides) | the PTY bridging the northbridge USART1 over the RTT-bridge |
+
+```sh
+# Step 0 — provision once, BEFORE starting the host
+control-radio-harness create --radio p2p                       # -> {"net_id":"…"}
+printf '{"app_key":"<32-hex>"}' > /tmp/sticker.key              # key via file, never argv
+control-radio-harness node-add --radio p2p --serial 0x<serial> \
+    --dev-eui <16-hex> --profile default --keys-file /tmp/sticker.key
+
+# Step 1 — start the central (add --deliver-time for the S3 step; --no-mqtt on a bench)
+PROXIMOS_P2P_UART=<pty> control-radio-p2p-host --no-mqtt 2> p2p-host.log
+
+# Step 3 (S2) — enqueue a downlink AFTER the DUT has joined; --hex must be a real fPort-85 Command
+control-radio-harness node-send --radio p2p --serial 0x<serial> --hex <cmd-hex>
+control-radio-harness node-list --radio p2p                    # shows "downlink_pending": N
+```
+
+**Log-line grep anchors** (`p2p-host.log`): `JoinAccept ->` · `TX_SCHEDULE ok: ACK … flags=0x??
+(N B body)` (N=3 base, 7 with time; flags bit0 pending, bit1 time) · `TX_SCHEDULE ok:
+COMMAND(0x56)` · `0x55 RESPONSE cleared` · `DECRYPT FAILED … NOT ACKing` · `REPLAY/implausible
+counter` · `retransmit of counter … re-ACKing`.
+
+## 8. Pre-HIL dry-run (no hardware)
+
+The host always opens a real UART, but the **FakeModem engine tests drive the identical
+`Central::on_event` path and print the same trace** — the supported smoke check before the
+bench is wired:
+
+```sh
+cargo test -p control-radio --lib p2p::runtime::tests::a_downlink_is_announced_then_sent_as_0x56_then_cleared_by_0x55 -- --nocapture --exact  # S2 full EVT_RX→ACK(0x01)→0x56→0x55→ACK(0x00)
+cargo test -p control-radio --lib p2p::runtime::tests::the_extended_ack_delivers_unix_time_when_enabled -- --nocapture --exact               # S3
+cargo test -p control-radio --lib p2p::runtime -- --nocapture                                                                                # whole engine
+```
+
+Run these to see "what good looks like" for P2E-03..06 before committing bench time.
+
+## 9. References
 
 - `doc/p2p.md` §5–§7 (join, data plane, lifecycle) — the protocol this validates.
 - `doc/plan/408 - LoRa improvements - P2P hardening.md` — the FW items (B1–B9).
