@@ -15,6 +15,48 @@
 extern "C" {
 #endif
 
+/* Frame geometry (data plane), doc/p2p.md §3. Single source of truth, shared
+ * by app_p2p.c and tests/p2p_logic. */
+#define P2P_HDR_LEN   11
+#define P2P_TAG_LEN   4 /* data-plane (session_key) CCM tag length only */
+#define P2P_NONCE_LEN 13
+#define P2P_KEY_LEN   16
+#define P2P_DIR_TX    0x00
+#define P2P_DIR_RX    0x01
+#define P2P_LORA_MTU  255
+#define P2P_MAX_BODY  (P2P_LORA_MTU - P2P_HDR_LEN - P2P_TAG_LEN) /* 240 */
+#define P2P_FRAME_MAX (P2P_HDR_LEN + P2P_MAX_BODY + P2P_TAG_LEN)
+
+/* Duty-cycle governor tuning (B2), shared with tests/p2p_logic. */
+#define P2P_DUTY_PERMILLE  10    /* 1% duty cycle (per mille) */
+#define P2P_DUTY_BUDGET_MS 36000 /* bucket capacity = 1% of one hour */
+
+/* Ack (0xFA) body layout (B1 rssi/snr + B5 optional time tail), doc/p2p.md §6.
+ * Shared with the pure parser and tests/p2p_logic. */
+#define P2P_ACK_FLAG_PENDING  0x01 /* bit 0: a downlink command is pending (B4) */
+#define P2P_ACK_FLAG_TIME     0x02 /* bit 1: 4-byte Unix time tail present (B5) */
+#define P2P_ACK_BODY_BASE_LEN 3    /* flags | rssi_i8 | snr_i8 */
+#define P2P_ACK_TIME_LEN      4    /* optional big-endian Unix seconds */
+#define P2P_ACK_BODY_MAX_LEN  (P2P_ACK_BODY_BASE_LEN + P2P_ACK_TIME_LEN) /* 7 */
+
+/* Parsed Ack body (B1/B5), filled by p2p_parse_ack_body(). */
+struct p2p_ack_info {
+	uint8_t flags;      /* raw flags byte (P2P_ACK_FLAG_*) */
+	int8_t rssi;        /* central-measured uplink RSSI, dBm */
+	int8_t snr;         /* central-measured uplink SNR, dB */
+	bool time_present;  /* a valid Unix time tail was present */
+	uint32_t unix_time; /* wall-clock seconds (valid iff time_present) */
+};
+
+/* Token-bucket duty-cycle governor state (B2). Defined here so tests/p2p_logic
+ * can declare one; the governor functions are internal to app_p2p.c (given
+ * external linkage only under CONFIG_ZTEST -- see the block at the end of this
+ * header). */
+struct p2p_duty {
+	int64_t tokens_us; /* available air-time budget, microseconds */
+	int64_t last_ms;   /* uptime of the last refill */
+};
+
 /* Raw-LoRa point-to-point transport, phase 1 (#118, doc/p2p.md). A drop-in
  * alternative to app_lrw for deployments without LoRaWAN infrastructure,
  * selected at boot by `radio-mode p2p` via the app_radio facade. It
@@ -57,7 +99,7 @@ enum app_p2p_frame_type {
 	APP_P2P_FRAME_TELEMETRY = 2,
 	APP_P2P_FRAME_ALARM = 3,
 	APP_P2P_FRAME_RESPONSE = 85,
-	APP_P2P_FRAME_COMMAND = 86, /* inbound (RX): reserved, not dispatched yet */
+	APP_P2P_FRAME_COMMAND = 86, /* inbound (RX): downlink command, dispatched (B4) */
 	APP_P2P_FRAME_JOIN_REQUEST = 0xF0,
 	APP_P2P_FRAME_JOIN_ACCEPT = 0xF1,
 	APP_P2P_FRAME_ACK = 0xFA,
@@ -137,6 +179,12 @@ struct app_p2p_info {
 	uint32_t fcnt;              /* next data-plane TX counter */
 	uint32_t dev_nonce;         /* JoinRequest anti-replay counter, never resets */
 	uint32_t ack_retry_pending; /* frames currently awaiting an Ack retry */
+	/* B1: RSSI/SNR the central reported in the last Ack (its measurement of
+	 * this device's uplink). last_ack_valid is false until the first Ack of
+	 * the current session. */
+	int8_t last_ack_rssi;
+	int8_t last_ack_snr;
+	bool last_ack_valid;
 	/* False means lrw_appkey is all-zero, i.e. the device has no root key
 	 * for P2P at all and app_p2p_start()/app_p2p_rejoin() refuse to bring
 	 * the radio up (doc/p2p.md §4). Without this, such a device is
@@ -198,6 +246,27 @@ void app_p2p_debug_drop_acks(uint32_t count);
  * errno. */
 int app_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, bool *more);
 #endif
+
+#if defined(CONFIG_ZTEST)
+/* Pure decision-logic helpers, internal to app_p2p.c (static in the firmware),
+ * exposed with external linkage for tests/p2p_logic only. Not part of the
+ * runtime API -- do not call from firmware. */
+uint32_t p2p_toa_ms(int sf, uint8_t payload_len);
+void build_nonce(uint8_t nonce[13], uint32_t counter, uint16_t dev_addr, uint8_t frame_type,
+		 uint8_t dir);
+int build_frame_keyed(uint32_t net_id, uint16_t dev_addr, const uint8_t session_key[16],
+		      uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t counter,
+		      uint8_t *frame);
+void p2p_duty_init(struct p2p_duty *d, int64_t now_ms);
+void p2p_duty_refill(struct p2p_duty *d, int64_t now_ms);
+void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
+int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
+uint32_t p2p_rejoin_backoff_ms(uint8_t attempt);
+bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
+void p2p_test_set_fcnt(uint32_t next, uint32_t reserved);
+uint32_t p2p_test_get_fcnt(void);
+int p2p_test_fcnt_next(uint32_t *counter_out);
+#endif /* defined(CONFIG_ZTEST) */
 
 #ifdef __cplusplus
 }

@@ -5,6 +5,7 @@
  */
 
 #include "app_ccm.h"
+#include "app_clock.h"
 #include "app_cmd.h"
 #include "app_compose.h"
 #include "app_config.h"
@@ -32,6 +33,16 @@
 #include <string.h>
 
 LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
+
+/* Internal helpers are `static` in the firmware but given external linkage
+ * under CONFIG_ZTEST so tests/p2p_logic can unit-test the pure decision logic
+ * (framing, time-on-air, the duty-cycle governor) directly, without a bench.
+ * Same idiom as app_cmd.c's CONFIG_ZTEST test hook. See app_p2p.h. */
+#if defined(CONFIG_ZTEST)
+#define P2P_TESTABLE
+#else
+#define P2P_TESTABLE static
+#endif
 
 /*
  * Wire frame (raw LoRa has no addressing/MIC/encryption of its own, doc/p2p.md §3):
@@ -69,15 +80,9 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * (#118 phase 2 revision, proximos-v2 MR!7 §7) precisely because there is
  * nothing to encrypt in either handshake frame, only to authenticate.
  */
-#define P2P_HDR_LEN   11
-#define P2P_TAG_LEN   4 /* data-plane (session_key) CCM tag length only */
-#define P2P_NONCE_LEN 13
-#define P2P_KEY_LEN   16
-#define P2P_DIR_TX    0x00
-#define P2P_DIR_RX    0x01
-#define P2P_LORA_MTU  255
-#define P2P_MAX_BODY  (P2P_LORA_MTU - P2P_HDR_LEN - P2P_TAG_LEN) /* 240 */
-#define P2P_FRAME_MAX (P2P_HDR_LEN + P2P_MAX_BODY + P2P_TAG_LEN)
+/* P2P_HDR_LEN / P2P_TAG_LEN / P2P_NONCE_LEN / P2P_KEY_LEN / P2P_DIR_TX /
+ * P2P_DIR_RX / P2P_LORA_MTU / P2P_MAX_BODY / P2P_FRAME_MAX are in app_p2p.h
+ * (shared with tests/p2p_logic). */
 
 /* Pre-join fixed value (§5.3): both header fields are 0 until JoinAccept
  * allocates real ones. m_net_id/m_dev_addr (below) hold the CURRENT value --
@@ -115,9 +120,22 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * tests/ccm), so no new primitive is needed, just the wider buffer. */
 #define P2P_SESSION_KEY_LABEL "HIO-P2P-SES"
 
-/* EU868 1% duty cycle, enforced app-side (raw LoRa bypasses LoRaMac). After a
- * frame of air-time A we must stay off the air for A*(100/1 - 1) = A*99 ms. */
-#define P2P_DUTY_CYCLE_PERMILLE 10
+/*
+ * EU868 1% duty cycle, enforced app-side (raw LoRa bypasses LoRaMac's own
+ * duty enforcement) with a token bucket (B2, doc/plan/408 §7 Step 2). The old
+ * model blocked the radio for air*99 ms after EVERY frame, so an alarm queued
+ * right behind a long telemetry frame waited minutes; the bucket instead lets
+ * a frame go the moment enough budget has accrued while holding the long-run
+ * average at 1%.
+ *
+ * Budget is tracked in microseconds of air-time, refills at 1% of wall time
+ * (P2P_DUTY_PERMILLE us per elapsed ms -- exact integer math, k_uptime_get()
+ * has no sub-ms part so no residue is lost), and is capped at the full hourly
+ * allowance P2P_DUTY_BUDGET_MS (Tower's DutyGovernor::eu() model): after a
+ * long idle the device may burst up to that much air at once, so the
+ * worst-case sliding hour is ~2% -- a deliberate choice (doc/p2p.md §6).
+ */
+/* P2P_DUTY_PERMILLE / P2P_DUTY_BUDGET_MS are in app_p2p.h (shared with tests). */
 
 #define P2P_FCNT_SUBTREE "p2pfc"
 #define P2P_FCNT_KEY     "p2pfc/base"
@@ -171,6 +189,18 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * plus this jitter so devices booting together don't collide on retry. */
 #define P2P_JOIN_RETRY_JITTER_MS 2000
 
+/* Self-healing re-join (B3, doc/p2p.md §7): after this many CONSECUTIVE
+ * fully-failed confirmed-uplink cycles (all P2P_ACK_MAX_RETRIES exhausted with
+ * no Ack), an already-PAIRED node concludes its session is stale (central DB
+ * loss/restore, key change, lost sync) and starts re-join attempts on its own.
+ * Unlike the never-paired boot join (§5.2), this is NOT bounded by the 120 s
+ * boot window -- a paired device recovers for its whole life -- so it must use
+ * exponential backoff (base -> x2 -> cap) instead of the tight boot-window
+ * jitter, to keep the duty budget and battery sane over a long outage. */
+#define P2P_REJOIN_FAIL_THRESHOLD  8       /* consecutive failed uplink cycles */
+#define P2P_REJOIN_BACKOFF_BASE_MS 60000   /* first re-join round: 60 s */
+#define P2P_REJOIN_BACKOFF_MAX_MS  3600000 /* cap: 1 h */
+
 /* RX1 window (§6, reused for JoinAccept per §5.3): opened this many ms
  * before the nominal rx1_delay deadline to absorb node-side timing error
  * (crystal drift, work-queue scheduling jitter), sized generously against
@@ -206,10 +236,16 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_RX1_TRAILING_MARGIN_MS 40
 #define P2P_RX1_DELAY_DEFAULT_S    1
 
-/* Confirmed uplink (§6): the Ack (0xFA) body is a single flags byte (bit 0:
- * downlink pending, read-and-logged only -- 0x56 dispatch stays out of scope,
- * same decision as §5.3). */
-#define P2P_ACK_BODY_LEN 1
+/* Confirmed uplink (§6): the Ack (0xFA) body (B1/B5, PR #408, matches the
+ * central in proximos-v2 MR!30). Base body is flags(1) | rssi(i8) | snr(i8) --
+ * the RSSI/SNR the central measured on the uplink being acknowledged (a free
+ * link-quality sample, TOWER's pattern). An optional 4-byte big-endian Unix
+ * time tail rides when flags bit 1 is set (B5 clock sync). The frame is
+ * self-describing: the node derives the body length from the received frame
+ * length, so no wire version is needed (P2P is pre-deployment). */
+/* P2P_ACK_FLAG_PENDING / P2P_ACK_FLAG_TIME / P2P_ACK_BODY_BASE_LEN /
+ * P2P_ACK_TIME_LEN / P2P_ACK_BODY_MAX_LEN are in app_p2p.h (shared with the
+ * pure p2p_parse_ack_body() helper and tests/p2p_logic). */
 
 /* Unacknowledged uplinks retransmit the SAME counter (byte-identical frame)
  * up to this many times (§6) -- interpreted as retries AFTER the first send
@@ -220,11 +256,14 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 /* Jitter added to a retry's wait, on top of any remaining duty-cycle block. */
 #define P2P_ACK_RETRY_JITTER_MS 1000
 
-/* HW-informed finding (#118 phase 2 HIL): a single MAX-size telemetry
- * frame's duty-cycle block can be ~227 s (240 B body, SF10/BW125 --
- * frame_toa_ms(255) ~=2296 ms, block = air*99); a REAL SF10 send's block is
- * routinely ~39-45 s even for smaller frames (measured on the bench). An
- * earlier design capped how long a retry would wait for duty-cycle
+/* HW-informed finding (#118 phase 2 HIL): under the OLD "block for air*99 ms
+ * after every frame" model a single MAX-size telemetry frame blocked the
+ * radio for ~227 s (240 B body, SF10/BW125 -- frame_toa_ms(255) ~=2296 ms);
+ * a real SF10 send blocked ~39-45 s even for smaller frames. The token-bucket
+ * governor (B2) replaces that fixed post-frame block, so a retry now waits
+ * only until enough budget has re-accrued for ITS frame -- but the wait can
+ * still be long once the bucket is drained, so the async design below still
+ * matters. An earlier design capped how long a retry would wait for duty-cycle
  * clearance and gave up past the cap -- but any workable cap short enough to
  * be safe on a shared work queue is *always* shorter than a real SF10 duty-
  * cycle block, making "retry up to 3 times" silently never retry in
@@ -271,7 +310,7 @@ static struct k_work_delayable m_heartbeat_work;
 
 static bool m_started;
 static bool m_listening;
-static int64_t m_dc_blocked_until; /* uptime ms; no TX before this */
+static struct p2p_duty m_duty; /* token-bucket duty-cycle governor (B2) */
 static void (*m_ready_cb)(void);
 
 /* --- Persistent frame counter (nonce uniqueness across reboots) --- */
@@ -287,6 +326,24 @@ static uint8_t m_session_key[P2P_KEY_LEN];
 static uint8_t m_rx1_delay_s = P2P_RX1_DELAY_DEFAULT_S;
 static uint32_t m_dev_nonce;      /* next JoinRequest counter; persisted, device lifetime */
 static int64_t m_join_started_at; /* uptime ms; start of the current boot join window */
+
+/* Self-healing re-join state (B3, §7). m_self_healing distinguishes a
+ * self-healing episode (exponential backoff, no boot-window cap) from a
+ * boot/shell join (120 s boot window, tight jitter). */
+static uint16_t m_consec_uplink_fail; /* consecutive fully-failed uplink cycles */
+static bool m_self_healing;           /* current JOINING episode is a self-heal */
+static uint8_t m_rejoin_attempt;      /* backoff step within a self-heal episode */
+
+/* B1: RSSI/SNR the central reported in the last Ack (its measurement of our
+ * uplink). m_last_ack_valid is false until the first Ack of this session. */
+static int8_t m_last_ack_rssi;
+static int8_t m_last_ack_snr;
+static bool m_last_ack_valid;
+
+/* B4: the last Ack's "downlink pending" flag -- when set, the central will
+ * deliver a 0x56 COMMAND in the RX1 window of the NEXT uplink (replacing that
+ * uplink's Ack), so that window must be sized for a full command frame. */
+static bool m_downlink_pending;
 
 struct p2p_tx_msg {
 	uint8_t type;
@@ -455,25 +512,72 @@ static struct settings_handler m_fcnt_sh = {
 	.h_set = fcnt_settings_set,
 };
 
-static void fcnt_reserve(uint32_t high_water)
+/* Persist a new reservation high-water. FAIL-CLOSED (B9): the in-RAM watermark
+ * is advanced ONLY if the durable write succeeded -- otherwise a reboot would
+ * resume from the older persisted value and could hand out a counter this run
+ * already used, and a repeated (key, nonce) pair is a full CCM break. Returns
+ * 0 or the settings errno. */
+static int fcnt_reserve(uint32_t high_water)
 {
-	m_fcnt_reserved = high_water;
 	int ret = settings_save_one(P2P_FCNT_KEY, &high_water, sizeof(high_water));
 
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("settings_save_one(p2pfc)", ret);
+		return ret;
 	}
+	m_fcnt_reserved = high_water;
+	return 0;
 }
 
-static uint32_t fcnt_next(void)
+/* Hand out the next frame counter into `*counter_out`. Guarantees the value is
+ * within the durably-reserved window before returning it (B9): if the window
+ * must be extended and that durable write fails, refuses (returns the errno)
+ * rather than reuse a counter across a reboot. Saturates at UINT32_MAX and
+ * refuses rather than wrapping (a wrap repeats every (key, nonce) -- a rekey
+ * via re-join is the intended recovery long before this is reachable). */
+static int fcnt_next(uint32_t *counter_out)
 {
-	uint32_t c = m_fcnt++;
+	if (m_fcnt == UINT32_MAX) {
+		LOG_ERR("P2P frame counter exhausted; refusing TX (re-join to rekey)");
+		return -EOVERFLOW;
+	}
 
 	if (m_fcnt >= m_fcnt_reserved) {
-		fcnt_reserve(m_fcnt + P2P_FCNT_RESERVE);
+		uint32_t target = (m_fcnt > UINT32_MAX - P2P_FCNT_RESERVE)
+					  ? UINT32_MAX
+					  : m_fcnt + P2P_FCNT_RESERVE;
+		int ret = fcnt_reserve(target);
+
+		if (ret) {
+			return ret; /* fail closed -- do not use an unreserved counter */
+		}
 	}
-	return c;
+
+	*counter_out = m_fcnt++;
+	return 0;
 }
+
+#if defined(CONFIG_ZTEST)
+/* Test hooks for the frame-counter fail-closed/saturation logic (B9). With the
+ * CONFIG_SETTINGS_NONE backend in tests/p2p_logic, settings_save_one() fails,
+ * so any path that must extend the reservation exercises the fail-closed
+ * branch. */
+void p2p_test_set_fcnt(uint32_t next, uint32_t reserved)
+{
+	m_fcnt = next;
+	m_fcnt_reserved = reserved;
+}
+
+uint32_t p2p_test_get_fcnt(void)
+{
+	return m_fcnt;
+}
+
+int p2p_test_fcnt_next(uint32_t *counter_out)
+{
+	return fcnt_next(counter_out);
+}
+#endif /* defined(CONFIG_ZTEST) */
 
 /* ======================================================================== */
 /* Join/session persistence (#118 phase 2, doc/p2p.md §5.3)                 */
@@ -557,8 +661,13 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
 	m_rx1_delay_s = rx1_delay_s;
 	m_link_state = P2P_LINK_PAIRED;
 
+	/* Fresh pairing: counter restarts at 0 under the just-rotated session_key,
+	 * so reuse vs. the old session is impossible. Best-effort reserve here --
+	 * if it fails, the old (higher) persisted watermark conservatively still
+	 * covers these low counters, and fcnt_next() re-reserves fail-closed once
+	 * m_fcnt catches up to it. */
 	m_fcnt = 0;
-	fcnt_reserve(P2P_FCNT_RESERVE);
+	(void)fcnt_reserve(P2P_FCNT_RESERVE);
 }
 
 /* ======================================================================== */
@@ -605,12 +714,12 @@ static int radio_configure(bool tx)
 	return ret;
 }
 
-/* LoRa time-on-air in ms (Semtech AN1200.13), integer-only to avoid pulling in
- * the soft-float/libm code on this Cortex-M4-no-FPU part. Used for app-side
- * duty-cycle accounting (preamble_len fixed at 8, explicit header). */
-static uint32_t frame_toa_ms(uint8_t payload_len)
+/* LoRa time-on-air in ms (Semtech AN1200.13) for spreading factor `sf`,
+ * integer-only to avoid pulling in the soft-float/libm code on this
+ * Cortex-M4-no-FPU part. Fixed PHY: BW 125 kHz, CR 4/5, preamble 8 symbols,
+ * explicit header (doc/p2p.md §3.3). Pure -- exposed to tests/p2p_logic. */
+P2P_TESTABLE uint32_t p2p_toa_ms(int sf, uint8_t payload_len)
 {
-	int sf = sf_from_cfg();
 	uint32_t bw = P2P_BANDWIDTH_HZ;
 	int cr = P2P_CR_DENOM;
 	int de = (sf >= 11 && bw == 125000) ? 1 : 0;
@@ -634,6 +743,12 @@ static uint32_t frame_toa_ms(uint8_t payload_len)
 	uint64_t t_payload_us = tsym_us * n_sym;
 
 	return (uint32_t)((t_preamble_us + t_payload_us + 500) / 1000);
+}
+
+/* Time-on-air for the current configured SF. */
+static uint32_t frame_toa_ms(uint8_t payload_len)
+{
+	return p2p_toa_ms(sf_from_cfg(), payload_len);
 }
 
 /* Preamble-catch / open-timing-slop budget in ms, P2P_RX1_WINDOW_SYMBOLS
@@ -702,8 +817,12 @@ static int p2p_rx_window(int64_t tx_end_ms, uint8_t rx1_delay_s, uint8_t expecte
 /* Frame TX                                                                 */
 /* ======================================================================== */
 
-static void build_nonce(uint8_t nonce[P2P_NONCE_LEN], uint32_t counter, uint16_t dev_addr,
-			uint8_t frame_type, uint8_t dir)
+/* CCM nonce layout (doc/p2p.md §3): counter(4 BE) | dev_addr(2 BE) |
+ * frame_type(1) | direction(1) | zero-pad. The direction byte separates the
+ * TX and RX keystreams under the same (key, counter). Pure -- exposed to
+ * tests/p2p_logic. */
+P2P_TESTABLE void build_nonce(uint8_t nonce[P2P_NONCE_LEN], uint32_t counter, uint16_t dev_addr,
+			      uint8_t frame_type, uint8_t dir)
 {
 	memset(nonce, 0, P2P_NONCE_LEN);
 	sys_put_be32(counter, &nonce[0]);
@@ -712,30 +831,179 @@ static void build_nonce(uint8_t nonce[P2P_NONCE_LEN], uint32_t counter, uint16_t
 	nonce[7] = dir;
 }
 
-static bool duty_cycle_blocked(void)
+/* ---- Token-bucket duty-cycle governor (B2, see the header comment above) - */
+
+#define P2P_DUTY_BUDGET_US        ((int64_t)P2P_DUTY_BUDGET_MS * 1000)
+/* Budget accrued per elapsed ms of wall time: 1 ms of wall carries 1000 us,
+ * of which P2P_DUTY_PERMILLE per mille is air budget => PERMILLE us/ms. */
+#define P2P_DUTY_ACCRUE_US_PER_MS (P2P_DUTY_PERMILLE)
+
+/* Start the bucket full at `now_ms` (uptime ms) -- boot is never blocked. */
+P2P_TESTABLE void p2p_duty_init(struct p2p_duty *d, int64_t now_ms)
 {
-	return k_uptime_get() < m_dc_blocked_until;
+	d->tokens_us = P2P_DUTY_BUDGET_US;
+	d->last_ms = now_ms;
+}
+
+/* Accrue budget for the wall time since the last refill, capped at the full
+ * hourly allowance. */
+P2P_TESTABLE void p2p_duty_refill(struct p2p_duty *d, int64_t now_ms)
+{
+	int64_t elapsed_ms = now_ms - d->last_ms;
+
+	if (elapsed_ms <= 0) {
+		return; /* clock is monotonic; nothing to accrue */
+	}
+
+	d->tokens_us += elapsed_ms * P2P_DUTY_ACCRUE_US_PER_MS;
+	if (d->tokens_us > P2P_DUTY_BUDGET_US) {
+		d->tokens_us = P2P_DUTY_BUDGET_US;
+	}
+	d->last_ms = now_ms;
+}
+
+/* Refill, then subtract `air_ms` of just-sent air-time (may go negative). */
+P2P_TESTABLE void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms)
+{
+	p2p_duty_refill(d, now_ms);
+	d->tokens_us -= (int64_t)air_ms * 1000;
+}
+
+/* Refill, then return how many ms to wait before `air_ms` of air can be
+ * afforded -- 0 if it can be sent now. */
+P2P_TESTABLE int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms)
+{
+	p2p_duty_refill(d, now_ms);
+
+	int64_t deficit_us = (int64_t)air_ms * 1000 - d->tokens_us;
+
+	if (deficit_us <= 0) {
+		return 0;
+	}
+	/* Round the wait up so the caller never wakes a fraction of a ms early. */
+	return (deficit_us + P2P_DUTY_ACCRUE_US_PER_MS - 1) / P2P_DUTY_ACCRUE_US_PER_MS;
+}
+
+/* Exponential backoff (ms) for self-healing re-join round `attempt` (0-based):
+ * BASE, 2*BASE, 4*BASE, ... capped at MAX. Pure -- exposed to tests/p2p_logic.
+ * The caller adds jitter. */
+P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
+{
+	uint32_t ms = P2P_REJOIN_BACKOFF_BASE_MS;
+
+	for (uint8_t i = 0; i < attempt && ms < P2P_REJOIN_BACKOFF_MAX_MS; i++) {
+		ms *= 2;
+	}
+	return MIN(ms, (uint32_t)P2P_REJOIN_BACKOFF_MAX_MS);
+}
+
+/* Parse a decrypted Ack body (B1/B5): base (3 B, flags|rssi|snr) or
+ * time-extended (7 B, + big-endian Unix seconds when flags bit 1 is set).
+ * Pure -- exposed to tests/p2p_logic. Returns false on any other length. */
+P2P_TESTABLE bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out)
+{
+	if (body_len != P2P_ACK_BODY_BASE_LEN && body_len != P2P_ACK_BODY_MAX_LEN) {
+		return false;
+	}
+
+	out->flags = body[0];
+	out->rssi = (int8_t)body[1];
+	out->snr = (int8_t)body[2];
+	out->time_present =
+		(body_len == P2P_ACK_BODY_MAX_LEN) && ((out->flags & P2P_ACK_FLAG_TIME) != 0);
+	out->unix_time = out->time_present ? sys_get_be32(&body[3]) : 0;
+	return true;
+}
+
+/* Duty-cycle budget (ms) still needed before a `wire_len`-byte frame can be
+ * sent at the current SF -- 0 if it can go now. */
+static int64_t duty_wait_ms_for(size_t wire_len)
+{
+	return p2p_duty_wait_ms(&m_duty, k_uptime_get(), frame_toa_ms((uint8_t)wire_len));
+}
+
+/* Charge `air_ms` of just-transmitted air-time against the budget. */
+static void duty_charge(uint32_t air_ms)
+{
+	p2p_duty_charge(&m_duty, k_uptime_get(), air_ms);
+}
+
+/* Start a JOINING episode and schedule the first JoinRequest. `self_healing`
+ * selects the retry policy in join_work_handler(): a boot/shell join is capped
+ * at the 120 s boot window with tight jitter (§5.2); a self-heal runs with
+ * exponential backoff and no window cap (§7). Shared by app_p2p_start(),
+ * app_p2p_rejoin() (shell), and the self-heal trigger below. */
+static void start_join_episode(bool self_healing)
+{
+	m_self_healing = self_healing;
+	m_rejoin_attempt = 0;
+	m_consec_uplink_fail = 0;
+	m_link_state = P2P_LINK_JOINING;
+	m_join_started_at = k_uptime_get();
+	k_work_schedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
+}
+
+/* A confirmed-uplink cycle completed successfully (Ack received) -- clear the
+ * self-healing failure streak. */
+static void note_uplink_acked(void)
+{
+	m_consec_uplink_fail = 0;
+}
+
+/* A confirmed-uplink cycle failed completely (all retries exhausted, no Ack).
+ * After P2P_REJOIN_FAIL_THRESHOLD consecutive such failures an already-PAIRED
+ * node self-heals by re-joining (B3, §7). Only fires while PAIRED, so once a
+ * self-heal is under way further give-ups don't re-trigger it. */
+static void note_uplink_cycle_failed(void)
+{
+	if (m_link_state != P2P_LINK_PAIRED) {
+		return; /* already re-joining (or never paired) */
+	}
+	if (++m_consec_uplink_fail < P2P_REJOIN_FAIL_THRESHOLD) {
+		return;
+	}
+	if (!app_key_is_set()) {
+		/* Can't re-join under an all-zero app_key (§4); stay put and keep
+		 * counting so a later re-provision + success resets the streak. */
+		LOG_ERR("P2P self-heal refused: lrw_appkey is all-zero (unprovisioned)");
+		return;
+	}
+	LOG_WRN("P2P: %u consecutive failed uplinks -- self-healing re-join (§7)",
+		m_consec_uplink_fail);
+	start_join_episode(true);
 }
 
 /* Build header+encrypt one frame into `frame` (>= P2P_HDR_LEN + body_len +
- * P2P_TAG_LEN bytes). Pure -- no radio/queue/counter side effects -- shared
- * by the real TX path (tx_frame_at) and the `ats radio compose` dry-run
- * (debug_compose_work_handler). */
-static int build_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t counter,
-		       uint8_t *frame)
+ * P2P_TAG_LEN bytes) under an explicit net_id/dev_addr/session_key. Pure --
+ * no radio/queue/counter side effects. Exposed to tests/p2p_logic; the
+ * firmware calls it through build_frame() with the live pairing state. */
+P2P_TESTABLE int build_frame_keyed(uint32_t net_id, uint16_t dev_addr,
+				   const uint8_t session_key[P2P_KEY_LEN], uint8_t frame_type,
+				   const uint8_t *body, size_t body_len, uint32_t counter,
+				   uint8_t *frame)
 {
-	sys_put_be32(m_net_id, &frame[0]);
-	sys_put_be16(m_dev_addr, &frame[4]);
+	sys_put_be32(net_id, &frame[0]);
+	sys_put_be16(dev_addr, &frame[4]);
 	frame[6] = frame_type;
 	sys_put_be32(counter, &frame[7]);
 
 	uint8_t nonce[P2P_NONCE_LEN];
 
-	build_nonce(nonce, counter, m_dev_addr, frame_type, P2P_DIR_TX);
+	build_nonce(nonce, counter, dev_addr, frame_type, P2P_DIR_TX);
 
-	int ret = app_ccm_encrypt_and_tag(m_session_key, nonce, P2P_NONCE_LEN, /* AAD */ frame,
-					  P2P_HDR_LEN, body, body_len, &frame[P2P_HDR_LEN],
-					  &frame[P2P_HDR_LEN + body_len], P2P_TAG_LEN);
+	return app_ccm_encrypt_and_tag(session_key, nonce, P2P_NONCE_LEN, /* AAD */ frame,
+				       P2P_HDR_LEN, body, body_len, &frame[P2P_HDR_LEN],
+				       &frame[P2P_HDR_LEN + body_len], P2P_TAG_LEN);
+}
+
+/* Build one frame with the live pairing state (m_net_id/m_dev_addr/
+ * m_session_key). Shared by the real TX path (tx_frame_at) and the
+ * `ats radio compose` dry-run (debug_compose_work_handler). */
+static int build_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t counter,
+		       uint8_t *frame)
+{
+	int ret = build_frame_keyed(m_net_id, m_dev_addr, m_session_key, frame_type, body, body_len,
+				    counter, frame);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_ccm_encrypt_and_tag", ret);
 	}
@@ -748,9 +1016,9 @@ static int build_frame(uint8_t frame_type, const uint8_t *body, size_t body_len,
  * byte-identical frame under the SAME counter: CCM under a fixed (key,
  * nonce, plaintext) is deterministic, so reusing the counter alone
  * reproduces the exact same ciphertext, no cached buffer needed). Caller
- * must have already checked !duty_cycle_blocked(). Returns 0 or errno; on
- * success reports the send-completion time via `tx_end_ms` (uptime ms, for
- * the caller's RX1/Ack wait) and charges the duty-cycle budget. */
+ * must have already checked the duty-cycle budget (duty_wait_ms_for). Returns
+ * 0 or errno; on success reports the send-completion time via `tx_end_ms`
+ * (uptime ms, for the caller's RX1/Ack wait) and charges the duty budget. */
 static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t counter,
 		       int64_t *tx_end_ms)
 {
@@ -789,8 +1057,8 @@ static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len,
 	int64_t end = k_uptime_get();
 	uint32_t air = frame_toa_ms((uint8_t)wire_len);
 
-	/* Charge the air-time against the 1% budget. */
-	m_dc_blocked_until = end + (int64_t)air * (1000 / P2P_DUTY_CYCLE_PERMILLE - 1);
+	/* Charge the just-sent air-time against the 1% budget. */
+	duty_charge(air);
 
 	LOG_INF("TX type %u, %zu B (counter %u, %u ms air)", frame_type, wire_len, counter, air);
 
@@ -804,13 +1072,21 @@ static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len,
 static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t *counter_out,
 		    int64_t *tx_end_ms)
 {
-	if (duty_cycle_blocked()) {
-		LOG_WRN("TX duty-cycle blocked for %lld ms", m_dc_blocked_until - k_uptime_get());
+	int64_t wait = duty_wait_ms_for(P2P_HDR_LEN + body_len + P2P_TAG_LEN);
+
+	if (wait > 0) {
+		LOG_WRN("TX duty-cycle blocked for %lld ms", wait);
 		return -EAGAIN;
 	}
 
-	uint32_t counter = fcnt_next();
-	int ret = tx_frame_at(frame_type, body, body_len, counter, tx_end_ms);
+	uint32_t counter;
+	int ret = fcnt_next(&counter);
+
+	if (ret) {
+		return ret; /* fail-closed: no durably-reserved counter available */
+	}
+
+	ret = tx_frame_at(frame_type, body, body_len, counter, tx_end_ms);
 
 	if (ret == 0) {
 		*counter_out = counter;
@@ -818,12 +1094,49 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, ui
 	return ret;
 }
 
-/* Wait for and validate an Ack (0xFA) for `counter` in the RX1 window after
- * `tx_end_ms` (doc/p2p.md §6): header must match (net_id/dev_addr/frame_type/
- * counter echo), then AES-CCM decrypt under session_key, direction=RX (it is
- * a downlink). The 1-byte flags body's bit 0 (downlink pending) is read and
- * logged only -- 0x56 dispatch stays out of scope, same decision as §5.3.
- * Returns true iff a valid, matching Ack was received. */
+/* B4: dispatch a received 0x56 COMMAND (already decrypted into `body`) through
+ * the transport-generic command handler and queue the 0x55 RESPONSE for the
+ * next uplink. P2P reuses the LoRaWAN over-the-air writability gating --
+ * APP_CMD_TRANSPORT_P2P shares the M-3 no_write_lrw field gate (configen), and
+ * the command-level allow-lists reject P2P for every LRW/NFC/vendor-only
+ * command (positive `tp == ...` checks), so only the unrestricted management
+ * commands (get/set_param, get/get_config, settings_save, reboot) run here.
+ * A deferred command action (settings_save/reboot/reset) is logged but NOT yet
+ * executed -- the reboot-after-response deferral is a B4 follow-up, paired with
+ * the central's structured-command phase-2 (proximos-v2 MR!30 S2). */
+static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
+{
+	uint8_t resp[P2P_TX_BUF_SIZE];
+	size_t resp_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	int ret = app_cmd_handle(APP_CMD_TRANSPORT_P2P, body, body_len, resp, sizeof(resp),
+				 &resp_len, &action);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_cmd_handle(p2p)", ret);
+		return;
+	}
+
+	if (resp_len > 0) {
+		(void)app_p2p_queue_response(0, resp, resp_len);
+	}
+
+	if (action != APP_CMD_ACTION_NONE) {
+		LOG_WRN("P2P command action %d not executed yet (B4 follow-up)", (int)action);
+	}
+}
+
+/* Wait for and validate the RX1 downlink for `counter` after `tx_end_ms`
+ * (doc/p2p.md §6): header must match (net_id/dev_addr/counter echo), then
+ * AES-CCM decrypt under session_key, direction=RX. Two frame types are
+ * accepted, both confirming the uplink got through:
+ *  - Ack (0xFA): body flags(1) | rssi_i8 | snr_i8 (B1) + optional 4-byte Unix
+ *    time tail when flags bit 1 is set (B5); length derived from the frame
+ *    length (self-describing). The pending flag (bit 0) sizes the NEXT uplink's
+ *    window for a command (B4).
+ *  - Command (0x56, B4): only when a pending downlink was announced -- decrypt,
+ *    dispatch (dispatch_p2p_command), and treat as an implicit Ack.
+ * Returns true iff a valid, matching downlink was received. */
 static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 {
 #if defined(CONFIG_SHELL)
@@ -838,13 +1151,19 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	uint8_t buf[P2P_FRAME_MAX];
 	int16_t rssi;
 	int8_t snr;
-	size_t want = P2P_HDR_LEN + P2P_ACK_BODY_LEN + P2P_TAG_LEN;
+	/* Size the window for the largest downlink the central may send. Normally
+	 * that is the time-extended Ack; once a downlink has been announced (B4),
+	 * a full-size 0x56 command may arrive INSTEAD, so size for a max frame --
+	 * that longer RX-on is the measurable power cost of a pending downlink
+	 * (doc/p2p.md §6), which is why the central only sets pending deliberately. */
+	uint8_t want_max = m_downlink_pending
+				   ? P2P_FRAME_MAX
+				   : (uint8_t)(P2P_HDR_LEN + P2P_ACK_BODY_MAX_LEN + P2P_TAG_LEN);
 
-	int len = p2p_rx_window(tx_end_ms, m_rx1_delay_s, (uint8_t)want, buf, sizeof(buf), &rssi,
-				&snr);
+	int len = p2p_rx_window(tx_end_ms, m_rx1_delay_s, want_max, buf, sizeof(buf), &rssi, &snr);
 
-	if (len < 0 || (size_t)len != want) {
-		return false;
+	if (len < P2P_HDR_LEN + P2P_TAG_LEN) {
+		return false; /* timeout or too short to hold a header + tag */
 	}
 
 	uint32_t net_id_hdr = sys_get_be32(&buf[0]);
@@ -852,8 +1171,40 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	uint8_t frame_type = buf[6];
 	uint32_t ctr = sys_get_be32(&buf[7]);
 
-	if (net_id_hdr != m_net_id || dev_addr_hdr != m_dev_addr ||
-	    frame_type != APP_P2P_FRAME_ACK || ctr != counter) {
+	if (net_id_hdr != m_net_id || dev_addr_hdr != m_dev_addr || ctr != counter) {
+		return false;
+	}
+
+	size_t body_len = (size_t)len - P2P_HDR_LEN - P2P_TAG_LEN;
+
+	/* --- B4: a 0x56 COMMAND takes this window instead of the Ack --- */
+	if (frame_type == APP_P2P_FRAME_COMMAND) {
+		uint8_t nonce[P2P_NONCE_LEN];
+		uint8_t body[P2P_MAX_BODY];
+
+		build_nonce(nonce, ctr, m_dev_addr, frame_type, P2P_DIR_RX);
+
+		int ret = app_ccm_auth_decrypt(m_session_key, nonce, P2P_NONCE_LEN, buf,
+					       P2P_HDR_LEN, &buf[P2P_HDR_LEN], body_len,
+					       &buf[P2P_HDR_LEN + body_len], P2P_TAG_LEN, body);
+		if (ret) {
+			LOG_WRN("Command auth failed (counter %u)", counter);
+			return false;
+		}
+
+		LOG_INF("Command received (counter %u, %zu B)", counter, body_len);
+		dispatch_p2p_command(body, body_len);
+
+		/* The command replaced this uplink's Ack; receiving it confirms the
+		 * uplink reached the central. The 0x55 response is now queued; the
+		 * next Ack re-announces any further pending downlink. */
+		m_downlink_pending = false;
+		return true;
+	}
+
+	/* --- Ack (0xFA): B1 rssi/snr + B5 time tail --- */
+	if (frame_type != APP_P2P_FRAME_ACK ||
+	    (body_len != P2P_ACK_BODY_BASE_LEN && body_len != P2P_ACK_BODY_MAX_LEN)) {
 		return false;
 	}
 
@@ -861,36 +1212,53 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 
 	build_nonce(nonce, ctr, m_dev_addr, frame_type, P2P_DIR_RX);
 
-	uint8_t flags;
+	uint8_t body[P2P_ACK_BODY_MAX_LEN];
 	int ret = app_ccm_auth_decrypt(m_session_key, nonce, P2P_NONCE_LEN, buf, P2P_HDR_LEN,
-				       &buf[P2P_HDR_LEN], P2P_ACK_BODY_LEN,
-				       &buf[P2P_HDR_LEN + P2P_ACK_BODY_LEN], P2P_TAG_LEN, &flags);
+				       &buf[P2P_HDR_LEN], body_len, &buf[P2P_HDR_LEN + body_len],
+				       P2P_TAG_LEN, body);
 	if (ret) {
 		LOG_WRN("Ack auth failed (counter %u)", counter);
 		return false;
 	}
 
-	LOG_INF("Ack received (counter %u)%s", counter,
-		(flags & 0x01) ? " [downlink pending]" : "");
+	struct p2p_ack_info ack;
+
+	if (!p2p_parse_ack_body(body, body_len, &ack)) {
+		return false;
+	}
+
+	/* B1: the RSSI/SNR the central measured on this uplink. */
+	m_last_ack_rssi = ack.rssi;
+	m_last_ack_snr = ack.snr;
+	m_last_ack_valid = true;
+
+	/* B4: remember whether to size the NEXT uplink's window for a command. */
+	m_downlink_pending = (ack.flags & P2P_ACK_FLAG_PENDING) != 0;
+
+	/* B5: apply the wall-clock time tail if present. */
+	if (ack.time_present) {
+		(void)app_clock_set_unix(ack.unix_time);
+	}
+
+	LOG_INF("Ack (counter %u) rssi=%d snr=%d%s%s", counter, m_last_ack_rssi, m_last_ack_snr,
+		m_downlink_pending ? " [pending]" : "", ack.time_present ? " [time]" : "");
 	return true;
 }
 
 /* (Re)schedule m_ack_retry_work for whenever the duty cycle clears (plus
  * jitter), if the queue has anything pending -- a no-op otherwise. Called
  * after every enqueue/dequeue so the timer always reflects the current
- * queue state and duty-cycle estimate. */
+ * queue state and duty-cycle estimate. The wait is sized for the frame at the
+ * head of the queue (peeked, not dequeued). */
 static void reschedule_ack_retry_work(void)
 {
-	if (k_msgq_num_used_get(&m_ack_retry_msgq) == 0) {
-		return;
+	struct p2p_ack_retry_state head;
+
+	if (k_msgq_peek(&m_ack_retry_msgq, &head) != 0) {
+		return; /* queue empty */
 	}
 
-	int64_t wait_ms = m_dc_blocked_until - k_uptime_get();
-
-	if (wait_ms < 0) {
-		wait_ms = 0;
-	}
-
+	int64_t wait_ms = duty_wait_ms_for(P2P_HDR_LEN + head.body_len + P2P_TAG_LEN);
 	uint32_t jitter = sys_rand32_get() % P2P_ACK_RETRY_JITTER_MS;
 
 	k_work_reschedule_for_queue(&m_work_q, &m_ack_retry_work, K_MSEC(wait_ms + jitter));
@@ -930,7 +1298,7 @@ static void ack_retry_work_handler(struct k_work *work)
 		return; /* queue empty */
 	}
 
-	if (duty_cycle_blocked()) {
+	if (duty_wait_ms_for(P2P_HDR_LEN + st.body_len + P2P_TAG_LEN) > 0) {
 		reschedule_ack_retry_work();
 		return;
 	}
@@ -948,7 +1316,9 @@ static void ack_retry_work_handler(struct k_work *work)
 		LOG_INF("Uplink retry %d/%d sent (counter %u)", st.attempt + 1, P2P_ACK_MAX_RETRIES,
 			st.counter);
 
-		if (!recv_ack(st.counter, tx_end)) {
+		if (recv_ack(st.counter, tx_end)) {
+			note_uplink_acked();
+		} else {
 			if (st.attempt + 1 < P2P_ACK_MAX_RETRIES) {
 				st.attempt++;
 				/* Re-queue at the TAIL (not retried in place): with more
@@ -958,11 +1328,13 @@ static void ack_retry_work_handler(struct k_work *work)
 					LOG_WRN("Ack retry queue full re-queueing counter %u; "
 						"giving up",
 						st.counter);
+					note_uplink_cycle_failed();
 				}
 			} else {
 				LOG_WRN("Uplink counter %u unacked after %d retries; giving "
 					"up",
 					st.counter, P2P_ACK_MAX_RETRIES);
+				note_uplink_cycle_failed();
 			}
 		}
 	}
@@ -991,7 +1363,9 @@ static int send_confirmed(uint8_t frame_type, const uint8_t *body, size_t body_l
 		return ret;
 	}
 
-	if (!recv_ack(counter, tx_end)) {
+	if (recv_ack(counter, tx_end)) {
+		note_uplink_acked();
+	} else {
 		schedule_ack_retry(frame_type, body, body_len, counter, 0);
 	}
 
@@ -1056,11 +1430,8 @@ static void tx_work_handler(struct k_work *work)
 			m_tx_deferred = msg;
 			m_tx_deferred_valid = true;
 
-			int64_t delay_ms = m_dc_blocked_until - k_uptime_get();
+			int64_t delay_ms = duty_wait_ms_for(P2P_HDR_LEN + msg.len + P2P_TAG_LEN);
 
-			if (delay_ms < 0) {
-				delay_ms = 0;
-			}
 			k_work_reschedule_for_queue(&m_work_q, dwork,
 						    K_MSEC(delay_ms + P2P_TX_RETRY_MARGIN_MS));
 			return;
@@ -1189,6 +1560,16 @@ int app_p2p_listen(bool enable)
 
 static void mark_ready(void)
 {
+	/* Paired: end any self-healing episode and clear the failure streak. */
+	m_self_healing = false;
+	m_rejoin_attempt = 0;
+	m_consec_uplink_fail = 0;
+
+	/* Fresh session: last Ack's link quality and any pending-downlink hint
+	 * from the old session no longer apply. */
+	m_last_ack_valid = false;
+	m_downlink_pending = false;
+
 	m_started = true;
 	if (m_ready_cb) {
 		m_ready_cb();
@@ -1209,9 +1590,7 @@ static void mark_ready(void)
  * errno. */
 static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 {
-	int64_t now = k_uptime_get();
-
-	if (now < m_dc_blocked_until) {
+	if (duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN) > 0) {
 		return -EAGAIN;
 	}
 
@@ -1257,7 +1636,7 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 	int64_t end = k_uptime_get();
 	uint32_t air = frame_toa_ms(sizeof(frame));
 
-	m_dc_blocked_until = end + (int64_t)air * (1000 / P2P_DUTY_CYCLE_PERMILLE - 1);
+	duty_charge(air);
 
 	LOG_INF("JoinRequest sent (dev_nonce %u, %u ms air)", nonce_val, air);
 
@@ -1346,7 +1725,10 @@ static void join_work_handler(struct k_work *work)
 		return; /* paired (or reverted) while a retry was already in flight */
 	}
 
-	if (k_uptime_get() - m_join_started_at >= P2P_JOIN_BOOT_WINDOW_MS) {
+	/* A never-paired boot/shell join gives up after the 120 s boot window
+	 * (§5.2); a self-healing re-join is exempt (§7) -- a paired device that
+	 * lost its session keeps trying, with exponential backoff, for its life. */
+	if (!m_self_healing && k_uptime_get() - m_join_started_at >= P2P_JOIN_BOOT_WINDOW_MS) {
 		LOG_WRN("P2P join: boot window (%d s) expired without a JoinAccept; giving up "
 			"until next boot/trigger",
 			P2P_JOIN_BOOT_WINDOW_MS / 1000);
@@ -1369,15 +1751,26 @@ static void join_work_handler(struct k_work *work)
 		LOG_ERR_CALL_FAILED_INT("send_join_request", ret);
 	}
 
-	int64_t wait_ms = (ret == -EAGAIN) ? (m_dc_blocked_until - k_uptime_get()) : 0;
+	int64_t wait_ms;
 
-	if (wait_ms < 0) {
-		wait_ms = 0;
+	if (m_self_healing) {
+		/* Exponential backoff between rounds, +/-25% jitter. Duty-cycle-blocked
+		 * (-EAGAIN) rounds also wait the backoff -- at 60 s+ it always exceeds
+		 * the join frame's duty wait anyway. */
+		uint32_t base = p2p_rejoin_backoff_ms(m_rejoin_attempt);
+
+		if (m_rejoin_attempt < UINT8_MAX) {
+			m_rejoin_attempt++;
+		}
+		wait_ms = (int64_t)base - base / 4 + (sys_rand32_get() % (base / 2 + 1));
+	} else {
+		wait_ms = (ret == -EAGAIN) ? duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN +
+							      P2P_JOIN_TAG_LEN)
+					   : 0;
+		wait_ms += sys_rand32_get() % P2P_JOIN_RETRY_JITTER_MS;
 	}
 
-	uint32_t jitter = sys_rand32_get() % P2P_JOIN_RETRY_JITTER_MS;
-
-	k_work_reschedule_for_queue(&m_work_q, dwork, K_MSEC(wait_ms + jitter));
+	k_work_reschedule_for_queue(&m_work_q, dwork, K_MSEC(wait_ms));
 }
 
 /* ======================================================================== */
@@ -1404,6 +1797,8 @@ int app_p2p_init(void)
 		LOG_ERR("LoRa device not ready");
 		return -ENODEV;
 	}
+
+	p2p_duty_init(&m_duty, k_uptime_get());
 
 	int ret = settings_register(&m_fcnt_sh);
 
@@ -1490,9 +1885,7 @@ void app_p2p_start(void)
 	/* Unpaired: kick off the boot-window join handshake (#118 phase 2,
 	 * §5.2). app_p2p_is_ready() only goes true once JoinAccept lands
 	 * (mark_ready(), called from join_work_handler()). */
-	m_link_state = P2P_LINK_JOINING;
-	m_join_started_at = k_uptime_get();
-	k_work_schedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
+	start_join_episode(false);
 }
 
 bool app_p2p_is_ready(void)
@@ -1567,6 +1960,9 @@ void app_p2p_get_info(struct app_p2p_info *info)
 	info->fcnt = m_fcnt;
 	info->dev_nonce = m_dev_nonce;
 	info->ack_retry_pending = k_msgq_num_used_get(&m_ack_retry_msgq);
+	info->last_ack_rssi = m_last_ack_rssi;
+	info->last_ack_snr = m_last_ack_snr;
+	info->last_ack_valid = m_last_ack_valid;
 	info->app_key_set = app_key_is_set();
 }
 
@@ -1586,9 +1982,8 @@ void app_p2p_rejoin(void)
 		return;
 	}
 
-	m_link_state = P2P_LINK_JOINING;
-	m_join_started_at = k_uptime_get();
-	k_work_schedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
+	/* Explicit operator-forced fresh join: boot-window policy, not self-heal. */
+	start_join_episode(false);
 }
 
 int app_p2p_unjoin(void)

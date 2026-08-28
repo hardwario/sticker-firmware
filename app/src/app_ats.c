@@ -755,6 +755,12 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 		shell_print(shell, "fcnt: %u", info.fcnt);
 		shell_print(shell, "dev_nonce: %u", info.dev_nonce);
 		shell_print(shell, "ack retry pending: %u", info.ack_retry_pending);
+		if (info.last_ack_valid) {
+			shell_print(shell, "last ack rssi: %d dBm", info.last_ack_rssi);
+			shell_print(shell, "last ack snr: %d dB", info.last_ack_snr);
+		} else {
+			shell_print(shell, "last ack rssi/snr: n/a");
+		}
 		shell_print(shell, "max payload: %u B", app_radio_get_max_payload());
 		return 0;
 	}
