@@ -90,9 +90,6 @@ void app_history_clear(void);
  * -ENOENT when idx >= count. */
 int app_history_get(size_t idx, struct app_history_record *out);
 
-/* Master enable (mirrors g_app_config.history_enable at boot). */
-bool app_history_is_enabled(void);
-
 /* True if the history backend is ready. Flash backend: the partition mounted OK
  * (false = mount failed, history degraded, #88 style). RAM backend: always true. */
 bool app_history_is_ready(void);
@@ -131,7 +128,6 @@ size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t star
 uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t cap);
 
 /* Descriptor helpers for the shell. */
-const char *app_history_sensor_name(enum app_history_sensor s);
 enum app_history_sensor app_history_sensor_by_name(const char *name);
 bool app_history_sensor_available(enum app_history_sensor s);
 uint32_t app_history_available_mask(void);

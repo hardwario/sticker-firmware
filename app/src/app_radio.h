@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 /* Radio facade (#118): one image links both the LoRaWAN stack (app_lrw) and
- * the raw-LoRa P2P stack (app_p2p, when CONFIG_APP_LORA_P2P=y). The active
+ * the raw-LoRa P2P stack (app_p2p, when CONFIG_RADIO_P2P=y). The active
  * one is chosen at boot from the `radio_mode` config parameter (off/lorawan/p2p)
  * and never changes at runtime (the SX126x radio is shared). The
  * radio-agnostic layers (app_report, app_compose, app_alarm, main) call

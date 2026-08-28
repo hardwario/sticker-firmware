@@ -703,9 +703,33 @@ static void lc_response_work_handler(struct k_work *work)
 	}
 }
 
+/* Bound on how long the post-command action defers to an undelivered Ack: the
+ * initial 8 s covers the successful-send RX windows, but a duty-cycle/MAC-busy
+ * lorawan_send() failure requeues the Ack with a FRAME_RETRY_SEC (15 s) backoff
+ * — longer than the deferral itself — so without waiting for the drain the
+ * reboot would drop the RAM-only queued Ack every time the first send attempt
+ * fails. Cap the extra wait so a permanently failing TX cannot postpone the
+ * commanded action forever. */
+#define POST_CMD_DRAIN_WAIT_SEC      8
+#define POST_CMD_DRAIN_MAX_DEFERRALS 6
+
+static uint8_t m_post_cmd_deferrals;
+
 static void post_cmd_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
+
+	if ((k_msgq_num_used_get(&m_response_msgq) > 0 ||
+	     k_work_delayable_is_pending(&m_tx_retry_work)) &&
+	    m_post_cmd_deferrals < POST_CMD_DRAIN_MAX_DEFERRALS) {
+		m_post_cmd_deferrals++;
+		LOG_WRN("Post-command action %d deferred: Ack still undelivered (%u/%u)",
+			(int)m_post_cmd_action, (unsigned)m_post_cmd_deferrals,
+			(unsigned)POST_CMD_DRAIN_MAX_DEFERRALS);
+		k_work_schedule_for_queue(&m_work_q, &m_post_cmd_work,
+					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
+		return;
+	}
 
 	switch (m_post_cmd_action) {
 	case APP_CMD_ACTION_SETTINGS_SAVE:
@@ -745,7 +769,7 @@ static void post_cmd_work_handler(struct k_work *work)
 	case APP_CMD_ACTION_LRW_RESET:
 		/* Wipe the LoRaWAN NVM (frame counters + DevNonce + session), then cold
 		 * reboot so the MAC re-initialises from a clean NVM (#109). Same path as
-		 * `ats radio reset`. The Ack uplink has already left (deferred 8s). */
+		 * `ats radio reset`. The Ack uplink has already left (drain-waited above). */
 		LOG_INF("Command: LoRaWAN reset (NVM wipe) + reboot");
 		app_lrw_reset_nvm();
 		sys_reboot(SYS_REBOOT_COLD);
@@ -803,11 +827,17 @@ static void dl_request_work_handler(struct k_work *work)
 			}
 		}
 
-		/* Defer reboot/save so the Ack uplink + its RX window finish first. */
+		/* Defer reboot/save so the Ack uplink + its RX window finish first.
+		 * post_cmd_work_handler() extends the wait (bounded) while the Ack is
+		 * still queued/retrying, so a duty-cycle backoff cannot silently drop
+		 * it on reboot. */
 		if (action != APP_CMD_ACTION_NONE) {
 			m_post_cmd_action = action;
-			k_work_schedule_for_queue(&m_work_q, &m_post_cmd_work, K_SECONDS(8));
-			LOG_INF("Post-command action %d scheduled in 8s", (int)action);
+			m_post_cmd_deferrals = 0;
+			k_work_schedule_for_queue(&m_work_q, &m_post_cmd_work,
+						  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
+			LOG_INF("Post-command action %d scheduled in %ds", (int)action,
+				POST_CMD_DRAIN_WAIT_SEC);
 		}
 	}
 

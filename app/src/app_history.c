@@ -322,21 +322,32 @@ static int page_read_stream(uint16_t phys, size_t off, uint8_t *dst, size_t len)
 	return 0;
 }
 
-/* Flush any staged bytes as one padded double word (page finalize). */
-static void flush_stage_pad(void)
+/* Flush any staged bytes as one padded double word (page finalize). #384: must
+ * propagate a write failure — the caller (advance_page()) is documented to leave
+ * all in-RAM ring state untouched on error so the operation can be retried; if
+ * this write silently "succeeded" from the caller's point of view, m_head_dw/
+ * m_stage_len would advance past a page whose last bytes were never actually
+ * committed to flash, and a later read would return corrupted/uninitialized
+ * data for those bytes (same class of bug backend_append() already guards
+ * against, C1). */
+static int flush_stage_pad(void)
 {
 	if (m_stage_len == 0) {
-		return;
+		return 0;
 	}
 	uint8_t dw[DW_SIZE];
 	memset(dw, 0, DW_DATA);
 	memcpy(dw, m_stage, m_stage_len);
 	dw[DW_DATA] = FRAME_BYTE;
 	uint16_t phys = m_live[m_nlive - 1].phys;
-	(void)flash_area_write(m_fa, page_off(phys) + HIST_HDR_SIZE + (off_t)m_head_dw * DW_SIZE,
-			       dw, DW_SIZE);
+	int ret = flash_area_write(
+		m_fa, page_off(phys) + HIST_HDR_SIZE + (off_t)m_head_dw * DW_SIZE, dw, DW_SIZE);
+	if (ret) {
+		return ret;
+	}
 	m_head_dw++;
 	m_stage_len = 0;
+	return 0;
 }
 
 /* Roll over to a fresh head page, evicting the tail page if the ring wraps onto
@@ -356,9 +367,15 @@ static int advance_page(uint32_t *evicted)
 	uint32_t new_base =
 		m_base_time + (m_nlive ? (m_abs_ord - m_live[0].first_ord) : 0) * m_interval;
 
-	/* Durably close the current head so its committed records survive. */
+	/* Durably close the current head so its committed records survive. #384: a
+	 * failure here must abort the rollover (return early, no in-RAM state
+	 * mutated yet) rather than proceeding to claim a new head page while the
+	 * old one's tail bytes were never actually flushed. */
 	if (m_nlive > 0) {
-		flush_stage_pad();
+		int ret = flush_stage_pad();
+		if (ret) {
+			return ret;
+		}
 	}
 
 	uint16_t next = (uint16_t)((m_last_phys + 1) % HIST_NPAGES);
@@ -575,6 +592,8 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
 
 	/* Stream `len` bytes into the head page, flushing full double words. */
 	uint16_t phys = m_live[m_nlive - 1].phys;
+	uint16_t start_head_dw = m_head_dw;
+	uint8_t start_stage_len = m_stage_len;
 	for (size_t i = 0; i < len; i++) {
 		m_stage[m_stage_len++] = rec[i];
 		if (m_stage_len == DW_DATA) {
@@ -589,6 +608,19 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
 			 * m_stage[] on the following capture (C1). */
 			m_stage_len = 0;
 			if (ret) {
+				/* A failure past the record's first byte leaves a gap in the
+				 * page's byte stream: this record's already-flushed double
+				 * words (m_head_dw advanced past them while m_abs_ord never
+				 * counted the record), and/or the previous record's staged
+				 * tail bytes just dropped above. Every later record in this
+				 * page would then read back shifted/garbage. NOR flash cannot
+				 * be rewound, so contain the damage: close the page, forcing
+				 * the next append onto a fresh one whose stream starts
+				 * aligned again. A failure with nothing flushed and an empty
+				 * pre-record stage leaves no gap -- keep the page open. */
+				if (m_head_dw != start_head_dw || start_stage_len != 0) {
+					m_head_full = true;
+				}
 				return ret;
 			}
 			m_head_dw++;
@@ -1145,11 +1177,6 @@ uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t c
 	return (uint16_t)((matched + per_frame - 1) / per_frame);
 }
 
-bool app_history_is_enabled(void)
-{
-	return m_enabled;
-}
-
 void app_history_set_enabled(bool enable)
 {
 	m_enabled = enable;
@@ -1187,14 +1214,6 @@ void app_history_set_mask(uint32_t mask)
 	recompute_sizing();
 	backend_reset_logical();
 	k_mutex_unlock(&m_lock);
-}
-
-const char *app_history_sensor_name(enum app_history_sensor s)
-{
-	if (s < 0 || s >= APP_HISTORY_SENSOR_COUNT) {
-		return "?";
-	}
-	return m_desc[s].name;
 }
 
 enum app_history_sensor app_history_sensor_by_name(const char *name)

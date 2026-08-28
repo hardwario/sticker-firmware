@@ -90,6 +90,7 @@ static void sensor_timer_handler(struct k_timer *timer)
 
 static K_TIMER_DEFINE(m_sensor_timer, sensor_timer_handler, NULL);
 
+#if defined(CONFIG_APP_PYQ1648)
 static void pyq1648_event_handler(void *user_data)
 {
 	LOG_INF("Motion detected");
@@ -100,6 +101,7 @@ static void pyq1648_event_handler(void *user_data)
 
 	app_alarm_event(APP_ALARM_SRC_PIR, true);
 }
+#endif /* defined(CONFIG_APP_PYQ1648) */
 
 #if defined(CONFIG_LIS2DH)
 /* Event-classification thresholds on total acceleration magnitude (m/s^2).
@@ -187,6 +189,7 @@ int app_sensor_init(void)
 	int ret;
 	int res = 0;
 
+#if defined(CONFIG_OPT3001)
 	if (g_app_config.cap_light_sensor) {
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(opt3001));
 
@@ -196,6 +199,7 @@ int app_sensor_init(void)
 			res = res ? res : ret;
 		}
 	}
+#endif /* defined(CONFIG_OPT3001) */
 
 	if (g_app_config.cap_barometer) {
 		const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(mpl3115a2));
@@ -245,6 +249,7 @@ int app_sensor_init(void)
 	}
 
 	if (g_app_config.cap_pir_detector) {
+#if defined(CONFIG_APP_PYQ1648)
 		ret = app_pyq1648_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_pyq1648_init", ret);
@@ -252,12 +257,19 @@ int app_sensor_init(void)
 		} else {
 			app_pyq1648_set_callback(pyq1648_event_handler, NULL);
 		}
+#else
+		/* #395: don't leave a configured PIR silently dead on a lean bench
+		 * build — no motion events would look like a HW fault otherwise. */
+		LOG_WRN("cap_pir_detector set but PIR not built in (CONFIG_APP_PYQ1648=n)");
+#endif /* defined(CONFIG_APP_PYQ1648) */
 	} else if (g_app_config.cap_buzzer) {
+#if defined(CONFIG_APP_BUZZER)
 		ret = app_buzzer_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_buzzer_init", ret);
 			res = res ? res : ret;
 		}
+#endif /* defined(CONFIG_APP_BUZZER) */
 	}
 
 #if defined(CONFIG_LIS2DH)
@@ -296,6 +308,7 @@ int app_sensor_init(void)
 	}
 #endif /* defined(CONFIG_LIS2DH) */
 
+#if defined(CONFIG_W1)
 	if (g_app_config.cap_w1_sensors) {
 		/* The DS2484 1-Wire master's device reset spans several back-to-back I2C
 		 * transfers. i2c1 runtime PM would suspend the bus between them (gate the
@@ -356,6 +369,7 @@ int app_sensor_init(void)
 			res = res ? res : ret;
 		}
 
+#if defined(CONFIG_DS28E17)
 		ret = device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_0)));
 		if (ret) {
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "machine_probe_0", ret);
@@ -367,7 +381,9 @@ int app_sensor_init(void)
 			LOG_ERR_CALL_FAILED_CTX_INT("device_init", "machine_probe_1", ret);
 			res = res ? res : ret;
 		}
+#endif /* defined(CONFIG_DS28E17) */
 	}
+#endif /* defined(CONFIG_W1) */
 
 	/* Boot-time scan + slot rebind runs only when a slot is already taught: an
 	 * untaught unit has nowhere to bind results (the no-data watchdog keys on
@@ -375,6 +391,7 @@ int app_sensor_init(void)
 	 * goes through on-demand `w1 scan` (the sensor devices above are ready). Tilt
 	 * alert is armed per probe inside app_machine_probe_scan() (scan_callback), so
 	 * it survives on-demand re-scans/enrolls too. */
+#if defined(CONFIG_W1)
 	bool w1_taught = g_app_config.cap_w1_sensors && app_w1_slots_any_taught();
 
 	if (w1_taught) {
@@ -384,16 +401,19 @@ int app_sensor_init(void)
 			res = res ? res : ret;
 		}
 
+#if defined(CONFIG_DS28E17)
 		ret = app_machine_probe_scan();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_machine_probe_scan", ret);
 			res = res ? res : ret;
 		}
+#endif /* defined(CONFIG_DS28E17) */
 
 		int present = app_w1_slots_rebind();
 
 		LOG_INF("1-Wire slots: %d sensor(s) bound", present);
 	}
+#endif /* defined(CONFIG_W1) */
 
 	k_work_queue_init(&m_sensor_work_q);
 
@@ -496,6 +516,7 @@ void app_sensor_sample(void)
 	}
 #endif /* defined(CONFIG_SHT4X) */
 
+#if defined(CONFIG_OPT3001)
 	if (g_app_config.cap_light_sensor) {
 		ret = app_opt3001_read(&illuminance);
 		i2c_tried++;
@@ -504,6 +525,7 @@ void app_sensor_sample(void)
 			LOG_ERR_CALL_FAILED_INT("app_opt3001_read", ret);
 		}
 	}
+#endif /* defined(CONFIG_OPT3001) */
 
 	if (g_app_config.cap_barometer) {
 		ret = app_mpl3115a2_read(&altitude, &pressure, NULL);
@@ -532,6 +554,7 @@ void app_sensor_sample(void)
 	 * dispatches on the slot type). Unbound / absent slots return present=false
 	 * with NaN readings, so a slot keeps a stable identity across reboots
 	 * regardless of bus enumeration order. */
+#if defined(CONFIG_W1)
 	if (g_app_config.cap_w1_sensors) {
 		for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
 			ret = app_w1_slots_read(s, &w1[s]);
@@ -548,6 +571,7 @@ void app_sensor_sample(void)
 			}
 		}
 	}
+#endif /* defined(CONFIG_W1) */
 
 	/* #340 M19: m_i2c_fail_streak is read/written by app_sensor_i2c_wedged()
 	 * (app_cmd.c, a different thread context) with no protection of its own;

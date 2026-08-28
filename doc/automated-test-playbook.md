@@ -419,11 +419,14 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 - **Cleanup:** `git status` must stay clean.
 
 ### AT-HOST-02 — native_sim ztest suites
-- **Steps:** `bash tests/run_native.sh` (iterates tests/alarm_eval, alarm_rules, ccm, cmd,
-  compose, history, history_flash, ndef, nfc_crypto on `native_sim/native/64`). `alarm_eval`
-  (#348) drives the real `app_alarm.c` dwell/confirm/hold state machine directly
-  (`app_alarm_event()`/`app_alarm_poll()`) with hall/sensor GPIO stubbed — `alarm_rules` only
-  covers the static rule-validation layer.
+- **Steps:** `bash tests/run_native.sh` (iterates tests/alarm_eval, alarm_rules, buzzer, ccm,
+  cmd, compose, history, history_flash, ndef, nfc_crypto, nfc_hw on `native_sim/native/64`).
+  `alarm_eval` (#348) drives the real `app_alarm.c` dwell/confirm/hold state machine directly
+  (`app_alarm_event()`/`app_alarm_poll()`) with hall/sensor GPIO stubbed, plus (#397) the
+  alarm-driven buzzer plumbing (`app_buzzer_play_repeating()` stubbed there) — `alarm_rules`
+  only covers the static rule-validation layer. `buzzer` (#397) drives the real
+  `app_buzzer.c` melody engine against a `gpio_emul`-backed fake GPIO: melody sequencing,
+  abort ordering, queue-replace policy, and `buzzer_play` id bounds.
 - **Expect:** every suite prints `PROJECT EXECUTION SUCCESSFUL`.
 - **Evidence:** per-suite pass/fail table.
 
@@ -1008,6 +1011,27 @@ still required before the next `alarm poll` will observe it as elapsed.
   unaffected; no crash on the next poll.
 - **Cleanup:** clear slot 15.
 
+### AT-ALM-09 — alarm-driven buzzer melody (D, SA; maps #397)
+- **Pre:** `cap-buzzer true` (buzzer HW variant fitted), `alarm-buzzer-mode normal`,
+  save/reboot (#154, config save reboots). One armed rule, e.g. AT-ALM-01's
+  onboard-temperature slot 0.
+- **Steps:** cross the threshold to activate the rule (same assist as AT-ALM-01); assist:
+  "listen for a repeating fast 5x-beep melody starting within a couple of seconds of the red
+  alarm LED"; wait > 30 s and assist-confirm it repeats; release the threshold to clear the
+  alarm; assist: "confirm the buzzer goes silent immediately, not fading out or finishing its
+  current repeat cycle". Mode sweep (spot-check): repeat the activation with
+  `alarm-buzzer-mode once` (single melody, no repeat) and `fast` (repeats every ~10 s).
+  New-alarm replay: with `normal` and the first alarm still active, activate a SECOND rule on
+  a different source — assist-confirm the melody replays right away (within the 3 s poll
+  cadence) instead of waiting out the 30 s repeat.
+- **Expect:** melody starts on each newly activated alarm, replays per the mode's interval
+  (`once` = never, `slow`/`normal`/`fast` = 120/30/10 s, `continuous` ≈ every 2.4 s) while
+  any alarm stays active, stops immediately once the last one clears. Negative case:
+  `alarm-buzzer-mode off` (or `cap-buzzer false`) → same rule activation produces the red
+  LED as normal but stays silent.
+- **Evidence:** operator confirmation of beep timing per mode + the negative (silent) case.
+- **Cleanup:** clear the rules; `alarm-buzzer-mode off` (factory default).
+
 ## 13. History (AT-HIS)
 
 Backend: raw-flash page ring, 32 KB @ 0x34000 (16 × 2 KB pages, shrunk from 64 KB via #302/PR#306),
@@ -1217,6 +1241,12 @@ cycle) to prove the device recovered. Run these LAST in a session.
 - **Steps:** enqueue 10 command downlinks at once on ChirpStack; run 10 uplink cycles.
 - **Expect:** exactly one consumed per RX window, in order, none lost/duplicated, queue
   drains fully.
+- **HW-verified (2026-08-17, SN 2162199999)**: enqueued 10 raw fPort-85 `SetParam` downlinks
+  (unencrypted, `interval_report` 70..79) via ChirpStack `Enqueue`, drained with repeated
+  `ats lrw check` + polling `config show`. Observed sequence was monotonically increasing
+  (70,71,72,74,76,77,77,79,79,79,79 — some intermediate values missed by 5s poll granularity, not
+  by the device), final value stable at **79** (the last item queued) and ChirpStack's
+  `GetQueue` afterward returned empty — full drain, in order, no duplicates in final state.
 
 ### AT-ADV-04 — oversized/boundary config values (D, A)
 - **Steps:** SetParam every int param at exact min/max (valid) and every bytes param at
@@ -1240,24 +1270,58 @@ cycle) to prove the device recovered. Run these LAST in a session.
   repower (`toggle_DUT_power("ON")`); read full config. Repeat 5× with varied delays (0–500 ms).
 - **Expect:** config is either fully-old or fully-new (NVS atomicity) — never a mix, never
   identity loss, never a boot loop.
+- **HW-verified (2026-08-18, SN 2162199999, debug @ hynek/v140-final-review-fixes)**: shell
+  `settings save` variant, cuts driven by `ppk2_orchestrator.py` (FIFO `cutin <delay> <off_ms>`,
+  timestamped log). 6 cycles total: delays 0/100/250/400/550 ms all landed **pre-commit** →
+  the OLD value survived, `config show` fully consistent (47 lines) every time; one extra
+  cycle at **1500 ms** landed **post-commit** → the NEW value survived cleanly — both
+  branches of the atomicity contract exercised, never a mix, identity intact every cycle.
+  Reset causes cleanly discriminated: `0x00000005` (pin, brownout) for every cut vs
+  `0x00000003` (pin, software) for the deliberate no-cut restore save. Note for repeats:
+  with the ~0.2–0.5 s MCP/shell dispatch latency, delays ≤550 ms never reached the commit —
+  use ~1.5 s to hit the post-commit window.
 
 ### AT-ADV-07 — power-cut storms (R+PPK2, A)
 - **Steps:** 20 random power cycles (real `toggle_DUT_power` off/on, not source-voltage-0 — see
   AT-ADV-06's note; on-time uniform 1–30 s); then full smoke + AT-HIS-03
   + AT-CFG-07 checks.
 - **Expect:** no identity/config/history corruption; no reset-cause anomalies; joins recover.
+- **HW-verified (2026-08-18, SN 2162199999, 12 cycles — reduced from 20)**: on-times drawn
+  uniform 2–25 s, 700 ms cuts, 3 cuts landed <5 s after power-up (mid-boot). Full smoke after
+  the storm: identity/keys intact verbatim, `config show` 47 consistent lines, alarms clean,
+  history clean, LRW RECONNECT→HEALTHY within ~30 s, RTC resynced via network time after
+  rejoin, reset cause `0x00000005` (pin, brownout) as expected. No corruption, no boot loop.
 
 ### AT-ADV-08 — RF denial during join backoff (DR, semi-A)
 - **Steps:** disable the device on the LNS (or take the gateway offline) → force rejoin →
   observe backoff for 15 min → re-enable.
 - **Expect:** exponential backoff per L9 (no hammering); join succeeds promptly after
   re-enable; no watchdog trips while backing off.
+- **HW-verified (2026-08-17, SN 2162199999)**: disabled the device on ChirpStack
+  (`Device.is_disabled=true`), forced `ats lrw reset` — `Join failed (not activated)` each
+  attempt, backoff grew attempt 1 (~60-72s incl. jitter) → attempt 2 (105s), confirming genuine
+  exponential growth, not a fixed retry. Re-enabled the device, forced one more `ats lrw reset` —
+  rejoined promptly (`state: HEALTHY`, fresh devaddr) within ~20s. `Reset cause` stayed
+  `0x00000003` (pin, software) throughout — no watchdog trip during the whole backoff window.
 
 ### AT-ADV-09 — time abuse (D, A)
 - **Steps:** `clock set` to: 0, 1, year-2038 boundary (0x7FFFFFFF), far future (0xFFFFFFF0);
   after each: one telemetry + one history record + decoder pass.
 - **Expect:** firmware clamps/handles; decoder yields null or a correct date — never a
   crash or a negative interval; history base-time stays coherent.
+- **HW-verified (2026-08-17, SN 2162199999)**: `clock set 0`/`1` correctly rejected (`-22`); the
+  2038/`UINT32_MAX` boundaries in the steps above set/read back fine. **But the untested
+  year-2100 boundary (RTC's 2-digit BCD year field only covers 2000-2099) is a real bug**: the
+  first `clock set 4102444800` (2100-01-01) caused an **intermittent watchdog reset**
+  (`Reset cause: 0x00000011`), 1 hit in ~7 attempts at/near that boundary — filed as **#386**.
+  Always check `Reset cause` after a boundary clock test, not just `clock get`'s displayed
+  value — a clean-looking readback doesn't rule out a hang on a repeat attempt.
+- **Fixed + re-verified (2026-08-17)**: `app_clock_set_unix()` now rejects `unix_s >=
+  APP_CLOCK_UNIX_MAX` before touching the RTC. `clock set 4102444800` re-tested post-fix —
+  cleanly rejected (`-22`), no reset. Severity corrected on the issue: the real `clock_sync`
+  Command path (LRW/NFC) already bounded `unix_time` via `APP_CMD_CLOCK_UNIX_MAX` in
+  `app_cmd.c`; only the debug `clock set` shell path (dev/commissioning-trusted) was actually
+  wide open — see the issue comment for detail.
 
 ### AT-ADV-10 — concurrency pile-up (D, SA)
 - **Steps:** simultaneously: phone holds an NFC config walk, ChirpStack has a queued

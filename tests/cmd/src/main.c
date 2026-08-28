@@ -900,6 +900,27 @@ ZTEST(cmd, test_vendor_reset_command)
 		      r.body.error.code);
 }
 
+/* #385: an all-zero replacement key is rejected synchronously (BAD_REQUEST, no
+ * action staged) instead of Ack'ing and letting app_settings_vendor_reset()'s
+ * own key_is_set() check silently no-op the deferred reset later — mirrors
+ * set_secret_key's existing zero-key rejection (test_set_secret_key_command's
+ * sibling check, same buffer_is_zero() bar). */
+ZTEST(cmd, test_vendor_reset_rejects_zero_key)
+{
+	Response r;
+
+	reset_cfg();
+	g_app_config.vendor_reset_allow = true;
+	/* seq1 vendor_reset{ key = 16x0x00 } */
+	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_VENDOR,
+					   "0801d201120a1000000000000000000000000000000000", &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "zero key: no action staged");
+	zassert_equal(r.which_body, Response_error_tag, "zero key should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
+		      r.body.error.code);
+}
+
 /* #316 Option A: the vendor_reset Command still honors vendor_reset_allow — when
  * false it is refused with NOT_READY (immediate feedback, not a silent no-op). The
  * vendor re-enables it via a vendor-channel set_param (test_vendor_reset_allow_

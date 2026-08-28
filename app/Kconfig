@@ -6,6 +6,53 @@
 
 menu "Application"
 
+config RADIO_LORAWAN
+	bool "LoRaWAN radio transport"
+	default y
+	select LORAWAN if LORA
+	help
+	  App-level name for the LoRaWAN transport (issue #395) — pairs with
+	  RADIO_P2P below as the two selectable radio transports. `select
+	  LORAWAN if LORA` only forces the underlying Zephyr subsystem ON
+	  when this is y AND the LORA radio driver is present (native_sim
+	  test builds have neither — `select` on a symbol whose own
+	  dependencies aren't met is a hard Kconfig error, not a silent
+	  no-op, hence the `if LORA` guard); turning this off on real HW
+	  (nothing else in this tree selects LORAWAN) leaves it at its own
+	  default (off), disabling all radio transmission. Telemetry/alarm
+	  sampling and history capture keep working with no radio
+	  (app_report.c owns that cadence, not the uplink) — only the actual
+	  send is skipped.
+
+	  ~41 KB flash / ~15 KB RAM when off (issue #395) — the single
+	  biggest lever of any toggle in this tree, but also the biggest
+	  behavioral change (no radio at all), which is why it stays on by
+	  default rather than joining debug.conf's OFF-by-default set.
+
+config RADIO_P2P
+	bool "Raw-LoRa P2P radio transport (#118)"
+	depends on LORA
+	default y
+	help
+	  App-level name for the raw-LoRa point-to-point transport
+	  (app_p2p.c, issue #118) — pairs with RADIO_LORAWAN above as the two
+	  selectable radio transports. Reserved as an inert placeholder by
+	  #395 and wired up here when the P2P work merged; it was briefly
+	  named APP_LORA_P2P on the feat-p2p branch, so out-of-tree overlays
+	  carrying that name need updating.
+
+	  Unlike RADIO_LORAWAN, which `select`s an underlying Zephyr
+	  subsystem, this compiles app-owned code that talks to drivers/lora
+	  directly — hence `depends on LORA` rather than a `select` (and it
+	  therefore drops out on native_sim test builds, which have no radio,
+	  without needing RADIO_LORAWAN's `if LORA` guard).
+
+	  Which transport actually brings up the shared SX126x radio is a
+	  runtime choice (`radio-mode`, #271), not a build-time one: both
+	  stacks link into the same image when both are y. Turning this off
+	  reclaims flash on builds that never need P2P — the flash-tight
+	  debug overlay does exactly that (doc/p2p.md §11).
+
 config APP_VERBOSE_LOGGING
 	bool "Enable verbose parameter logging"
 	default y
@@ -112,20 +159,39 @@ config APP_HISTORY_BYTES
 	  Size of the in-RAM history ring used when CONFIG_APP_HISTORY_FLASH=n.
 	  Record size is variable (5-33 B) depending on the enabled sensor set.
 
-config APP_LORA_P2P
-	bool "Raw-LoRa P2P transport (#118)"
-	depends on LORA
+config APP_CALIBRATION
+	bool "Factory calibration mode (magnet-triggered)"
 	default y
 	help
-	  Compile in the raw-LoRa point-to-point transport (app_p2p.c), selected
-	  at boot by `radio-mode p2p` (an alternative to LoRaWAN for deployments
-	  with no LoRaWAN infrastructure, see doc/p2p.md). Both stacks link into
-	  the same image; only the one selected by radio-mode actually brings up
-	  the shared SX126x radio.
+	  Compile in the magnet-triggered factory calibration mode
+	  (app_calibration.c): boots into a dedicated LED/LoRaWAN test loop
+	  that reads every enabled sensor and reports over a fixed uplink,
+	  instead of normal application behavior.
 
-	  Disable (n) to drop the P2P transport and reclaim flash on a build
-	  that never needs it — the flash-tight debug overlay does this today
-	  (doc/p2p.md §11: release has ~58.5 KB headroom, debug only ~4.75 KB).
+	  Disable for bench sessions that don't need to calibrate hardware
+	  (e.g. a pure radio/transport test) to free flash/RAM for what IS
+	  under test — see app/debug.conf's variant table.
+
+config APP_PYQ1648
+	bool "PIR motion sensor (PYQ1648)"
+	default y
+	help
+	  Compile in the PIR motion-detector driver wrapper (app_pyq1648.c).
+	  Default y to match shipped behavior — both this and
+	  CONFIG_APP_BUZZER stay compiled in on a normal build, since which
+	  one is actually active is a runtime, per-unit choice
+	  (cap_pir_detector / cap_buzzer config, they share pins, #90/#338).
+	  Disable only for a bench session that knows it needs neither.
+
+config APP_BUZZER
+	bool "Buzzer / melody output (#338)"
+	default y
+	help
+	  Compile in the buzzer/melody driver wrapper (app_buzzer.c) and its
+	  shell (`ats buzz ...`) and remote-command (NFC/LoRaWAN play-melody)
+	  surfaces. Default y to match shipped behavior (see
+	  CONFIG_APP_PYQ1648 above) — disable only for a bench session that
+	  knows it needs neither PIR nor buzzer.
 
 endmenu
 

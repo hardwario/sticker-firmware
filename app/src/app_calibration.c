@@ -53,8 +53,12 @@ static const uint8_t m_cal_nwkskey[] = {0xaf, 0x4f, 0x05, 0x0b, 0xd3, 0x74, 0x0d
 static const uint8_t m_cal_appskey[] = {0xd9, 0xa9, 0xc4, 0x1a, 0xcf, 0x55, 0x99, 0xdc,
 					0xe1, 0x16, 0x8e, 0xfe, 0x6d, 0x29, 0x1d, 0xab};
 
+#if defined(CONFIG_W1)
 static int m_count_ds18b20;
+#endif /* defined(CONFIG_W1) */
+#if defined(CONFIG_DS28E17)
 static int m_count_machine_probe;
+#endif /* defined(CONFIG_DS28E17) */
 static uint16_t m_battery_mv = BATTERY_INVALID_MV;
 
 /* #340 M22: lorawan_send() blocks on a MAC-confirm semaphore that can hang
@@ -209,6 +213,7 @@ static void compose_calibration_payload(uint8_t *buf)
 	/* Offset 8-11: SHT40 temperature and humidity */
 	int16_t sht_temp = SENTINEL;
 	int16_t sht_hum = SENTINEL;
+#if defined(CONFIG_SHT4X)
 	{
 		float temperature, humidity;
 
@@ -218,6 +223,7 @@ static void compose_calibration_payload(uint8_t *buf)
 			sht_hum = (int16_t)(humidity * 100.0f);
 		}
 	}
+#endif /* defined(CONFIG_SHT4X) */
 	sys_put_le16((uint16_t)sht_temp, &buf[8]);
 	sys_put_le16((uint16_t)sht_hum, &buf[10]);
 
@@ -225,6 +231,7 @@ static void compose_calibration_payload(uint8_t *buf)
 	int16_t t1 = SENTINEL;
 	int16_t t2 = SENTINEL;
 
+#if defined(CONFIG_W1)
 	if (m_count_ds18b20 > 0) {
 		uint64_t sn;
 		float temperature;
@@ -241,6 +248,7 @@ static void compose_calibration_payload(uint8_t *buf)
 			}
 		}
 	}
+#endif /* defined(CONFIG_W1) */
 
 	sys_put_le16((uint16_t)t1, &buf[12]);
 	sys_put_le16((uint16_t)t2, &buf[14]);
@@ -251,6 +259,7 @@ static void compose_calibration_payload(uint8_t *buf)
 	int16_t p2_temp = SENTINEL;
 	int16_t p2_hum = SENTINEL;
 
+#if defined(CONFIG_DS28E17)
 	if (m_count_machine_probe > 0) {
 		uint64_t sn;
 		float temperature, humidity;
@@ -269,6 +278,7 @@ static void compose_calibration_payload(uint8_t *buf)
 			}
 		}
 	}
+#endif /* defined(CONFIG_DS28E17) */
 
 	sys_put_le16((uint16_t)p1_temp, &buf[16]);
 	sys_put_le16((uint16_t)p1_hum, &buf[18]);
@@ -343,6 +353,7 @@ int app_calibration_init(void)
 	 * comment. */
 	k_work_init(&m_cal_send_work, cal_send_work_handler);
 
+#if defined(CONFIG_W1)
 	/* Init 1-Wire bus (DS2484) — non-fatal on failure */
 	bool w1_ready = false;
 
@@ -365,6 +376,7 @@ int app_calibration_init(void)
 		}
 	}
 
+#if defined(CONFIG_DS28E17)
 	/* Init Machine Probe sensors */
 	if (w1_ready && g_app_config.cap_w1_sensors) {
 		device_init(DEVICE_DT_GET(DT_NODELABEL(machine_probe_0)));
@@ -374,6 +386,8 @@ int app_calibration_init(void)
 			m_count_machine_probe = app_machine_probe_get_count();
 		}
 	}
+#endif /* defined(CONFIG_DS28E17) */
+#endif /* defined(CONFIG_W1) */
 
 #if defined(CONFIG_WATCHDOG)
 	app_wdog_feed();

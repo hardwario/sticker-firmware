@@ -60,6 +60,38 @@ enums:
       value: 3
       shell: high
 
+  # #397: 0-7 wire range, ordered by intensity. Every non-off mode replays the
+  # melody immediately whenever a NEW alarm activates (even while another is
+  # already active) and differs only in how often it repeats while any alarm
+  # stays active: once = no repeat, slow/normal/fast = 120/30/10 s,
+  # continuous = back-to-back. 6-7 are reserved for future variants (they
+  # currently behave like normal).
+  alarm_buzzer_mode:
+    - name: "OFF"
+      value: 0
+      shell: "off"
+    - name: ONCE
+      value: 1
+      shell: once
+    - name: SLOW
+      value: 2
+      shell: slow
+    - name: NORMAL
+      value: 3
+      shell: normal
+    - name: FAST
+      value: 4
+      shell: fast
+    - name: CONTINUOUS
+      value: 5
+      shell: continuous
+    - name: RESERVED_6
+      value: 6
+      shell: reserved6
+    - name: RESERVED_7
+      value: 7
+      shell: reserved7
+
 proto:
   message: AppConfigMessage
   extra_fields:
@@ -142,7 +174,11 @@ commands:
     # which reject the (re)join while unsaved LoRaWAN staging changes exist.
     - {name: lrw_reset, proto_id: 16, body: LrwReset, kind: handler, response: ack}
     - {name: lrw_join, proto_id: 17, body: LrwJoin, kind: handler, response: ack}
-    - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: action, action: ENTER_CALIBRATION, response: ack, transports: [lrw, nfc]}
+    # #395: handler (not plain action) so the dispatch calls
+    # app_cmd_handle_enter_calibration, which reports NOT_SUPPORTED when the
+    # calibration mode isn't compiled in (CONFIG_APP_CALIBRATION=n) instead of
+    # ACKing and persisting a calibration flag nothing would ever consume.
+    - {name: enter_calibration, proto_id: 18, body: EnterCalibration, kind: handler, response: ack, transports: [lrw, nfc]}
     - {name: sample, proto_id: 21, body: Sample, kind: handler, response: sample, transports: [lrw, nfc]}
     # #299 reset ladder, new middle tier: keeps identity only (serial/vendor_token/
     # secret_key/nonce_counter/claim_token/DevEUI/JoinEUI), drops the LoRaWAN
@@ -328,6 +364,11 @@ parameters:
     type: bool
     default: true
     writable: [shell, vendor]
+    # A deliberately-set interlock survives the non-vendor reset tiers: without
+    # this, a plain device_reset/factory_reset would silently flip an owner's
+    # allow=false back to the default true. vendor_reset itself still restores
+    # the default (it only runs when allow was true anyway).
+    persistent: [device_reset, factory_reset]
     help: "Get/Set whether vendor_reset is accepted (true/false); over the air, settable only over the vendor NFC channel."
 
   - name: alarm_limit
@@ -354,7 +395,10 @@ parameters:
     proto_id: 15
     type: enum
     enum: radio_mode
-    default: LORAWAN
+    # #350: ship radio-silent — a freshly provisioned unit does not transmit until an
+    # operator deliberately enables LoRaWAN (or P2P), so it can never join/beacon on an
+    # unintended network out of the box. Sensor sampling + history still run.
+    default: "OFF"
     persistent: [device_reset]
     help: "Get/Set radio mode (off/lorawan/p2p). off = radio-silent, sensor/history still run."
 
@@ -383,6 +427,10 @@ parameters:
     writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 4
     type: bool
+    # #350: ADR on by default — a stationary battery-powered end-node wants the network to
+    # optimise its data rate/TX power for airtime and battery, rather than sitting at a
+    # fixed conservative DR regardless of link quality.
+    default: true
     persistent: [device_reset]
     help: "Get/Set LoRaWAN ADR (true/false)."
 
@@ -710,6 +758,14 @@ parameters:
     readable: [nfc, lrw]
     writable: [nfc, lrw]
     help: "Get/Set alarm rule slot 15 (packed hex, see app_config.yml)."
+
+  - name: alarm_buzzer_mode
+    proto_group: alarms
+    proto_id: 20
+    type: enum
+    enum: alarm_buzzer_mode
+    default: "off"
+    help: "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap_buzzer."
 
   - name: accel_motion_sensitivity
     proto_group: sensors

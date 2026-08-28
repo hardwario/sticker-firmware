@@ -2331,7 +2331,11 @@ static int cmd_nfc_read(const struct shell *sh, size_t argc, char **argv)
 	unsigned long off = strtoul(argv[1], NULL, 0);
 	unsigned long len = strtoul(argv[2], NULL, 0);
 
-	if (len == 0 || off >= ST25DV_USER_MEM_SIZE || off + len > ST25DV_USER_MEM_SIZE) {
+	/* Bound each operand before the sum: `off + len` wraps modulo the word size
+	 * for a huge `len`, which would slip past a combined check and overrun
+	 * m_buf. */
+	if (len == 0 || len > ST25DV_USER_MEM_SIZE || off >= ST25DV_USER_MEM_SIZE ||
+	    off > ST25DV_USER_MEM_SIZE - len) {
 		shell_error(sh, "range out of 0..%d", ST25DV_USER_MEM_SIZE);
 		return -EINVAL;
 	}

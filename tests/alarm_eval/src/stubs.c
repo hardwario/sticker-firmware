@@ -15,6 +15,7 @@
  */
 
 #include "app_alarm_rules.h"
+#include "app_buzzer.h"
 #include "app_clock.h"
 #include "app_cmd.h"
 #include "app_config.h"
@@ -106,8 +107,14 @@ void app_report_trigger(void)
 }
 
 /* ---- alarm-report encoding: alarm_batch_flush() calls this unconditionally
- * (not LoRaWAN-gated) once the batch work item fires. Just needs to succeed
- * so the batch counter resets; test assertions never inspect the bytes. ---- */
+ * (not LoRaWAN-gated) once the batch work item fires. Succeeds so the batch
+ * counter resets, and appends every flushed event into a test-visible capture
+ * buffer so cases can assert on emitted activate/deactivate edges (with
+ * g_app_config.alarm_limit = 0 the flush — and so the capture — happens
+ * synchronously inside app_alarm_poll()). ---- */
+
+struct app_cmd_alarm_event test_alarm_events[16];
+size_t test_alarm_event_count;
 
 int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
@@ -116,12 +123,32 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 	(void)base_time;
 	(void)total;
 	(void)time_synced;
-	(void)events;
-	(void)n_events;
 	if (!out || !out_len || out_cap == 0) {
 		return -EINVAL;
 	}
+	for (size_t i = 0; i < n_events; i++) {
+		if (test_alarm_event_count < ARRAY_SIZE(test_alarm_events)) {
+			test_alarm_events[test_alarm_event_count++] = events[i];
+		}
+	}
 	out[0] = 0;
 	*out_len = 1;
+	return 0;
+}
+
+/* ---- buzzer (#397): app_alarm_poll() drives the local buzzer as a side
+ * effect (alarm_buzzer_sync() in app_alarm.c). Track every call so cases can
+ * assert on the alarm-event -> melody trigger/stop plumbing without a real
+ * GPIO thread. ---- */
+
+int g_buzzer_play_calls;
+uint32_t g_buzzer_play_last_kind;
+uint16_t g_buzzer_play_last_repeat_s;
+
+int app_buzzer_play_repeating(uint32_t kind, uint16_t repeat_s)
+{
+	g_buzzer_play_calls++;
+	g_buzzer_play_last_kind = kind;
+	g_buzzer_play_last_repeat_s = repeat_s;
 	return 0;
 }

@@ -1,4 +1,5 @@
 #include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
 
 / {
 	aliases {
@@ -6,6 +7,23 @@
 		sw1 = &hall_r;
 		sw2 = &gp_a;
 		sw3 = &gp_b;
+	};
+
+	/* Red (PA5/TIM2_CH1) and green (PA6/TIM16_CH1) status LEDs on HW PWM so
+	 * app_led can dim them (low duty ≈ 1/5 current, still clearly visible).
+	 * The board's gpio-leds led_r/led_g stay defined but unused — app_led now
+	 * references these pwm nodes. Yellow (PA4) has no timer channel and stays
+	 * plain GPIO (led_y). Active-low LEDs → PWM_POLARITY_INVERTED. */
+	pwmleds {
+		compatible = "pwm-leds";
+
+		led_r_pwm: led_r_pwm {
+			pwms = <&pwm2 1 PWM_MSEC(1) PWM_POLARITY_INVERTED>;
+		};
+
+		led_g_pwm: led_g_pwm {
+			pwms = <&pwm16 1 PWM_MSEC(1) PWM_POLARITY_INVERTED>;
+		};
 	};
 
 	zephyr,user {
@@ -24,4 +42,25 @@
  * unserviced. Paired with pm_device_wakeup_enable(gpiob) in app_nfc_init. */
 &gpiob {
 	wakeup-source;
+};
+
+/* Enable TIM2 (red LED, PA5/CH1) and TIM16 (green LED, PA6/CH1) as PWM. */
+&timers2 {
+	status = "okay";
+
+	pwm2: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim2_ch1_pa5>;
+		pinctrl-names = "default";
+	};
+};
+
+&timers16 {
+	status = "okay";
+
+	pwm16: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim16_ch1_pa6>;
+		pinctrl-names = "default";
+	};
 };

@@ -7,7 +7,7 @@ FIBER v2 gateway or central service.
 
 Deliberately separate from the main app: only `app_ccm.c` (AES-CCM/CMAC/ECB) is
 shared. No sensors, NFC, LoRaWAN, history, or protobuf — this is why it fits
-comfortably (~24 % flash / ~21 % RAM) where a `debug.conf` + `CONFIG_APP_LORA_P2P=y`
+comfortably (~24 % flash / ~21 % RAM) where a `debug.conf` + `CONFIG_RADIO_P2P=y`
 combination of the main app currently does not (see `doc/p2p.md` §11).
 
 ## Build + flash

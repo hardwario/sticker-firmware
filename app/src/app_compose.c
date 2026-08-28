@@ -226,6 +226,7 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	 * vtable (app_w1_slot_encode), so adding a sensor type needs no change here.
 	 * type travels with the reading; the composer may split the list across
 	 * frames (each reading is indivisible). Absent quantities stay omitted. */
+#if defined(CONFIG_W1)
 	if (g_app_config.cap_w1_sensors) {
 		for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
 			enum app_w1_slot_type type = app_w1_slot_get_type(i);
@@ -243,6 +244,7 @@ static void fill_telemetry(Telemetry *t, bool boot)
 			t->w1_sensors_count++;
 		}
 	}
+#endif /* defined(CONFIG_W1) */
 
 	/* hall left / right */
 	if (g_app_config.cap_hall_left) {
@@ -298,6 +300,13 @@ static void fill_telemetry(Telemetry *t, bool boot)
  * SYSTEM_FLAG_BOOT and the real first uplink went out with system_flags=0. */
 static bool m_boot_pending = true;
 
+/* True while the in-progress snapshot belongs to the shell's debug probe
+ * (app_compose_ex()) rather than the real TX path. Both paths run their
+ * multi-frame sessions as separate per-frame work items on m_work_q, so they
+ * can interleave — without this tag the real report would silently drain the
+ * remainder of a debug session's snapshot over the air (and vice versa). */
+static bool m_active_debug;
+
 /* Take a fresh snapshot into m_snapshot and arm the multi-frame packer. Runs
  * solely on m_work_q. `consume_boot` is true only for the real report path
  * (app_compose()) — a debug/test probe (app_compose_ex()) must not clear the
@@ -348,8 +357,21 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 		return -EAGAIN;
 	}
 
+	bool debug_probe = !consume_boot;
+
+	/* Cross-session guard: the real path drops a leftover debug snapshot and
+	 * composes fresh (the debug probe simply restarts on its next call); the
+	 * debug probe must never steal frames from an in-flight real report. */
+	if (m_active && m_active_debug != debug_probe) {
+		if (debug_probe) {
+			return -EBUSY;
+		}
+		app_compose_reset();
+	}
+
 	if (!m_active) {
 		fill_snapshot(consume_boot);
+		m_active_debug = debug_probe;
 		if (m_pending == 0 && m_snapshot.w1_sensors_count == 0) {
 			/* Nothing to report (e.g. all sensors NaN pre-sample). */
 			*len = 0;

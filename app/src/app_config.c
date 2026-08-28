@@ -40,10 +40,12 @@ static const struct app_config m_app_config_defaults = {
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
 	.alarm_limit = 10,
-	.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN,
+	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
+	.lrw_adr = true,
 	.lrw_link_check_interval = 5,
 	.lrw_link_check_fail_rejoin = 5,
+	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 868100000,
 	.p2p_spreading_factor = 10,
@@ -73,10 +75,12 @@ static struct app_config m_app_config = {
 	.battery_level = 2400,
 	.vendor_reset_allow = true,
 	.alarm_limit = 10,
-	.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN,
+	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
+	.lrw_adr = true,
 	.lrw_link_check_interval = 5,
 	.lrw_link_check_fail_rejoin = 5,
+	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 868100000,
 	.p2p_spreading_factor = 10,
@@ -196,6 +200,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("alarm-13", m_app_config.alarm_13, sizeof(m_app_config.alarm_13));
 	SETTINGS_SET("alarm-14", m_app_config.alarm_14, sizeof(m_app_config.alarm_14));
 	SETTINGS_SET("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
+	SETTINGS_SET("alarm-buzzer-mode", &m_app_config.alarm_buzzer_mode,
+		     sizeof(m_app_config.alarm_buzzer_mode));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
 	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -247,6 +253,7 @@ static int h_commit(void)
 		       sizeof(m_app_config.claim_token));
 		memcpy(m_app_config.vendor_token, stored.vendor_token,
 		       sizeof(m_app_config.vendor_token));
+		m_app_config.vendor_reset_allow = stored.vendor_reset_allow;
 		m_app_config.lrw_region = stored.lrw_region;
 		m_app_config.radio_mode = stored.radio_mode;
 		m_app_config.lrw_sub_band = stored.lrw_sub_band;
@@ -302,7 +309,7 @@ static int h_commit(void)
 		m_app_config.lrw_region = 0;
 	}
 	if ((int)m_app_config.radio_mode < 0 || (int)m_app_config.radio_mode > 2) {
-		m_app_config.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN;
+		m_app_config.radio_mode = APP_CONFIG_RADIO_MODE_OFF;
 	}
 	if (m_app_config.lrw_sub_band < 0) {
 		m_app_config.lrw_sub_band = 0;
@@ -327,6 +334,9 @@ static int h_commit(void)
 	}
 	if (m_app_config.lrw_link_check_fail_rejoin > 255) {
 		m_app_config.lrw_link_check_fail_rejoin = 255;
+	}
+	if ((int)m_app_config.alarm_buzzer_mode < 0 || (int)m_app_config.alarm_buzzer_mode > 7) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
 	}
 	if ((int)m_app_config.accel_motion_sensitivity < 0 ||
 	    (int)m_app_config.accel_motion_sensitivity > 3) {
@@ -434,6 +444,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("alarm-13", m_app_config.alarm_13, sizeof(m_app_config.alarm_13));
 	EXPORT_FUNC("alarm-14", m_app_config.alarm_14, sizeof(m_app_config.alarm_14));
 	EXPORT_FUNC("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
+	EXPORT_FUNC("alarm-buzzer-mode", &m_app_config.alarm_buzzer_mode,
+		    sizeof(m_app_config.alarm_buzzer_mode));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
 	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -872,6 +884,41 @@ static void print_cap_accelerometer(const struct shell *shell)
 		    m_app_config.cap_accelerometer ? "true" : "false");
 }
 
+static void print_alarm_buzzer_mode(const struct shell *shell)
+{
+	const char *str;
+	switch (m_app_config.alarm_buzzer_mode) {
+	case APP_CONFIG_ALARM_BUZZER_MODE_OFF:
+		str = "off";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_ONCE:
+		str = "once";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_SLOW:
+		str = "slow";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_NORMAL:
+		str = "normal";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_FAST:
+		str = "fast";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_CONTINUOUS:
+		str = "continuous";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_6:
+		str = "reserved6";
+		break;
+	case APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_7:
+		str = "reserved7";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " alarm-buzzer-mode %s", str);
+}
+
 static void print_accel_motion_sensitivity(const struct shell *shell)
 {
 	const char *str;
@@ -999,6 +1046,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_buzzer(shell);
 	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
+	print_alarm_buzzer_mode(shell);
 	print_accel_motion_sensitivity(shell);
 	print_sensor1_rom(shell);
 	print_sensor2_rom(shell);
@@ -1458,6 +1506,51 @@ static int cmd_cap_accelerometer(const struct shell *shell, size_t argc, char **
 			print_cap_accelerometer);
 }
 
+static int cmd_alarm_buzzer_mode(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_alarm_buzzer_mode(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: off, once, slow, normal, fast, continuous, "
+				   "reserved6, reserved7");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "off")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
+	} else if (!strcmp(argv[1], "once")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_ONCE;
+	} else if (!strcmp(argv[1], "slow")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_SLOW;
+	} else if (!strcmp(argv[1], "normal")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_NORMAL;
+	} else if (!strcmp(argv[1], "fast")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_FAST;
+	} else if (!strcmp(argv[1], "continuous")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_CONTINUOUS;
+	} else if (!strcmp(argv[1], "reserved6")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_6;
+	} else if (!strcmp(argv[1], "reserved7")) {
+		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_RESERVED_7;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: off, once, slow, normal, fast, continuous, "
+				   "reserved6, reserved7");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -1730,6 +1823,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set accelerometer capability — orientation, motion and free-fall (true/false).",
 	              cmd_cap_accelerometer, 1, 1),
 
+	SHELL_CMD_ARG(alarm-buzzer-mode, NULL,
+	              "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap_buzzer.",
+	              cmd_alarm_buzzer_mode, 1, 1),
+
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",
 	              cmd_accel_motion_sensitivity, 1, 1),
@@ -1817,6 +1914,7 @@ int app_config_device_reset(void)
 	memcpy(m_app_config.claim_token, preserved.claim_token, sizeof(m_app_config.claim_token));
 	memcpy(m_app_config.vendor_token, preserved.vendor_token,
 	       sizeof(m_app_config.vendor_token));
+	m_app_config.vendor_reset_allow = preserved.vendor_reset_allow;
 	m_app_config.lrw_region = preserved.lrw_region;
 	m_app_config.radio_mode = preserved.radio_mode;
 	m_app_config.lrw_sub_band = preserved.lrw_sub_band;
@@ -1871,6 +1969,7 @@ int app_config_factory_reset(void)
 	memcpy(m_app_config.claim_token, preserved.claim_token, sizeof(m_app_config.claim_token));
 	memcpy(m_app_config.vendor_token, preserved.vendor_token,
 	       sizeof(m_app_config.vendor_token));
+	m_app_config.vendor_reset_allow = preserved.vendor_reset_allow;
 	memcpy(m_app_config.lrw_deveui, preserved.lrw_deveui, sizeof(m_app_config.lrw_deveui));
 	memcpy(m_app_config.lrw_joineui, preserved.lrw_joineui, sizeof(m_app_config.lrw_joineui));
 

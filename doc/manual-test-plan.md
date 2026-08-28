@@ -1133,7 +1133,10 @@ and NFC.
 **Goal:** A slot can be overwritten, cleared, and disabled-without-losing-its-definition.
 **Observable:** Overwriting `alarm_<i>` changes the rule; `alarm clear <i>` (or `alarm_<i>` = 34
 zero hex chars) removes it; a packed rule with flags = present-only (enabled bit clear, e.g.
-`01…`) keeps the slot listed with `en=0` and is **not** evaluated.
+`01…`) keeps the slot listed with `en=0` and is **not** evaluated. Since the 2026-08-18
+final-review fix, clearing/disabling/editing a rule whose latch is currently ACTIVE also emits
+the matching fPort-3 deactivate edge on the next poll (previously the activate was left
+dangling for edge-pairing backends).
 
 **Prompt for Claude:**
 > Using slot 0: (1) **change** it — `alarm set 0 onboard temperature 0 10 5` then re-set to
@@ -1823,7 +1826,15 @@ error (temporarily bad `flash_area_write` return, or an out-of-range history fla
 shell if available), capture a few more records, confirm no HardFault/reset and `history stats`
 stays sane afterward.
 
-- [ ] Pass
+- [x] Pass
+
+> **HW-verified (2026-08-17, SN 2162199999)**: temporary debug-only build
+> (`debug-history-flash.conf`/`.overlay`, `CONFIG_APP_HISTORY_FLASH=y`) + a temporary
+> `history debugfail <n>` fault-injection shell hook wrapping `flash_area_write()` in
+> `backend_append()`. Forced ~5 injected write failures across the ordinary (non-rollover)
+> append path — every one produced `"history append failed — record dropped"`, count did NOT
+> advance, no crash, and the very next capture succeeded normally. `m_stage_len` handling (C1)
+> confirmed correct on real hardware. See X5 for the rollover-path finding (#384).
 
 ### X2 — C2: SetParam vendor-transport write gate
 
@@ -1836,7 +1847,13 @@ is rejected; the same field set via `nfc`/`lrw` succeeds.
 [[reference_nfc_inf_record]] framing), attempt `SetParam alarm_0=...`; confirm rejection. Repeat
 the identical write over NFC secret_key auth; confirm success.
 
-- [ ] Pass
+- [x] Pass
+
+> **HW-verified (2026-08-17, SN 2162199999, phone-free hand-crafted AES-CCM frames via
+> `nfc write`/`nfc check`)**: vendor-channel `SetParam{alarms.alarm_0=...}` rejected —
+> `error{code:NOT_WRITABLE, fault_field:403, detail:"transport not allowed"}`. Identical write
+> over NFC `secret_key` auth succeeded (`ack{}`), `alarm list` confirmed slot 0 updated to the new
+> rule. Decisive.
 
 ### X3 — H: history replay-active flag cleared on RECONNECT abort (M4)
 
@@ -1849,7 +1866,16 @@ during the backoff window (`history stats` count climbs), not frozen until rejoi
 RECONNECT mid-replay (radio-silence / bad gateway), then keep sampling during the backoff and
 confirm `history stats` count keeps climbing.
 
-- [ ] Pass
+- [x] Pass
+
+> **HW-verified (2026-08-17, SN 2162199999, TTN)**: enabled history, captured 3 records, sent a
+> raw `ReqHistory` LRW downlink (device-driven streaming replay), then forced WARNING→RECONNECT
+> via `ats lrw lc fail` (needs the injections spaced ~3s apart — rapid-fire submits coalesce on
+> `m_work_q`'s single debug-injection work item, only the last one before it runs counts).
+> Confirmed `state: RECONNECT`, then ran 3 more `history capture` — count went **3 → 6** while
+> still in RECONNECT, i.e. capture kept running through the backoff window, not frozen. Decisive.
+
+
 
 ### X4 — H: `ats radio compose` runs on `m_work_q`, no longer races real TX
 
@@ -1880,7 +1906,18 @@ doesn't show a phantom committed page); no OOB/corruption on subsequent captures
 that exact moment (may need a temporary build hook), confirm no page falsely committed and no
 follow-on corruption.
 
-- [ ] Pass
+- [x] Pass (partial — found a real, DECISIVE bug, filed as #384)
+
+> **HW-verified (2026-08-17, SN 2162199999)**: `advance_page()`'s own erase/header-write correctly
+> propagate failure (no phantom page commit) — that half is confirmed. But injecting one write
+> failure exactly at the page-1→page-2 rollover hit **`flush_stage_pad()`** (called from inside
+> `advance_page()` to close the outgoing page) — that call's `void` return type silently
+> swallows the failure, so `advance_page()` still reported success. Follow-on `history read`
+> showed the predicted corruption right at the boundary: records 1164-1168 read back
+> implausible temperatures (195-203°C, clearly uninitialized/garbage flash bytes decoded as a
+> value), then records 1169-1175 read back as the no-data sentinel (`-0.01`/`--`). Filed/updated
+> as **#384** (was static-only, now HIL-decisive) — this is a real release blocker, not a
+> theoretical concern.
 
 ### X6 — H: deferred NFC actions run after counters/sensor init (boot-staged `reset_counters`, #340 M8)
 
@@ -1892,16 +1929,45 @@ boot), only `hall_left` resets to 0; `hall_right`/input counters keep their pre-
 **Prompt for Claude:** With non-zero counters on ≥2 channels, stage `reset_counters{hall_left}`
 over NFC while powered off, reboot, confirm ONLY hall_left is zeroed — the others must survive.
 
-> **Code-verified only (2026-08-17):** confirmed in `main.c` at the `5d14b24` tip that
+> **Code-verified (2026-08-17)**: confirmed in `main.c` at the `5d14b24` tip that
 > `nfc_run_deferred_cmd_actions()` is called at line 548, after `app_sensor_init()`/
 > `app_counters_init()` (lines 532/539) and before `app_lrw_join()` (line 555) — the exact ordering
-> the fix describes. **Full behavioral HIL still owed**: this bench's hall/input counters are
-> currently all 0 (no physical pulse actuator connected this session), so the "only the targeted
-> channel resets, others survive" behavior couldn't be demonstrated end-to-end; also needs a
-> hand-crafted `reset_counters` Command protobuf hex for `ats cmd nfc`/a real boot-staged NFC write
-> to exercise the actual deferred-action path rather than just the source ordering.
+> the fix describes.
+>
+> **HIL-verified selectivity, decisive (2026-08-18, SN 2162199999)**: with a real magnet, got
+> hall-left and hall-right both to nonzero counts (5/1 in one run, 1/1 in a follow-up).
+> Hand-crafted an encrypted `reset_counters{hall_right:true}` Command via
+> `nfc_helper.py`/`sticker_nfc_frame.py` (owner `hio.stck:cmd` channel, live nonce), wrote it to
+> the tag, and forced processing with `nfc check` — RTT log showed
+> `staged command action 9 (applied by poll thread)` (action 9 =
+> `APP_CMD_ACTION_COUNTERS_SAVE`, confirming the fix's deferred-action dispatch actually ran), and
+> `ats sensors sample` afterward showed the TARGETED channel zeroed while the OTHER channel's
+> count was untouched — confirms `app_cmd_handle_reset_counters()` only zeros what it's told to,
+> and the deferred persist doesn't clobber the sibling channel. Reused nonces/replayed frames
+> along the way surfaced the NFC anti-replay cache (`M1`) behaving correctly (a byte-identical
+> retransmission just replays the cached response instead of re-executing) — consistent with
+> prior N8/N11 findings, not a new issue.
+>
+> **Genuine boot-staged-while-off race NOT independently reproduced**: writing the command frame
+> via `nfc write` (raw I2C, not real RF) and then rebooting did not get picked up automatically —
+> the NFC poll thread's own boot-time step unconditionally re-lays the plaintext info record over
+> the tag before a manual `nfc check` ever sees the staged command, so this specific repro path
+> can't distinguish "processed before `app_counters_init()`" from "never discovered at all"
+> without real RF/phone hardware. The ordering fix itself is verified two independent ways
+> instead: the code-level call-site ordering above, and (newly found while investigating this)
+> the NFC poll thread's `K_THREAD_DEFINE(..., NFC_POLL_START_DELAY_MS)` = **3000 ms** startup
+> delay (`main.c`), which structurally guarantees no NFC command can be discovered/dispatched
+> before `main()`'s init sequence (well under 3s) reaches `app_counters_init()` — this delay,
+> not `nfc_run_deferred_cmd_actions()`'s position, is what actually closes the boot-race window
+> #340 M8 describes.
+>
+> **Bonus finding (not a bug)**: while chasing this, both hall magnets ended up near the board
+> during a reboot and the device correctly entered calibration mode (temporary DevEUI
+> `02403b84fd451f37`, `Device status: nfc-down`) per `app_calibration_detect_magnets()` —
+> confirms that detection path works on real hardware too.
 
-- [ ] Pass
+- [x] Pass — code-verified ordering + HIL-verified selective-reset behavior (see above); the
+  exact at-boot race timing not independently reproduced without real RF/phone hardware
 
 ### X7 — H + M3 + M15 + M24: clm arm/rearm persist-after-confirmed-write + vendor decrypt doesn't consume + `m_clm_state` locked
 
@@ -1920,7 +1986,17 @@ suite itself — this is confirming the same behavior survived the subsequent M2
 merged in via PR#358). Then race `ats claim active`/`ats claim done` against live NFC field
 activity and confirm no corrupted `clm` state (check via `ats claim status` / NVS readback).
 
-- [ ] Pass
+- [x] Pass (partial — (a) confirmed, (c) not attempted)
+
+> **HW-verified (2026-08-17, SN 2162199999)**: provisioned `claim-token` (was unset from an
+> earlier `vendor_reset` this session) + `ats claim active` + `settings save` (a reboot was
+> needed for the re-armed state to actually take — `ats claim active` alone didn't visibly change
+> `ats claim status` until after save+reboot) → `clm state: pending (1)`. Sent a vendor-channel
+> (`hio.stck:vnd`) `GetInfo` — `clm state` stayed `pending (1)` (not consumed). Immediately after,
+> sent the identical `GetInfo` over NFC `secret_key` auth — `clm state: consumed (2)`. Confirms
+> (a) decisively: only the owner-authenticated channel consumes the claim window, vendor-channel
+> traffic does not. (c) (`ats claim active`/`done` raced against live NFC activity) not attempted
+> this round — needs genuinely concurrent execution, not just back-to-back sequential calls.
 
 ### X8 — H: reset tiers reboot on mid-sequence failure; LoRaMac NVM wiped on factory/vendor reset
 
@@ -1934,7 +2010,16 @@ old ones — see [[reference_cs_otaa_devnonce_flush]] for the failure mode this 
 rejoin OTAA on the SAME network server without a manual DevNonce flush, confirm the join succeeds
 cleanly (proving LoRaMac NVM was actually wiped, not just the app config).
 
-- [ ] Pass
+- [x] Pass
+
+> **HW-verified (2026-08-17, SN 2162199999, TTN)**: performed both a real `factory_reset` and a
+> real `vendor_reset` over NFC this session (see X12). Both correctly zeroed `lrw-appkey` (+
+> devaddr/nwkskey/appskey) while preserving `lrw-deveui`/`lrw-joineui`; after restoring the
+> original AppKey via NFC `SetParam{lorawan.appkey}+save=true`, the device rejoined OTAA cleanly
+> both times (fresh `devaddr`, `state: HEALTHY`) with no manual DevNonce flush and no "already
+> used" rejection. Caveat: TTN is known to be more tolerant of DevNonce reuse than ChirpStack
+> (#346) — a clean TTN rejoin is good supporting evidence but not as decisive as a ChirpStack
+> repro would be; the underlying `lorawan_send`/NVM-wipe mechanism isn't network-specific though.
 
 ### X9 — H: alarm `rt_sync()` resets stale latch on any rule edit; RATE/COUNT holds after firing
 
@@ -1948,7 +2033,22 @@ re-triggers.
 re-fire every subsequent window while the condition persists — only once, then re-arms cleanly
 after edit. Regression-tested in `tests/alarm_eval` already; this is HW confirmation only.
 
-- [ ] Pass
+> **HW-verified, decisive (2026-08-18, SN 2162199999)**: armed `alarm new hall-left count 1 90`
+> (`interval-report` shortened to 60s, its config min, for fast window cycling; `alarm-limit 0`
+> for immediate uplink). User swiped a real magnet past hall-left (`hall-left count 0→1`); at the
+> next 60s window boundary `alarm list` showed `active=1` — fired. A second swipe
+> (`count 1→2`, still within the 90s dwell) produced **no** re-fire — `active` stayed `1`
+> throughout the hold, confirming the `!rt->active` one-shot guard holds on real hardware, not
+> just in `tests/alarm_eval`. Then `alarm set 0 hall-left count 1 45` (only `dwell` changed,
+> 90→45) — `alarm list` immediately showed `active=0`: the stale latch was reset by the edit,
+> exactly as `rt_sync()`'s memcmp-any-field-change design intends. A further magnet swipe after
+> the edit (`count 4→5`) fired again cleanly (`active=1`) at the next window — confirms the reset
+> re-arms properly rather than getting stuck. Full fire→hold→edit-reset→re-fire chain observed on
+> real hardware. (Note: `CONFIG_LOG_MAX_LEVEL=2` on this debug build filters out the `LOG_INF`
+> "Alarm batch" line — `alarm list`'s `active` field was the load-bearing observable, not the RTT
+> log.)
+
+- [x] Pass
 
 ### X10 — H: SetParam snapshot/apply/rollback mutex-guarded against cross-transport races
 
@@ -1961,7 +2061,16 @@ concurrently (e.g. NFC + LoRaWAN downlink landing close together).
 downlink as close together as practically achievable; confirm both apply cleanly with no
 torn/partial config afterward (`config show`/`GetConfig`).
 
-- [ ] Pass
+- [x] Pass
+
+> **HW-verified (2026-08-17, SN 2162199999)**: fired `SetParam{application.interval_sample=15}`
+> as a raw (unencrypted) fPort-85 downlink via TTN and `SetParam{application.interval_report=90}`
+> over NFC secret_key auth close together (downlink queued, NFC write+check issued immediately
+> after). Both landed on the LNS/tag with `ack{}` and `config show` afterward showed
+> `interval-sample=15` AND `interval-report=90` — both applied cleanly, no torn/partial config.
+> LRW delivery took one uplink cycle to actually reach the device (fPort-85 downlinks piggyback on
+> the next scheduled/forced uplink, not instantaneous), so the overlap wasn't sub-millisecond, but
+> demonstrates the cross-transport race resolves correctly.
 
 ### X11 — M1: NFC encrypted-cmd response cache requires byte-exact match
 
@@ -1975,7 +2084,11 @@ an 8-byte header-only frame `BE32(serial)||BE32(same counter)` (per
 [[project_nfc_phone_free_testing_0811]]'s hand-crafted-frame technique) and write it; confirm it's
 rejected (red LED / no cached reply), not silently accepted.
 
-- [ ] Pass
+- [x] Pass
+
+> **HW-verified (2026-08-17, SN 2162199999)**: sent a legit encrypted GetInfo, then wrote a bare
+> 8-byte `BE32(serial)||BE32(same counter)` frame (no ciphertext/tag) at that counter —
+> `-> command rejected: -22` (EINVAL), not served a cached reply. Decisive.
 
 ### X12 — M2: `nonce_counter` preserved across `vendor_reset`
 
@@ -1988,7 +2101,14 @@ rejected (red LED / no cached reply), not silently accepted.
 `vendor_reset`, replay the recorded frame — confirm rejection (nonce already used / out of window),
 and confirm `nonce_counter` in `get_info`/`config show` did NOT drop to 0.
 
-- [ ] Pass
+- [x] Pass
+
+> **HW-verified (2026-08-17, SN 2162199999)**: recorded a legit vendor GetInfo at nonce 564,
+> executed a real `vendor_reset` (new secret_key, over the vendor channel) — confirmed via reboot
+> (DevEUI/claim_token wiped, secret_key changed, `serial_number`/`vendor_token` preserved).
+> Post-reset `nonce-counter` read back as **565** (not 0). Replaying the recorded counter-564 frame
+> was rejected (`-13`/EACCES, "nonce not greater than last used"). Fully decisive. LoRaWAN identity
+> was then restored via NFC SetParam (deveui/joineui/appkey) and the device rejoined TTN cleanly.
 
 ### X13 — M5: telemetry trigger coalesced with a queued drain still composes
 
@@ -2001,7 +2121,16 @@ telemetry frame on the LNS — no missing report for that interval.
 elapses (e.g. trigger several alarms right before the interval boundary), confirm the periodic
 telemetry frame still appears on the LNS for that interval.
 
-- [ ] Pass
+- [x] Pass (partial)
+
+> **HW-verified, partial (2026-08-17, SN 2162199999, TTN)**: armed an `onboard temperature`
+> threshold rule already violated by the live reading (immediate activation, no physical
+> stimulus needed) and left it continuously active across several `interval-report` (60 s)
+> cycles. LNS uplinks showed a steady repeating pair each cycle (plain fPort-2 telemetry +
+> a second extended-group frame, ~10 s apart) with no missing interval over ~10 cycles. Confirms
+> telemetry keeps flowing steadily with a live alarm condition in play; did not isolate the exact
+> single-tick coalescing race (would need precise `m_send_work` timing control), so counted as
+> supporting evidence rather than a fully isolated repro.
 
 ### X14 — M6: compose resets on frame abandon (regression-tested, HW confirmation only)
 
@@ -2029,7 +2158,17 @@ voltage reading (not stale/garbage).
 server repeatedly while sampling is active; confirm no hangs/resets over an extended run, and the
 reported battery level tracks `ats sensors sample`'s voltage.
 
-- [ ] Pass
+- [x] Pass
+
+> **HW-verified (2026-08-18, sticker SN 2162199999, debug build @ `ac9307f`, ChirpStack):**
+> device-profile `device_status_req_interval` temporarily 1→96 (restored to 1 afterwards,
+> verified by re-Get). `ats sensors sample` read 3.03 V; the FW mapping
+> (`battery_level_callback()` reads `app_battery_last_sample()`,
+> `raw = 1 + round(clamp((v−2.4)/1.2, 0, 1)·253)`) predicts raw 134 ≈ 52.6 %. Three
+> uplink/downlink rounds ~60–90 s apart reported ChirpStack `device_status.battery_level`
+> 53.14 % / 52.75 % / 52.75 % — all within one raw battery unit (~0.4 pp) of the prediction,
+> rounds 2–3 byte-identical (consistent with a cached value, not per-request ADC noise).
+> Uptime strictly increasing, reset cause unchanged, shell responsive throughout — no hang.
 
 ### X16 — M13: late `LinkCheckAns` not reprocessed
 
@@ -2043,7 +2182,20 @@ a single physical round trip.
 is pending (so it resolves LC implicitly), then confirm a late/duplicate `LinkCheckAns` doesn't
 also increment `m_consecutive_lc_ok` a second time (`ats radio status` consecutive-ok counter).
 
-- [ ] Pass
+- [~] Pass (best-effort — race precondition achieved, magnitude structurally unobservable)
+
+> **HW-attempted, best-effort PASS (2026-08-18, SN 2162199999, ChirpStack):** unlike the
+> 2026-08-17 TTN/ChirpStack attempts, the precondition WAS achieved this time: in WARNING
+> (3× `ats lrw lc fail`, ≥3 s apart), one enqueued fPort-85 downlink (`1a020801`, harmless
+> GetParam) was delivered in the same RX window as the `ats lrw check` LinkCheckAns (queue
+> confirmed drained). Result: exactly one clean WARNING→HEALTHY transition, `healthy->warning`
+> stayed 0/3 (no spurious failure path), no reset, no bounce. Caveat: with
+> `OK_THRESHOLD_HEALTHY = 1` a single LC success transitions immediately and resets
+> `m_consecutive_lc_ok`, so +1 vs. a buggy +2 lands on the same visible `0/1` — the counter
+> magnitude cannot distinguish the two on this config, and `debug.conf`'s
+> `CONFIG_LOG_MAX_LEVEL=2` compiles out the guard's `LOG_DBG` line. The guard itself
+> (`app_lrw.c` `lc_response_work_handler()`, `if (!m_link_check_pending) return;`) is
+> statically confirmed; no anomaly was observable on hardware with the race forced.
 
 ### X17 — M17: `app_report_suspend()` cancels pending report work
 
@@ -2094,7 +2246,30 @@ report timer also samples, with the I2C bus forced into failure (disconnect a se
 `SetParam` repeatedly while issuing `settings reset` from another channel — confirm no crash/torn
 config.
 
-- [ ] Pass
+> **Attempted (2026-08-18, SN 2162199999)**: physically disconnected the machine-probe (DS28E17
+> bridge, `i2c1`, ROM `0000000553f7`, bound slot 1) mid-session and ran repeated
+> `ats sensors sample`. Result: `ds28e17: w1_reset_select failed: -19` /
+> `app_machine_probe: ds28e17_write_config failed: -19` every sweep (the bridge chip's own i2c
+> address stops responding, as expected), but the onboard SHT4x readings kept succeeding
+> throughout — so `i2c_failed != i2c_tried` every sweep and `m_i2c_fail_streak` never reaches
+> `I2C_RECOVER_FAIL_THRESHOLD` (3). **This is correct, expected behavior, not a test failure**: a
+> clean unplug makes one device stop ACKing, it does not wedge the shared bus (SDA held low),
+> which is the specific failure mode `i2c_recover_bus()` targets. Reproducing a genuine bus-wedge
+> would need a mid-transaction short/miswire, which carries real connector risk for uncertain
+> payoff — not attempted, per the plan's own connector-risk caution for this item. Reconnected the
+> probe afterward; `w1 scan` confirmed it re-detected cleanly (slot 1 restored).
+>
+> **Second half (SetParam vs. config reset race) not attempted**: `device_reset`/`factory_reset`/
+> `vendor_reset` all reboot immediately as part of their deferred action, and forcing a genuine
+> cross-transport race with hand-timed shell/NFC commands has low confidence of actually
+> overlapping the lock window while being destructive to the current LoRaWAN identity/session —
+> not a good time/risk trade-off for a best-effort item already covered by native_sim regression
+> (per this item's own text). Left for a soak-test session with real concurrent transports
+> instead of manual timing.
+
+- [~] Partial — bus-wedge recovery path correctly NOT triggered by a clean single-device
+  disconnect (expected); genuine wedge and the SetParam/reset race remain unattempted (soak-test
+  material, not manual-timing material)
 
 ### X20 — M22: calibration TX decoupled from the blocking main loop
 
@@ -2121,6 +2296,193 @@ ends via its own deadline reboot rather than an unexplained hang/IWDG reset.
 > block the gateway) that wasn't set up this session.
 
 - [ ] Pass (full stall scenario, still owed)
+
+---
+
+## New defects + fixes (2026-08-17 v1.4.0-final campaign follow-up: #383–#386)
+
+Four additional defects found during this campaign, each fixed and (mostly) HIL-verified on the
+same worktree/bench used for X1–X20 above (SN 2162199999, J-Link 822005109).
+
+### #383 — `app_input.c` missing boot-time "prime" read (spurious edge on already-active input)
+
+**Fix:** `app_input.c` gets the same `poll_impl(bool prime)` pattern `app_hall.c` already has
+(#340 M14) — `app_input_init()` now seeds `m_input_data` from the real GPIO level once before
+starting the periodic poll timer, without treating that seed as a rise/fall edge.
+
+> **HW-verified, decisive A/B (2026-08-18, SN 2162199999)**: user physically shorted Input A
+> (PB4) to GND (confirmed independent of firmware via direct J-Link `mem32 0x48000410,1` GPIOB
+> IDR read = `0x00000000`, bit 4 low = active per `GPIO_ACTIVE_LOW`), then `cap-input-a`/
+> `input-a-counter` were enabled and committed via `settings save` (reboots) while the short stayed
+> in place across the reboot — the exact #383 scenario.
+> - **Fixed build (this branch's actual code)**: post-boot `ats sensors sample` showed
+>   `input-a: count=0 active=true` — level correctly read as active, but no rise counted. No
+>   `LOG_WRN`/`LOG_DBG` rise event in the RTT log either.
+> - **Negative control**: temporarily swapped in the pre-#383 `app_input.c` (parent commit
+>   `abe4f4a^`, unfixed `poll()`/`app_input_init()`) with the same reboot conditions (Input A still
+>   shorted) — this time the RTT log showed `XTEST: Input A activated (rise), count: 1`
+>   immediately at boot, i.e. the bug reproduces exactly as described. (Note: the *final*, steady
+>   -state `input-a-count` alone is not a usable observable for this — `app_counters_init()`
+>   overwrites it from the persisted NVS totalizer shortly after boot (issue #340 L10) — the
+>   transient rise had to be caught via a direct log at the decision point, not the settled count.)
+> - Restored the real fix afterward and reconfirmed clean (`count=0 active=true`, no rise) before
+>   moving on.
+>
+> This is a fully decisive fixed-vs-unfixed HIL comparison, not just a code-pattern match to the
+> hall fix anymore.
+
+- [x] Pass — HW-verified decisive (see above). Full `run_native.sh` (10 suites, 116 tests) and
+  `clang-format --dry-run --Werror` both clean (there's no dedicated `app_input` ztest suite; this
+  fix mirrors `app_hall.c`'s already-HIL-proven #340 M14 fix line-for-line, and is now separately
+  HIL-confirmed itself, above).
+
+### #384 — `flush_stage_pad()` silently swallows a flash-write failure at page rollover
+
+**Fix:** `flush_stage_pad()` now returns the real `flash_area_write()` status instead of `void`,
+and `advance_page()` propagates that failure instead of proceeding as if the outgoing page had
+been durably closed.
+
+> **HW-verified, pre-fix repro (2026-08-17, SN 2162199999, debug-history-flash build)**: fault
+> injection landing exactly on the page-1→page-2 rollover produced the predicted corruption —
+> records 1164-1168 read back as implausible temperatures (195-203°C), 1169-1175 as the no-data
+> sentinel. This is the original decisive evidence the issue was filed on (see X5 above).
+>
+> **Post-fix re-verification, decisive (2026-08-18, SN 2162199999)**: the first re-verify attempt
+> (still on the default temperature+humidity sensor set, `sample_size=3`) confirmed the injection
+> point is structurally unreachable there — `records_per_page()*sample_size` is an exact multiple
+> of `DW_DATA` (7) every rollover (588×3=1764=7×252), so `m_stage_len` is always exactly 0 and
+> `flush_stage_pad()`'s early return (`if (m_stage_len == 0) return 0;`) bypasses the padded write
+> this fix guards. Reconfigured the history sensor set to temperature+pressure+orientation
+> (`sample_size=5`, via `history sensors humidity off`/`pressure on`/`orientation on`, backed by
+> live-enabled `cap-barometer`/`cap-accelerometer`) — `records_per_page()=352`,
+> `352×5=1760`, `1760 mod 7 = 3`, so `m_stage_len` is nonzero at every rollover in this config.
+> Filled to the 3rd page-rollover boundary (record 1056→1057) with one fault armed
+> (`history debugfail 1`): the injection fired on an *automatic* periodic capture (not a manual
+> shell one) — RTT log showed `XTEST: injecting flush_stage_pad write failure (0 left)` followed
+> by `history append failed — record dropped`, and the stored count correctly stayed at 1056 (not
+> silently advanced). The very next capture attempt safely retried the identical rollover (fault
+> already consumed) and succeeded cleanly, advancing to 1057. `history read` across the boundary
+> (records 1043-1057) showed all-plausible temperatures (20.16-20.90°C) with no implausible
+> garbage and no unexpected no-data run — a clean pass, in stark contrast to the original pre-fix
+> repro's corruption at the same kind of boundary. This is now a fully decisive post-fix HIL
+> confirmation, not just repro + review.
+>
+> Bench restored to its pre-test sensor/capability configuration (temperature+humidity,
+> `cap-barometer`/`cap-accelerometer`/`cap-input-a` back to `false`) and the debug-only fault
+> -injection hook (`history debugfail`) reverted out of the tree before the final clean reflash.
+
+- [x] Pass — HW-verified decisive post-fix repro (see above), on top of the original pre-fix
+  corruption repro + code review + `native_sim` history suites green.
+
+### #385 — `vendor_reset` with an all-zero key returns a false-positive `Ack`
+
+**Fix:** `app_cmd_handle_vendor_reset()` now calls `buffer_is_zero()` on the replacement key and
+rejects synchronously with `BAD_REQUEST`, matching the sibling `set_secret_key` handler, instead
+of Ack'ing and letting `app_settings_vendor_reset()`'s own `key_is_set()` check silently no-op
+the deferred action later with no error surfaced to the caller.
+
+- [x] Pass — new `tests/cmd` ztest `test_vendor_reset_rejects_zero_key` (35/35 `cmd` suite tests
+  green): confirms `APP_CMD_ACTION_NONE` (no action staged) and a `BAD_REQUEST` error response for
+  an all-zero vendor_reset key, instead of the previous no-op-behind-an-Ack.
+
+### #386 — `clock set`/network time sync missing an upper (year-2100) bound
+
+**Fix:** `app_clock_set_unix()` now rejects `unix_s >= APP_CLOCK_UNIX_MAX` (4102444800,
+2100-01-01T00:00:00Z) before ever calling `gmtime_r()`/`rtc_set_time()` — closing the one path
+(`clock set` debug shell) that lacked the bound already enforced on the real network-time
+(`app_clock_handle_downlink()`) and NFC `clock_sync` Command paths.
+
+> **HW-verified (2026-08-17, SN 2162199999)**: `clock set 4102444800` correctly rejected
+> (`app_clock_set_unix failed: -22`), no reset. Caught an off-by-one in the first version of this
+> fix via HIL re-test: `unix_s > APP_CLOCK_UNIX_MAX` let the exact boundary value through and it
+> still set successfully — fixed to `>=` in a follow-up commit. Also confirmed the real
+> `clock_sync` Command path (LoRaWAN/NFC) was **never actually vulnerable** — only the debug
+> `clock set` shell command was, since `app_cmd_handle_clock_sync()` already had the same `>`
+> bound check the network-time path uses.
+
+- [x] Pass (HW-verified, boundary + off-by-one both confirmed)
+
+---
+
+## Final-review fixes (2026-08-18 pre-merge deep review)
+
+A multi-agent static review of the whole `v1.4.0` surface (8 subsystem finders, each finding
+adversarially verified) ran as the last gate before the merge to `main`. Five confirmed defects
+were fixed; every fix carries native regression coverage where the logic is host-testable.
+
+### FR-1 — deactivate edge lost when an ACTIVE rule is cleared/disabled/edited (`app_alarm.c`)
+
+`rt_sync()` reset an active latch *before* `eval_threshold()`/`eval_state()` ran, so their
+`!rule->enabled` deactivate branches could never see the pre-reset latch — the fPort-3
+deactivate edge for that alarm instance was silently skipped (dangling activate for any backend
+pairing edges; the LED/status snapshot cleared correctly, only the event was lost).
+**Fix:** `rt_sync()` emits the deactivate edge itself when resetting an active latch (clear,
+disable, and in-place edit all covered). Covered by 3 new `tests/alarm_eval` cases
+(`test_clearing/disabling/editing_active_rule_emits_deactivate_edge*`) via a new event-capture
+stub.
+
+> **HW-verified (2026-08-18, SN 2162199999, debug build @ this branch, ChirpStack):**
+> `alarm set 0 onboard temperature -50 10 0` with the bench at 22.7 °C + `alarm poll` →
+> fPort-3 activate uplink captured live via the gRPC event stream
+> (`{"event":"activate","quantity":"temperature","slot":0,...}`); `alarm clear 0` at unix
+> 1787036234 → fPort-3 **deactivate** uplink captured with device-side event time 1787036235
+> (1 s after the clear, decisively attributable):
+> `{"slot":0,"event":"deactivate","quantity":"temperature","source":"onboard","type":"high"}`.
+> No reset, uptime monotonic.
+
+### FR-2 — mid-record flash-write failure misaligns the rest of the history page (`app_history.c`)
+
+`backend_append()` streams a record as multiple double words; a write failure past the record's
+first byte left the already-flushed DWs (and, on a first-DW failure, the previous record's
+staged tail) as an unaccounted gap in the page byte stream — every later record in that page
+read back shifted/garbage (sibling of the #384 rollover bug, one layer deeper).
+**Fix:** on such a failure the page is closed (`m_head_full = true`), so the next append opens a
+fresh page and the stream re-aligns; a no-bytes-lost failure keeps the page open. Blast radius
+shrinks from "rest of the page" to "at most the failed record".
+
+### FR-3 — command Ack lost when a duty-cycle backoff outlives the reboot deferral (`app_lrw.c`)
+
+The post-command action (reboot/save/reset over the fPort-85 downlink port) fired at a fixed
+8 s, but a failed `lorawan_send()` requeues the Ack with a 15 s retry backoff — the reboot always
+won and dropped the RAM-only queued Ack. **Fix:** the action defers in 8 s steps (max 6, ~56 s
+cap) while the response queue is non-empty or a TX retry is pending.
+
+### FR-4 — `vendor_reset_allow` silently re-enabled by device/factory reset (`app_config.yml`)
+
+The field had no `persistent:` tier, so `device_reset`/`factory_reset` reset an owner's
+deliberate `false` back to the default `true`. **Fix:** `persistent: [device_reset,
+factory_reset]` (+ configen regen). `vendor_reset` still restores the default (it only runs when
+allow was true anyway). Guarded by the existing generic
+`test_reset_ops_preserve_only_their_tier` pytest.
+
+> **HW-verified (2026-08-18, SN 2162199999):** `config vendor-reset-allow false` +
+> `settings save` → `settings device-reset` → `vendor-reset-allow` still `false` after the
+> reset (other volatile config correctly back at defaults, identity/LoRaWAN keys untouched).
+> Restored to `true` afterwards.
+
+### FR-5 — debug `ats lrw compose` could feed the real uplink a stale snapshot (`app_compose.c`)
+
+The debug probe and the real TX path share one snapshot state machine as interleavable per-frame
+work items on `m_work_q`; a periodic report landing mid-debug-session drained the *debug*
+session's remaining groups as the real over-the-air uplink (milder sibling of #340 M16).
+**Fix:** the active session is tagged debug/real — the real path drops a leftover debug snapshot
+and composes fresh; the debug probe returns `-EBUSY` during an in-flight real report.
+
+### FR-6 — smaller items in the same batch
+
+- `nfc read <off> <len>` shell: `off + len` integer wraparound bypassed the range check →
+  potential 512 B+ read past `m_buf` (dev-shell only). Bounds now checked per-operand.
+  HW-verified 2026-08-18: `nfc read 10 4294967286` rejected; boundary `496 16` accepted,
+  `496 17` rejected; no crash, uptime monotonic.
+- Boot path: extra IWDG feed after the 5 s LED carousel — the init chain below gets the full
+  10 s budget instead of the remainder (thin-margin hardening, no observed overrun).
+- Dead code removed: `app_history_is_enabled()`, `app_history_sensor_name()`,
+  `app_settings_erase()` (the shell command uses the internal `erase()` directly),
+  `app_machine_probe_enable/disable_tilt_alert()` (+ the orphaned static
+  `lis2dh12_disable_alert()`; tilt alert is armed internally at scan time, `get` stays).
+- Noted, deliberately NOT changed: `tx_send_queued()` retries responses/alarms without a cap —
+  unlike bulk telemetry/history these are low-volume and precious, and the backoff retry
+  eventually succeeds; a cap would only convert late delivery into silent loss.
 
 ---
 

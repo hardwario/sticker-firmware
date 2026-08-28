@@ -97,12 +97,12 @@ and `app_report` owns the `interval_report` cadence for both transports,
 behind an `app_radio` facade (shape carried over from PR #228; mainline
 has ~40 direct `app_lrw_*` call sites that the facade must absorb).
 
-Build: dual-stack image gated by `CONFIG_APP_LORA_P2P` (default `y` on
+Build: dual-stack image gated by `CONFIG_RADIO_P2P` (default `y` on
 release; `n` on the flash-tight debug overlay). `CONFIG_LORA=y` (Zephyr raw
 LoRa driver) is already present in the release configuration today, so no new
 driver Kconfig is needed. Flash headroom against the current `0x34000` budget
 was re-measured — see §11 — release has room, debug does not and keeps
-`CONFIG_APP_LORA_P2P=n`.
+`CONFIG_RADIO_P2P=n`.
 
 ---
 
@@ -619,12 +619,12 @@ phone app step is needed for P2P at all, one-time or otherwise.
   can be swept without a full re-join while measuring northbridge
   scheduled-TX precision during phase 3 (§13).
 - **Flash budget** — re-measure the dual-stack image against `0x34000`;
-  decide whether debug keeps `CONFIG_APP_LORA_P2P=n`. **Measured 2026-08-17**
+  decide whether debug keeps `CONFIG_RADIO_P2P=n`. **Measured 2026-08-17**
   (current `v1.4.0` tip, no P2P code yet — this is the baseline the dual-stack
   addition must fit into): release `153116 B / 212992 B (0x34000) = 71.89%`,
   **~58.5 KB (28.1 %) free**; debug `240900 B / 245760 B = 98.02%`, only
   **~4.75 KB (1.98 %) free**. Release has comfortable headroom; debug does
-  not — confirms debug keeps `CONFIG_APP_LORA_P2P=n` (same lever already used
+  not — confirms debug keeps `CONFIG_RADIO_P2P=n` (same lever already used
   to drop AU915/US915 from debug.conf, see the debug build RAM+flash coupling
   fix from issue #340) unless debug frees up budget elsewhere first.
 - **Device-side duty-cycle enforcement** — §6/§8 only describe duty-cycle
@@ -927,7 +927,7 @@ issue #394.** While chasing what looked like TX silence, the DUT's shell
 went completely unresponsive a few seconds after boot. Turned out to be a
 reproducible BusFault/UsageFault from the *mainline* `debug.conf`'s system
 heap writing past the physical end of RAM (`0x20010000` on this 64 KB
-part) — reproduced identically with `CONFIG_APP_LORA_P2P` entirely
+part) — reproduced identically with `CONFIG_RADIO_P2P` entirely
 disabled, so this is a `debug.conf` RAM-budget problem, not a P2P bug. The
 bench overlay (`app/debug_p2p_bench.conf`) has its own local fix (trimmed
 history/log/RTT buffers + `CONFIG_MAIN_STACK_SIZE`, verified via

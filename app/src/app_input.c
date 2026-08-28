@@ -30,7 +30,11 @@ static struct app_input_data m_input_data;
 
 K_MUTEX_DEFINE(m_input_data_mutex);
 
-static int poll(void)
+/* #383: `prime` seeds m_input_data from the real GPIO level without treating it
+ * as a rise/fall edge — used once at init so an input already asserted before
+ * boot isn't reported as a brand-new activation on the first periodic poll
+ * (mirrors app_hall.c's #340 M14 fix). */
+static int poll_impl(bool prime)
 {
 	bool input_a_is_active = false;
 	bool input_b_is_active = false;
@@ -66,10 +70,10 @@ static int poll(void)
 
 	k_mutex_lock(&m_input_data_mutex, K_FOREVER);
 
-	bool a_rise = (!m_input_data.input_a_is_active && input_a_is_active);
-	bool a_fall = (m_input_data.input_a_is_active && !input_a_is_active);
-	bool b_rise = (!m_input_data.input_b_is_active && input_b_is_active);
-	bool b_fall = (m_input_data.input_b_is_active && !input_b_is_active);
+	bool a_rise = !prime && (!m_input_data.input_a_is_active && input_a_is_active);
+	bool a_fall = !prime && (m_input_data.input_a_is_active && !input_a_is_active);
+	bool b_rise = !prime && (!m_input_data.input_b_is_active && input_b_is_active);
+	bool b_fall = !prime && (m_input_data.input_b_is_active && !input_b_is_active);
 
 	m_input_data.input_a_is_active = input_a_is_active;
 	m_input_data.input_b_is_active = input_b_is_active;
@@ -108,6 +112,11 @@ static int poll(void)
 	}
 
 	return 0;
+}
+
+static int poll(void)
+{
+	return poll_impl(false);
 }
 
 static void input_poll_work_handler(struct k_work *work)
@@ -154,6 +163,15 @@ int app_input_init(void)
 	ret = gpio_pin_configure_dt(&m_input_b, GPIO_INPUT);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("gpio_pin_configure_dt", ret);
+		return ret;
+	}
+
+	/* #383: seed m_input_data from the real level before the periodic timer's
+	 * first tick, so an input already asserted at boot isn't latched as a fresh
+	 * activation edge (spurious counter increment + alarm event). */
+	ret = poll_impl(true);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("poll_impl", ret);
 		return ret;
 	}
 

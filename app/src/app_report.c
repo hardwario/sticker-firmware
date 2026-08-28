@@ -130,7 +130,8 @@ static void run_report(bool periodic)
 
 	/* Hand off to the transport: it composes the snapshot and splits it into
 	 * budget frames (DR-budget + LC piggyback + duty-cycle retry for LoRaWAN;
-	 * fixed MTU + app-side duty-cycle for P2P). */
+	 * fixed MTU + app-side duty-cycle for P2P). app_radio dispatches, and
+	 * handles a build with neither transport compiled in. */
 	app_radio_send_telemetry();
 }
 
@@ -154,7 +155,9 @@ static void report_timer_handler(struct k_timer *timer)
 
 /* Link-ready edge from the transport (join success / history-replay finish):
  * send an immediate report to drain the buffered history, but leave the fixed
- * cadence (and its history capture) untouched. */
+ * cadence (and its history capture) untouched. Registered via app_radio, so
+ * this is needed on a P2P-only build too -- it must not be CONFIG_LORAWAN
+ * gated (as it was before #118's app_radio facade). */
 static void report_kick(void)
 {
 	k_work_submit_to_queue(&m_work_q, &m_trigger_work);
