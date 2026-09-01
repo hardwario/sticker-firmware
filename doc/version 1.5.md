@@ -11,6 +11,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Buzzer | **New** — alarm-driven melodies (#397, Phase 2 of #338): the buzzer HW variant now sounds automatically while any alarm is active, gated on a new global `alarm-buzzer-mode` config key |
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
+| LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
 
 ---
 
@@ -129,6 +130,68 @@ unchanged from the previous hard-blink carousel, so the overall boot animation
 length is identical — only the red/green transitions are now smooth. HW-
 confirmed on the bench (J-Link EDU Mini 801053709, SN 2162165627): red and
 green fade smoothly, yellow blinks as before.
+
+---
+
+## 4. Autonomous settings-info uplink after boot (#412)
+
+Every boot, once the device joins, it announces itself with an autonomous
+`GetInfo` uplink on fPort 85 (`on_join_success()` → `queue_info_uplink()`). The
+network server, however, had no picture of the device's **configuration** unless
+it actively polled with `GetParam` / `GetConfig` downlinks — so after any local
+reconfiguration (shell / NFC), the LNS copy stayed stale until someone asked.
+
+This adds a **second autonomous fPort-85 uplink right after the boot `Info`**: a
+single-page `Response.ConfigDump` (`page_index = 0`, `page_count = 1`) carrying a
+fixed selection of the key operating settings. Because `settings save` cold-reboots
+and every boot re-joins, this **re-announces the effective config automatically**
+after every persisted change — no diff-tracking, no extra state.
+
+**Contents:**
+
+| Group | Fields |
+|---|---|
+| `application` | `interval_sample`, `interval_report`, `history_enable` |
+| `sensors` | `cap_hall_left` … `cap_accelerometer` (all nine capability flags, emitted explicitly incl. `false`) |
+| `w1_slot_type` | detected 1-Wire sensor type per logical slot 1..4 |
+
+`w1_slot_type` (`ConfigDump` field 7, packed `repeated uint32`) reports what is
+physically attached to each 1-Wire slot. Its values mirror the firmware's single
+source of truth, `enum app_w1_slot_type` (`app_w1_slots.h`):
+
+| Value | Meaning |
+|:-:|---|
+| 0 | empty |
+| 1 | dallas (DS18B20) |
+| 2 | machine-probe (DS28E17) |
+
+Adding a new sensor family is a one-place change to that enum + the type registry
+in `app_w1_slots.c`; the new value flows onto the wire automatically (the proto
+stays a raw `uint32`, so no schema change). A decoder that predates a value renders
+it as `type<N>` rather than failing.
+
+**Decoded example** (as the LNS sees it):
+
+```json
+{ "config_dump": { "page_index": 0, "page_count": 1,
+    "application": { "interval_sample": 60, "interval_report": 900, "history_enable": false },
+    "sensors": { "cap_hall_left": true, "cap_hall_right": false, "cap_input_a": true,
+                 "cap_input_b": false, "cap_light_sensor": true, "cap_barometer": false,
+                 "cap_pir_detector": false, "cap_w1_sensors": true, "cap_accelerometer": false },
+    "w1_slot_type": ["machine-probe", "dallas", "empty", "empty"] } }
+```
+
+**Notes:**
+
+- ~46 B encoded incl. the `APP_PROTO_VERSION` byte — fits the EU868 DR0 budget
+  (51 B) and the 64 B response buffer, so it is never dropped whole at a low DR.
+- **Zero proto/decoder disruption** otherwise: `ConfigDump`,
+  `app_config_fill_application()` / `fill_sensors()` (selected-ids fill), and the
+  `ttn.js` `_decodeConfigDump()` already handle the config fields.
+- The **persisted 1-Wire slot ROM serials** are *not* in this frame (to keep it one
+  DR0 uplink); a host that wants them reads `GetParam(sensors 11..14)`.
+- `w1_slot_type` is runtime state, filled **only** by this boot uplink — a plain
+  `GetConfig` / `GetParam` reply stays a pure config snapshot and never carries it.
 
 ---
 
