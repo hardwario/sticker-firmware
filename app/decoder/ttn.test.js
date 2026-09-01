@@ -128,6 +128,29 @@ test("config_dump renders cap_buzzer (sensors tag 19) (#340 M20)", () => {
   assert.equal(u.config_dump.sensors.cap_buzzer, 1);
 });
 
+// #412: the boot settings-info uplink carries the detected 1-Wire slot type per
+// slot in ConfigDump.w1_slot_type (field 7, packed repeated uint32). Names mirror
+// enum app_w1_slot_type: 0=empty, 1=dallas, 2=machine-probe (same _W1_SLOT_TYPES
+// map as the fPort-2 telemetry per-slot type).
+test("config_dump decodes w1_slot_type (packed, #412)", () => {
+  // Response{ config_dump: ConfigDump{ page_count:1, w1_slot_type:[2,1,0,0] } },
+  // 1-byte version prefix: 01 | 22 08 (config_dump, len 8) | 10 01 (page_count=1)
+  //                              | 3a 04 02 01 00 00 (field7 packed: 2,1,0,0)
+  const dump = hex("01220810013a0402010000");
+  const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
+  assert.equal(u.config_dump.page_count, 1);
+  assert.deepEqual(u.config_dump.w1_slot_type, ["machine-probe", "dallas", "empty", "empty"]);
+});
+
+// An unknown/newer slot type from a future firmware must not break an older
+// decoder — it falls back to "type<N>" instead of undefined.
+test("config_dump w1_slot_type unknown value falls back to type<N> (#412)", () => {
+  // ConfigDump{ w1_slot_type:[7] }: 01 | 22 03 | 3a 01 07
+  const dump = hex("0122033a0107");
+  const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
+  assert.deepEqual(u.config_dump.w1_slot_type, ["type7"]);
+});
+
 // --- Uplink: legacy bitmap (fPort 1) --------------------------------------
 test("decodeUplink decodes legacy bitmap (fPort 1)", () => {
   const got = codec.decodeUplink({ bytes: hex("7a01a109fa580258"), fPort: 1 });
