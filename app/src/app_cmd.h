@@ -140,6 +140,16 @@ const uint8_t *app_cmd_take_pending_vendor_secret_key(void);
  * NULL argument, or -EMSGSIZE if `out_cap` is too small. */
 int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len);
 
+/* Build an unsolicited settings-info frame (Response{ seq=0, config_dump=... },
+ * one page, page_count=1) into `out`. Carries a fixed selection of the key
+ * operating settings — application interval_sample/interval_report/history_enable,
+ * the sensor cap_* capabilities, and (when 1-Wire is present) the detected
+ * per-slot w1_slot_type — so the network learns the effective config on join
+ * without polling (#412). Byte-identical to a GetConfig reply apart from the
+ * runtime-only w1_slot_type. Returns 0 with *out_len set, -EINVAL on a NULL
+ * argument, or -EMSGSIZE if `out_cap` is too small. */
+int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len);
+
 /* Staging buffer for one LoRaWAN history-replay frame (version byte + Response{
  * seq, history_frame } protobuf). Sized to exceed the largest EU868 payload (242 B
  * at DR4/5) so it holds a full frame at every LoRaWAN data rate and the transmit

@@ -374,6 +374,67 @@ ZTEST(cmd, test_build_info)
 	zassert_false(r.body.info.has_claim_token, "claim_token must be omitted when unset");
 }
 
+/* #412: the autonomous boot settings-info uplink is a single-page ConfigDump
+ * carrying the key operating settings — application interval_sample/report +
+ * history_enable, the sensor cap_* capabilities, and (on target) the detected
+ * per-slot w1_slot_type. It must decode as a ConfigDump, report page 0 of 1,
+ * echo the selected settings, and stay within the EU868 DR0 payload budget. */
+ZTEST(cmd, test_build_config_status)
+{
+	uint8_t out[128];
+	size_t out_len = 0;
+
+	reset_cfg();
+	g_app_config.interval_sample = 60;
+	g_app_config.interval_report = 900;
+	g_app_config.history_enable = true;
+	g_app_config.cap_hall_left = true;
+	g_app_config.cap_accelerometer = true;
+
+	int ret = app_cmd_build_config_status(out, sizeof(out), &out_len);
+	zassert_equal(ret, 0, "build_config_status ret %d", ret);
+
+	/* Fits the smallest EU868 application payload (DR0 = 51 B), incl. the
+	 * APP_PROTO_VERSION prefix — so it is never dropped whole at a low DR. */
+	zassert_true(out_len <= 51, "settings-info too large for DR0: %zu B", out_len);
+
+	zassert_equal(out[0], APP_PROTO_VERSION, "bad version 0x%02x", out[0]);
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+
+	zassert_equal(r.which_body, Response_config_dump_tag, "expected ConfigDump, which=%d",
+		      r.which_body);
+	zassert_equal(r.body.config_dump.page_index, 0, "page_index");
+	zassert_equal(r.body.config_dump.page_count, 1, "page_count %u",
+		      r.body.config_dump.page_count);
+
+	zassert_true(r.body.config_dump.has_application, "application section missing");
+	zassert_true(r.body.config_dump.application.has_interval_sample, "interval_sample missing");
+	zassert_equal(r.body.config_dump.application.interval_sample, 60, "interval_sample");
+	zassert_true(r.body.config_dump.application.has_interval_report, "interval_report missing");
+	zassert_equal(r.body.config_dump.application.interval_report, 900, "interval_report");
+	zassert_true(r.body.config_dump.application.has_history_enable, "history_enable missing");
+	zassert_true(r.body.config_dump.application.history_enable, "history_enable value");
+
+	zassert_true(r.body.config_dump.has_sensors, "sensors section missing");
+	/* All nine caps ship explicitly (even the false ones, via has_ flags) so the
+	 * network sees the full capability picture. */
+	zassert_true(r.body.config_dump.sensors.has_cap_hall_left, "cap_hall_left missing");
+	zassert_true(r.body.config_dump.sensors.cap_hall_left, "cap_hall_left value");
+	zassert_true(r.body.config_dump.sensors.has_cap_accelerometer, "cap_accelerometer missing");
+	zassert_true(r.body.config_dump.sensors.cap_accelerometer, "cap_accelerometer value");
+	zassert_true(r.body.config_dump.sensors.has_cap_barometer,
+		     "cap_barometer must be explicit");
+	zassert_false(r.body.config_dump.sensors.cap_barometer, "cap_barometer default false");
+
+	/* This native build has no CONFIG_W1 (APP_CMD_HAVE_W1 undefined), so the
+	 * runtime-only slot-type list is compiled out; the wire encoding of
+	 * w1_slot_type is covered by the decoder regression test (ttn.test.js). */
+	zassert_equal(r.body.config_dump.w1_slot_type_count, 0,
+		      "w1_slot_type must be empty without CONFIG_W1");
+}
+
 /* sample over NFC: the device answers synchronously with the fresh telemetry
  * snapshot (Response.sample) so the phone can show the readings. */
 ZTEST(cmd, test_sample_over_nfc)
