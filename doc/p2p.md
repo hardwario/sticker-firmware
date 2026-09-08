@@ -433,15 +433,35 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   under the session key, `counter` echoing the uplink counter. At SF10/125 kHz
   an ACK is ≈ 250 ms time-on-air — the gateway→central→gateway decision must
   fit inside the ~1 s budget, hence the LAN requirement.
-  **Implemented (B1/B5, PR #408, v1.5.0; matches proximos-v2 MR!30 S1/S3):**
-  the ACK body is `flags(1) | rssi(i8) | snr(i8)` — bit 0 downlink pending, bit
-  1 a Unix-time tail present — with an optional 4-byte big-endian Unix-time
-  tail (B5 clock sync → `app_clock_set_unix()`). `rssi`/`snr` are the central's
-  measurement of the acknowledged uplink (B1), surfaced by `ats radio status`.
-  The body is **not wire-versioned** (P2P is pre-deployment): its length is
-  self-describing (3 B or 7 B), so the node derives it from the received frame
-  length. Node-side layout: `header | flags | rssi | snr | [unix_be32 if bit1]
-  | tag`.
+  **Implemented (B1/B5 + D2, v1.5.0):** the ACK body is
+  `flags(1) | rssi(i8) | snr(i8)`, optionally followed by the pending
+  downlink's on-air length and a 4-byte big-endian Unix-time tail (B5 clock
+  sync → `app_clock_set_unix()`). `rssi`/`snr` are the central's measurement
+  of the acknowledged uplink (B1), surfaced by `ats radio status`.
+
+  ```
+  header | flags | rssi | snr | [pending_frame_len if bit0] | [unix_be32 if bit1] | tag
+  ```
+
+  Valid body lengths are therefore **3, 4, 7 and 8**. The body is **not
+  wire-versioned** (P2P is pre-deployment): it is self-describing by length, so
+  the node derives the shape from the received frame length and treats the
+  flags as a refinement, never the authority — a flag claiming a field the
+  frame is too short to hold is ignored rather than trusted. That tolerance is
+  also what let the length byte be added without a version: a central still
+  emitting the old 3/7-byte body with bit 0 set reads as "pending, length
+  unknown", and the node falls back to the 255 B worst-case window until the
+  byte appears.
+
+  `pending_frame_len` is the **total on-air length** of the next `0x56`
+  (11 B header + ciphertext + 4 B tag), so the node sizes its RX1 window for
+  exactly that frame. This matters more than it looks: this driver has no
+  hardware symbol timeout, so the window must outlast the *whole* expected
+  frame or a real command is aborted mid-reception (§3.3) — which is why the
+  pre-D2 node had to open for a 255 B worst case whenever anything was
+  pending. At SF10 a 2 B GetInfo (17 B on air) drops the receiver-on from
+  **2434 ms to 468 ms**. With nothing pending the window is 23 B, sized for a
+  fully-extended ACK.
 - **Retries**: unacknowledged uplinks retransmit **the same counter value**
   (byte-identical frame) up to 3 times with randomized backoff. The central
   treats `counter == high-water` as a duplicate: re-ACK, don't re-process.

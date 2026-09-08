@@ -31,21 +31,37 @@ extern "C" {
 #define P2P_DUTY_PERMILLE  10    /* 1% duty cycle (per mille) */
 #define P2P_DUTY_BUDGET_MS 36000 /* bucket capacity = 1% of one hour */
 
-/* Ack (0xFA) body layout (B1 rssi/snr + B5 optional time tail), doc/p2p.md §6.
- * Shared with the pure parser and tests/p2p_logic. */
-#define P2P_ACK_FLAG_PENDING  0x01 /* bit 0: a downlink command is pending (B4) */
-#define P2P_ACK_FLAG_TIME     0x02 /* bit 1: 4-byte Unix time tail present (B5) */
-#define P2P_ACK_BODY_BASE_LEN 3    /* flags | rssi_i8 | snr_i8 */
-#define P2P_ACK_TIME_LEN      4    /* optional big-endian Unix seconds */
-#define P2P_ACK_BODY_MAX_LEN  (P2P_ACK_BODY_BASE_LEN + P2P_ACK_TIME_LEN) /* 7 */
+/* Ack (0xFA) body layout, doc/p2p.md §6:
+ *
+ *   flags(1) | rssi(i8) | snr(i8) | [pending_frame_len(1) if bit0] |
+ *   [unix_be32 if bit1]
+ *
+ * giving valid lengths 3, 4, 7 and 8. The body is NOT wire-versioned (P2P is
+ * pre-deployment) -- it is self-describing by length, so the node derives the
+ * shape from the received frame length and treats the flags as a refinement,
+ * never as the authority. Shared with the pure parser and tests/p2p_logic. */
+#define P2P_ACK_FLAG_PENDING    0x01 /* bit 0: a downlink command is pending (B4) */
+#define P2P_ACK_FLAG_TIME       0x02 /* bit 1: 4-byte Unix time tail present (B5) */
+#define P2P_ACK_BODY_BASE_LEN   3    /* flags | rssi_i8 | snr_i8 */
+#define P2P_ACK_PENDING_LEN_LEN 1    /* optional on-air length of the pending 0x56 */
+#define P2P_ACK_TIME_LEN        4    /* optional big-endian Unix seconds */
+#define P2P_ACK_BODY_MAX_LEN                                                                       \
+	(P2P_ACK_BODY_BASE_LEN + P2P_ACK_PENDING_LEN_LEN + P2P_ACK_TIME_LEN) /* 8 */
 
-/* Parsed Ack body (B1/B5), filled by p2p_parse_ack_body(). */
+/* Parsed Ack body, filled by p2p_parse_ack_body(). */
 struct p2p_ack_info {
 	uint8_t flags;      /* raw flags byte (P2P_ACK_FLAG_*) */
 	int8_t rssi;        /* central-measured uplink RSSI, dBm */
 	int8_t snr;         /* central-measured uplink SNR, dB */
 	bool time_present;  /* a valid Unix time tail was present */
 	uint32_t unix_time; /* wall-clock seconds (valid iff time_present) */
+	/* Total on-air length of the NEXT 0x56 the central will deliver
+	 * (11 B header + ciphertext + 4 B tag), so the node can size its RX1
+	 * window exactly instead of opening for a 255 B worst case. False when
+	 * the central is still on the pre-announcement 3/7-byte body -- the
+	 * node then falls back to the old worst case (doc/p2p.md §6). */
+	bool pending_len_present;
+	uint8_t pending_frame_len;
 };
 
 /* Token-bucket duty-cycle governor state (B2). Defined here so tests/p2p_logic

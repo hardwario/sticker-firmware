@@ -346,8 +346,14 @@ static bool m_last_ack_valid;
 
 /* B4: the last Ack's "downlink pending" flag -- when set, the central will
  * deliver a 0x56 COMMAND in the RX1 window of the NEXT uplink (replacing that
- * uplink's Ack), so that window must be sized for a full command frame. */
+ * uplink's Ack), so that window must be sized for a command frame. */
 static bool m_downlink_pending;
+
+/* D2: the on-air length that Ack announced for the pending 0x56, so the next
+ * RX1 window is sized exactly instead of for a 255 B worst case. 0 means "not
+ * announced" -- either nothing is pending, or the central is still emitting
+ * the pre-D2 3/7-byte Ack body; both fall back to P2P_FRAME_MAX. */
+static uint8_t m_pending_frame_len;
 
 struct p2p_tx_msg {
 	uint8_t type;
@@ -710,6 +716,7 @@ static int pairing_clear(void)
 	m_started = false;
 	m_last_ack_valid = false;
 	m_downlink_pending = false;
+	m_pending_frame_len = 0;
 	m_tx_deferred_valid = false;
 	k_msgq_purge(&m_ack_retry_msgq);
 	k_msgq_purge(&m_tx_msgq);
@@ -944,21 +951,63 @@ P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
 	return MIN(ms, (uint32_t)P2P_REJOIN_BACKOFF_MAX_MS);
 }
 
-/* Parse a decrypted Ack body (B1/B5): base (3 B, flags|rssi|snr) or
- * time-extended (7 B, + big-endian Unix seconds when flags bit 1 is set).
+/* Parse a decrypted Ack body (app_p2p.h): flags|rssi|snr, optionally followed
+ * by the pending 0x56's on-air length (D2) and/or a big-endian Unix time tail.
+ *
+ * The LENGTH decides the shape and the flags only refine it, never the other
+ * way round. That asymmetry is deliberate and pre-dates the length byte: a
+ * flag claiming a field the frame is too short to hold is ignored rather than
+ * trusted, so a central that over-claims cannot walk this parser off the end
+ * of the body. It is also what makes the length byte adoptable without a wire
+ * version -- a central still emitting the old 3/7-byte body with bit 0 set is
+ * read as "pending, length unknown", and the caller falls back to the 255 B
+ * worst-case window until the byte appears.
+ *
+ *   3 B  base                          (bit 1 without a tail is ignored)
+ *   4 B  base + pending_frame_len      requires bit 0
+ *   7 B  base + time                   bit 0 without the length byte = legacy
+ *   8 B  base + pending_frame_len + time
+ *
  * Pure -- exposed to tests/p2p_logic. Returns false on any other length. */
 P2P_TESTABLE bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out)
 {
-	if (body_len != P2P_ACK_BODY_BASE_LEN && body_len != P2P_ACK_BODY_MAX_LEN) {
+	bool has_len;
+	size_t time_off;
+
+	switch (body_len) {
+	case P2P_ACK_BODY_BASE_LEN: /* 3 */
+		has_len = false;
+		time_off = 0; /* no room for a tail */
+		break;
+	case P2P_ACK_BODY_BASE_LEN + P2P_ACK_PENDING_LEN_LEN: /* 4 */
+		if (!(body[0] & P2P_ACK_FLAG_PENDING)) {
+			return false; /* a length byte with nothing pending */
+		}
+		has_len = true;
+		time_off = 0;
+		break;
+	case P2P_ACK_BODY_BASE_LEN + P2P_ACK_TIME_LEN: /* 7 */
+		has_len = false;
+		time_off = P2P_ACK_BODY_BASE_LEN;
+		break;
+	case P2P_ACK_BODY_MAX_LEN: /* 8 */
+		if (!(body[0] & P2P_ACK_FLAG_PENDING)) {
+			return false;
+		}
+		has_len = true;
+		time_off = P2P_ACK_BODY_BASE_LEN + P2P_ACK_PENDING_LEN_LEN;
+		break;
+	default:
 		return false;
 	}
 
 	out->flags = body[0];
 	out->rssi = (int8_t)body[1];
 	out->snr = (int8_t)body[2];
-	out->time_present =
-		(body_len == P2P_ACK_BODY_MAX_LEN) && ((out->flags & P2P_ACK_FLAG_TIME) != 0);
-	out->unix_time = out->time_present ? sys_get_be32(&body[3]) : 0;
+	out->pending_len_present = has_len;
+	out->pending_frame_len = has_len ? body[P2P_ACK_BODY_BASE_LEN] : 0;
+	out->time_present = (time_off != 0) && ((out->flags & P2P_ACK_FLAG_TIME) != 0);
+	out->unix_time = out->time_present ? sys_get_be32(&body[time_off]) : 0;
 	return true;
 }
 
@@ -1308,14 +1357,27 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	uint8_t buf[P2P_FRAME_MAX];
 	int16_t rssi;
 	int8_t snr;
-	/* Size the window for the largest downlink the central may send. Normally
-	 * that is the time-extended Ack; once a downlink has been announced (B4),
-	 * a full-size 0x56 command may arrive INSTEAD, so size for a max frame --
-	 * that longer RX-on is the measurable power cost of a pending downlink
-	 * (doc/p2p.md §6), which is why the central only sets pending deliberately. */
-	uint8_t want_max = m_downlink_pending
-				   ? P2P_FRAME_MAX
-				   : (uint8_t)(P2P_HDR_LEN + P2P_ACK_BODY_MAX_LEN + P2P_TAG_LEN);
+	/* Size the window for the largest downlink the central may send. With
+	 * nothing pending that is the fully-extended Ack (23 B). Once a downlink
+	 * has been announced (B4) a 0x56 arrives INSTEAD of the Ack, and the
+	 * receiver must stay on for its whole time-on-air -- this driver's
+	 * "timeout" aborts an in-flight reception (see p2p_rx1_timeout_ms), so a
+	 * window sized short truncates a real command mid-frame.
+	 *
+	 * D2: the announcing Ack now carries that frame's exact length, so the
+	 * window costs only what the command actually needs -- at SF10 a 2 B
+	 * GetInfo drops the receiver-on from 2434 ms to 468 ms. Without the byte
+	 * (central not yet upgraded) fall back to the 255 B worst case, which is
+	 * the pre-D2 behaviour. */
+	uint8_t want_max;
+
+	if (!m_downlink_pending) {
+		want_max = (uint8_t)(P2P_HDR_LEN + P2P_ACK_BODY_MAX_LEN + P2P_TAG_LEN);
+	} else if (m_pending_frame_len != 0) {
+		want_max = m_pending_frame_len;
+	} else {
+		want_max = P2P_FRAME_MAX;
+	}
 
 	int len = p2p_rx_window(tx_end_ms, m_rx1_delay_s, want_max, buf, sizeof(buf), &rssi, &snr);
 
@@ -1407,9 +1469,11 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 		return true;
 	}
 
-	/* --- Ack (0xFA): B1 rssi/snr + B5 time tail --- */
-	if (frame_type != APP_P2P_FRAME_ACK ||
-	    (body_len != P2P_ACK_BODY_BASE_LEN && body_len != P2P_ACK_BODY_MAX_LEN)) {
+	/* --- Ack (0xFA): rssi/snr + optional pending length and time tail --- */
+	/* Bound the body before spending a decrypt; p2p_parse_ack_body() below
+	 * does the exact 3/4/7/8 validation once the plaintext is in hand. */
+	if (frame_type != APP_P2P_FRAME_ACK || body_len < P2P_ACK_BODY_BASE_LEN ||
+	    body_len > P2P_ACK_BODY_MAX_LEN) {
 		return false;
 	}
 
@@ -1437,16 +1501,30 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	m_last_ack_snr = ack.snr;
 	m_last_ack_valid = true;
 
-	/* B4: remember whether to size the NEXT uplink's window for a command. */
+	/* B4/D2: remember whether -- and how large -- to size the NEXT uplink's
+	 * window. Clamp defensively: a corrupt-but-authentic byte below a bare
+	 * header+tag or above the PHY limit would otherwise produce a window
+	 * that cannot hold any frame at all. */
 	m_downlink_pending = (ack.flags & P2P_ACK_FLAG_PENDING) != 0;
+	m_pending_frame_len = ack.pending_len_present
+				      ? (uint8_t)CLAMP(ack.pending_frame_len,
+						       P2P_HDR_LEN + P2P_TAG_LEN, P2P_FRAME_MAX)
+				      : 0;
 
 	/* B5: apply the wall-clock time tail if present. */
 	if (ack.time_present) {
 		(void)app_clock_set_unix(ack.unix_time);
 	}
 
-	LOG_INF("Ack (counter %u) rssi=%d snr=%d%s%s", counter, m_last_ack_rssi, m_last_ack_snr,
-		m_downlink_pending ? " [pending]" : "", ack.time_present ? " [time]" : "");
+	if (m_pending_frame_len != 0) {
+		LOG_INF("Ack (counter %u) rssi=%d snr=%d [pending] pending_len=%u%s", counter,
+			m_last_ack_rssi, m_last_ack_snr, m_pending_frame_len,
+			ack.time_present ? " [time]" : "");
+	} else {
+		LOG_INF("Ack (counter %u) rssi=%d snr=%d%s%s", counter, m_last_ack_rssi,
+			m_last_ack_snr, m_downlink_pending ? " [pending]" : "",
+			ack.time_present ? " [time]" : "");
+	}
 	return true;
 }
 
@@ -1774,6 +1852,7 @@ static void mark_ready(void)
 	 * from the old session no longer apply. */
 	m_last_ack_valid = false;
 	m_downlink_pending = false;
+	m_pending_frame_len = 0;
 
 	m_started = true;
 	if (m_ready_cb) {

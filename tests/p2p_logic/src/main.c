@@ -187,8 +187,7 @@ ZTEST(p2p_logic, test_build_frame_empty_body_roundtrip)
 	const uint32_t counter = 4242;
 
 	for (uint8_t i = 0; i < 2; i++) {
-		const uint8_t frame_type =
-			i ? APP_P2P_FRAME_REJOIN_REQUEST : APP_P2P_FRAME_DETACH;
+		const uint8_t frame_type = i ? APP_P2P_FRAME_REJOIN_REQUEST : APP_P2P_FRAME_DETACH;
 		uint8_t frame[P2P_HDR_LEN + P2P_TAG_LEN]; /* 15 B, no ciphertext */
 
 		zassert_ok(build_frame_keyed(net_id, dev_addr, k_session_key, frame_type, NULL, 0,
@@ -455,7 +454,10 @@ ZTEST(p2p_logic, test_ack_body_base)
 
 ZTEST(p2p_logic, test_ack_body_with_time)
 {
-	uint8_t body[P2P_ACK_BODY_MAX_LEN] = {0};
+	/* The 7 B time form, spelled out rather than as P2P_ACK_BODY_MAX_LEN:
+	 * D2 grew the max to 8 (base + length + time), and this test is about
+	 * the shape with no length byte. */
+	uint8_t body[P2P_ACK_BODY_BASE_LEN + P2P_ACK_TIME_LEN] = {0};
 
 	body[0] = P2P_ACK_FLAG_TIME;
 	body[1] = (uint8_t)(int8_t)-110; /* rssi */
@@ -481,14 +483,91 @@ ZTEST(p2p_logic, test_ack_body_time_bit_without_tail_is_ignored)
 	zassert_false(info.time_present, "time flag with no tail must be ignored");
 }
 
-ZTEST(p2p_logic, test_ack_body_bad_length_rejected)
+/* D2: the announcing Ack states the pending 0x56's on-air length so the node
+ * can size its RX1 window exactly. 4 B = base + length. */
+ZTEST(p2p_logic, test_ack_body_pending_len)
 {
-	uint8_t body[8] = {0};
+	uint8_t body[4] = {P2P_ACK_FLAG_PENDING, (uint8_t)(int8_t)-71, (uint8_t)(int8_t)7, 17};
 	struct p2p_ack_info info;
 
+	zassert_true(p2p_parse_ack_body(body, sizeof(body), &info), "4 B body must parse");
+	zassert_equal(info.rssi, -71, "rssi wrong");
+	zassert_equal(info.snr, 7, "snr wrong");
+	zassert_true(info.pending_len_present, "length byte must be reported present");
+	zassert_equal(info.pending_frame_len, 17, "a 2 B command is 11+2+4 = 17 B on air");
+	zassert_false(info.time_present, "no time tail in a 4 B body");
+}
+
+/* 8 B = base + length + time: the length byte precedes the tail, so a parser
+ * that read the tail from a fixed offset 3 would decode garbage. */
+ZTEST(p2p_logic, test_ack_body_pending_len_with_time)
+{
+	uint8_t body[P2P_ACK_BODY_MAX_LEN] = {0};
+	struct p2p_ack_info info;
+
+	body[0] = P2P_ACK_FLAG_PENDING | P2P_ACK_FLAG_TIME;
+	body[1] = (uint8_t)(int8_t)-110;
+	body[2] = (uint8_t)(int8_t)-3;
+	body[3] = 55;
+	sys_put_be32(1735689600u, &body[4]);
+
+	zassert_true(p2p_parse_ack_body(body, sizeof(body), &info), "8 B body must parse");
+	zassert_equal(info.rssi, -110, "rssi wrong");
+	zassert_equal(info.snr, -3, "snr wrong");
+	zassert_true(info.pending_len_present, "length byte must be present");
+	zassert_equal(info.pending_frame_len, 55, "length byte wrong");
+	zassert_true(info.time_present, "time tail must be present");
+	zassert_equal(info.unix_time, 1735689600u, "time tail decoded from the wrong offset");
+}
+
+/* Transitional tolerance: a central still emitting the pre-D2 body with bit 0
+ * set means "pending, length unknown" -- it must parse, with the caller left
+ * to fall back to the 255 B worst-case window. Both legacy shapes.
+ */
+ZTEST(p2p_logic, test_ack_body_legacy_pending_without_len_still_parses)
+{
+	struct p2p_ack_info info;
+	uint8_t base[P2P_ACK_BODY_BASE_LEN] = {P2P_ACK_FLAG_PENDING, 0, 0};
+
+	zassert_true(p2p_parse_ack_body(base, sizeof(base), &info), "legacy 3 B must parse");
+	zassert_equal(info.flags & P2P_ACK_FLAG_PENDING, P2P_ACK_FLAG_PENDING, "pending lost");
+	zassert_false(info.pending_len_present, "3 B body cannot carry a length");
+	zassert_equal(info.pending_frame_len, 0, "length must read 0 when absent");
+
+	uint8_t timed[P2P_ACK_BODY_BASE_LEN + P2P_ACK_TIME_LEN] = {0};
+
+	timed[0] = P2P_ACK_FLAG_PENDING | P2P_ACK_FLAG_TIME;
+	sys_put_be32(1735689600u, &timed[3]);
+
+	zassert_true(p2p_parse_ack_body(timed, sizeof(timed), &info), "legacy 7 B must parse");
+	zassert_false(info.pending_len_present, "7 B body cannot carry a length");
+	zassert_true(info.time_present, "the 7 B tail is still a time tail");
+	zassert_equal(info.unix_time, 1735689600u, "legacy time tail decoded wrong");
+}
+
+ZTEST(p2p_logic, test_ack_body_bad_length_rejected)
+{
+	uint8_t body[16] = {P2P_ACK_FLAG_PENDING | P2P_ACK_FLAG_TIME, 0, 0, 17, 0, 0, 0, 0};
+	struct p2p_ack_info info;
+
+	/* Only 3, 4, 7 and 8 are valid shapes. */
+	zassert_false(p2p_parse_ack_body(body, 0, &info), "0 B body must be rejected");
 	zassert_false(p2p_parse_ack_body(body, 1, &info), "1 B body must be rejected");
-	zassert_false(p2p_parse_ack_body(body, 4, &info), "4 B body must be rejected");
-	zassert_false(p2p_parse_ack_body(body, 8, &info), "8 B body must be rejected");
+	zassert_false(p2p_parse_ack_body(body, 2, &info), "2 B body must be rejected");
+	zassert_false(p2p_parse_ack_body(body, 5, &info), "5 B body must be rejected");
+	zassert_false(p2p_parse_ack_body(body, 6, &info), "6 B body must be rejected");
+	zassert_false(p2p_parse_ack_body(body, 9, &info), "9 B body must be rejected");
+	zassert_false(p2p_parse_ack_body(body, P2P_ACK_BODY_MAX_LEN + 1, &info),
+		      "over-long body must be rejected");
+
+	/* A length byte is only meaningful when a downlink is pending: the 4 and
+	 * 8 B shapes require bit 0, or the byte is unexplained. */
+	uint8_t no_pending[P2P_ACK_BODY_MAX_LEN] = {P2P_ACK_FLAG_TIME, 0, 0, 17, 0, 0, 0, 0};
+
+	zassert_false(p2p_parse_ack_body(no_pending, 4, &info),
+		      "4 B without the pending bit must be rejected");
+	zassert_false(p2p_parse_ack_body(no_pending, 8, &info),
+		      "8 B without the pending bit must be rejected");
 }
 
 ZTEST_SUITE(p2p_logic, NULL, NULL, NULL, NULL, NULL);
