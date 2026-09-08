@@ -125,21 +125,29 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_SESSION_KEY_LABEL "HIO-P2P-SES"
 
 /*
- * EU868 1% duty cycle, enforced app-side (raw LoRa bypasses LoRaMac's own
- * duty enforcement) with a token bucket (B2, doc/plan/408 §7 Step 2). The old
- * model blocked the radio for air*99 ms after EVERY frame, so an alarm queued
- * right behind a long telemetry frame waited minutes; the bucket instead lets
- * a frame go the moment enough budget has accrued while holding the long-run
- * average at 1%.
+ * EU868 1% duty cycle, enforced app-side (raw LoRa bypasses LoRaMac's own duty
+ * enforcement) with an exact sliding-hour ledger (B2, decision D1).
  *
- * Budget is tracked in microseconds of air-time, refills at 1% of wall time
- * (P2P_DUTY_PERMILLE us per elapsed ms -- exact integer math, k_uptime_get()
- * has no sub-ms part so no residue is lost), and is capped at the full hourly
- * allowance P2P_DUTY_BUDGET_MS (Tower's DutyGovernor::eu() model): after a
- * long idle the device may burst up to that much air at once, so the
- * worst-case sliding hour is ~2% -- a deliberate choice (doc/p2p.md §6).
+ * Two models preceded it. The first blocked the radio for air*99 ms after
+ * EVERY frame, so an alarm queued behind a long telemetry frame waited
+ * minutes. The second (PR #408) was a token bucket refilling at 1% of wall
+ * time and capped at the full hourly allowance: that fixed the latency and
+ * held the long-run average at 1%, but a node idle for an hour could then
+ * burst the whole 36 s of air at once, which means a worst-case SLIDING hour
+ * of ~2%. Amortised compliance, not compliance.
+ *
+ * The ledger records (end time, air-time) per transmission and admits a frame
+ * only if the air already inside the trailing hour plus this frame fits the
+ * allowance -- so every sliding hour sums to <= 1%, with no burst hole to
+ * argue about in a certification review. It keeps the bucket's latency
+ * behaviour: a frame goes the moment there is room, rather than serving a
+ * fixed post-frame penalty.
+ *
+ * Cost is 384 B of RAM (P2P_DUTY_LEDGER_ENTRIES entries) and a bounded frame
+ * count per hour -- see the header, and doc/p2p.md §6/§11 for both.
  */
-/* P2P_DUTY_PERMILLE / P2P_DUTY_BUDGET_MS are in app_p2p.h (shared with tests). */
+/* P2P_DUTY_WINDOW_MS / P2P_DUTY_BUDGET_MS / P2P_DUTY_LEDGER_ENTRIES are in
+ * app_p2p.h (shared with tests). */
 
 #define P2P_FCNT_SUBTREE "p2pfc"
 #define P2P_FCNT_KEY     "p2pfc/base"
@@ -314,7 +322,7 @@ static struct k_work_delayable m_heartbeat_work;
 
 static bool m_started;
 static bool m_listening;
-static struct p2p_duty m_duty; /* token-bucket duty-cycle governor (B2) */
+static struct p2p_duty m_duty; /* exact sliding-hour duty ledger (B2/D1) */
 static void (*m_ready_cb)(void);
 
 /* --- Persistent frame counter (nonce uniqueness across reboots) --- */
@@ -885,57 +893,116 @@ P2P_TESTABLE void build_nonce(uint8_t nonce[P2P_NONCE_LEN], uint32_t counter, ui
 	nonce[7] = dir;
 }
 
-/* ---- Token-bucket duty-cycle governor (B2, see the header comment above) - */
+/* ---- Exact sliding-hour duty ledger (B2/D1, see the header comment) ------ */
 
-#define P2P_DUTY_BUDGET_US        ((int64_t)P2P_DUTY_BUDGET_MS * 1000)
-/* Budget accrued per elapsed ms of wall time: 1 ms of wall carries 1000 us,
- * of which P2P_DUTY_PERMILLE per mille is air budget => PERMILLE us/ms. */
-#define P2P_DUTY_ACCRUE_US_PER_MS (P2P_DUTY_PERMILLE)
-
-/* Start the bucket full at `now_ms` (uptime ms) -- boot is never blocked. */
-P2P_TESTABLE void p2p_duty_init(struct p2p_duty *d, int64_t now_ms)
+/* Index of the i-th oldest entry. */
+static inline uint8_t duty_slot(const struct p2p_duty *d, uint8_t i)
 {
-	d->tokens_us = P2P_DUTY_BUDGET_US;
-	d->last_ms = now_ms;
+	return (uint8_t)((d->head + i) % P2P_DUTY_LEDGER_ENTRIES);
 }
 
-/* Accrue budget for the wall time since the last refill, capped at the full
- * hourly allowance. */
-P2P_TESTABLE void p2p_duty_refill(struct p2p_duty *d, int64_t now_ms)
+/* Drop every entry that has fallen out of the trailing window.
+ *
+ * `now` and `end_ms` are uptime truncated to 32 bits and compared as an
+ * unsigned difference, which stays correct across the ~49.7-day wrap: an
+ * entry only ever lives P2P_DUTY_WINDOW_MS, four orders of magnitude short of
+ * the wrap distance, so `now - end_ms` can never alias. */
+static void duty_expire(struct p2p_duty *d, uint32_t now)
 {
-	int64_t elapsed_ms = now_ms - d->last_ms;
-
-	if (elapsed_ms <= 0) {
-		return; /* clock is monotonic; nothing to accrue */
+	while (d->count > 0 && (now - d->entries[d->head].end_ms) >= P2P_DUTY_WINDOW_MS) {
+		d->head = duty_slot(d, 1);
+		d->count--;
 	}
-
-	d->tokens_us += elapsed_ms * P2P_DUTY_ACCRUE_US_PER_MS;
-	if (d->tokens_us > P2P_DUTY_BUDGET_US) {
-		d->tokens_us = P2P_DUTY_BUDGET_US;
-	}
-	d->last_ms = now_ms;
 }
 
-/* Refill, then subtract `air_ms` of just-sent air-time (may go negative). */
+/* Air-time recorded inside the current window. Caller must have expired
+ * first. Cannot overflow: ENTRIES * UINT16_MAX is ~3.1e6, and the ledger
+ * never admits a sum past P2P_DUTY_BUDGET_MS anyway. */
+static uint32_t duty_used_ms(const struct p2p_duty *d)
+{
+	uint32_t used = 0;
+
+	for (uint8_t i = 0; i < d->count; i++) {
+		used += d->entries[duty_slot(d, i)].air_ms;
+	}
+	return used;
+}
+
+/* Empty ledger: boot is never blocked, exactly as the full token bucket was
+ * not. A reboot therefore forgets the hour just transmitted -- the same hole
+ * the bucket had (it restarted full), and accepted for the same reason: the
+ * ledger is RAM-only, and persisting it would cost an NVS write per frame.
+ * doc/p2p.md §6 records it. */
+P2P_TESTABLE void p2p_duty_init(struct p2p_duty *d)
+{
+	d->head = 0;
+	d->count = 0;
+}
+
+/* Record `air_ms` of air that finished at `now_ms`. */
 P2P_TESTABLE void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms)
 {
-	p2p_duty_refill(d, now_ms);
-	d->tokens_us -= (int64_t)air_ms * 1000;
+	uint32_t now = (uint32_t)now_ms;
+
+	duty_expire(d, now);
+
+	if (d->count >= P2P_DUTY_LEDGER_ENTRIES) {
+		/* Unreachable through the real call paths -- they charge only
+		 * after p2p_duty_wait_ms() returned 0, which requires a free
+		 * slot. If it ever happens, fold into the newest entry: the sum
+		 * stays truthful (never under-reports air already radiated) and
+		 * the window it occupies only grows, so the 1% bound holds.
+		 * Silently dropping the charge is the one outcome that could
+		 * breach it. */
+		struct p2p_duty_entry *newest = &d->entries[duty_slot(d, d->count - 1)];
+
+		newest->end_ms = now;
+		newest->air_ms = (uint16_t)MIN((uint32_t)newest->air_ms + air_ms, UINT16_MAX);
+		return;
+	}
+
+	d->entries[duty_slot(d, d->count)] = (struct p2p_duty_entry){
+		.end_ms = now,
+		.air_ms = (uint16_t)MIN(air_ms, (uint32_t)UINT16_MAX),
+	};
+	d->count++;
 }
 
-/* Refill, then return how many ms to wait before `air_ms` of air can be
- * afforded -- 0 if it can be sent now. */
+/* How many ms to wait before `air_ms` of air may be transmitted -- 0 if now.
+ *
+ * The guarantee is exact rather than amortised: a frame is admitted only when
+ * the air already recorded in the trailing hour plus this frame fits inside
+ * P2P_DUTY_BUDGET_MS, so EVERY sliding one-hour window sums to <= 1%.
+ *
+ * When blocked, the answer is the time until the OLDEST entry leaves the
+ * window. That is a lower bound, not necessarily enough on its own -- freeing
+ * one entry may still leave the sum too high -- but every caller re-checks
+ * and reschedules (tx_work_handler, reschedule_ack_retry_work,
+ * join_work_handler), so the wait converges instead of needing an exact
+ * answer here. Returning the true wait would mean solving for the smallest
+ * prefix of expiries that frees enough budget, for no behavioural gain. */
 P2P_TESTABLE int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms)
 {
-	p2p_duty_refill(d, now_ms);
+	uint32_t now = (uint32_t)now_ms;
 
-	int64_t deficit_us = (int64_t)air_ms * 1000 - d->tokens_us;
+	duty_expire(d, now);
 
-	if (deficit_us <= 0) {
+	if (d->count < P2P_DUTY_LEDGER_ENTRIES && duty_used_ms(d) + air_ms <= P2P_DUTY_BUDGET_MS) {
 		return 0;
 	}
-	/* Round the wait up so the caller never wakes a fraction of a ms early. */
-	return (deficit_us + P2P_DUTY_ACCRUE_US_PER_MS - 1) / P2P_DUTY_ACCRUE_US_PER_MS;
+
+	if (d->count == 0) {
+		/* Nothing to wait for. Only reachable if one frame's own air
+		 * exceeded the whole hourly allowance, which no supported
+		 * PHY setting can produce (worst case ~9.2 s at SF12 vs a
+		 * 36 s budget) -- refusing forever would be worse than
+		 * sending it. */
+		return 0;
+	}
+
+	/* duty_expire() guarantees the oldest entry is still inside the
+	 * window, so this is in (0, P2P_DUTY_WINDOW_MS]. */
+	return (int64_t)(P2P_DUTY_WINDOW_MS - (now - d->entries[d->head].end_ms));
 }
 
 /* Exponential backoff (ms) for self-healing re-join round `attempt` (0-based):
@@ -2082,7 +2149,7 @@ int app_p2p_init(void)
 		return -ENODEV;
 	}
 
-	p2p_duty_init(&m_duty, k_uptime_get());
+	p2p_duty_init(&m_duty);
 
 	int ret = settings_register(&m_fcnt_sh);
 

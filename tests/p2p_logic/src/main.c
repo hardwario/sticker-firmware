@@ -271,110 +271,181 @@ ZTEST(p2p_logic, test_build_frame_max_body)
 	zassert_mem_equal(pt, body, sizeof(body), "max-body recovered mismatch");
 }
 
-/* ---- Duty-cycle governor (B2) ----------------------------------------- */
+/* ---- Exact sliding-hour duty ledger (B2, decision D1) ----------------- */
 
-ZTEST(p2p_logic, test_duty_starts_full)
+/* The property under test is stronger than the token bucket's: not "the
+ * long-run average is 1%" but "EVERY sliding one-hour window sums to <= 1%".
+ * These tests drive the ledger on a virtual clock, so an hour costs no time. */
+
+ZTEST(p2p_logic, test_duty_empty_ledger_admits)
 {
 	struct p2p_duty d;
 
-	p2p_duty_init(&d, 1000);
+	p2p_duty_init(&d);
 
-	/* A full-hour budget worth of air-time can go immediately after init. */
-	zassert_equal(p2p_duty_wait_ms(&d, 1000, P2P_DUTY_BUDGET_MS), 0,
-		      "a full bucket must afford the whole budget at once");
+	/* Boot is never blocked, and the whole allowance is available at once. */
+	zassert_equal(p2p_duty_wait_ms(&d, 0, 1), 0, "an empty ledger must admit a small frame");
+	zassert_equal(p2p_duty_wait_ms(&d, 0, P2P_DUTY_BUDGET_MS), 0,
+		      "an empty ledger must admit the whole hourly allowance");
 }
 
-ZTEST(p2p_logic, test_duty_charge_then_block)
+ZTEST(p2p_logic, test_duty_sum_enforced)
 {
 	struct p2p_duty d;
+	const uint32_t air = P2P_DUTY_BUDGET_MS / 4; /* 9 s: four fill the hour */
 
-	p2p_duty_init(&d, 0);
+	p2p_duty_init(&d);
 
-	/* Drain the entire bucket with one big charge. */
-	p2p_duty_charge(&d, 0, P2P_DUTY_BUDGET_MS);
+	for (int i = 0; i < 4; i++) {
+		int64_t now = i * 1000;
 
-	/* Now even a 1 ms frame must wait ~100 ms (10 us/ms refill). */
-	int64_t wait = p2p_duty_wait_ms(&d, 0, 1);
+		zassert_equal(p2p_duty_wait_ms(&d, now, air), 0, "frame %d must be admitted", i);
+		p2p_duty_charge(&d, now, air);
+	}
 
-	zassert_equal(wait, 100, "1 ms of air after a full drain should need 100 ms, got %lld",
-		      wait);
+	/* The allowance is exactly spent -- not one further millisecond of air. */
+	zassert_true(p2p_duty_wait_ms(&d, 4000, 1) > 0,
+		     "1 ms of air must be refused once the hour's allowance is spent");
+	zassert_equal(p2p_duty_wait_ms(&d, 4000, 0), 0, "a zero-length frame is always affordable");
 }
 
-ZTEST(p2p_logic, test_duty_refill_accrues)
+ZTEST(p2p_logic, test_duty_expiry_after_hour)
 {
 	struct p2p_duty d;
 
-	p2p_duty_init(&d, 0);
-	p2p_duty_charge(&d, 0, P2P_DUTY_BUDGET_MS); /* empty */
+	p2p_duty_init(&d);
+	p2p_duty_charge(&d, 0, P2P_DUTY_BUDGET_MS); /* spend it all at t=0 */
 
-	/* After 1 s of wall time, 10 ms of air-time budget has accrued. */
-	zassert_equal(p2p_duty_wait_ms(&d, 1000, 10), 0,
-		      "10 ms air should be affordable after 1 s");
-	zassert_true(p2p_duty_wait_ms(&d, 1000, 11) > 0, "11 ms air should not yet be affordable");
+	zassert_true(p2p_duty_wait_ms(&d, 1000, 1) > 0, "still blocked one second in");
+
+	/* One ms before the entry leaves the window: still blocked, and the
+	 * reported wait is exactly the time remaining. */
+	int64_t wait = p2p_duty_wait_ms(&d, P2P_DUTY_WINDOW_MS - 1, 1);
+
+	zassert_equal(wait, 1, "wait should be 1 ms at the window edge, got %lld", wait);
+
+	/* The instant it does, the full allowance is available again. */
+	zassert_equal(p2p_duty_wait_ms(&d, P2P_DUTY_WINDOW_MS, P2P_DUTY_BUDGET_MS), 0,
+		      "the allowance must return when the entry leaves the window");
 }
 
-ZTEST(p2p_logic, test_duty_refill_caps_at_budget)
+/* The ring is finite, so a node transmitting more frames per hour than it has
+ * entries runs out of slots before it runs out of air-time budget. That is
+ * safe -- it can only delay a frame, never permit one the budget forbids --
+ * and this pins the direction of that conservatism. */
+ZTEST(p2p_logic, test_duty_ring_full_is_conservative)
 {
 	struct p2p_duty d;
 
-	p2p_duty_init(&d, 0);
-	p2p_duty_charge(&d, 0, P2P_DUTY_BUDGET_MS); /* empty */
+	p2p_duty_init(&d);
 
-	/* Idle far longer than a full recharge (10x the hour): budget must cap,
-	 * not overflow into a larger-than-full burst allowance. */
-	int64_t long_idle = (int64_t)P2P_DUTY_BUDGET_MS * 100 * 10;
+	/* Fill every slot with a frame far too short to trouble the budget. */
+	for (int i = 0; i < P2P_DUTY_LEDGER_ENTRIES; i++) {
+		int64_t now = i * 10;
 
-	zassert_equal(p2p_duty_wait_ms(&d, long_idle, P2P_DUTY_BUDGET_MS), 0,
-		      "capped bucket must afford exactly the full budget");
-	zassert_true(p2p_duty_wait_ms(&d, long_idle, P2P_DUTY_BUDGET_MS + 1) > 0,
-		     "capped bucket must NOT afford more than the full budget");
+		zassert_equal(p2p_duty_wait_ms(&d, now, 1), 0, "tiny frame %d must be admitted", i);
+		p2p_duty_charge(&d, now, 1);
+	}
+
+	/* Budget is barely touched, but there is no slot to record another
+	 * frame in, so the ledger waits for the oldest to expire rather than
+	 * forget a transmission it has already counted. */
+	int64_t wait = p2p_duty_wait_ms(&d, 1000, 1);
+
+	zassert_true(wait > 0, "a full ring must block even with budget to spare");
+	zassert_equal(wait, P2P_DUTY_WINDOW_MS - 1000,
+		      "the wait must be until the OLDEST entry expires, got %lld", wait);
+
+	/* And once it does, exactly one slot frees up. */
+	zassert_equal(p2p_duty_wait_ms(&d, P2P_DUTY_WINDOW_MS, 1), 0,
+		      "a freed slot must admit the next frame");
 }
 
-ZTEST(p2p_logic, test_duty_long_run_stays_within_1pct)
+/* Deterministic pseudo-random frame sizes: a failure has to be reproducible. */
+static uint32_t duty_rand(uint32_t *state)
+{
+	uint32_t x = *state;
+
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	*state = x;
+	return x;
+}
+
+/* Static, not on the stack: 24 simulated hours of sends is a few thousand
+ * records and this runs on native_sim. */
+static struct {
+	uint32_t end_ms;
+	uint32_t air_ms;
+} m_sent[4096];
+
+ZTEST(p2p_logic, test_duty_sliding_hour_never_exceeds_1pct)
 {
 	struct p2p_duty d;
+	uint32_t state = 0xC0FFEEu;
+	size_t n = 0;
 
-	p2p_duty_init(&d, 0);
+	p2p_duty_init(&d);
 
-	/* Empty the initial full bucket so it does not inflate the accounting,
-	 * then hammer sends for a simulated hour and confirm the air-time
-	 * actually transmitted never exceeds the 1% budget for that window. */
-	p2p_duty_charge(&d, 0, P2P_DUTY_BUDGET_MS);
+	/* Hammer the ledger for 24 simulated hours, always trying to send, with
+	 * frame air-times spanning the real SF10 range (330..2296 ms). */
+	for (int64_t now = 0; now <= 24 * (int64_t)P2P_DUTY_WINDOW_MS; now += 1000) {
+		uint32_t air = 330 + (duty_rand(&state) % 1967);
 
-	const int64_t window_ms = 3600LL * 1000; /* one hour */
-	const uint32_t air_per_send = 500;       /* a typical telemetry frame */
-	int64_t sent_air_ms = 0;
-
-	for (int64_t now = 0; now <= window_ms; now += 1000) {
-		/* Try to send as many frames as the bucket currently allows. */
-		while (p2p_duty_wait_ms(&d, now, air_per_send) == 0) {
-			p2p_duty_charge(&d, now, air_per_send);
-			sent_air_ms += air_per_send;
+		while (p2p_duty_wait_ms(&d, now, air) == 0) {
+			p2p_duty_charge(&d, now, air);
+			zassert_true(n < ARRAY_SIZE(m_sent), "test record overflow");
+			m_sent[n].end_ms = (uint32_t)now;
+			m_sent[n].air_ms = air;
+			n++;
+			air = 330 + (duty_rand(&state) % 1967);
 		}
 	}
 
-	/* Over one hour at 1% the air budget is P2P_DUTY_BUDGET_MS; allow one
-	 * extra frame's slack for the boundary. */
-	zassert_true(sent_air_ms <= P2P_DUTY_BUDGET_MS + air_per_send,
-		     "sent %lld ms of air in an hour, over the 1%% budget of %d ms", sent_air_ms,
-		     P2P_DUTY_BUDGET_MS);
+	zassert_true(n > 100, "the simulation should have sent plenty, got %zu", n);
+
+	/* The guarantee, checked directly against the record rather than the
+	 * ledger's own arithmetic: for every transmission, the air radiated in
+	 * the hour ending at it -- itself included -- is within the allowance. */
+	for (size_t j = 0; j < n; j++) {
+		uint32_t sum = 0;
+
+		for (size_t i = 0; i <= j; i++) {
+			if (m_sent[j].end_ms - m_sent[i].end_ms < P2P_DUTY_WINDOW_MS) {
+				sum += m_sent[i].air_ms;
+			}
+		}
+		zassert_true(sum <= P2P_DUTY_BUDGET_MS,
+			     "sliding hour ending at send %zu (t=%u) radiated %u ms, over the "
+			     "%d ms allowance",
+			     j, m_sent[j].end_ms, sum, P2P_DUTY_BUDGET_MS);
+	}
 }
 
-ZTEST(p2p_logic, test_duty_burst_after_idle)
+/* Uptime is truncated to 32 bits in the ledger, so entries have to survive the
+ * ~49.7-day wrap. A `now >= end_ms + WINDOW` formulation breaks here; the
+ * unsigned-difference one does not. */
+ZTEST(p2p_logic, test_duty_wrap_safe)
 {
 	struct p2p_duty d;
+	const int64_t t = 0xFFFFFF00LL; /* 256 ms before the u32 wrap */
 
-	p2p_duty_init(&d, 5000); /* full at boot */
+	p2p_duty_init(&d);
+	p2p_duty_charge(&d, t, P2P_DUTY_BUDGET_MS);
 
-	/* Tower-style: a full bucket permits a burst up to the whole budget in
-	 * one go (this is the deliberate ~2% worst-case, doc/p2p.md §6). */
-	zassert_equal(p2p_duty_wait_ms(&d, 5000, P2P_DUTY_BUDGET_MS), 0,
-		      "a full bucket must permit a full-budget burst");
-	p2p_duty_charge(&d, 5000, P2P_DUTY_BUDGET_MS);
-	zassert_true(p2p_duty_wait_ms(&d, 5000, 1) > 0, "after the burst the bucket must be empty");
+	/* Straddling the wrap, still inside the window: must stay blocked. */
+	zassert_true(p2p_duty_wait_ms(&d, t + 1000, 1) > 0,
+		     "an entry must still count after the uptime counter wraps");
+
+	int64_t wait = p2p_duty_wait_ms(&d, t + 1000, 1);
+
+	zassert_equal(wait, P2P_DUTY_WINDOW_MS - 1000, "wait wrong across the wrap: %lld", wait);
+
+	/* And expire correctly on the far side of it. */
+	zassert_equal(p2p_duty_wait_ms(&d, t + P2P_DUTY_WINDOW_MS, P2P_DUTY_BUDGET_MS), 0,
+		      "the entry must expire on schedule across the wrap");
 }
-
-/* ---- Self-healing rejoin backoff (B3) --------------------------------- */
 
 ZTEST(p2p_logic, test_rejoin_backoff_doubles_then_caps)
 {

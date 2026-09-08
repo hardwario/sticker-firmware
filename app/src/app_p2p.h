@@ -27,9 +27,19 @@ extern "C" {
 #define P2P_MAX_BODY  (P2P_LORA_MTU - P2P_HDR_LEN - P2P_TAG_LEN) /* 240 */
 #define P2P_FRAME_MAX (P2P_HDR_LEN + P2P_MAX_BODY + P2P_TAG_LEN)
 
-/* Duty-cycle governor tuning (B2), shared with tests/p2p_logic. */
-#define P2P_DUTY_PERMILLE  10    /* 1% duty cycle (per mille) */
-#define P2P_DUTY_BUDGET_MS 36000 /* bucket capacity = 1% of one hour */
+/* Duty-cycle ledger tuning (B2 / decision D1), shared with tests/p2p_logic. */
+#define P2P_DUTY_WINDOW_MS 3600000 /* the sliding window: one hour */
+#define P2P_DUTY_BUDGET_MS 36000   /* 1% of it -- the air-time allowance */
+
+/* Ring capacity. One entry per transmission still inside the window, so this
+ * bounds how many frames an hour may contain before the LEDGER rather than
+ * the air-time budget becomes the limit: at SF10 the smallest frame the node
+ * sends is 17 B / 330 ms, so 36 000 ms buys ~109 of them and 48 entries bind
+ * first above ~48 uplinks/hour. That is deliberately conservative -- it can
+ * only ever delay a transmission, never permit one the budget forbids (see
+ * p2p_duty_wait_ms) -- but it means a bench run wanting the air-time budget
+ * to be the visible limit needs an interval above ~75 s. doc/p2p.md §6. */
+#define P2P_DUTY_LEDGER_ENTRIES 48
 
 /* Ack (0xFA) body layout, doc/p2p.md §6:
  *
@@ -64,13 +74,26 @@ struct p2p_ack_info {
 	uint8_t pending_frame_len;
 };
 
-/* Token-bucket duty-cycle governor state (B2). Defined here so tests/p2p_logic
- * can declare one; the governor functions are internal to app_p2p.c (given
- * external linkage only under CONFIG_ZTEST -- see the block at the end of this
- * header). */
+/* Exact sliding-hour duty ledger (B2, decision D1) -- one entry per
+ * transmission that is still inside the window. Replaces the earlier token
+ * bucket, which refilled at 1% of wall time and capped at the full hourly
+ * allowance: that held the long-run average at 1% but let a node idle for an
+ * hour and then burst 36 s of air in one go, so the worst-case SLIDING hour
+ * reached ~2%. Summing the real window costs 384 B of RAM and makes the
+ * bound exact instead of amortised.
+ *
+ * Defined here so tests/p2p_logic can declare one; the ledger functions are
+ * internal to app_p2p.c (given external linkage only under CONFIG_ZTEST --
+ * see the block at the end of this header). */
+struct p2p_duty_entry {
+	uint32_t end_ms; /* uptime (ms, truncated) at which the frame finished */
+	uint16_t air_ms; /* its time-on-air; a 255 B SF12 frame is ~9.2 s, so u16 fits */
+};
+
 struct p2p_duty {
-	int64_t tokens_us; /* available air-time budget, microseconds */
-	int64_t last_ms;   /* uptime of the last refill */
+	struct p2p_duty_entry entries[P2P_DUTY_LEDGER_ENTRIES];
+	uint8_t head;  /* index of the oldest entry */
+	uint8_t count; /* entries in use */
 };
 
 /* Raw-LoRa point-to-point transport, phase 1 (#118, doc/p2p.md). A drop-in
@@ -280,8 +303,7 @@ void build_nonce(uint8_t nonce[13], uint32_t counter, uint16_t dev_addr, uint8_t
 int build_frame_keyed(uint32_t net_id, uint16_t dev_addr, const uint8_t session_key[16],
 		      uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t counter,
 		      uint8_t *frame);
-void p2p_duty_init(struct p2p_duty *d, int64_t now_ms);
-void p2p_duty_refill(struct p2p_duty *d, int64_t now_ms);
+void p2p_duty_init(struct p2p_duty *d);
 void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 uint32_t p2p_rejoin_backoff_ms(uint8_t attempt);

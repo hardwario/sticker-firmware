@@ -477,19 +477,47 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   self-heals via `Detach`/`RejoinRequest` rather than needing central DB
   surgery), but no reason to leave a second unbounded `>` check in the same
   design.
-- **Device-side duty cycle** (B2, PR #408, **v1.5.0**): raw LoRa bypasses
+- **Device-side duty cycle** (B2, decision D1, **v1.5.0**): raw LoRa bypasses
   LoRaMac's duty enforcement, so the node enforces the EU868 1 % limit itself
-  with a **token bucket** (`struct p2p_duty` in `app_p2p.c`). Budget accrues at
-  1 % of wall time and is capped at the full hourly allowance
-  (`P2P_DUTY_BUDGET_MS = 36000`, Tower's `DutyGovernor::eu()` model); every TX
-  (data, ACK retry, JoinRequest) is charged its measured air-time and gated on
-  affordability. This replaces the earlier "block for air×99 ms after every
-  frame" rule, whose fixed post-frame block made an alarm queued behind a long
-  telemetry frame wait minutes. **Deliberate trade-off:** a full bucket permits
-  a burst of up to 36 s of air after a long idle, so the worst-case *sliding*
-  hour can reach ~2 % even though the long-run average holds at 1 %. This is
-  accepted (matches TOWER's field-proven governor); a stricter model would cap
-  the bucket lower at the cost of burst latency for alarms.
+  with an **exact sliding-hour ledger** (`struct p2p_duty` in `app_p2p.c`).
+  Every TX (data, ACK retry, JoinRequest) is charged its measured air-time; a
+  frame is admitted only when the air already recorded in the trailing hour
+  plus that frame fits `P2P_DUTY_BUDGET_MS` (36 000 ms), so **every** sliding
+  one-hour window sums to ≤ 1 %.
+
+  This is the third model. The first blocked the radio for air×99 ms after
+  every frame, which made an alarm queued behind a long telemetry frame wait
+  minutes. The second (PR #408) was a **token bucket** accruing at 1 % of wall
+  time and capped at the full hourly allowance: it fixed the latency and held
+  the long-run *average* at 1 %, but a node idle for an hour could then burst
+  the whole 36 s at once — a simulated 24 h of continuous sending reaches
+  **2.00 % in the worst sliding hour** (71 860 ms of air). That was documented
+  as an accepted trade-off; D1 withdraws it, because "amortised" is not what
+  the regulation asks and not what a certification review will accept. The
+  ledger keeps the bucket's latency behaviour (a frame goes the moment there is
+  room) and drops the burst hole. `tests/p2p_logic`'s
+  `test_duty_sliding_hour_never_exceeds_1pct` simulates 24 h and checks the
+  window ending at *every* transmission; it fails against the old bucket and
+  passes against the ledger.
+
+  Two costs, both deliberate:
+  - **384 B of RAM** — `P2P_DUTY_LEDGER_ENTRIES` (48) × 8 B, replacing the
+    bucket's 16 B.
+  - **A bounded frame count per hour.** One entry per transmission still
+    inside the window means the *ledger* rather than the air-time budget
+    becomes the limit above 48 uplinks/hour. At SF10 the smallest frame the
+    node sends is 17 B / 330 ms, so the 36 000 ms allowance would otherwise
+    buy ~109. The direction is safe — a full ring can only *delay* a frame,
+    never permit one the budget forbids — but a bench run that wants the
+    air-time budget to be the visible limit needs `interval-report` above
+    ~75 s. Raising the ring, or folding the two oldest entries together when
+    it fills, would remove the limit at any SF; neither is needed for the
+    cadences this product ships with.
+
+  The ledger is **RAM-only**: a reboot forgets the hour just transmitted, so a
+  reboot loop can still exceed 1 %. The token bucket had the same hole (it
+  restarted full) and it is accepted for the same reason — persisting it would
+  cost an NVS write per frame.
 - **Downlink commands** (`0x56`): flagged in the ACK, delivered in the RX1
   window of the *next* uplink (Class-A downlink queue on the central). Same
   protobuf Command shape as LoRaWAN fPort 85's Command oneof; `frame_type
@@ -728,10 +756,13 @@ phone app step is needed for P2P at all, one-time or otherwise.
   fix from issue #340) unless debug frees up budget elsewhere first.
 - **Device-side duty-cycle enforcement** — LoRaWAN's own EU868 1 % limit is
   enforced inside LoRaMac, which P2P mode bypasses entirely (raw LoRa driver,
-  no network server, §1). **RESOLVED (B2, PR #408, v1.5.0):** the node now
-  enforces its own 1 % limit with a token bucket over all TX (data, ACK retry,
-  JoinRequest) — see §6. §6/§8's central/gateway-side duty *bookkeeping* is a
-  separate concern and still applies.
+  no network server, §1). **RESOLVED (B2 + decision D1, v1.5.0):** the node
+  enforces its own limit over all TX (data, ACK retry, JoinRequest) with an
+  exact sliding-hour ledger — every sliding hour ≤ 1 %, not merely a 1 %
+  long-run average — at a cost of 384 B of RAM and a bounded frame count per
+  hour. See §6 for both, and for the token bucket this replaced. §6/§8's
+  central/gateway-side duty *bookkeeping* is a separate concern and still
+  applies.
 - **RX2-equivalent downlink fallback** — v1 is RX1-only (§6): a missed
   ~1 s gateway↔central round trip (LAN/MQTT jitter) just counts as an
   unacknowledged uplink and falls back to the normal retry path, unlike
