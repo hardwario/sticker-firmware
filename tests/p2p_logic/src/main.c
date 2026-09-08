@@ -30,6 +30,40 @@ ZTEST(p2p_logic, test_toa_sf10_max_frame_reference)
 				  "SF10/255 B ToA %u ms outside the documented ~2296 ms", toa);
 }
 
+/* The exact SF10 airtimes doc/p2p.md §3.3/§6 and the RX-window arithmetic
+ * quote. These are load-bearing numbers -- the "2434 ms -> 468 ms" claim for
+ * D2's window sizing is derived from them, and a silent formula change would
+ * make the documentation wrong without failing anything else.
+ *
+ * The window a caller actually opens is
+ * rx1_preamble_catch_ms() + frame_toa_ms(len) + P2P_RX1_TRAILING_MARGIN_MS,
+ * i.e. a fixed 138 ms at SF10 (12 symbols = 98 ms, plus 40 ms) on top of the
+ * figures below: 468 ms for a 2 B command, 509 ms for a bare Ack, 2434 ms for
+ * the 255 B worst case D2 removes. Those two helpers are static and not part
+ * of this suite's surface, so the ToA terms are what get pinned here. */
+ZTEST(p2p_logic, test_toa_sf10_documented_airtimes)
+{
+	const struct {
+		uint8_t len;
+		uint32_t ms;
+	} cases[] = {
+		{17, 330},  /* 2 B command / minimum data frame */
+		{22, 371},  /* time-extended Ack (pre-D2 max) */
+		{23, 371},  /* fully-extended Ack (D2 max) */
+		{37, 494},  /* JoinRequest */
+		{42, 535},  /* JoinAccept */
+		{55, 657},  /* the 40 B command in the P2E-20 bench row */
+		{255, 2296} /* PHY maximum */
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		uint32_t got = p2p_toa_ms(10, cases[i].len);
+
+		zassert_equal(got, cases[i].ms, "SF10 ToA(%u B) = %u ms, documented as %u",
+			      cases[i].len, got, cases[i].ms);
+	}
+}
+
 ZTEST(p2p_logic, test_toa_monotonic_in_length)
 {
 	uint32_t prev = p2p_toa_ms(10, 15); /* header+tag only */
