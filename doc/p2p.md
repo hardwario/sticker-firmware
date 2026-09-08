@@ -90,6 +90,33 @@ config radio-mode p2p        # off / lorawan / p2p
 settings save                # persists + reboots
 ```
 
+The three radio parameters are configured the same way, and are
+**`writable: [shell]` only — deliberately, not by omission**:
+
+```
+config p2p-frequency 868100000   # 863..870 MHz
+config p2p-spreading-factor 10   # 6..12
+config p2p-tx-power 14           # 2..22 dBm
+settings save
+```
+
+They must equal the Hub's `radio.p2p_radio` values or the link simply does not
+exist, so they are commissioning-time settings, not runtime ones. Two reasons
+they are not exposed over the air or over NFC:
+
+- **Over the radio is self-defeating.** A `0x56` that changed the frequency or
+  SF would sever the very link carrying it, and the node would be unreachable
+  until someone visited it with a phone or a probe. The M-3 field gate already
+  denies it (#271 — `no_write_lrw` also denies `APP_CMD_TRANSPORT_P2P`), and
+  §7 relies on that.
+- **Over NFC it is a cross-project commitment, not a firmware toggle.** The
+  config schema is shared with the Manager-App, so flipping these three to
+  `[shell, nfc]` means a coordinated app release (the lockstep noted on #271);
+  and since the Hub side must change in the same breath anyway, a phone that
+  can set them without setting the Hub only creates a way to strand a node.
+  Deferred pending agreement with the app team — see §5.2 for the same
+  conclusion about an NFC `p2p_join` trigger.
+
 On boot the firmware brings up **only** the selected stack — the SX126x radio
 is shared between LoRaMac and raw LoRa, so there is no live switch. The
 payload layer is unchanged: `app_compose` builds the same protobuf snapshots
@@ -288,7 +315,16 @@ never finds a gateway, see below).
 - NFC command `p2p_join` (staged like any command — works battery-off, applied
   at next boot). Battery-cheapest and timing-safest path: the join burst is a
   single bounded attempt at the node's own next boot, so there is no window to
-  miss.
+  miss. **Not implemented (v1.5.0).** There is no `p2p_join` command in the
+  protobuf schema and no NFC path to one; the design is recorded here, not
+  shipped. Adding it is not a firmware-only change — it needs a new `Command`
+  oneof tag (the next free one after 28; 19/20/22 are reserved), a
+  `transports: [nfc]` guard, a `west configen` run, and a matching
+  Manager-App release, so it waits on agreement with the app team rather than
+  being added speculatively. **Nothing depends on it**: a node that needs to
+  re-pair has four working triggers — the boot window below, the shell `join`,
+  the self-healing re-join (§7), and the central-initiated `RejoinRequest`
+  (§5.4).
 - Automatically at boot when `radio-mode p2p` and no valid pairing state in
   NVS, but **only for 120 s after boot** (mirrors the central's own pairing
   window default, §5.1) — after that the node stops retrying entirely and
