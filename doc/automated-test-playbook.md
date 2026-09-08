@@ -698,9 +698,9 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   this is the only place it gets exercised. In `radio-mode p2p`, set
   `lrw-appkey 00000000000000000000000000000000` + save: expect `P2P not started: lrw_appkey
   is all-zero` in the boot log, `app_key: MISSING (radio refused to start)` from `ats radio
-  status`, no JoinRequest on air, and `ats radio join` refused rather than transmitting.
+  status`, no JoinRequest on air, and `join` refused rather than transmitting.
   Restore a real `lrw-appkey` and confirm the join proceeds.
-- **Note:** `factory_reset` reverts `radio-mode` to its `LORAWAN` default (it is
+- **Note:** `factory_reset` reverts `radio-mode` to its `OFF` default (#350; it is
   `persistent: [device_reset]` and is not in `app_config_factory_reset()`'s preserve list),
   so it never leaves a live P2P node behind — but it does wipe `lrw_appkey` while leaving
   the `p2pjoin/*` pairing intact, which is the state the guard above exists for

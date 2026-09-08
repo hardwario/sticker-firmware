@@ -102,7 +102,10 @@ release; `n` on the flash-tight debug overlay). `CONFIG_LORA=y` (Zephyr raw
 LoRa driver) is already present in the release configuration today, so no new
 driver Kconfig is needed. Flash headroom against the current `0x34000` budget
 was re-measured — see §11 — release has room, debug does not and keeps
-`CONFIG_RADIO_P2P=n`.
+`CONFIG_RADIO_P2P=n`. The bench overlay `app/debug_p2p_bench.conf` (layered on
+top of `debug.conf`, §14) flips `CONFIG_RADIO_P2P=y` back on and pays for it by
+setting `CONFIG_RADIO_LORAWAN=n` — it is the only debug image containing P2P,
+and it contains no LoRaWAN at all.
 
 ---
 
@@ -248,7 +251,7 @@ lands here — the ordinary case on a bench or a P2P-only build — and it is
 also what `factory_reset` leaves behind for a device later re-enabled into
 `radio-mode p2p` (§7). `app_p2p_start()` therefore refuses
 to bring the radio up at all while `lrw_appkey` is all-zero, and
-`app_p2p_rejoin()` (the `ats radio join` shell path) refuses for the same
+`app_p2p_rejoin()` (the top-level `join` shell path) refuses for the same
 reason so the debug surface is not a way around it. The refusal is loud —
 `LOG_ERR` at boot, plus an `app_key: MISSING (radio refused to start)` line
 in `ats radio status` — following the same rule as app_lrw.c's
@@ -501,7 +504,7 @@ isn't):
 | Trigger | Behavior |
 |---|---|
 | `lrw_appkey` change (`set_param`/`config`, e.g. re-provisioning) | `session_key` on the *next* join changes; an already-`PAIRED` session is unaffected until something else forces a re-join (unlike `secret_key` rotation on the NFC channel, which forces a reboot, #322 — changing `app_key` does not by itself). The central must have the new `app_key` registered before the node's next JoinRequest will authenticate. |
-| `factory_reset` | **A P2P node stops being a P2P node.** `radio_mode` is `persistent: [device_reset]` only and is absent from `app_config_factory_reset()`'s preserve list, so it reverts to its `LORAWAN` default: `app_radio_init()` routes to app_lrw.c and `app_p2p_start()` is never called at all. Two leftovers survive and matter later. (a) **The P2P pairing is NOT cleared** (doc/code mismatch found 2026-08-24: the `p2pjoin/*` subtree is registered entirely inside `app_p2p.c` and `app_settings_factory_reset()` never references it) — inert while `radio_mode` is not `p2p`, but `join_settings_set()` still restores it straight to `PAIRED` the moment someone sets `radio_mode p2p` again. (b) **`app_key` (`lrw_appkey`) IS wiped** — also `persistent: [device_reset]` only and also absent from that preserve list, unlike `secret_key`, which the earlier `join_key`-rooted design could always fall back on. So re-enabling P2P after a `factory_reset` without re-provisioning `lrw_appkey` would otherwise resume a pairing the operator explicitly reset, under a root key that is now all-zero and therefore public; §4's zero-`app_key` guard refuses to start in exactly that state, which is why it is checked *before* `app_p2p_start()`'s already-`PAIRED` shortcut. The old design's self-healing property — the device could always re-derive its way back on its own — is gone regardless. Bench levers: `ats radio join` (v1.5.0) forces a fresh join live, no reboot needed (mirrors LoRaWAN's `join`, which always rejoins unconditionally); `ats radio unjoin` (v1.5.0; clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears the pairing. |
+| `factory_reset` | **A P2P node stops being a P2P node.** `radio_mode` is `persistent: [device_reset]` only and is absent from `app_config_factory_reset()`'s preserve list, so it reverts to its `OFF` default (#350): `app_radio_init()` brings no radio up and `app_p2p_start()` is never called at all. Two leftovers survive and matter later. (a) **The P2P pairing is NOT cleared** (doc/code mismatch found 2026-08-24: the `p2pjoin/*` subtree is registered entirely inside `app_p2p.c` and `app_settings_factory_reset()` never references it) — inert while `radio_mode` is not `p2p`, but `join_settings_set()` still restores it straight to `PAIRED` the moment someone sets `radio_mode p2p` again. (b) **`app_key` (`lrw_appkey`) IS wiped** — also `persistent: [device_reset]` only and also absent from that preserve list, unlike `secret_key`, which the earlier `join_key`-rooted design could always fall back on. So re-enabling P2P after a `factory_reset` without re-provisioning `lrw_appkey` would otherwise resume a pairing the operator explicitly reset, under a root key that is now all-zero and therefore public; §4's zero-`app_key` guard refuses to start in exactly that state, which is why it is checked *before* `app_p2p_start()`'s already-`PAIRED` shortcut. The old design's self-healing property — the device could always re-derive its way back on its own — is gone regardless. Bench levers: the top-level `join` (v1.5.0) forces a fresh join live, no reboot needed (the same command on both radio stacks -- `app_radio_rejoin()` dispatches it); `ats radio unjoin` (v1.5.0; clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears the pairing. |
 | Central DB loss/restore | Node's uplinks stop being ACKed (or ACK under an unknown session fails authentication). Self-healing: after **N consecutive fully-failed uplink cycles** (default 8) the node starts re-join attempts with exponential backoff. Known devices' re-joins are accepted outside the pairing window. **Implemented (B3, PR #408, v1.5.0):** `P2P_REJOIN_FAIL_THRESHOLD = 8`; a fully-failed cycle = all `P2P_ACK_MAX_RETRIES` exhausted with no Ack; any Ack resets the streak. The re-join is exempt from the 120 s boot-window cap (§5.2, this is a paired device recovering, not a never-paired join) and backs off `60 s → ×2 → 3600 s` cap, ±25 % jitter. Same `app_key`-set guard as the boot join. |
 | Explicit `Detach` / `RejoinRequest` downlink | Authenticated; immediate. `RejoinRequest` is the network-initiated rekey lever (counter hygiene, key rotation policy). |
 | Counter approaching 32-bit wrap | Practically unreachable; policy is a network-initiated `RejoinRequest` rekey long before wrap. |
@@ -820,7 +823,9 @@ everything except real round-trip timing.
 ### Setup
 
 - **Device A ("node" / DUT)** — mainline firmware, `radio-mode p2p`, behaves
-  exactly like a deployed unit.
+  exactly like a deployed unit. Its own diagnostic receiver is
+  `ats radio listen on|off` (`app_p2p_listen()`, `CONFIG_SHELL`) — not the
+  `p2p listen` below, which belongs to device B's standalone firmware.
 - **Device B ("gw-sim")** — **a separate, standalone firmware**
   (`sticker/tests/p2p/`, `west build -b sticker tests/p2p`), *not* a debug
   build of the mainline app with extra `ats p2p ...` shell commands as
@@ -879,7 +884,7 @@ everything except real round-trip timing.
   reboots), and confirm the boot log carries `P2P not started: lrw_appkey is
   all-zero`, that `ats radio status` reports `app_key: MISSING (radio
   refused to start)`, that device B hears no JoinRequest at all, and that
-  `ats radio join` is refused rather than transmitting. Then restore a real
+  `join` is refused rather than transmitting. Then restore a real
   `lrw-appkey` and confirm the join proceeds normally. Worth running once
   with a pairing already in NVS (§7's re-enable path) so the check ahead of
   `app_p2p_start()`'s already-`PAIRED` shortcut is covered too.

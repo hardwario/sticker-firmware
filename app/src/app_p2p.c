@@ -1099,8 +1099,11 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, ui
  * next uplink. P2P reuses the LoRaWAN over-the-air writability gating --
  * APP_CMD_TRANSPORT_P2P shares the M-3 no_write_lrw field gate (configen), and
  * the command-level allow-lists reject P2P for every LRW/NFC/vendor-only
- * command (positive `tp == ...` checks), so only the unrestricted management
- * commands (get/set_param, get/get_config, settings_save, reboot) run here.
+ * command (positive `tp == ...` checks), so the commands that run here are
+ * exactly those carrying no `transports:` guard at all: set_param, get_param,
+ * get_info, get_config, settings_save, reboot, reset_counters, w1_scan,
+ * lrw_reset and lrw_join -- the last two are LoRaWAN-specific yet ungated, so
+ * a 0x56 does reach them.
  * A deferred command action (settings_save/reboot/reset) is logged but NOT yet
  * executed -- the reboot-after-response deferral is a B4 follow-up, paired with
  * the central's structured-command phase-2 (proximos-v2 MR!30 S2). */
@@ -1867,8 +1870,8 @@ void app_p2p_start(void)
 	 * that shortcut and resume transmitting under a session the operator
 	 * explicitly reset, with a root key it can never re-derive. Note this
 	 * needs the explicit re-enable: factory_reset also reverts radio_mode to
-	 * its LORAWAN default, so it does not by itself leave a live P2P node in
-	 * this state. */
+	 * its OFF default (app_config.yml, #350), so it does not by itself leave
+	 * a live P2P node in this state. */
 	if (!app_key_is_set()) {
 		LOG_ERR("P2P not started: lrw_appkey is all-zero (device unprovisioned). "
 			"Set lrw-appkey over NFC or shell, then reboot.");

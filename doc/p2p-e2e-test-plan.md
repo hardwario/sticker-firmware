@@ -13,20 +13,30 @@ observable on each side, so an HIL run is a checklist rather than a debugging se
 The two-probe P2P rig from the PR #404 app-key/CMAC HIL (see the commit history) is the same
 rig here, plus the Proximos central driving the northbridge.
 
+**The J-Link serial numbers below are one specific bench's** (the PR #404/#408 rig) and are
+recorded only so that run's logs stay readable. Re-read your own before every session —
+`lsusb -d 1366: -v 2>/dev/null | grep iSerial` (values print zero-padded) or `ShowEmuList`
+inside `JLinkExe` — and substitute them everywhere a serial appears.
+
 | Role | Hardware | Firmware |
 |---|---|---|
 | STICKER DUT | J-Link Compact Base **822005109** (or EDU Mini 801053709's STICKER) | this branch (`feat-p2p` + B1–B5), a **debug + P2P bench** build (`debug.conf` + `debug_p2p_bench.conf`) so `ats radio …` shell + RTT log are available |
-| Northbridge modem | J-Link Compact Base **822005110** (STM32WL5MOC) | `proximos/firmware@hynek/northbridge-p2p-protocol`, `fiber-northbridge/app` — the HDLC P2P modem. Bench uses the **RTT-bridge** transport variant (`APP_P2P_BENCH_RTT_BRIDGE`), since no USB-UART adapter is attached |
+| Northbridge modem | J-Link Compact Base **822005110** (STM32WL5MOC) | `proximos/firmware@hynek/northbridge-p2p-protocol`, `fiber-northbridge/app` — the HDLC P2P modem. Bench uses the **RTT-bridge** transport variant, built with `-DBENCH_RTT_BRIDGE=ON` (`fiber-northbridge/app/CMakeLists.txt`; `APP_P2P_BENCH_RTT_BRIDGE` is the C define it sets, not the build switch), since no USB-UART adapter is attached |
 | Central | this machine | Proximos `control-radio-p2p-host` (MR!30, S1–S4), talking to the northbridge over the RTT-bridge |
 
 **Transport note:** there is no USB-UART adapter enumerated (`/dev/ttyUSB*`/`ttyACM*` absent),
-so the Proximos↔northbridge link is the RTT-bridge (`JLinkExe -RTTTelnetPort` on 822005110,
-`socat` to a PTY the host opens), the same path the PR #404 HIL used. The HDLC framing and
-protocol are byte-identical between the RTT-bridge and the production USART1 build — only the
-transport differs — so this validates the real protocol.
+so the Proximos↔northbridge link is an RTT↔PTY bridge. The current implementation is
+`proximos/firmware` `fiber-northbridge/tests/hil_p2p/nb_rtt_bridge.py`, which speaks RTT
+directly over `pylink` and hands the host a PTY (`--nb-sn`, `--elf`|`--rtt-addr`, `--link`);
+see §6's bench findings for why the PTY must be raw and the RTT down-buffer 256 B. The earlier
+`JLinkExe -RTTTelnetPort` + `socat` pairing described in the PR #404 HIL is superseded by that
+script — it lacked the raw-PTY and chunked-write handling the JoinAccept timing needs. The HDLC
+framing and protocol are byte-identical between the RTT bridge and the production USART1 build —
+only the transport differs — so either validates the real protocol.
 
 **Bench hygiene:** J-Link ownership changes daily — confirm no peer session is driving
-822005109/822005110 before attaching, and always pass the explicit `-SelectEmuBySN`. Flashing
+either probe before attaching, and always name the probe explicitly: `JLinkExe -USB <SN>`,
+`west flash --dev-id <SN>` (or `make flash JLINK_SN=<SN>`), `rttt --serial <SN>`. Flashing
 the DUT needs explicit per-image OK. `ats radio unjoin` (reboot) gives a clean never-paired
 start; never reuse a stale pairing (always fresh join per bench convention).
 
