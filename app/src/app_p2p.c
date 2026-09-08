@@ -9,8 +9,11 @@
 #include "app_cmd.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_counters.h"
 #include "app_log.h"
+#include "app_lrw.h"
 #include "app_p2p.h"
+#include "app_settings.h"
 #include "app_version.h"
 #include "app_wdog.h"
 
@@ -23,6 +26,7 @@
 #include <zephyr/random/random.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/sys/util.h>
 
 /* Standard includes */
@@ -1137,6 +1141,92 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, ui
 	return ret;
 }
 
+/* B4 deferred command actions. A command handler that asks for a reboot or a
+ * settings save must not have it happen before the 0x55 RESPONSE has actually
+ * left and been acknowledged, or the operator gets no answer and (for
+ * settings_save) the staged config is lost. Same problem and same shape as
+ * app_lrw.c's post_cmd_work_handler(); the log strings are deliberately
+ * identical so one bench anchor matches both transports.
+ *
+ * The wait is bounded: a permanently failing TX must not postpone the
+ * commanded action forever. 8 s covers a successful send plus its RX1 window;
+ * a duty-cycle-blocked first attempt reschedules on a longer timer than that,
+ * which is why the handler re-checks instead of firing once.
+ *
+ * P2P has to watch four "not delivered yet" signals where LoRaWAN watches two,
+ * because its response can be parked in three different places: still queued
+ * (m_tx_msgq), dequeued but bounced by the duty cycle (m_tx_deferred), or
+ * transmitted and awaiting a confirmation retry (m_ack_retry_msgq). The
+ * m_tx_work check catches the window between a reschedule and its fire. */
+#define POST_CMD_DRAIN_WAIT_SEC      8
+#define POST_CMD_DRAIN_MAX_DEFERRALS 6
+
+static enum app_cmd_action m_post_cmd_action;
+static uint8_t m_post_cmd_deferrals;
+static struct k_work_delayable m_post_cmd_work;
+
+/* Kept in lockstep with app_lrw.c::post_cmd_work_handler() and main.c's NFC
+ * equivalent so the three dispatch tables cannot drift. Only the actions a
+ * 0x56 can actually reach appear here (app_cmd.c::app_cmd_dispatch leaves
+ * exactly these ungated for APP_CMD_TRANSPORT_P2P); everything else is
+ * rejected before it ever produces an action, so it falls to `default`. */
+static void post_cmd_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if ((k_msgq_num_used_get(&m_tx_msgq) > 0 || m_tx_deferred_valid ||
+	     k_msgq_num_used_get(&m_ack_retry_msgq) > 0 ||
+	     k_work_delayable_is_pending(&m_tx_work)) &&
+	    m_post_cmd_deferrals < POST_CMD_DRAIN_MAX_DEFERRALS) {
+		m_post_cmd_deferrals++;
+		LOG_WRN("Post-command action %d deferred: Ack still undelivered (%u/%u)",
+			(int)m_post_cmd_action, (unsigned)m_post_cmd_deferrals,
+			(unsigned)POST_CMD_DRAIN_MAX_DEFERRALS);
+		k_work_schedule_for_queue(&m_work_q, &m_post_cmd_work,
+					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
+		return;
+	}
+
+	switch (m_post_cmd_action) {
+	case APP_CMD_ACTION_SETTINGS_SAVE:
+		LOG_INF("Command: saving settings + reboot");
+		app_settings_save(true);
+		break;
+	case APP_CMD_ACTION_REBOOT:
+		LOG_INF("Command: reboot");
+		sys_reboot(SYS_REBOOT_COLD);
+		break;
+	case APP_CMD_ACTION_COUNTERS_SAVE:
+		LOG_INF("Command: saving counters");
+		app_counters_save(true);
+		break;
+	case APP_CMD_ACTION_LRW_RESET:
+		/* Reachable over P2P only because lrw_reset carries no
+		 * `transports:` guard. Wiping the LoRaWAN NVM is harmless while
+		 * the radio runs P2P -- it just prepares a later switch back --
+		 * so honour it where the stack exists, and say so where it does
+		 * not (the bench image builds with CONFIG_RADIO_LORAWAN=n). */
+#if defined(CONFIG_LORAWAN)
+		LOG_INF("Command: LoRaWAN reset (NVM wipe) + reboot");
+		app_lrw_reset_nvm();
+		sys_reboot(SYS_REBOOT_COLD);
+#else
+		LOG_WRN("Command: LoRaWAN reset ignored (no LoRaWAN in this build)");
+#endif /* defined(CONFIG_LORAWAN) */
+		break;
+	case APP_CMD_ACTION_LRW_JOIN:
+		/* Same ungated-command story, but this one is meaningless here
+		 * whatever the build: the radio is busy being a P2P node, and a
+		 * LoRaWAN join would need it. Refuse loudly rather than half-do
+		 * it -- to move a node between stacks, set `radio-mode` and
+		 * reboot. */
+		LOG_WRN("Command: LoRaWAN join ignored (radio-mode is p2p)");
+		break;
+	default:
+		break;
+	}
+}
+
 /* B4: dispatch a received 0x56 COMMAND (already decrypted into `body`) through
  * the transport-generic command handler and queue the 0x55 RESPONSE for the
  * next uplink. P2P reuses the LoRaWAN over-the-air writability gating --
@@ -1147,9 +1237,21 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, ui
  * get_info, get_config, settings_save, reboot, reset_counters, w1_scan,
  * lrw_reset and lrw_join -- the last two are LoRaWAN-specific yet ungated, so
  * a 0x56 does reach them.
- * A deferred command action (settings_save/reboot/reset) is logged but NOT yet
- * executed -- the reboot-after-response deferral is a B4 follow-up, paired with
- * the central's structured-command phase-2 (proximos-v2 MR!30 S2). */
+ *
+ * A deferred command action is handed to post_cmd_work_handler() above, which
+ * waits for the 0x55 to be delivered and acknowledged before executing it.
+ *
+ * `seq` correlation is already in place and needs nothing here: the central
+ * stamps every structured Command with a nonzero `seq` from its per-node
+ * allocator, and the generated app_cmd_dispatch() copies it onto the Response
+ * unconditionally. The central clears its queue head only on a Response whose
+ * `seq` matches, and re-announces the same bytes after three further uplinks
+ * without one -- so a lost 0x55 costs a retry, never a silently dropped
+ * command. Node-side idempotency is what makes that safe: get_* are pure,
+ * set_param with an unchanged value is a no-op, and settings_save/reboot run
+ * only after the response was acknowledged (or the bounded drain expired), so
+ * a redelivered command cannot reboot a node whose answer was already in
+ * flight (doc/p2p.md §6). */
 static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
 {
 	uint8_t resp[P2P_TX_BUF_SIZE];
@@ -1167,8 +1269,17 @@ static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
 		(void)app_p2p_queue_response(0, resp, resp_len);
 	}
 
+	/* Defer so the 0x55 uplink and its RX window finish first;
+	 * post_cmd_work_handler() extends the wait (bounded) while the response
+	 * is still queued or retrying, so a duty-cycle backoff cannot lose it to
+	 * a reboot. */
 	if (action != APP_CMD_ACTION_NONE) {
-		LOG_WRN("P2P command action %d not executed yet (B4 follow-up)", (int)action);
+		m_post_cmd_action = action;
+		m_post_cmd_deferrals = 0;
+		k_work_schedule_for_queue(&m_work_q, &m_post_cmd_work,
+					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
+		LOG_INF("Post-command action %d scheduled in %ds", (int)action,
+			POST_CMD_DRAIN_WAIT_SEC);
 	}
 }
 
@@ -1930,6 +2041,7 @@ int app_p2p_init(void)
 	k_work_init_delayable(&m_tx_work, tx_work_handler);
 	k_work_init_delayable(&m_join_work, join_work_handler);
 	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
+	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
 	k_work_init(&m_debug_compose_work, debug_compose_work_handler);

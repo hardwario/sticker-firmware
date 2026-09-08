@@ -487,10 +487,34 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   P2P for every LRW/NFC/vendor-only command, and the M-3 field gate denies P2P
   writes of any field not writable over LoRaWAN (configen `no_write_lrw` also
   denies `p2p`), so a `0x56` `set_param` cannot touch region/keys/`radio_mode`.
-  **Follow-up:** a command whose handler returns a deferred action
-  (settings_save/reboot/reset) is logged but not yet executed over P2P — the
-  reboot-after-response deferral pairs with the central's structured-command
-  phase-2.
+  **Deferred actions (v1.5.0):** a command whose handler returns an action
+  (`settings_save`, `reboot`, `reset_counters`, and — because they carry no
+  `transports:` guard — `lrw_reset`/`lrw_join`) does not execute inline. It is
+  handed to `post_cmd_work_handler()`, which fires
+  `POST_CMD_DRAIN_WAIT_SEC` (8 s) later and re-defers, up to
+  `POST_CMD_DRAIN_MAX_DEFERRALS` (6) times, while the `0x55` is still queued
+  (`m_tx_msgq`), duty-cycle-parked (`m_tx_deferred`) or awaiting a
+  confirmation retry (`m_ack_retry_msgq`). So a `Reboot` reboots only after
+  its response has actually been acknowledged, and a
+  `SetParam{…, save=true}` cannot lose the staged config to a reboot that
+  raced its own answer. The wait is bounded on purpose: a permanently failing
+  TX must not postpone a commanded action forever, so after 6 deferrals it
+  runs anyway — the same bargain LoRaWAN makes (`app_lrw.c`, identical
+  constants and log strings). `lrw_join` is refused in P2P mode (the radio is
+  busy being a P2P node); `lrw_reset` is honoured where the LoRaWAN stack is
+  compiled in and logged-and-ignored where it is not.
+- **Command correlation (`seq`)**: the `0x56` body is the same fPort-85
+  `Command` protobuf, and the central stamps every structured one with a
+  nonzero `seq` from its per-node allocator. The node echoes it without doing
+  anything special — the generated `app_cmd_dispatch()` copies `cmd->seq` onto
+  the response unconditionally. The central clears its queue head only on a
+  `0x55` whose `Response.seq` matches the head's, and after three further
+  uplinks without one it re-announces and re-delivers the *same* bytes. A lost
+  response therefore costs a redelivery, never a silently dropped command.
+  What makes redelivery safe is node-side idempotency: `get_*` are pure,
+  `set_param` with an unchanged value is a no-op, and the deferred actions
+  above run only after the response was acknowledged, so a redelivered
+  command cannot reboot a node whose answer was already in flight.
 - **Dedup across gateways**: every gateway that hears a frame forwards it;
   the central keys dedup on `(dev_addr, counter)` and records per-gateway
   RSSI/SNR (which also feeds ACK routing).
