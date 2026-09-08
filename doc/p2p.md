@@ -167,22 +167,33 @@ and it contains no LoRaWAN at all.
 
 ### 3.2 `frame_type` allocation
 
-| Value | Direction | Meaning |
-|---|---|---|
-| `0x02` | up | telemetry (mirrors LoRaWAN fPort 2, body byte-identical) |
-| `0x03` | up | alarm (fPort 3 mirror) |
-| `0x55` | up | command response (fPort 85 mirror) |
-| `0x56` | down | command (same protobuf Command shape as fPort 85's Command oneof; P2P-only surface, no real LoRaWAN fPort counterpart -- see §6) |
-| `0xF0` | up | **JoinRequest** (link control, §5) |
-| `0xF1` | down | **JoinAccept** |
-| `0xFA` | down | **Ack** |
-| `0xFD` | down | **Detach** (authenticated) |
-| `0xFE` | down | **RejoinRequest** (network asks the node to rejoin) |
+`enum app_p2p_frame_type` (`app_p2p.h`) is the node's copy of this table; the
+central's is `frame_type` in `src/p2p/frame.rs` and the decoder's is
+`FRAME_TYPE_NAMES` in `app/decoder/p2p.js`. All three hard-code the same
+numbers, so a renumbering is a three-repo change.
+
+| Value | Direction | Node side (v1.5.0) | Meaning |
+|---|---|---|---|
+| `0x02` | up | sends | telemetry (mirrors LoRaWAN fPort 2, body byte-identical) |
+| `0x03` | up | sends | alarm (fPort 3 mirror) |
+| `0x55` | up | sends | command response (fPort 85 mirror) |
+| `0x56` | down | **dispatches** | command (same protobuf Command shape as fPort 85's Command oneof; P2P-only surface, no real LoRaWAN fPort counterpart -- see §6) |
+| `0xF0` | up | sends | **JoinRequest** (link control, §5) |
+| `0xF1` | down | **verifies + pairs** | **JoinAccept**, incl. the `reserved(4)` radio assignment (§5.3) |
+| `0xFA` | down | **parses** | **Ack**, 3/4/7/8-byte body (§6) |
+| `0xFD` | down | **obeys** | **Detach** (authenticated) — clears the pairing, no auto re-join (§5.4) |
+| `0xFE` | down | **obeys** | **RejoinRequest** — starts a self-heal-policy join (§5.4) |
+
+Every frame type the central can send is now handled; before v1.5.0 the node
+accepted only `0xFA` and `0x56` in its RX1 window and silently dropped
+`0xFD`/`0xFE` (§5.4).
 
 `0x02`, `0x03`, `0x55` mirror fPorts byte-for-byte so the off-device decoder
 reuses the LoRaWAN codec (`ttn.js` via `p2p.js`); `0x56` reuses the same
 protobuf shape but has no fPort of its own (§6); `0xF0`–`0xFF` is reserved
-for link control and never collides with an fPort mirror.
+for link control and never collides with an fPort mirror. The decoder names
+all nine but decodes bodies only for the three fPort mirrors — the handshake
+bodies are cleartext-but-CMAC-tagged and the link-control ones are empty.
 
 ### 3.3 Radio parameters
 
@@ -928,8 +939,12 @@ design's gateway is based on: a mains-powered STM32WL5MOC radio MCU
 Deliberately out of scope for v1:
 
 - **No mesh / multi-hop** — star topology only (gateways are not repeaters).
-- **No history replay / link check / clock sync** over P2P (LoRaWAN-specific
-  today; clock sync over P2P is a natural v2 since the central owns time).
+- **No history replay / link check** over P2P (both LoRaWAN-specific;
+  `req_history` and `clock_sync` carry `transports:` guards that reject P2P,
+  and history replay is excluded from v1 by design — `plan.md` §5 keeps it
+  LoRaWAN-only). **Clock sync is no longer on this list:** B5 shipped it as
+  the Ack's optional Unix-time tail (§6), so a node with no RTC gets wall
+  time from the central without a `clock_sync` command at all.
 - **BW / CR fixed** at 125 kHz / 4-5.
 - **Single shared channel** (multi-channel via JoinAccept reserved field is
   the v2 hook).
