@@ -58,6 +58,27 @@ extern "C" {
 #define P2P_ACK_BODY_MAX_LEN                                                                       \
 	(P2P_ACK_BODY_BASE_LEN + P2P_ACK_PENDING_LEN_LEN + P2P_ACK_TIME_LEN) /* 8 */
 
+/* JoinAccept `reserved(4)` -- the central's radio assignment for this session
+ * (decision D3, doc/p2p.md §5.3):
+ *
+ *   channel_idx(1) | sf(1) | tx_power(1) | flags(1)
+ *
+ * This release honours `tx_power` only. `channel_idx` must be 0 (the
+ * NorthBridge has one physical channel) and `sf` is a documented hook that the
+ * node logs and ignores, because that same single receiver makes SF
+ * network-wide rather than per-node -- it is provisioned out of band on both
+ * ends. All-zero means "no assignment", which is what the central sends until
+ * its own tx-power key is configured, so an unassigned session simply keeps
+ * the node's own `p2p_tx_power`. */
+#define P2P_TX_POWER_MIN_DBM 2  /* mirrors app_config.yml::p2p_tx_power min */
+#define P2P_TX_POWER_MAX_DBM 22 /* ... and its max */
+
+struct p2p_radio_assign {
+	bool tx_power_assigned;
+	int8_t tx_power_dbm; /* valid iff tx_power_assigned */
+	uint8_t sf_hint;     /* raw byte, 0 = none; logged and ignored (see above) */
+};
+
 /* Parsed Ack body, filled by p2p_parse_ack_body(). */
 struct p2p_ack_info {
 	uint8_t flags;      /* raw flags byte (P2P_ACK_FLAG_*) */
@@ -222,6 +243,10 @@ struct app_p2p_info {
 	uint32_t net_id;   /* 0 pre-pairing */
 	uint16_t dev_addr; /* 0 pre-pairing */
 	uint8_t rx1_delay_s;
+	/* Session TX power: the value the central assigned in JoinAccept when
+	 * tx_power_assigned, otherwise the node's own p2p_tx_power config. */
+	bool tx_power_assigned;
+	int8_t tx_power_dbm;
 	uint32_t fcnt;              /* next data-plane TX counter */
 	uint32_t dev_nonce;         /* JoinRequest anti-replay counter, never resets */
 	uint32_t ack_retry_pending; /* frames currently awaiting an Ack retry */
@@ -308,6 +333,7 @@ void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 uint32_t p2p_rejoin_backoff_ms(uint8_t attempt);
 bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
+void p2p_parse_join_accept_reserved(const uint8_t reserved[4], struct p2p_radio_assign *out);
 void p2p_test_set_fcnt(uint32_t next, uint32_t reserved);
 uint32_t p2p_test_get_fcnt(void);
 int p2p_test_fcnt_next(uint32_t *counter_out);

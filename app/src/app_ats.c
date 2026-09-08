@@ -752,6 +752,8 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 		shell_print(shell, "net_id: %08x", info.net_id);
 		shell_print(shell, "dev_addr: %04x", info.dev_addr);
 		shell_print(shell, "rx1_delay: %u s", info.rx1_delay_s);
+		shell_print(shell, "tx power: %d dBm (%s)", info.tx_power_dbm,
+			    info.tx_power_assigned ? "assigned" : "config");
 		shell_print(shell, "fcnt: %u", info.fcnt);
 		shell_print(shell, "dev_nonce: %u", info.dev_nonce);
 		shell_print(shell, "ack retry pending: %u", info.ack_retry_pending);

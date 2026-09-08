@@ -387,8 +387,34 @@ never be confused with each other.
   RF outages and normal power cycles), so a node computing RX1 timing from a
   forgotten/default value after reboot would drift from what the central
   actually assigned.
-- The `reserved` field is the v2 hook for assigning data-channel radio
-  parameters (§11).
+- The `reserved(4)` field carries the central's **radio assignment** for this
+  session (decision D3), laid out `channel_idx(1) | sf(1) | tx_power(1) |
+  flags(1)`. **Implemented (v1.5.0):**
+  - `tx_power` — dBm, `0` = no assignment, otherwise 2..22 (the node's own
+    `p2p_tx_power` bounds). Applied to the session and **persisted with the
+    pairing**, so it survives reboots without a re-join, and shown by
+    `ats radio status` as `tx power: <n> dBm (assigned)` versus `(config)`.
+    The central owns the link budget across the whole network; the node owns
+    only its default.
+  - `channel_idx` — must be `0`. The NorthBridge has one physical channel
+    (§8), so anything else is logged and ignored.
+  - `sf` — a documented hook, logged and ignored. That single receiver makes
+    SF **network-wide**, not per-node: assigning this node a different SF
+    would just make it unhearable. It is provisioned out of band on both ends.
+  - `flags` — must be `0`; unknown bits are logged and ignored.
+
+  Every unsupported or out-of-range field is warned about and ignored rather
+  than refused — the JoinAccept is authenticated and otherwise valid, and
+  declining to pair over a byte this release cannot honour would strand the
+  node. An all-zero `reserved` (what the central sends until its own
+  `node_tx_power_dbm` key is set) therefore means "no assignment", and the
+  node keeps its configured power.
+
+  **Upgrade note:** the persisted pairing record grew by this one byte, and
+  `join_settings_set()` accepts only records of exactly the current length. A
+  node upgraded across this change reads its old 23-byte record as invalid,
+  boots `UNPAIRED` and re-joins once — deliberate, and harmless
+  pre-deployment, since that re-join is what fetches the assignment (§7).
 
 A failed attempt (no JoinAccept) retries with jittered, duty-cycle-aware
 backoff — but only for the trigger's own bounded lifetime: within the 120 s
@@ -596,6 +622,7 @@ isn't):
 | `factory_reset` | **A P2P node stops being a P2P node.** `radio_mode` is `persistent: [device_reset]` only and is absent from `app_config_factory_reset()`'s preserve list, so it reverts to its `OFF` default (#350): `app_radio_init()` brings no radio up and `app_p2p_start()` is never called at all. Two leftovers survive and matter later. (a) **The P2P pairing is NOT cleared** (doc/code mismatch found 2026-08-24: the `p2pjoin/*` subtree is registered entirely inside `app_p2p.c` and `app_settings_factory_reset()` never references it) — inert while `radio_mode` is not `p2p`, but `join_settings_set()` still restores it straight to `PAIRED` the moment someone sets `radio_mode p2p` again. (b) **`app_key` (`lrw_appkey`) IS wiped** — also `persistent: [device_reset]` only and also absent from that preserve list, unlike `secret_key`, which the earlier `join_key`-rooted design could always fall back on. So re-enabling P2P after a `factory_reset` without re-provisioning `lrw_appkey` would otherwise resume a pairing the operator explicitly reset, under a root key that is now all-zero and therefore public; §4's zero-`app_key` guard refuses to start in exactly that state, which is why it is checked *before* `app_p2p_start()`'s already-`PAIRED` shortcut. The old design's self-healing property — the device could always re-derive its way back on its own — is gone regardless. Bench levers: the top-level `join` (v1.5.0) forces a fresh join live, no reboot needed (the same command on both radio stacks -- `app_radio_rejoin()` dispatches it); `ats radio unjoin` (v1.5.0; clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears the pairing. |
 | Central DB loss/restore | Node's uplinks stop being ACKed (or ACK under an unknown session fails authentication). Self-healing: after **N consecutive fully-failed uplink cycles** (default 8) the node starts re-join attempts with exponential backoff. Known devices' re-joins are accepted outside the pairing window. **Implemented (B3, PR #408, v1.5.0):** `P2P_REJOIN_FAIL_THRESHOLD = 8`; a fully-failed cycle = all `P2P_ACK_MAX_RETRIES` exhausted with no Ack; any Ack resets the streak. The re-join is exempt from the 120 s boot-window cap (§5.2, this is a paired device recovering, not a never-paired join) and backs off `60 s → ×2 → 3600 s` cap, ±25 % jitter. Same `app_key`-set guard as the boot join. |
 | Explicit `Detach` / `RejoinRequest` downlink | Authenticated; immediate. **Implemented (v1.5.0)** — see §5.4 for both. `Detach` clears the pairing and leaves the node silent with no automatic re-join; `RejoinRequest` is the network-initiated rekey lever (counter hygiene, key rotation policy) and starts a self-heal-policy join episode. Before v1.5.0 the node parsed neither, so a `node-remove` left it retrying into a session the central had dropped until the self-heal threshold turned it into a rejoin loop against an unregistered serial. |
+| Firmware upgrade that changes the pairing record | `join_settings_set()` accepts only a `p2pjoin/state` record of exactly the current length, so any release that changes the layout invalidates the stored pairing: the node boots `UNPAIRED` and re-joins once, automatically. v1.5.0 does this (the `reserved(4)` TX-power byte, §5.3). Deliberate, and cheap pre-deployment — the re-join is what populates the new field. Note it costs one `dev_nonce` and resets `fcnt` to 0 under a freshly derived `session_key`, both of which the central already tolerates. |
 | Counter approaching 32-bit wrap | Practically unreachable; policy is a network-initiated `RejoinRequest` rekey long before wrap. |
 
 ---

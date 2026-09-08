@@ -447,6 +447,93 @@ ZTEST(p2p_logic, test_duty_wrap_safe)
 		      "the entry must expire on schedule across the wrap");
 }
 
+/* ---- JoinAccept reserved(4) radio assignment (D3) --------------------- */
+
+/* Every unsupported or out-of-range field is warned about and ignored, never
+ * refused: a JoinAccept is authenticated and otherwise valid, and declining to
+ * pair over a byte this release cannot honour would strand the node. */
+
+ZTEST(p2p_logic, test_join_accept_reserved_all_zero_is_no_assignment)
+{
+	const uint8_t reserved[4] = {0, 0, 0, 0};
+	struct p2p_radio_assign a;
+
+	p2p_parse_join_accept_reserved(reserved, &a);
+
+	zassert_false(a.tx_power_assigned, "all-zero reserved must assign nothing");
+	zassert_equal(a.tx_power_dbm, 0, "no assignment must leave the power at 0");
+	zassert_equal(a.sf_hint, 0, "no SF hint expected");
+}
+
+ZTEST(p2p_logic, test_join_accept_reserved_assigns_tx_power)
+{
+	struct p2p_radio_assign a;
+
+	/* Both ends of the configured envelope, plus a middling value. */
+	const uint8_t powers[] = {P2P_TX_POWER_MIN_DBM, 8, 14, P2P_TX_POWER_MAX_DBM};
+
+	for (size_t i = 0; i < ARRAY_SIZE(powers); i++) {
+		const uint8_t reserved[4] = {0, 0, powers[i], 0};
+
+		p2p_parse_join_accept_reserved(reserved, &a);
+		zassert_true(a.tx_power_assigned, "%u dBm must be accepted", powers[i]);
+		zassert_equal(a.tx_power_dbm, (int8_t)powers[i], "wrong power recorded");
+	}
+}
+
+ZTEST(p2p_logic, test_join_accept_reserved_rejects_out_of_range_tx_power)
+{
+	struct p2p_radio_assign a;
+	/* Just outside both bounds, and the 0xFF a corrupt/garbage byte gives. */
+	const uint8_t bad[] = {1,   P2P_TX_POWER_MIN_DBM - 1, P2P_TX_POWER_MAX_DBM + 1, 23, 100,
+			       0xFF};
+
+	for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+		const uint8_t reserved[4] = {0, 0, bad[i], 0};
+
+		p2p_parse_join_accept_reserved(reserved, &a);
+		zassert_false(a.tx_power_assigned, "%u dBm must be refused, not applied", bad[i]);
+		zassert_equal(a.tx_power_dbm, 0, "a refused power must not leak through");
+	}
+}
+
+ZTEST(p2p_logic, test_join_accept_reserved_ignores_channel_but_keeps_power)
+{
+	/* A nonzero channel is unsupported (one physical channel), but it must
+	 * not cost the node an otherwise-valid power assignment. */
+	const uint8_t reserved[4] = {3, 0, 8, 0};
+	struct p2p_radio_assign a;
+
+	p2p_parse_join_accept_reserved(reserved, &a);
+
+	zassert_true(a.tx_power_assigned, "an unsupported channel must not veto the power");
+	zassert_equal(a.tx_power_dbm, 8, "wrong power recorded");
+}
+
+ZTEST(p2p_logic, test_join_accept_reserved_records_sf_hint)
+{
+	/* SF is judged by the caller (only it knows the configured SF), so the
+	 * parser must pass the raw byte through untouched. */
+	const uint8_t reserved[4] = {0, 12, 0, 0};
+	struct p2p_radio_assign a;
+
+	p2p_parse_join_accept_reserved(reserved, &a);
+
+	zassert_equal(a.sf_hint, 12, "SF hint must be reported verbatim");
+	zassert_false(a.tx_power_assigned, "an SF hint alone assigns no power");
+}
+
+ZTEST(p2p_logic, test_join_accept_reserved_ignores_unknown_flags)
+{
+	const uint8_t reserved[4] = {0, 0, 14, 0xA5};
+	struct p2p_radio_assign a;
+
+	p2p_parse_join_accept_reserved(reserved, &a);
+
+	zassert_true(a.tx_power_assigned, "unknown flags must not veto the power");
+	zassert_equal(a.tx_power_dbm, 14, "wrong power recorded");
+}
+
 ZTEST(p2p_logic, test_rejoin_backoff_doubles_then_caps)
 {
 	/* base, 2x, 4x, ... capped at 1 h. */

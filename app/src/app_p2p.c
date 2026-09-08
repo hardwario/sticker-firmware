@@ -172,8 +172,15 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_JOIN_SUBTREE    "p2pjoin"
 #define P2P_JOIN_DNONCE_KEY "p2pjoin/dnonce"
 #define P2P_JOIN_STATE_KEY  "p2pjoin/state"
-/* net_id(4 BE) | dev_addr(2 BE) | session_key(16) | rx1_delay_s(1) */
-#define P2P_JOIN_STATE_LEN  (4 + 2 + P2P_KEY_LEN + 1)
+/* net_id(4 BE) | dev_addr(2 BE) | session_key(16) | rx1_delay_s(1) |
+ * tx_power_dbm(1, 0 = none)
+ *
+ * The trailing tx_power byte is new in this release (D3). join_settings_set()
+ * accepts only records of exactly this length, so a node upgraded across the
+ * change reads its old 23 B record as invalid, boots UNPAIRED and re-joins
+ * once -- deliberate, and harmless pre-deployment: the re-join is what fetches
+ * the assignment the record now has room for. doc/p2p.md §7. */
+#define P2P_JOIN_STATE_LEN  (4 + 2 + P2P_KEY_LEN + 1 + 1)
 
 /* JoinRequest body (§5.3): product_type(1) | proto_version(1) |
  * serial_number(4 BE) | fw_version(4). product_type has no existing
@@ -336,6 +343,10 @@ static uint32_t m_net_id;   /* 0 (pre-join) until PAIRED */
 static uint16_t m_dev_addr; /* 0 (pre-join) until PAIRED */
 static uint8_t m_session_key[P2P_KEY_LEN];
 static uint8_t m_rx1_delay_s = P2P_RX1_DELAY_DEFAULT_S;
+/* D3: TX power the central assigned for this session in JoinAccept
+ * reserved[2]. Falls back to g_app_config.p2p_tx_power when unassigned. */
+static bool m_session_tx_power_assigned;
+static int8_t m_session_tx_power_dbm;
 static uint32_t m_dev_nonce;      /* next JoinRequest counter; persisted, device lifetime */
 static int64_t m_join_started_at; /* uptime ms; start of the current boot join window */
 
@@ -619,10 +630,18 @@ static int join_settings_set(const char *name, size_t len, settings_read_cb read
 
 		if (len == sizeof(buf) &&
 		    read_cb(cb_arg, buf, sizeof(buf)) == (ssize_t)sizeof(buf)) {
+			uint8_t tx_power = buf[7 + P2P_KEY_LEN];
+
 			m_net_id = sys_get_be32(&buf[0]);
 			m_dev_addr = sys_get_be16(&buf[4]);
 			memcpy(m_session_key, &buf[6], P2P_KEY_LEN);
 			m_rx1_delay_s = buf[6 + P2P_KEY_LEN];
+			/* 0 = the session carried no assignment. Range-check on
+			 * the way back in too, so a corrupt record cannot push
+			 * the PA outside its configured envelope. */
+			m_session_tx_power_assigned = tx_power >= P2P_TX_POWER_MIN_DBM &&
+						      tx_power <= P2P_TX_POWER_MAX_DBM;
+			m_session_tx_power_dbm = m_session_tx_power_assigned ? (int8_t)tx_power : 0;
 			m_link_state = P2P_LINK_PAIRED;
 		}
 		return 0;
@@ -657,7 +676,8 @@ static void dnonce_persist(uint32_t v)
  * session_key is fresh (see derive_session_key()'s comment) and keeps the
  * on-air counter values small. */
 static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
-			    const uint8_t session_key[P2P_KEY_LEN], uint8_t rx1_delay_s)
+			    const uint8_t session_key[P2P_KEY_LEN], uint8_t rx1_delay_s,
+			    const struct p2p_radio_assign *assign)
 {
 	uint8_t buf[P2P_JOIN_STATE_LEN];
 
@@ -665,6 +685,7 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
 	sys_put_be16(dev_addr, &buf[4]);
 	memcpy(&buf[6], session_key, P2P_KEY_LEN);
 	buf[6 + P2P_KEY_LEN] = rx1_delay_s;
+	buf[7 + P2P_KEY_LEN] = assign->tx_power_assigned ? (uint8_t)assign->tx_power_dbm : 0;
 
 	int ret = settings_save_one(P2P_JOIN_STATE_KEY, buf, sizeof(buf));
 
@@ -677,6 +698,8 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
 	m_dev_addr = dev_addr;
 	memcpy(m_session_key, session_key, P2P_KEY_LEN);
 	m_rx1_delay_s = rx1_delay_s;
+	m_session_tx_power_assigned = assign->tx_power_assigned;
+	m_session_tx_power_dbm = assign->tx_power_dbm;
 	m_link_state = P2P_LINK_PAIRED;
 
 	/* Fresh pairing: counter restarts at 0 under the just-rotated session_key,
@@ -722,6 +745,8 @@ static int pairing_clear(void)
 
 	m_link_state = P2P_LINK_UNPAIRED;
 	m_started = false;
+	m_session_tx_power_assigned = false;
+	m_session_tx_power_dbm = 0;
 	m_last_ack_valid = false;
 	m_downlink_pending = false;
 	m_pending_frame_len = 0;
@@ -757,7 +782,11 @@ static void build_modem_config(struct lora_modem_config *c, bool tx)
 	c->datarate = (enum lora_datarate)sf_from_cfg();
 	c->coding_rate = P2P_CODING_RATE;
 	c->preamble_len = 8;
-	c->tx_power = (int8_t)g_app_config.p2p_tx_power;
+	/* An assigned session power overrides the local config: the central owns
+	 * the link budget across the whole network, the node only its own
+	 * default (D3). */
+	c->tx_power = m_session_tx_power_assigned ? m_session_tx_power_dbm
+						  : (int8_t)g_app_config.p2p_tx_power;
 	c->tx = tx;
 	c->iq_inverted = false;
 	c->public_network = false;
@@ -1076,6 +1105,47 @@ P2P_TESTABLE bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struc
 	out->time_present = (time_off != 0) && ((out->flags & P2P_ACK_FLAG_TIME) != 0);
 	out->unix_time = out->time_present ? sys_get_be32(&body[time_off]) : 0;
 	return true;
+}
+
+/* Parse JoinAccept's reserved(4) radio assignment (D3, app_p2p.h):
+ * channel_idx | sf | tx_power | flags. Every unsupported or out-of-range field
+ * is warned about and ignored rather than refused -- a JoinAccept is otherwise
+ * valid and authenticated, and refusing to pair over a byte this release
+ * cannot honour would strand the node.
+ *
+ * `sf` is recorded rather than judged here: only the caller knows the
+ * configured SF to compare against, and this stays a pure function so
+ * tests/p2p_logic can drive it without a config. Pure -- exposed to
+ * tests/p2p_logic. */
+P2P_TESTABLE void p2p_parse_join_accept_reserved(const uint8_t reserved[4],
+						 struct p2p_radio_assign *out)
+{
+	uint8_t channel_idx = reserved[0];
+	uint8_t tx_power = reserved[2];
+	uint8_t flags = reserved[3];
+
+	out->tx_power_assigned = false;
+	out->tx_power_dbm = 0;
+	out->sf_hint = reserved[1];
+
+	if (channel_idx != 0) {
+		LOG_WRN("JoinAccept assigns channel %u: not supported (single channel)",
+			channel_idx);
+	}
+
+	if (tx_power != 0) {
+		if (tx_power >= P2P_TX_POWER_MIN_DBM && tx_power <= P2P_TX_POWER_MAX_DBM) {
+			out->tx_power_assigned = true;
+			out->tx_power_dbm = (int8_t)tx_power;
+		} else {
+			LOG_WRN("JoinAccept assigns %u dBm TX power: outside %d..%d, ignoring",
+				tx_power, P2P_TX_POWER_MIN_DBM, P2P_TX_POWER_MAX_DBM);
+		}
+	}
+
+	if (flags != 0) {
+		LOG_WRN("JoinAccept sets reserved flags 0x%02x: unknown, ignoring", flags);
+	}
 }
 
 /* Duty-cycle budget (ms) still needed before a `wire_len`-byte frame can be
@@ -1922,6 +1992,10 @@ static void mark_ready(void)
 	m_pending_frame_len = 0;
 
 	m_started = true;
+	/* The TX power assignment is NOT reset here: pairing_persist() has
+	 * already installed this session's value (or cleared it), and
+	 * mark_ready() also runs on the already-PAIRED boot shortcut, where the
+	 * value restored from NVS is the one to keep. */
 	if (m_ready_cb) {
 		m_ready_cb();
 	}
@@ -2056,15 +2130,31 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	uint16_t dev_addr = sys_get_be16(&body[4]);
 	uint32_t central_nonce = sys_get_be32(&body[6]);
 	uint8_t rx1_delay_s = body[10];
-	/* body[11..14] = reserved (v2 data-channel assignment hook, §11), unused. */
+
+	/* body[11..14] = reserved(4): the central's radio assignment (D3). */
+	struct p2p_radio_assign assign;
+
+	p2p_parse_join_accept_reserved(&body[11], &assign);
+
+	/* SF is network-wide: the NorthBridge has a single receiver, so a
+	 * per-node SF would simply make this node unhearable. The byte stays a
+	 * documented hook -- warn and keep ours. */
+	if (assign.sf_hint != 0 && assign.sf_hint != (uint8_t)sf_from_cfg()) {
+		LOG_WRN("JoinAccept assigns SF%u: SF is network-wide, keeping SF%d", assign.sf_hint,
+			sf_from_cfg());
+	}
 
 	uint8_t session_key[P2P_KEY_LEN];
 
 	derive_session_key(dev_nonce, central_nonce, session_key);
-	pairing_persist(net_id, dev_addr, session_key, rx1_delay_s);
+	pairing_persist(net_id, dev_addr, session_key, rx1_delay_s, &assign);
 
 	LOG_INF("Joined: net_id=%u dev_addr=%u rx1_delay=%us (RSSI %d dBm, SNR %d dB)", net_id,
 		dev_addr, rx1_delay_s, rssi, snr);
+	if (assign.tx_power_assigned) {
+		LOG_INF("Session TX power assigned: %d dBm (config %d dBm)", assign.tx_power_dbm,
+			g_app_config.p2p_tx_power);
+	}
 	return 0;
 }
 
@@ -2309,6 +2399,9 @@ void app_p2p_get_info(struct app_p2p_info *info)
 	info->net_id = m_net_id;
 	info->dev_addr = m_dev_addr;
 	info->rx1_delay_s = m_rx1_delay_s;
+	info->tx_power_assigned = m_session_tx_power_assigned;
+	info->tx_power_dbm = m_session_tx_power_assigned ? m_session_tx_power_dbm
+							 : (int8_t)g_app_config.p2p_tx_power;
 	info->fcnt = m_fcnt;
 	info->dev_nonce = m_dev_nonce;
 	info->ack_retry_pending = k_msgq_num_used_get(&m_ack_retry_msgq);
