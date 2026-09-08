@@ -295,11 +295,22 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 
 static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 
-/* Shallower than app_lrw.c's own m_work_q (4096 B, sized for LoRaMac's deep call
- * stacks): this queue's handlers only do raw lora_send()/lora_config(), AES-CCM
- * (app_ccm) and app_compose_budget() (whose Telemetry frame is a module static,
- * not stack-allocated), so 2048 B (the pre-#265 LoRaWAN default) is ample. */
-static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
+/* 4096 B, the same as app_lrw.c's own m_work_q -- and for the same reason: both
+ * queues run app_cmd_handle().
+ *
+ * This was 2048 B while the queue only did raw lora_send()/lora_config(),
+ * AES-CCM (app_ccm) and app_compose_budget() (whose Telemetry frame is a module
+ * static, not stack-allocated). B4 made that sizing wrong by putting command
+ * dispatch here: a 0x56 runs recv_ack() -> dispatch_p2p_command() ->
+ * app_cmd_handle() plus nanopb decode/encode on this stack, and the deferred
+ * action it schedules (m_post_cmd_work) runs here too.
+ *
+ * Measured frames on that path: recv_ack 612 B (it holds buf[P2P_FRAME_MAX] and
+ * body[P2P_MAX_BODY]) + app_cmd_handle 32 B + the get_param handler 356 B, so
+ * ~1000 B before nanopb touches the stack at all. On 2048 B that overflowed on
+ * the first downlink command -- app_cmd_handle's memset of the generated
+ * Command/Response structs wrote past the guard and the node halted. */
+static K_THREAD_STACK_DEFINE(m_work_stack, 4096);
 static struct k_work_q m_work_q;
 static struct k_work m_send_work;           /* compose + send telemetry */
 static struct k_work_delayable m_tx_work;   /* drain response/alarm queue, retries on -EAGAIN */
@@ -1467,6 +1478,17 @@ static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
 		LOG_INF("Post-command action %d scheduled in %ds", (int)action,
 			POST_CMD_DRAIN_WAIT_SEC);
 	}
+
+#if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
+	/* The deepest thing this queue ever does (see m_work_stack's comment),
+	 * so this is where its real high-water shows. Same probe app_lrw.c keeps
+	 * at the end of its own command handler. */
+	size_t unused;
+
+	if (k_thread_stack_space_get(k_current_get(), &unused) == 0) {
+		LOG_INF("m_work_q stack: %zu B unused after cmd handle", unused);
+	}
+#endif /* defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO) */
 }
 
 /* Wait for and validate the RX1 downlink for `counter` after `tx_end_ms`
