@@ -670,6 +670,49 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
 	(void)fcnt_reserve(P2P_FCNT_RESERVE);
 }
 
+/* Tear the pairing down: drop the persisted session and return the module to
+ * UNPAIRED, live, without a reboot. The inverse of pairing_persist().
+ *
+ * Shared by the `ats radio unjoin` shell path (which reboots afterwards
+ * anyway) and the Detach downlink (§5.4), which must take effect immediately
+ * -- the central has already dropped the session, so every further uplink
+ * would be shouting at a network that is no longer listening. Clearing
+ * m_started is what stops the report cadence: app_report.c::run_report gates
+ * the uplink on app_radio_is_ready() -> app_p2p_is_ready() -> m_started, so
+ * the cadence timer keeps running harmlessly while nothing is transmitted.
+ *
+ * The queues are purged because their frames are encrypted -- or about to be
+ * -- under a session_key that no longer has a peer; a queued response or
+ * alarm from the dead session is not worth carrying into the next one.
+ *
+ * NEVER touches m_dev_nonce (see dnonce_persist()) or m_fcnt: the nonce is
+ * the central's JoinRequest replay handle and must keep advancing across
+ * pairings, and the counter is reset by the NEXT pairing_persist() under a
+ * freshly derived key.
+ *
+ * The RAM state is cleared even if the NVS delete fails: honouring the
+ * Detach matters more than the record, and a stale record only means the
+ * next boot comes up PAIRED into a dead session, which the self-heal path
+ * (§7) already recovers from. Returns the settings_delete() result. */
+static int pairing_clear(void)
+{
+	int ret = settings_delete(P2P_JOIN_STATE_KEY);
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("settings_delete(p2pjoin/state)", ret);
+	}
+
+	m_link_state = P2P_LINK_UNPAIRED;
+	m_started = false;
+	m_last_ack_valid = false;
+	m_downlink_pending = false;
+	m_tx_deferred_valid = false;
+	k_msgq_purge(&m_ack_retry_msgq);
+	k_msgq_purge(&m_tx_msgq);
+
+	return ret;
+}
+
 /* ======================================================================== */
 /* Radio configuration                                                      */
 /* ======================================================================== */
@@ -1179,6 +1222,54 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	}
 
 	size_t body_len = (size_t)len - P2P_HDR_LEN - P2P_TAG_LEN;
+
+	/* --- Link control (§5.4): Detach (0xFD) / RejoinRequest (0xFE) --- */
+	if (frame_type == APP_P2P_FRAME_DETACH || frame_type == APP_P2P_FRAME_REJOIN_REQUEST) {
+		if (body_len != 0) {
+			return false; /* both are empty-bodied on the wire */
+		}
+
+		uint8_t nonce[P2P_NONCE_LEN];
+		/* Zero-length plaintext, but a real object: app_ccm's failure
+		 * path memset()s the output buffer, and memset(NULL, 0, 0) is
+		 * undefined even though it copies nothing. */
+		uint8_t empty[1];
+
+		build_nonce(nonce, ctr, m_dev_addr, frame_type, P2P_DIR_RX);
+
+		/* An empty message is a legitimate CCM input: the tag still
+		 * covers the nonce and the 11 B header AAD, which is what
+		 * authenticates this frame (app_ccm.c::params_ok constrains the
+		 * nonce/AAD/tag lengths only, not the payload; RFC 3610 allows
+		 * an empty message). Together with the counter echo checked
+		 * above -- single-use per uplink, and this window closes right
+		 * after -- neither frame can be forged or replayed without
+		 * session_key. */
+		int ret = app_ccm_auth_decrypt(m_session_key, nonce, P2P_NONCE_LEN, buf,
+					       P2P_HDR_LEN, &buf[P2P_HDR_LEN], 0, &buf[P2P_HDR_LEN],
+					       P2P_TAG_LEN, empty);
+		if (ret) {
+			LOG_WRN("Detach/RejoinRequest auth failed (counter %u)", counter);
+			return false;
+		}
+
+		if (frame_type == APP_P2P_FRAME_DETACH) {
+			LOG_WRN("Detach received (counter %u): pairing cleared, radio idle "
+				"until reboot or `join`",
+				counter);
+			(void)pairing_clear();
+		} else {
+			LOG_WRN("RejoinRequest received (counter %u): re-joining", counter);
+			/* Self-heal policy (§7), not the boot window: this is a
+			 * paired node the central asked to rekey, and it must
+			 * keep trying past the 120 s cap with backoff. */
+			start_join_episode(true);
+		}
+
+		/* Either way the central proved it received this uplink, so the
+		 * cycle is confirmed and no Ack retry is scheduled. */
+		return true;
+	}
 
 	/* --- B4: a 0x56 COMMAND takes this window instead of the Ack --- */
 	if (frame_type == APP_P2P_FRAME_COMMAND) {
@@ -1991,10 +2082,9 @@ void app_p2p_rejoin(void)
 
 int app_p2p_unjoin(void)
 {
-	int ret = settings_delete(P2P_JOIN_STATE_KEY);
+	int ret = pairing_clear();
 
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("settings_delete(p2pjoin/state)", ret);
 		return ret;
 	}
 	LOG_INF("P2P pairing cleared; reboot required");

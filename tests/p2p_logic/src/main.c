@@ -175,6 +175,77 @@ ZTEST(p2p_logic, test_build_frame_tag_detects_tamper)
 		      -EBADMSG, "tampered AAD accepted");
 }
 
+/* Detach (0xFD) and RejoinRequest (0xFE) are empty-bodied on the wire, so
+ * recv_ack()'s link-control branch (§5.4) authenticates a zero-length CCM
+ * message whose tag covers only the nonce and the 11 B header AAD. Nothing
+ * else in the transport exercises that shape -- pin it here, both directions
+ * of the verdict, since the central relies on it. */
+ZTEST(p2p_logic, test_build_frame_empty_body_roundtrip)
+{
+	const uint32_t net_id = 0xB595CF19u;
+	const uint16_t dev_addr = 0x0001u;
+	const uint32_t counter = 4242;
+
+	for (uint8_t i = 0; i < 2; i++) {
+		const uint8_t frame_type =
+			i ? APP_P2P_FRAME_REJOIN_REQUEST : APP_P2P_FRAME_DETACH;
+		uint8_t frame[P2P_HDR_LEN + P2P_TAG_LEN]; /* 15 B, no ciphertext */
+
+		zassert_ok(build_frame_keyed(net_id, dev_addr, k_session_key, frame_type, NULL, 0,
+					     counter, frame),
+			   "empty-body build failed for type 0x%02x", frame_type);
+
+		zassert_equal(sys_get_be32(&frame[0]), net_id, "net_id header wrong");
+		zassert_equal(sys_get_be16(&frame[4]), dev_addr, "dev_addr header wrong");
+		zassert_equal(frame[6], frame_type, "frame_type header wrong");
+		zassert_equal(sys_get_be32(&frame[7]), counter, "counter header wrong");
+
+		uint8_t nonce[P2P_NONCE_LEN];
+		uint8_t empty[1];
+
+		build_nonce(nonce, counter, dev_addr, frame_type, P2P_DIR_TX);
+
+		zassert_ok(app_ccm_auth_decrypt(k_session_key, nonce, P2P_NONCE_LEN, frame,
+						P2P_HDR_LEN, &frame[P2P_HDR_LEN], 0,
+						&frame[P2P_HDR_LEN], P2P_TAG_LEN, empty),
+			   "empty-body verify failed for type 0x%02x", frame_type);
+
+		/* A flipped tag byte must fail: with no ciphertext the tag is
+		 * the only thing standing between the node and a forged
+		 * unpair. */
+		frame[P2P_HDR_LEN] ^= 0x01;
+		zassert_equal(app_ccm_auth_decrypt(k_session_key, nonce, P2P_NONCE_LEN, frame,
+						   P2P_HDR_LEN, &frame[P2P_HDR_LEN], 0,
+						   &frame[P2P_HDR_LEN], P2P_TAG_LEN, empty),
+			      -EBADMSG, "tampered empty-body tag accepted");
+		frame[P2P_HDR_LEN] ^= 0x01;
+
+		/* Same for the header AAD -- e.g. retargeting a captured
+		 * Detach at another dev_addr. */
+		frame[4] ^= 0x01;
+		zassert_equal(app_ccm_auth_decrypt(k_session_key, nonce, P2P_NONCE_LEN, frame,
+						   P2P_HDR_LEN, &frame[P2P_HDR_LEN], 0,
+						   &frame[P2P_HDR_LEN], P2P_TAG_LEN, empty),
+			      -EBADMSG, "tampered empty-body AAD accepted");
+	}
+}
+
+/* The frame-type numbers are a cross-repo wire constant (the central's
+ * src/p2p/frame.rs::frame_type and app/decoder/p2p.js both hard-code them), so
+ * a renumbering here has to fail loudly rather than desync three code bases. */
+ZTEST(p2p_logic, test_frame_type_constants)
+{
+	zassert_equal(APP_P2P_FRAME_TELEMETRY, 0x02, "telemetry");
+	zassert_equal(APP_P2P_FRAME_ALARM, 0x03, "alarm");
+	zassert_equal(APP_P2P_FRAME_RESPONSE, 0x55, "response");
+	zassert_equal(APP_P2P_FRAME_COMMAND, 0x56, "command");
+	zassert_equal(APP_P2P_FRAME_JOIN_REQUEST, 0xF0, "join request");
+	zassert_equal(APP_P2P_FRAME_JOIN_ACCEPT, 0xF1, "join accept");
+	zassert_equal(APP_P2P_FRAME_ACK, 0xFA, "ack");
+	zassert_equal(APP_P2P_FRAME_DETACH, 0xFD, "detach");
+	zassert_equal(APP_P2P_FRAME_REJOIN_REQUEST, 0xFE, "rejoin request");
+}
+
 ZTEST(p2p_logic, test_build_frame_max_body)
 {
 	uint8_t body[P2P_MAX_BODY];

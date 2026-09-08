@@ -84,17 +84,20 @@ struct p2p_duty {
  * cadence) only goes true once paired -- a device stuck unpaired past its
  * boot join window (§5.2, 120 s) stays silent until the next boot or an NFC
  * `p2p_join` trigger (not yet wired). The confirmed-uplink Ack/retry (§6),
- * self-healing re-join (§7) and Detach (§5.4) are not implemented yet. The
- * optional listen mode (CONFIG_SHELL) puts the radio in continuous RX for
- * the two-STICKER bench rig (doc/p2p.md §14) -- it decrypts and logs
- * received frames but does not dispatch COMMAND frames to app_cmd (that
- * arrives with a later, real anti-replay-protected command channel).
+ * self-healing re-join (§7) and the Detach/RejoinRequest link-control
+ * downlinks (§5.4) are all implemented. The optional listen mode
+ * (CONFIG_SHELL) puts the radio in continuous RX for the two-STICKER bench
+ * rig (doc/p2p.md §14) -- it decrypts and logs received frames but does not
+ * dispatch COMMAND frames to app_cmd (that arrives with a later, real
+ * anti-replay-protected command channel).
  */
 
 /* Wire frame types -- mirror the LoRaWAN fPort values so the off-device
  * decoder logic is shared (doc/p2p.md §3.2). 0xF0-0xFE are reserved for
- * link control; JOIN_REQUEST/JOIN_ACCEPT are implemented (#118 phase 2,
- * doc/p2p.md §5.3), the rest (Detach/RejoinRequest, §7) are not yet. */
+ * link control; all of them are handled now that Detach/RejoinRequest land
+ * (§5.4/§7). Values are the wire contract shared with the central
+ * (proximos-v2 control-radio, src/p2p/frame.rs::frame_type) -- never
+ * renumber one without changing it there in the same release. */
 enum app_p2p_frame_type {
 	APP_P2P_FRAME_TELEMETRY = 2,
 	APP_P2P_FRAME_ALARM = 3,
@@ -103,6 +106,10 @@ enum app_p2p_frame_type {
 	APP_P2P_FRAME_JOIN_REQUEST = 0xF0,
 	APP_P2P_FRAME_JOIN_ACCEPT = 0xF1,
 	APP_P2P_FRAME_ACK = 0xFA,
+	/* Link control, both inbound (RX), both empty-bodied and authenticated
+	 * under session_key with the acknowledged uplink's counter (§5.4). */
+	APP_P2P_FRAME_DETACH = 0xFD,
+	APP_P2P_FRAME_REJOIN_REQUEST = 0xFE,
 };
 
 /* LoRa PHY max payload -- the largest a single P2P wire frame (header + body
