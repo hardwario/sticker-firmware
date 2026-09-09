@@ -16,3 +16,4 @@ A plan is renamed if its PR is renamed, so the two stay in step.
 | `409 - LoRaWAN improvements - regions, datarate, diagnostics.md` | [#409](https://github.com/hardwario/sticker-firmware/pull/409) |
 | `410 - TOWER GFSK transport (radio-mode tower).md` | [#410](https://github.com/hardwario/sticker-firmware/pull/410) |
 | `v1.5.0_mailbox.md` — NFC command channel over the ST25DV FTM mailbox (mailbox-only) | [#414](https://github.com/hardwario/sticker-firmware/pull/414) |
+| `v1.5.0_claiming.md` — plaintext command transport and explicit claiming | [#415](https://github.com/hardwario/sticker-firmware/pull/415) |
