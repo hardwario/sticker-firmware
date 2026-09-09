@@ -1633,7 +1633,10 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "Wall clock:    RTC not synced");
 	}
 
-	/* Device identity keys (local shell only). secret-key is confidential; the
+	/* Device identity keys (local shell only). secret-key is confidential, so
+	 * only its first and last two bytes are shown here -- `config secret-key`
+	 * prints the full value on request. Bench logs of this command get pasted
+	 * into run records and tickets; the summary must not carry the key. The
 	 * claim-token (#170) is shown as "(unset)" until commissioned. */
 	char hexbuf[2 * 16 + 1];
 
@@ -1641,7 +1644,8 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "DevEUI:        %s", hexbuf);
 
 	bin2hex(g_app_config.secret_key, sizeof(g_app_config.secret_key), hexbuf, sizeof(hexbuf));
-	shell_print(sh, "Secret key:    %s", hexbuf);
+	shell_print(sh, "Secret key:    %.4s...%s (masked; `config secret-key` shows all)", hexbuf,
+		    &hexbuf[strlen(hexbuf) - 4]);
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
