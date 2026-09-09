@@ -588,9 +588,13 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
     cadences this product ships with.
 
   The ledger is **RAM-only**: a reboot forgets the hour just transmitted, so a
-  reboot loop can still exceed 1 %. The token bucket had the same hole (it
+  reboot loop can still exceed 1 %. In other words it enforces 1 % per
+  *uninterrupted run*, not per wall-clock hour; a duty analysis over a log with
+  reboots in it has to segment by boot. The token bucket had the same hole (it
   restarted full) and it is accepted for the same reason — persisting it would
-  cost an NVS write per frame.
+  cost an NVS write per frame. If persistence is ever wanted, a coarse
+  "air spent in the last hour" total plus a timestamp, restored and aged on
+  boot, is the workable shape; the 48 × 8 B ring itself is not.
 - **Downlink commands** (`0x56`): flagged in the ACK, delivered in the RX1
   window of the *next* uplink (Class-A downlink queue on the central). Same
   protobuf Command shape as LoRaWAN fPort 85's Command oneof; `frame_type
