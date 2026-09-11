@@ -94,6 +94,16 @@ Section numbering below is kept stable to preserve cross-references.
 Inspired by the TOWER SPIRIT1 network layer. Section 4 compares the two protocols in detail
 and justifies each item.
 
+> **Governing principle — all communication goes through the `app_radio` facade.**
+> Every function a transport exposes to the rest of the app (uplink, downlink, link-ready
+> announces, history) is reached through the `app_radio_*` facade, never by an application
+> module calling `app_lrw_*` or `app_p2p_*` directly. The facade is the single seam that lets
+> a transport be added, swapped or extended without touching callers. A feature counts as
+> "done" only when it is either routed through the facade (and therefore works on every
+> transport) **or** explicitly and deliberately transport-specific and documented as such
+> (e.g. `lrw_join`). This is what B10 audits and enforces; new work must not add a second
+> transport-hardcoded call site.
+
 | # | Proposal | TOWER pattern adopted | Blast radius |
 |---|---|---|---|
 | B1 | **ACK carries RSSI/SNR** | ACK with receiver RSSI | `app_p2p.c` ~10 lines + central |
@@ -105,6 +115,7 @@ and justifies each item.
 | B7 | **CAD / listen-before-talk** | CSMA + AFA | driver-level, not a quick win |
 | B8 | **History replay over P2P** (device-driven stream) | — (mirrors LoRaWAN replay) | `app_radio`, `app_p2p.c`, `app_cmd`, central |
 | B9 | **Counter/replay hardening audit** | fail-closed reserve-ahead | review of `app_p2p.c` |
+| B10 | **Transport parity via facade** | — (our governing principle) | `app_radio`, `app_lrw.c`, `app_p2p.c`, `app_cmd` |
 
 ### B1 — ACK carries RSSI/SNR
 
@@ -265,6 +276,42 @@ TOWER's counter/replay handling has several properties worth auditing ours again
 STICKER already has reserve-ahead persistence (`P2P_FCNT_RESERVE 256`). This is an audit
 item, not a feature: confirm the fail-closed branch exists and behaves.
 
+### B10 — Transport parity via facade
+
+Enforce the governing principle above: everything the LoRaWAN transport exposes must be
+reachable over P2P through the `app_radio` facade, or be a documented, deliberate exception.
+A code audit (2026-09-11) found the data plane already at parity — telemetry, alarms and
+command responses all route through `app_radio_send_telemetry` / `app_radio_send_alarm` /
+`app_radio_queue_response`, and both stacks implement the full facade surface — but four
+behaviours still bypass the facade and are LoRaWAN-only:
+
+| Gap | Today | Fix |
+|---|---|---|
+| **History replay** | `app_cmd_handle_req_history()` calls `app_lrw_start_history_replay()` directly under `#if defined(CONFIG_LORAWAN)` | covered by **B8** (adds `app_radio_start_history_replay()`) |
+| **GetInfo-on-join** | `queue_info_uplink()` lives in `app_lrw.c` and fires only on a LoRaWAN join | add a facade link-ready **announce hook** so P2P also announces identity/firmware on pairing (`mark_ready()`) |
+| **`force_send`** | handler body is `#if defined(CONFIG_LORAWAN)`; dispatcher rejects `tp != LRW` | route through `app_report_trigger()` (already facade-backed) and add `APP_CMD_TRANSPORT_P2P` to the allow-list |
+| **Downlink command execution** | P2P `0x56` COMMAND is dispatched but deferred actions are **logged, not executed** (B4 follow-up) | execute the deferred action over P2P, same as the LoRaWAN port-85 path |
+
+And the command dispatcher (`app_cmd.c`) excludes P2P from several commands LoRaWAN already
+accepts. Widen the `tp != …` allow-lists to include `APP_CMD_TRANSPORT_P2P` for the ones that
+are transport-neutral: **`force_send`, `sample`, `buzzer_play`, `enter_calibration`**, and
+reconcile **`clock_sync`** (either accept the command over P2P too, or document B5's `0x56`
+time-tail as the P2P equivalent so the two mechanisms are not silently divergent). P2P reuses
+the LoRaWAN over-the-air command gating (positive `tp ==` allow-lists in the generated
+`app_config_ingest.c`), so opening these does not widen the write surface beyond what LoRaWAN
+already permits.
+
+**Deliberate exceptions (stay transport-specific, documented here):**
+
+- `lrw_join` / `lrw_reset` — inherently LoRaWAN; P2P has its own join/rejoin (`app_p2p_start` /
+  `app_p2p_rejoin`) reached through `app_radio_start` / `app_radio_rejoin`.
+- `device_reset`, `factory_reset`, `set_secret_key`, `clm_ack`, `clm_rearm`, `vendor_reset`,
+  `req_history_page` — local provisioning / NFC / vendor commands, not part of the LoRaWAN
+  over-the-air surface, so no P2P parity is owed. LoRaWAN does not accept them either.
+
+The outcome is that parity becomes a checked invariant, not an accident: after B10 every
+LoRaWAN-capable function is either facade-routed (works everywhere) or on the exception list.
+
 ---
 
 ## 4. TOWER vs STICKER P2P — protocol comparison
@@ -331,6 +378,7 @@ The scope of this PR is the P2P work; the LoRaWAN items (A1–A7) are tracked in
 - [x] B4 — pending-downlink chaining + `0x56` COMMAND dispatch ✅ (central S2 done; deferred-action execution is a follow-up)
 - [x] B5 — clock sync over P2P ✅ (central S3 done)
 - [ ] B8 — history replay over P2P (device-driven stream) *(reuses the LoRaWAN `HistoryFrame` encoder via a new `app_radio` facade call; needs central S5)*
+- [ ] B10 — transport parity via facade *(GetInfo-on-join announce hook + `force_send`/`sample`/`buzzer_play`/`enter_calibration` allow-lists + B4 deferred-action execution; enforces the §3 governing principle)*
 
 **Large — design and compliance first**
 
@@ -497,6 +545,27 @@ facade (drop the `#if defined(CONFIG_LORAWAN)`) and add `APP_CMD_TRANSPORT_P2P` 
 `req_history` allow-list in the dispatcher. Test natively in `tests/p2p_logic` against the
 emul-LoRa device: a `ReqHistory` produces the expected frame count and yields under a starved
 duty bucket. Pairs with Step 6 (both ride the `0x56` COMMAND channel).
+
+### Step 9 — B10: transport parity via facade
+
+Close the remaining facade-bypass gaps found in the 2026-09-11 audit (§3 B10). Land in small,
+independent commits:
+
+1. **GetInfo-on-join → facade.** Lift `queue_info_uplink()` out of `app_lrw.c` into a shared
+   link-ready announce that the facade invokes for whichever stack just became ready, so P2P
+   announces identity/firmware on `mark_ready()` the way LoRaWAN does on join.
+2. **`force_send` radio-agnostic.** Drop the `#if defined(CONFIG_LORAWAN)` in the handler (it
+   already calls the facade-backed `app_report_trigger()`) and add `APP_CMD_TRANSPORT_P2P` to
+   its dispatch allow-list.
+3. **Widen allow-lists.** Add `APP_CMD_TRANSPORT_P2P` to `sample`, `buzzer_play` and
+   `enter_calibration`; reconcile `clock_sync` (accept over P2P or document B5 as its P2P
+   equivalent). No new write surface — P2P reuses the LoRaWAN `tp ==` gating.
+4. **Execute deferred downlink actions over P2P** (finish the B4 follow-up) so a `0x56` COMMAND
+   that schedules a reboot/action behaves as it does on LoRaWAN port 85.
+
+Each sub-step is verifiable in `tests/p2p_logic` (command accepted over P2P, right action
+emitted) plus the three build configs and clang-format. After this step, "does every
+LoRaWAN function work over P2P?" is answered by the §3 B10 table, not by inspection.
 
 ### Later — design and compliance gated
 
