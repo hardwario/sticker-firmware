@@ -10,6 +10,7 @@
 #include "app_compose.h"
 #include "app_config.h"
 #include "app_counters.h"
+#include "app_history.h"
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_p2p.h"
@@ -2251,6 +2252,166 @@ static void heartbeat_work_handler(struct k_work *work)
 #endif /* defined(CONFIG_WATCHDOG) */
 
 /* ======================================================================== */
+/* History replay (req_history, tag 11) -- P2P device-driven HistoryFrame    */
+/* stream; mirror of app_lrw's replay state machine, transmit path only.     */
+/* ======================================================================== */
+
+/* One frame per work invocation, rescheduled FRAME_GAP apart so the exact
+ * sliding-hour duty ledger (B2) paces the burst; each frame goes out as a
+ * confirmed 0x55 RESPONSE sharing m_hist_seq. */
+#define P2P_HIST_FRAME_GAP_SEC   3
+#define P2P_HIST_FRAME_RETRY_SEC 15
+#define P2P_HIST_MAX_RETRIES     8 /* duty-cycle retries before abandoning a frame */
+
+static struct k_work_delayable m_hist_work;
+static bool m_hist_active;
+static uint32_t m_hist_from, m_hist_to, m_hist_seq;
+static uint32_t m_hist_count, m_hist_idx;
+static size_t m_hist_cursor;
+static uint32_t m_hist_present, m_hist_interval; /* snapshot at replay start */
+static int m_hist_retries;
+static uint8_t m_hist_tx_buf[APP_CMD_HISTORY_FRAME_BUF_SIZE];
+
+/* Per-frame sample capacity: the exact protobuf envelope overhead for these
+ * frame fields, clamped to the P2P body budget and the tx buffer. Worst-case
+ * (max-varint) index/count/t0 give a stable lower bound for the whole replay,
+ * so counting and sending use an identical per-frame cap. */
+static size_t p2p_history_frame_cap(void)
+{
+	size_t out_cap = MIN((size_t)P2P_MAX_BODY, sizeof(m_hist_tx_buf));
+
+	return app_cmd_history_sample_capacity(m_hist_seq, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+					       m_hist_present, m_hist_interval, out_cap);
+}
+
+static void p2p_history_finish(void)
+{
+	m_hist_active = false;
+	app_history_set_replay_active(false);
+	/* Hand the report cadence back to app_report with an immediate kick. */
+	if (m_ready_cb) {
+		m_ready_cb();
+	}
+}
+
+static void hist_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (!m_hist_active) {
+		return;
+	}
+	if (!app_p2p_is_ready()) {
+		LOG_WRN("History replay aborted: P2P not ready");
+		m_hist_active = false;
+		app_history_set_replay_active(false);
+		return;
+	}
+
+	static uint8_t samples[APP_CMD_HISTORY_FRAME_BUF_SIZE]; /* static: 256 B off
+								 * the work-queue stack */
+	size_t cap = MIN(p2p_history_frame_cap(), sizeof(samples));
+	uint32_t t0 = 0;
+	uint16_t n = 0;
+	size_t next = m_hist_cursor;
+	size_t slen = 0;
+
+	if (cap > 0) {
+		slen = app_history_export_page(m_hist_from, m_hist_to, m_hist_cursor, samples, cap,
+					       &t0, &n, &next);
+	}
+	if (n == 0) {
+		LOG_INF("P2P history replay stop at frame %u (cap=%uB)", (unsigned)m_hist_idx,
+			(unsigned)cap);
+		p2p_history_finish();
+		return;
+	}
+
+	size_t len;
+	int ret = app_cmd_build_history_frame(m_hist_seq, m_hist_idx, m_hist_count, t0,
+					      m_hist_present, m_hist_interval,
+					      app_history_base_synced(), samples, slen,
+					      m_hist_tx_buf, sizeof(m_hist_tx_buf), &len);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_cmd_build_history_frame", ret);
+		p2p_history_finish();
+		return;
+	}
+
+	ret = send_confirmed(APP_P2P_FRAME_RESPONSE, m_hist_tx_buf, len);
+	if (ret == -EAGAIN) {
+		/* Duty-cycle blocked: retry the SAME frame, bounded so a persistently
+		 * rejected frame cannot wedge the replay forever. */
+		if (++m_hist_retries > P2P_HIST_MAX_RETRIES) {
+			LOG_ERR("P2P history frame %u abandoned after %d retries",
+				(unsigned)m_hist_idx, m_hist_retries - 1);
+			p2p_history_finish();
+			return;
+		}
+		k_work_schedule_for_queue(&m_work_q, &m_hist_work,
+					  K_SECONDS(P2P_HIST_FRAME_RETRY_SEC));
+		return;
+	}
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("send_confirmed(history)", ret);
+		p2p_history_finish();
+		return;
+	}
+	m_hist_retries = 0;
+
+	LOG_INF("P2P history frame %u/%u sent (%u rec, %zu B)", (unsigned)(m_hist_idx + 1),
+		(unsigned)m_hist_count, (unsigned)n, len);
+	m_hist_cursor = next;
+	m_hist_idx++;
+
+	/* Terminate on cursor exhaustion, not frame_index == frame_count: the
+	 * up-front count is only an estimate; the host concatenates by frame_index. */
+	if (m_hist_cursor < app_history_count()) {
+		k_work_schedule_for_queue(&m_work_q, &m_hist_work,
+					  K_SECONDS(P2P_HIST_FRAME_GAP_SEC));
+	} else {
+		LOG_INF("P2P history replay complete: %u frames", (unsigned)m_hist_idx);
+		p2p_history_finish();
+	}
+}
+
+bool app_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+{
+	if (!app_p2p_is_ready()) {
+		LOG_WRN("History replay requested but P2P not ready; ignoring");
+		return false;
+	}
+
+	/* Seed the snapshot fields the cap depends on (seq/present/interval) before
+	 * sizing a frame, so counting and sending use an identical per-frame cap. */
+	m_hist_from = from_unix;
+	m_hist_to = to_unix;
+	m_hist_seq = seq;
+	m_hist_present = app_history_get_mask();
+	m_hist_interval = app_history_get_interval();
+
+	size_t cap = p2p_history_frame_cap();
+	uint32_t n = (cap > 0) ? app_history_count_frames(from_unix, to_unix, cap) : 0;
+
+	if (n == 0) {
+		LOG_INF("P2P history replay: no records in window");
+		return false;
+	}
+
+	m_hist_count = n;
+	m_hist_idx = 0;
+	m_hist_cursor = 0;
+	m_hist_retries = 0;
+	m_hist_active = true;
+	app_history_set_replay_active(true); /* pause capture; telemetry self-skips */
+
+	LOG_INF("P2P history replay start: %u frames (window %u..%u, seq %u)", (unsigned)n,
+		from_unix, to_unix, seq);
+	k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_NO_WAIT);
+	return true;
+}
+
+/* ======================================================================== */
 /* Public API                                                                */
 /* ======================================================================== */
 
@@ -2300,6 +2461,7 @@ int app_p2p_init(void)
 	k_work_init_delayable(&m_join_work, join_work_handler);
 	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
 	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
+	k_work_init_delayable(&m_hist_work, hist_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
 	k_work_init(&m_debug_compose_work, debug_compose_work_handler);

@@ -227,6 +227,16 @@ int app_p2p_queue_response(uint8_t port, const uint8_t *buf, size_t len);
 /* Send an alarm-detail batch (frame type ALARM). */
 int app_p2p_send_alarm(const uint8_t *buf, size_t len);
 
+/* Start a device-driven history replay over P2P (req_history, tag 11): stream
+ * every stored record in [from_unix, to_unix] back as N HistoryFrame uplinks
+ * (frame type RESPONSE / 0x55) sharing the command `seq`, on the P2P carrier.
+ * The P2P counterpart of app_lrw_start_history_replay(); same app_history /
+ * app_cmd_build_history_frame engine, only the transmit path differs
+ * (send_confirmed instead of lorawan_send). Returns true if a replay was
+ * started (records matched), false on an empty window or P2P not ready (the
+ * caller then answers HISTORY_UNAVAILABLE). */
+bool app_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
+
 /* Register the link-ready kick fired by app_p2p_start() so app_report can
  * begin the cadence. NULL clears it. */
 void app_p2p_register_ready_cb(void (*cb)(void));
