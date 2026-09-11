@@ -1,0 +1,9 @@
+# Copyright (c) 2026 HARDWARIO a.s.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Minimal fake LoRa modem node so app_p2p.c's DEVICE_DT_GET(DT_ALIAS(lora0))
+# resolves on native_sim. The driver (src/emul_lora.c) is a no-op stub -- the
+# tests exercise app_p2p.c's pure logic, never the radio.
+description: HARDWARIO fake LoRa modem for host tests
+compatible: "hardwario,lora-emul"
+include: base.yaml

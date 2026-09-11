@@ -85,8 +85,9 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 		*fault_field = 0;
 	}
 
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_region && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_region && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(1);
 	} else if (src->has_region) {
 		if ((int)src->region >= 0 && (int)src->region <= 2) {
@@ -95,8 +96,9 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(1);
 		}
 	}
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_sub_band && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_sub_band && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				  tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(2);
 	} else if (src->has_sub_band) {
 		int val = src->sub_band;
@@ -107,8 +109,9 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(2);
 		}
 	}
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_network && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_network && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				 tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(3);
 	} else if (src->has_network) {
 		if ((int)src->network >= 0 && (int)src->network <= 1) {
@@ -117,15 +120,16 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(3);
 		}
 	}
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_adr && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_adr && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+			     tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(4);
 	} else if (src->has_adr) {
 		config->lrw_adr = src->adr;
 	}
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_activation &&
-	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_activation && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				    tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(5);
 	} else if (src->has_activation) {
 		if ((int)src->activation >= 0 && (int)src->activation <= 1) {
@@ -134,65 +138,73 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(5);
 		}
 	}
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_deveui && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_deveui && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(6);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_deveui) {
 			memcpy(config->lrw_deveui, src->deveui, sizeof(config->lrw_deveui));
 		}
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_joineui && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_joineui && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				 tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(7);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_joineui) {
 			memcpy(config->lrw_joineui, src->joineui, sizeof(config->lrw_joineui));
 		}
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_nwkkey && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_nwkkey && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(8);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_nwkkey) {
 			memcpy(config->lrw_nwkkey, src->nwkkey, sizeof(config->lrw_nwkkey));
 		}
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_appkey && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_appkey && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(9);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_appkey) {
 			memcpy(config->lrw_appkey, src->appkey, sizeof(config->lrw_appkey));
 		}
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_devaddr && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_devaddr && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				 tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(10);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_devaddr) {
 			memcpy(config->lrw_devaddr, src->devaddr, sizeof(config->lrw_devaddr));
 		}
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_nwkskey && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_nwkskey && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				 tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(11);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_nwkskey) {
 			memcpy(config->lrw_nwkskey, src->nwkskey, sizeof(config->lrw_nwkskey));
 		}
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_appskey && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_appskey && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				 tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(12);
 	} else
 		/* Native fixed_length bytes: nanopb decodes exactly sizeof(field) bytes. */
 		if (src->has_appskey) {
 			memcpy(config->lrw_appskey, src->appskey, sizeof(config->lrw_appskey));
 		}
-	/* M-3: this field is not writable over lrw/vendor. */
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
 	if (src->has_link_check_interval &&
-	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+	     tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(13);
 	} else if (src->has_link_check_interval) {
 		int val = src->link_check_interval;
@@ -203,9 +215,10 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(13);
 		}
 	}
-	/* M-3: this field is not writable over lrw/vendor. */
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
 	if (src->has_link_check_fail_rejoin &&
-	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+	     tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(14);
 	} else if (src->has_link_check_fail_rejoin) {
 		int val = src->link_check_fail_rejoin;
@@ -216,9 +229,9 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(14);
 		}
 	}
-	/* M-3: this field is not writable over lrw/vendor. */
-	if (src->has_radio_mode &&
-	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	if (src->has_radio_mode && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				    tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(15);
 	} else if (src->has_radio_mode) {
 		if ((int)src->radio_mode >= 0 && (int)src->radio_mode <= 2) {
@@ -342,9 +355,10 @@ int app_config_apply_application(enum app_cmd_transport tp, const AppConfigMessa
 			FAULT(6);
 		}
 	}
-	/* M-3: this field is not writable over lrw/nfc. */
+	/* M-3: this field is not writable over lrw/p2p/nfc. */
 	if (src->has_vendor_reset_allow &&
-	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_NFC)) {
+	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+	     tp == APP_CMD_TRANSPORT_NFC)) {
 		FAULT_TRANSPORT(7);
 	} else if (src->has_vendor_reset_allow) {
 		config->vendor_reset_allow = src->vendor_reset_allow;
@@ -842,9 +856,9 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 		*fault_field = 0;
 	}
 
-	/* M-3: this field is not writable over lrw/nfc/vendor. */
-	if (src->has_frequency && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_NFC ||
-				   tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/nfc/vendor. */
+	if (src->has_frequency && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				   tp == APP_CMD_TRANSPORT_NFC || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(1);
 	} else if (src->has_frequency) {
 		int val = src->frequency;
@@ -855,10 +869,10 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 			FAULT(1);
 		}
 	}
-	/* M-3: this field is not writable over lrw/nfc/vendor. */
+	/* M-3: this field is not writable over lrw/p2p/nfc/vendor. */
 	if (src->has_spreading_factor &&
-	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_NFC ||
-	     tp == APP_CMD_TRANSPORT_VENDOR)) {
+	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+	     tp == APP_CMD_TRANSPORT_NFC || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(2);
 	} else if (src->has_spreading_factor) {
 		int val = src->spreading_factor;
@@ -869,9 +883,9 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 			FAULT(2);
 		}
 	}
-	/* M-3: this field is not writable over lrw/nfc/vendor. */
-	if (src->has_tx_power && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_NFC ||
-				  tp == APP_CMD_TRANSPORT_VENDOR)) {
+	/* M-3: this field is not writable over lrw/p2p/nfc/vendor. */
+	if (src->has_tx_power && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
+				  tp == APP_CMD_TRANSPORT_NFC || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(3);
 	} else if (src->has_tx_power) {
 		int val = src->tx_power;

@@ -140,7 +140,12 @@ test("telemetry round-trip: header parsed, body recovered and decoded", () => {
 });
 
 test("frame type maps to fPort decoder name", () => {
-  for (const [type, name] of [[2, "telemetry"], [3, "alarm"], [85, "response"]]) {
+  for (const [type, name] of [
+    [2, "telemetry"],
+    [3, "alarm"],
+    [85, "response"],
+    [86, "command"],
+  ]) {
     const frame = p2p.encodeP2pFrame({
       netId: 0,
       devAddr: 0,
@@ -151,6 +156,44 @@ test("frame type maps to fPort decoder name", () => {
     });
     assert.equal(p2p.decodeP2pFrame(frame, KEY).frameTypeName, name);
   }
+});
+
+// Link control (doc/p2p.md §3.2). Detach/RejoinRequest are empty-bodied, so
+// this doubles as the decoder's zero-length-body round trip.
+test("link-control frame types are named", () => {
+  for (const [type, name] of [
+    [0xfa, "ack"],
+    [0xfd, "detach"],
+    [0xfe, "rejoin_request"],
+  ]) {
+    const frame = p2p.encodeP2pFrame({
+      netId: 0x12345678,
+      devAddr: 0x0042,
+      frameType: type,
+      counter: 7,
+      body: "",
+      dir: p2p.P2P_DIR_RX,
+      key: KEY,
+    });
+    const out = p2p.decodeP2pFrame(frame, KEY, { dir: p2p.P2P_DIR_RX });
+
+    assert.equal(out.frameTypeName, name);
+    assert.equal(out.frameType, type);
+    assert.equal(out.counter, 7);
+    assert.equal(out.body.length, 0);
+  }
+});
+
+test("an unknown frame type still decodes, named unknown", () => {
+  const frame = p2p.encodeP2pFrame({
+    netId: 0,
+    devAddr: 0,
+    frameType: 0x7b,
+    counter: 1,
+    body: "00",
+    key: KEY,
+  });
+  assert.equal(p2p.decodeP2pFrame(frame, KEY).frameTypeName, "unknown");
 });
 
 test("tampered ciphertext fails authentication", () => {

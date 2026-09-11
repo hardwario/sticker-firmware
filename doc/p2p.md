@@ -90,6 +90,33 @@ config radio-mode p2p        # off / lorawan / p2p
 settings save                # persists + reboots
 ```
 
+The three radio parameters are configured the same way, and are
+**`writable: [shell]` only — deliberately, not by omission**:
+
+```
+config p2p-frequency 868100000   # 863..870 MHz
+config p2p-spreading-factor 10   # 6..12
+config p2p-tx-power 14           # 2..22 dBm
+settings save
+```
+
+They must equal the Hub's `radio.p2p_radio` values or the link simply does not
+exist, so they are commissioning-time settings, not runtime ones. Two reasons
+they are not exposed over the air or over NFC:
+
+- **Over the radio is self-defeating.** A `0x56` that changed the frequency or
+  SF would sever the very link carrying it, and the node would be unreachable
+  until someone visited it with a phone or a probe. The M-3 field gate already
+  denies it (#271 — `no_write_lrw` also denies `APP_CMD_TRANSPORT_P2P`), and
+  §7 relies on that.
+- **Over NFC it is a cross-project commitment, not a firmware toggle.** The
+  config schema is shared with the Manager-App, so flipping these three to
+  `[shell, nfc]` means a coordinated app release (the lockstep noted on #271);
+  and since the Hub side must change in the same breath anyway, a phone that
+  can set them without setting the Hub only creates a way to strand a node.
+  Deferred pending agreement with the app team — see §5.2 for the same
+  conclusion about an NFC `p2p_join` trigger.
+
 On boot the firmware brings up **only** the selected stack — the SX126x radio
 is shared between LoRaMac and raw LoRa, so there is no live switch. The
 payload layer is unchanged: `app_compose` builds the same protobuf snapshots
@@ -102,7 +129,10 @@ release; `n` on the flash-tight debug overlay). `CONFIG_LORA=y` (Zephyr raw
 LoRa driver) is already present in the release configuration today, so no new
 driver Kconfig is needed. Flash headroom against the current `0x34000` budget
 was re-measured — see §11 — release has room, debug does not and keeps
-`CONFIG_RADIO_P2P=n`.
+`CONFIG_RADIO_P2P=n`. The bench overlay `app/debug_p2p_bench.conf` (layered on
+top of `debug.conf`, §14) flips `CONFIG_RADIO_P2P=y` back on and pays for it by
+setting `CONFIG_RADIO_LORAWAN=n` — it is the only debug image containing P2P,
+and it contains no LoRaWAN at all.
 
 ---
 
@@ -137,22 +167,33 @@ was re-measured — see §11 — release has room, debug does not and keeps
 
 ### 3.2 `frame_type` allocation
 
-| Value | Direction | Meaning |
-|---|---|---|
-| `0x02` | up | telemetry (mirrors LoRaWAN fPort 2, body byte-identical) |
-| `0x03` | up | alarm (fPort 3 mirror) |
-| `0x55` | up | command response (fPort 85 mirror) |
-| `0x56` | down | command (same protobuf Command shape as fPort 85's Command oneof; P2P-only surface, no real LoRaWAN fPort counterpart -- see §6) |
-| `0xF0` | up | **JoinRequest** (link control, §5) |
-| `0xF1` | down | **JoinAccept** |
-| `0xFA` | down | **Ack** |
-| `0xFD` | down | **Detach** (authenticated) |
-| `0xFE` | down | **RejoinRequest** (network asks the node to rejoin) |
+`enum app_p2p_frame_type` (`app_p2p.h`) is the node's copy of this table; the
+central's is `frame_type` in `src/p2p/frame.rs` and the decoder's is
+`FRAME_TYPE_NAMES` in `app/decoder/p2p.js`. All three hard-code the same
+numbers, so a renumbering is a three-repo change.
+
+| Value | Direction | Node side (v1.5.0) | Meaning |
+|---|---|---|---|
+| `0x02` | up | sends | telemetry (mirrors LoRaWAN fPort 2, body byte-identical) |
+| `0x03` | up | sends | alarm (fPort 3 mirror) |
+| `0x55` | up | sends | command response (fPort 85 mirror) |
+| `0x56` | down | **dispatches** | command (same protobuf Command shape as fPort 85's Command oneof; P2P-only surface, no real LoRaWAN fPort counterpart -- see §6) |
+| `0xF0` | up | sends | **JoinRequest** (link control, §5) |
+| `0xF1` | down | **verifies + pairs** | **JoinAccept**, incl. the `reserved(4)` radio assignment (§5.3) |
+| `0xFA` | down | **parses** | **Ack**, 3/4/7/8-byte body (§6) |
+| `0xFD` | down | **obeys** | **Detach** (authenticated) — clears the pairing, no auto re-join (§5.4) |
+| `0xFE` | down | **obeys** | **RejoinRequest** — starts a self-heal-policy join (§5.4) |
+
+Every frame type the central can send is now handled; before v1.5.0 the node
+accepted only `0xFA` and `0x56` in its RX1 window and silently dropped
+`0xFD`/`0xFE` (§5.4).
 
 `0x02`, `0x03`, `0x55` mirror fPorts byte-for-byte so the off-device decoder
 reuses the LoRaWAN codec (`ttn.js` via `p2p.js`); `0x56` reuses the same
 protobuf shape but has no fPort of its own (§6); `0xF0`–`0xFF` is reserved
-for link control and never collides with an fPort mirror.
+for link control and never collides with an fPort mirror. The decoder names
+all nine but decodes bodies only for the three fPort mirrors — the handshake
+bodies are cleartext-but-CMAC-tagged and the link-control ones are empty.
 
 ### 3.3 Radio parameters
 
@@ -248,7 +289,7 @@ lands here — the ordinary case on a bench or a P2P-only build — and it is
 also what `factory_reset` leaves behind for a device later re-enabled into
 `radio-mode p2p` (§7). `app_p2p_start()` therefore refuses
 to bring the radio up at all while `lrw_appkey` is all-zero, and
-`app_p2p_rejoin()` (the `ats radio join` shell path) refuses for the same
+`app_p2p_rejoin()` (the top-level `join` shell path) refuses for the same
 reason so the debug surface is not a way around it. The refusal is loud —
 `LOG_ERR` at boot, plus an `app_key: MISSING (radio refused to start)` line
 in `ats radio status` — following the same rule as app_lrw.c's
@@ -285,7 +326,16 @@ never finds a gateway, see below).
 - NFC command `p2p_join` (staged like any command — works battery-off, applied
   at next boot). Battery-cheapest and timing-safest path: the join burst is a
   single bounded attempt at the node's own next boot, so there is no window to
-  miss.
+  miss. **Not implemented (v1.5.0).** There is no `p2p_join` command in the
+  protobuf schema and no NFC path to one; the design is recorded here, not
+  shipped. Adding it is not a firmware-only change — it needs a new `Command`
+  oneof tag (the next free one after 28; 19/20/22 are reserved), a
+  `transports: [nfc]` guard, a `west configen` run, and a matching
+  Manager-App release, so it waits on agreement with the app team rather than
+  being added speculatively. **Nothing depends on it**: a node that needs to
+  re-pair has four working triggers — the boot window below, the shell `join`,
+  the self-healing re-join (§7), and the central-initiated `RejoinRequest`
+  (§5.4).
 - Automatically at boot when `radio-mode p2p` and no valid pairing state in
   NVS, but **only for 120 s after boot** (mirrors the central's own pairing
   window default, §5.1) — after that the node stops retrying entirely and
@@ -384,8 +434,34 @@ never be confused with each other.
   RF outages and normal power cycles), so a node computing RX1 timing from a
   forgotten/default value after reboot would drift from what the central
   actually assigned.
-- The `reserved` field is the v2 hook for assigning data-channel radio
-  parameters (§11).
+- The `reserved(4)` field carries the central's **radio assignment** for this
+  session (decision D3), laid out `channel_idx(1) | sf(1) | tx_power(1) |
+  flags(1)`. **Implemented (v1.5.0):**
+  - `tx_power` — dBm, `0` = no assignment, otherwise 2..22 (the node's own
+    `p2p_tx_power` bounds). Applied to the session and **persisted with the
+    pairing**, so it survives reboots without a re-join, and shown by
+    `ats radio status` as `tx power: <n> dBm (assigned)` versus `(config)`.
+    The central owns the link budget across the whole network; the node owns
+    only its default.
+  - `channel_idx` — must be `0`. The NorthBridge has one physical channel
+    (§8), so anything else is logged and ignored.
+  - `sf` — a documented hook, logged and ignored. That single receiver makes
+    SF **network-wide**, not per-node: assigning this node a different SF
+    would just make it unhearable. It is provisioned out of band on both ends.
+  - `flags` — must be `0`; unknown bits are logged and ignored.
+
+  Every unsupported or out-of-range field is warned about and ignored rather
+  than refused — the JoinAccept is authenticated and otherwise valid, and
+  declining to pair over a byte this release cannot honour would strand the
+  node. An all-zero `reserved` (what the central sends until its own
+  `node_tx_power_dbm` key is set) therefore means "no assignment", and the
+  node keeps its configured power.
+
+  **Upgrade note:** the persisted pairing record grew by this one byte, and
+  `join_settings_set()` accepts only records of exactly the current length. A
+  node upgraded across this change reads its old 23-byte record as invalid,
+  boots `UNPAIRED` and re-joins once — deliberate, and harmless
+  pre-deployment, since that re-join is what fetches the assignment (§7).
 
 A failed attempt (no JoinAccept) retries with jittered, duty-cycle-aware
 backoff — but only for the trigger's own bounded lifetime: within the 120 s
@@ -393,13 +469,30 @@ boot window (§5.2) for an auto-boot join, or a single attempt for an
 NFC-staged `p2p_join` (no standing retry loop once that boot's window/attempt
 is spent — the node goes back to idle and waits for the next trigger).
 
-### 5.4 Detach
+### 5.4 Detach and RejoinRequest
 
-`Detach` (`0xFD`) is a downlink authenticated under the session key; the node
-wipes its pairing state and returns to the unpaired boot behavior. The
-management API's `nodes/remove` issues it (best-effort — a sleeping node picks
-it up in its next RX1, exactly TOWER's caveat). TOWER's unauthenticated
-detach-by-anyone is explicitly not reproduced.
+Two link-control downlinks let the central end or renew a pairing. Both ride
+an RX1 window like an Ack, both carry an **empty body**, and both are
+authenticated under `session_key` with AES-CCM direction RX and `counter`
+echoing the uplink being answered — 15 B on air (11 B header + 4 B tag). With
+no ciphertext the tag covers the nonce and the header AAD alone, which is
+exactly what makes them unforgeable: an attacker without `session_key` cannot
+produce the tag, and a replay is impossible because the counter is single-use
+per uplink and the window closes immediately after.
+
+**Implemented (v1.5.0, `app_p2p.c::recv_ack`.)** Both are accepted only after
+the same `net_id`/`dev_addr`/`counter` header match the Ack path uses, and a
+body of any other length is ignored. Either frame confirms the uplink reached
+the central, so neither schedules an Ack retry.
+
+| Frame | Node behaviour |
+|---|---|
+| `Detach` (`0xFD`) | `pairing_clear()`: delete `p2pjoin/state`, drop to `UNPAIRED`, purge the response/alarm and Ack-retry queues, and stop the uplink cadence (`app_p2p_is_ready()` goes false, so `app_report.c::run_report` skips the send while its timer keeps running). **No automatic re-join** — the operator removed this node deliberately, so it stays silent until a reboot or an explicit `join`. `dev_nonce` is untouched, so if it is re-registered later its next JoinRequest is still accepted. Log: `Detach received (counter %u): pairing cleared, radio idle until reboot or `join``. |
+| `RejoinRequest` (`0xFE`) | `start_join_episode(true)` — a self-heal-policy join (§7): exempt from §5.2's 120 s boot window and backed off 60 s → ×2 → 1 h, because a paired node asked to rekey must keep trying for its whole life rather than give up after two minutes. The old session stays usable until the new JoinAccept replaces it. Log: `RejoinRequest received (counter %u): re-joining`. |
+
+The management API's `nodes/remove` issues the Detach (best-effort — a sleeping
+node picks it up in its next RX1, exactly TOWER's caveat). TOWER's
+unauthenticated detach-by-anyone is explicitly not reproduced.
 
 ---
 
@@ -409,11 +502,39 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
 (Class-A pattern).
 
 - **RX1**: opens `rx1_delay` seconds (default 1 s, assigned in JoinAccept)
-  after uplink end, same channel/SF. The ACK (`0xFA`) is a header + a 1-byte
-  flags body (bit 0: downlink pending) + tag under the session key, `counter`
-  echoing the uplink counter. At SF10/125 kHz an ACK is ≈ 250 ms
-  time-on-air — the gateway→central→gateway decision must fit inside the
-  ~1 s budget, hence the LAN requirement.
+  after uplink end, same channel/SF. The ACK (`0xFA`) is a header + body + tag
+  under the session key, `counter` echoing the uplink counter. At SF10/125 kHz
+  an ACK is ≈ 250 ms time-on-air — the gateway→central→gateway decision must
+  fit inside the ~1 s budget, hence the LAN requirement.
+  **Implemented (B1/B5 + D2, v1.5.0):** the ACK body is
+  `flags(1) | rssi(i8) | snr(i8)`, optionally followed by the pending
+  downlink's on-air length and a 4-byte big-endian Unix-time tail (B5 clock
+  sync → `app_clock_set_unix()`). `rssi`/`snr` are the central's measurement
+  of the acknowledged uplink (B1), surfaced by `ats radio status`.
+
+  ```
+  header | flags | rssi | snr | [pending_frame_len if bit0] | [unix_be32 if bit1] | tag
+  ```
+
+  Valid body lengths are therefore **3, 4, 7 and 8**. The body is **not
+  wire-versioned** (P2P is pre-deployment): it is self-describing by length, so
+  the node derives the shape from the received frame length and treats the
+  flags as a refinement, never the authority — a flag claiming a field the
+  frame is too short to hold is ignored rather than trusted. That tolerance is
+  also what let the length byte be added without a version: a central still
+  emitting the old 3/7-byte body with bit 0 set reads as "pending, length
+  unknown", and the node falls back to the 255 B worst-case window until the
+  byte appears.
+
+  `pending_frame_len` is the **total on-air length** of the next `0x56`
+  (11 B header + ciphertext + 4 B tag), so the node sizes its RX1 window for
+  exactly that frame. This matters more than it looks: this driver has no
+  hardware symbol timeout, so the window must outlast the *whole* expected
+  frame or a real command is aborted mid-reception (§3.3) — which is why the
+  pre-D2 node had to open for a 255 B worst case whenever anything was
+  pending. At SF10 a 2 B GetInfo (17 B on air) drops the receiver-on from
+  **2434 ms to 468 ms**. With nothing pending the window is 23 B, sized for a
+  fully-extended ACK.
 - **Retries**: unacknowledged uplinks retransmit **the same counter value**
   (byte-identical frame) up to 3 times with randomized backoff. The central
   treats `counter == high-water` as a duplicate: re-ACK, don't re-process.
@@ -429,6 +550,51 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   self-heals via `Detach`/`RejoinRequest` rather than needing central DB
   surgery), but no reason to leave a second unbounded `>` check in the same
   design.
+- **Device-side duty cycle** (B2, decision D1, **v1.5.0**): raw LoRa bypasses
+  LoRaMac's duty enforcement, so the node enforces the EU868 1 % limit itself
+  with an **exact sliding-hour ledger** (`struct p2p_duty` in `app_p2p.c`).
+  Every TX (data, ACK retry, JoinRequest) is charged its measured air-time; a
+  frame is admitted only when the air already recorded in the trailing hour
+  plus that frame fits `P2P_DUTY_BUDGET_MS` (36 000 ms), so **every** sliding
+  one-hour window sums to ≤ 1 %.
+
+  This is the third model. The first blocked the radio for air×99 ms after
+  every frame, which made an alarm queued behind a long telemetry frame wait
+  minutes. The second (PR #408) was a **token bucket** accruing at 1 % of wall
+  time and capped at the full hourly allowance: it fixed the latency and held
+  the long-run *average* at 1 %, but a node idle for an hour could then burst
+  the whole 36 s at once — a simulated 24 h of continuous sending reaches
+  **2.00 % in the worst sliding hour** (71 860 ms of air). That was documented
+  as an accepted trade-off; D1 withdraws it, because "amortised" is not what
+  the regulation asks and not what a certification review will accept. The
+  ledger keeps the bucket's latency behaviour (a frame goes the moment there is
+  room) and drops the burst hole. `tests/p2p_logic`'s
+  `test_duty_sliding_hour_never_exceeds_1pct` simulates 24 h and checks the
+  window ending at *every* transmission; it fails against the old bucket and
+  passes against the ledger.
+
+  Two costs, both deliberate:
+  - **384 B of RAM** — `P2P_DUTY_LEDGER_ENTRIES` (48) × 8 B, replacing the
+    bucket's 16 B.
+  - **A bounded frame count per hour.** One entry per transmission still
+    inside the window means the *ledger* rather than the air-time budget
+    becomes the limit above 48 uplinks/hour. At SF10 the smallest frame the
+    node sends is 17 B / 330 ms, so the 36 000 ms allowance would otherwise
+    buy ~109. The direction is safe — a full ring can only *delay* a frame,
+    never permit one the budget forbids — but a bench run that wants the
+    air-time budget to be the visible limit needs `interval-report` above
+    ~75 s. Raising the ring, or folding the two oldest entries together when
+    it fills, would remove the limit at any SF; neither is needed for the
+    cadences this product ships with.
+
+  The ledger is **RAM-only**: a reboot forgets the hour just transmitted, so a
+  reboot loop can still exceed 1 %. In other words it enforces 1 % per
+  *uninterrupted run*, not per wall-clock hour; a duty analysis over a log with
+  reboots in it has to segment by boot. The token bucket had the same hole (it
+  restarted full) and it is accepted for the same reason — persisting it would
+  cost an NVS write per frame. If persistence is ever wanted, a coarse
+  "air spent in the last hour" total plus a timestamp, restored and aged on
+  boot, is the workable shape; the 48 × 8 B ring itself is not.
 - **Downlink commands** (`0x56`): flagged in the ACK, delivered in the RX1
   window of the *next* uplink (Class-A downlink queue on the central). Same
   protobuf Command shape as LoRaWAN fPort 85's Command oneof; `frame_type
@@ -436,6 +602,44 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   directional `0x55`/`0x56` split exists because P2P lacks ChirpStack's
   topic-based direction separation) -- `app_cmd` ingest is still
   transport-agnostic, just not a literal fPort mirror on the downlink side.
+  **Implemented (B4, PR #408, v1.5.0; matches proximos-v2 MR!30 S2):** on a
+  pending-flagged Ack the node sizes its next RX1 window for a full frame; if
+  the central sends a `0x56` there instead of the Ack, `recv_ack()` decrypts it
+  (direction RX), dispatches through the transport-generic `app_cmd_handle()`
+  as `APP_CMD_TRANSPORT_P2P`, and queues the `0x55` RESPONSE, treating the
+  command as an implicit Ack of that uplink. **Security:** the P2P transport
+  reuses the LoRaWAN over-the-air gating — the per-command allow-lists reject
+  P2P for every LRW/NFC/vendor-only command, and the M-3 field gate denies P2P
+  writes of any field not writable over LoRaWAN (configen `no_write_lrw` also
+  denies `p2p`), so a `0x56` `set_param` cannot touch region/keys/`radio_mode`.
+  **Deferred actions (v1.5.0):** a command whose handler returns an action
+  (`settings_save`, `reboot`, `reset_counters`, and — because they carry no
+  `transports:` guard — `lrw_reset`/`lrw_join`) does not execute inline. It is
+  handed to `post_cmd_work_handler()`, which fires
+  `POST_CMD_DRAIN_WAIT_SEC` (8 s) later and re-defers, up to
+  `POST_CMD_DRAIN_MAX_DEFERRALS` (6) times, while the `0x55` is still queued
+  (`m_tx_msgq`), duty-cycle-parked (`m_tx_deferred`) or awaiting a
+  confirmation retry (`m_ack_retry_msgq`). So a `Reboot` reboots only after
+  its response has actually been acknowledged, and a
+  `SetParam{…, save=true}` cannot lose the staged config to a reboot that
+  raced its own answer. The wait is bounded on purpose: a permanently failing
+  TX must not postpone a commanded action forever, so after 6 deferrals it
+  runs anyway — the same bargain LoRaWAN makes (`app_lrw.c`, identical
+  constants and log strings). `lrw_join` is refused in P2P mode (the radio is
+  busy being a P2P node); `lrw_reset` is honoured where the LoRaWAN stack is
+  compiled in and logged-and-ignored where it is not.
+- **Command correlation (`seq`)**: the `0x56` body is the same fPort-85
+  `Command` protobuf, and the central stamps every structured one with a
+  nonzero `seq` from its per-node allocator. The node echoes it without doing
+  anything special — the generated `app_cmd_dispatch()` copies `cmd->seq` onto
+  the response unconditionally. The central clears its queue head only on a
+  `0x55` whose `Response.seq` matches the head's, and after three further
+  uplinks without one it re-announces and re-delivers the *same* bytes. A lost
+  response therefore costs a redelivery, never a silently dropped command.
+  What makes redelivery safe is node-side idempotency: `get_*` are pure,
+  `set_param` with an unchanged value is a no-op, and the deferred actions
+  above run only after the response was acknowledged, so a redelivered
+  command cannot reboot a node whose answer was already in flight.
 - **Dedup across gateways**: every gateway that hears a frame forwards it;
   the central keys dedup on `(dev_addr, counter)` and records per-gateway
   RSSI/SNR (which also feeds ACK routing).
@@ -466,9 +670,10 @@ isn't):
 | Trigger | Behavior |
 |---|---|
 | `lrw_appkey` change (`set_param`/`config`, e.g. re-provisioning) | `session_key` on the *next* join changes; an already-`PAIRED` session is unaffected until something else forces a re-join (unlike `secret_key` rotation on the NFC channel, which forces a reboot, #322 — changing `app_key` does not by itself). The central must have the new `app_key` registered before the node's next JoinRequest will authenticate. |
-| `factory_reset` | **A P2P node stops being a P2P node.** `radio_mode` is `persistent: [device_reset]` only and is absent from `app_config_factory_reset()`'s preserve list, so it reverts to its `LORAWAN` default: `app_radio_init()` routes to app_lrw.c and `app_p2p_start()` is never called at all. Two leftovers survive and matter later. (a) **The P2P pairing is NOT cleared** (doc/code mismatch found 2026-08-24: the `p2pjoin/*` subtree is registered entirely inside `app_p2p.c` and `app_settings_factory_reset()` never references it) — inert while `radio_mode` is not `p2p`, but `join_settings_set()` still restores it straight to `PAIRED` the moment someone sets `radio_mode p2p` again. (b) **`app_key` (`lrw_appkey`) IS wiped** — also `persistent: [device_reset]` only and also absent from that preserve list, unlike `secret_key`, which the earlier `join_key`-rooted design could always fall back on. So re-enabling P2P after a `factory_reset` without re-provisioning `lrw_appkey` would otherwise resume a pairing the operator explicitly reset, under a root key that is now all-zero and therefore public; §4's zero-`app_key` guard refuses to start in exactly that state, which is why it is checked *before* `app_p2p_start()`'s already-`PAIRED` shortcut. The old design's self-healing property — the device could always re-derive its way back on its own — is gone regardless. Bench levers: `ats radio join` (v1.5.0) forces a fresh join live, no reboot needed (mirrors LoRaWAN's `join`, which always rejoins unconditionally); `ats radio unjoin` (v1.5.0; clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears the pairing. |
-| Central DB loss/restore | Node's uplinks stop being ACKed (or ACK under an unknown session fails authentication). Self-healing: after **N consecutive fully-failed uplink cycles** (default 8) the node starts re-join attempts with exponential backoff. Known devices' re-joins are accepted outside the pairing window. |
-| Explicit `Detach` / `RejoinRequest` downlink | Authenticated; immediate. `RejoinRequest` is the network-initiated rekey lever (counter hygiene, key rotation policy). |
+| `factory_reset` | **A P2P node stops being a P2P node.** `radio_mode` is `persistent: [device_reset]` only and is absent from `app_config_factory_reset()`'s preserve list, so it reverts to its `OFF` default (#350): `app_radio_init()` brings no radio up and `app_p2p_start()` is never called at all. Two leftovers survive and matter later. (a) **The P2P pairing is NOT cleared** (doc/code mismatch found 2026-08-24: the `p2pjoin/*` subtree is registered entirely inside `app_p2p.c` and `app_settings_factory_reset()` never references it) — inert while `radio_mode` is not `p2p`, but `join_settings_set()` still restores it straight to `PAIRED` the moment someone sets `radio_mode p2p` again. (b) **`app_key` (`lrw_appkey`) IS wiped** — also `persistent: [device_reset]` only and also absent from that preserve list, unlike `secret_key`, which the earlier `join_key`-rooted design could always fall back on. So re-enabling P2P after a `factory_reset` without re-provisioning `lrw_appkey` would otherwise resume a pairing the operator explicitly reset, under a root key that is now all-zero and therefore public; §4's zero-`app_key` guard refuses to start in exactly that state, which is why it is checked *before* `app_p2p_start()`'s already-`PAIRED` shortcut. The old design's self-healing property — the device could always re-derive its way back on its own — is gone regardless. Bench levers: the top-level `join` (v1.5.0) forces a fresh join live, no reboot needed (the same command on both radio stacks -- `app_radio_rejoin()` dispatches it); `ats radio unjoin` (v1.5.0; clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears the pairing. |
+| Central DB loss/restore | Node's uplinks stop being ACKed (or ACK under an unknown session fails authentication). Self-healing: after **N consecutive fully-failed uplink cycles** (default 8) the node starts re-join attempts with exponential backoff. Known devices' re-joins are accepted outside the pairing window. **Implemented (B3, PR #408, v1.5.0):** `P2P_REJOIN_FAIL_THRESHOLD = 8`; a fully-failed cycle = all `P2P_ACK_MAX_RETRIES` exhausted with no Ack; any Ack resets the streak. The re-join is exempt from the 120 s boot-window cap (§5.2, this is a paired device recovering, not a never-paired join) and backs off `60 s → ×2 → 3600 s` cap, ±25 % jitter. Same `app_key`-set guard as the boot join. |
+| Explicit `Detach` / `RejoinRequest` downlink | Authenticated; immediate. **Implemented (v1.5.0)** — see §5.4 for both. `Detach` clears the pairing and leaves the node silent with no automatic re-join; `RejoinRequest` is the network-initiated rekey lever (counter hygiene, key rotation policy) and starts a self-heal-policy join episode. Before v1.5.0 the node parsed neither, so a `node-remove` left it retrying into a session the central had dropped until the self-heal threshold turned it into a rejoin loop against an unregistered serial. |
+| Firmware upgrade that changes the pairing record | `join_settings_set()` accepts only a `p2pjoin/state` record of exactly the current length, so any release that changes the layout invalidates the stored pairing: the node boots `UNPAIRED` and re-joins once, automatically. v1.5.0 does this (the `reserved(4)` TX-power byte, §5.3). Deliberate, and cheap pre-deployment — the re-join is what populates the new field. Note it costs one `dev_nonce` and resets `fcnt` to 0 under a freshly derived `session_key`, both of which the central already tolerates. |
 | Counter approaching 32-bit wrap | Practically unreachable; policy is a network-initiated `RejoinRequest` rekey long before wrap. |
 
 ---
@@ -627,13 +832,15 @@ phone app step is needed for P2P at all, one-time or otherwise.
   not — confirms debug keeps `CONFIG_RADIO_P2P=n` (same lever already used
   to drop AU915/US915 from debug.conf, see the debug build RAM+flash coupling
   fix from issue #340) unless debug frees up budget elsewhere first.
-- **Device-side duty-cycle enforcement** — §6/§8 only describe duty-cycle
-  *bookkeeping* on the central/gateway side; LoRaWAN's own EU868 1 % limit is
-  enforced inside LoRaMac today, which P2P mode bypasses entirely (raw LoRa
-  driver, no network server, §1). Nothing in this design yet gives the node
-  itself an equivalent tracker for its own uplink/retry/re-join traffic.
-  **Deferred to phase 2** (§13, FW join + ACK state machine) — must land
-  before this ships, not before the design is accepted.
+- **Device-side duty-cycle enforcement** — LoRaWAN's own EU868 1 % limit is
+  enforced inside LoRaMac, which P2P mode bypasses entirely (raw LoRa driver,
+  no network server, §1). **RESOLVED (B2 + decision D1, v1.5.0):** the node
+  enforces its own limit over all TX (data, ACK retry, JoinRequest) with an
+  exact sliding-hour ledger — every sliding hour ≤ 1 %, not merely a 1 %
+  long-run average — at a cost of 384 B of RAM and a bounded frame count per
+  hour. See §6 for both, and for the token bucket this replaced. §6/§8's
+  central/gateway-side duty *bookkeeping* is a separate concern and still
+  applies.
 - **RX2-equivalent downlink fallback** — v1 is RX1-only (§6): a missed
   ~1 s gateway↔central round trip (LAN/MQTT jitter) just counts as an
   unacknowledged uplink and falls back to the normal retry path, unlike
@@ -736,8 +943,12 @@ design's gateway is based on: a mains-powered STM32WL5MOC radio MCU
 Deliberately out of scope for v1:
 
 - **No mesh / multi-hop** — star topology only (gateways are not repeaters).
-- **No history replay / link check / clock sync** over P2P (LoRaWAN-specific
-  today; clock sync over P2P is a natural v2 since the central owns time).
+- **No history replay / link check** over P2P (both LoRaWAN-specific;
+  `req_history` and `clock_sync` carry `transports:` guards that reject P2P,
+  and history replay is excluded from v1 by design — `plan.md` §5 keeps it
+  LoRaWAN-only). **Clock sync is no longer on this list:** B5 shipped it as
+  the Ack's optional Unix-time tail (§6), so a node with no RTC gets wall
+  time from the central without a `clock_sync` command at all.
 - **BW / CR fixed** at 125 kHz / 4-5.
 - **Single shared channel** (multi-channel via JoinAccept reserved field is
   the v2 hook).
@@ -786,7 +997,9 @@ everything except real round-trip timing.
 ### Setup
 
 - **Device A ("node" / DUT)** — mainline firmware, `radio-mode p2p`, behaves
-  exactly like a deployed unit.
+  exactly like a deployed unit. Its own diagnostic receiver is
+  `ats radio listen on|off` (`app_p2p_listen()`, `CONFIG_SHELL`) — not the
+  `p2p listen` below, which belongs to device B's standalone firmware.
 - **Device B ("gw-sim")** — **a separate, standalone firmware**
   (`sticker/tests/p2p/`, `west build -b sticker tests/p2p`), *not* a debug
   build of the mainline app with extra `ats p2p ...` shell commands as
@@ -845,7 +1058,7 @@ everything except real round-trip timing.
   reboots), and confirm the boot log carries `P2P not started: lrw_appkey is
   all-zero`, that `ats radio status` reports `app_key: MISSING (radio
   refused to start)`, that device B hears no JoinRequest at all, and that
-  `ats radio join` is refused rather than transmitting. Then restore a real
+  `join` is refused rather than transmitting. Then restore a real
   `lrw-appkey` and confirm the join proceeds normally. Worth running once
   with a pairing already in NVS (§7's re-enable path) so the check ahead of
   `app_p2p_start()`'s already-`PAIRED` shortcut is covered too.

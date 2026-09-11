@@ -420,13 +420,18 @@ Run these first in every session; they gate everything else. All `A`/host-only.
 
 ### AT-HOST-02 — native_sim ztest suites
 - **Steps:** `bash tests/run_native.sh` (iterates tests/alarm_eval, alarm_rules, buzzer, ccm,
-  cmd, compose, history, history_flash, ndef, nfc_crypto, nfc_hw on `native_sim/native/64`).
+  cmd, compose, history, history_flash, ndef, nfc_crypto, nfc_hw, p2p_logic on
+  `native_sim/native/64`).
   `alarm_eval` (#348) drives the real `app_alarm.c` dwell/confirm/hold state machine directly
   (`app_alarm_event()`/`app_alarm_poll()`) with hall/sensor GPIO stubbed, plus (#397) the
   alarm-driven buzzer plumbing (`app_buzzer_play_repeating()` stubbed there) — `alarm_rules`
   only covers the static rule-validation layer. `buzzer` (#397) drives the real
   `app_buzzer.c` melody engine against a `gpio_emul`-backed fake GPIO: melody sequencing,
-  abort ordering, queue-replace policy, and `buzzer_play` id bounds.
+  abort ordering, queue-replace policy, and `buzzer_play` id bounds. `p2p_logic` (#118, PR
+  #408) compiles the real `app_p2p.c` against a no-op fake LoRa device (`src/emul_lora.c`) and
+  thin stubs, reaching its internal pure helpers via CONFIG_ZTEST hooks (`app_p2p.h`): LoRa
+  time-on-air, the CCM nonce layout, the data-plane frame codec (round-trip + tamper), and the
+  token-bucket duty-cycle governor (B2 — refill accrual, burst, cap, long-run ≤1%).
 - **Expect:** every suite prints `PROJECT EXECUTION SUCCESSFUL`.
 - **Evidence:** per-suite pass/fail table.
 
@@ -693,9 +698,9 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   this is the only place it gets exercised. In `radio-mode p2p`, set
   `lrw-appkey 00000000000000000000000000000000` + save: expect `P2P not started: lrw_appkey
   is all-zero` in the boot log, `app_key: MISSING (radio refused to start)` from `ats radio
-  status`, no JoinRequest on air, and `ats radio join` refused rather than transmitting.
+  status`, no JoinRequest on air, and `join` refused rather than transmitting.
   Restore a real `lrw-appkey` and confirm the join proceeds.
-- **Note:** `factory_reset` reverts `radio-mode` to its `LORAWAN` default (it is
+- **Note:** `factory_reset` reverts `radio-mode` to its `OFF` default (#350; it is
   `persistent: [device_reset]` and is not in `app_config_factory_reset()`'s preserve list),
   so it never leaves a live P2P node behind — but it does wipe `lrw_appkey` while leaving
   the `p2pjoin/*` pairing intact, which is the state the guard above exists for

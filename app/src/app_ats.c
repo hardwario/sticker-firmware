@@ -752,9 +752,17 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 		shell_print(shell, "net_id: %08x", info.net_id);
 		shell_print(shell, "dev_addr: %04x", info.dev_addr);
 		shell_print(shell, "rx1_delay: %u s", info.rx1_delay_s);
+		shell_print(shell, "tx power: %d dBm (%s)", info.tx_power_dbm,
+			    info.tx_power_assigned ? "assigned" : "config");
 		shell_print(shell, "fcnt: %u", info.fcnt);
 		shell_print(shell, "dev_nonce: %u", info.dev_nonce);
 		shell_print(shell, "ack retry pending: %u", info.ack_retry_pending);
+		if (info.last_ack_valid) {
+			shell_print(shell, "last ack rssi: %d dBm", info.last_ack_rssi);
+			shell_print(shell, "last ack snr: %d dB", info.last_ack_snr);
+		} else {
+			shell_print(shell, "last ack rssi/snr: n/a");
+		}
 		shell_print(shell, "max payload: %u B", app_radio_get_max_payload());
 		return 0;
 	}
@@ -1625,7 +1633,10 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "Wall clock:    RTC not synced");
 	}
 
-	/* Device identity keys (local shell only). secret-key is confidential; the
+	/* Device identity keys (local shell only). secret-key is confidential, so
+	 * only its first and last two bytes are shown here -- `config secret-key`
+	 * prints the full value on request. Bench logs of this command get pasted
+	 * into run records and tickets; the summary must not carry the key. The
 	 * claim-token (#170) is shown as "(unset)" until commissioned. */
 	char hexbuf[2 * 16 + 1];
 
@@ -1633,7 +1644,8 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "DevEUI:        %s", hexbuf);
 
 	bin2hex(g_app_config.secret_key, sizeof(g_app_config.secret_key), hexbuf, sizeof(hexbuf));
-	shell_print(sh, "Secret key:    %s", hexbuf);
+	shell_print(sh, "Secret key:    %.4s...%s (masked; `config secret-key` shows all)", hexbuf,
+		    &hexbuf[strlen(hexbuf) - 4]);
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {

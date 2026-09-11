@@ -480,6 +480,12 @@ def normalize_access(config):
         # scoped to a narrow recovery surface (#299/#316), so a field that omits
         # vendor from `writable` must reject it like any other excluded transport.
         # Mirrors dump/dump_nfc_only.
+        # no_write_lrw also gates the raw-LoRa P2P transport (#118 B4): P2P is a
+        # radio downlink like LoRaWAN, so a field kept off the LoRaWAN link (e.g.
+        # radio_mode/keys, the #271 "don't reconfigure the radio over the radio"
+        # rule) must be kept off P2P too. The ingest template emits an
+        # APP_CMD_TRANSPORT_P2P check wherever it emits the LRW one; `p2p` is not
+        # a YAML `writable` token, it simply mirrors `lrw` here.
         if "lrw" not in w:
             p["no_write_lrw"] = True
         if "nfc" not in w:
