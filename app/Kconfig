@@ -30,15 +30,28 @@ config RADIO_LORAWAN
 	  default rather than joining debug.conf's OFF-by-default set.
 
 config RADIO_P2P
-	bool "Raw-LoRa P2P radio transport (reserved, not yet implemented)"
-	default n
+	bool "Raw-LoRa P2P radio transport (#118)"
+	depends on LORA
+	default y
 	help
-	  Reserved app-level name for the raw-LoRa P2P transport (issue
-	  #118), pairing with RADIO_LORAWAN above. The P2P implementation
-	  is not merged yet — this option currently has no effect (nothing
-	  depends on or selects anything from it). Wire it to the P2P
-	  transport's own Kconfig once that work merges, mirroring how
-	  RADIO_LORAWAN wraps CONFIG_LORAWAN.
+	  App-level name for the raw-LoRa point-to-point transport
+	  (app_p2p.c, issue #118) — pairs with RADIO_LORAWAN above as the two
+	  selectable radio transports. Reserved as an inert placeholder by
+	  #395 and wired up here when the P2P work merged; it was briefly
+	  named APP_LORA_P2P on the feat-p2p branch, so out-of-tree overlays
+	  carrying that name need updating.
+
+	  Unlike RADIO_LORAWAN, which `select`s an underlying Zephyr
+	  subsystem, this compiles app-owned code that talks to drivers/lora
+	  directly — hence `depends on LORA` rather than a `select` (and it
+	  therefore drops out on native_sim test builds, which have no radio,
+	  without needing RADIO_LORAWAN's `if LORA` guard).
+
+	  Which transport actually brings up the shared SX126x radio is a
+	  runtime choice (`radio-mode`, #271), not a build-time one: both
+	  stacks link into the same image when both are y. Turning this off
+	  reclaims flash on builds that never need P2P — the flash-tight
+	  debug overlay does exactly that (doc/p2p.md §11).
 
 config APP_VERBOSE_LOGGING
 	bool "Enable verbose parameter logging"

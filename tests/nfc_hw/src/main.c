@@ -238,7 +238,8 @@ ZTEST(nfc_hw, test_response_write_failure_stops_the_processing_blink)
 	 * "retransmission" replay against whichever of those tests runs first,
 	 * instead of a fresh decrypt. Same plaintext/key as REQ_WIRE, counter=99,
 	 * sealed with the same seal() helper as sticker_nfc_frame.py. */
-	const char *write_fail_req_wire = "0000000000000063e656f7390a22d21e38553a1635cab62af5dd4f7d2f";
+	const char *write_fail_req_wire =
+		"0000000000000063e656f7390a22d21e38553a1635cab62af5dd4f7d2f";
 	uint8_t wire[64];
 	size_t wire_len = unhex(write_fail_req_wire, wire, sizeof(wire));
 	uint8_t tag[ST25DV_EMUL_MEM_SIZE] = {0};
@@ -253,10 +254,10 @@ ZTEST(nfc_hw, test_response_write_failure_stops_the_processing_blink)
 	int ret = app_nfc_check();
 
 	zassert_not_equal(ret, 0,
-			   "app_nfc_check should surface the injected response-write failure");
+			  "app_nfc_check should surface the injected response-write failure");
 	zassert_false(app_nfc_led_blink_active(),
-		       "a hard response-write failure must stop the processing blink timer "
-		       "(#340 L1) -- nothing else will on the boot-staged, no-RF-session path");
+		      "a hard response-write failure must stop the processing blink timer "
+		      "(#340 L1) -- nothing else will on the boot-staged, no-RF-session path");
 }
 
 ZTEST_SUITE(nfc_hw, NULL, NULL, nfc_hw_before, NULL, NULL);

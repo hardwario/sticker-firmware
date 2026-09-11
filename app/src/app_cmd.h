@@ -26,6 +26,10 @@ enum app_cmd_transport {
 	APP_CMD_TRANSPORT_LRW,
 	APP_CMD_TRANSPORT_NFC,
 	APP_CMD_TRANSPORT_SHELL_DEBUG,
+	/* Raw-LoRa P2P downlink command (0x56), dispatched by app_p2p.c (#118 B4).
+	 * Same generic Command/Response dispatch and writability gating as the
+	 * LoRaWAN transport -- P2P is the network-server-less equivalent. */
+	APP_CMD_TRANSPORT_P2P,
 	/* NFC hio.stck:vnd record, authenticated with vendor_token instead of
 	 * secret_key (#316). Runs the same generic Command/Response dispatch; gates
 	 * the vendor-only command (vendor_reset) and writable:[vendor] fields. */

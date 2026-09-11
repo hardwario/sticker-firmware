@@ -9,7 +9,7 @@
 #include "app_config.h"
 #include "app_hall.h"
 #include "app_input.h"
-#include "app_lrw.h"
+#include "app_radio.h"
 #include "app_sensor.h"
 
 /* Nanopb includes */
@@ -293,9 +293,9 @@ static void fill_telemetry(Telemetry *t, bool boot)
 
 /* #340 M16: the one-shot "first uplink after boot" marker. Module-level (not a
  * fill_snapshot()-local static) so app_compose_ex()'s debug/test callers (e.g.
- * `ats lrw compose`) can read it without being the ones who clear it — only a
+ * `ats radio compose`) can read it without being the ones who clear it — only a
  * real report (app_compose(), consume_boot=true below) may consume it. Without
- * this split, a bench tech running `ats lrw compose` before the real first
+ * this split, a bench tech running `ats radio compose` before the real first
  * post-boot cycle silently stole the marker: the debug dump got
  * SYSTEM_FLAG_BOOT and the real first uplink went out with system_flags=0. */
 static bool m_boot_pending = true;
@@ -475,10 +475,15 @@ static int compose_ex_impl(uint8_t *buf, size_t size, size_t *len, bool *more, u
 
 int app_compose(uint8_t *buf, size_t size, size_t *len, bool *more)
 {
-	return compose_ex_impl(buf, size, len, more, app_lrw_get_max_payload(), true);
+	return compose_ex_impl(buf, size, len, more, app_radio_get_max_payload(), true);
 }
 
 int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)
 {
 	return compose_ex_impl(buf, size, len, more, budget, false);
+}
+
+int app_compose_budget(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)
+{
+	return compose_ex_impl(buf, size, len, more, budget, true);
 }

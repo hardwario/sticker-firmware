@@ -2,6 +2,8 @@
 
 This document lists **only the changes introduced in firmware v1.4.0** relative to the v1.3.x series — new features, new messages, new commands and new configuration options. Existing v1.3.x behaviour (basic telemetry, LoRaWAN keys, alarm thresholds, counters, corrections, calibration mode) is unchanged unless noted.
 
+> **Frozen historical record.** Shell commands below are named as they were in v1.4.0. The `ats lrw ...` group was later unified with the P2P debug commands into `ats radio ...` (#118) — e.g. `ats lrw reset`/`ats lrw status`/`ats lrw lc` are now `ats radio reset`/`ats radio status`/`ats radio lc`. Do not use this page as a live shell reference; see `doc/manual-test-plan.md` instead.
+
 ---
 
 ## Overview of changes
