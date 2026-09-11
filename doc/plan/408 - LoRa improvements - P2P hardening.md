@@ -103,7 +103,7 @@ and justifies each item.
 | B5 | **Clock sync over P2P** | — | `app_p2p.c` + central |
 | B6 | **Multi-channel / P2P region model** | runtime band switch, per-node channel | yml, `app_p2p.c`, doc, central |
 | B7 | **CAD / listen-before-talk** | CSMA + AFA | driver-level, not a quick win |
-| B8 | **Pull-based bulk transfer** | `bulk_serve`/`bulk_fetch` | deferred to v2 |
+| B8 | **History replay over P2P** (device-driven stream) | — (mirrors LoRaWAN replay) | `app_radio`, `app_p2p.c`, `app_cmd`, central |
 | B9 | **Counter/replay hardening audit** | fail-closed reserve-ahead | review of `app_p2p.c` |
 
 ### B1 — ACK carries RSSI/SNR
@@ -213,12 +213,42 @@ Zephyr driver owns the static `RadioEvents_t` and registers only TxDone/RxDone/R
 in-workspace Zephyr driver — the same driver work as the GFSK PHY in Section 5, so the two
 should be planned together.
 
-### B8 — Pull-based bulk transfer (deferred, v2)
+### B8 — History replay over P2P (device-driven stream)
 
-TOWER has a pull-based bulk transfer over `BulkSource`/`BulkSink` traits, verified to 64 KB
-in constant RAM. That is precisely the primitive needed for history replay over P2P and,
-later, FUOTA. `doc/p2p.md` §13 explicitly excludes both from v1; this is recorded as the
-shape to adopt when they come back.
+**Goal: feature parity.** Everything the LoRaWAN transport exposes must also work over P2P.
+History replay is the one remaining hole: telemetry, alarms and command responses already go
+through the `app_radio` facade (`app_p2p_send_telemetry` / `app_p2p_send_alarm` /
+`app_p2p_queue_response`), but history replay does not — it is wired straight to LoRaWAN.
+
+Today `app_cmd_handle_req_history()` is compiled under `#if defined(CONFIG_LORAWAN)` and calls
+`app_lrw_start_history_replay()` directly (`app_cmd.c`), and the command dispatcher rejects any
+transport other than LRW (`app_cmd.c`, `tp != APP_CMD_TRANSPORT_LRW`). There is no
+`app_p2p` replay path at all — `app_p2p.c` has zero history code.
+
+**Design — device-driven stream, mirroring LoRaWAN** (user decision 2026-09-11). We reuse the
+existing replay engine rather than inventing a pull protocol:
+
+1. **Promote replay into the `app_radio` facade.** Add `app_radio_start_history_replay(from, to,
+   seq)` that dispatches to `app_lrw_start_history_replay()` (LoRaWAN) or a new
+   `app_p2p_start_history_replay()` (P2P), the same shape as the other three facade calls.
+2. **`app_p2p_start_history_replay()`** streams the matching records back as N `HistoryFrame`
+   protobuf frames — the identical encoder used by the LoRaWAN path (`history_frame_cap()` +
+   `app_history_export_*`), just emitted as P2P uplinks instead of port-85 LoRaWAN uplinks.
+   `app_history_set_replay_active(true)` still self-skips capture during the stream (#126).
+3. **Duty compliance.** Each frame is charged through the B2 token-bucket duty governor and
+   sized to `app_p2p_get_max_payload()`; the stream yields when the bucket is empty and resumes
+   on refill (no busy-wait), the P2P analogue of the LoRaWAN MAC-busy retry loop.
+4. **Command plumbing.** Drop the `#if defined(CONFIG_LORAWAN)` in `app_cmd_handle_req_history()`
+   so it routes via the facade, and add `APP_CMD_TRANSPORT_P2P` to the `req_history` allow-list
+   in the dispatcher. The first frame is the reply (`which_body` stays 0, no redundant Ack), as
+   on LoRaWAN.
+5. **Central (S5).** The central must issue `ReqHistory` over the `0x56` COMMAND channel (B4)
+   and collect the resulting `HistoryFrame` stream. Added to proximos-v2 MR !30 as S5.
+
+**Non-goal (still v2):** a *generic* pull-based bulk-transfer primitive (TOWER's
+`BulkSource`/`BulkSink`, verified to 64 KB in constant RAM) for FUOTA and large-object fetch.
+History replay does not need it — the device-driven stream above is enough — so that primitive
+stays deferred and is recorded here as the shape to adopt when FUOTA returns.
 
 ### B9 — Counter and replay hardening audit
 
@@ -255,7 +285,7 @@ Per-row verdict on which design is better and why. This is the evidence base for
 | Retransmit / dedup | byte-identical retry, high-water dedup, re-ACK | byte-identical retry, high-water dedup, re-ACK | tie | both correct, and both nonce-reuse-safe |
 | Downlink | pending flag → chained RX windows, remote shell over the air | pending flag logged only; COMMAND frames not dispatched | **TOWER** | a complete bidirectional path. Ours has the hook but not the plumbing → B4 |
 | Duty / compliance | token bucket with residue carry, LBT/AFA (EU), FHSS (US), runtime band switch | blocked-until timestamp, EU-only, no LBT | **TOWER** | compliance by construction and genuinely multi-region → B2, B6, B7 |
-| Bulk transfer | pull-based, constant RAM, verified to 64 KB | none | **TOWER** | a ready-made primitive for history replay and FUOTA → B8 |
+| Bulk transfer | pull-based, constant RAM, verified to 64 KB | history replay is device-driven (LoRaWAN today; P2P via B8), no generic pull primitive | **TOWER** for a generic primitive (FUOTA, v2); history replay reaches P2P parity device-side via B8 |
 | Link diagnostics | RSSI/LQI/SQI/AFC per packet, channel RSSI scan | RSSI/SNR logged, shown in `ats radio status` | **TOWER** | richer link telemetry; adopt partially via B1 |
 | Gateway / central model | stateful dongle gateway, registry in EEPROM | stateless keyless gateways + one central (FIBER v2), multi-gateway dedup and roaming | **P2P** | scales to many gateways, keeps all state in one place, and gateways hold no keys |
 | Testability | pure decision kernels split into host-testable `no_std` crates (`tower-net-core`, `tower-radio-core`) | `app_p2p.c` is HW/HIL-only; no native ztest suite covers it | **TOWER** | all regulatory arithmetic and security accept/reject logic unit-tested on the host. Strong argument for extracting our P2P decision logic into a testable core |
@@ -300,6 +330,7 @@ The scope of this PR is the P2P work; the LoRaWAN items (A1–A7) are tracked in
 - [x] B9 — counter/replay hardening audit ✅
 - [x] B4 — pending-downlink chaining + `0x56` COMMAND dispatch ✅ (central S2 done; deferred-action execution is a follow-up)
 - [x] B5 — clock sync over P2P ✅ (central S3 done)
+- [ ] B8 — history replay over P2P (device-driven stream) *(reuses the LoRaWAN `HistoryFrame` encoder via a new `app_radio` facade call; needs central S5)*
 
 **Large — design and compliance first**
 
@@ -309,11 +340,12 @@ The scope of this PR is the P2P work; the LoRaWAN items (A1–A7) are tracked in
 **Next phase:** the TOWER transport is tracked in
 [PR #410](https://github.com/hardwario/sticker-firmware/pull/410) (§5).
 
-**Deferred / v2:** B8 (bulk transfer).
+**Deferred / v2:** a generic pull-based bulk-transfer primitive (FUOTA, large-object fetch) —
+history replay itself is now in scope as B8.
 
-Server-side counterparts for B1, B4, B5, and B6 are defined in
+Server-side counterparts for B1, B4, B5, B6, and B8 are defined in
 [proximos-v2 MR !30](https://gitlab.hardwario.com/proximos/proximos-v2/-/merge_requests/30)
-as S1–S4.
+as S1–S5.
 
 Suggested order: B2 and B3 are self-contained device-side changes with no external
 dependency, so they can land first. B1 needs the central to key the ACK size off the session
@@ -453,6 +485,18 @@ gw-sim in `tests/p2p/`.
 The sink already exists and is public: `app_clock_set_unix()` (`app_clock.h:44`). Only the
 wire format is new — either 4 bytes of unix time on the extended ACK (pairs with Step 5) or a
 ClockSync command over `0x56` (pairs with Step 6). Pick whichever of those two lands first.
+
+### Step 8 — B8: history replay over P2P *(needs S5)*
+
+Bring history to feature parity with LoRaWAN. Add `app_radio_start_history_replay(from, to,
+seq)` to the facade and a new `app_p2p_start_history_replay()` that streams the matching records
+as N `HistoryFrame` frames — reusing `history_frame_cap()` + `app_history_export_*`, each frame
+charged through the B2 duty governor and sized to `app_p2p_get_max_payload()`, yielding/resuming
+on the token bucket rather than busy-waiting. Route `app_cmd_handle_req_history()` through the
+facade (drop the `#if defined(CONFIG_LORAWAN)`) and add `APP_CMD_TRANSPORT_P2P` to the
+`req_history` allow-list in the dispatcher. Test natively in `tests/p2p_logic` against the
+emul-LoRa device: a `ReqHistory` produces the expected frame count and yields under a starved
+duty bucket. Pairs with Step 6 (both ride the `0x56` COMMAND channel).
 
 ### Later — design and compliance gated
 
