@@ -107,7 +107,7 @@ and justifies each item.
 | # | Proposal | TOWER pattern adopted | Blast radius |
 |---|---|---|---|
 | B1 | **ACK carries RSSI/SNR** | ACK with receiver RSSI | `app_p2p.c` ~10 lines + central |
-| B2 | **Token-bucket duty governor** | `DutyGovernor` with residue carry | `app_p2p.c`, ~6 sites |
+| B2 | **Sliding-hour duty ledger** | exact per-window ledger (token bucket withdrawn) | `app_p2p.c`, ~6 sites |
 | B3 | **Self-healing rejoin** | — (our own §7 spec, unimplemented) | `app_p2p.c` ~30 lines |
 | B4 | **Pending-downlink chaining + COMMAND dispatch** | pending flag → chained RX | `app_p2p.c`, `app_cmd`, central |
 | B5 | **Clock sync over P2P** | — | `app_p2p.c` + central |
@@ -116,6 +116,9 @@ and justifies each item.
 | B8 | **History replay over P2P** (device-driven stream) | — (mirrors LoRaWAN replay) | `app_radio`, `app_p2p.c`, `app_cmd`, central |
 | B9 | **Counter/replay hardening audit** | fail-closed reserve-ahead | review of `app_p2p.c` |
 | B10 | **Transport parity via facade** | — (our governing principle) | `app_radio`, `app_lrw.c`, `app_p2p.c`, `app_cmd` |
+| B11 | **Detach / RejoinRequest** (central-initiated) ✅ #416 | — (extends B3) | `app_p2p.c` + central |
+| B12 | **Per-node TX-power via JoinAccept** ✅ #416 | — | `app_p2p.c` + central |
+| B13 | **Exact RX1 window from `pending_frame_len`** ✅ #416 | — (extends B1/B4/B5) | `app_p2p.c` + central |
 
 ### B1 — ACK carries RSSI/SNR
 
@@ -134,20 +137,30 @@ central must key the ACK size off the session's `proto_version` (sent in the Joi
 and persisted centrally). Consider a P2P-specific wire version — `APP_PROTO_VERSION` is
 currently shared with the fPort-85/NFC command protocol.
 
-### B2 — Token-bucket duty governor
+### B2 — Sliding-hour duty ledger
 
-The current model is a single "blocked until" timestamp (`app_p2p.c:274`): after each TX the
-device is hard-blocked for 99× the airtime. TOWER instead runs a token bucket (36 000 ms per
-hour for EU 1 %, with sub-millisecond residue carry so repeated small charges do not round
-away). The practical difference: a token bucket permits a legitimate burst — an alarm
-immediately after a telemetry frame — while still holding the hourly average.
+The original model was a single "blocked until" timestamp: after each TX the device was
+hard-blocked for 99× the airtime (a 240 B SF10 frame blocked for **~227 s**). B2 first replaced
+that with a TOWER-style **token bucket** (36 000 ms/hour for EU 1 %, sub-millisecond residue
+carry), which held the hourly *average* at 1 % while still permitting a legitimate burst — an
+alarm right after a telemetry frame.
 
-This matters more than it sounds: the code notes a 240 B SF10 frame blocks for **~227 s**
-under the current model (`app_p2p.c:181-183`).
+The control-radio completion work (#416) then **withdrew the bucket** for an **exact
+sliding-hour ledger**. The bucket held only the long-run average, so a node idle for an hour
+could then burst all 36 s of air at once — a simulated 24 h continuous run reached **2.00 %** in
+the worst sliding hour. #408 had documented that as an accepted trade-off; it was reversed
+because amortised compliance is not what the regulation asks for, nor what a certification
+review accepts. The ledger records `(end_time, air_time)` per transmission and admits a frame
+only when the air already inside the trailing hour plus that frame fits `P2P_DUTY_BUDGET_MS`, so
+**every** sliding one-hour window sums to ≤ 1 % exactly — while keeping the bucket's latency
+behaviour (a frame goes the moment there is room, not after a fixed post-frame penalty).
 
-Implementation note: the duty gate currently runs before the frame length is known
-(`tx_frame`, `app_p2p.c:807`). Either gate coarsely (`tokens <= 0`) or move the check into
-`tx_frame_at()` where `wire_len` exists.
+Costs, both documented in `doc/p2p.md` §6: **+384 B RAM** (48 × 8 B entries, replacing the
+bucket's 16 B) and a **~48 uplinks/hour** bound before the ring — not the air budget — becomes
+the limiting factor (a safe direction: a full ring can only delay a frame, never permit one the
+budget forbids; matters only for bench cadences below ~75 s). Still RAM-only, so a reboot loop
+can exceed 1 % — the same hole the bucket had, kept for the same reason (persisting would cost
+an NVS write per frame).
 
 ### B3 — Self-healing rejoin
 
@@ -178,6 +191,14 @@ Gotcha: `p2p_rx_window()` sizes its timeout from the expected frame length (the 
 hardware symbol timeout). Commands are variable-length, so the window must be sized for the
 maximum command frame — meaning a longer radio-on time per pending downlink. Worth measuring
 against the 92 µA idle baseline.
+
+**Implemented (#416):** `0x56` is dispatched through `app_cmd_handle(APP_CMD_TRANSPORT_P2P, …)`
+with responses on `app_p2p_queue_response()`, and **deferred actions now execute** after the
+`0x55` (mirrors `app_lrw`'s post-cmd handler: stash, wait `POST_CMD_DRAIN_WAIT_SEC`, re-defer up
+to 6× while the response is undelivered, then run regardless). A bench stack overflow from
+running command dispatch on the 2 KB P2P work queue was fixed by sizing it to 4 KB (+2 KB RAM).
+The oversized-RX-window gotcha above is separately solved by **B13** (exact RX1 window from the
+Ack's `pending_frame_len`, #416).
 
 ### B5 — Clock sync over P2P
 
@@ -246,7 +267,7 @@ existing replay engine rather than inventing a pull protocol:
    protobuf frames — the identical encoder used by the LoRaWAN path (`history_frame_cap()` +
    `app_history_export_*`), just emitted as P2P uplinks instead of port-85 LoRaWAN uplinks.
    `app_history_set_replay_active(true)` still self-skips capture during the stream (#126).
-3. **Duty compliance.** Each frame is charged through the B2 token-bucket duty governor and
+3. **Duty compliance.** Each frame is charged through the B2 sliding-hour duty ledger and
    sized to `app_p2p_get_max_payload()`; the stream yields when the bucket is empty and resumes
    on refill (no busy-wait), the P2P analogue of the LoRaWAN MAC-busy retry loop.
 4. **Command plumbing.** Drop the `#if defined(CONFIG_LORAWAN)` in `app_cmd_handle_req_history()`
@@ -282,15 +303,15 @@ Enforce the governing principle above: everything the LoRaWAN transport exposes 
 reachable over P2P through the `app_radio` facade, or be a documented, deliberate exception.
 A code audit (2026-09-11) found the data plane already at parity — telemetry, alarms and
 command responses all route through `app_radio_send_telemetry` / `app_radio_send_alarm` /
-`app_radio_queue_response`, and both stacks implement the full facade surface — but four
-behaviours still bypass the facade and are LoRaWAN-only:
+`app_radio_queue_response`, and both stacks implement the full facade surface — but three
+behaviours still bypass the facade and are LoRaWAN-only (a fourth, downlink command execution,
+was closed by #416 — see B4):
 
 | Gap | Today | Fix |
 |---|---|---|
 | **History replay** | `app_cmd_handle_req_history()` calls `app_lrw_start_history_replay()` directly under `#if defined(CONFIG_LORAWAN)` | covered by **B8** (adds `app_radio_start_history_replay()`) |
 | **GetInfo-on-join** | `queue_info_uplink()` lives in `app_lrw.c` and fires only on a LoRaWAN join | add a facade link-ready **announce hook** so P2P also announces identity/firmware on pairing (`mark_ready()`) |
 | **`force_send`** | handler body is `#if defined(CONFIG_LORAWAN)`; dispatcher rejects `tp != LRW` | route through `app_report_trigger()` (already facade-backed) and add `APP_CMD_TRANSPORT_P2P` to the allow-list |
-| **Downlink command execution** | P2P `0x56` COMMAND is dispatched but deferred actions are **logged, not executed** (B4 follow-up) | execute the deferred action over P2P, same as the LoRaWAN port-85 path |
 
 And the command dispatcher (`app_cmd.c`) excludes P2P from several commands LoRaWAN already
 accepts. Widen the `tp != …` allow-lists to include `APP_CMD_TRANSPORT_P2P` for the ones that
@@ -312,6 +333,56 @@ already permits.
 The outcome is that parity becomes a checked invariant, not an accident: after B10 every
 LoRaWAN-capable function is either facade-routed (works everywhere) or on the exception list.
 
+### Beyond the plan — landed in #416
+
+The control-radio completion work added three protocol features the original proposal did not
+call out. They are recorded here so the plan's inventory matches the merged code.
+
+#### B11 — Detach (0xFD) and RejoinRequest (0xFE)
+
+Central-initiated session control. The central had always sent Detach on node-remove, but
+`recv_ack()` accepted only `0xFA`/`0x56` and dropped it — so a removed node kept retrying into
+a dead session and, after 8 failed cycles, **self-healed into an endless rejoin loop against an
+unregistered serial**. Both frames are empty-bodied, authenticated under `session_key` with
+direction RX and the acknowledged uplink's counter (15 B on air), so neither is forgeable and
+the single-use counter rules out replay.
+
+- **Detach → `pairing_clear()`** (factored out of `app_p2p_unjoin()`, compiled
+  unconditionally): drop to UNPAIRED, purge TX + Ack-retry queues, clear `m_started` so
+  `app_report` skips uplinks while its timer keeps running. **No auto re-join** — the node was
+  removed deliberately, so it stays silent until a reboot or explicit `join`. `dev_nonce` is
+  untouched, so a later re-registration still authenticates.
+- **RejoinRequest → `start_join_episode(true)`** (the self-heal policy: exempt from the 120 s
+  boot window, 60 s → ×2 → 1 h backoff) so a paired node asked to rekey keeps trying.
+
+#### B12 — Per-node TX-power via the JoinAccept reserved bytes
+
+`JoinAccept.reserved(4)` — previously discarded — is now
+`channel_idx(1) | sf(1) | tx_power(1) | flags(1)`. `tx_power` (2–22 dBm, bounded by the node's
+own `p2p_tx_power`; **0 = no assignment**) is applied to the session, **persisted with the
+pairing** (survives reboot without a re-join), reported by `ats radio status` as
+`tx power: <n> dBm (assigned|config)`, and preferred over local config in
+`build_modem_config()` — the central owns the link budget, the node owns its default.
+`channel_idx` must be 0 and `sf` is a documented hook (both logged and ignored — the NorthBridge
+has a single receiver, so SF is network-wide); every unsupported/out-of-range field is warned
+and ignored rather than refused, since declining to pair over an unhonourable byte would strand
+an otherwise-valid authenticated JoinAccept. All-zero (what the central sends until
+`node_tx_power_dbm` is configured) means "no assignment", so it is compatible with the central
+as it ships. `p2p_parse_join_accept_reserved()` is a pure, tested function.
+
+#### B13 — Exact RX1 window from the Ack's `pending_frame_len`
+
+The announcing Ack now carries the pending `0x56`'s total on-air length, so the node sizes its
+next RX1 window for exactly that frame instead of a 255 B worst case (this driver has no
+hardware symbol timeout, so a short window aborts a real command mid-reception). At SF10 a 2 B
+GetInfo drops receiver-on from **2434 ms to 468 ms**. This closes the oversized-window gotcha
+noted under B4. The Ack body becomes
+`flags(1) | rssi(i8) | snr(i8) | [pending_frame_len if bit0] | [unix_be32 if bit1]` (valid
+lengths 3/4/7/8), extending the B1/B5 format. `p2p_parse_ack_body()` is restructured around the
+length (the flags only refine it), which is what lets the byte be adopted **without a wire
+version**: a legacy 3/7-byte body with bit 0 set still parses as "pending, length unknown" and
+the node keeps the 255 B fallback until the central emits the byte.
+
 ---
 
 ## 4. TOWER vs STICKER P2P — protocol comparison
@@ -330,8 +401,8 @@ Per-row verdict on which design is better and why. This is the evidence base for
 | Counter persistence | reserve-ahead 1024, **fail-closed**, saturating, consumed at seal time | reserve-ahead 256; fail-closed unverified | **TOWER** | explicit fail-closed, saturation, and seal-time consumption are strictly stronger guarantees → audit item B9 |
 | ACK contents | counter echo + **RSSI** + pending flag | 1 byte of flags (bit 0 = pending) | **TOWER** | link-quality feedback on every uplink for free → adopt as B1 |
 | Retransmit / dedup | byte-identical retry, high-water dedup, re-ACK | byte-identical retry, high-water dedup, re-ACK | tie | both correct, and both nonce-reuse-safe |
-| Downlink | pending flag → chained RX windows, remote shell over the air | pending flag logged only; COMMAND frames not dispatched | **TOWER** | a complete bidirectional path. Ours has the hook but not the plumbing → B4 |
-| Duty / compliance | token bucket with residue carry, LBT/AFA (EU), FHSS (US), runtime band switch | blocked-until timestamp, EU-only, no LBT | **TOWER** | compliance by construction and genuinely multi-region → B2, B6, B7 |
+| Downlink | pending flag → chained RX windows, remote shell over the air | pending flag → chained RX; `0x56` COMMAND dispatched and deferred actions (save/reboot) executed after the `0x55` | **parity** | B4 landed the full bidirectional path — dispatch + deferred execution mirroring `app_lrw` post-cmd |
+| Duty / compliance | token bucket with residue carry, LBT/AFA (EU), FHSS (US), runtime band switch | exact sliding-hour ledger (≤1% per window, stricter than the bucket's average), EU-only, no LBT | **TOWER** | TOWER still wins on LBT/FHSS/multi-region; P2P's duty accounting (B2) is now exact per window, not amortised → B6, B7 |
 | Bulk transfer | pull-based, constant RAM, verified to 64 KB | history replay is device-driven (LoRaWAN today; P2P via B8), no generic pull primitive | **TOWER** for a generic primitive (FUOTA, v2); history replay reaches P2P parity device-side via B8 |
 | Link diagnostics | RSSI/LQI/SQI/AFC per packet, channel RSSI scan | RSSI/SNR logged, shown in `ats radio status` | **TOWER** | richer link telemetry; adopt partially via B1 |
 | Gateway / central model | stateful dongle gateway, registry in EEPROM | stateless keyless gateways + one central (FIBER v2), multi-gateway dedup and roaming | **P2P** | scales to many gateways, keeps all state in one place, and gateways hold no keys |
@@ -368,17 +439,23 @@ The scope of this PR is the P2P work; the LoRaWAN items (A1–A7) are tracked in
 
 **Quick wins**
 
-- [x] B2 — token-bucket duty governor ✅ (+ Step 1 native test suite)
+- [x] B2 — sliding-hour duty ledger ✅ (first landed as a token bucket, replaced by the exact ledger in #416; + Step 1 native test suite)
 - [x] B3 — self-healing rejoin ✅
 - [x] B1 — ACK carries RSSI/SNR ✅ (central S1 done)
 
 **Medium** — needs central/gateway coordination or a larger change
 
 - [x] B9 — counter/replay hardening audit ✅
-- [x] B4 — pending-downlink chaining + `0x56` COMMAND dispatch ✅ (central S2 done; deferred-action execution is a follow-up)
+- [x] B4 — pending-downlink chaining + `0x56` COMMAND dispatch ✅ (central S2 done; deferred-action execution now runs after the `0x55` — #416, mirrors `app_lrw` post-cmd; dispatch work queue sized 2→4 KB after a bench stack overflow)
 - [x] B5 — clock sync over P2P ✅ (central S3 done)
 - [ ] B8 — history replay over P2P (device-driven stream) *(reuses the LoRaWAN `HistoryFrame` encoder via a new `app_radio` facade call; needs central S5)*
-- [ ] B10 — transport parity via facade *(GetInfo-on-join announce hook + `force_send`/`sample`/`buzzer_play`/`enter_calibration` allow-lists + B4 deferred-action execution; enforces the §3 governing principle)*
+- [ ] B10 — transport parity via facade *(GetInfo-on-join announce hook + `force_send`/`sample`/`buzzer_play`/`enter_calibration` allow-lists; B4 deferred-action execution already landed in #416; enforces the §3 governing principle)*
+
+**Landed in #416, beyond the original proposal**
+
+- [x] B11 — Detach / RejoinRequest (central-initiated session control) ✅
+- [x] B12 — per-node TX-power via the JoinAccept reserved bytes ✅
+- [x] B13 — exact RX1 window from the Ack's `pending_frame_len` ✅
 
 **Large — design and compliance first**
 
@@ -437,26 +514,27 @@ anything moves, and is TOWER's host-testable-decision-kernel lesson (§4) applie
   nonce layout + direction, frame codec round-trip + tamper + max body.
 - Verified: 12/12 native suites, all three build configs, clang-format 22.1.5 clean.
 
-### Step 2 — B2: token-bucket duty governor ✅ DONE
+### Step 2 — B2: sliding-hour duty ledger ✅ DONE
 
-Replaced the single `m_dc_blocked_until` deadline with a refilling token bucket, **Tower-style
-36 000 ms cap** (user decision).
+Replaced the single `m_dc_blocked_until` deadline with a per-frame duty governor. It first
+landed as a Tower-style token bucket (36 000 ms cap, µs residue carry); the control-radio
+completion work (#416) then replaced it with an **exact sliding-hour ledger**, because the
+bucket held only the 1 % *average* — a simulated 24 h run reached 2.00 % in the worst sliding
+hour, which a certification review will not accept.
 
-- `struct p2p_duty { tokens_us; last_ms; }` + `p2p_duty_init/refill/charge/wait_ms` in
-  `app_p2p.c` (budget in µs, refills 10 µs per elapsed ms = exact 1 %, capped at
-  `P2P_DUTY_BUDGET_MS = 36000`). Thin `duty_wait_ms_for(wire_len)` / `duty_charge(air)`
-  wrappers over the live `m_duty`.
-- Rewrote all nine `m_dc_blocked_until` sites to gate/charge/wait per-frame (each site knows
-  its frame size — the "coarse gate" wrinkle from the original plan turned out unnecessary,
-  `tx_frame()` has `body_len`). Bucket started full at `app_p2p_init`.
-- Comments in `app_p2p.c` + `doc/p2p.md` §6/§11 updated; the ~2 % worst-case sliding hour is
-  documented as the deliberate Tower-model trade-off.
-- Tests: refill accrual, burst-then-starve, cap, and a simulated-hour loop asserting the
-  transmitted air never exceeds the 1 % budget. 15/15 in `p2p_logic`.
+- Final state: `struct p2p_duty` holds a ring of `(end_time, air_time)` entries;
+  `p2p_duty_wait_ms(wire_len)` / `p2p_duty_charge(air)` admit a frame only when the trailing
+  hour plus that frame fits `P2P_DUTY_BUDGET_MS = 36000`. `p2p_duty_refill()` and
+  `P2P_DUTY_PERMILLE` are gone; `p2p_duty_init()` needs no timestamp.
+- All nine former `m_dc_blocked_until` sites gate/charge/wait per-frame (each knows its frame
+  size — the "coarse gate" wrinkle from the original plan proved unnecessary).
+- `app_p2p.c` + `doc/p2p.md` §6 updated: every sliding hour is ≤ 1 % exactly; the costs
+  (+384 B RAM, ~48 uplinks/h bound) are documented.
+- Tests: the six bucket tests were replaced by six ledger tests, including a 24 h property
+  check over every window that rejects a reference bucket at 2.00 %. 28/28 in `p2p_logic`.
 
 **Verify (both steps):** 12/12 native suites; Release dual-stack + `debug.conf` +
-`debug.conf+debug_p2p_bench.conf` all build (Release +≈0.3 KB flash / +64 B RAM vs baseline;
-P2P-only unchanged); clang-format 22.1.5 clean.
+`debug.conf+debug_p2p_bench.conf` all build; clang-format 22.1.5 clean.
 
 ### Step 3 — B3: self-healing rejoin ✅ DONE
 
@@ -539,8 +617,8 @@ ClockSync command over `0x56` (pairs with Step 6). Pick whichever of those two l
 Bring history to feature parity with LoRaWAN. Add `app_radio_start_history_replay(from, to,
 seq)` to the facade and a new `app_p2p_start_history_replay()` that streams the matching records
 as N `HistoryFrame` frames — reusing `history_frame_cap()` + `app_history_export_*`, each frame
-charged through the B2 duty governor and sized to `app_p2p_get_max_payload()`, yielding/resuming
-on the token bucket rather than busy-waiting. Route `app_cmd_handle_req_history()` through the
+charged through the B2 duty ledger and sized to `app_p2p_get_max_payload()`, yielding/resuming
+on the ledger rather than busy-waiting. Route `app_cmd_handle_req_history()` through the
 facade (drop the `#if defined(CONFIG_LORAWAN)`) and add `APP_CMD_TRANSPORT_P2P` to the
 `req_history` allow-list in the dispatcher. Test natively in `tests/p2p_logic` against the
 emul-LoRa device: a `ReqHistory` produces the expected frame count and yields under a starved
@@ -560,8 +638,11 @@ independent commits:
 3. **Widen allow-lists.** Add `APP_CMD_TRANSPORT_P2P` to `sample`, `buzzer_play` and
    `enter_calibration`; reconcile `clock_sync` (accept over P2P or document B5 as its P2P
    equivalent). No new write surface — P2P reuses the LoRaWAN `tp ==` gating.
-4. **Execute deferred downlink actions over P2P** (finish the B4 follow-up) so a `0x56` COMMAND
-   that schedules a reboot/action behaves as it does on LoRaWAN port 85.
+4. **Deferred downlink action execution — already done in #416** (`6d855b0`): a `0x56` COMMAND
+   that schedules a save/reboot now runs after the `0x55`, mirroring `app_lrw`'s post-cmd
+   handler (settings_save, reboot, reset_counters, lrw_reset and lrw_join are ungated for P2P;
+   lrw_join is refused in P2P mode, lrw_reset honoured only where the LoRaWAN stack is compiled
+   in). No further work in this step.
 
 Each sub-step is verifiable in `tests/p2p_logic` (command accepted over P2P, right action
 emitted) plus the three build configs and clang-format. After this step, "does every
