@@ -46,7 +46,21 @@ const P2P_JOIN_TAG_LABEL = "HIO-P2P-JOIN"; // JoinRequest tag
 const P2P_JOINACCEPT_TAG_LABEL = "HIO-P2P-ACC"; // JoinAccept tag
 const P2P_SESSION_KEY_LABEL = "HIO-P2P-SES";
 
-const FRAME_TYPE_NAMES = { 2: "telemetry", 3: "alarm", 85: "response", 86: "command" };
+// 0xF0-0xFE are link control (doc/p2p.md §3.2). Named so a captured frame is
+// readable; none of them carries an app payload this decoder could decode --
+// the join handshake bodies are cleartext but CMAC-tagged, and Detach/
+// RejoinRequest are empty.
+const FRAME_TYPE_NAMES = {
+  2: "telemetry",
+  3: "alarm",
+  85: "response",
+  86: "command",
+  0xf0: "join_request",
+  0xf1: "join_accept",
+  0xfa: "ack",
+  0xfd: "detach",
+  0xfe: "rejoin_request",
+};
 
 function buildNonce(counter, devAddr, frameType, dir) {
   const n = Buffer.alloc(P2P_NONCE_LEN);

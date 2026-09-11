@@ -9,8 +9,11 @@
 #include "app_cmd.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_counters.h"
 #include "app_log.h"
+#include "app_lrw.h"
 #include "app_p2p.h"
+#include "app_settings.h"
 #include "app_version.h"
 #include "app_wdog.h"
 
@@ -23,6 +26,7 @@
 #include <zephyr/random/random.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/sys/util.h>
 
 /* Standard includes */
@@ -121,21 +125,29 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_SESSION_KEY_LABEL "HIO-P2P-SES"
 
 /*
- * EU868 1% duty cycle, enforced app-side (raw LoRa bypasses LoRaMac's own
- * duty enforcement) with a token bucket (B2, doc/plan/408 §7 Step 2). The old
- * model blocked the radio for air*99 ms after EVERY frame, so an alarm queued
- * right behind a long telemetry frame waited minutes; the bucket instead lets
- * a frame go the moment enough budget has accrued while holding the long-run
- * average at 1%.
+ * EU868 1% duty cycle, enforced app-side (raw LoRa bypasses LoRaMac's own duty
+ * enforcement) with an exact sliding-hour ledger (B2, decision D1).
  *
- * Budget is tracked in microseconds of air-time, refills at 1% of wall time
- * (P2P_DUTY_PERMILLE us per elapsed ms -- exact integer math, k_uptime_get()
- * has no sub-ms part so no residue is lost), and is capped at the full hourly
- * allowance P2P_DUTY_BUDGET_MS (Tower's DutyGovernor::eu() model): after a
- * long idle the device may burst up to that much air at once, so the
- * worst-case sliding hour is ~2% -- a deliberate choice (doc/p2p.md §6).
+ * Two models preceded it. The first blocked the radio for air*99 ms after
+ * EVERY frame, so an alarm queued behind a long telemetry frame waited
+ * minutes. The second (PR #408) was a token bucket refilling at 1% of wall
+ * time and capped at the full hourly allowance: that fixed the latency and
+ * held the long-run average at 1%, but a node idle for an hour could then
+ * burst the whole 36 s of air at once, which means a worst-case SLIDING hour
+ * of ~2%. Amortised compliance, not compliance.
+ *
+ * The ledger records (end time, air-time) per transmission and admits a frame
+ * only if the air already inside the trailing hour plus this frame fits the
+ * allowance -- so every sliding hour sums to <= 1%, with no burst hole to
+ * argue about in a certification review. It keeps the bucket's latency
+ * behaviour: a frame goes the moment there is room, rather than serving a
+ * fixed post-frame penalty.
+ *
+ * Cost is 384 B of RAM (P2P_DUTY_LEDGER_ENTRIES entries) and a bounded frame
+ * count per hour -- see the header, and doc/p2p.md §6/§11 for both.
  */
-/* P2P_DUTY_PERMILLE / P2P_DUTY_BUDGET_MS are in app_p2p.h (shared with tests). */
+/* P2P_DUTY_WINDOW_MS / P2P_DUTY_BUDGET_MS / P2P_DUTY_LEDGER_ENTRIES are in
+ * app_p2p.h (shared with tests). */
 
 #define P2P_FCNT_SUBTREE "p2pfc"
 #define P2P_FCNT_KEY     "p2pfc/base"
@@ -160,8 +172,15 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_JOIN_SUBTREE    "p2pjoin"
 #define P2P_JOIN_DNONCE_KEY "p2pjoin/dnonce"
 #define P2P_JOIN_STATE_KEY  "p2pjoin/state"
-/* net_id(4 BE) | dev_addr(2 BE) | session_key(16) | rx1_delay_s(1) */
-#define P2P_JOIN_STATE_LEN  (4 + 2 + P2P_KEY_LEN + 1)
+/* net_id(4 BE) | dev_addr(2 BE) | session_key(16) | rx1_delay_s(1) |
+ * tx_power_dbm(1, 0 = none)
+ *
+ * The trailing tx_power byte is new in this release (D3). join_settings_set()
+ * accepts only records of exactly this length, so a node upgraded across the
+ * change reads its old 23 B record as invalid, boots UNPAIRED and re-joins
+ * once -- deliberate, and harmless pre-deployment: the re-join is what fetches
+ * the assignment the record now has room for. doc/p2p.md §7. */
+#define P2P_JOIN_STATE_LEN  (4 + 2 + P2P_KEY_LEN + 1 + 1)
 
 /* JoinRequest body (§5.3): product_type(1) | proto_version(1) |
  * serial_number(4 BE) | fw_version(4). product_type has no existing
@@ -276,11 +295,22 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 
 static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 
-/* Shallower than app_lrw.c's own m_work_q (4096 B, sized for LoRaMac's deep call
- * stacks): this queue's handlers only do raw lora_send()/lora_config(), AES-CCM
- * (app_ccm) and app_compose_budget() (whose Telemetry frame is a module static,
- * not stack-allocated), so 2048 B (the pre-#265 LoRaWAN default) is ample. */
-static K_THREAD_STACK_DEFINE(m_work_stack, 2048);
+/* 4096 B, the same as app_lrw.c's own m_work_q -- and for the same reason: both
+ * queues run app_cmd_handle().
+ *
+ * This was 2048 B while the queue only did raw lora_send()/lora_config(),
+ * AES-CCM (app_ccm) and app_compose_budget() (whose Telemetry frame is a module
+ * static, not stack-allocated). B4 made that sizing wrong by putting command
+ * dispatch here: a 0x56 runs recv_ack() -> dispatch_p2p_command() ->
+ * app_cmd_handle() plus nanopb decode/encode on this stack, and the deferred
+ * action it schedules (m_post_cmd_work) runs here too.
+ *
+ * Measured frames on that path: recv_ack 612 B (it holds buf[P2P_FRAME_MAX] and
+ * body[P2P_MAX_BODY]) + app_cmd_handle 32 B + the get_param handler 356 B, so
+ * ~1000 B before nanopb touches the stack at all. On 2048 B that overflowed on
+ * the first downlink command -- app_cmd_handle's memset of the generated
+ * Command/Response structs wrote past the guard and the node halted. */
+static K_THREAD_STACK_DEFINE(m_work_stack, 4096);
 static struct k_work_q m_work_q;
 static struct k_work m_send_work;           /* compose + send telemetry */
 static struct k_work_delayable m_tx_work;   /* drain response/alarm queue, retries on -EAGAIN */
@@ -310,7 +340,7 @@ static struct k_work_delayable m_heartbeat_work;
 
 static bool m_started;
 static bool m_listening;
-static struct p2p_duty m_duty; /* token-bucket duty-cycle governor (B2) */
+static struct p2p_duty m_duty; /* exact sliding-hour duty ledger (B2/D1) */
 static void (*m_ready_cb)(void);
 
 /* --- Persistent frame counter (nonce uniqueness across reboots) --- */
@@ -324,6 +354,10 @@ static uint32_t m_net_id;   /* 0 (pre-join) until PAIRED */
 static uint16_t m_dev_addr; /* 0 (pre-join) until PAIRED */
 static uint8_t m_session_key[P2P_KEY_LEN];
 static uint8_t m_rx1_delay_s = P2P_RX1_DELAY_DEFAULT_S;
+/* D3: TX power the central assigned for this session in JoinAccept
+ * reserved[2]. Falls back to g_app_config.p2p_tx_power when unassigned. */
+static bool m_session_tx_power_assigned;
+static int8_t m_session_tx_power_dbm;
 static uint32_t m_dev_nonce;      /* next JoinRequest counter; persisted, device lifetime */
 static int64_t m_join_started_at; /* uptime ms; start of the current boot join window */
 
@@ -342,8 +376,14 @@ static bool m_last_ack_valid;
 
 /* B4: the last Ack's "downlink pending" flag -- when set, the central will
  * deliver a 0x56 COMMAND in the RX1 window of the NEXT uplink (replacing that
- * uplink's Ack), so that window must be sized for a full command frame. */
+ * uplink's Ack), so that window must be sized for a command frame. */
 static bool m_downlink_pending;
+
+/* D2: the on-air length that Ack announced for the pending 0x56, so the next
+ * RX1 window is sized exactly instead of for a 255 B worst case. 0 means "not
+ * announced" -- either nothing is pending, or the central is still emitting
+ * the pre-D2 3/7-byte Ack body; both fall back to P2P_FRAME_MAX. */
+static uint8_t m_pending_frame_len;
 
 struct p2p_tx_msg {
 	uint8_t type;
@@ -601,10 +641,18 @@ static int join_settings_set(const char *name, size_t len, settings_read_cb read
 
 		if (len == sizeof(buf) &&
 		    read_cb(cb_arg, buf, sizeof(buf)) == (ssize_t)sizeof(buf)) {
+			uint8_t tx_power = buf[7 + P2P_KEY_LEN];
+
 			m_net_id = sys_get_be32(&buf[0]);
 			m_dev_addr = sys_get_be16(&buf[4]);
 			memcpy(m_session_key, &buf[6], P2P_KEY_LEN);
 			m_rx1_delay_s = buf[6 + P2P_KEY_LEN];
+			/* 0 = the session carried no assignment. Range-check on
+			 * the way back in too, so a corrupt record cannot push
+			 * the PA outside its configured envelope. */
+			m_session_tx_power_assigned = tx_power >= P2P_TX_POWER_MIN_DBM &&
+						      tx_power <= P2P_TX_POWER_MAX_DBM;
+			m_session_tx_power_dbm = m_session_tx_power_assigned ? (int8_t)tx_power : 0;
 			m_link_state = P2P_LINK_PAIRED;
 		}
 		return 0;
@@ -639,7 +687,8 @@ static void dnonce_persist(uint32_t v)
  * session_key is fresh (see derive_session_key()'s comment) and keeps the
  * on-air counter values small. */
 static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
-			    const uint8_t session_key[P2P_KEY_LEN], uint8_t rx1_delay_s)
+			    const uint8_t session_key[P2P_KEY_LEN], uint8_t rx1_delay_s,
+			    const struct p2p_radio_assign *assign)
 {
 	uint8_t buf[P2P_JOIN_STATE_LEN];
 
@@ -647,6 +696,7 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
 	sys_put_be16(dev_addr, &buf[4]);
 	memcpy(&buf[6], session_key, P2P_KEY_LEN);
 	buf[6 + P2P_KEY_LEN] = rx1_delay_s;
+	buf[7 + P2P_KEY_LEN] = assign->tx_power_assigned ? (uint8_t)assign->tx_power_dbm : 0;
 
 	int ret = settings_save_one(P2P_JOIN_STATE_KEY, buf, sizeof(buf));
 
@@ -659,6 +709,8 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
 	m_dev_addr = dev_addr;
 	memcpy(m_session_key, session_key, P2P_KEY_LEN);
 	m_rx1_delay_s = rx1_delay_s;
+	m_session_tx_power_assigned = assign->tx_power_assigned;
+	m_session_tx_power_dbm = assign->tx_power_dbm;
 	m_link_state = P2P_LINK_PAIRED;
 
 	/* Fresh pairing: counter restarts at 0 under the just-rotated session_key,
@@ -668,6 +720,52 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
 	 * m_fcnt catches up to it. */
 	m_fcnt = 0;
 	(void)fcnt_reserve(P2P_FCNT_RESERVE);
+}
+
+/* Tear the pairing down: drop the persisted session and return the module to
+ * UNPAIRED, live, without a reboot. The inverse of pairing_persist().
+ *
+ * Shared by the `ats radio unjoin` shell path (which reboots afterwards
+ * anyway) and the Detach downlink (§5.4), which must take effect immediately
+ * -- the central has already dropped the session, so every further uplink
+ * would be shouting at a network that is no longer listening. Clearing
+ * m_started is what stops the report cadence: app_report.c::run_report gates
+ * the uplink on app_radio_is_ready() -> app_p2p_is_ready() -> m_started, so
+ * the cadence timer keeps running harmlessly while nothing is transmitted.
+ *
+ * The queues are purged because their frames are encrypted -- or about to be
+ * -- under a session_key that no longer has a peer; a queued response or
+ * alarm from the dead session is not worth carrying into the next one.
+ *
+ * NEVER touches m_dev_nonce (see dnonce_persist()) or m_fcnt: the nonce is
+ * the central's JoinRequest replay handle and must keep advancing across
+ * pairings, and the counter is reset by the NEXT pairing_persist() under a
+ * freshly derived key.
+ *
+ * The RAM state is cleared even if the NVS delete fails: honouring the
+ * Detach matters more than the record, and a stale record only means the
+ * next boot comes up PAIRED into a dead session, which the self-heal path
+ * (§7) already recovers from. Returns the settings_delete() result. */
+static int pairing_clear(void)
+{
+	int ret = settings_delete(P2P_JOIN_STATE_KEY);
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("settings_delete(p2pjoin/state)", ret);
+	}
+
+	m_link_state = P2P_LINK_UNPAIRED;
+	m_started = false;
+	m_session_tx_power_assigned = false;
+	m_session_tx_power_dbm = 0;
+	m_last_ack_valid = false;
+	m_downlink_pending = false;
+	m_pending_frame_len = 0;
+	m_tx_deferred_valid = false;
+	k_msgq_purge(&m_ack_retry_msgq);
+	k_msgq_purge(&m_tx_msgq);
+
+	return ret;
 }
 
 /* ======================================================================== */
@@ -695,7 +793,11 @@ static void build_modem_config(struct lora_modem_config *c, bool tx)
 	c->datarate = (enum lora_datarate)sf_from_cfg();
 	c->coding_rate = P2P_CODING_RATE;
 	c->preamble_len = 8;
-	c->tx_power = (int8_t)g_app_config.p2p_tx_power;
+	/* An assigned session power overrides the local config: the central owns
+	 * the link budget across the whole network, the node only its own
+	 * default (D3). */
+	c->tx_power = m_session_tx_power_assigned ? m_session_tx_power_dbm
+						  : (int8_t)g_app_config.p2p_tx_power;
 	c->tx = tx;
 	c->iq_inverted = false;
 	c->public_network = false;
@@ -831,57 +933,116 @@ P2P_TESTABLE void build_nonce(uint8_t nonce[P2P_NONCE_LEN], uint32_t counter, ui
 	nonce[7] = dir;
 }
 
-/* ---- Token-bucket duty-cycle governor (B2, see the header comment above) - */
+/* ---- Exact sliding-hour duty ledger (B2/D1, see the header comment) ------ */
 
-#define P2P_DUTY_BUDGET_US        ((int64_t)P2P_DUTY_BUDGET_MS * 1000)
-/* Budget accrued per elapsed ms of wall time: 1 ms of wall carries 1000 us,
- * of which P2P_DUTY_PERMILLE per mille is air budget => PERMILLE us/ms. */
-#define P2P_DUTY_ACCRUE_US_PER_MS (P2P_DUTY_PERMILLE)
-
-/* Start the bucket full at `now_ms` (uptime ms) -- boot is never blocked. */
-P2P_TESTABLE void p2p_duty_init(struct p2p_duty *d, int64_t now_ms)
+/* Index of the i-th oldest entry. */
+static inline uint8_t duty_slot(const struct p2p_duty *d, uint8_t i)
 {
-	d->tokens_us = P2P_DUTY_BUDGET_US;
-	d->last_ms = now_ms;
+	return (uint8_t)((d->head + i) % P2P_DUTY_LEDGER_ENTRIES);
 }
 
-/* Accrue budget for the wall time since the last refill, capped at the full
- * hourly allowance. */
-P2P_TESTABLE void p2p_duty_refill(struct p2p_duty *d, int64_t now_ms)
+/* Drop every entry that has fallen out of the trailing window.
+ *
+ * `now` and `end_ms` are uptime truncated to 32 bits and compared as an
+ * unsigned difference, which stays correct across the ~49.7-day wrap: an
+ * entry only ever lives P2P_DUTY_WINDOW_MS, four orders of magnitude short of
+ * the wrap distance, so `now - end_ms` can never alias. */
+static void duty_expire(struct p2p_duty *d, uint32_t now)
 {
-	int64_t elapsed_ms = now_ms - d->last_ms;
-
-	if (elapsed_ms <= 0) {
-		return; /* clock is monotonic; nothing to accrue */
+	while (d->count > 0 && (now - d->entries[d->head].end_ms) >= P2P_DUTY_WINDOW_MS) {
+		d->head = duty_slot(d, 1);
+		d->count--;
 	}
-
-	d->tokens_us += elapsed_ms * P2P_DUTY_ACCRUE_US_PER_MS;
-	if (d->tokens_us > P2P_DUTY_BUDGET_US) {
-		d->tokens_us = P2P_DUTY_BUDGET_US;
-	}
-	d->last_ms = now_ms;
 }
 
-/* Refill, then subtract `air_ms` of just-sent air-time (may go negative). */
+/* Air-time recorded inside the current window. Caller must have expired
+ * first. Cannot overflow: ENTRIES * UINT16_MAX is ~3.1e6, and the ledger
+ * never admits a sum past P2P_DUTY_BUDGET_MS anyway. */
+static uint32_t duty_used_ms(const struct p2p_duty *d)
+{
+	uint32_t used = 0;
+
+	for (uint8_t i = 0; i < d->count; i++) {
+		used += d->entries[duty_slot(d, i)].air_ms;
+	}
+	return used;
+}
+
+/* Empty ledger: boot is never blocked, exactly as the full token bucket was
+ * not. A reboot therefore forgets the hour just transmitted -- the same hole
+ * the bucket had (it restarted full), and accepted for the same reason: the
+ * ledger is RAM-only, and persisting it would cost an NVS write per frame.
+ * doc/p2p.md §6 records it. */
+P2P_TESTABLE void p2p_duty_init(struct p2p_duty *d)
+{
+	d->head = 0;
+	d->count = 0;
+}
+
+/* Record `air_ms` of air that finished at `now_ms`. */
 P2P_TESTABLE void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms)
 {
-	p2p_duty_refill(d, now_ms);
-	d->tokens_us -= (int64_t)air_ms * 1000;
+	uint32_t now = (uint32_t)now_ms;
+
+	duty_expire(d, now);
+
+	if (d->count >= P2P_DUTY_LEDGER_ENTRIES) {
+		/* Unreachable through the real call paths -- they charge only
+		 * after p2p_duty_wait_ms() returned 0, which requires a free
+		 * slot. If it ever happens, fold into the newest entry: the sum
+		 * stays truthful (never under-reports air already radiated) and
+		 * the window it occupies only grows, so the 1% bound holds.
+		 * Silently dropping the charge is the one outcome that could
+		 * breach it. */
+		struct p2p_duty_entry *newest = &d->entries[duty_slot(d, d->count - 1)];
+
+		newest->end_ms = now;
+		newest->air_ms = (uint16_t)MIN((uint32_t)newest->air_ms + air_ms, UINT16_MAX);
+		return;
+	}
+
+	d->entries[duty_slot(d, d->count)] = (struct p2p_duty_entry){
+		.end_ms = now,
+		.air_ms = (uint16_t)MIN(air_ms, (uint32_t)UINT16_MAX),
+	};
+	d->count++;
 }
 
-/* Refill, then return how many ms to wait before `air_ms` of air can be
- * afforded -- 0 if it can be sent now. */
+/* How many ms to wait before `air_ms` of air may be transmitted -- 0 if now.
+ *
+ * The guarantee is exact rather than amortised: a frame is admitted only when
+ * the air already recorded in the trailing hour plus this frame fits inside
+ * P2P_DUTY_BUDGET_MS, so EVERY sliding one-hour window sums to <= 1%.
+ *
+ * When blocked, the answer is the time until the OLDEST entry leaves the
+ * window. That is a lower bound, not necessarily enough on its own -- freeing
+ * one entry may still leave the sum too high -- but every caller re-checks
+ * and reschedules (tx_work_handler, reschedule_ack_retry_work,
+ * join_work_handler), so the wait converges instead of needing an exact
+ * answer here. Returning the true wait would mean solving for the smallest
+ * prefix of expiries that frees enough budget, for no behavioural gain. */
 P2P_TESTABLE int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms)
 {
-	p2p_duty_refill(d, now_ms);
+	uint32_t now = (uint32_t)now_ms;
 
-	int64_t deficit_us = (int64_t)air_ms * 1000 - d->tokens_us;
+	duty_expire(d, now);
 
-	if (deficit_us <= 0) {
+	if (d->count < P2P_DUTY_LEDGER_ENTRIES && duty_used_ms(d) + air_ms <= P2P_DUTY_BUDGET_MS) {
 		return 0;
 	}
-	/* Round the wait up so the caller never wakes a fraction of a ms early. */
-	return (deficit_us + P2P_DUTY_ACCRUE_US_PER_MS - 1) / P2P_DUTY_ACCRUE_US_PER_MS;
+
+	if (d->count == 0) {
+		/* Nothing to wait for. Only reachable if one frame's own air
+		 * exceeded the whole hourly allowance, which no supported
+		 * PHY setting can produce (worst case ~9.2 s at SF12 vs a
+		 * 36 s budget) -- refusing forever would be worse than
+		 * sending it. */
+		return 0;
+	}
+
+	/* duty_expire() guarantees the oldest entry is still inside the
+	 * window, so this is in (0, P2P_DUTY_WINDOW_MS]. */
+	return (int64_t)(P2P_DUTY_WINDOW_MS - (now - d->entries[d->head].end_ms));
 }
 
 /* Exponential backoff (ms) for self-healing re-join round `attempt` (0-based):
@@ -897,22 +1058,105 @@ P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
 	return MIN(ms, (uint32_t)P2P_REJOIN_BACKOFF_MAX_MS);
 }
 
-/* Parse a decrypted Ack body (B1/B5): base (3 B, flags|rssi|snr) or
- * time-extended (7 B, + big-endian Unix seconds when flags bit 1 is set).
+/* Parse a decrypted Ack body (app_p2p.h): flags|rssi|snr, optionally followed
+ * by the pending 0x56's on-air length (D2) and/or a big-endian Unix time tail.
+ *
+ * The LENGTH decides the shape and the flags only refine it, never the other
+ * way round. That asymmetry is deliberate and pre-dates the length byte: a
+ * flag claiming a field the frame is too short to hold is ignored rather than
+ * trusted, so a central that over-claims cannot walk this parser off the end
+ * of the body. It is also what makes the length byte adoptable without a wire
+ * version -- a central still emitting the old 3/7-byte body with bit 0 set is
+ * read as "pending, length unknown", and the caller falls back to the 255 B
+ * worst-case window until the byte appears.
+ *
+ *   3 B  base                          (bit 1 without a tail is ignored)
+ *   4 B  base + pending_frame_len      requires bit 0
+ *   7 B  base + time                   bit 0 without the length byte = legacy
+ *   8 B  base + pending_frame_len + time
+ *
  * Pure -- exposed to tests/p2p_logic. Returns false on any other length. */
 P2P_TESTABLE bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out)
 {
-	if (body_len != P2P_ACK_BODY_BASE_LEN && body_len != P2P_ACK_BODY_MAX_LEN) {
+	bool has_len;
+	size_t time_off;
+
+	switch (body_len) {
+	case P2P_ACK_BODY_BASE_LEN: /* 3 */
+		has_len = false;
+		time_off = 0; /* no room for a tail */
+		break;
+	case P2P_ACK_BODY_BASE_LEN + P2P_ACK_PENDING_LEN_LEN: /* 4 */
+		if (!(body[0] & P2P_ACK_FLAG_PENDING)) {
+			return false; /* a length byte with nothing pending */
+		}
+		has_len = true;
+		time_off = 0;
+		break;
+	case P2P_ACK_BODY_BASE_LEN + P2P_ACK_TIME_LEN: /* 7 */
+		has_len = false;
+		time_off = P2P_ACK_BODY_BASE_LEN;
+		break;
+	case P2P_ACK_BODY_MAX_LEN: /* 8 */
+		if (!(body[0] & P2P_ACK_FLAG_PENDING)) {
+			return false;
+		}
+		has_len = true;
+		time_off = P2P_ACK_BODY_BASE_LEN + P2P_ACK_PENDING_LEN_LEN;
+		break;
+	default:
 		return false;
 	}
 
 	out->flags = body[0];
 	out->rssi = (int8_t)body[1];
 	out->snr = (int8_t)body[2];
-	out->time_present =
-		(body_len == P2P_ACK_BODY_MAX_LEN) && ((out->flags & P2P_ACK_FLAG_TIME) != 0);
-	out->unix_time = out->time_present ? sys_get_be32(&body[3]) : 0;
+	out->pending_len_present = has_len;
+	out->pending_frame_len = has_len ? body[P2P_ACK_BODY_BASE_LEN] : 0;
+	out->time_present = (time_off != 0) && ((out->flags & P2P_ACK_FLAG_TIME) != 0);
+	out->unix_time = out->time_present ? sys_get_be32(&body[time_off]) : 0;
 	return true;
+}
+
+/* Parse JoinAccept's reserved(4) radio assignment (D3, app_p2p.h):
+ * channel_idx | sf | tx_power | flags. Every unsupported or out-of-range field
+ * is warned about and ignored rather than refused -- a JoinAccept is otherwise
+ * valid and authenticated, and refusing to pair over a byte this release
+ * cannot honour would strand the node.
+ *
+ * `sf` is recorded rather than judged here: only the caller knows the
+ * configured SF to compare against, and this stays a pure function so
+ * tests/p2p_logic can drive it without a config. Pure -- exposed to
+ * tests/p2p_logic. */
+P2P_TESTABLE void p2p_parse_join_accept_reserved(const uint8_t reserved[4],
+						 struct p2p_radio_assign *out)
+{
+	uint8_t channel_idx = reserved[0];
+	uint8_t tx_power = reserved[2];
+	uint8_t flags = reserved[3];
+
+	out->tx_power_assigned = false;
+	out->tx_power_dbm = 0;
+	out->sf_hint = reserved[1];
+
+	if (channel_idx != 0) {
+		LOG_WRN("JoinAccept assigns channel %u: not supported (single channel)",
+			channel_idx);
+	}
+
+	if (tx_power != 0) {
+		if (tx_power >= P2P_TX_POWER_MIN_DBM && tx_power <= P2P_TX_POWER_MAX_DBM) {
+			out->tx_power_assigned = true;
+			out->tx_power_dbm = (int8_t)tx_power;
+		} else {
+			LOG_WRN("JoinAccept assigns %u dBm TX power: outside %d..%d, ignoring",
+				tx_power, P2P_TX_POWER_MIN_DBM, P2P_TX_POWER_MAX_DBM);
+		}
+	}
+
+	if (flags != 0) {
+		LOG_WRN("JoinAccept sets reserved flags 0x%02x: unknown, ignoring", flags);
+	}
 }
 
 /* Duty-cycle budget (ms) still needed before a `wire_len`-byte frame can be
@@ -1094,16 +1338,117 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, ui
 	return ret;
 }
 
+/* B4 deferred command actions. A command handler that asks for a reboot or a
+ * settings save must not have it happen before the 0x55 RESPONSE has actually
+ * left and been acknowledged, or the operator gets no answer and (for
+ * settings_save) the staged config is lost. Same problem and same shape as
+ * app_lrw.c's post_cmd_work_handler(); the log strings are deliberately
+ * identical so one bench anchor matches both transports.
+ *
+ * The wait is bounded: a permanently failing TX must not postpone the
+ * commanded action forever. 8 s covers a successful send plus its RX1 window;
+ * a duty-cycle-blocked first attempt reschedules on a longer timer than that,
+ * which is why the handler re-checks instead of firing once.
+ *
+ * P2P has to watch four "not delivered yet" signals where LoRaWAN watches two,
+ * because its response can be parked in three different places: still queued
+ * (m_tx_msgq), dequeued but bounced by the duty cycle (m_tx_deferred), or
+ * transmitted and awaiting a confirmation retry (m_ack_retry_msgq). The
+ * m_tx_work check catches the window between a reschedule and its fire. */
+#define POST_CMD_DRAIN_WAIT_SEC      8
+#define POST_CMD_DRAIN_MAX_DEFERRALS 6
+
+static enum app_cmd_action m_post_cmd_action;
+static uint8_t m_post_cmd_deferrals;
+static struct k_work_delayable m_post_cmd_work;
+
+/* Kept in lockstep with app_lrw.c::post_cmd_work_handler() and main.c's NFC
+ * equivalent so the three dispatch tables cannot drift. Only the actions a
+ * 0x56 can actually reach appear here (app_cmd.c::app_cmd_dispatch leaves
+ * exactly these ungated for APP_CMD_TRANSPORT_P2P); everything else is
+ * rejected before it ever produces an action, so it falls to `default`. */
+static void post_cmd_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if ((k_msgq_num_used_get(&m_tx_msgq) > 0 || m_tx_deferred_valid ||
+	     k_msgq_num_used_get(&m_ack_retry_msgq) > 0 ||
+	     k_work_delayable_is_pending(&m_tx_work)) &&
+	    m_post_cmd_deferrals < POST_CMD_DRAIN_MAX_DEFERRALS) {
+		m_post_cmd_deferrals++;
+		LOG_WRN("Post-command action %d deferred: Ack still undelivered (%u/%u)",
+			(int)m_post_cmd_action, (unsigned)m_post_cmd_deferrals,
+			(unsigned)POST_CMD_DRAIN_MAX_DEFERRALS);
+		k_work_schedule_for_queue(&m_work_q, &m_post_cmd_work,
+					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
+		return;
+	}
+
+	switch (m_post_cmd_action) {
+	case APP_CMD_ACTION_SETTINGS_SAVE:
+		LOG_INF("Command: saving settings + reboot");
+		app_settings_save(true);
+		break;
+	case APP_CMD_ACTION_REBOOT:
+		LOG_INF("Command: reboot");
+		sys_reboot(SYS_REBOOT_COLD);
+		break;
+	case APP_CMD_ACTION_COUNTERS_SAVE:
+		LOG_INF("Command: saving counters");
+		app_counters_save(true);
+		break;
+	case APP_CMD_ACTION_LRW_RESET:
+		/* Reachable over P2P only because lrw_reset carries no
+		 * `transports:` guard. Wiping the LoRaWAN NVM is harmless while
+		 * the radio runs P2P -- it just prepares a later switch back --
+		 * so honour it where the stack exists, and say so where it does
+		 * not (the bench image builds with CONFIG_RADIO_LORAWAN=n). */
+#if defined(CONFIG_LORAWAN)
+		LOG_INF("Command: LoRaWAN reset (NVM wipe) + reboot");
+		app_lrw_reset_nvm();
+		sys_reboot(SYS_REBOOT_COLD);
+#else
+		LOG_WRN("Command: LoRaWAN reset ignored (no LoRaWAN in this build)");
+#endif /* defined(CONFIG_LORAWAN) */
+		break;
+	case APP_CMD_ACTION_LRW_JOIN:
+		/* Same ungated-command story, but this one is meaningless here
+		 * whatever the build: the radio is busy being a P2P node, and a
+		 * LoRaWAN join would need it. Refuse loudly rather than half-do
+		 * it -- to move a node between stacks, set `radio-mode` and
+		 * reboot. */
+		LOG_WRN("Command: LoRaWAN join ignored (radio-mode is p2p)");
+		break;
+	default:
+		break;
+	}
+}
+
 /* B4: dispatch a received 0x56 COMMAND (already decrypted into `body`) through
  * the transport-generic command handler and queue the 0x55 RESPONSE for the
  * next uplink. P2P reuses the LoRaWAN over-the-air writability gating --
  * APP_CMD_TRANSPORT_P2P shares the M-3 no_write_lrw field gate (configen), and
  * the command-level allow-lists reject P2P for every LRW/NFC/vendor-only
- * command (positive `tp == ...` checks), so only the unrestricted management
- * commands (get/set_param, get/get_config, settings_save, reboot) run here.
- * A deferred command action (settings_save/reboot/reset) is logged but NOT yet
- * executed -- the reboot-after-response deferral is a B4 follow-up, paired with
- * the central's structured-command phase-2 (proximos-v2 MR!30 S2). */
+ * command (positive `tp == ...` checks), so the commands that run here are
+ * exactly those carrying no `transports:` guard at all: set_param, get_param,
+ * get_info, get_config, settings_save, reboot, reset_counters, w1_scan,
+ * lrw_reset and lrw_join -- the last two are LoRaWAN-specific yet ungated, so
+ * a 0x56 does reach them.
+ *
+ * A deferred command action is handed to post_cmd_work_handler() above, which
+ * waits for the 0x55 to be delivered and acknowledged before executing it.
+ *
+ * `seq` correlation is already in place and needs nothing here: the central
+ * stamps every structured Command with a nonzero `seq` from its per-node
+ * allocator, and the generated app_cmd_dispatch() copies it onto the Response
+ * unconditionally. The central clears its queue head only on a Response whose
+ * `seq` matches, and re-announces the same bytes after three further uplinks
+ * without one -- so a lost 0x55 costs a retry, never a silently dropped
+ * command. Node-side idempotency is what makes that safe: get_* are pure,
+ * set_param with an unchanged value is a no-op, and settings_save/reboot run
+ * only after the response was acknowledged (or the bounded drain expired), so
+ * a redelivered command cannot reboot a node whose answer was already in
+ * flight (doc/p2p.md §6). */
 static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
 {
 	uint8_t resp[P2P_TX_BUF_SIZE];
@@ -1121,9 +1466,29 @@ static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
 		(void)app_p2p_queue_response(0, resp, resp_len);
 	}
 
+	/* Defer so the 0x55 uplink and its RX window finish first;
+	 * post_cmd_work_handler() extends the wait (bounded) while the response
+	 * is still queued or retrying, so a duty-cycle backoff cannot lose it to
+	 * a reboot. */
 	if (action != APP_CMD_ACTION_NONE) {
-		LOG_WRN("P2P command action %d not executed yet (B4 follow-up)", (int)action);
+		m_post_cmd_action = action;
+		m_post_cmd_deferrals = 0;
+		k_work_schedule_for_queue(&m_work_q, &m_post_cmd_work,
+					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
+		LOG_INF("Post-command action %d scheduled in %ds", (int)action,
+			POST_CMD_DRAIN_WAIT_SEC);
 	}
+
+#if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
+	/* The deepest thing this queue ever does (see m_work_stack's comment),
+	 * so this is where its real high-water shows. Same probe app_lrw.c keeps
+	 * at the end of its own command handler. */
+	size_t unused;
+
+	if (k_thread_stack_space_get(k_current_get(), &unused) == 0) {
+		LOG_INF("m_work_q stack: %zu B unused after cmd handle", unused);
+	}
+#endif /* defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO) */
 }
 
 /* Wait for and validate the RX1 downlink for `counter` after `tx_end_ms`
@@ -1151,14 +1516,27 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	uint8_t buf[P2P_FRAME_MAX];
 	int16_t rssi;
 	int8_t snr;
-	/* Size the window for the largest downlink the central may send. Normally
-	 * that is the time-extended Ack; once a downlink has been announced (B4),
-	 * a full-size 0x56 command may arrive INSTEAD, so size for a max frame --
-	 * that longer RX-on is the measurable power cost of a pending downlink
-	 * (doc/p2p.md §6), which is why the central only sets pending deliberately. */
-	uint8_t want_max = m_downlink_pending
-				   ? P2P_FRAME_MAX
-				   : (uint8_t)(P2P_HDR_LEN + P2P_ACK_BODY_MAX_LEN + P2P_TAG_LEN);
+	/* Size the window for the largest downlink the central may send. With
+	 * nothing pending that is the fully-extended Ack (23 B). Once a downlink
+	 * has been announced (B4) a 0x56 arrives INSTEAD of the Ack, and the
+	 * receiver must stay on for its whole time-on-air -- this driver's
+	 * "timeout" aborts an in-flight reception (see p2p_rx1_timeout_ms), so a
+	 * window sized short truncates a real command mid-frame.
+	 *
+	 * D2: the announcing Ack now carries that frame's exact length, so the
+	 * window costs only what the command actually needs -- at SF10 a 2 B
+	 * GetInfo drops the receiver-on from 2434 ms to 468 ms. Without the byte
+	 * (central not yet upgraded) fall back to the 255 B worst case, which is
+	 * the pre-D2 behaviour. */
+	uint8_t want_max;
+
+	if (!m_downlink_pending) {
+		want_max = (uint8_t)(P2P_HDR_LEN + P2P_ACK_BODY_MAX_LEN + P2P_TAG_LEN);
+	} else if (m_pending_frame_len != 0) {
+		want_max = m_pending_frame_len;
+	} else {
+		want_max = P2P_FRAME_MAX;
+	}
 
 	int len = p2p_rx_window(tx_end_ms, m_rx1_delay_s, want_max, buf, sizeof(buf), &rssi, &snr);
 
@@ -1176,6 +1554,54 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	}
 
 	size_t body_len = (size_t)len - P2P_HDR_LEN - P2P_TAG_LEN;
+
+	/* --- Link control (§5.4): Detach (0xFD) / RejoinRequest (0xFE) --- */
+	if (frame_type == APP_P2P_FRAME_DETACH || frame_type == APP_P2P_FRAME_REJOIN_REQUEST) {
+		if (body_len != 0) {
+			return false; /* both are empty-bodied on the wire */
+		}
+
+		uint8_t nonce[P2P_NONCE_LEN];
+		/* Zero-length plaintext, but a real object: app_ccm's failure
+		 * path memset()s the output buffer, and memset(NULL, 0, 0) is
+		 * undefined even though it copies nothing. */
+		uint8_t empty[1];
+
+		build_nonce(nonce, ctr, m_dev_addr, frame_type, P2P_DIR_RX);
+
+		/* An empty message is a legitimate CCM input: the tag still
+		 * covers the nonce and the 11 B header AAD, which is what
+		 * authenticates this frame (app_ccm.c::params_ok constrains the
+		 * nonce/AAD/tag lengths only, not the payload; RFC 3610 allows
+		 * an empty message). Together with the counter echo checked
+		 * above -- single-use per uplink, and this window closes right
+		 * after -- neither frame can be forged or replayed without
+		 * session_key. */
+		int ret = app_ccm_auth_decrypt(m_session_key, nonce, P2P_NONCE_LEN, buf,
+					       P2P_HDR_LEN, &buf[P2P_HDR_LEN], 0, &buf[P2P_HDR_LEN],
+					       P2P_TAG_LEN, empty);
+		if (ret) {
+			LOG_WRN("Detach/RejoinRequest auth failed (counter %u)", counter);
+			return false;
+		}
+
+		if (frame_type == APP_P2P_FRAME_DETACH) {
+			LOG_WRN("Detach received (counter %u): pairing cleared, radio idle "
+				"until reboot or `join`",
+				counter);
+			(void)pairing_clear();
+		} else {
+			LOG_WRN("RejoinRequest received (counter %u): re-joining", counter);
+			/* Self-heal policy (§7), not the boot window: this is a
+			 * paired node the central asked to rekey, and it must
+			 * keep trying past the 120 s cap with backoff. */
+			start_join_episode(true);
+		}
+
+		/* Either way the central proved it received this uplink, so the
+		 * cycle is confirmed and no Ack retry is scheduled. */
+		return true;
+	}
 
 	/* --- B4: a 0x56 COMMAND takes this window instead of the Ack --- */
 	if (frame_type == APP_P2P_FRAME_COMMAND) {
@@ -1202,9 +1628,11 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 		return true;
 	}
 
-	/* --- Ack (0xFA): B1 rssi/snr + B5 time tail --- */
-	if (frame_type != APP_P2P_FRAME_ACK ||
-	    (body_len != P2P_ACK_BODY_BASE_LEN && body_len != P2P_ACK_BODY_MAX_LEN)) {
+	/* --- Ack (0xFA): rssi/snr + optional pending length and time tail --- */
+	/* Bound the body before spending a decrypt; p2p_parse_ack_body() below
+	 * does the exact 3/4/7/8 validation once the plaintext is in hand. */
+	if (frame_type != APP_P2P_FRAME_ACK || body_len < P2P_ACK_BODY_BASE_LEN ||
+	    body_len > P2P_ACK_BODY_MAX_LEN) {
 		return false;
 	}
 
@@ -1232,16 +1660,30 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	m_last_ack_snr = ack.snr;
 	m_last_ack_valid = true;
 
-	/* B4: remember whether to size the NEXT uplink's window for a command. */
+	/* B4/D2: remember whether -- and how large -- to size the NEXT uplink's
+	 * window. Clamp defensively: a corrupt-but-authentic byte below a bare
+	 * header+tag or above the PHY limit would otherwise produce a window
+	 * that cannot hold any frame at all. */
 	m_downlink_pending = (ack.flags & P2P_ACK_FLAG_PENDING) != 0;
+	m_pending_frame_len = ack.pending_len_present
+				      ? (uint8_t)CLAMP(ack.pending_frame_len,
+						       P2P_HDR_LEN + P2P_TAG_LEN, P2P_FRAME_MAX)
+				      : 0;
 
 	/* B5: apply the wall-clock time tail if present. */
 	if (ack.time_present) {
 		(void)app_clock_set_unix(ack.unix_time);
 	}
 
-	LOG_INF("Ack (counter %u) rssi=%d snr=%d%s%s", counter, m_last_ack_rssi, m_last_ack_snr,
-		m_downlink_pending ? " [pending]" : "", ack.time_present ? " [time]" : "");
+	if (m_pending_frame_len != 0) {
+		LOG_INF("Ack (counter %u) rssi=%d snr=%d [pending] pending_len=%u%s", counter,
+			m_last_ack_rssi, m_last_ack_snr, m_pending_frame_len,
+			ack.time_present ? " [time]" : "");
+	} else {
+		LOG_INF("Ack (counter %u) rssi=%d snr=%d%s%s", counter, m_last_ack_rssi,
+			m_last_ack_snr, m_downlink_pending ? " [pending]" : "",
+			ack.time_present ? " [time]" : "");
+	}
 	return true;
 }
 
@@ -1569,8 +2011,13 @@ static void mark_ready(void)
 	 * from the old session no longer apply. */
 	m_last_ack_valid = false;
 	m_downlink_pending = false;
+	m_pending_frame_len = 0;
 
 	m_started = true;
+	/* The TX power assignment is NOT reset here: pairing_persist() has
+	 * already installed this session's value (or cleared it), and
+	 * mark_ready() also runs on the already-PAIRED boot shortcut, where the
+	 * value restored from NVS is the one to keep. */
 	if (m_ready_cb) {
 		m_ready_cb();
 	}
@@ -1705,15 +2152,31 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	uint16_t dev_addr = sys_get_be16(&body[4]);
 	uint32_t central_nonce = sys_get_be32(&body[6]);
 	uint8_t rx1_delay_s = body[10];
-	/* body[11..14] = reserved (v2 data-channel assignment hook, §11), unused. */
+
+	/* body[11..14] = reserved(4): the central's radio assignment (D3). */
+	struct p2p_radio_assign assign;
+
+	p2p_parse_join_accept_reserved(&body[11], &assign);
+
+	/* SF is network-wide: the NorthBridge has a single receiver, so a
+	 * per-node SF would simply make this node unhearable. The byte stays a
+	 * documented hook -- warn and keep ours. */
+	if (assign.sf_hint != 0 && assign.sf_hint != (uint8_t)sf_from_cfg()) {
+		LOG_WRN("JoinAccept assigns SF%u: SF is network-wide, keeping SF%d", assign.sf_hint,
+			sf_from_cfg());
+	}
 
 	uint8_t session_key[P2P_KEY_LEN];
 
 	derive_session_key(dev_nonce, central_nonce, session_key);
-	pairing_persist(net_id, dev_addr, session_key, rx1_delay_s);
+	pairing_persist(net_id, dev_addr, session_key, rx1_delay_s, &assign);
 
 	LOG_INF("Joined: net_id=%u dev_addr=%u rx1_delay=%us (RSSI %d dBm, SNR %d dB)", net_id,
 		dev_addr, rx1_delay_s, rssi, snr);
+	if (assign.tx_power_assigned) {
+		LOG_INF("Session TX power assigned: %d dBm (config %d dBm)", assign.tx_power_dbm,
+			g_app_config.p2p_tx_power);
+	}
 	return 0;
 }
 
@@ -1798,7 +2261,7 @@ int app_p2p_init(void)
 		return -ENODEV;
 	}
 
-	p2p_duty_init(&m_duty, k_uptime_get());
+	p2p_duty_init(&m_duty);
 
 	int ret = settings_register(&m_fcnt_sh);
 
@@ -1836,6 +2299,7 @@ int app_p2p_init(void)
 	k_work_init_delayable(&m_tx_work, tx_work_handler);
 	k_work_init_delayable(&m_join_work, join_work_handler);
 	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
+	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
 	k_work_init(&m_debug_compose_work, debug_compose_work_handler);
@@ -1867,8 +2331,8 @@ void app_p2p_start(void)
 	 * that shortcut and resume transmitting under a session the operator
 	 * explicitly reset, with a root key it can never re-derive. Note this
 	 * needs the explicit re-enable: factory_reset also reverts radio_mode to
-	 * its LORAWAN default, so it does not by itself leave a live P2P node in
-	 * this state. */
+	 * its OFF default (app_config.yml, #350), so it does not by itself leave
+	 * a live P2P node in this state. */
 	if (!app_key_is_set()) {
 		LOG_ERR("P2P not started: lrw_appkey is all-zero (device unprovisioned). "
 			"Set lrw-appkey over NFC or shell, then reboot.");
@@ -1957,6 +2421,9 @@ void app_p2p_get_info(struct app_p2p_info *info)
 	info->net_id = m_net_id;
 	info->dev_addr = m_dev_addr;
 	info->rx1_delay_s = m_rx1_delay_s;
+	info->tx_power_assigned = m_session_tx_power_assigned;
+	info->tx_power_dbm = m_session_tx_power_assigned ? m_session_tx_power_dbm
+							 : (int8_t)g_app_config.p2p_tx_power;
 	info->fcnt = m_fcnt;
 	info->dev_nonce = m_dev_nonce;
 	info->ack_retry_pending = k_msgq_num_used_get(&m_ack_retry_msgq);
@@ -1988,10 +2455,9 @@ void app_p2p_rejoin(void)
 
 int app_p2p_unjoin(void)
 {
-	int ret = settings_delete(P2P_JOIN_STATE_KEY);
+	int ret = pairing_clear();
 
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("settings_delete(p2pjoin/state)", ret);
 		return ret;
 	}
 	LOG_INF("P2P pairing cleared; reboot required");

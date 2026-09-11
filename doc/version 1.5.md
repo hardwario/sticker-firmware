@@ -10,6 +10,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 |---|---|
 | Buzzer | **New** — alarm-driven melodies (#397, Phase 2 of #338): the buzzer HW variant now sounds automatically while any alarm is active, gated on a new global `alarm-buzzer-mode` config key |
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
+| Radio: P2P | **New** — the raw-LoRa point-to-point transport is complete on the node (#118): `radio-mode p2p` pairs with a Proximos `Control.radio.P2P` central over a FIBER modem, with an acknowledged data plane, downlink commands, network-initiated pairing control, per-node TX power, and strict EU868 duty compliance. LoRaWAN is unaffected — both stacks link into the same image and the choice is made at boot. |
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
 
 ---
@@ -129,6 +130,62 @@ unchanged from the previous hard-blink carousel, so the overall boot animation
 length is identical — only the red/green transitions are now smooth. HW-
 confirmed on the bench (J-Link EDU Mini 801053709, SN 2162165627): red and
 green fade smoothly, yellow blinks as before.
+
+---
+
+## 4. Raw-LoRa P2P transport (#118)
+
+A second radio transport, selectable at boot with `config radio-mode p2p`, for
+deployments with no LoRaWAN infrastructure: the STICKER talks directly to a
+HARDWARIO FIBER acting as a modem, and a Proximos `Control.radio.P2P` central
+behind it owns the network. The payload layer is unchanged — `app_compose`
+builds the same protobuf snapshots and `app_report` owns the same
+`interval_report` cadence — so telemetry, alarms and history behave as they do
+over LoRaWAN. Full design in `doc/p2p.md`; the acceptance matrix is
+`doc/p2p-e2e-test-plan.md`.
+
+**Setup** is three commands and a save. `lrw_appkey` is the root of the whole
+transport (there is no separate P2P key — the central already has it from
+ordinary OTAA provisioning), and an all-zero one makes the radio refuse to
+start rather than join under a publicly known key:
+
+```
+config lrw-appkey <32 hex>
+config radio-mode p2p
+settings save                    # persists + reboots
+ats radio status                 # kind: P2P, app_key: set, state: JOINING|PAIRED
+ats device info                  # the serial the central registers
+```
+
+The three radio parameters (`p2p-frequency`, `p2p-spreading-factor`,
+`p2p-tx-power`) must match the Hub's and are shell-only by design — see
+`doc/p2p.md` §2.
+
+**What the node does:**
+
+| Area | Behaviour |
+|---|---|
+| Pairing | On-air join handshake (JoinRequest/JoinAccept, 16 B AES-CMAC tags under `app_key`), 120 s boot window, session persisted to NVS so a power cycle never costs a re-join. `join` forces a fresh session; `ats radio unjoin` simulates a never-paired boot. |
+| Data plane | AES-CCM under a derived `session_key`, 4 B tag, per-frame counter persisted with a reservation window so a reboot can never reuse a nonce. Confirmed uplinks with up to 3 retransmissions of the byte-identical frame. |
+| Link quality | Each Ack carries the RSSI/SNR the central measured on that uplink, surfaced by `ats radio status`. |
+| Clock | The Ack can carry a Unix-time tail, so a node with no RTC gets wall time from the central — no `clock_sync` command needed. |
+| Downlink commands | `0x56` carries the same protobuf `Command` as LoRaWAN fPort 85, dispatched through the shared handler and answered with a `0x55`. Deferred actions (`settings_save`, `reboot`) execute only **after** that answer has been acknowledged, so a commanded reboot cannot swallow its own response. |
+| RX window | The announcing Ack states the pending command's exact on-air length, so the receiver stays on for that frame instead of a 255 B worst case — 468 ms instead of 2434 ms for a short command at SF10. |
+| Pairing control | The central can end a pairing (`Detach`) or ask for a rekey (`RejoinRequest`); both are authenticated and empty-bodied. A detached node goes quiet and stays quiet — no automatic re-join — until a reboot or an explicit `join`. |
+| Radio assignment | JoinAccept can assign this node's TX power (2..22 dBm), applied and persisted with the pairing; `ats radio status` shows `assigned` versus `config`. Channel and SF stay network-wide: the modem has one receiver. |
+| Duty cycle | Raw LoRa bypasses LoRaMac's enforcement, so the node keeps its own exact sliding-hour ledger: **every** rolling hour stays within EU868's 1 %, not merely the long-run average. |
+| Self-healing | Eight consecutive fully-failed uplink cycles start a re-join with exponential backoff (60 s → 1 h), so a node survives a central DB restore or a long outage without a site visit. |
+
+**Not in this release:** listen-before-talk (CAD) — the Zephyr LoRa driver API
+has no CAD entry point yet, so it is a follow-up (`doc/plan/`); bulk history
+replay over P2P (LoRaWAN-only by design); region support beyond EU868; and NFC
+configuration of the P2P radio parameters or an NFC `p2p_join` trigger, both of
+which need a coordinated Manager-App release.
+
+**Build note:** both radio stacks link into the same image, gated by
+`CONFIG_RADIO_P2P` (default `y`) and `CONFIG_RADIO_LORAWAN`. The flash-tight
+`debug.conf` overlay drops P2P; `debug.conf;debug_p2p_bench.conf` is the only
+debug image containing it, and it pays for that by dropping LoRaWAN.
 
 ---
 

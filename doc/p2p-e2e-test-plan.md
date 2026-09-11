@@ -13,20 +13,30 @@ observable on each side, so an HIL run is a checklist rather than a debugging se
 The two-probe P2P rig from the PR #404 app-key/CMAC HIL (see the commit history) is the same
 rig here, plus the Proximos central driving the northbridge.
 
+**The J-Link serial numbers below are one specific bench's** (the PR #404/#408 rig) and are
+recorded only so that run's logs stay readable. Re-read your own before every session —
+`lsusb -d 1366: -v 2>/dev/null | grep iSerial` (values print zero-padded) or `ShowEmuList`
+inside `JLinkExe` — and substitute them everywhere a serial appears.
+
 | Role | Hardware | Firmware |
 |---|---|---|
 | STICKER DUT | J-Link Compact Base **822005109** (or EDU Mini 801053709's STICKER) | this branch (`feat-p2p` + B1–B5), a **debug + P2P bench** build (`debug.conf` + `debug_p2p_bench.conf`) so `ats radio …` shell + RTT log are available |
-| Northbridge modem | J-Link Compact Base **822005110** (STM32WL5MOC) | `proximos/firmware@hynek/northbridge-p2p-protocol`, `fiber-northbridge/app` — the HDLC P2P modem. Bench uses the **RTT-bridge** transport variant (`APP_P2P_BENCH_RTT_BRIDGE`), since no USB-UART adapter is attached |
+| Northbridge modem | J-Link Compact Base **822005110** (STM32WL5MOC) | `proximos/firmware@hynek/northbridge-p2p-protocol`, `fiber-northbridge/app` — the HDLC P2P modem. Bench uses the **RTT-bridge** transport variant, built with `-DBENCH_RTT_BRIDGE=ON` (`fiber-northbridge/app/CMakeLists.txt`; `APP_P2P_BENCH_RTT_BRIDGE` is the C define it sets, not the build switch), since no USB-UART adapter is attached |
 | Central | this machine | Proximos `control-radio-p2p-host` (MR!30, S1–S4), talking to the northbridge over the RTT-bridge |
 
 **Transport note:** there is no USB-UART adapter enumerated (`/dev/ttyUSB*`/`ttyACM*` absent),
-so the Proximos↔northbridge link is the RTT-bridge (`JLinkExe -RTTTelnetPort` on 822005110,
-`socat` to a PTY the host opens), the same path the PR #404 HIL used. The HDLC framing and
-protocol are byte-identical between the RTT-bridge and the production USART1 build — only the
-transport differs — so this validates the real protocol.
+so the Proximos↔northbridge link is an RTT↔PTY bridge. The current implementation is
+`proximos/firmware` `fiber-northbridge/tests/hil_p2p/nb_rtt_bridge.py`, which speaks RTT
+directly over `pylink` and hands the host a PTY (`--nb-sn`, `--elf`|`--rtt-addr`, `--link`);
+see §6's bench findings for why the PTY must be raw and the RTT down-buffer 256 B. The earlier
+`JLinkExe -RTTTelnetPort` + `socat` pairing described in the PR #404 HIL is superseded by that
+script — it lacked the raw-PTY and chunked-write handling the JoinAccept timing needs. The HDLC
+framing and protocol are byte-identical between the RTT bridge and the production USART1 build —
+only the transport differs — so either validates the real protocol.
 
 **Bench hygiene:** J-Link ownership changes daily — confirm no peer session is driving
-822005109/822005110 before attaching, and always pass the explicit `-SelectEmuBySN`. Flashing
+either probe before attaching, and always name the probe explicitly: `JLinkExe -USB <SN>`,
+`west flash --dev-id <SN>` (or `make flash JLINK_SN=<SN>`), `rttt --serial <SN>`. Flashing
 the DUT needs explicit per-image OK. `ats radio unjoin` (reboot) gives a clean never-paired
 start; never reuse a stale pairing (always fresh join per bench convention).
 
@@ -56,9 +66,40 @@ prefix `P2E-` (P2P end-to-end).
 | P2E-06 | **B4** chaining | queue two downlinks | two consecutive command→response cycles; pending stays set until the queue drains | queue depth 2 → 1 → 0 across the cycles |
 | P2E-07 | **B4** gating | `node-send` a `set_param` writing `region`/`radio_mode`/a key | RESPONSE carries `NOT_WRITABLE` (Error) — the field is not writable over P2P | central just relays; the refusal is the DUT's |
 | P2E-08 | **B4** command gating | `node-send` an LRW-only command (e.g. `req_history`) | RESPONSE `NOT_READY`/"transport not allowed" | — |
-| P2E-09 | **B2** duty | queue an alarm right behind a telemetry frame | the alarm goes out promptly (token bucket), not after a ~227 s block; sustained sends throttle to ~1 % | frames arrive at the expected cadence |
-| P2E-10 | **B3** self-heal | `ats radio ack_drop 24` on the DUT (forces 8 fully-failed uplink cycles) | after 8 give-ups → `self-healing re-join (§7)`, JoinRequest with exponential backoff | central sees a re-join of a known device outside the pairing window |
+| P2E-09 | **B2** duty | queue an alarm right behind a telemetry frame | the alarm goes out promptly, not after a ~227 s block; sustained sends throttle to ~1 % | frames arrive at the expected cadence | *(latency half still valid; the ~1 % half is **superseded by P2E-16**, which measures the sliding-hour ledger that replaced the token bucket)* |
+| P2E-10 | **B3** self-heal | `ats radio ack_drop 32` on a **freshly booted** DUT, armed within seconds of boot (each failed cycle burns 4 Acks — the uplink and its 3 retries — so 32 forces exactly 8 fully-failed cycles; 24 stops at 6 and the next real Ack resets the streak. The storm needs ~21 s of air, so the duty ledger must be near-empty or it blocks the run partway) | after 8 give-ups → `self-healing re-join (§7)`, JoinRequest with exponential backoff | central sees a re-join of a known device outside the pairing window |
 | P2E-11 | persistence | reboot the DUT | resumes PAIRED from NVS (no JoinRequest), counter resumes at the reserved high-water | next uplink decrypts under the same session key, counter ≥ reservation |
+
+### 3.1 Added for the control-radio completion PR
+
+These cover what the node gained after PR #408: Detach/RejoinRequest, deferred
+command actions, exact RX-window sizing, the duty ledger and the TX-power
+assignment. Full prerequisites, exact anchor strings and failure modes are in the
+companion bench guide; this table is the checklist form.
+
+`(F#)` marks the central-side step a row depends on — a row cannot pass against a
+central that predates it.
+
+| ID | Item | Action | STICKER observable | Proximos observable |
+|---|---|---|---|---|
+| P2E-12 | Detach obeyed | `node-remove --radio p2p --serial <s>` | on the next uplink `Detach received (counter N): pairing cleared, radio idle until reboot or \`join\``; `ats radio status` → `state: UNPAIRED`; no further `TX type` lines and **no** `self-healing re-join` within 10 min | `detach pending for … — sending Detach(0xFD) and dropping the session`, `TX_SCHEDULE ok: Detach dev_addr=…`, then silence from that dev_addr |
+| P2E-13 | RejoinRequest obeyed *(F7)* | make the session `RejoinPending` (re-register the serial, or the rekey-threshold hook) | `RejoinRequest received (counter N): re-joining` → `JoinRequest sent (dev_nonce N+1 …)` within 60 s + jitter → `Joined: …` | `TX_SCHEDULE ok: RejoinRequest …` then `JoinAccept -> serial=…` for the same serial |
+| P2E-14 | Deferred action after the 0x55 | `node-send` a `SetParam{application.interval_report=120, save=true}` | `Command received …` → `TX type 85 …` → `Ack (counter …)` → `Post-command action 1 scheduled in 8s` → ≥8 s later `Command: saving settings + reboot` → reboot banner → `state: PAIRED`, `config interval-report` reads 120 | `response decrypted+authenticated`, `0x55 RESPONSE cleared …`; telemetry resumes after the reboot with no re-join |
+| P2E-15 | Exact RX window *(F4)* | queue a 2 B GetInfo (`2200`) | announcing `Ack (counter …) [pending] pending_len=17`; next cycle `Command received (counter …, 2 B)`; the window is ~468 ms, never the ~2434 ms it used to be | `TX_SCHEDULE ok: ACK … flags=0x01 (4 B body)` then `COMMAND(0x56) … (2 B body)` |
+| P2E-16 | Sliding-hour duty ledger | run ≥ 70 min with a burst at t≈0. **Use `config interval-report 120`** — see the note below | `TX duty-cycle blocked for %lld ms` appears only when the trailing hour's air would exceed 36 000 ms; no hour in the log sums above it (script the `%u ms air` values) | frames arrive with the predicted gaps |
+| P2E-17 | TX-power assignment *(F5)* | Hub `node_tx_power_dbm: 8`, then re-join | `Joined: …` then `Session TX power assigned: 8 dBm (config 14 dBm)`; `ats radio status` → `tx power: 8 dBm (assigned)`, and it survives a reboot | `JoinAccept -> … tx_power=8`; subsequent `EVT_RX … rssi=` lower at fixed geometry |
+| P2E-18 | CAD / listen-before-talk | — | **BLOCKED — not implemented in this PR.** The Zephyr LoRa driver API has no CAD entry point; see the plan doc's S8 section | — |
+| P2E-19 | Persistence cleared | `settings erase`, re-provision | `JoinRequest sent (dev_nonce 0 …)` then `JoinAccept not received/invalid …` until the boot window expires | `JoinRequest dev_nonce 0 not accepted for … (replay or implausible jump) — dropping`. Documents the lockout; `node-remove` + `node-add` clears it |
+| P2E-20 | Reboot between announce and delivery | queue a 40 B command, wait for `Ack … [pending]`, power-cycle before the next uplink | after boot the window is the 23 B Ack size (the announcement was RAM-only), so a 55 B `0x56` is missed once | *(F3)* three uplinks later `re-announcing downlink seq=…`, then a fresh `Ack … [pending] pending_len=55` and the command lands |
+| P2E-21 | Wrong key | central registered with a different `app_key`; `ats radio unjoin` | `JoinRequest sent …` repeating, never `Joined`; window expires → `state: UNPAIRED` | `JoinRequest tag INVALID for serial … — dropping (forged, corrupt, or wrong app_key)` |
+| P2E-22 | Tampered / replayed downlink | rig B (DUT + `tests/p2p` gw-sim, FIBER idle): inject a corrupted-tag JoinAccept, a stale-counter Ack, and a tampered Ack body | `JoinAccept: auth failed`; stale counter silently ignored then `Uplink retry 1/3 sent`; tampered body → `Ack auth failed (counter N)`. A tampered Detach/RejoinRequest gives `Detach/RejoinRequest auth failed (counter N)` and the pairing survives | — (the central's own replay logic is a separate F-row) |
+
+**P2E-16 cadence.** The ledger holds one entry per transmission still inside the
+hour, `P2P_DUTY_LEDGER_ENTRIES` = 48. Above ~48 uplinks/hour the *entry count*
+becomes the binding constraint rather than the air-time budget, so at
+`interval-report 60` the duty blocks you see are slot exhaustion, not the 1 %
+limit, and the row's stated criterion will not hold. Run it at 120 s (30
+frames/hour). doc/p2p.md §6 records the limitation.
 
 ## 4. Pass criteria
 
@@ -82,7 +123,7 @@ prefix `P2E-` (P2P end-to-end).
 ## 6. Live HIL results — 2026-08-28
 
 First live run of the real STICKER (this firmware) ↔ northbridge ↔ Proximos `control-radio`
-central, over a custom RTT↔PTY bridge (see §8's runbook and the bench notes below). DUT on
+central, over a custom RTT↔PTY bridge (see §7's runbook and the bench notes below). DUT on
 J-Link 822005109, northbridge on 822005110.
 
 | ID | Item | Result | Evidence |
