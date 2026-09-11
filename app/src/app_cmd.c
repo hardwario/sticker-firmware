@@ -16,6 +16,9 @@
 #include "app_log.h"
 #include "app_lrw.h"
 #include "app_nfc.h"
+#if defined(CONFIG_RADIO_P2P)
+#include "app_p2p.h"
+#endif
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_config_ingest.h"
@@ -952,22 +955,35 @@ static void app_cmd_handle_sample(enum app_cmd_transport tp, const Command *cmd,
 static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command *cmd,
 				       Response *resp, enum app_cmd_action *action)
 {
-	ARG_UNUSED(tp);
 	ARG_UNUSED(action);
-#if defined(APP_CMD_HAVE_HISTORY) && defined(CONFIG_LORAWAN)
+#if defined(APP_CMD_HAVE_HISTORY)
 	const Command_ReqHistory *rq = &cmd->body.req_history;
 	uint32_t from = rq->has_from_unix ? rq->from_unix : 0;
 	uint32_t to = rq->has_to_unix ? rq->to_unix : UINT32_MAX;
 
 	/* Device-driven replay: the device streams all matching records back as N
-	 * HistoryFrame uplinks on port 85. The first frame is the reply, so leave
-	 * the response body unset (which_body stays 0) to suppress a redundant Ack
-	 * uplink. Only when nothing replays (empty window / DR too low) do we send
-	 * an Error so the host still gets a definitive answer. */
-	if (!app_lrw_start_history_replay(from, to, cmd->seq)) {
+	 * HistoryFrame uplinks (fPort 85 on LoRaWAN, 0x55 RESPONSE on P2P). The
+	 * first frame is the reply, so leave the response body unset (which_body
+	 * stays 0) to suppress a redundant Ack. Only when nothing replays (empty
+	 * window / DR too low / transport not ready) do we send an Error so the
+	 * host still gets a definitive answer. */
+	bool started = false;
+
+#if defined(CONFIG_LORAWAN)
+	if (tp == APP_CMD_TRANSPORT_LRW) {
+		started = app_lrw_start_history_replay(from, to, cmd->seq);
+	}
+#endif
+#if defined(CONFIG_RADIO_P2P)
+	if (tp == APP_CMD_TRANSPORT_P2P) {
+		started = app_p2p_start_history_replay(from, to, cmd->seq);
+	}
+#endif
+	if (!started) {
 		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no records");
 	}
 #else
+	ARG_UNUSED(tp);
 	ARG_UNUSED(cmd);
 	make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no history");
 #endif
@@ -1237,8 +1253,9 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_reset_counters(tp, cmd, resp, action);
 		break;
 	case Command_req_history_tag:
-		/* transports: [lrw] — reject on any other transport */
-		if (tp != APP_CMD_TRANSPORT_LRW) {
+		/* transports: [lrw, p2p] — device-driven replay over either data
+		 * plane (B8); reject NFC/vendor/shell. */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_P2P) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
