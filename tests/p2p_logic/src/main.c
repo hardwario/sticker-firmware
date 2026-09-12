@@ -615,6 +615,21 @@ ZTEST(p2p_logic, test_fcnt_fail_closed_on_reserve_failure)
 	zassert_true(p2p_test_fcnt_next(&c) != 0,
 		     "fcnt_next must fail closed when the reservation can't be persisted");
 	zassert_equal(p2p_test_get_fcnt(), 200u, "counter advanced despite a failed reservation");
+	zassert_equal(c, 0xDEADBEEFu, "counter_out written despite a failed reservation");
+
+	/* Call again from the same window edge. This is the assertion that guards the
+	 * ORDERING, not just the return value: if fcnt_reserve advanced the in-RAM
+	 * watermark before the durable write (the pre-B9 bug), the first call still
+	 * refused -- but left m_fcnt_reserved at the un-persisted target, so this one
+	 * finds itself inside a window that was never written and hands out counter
+	 * 200 unreserved. A reboot then resumes below it and repeats a (key, nonce)
+	 * pair, which is a full CCM break. Refusing once is not the property; refusing
+	 * until the reservation is durable is. */
+	zassert_true(p2p_test_fcnt_next(&c) != 0,
+		     "a second fcnt_next must also fail closed -- the reservation is still "
+		     "not durable, so the window must not be treated as extended");
+	zassert_equal(p2p_test_get_fcnt(), 200u, "counter advanced on the second refusal");
+	zassert_equal(c, 0xDEADBEEFu, "counter_out written on the second refusal");
 }
 
 ZTEST(p2p_logic, test_fcnt_saturates_no_wrap)
