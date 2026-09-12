@@ -13,6 +13,9 @@
 #include "app_ccm.h"
 #include "app_p2p.h"
 
+extern uint16_t test_history_frame_count;
+extern int g_compose_budget_calls;
+
 #include <zephyr/ztest.h>
 #include <zephyr/sys/byteorder.h>
 
@@ -603,8 +606,10 @@ ZTEST(p2p_logic, test_join_retry_stays_inside_the_boot_window)
 	int64_t d = p2p_join_retry_delay_ms(false, 119000, 3500000, 0, jitter);
 
 	zassert_true(d >= 0, "119 s into a 120 s window is not yet expired");
-	zassert_true(d <= 1000, "a duty wait of 3500 s must be capped to the 1000 ms remaining, "
-			        "got %lld", (long long)d);
+	zassert_true(d <= 1000,
+		     "a duty wait of 3500 s must be capped to the 1000 ms remaining, "
+		     "got %lld",
+		     (long long)d);
 
 	/* Past the window: refuse, so the caller logs the give-up instead of
 	 * rescheduling. */
@@ -620,7 +625,8 @@ ZTEST(p2p_logic, test_join_retry_stays_inside_the_boot_window)
 
 		zassert_true(p2p_join_retry_delay_ms(true, 999999999, 3500000, base, jitter) >= 0,
 			     "a self-healing re-join must never be capped by the boot window "
-			     "(attempt %u)", a);
+			     "(attempt %u)",
+			     a);
 	}
 
 	/* Free radio at the start of the window: no wait beyond the caller's jitter. */
@@ -631,6 +637,82 @@ ZTEST(p2p_logic, test_join_retry_stays_inside_the_boot_window)
 	 * -- the cap must not make every retry immediate. */
 	zassert_equal(p2p_join_retry_delay_ms(false, 1000, 30000, 0, jitter), 30000,
 		      "a 30 s duty wait 1 s into the window is not capped");
+}
+
+/* ---- B8 history replay ------------------------------------------------ */
+
+ZTEST(p2p_logic, test_history_frame_cap_is_bounded_by_the_p2p_body)
+{
+	p2p_test_replay_setup();
+
+	/* m_hist_tx_buf is APP_CMD_HISTORY_FRAME_BUF_SIZE (256 B), sized for the
+	 * LoRaWAN frame; over P2P the binding limit is the 240 B body a single
+	 * frame can carry (P2P_MAX_BODY = 255 MTU - 11 header - 4 tag). Sizing a
+	 * frame off the buffer instead would build pages the radio cannot send. */
+	zassert_equal(p2p_history_frame_cap(), (size_t)P2P_MAX_BODY,
+		      "the per-frame cap must be the P2P body budget (%u), not the 256 B buffer",
+		      (unsigned)P2P_MAX_BODY);
+	zassert_equal((size_t)P2P_MAX_BODY, 240u, "P2P_MAX_BODY drifted from 240");
+}
+
+ZTEST(p2p_logic, test_history_replay_start_is_not_reentrant)
+{
+	bool active;
+	uint32_t seq, idx;
+	size_t cursor;
+
+	p2p_test_replay_setup();
+	test_history_frame_count = 3;
+
+	zassert_true(app_p2p_start_history_replay(100, 200, 42),
+		     "a replay with records available must start");
+	p2p_test_get_replay(&active, &seq, &cursor, &idx);
+	zassert_true(active, "the replay should be marked active");
+	zassert_equal(seq, 42u, "the stream answers the requesting seq");
+
+	/* Over P2P a re-delivered req_history is dispatched from inside the
+	 * replay's OWN call stack -- hist_work_handler -> send_confirmed ->
+	 * recv_ack -> dispatch_p2p_command -> app_cmd_handle ->
+	 * app_cmd_handle_req_history -> here. Without a guard this resets
+	 * cursor/idx/seq, and control then returns into the outer handler, which
+	 * writes its stale cursor back and schedules the work a second time. The
+	 * node ends up answering one request with two interleaved streams.
+	 *
+	 * A retransmitted request is already being answered, so accept it and
+	 * change nothing. */
+	zassert_true(app_p2p_start_history_replay(900, 1000, 77),
+		     "a re-delivered request must be accepted, not refused");
+
+	p2p_test_get_replay(&active, &seq, &cursor, &idx);
+	zassert_true(active, "the replay must still be active");
+	zassert_equal(seq, 42u, "the in-flight stream's seq must not be replaced by the retry's");
+	zassert_equal(idx, 0u, "the frame index must not be rewound");
+}
+
+ZTEST(p2p_logic, test_telemetry_does_not_interleave_with_a_history_replay)
+{
+	p2p_test_replay_setup();
+	test_history_frame_count = 3;
+
+	/* Control: with no replay running, a telemetry request composes a frame. */
+	g_compose_budget_calls = 0;
+	app_p2p_send_telemetry();
+	k_sleep(K_MSEC(50));
+	zassert_true(g_compose_budget_calls > 0,
+		     "with no replay running, telemetry must still be composed");
+
+	/* app_lrw.c gates its own send path on m_hist_active (MED-9); app_p2p.c's
+	 * copy kept the "telemetry self-skips" comment but dropped the gate.
+	 * app_history_set_replay_active() only pauses history CAPTURE -- nothing
+	 * in the send path consults it -- so scheduled telemetry interleaved with
+	 * the history frames and competed for the same duty ledger and Ack slot. */
+	p2p_test_set_replay_active(true);
+
+	g_compose_budget_calls = 0;
+	app_p2p_send_telemetry();
+	k_sleep(K_MSEC(50));
+	zassert_equal(g_compose_budget_calls, 0,
+		      "a replay owns the radio: telemetry must not be composed mid-stream");
 }
 
 /* ---- Frame-counter fail-closed / saturation (B9) ---------------------- */

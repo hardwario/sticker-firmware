@@ -25,6 +25,15 @@ nanopb_generate_cpp(proto_srcs proto_hdrs RELPATH ${APP_DIR}
   ${APP_DIR}/src/app_config.proto)
 
 target_include_directories(app PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${APP_DIR}/src)
+# B8: app_cmd_handle_req_history routes req_history on the transport, and its
+# `#if defined(CONFIG_RADIO_P2P)` arm was not compiled natively at all before
+# this -- so the P2P dispatch path had no test. The real Kconfig symbol
+# `depends on LORA`, which this suite has no reason to pull in (it stubs
+# app_p2p_start_history_replay anyway), so the gate is set for this target
+# directly. It selects which branch of app_cmd.c compiles; nothing else here
+# consults it.
+target_compile_definitions(app PRIVATE CONFIG_RADIO_P2P=1)
+
 target_sources(app PRIVATE
   ${proto_srcs}
   ${APP_DIR}/src/app_cmd.c

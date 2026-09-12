@@ -354,6 +354,10 @@ int64_t p2p_join_retry_delay_ms(bool self_healing, int64_t elapsed_ms, int64_t d
 				uint32_t backoff_ms, uint32_t jitter_ms);
 bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
 void p2p_parse_join_accept_reserved(const uint8_t reserved[4], struct p2p_radio_assign *out);
+size_t p2p_history_frame_cap(void);
+void p2p_test_replay_setup(void);
+void p2p_test_set_replay_active(bool active);
+void p2p_test_get_replay(bool *active, uint32_t *seq, size_t *cursor, uint32_t *idx);
 void p2p_test_set_fcnt(uint32_t next, uint32_t reserved);
 uint32_t p2p_test_get_fcnt(void);
 int p2p_test_fcnt_next(uint32_t *counter_out);

@@ -309,3 +309,22 @@ bool app_sensor_i2c_wedged(void)
 {
 	return false;
 }
+
+/* ---- B8: the P2P history-replay entry point app_cmd_handle_req_history calls ---- */
+
+int g_p2p_start_history_replay_calls;
+uint32_t g_p2p_start_history_replay_from;
+uint32_t g_p2p_start_history_replay_to;
+uint32_t g_p2p_start_history_replay_seq;
+/* What the stub reports: true = a stream was started and IS the answer, false =
+ * nothing to replay, so the handler must emit HISTORY_UNAVAILABLE instead. */
+bool test_p2p_start_history_replay_ret;
+
+bool app_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+{
+	g_p2p_start_history_replay_calls++;
+	g_p2p_start_history_replay_from = from_unix;
+	g_p2p_start_history_replay_to = to_unix;
+	g_p2p_start_history_replay_seq = seq;
+	return test_p2p_start_history_replay_ret;
+}
