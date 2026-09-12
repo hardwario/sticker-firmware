@@ -590,6 +590,49 @@ ZTEST(p2p_logic, test_rejoin_backoff_doubles_then_caps)
 	zassert_equal(p2p_rejoin_backoff_ms(255), 3600000u, "a large attempt must saturate at 1 h");
 }
 
+ZTEST(p2p_logic, test_join_retry_stays_inside_the_boot_window)
+{
+	const uint32_t jitter = P2P_JOIN_RETRY_JITTER_MS;
+
+	/* The defect: p2p_duty_wait_ms returns "time until the oldest ledger entry
+	 * leaves the sliding hour" -- up to P2P_DUTY_WINDOW_MS when the 48-entry
+	 * ring is full. A boot join that waited that long would be answered long
+	 * after its 120 s window closed, which is how a 120 s window was still
+	 * JOINING 7 m 38 s in on the bench (2026-09-10 §9). The wait is capped at
+	 * the window edge so the NEXT wake-up is the one that gives up, on time. */
+	int64_t d = p2p_join_retry_delay_ms(false, 119000, 3500000, 0, jitter);
+
+	zassert_true(d >= 0, "119 s into a 120 s window is not yet expired");
+	zassert_true(d <= 1000, "a duty wait of 3500 s must be capped to the 1000 ms remaining, "
+			        "got %lld", (long long)d);
+
+	/* Past the window: refuse, so the caller logs the give-up instead of
+	 * rescheduling. */
+	zassert_true(p2p_join_retry_delay_ms(false, P2P_JOIN_BOOT_WINDOW_MS, 0, 0, jitter) < 0,
+		     "at the window edge the boot join must give up");
+	zassert_true(p2p_join_retry_delay_ms(false, 500000, 0, 0, jitter) < 0,
+		     "well past the window the boot join must give up");
+
+	/* A self-heal has no window at all (§7) -- a paired device recovers for its
+	 * whole life, so this must never refuse no matter how long it has run. */
+	for (uint8_t a = 0; a < 255; a++) {
+		uint32_t base = p2p_rejoin_backoff_ms(a);
+
+		zassert_true(p2p_join_retry_delay_ms(true, 999999999, 3500000, base, jitter) >= 0,
+			     "a self-healing re-join must never be capped by the boot window "
+			     "(attempt %u)", a);
+	}
+
+	/* Free radio at the start of the window: no wait beyond the caller's jitter. */
+	zassert_true(p2p_join_retry_delay_ms(false, 0, 0, 0, jitter) < (int64_t)jitter,
+		     "an unblocked retry should go essentially immediately");
+
+	/* And an ordinary duty wait well inside the window passes through untouched
+	 * -- the cap must not make every retry immediate. */
+	zassert_equal(p2p_join_retry_delay_ms(false, 1000, 30000, 0, jitter), 30000,
+		      "a 30 s duty wait 1 s into the window is not capped");
+}
+
 /* ---- Frame-counter fail-closed / saturation (B9) ---------------------- */
 
 ZTEST(p2p_logic, test_fcnt_normal_advance)

@@ -197,17 +197,9 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * assignment hook (§11), unused/ignored today. */
 #define P2P_JOIN_ACCEPT_BODY_LEN 15
 
-/* Boot-trigger join window (§5.2): an unpaired device retries for at most
- * this long after boot, then goes idle until the next boot or an NFC
- * `p2p_join` (not yet wired) -- caps the worst-case radio-retry drain for a
- * device that never finds a gateway. */
-#define P2P_JOIN_BOOT_WINDOW_MS (120 * 1000)
-
-/* Retry cadence for an unanswered JoinRequest. doc/p2p.md §5.3 specifies
- * "jittered, duty-cycle-aware backoff" without exact numbers: retry as soon
- * as the duty cycle clears (the dominant wait at SF10 -- tens of seconds),
- * plus this jitter so devices booting together don't collide on retry. */
-#define P2P_JOIN_RETRY_JITTER_MS 2000
+/* P2P_JOIN_BOOT_WINDOW_MS (§5.2, the unpaired retry deadline) and
+ * P2P_JOIN_RETRY_JITTER_MS (§5.3, so devices booting together don't collide on
+ * retry) live in app_p2p.h -- tests/p2p_logic checks the wait against them. */
 
 /* Self-healing re-join (B3, doc/p2p.md §7): after this many CONSECUTIVE
  * fully-failed confirmed-uplink cycles (all P2P_ACK_MAX_RETRIES exhausted with
@@ -1057,6 +1049,46 @@ P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
 		ms *= 2;
 	}
 	return MIN(ms, (uint32_t)P2P_REJOIN_BACKOFF_MAX_MS);
+}
+
+/* How long to wait before the next JoinRequest, or < 0 for "the boot window is
+ * over, give up". Pure -- exposed to tests/p2p_logic. The caller adds jitter.
+ *
+ * A self-healing re-join (§7) has no window: a paired device recovers for its
+ * whole life, so it always gets its exponential backoff.
+ *
+ * A boot join (§5.2) has a 120 s deadline, and that deadline has to bound the
+ * wait as well as the retrying. `duty_wait_ms` is whatever p2p_duty_wait_ms
+ * returned, which is "time until the oldest ledger entry leaves the sliding
+ * hour" -- up to P2P_DUTY_WINDOW_MS, a full hour, once the 48-entry ring is
+ * full. 48 JoinRequests at 494 ms fill that ring well inside 120 s, so the
+ * unclamped wait routinely landed hours past the deadline: the window check at
+ * the top of join_work_handler ran, but not until long after the window had
+ * closed. Measured on the bench 2026-09-10 (§9): still `state: JOINING` 7 m
+ * 38 s into a 120 s window, with a reconstructed duty wait of ~1296 s, and the
+ * give-up line never reached. Capping at the remaining window makes the next
+ * wake-up the one that gives up -- the caller's jitter lands it just past the
+ * edge, which is exactly when the give-up is due. */
+P2P_TESTABLE int64_t p2p_join_retry_delay_ms(bool self_healing, int64_t elapsed_ms,
+					     int64_t duty_wait_ms, uint32_t backoff_ms,
+					     uint32_t jitter_ms)
+{
+	if (self_healing) {
+		return (int64_t)backoff_ms;
+	}
+
+	int64_t remaining = (int64_t)P2P_JOIN_BOOT_WINDOW_MS - elapsed_ms;
+
+	if (remaining <= 0) {
+		return -1;
+	}
+
+	int64_t wait = (duty_wait_ms > 0) ? duty_wait_ms : 0;
+
+	if (wait + (int64_t)jitter_ms >= remaining) {
+		return remaining;
+	}
+	return wait;
 }
 
 /* Parse a decrypted Ack body (app_p2p.h): flags|rssi|snr, optionally followed
@@ -2181,6 +2213,17 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	return 0;
 }
 
+/* §5.2: the never-paired boot join is over. Both the deadline check at entry
+ * and a retry that cannot fit inside the window end here, so the line reads the
+ * same either way. */
+static void join_give_up(void)
+{
+	LOG_WRN("P2P join: boot window (%d s) expired without a JoinAccept; giving up "
+		"until next boot/trigger",
+		P2P_JOIN_BOOT_WINDOW_MS / 1000);
+	m_link_state = P2P_LINK_UNPAIRED;
+}
+
 static void join_work_handler(struct k_work *work)
 {
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
@@ -2193,10 +2236,7 @@ static void join_work_handler(struct k_work *work)
 	 * (§5.2); a self-healing re-join is exempt (§7) -- a paired device that
 	 * lost its session keeps trying, with exponential backoff, for its life. */
 	if (!m_self_healing && k_uptime_get() - m_join_started_at >= P2P_JOIN_BOOT_WINDOW_MS) {
-		LOG_WRN("P2P join: boot window (%d s) expired without a JoinAccept; giving up "
-			"until next boot/trigger",
-			P2P_JOIN_BOOT_WINDOW_MS / 1000);
-		m_link_state = P2P_LINK_UNPAIRED;
+		join_give_up();
 		return;
 	}
 
@@ -2215,22 +2255,32 @@ static void join_work_handler(struct k_work *work)
 		LOG_ERR_CALL_FAILED_INT("send_join_request", ret);
 	}
 
-	int64_t wait_ms;
+	int64_t duty_wait_ms =
+		(ret == -EAGAIN)
+			? duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN)
+			: 0;
+	uint32_t base = m_self_healing ? p2p_rejoin_backoff_ms(m_rejoin_attempt) : 0;
+	int64_t wait_ms =
+		p2p_join_retry_delay_ms(m_self_healing, k_uptime_get() - m_join_started_at,
+					duty_wait_ms, base, P2P_JOIN_RETRY_JITTER_MS);
+
+	if (wait_ms < 0) {
+		/* The duty ledger cannot clear before the window does -- retrying would
+		 * only wake past the deadline. Give up now rather than schedule a
+		 * JoinRequest that is already too late (§5.2). */
+		join_give_up();
+		return;
+	}
 
 	if (m_self_healing) {
 		/* Exponential backoff between rounds, +/-25% jitter. Duty-cycle-blocked
 		 * (-EAGAIN) rounds also wait the backoff -- at 60 s+ it always exceeds
 		 * the join frame's duty wait anyway. */
-		uint32_t base = p2p_rejoin_backoff_ms(m_rejoin_attempt);
-
 		if (m_rejoin_attempt < UINT8_MAX) {
 			m_rejoin_attempt++;
 		}
-		wait_ms = (int64_t)base - base / 4 + (sys_rand32_get() % (base / 2 + 1));
+		wait_ms += -(int64_t)(base / 4) + (sys_rand32_get() % (base / 2 + 1));
 	} else {
-		wait_ms = (ret == -EAGAIN) ? duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN +
-							      P2P_JOIN_TAG_LEN)
-					   : 0;
 		wait_ms += sys_rand32_get() % P2P_JOIN_RETRY_JITTER_MS;
 	}
 

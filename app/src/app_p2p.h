@@ -27,6 +27,14 @@ extern "C" {
 #define P2P_MAX_BODY  (P2P_LORA_MTU - P2P_HDR_LEN - P2P_TAG_LEN) /* 240 */
 #define P2P_FRAME_MAX (P2P_HDR_LEN + P2P_MAX_BODY + P2P_TAG_LEN)
 
+/* Join retry tuning (§5.2 / §5.3), shared with tests/p2p_logic.
+ *
+ * The window is a deadline, not a hint: the retry wait is capped against it
+ * (p2p_join_retry_delay_ms), because the duty-cycle wait it competes with can
+ * be as long as P2P_DUTY_WINDOW_MS. */
+#define P2P_JOIN_BOOT_WINDOW_MS  (120 * 1000)
+#define P2P_JOIN_RETRY_JITTER_MS 2000
+
 /* Duty-cycle ledger tuning (B2 / decision D1), shared with tests/p2p_logic. */
 #define P2P_DUTY_WINDOW_MS 3600000 /* the sliding window: one hour */
 #define P2P_DUTY_BUDGET_MS 36000   /* 1% of it -- the air-time allowance */
@@ -342,6 +350,8 @@ void p2p_duty_init(struct p2p_duty *d);
 void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 uint32_t p2p_rejoin_backoff_ms(uint8_t attempt);
+int64_t p2p_join_retry_delay_ms(bool self_healing, int64_t elapsed_ms, int64_t duty_wait_ms,
+				uint32_t backoff_ms, uint32_t jitter_ms);
 bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
 void p2p_parse_join_accept_reserved(const uint8_t reserved[4], struct p2p_radio_assign *out);
 void p2p_test_set_fcnt(uint32_t next, uint32_t reserved);
