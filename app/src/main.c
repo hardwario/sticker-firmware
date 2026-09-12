@@ -143,6 +143,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			app_settings_save(true);
 			break;
 		case APP_CMD_ACTION_REBOOT:
+			LOG_WRN_REBOOTING("NFC command");
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
 		case APP_CMD_ACTION_DEVICE_RESET:
@@ -195,6 +196,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			play_carousel_nfc();
 			app_nfc_clm_reset();
 			if (app_settings_save(true)) {
+				LOG_WRN_REBOOTING("claim-token save failed");
 				sys_reboot(SYS_REBOOT_COLD);
 			}
 			break;
@@ -215,6 +217,7 @@ static void nfc_run_deferred_cmd_actions(void)
 #if defined(CONFIG_LORAWAN)
 			app_lrw_reset_nvm();
 #endif /* defined(CONFIG_LORAWAN) */
+			LOG_WRN_REBOOTING("LoRaWAN NVM reset");
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
 		case APP_CMD_ACTION_LRW_JOIN:

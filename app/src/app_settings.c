@@ -12,6 +12,7 @@
 #include "app_hall.h"
 #include "app_history.h"
 #include "app_input.h"
+#include "app_log.h"
 #include "app_lrw.h"
 #include "app_nfc.h"
 
@@ -49,6 +50,7 @@ static int save(bool reboot)
 	}
 
 	if (reboot) {
+		LOG_WRN_REBOOTING("settings saved");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 
@@ -115,6 +117,7 @@ static int erase(bool reboot)
 	}
 
 	if (reboot) {
+		LOG_WRN_REBOOTING("settings storage erased");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 
@@ -346,6 +349,7 @@ int app_settings_device_reset(void)
 	 * atomicity note in app_settings.h). */
 	clear_and_save_alarm_rules();
 
+	LOG_WRN_REBOOTING("device reset");
 	sys_reboot(SYS_REBOOT_COLD);
 
 	return 0;
@@ -374,6 +378,7 @@ int app_settings_factory_reset(void)
 	clear_and_save_alarm_rules();
 
 	lrw_reset_nvm_before_reboot();
+	LOG_WRN_REBOOTING("factory reset");
 	sys_reboot(SYS_REBOOT_COLD);
 
 	return 0;
@@ -449,6 +454,7 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 	if (ret) {
 		LOG_ERR("Call `save_secret_key` failed: %d", ret);
 		lrw_reset_nvm_before_reboot();
+		LOG_WRN_REBOOTING("vendor reset -- secret key save failed");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 
@@ -463,6 +469,7 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 	if (ret) {
 		LOG_ERR("Call `app_counters_save` failed: %d", ret);
 		lrw_reset_nvm_before_reboot();
+		LOG_WRN_REBOOTING("vendor reset -- counter save failed");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 	app_nfc_clm_reset();
@@ -477,10 +484,12 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 	if (ret) {
 		LOG_ERR("Call `app_alarm_rules_save` failed: %d", ret);
 		lrw_reset_nvm_before_reboot();
+		LOG_WRN_REBOOTING("vendor reset -- alarm rule save failed");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 
 	lrw_reset_nvm_before_reboot();
+	LOG_WRN_REBOOTING("vendor reset");
 	sys_reboot(SYS_REBOOT_COLD);
 
 	return 0;

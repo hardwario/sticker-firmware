@@ -1423,7 +1423,7 @@ static void post_cmd_work_handler(struct k_work *work)
 		app_settings_save(true);
 		break;
 	case APP_CMD_ACTION_REBOOT:
-		LOG_INF("Command: reboot");
+		LOG_WRN_REBOOTING("command");
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
 	case APP_CMD_ACTION_COUNTERS_SAVE:
@@ -1437,8 +1437,8 @@ static void post_cmd_work_handler(struct k_work *work)
 		 * so honour it where the stack exists, and say so where it does
 		 * not (the bench image builds with CONFIG_RADIO_LORAWAN=n). */
 #if defined(CONFIG_LORAWAN)
-		LOG_INF("Command: LoRaWAN reset (NVM wipe) + reboot");
 		app_lrw_reset_nvm();
+		LOG_WRN_REBOOTING("command: LoRaWAN NVM wipe");
 		sys_reboot(SYS_REBOOT_COLD);
 #else
 		LOG_WRN("Command: LoRaWAN reset ignored (no LoRaWAN in this build)");

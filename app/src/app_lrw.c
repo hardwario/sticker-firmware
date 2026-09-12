@@ -754,7 +754,7 @@ static void post_cmd_work_handler(struct k_work *work)
 		app_settings_save(true);
 		break;
 	case APP_CMD_ACTION_REBOOT:
-		LOG_INF("Command: reboot");
+		LOG_WRN_REBOOTING("command");
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
 	case APP_CMD_ACTION_ENTER_CALIBRATION:
@@ -770,8 +770,8 @@ static void post_cmd_work_handler(struct k_work *work)
 		/* Wipe the LoRaWAN NVM (frame counters + DevNonce + session), then cold
 		 * reboot so the MAC re-initialises from a clean NVM (#109). Same path as
 		 * `ats radio reset`. The Ack uplink has already left (drain-waited above). */
-		LOG_INF("Command: LoRaWAN reset (NVM wipe) + reboot");
 		app_lrw_reset_nvm();
+		LOG_WRN_REBOOTING("command: LoRaWAN NVM wipe");
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
 	case APP_CMD_ACTION_LRW_JOIN:
