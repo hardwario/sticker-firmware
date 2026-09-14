@@ -35,6 +35,12 @@ extern "C" {
 #define P2P_JOIN_BOOT_WINDOW_MS  (120 * 1000)
 #define P2P_JOIN_RETRY_JITTER_MS 2000
 
+/* JoinRequests to send at the configured SF (sweep step 0) before moving on to
+ * the next SF; every other step gets one. The configured SF is the overwhelmingly
+ * likely answer, so it is worth a second shot at a lost frame before paying a
+ * whole pass, but a third would just delay finding a Hub that really has moved. */
+#define P2P_JOIN_SF_ATTEMPTS 2
+
 /* Duty-cycle ledger tuning (B2 / decision D1), shared with tests/p2p_logic. */
 #define P2P_DUTY_WINDOW_MS 3600000 /* the sliding window: one hour */
 #define P2P_DUTY_BUDGET_MS 36000   /* 1% of it -- the air-time allowance */
@@ -352,6 +358,7 @@ void p2p_duty_init(struct p2p_duty *d);
 void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 uint32_t p2p_rejoin_backoff_ms(uint8_t attempt);
+int p2p_join_sweep_sf(int cfg_sf, uint8_t step);
 int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait_ms,
 				uint32_t backoff_ms, uint32_t jitter_ms);
 bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);

@@ -678,6 +678,79 @@ ZTEST(p2p_logic, test_join_retry_stays_inside_the_boot_window)
 		      "a 30 s duty wait 1 s into the window is not capped");
 }
 
+/* ---- join SF sweep ---------------------------------------------------- */
+
+/* The SF is network-wide and the Hub owns it, so a Hub that changes it strands
+ * every node still tuned to the old one. A node can only find it again by
+ * trying other SFs during join, and the cheapest order is nearest-first: the
+ * likeliest change is by one step. Ties break HIGHER first -- an SF change is
+ * almost always upward, for range. */
+ZTEST(p2p_logic, test_join_sweep_order_is_nearest_first_higher_first)
+{
+	const struct {
+		int cfg_sf;
+		uint8_t steps;
+		int expect[8];
+	} cases[] = {
+		{10, 6, {10, 11, 9, 12, 8, 7}},
+		{12, 6, {12, 11, 10, 9, 8, 7}},
+		{7, 6, {7, 8, 9, 10, 11, 12}},
+		/* SF6 is configurable but below the sweep range: step 0 still
+		 * honours the configured SF, then the whole range follows. */
+		{6, 7, {6, 7, 8, 9, 10, 11, 12}},
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		int cfg = cases[i].cfg_sf;
+
+		for (uint8_t step = 0; step < cases[i].steps; step++) {
+			zassert_equal(p2p_join_sweep_sf(cfg, step), cases[i].expect[step],
+				      "cfg SF%d step %u should be SF%d, got %d", cfg, step,
+				      cases[i].expect[step], p2p_join_sweep_sf(cfg, step));
+		}
+
+		/* Past the end the pass is exhausted, and stays exhausted. */
+		zassert_equal(p2p_join_sweep_sf(cfg, cases[i].steps), -1,
+			      "cfg SF%d must be exhausted after %u steps", cfg, cases[i].steps);
+		zassert_equal(p2p_join_sweep_sf(cfg, 255), -1, "cfg SF%d must stay exhausted", cfg);
+	}
+}
+
+/* A sweep pass is a burst of JoinRequests at rising SFs, and the SF12 ones are
+ * expensive. The pass has to stay a small fraction of the hourly budget or the
+ * retries it feeds would be duty-blocked before the pass even finished. */
+ZTEST(p2p_logic, test_join_sweep_pass_air_fits_the_duty_budget)
+{
+	const uint8_t join_req_len = 37; /* JoinRequest on air, see the ToA table above */
+	uint32_t total = 0;
+
+	for (uint8_t step = 0;; step++) {
+		int sf = p2p_join_sweep_sf(10, step);
+
+		if (sf < 0) {
+			break;
+		}
+		total += (step == 0 ? P2P_JOIN_SF_ATTEMPTS : 1) * p2p_toa_ms(sf, join_req_len);
+	}
+
+	/* 2 x 494 (SF10) + 1069 + 267 + 1974 + 144 + 82. */
+	zassert_equal(total, 4524u, "a cfg-SF10 sweep pass should be 4524 ms of air, got %u ms",
+		      total);
+	zassert_true(total < P2P_DUTY_BUDGET_MS / 4,
+		     "a sweep pass (%u ms) must stay well inside the hourly budget", total);
+
+	/* The other edge of the same budget: SF12 JoinRequests are 1974 ms each,
+	 * so the hour holds 18 of them and no more. A sweep that retried at SF12
+	 * more often than that would be blocked by the duty ledger, not by its
+	 * own policy. */
+	uint32_t sf12 = p2p_toa_ms(12, join_req_len);
+
+	zassert_true(18 * sf12 <= P2P_DUTY_BUDGET_MS, "18 SF12 joins (%u ms) must fit the hour",
+		     18 * sf12);
+	zassert_true(19 * sf12 > P2P_DUTY_BUDGET_MS, "19 SF12 joins (%u ms) must not fit the hour",
+		     19 * sf12);
+}
+
 /* ---- B8 history replay ------------------------------------------------ */
 
 ZTEST(p2p_logic, test_history_frame_cap_is_bounded_by_the_p2p_body)

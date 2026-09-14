@@ -201,6 +201,13 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * P2P_JOIN_RETRY_JITTER_MS (§5.3, so devices booting together don't collide on
  * retry) live in app_p2p.h -- tests/p2p_logic checks the wait against them. */
 
+/* SF range the join sweep tries when the configured SF finds no Hub (B-2). The
+ * SF is network-wide and the Hub owns it, so a Hub that changed it leaves every
+ * node deaf until the node re-discovers it. SF6 is configurable but excluded:
+ * it needs the implicit-header mode this PHY does not use. */
+#define P2P_JOIN_SWEEP_SF_MIN 7
+#define P2P_JOIN_SWEEP_SF_MAX 12
+
 /* Self-healing re-join (B3, doc/p2p.md §7): after this many CONSECUTIVE
  * fully-failed confirmed-uplink cycles (all P2P_ACK_MAX_RETRIES exhausted with
  * no Ack), an already-PAIRED node concludes its session is stale (central DB
@@ -1051,6 +1058,40 @@ P2P_TESTABLE int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32
 	return (int64_t)(P2P_DUTY_WINDOW_MS - (now - d->entries[d->head].end_ms));
 }
 
+/* The SF to try on join sweep step `step` (0-based) when the device is
+ * configured for `cfg_sf`. Step 0 is always the configured SF -- it is the
+ * likeliest answer and the only one a Hub that never moved will ever accept.
+ * After that the sweep walks [P2P_JOIN_SWEEP_SF_MIN, P2P_JOIN_SWEEP_SF_MAX]
+ * nearest-first, higher SF first on a tie (an SF change is almost always
+ * upward, for range), skipping the configured SF. Returns -1 once the pass is
+ * exhausted. A configured SF outside the sweep range still gets step 0, then
+ * the whole range follows. Pure -- exposed to tests/p2p_logic. */
+P2P_TESTABLE int p2p_join_sweep_sf(int cfg_sf, uint8_t step)
+{
+	if (step == 0) {
+		return cfg_sf;
+	}
+
+	int max_dist = MAX(P2P_JOIN_SWEEP_SF_MAX - cfg_sf, cfg_sf - P2P_JOIN_SWEEP_SF_MIN);
+	uint8_t seen = 0;
+
+	for (int dist = 1; dist <= max_dist; dist++) {
+		const int candidates[] = {cfg_sf + dist, cfg_sf - dist}; /* higher first */
+
+		for (size_t i = 0; i < ARRAY_SIZE(candidates); i++) {
+			int sf = candidates[i];
+
+			if (sf < P2P_JOIN_SWEEP_SF_MIN || sf > P2P_JOIN_SWEEP_SF_MAX) {
+				continue;
+			}
+			if (++seen == step) {
+				return sf;
+			}
+		}
+	}
+	return -1;
+}
+
 /* Exponential backoff (ms) for self-healing re-join round `attempt` (0-based):
  * BASE, 2*BASE, 4*BASE, ... capped at MAX. Pure -- exposed to tests/p2p_logic.
  * The caller adds jitter. */
@@ -1224,7 +1265,8 @@ static void duty_charge(uint32_t air_ms)
  * app_p2p_rejoin() (shell), and the self-heal trigger below. */
 static void start_join_episode(bool slow)
 {
-	m_sf = (uint8_t)sf_from_cfg();
+	/* Every episode starts at sweep step 0 -- the configured SF. */
+	m_sf = (uint8_t)p2p_join_sweep_sf(sf_from_cfg(), 0);
 	m_join_slow = slow;
 	m_rejoin_attempt = 0;
 	m_consec_uplink_fail = 0;
