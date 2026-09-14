@@ -678,6 +678,36 @@ ZTEST(p2p_logic, test_join_retry_stays_inside_the_boot_window)
 		      "a 30 s duty wait 1 s into the window is not capped");
 }
 
+/* The slow policy competes with the duty ledger, not just with the clock: a
+ * JoinRequest the ledger refuses never reaches the air, so a round that waits
+ * only its backoff wakes to be refused again and has spent a backoff step for
+ * nothing. The wait has to be the longer of the two. */
+ZTEST(p2p_logic, test_slow_retry_waits_for_duty_and_stays_bounded)
+{
+	const uint32_t jitter = P2P_JOIN_RETRY_JITTER_MS;
+
+	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 1500, 0, jitter), 1500,
+		      "a duty-blocked slow retry with no backoff must wait out the ledger");
+	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 90000, 60000, jitter), 90000,
+		      "a 90 s duty wait must outrank a 60 s backoff");
+
+	/* ...and the backoff still wins when it is the longer of the two, so the
+	 * fix cannot turn a long backoff into a busy retry loop. */
+	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 1500, 60000, jitter), 60000,
+		      "a 60 s backoff must outrank a 1.5 s duty wait");
+
+	/* Both terms are bounded by the sliding hour -- p2p_duty_wait_ms never
+	 * returns more than the window and the backoff caps at the same value --
+	 * so their maximum is bounded too: the slow policy never sleeps past it. */
+	int64_t d = p2p_join_retry_delay_ms(true, 999999, P2P_DUTY_WINDOW_MS - 1000,
+					    p2p_rejoin_backoff_ms(255), jitter);
+
+	zassert_true(d > 0, "a slow retry must never refuse");
+	zassert_true(d <= P2P_DUTY_WINDOW_MS,
+		     "a slow retry wait of %lld ms must stay inside the sliding hour",
+		     (long long)d);
+}
+
 /* ---- join SF sweep ---------------------------------------------------- */
 
 /* The SF is network-wide and the Hub owns it, so a Hub that changes it strands

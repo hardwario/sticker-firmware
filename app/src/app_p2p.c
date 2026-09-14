@@ -1109,7 +1109,12 @@ P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
  * over, give up". Pure -- exposed to tests/p2p_logic. The caller adds jitter.
  *
  * The slow policy (§7, selected by a self-heal) has no window: a paired device
- * recovers for its whole life, so it always gets its exponential backoff.
+ * recovers for its whole life, so it always gets its exponential backoff -- or
+ * the duty wait, whichever is longer. Taking only the backoff meant a round the
+ * duty ledger had refused (the JoinRequest never reached the air) woke into the
+ * same refusal having spent a backoff step on nothing; once the 48-entry ring
+ * is full the ledger's wait runs to the better part of an hour, well past the
+ * 60 s first backoff.
  *
  * The fast policy (a boot join, §5.2) has a 120 s deadline, and that deadline has to bound the
  * wait as well as the retrying. `duty_wait_ms` is whatever p2p_duty_wait_ms
@@ -1127,7 +1132,11 @@ P2P_TESTABLE int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int6
 					     uint32_t backoff_ms, uint32_t jitter_ms)
 {
 	if (slow) {
-		return (int64_t)backoff_ms;
+		/* Whichever is longer. A round the duty ledger refused never
+		 * reached the air, so waiting only the backoff wakes it into
+		 * the same refusal, one backoff step poorer. Both terms are
+		 * bounded by the sliding hour, so this is too. */
+		return MAX((int64_t)backoff_ms, duty_wait_ms > 0 ? duty_wait_ms : 0);
 	}
 
 	int64_t remaining = (int64_t)P2P_JOIN_BOOT_WINDOW_MS - elapsed_ms;
@@ -2339,9 +2348,9 @@ static void join_work_handler(struct k_work *work)
 	}
 
 	if (m_join_slow) {
-		/* Exponential backoff between rounds, +/-25% jitter. Duty-cycle-blocked
-		 * (-EAGAIN) rounds also wait the backoff -- at 60 s+ it always exceeds
-		 * the join frame's duty wait anyway. */
+		/* Exponential backoff between rounds, +/-25% jitter. A duty-cycle-
+		 * blocked (-EAGAIN) round waits for the ledger instead when that is
+		 * the longer of the two (p2p_join_retry_delay_ms). */
 		if (m_rejoin_attempt < UINT8_MAX) {
 			m_rejoin_attempt++;
 		}
