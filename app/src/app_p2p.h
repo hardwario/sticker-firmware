@@ -341,6 +341,8 @@ int app_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, bool *
  * exposed with external linkage for tests/p2p_logic only. Not part of the
  * runtime API -- do not call from firmware. */
 uint32_t p2p_toa_ms(int sf, uint8_t payload_len);
+uint32_t rx1_preamble_catch_ms(int sf);
+uint32_t p2p_rx1_timeout_ms(int sf, uint8_t expected_frame_len);
 void build_nonce(uint8_t nonce[13], uint32_t counter, uint16_t dev_addr, uint8_t frame_type,
 		 uint8_t dir);
 int build_frame_keyed(uint32_t net_id, uint16_t dev_addr, const uint8_t session_key[16],

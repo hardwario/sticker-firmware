@@ -359,6 +359,12 @@ static int8_t m_session_tx_power_dbm;
 static uint32_t m_dev_nonce;      /* next JoinRequest counter; persisted, device lifetime */
 static int64_t m_join_started_at; /* uptime ms; start of the current boot join window */
 
+/* Live spreading factor the radio is tuned to. Seeded from the config at init
+ * and at the start of every join episode; the join sweep re-tunes it between
+ * attempts, so every radio path (modem config, time-on-air, RX1 window sizing)
+ * must read THIS rather than the config, or the two drift apart mid-join. */
+static uint8_t m_sf;
+
 /* Self-healing re-join state (B3, §7). m_self_healing distinguishes a
  * self-healing episode (exponential backoff, no boot-window cap) from a
  * boot/shell join (120 s boot window, tight jitter). */
@@ -788,7 +794,7 @@ static void build_modem_config(struct lora_modem_config *c, bool tx)
 	memset(c, 0, sizeof(*c));
 	c->frequency = g_app_config.p2p_frequency;
 	c->bandwidth = P2P_BANDWIDTH;
-	c->datarate = (enum lora_datarate)sf_from_cfg();
+	c->datarate = (enum lora_datarate)m_sf;
 	c->coding_rate = P2P_CODING_RATE;
 	c->preamble_len = 8;
 	/* An assigned session power overrides the local config: the central owns
@@ -845,32 +851,33 @@ P2P_TESTABLE uint32_t p2p_toa_ms(int sf, uint8_t payload_len)
 	return (uint32_t)((t_preamble_us + t_payload_us + 500) / 1000);
 }
 
-/* Time-on-air for the current configured SF. */
+/* Time-on-air at the SF the radio is currently tuned to. */
 static uint32_t frame_toa_ms(uint8_t payload_len)
 {
-	return p2p_toa_ms(sf_from_cfg(), payload_len);
+	return p2p_toa_ms(m_sf, payload_len);
 }
 
 /* Preamble-catch / open-timing-slop budget in ms, P2P_RX1_WINDOW_SYMBOLS
- * symbols at the live SF/BW -- only ONE component of the real lora_recv()
- * timeout (see p2p_rx1_timeout_ms() and the #define comment above: this
- * driver has no HW symbol-timeout, so this alone is NOT a valid window). */
-static uint32_t rx1_preamble_catch_ms(void)
+ * symbols at `sf`/BW -- only ONE component of the real lora_recv() timeout
+ * (see p2p_rx1_timeout_ms() and the #define comment above: this driver has no
+ * HW symbol-timeout, so this alone is NOT a valid window). Pure -- exposed to
+ * tests/p2p_logic. */
+P2P_TESTABLE uint32_t rx1_preamble_catch_ms(int sf)
 {
-	int sf = sf_from_cfg();
 	uint64_t tsym_us = ((uint64_t)(1u << sf) * 1000000ULL) / P2P_BANDWIDTH_HZ;
 
 	return (uint32_t)((tsym_us * P2P_RX1_WINDOW_SYMBOLS + 500) / 1000);
 }
 
-/* Full lora_recv() timeout for an RX1 wait expecting a frame of
+/* Full lora_recv() timeout for an RX1 wait at `sf` expecting a frame of
  * `expected_frame_len` bytes: preamble-catch budget + that frame's whole
  * time-on-air + a trailing margin (#118 phase 2 HW finding -- this driver's
  * "timeout" aborts an in-flight reception, so it must outlast the entire
- * expected frame, not just its preamble). */
-static uint32_t p2p_rx1_timeout_ms(uint8_t expected_frame_len)
+ * expected frame, not just its preamble). SF is explicit because a join sweep
+ * tries SFs other than the configured one. Pure -- exposed to tests/p2p_logic. */
+P2P_TESTABLE uint32_t p2p_rx1_timeout_ms(int sf, uint8_t expected_frame_len)
 {
-	return rx1_preamble_catch_ms() + frame_toa_ms(expected_frame_len) +
+	return rx1_preamble_catch_ms(sf) + p2p_toa_ms(sf, expected_frame_len) +
 	       P2P_RX1_TRAILING_MARGIN_MS;
 }
 
@@ -906,7 +913,7 @@ static int p2p_rx_window(int64_t tx_end_ms, uint8_t rx1_delay_s, uint8_t expecte
 	}
 
 	ret = lora_recv(m_lora_dev, buf, (uint8_t)MIN(buf_size, 255),
-			K_MSEC(p2p_rx1_timeout_ms(expected_frame_len)), rssi, snr);
+			K_MSEC(p2p_rx1_timeout_ms(m_sf, expected_frame_len)), rssi, snr);
 
 	(void)radio_configure(true);
 
@@ -1217,6 +1224,7 @@ static void duty_charge(uint32_t air_ms)
  * app_p2p_rejoin() (shell), and the self-heal trigger below. */
 static void start_join_episode(bool self_healing)
 {
+	m_sf = (uint8_t)sf_from_cfg();
 	m_self_healing = self_healing;
 	m_rejoin_attempt = 0;
 	m_consec_uplink_fail = 0;
@@ -2211,9 +2219,9 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	/* SF is network-wide: the NorthBridge has a single receiver, so a
 	 * per-node SF would simply make this node unhearable. The byte stays a
 	 * documented hook -- warn and keep ours. */
-	if (assign.sf_hint != 0 && assign.sf_hint != (uint8_t)sf_from_cfg()) {
-		LOG_WRN("JoinAccept assigns SF%u: SF is network-wide, keeping SF%d", assign.sf_hint,
-			sf_from_cfg());
+	if (assign.sf_hint != 0 && assign.sf_hint != m_sf) {
+		LOG_WRN("JoinAccept assigns SF%u: SF is network-wide, keeping SF%u", assign.sf_hint,
+			m_sf);
 	}
 
 	uint8_t session_key[P2P_KEY_LEN];
@@ -2582,6 +2590,8 @@ int app_p2p_init(void)
 		LOG_ERR_CALL_FAILED_INT("settings_load_subtree", ret);
 		return ret;
 	}
+
+	m_sf = (uint8_t)sf_from_cfg();
 
 	ret = radio_configure(true);
 	if (ret) {

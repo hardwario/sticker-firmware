@@ -103,6 +103,45 @@ ZTEST(p2p_logic, test_toa_small_frame_bounded)
 	zassert_true(small < big, "small frame ToA %u not < max frame ToA %u", small, big);
 }
 
+/* ---- RX1 window sizing ------------------------------------------------ */
+
+/* The RX1 window is sized from the SF the node is CURRENTLY tried on, not from
+ * the configured one: a join sweep re-tunes the radio between attempts, and a
+ * window still sized for the configured SF would either close mid-JoinAccept
+ * (too short) or waste the retry budget (too long). Both terms of the window
+ * -- the preamble-catch budget and the expected frame's whole time-on-air --
+ * scale with SF, so they take it as an argument. */
+ZTEST(p2p_logic, test_rx1_timeout_scales_with_the_tried_sf)
+{
+	/* JoinAccept is 42 B on air. Computed from the formula
+	 * rx1_preamble_catch_ms(sf) + p2p_toa_ms(sf, 42) + 40 ms trailing margin:
+	 * SF10 = 98 + 535 + 40, SF12 = 393 + 2138 + 40. */
+	zassert_equal(p2p_rx1_timeout_ms(10, 42), 673u, "SF10 JoinAccept window should be 673 ms");
+	zassert_equal(p2p_rx1_timeout_ms(12, 42), 2571u,
+		      "SF12 JoinAccept window should be 2571 ms");
+
+	uint32_t prev = p2p_rx1_timeout_ms(7, 42);
+
+	for (int sf = 8; sf <= 12; sf++) {
+		uint32_t cur = p2p_rx1_timeout_ms(sf, 42);
+
+		zassert_true(cur > prev, "RX1 window not increasing at SF%d (%u <= %u)", sf, cur,
+			     prev);
+		prev = cur;
+	}
+
+	/* #118 phase 2 HW finding: this driver's timeout aborts an in-flight
+	 * reception, so at every SF the window must outlast the whole expected
+	 * frame, and the preamble-catch budget must be a real part of it. */
+	for (int sf = 7; sf <= 12; sf++) {
+		uint32_t catch_ms = rx1_preamble_catch_ms(sf);
+
+		zassert_true(catch_ms > 0, "SF%d preamble catch budget must be positive", sf);
+		zassert_true(p2p_rx1_timeout_ms(sf, 42) > p2p_toa_ms(sf, 42) + catch_ms,
+			     "SF%d window must outlast the frame plus the catch budget", sf);
+	}
+}
+
 /* ---- p2p_build_nonce -------------------------------------------------- */
 
 ZTEST(p2p_logic, test_nonce_layout)
