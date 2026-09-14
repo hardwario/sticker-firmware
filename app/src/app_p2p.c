@@ -365,12 +365,13 @@ static int64_t m_join_started_at; /* uptime ms; start of the current boot join w
  * must read THIS rather than the config, or the two drift apart mid-join. */
 static uint8_t m_sf;
 
-/* Self-healing re-join state (B3, §7). m_self_healing distinguishes a
- * self-healing episode (exponential backoff, no boot-window cap) from a
- * boot/shell join (120 s boot window, tight jitter). */
+/* Self-healing re-join state (B3, §7). m_join_slow names the retry POLICY,
+ * not what triggered it: the slow policy is exponential backoff with no
+ * boot-window cap; the fast one is the 120 s boot window with tight jitter.
+ * A self-heal is the only thing that selects the slow policy today. */
 static uint16_t m_consec_uplink_fail; /* consecutive fully-failed uplink cycles */
-static bool m_self_healing;           /* current JOINING episode is a self-heal */
-static uint8_t m_rejoin_attempt;      /* backoff step within a self-heal episode */
+static bool m_join_slow;              /* current JOINING episode uses the slow policy */
+static uint8_t m_rejoin_attempt;      /* backoff step within a slow-policy episode */
 
 /* B1: RSSI/SNR the central reported in the last Ack (its measurement of our
  * uplink). m_last_ack_valid is false until the first Ack of this session. */
@@ -1066,10 +1067,10 @@ P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
 /* How long to wait before the next JoinRequest, or < 0 for "the boot window is
  * over, give up". Pure -- exposed to tests/p2p_logic. The caller adds jitter.
  *
- * A self-healing re-join (§7) has no window: a paired device recovers for its
- * whole life, so it always gets its exponential backoff.
+ * The slow policy (§7, selected by a self-heal) has no window: a paired device
+ * recovers for its whole life, so it always gets its exponential backoff.
  *
- * A boot join (§5.2) has a 120 s deadline, and that deadline has to bound the
+ * The fast policy (a boot join, §5.2) has a 120 s deadline, and that deadline has to bound the
  * wait as well as the retrying. `duty_wait_ms` is whatever p2p_duty_wait_ms
  * returned, which is "time until the oldest ledger entry leaves the sliding
  * hour" -- up to P2P_DUTY_WINDOW_MS, a full hour, once the 48-entry ring is
@@ -1081,11 +1082,10 @@ P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
  * give-up line never reached. Capping at the remaining window makes the next
  * wake-up the one that gives up -- the caller's jitter lands it just past the
  * edge, which is exactly when the give-up is due. */
-P2P_TESTABLE int64_t p2p_join_retry_delay_ms(bool self_healing, int64_t elapsed_ms,
-					     int64_t duty_wait_ms, uint32_t backoff_ms,
-					     uint32_t jitter_ms)
+P2P_TESTABLE int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait_ms,
+					     uint32_t backoff_ms, uint32_t jitter_ms)
 {
-	if (self_healing) {
+	if (slow) {
 		return (int64_t)backoff_ms;
 	}
 
@@ -1217,15 +1217,15 @@ static void duty_charge(uint32_t air_ms)
 	p2p_duty_charge(&m_duty, k_uptime_get(), air_ms);
 }
 
-/* Start a JOINING episode and schedule the first JoinRequest. `self_healing`
- * selects the retry policy in join_work_handler(): a boot/shell join is capped
- * at the 120 s boot window with tight jitter (§5.2); a self-heal runs with
- * exponential backoff and no window cap (§7). Shared by app_p2p_start(),
+/* Start a JOINING episode and schedule the first JoinRequest. `slow` selects
+ * the retry policy in join_work_handler(): the fast policy caps a boot/shell
+ * join at the 120 s boot window with tight jitter (§5.2); the slow one runs
+ * with exponential backoff and no window cap (§7). Shared by app_p2p_start(),
  * app_p2p_rejoin() (shell), and the self-heal trigger below. */
-static void start_join_episode(bool self_healing)
+static void start_join_episode(bool slow)
 {
 	m_sf = (uint8_t)sf_from_cfg();
-	m_self_healing = self_healing;
+	m_join_slow = slow;
 	m_rejoin_attempt = 0;
 	m_consec_uplink_fail = 0;
 	m_link_state = P2P_LINK_JOINING;
@@ -2060,8 +2060,8 @@ int app_p2p_listen(bool enable)
 
 static void mark_ready(void)
 {
-	/* Paired: end any self-healing episode and clear the failure streak. */
-	m_self_healing = false;
+	/* Paired: back to the fast policy and clear the failure streak. */
+	m_join_slow = false;
 	m_rejoin_attempt = 0;
 	m_consec_uplink_fail = 0;
 
@@ -2258,9 +2258,9 @@ static void join_work_handler(struct k_work *work)
 	}
 
 	/* A never-paired boot/shell join gives up after the 120 s boot window
-	 * (§5.2); a self-healing re-join is exempt (§7) -- a paired device that
-	 * lost its session keeps trying, with exponential backoff, for its life. */
-	if (!m_self_healing && k_uptime_get() - m_join_started_at >= P2P_JOIN_BOOT_WINDOW_MS) {
+	 * (§5.2); the slow policy is exempt (§7) -- a paired device that lost its
+	 * session keeps trying, with exponential backoff, for its life. */
+	if (!m_join_slow && k_uptime_get() - m_join_started_at >= P2P_JOIN_BOOT_WINDOW_MS) {
 		join_give_up();
 		return;
 	}
@@ -2284,10 +2284,9 @@ static void join_work_handler(struct k_work *work)
 		(ret == -EAGAIN)
 			? duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN)
 			: 0;
-	uint32_t base = m_self_healing ? p2p_rejoin_backoff_ms(m_rejoin_attempt) : 0;
-	int64_t wait_ms =
-		p2p_join_retry_delay_ms(m_self_healing, k_uptime_get() - m_join_started_at,
-					duty_wait_ms, base, P2P_JOIN_RETRY_JITTER_MS);
+	uint32_t base = m_join_slow ? p2p_rejoin_backoff_ms(m_rejoin_attempt) : 0;
+	int64_t wait_ms = p2p_join_retry_delay_ms(m_join_slow, k_uptime_get() - m_join_started_at,
+						  duty_wait_ms, base, P2P_JOIN_RETRY_JITTER_MS);
 
 	if (wait_ms < 0) {
 		/* The duty ledger cannot clear before the window does -- retrying would
@@ -2297,7 +2296,7 @@ static void join_work_handler(struct k_work *work)
 		return;
 	}
 
-	if (m_self_healing) {
+	if (m_join_slow) {
 		/* Exponential backoff between rounds, +/-25% jitter. Duty-cycle-blocked
 		 * (-EAGAIN) rounds also wait the backoff -- at 60 s+ it always exceeds
 		 * the join frame's duty wait anyway. */
