@@ -1153,6 +1153,27 @@ P2P_TESTABLE int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int6
 	return wait;
 }
 
+/* Apply the slow policy's +/-25%-of-backoff jitter to `wait_ms`, never letting
+ * the result fall below `duty_wait_ms`. `rand32` is a raw sys_rand32_get()
+ * draw. Pure -- exposed to tests/p2p_logic.
+ *
+ * The jitter stops a fleet that lost the same central from re-joining in
+ * lockstep, and it is scaled to the backoff. But `wait_ms` may be the DUTY wait
+ * instead -- p2p_join_retry_delay_ms returns the longer of the two -- and the
+ * two are unrelated magnitudes. A negative draw of base/4 (15 s at the 60 s
+ * base, 15 min at the 1 h cap) would then wake the node before the ledger has
+ * cleared: send_join_request() is refused again, and the round has still spent
+ * a backoff step on a frame that never went out, which is the waste the duty
+ * wait exists to stop. So the duty wait is a floor -- jitter may push the wait
+ * up past it, never back through it. */
+P2P_TESTABLE int64_t p2p_join_slow_jitter_ms(int64_t wait_ms, int64_t duty_wait_ms, uint32_t base,
+					     uint32_t rand32)
+{
+	int64_t jittered = wait_ms - (int64_t)(base / 4) + (int64_t)(rand32 % (base / 2 + 1));
+
+	return MAX(jittered, duty_wait_ms > 0 ? duty_wait_ms : 0);
+}
+
 /* Parse a decrypted Ack body (app_p2p.h): flags|rssi|snr, optionally followed
  * by the pending 0x56's on-air length (D2) and/or a big-endian Unix time tail.
  *
@@ -2350,11 +2371,12 @@ static void join_work_handler(struct k_work *work)
 	if (m_join_slow) {
 		/* Exponential backoff between rounds, +/-25% jitter. A duty-cycle-
 		 * blocked (-EAGAIN) round waits for the ledger instead when that is
-		 * the longer of the two (p2p_join_retry_delay_ms). */
+		 * the longer of the two (p2p_join_retry_delay_ms), and the jitter
+		 * may not undercut it (p2p_join_slow_jitter_ms). */
 		if (m_rejoin_attempt < UINT8_MAX) {
 			m_rejoin_attempt++;
 		}
-		wait_ms += -(int64_t)(base / 4) + (sys_rand32_get() % (base / 2 + 1));
+		wait_ms = p2p_join_slow_jitter_ms(wait_ms, duty_wait_ms, base, sys_rand32_get());
 	} else {
 		wait_ms += sys_rand32_get() % P2P_JOIN_RETRY_JITTER_MS;
 	}

@@ -361,6 +361,8 @@ uint32_t p2p_rejoin_backoff_ms(uint8_t attempt);
 int p2p_join_sweep_sf(int cfg_sf, uint8_t step);
 int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait_ms,
 				uint32_t backoff_ms, uint32_t jitter_ms);
+int64_t p2p_join_slow_jitter_ms(int64_t wait_ms, int64_t duty_wait_ms, uint32_t base,
+				uint32_t rand32);
 bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
 void p2p_parse_join_accept_reserved(const uint8_t reserved[4], struct p2p_radio_assign *out);
 size_t p2p_history_frame_cap(void);

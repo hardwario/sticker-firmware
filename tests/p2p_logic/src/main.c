@@ -696,16 +696,57 @@ ZTEST(p2p_logic, test_slow_retry_waits_for_duty_and_stays_bounded)
 	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 1500, 60000, jitter), 60000,
 		      "a 60 s backoff must outrank a 1.5 s duty wait");
 
-	/* Both terms are bounded by the sliding hour -- p2p_duty_wait_ms never
-	 * returns more than the window and the backoff caps at the same value --
-	 * so their maximum is bounded too: the slow policy never sleeps past it. */
+	/* The worst case the ledger can produce: a full 48-entry ring puts the
+	 * wait within a second of the whole sliding hour, three orders of
+	 * magnitude past the first backoff step. The duty wait has to come
+	 * through intact, and it is still bounded -- p2p_duty_wait_ms never
+	 * returns more than the window, and the backoff caps at the same value,
+	 * so their maximum is bounded too and the slow policy never oversleeps. */
 	int64_t d = p2p_join_retry_delay_ms(true, 999999, P2P_DUTY_WINDOW_MS - 1000,
-					    p2p_rejoin_backoff_ms(255), jitter);
+					    p2p_rejoin_backoff_ms(0), jitter);
 
-	zassert_true(d > 0, "a slow retry must never refuse");
+	zassert_equal(d, P2P_DUTY_WINDOW_MS - 1000,
+		      "a near-window duty wait must survive a 60 s backoff, got %lld ms",
+		      (long long)d);
 	zassert_true(d <= P2P_DUTY_WINDOW_MS,
 		     "a slow retry wait of %lld ms must stay inside the sliding hour",
 		     (long long)d);
+}
+
+/* The jitter that spreads a fleet's re-join rounds is scaled to the BACKOFF,
+ * but it is applied to the wait that p2p_join_retry_delay_ms returned -- which
+ * after the duty fix may be the duty wait instead. A negative draw of up to
+ * base/4 (15 s at the 60 s base, 15 min at the 1 h cap) then wakes the node
+ * before the ledger has cleared, send_join_request() is refused again, and
+ * m_rejoin_attempt++ burns a backoff step for a frame that never went out --
+ * exactly the waste the duty fix exists to stop. The duty wait is a floor the
+ * jitter may push up but never through. */
+ZTEST(p2p_logic, test_slow_retry_jitter_never_dips_below_the_duty_wait)
+{
+	const uint32_t base = p2p_rejoin_backoff_ms(0); /* 60 s */
+	const int64_t duty = 90000;
+
+	/* The most negative draw there is: rand 0 subtracts the whole base/4. */
+	zassert_equal(p2p_join_slow_jitter_ms(duty, duty, base, 0), duty,
+		      "the most negative jitter draw must not undercut the duty wait");
+
+	/* Every draw, not just the extreme one. */
+	for (uint32_t r = 0; r <= base / 2; r += 1000) {
+		int64_t d = p2p_join_slow_jitter_ms(duty, duty, base, r);
+
+		zassert_true(d >= duty, "draw %u dipped to %lld ms, below the %lld ms duty wait", r,
+			     (long long)d, (long long)duty);
+		zassert_true(d <= duty + (int64_t)(base / 4),
+			     "draw %u overshot to %lld ms, past +25%% of the backoff", r,
+			     (long long)d);
+	}
+
+	/* The floor must not swallow the jitter: with no duty block the spread is
+	 * the full +/-25%, which is what keeps a fleet from re-joining in lockstep. */
+	zassert_equal(p2p_join_slow_jitter_ms(base, 0, base, 0), base - base / 4,
+		      "an unblocked round must still take the full negative jitter");
+	zassert_equal(p2p_join_slow_jitter_ms(base, 0, base, base / 2), base + base / 4,
+		      "an unblocked round must still take the full positive jitter");
 }
 
 /* ---- join SF sweep ---------------------------------------------------- */
