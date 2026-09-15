@@ -170,15 +170,24 @@ function joinTag(appKey, label, headerAndBody) {
 }
 
 // session_key = AES128-CMAC(appKey, "HIO-P2P-SES" || 0x01 || devNonce(4 BE) ||
-// centralNonce(4 BE) || serialNumber(4 BE) || zero-pad to 32 B), doc/p2p.md §4
-// -- derived DIRECTLY from the device's existing LoRaWAN OTAA AppKey (no
-// join_key intermediate any more, #118 phase 2 revision), once per successful
-// join. `appKey` a Buffer or 32-hex-digit string; `devNonce`/`centralNonce`/
-// `serialNumber` uint32s. Returns the 16-byte session_key as a Buffer.
+// centralNonce(4 BE) || devEui(8 B, MSB-first) || zero-pad to 32 B),
+// doc/p2p.md §4 -- derived DIRECTLY from the device's existing LoRaWAN OTAA
+// AppKey (no join_key intermediate any more, #118 phase 2 revision), once per
+// successful join. The last field was serialNumber(4 BE) until #417 / GitLab
+// #73 made the DevEUI the join identity; the input went 24 -> 28 octets and is
+// still zero-padded to 32, so it is still two CMAC blocks.
+//
+// `appKey` a Buffer or 32-hex-digit string; `devNonce`/`centralNonce` uint32s;
+// `devEui` an 8-byte Buffer or a 16-hex-digit string, MSB-FIRST -- exactly as
+// the hex string reads, deliberately NOT LoRaWAN's LSB-first on-air order
+// (decision D1). Returns the 16-byte session_key as a Buffer.
+//
 // Matches app_p2p.c's derive_session_key() exactly (same label, same
-// big-endian field encoding, same zero-padding to a 32 B/2-block message).
-function deriveSessionKey(appKey, devNonce, centralNonce, serialNumber) {
+// big-endian field encoding, same zero-padding to a 32 B/2-block message), and
+// is pinned against it by the shared fixture tests/ccm/p2p_join_kat.json.
+function deriveSessionKey(appKey, devNonce, centralNonce, devEui) {
   appKey = asKey(appKey);
+  devEui = asDevEui(devEui);
 
   const label = Buffer.from(P2P_SESSION_KEY_LABEL, "ascii");
   const block = Buffer.alloc(32);
@@ -187,10 +196,31 @@ function deriveSessionKey(appKey, devNonce, centralNonce, serialNumber) {
   block[label.length] = 0x01;
   block.writeUInt32BE(devNonce >>> 0, label.length + 1);
   block.writeUInt32BE(centralNonce >>> 0, label.length + 5);
-  block.writeUInt32BE(serialNumber >>> 0, label.length + 9);
-  // block[label.length+13 .. 31] = zero padding, already zero-initialized.
+  devEui.copy(block, label.length + 9);
+  // block[label.length+17 .. 31] = zero padding, already zero-initialized.
 
   return aes128Cmac(appKey, block);
+}
+
+// Coerce a DevEUI to its 8 raw bytes, MSB-first.
+//
+// Deliberately strict: a caller still passing the pre-#417 4-byte serial must
+// fail here rather than have it silently zero-extended into a key that differs
+// from the central's by four bytes. That is the #118 failure mode -- the join
+// succeeds and every data frame after it fails to decrypt with no clue why.
+function asDevEui(devEui) {
+  if (typeof devEui === "string") {
+    devEui = Buffer.from(devEui.replace(/[:-]/g, ""), "hex");
+  } else if (!Buffer.isBuffer(devEui)) {
+    if (typeof devEui === "number") {
+      throw new TypeError("dev_eui must be 8 bytes (MSB-first), not a number -- see #417");
+    }
+    devEui = Buffer.from(devEui);
+  }
+  if (devEui.length !== 8) {
+    throw new RangeError(`dev_eui must be 8 bytes (MSB-first), got ${devEui.length}`);
+  }
+  return devEui;
 }
 
 // Decode one raw P2P DATA-PLANE frame (telemetry/alarm/response/ack -- NOT
