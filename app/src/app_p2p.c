@@ -369,8 +369,12 @@ static int64_t m_join_started_at; /* uptime ms; start of the current boot join w
 /* Live spreading factor the radio is tuned to. Seeded from the config at init
  * and at the start of every join episode; the join sweep re-tunes it between
  * attempts, so every radio path (modem config, time-on-air, RX1 window sizing)
- * must read THIS rather than the config, or the two drift apart mid-join. */
-static uint8_t m_sf;
+ * must read THIS rather than the config, or the two drift apart mid-join.
+ * Initialised to the app_config.yml default rather than left at 0, so the
+ * 2^SF arithmetic in p2p_toa_ms()/rx1_preamble_catch_ms() can never run on a
+ * zero SF if anything reads it before app_p2p_init() gets past its settings
+ * loads to the seeding line. */
+static uint8_t m_sf = SF_10;
 
 /* Self-healing re-join state (B3, §7). m_join_slow names the retry POLICY,
  * not what triggered it: the slow policy is exponential backoff with no
