@@ -1120,14 +1120,14 @@ P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
  * is full the ledger's wait runs to the better part of an hour, well past the
  * 60 s first backoff.
  *
- * The fast policy (a boot join, §5.2) has a 120 s deadline, and that deadline has to bound the
- * wait as well as the retrying. `duty_wait_ms` is whatever p2p_duty_wait_ms
- * returned, which is "time until the oldest ledger entry leaves the sliding
- * hour" -- up to P2P_DUTY_WINDOW_MS, a full hour, once the 48-entry ring is
- * full. 48 JoinRequests at 494 ms fill that ring well inside 120 s, so the
- * unclamped wait routinely landed hours past the deadline: the window check at
- * the top of join_work_handler ran, but not until long after the window had
- * closed. Measured on the bench 2026-09-10 (§9): still `state: JOINING` 7 m
+ * The fast policy (a boot join, §5.2) has a 120 s deadline, and that deadline
+ * has to bound the wait as well as the retrying. `duty_wait_ms` is whatever
+ * p2p_duty_wait_ms returned, which is "time until the oldest ledger entry
+ * leaves the sliding hour" -- up to P2P_DUTY_WINDOW_MS, a full hour, once the
+ * 48-entry ring is full. 48 JoinRequests at 494 ms fill that ring well inside
+ * 120 s, so the unclamped wait routinely landed hours past the deadline: the
+ * window check at the top of join_work_handler ran, but not until long after
+ * the window had closed. Measured on the bench 2026-09-10 (§9): still `state: JOINING` 7 m
  * 38 s into a 120 s window, with a reconstructed duty wait of ~1296 s, and the
  * give-up line never reached. Capping at the remaining window makes the next
  * wake-up the one that gives up -- the caller's jitter lands it just past the
