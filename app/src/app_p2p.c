@@ -113,16 +113,24 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * body" reason). See doc/p2p.md §4/§5.3. */
 #define P2P_JOIN_TAG_LABEL       "HIO-P2P-JOIN" /* 12 B -- JoinRequest tag */
 #define P2P_JOINACCEPT_TAG_LABEL "HIO-P2P-ACC"  /* 11 B -- JoinAccept tag */
-#define P2P_JOIN_TAG_LEN         16             /* full CMAC output; NOT P2P_TAG_LEN */
+/* P2P_JOIN_TAG_LEN (the full CMAC output; NOT P2P_TAG_LEN), and the join body
+ * and frame lengths, live in app_p2p.h -- tests/p2p_logic shares them. */
 
 /* session_key = AES128-CMAC(app_key, "HIO-P2P-SES" || 0x01 || dev_nonce(4 BE)
- * || central_nonce(4 BE) || serial_number(4 BE) || zero-pad to 32 B),
+ * || central_nonce(4 BE) || dev_eui(8 B, MSB-first) || zero-pad to 32 B),
  * doc/p2p.md §4 -- keys the data plane (telemetry/alarm/response/ack) once
  * PAIRED, derived directly from app_key (see above), never from a bare
- * config secret. Label(11 B) + 0x01(1 B) + 3*4 B nonces/serial = 24 B,
+ * config secret. Label(11 B) + 0x01(1 B) + 2*4 B nonces + 8 B dev_eui = 28 B,
  * zero-padded to 32 B (two full CMAC blocks) -- app_ccm_cmac() already
  * handles multi-block messages (its RFC4493 Mlen-40/64 KAT vectors in
- * tests/ccm), so no new primitive is needed, just the wider buffer. */
+ * tests/ccm), so no new primitive is needed, just the wider buffer.
+ *
+ * The last field was serial_number(4 BE) until #417 / GitLab #73 made the
+ * DevEUI the node's identity on the air. Both ends must agree byte for byte:
+ * if they do not, the join still succeeds and every data frame after it fails
+ * to decrypt with nothing in the log to explain it (the #118 failure class).
+ * Pinned against the central and the JS decoder by the shared fixture
+ * tests/ccm/p2p_join_kat.json. */
 #define P2P_SESSION_KEY_LABEL "HIO-P2P-SES"
 
 /*
@@ -184,18 +192,27 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_JOIN_STATE_LEN  (4 + 2 + P2P_KEY_LEN + 1 + 1)
 
 /* JoinRequest body (§5.3): product_type(1) | proto_version(1) |
- * serial_number(4 BE) | fw_version(4). product_type has no existing
- * registry in this codebase yet (single-product today) -- 1 = STICKER, a
- * placeholder pending the central's actual product-type schema (#118
- * follow-up; doc/p2p.md §5.3 cites claiming_process.md §11's identity
- * envelope for the intended generalization). */
+ * dev_eui(8, MSB-first) | fw_version(4) -- 14 B, so 41 B on the air.
+ *
+ * The identity field was serial_number(4 BE) until #417 / GitLab #73: the
+ * serial is off the air entirely now, and stays only as the number printed on
+ * the device. The DevEUI is written MSB-first, exactly as `config lrw-deveui`
+ * prints it and as the hex string reads -- deliberately NOT LoRaWAN's LSB-first
+ * on-air order, which LoRaMac applies internally for OTAA joins. Reusing that
+ * serialization here would be the #118 failure class in its purest form
+ * (decision D1).
+ *
+ * product_type has no existing registry in this codebase yet (single-product
+ * today) -- 1 = STICKER, a placeholder pending the central's actual
+ * product-type schema (#118 follow-up; doc/p2p.md §5.3 cites
+ * claiming_process.md §11's identity envelope for the intended
+ * generalization). */
 #define P2P_PRODUCT_TYPE_STICKER 1
-#define P2P_JOIN_REQ_BODY_LEN    10
 
-/* JoinAccept body (§5.3): net_id(4 BE) | dev_addr(2 BE) | central_nonce(4 BE)
- * | rx1_delay_s(1) | reserved(4) -- reserved is the v2 data-channel
- * assignment hook (§11), unused/ignored today. */
-#define P2P_JOIN_ACCEPT_BODY_LEN 15
+/* JoinAccept body (§5.3, in app_p2p.h): net_id(4 BE) | dev_addr(2 BE) |
+ * central_nonce(4 BE) | rx1_delay_s(1) | reserved(4) -- reserved is the v2
+ * data-channel assignment hook (§11), unused/ignored today. Unchanged by
+ * #417: the JoinAccept carries no identity field at all. */
 
 /* P2P_JOIN_BOOT_WINDOW_MS (§5.2, the unpaired retry deadline) and
  * P2P_JOIN_RETRY_JITTER_MS (§5.3, so devices booting together don't collide on
@@ -506,6 +523,26 @@ static bool app_key_is_set(void)
 	return false;
 }
 
+/* The same rule for lrw_deveui, which #417 / GitLab #73 made load-bearing:
+ * the DevEUI is now the central's lookup key on the air AND an input to the
+ * session-key KDF, so an all-zero one is not a cosmetic gap.
+ *
+ * All-zero is a legitimate state today -- it is what an unprovisioned device
+ * has, and app_lrw.c treats it as a reason to stay radio-silent rather than an
+ * error. Without this guard a P2P node would happily transmit JoinRequests
+ * carrying eight zero bytes, which no central can have registered, and the
+ * only symptom would be a node that joins forever. Refuse for the same reason
+ * and in the same shape as app_key_is_set() above. */
+static bool dev_eui_is_set(void)
+{
+	for (size_t i = 0; i < sizeof(g_app_config.lrw_deveui); i++) {
+		if (g_app_config.lrw_deveui[i] != 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* Constant-time 16 B tag compare (mirrors app_ccm_auth_decrypt()'s own
  * accumulate-the-XOR pattern in app_ccm.c) -- used to verify the plain
  * AES-CMAC tags on JoinRequest/JoinAccept below. A short-circuiting memcmp()
@@ -522,7 +559,7 @@ static bool p2p_tag_eq(const uint8_t a[P2P_JOIN_TAG_LEN], const uint8_t b[P2P_JO
 }
 
 /* See P2P_SESSION_KEY_LABEL above for the formula and rationale. Label (11 B)
- * + 0x01 (1 B) + dev_nonce/central_nonce/serial_number (4 B each) = 24 B,
+ * + 0x01 (1 B) + dev_nonce/central_nonce (4 B each) + dev_eui (8 B) = 28 B,
  * zero-padded to 32 B (two full CMAC blocks) -- app_ccm_cmac() already
  * handles multi-block messages (see its RFC4493 Mlen-40/64 KAT vectors in
  * tests/ccm), so this needs no new primitive, just the wider buffer.
@@ -539,8 +576,11 @@ static void derive_session_key(uint32_t dev_nonce, uint32_t central_nonce, uint8
 	block[label_len] = 0x01;
 	sys_put_be32(dev_nonce, &block[label_len + 1]);
 	sys_put_be32(central_nonce, &block[label_len + 5]);
-	sys_put_be32(g_app_config.serial_number, &block[label_len + 9]);
-	/* block[label_len+13 .. 31] = zero padding, already zero-initialized. */
+	/* MSB-first, straight out of the config array: lrw_deveui is already
+	 * stored in the order the hex string reads (LoRaMac does the LoRaWAN
+	 * LSB reversal internally in lorawan_join), so no byte swap here. */
+	memcpy(&block[label_len + 9], g_app_config.lrw_deveui, sizeof(g_app_config.lrw_deveui));
+	/* block[label_len+17 .. 31] = zero padding, already zero-initialized. */
 
 	(void)app_ccm_cmac(g_app_config.lrw_appkey, block, sizeof(block), out);
 }
@@ -1432,6 +1472,12 @@ static void note_uplink_cycle_failed(void)
 		LOG_ERR("P2P self-heal refused: lrw_appkey is all-zero (unprovisioned)");
 		return;
 	}
+	if (!dev_eui_is_set()) {
+		/* Same for the DevEUI (#417): a JoinRequest carrying eight zero
+		 * bytes is one no central can have registered. */
+		LOG_ERR("P2P self-heal refused: lrw_deveui is all-zero (unprovisioned)");
+		return;
+	}
 	LOG_WRN("P2P: %u consecutive failed uplinks -- self-healing re-join (§7)",
 		m_consec_uplink_fail);
 	start_join_episode(true);
@@ -2255,30 +2301,13 @@ static void mark_ready(void)
 	}
 }
 
-/* Send one JoinRequest (doc/p2p.md §5.3): header net_id=0/dev_addr=0,
- * counter=dev_nonce; CLEARTEXT body product_type|proto_version|serial_be32|
- * fw_version (nothing secret in it -- it is the central's lookup key)
- * followed by a full 16 B plain AES-CMAC tag = CMAC(app_key,
- * P2P_JOIN_TAG_LABEL || header || body) -- see the P2P_JOIN_TAG_LABEL
- * comment above; deliberately NOT AES-CCM, there is no ciphertext and no
- * nonce involved at all (#118 phase 2 revision, proximos-v2 MR!7 §7).
- * Persists the advanced dev_nonce BEFORE sending: once a JoinRequest *could*
- * have reached the central, that nonce value must never be reused, even if
- * the TX or the round-trip afterward fails. Returns 0 (with
- * `*used_nonce`/`*tx_end_ms` set) or -EAGAIN (duty-cycle blocked) or an
- * errno. */
-static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
+/* Build one JoinRequest into `frame` (P2P_JOIN_REQ_LEN bytes): the header, the
+ * cleartext body and the full CMAC tag over both. Factored out of
+ * send_join_request() so a ztest can pin the exact bytes against the shared
+ * KAT fixture without a radio (#417) -- the on-air frame and the tested frame
+ * are then the same code, not two spellings of it. */
+static void join_request_build(uint32_t nonce_val, uint8_t frame[P2P_JOIN_REQ_LEN])
 {
-	if (duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN) > 0) {
-		return -EAGAIN;
-	}
-
-	uint32_t nonce_val = m_dev_nonce;
-
-	dnonce_persist(nonce_val + 1);
-
-	uint8_t frame[P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN]; /* 37 B */
-
 	sys_put_be32(P2P_PREJOIN_NET_ID, &frame[0]);
 	sys_put_be16(P2P_PREJOIN_DEV_ADDR, &frame[4]);
 	frame[6] = APP_P2P_FRAME_JOIN_REQUEST;
@@ -2288,11 +2317,13 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 
 	body[0] = P2P_PRODUCT_TYPE_STICKER;
 	body[1] = APP_PROTO_VERSION;
-	sys_put_be32(g_app_config.serial_number, &body[2]);
-	body[6] = APP_VERSION_MAJOR;
-	body[7] = APP_VERSION_MINOR;
-	body[8] = APP_VERSION_PATCH;
-	body[9] = 0; /* reserved */
+	/* MSB-first -- see P2P_JOIN_REQ_BODY_LEN in app_p2p.h for why this is a
+	 * plain memcpy and not LoRaMac's OTAA byte order. */
+	memcpy(&body[2], g_app_config.lrw_deveui, sizeof(g_app_config.lrw_deveui));
+	body[10] = APP_VERSION_MAJOR;
+	body[11] = APP_VERSION_MINOR;
+	body[12] = APP_VERSION_PATCH;
+	body[13] = 0; /* reserved */
 
 	/* tag = CMAC(app_key, label || header || body); header+body are already
 	 * contiguous in frame[0 .. P2P_HDR_LEN+P2P_JOIN_REQ_BODY_LEN). */
@@ -2305,6 +2336,50 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 
 	(void)app_ccm_cmac(g_app_config.lrw_appkey, tag_in, sizeof(tag_in), tag);
 	memcpy(&frame[P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN], tag, P2P_JOIN_TAG_LEN);
+}
+
+#if defined(CONFIG_ZTEST)
+/* Test hooks for the join identity (#417 / GitLab #73). They build the frame
+ * and derive the key through exactly the code the radio path uses, so the KAT
+ * vectors in tests/p2p_logic pin the shipped bytes rather than a re-spelling
+ * of them. Neither transmits. */
+void p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN])
+{
+	join_request_build(dev_nonce, out);
+}
+
+void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
+				 uint8_t out[P2P_KEY_LEN])
+{
+	derive_session_key(dev_nonce, central_nonce, out);
+}
+#endif /* defined(CONFIG_ZTEST) */
+
+/* Send one JoinRequest (doc/p2p.md §5.3): header net_id=0/dev_addr=0,
+ * counter=dev_nonce; CLEARTEXT body product_type|proto_version|dev_eui(8)|
+ * fw_version (nothing secret in it -- it is the central's lookup key)
+ * followed by a full 16 B plain AES-CMAC tag = CMAC(app_key,
+ * P2P_JOIN_TAG_LABEL || header || body) -- see the P2P_JOIN_TAG_LABEL
+ * comment above; deliberately NOT AES-CCM, there is no ciphertext and no
+ * nonce involved at all (#118 phase 2 revision, proximos-v2 MR!7 §7).
+ * Persists the advanced dev_nonce BEFORE sending: once a JoinRequest *could*
+ * have reached the central, that nonce value must never be reused, even if
+ * the TX or the round-trip afterward fails. Returns 0 (with
+ * `*used_nonce`/`*tx_end_ms` set) or -EAGAIN (duty-cycle blocked) or an
+ * errno. */
+static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
+{
+	if (duty_wait_ms_for(P2P_JOIN_REQ_LEN) > 0) {
+		return -EAGAIN;
+	}
+
+	uint32_t nonce_val = m_dev_nonce;
+
+	dnonce_persist(nonce_val + 1);
+
+	uint8_t frame[P2P_JOIN_REQ_LEN]; /* 41 B */
+
+	join_request_build(nonce_val, frame);
 
 	int ret = lora_send(m_lora_dev, frame, sizeof(frame));
 	if (ret) {
@@ -2334,7 +2409,7 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	uint8_t buf[P2P_FRAME_MAX];
 	int16_t rssi;
 	int8_t snr;
-	size_t want = P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN + P2P_JOIN_TAG_LEN; /* 42 B */
+	size_t want = P2P_JOIN_ACCEPT_LEN; /* 42 B, unchanged by #417 */
 
 	int len = p2p_rx_window(tx_end_ms, P2P_RX1_DELAY_DEFAULT_S, (uint8_t)want, buf, sizeof(buf),
 				&rssi, &snr);
@@ -2938,6 +3013,12 @@ void app_p2p_start(void)
 		return;
 	}
 
+	if (!dev_eui_is_set()) {
+		LOG_ERR("P2P not started: lrw_deveui is all-zero (device unprovisioned). "
+			"Set lrw-deveui over NFC or shell, then reboot.");
+		return;
+	}
+
 	if (m_link_state == P2P_LINK_PAIRED) {
 		/* Persisted pairing from a prior boot: no re-join needed (§7 --
 		 * a session survives normal power cycles). */
@@ -3046,6 +3127,10 @@ void app_p2p_rejoin(void)
 	 * anyone; see app_key_is_set()). */
 	if (!app_key_is_set()) {
 		LOG_ERR("P2P rejoin refused: lrw_appkey is all-zero (device unprovisioned)");
+		return;
+	}
+	if (!dev_eui_is_set()) {
+		LOG_ERR("P2P rejoin refused: lrw_deveui is all-zero (device unprovisioned)");
 		return;
 	}
 

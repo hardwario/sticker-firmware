@@ -27,6 +27,22 @@ extern "C" {
 #define P2P_MAX_BODY  (P2P_LORA_MTU - P2P_HDR_LEN - P2P_TAG_LEN) /* 240 */
 #define P2P_FRAME_MAX (P2P_HDR_LEN + P2P_MAX_BODY + P2P_TAG_LEN)
 
+/* Join frame geometry (§5.3), shared with tests/p2p_logic so the time-on-air
+ * and duty-budget rows there stop hard-coding 37/42.
+ *
+ * The join frames carry a FULL 16 B plain AES-CMAC tag, not the data plane's
+ * truncated 4 B CCM tag -- they have no ciphertext and no nonce at all (see
+ * P2P_JOIN_TAG_LABEL in app_p2p.c).
+ *
+ * JoinRequest body: product_type(1) | proto_version(1) | dev_eui(8, MSB-first)
+ * | fw_version(4). It was 10 B with a serial_number(4 BE) until #417 / GitLab
+ * #73 took the serial off the air. JoinAccept is unchanged. */
+#define P2P_JOIN_TAG_LEN         16
+#define P2P_JOIN_REQ_BODY_LEN    14
+#define P2P_JOIN_ACCEPT_BODY_LEN 15
+#define P2P_JOIN_REQ_LEN         (P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN)
+#define P2P_JOIN_ACCEPT_LEN      (P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN + P2P_JOIN_TAG_LEN)
+
 /* Join retry tuning (§5.2 / §5.3), shared with tests/p2p_logic.
  *
  * The window is a deadline, not a hint: the retry wait is capped against it
@@ -383,6 +399,9 @@ void p2p_test_set_join_started_at(int64_t at_ms);
 struct p2p_duty *p2p_test_get_duty(void);
 void p2p_test_set_replay_active(bool active);
 void p2p_test_get_replay(bool *active, uint32_t *seq, size_t *cursor, uint32_t *idx);
+void p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN]);
+void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
+				 uint8_t out[P2P_KEY_LEN]);
 void p2p_test_set_fcnt(uint32_t next, uint32_t reserved);
 uint32_t p2p_test_get_fcnt(void);
 int p2p_test_fcnt_next(uint32_t *counter_out);
