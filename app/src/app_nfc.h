@@ -18,10 +18,9 @@ extern "C" {
 
 int app_nfc_init(void);
 
-/* Full check: always reads the tag. Use at boot and for on-demand checks. A
- * staged command (hio.stck:cmd) is run through app_cmd_handle(); its deferred
- * action is taken separately via app_nfc_take_cmd_action() — offline/boot-staged
- * provisioning is unified on the encrypted Command/SetParam path (#250). */
+/* Reconcile the resting NDEF record now (boot and `nfc check`): lays it down on
+ * an empty tag, refreshes a stale one, restores it over foreign data. Needs the
+ * RF field off (EEPROM); a phone holding the field makes it a no-op this pass. */
 int app_nfc_check(void);
 
 /* Reads the tag and processes any pending command, restoring the info record
@@ -43,21 +42,6 @@ enum app_cmd_action app_nfc_take_cmd_action(void);
  * `nfc autocheck on|off` shell command so a multi-step `nfc write` of a config
  * blob is not raced (and overwritten) by the periodic check mid-write. */
 bool app_nfc_periodic_enabled(void);
-
-/* #164: a command/response exchange leaves the response record on the tag (the
- * immediate info-restore was dropped in #144 to avoid racing the phone read).
- * `app_nfc_info_restore_pending()` is true while that stale response is still on
- * the tag; the poll thread shortens its wait and, once the RF field has been
- * quiet for the debounce window (no GPO events), calls `app_nfc_restore_info()`
- * to rewrite the plaintext info record so a later tap finds valid metadata. */
-bool app_nfc_info_restore_pending(void);
-
-/* True while a command response is staged but not yet fully written to the tag
- * (the RF field interrupted the write). The poll thread shortens its wait and
- * re-runs app_nfc_poll() to rewrite the cached reply, rather than restoring the
- * info record. */
-bool app_nfc_resp_write_pending(void);
-int app_nfc_restore_info(void);
 
 /* True once app_nfc_init() has succeeded (ST25DV tag usable). False means the
  * tag is unavailable and the device runs degraded (#88). */
