@@ -48,19 +48,14 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
  * and the initial info-record write is done once at boot before the wait loop.
  * (Was a 30 s periodic fallback, which on the release build meant a Stop2 wake
  * every 30 s for nothing.) */
-#define NFC_EVENT_FALLBACK_MS        (-1)
-/* #164: once a response record is left on the tag, poll this often so the info
- * record is restored ~10 s after the phone leaves (no GPO events in this window
- * = field lost). The debounce avoids the #144 race with the phone still reading
- * the reply. */
-#define NFC_INFO_RESTORE_DEBOUNCE_MS 10000
-#define NFC_POLL_START_DELAY_MS      3000
+#define NFC_EVENT_FALLBACK_MS      (-1)
+#define NFC_POLL_START_DELAY_MS    3000
 /* Sized for the deepest NFC command run on this thread: a GetConfig/GetParam
  * over NFC packs DUMP_FIELDS tags into a flat ids[] (#176), builds a Response
  * (union sized to ConfigDump), and runs PSA AES-CCM decrypt/encrypt + nanopb —
  * far more than a short GetInfo. 3072 B overflowed on the longer commands. */
-#define NFC_POLL_THREAD_STACK_SIZE   6144
-#define NFC_POLL_THREAD_PRIO         K_LOWEST_APPLICATION_THREAD_PRIO
+#define NFC_POLL_THREAD_STACK_SIZE 6144
+#define NFC_POLL_THREAD_PRIO       K_LOWEST_APPLICATION_THREAD_PRIO
 
 #define APP_ALARM_ORANGE_RATE_LIMIT_MS 500
 #define APP_ALARM_ORANGE_AUTO_OFF_MS   (60 * 60 * 1000)
@@ -258,48 +253,26 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 	}
 
 	for (;;) {
-		/* Sleep until the GPO interrupt fires (phone touched the tag) or the
-		 * fallback elapses. While a response is mid-write or a stale response
-		 * record is on the tag (#164), use a short ~10 s fallback so we retry the
-		 * deferred write / restore the info record soon; otherwise wait forever
-		 * (event-driven — only the GPO wakes us). */
-		bool nfc_busy = app_nfc_info_restore_pending() || app_nfc_resp_write_pending();
-		int fallback = nfc_busy ? NFC_INFO_RESTORE_DEBOUNCE_MS : NFC_EVENT_FALLBACK_MS;
-		int wret = app_nfc_wait_event(fallback);
+		/* Sleep until the GPO interrupt fires (phone's field appeared / a mailbox
+		 * message landed). Event-driven: with no phone around the thread waits
+		 * forever and the device stays in Stop2. */
+		(void)app_nfc_wait_event(NFC_EVENT_FALLBACK_MS);
 
 		if (!app_nfc_periodic_enabled()) {
 			continue;
 		}
 
-		/* A response write was deferred (RF field was up): fall through to
-		 * app_nfc_poll(), which rewrites the cached reply in this field-off window
-		 * — do NOT restore the info record (it would clobber the pending reply). */
-		if (wret == -EAGAIN && !app_nfc_resp_write_pending() &&
-		    app_nfc_info_restore_pending()) {
-			/* #164: the fallback elapsed with a response record still on the tag
-			 * and no GPO event in the debounce window → the RF field has been
-			 * quiet (phone gone), so it is safe to restore the info record without
-			 * racing the phone reading the reply (the #144 hazard). */
-			int ret = app_nfc_restore_info();
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_nfc_restore_info", ret);
-			}
-			/* The backstop restore releases any deferred action (the phone left
-			 * without acking) — run it now instead of waiting for the next wake. */
-			nfc_run_deferred_cmd_actions();
-			continue;
-		}
-
+		/* Serve the mailbox while the phone holds its field, then reconcile the
+		 * resting NDEF record once the field is gone (#313). */
 		int ret = app_nfc_poll();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_nfc_poll", ret);
 		}
 
-		/* Deferred action from an NFC command (reboot/save/factory-reset/...) —
-		 * the unified provisioning path (#250). Gated: only runs once the phone has
-		 * read the response (see nfc_run_deferred_cmd_actions / app_nfc_take_cmd_action).
-		 * play_carousel_nfc() is driven from inside the SETTINGS_SAVE/RESET cases if
-		 * needed; here we just release the staged action. */
+		/* Deferred action from a mailbox command (reboot/save/factory-reset/...):
+		 * the session has already delivered the reply and closed, so it is safe to
+		 * run now. play_carousel_nfc() is driven from inside the SETTINGS_SAVE/RESET
+		 * cases if needed; here we just release the staged action. */
 		nfc_run_deferred_cmd_actions();
 	}
 }
@@ -467,22 +440,14 @@ int main(void)
 	if (ret) {
 		LOG_WRN("app_nfc_init failed: %d (NFC unavailable, continuing)", ret);
 	} else {
-		/* A stale/replay command left on the tag makes app_nfc_check() fail
-		 * (anti-replay) on every boot. Do NOT die() here — that would brick the
-		 * device into a reboot loop. Log and continue, like the periodic check
-		 * in the main loop does. */
+		/* Lay down / reconcile the resting NDEF record. Not fatal: an unreadable
+		 * or foreign tag content must never brick the device into a reboot loop
+		 * (#88); the poll thread keeps reconciling later. Commands are no longer
+		 * staged on the tag (the NDEF command channel went with #313), so nothing
+		 * is applied here. */
 		ret = app_nfc_check();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
-		}
-
-		/* Open deferred-action gate: restore the info record after apply check.
-		 * The phone that staged the command is gone (device was powered off). */
-		if (app_nfc_info_restore_pending()) {
-			ret = app_nfc_restore_info();
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_nfc_restore_info", ret);
-			}
 		}
 	}
 
@@ -554,12 +519,6 @@ int main(void)
 	if (ret) {
 		LOG_WRN("app_counters_init failed: %d (counter persistence unavailable)", ret);
 	}
-
-	/* Run deferred NFC command actions. Must occur after counters_init and
-	 * sensor_init so selective resets (COUNTERS_SAVE) don't persist zero
-	 * counters. Rebooting actions still fire before app_lrw_join(), keeping
-	 * staged LoRaWAN keys in place (#147, #250). */
-	nfc_run_deferred_cmd_actions();
 
 #if defined(CONFIG_WATCHDOG)
 	app_wdog_feed();

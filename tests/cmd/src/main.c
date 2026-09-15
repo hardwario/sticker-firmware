@@ -17,6 +17,7 @@
 #include <zephyr/ztest.h>
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -344,6 +345,56 @@ ZTEST(cmd, test_get_param_keys_nfc_only)
 	handle_via(APP_CMD_TRANSPORT_LRW, cmd, &r);
 	zassert_equal(r.which_body, Response_config_dump_tag, "LRW which=%d", r.which_body);
 	zassert_false(r.body.config_dump.lorawan.has_nwkkey, "LRW: nwkkey leaked over LoRaWAN!");
+}
+
+/* #313: over NFC the reply travels in the 256 B ST25DV mailbox frame — 1 B
+ * channel prefix + 8 B header + 16 B CCM tag leave 231 B of plaintext (version
+ * byte + Response). Every get_config page must fit that when the caller passes
+ * the mailbox capacity, and the pages must cover the whole snapshot. */
+ZTEST(cmd, test_get_config_pages_fit_mailbox_frame)
+{
+	const size_t mailbox_plain_cap = 256 - 1 - 8 - 16;
+	uint8_t in[16], out[mailbox_plain_cap];
+	Response r;
+	uint32_t page_count = 0;
+
+	reset_cfg();
+	g_app_config.interval_report = 900;
+	g_app_config.interval_sample = 60;
+	memset(g_app_config.lrw_nwkkey, 0xA5, sizeof(g_app_config.lrw_nwkkey));
+
+	for (uint32_t page = 0; page < 32; page++) {
+		/* seq1 get_config{ page } */
+		char hex[16];
+		snprintf(hex, sizeof(hex), "08012a0208%02x", (unsigned)page);
+		size_t in_len = unhex(hex, in, sizeof(in));
+		size_t out_len = 0;
+		enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+		int ret = app_cmd_handle(APP_CMD_TRANSPORT_NFC, in, in_len, out, sizeof(out),
+					 &out_len, &action);
+		zassert_equal(ret, 0, "page %u: ret %d", page, ret);
+		zassert_true(out_len >= 1 && out_len <= mailbox_plain_cap, "page %u: %zu B", page,
+			     out_len);
+
+		r = (Response)Response_init_zero;
+		pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+		zassert_true(pb_decode(&is, Response_fields, &r), "page %u: decode", page);
+		zassert_equal(r.which_body, Response_config_dump_tag, "page %u: which=%d", page,
+			      r.which_body);
+		zassert_equal(r.body.config_dump.page_index, page, "page index");
+		if (page == 0) {
+			page_count = r.body.config_dump.page_count;
+			zassert_true(page_count >= 1, "page_count");
+		} else {
+			zassert_equal(r.body.config_dump.page_count, page_count,
+				      "page_count drift");
+		}
+		if (page + 1 >= page_count) {
+			break;
+		}
+	}
+	zassert_true(page_count >= 2, "the full snapshot should need more than one 231 B page");
 }
 
 ZTEST(cmd, test_build_info)

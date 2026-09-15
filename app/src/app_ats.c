@@ -1321,6 +1321,7 @@ static void print_device_status(const struct shell *sh, uint32_t status)
 		{APP_DEVICE_STATUS_I2C_WEDGED, "i2c-wedged"},
 		{APP_DEVICE_STATUS_TIME_UNSYNCED, "time-unsynced"},
 		{APP_DEVICE_STATUS_LRW_DISABLED, "lrw-disabled"},
+		{APP_DEVICE_STATUS_MAILBOX_DOWN, "mailbox-down"},
 	};
 
 	char buf[128];
@@ -1374,6 +1375,11 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 
 	print_reset_cause(sh, info.reset_cause);
 	print_device_status(sh, info.device_status);
+	/* #313 D7: FTM mailbox authorisation is a per-unit hardware property — a
+	 * unit that cannot enable it has no interactive NFC channel and must not
+	 * leave the production tester. */
+	shell_print(sh, "NFC mailbox:   %s",
+		    app_nfc_mailbox_available() ? "available" : "UNAVAILABLE (MB_MODE cfg failed)");
 
 	if (info.has_unix_time) {
 		time_t t = (time_t)info.unix_time;

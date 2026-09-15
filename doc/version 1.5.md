@@ -11,6 +11,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Buzzer | **New** — alarm-driven melodies (#397, Phase 2 of #338): the buzzer HW variant now sounds automatically while any alarm is active, gated on a new global `alarm-buzzer-mode` config key |
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
+| NFC | **Changed (breaking)** — interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The NDEF command/response/ack records are removed; the identity record stays (now a short external type, no tap-to-launch). Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). |
 
 ---
 
@@ -129,6 +130,111 @@ unchanged from the previous hard-blink carousel, so the overall boot animation
 length is identical — only the red/green transitions are now smooth. HW-
 confirmed on the bench (J-Link EDU Mini 801053709, SN 2162165627): red and
 green fade smoothly, yellow blinks as before.
+
+---
+
+## 4. NFC command channel: ST25DV Fast-Transfer-Mode mailbox (#313)
+
+**Why.** In v1.4.0 the phone drove interactive commands by writing an NDEF
+`hio.stck:cmd` record into the ST25DV's user EEPROM and reading an `hio.stck:rsp`
+record back (v1.4.0 §10). That EEPROM is **single-port**: the firmware can only
+read the command and write the reply while the RF field is **off**, so the phone
+has to drop its field between the write and the read. Android reader mode can do
+that silently; **iOS Core NFC cannot**, so the iOS flow needed the operator to
+tap, lift for ~2 s, and tap again — two taps per command, two per config page,
+and frequently a stall. This is a platform + hardware limit, not app code.
+
+**What changed.** Interactive commands now travel through the ST25DV **Fast-
+Transfer-Mode (FTM) mailbox** — a 256-byte **dual-port** RAM that the RF reader
+and the I2C host exchange messages through **with the field on**, coordinated by
+a hardware handshake (`RF_PUT_MSG` / `HOST_PUT_MSG`). No field-off window is ever
+needed, so the whole exchange completes in **one tap with the phone held still**,
+on iOS exactly as on Android. HW-measured on the bench: ~0.1–0.3 s per exchange,
+a full multi-page `GetConfig` and a `SetParam`-with-save in a single hold.
+
+### Protocol (phone side)
+
+The mailbox is reached with standard ISO 15693 custom commands (manufacturer
+code `0x02`), the same on Android (`NfcV.transceive`) and iOS
+(`Iso15693.customCommand`, non-addressed):
+
+1. Read the resting **`hio.stck:inf`** record for the serial and the anti-replay
+   nonce high-water (unchanged contract, see below).
+2. `0xAD` read `EH_CTRL_Dyn`: `VCC_ON` must be set (the device is powered — the
+   mailbox needs the MCU running; a battery-less unit has no mailbox).
+3. `0xAE` write `MB_CTRL_Dyn = MB_EN`, then `0xAD` read it back. If `MB_EN`
+   does not stick within ~1 s the unit is a legacy v1.4.x firmware (no mailbox)
+   — fall back to the NDEF flow (Android only).
+4. `0xAA` Write Message a **`[channel][payload]`** frame, poll `0xAD` for
+   `HOST_PUT_MSG`, then `0xAB`/`0xAC` Read the reply (in ≤200 B chunks for iOS).
+5. Repeat for further commands; `0xAE` write `MB_EN = 0` (or just leave) when done.
+
+The frame is `[channel 1 B][payload]`:
+
+| Channel | Payload | Key |
+|:-:|---|---|
+| `0x01` | encrypted `Command` (request) / `Response` (reply), byte-identical to the old `hio.stck:cmd`/`hio.stck:rsp` content | `secret_key` |
+| `0x02` | same, vendor channel | `vendor_token` |
+| `0x03` | reserved for the plaintext `get_claim_info` command (PR #415) — rejected until it lands | — |
+
+The AES-CCM envelope, the direction-separated nonce, the anti-replay window and
+the response cache are **unchanged** from v1.4.0 §10 — only the transport moved,
+so the phone's codec is the same. A mailbox frame is 256 B, leaving **231 B of
+plaintext** (256 − 1 channel − 8 header − 16 tag); `GetConfig`/`GetParam` and
+history now page to fit that (a full snapshot is a few pages read in one hold),
+and a `GetInfo` with more than ~17 simultaneously-active alarms drops the alarm
+list to fit, as it already does on a tight LoRaWAN frame.
+
+### Identity record (`hio.stck:inf`)
+
+Still present at rest, still plaintext, same `<serial>:<config_ver>:<nonce_hi>`
+ASCII payload readable by any NFC reader. It is now a short **external-type**
+record (`hio.stck:inf`) instead of the v1.4.0 MIME media-type record: Android
+**tap-to-launch** (#298) is dropped — the user opens the app themselves — which
+also removes the intent-filter that was a source of RF-field regressions on the
+phone side. After a mailbox session the record is refreshed once the field drops
+(the nonce high-water advanced).
+
+### What is removed / breaking
+
+- **The NDEF command channel** (`hio.stck:cmd` / `hio.stck:rsp` / `hio.stck:ack`
+  and the vendor `hio.stck:vnd` record). Firmware v1.5.0 no longer answers a
+  command written into the tag EEPROM; the Manager-App must use the mailbox
+  (lockstep release). An old app's `hio.stck:cmd` left on the tag is ignored,
+  never executed.
+- **Battery-less configuration / boot-staged provisioning** (v1.4.0 §10
+  "Provisioning while powered off", #147/#250). The mailbox needs the MCU
+  powered, so a command can no longer be staged into an unpowered unit and
+  applied at the next boot. Claiming likewise moves to a powered device; the
+  claim-window redesign and the plaintext `get_claim_info` are in **PR #415**.
+- **Android tap-to-launch** via the MIME identity record (#298).
+
+### Production tester
+
+Authorising FTM sets the static `MB_MODE` bit once at boot (inside the existing
+I2C-password session that already configures the GPO). A unit whose `MB_MODE`
+cannot be set has **no interactive NFC channel** — a hardware/production defect,
+not something the firmware can work around. It is reported as
+`APP_DEVICE_STATUS_MAILBOX_DOWN` (device_status **bit 13**, `0x2000`) in the
+GetInfo response and as an `NFC mailbox: UNAVAILABLE` line in `ats device info`,
+so the production tester rejects it.
+
+### Bench shell
+
+`nfc mb status` (dump the FTM registers), `nfc mb on|off` (drive `MB_EN` from the
+I2C side), and `nfc mb serve` (enable and serve the mailbox for a reader that
+cannot issue Write Dynamic Configuration itself). `ats cmd nfc` still injects a
+command straight into `app_cmd_handle` for phone-free command-logic testing.
+
+### Test coverage
+
+`tests/nfc_hw` gained a full ST25DV mailbox model (registers, 256 B RAM, the
+RF/host handshake, the datasheet rule that every EEPROM write NACKs while
+`MB_EN=1`, and a password-failure mode) plus session ztests: boot authorisation
++ GPO config, the `MAILBOX_DOWN` flag on a password failure, a stuck `MB_EN`
+cleared on the next boot, an owner-command session that consumes the claim window
+and advances the nonce, a vendor session that does not, and a rejected channel
+prefix. `tests/cmd` checks every `GetConfig` page fits one 256 B mailbox frame.
 
 ---
 
