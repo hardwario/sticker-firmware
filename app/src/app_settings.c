@@ -269,6 +269,23 @@ int app_settings_save_nonce_counter(void)
 				 sizeof(app_config()->nonce_counter));
 }
 
+int app_settings_save_p2p_spreading_factor(int sf)
+{
+	/* Same single-key rationale as nonce_counter above. BOTH live copies are
+	 * updated first, under the config lock: app_config() hands out
+	 * m_app_config -- what the shell prints and what a full save exports --
+	 * while g_app_config is the read-mostly mirror the rest of the firmware
+	 * reads, app_p2p.c's sf_from_cfg() among them. Writing only one of them
+	 * would leave the device joining at an SF its own `config show` denies. */
+	app_config_lock();
+	app_config()->p2p_spreading_factor = sf;
+	g_app_config.p2p_spreading_factor = sf;
+	app_config_unlock();
+
+	return settings_save_one("config/p2p-spreading-factor", &app_config()->p2p_spreading_factor,
+				 sizeof(app_config()->p2p_spreading_factor));
+}
+
 /* Persist only secret_key to NVS as a single settings key — same single-key
  * rationale as nonce_counter above. Internal to vendor_reset below: the
  * set_secret_key command (#299) used to persist through here too, but a narrow
