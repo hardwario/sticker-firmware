@@ -631,7 +631,19 @@ bool app_nfc_periodic_enabled(void)
  * caller skips this cycle. */
 static bool nfc_wait_field_off(void);
 
-static int read_mem(uint16_t reg, void *buf, size_t len)
+/* Chunked I2C read from the user-memory device (E0). `field_gated` selects the
+ * two very different regions that live behind that device select:
+ *  - true:  user EEPROM (0x0000..0x01FF). Single-port — an access concurrent with
+ *           RF collides on the shared i2c1 bus and can wedge it, so every chunk
+ *           waits for the RF field to be off (nfc_wait_field_off) and aborts
+ *           with -EBUSY if it stays on.
+ *  - false: dynamic registers / the FTM mailbox RAM (0x2000..0x2107). Dual-port
+ *           by design: served to I2C while the phone holds its field, which is
+ *           the whole point of the mailbox — never wait for field-off here (the
+ *           old app_nfc_serve_mailbox read the mailbox through the gated path and
+ *           could therefore never see a message under a held field).
+ * Either way each chunk rides out arbitration NACKs with a short retry. */
+static int read_chunks(uint16_t reg, void *buf, size_t len, bool field_gated)
 {
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 
@@ -645,7 +657,7 @@ static int read_mem(uint16_t reg, void *buf, size_t len)
 	while (off < len) {
 		/* Pause before this chunk if the RF field is back; resume once it clears.
 		 * Keeps every EEPROM read off the dual-port bus during RF. */
-		if (!nfc_wait_field_off()) {
+		if (field_gated && !nfc_wait_field_off()) {
 			return -EBUSY;
 		}
 
@@ -674,6 +686,12 @@ static int read_mem(uint16_t reg, void *buf, size_t len)
 	}
 
 	return 0;
+}
+
+/* User EEPROM read (field-gated, see read_chunks). */
+static int read_mem(uint16_t reg, void *buf, size_t len)
+{
+	return read_chunks(reg, buf, len, true);
 }
 
 static inline uint32_t calc_prog_time_ms(uint16_t reg, size_t len)
