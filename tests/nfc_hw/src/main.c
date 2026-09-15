@@ -10,6 +10,7 @@
  */
 
 #include "app_nfc.h"
+#include "app_cmd.h"
 #include "app_config.h"
 
 #include <zephyr/ztest.h>
@@ -106,6 +107,247 @@ ZTEST(nfc_hw, test_clm_arm_reverts_on_write_failure_commits_on_success)
 	zassert_equal(app_nfc_check(), 0, "app_nfc_check should succeed once the write lands");
 	zassert_equal(app_nfc_clm_state_get(), TEST_CLM_PENDING,
 		      "clm should be PENDING once the resting NDEF write is confirmed");
+}
+
+/* ---- FTM mailbox (#313) ---------------------------------------------------- */
+
+#define GPO_RF_PUT_MSG_EN 0x10
+#define GPO_RF_WRITE_EN   0x40
+#define GPO_EN            0x80
+#define MB_CTRL_MB_EN     0x01
+#define MB_CTRL_HOST_PUT  0x02
+
+/* AES-CCM(secret_key = 000102..0f, serial 0, counter 1..2) of Command{get_info}
+ * and AES-CCM(vendor_token = 101112..1f, counter 3) of the same — direction
+ * request, from sticker_nfc_frame.py, same wire contract as tests/nfc_crypto. */
+#define KEY_HEX        "000102030405060708090a0b0c0d0e0f"
+#define VND_KEY_HEX    "101112131415161718191a1b1c1d1e1f"
+#define GETINFO_C1     "00000000000000019798f777cd12b7b425c5893eb72a63479ec93ec8"
+#define GETINFO_C2     "0000000000000002a74df0cb60de2c4225f8dd4459690b9125da17ec"
+#define VND_GETINFO_C3 "0000000000000003548d0343ec24ecb0eaeadfa4b80aa2b4c35a5376"
+
+static size_t unhex_local(const char *hex, uint8_t *out, size_t cap)
+{
+	size_t n = 0;
+
+	for (; hex[0] && hex[1] && n < cap; hex += 2, n++) {
+		char b[3] = {hex[0], hex[1], 0};
+
+		out[n] = (uint8_t)strtoul(b, NULL, 16);
+	}
+	return n;
+}
+
+/* The "phone": drives the RF side of the mailbox from a cooperative thread so it
+ * interleaves with app_nfc_poll()'s (blocking) mb_serve_locked() running in the
+ * test thread. Each entry is one [chan][wire] request; the reply is read back
+ * and its channel byte captured. After the last request it drops the RF field so
+ * the session ends. */
+struct mb_phone {
+	const uint8_t *const *reqs;
+	const size_t *req_lens;
+	size_t n;
+	uint8_t reply_chan[8];
+	size_t reply_len[8];
+	int put_err[8];
+};
+
+static K_THREAD_STACK_DEFINE(phone_stack, 3072);
+static struct k_thread phone_thread;
+
+static void mb_phone_fn(void *a, void *b, void *c)
+{
+	struct mb_phone *ph = a;
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	k_msleep(50); /* let app_nfc_poll() reach its serve loop first */
+	st25dv_emul_rf_set_mb_en(true);
+
+	for (size_t i = 0; i < ph->n; i++) {
+		ph->put_err[i] = st25dv_emul_rf_put_message(ph->reqs[i], ph->req_lens[i]);
+		if (ph->put_err[i]) {
+			continue;
+		}
+		/* Poll for the firmware's reply (bounded). */
+		uint8_t reply[256];
+		size_t rlen = 0;
+
+		for (int spin = 0; spin < 150; spin++) {
+			if (st25dv_emul_rf_read_message(reply, sizeof(reply), &rlen) == 0) {
+				ph->reply_chan[i] = reply[0];
+				ph->reply_len[i] = rlen;
+				break;
+			}
+			k_msleep(5);
+		}
+	}
+
+	/* Give a rejected-frame case a moment to be seen as "no reply", then drop the
+	 * field so mb_serve_locked() exits and app_nfc_poll() reconciles the tag. */
+	k_msleep(50);
+	st25dv_emul_set_field_on(false);
+}
+
+/* Init with the mailbox authorised + a field present, and the crypto identity
+ * the golden frames are sealed against. */
+static void mb_bring_up(const char *key_hex)
+{
+	zassert_equal(app_nfc_init(), 0, "app_nfc_init failed");
+	zassert_true(app_nfc_mailbox_available(), "MB_MODE should be authorised at boot");
+
+	g_app_config.serial_number = 0;
+	g_app_config.nonce_counter = 0;
+	if (key_hex) {
+		unhex_local(key_hex, g_app_config.secret_key, sizeof(g_app_config.secret_key));
+	}
+	unhex_local(VND_KEY_HEX, g_app_config.vendor_token, sizeof(g_app_config.vendor_token));
+	/* Field stays OFF here so a caller can arm the claim window (an EEPROM write,
+	 * which needs a field-off window) before turning the RF field on for the
+	 * mailbox session. */
+}
+
+static struct mb_phone run_phone(const uint8_t *const *reqs, const size_t *lens, size_t n)
+{
+	static struct mb_phone ph;
+
+	ph = (struct mb_phone){.reqs = reqs, .req_lens = lens, .n = n};
+
+	k_thread_create(&phone_thread, phone_stack, K_THREAD_STACK_SIZEOF(phone_stack), mb_phone_fn,
+			&ph, NULL, NULL, K_PRIO_COOP(1), 0, K_NO_WAIT);
+	int ret = app_nfc_poll();
+
+	zassert_true(ret == 0, "app_nfc_poll returned %d", ret);
+	k_thread_join(&phone_thread, K_FOREVER);
+	return ph;
+}
+
+ZTEST(nfc_hw, test_mb_boot_authorises_ftm_and_configures_gpo)
+{
+	zassert_equal(app_nfc_init(), 0, "app_nfc_init failed");
+
+	zassert_true(app_nfc_mailbox_available(), "mailbox should be available");
+	zassert_true(st25dv_emul_mb_mode(), "MB_MODE (static) must be set at boot");
+
+	uint8_t gpo = st25dv_emul_gpo_reg();
+
+	zassert_true(gpo & GPO_RF_PUT_MSG_EN, "GPO RF_PUT_MSG_EN must be set (0x%02x)", gpo);
+	zassert_true(gpo & GPO_EN, "GPO_EN must be set (0x%02x)", gpo);
+	zassert_true(gpo & GPO_RF_WRITE_EN, "GPO RF_WRITE_EN must be set (0x%02x)", gpo);
+	zassert_false(st25dv_emul_mb_ctrl() & MB_CTRL_MB_EN, "MB_EN must be 0 at boot");
+
+	struct app_cmd_info info;
+
+	app_cmd_get_info(&info);
+	zassert_false(info.device_status & APP_DEVICE_STATUS_MAILBOX_DOWN,
+		      "MAILBOX_DOWN must be clear on a healthy unit");
+}
+
+ZTEST(nfc_hw, test_mb_boot_pwd_fail_marks_unavailable)
+{
+	st25dv_emul_set_pwd_fail(true);
+
+	zassert_equal(app_nfc_init(), 0, "app_nfc_init must still succeed (degraded)");
+	zassert_false(app_nfc_mailbox_available(),
+		      "mailbox must be unavailable when MB_MODE fails");
+	zassert_false(st25dv_emul_mb_mode(), "MB_MODE must not be set when the password fails");
+
+	struct app_cmd_info info;
+
+	app_cmd_get_info(&info);
+	zassert_true(info.device_status & APP_DEVICE_STATUS_MAILBOX_DOWN,
+		     "device_status must flag MAILBOX_DOWN (bit 13) for the production tester");
+}
+
+ZTEST(nfc_hw, test_mb_boot_clears_stuck_mb_en)
+{
+	/* Simulate a mailbox left enabled by an aborted session that survived a
+	 * reset. First init authorises MB_MODE; then force MB_EN on (as a stuck
+	 * session would leave it) and check a second init (a reboot) clears it. */
+	zassert_equal(app_nfc_init(), 0, "first init");
+	st25dv_emul_rf_set_mb_en(true);
+	zassert_true(st25dv_emul_mb_ctrl() & MB_CTRL_MB_EN, "precondition: MB_EN set");
+
+	/* A second init (a reboot) must clear the stuck MB_EN before touching EEPROM. */
+	zassert_equal(app_nfc_init(), 0, "second init");
+	zassert_false(st25dv_emul_mb_ctrl() & MB_CTRL_MB_EN,
+		      "boot must clear a stuck MB_EN (0x%02x)", st25dv_emul_mb_ctrl());
+}
+
+ZTEST(nfc_hw, test_mb_session_cmd_consumes_clm_and_advances_nonce)
+{
+	memset(g_app_config.claim_token, 0xAB, sizeof(g_app_config.claim_token));
+	mb_bring_up(KEY_HEX);
+	zassert_equal(app_nfc_check(), 0, "arming poll failed");
+	zassert_equal(app_nfc_clm_state_get(), TEST_CLM_PENDING, "clm should be PENDING");
+	st25dv_emul_set_field_on(true); /* now the phone arrives */
+
+	uint8_t req[64];
+	size_t rl = unhex_local(GETINFO_C1, req, sizeof(req));
+	uint8_t frame[65];
+
+	frame[0] = 0x01; /* chan: owner command */
+	memcpy(&frame[1], req, rl);
+	const uint8_t *reqs[] = {frame};
+	const size_t lens[] = {rl + 1};
+
+	struct mb_phone ph = run_phone(reqs, lens, 1);
+
+	zassert_equal(ph.put_err[0], 0, "RF put failed: %d", ph.put_err[0]);
+	zassert_true(ph.reply_len[0] > 1, "no reply received (%zu B)", ph.reply_len[0]);
+	zassert_equal(ph.reply_chan[0], 0x01, "reply channel byte");
+	zassert_equal(g_app_config.nonce_counter, 1, "nonce must advance to 1");
+	zassert_equal(app_nfc_clm_state_get(), TEST_CLM_CONSUMED,
+		      "a valid owner command over the mailbox must consume the claim window");
+}
+
+ZTEST(nfc_hw, test_mb_session_vendor_does_not_consume_clm)
+{
+	memset(g_app_config.claim_token, 0xAB, sizeof(g_app_config.claim_token));
+	mb_bring_up(KEY_HEX);
+	zassert_equal(app_nfc_check(), 0, "arming poll failed");
+	zassert_equal(app_nfc_clm_state_get(), TEST_CLM_PENDING, "clm should be PENDING");
+	st25dv_emul_set_field_on(true); /* now the phone arrives */
+
+	uint8_t req[64];
+	size_t rl = unhex_local(VND_GETINFO_C3, req, sizeof(req));
+	uint8_t frame[65];
+
+	frame[0] = 0x02; /* chan: vendor command */
+	memcpy(&frame[1], req, rl);
+	g_app_config.nonce_counter = 2; /* accept counter 3 */
+	const uint8_t *reqs[] = {frame};
+	const size_t lens[] = {rl + 1};
+
+	struct mb_phone ph = run_phone(reqs, lens, 1);
+
+	zassert_equal(ph.put_err[0], 0, "RF put failed: %d", ph.put_err[0]);
+	zassert_true(ph.reply_len[0] > 1, "no reply received");
+	zassert_equal(ph.reply_chan[0], 0x02, "reply channel byte");
+	zassert_equal(app_nfc_clm_state_get(), TEST_CLM_PENDING,
+		      "a vendor command must NOT consume the owner's claim window (#316)");
+}
+
+ZTEST(nfc_hw, test_mb_bad_channel_prefix_rejected)
+{
+	mb_bring_up(KEY_HEX);
+	st25dv_emul_set_field_on(true);
+
+	uint8_t req[64];
+	size_t rl = unhex_local(GETINFO_C1, req, sizeof(req));
+	uint8_t frame[65];
+
+	frame[0] = 0x03; /* chan: plain_text (PR #415) — stubbed, must be rejected */
+	memcpy(&frame[1], req, rl);
+	const uint8_t *reqs[] = {frame};
+	const size_t lens[] = {rl + 1};
+
+	struct mb_phone ph = run_phone(reqs, lens, 1);
+
+	zassert_equal(ph.put_err[0], 0, "RF put failed");
+	zassert_equal(ph.reply_len[0], 0, "channel 0x03 must get no reply (%zu B)",
+		      ph.reply_len[0]);
+	zassert_equal(g_app_config.nonce_counter, 0, "a rejected frame must not advance the nonce");
 }
 
 ZTEST_SUITE(nfc_hw, NULL, NULL, nfc_hw_before, NULL, NULL);

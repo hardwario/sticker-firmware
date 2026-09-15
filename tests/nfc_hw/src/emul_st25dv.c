@@ -42,7 +42,19 @@
 
 /* Static registers (E1, reg < 0x2000). */
 #define ST25DV_GPO_REG     0x0000
+#define ST25DV_MB_MODE_REG 0x000D
 #define ST25DV_I2C_PWD_REG 0x0900
+#define ST25DV_MB_MODE_EN  0x01
+
+/* FTM mailbox (E0, dynamic). */
+#define ST25DV_MB_CTRL_DYN      0x2006
+#define ST25DV_MB_LEN_DYN       0x2007
+#define ST25DV_MB_RAM           0x2008
+#define ST25DV_MB_RAM_END       0x2108 /* one past the last mailbox byte */
+#define ST25DV_MB_RAM_SIZE      256
+#define ST25DV_MB_CTRL_MB_EN    0x01
+#define ST25DV_MB_CTRL_HOST_PUT 0x02
+#define ST25DV_MB_CTRL_RF_PUT   0x04
 
 struct st25dv_model {
 	uint8_t mem[ST25DV_EMUL_MEM_SIZE];
@@ -50,6 +62,11 @@ struct st25dv_model {
 	uint8_t eh_ctrl_dyn;
 	uint8_t it_sts_dyn;
 	uint8_t gpo_reg;
+	uint8_t mb_mode;
+	uint8_t mb_ctrl;
+	uint8_t mb_len; /* message length - 1 */
+	uint8_t mb_ram[ST25DV_MB_RAM_SIZE];
+	bool pwd_fail;
 	int write_fail_remaining;
 };
 
@@ -86,6 +103,74 @@ void st25dv_emul_inject_write_fail(int count)
 	m_model.write_fail_remaining = count;
 }
 
+bool st25dv_emul_mb_mode(void)
+{
+	return m_model.mb_mode & ST25DV_MB_MODE_EN;
+}
+
+uint8_t st25dv_emul_mb_ctrl(void)
+{
+	return m_model.mb_ctrl;
+}
+
+uint8_t st25dv_emul_gpo_reg(void)
+{
+	return m_model.gpo_reg;
+}
+
+void st25dv_emul_set_pwd_fail(bool fail)
+{
+	m_model.pwd_fail = fail;
+}
+
+void st25dv_emul_rf_set_mb_en(bool on)
+{
+	if (on) {
+		/* MB_EN is RF-writable only once MB_MODE authorises FTM. */
+		if (m_model.mb_mode & ST25DV_MB_MODE_EN) {
+			m_model.mb_ctrl |= ST25DV_MB_CTRL_MB_EN;
+		}
+	} else {
+		m_model.mb_ctrl &=
+			~(ST25DV_MB_CTRL_MB_EN | ST25DV_MB_CTRL_HOST_PUT | ST25DV_MB_CTRL_RF_PUT);
+	}
+}
+
+int st25dv_emul_rf_put_message(const uint8_t *msg, size_t len)
+{
+	if (!(m_model.mb_ctrl & ST25DV_MB_CTRL_MB_EN)) {
+		return -EACCES;
+	}
+	if (len == 0 || len > ST25DV_MB_RAM_SIZE) {
+		return -EMSGSIZE;
+	}
+	/* Mailbox must be free (no unread message either way). */
+	if (m_model.mb_ctrl & (ST25DV_MB_CTRL_HOST_PUT | ST25DV_MB_CTRL_RF_PUT)) {
+		return -EBUSY;
+	}
+	memcpy(m_model.mb_ram, msg, len);
+	m_model.mb_len = (uint8_t)(len - 1);
+	m_model.mb_ctrl |= ST25DV_MB_CTRL_RF_PUT;
+	return 0;
+}
+
+int st25dv_emul_rf_read_message(uint8_t *out, size_t cap, size_t *len)
+{
+	if (!(m_model.mb_ctrl & ST25DV_MB_CTRL_HOST_PUT)) {
+		return -EAGAIN;
+	}
+	size_t n = (size_t)m_model.mb_len + 1;
+
+	if (n > cap) {
+		return -EMSGSIZE;
+	}
+	memcpy(out, m_model.mb_ram, n);
+	*len = n;
+	/* RF read of the last byte frees the mailbox for the I2C host. */
+	m_model.mb_ctrl &= ~ST25DV_MB_CTRL_HOST_PUT;
+	return 0;
+}
+
 /* One dynamic/static register byte, addressed generically — every register
  * app_nfc.c touches today is a single byte wide (GPO_REG, GPO_CTRL_DYN_REG,
  * EH_CTRL_DYN, IT_STS_DYN). Extend here if a future fix reads a new one. */
@@ -100,6 +185,12 @@ static uint8_t *reg_slot(uint16_t reg)
 		return &m_model.it_sts_dyn;
 	case ST25DV_GPO_REG:
 		return &m_model.gpo_reg;
+	case ST25DV_MB_MODE_REG:
+		return &m_model.mb_mode;
+	case ST25DV_MB_CTRL_DYN:
+		return &m_model.mb_ctrl;
+	case ST25DV_MB_LEN_DYN:
+		return &m_model.mb_len;
 	default:
 		return NULL;
 	}
@@ -112,9 +203,22 @@ static uint8_t *reg_slot(uint16_t reg)
 static int st25dv_do_write(int addr, uint16_t reg, const uint8_t *data, size_t len)
 {
 	if (addr == ST25DV_I2C_ADDR_E1 && reg == ST25DV_I2C_PWD_REG) {
-		/* nfc_present_password(): accept unconditionally, no security
-		 * modeling needed for these tests. */
-		return 0;
+		/* nfc_present_password(): a unit with an unknown I2C password NACKs it
+		 * (st25dv_emul_set_pwd_fail) — app_nfc.c then cannot authorise FTM. */
+		return m_model.pwd_fail ? -EIO : 0;
+	}
+
+	/* A static-config write (E1, e.g. MB_MODE / GPO) needs the password session;
+	 * model that by failing it too when the password NACKs. */
+	if (addr == ST25DV_I2C_ADDR_E1 && reg < 0x2000 && m_model.pwd_fail) {
+		return -EIO;
+	}
+
+	/* DS10925 §5.1.2: with FTM enabled every EEPROM write (user or system) is
+	 * refused by the chip. The mailbox RAM (reg >= 0x2008) is exempt. */
+	if ((m_model.mb_ctrl & ST25DV_MB_CTRL_MB_EN) &&
+	    ((addr == ST25DV_I2C_ADDR_E0 && reg < 0x2000) || (addr == ST25DV_I2C_ADDR_E1))) {
+		return -EIO;
 	}
 
 	if (addr == ST25DV_I2C_ADDR_E0 && reg < 0x2000) {
@@ -127,9 +231,35 @@ static int st25dv_do_write(int addr, uint16_t reg, const uint8_t *data, size_t l
 			return -EIO;
 		}
 		memcpy(&m_model.mem[reg], data, len);
-		/* A real tag would set IT_RF_WRITE only for an RF-side write; an
-		 * I2C-side write (the device writing to itself) does not set it.
-		 * Nothing to do here for that bit. */
+		return 0;
+	}
+
+	/* Mailbox RAM write (mb_write_msg): one transaction starting at 0x2008; the
+	 * chip sets HOST_PUT_MSG + MB_LEN_Dyn at the STOP condition. */
+	if (addr == ST25DV_I2C_ADDR_E0 && reg >= ST25DV_MB_RAM && reg < ST25DV_MB_RAM_END) {
+		if (reg != ST25DV_MB_RAM || len == 0 || len > ST25DV_MB_RAM_SIZE) {
+			return -EIO;
+		}
+		memcpy(m_model.mb_ram, data, len);
+		m_model.mb_len = (uint8_t)(len - 1);
+		m_model.mb_ctrl |= ST25DV_MB_CTRL_HOST_PUT;
+		return 0;
+	}
+
+	/* MB_CTRL_Dyn: I2C may write only MB_EN (bit0); the rest is read-only. */
+	if (addr == ST25DV_I2C_ADDR_E0 && reg == ST25DV_MB_CTRL_DYN) {
+		if (len != 1) {
+			return -EIO;
+		}
+		if (data[0] & ST25DV_MB_CTRL_MB_EN) {
+			if (!(m_model.mb_mode & ST25DV_MB_MODE_EN)) {
+				return -EIO; /* FTM not authorised */
+			}
+			m_model.mb_ctrl |= ST25DV_MB_CTRL_MB_EN;
+		} else {
+			m_model.mb_ctrl &= ~(ST25DV_MB_CTRL_MB_EN | ST25DV_MB_CTRL_HOST_PUT |
+					     ST25DV_MB_CTRL_RF_PUT);
+		}
 		return 0;
 	}
 
@@ -150,6 +280,22 @@ static int st25dv_do_read(int addr, uint16_t reg, uint8_t *out, size_t len)
 			return -EIO;
 		}
 		memcpy(out, &m_model.mem[reg], len);
+		return 0;
+	}
+
+	/* Mailbox RAM read (mb_read_msg): reading through the last byte of the RF
+	 * message frees the mailbox (clears RF_PUT_MSG). */
+	if (addr == ST25DV_I2C_ADDR_E0 && reg >= ST25DV_MB_RAM && reg < ST25DV_MB_RAM_END) {
+		size_t off = reg - ST25DV_MB_RAM;
+
+		if (off + len > ST25DV_MB_RAM_SIZE) {
+			return -EIO;
+		}
+		memcpy(out, &m_model.mb_ram[off], len);
+		if ((m_model.mb_ctrl & ST25DV_MB_CTRL_RF_PUT) &&
+		    off + len > (size_t)m_model.mb_len) {
+			m_model.mb_ctrl &= ~ST25DV_MB_CTRL_RF_PUT;
+		}
 		return 0;
 	}
 

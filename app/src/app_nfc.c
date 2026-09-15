@@ -878,6 +878,11 @@ static int nfc_enable_rf_write_it(void)
 	static const uint8_t default_pwd[8] = {0};
 	int ret;
 
+	/* Assume unavailable until MB_MODE is authorised + verified below; any early
+	 * return (password / GPO failure) then correctly leaves the mailbox marked
+	 * down rather than keeping a previous boot's value. */
+	m_mb_available = false;
+
 	/* 0) A mailbox left enabled by an aborted session survives an MCU reset (the
 	 *    dynamic registers persist while the phone's field or VCC keeps the chip
 	 *    up) and would make every EEPROM write below fail (NACK, DS §5.1.2) —
