@@ -1120,7 +1120,9 @@ P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
 }
 
 /* How long to wait before the next JoinRequest, or < 0 for "the boot window is
- * over, give up". Pure -- exposed to tests/p2p_logic. The caller adds jitter.
+ * over" -- which hands the episode to the slow policy rather than ending it
+ * (join_window_expired). Pure -- exposed to tests/p2p_logic. The caller adds
+ * jitter.
  *
  * The slow policy (§7, selected by a self-heal) has no window: a paired device
  * recovers for its whole life, so it always gets its exponential backoff -- or
@@ -1136,13 +1138,13 @@ P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
  * leaves the sliding hour" -- up to P2P_DUTY_WINDOW_MS, a full hour, once the
  * 48-entry ring is full. 48 JoinRequests at 494 ms fill that ring well inside
  * 120 s, so the unclamped wait routinely landed hours past the deadline: the
- * window check at the top of join_work_handler ran, but not until long after
+ * episode's own deadline check ran, but not until long after
  * the window had closed. Measured on the bench 2026-09-10 (§9): still
  * `state: JOINING` 7 m 38 s into a 120 s window, with a reconstructed duty
- * wait of ~1296 s, and the give-up line never reached. Capping at the
- * remaining window makes the next wake-up the one that gives up -- the
+ * wait of ~1296 s, and the window-expiry line never reached. Capping at the
+ * remaining window makes the next wake-up the one that reports it -- the
  * caller's jitter lands it just past the edge, which is exactly when the
- * give-up is due. */
+ * hand-over to the slow policy is due. */
 P2P_TESTABLE int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait_ms,
 					     uint32_t backoff_ms, uint32_t jitter_ms)
 {
@@ -2413,15 +2415,22 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	return 0;
 }
 
-/* §5.2: the never-paired boot join is over. Both the deadline check at entry
- * and a retry that cannot fit inside the window end here, so the line reads the
- * same either way. */
-static void join_give_up(void)
+/* §5.2: the never-paired boot join's 120 s window is over. It ends the FAST
+ * retry policy, not the episode -- the node keeps looking, on the same
+ * exponential curve a self-heal uses (§7), converging to one sweep pass an
+ * hour. Going UNPAIRED and silent here is what stranded a node switched on
+ * before its Hub, or after the Hub moved the network SF: nothing short of a
+ * power cycle would ever have brought it back.
+ *
+ * The curve restarts at its first step, because this is the first round of the
+ * slow phase, not a continuation of anything. */
+static void join_window_expired(void)
 {
-	LOG_WRN("P2P join: boot window (%d s) expired without a JoinAccept; giving up "
-		"until next boot/trigger",
+	LOG_WRN("P2P join: boot window (%d s) expired without a JoinAccept; continuing "
+		"on slow backoff",
 		P2P_JOIN_BOOT_WINDOW_MS / 1000);
-	m_link_state = P2P_LINK_UNPAIRED;
+	m_join_slow = true;
+	m_rejoin_attempt = 0;
 }
 
 static void join_work_handler(struct k_work *work)
@@ -2434,14 +2443,6 @@ static void join_work_handler(struct k_work *work)
 
 	if (m_join_episode_fresh) {
 		join_episode_begin();
-	}
-
-	/* A never-paired boot/shell join gives up after the 120 s boot window
-	 * (§5.2); the slow policy is exempt (§7) -- a paired device that lost its
-	 * session keeps trying, with exponential backoff, for its life. */
-	if (!m_join_slow && k_uptime_get() - m_join_started_at >= P2P_JOIN_BOOT_WINDOW_MS) {
-		join_give_up();
-		return;
 	}
 
 	uint32_t used_nonce;
@@ -2472,8 +2473,22 @@ static void join_work_handler(struct k_work *work)
 		duty_blocked
 			? duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN)
 			: 0;
-	int64_t wait_ms;
+	int64_t wait_ms = 0;
 	uint32_t base = 0;
+
+	if (!m_join_slow) {
+		wait_ms = p2p_join_retry_delay_ms(false, k_uptime_get() - m_join_started_at,
+						  duty_wait_ms, 0, P2P_JOIN_RETRY_JITTER_MS);
+		/* < 0 means the boot window is over -- either it closed while this
+		 * attempt was running, or the duty ledger cannot clear before it
+		 * does, so the next wake-up would land past the deadline anyway.
+		 * Either way the fast policy is finished and the slow one takes the
+		 * episode from here; this is the only place that transition
+		 * happens. */
+		if (wait_ms < 0) {
+			join_window_expired();
+		}
+	}
 
 	if (m_join_slow) {
 		/* No window on the slow policy (§7). Waits INSIDE a pass are short
@@ -2486,17 +2501,6 @@ static void join_work_handler(struct k_work *work)
 		}
 		wait_ms = p2p_join_retry_delay_ms(true, 0, duty_wait_ms, base,
 						  P2P_JOIN_RETRY_JITTER_MS);
-	} else {
-		wait_ms = p2p_join_retry_delay_ms(false, k_uptime_get() - m_join_started_at,
-						  duty_wait_ms, 0, P2P_JOIN_RETRY_JITTER_MS);
-	}
-
-	if (wait_ms < 0) {
-		/* The duty ledger cannot clear before the window does -- retrying would
-		 * only wake past the deadline. Give up now rather than schedule a
-		 * JoinRequest that is already too late (§5.2). */
-		join_give_up();
-		return;
 	}
 
 	if (m_join_slow && pass_end) {

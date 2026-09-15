@@ -155,9 +155,11 @@ struct p2p_duty {
  * for JoinAccept, and on success persists net_id/dev_addr/session_key/
  * rx1_delay to NVS and switches the data plane on to session_key
  * (doc/p2p.md §5.3). app_p2p_is_ready() (and therefore the report
- * cadence) only goes true once paired -- a device stuck unpaired past its
- * boot join window (§5.2, 120 s) stays silent until the next boot or an NFC
- * `p2p_join` trigger (not yet wired). The confirmed-uplink Ack/retry (§6),
+ * cadence) only goes true once paired -- a device still unpaired when its
+ * boot join window closes (§5.2, 120 s) does not stop: it hands the
+ * episode to the slow backoff curve (§7) and keeps sweeping the spreading
+ * factors, converging to about one pass an hour, so a node powered on
+ * before its Hub joins on its own once the Hub appears. The confirmed-uplink Ack/retry (§6),
  * self-healing re-join (§7) and the Detach/RejoinRequest link-control
  * downlinks (§5.4) are all implemented. The optional listen mode
  * (CONFIG_SHELL) puts the radio in continuous RX for the two-STICKER bench
@@ -195,7 +197,7 @@ enum app_p2p_frame_type {
  * status` can report it via struct app_p2p_info below. */
 enum p2p_link_state {
 	P2P_LINK_UNPAIRED, /* no valid pairing in NVS; not currently joining */
-	P2P_LINK_JOINING,  /* boot-window join attempts in progress */
+	P2P_LINK_JOINING,  /* join attempts in progress: boot window, then slow backoff */
 	P2P_LINK_PAIRED,   /* net_id/dev_addr/session_key valid, data plane live */
 };
 

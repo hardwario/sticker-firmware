@@ -658,9 +658,9 @@ ZTEST(p2p_logic, test_join_retry_stays_inside_the_boot_window)
 	/* Past the window: refuse, so the caller logs the give-up instead of
 	 * rescheduling. */
 	zassert_true(p2p_join_retry_delay_ms(false, P2P_JOIN_BOOT_WINDOW_MS, 0, 0, jitter) < 0,
-		     "at the window edge the boot join must give up");
+		     "at the window edge the boot join must report the window closed");
 	zassert_true(p2p_join_retry_delay_ms(false, 500000, 0, 0, jitter) < 0,
-		     "well past the window the boot join must give up");
+		     "well past the window the boot join must report the window closed");
 
 	/* A self-heal has no window at all (§7) -- a paired device recovers for its
 	 * whole life, so this must never refuse no matter how long it has run. */
@@ -927,6 +927,46 @@ ZTEST(p2p_logic, test_join_adopt_sf_persists_only_a_changed_sf)
 	zassert_equal(p2p_join_adopt_sf(12), -EIO, "a failed persist must return its errno");
 	zassert_equal(g_test_save_sf_calls, 1, "the failing write still happened once, got %d",
 		      g_test_save_sf_calls);
+}
+
+/* The boot window used to end the episode, not just the fast policy: the node
+ * went UNPAIRED and stayed silent until someone power-cycled it. A node
+ * deployed before its Hub, or one switched on after the Hub moved the network
+ * SF, would never come back on its own -- and the sweep above is worth nothing
+ * if the episode it runs in has already stopped. The window still ends the fast
+ * policy; it no longer ends the episode. */
+ZTEST(p2p_logic, test_join_window_expiry_switches_to_slow_policy_not_silence)
+{
+	uint8_t sf, step, attempts, rejoin;
+	bool slow;
+	enum p2p_link_state state;
+
+	p2p_test_join_setup(10);
+	p2p_test_set_join_started_at(k_uptime_get() - P2P_JOIN_BOOT_WINDOW_MS - 1);
+
+	p2p_test_join_step();
+
+	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
+	zassert_equal(state, P2P_LINK_JOINING,
+		      "an expired boot window must leave the episode JOINING, got %d", state);
+	zassert_true(slow, "an expired boot window must hand the episode to the slow policy");
+	zassert_equal(rejoin, 0, "the slow curve starts at its first step, got %u", rejoin);
+
+	/* The curve is charged per PASS, not per attempt: the rest of this pass
+	 * spends no backoff step, and the pass end spends exactly one. */
+	for (int i = 0; i < 5; i++) {
+		p2p_test_join_step();
+		p2p_test_get_join(NULL, NULL, NULL, NULL, &rejoin, NULL);
+		zassert_equal(rejoin, 0, "attempt %d is mid-pass and must spend no backoff step",
+			      i + 2);
+	}
+
+	p2p_test_join_step();
+	p2p_test_get_join(&sf, &step, NULL, NULL, &rejoin, &state);
+	zassert_equal(rejoin, 1, "a pass end must spend exactly one backoff step, got %u", rejoin);
+	zassert_equal(step, 0, "and leave the next pass at sweep step 0, got %u", step);
+	zassert_equal(sf, 10, "which is the configured SF, got SF%u", sf);
+	zassert_equal(state, P2P_LINK_JOINING, "and the episode is still running");
 }
 
 /* ---- B8 history replay ------------------------------------------------ */
