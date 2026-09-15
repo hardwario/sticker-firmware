@@ -15,10 +15,15 @@
 
 extern uint16_t test_history_frame_count;
 extern int g_compose_budget_calls;
+/* tests/p2p_logic/src/stubs.c's app_settings_save_p2p_spreading_factor knobs. */
+extern int g_test_saved_sf;
+extern int g_test_save_sf_calls;
+extern int test_save_sf_ret;
 
 #include <zephyr/ztest.h>
 #include <zephyr/sys/byteorder.h>
 
+#include <errno.h>
 #include <string.h>
 
 /* ---- p2p_frame_toa_ms ------------------------------------------------- */
@@ -820,6 +825,108 @@ ZTEST(p2p_logic, test_join_sweep_pass_air_fits_the_duty_budget)
 		     18 * sf12);
 	zassert_true(19 * sf12 > P2P_DUTY_BUDGET_MS, "19 SF12 joins (%u ms) must not fit the hour",
 		     19 * sf12);
+}
+
+/* ---- join episode: walking the sweep ---------------------------------- */
+
+/* The sweep order is only half the story: the episode has to actually walk it.
+ * One pass is P2P_JOIN_SF_ATTEMPTS JoinRequests at the configured SF -- the
+ * likeliest answer deserves a second chance at a lost frame -- then one at
+ * every other SF in the order, then back to the configured SF for the next
+ * pass. The radio must be tuned to that SF when the JoinRequest goes out, so
+ * the state is read BEFORE each attempt. */
+ZTEST(p2p_logic, test_join_sweep_walks_the_order_and_wraps)
+{
+	const uint8_t expect[] = {10, 10, 11, 9, 12, 8, 7};
+	uint8_t sf, step, attempts, rejoin;
+	bool slow;
+	enum p2p_link_state state;
+
+	p2p_test_join_setup(10);
+
+	for (size_t i = 0; i < ARRAY_SIZE(expect); i++) {
+		p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
+		zassert_equal(sf, expect[i],
+			      "attempt %zu should go out at SF%u, the radio is on SF%u", i,
+			      expect[i], sf);
+		p2p_test_join_step();
+	}
+
+	/* The pass wrapped: back to step 0 / the configured SF, with a clean
+	 * attempt count, ready to start the next pass. */
+	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
+	zassert_equal(sf, 10, "a wrapped pass must return to the configured SF, got SF%u", sf);
+	zassert_equal(step, 0, "a wrapped pass must return to sweep step 0, got %u", step);
+	zassert_equal(attempts, 0, "a wrapped pass must reset the attempt count, got %u", attempts);
+
+	/* The boot policy owns this episode: the window has not closed, so the
+	 * policy has not changed and no backoff step has been spent. */
+	zassert_false(slow, "an episode inside its boot window must stay on the fast policy");
+	zassert_equal(rejoin, 0, "the fast policy must not spend backoff steps, got %u", rejoin);
+	zassert_equal(state, P2P_LINK_JOINING, "a sweeping episode is still JOINING");
+}
+
+/* A JoinRequest the duty ledger refuses never reaches the air, so it tried no
+ * SF at all. Advancing the sweep on it would skip an SF per duty bounce and a
+ * blocked node would walk the whole order without transmitting once. */
+ZTEST(p2p_logic, test_join_duty_block_does_not_advance_the_sweep)
+{
+	uint8_t sf, step, attempts, rejoin;
+	bool slow;
+	enum p2p_link_state state;
+
+	p2p_test_join_setup(10);
+
+	/* Fill the sliding-hour ledger: p2p_duty_wait_ms() refuses as soon as the
+	 * 48-entry ring is full, whatever the air-time sum, so 48 one-ms charges
+	 * are enough to make send_join_request() return -EAGAIN. */
+	struct p2p_duty *duty = p2p_test_get_duty();
+
+	for (int i = 0; i < P2P_DUTY_LEDGER_ENTRIES; i++) {
+		p2p_duty_charge(duty, k_uptime_get(), 1);
+	}
+
+	p2p_test_join_step();
+
+	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
+	zassert_equal(sf, 10, "a duty bounce tried no SF, so the radio must stay on SF10, got SF%u",
+		      sf);
+	zassert_equal(step, 0, "a duty bounce must not advance the sweep step, got %u", step);
+	zassert_equal(attempts, 0, "a duty bounce is not a sent attempt, got %u", attempts);
+}
+
+/* The SF a sweep lands on has to outlive the session: app_p2p_start()'s PAIRED
+ * shortcut never joins, so a node that joined at a swept SF and rebooted would
+ * come up on the stale configured one with nothing left to re-discover it.
+ * Persisting an unchanged SF, on the other hand, is a pointless flash write on
+ * every ordinary join. */
+ZTEST(p2p_logic, test_join_adopt_sf_persists_only_a_changed_sf)
+{
+	p2p_test_join_setup(10);
+
+	g_test_save_sf_calls = 0;
+	test_save_sf_ret = 0;
+
+	zassert_equal(p2p_join_adopt_sf(10), 0, "joining at the configured SF must succeed");
+	zassert_equal(g_test_save_sf_calls, 0,
+		      "joining at the configured SF must not write it back, %d write(s) seen",
+		      g_test_save_sf_calls);
+
+	zassert_equal(p2p_join_adopt_sf(12), 0, "adopting a swept SF must succeed");
+	zassert_equal(g_test_save_sf_calls, 1, "adopting an SF is exactly one write, got %d",
+		      g_test_save_sf_calls);
+	zassert_equal(g_test_saved_sf, 12, "the adopted SF must be the one persisted, got %d",
+		      g_test_saved_sf);
+
+	/* A failed persist is surfaced, not swallowed: the session still runs at
+	 * the swept SF, but the next boot comes back on the stale configured one
+	 * and the bench has to be able to see that coming. */
+	g_test_save_sf_calls = 0;
+	test_save_sf_ret = -EIO;
+
+	zassert_equal(p2p_join_adopt_sf(12), -EIO, "a failed persist must return its errno");
+	zassert_equal(g_test_save_sf_calls, 1, "the failing write still happened once, got %d",
+		      g_test_save_sf_calls);
 }
 
 /* ---- B8 history replay ------------------------------------------------ */

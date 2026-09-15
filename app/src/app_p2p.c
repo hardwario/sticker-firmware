@@ -384,6 +384,16 @@ static uint16_t m_consec_uplink_fail; /* consecutive fully-failed uplink cycles 
 static bool m_join_slow;              /* current JOINING episode uses the slow policy */
 static uint8_t m_rejoin_attempt;      /* backoff step within a slow-policy episode */
 
+/* Join SF sweep state (B-2). An episode walks passes; a pass is
+ * P2P_JOIN_SF_ATTEMPTS sent JoinRequests at p2p_join_sweep_sf(cfg, 0) -- the
+ * configured SF -- then one at each further step until the order is exhausted.
+ * m_join_episode_fresh makes join_work_handler, not start_join_episode(), do
+ * the per-episode seeding: the shell `join` command calls start_join_episode()
+ * from its own thread, and every m_sf write has to happen on m_work_q. */
+static uint8_t m_join_sweep_step;  /* sweep step the next JoinRequest uses */
+static uint8_t m_join_sf_attempts; /* SENT attempts already made at that step */
+static bool m_join_episode_fresh;  /* the handler has not opened this episode yet */
+
 /* B1: RSSI/SNR the central reported in the last Ack (its measurement of our
  * uplink). m_last_ack_valid is false until the first Ack of this session. */
 static int8_t m_last_ack_rssi;
@@ -1127,11 +1137,12 @@ P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
  * 48-entry ring is full. 48 JoinRequests at 494 ms fill that ring well inside
  * 120 s, so the unclamped wait routinely landed hours past the deadline: the
  * window check at the top of join_work_handler ran, but not until long after
- * the window had closed. Measured on the bench 2026-09-10 (§9): still `state: JOINING` 7 m
- * 38 s into a 120 s window, with a reconstructed duty wait of ~1296 s, and the
- * give-up line never reached. Capping at the remaining window makes the next
- * wake-up the one that gives up -- the caller's jitter lands it just past the
- * edge, which is exactly when the give-up is due. */
+ * the window had closed. Measured on the bench 2026-09-10 (§9): still
+ * `state: JOINING` 7 m 38 s into a 120 s window, with a reconstructed duty
+ * wait of ~1296 s, and the give-up line never reached. Capping at the
+ * remaining window makes the next wake-up the one that gives up -- the
+ * caller's jitter lands it just past the edge, which is exactly when the
+ * give-up is due. */
 P2P_TESTABLE int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait_ms,
 					     uint32_t backoff_ms, uint32_t jitter_ms)
 {
@@ -1292,6 +1303,88 @@ static void duty_charge(uint32_t air_ms)
 	p2p_duty_charge(&m_duty, k_uptime_get(), air_ms);
 }
 
+/* Retune the radio to `sf` for the next JoinRequest. m_work_q ONLY: it writes
+ * m_sf, which every radio path reads, and reconfigures the modem -- doing that
+ * from another thread while m_work_q is inside lora_recv() would leave the two
+ * disagreeing about what the radio is tuned to. */
+static void join_set_sf(int sf)
+{
+	m_sf = (uint8_t)sf;
+	(void)radio_configure(true);
+}
+
+/* Open a join episode on m_work_q: back to sweep step 0 (the configured SF)
+ * with a clean attempt count. Separate from start_join_episode() because that
+ * one may run on the shell thread -- see join_set_sf(). */
+static void join_episode_begin(void)
+{
+	m_join_episode_fresh = false;
+	m_join_sweep_step = 0;
+	m_join_sf_attempts = 0;
+	join_set_sf(p2p_join_sweep_sf(sf_from_cfg(), 0));
+}
+
+/* Account for one JoinRequest that actually reached the air and, when the step
+ * has had its attempts, move to the next SF in the order. Returns true when the
+ * pass is exhausted -- the caller owns what happens between passes, because
+ * that is where the two retry policies differ.
+ *
+ * Only SENT attempts get here: a duty bounce tried no SF at all, and advancing
+ * on one would let a blocked node walk the whole order without transmitting
+ * once. */
+static bool join_sweep_advance(void)
+{
+	uint8_t limit = (m_join_sweep_step == 0) ? P2P_JOIN_SF_ATTEMPTS : 1;
+
+	if (++m_join_sf_attempts < limit) {
+		return false;
+	}
+
+	m_join_sf_attempts = 0;
+
+	int next = p2p_join_sweep_sf(sf_from_cfg(), m_join_sweep_step + 1);
+
+	if (next < 0) {
+		/* Pass exhausted: back to the configured SF, which is both step 0
+		 * of the next pass and the SF the data plane would use if a join
+		 * landed some other way. */
+		m_join_sweep_step = 0;
+		join_set_sf(sf_from_cfg());
+		return true;
+	}
+
+	m_join_sweep_step++;
+	join_set_sf(next);
+	return false;
+}
+
+/* Persist the SF a JoinAccept actually arrived on, when it is not the one the
+ * config names. app_p2p_start()'s PAIRED shortcut never joins, so without this
+ * a node that swept its way onto the network would come up on the stale
+ * configured SF after a reboot with nothing left to re-discover it; persisting
+ * an UNCHANGED SF, on the other hand, is a pointless flash write on every
+ * ordinary join. Returns 0, or the errno the save failed with (the session
+ * keeps running at m_sf either way). Pure enough to expose to tests/p2p_logic,
+ * which stubs the save. */
+P2P_TESTABLE int p2p_join_adopt_sf(uint8_t joined_sf)
+{
+	int cfg_sf = sf_from_cfg();
+
+	if ((int)joined_sf == cfg_sf) {
+		return 0;
+	}
+
+	int ret = app_settings_save_p2p_spreading_factor(joined_sf);
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_settings_save_p2p_spreading_factor", ret);
+		return ret;
+	}
+
+	LOG_INF("P2P join: network SF changed %d -> %d, persisted", cfg_sf, joined_sf);
+	return 0;
+}
+
 /* Start a JOINING episode and schedule the first JoinRequest. `slow` selects
  * the retry policy in join_work_handler(): the fast policy caps a boot/shell
  * join at the 120 s boot window with tight jitter (§5.2); the slow one runs
@@ -1299,8 +1392,11 @@ static void duty_charge(uint32_t air_ms)
  * app_p2p_rejoin() (shell), and the self-heal trigger below. */
 static void start_join_episode(bool slow)
 {
-	/* Every episode starts at sweep step 0 -- the configured SF. */
-	m_sf = (uint8_t)p2p_join_sweep_sf(sf_from_cfg(), 0);
+	/* The sweep state and m_sf are seeded by join_work_handler instead, on
+	 * m_work_q: app_p2p_rejoin() reaches here from the shell thread, which
+	 * may be running while m_work_q sits blocked in lora_recv(), and a
+	 * retune from under it would leave the radio and m_sf disagreeing. */
+	m_join_episode_fresh = true;
 	m_join_slow = slow;
 	m_rejoin_attempt = 0;
 	m_consec_uplink_fail = 0;
@@ -2304,6 +2400,9 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 
 	derive_session_key(dev_nonce, central_nonce, session_key);
 	pairing_persist(net_id, dev_addr, session_key, rx1_delay_s, &assign);
+	/* The sweep may have landed this join on an SF the config does not name;
+	 * record it before anything else can reboot us into the stale one. */
+	(void)p2p_join_adopt_sf(m_sf);
 
 	LOG_INF("Joined: net_id=%u dev_addr=%u rx1_delay=%us (RSSI %d dBm, SNR %d dB)", net_id,
 		dev_addr, rx1_delay_s, rssi, snr);
@@ -2333,6 +2432,10 @@ static void join_work_handler(struct k_work *work)
 		return; /* paired (or reverted) while a retry was already in flight */
 	}
 
+	if (m_join_episode_fresh) {
+		join_episode_begin();
+	}
+
 	/* A never-paired boot/shell join gives up after the 120 s boot window
 	 * (§5.2); the slow policy is exempt (§7) -- a paired device that lost its
 	 * session keeps trying, with exponential backoff, for its life. */
@@ -2344,6 +2447,10 @@ static void join_work_handler(struct k_work *work)
 	uint32_t used_nonce;
 	int64_t tx_end;
 	int ret = send_join_request(&used_nonce, &tx_end);
+	/* Captured before recv_join_accept() overwrites `ret`: only the SEND can
+	 * report the duty ledger's refusal, and that refusal is the one outcome
+	 * that tried no SF at all. */
+	bool duty_blocked = (ret == -EAGAIN);
 
 	if (ret == 0) {
 		ret = recv_join_accept(used_nonce, tx_end);
@@ -2352,17 +2459,37 @@ static void join_work_handler(struct k_work *work)
 			return; /* paired; no more retries */
 		}
 		LOG_INF("JoinAccept not received/invalid (%d); retrying", ret);
-	} else if (ret != -EAGAIN) {
+	} else if (!duty_blocked) {
 		LOG_ERR_CALL_FAILED_INT("send_join_request", ret);
 	}
 
+	/* A refused JoinRequest never reached the air, so it neither consumes an
+	 * attempt at this SF nor advances the sweep -- otherwise a duty-blocked
+	 * node would walk the whole order without transmitting once. */
+	bool pass_end = !duty_blocked && join_sweep_advance();
+
 	int64_t duty_wait_ms =
-		(ret == -EAGAIN)
+		duty_blocked
 			? duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN)
 			: 0;
-	uint32_t base = m_join_slow ? p2p_rejoin_backoff_ms(m_rejoin_attempt) : 0;
-	int64_t wait_ms = p2p_join_retry_delay_ms(m_join_slow, k_uptime_get() - m_join_started_at,
-						  duty_wait_ms, base, P2P_JOIN_RETRY_JITTER_MS);
+	int64_t wait_ms;
+	uint32_t base = 0;
+
+	if (m_join_slow) {
+		/* No window on the slow policy (§7). Waits INSIDE a pass are short
+		 * whatever the policy -- the sweep is the point of the pass, and
+		 * spreading one over the backoff curve would mean an SF got tried
+		 * once an hour. The curve is charged between passes instead, which
+		 * is the only place the two policies differ. */
+		if (pass_end) {
+			base = p2p_rejoin_backoff_ms(m_rejoin_attempt);
+		}
+		wait_ms = p2p_join_retry_delay_ms(true, 0, duty_wait_ms, base,
+						  P2P_JOIN_RETRY_JITTER_MS);
+	} else {
+		wait_ms = p2p_join_retry_delay_ms(false, k_uptime_get() - m_join_started_at,
+						  duty_wait_ms, 0, P2P_JOIN_RETRY_JITTER_MS);
+	}
 
 	if (wait_ms < 0) {
 		/* The duty ledger cannot clear before the window does -- retrying would
@@ -2372,8 +2499,8 @@ static void join_work_handler(struct k_work *work)
 		return;
 	}
 
-	if (m_join_slow) {
-		/* Exponential backoff between rounds, +/-25% jitter. A duty-cycle-
+	if (m_join_slow && pass_end) {
+		/* Exponential backoff between passes, +/-25% jitter. A duty-cycle-
 		 * blocked (-EAGAIN) round waits for the ledger instead when that is
 		 * the longer of the two (p2p_join_retry_delay_ms), and the jitter
 		 * may not undercut it (p2p_join_slow_jitter_ms). */
@@ -2589,17 +2716,27 @@ bool app_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
  * item the way app_p2p_init() does, mark P2P ready, and read back the replay
  * cursor so a test can see whether a second start disturbed a stream already in
  * flight. */
-void p2p_test_replay_setup(void)
+/* Bring up the work queue and its work items once per test binary, the way
+ * app_p2p_init() does. Shared by every setup hook below: k_work_queue_start()
+ * on an already-running queue is undefined, and the suite runs many tests. */
+static void test_queue_start_once(void)
 {
 	static bool started;
 
-	if (!started) {
-		k_work_queue_start(&m_work_q, m_work_stack, K_THREAD_STACK_SIZEOF(m_work_stack),
-				   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
-		k_work_init_delayable(&m_hist_work, hist_work_handler);
-		k_work_init(&m_send_work, send_work_handler);
-		started = true;
+	if (started) {
+		return;
 	}
+	k_work_queue_start(&m_work_q, m_work_stack, K_THREAD_STACK_SIZEOF(m_work_stack),
+			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
+	k_work_init_delayable(&m_hist_work, hist_work_handler);
+	k_work_init(&m_send_work, send_work_handler);
+	k_work_init_delayable(&m_join_work, join_work_handler);
+	started = true;
+}
+
+void p2p_test_replay_setup(void)
+{
+	test_queue_start_once();
 	m_started = true;
 	m_hist_active = false;
 	m_hist_seq = 0;
@@ -2612,6 +2749,72 @@ void p2p_test_replay_setup(void)
 void p2p_test_set_replay_active(bool active)
 {
 	m_hist_active = active;
+}
+
+/* Put the module into a fresh boot-policy JOINING episode configured for
+ * `cfg_sf`, with the duty ledger empty and the episode already opened, so a
+ * test can read the state the first JoinRequest will go out on before it
+ * drives a single step. */
+void p2p_test_join_setup(int cfg_sf)
+{
+	test_queue_start_once();
+	g_app_config.p2p_spreading_factor = cfg_sf;
+	p2p_duty_init(&m_duty);
+	m_link_state = P2P_LINK_JOINING;
+	m_join_slow = false;
+	m_rejoin_attempt = 0;
+	m_consec_uplink_fail = 0;
+	m_join_started_at = k_uptime_get();
+	m_join_episode_fresh = false;
+	m_join_sweep_step = 0;
+	m_join_sf_attempts = 0;
+	join_set_sf(p2p_join_sweep_sf(cfg_sf, 0));
+}
+
+/* Run exactly one join_work_handler iteration on the caller's thread and cancel
+ * the retry it scheduled, so the work-queue thread cannot run a second attempt
+ * underneath the assertions. */
+void p2p_test_join_step(void)
+{
+	join_work_handler(&m_join_work.work);
+	(void)k_work_cancel_delayable(&m_join_work);
+}
+
+void p2p_test_get_join(uint8_t *sf, uint8_t *step, uint8_t *attempts, bool *slow, uint8_t *rejoin,
+		       enum p2p_link_state *state)
+{
+	if (sf) {
+		*sf = m_sf;
+	}
+	if (step) {
+		*step = m_join_sweep_step;
+	}
+	if (attempts) {
+		*attempts = m_join_sf_attempts;
+	}
+	if (slow) {
+		*slow = m_join_slow;
+	}
+	if (rejoin) {
+		*rejoin = m_rejoin_attempt;
+	}
+	if (state) {
+		*state = m_link_state;
+	}
+}
+
+/* Move the episode's start back, so a test can reach the boot window's edge
+ * without waiting 120 s for it. */
+void p2p_test_set_join_started_at(int64_t at_ms)
+{
+	m_join_started_at = at_ms;
+}
+
+/* The live duty ledger, so a test can fill it and make send_join_request()
+ * return -EAGAIN for real rather than through a stub. */
+struct p2p_duty *p2p_test_get_duty(void)
+{
+	return &m_duty;
 }
 
 void p2p_test_get_replay(bool *active, uint32_t *seq, size_t *cursor, uint32_t *idx)
@@ -2667,6 +2870,14 @@ int app_p2p_init(void)
 		return ret;
 	}
 
+	/* The configured SF is also the discovered one: a join that swept onto a
+	 * different SF persisted it here (p2p_join_adopt_sf), so a PAIRED boot --
+	 * which app_p2p_start() takes without joining -- comes up on the SF the
+	 * network is actually using. If that persist had failed, this boots on the
+	 * stale value, the uplinks go unacknowledged, and the self-heal episode's
+	 * sweep re-discovers it after P2P_REJOIN_FAIL_THRESHOLD cycles: slow
+	 * recovery, not a brick, which is why the failure is logged at ERR rather
+	 * than being treated as fatal. */
 	m_sf = (uint8_t)sf_from_cfg();
 
 	ret = radio_configure(true);

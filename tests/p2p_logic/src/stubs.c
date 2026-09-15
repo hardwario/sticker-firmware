@@ -17,6 +17,7 @@
 
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_settings.h"
 
 #include <zephyr/toolchain.h>
 
@@ -158,6 +159,22 @@ int app_cmd_handle(int transport, const uint8_t *in, size_t in_len, uint8_t *out
 	}
 	ARG_UNUSED(action);
 	return 0;
+}
+
+/* ---- app_settings, for p2p_join_adopt_sf's persist ---- */
+
+/* The SF the last call was asked to persist. */
+int g_test_saved_sf;
+/* How many calls the module made -- an unchanged SF must make none. */
+int g_test_save_sf_calls;
+/* What the save returns; set to an errno to exercise the failure path. */
+int test_save_sf_ret;
+
+int app_settings_save_p2p_spreading_factor(int sf)
+{
+	g_test_saved_sf = sf;
+	g_test_save_sf_calls++;
+	return test_save_sf_ret;
 }
 
 int app_clock_set_unix(uint32_t unix_time)
