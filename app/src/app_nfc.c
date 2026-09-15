@@ -907,6 +907,11 @@ static int nfc_present_password(const uint8_t pwd[8])
  * APP_DEVICE_STATUS_MAILBOX_DOWN so the production tester rejects it (#313 D7). */
 static bool m_mb_available;
 
+/* Set by nfc_wait_field_off() when it sees MB_EN appear under a held field: the
+ * phone switched to the mailbox mid-wait, so the EEPROM cycle is abandoned and
+ * app_nfc_poll() serves the mailbox instead. Consumed by app_nfc_poll(). */
+static bool m_mb_requested;
+
 bool app_nfc_mailbox_available(void)
 {
 	return m_mb_available;
@@ -1138,6 +1143,15 @@ static bool nfc_wait_field_off(void)
 		if (!waited_for_field) {
 			NFC_DBG("field: FIELD_ON set (EH=0x%02x) -> waiting for RF off", eh);
 			waited_for_field = true;
+		}
+		/* #313: a phone that keeps its field on and enables the mailbox wants
+		 * the FTM channel, not an EEPROM exchange — stop waiting for a field-off
+		 * window that will never come and let app_nfc_poll() serve the mailbox. */
+		uint8_t ctrl = 0;
+		if (m_mb_available && mb_read_ctrl(&ctrl) == 0 && (ctrl & ST25DV_MB_CTRL_MB_EN)) {
+			NFC_DBG("field: MB_EN set by RF after %d ms -> mailbox session", waited);
+			m_mb_requested = true;
+			return false;
 		}
 		k_msleep(NFC_FIELD_POLL_MS);
 	}
@@ -1618,9 +1632,18 @@ static int handle_encrypted_cmd(const uint8_t *key, enum app_cmd_transport trans
 		clm_consume("valid hio.stck:cmd received");
 	}
 
+	/* The encrypted reply must fit the caller's buffer: 8 B header + 16 B tag of
+	 * overhead. NDEF callers pass 512 (no reply gets near it); the 256 B mailbox
+	 * frame leaves 231 B of plaintext, and app_cmd_handle() already degrades an
+	 * oversize reply (drops Info alarms, then a compact Error) instead of failing. */
+	size_t plain_cap = sizeof(resp_plain);
+	if (out_cap > 8 + NFC_CCM_TAG_LEN && out_cap - 8 - NFC_CCM_TAG_LEN < plain_cap) {
+		plain_cap = out_cap - 8 - NFC_CCM_TAG_LEN;
+	}
+
 	size_t resp_len = 0;
-	ret = app_cmd_handle(transport, cmd_plain, cmd_len, resp_plain, sizeof(resp_plain),
-			     &resp_len, action);
+	ret = app_cmd_handle(transport, cmd_plain, cmd_len, resp_plain, plain_cap, &resp_len,
+			     action);
 	if (ret) {
 		NFC_DBG("cmd: app_cmd_handle failed=%d", ret);
 		return ret;
@@ -2341,6 +2364,253 @@ static int nfc_check_locked(void)
 	return res;
 }
 
+/* ---- FTM mailbox command session (#313) --------------------------------------
+ * The phone enables the mailbox itself (RF Write Dynamic Configuration, MB_EN=1)
+ * and then ping-pongs 256 B frames through the dual-port RAM while it keeps its
+ * field on — no field-off window is ever needed, which is what makes a one-tap
+ * exchange possible on iOS. Frame = [chan][payload]: chan 0x01 = owner command
+ * (secret_key, response cache), 0x02 = vendor command (vendor_token, no cache),
+ * 0x03 = plaintext channel (reserved for the plain_text transport, PR #415 —
+ * rejected here until it lands); the payload is byte-identical to the encrypted
+ * hio.stck:cmd / hio.stck:rsp content, so the phone codec does not change. */
+#define NFC_MB_SESSION_MAX_MS                                                                      \
+	120000                          /* hard cap on one session; a long history readout         \
+					 * is ~100 pages x 0.3 s, iOS itself cuts at 20 s */
+#define NFC_FIELD_FAST_TICK_MS    30000 /* field-present poll: 50 ms this long, then 500 ms */
+#define NFC_MB_IDLE_MS            3000  /* no RF message for this long -> session over */
+#define NFC_MB_POLL_MS            20    /* MB_CTRL_Dyn poll while waiting for RF_PUT */
+#define NFC_MB_HOST_PUT_WAIT_MS   1000  /* wait for the phone to read our reply */
+#define NFC_MB_ERR_BUDGET         8     /* consecutive MB_CTRL_Dyn read failures -> abort */
+#define NFC_MB_FIELD_OFF_DEBOUNCE 3     /* FIELD_ON=0 reads in a row -> phone gone */
+#define NFC_MB_CHAN_CMD           0x01
+#define NFC_MB_CHAN_VND           0x02
+#define NFC_MB_CHAN_PLAIN         0x03
+
+/* Read the message the phone put in the mailbox (RF_PUT_MSG). Reading the last
+ * byte is what tells the chip the message was consumed (clears RF_PUT_MSG and
+ * frees the mailbox for the next RF write), so always read the whole message. */
+static int mb_read_msg(uint8_t *buf, size_t len)
+{
+	if (len == 0 || len > ST25DV_MB_RAM_SIZE) {
+		return -EMSGSIZE;
+	}
+	return read_chunks(ST25DV_MB_RAM, buf, len, false);
+}
+
+/* Put our reply in the mailbox: one I2C write starting at 0x2008 (the chip sets
+ * HOST_PUT_MSG + MB_LEN_Dyn at the STOP condition; a split write is not a
+ * message). Frame is staged in m_buf — the request it held has been consumed by
+ * then. Caller holds the access lock. */
+static int mb_write_msg(const uint8_t *data, size_t len)
+{
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+
+	if (!device_is_ready(dev)) {
+		return -ENODEV;
+	}
+	if (len == 0 || len > ST25DV_MB_RAM_SIZE) {
+		return -EMSGSIZE;
+	}
+
+	sys_put_be16(ST25DV_MB_RAM, m_buf);
+	memcpy(&m_buf[2], data, len);
+
+	int ret = -EIO;
+	for (int attempt = 0; attempt < ST25DV_I2C_RETRIES; attempt++) {
+		ret = i2c_write(dev, m_buf, 2 + len, ST25DV_I2C_ADDR_E0);
+		if (ret == 0) {
+			return 0;
+		}
+		k_msleep(ST25DV_I2C_RETRY_MS); /* RF transaction in flight on the dual port */
+	}
+	LOG_ERR("NFC mb: write %u B failed after %d retries: %d", (unsigned)len, ST25DV_I2C_RETRIES,
+		ret);
+	return ret;
+}
+
+/* Wait until the phone has read our reply (HOST_PUT_MSG cleared by its RF read of
+ * the last byte). Without this a fast phone could write its next request before
+ * reading the current reply, or we could overwrite an unread reply, desyncing the
+ * request/response pairing (the #194 six-frame gap). Returns 0 when read,
+ * -ENOTCONN when the field dropped meanwhile, -ETIMEDOUT otherwise. */
+static int mb_wait_host_put_cleared(uint32_t timeout_ms)
+{
+	int64_t deadline = k_uptime_get() + timeout_ms;
+
+	while (k_uptime_get() < deadline) {
+		uint8_t ctrl = 0, eh = 0;
+		if (mb_read_ctrl(&ctrl) == 0 && !(ctrl & ST25DV_MB_CTRL_HOST_PUT)) {
+			return 0;
+		}
+		if (read_reg(ST25DV_EH_CTRL_DYN, &eh, 1) == 0 && !(eh & ST25DV_FIELD_ON)) {
+			return -ENOTCONN;
+		}
+		k_msleep(5);
+	}
+	return -ETIMEDOUT;
+}
+
+/* Serve mailbox requests until the phone leaves, disables the mailbox, goes
+ * quiet, or a deferred action needs the session closed. Caller holds the access
+ * lock with the tag powered (LPD low) for the whole session. Returns the number
+ * of replies sent. Always leaves MB_EN cleared: with the mailbox enabled the chip
+ * refuses every EEPROM write, so a stuck MB_EN would break the resting-record
+ * upkeep (the June "truncated NDEF" symptom). */
+static int mb_serve_locked(void)
+{
+	int64_t t0 = k_uptime_get();
+	int64_t t_last = t0;
+	int64_t t_keep = t0;
+	int err_budget = NFC_MB_ERR_BUDGET;
+	int field_off_n = 0;
+	unsigned int served = 0;
+	const char *reason = "?";
+
+	nfc_keep_awake();
+	nfc_led_detected();
+	NFC_DBG("mb: session start");
+
+	for (;;) {
+		int64_t now = k_uptime_get();
+		if (now - t0 > NFC_MB_SESSION_MAX_MS) {
+			reason = "max duration";
+			break;
+		}
+		if (now - t_last > NFC_MB_IDLE_MS) {
+			reason = "idle";
+			break;
+		}
+		if (now - t_keep >= 1000) {
+			nfc_keep_awake(); /* never let Stop2 land mid-session (#329) */
+			t_keep = now;
+		}
+
+		uint8_t ctrl = 0;
+		if (mb_read_ctrl(&ctrl)) {
+			if (--err_budget <= 0) {
+				reason = "i2c errors";
+				break;
+			}
+			k_msleep(NFC_MB_POLL_MS);
+			continue;
+		}
+		err_budget = NFC_MB_ERR_BUDGET;
+
+		if (!(ctrl & ST25DV_MB_CTRL_MB_EN)) {
+			reason = "phone disabled MB_EN";
+			break;
+		}
+
+		uint8_t eh = 0;
+		if (read_reg(ST25DV_EH_CTRL_DYN, &eh, 1) == 0 && !(eh & ST25DV_FIELD_ON)) {
+			if (++field_off_n >= NFC_MB_FIELD_OFF_DEBOUNCE) {
+				reason = "field off";
+				break;
+			}
+		} else {
+			field_off_n = 0;
+		}
+
+		if (!(ctrl & ST25DV_MB_CTRL_RF_PUT)) {
+			/* Nothing new — nap until the GPO RF_PUT_MSG pulse or the poll tick. */
+			k_sem_take(&m_gpo_sem, K_MSEC(NFC_MB_POLL_MS));
+			continue;
+		}
+
+		size_t len = 0;
+		int ret = mb_read_len(&len);
+		if (ret == 0) {
+			ret = mb_read_msg(m_buf, len);
+		}
+		if (ret) {
+			NFC_DBG("mb: read request failed: %d", ret);
+			k_msleep(NFC_MB_POLL_MS);
+			continue;
+		}
+		t_last = k_uptime_get();
+
+		uint8_t chan = m_buf[0];
+		const uint8_t *key = NULL;
+		enum app_cmd_transport tp = APP_CMD_TRANSPORT_NFC;
+		bool cache = true;
+
+		if (len >= 2 && chan == NFC_MB_CHAN_CMD) {
+			key = g_app_config.secret_key;
+		} else if (len >= 2 && chan == NFC_MB_CHAN_VND) {
+			key = g_app_config.vendor_token;
+			tp = APP_CMD_TRANSPORT_VENDOR;
+			cache = false;
+		} else {
+			/* 0x03 (plain_text, PR #415) not wired yet; anything else is noise. */
+			NFC_DBG("mb: rejected frame chan=0x%02x len=%u", chan, (unsigned)len);
+			nfc_led_rejected();
+			continue;
+		}
+
+		nfc_led_processing();
+		NFC_REPORT("mailbox: %u B request on chan 0x%02x", (unsigned)len, chan);
+
+		size_t resp_len = 0;
+		enum app_cmd_action action = APP_CMD_ACTION_NONE;
+		bool replayed = false;
+#ifdef CONFIG_APP_NFC_ENCRYPTION
+		ret = handle_encrypted_cmd(key, tp, cache, &m_buf[1], len - 1, &m_resp_buf[1],
+					   ST25DV_MB_RAM_SIZE - 1, &resp_len, &action, &replayed);
+#else
+		/* Plaintext validation build: no vendor channel (no key to bind it to). */
+		ARG_UNUSED(key);
+		ARG_UNUSED(cache);
+		if (tp != APP_CMD_TRANSPORT_NFC) {
+			ret = -EACCES;
+		} else {
+			ret = app_cmd_handle(tp, &m_buf[1], len - 1, &m_resp_buf[1],
+					     ST25DV_MB_RAM_SIZE - 1, &resp_len, &action);
+		}
+#endif
+		if (ret) {
+			/* Same as the NDEF path: a frame we cannot authenticate gets no reply
+			 * (#315 red blink), the phone times out. */
+			NFC_DBG("mb: request rejected: %d", ret);
+			nfc_led_rejected();
+			continue;
+		}
+
+		if (resp_len) {
+			m_resp_buf[0] = chan;
+			ret = mb_write_msg(m_resp_buf, resp_len + 1);
+			if (ret) {
+				continue; /* budget/idle above bound the retry */
+			}
+			served++;
+			ret = mb_wait_host_put_cleared(NFC_MB_HOST_PUT_WAIT_MS);
+			NFC_REPORT("mailbox: %u B reply, read by phone: %s", (unsigned)resp_len + 1,
+				   ret == 0 ? "yes" : "no");
+			nfc_led_detected();
+		}
+
+		if (!replayed && action != APP_CMD_ACTION_NONE) {
+			/* Reboot/save/reset: the phone has read (or had a second to read) the
+			 * reply — hand the action to the poll thread and close the session so
+			 * it runs with the mailbox off and the tag released (#242 equivalent). */
+			if (m_cmd_action != APP_CMD_ACTION_NONE && m_cmd_action != action) {
+				LOG_WRN("NFC mb: action %d supersedes pending %d", action,
+					m_cmd_action);
+			}
+			m_cmd_action = action;
+			m_cmd_action_ready = true;
+			reason = "deferred action";
+			break;
+		}
+	}
+
+	if (mb_set_en(false)) {
+		LOG_WRN("NFC mb: could not disable the mailbox at session end");
+	}
+	nfc_led_off();
+	NFC_DBG("mb: session end (%s), %u reply(ies)", reason, served);
+	return (int)served;
+}
+
 /* Full NFC check: always reads the tag. Used at boot and by `nfc check`
  * (an I2C-side `nfc write` does not set the RF IT_STS_Dyn flags). */
 int app_nfc_check(void)
@@ -2365,9 +2635,63 @@ int app_nfc_check(void)
  * while the RF field is briefly off, which IT_STS wouldn't flag anyway. */
 int app_nfc_poll(void)
 {
-	/* Identical to app_nfc_check() — both do a full tag read under the access
-	 * lock; kept as a separate entry point for call-site clarity (#220.F). */
-	return app_nfc_check();
+	int ret = nfc_access_begin();
+	if (ret) {
+		return ret;
+	}
+
+	int res = 0;
+	int64_t t_start = k_uptime_get();
+
+	/* Field-present mode (#313): as long as the phone holds its field we stay
+	 * powered (LPD low) and keep watching MB_CTRL_Dyn, so a mailbox enabled at
+	 * any point of the tap is served at once. Measured on the bench: with LPD
+	 * high the chip runs on field power alone and a phone's Write Dynamic
+	 * Configuration MB_EN=1 simply does not stick (VCC_ON=0), so releasing the
+	 * chip while a field is present would strand the phone. The EEPROM is not
+	 * touched while the field is on (that is the single-port collision the whole
+	 * design avoids); the usual reconciliation runs as soon as the field drops.
+	 * A reader parked on the tag costs a 500 ms tick after the first 30 s. */
+	for (;;) {
+		uint8_t eh = 0, ctrl = 0;
+		bool field_on = read_reg(ST25DV_EH_CTRL_DYN, &eh, 1) == 0 && (eh & ST25DV_FIELD_ON);
+		bool mb_en =
+			m_mb_available && mb_read_ctrl(&ctrl) == 0 && (ctrl & ST25DV_MB_CTRL_MB_EN);
+
+		if (mb_en && field_on) {
+			m_mb_requested = false;
+			ret = mb_serve_locked();
+			if (ret < 0) {
+				res = ret;
+			}
+			continue; /* re-read the field: the phone may be gone or may re-enable */
+		}
+		if (mb_en) {
+			/* Mailbox enabled but no phone: left over from an aborted session
+			 * (survives an MCU reset) and it blocks every EEPROM write — clear it. */
+			LOG_WRN("NFC mb: stuck MB_EN with no field -> disabling");
+			(void)mb_set_en(false);
+		}
+
+		if (!field_on) {
+			m_mb_requested = false;
+			res = nfc_check_locked();
+			if (m_mb_requested) {
+				continue; /* field came back with MB_EN during the read -> serve */
+			}
+			break;
+		}
+
+		/* Field on, mailbox off: hold the chip powered and wait for MB_EN or for
+		 * the field to drop (legacy NDEF phones drop it ~1.5 s after writing —
+		 * the EEPROM read then runs on the next tick). GPO pulses cut the wait. */
+		nfc_keep_awake();
+		int64_t elapsed = k_uptime_get() - t_start;
+		k_sem_take(&m_gpo_sem, K_MSEC(elapsed < NFC_FIELD_FAST_TICK_MS ? 50 : 500));
+	}
+
+	nfc_access_end();
+	return res;
 }
 
 /* #164: true while a response record is left on the tag and the info record has
@@ -2760,11 +3084,42 @@ static int cmd_nfc_mb_en(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* Bench helper: enable the mailbox from the I2C side and serve it, for readers
+ * that cannot send Write Dynamic Configuration themselves. Runs the same session
+ * loop the poll thread uses; a deferred action is only reported, not executed. */
+static int cmd_nfc_mb_serve(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+	ret = mb_set_en(true);
+	if (ret) {
+		nfc_access_end();
+		shell_error(sh, "MB_EN=1 failed: %d", ret);
+		return ret;
+	}
+	m_report_sh = sh;
+	int served = mb_serve_locked();
+	m_report_sh = NULL;
+	nfc_access_end();
+
+	shell_print(sh, "mailbox session over: %d reply(ies)%s", served,
+		    m_cmd_action_ready ? " (deferred action pending for the poll thread)" : "");
+	return served < 0 ? served : 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_nfc_mb,
 	SHELL_CMD_ARG(status, NULL, "Show FTM mailbox registers.", cmd_nfc_mb_status, 1, 0),
 	SHELL_CMD_ARG(on, NULL, "Enable the mailbox (MB_EN=1).", cmd_nfc_mb_en, 1, 0),
 	SHELL_CMD_ARG(off, NULL, "Disable the mailbox (MB_EN=0).", cmd_nfc_mb_en, 1, 0),
+	SHELL_CMD_ARG(serve, NULL, "Enable + serve the mailbox until idle/field-off.",
+		      cmd_nfc_mb_serve, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
@@ -2781,7 +3136,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_nfc_reg, 2, 1),
 	SHELL_CMD_ARG(regw, NULL, "Write system/dynamic register (E1). Usage: regw <addr> <hex>",
 		      cmd_nfc_regw, 3, 0),
-	SHELL_CMD(mb, &sub_nfc_mb, "FTM mailbox: status|on|off (#313).", NULL),
+	SHELL_CMD(mb, &sub_nfc_mb, "FTM mailbox: status|on|off|serve (#313).", NULL),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC memory access (debug).", NULL);
