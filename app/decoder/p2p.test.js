@@ -80,7 +80,8 @@ test("deriveSessionKey: distinct app_key, nonces or dev_eui gives a distinct ses
   const eui = "70b3d57ed0000abe";
   const a = p2p.deriveSessionKey(KEY, 0x11111111, 0x22222222, eui);
   const b = p2p.deriveSessionKey(KEY, 0x11111112, 0x22222222, eui); // dev_nonce +1
-  const c = p2p.deriveSessionKey("ffffffffffffffffffffffffffffffff", 0x11111111, 0x22222222, eui); // key differs
+  // key differs
+  const c = p2p.deriveSessionKey("ff".repeat(16), 0x11111111, 0x22222222, eui);
   const d = p2p.deriveSessionKey(KEY, 0x11111111, 0x22222222, "70b3d57ed0000abf"); // dev_eui +1
 
   assert.notEqual(toHex(a), toHex(b));

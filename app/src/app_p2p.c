@@ -1856,6 +1856,17 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 				"until reboot or `join`",
 				counter);
 			(void)pairing_clear();
+		} else if (!app_key_is_set() || !dev_eui_is_set()) {
+			/* The central can ask a paired node to rekey at any time,
+			 * and the session key it authenticated this frame with
+			 * outlives a config edit -- so the identity could have been
+			 * cleared underneath us since the join. Re-joining then
+			 * would put an all-zero app_key or DevEUI on the air, which
+			 * is exactly what the guards on the other three
+			 * start_join_episode() paths exist to prevent (#417). */
+			LOG_ERR("RejoinRequest received (counter %u) but lrw_appkey or lrw_deveui "
+				"is all-zero (device unprovisioned) -- not re-joining",
+				counter);
 		} else {
 			LOG_WRN("RejoinRequest received (counter %u): re-joining", counter);
 			/* Self-heal policy (§7), not the boot window: this is a
@@ -2544,10 +2555,7 @@ static void join_work_handler(struct k_work *work)
 	 * node would walk the whole order without transmitting once. */
 	bool pass_end = !duty_blocked && join_sweep_advance();
 
-	int64_t duty_wait_ms =
-		duty_blocked
-			? duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN)
-			: 0;
+	int64_t duty_wait_ms = duty_blocked ? duty_wait_ms_for(P2P_JOIN_REQ_LEN) : 0;
 	int64_t wait_ms = 0;
 	uint32_t base = 0;
 
