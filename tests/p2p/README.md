@@ -26,14 +26,14 @@ Nothing persists across reboot: re-enter radio params/keys every session.
 ```
 p2p status                                   # show current config
 p2p radio 868100000 10 14                    # freq_hz, sf (6-12), tx_power_dbm
-p2p key <app_key 32 hex digits> <serial_number>      # DUT identity (its LoRaWAN AppKey)
+p2p key <app_key 32 hex digits> <dev_eui 16 hex digits>   # DUT identity (AppKey + DevEUI)
 p2p session <dev_nonce> <central_nonce>      # derive session_key for data-plane frames
 p2p listen on                                # continuous RX: verify/decrypt + log DUT frames
 p2p listen off
 p2p tx <frame_type> <hex_body> [counter] [dir 0|1]   # craft + send a frame
 ```
 
-`p2p key`'s `app_key`/`serial_number` must match the device under test's own
+`p2p key`'s `app_key`/`dev_eui` must match the device under test's own
 provisioned values — `app_key` is the DUT's existing LoRaWAN OTAA AppKey
 (read it off the DUT, e.g. `config lrw_appkey` or bench records), the sole
 root secret for the whole P2P transport (doc/p2p.md §4, #118 phase 2
@@ -43,7 +43,7 @@ transmitted or provisioned separately.
 
 `p2p session` derives the data-plane `session_key = AES128-CMAC(app_key,
 "HIO-P2P-SES" ‖ 0x01 ‖ dev_nonce(4 BE) ‖ central_nonce(4 BE) ‖
-serial_number(4 BE) ‖ zero-pad to 32 B)` — read `dev_nonce`/`central_nonce`
+dev_eui(8, MSB-first) ‖ zero-pad to 32 B)` — read `dev_nonce`/`central_nonce`
 off the join exchange this sim observed or crafted (this sim does not track
 a join state machine itself).
 
