@@ -52,6 +52,7 @@ enum app_cmd_transport {
 #define APP_DEVICE_STATUS_I2C_WEDGED      (1u << 10) /* I2C bus wedged (fail streak >= threshold) */
 #define APP_DEVICE_STATUS_TIME_UNSYNCED   (1u << 11) /* RTC not synced (no wall-clock) */
 #define APP_DEVICE_STATUS_LRW_DISABLED    (1u << 12) /* radio-silent: DevEUI all-zero (#98) */
+#define APP_DEVICE_STATUS_MAILBOX_DOWN    (1u << 13) /* ST25DV FTM mailbox not authorised (#313) */
 
 /* Action the caller must perform AFTER the response has been sent (so the Ack
  * leaves before the device reboots). Set by app_cmd_handle(). */

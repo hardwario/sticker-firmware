@@ -156,14 +156,39 @@ static const char *cmd_action_str(enum app_cmd_action a)
  * never pulses regardless of the event bits. The event bits: RF_WRITE (bit6)
  * reports RF EEPROM writes (also in IT_STS_Dyn), FIELD_CHANGE (bit3) pulses on RF
  * field on/off. */
-#define ST25DV_GPO_REG          0x0000
-#define ST25DV_GPO_CTRL_DYN_REG 0x2000
-#define ST25DV_GPO_EN           0x80
-#define ST25DV_GPO_RF_WRITE_EN  0x40
-#define ST25DV_GPO_FIELD_EN     0x08
-/* Master enable + both event sources. GPO_EN MUST be included or the pin is mute. */
-#define ST25DV_GPO_WANT         (ST25DV_GPO_EN | ST25DV_GPO_RF_WRITE_EN | ST25DV_GPO_FIELD_EN)
-#define ST25DV_I2C_PWD_REG      0x0900
+#define ST25DV_GPO_REG           0x0000
+#define ST25DV_GPO_CTRL_DYN_REG  0x2000
+#define ST25DV_GPO_EN            0x80
+#define ST25DV_GPO_RF_WRITE_EN   0x40
+#define ST25DV_GPO_RF_PUT_MSG_EN 0x10 /* pulse when RF wrote a mailbox message (FTM) */
+#define ST25DV_GPO_FIELD_EN      0x08
+/* Master enable + all event sources. GPO_EN MUST be included or the pin is mute.
+ * RF_PUT_MSG_EN wakes the poll thread the moment the phone drops a mailbox
+ * request (#313); the field/EEPROM events keep the pre-mailbox behaviour. */
+#define ST25DV_GPO_WANT                                                                            \
+	(ST25DV_GPO_EN | ST25DV_GPO_RF_WRITE_EN | ST25DV_GPO_RF_PUT_MSG_EN | ST25DV_GPO_FIELD_EN)
+
+/* Fast Transfer Mode (FTM) mailbox — a 256 B dual-port RAM the RF reader and
+ * this I2C host exchange messages through WHILE THE RF FIELD IS ON (datasheet
+ * DS10925 §5.1), which is what the single-port user EEPROM can never do. The
+ * static MB_MODE bit (E1 EEPROM, needs the I2C password) only *authorises* FTM
+ * and is set once per device at boot; the dynamic MB_EN bit (E0, no password,
+ * writable from RF too) turns it on for a session — the phone sets it, we clear
+ * it. While MB_EN=1 every EEPROM write (user or system) is refused by the chip
+ * (I2C NACK / RF error 0Fh), so MB_EN must be 0 whenever we touch the EEPROM. */
+#define ST25DV_MB_MODE_REG       0x000D /* static, E1: bit0 = FTM authorised */
+#define ST25DV_MB_MODE_EN        0x01
+#define ST25DV_MB_CTRL_DYN       0x2006 /* dynamic, E0 */
+#define ST25DV_MB_CTRL_MB_EN     0x01   /* bit0: mailbox enabled (RW from RF and I2C) */
+#define ST25DV_MB_CTRL_HOST_PUT  0x02   /* bit1: I2C (we) put a message, RF has not read it */
+#define ST25DV_MB_CTRL_RF_PUT    0x04   /* bit2: RF put a message, we have not read it */
+#define ST25DV_MB_CTRL_HOST_MISS 0x10   /* bit4: we missed an RF message (MB_WDG) */
+#define ST25DV_MB_CTRL_RF_MISS   0x20   /* bit5: RF missed our message (MB_WDG) */
+#define ST25DV_MB_LEN_DYN        0x2007 /* dynamic, E0: message length - 1 */
+#define ST25DV_MB_RAM            0x2008 /* dynamic, E0: 256 B mailbox RAM */
+#define ST25DV_MB_RAM_SIZE       256
+#define ST25DV_VCC_ON            0x08 /* EH_CTRL_Dyn bit3: VCC present (LPD low) */
+#define ST25DV_I2C_PWD_REG       0x0900
 
 /* NFC Forum external type (TNF=0x04, urn:nfc:ext:) records carry the functional
  * protocol (cmd/rsp/ack/clm). Short type names ("hio.stck:<kind>") instead of full
@@ -872,6 +897,59 @@ static int nfc_present_password(const uint8_t pwd[8])
 	return 0;
 }
 
+/* ---- ST25DV FTM mailbox register layer (#313) ------------------------------
+ * All of these run with the access lock held and the tag powered (LPD low).
+ * They touch only dynamic registers / mailbox RAM (dual-port), so they are safe
+ * under a held RF field and never go through nfc_wait_field_off(). */
+
+/* Whether FTM could be authorised on this chip at boot (MB_MODE set/verified).
+ * false = the mailbox command channel does not work on this unit; reported as
+ * APP_DEVICE_STATUS_MAILBOX_DOWN so the production tester rejects it (#313 D7). */
+static bool m_mb_available;
+
+bool app_nfc_mailbox_available(void)
+{
+	return m_mb_available;
+}
+
+static int mb_read_ctrl(uint8_t *ctrl)
+{
+	return read_reg(ST25DV_MB_CTRL_DYN, ctrl, 1);
+}
+
+/* Set or clear MB_EN and verify the read-back. Clearing also drops any message
+ * flags (the chip resets HOST_PUT/RF_PUT with the mailbox). */
+static int mb_set_en(bool enable)
+{
+	uint8_t v = enable ? ST25DV_MB_CTRL_MB_EN : 0;
+	int ret = write_reg(ST25DV_MB_CTRL_DYN, &v, 1);
+	if (ret) {
+		return ret;
+	}
+	uint8_t rb = 0;
+	ret = read_reg(ST25DV_MB_CTRL_DYN, &rb, 1);
+	if (ret) {
+		return ret;
+	}
+	if (!!(rb & ST25DV_MB_CTRL_MB_EN) != enable) {
+		LOG_WRN("NFC mb: MB_EN=%d did not stick (MB_CTRL_Dyn=0x%02x)", enable, rb);
+		return -EIO;
+	}
+	return 0;
+}
+
+/* Length of the message currently in the mailbox (MB_LEN_Dyn holds len - 1). */
+static int mb_read_len(size_t *len)
+{
+	uint8_t lenm1 = 0;
+	int ret = read_reg(ST25DV_MB_LEN_DYN, &lenm1, 1);
+	if (ret) {
+		return ret;
+	}
+	*len = (size_t)lenm1 + 1;
+	return 0;
+}
+
 /* Configure the GPO so the pin actually pulses on RF write / field change — the
  * wake source for the event-driven NFC poll. Sets GPO_EN (master output enable) +
  * RF_WRITE + FIELD_CHANGE in BOTH the static EEPROM register (persists across
@@ -883,8 +961,20 @@ static int nfc_present_password(const uint8_t pwd[8])
 static int nfc_enable_rf_write_it(void)
 {
 	static const uint8_t default_pwd[8] = {0};
+	int ret;
 
-	int ret = nfc_present_password(default_pwd);
+	/* 0) A mailbox left enabled by an aborted session survives an MCU reset (the
+	 *    dynamic registers persist while the phone's field or VCC keeps the chip
+	 *    up) and would make every EEPROM write below fail (NACK, DS §5.1.2) —
+	 *    this was the June "boot mb_disable NACKs" symptom. Clear MB_EN first;
+	 *    a failed read here just means the register is unknown (emulator). */
+	uint8_t ctrl = 0;
+	if (mb_read_ctrl(&ctrl) == 0 && (ctrl & ST25DV_MB_CTRL_MB_EN)) {
+		LOG_WRN("NFC mb: left enabled at boot (MB_CTRL_Dyn=0x%02x) -> disabling", ctrl);
+		(void)mb_set_en(false);
+	}
+
+	ret = nfc_present_password(default_pwd);
 	if (ret) {
 		return ret;
 	}
@@ -922,7 +1012,30 @@ static int nfc_enable_rf_write_it(void)
 		}
 	}
 
-	/* 2) Dynamic GPO_CTRL_Dyn (volatile, E0, no password): enable GPO_EN now so
+	/* 2) MB_MODE (static EEPROM, same password session): authorise FTM once per
+	 *    device so the phone can enable the mailbox itself (MB_EN is RF-writable
+	 *    only while MB_MODE=1). EEPROM write only when the bit is not set yet.
+	 *    Failure is not fatal for the GPO path but marks the mailbox unavailable —
+	 *    a production defect the tester catches via device_status bit 13 (D7). */
+	uint8_t mode = 0;
+	int mret = read_reg(ST25DV_MB_MODE_REG, &mode, 1);
+	if (mret == 0 && !(mode & ST25DV_MB_MODE_EN)) {
+		mode |= ST25DV_MB_MODE_EN;
+		mret = write_reg(ST25DV_MB_MODE_REG, &mode, 1);
+		if (mret == 0) {
+			k_msleep(ST25DV_TW_MS_PER_PAGE + 5);
+			mret = read_reg(ST25DV_MB_MODE_REG, &mode, 1);
+			if (mret == 0 && !(mode & ST25DV_MB_MODE_EN)) {
+				mret = -EIO;
+			}
+		}
+	}
+	m_mb_available = (mret == 0);
+	if (!m_mb_available) {
+		LOG_WRN("NFC mb: unavailable - MB_MODE cfg failed: %d (tester must reject)", mret);
+	}
+
+	/* 3) Dynamic GPO_CTRL_Dyn (volatile, E0, no password): enable GPO_EN now so
 	 *    the output is live for this power cycle without waiting for a reboot. */
 	uint8_t dyn = 0;
 	ret = read_reg(ST25DV_GPO_CTRL_DYN_REG, &dyn, 1);
@@ -937,8 +1050,8 @@ static int nfc_enable_rf_write_it(void)
 		}
 	}
 
-	LOG_INF("NFC: GPO cfg static=0x%02x dyn=0x%02x (GPO_EN=%d)", gpo, dyn,
-		!!(dyn & ST25DV_GPO_EN));
+	LOG_INF("NFC: GPO cfg static=0x%02x dyn=0x%02x (GPO_EN=%d) MB_MODE=0x%02x mailbox=%s", gpo,
+		dyn, !!(dyn & ST25DV_GPO_EN), mode, m_mb_available ? "ok" : "UNAVAILABLE");
 
 	return 0;
 }
@@ -2585,6 +2698,75 @@ static int cmd_nfc_regw(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* ---- `nfc mb` — FTM mailbox bench controls (#313) ---- */
+
+static int cmd_nfc_mb_status(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	uint8_t mode = 0, ctrl = 0, eh = 0, gpo = 0, gpo_dyn = 0;
+	size_t mlen = 0;
+	int r_mode = read_reg(ST25DV_MB_MODE_REG, &mode, 1);
+	int r_ctrl = mb_read_ctrl(&ctrl);
+	int r_len = mb_read_len(&mlen);
+	int r_eh = read_reg(ST25DV_EH_CTRL_DYN, &eh, 1);
+	int r_gpo = read_reg(ST25DV_GPO_REG, &gpo, 1);
+	int r_gdyn = read_reg(ST25DV_GPO_CTRL_DYN_REG, &gpo_dyn, 1);
+	nfc_access_end();
+
+	shell_print(sh, "mailbox available: %s",
+		    m_mb_available ? "yes" : "NO (MB_MODE cfg failed)");
+	shell_print(sh, "MB_MODE   (0x000D): 0x%02x%s", mode, r_mode ? " (read failed)" : "");
+	shell_print(sh,
+		    "MB_CTRL   (0x2006): 0x%02x  MB_EN=%d HOST_PUT=%d RF_PUT=%d HOST_MISS=%d "
+		    "RF_MISS=%d%s",
+		    ctrl, !!(ctrl & ST25DV_MB_CTRL_MB_EN), !!(ctrl & ST25DV_MB_CTRL_HOST_PUT),
+		    !!(ctrl & ST25DV_MB_CTRL_RF_PUT), !!(ctrl & ST25DV_MB_CTRL_HOST_MISS),
+		    !!(ctrl & ST25DV_MB_CTRL_RF_MISS), r_ctrl ? " (read failed)" : "");
+	shell_print(sh, "MB_LEN    (0x2007): msg %u B%s", (unsigned)mlen,
+		    r_len ? " (read failed)" : "");
+	shell_print(sh, "EH_CTRL   (0x2002): 0x%02x  FIELD_ON=%d VCC_ON=%d%s", eh,
+		    !!(eh & ST25DV_FIELD_ON), !!(eh & ST25DV_VCC_ON), r_eh ? " (read failed)" : "");
+	shell_print(sh, "GPO static (0x0000): 0x%02x  GPO_CTRL_Dyn (0x2000): 0x%02x%s", gpo,
+		    gpo_dyn, (r_gpo || r_gdyn) ? " (read failed)" : "");
+	return 0;
+}
+
+static int cmd_nfc_mb_en(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	bool enable = strcmp(argv[0], "on") == 0;
+
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+	ret = mb_set_en(enable);
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "MB_EN=%d failed: %d", enable, ret);
+		return ret;
+	}
+	shell_print(sh, "MB_EN=%d", enable);
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_nfc_mb,
+	SHELL_CMD_ARG(status, NULL, "Show FTM mailbox registers.", cmd_nfc_mb_status, 1, 0),
+	SHELL_CMD_ARG(on, NULL, "Enable the mailbox (MB_EN=1).", cmd_nfc_mb_en, 1, 0),
+	SHELL_CMD_ARG(off, NULL, "Disable the mailbox (MB_EN=0).", cmd_nfc_mb_en, 1, 0),
+	SHELL_SUBCMD_SET_END);
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_nfc, SHELL_CMD_ARG(dump, NULL, "Hex dump all 512 B of NFC memory.", cmd_nfc_dump, 1, 0),
 	SHELL_CMD_ARG(read, NULL, "Read a range. Usage: read <offset> <len>", cmd_nfc_read, 3, 0),
@@ -2599,6 +2781,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_nfc_reg, 2, 1),
 	SHELL_CMD_ARG(regw, NULL, "Write system/dynamic register (E1). Usage: regw <addr> <hex>",
 		      cmd_nfc_regw, 3, 0),
+	SHELL_CMD(mb, &sub_nfc_mb, "FTM mailbox: status|on|off (#313).", NULL),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC memory access (debug).", NULL);

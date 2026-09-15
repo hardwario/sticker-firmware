@@ -282,6 +282,11 @@ bool app_nfc_ready(void)
 	return true;
 }
 
+bool app_nfc_mailbox_available(void)
+{
+	return true;
+}
+
 /* #308: call counter so the test can confirm clm_ack dispatch reached app_nfc
  * without linking the real app_nfc.c (its clm latch is HIL-verified, like the
  * rest of that file — see #247). */

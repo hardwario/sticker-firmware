@@ -63,6 +63,12 @@ int app_nfc_restore_info(void);
  * tag is unavailable and the device runs degraded (#88). */
 bool app_nfc_ready(void);
 
+/* Whether the ST25DV Fast-Transfer-Mode mailbox could be authorised at boot
+ * (static MB_MODE set + verified). false = the mailbox command channel is dead
+ * on this unit — a hardware/production defect, reported as
+ * APP_DEVICE_STATUS_MAILBOX_DOWN for the production tester (#313 D7). */
+bool app_nfc_mailbox_available(void);
+
 /* True while an NFC exchange is in progress (a phone is interacting). The main
  * loop suppresses its periodic status/heartbeat LED blink while this is set so it
  * does not fight the NFC interaction LED (app_nfc.c). */

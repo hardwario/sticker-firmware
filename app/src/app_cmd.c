@@ -162,6 +162,9 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	if (!app_nfc_ready()) {
 		status |= APP_DEVICE_STATUS_NFC_DOWN;
 	}
+	if (!app_nfc_mailbox_available()) {
+		status |= APP_DEVICE_STATUS_MAILBOX_DOWN;
+	}
 #ifdef APP_CMD_HAVE_HISTORY
 	if (!app_history_is_ready()) {
 		status |= APP_DEVICE_STATUS_HISTORY_DOWN;
