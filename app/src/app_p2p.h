@@ -269,6 +269,11 @@ struct app_p2p_info {
 	uint32_t net_id;   /* 0 pre-pairing */
 	uint16_t dev_addr; /* 0 pre-pairing */
 	uint8_t rx1_delay_s;
+	/* The spreading factor the radio is tuned to RIGHT NOW. It is not
+	 * necessarily p2p_spreading_factor: a join episode sweeps, and a join
+	 * that landed on a swept SF persists it. This is what tells a bench
+	 * whether a node found the network's SF or is still looking. */
+	uint8_t sf;
 	/* Session TX power: the value the central assigned in JoinAccept when
 	 * tx_power_assigned, otherwise the node's own p2p_tx_power config. */
 	bool tx_power_assigned;

@@ -3020,6 +3020,7 @@ void app_p2p_get_info(struct app_p2p_info *info)
 	info->net_id = m_net_id;
 	info->dev_addr = m_dev_addr;
 	info->rx1_delay_s = m_rx1_delay_s;
+	info->sf = m_sf;
 	info->tx_power_assigned = m_session_tx_power_assigned;
 	info->tx_power_dbm = m_session_tx_power_assigned ? m_session_tx_power_dbm
 							 : (int8_t)g_app_config.p2p_tx_power;
