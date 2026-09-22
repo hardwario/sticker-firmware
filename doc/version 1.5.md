@@ -14,6 +14,8 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
 | LoRaWAN | **Fix** — region guard (#409 A1): a stored `lrw-region` that is not compiled into the image no longer kills LoRaWAN init silently — the radio stays silent (never falls back to another band) and `device_status` bit 13 `lrw_bad_region` reports it. |
 | LoRaWAN | **New** — manual uplink datarate `lrw-datarate` (#409 A3): `auto` (default) or `dr0`–`dr7`, pinned after every join when ADR is off. |
+| LoRaWAN | **Fix** — low-DR delivery (#409 A5a, part 1): compact LoRaWAN `Error` so a command is always answered at the 11 B tier; MAC-flood (budget 0) no longer drops responses/alarms; alarm batches split across frames; alarm state mirrored into telemetry `system_flags`. |
+| LoRaWAN | **Fix** — `DevStatusReq` right after `LinkADRReq` is now answered (#419), via a `loramac-node` patch applied with `west patch apply`. |
 
 ---
 
@@ -278,6 +280,49 @@ settings save
 encodes the names (`"DR3"`) and decodes the raw value.
 
 Cost: release +408 B flash, +0 B RAM.
+
+
+---
+
+## 7. Low-DR delivery, part 1 (#409 A5a)
+
+At the smallest LoRaWAN budget tier — **11 B** on US915 DR0 and AU915 / AS923 DR2 — most
+fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *floor*
+(telemetry, Ack, compact Error, Info-lite); full delivery targets ≥ 51 B.
+
+- **Compact LoRaWAN `Error`.** Over LoRaWAN an `Error` carries `code` + `fault_field`
+  only; the `detail` string is NFC-only. The "response too large" fallback is a 5 B empty
+  `Error` (`code` 0 = UNKNOWN, which proto3 omits — `ttn.js` now defaults `code` to 0), so
+  a command that cannot be answered in full still gets an answer.
+- **Budget 0 (MAC-command flood)** no longer drops a queued response or alarm: an empty
+  uplink flushes the MAC answers and the payload is retried.
+- **Alarm batches split** across as many `AlarmReport` frames as needed (same
+  `base_time` / `total` in each) instead of trimming to the first frame. At the 11 B tier
+  no `AlarmReport` fits; the frame is skipped and logged.
+- **Alarm state in telemetry.** `Telemetry.system_flags` bits 1..8 now carry the
+  `device_status` alarm byte (bit 0 is still `boot`), so the alarm state reaches the LNS in
+  every telemetry frame, including at the 11 B tier. `ttn.js` adds `alarm_status` and
+  `alarm_status_flags` (e.g. `["alarm_any", "alarm_threshold"]`). Additive — older decoders
+  ignore the extra bits.
+
+## 8. `DevStatusReq` after `LinkADRReq` answered (#419)
+
+LoRaMac-node's MAC-command parser skipped a `DevStatusReq` that is the last FOpts byte
+right after a `LinkADRReq` block — exactly how ChirpStack bundles them — so `DevStatusAns`
+(battery, margin) was never sent. Not fixed upstream.
+
+The fix is carried as a **Zephyr `west patch`** on the `loramac-node` module
+(`zephyr/patches.yml`, `zephyr/patches/loramac-node/`):
+
+```
+west update
+west patch apply      # re-run after every west update
+```
+
+CI applies it automatically. A LoRaWAN build **refuses to configure** when the patch is
+missing (CMake checks for the `STICKER-419` marker); `-DSTICKER_ALLOW_UNPATCHED_MODULES=ON`
+overrides it for a throwaway build. From a git worktree pass absolute paths:
+`west patch apply -b <worktree>/zephyr/patches -l <worktree>/zephyr/patches.yml`.
 
 ---
 

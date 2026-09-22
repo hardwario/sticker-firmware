@@ -276,7 +276,7 @@ LNS silently kills all downlinks.
   proto_id 16); bench check pending (playbook AT-LRW-20)
 - [ ] A5a — general split rule for fPort 85 / fPort 3 (see Step 3); closes #418
   - [x] 3a — shared budget helper (0 = defer, not unlimited) + compact LoRaWAN `Error` (`05e4a5f`)
-  - [ ] 3b — alarms: N `AlarmReport` frames instead of trimming; alarm bits in telemetry
+  - [x] 3b — alarms: N `AlarmReport` frames instead of trimming; alarm bits in telemetry (`3b0a97d`)
   - [ ] 3c — `Info`-lite at the 11 B tier + deferred boot announce; `BUDGET_TOO_SMALL`
   - [ ] 3d — settings-info + GetConfig: DR-adaptive pages (≥ 51 B tier, low priority)
   - [ ] 3e — GetParam / W1Scan: paging (≥ 51 B tier, low priority)
@@ -288,6 +288,9 @@ LNS silently kills all downlinks.
 - [ ] A5b — AU915 HIL validation (needs an AU915-plan gateway)
 
 **Deferred / v2:** A7 (RX2 override).
+
+**Also in this PR:** #419 — `DevStatusReq` after `LinkADRReq` (loramac-node `west patch`,
+`6d6215f`); HW acceptance pending.
 
 ## 4. Implementation steps
 
