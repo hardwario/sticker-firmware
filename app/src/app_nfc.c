@@ -208,12 +208,13 @@ static const char *cmd_action_str(enum app_cmd_action a)
 #define NDEF_ACK_TYPE      "hio.stck:ack"
 
 /* Provisioning claim record (#247): a plaintext protobuf ClaimInfo{serial_number,
- * claim_token} the firmware lays down alongside `inf` while a claim token is
- * provisioned but not yet claimed. The provisioning phone reads it, claims the
- * device (first-claim-wins), then deletes it from the ST25DV over RF — which
- * works even with the MCU powered off. Once gone, the firmware never rewrites it
- * (latched via m_clm_state). The token stays owner-readable over the encrypted
- * get_info channel, so deleting clm only removes the plaintext convenience. */
+ * claim_token} the firmware lays down alongside `inf` while the claim window is
+ * active and a claim token is provisioned (#415: laid whenever CLAIM_ACTIVE, no
+ * longer a lazily-armed one-shot). The provisioning phone reads it, claims the
+ * device (first-claim-wins), then the app sends claim_done to close the window
+ * (m_claim_state -> CLAIM_DONE). The token stays owner-readable over the
+ * encrypted get_info / get_claim_info channel. PR #414 removes this record
+ * entirely (mailbox get_claim_info replaces the plaintext convenience). */
 #define NDEF_CLAIM_TYPE "hio.stck:clm"
 
 /* Vendor-token command channel (#299, #316): a separate, dedicated record from
@@ -419,29 +420,43 @@ static bool m_seen_resp; /* tag already holds a response record; leave it for th
 static bool m_seen_ack;  /* tag holds the phone's ack: reply consumed, restore info now */
 static bool m_seen_inf;  /* #247: tag holds our info record (settled resting state) */
 
-/* #247 claim-record lifecycle, persisted in its own "clm" settings subtree (not
- * the config blob, so a factory reset that preserves identity leaves it intact —
- * only a full NVS erase re-opens provisioning):
- *   UNSET    no token provisioned yet, or clm never laid down
- *   PENDING  clm laid down on the tag, awaiting an authenticated claim confirm
- *   CONSUMED clm_ack command or any successfully-decrypted hio.stck:cmd (#360)
- *            — never rewrite it again */
-enum clm_state {
-	CLM_UNSET = 0,
-	CLM_PENDING = 1,
-	CLM_CONSUMED = 2,
+/* #247/#415 claim window, persisted in its own "clm" settings subtree (key
+ * "clm/state"), not the config blob - so a device_reset/factory_reset that
+ * preserves identity leaves it intact; only a full NVS erase, an explicit
+ * claim_active, or vendor_reset re-opens it. #415 C3: two explicit states, no
+ * automatic behaviour.
+ *   ACTIVE  factory default - the device may still be claimed: the plaintext
+ *           clm record is laid on the tag (until PR #414 removes it) and
+ *           get_claim_info discloses the claim_token.
+ *   DONE    claiming finished (claim_done command / `ats claim done`): no clm
+ *           record, get_claim_info returns NOT_READY.
+ * Mutators are explicit only (claim_done / claim_active / vendor_reset). There
+ * is no auto-arm on a provisioned token and no implicit close on a decrypted
+ * command - both removed in #415 (the #247 tri-state's PENDING/CONSUMED and the
+ * #308/#340-M3 arm-commit/consume machinery are gone). */
+enum claim_state {
+	CLAIM_ACTIVE = APP_NFC_CLAIM_ACTIVE,
+	CLAIM_DONE = APP_NFC_CLAIM_DONE,
 };
-static uint8_t m_clm_state;
+/* Factory default when the "clm/state" key is absent (fresh NVS): ACTIVE. */
+static uint8_t m_claim_state = CLAIM_ACTIVE;
 
-/* Load handler for the "clm" settings subtree (key "clm/state"). */
+/* Load handler for the "clm" settings subtree (key "clm/state"). Migrates the
+ * legacy #247 tri-state in place: unset(0)/pending(1) -> ACTIVE, consumed(2) ->
+ * DONE, any other byte -> ACTIVE (safe default). */
 static int clm_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	if (settings_name_steq(name, "state", NULL)) {
-		if (len != sizeof(m_clm_state)) {
+		uint8_t stored;
+		if (len != sizeof(stored)) {
 			return -EINVAL;
 		}
-		ssize_t r = read_cb(cb_arg, &m_clm_state, sizeof(m_clm_state));
-		return (r < 0) ? (int)r : 0;
+		ssize_t r = read_cb(cb_arg, &stored, sizeof(stored));
+		if (r < 0) {
+			return (int)r;
+		}
+		m_claim_state = (stored == CLAIM_DONE) ? CLAIM_DONE : CLAIM_ACTIVE;
+		return 0;
 	}
 	return -ENOENT;
 }
@@ -449,93 +464,59 @@ SETTINGS_STATIC_HANDLER_DEFINE(app_clm, "clm", NULL, clm_settings_set, NULL, NUL
 
 static void clm_state_save(void)
 {
-	int ret = settings_save_one("clm/state", &m_clm_state, sizeof(m_clm_state));
+	int ret = settings_save_one("clm/state", &m_claim_state, sizeof(m_claim_state));
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("settings_save_one(clm/state)", ret);
 	}
 }
 
-/* #340 M24: m_clm_state is also mutated by nfc_check_locked()'s poll-thread
- * arm sequence (clm_arm_commit/revert below) - guarded by m_lock across that
- * whole sequence (nfc_access_begin/end). app_nfc_clm_reset() and clm_consume()
- * are reachable directly from other threads (shell app_ats.c commands, the
- * main thread's deferred-action dispatch, app_settings_vendor_reset()) with
- * no synchronization of their own, so a reset/consume from one of those could
- * race a poll-thread commit/revert and be silently clobbered by whichever ran
- * last. Take m_lock here too - Zephyr's k_mutex is recursive for the owning
- * thread, so this is a safe no-op when already called from within the poll
- * thread's own locked sequence (clm_consume() from handle_encrypted_cmd() or
- * the delete-detected path), and correctly serializes against a genuinely
- * different thread otherwise. */
-void app_nfc_clm_reset(void)
+/* Set the claim window state and persist it. Takes m_lock because m_claim_state
+ * is also read by the poll thread (build_resting_ndef via nfc_check_locked) and
+ * these mutators are reached from other threads (shell app_ats.c, the main
+ * thread's deferred-action dispatch, app_settings_vendor_reset()). Zephyr's
+ * k_mutex is recursive for the owning thread, so this is a safe no-op when
+ * already held by the poll thread and correctly serializes a genuinely
+ * different thread otherwise (#340 M24). */
+static void claim_state_set(uint8_t state, const char *reason)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
-	m_clm_state = CLM_UNSET;
-	clm_state_save();
-	k_mutex_unlock(&m_lock);
-}
-
-/* Shared PENDING->CONSUMED transition (#308): two independent triggers funnel
- * through here so the latch/log/persist logic lives in one place. (#360: the
- * original third trigger - unauthenticated delete-detection in
- * nfc_check_locked, the #247 signal - was removed; it let any NFC write that
- * removed the clm record, not just the claiming phone, latch CONSUMED with no
- * secret_key involved.)
- *   1. clm_ack command (app_nfc_clm_ack) - explicit, authenticated (secret_key).
- *   2. any successfully-decrypted hio.stck:cmd (handle_encrypted_cmd) - implicit:
- *      decrypting at all already proves the caller holds secret_key, which is
- *      already the "provisioning operator" bar the rest of this file uses, so a
- *      claim window left open after a phone has already run a real command is
- *      just noise on the tag.
- * A no-op outside PENDING (already CONSUMED, or never armed). See #340 M24
- * above for why this takes m_lock. */
-static void clm_consume(const char *reason)
-{
-	k_mutex_lock(&m_lock, K_FOREVER);
-	if (m_clm_state != CLM_PENDING) {
-		k_mutex_unlock(&m_lock);
-		return;
+	if (m_claim_state != state) {
+		m_claim_state = state;
+		clm_state_save();
+		LOG_INF("NFC claim window -> %s (%s) (#415)",
+			state == CLAIM_DONE ? "done" : "active", reason);
 	}
-	m_clm_state = CLM_CONSUMED;
-	clm_state_save();
 	k_mutex_unlock(&m_lock);
-	LOG_INF("NFC clm record consumed (%s) (#308)", reason);
 }
 
-/* #340 M3: arming (UNSET->PENDING) is split into an in-RAM step (so
- * build_resting_ndef sees PENDING immediately) and a deferred persist that
- * only happens once nfc_check_locked has confirmed the clm-bearing resting
- * NDEF actually landed on the tag. These two helpers are that persist/undo,
- * called only on the poll cycle that just armed (just_armed == true). */
-static void clm_arm_commit(void)
+/* #415: claiming finished - stop laying the clm record and refuse
+ * get_claim_info. Reached from the claim_done command (over the secret_key- or
+ * vendor_token-encrypted channel) and `ats claim done`. */
+void app_nfc_claim_done(void)
 {
-	m_clm_state = CLM_PENDING;
-	clm_state_save();
+	claim_state_set(CLAIM_DONE, "claim_done command");
 }
 
-static void clm_arm_revert(void)
+/* #415: (re)open the claim window (factory default). Reached from the
+ * claim_active command, `ats claim active`, and vendor_reset. */
+void app_nfc_claim_active(void)
 {
-	m_clm_state = CLM_UNSET;
+	claim_state_set(CLAIM_ACTIVE, "claim_active command");
 }
 
-void app_nfc_clm_ack(void)
-{
-	clm_consume("clm_ack command");
-}
-
-uint8_t app_nfc_clm_state_get(void)
+uint8_t app_nfc_claim_state_get(void)
 {
 	uint8_t state;
 
 	k_mutex_lock(&m_lock, K_FOREVER);
-	state = m_clm_state;
+	state = m_claim_state;
 	k_mutex_unlock(&m_lock);
 
 	return state;
 }
 
 /* #340 L1 test support: whether the "processing"/"rejected" blink timer is
- * currently armed. Same testability idiom as app_nfc_clm_state_get() above. */
+ * currently armed. Same testability idiom as app_nfc_claim_state_get() above. */
 bool app_nfc_led_blink_active(void)
 {
 	return k_timer_remaining_get(&m_led_blink_timer) != 0;
@@ -1166,9 +1147,10 @@ static size_t build_claim_payload(uint8_t *out, size_t out_size)
 }
 
 /* Build the "resting" NDEF the tag holds between phone exchanges: the info
- * record, plus the clm provisioning record while m_clm_state == CLM_PENDING
- * (#247). Stable input (advances only with the nonce counter / claim state) so
- * nfc_check_locked can compare it to the tag and skip rewriting when present. */
+ * record, plus the clm provisioning record while the claim window is active and
+ * a token is provisioned (#247/#415). Stable input (advances only with the
+ * nonce counter / claim state) so nfc_check_locked can compare it to the tag and
+ * skip rewriting when present. */
 static size_t build_resting_ndef(uint8_t *out, size_t out_size)
 {
 	char inf[NDEF_INFO_PAYLOAD_MAX];
@@ -1182,8 +1164,10 @@ static size_t build_resting_ndef(uint8_t *out, size_t out_size)
 				      .payload = (const uint8_t *)inf,
 				      .payload_len = inf_len};
 
+	/* #415: lay the clm record whenever the claim window is active and a token
+	 * is provisioned (no longer a lazily-armed PENDING state). */
 	uint8_t clm[ClaimInfo_size];
-	if (m_clm_state == CLM_PENDING) {
+	if (m_claim_state == CLAIM_ACTIVE && claim_token_is_set()) {
 		size_t clm_len = build_claim_payload(clm, sizeof(clm));
 		if (clm_len) {
 			recs[n++] = (struct ndef_rec){.tnf = NDEF_TNF_EXT,
@@ -1476,16 +1460,11 @@ static int handle_encrypted_cmd(const uint8_t *key, enum app_cmd_transport trans
 	uint32_t req_nonce = app_config()->nonce_counter;
 	NFC_DBG("cmd: decrypt ok, cmd_len=%zu", cmd_len);
 
-	/* #308: decrypting at all already proves the caller holds secret_key,
-	 * regardless of which command it turns out to be or whether it succeeds -
-	 * that is already the bar the rest of the claim window relies on. Excludes
-	 * the vendor_token channel (#316): a vendor_token holder is a narrower,
-	 * separate principal (HARDWARIO recovery), not proof of secret_key
-	 * possession, so a vendor touch must not silently close a claim window
-	 * meant for the actual device owner. */
-	if (transport != APP_CMD_TRANSPORT_VENDOR) {
-		clm_consume("valid hio.stck:cmd received");
-	}
+	/* #415 C3/D10: the claim window no longer closes implicitly on a decrypted
+	 * command (the #308 behaviour). It closes only on an explicit claim_done, so
+	 * the app must send one after storing the keys - a crash in between leaves
+	 * the token readable on a powered unit (accepted: ATELOS refuses a second
+	 * claim of the same serial; only the token leaks, not control). */
 
 	size_t resp_len = 0;
 	ret = app_cmd_handle(transport, cmd_plain, cmd_len, resp_plain, sizeof(resp_plain),
@@ -1820,14 +1799,15 @@ int app_nfc_init(void)
 	LOG_WRN("============================================================");
 #endif
 
-	/* #247: restore the claim-record lifecycle latch from its own settings subtree
-	 * (settings subsystem already brought up by app_config_init; idempotent here). */
+	/* #247/#415: restore the claim window latch from its own settings subtree
+	 * (settings subsystem already brought up by app_config_init; idempotent here).
+	 * A missing key leaves the factory default ACTIVE. */
 	(void)settings_subsys_init();
 	ret = settings_load_subtree("clm");
 	if (ret) {
-		LOG_WRN("NFC: clm state load failed: %d (defaulting UNSET)", ret);
+		LOG_WRN("NFC: clm state load failed: %d (defaulting ACTIVE)", ret);
 	}
-	LOG_INF("NFC: clm state = %u", m_clm_state);
+	LOG_INF("NFC: claim state = %u", m_claim_state);
 
 	if (!gpio_is_ready_dt(&m_lpd)) {
 		LOG_ERR("GPIO device not ready (LPD)");
@@ -1953,28 +1933,6 @@ static int nfc_check_locked(void)
 	m_seen_ack = false;
 	m_seen_inf = false;
 
-	/* #247: once a claim token is provisioned, start exposing the clm record
-	 * (UNSET -> PENDING). Driven purely by the token being set (not tag content),
-	 * so it fires on the first check after commissioning; build_resting_ndef then
-	 * includes clm. CONSUMED (via clm_ack or a decrypted command, #360) is
-	 * terminal. `just_armed` guards the deferred-persist step below (#340 M3):
-	 * the PENDING state is set in RAM only here (build_resting_ndef right below
-	 * needs it immediately to include the clm record) - it is NOT persisted yet.
-	 * If the tag write that lays down that clm-bearing record never lands (RF
-	 * field up -> -EBUSY, I2C error, ...), persisting PENDING now would leave
-	 * flash out of sync with what's actually on the tag. So every path below
-	 * reachable while just_armed is true must either confirm the write succeeded
-	 * and call clm_arm_commit() (persist PENDING), or call clm_arm_revert() (undo
-	 * back to UNSET in RAM so the next poll retries arming from scratch) - see
-	 * #351/#357 clm_rearm, which made this arming sequence run on every
-	 * re-provisioning, not just once at factory commissioning. */
-	bool just_armed = false;
-	if (m_clm_state == CLM_UNSET && claim_token_is_set()) {
-		m_clm_state = CLM_PENDING;
-		just_armed = true;
-		LOG_INF("NFC clm record armed (claim token provisioned) (#247)");
-	}
-
 	/* read_mem / write_mem below gate every EEPROM chunk on the RF field being
 	 * off (see nfc_wait_field_off): a 512 B access during RF collides with the
 	 * phone on the shared i2c1 bus and can wedge it, starving the watchdog feeder
@@ -1982,26 +1940,23 @@ static int nfc_check_locked(void)
 	 * dump. The sensors keep using i2c1 unaffected. */
 
 	/* Build the expected resting NDEF up front (no I2C): info record, plus the
-	 * clm record while PENDING (#247). Used both to detect "tag already holds our
-	 * resting content" and to (re)write it. */
+	 * clm record while the claim window is active and a claim token is
+	 * provisioned (#247/#415). Used both to detect "tag already holds our resting
+	 * content" and to (re)write it. #415: the clm record now simply reflects the
+	 * current claim state (build_resting_ndef) - it is no longer armed lazily, so
+	 * there is nothing to commit/undo when a tag write fails; the next poll just
+	 * lays it down again. */
 	uint8_t info[128];
 	size_t info_len = build_resting_ndef(info, sizeof(info));
 
 	ret = read_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
 	if (ret == -EBUSY) {
 		/* RF field stayed on through the read -> skip this cycle (benign); the
-		 * GPO event / fallback re-polls once the field is quiet again. No write
-		 * happened, so an arm this cycle (#340 M3) is not yet confirmed - retry. */
-		if (just_armed) {
-			clm_arm_revert();
-		}
+		 * GPO event / fallback re-polls once the field is quiet again. */
 		return 0;
 	}
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("read_mem", ret);
-		if (just_armed) {
-			clm_arm_revert();
-		}
 		return ret;
 	}
 	NFC_DBG("poll: tag read ok, CC=%02x TLV=%02x len=%02x rec=%02x", m_buf[0], m_buf[4],
@@ -2012,25 +1967,11 @@ static int nfc_check_locked(void)
 		m_unknown_count = 0;
 		m_info_restore_pending = false; /* #164: writing info record below */
 		NFC_REPORT("NFC tag empty -> writing info record (%zu B)", info_len);
-		bool write_ok = false;
 		if (info_len) {
 			ret = write_mem(0, info, info_len);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
 				res = ret;
-			} else {
-				write_ok = true;
-			}
-		}
-		/* #340 M3: commit the arm only once the clm-bearing record actually landed
-		 * on the tag (info_len == 0 would mean nothing was ever written either).
-		 * Tracked via a dedicated flag, not `res`, since `res` is not touched on
-		 * the write's own success path (only on failure). */
-		if (just_armed) {
-			if (write_ok) {
-				clm_arm_commit();
-			} else {
-				clm_arm_revert();
 			}
 		}
 		return res;
@@ -2042,11 +1983,6 @@ static int nfc_check_locked(void)
 		m_unknown_count = 0;
 		m_info_restore_pending = false; /* #164: info record is present */
 		NFC_REPORT("NFC tag holds our info record (nothing pending) -> no action");
-		/* #340 M3: tag content already matches what we'd write (clm included when
-		 * PENDING) - confirmed correct, not a race. */
-		if (just_armed) {
-			clm_arm_commit();
-		}
 		return 0;
 	}
 
@@ -2069,11 +2005,6 @@ static int nfc_check_locked(void)
 		NFC_REPORT_HEX("  response (0x01 ver + protobuf Response):", m_resp_buf,
 			       m_resp_len);
 		m_resp_write_pending = true;
-		/* #340 M3: this writes the command reply, not the clm-bearing resting
-		 * NDEF - an arm this cycle is not confirmed by it, so retry next poll. */
-		if (just_armed) {
-			clm_arm_revert();
-		}
 		return nfc_write_response();
 	}
 
@@ -2092,25 +2023,11 @@ static int nfc_check_locked(void)
 		}
 		LOG_INF("Restoring info record after phone ack (#164)...");
 		NFC_REPORT("NFC wrote: info record (%zu B) - restored after phone ack", info_len);
-		bool write_ok = false;
 		if (info_len) {
 			ret = write_mem(0, info, info_len);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
 				res = ret;
-			} else {
-				write_ok = true;
-			}
-		}
-		/* #340 M3: `info` here is the clm-bearing record built at the top of this
-		 * call - commit the arm once it is confirmed written, else retry. Tracked
-		 * via a dedicated flag: `res` may already carry an unrelated error from
-		 * app_nfc_parser_run above and would falsely look like a failed write. */
-		if (just_armed) {
-			if (write_ok) {
-				clm_arm_commit();
-			} else {
-				clm_arm_revert();
 			}
 		}
 		return res;
@@ -2122,44 +2039,25 @@ static int nfc_check_locked(void)
 	if (m_seen_resp) {
 		m_unknown_count = 0;
 		m_info_restore_pending = true;
-		/* #340 M3: no write happened this cycle - an arm is not confirmed. */
-		if (just_armed) {
-			clm_arm_revert();
-		}
 		return res;
 	}
 
 	/* #247: settled resting state — our info record is on the tag (so this is not
 	 * a phone mid-write, which would show neither inf nor clm). Refresh the
 	 * resting record if the tag copy is stale (e.g. an older nonce high-water).
-	 * (#360: this used to also latch CLM_CONSUMED here when clm was absent —
-	 * removed, since that trigger fired on unauthenticated presence/absence of
-	 * the plaintext clm record with no secret_key check at all.) */
+	 * (#360 removed an unauthenticated close-on-clm-absent trigger here; #415
+	 * removed the last implicit close entirely — the window closes only on an
+	 * explicit claim_done.) */
 	if (m_seen_inf) {
 		m_unknown_count = 0;
 		m_info_restore_pending = false;
 		info_len = build_resting_ndef(info, sizeof(info));
-		bool matched = info_len && memcmp(m_buf, info, info_len) == 0;
-		bool write_ok = false;
-		if (!matched && info_len) {
+		if (info_len && memcmp(m_buf, info, info_len) != 0) {
 			NFC_REPORT("NFC refreshing resting record (%zu B)", info_len);
 			ret = write_mem(0, info, info_len);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("write_mem", ret);
 				res = ret;
-			} else {
-				write_ok = true;
-			}
-		}
-		/* #340 M3: commit once the clm-bearing record is confirmed on the tag,
-		 * either because it already matched or because the refresh write above
-		 * just landed it; otherwise retry next poll. Tracked via a dedicated flag,
-		 * not `res` (which may carry an unrelated earlier parser error). */
-		if (just_armed) {
-			if (matched || write_ok) {
-				clm_arm_commit();
-			} else {
-				clm_arm_revert();
 			}
 		}
 		return res;
@@ -2173,10 +2071,6 @@ static int nfc_check_locked(void)
 	if (++m_unknown_count < NFC_UNKNOWN_DEBOUNCE) {
 		NFC_REPORT("NFC unrecognized data (%u/%u) -> waiting (likely mid-write)",
 			   m_unknown_count, NFC_UNKNOWN_DEBOUNCE);
-		/* #340 M3: no write happened this cycle - an arm is not confirmed. */
-		if (just_armed) {
-			clm_arm_revert();
-		}
 		return res;
 	}
 
@@ -2185,25 +2079,11 @@ static int nfc_check_locked(void)
 	LOG_INF("Writing info record to NFC (cleared unknown data)...");
 	NFC_REPORT("NFC wrote: info record (%zu B) - cleared unknown data, restored metadata",
 		   info_len);
-	bool write_ok = false;
 	if (info_len) {
 		ret = write_mem(0, info, info_len);
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("write_mem", ret);
 			res = ret;
-		} else {
-			write_ok = true;
-		}
-	}
-
-	/* #340 M3: commit the arm once this final restore write is confirmed, else
-	 * revert so the next poll retries from scratch. Tracked via a dedicated
-	 * flag, not `res` (which may carry an unrelated earlier parser error). */
-	if (just_armed) {
-		if (write_ok) {
-			clm_arm_commit();
-		} else {
-			clm_arm_revert();
 		}
 	}
 
@@ -2489,10 +2369,10 @@ static int cmd_nfc_check(const struct shell *sh, size_t argc, char **argv)
 		shell_print(sh, "secret_key saved%s", ret ? " (save failed!)" : " and applied");
 		break;
 	case APP_CMD_ACTION_CLM_REARM_SAVE:
-		/* #351: same save+reboot as SECRET_KEY_SAVE above, plus the latch flip
-		 * app_cmd_handle_clm_rearm deliberately deferred to this same point
+		/* #351/#415: same save+reboot as SECRET_KEY_SAVE above, plus the latch
+		 * flip app_cmd_handle_clm_rearm deliberately deferred to this same point
 		 * (see its comment) — mirrors main.c's real apply site exactly. */
-		app_nfc_clm_reset();
+		app_nfc_claim_active();
 		ret = app_settings_save(true); /* reboots on success */
 		shell_print(sh, "claim_token saved%s", ret ? " (save failed!)" : " and applied");
 		break;

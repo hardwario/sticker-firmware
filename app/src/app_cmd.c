@@ -756,12 +756,12 @@ static void app_cmd_handle_set_secret_key(enum app_cmd_transport tp, const Comma
 	resp->which_body = Response_ack_tag;
 }
 
-/* #308: explicit end of the claim window. Decrypting this command at all
- * already proves the caller holds secret_key, so app_nfc_clm_ack() does the
- * same narrow settings_save_one() persist the #247 delete-detection path
- * already does synchronously elsewhere in app_nfc.c — no deferred action, no
- * reboot. A no-op if the claim window isn't currently open (already consumed,
- * or claim_token never provisioned), so this is always safe to send. */
+/* #308/#415: explicit end of the claim window. app_nfc_claim_done() does the
+ * same narrow settings_save_one() persist app_nfc.c already does synchronously —
+ * no deferred action, no reboot. Idempotent (a no-op if already done), so it is
+ * always safe to send. With #415 this is the ONLY way the window closes (the
+ * implicit close on any decrypted command is gone), so the app must send it
+ * after storing the claimed keys. */
 static void app_cmd_handle_clm_ack(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				   enum app_cmd_action *action)
 {
@@ -769,7 +769,7 @@ static void app_cmd_handle_clm_ack(enum app_cmd_transport tp, const Command *cmd
 	ARG_UNUSED(cmd);
 	ARG_UNUSED(action);
 
-	app_nfc_clm_ack();
+	app_nfc_claim_done();
 	resp->which_body = Response_ack_tag;
 }
 
@@ -779,7 +779,7 @@ static void app_cmd_handle_clm_ack(enum app_cmd_transport tp, const Command *cmd
  * delivered to the phone first (app_nfc_take_cmd_action() only releases the
  * action once that round-trip completes, #242), and only then does main.c
  * flip the latch + reboot. This used to short-circuit to a synchronous
- * app_nfc_clm_reset() (no reboot) when no new_claim_token was given, on the
+ * app_nfc_claim_active() (no reboot) when no new_claim_token was given, on the
  * reasoning that nothing in g_app_config was changing so there was nothing to
  * wait on — but that made the two branches behave differently for no
  * functional reason. Deferring both the same way costs one reboot in the

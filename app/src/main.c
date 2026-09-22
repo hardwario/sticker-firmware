@@ -172,19 +172,19 @@ static void nfc_run_deferred_cmd_actions(void)
 			app_settings_save(true);
 			break;
 		case APP_CMD_ACTION_CLM_REARM_SAVE:
-			/* #351: flip the clm latch to UNSET and persist+reboot together,
-			 * always (both the same-token and new-token clm_rearm cases run
-			 * this action, see app_cmd_handle_clm_rearm) so the phone can
+			/* #351/#415: flip the claim window back to ACTIVE and persist+reboot
+			 * together, always (both the same-token and new-token clm_rearm cases
+			 * run this action, see app_cmd_handle_clm_rearm) so the phone can
 			 * always assume "ack read -> reboot" regardless of which case it
 			 * took. When a new token was staged, this also ensures
 			 * g_app_config.claim_token becomes live (h_commit) in the same
-			 * breath the latch clears — no window where a poll could
+			 * breath the latch flips — no window where a poll could
 			 * re-expose the OLD token; when no new token was given this is a
 			 * same-value no-op re-persist.
 			 *
-			 * #340 M15: app_nfc_clm_reset() already persisted clm/state=UNSET
+			 * #340 M15: app_nfc_claim_active() already persisted clm/state=ACTIVE
 			 * to flash by the time app_settings_save() runs. If that save
-			 * then fails, don't keep running live with the clm latch reset
+			 * then fails, don't keep running live with the latch reopened
 			 * but the (possibly new) claim_token never persisted - mirrors
 			 * app_settings.c's post-destructive-step convention (34a1ed8):
 			 * force a reboot so the device re-reads whatever DID actually
@@ -192,7 +192,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			 * flash and live state out of sync until some later, unrelated
 			 * reboot. */
 			play_carousel_nfc();
-			app_nfc_clm_reset();
+			app_nfc_claim_active();
 			if (app_settings_save(true)) {
 				sys_reboot(SYS_REBOOT_COLD);
 			}

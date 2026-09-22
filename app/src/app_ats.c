@@ -1448,16 +1448,16 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(reboot, NULL, "Cold-reboot the device.", cmd_device_reboot, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
-/* Re-arm the claim record (#247/#351): drops the clm latch back to UNSET, which
- * auto-advances to PENDING (clm reappears on NFC) on the next nfc_check_locked()
- * poll, as long as claim_token is still set. Non-destructive alternative to
- * app_settings_vendor_reset() for bench re-testing the claim flow. */
+/* #415: (re)open the claim window -> ACTIVE, so the clm record is laid again on
+ * the next NFC poll (while claim_token is set) and get_claim_info discloses the
+ * token. Non-destructive alternative to app_settings_vendor_reset() for bench
+ * re-testing the claim flow. */
 static int cmd_claim_active(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	app_nfc_clm_reset();
+	app_nfc_claim_active();
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
@@ -1466,34 +1466,36 @@ static int cmd_claim_active(const struct shell *sh, size_t argc, char **argv)
 			break;
 		}
 	}
-	shell_print(sh, "clm state -> unset (re-arms to pending on next NFC poll)");
+	shell_print(sh, "claim window -> active");
 	if (!claim_set) {
-		shell_print(sh, "warning: claim_token is unset - clm record will NOT reappear "
+		shell_print(sh, "warning: claim_token is unset - clm record will NOT appear "
 				"until one is provisioned (`config claim-token <hex>`)");
 	}
 	return 0;
 }
 
-/* Force the claim window closed (#308) without a phone deleting the clm record. */
+/* #415: close the claim window -> DONE without a phone (claim_done command). */
 static int cmd_claim_done(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	app_nfc_clm_ack();
-	shell_print(sh, "clm state -> consumed");
+	app_nfc_claim_done();
+	shell_print(sh, "claim window -> done");
 	return 0;
 }
 
-/* #247: show the claim-record lifecycle latch (debug/HW-test visibility). Moved
- * here from `nfc clm` (#351) so claim-lifecycle commands live in one place. */
+/* #247/#415: show the claim window state (debug/HW-test visibility). Moved here
+ * from `nfc clm` (#351) so claim-lifecycle commands live in one place. */
 static int cmd_claim_status(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	static const char *const names[] = {"unset", "pending", "consumed"};
-	uint8_t state = app_nfc_clm_state_get();
+	uint8_t state = app_nfc_claim_state_get();
+	const char *name = (state == APP_NFC_CLAIM_ACTIVE) ? "active"
+			   : (state == APP_NFC_CLAIM_DONE) ? "done"
+							   : "?";
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
@@ -1502,9 +1504,8 @@ static int cmd_claim_status(const struct shell *sh, size_t argc, char **argv)
 			break;
 		}
 	}
-	shell_print(sh, "clm state:   %s (%u)", state < ARRAY_SIZE(names) ? names[state] : "?",
-		    state);
-	shell_print(sh, "claim token: %s", claim_set ? "set" : "unset");
+	shell_print(sh, "claim window: %s (%u)", name, state);
+	shell_print(sh, "claim token:  %s", claim_set ? "set" : "unset");
 	return 0;
 }
 
