@@ -11,7 +11,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Buzzer | **New** — alarm-driven melodies (#397, Phase 2 of #338): the buzzer HW variant now sounds automatically while any alarm is active, gated on a new global `alarm-buzzer-mode` config key |
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
-| NFC | **Changed (breaking)** — interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The NDEF command/response/ack records are removed; the identity record stays (now a short external type, no tap-to-launch). Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §4. |
+| NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §4. |
 | NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §5. |
 
 ---
@@ -159,14 +159,17 @@ The mailbox is reached with standard ISO 15693 custom commands (manufacturer
 code `0x02`), the same on Android (`NfcV.transceive`) and iOS
 (`Iso15693.customCommand`, non-addressed):
 
-1. Read the resting **`hio.stck:inf`** record for the serial and the anti-replay
-   nonce high-water (unchanged contract, see below).
-2. `0xAD` read `EH_CTRL_Dyn`: `VCC_ON` must be set (the device is powered — the
-   mailbox needs the MCU running; a battery-less unit has no mailbox).
-3. `0xAE` write `MB_CTRL_Dyn = MB_EN`, then `0xAD` read it back. If `MB_EN`
+1. `0xAD` read `EH_CTRL_Dyn`: `VCC_ON` must be set (the device is powered — the
+   mailbox needs the MCU running; a battery-less unit has no mailbox and no NDEF,
+   so it reads as a blank tag).
+2. `0xAE` write `MB_CTRL_Dyn = MB_EN`, then `0xAD` read it back. If `MB_EN`
    does not stick within ~1 s the unit is a legacy v1.4.x firmware (no mailbox)
    — fall back to the NDEF flow (Android only).
-4. `0xAA` Write Message a **`[channel][payload]`** frame, poll `0xAD` for
+3. `0xAA`/`0xAB`/`0xAC` a **`[0x03] get_basic_info`** frame → serial + nonce
+   high-water + config/FW version + `device_status`. This is the identity
+   bootstrap that replaces the old plaintext inf record: the phone picks the
+   cached `secret_key` by serial and sends the next command's counter = nonce + 1.
+4. `0xAA` Write Message a **`[channel][payload]`** command frame, poll `0xAD` for
    `HOST_PUT_MSG`, then `0xAB`/`0xAC` Read the reply (in ≤200 B chunks for iOS).
 5. Repeat for further commands; `0xAE` write `MB_EN = 0` (or just leave) when done.
 
@@ -176,7 +179,7 @@ The frame is `[channel 1 B][payload]`:
 |:-:|---|---|
 | `0x01` | encrypted `Command` (request) / `Response` (reply), byte-identical to the old `hio.stck:cmd`/`hio.stck:rsp` content | `secret_key` |
 | `0x02` | same, vendor channel | `vendor_token` |
-| `0x03` | reserved for the plaintext `get_claim_info` command (PR #415) — rejected until it lands | — |
+| `0x03` | plaintext `Command` → `0x01 \|\| Response`, the unauthenticated allow-listed transport: `get_basic_info` (identity bootstrap) and `get_claim_info` (PR #415) | none |
 
 The AES-CCM envelope, the direction-separated nonce, the anti-replay window and
 the response cache are **unchanged** from v1.4.0 §10 — only the transport moved,
@@ -186,23 +189,26 @@ history now page to fit that (a full snapshot is a few pages read in one hold),
 and a `GetInfo` with more than ~17 simultaneously-active alarms drops the alarm
 list to fit, as it already does on a tight LoRaWAN frame.
 
-### Identity record (`hio.stck:inf`)
+### Identity: no NDEF record — `get_basic_info` instead
 
-Still present at rest, still plaintext, same `<serial>:<config_ver>:<nonce_hi>`
-ASCII payload readable by any NFC reader. It is now a short **external-type**
-record (`hio.stck:inf`) instead of the v1.4.0 MIME media-type record: Android
-**tap-to-launch** (#298) is dropped — the user opens the app themselves — which
-also removes the intent-filter that was a source of RF-field regressions on the
-phone side. After a mailbox session the record is refreshed once the field drops
-(the nonce high-water advanced).
+v1.5.0 removes the `hio.stck:inf` record too: the tag holds **no NDEF at all**.
+A phone reads the serial, the anti-replay nonce high-water, the config/FW version
+and `device_status` from the plaintext `get_basic_info` command over the mailbox
+(channel `0x03`), right after enabling it — so a generic NFC reader or a
+dead-battery unit now shows a **blank tag** rather than the serial (accepted,
+since configuration and claiming already need a powered device). Dropping the
+record removes the last EEPROM writer, and with it the field-off gate whose
+single-port RF/I2C contention was the whole reason the v1.4.0 NDEF channel could
+stall or wedge i2c1 — the poll thread now only ever serves the mailbox.
 
 ### What is removed / breaking
 
-- **The NDEF command channel** (`hio.stck:cmd` / `hio.stck:rsp` / `hio.stck:ack`
-  and the vendor `hio.stck:vnd` record). Firmware v1.5.0 no longer answers a
-  command written into the tag EEPROM; the Manager-App must use the mailbox
-  (lockstep release). An old app's `hio.stck:cmd` left on the tag is ignored,
-  never executed.
+- **All NDEF records.** The command channel (`hio.stck:cmd` / `hio.stck:rsp` /
+  `hio.stck:ack`, the vendor `hio.stck:vnd`) AND the resting identity record
+  (`hio.stck:inf`) and the `hio.stck:clm` claim record are gone — the tag holds
+  no NDEF. Firmware v1.5.0 answers only over the mailbox; the Manager-App must
+  use it (lockstep release). An old app's `hio.stck:cmd` left on the tag is
+  ignored, never executed.
 - **Battery-less configuration / boot-staged provisioning** (v1.4.0 §10
   "Provisioning while powered off", #147/#250). The mailbox needs the MCU
   powered, so a command can no longer be staged into an unpowered unit and
