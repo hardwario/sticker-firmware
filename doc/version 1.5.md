@@ -166,12 +166,28 @@ code `0x02`), the same on Android (`NfcV.transceive`) and iOS
    does not stick within ~1 s the unit is a legacy v1.4.x firmware (no mailbox)
    — fall back to the NDEF flow (Android only).
 3. `0xAA`/`0xAB`/`0xAC` a **`[0x03] get_basic_info`** frame → serial + nonce
-   high-water + config/FW version + `device_status`. This is the identity
-   bootstrap that replaces the old plaintext inf record: the phone picks the
-   cached `secret_key` by serial and sends the next command's counter = nonce + 1.
+   high-water + config/FW version. This is the identity bootstrap that replaces
+   the old plaintext inf record: the phone picks the cached `secret_key` by serial
+   and sends the next command's counter = nonce + 1. It is identity only — the
+   device status (alarms, battery, radio, claim window) is owner-only and read
+   from `Info.device_status` with the encrypted `GetInfo`.
 4. `0xAA` Write Message a **`[channel][payload]`** command frame, poll `0xAD` for
    `HOST_PUT_MSG`, then `0xAB`/`0xAC` Read the reply (in ≤200 B chunks for iOS).
 5. Repeat for further commands; `0xAE` write `MB_EN = 0` (or just leave) when done.
+
+**Firmware session limits.** While the field is on the firmware keeps the chip
+powered (LPD low) and watches for `MB_EN`. One mailbox session lasts at most
+120 s and ends after 3 s without a request. A field held for **120 s without a
+served reply** (a phone left lying on the sticker, a fixed reader nearby) releases
+the chip until the field changes — every served exchange restarts that window, so
+a long exchange is never cut. A command that stages a deferred action (reboot,
+settings save, `set_secret_key`, resets, …) ends the session and the action runs
+**right away**, even if the phone still holds the field — nothing else is served
+until it has run, so a follow-up command can neither see the unapplied state nor
+replace the action. After a non-rebooting action (e.g. `lrw_join`) the firmware
+resumes the hold, so the phone re-enables `MB_EN` (same ~1 s retry as step 2) and
+continues in the same tap; after a reboot it re-reads `get_basic_info`. A unit
+whose mailbox is unavailable (see Production tester) does not hold the chip at all.
 
 The frame is `[channel 1 B][payload]`:
 
@@ -192,9 +208,9 @@ list to fit, as it already does on a tight LoRaWAN frame.
 ### Identity: no NDEF record — `get_basic_info` instead
 
 v1.5.0 removes the `hio.stck:inf` record too: the tag holds **no NDEF at all**.
-A phone reads the serial, the anti-replay nonce high-water, the config/FW version
-and `device_status` from the plaintext `get_basic_info` command over the mailbox
-(channel `0x03`), right after enabling it — so a generic NFC reader or a
+A phone reads the serial, the anti-replay nonce high-water and the config/FW
+version from the plaintext `get_basic_info` command over the mailbox (channel
+`0x03`), right after enabling it — so a generic NFC reader or a
 dead-battery unit now shows a **blank tag** rather than the serial (accepted,
 since configuration and claiming already need a powered device). Dropping the
 record removes the last EEPROM writer, and with it the field-off gate whose
@@ -239,9 +255,15 @@ command straight into `app_cmd_handle` for phone-free command-logic testing.
 RF/host handshake, the datasheet rule that every EEPROM write NACKs while
 `MB_EN=1`, and a password-failure mode) plus session ztests: boot authorisation
 + GPO config, the `MAILBOX_DOWN` flag on a password failure, a stuck `MB_EN`
-cleared on the next boot, an owner-command session that consumes the claim window
-and advances the nonce, a vendor session that does not, and a rejected channel
-prefix. `tests/cmd` checks every `GetConfig` page fits one 256 B mailbox frame.
+cleared on the next boot, owner- and vendor-command sessions that advance the nonce
+and leave the claim window active, a rejected channel prefix, a plaintext
+`get_basic_info`, and the session limits: a field held without traffic released
+after 120 s (restarted by an exchange), no hold when the mailbox is unavailable, a
+deferred action ending the poll while the phone still holds the field (a follow-up
+command is not served and cannot replace it), and `app_cmd_get_info()` — which
+`m_work_q` runs for the on-join / clock-sync / downlink `GetInfo` — never waiting
+on a tap (the claim state is read lock-free). `tests/cmd` checks every `GetConfig`
+page fits one 256 B mailbox frame.
 
 ---
 
@@ -283,8 +305,8 @@ The claim window (`clm/state` in NVS) is now a two-state latch:
 
 | State | Meaning |
 |---|---|
-| `active` | factory default — the device may still be claimed: the `hio.stck:clm` record is laid and `get_claim_info` discloses the token |
-| `done` | claiming finished — no `clm` record, `get_claim_info` → `NOT_READY` |
+| `active` | factory default — the device may still be claimed: `get_claim_info` discloses the token |
+| `done` | claiming finished — `get_claim_info` → `NOT_READY "claimed"` |
 
 Removed relative to v1.4.0: the auto-arm (a provisioned token no longer lazily
 "arms" the record) and the **implicit close** — in v1.4.0 any successfully
