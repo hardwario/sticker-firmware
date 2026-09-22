@@ -971,6 +971,39 @@ ZTEST(p2p_logic, test_join_window_expiry_switches_to_slow_policy_not_silence)
 	zassert_equal(state, P2P_LINK_JOINING, "and the episode is still running");
 }
 
+/* R-01: 8227954 made the join episode endless -- the slow policy backs off to an
+ * hour and never gives up -- but start_join_episode() still armed the first
+ * attempt with k_work_schedule_for_queue(), which Zephyr defines as a no-op
+ * while the item is already scheduled. So the shell `join` rewrote
+ * m_join_episode_fresh / m_join_slow / m_join_started_at and the pending timer
+ * ignored all of it for up to P2P_REJOIN_BACKOFF_MAX_MS. An operator asking a
+ * stuck node to re-join has to be answered now, not in an hour. */
+ZTEST(p2p_logic, test_shell_join_preempts_a_pending_slow_retry)
+{
+	p2p_test_join_setup(10);
+	p2p_test_set_join_started_at(k_uptime_get() - P2P_JOIN_BOOT_WINDOW_MS - 1);
+
+	/* A slow-phase pass end arms the backoff curve, which reaches an hour. The
+	 * delay is placed directly rather than spent: running real passes to get
+	 * there would leave the work-queue thread racing these assertions. */
+	p2p_test_join_arm_retry(3600000); /* P2P_REJOIN_BACKOFF_MAX_MS, the curve's cap */
+	zassert_true(p2p_test_join_pending_ms() > 10000,
+		     "the retry this test pre-empts must be pending, got %lld ms",
+		     (long long)p2p_test_join_pending_ms());
+
+	p2p_test_join_restart();
+
+	/* Nothing yields between the two calls, so the work-queue thread cannot
+	 * have run the item yet: 0 means it is queued to run now, not still
+	 * waiting out the old delay. */
+	zassert_equal(p2p_test_join_pending_ms(), 0,
+		      "an operator join must pre-empt the pending retry, %lld ms still to wait",
+		      (long long)p2p_test_join_pending_ms());
+
+	/* Leave nothing armed for the next test. */
+	p2p_test_join_step();
+}
+
 /* ---- B8 history replay ------------------------------------------------ */
 
 ZTEST(p2p_logic, test_history_frame_cap_is_bounded_by_the_p2p_body)

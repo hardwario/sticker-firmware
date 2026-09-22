@@ -229,10 +229,11 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * fully-failed confirmed-uplink cycles (all P2P_ACK_MAX_RETRIES exhausted with
  * no Ack), an already-PAIRED node concludes its session is stale (central DB
  * loss/restore, key change, lost sync) and starts re-join attempts on its own.
- * Unlike the never-paired boot join (§5.2), this is NOT bounded by the 120 s
- * boot window -- a paired device recovers for its whole life -- so it must use
- * exponential backoff (base -> x2 -> cap) instead of the tight boot-window
- * jitter, to keep the duty budget and battery sane over a long outage. */
+ * Unlike the never-paired boot join (§5.2), this one skips the 120 s fast phase
+ * entirely -- the window only selects which policy runs first, and neither
+ * policy ever gives up -- so it starts straight on exponential backoff
+ * (base -> x2 -> cap) instead of the tight boot-window jitter, to keep the duty
+ * budget and battery sane over a long outage. */
 #define P2P_REJOIN_FAIL_THRESHOLD  8       /* consecutive failed uplink cycles */
 #define P2P_REJOIN_BACKOFF_BASE_MS 60000   /* first re-join round: 60 s */
 #define P2P_REJOIN_BACKOFF_MAX_MS  3600000 /* cap: 1 h */
@@ -1428,10 +1429,11 @@ P2P_TESTABLE int p2p_join_adopt_sf(uint8_t joined_sf)
 }
 
 /* Start a JOINING episode and schedule the first JoinRequest. `slow` selects
- * the retry policy in join_work_handler(): the fast policy caps a boot/shell
- * join at the 120 s boot window with tight jitter (§5.2); the slow one runs
- * with exponential backoff and no window cap (§7). Shared by app_p2p_start(),
- * app_p2p_rejoin() (shell), and the self-heal trigger below. */
+ * which retry policy join_work_handler() opens with: the fast one runs with
+ * tight jitter until the 120 s boot window closes and then hands over to the
+ * slow policy (§5.2); the slow one starts there directly, on exponential
+ * backoff (§7). Neither gives up. Shared by app_p2p_start(), app_p2p_rejoin()
+ * (shell), and the self-heal trigger below. */
 static void start_join_episode(bool slow)
 {
 	/* The sweep state and m_sf are seeded by join_work_handler instead, on
@@ -1444,7 +1446,11 @@ static void start_join_episode(bool slow)
 	m_consec_uplink_fail = 0;
 	m_link_state = P2P_LINK_JOINING;
 	m_join_started_at = k_uptime_get();
-	k_work_schedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
+	/* reschedule, not schedule: a slow-backoff retry may be pending for up to
+	 * an hour, and k_work_schedule_for_queue() is a no-op while the item is
+	 * already scheduled -- the state rewritten just above would then sit
+	 * unread until that timer fired. The operator's join must pre-empt it. */
+	k_work_reschedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
 }
 
 /* A confirmed-uplink cycle completed successfully (Ack received) -- clear the
@@ -2865,6 +2871,25 @@ void p2p_test_join_step(void)
 {
 	join_work_handler(&m_join_work.work);
 	(void)k_work_cancel_delayable(&m_join_work);
+}
+
+/* Arm the join retry with a known delay, standing in for a slow-phase pass end
+ * without spending a real pass to get there. */
+void p2p_test_join_arm_retry(int64_t ms)
+{
+	k_work_reschedule_for_queue(&m_work_q, &m_join_work, K_MSEC(ms));
+}
+
+/* Re-enter start_join_episode() the way the shell `join` verb does. */
+void p2p_test_join_restart(void)
+{
+	start_join_episode(false);
+}
+
+/* How long the pending join retry still has to wait, or 0 if none is armed. */
+int64_t p2p_test_join_pending_ms(void)
+{
+	return k_ticks_to_ms_floor64(k_work_delayable_remaining_get(&m_join_work));
 }
 
 void p2p_test_get_join(uint8_t *sf, uint8_t *step, uint8_t *attempts, bool *slow, uint8_t *rejoin,

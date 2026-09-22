@@ -393,6 +393,9 @@ int p2p_join_adopt_sf(uint8_t joined_sf);
 void p2p_test_replay_setup(void);
 void p2p_test_join_setup(int cfg_sf);
 void p2p_test_join_step(void);
+void p2p_test_join_arm_retry(int64_t ms);
+void p2p_test_join_restart(void);
+int64_t p2p_test_join_pending_ms(void);
 void p2p_test_get_join(uint8_t *sf, uint8_t *step, uint8_t *attempts, bool *slow, uint8_t *rejoin,
 		       enum p2p_link_state *state);
 void p2p_test_set_join_started_at(int64_t at_ms);
