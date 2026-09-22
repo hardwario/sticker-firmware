@@ -375,6 +375,29 @@ static int64_t run_hold(struct hold_probe *pr)
 	return elapsed;
 }
 
+/* Finding 1: app_cmd_get_info() runs on m_work_q (GetInfo-on-join, the
+ * clock-sync Info, a LoRaWAN get_info downlink) and reads the claim state. It
+ * must not wait on the NFC access lock the poll thread holds for a whole
+ * field-present hold / mailbox session — m_work_q's 30 s liveness heartbeat would
+ * go stale and the IWDG reset the device. */
+ZTEST(nfc_hw, test_get_info_does_not_wait_on_a_held_field)
+{
+	memset(g_app_config.claim_token, 0xAB, sizeof(g_app_config.claim_token));
+	mb_bring_up(KEY_HEX);
+	st25dv_emul_set_field_on(true); /* a phone parked on the tag, no mailbox */
+
+	struct hold_probe pr = {.delay_ms = 1000, .exchange = false};
+
+	run_hold(&pr);
+	st25dv_emul_set_field_on(false);
+
+	zassert_true(pr.done_ms < 2000,
+		     "app_cmd_get_info() blocked on the NFC lock until %lld ms (probe at 1000 ms)",
+		     (long long)pr.done_ms);
+	zassert_true(pr.device_status & APP_DEVICE_STATUS_CLAIM_ACTIVE,
+		     "claim-active bit read while the poll thread held the tag");
+}
+
 /* Finding 2: a field held with no mailbox traffic (a phone left lying on the
  * STICKER) must not keep the chip powered, the CPU out of Stop2 and the access
  * lock taken forever — the hold ends after 120 s. */

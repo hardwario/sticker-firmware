@@ -353,21 +353,30 @@ static uint8_t m_resp_buf[512];
  * preserves identity leaves it intact; only a full NVS erase, an explicit
  * claim_active, or vendor_reset re-opens it. #415 C3: two explicit states, no
  * automatic behaviour.
- *   ACTIVE  factory default - the device may still be claimed: the plaintext
- *           clm record is laid on the tag (until PR #414 removes it) and
- *           get_claim_info discloses the claim_token.
- *   DONE    claiming finished (claim_done command / `ats claim done`): no clm
- *           record, get_claim_info returns NOT_READY.
+ *   ACTIVE  factory default - the device may still be claimed: get_claim_info
+ *           discloses the claim_token.
+ *   DONE    claiming finished (claim_done command / `ats claim done`):
+ *           get_claim_info returns NOT_READY.
  * Mutators are explicit only (claim_done / claim_active / vendor_reset). There
  * is no auto-arm on a provisioned token and no implicit close on a decrypted
  * command - both removed in #415 (the #247 tri-state's PENDING/CONSUMED and the
- * #308/#340-M3 arm-commit/consume machinery are gone). */
+ * #308/#340-M3 arm-commit/consume machinery are gone).
+ *
+ * Deliberately NOT guarded by m_lock: the claim state no longer touches the tag,
+ * and m_lock is held by the poll thread for a whole mailbox session (up to
+ * NFC_MB_SESSION_MAX_MS) or field-present hold. app_cmd_get_info() reads the
+ * state on m_work_q (GetInfo-on-join, the clock-sync Info, a LoRaWAN get_info
+ * downlink), which must never wait that long - its 30 s liveness heartbeat would
+ * go stale and the IWDG reset the device. Reads are a lock-free atomic_get();
+ * writers serialise on the short-held m_claim_lock so a set + persist pair is
+ * never interleaved with another writer's. */
 enum claim_state {
 	CLAIM_ACTIVE = APP_NFC_CLAIM_ACTIVE,
 	CLAIM_DONE = APP_NFC_CLAIM_DONE,
 };
 /* Factory default when the "clm/state" key is absent (fresh NVS): ACTIVE. */
-static uint8_t m_claim_state = CLAIM_ACTIVE;
+static atomic_t m_claim_state = ATOMIC_INIT(CLAIM_ACTIVE);
+static K_MUTEX_DEFINE(m_claim_lock);
 
 /* Load handler for the "clm" settings subtree (key "clm/state"). Migrates the
  * legacy #247 tri-state in place: unset(0)/pending(1) -> ACTIVE, consumed(2) ->
@@ -383,43 +392,42 @@ static int clm_settings_set(const char *name, size_t len, settings_read_cb read_
 		if (r < 0) {
 			return (int)r;
 		}
-		m_claim_state = (stored == CLAIM_DONE) ? CLAIM_DONE : CLAIM_ACTIVE;
+		atomic_set(&m_claim_state, (stored == CLAIM_DONE) ? CLAIM_DONE : CLAIM_ACTIVE);
 		return 0;
 	}
 	return -ENOENT;
 }
 SETTINGS_STATIC_HANDLER_DEFINE(app_clm, "clm", NULL, clm_settings_set, NULL, NULL);
 
-static void clm_state_save(void)
+static void clm_state_save(uint8_t state)
 {
-	int ret = settings_save_one("clm/state", &m_claim_state, sizeof(m_claim_state));
+	int ret = settings_save_one("clm/state", &state, sizeof(state));
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("settings_save_one(clm/state)", ret);
 	}
 }
 
-/* Set the claim window state and persist it. Takes m_lock because m_claim_state
- * is also read by the poll thread (the get_claim_info handler in a mailbox
- * session) and these mutators are reached from other threads (shell app_ats.c, the main
- * thread's deferred-action dispatch, app_settings_vendor_reset()). Zephyr's
- * k_mutex is recursive for the owning thread, so this is a safe no-op when
- * already held by the poll thread and correctly serializes a genuinely
- * different thread otherwise (#340 M24). */
+/* Set the claim window state and persist it. The mutators are reached from the
+ * poll thread (claim_done inside a mailbox session, the deferred claim_active /
+ * vendor_reset actions) and from the shell (app_ats.c); m_claim_lock serialises
+ * them (#340 M24). It is never held across anything slow but the one-key
+ * settings_save_one(), and never taken together with m_lock in the other order,
+ * so a writer inside a mailbox session (m_lock held) cannot deadlock. */
 static void claim_state_set(uint8_t state, const char *reason)
 {
-	k_mutex_lock(&m_lock, K_FOREVER);
-	if (m_claim_state != state) {
-		m_claim_state = state;
-		clm_state_save();
+	k_mutex_lock(&m_claim_lock, K_FOREVER);
+	if ((uint8_t)atomic_get(&m_claim_state) != state) {
+		atomic_set(&m_claim_state, state);
+		clm_state_save(state);
 		LOG_INF("NFC claim window -> %s (%s) (#415)",
 			state == CLAIM_DONE ? "done" : "active", reason);
 	}
-	k_mutex_unlock(&m_lock);
+	k_mutex_unlock(&m_claim_lock);
 }
 
-/* #415: claiming finished - stop laying the clm record and refuse
- * get_claim_info. Reached from the claim_done command (over the secret_key- or
- * vendor_token-encrypted channel) and `ats claim done`. */
+/* #415: claiming finished - get_claim_info refuses from now on. Reached from the
+ * claim_done command (secret_key-encrypted owner channel / shell; the vendor
+ * channel is not allow-listed) and `ats claim done`. */
 void app_nfc_claim_done(void)
 {
 	claim_state_set(CLAIM_DONE, "claim_done command");
@@ -432,15 +440,10 @@ void app_nfc_claim_active(void)
 	claim_state_set(CLAIM_ACTIVE, "claim_active command");
 }
 
+/* Lock-free: safe from any thread, never waits on a mailbox session (see above). */
 uint8_t app_nfc_claim_state_get(void)
 {
-	uint8_t state;
-
-	k_mutex_lock(&m_lock, K_FOREVER);
-	state = m_claim_state;
-	k_mutex_unlock(&m_lock);
-
-	return state;
+	return (uint8_t)atomic_get(&m_claim_state);
 }
 
 /* #340 L1 test support: whether the "processing"/"rejected" blink timer is
@@ -1410,7 +1413,7 @@ int app_nfc_init(void)
 	if (ret) {
 		LOG_WRN("NFC: clm state load failed: %d (defaulting ACTIVE)", ret);
 	}
-	LOG_INF("NFC: claim state = %u", m_claim_state);
+	LOG_INF("NFC: claim state = %u", (unsigned)atomic_get(&m_claim_state));
 
 	if (!gpio_is_ready_dt(&m_lpd)) {
 		LOG_ERR("GPIO device not ready (LPD)");
