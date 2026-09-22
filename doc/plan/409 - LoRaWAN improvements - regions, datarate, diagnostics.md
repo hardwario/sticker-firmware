@@ -282,7 +282,8 @@ LNS silently kills all downlinks.
   - [ ] 3d — settings-info + GetConfig: DR-adaptive pages (≥ 51 B tier, low priority)
   - [ ] 3e — GetParam / W1Scan: paging (≥ 51 B tier, low priority)
   - [x] 3f — HistoryFrame: real (not worst-case) overhead, defined floor (`790b8f9`)
-  - [ ] 3g — send-time budget: re-encode instead of dropping on a DR drop
+  - [x] 3g — DR drop between queue and send: recover by frame kind (`c77f5ac`; narrowed — full
+    send-time re-encode would need a whole `Response` per queue slot, no RAM for it)
 - [ ] A6 — AS923 region (+2 576 B flash, +0 B RAM) — after A5a
 - [ ] A2 — RSSI/SNR in GetInfo — after #414
 - [ ] A4 — confirmed uplinks for alarms — heartbeat blocker resolved first

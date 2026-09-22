@@ -307,6 +307,11 @@ fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *f
   instead of ~18 B). When records exist but not one fits the current DR, the answer is
   `Error BUDGET_TOO_SMALL` instead of `HISTORY_UNAVAILABLE`; a replay cut short by a DR
   drop ends with the same `Error` (request `seq`) instead of going silent.
+- **DR drop between queueing and sending.** A queued frame that no longer fits after
+  ADR lowered the DR is recovered instead of dropped: the boot `Info` / settings-info
+  are re-sent once the DR rises again, a command answer becomes `Error
+  BUDGET_TOO_SMALL` with the command's `seq`, an alarm frame is dropped (its state is
+  still in telemetry `system_flags`).
 - **Budget 0 (MAC-command flood)** no longer drops a queued response or alarm: an empty
   uplink flushes the MAC answers and the payload is retried.
 - **Alarm batches split** across as many `AlarmReport` frames as needed (same
