@@ -1343,4 +1343,52 @@ ZTEST(cmd, test_lrw_region_writable_excludes_vendor)
 		      r.body.error.code);
 }
 
+/* #409 3a: over LoRaWAN an Error carries code + fault_field only — the detail
+ * string made even an Error too big for the 11 B budget tier. NFC keeps it. */
+ZTEST(cmd, test_error_detail_omitted_over_lrw)
+{
+	Response r;
+	/* seq3 set_param{ application{ interval_report=10 } } — below min 60 */
+	const char *hex = "080312041202180a";
+
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_LRW, hex, &r);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.fault_field, 203, "fault_field %u", r.body.error.fault_field);
+	zassert_equal(r.body.error.detail[0], '\0', "detail must be omitted over LRW: '%s'",
+		      r.body.error.detail);
+
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_NFC, hex, &r);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_not_equal(r.body.error.detail[0], '\0', "detail must stay over NFC");
+}
+
+/* #409 3a: a response that does not fit the 11 B budget tier (US915 DR0, AU915 /
+ * AS923 DR2) falls back to an Error that itself fits, so the host always gets an
+ * answer. Before, the fallback carried "response too large" (25 B) and failed
+ * too, leaving the command unanswered. */
+ZTEST(cmd, test_too_large_fallback_fits_11b_budget)
+{
+	/* seq2 get_param{ lorawan_field=[6 deveui, 7 joineui] } — ~27 B response. */
+	uint8_t in[16], out[11];
+	size_t in_len = unhex("08021a040a020607", in, sizeof(in));
+	size_t out_len = 0;
+
+	reset_cfg();
+	int ret =
+		app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len, NULL);
+	zassert_equal(ret, 0, "fallback Error must fit 11 B, ret %d", ret);
+	zassert_true(out_len >= 1 && out_len <= sizeof(out), "out_len %zu", out_len);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "Response decode failed");
+	zassert_equal(r.seq, 2, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_UNKNOWN, "code %d", r.body.error.code);
+}
+
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);

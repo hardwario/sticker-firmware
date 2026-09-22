@@ -329,7 +329,9 @@ function _decodeInfo(bytes, start, end) {
 }
 
 function _decodeError(bytes, start, end) {
-  var err = {};
+  // code defaults to 0 (UNKNOWN): proto3 omits it, and over LoRaWAN the compact
+  // "response too large" Error (#409) is exactly that — an empty Error body.
+  var err = { code: 0 };
   var pos = start;
   while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;

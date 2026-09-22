@@ -312,10 +312,7 @@ static void alarm_batch_flush(void)
 
 	size_t cap = ALARM_FRAME_MAX;
 #if defined(CONFIG_LORAWAN)
-	uint8_t dr = app_lrw_get_max_payload();
-	if (dr > 0 && dr < cap) {
-		cap = dr;
-	}
+	cap = app_lrw_payload_cap(cap);
 #endif
 
 	/* L-4: if the window opened before the RTC synced but the clock is known

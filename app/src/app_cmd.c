@@ -1395,6 +1395,14 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		app_cmd_dispatch(transport, &cmd, &resp, &act);
 	}
 
+	/* #409 3a: over LoRaWAN an Error carries code + fault_field only. The detail
+	 * string (up to 32 B) made even an Error too big for the 11 B budget tier
+	 * (US915 DR0, AU915/AS923 DR2), so a failed command went unanswered. NFC
+	 * keeps the human-readable detail. */
+	if (transport == APP_CMD_TRANSPORT_LRW && resp.which_body == Response_error_tag) {
+		resp.body.error.detail[0] = '\0';
+	}
+
 	/* A handler may opt out of an immediate response by leaving the oneof unset
 	 * (which_body == 0) — e.g. ReqHistory, whose HistoryFrame stream is the
 	 * reply. Emit nothing so no redundant uplink is queued. */
@@ -1427,7 +1435,8 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		LOG_WRN("Response too large for buffer; sending Error instead");
 		Response err = Response_init_zero;
 		err.seq = resp.seq;
-		make_error(&err, Response_Error_Code_UNKNOWN, "response too large");
+		make_error(&err, Response_Error_Code_UNKNOWN,
+			   transport == APP_CMD_TRANSPORT_LRW ? NULL : "response too large");
 		ret = encode_response(&err, out, out_cap, out_len);
 	}
 	if (ret) {

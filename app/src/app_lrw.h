@@ -83,6 +83,12 @@ void app_lrw_force_link_check(void);
  * decide how many telemetry fields fit. */
 uint8_t app_lrw_get_max_payload(void);
 
+/* Encode cap for a frame built into a `buf_size` buffer: the current payload
+ * budget when known and smaller, else `buf_size` (budget 0 = unknown right now;
+ * the send path flushes pending MAC answers and retries). Uses the cached budget,
+ * so it is safe off m_work_q. Shared by every fPort 85 / fPort 3 encoder (#409). */
+size_t app_lrw_payload_cap(size_t buf_size);
+
 /* Stage a serialized response (e.g. Response on port 85) for the next
  * uplink. send_work_handler() drains this slot before composing telemetry, so
  * the response leaves at the next jitter window. Single-slot, overwritten with

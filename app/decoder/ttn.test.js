@@ -220,6 +220,21 @@ test("decodeUplink splits Error.fault_field group*100 + tag (#196, fPort 85)", (
   assert.equal(got.error.fault_field, 5);
 });
 
+// Compact LoRaWAN Errors (#409 3a): no detail string. The "response too large"
+// fallback is an empty Error body (code 0 = UNKNOWN omitted by proto3) -> 5 B,
+// so it fits the 11 B budget tier.
+test("decodeUplink decodes compact LoRaWAN Errors without detail (#409, fPort 85)", () => {
+  const oor = codec.decodeUplink({ bytes: hex("0108033205080210cb01"), fPort: 85 }).data;
+  assert.equal(oor.error.code, 2);
+  assert.equal(oor.error.fault_group, 2);
+  assert.equal(oor.error.fault_field, 3);
+  assert.equal(oor.error.detail, undefined);
+
+  const big = codec.decodeUplink({ bytes: hex("0108023200"), fPort: 85 }).data;
+  assert.equal(big.seq, 2);
+  assert.equal(big.error.code, 0);
+});
+
 // W1Scan response (field 7): the discovered 1-Wire ROMs come back as hex
 // strings so the host can teach a slot via SetParam sensorN_rom.
 //   01           APP_PROTO_VERSION prefix

@@ -337,6 +337,24 @@ uint8_t app_lrw_get_max_payload(void)
 	return m_max_next_payload;
 }
 
+size_t app_lrw_payload_cap(size_t buf_size)
+{
+	uint8_t budget = m_max_next_payload;
+
+	/* 0 = no budget known right now (before join, or pending MAC answers fill
+	 * the frame): encode against the buffer and let tx_send_queued() flush the
+	 * MAC and retry, instead of pretending the frame has no room at all. */
+	return (budget > 0 && budget < buf_size) ? budget : buf_size;
+}
+
+/* Same as app_lrw_payload_cap() but re-queries the stack first (MED-6). Only on
+ * m_work_q: lorawan_get_payload_sizes() calls into the non-thread-safe LoRaMac. */
+static size_t refresh_payload_cap(size_t buf_size)
+{
+	refresh_payload_budget();
+	return app_lrw_payload_cap(buf_size);
+}
+
 /* ======================================================================== */
 /* State machine                                                            */
 /* ======================================================================== */
@@ -453,13 +471,7 @@ static int queue_info_uplink(void)
 	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t info_len;
 
-	uint8_t budget = refresh_payload_budget();
-	size_t cap = sizeof(info_buf);
-	if (budget > 0 && budget < cap) {
-		cap = budget;
-	}
-
-	int ret = app_cmd_build_info(info_buf, cap, &info_len);
+	int ret = app_cmd_build_info(info_buf, refresh_payload_cap(sizeof(info_buf)), &info_len);
 	if (ret == 0) {
 		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len);
 	}
@@ -476,13 +488,7 @@ static int queue_settings_info_uplink(void)
 	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t len;
 
-	uint8_t budget = refresh_payload_budget();
-	size_t cap = sizeof(buf);
-	if (budget > 0 && budget < cap) {
-		cap = budget;
-	}
-
-	int ret = app_cmd_build_config_status(buf, cap, &len);
+	int ret = app_cmd_build_config_status(buf, refresh_payload_cap(sizeof(buf)), &len);
 	if (ret == 0) {
 		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len);
 	}
@@ -866,11 +872,7 @@ static void dl_request_work_handler(struct k_work *work)
 		 * so an explicit GetInfo command gets the same active_alarms trimming as
 		 * the autonomous join/clock-sync uplink (queue_info_uplink()) instead of
 		 * tx_send_queued() dropping the whole response later. */
-		uint8_t budget = refresh_payload_budget();
-		size_t resp_cap = sizeof(resp);
-		if (budget > 0 && budget < resp_cap) {
-			resp_cap = budget;
-		}
+		size_t resp_cap = refresh_payload_cap(sizeof(resp));
 
 		int ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, msg.buf, msg.len, resp, resp_cap,
 					 &resp_len, &action);
@@ -1274,6 +1276,25 @@ static void tx_jitter_work_handler(struct k_work *work)
 static bool tx_send_queued(struct k_msgq *q, struct lrw_tx_msg *tx, uint8_t port)
 {
 	uint8_t budget = refresh_payload_budget();
+
+	if (budget == 0) {
+		/* #409 3a: pending MAC answers fill the whole frame (same H-1 condition
+		 * as the telemetry path). Dropping here lost responses/alarms during a
+		 * MAC-command flood. Flush the MAC with an empty uplink and keep the
+		 * payload for a retry once the budget recovers. */
+		LOG_WRN("TX budget 0 (MAC-command flood, port %u): empty uplink to flush MAC",
+			port);
+		int ret = lorawan_send(port, tx->buf, 0, LORAWAN_MSG_UNCONFIRMED);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("lorawan_send (MAC flush)", ret);
+		}
+		if (k_msgq_put(q, tx, K_NO_WAIT) != 0) {
+			LOG_WRN("TX requeue failed (port %u); dropped", port);
+			return true;
+		}
+		k_work_schedule_for_queue(&m_work_q, &m_tx_retry_work, K_SECONDS(FRAME_RETRY_SEC));
+		return false;
+	}
 
 	if (tx->len > budget) {
 		/* Won't fit at this DR — Zephyr's lorawan_send would transmit an empty
