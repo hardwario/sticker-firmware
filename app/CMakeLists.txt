@@ -11,16 +11,18 @@ project(sticker)
 
 # Module patches (zephyr/patches.yml, applied by `west patch apply`). A LoRaWAN
 # image built without them silently misses the fix, so refuse to build instead.
-# Each patch leaves a "STICKER-<issue>" marker in the patched source.
+# Each patch leaves a "STICKER-<issue>" marker in the patched source. Checked at
+# configure time and again on every build: `west update` resets the module and
+# an incremental build (incl. the one `west flash` runs) does not reconfigure.
 if(CONFIG_LORAWAN AND DEFINED ZEPHYR_LORAMAC_NODE_MODULE_DIR AND NOT STICKER_ALLOW_UNPATCHED_MODULES)
-  file(STRINGS ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/LoRaMac.c _sticker_419 REGEX "STICKER-419")
-  if(NOT _sticker_419)
-    message(FATAL_ERROR
-      "loramac-node is missing the STICKER patch for #419 (DevStatusReq after LinkADRReq).\n"
-      "Run `west patch apply` in the workspace (from a git worktree: west patch apply "
-      "-b <worktree>/zephyr/patches -l <worktree>/zephyr/patches.yml), or pass "
-      "-DSTICKER_ALLOW_UNPATCHED_MODULES=ON for a throwaway build.")
-  endif()
+  set(FILE ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/LoRaMac.c)
+  set(MARKER STICKER-419)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_module_patch.cmake)
+  add_custom_target(sticker_module_patch_check ALL
+    COMMAND ${CMAKE_COMMAND} -DFILE=${FILE} -DMARKER=${MARKER}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_module_patch.cmake
+    COMMENT "Checking STICKER module patches")
+  add_dependencies(app sticker_module_patch_check)
 endif()
 
 # Firmware version + source baked into the image (logged at boot, reported by

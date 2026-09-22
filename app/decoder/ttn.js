@@ -1148,7 +1148,10 @@ function decodeAlarmBatch(bytes) {
   for (var i = 0; i < out.alarms.length; i++) {
     out.alarms[i].time = out.time_synced ? ((out.base_time + rels[i]) >>> 0) : null;
   }
-  out.truncated = out.alarms.length < out.total; // some alarms dropped to fit the DR
+  // total counts every alarm in the window. Fewer events here means either some
+  // were dropped, or (#409) the batch was split across several fPort 3 frames —
+  // those share base_time and total, so group frames by base_time to rebuild it.
+  out.truncated = out.alarms.length < out.total;
   return out;
 }
 
