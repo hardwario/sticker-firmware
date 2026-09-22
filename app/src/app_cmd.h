@@ -143,6 +143,12 @@ const uint8_t *app_cmd_take_pending_vendor_secret_key(void);
  * -EINVAL on a NULL argument, or -EMSGSIZE if not even InfoLite fits. */
 int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *lite);
 
+/* Build an unsolicited Response{ seq, error{ code=BUDGET_TOO_SMALL } } (no
+ * detail, 5-7 B) into `out` — for a LoRaWAN answer that stopped because the DR
+ * budget dropped (e.g. a history replay mid-stream, #409). Returns 0, -EINVAL,
+ * or -EMSGSIZE. */
+int app_cmd_build_budget_error(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len);
+
 /* Build an unsolicited settings-info frame (Response{ seq=0, config_dump=... },
  * one page, page_count=1) into `out`. Carries a fixed selection of the key
  * operating settings — application interval_sample/interval_report/history_enable,

@@ -195,6 +195,10 @@ static void tx_telemetry_frame(bool first_frame);
 static bool m_hist_active;
 static uint32_t m_hist_from, m_hist_to, m_hist_seq;
 static uint32_t m_hist_count;
+/* #409 3f: upper bound for frame_index/frame_count when sizing a frame (their
+ * varint width). UINT32_MAX = worst case; tightened to the first frame count at
+ * replay start, which buys ~8 B of samples per frame at low DRs. */
+static uint32_t m_hist_frame_bound = UINT32_MAX;
 static uint32_t m_hist_idx;
 static size_t m_hist_cursor;
 static uint32_t m_hist_present; /* shared sensor mask (uint32), snapshot at replay start */
@@ -1469,14 +1473,16 @@ static void send_work_handler(struct k_work *work)
 
 /* Max samples that fit one frame at the current DR. Uses the exact protobuf
  * envelope overhead (app_cmd_history_sample_capacity) instead of a fixed guess
- * that overflowed m_hist_tx_buf on DR3+ with a synced RTC (#89). Worst-case
- * (max-varint) frame_index/count/t0 give a stable per-replay lower bound. */
+ * that overflowed m_hist_tx_buf on DR3+ with a synced RTC (#89). frame_index /
+ * frame_count are sized with m_hist_frame_bound and t0 with the max varint, so
+ * the cap is a stable per-replay lower bound. */
 static size_t history_frame_cap(void)
 {
 	size_t out_cap = MIN((size_t)refresh_payload_budget(), sizeof(m_hist_tx_buf)); /* MED-6 */
 
-	return app_cmd_history_sample_capacity(m_hist_seq, UINT32_MAX, UINT32_MAX, UINT32_MAX,
-					       m_hist_present, m_hist_interval, out_cap);
+	return app_cmd_history_sample_capacity(m_hist_seq, m_hist_frame_bound, m_hist_frame_bound,
+					       UINT32_MAX, m_hist_present, m_hist_interval,
+					       out_cap);
 }
 
 static void history_replay_finish(void)
@@ -1504,6 +1510,12 @@ static void m_hist_work_handler(struct k_work *work)
 		return; /* the (re)join → HEALTHY entry / send path restarts cadence */
 	}
 
+	/* A DR drop mid-replay packs fewer records per frame, so frame_index can
+	 * outgrow the bound the cap was sized with: fall back to the worst case. */
+	if (m_hist_idx >= m_hist_frame_bound) {
+		m_hist_frame_bound = UINT32_MAX;
+	}
+
 	uint8_t samples[HISTORY_SAMPLES_MAX];
 	size_t cap = MIN(history_frame_cap(), sizeof(samples));
 	uint32_t t0 = 0;
@@ -1518,6 +1530,19 @@ static void m_hist_work_handler(struct k_work *work)
 	if (n == 0) {
 		LOG_WRN("History replay stop at frame %u/%u (cap=%uB)", (unsigned)m_hist_idx,
 			(unsigned)m_hist_count, (unsigned)cap);
+		if (m_hist_idx < m_hist_count) {
+			/* #409 3f: records remain but the DR dropped below one record per
+			 * frame. Tell the host instead of going silent mid-stream. */
+			uint8_t err[16];
+			size_t err_len;
+
+			if (app_cmd_build_budget_error(m_hist_seq, err,
+						       refresh_payload_cap(sizeof(err)),
+						       &err_len) == 0) {
+				(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, err,
+							     err_len);
+			}
+		}
 		history_replay_finish();
 		return;
 	}
@@ -1570,11 +1595,11 @@ static void m_hist_work_handler(struct k_work *work)
 	}
 }
 
-bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+int app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
 {
 	if (!app_lrw_is_ready()) {
 		LOG_WRN("History replay requested but LRW not ready; ignoring");
-		return false;
+		return -EAGAIN;
 	}
 
 	/* Seed the snapshot fields the cap depends on (seq/present/interval) before
@@ -1585,12 +1610,28 @@ bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 	m_hist_present = app_history_get_mask();
 	m_hist_interval = app_history_get_interval();
 
+	/* #409 3f: size with the worst-case frame_index/count first, then tighten
+	 * the bound to that frame count and recount. A bigger cap never needs more
+	 * frames, so the final count stays within the bound and counting and
+	 * sending keep using one identical per-frame cap. */
+	m_hist_frame_bound = UINT32_MAX;
 	size_t cap = history_frame_cap();
 	uint32_t n = (cap > 0) ? app_history_count_frames(from_unix, to_unix, cap) : 0;
 
+	if (n > 0) {
+		m_hist_frame_bound = n;
+		n = app_history_count_frames(from_unix, to_unix, history_frame_cap());
+	}
+
 	if (n == 0) {
-		LOG_INF("History replay: no records in window (or DR too low)");
-		return false;
+		/* Empty window, or records exist but not one fits the current DR (the
+		 * 11 B budget tier)? Probe with the full frame buffer to tell apart. */
+		if (app_history_count_frames(from_unix, to_unix, sizeof(m_hist_tx_buf)) > 0) {
+			LOG_WRN("History replay: DR budget too small for one record");
+			return -EMSGSIZE;
+		}
+		LOG_INF("History replay: no records in window");
+		return -ENODATA;
 	}
 
 	m_hist_count = n;
@@ -1602,7 +1643,7 @@ bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 
 	LOG_INF("History replay start: %u frames (window %u..%u)", (unsigned)n, from_unix, to_unix);
 	k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_NO_WAIT);
-	return true;
+	return 0;
 }
 
 /* ======================================================================== */

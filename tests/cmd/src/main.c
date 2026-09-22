@@ -1393,6 +1393,26 @@ ZTEST(cmd, test_too_large_fallback_fits_11b_budget)
 		      r.body.error.code);
 }
 
+/* #409 3f: the unsolicited BUDGET_TOO_SMALL Error (history replay stopped by a
+ * DR drop) keeps the request seq and fits the 11 B budget tier. */
+ZTEST(cmd, test_build_budget_error_fits_11b)
+{
+	uint8_t out[11];
+	size_t out_len = 0;
+
+	zassert_equal(app_cmd_build_budget_error(300, out, sizeof(out), &out_len), 0, "ret");
+	zassert_true(out_len <= sizeof(out), "out_len %zu", out_len);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_equal(r.seq, 300, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.detail[0], '\0', "no detail");
+}
+
 /* #409 A5a: at the 11 B budget tier even Info without alarms does not fit;
  * app_cmd_build_info() falls back to InfoLite (firmware version) and reports it
  * via *lite so app_lrw can send the full Info once the DR rises. */

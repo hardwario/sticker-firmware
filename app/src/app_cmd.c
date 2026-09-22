@@ -968,9 +968,14 @@ static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command 
 	/* Device-driven replay: the device streams all matching records back as N
 	 * HistoryFrame uplinks on port 85. The first frame is the reply, so leave
 	 * the response body unset (which_body stays 0) to suppress a redundant Ack
-	 * uplink. Only when nothing replays (empty window / DR too low) do we send
-	 * an Error so the host still gets a definitive answer. */
-	if (!app_lrw_start_history_replay(from, to, cmd->seq)) {
+	 * uplink. Only when nothing replays do we send an Error so the host still
+	 * gets a definitive answer: BUDGET_TOO_SMALL when records exist but not one
+	 * fits the current DR (#409 3f, retry at a higher DR), else
+	 * HISTORY_UNAVAILABLE. */
+	int ret = app_lrw_start_history_replay(from, to, cmd->seq);
+	if (ret == -EMSGSIZE) {
+		make_error(resp, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
+	} else if (ret != 0) {
 		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no records");
 	}
 #else
@@ -1481,6 +1486,18 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		*action = act;
 	}
 	return 0;
+}
+
+int app_cmd_build_budget_error(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	if (!out || !out_len) {
+		return -EINVAL;
+	}
+
+	Response resp = Response_init_zero;
+	resp.seq = seq;
+	make_error(&resp, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
+	return encode_response(&resp, out, out_cap, out_len);
 }
 
 int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *lite)

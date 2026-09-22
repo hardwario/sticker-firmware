@@ -107,10 +107,12 @@ int app_lrw_send_alarm(const uint8_t *buf, size_t len);
 
 /* Start a device-driven history replay (issue #52): stream every stored record
  * in [from_unix, to_unix] back as N HistoryFrame uplinks on the command port,
- * back-to-back ASAP (duty-cycle permitting), echoing `seq`. Returns true when a
+ * back-to-back ASAP (duty-cycle permitting), echoing `seq`. Returns 0 when a
  * replay was armed (the first frame is the reply, so the caller should NOT also
- * send an Ack), false if the link isn't ready or the window is empty. */
-bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
+ * send an Ack), -EAGAIN if the link isn't ready, -ENODATA if the window is
+ * empty, or -EMSGSIZE if records exist but not one fits the current DR budget
+ * (the 11 B tier, #409). */
+int app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
 
 /* Erase the persisted LoRaWAN NVM context (frame counters, DevNonce, session).
  * Used when re-provisioning credentials so a new ABP/OTAA identity starts from
