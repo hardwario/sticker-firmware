@@ -225,6 +225,7 @@ static int m_message_count;         /* Message counter for N-th LC */
 static int m_rejoin_attempts;       /* Rejoin attempt counter for backoff */
 static int m_join_busy_polls;       /* Counter for MAC busy polling */
 static bool m_init_join;            /* True for first join after boot */
+static bool m_mac_started;          /* lorawan_start() succeeded; LoRaMac state is valid */
 
 #define JOIN_BUSY_POLL_INTERVAL_MS 500
 #define JOIN_BUSY_MAX_POLLS        30
@@ -1784,6 +1785,7 @@ int app_lrw_init(void)
 			LOG_ERR_CALL_FAILED_INT("lorawan_start", ret);
 			return ret;
 		}
+		m_mac_started = true;
 
 		if (g_app_config.lrw_region == APP_CONFIG_LRW_REGION_US915 ||
 		    g_app_config.lrw_region == APP_CONFIG_LRW_REGION_AU915) {
@@ -1921,8 +1923,10 @@ int app_lrw_get_info(struct app_lrw_info *info)
 	/* #340 L3: radio-mode OFF/P2P (#271) never calls lorawan_start(), so
 	 * LoRaMac's own state (incl. CryptoNvm) was never initialized -- querying
 	 * it here would deref a NULL CryptoNvm. Zero-fill instead of touching
-	 * LoRaMac's MIB/crypto API when the MAC was never started. */
-	if (info->state == APP_LRW_STATE_DISABLED) {
+	 * LoRaMac's MIB/crypto API when the MAC was never started. The same holds
+	 * for the boot window before app_lrw_init() has run lorawan_start(): the
+	 * state is already IDLE then (HW-seen: shell showed FCntUp 0x080232D6). */
+	if (info->state == APP_LRW_STATE_DISABLED || !m_mac_started) {
 		info->dev_addr = 0;
 		info->fcnt_up = 0;
 	} else {
