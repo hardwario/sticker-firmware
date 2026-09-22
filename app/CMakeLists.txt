@@ -20,7 +20,7 @@ project(sticker)
 if(NOT DEFINED APP_VERSION_MAJOR)
   set(APP_BUILD_TYPE 2) # CUSTOM
   set(APP_VERSION_MAJOR 1)
-  set(APP_VERSION_MINOR 4)
+  set(APP_VERSION_MINOR 5)
   set(APP_VERSION_PATCH 0)
 endif()
 add_compile_definitions(

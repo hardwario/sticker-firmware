@@ -359,6 +359,38 @@ on TTN.
 
 - [ ] Pass
 
+### L4b — Settings-info ConfigDump after boot (v1.5.0, #412)
+
+**Goal:** Right after the boot `Info`, the device autonomously pushes its key operating
+settings as a one-page `ConfigDump`, so the network learns the effective config without polling.
+**Observable:** A second fPort-85 uplink directly after the boot `Info` and before the first
+fPort-2 Telemetry. It decodes to `config_dump` with `page_count: 1`, `application`
+(`interval_sample`, `interval_report`, `history_enable`), all nine `sensors.cap_*` flags and,
+on a 1-Wire build, `w1_slot_type` (4 entries).
+
+**Prompt for Claude:**
+> Note the current `config show` values. Change at least one reported setting (e.g.
+> `config interval-sample 60`, `config cap-w1-sensors true`) and run `settings save`, which reboots
+> and re-joins. Watching the network server / gateway uplinks, confirm that the uplink after the
+> fPort-85 `Info` is a fPort-85 `ConfigDump` (page 0/1), sent before the first fPort-2 Telemetry.
+> Decode it with `app/decoder/ttn.js` and confirm every field matches `config show`, including
+> the change just made. On a `CONFIG_W1=y` image, confirm `w1_slot_type` has 4 entries matching the
+> attached 1-Wire sensors (`empty` / `dallas` / `machine-probe`). Report the frame size and DR.
+
+> **HW-verified (2026-09-22, debug build @ `4848a09`, EU868, local ChirpStack v4 + RAK5146 GW):**
+> on a factory-blank unit provisioned with an OTAA test identity, each join was followed by
+> FCnt 1 `Info` (21/24 B), FCnt 2 `ConfigDump` page 0/1, and FCnt 3 telemetry, all at DR0
+> (SF12). The dumped values matched `config show` exactly (`interval_sample 60`,
+> `interval_report 900`, `history_enable 0`, `cap_w1_sensors 1`, all other caps `0`). With plain
+> `debug.conf` (`CONFIG_W1=n`) the frame was 34 B and field 7 was absent, as expected. With
+> `-DCONFIG_W1=y` it was 40 B, ending in `3a 04 00 00 00 00`, which decodes as
+> `w1_slot_type: ["empty","empty","empty","empty"]`. **Not covered on HW:** the `dallas` /
+> `machine-probe` values, because the unit has no DS2484 (`ds2484: Device reset failed: -5`);
+> they are covered by `tests/cmd` + `ttn.test.js` only. Low DR on US915/AU915 was also not
+> covered: both boot frames are dropped whole there, see #418.
+
+- [x] Pass (EU868; `w1_slot_type` verified as all-`empty` only)
+
 ### L5 — Periodic telemetry
 
 **Goal:** Telemetry is sent on the configured interval.
