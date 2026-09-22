@@ -281,7 +281,7 @@ LNS silently kills all downlinks.
     `InfoLite` = `Response` field 11, since #414 claims 9/10)
   - [ ] 3d — settings-info + GetConfig: DR-adaptive pages (≥ 51 B tier, low priority)
   - [ ] 3e — GetParam / W1Scan: paging (≥ 51 B tier, low priority)
-  - [ ] 3f — HistoryFrame: real (not worst-case) overhead, defined floor
+  - [x] 3f — HistoryFrame: real (not worst-case) overhead, defined floor (`790b8f9`)
   - [ ] 3g — send-time budget: re-encode instead of dropping on a DR drop
 - [ ] A6 — AS923 region (+2 576 B flash, +0 B RAM) — after A5a
 - [ ] A2 — RSSI/SNR in GetInfo — after #414

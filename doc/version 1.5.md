@@ -302,6 +302,11 @@ fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *f
 - **Deferred boot announce.** If the join `Info` went out as `InfoLite`, or the #412
   settings-info did not fit, the device sends the full frame by itself once a DR change
   makes room — no host poll needed.
+- **History replay (`req_history`) at low DR.** Frames are sized with the real frame
+  count instead of the worst-case varint, ~8 B more samples per frame (EU868 DR0: ~26 B
+  instead of ~18 B). When records exist but not one fits the current DR, the answer is
+  `Error BUDGET_TOO_SMALL` instead of `HISTORY_UNAVAILABLE`; a replay cut short by a DR
+  drop ends with the same `Error` (request `seq`) instead of going silent.
 - **Budget 0 (MAC-command flood)** no longer drops a queued response or alarm: an empty
   uplink flushes the MAC answers and the payload is retried.
 - **Alarm batches split** across as many `AlarmReport` frames as needed (same
