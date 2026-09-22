@@ -426,6 +426,20 @@ test("decodeUplink fPort 2: real HW frame, system + enabled groups always presen
   assert.equal(got.hall_right_is_active, true);
 });
 
+// #409 A5a: system_flags bits 1..8 carry the device_status alarm byte, so the
+// alarm state reaches the LNS even at the 11 B budget tier (no fPort 3 fits).
+// voltage=100, system_flags=0x07 = boot | alarm_any<<1 | alarm_threshold<<1.
+test("decodeUplink fPort 2: system_flags alarm bits (#409)", () => {
+  const got = codec.decodeUplink({ bytes: hex("0108641007"), fPort: 2 }).data;
+  assert.equal(got.boot, true);
+  assert.equal(got.alarm_status, 0x03);
+  assert.deepEqual(got.alarm_status_flags, ["alarm_any", "alarm_threshold"]);
+
+  const idle = codec.decodeUplink({ bytes: hex("0108641000"), fPort: 2 }).data;
+  assert.equal(idle.alarm_status, 0);
+  assert.deepEqual(idle.alarm_status_flags, []);
+});
+
 // #78: an enabled-sensor group is sent whole even when ALL its values are 0 —
 // the decoder must surface those as explicit false/0, not omit them. Synthetic
 // frame: voltage=100 (field 1), system_flags=0 (field 2 -> boot=false),

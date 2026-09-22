@@ -329,28 +329,43 @@ static void alarm_batch_flush(void)
 	}
 #endif
 
+	/* #409 3b: split the batch across as many AlarmReport frames as the budget
+	 * needs (each self-contained: same base_time/total/time_synced), instead of
+	 * trimming it to the first frame and losing the rest. Greedy: the largest
+	 * run of remaining events that fits goes out next. */
 	uint8_t buf[ALARM_FRAME_MAX];
-	size_t len = 0;
-	uint8_t n = m_batch_count;
-	int ret = -EMSGSIZE;
+	uint8_t sent = 0;
 
-	while (n > 0) {
-		ret = app_cmd_build_alarm_report(m_window_base_unix, m_window_total, synced,
-						 m_batch, n, buf, cap, &len);
-		if (ret == 0) {
+	while (sent < m_batch_count) {
+		size_t len = 0;
+		uint8_t n = m_batch_count - sent;
+		int ret = -EMSGSIZE;
+
+		while (n > 0) {
+			ret = app_cmd_build_alarm_report(m_window_base_unix, m_window_total, synced,
+							 &m_batch[sent], n, buf, cap, &len);
+			if (ret == 0) {
+				break;
+			}
+			n--;
+		}
+
+		if (ret != 0) {
+			/* Not even one event fits (the 11 B budget tier): no fPort 3
+			 * detail. The alarm state still reaches the LNS through the
+			 * alarm bits in every telemetry frame (system_flags). */
+			LOG_WRN("Alarm detail skipped: %u event(s) do not fit %u B; state is "
+				"in telemetry system_flags",
+				m_batch_count - sent, (unsigned)cap);
 			break;
 		}
-		n--;
-	}
 
-	if (ret == 0) {
 #if defined(CONFIG_LORAWAN)
 		(void)app_lrw_send_alarm(buf, len);
 #endif
-		LOG_INF("Alarm batch: %u/%u events on fPort 3 (%u B)", n, m_window_total,
-			(unsigned)len);
-	} else {
-		LOG_ERR_CALL_FAILED_INT("app_cmd_build_alarm_report", ret);
+		LOG_INF("Alarm batch: events %u..%u of %u on fPort 3 (%u B)", sent + 1, sent + n,
+			m_window_total, (unsigned)len);
+		sent += n;
 	}
 
 	m_batch_count = 0;

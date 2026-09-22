@@ -617,7 +617,13 @@ function decodeTelemetry(bytes) {
     switch (field) {
       // system
       case 1:  d.voltage = (v.value === 0) ? null : v.value / 50; break; // 0 = pre-sample sentinel (L-51)
-      case 2:  d.boot = (v.value & (1 << 0)) !== 0; break;     // system_flags (always sent)
+      case 2:  // system_flags (always sent): bit0 boot, bits 1..8 = device_status alarm byte (#409)
+        d.boot = (v.value & (1 << 0)) !== 0;
+        d.alarm_status = (v.value >>> 1) & 0xff;
+        d.alarm_status_flags = _DEVICE_STATUS
+          .filter(function (f) { return f[0] < (1 << 8) && (d.alarm_status & f[0]) !== 0; })
+          .map(function (f) { return f[1]; });
+        break;
       // internal (SHT4x) — sentinel → null (sensor enabled but no valid sample)
       case 3:  { var _t = _pbZigzag(v.value); d.temperature = (_t === _TM_S32_NA) ? null : _t / 100; break; }
       case 4:  d.humidity = (v.value === _TM_U32_NA) ? null : v.value / 2; break;
