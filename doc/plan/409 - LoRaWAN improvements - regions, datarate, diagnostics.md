@@ -275,11 +275,11 @@ LNS silently kills all downlinks.
 - [ ] A3 — manual datarate parameter — code done (`lrw-datarate` auto|dr0-dr7, enum,
   proto_id 16); bench check pending (playbook AT-LRW-20)
 - [ ] A5a — general split rule for fPort 85 / fPort 3 (see Step 3); closes #418
-  - [ ] 3a — shared budget helper (0 = defer, not unlimited) + compact LoRaWAN `Error`
-  - [ ] 3b — alarms: N `AlarmReport` frames instead of trimming; fit-at-11 B decision
-  - [ ] 3c — `Info`: self-contained partial frames
-  - [ ] 3d — settings-info + GetConfig: DR-adaptive, self-contained pages
-  - [ ] 3e — GetParam / W1Scan: paging
+  - [x] 3a — shared budget helper (0 = defer, not unlimited) + compact LoRaWAN `Error` (`05e4a5f`)
+  - [ ] 3b — alarms: N `AlarmReport` frames instead of trimming; alarm bits in telemetry
+  - [ ] 3c — `Info`-lite at the 11 B tier + deferred boot announce; `BUDGET_TOO_SMALL`
+  - [ ] 3d — settings-info + GetConfig: DR-adaptive pages (≥ 51 B tier, low priority)
+  - [ ] 3e — GetParam / W1Scan: paging (≥ 51 B tier, low priority)
   - [ ] 3f — HistoryFrame: real (not worst-case) overhead, defined floor
   - [ ] 3g — send-time budget: re-encode instead of dropping on a DR drop
 - [ ] A6 — AS923 region (+2 576 B flash, +0 B RAM) — after A5a
@@ -333,6 +333,24 @@ a logical message that does not fit becomes N self-contained messages (telemetry
 precedent), never byte fragments. Record the wire decisions below in this plan before
 coding and coordinate them with apps/manager and the LNS decoder owners.
 
+**Design decisions (2026-09-22).** Measured first: at the 11 B tier a self-contained
+protobuf frame does not fit even with a single field for most types — a `ConfigDump` page
+with one field is 12 B, one alarm rule page 30 B, one history record ≥ 19 B, `Info`
+serial + uptime 13 B. Only `Info` firmware version (9–11 B) and a stripped alarm
+(source/type/slot, 9 B) fit. At 51 B everything splits fine. Hence:
+
+1. **11 B tier = floor, not full function.** Telemetry, Ack, compact `Error` and
+   `Info`-lite are delivered; every other response gets a compact `Error` with a new code
+   **`BUDGET_TOO_SMALL`** so the host knows to retry once ADR raises the DR. Full splitting
+   targets the ≥ 51 B tiers. No new binary format.
+2. **Alarms at the 11 B tier: no fPort 3 detail**; the alarm *state* travels as bits in
+   `Telemetry.system_flags` (mirror of the `device_status` alarm bits 0–5 → system_flags
+   bits 1–6), which is in every telemetry frame and stays a 1-byte varint. Additive bits —
+   an old decoder ignores them.
+3. **`Info` at the 11 B tier: `Info`-lite** (firmware version, plus build type when it
+   fits); an `Info` without `serial_number` is the lite form. The full `Info` (and the
+   #412 settings-info) is sent automatically once the budget allows it.
+
 **3a — Shared budget helper + compact Error.**
 - One helper replaces the scattered `if (budget > 0 && budget < cap)` copies in
   `queue_info_uplink()`, `queue_settings_info_uplink()`, the downlink handler and
@@ -342,26 +360,24 @@ coding and coordinate them with apps/manager and the LNS decoder owners.
   NFC keeps the string. The "response too large" fallback then always fits, so no command
   goes unanswered.
 
-**3b — Alarms: split instead of trim.**
+**3b — Alarms: split instead of trim + alarm bits in telemetry.**
 - `alarm_batch_flush()` emits as many `AlarmReport` frames as needed (each with the same
-  `base_time` and `total`), instead of `n--` until one frame fits. The alarm queue depth
-  and `ALARM_FRAME_MAX` are sized so all `ALARM_BATCH_MAX` events can leave.
-- **Decision needed:** one event is 15–26 B, so no `AlarmReport` fits 11 B with the current
-  schema. Options: (i) a slimmed event for small budgets (e.g. omit `base_time` and
-  `time_synced` — the LNS receive time is the anchor — and `value`), (ii) a compact
-  alarm-lite frame, (iii) document "alarm detail unavailable at the 11 B tier; the telemetry
-  `device_status` alarm bits still report it". Measure before choosing.
+  `base_time` and `total`) instead of `n--` until one frame fits; queue depth and
+  `ALARM_FRAME_MAX` sized so all `ALARM_BATCH_MAX` events can leave.
+- When not even one event fits (11 B tier), no fPort 3 frame is built (logged); the state
+  is carried by the new `Telemetry.system_flags` alarm bits (decision 2).
 
-**3c — `Info`: self-contained partial frames.**
-- Add `page_index` / `page_count` to `Info` (or split it into several smaller Info-family
-  messages); each frame carries a subset of fields and decodes on its own.
-- At 11 B even fw version + serial (13 B) does not fit one frame. Over LoRaWAN the DevEUI
-  already identifies the device, so frame 0 = firmware version + build type (~7–9 B); serial,
-  uptime, time, battery, status and alarms follow in later frames.
-- The `claim_token` NFC-only trade-off (`app_cmd.c`, "page the Info response instead of
-  trimming it") can be revisited once `Info` pages.
+**3c — `Info`-lite + deferred boot announce + `BUDGET_TOO_SMALL`.**
+- `app_cmd_build_info()` falls back to `Info`-lite when the full `Info` does not fit even
+  with `active_alarms` trimmed (decision 3).
+- If the boot `Info` went out as lite, or settings-info (#412) was skipped, a pending flag
+  re-sends them once a DR change raises the budget enough.
+- New `Error.Code BUDGET_TOO_SMALL`: the LoRaWAN "response too large" fallback uses it
+  (instead of `UNKNOWN`), so the host can tell "retry at a higher DR" from a real failure.
+- Closes #418 together with 3b.
 
-**3d — settings-info + GetConfig: DR-adaptive, self-contained pages.**
+**3d — settings-info + GetConfig: DR-adaptive, self-contained pages** (≥ 51 B tier; low
+priority — the fixed 30 B pages already fit 51 B).
 - settings-info (#413): split into several single-section `ConfigDump` pages when the budget
   is small (application / sensors / `w1_slot_type`), instead of skipping.
 - GetConfig: page budget derived from the current payload budget (minus the measured
@@ -371,14 +387,14 @@ coding and coordinate them with apps/manager and the LNS decoder owners.
   was in effect for page 0 (and report the tier in the response), or keep fixed pages but
   size them for the 11 B tier on LoRaWAN. Decide before coding.
 
-**3e — GetParam / W1Scan: paging.** Reuse the ConfigDump paging for GetParam; W1Scan
+**3e — GetParam / W1Scan: paging** (≥ 51 B tier; low priority). Reuse the ConfigDump paging for GetParam; W1Scan
 answers with one self-contained frame per 1–N ROMs (`page_index` / `page_count`).
 
 **3f — HistoryFrame: real overhead and a defined floor.** `history_frame_cap()` uses
 worst-case varints (33 B of overhead); compute it with the real `frame_count` / `t0` /
 `present` values that are known up front. Then state the floor explicitly: if not even one
-record fits (the 11 B tier with the current schema), answer `req_history` with the compact
-`HISTORY_UNAVAILABLE` error from 3a instead of a silent stop.
+record fits (the 11 B tier), answer `req_history` with the compact `BUDGET_TOO_SMALL`
+error instead of a silent stop.
 
 **3g — Send-time budget.** Queue the logical message (or a rebuild callback) rather than
 pre-encoded bytes, so `tx_send_queued()` can re-encode / re-split at the budget in effect
