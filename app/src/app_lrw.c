@@ -920,6 +920,11 @@ static void join_complete_work_handler(struct k_work *work)
 	on_join_success();
 }
 
+/* A1 (#409): the stored lrw-region is not compiled into this image (e.g. a
+ * debug.conf build that trims US915/AU915). Set once in app_lrw_init() before
+ * any radio bring-up; the radio then stays silent like radio-mode OFF. */
+static bool m_region_unsupported;
+
 /* Radio disabled by the radio-mode config (#271). This replaces the old
  * DevEUI/DevAddr-zero radio-silent guard (#98/#175): whether the radio comes up
  * is now an explicit user choice, not inferred from a blank identifier. OFF is
@@ -930,6 +935,9 @@ static void join_complete_work_handler(struct k_work *work)
  * disabling — provisioning problems surface instead of masquerading as OFF. */
 static bool radio_disabled(void)
 {
+	if (m_region_unsupported) {
+		return true;
+	}
 	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_P2P) {
 		LOG_WRN("radio-mode P2P not yet implemented (#118/#228) — radio stays off");
 		return true;
@@ -947,7 +955,9 @@ static void join_work_handler(struct k_work *work)
 	 * back to LORAWAN + rebooted. */
 	if (radio_disabled()) {
 		if ((enum app_lrw_state)atomic_get(&m_state) != APP_LRW_STATE_DISABLED) {
-			LOG_WRN("radio-mode not LORAWAN: disabled (radio-silent)");
+			LOG_WRN("%s: disabled (radio-silent)",
+				m_region_unsupported ? "lrw-region not in this image"
+						     : "radio-mode not LORAWAN");
 			state_transition(APP_LRW_STATE_DISABLED);
 		}
 		return;
@@ -1709,6 +1719,41 @@ static void heartbeat_work_handler(struct k_work *work)
 }
 #endif /* defined(CONFIG_WATCHDOG) */
 
+/* Map the stored lrw-region to a Zephyr region, but only if that region is
+ * compiled into this image (A1, #409). lorawan_set_region() returns -ENOTSUP for
+ * a region whose CONFIG_LORAMAC_REGION_* is off; resolving it here lets the
+ * caller go radio-silent instead of failing the whole LoRaWAN init. There is
+ * deliberately no fallback to another region: a device configured for US915 or
+ * AU915 must never transmit on 868 MHz (or vice versa). */
+static int resolve_region(enum lorawan_region *region)
+{
+	switch (g_app_config.lrw_region) {
+	case APP_CONFIG_LRW_REGION_EU868:
+		if (IS_ENABLED(CONFIG_LORAMAC_REGION_EU868)) {
+			*region = LORAWAN_REGION_EU868;
+			return 0;
+		}
+		break;
+	case APP_CONFIG_LRW_REGION_US915:
+		if (IS_ENABLED(CONFIG_LORAMAC_REGION_US915)) {
+			*region = LORAWAN_REGION_US915;
+			return 0;
+		}
+		break;
+	case APP_CONFIG_LRW_REGION_AU915:
+		if (IS_ENABLED(CONFIG_LORAMAC_REGION_AU915)) {
+			*region = LORAWAN_REGION_AU915;
+			return 0;
+		}
+		break;
+	default:
+		LOG_ERR("Invalid lrw-region: %d", g_app_config.lrw_region);
+		return -EINVAL;
+	}
+
+	return -ENOTSUP;
+}
+
 int app_lrw_init(void)
 {
 	int ret;
@@ -1727,27 +1772,24 @@ int app_lrw_init(void)
 	 * lorawan_start() are never called — the SubGHz radio is never powered, so
 	 * there is no boot radio burst. (Replaces the #98/#175 DevEUI-zero guard: the
 	 * radio is now enabled/disabled explicitly, not inferred from a blank ID.) */
-	const bool radio_silent = radio_disabled();
+	enum lorawan_region region = LORAWAN_REGION_EU868;
+
+	/* A1 (#409): a stored region missing from this image (or an out-of-range
+	 * value) used to fail the whole init, leaving a device with no radio and no
+	 * diagnosable state. Go radio-silent instead: DISABLED + device_status bit,
+	 * visible over NFC; fix by setting a compiled-in lrw-region or reflashing. */
+	bool radio_silent = radio_disabled();
+
+	if (!radio_silent && resolve_region(&region) != 0) {
+		LOG_ERR("lrw-region %d is not compiled into this image: radio-silent "
+			"(set a supported lrw-region or flash a full image)",
+			g_app_config.lrw_region);
+		m_region_unsupported = true;
+		radio_silent = true;
+	}
 
 	if (!radio_silent) {
 		clear_stale_lorawan_nvm();
-
-		enum lorawan_region region;
-
-		switch (g_app_config.lrw_region) {
-		case APP_CONFIG_LRW_REGION_EU868:
-			region = LORAWAN_REGION_EU868;
-			break;
-		case APP_CONFIG_LRW_REGION_US915:
-			region = LORAWAN_REGION_US915;
-			break;
-		case APP_CONFIG_LRW_REGION_AU915:
-			region = LORAWAN_REGION_AU915;
-			break;
-		default:
-			LOG_ERR("Invalid region: %d", g_app_config.lrw_region);
-			return -EINVAL;
-		}
 
 		ret = lorawan_set_region(region);
 		if (ret) {
@@ -1779,7 +1821,7 @@ int app_lrw_init(void)
 		lorawan_register_battery_level_callback(battery_level_callback);
 		lorawan_register_dr_changed_callback(datarate_changed_callback);
 		lorawan_register_link_check_ans_callback(link_check_callback);
-	} else {
+	} else if (!m_region_unsupported) {
 		LOG_WRN("radio-mode not LORAWAN: skipping LoRaWAN bring-up (radio-silent, #271)");
 	}
 
@@ -1875,6 +1917,11 @@ void app_lrw_force_link_check(void)
 enum app_lrw_state app_lrw_get_state(void)
 {
 	return (enum app_lrw_state)atomic_get(&m_state);
+}
+
+bool app_lrw_region_unsupported(void)
+{
+	return m_region_unsupported;
 }
 
 bool app_lrw_is_ready(void)

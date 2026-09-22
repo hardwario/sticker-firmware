@@ -79,6 +79,7 @@ var _DEVICE_STATUS = [
   [1 << 10, "i2c_wedged"],
   [1 << 11, "time_unsynced"],
   [1 << 12, "lrw_disabled"],
+  [1 << 13, "lrw_bad_region"],
 ];
 
 // reset_cause (Info field 11) bit -> name. Zephyr hwinfo RESET_* bitmask of the

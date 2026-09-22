@@ -1321,6 +1321,7 @@ static void print_device_status(const struct shell *sh, uint32_t status)
 		{APP_DEVICE_STATUS_I2C_WEDGED, "i2c-wedged"},
 		{APP_DEVICE_STATUS_TIME_UNSYNCED, "time-unsynced"},
 		{APP_DEVICE_STATUS_LRW_DISABLED, "lrw-disabled"},
+		{APP_DEVICE_STATUS_LRW_BAD_REGION, "lrw-bad-region"},
 	};
 
 	char buf[128];
