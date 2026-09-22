@@ -2544,6 +2544,7 @@ static void join_work_handler(struct k_work *work)
 	 * report the duty ledger's refusal, and that refusal is the one outcome
 	 * that tried no SF at all. */
 	bool duty_blocked = (ret == -EAGAIN);
+	bool sent = (ret == 0);
 
 	if (ret == 0) {
 		ret = recv_join_accept(used_nonce, tx_end);
@@ -2556,10 +2557,12 @@ static void join_work_handler(struct k_work *work)
 		LOG_ERR_CALL_FAILED_INT("send_join_request", ret);
 	}
 
-	/* A refused JoinRequest never reached the air, so it neither consumes an
-	 * attempt at this SF nor advances the sweep -- otherwise a duty-blocked
-	 * node would walk the whole order without transmitting once. */
-	bool pass_end = !duty_blocked && join_sweep_advance();
+	/* Only a JoinRequest that reached the air consumes an attempt at this SF.
+	 * A duty bounce tried nothing and waits for the ledger; a hard radio fault
+	 * tried nothing either, but must still END the round so the slow policy
+	 * backs off -- advancing neither the sweep nor the round would retry a dead
+	 * modem every jitter interval, with a dev_nonce flash write each time. */
+	bool pass_end = sent ? join_sweep_advance() : !duty_blocked;
 
 	int64_t duty_wait_ms = duty_blocked ? duty_wait_ms_for(P2P_JOIN_REQ_LEN) : 0;
 	int64_t wait_ms = 0;

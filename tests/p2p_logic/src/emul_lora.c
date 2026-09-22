@@ -21,12 +21,16 @@ static int emul_config(const struct device *dev, struct lora_modem_config *confi
 	return 0;
 }
 
+/* What emul_send() returns. 0 (a sent frame) unless a test is exercising a radio
+ * fault; the test resets it. Same shape as test_save_sf_ret in stubs.c. */
+int test_lora_send_ret;
+
 static int emul_send(const struct device *dev, uint8_t *data, uint32_t data_len)
 {
 	ARG_UNUSED(dev);
 	ARG_UNUSED(data);
 	ARG_UNUSED(data_len);
-	return 0;
+	return test_lora_send_ret;
 }
 
 static int emul_send_async(const struct device *dev, uint8_t *data, uint32_t data_len,

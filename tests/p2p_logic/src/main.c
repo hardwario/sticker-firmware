@@ -20,6 +20,7 @@ extern int g_compose_budget_calls;
 extern int g_test_saved_sf;
 extern int g_test_save_sf_calls;
 extern int test_save_sf_ret;
+extern int test_lora_send_ret;
 
 #include <zephyr/ztest.h>
 #include <zephyr/sys/byteorder.h>
@@ -969,6 +970,38 @@ ZTEST(p2p_logic, test_join_window_expiry_switches_to_slow_policy_not_silence)
 	zassert_equal(step, 0, "and leave the next pass at sweep step 0, got %u", step);
 	zassert_equal(sf, 10, "which is the configured SF, got SF%u", sf);
 	zassert_equal(state, P2P_LINK_JOINING, "and the episode is still running");
+}
+
+/* R-06: the sweep advanced on ANY non-EAGAIN send result, so a radio that is
+ * simply broken walked the whole SF order without transmitting once and then
+ * charged a backoff step for the "pass" it never flew.
+ *
+ * Advancing only on a sent frame is half the fix. Alone it makes pass_end never
+ * true on a dead modem, which collapses the slow-phase wait to the bare jitter
+ * (p2p_join_retry_delay_ms with base 0) -- a sub-2-second retry loop, each turn
+ * costing a dev_nonce flash write. The round has to end even when the sweep does
+ * not move, so the slow policy backs off. */
+ZTEST(p2p_logic, test_join_send_failure_holds_the_sweep_and_ends_the_round)
+{
+	uint8_t sf, step, attempts, rejoin;
+	bool slow;
+	enum p2p_link_state state;
+
+	p2p_test_join_setup(10);
+	p2p_test_set_join_started_at(k_uptime_get() - P2P_JOIN_BOOT_WINDOW_MS - 1);
+
+	test_lora_send_ret = -EIO;
+	p2p_test_join_step();
+	test_lora_send_ret = 0;
+
+	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
+	zassert_equal(sf, 10, "a radio fault tried no SF, so the radio stays on SF10, got SF%u",
+		      sf);
+	zassert_equal(step, 0, "a radio fault must not advance the sweep step, got %u", step);
+	zassert_equal(attempts, 0, "a frame that never reached the air is not an attempt, got %u",
+		      attempts);
+	zassert_equal(rejoin, 1,
+		      "but the round must still end, so the slow policy backs off, got %u", rejoin);
 }
 
 /* R-01: 8227954 made the join episode endless -- the slow policy backs off to an
