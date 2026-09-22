@@ -9,6 +9,20 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sticker)
 
+# Module patches (zephyr/patches.yml, applied by `west patch apply`). A LoRaWAN
+# image built without them silently misses the fix, so refuse to build instead.
+# Each patch leaves a "STICKER-<issue>" marker in the patched source.
+if(CONFIG_LORAWAN AND DEFINED ZEPHYR_LORAMAC_NODE_MODULE_DIR AND NOT STICKER_ALLOW_UNPATCHED_MODULES)
+  file(STRINGS ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/LoRaMac.c _sticker_419 REGEX "STICKER-419")
+  if(NOT _sticker_419)
+    message(FATAL_ERROR
+      "loramac-node is missing the STICKER patch for #419 (DevStatusReq after LinkADRReq).\n"
+      "Run `west patch apply` in the workspace (from a git worktree: west patch apply "
+      "-b <worktree>/zephyr/patches -l <worktree>/zephyr/patches.yml), or pass "
+      "-DSTICKER_ALLOW_UNPATCHED_MODULES=ON for a throwaway build.")
+  endif()
+endif()
+
 # Firmware version + source baked into the image (logged at boot, reported by
 # the GetInfo command). CI passes the numeric version components and build type
 # via -DAPP_VERSION_* / -DAPP_BUILD_TYPE (see .github/workflows/build.yml):
