@@ -21,8 +21,9 @@ int app_nfc_init(void);
 /* Serve the ST25DV FTM mailbox while the phone holds its field (#313): the
  * one-tap command channel. Run from the poll thread after app_nfc_wait_event().
  * The tag holds no NDEF record — there is nothing to reconcile. Returns when the
- * field is gone or has been held for 120 s without mailbox traffic; returns at
- * once when the mailbox is unavailable. */
+ * field is gone, a command staged a deferred action (take it with
+ * app_nfc_take_cmd_action() right after), or the field has been held for 120 s
+ * without mailbox traffic; returns at once when the mailbox is unavailable. */
 int app_nfc_poll(void);
 
 /* Block until the ST25DV GPO line signals RF activity (the phone touched the

@@ -308,6 +308,12 @@ ZTEST(nfc_hw, test_mb_session_plain_get_basic_info)
 
 /* ---- Field-present hold bounds (#414 review) ------------------------------- */
 
+/* AES-CCM(secret_key = KEY_HEX, serial 0) of Command{seq=1, settings_save={}} at
+ * counter 1 and Command{seq=2, reboot={}} at counter 2 — direction request, from
+ * sticker_nfc_frame.py (same wire contract as GETINFO_C1/C2 above). */
+#define SETTINGS_SAVE_C1 "00000000000000019798e777424a9f4ff48ecc4bde43a43564b14f84"
+#define REBOOT_C2        "0000000000000002a74de8cb01a98c6fc3706b64ccf2cf0abd7d2de9"
+
 /* [0x03] Command{ seq=1, get_basic_info={} } — see test_mb_session_plain_get_basic_info. */
 static const uint8_t PLAIN_GET_BASIC_INFO[] = {0x03, 0x08, 0x01, 0xF2, 0x01, 0x00};
 
@@ -420,6 +426,81 @@ ZTEST(nfc_hw, test_poll_returns_at_once_when_mailbox_unavailable)
 
 	st25dv_emul_set_field_on(false);
 	zassert_true(elapsed < 100, "app_nfc_poll held the tag for %lld ms", (long long)elapsed);
+}
+
+/* Finding 3: the phone for the deferred-action test. Sends settings_save, reads
+ * the Ack, then — still holding its field — re-enables the mailbox the firmware
+ * just cleared and sends a reboot, as a phone driver that re-arms MB_EN would. */
+struct action_phone {
+	size_t reply1_len;
+	int put2_err;
+	size_t reply2_len;
+};
+
+static void action_phone_fn(void *a, void *b, void *c)
+{
+	struct action_phone *ph = a;
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	uint8_t frame[65];
+	uint8_t reply[256];
+	size_t rl;
+
+	k_msleep(50); /* let app_nfc_poll() reach its hold loop first */
+	st25dv_emul_rf_set_mb_en(true);
+	frame[0] = 0x01;
+	rl = unhex_local(SETTINGS_SAVE_C1, &frame[1], sizeof(frame) - 1);
+	if (st25dv_emul_rf_put_message(frame, rl + 1) == 0) {
+		for (int spin = 0; spin < 150; spin++) {
+			if (st25dv_emul_rf_read_message(reply, sizeof(reply), &ph->reply1_len) ==
+			    0) {
+				break;
+			}
+			k_msleep(5);
+		}
+	}
+
+	/* Wait for the firmware to close the session (clears MB_EN), then re-arm it. */
+	for (int spin = 0; spin < 400 && (st25dv_emul_mb_ctrl() & MB_CTRL_MB_EN); spin++) {
+		k_msleep(5);
+	}
+	st25dv_emul_rf_set_mb_en(true);
+	rl = unhex_local(REBOOT_C2, &frame[1], sizeof(frame) - 1);
+	ph->put2_err = st25dv_emul_rf_put_message(frame, rl + 1);
+	for (int spin = 0; spin < 200; spin++) {
+		if (st25dv_emul_rf_read_message(reply, sizeof(reply), &ph->reply2_len) == 0) {
+			break;
+		}
+		k_msleep(5);
+	}
+	st25dv_emul_set_field_on(false);
+}
+
+/* Finding 3: a deferred action ends app_nfc_poll() right after its session, even
+ * while the phone still holds the field — so the poll thread runs it at once, and
+ * a follow-up command can neither run against the unapplied state nor replace the
+ * action (here: a reboot dropping the acked settings save). */
+ZTEST(nfc_hw, test_mb_deferred_action_ends_poll_while_field_held)
+{
+	mb_bring_up(KEY_HEX);
+	st25dv_emul_set_field_on(true);
+
+	static struct action_phone ph;
+
+	ph = (struct action_phone){0};
+	k_thread_create(&phone_thread, phone_stack, K_THREAD_STACK_SIZEOF(phone_stack),
+			action_phone_fn, &ph, NULL, NULL, K_PRIO_COOP(1), 0, K_NO_WAIT);
+	zassert_equal(app_nfc_poll(), 0, "app_nfc_poll");
+	enum app_cmd_action action = app_nfc_take_cmd_action();
+
+	k_thread_join(&phone_thread, K_FOREVER);
+
+	zassert_true(ph.reply1_len > 1, "settings_save got no Ack (%zu B)", ph.reply1_len);
+	zassert_equal(action, APP_CMD_ACTION_SETTINGS_SAVE, "staged action %d replaced", action);
+	zassert_equal(g_app_config.nonce_counter, 1, "the follow-up reboot must not have run");
+	zassert_equal(ph.reply2_len, 0, "the follow-up command must get no reply");
+	zassert_equal(app_nfc_take_cmd_action(), APP_CMD_ACTION_NONE, "action taken once");
 }
 
 ZTEST_SUITE(nfc_hw, NULL, NULL, nfc_hw_before, NULL, NULL);

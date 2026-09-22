@@ -1727,8 +1727,9 @@ static int mb_serve_locked(void)
  * app_nfc_wait_event() wakes it on the GPO interrupt (low-power; no busy
  * polling). The tag holds no NDEF record — software gating on IT_STS_Dyn is
  * useless here anyway (the register reads 0x00 every pass, cleared by the LPD
- * power-cycle in nfc_access_begin). Returns once the field is gone or has been
- * held for NFC_FIELD_PRESENT_MAX_MS without mailbox traffic. */
+ * power-cycle in nfc_access_begin). Returns once the field is gone, a mailbox
+ * command staged a deferred action, or the field has been held for
+ * NFC_FIELD_PRESENT_MAX_MS without mailbox traffic. */
 int app_nfc_poll(void)
 {
 	/* Without FTM authorised (#313 D7) the phone cannot enable the mailbox and the
@@ -1766,6 +1767,16 @@ int app_nfc_poll(void)
 		if (mb_en && field_on && !held_too_long) {
 			if (mb_serve_locked() > 0) {
 				t_activity = k_uptime_get(); /* a live exchange: restart the hold */
+			}
+			if (m_cmd_action != APP_CMD_ACTION_NONE) {
+				/* A command staged a deferred action (reboot/save/reset/...):
+				 * return now so the poll thread runs it even if the phone still
+				 * holds its field. Staying here would let the phone re-enable the
+				 * mailbox and run further commands against the not-yet-applied
+				 * state, and a second action would replace this one (e.g. a reboot
+				 * dropping a staged secret_key save the phone was already acked
+				 * for). */
+				break;
 			}
 			continue; /* re-read the field: the phone may be gone or may re-enable */
 		}
