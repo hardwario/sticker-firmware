@@ -2833,6 +2833,12 @@ static void test_queue_start_once(void)
 void p2p_test_replay_setup(void)
 {
 	test_queue_start_once();
+	/* A previous test may have left the replay work queued -- notably
+	 * test_history_replay_start_is_not_reentrant, which asserts on the
+	 * re-entrancy guard and never drives the stream to its end. Drop it the
+	 * way p2p_test_join_step() drops the join retry, so the work-queue thread
+	 * cannot run a stream underneath the next test's assertions. */
+	(void)k_work_cancel_delayable(&m_hist_work);
 	m_started = true;
 	m_hist_active = false;
 	m_hist_seq = 0;
