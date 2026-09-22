@@ -118,34 +118,16 @@ static const char *cmd_action_str(enum app_cmd_action a)
  * the system area is at 0x57 (the prior 0x55 was the E2=0 value and NACKed). */
 #define ST25DV_I2C_ADDR_E1 0x57
 
-#define ST25DV_MAX_SEQ_WRITE_BYTES 256
-#define ST25DV_INT_PAGE_BYTES      4
-#define ST25DV_TW_MS_PER_PAGE      5
-
-#define ST25DV_USER_MEM_SIZE 512
-
-/* Dynamic register IT_STS_Dyn (device E0, addr 0x2005): interrupt status,
- * read-clears. Non-zero => RF activity since last read (field change / RF
- * write / etc.). Used to skip the full 512 B read when nothing happened. */
-#define ST25DV_IT_STS_DYN  0x2005
-#define ST25DV_IT_RF_WRITE 0x80 /* IT_STS_Dyn bit7: RF wrote to the EEPROM */
+#define ST25DV_TW_MS_PER_PAGE 5 /* EEPROM write time (static system config: GPO, MB_MODE) */
 
 /* Dynamic register EH_CTRL_Dyn (device E0, addr 0x2002): bit2 FIELD_ON reports
  * whether an RF field is currently present. Dynamic registers live in the
  * dual-port area and are safe to read while RF is active (unlike the 512 B
- * user-memory EEPROM, whose reads/writes collide with RF on the shared i2c1 bus
- * and can wedge it). The poll gates EEPROM access on this bit so the firmware
- * only touches the tag while the field is off — see nfc_wait_field_off(). */
+ * user-memory EEPROM, whose accesses collide with RF on the shared i2c1 bus and
+ * can wedge it — which is why the firmware no longer touches the user EEPROM at
+ * all, #313). The mailbox session and the field-present hold poll this bit. */
 #define ST25DV_EH_CTRL_DYN 0x2002
 #define ST25DV_FIELD_ON    0x04
-
-/* Bound the wait for the RF field to clear before an EEPROM access. The phone's
- * protocol drops the field for ~1500 ms after writing a command so the firmware
- * can read/answer cleanly; wait a little longer than that, polling the FIELD_ON
- * bit. Only short dynamic-register reads happen during the wait, so the shared
- * i2c1 bus stays free for the sensors. */
-#define NFC_FIELD_OFF_WAIT_MS 1800
-#define NFC_FIELD_POLL_MS     20
 
 /* ST25DV (non-C, IC_REF 0x24) GPO configuration. Bit positions per the ST driver
  * st25dv_reg.h. The STATIC GPO register (0x0000, E1 0x57, EEPROM) needs an open
@@ -189,10 +171,11 @@ static const char *cmd_action_str(enum app_cmd_action a)
 #define ST25DV_VCC_ON            0x08 /* EH_CTRL_Dyn bit3: VCC present (LPD low) */
 #define ST25DV_I2C_PWD_REG       0x0900
 
-/* Single shared 512-byte scratch buffer for all ST25DV memory access. Always
+/* Shared scratch buffer for the mailbox: the request read from the FTM RAM, then
+ * the reply staged behind its 2-byte register address (mb_write_msg). Always
  * used while holding m_lock, which serialises the poll thread (app_nfc_poll) and
  * the `nfc` shell commands against each other on the I2C bus and LPD pin. */
-static uint8_t m_buf[ST25DV_USER_MEM_SIZE];
+static uint8_t m_buf[2 + ST25DV_MB_RAM_SIZE];
 static K_MUTEX_DEFINE(m_lock);
 
 static const struct gpio_dt_spec m_lpd = GPIO_DT_SPEC_GET(DT_NODELABEL(lpd), gpios);
@@ -470,34 +453,18 @@ enum app_cmd_action app_nfc_take_cmd_action(void)
  * be NACKed (-EIO) by the arbiter — common while a phone holds its field open
  * waiting for our reply. The transfers are short-lived, so a brief retry rides
  * out the contention. Chunking a long read also means a collision only retries
- * a small block, not the whole 512 B (which would otherwise fail repeatedly
- * under continuous RF). */
+ * a small block, not the whole 256 B mailbox message. */
 #define ST25DV_I2C_RETRIES  20
 #define ST25DV_I2C_RETRY_MS 2
 #define ST25DV_READ_CHUNK   64
 
-/* Bounded wait for the RF field to be off (defined further below). read_mem /
- * write_mem gate every chunk on it: if the field reappears mid-transfer they
- * pause before the next chunk and resume once it clears, so no EEPROM chunk
- * ever runs on the bus while RF is active. Returns false if the field stays on
- * past the wait, or if the status register itself is persistently unreadable
- * (fail-closed, #329) — either way the chunk loop aborts with -EBUSY and the
- * caller skips this cycle. */
-static bool nfc_wait_field_off(void);
-
-/* Chunked I2C read from the user-memory device (E0). `field_gated` selects the
- * two very different regions that live behind that device select:
- *  - true:  user EEPROM (0x0000..0x01FF). Single-port — an access concurrent with
- *           RF collides on the shared i2c1 bus and can wedge it, so every chunk
- *           waits for the RF field to be off (nfc_wait_field_off) and aborts
- *           with -EBUSY if it stays on.
- *  - false: dynamic registers / the FTM mailbox RAM (0x2000..0x2107). Dual-port
- *           by design: served to I2C while the phone holds its field, which is
- *           the whole point of the mailbox — never wait for field-off here (the
- *           old app_nfc_serve_mailbox read the mailbox through the gated path and
- *           could therefore never see a message under a held field).
- * Either way each chunk rides out arbitration NACKs with a short retry. */
-static int read_chunks(uint16_t reg, void *buf, size_t len, bool field_gated)
+/* Chunked I2C read from the user-memory device (E0), used for the FTM mailbox
+ * RAM (0x2008..0x2107). Dual-port by design: served to I2C while the phone holds
+ * its field, which is the whole point of the mailbox — so no field-off wait here
+ * (the old app_nfc_serve_mailbox read the mailbox through a field-gated EEPROM
+ * path and could therefore never see a message under a held field). Each chunk
+ * rides out arbitration NACKs with a short retry. */
+static int read_chunks(uint16_t reg, void *buf, size_t len)
 {
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 
@@ -509,12 +476,6 @@ static int read_chunks(uint16_t reg, void *buf, size_t len, bool field_gated)
 	uint8_t *p = buf;
 	size_t off = 0;
 	while (off < len) {
-		/* Pause before this chunk if the RF field is back; resume once it clears.
-		 * Keeps every EEPROM read off the dual-port bus during RF. */
-		if (field_gated && !nfc_wait_field_off()) {
-			return -EBUSY;
-		}
-
 		size_t chunk = MIN(len - off, (size_t)ST25DV_READ_CHUNK);
 		uint8_t reg_[2];
 		sys_put_be16((uint16_t)(reg + off), reg_);
@@ -530,7 +491,8 @@ static int read_chunks(uint16_t reg, void *buf, size_t len, bool field_gated)
 			k_msleep(ST25DV_I2C_RETRY_MS); /* let RF yield the dual port */
 		}
 		if (ret) {
-			LOG_ERR("read_mem @0x%04x +%u: i2c -EIO after %d retries (RF contention?)",
+			LOG_ERR("read_chunks @0x%04x +%u: i2c -EIO after %d retries (RF "
+				"contention?)",
 				(unsigned)(reg + off), (unsigned)chunk, ST25DV_I2C_RETRIES);
 			return ret;
 		}
@@ -542,85 +504,8 @@ static int read_chunks(uint16_t reg, void *buf, size_t len, bool field_gated)
 	return 0;
 }
 
-/* User EEPROM read (field-gated, see read_chunks). */
-static int read_mem(uint16_t reg, void *buf, size_t len)
-{
-	return read_chunks(reg, buf, len, true);
-}
-
-static inline uint32_t calc_prog_time_ms(uint16_t reg, size_t len)
-{
-	size_t off_in_page = reg & (ST25DV_INT_PAGE_BYTES - 1);
-	size_t total = off_in_page + len;
-	size_t pages = DIV_ROUND_UP(total, ST25DV_INT_PAGE_BYTES);
-	return pages * ST25DV_TW_MS_PER_PAGE;
-}
-
-static int write_mem(uint16_t reg, const void *buf, size_t len)
-{
-	int ret;
-
-	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
-	if (!device_is_ready(dev)) {
-		LOG_ERR("Device not ready");
-		return -ENODEV;
-	}
-
-	const uint8_t *p = buf;
-	size_t remaining = len;
-
-	while (remaining) {
-		/* Pause before this chunk if the RF field is back; resume once it clears.
-		 * Keeps every EEPROM write off the dual-port bus during RF. */
-		if (!nfc_wait_field_off()) {
-			return -EBUSY;
-		}
-
-		size_t within_256 =
-			ST25DV_MAX_SEQ_WRITE_BYTES - (reg & (ST25DV_MAX_SEQ_WRITE_BYTES - 1));
-
-		size_t chunk = MIN(remaining, within_256);
-
-		if (chunk > ST25DV_MAX_SEQ_WRITE_BYTES) {
-			chunk = ST25DV_MAX_SEQ_WRITE_BYTES;
-		}
-
-		uint8_t frame[2 + ST25DV_MAX_SEQ_WRITE_BYTES];
-		sys_put_be16(reg, frame);
-		memcpy(&frame[2], p, chunk);
-
-		ret = -EIO;
-		int attempt = 0;
-		for (; attempt < ST25DV_I2C_RETRIES; attempt++) {
-			ret = i2c_write(dev, frame, 2 + chunk, ST25DV_I2C_ADDR_E0);
-			if (ret == 0) {
-				break;
-			}
-			k_msleep(ST25DV_I2C_RETRY_MS); /* RF contention on the dual port */
-		}
-		if (ret) {
-			LOG_ERR("write_mem @0x%04x +%u: i2c -EIO after %d retries", (unsigned)reg,
-				(unsigned)chunk, ST25DV_I2C_RETRIES);
-			return ret;
-		}
-		NFC_DBG("wr @0x%04x +%u ok (tries=%d)", (unsigned)reg, (unsigned)chunk,
-			attempt + 1);
-
-		uint32_t wait_ms = calc_prog_time_ms(reg, chunk);
-		if (wait_ms) {
-			k_msleep(wait_ms);
-		}
-
-		reg += chunk;
-		p += chunk;
-		remaining -= chunk;
-	}
-
-	return 0;
-}
-
-/* ST25DV register device select: dynamic registers (>=0x2000, e.g. IT_STS_Dyn
- * 0x2005, GPO_Dyn 0x2000) live on the user-memory device (E0 0x53); the static
+/* ST25DV register device select: dynamic registers (>=0x2000, e.g. EH_CTRL_Dyn
+ * 0x2002, GPO_Dyn 0x2000) live on the user-memory device (E0 0x53); the static
  * system configuration area (<0x2000, e.g. GPO 0x0000) is on the system device
  * (E1 0x57). */
 static inline uint8_t reg_dev_addr(uint16_t reg)
@@ -729,17 +614,12 @@ static int nfc_present_password(const uint8_t pwd[8])
 /* ---- ST25DV FTM mailbox register layer (#313) ------------------------------
  * All of these run with the access lock held and the tag powered (LPD low).
  * They touch only dynamic registers / mailbox RAM (dual-port), so they are safe
- * under a held RF field and never go through nfc_wait_field_off(). */
+ * under a held RF field. */
 
 /* Whether FTM could be authorised on this chip at boot (MB_MODE set/verified).
  * false = the mailbox command channel does not work on this unit; reported as
  * APP_DEVICE_STATUS_MAILBOX_DOWN so the production tester rejects it (#313 D7). */
 static bool m_mb_available;
-
-/* Set by nfc_wait_field_off() when it sees MB_EN appear under a held field: the
- * phone switched to the mailbox mid-wait, so the EEPROM cycle is abandoned and
- * app_nfc_poll() serves the mailbox instead. Consumed by app_nfc_poll(). */
-static bool m_mb_requested;
 
 bool app_nfc_mailbox_available(void)
 {
@@ -930,67 +810,6 @@ static void nfc_access_end(void)
 	}
 
 	k_mutex_unlock(&m_lock);
-}
-
-/* Wait (bounded) for the RF field to be absent before the caller touches the
- * user-memory EEPROM. The 512 B EEPROM reads/writes collide with a present RF
- * field on the shared i2c1 bus (arbitration NACK / bus wedge), and a wedged
- * transaction can starve the watchdog feeder in the main loop (all the sensors
- * share i2c1) -> a 10 s SoC reset with no panic dump. EH_CTRL_Dyn.FIELD_ON is a
- * dual-port dynamic register, safe to poll during RF.
- *
- * Returns true once the field is absent (safe to access). Returns false if the
- * field is still present after NFC_FIELD_OFF_WAIT_MS, or if the status read
- * itself never succeeds (caller should skip this cycle either way).
- *
- * FAIL-CLOSED (#329/#330): read_reg() already retries the transfer
- * ST25DV_I2C_RETRIES times internally before giving up, so a `ret != 0` here
- * is not routine dual-port RF contention (that would have been absorbed by
- * those retries) — it is a persistently unreadable register, the same
- * symptom a wedged i2c1 produces (Stop2 wiping TIMINGR with no resume edge
- * to reapply it, #329). Proceeding into the EEPROM chunk access on that
- * evidence used to be fail-open (assume field-off, go ahead); that just
- * traded one silent failure for another doomed transfer a few chunks later.
- * Failing closed costs nothing a genuinely-live bus would have needed anyway
- * (the caller's -EBUSY path already exists for "field still on" and simply
- * retries next poll cycle), and it stops masking a real bus fault as if it
- * were expected RF contention. The caller must already hold the access lock
- * (tag powered via nfc_access_begin). */
-static bool nfc_wait_field_off(void)
-{
-	bool waited_for_field = false;
-	for (int waited = 0; waited <= NFC_FIELD_OFF_WAIT_MS; waited += NFC_FIELD_POLL_MS) {
-		uint8_t eh;
-		int ret = read_reg(ST25DV_EH_CTRL_DYN, &eh, 1);
-		if (ret != 0) {
-			NFC_DBG("field: EH_CTRL_Dyn read=%d after retries -> abort (fail-closed)",
-				ret);
-			return false; /* persistently unreadable -> don't touch a possibly-wedged
-					 bus */
-		}
-		if (!(eh & ST25DV_FIELD_ON)) {
-			if (waited_for_field) {
-				NFC_DBG("field: cleared after %d ms (EH=0x%02x)", waited, eh);
-			}
-			return true; /* field absent -> safe to access the EEPROM */
-		}
-		if (!waited_for_field) {
-			NFC_DBG("field: FIELD_ON set (EH=0x%02x) -> waiting for RF off", eh);
-			waited_for_field = true;
-		}
-		/* #313: a phone that keeps its field on and enables the mailbox wants
-		 * the FTM channel, not an EEPROM exchange — stop waiting for a field-off
-		 * window that will never come and let app_nfc_poll() serve the mailbox. */
-		uint8_t ctrl = 0;
-		if (m_mb_available && mb_read_ctrl(&ctrl) == 0 && (ctrl & ST25DV_MB_CTRL_MB_EN)) {
-			NFC_DBG("field: MB_EN set by RF after %d ms -> mailbox session", waited);
-			m_mb_requested = true;
-			return false;
-		}
-		k_msleep(NFC_FIELD_POLL_MS);
-	}
-	NFC_DBG("field: still on after %d ms -> abort EEPROM chunk", NFC_FIELD_OFF_WAIT_MS);
-	return false;
 }
 
 #ifdef CONFIG_APP_NFC_ENCRYPTION
@@ -1498,7 +1317,7 @@ static int mb_read_msg(uint8_t *buf, size_t len)
 	if (len == 0 || len > ST25DV_MB_RAM_SIZE) {
 		return -EMSGSIZE;
 	}
-	return read_chunks(ST25DV_MB_RAM, buf, len, false);
+	return read_chunks(ST25DV_MB_RAM, buf, len);
 }
 
 /* Put our reply in the mailbox: one I2C write starting at 0x2008 (the chip sets
@@ -1826,131 +1645,6 @@ int app_nfc_poll(void)
 
 #if defined(CONFIG_SHELL)
 
-static int cmd_nfc_dump(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	int ret = nfc_access_begin();
-	if (ret) {
-		shell_error(sh, "nfc access failed: %d", ret);
-		return ret;
-	}
-
-	ret = read_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
-	if (ret == 0) {
-		shell_hexdump(sh, m_buf, ST25DV_USER_MEM_SIZE);
-	}
-
-	nfc_access_end();
-
-	if (ret) {
-		shell_error(sh, "read failed: %d", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-static int cmd_nfc_read(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-
-	unsigned long off = strtoul(argv[1], NULL, 0);
-	unsigned long len = strtoul(argv[2], NULL, 0);
-
-	/* Bound each operand before the sum: `off + len` wraps modulo the word size
-	 * for a huge `len`, which would slip past a combined check and overrun
-	 * m_buf. */
-	if (len == 0 || len > ST25DV_USER_MEM_SIZE || off >= ST25DV_USER_MEM_SIZE ||
-	    off > ST25DV_USER_MEM_SIZE - len) {
-		shell_error(sh, "range out of 0..%d", ST25DV_USER_MEM_SIZE);
-		return -EINVAL;
-	}
-
-	int ret = nfc_access_begin();
-	if (ret) {
-		shell_error(sh, "nfc access failed: %d", ret);
-		return ret;
-	}
-
-	ret = read_mem((uint16_t)off, m_buf, len);
-	if (ret == 0) {
-		shell_hexdump(sh, m_buf, len);
-	}
-
-	nfc_access_end();
-
-	if (ret) {
-		shell_error(sh, "read failed: %d", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-static int cmd_nfc_write(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-
-	unsigned long off = strtoul(argv[1], NULL, 0);
-
-	size_t n = hex2bin(argv[2], strlen(argv[2]), m_buf, ST25DV_USER_MEM_SIZE);
-	if (n == 0) {
-		shell_error(sh, "bad hex (or empty)");
-		return -EINVAL;
-	}
-
-	if (off >= ST25DV_USER_MEM_SIZE || off + n > ST25DV_USER_MEM_SIZE) {
-		shell_error(sh, "range out of 0..%d", ST25DV_USER_MEM_SIZE);
-		return -EINVAL;
-	}
-
-	int ret = nfc_access_begin();
-	if (ret) {
-		shell_error(sh, "nfc access failed: %d", ret);
-		return ret;
-	}
-
-	ret = write_mem((uint16_t)off, m_buf, n);
-
-	nfc_access_end();
-
-	if (ret) {
-		shell_error(sh, "write failed: %d", ret);
-		return ret;
-	}
-
-	shell_print(sh, "wrote %zu byte(s) at offset %lu", n, off);
-	return 0;
-}
-
-static int cmd_nfc_clear(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	memset(m_buf, 0, ST25DV_USER_MEM_SIZE);
-
-	int ret = nfc_access_begin();
-	if (ret) {
-		shell_error(sh, "nfc access failed: %d", ret);
-		return ret;
-	}
-
-	ret = write_mem(0, m_buf, ST25DV_USER_MEM_SIZE);
-
-	nfc_access_end();
-
-	if (ret) {
-		shell_error(sh, "clear failed: %d", ret);
-		return ret;
-	}
-
-	shell_print(sh, "cleared %d bytes", ST25DV_USER_MEM_SIZE);
-	return 0;
-}
-
 static int cmd_nfc_reg(const struct shell *sh, size_t argc, char **argv)
 {
 	unsigned long addr = strtoul(argv[1], NULL, 0);
@@ -2114,11 +1808,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
-	sub_nfc, SHELL_CMD_ARG(dump, NULL, "Hex dump all 512 B of NFC memory.", cmd_nfc_dump, 1, 0),
-	SHELL_CMD_ARG(read, NULL, "Read a range. Usage: read <offset> <len>", cmd_nfc_read, 3, 0),
-	SHELL_CMD_ARG(write, NULL, "Write hex bytes. Usage: write <offset> <hexbytes>",
-		      cmd_nfc_write, 3, 0),
-	SHELL_CMD_ARG(clear, NULL, "Zero all 512 B of NFC memory.", cmd_nfc_clear, 1, 0),
+	sub_nfc,
 	SHELL_CMD_ARG(reg, NULL, "Read system/dynamic register (E1). Usage: reg <addr> [count]",
 		      cmd_nfc_reg, 2, 1),
 	SHELL_CMD_ARG(regw, NULL, "Write system/dynamic register (E1). Usage: regw <addr> <hex>",
@@ -2126,6 +1816,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(mb, &sub_nfc_mb, "FTM mailbox: status|on|off|serve (#313).", NULL),
 	SHELL_SUBCMD_SET_END);
 
-SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC memory access (debug).", NULL);
+SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC registers + FTM mailbox (debug).", NULL);
 
 #endif /* CONFIG_SHELL */
