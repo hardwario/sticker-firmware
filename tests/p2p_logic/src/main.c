@@ -972,6 +972,30 @@ ZTEST(p2p_logic, test_join_window_expiry_switches_to_slow_policy_not_silence)
 	zassert_equal(state, P2P_LINK_JOINING, "and the episode is still running");
 }
 
+/* R-05: dev_eui_is_set() sat above the PAIRED shortcut, so a node paired under
+ * pre-#417 firmware -- whose 24 B p2pjoin/state record join_settings_set() still
+ * accepts, restoring it straight to PAIRED -- was refused on the next boot and
+ * went silent. No telemetry, no self-heal, one ERR line. The other three DevEUI
+ * gates only refuse a NEW join, which is the right shape; this one refused a
+ * session that was already working. */
+ZTEST(p2p_logic, test_start_with_zero_deveui_keeps_a_paired_session)
+{
+	uint8_t saved[8];
+
+	memcpy(saved, g_app_config.lrw_deveui, sizeof(saved));
+
+	p2p_test_join_setup(10);
+	p2p_test_set_paired();
+	memset(g_app_config.lrw_deveui, 0, sizeof(g_app_config.lrw_deveui));
+
+	app_p2p_start();
+
+	zassert_true(app_p2p_is_ready(),
+		     "a persisted session must survive an upgrade that added the DevEUI");
+
+	memcpy(g_app_config.lrw_deveui, saved, sizeof(saved));
+}
+
 /* R-06: the sweep advanced on ANY non-EAGAIN send result, so a radio that is
  * simply broken walked the whole SF order without transmitting once and then
  * charged a backoff step for the "pass" it never flew.

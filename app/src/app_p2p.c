@@ -2876,6 +2876,14 @@ void p2p_test_join_step(void)
 	(void)k_work_cancel_delayable(&m_join_work);
 }
 
+/* Put the link where a node that was paired under older firmware boots: PAIRED
+ * from the persisted record, but not yet started. */
+void p2p_test_set_paired(void)
+{
+	m_link_state = P2P_LINK_PAIRED;
+	m_started = false;
+}
+
 /* Arm the join retry with a known delay, standing in for a slow-phase pass end
  * without spending a real pass to get there. */
 void p2p_test_join_arm_retry(int64_t ms)
@@ -3049,16 +3057,25 @@ void app_p2p_start(void)
 		return;
 	}
 
-	if (!dev_eui_is_set()) {
-		LOG_ERR("P2P not started: lrw_deveui is all-zero (device unprovisioned). "
-			"Set lrw-deveui over NFC or shell, then reboot.");
-		return;
-	}
-
 	if (m_link_state == P2P_LINK_PAIRED) {
 		/* Persisted pairing from a prior boot: no re-join needed (§7 --
 		 * a session survives normal power cycles). */
 		mark_ready();
+		return;
+	}
+
+	/* Below the PAIRED shortcut on purpose: the DevEUI is a join identity
+	 * (#417), not a session input -- derive_session_key() and
+	 * join_request_build() are the only readers, and a session persisted
+	 * before it was set is self-contained (P2P_JOIN_STATE_LEN is unchanged,
+	 * so join_settings_set() still accepts the old 24 B record). Every path
+	 * that would start a NEW join carries its own guard. And unlike
+	 * lrw_appkey it survives factory_reset (app_config.yml: persistent
+	 * [device_reset, factory_reset]), so the ordering argument above does
+	 * not transfer to this gate. */
+	if (!dev_eui_is_set()) {
+		LOG_ERR("P2P not started: lrw_deveui is all-zero (device unprovisioned). "
+			"Set lrw-deveui over NFC or shell, then reboot.");
 		return;
 	}
 
