@@ -259,11 +259,25 @@ static uint8_t m_lc_response_gw_count;
  * size is always far below the protobuf worst case. */
 BUILD_ASSERT(APP_LRW_REQUEST_BUF_SIZE >= 222, "request buffer below LoRaWAN MTU");
 
+/* What a queued frame is, so tx_send_queued() can recover it instead of just
+ * dropping it when a DR drop between queueing and sending leaves it over budget
+ * (#409 3g). Fits the padding byte after `port`, so the msgq slots do not grow. */
+enum lrw_tx_kind {
+	LRW_TX_OTHER = 0,    /* no recovery (shell-injected, error frames) */
+	LRW_TX_CMD_RESPONSE, /* answer to a downlink command: carries its seq */
+	LRW_TX_INFO,         /* autonomous Info (join / clock-sync / deferred) */
+	LRW_TX_SETTINGS,     /* autonomous settings-info (#412) */
+	LRW_TX_ALARM,        /* fPort 3 AlarmReport */
+};
+
 struct lrw_tx_msg {
 	uint8_t port;
+	uint8_t kind; /* enum lrw_tx_kind */
 	uint16_t len;
 	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
 };
+BUILD_ASSERT(sizeof(struct lrw_tx_msg) == 4 + APP_LRW_RESPONSE_BUF_SIZE,
+	     "lrw_tx_msg grew: kind must stay in the padding byte");
 struct lrw_dl_msg {
 	uint16_t len;
 	uint8_t buf[APP_LRW_REQUEST_BUF_SIZE];
@@ -272,6 +286,8 @@ struct lrw_dl_msg {
 K_MSGQ_DEFINE(m_response_msgq, sizeof(struct lrw_tx_msg), APP_LRW_TX_QUEUE_DEPTH, 4);
 K_MSGQ_DEFINE(m_alarm_msgq, sizeof(struct lrw_tx_msg), APP_LRW_TX_QUEUE_DEPTH, 4);
 K_MSGQ_DEFINE(m_dl_msgq, sizeof(struct lrw_dl_msg), APP_LRW_DL_QUEUE_DEPTH, 4);
+
+static int queue_tx_response(uint8_t port, const uint8_t *buf, size_t len, enum lrw_tx_kind kind);
 
 /* Deferred reboot/save requested by a command handler; runs after the Ack TX. */
 static enum app_cmd_action m_post_cmd_action;
@@ -486,7 +502,7 @@ static int queue_info_uplink(void)
 	int ret = app_cmd_build_info(info_buf, refresh_payload_cap(sizeof(info_buf)), &info_len,
 				     &lite);
 	if (ret == 0) {
-		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len);
+		(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len, LRW_TX_INFO);
 	}
 	/* #409: only InfoLite fit (or nothing) — send the full Info once the DR rises. */
 	if (ret != 0 || lite) {
@@ -509,7 +525,7 @@ static int queue_settings_info_uplink(void)
 
 	int ret = app_cmd_build_config_status(buf, refresh_payload_cap(sizeof(buf)), &len);
 	if (ret == 0) {
-		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len);
+		(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_SETTINGS);
 		atomic_clear_bit(&m_announce_pending, ANNOUNCE_SETTINGS);
 	} else {
 		atomic_set_bit(&m_announce_pending, ANNOUNCE_SETTINGS); /* #409: retry later */
@@ -539,7 +555,7 @@ static void announce_work_handler(struct k_work *work)
 
 		if (ret == 0 && !lite) {
 			LOG_INF("DR budget allows the full Info now: sending it");
-			(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len);
+			(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_INFO);
 			atomic_clear_bit(&m_announce_pending, ANNOUNCE_INFO);
 		}
 	}
@@ -937,7 +953,8 @@ static void dl_request_work_handler(struct k_work *work)
 		}
 
 		if (resp_len) {
-			ret = app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, resp, resp_len);
+			ret = queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, resp, resp_len,
+						LRW_TX_CMD_RESPONSE);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("app_lrw_queue_response", ret);
 			}
@@ -1328,6 +1345,68 @@ static void tx_jitter_work_handler(struct k_work *work)
  * duty-cycle retry (#93.1). Returns true if the message was consumed (sent or
  * dropped); false if it was requeued for a later retry (a backoff re-drain is
  * already scheduled, so the caller must not touch the timers). */
+/* seq of an encoded Response (version byte + protobuf): field 1 comes first
+ * when non-zero (nanopb encodes in field order); absent means seq 0. */
+static uint32_t response_seq(const struct lrw_tx_msg *tx)
+{
+	uint32_t seq = 0;
+
+	if (tx->len < 2 || tx->buf[1] != 0x08) {
+		return 0;
+	}
+	for (uint16_t i = 2, shift = 0; i < tx->len && shift < 32; i++, shift += 7) {
+		seq |= (uint32_t)(tx->buf[i] & 0x7f) << shift;
+		if (!(tx->buf[i] & 0x80)) {
+			break;
+		}
+	}
+	return seq;
+}
+
+/* #409 3g: a queued frame no longer fits because the DR dropped after it was
+ * encoded (ADR / LinkADRReq). Recover by kind instead of losing it silently:
+ * autonomous Info / settings-info are re-armed for the deferred announce (sent
+ * again once the DR rises); a command answer is replaced in place by
+ * Error BUDGET_TOO_SMALL carrying the command's seq (retry at a higher DR);
+ * an alarm is dropped, its state still rides in telemetry system_flags.
+ * Returns true when `tx` now holds a frame to send. */
+static bool recover_over_budget(struct lrw_tx_msg *tx, uint8_t budget)
+{
+	LOG_WRN("TX %u B over DR budget %u B (port %u, kind %u)", tx->len, budget, tx->port,
+		tx->kind);
+
+	switch ((enum lrw_tx_kind)tx->kind) {
+	case LRW_TX_INFO:
+		atomic_set_bit(&m_announce_pending, ANNOUNCE_INFO);
+		LOG_INF("Info re-armed for the deferred announce");
+		return false;
+	case LRW_TX_SETTINGS:
+		atomic_set_bit(&m_announce_pending, ANNOUNCE_SETTINGS);
+		LOG_INF("settings-info re-armed for the deferred announce");
+		return false;
+	case LRW_TX_CMD_RESPONSE: {
+		uint32_t seq = response_seq(tx);
+		size_t len;
+
+		if (app_cmd_build_budget_error(seq, tx->buf, MIN(budget, sizeof(tx->buf)), &len) ==
+		    0) {
+			tx->len = len;
+			tx->kind = LRW_TX_OTHER; /* never recover the error itself */
+			LOG_INF("Command answer (seq %u) replaced by BUDGET_TOO_SMALL", seq);
+			return true;
+		}
+		LOG_ERR("Command answer (seq %u) dropped: not even the Error fits", seq);
+		return false;
+	}
+	case LRW_TX_ALARM:
+		LOG_INF("Alarm frame dropped; alarm state stays in telemetry system_flags");
+		return false;
+	default:
+		LOG_ERR("Frame dropped");
+		return false;
+	}
+}
+
 static bool tx_send_queued(struct k_msgq *q, struct lrw_tx_msg *tx, uint8_t port)
 {
 	uint8_t budget = refresh_payload_budget();
@@ -1351,11 +1430,10 @@ static bool tx_send_queued(struct k_msgq *q, struct lrw_tx_msg *tx, uint8_t port
 		return false;
 	}
 
-	if (tx->len > budget) {
+	if (tx->len > budget && !recover_over_budget(tx, budget)) {
 		/* Won't fit at this DR — Zephyr's lorawan_send would transmit an empty
-		 * frame and drop the payload anyway, so drop it explicitly with a log
-		 * rather than burning airtime on an empty uplink. */
-		LOG_ERR("TX %u B over DR budget %u B (port %u); dropped", tx->len, budget, port);
+		 * frame and drop the payload anyway, so drop it explicitly (logged in
+		 * recover_over_budget()) rather than burning airtime on an empty uplink. */
 		return true;
 	}
 
@@ -2132,6 +2210,11 @@ int app_lrw_get_info(struct app_lrw_info *info)
 
 int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 {
+	return queue_tx_response(port, buf, len, LRW_TX_OTHER);
+}
+
+static int queue_tx_response(uint8_t port, const uint8_t *buf, size_t len, enum lrw_tx_kind kind)
+{
 	if (!buf || len == 0) {
 		return -EINVAL;
 	}
@@ -2143,6 +2226,7 @@ int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 	struct lrw_tx_msg msg;
 
 	msg.port = port;
+	msg.kind = kind;
 	msg.len = len;
 	memcpy(msg.buf, buf, len);
 
@@ -2176,6 +2260,7 @@ int app_lrw_send_alarm(const uint8_t *buf, size_t len)
 	struct lrw_tx_msg msg;
 
 	msg.port = APP_LRW_ALARM_PORT;
+	msg.kind = LRW_TX_ALARM;
 	msg.len = len;
 	memcpy(msg.buf, buf, len);
 
