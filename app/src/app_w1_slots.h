@@ -22,7 +22,10 @@ extern "C" {
 
 /* Slot sensor type. Persisted in config (sensorN_type) and used to dispatch
  * which transport driver reads the slot. Extend with new families here +
- * one entry in the type registry in app_w1_slots.c. */
+ * one entry in the type registry in app_w1_slots.c — this enum is the single
+ * source of truth for the type numbering. These values are also wire-visible:
+ * the boot settings-info uplink emits them raw in Response.ConfigDump.w1_slot_type
+ * (#412), so the numbering is append-only — never renumber an existing entry. */
 enum app_w1_slot_type {
 	APP_W1_SLOT_EMPTY = 0,
 	APP_W1_SLOT_DALLAS = 1,        /* DS18B20, family 0x28 — temperature */

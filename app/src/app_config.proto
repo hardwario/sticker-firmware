@@ -363,6 +363,15 @@ message Response {
         optional AppConfigMessage.Application application = 4;
         optional AppConfigMessage.Sensors     sensors     = 5;
         optional AppConfigMessage.Alarms      alarms      = 6;
+        // Detected 1-Wire slot occupancy, slots 1..4 in order. Raw uint32 whose
+        // values follow enum app_w1_slot_type (app_w1_slots.h — the single source
+        // of truth, extended in one place when a new sensor family is added):
+        // 0=empty, 1=dallas (DS18B20), 2=machine-probe (DS28E17). This is live
+        // runtime state, not a stored config field — it is filled ONLY by the
+        // autonomous boot settings-info uplink (#412), never by GetConfig/GetParam
+        // (those stay a pure config snapshot). The persisted slot ROM serials are
+        // read separately via GetParam(sensors 11..14).
+        repeated uint32 w1_slot_type = 7;
     }
 
     message HistoryFrame {

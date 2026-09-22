@@ -40,6 +40,7 @@
  * a slot via SetParam sensorN_rom. */
 #if defined(CONFIG_W1)
 #include "app_w1.h"
+#include "app_w1_slots.h"
 #define APP_CMD_HAVE_W1 1
 #endif
 
@@ -1459,6 +1460,55 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
 	}
 
 	return ret;
+}
+
+int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	if (!out || !out_len) {
+		return -EINVAL;
+	}
+
+	/* Autonomous boot settings-info uplink (#412): a single-page ConfigDump with
+	 * a fixed selection of the key operating settings, so the LNS learns the
+	 * device's effective configuration on join without polling. Byte-identical to
+	 * a GetConfig reply (no decoder change), plus the runtime-only w1_slot_type.
+	 * The persisted ROM serials are left out to keep this one DR0 frame; a host
+	 * that wants them issues GetParam(sensors 11..14). */
+	Response resp = Response_init_zero;
+	resp.seq = 0;
+	resp.which_body = Response_config_dump_tag;
+
+	Response_ConfigDump *cd = &resp.body.config_dump;
+	cd->page_index = 0;
+	cd->page_count = 1;
+
+	/* application: interval_sample, interval_report, history_enable */
+	static const uint32_t app_ids[] = {2, 3, 4};
+	/* sensors: cap_hall_left..cap_accelerometer (all nine cap_* flags) */
+	static const uint32_t sensor_ids[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+
+	cd->has_application = true;
+	app_config_fill_application(&cd->application, app_ids, ARRAY_SIZE(app_ids));
+
+	cd->has_sensors = true;
+	app_config_fill_sensors(&cd->sensors, sensor_ids, ARRAY_SIZE(sensor_ids));
+
+#if defined(APP_CMD_HAVE_W1)
+	/* Detected 1-Wire slot type per slot (runtime state; see app_w1_slot_type in
+	 * app_w1_slots.h — the single source of truth). Wire values are pinned here so
+	 * reordering the enum can never silently change the on-air meaning. */
+	BUILD_ASSERT(APP_W1_SLOT_EMPTY == 0 && APP_W1_SLOT_DALLAS == 1 &&
+			     APP_W1_SLOT_MACHINE_PROBE == 2,
+		     "w1_slot_type wire values must stay 0/empty 1/dallas 2/machine-probe");
+	BUILD_ASSERT(APP_W1_SLOT_COUNT <= ARRAY_SIZE(cd->w1_slot_type),
+		     "w1_slot_type array too small for APP_W1_SLOT_COUNT");
+	cd->w1_slot_type_count = APP_W1_SLOT_COUNT;
+	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+		cd->w1_slot_type[s] = (uint32_t)app_w1_slot_get_type(s);
+	}
+#endif
+
+	return encode_response(&resp, out, out_cap, out_len);
 }
 
 #if defined(APP_CMD_HAVE_HISTORY)

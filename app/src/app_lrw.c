@@ -466,6 +466,29 @@ static int queue_info_uplink(void)
 	return ret;
 }
 
+/* Build a settings-info ConfigDump and stage it on the command port, right after
+ * the on-join GetInfo. Announces the effective config (key application settings,
+ * sensor capabilities, detected 1-Wire slot types) so the network stays in sync
+ * without polling (#412). Encoded against the current DR budget like the Info
+ * above so a low DR trims via -EMSGSIZE rather than a later silent drop. */
+static int queue_settings_info_uplink(void)
+{
+	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
+	size_t len;
+
+	uint8_t budget = refresh_payload_budget();
+	size_t cap = sizeof(buf);
+	if (budget > 0 && budget < cap) {
+		cap = budget;
+	}
+
+	int ret = app_cmd_build_config_status(buf, cap, &len);
+	if (ret == 0) {
+		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len);
+	}
+	return ret;
+}
+
 static void on_join_success(void)
 {
 	LOG_INF("Join successful");
@@ -486,6 +509,13 @@ static void on_join_success(void)
 	 * the first telemetry. send_work drains queued responses first. */
 	if (queue_info_uplink() != 0) {
 		LOG_WRN("app_cmd_build_info failed; skipping GetInfo-on-join");
+	}
+
+	/* Follow the Info with an autonomous settings-info ConfigDump (#412) so the
+	 * network learns the effective config on join without a GetConfig poll. The
+	 * response queue drains FIFO, so this lands right after the Info above. */
+	if (queue_settings_info_uplink() != 0) {
+		LOG_WRN("app_cmd_build_config_status failed; skipping settings-info-on-join");
 	}
 
 	/* Kick app_report to start the report cadence with an immediate uplink (its
