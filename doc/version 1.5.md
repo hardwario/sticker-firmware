@@ -12,6 +12,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
 | LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
+| LoRaWAN | **Fix** — region guard (#409 A1): a stored `lrw-region` that is not compiled into the image no longer kills LoRaWAN init silently — the radio stays silent (never falls back to another band) and `device_status` bit 13 `lrw_bad_region` reports it. |
 
 ---
 
@@ -209,6 +210,37 @@ telemetry (FCnt 3), all at DR0. The dumped values matched `config show`, and a
 `-DCONFIG_W1=y` debug image carried `w1_slot_type` = 4× `empty` (40 B). The
 `dallas` / `machine-probe` values are covered only by the unit tests: the test
 unit had no 1-Wire bridge. See `doc/manual-test-plan.md` scenario **L4b**.
+
+
+---
+
+## 5. LoRaWAN region guard (#409 A1)
+
+`lorawan_set_region()` returns `-ENOTSUP` for a region whose
+`CONFIG_LORAMAC_REGION_*` is not compiled in. Until now that made `app_lrw_init()`
+fail, leaving a device with **no radio and no diagnosable state** — a real case,
+because `debug.conf` trims US915/AU915, so a device configured for `us915` that is
+flashed with a debug image (or any trimmed build) went dead.
+
+Now `app_lrw_init()` resolves the stored region against the regions in the image
+first. If it is missing (or out of range):
+
+- the radio stays **silent** through the existing radio-mode OFF path
+  (`APP_LRW_STATE_DISABLED`, no LoRaMac bring-up, join/send are no-ops);
+- an error is logged: `lrw-region <n> is not compiled into this image: radio-silent`;
+- `device_status` (Info field 14) gets **bit 13 `lrw_bad_region`**, next to the
+  already-set bit 12 `lrw_disabled`, so the fault is visible over NFC
+  (`ats` shell: `lrw-bad-region`).
+
+There is **deliberately no fallback to another region**: a device configured for
+US915 or AU915 must never transmit on 868 MHz (or vice versa). Fix by setting a
+compiled-in `lrw-region` (NFC / shell) or flashing a full image.
+
+| Bit | Name | Meaning |
+|---|---|---|
+| 13 | `lrw_bad_region` | stored `lrw-region` is not compiled into this image — radio-silent (#409) |
+
+Cost: release +40 B flash, +0 B RAM.
 
 ---
 

@@ -270,9 +270,10 @@ LNS silently kills all downlinks.
 
 ## 3. Tracking
 
-- [ ] A1 — build-vs-runtime region guard (radio-silent, no region fallback)
+- [ ] A1 — build-vs-runtime region guard (radio-silent, no region fallback) — code done
+  (`device_status` bit 13 `lrw_bad_region`); bench check on `debug.conf` pending
 - [ ] A3 — manual datarate parameter
-- [ ] A5a — general split rule for fPort 85 / fPort 3 (see Step 3)
+- [ ] A5a — general split rule for fPort 85 / fPort 3 (see Step 3); closes #418
   - [ ] 3a — shared budget helper (0 = defer, not unlimited) + compact LoRaWAN `Error`
   - [ ] 3b — alarms: N `AlarmReport` frames instead of trimming; fit-at-11 B decision
   - [ ] 3c — `Info`: self-contained partial frames
