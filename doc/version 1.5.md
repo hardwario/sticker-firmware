@@ -170,21 +170,31 @@ in `app_w1_slots.c`; the new value flows onto the wire automatically (the proto
 stays a raw `uint32`, so no schema change). A decoder that predates a value renders
 it as `type<N>` rather than failing.
 
-**Decoded example** (as the LNS sees it):
+**Decoded example** (`ttn.js` output as the LNS sees it; like every other config
+reply, bool fields decode as `0`/`1`, and the proto3-default `page_index = 0` is
+omitted):
 
 ```json
-{ "config_dump": { "page_index": 0, "page_count": 1,
-    "application": { "interval_sample": 60, "interval_report": 900, "history_enable": false },
-    "sensors": { "cap_hall_left": true, "cap_hall_right": false, "cap_input_a": true,
-                 "cap_input_b": false, "cap_light_sensor": true, "cap_barometer": false,
-                 "cap_pir_detector": false, "cap_w1_sensors": true, "cap_accelerometer": false },
+{ "config_dump": { "page_count": 1,
+    "application": { "interval_sample": 60, "interval_report": 900, "history_enable": 0 },
+    "sensors": { "cap_hall_left": 1, "cap_hall_right": 0, "cap_input_a": 1,
+                 "cap_input_b": 0, "cap_light_sensor": 1, "cap_barometer": 0,
+                 "cap_pir_detector": 0, "cap_w1_sensors": 1, "cap_accelerometer": 0 },
     "w1_slot_type": ["machine-probe", "dallas", "empty", "empty"] } }
 ```
 
 **Notes:**
 
-- ~46 B encoded incl. the `APP_PROTO_VERSION` byte — fits the EU868 DR0 budget
-  (51 B) and the 64 B response buffer, so it is never dropped whole at a low DR.
+- Size incl. the `APP_PROTO_VERSION` byte: 34 B without 1-Wire (`CONFIG_W1=n`, no
+  field 7), 40 B with the four `w1_slot_type` entries, up to ~46 B with large
+  interval values. It fits the EU868 DR0 budget (51 B) and the 64 B response buffer.
+- **Known limitation — low DR outside EU868 (#418):** the frame is encoded against
+  the current DR budget and, like the boot `Info`, is **single-frame and not
+  paged**. On US915 / AU915 DR0 (11 B) or AS923 with dwell time, both boot frames
+  are therefore **dropped whole** until ADR raises the DR. Tracked in #418.
+- The lean debug default (`debug.conf`, #395) builds with `CONFIG_W1=n`, so a
+  debug image omits `w1_slot_type`. Build with `-DCONFIG_W1=y` to exercise it.
+  Release builds have 1-Wire on.
 - **Zero proto/decoder disruption** otherwise: `ConfigDump`,
   `app_config_fill_application()` / `fill_sensors()` (selected-ids fill), and the
   `ttn.js` `_decodeConfigDump()` already handle the config fields.
@@ -192,6 +202,13 @@ it as `type<N>` rather than failing.
   DR0 uplink); a host that wants them reads `GetParam(sensors 11..14)`.
 - `w1_slot_type` is runtime state, filled **only** by this boot uplink — a plain
   `GetConfig` / `GetParam` reply stays a pure config snapshot and never carries it.
+
+**HW verification (2026-09-22, EU868, ChirpStack v4):** after every join the
+device sent `Info` (FCnt 1), then this `ConfigDump` page 0/1 (FCnt 2), then
+telemetry (FCnt 3), all at DR0. The dumped values matched `config show`, and a
+`-DCONFIG_W1=y` debug image carried `w1_slot_type` = 4× `empty` (40 B). The
+`dallas` / `machine-probe` values are covered only by the unit tests: the test
+unit had no 1-Wire bridge. See `doc/manual-test-plan.md` scenario **L4b**.
 
 ---
 
