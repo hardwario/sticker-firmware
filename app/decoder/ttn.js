@@ -185,6 +185,7 @@ var _CMD_NAMES = {
   27: "claim_active",
   28: "buzzer_play",
   29: "get_claim_info",
+  30: "get_basic_info",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);

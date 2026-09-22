@@ -152,6 +152,7 @@ message Command {
         ClaimActive      claim_active      = 27;
         BuzzerPlay       buzzer_play       = 28;
         GetClaimInfo     get_claim_info    = 29;
+        GetBasicInfo     get_basic_info    = 30;
     }
 // END GENERATED COMMANDS
 
@@ -286,6 +287,12 @@ message Command {
     // provisioned. First command on the unauthenticated plain_text transport
     // (also nfc / shell); never LoRaWAN.
     message GetClaimInfo { }
+
+    // #415/#313: identity bootstrap over the mailbox (empty request). Answered
+    // with Response.basic_info — the serial + nonce high-water + config/FW
+    // version + claim state a phone needs before its first encrypted command.
+    // Replaces the plaintext hio.stck:inf NDEF record. plain_text / nfc / shell.
+    message GetBasicInfo { }
 }
 
 message Response {
@@ -300,6 +307,23 @@ message Response {
         W1Scan         w1_scan          = 7;
         Telemetry      sample           = 8;   // Sample command: fresh readings (NFC)
         ClaimInfo      claim_info       = 9;   // get_claim_info: serial + claim_token (#415)
+        BasicInfo      basic_info       = 10;  // get_basic_info: identity bootstrap (#415/#313)
+    }
+
+    // #415/#313: plaintext identity bootstrap returned by get_basic_info — the
+    // minimum a phone needs before its first encrypted command, none of it
+    // secret. device_status is the same APP_DEVICE_STATUS_* bitmask GetInfo
+    // carries (alarm/battery/health + claim window bit 14; mailbox-down bit 13
+    // added by PR #414), so one tap tells the app the claim/alarm/battery/radio
+    // state without a key.
+    message BasicInfo {
+        uint32 serial_number  = 1;
+        uint32 nonce_counter  = 2;  // anti-replay high-water; the phone sends nonce_counter + 1
+        uint32 config_version = 3;  // bump => the phone's cached config layout is stale
+        uint32 fw_major       = 4;
+        uint32 fw_minor       = 5;
+        uint32 fw_patch       = 6;
+        uint32 device_status  = 7;  // APP_DEVICE_STATUS_* bitmask (claim/alarm/battery/health)
     }
 
     message Ack { }

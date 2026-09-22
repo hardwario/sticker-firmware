@@ -61,6 +61,9 @@ enum app_cmd_transport {
 #define APP_DEVICE_STATUS_I2C_WEDGED      (1u << 10) /* I2C bus wedged (fail streak >= threshold) */
 #define APP_DEVICE_STATUS_TIME_UNSYNCED   (1u << 11) /* RTC not synced (no wall-clock) */
 #define APP_DEVICE_STATUS_LRW_DISABLED    (1u << 12) /* radio-silent: DevEUI all-zero (#98) */
+/* bit 13 = APP_DEVICE_STATUS_MAILBOX_DOWN, defined by PR #414 (mailbox layer) */
+#define APP_DEVICE_STATUS_CLAIM_ACTIVE                                                             \
+	(1u << 14) /* claim window open (claimable); clear = claimed (#415) */
 
 /* Action the caller must perform AFTER the response has been sent (so the Ack
  * leaves before the device reboots). Set by app_cmd_handle(). */

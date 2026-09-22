@@ -1344,24 +1344,25 @@ ZTEST(cmd, test_plain_text_rejects_every_command)
 	}
 }
 
-/* Encode Command{seq=1, get_claim_info={}} and dispatch it over `tp`; decode
- * the Response. get_claim_info has an empty body, so this is a fixed frame. */
-static void handle_get_claim_info(enum app_cmd_transport tp, Response *resp)
+/* Encode Command{seq=1, which_body} with an empty body and dispatch it over
+ * `tp`; decode the Response. Used by the read-only get_claim_info /
+ * get_basic_info tests (both have empty request bodies). */
+static void handle_empty_body_cmd(enum app_cmd_transport tp, pb_size_t which_body, Response *resp)
 {
 	Command cmd = Command_init_zero;
 	cmd.seq = 1;
-	cmd.which_body = Command_get_claim_info_tag;
+	cmd.which_body = which_body;
 
 	uint8_t in[16];
 	pb_ostream_t os = pb_ostream_from_buffer(in, sizeof(in));
-	zassert_true(pb_encode(&os, Command_fields, &cmd), "encode get_claim_info");
+	zassert_true(pb_encode(&os, Command_fields, &cmd), "encode command");
 
 	uint8_t out[128];
 	size_t out_len = 0;
 	enum app_cmd_action action = APP_CMD_ACTION_NONE;
 	int ret = app_cmd_handle(tp, in, os.bytes_written, out, sizeof(out), &out_len, &action);
 	zassert_equal(ret, 0, "app_cmd_handle ret %d", ret);
-	zassert_equal(action, APP_CMD_ACTION_NONE, "get_claim_info is read-only, no action");
+	zassert_equal(action, APP_CMD_ACTION_NONE, "read-only command, no action");
 	zassert_true(out_len >= 1 && out[0] == APP_PROTO_VERSION, "bad version byte");
 
 	*resp = (Response)Response_init_zero;
@@ -1384,7 +1385,7 @@ ZTEST(cmd, test_get_claim_info)
 	reset_cfg();
 	g_app_config.serial_number = 2162123456u;
 	memcpy(g_app_config.claim_token, expect_token, sizeof(expect_token));
-	handle_get_claim_info(APP_CMD_TRANSPORT_PLAIN_TEXT, &r);
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_PLAIN_TEXT, Command_get_claim_info_tag, &r);
 	zassert_equal(r.which_body, Response_claim_info_tag, "expected claim_info (which=%d)",
 		      r.which_body);
 	zassert_equal(r.body.claim_info.serial_number, 2162123456u, "serial mismatch");
@@ -1392,12 +1393,12 @@ ZTEST(cmd, test_get_claim_info)
 			  "claim_token mismatch");
 
 	/* Same over nfc (owner re-read of the token). */
-	handle_get_claim_info(APP_CMD_TRANSPORT_NFC, &r);
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_NFC, Command_get_claim_info_tag, &r);
 	zassert_equal(r.which_body, Response_claim_info_tag, "claim_info over nfc");
 
 	/* Window done -> NOT_READY. */
 	g_claim_state = APP_NFC_CLAIM_DONE;
-	handle_get_claim_info(APP_CMD_TRANSPORT_PLAIN_TEXT, &r);
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_PLAIN_TEXT, Command_get_claim_info_tag, &r);
 	zassert_equal(r.which_body, Response_error_tag, "done should error (which=%d)",
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "done code %d",
@@ -1406,7 +1407,7 @@ ZTEST(cmd, test_get_claim_info)
 	/* Active but no token provisioned -> NOT_READY. */
 	g_claim_state = APP_NFC_CLAIM_ACTIVE;
 	memset(g_app_config.claim_token, 0, sizeof(g_app_config.claim_token));
-	handle_get_claim_info(APP_CMD_TRANSPORT_PLAIN_TEXT, &r);
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_PLAIN_TEXT, Command_get_claim_info_tag, &r);
 	zassert_equal(r.which_body, Response_error_tag, "no token should error (which=%d)",
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "no-token code %d",
@@ -1414,9 +1415,45 @@ ZTEST(cmd, test_get_claim_info)
 
 	/* Not allow-listed over lrw / vendor -> rejected by the dispatch guard. */
 	memcpy(g_app_config.claim_token, expect_token, sizeof(expect_token));
-	handle_get_claim_info(APP_CMD_TRANSPORT_LRW, &r);
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_LRW, Command_get_claim_info_tag, &r);
 	zassert_equal(r.which_body, Response_error_tag, "lrw should be rejected");
-	handle_get_claim_info(APP_CMD_TRANSPORT_VENDOR, &r);
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_VENDOR, Command_get_claim_info_tag, &r);
+	zassert_equal(r.which_body, Response_error_tag, "vendor should be rejected");
+}
+
+/* #415/#313 get_basic_info: the plaintext identity bootstrap. Returns serial +
+ * nonce high-water + config/FW version + device_status (with the claim-window
+ * bit); reachable over plain_text / nfc / shell, rejected over lrw / vendor. */
+ZTEST(cmd, test_get_basic_info)
+{
+	Response r;
+
+	reset_cfg();
+	g_app_config.serial_number = 2162123456u;
+	g_app_config.config_version = 4;
+	g_app_config.nonce_counter = 42;
+	g_claim_state = APP_NFC_CLAIM_ACTIVE;
+
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_PLAIN_TEXT, Command_get_basic_info_tag, &r);
+	zassert_equal(r.which_body, Response_basic_info_tag, "expected basic_info (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.basic_info.serial_number, 2162123456u, "serial mismatch");
+	zassert_equal(r.body.basic_info.nonce_counter, 42u, "nonce high-water mismatch");
+	zassert_equal(r.body.basic_info.config_version, 4u, "config_version mismatch");
+	zassert_true(r.body.basic_info.device_status & APP_DEVICE_STATUS_CLAIM_ACTIVE,
+		     "claim-active bit must be set while the window is active");
+
+	/* Claimed -> the claim-active bit clears (rest of device_status unaffected). */
+	g_claim_state = APP_NFC_CLAIM_DONE;
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_NFC, Command_get_basic_info_tag, &r);
+	zassert_equal(r.which_body, Response_basic_info_tag, "basic_info over nfc");
+	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_CLAIM_ACTIVE,
+		      "claim-active bit must clear once claimed");
+
+	/* Not allow-listed over lrw / vendor -> rejected by the dispatch guard. */
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_LRW, Command_get_basic_info_tag, &r);
+	zassert_equal(r.which_body, Response_error_tag, "lrw should be rejected");
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_VENDOR, Command_get_basic_info_tag, &r);
 	zassert_equal(r.which_body, Response_error_tag, "vendor should be rejected");
 }
 

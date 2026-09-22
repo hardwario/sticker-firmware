@@ -176,6 +176,9 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	if (info->lrw_state == APP_LRW_STATE_DISABLED) {
 		status |= APP_DEVICE_STATUS_LRW_DISABLED;
 	}
+	if (app_nfc_claim_state_get() == APP_NFC_CLAIM_ACTIVE) {
+		status |= APP_DEVICE_STATUS_CLAIM_ACTIVE;
+	}
 	info->device_status = status;
 }
 
@@ -836,6 +839,38 @@ static void app_cmd_handle_get_claim_info(enum app_cmd_transport tp, const Comma
 	       sizeof(g_app_config.claim_token));
 }
 
+/* #415/#313: identity bootstrap over the mailbox. Everything a phone needs after
+ * a tap, before its first encrypted command, and none of it secret: the serial
+ * (to pick the cached secret_key), the nonce high-water (to send nonce+1 through
+ * the anti-replay window), the config version (is its cached config stale), the
+ * FW version and the claim state. Replaces the plaintext hio.stck:inf record.
+ * Read-only. Always answers (unlike get_claim_info it is not gated on the claim
+ * window). mailbox_available (device_status bit 13) is added by PR #414. */
+static void app_cmd_handle_get_basic_info(enum app_cmd_transport tp, const Command *cmd,
+					  Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(action);
+
+	struct app_cmd_info info;
+	app_cmd_get_info(&info);
+
+	resp->which_body = Response_basic_info_tag;
+	Response_BasicInfo *bi = &resp->body.basic_info;
+	bi->serial_number = info.serial_number;
+	/* Live high-water == what decrypt() checks against (see build_info_payload /
+	 * the old inf record). */
+	bi->nonce_counter = app_config()->nonce_counter;
+	bi->config_version = g_app_config.config_version;
+	bi->fw_major = info.fw_major;
+	bi->fw_minor = info.fw_minor;
+	bi->fw_patch = info.fw_patch;
+	/* Full APP_DEVICE_STATUS_* bitmask (app_cmd_get_info fills it, incl. the
+	 * claim-window bit) — claim/alarm/battery/health in one word. */
+	bi->device_status = info.device_status;
+}
+
 /* #338: remote-triggered buzzer melody (NFC/LRW). kind selects one of the
  * fixed severity melodies (the buzzer is DC self-oscillating only — no custom
  * tones); kind 0 (or any id >= 16) is the STOP request — the remote
@@ -1434,6 +1469,15 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_get_claim_info(tp, cmd, resp, action);
+		break;
+	case Command_get_basic_info_tag:
+		/* transports: [plain_text, nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_PLAIN_TEXT && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_get_basic_info(tp, cmd, resp, action);
 		break;
 	default:
 		/* L-54: an unknown command tag (e.g. a removed command like the old
