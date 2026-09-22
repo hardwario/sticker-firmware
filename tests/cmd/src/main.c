@@ -12,6 +12,7 @@
 #include "app_sensor.h"
 
 #include <pb_decode.h>
+#include <pb_encode.h>
 #include "src/app_config.pb.h"
 
 #include <zephyr/ztest.h>
@@ -1280,6 +1281,59 @@ ZTEST(cmd, test_lrw_region_writable_excludes_vendor)
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE,
 		      "C2 REGRESSION: EXPECTED NOT_WRITABLE over vendor; code=%d",
 		      r.body.error.code);
+}
+
+/* #415 C1/K2: the plain_text transport is opt-in — a command answers on it only
+ * by listing `plain_text` in app_config.yml. No command does yet (get_claim_info
+ * arrives in a later commit), so EVERY command must be rejected with NOT_READY
+ * "transport not allowed" by the generated dispatch guard, before its handler
+ * runs and before any deferred action is staged. Guards the security boundary:
+ * an unauthenticated caller must never reach get_info (discloses claim_token) or
+ * set_param (writes config) over the plaintext channel. */
+ZTEST(cmd, test_plain_text_rejects_every_command)
+{
+	static const pb_size_t tags[] = {
+		Command_set_param_tag,      Command_get_param_tag,
+		Command_get_info_tag,       Command_get_config_tag,
+		Command_settings_save_tag,  Command_reboot_tag,
+		Command_device_reset_tag,   Command_force_send_tag,
+		Command_reset_counters_tag, Command_req_history_tag,
+		Command_clock_sync_tag,     Command_req_history_page_tag,
+		Command_w1_scan_tag,        Command_lrw_reset_tag,
+		Command_lrw_join_tag,       Command_enter_calibration_tag,
+		Command_sample_tag,         Command_factory_reset_tag,
+		Command_set_secret_key_tag, Command_clm_ack_tag,
+		Command_vendor_reset_tag,   Command_clm_rearm_tag,
+		Command_buzzer_play_tag,
+	};
+
+	reset_cfg();
+	for (size_t i = 0; i < ARRAY_SIZE(tags); i++) {
+		Command cmd = Command_init_zero;
+		cmd.seq = 1;
+		cmd.which_body = tags[i];
+
+		uint8_t in[64];
+		pb_ostream_t os = pb_ostream_from_buffer(in, sizeof(in));
+		zassert_true(pb_encode(&os, Command_fields, &cmd), "encode tag %u", tags[i]);
+
+		uint8_t out[128];
+		size_t out_len = 0;
+		enum app_cmd_action action = APP_CMD_ACTION_NONE;
+		int ret = app_cmd_handle(APP_CMD_TRANSPORT_PLAIN_TEXT, in, os.bytes_written, out,
+					 sizeof(out), &out_len, &action);
+		zassert_equal(ret, 0, "handle ret %d (tag %u)", ret, tags[i]);
+		zassert_equal(action, APP_CMD_ACTION_NONE, "deferred action leaked (tag %u)",
+			      tags[i]);
+
+		Response r = Response_init_zero;
+		pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+		zassert_true(pb_decode(&is, Response_fields, &r), "decode tag %u", tags[i]);
+		zassert_equal(r.which_body, Response_error_tag, "tag %u not rejected (which=%d)",
+			      tags[i], r.which_body);
+		zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY,
+			      "tag %u wrong code %d", tags[i], r.body.error.code);
+	}
 }
 
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);

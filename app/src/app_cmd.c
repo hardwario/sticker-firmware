@@ -1197,22 +1197,58 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 
 	switch (cmd->which_body) {
 	case Command_set_param_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_set_param(tp, cmd, resp, action);
 		break;
 	case Command_get_param_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_get_param(tp, cmd, resp, action);
 		break;
 	case Command_get_info_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_get_info(tp, cmd, resp, action);
 		break;
 	case Command_get_config_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_get_config(tp, cmd, resp, action);
 		break;
 	case Command_settings_save_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		*action = APP_CMD_ACTION_SETTINGS_SAVE;
 		resp->which_body = Response_ack_tag;
 		break;
 	case Command_reboot_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		*action = APP_CMD_ACTION_REBOOT;
 		resp->which_body = Response_ack_tag;
 		break;
@@ -1234,6 +1270,12 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_force_send(tp, cmd, resp, action);
 		break;
 	case Command_reset_counters_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_reset_counters(tp, cmd, resp, action);
 		break;
 	case Command_req_history_tag:
@@ -1261,12 +1303,30 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_clock_sync(tp, cmd, resp, action);
 		break;
 	case Command_w1_scan_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_w1_scan(tp, cmd, resp, action);
 		break;
 	case Command_lrw_reset_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_lrw_reset(tp, cmd, resp, action);
 		break;
 	case Command_lrw_join_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_lrw_join(tp, cmd, resp, action);
 		break;
 	case Command_enter_calibration_tag:

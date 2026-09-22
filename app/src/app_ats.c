@@ -980,6 +980,15 @@ static int cmd_cmd_nfc(const struct shell *sh, size_t argc, char **argv)
 	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_NFC, argv[1]);
 }
 
+/* #415: inject a raw (unencrypted) Command over the plain_text transport — the
+ * bench equivalent of the NFC mailbox channel 0x03. Only allow-listed commands
+ * answer (get_claim_info); anything else returns NOT_READY "transport not
+ * allowed". */
+static int cmd_cmd_plain(const struct shell *sh, size_t argc, char **argv)
+{
+	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_PLAIN_TEXT, argv[1]);
+}
+
 /* Bench driver for the NFC paged history read (#260): drives the same
  * client-side loop the Manager-App runs — build a req_history_page Command,
  * feed it through app_cmd_handle(NFC), decode the HistoryFrame, advance the
@@ -1095,6 +1104,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(lrw, NULL, "Inject over LoRaWAN transport. Usage: lrw <hex>", cmd_cmd_lrw, 2,
 		      0),
 	SHELL_CMD_ARG(nfc, NULL, "Inject over NFC transport. Usage: nfc <hex>", cmd_cmd_nfc, 2, 0),
+	SHELL_CMD_ARG(plain, NULL,
+		      "Inject a raw Command over the unauthenticated plain_text transport "
+		      "(#415). Usage: plain <hex>",
+		      cmd_cmd_plain, 2, 0),
 	SHELL_CMD_ARG(history, NULL,
 		      "Drive the NFC paged history read (#260). Usage: history [<from> [<to>]]",
 		      cmd_cmd_history, 1, 2),

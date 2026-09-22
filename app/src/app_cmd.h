@@ -30,6 +30,15 @@ enum app_cmd_transport {
 	 * secret_key (#316). Runs the same generic Command/Response dispatch; gates
 	 * the vendor-only command (vendor_reset) and writable:[vendor] fields. */
 	APP_CMD_TRANSPORT_VENDOR,
+	/* Unencrypted, unauthenticated command channel (#415): a raw Command
+	 * protobuf in, 0x01||Response out, no CCM/nonce/cache. Reachable over the
+	 * NFC mailbox channel 0x03 and the `ats cmd plain` shell. A command answers
+	 * on it ONLY by listing `plain_text` in app_config.yml (opt-in) — the
+	 * implicit "omitted = all transports" default deliberately excludes it, so a
+	 * command reaches plain_text only after a reviewed one-line yml change. The
+	 * rule for such a command: read-only, disclosing identity-class data only
+	 * (first user: get_claim_info). */
+	APP_CMD_TRANSPORT_PLAIN_TEXT,
 };
 
 /* Aggregated device status reported in Device Info (device_status, fPort 85 +
