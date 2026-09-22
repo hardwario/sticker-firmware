@@ -18,13 +18,9 @@ extern "C" {
 
 int app_nfc_init(void);
 
-/* Reconcile the resting NDEF record now (boot and `nfc check`): lays it down on
- * an empty tag, refreshes a stale one, restores it over foreign data. Needs the
- * RF field off (EEPROM); a phone holding the field makes it a no-op this pass. */
-int app_nfc_check(void);
-
-/* Reads the tag and processes any pending command, restoring the info record
- * otherwise. Run from the poll thread after app_nfc_wait_event(). */
+/* Serve the ST25DV FTM mailbox while the phone holds its field (#313): the
+ * one-tap command channel. Run from the poll thread after app_nfc_wait_event().
+ * The tag holds no NDEF record — there is nothing to reconcile. */
 int app_nfc_poll(void);
 
 /* Block until the ST25DV GPO line signals RF activity (the phone touched the
@@ -37,11 +33,6 @@ int app_nfc_wait_event(int fallback_ms);
  * response is on the tag, so the phone can still read the Ack first. Returns
  * APP_CMD_ACTION_NONE when there is nothing pending. */
 enum app_cmd_action app_nfc_take_cmd_action(void);
-
-/* Whether the main loop should run the periodic NFC check. Toggled by the
- * `nfc autocheck on|off` shell command so a multi-step `nfc write` of a config
- * blob is not raced (and overwritten) by the periodic check mid-write. */
-bool app_nfc_periodic_enabled(void);
 
 /* True once app_nfc_init() has succeeded (ST25DV tag usable). False means the
  * tag is unavailable and the device runs degraded (#88). */

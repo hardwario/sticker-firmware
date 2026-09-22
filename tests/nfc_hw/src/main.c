@@ -41,40 +41,6 @@ ZTEST(nfc_hw, test_init_succeeds_on_empty_tag)
 	zassert_equal(app_nfc_init(), 0, "app_nfc_init failed against the emulated ST25DV");
 }
 
-ZTEST(nfc_hw, test_check_writes_info_record_on_empty_tag)
-{
-	zassert_equal(app_nfc_init(), 0, "app_nfc_init failed");
-
-	uint8_t mem_before[ST25DV_EMUL_MEM_SIZE];
-
-	st25dv_emul_mem_get(mem_before, 0, sizeof(mem_before));
-	bool all_zero = true;
-
-	for (size_t i = 0; i < sizeof(mem_before); i++) {
-		if (mem_before[i]) {
-			all_zero = false;
-			break;
-		}
-	}
-	zassert_true(all_zero, "test precondition: tag should start empty");
-
-	zassert_equal(app_nfc_check(), 0, "app_nfc_check failed on an empty tag");
-
-	uint8_t mem_after[ST25DV_EMUL_MEM_SIZE];
-
-	st25dv_emul_mem_get(mem_after, 0, sizeof(mem_after));
-	bool wrote_something = false;
-
-	for (size_t i = 0; i < sizeof(mem_after); i++) {
-		if (mem_after[i]) {
-			wrote_something = true;
-			break;
-		}
-	}
-	zassert_true(wrote_something,
-		     "app_nfc_check() should have written the resting info record to the tag");
-}
-
 /* ---- FTM mailbox (#313) ---------------------------------------------------- */
 
 #define GPO_RF_PUT_MSG_EN 0x10
@@ -150,7 +116,7 @@ static void mb_phone_fn(void *a, void *b, void *c)
 	}
 
 	/* Give a rejected-frame case a moment to be seen as "no reply", then drop the
-	 * field so mb_serve_locked() exits and app_nfc_poll() reconciles the tag. */
+	 * field so mb_serve_locked() exits and app_nfc_poll() returns. */
 	k_msleep(50);
 	st25dv_emul_set_field_on(false);
 }
@@ -168,9 +134,8 @@ static void mb_bring_up(const char *key_hex)
 		unhex_local(key_hex, g_app_config.secret_key, sizeof(g_app_config.secret_key));
 	}
 	unhex_local(VND_KEY_HEX, g_app_config.vendor_token, sizeof(g_app_config.vendor_token));
-	/* Field stays OFF here so a caller can arm the claim window (an EEPROM write,
-	 * which needs a field-off window) before turning the RF field on for the
-	 * mailbox session. */
+	/* Field stays OFF here; the caller turns the RF field on for the mailbox
+	 * session. The claim window is ACTIVE by default (nfc_hw_before). */
 }
 
 static struct mb_phone run_phone(const uint8_t *const *reqs, const size_t *lens, size_t n)
@@ -244,7 +209,6 @@ ZTEST(nfc_hw, test_mb_session_cmd_keeps_claim_active_and_advances_nonce)
 {
 	memset(g_app_config.claim_token, 0xAB, sizeof(g_app_config.claim_token));
 	mb_bring_up(KEY_HEX);
-	zassert_equal(app_nfc_check(), 0, "resting poll failed");
 	zassert_equal(app_nfc_claim_state_get(), APP_NFC_CLAIM_ACTIVE,
 		      "a provisioned unit is claim-active by default");
 	st25dv_emul_set_field_on(true); /* now the phone arrives */
@@ -272,7 +236,6 @@ ZTEST(nfc_hw, test_mb_session_vendor_keeps_claim_active)
 {
 	memset(g_app_config.claim_token, 0xAB, sizeof(g_app_config.claim_token));
 	mb_bring_up(KEY_HEX);
-	zassert_equal(app_nfc_check(), 0, "resting poll failed");
 	zassert_equal(app_nfc_claim_state_get(), APP_NFC_CLAIM_ACTIVE,
 		      "a provisioned unit is claim-active by default");
 	st25dv_emul_set_field_on(true); /* now the phone arrives */

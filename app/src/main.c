@@ -241,29 +241,14 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 		return;
 	}
 
-	/* Lay down the plaintext info record once at boot. The wait loop below is
-	 * event-driven (waits forever on the GPO when idle), so without this initial
-	 * check a freshly-booted tag would keep whatever was on it — or stay blank —
-	 * until the first phone tap. */
-	if (app_nfc_periodic_enabled()) {
-		int ret = app_nfc_poll();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_nfc_poll", ret);
-		}
-	}
-
 	for (;;) {
 		/* Sleep until the GPO interrupt fires (phone's field appeared / a mailbox
 		 * message landed). Event-driven: with no phone around the thread waits
 		 * forever and the device stays in Stop2. */
 		(void)app_nfc_wait_event(NFC_EVENT_FALLBACK_MS);
 
-		if (!app_nfc_periodic_enabled()) {
-			continue;
-		}
-
-		/* Serve the mailbox while the phone holds its field, then reconcile the
-		 * resting NDEF record once the field is gone (#313). */
+		/* Serve the mailbox while the phone holds its field (#313). The tag holds
+		 * no NDEF record any more, so there is nothing else to reconcile. */
 		int ret = app_nfc_poll();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_nfc_poll", ret);
@@ -439,17 +424,10 @@ int main(void)
 	ret = app_nfc_init();
 	if (ret) {
 		LOG_WRN("app_nfc_init failed: %d (NFC unavailable, continuing)", ret);
-	} else {
-		/* Lay down / reconcile the resting NDEF record. Not fatal: an unreadable
-		 * or foreign tag content must never brick the device into a reboot loop
-		 * (#88); the poll thread keeps reconciling later. Commands are no longer
-		 * staged on the tag (the NDEF command channel went with #313), so nothing
-		 * is applied here. */
-		ret = app_nfc_check();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
-		}
 	}
+	/* #313: the tag holds no NDEF record any more (mailbox-only), so there is
+	 * nothing to lay down or reconcile at boot — the phone reads identity via the
+	 * mailbox get_basic_info command. */
 
 #if defined(CONFIG_WATCHDOG)
 	app_wdog_feed();

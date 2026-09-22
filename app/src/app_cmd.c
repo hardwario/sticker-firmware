@@ -869,8 +869,8 @@ static void app_cmd_handle_get_basic_info(enum app_cmd_transport tp, const Comma
 	resp->which_body = Response_basic_info_tag;
 	Response_BasicInfo *bi = &resp->body.basic_info;
 	bi->serial_number = info.serial_number;
-	/* Live high-water == what decrypt() checks against (see build_info_payload /
-	 * the old inf record). */
+	/* Live high-water == what decrypt() checks against (what the old inf record
+	 * carried, now served here). */
 	bi->nonce_counter = app_config()->nonce_counter;
 	bi->config_version = g_app_config.config_version;
 	bi->fw_major = info.fw_major;
