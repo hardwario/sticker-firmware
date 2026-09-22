@@ -2,10 +2,10 @@
 
 The LoRaWAN half of the LoRa improvements survey: region handling (AS923, the AU915 dwell
 gap, a build-vs-runtime guard), a manual datarate parameter, confirmed uplinks for alarms,
-and link diagnostics in GetInfo. Split out of
-`doc/plan/408 - LoRa improvements - P2P hardening and TOWER transport.md` (PR #408), which
-keeps the P2P and TOWER work — this work is `app_lrw.c` territory and targets `v1.5.0`
-directly, while #408 stacks on `feat-p2p`.
+and link diagnostics in GetInfo. Split out of PR #408, whose plan now lives at
+`doc/plan/408 - LoRa improvements - P2P hardening.md` **on `feat-p2p` only** (not yet on
+`v1.5.0`) — this work is `app_lrw.c` territory and targets `v1.5.0` directly. The TOWER
+transport moved to PR #410.
 
 > Requested 2026-08-27: "review the LoRa implementation on TOWER, propose what we could add
 > to STICKER (band switching, US915 and AU regulations), and propose improvements to LoRa
@@ -15,6 +15,13 @@ directly, while #408 stacks on `feat-p2p`.
 survey findings, feasibility verification and the TOWER protocol comparison live in the #408
 plan; only what this PR acts on is repeated here. Line citations are against `v1.5.0` at
 `a05f173` — treat the surrounding identifiers as authoritative and the numbers as a hint.
+
+**Revision 2026-09-22** (code review of this plan against `v1.5.0`): A1 no longer falls back
+to EU868 (regulatory risk — it goes radio-silent instead); A5a reframed — responses are
+already budget-capped, the real gap is that `Info` cannot be split, which needs a proto
+design; A2 now waits for #414 and weighs the `Info` size budget; A6 reordered after A5a
+(dwell=1 region is not usable without it); A4 gained the duty-cycle vs 30 s heartbeat
+conflict as a blocker. Steps in §4 renumbered accordingly.
 
 ---
 
@@ -38,11 +45,11 @@ enumerated below. The parameter surface is inspired by `twr-sdk`'s `twr_cmwx1zza
 
 | # | Proposal | Feasibility | Blast radius |
 |---|---|---|---|
-| A1 | **Build-vs-runtime region guard** | API ready | `app_lrw.c`, ~15 lines |
-| A2 | **RSSI/SNR in GetInfo** (like `AT$RFQ`) | API ready | proto + `app_cmd`, 3–4 files |
+| A1 | **Build-vs-runtime region guard** | API ready | `app_lrw.c` + a `device_status` bit, ~25 lines |
+| A2 | **RSSI/SNR in GetInfo** (like `AT$RFQ`) | API ready, `Info` size budget | proto + `app_cmd`, 3–4 files; after #414 |
 | A3 | **Manual datarate parameter** (like `AT$DR`) | API ready | yml + configen + `app_lrw.c` |
-| A4 | **Confirmed uplinks for alarms** (like `AT$REPC`) | API ready, 2 gotchas | `app_lrw.c` + config param |
-| A5 | **AU915 dwell-time compliance** | (a) needs code, (b) validation | `app_lrw.c` + playbook |
+| A4 | **Confirmed uplinks for alarms** (like `AT$REPC`) | API ready, blocker: 30 s heartbeat | `app_lrw.c` + config param |
+| A5 | **AU915 dwell-time compliance** | (a) needs proto design, (b) validation | proto + `app_cmd` + `app_lrw.c` + decoder + playbook |
 | A6 | **AS923 region** | mechanical plumbing | ~5 files, **+2576 B flash** |
 | A7 | **RX2 override** (expert knob) | precedent exists | `app_lrw.c` + param |
 
@@ -57,8 +64,18 @@ This is **not theoretical**: `debug.conf` on v1.5.0 already drops AU915/US915 to
 ~5.9 KB flash / ~0.7 KB RAM.
 
 Proposal: gate each `case` on `IS_ENABLED(CONFIG_LORAMAC_REGION_*)` (the pattern is already
-used elsewhere in this codebase) and fall back to EU868 with a loud `LOG_ERR` instead of
-failing init.
+used elsewhere in this codebase). On a stored region that is not compiled in, **do not fall
+back to another region** — enter the existing radio-silent `APP_LRW_STATE_DISABLED` path
+(the same one an all-zero DevEUI uses, #98), log a loud `LOG_ERR`, and raise a dedicated
+`device_status` bit so the fault is visible over NFC and in the Manager-App.
+
+Why not "fall back to EU868": a device configured for US915/AU915 would then transmit on
+868 MHz in the Americas or Australia — outside the permitted ISM band. A dead-but-diagnosable
+radio is the safe failure; a wrong-band radio is a compliance violation. The operator fixes
+it by reflashing a full image or changing `lrw-region` over NFC/shell.
+
+Note: #414 regroups the `device_status` bit layout — allocate the new bit against the
+layout that lands first.
 
 ### A2 — RSSI/SNR in GetInfo
 
@@ -71,6 +88,20 @@ phone (NFC) or the LNS cannot see link quality.
 
 Caveat to document: the values come from the **last downlink**, which on a Class-A sensor
 may be hours old. Consider pairing them with a timestamp or a staleness flag.
+
+**Size budget.** `Info` is already at the edge of the EU868 DR0 budget (51 B): `claim_token`
+was moved to NFC-only for exactly that reason (see the comment on `Info.claim_token` in
+`app_config.proto`), and `app_cmd_build_info()` trims `active_alarms` to fit. RSSI + SNR +
+an age field add roughly 6–8 B of protobuf and would eat into the alarm list at DR0. Two
+options, decide in Step 5:
+
+- **NFC-only** (like `lrw_state` / `dev_eui`) — zero LoRaWAN cost; the LNS already has
+  per-frame gateway RSSI/SNR for the uplink direction anyway.
+- **Both transports** — only after A5a gives `Info` a way to split.
+
+**Dependency.** #414 (mailbox, `get_basic_info`, `device_status` regroup) and #413 (boot
+settings-info) both change `app_config.proto`, `app_cmd.c` and the `Info` build path. Do A2
+after #414 lands to avoid a three-way conflict on the same message.
 
 ### A3 — Manual datarate parameter
 
@@ -100,9 +131,15 @@ already requeues with backoff, so a NOACK (`-ETIMEDOUT`) is handled.
    triple *telemetry* airtime too. Use a set → send → restore sequence around the confirmed
    send (`lorawan_send()` is synchronous). A `LinkADRReq` can also overwrite NbTrans
    (`LoRaMac.c:2262`).
-2. A confirmed send blocks `m_work_q` for the whole retry sequence, and the watchdog
-   heartbeat runs on the same queue with a 30 s timeout. Verify the worst-case NbTrans
-   duration at DR0 before shipping.
+2. **Blocker, not a check:** a confirmed send blocks `m_work_q` for the whole retry
+   sequence (`lorawan_send()` is synchronous), and the #182 liveness heartbeat runs on the
+   same queue with `LRW_HEARTBEAT_TIMEOUT_MS = 30000`. At EU868 DR0 one frame is ~1.5 s ToA;
+   the 1 % duty cycle then holds the sub-band for ~150 s, so any retry beyond the first
+   (unless the MAC finds a free sub-band) blows the 30 s limit by a wide margin. Resolve
+   before implementation — options: (a) cap NbTrans for alarms to what fits the heartbeat
+   at the current DR, (b) suspend/extend the heartbeat around a confirmed send, or (c) send
+   confirmed alarms without blocking the queue. A longer blocking window also widens the
+   exposure to the known `lorawan_send()` `K_FOREVER` semaphore hang (see CLAUDE.md).
 
 ### A5 — AU915 dwell time ("AU regulations")
 
@@ -119,10 +156,24 @@ already fully MAC-enforced and needs no app changes for telemetry.**
   compose. `PHY_MIN_TX_DR` is dwell-aware too, so the ADR floor and
   `lorawan_set_datarate()` validation both respect DR2.
 
-**The real gap** is elsewhere: `tx_send_queued()` **drops** over-budget response and alarm
-frames instead of fragmenting them. At an 11 B DR2 budget, the GetInfo-on-join frame and
-most alarm frames are near-guaranteed drops. That is the actual AU915 work item — and it is
-shared with AS923, which also defaults to dwell=1.
+**The real gap** is elsewhere — and it is narrower than "`tx_send_queued()` drops", which is
+only half the story:
+
+- **Command responses are already budget-capped.** `queue_info_uplink()` and the downlink
+  handler both pass `min(budget, buffer)` into the encoder, and `app_cmd_build_info()` trims
+  `active_alarms` to fit — so an over-budget response does not reach `tx_send_queued()`, it
+  **fails at encode time** and nothing is queued. At an 11 B DR2 budget even the fixed part
+  of `Info` (fw version, serial, uptime, unix time, battery, reset cause, device status +
+  envelope) does not fit, so GetInfo-on-join and an explicit GetInfo are lost.
+- **Alarm frames** are not budget-capped at encode time; they hit the drop in
+  `tx_send_queued()`.
+- **`Info` has no way to split.** Unlike `HistoryFrame` (`page_index` / `page_count`) it
+  carries no paging fields, so "reuse the existing multi-frame pattern" is not free: it needs
+  a proto change (paging fields or a split into smaller messages), matching encoder logic in
+  `app_cmd`, and reassembly in `ttn.js` / the LNS.
+
+That is the actual AU915 work item and the largest item in this PR — and it is shared with
+AS923, which also defaults to dwell=1.
 
 Second item: HIL validation for AU915 mirroring what #303 did for US915 (playbook scenarios,
 a gateway on an AU915 plan).
@@ -156,7 +207,11 @@ Notes:
   (`RegionAS923.c:54-55`), injectable via
   `zephyr_compile_definitions(REGION_AS923_DEFAULT_CHANNEL_PLAN=…)`. One group per build —
   build variants, not a runtime setting.
-- AS923 also defaults to dwell=1, so the A5 fragmentation gap applies here too.
+- AS923 also defaults to dwell=1, so the A5 fragmentation gap applies here too. **Ship A6
+  after A5a** — before it, AS923 at DR2 (11 B) loses GetInfo-on-join and most alarms, i.e.
+  the region would be nominally supported but not usable.
+- AS923-1 JP channels require LBT; loramac-node handles it per channel plan — confirm on
+  the bench if a JP deployment is ever targeted.
 
 ### A7 — RX2 override
 
@@ -171,12 +226,12 @@ LNS silently kills all downlinks.
 
 ## 3. Tracking
 
-- [ ] A1 — build-vs-runtime region guard
-- [ ] A6 — AS923 region (+2 576 B flash, +0 B RAM)
+- [ ] A1 — build-vs-runtime region guard (radio-silent, no region fallback)
 - [ ] A3 — manual datarate parameter
-- [ ] A2 — RSSI/SNR in GetInfo
-- [ ] A5a — fragment instead of dropping over-budget response/alarm frames
-- [ ] A4 — confirmed uplinks for alarms
+- [ ] A5a — splittable `Info` / fragment instead of dropping over-budget frames
+- [ ] A6 — AS923 region (+2 576 B flash, +0 B RAM) — after A5a
+- [ ] A2 — RSSI/SNR in GetInfo — after #414
+- [ ] A4 — confirmed uplinks for alarms — heartbeat blocker resolved first
 - [ ] A5b — AU915 HIL validation (needs an AU915-plan gateway)
 
 **Deferred / v2:** A7 (RX2 override).
@@ -188,19 +243,55 @@ and `debug.conf` builds, `bash tests/run_native.sh`, `clang-format --dry-run --W
 `app_config.yml` or the proto changes, also
 `pytest sticker/scripts/west_commands/tests` and `cd app/decoder && node --test`.
 
+Steps 1–2 have no dependency on other open PRs and can start immediately.
+
 ### Step 1 — A1: region guard
 
 Gate each `lorawan_set_region()` case in `app_lrw_init()` on
-`IS_ENABLED(CONFIG_LORAMAC_REGION_*)`; on a stored region that is not compiled in, fall back
-to EU868 with a loud `LOG_ERR` instead of failing radio init. ~15 lines, `app_lrw.c` only.
+`IS_ENABLED(CONFIG_LORAMAC_REGION_*)`. On a stored region that is not compiled in, enter
+`APP_LRW_STATE_DISABLED` (radio-silent, like #98) with a loud `LOG_ERR` and a new
+`device_status` bit — **never** substitute another region. `app_lrw.c` + `app_cmd.h` bit +
+decoder bit name.
 
-**Verify:** standard; bench check on `debug.conf` (which drops US915/AU915) — set
-`lrw-region us915`, reboot, expect the fallback log and a working EU868 radio, not a dead
-one.
+**Verify:** standard + decoder tests; bench check on `debug.conf` (which drops US915/AU915) —
+set `lrw-region us915`, reboot, expect the error log, `DISABLED` state, the status bit over
+NFC, and **no RF emission**; setting `lrw-region eu868` restores a working radio.
 
-### Step 2 — A6: AS923 region
+### Step 2 — A3: manual datarate parameter
 
-Rides on Step 1 (the guard makes a non-compiled AS923 safe on trimmed images).
+- New `lrw-datarate` param (int, sentinel for "let ADR/stack choose", persisted, shell+NFC
+  writable — same access model as the other `lrw_*` params) in `app_config.yml` +
+  regenerated artefacts + decoder map.
+- Apply in `on_join_success()` after `lorawan_enable_adr()`, before
+  `refresh_payload_budget()`; skip (with a log) when ADR is on; log loudly on `-EINVAL`
+  (region/dwell-invalid DR). Calibration mode's own `LORAWAN_DR_5` stays authoritative
+  while calibrating.
+
+**Verify:** standard + configen pytest + decoder tests; bench check: ADR off + DR pinned,
+confirm uplink DR on the LNS; ADR on + param set, confirm the skip log.
+
+### Step 3 — A5a: splittable `Info` + alarm fragmentation
+
+Design first, then code — this is the largest step:
+
+- **Design decision** (record in this plan before coding): how `Info` splits — paging
+  fields (`page_index` / `page_count`, `HistoryFrame` precedent) vs. splitting into smaller
+  self-contained messages. Constraint: the first frame alone must identify the device and
+  firmware at an 11 B budget. Coordinate the wire change with apps/manager and the LNS
+  decoder.
+- `app_cmd_build_info()` / `queue_info_uplink()` emit N frames when the budget is small
+  instead of failing at encode time.
+- Alarm frames: budget-aware encode or split instead of the drop in `tx_send_queued()`.
+- `ttn.js` reassembly + tests.
+
+**Verify:** standard + proto pytest + decoder tests + a `tests/cmd`/`tests/compose`-style
+ztest case at an 11 B budget; bench check on US915 DR0 (same 11 B budget as AU915 DR2, no
+AU gateway needed).
+
+### Step 4 — A6: AS923 region
+
+Rides on Step 1 (the guard makes a non-compiled AS923 safe on trimmed images) and Step 3
+(dwell=1 budget).
 
 - `app_config.yml`: `AS923` enum value; regenerate via local configen (never hand-edit
   `app_config.c` — it is generated).
@@ -211,56 +302,41 @@ Rides on Step 1 (the guard makes a non-compiled AS923 safe on trimmed images).
 - `app/decoder/ttn.js`: extend `_LRW_ENUM.region` + tests.
 
 **Verify:** standard + configen pytest + decoder tests; flash/RAM delta recorded in the
-commit message (expected ≈ +2.6 KB / +0 B against the table above).
+commit message (expected ≈ +2.6 KB / +0 B against the table above — re-measure, the
+baseline has moved since).
 
-### Step 3 — A3: manual datarate parameter
+### Step 5 — A2: RSSI/SNR in GetInfo
 
-- New `lrw-datarate` param (int, sentinel for "let ADR/stack choose", persisted, shell+NFC
-  writable — same access model as the other `lrw_*` params) in `app_config.yml` +
-  regenerated artefacts + decoder map.
-- Apply in `on_join_success()` after `lorawan_enable_adr()`, before
-  `refresh_payload_budget()`; skip (with a log) when ADR is on; log loudly on `-EINVAL`
-  (region/dwell-invalid DR).
+Starts after #414 is merged into `v1.5.0` (and rebased over #413 if that lands first).
 
-**Verify:** standard + configen pytest + decoder tests; bench check: ADR off + DR pinned,
-confirm uplink DR on the LNS; ADR on + param set, confirm the skip log.
-
-### Step 4 — A2: RSSI/SNR in GetInfo
-
-- `Info` proto message: `last_rssi` / `last_snr` (+ staleness: either a
-  `last_downlink_age_s` field or documenting "last downlink" semantics — decide during
-  implementation).
+- Decide transport: NFC-only (recommended unless Step 3 made `Info` splittable cheaply) vs.
+  both.
+- `Info` proto message: `last_rssi` / `last_snr` + staleness (`last_downlink_age_s` or
+  documented "last downlink" semantics).
 - `app_cmd_get_info()` fills them from the values `app_lrw` already tracks; `ttn.js` Info
-  decode + tests; extend the `tests/cmd` build_info ztest cases.
+  decode + tests; extend the `tests/cmd` build_info ztest cases, including one asserting
+  the DR0 budget still fits.
 
 **Verify:** standard + configen/proto pytest + decoder tests + `tests/cmd` suite.
 
-### Step 5 — A5a: fragment instead of dropping
-
-`tx_send_queued()` currently drops a queued response/alarm frame larger than the current
-payload budget. Split it across multiple uplinks instead (the compose/history paths already
-have multi-frame precedent). Needs a small design decision on framing for split responses —
-reuse the existing multi-frame pattern rather than inventing a new one.
-
-**Verify:** standard + a `tests/compose`-style ztest case at an 11 B budget; bench check on
-US915 DR0 (same 11 B budget as AU915 DR2, no AU gateway needed).
-
 ### Step 6 — A4: confirmed alarms
+
+**Precondition:** pick and document the heartbeat resolution from §2 A4 gotcha 2.
 
 - New config param (e.g. `lrw-alarm-confirmed`, bool, default off) — alarms opt into
   `LORAWAN_MSG_CONFIRMED`.
 - Set → send → restore `MIB_CHANNELS_NB_TRANS` around the confirmed send so telemetry
-  airtime is untouched; measure worst-case duration at DR0 against the 30 s work-queue
-  watchdog before enabling by default anywhere.
+  airtime is untouched; NbTrans bounded per the chosen heartbeat resolution.
 
 **Verify:** standard + configen pytest; bench check with a gateway ACKing fPort 3, plus a
-forced-NOACK run (gateway down) confirming the requeue path and no watchdog trip.
+forced-NOACK run (gateway down) at EU868 DR0 confirming the requeue path and **no heartbeat
+trip / no reboot**.
 
 ### Step 7 — A5b: AU915 HIL validation
 
 Playbook scenarios mirroring AT-LRW-13..15 for AU915 (join on a sub-band, dwell-limited
-DR floor = DR2, 11 B budget multi-frame split, fragment-not-drop from Step 5). Blocked on
-bench hardware: needs a gateway on an AU915 frequency plan.
+DR floor = DR2, 11 B budget, split `Info` and alarms from Step 3). Blocked on bench
+hardware: needs a gateway on an AU915 frequency plan.
 
 ## 5. Explicit non-goals
 
@@ -268,12 +344,12 @@ bench hardware: needs a gateway on an AU915 frequency plan.
   choice; LTO strips the Class B/C code paths today.
 - **Runtime AS923 channel-plan switching** — loramac-node fixes the plan group at compile
   time; build variants cover the need.
-- **P2P and TOWER work** — lives in PR #408 (`feat-p2p`).
+- **P2P and TOWER work** — PR #408 (merged into `feat-p2p`) and PR #410.
 
 ## 6. References
 
-- `doc/plan/408 - LoRa improvements - P2P hardening and TOWER transport.md` — the full
-  survey (TOWER stack, twr-sdk), the feasibility matrix, and the P2P/TOWER tracks.
+- `doc/plan/408 - LoRa improvements - P2P hardening.md` (on `feat-p2p`) — the full survey
+  (TOWER stack, twr-sdk), the feasibility matrix, and the P2P track; TOWER in PR #410.
 - `hardwario/twr-sdk` @ `9ded554` — `twr/src/twr_cmwx1zzabz.c`, `twr/src/twr_at_lora.c`.
 - Issue #303 — US915 end-to-end validation (closed, no firmware defect found).
 - `doc/us915-test-plan.md`, `doc/automated-test-playbook.md` (AT-LRW-13..15).
