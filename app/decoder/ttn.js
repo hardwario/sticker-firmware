@@ -270,6 +270,17 @@ function _decodeConfigDump(bytes, start, end) {
   return cd;
 }
 
+// InfoLite (Response field 11, #409): firmware version (+ build type) only, sent
+// instead of Info at the 11 B budget tier. Fields 1..4 share Info's numbering.
+// The device follows up with the full Info once the data rate allows it.
+function _decodeInfoLite(bytes, start, end) {
+  var full = _decodeInfo(bytes, start, end);
+  return {
+    fw_major: full.fw_major, fw_minor: full.fw_minor, fw_patch: full.fw_patch,
+    fw_version: full.fw_version, build_type: full.build_type, build_type_name: full.build_type_name
+  };
+}
+
 function _decodeInfo(bytes, start, end) {
   var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false, device_status: 0, active_alarms: [] };
   var pos = start;
@@ -523,6 +534,7 @@ function decodeDownlinkResponse(bytes) {
       else if (field === 5) resp.history_frame = _decodeHistoryFrame(bytes, pos, end);
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       else if (field === 7) resp.w1_scan = _decodeW1Scan(bytes, pos, end);
+      else if (field === 11) resp.info_lite = _decodeInfoLite(bytes, pos, end);
       pos = end;
     } else {
       break;

@@ -1373,6 +1373,28 @@ static int encode_response(const Response *resp, uint8_t *out, size_t out_cap, s
 	return 0;
 }
 
+/* #409 A5a: encode Response{ seq, info_lite } — the firmware version, plus the
+ * build type if it still fits. For the 11 B budget tier, where even Info without
+ * active_alarms does not fit. */
+static int encode_info_lite(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	Response resp = Response_init_zero;
+	resp.seq = seq;
+	resp.which_body = Response_info_lite_tag;
+	Response_InfoLite *l = &resp.body.info_lite;
+	l->fw_major = APP_VERSION_MAJOR;
+	l->fw_minor = APP_VERSION_MINOR;
+	l->fw_patch = APP_VERSION_PATCH;
+	l->build_type = (Response_Info_BuildType)APP_BUILD_TYPE;
+
+	int ret = encode_response(&resp, out, out_cap, out_len);
+	if (ret == -EMSGSIZE && l->build_type != 0) {
+		l->build_type = 0; /* proto3 default: omitted on the wire */
+		ret = encode_response(&resp, out, out_cap, out_len);
+	}
+	return ret;
+}
+
 int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len, uint8_t *out,
 		   size_t out_cap, size_t *out_len, enum app_cmd_action *action)
 {
@@ -1427,6 +1449,13 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		ret = encode_response(&resp, out, out_cap, out_len);
 	}
 
+	/* #409 A5a: a LoRaWAN GetInfo that does not fit even without alarms answers
+	 * with InfoLite (firmware version) instead of an Error. */
+	if (ret == -EMSGSIZE && resp.which_body == Response_info_tag &&
+	    transport == APP_CMD_TRANSPORT_LRW) {
+		ret = encode_info_lite(resp.seq, out, out_cap, out_len);
+	}
+
 	if (ret == -EMSGSIZE) {
 		/* The composed response doesn't fit the transport buffer. Don't fail
 		 * silently (#93.3) — replace it with a compact Error carrying the same
@@ -1435,8 +1464,13 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		LOG_WRN("Response too large for buffer; sending Error instead");
 		Response err = Response_init_zero;
 		err.seq = resp.seq;
-		make_error(&err, Response_Error_Code_UNKNOWN,
-			   transport == APP_CMD_TRANSPORT_LRW ? NULL : "response too large");
+		/* #409: over LoRaWAN the only reason is the DR payload budget, so say
+		 * so — the host should retry once ADR raises the DR. */
+		if (transport == APP_CMD_TRANSPORT_LRW) {
+			make_error(&err, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
+		} else {
+			make_error(&err, Response_Error_Code_UNKNOWN, "response too large");
+		}
 		ret = encode_response(&err, out, out_cap, out_len);
 	}
 	if (ret) {
@@ -1449,10 +1483,13 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	return 0;
 }
 
-int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
+int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *lite)
 {
 	if (!out || !out_len) {
 		return -EINVAL;
+	}
+	if (lite) {
+		*lite = false;
 	}
 
 	Response resp = Response_init_zero;
@@ -1471,6 +1508,13 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
 	for (size_t max_alarms = ACTIVE_ALARM_SNAPSHOT_MAX; ret == -EMSGSIZE && max_alarms-- > 0;) {
 		fill_info(APP_CMD_TRANSPORT_LRW, &resp.body.info, max_alarms);
 		ret = encode_response(&resp, out, out_cap, out_len);
+	}
+
+	if (ret == -EMSGSIZE) {
+		ret = encode_info_lite(0, out, out_cap, out_len);
+		if (ret == 0 && lite) {
+			*lite = true;
+		}
 	}
 
 	return ret;

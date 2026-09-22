@@ -7,6 +7,7 @@
  */
 
 #include "app_cmd.h"
+#include "app_version.h"
 #include "app_config.h"
 #include "app_config_ingest.h"
 #include "app_sensor.h"
@@ -358,7 +359,7 @@ ZTEST(cmd, test_build_info)
 	/* get_info reads the cached sample voltage, not a fresh ADC read. */
 	g_app_sensor_data.voltage = 3.3f;
 
-	int ret = app_cmd_build_info(out, sizeof(out), &out_len);
+	int ret = app_cmd_build_info(out, sizeof(out), &out_len, NULL);
 	zassert_equal(ret, 0, "build_info ret %d", ret);
 
 	/* Skip the APP_PROTO_VERSION prefix (#55). */
@@ -486,7 +487,7 @@ ZTEST(cmd, test_build_info_claim_token_omitted_over_lrw)
 	reset_cfg();
 	memcpy(g_app_config.claim_token, token, sizeof(token));
 
-	zassert_equal(app_cmd_build_info(out, sizeof(out), &out_len), 0, "build_info");
+	zassert_equal(app_cmd_build_info(out, sizeof(out), &out_len, NULL), 0, "build_info");
 	Response r = Response_init_zero;
 	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
@@ -644,14 +645,14 @@ ZTEST(cmd, test_build_info_trims_alarms_over_dr_budget)
 	test_set_active_alarm_count(5);
 
 	/* Baseline: plenty of room, all 5 alarms present. */
-	int ret = app_cmd_build_info(out, sizeof(out), &full_len);
+	int ret = app_cmd_build_info(out, sizeof(out), &full_len, NULL);
 	zassert_equal(ret, 0, "baseline build_info ret %d", ret);
 	zassert_equal(count_info_active_alarms(out, full_len), 5,
 		      "expected all 5 alarms unconstrained");
 
 	/* One byte short of the untrimmed size: must still succeed, with fewer
 	 * alarms (dropping even one entry frees far more than 1 B of headroom). */
-	ret = app_cmd_build_info(out, full_len - 1, &out_len);
+	ret = app_cmd_build_info(out, full_len - 1, &out_len, NULL);
 	zassert_equal(ret, 0, "trimmed build_info ret %d", ret);
 	zassert_true(out_len <= full_len - 1, "out_len %zu over cap %zu", out_len, full_len - 1);
 	size_t trimmed_count = count_info_active_alarms(out, out_len);
@@ -666,7 +667,7 @@ ZTEST(cmd, test_build_info_trims_alarms_over_dr_budget)
 
 	/* A cap too small even for zero alarms genuinely fails -- no silent
 	 * truncation of the rest of Info. */
-	ret = app_cmd_build_info(out, 2, &out_len);
+	ret = app_cmd_build_info(out, 2, &out_len, NULL);
 	zassert_equal(ret, -EMSGSIZE, "expected -EMSGSIZE for an impossible cap, got %d", ret);
 }
 
@@ -1388,7 +1389,63 @@ ZTEST(cmd, test_too_large_fallback_fits_11b_budget)
 	zassert_true(pb_decode(&is, Response_fields, &r), "Response decode failed");
 	zassert_equal(r.seq, 2, "seq %u", r.seq);
 	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
-	zassert_equal(r.body.error.code, Response_Error_Code_UNKNOWN, "code %d", r.body.error.code);
+	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code %d",
+		      r.body.error.code);
+}
+
+/* #409 A5a: at the 11 B budget tier even Info without alarms does not fit;
+ * app_cmd_build_info() falls back to InfoLite (firmware version) and reports it
+ * via *lite so app_lrw can send the full Info once the DR rises. */
+ZTEST(cmd, test_build_info_falls_back_to_info_lite_at_11b)
+{
+	uint8_t out[11];
+	size_t out_len = 0;
+	bool lite = false;
+
+	reset_cfg();
+	g_app_config.serial_number = 1234567890;
+	int ret = app_cmd_build_info(out, sizeof(out), &out_len, &lite);
+	zassert_equal(ret, 0, "InfoLite must fit 11 B, ret %d", ret);
+	zassert_true(lite, "lite flag not set");
+	zassert_true(out_len <= sizeof(out), "out_len %zu", out_len);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_equal(r.which_body, Response_info_lite_tag, "expected InfoLite, which=%d",
+		      r.which_body);
+	zassert_equal(r.body.info_lite.fw_major, APP_VERSION_MAJOR, "fw_major");
+	zassert_equal(r.body.info_lite.fw_minor, APP_VERSION_MINOR, "fw_minor");
+	zassert_equal(r.body.info_lite.fw_patch, APP_VERSION_PATCH, "fw_patch");
+
+	/* With room for the full Info the flag stays clear. */
+	uint8_t big[128];
+	ret = app_cmd_build_info(big, sizeof(big), &out_len, &lite);
+	zassert_equal(ret, 0, "full build_info ret %d", ret);
+	zassert_false(lite, "lite flag set with a big buffer");
+}
+
+/* #409 A5a: a GetInfo command over LoRaWAN at 11 B answers with InfoLite
+ * (keeping the seq), not an Error. */
+ZTEST(cmd, test_get_info_over_lrw_answers_info_lite_at_11b)
+{
+	uint8_t in[8], out[11];
+	size_t in_len = unhex("08072200", in, sizeof(in)); /* seq7 get_info */
+	size_t out_len = 0;
+
+	reset_cfg();
+	g_app_config.serial_number = 1234567890;
+	int ret =
+		app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len, NULL);
+	zassert_equal(ret, 0, "ret %d", ret);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_equal(r.seq, 7, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_info_lite_tag, "expected InfoLite, which=%d",
+		      r.which_body);
+	zassert_equal(r.body.info_lite.fw_major, APP_VERSION_MAJOR, "fw_major");
 }
 
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);

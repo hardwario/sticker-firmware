@@ -137,9 +137,11 @@ const uint8_t *app_cmd_take_pending_vendor_secret_key(void);
 
 /* Build an unsolicited device Info frame (Response{ seq=0, info=... },
  * the same payload a GetInfo command returns) into `out`. Used to send an
- * autonomous GetInfo uplink on join. Returns 0 with *out_len set, -EINVAL on a
- * NULL argument, or -EMSGSIZE if `out_cap` is too small. */
-int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len);
+ * autonomous GetInfo uplink on join. When the full Info does not fit `out_cap`
+ * even with active_alarms trimmed, falls back to Response{ info_lite } (firmware
+ * version only, #409) and sets *lite (may be NULL). Returns 0 with *out_len set,
+ * -EINVAL on a NULL argument, or -EMSGSIZE if not even InfoLite fits. */
+int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *lite);
 
 /* Build an unsolicited settings-info frame (Response{ seq=0, config_dump=... },
  * one page, page_count=1) into `out`. Carries a fixed selection of the key

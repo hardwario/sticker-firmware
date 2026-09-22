@@ -138,6 +138,7 @@ static struct k_work m_join_work;
 static struct k_work m_link_check_work;       /* LC timeout (from m_lc_timeout_timer) */
 static struct k_work m_downlink_success_work; /* deferred from downlink_callback */
 static struct k_work m_clock_sync_info_work;  /* deferred ClockSync Info uplink (#219) */
+static struct k_work m_announce_work;         /* deferred full Info / settings-info (#409) */
 static struct k_work m_lc_response_work;      /* deferred from link_check_callback */
 static struct k_work m_force_lc_work;         /* arm a forced LC on the next telemetry */
 static struct k_work m_dl_request_work;       /* drains m_dl_msgq (port-85 commands) */
@@ -276,6 +277,12 @@ static enum app_cmd_action m_post_cmd_action;
 /* #193: set from a command-handler thread, test-and-cleared in the LoRaMac
  * downlink callback (another context) — an atomic bit closes the lost-update race. */
 static atomic_t m_clock_sync_info_pending;
+/* #409 A5a: boot announce frames that did not fit the DR budget at join time
+ * (Info went out as InfoLite, settings-info was skipped). Re-sent from
+ * m_announce_work once a DR change makes room. */
+#define ANNOUNCE_INFO     0
+#define ANNOUNCE_SETTINGS 1
+static atomic_t m_announce_pending;
 
 /* Kicked on a link-ready edge (join success / history-replay finish) so
  * app_report can resume the report cadence with an immediate uplink. */
@@ -470,10 +477,18 @@ static int queue_info_uplink(void)
 {
 	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t info_len;
+	bool lite = false;
 
-	int ret = app_cmd_build_info(info_buf, refresh_payload_cap(sizeof(info_buf)), &info_len);
+	int ret = app_cmd_build_info(info_buf, refresh_payload_cap(sizeof(info_buf)), &info_len,
+				     &lite);
 	if (ret == 0) {
 		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len);
+	}
+	/* #409: only InfoLite fit (or nothing) — send the full Info once the DR rises. */
+	if (ret != 0 || lite) {
+		atomic_set_bit(&m_announce_pending, ANNOUNCE_INFO);
+	} else {
+		atomic_clear_bit(&m_announce_pending, ANNOUNCE_INFO);
 	}
 	return ret;
 }
@@ -491,8 +506,43 @@ static int queue_settings_info_uplink(void)
 	int ret = app_cmd_build_config_status(buf, refresh_payload_cap(sizeof(buf)), &len);
 	if (ret == 0) {
 		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len);
+		atomic_clear_bit(&m_announce_pending, ANNOUNCE_SETTINGS);
+	} else {
+		atomic_set_bit(&m_announce_pending, ANNOUNCE_SETTINGS); /* #409: retry later */
 	}
 	return ret;
+}
+
+/* #409 A5a: re-send the boot announce frames that did not fit at join time (full
+ * Info after an InfoLite, a skipped settings-info), once a DR change has made
+ * room. Only queues the full Info — never a second InfoLite — so a DR that is
+ * still too small leaves the flag set without extra airtime. */
+static void announce_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+
+	if (state != APP_LRW_STATE_HEALTHY && state != APP_LRW_STATE_WARNING) {
+		return; /* the next join re-announces from scratch */
+	}
+
+	if (atomic_test_bit(&m_announce_pending, ANNOUNCE_INFO)) {
+		uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
+		size_t len;
+		bool lite = false;
+		int ret = app_cmd_build_info(buf, refresh_payload_cap(sizeof(buf)), &len, &lite);
+
+		if (ret == 0 && !lite) {
+			LOG_INF("DR budget allows the full Info now: sending it");
+			(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len);
+			atomic_clear_bit(&m_announce_pending, ANNOUNCE_INFO);
+		}
+	}
+
+	if (atomic_test_bit(&m_announce_pending, ANNOUNCE_SETTINGS)) {
+		(void)queue_settings_info_uplink();
+	}
 }
 
 /* Pin the uplink datarate from lrw-datarate (#409 A3, like twr-sdk AT$DR). Runs
@@ -543,14 +593,15 @@ static void on_join_success(void)
 	/* Autonomous GetInfo on join: announce identity/firmware on fPort 85 before
 	 * the first telemetry. send_work drains queued responses first. */
 	if (queue_info_uplink() != 0) {
-		LOG_WRN("app_cmd_build_info failed; skipping GetInfo-on-join");
+		LOG_WRN("GetInfo-on-join does not fit the DR budget; deferred until the DR rises");
 	}
 
 	/* Follow the Info with an autonomous settings-info ConfigDump (#412) so the
 	 * network learns the effective config on join without a GetConfig poll. The
 	 * response queue drains FIFO, so this lands right after the Info above. */
 	if (queue_settings_info_uplink() != 0) {
-		LOG_WRN("app_cmd_build_config_status failed; skipping settings-info-on-join");
+		LOG_WRN("settings-info-on-join does not fit the DR budget; deferred until the DR "
+			"rises");
 	}
 
 	/* Kick app_report to start the report cadence with an immediate uplink (its
@@ -1656,6 +1707,11 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 	m_current_dr = dr;
 	m_max_next_payload = max_next;
 	LOG_INF("New data rate: DR%d, Maximum payload size: %d", dr, max_now);
+
+	/* #409: a higher DR may now fit the deferred full Info / settings-info. */
+	if (atomic_get(&m_announce_pending)) {
+		k_work_submit_to_queue(&m_work_q, &m_announce_work);
+	}
 }
 
 static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
@@ -1887,6 +1943,7 @@ int app_lrw_init(void)
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
 	k_work_init(&m_clock_sync_info_work, clock_sync_info_work_handler);
+	k_work_init(&m_announce_work, announce_work_handler);
 	k_work_init(&m_lc_response_work, lc_response_work_handler);
 	k_work_init(&m_force_lc_work, force_lc_work_handler);
 	k_work_init(&m_dl_request_work, dl_request_work_handler);
