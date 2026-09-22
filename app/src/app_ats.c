@@ -1323,21 +1323,27 @@ static void print_device_status(const struct shell *sh, uint32_t status)
 		uint32_t flag;
 		const char *name;
 	} names[] = {
+		/* Alarms */
 		{APP_DEVICE_STATUS_ALARM_ANY, "alarm-any"},
 		{APP_DEVICE_STATUS_ALARM_THRESHOLD, "alarm-threshold"},
 		{APP_DEVICE_STATUS_ALARM_STATE, "alarm-state"},
 		{APP_DEVICE_STATUS_ALARM_RATE, "alarm-rate"},
 		{APP_DEVICE_STATUS_ALARM_NO_DATA, "alarm-no-data"},
 		{APP_DEVICE_STATUS_ALARM_LOW_BATT, "alarm-low-battery"},
-		{APP_DEVICE_STATUS_NFC_DOWN, "nfc-down"},
-		{APP_DEVICE_STATUS_HISTORY_DOWN, "history-down"},
-		{APP_DEVICE_STATUS_I2C_WEDGED, "i2c-wedged"},
-		{APP_DEVICE_STATUS_TIME_UNSYNCED, "time-unsynced"},
+		/* Radio */
+		{APP_DEVICE_STATUS_RADIO_OFF, "radio-off"},
 		{APP_DEVICE_STATUS_LRW_DISABLED, "lrw-disabled"},
+		{APP_DEVICE_STATUS_RADIO_LINK_DOWN, "radio-link-down"},
+		/* Hardware / health */
+		{APP_DEVICE_STATUS_NFC_DOWN, "nfc-down"},
+		{APP_DEVICE_STATUS_I2C_WEDGED, "i2c-wedged"},
+		{APP_DEVICE_STATUS_HISTORY_DOWN, "history-down"},
+		/* System */
+		{APP_DEVICE_STATUS_TIME_UNSYNCED, "time-unsynced"},
 		{APP_DEVICE_STATUS_CLAIM_ACTIVE, "claim-active"},
 	};
 
-	char buf[128];
+	char buf[256];
 	size_t len = 0;
 
 	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {

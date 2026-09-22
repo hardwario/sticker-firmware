@@ -67,18 +67,27 @@ var _BUILD_TYPES = ["main", "dev", "custom"];
 var _LRW_STATES = ["idle", "joining", "healthy", "warning", "reconnect", "disabled"];
 
 // device_status (Info field 14) bit -> name. Keep in sync with APP_DEVICE_STATUS_*.
+// Re-grouped for v1.5.0 (#415): alarms / radio / hardware / system. This layout
+// is v1.5.0-specific — a still-deployed 1.4.x unit used a different bit layout.
 var _DEVICE_STATUS = [
+  // Alarms (0-7)
   [1 << 0, "alarm_any"],
   [1 << 1, "alarm_threshold"],
   [1 << 2, "alarm_state"],
   [1 << 3, "alarm_rate"],
   [1 << 4, "alarm_no_data"],
   [1 << 5, "alarm_low_battery"],
-  [1 << 8, "nfc_down"],
-  [1 << 9, "history_down"],
-  [1 << 10, "i2c_wedged"],
-  [1 << 11, "time_unsynced"],
-  [1 << 12, "lrw_disabled"],
+  // Radio (8-11)
+  [1 << 8, "radio_off"],
+  [1 << 9, "lrw_disabled"],
+  [1 << 10, "radio_link_down"],
+  // Hardware / health (12-15); bit 13 = mailbox_down (added by PR #414)
+  [1 << 12, "nfc_down"],
+  [1 << 14, "i2c_wedged"],
+  [1 << 15, "history_down"],
+  // System (16-17)
+  [1 << 16, "time_unsynced"],
+  [1 << 17, "claim_active"],
 ];
 
 // reset_cause (Info field 11) bit -> name. Zephyr hwinfo RESET_* bitmask of the

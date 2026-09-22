@@ -1442,6 +1442,12 @@ ZTEST(cmd, test_get_basic_info)
 	zassert_equal(r.body.basic_info.config_version, 4u, "config_version mismatch");
 	zassert_true(r.body.basic_info.device_status & APP_DEVICE_STATUS_CLAIM_ACTIVE,
 		     "claim-active bit must be set while the window is active");
+	/* radio_mode defaults to OFF (reset_cfg zeroes the config) -> radio-off set,
+	 * radio-link-down clear. */
+	zassert_true(r.body.basic_info.device_status & APP_DEVICE_STATUS_RADIO_OFF,
+		     "radio-off bit set when radio_mode == off");
+	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_RADIO_LINK_DOWN,
+		      "radio-link-down clear while the radio is off");
 
 	/* Claimed -> the claim-active bit clears (rest of device_status unaffected). */
 	g_claim_state = APP_NFC_CLAIM_DONE;
@@ -1449,6 +1455,14 @@ ZTEST(cmd, test_get_basic_info)
 	zassert_equal(r.which_body, Response_basic_info_tag, "basic_info over nfc");
 	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_CLAIM_ACTIVE,
 		      "claim-active bit must clear once claimed");
+
+	/* P2P: radio on but no LoRaWAN link concept -> neither radio bit set. */
+	g_app_config.radio_mode = APP_CONFIG_RADIO_MODE_P2P;
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_PLAIN_TEXT, Command_get_basic_info_tag, &r);
+	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_RADIO_OFF,
+		      "radio-off clear in P2P mode");
+	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_RADIO_LINK_DOWN,
+		      "radio-link-down clear in P2P mode (no LoRaWAN link)");
 
 	/* Not allow-listed over lrw / vendor -> rejected by the dispatch guard. */
 	handle_empty_body_cmd(APP_CMD_TRANSPORT_LRW, Command_get_basic_info_tag, &r);

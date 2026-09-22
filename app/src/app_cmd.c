@@ -176,6 +176,16 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	if (info->lrw_state == APP_LRW_STATE_DISABLED) {
 		status |= APP_DEVICE_STATUS_LRW_DISABLED;
 	}
+	/* Radio: OFF means the operator deliberately silenced it; otherwise, in
+	 * LoRaWAN mode, flag a link that is not alive (not healthy/warning = idle/
+	 * joining/reconnect/disabled). P2P has no LoRaWAN link, so it sets neither. */
+	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_OFF) {
+		status |= APP_DEVICE_STATUS_RADIO_OFF;
+	} else if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_LORAWAN &&
+		   info->lrw_state != APP_LRW_STATE_HEALTHY &&
+		   info->lrw_state != APP_LRW_STATE_WARNING) {
+		status |= APP_DEVICE_STATUS_RADIO_LINK_DOWN;
+	}
 	if (app_nfc_claim_state_get() == APP_NFC_CLAIM_ACTIVE) {
 		status |= APP_DEVICE_STATUS_CLAIM_ACTIVE;
 	}
