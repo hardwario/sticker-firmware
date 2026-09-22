@@ -277,7 +277,8 @@ LNS silently kills all downlinks.
 - [ ] A5a — general split rule for fPort 85 / fPort 3 (see Step 3); closes #418
   - [x] 3a — shared budget helper (0 = defer, not unlimited) + compact LoRaWAN `Error` (`05e4a5f`)
   - [x] 3b — alarms: N `AlarmReport` frames instead of trimming; alarm bits in telemetry (`3b0a97d`)
-  - [ ] 3c — `Info`-lite at the 11 B tier + deferred boot announce; `BUDGET_TOO_SMALL`
+  - [x] 3c — `Info`-lite at the 11 B tier + deferred boot announce; `BUDGET_TOO_SMALL` (`6cbb4db`;
+    `InfoLite` = `Response` field 11, since #414 claims 9/10)
   - [ ] 3d — settings-info + GetConfig: DR-adaptive pages (≥ 51 B tier, low priority)
   - [ ] 3e — GetParam / W1Scan: paging (≥ 51 B tier, low priority)
   - [ ] 3f — HistoryFrame: real (not worst-case) overhead, defined floor

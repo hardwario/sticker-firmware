@@ -192,10 +192,10 @@ omitted):
 - Size incl. the `APP_PROTO_VERSION` byte: 34 B without 1-Wire (`CONFIG_W1=n`, no
   field 7), 40 B with the four `w1_slot_type` entries, up to ~46 B with large
   interval values. It fits the EU868 DR0 budget (51 B) and the 64 B response buffer.
-- **Known limitation — low DR outside EU868 (#418):** the frame is encoded against
-  the current DR budget and, like the boot `Info`, is **single-frame and not
-  paged**. On US915 / AU915 DR0 (11 B) or AS923 with dwell time, both boot frames
-  are therefore **dropped whole** until ADR raises the DR. Tracked in #418.
+- **Low DR outside EU868 (#418, resolved by #409):** the frame is single-frame and
+  not paged, so it does not fit the 11 B tier (US915 DR0, AU915 / AS923 DR2). It is
+  no longer lost: the device remembers it and sends it automatically once a DR
+  change makes room; the boot `Info` meanwhile goes out as `InfoLite` (see §7).
 - The lean debug default (`debug.conf`, #395) builds with `CONFIG_W1=n`, so a
   debug image omits `w1_slot_type`. Build with `-DCONFIG_W1=y` to exercise it.
   Release builds have 1-Wire on.
@@ -291,9 +291,17 @@ fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *f
 (telemetry, Ack, compact Error, Info-lite); full delivery targets ≥ 51 B.
 
 - **Compact LoRaWAN `Error`.** Over LoRaWAN an `Error` carries `code` + `fault_field`
-  only; the `detail` string is NFC-only. The "response too large" fallback is a 5 B empty
-  `Error` (`code` 0 = UNKNOWN, which proto3 omits — `ttn.js` now defaults `code` to 0), so
-  a command that cannot be answered in full still gets an answer.
+  only; the `detail` string is NFC-only (`ttn.js` defaults a missing `code` to 0 =
+  UNKNOWN, which proto3 omits). The LoRaWAN "response too large" fallback is a 7 B
+  `Error{ code = 9 BUDGET_TOO_SMALL }` — "retry once ADR raises the DR" — so a command
+  that cannot be answered in full still gets an answer. NFC keeps `UNKNOWN` + detail.
+- **`InfoLite`** (`Response` field 11): when even `Info` without `active_alarms` does
+  not fit, the join / clock-sync `Info` and a LoRaWAN `GetInfo` answer with the firmware
+  version (+ build type when it fits), 9–11 B. `ttn.js` decodes it as `info_lite`
+  (`fw_version`, `build_type_name`).
+- **Deferred boot announce.** If the join `Info` went out as `InfoLite`, or the #412
+  settings-info did not fit, the device sends the full frame by itself once a DR change
+  makes room — no host poll needed.
 - **Budget 0 (MAC-command flood)** no longer drops a queued response or alarm: an empty
   uplink flushes the MAC answers and the payload is retried.
 - **Alarm batches split** across as many `AlarmReport` frames as needed (same
