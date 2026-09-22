@@ -1778,7 +1778,10 @@ int app_nfc_poll(void)
 				 * mailbox and run further commands against the not-yet-applied
 				 * state, and a second action would replace this one (e.g. a reboot
 				 * dropping a staged secret_key save the phone was already acked
-				 * for). */
+				 * for). Re-arm the poll so a non-rebooting action (lrw_join,
+				 * counters save, ...) is followed straight by a new pass: a phone
+				 * still holding the field can re-enable the mailbox and go on. */
+				k_sem_give(&m_gpo_sem);
 				break;
 			}
 			continue; /* re-read the field: the phone may be gone or may re-enable */

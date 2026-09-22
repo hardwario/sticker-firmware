@@ -512,6 +512,9 @@ ZTEST(nfc_hw, test_mb_deferred_action_ends_poll_while_field_held)
 	static struct action_phone ph;
 
 	ph = (struct action_phone){0};
+	while (app_nfc_wait_event(0) == 0) {
+		/* drain GPO events left by earlier tests: the re-arm check below */
+	}
 	k_thread_create(&phone_thread, phone_stack, K_THREAD_STACK_SIZEOF(phone_stack),
 			action_phone_fn, &ph, NULL, NULL, K_PRIO_COOP(1), 0, K_NO_WAIT);
 	zassert_equal(app_nfc_poll(), 0, "app_nfc_poll");
@@ -524,6 +527,8 @@ ZTEST(nfc_hw, test_mb_deferred_action_ends_poll_while_field_held)
 	zassert_equal(g_app_config.nonce_counter, 1, "the follow-up reboot must not have run");
 	zassert_equal(ph.reply2_len, 0, "the follow-up command must get no reply");
 	zassert_equal(app_nfc_take_cmd_action(), APP_CMD_ACTION_NONE, "action taken once");
+	zassert_equal(app_nfc_wait_event(0), 0,
+		      "the poll must be re-armed so a non-rebooting action resumes the tap");
 }
 
 ZTEST_SUITE(nfc_hw, NULL, NULL, nfc_hw_before, NULL, NULL);
