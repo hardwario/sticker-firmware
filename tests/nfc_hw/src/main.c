@@ -306,4 +306,120 @@ ZTEST(nfc_hw, test_mb_session_plain_get_basic_info)
 	zassert_equal(g_app_config.nonce_counter, 0, "plain_text must not touch the nonce");
 }
 
+/* ---- Field-present hold bounds (#414 review) ------------------------------- */
+
+/* [0x03] Command{ seq=1, get_basic_info={} } — see test_mb_session_plain_get_basic_info. */
+static const uint8_t PLAIN_GET_BASIC_INFO[] = {0x03, 0x08, 0x01, 0xF2, 0x01, 0x00};
+
+/* A second cooperative thread for the hold tests: sleeps `delay_ms` while the
+ * test thread sits in app_nfc_poll()'s field-present hold, then either probes
+ * app_cmd_get_info() (the m_work_q GetInfo path) or runs one plaintext mailbox
+ * exchange, recording when it finished. It never drops the field — the test
+ * decides whether the hold must end on its own. */
+struct hold_probe {
+	int32_t delay_ms;
+	bool exchange; /* true: one get_basic_info exchange; false: app_cmd_get_info() */
+	int64_t done_ms;
+	uint32_t device_status;
+	size_t reply_len;
+};
+
+static void hold_probe_fn(void *a, void *b, void *c)
+{
+	struct hold_probe *pr = a;
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	k_msleep(pr->delay_ms);
+	if (pr->exchange) {
+		st25dv_emul_rf_set_mb_en(true);
+		if (st25dv_emul_rf_put_message(PLAIN_GET_BASIC_INFO,
+					       sizeof(PLAIN_GET_BASIC_INFO)) == 0) {
+			uint8_t reply[256];
+
+			for (int spin = 0; spin < 150; spin++) {
+				if (st25dv_emul_rf_read_message(reply, sizeof(reply),
+								&pr->reply_len) == 0) {
+					break;
+				}
+				k_msleep(5);
+			}
+		}
+	} else {
+		struct app_cmd_info info;
+
+		app_cmd_get_info(&info);
+		pr->device_status = info.device_status;
+	}
+	pr->done_ms = k_uptime_get();
+}
+
+static int64_t run_hold(struct hold_probe *pr)
+{
+	int64_t t0 = k_uptime_get();
+
+	k_thread_create(&phone_thread, phone_stack, K_THREAD_STACK_SIZEOF(phone_stack),
+			hold_probe_fn, pr, NULL, NULL, K_PRIO_COOP(1), 0, K_NO_WAIT);
+	int ret = app_nfc_poll();
+	int64_t elapsed = k_uptime_get() - t0;
+
+	zassert_equal(ret, 0, "app_nfc_poll returned %d", ret);
+	k_thread_join(&phone_thread, K_FOREVER);
+	pr->done_ms -= t0;
+	return elapsed;
+}
+
+/* Finding 2: a field held with no mailbox traffic (a phone left lying on the
+ * STICKER) must not keep the chip powered, the CPU out of Stop2 and the access
+ * lock taken forever — the hold ends after 120 s. */
+ZTEST(nfc_hw, test_field_held_without_mailbox_releases_after_120s)
+{
+	mb_bring_up(KEY_HEX);
+	st25dv_emul_set_field_on(true);
+
+	struct hold_probe pr = {.delay_ms = 0, .exchange = false};
+	int64_t elapsed = run_hold(&pr);
+
+	st25dv_emul_set_field_on(false);
+	zassert_true(elapsed >= 120000 && elapsed < 122000,
+		     "field-present hold ended after %lld ms (expected ~120 s)",
+		     (long long)elapsed);
+}
+
+/* Finding 2, "longer communication": mailbox traffic restarts the 120 s hold, so
+ * an exchange late in a long tap is served and the release comes 120 s after it,
+ * not 120 s after the tap started. */
+ZTEST(nfc_hw, test_field_hold_restarts_after_mailbox_traffic)
+{
+	mb_bring_up(KEY_HEX);
+	st25dv_emul_set_field_on(true);
+
+	struct hold_probe pr = {.delay_ms = 100000, .exchange = true};
+	int64_t elapsed = run_hold(&pr);
+
+	st25dv_emul_set_field_on(false);
+	zassert_true(pr.reply_len > 1, "the exchange at 100 s got no reply (%zu B)", pr.reply_len);
+	zassert_true(elapsed >= 100000 + 120000 && elapsed < 100000 + 120000 + 6000,
+		     "hold ended after %lld ms (expected ~120 s after the exchange)",
+		     (long long)elapsed);
+}
+
+/* Finding 2: without FTM authorised the phone can never enable the mailbox, so
+ * app_nfc_poll() returns at once instead of holding the field-present loop. */
+ZTEST(nfc_hw, test_poll_returns_at_once_when_mailbox_unavailable)
+{
+	st25dv_emul_set_pwd_fail(true);
+	zassert_equal(app_nfc_init(), 0, "app_nfc_init must still succeed (degraded)");
+	zassert_false(app_nfc_mailbox_available(), "precondition: mailbox unavailable");
+	st25dv_emul_set_field_on(true);
+
+	int64_t t0 = k_uptime_get();
+
+	zassert_equal(app_nfc_poll(), 0, "app_nfc_poll");
+	int64_t elapsed = k_uptime_get() - t0;
+
+	st25dv_emul_set_field_on(false);
+	zassert_true(elapsed < 100, "app_nfc_poll held the tag for %lld ms", (long long)elapsed);
+}
+
 ZTEST_SUITE(nfc_hw, NULL, NULL, nfc_hw_before, NULL, NULL);

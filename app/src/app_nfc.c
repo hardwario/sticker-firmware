@@ -1474,14 +1474,15 @@ int app_nfc_init(void)
  * The 0x01/0x02 payload is byte-identical to the old encrypted hio.stck:cmd /
  * hio.stck:rsp content, so the phone codec does not change. */
 #define NFC_MB_SESSION_MAX_MS                                                                      \
-	120000                          /* hard cap on one session; a long history readout         \
-					 * is ~100 pages x 0.3 s, iOS itself cuts at 20 s */
-#define NFC_FIELD_FAST_TICK_MS    30000 /* field-present poll: 50 ms this long, then 500 ms */
-#define NFC_MB_IDLE_MS            3000  /* no RF message for this long -> session over */
-#define NFC_MB_POLL_MS            20    /* MB_CTRL_Dyn poll while waiting for RF_PUT */
-#define NFC_MB_HOST_PUT_WAIT_MS   1000  /* wait for the phone to read our reply */
-#define NFC_MB_ERR_BUDGET         8     /* consecutive MB_CTRL_Dyn read failures -> abort */
-#define NFC_MB_FIELD_OFF_DEBOUNCE 3     /* FIELD_ON=0 reads in a row -> phone gone */
+	120000                           /* hard cap on one session; a long history readout        \
+					  * is ~100 pages x 0.3 s, iOS itself cuts at 20 s */
+#define NFC_FIELD_FAST_TICK_MS    30000  /* field-present poll: 50 ms this long, then 500 ms */
+#define NFC_FIELD_PRESENT_MAX_MS  120000 /* field held w/o mailbox reply -> release the tag */
+#define NFC_MB_IDLE_MS            3000   /* no RF message for this long -> session over */
+#define NFC_MB_POLL_MS            20     /* MB_CTRL_Dyn poll while waiting for RF_PUT */
+#define NFC_MB_HOST_PUT_WAIT_MS   1000   /* wait for the phone to read our reply */
+#define NFC_MB_ERR_BUDGET         8      /* consecutive MB_CTRL_Dyn read failures -> abort */
+#define NFC_MB_FIELD_OFF_DEBOUNCE 3      /* FIELD_ON=0 reads in a row -> phone gone */
 #define NFC_MB_CHAN_CMD           0x01
 #define NFC_MB_CHAN_VND           0x02
 #define NFC_MB_CHAN_PLAIN         0x03
@@ -1726,17 +1727,25 @@ static int mb_serve_locked(void)
  * app_nfc_wait_event() wakes it on the GPO interrupt (low-power; no busy
  * polling). The tag holds no NDEF record — software gating on IT_STS_Dyn is
  * useless here anyway (the register reads 0x00 every pass, cleared by the LPD
- * power-cycle in nfc_access_begin), and a command can only be read / answered
- * while the RF field is briefly off, which IT_STS wouldn't flag anyway. */
+ * power-cycle in nfc_access_begin). Returns once the field is gone or has been
+ * held for NFC_FIELD_PRESENT_MAX_MS without mailbox traffic. */
 int app_nfc_poll(void)
 {
+	/* Without FTM authorised (#313 D7) the phone cannot enable the mailbox and the
+	 * tag holds no NDEF, so a field can never turn into a session: do not power
+	 * the chip or hold the CPU out of Stop2 waiting for one. */
+	if (!m_mb_available) {
+		return 0;
+	}
+
 	int ret = nfc_access_begin();
 	if (ret) {
 		return ret;
 	}
 
-	int res = 0;
-	int64_t t_start = k_uptime_get();
+	/* Start of this pass, then the end of each session that served a reply: the
+	 * field-present hold below gives up NFC_FIELD_PRESENT_MAX_MS after it. */
+	int64_t t_activity = k_uptime_get();
 
 	/* Field-present mode (#313): as long as the phone holds its field we stay
 	 * powered (LPD low) and keep watching MB_CTRL_Dyn, so a mailbox enabled at
@@ -1745,26 +1754,29 @@ int app_nfc_poll(void)
 	 * Configuration MB_EN=1 simply does not stick (VCC_ON=0), so releasing the
 	 * chip while a field is present would strand the phone. The EEPROM is not
 	 * touched while the field is on (that is the single-port collision the whole
-	 * design avoids); the usual reconciliation runs as soon as the field drops.
-	 * A reader parked on the tag costs a 500 ms tick after the first 30 s. */
+	 * design avoids). A reader parked on the tag costs a 500 ms tick after the
+	 * first 30 s, and is let go after NFC_FIELD_PRESENT_MAX_MS without traffic. */
 	for (;;) {
 		uint8_t eh = 0, ctrl = 0;
 		bool field_on = read_reg(ST25DV_EH_CTRL_DYN, &eh, 1) == 0 && (eh & ST25DV_FIELD_ON);
-		bool mb_en =
-			m_mb_available && mb_read_ctrl(&ctrl) == 0 && (ctrl & ST25DV_MB_CTRL_MB_EN);
+		bool mb_en = mb_read_ctrl(&ctrl) == 0 && (ctrl & ST25DV_MB_CTRL_MB_EN);
+		int64_t idle = k_uptime_get() - t_activity;
+		bool held_too_long = idle >= NFC_FIELD_PRESENT_MAX_MS;
 
-		if (mb_en && field_on) {
-			ret = mb_serve_locked();
-			if (ret < 0) {
-				res = ret;
+		if (mb_en && field_on && !held_too_long) {
+			if (mb_serve_locked() > 0) {
+				t_activity = k_uptime_get(); /* a live exchange: restart the hold */
 			}
 			continue; /* re-read the field: the phone may be gone or may re-enable */
 		}
 		if (mb_en) {
-			/* Mailbox left enabled by an aborted session (survives an MCU reset).
-			 * Nothing on the tag to protect any more, but clear it so a later
-			 * boot/session starts clean and the GPO reflects reality. */
-			LOG_WRN("NFC mb: stuck MB_EN with no field -> disabling");
+			/* Mailbox left enabled with no field (an aborted session, survives an
+			 * MCU reset), or still enabled by a phone when the hold below gives
+			 * up: clear it so a later session starts clean and the GPO reflects
+			 * reality. */
+			if (!field_on) {
+				LOG_WRN("NFC mb: stuck MB_EN with no field -> disabling");
+			}
 			(void)mb_set_en(false);
 		}
 
@@ -1772,16 +1784,27 @@ int app_nfc_poll(void)
 			break; /* mailbox-only: no NDEF/EEPROM reconciliation to run */
 		}
 
+		if (held_too_long) {
+			/* A reader parked on the tag with no mailbox traffic (a phone left
+			 * lying on the STICKER, a fixed reader nearby): stop holding the chip
+			 * powered and the CPU out of Stop2. Drop the GPO events this hold
+			 * already collected so the poll thread sleeps until the field actually
+			 * changes (phone lifted / a new tap) instead of re-entering at once. */
+			LOG_WRN("NFC: field held %u s without mailbox traffic -> releasing the tag",
+				(unsigned)(idle / 1000));
+			k_sem_reset(&m_gpo_sem);
+			break;
+		}
+
 		/* Field on, mailbox off: hold the chip powered and wait for MB_EN (the
 		 * phone enables it after finding no NDEF on the tag) or for the field to
 		 * drop. GPO pulses cut the wait. */
 		nfc_keep_awake();
-		int64_t elapsed = k_uptime_get() - t_start;
-		k_sem_take(&m_gpo_sem, K_MSEC(elapsed < NFC_FIELD_FAST_TICK_MS ? 50 : 500));
+		k_sem_take(&m_gpo_sem, K_MSEC(idle < NFC_FIELD_FAST_TICK_MS ? 50 : 500));
 	}
 
 	nfc_access_end();
-	return res;
+	return 0;
 }
 
 #if defined(CONFIG_SHELL)
