@@ -31,6 +31,18 @@ message AppConfigMessage {
             P2P = 2;
         }
 
+        enum Datarate {
+            AUTO = 0;
+            DR0 = 1;
+            DR1 = 2;
+            DR2 = 3;
+            DR3 = 4;
+            DR4 = 5;
+            DR5 = 6;
+            DR6 = 7;
+            DR7 = 8;
+        }
+
         optional Region region = 1;
         optional uint32 sub_band = 2;
         optional Network network = 3;
@@ -46,6 +58,7 @@ message AppConfigMessage {
         optional uint32 link_check_interval = 13;
         optional uint32 link_check_fail_rejoin = 14;
         optional RadioMode radio_mode = 15;
+        optional Datarate datarate = 16;
     }
 
     message Application {

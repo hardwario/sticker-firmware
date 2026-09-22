@@ -489,11 +489,40 @@ static int queue_settings_info_uplink(void)
 	return ret;
 }
 
+/* Pin the uplink datarate from lrw-datarate (#409 A3, like twr-sdk AT$DR). Runs
+ * on every (re)join, after ADR is configured and before the payload budget is
+ * captured, so the budget reflects the pinned DR. lorawan_set_datarate() also
+ * becomes the DR of the next join request and is re-applied by the stack after
+ * each join while ADR is off. Validity is region/dwell dependent (e.g. AU915
+ * dwell=1 rejects DR0/DR1): an invalid DR is rejected by the MAC and the stack's
+ * own DR stays in use. Calibration pins its own DR and is left alone. */
+static void apply_manual_datarate(void)
+{
+	if (g_app_config.lrw_datarate == APP_CONFIG_LRW_DATARATE_AUTO || g_app_config.calibration) {
+		return;
+	}
+
+	int dr = (int)g_app_config.lrw_datarate - (int)APP_CONFIG_LRW_DATARATE_DR0;
+
+	if (g_app_config.lrw_adr) {
+		LOG_WRN("lrw-datarate DR%d ignored: ADR is on (set lrw-adr false)", dr);
+		return;
+	}
+
+	int ret = lorawan_set_datarate((enum lorawan_datarate)dr);
+	if (ret) {
+		LOG_ERR("lrw-datarate DR%d rejected in this region (%d); stack DR kept", dr, ret);
+		return;
+	}
+	LOG_INF("Uplink datarate pinned to DR%d (lrw-datarate)", dr);
+}
+
 static void on_join_success(void)
 {
 	LOG_INF("Join successful");
 	m_init_join = false; /* Next join will be a rejoin with MAC reset */
 	lorawan_enable_adr(g_app_config.lrw_adr);
+	apply_manual_datarate();
 
 	/* Capture the initial DR's payload budget; the DR-changed callback may not
 	 * fire on join. */

@@ -135,7 +135,7 @@ var _ALM_HEX_ENC = {};
 // Names drop the `lrw_` prefix the YAML carries (region <- lrw_region, ...).
 var _LRW_NAMES = {
   1: "region", 2: "sub_band", 3: "network", 4: "adr", 5: "activation",
-  13: "link_check_interval", 14: "link_check_fail_rejoin", 15: "radio_mode"
+  13: "link_check_interval", 14: "link_check_fail_rejoin", 15: "radio_mode", 16: "datarate"
 };
 var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
 
@@ -147,7 +147,8 @@ var _LRW_ENUM = {
   region: { EU868: 0, US915: 1, AU915: 2 },
   network: { PUBLIC: 0, PRIVATE: 1 },
   activation: { OTAA: 0, ABP: 1 },
-  radio_mode: { OFF: 0, LORAWAN: 1, P2P: 2 }
+  radio_mode: { OFF: 0, LORAWAN: 1, P2P: 2 },
+  datarate: { AUTO: 0, DR0: 1, DR1: 2, DR2: 3, DR3: 4, DR4: 5, DR5: 6, DR6: 7, DR7: 8 }
 };
 function _invert(map) {
   var out = {};

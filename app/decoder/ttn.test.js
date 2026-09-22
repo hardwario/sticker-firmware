@@ -918,6 +918,17 @@ test("set_param lorawan.radio_mode (enum) + link-check fields round-trip (#H2)",
   assert.equal(back.set_param.lorawan.link_check_fail_rejoin, 3);
 });
 
+// lrw_datarate (#409 A3): enum on the wire, AUTO = 0 and DRn = n + 1.
+test("set_param lorawan.datarate (enum) round-trips (#409)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 5, command: "set_param", set_param: { lorawan: { datarate: "DR3", adr: false } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.lorawan.datarate, 4); // DR3 -> wire value 4
+  assert.equal(back.set_param.lorawan.adr, 0);
+});
+
 test("encode surfaces an error on an unknown config field instead of a silent no-op (#H2)", () => {
   const enc = codec.encodeDownlink({
     data: { seq: 4, command: "set_param", set_param: { application: { not_a_field: 1 } } },
