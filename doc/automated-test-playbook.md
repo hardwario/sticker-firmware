@@ -746,7 +746,7 @@ frame counters via `clear_stale_lorawan_nvm`, else the join uses the wrong chann
   RX2 downlink lands (US915 RX2 fixed at **DR8**, 500 kHz); ADR behaves.
 - **Evidence:** DR per uplink, one decoded downlink response hex, multi-frame split at DR0.
 
-### AT-LRW-19 — region not in the image → radio-silent (D, A; maps #409 A1)
+### AT-LRW-19 — region not in the image → radio-silent (D, A; maps #409 A1) — **HW PASS 2026-09-23**
 - **Steps:** on a `debug.conf` image (US915/AU915 compiled out) set `config lrw-region us915`,
   `settings save` (reboots). Read RTT, `ats radio status`, and NFC `get_info`.
 - **Expect:** RTT `lrw-region 1 is not compiled into this image: radio-silent`; LoRaWAN state
@@ -754,7 +754,7 @@ frame counters via `clear_stale_lorawan_nvm`, else the join uses the wrong chann
   emission** (no join request on the LNS / SDR). Never an EU868 join.
 - **Cleanup:** `config lrw-region eu868`, `settings save` → normal join.
 
-### AT-LRW-20 — manual datarate `lrw-datarate` (D, A; maps #409 A3)
+### AT-LRW-20 — manual datarate `lrw-datarate` (D, A; maps #409 A3) — **HW PASS 2026-09-23** (a, b; c needs a 915 gateway)
 - **Steps:** (a) `config lrw-adr false`, `config lrw-datarate dr3`, save → capture uplinks on the
   LNS. (b) `config lrw-adr true` (keep `dr3`), save. (c) US915: `lrw-adr false`,
   `lrw-datarate dr7`, save.

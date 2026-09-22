@@ -337,9 +337,12 @@ west update
 west patch apply      # re-run after every west update
 ```
 
-CI applies it automatically. A LoRaWAN build **refuses to configure** when the patch is
-missing (CMake checks for the `STICKER-419` marker); `-DSTICKER_ALLOW_UNPATCHED_MODULES=ON`
-overrides it for a throwaway build. From a git worktree pass absolute paths:
+CI applies it automatically. A LoRaWAN build **fails** when the patch is missing — CMake
+checks for the `STICKER-419` marker at configure time and again on every build, because
+`west update` resets the module and an incremental build (including the one `west flash`
+runs) does not reconfigure. `-DSTICKER_ALLOW_UNPATCHED_MODULES=ON` overrides it for a
+throwaway build. HW-verified 2026-09-23: after ChirpStack's `LinkADRReq + DevStatusReq` the
+next uplink carries `DevStatusAns`, and ChirpStack shows the device's battery / margin. From a git worktree pass absolute paths:
 `west patch apply -b <worktree>/zephyr/patches -l <worktree>/zephyr/patches.yml`.
 
 ---
