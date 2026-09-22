@@ -271,8 +271,9 @@ LNS silently kills all downlinks.
 ## 3. Tracking
 
 - [ ] A1 — build-vs-runtime region guard (radio-silent, no region fallback) — code done
-  (`device_status` bit 13 `lrw_bad_region`); bench check on `debug.conf` pending
-- [ ] A3 — manual datarate parameter
+  (`device_status` bit 13 `lrw_bad_region`); bench check pending (playbook AT-LRW-19)
+- [ ] A3 — manual datarate parameter — code done (`lrw-datarate` auto|dr0-dr7, enum,
+  proto_id 16); bench check pending (playbook AT-LRW-20)
 - [ ] A5a — general split rule for fPort 85 / fPort 3 (see Step 3); closes #418
   - [ ] 3a — shared budget helper (0 = defer, not unlimited) + compact LoRaWAN `Error`
   - [ ] 3b — alarms: N `AlarmReport` frames instead of trimming; fit-at-11 B decision
@@ -311,9 +312,11 @@ NFC, and **no RF emission**; setting `lrw-region eu868` restores a working radio
 
 ### Step 2 — A3: manual datarate parameter
 
-- New `lrw-datarate` param (int, sentinel for "let ADR/stack choose", persisted, shell+NFC
-  writable — same access model as the other `lrw_*` params) in `app_config.yml` +
-  regenerated artefacts + decoder map.
+- New `lrw-datarate` param (persisted, shell+NFC writable — same access model as the other
+  `lrw_*` params) in `app_config.yml` + regenerated artefacts + decoder map. **As built:** an
+  enum `auto | dr0..dr7` (wire `AUTO = 0`, `DRn = n + 1`) instead of an int with a sentinel —
+  configen maps every int to `uint32`, so a negative sentinel is impossible and an enum lets
+  `auto` be the proto3 default.
 - Apply in `on_join_success()` after `lorawan_enable_adr()`, before
   `refresh_payload_budget()`; skip (with a log) when ADR is on; log loudly on `-EINVAL`
   (region/dwell-invalid DR). Calibration mode's own `LORAWAN_DR_5` stays authoritative

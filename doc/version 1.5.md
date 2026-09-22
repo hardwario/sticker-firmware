@@ -13,6 +13,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
 | LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
 | LoRaWAN | **Fix** — region guard (#409 A1): a stored `lrw-region` that is not compiled into the image no longer kills LoRaWAN init silently — the radio stays silent (never falls back to another band) and `device_status` bit 13 `lrw_bad_region` reports it. |
+| LoRaWAN | **New** — manual uplink datarate `lrw-datarate` (#409 A3): `auto` (default) or `dr0`–`dr7`, pinned after every join when ADR is off. |
 
 ---
 
@@ -241,6 +242,42 @@ compiled-in `lrw-region` (NFC / shell) or flashing a full image.
 | 13 | `lrw_bad_region` | stored `lrw-region` is not compiled into this image — radio-silent (#409) |
 
 Cost: release +40 B flash, +0 B RAM.
+
+
+---
+
+## 6. Manual uplink datarate `lrw-datarate` (#409 A3)
+
+New config key, modelled on twr-sdk's `AT$DR`:
+
+```
+config lrw-adr false
+config lrw-datarate dr3
+settings save
+```
+
+| Value | Meaning |
+|---|---|
+| `auto` (default) | stack / ADR choose the DR — behaviour unchanged from v1.4.0 |
+| `dr0` … `dr7` | pin the region's DRn for uplinks |
+
+- Applied in `on_join_success()` on **every (re)join**, after ADR is configured and
+  before the payload budget is captured, so the telemetry split follows the pinned DR.
+  It also becomes the DR of the next join request.
+- **Only with ADR off.** With `lrw-adr true` the value is ignored and a warning is
+  logged (Zephyr's `lorawan_set_datarate()` refuses while ADR is on).
+- DR validity is **region-dependent**: EU868 DR0–7, US915 DR0–4, AU915 DR2–6 with the
+  default dwell time (DR0/DR1 have a 0-byte payload there). A DR the MAC rejects is
+  logged as an error and the stack's own DR stays in use — the device keeps working.
+- Calibration mode pins its own DR and ignores `lrw-datarate`.
+- Writable over shell and NFC only (like the rest of the `lorawan` group, never over a
+  LoRaWAN downlink); preserved across `device_reset`.
+
+**Wire format:** `AppConfigMessage.Lorawan.datarate` (field 16), enum `Datarate`:
+`AUTO = 0`, `DRn = n + 1` — the offset lets `auto` be the proto3 default. `ttn.js`
+encodes the names (`"DR3"`) and decodes the raw value.
+
+Cost: release +408 B flash, +0 B RAM.
 
 ---
 
