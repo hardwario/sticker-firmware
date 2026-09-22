@@ -186,17 +186,15 @@ commands:
     # so a lost/rotated key never needs a J-Link. The new key is never readable back
     # via GetParam/GetConfig (secret_key stays proto_field:false).
     - {name: set_secret_key, proto_id: 24, body: SetSecretKey, kind: handler, response: ack, transports: [nfc, shell, vendor]}
-    # #308: explicit, authenticated end of the claim window (a companion to the
-    # #247 clm-record delete-detection, which stays as-is for backward
-    # compatibility with older Manager-App builds). Runs over the already-
-    # encrypted hio.stck:cmd channel like set_secret_key above, so only a phone
-    # that already holds secret_key can send it — decrypting at all already
-    # proves that, so app_nfc.c also fires the same transition as a side effect
-    # of any successfully-decrypted command, not just this one. No reboot, no
-    # deferred action: the underlying settings_save_one() write is the same
-    # narrow single-key persist app_nfc.c already does synchronously for the
-    # #247 delete-detection path.
-    - {name: clm_ack, proto_id: 25, body: ClmAck, kind: handler, response: ack, transports: [nfc, shell]}
+    # #308/#415: explicit, authenticated end of the claim window (renamed from
+    # clm_ack; SAME wire id 25). Runs over the already-encrypted hio.stck:cmd /
+    # mailbox channel like set_secret_key above, so only a caller that already
+    # holds secret_key (or vendor_token) can send it. #415 D10: this is now the
+    # ONLY way the window closes - the old implicit close on any decrypted
+    # command is gone, so the app MUST send it after storing the claimed keys.
+    # No reboot, no deferred action: app_nfc_claim_done() is a narrow
+    # settings_save_one() persist.
+    - {name: claim_done, proto_id: 25, body: ClaimDone, kind: handler, response: ack, transports: [nfc, shell]}
     # #316 vendor_reset: deepest reset tier — wipes everything except serial_number
     # + vendor_token and installs the replacement secret_key carried in the body
     # (reusing the SetSecretKey shape, since vendor_reset zeroes the old key).
@@ -204,16 +202,17 @@ commands:
     # authenticated); the shell `settings vendor-reset` remains for HIL. Gated by
     # vendor_reset_allow (in the handler + app_settings_vendor_reset); recovery from
     # allow==false is a vendor-channel set_param(vendor_reset_allow=true) first.
-    # proto_id 26 (not 25): 25 was taken by clm_ack (#308) merged into v1.4.0 first.
+    # proto_id 26 (not 25): 25 was taken by claim_done (ex-clm_ack, #308) first.
     - {name: vendor_reset, proto_id: 26, body: SetSecretKey, kind: handler, response: ack, transports: [vendor]}
-    # #351: symmetric counterpart to clm_ack above — re-opens the claim window
-    # instead of closing it, over the same secret_key-authenticated hio.stck:cmd
-    # channel. Optional new_claim_token: empty/omitted re-arms with the EXISTING
-    # token, a non-zero value replaces it — either way the latch flip + reboot
-    # are deferred together until after the Ack is delivered (same restart-style
-    # pattern as reboot/set_secret_key, see app_cmd_handle_clm_rearm), so the
+    # #351/#415: symmetric counterpart to claim_done above (renamed from
+    # clm_rearm; SAME wire id 27) — re-opens the claim window instead of closing
+    # it, over the same secret_key-authenticated hio.stck:cmd / mailbox channel.
+    # Optional new_claim_token: empty/omitted re-opens with the EXISTING token, a
+    # non-zero value replaces it — either way the latch flip + reboot are
+    # deferred together until after the Ack is delivered (same restart-style
+    # pattern as reboot/set_secret_key, see app_cmd_handle_claim_active), so the
     # phone always sees "ack read -> reboot" regardless of which case it took.
-    - {name: clm_rearm, proto_id: 27, body: ClmRearm, kind: handler, response: ack, transports: [nfc, shell]}
+    - {name: claim_active, proto_id: 27, body: ClaimActive, kind: handler, response: ack, transports: [nfc, shell]}
     # #338: remote-triggered buzzer melody. kind is a raw melody id (0 = stop —
     # silences immediately + cancels a pending repeat; 1-3 = fixed severity
     # melodies; 4-15 reserved; >=16 collapses to 0), owned entirely by

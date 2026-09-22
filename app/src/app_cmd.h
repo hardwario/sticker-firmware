@@ -82,8 +82,8 @@ enum app_cmd_action {
 	APP_CMD_ACTION_LRW_JOIN,        /* trigger a forced (re)join, no reboot (#109) */
 	APP_CMD_ACTION_COUNTERS_SAVE,   /* persist pulse totalizers (no reboot) */
 	APP_CMD_ACTION_SECRET_KEY_SAVE, /* persist the new secret_key + reboot (#299, #322) */
-	APP_CMD_ACTION_CLM_REARM_SAVE,  /* persist new claim_token + reboot, then re-arm clm (#351)
-					 */
+	APP_CMD_ACTION_CLAIM_ACTIVE_SAVE, /* persist new claim_token + reboot, then re-open the
+					   * claim window (#351/#415, ex-CLM_REARM_SAVE) */
 };
 
 /* Plain-C device info snapshot (no protobuf dependency), filled by

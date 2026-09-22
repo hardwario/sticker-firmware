@@ -282,22 +282,22 @@ bool app_nfc_ready(void)
 	return true;
 }
 
-/* #308/#415: call counter so the test can confirm clm_ack dispatch reached
- * app_nfc without linking the real app_nfc.c (its claim latch is HIL-verified /
- * covered by tests/nfc_hw). */
-int g_clm_ack_calls;
+/* #308/#415: call counter so the test can confirm claim_done dispatch reached
+ * app_nfc without linking the real app_nfc.c (its claim latch is covered by
+ * tests/nfc_hw). */
+int g_claim_done_calls;
 
 void app_nfc_claim_done(void)
 {
-	g_clm_ack_calls++;
+	g_claim_done_calls++;
 }
 
-/* #351/#415: mirrors g_clm_ack_calls above, for clm_rearm's "no new token" branch. */
-int g_clm_rearm_calls;
+/* #351/#415: mirrors g_claim_done_calls above, for the claim_active command. */
+int g_claim_active_calls;
 
 void app_nfc_claim_active(void)
 {
-	g_clm_rearm_calls++;
+	g_claim_active_calls++;
 }
 
 bool app_history_is_ready(void)

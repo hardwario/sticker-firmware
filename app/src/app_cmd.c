@@ -762,8 +762,8 @@ static void app_cmd_handle_set_secret_key(enum app_cmd_transport tp, const Comma
  * always safe to send. With #415 this is the ONLY way the window closes (the
  * implicit close on any decrypted command is gone), so the app must send it
  * after storing the claimed keys. */
-static void app_cmd_handle_clm_ack(enum app_cmd_transport tp, const Command *cmd, Response *resp,
-				   enum app_cmd_action *action)
+static void app_cmd_handle_claim_done(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				      enum app_cmd_action *action)
 {
 	ARG_UNUSED(tp);
 	ARG_UNUSED(cmd);
@@ -773,34 +773,34 @@ static void app_cmd_handle_clm_ack(enum app_cmd_transport tp, const Command *cmd
 	resp->which_body = Response_ack_tag;
 }
 
-/* #351: re-open the claim window (symmetric counterpart to clm_ack's close).
- * Always deferred via APP_CMD_ACTION_CLM_REARM_SAVE — same restart-style
- * pattern as reboot/device_reset/set_secret_key: the Ack is written and
- * delivered to the phone first (app_nfc_take_cmd_action() only releases the
- * action once that round-trip completes, #242), and only then does main.c
- * flip the latch + reboot. This used to short-circuit to a synchronous
+/* #351/#415: re-open the claim window (symmetric counterpart to claim_done's
+ * close). Always deferred via APP_CMD_ACTION_CLAIM_ACTIVE_SAVE — same
+ * restart-style pattern as reboot/device_reset/set_secret_key: the Ack is
+ * written and delivered to the phone first (app_nfc_take_cmd_action() only
+ * releases the action once that round-trip completes, #242), and only then does
+ * main.c flip the latch + reboot. This used to short-circuit to a synchronous
  * app_nfc_claim_active() (no reboot) when no new_claim_token was given, on the
  * reasoning that nothing in g_app_config was changing so there was nothing to
  * wait on — but that made the two branches behave differently for no
  * functional reason. Deferring both the same way costs one reboot in the
  * no-new-token case and buys consistent, predictable timing instead: the
  * phone can always assume "ack read -> reboot happens" regardless of which
- * branch it took, mirroring the non-new-token branch's rebuilt of
+ * branch it took, mirroring the non-new-token branch's rebuild of
  * app_config()->claim_token being a same-value no-op (h_commit just re-syncs
- * the value that's already live), so a plain re-arm still leaves
+ * the value that's already live), so a plain re-open still leaves
  * claim_token unchanged. */
-static void app_cmd_handle_clm_rearm(enum app_cmd_transport tp, const Command *cmd, Response *resp,
-				     enum app_cmd_action *action)
+static void app_cmd_handle_claim_active(enum app_cmd_transport tp, const Command *cmd,
+					Response *resp, enum app_cmd_action *action)
 {
 	ARG_UNUSED(tp);
-	const Command_ClmRearm *rearm = &cmd->body.clm_rearm;
+	const Command_ClaimActive *rearm = &cmd->body.claim_active;
 
 	if (rearm->has_new_claim_token &&
 	    !buffer_is_zero(rearm->new_claim_token, sizeof(rearm->new_claim_token))) {
 		memcpy(app_config()->claim_token, rearm->new_claim_token,
 		       sizeof(app_config()->claim_token));
 	}
-	*action = APP_CMD_ACTION_CLM_REARM_SAVE;
+	*action = APP_CMD_ACTION_CLAIM_ACTIVE_SAVE;
 
 	resp->which_body = Response_ack_tag;
 }
@@ -1363,13 +1363,13 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		}
 		app_cmd_handle_set_secret_key(tp, cmd, resp, action);
 		break;
-	case Command_clm_ack_tag:
+	case Command_claim_done_tag:
 		/* transports: [nfc, shell] — reject on any other transport */
 		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
-		app_cmd_handle_clm_ack(tp, cmd, resp, action);
+		app_cmd_handle_claim_done(tp, cmd, resp, action);
 		break;
 	case Command_vendor_reset_tag:
 		/* transports: [vendor] — reject on any other transport */
@@ -1379,13 +1379,13 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		}
 		app_cmd_handle_vendor_reset(tp, cmd, resp, action);
 		break;
-	case Command_clm_rearm_tag:
+	case Command_claim_active_tag:
 		/* transports: [nfc, shell] — reject on any other transport */
 		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
-		app_cmd_handle_clm_rearm(tp, cmd, resp, action);
+		app_cmd_handle_claim_active(tp, cmd, resp, action);
 		break;
 	case Command_buzzer_play_tag:
 		/* transports: [lrw, nfc] — reject on any other transport */

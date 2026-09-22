@@ -171,10 +171,10 @@ static void nfc_run_deferred_cmd_actions(void)
 			play_carousel_nfc();
 			app_settings_save(true);
 			break;
-		case APP_CMD_ACTION_CLM_REARM_SAVE:
+		case APP_CMD_ACTION_CLAIM_ACTIVE_SAVE:
 			/* #351/#415: flip the claim window back to ACTIVE and persist+reboot
-			 * together, always (both the same-token and new-token clm_rearm cases
-			 * run this action, see app_cmd_handle_clm_rearm) so the phone can
+			 * together, always (both the same-token and new-token claim_active
+			 * cases run this action, see app_cmd_handle_claim_active) so the phone can
 			 * always assume "ack read -> reboot" regardless of which case it
 			 * took. When a new token was staged, this also ensures
 			 * g_app_config.claim_token becomes live (h_commit) in the same

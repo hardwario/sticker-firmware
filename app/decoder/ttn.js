@@ -180,9 +180,9 @@ var _CMD_NAMES = {
   21: "sample",
   23: "factory_reset",
   24: "set_secret_key",
-  25: "clm_ack",
+  25: "claim_done",
   26: "vendor_reset",
-  27: "clm_rearm",
+  27: "claim_active",
   28: "buzzer_play",
 };
 // END GENERATED COMMANDS

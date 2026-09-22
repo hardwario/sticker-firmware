@@ -147,9 +147,9 @@ message Command {
         Sample           sample            = 21;
         FactoryReset     factory_reset     = 23;
         SetSecretKey     set_secret_key    = 24;
-        ClmAck           clm_ack           = 25;
+        ClaimDone        claim_done        = 25;
         SetSecretKey     vendor_reset      = 26;
-        ClmRearm         clm_rearm         = 27;
+        ClaimActive      claim_active      = 27;
         BuzzerPlay       buzzer_play       = 28;
     }
 // END GENERATED COMMANDS
@@ -249,15 +249,17 @@ message Command {
     // (secret_key stays proto_field:false — see AppConfigMessage.reserved).
     message SetSecretKey { optional bytes key = 1; }
 
-    // #308: explicit end of the claim window (companion to the #247 clm-record
-    // delete-detection). Empty — the token itself never travels on this command,
-    // only the fact that an authenticated caller sent it.
-    message ClmAck { }
+    // #308/#415: explicit end of the claim window (renamed from ClmAck, same
+    // wire id 25). Empty — the token itself never travels on this command, only
+    // the fact that an authenticated caller sent it. #415 D10: the only way the
+    // window closes (the implicit close on any decrypted command is gone).
+    message ClaimDone { }
 
-    // #351: symmetric counterpart to ClmAck — re-opens the claim window.
-    // new_claim_token omitted/zero re-arms with the existing token; a non-zero
-    // value replaces it (see app_cmd_handle_clm_rearm for the save+reboot path).
-    message ClmRearm { optional bytes new_claim_token = 1; }
+    // #351/#415: symmetric counterpart to ClaimDone (renamed from ClmRearm, same
+    // wire id 27) — re-opens the claim window. new_claim_token omitted/zero
+    // re-opens with the existing token; a non-zero value replaces it (see
+    // app_cmd_handle_claim_active for the save+reboot path).
+    message ClaimActive { optional bytes new_claim_token = 1; }
 
     // #338: remote-triggered buzzer melody (NFC/LRW). kind is a raw melody id,
     // deliberately NOT a proto enum: app_buzzer.c (MELODY_TABLE) is the only
