@@ -231,6 +231,11 @@ stall or wedge i2c1 — the poll thread now only ever serves the mailbox.
   applied at the next boot. Claiming likewise moves to a powered device; the
   claim-window redesign and the plaintext `get_claim_info` are in **PR #415**.
 - **Android tap-to-launch** via the MIME identity record (#298).
+- **`nfc dump` and `nfc check|autocheck`** (v1.4.0 bench shell). The firmware no
+  longer touches the user EEPROM on any path. Enabling the mailbox does not
+  change the EEPROM either, so a unit reflashed from v1.4.x keeps its old NDEF
+  records (possibly a plaintext `clm` claim token) until they are wiped by hand —
+  `nfc clear` on a debug build (see Bench shell) or an RF erase (e.g. ST25 NFC Tap).
 
 ### Production tester
 
@@ -246,7 +251,12 @@ so the production tester rejects it.
 
 `nfc mb status` (dump the FTM registers), `nfc mb on|off` (drive `MB_EN` from the
 I2C side), and `nfc mb serve` (enable and serve the mailbox for a reader that
-cannot issue Write Dynamic Configuration itself). `ats cmd nfc` still injects a
+cannot issue Write Dynamic Configuration itself); `nfc reg|regw` read/write a
+system or dynamic register. Debug build only: `nfc read <off> <len>`,
+`nfc write <off> <hex>` (≤ 64 B) and `nfc clear` (zero all 512 B) access the user
+EEPROM by hand, e.g. to wipe stale v1.4.x NDEF records; they refuse while an RF
+field is present (remove the phone) and clear `MB_EN` first (the chip refuses
+EEPROM writes while FTM is on). `ats cmd nfc` still injects a
 command straight into `app_cmd_handle` for phone-free command-logic testing.
 
 ### Test coverage
