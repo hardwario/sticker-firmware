@@ -980,6 +980,15 @@ static int cmd_cmd_nfc(const struct shell *sh, size_t argc, char **argv)
 	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_NFC, argv[1]);
 }
 
+/* #415: inject a raw (unencrypted) Command over the plain_text transport — the
+ * bench equivalent of the NFC mailbox channel 0x03. Only allow-listed commands
+ * answer (get_claim_info); anything else returns NOT_READY "transport not
+ * allowed". */
+static int cmd_cmd_plain(const struct shell *sh, size_t argc, char **argv)
+{
+	return cmd_cmd_inject(sh, APP_CMD_TRANSPORT_PLAIN_TEXT, argv[1]);
+}
+
 /* Bench driver for the NFC paged history read (#260): drives the same
  * client-side loop the Manager-App runs — build a req_history_page Command,
  * feed it through app_cmd_handle(NFC), decode the HistoryFrame, advance the
@@ -1095,6 +1104,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(lrw, NULL, "Inject over LoRaWAN transport. Usage: lrw <hex>", cmd_cmd_lrw, 2,
 		      0),
 	SHELL_CMD_ARG(nfc, NULL, "Inject over NFC transport. Usage: nfc <hex>", cmd_cmd_nfc, 2, 0),
+	SHELL_CMD_ARG(plain, NULL,
+		      "Inject a raw Command over the unauthenticated plain_text transport "
+		      "(#415). Usage: plain <hex>",
+		      cmd_cmd_plain, 2, 0),
 	SHELL_CMD_ARG(history, NULL,
 		      "Drive the NFC paged history read (#260). Usage: history [<from> [<to>]]",
 		      cmd_cmd_history, 1, 2),
@@ -1310,21 +1323,28 @@ static void print_device_status(const struct shell *sh, uint32_t status)
 		uint32_t flag;
 		const char *name;
 	} names[] = {
+		/* Alarms */
 		{APP_DEVICE_STATUS_ALARM_ANY, "alarm-any"},
 		{APP_DEVICE_STATUS_ALARM_THRESHOLD, "alarm-threshold"},
 		{APP_DEVICE_STATUS_ALARM_STATE, "alarm-state"},
 		{APP_DEVICE_STATUS_ALARM_RATE, "alarm-rate"},
 		{APP_DEVICE_STATUS_ALARM_NO_DATA, "alarm-no-data"},
 		{APP_DEVICE_STATUS_ALARM_LOW_BATT, "alarm-low-battery"},
-		{APP_DEVICE_STATUS_NFC_DOWN, "nfc-down"},
-		{APP_DEVICE_STATUS_HISTORY_DOWN, "history-down"},
-		{APP_DEVICE_STATUS_I2C_WEDGED, "i2c-wedged"},
-		{APP_DEVICE_STATUS_TIME_UNSYNCED, "time-unsynced"},
+		/* Radio */
+		{APP_DEVICE_STATUS_RADIO_OFF, "radio-off"},
 		{APP_DEVICE_STATUS_LRW_DISABLED, "lrw-disabled"},
+		{APP_DEVICE_STATUS_RADIO_LINK_DOWN, "radio-link-down"},
+		/* Hardware / health */
+		{APP_DEVICE_STATUS_NFC_DOWN, "nfc-down"},
 		{APP_DEVICE_STATUS_MAILBOX_DOWN, "mailbox-down"},
+		{APP_DEVICE_STATUS_I2C_WEDGED, "i2c-wedged"},
+		{APP_DEVICE_STATUS_HISTORY_DOWN, "history-down"},
+		/* System */
+		{APP_DEVICE_STATUS_TIME_UNSYNCED, "time-unsynced"},
+		{APP_DEVICE_STATUS_CLAIM_ACTIVE, "claim-active"},
 	};
 
-	char buf[128];
+	char buf[256];
 	size_t len = 0;
 
 	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
@@ -1441,16 +1461,16 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(reboot, NULL, "Cold-reboot the device.", cmd_device_reboot, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
-/* Re-arm the claim record (#247/#351): drops the clm latch back to UNSET, which
- * auto-advances to PENDING (clm reappears on NFC) on the next nfc_check_locked()
- * poll, as long as claim_token is still set. Non-destructive alternative to
- * app_settings_vendor_reset() for bench re-testing the claim flow. */
+/* #415: (re)open the claim window -> ACTIVE, so the clm record is laid again on
+ * the next NFC poll (while claim_token is set) and get_claim_info discloses the
+ * token. Non-destructive alternative to app_settings_vendor_reset() for bench
+ * re-testing the claim flow. */
 static int cmd_claim_active(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	app_nfc_clm_reset();
+	app_nfc_claim_active();
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
@@ -1459,34 +1479,36 @@ static int cmd_claim_active(const struct shell *sh, size_t argc, char **argv)
 			break;
 		}
 	}
-	shell_print(sh, "clm state -> unset (re-arms to pending on next NFC poll)");
+	shell_print(sh, "claim window -> active");
 	if (!claim_set) {
-		shell_print(sh, "warning: claim_token is unset - clm record will NOT reappear "
+		shell_print(sh, "warning: claim_token is unset - clm record will NOT appear "
 				"until one is provisioned (`config claim-token <hex>`)");
 	}
 	return 0;
 }
 
-/* Force the claim window closed (#308) without a phone deleting the clm record. */
+/* #415: close the claim window -> DONE without a phone (claim_done command). */
 static int cmd_claim_done(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	app_nfc_clm_ack();
-	shell_print(sh, "clm state -> consumed");
+	app_nfc_claim_done();
+	shell_print(sh, "claim window -> done");
 	return 0;
 }
 
-/* #247: show the claim-record lifecycle latch (debug/HW-test visibility). Moved
- * here from `nfc clm` (#351) so claim-lifecycle commands live in one place. */
+/* #247/#415: show the claim window state (debug/HW-test visibility). Moved here
+ * from `nfc clm` (#351) so claim-lifecycle commands live in one place. */
 static int cmd_claim_status(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	static const char *const names[] = {"unset", "pending", "consumed"};
-	uint8_t state = app_nfc_clm_state_get();
+	uint8_t state = app_nfc_claim_state_get();
+	const char *name = (state == APP_NFC_CLAIM_ACTIVE) ? "active"
+			   : (state == APP_NFC_CLAIM_DONE) ? "done"
+							   : "?";
 
 	bool claim_set = false;
 	for (size_t i = 0; i < sizeof(g_app_config.claim_token); i++) {
@@ -1495,9 +1517,8 @@ static int cmd_claim_status(const struct shell *sh, size_t argc, char **argv)
 			break;
 		}
 	}
-	shell_print(sh, "clm state:   %s (%u)", state < ARRAY_SIZE(names) ? names[state] : "?",
-		    state);
-	shell_print(sh, "claim token: %s", claim_set ? "set" : "unset");
+	shell_print(sh, "claim window: %s (%u)", name, state);
+	shell_print(sh, "claim token:  %s", claim_set ? "set" : "unset");
 	return 0;
 }
 

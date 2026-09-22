@@ -1675,57 +1675,50 @@ re-exercised in this session — unchanged by #322.
 
 - [ ] Pass
 
-### N10 — Claim window: `hio.stck:clm` lay-down + all three end-of-claim triggers (#247, #308)
+### N10 — Claim window: explicit two-state latch (`active`/`done`) + `get_claim_info` (#247, #415)
 
-**Goal:** once `claim_token` is provisioned, the firmware publishes `hio.stck:clm` alongside the
-plaintext info record on every resting-tag write (including after a reboot/reflash), and the claim
-window ends via **any** of three independent triggers: (1) the phone deletes `clm` off the tag
-(#247, unauthenticated over RF, kept for backward compatibility), (2) the phone sends the explicit
-`clm_ack` command over the encrypted `hio.stck:cmd` channel (#308), or (3) the phone sends **any**
-other authenticated command at all — decrypting it already proves `secret_key` possession (#308).
-All three latch the same persisted `UNSET → PENDING → CONSUMED` state; once `CONSUMED`, `clm` is
-never republished, even across reboot/reflash — only a full NVS erase or `vendor_reset` reopens it.
-**Observable:** `nfc clm` shell command reports the latch state throughout. `nfc dump` shows a
-two-record `[inf, clm]` NDEF message while `PENDING`, `inf`-only once `CONSUMED`.
+**Rewritten for v1.5.0 (#415).** The claim window is now an explicit two-state latch with **no
+automatic behaviour** — the v1.4.0 auto-arm (`unset → pending` on a provisioned token) and the two
+implicit closes (RF delete-detection, and any decrypted command #308) are gone. The tri-state
+`unset/pending/consumed` recorded in earlier runs no longer exists.
+
+**Goal:** a provisioned unit is `active` from the factory (NVS default); while `active` it lays the
+`hio.stck:clm` record alongside `inf` and answers `get_claim_info` with `ClaimInfo{serial_number,
+claim_token}`. The window closes **only** on an explicit `claim_done` command / `ats claim done` →
+`done`: no `clm` record, `get_claim_info` → `NOT_READY "claimed"`. `claim_active` / `ats claim
+active` / `vendor_reset` reopen it. `device_reset` / `factory_reset` leave it alone. State persists
+across reboot/reflash (NVS `clm/state`); upgrading a v1.4.x unit migrates `unset`/`pending` →
+`active`, `consumed` → `done`. **Observable:** `ats claim status` reports the state throughout;
+`nfc dump` shows a two-record `[inf, clm]` message while `active`, `inf`-only once `done`.
 
 **Prompt for Claude:**
-> `settings erase`, then `config claim-token <32-hex>` + `settings save`. After reboot confirm
-> `nfc clm` reports `PENDING` and `nfc dump` shows the two-record `[inf, clm]` message. Reflash the
-> firmware (plain `west flash`, no `--erase`) and confirm `PENDING` and the two-record tag survive
-> the reflash unchanged (#308 "publish until claimed" guarantee).
+> `settings erase`, then `config claim-token <32-hex>` + `config secret-key <32-hex>` + `settings
+> save`. After reboot confirm `ats claim status` reports **`active`** (the factory default — no arm
+> step) and `nfc dump` shows the two-record `[inf, clm]` message. Confirm `ats cmd plain
+> <GetClaimInfo hex>` returns the `ClaimInfo` (serial + the provisioned token), and `ats cmd plain
+> <GetInfo hex>` returns `NOT_READY "transport not allowed"` (plain_text is opt-in). Reflash (plain
+> `west flash`, no `--erase`) and confirm `active` + the two-record tag survive unchanged.
 >
-> Trigger 1 (delete-detection, #247): rewrite the tag with an info-only NDEF message (simulating
-> the phone deleting `clm` after claiming) via `nfc write`, then `nfc check`. Confirm `nfc clm`
-> latches `CONSUMED` and reboot doesn't resurrect `clm`.
+> Close the window: `ats claim done` (or inject an encrypted `hio.stck:cmd` frame carrying
+> `claim_done`, wire id 25 — same recipe as `reference_nfc_rst_hil_test_299`, split long hex across
+> `nfc write` calls). Confirm `ats claim status` → **`done`**, `nfc dump` shows `inf` only, and
+> `ats cmd plain <GetClaimInfo>` → `NOT_READY "claimed"`. Reboot and confirm `done` survives.
 >
-> Reset to `PENDING` again (`settings erase` + re-provision) for the next two triggers so each is
-> tested from a clean arm. Trigger 2 (`clm_ack`, #308): build an AES-CCM `hio.stck:cmd` frame
-> carrying `clm_ack` (mirror the golden-vector construction in `tests/nfc_crypto` /
-> `reference_nfc_rst_hil_test_299`; split into sequential `nfc write` calls — long hex truncates
-> silently past ~128 chars) and inject it. Confirm the encrypted `ack` comes back and `nfc clm`
-> latches `CONSUMED` — with **no** RF delete needed.
->
-> Trigger 3 (implicit consume, #308): re-arm to `PENDING` once more, then send an *unrelated*
-> authenticated command (e.g. `get_info`) over `hio.stck:cmd` instead of `clm_ack`. Confirm that
-> merely decrypting this command also latches `CONSUMED`, even though the command itself was never
-> `clm_ack`. Report all three trigger outcomes and the reflash-survival result.
+> Confirm the removed implicit close: reopen (`ats claim active`), then send an unrelated
+> authenticated `get_info` over `hio.stck:cmd`. Confirm `ats claim status` **stays `active`** (a
+> decrypted command must NOT close the window any more). Then confirm `vendor_reset` reopens a
+> `done` window back to `active`. Report each outcome.
 
-**HIL-verified 2026-07-14** (debug image, J-Link 822005109), hand-crafted AES-CCM frames (no phone,
-same recipe as `reference_nfc_rst_hil_test_299`): `settings erase` → `config claim-token` +
-`config secret-key` + `settings save` → reboot arms `PENDING`; `nfc dump` confirmed the two-record
-`[inf, clm]` message (`TLV len=0x5b`, second record `54 0c 12 68 69 6f 2e 73 74 63 6b 3a 63 6c 6d`
-= `hio.stck:clm`, payload `12 10` + the 16-byte test token, byte-exact). **Reflash survival**:
-re-flashed the same image (no `--erase`) and confirmed `PENDING` + the identical two-record content
-survived unchanged. **Trigger 2 (`clm_ack`)**: injected an encrypted `hio.stck:cmd` frame carrying
-`clm_ack` → `handled, response 5 B` (bare ack, `deferred action: none`) → `clm state: consumed (2)`.
-**Trigger 3 (implicit consume)**: re-armed to `PENDING`, injected an encrypted `get_info` command
-instead (67 B `Info` response, clearly not `clm_ack`) → `clm state: consumed (2)` all the same,
-confirming any authenticated command ends the window. Trigger 1 (delete-detection) was not
-re-exercised standalone this session — its logic is unchanged from #247 (only moved into the shared
-`clm_consume()` helper also used by triggers 2/3, both of which passed) — see the original #247
-HW-validation note above for its own direct HIL run.
+- [ ] Pass — **v1.5.0 re-verification pending** (the recorded v1.4.0 HIL run below tested the old
+  tri-state model and is superseded; the two-state behaviour is covered by `tests/nfc_hw`
+  `test_secret_key_command_does_not_close_claim_window` and `tests/cmd` `test_claim_done` /
+  `test_claim_active` / `test_get_claim_info`).
 
-- [x] Pass (HIL-verified via hand-crafted frames, 2026-07-14; triggers 2 and 3 + reflash survival)
+> **Superseded v1.4.0 run (2026-07-14, for reference only):** with the old auto-arm + implicit
+> close, `config claim-token` + `settings save` armed `pending`; `nfc dump` showed the two-record
+> `[inf, clm]` message (byte-exact `hio.stck:clm` + token); a `clm_ack` frame and an unrelated
+> `get_info` each latched `consumed (2)`. Under #415 the arm is gone (default is `active`) and only
+> `claim_done` closes it — re-run the prompt above.
 
 ### N11 — Rejected tap blinks red, not green (#315)
 
@@ -1969,13 +1962,22 @@ over NFC while powered off, reboot, confirm ONLY hall_left is zeroed — the oth
 - [x] Pass — code-verified ordering + HIL-verified selective-reset behavior (see above); the
   exact at-boot race timing not independently reproduced without real RF/phone hardware
 
-### X7 — H + M3 + M15 + M24: clm arm/rearm persist-after-confirmed-write + vendor decrypt doesn't consume + `m_clm_state` locked
+### X7 — M24: claim state locked against shell/poll races (was M3/M15/vendor-consume, superseded by #415)
 
-**Goal:** (a) `clm_consume()` no longer fires on a vendor-authenticated decrypt (only `clm_ack` /
-successfully-decrypted `hio.stck:cmd`); (b) the arm sequence (M3) and rearm sequence (M15) persist
-`CLM_PENDING`/`UNSET` only after the tag write / config-save is confirmed, reverting instead of
-latching a bad terminal state on failure; (c) `m_clm_state` is now locked against the shell
-`ats claim active/done` commands racing the NFC poll thread (M24).
+> **Mostly superseded by v1.5.0 (#415).** (a) and (b) below no longer apply: the implicit close is
+> gone (NO command — owner or vendor — closes the window any more; only an explicit `claim_done`
+> does), and the M3/M15 arm-persist-after-confirmed-write dance is deleted (the `clm` record simply
+> reflects the current `active`/`done` state, so a failed tag write just retries next poll — nothing
+> to commit/revert). Only **(c)** survives: the claim state (`m_claim_state`) is still taken under
+> `m_lock` in `claim_state_set()`, serialising `ats claim active/done` / `claim_active`/`claim_done`
+> / `vendor_reset` against the NFC poll thread. See the rewritten **N10** for the current claim-window
+> test.
+
+**Goal (historical, v1.4.0):** (a) `clm_consume()` no longer fires on a vendor-authenticated decrypt
+(only `clm_ack` / successfully-decrypted `hio.stck:cmd`); (b) the arm sequence (M3) and rearm
+sequence (M15) persist `CLM_PENDING`/`UNSET` only after the tag write / config-save is confirmed,
+reverting instead of latching a bad terminal state on failure; (c) `m_clm_state` is now locked
+against the shell `ats claim active/done` commands racing the NFC poll thread (M24).
 **Observable:** A vendor-channel decrypt on a claimed device does NOT flip `clm` state; an
 inf-write failure during arm reverts to `CLM_UNSET` (retries next poll) instead of latching
 `CLM_CONSUMED`; concurrent shell claim commands + NFC poll don't corrupt `clm` state.

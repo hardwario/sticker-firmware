@@ -58,21 +58,28 @@ bool app_nfc_mailbox_available(void);
  * does not fight the NFC interaction LED (app_nfc.c). */
 bool app_nfc_session_active(void);
 
-/* Reset the claim-record lifecycle (#247) back to CLM_UNSET and persist, so the
- * device re-opens provisioning (as if freshly manufactured) — used by
- * app_settings_vendor_reset() (#299), the one reset tier deep enough to matter;
- * device_reset/factory_reset deliberately leave clm state alone (see app_nfc.c). */
-void app_nfc_clm_reset(void);
+/* Claim window states, persisted under the "clm/state" key (#247/#415).
+ * Returned by app_nfc_claim_state_get(); the numeric values are wire-stable and
+ * match the legacy pending/consumed bytes so the NVS migration is a no-op for
+ * the common cases (see app_nfc.c). */
+#define APP_NFC_CLAIM_ACTIVE 1 /* claimable: clm record laid, get_claim_info discloses token */
+#define APP_NFC_CLAIM_DONE   2 /* claimed: no clm record, get_claim_info -> NOT_READY */
 
-/* Explicit claim-ack (#308, clm_ack command): transitions CLM_PENDING -> CLM_CONSUMED
- * and persists, no reboot. A no-op if not currently PENDING (already consumed, or
- * never armed) - always safe to call. */
-void app_nfc_clm_ack(void);
+/* (Re)open the claim window (#415): CLAIM_ACTIVE + persist, no reboot. Reached
+ * from the claim_active command, `ats claim active`, and app_settings_vendor_reset()
+ * (#299) — the one reset tier deep enough to re-provision; device_reset/
+ * factory_reset deliberately leave the claim state alone (see app_nfc.c). */
+void app_nfc_claim_active(void);
 
-/* Current claim-record lifecycle state (0=unset, 1=pending, 2=consumed), for
- * `ats claim status` (moved out of the nfc shell group so claim commands live
- * in one place). */
-uint8_t app_nfc_clm_state_get(void);
+/* Close the claim window (#415, claim_done command / `ats claim done`):
+ * CLAIM_DONE + persist, no reboot. Idempotent — always safe to call. Replaces
+ * the #308 implicit close (any decrypted command); the app must now send this
+ * explicitly after storing the keys. */
+void app_nfc_claim_done(void);
+
+/* Current claim window state (APP_NFC_CLAIM_ACTIVE / APP_NFC_CLAIM_DONE), for
+ * `ats claim status`, the get_claim_info handler, and tests. */
+uint8_t app_nfc_claim_state_get(void);
 
 /* Whether the "processing"/"rejected" NFC LED blink timer is currently armed
  * (#340 L1 regression test support: a hard response-write failure on the

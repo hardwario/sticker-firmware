@@ -30,29 +30,53 @@ enum app_cmd_transport {
 	 * secret_key (#316). Runs the same generic Command/Response dispatch; gates
 	 * the vendor-only command (vendor_reset) and writable:[vendor] fields. */
 	APP_CMD_TRANSPORT_VENDOR,
+	/* Unencrypted, unauthenticated command channel (#415): a raw Command
+	 * protobuf in, 0x01||Response out, no CCM/nonce/cache. Reachable over the
+	 * NFC mailbox channel 0x03 and the `ats cmd plain` shell. A command answers
+	 * on it ONLY by listing `plain_text` in app_config.yml (opt-in) — the
+	 * implicit "omitted = all transports" default deliberately excludes it, so a
+	 * command reaches plain_text only after a reviewed one-line yml change. The
+	 * rule for such a command: read-only, disclosing identity-class data only
+	 * (first user: get_claim_info). */
+	APP_CMD_TRANSPORT_PLAIN_TEXT,
 };
 
 /* Aggregated device status reported in Device Info (device_status, fPort 85 +
- * NFC). uint32 bitmask; proto3 omits a 0 so an empty field means "all OK /
- * nothing active". Low bits are alarm categories (derived read-only from the
- * alarm latches, no side effects), high bits are health/degradation. The raw
- * LoRaWAN link state is NOT duplicated here (it has its own lrw_state field);
- * only the derived LRW_DISABLED bit is included. Bit positions are stable --
- * never renumber; new states take new bits. Plain (1u << n), not zephyr BIT(),
- * so this header stays free of zephyr includes. */
+ * NFC) and the plaintext get_basic_info. uint32 bitmask; proto3 omits a 0 so an
+ * empty field means "all OK / nothing active". A set bit is always the notable /
+ * active / degraded state (never "healthy"), so the empty field stays meaningful.
+ * Bits are grouped by category (alarms / radio / hardware / system) with a
+ * reserved tail in each group for future states.
+ *
+ * The layout was re-grouped for v1.5.0 (#415) — a clean break the mailbox move
+ * already forced. device_status carries no per-frame layout version, so the
+ * decoder is v1.5.0-specific; a still-deployed 1.4.x unit used a different layout
+ * (distinguishable only by the Info fw_* version). Stable from v1.5.0 on — never
+ * renumber again; new states take the reserved bits. Plain (1u << n), not zephyr
+ * BIT(), so this header stays free of zephyr includes. */
+/* Alarms (0-7) — derived read-only from the alarm latches, no side effects. */
 #define APP_DEVICE_STATUS_ALARM_ANY       (1u << 0) /* any alarm latched active */
 #define APP_DEVICE_STATUS_ALARM_THRESHOLD (1u << 1) /* analog threshold rule active */
 #define APP_DEVICE_STATUS_ALARM_STATE     (1u << 2) /* discrete state rule active */
 #define APP_DEVICE_STATUS_ALARM_RATE      (1u << 3) /* counter-rate rule active */
 #define APP_DEVICE_STATUS_ALARM_NO_DATA   (1u << 4) /* no-data watchdog latched */
 #define APP_DEVICE_STATUS_ALARM_LOW_BATT  (1u << 5) /* low-battery watchdog latched (#210) */
-/* bits 6..7 reserved for future alarm categories */
-#define APP_DEVICE_STATUS_NFC_DOWN        (1u << 8)  /* NFC (ST25DV) init failed, degraded */
-#define APP_DEVICE_STATUS_HISTORY_DOWN    (1u << 9)  /* history flash mount failed */
-#define APP_DEVICE_STATUS_I2C_WEDGED      (1u << 10) /* I2C bus wedged (fail streak >= threshold) */
-#define APP_DEVICE_STATUS_TIME_UNSYNCED   (1u << 11) /* RTC not synced (no wall-clock) */
-#define APP_DEVICE_STATUS_LRW_DISABLED    (1u << 12) /* radio-silent: DevEUI all-zero (#98) */
-#define APP_DEVICE_STATUS_MAILBOX_DOWN    (1u << 13) /* ST25DV FTM mailbox not authorised (#313) */
+/* bits 6-7 reserved (alarms) */
+/* Radio (8-11). */
+#define APP_DEVICE_STATUS_RADIO_OFF    (1u << 8) /* radio_mode == off: deliberately silent (#350) */
+#define APP_DEVICE_STATUS_LRW_DISABLED (1u << 9) /* radio-silent: DevEUI all-zero (#98) */
+#define APP_DEVICE_STATUS_RADIO_LINK_DOWN                                                          \
+	(1u << 10) /* LoRaWAN link not healthy/warning (not alive) */
+/* bit 11 reserved (radio) */
+/* Hardware / health (12-15). */
+#define APP_DEVICE_STATUS_NFC_DOWN      (1u << 12) /* NFC (ST25DV) init failed, degraded */
+#define APP_DEVICE_STATUS_MAILBOX_DOWN  (1u << 13) /* ST25DV FTM mailbox not authorised (#414) */
+#define APP_DEVICE_STATUS_I2C_WEDGED    (1u << 14) /* I2C bus wedged (fail streak >= threshold) */
+#define APP_DEVICE_STATUS_HISTORY_DOWN  (1u << 15) /* history flash mount failed */
+/* System (16-17). */
+#define APP_DEVICE_STATUS_TIME_UNSYNCED (1u << 16) /* RTC not synced (no wall-clock) */
+#define APP_DEVICE_STATUS_CLAIM_ACTIVE                                                             \
+	(1u << 17) /* claim window open (claimable); clear = claimed (#415) */
 
 /* Action the caller must perform AFTER the response has been sent (so the Ack
  * leaves before the device reboots). Set by app_cmd_handle(). */
@@ -74,8 +98,8 @@ enum app_cmd_action {
 	APP_CMD_ACTION_LRW_JOIN,        /* trigger a forced (re)join, no reboot (#109) */
 	APP_CMD_ACTION_COUNTERS_SAVE,   /* persist pulse totalizers (no reboot) */
 	APP_CMD_ACTION_SECRET_KEY_SAVE, /* persist the new secret_key + reboot (#299, #322) */
-	APP_CMD_ACTION_CLM_REARM_SAVE,  /* persist new claim_token + reboot, then re-arm clm (#351)
-					 */
+	APP_CMD_ACTION_CLAIM_ACTIVE_SAVE, /* persist new claim_token + reboot, then re-open the
+					   * claim window (#351/#415, ex-CLM_REARM_SAVE) */
 };
 
 /* Plain-C device info snapshot (no protobuf dependency), filled by

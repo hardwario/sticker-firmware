@@ -287,22 +287,31 @@ bool app_nfc_mailbox_available(void)
 	return true;
 }
 
-/* #308: call counter so the test can confirm clm_ack dispatch reached app_nfc
- * without linking the real app_nfc.c (its clm latch is HIL-verified, like the
- * rest of that file — see #247). */
-int g_clm_ack_calls;
+/* #308/#415: call counter so the test can confirm claim_done dispatch reached
+ * app_nfc without linking the real app_nfc.c (its claim latch is covered by
+ * tests/nfc_hw). */
+int g_claim_done_calls;
 
-void app_nfc_clm_ack(void)
+void app_nfc_claim_done(void)
 {
-	g_clm_ack_calls++;
+	g_claim_done_calls++;
 }
 
-/* #351: mirrors g_clm_ack_calls above, for clm_rearm's "no new token" branch. */
-int g_clm_rearm_calls;
+/* #351/#415: mirrors g_claim_done_calls above, for the claim_active command. */
+int g_claim_active_calls;
 
-void app_nfc_clm_reset(void)
+void app_nfc_claim_active(void)
 {
-	g_clm_rearm_calls++;
+	g_claim_active_calls++;
+}
+
+/* #415: claim window state seen by app_cmd_handle_get_claim_info(); the test
+ * drives it (default ACTIVE, like a freshly provisioned unit). */
+uint8_t g_claim_state = APP_NFC_CLAIM_ACTIVE;
+
+uint8_t app_nfc_claim_state_get(void)
+{
+	return g_claim_state;
 }
 
 bool app_history_is_ready(void)

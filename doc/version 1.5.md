@@ -11,7 +11,8 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Buzzer | **New** — alarm-driven melodies (#397, Phase 2 of #338): the buzzer HW variant now sounds automatically while any alarm is active, gated on a new global `alarm-buzzer-mode` config key |
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
-| NFC | **Changed (breaking)** — interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The NDEF command/response/ack records are removed; the identity record stays (now a short external type, no tap-to-launch). Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). |
+| NFC | **Changed (breaking)** — interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The NDEF command/response/ack records are removed; the identity record stays (now a short external type, no tap-to-launch). Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §4. |
+| NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §5. |
 
 ---
 
@@ -235,6 +236,77 @@ RF/host handshake, the datasheet rule that every EEPROM write NACKs while
 cleared on the next boot, an owner-command session that consumes the claim window
 and advances the nonce, a vendor session that does not, and a rejected channel
 prefix. `tests/cmd` checks every `GetConfig` page fits one 256 B mailbox frame.
+
+---
+
+## 5. Plaintext command transport and explicit claiming (#415)
+
+Prepares the claim flow for the NFC mailbox move (#313/#414) and tightens the
+claim window into something with no automatic behaviour.
+
+### 5.1 The `plain_text` transport
+
+A new command transport, `plain_text`, carries a **raw `Command` protobuf** in and
+`0x01 || Response` out — no AES-CCM, no nonce, no response cache. It is the
+unauthenticated, identity-disclosure channel a phone uses before it holds any key.
+It is reachable over the NFC mailbox channel `0x03` (added by #414) and, for the
+bench, the shell `ats cmd plain <hex>`; it is **never** reachable over LoRaWAN.
+
+The transport is **strictly opt-in**. A command answers on it only by listing
+`plain_text` in `app_config.yml`; every other command is rejected by the generated
+dispatch with `NOT_READY "transport not allowed"`. This is enforced in configen:
+the historical "omitted `transports:` = all transports" default now means "all
+transports **except** `plain_text`", so a command that does not name it — `get_info`
+(which would disclose `claim_token`), `set_param` (which would write config), … —
+can never be answered without a key. **Rule for any command that opts in:
+read-only, and disclosing identity-class data only.**
+
+### 5.2 `get_claim_info` (proto 29)
+
+The first `plain_text` command (also allowed over `nfc` and `shell`). Empty request;
+returns `Response.claim_info { serial_number, claim_token }` — the same data the
+plaintext `hio.stck:clm` NDEF record carries today — **while the claim window is
+active**. Once the window is `done` it returns `NOT_READY "claimed"`; before a
+token is provisioned, `NOT_READY "no claim token"`. Unlike the NDEF record it needs
+a **powered** device, so a shelf attacker can no longer read the token off an
+unpowered box.
+
+### 5.3 Explicit two-state claim window
+
+The claim window (`clm/state` in NVS) is now a two-state latch:
+
+| State | Meaning |
+|---|---|
+| `active` | factory default — the device may still be claimed: the `hio.stck:clm` record is laid and `get_claim_info` discloses the token |
+| `done` | claiming finished — no `clm` record, `get_claim_info` → `NOT_READY` |
+
+Removed relative to v1.4.0: the auto-arm (a provisioned token no longer lazily
+"arms" the record) and the **implicit close** — in v1.4.0 any successfully
+decrypted command closed the window (#308); now it closes **only** on an explicit
+`claim_done`. The app must therefore send `claim_done` after storing the claimed
+keys; a crash in between leaves the token readable on a powered unit (accepted:
+the backend refuses a second claim of the same serial, so only the token leaks,
+not control). Mutators are explicit only: `claim_done` / `ats claim done` →
+`done`; `claim_active` / `ats claim active` / `vendor_reset` → `active`.
+`device_reset` / `factory_reset` leave the state alone.
+
+Upgrading from v1.4.x migrates the old tri-state in place: `unset`/`pending` →
+`active`, `consumed` → `done`.
+
+### 5.4 Command rename (wire-compatible)
+
+`clm_ack` → `claim_done` (id 25) and `clm_rearm` → `claim_active` (id 27); messages
+`ClmAck`/`ClmRearm` → `ClaimDone`/`ClaimActive`. The **field numbers do not move**,
+so already-deployed downlinks and vendored protos stay byte-compatible — only the
+generated names change (firmware, JS decoder, and the Manager-App's vendored proto).
+
+### 5.5 Bench
+
+`ats cmd plain <hex>` injects a raw Command over the transport; `ats claim
+active|done|status` drives and prints the window state. Example:
+`ats claim status` on a freshly provisioned unit prints `claim window: active`;
+`ats cmd plain <GetClaimInfo>` returns the `ClaimInfo`; `ats cmd plain <GetInfo>`
+returns `NOT_READY "transport not allowed"`.
 
 ---
 

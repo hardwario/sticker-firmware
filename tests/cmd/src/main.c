@@ -9,9 +9,11 @@
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_config_ingest.h"
+#include "app_nfc.h"
 #include "app_sensor.h"
 
 #include <pb_decode.h>
+#include <pb_encode.h>
 #include "src/app_config.pb.h"
 
 #include <zephyr/ztest.h>
@@ -28,8 +30,9 @@ extern float test_battery_v;
 extern int test_battery_ret;
 extern void test_set_lrw_dirty(bool v);
 extern void test_set_active_alarm_count(size_t n);
-extern int g_clm_ack_calls;
-extern int g_clm_rearm_calls;
+extern int g_claim_done_calls;
+extern int g_claim_active_calls;
+extern uint8_t g_claim_state;
 extern int g_buzzer_play_calls;
 extern uint32_t g_buzzer_play_last_kind;
 extern uint16_t g_buzzer_play_last_repeat_s;
@@ -79,8 +82,9 @@ static void reset_cfg(void)
 	test_clock_has = false;
 	test_set_lrw_dirty(false);
 	test_set_active_alarm_count(0);
-	g_clm_ack_calls = 0;
-	g_clm_rearm_calls = 0;
+	g_claim_done_calls = 0;
+	g_claim_active_calls = 0;
+	g_claim_state = APP_NFC_CLAIM_ACTIVE;
 	g_buzzer_play_calls = 0;
 	g_buzzer_play_last_kind = 0;
 	g_buzzer_play_last_repeat_s = 0;
@@ -786,39 +790,42 @@ ZTEST(cmd, test_set_secret_key)
 			  "zero key must not overwrite the current secret_key");
 }
 
-/* #308 clm_ack (field 25): nfc/shell only (rejected over lrw, like
- * factory_reset/set_secret_key above). The actual clm-latch transition lives in
- * app_nfc.c (HIL-verified, #247/#308 — see manual-test-plan.md); here we only
- * confirm the command reaches app_nfc_clm_ack() and acks, via the stub call
- * counter (g_clm_ack_calls). */
-ZTEST(cmd, test_clm_ack)
+/* #308/#415 claim_done (field 25, ex-clm_ack): nfc/shell only (rejected over
+ * lrw, like factory_reset/set_secret_key above). The actual latch transition
+ * lives in app_nfc.c (covered by tests/nfc_hw); here we only confirm the command
+ * reaches app_nfc_claim_done() and acks, via the stub call counter
+ * (g_claim_done_calls). Wire id 25 is unchanged by the rename, so the vectors
+ * are byte-identical to the old clm_ack ones. */
+ZTEST(cmd, test_claim_done)
 {
 	Response r;
 
 	reset_cfg();
-	zassert_equal(handle("080cca0100", &r), APP_CMD_ACTION_NONE, "clm_ack rejected over lrw");
+	zassert_equal(handle("080cca0100", &r), APP_CMD_ACTION_NONE,
+		      "claim_done rejected over lrw");
 	zassert_equal(r.which_body, Response_error_tag, "lrw should error (which=%d)",
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
 		      r.body.error.code);
-	zassert_equal(g_clm_ack_calls, 0, "must not call app_nfc_clm_ack over lrw");
+	zassert_equal(g_claim_done_calls, 0, "must not call app_nfc_claim_done over lrw");
 
 	reset_cfg();
 	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_NFC, "080cca0100", &r);
-	zassert_equal(a, APP_CMD_ACTION_NONE, "clm_ack over nfc: no deferred action");
-	zassert_equal(r.which_body, Response_ack_tag, "clm_ack acks (which=%d)", r.which_body);
-	zassert_equal(g_clm_ack_calls, 1, "app_nfc_clm_ack called exactly once");
+	zassert_equal(a, APP_CMD_ACTION_NONE, "claim_done over nfc: no deferred action");
+	zassert_equal(r.which_body, Response_ack_tag, "claim_done acks (which=%d)", r.which_body);
+	zassert_equal(g_claim_done_calls, 1, "app_nfc_claim_done called exactly once");
 }
 
-/* #351 clm_rearm (field 27): nfc/shell only (rejected over lrw, same pattern as
- * clm_ack/set_secret_key above). Both the no/zero-new_claim_token and the
- * non-zero-new_claim_token cases now defer APP_CMD_ACTION_CLM_REARM_SAVE the
- * same way — restart-style, Ack delivered to the phone first, then main.c
- * flips the latch (app_nfc_clm_reset()) and reboots — so the phone can always
- * assume "ack read -> reboot" regardless of which case it took. A non-zero
- * new_claim_token additionally stages it into g_app_config synchronously in
- * the handler, before the deferred reboot lands it via h_commit. */
-ZTEST(cmd, test_clm_rearm)
+/* #351/#415 claim_active (field 27, ex-clm_rearm): nfc/shell only (rejected over
+ * lrw, same pattern as claim_done/set_secret_key above). Both the
+ * no/zero-new_claim_token and the non-zero-new_claim_token cases defer
+ * APP_CMD_ACTION_CLAIM_ACTIVE_SAVE the same way — restart-style, Ack delivered
+ * to the phone first, then main.c flips the latch (app_nfc_claim_active()) and
+ * reboots — so the phone can always assume "ack read -> reboot" regardless of
+ * which case it took. A non-zero new_claim_token additionally stages it into
+ * g_app_config synchronously in the handler, before the deferred reboot lands it
+ * via h_commit. Wire id 27 is unchanged by the rename. */
+ZTEST(cmd, test_claim_active)
 {
 	Response r;
 	uint8_t expect_token[16];
@@ -826,29 +833,31 @@ ZTEST(cmd, test_clm_rearm)
 	memset(expect_token, 0x33, sizeof(expect_token));
 
 	reset_cfg();
-	zassert_equal(handle("080dda0100", &r), APP_CMD_ACTION_NONE, "clm_rearm rejected over lrw");
+	zassert_equal(handle("080dda0100", &r), APP_CMD_ACTION_NONE,
+		      "claim_active rejected over lrw");
 	zassert_equal(r.which_body, Response_error_tag, "lrw should error (which=%d)",
 		      r.which_body);
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
 		      r.body.error.code);
-	zassert_equal(g_clm_rearm_calls, 0, "must not call app_nfc_clm_reset over lrw");
+	zassert_equal(g_claim_active_calls, 0, "must not call app_nfc_claim_active over lrw");
 
 	reset_cfg();
 	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_NFC, "080dda0100", &r);
-	zassert_equal(a, APP_CMD_ACTION_CLM_REARM_SAVE,
-		      "clm_rearm without token also defers save+reboot");
-	zassert_equal(r.which_body, Response_ack_tag, "clm_rearm acks (which=%d)", r.which_body);
-	zassert_equal(g_clm_rearm_calls, 0,
-		      "app_nfc_clm_reset must NOT run synchronously in the handler");
+	zassert_equal(a, APP_CMD_ACTION_CLAIM_ACTIVE_SAVE,
+		      "claim_active without token also defers save+reboot");
+	zassert_equal(r.which_body, Response_ack_tag, "claim_active acks (which=%d)", r.which_body);
+	zassert_equal(g_claim_active_calls, 0,
+		      "app_nfc_claim_active must NOT run synchronously in the handler");
 
 	reset_cfg();
 	a = handle_via(APP_CMD_TRANSPORT_NFC, "080eda01120a1033333333333333333333333333333333", &r);
-	zassert_equal(a, APP_CMD_ACTION_CLM_REARM_SAVE, "clm_rearm with token defers save+reboot");
-	zassert_equal(r.which_body, Response_ack_tag, "clm_rearm acks (which=%d)", r.which_body);
+	zassert_equal(a, APP_CMD_ACTION_CLAIM_ACTIVE_SAVE,
+		      "claim_active with token defers save+reboot");
+	zassert_equal(r.which_body, Response_ack_tag, "claim_active acks (which=%d)", r.which_body);
 	zassert_mem_equal(g_app_config.claim_token, expect_token, sizeof(expect_token),
 			  "new_claim_token not staged");
-	zassert_equal(g_clm_rearm_calls, 0,
-		      "app_nfc_clm_reset must NOT run synchronously when staging a new token");
+	zassert_equal(g_claim_active_calls, 0,
+		      "app_nfc_claim_active must NOT run synchronously when staging a new token");
 }
 
 /* #338 buzzer_play (field 28): lrw/nfc only (rejected over shell, like
@@ -919,7 +928,7 @@ ZTEST(cmd, test_buzzer_play)
 
 /* #316: vendor_reset is a generic Command reachable ONLY over the vendor
  * transport (NFC hio.stck:vnd). Its body reuses SetSecretKey (field 26 — 25 was
- * taken by clm_ack, #308) — the replacement secret_key, mandatory because
+ * taken by claim_done, ex-clm_ack, #308) — the replacement secret_key, mandatory because
  * vendor_reset zeroes the old one. The handler stages the key + defers
  * APP_CMD_ACTION_VENDOR_RESET; a missing key is BAD_REQUEST (checked before the
  * allow gate). */
@@ -1331,6 +1340,186 @@ ZTEST(cmd, test_lrw_region_writable_excludes_vendor)
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE,
 		      "C2 REGRESSION: EXPECTED NOT_WRITABLE over vendor; code=%d",
 		      r.body.error.code);
+}
+
+/* #415 C1/K2: the plain_text transport is opt-in — a command answers on it only
+ * by listing `plain_text` in app_config.yml. No command does yet (get_claim_info
+ * arrives in a later commit), so EVERY command must be rejected with NOT_READY
+ * "transport not allowed" by the generated dispatch guard, before its handler
+ * runs and before any deferred action is staged. Guards the security boundary:
+ * an unauthenticated caller must never reach get_info (discloses claim_token) or
+ * set_param (writes config) over the plaintext channel. */
+ZTEST(cmd, test_plain_text_rejects_every_command)
+{
+	static const pb_size_t tags[] = {
+		Command_set_param_tag,      Command_get_param_tag,
+		Command_get_info_tag,       Command_get_config_tag,
+		Command_settings_save_tag,  Command_reboot_tag,
+		Command_device_reset_tag,   Command_force_send_tag,
+		Command_reset_counters_tag, Command_req_history_tag,
+		Command_clock_sync_tag,     Command_req_history_page_tag,
+		Command_w1_scan_tag,        Command_lrw_reset_tag,
+		Command_lrw_join_tag,       Command_enter_calibration_tag,
+		Command_sample_tag,         Command_factory_reset_tag,
+		Command_set_secret_key_tag, Command_claim_done_tag,
+		Command_vendor_reset_tag,   Command_claim_active_tag,
+		Command_buzzer_play_tag,
+	};
+
+	reset_cfg();
+	for (size_t i = 0; i < ARRAY_SIZE(tags); i++) {
+		Command cmd = Command_init_zero;
+		cmd.seq = 1;
+		cmd.which_body = tags[i];
+
+		uint8_t in[64];
+		pb_ostream_t os = pb_ostream_from_buffer(in, sizeof(in));
+		zassert_true(pb_encode(&os, Command_fields, &cmd), "encode tag %u", tags[i]);
+
+		uint8_t out[128];
+		size_t out_len = 0;
+		enum app_cmd_action action = APP_CMD_ACTION_NONE;
+		int ret = app_cmd_handle(APP_CMD_TRANSPORT_PLAIN_TEXT, in, os.bytes_written, out,
+					 sizeof(out), &out_len, &action);
+		zassert_equal(ret, 0, "handle ret %d (tag %u)", ret, tags[i]);
+		zassert_equal(action, APP_CMD_ACTION_NONE, "deferred action leaked (tag %u)",
+			      tags[i]);
+
+		Response r = Response_init_zero;
+		pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+		zassert_true(pb_decode(&is, Response_fields, &r), "decode tag %u", tags[i]);
+		zassert_equal(r.which_body, Response_error_tag, "tag %u not rejected (which=%d)",
+			      tags[i], r.which_body);
+		zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY,
+			      "tag %u wrong code %d", tags[i], r.body.error.code);
+	}
+}
+
+/* Encode Command{seq=1, which_body} with an empty body and dispatch it over
+ * `tp`; decode the Response. Used by the read-only get_claim_info /
+ * get_basic_info tests (both have empty request bodies). */
+static void handle_empty_body_cmd(enum app_cmd_transport tp, pb_size_t which_body, Response *resp)
+{
+	Command cmd = Command_init_zero;
+	cmd.seq = 1;
+	cmd.which_body = which_body;
+
+	uint8_t in[16];
+	pb_ostream_t os = pb_ostream_from_buffer(in, sizeof(in));
+	zassert_true(pb_encode(&os, Command_fields, &cmd), "encode command");
+
+	uint8_t out[128];
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	int ret = app_cmd_handle(tp, in, os.bytes_written, out, sizeof(out), &out_len, &action);
+	zassert_equal(ret, 0, "app_cmd_handle ret %d", ret);
+	zassert_equal(action, APP_CMD_ACTION_NONE, "read-only command, no action");
+	zassert_true(out_len >= 1 && out[0] == APP_PROTO_VERSION, "bad version byte");
+
+	*resp = (Response)Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, resp), "Response decode failed");
+}
+
+/* #415 C2: get_claim_info returns ClaimInfo{serial, claim_token} while the claim
+ * window is active and a token is provisioned; NOT_READY once done or when no
+ * token exists; and it is reachable over plain_text / nfc / shell but not
+ * lrw / vendor (the generated allow-list guard). */
+ZTEST(cmd, test_get_claim_info)
+{
+	Response r;
+	uint8_t expect_token[16];
+
+	memset(expect_token, 0xAB, sizeof(expect_token));
+
+	/* Active + provisioned -> ClaimInfo over the unauthenticated plain_text. */
+	reset_cfg();
+	g_app_config.serial_number = 2162123456u;
+	memcpy(g_app_config.claim_token, expect_token, sizeof(expect_token));
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_PLAIN_TEXT, Command_get_claim_info_tag, &r);
+	zassert_equal(r.which_body, Response_claim_info_tag, "expected claim_info (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.claim_info.serial_number, 2162123456u, "serial mismatch");
+	zassert_mem_equal(r.body.claim_info.claim_token, expect_token, sizeof(expect_token),
+			  "claim_token mismatch");
+
+	/* Same over nfc (owner re-read of the token). */
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_NFC, Command_get_claim_info_tag, &r);
+	zassert_equal(r.which_body, Response_claim_info_tag, "claim_info over nfc");
+
+	/* Window done -> NOT_READY. */
+	g_claim_state = APP_NFC_CLAIM_DONE;
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_PLAIN_TEXT, Command_get_claim_info_tag, &r);
+	zassert_equal(r.which_body, Response_error_tag, "done should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "done code %d",
+		      r.body.error.code);
+
+	/* Active but no token provisioned -> NOT_READY. */
+	g_claim_state = APP_NFC_CLAIM_ACTIVE;
+	memset(g_app_config.claim_token, 0, sizeof(g_app_config.claim_token));
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_PLAIN_TEXT, Command_get_claim_info_tag, &r);
+	zassert_equal(r.which_body, Response_error_tag, "no token should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "no-token code %d",
+		      r.body.error.code);
+
+	/* Not allow-listed over lrw / vendor -> rejected by the dispatch guard. */
+	memcpy(g_app_config.claim_token, expect_token, sizeof(expect_token));
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_LRW, Command_get_claim_info_tag, &r);
+	zassert_equal(r.which_body, Response_error_tag, "lrw should be rejected");
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_VENDOR, Command_get_claim_info_tag, &r);
+	zassert_equal(r.which_body, Response_error_tag, "vendor should be rejected");
+}
+
+/* #415/#313 get_basic_info: the plaintext identity bootstrap. Returns serial +
+ * nonce high-water + config/FW version + device_status (with the claim-window
+ * bit); reachable over plain_text / nfc / shell, rejected over lrw / vendor. */
+ZTEST(cmd, test_get_basic_info)
+{
+	Response r;
+
+	reset_cfg();
+	g_app_config.serial_number = 2162123456u;
+	g_app_config.config_version = 4;
+	g_app_config.nonce_counter = 42;
+	g_claim_state = APP_NFC_CLAIM_ACTIVE;
+
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_PLAIN_TEXT, Command_get_basic_info_tag, &r);
+	zassert_equal(r.which_body, Response_basic_info_tag, "expected basic_info (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.basic_info.serial_number, 2162123456u, "serial mismatch");
+	zassert_equal(r.body.basic_info.nonce_counter, 42u, "nonce high-water mismatch");
+	zassert_equal(r.body.basic_info.config_version, 4u, "config_version mismatch");
+	zassert_true(r.body.basic_info.device_status & APP_DEVICE_STATUS_CLAIM_ACTIVE,
+		     "claim-active bit must be set while the window is active");
+	/* radio_mode defaults to OFF (reset_cfg zeroes the config) -> radio-off set,
+	 * radio-link-down clear. */
+	zassert_true(r.body.basic_info.device_status & APP_DEVICE_STATUS_RADIO_OFF,
+		     "radio-off bit set when radio_mode == off");
+	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_RADIO_LINK_DOWN,
+		      "radio-link-down clear while the radio is off");
+
+	/* Claimed -> the claim-active bit clears (rest of device_status unaffected). */
+	g_claim_state = APP_NFC_CLAIM_DONE;
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_NFC, Command_get_basic_info_tag, &r);
+	zassert_equal(r.which_body, Response_basic_info_tag, "basic_info over nfc");
+	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_CLAIM_ACTIVE,
+		      "claim-active bit must clear once claimed");
+
+	/* P2P: radio on but no LoRaWAN link concept -> neither radio bit set. */
+	g_app_config.radio_mode = APP_CONFIG_RADIO_MODE_P2P;
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_PLAIN_TEXT, Command_get_basic_info_tag, &r);
+	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_RADIO_OFF,
+		      "radio-off clear in P2P mode");
+	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_RADIO_LINK_DOWN,
+		      "radio-link-down clear in P2P mode (no LoRaWAN link)");
+
+	/* Not allow-listed over lrw / vendor -> rejected by the dispatch guard. */
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_LRW, Command_get_basic_info_tag, &r);
+	zassert_equal(r.which_body, Response_error_tag, "lrw should be rejected");
+	handle_empty_body_cmd(APP_CMD_TRANSPORT_VENDOR, Command_get_basic_info_tag, &r);
+	zassert_equal(r.which_body, Response_error_tag, "vendor should be rejected");
 }
 
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);
