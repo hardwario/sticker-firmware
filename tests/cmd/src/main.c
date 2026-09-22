@@ -1473,17 +1473,19 @@ ZTEST(cmd, test_get_claim_info)
 }
 
 /* #415/#313 get_basic_info: the plaintext identity bootstrap. Returns serial +
- * nonce high-water + config/FW version + device_status (with the claim-window
- * bit); reachable over plain_text / nfc / shell, rejected over lrw / vendor. */
+ * nonce high-water + config/FW version — identity only, no device_status (the
+ * status stays owner-only, see test_device_status_radio_and_claim_bits);
+ * reachable over plain_text / nfc / shell, rejected over lrw / vendor. */
 ZTEST(cmd, test_get_basic_info)
 {
 	Response r;
+	struct app_cmd_info info;
 
 	reset_cfg();
 	g_app_config.serial_number = 2162123456u;
 	g_app_config.config_version = 4;
 	g_app_config.nonce_counter = 42;
-	g_claim_state = APP_NFC_CLAIM_ACTIVE;
+	app_cmd_get_info(&info);
 
 	handle_empty_body_cmd(APP_CMD_TRANSPORT_PLAIN_TEXT, Command_get_basic_info_tag, &r);
 	zassert_equal(r.which_body, Response_basic_info_tag, "expected basic_info (which=%d)",
@@ -1491,35 +1493,52 @@ ZTEST(cmd, test_get_basic_info)
 	zassert_equal(r.body.basic_info.serial_number, 2162123456u, "serial mismatch");
 	zassert_equal(r.body.basic_info.nonce_counter, 42u, "nonce high-water mismatch");
 	zassert_equal(r.body.basic_info.config_version, 4u, "config_version mismatch");
-	zassert_true(r.body.basic_info.device_status & APP_DEVICE_STATUS_CLAIM_ACTIVE,
-		     "claim-active bit must be set while the window is active");
-	/* radio_mode defaults to OFF (reset_cfg zeroes the config) -> radio-off set,
-	 * radio-link-down clear. */
-	zassert_true(r.body.basic_info.device_status & APP_DEVICE_STATUS_RADIO_OFF,
-		     "radio-off bit set when radio_mode == off");
-	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_RADIO_LINK_DOWN,
-		      "radio-link-down clear while the radio is off");
+	zassert_equal(r.body.basic_info.fw_major, info.fw_major, "fw_major mismatch");
+	zassert_equal(r.body.basic_info.fw_minor, info.fw_minor, "fw_minor mismatch");
+	zassert_equal(r.body.basic_info.fw_patch, info.fw_patch, "fw_patch mismatch");
 
-	/* Claimed -> the claim-active bit clears (rest of device_status unaffected). */
-	g_claim_state = APP_NFC_CLAIM_DONE;
 	handle_empty_body_cmd(APP_CMD_TRANSPORT_NFC, Command_get_basic_info_tag, &r);
 	zassert_equal(r.which_body, Response_basic_info_tag, "basic_info over nfc");
-	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_CLAIM_ACTIVE,
-		      "claim-active bit must clear once claimed");
-
-	/* P2P: radio on but no LoRaWAN link concept -> neither radio bit set. */
-	g_app_config.radio_mode = APP_CONFIG_RADIO_MODE_P2P;
-	handle_empty_body_cmd(APP_CMD_TRANSPORT_PLAIN_TEXT, Command_get_basic_info_tag, &r);
-	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_RADIO_OFF,
-		      "radio-off clear in P2P mode");
-	zassert_false(r.body.basic_info.device_status & APP_DEVICE_STATUS_RADIO_LINK_DOWN,
-		      "radio-link-down clear in P2P mode (no LoRaWAN link)");
 
 	/* Not allow-listed over lrw / vendor -> rejected by the dispatch guard. */
 	handle_empty_body_cmd(APP_CMD_TRANSPORT_LRW, Command_get_basic_info_tag, &r);
 	zassert_equal(r.which_body, Response_error_tag, "lrw should be rejected");
 	handle_empty_body_cmd(APP_CMD_TRANSPORT_VENDOR, Command_get_basic_info_tag, &r);
 	zassert_equal(r.which_body, Response_error_tag, "vendor should be rejected");
+}
+
+/* #415 device_status radio + claim bits (owner-only, Info.device_status via the
+ * encrypted get_info): CLAIM_ACTIVE follows the claim window; RADIO_OFF when
+ * radio_mode == off; P2P has no LoRaWAN link, so neither radio bit is set. */
+ZTEST(cmd, test_device_status_radio_and_claim_bits)
+{
+	struct app_cmd_info info;
+
+	reset_cfg();
+	g_claim_state = APP_NFC_CLAIM_ACTIVE;
+	app_cmd_get_info(&info);
+	zassert_true(info.device_status & APP_DEVICE_STATUS_CLAIM_ACTIVE,
+		     "claim-active bit must be set while the window is active");
+	/* radio_mode defaults to OFF (reset_cfg zeroes the config) -> radio-off set,
+	 * radio-link-down clear. */
+	zassert_true(info.device_status & APP_DEVICE_STATUS_RADIO_OFF,
+		     "radio-off bit set when radio_mode == off");
+	zassert_false(info.device_status & APP_DEVICE_STATUS_RADIO_LINK_DOWN,
+		      "radio-link-down clear while the radio is off");
+
+	/* Claimed -> the claim-active bit clears (rest of device_status unaffected). */
+	g_claim_state = APP_NFC_CLAIM_DONE;
+	app_cmd_get_info(&info);
+	zassert_false(info.device_status & APP_DEVICE_STATUS_CLAIM_ACTIVE,
+		      "claim-active bit must clear once claimed");
+
+	/* P2P: radio on but no LoRaWAN link concept -> neither radio bit set. */
+	g_app_config.radio_mode = APP_CONFIG_RADIO_MODE_P2P;
+	app_cmd_get_info(&info);
+	zassert_false(info.device_status & APP_DEVICE_STATUS_RADIO_OFF,
+		      "radio-off clear in P2P mode");
+	zassert_false(info.device_status & APP_DEVICE_STATUS_RADIO_LINK_DOWN,
+		      "radio-link-down clear in P2P mode (no LoRaWAN link)");
 }
 
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);

@@ -229,11 +229,12 @@ commands:
     # #415/#313: identity bootstrap over the mailbox. The phone reads this over
     # plain_text (channel 0x03) right after a tap to learn the serial (pick the
     # cached secret_key), the nonce high-water (send nonce+1 through the
-    # anti-replay window), the config_version (is its cached config stale), the FW
-    # version and the claim state — everything it needs BEFORE the first encrypted
-    # command. Replaces the plaintext hio.stck:inf NDEF record (removed by #414),
-    # so a mailbox-only device needs no NDEF at all. Read-only, identity-class
-    # only (no secret_key / claim_token / DevEUI).
+    # anti-replay window), the config_version (is its cached config stale) and the
+    # FW version — everything it needs BEFORE the first encrypted command.
+    # Replaces the plaintext hio.stck:inf NDEF record (removed by #414), so a
+    # mailbox-only device needs no NDEF at all. Read-only, identity-class only
+    # (no secret_key / claim_token / DevEUI / device status — the status is
+    # owner-only, via the encrypted get_info).
     - {name: get_basic_info, proto_id: 30, body: GetBasicInfo, kind: handler, response: basic_info, transports: [plain_text, nfc, shell]}
 parameters:
   # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /

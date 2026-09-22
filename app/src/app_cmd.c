@@ -852,10 +852,12 @@ static void app_cmd_handle_get_claim_info(enum app_cmd_transport tp, const Comma
 /* #415/#313: identity bootstrap over the mailbox. Everything a phone needs after
  * a tap, before its first encrypted command, and none of it secret: the serial
  * (to pick the cached secret_key), the nonce high-water (to send nonce+1 through
- * the anti-replay window), the config version (is its cached config stale), the
- * FW version and the claim state. Replaces the plaintext hio.stck:inf record.
- * Read-only. Always answers (unlike get_claim_info it is not gated on the claim
- * window). mailbox_available (device_status bit 13) is added by PR #414. */
+ * the anti-replay window), the config version (is its cached config stale) and
+ * the FW version. Replaces the plaintext hio.stck:inf record. Read-only. Always
+ * answers (unlike get_claim_info it is not gated on the claim window). Identity
+ * only — no device_status: alarm / battery / radio / claim state stay owner-only
+ * (Info.device_status over the encrypted get_info), so an unauthenticated tap
+ * cannot tell e.g. that a security sensor's radio is off. */
 static void app_cmd_handle_get_basic_info(enum app_cmd_transport tp, const Command *cmd,
 					  Response *resp, enum app_cmd_action *action)
 {
@@ -863,22 +865,16 @@ static void app_cmd_handle_get_basic_info(enum app_cmd_transport tp, const Comma
 	ARG_UNUSED(cmd);
 	ARG_UNUSED(action);
 
-	struct app_cmd_info info;
-	app_cmd_get_info(&info);
-
 	resp->which_body = Response_basic_info_tag;
 	Response_BasicInfo *bi = &resp->body.basic_info;
-	bi->serial_number = info.serial_number;
+	bi->serial_number = g_app_config.serial_number;
 	/* Live high-water == what decrypt() checks against (what the old inf record
 	 * carried, now served here). */
 	bi->nonce_counter = app_config()->nonce_counter;
 	bi->config_version = g_app_config.config_version;
-	bi->fw_major = info.fw_major;
-	bi->fw_minor = info.fw_minor;
-	bi->fw_patch = info.fw_patch;
-	/* Full APP_DEVICE_STATUS_* bitmask (app_cmd_get_info fills it, incl. the
-	 * claim-window bit) — claim/alarm/battery/health in one word. */
-	bi->device_status = info.device_status;
+	bi->fw_major = APP_VERSION_MAJOR;
+	bi->fw_minor = APP_VERSION_MINOR;
+	bi->fw_patch = APP_VERSION_PATCH;
 }
 
 /* #338: remote-triggered buzzer melody (NFC/LRW). kind selects one of the
