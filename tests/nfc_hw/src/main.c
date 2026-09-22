@@ -13,6 +13,8 @@
 #include "app_cmd.h"
 #include "app_config.h"
 
+#include <zephyr/shell/shell.h>
+#include <zephyr/shell/shell_dummy.h>
 #include <zephyr/ztest.h>
 
 #include <errno.h>
@@ -529,6 +531,86 @@ ZTEST(nfc_hw, test_mb_deferred_action_ends_poll_while_field_held)
 	zassert_equal(app_nfc_take_cmd_action(), APP_CMD_ACTION_NONE, "action taken once");
 	zassert_equal(app_nfc_wait_event(0), 0,
 		      "the poll must be re-armed so a non-rebooting action resumes the tap");
+}
+
+/* ---- Debug-shell user-EEPROM access (`nfc read|write|clear`) --------------- */
+
+/* Run one shell command on the dummy backend; returns its result, output in *out. */
+static int nfc_shell(const char *cmd, const char **out)
+{
+	const struct shell *sh = shell_backend_dummy_get_ptr();
+	size_t len;
+
+	shell_backend_dummy_clear_output(sh);
+	int ret = shell_execute_cmd(sh, cmd);
+
+	*out = shell_backend_dummy_get_output(sh, &len);
+	return ret;
+}
+
+/* write lands byte-exact (also across a 16 B write chunk), read prints it at the
+ * right offset, clear zeroes all 512 B — e.g. stale v1.4.x NDEF on a reflashed
+ * unit — and a couple of arbitration NACKs are ridden out. */
+ZTEST(nfc_hw, test_shell_eeprom_write_read_clear)
+{
+	const char *out;
+	uint8_t mem[ST25DV_EMUL_MEM_SIZE];
+	static const uint8_t cc[] = {0xE1, 0x40, 0x40, 0x01};
+	static const uint8_t cross[] = {0x01, 0x02, 0x03, 0x04, 0x05};
+
+	zassert_equal(app_nfc_init(), 0, "app_nfc_init");
+
+	zassert_equal(nfc_shell("nfc write 0 e1404001", &out), 0, "write: %s", out);
+	st25dv_emul_mem_get(mem, 0, sizeof(cc));
+	zassert_mem_equal(mem, cc, sizeof(cc), "CC not written");
+
+	st25dv_emul_inject_write_fail(2);
+	zassert_equal(nfc_shell("nfc write 14 0102030405", &out), 0, "write across chunk: %s",
+		      out);
+	st25dv_emul_mem_get(mem, 14, sizeof(cross));
+	zassert_mem_equal(mem, cross, sizeof(cross), "chunk-crossing write mismatch");
+
+	zassert_equal(nfc_shell("nfc read 12 8", &out), 0, "read: %s", out);
+	zassert_not_null(strstr(out, "0000000C: 00 00 01 02 03 04 05 00"), "read output: %s",
+			 out);
+
+	memset(mem, 0xA5, sizeof(mem));
+	st25dv_emul_mem_set(mem, 0, sizeof(mem));
+	zassert_equal(nfc_shell("nfc clear", &out), 0, "clear: %s", out);
+	st25dv_emul_mem_get(mem, 0, sizeof(mem));
+	for (size_t i = 0; i < sizeof(mem); i++) {
+		zassert_equal(mem[i], 0, "byte %zu not cleared (0x%02x)", i, mem[i]);
+	}
+}
+
+/* The EEPROM is single-port and refuses writes while FTM is on: every command is
+ * refused under an RF field, MB_EN is cleared before a write, and ranges past
+ * the 512 B EEPROM are rejected. */
+ZTEST(nfc_hw, test_shell_eeprom_guards)
+{
+	const char *out;
+	uint8_t b;
+
+	zassert_equal(app_nfc_init(), 0, "app_nfc_init");
+
+	st25dv_emul_set_field_on(true);
+	zassert_equal(nfc_shell("nfc write 0 aa", &out), -EBUSY, "write under a field");
+	zassert_equal(nfc_shell("nfc read 0 4", &out), -EBUSY, "read under a field");
+	zassert_equal(nfc_shell("nfc clear", &out), -EBUSY, "clear under a field");
+	st25dv_emul_mem_get(&b, 0, 1);
+	zassert_equal(b, 0, "nothing may be written under a field");
+	st25dv_emul_set_field_on(false);
+
+	st25dv_emul_rf_set_mb_en(true);
+	zassert_equal(nfc_shell("nfc write 0 aa", &out), 0, "write with MB_EN left on: %s", out);
+	zassert_false(st25dv_emul_mb_ctrl() & MB_CTRL_MB_EN, "MB_EN must be cleared first");
+	st25dv_emul_mem_get(&b, 0, 1);
+	zassert_equal(b, 0xAA, "write did not land");
+
+	zassert_equal(nfc_shell("nfc read 500 20", &out), -EINVAL, "read past 512 B");
+	zassert_equal(nfc_shell("nfc read 0 4294967295", &out), -EINVAL, "read len wrap");
+	zassert_equal(nfc_shell("nfc write 510 010203", &out), -EINVAL, "write past 512 B");
+	zassert_equal(nfc_shell("nfc write 0 zz", &out), -EINVAL, "bad hex");
 }
 
 ZTEST_SUITE(nfc_hw, NULL, NULL, nfc_hw_before, NULL, NULL);

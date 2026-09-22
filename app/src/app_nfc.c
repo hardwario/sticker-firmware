@@ -462,8 +462,9 @@ enum app_cmd_action app_nfc_take_cmd_action(void)
  * RAM (0x2008..0x2107). Dual-port by design: served to I2C while the phone holds
  * its field, which is the whole point of the mailbox — so no field-off wait here
  * (the old app_nfc_serve_mailbox read the mailbox through a field-gated EEPROM
- * path and could therefore never see a message under a held field). Each chunk
- * rides out arbitration NACKs with a short retry. */
+ * path and could therefore never see a message under a held field). The debug
+ * `nfc read` shell also reads the user EEPROM through it, after checking the
+ * field is off. Each chunk rides out arbitration NACKs with a short retry. */
 static int read_chunks(uint16_t reg, void *buf, size_t len)
 {
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
@@ -1645,6 +1646,173 @@ int app_nfc_poll(void)
 
 #if defined(CONFIG_SHELL)
 
+/* ---- `nfc read|write|clear` — raw user-EEPROM bench access (debug only) ----
+ * The firmware itself never touches the 512 B user EEPROM (#313); these exist
+ * only to inspect or edit a tag by hand, e.g. wipe the stale v1.4.x NDEF records
+ * (possibly a plaintext clm claim token) off a unit reflashed to v1.5.0. The
+ * EEPROM is single-port: an access under an RF field collides on the shared i2c1
+ * bus and can wedge it, and with MB_EN=1 the chip refuses every write — so each
+ * command refuses while a field is present and clears MB_EN first. */
+#define NFC_EEPROM_SIZE        512
+#define NFC_EEPROM_READ_CHUNK  64 /* read + print granularity (stack buffer) */
+#define NFC_EEPROM_WRITE_CHUNK 16 /* page-aligned write; never crosses a 256 B row */
+#define NFC_EEPROM_WRITE_MAX   64 /* one `nfc write` (the shell caps an arg at ~128 hex) */
+
+/* Power the tag and make it safe for an EEPROM access: no RF field, mailbox off.
+ * On success the caller holds the access lock and must nfc_access_end(). */
+static int eeprom_access_begin(const struct shell *sh)
+{
+	int ret = nfc_access_begin();
+	if (ret) {
+		shell_error(sh, "nfc access failed: %d", ret);
+		return ret;
+	}
+
+	uint8_t eh = 0;
+	ret = read_reg(ST25DV_EH_CTRL_DYN, &eh, 1);
+	if (ret == 0 && (eh & ST25DV_FIELD_ON)) {
+		ret = -EBUSY;
+	}
+	if (ret == 0) {
+		ret = mb_set_en(false);
+	}
+	if (ret) {
+		nfc_access_end();
+		shell_error(sh, "%s (%d)",
+			    ret == -EBUSY ? "RF field present - remove the phone and retry"
+					  : "tag not ready",
+			    ret);
+	}
+	return ret;
+}
+
+/* Write `len` bytes at EEPROM offset `off` in page-aligned chunks, waiting out
+ * the EEPROM programming time (5 ms per 4 B page) after each one — the tag must
+ * not lose power (LPD high) mid-program. `data` NULL writes zeros. */
+static int eeprom_write(uint16_t off, const uint8_t *data, size_t len)
+{
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+	uint8_t frame[2 + NFC_EEPROM_WRITE_CHUNK];
+
+	while (len) {
+		size_t chunk = MIN(len, NFC_EEPROM_WRITE_CHUNK - (off % NFC_EEPROM_WRITE_CHUNK));
+
+		sys_put_be16(off, frame);
+		if (data) {
+			memcpy(&frame[2], data, chunk);
+			data += chunk;
+		} else {
+			memset(&frame[2], 0, chunk);
+		}
+
+		int ret = -EIO;
+		for (int attempt = 0; attempt < ST25DV_I2C_RETRIES && ret; attempt++) {
+			ret = i2c_write(dev, frame, 2 + chunk, ST25DV_I2C_ADDR_E0);
+			if (ret) {
+				k_msleep(ST25DV_I2C_RETRY_MS);
+			}
+		}
+		if (ret) {
+			return ret;
+		}
+		k_msleep(DIV_ROUND_UP((off % 4) + chunk, 4) * ST25DV_TW_MS_PER_PAGE);
+
+		off += chunk;
+		len -= chunk;
+	}
+	return 0;
+}
+
+static int cmd_nfc_read(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	unsigned long off = strtoul(argv[1], NULL, 0);
+	unsigned long len = strtoul(argv[2], NULL, 0);
+
+	/* Bound each operand before the sum: `off + len` wraps for a huge `len`. */
+	if (len == 0 || len > NFC_EEPROM_SIZE || off > NFC_EEPROM_SIZE - len) {
+		shell_error(sh, "range out of 0..%d", NFC_EEPROM_SIZE);
+		return -EINVAL;
+	}
+
+	int ret = eeprom_access_begin(sh);
+	if (ret) {
+		return ret;
+	}
+
+	uint8_t buf[NFC_EEPROM_READ_CHUNK];
+
+	for (size_t done = 0; done < len && ret == 0;) {
+		size_t chunk = MIN(len - done, sizeof(buf));
+
+		ret = read_chunks((uint16_t)(off + done), buf, chunk);
+		for (size_t i = 0; ret == 0 && i < chunk; i += SHELL_HEXDUMP_BYTES_IN_LINE) {
+			shell_hexdump_line(sh, off + done + i, &buf[i],
+					   MIN(chunk - i, SHELL_HEXDUMP_BYTES_IN_LINE));
+		}
+		done += chunk;
+	}
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "read failed: %d", ret);
+	}
+	return ret;
+}
+
+static int cmd_nfc_write(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	unsigned long off = strtoul(argv[1], NULL, 0);
+	uint8_t data[NFC_EEPROM_WRITE_MAX];
+	size_t n = hex2bin(argv[2], strlen(argv[2]), data, sizeof(data));
+
+	if (n == 0) {
+		shell_error(sh, "bad hex (empty, invalid or over %d B)", NFC_EEPROM_WRITE_MAX);
+		return -EINVAL;
+	}
+	if (off > NFC_EEPROM_SIZE - n) {
+		shell_error(sh, "range out of 0..%d", NFC_EEPROM_SIZE);
+		return -EINVAL;
+	}
+
+	int ret = eeprom_access_begin(sh);
+	if (ret) {
+		return ret;
+	}
+	ret = eeprom_write((uint16_t)off, data, n);
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "write failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "wrote %zu byte(s) at offset %lu", n, off);
+	return 0;
+}
+
+static int cmd_nfc_clear(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = eeprom_access_begin(sh);
+	if (ret) {
+		return ret;
+	}
+	ret = eeprom_write(0, NULL, NFC_EEPROM_SIZE);
+	nfc_access_end();
+
+	if (ret) {
+		shell_error(sh, "clear failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "cleared %d bytes", NFC_EEPROM_SIZE);
+	return 0;
+}
+
 static int cmd_nfc_reg(const struct shell *sh, size_t argc, char **argv)
 {
 	unsigned long addr = strtoul(argv[1], NULL, 0);
@@ -1809,6 +1977,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_nfc,
+	SHELL_CMD_ARG(read, NULL, "Read user EEPROM. Usage: read <offset> <len>", cmd_nfc_read, 3,
+		      0),
+	SHELL_CMD_ARG(write, NULL, "Write user EEPROM (<= 64 B). Usage: write <offset> <hex>",
+		      cmd_nfc_write, 3, 0),
+	SHELL_CMD_ARG(clear, NULL, "Zero all 512 B of user EEPROM (wipes any NDEF).", cmd_nfc_clear,
+		      1, 0),
 	SHELL_CMD_ARG(reg, NULL, "Read system/dynamic register (E1). Usage: reg <addr> [count]",
 		      cmd_nfc_reg, 2, 1),
 	SHELL_CMD_ARG(regw, NULL, "Write system/dynamic register (E1). Usage: regw <addr> <hex>",
@@ -1816,6 +1990,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(mb, &sub_nfc_mb, "FTM mailbox: status|on|off|serve (#313).", NULL),
 	SHELL_SUBCMD_SET_END);
 
-SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC registers + FTM mailbox (debug).", NULL);
+SHELL_CMD_REGISTER(nfc, &sub_nfc, "ST25DV NFC EEPROM, registers + FTM mailbox (debug).", NULL);
 
 #endif /* CONFIG_SHELL */
