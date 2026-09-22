@@ -305,7 +305,9 @@ ZTEST(nfc_hw, test_mb_bad_channel_prefix_rejected)
 	size_t rl = unhex_local(GETINFO_C1, req, sizeof(req));
 	uint8_t frame[65];
 
-	frame[0] = 0x03; /* chan: plain_text (PR #415) — stubbed, must be rejected */
+	/* 0x04 is not a defined channel (0x01 owner / 0x02 vendor / 0x03 plaintext);
+	 * an unknown prefix gets no reply and advances nothing. */
+	frame[0] = 0x04;
 	memcpy(&frame[1], req, rl);
 	const uint8_t *reqs[] = {frame};
 	const size_t lens[] = {rl + 1};
@@ -313,9 +315,32 @@ ZTEST(nfc_hw, test_mb_bad_channel_prefix_rejected)
 	struct mb_phone ph = run_phone(reqs, lens, 1);
 
 	zassert_equal(ph.put_err[0], 0, "RF put failed");
-	zassert_equal(ph.reply_len[0], 0, "channel 0x03 must get no reply (%zu B)",
+	zassert_equal(ph.reply_len[0], 0, "an unknown channel must get no reply (%zu B)",
 		      ph.reply_len[0]);
 	zassert_equal(g_app_config.nonce_counter, 0, "a rejected frame must not advance the nonce");
+}
+
+/* #415/#313: the plaintext channel 0x03 routes a raw Command to the plain_text
+ * transport. get_basic_info (the mailbox-only replacement for the inf record)
+ * answers with no key and no nonce advance. */
+ZTEST(nfc_hw, test_mb_session_plain_get_basic_info)
+{
+	memset(g_app_config.claim_token, 0xAB, sizeof(g_app_config.claim_token));
+	g_app_config.serial_number = 0x12345678;
+	mb_bring_up(KEY_HEX);
+	st25dv_emul_set_field_on(true);
+
+	/* [0x03] Command{ seq=1, get_basic_info={} } — field 30 (0xF2 0x01), empty. */
+	uint8_t frame[] = {0x03, 0x08, 0x01, 0xF2, 0x01, 0x00};
+	const uint8_t *reqs[] = {frame};
+	const size_t lens[] = {sizeof(frame)};
+
+	struct mb_phone ph = run_phone(reqs, lens, 1);
+
+	zassert_equal(ph.put_err[0], 0, "RF put failed: %d", ph.put_err[0]);
+	zassert_true(ph.reply_len[0] > 1, "no basic_info reply (%zu B)", ph.reply_len[0]);
+	zassert_equal(ph.reply_chan[0], 0x03, "reply channel byte");
+	zassert_equal(g_app_config.nonce_counter, 0, "plain_text must not touch the nonce");
 }
 
 ZTEST_SUITE(nfc_hw, NULL, NULL, nfc_hw_before, NULL, NULL);

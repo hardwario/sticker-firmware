@@ -1871,9 +1871,10 @@ static int nfc_check_locked(void)
  * field on — no field-off window is ever needed, which is what makes a one-tap
  * exchange possible on iOS. Frame = [chan][payload]: chan 0x01 = owner command
  * (secret_key, response cache), 0x02 = vendor command (vendor_token, no cache),
- * 0x03 = plaintext channel (reserved for the plain_text transport, PR #415 —
- * rejected here until it lands); the payload is byte-identical to the encrypted
- * hio.stck:cmd / hio.stck:rsp content, so the phone codec does not change. */
+ * 0x03 = plaintext (the unauthenticated plain_text transport, #415 — a raw
+ * Command -> 0x01||Response, allow-list gated: get_basic_info / get_claim_info).
+ * The 0x01/0x02 payload is byte-identical to the old encrypted hio.stck:cmd /
+ * hio.stck:rsp content, so the phone codec does not change. */
 #define NFC_MB_SESSION_MAX_MS                                                                      \
 	120000                          /* hard cap on one session; a long history readout         \
 					 * is ~100 pages x 0.3 s, iOS itself cuts at 20 s */
@@ -2041,8 +2042,14 @@ static int mb_serve_locked(void)
 			key = g_app_config.vendor_token;
 			tp = APP_CMD_TRANSPORT_VENDOR;
 			cache = false;
+		} else if (len >= 2 && chan == NFC_MB_CHAN_PLAIN) {
+			/* Unencrypted, unauthenticated (#415): a raw Command whose reply is
+			 * 0x01||Response. The generated dispatch allow-list decides which
+			 * commands answer (get_basic_info, get_claim_info) and rejects the
+			 * rest — no key, no nonce, no cache, no claim side effects. */
+			tp = APP_CMD_TRANSPORT_PLAIN_TEXT;
+			cache = false;
 		} else {
-			/* 0x03 (plain_text, PR #415) not wired yet; anything else is noise. */
 			NFC_DBG("mb: rejected frame chan=0x%02x len=%u", chan, (unsigned)len);
 			nfc_led_rejected();
 			continue;
@@ -2054,20 +2061,24 @@ static int mb_serve_locked(void)
 		size_t resp_len = 0;
 		enum app_cmd_action action = APP_CMD_ACTION_NONE;
 		bool replayed = false;
-#ifdef CONFIG_APP_NFC_ENCRYPTION
-		ret = handle_encrypted_cmd(key, tp, cache, &m_buf[1], len - 1, &m_resp_buf[1],
-					   ST25DV_MB_RAM_SIZE - 1, &resp_len, &action, &replayed);
-#else
-		/* Plaintext validation build: no vendor channel (no key to bind it to). */
-		ARG_UNUSED(key);
-		ARG_UNUSED(cache);
-		if (tp != APP_CMD_TRANSPORT_NFC) {
-			ret = -EACCES;
-		} else {
+		if (tp == APP_CMD_TRANSPORT_PLAIN_TEXT) {
 			ret = app_cmd_handle(tp, &m_buf[1], len - 1, &m_resp_buf[1],
 					     ST25DV_MB_RAM_SIZE - 1, &resp_len, &action);
-		}
+		} else {
+#ifdef CONFIG_APP_NFC_ENCRYPTION
+			ret = handle_encrypted_cmd(key, tp, cache, &m_buf[1], len - 1,
+						   &m_resp_buf[1], ST25DV_MB_RAM_SIZE - 1,
+						   &resp_len, &action, &replayed);
+#else
+			/* Plaintext validation build: no vendor channel (no key to bind it). */
+			ARG_UNUSED(key);
+			ARG_UNUSED(cache);
+			ret = (tp == APP_CMD_TRANSPORT_NFC)
+				      ? app_cmd_handle(tp, &m_buf[1], len - 1, &m_resp_buf[1],
+						       ST25DV_MB_RAM_SIZE - 1, &resp_len, &action)
+				      : -EACCES;
 #endif
+		}
 		if (ret) {
 			/* Same as the NDEF path: a frame we cannot authenticate gets no reply
 			 * (#315 red blink), the phone times out. */
