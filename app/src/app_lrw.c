@@ -1595,7 +1595,7 @@ static void m_hist_work_handler(struct k_work *work)
 	}
 }
 
-int app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+int app_lrw_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
 {
 	if (!app_lrw_is_ready()) {
 		LOG_WRN("History replay requested but LRW not ready; ignoring");

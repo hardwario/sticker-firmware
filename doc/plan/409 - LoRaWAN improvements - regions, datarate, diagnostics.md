@@ -290,6 +290,12 @@ LNS silently kills all downlinks.
 
 **Deferred / v2:** A7 (RX2 override).
 
+**Merge note for `feat-p2p`:** 3f renamed `app_lrw_start_history_replay()` (bool) to
+`app_lrw_history_replay_start()` (int, 0 = started). `feat-p2p`'s `app_cmd.c` still calls the old
+name next to `app_p2p_start_history_replay()` — the rename makes that a compile error at the
+v1.5.0 ↔ feat-p2p merge instead of a silent true/false inversion; resolve by mapping
+`-EMSGSIZE` to `BUDGET_TOO_SMALL` there too.
+
 **Also in this PR:** #419 — `DevStatusReq` after `LinkADRReq` (loramac-node `west patch`,
 `6d6215f`); HW acceptance pending.
 

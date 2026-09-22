@@ -111,8 +111,10 @@ int app_lrw_send_alarm(const uint8_t *buf, size_t len);
  * replay was armed (the first frame is the reply, so the caller should NOT also
  * send an Ack), -EAGAIN if the link isn't ready, -ENODATA if the window is
  * empty, or -EMSGSIZE if records exist but not one fits the current DR budget
- * (the 11 B tier, #409). */
-int app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
+ * (the 11 B tier, #409). Renamed from the bool app_lrw_start_history_replay()
+ * so a caller written for the old API (true = started) fails to compile
+ * instead of silently inverting on 0 = success. */
+int app_lrw_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
 
 /* Erase the persisted LoRaWAN NVM context (frame counters, DevNonce, session).
  * Used when re-provisioning credentials so a new ABP/OTAA identity starts from

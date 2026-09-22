@@ -972,7 +972,7 @@ static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command 
 	 * gets a definitive answer: BUDGET_TOO_SMALL when records exist but not one
 	 * fits the current DR (#409 3f, retry at a higher DR), else
 	 * HISTORY_UNAVAILABLE. */
-	int ret = app_lrw_start_history_replay(from, to, cmd->seq);
+	int ret = app_lrw_history_replay_start(from, to, cmd->seq);
 	if (ret == -EMSGSIZE) {
 		make_error(resp, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
 	} else if (ret != 0) {
