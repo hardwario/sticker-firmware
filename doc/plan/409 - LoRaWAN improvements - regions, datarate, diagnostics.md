@@ -14,7 +14,8 @@ transport moved to PR #410.
 **Status:** this document is the plan for this PR, which implements the accepted items. The
 survey findings, feasibility verification and the TOWER protocol comparison live in the #408
 plan; only what this PR acts on is repeated here. Line citations are against `v1.5.0` at
-`a05f173` — treat the surrounding identifiers as authoritative and the numbers as a hint.
+`a05f173` (the A5 audit below at `0dd8cb4`, after #413 merged) — treat the surrounding
+identifiers as authoritative and the numbers as a hint.
 
 **Revision 2026-09-22** (code review of this plan against `v1.5.0`): A1 no longer falls back
 to EU868 (regulatory risk — it goes radio-silent instead); A5a reframed — responses are
@@ -22,6 +23,12 @@ already budget-capped, the real gap is that `Info` cannot be split, which needs 
 design; A2 now waits for #414 and weighs the `Info` size budget; A6 reordered after A5a
 (dwell=1 region is not usable without it); A4 gained the duty-cycle vs 30 s heartbeat
 conflict as a blocker. Steps in §4 renumbered accordingly.
+
+**Revision 2 2026-09-22** — A5 audit of **every** uplink type against every DR/region
+budget (sizes measured by encoding real messages through `app_config.proto`, not
+estimated). Corrects revision 1: alarms **are** budget-capped at encode time (they trim
+events, they are not dropped in `tx_send_queued()`). A5a widened from "splittable `Info`"
+to a general split rule for fPort 85 and fPort 3, with sub-steps 3a–3g.
 
 ---
 
@@ -49,7 +56,7 @@ enumerated below. The parameter surface is inspired by `twr-sdk`'s `twr_cmwx1zza
 | A2 | **RSSI/SNR in GetInfo** (like `AT$RFQ`) | API ready, `Info` size budget | proto + `app_cmd`, 3–4 files; after #414 |
 | A3 | **Manual datarate parameter** (like `AT$DR`) | API ready | yml + configen + `app_lrw.c` |
 | A4 | **Confirmed uplinks for alarms** (like `AT$REPC`) | API ready, blocker: 30 s heartbeat | `app_lrw.c` + config param |
-| A5 | **AU915 dwell-time compliance** | (a) needs proto design, (b) validation | proto + `app_cmd` + `app_lrw.c` + decoder + playbook |
+| A5 | **AU915 dwell-time compliance** | (a) general split rule — proto design, (b) validation | proto + `app_cmd` + `app_alarm` + `app_lrw.c` + decoder + playbook |
 | A6 | **AS923 region** | mechanical plumbing | ~5 files, **+2576 B flash** |
 | A7 | **RX2 override** (expert knob) | precedent exists | `app_lrw.c` + param |
 
@@ -99,9 +106,10 @@ options, decide in Step 5:
   per-frame gateway RSSI/SNR for the uplink direction anyway.
 - **Both transports** — only after A5a gives `Info` a way to split.
 
-**Dependency.** #414 (mailbox, `get_basic_info`, `device_status` regroup) and #413 (boot
-settings-info) both change `app_config.proto`, `app_cmd.c` and the `Info` build path. Do A2
-after #414 lands to avoid a three-way conflict on the same message.
+**Dependency.** #414 (mailbox, `get_basic_info`, `device_status` regroup) changes
+`app_config.proto`, `app_cmd.c` and the `Info` build path. Do A2 after #414 lands to avoid
+a conflict on the same message. (#413, boot settings-info, touched the same files and has
+since merged into `v1.5.0`.)
 
 ### A3 — Manual datarate parameter
 
@@ -156,24 +164,59 @@ already fully MAC-enforced and needs no app changes for telemetry.**
   compose. `PHY_MIN_TX_DR` is dwell-aware too, so the ADR floor and
   `lorawan_set_datarate()` validation both respect DR2.
 
-**The real gap** is elsewhere — and it is narrower than "`tx_send_queued()` drops", which is
-only half the story:
+**The real gap** is elsewhere: most uplink types other than telemetry cannot shrink to a
+small budget. Audit of every uplink type on `v1.5.0` @ `0dd8cb4`:
 
-- **Command responses are already budget-capped.** `queue_info_uplink()` and the downlink
-  handler both pass `min(budget, buffer)` into the encoder, and `app_cmd_build_info()` trims
-  `active_alarms` to fit — so an over-budget response does not reach `tx_send_queued()`, it
-  **fails at encode time** and nothing is queued. At an 11 B DR2 budget even the fixed part
-  of `Info` (fw version, serial, uptime, unix time, battery, reset cause, device status +
-  envelope) does not fit, so GetInfo-on-join and an explicit GetInfo are lost.
-- **Alarm frames** are not budget-capped at encode time; they hit the drop in
-  `tx_send_queued()`.
-- **`Info` has no way to split.** Unlike `HistoryFrame` (`page_index` / `page_count`) it
-  carries no paging fields, so "reuse the existing multi-frame pattern" is not free: it needs
-  a proto change (paging fields or a split into smaller messages), matching encoder logic in
-  `app_cmd`, and reassembly in `ttn.js` / the LNS.
+**Budget tiers** (loramac-node `MaxPayloadOfDatarate*`, application payload N; pending MAC
+answers in FOpts shrink it further):
 
-That is the actual AU915 work item and the largest item in this PR — and it is shared with
-AS923, which also defaults to dwell=1.
+| Tier | Where |
+|---|---|
+| **11 B** | US915 DR0; AU915 DR2 and AS923 DR2 (dwell=1 floor — DR0/DR1 are 0 B) |
+| **51 B** | EU868 DR0–2 (also KR920/IN865 DR0–2, not compiled) |
+| **≥ 53 B** | US915 DR1+, AU915/AS923 DR3+, EU868 DR3+ |
+
+**Per message type** (sizes include the 1-byte `APP_PROTO_VERSION` prefix):
+
+| Message | Mechanism today | 11 B | 51 B | ≥ 53 B |
+|---|---|---|---|---|
+| Telemetry, fPort 2 | **splits** by sensor group, each frame self-contained | ✅ except a single group larger than the budget (machine-probe reading 29 B) — dropped (M-10) | ✅ | ✅ |
+| HistoryFrame replay | **splits** by budget | ❌ worst-case varint overhead 33 B → sample cap 0 → replay stops at frame 0 | ✅ ~18 B samples/frame | ✅ |
+| Info (join, clock-sync, GetInfo) | **trims** `active_alarms`, cannot split | ❌ min 13 B (fw + serial), typical 30 B | ✅ 30–46 B, ~2 alarms | ✅ |
+| settings-info ConfigDump (#413) | fixed single page, 40 B | ❌ skipped with a log | ✅ | ✅ |
+| GetConfig | pages of fixed `DUMP_PAGE_BUDGET = 30` → ~32–44 B frames | ❌ every page | ✅ | ✅ but not DR-adaptive (same ~page count at 242 B) |
+| GetParam | no paging | ⚠️ one small field (10 B) | ⚠️ ~2 alarm rules | ⚠️ 64 B cap |
+| W1Scan | no paging, 10 B per ROM | ❌ 1 ROM = 15 B | ⚠️ ~3 ROMs | ⚠️ 64 B cap |
+| AlarmReport, fPort 3 | **trims** events (`total` keeps the true count), cannot split | ❌ 1 event = 15–26 B → alarm lost | ⚠️ 2 events | ⚠️ ~3 events (64 B cap) |
+| Error | `detail` string, 15–30 B | ❌ (code-only would be 7 B) | ✅ | ✅ |
+| Ack | 5–9 B | ✅ | ✅ | ✅ |
+
+Cross-cutting defects found by the audit:
+
+1. **Silence at 11 B.** When a response does not fit, `app_cmd_handle()` substitutes
+   `Error "response too large"` — 25 B, which does not fit either, so a downlink command gets
+   **no answer at all**.
+2. **64 B caps independent of DR.** `APP_LRW_RESPONSE_BUF_SIZE` and `ALARM_FRAME_MAX` are
+   64 B. The alarm batch holds `ALARM_BATCH_MAX = 8` events but at most ~3 fit one frame even
+   at 242 B; the rest are counted in `total` and never sent.
+3. **Budget 0 read as "unlimited".** Every encoder uses `if (budget > 0 && budget < cap)`,
+   so during a MAC-command flood (budget 0) it encodes at full size and
+   `tx_send_queued()` then drops the frame.
+4. **Encode-time vs send-time budget.** Responses and alarms are encoded against the budget
+   at queue time; if ADR lowers the DR before the send, `tx_send_queued()` drops the bytes.
+   Telemetry does not have this problem — it recomposes per frame.
+5. **Calibration forces `LORAWAN_DR_5`**, which does not exist on US915 / AU915-dwell1. The
+   factory flow is EU868-only, so this is a note, not a work item.
+
+So the 11 B tier (every non-EU region at its lowest DR) can reliably deliver only telemetry
+and Acks. That is the AU915 work item and the largest item in this PR — shared with US915
+DR0 and with AS923.
+
+**Constraint that shapes the design:** LNS payload formatters (TTN `ttn.js`, ChirpStack
+codecs) are **stateless per uplink**. Reassembling a byte stream across uplinks in the
+decoder is not possible there. Hence the rule the telemetry composer and the history replay
+already follow: **every frame is a complete, independently decodable message**, and a large
+logical message becomes N smaller messages, not N fragments of one.
 
 Second item: HIL validation for AU915 mirroring what #303 did for US915 (playbook scenarios,
 a gateway on an AU915 plan).
@@ -208,8 +251,9 @@ Notes:
   `zephyr_compile_definitions(REGION_AS923_DEFAULT_CHANNEL_PLAN=…)`. One group per build —
   build variants, not a runtime setting.
 - AS923 also defaults to dwell=1, so the A5 fragmentation gap applies here too. **Ship A6
-  after A5a** — before it, AS923 at DR2 (11 B) loses GetInfo-on-join and most alarms, i.e.
-  the region would be nominally supported but not usable.
+  after A5a** — before it, AS923 at DR2 (11 B) loses GetInfo-on-join, settings-info, every
+  alarm and every command response except Ack, i.e. the region would be nominally supported
+  but not usable.
 - AS923-1 JP channels require LBT; loramac-node handles it per channel plan — confirm on
   the bench if a JP deployment is ever targeted.
 
@@ -228,7 +272,14 @@ LNS silently kills all downlinks.
 
 - [ ] A1 — build-vs-runtime region guard (radio-silent, no region fallback)
 - [ ] A3 — manual datarate parameter
-- [ ] A5a — splittable `Info` / fragment instead of dropping over-budget frames
+- [ ] A5a — general split rule for fPort 85 / fPort 3 (see Step 3)
+  - [ ] 3a — shared budget helper (0 = defer, not unlimited) + compact LoRaWAN `Error`
+  - [ ] 3b — alarms: N `AlarmReport` frames instead of trimming; fit-at-11 B decision
+  - [ ] 3c — `Info`: self-contained partial frames
+  - [ ] 3d — settings-info + GetConfig: DR-adaptive, self-contained pages
+  - [ ] 3e — GetParam / W1Scan: paging
+  - [ ] 3f — HistoryFrame: real (not worst-case) overhead, defined floor
+  - [ ] 3g — send-time budget: re-encode instead of dropping on a DR drop
 - [ ] A6 — AS923 region (+2 576 B flash, +0 B RAM) — after A5a
 - [ ] A2 — RSSI/SNR in GetInfo — after #414
 - [ ] A4 — confirmed uplinks for alarms — heartbeat blocker resolved first
@@ -270,23 +321,74 @@ NFC, and **no RF emission**; setting `lrw-region eu868` restores a working radio
 **Verify:** standard + configen pytest + decoder tests; bench check: ADR off + DR pinned,
 confirm uplink DR on the LNS; ADR on + param set, confirm the skip log.
 
-### Step 3 — A5a: splittable `Info` + alarm fragmentation
+### Step 3 — A5a: general split rule (fPort 85 + fPort 3)
 
-Design first, then code — this is the largest step:
+Design first, then code — the largest step, landed as sub-commits 3a–3g. **Rule:** every
+uplink frame is a complete, independently decodable message sized to the current budget;
+a logical message that does not fit becomes N self-contained messages (telemetry / history
+precedent), never byte fragments. Record the wire decisions below in this plan before
+coding and coordinate them with apps/manager and the LNS decoder owners.
 
-- **Design decision** (record in this plan before coding): how `Info` splits — paging
-  fields (`page_index` / `page_count`, `HistoryFrame` precedent) vs. splitting into smaller
-  self-contained messages. Constraint: the first frame alone must identify the device and
-  firmware at an 11 B budget. Coordinate the wire change with apps/manager and the LNS
-  decoder.
-- `app_cmd_build_info()` / `queue_info_uplink()` emit N frames when the budget is small
-  instead of failing at encode time.
-- Alarm frames: budget-aware encode or split instead of the drop in `tx_send_queued()`.
-- `ttn.js` reassembly + tests.
+**3a — Shared budget helper + compact Error.**
+- One helper replaces the scattered `if (budget > 0 && budget < cap)` copies in
+  `queue_info_uplink()`, `queue_settings_info_uplink()`, the downlink handler and
+  `alarm_batch_flush()`. Budget 0 (MAC flood) means **defer** (retry after the MAC flush),
+  not "no cap".
+- Over LoRaWAN, `Error` omits `detail` (code + `fault_field` only, 7–9 B, fits every tier);
+  NFC keeps the string. The "response too large" fallback then always fits, so no command
+  goes unanswered.
 
-**Verify:** standard + proto pytest + decoder tests + a `tests/cmd`/`tests/compose`-style
-ztest case at an 11 B budget; bench check on US915 DR0 (same 11 B budget as AU915 DR2, no
-AU gateway needed).
+**3b — Alarms: split instead of trim.**
+- `alarm_batch_flush()` emits as many `AlarmReport` frames as needed (each with the same
+  `base_time` and `total`), instead of `n--` until one frame fits. The alarm queue depth
+  and `ALARM_FRAME_MAX` are sized so all `ALARM_BATCH_MAX` events can leave.
+- **Decision needed:** one event is 15–26 B, so no `AlarmReport` fits 11 B with the current
+  schema. Options: (i) a slimmed event for small budgets (e.g. omit `base_time` and
+  `time_synced` — the LNS receive time is the anchor — and `value`), (ii) a compact
+  alarm-lite frame, (iii) document "alarm detail unavailable at the 11 B tier; the telemetry
+  `device_status` alarm bits still report it". Measure before choosing.
+
+**3c — `Info`: self-contained partial frames.**
+- Add `page_index` / `page_count` to `Info` (or split it into several smaller Info-family
+  messages); each frame carries a subset of fields and decodes on its own.
+- At 11 B even fw version + serial (13 B) does not fit one frame. Over LoRaWAN the DevEUI
+  already identifies the device, so frame 0 = firmware version + build type (~7–9 B); serial,
+  uptime, time, battery, status and alarms follow in later frames.
+- The `claim_token` NFC-only trade-off (`app_cmd.c`, "page the Info response instead of
+  trimming it") can be revisited once `Info` pages.
+
+**3d — settings-info + GetConfig: DR-adaptive, self-contained pages.**
+- settings-info (#413): split into several single-section `ConfigDump` pages when the budget
+  is small (application / sensors / `w1_slot_type`), instead of skipping.
+- GetConfig: page budget derived from the current payload budget (minus the measured
+  wrapper overhead) instead of the fixed `DUMP_PAGE_BUDGET = 30`. **Pitfall:** `page_count`
+  then depends on the DR, and the host requests pages one by one across downlinks — if the
+  DR changes mid-read, the page layout shifts. Either pin the layout to the budget tier that
+  was in effect for page 0 (and report the tier in the response), or keep fixed pages but
+  size them for the 11 B tier on LoRaWAN. Decide before coding.
+
+**3e — GetParam / W1Scan: paging.** Reuse the ConfigDump paging for GetParam; W1Scan
+answers with one self-contained frame per 1–N ROMs (`page_index` / `page_count`).
+
+**3f — HistoryFrame: real overhead and a defined floor.** `history_frame_cap()` uses
+worst-case varints (33 B of overhead); compute it with the real `frame_count` / `t0` /
+`present` values that are known up front. Then state the floor explicitly: if not even one
+record fits (the 11 B tier with the current schema), answer `req_history` with the compact
+`HISTORY_UNAVAILABLE` error from 3a instead of a silent stop.
+
+**3g — Send-time budget.** Queue the logical message (or a rebuild callback) rather than
+pre-encoded bytes, so `tx_send_queued()` can re-encode / re-split at the budget in effect
+when the frame actually leaves. A DR drop between queue and send then costs an extra frame,
+not the message.
+
+**Out of scope for 3:** splitting a single telemetry group larger than the budget
+(machine-probe reading, 29 B, at the 11 B tier) — telemetry already splits per group; a
+per-reading split needs its own schema change. Tracked as a follow-up.
+
+**Verify:** standard + proto pytest + decoder tests (each new frame shape decodes
+standalone) + ztest cases in `tests/cmd` / `tests/compose` at 11 B, 51 B and 242 B budgets
+for every message type in the §2 A5 audit table; bench check on US915 DR0 (same 11 B budget
+as AU915 DR2, no AU gateway needed) walking the whole table.
 
 ### Step 4 — A6: AS923 region
 
@@ -307,7 +409,7 @@ baseline has moved since).
 
 ### Step 5 — A2: RSSI/SNR in GetInfo
 
-Starts after #414 is merged into `v1.5.0` (and rebased over #413 if that lands first).
+Starts after #414 is merged into `v1.5.0` (#413 has already merged).
 
 - Decide transport: NFC-only (recommended unless Step 3 made `Info` splittable cheaply) vs.
   both.
@@ -335,7 +437,7 @@ trip / no reboot**.
 ### Step 7 — A5b: AU915 HIL validation
 
 Playbook scenarios mirroring AT-LRW-13..15 for AU915 (join on a sub-band, dwell-limited
-DR floor = DR2, 11 B budget, split `Info` and alarms from Step 3). Blocked on bench
+DR floor = DR2, 11 B budget, every row of the §2 A5 audit table after Step 3). Blocked on bench
 hardware: needs a gateway on an AU915 frequency plan.
 
 ## 5. Explicit non-goals
