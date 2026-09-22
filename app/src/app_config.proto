@@ -151,6 +151,7 @@ message Command {
         SetSecretKey     vendor_reset      = 26;
         ClaimActive      claim_active      = 27;
         BuzzerPlay       buzzer_play       = 28;
+        GetClaimInfo     get_claim_info    = 29;
     }
 // END GENERATED COMMANDS
 
@@ -278,6 +279,13 @@ message Command {
         optional uint32 kind     = 1; // melody id: 0 stop, 1-3 melodies, 4-15 reserved, >=16 -> 0
         optional uint32 repeat_s = 2; // 0 = no repeat; 1-999 = repeat interval (s)
     }
+
+    // #415: read the claim identity (serial_number + claim_token). Empty request.
+    // Answered with Response.claim_info while the claim window is active; Error
+    // NOT_READY "claimed" once done, or "no claim token" when none is
+    // provisioned. First command on the unauthenticated plain_text transport
+    // (also nfc / shell); never LoRaWAN.
+    message GetClaimInfo { }
 }
 
 message Response {
@@ -291,6 +299,7 @@ message Response {
         Error          error            = 6;
         W1Scan         w1_scan          = 7;
         Telemetry      sample           = 8;   // Sample command: fresh readings (NFC)
+        ClaimInfo      claim_info       = 9;   // get_claim_info: serial + claim_token (#415)
     }
 
     message Ack { }
@@ -543,12 +552,12 @@ message SensorReading {
     optional sint32 accel_z        = 10; // m/s^2 x100
 }
 
-// Provisioning claim record (#247). Carried plaintext in the NFC `hio.stck:clm`
-// NDEF record during the factory -> first-claim window so the provisioning app
-// can claim the device (first-claim-wins). The phone deletes the record from the
-// ST25DV over RF once the server confirms the claim; the firmware never rewrites
-// it afterwards. Not carried over LoRaWAN (the owner reads claim_token via the
-// encrypted get_info Info instead).
+// Provisioning claim identity (#247/#415): {serial_number, claim_token}. Served
+// two ways while the claim window is active: laid plaintext in the NFC
+// `hio.stck:clm` NDEF record (removed by PR #414), and returned in
+// Response.claim_info by the get_claim_info command over the plain_text / nfc /
+// shell transports. Not carried over LoRaWAN (the owner also reads claim_token
+// via the encrypted get_info Info).
 message ClaimInfo {
     uint32 serial_number = 1;
     bytes  claim_token   = 2;  // 128-bit device claim token (#170)

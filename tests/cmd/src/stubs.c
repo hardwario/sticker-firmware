@@ -300,6 +300,15 @@ void app_nfc_claim_active(void)
 	g_claim_active_calls++;
 }
 
+/* #415: claim window state seen by app_cmd_handle_get_claim_info(); the test
+ * drives it (default ACTIVE, like a freshly provisioned unit). */
+uint8_t g_claim_state = APP_NFC_CLAIM_ACTIVE;
+
+uint8_t app_nfc_claim_state_get(void)
+{
+	return g_claim_state;
+}
+
 bool app_history_is_ready(void)
 {
 	return true;

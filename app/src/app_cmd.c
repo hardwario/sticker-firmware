@@ -805,6 +805,37 @@ static void app_cmd_handle_claim_active(enum app_cmd_transport tp, const Command
 	resp->which_body = Response_ack_tag;
 }
 
+/* #415: read the claim identity {serial_number, claim_token} over the
+ * unauthenticated plain_text transport (also nfc / shell). Returns
+ * Response.claim_info while the claim window is active; Error NOT_READY
+ * "claimed" once it is done, or "no claim token" when none was provisioned.
+ * Read-only, no side effects — the identity-class-only rule a plain_text command
+ * must obey. Discloses exactly what the plaintext hio.stck:clm record does
+ * today, but only on a powered unit while the window is open. */
+static void app_cmd_handle_get_claim_info(enum app_cmd_transport tp, const Command *cmd,
+					  Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(action);
+
+	if (app_nfc_claim_state_get() == APP_NFC_CLAIM_DONE) {
+		make_error(resp, Response_Error_Code_NOT_READY, "claimed");
+		return;
+	}
+	if (buffer_is_zero(g_app_config.claim_token, sizeof(g_app_config.claim_token))) {
+		make_error(resp, Response_Error_Code_NOT_READY, "no claim token");
+		return;
+	}
+
+	resp->which_body = Response_claim_info_tag;
+	resp->body.claim_info.serial_number = g_app_config.serial_number;
+	BUILD_ASSERT(sizeof(resp->body.claim_info.claim_token) == sizeof(g_app_config.claim_token),
+		     "ClaimInfo.claim_token size mismatch");
+	memcpy(resp->body.claim_info.claim_token, g_app_config.claim_token,
+	       sizeof(g_app_config.claim_token));
+}
+
 /* #338: remote-triggered buzzer melody (NFC/LRW). kind selects one of the
  * fixed severity melodies (the buzzer is DC self-oscillating only — no custom
  * tones); kind 0 (or any id >= 16) is the STOP request — the remote
@@ -1394,6 +1425,15 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 			break;
 		}
 		app_cmd_handle_buzzer_play(tp, cmd, resp, action);
+		break;
+	case Command_get_claim_info_tag:
+		/* transports: [plain_text, nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_PLAIN_TEXT && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_get_claim_info(tp, cmd, resp, action);
 		break;
 	default:
 		/* L-54: an unknown command tag (e.g. a removed command like the old

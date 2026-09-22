@@ -220,6 +220,12 @@ commands:
     # melody that many seconds after it finishes, until stopped (kind 0 or
     # `ats buzzer off`).
     - {name: buzzer_play, proto_id: 28, body: BuzzerPlay, kind: handler, response: ack, transports: [lrw, nfc]}
+    # #415: read the claim identity (serial_number + claim_token) without a key.
+    # First command on the unauthenticated plain_text transport (also over nfc +
+    # shell, never lrw). Read-only, identity-class disclosure only — the RULE for
+    # any command that opts into plain_text. Answers Response.claim_info while the
+    # claim window is active; Error NOT_READY otherwise (see app_cmd_handle_get_claim_info).
+    - {name: get_claim_info, proto_id: 29, body: GetClaimInfo, kind: handler, response: claim_info, transports: [plain_text, nfc, shell]}
 parameters:
   # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /
   # vendor_token) are OFF the config wire (`proto_field: false`, #250 Part B): configen
