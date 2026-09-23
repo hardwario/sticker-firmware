@@ -173,17 +173,17 @@ storage between calls. The design must never need cross-uplink memory in the dec
 | 3f history floor | kept; numbering moves to the envelope |
 | 3g DR-drop recovery | kept; a page that no longer fits → `BUDGET_TOO_SMALL` + stream stop |
 
-## 7. Open questions
+## 7. Open questions — decided 2026-09-23 (all as proposed)
 
 1. **Telemetry (fPort 2)** is split by sensor group and every frame is already a complete
    snapshot slice. Adding `page_index/page_count` would make it uniform too, but `Telemetry`
    field numbers < 16 are all taken, so each field would cost 3 B (6 B per frame) — a lot at
-   11 B. Proposal: leave telemetry out; decide in review.
+   11 B. **Decided: telemetry stays out.**
 2. **NFC history** (`req_history_page`) is cursor-paged by the phone (`next_ord` /
    `has_more`), because records are addressed by ordinal. Proposal: keep the cursor; the
-   envelope fields stay absent there (documented exception).
+   envelope fields stay absent there (documented exception). **Decided: keep the cursor.**
 3. **Page loss.** No retransmission in v1 — a host missing a page re-sends the request with
-   `page = <missing index>` (the stream then sends from that page to the end).
+   `page = <missing index>` (the stream then sends from that page to the end). **Decided.**
 
 ## 8. Implementation steps
 
