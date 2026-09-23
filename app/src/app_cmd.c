@@ -307,6 +307,17 @@ static void make_error(Response *resp, Response_Error_Code code, const char *det
 	}
 }
 
+/* #425 universal paging: stamp page `index` of `count` on a Response — the one
+ * place that writes the envelope. Omitted for a single-frame answer (count <=
+ * 1), so an unpaged answer is unchanged. */
+static void set_page(Response *resp, uint32_t index, uint32_t count)
+{
+	if (count > 1) {
+		resp->page_index = index;
+		resp->page_count = count;
+	}
+}
+
 /* Command handlers share a uniform signature (transport, cmd, resp, action) so
  * the generated app_cmd_dispatch() switch can call any of them the same way; a
  * handler simply ignores the parameters it does not need. They fill `resp`
@@ -558,8 +569,7 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 
 	Response_ConfigDump *cd = &resp->body.config_dump;
 	resp->which_body = Response_config_dump_tag;
-	cd->page_index = page;
-	cd->page_count = page_count;
+	set_page(resp, page, page_count);
 
 	if (n[DUMP_SECTION_LORAWAN] > 0) {
 		cd->has_lorawan = true;
@@ -675,8 +685,7 @@ static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *c
 
 	Response_ConfigDump *cd = &resp->body.config_dump;
 	resp->which_body = Response_config_dump_tag;
-	cd->page_index = page;
-	cd->page_count = page_count;
+	set_page(resp, page, page_count);
 
 	if (out_n[DUMP_SECTION_LORAWAN] > 0) {
 		cd->has_lorawan = true;
@@ -1031,8 +1040,8 @@ static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Com
 						 &n_written, &next_ord);
 
 	resp->which_body = Response_history_frame_tag;
-	hf->frame_index = 0; /* informational only over NFC; the phone counts its own pages */
-	hf->frame_count = app_history_count_frames(from, to, cap); /* progress hint */
+	/* NFC history is cursor-paged (next_ord / has_more below): the phone drives
+	 * it by record ordinal, so no page_index/page_count here (#425). */
 	hf->t0_unix = t0;
 	hf->samples.size = written;
 	hf->present = present;
@@ -1209,6 +1218,10 @@ static void app_cmd_handle_enter_calibration(enum app_cmd_transport tp, const Co
 #endif /* defined(CONFIG_APP_CALIBRATION) */
 }
 
+/* Defined next to the settings-info page builder it shares with the boot dump. */
+static void app_cmd_handle_get_settings(enum app_cmd_transport tp, const Command *cmd,
+					Response *resp, enum app_cmd_action *action);
+
 // BEGIN GENERATED DISPATCH
 static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 			     enum app_cmd_action *action)
@@ -1355,6 +1368,9 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		}
 		app_cmd_handle_buzzer_play(tp, cmd, resp, action);
 		break;
+	case Command_get_settings_tag:
+		app_cmd_handle_get_settings(tp, cmd, resp, action);
+		break;
 	default:
 		/* L-54: an unknown command tag (e.g. a removed command like the old
 		 * enter_dfu/enter_mailbox 19/20/22 sent by an older app) is a distinct,
@@ -1379,7 +1395,14 @@ static int encode_response(const Response *resp, uint8_t *out, size_t out_cap, s
 
 	pb_ostream_t ostream = pb_ostream_from_buffer(out + 1, out_cap - 1);
 	if (!pb_encode(&ostream, Response_fields, resp)) {
-		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
+		/* "stream full" is the expected answer to a trial encode (paging
+		 * layouts, alarm trimming probe a budget many times per command), so it
+		 * stays quiet; anything else is a real encoder error. */
+		if (strcmp(PB_GET_ERROR(&ostream), "stream full") == 0) {
+			LOG_DBG("pb_encode: does not fit %zu B", out_cap);
+		} else {
+			LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
+		}
 		return -EMSGSIZE;
 	}
 
@@ -1387,105 +1410,661 @@ static int encode_response(const Response *resp, uint8_t *out, size_t out_cap, s
 	return 0;
 }
 
-/* #409 A5a: encode Response{ seq, info_lite } — the firmware version, plus the
- * build type if it still fits. For the 11 B budget tier, where even Info without
- * active_alarms does not fit. */
-static int encode_info_lite(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len)
-{
-	Response resp = Response_init_zero;
-	resp.seq = seq;
-	resp.which_body = Response_info_lite_tag;
-	Response_InfoLite *l = &resp.body.info_lite;
-	l->fw_major = APP_VERSION_MAJOR;
-	l->fw_minor = APP_VERSION_MINOR;
-	l->fw_patch = APP_VERSION_PATCH;
-	l->build_type = (Response_Info_BuildType)APP_BUILD_TYPE;
-
-	int ret = encode_response(&resp, out, out_cap, out_len);
-	if (ret == -EMSGSIZE && l->build_type != 0) {
-		l->build_type = 0; /* proto3 default: omitted on the wire */
-		ret = encode_response(&resp, out, out_cap, out_len);
-	}
-	return ret;
-}
-
-/* #409 3d/3e: LoRaWAN page stream state. The request is kept as raw bytes and
- * re-dispatched with page = next for every following page, so each page comes
- * from the exact handler + layout that produced page 0. Only touched from the
- * LoRaWAN command path (m_work_q). */
+/* #425 universal paging over a radio. An answer that does not fit the DR budget
+ * is split into pages — each a complete Response with the same seq and
+ * Response.page_index/page_count — and the device sends every page by itself.
+ * One stream at a time; a new paged answer replaces a running one. Only touched
+ * from the LoRaWAN command path (m_work_q).
+ *   REQUEST  - GetConfig/GetParam: the raw request is re-dispatched with
+ *              page = next, so every page comes from the same handler/layout.
+ *   SETTINGS - the autonomous settings-info: re-laid out for the budget captured
+ *              at the start (the content is static config).
+ *   W1SCAN   - the scan result is kept, so later pages do not rescan the bus.
+ *   INFO     - a snapshot of Info (scalars + active alarms), so all pages
+ *              describe the same moment. */
 #define PAGE_STREAM_REQ_MAX 64
+/* Upper bound used for page_index/page_count while laying pages out: keeps both
+ * varints at one byte, so the real values never make a page grow. */
+#define PAGE_COUNT_BOUND    127
+
+enum page_stream_kind {
+	PAGE_STREAM_NONE = 0,
+	PAGE_STREAM_REQUEST,
+	PAGE_STREAM_SETTINGS,
+	PAGE_STREAM_W1SCAN,
+	PAGE_STREAM_INFO,
+};
+
+/* Info snapshot for paging: the LoRaWAN view of the scalars plus the active
+ * alarms as (source, quantity, type) triples. */
+struct info_snap {
+	Response_Info info;
+	uint8_t alarm[ACTIVE_ALARM_SNAPSHOT_MAX][3];
+	uint8_t n_alarms;
+};
+
 static struct {
-	uint8_t req[PAGE_STREAM_REQ_MAX];
-	size_t req_len;
+	enum page_stream_kind kind;
 	uint32_t next;
 	uint32_t count;
-	bool active;
+	uint32_t seq;
+	size_t cap; /* budget the layout was made for */
+	union {
+		struct {
+			uint8_t buf[PAGE_STREAM_REQ_MAX];
+			size_t len;
+		} req;
+		struct {
+			Response_W1Scan scan;
+			uint8_t per_page;
+		} w1;
+		struct info_snap info;
+	} u;
 } m_page_stream;
 
 void app_cmd_stream_cancel(void)
 {
-	m_page_stream.active = false;
+	m_page_stream.kind = PAGE_STREAM_NONE;
+}
+
+bool app_cmd_stream_active(void)
+{
+	return m_page_stream.kind != PAGE_STREAM_NONE;
+}
+
+static void page_stream_start(enum page_stream_kind kind, uint32_t seq, size_t cap, uint32_t count)
+{
+	m_page_stream.kind = kind;
+	m_page_stream.seq = seq;
+	m_page_stream.cap = cap;
+	m_page_stream.next = 1;
+	m_page_stream.count = count;
 }
 
 /* After a LoRaWAN GetConfig/GetParam: arm the stream when pages remain. */
 static bool page_stream_arm(const uint8_t *in, size_t in_len, const Response *resp)
 {
-	if (resp->which_body != Response_config_dump_tag || in_len > sizeof(m_page_stream.req)) {
+	if (resp->which_body != Response_config_dump_tag ||
+	    in_len > sizeof(m_page_stream.u.req.buf) || resp->page_index + 1 >= resp->page_count) {
 		return false;
 	}
-	const Response_ConfigDump *cd = &resp->body.config_dump;
-
-	if (cd->page_index + 1 >= cd->page_count) {
-		return false;
-	}
-	memcpy(m_page_stream.req, in, in_len);
-	m_page_stream.req_len = in_len;
-	m_page_stream.next = cd->page_index + 1;
-	m_page_stream.count = cd->page_count;
-	m_page_stream.active = true;
+	memcpy(m_page_stream.u.req.buf, in, in_len);
+	m_page_stream.u.req.len = in_len;
+	page_stream_start(PAGE_STREAM_REQUEST, resp->seq, 0, resp->page_count);
+	m_page_stream.next = resp->page_index + 1;
 	return true;
 }
 
-int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
+/* ---- settings-info pages (#412 content) --------------------------------- */
+
+/* application: interval_sample, interval_report, history_enable */
+static const uint32_t cs_app_ids[] = {2, 3, 4};
+/* sensors: cap_hall_left..cap_accelerometer (all nine cap_* flags) */
+static const uint32_t cs_sensor_ids[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+#if defined(APP_CMD_HAVE_W1)
+#define CS_ITEMS (ARRAY_SIZE(cs_app_ids) + ARRAY_SIZE(cs_sensor_ids) + 1)
+#else
+#define CS_ITEMS (ARRAY_SIZE(cs_app_ids) + ARRAY_SIZE(cs_sensor_ids))
+#endif
+
+/* Fill a settings-info ConfigDump with the items in `mask` (bit i = item i:
+ * application ids, then sensor ids, then the w1_slot_type block). `seq` is 0 for
+ * the autonomous boot dump, the command's seq for a GetSettings answer. */
+static void config_status_fill(Response *resp, uint32_t seq, uint32_t mask, uint32_t page,
+			       uint32_t count)
 {
-	if (!out || !out_len) {
-		return -EINVAL;
+	*resp = (Response)Response_init_zero;
+	resp->seq = seq;
+	resp->which_body = Response_config_dump_tag;
+	set_page(resp, page, count);
+
+	Response_ConfigDump *cd = &resp->body.config_dump;
+	uint32_t ids[ARRAY_SIZE(cs_sensor_ids)];
+	size_t n = 0;
+
+	for (size_t i = 0; i < ARRAY_SIZE(cs_app_ids); i++) {
+		if (mask & BIT(i)) {
+			ids[n++] = cs_app_ids[i];
+		}
 	}
-	if (!m_page_stream.active || m_page_stream.next >= m_page_stream.count) {
-		m_page_stream.active = false;
-		return -ENODATA;
+	if (n > 0) {
+		cd->has_application = true;
+		app_config_fill_application(&cd->application, ids, n);
 	}
 
+	n = 0;
+	for (size_t i = 0; i < ARRAY_SIZE(cs_sensor_ids); i++) {
+		if (mask & BIT(ARRAY_SIZE(cs_app_ids) + i)) {
+			ids[n++] = cs_sensor_ids[i];
+		}
+	}
+	if (n > 0) {
+		cd->has_sensors = true;
+		app_config_fill_sensors(&cd->sensors, ids, n);
+	}
+
+#if defined(APP_CMD_HAVE_W1)
+	if (mask & BIT(CS_ITEMS - 1)) {
+		/* Detected 1-Wire slot type per slot (runtime state; see app_w1_slot_type
+		 * in app_w1_slots.h — the single source of truth). Wire values are pinned
+		 * here so reordering the enum can never silently change the on-air
+		 * meaning. */
+		BUILD_ASSERT(APP_W1_SLOT_EMPTY == 0 && APP_W1_SLOT_DALLAS == 1 &&
+				     APP_W1_SLOT_MACHINE_PROBE == 2,
+			     "w1_slot_type wire values must stay 0/empty 1/dallas 2/machine-probe");
+		BUILD_ASSERT(APP_W1_SLOT_COUNT <= ARRAY_SIZE(cd->w1_slot_type),
+			     "w1_slot_type array too small for APP_W1_SLOT_COUNT");
+		cd->w1_slot_type_count = APP_W1_SLOT_COUNT;
+		for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
+			cd->w1_slot_type[s] = (uint32_t)app_w1_slot_get_type(s);
+		}
+	}
+#endif
+}
+
+/* Greedy layout: pack items into as few pages as fit `cap` (measured by really
+ * encoding each candidate page). An item that does not fit even alone is left
+ * out (physical floor, #425); -EMSGSIZE only when no item fits at all. On
+ * success mask[p] holds the items of page p and *count the pages. `seq` is
+ * part of the measured size (a non-zero seq costs 2+ B). `scratch` is the
+ * caller's Response, reused for the trial encodes so no second ~600 B Response
+ * lands on the stack (the GetSettings path already holds app_cmd_handle()'s
+ * Command + Response). */
+static int config_status_layout(Response *scratch, size_t cap, uint32_t seq,
+				uint32_t mask[CS_ITEMS], uint32_t *count)
+{
+	uint8_t tmp[128];
+	size_t len;
+	uint32_t cur = 0;
+
+	cap = MIN(cap, sizeof(tmp));
+	memset(mask, 0, sizeof(uint32_t) * CS_ITEMS);
+
+	for (size_t i = 0; i < CS_ITEMS; i++) {
+		config_status_fill(scratch, seq, mask[cur] | BIT(i), PAGE_COUNT_BOUND,
+				   PAGE_COUNT_BOUND);
+		if (encode_response(scratch, tmp, cap, &len) == 0) {
+			mask[cur] |= BIT(i);
+			continue;
+		}
+		config_status_fill(scratch, seq, BIT(i), PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
+		if (encode_response(scratch, tmp, cap, &len) != 0) {
+			continue; /* too big even alone: left out */
+		}
+		cur++;
+		mask[cur] = BIT(i);
+	}
+	if (mask[cur] == 0) {
+		return -EMSGSIZE; /* nothing fits */
+	}
+	*count = cur + 1;
+	return 0;
+}
+
+/* Encode settings-info page `page` of the layout for `layout_cap`; `scratch`
+ * ends up holding that page. */
+static int config_status_page(Response *scratch, size_t layout_cap, uint32_t seq, uint32_t page,
+			      uint8_t *out, size_t out_cap, size_t *out_len, uint32_t *count)
+{
+	uint32_t mask[CS_ITEMS];
+	int ret = config_status_layout(scratch, layout_cap, seq, mask, count);
+
+	if (ret) {
+		return ret;
+	}
+	if (page >= *count) {
+		return -ENODATA;
+	}
+	config_status_fill(scratch, seq, mask[page], page, *count);
+	return encode_response(scratch, out, out_cap, out_len);
+}
+
+/* GetSettings: the boot settings-info content on request, with this command's
+ * seq (the autonomous boot dump keeps seq 0, so the host can tell them apart).
+ * Filled here as one frame with every item; app_cmd_handle() re-lays it out as
+ * pages over LoRaWAN when that does not fit the payload budget (#425). */
+static void app_cmd_handle_get_settings(enum app_cmd_transport tp, const Command *cmd,
+					Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+	config_status_fill(resp, cmd->seq, BIT(CS_ITEMS) - 1, 0, 1);
+}
+
+/* GetSettings over LoRaWAN that does not fit `cap`: page it like the boot dump.
+ * `resp` (app_cmd_handle()'s Response) is the layout scratch and ends up holding
+ * page 0, which is encoded into `out`; the rest follow via the page stream. */
+static int settings_paged(Response *resp, uint8_t *out, size_t cap, size_t *out_len, bool *streamed)
+{
+	uint32_t seq = resp->seq;
+	uint32_t count;
+	int ret;
+
+	app_cmd_stream_cancel();
+	ret = config_status_page(resp, cap, seq, 0, out, cap, out_len, &count);
+	if (ret) {
+		return ret;
+	}
+	*streamed = count > 1;
+	if (*streamed) {
+		page_stream_start(PAGE_STREAM_SETTINGS, seq, cap, count);
+	}
+	return 0;
+}
+
+/* ---- W1Scan pages -------------------------------------------------------- */
+
+/* Split a LoRaWAN W1Scan answer that does not fit `cap`: keep the largest
+ * number of ROMs per page that fits, trim `resp` to page 0 and keep the full
+ * result for app_cmd_stream_next(). Returns true when a stream was armed. If
+ * not even one ROM fits, `resp` is left alone (the caller's too-large fallback
+ * answers BUDGET_TOO_SMALL). Not inlined: its trial Response + buffer (~700 B)
+ * would otherwise sit on app_cmd_handle()'s frame for every command, including
+ * the deep paged-GetInfo path on the 4 KB m_work_q (HIL P5b). */
+static __noinline bool w1_scan_arm_pages(Response *resp, size_t cap)
+{
+	uint8_t tmp[128];
+	size_t len;
+	pb_size_t n = resp->body.w1_scan.rom_count;
+	pb_size_t k;
+
+	cap = MIN(cap, sizeof(tmp));
+	for (k = n; k > 0; k--) {
+		Response r = *resp;
+
+		r.body.w1_scan.rom_count = k;
+		if (k < n) {
+			set_page(&r, PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
+		}
+		if (encode_response(&r, tmp, cap, &len) == 0) {
+			break;
+		}
+	}
+	if (k == n || k == 0) {
+		return false; /* fits whole, or nothing fits */
+	}
+
+	m_page_stream.u.w1.scan = resp->body.w1_scan;
+	m_page_stream.u.w1.per_page = (uint8_t)k;
+	page_stream_start(PAGE_STREAM_W1SCAN, resp->seq, cap, (n + k - 1) / k);
+
+	resp->body.w1_scan.rom_count = k;
+	set_page(resp, 0, m_page_stream.count);
+	return true;
+}
+
+static int w1_scan_page(uint32_t page, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	Response r = Response_init_zero;
+	const Response_W1Scan *all = &m_page_stream.u.w1.scan;
+	size_t first = (size_t)page * m_page_stream.u.w1.per_page;
+
+	r.seq = m_page_stream.seq;
+	r.which_body = Response_w1_scan_tag;
+	set_page(&r, page, m_page_stream.count);
+	for (size_t i = first; i < all->rom_count && i < first + m_page_stream.u.w1.per_page; i++) {
+		r.body.w1_scan.rom[r.body.w1_scan.rom_count++] = all->rom[i];
+	}
+	return encode_response(&r, out, out_cap, out_len);
+}
+
+#ifdef CONFIG_ZTEST
+/* Test hook: the W1Scan split without a 1-Wire bus. Builds the answer for `n`
+ * ROMs, applies the LoRaWAN split for `cap` and encodes page 0. */
+int test_w1_scan_page0(const uint8_t roms[][8], size_t n, uint32_t seq, uint8_t *out, size_t cap,
+		       size_t *out_len, bool *streamed)
+{
+	Response r = Response_init_zero;
+
+	app_cmd_stream_cancel();
+	r.seq = seq;
+	r.which_body = Response_w1_scan_tag;
+	for (size_t i = 0; i < n && i < ARRAY_SIZE(r.body.w1_scan.rom); i++) {
+		r.body.w1_scan.rom[i].size = 8;
+		memcpy(r.body.w1_scan.rom[i].bytes, roms[i], 8);
+		r.body.w1_scan.rom_count++;
+	}
+	*streamed = w1_scan_arm_pages(&r, cap);
+	return encode_response(&r, out, cap, out_len);
+}
+#endif
+
+/* ---- Info pages ---------------------------------------------------------- */
+
+/* Info units, in page order: the scalar fields one by one, then each active
+ * alarm. Splitting per field is what lets page 0 carry the firmware version
+ * even at the 11 B budget tier. */
+enum {
+	INFO_U_FW_MAJOR,
+	INFO_U_FW_MINOR,
+	INFO_U_FW_PATCH,
+	INFO_U_BUILD_TYPE,
+	INFO_U_DEBUG,
+	INFO_U_SERIAL,
+	INFO_U_UPTIME,
+	INFO_U_UNIX_TIME,
+	INFO_U_BATTERY,
+	INFO_U_RESET_CAUSE,
+	INFO_U_DEVICE_STATUS,
+	INFO_U_SCALARS,
+};
+
+struct alarm_range {
+	const struct info_snap *snap;
+	uint8_t start;
+	uint8_t end;
+};
+
+static bool encode_alarm_range(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
+{
+	const struct alarm_range *r = *arg;
+
+	for (uint8_t i = r->start; i < r->end; i++) {
+		Response_AlarmStatus e = Response_AlarmStatus_init_zero;
+
+		e.source = r->snap->alarm[i][0];
+		e.quantity = r->snap->alarm[i][1];
+		e.type = r->snap->alarm[i][2];
+		if (!pb_encode_tag_for_field(stream, field) ||
+		    !pb_encode_submessage(stream, Response_AlarmStatus_fields, &e)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* Build an Info page with the scalar units in `mask` and alarms [a0, a1). */
+static void info_page_fill(Response *resp, const struct info_snap *snap, uint32_t mask,
+			   struct alarm_range *rng, uint32_t page, uint32_t count)
+{
+	const Response_Info *all = &snap->info;
+	Response_Info *pi = &resp->body.info;
+
+	*resp = (Response)Response_init_zero;
+	resp->seq = m_page_stream.seq;
+	resp->which_body = Response_info_tag;
+	set_page(resp, page, count);
+
+	pi->fw_major = (mask & BIT(INFO_U_FW_MAJOR)) ? all->fw_major : 0;
+	pi->fw_minor = (mask & BIT(INFO_U_FW_MINOR)) ? all->fw_minor : 0;
+	pi->fw_patch = (mask & BIT(INFO_U_FW_PATCH)) ? all->fw_patch : 0;
+	pi->build_type = (mask & BIT(INFO_U_BUILD_TYPE)) ? all->build_type : 0;
+	pi->debug = (mask & BIT(INFO_U_DEBUG)) ? all->debug : false;
+	pi->serial_number = (mask & BIT(INFO_U_SERIAL)) ? all->serial_number : 0;
+	pi->uptime_s = (mask & BIT(INFO_U_UPTIME)) ? all->uptime_s : 0;
+	pi->unix_time = (mask & BIT(INFO_U_UNIX_TIME)) ? all->unix_time : 0;
+	pi->battery = (mask & BIT(INFO_U_BATTERY)) ? all->battery : 0;
+	pi->reset_cause = (mask & BIT(INFO_U_RESET_CAUSE)) ? all->reset_cause : 0;
+	pi->device_status = (mask & BIT(INFO_U_DEVICE_STATUS)) ? all->device_status : 0;
+	if (rng->end > rng->start) {
+		pi->active_alarms.funcs.encode = encode_alarm_range;
+		pi->active_alarms.arg = rng;
+	}
+}
+
+/* A scalar unit whose value is 0 is omitted on the wire anyway; skipping it keeps
+ * a page from carrying nothing. */
+static bool info_unit_empty(const Response_Info *in, size_t u)
+{
+	switch (u) {
+	case INFO_U_FW_MAJOR:
+		return in->fw_major == 0;
+	case INFO_U_FW_MINOR:
+		return in->fw_minor == 0;
+	case INFO_U_FW_PATCH:
+		return in->fw_patch == 0;
+	case INFO_U_BUILD_TYPE:
+		return in->build_type == 0;
+	case INFO_U_DEBUG:
+		return !in->debug;
+	case INFO_U_SERIAL:
+		return in->serial_number == 0;
+	case INFO_U_UPTIME:
+		return in->uptime_s == 0;
+	case INFO_U_UNIX_TIME:
+		return in->unix_time == 0;
+	case INFO_U_BATTERY:
+		return in->battery == 0;
+	case INFO_U_RESET_CAUSE:
+		return in->reset_cause == 0;
+	case INFO_U_DEVICE_STATUS:
+		return in->device_status == 0;
+	default:
+		return false;
+	}
+}
+
+/* Greedy layout of the Info units for `cap`; fills in the composition of page
+ * `want` (if it exists) and the page count. A unit that does not fit even alone
+ * (at the 11 B tier: serial, unix time, an alarm entry) is left out — physical
+ * floor, #425; -EMSGSIZE only when no unit fits at all. `r` is the caller's
+ * scratch Response (clobbered): a Response is ~580 B and this runs deep on
+ * m_work_q under app_cmd_handle(), so no extra one lives on this frame. */
+static int info_layout(const struct info_snap *snap, size_t cap, uint32_t want, uint32_t *mask_out,
+		       struct alarm_range *rng_out, uint32_t *count, Response *r)
+{
+	uint8_t tmp[64];
+	size_t len;
+	uint32_t cur = 0, mask = 0;
+	struct alarm_range rng = {.snap = snap, .start = 0, .end = 0};
+	size_t units = INFO_U_SCALARS + snap->n_alarms;
+
+	cap = MIN(cap, sizeof(tmp));
+	for (size_t u = 0; u < units; u++) {
+		bool is_alarm = u >= INFO_U_SCALARS;
+		uint8_t a = (uint8_t)(u - INFO_U_SCALARS);
+
+		if (!is_alarm && info_unit_empty(&snap->info, u)) {
+			continue;
+		}
+		uint32_t tmask = is_alarm ? mask : (mask | BIT(u));
+		struct alarm_range trng = rng;
+
+		if (is_alarm) {
+			/* Alarms on one page must be contiguous: a skipped one closes the
+			 * run, so a new run always starts a new page. */
+			if (trng.end == trng.start || trng.end != a) {
+				trng.start = a;
+			}
+			trng.end = a + 1;
+		}
+		bool contiguous = !is_alarm || rng.end == rng.start || rng.end == a;
+
+		if (contiguous) {
+			info_page_fill(r, snap, tmask, &trng, PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
+			if (encode_response(r, tmp, cap, &len) == 0) {
+				mask = tmask;
+				rng = trng;
+				continue;
+			}
+		}
+
+		/* Does it fit alone? If not, leave it out. */
+		uint32_t amask = is_alarm ? 0 : BIT(u);
+		struct alarm_range arng = {.snap = snap, .start = 0, .end = 0};
+
+		if (is_alarm) {
+			arng.start = a;
+			arng.end = a + 1;
+		}
+		info_page_fill(r, snap, amask, &arng, PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
+		if (encode_response(r, tmp, cap, &len) != 0) {
+			continue;
+		}
+		if (mask != 0 || rng.end != rng.start) {
+			if (cur == want) {
+				*mask_out = mask;
+				*rng_out = rng;
+			}
+			cur++;
+		}
+		mask = amask;
+		rng = arng;
+	}
+	if (mask == 0 && rng.end == rng.start) {
+		return -EMSGSIZE; /* nothing fits */
+	}
+	if (cur == want) {
+		*mask_out = mask;
+		*rng_out = rng;
+	}
+	*count = cur + 1;
+	return 0;
+}
+
+static int info_page(uint32_t page, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	const struct info_snap *snap = &m_page_stream.u.info;
+	uint32_t mask = 0, count;
+	struct alarm_range rng = {.snap = snap};
+	Response r;
+	int ret = info_layout(snap, m_page_stream.cap, page, &mask, &rng, &count, &r);
+
+	if (ret) {
+		return ret;
+	}
+	if (page >= count) {
+		return -ENODATA;
+	}
+	info_page_fill(&r, snap, mask, &rng, page, count);
+	return encode_response(&r, out, out_cap, out_len);
+}
+
+/* Page a LoRaWAN Info that does not fit `cap`: snapshot it, encode page 0 into
+ * `out` and, when more pages follow, arm the stream (*streamed = true). `r` is
+ * the caller's (already encoded, now dead) Response, reused as scratch: the
+ * GetInfo command path overflowed the 4 KB m_work_q with two more Responses on
+ * this and info_layout()'s frames (HIL P5b, 6 active alarms). */
+static int info_paged(uint32_t seq, uint8_t *out, size_t cap, size_t *out_len, bool *streamed,
+		      Response *r)
+{
+	struct info_snap *snap = &m_page_stream.u.info;
+	struct app_alarm_active list[ACTIVE_ALARM_SNAPSHOT_MAX];
+	size_t n = app_alarm_active_snapshot(list, ARRAY_SIZE(list));
+	uint32_t count;
+
+	app_cmd_stream_cancel();
+	memset(snap, 0, sizeof(*snap));
+	fill_info(APP_CMD_TRANSPORT_LRW, &snap->info, SIZE_MAX);
+	snap->info.active_alarms.funcs.encode = NULL;
+	for (size_t i = 0; i < n; i++) {
+		snap->alarm[i][0] = (uint8_t)list[i].source;
+		snap->alarm[i][1] = (uint8_t)list[i].quantity;
+		snap->alarm[i][2] = (uint8_t)list[i].type;
+	}
+	snap->n_alarms = (uint8_t)n;
+
+	m_page_stream.seq = seq;
+	m_page_stream.cap = cap;
+
+	uint32_t mask = 0;
+	struct alarm_range rng = {.snap = snap};
+	int ret = info_layout(snap, cap, 0, &mask, &rng, &count, r);
+
+	if (ret) {
+		return ret;
+	}
+	info_page_fill(r, snap, mask, &rng, 0, count);
+	ret = encode_response(r, out, cap, out_len);
+	if (ret) {
+		return ret;
+	}
+	*streamed = count > 1;
+	if (*streamed) {
+		page_stream_start(PAGE_STREAM_INFO, seq, cap, count);
+	}
+	return 0;
+}
+
+/* ---- stream driver -------------------------------------------------------- */
+
+static int request_page(uint32_t page, uint8_t *out, size_t out_cap, size_t *out_len)
+{
 	Command cmd = Command_init_zero;
 	Response resp = Response_init_zero;
 	enum app_cmd_action act = APP_CMD_ACTION_NONE;
-	pb_istream_t istream = pb_istream_from_buffer(m_page_stream.req, m_page_stream.req_len);
+	pb_istream_t istream =
+		pb_istream_from_buffer(m_page_stream.u.req.buf, m_page_stream.u.req.len);
 
 	if (!pb_decode(&istream, Command_fields, &cmd)) {
-		m_page_stream.active = false;
 		return -EINVAL;
 	}
 	if (cmd.which_body == Command_get_config_tag) {
 		cmd.body.get_config.has_page = true;
-		cmd.body.get_config.page = m_page_stream.next;
+		cmd.body.get_config.page = page;
 	} else if (cmd.which_body == Command_get_param_tag) {
 		cmd.body.get_param.has_page = true;
-		cmd.body.get_param.page = m_page_stream.next;
+		cmd.body.get_param.page = page;
 	} else {
-		m_page_stream.active = false;
 		return -EINVAL;
 	}
-
 	app_cmd_dispatch(APP_CMD_TRANSPORT_LRW, &cmd, &resp, &act);
-	int ret = encode_response(&resp, out, out_cap, out_len);
+	return encode_response(&resp, out, out_cap, out_len);
+}
+
+int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	uint32_t count;
+	int ret;
+
+	if (!out || !out_len) {
+		return -EINVAL;
+	}
+	if (m_page_stream.kind == PAGE_STREAM_NONE || m_page_stream.next >= m_page_stream.count) {
+		m_page_stream.kind = PAGE_STREAM_NONE;
+		return -ENODATA;
+	}
+
+	switch (m_page_stream.kind) {
+	case PAGE_STREAM_REQUEST:
+		ret = request_page(m_page_stream.next, out, out_cap, out_len);
+		break;
+	case PAGE_STREAM_SETTINGS: {
+		Response r;
+
+		ret = config_status_page(&r, m_page_stream.cap, m_page_stream.seq,
+					 m_page_stream.next, out, out_cap, out_len, &count);
+		break;
+	}
+	case PAGE_STREAM_W1SCAN:
+		ret = w1_scan_page(m_page_stream.next, out, out_cap, out_len);
+		break;
+	case PAGE_STREAM_INFO:
+		ret = info_page(m_page_stream.next, out, out_cap, out_len);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
 	if (ret) {
-		m_page_stream.active = false;
+		m_page_stream.kind = PAGE_STREAM_NONE;
 		return ret;
 	}
 	if (++m_page_stream.next >= m_page_stream.count) {
-		m_page_stream.active = false;
+		m_page_stream.kind = PAGE_STREAM_NONE;
 	}
 	return 0;
+}
+
+/* Decode + dispatch in their own frame, so the ~550 B Command is gone again
+ * before app_cmd_handle() encodes and pages the answer (HIL P5b: a paged GetInfo
+ * overflowed the 4 KB m_work_q with the Command still on the stack). Returns the
+ * command's body tag (0 on a decode error, answered BAD_REQUEST). */
+static __noinline pb_size_t decode_and_dispatch(enum app_cmd_transport transport, const uint8_t *in,
+						size_t in_len, Response *resp,
+						enum app_cmd_action *act)
+{
+	Command cmd = Command_init_zero;
+	pb_istream_t istream = pb_istream_from_buffer(in, in_len);
+
+	if (!pb_decode(&istream, Command_fields, &cmd)) {
+		LOG_ERR_CALL_FAILED_STR("pb_decode", PB_GET_ERROR(&istream));
+		resp->seq = 0;
+		make_error(resp, Response_Error_Code_BAD_REQUEST, PB_GET_ERROR(&istream));
+		return 0;
+	}
+	app_cmd_dispatch(transport, &cmd, resp, act);
+	return cmd.which_body;
 }
 
 int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len, uint8_t *out,
@@ -1498,25 +2077,24 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	*out_len = 0;
 	enum app_cmd_action act = APP_CMD_ACTION_NONE;
 
-	Command cmd = Command_init_zero;
 	Response resp = Response_init_zero;
+	pb_size_t cmd_body = decode_and_dispatch(transport, in, in_len, &resp, &act);
 
-	pb_istream_t istream = pb_istream_from_buffer(in, in_len);
-	if (!pb_decode(&istream, Command_fields, &cmd)) {
-		LOG_ERR_CALL_FAILED_STR("pb_decode", PB_GET_ERROR(&istream));
-		resp.seq = 0;
-		make_error(&resp, Response_Error_Code_BAD_REQUEST, PB_GET_ERROR(&istream));
-	} else {
-		app_cmd_dispatch(transport, &cmd, &resp, &act);
-
+	if (cmd_body != 0) {
 		/* #409 3d/3e: over LoRaWAN a multi-page GetConfig/GetParam streams
 		 * every remaining page by itself (the host sends one request). NFC keeps
 		 * its host-driven paging (big pages, read in one RF session). */
 		if (transport == APP_CMD_TRANSPORT_LRW &&
-		    (cmd.which_body == Command_get_config_tag ||
-		     cmd.which_body == Command_get_param_tag)) {
+		    (cmd_body == Command_get_config_tag || cmd_body == Command_get_param_tag)) {
 			app_cmd_stream_cancel();
 			if (page_stream_arm(in, in_len, &resp)) {
+				act = APP_CMD_ACTION_PAGE_STREAM;
+			}
+		} else if (transport == APP_CMD_TRANSPORT_LRW &&
+			   resp.which_body == Response_w1_scan_tag) {
+			/* #425: a scan that does not fit is paged by ROM. */
+			app_cmd_stream_cancel();
+			if (w1_scan_arm_pages(&resp, out_cap)) {
 				act = APP_CMD_ACTION_PAGE_STREAM;
 			}
 		}
@@ -1542,41 +2120,64 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	}
 
 	int ret = encode_response(&resp, out, out_cap, out_len);
+	const uint32_t seq = resp.seq;
+	bool info_paging = false;
 
-	/* An Info response (explicit GetInfo / ClockSync-answer) that overflows the
-	 * transport budget: drop active alarms one at a time and re-encode before
-	 * giving up, same as the autonomous join/clock-sync uplink in
-	 * app_cmd_build_info() — the rest of Info is worth far more than the alarm
-	 * list. */
-	for (size_t max_alarms = ACTIVE_ALARM_SNAPSHOT_MAX;
-	     ret == -EMSGSIZE && resp.which_body == Response_info_tag && max_alarms-- > 0;) {
-		resp.body.info.active_alarms.arg = (void *)(uintptr_t)max_alarms;
-		ret = encode_response(&resp, out, out_cap, out_len);
-	}
-
-	/* #409 A5a: a LoRaWAN GetInfo that does not fit even without alarms answers
-	 * with InfoLite (firmware version) instead of an Error. */
 	if (ret == -EMSGSIZE && resp.which_body == Response_info_tag &&
 	    transport == APP_CMD_TRANSPORT_LRW) {
-		ret = encode_info_lite(resp.seq, out, out_cap, out_len);
+		/* #425: a GetInfo that does not fit the payload budget is paged —
+		 * fields and active alarms spread over self-contained Info pages —
+		 * instead of trimmed. `resp` is dead now and serves as the scratch. */
+		bool streamed = false;
+
+		info_paging = true;
+		ret = info_paged(seq, out, out_cap, out_len, &streamed, &resp);
+		if (ret == 0 && streamed) {
+			act = APP_CMD_ACTION_PAGE_STREAM;
+		}
+	}
+
+	if (ret == -EMSGSIZE && cmd_body == Command_get_settings_tag &&
+	    resp.which_body == Response_config_dump_tag && transport == APP_CMD_TRANSPORT_LRW) {
+		/* GetSettings that does not fit the budget: the same pages as the boot
+		 * settings-info (#425 envelope), carrying the command's seq. */
+		bool streamed = false;
+
+		ret = settings_paged(&resp, out, out_cap, out_len, &streamed);
+		if (ret == 0 && streamed) {
+			act = APP_CMD_ACTION_PAGE_STREAM;
+		}
+	}
+
+	/* An Info over NFC that overflows the buffer: drop active alarms one at a
+	 * time and re-encode before giving up — the rest of Info is worth far more
+	 * than the alarm list. */
+	for (size_t max_alarms = ACTIVE_ALARM_SNAPSHOT_MAX;
+	     ret == -EMSGSIZE && resp.which_body == Response_info_tag && max_alarms-- > 0;) {
+		if (info_paging) {
+			break; /* `resp` is page scratch now, not the full Info */
+		}
+		resp.body.info.active_alarms.arg = (void *)(uintptr_t)max_alarms;
+		ret = encode_response(&resp, out, out_cap, out_len);
 	}
 
 	if (ret == -EMSGSIZE) {
 		/* The composed response doesn't fit the transport buffer. Don't fail
 		 * silently (#93.3) — replace it with a compact Error carrying the same
 		 * seq so the host learns the request couldn't be answered (e.g. an
-		 * over-broad GetParam/GetConfig page). */
+		 * over-broad GetParam/GetConfig page). Reuses `resp` (no second ~580 B
+		 * Response on this frame). */
 		LOG_WRN("Response too large for buffer; sending Error instead");
-		Response err = Response_init_zero;
-		err.seq = resp.seq;
+		resp = (Response)Response_init_zero;
+		resp.seq = seq;
 		/* #409: over LoRaWAN the only reason is the DR payload budget, so say
 		 * so — the host should retry once ADR raises the DR. */
 		if (transport == APP_CMD_TRANSPORT_LRW) {
-			make_error(&err, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
+			make_error(&resp, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
 		} else {
-			make_error(&err, Response_Error_Code_UNKNOWN, "response too large");
+			make_error(&resp, Response_Error_Code_UNKNOWN, "response too large");
 		}
-		ret = encode_response(&err, out, out_cap, out_len);
+		ret = encode_response(&resp, out, out_cap, out_len);
 	}
 	if (ret) {
 		return ret;
@@ -1600,14 +2201,12 @@ int app_cmd_build_budget_error(uint32_t seq, uint8_t *out, size_t out_cap, size_
 	return encode_response(&resp, out, out_cap, out_len);
 }
 
-int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *lite)
+int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *more)
 {
-	if (!out || !out_len) {
+	if (!out || !out_len || !more) {
 		return -EINVAL;
 	}
-	if (lite) {
-		*lite = false;
-	}
+	*more = false;
 
 	Response resp = Response_init_zero;
 	resp.seq = 0;
@@ -1615,75 +2214,44 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *lite
 	/* Autonomous GetInfo on join goes out over LoRaWAN, so dev_eui is omitted. */
 	fill_info(APP_CMD_TRANSPORT_LRW, &resp.body.info, SIZE_MAX);
 
+	/* out_cap is the current payload budget (see queue_info_uplink()). If the
+	 * full Info does not fit, page it (#425): page 0 goes out here, the rest via
+	 * app_cmd_stream_next(). */
 	int ret = encode_response(&resp, out, out_cap, out_len);
 
-	/* out_cap is the current DR's payload budget (see queue_info_uplink()), not
-	 * just the software buffer size. If every active alarm doesn't fit, drop them
-	 * one at a time and re-encode rather than lose the whole uplink — identity /
-	 * firmware / battery / device_status are far more valuable than a redundant
-	 * alarm list also readable over NFC and on fPort 3 (AlarmReport). */
-	for (size_t max_alarms = ACTIVE_ALARM_SNAPSHOT_MAX; ret == -EMSGSIZE && max_alarms-- > 0;) {
-		fill_info(APP_CMD_TRANSPORT_LRW, &resp.body.info, max_alarms);
-		ret = encode_response(&resp, out, out_cap, out_len);
-	}
-
 	if (ret == -EMSGSIZE) {
-		ret = encode_info_lite(0, out, out_cap, out_len);
-		if (ret == 0 && lite) {
-			*lite = true;
-		}
+		ret = info_paged(0, out, out_cap, out_len, more, &resp);
 	}
-
 	return ret;
 }
 
-int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len)
+int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len, bool *more)
 {
-	if (!out || !out_len) {
+	Response r;
+	uint32_t count;
+
+	if (!out || !out_len || !more) {
 		return -EINVAL;
 	}
+	*more = false;
 
-	/* Autonomous boot settings-info uplink (#412): a single-page ConfigDump with
-	 * a fixed selection of the key operating settings, so the LNS learns the
-	 * device's effective configuration on join without polling. Byte-identical to
-	 * a GetConfig reply (no decoder change), plus the runtime-only w1_slot_type.
-	 * The persisted ROM serials are left out to keep this one DR0 frame; a host
-	 * that wants them issues GetParam(sensors 11..14). */
-	Response resp = Response_init_zero;
-	resp.seq = 0;
-	resp.which_body = Response_config_dump_tag;
+	/* Autonomous boot settings-info uplink (#412): ConfigDump page(s) with a
+	 * fixed selection of the key operating settings, so the LNS learns the
+	 * device's effective configuration on join without polling. Same content as
+	 * a GetConfig reply, plus the runtime-only w1_slot_type; the persisted ROM
+	 * serials are left out (GetParam sensors 11..14). #425: one page when it fits
+	 * out_cap (EU868 DR0 and up), else as many pages as the budget needs — page
+	 * 0 here, the rest via app_cmd_stream_next(). */
+	int ret = config_status_page(&r, out_cap, 0, 0, out, out_cap, out_len, &count);
 
-	Response_ConfigDump *cd = &resp.body.config_dump;
-	cd->page_index = 0;
-	cd->page_count = 1;
-
-	/* application: interval_sample, interval_report, history_enable */
-	static const uint32_t app_ids[] = {2, 3, 4};
-	/* sensors: cap_hall_left..cap_accelerometer (all nine cap_* flags) */
-	static const uint32_t sensor_ids[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
-
-	cd->has_application = true;
-	app_config_fill_application(&cd->application, app_ids, ARRAY_SIZE(app_ids));
-
-	cd->has_sensors = true;
-	app_config_fill_sensors(&cd->sensors, sensor_ids, ARRAY_SIZE(sensor_ids));
-
-#if defined(APP_CMD_HAVE_W1)
-	/* Detected 1-Wire slot type per slot (runtime state; see app_w1_slot_type in
-	 * app_w1_slots.h — the single source of truth). Wire values are pinned here so
-	 * reordering the enum can never silently change the on-air meaning. */
-	BUILD_ASSERT(APP_W1_SLOT_EMPTY == 0 && APP_W1_SLOT_DALLAS == 1 &&
-			     APP_W1_SLOT_MACHINE_PROBE == 2,
-		     "w1_slot_type wire values must stay 0/empty 1/dallas 2/machine-probe");
-	BUILD_ASSERT(APP_W1_SLOT_COUNT <= ARRAY_SIZE(cd->w1_slot_type),
-		     "w1_slot_type array too small for APP_W1_SLOT_COUNT");
-	cd->w1_slot_type_count = APP_W1_SLOT_COUNT;
-	for (int s = 0; s < APP_W1_SLOT_COUNT; s++) {
-		cd->w1_slot_type[s] = (uint32_t)app_w1_slot_get_type(s);
+	if (ret) {
+		return ret;
 	}
-#endif
-
-	return encode_response(&resp, out, out_cap, out_len);
+	if (count > 1) {
+		page_stream_start(PAGE_STREAM_SETTINGS, 0, out_cap, count);
+		*more = true;
+	}
+	return 0;
 }
 
 #if defined(APP_CMD_HAVE_HISTORY)
@@ -1696,8 +2264,7 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 	resp.seq = seq;
 	resp.which_body = Response_history_frame_tag;
 	Response_HistoryFrame *hf = &resp.body.history_frame;
-	hf->frame_index = frame_index;
-	hf->frame_count = frame_count;
+	set_page(&resp, frame_index, frame_count);
 	hf->t0_unix = t0_unix;
 	hf->present = present;
 	hf->interval_s = interval_s;
@@ -1744,8 +2311,7 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 	resp.seq = seq;
 	resp.which_body = Response_history_frame_tag;
 	Response_HistoryFrame *hf = &resp.body.history_frame;
-	hf->frame_index = frame_index;
-	hf->frame_count = frame_count;
+	set_page(&resp, frame_index, frame_count);
 	hf->t0_unix = t0_unix;
 	hf->present = present;
 	hf->interval_s = interval_s;
@@ -1761,7 +2327,8 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 
 int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
-			       uint8_t *out, size_t out_cap, size_t *out_len)
+			       uint32_t page_index, uint32_t page_count, uint8_t *out,
+			       size_t out_cap, size_t *out_len)
 {
 	if (!out || !out_len || (n_events > 0 && !events)) {
 		return -EINVAL;
@@ -1773,6 +2340,10 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 	/* Flag whether base_time is absolute (L-3/L-4): host emits time=null otherwise. */
 	report.has_time_synced = true;
 	report.time_synced = time_synced;
+	if (page_count > 1) { /* #425: same paging as Response */
+		report.page_index = page_index;
+		report.page_count = page_count;
+	}
 
 	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
 	for (size_t i = 0; i < n; i++) {

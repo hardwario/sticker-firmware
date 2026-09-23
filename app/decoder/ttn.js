@@ -185,6 +185,7 @@ var _CMD_NAMES = {
   26: "vendor_reset",
   27: "clm_rearm",
   28: "buzzer_play",
+  31: "get_settings",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);
@@ -269,24 +270,15 @@ function _decodeConfigDump(bytes, start, end) {
   return cd;
 }
 
-// InfoLite (Response field 11, #409): firmware version (+ build type) only, sent
-// instead of Info at the 11 B budget tier. Fields 1..4 share Info's numbering.
-// The device follows up with the full Info once the data rate allows it.
-function _decodeInfoLite(bytes, start, end) {
-  var full = _decodeInfo(bytes, start, end);
-  return {
-    fw_major: full.fw_major, fw_minor: full.fw_minor, fw_patch: full.fw_patch,
-    fw_version: full.fw_version, build_type: full.build_type, build_type_name: full.build_type_name
-  };
-}
-
 function _decodeInfo(bytes, start, end) {
   var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false, device_status: 0, active_alarms: [] };
+  var seen = {}; // field numbers present on the wire (#425: a page emits only these)
   var pos = start;
   while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
+    seen[field] = true;
     if (wire === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (field === 1) info.fw_major = v.value;
@@ -335,7 +327,31 @@ function _decodeInfo(bytes, start, end) {
       .filter(function (f) { return (info.reset_cause & f[0]) !== 0; })
       .map(function (f) { return f[1]; });
   }
+  // Internal: read by _pruneInfoPage(), removed again before the result leaves
+  // the decoder (see the paging block in the Response decoder).
+  Object.defineProperty(info, "_seen", { value: seen, enumerable: false, configurable: true });
   return info;
+}
+
+// #425: an Info *page* carries only some fields. Drop everything the page did
+// not contain, so a missing field never reads as a default (fw 0.0.0, status 0).
+var _INFO_FIELD_KEYS = {
+  1: ["fw_major"], 2: ["fw_minor"], 3: ["fw_patch"], 4: ["build_type", "build_type_name"],
+  5: ["serial_number"], 6: ["uptime_s"], 7: ["unix_time"], 8: ["debug"], 9: ["claim_token"],
+  10: ["battery"], 11: ["reset_cause", "reset_cause_flags"], 12: ["lrw_state", "lrw_state_name"],
+  13: ["dev_eui"], 14: ["device_status", "device_status_flags"], 15: ["active_alarms"],
+  16: ["last_dl_rssi"], 17: ["last_dl_snr"], 18: ["last_dl_age_s"]
+};
+function _pruneInfoPage(info) {
+  var seen = info._seen || {};
+  var keep = {};
+  for (var f in _INFO_FIELD_KEYS) {
+    if (seen[f]) _INFO_FIELD_KEYS[f].forEach(function (k) { keep[k] = true; });
+  }
+  if (seen[1] || seen[2] || seen[3]) keep.fw_version = true;
+  var out = {};
+  for (var k in info) { if (info.hasOwnProperty(k) && keep[k]) out[k] = info[k]; }
+  return out;
 }
 
 function _decodeError(bytes, start, end) {
@@ -476,9 +492,10 @@ function _decodeHistorySamples(bytes, t0, present, interval, synced) {
 }
 
 function _decodeHistoryFrame(bytes, start, end) {
-  // frame_index/frame_count default to 0 — proto3 omits a zero frame_index, so
-  // frame 0 of a replay carries no field 1; the consumer still needs index 0.
-  var hf = { frame_index: 0, frame_count: 0, records: [] };
+  // frame_index/frame_count: only older firmware numbers frames here (#425 moved
+  // it to the Response envelope, pages "i/N"). Emitted only when frame_count is
+  // on the wire; then an absent frame_index is frame 0 (proto3 omits a zero).
+  var hf = { records: [] };
   var t0 = 0, present = 0, interval = 0;
   // time_synced (field 7) absent = old FW = treat as synced (emit timestamps).
   var synced = true;
@@ -506,6 +523,8 @@ function _decodeHistoryFrame(bytes, start, end) {
       pos += len.value;
     } else { break; }
   }
+  if (hf.frame_count !== undefined && hf.frame_index === undefined) hf.frame_index = 0;
+  else if (hf.frame_count === undefined) delete hf.frame_index;
   hf.t0_unix = t0;
   hf.present = present;
   hf.interval_s = interval;
@@ -524,6 +543,9 @@ function decodeDownlinkResponse(bytes) {
     if (wire === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (field === 1) resp.seq = v.value;
+      // #425 universal paging: page_index (12) / page_count (13) in the envelope.
+      else if (field === 12) resp.page_index = v.value;
+      else if (field === 13) resp.page_count = v.value;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var end = pos + len.value;
@@ -533,13 +555,36 @@ function decodeDownlinkResponse(bytes) {
       else if (field === 5) resp.history_frame = _decodeHistoryFrame(bytes, pos, end);
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       else if (field === 7) resp.w1_scan = _decodeW1Scan(bytes, pos, end);
-      else if (field === 11) resp.info_lite = _decodeInfoLite(bytes, pos, end);
       pos = end;
     } else {
       break;
     }
   }
+  _applyPages(resp);
   return resp;
+}
+
+// #425: every page is a complete message decoded on its own (no state between
+// uplinks — TTN / ChirpStack codecs are stateless). Label it "i/N" (1-based).
+// Older firmware numbered ConfigDump / HistoryFrame inside the body; use that
+// when the envelope has none.
+function _applyPages(resp) {
+  if (resp.page_count === undefined) {
+    if (resp.config_dump && resp.config_dump.page_count > 1) {
+      resp.page_index = resp.config_dump.page_index || 0;
+      resp.page_count = resp.config_dump.page_count;
+    } else if (resp.history_frame && resp.history_frame.frame_count > 1) {
+      resp.page_index = resp.history_frame.frame_index || 0;
+      resp.page_count = resp.history_frame.frame_count;
+    }
+  }
+  if (resp.page_count > 1) {
+    if (resp.page_index === undefined) resp.page_index = 0;
+    resp.pages = (resp.page_index + 1) + "/" + resp.page_count;
+    if (resp.info) resp.info = _pruneInfoPage(resp.info);
+  }
+  // The field-presence map is decoder-internal: never hand it to a consumer.
+  if (resp.info) delete resp.info._seen;
 }
 
 // Zig-zag decode for protobuf sint32.
@@ -1122,6 +1167,9 @@ function decodeAlarmBatch(bytes) {
       if (field === 1) out.base_time = v.value >>> 0;
       else if (field === 2) out.total = v.value;
       else if (field === 4) out.time_synced = v.value !== 0;
+      // #425: page_index (5) / page_count (6), the same paging as Response.
+      else if (field === 5) out.page_index = v.value;
+      else if (field === 6) out.page_count = v.value;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var endE = pos + len.value;
@@ -1147,10 +1195,15 @@ function decodeAlarmBatch(bytes) {
   for (var i = 0; i < out.alarms.length; i++) {
     out.alarms[i].time = out.time_synced ? ((out.base_time + rels[i]) >>> 0) : null;
   }
-  // total counts every alarm in the window. Fewer events here means either some
-  // were dropped, or (#409) the batch was split across several fPort 3 frames —
-  // those share base_time and total, so group frames by base_time to rebuild it.
-  out.truncated = out.alarms.length < out.total;
+  // total counts every alarm in the window. A batch split across frames (#425)
+  // is labelled "i/N"; its pages share base_time and total, and each decodes on
+  // its own. Unpaged, fewer events than total means some were dropped.
+  if (out.page_count > 1) {
+    if (out.page_index === undefined) out.page_index = 0;
+    out.pages = (out.page_index + 1) + "/" + out.page_count;
+  } else {
+    out.truncated = out.alarms.length < out.total;
+  }
   return out;
 }
 

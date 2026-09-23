@@ -20,6 +20,8 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN | **Fix** — `DevStatusReq` right after `LinkADRReq` is now answered (#419), via a `loramac-node` patch applied with `west patch apply`. |
 | LoRaWAN | **New** — AS923 region (#409 A6): `lrw-region as923`, channel plan AS923-1, release builds. |
 | LoRaWAN | **Improved** — faster link-loss recovery (#424): link check on every report while `WARNING`, a TX-power/data-rate step-down ladder before the rejoin (a moved device regains its gateway on a lower DR without losing the session), and US915/AU915 no longer lose the configured sub-band after repeated failed joins. |
+| LoRaWAN / P2P | **New** — universal response paging (#425): every answer that does not fit one frame is split into self-contained pages numbered `page_index`/`page_count` in the `Response` envelope (and in `AlarmReport`), sent by the device on its own; decoders label them `pages: "i/N"`. |
+| LoRaWAN / NFC | **New** — `GetSettings` command (#428): the boot settings-info `ConfigDump` (§4) on request, with the command's `seq`, so a host can refresh the key operating settings without a full multi-page `GetConfig`. |
 
 ---
 
@@ -150,7 +152,7 @@ it actively polled with `GetParam` / `GetConfig` downlinks — so after any loca
 reconfiguration (shell / NFC), the LNS copy stayed stale until someone asked.
 
 This adds a **second autonomous fPort-85 uplink right after the boot `Info`**: a
-single-page `Response.ConfigDump` (`page_index = 0`, `page_count = 1`) carrying a
+`Response.ConfigDump` (one frame when it fits, paged otherwise — §13) carrying a
 fixed selection of the key operating settings. Because `settings save` cold-reboots
 and every boot re-joins, this **re-announces the effective config automatically**
 after every persisted change — no diff-tracking, no extra state.
@@ -178,12 +180,11 @@ in `app_w1_slots.c`; the new value flows onto the wire automatically (the proto
 stays a raw `uint32`, so no schema change). A decoder that predates a value renders
 it as `type<N>` rather than failing.
 
-**Decoded example** (`ttn.js` output as the LNS sees it; like every other config
-reply, bool fields decode as `0`/`1`, and the proto3-default `page_index = 0` is
-omitted):
+**Decoded example** (`ttn.js` output as the LNS sees it, one frame; like every other
+config reply, bool fields decode as `0`/`1`):
 
 ```json
-{ "config_dump": { "page_count": 1,
+{ "config_dump": {
     "application": { "interval_sample": 60, "interval_report": 900, "history_enable": 0 },
     "sensors": { "cap_hall_left": 1, "cap_hall_right": 0, "cap_input_a": 1,
                  "cap_input_b": 0, "cap_light_sensor": 1, "cap_barometer": 0,
@@ -196,10 +197,9 @@ omitted):
 - Size incl. the `APP_PROTO_VERSION` byte: 34 B without 1-Wire (`CONFIG_W1=n`, no
   field 7), 40 B with the four `w1_slot_type` entries, up to ~46 B with large
   interval values. It fits the EU868 DR0 budget (51 B) and the 64 B response buffer.
-- **Low DR outside EU868 (#418, resolved by #409):** the frame is single-frame and
-  not paged, so it does not fit the 11 B tier (US915 DR0, AU915 / AS923 DR2). It is
-  no longer lost: the device remembers it and sends it automatically once a DR
-  change makes room; the boot `Info` meanwhile goes out as `InfoLite` (see §9).
+- **Low DR outside EU868 (#418, resolved by #409 / #425):** below the EU868 DR0
+  budget the settings-info is paged (§13); a setting that does not fit even alone is
+  left out, and when nothing fits the device sends it once a DR change makes room.
 - The lean debug default (`debug.conf`, #395) builds with `CONFIG_W1=n`, so a
   debug image omits `w1_slot_type`. Build with `-DCONFIG_W1=y` to exercise it.
   Release builds have 1-Wire on.
@@ -208,8 +208,9 @@ omitted):
   `ttn.js` `_decodeConfigDump()` already handle the config fields.
 - The **persisted 1-Wire slot ROM serials** are *not* in this frame (to keep it one
   DR0 uplink); a host that wants them reads `GetParam(sensors 11..14)`.
-- `w1_slot_type` is runtime state, filled **only** by this boot uplink — a plain
-  `GetConfig` / `GetParam` reply stays a pure config snapshot and never carries it.
+- `w1_slot_type` is runtime state, filled **only** by this boot uplink and by its
+  on-request twin `GetSettings` (§14) — a plain `GetConfig` / `GetParam` reply stays a
+  pure config snapshot and never carries it.
 
 **HW verification (2026-09-22, EU868, ChirpStack v4):** after every join the
 device sent `Info` (FCnt 1), then this `ConfigDump` page 0/1 (FCnt 2), then
@@ -354,7 +355,9 @@ settings save
 
 - Applied in `on_join_success()` on **every (re)join**, after ADR is configured and
   before the payload budget is captured, so the telemetry split follows the pinned DR.
-  It also becomes the DR of the next join request.
+  JoinRequests are not affected: they always go out at the region's default join DR
+  (every (re)join re-initialises the MAC); the pin applies from the first uplink after
+  the join.
 - **Only with ADR off.** With `lrw-adr true` the value is ignored and a warning is
   logged (Zephyr's `lorawan_set_datarate()` refuses while ADR is on).
 - DR validity is **region-dependent**: EU868 DR0–7, US915 DR0–4, AU915 DR2–6 with the
@@ -384,13 +387,12 @@ fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *f
   UNKNOWN, which proto3 omits). The LoRaWAN "response too large" fallback is a 7 B
   `Error{ code = 9 BUDGET_TOO_SMALL }` — "retry once ADR raises the DR" — so a command
   that cannot be answered in full still gets an answer. NFC keeps `UNKNOWN` + detail.
-- **`InfoLite`** (`Response` field 11): when even `Info` without `active_alarms` does
-  not fit, the join / clock-sync `Info` and a LoRaWAN `GetInfo` answer with the firmware
-  version (+ build type when it fits), 9–11 B. `ttn.js` decodes it as `info_lite`
-  (`fw_version`, `build_type_name`).
-- **Deferred boot announce.** If the join `Info` went out as `InfoLite`, or the #412
-  settings-info did not fit, the device sends the full frame by itself once a DR change
-  makes room — no host poll needed.
+- **Info at a small budget** is paged (§13) — the join / clock-sync `Info` and a
+  LoRaWAN `GetInfo`. (An interim `InfoLite` message from the #409 draft was replaced by
+  this before release; `Response` field 11 is reserved.)
+- **Deferred boot announce.** If not even one field of the join `Info` or the #412
+  settings-info fits, the device sends it by itself once a DR change makes room — no
+  host poll needed.
 - **History replay (`req_history`) at low DR.** Frames are sized with the real frame
   count instead of the worst-case varint, ~8 B more samples per frame (EU868 DR0: ~26 B
   instead of ~18 B). When records exist but not one fits the current DR, the answer is
@@ -398,11 +400,10 @@ fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *f
   drop ends with the same `Error` (request `seq`) instead of going silent.
 - **GetConfig / GetParam over LoRaWAN send every page by themselves.** One downlink
   request is enough: the device answers with the requested page (0 unless `page` is
-  given) and then uplinks the remaining pages on its own — same `seq`, `page_index` /
-  `page_count` as before, paced by the duty cycle (at EU868 DR0 a full config takes
-  minutes). A new GetConfig/GetParam replaces a stream still running; a rejoin cancels
-  it. The page size stays 30 B. NFC is unchanged (the phone still asks page by page,
-  ~450 B pages).
+  given) and then uplinks the remaining pages on its own — same `seq`, numbered as in
+  §13, paced by the duty cycle (at EU868 DR0 a full config takes minutes). A new paged
+  request replaces a stream still running; a rejoin cancels it. The page size stays
+  30 B. NFC is unchanged (the phone still asks page by page, ~450 B pages).
 - **DR drop between queueing and sending.** A queued frame that no longer fits after
   ADR lowered the DR is recovered instead of dropped: the boot `Info` / settings-info
   are re-sent once the DR rises again, a command answer becomes `Error
@@ -458,8 +459,8 @@ settings save
   groups (AS923-2/-3/-4) would be separate build variants.
 - **No sub-band** — `lrw-sub-band` applies to US915/AU915 only.
 - **Dwell time on by default:** DR0/DR1 carry 0 B and DR2 carries 11 B, so AS923 at its
-  lowest DR is the 11 B budget tier handled by §9 (`InfoLite`, compact `Error`, alarm
-  state in telemetry, deferred boot announce). `lrw-datarate dr0` / `dr1` are rejected by
+  lowest DR is the 11 B budget tier handled by §9 and §13 (paged answers, compact
+  `Error`, alarm state in telemetry, deferred boot announce). `lrw-datarate dr0` / `dr1` are rejected by
   the MAC and logged; the stack's DR stays in use.
 - **Release builds only.** `debug.conf` trims AS923 together with AU915/US915; a stored
   `as923` on a debug image leaves the radio silent (§7), never on another band.
@@ -473,6 +474,7 @@ the region guard (§7), `lrw-datarate` (§8), compact `Error`, alarm split and a
 streaming (§9), `DevStatusAns` (§10) and the release image with AS923 compiled in all PASS. Not HW-tested (no
 US915/AU915/AS923 gateway): the 11 B budget tier of §9 and AS923 on air. See the HIL records in
 `doc/plan/409 - LoRaWAN improvements - regions, datarate, diagnostics.md`.
+
 
 ---
 
@@ -506,6 +508,123 @@ When the network disappears (gateway off, or the device moved out of reach of it
 - Not HW-tested: the US915/AU915 sub-band fix (no 915 MHz gateway), code review only.
 
 See `doc/manual-test-plan.md` **L18**/**L19** and `doc/plan/424 - Faster link-loss recovery.md`.
+
+---
+
+## 13. Universal response paging (#425)
+
+One paging rule for every answer the device sends over a radio. When a response does
+not fit one frame, it is split into **pages**; each page is a complete, independently
+decodable message with the same `seq`, carrying part of the answer and "page *i* of *N*".
+The device sends all pages by itself. Plan: `doc/plan/425 - Universal response paging.md`.
+
+**Wire format**
+
+| Message | Fields |
+|---|---|
+| `Response` (fPort 85, every body type) | `page_index = 12`, `page_count = 13` |
+| `AlarmReport` (fPort 3) | `page_index = 5`, `page_count = 6` |
+
+- Absent (`page_count` 0/1) = the whole answer is in this one frame, byte-identical to
+  an unpaged answer. `page_count >= 2` = page `page_index` (0-based) of `page_count`.
+- `ConfigDump.page_index/page_count` and `HistoryFrame.frame_index/frame_count` are
+  **deprecated and no longer set**; they stay declared so older firmware still decodes.
+- `Response` field 11 is reserved (the #409 draft's `InfoLite`, replaced by Info pages).
+
+**What pages, and how**
+
+| Answer | Page unit |
+|---|---|
+| Info (join, clock-sync, GetInfo over LoRaWAN) | each field, then each active alarm (one snapshot for all pages) |
+| GetConfig / GetParam | config fields (fixed 30 B pages on LoRaWAN at any DR; not at the 11 B tier → `BUDGET_TOO_SMALL`) |
+| settings-info (#412) | each setting / the `w1_slot_type` block |
+| W1Scan | ROMs (scan result kept, no rescan per page) |
+| History replay (`req_history`) | records (as before, numbering now in the envelope) |
+| AlarmReport | events (every page keeps its own `base_time` / `total`) |
+
+- **Device-driven on the radio**: page 0 answers the request (or is the autonomous
+  uplink), the rest follow one per send cycle, paced by the duty cycle; one stream at a
+  time (a new paged answer replaces a running one; a rejoin cancels it; the boot
+  settings-info waits for the Info pages). A host missing a page re-sends the request
+  with `page = <index>` — the stream then sends from that page on.
+- **Host-driven on NFC**: the phone asks for a page; only big config dumps page there.
+  NFC history keeps its cursor (`next_ord` / `has_more`), no envelope numbering.
+- **Physical floor**: a unit that does not fit even alone is left out (at the 11 B tier
+  e.g. the serial number, unix time, an alarm entry or rule); when nothing fits the
+  answer is `Error BUDGET_TOO_SMALL`.
+- **Telemetry (fPort 2)** is not paged: it keeps its per-sensor-group split, every
+  frame already a complete snapshot slice.
+
+**Decoders (TTN / ChirpStack) are stateless.** `ttn.js` decodes each page on its own and
+adds `pages: "i/N"`; an Info page lists only the fields it carries (no default zeros).
+Nothing is buffered or merged in the decoder — a consumer that wants the whole answer
+merges pages by (DevEUI, fPort, `seq`), for `AlarmReport` by `base_time`. A consumer
+that ignores `pages` just sees several partial answers.
+
+**Host impact**: Manager-App NFC GetConfig must read the page count from
+`Response.page_count` (absent = 1); the proximos-v2 decoder should merge pages
+(Hub side: proximos-v2#96; decoder parity: proximos-v2#90). **P2P** uses the same rule and format (driver in
+PR #426 on `feat-p2p`): an answer that does not fit one 0x55 RESPONSE (64 B) is streamed
+as pages with the same `seq`; the P2P central must accept several 0x55 with one `seq`.
+
+**Duty cycle (host guidance).** At EU868 DR0 a page is ~2.1 s of SF12 airtime, so a
+6-page GetConfig uses about a third of the 36 s/h budget of its sub-band; once the budget
+is spent, LoRaMac holds **every** uplink (pages, telemetry, alarms) until its hourly window
+resets (HW-seen: ~50 min). The firmware does not throttle streams — the host must: no
+repeated full GetConfig/GetParam at SF11/SF12 (ask only for the keys needed, wait for a
+higher DR, or use NFC), no immediate re-request of a missing page (it may just be waiting
+for duty-cycle credit), and page-assembly timeouts of ≥ 1 h at a low DR.
+
+Cost: release about +1.8 KB flash, +128 B RAM.
+
+**Known limitations:**
+- **Manager-App** must read `Response.page_count` over NFC (absent = 1). The deprecated `ConfigDump.page_*` is no
+  longer set, so an older app sees only the first page of a paged GetConfig. There is no compatibility shim, by
+  decision.
+- GetConfig / GetParam over LoRaWAN use a fixed 30 B page layout, so the page count is the same at every DR ≥ 51 B.
+  At 11 B they answer `BUDGET_TOO_SMALL`.
+- A queued AlarmReport page waits behind a running response stream.
+- A rejoin does not cancel pages already queued.
+
+**HW verification (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub):**
+- GetConfig (6 pages at DR0, 14 with 8 rules), `page=N` resume, stream cancel, GetParam, paged GetInfo with active
+  alarms, AlarmReport pages, history frames, release image and coexistence with #424 all PASS.
+- The first run found a `m_work_q` stack overflow on a paged GetInfo. It was a regression of this change (A/B
+  against the previous `v1.5.0` was clean) and is fixed before merge.
+- Not HW-tested: the 11 B tier and AU915 (no 915 MHz gateway), and P2P (#426).
+- See §10 of `doc/plan/425 - Universal response paging.md`.
+
+---
+
+## 14. `GetSettings` — settings-info on request (#428)
+
+The boot settings-info (§4) tells the network the effective configuration once per boot.
+A host that wants to refresh it later had only `GetConfig`: 38 keys in 6+ pages (one page
+per alarm rule on top), ~13 s of SF12 airtime at EU868 DR0. `GetSettings` returns exactly
+the §4 content on request.
+
+| | |
+|---|---|
+| Command | `get_settings` = `Command` field **31**, empty body (29/30 are taken by #414; 15 was `req_alarm_rules`, not reused) |
+| Downlink | fPort 85, e.g. `0807fa0100` (seq 7) |
+| Answer | `Response.config_dump` with the command's `seq`: `application` interval_sample / interval_report / history_enable, the nine `sensors.cap_*` flags, runtime `w1_slot_type` (1-Wire builds) |
+| Size | the boot dump + 2 B for the `seq` (34 B measured without 1-Wire, +6 B with the four `w1_slot_type` entries): one frame at EU868 DR0 and up |
+| Paging | over LoRaWAN the same pages as the boot dump (§13 envelope) when the budget is smaller; every page carries the `seq` |
+| Transports | all (LoRaWAN, NFC, shell); read-only, no secrets |
+
+The values are the **staged** config, like every `GetConfig` / `GetParam` answer (a change
+without `settings save` shows up at once). The boot dump keeps `seq` 0, so a host can tell
+the autonomous dump from an answer. Decoders need no change: the answer is a normal
+`config_dump`; `ttn.js` only learns the command name for `encodeDownlink`.
+
+**HW verification (2026-09-23, EU868, ProXimos Hub ChirpStack v4, PR #429):** downlink
+`0807fa0100` → one fPort-85 frame at DR5, 34 B, `Response{seq 7, config_dump}` whose
+`config_dump` bytes are identical to the boot settings-info of the same boot. See
+`doc/manual-test-plan.md` scenario **L4c**.
+Hub combined11 (proximos-v2 !91): the Portal "Refresh from device" button sends
+`GetSettings` and completes on the one-frame answer. A v1.5.0 image without this command
+answers `Error NOT_SUPPORTED` (code 7) with the `seq` kept, so the Hub's config is untouched.
+Not HW-tested: NFC, DR0 (34 B fits one frame there too) and the paged form (native tests only).
 
 ---
 

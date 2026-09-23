@@ -172,6 +172,7 @@ message Command {
         SetSecretKey     vendor_reset      = 26;
         ClmRearm         clm_rearm         = 27;
         BuzzerPlay       buzzer_play       = 28;
+        GetSettings      get_settings      = 31;
     }
 // END GENERATED COMMANDS
 
@@ -297,6 +298,13 @@ message Command {
         optional uint32 kind     = 1; // melody id: 0 stop, 1-3 melodies, 4-15 reserved, >=16 -> 0
         optional uint32 repeat_s = 2; // 0 = no repeat; 1-999 = repeat interval (s)
     }
+
+    // The boot settings-info ConfigDump (#412) on request: application
+    // interval_sample / interval_report / history_enable, the nine sensors
+    // cap_* flags and the runtime w1_slot_type. The answer carries this
+    // command's seq (the autonomous boot dump has seq 0); over LoRaWAN it is
+    // paged with the Response envelope (#425) when it does not fit one frame.
+    message GetSettings { }
 }
 
 message Response {
@@ -311,22 +319,20 @@ message Response {
         W1Scan         w1_scan          = 7;
         Telemetry      sample           = 8;   // Sample command: fresh readings (NFC)
         // 9, 10 are claimed by claim_info / basic_info in #414 (mailbox) — keep free.
-        InfoLite       info_lite        = 11;  // Info when the full one does not fit the DR (#409)
     }
+    reserved 11;  // was info_lite (#409 draft), replaced by Info pages (#425)
+
+    // Universal paging (#425), the same for every response type. An answer that
+    // does not fit one frame — over a radio, the payload budget — is split into
+    // pages, each a complete Response with the same seq and a part of the body:
+    // page_index = 0..page_count-1 of page_count. Over a radio the device sends
+    // all pages by itself; over NFC the host asks for a page. Absent (page_count
+    // 0/1) = the whole answer is in this one frame.
+    uint32 page_index = 12;
+    uint32 page_count = 13;
 
     message Ack { }
 
-    // Minimal Info for the smallest LoRaWAN budget tier (11 B: US915 DR0, AU915 /
-    // AS923 DR2), where even Info without alarms does not fit (#409 A5a). Sent in
-    // place of Info — for the autonomous join / clock-sync uplink and for a GetInfo
-    // over LoRaWAN — carrying just the firmware version (+ build type when it
-    // fits). The device sends the full Info by itself once the DR allows it.
-    message InfoLite {
-        uint32         fw_major   = 1;
-        uint32         fw_minor   = 2;
-        uint32         fw_patch   = 3;
-        Info.BuildType build_type = 4;
-    }
 
     message Info {
         // Firmware version (semver components). board is omitted on purpose —
@@ -392,6 +398,8 @@ message Response {
     }
 
     message ConfigDump {
+        // Deprecated since #425, no longer set: paging is Response.page_index /
+        // page_count for every response type. Kept so older firmware decodes.
         uint32 page_index = 1;
         uint32 page_count = 2;
         optional AppConfigMessage.Lorawan     lorawan     = 3;
@@ -410,6 +418,8 @@ message Response {
     }
 
     message HistoryFrame {
+        // Deprecated since #425, no longer set: frames are Response.page_index /
+        // page_count like every other paged response. Kept so older firmware decodes.
         uint32 frame_index = 1;
         uint32 frame_count = 2;
         uint32 t0_unix     = 3;
@@ -478,6 +488,11 @@ message AlarmReport {
     // uptime-relative (L-3/L-4). Absent = old FW = treat as synced. The decoder
     // emits time=null for every event when this is present and false.
     optional bool time_synced = 4;
+    // #425: a batch that does not fit one frame is split into several reports
+    // (same base_time / total), numbered page_index = 0..page_count-1 — the same
+    // paging as Response. Absent = the whole batch is in this report.
+    uint32 page_index = 5;
+    uint32 page_count = 6;
 }
 
 message AlarmEvent {
