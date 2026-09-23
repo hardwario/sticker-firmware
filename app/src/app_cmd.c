@@ -1381,7 +1381,14 @@ static int encode_response(const Response *resp, uint8_t *out, size_t out_cap, s
 
 	pb_ostream_t ostream = pb_ostream_from_buffer(out + 1, out_cap - 1);
 	if (!pb_encode(&ostream, Response_fields, resp)) {
-		LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
+		/* "stream full" is the expected answer to a trial encode (paging
+		 * layouts, alarm trimming probe a budget many times per command), so it
+		 * stays quiet; anything else is a real encoder error. */
+		if (strcmp(PB_GET_ERROR(&ostream), "stream full") == 0) {
+			LOG_DBG("pb_encode: does not fit %zu B", out_cap);
+		} else {
+			LOG_ERR_CALL_FAILED_STR("pb_encode", PB_GET_ERROR(&ostream));
+		}
 		return -EMSGSIZE;
 	}
 
@@ -1637,8 +1644,10 @@ static int settings_paged(Response *resp, uint8_t *out, size_t cap, size_t *out_
  * number of ROMs per page that fits, trim `resp` to page 0 and keep the full
  * result for app_cmd_stream_next(). Returns true when a stream was armed. If
  * not even one ROM fits, `resp` is left alone (the caller's too-large fallback
- * answers BUDGET_TOO_SMALL). */
-static bool w1_scan_arm_pages(Response *resp, size_t cap)
+ * answers BUDGET_TOO_SMALL). Not inlined: its trial Response + buffer (~700 B)
+ * would otherwise sit on app_cmd_handle()'s frame for every command, including
+ * the deep paged-GetInfo path on the 4 KB m_work_q (HIL P5b). */
+static __noinline bool w1_scan_arm_pages(Response *resp, size_t cap)
 {
 	uint8_t tmp[128];
 	size_t len;
@@ -1814,13 +1823,14 @@ static bool info_unit_empty(const Response_Info *in, size_t u)
 /* Greedy layout of the Info units for `cap`; fills in the composition of page
  * `want` (if it exists) and the page count. A unit that does not fit even alone
  * (at the 11 B tier: serial, unix time, an alarm entry) is left out — physical
- * floor, #425; -EMSGSIZE only when no unit fits at all. */
+ * floor, #425; -EMSGSIZE only when no unit fits at all. `r` is the caller's
+ * scratch Response (clobbered): a Response is ~580 B and this runs deep on
+ * m_work_q under app_cmd_handle(), so no extra one lives on this frame. */
 static int info_layout(const struct info_snap *snap, size_t cap, uint32_t want, uint32_t *mask_out,
-		       struct alarm_range *rng_out, uint32_t *count)
+		       struct alarm_range *rng_out, uint32_t *count, Response *r)
 {
 	uint8_t tmp[64];
 	size_t len;
-	Response r;
 	uint32_t cur = 0, mask = 0;
 	struct alarm_range rng = {.snap = snap, .start = 0, .end = 0};
 	size_t units = INFO_U_SCALARS + snap->n_alarms;
@@ -1847,8 +1857,8 @@ static int info_layout(const struct info_snap *snap, size_t cap, uint32_t want, 
 		bool contiguous = !is_alarm || rng.end == rng.start || rng.end == a;
 
 		if (contiguous) {
-			info_page_fill(&r, snap, tmask, &trng, PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
-			if (encode_response(&r, tmp, cap, &len) == 0) {
+			info_page_fill(r, snap, tmask, &trng, PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
+			if (encode_response(r, tmp, cap, &len) == 0) {
 				mask = tmask;
 				rng = trng;
 				continue;
@@ -1863,8 +1873,8 @@ static int info_layout(const struct info_snap *snap, size_t cap, uint32_t want, 
 			arng.start = a;
 			arng.end = a + 1;
 		}
-		info_page_fill(&r, snap, amask, &arng, PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
-		if (encode_response(&r, tmp, cap, &len) != 0) {
+		info_page_fill(r, snap, amask, &arng, PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
+		if (encode_response(r, tmp, cap, &len) != 0) {
 			continue;
 		}
 		if (mask != 0 || rng.end != rng.start) {
@@ -1894,7 +1904,7 @@ static int info_page(uint32_t page, uint8_t *out, size_t out_cap, size_t *out_le
 	uint32_t mask = 0, count;
 	struct alarm_range rng = {.snap = snap};
 	Response r;
-	int ret = info_layout(snap, m_page_stream.cap, page, &mask, &rng, &count);
+	int ret = info_layout(snap, m_page_stream.cap, page, &mask, &rng, &count, &r);
 
 	if (ret) {
 		return ret;
@@ -1907,8 +1917,12 @@ static int info_page(uint32_t page, uint8_t *out, size_t out_cap, size_t *out_le
 }
 
 /* Page a LoRaWAN Info that does not fit `cap`: snapshot it, encode page 0 into
- * `out` and, when more pages follow, arm the stream (*streamed = true). */
-static int info_paged(uint32_t seq, uint8_t *out, size_t cap, size_t *out_len, bool *streamed)
+ * `out` and, when more pages follow, arm the stream (*streamed = true). `r` is
+ * the caller's (already encoded, now dead) Response, reused as scratch: the
+ * GetInfo command path overflowed the 4 KB m_work_q with two more Responses on
+ * this and info_layout()'s frames (HIL P5b, 6 active alarms). */
+static int info_paged(uint32_t seq, uint8_t *out, size_t cap, size_t *out_len, bool *streamed,
+		      Response *r)
 {
 	struct info_snap *snap = &m_page_stream.u.info;
 	struct app_alarm_active list[ACTIVE_ALARM_SNAPSHOT_MAX];
@@ -1931,14 +1945,13 @@ static int info_paged(uint32_t seq, uint8_t *out, size_t cap, size_t *out_len, b
 
 	uint32_t mask = 0;
 	struct alarm_range rng = {.snap = snap};
-	Response r;
-	int ret = info_layout(snap, cap, 0, &mask, &rng, &count);
+	int ret = info_layout(snap, cap, 0, &mask, &rng, &count, r);
 
 	if (ret) {
 		return ret;
 	}
-	info_page_fill(&r, snap, mask, &rng, 0, count);
-	ret = encode_response(&r, out, cap, out_len);
+	info_page_fill(r, snap, mask, &rng, 0, count);
+	ret = encode_response(r, out, cap, out_len);
 	if (ret) {
 		return ret;
 	}
@@ -2019,6 +2032,27 @@ int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
 	return 0;
 }
 
+/* Decode + dispatch in their own frame, so the ~550 B Command is gone again
+ * before app_cmd_handle() encodes and pages the answer (HIL P5b: a paged GetInfo
+ * overflowed the 4 KB m_work_q with the Command still on the stack). Returns the
+ * command's body tag (0 on a decode error, answered BAD_REQUEST). */
+static __noinline pb_size_t decode_and_dispatch(enum app_cmd_transport transport, const uint8_t *in,
+						size_t in_len, Response *resp,
+						enum app_cmd_action *act)
+{
+	Command cmd = Command_init_zero;
+	pb_istream_t istream = pb_istream_from_buffer(in, in_len);
+
+	if (!pb_decode(&istream, Command_fields, &cmd)) {
+		LOG_ERR_CALL_FAILED_STR("pb_decode", PB_GET_ERROR(&istream));
+		resp->seq = 0;
+		make_error(resp, Response_Error_Code_BAD_REQUEST, PB_GET_ERROR(&istream));
+		return 0;
+	}
+	app_cmd_dispatch(transport, &cmd, resp, act);
+	return cmd.which_body;
+}
+
 int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len, uint8_t *out,
 		   size_t out_cap, size_t *out_len, enum app_cmd_action *action)
 {
@@ -2029,23 +2063,15 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	*out_len = 0;
 	enum app_cmd_action act = APP_CMD_ACTION_NONE;
 
-	Command cmd = Command_init_zero;
 	Response resp = Response_init_zero;
+	pb_size_t cmd_body = decode_and_dispatch(transport, in, in_len, &resp, &act);
 
-	pb_istream_t istream = pb_istream_from_buffer(in, in_len);
-	if (!pb_decode(&istream, Command_fields, &cmd)) {
-		LOG_ERR_CALL_FAILED_STR("pb_decode", PB_GET_ERROR(&istream));
-		resp.seq = 0;
-		make_error(&resp, Response_Error_Code_BAD_REQUEST, PB_GET_ERROR(&istream));
-	} else {
-		app_cmd_dispatch(transport, &cmd, &resp, &act);
-
+	if (cmd_body != 0) {
 		/* #409 3d/3e: over LoRaWAN a multi-page GetConfig/GetParam streams
 		 * every remaining page by itself (the host sends one request). NFC keeps
 		 * its host-driven paging (big pages, read in one RF session). */
 		if (transport == APP_CMD_TRANSPORT_LRW &&
-		    (cmd.which_body == Command_get_config_tag ||
-		     cmd.which_body == Command_get_param_tag)) {
+		    (cmd_body == Command_get_config_tag || cmd_body == Command_get_param_tag)) {
 			app_cmd_stream_cancel();
 			if (page_stream_arm(in, in_len, &resp)) {
 				act = APP_CMD_ACTION_PAGE_STREAM;
@@ -2080,21 +2106,24 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	}
 
 	int ret = encode_response(&resp, out, out_cap, out_len);
+	const uint32_t seq = resp.seq;
+	bool info_paging = false;
 
 	if (ret == -EMSGSIZE && resp.which_body == Response_info_tag &&
 	    transport == APP_CMD_TRANSPORT_LRW) {
 		/* #425: a GetInfo that does not fit the payload budget is paged —
 		 * fields and active alarms spread over self-contained Info pages —
-		 * instead of trimmed. */
+		 * instead of trimmed. `resp` is dead now and serves as the scratch. */
 		bool streamed = false;
 
-		ret = info_paged(resp.seq, out, out_cap, out_len, &streamed);
+		info_paging = true;
+		ret = info_paged(seq, out, out_cap, out_len, &streamed, &resp);
 		if (ret == 0 && streamed) {
 			act = APP_CMD_ACTION_PAGE_STREAM;
 		}
 	}
 
-	if (ret == -EMSGSIZE && cmd.which_body == Command_get_settings_tag &&
+	if (ret == -EMSGSIZE && cmd_body == Command_get_settings_tag &&
 	    resp.which_body == Response_config_dump_tag && transport == APP_CMD_TRANSPORT_LRW) {
 		/* GetSettings that does not fit the budget: the same pages as the boot
 		 * settings-info (#425 envelope), carrying the command's seq. */
@@ -2111,6 +2140,9 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	 * than the alarm list. */
 	for (size_t max_alarms = ACTIVE_ALARM_SNAPSHOT_MAX;
 	     ret == -EMSGSIZE && resp.which_body == Response_info_tag && max_alarms-- > 0;) {
+		if (info_paging) {
+			break; /* `resp` is page scratch now, not the full Info */
+		}
 		resp.body.info.active_alarms.arg = (void *)(uintptr_t)max_alarms;
 		ret = encode_response(&resp, out, out_cap, out_len);
 	}
@@ -2119,18 +2151,19 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		/* The composed response doesn't fit the transport buffer. Don't fail
 		 * silently (#93.3) — replace it with a compact Error carrying the same
 		 * seq so the host learns the request couldn't be answered (e.g. an
-		 * over-broad GetParam/GetConfig page). */
+		 * over-broad GetParam/GetConfig page). Reuses `resp` (no second ~580 B
+		 * Response on this frame). */
 		LOG_WRN("Response too large for buffer; sending Error instead");
-		Response err = Response_init_zero;
-		err.seq = resp.seq;
+		resp = (Response)Response_init_zero;
+		resp.seq = seq;
 		/* #409: over LoRaWAN the only reason is the DR payload budget, so say
 		 * so — the host should retry once ADR raises the DR. */
 		if (transport == APP_CMD_TRANSPORT_LRW) {
-			make_error(&err, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
+			make_error(&resp, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
 		} else {
-			make_error(&err, Response_Error_Code_UNKNOWN, "response too large");
+			make_error(&resp, Response_Error_Code_UNKNOWN, "response too large");
 		}
-		ret = encode_response(&err, out, out_cap, out_len);
+		ret = encode_response(&resp, out, out_cap, out_len);
 	}
 	if (ret) {
 		return ret;
@@ -2173,7 +2206,7 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *more
 	int ret = encode_response(&resp, out, out_cap, out_len);
 
 	if (ret == -EMSGSIZE) {
-		ret = info_paged(0, out, out_cap, out_len, more);
+		ret = info_paged(0, out, out_cap, out_len, more, &resp);
 	}
 	return ret;
 }
