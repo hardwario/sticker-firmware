@@ -442,30 +442,30 @@ static const struct {
 	{DUMP_SECTION_LORAWAN, 6, 10, false},    {DUMP_SECTION_LORAWAN, 7, 10, false},
 	{DUMP_SECTION_LORAWAN, 8, 18, true},     {DUMP_SECTION_LORAWAN, 9, 18, true},
 	{DUMP_SECTION_LORAWAN, 10, 6, false},    {DUMP_SECTION_LORAWAN, 11, 18, true},
-	{DUMP_SECTION_LORAWAN, 12, 18, true},    {DUMP_SECTION_LORAWAN, 13, 3, false},
-	{DUMP_SECTION_LORAWAN, 14, 3, false},    {DUMP_SECTION_APPLICATION, 1, 2, false},
-	{DUMP_SECTION_APPLICATION, 2, 3, false}, {DUMP_SECTION_APPLICATION, 3, 4, false},
-	{DUMP_SECTION_APPLICATION, 4, 2, false}, {DUMP_SECTION_APPLICATION, 5, 6, false},
-	{DUMP_SECTION_APPLICATION, 6, 3, false}, {DUMP_SECTION_APPLICATION, 7, 2, false},
-	{DUMP_SECTION_SENSORS, 1, 2, false},     {DUMP_SECTION_SENSORS, 2, 2, false},
-	{DUMP_SECTION_SENSORS, 3, 2, false},     {DUMP_SECTION_SENSORS, 4, 2, false},
-	{DUMP_SECTION_SENSORS, 5, 2, false},     {DUMP_SECTION_SENSORS, 6, 2, false},
-	{DUMP_SECTION_SENSORS, 7, 2, false},     {DUMP_SECTION_SENSORS, 19, 3, false},
-	{DUMP_SECTION_SENSORS, 8, 2, false},     {DUMP_SECTION_SENSORS, 9, 2, false},
-	{DUMP_SECTION_SENSORS, 10, 2, false},    {DUMP_SECTION_SENSORS, 11, 10, false},
-	{DUMP_SECTION_SENSORS, 12, 10, false},   {DUMP_SECTION_SENSORS, 13, 10, false},
-	{DUMP_SECTION_SENSORS, 14, 10, false},   {DUMP_SECTION_SENSORS, 15, 2, false},
-	{DUMP_SECTION_SENSORS, 16, 3, false},    {DUMP_SECTION_SENSORS, 17, 3, false},
-	{DUMP_SECTION_SENSORS, 18, 3, false},    {DUMP_SECTION_ALARMS, 1, 3, false},
-	{DUMP_SECTION_ALARMS, 3, 19, false},     {DUMP_SECTION_ALARMS, 4, 19, false},
-	{DUMP_SECTION_ALARMS, 5, 19, false},     {DUMP_SECTION_ALARMS, 6, 19, false},
-	{DUMP_SECTION_ALARMS, 7, 19, false},     {DUMP_SECTION_ALARMS, 8, 19, false},
-	{DUMP_SECTION_ALARMS, 9, 19, false},     {DUMP_SECTION_ALARMS, 10, 19, false},
-	{DUMP_SECTION_ALARMS, 11, 19, false},    {DUMP_SECTION_ALARMS, 12, 19, false},
-	{DUMP_SECTION_ALARMS, 13, 19, false},    {DUMP_SECTION_ALARMS, 14, 19, false},
-	{DUMP_SECTION_ALARMS, 15, 19, false},    {DUMP_SECTION_ALARMS, 16, 20, false},
-	{DUMP_SECTION_ALARMS, 17, 20, false},    {DUMP_SECTION_ALARMS, 18, 20, false},
-	{DUMP_SECTION_ALARMS, 20, 3, false},
+	{DUMP_SECTION_LORAWAN, 12, 18, true},    {DUMP_SECTION_LORAWAN, 16, 3, false},
+	{DUMP_SECTION_LORAWAN, 13, 3, false},    {DUMP_SECTION_LORAWAN, 14, 3, false},
+	{DUMP_SECTION_APPLICATION, 1, 2, false}, {DUMP_SECTION_APPLICATION, 2, 3, false},
+	{DUMP_SECTION_APPLICATION, 3, 4, false}, {DUMP_SECTION_APPLICATION, 4, 2, false},
+	{DUMP_SECTION_APPLICATION, 5, 6, false}, {DUMP_SECTION_APPLICATION, 6, 3, false},
+	{DUMP_SECTION_APPLICATION, 7, 2, false}, {DUMP_SECTION_SENSORS, 1, 2, false},
+	{DUMP_SECTION_SENSORS, 2, 2, false},     {DUMP_SECTION_SENSORS, 3, 2, false},
+	{DUMP_SECTION_SENSORS, 4, 2, false},     {DUMP_SECTION_SENSORS, 5, 2, false},
+	{DUMP_SECTION_SENSORS, 6, 2, false},     {DUMP_SECTION_SENSORS, 7, 2, false},
+	{DUMP_SECTION_SENSORS, 19, 3, false},    {DUMP_SECTION_SENSORS, 8, 2, false},
+	{DUMP_SECTION_SENSORS, 9, 2, false},     {DUMP_SECTION_SENSORS, 10, 2, false},
+	{DUMP_SECTION_SENSORS, 11, 10, false},   {DUMP_SECTION_SENSORS, 12, 10, false},
+	{DUMP_SECTION_SENSORS, 13, 10, false},   {DUMP_SECTION_SENSORS, 14, 10, false},
+	{DUMP_SECTION_SENSORS, 15, 2, false},    {DUMP_SECTION_SENSORS, 16, 3, false},
+	{DUMP_SECTION_SENSORS, 17, 3, false},    {DUMP_SECTION_SENSORS, 18, 3, false},
+	{DUMP_SECTION_ALARMS, 1, 3, false},      {DUMP_SECTION_ALARMS, 3, 19, false},
+	{DUMP_SECTION_ALARMS, 4, 19, false},     {DUMP_SECTION_ALARMS, 5, 19, false},
+	{DUMP_SECTION_ALARMS, 6, 19, false},     {DUMP_SECTION_ALARMS, 7, 19, false},
+	{DUMP_SECTION_ALARMS, 8, 19, false},     {DUMP_SECTION_ALARMS, 9, 19, false},
+	{DUMP_SECTION_ALARMS, 10, 19, false},    {DUMP_SECTION_ALARMS, 11, 19, false},
+	{DUMP_SECTION_ALARMS, 12, 19, false},    {DUMP_SECTION_ALARMS, 13, 19, false},
+	{DUMP_SECTION_ALARMS, 14, 19, false},    {DUMP_SECTION_ALARMS, 15, 19, false},
+	{DUMP_SECTION_ALARMS, 16, 20, false},    {DUMP_SECTION_ALARMS, 17, 20, false},
+	{DUMP_SECTION_ALARMS, 18, 20, false},    {DUMP_SECTION_ALARMS, 20, 3, false},
 	// END GENERATED DUMP_FIELDS
 };
 
@@ -965,22 +965,25 @@ static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command 
 	/* Device-driven replay: the device streams all matching records back as N
 	 * HistoryFrame uplinks (fPort 85 on LoRaWAN, 0x55 RESPONSE on P2P). The
 	 * first frame is the reply, so leave the response body unset (which_body
-	 * stays 0) to suppress a redundant Ack. Only when nothing replays (empty
-	 * window / DR too low / transport not ready) do we send an Error so the
-	 * host still gets a definitive answer. */
-	bool started = false;
+	 * stays 0) to suppress a redundant Ack. Only when nothing replays do we send
+	 * an Error so the host still gets a definitive answer: BUDGET_TOO_SMALL when
+	 * records exist but not one fits the current budget (#409 3f, retry at a
+	 * higher DR), else HISTORY_UNAVAILABLE (empty window / transport not ready). */
+	int ret = -ENODATA;
 
 #if defined(CONFIG_LORAWAN)
 	if (tp == APP_CMD_TRANSPORT_LRW) {
-		started = app_lrw_start_history_replay(from, to, cmd->seq);
+		ret = app_lrw_history_replay_start(from, to, cmd->seq);
 	}
 #endif
 #if defined(CONFIG_RADIO_P2P)
 	if (tp == APP_CMD_TRANSPORT_P2P) {
-		started = app_p2p_start_history_replay(from, to, cmd->seq);
+		ret = app_p2p_start_history_replay(from, to, cmd->seq) ? 0 : -ENODATA;
 	}
 #endif
-	if (!started) {
+	if (ret == -EMSGSIZE) {
+		make_error(resp, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
+	} else if (ret != 0) {
 		make_error(resp, Response_Error_Code_HISTORY_UNAVAILABLE, "no records");
 	}
 #else
@@ -1384,6 +1387,107 @@ static int encode_response(const Response *resp, uint8_t *out, size_t out_cap, s
 	return 0;
 }
 
+/* #409 A5a: encode Response{ seq, info_lite } — the firmware version, plus the
+ * build type if it still fits. For the 11 B budget tier, where even Info without
+ * active_alarms does not fit. */
+static int encode_info_lite(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	Response resp = Response_init_zero;
+	resp.seq = seq;
+	resp.which_body = Response_info_lite_tag;
+	Response_InfoLite *l = &resp.body.info_lite;
+	l->fw_major = APP_VERSION_MAJOR;
+	l->fw_minor = APP_VERSION_MINOR;
+	l->fw_patch = APP_VERSION_PATCH;
+	l->build_type = (Response_Info_BuildType)APP_BUILD_TYPE;
+
+	int ret = encode_response(&resp, out, out_cap, out_len);
+	if (ret == -EMSGSIZE && l->build_type != 0) {
+		l->build_type = 0; /* proto3 default: omitted on the wire */
+		ret = encode_response(&resp, out, out_cap, out_len);
+	}
+	return ret;
+}
+
+/* #409 3d/3e: LoRaWAN page stream state. The request is kept as raw bytes and
+ * re-dispatched with page = next for every following page, so each page comes
+ * from the exact handler + layout that produced page 0. Only touched from the
+ * LoRaWAN command path (m_work_q). */
+#define PAGE_STREAM_REQ_MAX 64
+static struct {
+	uint8_t req[PAGE_STREAM_REQ_MAX];
+	size_t req_len;
+	uint32_t next;
+	uint32_t count;
+	bool active;
+} m_page_stream;
+
+void app_cmd_stream_cancel(void)
+{
+	m_page_stream.active = false;
+}
+
+/* After a LoRaWAN GetConfig/GetParam: arm the stream when pages remain. */
+static bool page_stream_arm(const uint8_t *in, size_t in_len, const Response *resp)
+{
+	if (resp->which_body != Response_config_dump_tag || in_len > sizeof(m_page_stream.req)) {
+		return false;
+	}
+	const Response_ConfigDump *cd = &resp->body.config_dump;
+
+	if (cd->page_index + 1 >= cd->page_count) {
+		return false;
+	}
+	memcpy(m_page_stream.req, in, in_len);
+	m_page_stream.req_len = in_len;
+	m_page_stream.next = cd->page_index + 1;
+	m_page_stream.count = cd->page_count;
+	m_page_stream.active = true;
+	return true;
+}
+
+int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	if (!out || !out_len) {
+		return -EINVAL;
+	}
+	if (!m_page_stream.active || m_page_stream.next >= m_page_stream.count) {
+		m_page_stream.active = false;
+		return -ENODATA;
+	}
+
+	Command cmd = Command_init_zero;
+	Response resp = Response_init_zero;
+	enum app_cmd_action act = APP_CMD_ACTION_NONE;
+	pb_istream_t istream = pb_istream_from_buffer(m_page_stream.req, m_page_stream.req_len);
+
+	if (!pb_decode(&istream, Command_fields, &cmd)) {
+		m_page_stream.active = false;
+		return -EINVAL;
+	}
+	if (cmd.which_body == Command_get_config_tag) {
+		cmd.body.get_config.has_page = true;
+		cmd.body.get_config.page = m_page_stream.next;
+	} else if (cmd.which_body == Command_get_param_tag) {
+		cmd.body.get_param.has_page = true;
+		cmd.body.get_param.page = m_page_stream.next;
+	} else {
+		m_page_stream.active = false;
+		return -EINVAL;
+	}
+
+	app_cmd_dispatch(APP_CMD_TRANSPORT_LRW, &cmd, &resp, &act);
+	int ret = encode_response(&resp, out, out_cap, out_len);
+	if (ret) {
+		m_page_stream.active = false;
+		return ret;
+	}
+	if (++m_page_stream.next >= m_page_stream.count) {
+		m_page_stream.active = false;
+	}
+	return 0;
+}
+
 int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len, uint8_t *out,
 		   size_t out_cap, size_t *out_len, enum app_cmd_action *action)
 {
@@ -1404,6 +1508,26 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		make_error(&resp, Response_Error_Code_BAD_REQUEST, PB_GET_ERROR(&istream));
 	} else {
 		app_cmd_dispatch(transport, &cmd, &resp, &act);
+
+		/* #409 3d/3e: over LoRaWAN a multi-page GetConfig/GetParam streams
+		 * every remaining page by itself (the host sends one request). NFC keeps
+		 * its host-driven paging (big pages, read in one RF session). */
+		if (transport == APP_CMD_TRANSPORT_LRW &&
+		    (cmd.which_body == Command_get_config_tag ||
+		     cmd.which_body == Command_get_param_tag)) {
+			app_cmd_stream_cancel();
+			if (page_stream_arm(in, in_len, &resp)) {
+				act = APP_CMD_ACTION_PAGE_STREAM;
+			}
+		}
+	}
+
+	/* #409 3a: over LoRaWAN an Error carries code + fault_field only. The detail
+	 * string (up to 32 B) made even an Error too big for the 11 B budget tier
+	 * (US915 DR0, AU915/AS923 DR2), so a failed command went unanswered. NFC
+	 * keeps the human-readable detail. */
+	if (transport == APP_CMD_TRANSPORT_LRW && resp.which_body == Response_error_tag) {
+		resp.body.error.detail[0] = '\0';
 	}
 
 	/* A handler may opt out of an immediate response by leaving the oneof unset
@@ -1430,6 +1554,13 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		ret = encode_response(&resp, out, out_cap, out_len);
 	}
 
+	/* #409 A5a: a LoRaWAN GetInfo that does not fit even without alarms answers
+	 * with InfoLite (firmware version) instead of an Error. */
+	if (ret == -EMSGSIZE && resp.which_body == Response_info_tag &&
+	    transport == APP_CMD_TRANSPORT_LRW) {
+		ret = encode_info_lite(resp.seq, out, out_cap, out_len);
+	}
+
 	if (ret == -EMSGSIZE) {
 		/* The composed response doesn't fit the transport buffer. Don't fail
 		 * silently (#93.3) — replace it with a compact Error carrying the same
@@ -1438,7 +1569,13 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		LOG_WRN("Response too large for buffer; sending Error instead");
 		Response err = Response_init_zero;
 		err.seq = resp.seq;
-		make_error(&err, Response_Error_Code_UNKNOWN, "response too large");
+		/* #409: over LoRaWAN the only reason is the DR payload budget, so say
+		 * so — the host should retry once ADR raises the DR. */
+		if (transport == APP_CMD_TRANSPORT_LRW) {
+			make_error(&err, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
+		} else {
+			make_error(&err, Response_Error_Code_UNKNOWN, "response too large");
+		}
 		ret = encode_response(&err, out, out_cap, out_len);
 	}
 	if (ret) {
@@ -1451,10 +1588,25 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	return 0;
 }
 
-int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
+int app_cmd_build_budget_error(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len)
 {
 	if (!out || !out_len) {
 		return -EINVAL;
+	}
+
+	Response resp = Response_init_zero;
+	resp.seq = seq;
+	make_error(&resp, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
+	return encode_response(&resp, out, out_cap, out_len);
+}
+
+int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *lite)
+{
+	if (!out || !out_len) {
+		return -EINVAL;
+	}
+	if (lite) {
+		*lite = false;
 	}
 
 	Response resp = Response_init_zero;
@@ -1473,6 +1625,13 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len)
 	for (size_t max_alarms = ACTIVE_ALARM_SNAPSHOT_MAX; ret == -EMSGSIZE && max_alarms-- > 0;) {
 		fill_info(APP_CMD_TRANSPORT_LRW, &resp.body.info, max_alarms);
 		ret = encode_response(&resp, out, out_cap, out_len);
+	}
+
+	if (ret == -EMSGSIZE) {
+		ret = encode_info_lite(0, out, out_cap, out_len);
+		if (ret == 0 && lite) {
+			*lite = true;
+		}
 	}
 
 	return ret;

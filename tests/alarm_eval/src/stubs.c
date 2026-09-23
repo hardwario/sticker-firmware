@@ -115,6 +115,9 @@ void app_report_trigger(void)
 
 struct app_cmd_alarm_event test_alarm_events[16];
 size_t test_alarm_event_count;
+/* Max events one encoded frame may hold (#409 3b): more -> -EMSGSIZE, like a
+ * small DR budget. 0 = not even one fits (the 11 B tier). */
+size_t test_alarm_max_events = SIZE_MAX;
 
 int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
@@ -125,6 +128,9 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 	(void)time_synced;
 	if (!out || !out_len || out_cap == 0) {
 		return -EINVAL;
+	}
+	if (n_events > test_alarm_max_events) {
+		return -EMSGSIZE;
 	}
 	for (size_t i = 0; i < n_events; i++) {
 		if (test_alarm_event_count < ARRAY_SIZE(test_alarm_events)) {

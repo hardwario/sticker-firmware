@@ -7,6 +7,7 @@
  */
 
 #include "app_cmd.h"
+#include "app_version.h"
 #include "app_config.h"
 #include "app_config_ingest.h"
 #include "app_sensor.h"
@@ -387,7 +388,7 @@ ZTEST(cmd, test_build_info)
 	/* get_info reads the cached sample voltage, not a fresh ADC read. */
 	g_app_sensor_data.voltage = 3.3f;
 
-	int ret = app_cmd_build_info(out, sizeof(out), &out_len);
+	int ret = app_cmd_build_info(out, sizeof(out), &out_len, NULL);
 	zassert_equal(ret, 0, "build_info ret %d", ret);
 
 	/* Skip the APP_PROTO_VERSION prefix (#55). */
@@ -515,7 +516,7 @@ ZTEST(cmd, test_build_info_claim_token_omitted_over_lrw)
 	reset_cfg();
 	memcpy(g_app_config.claim_token, token, sizeof(token));
 
-	zassert_equal(app_cmd_build_info(out, sizeof(out), &out_len), 0, "build_info");
+	zassert_equal(app_cmd_build_info(out, sizeof(out), &out_len, NULL), 0, "build_info");
 	Response r = Response_init_zero;
 	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
@@ -673,14 +674,14 @@ ZTEST(cmd, test_build_info_trims_alarms_over_dr_budget)
 	test_set_active_alarm_count(5);
 
 	/* Baseline: plenty of room, all 5 alarms present. */
-	int ret = app_cmd_build_info(out, sizeof(out), &full_len);
+	int ret = app_cmd_build_info(out, sizeof(out), &full_len, NULL);
 	zassert_equal(ret, 0, "baseline build_info ret %d", ret);
 	zassert_equal(count_info_active_alarms(out, full_len), 5,
 		      "expected all 5 alarms unconstrained");
 
 	/* One byte short of the untrimmed size: must still succeed, with fewer
 	 * alarms (dropping even one entry frees far more than 1 B of headroom). */
-	ret = app_cmd_build_info(out, full_len - 1, &out_len);
+	ret = app_cmd_build_info(out, full_len - 1, &out_len, NULL);
 	zassert_equal(ret, 0, "trimmed build_info ret %d", ret);
 	zassert_true(out_len <= full_len - 1, "out_len %zu over cap %zu", out_len, full_len - 1);
 	size_t trimmed_count = count_info_active_alarms(out, out_len);
@@ -695,7 +696,7 @@ ZTEST(cmd, test_build_info_trims_alarms_over_dr_budget)
 
 	/* A cap too small even for zero alarms genuinely fails -- no silent
 	 * truncation of the rest of Info. */
-	ret = app_cmd_build_info(out, 2, &out_len);
+	ret = app_cmd_build_info(out, 2, &out_len, NULL);
 	zassert_equal(ret, -EMSGSIZE, "expected -EMSGSIZE for an impossible cap, got %d", ret);
 }
 
@@ -1429,6 +1430,178 @@ ZTEST(cmd, test_lrw_region_writable_excludes_vendor)
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE,
 		      "C2 REGRESSION: EXPECTED NOT_WRITABLE over vendor; code=%d",
 		      r.body.error.code);
+}
+
+/* #409 3a: over LoRaWAN an Error carries code + fault_field only — the detail
+ * string made even an Error too big for the 11 B budget tier. NFC keeps it. */
+ZTEST(cmd, test_error_detail_omitted_over_lrw)
+{
+	Response r;
+	/* seq3 set_param{ application{ interval_report=10 } } — below min 60 */
+	const char *hex = "080312041202180a";
+
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_LRW, hex, &r);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.fault_field, 203, "fault_field %u", r.body.error.fault_field);
+	zassert_equal(r.body.error.detail[0], '\0', "detail must be omitted over LRW: '%s'",
+		      r.body.error.detail);
+
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_NFC, hex, &r);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_not_equal(r.body.error.detail[0], '\0', "detail must stay over NFC");
+}
+
+/* #409 3a: a response that does not fit the 11 B budget tier (US915 DR0, AU915 /
+ * AS923 DR2) falls back to an Error that itself fits, so the host always gets an
+ * answer. Before, the fallback carried "response too large" (25 B) and failed
+ * too, leaving the command unanswered. */
+ZTEST(cmd, test_too_large_fallback_fits_11b_budget)
+{
+	/* seq2 get_param{ lorawan_field=[6 deveui, 7 joineui] } — ~27 B response. */
+	uint8_t in[16], out[11];
+	size_t in_len = unhex("08021a040a020607", in, sizeof(in));
+	size_t out_len = 0;
+
+	reset_cfg();
+	int ret =
+		app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len, NULL);
+	zassert_equal(ret, 0, "fallback Error must fit 11 B, ret %d", ret);
+	zassert_true(out_len >= 1 && out_len <= sizeof(out), "out_len %zu", out_len);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "Response decode failed");
+	zassert_equal(r.seq, 2, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code %d",
+		      r.body.error.code);
+}
+
+/* #409 3f: the unsolicited BUDGET_TOO_SMALL Error (history replay stopped by a
+ * DR drop) keeps the request seq and fits the 11 B budget tier. */
+ZTEST(cmd, test_build_budget_error_fits_11b)
+{
+	uint8_t out[11];
+	size_t out_len = 0;
+
+	zassert_equal(app_cmd_build_budget_error(300, out, sizeof(out), &out_len), 0, "ret");
+	zassert_true(out_len <= sizeof(out), "out_len %zu", out_len);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_equal(r.seq, 300, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.detail[0], '\0', "no detail");
+}
+
+/* #409 A5a: at the 11 B budget tier even Info without alarms does not fit;
+ * app_cmd_build_info() falls back to InfoLite (firmware version) and reports it
+ * via *lite so app_lrw can send the full Info once the DR rises. */
+ZTEST(cmd, test_build_info_falls_back_to_info_lite_at_11b)
+{
+	uint8_t out[11];
+	size_t out_len = 0;
+	bool lite = false;
+
+	reset_cfg();
+	g_app_config.serial_number = 1234567890;
+	int ret = app_cmd_build_info(out, sizeof(out), &out_len, &lite);
+	zassert_equal(ret, 0, "InfoLite must fit 11 B, ret %d", ret);
+	zassert_true(lite, "lite flag not set");
+	zassert_true(out_len <= sizeof(out), "out_len %zu", out_len);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_equal(r.which_body, Response_info_lite_tag, "expected InfoLite, which=%d",
+		      r.which_body);
+	zassert_equal(r.body.info_lite.fw_major, APP_VERSION_MAJOR, "fw_major");
+	zassert_equal(r.body.info_lite.fw_minor, APP_VERSION_MINOR, "fw_minor");
+	zassert_equal(r.body.info_lite.fw_patch, APP_VERSION_PATCH, "fw_patch");
+
+	/* With room for the full Info the flag stays clear. */
+	uint8_t big[128];
+	ret = app_cmd_build_info(big, sizeof(big), &out_len, &lite);
+	zassert_equal(ret, 0, "full build_info ret %d", ret);
+	zassert_false(lite, "lite flag set with a big buffer");
+}
+
+/* #409 A5a: a GetInfo command over LoRaWAN at 11 B answers with InfoLite
+ * (keeping the seq), not an Error. */
+ZTEST(cmd, test_get_info_over_lrw_answers_info_lite_at_11b)
+{
+	uint8_t in[8], out[11];
+	size_t in_len = unhex("08072200", in, sizeof(in)); /* seq7 get_info */
+	size_t out_len = 0;
+
+	reset_cfg();
+	g_app_config.serial_number = 1234567890;
+	int ret =
+		app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len, NULL);
+	zassert_equal(ret, 0, "ret %d", ret);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_equal(r.seq, 7, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_info_lite_tag, "expected InfoLite, which=%d",
+		      r.which_body);
+	zassert_equal(r.body.info_lite.fw_major, APP_VERSION_MAJOR, "fw_major");
+}
+
+/* #409 3d/3e: a multi-page GetConfig over LoRaWAN is answered with page 0 and
+ * APP_CMD_ACTION_PAGE_STREAM; app_cmd_stream_next() then yields pages 1..N-1
+ * of the same request (same seq, consistent page_count), then -ENODATA. NFC
+ * keeps host-driven paging (no stream). */
+ZTEST(cmd, test_get_config_streams_all_pages_over_lrw)
+{
+	uint8_t in[8], out[64];
+	size_t in_len = unhex("08092a00", in, sizeof(in)); /* seq9 get_config{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	Response r;
+	pb_istream_t is;
+
+	reset_cfg();
+	g_app_config.interval_report = 900;
+	g_app_config.interval_sample = 60;
+
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 51, &out_len, &action),
+		      0, "handle");
+	r = (Response)Response_init_zero;
+	is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode page 0");
+	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
+	uint32_t count = r.body.config_dump.page_count;
+	zassert_true(count > 1, "test needs a multi-page config, got %u", count);
+	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
+
+	for (uint32_t p = 1; p < count; p++) {
+		zassert_equal(app_cmd_stream_next(out, 51, &out_len), 0, "page %u", p);
+		zassert_true(out_len <= 51, "page %u is %zu B", p, out_len);
+		r = (Response)Response_init_zero;
+		is = pb_istream_from_buffer(out + 1, out_len - 1);
+		zassert_true(pb_decode(&is, Response_fields, &r), "decode page %u", p);
+		zassert_equal(r.seq, 9, "seq %u on page %u", r.seq, p);
+		zassert_equal(r.body.config_dump.page_index, p, "page_index");
+		zassert_equal(r.body.config_dump.page_count, count, "page_count drift");
+	}
+	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "stream must end");
+
+	/* NFC: no stream, the host pages itself. */
+	action = APP_CMD_ACTION_NONE;
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, in, in_len, out, sizeof(out), &out_len,
+				     &action),
+		      0, "nfc handle");
+	zassert_equal(action, APP_CMD_ACTION_NONE, "no stream over NFC");
+	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "no NFC stream");
 }
 
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);
