@@ -940,7 +940,7 @@ The three yellow network states form a **severity scale**: radio-off (1× yellow
 | Pattern | Meaning |
 |---------|---------|
 | 🔴→🟡→🟢 carousel (once) | Boot self-test (exercises all three LEDs) |
-| 🟢 green ×10 | NFC config applied (success) |
+| 🟢 green ×10 | NFC config applied (success) — v1.4.0 only; v1.5.0 shows green + yellow 2 s before the reboot |
 | 🟠 orange ×5 | Entering calibration mode |
 | 🟠 orange, once/s | Calibration mode running |
 | 🟢 + 🟠 green and orange | **Input activity** — PIR / hall / digital input / accelerometer activation or release |
@@ -948,6 +948,11 @@ The three yellow network states form a **severity scale**: radio-off (1× yellow
 The input-event LED is a **commissioning diagnostic**: it blinks only for the first hour after power-up (rate-limited to 2/s), then goes quiet. It shows **green and orange together** (a two-colour blink, so it can't be mistaken for the single-yellow radio-off heartbeat). The firmware does drive the two colours in a different order for an activation (0→1) versus a release (1→0), but the order is **not visually distinguishable in practice** — treat any green+orange blink simply as "an input changed".
 
 **NFC interaction**
+
+> **Superseded in v1.5.0 (#313/#414).** With the FTM mailbox the NFC LED shows: phone detected →
+> green ≤ 5 s, session running → green blink, session end → green + yellow 2 s (last exchange OK)
+> or red 2 s (last exchange failed); reboot-type commands show the result, then reboot (no
+> pre-reboot green ×10). See `doc/version 1.5.md` §4 "LED during a tap".
 
 An NFC exchange with a phone shows a four-step sequence so an operator can follow it:
 

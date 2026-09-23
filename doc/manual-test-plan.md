@@ -1720,30 +1720,32 @@ across reboot/reflash (NVS `clm/state`); upgrading a v1.4.x unit migrates `unset
 > `get_info` each latched `consumed (2)`. Under #415 the arm is gone (default is `active`) and only
 > `claim_done` closes it — re-run the prompt above.
 
-### N11 — Rejected tap blinks red, not green (#315)
+### N11 — NFC LED during a mailbox tap (#315, v1.5.0 #414)
 
-**Goal:** a command that fails authentication is visually distinguishable from one that succeeded.
-Both encrypted channels (`hio.stck:cmd` keyed by `secret_key`, `hio.stck:vnd` keyed by
-`vendor_token`) write **nothing** back to the tag when the frame is rejected — wrong key, stale or
-out-of-window `nonce_counter`, unprovisioned (all-zero) key, malformed frame — so before #315 the
-green "servicing" blink simply kept running until the RF-quiet backstop and a failed tap looked
-exactly like a successful one.
-**Observable:** on rejection the green fast blink is replaced by a **red fast blink** (same ~90 ms
-cadence) held ~2 s, then the LED clears; RTT shows `-> command rejected: <errno>` (or
-`-> vendor command rejected:`) for the same tap. An *authenticated* command that merely fails at the
-application level (e.g. `NOT_WRITABLE`) is **not** a rejection: it returns an encrypted `error`
-response and still shows the reply-ready green+yellow (`doc/version 1.4.md` §16).
+**Goal:** an operator holding the phone can tell a successful tap from a failed one by the LED
+alone (`doc/version 1.5.md` §4 "LED during a tap"). The firmware sends **no reply** to a frame it
+cannot authenticate (wrong `secret_key` / `vendor_token`, stale or out-of-window `nonce_counter`,
+unknown channel), so without the LED a failed tap looks like a slow one.
+**Observable:**
+- phone on the tag, no mailbox session → **green**, off after ≤ 5 s (even if the phone stays);
+- mailbox session running → **green blink**;
+- session end (3 s idle / `MB_EN` cleared / field off), last exchange OK → **green + yellow 2 s**, then off;
+- last exchange rejected, or its reply never read (phone lifted too early) → **red 2 s**, then off;
+- a rejection followed by a successful exchange (app resync) ends **green + yellow** (last decides);
+- an authenticated `Response.error` (e.g. `NOT_WRITABLE`) counts as OK;
+- a reboot-type command (`set_param save=true`, `reboot`, resets, `set_secret_key`) shows
+  **green + yellow 2 s, then reboots** (boot carousel follows; no pre-reboot green ×10);
+- never an orange blend (red + green) between states.
 
 **Prompt for Claude:**
-> On the debug build over RTT, inject a *tampered* encrypted `hio.stck:cmd` frame (take a valid
-> hand-crafted frame — same recipe as N9/N10 — and flip one ciphertext byte so the CCM tag fails)
-> via sequential `nfc write` calls, then `nfc check`. Confirm RTT reports the rejection
-> (`handle_encrypted_cmd` failed / `-> command rejected: -5`) and that the red LED is driven
-> instead of green: read the LED GPIO state over J-Link (or watch the unit) during the ~2 s window,
-> then confirm all three channels are off afterwards. Repeat with a **stale** counter (`<=` the
-> stored high-water → `-EACCES`) and with a `hio.stck:vnd` frame under a wrong `vendor_token`.
-> Finally send one *valid* command and confirm the normal green → green+yellow sequence still
-> happens (no red, no orange blend from a leftover red channel). Report each outcome.
+> Release-like build, SWD detached (Q14). Drive the mailbox from the phone bench
+> (`nfc-proxy-app` + `sticker_mailbox_test.py`, or the Manager-App mailbox transport) and watch
+> the unit (or read the LED GPIOs over J-Link between taps). (1) Hold the phone without enabling the
+> mailbox: green, off within 5 s. (2) `getinfo` loop of 5: green blink during, green + yellow 2 s at
+> the end. (3) One frame with a wrong key: red 2 s at the end; RTT shows `mb: request rejected`.
+> (4) Wrong-key frame, then `get_basic_info` + a correct frame in the same session: green + yellow.
+> (5) Send a request and lift before reading the reply: red. (6) `setparam --save`: green + yellow
+> 2 s, then reboot + boot carousel. Report each outcome.
 
 - [ ] Pass
 
