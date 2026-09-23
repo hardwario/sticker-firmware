@@ -89,7 +89,7 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 	if (src->has_region && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(1);
 	} else if (src->has_region) {
-		if ((int)src->region >= 0 && (int)src->region <= 2) {
+		if ((int)src->region >= 0 && (int)src->region <= 3) {
 			config->lrw_region = (enum app_config_lrw_region)src->region;
 		} else {
 			FAULT(1);

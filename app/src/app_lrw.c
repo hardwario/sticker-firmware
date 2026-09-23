@@ -1996,6 +1996,13 @@ static int resolve_region(enum lorawan_region *region)
 			return 0;
 		}
 		break;
+	case APP_CONFIG_LRW_REGION_AS923:
+		/* #409 A6: channel plan AS923-1 (loramac-node default); no sub-band. */
+		if (IS_ENABLED(CONFIG_LORAMAC_REGION_AS923)) {
+			*region = LORAWAN_REGION_AS923;
+			return 0;
+		}
+		break;
 	default:
 		LOG_ERR("Invalid lrw-region: %d", g_app_config.lrw_region);
 		return -EINVAL;

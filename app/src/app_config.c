@@ -293,7 +293,7 @@ static int h_commit(void)
 	if (m_app_config.alarm_limit > 3600) {
 		m_app_config.alarm_limit = 3600;
 	}
-	if ((int)m_app_config.lrw_region < 0 || (int)m_app_config.lrw_region > 2) {
+	if ((int)m_app_config.lrw_region < 0 || (int)m_app_config.lrw_region > 3) {
 		m_app_config.lrw_region = 0;
 	}
 	if ((int)m_app_config.radio_mode < 0 || (int)m_app_config.radio_mode > 2) {
@@ -670,6 +670,9 @@ static void print_lrw_region(const struct shell *shell)
 		break;
 	case APP_CONFIG_LRW_REGION_AU915:
 		str = "au915";
+		break;
+	case APP_CONFIG_LRW_REGION_AS923:
+		str = "as923";
 		break;
 	default:
 		str = "unknown";
@@ -1266,7 +1269,7 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 
 	/* `help`/`?` lists the accepted tokens. */
 	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
-		shell_print(shell, "valid values: eu868, us915, au915");
+		shell_print(shell, "valid values: eu868, us915, au915, as923");
 		return 0;
 	}
 
@@ -1276,9 +1279,11 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_US915;
 	} else if (!strcmp(argv[1], "au915")) {
 		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_AU915;
+	} else if (!strcmp(argv[1], "as923")) {
+		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_AS923;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
-		shell_print(shell, "valid values: eu868, us915, au915");
+		shell_print(shell, "valid values: eu868, us915, au915, as923");
 		return -EINVAL;
 	}
 
@@ -1741,7 +1746,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_alarm_limit, 1, 1),
 
 	SHELL_CMD_ARG(lrw-region, NULL,
-	              "Get/Set LoRaWAN region (eu868/us915/au915).",
+	              "Get/Set LoRaWAN region (eu868/us915/au915/as923).",
 	              cmd_lrw_region, 1, 1),
 
 	SHELL_CMD_ARG(radio-mode, NULL,

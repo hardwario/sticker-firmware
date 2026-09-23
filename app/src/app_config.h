@@ -21,6 +21,7 @@ enum app_config_lrw_region {
 	APP_CONFIG_LRW_REGION_EU868 = 0,
 	APP_CONFIG_LRW_REGION_US915 = 1,
 	APP_CONFIG_LRW_REGION_AU915 = 2,
+	APP_CONFIG_LRW_REGION_AS923 = 3,
 };
 
 enum app_config_lrw_datarate {

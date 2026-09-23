@@ -143,7 +143,7 @@ var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
 // hides but which a downlink may legitimately set.
 var _LRW_HEX_ENC = { deveui: 6, joineui: 7, nwkkey: 8, appkey: 9, devaddr: 10, nwkskey: 11, appskey: 12 };
 var _LRW_ENUM = {
-  region: { EU868: 0, US915: 1, AU915: 2 },
+  region: { EU868: 0, US915: 1, AU915: 2, AS923: 3 },
   network: { PUBLIC: 0, PRIVATE: 1 },
   activation: { OTAA: 0, ABP: 1 },
   radio_mode: { OFF: 0, LORAWAN: 1, P2P: 2 },

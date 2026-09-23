@@ -13,6 +13,7 @@ message AppConfigMessage {
             EU868 = 0;
             US915 = 1;
             AU915 = 2;
+            AS923 = 3;
         }
 
         enum Network {

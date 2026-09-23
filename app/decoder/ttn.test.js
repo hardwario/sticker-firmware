@@ -948,6 +948,16 @@ test("set_param lorawan.radio_mode (enum) + link-check fields round-trip (#H2)",
   assert.equal(back.set_param.lorawan.link_check_fail_rejoin, 3);
 });
 
+// lrw_region AS923 (#409 A6) = 3 on the wire.
+test("set_param lorawan.region AS923 round-trips (#409)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 6, command: "set_param", set_param: { lorawan: { region: "AS923" } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.lorawan.region, 3);
+});
+
 // lrw_datarate (#409 A3): enum on the wire, AUTO = 0 and DRn = n + 1.
 test("set_param lorawan.datarate (enum) round-trips (#409)", () => {
   const enc = codec.encodeDownlink({

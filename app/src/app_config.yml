@@ -18,6 +18,11 @@ enums:
     - name: AU915
       value: 2
       shell: au915
+    # #409 A6. Channel plan group AS923-1 (loramac-node default; compile-time only,
+    # REGION_AS923_DEFAULT_CHANNEL_PLAN). Dwell time on by default: DR2 = 11 B.
+    - name: AS923
+      value: 3
+      shell: as923
 
   # Manual uplink datarate (#409 A3). AUTO leaves the stack/ADR in charge; DRn is
   # the region's DRn (value = n + 1, so AUTO can be the proto3 default 0). DR8+
@@ -414,7 +419,7 @@ parameters:
     type: enum
     enum: lrw_region
     persistent: [device_reset]
-    help: "Get/Set LoRaWAN region (eu868/us915/au915)."
+    help: "Get/Set LoRaWAN region (eu868/us915/au915/as923)."
 
   - name: radio_mode
     proto_group: lorawan
