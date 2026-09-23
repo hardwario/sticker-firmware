@@ -49,9 +49,15 @@ whole message. Decided against on 2026-09-23 in favour of self-contained pages.
 2. **Absent = single frame.** A response that fits carries neither field (proto3 omits 0),
    so an unpaged answer is byte-identical to today's. `page_count >= 2` means "page
    `page_index` (0-based) of `page_count`".
-3. **Every page is a complete message.** Same `seq`, same body type, a subset of the body.
-   A decoder handles each page on its own; a host that wants the whole answer merges the
-   pages with the same `seq` (disjoint field sets / list ranges — no overlap, no conflict).
+3. **Every page is a complete message — decodable with no memory.** Same `seq`, same body
+   type, a subset of the body, plus everything needed to interpret that subset (e.g. every
+   history page carries its own `t0_unix` / `interval_s` / `present`, every alarm page its own
+   `base_time` / `total` / `time_synced`). The TTN payload formatter and the ChirpStack codec
+   are stateless — they see one uplink at a time and keep nothing between invocations — so
+   the decoder never waits for, stores or merges pages: each uplink yields a correct,
+   meaningful object on its own, labelled `pages: "i/N"`. Merging pages (disjoint field sets /
+   list ranges, no overlap, no conflict) is optional and is the job of the application
+   behind the LNS, keyed by `seq`.
 4. **Device-driven on the radio, host-driven on NFC.** Over a radio transport the device
    answers the requested page (0 unless a `page` was given) and then sends the remaining pages
    by itself. Over NFC the phone keeps asking for a page (NFC pages are ~450 B, so only big
@@ -132,14 +138,24 @@ command answer takes exactly the radio path above.
 
 ## 5. Host side
 
+**Hard constraint: the LNS decoders are stateless.** `ttn.js` runs as the TTN payload
+formatter and as the ChirpStack codec (same `decodeUplink()`), one uplink per call, with no
+storage between calls. The design must never need cross-uplink memory in the decoder:
+
 - **`ttn.js`:** read `page_index`/`page_count` from the envelope (and from `AlarmReport`); add
-  a display field `pages: "1/5"` (1-based) whenever `page_count >= 2`; on a page, emit only the
-  fields actually present (no default zeros — an Info page without `fw_major` must not read as
-  firmware 0.0.0). Keep decoding the deprecated `ConfigDump`/`HistoryFrame` numbering for older
-  firmware. Drop `info_lite`. `AlarmReport.truncated` is only meaningful when unpaged.
-- **proximos-v2 (Hub decoder, Rust):** merge pages by (DevEUI, fPort, `seq`) — for
-  `AlarmReport` by `base_time`; a page set is complete when `page_count` distinct indices
-  arrived. Issue to be filed there (decoder-parity tracking already exists: proximos-v2#90).
+  a display field `pages: "1/5"` (1-based) whenever `page_count >= 2`; decode the page's
+  content exactly like an unpaged message of that type, but emit only the fields actually
+  present (no default zeros — an Info page without `fw_major` must not read as firmware
+  0.0.0). No buffering, no reassembly, no global state. Keep decoding the deprecated
+  `ConfigDump`/`HistoryFrame` numbering for older firmware. Drop `info_lite`.
+  `AlarmReport.truncated` is only meaningful when unpaged. Tests: every paged vector decodes
+  on its own; decoding page 2 before page 1 (or without page 1) gives the same result.
+- **Application side (optional merge):** a consumer that wants the whole answer — the Hub
+  (proximos-v2, Rust decoder behind ChirpStack), a TTN integration, a backend — merges the
+  decoded pages by (DevEUI, fPort, `seq`), for `AlarmReport` by `base_time`; complete when
+  `page_count` distinct indices arrived. Nothing breaks for a consumer that ignores `pages`:
+  it just sees several partial answers. Issue for proximos-v2 to be filed (decoder-parity
+  tracking already exists: proximos-v2#90).
 - **Manager-App (NFC):** GetConfig/GetParam page count now comes from the envelope
   (`Response.page_count`, absent = 1) instead of `ConfigDump.page_count`; W1Scan / Info never
   page over NFC in practice. Coordinate with apps/manager before this lands.
