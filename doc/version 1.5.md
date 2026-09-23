@@ -506,6 +506,14 @@ that ignores `pages` just sees several partial answers.
 PR #426 on `feat-p2p`): an answer that does not fit one 0x55 RESPONSE (64 B) is streamed
 as pages with the same `seq`; the P2P central must accept several 0x55 with one `seq`.
 
+**Duty cycle (host guidance).** At EU868 DR0 a page is ~2.1 s of SF12 airtime, so a
+6-page GetConfig uses about a third of the 36 s/h budget of its sub-band; once the budget
+is spent, LoRaMac holds **every** uplink (pages, telemetry, alarms) until its hourly window
+resets (HW-seen: ~50 min). The firmware does not throttle streams — the host must: no
+repeated full GetConfig/GetParam at SF11/SF12 (ask only for the keys needed, wait for a
+higher DR, or use NFC), no immediate re-request of a missing page (it may just be waiting
+for duty-cycle credit), and page-assembly timeouts of ≥ 1 h at a low DR.
+
 Cost: release about +1.8 KB flash, +128 B RAM.
 
 ---
