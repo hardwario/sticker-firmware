@@ -13,6 +13,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
 | LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
 | LoRaWAN | **Fixed** — LoRaWAN glue in the Zephyr fork (`sticker-zephyr` `v4.3.0-sticker2-branch`, #421): a (re)join no longer returns the stale result of an earlier link-check / device-time confirm (L-7, #241); MAC-confirm waits are bounded (`-ETIMEDOUT` instead of a wedged `m_work_q`, #181); all LoRaMac access is serialised by one MAC lock (#241). |
+| NFC | **New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2), so an installer with a phone can judge the link at the mounting spot. |
 
 ---
 
@@ -242,6 +243,34 @@ reads LoRaMac's still-uninitialised crypto context (it showed a garbage FCntUp).
 - **Rejoin:** after a network loss, the first rejoin once the network was back succeeded.
 
 See `doc/manual-test-plan.md` **L17** and `doc/plan/421 - LoRaWAN glue fixes in sticker-zephyr.md`.
+
+
+---
+
+## 6. Last-downlink link quality in the NFC GetInfo (#409 A2)
+
+An installer with only a phone (Manager-App over NFC) has no view of the network
+server, so it could not tell whether the radio link is good where the device is
+mounted. The NFC `Info` now carries the link quality of the **last downlink the device
+received**, as measured by the device:
+
+| Field | Type | Meaning |
+|---|---|---|
+| 16 `last_dl_rssi` | sint32 | RSSI of the last downlink, dBm |
+| 17 `last_dl_snr` | sint32 | SNR of the last downlink, dB |
+| 18 `last_dl_age_s` | uint32 | seconds since that downlink was received |
+
+- **NFC only** — like `lrw_state` and `dev_eui`. The LoRaWAN `Info` does not carry them:
+  the network server already has the uplink RSSI/SNR per gateway and, with `DevStatusAns`
+  (#419), the device-side downlink SNR margin and battery.
+- **Always with its age.** A Class A device only receives a downlink when the network
+  sends one, so the reading can be hours old. The values reflect any downlink, including
+  MAC-only ones (ADR, DevStatusReq, LinkCheckAns).
+- **Omitted until the first downlink since boot**, so a missing value never reads as 0 dBm.
+- The same values are on the debug shell: `ats lrw status` (`rssi`, `snr`).
+- `ttn.js` decodes them as `last_dl_rssi`, `last_dl_snr`, `last_dl_age_s`.
+
+Cost: release +160 B flash, +0 B RAM.
 
 ---
 
