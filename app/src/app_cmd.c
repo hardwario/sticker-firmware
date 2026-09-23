@@ -177,11 +177,6 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	if (info->lrw_state == APP_LRW_STATE_DISABLED) {
 		status |= APP_DEVICE_STATUS_LRW_DISABLED;
 	}
-#ifdef CONFIG_LORAWAN
-	if (app_lrw_region_unsupported()) {
-		status |= APP_DEVICE_STATUS_LRW_BAD_REGION;
-	}
-#endif
 	info->device_status = status;
 }
 

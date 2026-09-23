@@ -54,9 +54,6 @@ struct app_lrw_info {
 int app_lrw_init(void);
 void app_lrw_join(void);
 enum app_lrw_state app_lrw_get_state(void);
-/* True when the stored lrw-region is not compiled into this image, so the radio
- * was left silent (APP_LRW_STATE_DISABLED) instead of brought up (A1, #409). */
-bool app_lrw_region_unsupported(void);
 int app_lrw_get_info(struct app_lrw_info *info);
 bool app_lrw_is_ready(void);
 

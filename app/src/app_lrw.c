@@ -2001,8 +2001,9 @@ int app_lrw_init(void)
 
 	/* A1 (#409): a stored region missing from this image (or an out-of-range
 	 * value) used to fail the whole init, leaving a device with no radio and no
-	 * diagnosable state. Go radio-silent instead: DISABLED + device_status bit,
-	 * visible over NFC; fix by setting a compiled-in lrw-region or reflashing. */
+	 * diagnosable state. Go radio-silent instead: DISABLED (lrw_state, and the
+	 * lrw_disabled device_status bit) + a loud log; fix by setting a
+	 * compiled-in lrw-region or reflashing. */
 	bool radio_silent = radio_disabled();
 
 	if (!radio_silent && resolve_region(&region) != 0) {
@@ -2143,11 +2144,6 @@ void app_lrw_force_link_check(void)
 enum app_lrw_state app_lrw_get_state(void)
 {
 	return (enum app_lrw_state)atomic_get(&m_state);
-}
-
-bool app_lrw_region_unsupported(void)
-{
-	return m_region_unsupported;
 }
 
 bool app_lrw_is_ready(void)

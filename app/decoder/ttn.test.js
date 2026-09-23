@@ -386,17 +386,6 @@ test("decodeUplink get_info lrw_state=5 decodes as disabled (fPort 85)", () => {
   assert.equal(got.info.lrw_state_name, "disabled");
 });
 
-// A stored lrw-region missing from the image leaves the radio silent (#409 A1):
-// device_status = 0x3000 (lrw_disabled | lrw_bad_region), varint 8060.
-test("decodeUplink get_info device_status lrw_bad_region (fPort 85)", () => {
-  const got = codec.decodeUplink({
-    bytes: hex("0108031a09080110041802708060"),
-    fPort: 85,
-  }).data;
-  assert.equal(got.info.device_status, 0x3000);
-  assert.deepEqual(got.info.device_status_flags, ["lrw_disabled", "lrw_bad_region"]);
-});
-
 // A healthy device omits device_status (0 -> proto3 drops it); decoder defaults to 0/[].
 test("decodeUplink get_info device_status defaults to 0 when absent (fPort 85)", () => {
   const got = codec.decodeUplink({
