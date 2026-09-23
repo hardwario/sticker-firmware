@@ -286,11 +286,11 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info, size_t max
 		 *
 		 * NFC-only: at 18 B on the wire this is the single largest
 		 * Info field, and it pushed the response past the EU868 DR0 application
-		 * payload budget (56 B vs 50 B). Info has no page_index/page_count (only
-		 * ConfigDump and HistoryFrame do), so an over-budget Info cannot be split
-		 * and tx_send_queued() simply drops it — leaving a downlink get_info, and
+		 * payload budget (56 B vs 50 B). Before #425 an Info could not be paged, so
+		 * an over-budget Info was dropped whole — leaving a downlink get_info, and
 		 * the device-info-on-join uplink, silently unanswered at DR0. Restricting
-		 * the token to NFC keeps the LoRaWAN Info inside the budget at every DR.
+		 * the token to NFC keeps the LoRaWAN Info small at every DR (over NFC it
+		 * is one more Info page unit, #425/#414).
 		 *
 		 * Trade-off (deliberate): a backend can no longer learn claim_token over
 		 * the air; claiming becomes an NFC-only flow. This reverses the LoRaWAN

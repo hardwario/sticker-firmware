@@ -388,13 +388,14 @@ ZTEST(cmd, test_get_config_pages_fit_mailbox_frame)
 		zassert_true(pb_decode(&is, Response_fields, &r), "page %u: decode", page);
 		zassert_equal(r.which_body, Response_config_dump_tag, "page %u: which=%d", page,
 			      r.which_body);
-		zassert_equal(r.body.config_dump.page_index, page, "page index");
+		/* #425: the page number lives in the Response envelope (absent = one
+		 * page); ConfigDump.page_index/page_count are no longer set. */
+		zassert_equal(r.page_index, page, "page index");
+		zassert_equal(r.body.config_dump.page_count, 0, "ConfigDump page fields unset");
 		if (page == 0) {
-			page_count = r.body.config_dump.page_count;
-			zassert_true(page_count >= 1, "page_count");
+			page_count = r.page_count ? r.page_count : 1;
 		} else {
-			zassert_equal(r.body.config_dump.page_count, page_count,
-				      "page_count drift");
+			zassert_equal(r.page_count, page_count, "page_count drift");
 		}
 		if (page + 1 >= page_count) {
 			break;
