@@ -599,6 +599,38 @@ conditions (release build masks-off: no `CONFIG_LOG`, `PM=y`).
 
 - [ ] Pass
 
+### L17 — LoRaWAN glue: real join result, bounded confirm, MAC lock (v1.5.0, #421)
+
+**Goal:** A (re)join reports the result of *its own* JoinRequest (not a stale link-check / device-time
+confirm). A lost MAC confirm ends in `-ETIMEDOUT` instead of wedging `m_work_q`. Concurrent LoRaMac access
+from shell/NFC and the radio/timer handlers never deadlocks.
+**Observable:** After a join plus its DeviceTime/LinkCheck exchange, a shell `join` blocks until the RX
+windows (≈ 6–9 s at SF12) instead of returning at once. After a network outage, the first rejoin once the NS
+answers again succeeds. No watchdog reset in any of the steps.
+
+**Prompt for Claude:**
+> On a joined debug image, wait for the first telemetry with its LinkCheckAns, then run `join` and note how
+> long it takes to end in `HEALTHY` versus when the NS saw the JoinRequest/JoinAccept. Disable the device on
+> the NS (e.g. ChirpStack `isDisabled`), run `join` and confirm the failure is reported only after the RX windows.
+> Re-enable it and confirm the automatic rejoin succeeds on its first attempt. With `interval-report 60` +
+> `lrw-link-check-interval 1`, disable the device for ~10 min: expect WARNING → RECONNECT → failing rejoins,
+> then success on the first attempt after re-enabling. Optionally (temporary, uncommitted hooks) drop one
+> McpsConfirm / join confirm and confirm `-ETIMEDOUT` after `CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS` with no
+> wedge. Restore the config afterwards.
+
+> **HW-verified (2026-09-23, debug + release @ `545b679`, EU868, ChirpStack v4 + RAK5146 on the ProXimos Hub):**
+> - **T1 / T8:** first-attempt joins on debug and release, with Info, settings-info ConfigDump (release: `w1_slot_type` 4× `empty`) and telemetry.
+> - **T2:** a disabled-NS join failed only after RX2 (8.4 s), and the first rejoin after re-enabling succeeded.
+> - **T2b A/B** (temporary WRN timing log): `lorawan_join()` after the link-check / device-time confirms
+>   took **26 ms / 25 ms on v1.5.0** (stale result) versus **8305 ms with #421**.
+> - **T3:** 8 min at 1 uplink/min, 8/8 LinkCheckAns, no FCnt gaps.
+> - **T4:** GetConfig page 0, SetParam without save → Ack + staged, `settings_save` → boot ConfigDump 600, CLI `set-config` with commit → 900.
+> - **T5** (temporary hooks): a dropped McpsConfirm → `-ETIMEDOUT` exactly 20 s after the request, and the retry went out. A dropped join confirm → `ret=-116 after 20025 ms`, then MAC polling → `HEALTHY`. No watchdog reset in either case.
+> - **T6:** 3 × 25 s at ~900 locked `get_info`/MIB reads per second ran concurrently with 4 chained GetConfig downlinks; all were answered and nothing hung.
+> - **T7:** ~8.8 min of NS outage → WARNING → RECONNECT → rejoin 1 refused → rejoin 2 (the first after re-enabling) succeeded.
+
+- [x] Pass
+
 ---
 
 ## Sensors
