@@ -43,10 +43,12 @@ start; never reuse a stale pairing (always fresh join per bench convention).
 ## 2. Preconditions
 
 - STICKER DUT: `lrw_appkey` provisioned (non-zero) and identical to the app_key the central
-  has registered for this serial — the P2P session key derives from it (doc/p2p.md §4). A
+  has registered for this DevEUI — the P2P session key derives from it (doc/p2p.md §4). A
   zero app_key makes the radio refuse to start.
+- STICKER DUT: `lrw_deveui` provisioned (non-zero) — since #417 it is the P2P join identity
+  (JoinRequest body + session-key KDF, MSB-first). An all-zero DevEUI refuses a new join.
 - `radio-mode p2p` set + saved on the DUT; reboot into P2P.
-- Central: started against the northbridge, with the DUT's serial→app_key registered
+- Central: started against the northbridge, with the DUT's DevEUI→app_key registered
   (`node-add`). Time delivery **on** for the S3 step (`control-radio-p2p-host --deliver-time`,
   MR!30 commit `dff883c`). Full central commands in §7.
 - Both sides logging: DUT over RTT (Terminal 0), central `eprintln!` to **stderr** (`2>`).

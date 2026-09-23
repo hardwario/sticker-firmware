@@ -238,7 +238,7 @@ the radio-side protocol.
 |---|---|---|
 | `secret_key` (16 B, existing) | device, ATELOS/inventory, phone app after claim | Set at the tester; the NFC command channel key only. **Never leaves the NFC/claim world — the central, gateways, and the P2P protocol never see it.** |
 | `lrw_appkey` (16 B, existing) | device, network/join-server infrastructure (already, via ordinary LoRaWAN OTAA provisioning) | Set at the tester (same provisioning step as any LoRaWAN-capable device), `persistent: [device_reset]` — **wiped by `factory_reset`, unlike `secret_key`** (§7 lifecycle table has the consequence). This is P2P's sole root secret; there is no P2P-specific enrollment credential any more. |
-| `p2p_session_key` (16 B, per pairing) | device + central | Derived during the join handshake, directly under `app_key`: `session_key = AES128-CMAC(app_key, "HIO-P2P-SES" ‖ 0x01 ‖ dev_nonce(4 BE) ‖ central_nonce(4 BE) ‖ serial(4 BE) ‖ zeros(8))` — the trailing zero-pad brings the 24 B unpadded message up to 32 B (two full CMAC blocks); no `join_key` intermediate. Rotates on every re-join. |
+| `p2p_session_key` (16 B, per pairing) | device + central | Derived during the join handshake, directly under `app_key`: `session_key = AES128-CMAC(app_key, "HIO-P2P-SES" ‖ 0x01 ‖ dev_nonce(4 BE) ‖ central_nonce(4 BE) ‖ dev_eui(8, MSB-first) ‖ zeros(4))` — the trailing zero-pad brings the 28 B unpadded message up to 32 B (two full CMAC blocks); no `join_key` intermediate. Rotates on every re-join. |
 
 JoinRequest/JoinAccept (§5.3) authenticate under `app_key` directly too —
 via a full 16 B plain AES-CMAC tag over a domain-separated label plus the
@@ -358,7 +358,7 @@ never finds a gateway, see below).
 
 ```
 header:  net_id = 0, dev_addr = 0, counter = dev_nonce
-body:    product_type(1) | proto_version(1) | serial_number(4 BE) | fw_version(4)   [CLEARTEXT]
+body:    product_type(1) | proto_version(1) | dev_eui(8, MSB-first) | fw_version(4)   [CLEARTEXT]
 tag:     16 B plain AES-CMAC tag = CMAC(app_key, "HIO-P2P-JOIN" ‖ header ‖ body)
 ```
 
@@ -366,9 +366,20 @@ Deliberately **not AES-CCM**: the body carries nothing secret (it is the
 device's own public identity), so it is authenticated only, not encrypted
 (§4). The tag is a full 16 B CMAC output, not a truncated 4 B CCM tag.
 
-- `serial_number` must be cleartext — it is the central's lookup handle into
+- `dev_eui` must be cleartext — it is the central's lookup handle into
   its device/`app_key` registry (the same registry LoRaWAN OTAA provisioning
   already populates, §4 — there is no separate P2P-specific registry).
+  Since #417 (GitLab proximos-v2#73) the node's on-air identity is the
+  DevEUI on every transport; the serial number stays the printed/registry
+  identity but is no longer sent over P2P. Body 10 → 14 B, frame 37 → 41 B.
+  **Byte order is a protocol constant: MSB-first**, i.e. the order the hex
+  string reads and `g_app_config.lrw_deveui` stores — *not* the LoRaWAN
+  on-air LSB-first order (LoRaMac reverses internally). A width/order
+  mismatch makes the join succeed and every data frame after it silently
+  fail to decrypt. Pinned by the shared KAT fixture
+  `tests/ccm/p2p_join_kat.json` (byte-identical in proximos-v2 and
+  `proximos/firmware`). A node with an all-zero `lrw_deveui` refuses to
+  start a join (an already persisted session keeps running).
 - `dev_nonce` is a **monotonic persisted counter** in NVS (LoRaWAN 1.0.4
   style), giving JoinRequest replay protection: the central stores the last
   seen `dev_nonce` per device and rejects non-increasing values. That accept
@@ -384,11 +395,11 @@ device's own public identity), so it is authenticated only, not encrypted
   by `factory_reset` (§4, §7), so a fresh re-provisioning gives the device a
   new `app_key` and a fresh `dev_nonce` sequence — but that only unlocks the
   device if the central treats a re-registered `app_key` for a given
-  `serial_number` as resetting (or re-keying) that serial's `dev_nonce`
+  `dev_eui` as resetting (or re-keying) that device's `dev_nonce`
   high-water too. **Recommendation for the central implementation:** key the
-  high-water by `(serial_number, app_key)`, or explicitly reset it whenever
-  a serial's registered `app_key` changes, specifically so this recovery
-  path exists — keying purely by `serial_number` would reproduce the old
+  high-water by `(dev_eui, app_key)`, or explicitly reset it whenever
+  a device's registered `app_key` changes, specifically so this recovery
+  path exists — keying purely by `dev_eui` would reproduce the old
   design's *permanent* lock. Apply the same capped-skip window here either
   way, since re-provisioning is a much heavier fallback than just not
   needing it.
@@ -1027,7 +1038,7 @@ everything except real round-trip timing.
     JoinAccept get a cleartext body + CMAC tag under `app_key`; any other
     frame_type gets AES-CCM under `session_key` (`p2p session` must be set
     first).
-  - `p2p key <app_key> <serial_number>` — sets the DUT's identity: its
+  - `p2p key <app_key 32hex> <dev_eui 16hex>` — sets the DUT's identity: its
     LoRaWAN OTAA AppKey (§4), used directly for the JoinRequest/JoinAccept
     CMAC tags (no derivation step any more — `join_key` is gone). Also the
     input to `p2p session` below.
