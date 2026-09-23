@@ -128,6 +128,10 @@ void app_cmd_get_info(struct app_cmd_info *info)
 #ifdef CONFIG_LORAWAN
 	info->lrw_state = (uint8_t)app_lrw_get_state();
 #endif
+#if defined(CONFIG_LORAWAN) || defined(CONFIG_ZTEST)
+	info->has_last_dl = app_lrw_last_downlink(&info->last_dl_rssi, &info->last_dl_snr,
+						  &info->last_dl_age_s);
+#endif
 
 	BUILD_ASSERT(sizeof(info->dev_eui) == sizeof(g_app_config.lrw_deveui),
 		     "dev_eui size mismatch");
@@ -254,6 +258,19 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info, size_t max
 	if (tp == APP_CMD_TRANSPORT_NFC) {
 		info->has_lrw_state = true;
 		info->lrw_state = (Response_Info_LrwState)i.lrw_state;
+
+		/* #409 A2: last-downlink link quality for an installer with only a
+		 * phone. NFC-only: the LNS already has uplink RSSI/SNR per gateway
+		 * and, since #419, DevStatusAns (downlink SNR margin + battery), so
+		 * it would only cost LoRaWAN payload. Always with its age. */
+		if (i.has_last_dl) {
+			info->has_last_dl_rssi = true;
+			info->last_dl_rssi = i.last_dl_rssi;
+			info->has_last_dl_snr = true;
+			info->last_dl_snr = i.last_dl_snr;
+			info->has_last_dl_age_s = true;
+			info->last_dl_age_s = i.last_dl_age_s;
+		}
 
 		for (size_t j = 0; j < sizeof(i.dev_eui); j++) {
 			if (i.dev_eui[j] != 0) {

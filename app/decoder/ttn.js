@@ -289,6 +289,11 @@ function _decodeInfo(bytes, start, end) {
       else if (field === 11) info.reset_cause = v.value; // hwinfo reset-cause bitmask of last boot (#88)
       else if (field === 12) info.lrw_state = v.value; // LoRaWAN network state; emitted over NFC only, absent from LoRaWAN uplinks
       else if (field === 14) info.device_status = v.value; // aggregated device status bitmask
+      // fields 16-18 (#409 A2, NFC only): last-downlink RSSI (dBm) / SNR (dB) as
+      // measured by the device, and the age of that reading in seconds.
+      else if (field === 16) info.last_dl_rssi = _pbZigzag(v.value);
+      else if (field === 17) info.last_dl_snr = _pbZigzag(v.value);
+      else if (field === 18) info.last_dl_age_s = v.value;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       // field 9 = claim_token (#170): 128-bit device claim token, presented as

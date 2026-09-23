@@ -236,6 +236,8 @@ static int m_current_dr;
 static uint8_t m_max_next_payload;
 static int16_t m_last_rssi;
 static int8_t m_last_snr;
+/* Uptime (s) + 1 of the last received downlink; 0 = none since boot (#409 A2). */
+static atomic_t m_last_dl_s;
 static uint8_t m_last_margin;
 static uint8_t m_last_gw_count;
 static uint8_t m_lc_response_gw_count;
@@ -1546,6 +1548,7 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 
 	m_last_rssi = rssi;
 	m_last_snr = snr;
+	atomic_set(&m_last_dl_s, (atomic_val_t)(k_uptime_get() / 1000) + 1);
 
 	if (data) {
 		LOG_HEXDUMP_INF(data, len, "Payload: ");
@@ -1901,6 +1904,19 @@ void app_lrw_force_link_check(void)
 enum app_lrw_state app_lrw_get_state(void)
 {
 	return (enum app_lrw_state)atomic_get(&m_state);
+}
+
+bool app_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+{
+	atomic_val_t at = atomic_get(&m_last_dl_s);
+
+	if (at == 0 || !rssi || !snr || !age_s) {
+		return false;
+	}
+	*rssi = m_last_rssi;
+	*snr = m_last_snr;
+	*age_s = (uint32_t)(k_uptime_get() / 1000) + 1 - (uint32_t)at;
+	return true;
 }
 
 bool app_lrw_is_ready(void)

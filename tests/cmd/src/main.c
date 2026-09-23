@@ -27,6 +27,10 @@ extern float test_battery_v;
 extern int test_battery_ret;
 extern void test_set_lrw_dirty(bool v);
 extern void test_set_active_alarm_count(size_t n);
+extern bool test_dl_valid;
+extern int16_t test_dl_rssi;
+extern int8_t test_dl_snr;
+extern uint32_t test_dl_age_s;
 extern int g_clm_ack_calls;
 extern int g_clm_rearm_calls;
 extern int g_buzzer_play_calls;
@@ -78,6 +82,7 @@ static void reset_cfg(void)
 	test_clock_has = false;
 	test_set_lrw_dirty(false);
 	test_set_active_alarm_count(0);
+	test_dl_valid = false;
 	g_clm_ack_calls = 0;
 	g_clm_rearm_calls = 0;
 	g_buzzer_play_calls = 0;
@@ -520,6 +525,58 @@ ZTEST(cmd, test_get_info_claim_token_present_over_nfc)
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
 	zassert_true(r.body.info.has_claim_token, "claim_token must be present over NFC");
 	zassert_mem_equal(r.body.info.claim_token, token, sizeof(token), "claim_token bytes");
+}
+
+/* #409 A2: last-downlink RSSI/SNR + age are in the NFC Info only, and only
+ * once a downlink was received; the LoRaWAN Info never carries them. */
+ZTEST(cmd, test_get_info_last_downlink_nfc_only)
+{
+	uint8_t out[256];
+	size_t out_len = 0;
+	const uint8_t req[] = {0x08, 0x01, 0x22, 0x00}; /* seq=1, get_info */
+	Response r;
+	pb_istream_t is;
+
+	/* No downlink yet: fields absent even over NFC. */
+	reset_cfg();
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, req, sizeof(req), out, sizeof(out),
+				     &out_len, NULL),
+		      0, "nfc ret");
+	r = (Response)Response_init_zero;
+	is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_false(r.body.info.has_last_dl_rssi, "rssi must be absent before a downlink");
+	zassert_false(r.body.info.has_last_dl_age_s, "age must be absent before a downlink");
+
+	/* After a downlink: present over NFC, with the age. */
+	reset_cfg();
+	test_dl_valid = true;
+	test_dl_rssi = -97;
+	test_dl_snr = -7;
+	test_dl_age_s = 3600;
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, req, sizeof(req), out, sizeof(out),
+				     &out_len, NULL),
+		      0, "nfc ret");
+	r = (Response)Response_init_zero;
+	is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_true(r.body.info.has_last_dl_rssi && r.body.info.has_last_dl_snr &&
+			     r.body.info.has_last_dl_age_s,
+		     "fields missing over NFC");
+	zassert_equal(r.body.info.last_dl_rssi, -97, "rssi %d", r.body.info.last_dl_rssi);
+	zassert_equal(r.body.info.last_dl_snr, -7, "snr %d", r.body.info.last_dl_snr);
+	zassert_equal(r.body.info.last_dl_age_s, 3600, "age %u", r.body.info.last_dl_age_s);
+
+	/* Same state over LoRaWAN: never carried. */
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, req, sizeof(req), out, sizeof(out),
+				     &out_len, NULL),
+		      0, "lrw ret");
+	r = (Response)Response_init_zero;
+	is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_false(r.body.info.has_last_dl_rssi || r.body.info.has_last_dl_snr ||
+			      r.body.info.has_last_dl_age_s,
+		      "last-downlink fields must never go over LoRaWAN");
 }
 
 /* Count Response.Info.active_alarms (field 15) entries by walking the raw

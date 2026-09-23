@@ -243,6 +243,23 @@ enum app_lrw_state app_lrw_get_state(void)
 	return APP_LRW_STATE_HEALTHY;
 }
 
+/* Last-downlink link quality (#409 A2): tests set test_dl_valid + values. */
+bool test_dl_valid;
+int16_t test_dl_rssi;
+int8_t test_dl_snr;
+uint32_t test_dl_age_s;
+
+bool app_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+{
+	if (!test_dl_valid) {
+		return false;
+	}
+	*rssi = test_dl_rssi;
+	*snr = test_dl_snr;
+	*age_s = test_dl_age_s;
+	return true;
+}
+
 /* device_status inputs: app_cmd_get_info() aggregates these into the status
  * bitmask. Stubbed to the "all healthy / nothing active" baseline. */
 uint32_t app_alarm_status_flags(void)
