@@ -27,6 +27,7 @@ extern struct app_hall_data test_hall;
 extern int g_buzzer_play_calls;
 extern uint32_t g_buzzer_play_last_kind;
 extern uint16_t g_buzzer_play_last_repeat_s;
+extern size_t test_alarm_max_events;
 
 static void before(void *unused)
 {
@@ -40,6 +41,7 @@ static void before(void *unused)
 	g_buzzer_play_calls = 0;
 	g_buzzer_play_last_kind = 0;
 	g_buzzer_play_last_repeat_s = 0;
+	test_alarm_max_events = SIZE_MAX;
 	/* app_alarm.c's per-slot runtime latch (m_rt[]) is static file-scope state
 	 * that outlives a single ztest case. rt_sync() only resets a slot when its
 	 * (source, quantity) changes or the slot was never used — several tests
@@ -462,6 +464,25 @@ static const struct app_cmd_alarm_event *last_event(void)
 {
 	zassert_true(test_alarm_event_count > 0, "no alarm event captured");
 	return &test_alarm_events[test_alarm_event_count - 1];
+}
+
+/* #409 3b: at the 11 B budget tier not even one AlarmEvent fits a frame. The
+ * flush must skip the fPort 3 detail cleanly (no partial/garbage frame) while
+ * the alarm itself stays latched, so its state still reaches the LNS through
+ * the telemetry system_flags alarm bits (app_alarm_status_flags()). */
+ZTEST(alarm_eval, test_alarm_detail_skipped_when_no_event_fits)
+{
+	g_app_config.alarm_limit = 0; /* flush synchronously inside poll */
+	test_alarm_event_count = 0;
+	test_alarm_max_events = 0;
+
+	activate_threshold_slot0();
+
+	zassert_equal(test_alarm_event_count, 0, "no event may be emitted, got %zu",
+		      test_alarm_event_count);
+	zassert_true(app_alarm_status_flags() & APP_DEVICE_STATUS_ALARM_ANY,
+		     "alarm state must stay visible for the telemetry mirror");
+	test_alarm_max_events = SIZE_MAX;
 }
 
 ZTEST(alarm_eval, test_clearing_active_rule_emits_deactivate_edge)

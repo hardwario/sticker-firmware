@@ -13,6 +13,7 @@ message AppConfigMessage {
             EU868 = 0;
             US915 = 1;
             AU915 = 2;
+            AS923 = 3;
         }
 
         enum Network {
@@ -31,6 +32,18 @@ message AppConfigMessage {
             P2P = 2;
         }
 
+        enum Datarate {
+            AUTO = 0;
+            DR0 = 1;
+            DR1 = 2;
+            DR2 = 3;
+            DR3 = 4;
+            DR4 = 5;
+            DR5 = 6;
+            DR6 = 7;
+            DR7 = 8;
+        }
+
         optional Region region = 1;
         optional uint32 sub_band = 2;
         optional Network network = 3;
@@ -46,6 +59,7 @@ message AppConfigMessage {
         optional uint32 link_check_interval = 13;
         optional uint32 link_check_fail_rejoin = 14;
         optional RadioMode radio_mode = 15;
+        optional Datarate datarate = 16;
     }
 
     message Application {
@@ -289,9 +303,23 @@ message Response {
         Error          error            = 6;
         W1Scan         w1_scan          = 7;
         Telemetry      sample           = 8;   // Sample command: fresh readings (NFC)
+        // 9, 10 are claimed by claim_info / basic_info in #414 (mailbox) — keep free.
+        InfoLite       info_lite        = 11;  // Info when the full one does not fit the DR (#409)
     }
 
     message Ack { }
+
+    // Minimal Info for the smallest LoRaWAN budget tier (11 B: US915 DR0, AU915 /
+    // AS923 DR2), where even Info without alarms does not fit (#409 A5a). Sent in
+    // place of Info — for the autonomous join / clock-sync uplink and for a GetInfo
+    // over LoRaWAN — carrying just the firmware version (+ build type when it
+    // fits). The device sends the full Info by itself once the DR allows it.
+    message InfoLite {
+        uint32         fw_major   = 1;
+        uint32         fw_minor   = 2;
+        uint32         fw_patch   = 3;
+        Info.BuildType build_type = 4;
+    }
 
     message Info {
         // Firmware version (semver components). board is omitted on purpose —
@@ -406,6 +434,7 @@ message Response {
             PERSIST_FAILED      = 6;
             NOT_SUPPORTED       = 7;   // command tag unknown / removed (L-54)
             NOT_WRITABLE        = 8;   // field not writable over this transport (M-3); fault_field = group*100+tag
+            BUDGET_TOO_SMALL    = 9;   // answer does not fit the current LoRaWAN DR; retry once the DR rises (#409)
         }
 
         Code   code         = 1;

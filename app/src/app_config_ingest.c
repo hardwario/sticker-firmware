@@ -89,7 +89,7 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 	if (src->has_region && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(1);
 	} else if (src->has_region) {
-		if ((int)src->region >= 0 && (int)src->region <= 2) {
+		if ((int)src->region >= 0 && (int)src->region <= 3) {
 			config->lrw_region = (enum app_config_lrw_region)src->region;
 		} else {
 			FAULT(1);
@@ -227,6 +227,16 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			FAULT(15);
 		}
 	}
+	/* M-3: this field is not writable over lrw/vendor. */
+	if (src->has_datarate && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(16);
+	} else if (src->has_datarate) {
+		if ((int)src->datarate >= 0 && (int)src->datarate <= 8) {
+			config->lrw_datarate = (enum app_config_lrw_datarate)src->datarate;
+		} else {
+			FAULT(16);
+		}
+	}
 	return ret;
 }
 
@@ -293,6 +303,10 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 	if (requested(ids, n, 15)) {
 		dst->has_radio_mode = true;
 		dst->radio_mode = (AppConfigMessage_Lorawan_RadioMode)c->radio_mode;
+	}
+	if (requested(ids, n, 16)) {
+		dst->has_datarate = true;
+		dst->datarate = (AppConfigMessage_Lorawan_Datarate)c->lrw_datarate;
 	}
 }
 

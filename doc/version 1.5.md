@@ -13,6 +13,11 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
 | LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
 | LoRaWAN | **Fixed** — LoRaWAN glue in the Zephyr fork (`sticker-zephyr` `v4.3.0-sticker2-branch`, #421): a (re)join no longer returns the stale result of an earlier link-check / device-time confirm (L-7, #241); MAC-confirm waits are bounded (`-ETIMEDOUT` instead of a wedged `m_work_q`, #181); all LoRaMac access is serialised by one MAC lock (#241). |
+| LoRaWAN | **Fix** — region guard (#409 A1): a stored `lrw-region` that is not compiled into the image no longer kills LoRaWAN init silently — the radio stays silent (never falls back to another band), reported as `lrw_disabled` plus an error log. |
+| LoRaWAN | **New** — manual uplink datarate `lrw-datarate` (#409 A3): `auto` (default) or `dr0`–`dr7`, pinned after every join when ADR is off. |
+| LoRaWAN | **Fix** — low-DR delivery (#409 A5a, part 1): compact LoRaWAN `Error` so a command is always answered at the 11 B tier; MAC-flood (budget 0) no longer drops responses/alarms; alarm batches split across frames; alarm state mirrored into telemetry `system_flags`. |
+| LoRaWAN | **Fix** — `DevStatusReq` right after `LinkADRReq` is now answered (#419), via a `loramac-node` patch applied with `west patch apply`. |
+| LoRaWAN | **New** — AS923 region (#409 A6): `lrw-region as923`, channel plan AS923-1, release builds. |
 | LoRaWAN | **Improved** — faster link-loss recovery (#424): link check on every report while `WARNING`, a TX-power/data-rate step-down ladder before the rejoin (a moved device regains its gateway on a lower DR without losing the session), and US915/AU915 no longer lose the configured sub-band after repeated failed joins. |
 
 ---
@@ -190,10 +195,10 @@ omitted):
 - Size incl. the `APP_PROTO_VERSION` byte: 34 B without 1-Wire (`CONFIG_W1=n`, no
   field 7), 40 B with the four `w1_slot_type` entries, up to ~46 B with large
   interval values. It fits the EU868 DR0 budget (51 B) and the 64 B response buffer.
-- **Known limitation — low DR outside EU868 (#418):** the frame is encoded against
-  the current DR budget and, like the boot `Info`, is **single-frame and not
-  paged**. On US915 / AU915 DR0 (11 B) or AS923 with dwell time, both boot frames
-  are therefore **dropped whole** until ADR raises the DR. Tracked in #418.
+- **Low DR outside EU868 (#418, resolved by #409):** the frame is single-frame and
+  not paged, so it does not fit the 11 B tier (US915 DR0, AU915 / AS923 DR2). It is
+  no longer lost: the device remembers it and sends it automatically once a DR
+  change makes room; the boot `Info` meanwhile goes out as `InfoLite` (see §8).
 - The lean debug default (`debug.conf`, #395) builds with `CONFIG_W1=n`, so a
   debug image omits `w1_slot_type`. Build with `-DCONFIG_W1=y` to exercise it.
   Release builds have 1-Wire on.
@@ -211,6 +216,7 @@ telemetry (FCnt 3), all at DR0. The dumped values matched `config show`, and a
 `-DCONFIG_W1=y` debug image carried `w1_slot_type` = 4× `empty` (40 B). The
 `dallas` / `machine-probe` values are covered only by the unit tests: the test
 unit had no 1-Wire bridge. See `doc/manual-test-plan.md` scenario **L4b**.
+
 
 ---
 
@@ -246,7 +252,172 @@ See `doc/manual-test-plan.md` **L17** and `doc/plan/421 - LoRaWAN glue fixes in 
 
 ---
 
-## 6. Faster link-loss recovery (#424)
+## 6. LoRaWAN region guard (#409 A1)
+
+`lorawan_set_region()` returns `-ENOTSUP` for a region whose
+`CONFIG_LORAMAC_REGION_*` is not compiled in. Until now that made `app_lrw_init()`
+fail, leaving a device with **no radio and no diagnosable state** — a real case,
+because `debug.conf` trims US915/AU915, so a device configured for `us915` that is
+flashed with a debug image (or any trimmed build) went dead.
+
+Now `app_lrw_init()` resolves the stored region against the regions in the image
+first. If it is missing (or out of range):
+
+- the radio stays **silent** through the existing radio-mode OFF path
+  (`APP_LRW_STATE_DISABLED`, no LoRaMac bring-up, join/send are no-ops);
+- an error is logged: `lrw-region <n> is not compiled into this image: radio-silent`;
+- over NFC the device reports `lrw_state` DISABLED and the existing `device_status`
+  bit 12 `lrw_disabled` (no dedicated bit — `config show` shows the stored region).
+
+There is **deliberately no fallback to another region**: a device configured for
+US915 or AU915 must never transmit on 868 MHz (or vice versa). Fix by setting a
+compiled-in `lrw-region` (NFC / shell) or flashing a full image.
+
+Cost: a few dozen bytes of flash, +0 B RAM.
+
+
+---
+
+## 7. Manual uplink datarate `lrw-datarate` (#409 A3)
+
+New config key, modelled on twr-sdk's `AT$DR`:
+
+```
+config lrw-adr false
+config lrw-datarate dr3
+settings save
+```
+
+| Value | Meaning |
+|---|---|
+| `auto` (default) | stack / ADR choose the DR — behaviour unchanged from v1.4.0 |
+| `dr0` … `dr7` | pin the region's DRn for uplinks |
+
+- Applied in `on_join_success()` on **every (re)join**, after ADR is configured and
+  before the payload budget is captured, so the telemetry split follows the pinned DR.
+  It also becomes the DR of the next join request.
+- **Only with ADR off.** With `lrw-adr true` the value is ignored and a warning is
+  logged (Zephyr's `lorawan_set_datarate()` refuses while ADR is on).
+- DR validity is **region-dependent**: EU868 DR0–7, US915 DR0–4, AU915 DR2–6 with the
+  default dwell time (DR0/DR1 have a 0-byte payload there). A DR the MAC rejects is
+  logged as an error and the stack's own DR stays in use — the device keeps working.
+- Calibration mode pins its own DR and ignores `lrw-datarate`.
+- Writable over shell and NFC only (like the rest of the `lorawan` group, never over a
+  LoRaWAN downlink); preserved across `device_reset`.
+
+**Wire format:** `AppConfigMessage.Lorawan.datarate` (field 16), enum `Datarate`:
+`AUTO = 0`, `DRn = n + 1` — the offset lets `auto` be the proto3 default. `ttn.js`
+encodes the names (`"DR3"`) and decodes the raw value.
+
+Cost: release +408 B flash, +0 B RAM.
+
+
+---
+
+## 8. Low-DR delivery, part 1 (#409 A5a)
+
+At the smallest LoRaWAN budget tier — **11 B** on US915 DR0 and AU915 / AS923 DR2 — most
+fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *floor*
+(telemetry, Ack, compact Error, Info-lite); full delivery targets ≥ 51 B.
+
+- **Compact LoRaWAN `Error`.** Over LoRaWAN an `Error` carries `code` + `fault_field`
+  only; the `detail` string is NFC-only (`ttn.js` defaults a missing `code` to 0 =
+  UNKNOWN, which proto3 omits). The LoRaWAN "response too large" fallback is a 7 B
+  `Error{ code = 9 BUDGET_TOO_SMALL }` — "retry once ADR raises the DR" — so a command
+  that cannot be answered in full still gets an answer. NFC keeps `UNKNOWN` + detail.
+- **`InfoLite`** (`Response` field 11): when even `Info` without `active_alarms` does
+  not fit, the join / clock-sync `Info` and a LoRaWAN `GetInfo` answer with the firmware
+  version (+ build type when it fits), 9–11 B. `ttn.js` decodes it as `info_lite`
+  (`fw_version`, `build_type_name`).
+- **Deferred boot announce.** If the join `Info` went out as `InfoLite`, or the #412
+  settings-info did not fit, the device sends the full frame by itself once a DR change
+  makes room — no host poll needed.
+- **History replay (`req_history`) at low DR.** Frames are sized with the real frame
+  count instead of the worst-case varint, ~8 B more samples per frame (EU868 DR0: ~26 B
+  instead of ~18 B). When records exist but not one fits the current DR, the answer is
+  `Error BUDGET_TOO_SMALL` instead of `HISTORY_UNAVAILABLE`; a replay cut short by a DR
+  drop ends with the same `Error` (request `seq`) instead of going silent.
+- **GetConfig / GetParam over LoRaWAN send every page by themselves.** One downlink
+  request is enough: the device answers with the requested page (0 unless `page` is
+  given) and then uplinks the remaining pages on its own — same `seq`, `page_index` /
+  `page_count` as before, paced by the duty cycle (at EU868 DR0 a full config takes
+  minutes). A new GetConfig/GetParam replaces a stream still running; a rejoin cancels
+  it. The page size stays 30 B. NFC is unchanged (the phone still asks page by page,
+  ~450 B pages).
+- **DR drop between queueing and sending.** A queued frame that no longer fits after
+  ADR lowered the DR is recovered instead of dropped: the boot `Info` / settings-info
+  are re-sent once the DR rises again, a command answer becomes `Error
+  BUDGET_TOO_SMALL` with the command's `seq`, an alarm frame is dropped (its state is
+  still in telemetry `system_flags`).
+- **Budget 0 (MAC-command flood)** no longer drops a queued response or alarm: an empty
+  uplink flushes the MAC answers and the payload is retried.
+- **Alarm batches split** across as many `AlarmReport` frames as needed (same
+  `base_time` / `total` in each) instead of trimming to the first frame. At the 11 B tier
+  no `AlarmReport` fits; the frame is skipped and logged.
+- **Alarm state in telemetry.** `Telemetry.system_flags` bits 1..8 now carry the
+  `device_status` alarm byte (bit 0 is still `boot`), so the alarm state reaches the LNS in
+  every telemetry frame, including at the 11 B tier. `ttn.js` adds `alarm_status` and
+  `alarm_status_flags` (e.g. `["alarm_any", "alarm_threshold"]`). Additive — older decoders
+  ignore the extra bits.
+
+## 9. `DevStatusReq` after `LinkADRReq` answered (#419)
+
+LoRaMac-node's MAC-command parser skipped a `DevStatusReq` that is the last FOpts byte
+right after a `LinkADRReq` block — exactly how ChirpStack bundles them — so `DevStatusAns`
+(battery, margin) was never sent. Not fixed upstream.
+
+The fix is carried as a **Zephyr `west patch`** on the `loramac-node` module
+(`zephyr/patches.yml`, `zephyr/patches/loramac-node/`):
+
+```
+west update
+west patch apply      # re-run after every west update
+```
+
+CI applies it automatically. A LoRaWAN build **fails** when the patch is missing — CMake
+checks for the `STICKER-419` marker at configure time and again on every build, because
+`west update` resets the module and an incremental build (including the one `west flash`
+runs) does not reconfigure. `-DSTICKER_ALLOW_UNPATCHED_MODULES=ON` overrides it for a
+throwaway build. HW-verified 2026-09-23: after ChirpStack's `LinkADRReq + DevStatusReq` the
+next uplink carries `DevStatusAns`, and ChirpStack shows the device's battery / margin. From a git worktree pass absolute paths:
+`west patch apply -b <worktree>/zephyr/patches -l <worktree>/zephyr/patches.yml`.
+
+
+---
+
+## 10. AS923 region (#409 A6)
+
+`lrw-region` accepts `as923` (wire value 3 in `AppConfigMessage.Lorawan.region`):
+
+```
+config lrw-region as923
+settings save
+```
+
+- **Channel plan group AS923-1** (923.2 / 923.4 MHz default channels), the loramac-node
+  default. The group is compile-time only (`REGION_AS923_DEFAULT_CHANNEL_PLAN`); other
+  groups (AS923-2/-3/-4) would be separate build variants.
+- **No sub-band** — `lrw-sub-band` applies to US915/AU915 only.
+- **Dwell time on by default:** DR0/DR1 carry 0 B and DR2 carries 11 B, so AS923 at its
+  lowest DR is the 11 B budget tier handled by §8 (`InfoLite`, compact `Error`, alarm
+  state in telemetry, deferred boot announce). `lrw-datarate dr0` / `dr1` are rejected by
+  the MAC and logged; the stack's DR stays in use.
+- **Release builds only.** `debug.conf` trims AS923 together with AU915/US915; a stored
+  `as923` on a debug image leaves the radio silent (§6), never on another band.
+- `ttn.js` encodes `region: "AS923"` in `set_param`.
+
+Cost: release +2 536 B flash, +0 B RAM (loramac-node channel structures are already
+sized for US915's 72 channels). Not tested on HW — the bench gateway is EU868 only.
+
+**HW verification of #409 (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub, STICKER DevEUI `5876070000000413`):**
+the region guard (§6), `lrw-datarate` (§7), compact `Error`, alarm split and alarm bits, GetConfig/GetParam page
+streaming (§8), `DevStatusAns` (§9) and the release image with AS923 compiled in all PASS. Not HW-tested (no
+US915/AU915/AS923 gateway): the 11 B budget tier of §8 and AS923 on air. See the HIL records in
+`doc/plan/409 - LoRaWAN improvements - regions, datarate, diagnostics.md`.
+
+---
+
+## 11. Faster link-loss recovery (#424)
 
 When the network disappears (gateway off, or the device moved out of reach of its ADR-optimised data rate), v1.5.0 recovers faster and, where possible, without a rejoin.
 
