@@ -301,6 +301,7 @@ static void on_downlink_received(void);
 static void state_transition(enum app_lrw_state new_state);
 static bool should_request_link_check(void);
 static void force_lc_work_handler(struct k_work *work);
+static int apply_channel_plan(void);
 
 static void fire_ready_cb(void)
 {
@@ -1088,6 +1089,15 @@ static void join_work_handler(struct k_work *work)
 			on_join_failure();
 			return;
 		}
+		/* lorawan_start() re-runs LoRaMacInitialization (region-default
+		 * channel masks) and restores the NVM snapshot: re-apply the
+		 * configured sub-band so the join uses it. */
+		ret = apply_channel_plan();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("apply_channel_plan", ret);
+			on_join_failure();
+			return;
+		}
 		LOG_INF("MAC reinitialized");
 	}
 
@@ -1778,6 +1788,27 @@ static int apply_subband(int sub_band)
 
 	mask[hi_ch / 16] |= BIT(hi_ch % 16);
 
+	/* Install the sub-band as the DEFAULT mask too, not only the active one.
+	 * LoRaMac copies ChannelsDefaultMask over ChannelsMask on every OTAA join
+	 * (ResetMacParameters) and when its ADR backoff reaches the minimum DR. With
+	 * only the active mask set, the default stayed all-64: once the sub-band's
+	 * 8 channels were used up, the remaining-channel pool refilled with all 64,
+	 * and join requests cycled over all eight sub-bands — one in eight reaching
+	 * an 8-channel gateway. Set before the active mask, whose setter trims the
+	 * default's 500 kHz word. */
+	MibRequestConfirm_t mib;
+
+	mib.Type = MIB_CHANNELS_DEFAULT_MASK;
+	mib.Param.ChannelsDefaultMask = mask;
+	lorawan_mac_lock();
+	LoRaMacStatus_t status = LoRaMacMibSetRequestConfirm(&mib);
+	lorawan_mac_unlock();
+
+	if (status != LORAMAC_STATUS_OK) {
+		LOG_ERR("Default channel mask rejected (sub-band %d): %d", sub_band, status);
+		return -EINVAL;
+	}
+
 	int ret = lorawan_set_channels_mask(mask, ARRAY_SIZE(mask));
 
 	if (ret) {
@@ -1787,6 +1818,17 @@ static int apply_subband(int sub_band)
 
 	LOG_INF("Applied sub-band %d", sub_band);
 	return 0;
+}
+
+/* Region-specific channel plan on top of the LoRaMac defaults. Called after
+ * every lorawan_start() (boot and each rejoin's MAC re-init). */
+static int apply_channel_plan(void)
+{
+	if (g_app_config.lrw_region != APP_CONFIG_LRW_REGION_US915 &&
+	    g_app_config.lrw_region != APP_CONFIG_LRW_REGION_AU915) {
+		return 0;
+	}
+	return apply_subband(g_app_config.lrw_sub_band);
 }
 
 /* ======================================================================== */
@@ -1889,13 +1931,10 @@ int app_lrw_init(void)
 		}
 		m_mac_started = true;
 
-		if (g_app_config.lrw_region == APP_CONFIG_LRW_REGION_US915 ||
-		    g_app_config.lrw_region == APP_CONFIG_LRW_REGION_AU915) {
-			ret = apply_subband(g_app_config.lrw_sub_band);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("apply_subband", ret);
-				return ret;
-			}
+		ret = apply_channel_plan();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("apply_channel_plan", ret);
+			return ret;
 		}
 
 		static struct lorawan_downlink_cb downlink_cb = {
