@@ -31,6 +31,7 @@ K_MUTEX_DEFINE(g_app_sensor_data_lock);
 
 /* Stub-controlled state (defined in stubs.c). */
 extern uint8_t test_budget;
+extern uint32_t test_alarm_flags;
 extern struct app_hall_data test_hall;
 extern struct app_input_data test_input;
 extern enum app_w1_slot_type test_w1_types[APP_W1_SLOT_COUNT];
@@ -44,6 +45,7 @@ static void set_clean(void)
 	memset(&test_input, 0, sizeof(test_input));
 	memset(test_w1_types, 0, sizeof(test_w1_types)); /* all slots empty */
 	test_budget = 200;
+	test_alarm_flags = 0;
 
 	g_app_sensor_data = (struct app_sensor_data){0};
 	g_app_sensor_data.orientation = INT_MAX; /* absent */
@@ -335,6 +337,31 @@ ZTEST(compose, test_system_always_present)
 		      fr[0].humidity);
 	/* Capability-gated / external groups still don't leak in when absent. */
 	zassert_false(fr[0].has_hall_left_count, "hall_left leaked");
+}
+
+/* #409 A5a: the device_status alarm byte rides in system_flags bits 1..8, so the
+ * alarm state reaches the LNS in every telemetry frame — including at the 11 B
+ * budget tier, where no fPort 3 AlarmReport fits. Masks bit 0 (boot) since its
+ * state depends on test order. */
+ZTEST(compose, test_system_flags_carry_alarm_bits)
+{
+	Telemetry fr[8];
+	size_t n;
+
+	set_clean();
+	/* Real readings: NaN sentinels (INT32_MIN / UINT32_MAX) would make the
+	 * internal group alone exceed 11 B (pre-existing M-10 oversize path). */
+	g_app_sensor_data.temperature = 23.5f;
+	g_app_sensor_data.humidity = 50.0f;
+	test_alarm_flags = 0x03; /* ALARM_ANY | ALARM_THRESHOLD */
+	test_budget = 11;        /* US915 DR0 / AU915 DR2 */
+	run_report(fr, 8, &n);
+
+	zassert_true(n >= 1, "no frame");
+	zassert_true(fr[0].has_system_flags, "system_flags must always be present");
+	zassert_equal(fr[0].system_flags >> 1, 0x03, "alarm bits wrong: flags 0x%x",
+		      fr[0].system_flags);
+	test_alarm_flags = 0;
 }
 
 ZTEST(compose, test_budget_unknown_pre_join)

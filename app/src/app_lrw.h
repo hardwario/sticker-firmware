@@ -35,6 +35,7 @@ struct app_lrw_info {
 	uint32_t dev_addr; /* Device address (from OTAA or ABP) */
 	uint32_t fcnt_up;  /* Uplink frame counter */
 	int datarate;
+	int tx_power; /* LoRaMac TX power index: 0 = max EIRP, higher = weaker */
 	int16_t rssi;
 	int8_t snr;
 	uint8_t margin;
@@ -80,6 +81,12 @@ void app_lrw_force_link_check(void);
  * decide how many telemetry fields fit. */
 uint8_t app_lrw_get_max_payload(void);
 
+/* Encode cap for a frame built into a `buf_size` buffer: the current payload
+ * budget when known and smaller, else `buf_size` (budget 0 = unknown right now;
+ * the send path flushes pending MAC answers and retries). Uses the cached budget,
+ * so it is safe off m_work_q. Shared by every fPort 85 / fPort 3 encoder (#409). */
+size_t app_lrw_payload_cap(size_t buf_size);
+
 /* Stage a serialized response (e.g. Response on port 85) for the next
  * uplink. send_work_handler() drains this slot before composing telemetry, so
  * the response leaves at the next jitter window. Single-slot, overwritten with
@@ -98,10 +105,14 @@ int app_lrw_send_alarm(const uint8_t *buf, size_t len);
 
 /* Start a device-driven history replay (issue #52): stream every stored record
  * in [from_unix, to_unix] back as N HistoryFrame uplinks on the command port,
- * back-to-back ASAP (duty-cycle permitting), echoing `seq`. Returns true when a
+ * back-to-back ASAP (duty-cycle permitting), echoing `seq`. Returns 0 when a
  * replay was armed (the first frame is the reply, so the caller should NOT also
- * send an Ack), false if the link isn't ready or the window is empty. */
-bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
+ * send an Ack), -EAGAIN if the link isn't ready, -ENODATA if the window is
+ * empty, or -EMSGSIZE if records exist but not one fits the current DR budget
+ * (the 11 B tier, #409). Renamed from the bool app_lrw_start_history_replay()
+ * so a caller written for the old API (true = started) fails to compile
+ * instead of silently inverting on 0 = success. */
+int app_lrw_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
 
 /* Erase the persisted LoRaWAN NVM context (frame counters, DevNonce, session).
  * Used when re-provisioning credentials so a new ABP/OTAA identity starts from

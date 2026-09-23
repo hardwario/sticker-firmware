@@ -163,6 +163,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	SETTINGS_SET("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	SETTINGS_SET("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+	SETTINGS_SET("lrw-datarate", &m_app_config.lrw_datarate, sizeof(m_app_config.lrw_datarate));
 	SETTINGS_SET("lrw-link-check-interval", &m_app_config.lrw_link_check_interval,
 		     sizeof(m_app_config.lrw_link_check_interval));
 	SETTINGS_SET("lrw-link-check-fail-rejoin", &m_app_config.lrw_link_check_fail_rejoin,
@@ -271,6 +272,7 @@ static int h_commit(void)
 		       sizeof(m_app_config.lrw_nwkskey));
 		memcpy(m_app_config.lrw_appskey, stored.lrw_appskey,
 		       sizeof(m_app_config.lrw_appskey));
+		m_app_config.lrw_datarate = stored.lrw_datarate;
 		m_app_config.p2p_frequency = stored.p2p_frequency;
 		m_app_config.p2p_spreading_factor = stored.p2p_spreading_factor;
 		m_app_config.p2p_tx_power = stored.p2p_tx_power;
@@ -305,7 +307,7 @@ static int h_commit(void)
 	if (m_app_config.alarm_limit > 3600) {
 		m_app_config.alarm_limit = 3600;
 	}
-	if ((int)m_app_config.lrw_region < 0 || (int)m_app_config.lrw_region > 2) {
+	if ((int)m_app_config.lrw_region < 0 || (int)m_app_config.lrw_region > 3) {
 		m_app_config.lrw_region = 0;
 	}
 	if ((int)m_app_config.radio_mode < 0 || (int)m_app_config.radio_mode > 2) {
@@ -322,6 +324,9 @@ static int h_commit(void)
 	}
 	if ((int)m_app_config.lrw_activation < 0 || (int)m_app_config.lrw_activation > 1) {
 		m_app_config.lrw_activation = 0;
+	}
+	if ((int)m_app_config.lrw_datarate < 0 || (int)m_app_config.lrw_datarate > 8) {
+		m_app_config.lrw_datarate = 0;
 	}
 	if (m_app_config.lrw_link_check_interval < 0) {
 		m_app_config.lrw_link_check_interval = 0;
@@ -407,6 +412,7 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("lrw-devaddr", m_app_config.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	EXPORT_FUNC("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	EXPORT_FUNC("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+	EXPORT_FUNC("lrw-datarate", &m_app_config.lrw_datarate, sizeof(m_app_config.lrw_datarate));
 	EXPORT_FUNC("lrw-link-check-interval", &m_app_config.lrw_link_check_interval,
 		    sizeof(m_app_config.lrw_link_check_interval));
 	EXPORT_FUNC("lrw-link-check-fail-rejoin", &m_app_config.lrw_link_check_fail_rejoin,
@@ -702,6 +708,9 @@ static void print_lrw_region(const struct shell *shell)
 	case APP_CONFIG_LRW_REGION_AU915:
 		str = "au915";
 		break;
+	case APP_CONFIG_LRW_REGION_AS923:
+		str = "as923";
+		break;
 	default:
 		str = "unknown";
 		break;
@@ -810,6 +819,44 @@ static void print_lrw_appskey(const struct shell *shell)
 {
 	print_bytes(shell, "lrw-appskey", m_app_config.lrw_appskey,
 		    sizeof(m_app_config.lrw_appskey));
+}
+
+static void print_lrw_datarate(const struct shell *shell)
+{
+	const char *str;
+	switch (m_app_config.lrw_datarate) {
+	case APP_CONFIG_LRW_DATARATE_AUTO:
+		str = "auto";
+		break;
+	case APP_CONFIG_LRW_DATARATE_DR0:
+		str = "dr0";
+		break;
+	case APP_CONFIG_LRW_DATARATE_DR1:
+		str = "dr1";
+		break;
+	case APP_CONFIG_LRW_DATARATE_DR2:
+		str = "dr2";
+		break;
+	case APP_CONFIG_LRW_DATARATE_DR3:
+		str = "dr3";
+		break;
+	case APP_CONFIG_LRW_DATARATE_DR4:
+		str = "dr4";
+		break;
+	case APP_CONFIG_LRW_DATARATE_DR5:
+		str = "dr5";
+		break;
+	case APP_CONFIG_LRW_DATARATE_DR6:
+		str = "dr6";
+		break;
+	case APP_CONFIG_LRW_DATARATE_DR7:
+		str = "dr7";
+		break;
+	default:
+		str = "unknown";
+		break;
+	}
+	shell_print(shell, SETTINGS_PFX " lrw-datarate %s", str);
 }
 
 static void print_lrw_link_check_interval(const struct shell *shell)
@@ -1034,6 +1081,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_lrw_devaddr(shell);
 	print_lrw_nwkskey(shell);
 	print_lrw_appskey(shell);
+	print_lrw_datarate(shell);
 	print_lrw_link_check_interval(shell);
 	print_lrw_link_check_fail_rejoin(shell);
 	print_cap_hall_left(shell);
@@ -1277,7 +1325,7 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 
 	/* `help`/`?` lists the accepted tokens. */
 	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
-		shell_print(shell, "valid values: eu868, us915, au915");
+		shell_print(shell, "valid values: eu868, us915, au915, as923");
 		return 0;
 	}
 
@@ -1287,9 +1335,11 @@ static int cmd_lrw_region(const struct shell *shell, size_t argc, char **argv)
 		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_US915;
 	} else if (!strcmp(argv[1], "au915")) {
 		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_AU915;
+	} else if (!strcmp(argv[1], "as923")) {
+		m_app_config.lrw_region = APP_CONFIG_LRW_REGION_AS923;
 	} else {
 		shell_error(shell, "%s", m_msg_invalid_value);
-		shell_print(shell, "valid values: eu868, us915, au915");
+		shell_print(shell, "valid values: eu868, us915, au915, as923");
 		return -EINVAL;
 	}
 
@@ -1441,6 +1491,51 @@ static int cmd_lrw_appskey(const struct shell *shell, size_t argc, char **argv)
 {
 	return cmd_bytes(shell, argc, argv, m_app_config.lrw_appskey,
 			 sizeof(m_app_config.lrw_appskey), false, print_lrw_appskey);
+}
+
+static int cmd_lrw_datarate(const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		print_lrw_datarate(shell);
+		return 0;
+	}
+
+	if (argc != 2) {
+		shell_error(shell, "%s", m_msg_invalid_args);
+		return -EINVAL;
+	}
+
+	/* `help`/`?` lists the accepted tokens. */
+	if (!strcmp(argv[1], "help") || !strcmp(argv[1], "?")) {
+		shell_print(shell, "valid values: auto, dr0, dr1, dr2, dr3, dr4, dr5, dr6, dr7");
+		return 0;
+	}
+
+	if (!strcmp(argv[1], "auto")) {
+		m_app_config.lrw_datarate = APP_CONFIG_LRW_DATARATE_AUTO;
+	} else if (!strcmp(argv[1], "dr0")) {
+		m_app_config.lrw_datarate = APP_CONFIG_LRW_DATARATE_DR0;
+	} else if (!strcmp(argv[1], "dr1")) {
+		m_app_config.lrw_datarate = APP_CONFIG_LRW_DATARATE_DR1;
+	} else if (!strcmp(argv[1], "dr2")) {
+		m_app_config.lrw_datarate = APP_CONFIG_LRW_DATARATE_DR2;
+	} else if (!strcmp(argv[1], "dr3")) {
+		m_app_config.lrw_datarate = APP_CONFIG_LRW_DATARATE_DR3;
+	} else if (!strcmp(argv[1], "dr4")) {
+		m_app_config.lrw_datarate = APP_CONFIG_LRW_DATARATE_DR4;
+	} else if (!strcmp(argv[1], "dr5")) {
+		m_app_config.lrw_datarate = APP_CONFIG_LRW_DATARATE_DR5;
+	} else if (!strcmp(argv[1], "dr6")) {
+		m_app_config.lrw_datarate = APP_CONFIG_LRW_DATARATE_DR6;
+	} else if (!strcmp(argv[1], "dr7")) {
+		m_app_config.lrw_datarate = APP_CONFIG_LRW_DATARATE_DR7;
+	} else {
+		shell_error(shell, "%s", m_msg_invalid_value);
+		shell_print(shell, "valid values: auto, dr0, dr1, dr2, dr3, dr4, dr5, dr6, dr7");
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static int cmd_lrw_link_check_interval(const struct shell *shell, size_t argc, char **argv)
@@ -1724,7 +1819,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_alarm_limit, 1, 1),
 
 	SHELL_CMD_ARG(lrw-region, NULL,
-	              "Get/Set LoRaWAN region (eu868/us915/au915).",
+	              "Get/Set LoRaWAN region (eu868/us915/au915/as923).",
 	              cmd_lrw_region, 1, 1),
 
 	SHELL_CMD_ARG(radio-mode, NULL,
@@ -1774,6 +1869,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(lrw-appskey, NULL,
 	              "Get/Set LoRaWAN AppSKey (32 hexadecimal digits).",
 	              cmd_lrw_appskey, 1, 1),
+
+	SHELL_CMD_ARG(lrw-datarate, NULL,
+	              "Get/Set manual uplink datarate (auto, dr0-dr7). Applied after join, only with ADR off; auto = stack default.",
+	              cmd_lrw_datarate, 1, 1),
 
 	SHELL_CMD_ARG(lrw-link-check-interval, NULL,
 	              "Get/Set link-check cadence: request a LinkCheckReq every N-th uplink (0 = disabled).",
@@ -1928,6 +2027,7 @@ int app_config_device_reset(void)
 	memcpy(m_app_config.lrw_devaddr, preserved.lrw_devaddr, sizeof(m_app_config.lrw_devaddr));
 	memcpy(m_app_config.lrw_nwkskey, preserved.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	memcpy(m_app_config.lrw_appskey, preserved.lrw_appskey, sizeof(m_app_config.lrw_appskey));
+	m_app_config.lrw_datarate = preserved.lrw_datarate;
 	m_app_config.p2p_frequency = preserved.p2p_frequency;
 	m_app_config.p2p_spreading_factor = preserved.p2p_spreading_factor;
 	m_app_config.p2p_tx_power = preserved.p2p_tx_power;

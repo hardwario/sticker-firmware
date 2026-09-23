@@ -75,6 +75,14 @@ uint8_t app_radio_get_max_payload(void)
 	return test_budget;
 }
 
+/* device_status alarm byte the composer mirrors into system_flags bits 1..8. */
+uint32_t test_alarm_flags;
+
+uint32_t app_alarm_status_flags(void)
+{
+	return test_alarm_flags;
+}
+
 int app_hall_get_data(struct app_hall_data *data)
 {
 	*data = test_hall;

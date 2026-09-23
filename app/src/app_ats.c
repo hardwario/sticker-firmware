@@ -783,6 +783,7 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "devaddr: %08x", info.dev_addr);
 	shell_print(shell, "fcnt up: %u", info.fcnt_up);
 	shell_print(shell, "datarate: DR%d", info.datarate);
+	shell_print(shell, "tx power: %d (0 = max)", info.tx_power);
 	shell_print(shell, "rssi: %d dBm", info.rssi);
 	shell_print(shell, "snr: %d dB", info.snr);
 	shell_print(shell, "margin: %u dB", info.margin);
