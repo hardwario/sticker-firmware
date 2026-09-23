@@ -519,8 +519,9 @@ that ignores `pages` just sees several partial answers.
 
 **Host impact**: Manager-App NFC GetConfig must read the page count from
 `Response.page_count` (absent = 1); the proximos-v2 decoder should merge pages
-(decoder-parity tracking: proximos-v2#90). The P2P transport uses the same format; its
-driver lands with the feat-p2p merge.
+(decoder-parity tracking: proximos-v2#90). **P2P** uses the same rule and format: an answer
+that does not fit one 0x55 RESPONSE (64 B) is streamed as pages with the same `seq`; the
+P2P central must accept several 0x55 with one `seq` (proximos-v2 MR!30).
 
 Cost: release about +1.8 KB flash, +128 B RAM.
 
