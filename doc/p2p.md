@@ -115,7 +115,7 @@ they are not exposed over the air or over NFC:
   and since the Hub side must change in the same breath anyway, a phone that
   can set them without setting the Hub only creates a way to strand a node.
   Deferred pending agreement with the app team — see §5.2 for the same
-  conclusion about an NFC `p2p_join` trigger.
+  conclusion about the (now superseded) NFC `p2p_join` trigger.
 
 On boot the firmware brings up **only** the selected stack — the SX126x radio
 is shared between LoRaMac and raw LoRa, so there is no live switch. The
@@ -316,12 +316,11 @@ Modeled on TOWER's pairing-request/ACK exchange, hardened to OTAA-grade.
 
 ### 5.2 Join triggers (node side)
 
-Deliberately narrower than TOWER's magnet/button gesture: **only** an
-explicit NFC command, or a bounded window right after boot — no
-gesture-based trigger (same reasoning as #252's removal of the boot-time
-dual-magnet calibration entry: a magnet is an easy *accidental* trigger, and
-here it would also mean an unbounded radio-retry loop for a device that
-never finds a gateway, see below).
+Deliberately narrower than TOWER's magnet/button gesture: no gesture-based
+trigger (same reasoning as #252's removal of the boot-time dual-magnet
+calibration entry: a magnet is an easy *accidental* trigger). A never-paired
+node joins automatically at boot; everything else is either an explicit
+operator action (shell `join`) or recovery (self-heal, `RejoinRequest`).
 
 - NFC command `p2p_join` (staged like any command — works battery-off, applied
   at next boot). Battery-cheapest and timing-safest path: the join burst is a
@@ -335,22 +334,46 @@ never finds a gateway, see below).
   being added speculatively. **Nothing depends on it**: a node that needs to
   re-pair has four working triggers — the boot window below, the shell `join`,
   the self-healing re-join (§7), and the central-initiated `RejoinRequest`
-  (§5.4).
+  (§5.4). With the boot join no longer giving up after its window (below),
+  the original motivation — "a node whose boot window was missed needs a
+  battery-off way back" — is gone as well; the trigger is superseded, not
+  just unscheduled.
 - Automatically at boot when `radio-mode p2p` and no valid pairing state in
-  NVS, but **only for 120 s after boot** (mirrors the central's own pairing
-  window default, §5.1) — after that the node stops retrying entirely and
-  goes back to sleep/idle until the next boot or an NFC `p2p_join`. Without
-  this cap, a device that is provisioned but never brought within range of an
-  open pairing window (in transit, in a warehouse, deployed before the
-  central side is set up) would otherwise keep transmitting JoinRequest +
-  listening RX1 on backoff for its *entire remaining battery life* — the
-  120 s window turns an unbounded worst-case drain into a fixed, small,
-  once-per-boot cost. (No HW power numbers yet — see §13 phase 6, "power
-  delta vs. the 92 µA baseline".)
+  NVS. The episode has two retry **policies**, not a deadline:
+  - **Fast** for the first **120 s after boot** (mirrors the central's own
+    pairing window default, §5.1): short jittered retries, duty-cycle aware.
+    The window is a hard edge — the retry wait is capped against it
+    (`p2p_join_retry_delay_ms()`), so a long duty-cycle wait cannot push a
+    fast attempt past it.
+  - **Slow** after that: the node stays `JOINING` and continues on the
+    self-heal backoff curve (§7: 60 s → ×2 → 1 h cap, ±25 % jitter, the
+    jitter never undercutting a pending duty-cycle wait). It converges to
+    roughly one sweep pass (§5.3) per hour — the same cadence a paired node
+    in a long outage already runs at, well inside the 1 % duty budget.
+    Log: `P2P join: boot window (120 s) expired without a JoinAccept;
+    continuing on slow backoff`.
+
+  Earlier revisions of this design stopped retrying entirely when the window
+  closed, to turn the never-paired worst case into a fixed once-per-boot
+  cost. That stopped being the right trade once a join episode sweeps the
+  spreading factors: a node switched on before its Hub, or after the Hub
+  moved the network SF, now has a working recovery available and would sit
+  on it silently until someone power-cycled it. The bounded cost moved from
+  "120 s then nothing" to "at most one pass an hour". (No HW power numbers
+  yet — see §13 phase 6, "power delta vs. the 92 µA baseline".)
 - Automatically as self-healing after persistent ACK loss (§7) — unaffected
   by the above: that is a *re-join* of an already-paired device recovering
   from lost sync, already bounded by "N consecutive failed uplink cycles"
-  (default 8), not the open-ended never-paired case this cap targets.
+  (default 8); it starts directly on the slow policy.
+- Operator: the shell `join` forces a fresh episode (fast policy) even when
+  `PAIRED`, and pre-empts a pending slow-backoff retry rather than waiting
+  up to an hour for it.
+- Network: an authenticated `RejoinRequest` (§5.4) starts a slow-policy
+  episode.
+
+All four paths refuse to start a join while `lrw_appkey` or `lrw_deveui` is
+all-zero (§4, §5.3) — a node that cannot be registered at any central does
+not transmit.
 
 ### 5.3 Handshake
 
@@ -474,11 +497,37 @@ never be confused with each other.
   boots `UNPAIRED` and re-joins once — deliberate, and harmless
   pre-deployment, since that re-join is what fetches the assignment (§7).
 
-A failed attempt (no JoinAccept) retries with jittered, duty-cycle-aware
-backoff — but only for the trigger's own bounded lifetime: within the 120 s
-boot window (§5.2) for an auto-boot join, or a single attempt for an
-NFC-staged `p2p_join` (no standing retry loop once that boot's window/attempt
-is spent — the node goes back to idle and waits for the next trigger).
+A failed attempt (no JoinAccept) retries under the episode's policy (§5.2):
+fast inside the 120 s boot window, slow backoff after it or for a
+self-heal/`RejoinRequest` episode. Neither policy gives up.
+
+**Spreading-factor sweep.** The SF is network-wide and owned by the Hub, and
+there is deliberately no downlink announcing an SF change — a node that can no
+longer hear the Hub could not hear the announcement either. So a join episode
+walks **passes**: a pass is `P2P_JOIN_SF_ATTEMPTS` (2) JoinRequests at the
+configured `p2p-spreading-factor`, then one at each other SF in SF7..SF12,
+nearest-first, the higher SF first on a tie (a network SF change is almost
+always upward, for range) — e.g. configured SF10 → 10, 10, 11, 9, 12, 8, 7.
+After the last step the radio returns to the configured SF for the next pass.
+
+- Only a JoinRequest that reached the air advances the sweep. A duty-cycle
+  refusal tried no SF at all and just waits for the ledger; a hard radio
+  fault (`lora_send` error) ends the round so the slow policy backs off,
+  instead of retrying a dead modem every jitter interval.
+- Inside a pass the waits stay short under both policies — spreading one
+  pass over the backoff curve would try each SF once an hour, which is not a
+  sweep. The slow policy charges its backoff **between** passes.
+- A JoinAccept received on a swept SF is **adopted and persisted**
+  (`p2p_join_adopt_sf()` → `p2p-spreading-factor`), because the `PAIRED`
+  boot shortcut never joins and would otherwise come back up on the stale
+  SF with nothing left to rediscover it. An unchanged SF is not re-written.
+  Log: `P2P join: network SF changed <old> -> <new>, persisted`.
+- `ats radio status` reports the SF the radio is tuned to **right now**
+  (`sf: <live> (config <cfg>)`), which during a sweep differs from the configured one — that is
+  how a bench tells "found the network" from "still looking".
+
+Cost: one pass at 41 B is ~4.9 s of air time (dominated by the SF11/SF12
+steps); the 36 s hourly budget holds 16 SF12 JoinRequests.
 
 ### 5.4 Detach and RejoinRequest
 
@@ -499,7 +548,7 @@ the central, so neither schedules an Ack retry.
 | Frame | Node behaviour |
 |---|---|
 | `Detach` (`0xFD`) | `pairing_clear()`: delete `p2pjoin/state`, drop to `UNPAIRED`, purge the response/alarm and Ack-retry queues, and stop the uplink cadence (`app_p2p_is_ready()` goes false, so `app_report.c::run_report` skips the send while its timer keeps running). **No automatic re-join** — the operator removed this node deliberately, so it stays silent until a reboot or an explicit `join`. `dev_nonce` is untouched, so if it is re-registered later its next JoinRequest is still accepted. Log: `Detach received (counter %u): pairing cleared, radio idle until reboot or `join``. |
-| `RejoinRequest` (`0xFE`) | `start_join_episode(true)` — a self-heal-policy join (§7): exempt from §5.2's 120 s boot window and backed off 60 s → ×2 → 1 h, because a paired node asked to rekey must keep trying for its whole life rather than give up after two minutes. The old session stays usable until the new JoinAccept replaces it. Log: `RejoinRequest received (counter %u): re-joining`. |
+| `RejoinRequest` (`0xFE`) | `start_join_episode(true)` — a self-heal-policy join (§7): exempt from §5.2's 120 s boot window and backed off 60 s → ×2 → 1 h, because a paired node asked to rekey must keep trying for its whole life; it starts directly on the slow policy instead of the boot join's 120 s fast phase, and sweeps the SF like any join episode (§5.3). The old session stays usable until the new JoinAccept replaces it. Log: `RejoinRequest received (counter %u): re-joining`. |
 
 The management API's `nodes/remove` issues the Detach (best-effort — a sleeping
 node picks it up in its next RX1, exactly TOWER's caveat). TOWER's
@@ -682,8 +731,8 @@ isn't):
 |---|---|
 | `lrw_appkey` change (`set_param`/`config`, e.g. re-provisioning) | `session_key` on the *next* join changes; an already-`PAIRED` session is unaffected until something else forces a re-join (unlike `secret_key` rotation on the NFC channel, which forces a reboot, #322 — changing `app_key` does not by itself). The central must have the new `app_key` registered before the node's next JoinRequest will authenticate. |
 | `factory_reset` | **A P2P node stops being a P2P node.** `radio_mode` is `persistent: [device_reset]` only and is absent from `app_config_factory_reset()`'s preserve list, so it reverts to its `OFF` default (#350): `app_radio_init()` brings no radio up and `app_p2p_start()` is never called at all. Two leftovers survive and matter later. (a) **The P2P pairing is NOT cleared** (doc/code mismatch found 2026-08-24: the `p2pjoin/*` subtree is registered entirely inside `app_p2p.c` and `app_settings_factory_reset()` never references it) — inert while `radio_mode` is not `p2p`, but `join_settings_set()` still restores it straight to `PAIRED` the moment someone sets `radio_mode p2p` again. (b) **`app_key` (`lrw_appkey`) IS wiped** — also `persistent: [device_reset]` only and also absent from that preserve list, unlike `secret_key`, which the earlier `join_key`-rooted design could always fall back on. So re-enabling P2P after a `factory_reset` without re-provisioning `lrw_appkey` would otherwise resume a pairing the operator explicitly reset, under a root key that is now all-zero and therefore public; §4's zero-`app_key` guard refuses to start in exactly that state, which is why it is checked *before* `app_p2p_start()`'s already-`PAIRED` shortcut. The old design's self-healing property — the device could always re-derive its way back on its own — is gone regardless. Bench levers: the top-level `join` (v1.5.0) forces a fresh join live, no reboot needed (the same command on both radio stacks -- `app_radio_rejoin()` dispatches it); `ats radio unjoin` (v1.5.0; clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears the pairing. |
-| Central DB loss/restore | Node's uplinks stop being ACKed (or ACK under an unknown session fails authentication). Self-healing: after **N consecutive fully-failed uplink cycles** (default 8) the node starts re-join attempts with exponential backoff. Known devices' re-joins are accepted outside the pairing window. **Implemented (B3, PR #408, v1.5.0):** `P2P_REJOIN_FAIL_THRESHOLD = 8`; a fully-failed cycle = all `P2P_ACK_MAX_RETRIES` exhausted with no Ack; any Ack resets the streak. The re-join is exempt from the 120 s boot-window cap (§5.2, this is a paired device recovering, not a never-paired join) and backs off `60 s → ×2 → 3600 s` cap, ±25 % jitter. Same `app_key`-set guard as the boot join. |
-| Explicit `Detach` / `RejoinRequest` downlink | Authenticated; immediate. **Implemented (v1.5.0)** — see §5.4 for both. `Detach` clears the pairing and leaves the node silent with no automatic re-join; `RejoinRequest` is the network-initiated rekey lever (counter hygiene, key rotation policy) and starts a self-heal-policy join episode. Before v1.5.0 the node parsed neither, so a `node-remove` left it retrying into a session the central had dropped until the self-heal threshold turned it into a rejoin loop against an unregistered serial. |
+| Central DB loss/restore | Node's uplinks stop being ACKed (or ACK under an unknown session fails authentication). Self-healing: after **N consecutive fully-failed uplink cycles** (default 8) the node starts re-join attempts with exponential backoff. Known devices' re-joins are accepted outside the pairing window. **Implemented (B3, PR #408, v1.5.0):** `P2P_REJOIN_FAIL_THRESHOLD = 8`; a fully-failed cycle = all `P2P_ACK_MAX_RETRIES` exhausted with no Ack; any Ack resets the streak. The re-join runs the slow policy from the start (§5.2) and sweeps the SF like any join episode (§5.3); it backs off `60 s → ×2 → 3600 s` cap, ±25 % jitter. Same `app_key`-set guard as the boot join. |
+| Explicit `Detach` / `RejoinRequest` downlink | Authenticated; immediate. **Implemented (v1.5.0)** — see §5.4 for both. `Detach` clears the pairing and leaves the node silent with no automatic re-join; `RejoinRequest` is the network-initiated rekey lever (counter hygiene, key rotation policy) and starts a self-heal-policy join episode. Before v1.5.0 the node parsed neither, so a `node-remove` left it retrying into a session the central had dropped until the self-heal threshold turned it into a rejoin loop against an unregistered device. |
 | Firmware upgrade that changes the pairing record | `join_settings_set()` accepts only a `p2pjoin/state` record of exactly the current length, so any release that changes the layout invalidates the stored pairing: the node boots `UNPAIRED` and re-joins once, automatically. v1.5.0 does this (the `reserved(4)` TX-power byte, §5.3). Deliberate, and cheap pre-deployment — the re-join is what populates the new field. Note it costs one `dev_nonce` and resets `fcnt` to 0 under a freshly derived `session_key`, both of which the central already tolerates. |
 | Counter approaching 32-bit wrap | Practically unreachable; policy is a network-initiated `RejoinRequest` rekey long before wrap. |
 
@@ -1059,8 +1108,8 @@ everything except real round-trip timing.
   §6).
 - JoinRequest/JoinAccept handshake (§5.3) and `session_key` derivation
   matching on both sides.
-- ACK (§6) and the retry/backoff state machine, including the 120 s
-  boot-window / NFC-`p2p_join` trigger cap (§5.2).
+- ACK (§6) and the retry/backoff state machine, including the fast→slow
+  policy hand-over at the 120 s boot window (§5.2) and the SF sweep (§5.3).
 - `Detach`/`RejoinRequest` (§5.4, §7).
 - The zero-`app_key` guard (§4). This one has **no automated coverage at
   all** — `app_p2p.c` needs the LoRa driver, so no native_sim suite reaches
