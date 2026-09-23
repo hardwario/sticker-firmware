@@ -1097,6 +1097,31 @@ test("buzzer_play with empty body encodes a stop (proto3 default)", () => {
   assert.equal(toHex(enc.bytes), "0802e20100");
 });
 
+// --- get_settings: empty-body command (field 31); the answer is a plain
+// ConfigDump with the command's seq, decoded by the existing config_dump path.
+test("get_settings encodes an empty body on field 31 and round-trips", () => {
+  const enc = codec.encodeDownlink({ data: { seq: 7, command: "get_settings" } });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  assert.equal(enc.fPort, 85);
+  // seq=7 (0x08 0x07) + field 31 length-delimited, length 0: tag (31<<3)|2 = 250
+  // = 0xfa 0x01 as a varint.
+  assert.equal(toHex(enc.bytes), "0807fa0100");
+  const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes });
+  assert.equal(dec.data.command, "get_settings");
+  assert.equal(dec.data.seq, 7);
+});
+
+test("get_settings answer decodes as a ConfigDump with its seq", () => {
+  // FW answer (tests/cmd test_get_settings_one_frame shape): version 01, seq 7,
+  // config_dump (4) { application (4) { interval_sample 60, interval_report 900 } }.
+  const r = codec.decodeUplink({ fPort: 85, bytes: [...hex("01080722072205103c188407")] });
+  assert.equal(r.errors.length, 0, "decode errors: " + r.errors);
+  assert.equal(r.data.seq, 7);
+  assert.equal(r.data.config_dump.application.interval_sample, 60);
+  assert.equal(r.data.config_dump.application.interval_report, 900);
+  assert.equal(r.data.pages, undefined, "one frame: no pages");
+});
+
 // --- Fix for a systemic decoder hang: _pbReadVarint(bytes, offset) with
 // offset >= bytes.length returned {next: offset} UNCHANGED (loop body never
 // ran), so any `while (p < end)` loop bounded by a length taken FROM the

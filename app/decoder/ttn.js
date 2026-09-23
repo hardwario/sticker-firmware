@@ -185,6 +185,7 @@ var _CMD_NAMES = {
   26: "vendor_reset",
   27: "clm_rearm",
   28: "buzzer_play",
+  31: "get_settings",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);
