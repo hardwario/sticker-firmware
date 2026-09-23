@@ -165,6 +165,7 @@ message Command {
         SetSecretKey     vendor_reset      = 26;
         ClmRearm         clm_rearm         = 27;
         BuzzerPlay       buzzer_play       = 28;
+        GetSettings      get_settings      = 31;
     }
 // END GENERATED COMMANDS
 
@@ -290,6 +291,13 @@ message Command {
         optional uint32 kind     = 1; // melody id: 0 stop, 1-3 melodies, 4-15 reserved, >=16 -> 0
         optional uint32 repeat_s = 2; // 0 = no repeat; 1-999 = repeat interval (s)
     }
+
+    // The boot settings-info ConfigDump (#412) on request: application
+    // interval_sample / interval_report / history_enable, the nine sensors
+    // cap_* flags and the runtime w1_slot_type. The answer carries this
+    // command's seq (the autonomous boot dump has seq 0); over LoRaWAN it is
+    // paged with the Response envelope (#425) when it does not fit one frame.
+    message GetSettings { }
 }
 
 message Response {
