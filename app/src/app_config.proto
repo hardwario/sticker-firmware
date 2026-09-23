@@ -418,6 +418,15 @@ message Response {
         // enums as the alarm rules and the fPort 3 AlarmReport (app_alarm_source,
         // app_alarm_quantity, AlarmEvent.Type) — see AlarmStatus.
         repeated AlarmStatus active_alarms = 15;
+
+        // Link quality of the last downlink received, as measured by the device
+        // (#409 A2), with its age: on a Class A device it can be hours old.
+        // Emitted over NFC only (an installer with a phone has no LNS view; the
+        // LNS already has uplink RSSI/SNR and DevStatusAns), and omitted until the
+        // first downlink since boot.
+        optional sint32 last_dl_rssi  = 16;  // dBm
+        optional sint32 last_dl_snr   = 17;  // dB
+        optional uint32 last_dl_age_s = 18;  // seconds since that downlink
     }
 
     // A single active alarm as reported in Info.active_alarms. Same taxonomy as a

@@ -124,6 +124,10 @@ struct app_cmd_info {
 	uint8_t lrw_state;      /* current LoRaWAN state (enum app_lrw_state) */
 	uint8_t dev_eui[8];     /* LoRaWAN DevEUI; all-zero = unset */
 	uint32_t device_status; /* aggregated status (APP_DEVICE_STATUS_* bitmask) */
+	bool has_last_dl;       /* a downlink was received since boot (#409 A2) */
+	int16_t last_dl_rssi;   /* its RSSI (dBm) */
+	int8_t last_dl_snr;     /* its SNR (dB) */
+	uint32_t last_dl_age_s; /* seconds since it was received */
 };
 
 /* Cache the hwinfo reset-cause bitmask read once at boot (RESET_* flags from

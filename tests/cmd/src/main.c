@@ -34,6 +34,10 @@ extern void test_set_active_alarm_count(size_t n);
 extern int g_claim_done_calls;
 extern int g_claim_active_calls;
 extern uint8_t g_claim_state;
+extern bool test_dl_valid;
+extern int16_t test_dl_rssi;
+extern int8_t test_dl_snr;
+extern uint32_t test_dl_age_s;
 extern int g_buzzer_play_calls;
 extern uint32_t g_buzzer_play_last_kind;
 extern uint16_t g_buzzer_play_last_repeat_s;
@@ -86,6 +90,7 @@ static void reset_cfg(void)
 	g_claim_done_calls = 0;
 	g_claim_active_calls = 0;
 	g_claim_state = APP_NFC_CLAIM_ACTIVE;
+	test_dl_valid = false;
 	g_buzzer_play_calls = 0;
 	g_buzzer_play_last_kind = 0;
 	g_buzzer_play_last_repeat_s = 0;
@@ -582,6 +587,58 @@ ZTEST(cmd, test_get_info_claim_token_present_over_nfc)
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
 	zassert_true(r.body.info.has_claim_token, "claim_token must be present over NFC");
 	zassert_mem_equal(r.body.info.claim_token, token, sizeof(token), "claim_token bytes");
+}
+
+/* #409 A2: last-downlink RSSI/SNR + age are in the NFC Info only, and only
+ * once a downlink was received; the LoRaWAN Info never carries them. */
+ZTEST(cmd, test_get_info_last_downlink_nfc_only)
+{
+	uint8_t out[256];
+	size_t out_len = 0;
+	const uint8_t req[] = {0x08, 0x01, 0x22, 0x00}; /* seq=1, get_info */
+	Response r;
+	pb_istream_t is;
+
+	/* No downlink yet: fields absent even over NFC. */
+	reset_cfg();
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, req, sizeof(req), out, sizeof(out),
+				     &out_len, NULL),
+		      0, "nfc ret");
+	r = (Response)Response_init_zero;
+	is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_false(r.body.info.has_last_dl_rssi, "rssi must be absent before a downlink");
+	zassert_false(r.body.info.has_last_dl_age_s, "age must be absent before a downlink");
+
+	/* After a downlink: present over NFC, with the age. */
+	reset_cfg();
+	test_dl_valid = true;
+	test_dl_rssi = -97;
+	test_dl_snr = -7;
+	test_dl_age_s = 3600;
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, req, sizeof(req), out, sizeof(out),
+				     &out_len, NULL),
+		      0, "nfc ret");
+	r = (Response)Response_init_zero;
+	is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_true(r.body.info.has_last_dl_rssi && r.body.info.has_last_dl_snr &&
+			     r.body.info.has_last_dl_age_s,
+		     "fields missing over NFC");
+	zassert_equal(r.body.info.last_dl_rssi, -97, "rssi %d", r.body.info.last_dl_rssi);
+	zassert_equal(r.body.info.last_dl_snr, -7, "snr %d", r.body.info.last_dl_snr);
+	zassert_equal(r.body.info.last_dl_age_s, 3600, "age %u", r.body.info.last_dl_age_s);
+
+	/* Same state over LoRaWAN: never carried. */
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, req, sizeof(req), out, sizeof(out),
+				     &out_len, NULL),
+		      0, "lrw ret");
+	r = (Response)Response_init_zero;
+	is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_false(r.body.info.has_last_dl_rssi || r.body.info.has_last_dl_snr ||
+			      r.body.info.has_last_dl_age_s,
+		      "last-downlink fields must never go over LoRaWAN");
 }
 
 /* Count Response.Info.active_alarms (field 15) entries by walking the raw
@@ -2044,6 +2101,11 @@ static void nfc_info_setup(size_t alarms)
 	memcpy(g_app_config.lrw_deveui, deveui, sizeof(deveui));
 	g_app_sensor_data.voltage = 3.3f;
 	test_set_active_alarm_count(alarms);
+	/* #423: a downlink was received, so the NFC-only last-downlink unit exists. */
+	test_dl_valid = true;
+	test_dl_rssi = -97;
+	test_dl_snr = -7;
+	test_dl_age_s = 3600;
 }
 
 /* Read every page of an Info over `tp` at `cap` (page 0 without `page`, then
@@ -2056,7 +2118,7 @@ static uint32_t nfc_read_info_pages(enum app_cmd_transport tp, size_t cap, size_
 	Response r = decode_resp(out, len);
 	uint32_t count = r.page_count ? r.page_count : 1;
 	size_t seen_alarms = 0;
-	int seen_serial = 0, seen_token = 0, seen_eui = 0, seen_battery = 0;
+	int seen_serial = 0, seen_token = 0, seen_eui = 0, seen_battery = 0, seen_dl = 0;
 
 	for (uint32_t p = 0; p < count; p++) {
 		if (p > 0) {
@@ -2075,6 +2137,18 @@ static uint32_t nfc_read_info_pages(enum app_cmd_transport tp, size_t cap, size_
 		seen_token += r.body.info.has_claim_token;
 		seen_eui += r.body.info.has_dev_eui;
 		seen_battery += r.body.info.battery == 3300;
+		/* #423: RSSI/SNR/age form one unit — never split across pages. */
+		const Response_Info *in = &r.body.info;
+
+		zassert_true(in->has_last_dl_rssi == in->has_last_dl_age_s &&
+				     in->has_last_dl_snr == in->has_last_dl_age_s,
+			     "page %u: last-downlink fields split", p);
+		if (in->has_last_dl_age_s) {
+			zassert_equal(in->last_dl_rssi, -97, "rssi %d", in->last_dl_rssi);
+			zassert_equal(in->last_dl_snr, -7, "snr %d", in->last_dl_snr);
+			zassert_equal(in->last_dl_age_s, 3600, "age %u", in->last_dl_age_s);
+			seen_dl++;
+		}
 	}
 	zassert_equal(seen_alarms, alarms, "%zu of %zu alarms", seen_alarms, alarms);
 	zassert_equal(seen_serial, 1, "serial on %d pages", seen_serial);
@@ -2082,6 +2156,9 @@ static uint32_t nfc_read_info_pages(enum app_cmd_transport tp, size_t cap, size_
 	if (tp == APP_CMD_TRANSPORT_NFC) {
 		zassert_equal(seen_token, 1, "claim_token on %d pages", seen_token);
 		zassert_equal(seen_eui, 1, "dev_eui on %d pages", seen_eui);
+		zassert_equal(seen_dl, 1, "last-downlink unit on %d pages", seen_dl);
+	} else {
+		zassert_equal(seen_dl, 0, "last-downlink fields are NFC-only");
 	}
 
 	/* One past the end: OUT_OF_RANGE on the page field. */

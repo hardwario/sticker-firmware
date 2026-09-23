@@ -23,6 +23,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / NFC | **New** — `GetSettings` command (#428): the boot settings-info `ConfigDump` (§4) on request, with the command's `seq`, so a host can refresh the key operating settings without a full multi-page `GetConfig`. |
 | NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §14. |
 | NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §15. |
+| NFC | **New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2), so an installer with a phone can judge the link at the mounting spot. |
 
 ---
 
@@ -252,6 +253,7 @@ reads LoRaMac's still-uninitialised crypto context (it showed a garbage FCntUp).
 - **Rejoin:** after a network loss, the first rejoin once the network was back succeeded.
 
 See `doc/manual-test-plan.md` **L17** and `doc/plan/421 - LoRaWAN glue fixes in sticker-zephyr.md`.
+
 
 ---
 
@@ -819,6 +821,36 @@ active|done|status` drives and prints the window state. Example:
 `ats claim status` on a freshly provisioned unit prints `claim window: active`;
 `ats cmd plain <GetClaimInfo>` returns the `ClaimInfo`; `ats cmd plain <GetInfo>`
 returns `NOT_READY "transport not allowed"`.
+
+---
+
+## 16. Last-downlink link quality in the NFC GetInfo (#409 A2)
+
+An installer with only a phone (Manager-App over NFC) has no view of the network
+server, so it could not tell whether the radio link is good where the device is
+mounted. The NFC `Info` now carries the link quality of the **last downlink the device
+received**, as measured by the device:
+
+| Field | Type | Meaning |
+|---|---|---|
+| 16 `last_dl_rssi` | sint32 | RSSI of the last downlink, dBm |
+| 17 `last_dl_snr` | sint32 | SNR of the last downlink, dB |
+| 18 `last_dl_age_s` | uint32 | seconds since that downlink was received |
+
+- **NFC only** — like `lrw_state` and `dev_eui`. The LoRaWAN `Info` does not carry them:
+  the network server already has the uplink RSSI/SNR per gateway and, with `DevStatusAns`
+  (#419), the device-side downlink SNR margin and battery.
+- **Always with its age.** A Class A device only receives a downlink when the network
+  sends one, so the reading can be hours old. The values reflect any downlink, including
+  MAC-only ones (ADR, DevStatusReq, LinkCheckAns).
+- **Omitted until the first downlink since boot**, so a missing value never reads as 0 dBm.
+- The same values are on the debug shell: `ats lrw status` (`rssi`, `snr`).
+- `ttn.js` decodes them as `last_dl_rssi`, `last_dl_snr`, `last_dl_age_s`.
+- **Paging (with §14):** in the host-driven NFC `GetInfo` paging the three fields form **one**
+  NFC-only Info unit (next to `lrw_state` / `claim_token` / `dev_eui`), so RSSI/SNR never
+  travel on a page without their age; the unit is empty (not sent) until the first downlink.
+
+Cost: release +160 B flash, +0 B RAM.
 
 ---
 

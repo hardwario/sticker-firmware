@@ -128,6 +128,10 @@ void app_cmd_get_info(struct app_cmd_info *info)
 #ifdef CONFIG_LORAWAN
 	info->lrw_state = (uint8_t)app_lrw_get_state();
 #endif
+#if defined(CONFIG_LORAWAN) || defined(CONFIG_ZTEST)
+	info->has_last_dl = app_lrw_last_downlink(&info->last_dl_rssi, &info->last_dl_snr,
+						  &info->last_dl_age_s);
+#endif
 
 	BUILD_ASSERT(sizeof(info->dev_eui) == sizeof(g_app_config.lrw_deveui),
 		     "dev_eui size mismatch");
@@ -270,6 +274,19 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info, size_t max
 	if (tp == APP_CMD_TRANSPORT_NFC) {
 		info->has_lrw_state = true;
 		info->lrw_state = (Response_Info_LrwState)i.lrw_state;
+
+		/* #409 A2: last-downlink link quality for an installer with only a
+		 * phone. NFC-only: the LNS already has uplink RSSI/SNR per gateway
+		 * and, since #419, DevStatusAns (downlink SNR margin + battery), so
+		 * it would only cost LoRaWAN payload. Always with its age. */
+		if (i.has_last_dl) {
+			info->has_last_dl_rssi = true;
+			info->last_dl_rssi = i.last_dl_rssi;
+			info->has_last_dl_snr = true;
+			info->last_dl_snr = i.last_dl_snr;
+			info->has_last_dl_age_s = true;
+			info->last_dl_age_s = i.last_dl_age_s;
+		}
 
 		for (size_t j = 0; j < sizeof(i.dev_eui); j++) {
 			if (i.dev_eui[j] != 0) {
@@ -1902,6 +1919,9 @@ enum {
 	INFO_U_LRW_STATE,
 	INFO_U_CLAIM_TOKEN,
 	INFO_U_DEV_EUI,
+	/* last_dl_rssi/snr/age_s (#423): one unit, so RSSI/SNR never travel on a page
+	 * without their age. */
+	INFO_U_LAST_DL,
 	INFO_U_SCALARS,
 };
 
@@ -1964,6 +1984,14 @@ static void info_page_fill(Response *resp, const struct info_snap *snap, uint32_
 		pi->has_dev_eui = all->has_dev_eui;
 		memcpy(pi->dev_eui, all->dev_eui, sizeof(pi->dev_eui));
 	}
+	if (mask & BIT(INFO_U_LAST_DL)) {
+		pi->has_last_dl_rssi = all->has_last_dl_rssi;
+		pi->last_dl_rssi = all->last_dl_rssi;
+		pi->has_last_dl_snr = all->has_last_dl_snr;
+		pi->last_dl_snr = all->last_dl_snr;
+		pi->has_last_dl_age_s = all->has_last_dl_age_s;
+		pi->last_dl_age_s = all->last_dl_age_s;
+	}
 	if (rng->end > rng->start) {
 		pi->active_alarms.funcs.encode = encode_alarm_range;
 		pi->active_alarms.arg = rng;
@@ -2003,6 +2031,10 @@ static bool info_unit_empty(const Response_Info *in, size_t u)
 		return !in->has_claim_token;
 	case INFO_U_DEV_EUI:
 		return !in->has_dev_eui;
+	case INFO_U_LAST_DL:
+		/* Set together, and only after a downlink: RSSI/SNR can be 0 or negative,
+		 * so presence (not the value) decides. */
+		return !in->has_last_dl_age_s;
 	default:
 		return false;
 	}
