@@ -68,8 +68,8 @@ whole message. Decided against on 2026-09-23 in favour of self-contained pages.
    recovery answers `Error BUDGET_TOO_SMALL` with the `seq` and the stream stops.
 6. **Physical floor.** A single unit that does not fit even alone (an alarm rule is 17 B, one
    history record or 1-Wire ROM ~10 B) cannot be sent at that budget → `Error
-   BUDGET_TOO_SMALL`. Everything made of small fields (Info, identity, status, most config)
-   pages down to the 11 B tier.
+   BUDGET_TOO_SMALL`. Everything made of small fields (Info, identity, status) pages down
+   to the 11 B tier; GetConfig / GetParam need ≥ ~13 B (see "As built" below).
 
 `AlarmReport` (fPort 3) is not a `Response`, so it gets the same two fields under the same
 names: `uint32 page_index = 5; uint32 page_count = 6;`.
@@ -204,6 +204,14 @@ Info with alarms / W1Scan do page there). The central must accept several 0x55 w
 `BUDGET_TOO_SMALL` only when nothing fits. At the 11 B tier the Info then carries the
 small fields (firmware version, battery, reset cause, status) but not the serial,
 unix time or alarm entries.
+
+**As built — GetConfig / GetParam over LoRaWAN** keep the #409 3d/3e layout: fixed 30 B
+field pages (DR0-sized, conservative, room for FOpts), the same at every DR ≥ 51 B (e.g. a
+default config = 6 pages of 29–41 B, HW-seen). They do **not** page down to the 11 B tier:
+a paged ConfigDump frame needs about 13 B (version, `seq`, `page_index`, `page_count`,
+`config_dump` + section wrapper, one field), so there the answer is `BUDGET_TOO_SMALL`
+(native-tested). No LoRaWAN region has a DR between 11 B and 51 B, so a budget-aware
+layout would only save frames at higher DRs — a possible follow-up, not a gap.
 
 
 One step per commit; each: Release + `debug.conf` builds (sticker2 Zephyr, #419 patch), native

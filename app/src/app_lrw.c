@@ -671,10 +671,11 @@ static void announce_work_handler(struct k_work *work)
 }
 
 /* Pin the uplink datarate from lrw-datarate (#409 A3, like twr-sdk AT$DR). Runs
- * on every (re)join, after ADR is configured and before the payload budget is
- * captured, so the budget reflects the pinned DR. lorawan_set_datarate() also
- * becomes the DR of the next join request and is re-applied by the stack after
- * each join while ADR is off. Validity is region/dwell dependent (e.g. AU915
+ * after every (re)join, after ADR is configured and before the payload budget is
+ * captured, so the budget reflects the pinned DR. It does NOT set the join DR:
+ * lorawan_start() (boot and each rejoin's MAC re-init) resets the stack's DR to
+ * the region default, so JoinRequests always go out at that DR and the pin is
+ * re-applied here once the join succeeds. Validity is region/dwell dependent (e.g. AU915
  * dwell=1 rejects DR0/DR1): an invalid DR is rejected by the MAC and the stack's
  * own DR stays in use. Calibration pins its own DR and is left alone. */
 static void apply_manual_datarate(void)
