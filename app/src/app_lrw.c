@@ -93,8 +93,8 @@ static struct k_work_q m_work_q;
 
 #if defined(CONFIG_WATCHDOG)
 /* Liveness heartbeat (#182): a self-rearming work item proves m_work_q is still
- * draining. If the queue wedges (e.g. lorawan_send blocks forever on the MAC
- * confirm semaphore, #181) this work can no longer run, the channel goes stale
+ * draining. If the queue wedges (lorawan_send's MAC-confirm wait is bounded since
+ * #181, but any other stuck work item) this work can no longer run, the channel goes stale
  * and app_wdog stops feeding the IWDG → SoC reset + rejoin. The timeout is far
  * above the worst-case legitimate single-send blocking (~7 s on TTN with a 5 s
  * RX1 delay), so only a true wedge trips it. */
@@ -106,6 +106,15 @@ static struct k_work_q m_work_q;
  * Force a MAC-reset rejoin after this many report intervals with no successful
  * telemetry uplink. */
 #define LRW_TX_STALE_REJOIN_FACTOR 4
+
+/* A lost MAC confirm must end in -ETIMEDOUT from lorawan_send()/lorawan_join()
+ * (#181) before the liveness channel goes stale and resets the SoC. */
+#if defined(CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS)
+BUILD_ASSERT(CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS > 0 &&
+		     CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS < LRW_HEARTBEAT_TIMEOUT_MS,
+	     "LoRaWAN confirm timeout must be bounded and below the m_work_q heartbeat");
+#endif
+
 static int m_wdog_channel = -1;
 static struct k_work_delayable m_heartbeat_work;
 #endif
@@ -221,6 +230,7 @@ static int m_message_count;         /* Message counter for N-th LC */
 static int m_rejoin_attempts;       /* Rejoin attempt counter for backoff */
 static int m_join_busy_polls;       /* Counter for MAC busy polling */
 static bool m_init_join;            /* True for first join after boot */
+static bool m_mac_started;          /* lorawan_start() succeeded; LoRaMac state is valid */
 
 #define JOIN_BUSY_POLL_INTERVAL_MS 500
 #define JOIN_BUSY_MAX_POLLS        30
@@ -991,8 +1001,13 @@ static void join_complete_work_handler(struct k_work *work)
 		return;
 	}
 
-	/* MAC layer still busy (join request in progress)? */
-	if (LoRaMacIsBusy()) {
+	/* MAC layer still busy (join request in progress)? LoRaMac is not
+	 * thread-safe, so direct calls go under the MAC lock (#241). */
+	lorawan_mac_lock();
+	bool mac_busy = LoRaMacIsBusy();
+	lorawan_mac_unlock();
+
+	if (mac_busy) {
 		m_join_busy_polls++;
 		if (m_join_busy_polls >= JOIN_BUSY_MAX_POLLS) {
 			LOG_ERR("MAC busy timeout after %d ms - reconnecting",
@@ -1013,7 +1028,11 @@ static void join_complete_work_handler(struct k_work *work)
 	MibRequestConfirm_t mib_req;
 
 	mib_req.Type = MIB_NETWORK_ACTIVATION;
-	if (LoRaMacMibGetRequestConfirm(&mib_req) != LORAMAC_STATUS_OK ||
+	lorawan_mac_lock();
+	LoRaMacStatus_t mib_status = LoRaMacMibGetRequestConfirm(&mib_req);
+	lorawan_mac_unlock();
+
+	if (mib_status != LORAMAC_STATUS_OK ||
 	    mib_req.Param.NetworkActivation == ACTIVATION_TYPE_NONE) {
 		LOG_ERR("Join failed (not activated)");
 		on_join_failure();
@@ -1083,7 +1102,9 @@ static void join_work_handler(struct k_work *work)
 	} else {
 		LOG_INF("Rejoin attempt %d...", m_rejoin_attempts);
 		LOG_INF("Deinitializing MAC...");
+		lorawan_mac_lock();
 		LoRaMacDeInitialization();
+		lorawan_mac_unlock();
 
 		ret = lorawan_start();
 		if (ret) {
@@ -1136,6 +1157,7 @@ static void join_work_handler(struct k_work *work)
 	if (config.mode == LORAWAN_ACT_ABP) {
 		MibRequestConfirm_t mib;
 
+		lorawan_mac_lock();
 		mib.Type = MIB_RECEIVE_DELAY_1;
 		mib.Param.ReceiveDelay1 = 1000;
 		LoRaMacMibSetRequestConfirm(&mib);
@@ -1143,6 +1165,7 @@ static void join_work_handler(struct k_work *work)
 		mib.Type = MIB_RECEIVE_DELAY_2;
 		mib.Param.ReceiveDelay2 = 2000;
 		LoRaMacMibSetRequestConfirm(&mib);
+		lorawan_mac_unlock();
 
 		LOG_INF("RX delays set: RX1=1s, RX2=2s");
 	}
@@ -1153,7 +1176,9 @@ static void join_work_handler(struct k_work *work)
 
 		mib.Type = MIB_PUBLIC_NETWORK;
 		mib.Param.EnablePublicNetwork = false;
+		lorawan_mac_lock();
 		LoRaMacMibSetRequestConfirm(&mib);
+		lorawan_mac_unlock();
 		LOG_INF("Network type: private (sync word 0x12)");
 	}
 
@@ -2028,6 +2053,7 @@ int app_lrw_init(void)
 			LOG_ERR_CALL_FAILED_INT("lorawan_start", ret);
 			return ret;
 		}
+		m_mac_started = true;
 
 		if (g_app_config.lrw_region == APP_CONFIG_LRW_REGION_US915 ||
 		    g_app_config.lrw_region == APP_CONFIG_LRW_REGION_AU915) {
@@ -2166,11 +2192,18 @@ int app_lrw_get_info(struct app_lrw_info *info)
 	/* #340 L3: radio-mode OFF/P2P (#271) never calls lorawan_start(), so
 	 * LoRaMac's own state (incl. CryptoNvm) was never initialized -- querying
 	 * it here would deref a NULL CryptoNvm. Zero-fill instead of touching
-	 * LoRaMac's MIB/crypto API when the MAC was never started. */
-	if (info->state == APP_LRW_STATE_DISABLED) {
+	 * LoRaMac's MIB/crypto API when the MAC was never started. The same holds
+	 * for the boot window before app_lrw_init() has run lorawan_start(): the
+	 * state is already IDLE then (HW-seen: shell showed FCntUp 0x080232D6). */
+	if (info->state == APP_LRW_STATE_DISABLED || !m_mac_started) {
 		info->dev_addr = 0;
 		info->fcnt_up = 0;
 	} else {
+		uint32_t fcnt_up;
+
+		/* Called from shell/NFC/m_work_q: direct LoRaMac access goes under
+		 * the MAC lock (#241). */
+		lorawan_mac_lock();
 		mib_req.Type = MIB_DEV_ADDR;
 		if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK) {
 			info->dev_addr = mib_req.Param.DevAddr;
@@ -2178,13 +2211,12 @@ int app_lrw_get_info(struct app_lrw_info *info)
 			info->dev_addr = 0;
 		}
 
-		uint32_t fcnt_up;
-
 		if (LoRaMacCryptoGetFCntUp(&fcnt_up) == LORAMAC_CRYPTO_SUCCESS) {
 			info->fcnt_up = fcnt_up;
 		} else {
 			info->fcnt_up = 0;
 		}
+		lorawan_mac_unlock();
 	}
 
 	info->datarate = m_current_dr;

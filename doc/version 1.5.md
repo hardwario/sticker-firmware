@@ -12,6 +12,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
 | LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
+| LoRaWAN | **Fixed** — LoRaWAN glue in the Zephyr fork (`sticker-zephyr` `v4.3.0-sticker2-branch`, #421): a (re)join no longer returns the stale result of an earlier link-check / device-time confirm (L-7, #241); MAC-confirm waits are bounded (`-ETIMEDOUT` instead of a wedged `m_work_q`, #181); all LoRaMac access is serialised by one MAC lock (#241). |
 | LoRaWAN | **Fix** — region guard (#409 A1): a stored `lrw-region` that is not compiled into the image no longer kills LoRaWAN init silently — the radio stays silent (never falls back to another band), reported as `lrw_disabled` plus an error log. |
 | LoRaWAN | **New** — manual uplink datarate `lrw-datarate` (#409 A3): `auto` (default) or `dr0`–`dr7`, pinned after every join when ADR is off. |
 | LoRaWAN | **Fix** — low-DR delivery (#409 A5a, part 1): compact LoRaWAN `Error` so a command is always answered at the 11 B tier; MAC-flood (budget 0) no longer drops responses/alarms; alarm batches split across frames; alarm state mirrored into telemetry `system_flags`. |
@@ -195,7 +196,7 @@ omitted):
 - **Low DR outside EU868 (#418, resolved by #409):** the frame is single-frame and
   not paged, so it does not fit the 11 B tier (US915 DR0, AU915 / AS923 DR2). It is
   no longer lost: the device remembers it and sends it automatically once a DR
-  change makes room; the boot `Info` meanwhile goes out as `InfoLite` (see §7).
+  change makes room; the boot `Info` meanwhile goes out as `InfoLite` (see §8).
 - The lean debug default (`debug.conf`, #395) builds with `CONFIG_W1=n`, so a
   debug image omits `w1_slot_type`. Build with `-DCONFIG_W1=y` to exercise it.
   Release builds have 1-Wire on.
@@ -217,7 +218,39 @@ unit had no 1-Wire bridge. See `doc/manual-test-plan.md` scenario **L4b**.
 
 ---
 
-## 5. LoRaWAN region guard (#409 A1)
+## 5. LoRaWAN glue fixes in the Zephyr fork (#421)
+
+The firmware now builds against `hardwario/sticker-zephyr` **`v4.3.0-sticker2-branch`** (Zephyr v4.3.0 +
+the existing I2C PM fix + three LoRaWAN glue commits). The migration to Zephyr v4.4.2 is tracked in #420 and will
+carry these commits over.
+
+| Fix | Before | After |
+|---|---|---|
+| **Stale join result** (L-7, #241) | Every link-check / device-time MLME confirm left a token in the join semaphore, so the next (re)join returned right after TX with the *previous* result. A stale failure made the app drop a session the MAC had actually joined, then back off. | Only the join confirm signals the join waiter; the semaphore is drained before each join. |
+| **Bounded confirm wait** (#181) | `lorawan_send()` / `lorawan_join()` waited forever for the MAC confirm; a lost confirm wedged `m_work_q` until the #182 watchdog reset the SoC. | `CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS` (20 s, `BUILD_ASSERT` < the 30 s liveness window). A lost confirm returns `-ETIMEDOUT` and the normal bounded retry path takes over. |
+| **MAC lock** (#241) | LoRaMac (not thread-safe) was entered from `m_work_q`, shell/NFC and the system work queue (timer + radio events) without a shared lock. | One recursive `lorawan_mac_lock()` around every LoRaMac entry, never held across a confirm wait. `app_lrw.c` wraps its direct LoRaMac calls. |
+
+Also fixed: `ats lrw status` / NFC info during the boot window before `lorawan_start()` no longer
+reads LoRaMac's still-uninitialised crypto context (it showed a garbage FCntUp).
+
+**Behaviour notes:**
+
+- A send that times out may already have been on air (only the confirm was lost), so the bounded retry can
+  send a duplicate uplink with a new FCnt. That is preferable to the previous permanent wedge.
+- Cost: about 400–480 B flash, 64 B RAM.
+
+**HW verification (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub):** T1–T8 PASS. The key results:
+- **A/B:** `lorawan_join()` after link-check / device-time confirms returned after **26 ms** on v1.5.0 (stale
+  result) versus **8305 ms** with #421 (the real JoinAccept).
+- **Fault injection:** a dropped confirm returned `-ETIMEDOUT` after 20 s with no wedge and no watchdog reset.
+- **Stress:** about 68 k locked MIB reads during chained downlinks, with no hang.
+- **Rejoin:** after a network loss, the first rejoin once the network was back succeeded.
+
+See `doc/manual-test-plan.md` **L17** and `doc/plan/421 - LoRaWAN glue fixes in sticker-zephyr.md`.
+
+---
+
+## 6. LoRaWAN region guard (#409 A1)
 
 `lorawan_set_region()` returns `-ENOTSUP` for a region whose
 `CONFIG_LORAMAC_REGION_*` is not compiled in. Until now that made `app_lrw_init()`
@@ -243,7 +276,7 @@ Cost: a few dozen bytes of flash, +0 B RAM.
 
 ---
 
-## 6. Manual uplink datarate `lrw-datarate` (#409 A3)
+## 7. Manual uplink datarate `lrw-datarate` (#409 A3)
 
 New config key, modelled on twr-sdk's `AT$DR`:
 
@@ -279,7 +312,7 @@ Cost: release +408 B flash, +0 B RAM.
 
 ---
 
-## 7. Low-DR delivery, part 1 (#409 A5a)
+## 8. Low-DR delivery, part 1 (#409 A5a)
 
 At the smallest LoRaWAN budget tier — **11 B** on US915 DR0 and AU915 / AS923 DR2 — most
 fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *floor*
@@ -318,7 +351,7 @@ fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *f
   `alarm_status_flags` (e.g. `["alarm_any", "alarm_threshold"]`). Additive — older decoders
   ignore the extra bits.
 
-## 8. `DevStatusReq` after `LinkADRReq` answered (#419)
+## 9. `DevStatusReq` after `LinkADRReq` answered (#419)
 
 LoRaMac-node's MAC-command parser skipped a `DevStatusReq` that is the last FOpts byte
 right after a `LinkADRReq` block — exactly how ChirpStack bundles them — so `DevStatusAns`
