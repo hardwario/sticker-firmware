@@ -245,10 +245,14 @@ bool app_sensor_i2c_wedged(void)
  * channel/state, only that app_nfc.c's calls into it don't crash the link. */
 int g_led_set_calls;
 
+/* Last state written per channel (R, G, Y) — the NFC LED tests assert on it. */
+int g_led_ch[3];
+
 void app_led_set(enum app_led_channel ch, int state)
 {
-	(void)ch;
-	(void)state;
+	if ((int)ch >= 0 && (int)ch < 3) {
+		g_led_ch[ch] = state;
+	}
 	g_led_set_calls++;
 }
 

@@ -209,90 +209,115 @@ static atomic_t m_awake_held; /* 1 while the SUSPEND_TO_IDLE lock is held */
 static void nfc_awake_timeout(struct k_timer *timer);
 static K_TIMER_DEFINE(m_awake_timer, nfc_awake_timeout, NULL);
 
-/* --- NFC interaction LED signalling --------------------------------------
- * Guides an operator through an NFC exchange:
- *   phone detected (RF field / GPO)      -> green solid
- *   command being serviced               -> fast green blink
- *   command rejected (auth/nonce, #315)  -> fast red blink, then off
- *   response written, waiting for phone   -> green + yellow solid
- *   response consumed / session quiet     -> LED off
- * The "processing"/"rejected" blink runs on a k_timer so it never blocks the NFC
- * critical path. app_led_set is a plain gpio write (ISR-safe); k_timer start/stop
- * are ISR-safe too, so these may be called from the GPO ISR / timer handlers.
- * One timer drives whichever channel the current state blinks (m_led_blink_ch),
- * and every state helper leaves the two channels it does not use turned off, so
- * a state change can never blend into a colour of its own (red + green = orange). */
-#define NFC_LED_BLINK_MS 90
+/* --- NFC interaction LED signalling (#414) ----------------------------------
+ * Guides whoever holds the phone against the sticker through a mailbox tap:
+ *   phone detected (RF field)                -> green solid, at most 5 s
+ *   mailbox session running                  -> green blink
+ *   session ended, last exchange OK          -> green + yellow, 2 s
+ *   session ended, last exchange failed      -> red, 2 s
+ *   otherwise / afterwards                   -> off
+ * "Failed" = the last request was rejected (wrong key / nonce / unknown channel,
+ * no reply is sent), its reply could not be written or was never read by the
+ * phone, or the session aborted on I2C errors. An authenticated Response.error
+ * is a valid reply, i.e. OK. The last exchange decides, so an app that resyncs
+ * after a rejection and then succeeds ends green + yellow. A deferred action
+ * (save / reset / reboot) waits for the result to be shown before it reboots
+ * (app_nfc_led_result_wait(), main.c); the boot carousel follows the reboot.
+ * Timers only, so nothing blocks the NFC path. The helpers are called from the
+ * poll thread, the GPO ISR (detected) and the timer handlers, so each one runs
+ * under irq_lock; app_led_set is a plain gpio write and k_timer calls are
+ * ISR-safe. Every state sets all three channels, so no two states can blend. */
+#define NFC_LED_BLINK_MS  90   /* session blink half-period */
+#define NFC_LED_DETECT_MS 5000 /* "phone detected" cap when no session starts */
+#define NFC_LED_RESULT_MS 2000 /* session result (OK / error) */
 
-/* How long the rejection blink is held (#315). Long enough to be unmistakable to
- * whoever is holding the phone against the sticker, and self-limiting: it clears
- * itself after this long rather than relying on any later event, so a rejected
- * frame never leaves the LED blinking indefinitely. */
-#define NFC_LED_REJECT_MS 2000
-
+static atomic_t m_led_state = ATOMIC_INIT(APP_NFC_LED_OFF);
 static bool m_led_blink_on;
-static enum app_led_channel m_led_blink_ch = APP_LED_CHANNEL_G;
+
+static void nfc_led_set3(bool r, bool g, bool y)
+{
+	app_led_set(APP_LED_CHANNEL_R, r ? APP_LED_ON : APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_G, g ? APP_LED_ON : APP_LED_OFF);
+	app_led_set(APP_LED_CHANNEL_Y, y ? APP_LED_ON : APP_LED_OFF);
+}
+
 static void nfc_led_blink_timer(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
-	m_led_blink_on = !m_led_blink_on;
-	app_led_set(m_led_blink_ch, m_led_blink_on ? APP_LED_ON : APP_LED_OFF);
+	unsigned int key = irq_lock();
+	if (atomic_get(&m_led_state) == APP_NFC_LED_SESSION) {
+		m_led_blink_on = !m_led_blink_on;
+		app_led_set(APP_LED_CHANNEL_G, m_led_blink_on ? APP_LED_ON : APP_LED_OFF);
+	}
+	irq_unlock(key);
 }
 static K_TIMER_DEFINE(m_led_blink_timer, nfc_led_blink_timer, NULL);
 
 static void nfc_led_off(void);
-static void nfc_led_reject_timeout(struct k_timer *timer)
+static void nfc_led_hold_timeout(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
 	nfc_led_off();
 }
-static K_TIMER_DEFINE(m_led_reject_timer, nfc_led_reject_timeout, NULL);
-
-static void nfc_led_detected(void)
-{
-	k_timer_stop(&m_led_reject_timer);
-	k_timer_stop(&m_led_blink_timer);
-	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
-	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
-	app_led_set(APP_LED_CHANNEL_G, APP_LED_ON);
-}
-
-static void nfc_led_processing(void)
-{
-	k_timer_stop(&m_led_reject_timer);
-	m_led_blink_on = true;
-	m_led_blink_ch = APP_LED_CHANNEL_G;
-	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
-	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
-	app_led_set(APP_LED_CHANNEL_G, APP_LED_ON);
-	k_timer_start(&m_led_blink_timer, K_MSEC(NFC_LED_BLINK_MS), K_MSEC(NFC_LED_BLINK_MS));
-}
-
-/* #315: the command was rejected before it ever ran (wrong secret_key /
- * vendor_token, stale or out-of-window nonce_counter, malformed frame) and no
- * reply is written back to the tag. Without this the green "servicing" blink from
- * nfc_led_processing() would simply keep running until the RF-quiet backstop —
- * visually identical to a successful command for whoever is holding the phone.
- * Same blink cadence in red (same rhythm, different colour = rejected), held for
- * NFC_LED_REJECT_MS and then cleared. */
-static void nfc_led_rejected(void)
-{
-	m_led_blink_on = true;
-	m_led_blink_ch = APP_LED_CHANNEL_R;
-	app_led_set(APP_LED_CHANNEL_G, APP_LED_OFF);
-	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
-	app_led_set(APP_LED_CHANNEL_R, APP_LED_ON);
-	k_timer_start(&m_led_blink_timer, K_MSEC(NFC_LED_BLINK_MS), K_MSEC(NFC_LED_BLINK_MS));
-	k_timer_start(&m_led_reject_timer, K_MSEC(NFC_LED_REJECT_MS), K_NO_WAIT);
-}
+/* Ends the time-limited states (detected, result). */
+static K_TIMER_DEFINE(m_led_hold_timer, nfc_led_hold_timeout, NULL);
 
 static void nfc_led_off(void)
 {
-	k_timer_stop(&m_led_reject_timer);
+	unsigned int key = irq_lock();
 	k_timer_stop(&m_led_blink_timer);
-	app_led_set(APP_LED_CHANNEL_R, APP_LED_OFF);
-	app_led_set(APP_LED_CHANNEL_G, APP_LED_OFF);
-	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+	k_timer_stop(&m_led_hold_timer);
+	nfc_led_set3(false, false, false);
+	atomic_set(&m_led_state, APP_NFC_LED_OFF);
+	irq_unlock(key);
+}
+
+static void nfc_led_detected(void)
+{
+	unsigned int key = irq_lock();
+	k_timer_stop(&m_led_blink_timer);
+	nfc_led_set3(false, true, false);
+	atomic_set(&m_led_state, APP_NFC_LED_DETECTED);
+	k_timer_start(&m_led_hold_timer, K_MSEC(NFC_LED_DETECT_MS), K_NO_WAIT);
+	irq_unlock(key);
+}
+
+static void nfc_led_session(void)
+{
+	unsigned int key = irq_lock();
+	k_timer_stop(&m_led_hold_timer);
+	m_led_blink_on = true;
+	nfc_led_set3(false, true, false);
+	atomic_set(&m_led_state, APP_NFC_LED_SESSION);
+	k_timer_start(&m_led_blink_timer, K_MSEC(NFC_LED_BLINK_MS), K_MSEC(NFC_LED_BLINK_MS));
+	irq_unlock(key);
+}
+
+static void nfc_led_result(bool ok)
+{
+	unsigned int key = irq_lock();
+	k_timer_stop(&m_led_blink_timer);
+	nfc_led_set3(!ok, ok, ok);
+	atomic_set(&m_led_state, ok ? APP_NFC_LED_RESULT_OK : APP_NFC_LED_RESULT_ERR);
+	k_timer_start(&m_led_hold_timer, K_MSEC(NFC_LED_RESULT_MS), K_NO_WAIT);
+	irq_unlock(key);
+}
+
+enum app_nfc_led_state app_nfc_led_state_get(void)
+{
+	return (enum app_nfc_led_state)atomic_get(&m_led_state);
+}
+
+void app_nfc_led_result_wait(void)
+{
+	/* Bounded: the hold timer ends a result after NFC_LED_RESULT_MS. */
+	for (int waited = 0; waited <= NFC_LED_RESULT_MS + 100; waited += 20) {
+		enum app_nfc_led_state st = app_nfc_led_state_get();
+		if (st != APP_NFC_LED_RESULT_OK && st != APP_NFC_LED_RESULT_ERR) {
+			return;
+		}
+		k_msleep(20);
+	}
 }
 
 /* True while an NFC exchange is in progress (the keep-awake lock is held). The
@@ -306,7 +331,7 @@ bool app_nfc_session_active(void)
 /* Take the deep-sleep lock (once) and (re)arm the inactivity window. Safe from
  * ISR context: pm_policy_state_lock_get and k_timer_start are irq-safe, and the
  * atomic_cas guards against a double get. The 0->1 edge is the start of an NFC
- * session (phone just arrived) -> light the "detected" LED. */
+ * session (phone just arrived) -> light the "detected" LED (capped at 5 s). */
 static void nfc_keep_awake(void)
 {
 	if (atomic_cas(&m_awake_held, 0, 1)) {
@@ -427,13 +452,6 @@ void app_nfc_claim_active(void)
 uint8_t app_nfc_claim_state_get(void)
 {
 	return (uint8_t)atomic_get(&m_claim_state);
-}
-
-/* #340 L1 test support: whether the "processing"/"rejected" blink timer is
- * currently armed. Same testability idiom as app_nfc_claim_state_get() above. */
-bool app_nfc_led_blink_active(void)
-{
-	return k_timer_remaining_get(&m_led_blink_timer) != 0;
 }
 
 static enum app_cmd_action m_cmd_action; /* deferred action from app_cmd_handle */
@@ -1389,9 +1407,13 @@ static int mb_serve_locked(void)
 	int field_off_n = 0;
 	unsigned int served = 0;
 	const char *reason = "?";
+	/* LED result (see the LED block): the outcome of the latest request decides. */
+	bool any = false;
+	bool last_ok = false;
+	bool io_fail = false;
 
 	nfc_keep_awake();
-	nfc_led_detected();
+	nfc_led_session();
 	NFC_DBG("mb: session start");
 
 	for (;;) {
@@ -1413,6 +1435,7 @@ static int mb_serve_locked(void)
 		if (mb_read_ctrl(&ctrl)) {
 			if (--err_budget <= 0) {
 				reason = "i2c errors";
+				io_fail = true;
 				break;
 			}
 			k_msleep(NFC_MB_POLL_MS);
@@ -1448,10 +1471,14 @@ static int mb_serve_locked(void)
 		}
 		if (ret) {
 			NFC_DBG("mb: read request failed: %d", ret);
+			any = true;
+			last_ok = false;
 			k_msleep(NFC_MB_POLL_MS);
 			continue;
 		}
 		t_last = k_uptime_get();
+		any = true;
+		last_ok = false; /* until its reply is written */
 
 		uint8_t chan = m_buf[0];
 		const uint8_t *key = NULL;
@@ -1473,11 +1500,9 @@ static int mb_serve_locked(void)
 			cache = false;
 		} else {
 			NFC_DBG("mb: rejected frame chan=0x%02x len=%u", chan, (unsigned)len);
-			nfc_led_rejected();
 			continue;
 		}
 
-		nfc_led_processing();
 		NFC_REPORT("mailbox: %u B request on chan 0x%02x", (unsigned)len, chan);
 
 		size_t resp_len = 0;
@@ -1502,10 +1527,10 @@ static int mb_serve_locked(void)
 #endif
 		}
 		if (ret) {
-			/* Same as the NDEF path: a frame we cannot authenticate gets no reply
-			 * (#315 red blink), the phone times out. */
+			/* A frame we cannot authenticate gets no reply; the phone times out.
+			 * The session keeps going (the app may resync) — the LED shows red
+			 * at the end only if nothing succeeds after this. */
 			NFC_DBG("mb: request rejected: %d", ret);
-			nfc_led_rejected();
 			continue;
 		}
 
@@ -1519,8 +1544,8 @@ static int mb_serve_locked(void)
 			ret = mb_wait_host_put_cleared(NFC_MB_HOST_PUT_WAIT_MS);
 			NFC_REPORT("mailbox: %u B reply, read by phone: %s", (unsigned)resp_len + 1,
 				   ret == 0 ? "yes" : "no");
-			nfc_led_detected();
 		}
+		last_ok = true; /* reply written (a still-unread one is re-checked at the end) */
 
 		if (!replayed && action != APP_CMD_ACTION_NONE) {
 			/* Reboot/save/reset: the phone has read (or had a second to read) the
@@ -1537,11 +1562,24 @@ static int mb_serve_locked(void)
 		}
 	}
 
+	/* Our last reply never read by the phone (lifted too early / app gone)?
+	 * Must be checked before MB_EN is cleared, which drops the message. */
+	uint8_t end_ctrl = 0;
+	if (last_ok && mb_read_ctrl(&end_ctrl) == 0 && (end_ctrl & ST25DV_MB_CTRL_HOST_PUT)) {
+		last_ok = false;
+	}
 	if (mb_set_en(false)) {
 		LOG_WRN("NFC mb: could not disable the mailbox at session end");
 	}
-	nfc_led_off();
-	NFC_DBG("mb: session end (%s), %u reply(ies)", reason, served);
+	if (io_fail || (any && !last_ok)) {
+		nfc_led_result(false);
+	} else if (any) {
+		nfc_led_result(true);
+	} else {
+		nfc_led_off(); /* mailbox enabled but no request: nothing to report */
+	}
+	NFC_DBG("mb: session end (%s), %u reply(ies), result %s", reason, served,
+		io_fail || (any && !last_ok) ? "error" : (any ? "ok" : "none"));
 	return (int)served;
 }
 
@@ -1570,6 +1608,7 @@ int app_nfc_poll(void)
 	/* Start of this pass, then the end of each session that served a reply: the
 	 * field-present hold below gives up NFC_FIELD_PRESENT_MAX_MS after it. */
 	int64_t t_activity = k_uptime_get();
+	bool first_pass = true;
 
 	/* Field-present mode (#313): as long as the phone holds its field we stay
 	 * powered (LPD low) and keep watching MB_CTRL_Dyn, so a mailbox enabled at
@@ -1586,6 +1625,14 @@ int app_nfc_poll(void)
 		bool mb_en = mb_read_ctrl(&ctrl) == 0 && (ctrl & ST25DV_MB_CTRL_MB_EN);
 		int64_t idle = k_uptime_get() - t_activity;
 		bool held_too_long = idle >= NFC_FIELD_PRESENT_MAX_MS;
+
+		/* A tap the GPO edge did not light (the keep-awake lock was still held
+		 * from a moment ago): show "detected" once, if nothing else is shown. */
+		if (first_pass && field_on && !mb_en &&
+		    app_nfc_led_state_get() == APP_NFC_LED_OFF) {
+			nfc_led_detected();
+		}
+		first_pass = false;
 
 		if (mb_en && field_on && !held_too_long) {
 			if (mb_serve_locked() > 0) {

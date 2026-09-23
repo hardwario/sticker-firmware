@@ -75,10 +75,23 @@ void app_nfc_claim_done(void);
  * `ats claim status`, the get_claim_info handler, and tests. */
 uint8_t app_nfc_claim_state_get(void);
 
-/* Whether the "processing"/"rejected" NFC LED blink timer is currently armed
- * (#340 L1 regression test support: a hard response-write failure on the
- * boot-staged path, which has no RF-session backstop, must stop it). */
-bool app_nfc_led_blink_active(void);
+/* NFC interaction LED state (#414, see app_nfc.c): detected = green (<= 5 s),
+ * session = green blink, result = green + yellow (OK) or red (error) for 2 s. */
+enum app_nfc_led_state {
+	APP_NFC_LED_OFF = 0,
+	APP_NFC_LED_DETECTED,
+	APP_NFC_LED_SESSION,
+	APP_NFC_LED_RESULT_OK,
+	APP_NFC_LED_RESULT_ERR,
+};
+
+/* Current NFC LED state (tests / debug visibility). */
+enum app_nfc_led_state app_nfc_led_state_get(void);
+
+/* Block (bounded, ~2 s) until a session result shown on the LED has ended — the
+ * deferred-action runner calls this before a reboot so the operator sees the
+ * green + yellow / red result first. Returns at once when no result is shown. */
+void app_nfc_led_result_wait(void);
 
 #ifdef __cplusplus
 }

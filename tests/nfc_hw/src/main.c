@@ -12,6 +12,7 @@
 #include "app_nfc.h"
 #include "app_cmd.h"
 #include "app_config.h"
+#include "app_led.h"
 
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_dummy.h>
@@ -81,9 +82,11 @@ struct mb_phone {
 	const uint8_t *const *reqs;
 	const size_t *req_lens;
 	size_t n;
+	bool no_read; /* put the requests but never read a reply (phone lifted early) */
 	uint8_t reply_chan[8];
 	size_t reply_len[8];
 	int put_err[8];
+	enum app_nfc_led_state led_during; /* LED state right after the first request */
 };
 
 static K_THREAD_STACK_DEFINE(phone_stack, 3072);
@@ -103,6 +106,17 @@ static void mb_phone_fn(void *a, void *b, void *c)
 		if (ph->put_err[i]) {
 			continue;
 		}
+		if (ph->no_read) {
+			/* Wait until the firmware has answered, then "lift" without reading. */
+			for (int spin = 0; spin < 150 && !(st25dv_emul_mb_ctrl() & MB_CTRL_HOST_PUT);
+			     spin++) {
+				k_msleep(5);
+			}
+			if (i == 0) {
+				ph->led_during = app_nfc_led_state_get();
+			}
+			continue;
+		}
 		/* Poll for the firmware's reply (bounded). */
 		uint8_t reply[256];
 		size_t rlen = 0;
@@ -114,6 +128,9 @@ static void mb_phone_fn(void *a, void *b, void *c)
 				break;
 			}
 			k_msleep(5);
+		}
+		if (i == 0) {
+			ph->led_during = app_nfc_led_state_get(); /* session still running */
 		}
 	}
 
@@ -140,11 +157,12 @@ static void mb_bring_up(const char *key_hex)
 	 * session. The claim window is ACTIVE by default (nfc_hw_before). */
 }
 
-static struct mb_phone run_phone(const uint8_t *const *reqs, const size_t *lens, size_t n)
+static struct mb_phone run_phone_opt(const uint8_t *const *reqs, const size_t *lens, size_t n,
+				      bool no_read)
 {
 	static struct mb_phone ph;
 
-	ph = (struct mb_phone){.reqs = reqs, .req_lens = lens, .n = n};
+	ph = (struct mb_phone){.reqs = reqs, .req_lens = lens, .n = n, .no_read = no_read};
 
 	k_thread_create(&phone_thread, phone_stack, K_THREAD_STACK_SIZEOF(phone_stack), mb_phone_fn,
 			&ph, NULL, NULL, K_PRIO_COOP(1), 0, K_NO_WAIT);
@@ -153,6 +171,11 @@ static struct mb_phone run_phone(const uint8_t *const *reqs, const size_t *lens,
 	zassert_true(ret == 0, "app_nfc_poll returned %d", ret);
 	k_thread_join(&phone_thread, K_FOREVER);
 	return ph;
+}
+
+static struct mb_phone run_phone(const uint8_t *const *reqs, const size_t *lens, size_t n)
+{
+	return run_phone_opt(reqs, lens, n, false);
 }
 
 ZTEST(nfc_hw, test_mb_boot_authorises_ftm_and_configures_gpo)
@@ -531,6 +554,153 @@ ZTEST(nfc_hw, test_mb_deferred_action_ends_poll_while_field_held)
 	zassert_equal(app_nfc_take_cmd_action(), APP_CMD_ACTION_NONE, "action taken once");
 	zassert_equal(app_nfc_wait_event(0), 0,
 		      "the poll must be re-armed so a non-rebooting action resumes the tap");
+}
+
+/* ---- NFC interaction LED (#414) --------------------------------------------- */
+
+extern int g_led_ch[3]; /* stubs.c: last state per channel, indexed R=0, G=1, Y=2 */
+
+#define LED_RESULT_MS 2000
+#define LED_DETECT_MS 5000
+
+/* Let any LED state left by an earlier test time out (all states are bounded). */
+static void led_settle(void)
+{
+	k_msleep(LED_DETECT_MS + 100);
+	zassert_equal(app_nfc_led_state_get(), APP_NFC_LED_OFF, "LED did not settle");
+}
+
+static void assert_led(bool r, bool g, bool y, const char *what)
+{
+	zassert_equal(g_led_ch[APP_LED_CHANNEL_R], r, "%s: red %d", what,
+		      g_led_ch[APP_LED_CHANNEL_R]);
+	zassert_equal(g_led_ch[APP_LED_CHANNEL_G], g, "%s: green %d", what,
+		      g_led_ch[APP_LED_CHANNEL_G]);
+	zassert_equal(g_led_ch[APP_LED_CHANNEL_Y], y, "%s: yellow %d", what,
+		      g_led_ch[APP_LED_CHANNEL_Y]);
+}
+
+/* Session: green blink while running, green + yellow for 2 s after a successful
+ * last exchange, then off; app_nfc_led_result_wait() returns once it is over. */
+ZTEST(nfc_hw, test_led_session_ok_green_yellow_2s)
+{
+	mb_bring_up(KEY_HEX);
+	led_settle();
+	st25dv_emul_set_field_on(true);
+
+	const uint8_t *reqs[] = {PLAIN_GET_BASIC_INFO};
+	const size_t lens[] = {sizeof(PLAIN_GET_BASIC_INFO)};
+	struct mb_phone ph = run_phone(reqs, lens, 1);
+
+	zassert_true(ph.reply_len[0] > 1, "no reply");
+	zassert_equal(ph.led_during, APP_NFC_LED_SESSION, "session must blink (state %d)",
+		      ph.led_during);
+	zassert_equal(app_nfc_led_state_get(), APP_NFC_LED_RESULT_OK, "result state %d",
+		      app_nfc_led_state_get());
+	assert_led(false, true, true, "result OK");
+
+	int64_t t0 = k_uptime_get();
+
+	app_nfc_led_result_wait();
+	int64_t waited = k_uptime_get() - t0;
+
+	zassert_true(waited >= LED_RESULT_MS - 200 && waited <= LED_RESULT_MS + 200,
+		     "result shown %lld ms", (long long)waited);
+	zassert_equal(app_nfc_led_state_get(), APP_NFC_LED_OFF, "off after the result");
+	assert_led(false, false, false, "after result");
+
+	t0 = k_uptime_get();
+	app_nfc_led_result_wait();
+	zassert_true(k_uptime_get() - t0 < 50, "wait must return at once with no result");
+}
+
+/* Last request rejected (unknown channel, no reply) -> red for 2 s. */
+ZTEST(nfc_hw, test_led_session_last_rejected_red)
+{
+	static const uint8_t bad[] = {0x04, 0x08, 0x01, 0xF2, 0x01, 0x00};
+
+	mb_bring_up(KEY_HEX);
+	led_settle();
+	st25dv_emul_set_field_on(true);
+
+	const uint8_t *reqs[] = {bad};
+	const size_t lens[] = {sizeof(bad)};
+
+	run_phone(reqs, lens, 1);
+	zassert_equal(app_nfc_led_state_get(), APP_NFC_LED_RESULT_ERR, "result state %d",
+		      app_nfc_led_state_get());
+	assert_led(true, false, false, "result error");
+	k_msleep(LED_RESULT_MS + 100);
+	assert_led(false, false, false, "after result");
+}
+
+/* The last exchange decides: a rejected frame followed by a good one ends OK. */
+ZTEST(nfc_hw, test_led_rejected_then_ok_ends_ok)
+{
+	static const uint8_t bad[] = {0x04, 0x08, 0x01, 0xF2, 0x01, 0x00};
+
+	mb_bring_up(KEY_HEX);
+	led_settle();
+	st25dv_emul_set_field_on(true);
+
+	const uint8_t *reqs[] = {bad, PLAIN_GET_BASIC_INFO};
+	const size_t lens[] = {sizeof(bad), sizeof(PLAIN_GET_BASIC_INFO)};
+	struct mb_phone ph = run_phone(reqs, lens, 2);
+
+	zassert_true(ph.reply_len[1] > 1, "no reply to the good frame");
+	zassert_equal(app_nfc_led_state_get(), APP_NFC_LED_RESULT_OK, "result state %d",
+		      app_nfc_led_state_get());
+}
+
+/* A reply the phone never read (lifted too early) makes the session end red. */
+ZTEST(nfc_hw, test_led_unread_reply_is_error)
+{
+	mb_bring_up(KEY_HEX);
+	led_settle();
+	st25dv_emul_set_field_on(true);
+
+	const uint8_t *reqs[] = {PLAIN_GET_BASIC_INFO};
+	const size_t lens[] = {sizeof(PLAIN_GET_BASIC_INFO)};
+
+	run_phone_opt(reqs, lens, 1, true);
+	zassert_equal(app_nfc_led_state_get(), APP_NFC_LED_RESULT_ERR, "result state %d",
+		      app_nfc_led_state_get());
+}
+
+/* Samples the LED at two moments while the test thread sits in the field-present
+ * hold (no mailbox); ends the hold by dropping the field. */
+static enum app_nfc_led_state m_led_at_1s, m_led_at_6s;
+static int m_led_g_at_1s;
+
+static void led_probe_fn(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	k_msleep(1000);
+	m_led_at_1s = app_nfc_led_state_get();
+	m_led_g_at_1s = g_led_ch[APP_LED_CHANNEL_G];
+	k_msleep(5000);
+	m_led_at_6s = app_nfc_led_state_get();
+	st25dv_emul_set_field_on(false);
+}
+
+/* Phone on the tag but no mailbox session: green, capped at 5 s. */
+ZTEST(nfc_hw, test_led_detected_green_capped_5s)
+{
+	mb_bring_up(KEY_HEX);
+	led_settle();
+	st25dv_emul_set_field_on(true);
+
+	k_thread_create(&phone_thread, phone_stack, K_THREAD_STACK_SIZEOF(phone_stack),
+			led_probe_fn, NULL, NULL, NULL, K_PRIO_COOP(1), 0, K_NO_WAIT);
+	zassert_equal(app_nfc_poll(), 0, "app_nfc_poll");
+	k_thread_join(&phone_thread, K_FOREVER);
+
+	zassert_equal(m_led_at_1s, APP_NFC_LED_DETECTED, "state at 1 s: %d", m_led_at_1s);
+	zassert_equal(m_led_g_at_1s, 1, "green must be on at 1 s");
+	zassert_equal(m_led_at_6s, APP_NFC_LED_OFF, "state at 6 s: %d", m_led_at_6s);
 }
 
 /* ---- Debug-shell user-EEPROM access (`nfc read|write|clear`) --------------- */

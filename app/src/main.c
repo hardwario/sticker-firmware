@@ -109,50 +109,46 @@ static void play_carousel_boot(void)
 	k_sleep(K_MSEC(5000));
 }
 
-static void play_carousel_nfc(void)
+/* #414: before an NFC-triggered reboot, let the mailbox session's result finish
+ * on the LED (green + yellow = applied, red = the last exchange failed, 2 s) so
+ * the operator sees it; the boot carousel follows the reboot. Replaces the
+ * pre-reboot green NFC carousel (#278). */
+static void nfc_result_before_reboot(void)
 {
-	/* #278: green (was yellow) — an applied NFC config is a SUCCESS, so it reads
-	 * as green rather than joining the overloaded set of yellow signals. */
-	struct app_led_blink_req req = {
-		.color = APP_LED_CHANNEL_G, .duration = 100, .space = 100, .repetitions = 10};
-	app_led_blink(&req);
-	k_sleep(K_MSEC(10 * 200 - 100));
+	app_nfc_led_result_wait();
 }
 
 /* Run any deferred action queued by an NFC command (reboot/save/factory-reset/
- * ...). app_nfc_take_cmd_action() returns an action only once its response has
- * been delivered to the phone — the phone acked the reply and the info record was
- * restored, or the quiet backstop restored it — so a reboot/save fires *after*
- * the phone has read the response instead of racing a blind fixed delay. */
+ * ...). app_nfc_take_cmd_action() returns an action only once its mailbox
+ * session has delivered the reply (the phone read it, or had a second to) and
+ * closed, so a reboot/save fires *after* the phone has read the response. */
 static void nfc_run_deferred_cmd_actions(void)
 {
 	enum app_cmd_action cmd_action = app_nfc_take_cmd_action();
 	while (cmd_action != APP_CMD_ACTION_NONE) {
 		switch (cmd_action) {
 		case APP_CMD_ACTION_SETTINGS_SAVE:
-			/* #250: green NFC carousel (#278) as operator feedback that an
-			 * (offline-)staged config was applied — was previously only
-			 * shown for the retired hio.stck:cfg record. */
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_settings_save(true);
 			break;
 		case APP_CMD_ACTION_REBOOT:
+			nfc_result_before_reboot();
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
 		case APP_CMD_ACTION_DEVICE_RESET:
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_settings_device_reset();
 			break;
 		case APP_CMD_ACTION_FACTORY_RESET:
 			/* #299, narrower than device_reset above: drops LoRaWAN too. */
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_settings_factory_reset();
 			break;
 		case APP_CMD_ACTION_VENDOR_RESET:
 			/* #299/#316, narrowest tier: set by the vendor_reset Command over the
 			 * NFC hio.stck:vnd (vendor-token) channel — never reachable over
 			 * LoRaWAN. The replacement secret_key travelled in the same request. */
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_settings_vendor_reset(app_cmd_take_pending_vendor_secret_key());
 			break;
 		case APP_CMD_ACTION_SECRET_KEY_SAVE:
@@ -163,7 +159,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			 * reboot. The Ack the phone already read was encrypted with that old
 			 * key — deliberately: this action only runs once the response has
 			 * been delivered (#242), so the reply is never cut off. */
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_settings_save(true);
 			break;
 		case APP_CMD_ACTION_CLAIM_ACTIVE_SAVE:
@@ -186,7 +182,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			 * get persisted, instead of a silent, un-rebooted return leaving
 			 * flash and live state out of sync until some later, unrelated
 			 * reboot. */
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_nfc_claim_active();
 			if (app_settings_save(true)) {
 				sys_reboot(SYS_REBOOT_COLD);
@@ -197,13 +193,14 @@ static void nfc_run_deferred_cmd_actions(void)
 			 * calibration mode (app_calibration_init() clears it).
 			 * Write the staging config (settings_save persists that,
 			 * not the boot-time g_app_config copy). */
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_config()->calibration = true;
 			app_settings_save(true);
 			break;
 #if defined(CONFIG_LORAWAN)
 		case APP_CMD_ACTION_LRW_RESET:
 			/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). */
+			nfc_result_before_reboot();
 			app_lrw_reset_nvm();
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
@@ -256,8 +253,8 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 
 		/* Deferred action from a mailbox command (reboot/save/factory-reset/...):
 		 * the session has already delivered the reply and closed, so it is safe to
-		 * run now. play_carousel_nfc() is driven from inside the SETTINGS_SAVE/RESET
-		 * cases if needed; here we just release the staged action. */
+		 * run now. Reboot-type actions first let the session result finish on the
+		 * LED (nfc_result_before_reboot). */
 		nfc_run_deferred_cmd_actions();
 	}
 }
