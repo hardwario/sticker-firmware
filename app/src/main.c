@@ -49,7 +49,6 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
  * (Was a 30 s periodic fallback, which on the release build meant a Stop2 wake
  * every 30 s for nothing.) */
 #define NFC_EVENT_FALLBACK_MS      (-1)
-#define NFC_POLL_START_DELAY_MS    3000
 /* Sized for the deepest NFC command run on this thread: a GetConfig/GetParam
  * over NFC packs DUMP_FIELDS tags into a flat ids[] (#176), builds a Response
  * (union sized to ConfigDump), and runs PSA AES-CCM decrypt/encrypt + nanopb —
@@ -222,7 +221,7 @@ static void nfc_run_deferred_cmd_actions(void)
 
 /* Dedicated NFC poll thread: independent of the LED blink loop. Each cycle does
  * the cheap gated poll (1-byte IT_STS_Dyn; full read only on RF activity) and
- * applies a consumed config. Started after a delay so app_nfc_init() has run. */
+ * applies a consumed config. main() starts it right after app_nfc_init(). */
 static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1);
@@ -231,8 +230,7 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 
 	/* NFC init failed at boot (#88): the tag is unusable, so exit instead of
 	 * polling a dead ST25DV (which would error every wake and keep the CPU busy).
-	 * The thread starts after NFC_POLL_START_DELAY_MS, so main() has already run
-	 * app_nfc_init() by now. */
+	 * main() starts this thread only after app_nfc_init() has run. */
 	if (!app_nfc_ready()) {
 		LOG_WRN("NFC unavailable; poll thread not started");
 		return;
@@ -259,8 +257,12 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 	}
 }
 
+/* Not started at boot (SYS_FOREVER_MS): main() starts it right after
+ * app_nfc_init(), so a phone kept on the tag across an NFC-triggered reboot is
+ * served within ~0.2 s of the chip powering up — not ~2 s later, past the
+ * phone's reply timeout (a fixed 3 s start delay did that). */
 K_THREAD_DEFINE(nfc_poll_tid, NFC_POLL_THREAD_STACK_SIZE, nfc_poll_thread_fn, NULL, NULL, NULL,
-		NFC_POLL_THREAD_PRIO, 0, NFC_POLL_START_DELAY_MS);
+		NFC_POLL_THREAD_PRIO, 0, SYS_FOREVER_MS);
 
 static enum app_mode detect_mode(void)
 {
@@ -422,6 +424,8 @@ int main(void)
 	if (ret) {
 		LOG_WRN("app_nfc_init failed: %d (NFC unavailable, continuing)", ret);
 	}
+	/* Also on failure: the thread then sees !app_nfc_ready() and exits. */
+	k_thread_start(nfc_poll_tid);
 	/* #313: the tag holds no NDEF record any more (mailbox-only), so there is
 	 * nothing to lay down or reconcile at boot — the phone reads identity via the
 	 * mailbox get_basic_info command. */

@@ -14,6 +14,7 @@
 #include "app_config.h"
 #include "app_led.h"
 
+#include <zephyr/drivers/gpio/gpio_emul.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_dummy.h>
 #include <zephyr/ztest.h>
@@ -51,6 +52,7 @@ ZTEST(nfc_hw, test_init_succeeds_on_empty_tag)
 #define GPO_EN            0x80
 #define MB_CTRL_MB_EN     0x01
 #define MB_CTRL_HOST_PUT  0x02
+#define MB_CTRL_RF_PUT    0x04
 
 /* AES-CCM(secret_key = 000102..0f, serial 0, counter 1..2) of Command{get_info}
  * and AES-CCM(vendor_token = 101112..1f, counter 3) of the same — direction
@@ -245,6 +247,76 @@ ZTEST(nfc_hw, test_mb_boot_with_field_present_arms_initial_poll)
 
 	st25dv_emul_set_field_on(false);
 	zassert_equal(armed, 0, "init must arm an initial poll pass for a field present at boot");
+}
+
+/* The phone for the boot-session test: its request is already in the mailbox, so
+ * it only waits for the reply, reads it, and lifts. */
+struct boot_phone {
+	uint8_t reply_chan;
+	size_t reply_len;
+};
+
+static void boot_phone_fn(void *a, void *b, void *c)
+{
+	struct boot_phone *ph = a;
+	uint8_t reply[256];
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	for (int spin = 0; spin < 200; spin++) {
+		if (st25dv_emul_rf_read_message(reply, sizeof(reply), &ph->reply_len) == 0) {
+			ph->reply_chan = reply[0];
+			break;
+		}
+		k_msleep(5);
+	}
+	k_msleep(50);
+	st25dv_emul_set_field_on(false);
+}
+
+/* HW validation (#414, settings save with the phone kept on the tag): init's own
+ * access powered the chip, the phone enabled the mailbox and put its first request
+ * at once, and init then cleared MB_EN ("left enabled at boot") and released the
+ * chip (LPD high: the VCC loss clears MB_EN too), so the request went unanswered.
+ * On an already-configured tag under a field, init must leave the phone's session
+ * alone and keep the chip powered, and the initial poll pass must serve it. */
+ZTEST(nfc_hw, test_mb_boot_keeps_phone_session_under_field)
+{
+	const struct device *gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+
+	memset(g_app_config.claim_token, 0xAB, sizeof(g_app_config.claim_token));
+	mb_bring_up(KEY_HEX); /* first boot: MB_MODE + GPO written to the EEPROM */
+	zassert_equal(gpio_emul_output_get(gpio0, 1), 1, "no field: init must release the chip");
+
+	/* Reboot with the phone on the tag: MB_EN + [0x03] get_basic_info already in. */
+	uint8_t frame[] = {0x03, 0x08, 0x01, 0xF2, 0x01, 0x00};
+
+	st25dv_emul_set_field_on(true);
+	st25dv_emul_rf_set_mb_en(true);
+	zassert_equal(st25dv_emul_rf_put_message(frame, sizeof(frame)), 0, "RF put");
+	while (app_nfc_wait_event(0) == 0) {
+		/* drop the field edge: at boot it came before the IRQ was armed */
+	}
+
+	zassert_equal(app_nfc_init(), 0, "app_nfc_init (reboot)");
+	uint8_t ctrl = st25dv_emul_mb_ctrl();
+
+	zassert_true(ctrl & MB_CTRL_MB_EN, "init cleared the phone's MB_EN (0x%02x)", ctrl);
+	zassert_true(ctrl & MB_CTRL_RF_PUT, "init dropped the phone's request (0x%02x)", ctrl);
+	zassert_equal(gpio_emul_output_get(gpio0, 1), 0, "init released the chip under a field");
+	zassert_equal(app_nfc_wait_event(0), 0, "initial poll pass not armed");
+
+	static struct boot_phone ph;
+
+	ph = (struct boot_phone){0};
+	k_thread_create(&phone_thread, phone_stack, K_THREAD_STACK_SIZEOF(phone_stack),
+			boot_phone_fn, &ph, NULL, NULL, K_PRIO_COOP(1), 0, K_NO_WAIT);
+	zassert_equal(app_nfc_poll(), 0, "app_nfc_poll");
+	k_thread_join(&phone_thread, K_FOREVER);
+
+	zassert_true(ph.reply_len > 1, "the boot-time request got no reply (%zu B)", ph.reply_len);
+	zassert_equal(ph.reply_chan, 0x03, "reply channel byte");
+	zassert_equal(gpio_emul_output_get(gpio0, 1), 1, "field gone: the poll must release the chip");
 }
 
 ZTEST(nfc_hw, test_mb_session_cmd_keeps_claim_active_and_advances_nonce)

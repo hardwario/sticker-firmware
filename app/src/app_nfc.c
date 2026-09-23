@@ -701,36 +701,62 @@ static int nfc_enable_rf_write_it(void)
 	 * down rather than keeping a previous boot's value. */
 	m_mb_available = false;
 
-	/* 0) A mailbox left enabled by an aborted session survives an MCU reset (the
-	 *    dynamic registers persist while the phone's field or VCC keeps the chip
-	 *    up) and would make every EEPROM write below fail (NACK, DS §5.1.2) —
-	 *    this was the June "boot mb_disable NACKs" symptom. Clear MB_EN first;
-	 *    a failed read here just means the register is unknown (emulator). */
-	uint8_t ctrl = 0;
-	if (mb_read_ctrl(&ctrl) == 0 && (ctrl & ST25DV_MB_CTRL_MB_EN)) {
+	/* 0) MB_EN at boot. A mailbox left enabled by an aborted session survives an
+	 *    MCU reset (the dynamic registers persist while the phone's field or VCC
+	 *    keeps the chip up) and would make every EEPROM write below fail (NACK, DS
+	 *    §5.1.2) — this was the June "boot mb_disable NACKs" symptom. With no
+	 *    field it is stale: clear it. Under a field it is a live session — a phone
+	 *    kept on the tag across a reboot enables the mailbox (and drops its first
+	 *    request) as soon as this access powers the chip — so leave it alone
+	 *    unless a static write below needs the EEPROM. A failed read just means the
+	 *    register is unknown (emulator). */
+	uint8_t ctrl = 0, eh = 0;
+	bool field_on = read_reg(ST25DV_EH_CTRL_DYN, &eh, 1) == 0 && (eh & ST25DV_FIELD_ON);
+	bool mb_en = mb_read_ctrl(&ctrl) == 0 && (ctrl & ST25DV_MB_CTRL_MB_EN);
+
+	if (mb_en && !field_on) {
 		LOG_WRN("NFC mb: left enabled at boot (MB_CTRL_Dyn=0x%02x) -> disabling", ctrl);
 		(void)mb_set_en(false);
+		mb_en = false;
 	}
 
-	ret = nfc_present_password(default_pwd);
-	if (ret) {
-		return ret;
-	}
-
-	/* The chip needs a moment after a present-password write before the next
-	 * I2C access is ACKed. 5 ms was too short (the next read NACKed with -EIO);
-	 * a system-area probe confirmed 10 ms is enough, so allow a safe margin. */
-	k_msleep(15);
-
-	/* 1) Static (EEPROM) GPO register: persist the config so it is active from
-	 *    every power-up. */
+	/* 1) Static (EEPROM) GPO + MB_MODE: persist the GPO config so it is active
+	 *    from every power-up, and authorise FTM once per device so the phone can
+	 *    enable the mailbox itself (MB_EN is RF-writable only while MB_MODE=1).
+	 *    Reads need no password; the I2C security session and the EEPROM writes
+	 *    happen only for a bit that is not set yet (first boot), so a normal boot
+	 *    touches neither the EEPROM nor a phone's live MB_EN. */
 	uint8_t gpo = 0;
 	ret = read_reg(ST25DV_GPO_REG, &gpo, 1);
 	if (ret) {
 		return ret;
 	}
 
-	if ((gpo & ST25DV_GPO_WANT) != ST25DV_GPO_WANT) {
+	uint8_t mode = 0;
+	int mret = read_reg(ST25DV_MB_MODE_REG, &mode, 1);
+	bool gpo_set = (gpo & ST25DV_GPO_WANT) == ST25DV_GPO_WANT;
+	bool mode_set = mret == 0 && (mode & ST25DV_MB_MODE_EN);
+
+	if (!gpo_set || (mret == 0 && !mode_set)) {
+		if (mb_en) {
+			LOG_WRN("NFC mb: enabled under a field at boot -> disabling for the EEPROM "
+				"config");
+			(void)mb_set_en(false);
+		}
+
+		ret = nfc_present_password(default_pwd);
+		if (ret) {
+			return ret;
+		}
+
+		/* The chip needs a moment after a present-password write before the next
+		 * I2C access is ACKed. 5 ms was too short (the next read NACKed with
+		 * -EIO); a system-area probe confirmed 10 ms is enough, so allow a safe
+		 * margin. */
+		k_msleep(15);
+	}
+
+	if (!gpo_set) {
 		gpo |= ST25DV_GPO_WANT;
 		ret = write_reg(ST25DV_GPO_REG, &gpo, 1);
 		if (ret) {
@@ -750,14 +776,10 @@ static int nfc_enable_rf_write_it(void)
 		}
 	}
 
-	/* 2) MB_MODE (static EEPROM, same password session): authorise FTM once per
-	 *    device so the phone can enable the mailbox itself (MB_EN is RF-writable
-	 *    only while MB_MODE=1). EEPROM write only when the bit is not set yet.
-	 *    Failure is not fatal for the GPO path but marks the mailbox unavailable —
-	 *    a production defect the tester catches via device_status bit 13 (D7). */
-	uint8_t mode = 0;
-	int mret = read_reg(ST25DV_MB_MODE_REG, &mode, 1);
-	if (mret == 0 && !(mode & ST25DV_MB_MODE_EN)) {
+	/* MB_MODE failure is not fatal for the GPO path but marks the mailbox
+	 * unavailable — a production defect the tester catches via device_status
+	 * bit 13 (D7). */
+	if (mret == 0 && !mode_set) {
 		mode |= ST25DV_MB_MODE_EN;
 		mret = write_reg(ST25DV_MB_MODE_REG, &mode, 1);
 		if (mret == 0) {
@@ -773,7 +795,7 @@ static int nfc_enable_rf_write_it(void)
 		LOG_WRN("NFC mb: unavailable - MB_MODE cfg failed: %d (tester must reject)", mret);
 	}
 
-	/* 3) Dynamic GPO_CTRL_Dyn (volatile, E0, no password): enable GPO_EN now so
+	/* 2) Dynamic GPO_CTRL_Dyn (volatile, E0, no password): enable GPO_EN now so
 	 *    the output is live for this power cycle without waiting for a reboot. */
 	uint8_t dyn = 0;
 	ret = read_reg(ST25DV_GPO_CTRL_DYN_REG, &dyn, 1);
@@ -1274,7 +1296,21 @@ int app_nfc_init(void)
 		} else {
 			LOG_WRN("NFC: RF_WRITE_EN config failed (not used by the poll)");
 		}
-		nfc_access_end();
+
+		/* A phone already on the tag (kept there across an NFC-triggered
+		 * reboot) enables the mailbox as soon as this access powers the chip;
+		 * releasing it now (LPD high) would drop VCC and with it the phone's
+		 * MB_EN and request. Keep it powered for the initial poll pass armed
+		 * below, which takes over the field-present hold and releases the chip
+		 * itself once the field goes. */
+		uint8_t eh = 0;
+
+		if (m_mb_available && read_reg(ST25DV_EH_CTRL_DYN, &eh, 1) == 0 &&
+		    (eh & ST25DV_FIELD_ON)) {
+			k_mutex_unlock(&m_lock);
+		} else {
+			nfc_access_end();
+		}
 	}
 
 	ret = nfc_gpo_irq_setup();
@@ -1303,10 +1339,10 @@ int app_nfc_init(void)
 	m_ready = true;
 
 	/* A field already present at boot (the phone kept on the tag across an
-	 * NFC-triggered reboot) raised its GPO edge before the IRQ was armed, and the
-	 * chip is released (LPD high, VCC_ON=0), so the phone cannot enable the
-	 * mailbox: arm one initial poll pass so the poll thread sees FIELD_ON and
-	 * serves it instead of waiting for the next field change. */
+	 * NFC-triggered reboot) raised its GPO edge before the IRQ was armed: arm one
+	 * initial poll pass so the poll thread sees FIELD_ON and serves it (the chip
+	 * is still powered, see above) instead of waiting for the next field change.
+	 * main() starts the poll thread right after this returns. */
 	k_sem_give(&m_gpo_sem);
 	return 0;
 }
