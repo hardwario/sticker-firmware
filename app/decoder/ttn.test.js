@@ -163,6 +163,9 @@ test("envelope paging: HistoryFrame page 1/2 (page_index 0 omitted) (#425)", () 
   assert.equal(d.history_frame.records.length, 1);
   assert.equal(d.history_frame.records[0].temperature, 21.5);
   assert.equal(d.history_frame.records[0].time, 1780000000);
+  // Legacy in-body numbering is absent on the wire -> not emitted (HIL P8).
+  assert.equal(d.history_frame.frame_index, undefined);
+  assert.equal(d.history_frame.frame_count, undefined);
 });
 
 test("envelope paging: an unpaged answer has no pages field (#425)", () => {
