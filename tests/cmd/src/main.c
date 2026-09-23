@@ -7,6 +7,7 @@
  */
 
 #include "app_cmd.h"
+#include "app_version.h"
 #include "app_config.h"
 #include "app_config_ingest.h"
 #include "app_sensor.h"
@@ -305,9 +306,10 @@ ZTEST(cmd, test_get_param_paging)
 	reset_cfg();
 	handle("08021a0a0a08060701020304050a", &r);
 	zassert_equal(r.which_body, Response_config_dump_tag, "page0 which=%d", r.which_body);
-	zassert_equal(r.body.config_dump.page_index, 0, "page0 index");
-	zassert_equal(r.body.config_dump.page_count, 2, "page_count %u",
-		      r.body.config_dump.page_count);
+	zassert_equal(r.page_index, 0, "page0 index");
+	zassert_equal(r.page_count, 2, "page_count %u", r.page_count);
+	zassert_equal(r.body.config_dump.page_count, 0,
+		      "legacy ConfigDump.page_count must not be set");
 	zassert_true(r.body.config_dump.lorawan.has_deveui, "deveui on page0");
 	zassert_true(r.body.config_dump.lorawan.has_joineui, "joineui on page0");
 	zassert_false(r.body.config_dump.lorawan.has_devaddr, "devaddr must not be on page0");
@@ -316,8 +318,8 @@ ZTEST(cmd, test_get_param_paging)
 	reset_cfg();
 	handle("08021a0c0a08060701020304050a2801", &r);
 	zassert_equal(r.which_body, Response_config_dump_tag, "page1 which=%d", r.which_body);
-	zassert_equal(r.body.config_dump.page_index, 1, "page1 index");
-	zassert_equal(r.body.config_dump.page_count, 2, "page1 count");
+	zassert_equal(r.page_index, 1, "page1 index");
+	zassert_equal(r.page_count, 2, "page1 count");
 	zassert_false(r.body.config_dump.lorawan.has_deveui, "deveui must not be on page1");
 	zassert_true(r.body.config_dump.lorawan.has_devaddr, "devaddr on page1");
 
@@ -342,8 +344,8 @@ ZTEST(cmd, test_get_param_duplicate_field_deduped)
 	/* seq2 get_param{ lorawan_field=[6, 6, 6, 6] }, page 0. */
 	handle("08021a060a0406060606", &r);
 	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
-	zassert_equal(r.body.config_dump.page_count, 1, "duplicates inflated page_count to %u",
-		      r.body.config_dump.page_count);
+	/* #425: a single page carries no paging fields (absent = one frame). */
+	zassert_true(r.page_count <= 1, "duplicates inflated page_count to %u", r.page_count);
 	zassert_true(r.body.config_dump.lorawan.has_deveui, "deveui not dumped");
 }
 
@@ -387,7 +389,8 @@ ZTEST(cmd, test_build_info)
 	/* get_info reads the cached sample voltage, not a fresh ADC read. */
 	g_app_sensor_data.voltage = 3.3f;
 
-	int ret = app_cmd_build_info(out, sizeof(out), &out_len);
+	bool more;
+	int ret = app_cmd_build_info(out, sizeof(out), &out_len, &more);
 	zassert_equal(ret, 0, "build_info ret %d", ret);
 
 	/* Skip the APP_PROTO_VERSION prefix (#55). */
@@ -420,7 +423,9 @@ ZTEST(cmd, test_build_config_status)
 	g_app_config.cap_hall_left = true;
 	g_app_config.cap_accelerometer = true;
 
-	int ret = app_cmd_build_config_status(out, sizeof(out), &out_len);
+	bool more;
+	int ret = app_cmd_build_config_status(out, sizeof(out), &out_len, &more);
+	zassert_false(more, "settings-info fits one frame here");
 	zassert_equal(ret, 0, "build_config_status ret %d", ret);
 
 	/* Fits the smallest EU868 application payload (DR0 = 51 B), incl. the
@@ -434,9 +439,9 @@ ZTEST(cmd, test_build_config_status)
 
 	zassert_equal(r.which_body, Response_config_dump_tag, "expected ConfigDump, which=%d",
 		      r.which_body);
-	zassert_equal(r.body.config_dump.page_index, 0, "page_index");
-	zassert_equal(r.body.config_dump.page_count, 1, "page_count %u",
-		      r.body.config_dump.page_count);
+	/* #425: one page -> no paging fields in the envelope, none in the body. */
+	zassert_equal(r.page_count, 0, "page_count %u", r.page_count);
+	zassert_equal(r.body.config_dump.page_count, 0, "legacy page_count must not be set");
 
 	zassert_true(r.body.config_dump.has_application, "application section missing");
 	zassert_true(r.body.config_dump.application.has_interval_sample, "interval_sample missing");
@@ -515,7 +520,8 @@ ZTEST(cmd, test_build_info_claim_token_omitted_over_lrw)
 	reset_cfg();
 	memcpy(g_app_config.claim_token, token, sizeof(token));
 
-	zassert_equal(app_cmd_build_info(out, sizeof(out), &out_len), 0, "build_info");
+	bool more;
+	zassert_equal(app_cmd_build_info(out, sizeof(out), &out_len, &more), 0, "build_info");
 	Response r = Response_init_zero;
 	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
@@ -656,14 +662,67 @@ static size_t count_info_active_alarms(const uint8_t *out, size_t out_len)
 	return count_wire_field(info_content, info_len, 15);
 }
 
-/* #335 tier-2: active_alarms is repeated/unbounded (~8 B/entry) and can push
- * Info back over a low DR's budget on its own, even with claim_token now
- * NFC-only. app_cmd_build_info() must drop alarm entries one at a time to fit
- * out_cap instead of failing (and losing firmware/serial/battery too). */
-ZTEST(cmd, test_build_info_trims_alarms_over_dr_budget)
+/* Decode one encoded Response (version byte + protobuf). */
+static Response decode_resp(const uint8_t *out, size_t len)
+{
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, len - 1);
+
+	zassert_true(len >= 1 && out[0] == APP_PROTO_VERSION, "version byte");
+	zassert_true(pb_decode(&is, Response_fields, &r), "Response decode failed");
+	return r;
+}
+
+/* #425: walk page 0 (already in `out`) and every streamed page; check the paging
+ * invariants (same seq, fixed page_count, consecutive page_index, every page <=
+ * cap) and hand each page's bytes to `visit`. Returns the page count. */
+static uint32_t walk_pages(const uint8_t *out, size_t len, size_t cap, uint32_t seq,
+			   void (*visit)(const uint8_t *buf, size_t len, const Response *r))
+{
+	uint8_t buf[128];
+	Response r = decode_resp(out, len);
+	uint32_t count = r.page_count;
+
+	zassert_true(len <= cap, "page 0 is %zu B > %zu", len, cap);
+	zassert_true(count > 1, "expected a paged answer, page_count %u", count);
+	zassert_equal(r.page_index, 0, "page 0 index %u", r.page_index);
+	zassert_equal(r.seq, seq, "page 0 seq %u", r.seq);
+	visit(out, len, &r);
+	for (uint32_t p = 1; p < count; p++) {
+		size_t n = 0;
+
+		zassert_equal(app_cmd_stream_next(buf, cap, &n), 0, "page %u", p);
+		zassert_true(n <= cap, "page %u is %zu B > %zu", p, n, cap);
+		r = decode_resp(buf, n);
+		zassert_equal(r.seq, seq, "seq %u on page %u", r.seq, p);
+		zassert_equal(r.page_index, p, "page_index %u, want %u", r.page_index, p);
+		zassert_equal(r.page_count, count, "page_count drift on page %u", p);
+		visit(buf, n, &r);
+	}
+	size_t n = 0;
+	zassert_equal(app_cmd_stream_next(buf, cap, &n), -ENODATA, "stream must end");
+	return count;
+}
+
+static size_t g_seen_alarms;
+static bool g_seen_serial, g_seen_battery;
+
+static void visit_info_page(const uint8_t *buf, size_t len, const Response *r)
+{
+	zassert_equal(r->which_body, Response_info_tag, "Info page expected, which=%d",
+		      r->which_body);
+	g_seen_alarms += count_info_active_alarms(buf, len);
+	g_seen_serial |= r->body.info.serial_number == 1234567890;
+	g_seen_battery |= r->body.info.battery == 3300;
+}
+
+/* #425 (was #335 alarm trimming): an Info that does not fit the budget is paged,
+ * not trimmed — every field and every active alarm arrives on some page. */
+ZTEST(cmd, test_build_info_pages_instead_of_trimming)
 {
 	uint8_t out[256];
 	size_t full_len = 0, out_len = 0;
+	bool more = false;
 
 	reset_cfg();
 	g_app_config.serial_number = 1234567890;
@@ -672,31 +731,40 @@ ZTEST(cmd, test_build_info_trims_alarms_over_dr_budget)
 	g_app_sensor_data.voltage = 3.3f;
 	test_set_active_alarm_count(5);
 
-	/* Baseline: plenty of room, all 5 alarms present. */
-	int ret = app_cmd_build_info(out, sizeof(out), &full_len);
-	zassert_equal(ret, 0, "baseline build_info ret %d", ret);
-	zassert_equal(count_info_active_alarms(out, full_len), 5,
-		      "expected all 5 alarms unconstrained");
+	/* Plenty of room: one frame, all 5 alarms, no stream. */
+	zassert_equal(app_cmd_build_info(out, sizeof(out), &full_len, &more), 0, "baseline");
+	zassert_false(more, "unpaged Info must not stream");
+	zassert_equal(count_info_active_alarms(out, full_len), 5, "all 5 alarms unconstrained");
+	zassert_equal(decode_resp(out, full_len).page_count, 0, "unpaged: no page fields");
 
-	/* One byte short of the untrimmed size: must still succeed, with fewer
-	 * alarms (dropping even one entry frees far more than 1 B of headroom). */
-	ret = app_cmd_build_info(out, full_len - 1, &out_len);
-	zassert_equal(ret, 0, "trimmed build_info ret %d", ret);
-	zassert_true(out_len <= full_len - 1, "out_len %zu over cap %zu", out_len, full_len - 1);
-	size_t trimmed_count = count_info_active_alarms(out, out_len);
-	zassert_true(trimmed_count < 5, "expected alarms to be trimmed, got %zu", trimmed_count);
+	/* Budgets from one byte short down to EU868 DR0: paged, nothing lost. */
+	const size_t caps[] = {full_len - 1, 51};
 
-	/* The rest of Info survives untouched -- alarms are what gets cut. */
-	Response r = Response_init_zero;
-	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
-	zassert_true(pb_decode(&is, Response_fields, &r), "decode trimmed Info");
-	zassert_equal(r.body.info.serial_number, 1234567890, "serial must survive trimming");
-	zassert_equal(r.body.info.battery, 3300, "battery must survive trimming");
+	for (size_t c = 0; c < ARRAY_SIZE(caps); c++) {
+		zassert_equal(app_cmd_build_info(out, caps[c], &out_len, &more), 0, "cap %zu",
+			      caps[c]);
+		zassert_true(more, "cap %zu: expected more pages", caps[c]);
+		g_seen_alarms = 0;
+		g_seen_serial = g_seen_battery = false;
+		walk_pages(out, out_len, caps[c], 0, visit_info_page);
+		zassert_equal(g_seen_alarms, 5, "cap %zu: %zu of 5 alarms", caps[c], g_seen_alarms);
+		zassert_true(g_seen_serial && g_seen_battery, "cap %zu: field lost", caps[c]);
+	}
 
-	/* A cap too small even for zero alarms genuinely fails -- no silent
-	 * truncation of the rest of Info. */
-	ret = app_cmd_build_info(out, 2, &out_len);
-	zassert_equal(ret, -EMSGSIZE, "expected -EMSGSIZE for an impossible cap, got %d", ret);
+	/* 11 B tier: fields that do not fit even alone (serial 6 B, an alarm entry)
+	 * are left out — the small ones (battery, reset cause, fw) still get through,
+	 * one or two per page. */
+	app_cmd_set_reset_cause(0x3);
+	zassert_equal(app_cmd_build_info(out, 11, &out_len, &more), 0, "11 B");
+	zassert_true(more, "11 B: expected more pages");
+	g_seen_alarms = 0;
+	g_seen_serial = g_seen_battery = false;
+	walk_pages(out, out_len, 11, 0, visit_info_page);
+	zassert_true(g_seen_battery, "11 B: battery must get through");
+
+	/* A cap too small for any single field still fails. */
+	zassert_equal(app_cmd_build_info(out, 2, &out_len, &more), -EMSGSIZE, "impossible cap");
+	app_cmd_set_reset_cause(0);
 }
 
 ZTEST(cmd, test_deferred_actions)
@@ -1429,6 +1497,215 @@ ZTEST(cmd, test_lrw_region_writable_excludes_vendor)
 	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE,
 		      "C2 REGRESSION: EXPECTED NOT_WRITABLE over vendor; code=%d",
 		      r.body.error.code);
+}
+
+/* #409 3a: over LoRaWAN an Error carries code + fault_field only — the detail
+ * string made even an Error too big for the 11 B budget tier. NFC keeps it. */
+ZTEST(cmd, test_error_detail_omitted_over_lrw)
+{
+	Response r;
+	/* seq3 set_param{ application{ interval_report=10 } } — below min 60 */
+	const char *hex = "080312041202180a";
+
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_LRW, hex, &r);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.fault_field, 203, "fault_field %u", r.body.error.fault_field);
+	zassert_equal(r.body.error.detail[0], '\0', "detail must be omitted over LRW: '%s'",
+		      r.body.error.detail);
+
+	reset_cfg();
+	handle_via(APP_CMD_TRANSPORT_NFC, hex, &r);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_not_equal(r.body.error.detail[0], '\0', "detail must stay over NFC");
+}
+
+/* #409 3a: a response that does not fit the 11 B budget tier (US915 DR0, AU915 /
+ * AS923 DR2) falls back to an Error that itself fits, so the host always gets an
+ * answer. Before, the fallback carried "response too large" (25 B) and failed
+ * too, leaving the command unanswered. */
+ZTEST(cmd, test_too_large_fallback_fits_11b_budget)
+{
+	/* seq2 get_param{ lorawan_field=[6 deveui, 7 joineui] } — ~27 B response. */
+	uint8_t in[16], out[11];
+	size_t in_len = unhex("08021a040a020607", in, sizeof(in));
+	size_t out_len = 0;
+
+	reset_cfg();
+	int ret =
+		app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len, NULL);
+	zassert_equal(ret, 0, "fallback Error must fit 11 B, ret %d", ret);
+	zassert_true(out_len >= 1 && out_len <= sizeof(out), "out_len %zu", out_len);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "Response decode failed");
+	zassert_equal(r.seq, 2, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code %d",
+		      r.body.error.code);
+}
+
+/* #409 3f: the unsolicited BUDGET_TOO_SMALL Error (history replay stopped by a
+ * DR drop) keeps the request seq and fits the 11 B budget tier. */
+ZTEST(cmd, test_build_budget_error_fits_11b)
+{
+	uint8_t out[11];
+	size_t out_len = 0;
+
+	zassert_equal(app_cmd_build_budget_error(300, out, sizeof(out), &out_len), 0, "ret");
+	zassert_true(out_len <= sizeof(out), "out_len %zu", out_len);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode");
+	zassert_equal(r.seq, 300, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.detail[0], '\0', "no detail");
+}
+
+/* #425: a GetInfo command over LoRaWAN that does not fit answers with Info pages
+ * (same seq), streamed after page 0 via APP_CMD_ACTION_PAGE_STREAM. */
+ZTEST(cmd, test_get_info_over_lrw_is_paged)
+{
+	uint8_t in[8], out[20];
+	size_t in_len = unhex("08072200", in, sizeof(in)); /* seq7 get_info */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	reset_cfg();
+	g_app_config.serial_number = 1234567890;
+	test_battery_v = 3.3f;
+	test_battery_ret = 0;
+	g_app_sensor_data.voltage = 3.3f;
+	test_set_active_alarm_count(2);
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len,
+				     &action),
+		      0, "handle");
+	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
+	g_seen_alarms = 0;
+	g_seen_serial = g_seen_battery = false;
+	walk_pages(out, out_len, sizeof(out), 7, visit_info_page);
+	zassert_equal(g_seen_alarms, 2, "%zu of 2 alarms", g_seen_alarms);
+	zassert_true(g_seen_serial && g_seen_battery, "field lost");
+}
+
+static uint32_t g_seen_cfg_fields;
+
+static void visit_settings_page(const uint8_t *buf, size_t len, const Response *r)
+{
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	const Response_ConfigDump *cd = &r->body.config_dump;
+
+	zassert_equal(r->which_body, Response_config_dump_tag, "ConfigDump page expected");
+	g_seen_cfg_fields += cd->application.has_interval_sample +
+			     cd->application.has_interval_report +
+			     cd->application.has_history_enable + cd->sensors.has_cap_hall_left +
+			     cd->sensors.has_cap_hall_right + cd->sensors.has_cap_input_a +
+			     cd->sensors.has_cap_input_b + cd->sensors.has_cap_light_sensor +
+			     cd->sensors.has_cap_barometer + cd->sensors.has_cap_pir_detector +
+			     cd->sensors.has_cap_w1_sensors + cd->sensors.has_cap_accelerometer;
+}
+
+/* #425: settings-info that does not fit is paged; all 12 settings arrive. */
+ZTEST(cmd, test_settings_info_paged_at_small_budget)
+{
+	uint8_t out[64];
+	size_t out_len = 0;
+	bool more = false;
+
+	reset_cfg();
+	g_app_config.interval_sample = 60;
+	g_app_config.interval_report = 900;
+	zassert_equal(app_cmd_build_config_status(out, 16, &out_len, &more), 0, "build");
+	zassert_true(more, "expected more pages at 16 B");
+	g_seen_cfg_fields = 0;
+	walk_pages(out, out_len, 16, 0, visit_settings_page);
+	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+}
+
+extern int test_w1_scan_page0(const uint8_t roms[][8], size_t n, uint32_t seq, uint8_t *out,
+			      size_t cap, size_t *out_len, bool *streamed);
+static uint32_t g_seen_roms;
+
+static void visit_w1_page(const uint8_t *buf, size_t len, const Response *r)
+{
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	zassert_equal(r->which_body, Response_w1_scan_tag, "W1Scan page expected");
+	g_seen_roms += r->body.w1_scan.rom_count;
+}
+
+/* #425: a W1Scan that does not fit is paged by ROM (no bus rescan per page). */
+ZTEST(cmd, test_w1_scan_paged)
+{
+	const uint8_t roms[4][8] = {{0x28, 1}, {0x28, 2}, {0x28, 3}, {0x28, 4}};
+	uint8_t out[64];
+	size_t out_len = 0;
+	bool streamed = false;
+
+	/* 4 ROMs = 45 B: fits 51 B whole. */
+	zassert_equal(test_w1_scan_page0(roms, 4, 5, out, 51, &out_len, &streamed), 0, "51 B");
+	zassert_false(streamed, "4 ROMs fit 51 B");
+	/* 30 B: at most 2 ROMs per page. */
+	zassert_equal(test_w1_scan_page0(roms, 4, 5, out, 30, &out_len, &streamed), 0, "30 B");
+	zassert_true(streamed, "expected pages at 30 B");
+	g_seen_roms = 0;
+	walk_pages(out, out_len, 30, 5, visit_w1_page);
+	zassert_equal(g_seen_roms, 4, "%u of 4 ROMs", g_seen_roms);
+}
+
+/* #409 3d/3e: a multi-page GetConfig over LoRaWAN is answered with page 0 and
+ * APP_CMD_ACTION_PAGE_STREAM; app_cmd_stream_next() then yields pages 1..N-1
+ * of the same request (same seq, consistent page_count), then -ENODATA. NFC
+ * keeps host-driven paging (no stream). */
+ZTEST(cmd, test_get_config_streams_all_pages_over_lrw)
+{
+	uint8_t in[8], out[64];
+	size_t in_len = unhex("08092a00", in, sizeof(in)); /* seq9 get_config{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	Response r;
+	pb_istream_t is;
+
+	reset_cfg();
+	g_app_config.interval_report = 900;
+	g_app_config.interval_sample = 60;
+
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 51, &out_len, &action),
+		      0, "handle");
+	r = (Response)Response_init_zero;
+	is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode page 0");
+	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
+	uint32_t count = r.page_count;
+	zassert_true(count > 1, "test needs a multi-page config, got %u", count);
+	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
+
+	for (uint32_t p = 1; p < count; p++) {
+		zassert_equal(app_cmd_stream_next(out, 51, &out_len), 0, "page %u", p);
+		zassert_true(out_len <= 51, "page %u is %zu B", p, out_len);
+		r = (Response)Response_init_zero;
+		is = pb_istream_from_buffer(out + 1, out_len - 1);
+		zassert_true(pb_decode(&is, Response_fields, &r), "decode page %u", p);
+		zassert_equal(r.seq, 9, "seq %u on page %u", r.seq, p);
+		zassert_equal(r.page_index, p, "page_index");
+		zassert_equal(r.page_count, count, "page_count drift");
+	}
+	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "stream must end");
+
+	/* NFC: no stream, the host pages itself. */
+	action = APP_CMD_ACTION_NONE;
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, in, in_len, out, sizeof(out), &out_len,
+				     &action),
+		      0, "nfc handle");
+	zassert_equal(action, APP_CMD_ACTION_NONE, "no stream over NFC");
+	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "no NFC stream");
 }
 
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);

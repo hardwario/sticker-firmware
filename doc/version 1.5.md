@@ -14,6 +14,12 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
 | LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
 | LoRaWAN | **Fixed** — LoRaWAN glue in the Zephyr fork (`sticker-zephyr` `v4.3.0-sticker2-branch`, #421): a (re)join no longer returns the stale result of an earlier link-check / device-time confirm (L-7, #241); MAC-confirm waits are bounded (`-ETIMEDOUT` instead of a wedged `m_work_q`, #181); all LoRaMac access is serialised by one MAC lock (#241). |
+| LoRaWAN | **Fix** — region guard (#409 A1): a stored `lrw-region` that is not compiled into the image no longer kills LoRaWAN init silently — the radio stays silent (never falls back to another band), reported as `lrw_disabled` plus an error log. |
+| LoRaWAN | **New** — manual uplink datarate `lrw-datarate` (#409 A3): `auto` (default) or `dr0`–`dr7`, pinned after every join when ADR is off. |
+| LoRaWAN | **Fix** — low-DR delivery (#409 A5a, part 1): compact LoRaWAN `Error` so a command is always answered at the 11 B tier; MAC-flood (budget 0) no longer drops responses/alarms; alarm batches split across frames; alarm state mirrored into telemetry `system_flags`. |
+| LoRaWAN | **Fix** — `DevStatusReq` right after `LinkADRReq` is now answered (#419), via a `loramac-node` patch applied with `west patch apply`. |
+| LoRaWAN | **New** — AS923 region (#409 A6): `lrw-region as923`, channel plan AS923-1, release builds. |
+| LoRaWAN / P2P | **New** — universal response paging (#425): every answer that does not fit one frame is split into self-contained pages numbered `page_index`/`page_count` in the `Response` envelope (and in `AlarmReport`), sent by the device on its own; decoders label them `pages: "i/N"`. |
 
 ---
 
@@ -144,7 +150,7 @@ it actively polled with `GetParam` / `GetConfig` downlinks — so after any loca
 reconfiguration (shell / NFC), the LNS copy stayed stale until someone asked.
 
 This adds a **second autonomous fPort-85 uplink right after the boot `Info`**: a
-single-page `Response.ConfigDump` (`page_index = 0`, `page_count = 1`) carrying a
+`Response.ConfigDump` (one frame when it fits, paged otherwise — §12) carrying a
 fixed selection of the key operating settings. Because `settings save` cold-reboots
 and every boot re-joins, this **re-announces the effective config automatically**
 after every persisted change — no diff-tracking, no extra state.
@@ -172,12 +178,11 @@ in `app_w1_slots.c`; the new value flows onto the wire automatically (the proto
 stays a raw `uint32`, so no schema change). A decoder that predates a value renders
 it as `type<N>` rather than failing.
 
-**Decoded example** (`ttn.js` output as the LNS sees it; like every other config
-reply, bool fields decode as `0`/`1`, and the proto3-default `page_index = 0` is
-omitted):
+**Decoded example** (`ttn.js` output as the LNS sees it, one frame; like every other
+config reply, bool fields decode as `0`/`1`):
 
 ```json
-{ "config_dump": { "page_count": 1,
+{ "config_dump": {
     "application": { "interval_sample": 60, "interval_report": 900, "history_enable": 0 },
     "sensors": { "cap_hall_left": 1, "cap_hall_right": 0, "cap_input_a": 1,
                  "cap_input_b": 0, "cap_light_sensor": 1, "cap_barometer": 0,
@@ -190,10 +195,9 @@ omitted):
 - Size incl. the `APP_PROTO_VERSION` byte: 34 B without 1-Wire (`CONFIG_W1=n`, no
   field 7), 40 B with the four `w1_slot_type` entries, up to ~46 B with large
   interval values. It fits the EU868 DR0 budget (51 B) and the 64 B response buffer.
-- **Known limitation — low DR outside EU868 (#418):** the frame is encoded against
-  the current DR budget and, like the boot `Info`, is **single-frame and not
-  paged**. On US915 / AU915 DR0 (11 B) or AS923 with dwell time, both boot frames
-  are therefore **dropped whole** until ADR raises the DR. Tracked in #418.
+- **Low DR outside EU868 (#418, resolved by #409 / #425):** below the EU868 DR0
+  budget the settings-info is paged (§12); a setting that does not fit even alone is
+  left out, and when nothing fits the device sends it once a DR change makes room.
 - The lean debug default (`debug.conf`, #395) builds with `CONFIG_W1=n`, so a
   debug image omits `w1_slot_type`. Build with `-DCONFIG_W1=y` to exercise it.
   Release builds have 1-Wire on.
@@ -211,6 +215,7 @@ telemetry (FCnt 3), all at DR0. The dumped values matched `config show`, and a
 `-DCONFIG_W1=y` debug image carried `w1_slot_type` = 4× `empty` (40 B). The
 `dallas` / `machine-probe` values are covered only by the unit tests: the test
 unit had no 1-Wire bridge. See `doc/manual-test-plan.md` scenario **L4b**.
+
 
 ---
 
@@ -301,6 +306,223 @@ which need a coordinated Manager-App release.
 `CONFIG_RADIO_P2P` (default `y`) and `CONFIG_RADIO_LORAWAN`. The flash-tight
 `debug.conf` overlay drops P2P; `debug.conf;debug_p2p_bench.conf` is the only
 debug image containing it, and it pays for that by dropping LoRaWAN.
+
+---
+
+## 7. LoRaWAN region guard (#409 A1)
+
+`lorawan_set_region()` returns `-ENOTSUP` for a region whose
+`CONFIG_LORAMAC_REGION_*` is not compiled in. Until now that made `app_lrw_init()`
+fail, leaving a device with **no radio and no diagnosable state** — a real case,
+because `debug.conf` trims US915/AU915, so a device configured for `us915` that is
+flashed with a debug image (or any trimmed build) went dead.
+
+Now `app_lrw_init()` resolves the stored region against the regions in the image
+first. If it is missing (or out of range):
+
+- the radio stays **silent** through the existing radio-mode OFF path
+  (`APP_LRW_STATE_DISABLED`, no LoRaMac bring-up, join/send are no-ops);
+- an error is logged: `lrw-region <n> is not compiled into this image: radio-silent`;
+- over NFC the device reports `lrw_state` DISABLED and the existing `device_status`
+  bit 12 `lrw_disabled` (no dedicated bit — `config show` shows the stored region).
+
+There is **deliberately no fallback to another region**: a device configured for
+US915 or AU915 must never transmit on 868 MHz (or vice versa). Fix by setting a
+compiled-in `lrw-region` (NFC / shell) or flashing a full image.
+
+Cost: a few dozen bytes of flash, +0 B RAM.
+
+
+---
+
+## 8. Manual uplink datarate `lrw-datarate` (#409 A3)
+
+New config key, modelled on twr-sdk's `AT$DR`:
+
+```
+config lrw-adr false
+config lrw-datarate dr3
+settings save
+```
+
+| Value | Meaning |
+|---|---|
+| `auto` (default) | stack / ADR choose the DR — behaviour unchanged from v1.4.0 |
+| `dr0` … `dr7` | pin the region's DRn for uplinks |
+
+- Applied in `on_join_success()` on **every (re)join**, after ADR is configured and
+  before the payload budget is captured, so the telemetry split follows the pinned DR.
+  It also becomes the DR of the next join request.
+- **Only with ADR off.** With `lrw-adr true` the value is ignored and a warning is
+  logged (Zephyr's `lorawan_set_datarate()` refuses while ADR is on).
+- DR validity is **region-dependent**: EU868 DR0–7, US915 DR0–4, AU915 DR2–6 with the
+  default dwell time (DR0/DR1 have a 0-byte payload there). A DR the MAC rejects is
+  logged as an error and the stack's own DR stays in use — the device keeps working.
+- Calibration mode pins its own DR and ignores `lrw-datarate`.
+- Writable over shell and NFC only (like the rest of the `lorawan` group, never over a
+  LoRaWAN downlink); preserved across `device_reset`.
+
+**Wire format:** `AppConfigMessage.Lorawan.datarate` (field 16), enum `Datarate`:
+`AUTO = 0`, `DRn = n + 1` — the offset lets `auto` be the proto3 default. `ttn.js`
+encodes the names (`"DR3"`) and decodes the raw value.
+
+Cost: release +408 B flash, +0 B RAM.
+
+
+---
+
+## 9. Low-DR delivery, part 1 (#409 A5a)
+
+At the smallest LoRaWAN budget tier — **11 B** on US915 DR0 and AU915 / AS923 DR2 — most
+fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *floor*
+(telemetry, Ack, compact Error, Info-lite); full delivery targets ≥ 51 B.
+
+- **Compact LoRaWAN `Error`.** Over LoRaWAN an `Error` carries `code` + `fault_field`
+  only; the `detail` string is NFC-only (`ttn.js` defaults a missing `code` to 0 =
+  UNKNOWN, which proto3 omits). The LoRaWAN "response too large" fallback is a 7 B
+  `Error{ code = 9 BUDGET_TOO_SMALL }` — "retry once ADR raises the DR" — so a command
+  that cannot be answered in full still gets an answer. NFC keeps `UNKNOWN` + detail.
+- **Info at a small budget** is paged (§12) — the join / clock-sync `Info` and a
+  LoRaWAN `GetInfo`. (An interim `InfoLite` message from the #409 draft was replaced by
+  this before release; `Response` field 11 is reserved.)
+- **Deferred boot announce.** If not even one field of the join `Info` or the #412
+  settings-info fits, the device sends it by itself once a DR change makes room — no
+  host poll needed.
+- **History replay (`req_history`) at low DR.** Frames are sized with the real frame
+  count instead of the worst-case varint, ~8 B more samples per frame (EU868 DR0: ~26 B
+  instead of ~18 B). When records exist but not one fits the current DR, the answer is
+  `Error BUDGET_TOO_SMALL` instead of `HISTORY_UNAVAILABLE`; a replay cut short by a DR
+  drop ends with the same `Error` (request `seq`) instead of going silent.
+- **GetConfig / GetParam over LoRaWAN send every page by themselves.** One downlink
+  request is enough: the device answers with the requested page (0 unless `page` is
+  given) and then uplinks the remaining pages on its own — same `seq`, numbered as in
+  §12, paced by the duty cycle (at EU868 DR0 a full config takes minutes). A new paged
+  request replaces a stream still running; a rejoin cancels it. The page size stays
+  30 B. NFC is unchanged (the phone still asks page by page, ~450 B pages).
+- **DR drop between queueing and sending.** A queued frame that no longer fits after
+  ADR lowered the DR is recovered instead of dropped: the boot `Info` / settings-info
+  are re-sent once the DR rises again, a command answer becomes `Error
+  BUDGET_TOO_SMALL` with the command's `seq`, an alarm frame is dropped (its state is
+  still in telemetry `system_flags`).
+- **Budget 0 (MAC-command flood)** no longer drops a queued response or alarm: an empty
+  uplink flushes the MAC answers and the payload is retried.
+- **Alarm batches split** across as many `AlarmReport` frames as needed (same
+  `base_time` / `total` in each) instead of trimming to the first frame. At the 11 B tier
+  no `AlarmReport` fits; the frame is skipped and logged.
+- **Alarm state in telemetry.** `Telemetry.system_flags` bits 1..8 now carry the
+  `device_status` alarm byte (bit 0 is still `boot`), so the alarm state reaches the LNS in
+  every telemetry frame, including at the 11 B tier. `ttn.js` adds `alarm_status` and
+  `alarm_status_flags` (e.g. `["alarm_any", "alarm_threshold"]`). Additive — older decoders
+  ignore the extra bits.
+
+## 10. `DevStatusReq` after `LinkADRReq` answered (#419)
+
+LoRaMac-node's MAC-command parser skipped a `DevStatusReq` that is the last FOpts byte
+right after a `LinkADRReq` block — exactly how ChirpStack bundles them — so `DevStatusAns`
+(battery, margin) was never sent. Not fixed upstream.
+
+The fix is carried as a **Zephyr `west patch`** on the `loramac-node` module
+(`zephyr/patches.yml`, `zephyr/patches/loramac-node/`):
+
+```
+west update
+west patch apply      # re-run after every west update
+```
+
+CI applies it automatically. A LoRaWAN build **fails** when the patch is missing — CMake
+checks for the `STICKER-419` marker at configure time and again on every build, because
+`west update` resets the module and an incremental build (including the one `west flash`
+runs) does not reconfigure. `-DSTICKER_ALLOW_UNPATCHED_MODULES=ON` overrides it for a
+throwaway build. HW-verified 2026-09-23: after ChirpStack's `LinkADRReq + DevStatusReq` the
+next uplink carries `DevStatusAns`, and ChirpStack shows the device's battery / margin. From a git worktree pass absolute paths:
+`west patch apply -b <worktree>/zephyr/patches -l <worktree>/zephyr/patches.yml`.
+
+
+---
+
+## 11. AS923 region (#409 A6)
+
+`lrw-region` accepts `as923` (wire value 3 in `AppConfigMessage.Lorawan.region`):
+
+```
+config lrw-region as923
+settings save
+```
+
+- **Channel plan group AS923-1** (923.2 / 923.4 MHz default channels), the loramac-node
+  default. The group is compile-time only (`REGION_AS923_DEFAULT_CHANNEL_PLAN`); other
+  groups (AS923-2/-3/-4) would be separate build variants.
+- **No sub-band** — `lrw-sub-band` applies to US915/AU915 only.
+- **Dwell time on by default:** DR0/DR1 carry 0 B and DR2 carries 11 B, so AS923 at its
+  lowest DR is the 11 B budget tier handled by §9 and §12 (paged answers, compact
+  `Error`, alarm state in telemetry, deferred boot announce). `lrw-datarate dr0` / `dr1` are rejected by
+  the MAC and logged; the stack's DR stays in use.
+- **Release builds only.** `debug.conf` trims AS923 together with AU915/US915; a stored
+  `as923` on a debug image leaves the radio silent (§7), never on another band.
+- `ttn.js` encodes `region: "AS923"` in `set_param`.
+
+Cost: release +2 536 B flash, +0 B RAM (loramac-node channel structures are already
+sized for US915's 72 channels). Not tested on HW — the bench gateway is EU868 only.
+
+
+---
+
+## 12. Universal response paging (#425)
+
+One paging rule for every answer the device sends over a radio. When a response does
+not fit one frame, it is split into **pages**; each page is a complete, independently
+decodable message with the same `seq`, carrying part of the answer and "page *i* of *N*".
+The device sends all pages by itself. Plan: `doc/plan/425 - Universal response paging.md`.
+
+**Wire format**
+
+| Message | Fields |
+|---|---|
+| `Response` (fPort 85, every body type) | `page_index = 12`, `page_count = 13` |
+| `AlarmReport` (fPort 3) | `page_index = 5`, `page_count = 6` |
+
+- Absent (`page_count` 0/1) = the whole answer is in this one frame, byte-identical to
+  an unpaged answer. `page_count >= 2` = page `page_index` (0-based) of `page_count`.
+- `ConfigDump.page_index/page_count` and `HistoryFrame.frame_index/frame_count` are
+  **deprecated and no longer set**; they stay declared so older firmware still decodes.
+- `Response` field 11 is reserved (the #409 draft's `InfoLite`, replaced by Info pages).
+
+**What pages, and how**
+
+| Answer | Page unit |
+|---|---|
+| Info (join, clock-sync, GetInfo over LoRaWAN) | each field, then each active alarm (one snapshot for all pages) |
+| GetConfig / GetParam | config fields (30 B pages on LoRaWAN) |
+| settings-info (#412) | each setting / the `w1_slot_type` block |
+| W1Scan | ROMs (scan result kept, no rescan per page) |
+| History replay (`req_history`) | records (as before, numbering now in the envelope) |
+| AlarmReport | events (every page keeps its own `base_time` / `total`) |
+
+- **Device-driven on the radio**: page 0 answers the request (or is the autonomous
+  uplink), the rest follow one per send cycle, paced by the duty cycle; one stream at a
+  time (a new paged answer replaces a running one; a rejoin cancels it; the boot
+  settings-info waits for the Info pages). A host missing a page re-sends the request
+  with `page = <index>` — the stream then sends from that page on.
+- **Host-driven on NFC**: the phone asks for a page; only big config dumps page there.
+  NFC history keeps its cursor (`next_ord` / `has_more`), no envelope numbering.
+- **Physical floor**: a unit that does not fit even alone is left out (at the 11 B tier
+  e.g. the serial number, unix time, an alarm entry or rule); when nothing fits the
+  answer is `Error BUDGET_TOO_SMALL`.
+- **Telemetry (fPort 2)** is not paged: it keeps its per-sensor-group split, every
+  frame already a complete snapshot slice.
+
+**Decoders (TTN / ChirpStack) are stateless.** `ttn.js` decodes each page on its own and
+adds `pages: "i/N"`; an Info page lists only the fields it carries (no default zeros).
+Nothing is buffered or merged in the decoder — a consumer that wants the whole answer
+merges pages by (DevEUI, fPort, `seq`), for `AlarmReport` by `base_time`. A consumer
+that ignores `pages` just sees several partial answers.
+
+**Host impact**: Manager-App NFC GetConfig must read the page count from
+`Response.page_count` (absent = 1); the proximos-v2 decoder should merge pages
+(decoder-parity tracking: proximos-v2#90). The P2P transport uses the same format; its
+driver lands with the feat-p2p merge.
+
+Cost: release about +1.8 KB flash, +128 B RAM.
 
 ---
 
