@@ -17,6 +17,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN | **New** — manual uplink datarate `lrw-datarate` (#409 A3): `auto` (default) or `dr0`–`dr7`, pinned after every join when ADR is off. |
 | LoRaWAN | **Fix** — low-DR delivery (#409 A5a, part 1): compact LoRaWAN `Error` so a command is always answered at the 11 B tier; MAC-flood (budget 0) no longer drops responses/alarms; alarm batches split across frames; alarm state mirrored into telemetry `system_flags`. |
 | LoRaWAN | **Fix** — `DevStatusReq` right after `LinkADRReq` is now answered (#419), via a `loramac-node` patch applied with `west patch apply`. |
+| LoRaWAN | **New** — AS923 region (#409 A6): `lrw-region as923`, channel plan AS923-1, release builds. |
 
 ---
 
@@ -372,6 +373,33 @@ runs) does not reconfigure. `-DSTICKER_ALLOW_UNPATCHED_MODULES=ON` overrides it 
 throwaway build. HW-verified 2026-09-23: after ChirpStack's `LinkADRReq + DevStatusReq` the
 next uplink carries `DevStatusAns`, and ChirpStack shows the device's battery / margin. From a git worktree pass absolute paths:
 `west patch apply -b <worktree>/zephyr/patches -l <worktree>/zephyr/patches.yml`.
+
+
+---
+
+## 10. AS923 region (#409 A6)
+
+`lrw-region` accepts `as923` (wire value 3 in `AppConfigMessage.Lorawan.region`):
+
+```
+config lrw-region as923
+settings save
+```
+
+- **Channel plan group AS923-1** (923.2 / 923.4 MHz default channels), the loramac-node
+  default. The group is compile-time only (`REGION_AS923_DEFAULT_CHANNEL_PLAN`); other
+  groups (AS923-2/-3/-4) would be separate build variants.
+- **No sub-band** — `lrw-sub-band` applies to US915/AU915 only.
+- **Dwell time on by default:** DR0/DR1 carry 0 B and DR2 carries 11 B, so AS923 at its
+  lowest DR is the 11 B budget tier handled by §8 (`InfoLite`, compact `Error`, alarm
+  state in telemetry, deferred boot announce). `lrw-datarate dr0` / `dr1` are rejected by
+  the MAC and logged; the stack's DR stays in use.
+- **Release builds only.** `debug.conf` trims AS923 together with AU915/US915; a stored
+  `as923` on a debug image leaves the radio silent (§6), never on another band.
+- `ttn.js` encodes `region: "AS923"` in `set_param`.
+
+Cost: release +2 536 B flash, +0 B RAM (loramac-node channel structures are already
+sized for US915's 72 channels). Not tested on HW — the bench gateway is EU868 only.
 
 ---
 

@@ -283,7 +283,8 @@ LNS silently kills all downlinks.
   - [x] 3f — HistoryFrame: real (not worst-case) overhead, defined floor (`790b8f9`)
   - [x] 3g — DR drop between queue and send: recover by frame kind (`c77f5ac`; narrowed — full
     send-time re-encode would need a whole `Response` per queue slot, no RAM for it)
-- [ ] A6 — AS923 region (+2 576 B flash, +0 B RAM) — after A5a
+- [x] A6 — AS923 region — measured +2 536 B flash / +0 B RAM (release, on the synced base);
+  AS923-1, release only (debug trims it); not HW-testable on the EU868 bench
 - [ ] A2 — RSSI/SNR in GetInfo — after #414
 - [ ] A4 — confirmed uplinks for alarms — heartbeat blocker resolved first
 - [ ] A5b — AU915 HIL validation (needs an AU915-plan gateway)
