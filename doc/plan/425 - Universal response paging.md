@@ -187,6 +187,22 @@ storage between calls. The design must never need cross-uplink memory in the dec
 
 ## 8. Implementation steps
 
+**Progress:** step 1 ✅ `0290f44` · steps 2+3 ✅ `b746288` (landed together: the Info
+stream and the generic stream share one code path) · step 5 ✅ `c6972bf` · step 6 ✅
+(folded into each step: envelope + `pages`, Info-page pruning, AlarmReport) · step 8 ✅
+(this commit) · **step 4:** numbering in the envelope done in step 1; unifying the LoRaWAN
+and P2P history replay drivers onto the stream moves to step 7 · **step 7 (P2P driver)**
+is follow-up work on `feat-p2p` (`app_p2p.c` lives there): budget
+`app_p2p_get_max_payload()`, same `app_cmd_stream_next()` loop over the P2P queue,
+paced by the B2 duty governor.
+
+**As built — physical floor refined:** a unit that does not fit even alone is left out
+(not `BUDGET_TOO_SMALL` for the whole answer); zero-valued Info fields are skipped;
+`BUDGET_TOO_SMALL` only when nothing fits. At the 11 B tier the Info then carries the
+small fields (firmware version, battery, reset cause, status) but not the serial,
+unix time or alarm entries.
+
+
 One step per commit; each: Release + `debug.conf` builds (sticker2 Zephyr, #419 patch), native
 suites, decoder tests, configen pytest, clang-format.
 
