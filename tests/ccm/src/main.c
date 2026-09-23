@@ -278,49 +278,62 @@ ZTEST(ccm, test_cmac_rfc4493_vectors)
 	zassert_mem_equal(out, mac_64, 16, "CMAC Mlen=64 mismatch");
 }
 
-/* #118 phase 2 revision (proximos-v2 MR!7 §7): known-answer vector for the
- * P2P transport's session_key = AES128-CMAC(app_key, "HIO-P2P-SES" || 0x01
- * || dev_nonce(4 BE) || central_nonce(4 BE) || serial_number(4 BE) ||
- * zero-pad to 32 B) -- pins app_p2p.c's derive_session_key() construction
- * (root key is now the device's LoRaWAN AppKey directly, no join_key
- * intermediate). Vector computed independently via PyCryptodome's
- * CMAC.new(key, ciphermod=AES) and cross-checked against app/decoder/
- * p2p.js's deriveSessionKey() unit test (app/decoder/p2p.test.js), so C, JS
- * and the independent Python oracle all agree on the same 16 bytes. */
+/* #417 / GitLab #73: known-answer vector for the P2P transport's session_key
+ * = AES128-CMAC(app_key, "HIO-P2P-SES" || 0x01 || dev_nonce(4 BE) ||
+ * central_nonce(4 BE) || dev_eui(8 B, MSB-first) || zero-pad to 32 B) -- pins
+ * app_p2p.c's derive_session_key() construction. The last field was
+ * serial_number(4 BE) until #417 took the serial off the air; the input went
+ * 24 -> 28 octets and is still padded to 32, so it is still two CMAC blocks.
+ *
+ * These are the bytes of tests/ccm/p2p_join_kat.json (sha256
+ * 14c4efbd40520d2a48ab3004ba07411e91a4775c87fb93f4663dccf92a8361a5), the
+ * fixture shared byte-for-byte with proximos-v2 control-radio and the
+ * NorthBridge Python replica. It was produced by an independent PyCryptodome
+ * oracle -- CMAC.new(key, ciphermod=AES) -- whose selftest first re-derives
+ * every vector this file carried before #417, so C, Rust, JS, Python and the
+ * oracle all agree on the same 16 bytes. Hardcoded here because a ztest on
+ * native_sim has no JSON parser; the JSON is the authority and this is its
+ * transcription. */
 ZTEST(ccm, test_session_key_known_answer)
 {
 	static const uint8_t block[32] = {
 		'H',  'I',  'O',  '-',  'P',  '2',  'P',  '-',  'S',  'E',  'S',
-		0x01, 0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22, 0x12, 0x34,
-		0x56, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x00, 0x00, 0x07, 0x22, 0x22, 0x22, 0x22, 0x70, 0xb3,
+		0xd5, 0x7e, 0xd0, 0x00, 0x0a, 0xbe, 0x00, 0x00, 0x00, 0x00,
 	};
-	static const uint8_t expected[16] = {0x80, 0x88, 0x7b, 0x1e, 0x99, 0xb6, 0x1b, 0x0b,
-					     0x19, 0xf4, 0x2e, 0x45, 0x7f, 0xeb, 0x40, 0x6f};
+	static const uint8_t expected[16] = {0x51, 0x28, 0x94, 0xff, 0xc3, 0x9f, 0xd4, 0x45,
+					     0x9d, 0x4f, 0x65, 0x55, 0x3c, 0x87, 0x0e, 0xed};
 	uint8_t out[16];
 
 	zassert_ok(app_ccm_cmac(KEY, block, sizeof(block), out));
 	zassert_mem_equal(out, expected, sizeof(expected), "session_key KAT mismatch");
 }
 
-/* #118 phase 2 revision (proximos-v2 MR!7 §7): known-answer vectors for the
- * JoinRequest/JoinAccept plain-CMAC handshake tags -- tag = AES128-CMAC(
- * app_key, label || header || body), pins app_p2p.c's send_join_request()/
- * recv_join_accept() tag construction (a NEW proposal introduced with this
- * revision, NOT AES-CCM -- see app_p2p.c's P2P_JOIN_TAG_LABEL comment).
- * Vectors computed independently via PyCryptodome and cross-checked against
- * app/decoder/p2p.js's joinTag() unit test (app/decoder/p2p.test.js). */
+/* #417 / GitLab #73: known-answer vectors for the JoinRequest/JoinAccept
+ * plain-CMAC handshake tags -- tag = AES128-CMAC(app_key, label || header ||
+ * body), pins app_p2p.c's join_request_build()/recv_join_accept() tag
+ * construction (deliberately NOT AES-CCM -- see app_p2p.c's
+ * P2P_JOIN_TAG_LABEL comment).
+ *
+ * Same fixture as test_session_key_known_answer above:
+ * tests/ccm/p2p_join_kat.json, sha256 14c4efbd40520d2a48ab3004ba07411e91a477
+ * 5c87fb93f4663dccf92a8361a5. The JoinRequest body carries dev_eui(8,
+ * MSB-first) instead of serial_number(4 BE) since #417, so the tag now covers
+ * 25 B of header+body rather than 21. The JoinAccept vector below is
+ * deliberately UNCHANGED -- that frame carries no identity field at all, so
+ * it is the control that says only the identity moved. */
 ZTEST(ccm, test_join_tag_known_answer)
 {
 	/* JoinRequest: label "HIO-P2P-JOIN" (12 B) || header (net_id=0,
 	 * dev_addr=0, frame_type=0xF0, counter=7) || body (product_type=1,
-	 * proto_version=1, serial=0x12345678, fw=1.2.3, reserved=0). */
-	static const uint8_t msg_req[33] = {
-		'H',  'I',  'O',  '-',  'P',  '2',  'P',  '-',  'J',  'O',  'I',
-		'N',  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0x00,
-		0x07, 0x01, 0x01, 0x12, 0x34, 0x56, 0x78, 0x01, 0x02, 0x03, 0x00,
+	 * proto_version=1, dev_eui=70b3d57ed0000abe, fw=1.4.0, reserved=0). */
+	static const uint8_t msg_req[37] = {
+		'H',  'I',  'O',  '-',  'P',  '2',  'P',  '-',  'J',  'O',  'I',  'N',  0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0x00, 0x07, 0x01, 0x01, 0x70,
+		0xb3, 0xd5, 0x7e, 0xd0, 0x00, 0x0a, 0xbe, 0x01, 0x04, 0x00, 0x00,
 	};
-	static const uint8_t expected_req[16] = {0xfd, 0x02, 0x84, 0x3b, 0x75, 0x6c, 0x81, 0xa9,
-						 0x97, 0x88, 0x2c, 0x28, 0xed, 0xaf, 0x28, 0xf8};
+	static const uint8_t expected_req[16] = {0x68, 0x97, 0x96, 0x7e, 0x0f, 0xb2, 0x6f, 0xf1,
+						 0xf5, 0x96, 0x1f, 0xf4, 0x35, 0x7f, 0x29, 0x19};
 	/* JoinAccept: label "HIO-P2P-ACC" (11 B) || header (net_id=0,
 	 * dev_addr=0, frame_type=0xF1, counter=7) || body (net_id=100,
 	 * dev_addr=5, central_nonce=0x22222222, rx1_delay_s=1, reserved=0). */
@@ -338,6 +351,55 @@ ZTEST(ccm, test_join_tag_known_answer)
 
 	zassert_ok(app_ccm_cmac(KEY, msg_acc, sizeof(msg_acc), out));
 	zassert_mem_equal(out, expected_acc, sizeof(expected_acc), "JoinAccept tag KAT mismatch");
+}
+
+/* The #118 detector the RFC's §8.4 asks for: the first data frame in each
+ * direction, decrypted under the session_key the fixture pins. If the two ends
+ * ever disagree on one KDF byte, the join still succeeds and this is the test
+ * that fails instead of a silent bench full of DECRYPT FAILED lines.
+ *
+ * Both frames are from tests/ccm/p2p_join_kat.json: header(11) is the CCM AAD,
+ * the nonce is counter(4 BE)|dev_addr(2 BE)|frame_type(1)|direction(1)|0*5, and
+ * the tag is the truncated 4 B data-plane tag (P2P_TAG_LEN), not the join
+ * frames' full CMAC. */
+ZTEST(ccm, test_first_frames_under_the_kat_session_key)
+{
+	static const uint8_t session_key[16] = {0x51, 0x28, 0x94, 0xff, 0xc3, 0x9f, 0xd4, 0x45,
+						0x9d, 0x4f, 0x65, 0x55, 0x3c, 0x87, 0x0e, 0xed};
+
+	/* Uplink telemetry: frame_type 0x02, counter 0, direction 0 (TX).
+	 * frame = 0000006400050200000000 196bd1 d6350158 (aad | ct | tag). */
+	static const uint8_t up_aad[11] = {0x00, 0x00, 0x00, 0x64, 0x00, 0x05,
+					   0x02, 0x00, 0x00, 0x00, 0x00};
+	static const uint8_t up_nonce[13] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x02,
+					     0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+	static const uint8_t up_ct[3] = {0x19, 0x6b, 0xd1};
+	static const uint8_t up_tag[4] = {0xd6, 0x35, 0x01, 0x58};
+	static const uint8_t up_pt[3] = {0x01, 0x08, 0x2a};
+
+	/* Downlink Ack: frame_type 0xFA, counter 0, direction 1 (RX).
+	 * frame = 000000640005fa00000000 f966c0 334dc095 (aad | ct | tag). */
+	static const uint8_t dn_aad[11] = {0x00, 0x00, 0x00, 0x64, 0x00, 0x05,
+					   0xfa, 0x00, 0x00, 0x00, 0x00};
+	static const uint8_t dn_nonce[13] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0xfa,
+					     0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
+	static const uint8_t dn_ct[3] = {0xf9, 0x66, 0xc0};
+	static const uint8_t dn_tag[4] = {0x33, 0x4d, 0xc0, 0x95};
+	static const uint8_t dn_pt[3] = {0x00, 0xc4, 0x07};
+
+	uint8_t pt[3];
+
+	zassert_ok(app_ccm_auth_decrypt(session_key, up_nonce, sizeof(up_nonce), up_aad,
+					sizeof(up_aad), up_ct, sizeof(up_ct), up_tag,
+					sizeof(up_tag), pt),
+		   "the first telemetry frame must open under the KAT session_key");
+	zassert_mem_equal(pt, up_pt, sizeof(up_pt), "telemetry plaintext mismatch");
+
+	zassert_ok(app_ccm_auth_decrypt(session_key, dn_nonce, sizeof(dn_nonce), dn_aad,
+					sizeof(dn_aad), dn_ct, sizeof(dn_ct), dn_tag,
+					sizeof(dn_tag), pt),
+		   "the first Ack must open under the KAT session_key");
+	zassert_mem_equal(pt, dn_pt, sizeof(dn_pt), "ack plaintext mismatch");
 }
 
 /* Cross-check app_ccm_cmac() against PSA's AES-CMAC (a certified RFC 4493

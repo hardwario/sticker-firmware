@@ -113,16 +113,24 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * body" reason). See doc/p2p.md §4/§5.3. */
 #define P2P_JOIN_TAG_LABEL       "HIO-P2P-JOIN" /* 12 B -- JoinRequest tag */
 #define P2P_JOINACCEPT_TAG_LABEL "HIO-P2P-ACC"  /* 11 B -- JoinAccept tag */
-#define P2P_JOIN_TAG_LEN         16             /* full CMAC output; NOT P2P_TAG_LEN */
+/* P2P_JOIN_TAG_LEN (the full CMAC output; NOT P2P_TAG_LEN), and the join body
+ * and frame lengths, live in app_p2p.h -- tests/p2p_logic shares them. */
 
 /* session_key = AES128-CMAC(app_key, "HIO-P2P-SES" || 0x01 || dev_nonce(4 BE)
- * || central_nonce(4 BE) || serial_number(4 BE) || zero-pad to 32 B),
+ * || central_nonce(4 BE) || dev_eui(8 B, MSB-first) || zero-pad to 32 B),
  * doc/p2p.md §4 -- keys the data plane (telemetry/alarm/response/ack) once
  * PAIRED, derived directly from app_key (see above), never from a bare
- * config secret. Label(11 B) + 0x01(1 B) + 3*4 B nonces/serial = 24 B,
+ * config secret. Label(11 B) + 0x01(1 B) + 2*4 B nonces + 8 B dev_eui = 28 B,
  * zero-padded to 32 B (two full CMAC blocks) -- app_ccm_cmac() already
  * handles multi-block messages (its RFC4493 Mlen-40/64 KAT vectors in
- * tests/ccm), so no new primitive is needed, just the wider buffer. */
+ * tests/ccm), so no new primitive is needed, just the wider buffer.
+ *
+ * The last field was serial_number(4 BE) until #417 / GitLab #73 made the
+ * DevEUI the node's identity on the air. Both ends must agree byte for byte:
+ * if they do not, the join still succeeds and every data frame after it fails
+ * to decrypt with nothing in the log to explain it (the #118 failure class).
+ * Pinned against the central and the JS decoder by the shared fixture
+ * tests/ccm/p2p_join_kat.json. */
 #define P2P_SESSION_KEY_LABEL "HIO-P2P-SES"
 
 /*
@@ -184,39 +192,48 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_JOIN_STATE_LEN  (4 + 2 + P2P_KEY_LEN + 1 + 1)
 
 /* JoinRequest body (§5.3): product_type(1) | proto_version(1) |
- * serial_number(4 BE) | fw_version(4). product_type has no existing
- * registry in this codebase yet (single-product today) -- 1 = STICKER, a
- * placeholder pending the central's actual product-type schema (#118
- * follow-up; doc/p2p.md §5.3 cites claiming_process.md §11's identity
- * envelope for the intended generalization). */
+ * dev_eui(8, MSB-first) | fw_version(4) -- 14 B, so 41 B on the air.
+ *
+ * The identity field was serial_number(4 BE) until #417 / GitLab #73: the
+ * serial is off the air entirely now, and stays only as the number printed on
+ * the device. The DevEUI is written MSB-first, exactly as `config lrw-deveui`
+ * prints it and as the hex string reads -- deliberately NOT LoRaWAN's LSB-first
+ * on-air order, which LoRaMac applies internally for OTAA joins. Reusing that
+ * serialization here would be the #118 failure class in its purest form
+ * (decision D1).
+ *
+ * product_type has no existing registry in this codebase yet (single-product
+ * today) -- 1 = STICKER, a placeholder pending the central's actual
+ * product-type schema (#118 follow-up; doc/p2p.md §5.3 cites
+ * claiming_process.md §11's identity envelope for the intended
+ * generalization). */
 #define P2P_PRODUCT_TYPE_STICKER 1
-#define P2P_JOIN_REQ_BODY_LEN    10
 
-/* JoinAccept body (§5.3): net_id(4 BE) | dev_addr(2 BE) | central_nonce(4 BE)
- * | rx1_delay_s(1) | reserved(4) -- reserved is the v2 data-channel
- * assignment hook (§11), unused/ignored today. */
-#define P2P_JOIN_ACCEPT_BODY_LEN 15
+/* JoinAccept body (§5.3, in app_p2p.h): net_id(4 BE) | dev_addr(2 BE) |
+ * central_nonce(4 BE) | rx1_delay_s(1) | reserved(4) -- reserved is the v2
+ * data-channel assignment hook (§11), unused/ignored today. Unchanged by
+ * #417: the JoinAccept carries no identity field at all. */
 
-/* Boot-trigger join window (§5.2): an unpaired device retries for at most
- * this long after boot, then goes idle until the next boot or an NFC
- * `p2p_join` (not yet wired) -- caps the worst-case radio-retry drain for a
- * device that never finds a gateway. */
-#define P2P_JOIN_BOOT_WINDOW_MS (120 * 1000)
+/* P2P_JOIN_BOOT_WINDOW_MS (§5.2, the unpaired retry deadline) and
+ * P2P_JOIN_RETRY_JITTER_MS (§5.3, so devices booting together don't collide on
+ * retry) live in app_p2p.h -- tests/p2p_logic checks the wait against them. */
 
-/* Retry cadence for an unanswered JoinRequest. doc/p2p.md §5.3 specifies
- * "jittered, duty-cycle-aware backoff" without exact numbers: retry as soon
- * as the duty cycle clears (the dominant wait at SF10 -- tens of seconds),
- * plus this jitter so devices booting together don't collide on retry. */
-#define P2P_JOIN_RETRY_JITTER_MS 2000
+/* SF range the join sweep tries when the configured SF finds no Hub (B-2). The
+ * SF is network-wide and the Hub owns it, so a Hub that changed it leaves every
+ * node deaf until the node re-discovers it. SF6 is configurable but excluded:
+ * it needs the implicit-header mode this PHY does not use. */
+#define P2P_JOIN_SWEEP_SF_MIN 7
+#define P2P_JOIN_SWEEP_SF_MAX 12
 
 /* Self-healing re-join (B3, doc/p2p.md §7): after this many CONSECUTIVE
  * fully-failed confirmed-uplink cycles (all P2P_ACK_MAX_RETRIES exhausted with
  * no Ack), an already-PAIRED node concludes its session is stale (central DB
  * loss/restore, key change, lost sync) and starts re-join attempts on its own.
- * Unlike the never-paired boot join (§5.2), this is NOT bounded by the 120 s
- * boot window -- a paired device recovers for its whole life -- so it must use
- * exponential backoff (base -> x2 -> cap) instead of the tight boot-window
- * jitter, to keep the duty budget and battery sane over a long outage. */
+ * Unlike the never-paired boot join (§5.2), this one skips the 120 s fast phase
+ * entirely -- the window only selects which policy runs first, and neither
+ * policy ever gives up -- so it starts straight on exponential backoff
+ * (base -> x2 -> cap) instead of the tight boot-window jitter, to keep the duty
+ * budget and battery sane over a long outage. */
 #define P2P_REJOIN_FAIL_THRESHOLD  8       /* consecutive failed uplink cycles */
 #define P2P_REJOIN_BACKOFF_BASE_MS 60000   /* first re-join round: 60 s */
 #define P2P_REJOIN_BACKOFF_MAX_MS  3600000 /* cap: 1 h */
@@ -316,6 +333,11 @@ static struct k_work_q m_work_q;
 static struct k_work m_send_work;           /* compose + send telemetry */
 static struct k_work_delayable m_tx_work;   /* drain response/alarm queue, retries on -EAGAIN */
 static struct k_work_delayable m_join_work; /* JoinRequest attempt + retry (#118 phase 2) */
+
+/* B8 history replay in progress. Declared up here, ahead of the rest of the
+ * replay state further down, because send_work_handler() gates telemetry on it
+ * (MED-9) and runs earlier in the file. */
+static bool m_hist_active;
 #if defined(CONFIG_SHELL)
 static struct k_work m_rx_work; /* drain received frames (listen) */
 
@@ -362,12 +384,33 @@ static int8_t m_session_tx_power_dbm;
 static uint32_t m_dev_nonce;      /* next JoinRequest counter; persisted, device lifetime */
 static int64_t m_join_started_at; /* uptime ms; start of the current boot join window */
 
-/* Self-healing re-join state (B3, §7). m_self_healing distinguishes a
- * self-healing episode (exponential backoff, no boot-window cap) from a
- * boot/shell join (120 s boot window, tight jitter). */
+/* Live spreading factor the radio is tuned to. Seeded from the config at init
+ * and at the start of every join episode; the join sweep re-tunes it between
+ * attempts, so every radio path (modem config, time-on-air, RX1 window sizing)
+ * must read THIS rather than the config, or the two drift apart mid-join.
+ * Initialised to the app_config.yml default rather than left at 0, so the
+ * 2^SF arithmetic in p2p_toa_ms()/rx1_preamble_catch_ms() can never run on a
+ * zero SF if anything reads it before app_p2p_init() gets past its settings
+ * loads to the seeding line. */
+static uint8_t m_sf = SF_10;
+
+/* Self-healing re-join state (B3, §7). m_join_slow names the retry POLICY,
+ * not what triggered it: the slow policy is exponential backoff with no
+ * boot-window cap; the fast one is the 120 s boot window with tight jitter.
+ * A self-heal is the only thing that selects the slow policy today. */
 static uint16_t m_consec_uplink_fail; /* consecutive fully-failed uplink cycles */
-static bool m_self_healing;           /* current JOINING episode is a self-heal */
-static uint8_t m_rejoin_attempt;      /* backoff step within a self-heal episode */
+static bool m_join_slow;              /* current JOINING episode uses the slow policy */
+static uint8_t m_rejoin_attempt;      /* backoff step within a slow-policy episode */
+
+/* Join SF sweep state (B-2). An episode walks passes; a pass is
+ * P2P_JOIN_SF_ATTEMPTS sent JoinRequests at p2p_join_sweep_sf(cfg, 0) -- the
+ * configured SF -- then one at each further step until the order is exhausted.
+ * m_join_episode_fresh makes join_work_handler, not start_join_episode(), do
+ * the per-episode seeding: the shell `join` command calls start_join_episode()
+ * from its own thread, and every m_sf write has to happen on m_work_q. */
+static uint8_t m_join_sweep_step;  /* sweep step the next JoinRequest uses */
+static uint8_t m_join_sf_attempts; /* SENT attempts already made at that step */
+static bool m_join_episode_fresh;  /* the handler has not opened this episode yet */
 
 /* B1: RSSI/SNR the central reported in the last Ack (its measurement of our
  * uplink). m_last_ack_valid is false until the first Ack of this session. */
@@ -481,6 +524,26 @@ static bool app_key_is_set(void)
 	return false;
 }
 
+/* The same rule for lrw_deveui, which #417 / GitLab #73 made load-bearing:
+ * the DevEUI is now the central's lookup key on the air AND an input to the
+ * session-key KDF, so an all-zero one is not a cosmetic gap.
+ *
+ * All-zero is a legitimate state today -- it is what an unprovisioned device
+ * has, and app_lrw.c treats it as a reason to stay radio-silent rather than an
+ * error. Without this guard a P2P node would happily transmit JoinRequests
+ * carrying eight zero bytes, which no central can have registered, and the
+ * only symptom would be a node that joins forever. Refuse for the same reason
+ * and in the same shape as app_key_is_set() above. */
+static bool dev_eui_is_set(void)
+{
+	for (size_t i = 0; i < sizeof(g_app_config.lrw_deveui); i++) {
+		if (g_app_config.lrw_deveui[i] != 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* Constant-time 16 B tag compare (mirrors app_ccm_auth_decrypt()'s own
  * accumulate-the-XOR pattern in app_ccm.c) -- used to verify the plain
  * AES-CMAC tags on JoinRequest/JoinAccept below. A short-circuiting memcmp()
@@ -497,7 +560,7 @@ static bool p2p_tag_eq(const uint8_t a[P2P_JOIN_TAG_LEN], const uint8_t b[P2P_JO
 }
 
 /* See P2P_SESSION_KEY_LABEL above for the formula and rationale. Label (11 B)
- * + 0x01 (1 B) + dev_nonce/central_nonce/serial_number (4 B each) = 24 B,
+ * + 0x01 (1 B) + dev_nonce/central_nonce (4 B each) + dev_eui (8 B) = 28 B,
  * zero-padded to 32 B (two full CMAC blocks) -- app_ccm_cmac() already
  * handles multi-block messages (see its RFC4493 Mlen-40/64 KAT vectors in
  * tests/ccm), so this needs no new primitive, just the wider buffer.
@@ -514,8 +577,11 @@ static void derive_session_key(uint32_t dev_nonce, uint32_t central_nonce, uint8
 	block[label_len] = 0x01;
 	sys_put_be32(dev_nonce, &block[label_len + 1]);
 	sys_put_be32(central_nonce, &block[label_len + 5]);
-	sys_put_be32(g_app_config.serial_number, &block[label_len + 9]);
-	/* block[label_len+13 .. 31] = zero padding, already zero-initialized. */
+	/* MSB-first, straight out of the config array: lrw_deveui is already
+	 * stored in the order the hex string reads (LoRaMac does the LoRaWAN
+	 * LSB reversal internally in lorawan_join), so no byte swap here. */
+	memcpy(&block[label_len + 9], g_app_config.lrw_deveui, sizeof(g_app_config.lrw_deveui));
+	/* block[label_len+17 .. 31] = zero padding, already zero-initialized. */
 
 	(void)app_ccm_cmac(g_app_config.lrw_appkey, block, sizeof(block), out);
 }
@@ -791,7 +857,7 @@ static void build_modem_config(struct lora_modem_config *c, bool tx)
 	memset(c, 0, sizeof(*c));
 	c->frequency = g_app_config.p2p_frequency;
 	c->bandwidth = P2P_BANDWIDTH;
-	c->datarate = (enum lora_datarate)sf_from_cfg();
+	c->datarate = (enum lora_datarate)m_sf;
 	c->coding_rate = P2P_CODING_RATE;
 	c->preamble_len = 8;
 	/* An assigned session power overrides the local config: the central owns
@@ -848,32 +914,33 @@ P2P_TESTABLE uint32_t p2p_toa_ms(int sf, uint8_t payload_len)
 	return (uint32_t)((t_preamble_us + t_payload_us + 500) / 1000);
 }
 
-/* Time-on-air for the current configured SF. */
+/* Time-on-air at the SF the radio is currently tuned to. */
 static uint32_t frame_toa_ms(uint8_t payload_len)
 {
-	return p2p_toa_ms(sf_from_cfg(), payload_len);
+	return p2p_toa_ms(m_sf, payload_len);
 }
 
 /* Preamble-catch / open-timing-slop budget in ms, P2P_RX1_WINDOW_SYMBOLS
- * symbols at the live SF/BW -- only ONE component of the real lora_recv()
- * timeout (see p2p_rx1_timeout_ms() and the #define comment above: this
- * driver has no HW symbol-timeout, so this alone is NOT a valid window). */
-static uint32_t rx1_preamble_catch_ms(void)
+ * symbols at `sf`/BW -- only ONE component of the real lora_recv() timeout
+ * (see p2p_rx1_timeout_ms() and the #define comment above: this driver has no
+ * HW symbol-timeout, so this alone is NOT a valid window). Pure -- exposed to
+ * tests/p2p_logic. */
+P2P_TESTABLE uint32_t rx1_preamble_catch_ms(int sf)
 {
-	int sf = sf_from_cfg();
 	uint64_t tsym_us = ((uint64_t)(1u << sf) * 1000000ULL) / P2P_BANDWIDTH_HZ;
 
 	return (uint32_t)((tsym_us * P2P_RX1_WINDOW_SYMBOLS + 500) / 1000);
 }
 
-/* Full lora_recv() timeout for an RX1 wait expecting a frame of
+/* Full lora_recv() timeout for an RX1 wait at `sf` expecting a frame of
  * `expected_frame_len` bytes: preamble-catch budget + that frame's whole
  * time-on-air + a trailing margin (#118 phase 2 HW finding -- this driver's
  * "timeout" aborts an in-flight reception, so it must outlast the entire
- * expected frame, not just its preamble). */
-static uint32_t p2p_rx1_timeout_ms(uint8_t expected_frame_len)
+ * expected frame, not just its preamble). SF is explicit because a join sweep
+ * tries SFs other than the configured one. Pure -- exposed to tests/p2p_logic. */
+P2P_TESTABLE uint32_t p2p_rx1_timeout_ms(int sf, uint8_t expected_frame_len)
 {
-	return rx1_preamble_catch_ms() + frame_toa_ms(expected_frame_len) +
+	return rx1_preamble_catch_ms(sf) + p2p_toa_ms(sf, expected_frame_len) +
 	       P2P_RX1_TRAILING_MARGIN_MS;
 }
 
@@ -909,7 +976,7 @@ static int p2p_rx_window(int64_t tx_end_ms, uint8_t rx1_delay_s, uint8_t expecte
 	}
 
 	ret = lora_recv(m_lora_dev, buf, (uint8_t)MIN(buf_size, 255),
-			K_MSEC(p2p_rx1_timeout_ms(expected_frame_len)), rssi, snr);
+			K_MSEC(p2p_rx1_timeout_ms(m_sf, expected_frame_len)), rssi, snr);
 
 	(void)radio_configure(true);
 
@@ -1046,6 +1113,40 @@ P2P_TESTABLE int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32
 	return (int64_t)(P2P_DUTY_WINDOW_MS - (now - d->entries[d->head].end_ms));
 }
 
+/* The SF to try on join sweep step `step` (0-based) when the device is
+ * configured for `cfg_sf`. Step 0 is always the configured SF -- it is the
+ * likeliest answer and the only one a Hub that never moved will ever accept.
+ * After that the sweep walks [P2P_JOIN_SWEEP_SF_MIN, P2P_JOIN_SWEEP_SF_MAX]
+ * nearest-first, higher SF first on a tie (an SF change is almost always
+ * upward, for range), skipping the configured SF. Returns -1 once the pass is
+ * exhausted. A configured SF outside the sweep range still gets step 0, then
+ * the whole range follows. Pure -- exposed to tests/p2p_logic. */
+P2P_TESTABLE int p2p_join_sweep_sf(int cfg_sf, uint8_t step)
+{
+	if (step == 0) {
+		return cfg_sf;
+	}
+
+	int max_dist = MAX(P2P_JOIN_SWEEP_SF_MAX - cfg_sf, cfg_sf - P2P_JOIN_SWEEP_SF_MIN);
+	uint8_t seen = 0;
+
+	for (int dist = 1; dist <= max_dist; dist++) {
+		const int candidates[] = {cfg_sf + dist, cfg_sf - dist}; /* higher first */
+
+		for (size_t i = 0; i < ARRAY_SIZE(candidates); i++) {
+			int sf = candidates[i];
+
+			if (sf < P2P_JOIN_SWEEP_SF_MIN || sf > P2P_JOIN_SWEEP_SF_MAX) {
+				continue;
+			}
+			if (++seen == step) {
+				return sf;
+			}
+		}
+	}
+	return -1;
+}
+
 /* Exponential backoff (ms) for self-healing re-join round `attempt` (0-based):
  * BASE, 2*BASE, 4*BASE, ... capped at MAX. Pure -- exposed to tests/p2p_logic.
  * The caller adds jitter. */
@@ -1057,6 +1158,78 @@ P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
 		ms *= 2;
 	}
 	return MIN(ms, (uint32_t)P2P_REJOIN_BACKOFF_MAX_MS);
+}
+
+/* How long to wait before the next JoinRequest, or < 0 for "the boot window is
+ * over" -- which hands the episode to the slow policy rather than ending it
+ * (join_window_expired). Pure -- exposed to tests/p2p_logic. The caller adds
+ * jitter.
+ *
+ * The slow policy (§7, selected by a self-heal) has no window: a paired device
+ * recovers for its whole life, so it always gets its exponential backoff -- or
+ * the duty wait, whichever is longer. Taking only the backoff meant a round the
+ * duty ledger had refused (the JoinRequest never reached the air) woke into the
+ * same refusal having spent a backoff step on nothing; once the 48-entry ring
+ * is full the ledger's wait runs to the better part of an hour, well past the
+ * 60 s first backoff.
+ *
+ * The fast policy (a boot join, §5.2) has a 120 s deadline, and that deadline
+ * has to bound the wait as well as the retrying. `duty_wait_ms` is whatever
+ * p2p_duty_wait_ms returned, which is "time until the oldest ledger entry
+ * leaves the sliding hour" -- up to P2P_DUTY_WINDOW_MS, a full hour, once the
+ * 48-entry ring is full. 48 JoinRequests at 494 ms fill that ring well inside
+ * 120 s, so the unclamped wait routinely landed hours past the deadline: the
+ * episode's own deadline check ran, but not until long after
+ * the window had closed. Measured on the bench 2026-09-10 (§9): still
+ * `state: JOINING` 7 m 38 s into a 120 s window, with a reconstructed duty
+ * wait of ~1296 s, and the window-expiry line never reached. Capping at the
+ * remaining window makes the next wake-up the one that reports it -- the
+ * caller's jitter lands it just past the edge, which is exactly when the
+ * hand-over to the slow policy is due. */
+P2P_TESTABLE int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait_ms,
+					     uint32_t backoff_ms, uint32_t jitter_ms)
+{
+	if (slow) {
+		/* Whichever is longer. A round the duty ledger refused never
+		 * reached the air, so waiting only the backoff wakes it into
+		 * the same refusal, one backoff step poorer. Both terms are
+		 * bounded by the sliding hour, so this is too. */
+		return MAX((int64_t)backoff_ms, duty_wait_ms > 0 ? duty_wait_ms : 0);
+	}
+
+	int64_t remaining = (int64_t)P2P_JOIN_BOOT_WINDOW_MS - elapsed_ms;
+
+	if (remaining <= 0) {
+		return -1;
+	}
+
+	int64_t wait = (duty_wait_ms > 0) ? duty_wait_ms : 0;
+
+	if (wait + (int64_t)jitter_ms >= remaining) {
+		return remaining;
+	}
+	return wait;
+}
+
+/* Apply the slow policy's +/-25%-of-backoff jitter to `wait_ms`, never letting
+ * the result fall below `duty_wait_ms`. `rand32` is a raw sys_rand32_get()
+ * draw. Pure -- exposed to tests/p2p_logic.
+ *
+ * The jitter stops a fleet that lost the same central from re-joining in
+ * lockstep, and it is scaled to the backoff. But `wait_ms` may be the DUTY wait
+ * instead -- p2p_join_retry_delay_ms returns the longer of the two -- and the
+ * two are unrelated magnitudes. A negative draw of base/4 (15 s at the 60 s
+ * base, 15 min at the 1 h cap) would then wake the node before the ledger has
+ * cleared: send_join_request() is refused again, and the round has still spent
+ * a backoff step on a frame that never went out, which is the waste the duty
+ * wait exists to stop. So the duty wait is a floor -- jitter may push the wait
+ * up past it, never back through it. */
+P2P_TESTABLE int64_t p2p_join_slow_jitter_ms(int64_t wait_ms, int64_t duty_wait_ms, uint32_t base,
+					     uint32_t rand32)
+{
+	int64_t jittered = wait_ms - (int64_t)(base / 4) + (int64_t)(rand32 % (base / 2 + 1));
+
+	return MAX(jittered, duty_wait_ms > 0 ? duty_wait_ms : 0);
 }
 
 /* Parse a decrypted Ack body (app_p2p.h): flags|rssi|snr, optionally followed
@@ -1173,19 +1346,111 @@ static void duty_charge(uint32_t air_ms)
 	p2p_duty_charge(&m_duty, k_uptime_get(), air_ms);
 }
 
-/* Start a JOINING episode and schedule the first JoinRequest. `self_healing`
- * selects the retry policy in join_work_handler(): a boot/shell join is capped
- * at the 120 s boot window with tight jitter (§5.2); a self-heal runs with
- * exponential backoff and no window cap (§7). Shared by app_p2p_start(),
- * app_p2p_rejoin() (shell), and the self-heal trigger below. */
-static void start_join_episode(bool self_healing)
+/* Retune the radio to `sf` for the next JoinRequest. m_work_q ONLY: it writes
+ * m_sf, which every radio path reads, and reconfigures the modem -- doing that
+ * from another thread while m_work_q is inside lora_recv() would leave the two
+ * disagreeing about what the radio is tuned to. */
+static void join_set_sf(int sf)
 {
-	m_self_healing = self_healing;
+	m_sf = (uint8_t)sf;
+	(void)radio_configure(true);
+}
+
+/* Open a join episode on m_work_q: back to sweep step 0 (the configured SF)
+ * with a clean attempt count. Separate from start_join_episode() because that
+ * one may run on the shell thread -- see join_set_sf(). */
+static void join_episode_begin(void)
+{
+	m_join_episode_fresh = false;
+	m_join_sweep_step = 0;
+	m_join_sf_attempts = 0;
+	join_set_sf(p2p_join_sweep_sf(sf_from_cfg(), 0));
+}
+
+/* Account for one JoinRequest that actually reached the air and, when the step
+ * has had its attempts, move to the next SF in the order. Returns true when the
+ * pass is exhausted -- the caller owns what happens between passes, because
+ * that is where the two retry policies differ.
+ *
+ * Only SENT attempts get here: a duty bounce tried no SF at all, and advancing
+ * on one would let a blocked node walk the whole order without transmitting
+ * once. */
+static bool join_sweep_advance(void)
+{
+	uint8_t limit = (m_join_sweep_step == 0) ? P2P_JOIN_SF_ATTEMPTS : 1;
+
+	if (++m_join_sf_attempts < limit) {
+		return false;
+	}
+
+	m_join_sf_attempts = 0;
+
+	int next = p2p_join_sweep_sf(sf_from_cfg(), m_join_sweep_step + 1);
+
+	if (next < 0) {
+		/* Pass exhausted: back to the configured SF, which is both step 0
+		 * of the next pass and the SF the data plane would use if a join
+		 * landed some other way. */
+		m_join_sweep_step = 0;
+		join_set_sf(sf_from_cfg());
+		return true;
+	}
+
+	m_join_sweep_step++;
+	join_set_sf(next);
+	return false;
+}
+
+/* Persist the SF a JoinAccept actually arrived on, when it is not the one the
+ * config names. app_p2p_start()'s PAIRED shortcut never joins, so without this
+ * a node that swept its way onto the network would come up on the stale
+ * configured SF after a reboot with nothing left to re-discover it; persisting
+ * an UNCHANGED SF, on the other hand, is a pointless flash write on every
+ * ordinary join. Returns 0, or the errno the save failed with (the session
+ * keeps running at m_sf either way). Pure enough to expose to tests/p2p_logic,
+ * which stubs the save. */
+P2P_TESTABLE int p2p_join_adopt_sf(uint8_t joined_sf)
+{
+	int cfg_sf = sf_from_cfg();
+
+	if ((int)joined_sf == cfg_sf) {
+		return 0;
+	}
+
+	int ret = app_settings_save_p2p_spreading_factor(joined_sf);
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_settings_save_p2p_spreading_factor", ret);
+		return ret;
+	}
+
+	LOG_INF("P2P join: network SF changed %d -> %d, persisted", cfg_sf, joined_sf);
+	return 0;
+}
+
+/* Start a JOINING episode and schedule the first JoinRequest. `slow` selects
+ * which retry policy join_work_handler() opens with: the fast one runs with
+ * tight jitter until the 120 s boot window closes and then hands over to the
+ * slow policy (§5.2); the slow one starts there directly, on exponential
+ * backoff (§7). Neither gives up. Shared by app_p2p_start(), app_p2p_rejoin()
+ * (shell), and the self-heal trigger below. */
+static void start_join_episode(bool slow)
+{
+	/* The sweep state and m_sf are seeded by join_work_handler instead, on
+	 * m_work_q: app_p2p_rejoin() reaches here from the shell thread, which
+	 * may be running while m_work_q sits blocked in lora_recv(), and a
+	 * retune from under it would leave the radio and m_sf disagreeing. */
+	m_join_episode_fresh = true;
+	m_join_slow = slow;
 	m_rejoin_attempt = 0;
 	m_consec_uplink_fail = 0;
 	m_link_state = P2P_LINK_JOINING;
 	m_join_started_at = k_uptime_get();
-	k_work_schedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
+	/* reschedule, not schedule: a slow-backoff retry may be pending for up to
+	 * an hour, and k_work_schedule_for_queue() is a no-op while the item is
+	 * already scheduled -- the state rewritten just above would then sit
+	 * unread until that timer fired. The operator's join must pre-empt it. */
+	k_work_reschedule_for_queue(&m_work_q, &m_join_work, K_NO_WAIT);
 }
 
 /* A confirmed-uplink cycle completed successfully (Ack received) -- clear the
@@ -1211,6 +1476,12 @@ static void note_uplink_cycle_failed(void)
 		/* Can't re-join under an all-zero app_key (§4); stay put and keep
 		 * counting so a later re-provision + success resets the streak. */
 		LOG_ERR("P2P self-heal refused: lrw_appkey is all-zero (unprovisioned)");
+		return;
+	}
+	if (!dev_eui_is_set()) {
+		/* Same for the DevEUI (#417): a JoinRequest carrying eight zero
+		 * bytes is one no central can have registered. */
+		LOG_ERR("P2P self-heal refused: lrw_deveui is all-zero (unprovisioned)");
 		return;
 	}
 	LOG_WRN("P2P: %u consecutive failed uplinks -- self-healing re-join (§7)",
@@ -1391,7 +1662,7 @@ static void post_cmd_work_handler(struct k_work *work)
 		app_settings_save(true);
 		break;
 	case APP_CMD_ACTION_REBOOT:
-		LOG_INF("Command: reboot");
+		LOG_WRN_REBOOTING("command");
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
 	case APP_CMD_ACTION_COUNTERS_SAVE:
@@ -1405,8 +1676,8 @@ static void post_cmd_work_handler(struct k_work *work)
 		 * so honour it where the stack exists, and say so where it does
 		 * not (the bench image builds with CONFIG_RADIO_LORAWAN=n). */
 #if defined(CONFIG_LORAWAN)
-		LOG_INF("Command: LoRaWAN reset (NVM wipe) + reboot");
 		app_lrw_reset_nvm();
+		LOG_WRN_REBOOTING("command: LoRaWAN NVM wipe");
 		sys_reboot(SYS_REBOOT_COLD);
 #else
 		LOG_WRN("Command: LoRaWAN reset ignored (no LoRaWAN in this build)");
@@ -1591,6 +1862,17 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 				"until reboot or `join`",
 				counter);
 			(void)pairing_clear();
+		} else if (!app_key_is_set() || !dev_eui_is_set()) {
+			/* The central can ask a paired node to rekey at any time,
+			 * and the session key it authenticated this frame with
+			 * outlives a config edit -- so the identity could have been
+			 * cleared underneath us since the join. Re-joining then
+			 * would put an all-zero app_key or DevEUI on the air, which
+			 * is exactly what the guards on the other three
+			 * start_join_episode() paths exist to prevent (#417). */
+			LOG_ERR("RejoinRequest received (counter %u) but lrw_appkey or lrw_deveui "
+				"is all-zero (device unprovisioned) -- not re-joining",
+				counter);
 		} else {
 			LOG_WRN("RejoinRequest received (counter %u): re-joining", counter);
 			/* Self-heal policy (§7), not the boot window: this is a
@@ -1823,6 +2105,18 @@ static void send_work_handler(struct k_work *work)
 		return;
 	}
 
+	/* MED-9, the P2P twin of app_lrw.c's gate: a history replay owns the radio,
+	 * so don't inject telemetry into the middle of it. Interleaved frames burn
+	 * the duty ledger and the confirmed-uplink Ack slot that the replay's own
+	 * retries need, and they break the run of frames the host is reassembling.
+	 *
+	 * Only telemetry is gated. Alarms reach the radio through queue_frame() and
+	 * tx_work_handler(), and are deliberately left free: a replay can run for
+	 * minutes, and an alarm is the one thing that must not wait for it. */
+	if (m_hist_active) {
+		return;
+	}
+
 	uint8_t buf[P2P_MAX_BODY];
 	size_t len = 0;
 	bool more = false;
@@ -2003,8 +2297,8 @@ int app_p2p_listen(bool enable)
 
 static void mark_ready(void)
 {
-	/* Paired: end any self-healing episode and clear the failure streak. */
-	m_self_healing = false;
+	/* Paired: back to the fast policy and clear the failure streak. */
+	m_join_slow = false;
 	m_rejoin_attempt = 0;
 	m_consec_uplink_fail = 0;
 
@@ -2024,30 +2318,13 @@ static void mark_ready(void)
 	}
 }
 
-/* Send one JoinRequest (doc/p2p.md §5.3): header net_id=0/dev_addr=0,
- * counter=dev_nonce; CLEARTEXT body product_type|proto_version|serial_be32|
- * fw_version (nothing secret in it -- it is the central's lookup key)
- * followed by a full 16 B plain AES-CMAC tag = CMAC(app_key,
- * P2P_JOIN_TAG_LABEL || header || body) -- see the P2P_JOIN_TAG_LABEL
- * comment above; deliberately NOT AES-CCM, there is no ciphertext and no
- * nonce involved at all (#118 phase 2 revision, proximos-v2 MR!7 §7).
- * Persists the advanced dev_nonce BEFORE sending: once a JoinRequest *could*
- * have reached the central, that nonce value must never be reused, even if
- * the TX or the round-trip afterward fails. Returns 0 (with
- * `*used_nonce`/`*tx_end_ms` set) or -EAGAIN (duty-cycle blocked) or an
- * errno. */
-static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
+/* Build one JoinRequest into `frame` (P2P_JOIN_REQ_LEN bytes): the header, the
+ * cleartext body and the full CMAC tag over both. Factored out of
+ * send_join_request() so a ztest can pin the exact bytes against the shared
+ * KAT fixture without a radio (#417) -- the on-air frame and the tested frame
+ * are then the same code, not two spellings of it. */
+static void join_request_build(uint32_t nonce_val, uint8_t frame[P2P_JOIN_REQ_LEN])
 {
-	if (duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN) > 0) {
-		return -EAGAIN;
-	}
-
-	uint32_t nonce_val = m_dev_nonce;
-
-	dnonce_persist(nonce_val + 1);
-
-	uint8_t frame[P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN]; /* 37 B */
-
 	sys_put_be32(P2P_PREJOIN_NET_ID, &frame[0]);
 	sys_put_be16(P2P_PREJOIN_DEV_ADDR, &frame[4]);
 	frame[6] = APP_P2P_FRAME_JOIN_REQUEST;
@@ -2057,11 +2334,13 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 
 	body[0] = P2P_PRODUCT_TYPE_STICKER;
 	body[1] = APP_PROTO_VERSION;
-	sys_put_be32(g_app_config.serial_number, &body[2]);
-	body[6] = APP_VERSION_MAJOR;
-	body[7] = APP_VERSION_MINOR;
-	body[8] = APP_VERSION_PATCH;
-	body[9] = 0; /* reserved */
+	/* MSB-first -- see P2P_JOIN_REQ_BODY_LEN in app_p2p.h for why this is a
+	 * plain memcpy and not LoRaMac's OTAA byte order. */
+	memcpy(&body[2], g_app_config.lrw_deveui, sizeof(g_app_config.lrw_deveui));
+	body[10] = APP_VERSION_MAJOR;
+	body[11] = APP_VERSION_MINOR;
+	body[12] = APP_VERSION_PATCH;
+	body[13] = 0; /* reserved */
 
 	/* tag = CMAC(app_key, label || header || body); header+body are already
 	 * contiguous in frame[0 .. P2P_HDR_LEN+P2P_JOIN_REQ_BODY_LEN). */
@@ -2074,6 +2353,50 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 
 	(void)app_ccm_cmac(g_app_config.lrw_appkey, tag_in, sizeof(tag_in), tag);
 	memcpy(&frame[P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN], tag, P2P_JOIN_TAG_LEN);
+}
+
+#if defined(CONFIG_ZTEST)
+/* Test hooks for the join identity (#417 / GitLab #73). They build the frame
+ * and derive the key through exactly the code the radio path uses, so the KAT
+ * vectors in tests/p2p_logic pin the shipped bytes rather than a re-spelling
+ * of them. Neither transmits. */
+void p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN])
+{
+	join_request_build(dev_nonce, out);
+}
+
+void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
+				 uint8_t out[P2P_KEY_LEN])
+{
+	derive_session_key(dev_nonce, central_nonce, out);
+}
+#endif /* defined(CONFIG_ZTEST) */
+
+/* Send one JoinRequest (doc/p2p.md §5.3): header net_id=0/dev_addr=0,
+ * counter=dev_nonce; CLEARTEXT body product_type|proto_version|dev_eui(8)|
+ * fw_version (nothing secret in it -- it is the central's lookup key)
+ * followed by a full 16 B plain AES-CMAC tag = CMAC(app_key,
+ * P2P_JOIN_TAG_LABEL || header || body) -- see the P2P_JOIN_TAG_LABEL
+ * comment above; deliberately NOT AES-CCM, there is no ciphertext and no
+ * nonce involved at all (#118 phase 2 revision, proximos-v2 MR!7 §7).
+ * Persists the advanced dev_nonce BEFORE sending: once a JoinRequest *could*
+ * have reached the central, that nonce value must never be reused, even if
+ * the TX or the round-trip afterward fails. Returns 0 (with
+ * `*used_nonce`/`*tx_end_ms` set) or -EAGAIN (duty-cycle blocked) or an
+ * errno. */
+static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
+{
+	if (duty_wait_ms_for(P2P_JOIN_REQ_LEN) > 0) {
+		return -EAGAIN;
+	}
+
+	uint32_t nonce_val = m_dev_nonce;
+
+	dnonce_persist(nonce_val + 1);
+
+	uint8_t frame[P2P_JOIN_REQ_LEN]; /* 41 B */
+
+	join_request_build(nonce_val, frame);
 
 	int ret = lora_send(m_lora_dev, frame, sizeof(frame));
 	if (ret) {
@@ -2103,7 +2426,7 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	uint8_t buf[P2P_FRAME_MAX];
 	int16_t rssi;
 	int8_t snr;
-	size_t want = P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN + P2P_JOIN_TAG_LEN; /* 42 B */
+	size_t want = P2P_JOIN_ACCEPT_LEN; /* 42 B, unchanged by #417 */
 
 	int len = p2p_rx_window(tx_end_ms, P2P_RX1_DELAY_DEFAULT_S, (uint8_t)want, buf, sizeof(buf),
 				&rssi, &snr);
@@ -2162,15 +2485,18 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	/* SF is network-wide: the NorthBridge has a single receiver, so a
 	 * per-node SF would simply make this node unhearable. The byte stays a
 	 * documented hook -- warn and keep ours. */
-	if (assign.sf_hint != 0 && assign.sf_hint != (uint8_t)sf_from_cfg()) {
-		LOG_WRN("JoinAccept assigns SF%u: SF is network-wide, keeping SF%d", assign.sf_hint,
-			sf_from_cfg());
+	if (assign.sf_hint != 0 && assign.sf_hint != m_sf) {
+		LOG_WRN("JoinAccept assigns SF%u: SF is network-wide, keeping SF%u", assign.sf_hint,
+			m_sf);
 	}
 
 	uint8_t session_key[P2P_KEY_LEN];
 
 	derive_session_key(dev_nonce, central_nonce, session_key);
 	pairing_persist(net_id, dev_addr, session_key, rx1_delay_s, &assign);
+	/* The sweep may have landed this join on an SF the config does not name;
+	 * record it before anything else can reboot us into the stale one. */
+	(void)p2p_join_adopt_sf(m_sf);
 
 	LOG_INF("Joined: net_id=%u dev_addr=%u rx1_delay=%us (RSSI %d dBm, SNR %d dB)", net_id,
 		dev_addr, rx1_delay_s, rssi, snr);
@@ -2181,6 +2507,24 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	return 0;
 }
 
+/* §5.2: the never-paired boot join's 120 s window is over. It ends the FAST
+ * retry policy, not the episode -- the node keeps looking, on the same
+ * exponential curve a self-heal uses (§7), converging to one sweep pass an
+ * hour. Going UNPAIRED and silent here is what stranded a node switched on
+ * before its Hub, or after the Hub moved the network SF: nothing short of a
+ * power cycle would ever have brought it back.
+ *
+ * The curve restarts at its first step, because this is the first round of the
+ * slow phase, not a continuation of anything. */
+static void join_window_expired(void)
+{
+	LOG_WRN("P2P join: boot window (%d s) expired without a JoinAccept; continuing "
+		"on slow backoff",
+		P2P_JOIN_BOOT_WINDOW_MS / 1000);
+	m_join_slow = true;
+	m_rejoin_attempt = 0;
+}
+
 static void join_work_handler(struct k_work *work)
 {
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
@@ -2189,20 +2533,18 @@ static void join_work_handler(struct k_work *work)
 		return; /* paired (or reverted) while a retry was already in flight */
 	}
 
-	/* A never-paired boot/shell join gives up after the 120 s boot window
-	 * (§5.2); a self-healing re-join is exempt (§7) -- a paired device that
-	 * lost its session keeps trying, with exponential backoff, for its life. */
-	if (!m_self_healing && k_uptime_get() - m_join_started_at >= P2P_JOIN_BOOT_WINDOW_MS) {
-		LOG_WRN("P2P join: boot window (%d s) expired without a JoinAccept; giving up "
-			"until next boot/trigger",
-			P2P_JOIN_BOOT_WINDOW_MS / 1000);
-		m_link_state = P2P_LINK_UNPAIRED;
-		return;
+	if (m_join_episode_fresh) {
+		join_episode_begin();
 	}
 
 	uint32_t used_nonce;
 	int64_t tx_end;
 	int ret = send_join_request(&used_nonce, &tx_end);
+	/* Captured before recv_join_accept() overwrites `ret`: only the SEND can
+	 * report the duty ledger's refusal, and that refusal is the one outcome
+	 * that tried no SF at all. */
+	bool duty_blocked = (ret == -EAGAIN);
+	bool sent = (ret == 0);
 
 	if (ret == 0) {
 		ret = recv_join_accept(used_nonce, tx_end);
@@ -2211,26 +2553,58 @@ static void join_work_handler(struct k_work *work)
 			return; /* paired; no more retries */
 		}
 		LOG_INF("JoinAccept not received/invalid (%d); retrying", ret);
-	} else if (ret != -EAGAIN) {
+	} else if (!duty_blocked) {
 		LOG_ERR_CALL_FAILED_INT("send_join_request", ret);
 	}
 
-	int64_t wait_ms;
+	/* Only a JoinRequest that reached the air consumes an attempt at this SF.
+	 * A duty bounce tried nothing and waits for the ledger; a hard radio fault
+	 * tried nothing either, but must still END the round so the slow policy
+	 * backs off -- advancing neither the sweep nor the round would retry a dead
+	 * modem every jitter interval, with a dev_nonce flash write each time. */
+	bool pass_end = sent ? join_sweep_advance() : !duty_blocked;
 
-	if (m_self_healing) {
-		/* Exponential backoff between rounds, +/-25% jitter. Duty-cycle-blocked
-		 * (-EAGAIN) rounds also wait the backoff -- at 60 s+ it always exceeds
-		 * the join frame's duty wait anyway. */
-		uint32_t base = p2p_rejoin_backoff_ms(m_rejoin_attempt);
+	int64_t duty_wait_ms = duty_blocked ? duty_wait_ms_for(P2P_JOIN_REQ_LEN) : 0;
+	int64_t wait_ms = 0;
+	uint32_t base = 0;
 
+	if (!m_join_slow) {
+		wait_ms = p2p_join_retry_delay_ms(false, k_uptime_get() - m_join_started_at,
+						  duty_wait_ms, 0, P2P_JOIN_RETRY_JITTER_MS);
+		/* < 0 means the boot window is over -- either it closed while this
+		 * attempt was running, or the duty ledger cannot clear before it
+		 * does, so the next wake-up would land past the deadline anyway.
+		 * Either way the fast policy is finished and the slow one takes the
+		 * episode from here; this is the only place that transition
+		 * happens. */
+		if (wait_ms < 0) {
+			join_window_expired();
+		}
+	}
+
+	if (m_join_slow) {
+		/* No window on the slow policy (§7). Waits INSIDE a pass are short
+		 * whatever the policy -- the sweep is the point of the pass, and
+		 * spreading one over the backoff curve would mean an SF got tried
+		 * once an hour. The curve is charged between passes instead, which
+		 * is the only place the two policies differ. */
+		if (pass_end) {
+			base = p2p_rejoin_backoff_ms(m_rejoin_attempt);
+		}
+		wait_ms = p2p_join_retry_delay_ms(true, 0, duty_wait_ms, base,
+						  P2P_JOIN_RETRY_JITTER_MS);
+	}
+
+	if (m_join_slow && pass_end) {
+		/* Exponential backoff between passes, +/-25% jitter. A duty-cycle-
+		 * blocked (-EAGAIN) round waits for the ledger instead when that is
+		 * the longer of the two (p2p_join_retry_delay_ms), and the jitter
+		 * may not undercut it (p2p_join_slow_jitter_ms). */
 		if (m_rejoin_attempt < UINT8_MAX) {
 			m_rejoin_attempt++;
 		}
-		wait_ms = (int64_t)base - base / 4 + (sys_rand32_get() % (base / 2 + 1));
+		wait_ms = p2p_join_slow_jitter_ms(wait_ms, duty_wait_ms, base, sys_rand32_get());
 	} else {
-		wait_ms = (ret == -EAGAIN) ? duty_wait_ms_for(P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN +
-							      P2P_JOIN_TAG_LEN)
-					   : 0;
 		wait_ms += sys_rand32_get() % P2P_JOIN_RETRY_JITTER_MS;
 	}
 
@@ -2264,7 +2638,6 @@ static void heartbeat_work_handler(struct k_work *work)
 #define P2P_HIST_MAX_RETRIES     8 /* duty-cycle retries before abandoning a frame */
 
 static struct k_work_delayable m_hist_work;
-static bool m_hist_active;
 static uint32_t m_hist_from, m_hist_to, m_hist_seq;
 static uint32_t m_hist_count, m_hist_idx;
 static size_t m_hist_cursor;
@@ -2276,7 +2649,7 @@ static uint8_t m_hist_tx_buf[APP_CMD_HISTORY_FRAME_BUF_SIZE];
  * frame fields, clamped to the P2P body budget and the tx buffer. Worst-case
  * (max-varint) index/count/t0 give a stable lower bound for the whole replay,
  * so counting and sending use an identical per-frame cap. */
-static size_t p2p_history_frame_cap(void)
+P2P_TESTABLE size_t p2p_history_frame_cap(void)
 {
 	size_t out_cap = MIN((size_t)P2P_MAX_BODY, sizeof(m_hist_tx_buf));
 
@@ -2303,8 +2676,11 @@ static void hist_work_handler(struct k_work *work)
 	}
 	if (!app_p2p_is_ready()) {
 		LOG_WRN("History replay aborted: P2P not ready");
-		m_hist_active = false;
-		app_history_set_replay_active(false);
+		/* Via p2p_history_finish() like every other exit: clearing the two
+		 * flags by hand skipped the m_ready_cb() kick, so the report cadence
+		 * was never handed back and telemetry stayed silent until something
+		 * else restarted it. */
+		p2p_history_finish();
 		return;
 	}
 
@@ -2382,6 +2758,24 @@ bool app_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 		return false;
 	}
 
+	/* A request we are already answering. Over P2P this arrives from inside the
+	 * replay's own call stack -- hist_work_handler -> send_confirmed ->
+	 * recv_ack -> dispatch_p2p_command -> app_cmd_handle ->
+	 * app_cmd_handle_req_history -> here -- because the node dispatches the
+	 * 0x56 it receives while waiting for its own frame's Ack. Re-seeding the
+	 * cursor here would leave the outer hist_work_handler to write its stale
+	 * values back over the top and schedule m_hist_work a second time, so one
+	 * request would be answered by two interleaved streams.
+	 *
+	 * `true` rather than `false`: the stream IS the answer, so the caller must
+	 * not also emit a HISTORY_UNAVAILABLE error for it. */
+	if (m_hist_active) {
+		LOG_INF("P2P history replay already streaming (seq %u); ignoring the re-delivered "
+			"request (seq %u)",
+			m_hist_seq, seq);
+		return true;
+	}
+
 	/* Seed the snapshot fields the cap depends on (seq/present/interval) before
 	 * sizing a frame, so counting and sending use an identical per-frame cap. */
 	m_hist_from = from_unix;
@@ -2403,13 +2797,171 @@ bool app_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 	m_hist_cursor = 0;
 	m_hist_retries = 0;
 	m_hist_active = true;
-	app_history_set_replay_active(true); /* pause capture; telemetry self-skips */
+	/* Pauses history CAPTURE only -- nothing in the send path consults it. The
+	 * telemetry gate is m_hist_active, in send_work_handler(). */
+	app_history_set_replay_active(true);
 
 	LOG_INF("P2P history replay start: %u frames (window %u..%u, seq %u)", (unsigned)n,
 		from_unix, to_unix, seq);
 	k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_NO_WAIT);
 	return true;
 }
+
+#if defined(CONFIG_ZTEST)
+/* Test hooks for the B8 history replay: start the work queue and the replay work
+ * item the way app_p2p_init() does, mark P2P ready, and read back the replay
+ * cursor so a test can see whether a second start disturbed a stream already in
+ * flight. */
+/* Bring up the work queue and its work items once per test binary, the way
+ * app_p2p_init() does. Shared by every setup hook below: k_work_queue_start()
+ * on an already-running queue is undefined, and the suite runs many tests. */
+static void test_queue_start_once(void)
+{
+	static bool started;
+
+	if (started) {
+		return;
+	}
+	k_work_queue_start(&m_work_q, m_work_stack, K_THREAD_STACK_SIZEOF(m_work_stack),
+			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
+	k_work_init_delayable(&m_hist_work, hist_work_handler);
+	k_work_init(&m_send_work, send_work_handler);
+	k_work_init_delayable(&m_join_work, join_work_handler);
+	started = true;
+}
+
+void p2p_test_replay_setup(void)
+{
+	test_queue_start_once();
+	/* A previous test may have left the replay work queued -- notably
+	 * test_history_replay_start_is_not_reentrant, which asserts on the
+	 * re-entrancy guard and never drives the stream to its end. Drop it the
+	 * way p2p_test_join_step() drops the join retry, so the work-queue thread
+	 * cannot run a stream underneath the next test's assertions. */
+	(void)k_work_cancel_delayable(&m_hist_work);
+	m_started = true;
+	m_hist_active = false;
+	m_hist_seq = 0;
+	m_hist_cursor = 0;
+	m_hist_idx = 0;
+}
+
+/* Hold the replay flag directly, so the telemetry gate can be tested without
+ * driving a whole stream through the radio path and racing its completion. */
+void p2p_test_set_replay_active(bool active)
+{
+	m_hist_active = active;
+}
+
+/* Put the module into a fresh boot-policy JOINING episode configured for
+ * `cfg_sf`, with the duty ledger empty and the episode already opened, so a
+ * test can read the state the first JoinRequest will go out on before it
+ * drives a single step. */
+void p2p_test_join_setup(int cfg_sf)
+{
+	test_queue_start_once();
+	g_app_config.p2p_spreading_factor = cfg_sf;
+	p2p_duty_init(&m_duty);
+	m_link_state = P2P_LINK_JOINING;
+	m_join_slow = false;
+	m_rejoin_attempt = 0;
+	m_consec_uplink_fail = 0;
+	m_join_started_at = k_uptime_get();
+	m_join_episode_fresh = false;
+	m_join_sweep_step = 0;
+	m_join_sf_attempts = 0;
+	join_set_sf(p2p_join_sweep_sf(cfg_sf, 0));
+}
+
+/* Run exactly one join_work_handler iteration on the caller's thread and cancel
+ * the retry it scheduled, so the work-queue thread cannot run a second attempt
+ * underneath the assertions. */
+void p2p_test_join_step(void)
+{
+	join_work_handler(&m_join_work.work);
+	(void)k_work_cancel_delayable(&m_join_work);
+}
+
+/* Put the link where a node that was paired under older firmware boots: PAIRED
+ * from the persisted record, but not yet started. */
+void p2p_test_set_paired(void)
+{
+	m_link_state = P2P_LINK_PAIRED;
+	m_started = false;
+}
+
+/* Arm the join retry with a known delay, standing in for a slow-phase pass end
+ * without spending a real pass to get there. */
+void p2p_test_join_arm_retry(int64_t ms)
+{
+	k_work_reschedule_for_queue(&m_work_q, &m_join_work, K_MSEC(ms));
+}
+
+/* Re-enter start_join_episode() the way the shell `join` verb does. */
+void p2p_test_join_restart(void)
+{
+	start_join_episode(false);
+}
+
+/* How long the pending join retry still has to wait, or 0 if none is armed. */
+int64_t p2p_test_join_pending_ms(void)
+{
+	return k_ticks_to_ms_floor64(k_work_delayable_remaining_get(&m_join_work));
+}
+
+void p2p_test_get_join(uint8_t *sf, uint8_t *step, uint8_t *attempts, bool *slow, uint8_t *rejoin,
+		       enum p2p_link_state *state)
+{
+	if (sf) {
+		*sf = m_sf;
+	}
+	if (step) {
+		*step = m_join_sweep_step;
+	}
+	if (attempts) {
+		*attempts = m_join_sf_attempts;
+	}
+	if (slow) {
+		*slow = m_join_slow;
+	}
+	if (rejoin) {
+		*rejoin = m_rejoin_attempt;
+	}
+	if (state) {
+		*state = m_link_state;
+	}
+}
+
+/* Move the episode's start back, so a test can reach the boot window's edge
+ * without waiting 120 s for it. */
+void p2p_test_set_join_started_at(int64_t at_ms)
+{
+	m_join_started_at = at_ms;
+}
+
+/* The live duty ledger, so a test can fill it and make send_join_request()
+ * return -EAGAIN for real rather than through a stub. */
+struct p2p_duty *p2p_test_get_duty(void)
+{
+	return &m_duty;
+}
+
+void p2p_test_get_replay(bool *active, uint32_t *seq, size_t *cursor, uint32_t *idx)
+{
+	if (active) {
+		*active = m_hist_active;
+	}
+	if (seq) {
+		*seq = m_hist_seq;
+	}
+	if (cursor) {
+		*cursor = m_hist_cursor;
+	}
+	if (idx) {
+		*idx = m_hist_idx;
+	}
+}
+#endif /* defined(CONFIG_ZTEST) */
 
 /* ======================================================================== */
 /* Public API                                                                */
@@ -2446,6 +2998,16 @@ int app_p2p_init(void)
 		LOG_ERR_CALL_FAILED_INT("settings_load_subtree", ret);
 		return ret;
 	}
+
+	/* The configured SF is also the discovered one: a join that swept onto a
+	 * different SF persisted it here (p2p_join_adopt_sf), so a PAIRED boot --
+	 * which app_p2p_start() takes without joining -- comes up on the SF the
+	 * network is actually using. If that persist had failed, this boots on the
+	 * stale value, the uplinks go unacknowledged, and the self-heal episode's
+	 * sweep re-discovers it after P2P_REJOIN_FAIL_THRESHOLD cycles: slow
+	 * recovery, not a brick, which is why the failure is logged at ERR rather
+	 * than being treated as fatal. */
+	m_sf = (uint8_t)sf_from_cfg();
 
 	ret = radio_configure(true);
 	if (ret) {
@@ -2505,6 +3067,21 @@ void app_p2p_start(void)
 		/* Persisted pairing from a prior boot: no re-join needed (§7 --
 		 * a session survives normal power cycles). */
 		mark_ready();
+		return;
+	}
+
+	/* Below the PAIRED shortcut on purpose: the DevEUI is a join identity
+	 * (#417), not a session input -- derive_session_key() and
+	 * join_request_build() are the only readers, and a session persisted
+	 * before it was set is self-contained (P2P_JOIN_STATE_LEN is unchanged,
+	 * so join_settings_set() still accepts the old 24 B record). Every path
+	 * that would start a NEW join carries its own guard. And unlike
+	 * lrw_appkey it survives factory_reset (app_config.yml: persistent
+	 * [device_reset, factory_reset]), so the ordering argument above does
+	 * not transfer to this gate. */
+	if (!dev_eui_is_set()) {
+		LOG_ERR("P2P not started: lrw_deveui is all-zero (device unprovisioned). "
+			"Set lrw-deveui over NFC or shell, then reboot.");
 		return;
 	}
 
@@ -2583,6 +3160,7 @@ void app_p2p_get_info(struct app_p2p_info *info)
 	info->net_id = m_net_id;
 	info->dev_addr = m_dev_addr;
 	info->rx1_delay_s = m_rx1_delay_s;
+	info->sf = m_sf;
 	info->tx_power_assigned = m_session_tx_power_assigned;
 	info->tx_power_dbm = m_session_tx_power_assigned ? m_session_tx_power_dbm
 							 : (int8_t)g_app_config.p2p_tx_power;
@@ -2608,6 +3186,10 @@ void app_p2p_rejoin(void)
 	 * anyone; see app_key_is_set()). */
 	if (!app_key_is_set()) {
 		LOG_ERR("P2P rejoin refused: lrw_appkey is all-zero (device unprovisioned)");
+		return;
+	}
+	if (!dev_eui_is_set()) {
+		LOG_ERR("P2P rejoin refused: lrw_deveui is all-zero (device unprovisioned)");
 		return;
 	}
 

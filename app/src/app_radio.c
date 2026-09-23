@@ -51,11 +51,22 @@ int app_radio_init(void)
 	LOG_INF("Radio: LoRaWAN");
 	return app_lrw_init();
 #else
-	/* Neither transport compiled in -- only reachable on a P2P-only build
-	 * (CONFIG_LORAWAN=n, #118 phase 2 flash budget) with radio_mode not set
-	 * to p2p, which is a misconfiguration rather than a real deployment. */
-	LOG_ERR("Radio: neither P2P nor LoRaWAN compiled in");
-	return -ENODEV;
+	/* Neither transport compiled in for this radio_mode. Only reachable on a
+	 * P2P-only build (CONFIG_LORAWAN=n, #118 phase 2 flash budget) whose
+	 * radio_mode is not p2p -- which includes `off`, the factory default
+	 * (app_config.yml, #350), so a factory-reset bench node lands here.
+	 *
+	 * Degrade rather than fail. main.c treats a non-zero app_radio_init() as
+	 * fatal and die()s into a 60 s reboot loop, leaving about nine seconds of
+	 * shell per cycle to fix the setting in -- which is how F-36 was found.
+	 * Every other app_radio_* entry point already has a safe #else tail
+	 * (is_ready -> false, send -> -ENODEV) and app_report.c gates on
+	 * app_radio_is_ready(), so an idle radio is a state the rest of the
+	 * application already understands. Production compiles both transports
+	 * (app/Kconfig: default y), so this branch never exists there. */
+	LOG_ERR("Radio: no transport for radio-mode %d in this image; radio idle",
+		g_app_config.radio_mode);
+	return 0;
 #endif
 }
 

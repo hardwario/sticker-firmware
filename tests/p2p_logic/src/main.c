@@ -11,11 +11,21 @@
  */
 
 #include "app_ccm.h"
+#include "app_config.h"
 #include "app_p2p.h"
+
+extern uint16_t test_history_frame_count;
+extern int g_compose_budget_calls;
+/* tests/p2p_logic/src/stubs.c's app_settings_save_p2p_spreading_factor knobs. */
+extern int g_test_saved_sf;
+extern int g_test_save_sf_calls;
+extern int test_save_sf_ret;
+extern int test_lora_send_ret;
 
 #include <zephyr/ztest.h>
 #include <zephyr/sys/byteorder.h>
 
+#include <errno.h>
 #include <string.h>
 
 /* ---- p2p_frame_toa_ms ------------------------------------------------- */
@@ -50,8 +60,8 @@ ZTEST(p2p_logic, test_toa_sf10_documented_airtimes)
 		{17, 330},  /* 2 B command / minimum data frame */
 		{22, 371},  /* time-extended Ack (pre-D2 max) */
 		{23, 371},  /* fully-extended Ack (D2 max) */
-		{37, 494},  /* JoinRequest */
-		{42, 535},  /* JoinAccept */
+		{41, 535},  /* JoinRequest (#417: 37 B before the DevEUI) */
+		{42, 535},  /* JoinAccept (unchanged) */
 		{55, 657},  /* the 40 B command in the P2E-20 bench row */
 		{255, 2296} /* PHY maximum */
 	};
@@ -98,6 +108,45 @@ ZTEST(p2p_logic, test_toa_small_frame_bounded)
 
 	zassert_true(small > 0, "ToA must be positive");
 	zassert_true(small < big, "small frame ToA %u not < max frame ToA %u", small, big);
+}
+
+/* ---- RX1 window sizing ------------------------------------------------ */
+
+/* The RX1 window is sized from the SF the node is CURRENTLY tried on, not from
+ * the configured one: a join sweep re-tunes the radio between attempts, and a
+ * window still sized for the configured SF would either close mid-JoinAccept
+ * (too short) or waste the retry budget (too long). Both terms of the window
+ * -- the preamble-catch budget and the expected frame's whole time-on-air --
+ * scale with SF, so they take it as an argument. */
+ZTEST(p2p_logic, test_rx1_timeout_scales_with_the_tried_sf)
+{
+	/* JoinAccept is 42 B on air. Computed from the formula
+	 * rx1_preamble_catch_ms(sf) + p2p_toa_ms(sf, 42) + 40 ms trailing margin:
+	 * SF10 = 98 + 535 + 40, SF12 = 393 + 2138 + 40. */
+	zassert_equal(p2p_rx1_timeout_ms(10, 42), 673u, "SF10 JoinAccept window should be 673 ms");
+	zassert_equal(p2p_rx1_timeout_ms(12, 42), 2571u,
+		      "SF12 JoinAccept window should be 2571 ms");
+
+	uint32_t prev = p2p_rx1_timeout_ms(7, 42);
+
+	for (int sf = 8; sf <= 12; sf++) {
+		uint32_t cur = p2p_rx1_timeout_ms(sf, 42);
+
+		zassert_true(cur > prev, "RX1 window not increasing at SF%d (%u <= %u)", sf, cur,
+			     prev);
+		prev = cur;
+	}
+
+	/* #118 phase 2 HW finding: this driver's timeout aborts an in-flight
+	 * reception, so at every SF the window must outlast the whole expected
+	 * frame, and the preamble-catch budget must be a real part of it. */
+	for (int sf = 7; sf <= 12; sf++) {
+		uint32_t catch_ms = rx1_preamble_catch_ms(sf);
+
+		zassert_true(catch_ms > 0, "SF%d preamble catch budget must be positive", sf);
+		zassert_true(p2p_rx1_timeout_ms(sf, 42) > p2p_toa_ms(sf, 42) + catch_ms,
+			     "SF%d window must outlast the frame plus the catch budget", sf);
+	}
 }
 
 /* ---- p2p_build_nonce -------------------------------------------------- */
@@ -590,6 +639,504 @@ ZTEST(p2p_logic, test_rejoin_backoff_doubles_then_caps)
 	zassert_equal(p2p_rejoin_backoff_ms(255), 3600000u, "a large attempt must saturate at 1 h");
 }
 
+ZTEST(p2p_logic, test_join_retry_stays_inside_the_boot_window)
+{
+	const uint32_t jitter = P2P_JOIN_RETRY_JITTER_MS;
+
+	/* The defect: p2p_duty_wait_ms returns "time until the oldest ledger entry
+	 * leaves the sliding hour" -- up to P2P_DUTY_WINDOW_MS when the 48-entry
+	 * ring is full. A boot join that waited that long would be answered long
+	 * after its 120 s window closed, which is how a 120 s window was still
+	 * JOINING 7 m 38 s in on the bench (2026-09-10 §9). The wait is capped at
+	 * the window edge so the NEXT wake-up is the one that gives up, on time. */
+	int64_t d = p2p_join_retry_delay_ms(false, 119000, 3500000, 0, jitter);
+
+	zassert_true(d >= 0, "119 s into a 120 s window is not yet expired");
+	zassert_true(d <= 1000,
+		     "a duty wait of 3500 s must be capped to the 1000 ms remaining, "
+		     "got %lld",
+		     (long long)d);
+
+	/* Past the window: refuse, so the caller logs the give-up instead of
+	 * rescheduling. */
+	zassert_true(p2p_join_retry_delay_ms(false, P2P_JOIN_BOOT_WINDOW_MS, 0, 0, jitter) < 0,
+		     "at the window edge the boot join must report the window closed");
+	zassert_true(p2p_join_retry_delay_ms(false, 500000, 0, 0, jitter) < 0,
+		     "well past the window the boot join must report the window closed");
+
+	/* A self-heal has no window at all (§7) -- a paired device recovers for its
+	 * whole life, so this must never refuse no matter how long it has run. */
+	for (uint8_t a = 0; a < 255; a++) {
+		uint32_t base = p2p_rejoin_backoff_ms(a);
+
+		zassert_true(p2p_join_retry_delay_ms(true, 999999999, 3500000, base, jitter) >= 0,
+			     "a self-healing re-join must never be capped by the boot window "
+			     "(attempt %u)",
+			     a);
+	}
+
+	/* Free radio at the start of the window: no wait beyond the caller's jitter. */
+	zassert_true(p2p_join_retry_delay_ms(false, 0, 0, 0, jitter) < (int64_t)jitter,
+		     "an unblocked retry should go essentially immediately");
+
+	/* And an ordinary duty wait well inside the window passes through untouched
+	 * -- the cap must not make every retry immediate. */
+	zassert_equal(p2p_join_retry_delay_ms(false, 1000, 30000, 0, jitter), 30000,
+		      "a 30 s duty wait 1 s into the window is not capped");
+}
+
+/* The slow policy competes with the duty ledger, not just with the clock: a
+ * JoinRequest the ledger refuses never reaches the air, so a round that waits
+ * only its backoff wakes to be refused again and has spent a backoff step for
+ * nothing. The wait has to be the longer of the two. */
+ZTEST(p2p_logic, test_slow_retry_waits_for_duty_and_stays_bounded)
+{
+	const uint32_t jitter = P2P_JOIN_RETRY_JITTER_MS;
+
+	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 1500, 0, jitter), 1500,
+		      "a duty-blocked slow retry with no backoff must wait out the ledger");
+	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 90000, 60000, jitter), 90000,
+		      "a 90 s duty wait must outrank a 60 s backoff");
+
+	/* ...and the backoff still wins when it is the longer of the two, so the
+	 * fix cannot turn a long backoff into a busy retry loop. */
+	zassert_equal(p2p_join_retry_delay_ms(true, 999999, 1500, 60000, jitter), 60000,
+		      "a 60 s backoff must outrank a 1.5 s duty wait");
+
+	/* The worst case the ledger can produce: a full 48-entry ring puts the
+	 * wait within a second of the whole sliding hour, three orders of
+	 * magnitude past the first backoff step. The duty wait has to come
+	 * through intact, and it is still bounded -- p2p_duty_wait_ms never
+	 * returns more than the window, and the backoff caps at the same value,
+	 * so their maximum is bounded too and the slow policy never oversleeps. */
+	int64_t d = p2p_join_retry_delay_ms(true, 999999, P2P_DUTY_WINDOW_MS - 1000,
+					    p2p_rejoin_backoff_ms(0), jitter);
+
+	zassert_equal(d, P2P_DUTY_WINDOW_MS - 1000,
+		      "a near-window duty wait must survive a 60 s backoff, got %lld ms",
+		      (long long)d);
+	zassert_true(d <= P2P_DUTY_WINDOW_MS,
+		     "a slow retry wait of %lld ms must stay inside the sliding hour",
+		     (long long)d);
+}
+
+/* The jitter that spreads a fleet's re-join rounds is scaled to the BACKOFF,
+ * but it is applied to the wait that p2p_join_retry_delay_ms returned -- which
+ * after the duty fix may be the duty wait instead. A negative draw of up to
+ * base/4 (15 s at the 60 s base, 15 min at the 1 h cap) then wakes the node
+ * before the ledger has cleared, send_join_request() is refused again, and
+ * m_rejoin_attempt++ burns a backoff step for a frame that never went out --
+ * exactly the waste the duty fix exists to stop. The duty wait is a floor the
+ * jitter may push up but never through. */
+ZTEST(p2p_logic, test_slow_retry_jitter_never_dips_below_the_duty_wait)
+{
+	const uint32_t base = p2p_rejoin_backoff_ms(0); /* 60 s */
+	const int64_t duty = 90000;
+
+	/* The most negative draw there is: rand 0 subtracts the whole base/4. */
+	zassert_equal(p2p_join_slow_jitter_ms(duty, duty, base, 0), duty,
+		      "the most negative jitter draw must not undercut the duty wait");
+
+	/* Every draw, not just the extreme one. */
+	for (uint32_t r = 0; r <= base / 2; r += 1000) {
+		int64_t d = p2p_join_slow_jitter_ms(duty, duty, base, r);
+
+		zassert_true(d >= duty, "draw %u dipped to %lld ms, below the %lld ms duty wait", r,
+			     (long long)d, (long long)duty);
+		zassert_true(d <= duty + (int64_t)(base / 4),
+			     "draw %u overshot to %lld ms, past +25%% of the backoff", r,
+			     (long long)d);
+	}
+
+	/* The floor must not swallow the jitter: with no duty block the spread is
+	 * the full +/-25%, which is what keeps a fleet from re-joining in lockstep. */
+	zassert_equal(p2p_join_slow_jitter_ms(base, 0, base, 0), base - base / 4,
+		      "an unblocked round must still take the full negative jitter");
+	zassert_equal(p2p_join_slow_jitter_ms(base, 0, base, base / 2), base + base / 4,
+		      "an unblocked round must still take the full positive jitter");
+}
+
+/* ---- join SF sweep ---------------------------------------------------- */
+
+/* The SF is network-wide and the Hub owns it, so a Hub that changes it strands
+ * every node still tuned to the old one. A node can only find it again by
+ * trying other SFs during join, and the cheapest order is nearest-first: the
+ * likeliest change is by one step. Ties break HIGHER first -- an SF change is
+ * almost always upward, for range. */
+ZTEST(p2p_logic, test_join_sweep_order_is_nearest_first_higher_first)
+{
+	const struct {
+		int cfg_sf;
+		uint8_t steps;
+		int expect[8];
+	} cases[] = {
+		{10, 6, {10, 11, 9, 12, 8, 7}},
+		{12, 6, {12, 11, 10, 9, 8, 7}},
+		{7, 6, {7, 8, 9, 10, 11, 12}},
+		/* SF6 is configurable but below the sweep range: step 0 still
+		 * honours the configured SF, then the whole range follows. */
+		{6, 7, {6, 7, 8, 9, 10, 11, 12}},
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		int cfg = cases[i].cfg_sf;
+
+		for (uint8_t step = 0; step < cases[i].steps; step++) {
+			zassert_equal(p2p_join_sweep_sf(cfg, step), cases[i].expect[step],
+				      "cfg SF%d step %u should be SF%d, got %d", cfg, step,
+				      cases[i].expect[step], p2p_join_sweep_sf(cfg, step));
+		}
+
+		/* Past the end the pass is exhausted, and stays exhausted. */
+		zassert_equal(p2p_join_sweep_sf(cfg, cases[i].steps), -1,
+			      "cfg SF%d must be exhausted after %u steps", cfg, cases[i].steps);
+		zassert_equal(p2p_join_sweep_sf(cfg, 255), -1, "cfg SF%d must stay exhausted", cfg);
+	}
+}
+
+/* A sweep pass is a burst of JoinRequests at rising SFs, and the SF12 ones are
+ * expensive. The pass has to stay a small fraction of the hourly budget or the
+ * retries it feeds would be duty-blocked before the pass even finished. */
+ZTEST(p2p_logic, test_join_sweep_pass_air_fits_the_duty_budget)
+{
+	const uint8_t join_req_len = P2P_JOIN_REQ_LEN; /* 41 B, see the ToA table above */
+	uint32_t total = 0;
+
+	for (uint8_t step = 0;; step++) {
+		int sf = p2p_join_sweep_sf(10, step);
+
+		if (sf < 0) {
+			break;
+		}
+		total += (step == 0 ? P2P_JOIN_SF_ATTEMPTS : 1) * p2p_toa_ms(sf, join_req_len);
+	}
+
+	/* 2 x 535 (SF10) + 1151 + 288 + 2138 + 154 + 87. */
+	zassert_equal(total, 4888u, "a cfg-SF10 sweep pass should be 4888 ms of air, got %u ms",
+		      total);
+	zassert_true(total < P2P_DUTY_BUDGET_MS / 4,
+		     "a sweep pass (%u ms) must stay well inside the hourly budget", total);
+
+	/* The other edge of the same budget: SF12 JoinRequests are 2138 ms each
+	 * at 41 B, so the hour holds 16 of them and no more -- it was 18 at 37 B,
+	 * which is what the four extra identity bytes cost (#417). A sweep that
+	 * retried at SF12 more often than that would be blocked by the duty
+	 * ledger, not by its own policy. */
+	uint32_t sf12 = p2p_toa_ms(12, join_req_len);
+
+	zassert_true(16 * sf12 <= P2P_DUTY_BUDGET_MS, "16 SF12 joins (%u ms) must fit the hour",
+		     16 * sf12);
+	zassert_true(17 * sf12 > P2P_DUTY_BUDGET_MS, "17 SF12 joins (%u ms) must not fit the hour",
+		     17 * sf12);
+}
+
+/* ---- join episode: walking the sweep ---------------------------------- */
+
+/* The sweep order is only half the story: the episode has to actually walk it.
+ * One pass is P2P_JOIN_SF_ATTEMPTS JoinRequests at the configured SF -- the
+ * likeliest answer deserves a second chance at a lost frame -- then one at
+ * every other SF in the order, then back to the configured SF for the next
+ * pass. The radio must be tuned to that SF when the JoinRequest goes out, so
+ * the state is read BEFORE each attempt. */
+ZTEST(p2p_logic, test_join_sweep_walks_the_order_and_wraps)
+{
+	const uint8_t expect[] = {10, 10, 11, 9, 12, 8, 7};
+	uint8_t sf, step, attempts, rejoin;
+	bool slow;
+	enum p2p_link_state state;
+
+	p2p_test_join_setup(10);
+
+	for (size_t i = 0; i < ARRAY_SIZE(expect); i++) {
+		p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
+		zassert_equal(sf, expect[i],
+			      "attempt %zu should go out at SF%u, the radio is on SF%u", i,
+			      expect[i], sf);
+		p2p_test_join_step();
+	}
+
+	/* The pass wrapped: back to step 0 / the configured SF, with a clean
+	 * attempt count, ready to start the next pass. */
+	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
+	zassert_equal(sf, 10, "a wrapped pass must return to the configured SF, got SF%u", sf);
+	zassert_equal(step, 0, "a wrapped pass must return to sweep step 0, got %u", step);
+	zassert_equal(attempts, 0, "a wrapped pass must reset the attempt count, got %u", attempts);
+
+	/* The boot policy owns this episode: the window has not closed, so the
+	 * policy has not changed and no backoff step has been spent. */
+	zassert_false(slow, "an episode inside its boot window must stay on the fast policy");
+	zassert_equal(rejoin, 0, "the fast policy must not spend backoff steps, got %u", rejoin);
+	zassert_equal(state, P2P_LINK_JOINING, "a sweeping episode is still JOINING");
+}
+
+/* A JoinRequest the duty ledger refuses never reaches the air, so it tried no
+ * SF at all. Advancing the sweep on it would skip an SF per duty bounce and a
+ * blocked node would walk the whole order without transmitting once. */
+ZTEST(p2p_logic, test_join_duty_block_does_not_advance_the_sweep)
+{
+	uint8_t sf, step, attempts, rejoin;
+	bool slow;
+	enum p2p_link_state state;
+
+	p2p_test_join_setup(10);
+
+	/* Fill the sliding-hour ledger: p2p_duty_wait_ms() refuses as soon as the
+	 * 48-entry ring is full, whatever the air-time sum, so 48 one-ms charges
+	 * are enough to make send_join_request() return -EAGAIN. */
+	struct p2p_duty *duty = p2p_test_get_duty();
+
+	for (int i = 0; i < P2P_DUTY_LEDGER_ENTRIES; i++) {
+		p2p_duty_charge(duty, k_uptime_get(), 1);
+	}
+
+	p2p_test_join_step();
+
+	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
+	zassert_equal(sf, 10, "a duty bounce tried no SF, so the radio must stay on SF10, got SF%u",
+		      sf);
+	zassert_equal(step, 0, "a duty bounce must not advance the sweep step, got %u", step);
+	zassert_equal(attempts, 0, "a duty bounce is not a sent attempt, got %u", attempts);
+}
+
+/* The SF a sweep lands on has to outlive the session: app_p2p_start()'s PAIRED
+ * shortcut never joins, so a node that joined at a swept SF and rebooted would
+ * come up on the stale configured one with nothing left to re-discover it.
+ * Persisting an unchanged SF, on the other hand, is a pointless flash write on
+ * every ordinary join. */
+ZTEST(p2p_logic, test_join_adopt_sf_persists_only_a_changed_sf)
+{
+	p2p_test_join_setup(10);
+
+	g_test_save_sf_calls = 0;
+	test_save_sf_ret = 0;
+
+	zassert_equal(p2p_join_adopt_sf(10), 0, "joining at the configured SF must succeed");
+	zassert_equal(g_test_save_sf_calls, 0,
+		      "joining at the configured SF must not write it back, %d write(s) seen",
+		      g_test_save_sf_calls);
+
+	zassert_equal(p2p_join_adopt_sf(12), 0, "adopting a swept SF must succeed");
+	zassert_equal(g_test_save_sf_calls, 1, "adopting an SF is exactly one write, got %d",
+		      g_test_save_sf_calls);
+	zassert_equal(g_test_saved_sf, 12, "the adopted SF must be the one persisted, got %d",
+		      g_test_saved_sf);
+
+	/* A failed persist is surfaced, not swallowed: the session still runs at
+	 * the swept SF, but the next boot comes back on the stale configured one
+	 * and the bench has to be able to see that coming. */
+	g_test_save_sf_calls = 0;
+	test_save_sf_ret = -EIO;
+
+	zassert_equal(p2p_join_adopt_sf(12), -EIO, "a failed persist must return its errno");
+	zassert_equal(g_test_save_sf_calls, 1, "the failing write still happened once, got %d",
+		      g_test_save_sf_calls);
+}
+
+/* The boot window used to end the episode, not just the fast policy: the node
+ * went UNPAIRED and stayed silent until someone power-cycled it. A node
+ * deployed before its Hub, or one switched on after the Hub moved the network
+ * SF, would never come back on its own -- and the sweep above is worth nothing
+ * if the episode it runs in has already stopped. The window still ends the fast
+ * policy; it no longer ends the episode. */
+ZTEST(p2p_logic, test_join_window_expiry_switches_to_slow_policy_not_silence)
+{
+	uint8_t sf, step, attempts, rejoin;
+	bool slow;
+	enum p2p_link_state state;
+
+	p2p_test_join_setup(10);
+	p2p_test_set_join_started_at(k_uptime_get() - P2P_JOIN_BOOT_WINDOW_MS - 1);
+
+	p2p_test_join_step();
+
+	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
+	zassert_equal(state, P2P_LINK_JOINING,
+		      "an expired boot window must leave the episode JOINING, got %d", state);
+	zassert_true(slow, "an expired boot window must hand the episode to the slow policy");
+	zassert_equal(rejoin, 0, "the slow curve starts at its first step, got %u", rejoin);
+
+	/* The curve is charged per PASS, not per attempt: the rest of this pass
+	 * spends no backoff step, and the pass end spends exactly one. */
+	for (int i = 0; i < 5; i++) {
+		p2p_test_join_step();
+		p2p_test_get_join(NULL, NULL, NULL, NULL, &rejoin, NULL);
+		zassert_equal(rejoin, 0, "attempt %d is mid-pass and must spend no backoff step",
+			      i + 2);
+	}
+
+	p2p_test_join_step();
+	p2p_test_get_join(&sf, &step, NULL, NULL, &rejoin, &state);
+	zassert_equal(rejoin, 1, "a pass end must spend exactly one backoff step, got %u", rejoin);
+	zassert_equal(step, 0, "and leave the next pass at sweep step 0, got %u", step);
+	zassert_equal(sf, 10, "which is the configured SF, got SF%u", sf);
+	zassert_equal(state, P2P_LINK_JOINING, "and the episode is still running");
+}
+
+/* R-05: dev_eui_is_set() sat above the PAIRED shortcut, so a node paired under
+ * pre-#417 firmware -- whose 24 B p2pjoin/state record join_settings_set() still
+ * accepts, restoring it straight to PAIRED -- was refused on the next boot and
+ * went silent. No telemetry, no self-heal, one ERR line. The other three DevEUI
+ * gates only refuse a NEW join, which is the right shape; this one refused a
+ * session that was already working. */
+ZTEST(p2p_logic, test_start_with_zero_deveui_keeps_a_paired_session)
+{
+	uint8_t saved[8];
+
+	memcpy(saved, g_app_config.lrw_deveui, sizeof(saved));
+
+	p2p_test_join_setup(10);
+	p2p_test_set_paired();
+	memset(g_app_config.lrw_deveui, 0, sizeof(g_app_config.lrw_deveui));
+
+	app_p2p_start();
+
+	zassert_true(app_p2p_is_ready(),
+		     "a persisted session must survive an upgrade that added the DevEUI");
+
+	memcpy(g_app_config.lrw_deveui, saved, sizeof(saved));
+}
+
+/* R-06: the sweep advanced on ANY non-EAGAIN send result, so a radio that is
+ * simply broken walked the whole SF order without transmitting once and then
+ * charged a backoff step for the "pass" it never flew.
+ *
+ * Advancing only on a sent frame is half the fix. Alone it makes pass_end never
+ * true on a dead modem, which collapses the slow-phase wait to the bare jitter
+ * (p2p_join_retry_delay_ms with base 0) -- a sub-2-second retry loop, each turn
+ * costing a dev_nonce flash write. The round has to end even when the sweep does
+ * not move, so the slow policy backs off. */
+ZTEST(p2p_logic, test_join_send_failure_holds_the_sweep_and_ends_the_round)
+{
+	uint8_t sf, step, attempts, rejoin;
+	bool slow;
+	enum p2p_link_state state;
+
+	p2p_test_join_setup(10);
+	p2p_test_set_join_started_at(k_uptime_get() - P2P_JOIN_BOOT_WINDOW_MS - 1);
+
+	test_lora_send_ret = -EIO;
+	p2p_test_join_step();
+	test_lora_send_ret = 0;
+
+	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
+	zassert_equal(sf, 10, "a radio fault tried no SF, so the radio stays on SF10, got SF%u",
+		      sf);
+	zassert_equal(step, 0, "a radio fault must not advance the sweep step, got %u", step);
+	zassert_equal(attempts, 0, "a frame that never reached the air is not an attempt, got %u",
+		      attempts);
+	zassert_equal(rejoin, 1,
+		      "but the round must still end, so the slow policy backs off, got %u", rejoin);
+}
+
+/* R-01: 8227954 made the join episode endless -- the slow policy backs off to an
+ * hour and never gives up -- but start_join_episode() still armed the first
+ * attempt with k_work_schedule_for_queue(), which Zephyr defines as a no-op
+ * while the item is already scheduled. So the shell `join` rewrote
+ * m_join_episode_fresh / m_join_slow / m_join_started_at and the pending timer
+ * ignored all of it for up to P2P_REJOIN_BACKOFF_MAX_MS. An operator asking a
+ * stuck node to re-join has to be answered now, not in an hour. */
+ZTEST(p2p_logic, test_shell_join_preempts_a_pending_slow_retry)
+{
+	p2p_test_join_setup(10);
+	p2p_test_set_join_started_at(k_uptime_get() - P2P_JOIN_BOOT_WINDOW_MS - 1);
+
+	/* A slow-phase pass end arms the backoff curve, which reaches an hour. The
+	 * delay is placed directly rather than spent: running real passes to get
+	 * there would leave the work-queue thread racing these assertions. */
+	p2p_test_join_arm_retry(3600000); /* P2P_REJOIN_BACKOFF_MAX_MS, the curve's cap */
+	zassert_true(p2p_test_join_pending_ms() > 10000,
+		     "the retry this test pre-empts must be pending, got %lld ms",
+		     (long long)p2p_test_join_pending_ms());
+
+	p2p_test_join_restart();
+
+	/* Nothing yields between the two calls, so the work-queue thread cannot
+	 * have run the item yet: 0 means it is queued to run now, not still
+	 * waiting out the old delay. */
+	zassert_equal(p2p_test_join_pending_ms(), 0,
+		      "an operator join must pre-empt the pending retry, %lld ms still to wait",
+		      (long long)p2p_test_join_pending_ms());
+
+	/* Leave nothing armed for the next test. */
+	p2p_test_join_step();
+}
+
+/* ---- B8 history replay ------------------------------------------------ */
+
+ZTEST(p2p_logic, test_history_frame_cap_is_bounded_by_the_p2p_body)
+{
+	p2p_test_replay_setup();
+
+	/* m_hist_tx_buf is APP_CMD_HISTORY_FRAME_BUF_SIZE (256 B), sized for the
+	 * LoRaWAN frame; over P2P the binding limit is the 240 B body a single
+	 * frame can carry (P2P_MAX_BODY = 255 MTU - 11 header - 4 tag). Sizing a
+	 * frame off the buffer instead would build pages the radio cannot send. */
+	zassert_equal(p2p_history_frame_cap(), (size_t)P2P_MAX_BODY,
+		      "the per-frame cap must be the P2P body budget (%u), not the 256 B buffer",
+		      (unsigned)P2P_MAX_BODY);
+	zassert_equal((size_t)P2P_MAX_BODY, 240u, "P2P_MAX_BODY drifted from 240");
+}
+
+ZTEST(p2p_logic, test_history_replay_start_is_not_reentrant)
+{
+	bool active;
+	uint32_t seq, idx;
+	size_t cursor;
+
+	p2p_test_replay_setup();
+	test_history_frame_count = 3;
+
+	zassert_true(app_p2p_start_history_replay(100, 200, 42),
+		     "a replay with records available must start");
+	p2p_test_get_replay(&active, &seq, &cursor, &idx);
+	zassert_true(active, "the replay should be marked active");
+	zassert_equal(seq, 42u, "the stream answers the requesting seq");
+
+	/* Over P2P a re-delivered req_history is dispatched from inside the
+	 * replay's OWN call stack -- hist_work_handler -> send_confirmed ->
+	 * recv_ack -> dispatch_p2p_command -> app_cmd_handle ->
+	 * app_cmd_handle_req_history -> here. Without a guard this resets
+	 * cursor/idx/seq, and control then returns into the outer handler, which
+	 * writes its stale cursor back and schedules the work a second time. The
+	 * node ends up answering one request with two interleaved streams.
+	 *
+	 * A retransmitted request is already being answered, so accept it and
+	 * change nothing. */
+	zassert_true(app_p2p_start_history_replay(900, 1000, 77),
+		     "a re-delivered request must be accepted, not refused");
+
+	p2p_test_get_replay(&active, &seq, &cursor, &idx);
+	zassert_true(active, "the replay must still be active");
+	zassert_equal(seq, 42u, "the in-flight stream's seq must not be replaced by the retry's");
+	zassert_equal(idx, 0u, "the frame index must not be rewound");
+}
+
+ZTEST(p2p_logic, test_telemetry_does_not_interleave_with_a_history_replay)
+{
+	p2p_test_replay_setup();
+	test_history_frame_count = 3;
+
+	/* Control: with no replay running, a telemetry request composes a frame. */
+	g_compose_budget_calls = 0;
+	app_p2p_send_telemetry();
+	k_sleep(K_MSEC(50));
+	zassert_true(g_compose_budget_calls > 0,
+		     "with no replay running, telemetry must still be composed");
+
+	/* app_lrw.c gates its own send path on m_hist_active (MED-9); app_p2p.c's
+	 * copy kept the "telemetry self-skips" comment but dropped the gate.
+	 * app_history_set_replay_active() only pauses history CAPTURE -- nothing
+	 * in the send path consults it -- so scheduled telemetry interleaved with
+	 * the history frames and competed for the same duty ledger and Ack slot. */
+	p2p_test_set_replay_active(true);
+
+	g_compose_budget_calls = 0;
+	app_p2p_send_telemetry();
+	k_sleep(K_MSEC(50));
+	zassert_equal(g_compose_budget_calls, 0,
+		      "a replay owns the radio: telemetry must not be composed mid-stream");
+}
+
 /* ---- Frame-counter fail-closed / saturation (B9) ---------------------- */
 
 ZTEST(p2p_logic, test_fcnt_normal_advance)
@@ -615,6 +1162,21 @@ ZTEST(p2p_logic, test_fcnt_fail_closed_on_reserve_failure)
 	zassert_true(p2p_test_fcnt_next(&c) != 0,
 		     "fcnt_next must fail closed when the reservation can't be persisted");
 	zassert_equal(p2p_test_get_fcnt(), 200u, "counter advanced despite a failed reservation");
+	zassert_equal(c, 0xDEADBEEFu, "counter_out written despite a failed reservation");
+
+	/* Call again from the same window edge. This is the assertion that guards the
+	 * ORDERING, not just the return value: if fcnt_reserve advanced the in-RAM
+	 * watermark before the durable write (the pre-B9 bug), the first call still
+	 * refused -- but left m_fcnt_reserved at the un-persisted target, so this one
+	 * finds itself inside a window that was never written and hands out counter
+	 * 200 unreserved. A reboot then resumes below it and repeats a (key, nonce)
+	 * pair, which is a full CCM break. Refusing once is not the property; refusing
+	 * until the reservation is durable is. */
+	zassert_true(p2p_test_fcnt_next(&c) != 0,
+		     "a second fcnt_next must also fail closed -- the reservation is still "
+		     "not durable, so the window must not be treated as extended");
+	zassert_equal(p2p_test_get_fcnt(), 200u, "counter advanced on the second refusal");
+	zassert_equal(c, 0xDEADBEEFu, "counter_out written on the second refusal");
 }
 
 ZTEST(p2p_logic, test_fcnt_saturates_no_wrap)
@@ -760,6 +1322,77 @@ ZTEST(p2p_logic, test_ack_body_bad_length_rejected)
 		      "4 B without the pending bit must be rejected");
 	zassert_false(p2p_parse_ack_body(no_pending, 8, &info),
 		      "8 B without the pending bit must be rejected");
+}
+
+/* ---- the shared join KAT fixture (#417 / GitLab #73) ------------------- */
+
+/* tests/ccm/p2p_join_kat.json, sha256
+ * 14c4efbd40520d2a48ab3004ba07411e91a4775c87fb93f4663dccf92a8361a5 -- the
+ * fixture shared byte-for-byte with proximos-v2 control-radio and the
+ * NorthBridge Python replica, generated by an independent PyCryptodome oracle.
+ *
+ * tests/ccm pins the raw CMAC construction; these two pin the *firmware's own*
+ * builder and KDF, reached through the CONFIG_ZTEST hooks so they run the code
+ * the radio path runs rather than a re-spelling of it. That is the difference
+ * that matters: a correct construction assembled from the wrong config field
+ * would pass over there and fail here. */
+static const uint8_t KAT_APP_KEY[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+					0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+static const uint8_t KAT_DEV_EUI[8] = {0x70, 0xb3, 0xd5, 0x7e, 0xd0, 0x00, 0x0a, 0xbe};
+
+static void kat_provision(void)
+{
+	memcpy(g_app_config.lrw_appkey, KAT_APP_KEY, sizeof(KAT_APP_KEY));
+	memcpy(g_app_config.lrw_deveui, KAT_DEV_EUI, sizeof(KAT_DEV_EUI));
+	/* Deliberately a different value from anything in the fixture: since
+	 * #417 the serial must not reach the air or the KDF at all, so a test
+	 * that still depended on it would fail here. */
+	g_app_config.serial_number = 0x80e00591;
+}
+
+ZTEST(p2p_logic, test_join_request_bytes_match_the_kat_fixture)
+{
+	static const uint8_t expected[P2P_JOIN_REQ_LEN] = {
+		/* header: net_id=0 | dev_addr=0 | 0xF0 | counter=dev_nonce=7 */
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0x00, 0x07,
+		/* body: product_type=1 | proto_version=1 | dev_eui(8) | fw 1.4.0.0 */
+		0x01, 0x01, 0x70, 0xb3, 0xd5, 0x7e, 0xd0, 0x00, 0x0a, 0xbe, 0x01, 0x04, 0x00, 0x00,
+		/* tag: CMAC(app_key, "HIO-P2P-JOIN" || header || body) */
+		0x68, 0x97, 0x96, 0x7e, 0x0f, 0xb2, 0x6f, 0xf1, 0xf5, 0x96, 0x1f, 0xf4, 0x35, 0x7f,
+		0x29, 0x19};
+	uint8_t frame[P2P_JOIN_REQ_LEN];
+
+	kat_provision();
+	p2p_test_build_join_request(7, frame);
+
+	zassert_equal(sizeof(frame), 41, "the JoinRequest is 41 B on the air since #417");
+	zassert_mem_equal(frame, expected, sizeof(expected),
+			  "JoinRequest bytes differ from the "
+			  "shared KAT fixture");
+}
+
+ZTEST(p2p_logic, test_session_key_matches_the_kat_fixture)
+{
+	static const uint8_t expected[P2P_KEY_LEN] = {0x51, 0x28, 0x94, 0xff, 0xc3, 0x9f,
+						      0xd4, 0x45, 0x9d, 0x4f, 0x65, 0x55,
+						      0x3c, 0x87, 0x0e, 0xed};
+	uint8_t key[P2P_KEY_LEN];
+
+	kat_provision();
+	p2p_test_derive_session_key(7, 0x22222222, key);
+
+	zassert_mem_equal(key, expected, sizeof(expected),
+			  "session_key differs from the shared KAT fixture -- the join would "
+			  "still succeed and every data frame after it would fail to decrypt");
+
+	/* And it really depends on the DevEUI: one flipped bit must move it.
+	 * Without this the test would pass even if the memcpy were dropped. */
+	uint8_t other[P2P_KEY_LEN];
+
+	g_app_config.lrw_deveui[7] ^= 0x01;
+	p2p_test_derive_session_key(7, 0x22222222, other);
+	zassert_true(memcmp(key, other, sizeof(key)) != 0,
+		     "the dev_eui must be an input to the KDF");
 }
 
 ZTEST_SUITE(p2p_logic, NULL, NULL, NULL, NULL, NULL);

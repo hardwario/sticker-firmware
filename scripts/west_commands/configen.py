@@ -840,6 +840,7 @@ def guard_no_renumber_commands(model, proto_path):
 # "all transports" set; a command whose list is a proper subset gets a guard.
 _TRANSPORT_ENUM = {
     "lrw": "APP_CMD_TRANSPORT_LRW",
+    "p2p": "APP_CMD_TRANSPORT_P2P",
     "nfc": "APP_CMD_TRANSPORT_NFC",
     "shell": "APP_CMD_TRANSPORT_SHELL_DEBUG",
     "vendor": "APP_CMD_TRANSPORT_VENDOR",

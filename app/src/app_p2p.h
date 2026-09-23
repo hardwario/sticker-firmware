@@ -27,6 +27,36 @@ extern "C" {
 #define P2P_MAX_BODY  (P2P_LORA_MTU - P2P_HDR_LEN - P2P_TAG_LEN) /* 240 */
 #define P2P_FRAME_MAX (P2P_HDR_LEN + P2P_MAX_BODY + P2P_TAG_LEN)
 
+/* Join frame geometry (§5.3), shared with tests/p2p_logic so the time-on-air
+ * and duty-budget rows there stop hard-coding 37/42.
+ *
+ * The join frames carry a FULL 16 B plain AES-CMAC tag, not the data plane's
+ * truncated 4 B CCM tag -- they have no ciphertext and no nonce at all (see
+ * P2P_JOIN_TAG_LABEL in app_p2p.c).
+ *
+ * JoinRequest body: product_type(1) | proto_version(1) | dev_eui(8, MSB-first)
+ * | fw_version(4). It was 10 B with a serial_number(4 BE) until #417 / GitLab
+ * #73 took the serial off the air. JoinAccept is unchanged. */
+#define P2P_JOIN_TAG_LEN         16
+#define P2P_JOIN_REQ_BODY_LEN    14
+#define P2P_JOIN_ACCEPT_BODY_LEN 15
+#define P2P_JOIN_REQ_LEN         (P2P_HDR_LEN + P2P_JOIN_REQ_BODY_LEN + P2P_JOIN_TAG_LEN)
+#define P2P_JOIN_ACCEPT_LEN      (P2P_HDR_LEN + P2P_JOIN_ACCEPT_BODY_LEN + P2P_JOIN_TAG_LEN)
+
+/* Join retry tuning (§5.2 / §5.3), shared with tests/p2p_logic.
+ *
+ * The window is a deadline, not a hint: the retry wait is capped against it
+ * (p2p_join_retry_delay_ms), because the duty-cycle wait it competes with can
+ * be as long as P2P_DUTY_WINDOW_MS. */
+#define P2P_JOIN_BOOT_WINDOW_MS  (120 * 1000)
+#define P2P_JOIN_RETRY_JITTER_MS 2000
+
+/* JoinRequests to send at the configured SF (sweep step 0) before moving on to
+ * the next SF; every other step gets one. The configured SF is the overwhelmingly
+ * likely answer, so it is worth a second shot at a lost frame before paying a
+ * whole pass, but a third would just delay finding a Hub that really has moved. */
+#define P2P_JOIN_SF_ATTEMPTS 2
+
 /* Duty-cycle ledger tuning (B2 / decision D1), shared with tests/p2p_logic. */
 #define P2P_DUTY_WINDOW_MS 3600000 /* the sliding window: one hour */
 #define P2P_DUTY_BUDGET_MS 36000   /* 1% of it -- the air-time allowance */
@@ -141,9 +171,11 @@ struct p2p_duty {
  * for JoinAccept, and on success persists net_id/dev_addr/session_key/
  * rx1_delay to NVS and switches the data plane on to session_key
  * (doc/p2p.md §5.3). app_p2p_is_ready() (and therefore the report
- * cadence) only goes true once paired -- a device stuck unpaired past its
- * boot join window (§5.2, 120 s) stays silent until the next boot or an NFC
- * `p2p_join` trigger (not yet wired). The confirmed-uplink Ack/retry (§6),
+ * cadence) only goes true once paired -- a device still unpaired when its
+ * boot join window closes (§5.2, 120 s) does not stop: it hands the
+ * episode to the slow backoff curve (§7) and keeps sweeping the spreading
+ * factors, converging to about one pass an hour, so a node powered on
+ * before its Hub joins on its own once the Hub appears. The confirmed-uplink Ack/retry (§6),
  * self-healing re-join (§7) and the Detach/RejoinRequest link-control
  * downlinks (§5.4) are all implemented. The optional listen mode
  * (CONFIG_SHELL) puts the radio in continuous RX for the two-STICKER bench
@@ -181,7 +213,7 @@ enum app_p2p_frame_type {
  * status` can report it via struct app_p2p_info below. */
 enum p2p_link_state {
 	P2P_LINK_UNPAIRED, /* no valid pairing in NVS; not currently joining */
-	P2P_LINK_JOINING,  /* boot-window join attempts in progress */
+	P2P_LINK_JOINING,  /* join attempts in progress: boot window, then slow backoff */
 	P2P_LINK_PAIRED,   /* net_id/dev_addr/session_key valid, data plane live */
 };
 
@@ -253,6 +285,11 @@ struct app_p2p_info {
 	uint32_t net_id;   /* 0 pre-pairing */
 	uint16_t dev_addr; /* 0 pre-pairing */
 	uint8_t rx1_delay_s;
+	/* The spreading factor the radio is tuned to RIGHT NOW. It is not
+	 * necessarily p2p_spreading_factor: a join episode sweeps, and a join
+	 * that landed on a swept SF persists it. This is what tells a bench
+	 * whether a node found the network's SF or is still looking. */
+	uint8_t sf;
 	/* Session TX power: the value the central assigned in JoinAccept when
 	 * tx_power_assigned, otherwise the node's own p2p_tx_power config. */
 	bool tx_power_assigned;
@@ -333,6 +370,8 @@ int app_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, bool *
  * exposed with external linkage for tests/p2p_logic only. Not part of the
  * runtime API -- do not call from firmware. */
 uint32_t p2p_toa_ms(int sf, uint8_t payload_len);
+uint32_t rx1_preamble_catch_ms(int sf);
+uint32_t p2p_rx1_timeout_ms(int sf, uint8_t expected_frame_len);
 void build_nonce(uint8_t nonce[13], uint32_t counter, uint16_t dev_addr, uint8_t frame_type,
 		 uint8_t dir);
 int build_frame_keyed(uint32_t net_id, uint16_t dev_addr, const uint8_t session_key[16],
@@ -342,8 +381,31 @@ void p2p_duty_init(struct p2p_duty *d);
 void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 uint32_t p2p_rejoin_backoff_ms(uint8_t attempt);
+int p2p_join_sweep_sf(int cfg_sf, uint8_t step);
+int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait_ms,
+				uint32_t backoff_ms, uint32_t jitter_ms);
+int64_t p2p_join_slow_jitter_ms(int64_t wait_ms, int64_t duty_wait_ms, uint32_t base,
+				uint32_t rand32);
 bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
 void p2p_parse_join_accept_reserved(const uint8_t reserved[4], struct p2p_radio_assign *out);
+size_t p2p_history_frame_cap(void);
+int p2p_join_adopt_sf(uint8_t joined_sf);
+void p2p_test_replay_setup(void);
+void p2p_test_join_setup(int cfg_sf);
+void p2p_test_join_step(void);
+void p2p_test_join_arm_retry(int64_t ms);
+void p2p_test_set_paired(void);
+void p2p_test_join_restart(void);
+int64_t p2p_test_join_pending_ms(void);
+void p2p_test_get_join(uint8_t *sf, uint8_t *step, uint8_t *attempts, bool *slow, uint8_t *rejoin,
+		       enum p2p_link_state *state);
+void p2p_test_set_join_started_at(int64_t at_ms);
+struct p2p_duty *p2p_test_get_duty(void);
+void p2p_test_set_replay_active(bool active);
+void p2p_test_get_replay(bool *active, uint32_t *seq, size_t *cursor, uint32_t *idx);
+void p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN]);
+void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
+				 uint8_t out[P2P_KEY_LEN]);
 void p2p_test_set_fcnt(uint32_t next, uint32_t reserved);
 uint32_t p2p_test_get_fcnt(void);
 int p2p_test_fcnt_next(uint32_t *counter_out);

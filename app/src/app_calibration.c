@@ -153,7 +153,7 @@ void app_calibration_check_trigger(void)
 	 * operator would have had to release both magnets first, then re-present
 	 * them, to clear magnet_expired before this branch was ever reachable). */
 	if (left && right) {
-		LOG_WRN("Both magnets detected — rebooting into calibration mode");
+		LOG_WRN_REBOOTING("both magnets detected -- entering calibration mode");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 
@@ -427,6 +427,7 @@ void app_calibration_run(void)
 
 	for (;;) {
 		if (k_uptime_get() >= deadline) {
+			LOG_WRN_REBOOTING("calibration window elapsed");
 			sys_reboot(SYS_REBOOT_COLD);
 		}
 

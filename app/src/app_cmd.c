@@ -909,10 +909,10 @@ const uint8_t *app_cmd_take_pending_vendor_secret_key(void)
 	return m_pending_vendor_secret_key;
 }
 
-/* force_send / req_history are LRW-only (transports: [lrw] in the YAML); the
- * generated dispatch enforces that before calling the handler, so the handlers
- * below assume the LoRaWAN transport. (clock_sync also runs over NFC — see its
- * handler.) */
+/* force_send is LRW-only (transports: [lrw] in the YAML); the generated dispatch
+ * enforces that before calling the handler, so it assumes the LoRaWAN transport.
+ * req_history is NOT — B8 widened it to [lrw, p2p] and its handler routes on the
+ * transport it was given. (clock_sync also runs over NFC — see its handler.) */
 static void app_cmd_handle_force_send(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
@@ -1253,8 +1253,7 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_reset_counters(tp, cmd, resp, action);
 		break;
 	case Command_req_history_tag:
-		/* transports: [lrw, p2p] — device-driven replay over either data
-		 * plane (B8); reject NFC/vendor/shell. */
+		/* transports: [lrw, p2p] — reject on any other transport */
 		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_P2P) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;

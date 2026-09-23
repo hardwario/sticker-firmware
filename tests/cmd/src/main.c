@@ -46,6 +46,10 @@ static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 }
 
 /* Run app_cmd_handle on a hex command over `transport`; decode the Response. */
+extern int g_p2p_start_history_replay_calls;
+extern uint32_t g_p2p_start_history_replay_seq;
+extern bool test_p2p_start_history_replay_ret;
+
 static enum app_cmd_action handle_via(enum app_cmd_transport transport, const char *hex,
 				      Response *resp)
 {
@@ -64,6 +68,31 @@ static enum app_cmd_action handle_via(enum app_cmd_transport transport, const ch
 	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
 	zassert_true(pb_decode(&is, Response_fields, resp), "Response decode failed");
 	return action;
+}
+
+/* Like handle_via, but for commands that legitimately answer with NOTHING: a
+ * started history replay emits no Response body, because the first HistoryFrame
+ * uplink IS the reply (B8). Returns the emitted length so a test can assert on
+ * the silence itself. */
+static size_t handle_via_maybe_silent(enum app_cmd_transport transport, const char *hex,
+				      Response *resp)
+{
+	uint8_t in[64], out[128];
+	size_t in_len = unhex(hex, in, sizeof(in));
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	int ret = app_cmd_handle(transport, in, in_len, out, sizeof(out), &out_len, &action);
+	zassert_equal(ret, 0, "app_cmd_handle ret %d", ret);
+
+	*resp = (Response)Response_init_zero;
+	if (out_len == 0) {
+		return 0;
+	}
+	zassert_equal(out[0], APP_PROTO_VERSION, "bad version 0x%02x", out[0]);
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, resp), "Response decode failed");
+	return out_len;
 }
 
 /* Most tests exercise the LoRaWAN transport. */
@@ -1068,6 +1097,65 @@ ZTEST(cmd, test_lrw_only_commands_rejected_over_nfc)
 	handle_via(APP_CMD_TRANSPORT_NFC, "08075a00", &r);
 	zassert_equal(r.which_body, Response_error_tag, "req_history/NFC should error (which=%d)",
 		      r.which_body);
+}
+
+/* B8: req_history is answered over P2P by streaming the window back as N
+ * HistoryFrame uplinks, so the transport allow-list is [lrw, p2p] and the
+ * handler routes on `tp`. Until CONFIG_RADIO_P2P was set for this suite the
+ * whole `#if defined(CONFIG_RADIO_P2P)` arm was not even compiled natively. */
+ZTEST(cmd, test_req_history_over_p2p_starts_a_replay)
+{
+	Response r;
+
+	/* A stream was started: the first HistoryFrame IS the reply, so the
+	 * response body must stay unset (which_body == 0) rather than add a
+	 * redundant Ack the host would have to ignore. */
+	reset_cfg();
+	g_p2p_start_history_replay_calls = 0;
+	test_p2p_start_history_replay_ret = true;
+	size_t emitted = handle_via_maybe_silent(APP_CMD_TRANSPORT_P2P, "08075a00", &r);
+
+	zassert_equal(g_p2p_start_history_replay_calls, 1,
+		      "the P2P arm should have started a replay (calls=%d)",
+		      g_p2p_start_history_replay_calls);
+	zassert_equal(g_p2p_start_history_replay_seq, 7u, "the stream must answer the request seq");
+	zassert_equal(emitted, 0,
+		      "a started replay must emit nothing -- the first HistoryFrame is the reply, "
+		      "and an extra Ack would cost a second uplink (emitted %zu B)",
+		      emitted);
+	zassert_equal(r.which_body, 0, "no response body (which=%d)", r.which_body);
+
+	/* Nothing in the window: the host still needs a definitive answer. */
+	reset_cfg();
+	g_p2p_start_history_replay_calls = 0;
+	test_p2p_start_history_replay_ret = false;
+	handle_via(APP_CMD_TRANSPORT_P2P, "08075a00", &r);
+	zassert_equal(g_p2p_start_history_replay_calls, 1, "the handler should still have tried");
+	zassert_equal(r.which_body, Response_error_tag, "expected an Error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_HISTORY_UNAVAILABLE, "code %d",
+		      r.body.error.code);
+	zassert_str_equal(r.body.error.detail, "no records", "message `%s`", r.body.error.detail);
+}
+
+/* The allow-list widened to [lrw, p2p] — not to everything. NFC must still be
+ * refused by the generated dispatch, before the handler is reached. */
+ZTEST(cmd, test_req_history_still_rejected_over_nfc)
+{
+	Response r;
+
+	reset_cfg();
+	g_p2p_start_history_replay_calls = 0;
+	test_p2p_start_history_replay_ret = true;
+	handle_via(APP_CMD_TRANSPORT_NFC, "08075a00", &r);
+	zassert_equal(g_p2p_start_history_replay_calls, 0,
+		      "the dispatch guard must refuse before the handler runs");
+	zassert_equal(r.which_body, Response_error_tag, "expected an Error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+	zassert_str_equal(r.body.error.detail, "transport not allowed", "message `%s`",
+			  r.body.error.detail);
 }
 
 /* #107: clock_sync carrying unix_time sets the RTC directly (NFC time bootstrap).

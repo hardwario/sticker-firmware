@@ -65,7 +65,7 @@ prefix `P2E-` (P2P end-to-end).
 | P2E-05 | **B4** happy path | `node-send --radio p2p --hex <cmd>` on the central (e.g. a GetInfo Command) | after the announcing Ack shows `[pending]`, the NEXT uplink's window yields a `0x56`; log `Command received (counter N, k B)`; a `0x55` RESPONSE is queued and sent | announce (pending flag) → on the next new uplink deliver `0x56` into RX1 → receive the `0x55`, pop the queue head → phase Idle |
 | P2E-06 | **B4** chaining | queue two downlinks | two consecutive command→response cycles; pending stays set until the queue drains | queue depth 2 → 1 → 0 across the cycles |
 | P2E-07 | **B4** gating | `node-send` a `set_param` writing `region`/`radio_mode`/a key | RESPONSE carries `NOT_WRITABLE` (Error) — the field is not writable over P2P | central just relays; the refusal is the DUT's |
-| P2E-08 | **B4** command gating | `node-send` an LRW-only command (e.g. `req_history`) | RESPONSE `NOT_READY`/"transport not allowed" | — |
+| P2E-08 | **B4** command gating | `node-send` an LRW-only command — use **`force_send`** (`transports: [lrw]` in `app_config.yml`, handler still `#if defined(CONFIG_LORAWAN)`). **Not `req_history`:** B8 made it legal over P2P, so it now starts a replay instead of refusing — that is P2E-23 | RESPONSE `NOT_READY`/"transport not allowed" | — |
 | P2E-09 | **B2** duty | queue an alarm right behind a telemetry frame | the alarm goes out promptly, not after a ~227 s block; sustained sends throttle to ~1 % | frames arrive at the expected cadence | *(latency half still valid; the ~1 % half is **superseded by P2E-16**, which measures the sliding-hour ledger that replaced the token bucket)* |
 | P2E-10 | **B3** self-heal | `ats radio ack_drop 32` on a **freshly booted** DUT, armed within seconds of boot (each failed cycle burns 4 Acks — the uplink and its 3 retries — so 32 forces exactly 8 fully-failed cycles; 24 stops at 6 and the next real Ack resets the streak. The storm needs ~21 s of air, so the duty ledger must be near-empty or it blocks the run partway) | after 8 give-ups → `self-healing re-join (§7)`, JoinRequest with exponential backoff | central sees a re-join of a known device outside the pairing window |
 | P2E-11 | persistence | reboot the DUT | resumes PAIRED from NVS (no JoinRequest), counter resumes at the reserved high-water | next uplink decrypts under the same session key, counter ≥ reservation |
@@ -101,6 +101,21 @@ becomes the binding constraint rather than the air-time budget, so at
 limit, and the row's stated criterion will not hold. Run it at 120 s (30
 frames/hour). doc/p2p.md §6 records the limitation.
 
+### 3.2 Added for B8 — device-driven history replay over P2P
+
+`req_history` is answered over P2P by streaming the window back as N
+`HistoryFrame` uplinks that all share the request's `seq`, rather than by a
+single Ack. Prerequisite for every row: `config history-enable true` +
+`settings save`, then enough dwell for records to accumulate — the boot banner
+`history: enabled=%d, %u sensors, sample=%uB, capacity=%u, stored=%u` reports
+what is there.
+
+| ID | Item | Action | STICKER observable | Proximos observable |
+|---|---|---|---|---|
+| P2E-23 | **B8** replay happy path | `node-send --radio p2p --serial <s> cmd history-replay --from 0 --to 4294967295` | `P2P history replay start: %u frames (window %u..%u, seq %u)`, then N × `P2P history frame %u/%u sent (%u rec, %zu B)` each followed by its `Ack (counter %u) …`, then `P2P history replay complete: %u frames`. An empty window instead gives `P2P history replay: no records in window` and a `HISTORY_UNAVAILABLE`/"no records" Error | one `Area::History` publish per frame; the `ReqHistory` queue head is retired **once**, at the end — not on the first frame — and **no** `re-announcing downlink seq=…` appears mid-stream. An empty window publishes the `{frame_index: 0, frame_count: 0, records: []}` sentinel |
+| P2E-24 | **B8** re-delivered request | while a replay is streaming, re-queue the same `req_history` | the node stays on its existing stream: **no** second `P2P history replay start`, and the frame numbering does not restart | the re-delivered command is answered from the stream already in flight |
+| P2E-25 | **B8** telemetry does not interleave | run a replay with `interval-report` short enough that a telemetry frame would otherwise fall inside it | **no** `TX type 2` line between two `P2P history frame %u/%u sent` lines; telemetry resumes after `P2P history replay complete` | the frame sequence arrives unbroken by a telemetry uplink |
+
 ## 4. Pass criteria
 
 - P2E-01..06 all pass = the S1/S2/S3 ↔ B1/B4/B5 wire contract is confirmed end-to-end
@@ -109,6 +124,8 @@ frames/hour). doc/p2p.md §6 records the limitation.
   air — a remote command cannot reconfigure the radio or reach an off-transport command.
 - P2E-09/10/11 = the device-side hardening (B2 duty, B3 self-heal, counter persistence) holds
   against a live central.
+- P2E-23/24/25 = B8's history replay streams a whole window over P2P without losing its place
+  to a re-delivered request or to the telemetry cadence.
 
 ## 5. Known gaps / not covered here
 

@@ -31,7 +31,7 @@
  * join-assigned): AES-CCM (AES-128, 4 B tag) under session_key, 11 B header
  * as AAD, nonce = counter(4 BE) | dev_addr(2 BE) | frame_type(1) |
  * direction(1) | 0*5. `p2p session <dev_nonce> <central_nonce>` derives
- * session_key from app_key + those nonces + serial_number (see
+ * session_key from app_key + those nonces + dev_eui (see
  * derive_session_key() below, identical to app_p2p.c's) -- read
  * dev_nonce/central_nonce off the join exchange this sim observed or
  * crafted; this sim does not track a join state machine itself.
@@ -74,7 +74,10 @@ LOG_MODULE_REGISTER(p2p_gw_sim, LOG_LEVEL_INF);
 #define JOIN_TAG_LABEL       "HIO-P2P-JOIN" /* 12 B -- JoinRequest tag */
 #define JOINACCEPT_TAG_LABEL "HIO-P2P-ACC"  /* 11 B -- JoinAccept tag */
 #define SESSION_KEY_LABEL    "HIO-P2P-SES"
-#define JOIN_ACCEPT_BODY_LEN 15 /* largest of the two join body sizes */
+#define JOIN_REQ_BODY_LEN    14 /* product(1) proto(1) dev_eui(8) fw(4), #417 */
+#define JOIN_ACCEPT_BODY_LEN 15
+#define JOIN_BODY_MAX        MAX(JOIN_REQ_BODY_LEN, JOIN_ACCEPT_BODY_LEN)
+#define DEV_EUI_LEN          8
 
 #define FRAME_TYPE_JOIN_REQUEST 0xF0
 #define FRAME_TYPE_JOIN_ACCEPT  0xF1
@@ -89,9 +92,11 @@ static uint8_t m_sf = SF_10;
 static int8_t m_tx_power = 14;
 
 /* DUT identity, set by `p2p key` -- its LoRaWAN OTAA AppKey, the sole root
- * secret for the whole P2P transport (#118 phase 2 revision). */
+ * secret for the whole P2P transport (#118 phase 2 revision), and its DevEUI,
+ * which #417 / GitLab #73 made the join identity and a KDF input. Both must
+ * match the DUT exactly or the derived session_key silently differs. */
 static uint8_t m_app_key[KEY_LEN];
-static uint32_t m_serial_number;
+static uint8_t m_dev_eui[DEV_EUI_LEN];
 static bool m_key_set;
 
 /* Data-plane key, set by `p2p session` once dev_nonce/central_nonce from the
@@ -134,7 +139,11 @@ static bool tag_eq(const uint8_t a[JOIN_TAG_LEN], const uint8_t b[JOIN_TAG_LEN])
 static void cmac_tag(const char *label, const uint8_t *hdr_body, size_t hdr_body_len,
 		     uint8_t out[KEY_LEN])
 {
-	uint8_t buf[16 + HDR_LEN + JOIN_ACCEPT_BODY_LEN]; /* label max 12 B */
+	/* label max 12 B, body the larger of the two join bodies. JOIN_BODY_MAX
+	 * is 15 today (JoinAccept), but #417 grew the JoinRequest body from 10 to
+	 * 14 -- close enough that the max is worth spelling out rather than
+	 * assuming which one wins. */
+	uint8_t buf[16 + HDR_LEN + JOIN_BODY_MAX];
 	size_t label_len = strlen(label);
 
 	memcpy(buf, label, label_len);
@@ -143,8 +152,9 @@ static void cmac_tag(const char *label, const uint8_t *hdr_body, size_t hdr_body
 }
 
 /* session_key = AES128-CMAC(app_key, "HIO-P2P-SES" || 0x01 || dev_nonce(4 BE)
- * || central_nonce(4 BE) || serial_number(4 BE) || zero-pad to 32 B) --
- * identical derivation to app_p2p.c's derive_session_key(). */
+ * || central_nonce(4 BE) || dev_eui(8, MSB-first) || zero-pad to 32 B) --
+ * identical derivation to app_p2p.c's derive_session_key(). The last field was
+ * serial_number(4 BE) until #417 / GitLab #73. */
 static void derive_session_key(uint32_t dev_nonce, uint32_t central_nonce, uint8_t out[KEY_LEN])
 {
 	uint8_t block[32] = {0};
@@ -154,7 +164,7 @@ static void derive_session_key(uint32_t dev_nonce, uint32_t central_nonce, uint8
 	block[label_len] = 0x01;
 	sys_put_be32(dev_nonce, &block[label_len + 1]);
 	sys_put_be32(central_nonce, &block[label_len + 5]);
-	sys_put_be32(m_serial_number, &block[label_len + 9]);
+	memcpy(&block[label_len + 9], m_dev_eui, sizeof(m_dev_eui));
 	(void)app_ccm_cmac(m_app_key, block, sizeof(block), out);
 }
 
@@ -343,11 +353,22 @@ static int cmd_p2p_key(const struct shell *sh, size_t argc, char **argv)
 
 		m_app_key[i] = (uint8_t)strtoul(b, NULL, 16);
 	}
-	m_serial_number = (uint32_t)strtoul(argv[2], NULL, 0);
+	if (strlen(argv[2]) != 2 * DEV_EUI_LEN) {
+		shell_error(sh, "dev_eui must be %d hex digits (MSB-first, as printed)",
+			    2 * DEV_EUI_LEN);
+		return -EINVAL;
+	}
+	for (int i = 0; i < DEV_EUI_LEN; i++) {
+		char b[3] = {argv[2][2 * i], argv[2][2 * i + 1], 0};
+
+		m_dev_eui[i] = (uint8_t)strtoul(b, NULL, 16);
+	}
 	m_key_set = true;
 	m_session_set = false; /* app_key changed; any cached session_key is now stale */
 
-	shell_print(sh, "key set: serial_number=%u", m_serial_number);
+	shell_print(sh, "key set: dev_eui=%02x%02x%02x%02x%02x%02x%02x%02x", m_dev_eui[0],
+		    m_dev_eui[1], m_dev_eui[2], m_dev_eui[3], m_dev_eui[4], m_dev_eui[5],
+		    m_dev_eui[6], m_dev_eui[7]);
 	return 0;
 }
 
@@ -516,9 +537,11 @@ static int cmd_p2p_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "radio:   %u Hz, SF%d, %d dBm (BW125/CR4-5 fixed)", m_freq, m_sf,
 		    m_tx_power);
 	if (m_key_set) {
-		shell_print(sh, "key:     set, serial_number=%u", m_serial_number);
+		shell_print(sh, "key:     set, dev_eui=%02x%02x%02x%02x%02x%02x%02x%02x",
+			    m_dev_eui[0], m_dev_eui[1], m_dev_eui[2], m_dev_eui[3], m_dev_eui[4],
+			    m_dev_eui[5], m_dev_eui[6], m_dev_eui[7]);
 	} else {
-		shell_print(sh, "key:     NOT SET (`p2p key <app_key 32hex> <serial_number>`)");
+		shell_print(sh, "key:     NOT SET (`p2p key <app_key 32hex> <dev_eui 16hex>`)");
 	}
 	if (m_session_set) {
 		shell_print(sh, "session: set");
@@ -535,8 +558,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      "Set radio params. Usage: radio <freq_hz> <sf 6-12> <tx_power_dbm>",
 		      cmd_p2p_radio, 4, 0),
 	SHELL_CMD_ARG(key, NULL,
-		      "Set the DUT identity (its LoRaWAN OTAA AppKey) to authenticate the "
-		      "join handshake with. Usage: key <app_key 32hex> <serial_number>",
+		      "Set the DUT identity (its LoRaWAN OTAA AppKey and DevEUI) to "
+		      "authenticate the join handshake and derive the session key with. "
+		      "Usage: key <app_key 32hex> <dev_eui 16hex, MSB-first>",
 		      cmd_p2p_key, 3, 0),
 	SHELL_CMD_ARG(session, NULL,
 		      "Derive session_key for post-join data-plane frames from "
