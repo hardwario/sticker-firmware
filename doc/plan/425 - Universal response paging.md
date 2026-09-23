@@ -154,8 +154,9 @@ storage between calls. The design must never need cross-uplink memory in the dec
   (proximos-v2, Rust decoder behind ChirpStack), a TTN integration, a backend — merges the
   decoded pages by (DevEUI, fPort, `seq`), for `AlarmReport` by `base_time`; complete when
   `page_count` distinct indices arrived. Nothing breaks for a consumer that ignores `pages`:
-  it just sees several partial answers. Issue for proximos-v2 to be filed (decoder-parity
-  tracking already exists: proximos-v2#90).
+  it just sees several partial answers. Hub side tracked in proximos-v2#96 (LoRaWAN merge
+  by `seq` / `base_time` with timeout + re-request of a missing `page`, P2P several 0x55
+  per `seq`, Rust decoder parity incl. error code 9; decoder parity: proximos-v2#90).
 - **Manager-App (NFC):** GetConfig/GetParam page count now comes from the envelope
   (`Response.page_count`, absent = 1) instead of `ConfigDump.page_count`; W1Scan / Info never
   page over NFC in practice. Coordinate with apps/manager before this lands.
