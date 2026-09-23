@@ -177,9 +177,10 @@ fPort-2 `Telemetry` frame and **no** fPort-85 response.
 ### G6 — Reset keeps identity (`settings device-reset` / DeviceReset)
 
 **Goal:** `settings device-reset` (renamed from `settings reset`, #299) and the DeviceReset command
-(same wire id as the old, single FactoryReset) restore application config + alarm rules to defaults
-but **keep** the device identity (`serial-number`, `secret-key`) and LoRaWAN provisioning
-(`lrw-deveui`, keys, region, …), so the unit stays provisioned and on the network (issue #108).
+(same wire id as the old, single FactoryReset; nfc/shell-only) restore application config + alarm
+rules to defaults but **keep** the device identity (`serial-number`, `secret-key`, `nonce-counter`,
+claim token + window state, `vendor-token`) and LoRaWAN provisioning (`lrw-deveui`, keys, region,
+…), so the unit stays provisioned and on the network (issue #108).
 **Observable:** changed app/alarm values back to defaults; DevEUI/keys/serial unchanged; device
 stays joined / rejoins with the same credentials.
 
@@ -188,31 +189,38 @@ stays joined / rejoins with the same credentials.
 > `config serial-number`, `config interval-report`) and change `interval-report` to a non-default.
 > Then run `settings device-reset` over the RTT shell. After reboot confirm: `interval-report` is
 > back to default, but `config lrw-deveui` / `config serial-number` are **unchanged**, and the device
-> rejoins with the same DevEUI. Repeat using a DeviceReset downlink on fPort 85 and confirm the
-> `Response.Ack` precedes the reboot and identity again survives.
+> rejoins with the same DevEUI. Then send a DeviceReset as a fPort-85 downlink (`08094200`) and
+> confirm it is **refused** with `Error{NOT_READY}` and nothing is reset (it is nfc/shell-only like
+> `factory_reset`; a phone runs it over the mailbox, N9).
 
 - [ ] Pass
 
 ### G6a — Reset ladder's narrower tiers (`factory_reset` / `vendor_reset` / `set_secret_key`, #299)
 
-**Goal:** `factory_reset` (new, narrower than device_reset above) keeps identity only and drops the
-LoRaWAN session/keys — the device must re-join after it. `vendor_reset` keeps only
+**Goal:** `factory_reset` (new, narrower than device_reset above) keeps the identity (serial,
+`secret-key`, `nonce-counter`, claim token, `vendor-token`) plus DevEUI / JoinEUI, and resets the
+LoRaWAN keys, session and radio settings to defaults — the unit must be re-keyed before it can join
+again. `vendor_reset` keeps only
 `serial-number` + `vendor-token` (goes through the live settings API, not a raw storage erase — only
 `history` is raw-erased), and is refused unless the caller supplies a replacement `secret-key` in the
 same call, or if `vendor-reset-allow` is false. `set_secret_key` rotates `secret-key` over the
 already-encrypted nfc/shell channel, then reboots so the new key is live (#322); an all-zero
 replacement is refused.
-**Observable:** `factory_reset` — identity survives, DevEUI/keys/region reset to defaults, device
-re-joins. `vendor_reset` without a key, or with `vendor-reset-allow false`, is refused (no reboot,
+**Observable:** `factory_reset` — identity and DevEUI / JoinEUI survive. AppKey / NwkKey, the ABP
+keys, region / sub-band / network / ADR / datarate and the radio mode go back to defaults, and the
+LoRaWAN NVM is wiped (X8). Once re-keyed, the device joins afresh. `vendor_reset` without a key, or with `vendor-reset-allow false`, is refused (no reboot,
 nothing erased). `vendor_reset` with a key — only serial+vendor-token survive, new secret_key is
 live after reboot. `set_secret_key` — the device saves and cold-reboots, and the new key is in
 effect once it comes back (old key no longer decrypts); an all-zero key is rejected with
 `BAD_REQUEST` and nothing is saved or rebooted (#322).
 
 **Prompt for Claude:**
-> `settings factory-reset` over the RTT shell: confirm `config serial-number`/`config secret-key`
-> survive but `config lrw-deveui` and the LoRaWAN keys reset to all-zero/defaults, and the device
-> re-joins. Then `config vendor-reset-allow false` + `settings save`, and confirm
+> `settings factory-reset` over the RTT shell. Confirm:
+> - `config serial-number` / `secret-key` / `lrw-deveui` / `lrw-joineui` survive;
+> - `config lrw-appkey` and the other LoRaWAN keys and settings are back to defaults.
+>
+> Re-provision the keys (`config lrw-appkey …` + `settings save`, or NFC `set_param`, N1) and
+> confirm the device joins afresh. Then `config vendor-reset-allow false` + `settings save`, and confirm
 > `settings vendor-reset <32-hex-key>` is refused (shell reports failure, no reboot). Set
 > `config vendor-reset-allow true` + `settings save`, then `settings vendor-reset` with **no**
 > argument — confirm it's rejected (missing key) — then with a key: confirm after reboot
@@ -221,36 +229,57 @@ effect once it comes back (old key no longer decrypts); an all-zero key is rejec
 
 - [ ] Pass
 
-### G6a-NFC — vendor_reset over the `hio.stck:vnd` channel (#299, #316)
+### G6a-NFC — vendor_reset over the vendor mailbox channel `0x02` (#299, #316, v1.5.0 #414)
 
-**Goal:** the same `vendor_reset` operation as G6a above, but driven over NFC through the
-vendor-token-authenticated record (`hio.stck:vnd`) instead of the shell. Since #316 this is a normal
-protobuf `Command` (`vendor_reset`, `transports: [vendor]`) dispatched on the vendor transport — the
-same generic Command/Response path as `hio.stck:cmd`, only decrypted/encrypted with `vendor_token`,
-and never reachable over `hio.stck:cmd` or LoRaWAN.
-**Observable:** the tag holds a plaintext info record, then a `hio.stck:vnd` write, then a
-`hio.stck:rsp` reply (`Ack` on success, `Error{NOT_READY}` if `vendor-reset-allow` is false,
-`Error{BAD_REQUEST}` for a missing key) — the actual reset only fires after the phone acks the reply
-(same ack-before-reboot handshake as every other reset), never immediately from the tap. With
-`vendor-reset-allow=false`, first send `set_param{ application{ vendor_reset_allow=true } }` over
-`hio.stck:vnd` (always accepted — the field is `writable: [vendor]` and its write is not gated on the
-current value), then re-send `vendor_reset`.
+**Rewritten for v1.5.0 (#414).** The vendor channel is now the mailbox channel `0x02`: the same
+AES-CCM envelope as the owner channel `0x01`, sealed with `vendor_token` instead of `secret_key`,
+with no response cache. The `hio.stck:vnd` record and the `hio.stck:ack` handshake are gone.
 
-**Needs HIL re-verification for #316** (the prior 2026-07-13 result was for the removed `hio.stck:rst`
-magic-byte channel, which no longer exists). The frame is now a protobuf `Command{ vendor_reset{ key } }`
-sealed under `vendor_token` — see the `nfc_crypto` `test_vendor_channel_vector` golden vector
-(`VND_REQ_PLAIN`/`VND_REQ_WIRE`) for the exact construction — injected into ST25DV memory via the
-`nfc write <offset> <hex>` shell command (`ats cmd nfc <hex>` would NOT work — it injects a *plaintext*
-`Command` straight into `app_cmd_handle` over the NFC transport, bypassing the tag/encryption and the
-vendor transport). Confirm: (1) a valid request is recognized ("vendor command record"), decrypted,
-dispatched on the vendor transport, accepted, and the reply written — the device does **not** reset
-until a `hio.stck:ack` record is written back, at which point the deferred action fires and
-`serial_number`/`vendor_token` survive with the new `secret_key` live; (2) with `vendor-reset-allow=false`,
-rejected (`Error{NOT_READY}`), and the `set_param(vendor_reset_allow=true)` recovery step above then
-unblocks it; (3) a stale/reused nonce is rejected by `decrypt()` same as the `cmd` channel. Long
-`nfc write` hex strings silently truncate — split into multiple writes at sequential offsets.
+**Goal:** the same `vendor_reset` operation as G6a above, driven over NFC through the vendor
+channel instead of the shell. `vendor_reset` (id 26, `SetSecretKey{key}` body) is
+`transports: [vendor]`. On `0x01` or as a LoRaWAN downlink it is refused with
+`Error{NOT_READY "transport not allowed"}`.
+**Observable:**
+- A valid request → `ack`. Then the session ends (deferred action), green + yellow 2 s, and the
+  reset + reboot run. Afterwards only `serial_number`, `vendor_token` and `nonce_counter` survive,
+  and the supplied `secret_key` is live (the owner channel works with the new key). The claim
+  window is set back to `active`, but the claim token is wiped with everything else, so
+  `get_claim_info` → `NOT_READY "no claim token"` until it is provisioned again. The LoRaWAN
+  identity is wiped too (X8).
+- `vendor-reset-allow = false` → `Error{NOT_READY "vendor_reset disabled"}`, no reboot. Recovery:
+  `set_param{application{vendor_reset_allow = true}}` over `0x02`. It is always accepted there: the
+  field is `writable: [vendor]` and its write is not gated on the current value. Then re-send
+  `vendor_reset`.
+- A missing key → `Error{BAD_REQUEST "missing key"}`; an all-zero key → `Error{BAD_REQUEST "zero
+  key"}` (#385). No reboot in either case.
+- A stale or reused counter on `0x02` gets no reply (no cache on the vendor channel, X12).
 
-- [x] Pass (HIL-verified via hand-crafted frame, 2026-07-13)
+**Prompt for Claude (phone bench as in N6; seal with `vendor_token` — the vector construction is in
+the Manager-App guide §4.4 and `tests/nfc_crypto` `test_vendor_channel_vector`):**
+> 1. With `vendor-reset-allow = false`, send `[0x02] vendor_reset{key = <new 16 B>}` →
+>    `NOT_READY "vendor_reset disabled"`, no reboot.
+> 2. Send `set_param{application{vendor_reset_allow = true}}` over `0x02` → `ack`.
+> 3. Send `vendor_reset` with no key → `BAD_REQUEST "missing key"`; with an all-zero key →
+>    `BAD_REQUEST "zero key"`.
+> 4. Send it with a valid key → `ack`, green + yellow 2 s, then the reboot. After the reboot (phone
+>    kept on the tag), confirm:
+>    - `get_basic_info` reports the same serial and a `nonce_counter` that is not reset;
+>    - the owner channel answers under the new `secret_key` (the old one gets no reply);
+>    - `ats claim status` → `active`, while `get_claim_info` → `NOT_READY "no claim token"`;
+>    - `config serial-number` / `vendor-token` are unchanged and everything else is back to
+>      defaults.
+> 5. Send `vendor_reset` over `0x01` → `NOT_READY "transport not allowed"`.
+>
+> Restore the bench identity (secret key, claim token, LoRaWAN keys via N1) afterwards. Report results.
+
+- [ ] Pass — v1.5.0 mailbox run pending
+
+> **Earlier runs (for reference):** 2026-07-13, HIL with a hand-crafted frame on the removed
+> `hio.stck:rst` magic-byte channel. After #316 the `hio.stck:vnd` protobuf channel was verified
+> with hand-crafted AES-CCM frames through X2 / X12 (2026-08-17). The command logic is covered by
+> `tests/cmd` (`test_vendor_reset_command`, `test_vendor_reset_rejects_zero_key`,
+> `test_vendor_reset_gated_by_allow`, `test_vendor_reset_rejected_off_vendor`,
+> `test_vendor_reset_allow_write_gate`).
 
 ### G6b — Full erase un-provisions (`settings erase`)
 
@@ -1667,46 +1696,112 @@ rejected with `error` `BAD_REQUEST` "bad epoch".
 
 ## NFC
 
-### N1 — NFC config delivery: SAVE
+### N1 — NFC configuration over the mailbox: `set_param` + save (v1.5.0 #414)
 
-**Goal:** A SAVE NFC tag applies and persists config.
-**Observable:** RTT `NFC action: SAVE`; ~10 yellow blinks; config persisted.
+**Rewritten for v1.5.0 (#414).** The v1.4.0 NDEF config tag (`application/vnd.hardwario.sticker-config.v1`,
+"SAVE" action, ~10 yellow blinks) is gone: a phone configures the unit with encrypted `set_param`
+commands over the mailbox (N6), one tap for the whole batch.
 
-**Prompt for Claude:**
-> Tell me how to present a SAVE NFC config tag (NDEF MIME
-> `application/vnd.hardwario.sticker-config.v1`) to the device. On tap, confirm the RTT log shows
-> `NFC action: SAVE`, the yellow LED blinks ~10×, and the delivered config is persisted (read back
-> via `config`). Report what was applied.
+**Goal:** one tap applies and persists a configuration: one or more `set_param` batches, the last
+one with `save = true`.
+**Observable:**
+- Each `set_param` → `ack`. A field not writable over NFC → `Error{NOT_WRITABLE}` with
+  `fault_field` (group × 100 + field); an invalid value → `Error{OUT_OF_RANGE}` / `BAD_REQUEST`.
+  A rejected batch is rolled back as a whole.
+- Without `save` the batch is only staged. Application values and alarm rules are live at once;
+  LoRaWAN values need save + reboot (`lrw_join` / `lrw_reset` before that →
+  `NOT_READY "unsaved lrw config; save first"`, N5).
+- The batch with `save = true` → `ack`, the session ends (deferred action), green + yellow 2 s,
+  then save + reboot (~5 s). After the reboot `get_config` over NFC (or `config` on the shell)
+  shows the new values.
+
+**Prompt for Claude (phone bench as in N6):**
+> Read `interval_report` with `get_config` (or `config interval-report`). Send
+> `set_param{application{interval_report = <new>}}` without save (`sticker_mailbox_test.py setparam
+> --interval <new>`) → `ack`, and `get_config` already shows the new value. Send it again with
+> `save = true` (`--save`) and confirm the `ack`, green + yellow 2 s, then the reboot. After the
+> reboot (phone kept on the tag) confirm the value persisted. Negative checks:
+> - `set_param{application{vendor_reset_allow = true}}` on the owner channel `0x01` →
+>   `Error{NOT_WRITABLE}` (the field is vendor-only, FR-4 / G6a-NFC);
+> - an out-of-range value → an error, with the config unchanged.
+>
+> Restore the original value with save. Report results.
 
 - [ ] Pass
 
 ### N4 — NFC channel encryption (`CONFIG_APP_NFC_ENCRYPTION`)
 
-**Goal:** The command/config channel is AES-CCM encrypted by default; only info reads without a key. A validation build (`=n`) accepts plaintext (#135).
-**Observable:** On a default build, a plaintext `hio.stck:cmd` record is rejected (no response / decrypt error) while a properly encrypted one is answered with an encrypted `hio.stck:rsp`. On a `CONFIG_APP_NFC_ENCRYPTION=n` build, the boot log shows the `NFC ENCRYPTION DISABLED - VALIDATION BUILD ONLY` banner and plaintext command/config records are accepted.
+**Rewritten for v1.5.0 (#414).**
+**Goal:** by default the mailbox channels `0x01` (owner, `secret_key`) and `0x02` (vendor,
+`vendor_token`) are AES-CCM. Only the allow-listed plaintext channel `0x03` works without a key
+(`get_basic_info`, `get_claim_info`; #415, N10). A validation build (`=n`) accepts a raw `Command`
+on `0x01` (#135). It is debug-only: a release build with it off does not compile. It has no
+vendor channel.
+**Observable:**
+- Default build:
+  - a raw (unencrypted) `Command` on `0x01` gets **no reply** (RTT `mb: request rejected`, red LED);
+  - the same command sealed with `secret_key` (serial + counter = `nonce_counter` + 1) is answered
+    with an encrypted reply;
+  - `[0x03] get_basic_info` is answered without a key; any other command on `0x03` →
+    `NOT_READY "transport not allowed"`.
+- `=n` build:
+  - the boot banner `NFC ENCRYPTION DISABLED - VALIDATION BUILD ONLY` appears;
+  - a raw `Command` on `0x01` (e.g. `08 03 22 00`, `get_info`) returns a plaintext `Response` on
+    `0x01`;
+  - any `0x02` frame gets no reply.
 
 **Prompt for Claude:**
-> Validation build (`-DCONFIG_APP_NFC_ENCRYPTION=n`, debug): confirm the boot banner, then inject
-> `ats cmd nfc 08032200` (get_info) and confirm a plaintext `Response.Info` comes back. Default
-> build (encryption on): present a plaintext command record and confirm it is rejected; present an
-> AES-CCM record (serial + nonce > last) and confirm an encrypted response is written back, and that
-> the info record (`hio.stck:inf`) is still readable without the key. Report all results.
+> Validation build (`-DCONFIG_APP_NFC_ENCRYPTION=n`, debug):
+> - confirm the boot banner;
+> - `ats cmd nfc 08032200` → a plaintext `Response.Info`;
+> - over the mailbox, send `[0x01] 08 03 22 00` → a plaintext `Response` on `0x01`;
+> - a `[0x02]` frame → no reply.
+>
+> Default build:
+> - the same raw `[0x01] 08 03 22 00` → no reply (RTT `mb: request rejected`);
+> - the command sealed (`sticker_mailbox_test.py getinfo`) → an encrypted reply that decrypts;
+> - `[0x03] get_basic_info` (`basicinfo`) → answered without a key.
+>
+> Report all results.
 
-> Note: the request/response nonce construction and anti-replay behaviour are covered in detail by **N8**.
+> Note: the nonce construction and anti-replay are covered by **N8**, the plaintext allow-list by
+> **N10**.
 
 - [ ] Pass
 
-### N5 — LoRaWAN reset & forced join over NFC (#109)
+### N5 — LoRaWAN reset & forced join over NFC (#109, v1.5.0 mailbox)
 
-**Goal:** A phone can reset the LoRaWAN counters and force a join via the NFC command channel, completing the set-params → `lrw_reset` → `lrw_join` commissioning flow without a shell/J-Link.
-**Observable:** `lrw_reset` writes an `ack` back to the tag, then RTT shows `Command: LoRaWAN reset (NVM wipe) + reboot` and the device cold-reboots (frame counter / `DevNonce` back to 0). `lrw_join` writes an `ack` and RTT shows `Command: forced LoRaWAN join` with a fresh join (no reboot).
+**Rewritten for v1.5.0 (#414).**
+**Goal:** a phone can finish commissioning without a shell / J-Link: LoRaWAN `set_param` + save
+(N1) → `lrw_reset` → `lrw_join`, all over the mailbox.
+**Observable:**
+- `lrw_join` (id 17, `08 01 8a 01 00`):
+  - `ack`, then a fresh join with no reboot (`ats lrw status`);
+  - the session ends on the deferred action and the firmware resumes the field-present hold, so
+    the phone re-enables `MB_EN` (~1 s retry) and carries on in the same tap.
+- `lrw_reset` (id 16, `08 01 82 01 00`):
+  - `ack`, the session ends, green + yellow 2 s, then the LoRaWAN NVM wipe and a reboot;
+  - after it, the frame counter and `DevNonce` restart at 0 and the device joins afresh;
+  - a phone kept on the tag carries on after the reboot (N6).
+- Either one after an unsaved LoRaWAN `set_param` → `NOT_READY "unsaved lrw config; save first"`,
+  with nothing executed.
+- Both also work as fPort-85 downlinks (the hex above).
 
-**Prompt for Claude:**
-> On a default (encrypted) build: present an AES-CCM `hio.stck:cmd` record carrying `lrw_join`
-> (`08018a0100`) and confirm the `ack` is written back to the tag and RTT logs `Command: forced
-> LoRaWAN join` followed by a join attempt — with no reboot. Then present `lrw_reset` (`0801820100`),
-> confirm the `ack` is readable first, then RTT logs the NVM wipe + reboot and the LoRaWAN frame
-> counter restarts at 0 after reboot. Also verify both commands work as fPort-85 downlinks. Report results.
+**Prompt for Claude (phone bench as in N6):**
+> 1. Seal `lrw_join` over `0x01` and confirm:
+>    - the `ack`;
+>    - RTT `mb: session end (deferred action)`;
+>    - a join attempt with no reboot;
+>    - that a `get_info` after re-enabling `MB_EN` in the same tap is answered.
+> 2. Send `lrw_reset` and confirm:
+>    - the `ack` first;
+>    - green + yellow 2 s, then the reboot;
+>    - `ats lrw status` after the reboot shows the frame counter back at 0 and a fresh join.
+> 3. Send `set_param{lorawan{adr = <toggled>}}` without save, then `lrw_join` →
+>    `NOT_READY "unsaved lrw config; save first"`. Save the batch (or revert it) and repeat.
+> 4. Confirm both commands also work as fPort-85 downlinks.
+>
+> Report results.
 
 - [ ] Pass
 
@@ -1810,42 +1905,55 @@ unit reads as a blank tag.
 
 ### N8 — NFC crypto hardening: nonce separation, anti-replay, response cache (#179, #184)
 
-**Goal:** The encrypted channel no longer reuses a `(key, nonce)` pair across a request and its
-response (#179), the anti-replay counter survives a power-cycle (#184), the counter high-water is
-exposed in the plaintext info record so a phone can resync, and a same-counter retransmission is
-idempotent via a response cache.
+**Rewritten for v1.5.0 (#414).** The AES-CCM envelope is unchanged from v1.4.0; only the transport
+moved to the mailbox. The counter high-water that the plaintext `hio.stck:inf` record used to
+expose now comes from `get_basic_info`.
+
+**Goal:** the encrypted channel never reuses a `(key, nonce)` pair across a request and its
+response (#179). The anti-replay counter survives a power-cycle (#184). The counter high-water is
+readable without a key, so a phone can resync. A byte-identical retransmission is idempotent via a
+response cache.
 **Observable:**
-- **Direction-separated nonce:** the CCM nonce is `serial ‖ nonce_counter ‖ direction` (9 bytes), with
-  the direction byte `0x00` for the request and `0x01` for the response. Request and response carry the
-  *same* counter in the header but use different keystreams. A phone on the new codec (9-byte nonce +
-  header-as-AAD) decrypts the response; the old 8-byte-nonce / no-AAD codec fails to decrypt or verify.
-- **Counter in info record:** `hio.stck:inf` is format `0x02`, 15-byte payload, with the last-accepted
-  `nonce_counter` (big-endian) at payload bytes `[11..14]`. It tracks the live counter.
-- **Idempotent retransmission (response cache):** re-sending the **same** counter (e.g. the phone never
-  read the reply) replays the cached encrypted response **without re-running** the command — no double
-  execution of a `set_param`/action.
-- **Anti-replay persists across reboot:** the accepted counter is durable; a counter `<=` the stored
-  high-water is rejected (`-EACCES`). After a reboot the response cache is empty, so even a same-counter
-  retry is rejected and the phone resyncs from the info-record counter. `lrw_reset` (which reboots
-  immediately) cannot be replayed.
+- **Direction-separated nonce:** the CCM nonce is `serial ‖ nonce_counter ‖ direction` (9 bytes),
+  with direction `0x00` for the request and `0x01` for the response. Request and response carry
+  the *same* counter in the header, which is also the AAD, but use different keystreams.
+- **Counter via `get_basic_info`:** `[0x03] get_basic_info` field 2 `nonce_counter` is the last
+  accepted counter. It tracks the live value (`config nonce-counter`) and is persisted on every
+  accepted decrypt, before the command runs.
+- **Idempotent retransmission (channel `0x01` only):** re-sending the **byte-identical** frame
+  (e.g. the phone never read the reply) replays the cached encrypted reply **without re-running**
+  the command. RTT shows `cmd: in_len=… counter=N (cache=N stored=N)` with no `decrypt ok` /
+  `handled` after it. The nonce does not advance, and a `set_param` is not applied twice. The
+  vendor channel `0x02` has no cache, so a retransmission there is rejected as a replay.
+- **Anti-replay window `(stored, stored + 1024]`:**
+  - a counter ≤ stored gets no reply (RTT `Nonce counter is not greater than the last used nonce`);
+  - a counter > stored + 1024 gets no reply either (`Nonce counter jumps too far ahead`);
+  - after a reboot the cache is empty, so even a same-counter retry is rejected and the phone
+    resyncs from `get_basic_info` (+1);
+  - `lrw_reset`, which reboots at once, cannot be replayed.
 
-**Prompt for Claude — bench/J-Link verifiable parts (FW agent):**
-> On the default (encrypted) build, over RTT: `nfc dump` and confirm the `hio.stck:inf` record has
-> format byte `0x02`, payload length `0x0f` (15), and a 4-byte counter field after the debug flag.
-> Set `config nonce-counter <N>` to a recognizable value, force an info rewrite (`nfc clear` then a few
-> `nfc check`), `nfc dump` again and confirm the counter field shows `<N>` big-endian. Restore
-> `config nonce-counter 0`. (The wire-format contract — golden request/response vectors, direction
-> separation, AAD binding — is also asserted by the `tests/nfc_crypto` native_sim unit suite.)
+**Prompt for Claude — bench / J-Link parts (FW agent):**
+> On the default (encrypted) build, over RTT: `ats cmd plain 0801f20100` (`get_basic_info`) and
+> note `nonce_counter`. Set `config nonce-counter <N>` to a recognizable value, repeat the
+> `ats cmd plain` and confirm it reports `<N>`, then restore the original value. (The wire-format
+> contract — golden request/response vectors, direction separation, AAD binding — is also asserted
+> by the `tests/nfc_crypto` native_sim suite; the mailbox session paths by `tests/nfc_hw`.)
 
-**Prompt for Claude — round-trip & replay parts (needs the Manager-App phone):**
-> With the Manager-App on the matching codec: send an encrypted `get_info` with counter = last+1,
-> confirm the encrypted `hio.stck:rsp` decrypts on the phone and that `config nonce-counter` (shell) and
-> the info-record counter both advanced. Re-send the **same** counter (simulating a lost reply) and
-> confirm the device **replays the identical cached response without re-running** the command (RTT shows
-> `retransmission … replaying cached response`; a `set_param` value is not applied twice). Power-cycle the
-> device, re-send the same counter, and confirm it is now **rejected** (`-EACCES`, cache gone) and the
-> phone resyncs from the info-record counter (`stored+1`). Capture a request and its response and confirm
-> they cannot be cross-decrypted (direction separation). Report results.
+**Prompt for Claude — round-trip & replay parts (phone bench as in N6):**
+> 1. `basicinfo` → `nonce_counter` = s. `getinfo` → the reply decrypts, and `basicinfo` now
+>    reports s + 1.
+> 2. Seal one frame and send it **twice** byte-identically (`sticker_mailbox_test.mb_exchange(p,
+>    0x01, wire)` with the same `wire`), and confirm:
+>    - the second reply is identical;
+>    - RTT shows no second `decrypt ok` / `handled`;
+>    - a `set_param` sent that way is applied once.
+> 3. Reboot the unit and send the same frame a third time → no reply. `basicinfo` → resync with
+>    s + 2.
+> 4. Send a frame at stored + 1025 → no reply.
+> 5. Capture a request and its response and confirm neither decrypts with the other's direction
+>    byte.
+>
+> Report results.
 
 - [ ] Pass
 
@@ -1923,48 +2031,66 @@ refused with `Error{BAD_REQUEST "zero key"}` — no save, no reboot.
 
 ### N10 — Claim window: explicit two-state latch (`active`/`done`) + `get_claim_info` (#247, #415)
 
-**Rewritten for v1.5.0 (#415).** The claim window is now an explicit two-state latch with **no
-automatic behaviour** — the v1.4.0 auto-arm (`unset → pending` on a provisioned token) and the two
-implicit closes (RF delete-detection, and any decrypted command #308) are gone. The tri-state
-`unset/pending/consumed` recorded in earlier runs no longer exists.
+**Rewritten for v1.5.0 (#415, #414).** The claim window is an explicit two-state latch with **no
+automatic behaviour**. The v1.4.0 auto-arm (`unset → pending` on a provisioned token) and the two
+implicit closes (RF delete-detection, and any decrypted command #308) are gone. With #414 there is
+no `hio.stck:clm` NDEF record either: the token is read with `get_claim_info` over the plaintext
+mailbox channel `0x03`.
 
-**Goal:** a provisioned unit is `active` from the factory (NVS default); while `active` it lays the
-`hio.stck:clm` record alongside `inf` and answers `get_claim_info` with `ClaimInfo{serial_number,
-claim_token}`. The window closes **only** on an explicit `claim_done` command / `ats claim done` →
-`done`: no `clm` record, `get_claim_info` → `NOT_READY "claimed"`. `claim_active` / `ats claim
-active` / `vendor_reset` reopen it. `device_reset` / `factory_reset` leave it alone. State persists
-across reboot/reflash (NVS `clm/state`); upgrading a v1.4.x unit migrates `unset`/`pending` →
-`active`, `consumed` → `done`. **Observable:** `ats claim status` reports the state throughout;
-`nfc dump` shows a two-record `[inf, clm]` message while `active`, `inf`-only once `done`.
+**Goal:** a provisioned unit is `active` from the factory (NVS default). While `active` it answers
+`get_claim_info` with `ClaimInfo{serial_number, claim_token}` (`device_status` bit 17
+`CLAIM_ACTIVE` set). The window closes **only** on an explicit `claim_done` (owner command, id 25)
+or `ats claim done`, which gives `done`: `get_claim_info` → `NOT_READY "claimed"` and bit 17 = 0.
+`claim_active` (id 27, reboots) / `ats claim active` / `vendor_reset` reopen it; `device_reset` /
+`factory_reset` leave it alone. The state persists across reboot and reflash (NVS `clm/state`).
+Upgrading a v1.4.x unit migrates `unset` / `pending` → `active` and `consumed` → `done`.
+No token provisioned → `NOT_READY "no claim token"`.
+**Observable:** `ats claim status` reports the state throughout. `get_claim_info` (over `[0x03]`
+or `ats cmd plain 0801ea0100`) returns the token or the `NOT_READY` reason. `device_status` bit 17
+in the encrypted `get_info` mirrors the window.
 
 **Prompt for Claude:**
-> `settings erase`, then `config claim-token <32-hex>` + `config secret-key <32-hex>` + `settings
-> save`. After reboot confirm `ats claim status` reports **`active`** (the factory default — no arm
-> step) and `nfc dump` shows the two-record `[inf, clm]` message. Confirm `ats cmd plain
-> <GetClaimInfo hex>` returns the `ClaimInfo` (serial + the provisioned token), and `ats cmd plain
-> <GetInfo hex>` returns `NOT_READY "transport not allowed"` (plain_text is opt-in). Reflash (plain
-> `west flash`, no `--erase`) and confirm `active` + the two-record tag survive unchanged.
+> **Shell part.**
+> 1. `settings erase`, then `config claim-token <32-hex>` + `config secret-key <32-hex>` +
+>    `settings save`.
+> 2. After the reboot, confirm:
+>    - `ats claim status` → **`active`** (the factory default, no arm step);
+>    - `ats cmd plain 0801ea0100` (`get_claim_info`) → `ClaimInfo` with the serial and the token;
+>    - `ats cmd plain 08012200` (`get_info`) → `NOT_READY "transport not allowed"` (plain_text is
+>      opt-in).
+> 3. Reflash (plain `west flash`, no `--erase`) and confirm the state is still `active`.
+> 4. `ats claim done` → `done`, and `get_claim_info` → `NOT_READY "claimed"`. Reboot and confirm
+>    `done` survives.
+> 5. `vendor_reset` (G6a-NFC) → back to `active`. The token is wiped with it, so
+>    `get_claim_info` → `NOT_READY "no claim token"` until `config claim-token` is set again.
 >
-> Close the window: `ats claim done` (or inject an encrypted `hio.stck:cmd` frame carrying
-> `claim_done`, wire id 25 — same recipe as `reference_nfc_rst_hil_test_299`, split long hex across
-> `nfc write` calls). Confirm `ats claim status` → **`done`**, `nfc dump` shows `inf` only, and
-> `ats cmd plain <GetClaimInfo>` → `NOT_READY "claimed"`. Reboot and confirm `done` survives.
+> **Phone part (bench as in N6, `sticker_mailbox_seq_led_claim.py` steps 3–7):**
+> 1. `get_claim_info` → token.
+> 2. Send many authenticated `get_info` and confirm the window **stays `active`**: a decrypted
+>    command must not close it.
+> 3. `claim_done` → `ack`, then `get_claim_info` → `NOT_READY "claimed"`, and `get_info` shows
+>    bit 17 = 0.
+> 4. `claim_active` → `ack`, reboot. With the phone kept on the tag, `get_claim_info` → token again.
 >
-> Confirm the removed implicit close: reopen (`ats claim active`), then send an unrelated
-> authenticated `get_info` over `hio.stck:cmd`. Confirm `ats claim status` **stays `active`** (a
-> decrypted command must NOT close the window any more). Then confirm `vendor_reset` reopens a
-> `done` window back to `active`. Report each outcome.
+> Report each outcome.
 
-- [ ] Pass — **v1.5.0 re-verification pending** (the recorded v1.4.0 HIL run below tested the old
-  tri-state model and is superseded; the two-state behaviour is covered by `tests/nfc_hw`
-  `test_secret_key_command_does_not_close_claim_window` and `tests/cmd` `test_claim_done` /
-  `test_claim_active` / `test_get_claim_info`).
+**HIL-verified 2026-09-23 — phone part** (`b4c2ee5` debug, SN 2162190413, Pixel 9a + nfc-proxy):
+- `get_claim_info` → token `0102…10`, after 31 authenticated exchanges in the same run (so decrypted
+  commands did not close the window);
+- `claim_done` → `ack`, then `NOT_READY "claimed"`, `device_status` = `0x00000000`;
+- `claim_active` → `ack`, reboot, device back +6.15 s, and `get_claim_info` → token again;
+- no WRN / ERR in RTT.
+
+The shell part (reflash survival, `vendor_reset` reopen) is still to be re-run on v1.5.0.
+
+- [x] Pass — phone part, 2026-09-23
+- [ ] Pass — shell part (v1.5.0)
 
 > **Superseded v1.4.0 run (2026-07-14, for reference only):** with the old auto-arm + implicit
 > close, `config claim-token` + `settings save` armed `pending`; `nfc dump` showed the two-record
 > `[inf, clm]` message (byte-exact `hio.stck:clm` + token); a `clm_ack` frame and an unrelated
 > `get_info` each latched `consumed (2)`. Under #415 the arm is gone (default is `active`) and only
-> `claim_done` closes it — re-run the prompt above.
+> `claim_done` closes it; under #414 the `clm` record is gone.
 
 ### N11 — NFC LED during a mailbox tap (#315, v1.5.0 #414)
 
@@ -2096,6 +2222,10 @@ the identical write over NFC secret_key auth; confirm success.
 > over NFC `secret_key` auth succeeded (`ack{}`), `alarm list` confirmed slot 0 updated to the new
 > rule. Decisive.
 
+> **v1.5.0 (#414):** the vendor channel is the mailbox channel `0x02` (G6a-NFC). To re-run, send a
+> `[0x02]` `SetParam{alarms.alarm_0=…}` sealed with `vendor_token` — expected unchanged
+> (`NOT_WRITABLE`, `fault_field` 403) — and the same write on `0x01` → `ack`.
+
 ### X3 — H: history replay-active flag cleared on RECONNECT abort (M4)
 
 **Goal:** A history replay aborted by a RECONNECT transition clears `app_history_set_replay_active
@@ -2214,12 +2344,12 @@ over NFC while powered off, reboot, confirm ONLY hall_left is zeroed — the oth
 
 > **Mostly superseded by v1.5.0 (#415).** (a) and (b) below no longer apply: the implicit close is
 > gone (NO command — owner or vendor — closes the window any more; only an explicit `claim_done`
-> does), and the M3/M15 arm-persist-after-confirmed-write dance is deleted (the `clm` record simply
-> reflects the current `active`/`done` state, so a failed tag write just retries next poll — nothing
-> to commit/revert). Only **(c)** survives: the claim state (`m_claim_state`) is still taken under
-> `m_lock` in `claim_state_set()`, serialising `ats claim active/done` / `claim_active`/`claim_done`
-> / `vendor_reset` against the NFC poll thread. See the rewritten **N10** for the current claim-window
-> test.
+> does), and the M3/M15 arm-persist-after-confirmed-write dance is deleted (with #414 there is no
+> `clm` record at all — nothing to commit/revert). Only **(c)** survives, in a new form: claim-state
+> writes (`claim_state_set()`, from `ats claim active/done` / `claim_active` / `claim_done` /
+> `vendor_reset`) are serialised by their own `m_claim_lock`, and reads are lock-free atomics (#414
+> review fix), so `app_cmd_get_info()` on `m_work_q` never waits on a phone tap. See the rewritten
+> **N10** for the current claim-window test.
 
 **Goal (historical, v1.4.0):** (a) `clm_consume()` no longer fires on a vendor-authenticated decrypt
 (only `clm_ack` / successfully-decrypted `hio.stck:cmd`); (b) the arm sequence (M3) and rearm
@@ -2340,6 +2470,10 @@ rejected (red LED / no cached reply), not silently accepted.
 > 8-byte `BE32(serial)||BE32(same counter)` frame (no ciphertext/tag) at that counter —
 > `-> command rejected: -22` (EINVAL), not served a cached reply. Decisive.
 
+> **v1.5.0 (#414):** on the mailbox, send the 8-byte header-only frame as `[0x01] BE32(serial)
+> BE32(same counter)` → no reply (RTT `mb: request rejected`), red LED. The byte-identical
+> retransmission of the real frame is still served from the cache (N8).
+
 ### X12 — M2: `nonce_counter` preserved across `vendor_reset`
 
 **Goal:** `vendor_reset` no longer restarts the AES-CCM nonce counter from 0 under the unchanged
@@ -2359,6 +2493,9 @@ and confirm `nonce_counter` in `get_info`/`config show` did NOT drop to 0.
 > Post-reset `nonce-counter` read back as **565** (not 0). Replaying the recorded counter-564 frame
 > was rejected (`-13`/EACCES, "nonce not greater than last used"). Fully decisive. LoRaWAN identity
 > was then restored via NFC SetParam (deveui/joineui/appkey) and the device rejoined TTN cleanly.
+
+> **v1.5.0 (#414):** the replay test now runs on the vendor mailbox channel `0x02` (no response
+> cache there), and `get_basic_info` shows the preserved counter right after the reset (G6a-NFC).
 
 ### X13 — M5: telemetry trigger coalesced with a queued drain still composes
 
