@@ -247,6 +247,25 @@ not something the firmware can work around. It is reported as
 GetInfo response and as an `NFC mailbox: UNAVAILABLE` line in `ats device info`,
 so the production tester rejects it.
 
+### LED during a tap
+
+| What happens | LED |
+|---|---|
+| Phone detected (RF field), no mailbox session yet | green, at most 5 s |
+| Mailbox session running | green blink |
+| Session ended, **last** exchange OK | green + yellow, 2 s |
+| Session ended, last exchange failed | red, 2 s |
+| Otherwise / afterwards | off |
+
+"Failed" means the last request was rejected (wrong key or nonce, unknown channel — no reply
+is sent), its reply could not be written or was never read by the phone, or the session aborted
+on I2C errors; an authenticated `Response.error` counts as a valid reply. The last exchange
+decides, so an app that resyncs after a rejection and then succeeds ends green + yellow. A
+command that reboots the device (save, reboot, resets, `set_secret_key`, `claim_active`,
+calibration, `lrw_reset`) first lets the result finish, then reboots; the boot carousel follows.
+The v1.4.0 NDEF states (per-command processing blink, green + yellow "response waiting",
+immediate red blink per rejected frame, pre-reboot green NFC carousel) are gone.
+
 ### Bench shell
 
 `nfc mb status` (dump the FTM registers), `nfc mb on|off` (drive `MB_EN` from the
