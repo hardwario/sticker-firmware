@@ -659,7 +659,19 @@ on the 5th WARNING failure.
 > on every report in WARNING and one rung per report; re-enable it mid-ladder and confirm recovery on the lower
 > DR without a rejoin. Restore the config afterwards.
 
-- [ ] Pass
+> **HW-verified (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub, STICKER `5876070000000413`):**
+> - B-2/B-3 inject runs (ADR off, temporary `ats lrw setdr` hook to start from DR5): one rung per uplink
+>   DR5 → DR0 on air, with the TX-power rung visible as +8–9 dB RSSI.
+>   - Floor → rejoin (new DevAddr).
+>   - `lc ok` at DR1 → HEALTHY with the same DevAddr.
+> - B-4 real outage (ADR on, LC every report, device disabled on the NS, no injects): WARNING + rungs DR5 → DR2,
+>   then the NS was re-enabled and the device recovered on DR2 with the same DevAddr and no JoinRequest.
+> - C-2 on the image combined with #409: `lrw-datarate dr5` + ADR off, the ladder steps through
+>   `lorawan_set_datarate()`, and after the rejoin the pinned DR5 is back.
+> - Bench caveat: the Hub's ChirpStack has an effective `network.max_dr = 0`, so with ADR on it pulls every node to DR0.
+>   Start the ladder from a raised DR via the hook, or run with the NS disabled as in B-4.
+
+- [x] Pass
 
 ### L19 — US915/AU915: sub-band survives repeated failed joins (v1.5.0, #424)
 
@@ -676,6 +688,8 @@ sub-band's 8 channels have all been used by failed joins and after each rejoin's
 > backoff). From the gateway's frame log confirm every JoinRequest frequency lies in sub-band 2. Then
 > re-enable the device and confirm the next join succeeds. (On v1.5.0 before #424 the attempts after the 8th
 > spread over all eight sub-bands.)
+
+> **Not run yet (2026-09-23):** no US915 gateway, and no 902–928 MHz TX on the EU868 bench. Covered by code review only.
 
 - [ ] Pass
 

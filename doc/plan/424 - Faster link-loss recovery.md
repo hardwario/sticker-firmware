@@ -96,9 +96,9 @@ without a rejoin.
 
 ## 3. Interactions / non-goals
 
-- **#409 A3 (manual DR, not in `v1.5.0` yet):** a pinned DR is now stepped down by the ladder until
-  the next join re-pins it. This mitigates the "joined but silent" loop, where a pinned DR is out of
-  reach after a relocation.
+- **#409 A3 (`lrw-datarate`, merged before this PR):** a pinned DR is stepped down by the ladder until
+  the next join re-pins it (HW-verified, C-2). This mitigates the "joined but silent" loop, where a pinned
+  DR is out of reach after a relocation.
 - **ABP** never rejoins. It now walks the ladder and then stays in WARNING with the per-report LC,
   instead of waiting for LoRaMac's 128-uplink backoff.
 - **Not addressed here** (from the same analysis):
@@ -110,14 +110,42 @@ without a rejoin.
 
 ## 4. Cost
 
+Measured against `v1.5.0` with #409 merged: the combined image vs the #409 image, both with the #419 patch.
+
 | Build | FLASH | RAM |
 |---|---|---|
-| release | 73.46 % → 73.61 % (+328 B) | 80.19 % (+0 B) |
-| debug | 87.88 % → 88.20 % (+784 B) | 93.94 % (+0 B) |
+| release | 75.50 % → 75.63 % (+272 B) | 80.39 % (+0 B) |
+| debug | 89.11 % → 89.42 % (+744 B) | 94.13 % (+0 B) |
 
 ## 5. Verification
 
-- clang-format 22.1.5 clean; release + debug build against `v4.3.0-sticker2-branch`, no new warnings.
+- clang-format 22.1.5 clean; release + debug builds, no new warnings. CI green.
 - native ztest 11/11, JS decoder 70/70, configen pytest 28/28. `app_lrw.c` has no native coverage.
-- HW: `doc/manual-test-plan.md` **L18** (ladder, EU868) and **L19** (US915 sub-band persistence).
-  L8 and L13 were updated for the new rejoin rule.
+
+### HIL record 2026-09-23
+
+Bench: STICKER DevEUI `5876070000000413`, J-Link `822005110`, EU868 OTAA, ChirpStack v4 on the ProXimos Hub.
+Frames were read from ChirpStack's device-frame stream.
+- Images: this branch standalone (`308f7cd`), and combined with #409 (the code tree of this branch after the
+  `v1.5.0` merge `1afd7e3`).
+- B-2/B-3 used a temporary, uncommitted shell hook `ats lrw setdr <dr> [txpow]`. It sets DR / TX power the way a
+  LinkADRReq would, to start the ladder from DR5.
+- The Hub's ChirpStack has an effective `network.max_dr = 0` (proximos #95). Its ADR pins every node to DR0 and
+  answers every uplink with `LinkADRReq DR0 / TXPower 2..7`. The runs were designed around that:
+  - ADR off in B-2/B-3/C-2
+  - ADR on in B-4, where the device is disabled on the NS, so no downlink reaches it
+
+| Test | Setup | Result |
+|---|---|---|
+| B-1 boot | standalone debug | PASS — first-attempt join, Info → settings-info → telemetry, `tx power` line in `ats lrw status` |
+| B-2 ladder → rejoin | ADR off, LC 0, `setdr 5 5`, injected LC failures | PASS — WARNING + `TX power 5 -> 0, DR5 -> DR4`, then one rung per uplink down to DR0; the next failure at the floor completes the budget (5/5) → RECONNECT → rejoin with a new DevAddr. On air: DR5/SF7 → DR4/SF8 (RSSI +8 dB, the TX-power rung) → DR3/SF9 → … |
+| B-3 mid-ladder recovery | as B-2 | PASS — DR5 → DR4 → DR3 → DR2 → DR1 on air (one rung per uplink, TX-power rung +9 dB), then `ats lrw lc ok` → HEALTHY with the **same DevAddr**, the next uplink stays on DR1 |
+| B-4 real outage | **ADR on**, LC every report, device `isDisabled` on ChirpStack, **no injects** | PASS — 3 real LC timeouts → WARNING + `TX power 5 -> 0, DR5 -> DR4`, then DR3, DR2 on the next reports; NS re-enabled → the next DR2 uplink got its LinkCheckAns → HEALTHY, **same DevAddr, no JoinRequest** during the whole run |
+| C-1 boot | combined debug | PASS — no boot WRN/ERR, live DR in `ats lrw status` |
+| C-2 ladder × `lrw-datarate` | combined, ADR off, `lrw-datarate dr5`, injected LC failures | PASS — the status says DR5 after the join (live DR); rungs DR5 → … → DR0 via `lorawan_set_datarate()` with the status matching each rung; floor → rejoin; after the rejoin the pinned DR5 is back on air |
+| C-3 release | combined release | PASS — first-attempt join, Info, settings-info, `DevStatusAns`, telemetry |
+| L19 US915 sub-band | — | **not run**: no US915 gateway, and no 902–928 MHz TX on this bench. Covered by code review only. |
+
+Found during the run and fixed here (`29d9732`): `ats lrw status` reported a stale DR after an ADR-off
+`lorawan_set_datarate()` (manual DR, ladder rung), because Zephyr fires the DR-changed callback only with ADR on.
+It now reads `MIB_CHANNELS_DATARATE` live.

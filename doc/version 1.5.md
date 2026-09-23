@@ -434,7 +434,17 @@ When the network disappears (gateway off, or the device moved out of reach of it
 - New log lines: `Link recovery: TX power <a> -> <b>, DR<x> -> DR<y> (payload <n> B)` and `LC FAIL in WARNING (total: n/m, ladder step)`. `ats lrw status` also prints `tx power: <index> (0 = max)`.
 - After a ladder recovery the device stays on the lower DR. With ADR on, the network raises it again from the uplinks it receives. A lower DR means a smaller payload budget (EU868 DR0–2: 51 B), so telemetry may take more frames until then.
 - The link-check timeout now starts after the uplink's RX windows closed. It no longer races a LinkCheckAns at DR0/SF12 with a 5 s RX1 delay.
-- Cost: +328 B flash release, +784 B debug, +0 B RAM.
+- Works together with `lrw-datarate` (§7): a pinned DR is stepped down by the ladder like any other, and the next join re-pins it.
+- `ats lrw status` now reports the live DR from the MAC. Before, it showed a stale value after an ADR-off DR change (`lrw-datarate`, a ladder rung).
+- Cost: +272 B flash release, +744 B debug, +0 B RAM.
+
+**HW verification (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub):**
+- Ladder runs with ADR off and on: one rung per report DR5 → DR0 on air, with the TX-power rung as +8–9 dB RSSI.
+- Recovery on a lower DR with the same DevAddr, both on an injected `lc ok` and after a real NS outage (device disabled on ChirpStack, no rejoin).
+- At the floor: a rejoin.
+- Combined with `lrw-datarate`: the ladder steps down and the next join re-pins.
+- The release image passed too.
+- Not HW-tested: the US915/AU915 sub-band fix (no 915 MHz gateway), code review only.
 
 See `doc/manual-test-plan.md` **L18**/**L19** and `doc/plan/424 - Faster link-loss recovery.md`.
 
