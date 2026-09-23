@@ -21,6 +21,19 @@ enum app_config_lrw_region {
 	APP_CONFIG_LRW_REGION_EU868 = 0,
 	APP_CONFIG_LRW_REGION_US915 = 1,
 	APP_CONFIG_LRW_REGION_AU915 = 2,
+	APP_CONFIG_LRW_REGION_AS923 = 3,
+};
+
+enum app_config_lrw_datarate {
+	APP_CONFIG_LRW_DATARATE_AUTO = 0,
+	APP_CONFIG_LRW_DATARATE_DR0 = 1,
+	APP_CONFIG_LRW_DATARATE_DR1 = 2,
+	APP_CONFIG_LRW_DATARATE_DR2 = 3,
+	APP_CONFIG_LRW_DATARATE_DR3 = 4,
+	APP_CONFIG_LRW_DATARATE_DR4 = 5,
+	APP_CONFIG_LRW_DATARATE_DR5 = 6,
+	APP_CONFIG_LRW_DATARATE_DR6 = 7,
+	APP_CONFIG_LRW_DATARATE_DR7 = 8,
 };
 
 enum app_config_lrw_network {
@@ -87,6 +100,7 @@ struct app_config {
 	uint8_t lrw_devaddr[4];
 	uint8_t lrw_nwkskey[16];
 	uint8_t lrw_appskey[16];
+	enum app_config_lrw_datarate lrw_datarate;
 	int lrw_link_check_interval;
 	int lrw_link_check_fail_rejoin;
 	bool cap_hall_left;

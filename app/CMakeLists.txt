@@ -9,6 +9,22 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sticker)
 
+# Module patches (zephyr/patches.yml, applied by `west patch apply`). A LoRaWAN
+# image built without them silently misses the fix, so refuse to build instead.
+# Each patch leaves a "STICKER-<issue>" marker in the patched source. Checked at
+# configure time and again on every build: `west update` resets the module and
+# an incremental build (incl. the one `west flash` runs) does not reconfigure.
+if(CONFIG_LORAWAN AND DEFINED ZEPHYR_LORAMAC_NODE_MODULE_DIR AND NOT STICKER_ALLOW_UNPATCHED_MODULES)
+  set(FILE ${ZEPHYR_LORAMAC_NODE_MODULE_DIR}/src/mac/LoRaMac.c)
+  set(MARKER STICKER-419)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_module_patch.cmake)
+  add_custom_target(sticker_module_patch_check ALL
+    COMMAND ${CMAKE_COMMAND} -DFILE=${FILE} -DMARKER=${MARKER}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_module_patch.cmake
+    COMMENT "Checking STICKER module patches")
+  add_dependencies(app sticker_module_patch_check)
+endif()
+
 # Firmware version + source baked into the image (logged at boot, reported by
 # the GetInfo command). CI passes the numeric version components and build type
 # via -DAPP_VERSION_* / -DAPP_BUILD_TYPE (see .github/workflows/build.yml):
@@ -20,7 +36,7 @@ project(sticker)
 if(NOT DEFINED APP_VERSION_MAJOR)
   set(APP_BUILD_TYPE 2) # CUSTOM
   set(APP_VERSION_MAJOR 1)
-  set(APP_VERSION_MINOR 4)
+  set(APP_VERSION_MINOR 5)
   set(APP_VERSION_PATCH 0)
 endif()
 add_compile_definitions(

@@ -359,6 +359,38 @@ on TTN.
 
 - [ ] Pass
 
+### L4b — Settings-info ConfigDump after boot (v1.5.0, #412)
+
+**Goal:** Right after the boot `Info`, the device autonomously pushes its key operating
+settings as a one-page `ConfigDump`, so the network learns the effective config without polling.
+**Observable:** A second fPort-85 uplink directly after the boot `Info` and before the first
+fPort-2 Telemetry. It decodes to `config_dump` with `page_count: 1`, `application`
+(`interval_sample`, `interval_report`, `history_enable`), all nine `sensors.cap_*` flags and,
+on a 1-Wire build, `w1_slot_type` (4 entries).
+
+**Prompt for Claude:**
+> Note the current `config show` values. Change at least one reported setting (e.g.
+> `config interval-sample 60`, `config cap-w1-sensors true`) and run `settings save`, which reboots
+> and re-joins. Watching the network server / gateway uplinks, confirm that the uplink after the
+> fPort-85 `Info` is a fPort-85 `ConfigDump` (page 0/1), sent before the first fPort-2 Telemetry.
+> Decode it with `app/decoder/ttn.js` and confirm every field matches `config show`, including
+> the change just made. On a `CONFIG_W1=y` image, confirm `w1_slot_type` has 4 entries matching the
+> attached 1-Wire sensors (`empty` / `dallas` / `machine-probe`). Report the frame size and DR.
+
+> **HW-verified (2026-09-22, debug build @ `4848a09`, EU868, local ChirpStack v4 + RAK5146 GW):**
+> on a factory-blank unit provisioned with an OTAA test identity, each join was followed by
+> FCnt 1 `Info` (21/24 B), FCnt 2 `ConfigDump` page 0/1, and FCnt 3 telemetry, all at DR0
+> (SF12). The dumped values matched `config show` exactly (`interval_sample 60`,
+> `interval_report 900`, `history_enable 0`, `cap_w1_sensors 1`, all other caps `0`). With plain
+> `debug.conf` (`CONFIG_W1=n`) the frame was 34 B and field 7 was absent, as expected. With
+> `-DCONFIG_W1=y` it was 40 B, ending in `3a 04 00 00 00 00`, which decodes as
+> `w1_slot_type: ["empty","empty","empty","empty"]`. **Not covered on HW:** the `dallas` /
+> `machine-probe` values, because the unit has no DS2484 (`ds2484: Device reset failed: -5`);
+> they are covered by `tests/cmd` + `ttn.test.js` only. Low DR on US915/AU915 was also not
+> covered: both boot frames are dropped whole there, see #418.
+
+- [x] Pass (EU868; `w1_slot_type` verified as all-`empty` only)
+
 ### L5 — Periodic telemetry
 
 **Goal:** Telemetry is sent on the configured interval.
@@ -389,8 +421,8 @@ report in <N> s`.
 ### L7 — Link check
 
 **Goal:** LinkCheckReq is sent periodically and answered.
-**Observable:** Every 5th message carries a LinkCheckReq; LinkCheckAns within 10 s; visible in
-RTT LC logs.
+**Observable:** Every 5th message carries a LinkCheckReq (every message while `WARNING`, v1.5.0 #424);
+LinkCheckAns within 10 s of the uplink's RX windows closing; visible in RTT LC logs.
 
 **Prompt for Claude:**
 > With the device HEALTHY and a gateway in range, send several uplinks (or wait through several
@@ -404,16 +436,18 @@ RTT LC logs.
 
 **Goal:** Link-check failures escalate state correctly.
 **Observable:** RTT `LC FAIL in HEALTHY (streak: n/3)` → `State: HEALTHY -> WARNING` after 3
-consecutive fails; `LC FAIL in WARNING (total: n/5)` → `State: WARNING -> RECONNECT` after
-`lrw-link-check-fail-rejoin` fails; `ats lrw status` mirrors the counters.
+consecutive fails; `LC FAIL in WARNING (total: n/5[, ladder step])` → `State: WARNING -> RECONNECT` once
+`lrw-link-check-fail-rejoin` fails are reached **and** the recovery ladder is at its floor (v1.5.0 #424,
+see L18 — a device on a DR above the region minimum takes extra rungs first); `ats lrw status` mirrors
+the counters.
 
 **Prompt for Claude:**
 > On a debug build, drive the failures deterministically with `ats lrw lc fail` (space them ~2 s
 > apart — the hook reuses one work item, rapid injects coalesce); set
 > `config lrw-link-check-interval 0` + `settings save` first so real link-checks don't reset the
 > streak. Watching the RTT log / `ats lrw status`, confirm HEALTHY → WARNING (3 consecutive) →
-> RECONNECT (after `lrw-link-check-fail-rejoin` more). Then `ats lrw lc ok` and confirm one success
-> returns WARNING → HEALTHY. (Alternatively provoke real failures by taking the gateway out of
+> RECONNECT (after `lrw-link-check-fail-rejoin` more, counted until the L18 ladder reaches its floor —
+> note the start DR). Then `ats lrw lc ok` and confirm one success returns WARNING → HEALTHY. (Alternatively provoke real failures by taking the gateway out of
 > range — note the method.) Report the observed thresholds.
 
 - [ ] Pass
@@ -513,7 +547,9 @@ where M = `lrw-link-check-fail-rejoin`; a LinkCheckReq is sent every Nth uplink 
 > Set e.g. `config lrw-link-check-interval 1`, `config lrw-link-check-fail-rejoin 3`,
 > `settings save`. Confirm `ats lrw status` shows `warning->reconnect: n/3`. With interval 1,
 > confirm a link check rides every uplink; with interval 0, confirm none are requested. Then drive
-> failures (L8) and confirm RECONNECT now triggers after 3 (not 5) WARNING fails.
+> failures (L8) and confirm RECONNECT now triggers after 3 (not 5) WARNING fails — start from the
+> region minimum DR (e.g. just after a join, before the NS raised it), otherwise the L18 ladder adds
+> one failure per DR step first.
 
 - [ ] Pass
 
@@ -564,6 +600,96 @@ conditions (release build masks-off: no `CONFIG_LOG`, `PM=y`).
 > build (no debug overlay) and let it run. Watch the LNS uplinks (TTS/ChirpStack) and confirm f_cnt
 > climbs continuously past ~13 with no stop. (Release has PM=y → SWD sleeps; reflash via a
 > `west flash` retry loop or power-cycle.) Report the highest f_cnt reached.
+
+- [ ] Pass
+
+### L17 — LoRaWAN glue: real join result, bounded confirm, MAC lock (v1.5.0, #421)
+
+**Goal:** A (re)join reports the result of *its own* JoinRequest (not a stale link-check / device-time
+confirm). A lost MAC confirm ends in `-ETIMEDOUT` instead of wedging `m_work_q`. Concurrent LoRaMac access
+from shell/NFC and the radio/timer handlers never deadlocks.
+**Observable:** After a join plus its DeviceTime/LinkCheck exchange, a shell `join` blocks until the RX
+windows (≈ 6–9 s at SF12) instead of returning at once. After a network outage, the first rejoin once the NS
+answers again succeeds. No watchdog reset in any of the steps.
+
+**Prompt for Claude:**
+> On a joined debug image, wait for the first telemetry with its LinkCheckAns, then run `join` and note how
+> long it takes to end in `HEALTHY` versus when the NS saw the JoinRequest/JoinAccept. Disable the device on
+> the NS (e.g. ChirpStack `isDisabled`), run `join` and confirm the failure is reported only after the RX windows.
+> Re-enable it and confirm the automatic rejoin succeeds on its first attempt. With `interval-report 60` +
+> `lrw-link-check-interval 1`, disable the device for ~10 min: expect WARNING → RECONNECT → failing rejoins,
+> then success on the first attempt after re-enabling. Optionally (temporary, uncommitted hooks) drop one
+> McpsConfirm / join confirm and confirm `-ETIMEDOUT` after `CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS` with no
+> wedge. Restore the config afterwards.
+
+> **HW-verified (2026-09-23, debug + release @ `545b679`, EU868, ChirpStack v4 + RAK5146 on the ProXimos Hub):**
+> - **T1 / T8:** first-attempt joins on debug and release, with Info, settings-info ConfigDump (release: `w1_slot_type` 4× `empty`) and telemetry.
+> - **T2:** a disabled-NS join failed only after RX2 (8.4 s), and the first rejoin after re-enabling succeeded.
+> - **T2b A/B** (temporary WRN timing log): `lorawan_join()` after the link-check / device-time confirms
+>   took **26 ms / 25 ms on v1.5.0** (stale result) versus **8305 ms with #421**.
+> - **T3:** 8 min at 1 uplink/min, 8/8 LinkCheckAns, no FCnt gaps.
+> - **T4:** GetConfig page 0, SetParam without save → Ack + staged, `settings_save` → boot ConfigDump 600, CLI `set-config` with commit → 900.
+> - **T5** (temporary hooks): a dropped McpsConfirm → `-ETIMEDOUT` exactly 20 s after the request, and the retry went out. A dropped join confirm → `ret=-116 after 20025 ms`, then MAC polling → `HEALTHY`. No watchdog reset in either case.
+> - **T6:** 3 × 25 s at ~900 locked `get_info`/MIB reads per second ran concurrently with 4 chained GetConfig downlinks; all were answered and nothing hung.
+> - **T7:** ~8.8 min of NS outage → WARNING → RECONNECT → rejoin 1 refused → rejoin 2 (the first after re-enabling) succeeded.
+
+- [x] Pass
+
+### L18 — Link-recovery ladder: TX power / DR step-down before rejoin (v1.5.0, #424)
+
+**Goal:** In WARNING the device checks the link on every report and, per failed check, restores the default
+TX power and drops the DR one step; it rejoins only at the floor. A check that succeeds on a lower DR returns to
+HEALTHY with the same session.
+**Observable:** RTT `Link recovery: TX power <a> -> <b>, DR<x> -> DR<y> (payload <n> B)` on the transition
+into WARNING and on every later `LC FAIL in WARNING (total: n/m, ladder step)`; `ats lrw status` `datarate` /
+`tx power` follow; the LNS sees each later uplink on the lower DR (higher SF). At the region minimum DR the next
+failure(s) complete the budget → `State: WARNING -> RECONNECT`. EU868 from DR5: WARNING entry + 4 rungs, rejoin
+on the 5th WARNING failure.
+
+**Prompt for Claude:**
+> On a joined EU868 debug image with ADR on, wait until the NS has raised the DR (`ats lrw status` shows e.g.
+> DR5 and a tx power index > 0; ChirpStack can pin it via the device-profile ADR/DR settings). Set
+> `config interval-report 60`, `config lrw-link-check-interval 0` + `settings save` (no real link checks, so
+> the injects are deterministic). Inject `ats lrw lc fail` ~2 s apart: after the 3rd, confirm WARNING + the
+> first `Link recovery` rung (tx power → 0, DR5 → DR4); on each further inject one more DR step; let a periodic
+> uplink go out between steps and confirm its DR/SF on the LNS. At DR0 confirm the next inject reaches the
+> budget and ends in RECONNECT → rejoin (new DevAddr). Repeat, but inject `ats lrw lc ok` mid-ladder (e.g. at
+> DR3): confirm WARNING → HEALTHY with the **same** DevAddr and the uplinks staying on DR3 until the NS raises
+> the DR. Real-outage variant: `lrw-link-check-interval 1`, disable the device on the NS, confirm a link check
+> on every report in WARNING and one rung per report; re-enable it mid-ladder and confirm recovery on the lower
+> DR without a rejoin. Restore the config afterwards.
+
+> **HW-verified (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub, STICKER `5876070000000413`):**
+> - B-2/B-3 inject runs (ADR off, temporary `ats lrw setdr` hook to start from DR5): one rung per uplink
+>   DR5 → DR0 on air, with the TX-power rung visible as +8–9 dB RSSI.
+>   - Floor → rejoin (new DevAddr).
+>   - `lc ok` at DR1 → HEALTHY with the same DevAddr.
+> - B-4 real outage (ADR on, LC every report, device disabled on the NS, no injects): WARNING + rungs DR5 → DR2,
+>   then the NS was re-enabled and the device recovered on DR2 with the same DevAddr and no JoinRequest.
+> - C-2 on the image combined with #409: `lrw-datarate dr5` + ADR off, the ladder steps through
+>   `lorawan_set_datarate()`, and after the rejoin the pinned DR5 is back.
+> - Bench caveat: the Hub's ChirpStack has an effective `network.max_dr = 0`, so with ADR on it pulls every node to DR0.
+>   Start the ladder from a raised DR via the hook, or run with the NS disabled as in B-4.
+
+- [x] Pass
+
+### L19 — US915/AU915: sub-band survives repeated failed joins (v1.5.0, #424)
+
+**Goal:** With `lrw-sub-band` set, every JoinRequest stays on the configured sub-band even after the
+sub-band's 8 channels have all been used by failed joins and after each rejoin's MAC re-init.
+**Observable:** Gateway / NS raw frame log: all JoinRequests on the sub-band's 125 kHz channels (sub-band 2:
+903.9–905.3 MHz) or its 500 kHz channel (904.6 MHz); none elsewhere. RTT `Applied sub-band <n>` after each
+`MAC reinitialized`.
+
+**Prompt for Claude:**
+> On a US915 bench with an 8-channel (e.g. FSB2) gateway, set `config lrw-region us915`,
+> `config lrw-sub-band 2` + `settings save`. Make joins fail (device disabled on the NS or not registered)
+> and trigger ≥ 10 join attempts (shell `join` repeatedly, ~15 s apart for the duty cycle, or wait for the
+> backoff). From the gateway's frame log confirm every JoinRequest frequency lies in sub-band 2. Then
+> re-enable the device and confirm the next join succeeds. (On v1.5.0 before #424 the attempts after the 8th
+> spread over all eight sub-bands.)
+
+> **Not run yet (2026-09-23):** no US915 gateway, and no 902–928 MHz TX on the EU868 bench. Covered by code review only.
 
 - [ ] Pass
 
@@ -1723,7 +1849,7 @@ across reboot/reflash (NVS `clm/state`); upgrading a v1.4.x unit migrates `unset
 ### N11 — NFC LED during a mailbox tap (#315, v1.5.0 #414)
 
 **Goal:** an operator holding the phone can tell a successful tap from a failed one by the LED
-alone (`doc/version 1.5.md` §4 "LED during a tap"). The firmware sends **no reply** to a frame it
+alone (`doc/version 1.5.md` §13 "LED during a tap"). The firmware sends **no reply** to a frame it
 cannot authenticate (wrong `secret_key` / `vendor_token`, stale or out-of-window `nonce_counter`,
 unknown channel), so without the LED a failed tap looks like a slow one.
 **Observable:**

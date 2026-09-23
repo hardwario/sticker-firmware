@@ -143,7 +143,7 @@ var _ALM_HEX_ENC = {};
 // Names drop the `lrw_` prefix the YAML carries (region <- lrw_region, ...).
 var _LRW_NAMES = {
   1: "region", 2: "sub_band", 3: "network", 4: "adr", 5: "activation",
-  13: "link_check_interval", 14: "link_check_fail_rejoin", 15: "radio_mode"
+  13: "link_check_interval", 14: "link_check_fail_rejoin", 15: "radio_mode", 16: "datarate"
 };
 var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
 
@@ -152,10 +152,11 @@ var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
 // hides but which a downlink may legitimately set.
 var _LRW_HEX_ENC = { deveui: 6, joineui: 7, nwkkey: 8, appkey: 9, devaddr: 10, nwkskey: 11, appskey: 12 };
 var _LRW_ENUM = {
-  region: { EU868: 0, US915: 1, AU915: 2 },
+  region: { EU868: 0, US915: 1, AU915: 2, AS923: 3 },
   network: { PUBLIC: 0, PRIVATE: 1 },
   activation: { OTAA: 0, ABP: 1 },
-  radio_mode: { OFF: 0, LORAWAN: 1, P2P: 2 }
+  radio_mode: { OFF: 0, LORAWAN: 1, P2P: 2 },
+  datarate: { AUTO: 0, DR0: 1, DR1: 2, DR2: 3, DR3: 4, DR4: 5, DR5: 6, DR6: 7, DR7: 8 }
 };
 function _invert(map) {
   var out = {};
@@ -254,6 +255,8 @@ function _decodeConfigDump(bytes, start, end) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (f === 1) cd.page_index = v.value;
       else if (f === 2) cd.page_count = v.value;
+      // field 7 = w1_slot_type, non-packed fallback (one varint per entry).
+      else if (f === 7) { (cd.w1_slot_type = cd.w1_slot_type || []).push(_W1_SLOT_TYPES[v.value] || ("type" + v.value)); }
     } else if (w === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var e2 = pos + len.value;
@@ -261,6 +264,16 @@ function _decodeConfigDump(bytes, start, end) {
       else if (f === 4) cd.application = _decodeApplication(bytes, pos, e2);
       else if (f === 5) cd.sensors = _decodeSensors(bytes, pos, e2);
       else if (f === 6) cd.alarms = _decodeAlarms(bytes, pos, e2);
+      // field 7 = repeated uint32 w1_slot_type (#412), packed: detected 1-Wire
+      // slot type for slots 1..4. Names mirror enum app_w1_slot_type (FW).
+      else if (f === 7) {
+        cd.w1_slot_type = [];
+        var p = pos;
+        while (p < e2) {
+          var t = _pbReadVarint(bytes, p); p = t.next;
+          cd.w1_slot_type.push(_W1_SLOT_TYPES[t.value] || ("type" + t.value));
+        }
+      }
       pos = e2;
     } else { break; }
   }
@@ -269,11 +282,13 @@ function _decodeConfigDump(bytes, start, end) {
 
 function _decodeInfo(bytes, start, end) {
   var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false, device_status: 0, active_alarms: [] };
+  var seen = {}; // field numbers present on the wire (#425: a page emits only these)
   var pos = start;
   while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
+    seen[field] = true;
     if (wire === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (field === 1) info.fw_major = v.value;
@@ -322,11 +337,37 @@ function _decodeInfo(bytes, start, end) {
       .filter(function (f) { return (info.reset_cause & f[0]) !== 0; })
       .map(function (f) { return f[1]; });
   }
+  // Internal: read by _pruneInfoPage(), removed again before the result leaves
+  // the decoder (see the paging block in the Response decoder).
+  Object.defineProperty(info, "_seen", { value: seen, enumerable: false, configurable: true });
   return info;
 }
 
+// #425: an Info *page* carries only some fields. Drop everything the page did
+// not contain, so a missing field never reads as a default (fw 0.0.0, status 0).
+var _INFO_FIELD_KEYS = {
+  1: ["fw_major"], 2: ["fw_minor"], 3: ["fw_patch"], 4: ["build_type", "build_type_name"],
+  5: ["serial_number"], 6: ["uptime_s"], 7: ["unix_time"], 8: ["debug"], 9: ["claim_token"],
+  10: ["battery"], 11: ["reset_cause", "reset_cause_flags"], 12: ["lrw_state", "lrw_state_name"],
+  13: ["dev_eui"], 14: ["device_status", "device_status_flags"], 15: ["active_alarms"],
+  16: ["last_dl_rssi"], 17: ["last_dl_snr"], 18: ["last_dl_age_s"]
+};
+function _pruneInfoPage(info) {
+  var seen = info._seen || {};
+  var keep = {};
+  for (var f in _INFO_FIELD_KEYS) {
+    if (seen[f]) _INFO_FIELD_KEYS[f].forEach(function (k) { keep[k] = true; });
+  }
+  if (seen[1] || seen[2] || seen[3]) keep.fw_version = true;
+  var out = {};
+  for (var k in info) { if (info.hasOwnProperty(k) && keep[k]) out[k] = info[k]; }
+  return out;
+}
+
 function _decodeError(bytes, start, end) {
-  var err = {};
+  // code defaults to 0 (UNKNOWN): proto3 omits it, and over LoRaWAN the compact
+  // "response too large" Error (#409) is exactly that — an empty Error body.
+  var err = { code: 0 };
   var pos = start;
   while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
@@ -509,6 +550,9 @@ function decodeDownlinkResponse(bytes) {
     if (wire === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (field === 1) resp.seq = v.value;
+      // #425 universal paging: page_index (12) / page_count (13) in the envelope.
+      else if (field === 12) resp.page_index = v.value;
+      else if (field === 13) resp.page_count = v.value;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var end = pos + len.value;
@@ -523,7 +567,31 @@ function decodeDownlinkResponse(bytes) {
       break;
     }
   }
+  _applyPages(resp);
   return resp;
+}
+
+// #425: every page is a complete message decoded on its own (no state between
+// uplinks — TTN / ChirpStack codecs are stateless). Label it "i/N" (1-based).
+// Older firmware numbered ConfigDump / HistoryFrame inside the body; use that
+// when the envelope has none.
+function _applyPages(resp) {
+  if (resp.page_count === undefined) {
+    if (resp.config_dump && resp.config_dump.page_count > 1) {
+      resp.page_index = resp.config_dump.page_index || 0;
+      resp.page_count = resp.config_dump.page_count;
+    } else if (resp.history_frame && resp.history_frame.frame_count > 1) {
+      resp.page_index = resp.history_frame.frame_index || 0;
+      resp.page_count = resp.history_frame.frame_count;
+    }
+  }
+  if (resp.page_count > 1) {
+    if (resp.page_index === undefined) resp.page_index = 0;
+    resp.pages = (resp.page_index + 1) + "/" + resp.page_count;
+    if (resp.info) resp.info = _pruneInfoPage(resp.info);
+  }
+  // The field-presence map is decoder-internal: never hand it to a consumer.
+  if (resp.info) delete resp.info._seen;
 }
 
 // Zig-zag decode for protobuf sint32.
@@ -531,8 +599,9 @@ function _pbZigzag(n) {
   return (n >>> 1) ^ -(n & 1);
 }
 
-// enum app_w1_slot_type → label (mirrors app_w1_slots.h).
-var _W1_SLOT_TYPES = { 1: "dallas", 2: "machine-probe" };
+// enum app_w1_slot_type → label (mirrors app_w1_slots.h). Shared by the fPort-2
+// telemetry per-slot type and the fPort-85 ConfigDump.w1_slot_type list (#412).
+var _W1_SLOT_TYPES = { 0: "empty", 1: "dallas", 2: "machine-probe" };
 
 // One SensorReading submessage (Telemetry field 27): slot=1 (1-based, matches
 // sensorN config / `w1 list`), type=2,
@@ -611,7 +680,13 @@ function decodeTelemetry(bytes) {
     switch (field) {
       // system
       case 1:  d.voltage = (v.value === 0) ? null : v.value / 50; break; // 0 = pre-sample sentinel (L-51)
-      case 2:  d.boot = (v.value & (1 << 0)) !== 0; break;     // system_flags (always sent)
+      case 2:  // system_flags (always sent): bit0 boot, bits 1..8 = device_status alarm byte (#409)
+        d.boot = (v.value & (1 << 0)) !== 0;
+        d.alarm_status = (v.value >>> 1) & 0xff;
+        d.alarm_status_flags = _DEVICE_STATUS
+          .filter(function (f) { return f[0] < (1 << 8) && (d.alarm_status & f[0]) !== 0; })
+          .map(function (f) { return f[1]; });
+        break;
       // internal (SHT4x) — sentinel → null (sensor enabled but no valid sample)
       case 3:  { var _t = _pbZigzag(v.value); d.temperature = (_t === _TM_S32_NA) ? null : _t / 100; break; }
       case 4:  d.humidity = (v.value === _TM_U32_NA) ? null : v.value / 2; break;
@@ -1099,6 +1174,9 @@ function decodeAlarmBatch(bytes) {
       if (field === 1) out.base_time = v.value >>> 0;
       else if (field === 2) out.total = v.value;
       else if (field === 4) out.time_synced = v.value !== 0;
+      // #425: page_index (5) / page_count (6), the same paging as Response.
+      else if (field === 5) out.page_index = v.value;
+      else if (field === 6) out.page_count = v.value;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var endE = pos + len.value;
@@ -1124,7 +1202,15 @@ function decodeAlarmBatch(bytes) {
   for (var i = 0; i < out.alarms.length; i++) {
     out.alarms[i].time = out.time_synced ? ((out.base_time + rels[i]) >>> 0) : null;
   }
-  out.truncated = out.alarms.length < out.total; // some alarms dropped to fit the DR
+  // total counts every alarm in the window. A batch split across frames (#425)
+  // is labelled "i/N"; its pages share base_time and total, and each decodes on
+  // its own. Unpaged, fewer events than total means some were dropped.
+  if (out.page_count > 1) {
+    if (out.page_index === undefined) out.page_index = 0;
+    out.pages = (out.page_index + 1) + "/" + out.page_count;
+  } else {
+    out.truncated = out.alarms.length < out.total;
+  }
   return out;
 }
 

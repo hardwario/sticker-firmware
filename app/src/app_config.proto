@@ -13,6 +13,7 @@ message AppConfigMessage {
             EU868 = 0;
             US915 = 1;
             AU915 = 2;
+            AS923 = 3;
         }
 
         enum Network {
@@ -31,6 +32,18 @@ message AppConfigMessage {
             P2P = 2;
         }
 
+        enum Datarate {
+            AUTO = 0;
+            DR0 = 1;
+            DR1 = 2;
+            DR2 = 3;
+            DR3 = 4;
+            DR4 = 5;
+            DR5 = 6;
+            DR6 = 7;
+            DR7 = 8;
+        }
+
         optional Region region = 1;
         optional uint32 sub_band = 2;
         optional Network network = 3;
@@ -46,6 +59,7 @@ message AppConfigMessage {
         optional uint32 link_check_interval = 13;
         optional uint32 link_check_fail_rejoin = 14;
         optional RadioMode radio_mode = 15;
+        optional Datarate datarate = 16;
     }
 
     message Application {
@@ -186,7 +200,11 @@ message Command {
         optional uint32 page              = 5;
     }
 
-    message GetInfo      { }
+    // page (#425, NFC / vendor / shell): which page of an Info that does not fit
+    // one frame — the answer carries Response.page_index/page_count; the phone
+    // asks for pages 1..page_count-1 itself. Omitted/0 = first page. Ignored
+    // over LoRaWAN, where the device streams every page by itself.
+    message GetInfo      { optional uint32 page = 1; }
     message GetConfig    { optional uint32 page = 1; }
     message SettingsSave { }
     message Reboot       { }
@@ -232,7 +250,9 @@ message Command {
 
     // Enumerate the 1-Wire bus; the response (Response.W1Scan) returns the
     // discovered ROMs so the host can teach a slot via SetParam sensorN_rom.
-    message W1Scan { }
+    // page: as GetInfo.page — a result that does not fit one frame is paged by
+    // ROM; every page request rescans the bus (the order is deterministic).
+    message W1Scan { optional uint32 page = 1; }
 
     // Take a fresh sensor sample, send it as telemetry over LoRaWAN (fPort 2),
     // and — over NFC — return the same readings synchronously in Response.sample
@@ -325,8 +345,19 @@ message Response {
         uint32 fw_patch       = 6;
         reserved 7;                 // was device_status — owner-only via get_info (#414)
     }
+    reserved 11;  // was info_lite (#409 draft), replaced by Info pages (#425)
+
+    // Universal paging (#425), the same for every response type. An answer that
+    // does not fit one frame — over a radio, the payload budget — is split into
+    // pages, each a complete Response with the same seq and a part of the body:
+    // page_index = 0..page_count-1 of page_count. Over a radio the device sends
+    // all pages by itself; over NFC the host asks for a page. Absent (page_count
+    // 0/1) = the whole answer is in this one frame.
+    uint32 page_index = 12;
+    uint32 page_count = 13;
 
     message Ack { }
+
 
     message Info {
         // Firmware version (semver components). board is omitted on purpose —
@@ -392,15 +423,28 @@ message Response {
     }
 
     message ConfigDump {
+        // Deprecated since #425, no longer set: paging is Response.page_index /
+        // page_count for every response type. Kept so older firmware decodes.
         uint32 page_index = 1;
         uint32 page_count = 2;
         optional AppConfigMessage.Lorawan     lorawan     = 3;
         optional AppConfigMessage.Application application = 4;
         optional AppConfigMessage.Sensors     sensors     = 5;
         optional AppConfigMessage.Alarms      alarms      = 6;
+        // Detected 1-Wire slot occupancy, slots 1..4 in order. Raw uint32 whose
+        // values follow enum app_w1_slot_type (app_w1_slots.h — the single source
+        // of truth, extended in one place when a new sensor family is added):
+        // 0=empty, 1=dallas (DS18B20), 2=machine-probe (DS28E17). This is live
+        // runtime state, not a stored config field — it is filled ONLY by the
+        // autonomous boot settings-info uplink (#412), never by GetConfig/GetParam
+        // (those stay a pure config snapshot). The persisted slot ROM serials are
+        // read separately via GetParam(sensors 11..14).
+        repeated uint32 w1_slot_type = 7;
     }
 
     message HistoryFrame {
+        // Deprecated since #425, no longer set: frames are Response.page_index /
+        // page_count like every other paged response. Kept so older firmware decodes.
         uint32 frame_index = 1;
         uint32 frame_count = 2;
         uint32 t0_unix     = 3;
@@ -432,6 +476,7 @@ message Response {
             PERSIST_FAILED      = 6;
             NOT_SUPPORTED       = 7;   // command tag unknown / removed (L-54)
             NOT_WRITABLE        = 8;   // field not writable over this transport (M-3); fault_field = group*100+tag
+            BUDGET_TOO_SMALL    = 9;   // answer does not fit the current LoRaWAN DR; retry once the DR rises (#409)
         }
 
         Code   code         = 1;
@@ -468,6 +513,11 @@ message AlarmReport {
     // uptime-relative (L-3/L-4). Absent = old FW = treat as synced. The decoder
     // emits time=null for every event when this is present and false.
     optional bool time_synced = 4;
+    // #425: a batch that does not fit one frame is split into several reports
+    // (same base_time / total), numbered page_index = 0..page_count-1 — the same
+    // paging as Response. Absent = the whole batch is in this report.
+    uint32 page_index = 5;
+    uint32 page_count = 6;
 }
 
 message AlarmEvent {

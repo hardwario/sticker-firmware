@@ -128,6 +128,71 @@ test("config_dump renders cap_buzzer (sensors tag 19) (#340 M20)", () => {
   assert.equal(u.config_dump.sensors.cap_buzzer, 1);
 });
 
+// #412: the boot settings-info uplink carries the detected 1-Wire slot type per
+// slot in ConfigDump.w1_slot_type (field 7, packed repeated uint32). Names mirror
+// enum app_w1_slot_type: 0=empty, 1=dallas, 2=machine-probe (same _W1_SLOT_TYPES
+// map as the fPort-2 telemetry per-slot type).
+test("config_dump decodes w1_slot_type (packed, #412)", () => {
+  // Response{ config_dump: ConfigDump{ page_count:1, w1_slot_type:[2,1,0,0] } },
+  // 1-byte version prefix: 01 | 22 08 (config_dump, len 8) | 10 01 (page_count=1)
+  //                              | 3a 04 02 01 00 00 (field7 packed: 2,1,0,0)
+  const dump = hex("01220810013a0402010000");
+  const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
+  assert.equal(u.config_dump.page_count, 1);
+  assert.deepEqual(u.config_dump.w1_slot_type, ["machine-probe", "dallas", "empty", "empty"]);
+});
+
+// #425 universal paging: Response.page_index (12) / page_count (13) in the
+// envelope, the same for every response type. Each page decodes on its own —
+// the decoder keeps no state between uplinks.
+test("envelope paging: ConfigDump page 2/3 decodes alone (#425)", () => {
+  // seq 9, page_index 1, page_count 3, config_dump.application.interval_report 900
+  const d = codec.decodeUplink({ bytes: hex("0108092205220318840760016803"), fPort: 85 }).data;
+  assert.equal(d.seq, 9);
+  assert.equal(d.page_index, 1);
+  assert.equal(d.page_count, 3);
+  assert.equal(d.pages, "2/3");
+  assert.equal(d.config_dump.application.interval_report, 900);
+});
+
+test("envelope paging: HistoryFrame page 1/2 (page_index 0 omitted) (#425)", () => {
+  const d = codec.decodeUplink({
+    bytes: hex("01080a2a121880cae2d006220366085a280330840738016802"), fPort: 85,
+  }).data;
+  assert.equal(d.pages, "1/2");
+  assert.equal(d.history_frame.records.length, 1);
+  assert.equal(d.history_frame.records[0].temperature, 21.5);
+  assert.equal(d.history_frame.records[0].time, 1780000000);
+});
+
+test("envelope paging: an unpaged answer has no pages field (#425)", () => {
+  const d = codec.decodeUplink({ bytes: hex("01220810013a0402010000"), fPort: 85 }).data;
+  assert.equal(d.pages, undefined); // legacy page_count 1 = single frame
+});
+
+// #425: an AlarmReport batch split over frames is numbered like Response pages.
+// Page 2/2 decodes alone (stateless decoder): its own base_time / total.
+test("fPort 3 AlarmReport page 2/2 decodes alone (#425)", () => {
+  const d = codec.decodeUplink({
+    bytes: hex("0108a487ccd50610041a0b200928ca59300138034802200128013002"), fPort: 3,
+  }).data;
+  assert.equal(d.pages, "2/2");
+  assert.equal(d.total, 4);
+  assert.equal(d.truncated, undefined); // paged: "fewer than total" is expected
+  assert.equal(d.alarms.length, 1);
+  assert.equal(d.alarms[0].slot, 3);
+  assert.equal(d.alarms[0].time, 1790116772 + 9);
+});
+
+// An unknown/newer slot type from a future firmware must not break an older
+// decoder — it falls back to "type<N>" instead of undefined.
+test("config_dump w1_slot_type unknown value falls back to type<N> (#412)", () => {
+  // ConfigDump{ w1_slot_type:[7] }: 01 | 22 03 | 3a 01 07
+  const dump = hex("0122033a0107");
+  const u = codec.decodeUplink({ bytes: dump, fPort: 85 }).data;
+  assert.deepEqual(u.config_dump.w1_slot_type, ["type7"]);
+});
+
 // --- Uplink: legacy bitmap (fPort 1) --------------------------------------
 test("decodeUplink decodes legacy bitmap (fPort 1)", () => {
   const got = codec.decodeUplink({ bytes: hex("7a01a109fa580258"), fPort: 1 });
@@ -197,6 +262,24 @@ test("decodeUplink splits Error.fault_field group*100 + tag (#196, fPort 85)", (
   assert.equal(got.error.fault_field, 5);
 });
 
+// Compact LoRaWAN Errors (#409 3a): no detail string. An empty Error body
+// decodes as code 0 (UNKNOWN, omitted by proto3). The LoRaWAN "response too
+// large" fallback is Error{ code=9 BUDGET_TOO_SMALL } (#409 3c) -> 7 B.
+test("decodeUplink decodes compact LoRaWAN Errors without detail (#409, fPort 85)", () => {
+  const oor = codec.decodeUplink({ bytes: hex("0108033205080210cb01"), fPort: 85 }).data;
+  assert.equal(oor.error.code, 2);
+  assert.equal(oor.error.fault_group, 2);
+  assert.equal(oor.error.fault_field, 3);
+  assert.equal(oor.error.detail, undefined);
+
+  const empty = codec.decodeUplink({ bytes: hex("0108023200"), fPort: 85 }).data;
+  assert.equal(empty.seq, 2);
+  assert.equal(empty.error.code, 0);
+
+  const big = codec.decodeUplink({ bytes: hex("01080232020809"), fPort: 85 }).data;
+  assert.equal(big.error.code, 9); // BUDGET_TOO_SMALL: retry once the DR rises
+});
+
 // W1Scan response (field 7): the discovered 1-Wire ROMs come back as hex
 // strings so the host can teach a slot via SetParam sensorN_rom.
 //   01           APP_PROTO_VERSION prefix
@@ -224,6 +307,16 @@ test("decodeUplink decodes get_info with claim_token (fPort 85)", () => {
   assert.equal(got.info.fw_version, "1.4.2");
   assert.equal(got.info.serial_number, 1234567890);
   assert.equal(got.info.claim_token, "158a6a5d5b54c5118e62a8f4af0de8d2");
+});
+
+// #425: the decoder's internal field-presence map never reaches the consumer,
+// not even as a hidden property (spread / Object.assign / structuredClone drop it).
+test("decodeUplink get_info carries no internal _seen property (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a24080110041802200228d285d8cc04302a40014a10158a6a5d5b54c5118e62a8f4af0de8d2"),
+    fPort: 85,
+  }).data;
+  assert.equal(Object.getOwnPropertyNames(got.info).includes("_seen"), false);
 });
 
 // An uncommissioned device omits claim_token (the all-zero sentinel) → absent.
@@ -375,6 +468,20 @@ test("decodeUplink fPort 2: real HW frame, system + enabled groups always presen
   assert.equal(got.hall_left_is_active, true);
   assert.equal(got.hall_right_count, 0);
   assert.equal(got.hall_right_is_active, true);
+});
+
+// #409 A5a: system_flags bits 1..8 carry the device_status alarm byte, so the
+// alarm state reaches the LNS even at the 11 B budget tier (no fPort 3 fits).
+// voltage=100, system_flags=0x07 = boot | alarm_any<<1 | alarm_threshold<<1.
+test("decodeUplink fPort 2: system_flags alarm bits (#409)", () => {
+  const got = codec.decodeUplink({ bytes: hex("0108641007"), fPort: 2 }).data;
+  assert.equal(got.boot, true);
+  assert.equal(got.alarm_status, 0x03);
+  assert.deepEqual(got.alarm_status_flags, ["alarm_any", "alarm_threshold"]);
+
+  const idle = codec.decodeUplink({ bytes: hex("0108641000"), fPort: 2 }).data;
+  assert.equal(idle.alarm_status, 0);
+  assert.deepEqual(idle.alarm_status_flags, []);
 });
 
 // #78: an enabled-sensor group is sent whole even when ALL its values are 0 —
@@ -882,6 +989,27 @@ test("set_param lorawan.radio_mode (enum) + link-check fields round-trip (#H2)",
   assert.equal(back.set_param.lorawan.radio_mode, 2); // P2P index
   assert.equal(back.set_param.lorawan.link_check_interval, 7);
   assert.equal(back.set_param.lorawan.link_check_fail_rejoin, 3);
+});
+
+// lrw_region AS923 (#409 A6) = 3 on the wire.
+test("set_param lorawan.region AS923 round-trips (#409)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 6, command: "set_param", set_param: { lorawan: { region: "AS923" } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.lorawan.region, 3);
+});
+
+// lrw_datarate (#409 A3): enum on the wire, AUTO = 0 and DRn = n + 1.
+test("set_param lorawan.datarate (enum) round-trips (#409)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 5, command: "set_param", set_param: { lorawan: { datarate: "DR3", adr: false } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.lorawan.datarate, 4); // DR3 -> wire value 4
+  assert.equal(back.set_param.lorawan.adr, 0);
 });
 
 test("encode surfaces an error on an unknown config field instead of a silent no-op (#H2)", () => {

@@ -100,6 +100,9 @@ enum app_cmd_action {
 	APP_CMD_ACTION_SECRET_KEY_SAVE, /* persist the new secret_key + reboot (#299, #322) */
 	APP_CMD_ACTION_CLAIM_ACTIVE_SAVE, /* persist new claim_token + reboot, then re-open the
 					   * claim window (#351/#415, ex-CLM_REARM_SAVE) */
+	/* LoRaWAN GetConfig / GetParam answered with page 0 of N (#409 3d/3e): the
+	 * transport streams the remaining pages via app_cmd_stream_next(). */
+	APP_CMD_ACTION_PAGE_STREAM,
 };
 
 /* Plain-C device info snapshot (no protobuf dependency), filled by
@@ -159,11 +162,44 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
  * encrypted channel usable (see app_settings_vendor_reset). */
 const uint8_t *app_cmd_take_pending_vendor_secret_key(void);
 
-/* Build an unsolicited device Info frame (Response{ seq=0, info=... },
- * the same payload a GetInfo command returns) into `out`. Used to send an
- * autonomous GetInfo uplink on join. Returns 0 with *out_len set, -EINVAL on a
- * NULL argument, or -EMSGSIZE if `out_cap` is too small. */
-int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len);
+/* Build an unsolicited device Info frame (Response{ seq=0, info=... }, the
+ * same payload a GetInfo command returns) into `out`. Used to send an autonomous
+ * GetInfo uplink on join. When the full Info does not fit `out_cap` it is paged
+ * (#425): page 0 goes into `out` and *more is set; the remaining pages come from
+ * app_cmd_stream_next(). Returns 0 with *out_len set, -EINVAL on a NULL argument,
+ * or -EMSGSIZE if not even one Info field fits. */
+int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *more);
+
+/* Build an unsolicited Response{ seq, error{ code=BUDGET_TOO_SMALL } } (no
+ * detail, 5-7 B) into `out` — for a LoRaWAN answer that stopped because the DR
+ * budget dropped (e.g. a history replay mid-stream, #409). Returns 0, -EINVAL,
+ * or -EMSGSIZE. */
+int app_cmd_build_budget_error(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len);
+
+/* Device-driven paging over a radio (#425). An answer that needs more than one
+ * page (GetConfig / GetParam, GetInfo, W1Scan, the autonomous Info and
+ * settings-info) is sent as page 0 plus APP_CMD_ACTION_PAGE_STREAM (or `more`);
+ * each call here then encodes the next page of that same answer (same seq, same
+ * layout, Response.page_index/page_count) into `out`. Returns 0 with *out_len
+ * set, -ENODATA when no stream is active or it has finished, or a negative
+ * errno (the stream is dropped). A new paged request replaces a running one. */
+int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len);
+
+/* Drop a running page stream (e.g. on rejoin). */
+void app_cmd_stream_cancel(void);
+
+/* True while pages of an answer are still waiting to be sent. */
+bool app_cmd_stream_active(void);
+
+/* Build an unsolicited settings-info frame (Response{ seq=0, config_dump=... })
+ * into `out`: a fixed selection of the key operating settings — application
+ * interval_sample/interval_report/history_enable, the sensor cap_* capabilities
+ * and (when 1-Wire is present) the detected per-slot w1_slot_type — so the
+ * network learns the effective config on join without polling (#412). When it
+ * does not fit `out_cap` it is paged (#425): page 0 into `out`, *more set, the
+ * rest from app_cmd_stream_next(). Returns 0 with *out_len set, -EINVAL on a NULL
+ * argument, or -EMSGSIZE if not even one setting fits. */
+int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len, bool *more);
 
 /* Staging buffer for one LoRaWAN history-replay frame (version byte + Response{
  * seq, history_frame } protobuf). Sized to exceed the largest EU868 payload (242 B
@@ -213,13 +249,14 @@ struct app_cmd_alarm_event {
 
 /* Build an alarm-detail batch (AlarmReport) for fPort 3 (#27) into `out`.
  * `events[0..n_events)` are encoded (capped to the message's 8-event array);
- * `total` is the true window count and may exceed the encoded events when the
- * caller trimmed to fit the data rate. Returns 0 with *out_len set, -EINVAL on
- * a NULL argument, or -EMSGSIZE if it won't fit `out_cap`. `time_synced` reports
- * whether `base_time` is absolute UTC (L-3/L-4). */
+ * `total` is the true window count. A batch split over several reports numbers
+ * them page_index 0..page_count-1 (#425; omitted when page_count <= 1). Returns
+ * 0 with *out_len set, -EINVAL on a NULL argument, or -EMSGSIZE if it won't fit
+ * `out_cap`. `time_synced` reports whether `base_time` is absolute UTC (L-3/L-4). */
 int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
-			       uint8_t *out, size_t out_cap, size_t *out_len);
+			       uint32_t page_index, uint32_t page_count, uint8_t *out,
+			       size_t out_cap, size_t *out_len);
 
 #ifdef __cplusplus
 }

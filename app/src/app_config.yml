@@ -18,6 +18,43 @@ enums:
     - name: AU915
       value: 2
       shell: au915
+    # #409 A6. Channel plan group AS923-1 (loramac-node default; compile-time only,
+    # REGION_AS923_DEFAULT_CHANNEL_PLAN). Dwell time on by default: DR2 = 11 B.
+    - name: AS923
+      value: 3
+      shell: as923
+
+  # Manual uplink datarate (#409 A3). AUTO leaves the stack/ADR in charge; DRn is
+  # the region's DRn (value = n + 1, so AUTO can be the proto3 default 0). DR8+
+  # are downlink-only / BW500 corner cases in the 915 plans and not offered.
+  lrw_datarate:
+    - name: AUTO
+      value: 0
+      shell: auto
+    - name: DR0
+      value: 1
+      shell: dr0
+    - name: DR1
+      value: 2
+      shell: dr1
+    - name: DR2
+      value: 3
+      shell: dr2
+    - name: DR3
+      value: 4
+      shell: dr3
+    - name: DR4
+      value: 5
+      shell: dr4
+    - name: DR5
+      value: 6
+      shell: dr5
+    - name: DR6
+      value: 7
+      shell: dr6
+    - name: DR7
+      value: 8
+      shell: dr7
 
   lrw_network:
     - name: PUBLIC
@@ -397,7 +434,7 @@ parameters:
     type: enum
     enum: lrw_region
     persistent: [device_reset]
-    help: "Get/Set LoRaWAN region (eu868/us915/au915)."
+    help: "Get/Set LoRaWAN region (eu868/us915/au915/as923)."
 
   - name: radio_mode
     proto_group: lorawan
@@ -519,6 +556,15 @@ parameters:
     size: 16
     persistent: [device_reset]
     help: "Get/Set LoRaWAN AppSKey (32 hexadecimal digits)."
+
+  - name: lrw_datarate
+    proto_group: lorawan
+    writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
+    proto_id: 16
+    type: enum
+    enum: lrw_datarate
+    persistent: [device_reset]
+    help: "Get/Set manual uplink datarate (auto, dr0-dr7). Applied after join, only with ADR off; auto = stack default."
 
   - name: lrw_link_check_interval
     proto_group: lorawan
