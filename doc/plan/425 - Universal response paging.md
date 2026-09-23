@@ -239,3 +239,51 @@ alarm batch > 1 frame); the 11 B tier needs a US915/AU915 gateway (as #409 A5b).
 
 About +1 KB flash (layout + stream kinds), +~150 B RAM (the stream snapshot union). Debug RAM is
 at 94 % after #409 — measure early; the snapshot union is the lever if it gets tight.
+
+## 10. HIL record 2026-09-23
+
+Bench: STICKER DevEUI `5876070000000413`, J-Link `822005110`, EU868, ADR off; ChirpStack v4 on the ProXimos Hub.
+Frames were read from the raw capture and decoded with `ttn.js`; from Hub combined10 on, pages were also assembled
+on the Hub (proximos-v2 !99). Debug images carry the #419 `loramac-node` patch. The run was done by the Sticker
+controller session.
+
+**First run, head `9ef98b0`:**
+
+| Test | Result |
+|---|---|
+| P1 GetConfig at DR0 | PASS — 6/6 pages, same `seq` |
+| P2a / P2b GetParam | PASS — one key unpaged; P2b unpaged |
+| P3 GetConfig `page=3` | PASS — pages 3..5 byte-identical to the full stream |
+| P4 new GetConfig cancels a running stream | PASS — one page of the old `seq` was already queued and still went out |
+| P5a / P6 boot Info / settings-info | PASS — unpaged |
+| **P5b GetInfo with 6 active alarms at DR0** | **FAIL** — MPU fault "Stack overflow on CPU 0" in `m_work_q` (guard of `m_work_stack` hit, PC in nanopb `load_descriptor_values`) → watchdog reset |
+
+A/B on `v1.5.0` @ `8c23cc5` (without this PR), same scenario: no crash; the unpaged 50 B Info trims
+`active_alarms` to 4/6. So P5b was a **regression of this PR**. `app_cmd_handle()` kept the `Command` + `Response`
+and the paged-Info layout with two more `Response`s on the 4 KB `m_work_q` stack at the same time.
+
+**Fix `5503d54`:** `Command` decode and dispatch moved into a `__noinline` `decode_and_dispatch()`, and the
+dead response reused as scratch.
+
+**Re-run, heads `5503d54` + `4c7b10a` (decoder only):**
+
+| Test | Result |
+|---|---|
+| P5b | PASS — 2 pages (3 + 3 alarms), no reset |
+| P2b paged | PASS — one key per page, fixed 30 B layout (#409) |
+| P7 AlarmReport pages | PASS |
+| P8 history, 30 records | PASS — 4 frames, envelope numbering (`4c7b10a` omits the legacy HistoryFrame numbering when absent) |
+| P10 at DR5 | PASS — Info 7 + 1 and AlarmReport 5 + 3 (64 B TX slot, a design limit); GetConfig with 8 rules = 14 pages |
+| Release image | PASS — Info in one frame with 8 alarms, settings-info + `w1_slot_type`, GetConfig 14/14 assembled on the Hub |
+| D1–D3 with #424 | PASS — boot, a page stream, and a link-recovery rung DR5 → DR4 + `lc ok` → HEALTHY with the same DevAddr; the stream is unaffected |
+
+**Not HW-tested:** the 11 B tier (US915 DR0, AU915/AS923 DR2 dwell), AU915, the P2P driver (#426). Native tests only.
+
+**Observations (open, not blockers):**
+- EU868 duty cycle at DR0: LoRaMac's credits reset only per hour, so ~36 DR0 frames can block every uplink for
+  ~50 min. Host guidance is in `doc/version 1.5.md` §12; the Hub limits requests (proximos-v2#96 / !99).
+- Priority: an AlarmReport page waited ~37 s behind a 14-page GetConfig stream, because responses drain before
+  alarms. "Alarms first" vs. leaving it to the host is an open decision.
+- A rejoin does not cancel pages already queued. They go out in the new session, possibly out of order. Consumers
+  merge by `seq` and page index, so this is tolerated.
+
