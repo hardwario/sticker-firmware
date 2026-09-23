@@ -230,6 +230,23 @@ ZTEST(nfc_hw, test_mb_boot_clears_stuck_mb_en)
 		      "boot must clear a stuck MB_EN (0x%02x)", st25dv_emul_mb_ctrl());
 }
 
+/* HW validation (phone kept on the tag across an NFC-triggered reboot): the
+ * field's GPO edge came before the IRQ was armed and the chip is released
+ * (VCC_ON=0), so the phone cannot enable the mailbox. Init must arm one poll
+ * pass, or the poll thread waits for the next field change (K_FOREVER). */
+ZTEST(nfc_hw, test_mb_boot_with_field_present_arms_initial_poll)
+{
+	st25dv_emul_set_field_on(true);
+	while (app_nfc_wait_event(0) == 0) {
+		/* drop the edge of the field set above: at boot it was never seen */
+	}
+	zassert_equal(app_nfc_init(), 0, "app_nfc_init");
+	int armed = app_nfc_wait_event(0);
+
+	st25dv_emul_set_field_on(false);
+	zassert_equal(armed, 0, "init must arm an initial poll pass for a field present at boot");
+}
+
 ZTEST(nfc_hw, test_mb_session_cmd_keeps_claim_active_and_advances_nonce)
 {
 	memset(g_app_config.claim_token, 0xAB, sizeof(g_app_config.claim_token));

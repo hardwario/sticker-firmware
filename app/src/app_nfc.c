@@ -1301,6 +1301,13 @@ int app_nfc_init(void)
 	 * the mailbox get_basic_info command and runs every command through the
 	 * mailbox, so there is nothing to lay down or reconcile on the EEPROM here. */
 	m_ready = true;
+
+	/* A field already present at boot (the phone kept on the tag across an
+	 * NFC-triggered reboot) raised its GPO edge before the IRQ was armed, and the
+	 * chip is released (LPD high, VCC_ON=0), so the phone cannot enable the
+	 * mailbox: arm one initial poll pass so the poll thread sees FIELD_ON and
+	 * serves it instead of waiting for the next field change. */
+	k_sem_give(&m_gpo_sem);
 	return 0;
 }
 
