@@ -309,6 +309,16 @@ test("decodeUplink decodes get_info with claim_token (fPort 85)", () => {
   assert.equal(got.info.claim_token, "158a6a5d5b54c5118e62a8f4af0de8d2");
 });
 
+// #425: the decoder's internal field-presence map never reaches the consumer,
+// not even as a hidden property (spread / Object.assign / structuredClone drop it).
+test("decodeUplink get_info carries no internal _seen property (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a24080110041802200228d285d8cc04302a40014a10158a6a5d5b54c5118e62a8f4af0de8d2"),
+    fPort: 85,
+  }).data;
+  assert.equal(Object.getOwnPropertyNames(got.info).includes("_seen"), false);
+});
+
 // An uncommissioned device omits claim_token (the all-zero sentinel) → absent.
 test("decodeUplink get_info omits claim_token when uncommissioned (fPort 85)", () => {
   const got = codec.decodeUplink({

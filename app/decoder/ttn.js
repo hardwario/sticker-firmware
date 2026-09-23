@@ -326,7 +326,9 @@ function _decodeInfo(bytes, start, end) {
       .filter(function (f) { return (info.reset_cause & f[0]) !== 0; })
       .map(function (f) { return f[1]; });
   }
-  Object.defineProperty(info, "_seen", { value: seen, enumerable: false });
+  // Internal: read by _pruneInfoPage(), removed again before the result leaves
+  // the decoder (see the paging block in the Response decoder).
+  Object.defineProperty(info, "_seen", { value: seen, enumerable: false, configurable: true });
   return info;
 }
 
@@ -577,6 +579,8 @@ function _applyPages(resp) {
     resp.pages = (resp.page_index + 1) + "/" + resp.page_count;
     if (resp.info) resp.info = _pruneInfoPage(resp.info);
   }
+  // The field-presence map is decoder-internal: never hand it to a consumer.
+  if (resp.info) delete resp.info._seen;
 }
 
 // Zig-zag decode for protobuf sint32.
