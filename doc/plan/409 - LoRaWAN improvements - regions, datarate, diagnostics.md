@@ -298,6 +298,11 @@ name next to `app_p2p_start_history_replay()` — the rename makes that a compil
 v1.5.0 ↔ feat-p2p merge instead of a silent true/false inversion; resolve by mapping
 `-EMSGSIZE` to `BUDGET_TOO_SMALL` there too.
 
+**Follow-up — universal paging in PR #425 (stacked on this PR):** one `Response.page_index /
+page_count` pair for every response type (and `AlarmReport`), device-driven page streams on
+LoRaWAN and P2P. It replaces `InfoLite` (3c) and the per-type numbering in `ConfigDump` /
+`HistoryFrame`; see `doc/plan/425 - Universal response paging.md`.
+
 **Also in this PR:** #419 — `DevStatusReq` after `LinkADRReq` (loramac-node `west patch`,
 `6d6215f`); **HW PASS 2026-09-23**.
 
@@ -322,6 +327,28 @@ needs a US915 / AU915 gateway (Step 7).
 Found during the run: `west flash` rebuilds a stale build dir before flashing, which bypassed the
 configure-time patch check and flashed an unpatched `LoRaMac.c` — fixed by checking on every build
 (`0d2b85a`).
+
+**HIL record 2 — delta on the final tip, 2026-09-23** (debug + release builds of this branch at `64f7b74` + the
+#419 patch from a private `loramac-node` copy — `strings zephyr.elf | grep -cx nextIsLinkAdrReq` = 1; same STICKER
+and Hub ChirpStack; flashed with `--skip-rebuild`). Covers what landed after record 1: the v1.5.0 sync (#421 glue),
+A1 without the `device_status` bit, 3d/3e page streaming and the release image with AS923 compiled in.
+
+| Item | Result |
+|---|---|
+| Boot regression | first-attempt join → Info (38 B) → settings-info (51 B) → telemetry, FIFO; all three decode with this branch's `ttn.js`; LinkCheckAns margin 24; no boot WRN/ERR |
+| A1 | `lrw-region us915` → `…not compiled into this image: radio-silent`, `device_status` 0x1000 (`lrw_disabled` only); the concentrator saw no frame for ~3 min; back to `eu868` → clean join |
+| A3 | ADR off + `dr3` → JoinRequest on DR0, then every uplink DR3/SF9 with the ADR bit clear, no LinkADRReq; ADR on → `lrw-datarate DR3 ignored: ADR is on` |
+| 3d/3e | one GetConfig downlink (`08092a00`) → 6 `ConfigDump` pages (seq 9, page 0..5 of 6) streamed ~5 s apart at DR0; one multi-field GetParam (`08021a0a0a08060701020304050a`) → 2 pages (seq 2); no key material in the pages |
+| #419 | `LinkADRReq` + trailing `DevStatusReq` → `DevStatusAns` in the next uplink, repeatedly (`06bb06`, `06b80b`) |
+| Release (AS923 compiled in) | first-attempt join → Info (fw 1.5.0) → settings-info (57 B, `w1_slot_type` 4× empty) → telemetry; LinkCheckAns on every uplink (margin 20–21); `DevStatusAns` |
+
+Bench note: the Hub's ChirpStack has an effective `network.max_dr = 0`, so its ADR answers every uplink with
+`LinkADRReq DR0 / TXPower 2..7` (proximos #95). Not a firmware issue; A3 was verified with ADR off, where the
+device ignores the DR/TX-power part of it.
+
+**Still not HW-tested** (no US915 / AU915 / AS923 gateway): A5b, the whole 11 B tier (`InfoLite`,
+`BUDGET_TOO_SMALL`, history-replay floor, 3g DR-drop recovery), A6 on air, and A3's per-region reject path (c).
+Native tests only. #418 is closed on the basis of those native tests.
 
 ## 4. Implementation steps
 

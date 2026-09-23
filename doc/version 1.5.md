@@ -19,6 +19,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN | **Fix** — low-DR delivery (#409 A5a, part 1): compact LoRaWAN `Error` so a command is always answered at the 11 B tier; MAC-flood (budget 0) no longer drops responses/alarms; alarm batches split across frames; alarm state mirrored into telemetry `system_flags`. |
 | LoRaWAN | **Fix** — `DevStatusReq` right after `LinkADRReq` is now answered (#419), via a `loramac-node` patch applied with `west patch apply`. |
 | LoRaWAN | **New** — AS923 region (#409 A6): `lrw-region as923`, channel plan AS923-1, release builds. |
+| LoRaWAN | **Improved** — faster link-loss recovery (#424): link check on every report while `WARNING`, a TX-power/data-rate step-down ladder before the rejoin (a moved device regains its gateway on a lower DR without losing the session), and US915/AU915 no longer lose the configured sub-band after repeated failed joins. |
 | LoRaWAN / P2P | **New** — universal response paging (#425): every answer that does not fit one frame is split into self-contained pages numbered `page_index`/`page_count` in the `Response` envelope (and in `AlarmReport`), sent by the device on its own; decoders label them `pages: "i/N"`. |
 
 ---
@@ -150,7 +151,7 @@ it actively polled with `GetParam` / `GetConfig` downlinks — so after any loca
 reconfiguration (shell / NFC), the LNS copy stayed stale until someone asked.
 
 This adds a **second autonomous fPort-85 uplink right after the boot `Info`**: a
-`Response.ConfigDump` (one frame when it fits, paged otherwise — §12) carrying a
+`Response.ConfigDump` (one frame when it fits, paged otherwise — §13) carrying a
 fixed selection of the key operating settings. Because `settings save` cold-reboots
 and every boot re-joins, this **re-announces the effective config automatically**
 after every persisted change — no diff-tracking, no extra state.
@@ -196,7 +197,7 @@ config reply, bool fields decode as `0`/`1`):
   field 7), 40 B with the four `w1_slot_type` entries, up to ~46 B with large
   interval values. It fits the EU868 DR0 budget (51 B) and the 64 B response buffer.
 - **Low DR outside EU868 (#418, resolved by #409 / #425):** below the EU868 DR0
-  budget the settings-info is paged (§12); a setting that does not fit even alone is
+  budget the settings-info is paged (§13); a setting that does not fit even alone is
   left out, and when nothing fits the device sends it once a DR change makes room.
 - The lean debug default (`debug.conf`, #395) builds with `CONFIG_W1=n`, so a
   debug image omits `w1_slot_type`. Build with `-DCONFIG_W1=y` to exercise it.
@@ -352,7 +353,9 @@ settings save
 
 - Applied in `on_join_success()` on **every (re)join**, after ADR is configured and
   before the payload budget is captured, so the telemetry split follows the pinned DR.
-  It also becomes the DR of the next join request.
+  JoinRequests are not affected: they always go out at the region's default join DR
+  (every (re)join re-initialises the MAC); the pin applies from the first uplink after
+  the join.
 - **Only with ADR off.** With `lrw-adr true` the value is ignored and a warning is
   logged (Zephyr's `lorawan_set_datarate()` refuses while ADR is on).
 - DR validity is **region-dependent**: EU868 DR0–7, US915 DR0–4, AU915 DR2–6 with the
@@ -382,7 +385,7 @@ fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *f
   UNKNOWN, which proto3 omits). The LoRaWAN "response too large" fallback is a 7 B
   `Error{ code = 9 BUDGET_TOO_SMALL }` — "retry once ADR raises the DR" — so a command
   that cannot be answered in full still gets an answer. NFC keeps `UNKNOWN` + detail.
-- **Info at a small budget** is paged (§12) — the join / clock-sync `Info` and a
+- **Info at a small budget** is paged (§13) — the join / clock-sync `Info` and a
   LoRaWAN `GetInfo`. (An interim `InfoLite` message from the #409 draft was replaced by
   this before release; `Response` field 11 is reserved.)
 - **Deferred boot announce.** If not even one field of the join `Info` or the #412
@@ -396,7 +399,7 @@ fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *f
 - **GetConfig / GetParam over LoRaWAN send every page by themselves.** One downlink
   request is enough: the device answers with the requested page (0 unless `page` is
   given) and then uplinks the remaining pages on its own — same `seq`, numbered as in
-  §12, paced by the duty cycle (at EU868 DR0 a full config takes minutes). A new paged
+  §13, paced by the duty cycle (at EU868 DR0 a full config takes minutes). A new paged
   request replaces a stream still running; a rejoin cancels it. The page size stays
   30 B. NFC is unchanged (the phone still asks page by page, ~450 B pages).
 - **DR drop between queueing and sending.** A queued frame that no longer fits after
@@ -454,7 +457,7 @@ settings save
   groups (AS923-2/-3/-4) would be separate build variants.
 - **No sub-band** — `lrw-sub-band` applies to US915/AU915 only.
 - **Dwell time on by default:** DR0/DR1 carry 0 B and DR2 carries 11 B, so AS923 at its
-  lowest DR is the 11 B budget tier handled by §9 and §12 (paged answers, compact
+  lowest DR is the 11 B budget tier handled by §9 and §13 (paged answers, compact
   `Error`, alarm state in telemetry, deferred boot announce). `lrw-datarate dr0` / `dr1` are rejected by
   the MAC and logged; the stack's DR stays in use.
 - **Release builds only.** `debug.conf` trims AS923 together with AU915/US915; a stored
@@ -464,10 +467,49 @@ settings save
 Cost: release +2 536 B flash, +0 B RAM (loramac-node channel structures are already
 sized for US915's 72 channels). Not tested on HW — the bench gateway is EU868 only.
 
+**HW verification of #409 (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub, STICKER DevEUI `5876070000000413`):**
+the region guard (§7), `lrw-datarate` (§8), compact `Error`, alarm split and alarm bits, GetConfig/GetParam page
+streaming (§9), `DevStatusAns` (§10) and the release image with AS923 compiled in all PASS. Not HW-tested (no
+US915/AU915/AS923 gateway): the 11 B budget tier of §9 and AS923 on air. See the HIL records in
+`doc/plan/409 - LoRaWAN improvements - regions, datarate, diagnostics.md`.
+
 
 ---
 
-## 12. Universal response paging (#425)
+## 12. Faster link-loss recovery (#424)
+
+When the network disappears (gateway off, or the device moved out of reach of its ADR-optimised data rate), v1.5.0 recovers faster and, where possible, without a rejoin.
+
+| | Before | After |
+|---|---|---|
+| Link check in `WARNING` | every `lrw-link-check-interval`-th report | **every report** (`lrw-link-check-interval 0` still disables link checks) |
+| DR fallback | only through the OTAA rejoin (MAC reset to the join DR). LoRaMac's own ADR backoff needs 128 unanswered uplinks for its first step (~32 h at 900 s) | **Recovery ladder**: entering `WARNING` and every later failed check restore the default (max) TX power and drop the DR by one step. A check that succeeds on the lower DR returns to `HEALTHY` with the same session. |
+| Rejoin | after `lrw-link-check-fail-rejoin` failures in `WARNING` | after that many failures **and** once the ladder is at the floor (region minimum DR, default TX power) |
+| Link loss → rejoin (EU868 from DR5, defaults 900 s / LC 5 / 5) | ≈ 9–10 h | ≈ 4–5 h |
+| US915/AU915 sub-band | set only as the active channel mask at boot. After ~8 failed joins, JoinRequests spread over all 8 sub-bands (~1 in 8 hit an 8-channel gateway). | also set as the LoRaMac **default** mask and re-applied after each rejoin's MAC re-init |
+
+**Behaviour notes:**
+
+- New log lines: `Link recovery: TX power <a> -> <b>, DR<x> -> DR<y> (payload <n> B)` and `LC FAIL in WARNING (total: n/m, ladder step)`. `ats lrw status` also prints `tx power: <index> (0 = max)`.
+- After a ladder recovery the device stays on the lower DR. With ADR on, the network raises it again from the uplinks it receives. A lower DR means a smaller payload budget (EU868 DR0–2: 51 B), so telemetry may take more frames until then.
+- The link-check timeout now starts after the uplink's RX windows closed. It no longer races a LinkCheckAns at DR0/SF12 with a 5 s RX1 delay.
+- Works together with `lrw-datarate` (§8): a pinned DR is stepped down by the ladder like any other, and the next join re-pins it.
+- `ats lrw status` now reports the live DR from the MAC. Before, it showed a stale value after an ADR-off DR change (`lrw-datarate`, a ladder rung).
+- Cost: +272 B flash release, +744 B debug, +0 B RAM.
+
+**HW verification (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub):**
+- Ladder runs with ADR off and on: one rung per report DR5 → DR0 on air, with the TX-power rung as +8–9 dB RSSI.
+- Recovery on a lower DR with the same DevAddr, both on an injected `lc ok` and after a real NS outage (device disabled on ChirpStack, no rejoin).
+- At the floor: a rejoin.
+- Combined with `lrw-datarate`: the ladder steps down and the next join re-pins.
+- The release image passed too.
+- Not HW-tested: the US915/AU915 sub-band fix (no 915 MHz gateway), code review only.
+
+See `doc/manual-test-plan.md` **L18**/**L19** and `doc/plan/424 - Faster link-loss recovery.md`.
+
+---
+
+## 13. Universal response paging (#425)
 
 One paging rule for every answer the device sends over a radio. When a response does
 not fit one frame, it is split into **pages**; each page is a complete, independently
@@ -492,7 +534,7 @@ The device sends all pages by itself. Plan: `doc/plan/425 - Universal response p
 | Answer | Page unit |
 |---|---|
 | Info (join, clock-sync, GetInfo over LoRaWAN) | each field, then each active alarm (one snapshot for all pages) |
-| GetConfig / GetParam | config fields (30 B pages on LoRaWAN) |
+| GetConfig / GetParam | config fields (fixed 30 B pages on LoRaWAN at any DR; not at the 11 B tier → `BUDGET_TOO_SMALL`) |
 | settings-info (#412) | each setting / the `w1_slot_type` block |
 | W1Scan | ROMs (scan result kept, no rescan per page) |
 | History replay (`req_history`) | records (as before, numbering now in the envelope) |
@@ -522,6 +564,14 @@ that ignores `pages` just sees several partial answers.
 (Hub side: proximos-v2#96; decoder parity: proximos-v2#90). **P2P** uses the same rule and format (driver in
 PR #426 on `feat-p2p`): an answer that does not fit one 0x55 RESPONSE (64 B) is streamed
 as pages with the same `seq`; the P2P central must accept several 0x55 with one `seq`.
+
+**Duty cycle (host guidance).** At EU868 DR0 a page is ~2.1 s of SF12 airtime, so a
+6-page GetConfig uses about a third of the 36 s/h budget of its sub-band; once the budget
+is spent, LoRaMac holds **every** uplink (pages, telemetry, alarms) until its hourly window
+resets (HW-seen: ~50 min). The firmware does not throttle streams — the host must: no
+repeated full GetConfig/GetParam at SF11/SF12 (ask only for the keys needed, wait for a
+higher DR, or use NFC), no immediate re-request of a missing page (it may just be waiting
+for duty-cycle credit), and page-assembly timeouts of ≥ 1 h at a low DR.
 
 Cost: release about +1.8 KB flash, +128 B RAM.
 

@@ -73,7 +73,7 @@ LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
  * are runtime-configurable: g_app_config.lrw_link_check_interval and
  * lrw_link_check_fail_rejoin (config keys lrw-link-check-interval /
  * lrw-link-check-fail-rejoin). */
-#define LINK_CHECK_TIMEOUT_SEC 10 /* Timeout for response */
+#define LINK_CHECK_TIMEOUT_SEC 10 /* LC answer timeout, from lorawan_send() return */
 
 /* State machine thresholds  */
 #define FAIL_THRESHOLD_WARNING 3 /* LC failures to enter WARNING */
@@ -237,7 +237,6 @@ static bool m_mac_started;          /* lorawan_start() succeeded; LoRaMac state 
 #define JOIN_BUSY_POLL_INTERVAL_MS 500
 #define JOIN_BUSY_MAX_POLLS        30
 
-static int m_current_dr;
 /* Application-payload budget (bytes), refreshed from lorawan_get_payload_sizes()
  * before each composing TX (MED-6: was cached only on DR-change/join). */
 static uint8_t m_max_next_payload;
@@ -331,6 +330,7 @@ static void on_downlink_received(void);
 static void state_transition(enum app_lrw_state new_state);
 static bool should_request_link_check(void);
 static void force_lc_work_handler(struct k_work *work);
+static int apply_channel_plan(void);
 
 static void fire_ready_cb(void)
 {
@@ -375,6 +375,83 @@ static uint8_t refresh_payload_budget(void)
 uint8_t app_lrw_get_max_payload(void)
 {
 	return m_max_next_payload;
+}
+
+/* Link-recovery ladder, one rung per failed link check in WARNING. LoRaMac's own
+ * ADR backoff needs ADR_ACK_LIMIT + 2 * ADR_ACK_DELAY = 128 unanswered uplinks
+ * before its first data-rate step (~32 h at the default 900 s report interval),
+ * so the state machine always rejoined long before it helped. Walk the same
+ * ladder here: restore the default (maximum) TX power, then drop the data rate
+ * one step towards the region minimum. A device moved out of reach of its
+ * ADR-optimised DR (or whose nearest gateway went away) reaches a gateway again
+ * without losing the session; with ADR on, the network raises the DR again from
+ * the uplinks it now receives. Returns true if a rung was taken, false at the
+ * floor (default TX power, minimum DR) — the caller then falls back to a rejoin.
+ * Runs on m_work_q. */
+static bool lrw_backoff_step(void)
+{
+	MibRequestConfirm_t mib;
+	bool stepped = false;
+	int8_t pwr, def_pwr, new_pwr, dr;
+
+	lorawan_mac_lock();
+	mib.Type = MIB_CHANNELS_DEFAULT_TX_POWER;
+	LoRaMacMibGetRequestConfirm(&mib);
+	def_pwr = mib.Param.ChannelsDefaultTxPower;
+
+	mib.Type = MIB_CHANNELS_TX_POWER;
+	LoRaMacMibGetRequestConfirm(&mib);
+	pwr = mib.Param.ChannelsTxPower;
+	new_pwr = pwr;
+
+	/* TX power is an index: 0 is the maximum EIRP, higher is weaker. */
+	if (pwr > def_pwr) {
+		mib.Param.ChannelsTxPower = def_pwr;
+		if (LoRaMacMibSetRequestConfirm(&mib) == LORAMAC_STATUS_OK) {
+			new_pwr = def_pwr;
+			stepped = true;
+		}
+	}
+
+	mib.Type = MIB_CHANNELS_DATARATE;
+	LoRaMacMibGetRequestConfirm(&mib);
+	dr = mib.Param.ChannelsDatarate;
+	lorawan_mac_unlock();
+
+	int8_t min_dr = (int8_t)lorawan_get_min_datarate();
+	int8_t new_dr = dr;
+
+	if (dr > min_dr) {
+		int ret;
+
+		new_dr = dr - 1;
+		if (g_app_config.lrw_adr) {
+			/* lorawan_set_datarate() refuses while ADR is on; the MAC keeps
+			 * ChannelsDatarate as the ADR starting point, so set it directly. */
+			mib.Type = MIB_CHANNELS_DATARATE;
+			mib.Param.ChannelsDatarate = new_dr;
+			lorawan_mac_lock();
+			ret = LoRaMacMibSetRequestConfirm(&mib) == LORAMAC_STATUS_OK ? 0 : -EINVAL;
+			lorawan_mac_unlock();
+		} else {
+			/* ADR off: lorawan_send() passes its own DR with every frame, which
+			 * overrides the MIB, so go through the Zephyr API. */
+			ret = lorawan_set_datarate((enum lorawan_datarate)new_dr);
+		}
+		if (ret) {
+			LOG_WRN("Link recovery: DR%d -> DR%d refused: %d", dr, new_dr, ret);
+			new_dr = dr;
+		} else {
+			stepped = true;
+		}
+	}
+
+	if (stepped) {
+		refresh_payload_budget();
+		LOG_WRN("Link recovery: TX power %d -> %d, DR%d -> DR%d (payload %u B)", pwr,
+			new_pwr, dr, new_dr, m_max_next_payload);
+	}
+	return stepped;
 }
 
 size_t app_lrw_payload_cap(size_t buf_size)
@@ -682,25 +759,36 @@ static void on_lc_failure(void)
 			FAIL_THRESHOLD_WARNING);
 		if (m_consecutive_lc_fail >= FAIL_THRESHOLD_WARNING) {
 			state_transition(APP_LRW_STATE_WARNING);
+			/* The failures that got us here already show the current TX
+			 * power / DR no longer reach a gateway: take the first rung now. */
+			(void)lrw_backoff_step();
 		}
 		break;
 
-	case APP_LRW_STATE_WARNING:
+	case APP_LRW_STATE_WARNING: {
+		/* Try the next rung before the rejoin budget is consulted: a rejoin
+		 * only fires once the ladder is exhausted, so it is never spent while a
+		 * lower DR is still untried (it would reset the MAC to the join DR
+		 * anyway, but at the cost of the session, a DevNonce and the backoff). */
+		bool stepped = lrw_backoff_step();
+
 		m_warning_lc_fail_total++;
-		LOG_WRN("LC FAIL in WARNING (total: %d/%d)", m_warning_lc_fail_total,
-			g_app_config.lrw_link_check_fail_rejoin);
-		if (m_warning_lc_fail_total >= g_app_config.lrw_link_check_fail_rejoin) {
+		LOG_WRN("LC FAIL in WARNING (total: %d/%d%s)", m_warning_lc_fail_total,
+			g_app_config.lrw_link_check_fail_rejoin, stepped ? ", ladder step" : "");
+		if (!stepped &&
+		    m_warning_lc_fail_total >= g_app_config.lrw_link_check_fail_rejoin) {
 			if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA) {
 				state_transition(APP_LRW_STATE_RECONNECT);
 			} else {
 				/* ABP cannot rejoin (no OTA). Stay in WARNING and keep
-				 * trying the normal N-th-message link check; recover if
-				 * the link returns. */
+				 * trying the per-report link check; recover if the link
+				 * returns. */
 				LOG_WRN("ABP mode - cannot rejoin, staying in WARNING");
 				m_warning_lc_fail_total = 0;
 			}
 		}
 		break;
+	}
 
 	default:
 		LOG_DBG("LC FAIL in %s (ignored)", state_name(state));
@@ -1180,6 +1268,15 @@ static void join_work_handler(struct k_work *work)
 			on_join_failure();
 			return;
 		}
+		/* lorawan_start() re-runs LoRaMacInitialization (region-default
+		 * channel masks) and restores the NVM snapshot: re-apply the
+		 * configured sub-band so the join uses it. */
+		ret = apply_channel_plan();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("apply_channel_plan", ret);
+			on_join_failure();
+			return;
+		}
 		LOG_INF("MAC reinitialized");
 	}
 
@@ -1266,6 +1363,13 @@ static bool should_request_link_check(void)
 	if (interval <= 0) {
 		return false;
 	}
+	/* WARNING: the link is suspect, so check on every report. Each failed check
+	 * takes one recovery-ladder rung (lrw_backoff_step) and counts towards the
+	 * rejoin budget; at the N-th-report cadence the default 900 s x 5 took
+	 * ~6 h to leave WARNING, all of it transmitting blind on the old DR. */
+	if ((enum app_lrw_state)atomic_get(&m_state) == APP_LRW_STATE_WARNING) {
+		return true;
+	}
 	int msg_num = m_message_count + 1;
 
 	if (msg_num == 1 || (msg_num % interval) == 0) {
@@ -1346,8 +1450,6 @@ static void tx_telemetry_frame(bool first_frame)
 			with_link_check = false;
 		} else {
 			m_link_check_pending = true;
-			k_timer_start(&m_lc_timeout_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC),
-				      K_FOREVER);
 		}
 	}
 
@@ -1359,7 +1461,6 @@ static void tx_telemetry_frame(bool first_frame)
 		LOG_ERR_CALL_FAILED_INT("lorawan_send", ret);
 		if (with_link_check) {
 			m_link_check_pending = false;
-			k_timer_stop(&m_lc_timeout_timer);
 		}
 		/* Likely duty-cycle / MAC busy — retry the same frame shortly, but bound
 		 * the attempts so a permanent TX error (e.g. misconfigured duty cycle)
@@ -1380,6 +1481,15 @@ static void tx_telemetry_frame(bool first_frame)
 		m_frame_resend = true;
 		k_work_schedule_for_queue(&m_work_q, &m_frame_work, K_SECONDS(FRAME_RETRY_SEC));
 		return;
+	}
+
+	/* Start the LC timeout only now: lorawan_send() returns after the RX windows
+	 * closed, so a LinkCheckAns has already been handed to m_work_q. Started
+	 * before the send, it also had to cover the airtime + RX1/RX2 delays, which
+	 * at DR0/SF12 with a 5 s RX1 delay is ~9-10 s — a race against the 10 s
+	 * timeout exactly on the bottom rung of the recovery ladder. */
+	if (with_link_check) {
+		k_timer_start(&m_lc_timeout_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC), K_FOREVER);
 	}
 
 	m_frame_resend = false;
@@ -1916,7 +2026,6 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 	uint8_t max_next = 0, max_now = 0;
 
 	lorawan_get_payload_sizes(&max_next, &max_now);
-	m_current_dr = dr;
 	m_max_next_payload = max_next;
 	LOG_INF("New data rate: DR%d, Maximum payload size: %d", dr, max_now);
 
@@ -1979,6 +2088,27 @@ static int apply_subband(int sub_band)
 
 	mask[hi_ch / 16] |= BIT(hi_ch % 16);
 
+	/* Install the sub-band as the DEFAULT mask too, not only the active one.
+	 * LoRaMac copies ChannelsDefaultMask over ChannelsMask on every OTAA join
+	 * (ResetMacParameters) and when its ADR backoff reaches the minimum DR. With
+	 * only the active mask set, the default stayed all-64: once the sub-band's
+	 * 8 channels were used up, the remaining-channel pool refilled with all 64,
+	 * and join requests cycled over all eight sub-bands — one in eight reaching
+	 * an 8-channel gateway. Set before the active mask, whose setter trims the
+	 * default's 500 kHz word. */
+	MibRequestConfirm_t mib;
+
+	mib.Type = MIB_CHANNELS_DEFAULT_MASK;
+	mib.Param.ChannelsDefaultMask = mask;
+	lorawan_mac_lock();
+	LoRaMacStatus_t status = LoRaMacMibSetRequestConfirm(&mib);
+	lorawan_mac_unlock();
+
+	if (status != LORAMAC_STATUS_OK) {
+		LOG_ERR("Default channel mask rejected (sub-band %d): %d", sub_band, status);
+		return -EINVAL;
+	}
+
 	int ret = lorawan_set_channels_mask(mask, ARRAY_SIZE(mask));
 
 	if (ret) {
@@ -1988,6 +2118,17 @@ static int apply_subband(int sub_band)
 
 	LOG_INF("Applied sub-band %d", sub_band);
 	return 0;
+}
+
+/* Region-specific channel plan on top of the LoRaMac defaults. Called after
+ * every lorawan_start() (boot and each rejoin's MAC re-init). */
+static int apply_channel_plan(void)
+{
+	if (g_app_config.lrw_region != APP_CONFIG_LRW_REGION_US915 &&
+	    g_app_config.lrw_region != APP_CONFIG_LRW_REGION_AU915) {
+		return 0;
+	}
+	return apply_subband(g_app_config.lrw_sub_band);
 }
 
 /* ======================================================================== */
@@ -2130,13 +2271,10 @@ int app_lrw_init(void)
 		}
 		m_mac_started = true;
 
-		if (g_app_config.lrw_region == APP_CONFIG_LRW_REGION_US915 ||
-		    g_app_config.lrw_region == APP_CONFIG_LRW_REGION_AU915) {
-			ret = apply_subband(g_app_config.lrw_sub_band);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("apply_subband", ret);
-				return ret;
-			}
+		ret = apply_channel_plan();
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("apply_channel_plan", ret);
+			return ret;
 		}
 
 		static struct lorawan_downlink_cb downlink_cb = {
@@ -2274,6 +2412,8 @@ int app_lrw_get_info(struct app_lrw_info *info)
 	if (info->state == APP_LRW_STATE_DISABLED || !m_mac_started) {
 		info->dev_addr = 0;
 		info->fcnt_up = 0;
+		info->datarate = 0;
+		info->tx_power = 0;
 	} else {
 		uint32_t fcnt_up;
 
@@ -2292,10 +2432,27 @@ int app_lrw_get_info(struct app_lrw_info *info)
 		} else {
 			info->fcnt_up = 0;
 		}
+
+		/* Live DR from the MAC, not a copy cached in the DR-changed callback:
+		 * Zephyr only fires that callback with ADR on (or on join), so an
+		 * ADR-off lorawan_set_datarate() (manual DR, recovery ladder) left
+		 * the reported DR stale. */
+		mib_req.Type = MIB_CHANNELS_DATARATE;
+		if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK) {
+			info->datarate = mib_req.Param.ChannelsDatarate;
+		} else {
+			info->datarate = 0;
+		}
+
+		mib_req.Type = MIB_CHANNELS_TX_POWER;
+		if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK) {
+			info->tx_power = mib_req.Param.ChannelsTxPower;
+		} else {
+			info->tx_power = 0;
+		}
 		lorawan_mac_unlock();
 	}
 
-	info->datarate = m_current_dr;
 	info->rssi = m_last_rssi;
 	info->snr = m_last_snr;
 	info->margin = m_last_margin;
