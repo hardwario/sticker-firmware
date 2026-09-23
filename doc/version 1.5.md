@@ -294,7 +294,9 @@ settings save
 
 - Applied in `on_join_success()` on **every (re)join**, after ADR is configured and
   before the payload budget is captured, so the telemetry split follows the pinned DR.
-  It also becomes the DR of the next join request.
+  JoinRequests are not affected: they always go out at the region's default join DR
+  (every (re)join re-initialises the MAC); the pin applies from the first uplink after
+  the join.
 - **Only with ADR off.** With `lrw-adr true` the value is ignored and a warning is
   logged (Zephyr's `lorawan_set_datarate()` refuses while ADR is on).
 - DR validity is **region-dependent**: EU868 DR0–7, US915 DR0–4, AU915 DR2–6 with the
