@@ -475,7 +475,7 @@ The device sends all pages by itself. Plan: `doc/plan/425 - Universal response p
 | Answer | Page unit |
 |---|---|
 | Info (join, clock-sync, GetInfo over LoRaWAN) | each field, then each active alarm (one snapshot for all pages) |
-| GetConfig / GetParam | config fields (30 B pages on LoRaWAN) |
+| GetConfig / GetParam | config fields (fixed 30 B pages on LoRaWAN at any DR; not at the 11 B tier → `BUDGET_TOO_SMALL`) |
 | settings-info (#412) | each setting / the `w1_slot_type` block |
 | W1Scan | ROMs (scan result kept, no rescan per page) |
 | History replay (`req_history`) | records (as before, numbering now in the envelope) |

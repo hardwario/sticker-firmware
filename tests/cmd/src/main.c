@@ -1620,4 +1620,49 @@ ZTEST(cmd, test_get_config_streams_all_pages_over_lrw)
 	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "no NFC stream");
 }
 
+/* #425: a GetConfig over LoRaWAN keeps the fixed 30 B field pages at any DR, and
+ * at the 11 B tier (US915 DR0, AU915/AS923 DR2) a paged ConfigDump cannot fit at
+ * all (~13 B minimum), so the answer is a compact BUDGET_TOO_SMALL with the seq. */
+ZTEST(cmd, test_get_config_layout_and_11b_floor)
+{
+	uint8_t in[8], out[64];
+	size_t in_len = unhex("08092a00", in, sizeof(in)); /* seq9 get_config{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	Response r;
+	pb_istream_t is;
+	uint32_t count51;
+
+	reset_cfg();
+	g_app_config.interval_report = 900;
+	g_app_config.interval_sample = 60;
+
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 51, &out_len, &action),
+		      0, "51 B");
+	r = (Response)Response_init_zero;
+	is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode 51 B");
+	count51 = r.page_count;
+
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len,
+				     &action),
+		      0, "64 B");
+	r = (Response)Response_init_zero;
+	is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode 64 B");
+	zassert_equal(r.page_count, count51, "layout must not depend on DR >= 51 B");
+
+	app_cmd_stream_cancel();
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 11, &out_len, &action),
+		      0, "11 B");
+	zassert_true(out_len <= 11, "%zu B", out_len);
+	r = (Response)Response_init_zero;
+	is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode 11 B");
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code");
+	zassert_equal(r.seq, 9, "seq");
+	app_cmd_stream_cancel();
+}
+
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);
