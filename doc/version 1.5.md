@@ -405,6 +405,12 @@ settings save
 Cost: release +2 536 B flash, +0 B RAM (loramac-node channel structures are already
 sized for US915's 72 channels). Not tested on HW — the bench gateway is EU868 only.
 
+**HW verification of #409 (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub, STICKER DevEUI `5876070000000413`):**
+the region guard (§6), `lrw-datarate` (§7), compact `Error`, alarm split and alarm bits, GetConfig/GetParam page
+streaming (§8), `DevStatusAns` (§9) and the release image with AS923 compiled in all PASS. Not HW-tested (no
+US915/AU915/AS923 gateway): the 11 B budget tier of §8 and AS923 on air. See the HIL records in
+`doc/plan/409 - LoRaWAN improvements - regions, datarate, diagnostics.md`.
+
 
 ---
 
