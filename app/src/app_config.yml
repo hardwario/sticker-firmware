@@ -258,7 +258,7 @@ commands:
     # melody that many seconds after it finishes, until stopped (kind 0 or
     # `ats buzzer off`).
     - {name: buzzer_play, proto_id: 28, body: BuzzerPlay, kind: handler, response: ack, transports: [lrw, nfc]}
-    # get_settings: the small boot settings-info ConfigDump (#412 content:
+    # get_settings (#428): the small boot settings-info ConfigDump (#412 content:
     # application interval_sample/interval_report/history_enable, the nine
     # sensors cap_* flags, runtime w1_slot_type) on request, so a host can refresh
     # the key operating settings without a full multi-page GetConfig. Answer

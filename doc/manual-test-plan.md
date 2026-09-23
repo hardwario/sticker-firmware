@@ -72,6 +72,7 @@ byte is the `seq` and is echoed in the reply.
 | `clock_sync` | `08056200` |
 | `force_send` | `08064a00` |
 | `sample` | `0805aa0100` |
+| `get_settings` (boot settings-info on request) | `0807fa0100` |
 | `reboot` | `08083a00` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
 | `set_param`: ADR on, `interval_report`=120 s, `alarm_0`=onboard temp 5–30 °C (hyst 1) | `0801121d0a022001120218782a131a1100000100000000a0400000f0410000803f` |
@@ -391,7 +392,34 @@ on a 1-Wire build, `w1_slot_type` (4 entries).
 
 - [x] Pass (EU868; `w1_slot_type` verified as all-`empty` only)
 
-### L5 — Periodic telemetry
+### L4c — GetSettings: settings-info on request (v1.5.0, #428)
+
+**Goal:** A host can read the L4b settings-info content at any time with one small command,
+instead of a full multi-page `GetConfig`, and tell the answer apart from the boot dump.
+**Observable:** After the `get_settings` downlink (fPort 85, `0807fa0100` = seq 7), one fPort-85
+`ConfigDump` uplink with `seq: 7` and the same fields as the L4b boot dump (`application`
+interval_sample / interval_report / history_enable, nine `sensors.cap_*`, `w1_slot_type` on a
+1-Wire build). No `pages` at EU868 DR0 and up; the boot dump keeps seq 0.
+
+**Prompt for Claude:**
+> Queue `0807fa0100` on fPort 85 and force an uplink (`send`) so it is delivered. Decode the
+> fPort-85 answer with `app/decoder/ttn.js`: confirm `seq` 7, `config_dump` with the same values
+> as the boot settings-info (L4b) and `config show`, and no `pages` (one frame). Change one
+> setting over the shell **without** `settings save` and send `get_settings` again: the answer
+> shows the staged value, like `GetConfig`. Report the frame size and DR.
+
+> **HW-verified (2026-09-23, debug build @ `215808c` = #425 `5503d54` + #429, EU868, ProXimos Hub
+> combined10 / ChirpStack v4):** `0807fa0100` queued through the Hub CLI (`node-send --hex --fport 85`)
+> went out in the RX of a telemetry uplink; the answer followed 1 s later as one fPort-85 frame at
+> DR5, 34 B: `01 0807 221d2207103c18840720002a12080010001800200028003000380040014800`. The
+> `config_dump` part is byte-identical to that boot's settings-info (`221d…4800`); `ttn.js` decodes
+> `seq: 7` with `interval_sample 60`, `interval_report 900`, `history_enable 0`, `cap_w1_sensors 1`,
+> the other caps `0` (= `config show`), no `pages`. `CONFIG_W1=n`, so no `w1_slot_type`. **Not
+> covered on HW:** the paged form (below the EU868 DR0 budget, `tests/cmd` only) and the staged-value
+> step.
+
+- [x] Pass (EU868 one-frame answer)
+
 
 **Goal:** Telemetry is sent on the configured interval.
 **Observable:** fPort 2 uplinks every `interval_report` seconds; RTT `Snapshot complete; next
