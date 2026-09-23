@@ -750,7 +750,7 @@ frame counters via `clear_stale_lorawan_nvm`, else the join uses the wrong chann
 - **Steps:** on a `debug.conf` image (US915/AU915 compiled out) set `config lrw-region us915`,
   `settings save` (reboots). Read RTT, `ats radio status`, and NFC `get_info`.
 - **Expect:** RTT `lrw-region 1 is not compiled into this image: radio-silent`; LoRaWAN state
-  `DISABLED`; `device_status` has `lrw_disabled` + `lrw_bad_region` (bits 12 + 13); **no RF
+  `DISABLED`; `device_status` has `lrw_disabled` (bit 12); **no RF
   emission** (no join request on the LNS / SDR). Never an EU868 join.
 - **Cleanup:** `config lrw-region eu868`, `settings save` → normal join.
 

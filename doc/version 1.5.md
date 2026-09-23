@@ -12,7 +12,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
 | LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
-| LoRaWAN | **Fix** — region guard (#409 A1): a stored `lrw-region` that is not compiled into the image no longer kills LoRaWAN init silently — the radio stays silent (never falls back to another band) and `device_status` bit 13 `lrw_bad_region` reports it. |
+| LoRaWAN | **Fix** — region guard (#409 A1): a stored `lrw-region` that is not compiled into the image no longer kills LoRaWAN init silently — the radio stays silent (never falls back to another band), reported as `lrw_disabled` plus an error log. |
 | LoRaWAN | **New** — manual uplink datarate `lrw-datarate` (#409 A3): `auto` (default) or `dr0`–`dr7`, pinned after every join when ADR is off. |
 | LoRaWAN | **Fix** — low-DR delivery (#409 A5a, part 1): compact LoRaWAN `Error` so a command is always answered at the 11 B tier; MAC-flood (budget 0) no longer drops responses/alarms; alarm batches split across frames; alarm state mirrored into telemetry `system_flags`. |
 | LoRaWAN | **Fix** — `DevStatusReq` right after `LinkADRReq` is now answered (#419), via a `loramac-node` patch applied with `west patch apply`. |
@@ -231,19 +231,14 @@ first. If it is missing (or out of range):
 - the radio stays **silent** through the existing radio-mode OFF path
   (`APP_LRW_STATE_DISABLED`, no LoRaMac bring-up, join/send are no-ops);
 - an error is logged: `lrw-region <n> is not compiled into this image: radio-silent`;
-- `device_status` (Info field 14) gets **bit 13 `lrw_bad_region`**, next to the
-  already-set bit 12 `lrw_disabled`, so the fault is visible over NFC
-  (`ats` shell: `lrw-bad-region`).
+- over NFC the device reports `lrw_state` DISABLED and the existing `device_status`
+  bit 12 `lrw_disabled` (no dedicated bit — `config show` shows the stored region).
 
 There is **deliberately no fallback to another region**: a device configured for
 US915 or AU915 must never transmit on 868 MHz (or vice versa). Fix by setting a
 compiled-in `lrw-region` (NFC / shell) or flashing a full image.
 
-| Bit | Name | Meaning |
-|---|---|---|
-| 13 | `lrw_bad_region` | stored `lrw-region` is not compiled into this image — radio-silent (#409) |
-
-Cost: release +40 B flash, +0 B RAM.
+Cost: a few dozen bytes of flash, +0 B RAM.
 
 
 ---

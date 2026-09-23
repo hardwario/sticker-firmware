@@ -52,7 +52,7 @@ enumerated below. The parameter surface is inspired by `twr-sdk`'s `twr_cmwx1zza
 
 | # | Proposal | Feasibility | Blast radius |
 |---|---|---|---|
-| A1 | **Build-vs-runtime region guard** | API ready | `app_lrw.c` + a `device_status` bit, ~25 lines |
+| A1 | **Build-vs-runtime region guard** | API ready | `app_lrw.c`, ~40 lines |
 | A2 | **RSSI/SNR in GetInfo** (like `AT$RFQ`) | API ready, `Info` size budget | proto + `app_cmd`, 3–4 files; after #414 |
 | A3 | **Manual datarate parameter** (like `AT$DR`) | API ready | yml + configen + `app_lrw.c` |
 | A4 | **Confirmed uplinks for alarms** (like `AT$REPC`) | API ready, blocker: 30 s heartbeat | `app_lrw.c` + config param |
@@ -73,16 +73,14 @@ This is **not theoretical**: `debug.conf` on v1.5.0 already drops AU915/US915 to
 Proposal: gate each `case` on `IS_ENABLED(CONFIG_LORAMAC_REGION_*)` (the pattern is already
 used elsewhere in this codebase). On a stored region that is not compiled in, **do not fall
 back to another region** — enter the existing radio-silent `APP_LRW_STATE_DISABLED` path
-(the same one an all-zero DevEUI uses, #98), log a loud `LOG_ERR`, and raise a dedicated
-`device_status` bit so the fault is visible over NFC and in the Manager-App.
+(the same one an all-zero DevEUI uses, #98) and log a loud `LOG_ERR`. Over NFC the device
+then reports `lrw_state` DISABLED and the existing `device_status` bit `lrw_disabled`; no
+dedicated bit (decided 2026-09-23 — the cause is visible in the log and in `config show`).
 
 Why not "fall back to EU868": a device configured for US915/AU915 would then transmit on
 868 MHz in the Americas or Australia — outside the permitted ISM band. A dead-but-diagnosable
 radio is the safe failure; a wrong-band radio is a compliance violation. The operator fixes
 it by reflashing a full image or changing `lrw-region` over NFC/shell.
-
-Note: #414 regroups the `device_status` bit layout — allocate the new bit against the
-layout that lands first.
 
 ### A2 — RSSI/SNR in GetInfo
 
@@ -270,8 +268,9 @@ LNS silently kills all downlinks.
 
 ## 3. Tracking
 
-- [x] A1 — build-vs-runtime region guard (radio-silent, no region fallback) — `device_status`
-  bit 13 `lrw_bad_region`; **HW PASS 2026-09-23** (AT-LRW-19)
+- [x] A1 — build-vs-runtime region guard (radio-silent, no region fallback);
+  **HW PASS 2026-09-23** (AT-LRW-19). The dedicated `device_status` bit 13 was dropped
+  afterwards (not needed — `lrw_disabled` + the log suffice)
 - [x] A3 — manual datarate parameter (`lrw-datarate` auto|dr0-dr7, enum, proto_id 16) —
   **HW PASS 2026-09-23** (AT-LRW-20 a+b; the per-region reject path (c) needs a 915 gateway)
 - [ ] A5a — general split rule for fPort 85 / fPort 3 (see Step 3); closes #418
@@ -311,7 +310,7 @@ frames read from the ChirpStack device-frame stream):
 | A3 | ADR off + `dr3` → every uplink after join at DR3/SF9; ADR on + `dr3` → `lrw-datarate DR3 ignored: ADR is on`, NS drives the DR |
 | 3b alarm bits | telemetry `alarm_status` 3 = `alarm_any` + `alarm_threshold` while rules were active, 0 after clearing |
 | 3b split | a 4-event batch at DR0 (51 B) → two fPort 3 frames (3 + 1 events, 42 B + 24 B), same `base_time` / `total` |
-| A1 | `lrw-region us915` on `debug.conf` (US915/AU915 not compiled) → `lrw-region 1 is not compiled into this image: radio-silent`, state `DISABLED`, `device_status` 0x3000, no JoinRequest after boot |
+| A1 | `lrw-region us915` on `debug.conf` (US915/AU915 not compiled) → `lrw-region 1 is not compiled into this image: radio-silent`, state `DISABLED`, `device_status` 0x3000 (bit 13 since removed), no JoinRequest after boot |
 | 3a compact Error | downlink `set_param interval_report=10` → 10 B `Error{OUT_OF_RANGE, fault 203}`, no detail; downlink `get_info` → full Info, 26 B at DR0 |
 
 Not testable on this EU868 bench (smallest budget 51 B): the 11 B tier paths — `InfoLite`,
@@ -335,13 +334,12 @@ Steps 1–2 have no dependency on other open PRs and can start immediately.
 
 Gate each `lorawan_set_region()` case in `app_lrw_init()` on
 `IS_ENABLED(CONFIG_LORAMAC_REGION_*)`. On a stored region that is not compiled in, enter
-`APP_LRW_STATE_DISABLED` (radio-silent, like #98) with a loud `LOG_ERR` and a new
-`device_status` bit — **never** substitute another region. `app_lrw.c` + `app_cmd.h` bit +
-decoder bit name.
+`APP_LRW_STATE_DISABLED` (radio-silent, like #98) with a loud `LOG_ERR` — **never**
+substitute another region. `app_lrw.c` only.
 
 **Verify:** standard + decoder tests; bench check on `debug.conf` (which drops US915/AU915) —
-set `lrw-region us915`, reboot, expect the error log, `DISABLED` state, the status bit over
-NFC, and **no RF emission**; setting `lrw-region eu868` restores a working radio.
+set `lrw-region us915`, reboot, expect the error log, `DISABLED` state (`lrw_disabled` over
+NFC), and **no RF emission**; setting `lrw-region eu868` restores a working radio.
 
 ### Step 2 — A3: manual datarate parameter
 
