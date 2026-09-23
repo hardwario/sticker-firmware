@@ -137,13 +137,13 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
  * encrypted channel usable (see app_settings_vendor_reset). */
 const uint8_t *app_cmd_take_pending_vendor_secret_key(void);
 
-/* Build an unsolicited device Info frame (Response{ seq=0, info=... },
- * the same payload a GetInfo command returns) into `out`. Used to send an
- * autonomous GetInfo uplink on join. When the full Info does not fit `out_cap`
- * even with active_alarms trimmed, falls back to Response{ info_lite } (firmware
- * version only, #409) and sets *lite (may be NULL). Returns 0 with *out_len set,
- * -EINVAL on a NULL argument, or -EMSGSIZE if not even InfoLite fits. */
-int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *lite);
+/* Build an unsolicited device Info frame (Response{ seq=0, info=... }, the
+ * same payload a GetInfo command returns) into `out`. Used to send an autonomous
+ * GetInfo uplink on join. When the full Info does not fit `out_cap` it is paged
+ * (#425): page 0 goes into `out` and *more is set; the remaining pages come from
+ * app_cmd_stream_next(). Returns 0 with *out_len set, -EINVAL on a NULL argument,
+ * or -EMSGSIZE if not even one Info field fits. */
+int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *more);
 
 /* Build an unsolicited Response{ seq, error{ code=BUDGET_TOO_SMALL } } (no
  * detail, 5-7 B) into `out` — for a LoRaWAN answer that stopped because the DR
@@ -151,10 +151,11 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *lite
  * or -EMSGSIZE. */
 int app_cmd_build_budget_error(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len);
 
-/* Device-driven paging over LoRaWAN (#409 3d/3e). A GetConfig / GetParam that
- * needs more than one ConfigDump page is answered with the requested page and
- * APP_CMD_ACTION_PAGE_STREAM; each call here then encodes the next page of that
- * same request (same seq, same page layout) into `out`. Returns 0 with *out_len
+/* Device-driven paging over a radio (#425). An answer that needs more than one
+ * page (GetConfig / GetParam, GetInfo, W1Scan, the autonomous Info and
+ * settings-info) is sent as page 0 plus APP_CMD_ACTION_PAGE_STREAM (or `more`);
+ * each call here then encodes the next page of that same answer (same seq, same
+ * layout, Response.page_index/page_count) into `out`. Returns 0 with *out_len
  * set, -ENODATA when no stream is active or it has finished, or a negative
  * errno (the stream is dropped). A new paged request replaces a running one. */
 int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len);
@@ -162,15 +163,18 @@ int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len);
 /* Drop a running page stream (e.g. on rejoin). */
 void app_cmd_stream_cancel(void);
 
-/* Build an unsolicited settings-info frame (Response{ seq=0, config_dump=... },
- * one page, page_count=1) into `out`. Carries a fixed selection of the key
- * operating settings — application interval_sample/interval_report/history_enable,
- * the sensor cap_* capabilities, and (when 1-Wire is present) the detected
- * per-slot w1_slot_type — so the network learns the effective config on join
- * without polling (#412). Byte-identical to a GetConfig reply apart from the
- * runtime-only w1_slot_type. Returns 0 with *out_len set, -EINVAL on a NULL
- * argument, or -EMSGSIZE if `out_cap` is too small. */
-int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len);
+/* True while pages of an answer are still waiting to be sent. */
+bool app_cmd_stream_active(void);
+
+/* Build an unsolicited settings-info frame (Response{ seq=0, config_dump=... })
+ * into `out`: a fixed selection of the key operating settings — application
+ * interval_sample/interval_report/history_enable, the sensor cap_* capabilities
+ * and (when 1-Wire is present) the detected per-slot w1_slot_type — so the
+ * network learns the effective config on join without polling (#412). When it
+ * does not fit `out_cap` it is paged (#425): page 0 into `out`, *more set, the
+ * rest from app_cmd_stream_next(). Returns 0 with *out_len set, -EINVAL on a NULL
+ * argument, or -EMSGSIZE if not even one setting fits. */
+int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len, bool *more);
 
 /* Staging buffer for one LoRaWAN history-replay frame (version byte + Response{
  * seq, history_frame } protobuf). Sized to exceed the largest EU868 payload (242 B

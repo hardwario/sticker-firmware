@@ -152,7 +152,8 @@ static struct k_work m_lc_response_work;      /* deferred from link_check_callba
 static struct k_work m_force_lc_work;         /* arm a forced LC on the next telemetry */
 static struct k_work m_dl_request_work;       /* drains m_dl_msgq (port-85 commands) */
 static struct k_work_delayable m_post_cmd_work;
-static struct k_work_delayable m_page_stream_work; /* GetConfig/GetParam pages (#409) */
+static struct k_work_delayable m_page_stream_work; /* paged answers (#409 3d/3e, #425) */
+#define PAGE_STREAM_PACE_SEC 2
 static struct k_work_delayable m_join_complete_work;
 static struct k_work_delayable m_hist_work;
 static struct k_work_delayable
@@ -308,9 +309,10 @@ static enum app_cmd_action m_post_cmd_action;
 /* #193: set from a command-handler thread, test-and-cleared in the LoRaMac
  * downlink callback (another context) — an atomic bit closes the lost-update race. */
 static atomic_t m_clock_sync_info_pending;
-/* #409 A5a: boot announce frames that did not fit the DR budget at join time
- * (Info went out as InfoLite, settings-info was skipped). Re-sent from
- * m_announce_work once a DR change makes room. */
+/* #409 A5a / #425: boot announce frames not sent at join time — not even one
+ * field fitted the budget, or settings-info waited for the Info pages to finish
+ * (one page stream at a time). Sent from m_announce_work once a DR change makes
+ * room or the running page stream ends. */
 #define ANNOUNCE_INFO     0
 #define ANNOUNCE_SETTINGS 1
 static atomic_t m_announce_pending;
@@ -501,25 +503,28 @@ static void state_transition(enum app_lrw_state new_state)
  * queue call live in one place (#220.F). Returns the app_cmd_build_info() result.
  *
  * Encodes against the current DR's payload budget, not just the software
- * buffer size: app_cmd_build_info() drops active_alarms entries one at a time
- * when they don't fit, so a low DR (e.g. EU868 DR0's 51 B) trims the alarm list
- * instead of tx_send_queued() silently dropping this whole uplink later. */
+ * buffer size: when the full Info does not fit, app_cmd_build_info() pages it
+ * (#425) and the remaining pages follow via m_page_stream_work, instead of
+ * tx_send_queued() silently dropping the whole uplink later. */
 static int queue_info_uplink(void)
 {
 	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t info_len;
-	bool lite = false;
+	bool more = false;
 
 	int ret = app_cmd_build_info(info_buf, refresh_payload_cap(sizeof(info_buf)), &info_len,
-				     &lite);
+				     &more);
 	if (ret == 0) {
 		(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len, LRW_TX_INFO);
-	}
-	/* #409: only InfoLite fit (or nothing) — send the full Info once the DR rises. */
-	if (ret != 0 || lite) {
-		atomic_set_bit(&m_announce_pending, ANNOUNCE_INFO);
-	} else {
 		atomic_clear_bit(&m_announce_pending, ANNOUNCE_INFO);
+		if (more) {
+			/* #425: the remaining Info pages follow page 0 by themselves. */
+			k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+						  K_SECONDS(PAGE_STREAM_PACE_SEC));
+		}
+	} else {
+		/* Not even one Info field fits: send it once the DR rises. */
+		atomic_set_bit(&m_announce_pending, ANNOUNCE_INFO);
 	}
 	return ret;
 }
@@ -533,21 +538,33 @@ static int queue_settings_info_uplink(void)
 {
 	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t len;
+	bool more = false;
 
-	int ret = app_cmd_build_config_status(buf, refresh_payload_cap(sizeof(buf)), &len);
+	/* #425: one page stream at a time — while the Info pages are still going
+	 * out, settings-info waits and is sent when that stream ends. */
+	if (app_cmd_stream_active()) {
+		atomic_set_bit(&m_announce_pending, ANNOUNCE_SETTINGS);
+		return -EBUSY;
+	}
+
+	int ret = app_cmd_build_config_status(buf, refresh_payload_cap(sizeof(buf)), &len, &more);
 	if (ret == 0) {
 		(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_SETTINGS);
 		atomic_clear_bit(&m_announce_pending, ANNOUNCE_SETTINGS);
+		if (more) {
+			k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+						  K_SECONDS(PAGE_STREAM_PACE_SEC));
+		}
 	} else {
 		atomic_set_bit(&m_announce_pending, ANNOUNCE_SETTINGS); /* #409: retry later */
 	}
 	return ret;
 }
 
-/* #409 A5a: re-send the boot announce frames that did not fit at join time (full
- * Info after an InfoLite, a skipped settings-info), once a DR change has made
- * room. Only queues the full Info — never a second InfoLite — so a DR that is
- * still too small leaves the flag set without extra airtime. */
+/* #409 A5a / #425: send the boot announce frames that were not sent at join time
+ * (no field fitted, or settings-info waited for the Info pages), once a DR
+ * change has made room or the running page stream has ended. A budget that is
+ * still too small leaves the flags set without extra airtime. */
 static void announce_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -558,16 +575,16 @@ static void announce_work_handler(struct k_work *work)
 		return; /* the next join re-announces from scratch */
 	}
 
-	if (atomic_test_bit(&m_announce_pending, ANNOUNCE_INFO)) {
-		uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
-		size_t len;
-		bool lite = false;
-		int ret = app_cmd_build_info(buf, refresh_payload_cap(sizeof(buf)), &len, &lite);
+	if (app_cmd_stream_active()) {
+		return; /* re-kicked when the running page stream ends */
+	}
 
-		if (ret == 0 && !lite) {
-			LOG_INF("DR budget allows the full Info now: sending it");
-			(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_INFO);
-			atomic_clear_bit(&m_announce_pending, ANNOUNCE_INFO);
+	if (atomic_test_bit(&m_announce_pending, ANNOUNCE_INFO)) {
+		if (queue_info_uplink() == 0) {
+			LOG_INF("Deferred Info sent");
+		}
+		if (app_cmd_stream_active()) {
+			return; /* settings-info follows once these pages are out */
 		}
 	}
 
@@ -938,10 +955,9 @@ static void post_cmd_work_handler(struct k_work *work)
 	}
 }
 
-/* #409 3d/3e: queue the next ConfigDump page of a device-driven LoRaWAN page
- * stream. One page per run, only while the response queue keeps a slot free
- * for other answers; paced by the send path (duty cycle permitting). */
-#define PAGE_STREAM_PACE_SEC 2
+/* #409 3d/3e, #425: queue the next page of a device-driven page stream (any
+ * paged answer). One page per run, only while the response queue keeps a slot
+ * free for other answers; paced by the send path (duty cycle permitting). */
 
 static void page_stream_work_handler(struct k_work *work)
 {
@@ -965,10 +981,17 @@ static void page_stream_work_handler(struct k_work *work)
 	int ret = app_cmd_stream_next(buf, sizeof(buf), &len);
 
 	if (ret == -ENODATA) {
-		return; /* all pages queued */
+		/* All pages queued; a boot announce frame may have waited for them. */
+		if (atomic_get(&m_announce_pending)) {
+			k_work_submit_to_queue(&m_work_q, &m_announce_work);
+		}
+		return;
 	}
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
+		if (atomic_get(&m_announce_pending)) {
+			k_work_submit_to_queue(&m_work_q, &m_announce_work);
+		}
 		return;
 	}
 	(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_CMD_RESPONSE);

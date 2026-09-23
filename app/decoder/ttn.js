@@ -269,24 +269,15 @@ function _decodeConfigDump(bytes, start, end) {
   return cd;
 }
 
-// InfoLite (Response field 11, #409): firmware version (+ build type) only, sent
-// instead of Info at the 11 B budget tier. Fields 1..4 share Info's numbering.
-// The device follows up with the full Info once the data rate allows it.
-function _decodeInfoLite(bytes, start, end) {
-  var full = _decodeInfo(bytes, start, end);
-  return {
-    fw_major: full.fw_major, fw_minor: full.fw_minor, fw_patch: full.fw_patch,
-    fw_version: full.fw_version, build_type: full.build_type, build_type_name: full.build_type_name
-  };
-}
-
 function _decodeInfo(bytes, start, end) {
   var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false, device_status: 0, active_alarms: [] };
+  var seen = {}; // field numbers present on the wire (#425: a page emits only these)
   var pos = start;
   while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
     var field = tag.value >>> 3;
     var wire = tag.value & 0x7;
+    seen[field] = true;
     if (wire === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (field === 1) info.fw_major = v.value;
@@ -335,7 +326,29 @@ function _decodeInfo(bytes, start, end) {
       .filter(function (f) { return (info.reset_cause & f[0]) !== 0; })
       .map(function (f) { return f[1]; });
   }
+  Object.defineProperty(info, "_seen", { value: seen, enumerable: false });
   return info;
+}
+
+// #425: an Info *page* carries only some fields. Drop everything the page did
+// not contain, so a missing field never reads as a default (fw 0.0.0, status 0).
+var _INFO_FIELD_KEYS = {
+  1: ["fw_major"], 2: ["fw_minor"], 3: ["fw_patch"], 4: ["build_type", "build_type_name"],
+  5: ["serial_number"], 6: ["uptime_s"], 7: ["unix_time"], 8: ["debug"], 9: ["claim_token"],
+  10: ["battery"], 11: ["reset_cause", "reset_cause_flags"], 12: ["lrw_state", "lrw_state_name"],
+  13: ["dev_eui"], 14: ["device_status", "device_status_flags"], 15: ["active_alarms"],
+  16: ["last_dl_rssi"], 17: ["last_dl_snr"], 18: ["last_dl_age_s"]
+};
+function _pruneInfoPage(info) {
+  var seen = info._seen || {};
+  var keep = {};
+  for (var f in _INFO_FIELD_KEYS) {
+    if (seen[f]) _INFO_FIELD_KEYS[f].forEach(function (k) { keep[k] = true; });
+  }
+  if (seen[1] || seen[2] || seen[3]) keep.fw_version = true;
+  var out = {};
+  for (var k in info) { if (info.hasOwnProperty(k) && keep[k]) out[k] = info[k]; }
+  return out;
 }
 
 function _decodeError(bytes, start, end) {
@@ -536,7 +549,6 @@ function decodeDownlinkResponse(bytes) {
       else if (field === 5) resp.history_frame = _decodeHistoryFrame(bytes, pos, end);
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       else if (field === 7) resp.w1_scan = _decodeW1Scan(bytes, pos, end);
-      else if (field === 11) resp.info_lite = _decodeInfoLite(bytes, pos, end);
       pos = end;
     } else {
       break;
@@ -563,6 +575,7 @@ function _applyPages(resp) {
   if (resp.page_count > 1) {
     if (resp.page_index === undefined) resp.page_index = 0;
     resp.pages = (resp.page_index + 1) + "/" + resp.page_count;
+    if (resp.info) resp.info = _pruneInfoPage(resp.info);
   }
 }
 

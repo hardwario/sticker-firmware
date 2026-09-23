@@ -266,15 +266,6 @@ test("decodeUplink decodes compact LoRaWAN Errors without detail (#409, fPort 85
   assert.equal(big.error.code, 9); // BUDGET_TOO_SMALL: retry once the DR rises
 });
 
-// InfoLite (Response field 11, #409 3c): Response{ seq=0, info_lite{ fw 1.5.1,
-// build_type=DEV } } = 01 5a 08 0801 1005 1801 2001 (11 B), fits the 11 B tier.
-test("decodeUplink decodes InfoLite (#409, fPort 85)", () => {
-  const got = codec.decodeUplink({ bytes: hex("015a080801100518012001"), fPort: 85 }).data;
-  assert.equal(got.info, undefined);
-  assert.equal(got.info_lite.fw_version, "1.5.1");
-  assert.equal(got.info_lite.build_type_name, "dev");
-});
-
 // W1Scan response (field 7): the discovered 1-Wire ROMs come back as hex
 // strings so the host can teach a slot via SetParam sensorN_rom.
 //   01           APP_PROTO_VERSION prefix
