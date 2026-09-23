@@ -492,9 +492,10 @@ function _decodeHistorySamples(bytes, t0, present, interval, synced) {
 }
 
 function _decodeHistoryFrame(bytes, start, end) {
-  // frame_index/frame_count default to 0 — proto3 omits a zero frame_index, so
-  // frame 0 of a replay carries no field 1; the consumer still needs index 0.
-  var hf = { frame_index: 0, frame_count: 0, records: [] };
+  // frame_index/frame_count: only older firmware numbers frames here (#425 moved
+  // it to the Response envelope, pages "i/N"). Emitted only when frame_count is
+  // on the wire; then an absent frame_index is frame 0 (proto3 omits a zero).
+  var hf = { records: [] };
   var t0 = 0, present = 0, interval = 0;
   // time_synced (field 7) absent = old FW = treat as synced (emit timestamps).
   var synced = true;
@@ -522,6 +523,8 @@ function _decodeHistoryFrame(bytes, start, end) {
       pos += len.value;
     } else { break; }
   }
+  if (hf.frame_count !== undefined && hf.frame_index === undefined) hf.frame_index = 0;
+  else if (hf.frame_count === undefined) delete hf.frame_index;
   hf.t0_unix = t0;
   hf.present = present;
   hf.interval_s = interval;

@@ -518,6 +518,22 @@ for duty-cycle credit), and page-assembly timeouts of ≥ 1 h at a low DR.
 
 Cost: release about +1.8 KB flash, +128 B RAM.
 
+**Known limitations:**
+- **Manager-App** must read `Response.page_count` over NFC (absent = 1). The deprecated `ConfigDump.page_*` is no
+  longer set, so an older app sees only the first page of a paged GetConfig. There is no compatibility shim, by
+  decision.
+- GetConfig / GetParam over LoRaWAN use a fixed 30 B page layout, so the page count is the same at every DR ≥ 51 B.
+  At 11 B they answer `BUDGET_TOO_SMALL`.
+- A queued AlarmReport page waits behind a running response stream.
+- A rejoin does not cancel pages already queued.
+
+**HW verification (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub):**
+- GetConfig (6 pages at DR0, 14 with 8 rules), `page=N` resume, stream cancel, GetParam, paged GetInfo with active
+  alarms, AlarmReport pages, history frames, release image and coexistence with #424 all PASS.
+- The first run found a `m_work_q` stack overflow on a paged GetInfo. It was a regression of this change (A/B
+  against the previous `v1.5.0` was clean) and is fixed before merge.
+- Not HW-tested: the 11 B tier and AU915 (no 915 MHz gateway), and P2P (#426).
+- See §10 of `doc/plan/425 - Universal response paging.md`.
 
 ---
 
@@ -546,6 +562,10 @@ the autonomous dump from an answer. Decoders need no change: the answer is a nor
 `0807fa0100` → one fPort-85 frame at DR5, 34 B, `Response{seq 7, config_dump}` whose
 `config_dump` bytes are identical to the boot settings-info of the same boot. See
 `doc/manual-test-plan.md` scenario **L4c**.
+Hub combined11 (proximos-v2 !91): the Portal "Refresh from device" button sends
+`GetSettings` and completes on the one-frame answer. A v1.5.0 image without this command
+answers `Error NOT_SUPPORTED` (code 7) with the `seq` kept, so the Hub's config is untouched.
+Not HW-tested: NFC, DR0 (34 B fits one frame there too) and the paged form (native tests only).
 
 ---
 
