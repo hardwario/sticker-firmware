@@ -2216,7 +2216,8 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 
 int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
-			       uint8_t *out, size_t out_cap, size_t *out_len)
+			       uint32_t page_index, uint32_t page_count, uint8_t *out,
+			       size_t out_cap, size_t *out_len)
 {
 	if (!out || !out_len || (n_events > 0 && !events)) {
 		return -EINVAL;
@@ -2228,6 +2229,10 @@ int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_syn
 	/* Flag whether base_time is absolute (L-3/L-4): host emits time=null otherwise. */
 	report.has_time_synced = true;
 	report.time_synced = time_synced;
+	if (page_count > 1) { /* #425: same paging as Response */
+		report.page_index = page_index;
+		report.page_count = page_count;
+	}
 
 	size_t n = MIN(n_events, ARRAY_SIZE(report.events));
 	for (size_t i = 0; i < n; i++) {

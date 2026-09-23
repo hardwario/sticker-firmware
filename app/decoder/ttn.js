@@ -1159,6 +1159,9 @@ function decodeAlarmBatch(bytes) {
       if (field === 1) out.base_time = v.value >>> 0;
       else if (field === 2) out.total = v.value;
       else if (field === 4) out.time_synced = v.value !== 0;
+      // #425: page_index (5) / page_count (6), the same paging as Response.
+      else if (field === 5) out.page_index = v.value;
+      else if (field === 6) out.page_count = v.value;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var endE = pos + len.value;
@@ -1184,10 +1187,15 @@ function decodeAlarmBatch(bytes) {
   for (var i = 0; i < out.alarms.length; i++) {
     out.alarms[i].time = out.time_synced ? ((out.base_time + rels[i]) >>> 0) : null;
   }
-  // total counts every alarm in the window. Fewer events here means either some
-  // were dropped, or (#409) the batch was split across several fPort 3 frames —
-  // those share base_time and total, so group frames by base_time to rebuild it.
-  out.truncated = out.alarms.length < out.total;
+  // total counts every alarm in the window. A batch split across frames (#425)
+  // is labelled "i/N"; its pages share base_time and total, and each decodes on
+  // its own. Unpaged, fewer events than total means some were dropped.
+  if (out.page_count > 1) {
+    if (out.page_index === undefined) out.page_index = 0;
+    out.pages = (out.page_index + 1) + "/" + out.page_count;
+  } else {
+    out.truncated = out.alarms.length < out.total;
+  }
   return out;
 }
 

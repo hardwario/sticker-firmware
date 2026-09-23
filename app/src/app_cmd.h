@@ -224,13 +224,14 @@ struct app_cmd_alarm_event {
 
 /* Build an alarm-detail batch (AlarmReport) for fPort 3 (#27) into `out`.
  * `events[0..n_events)` are encoded (capped to the message's 8-event array);
- * `total` is the true window count and may exceed the encoded events when the
- * caller trimmed to fit the data rate. Returns 0 with *out_len set, -EINVAL on
- * a NULL argument, or -EMSGSIZE if it won't fit `out_cap`. `time_synced` reports
- * whether `base_time` is absolute UTC (L-3/L-4). */
+ * `total` is the true window count. A batch split over several reports numbers
+ * them page_index 0..page_count-1 (#425; omitted when page_count <= 1). Returns
+ * 0 with *out_len set, -EINVAL on a NULL argument, or -EMSGSIZE if it won't fit
+ * `out_cap`. `time_synced` reports whether `base_time` is absolute UTC (L-3/L-4). */
 int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
-			       uint8_t *out, size_t out_cap, size_t *out_len);
+			       uint32_t page_index, uint32_t page_count, uint8_t *out,
+			       size_t out_cap, size_t *out_len);
 
 #ifdef __cplusplus
 }

@@ -170,6 +170,20 @@ test("envelope paging: an unpaged answer has no pages field (#425)", () => {
   assert.equal(d.pages, undefined); // legacy page_count 1 = single frame
 });
 
+// #425: an AlarmReport batch split over frames is numbered like Response pages.
+// Page 2/2 decodes alone (stateless decoder): its own base_time / total.
+test("fPort 3 AlarmReport page 2/2 decodes alone (#425)", () => {
+  const d = codec.decodeUplink({
+    bytes: hex("0108a487ccd50610041a0b200928ca59300138034802200128013002"), fPort: 3,
+  }).data;
+  assert.equal(d.pages, "2/2");
+  assert.equal(d.total, 4);
+  assert.equal(d.truncated, undefined); // paged: "fewer than total" is expected
+  assert.equal(d.alarms.length, 1);
+  assert.equal(d.alarms[0].slot, 3);
+  assert.equal(d.alarms[0].time, 1790116772 + 9);
+});
+
 // An unknown/newer slot type from a future firmware must not break an older
 // decoder — it falls back to "type<N>" instead of undefined.
 test("config_dump w1_slot_type unknown value falls back to type<N> (#412)", () => {
