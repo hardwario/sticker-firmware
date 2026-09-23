@@ -307,6 +307,15 @@ message Response {
         InfoLite       info_lite        = 11;  // Info when the full one does not fit the DR (#409)
     }
 
+    // Universal paging (#425), the same for every response type. An answer that
+    // does not fit one frame — over a radio, the payload budget — is split into
+    // pages, each a complete Response with the same seq and a part of the body:
+    // page_index = 0..page_count-1 of page_count. Over a radio the device sends
+    // all pages by itself; over NFC the host asks for a page. Absent (page_count
+    // 0/1) = the whole answer is in this one frame.
+    uint32 page_index = 12;
+    uint32 page_count = 13;
+
     message Ack { }
 
     // Minimal Info for the smallest LoRaWAN budget tier (11 B: US915 DR0, AU915 /
@@ -385,6 +394,8 @@ message Response {
     }
 
     message ConfigDump {
+        // Deprecated since #425, no longer set: paging is Response.page_index /
+        // page_count for every response type. Kept so older firmware decodes.
         uint32 page_index = 1;
         uint32 page_count = 2;
         optional AppConfigMessage.Lorawan     lorawan     = 3;
@@ -403,6 +414,8 @@ message Response {
     }
 
     message HistoryFrame {
+        // Deprecated since #425, no longer set: frames are Response.page_index /
+        // page_count like every other paged response. Kept so older firmware decodes.
         uint32 frame_index = 1;
         uint32 frame_count = 2;
         uint32 t0_unix     = 3;
@@ -471,6 +484,11 @@ message AlarmReport {
     // uptime-relative (L-3/L-4). Absent = old FW = treat as synced. The decoder
     // emits time=null for every event when this is present and false.
     optional bool time_synced = 4;
+    // #425: a batch that does not fit one frame is split into several reports
+    // (same base_time / total), numbered page_index = 0..page_count-1 — the same
+    // paging as Response. Absent = the whole batch is in this report.
+    uint32 page_index = 5;
+    uint32 page_count = 6;
 }
 
 message AlarmEvent {

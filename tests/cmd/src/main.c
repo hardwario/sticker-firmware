@@ -277,9 +277,10 @@ ZTEST(cmd, test_get_param_paging)
 	reset_cfg();
 	handle("08021a0a0a08060701020304050a", &r);
 	zassert_equal(r.which_body, Response_config_dump_tag, "page0 which=%d", r.which_body);
-	zassert_equal(r.body.config_dump.page_index, 0, "page0 index");
-	zassert_equal(r.body.config_dump.page_count, 2, "page_count %u",
-		      r.body.config_dump.page_count);
+	zassert_equal(r.page_index, 0, "page0 index");
+	zassert_equal(r.page_count, 2, "page_count %u", r.page_count);
+	zassert_equal(r.body.config_dump.page_count, 0,
+		      "legacy ConfigDump.page_count must not be set");
 	zassert_true(r.body.config_dump.lorawan.has_deveui, "deveui on page0");
 	zassert_true(r.body.config_dump.lorawan.has_joineui, "joineui on page0");
 	zassert_false(r.body.config_dump.lorawan.has_devaddr, "devaddr must not be on page0");
@@ -288,8 +289,8 @@ ZTEST(cmd, test_get_param_paging)
 	reset_cfg();
 	handle("08021a0c0a08060701020304050a2801", &r);
 	zassert_equal(r.which_body, Response_config_dump_tag, "page1 which=%d", r.which_body);
-	zassert_equal(r.body.config_dump.page_index, 1, "page1 index");
-	zassert_equal(r.body.config_dump.page_count, 2, "page1 count");
+	zassert_equal(r.page_index, 1, "page1 index");
+	zassert_equal(r.page_count, 2, "page1 count");
 	zassert_false(r.body.config_dump.lorawan.has_deveui, "deveui must not be on page1");
 	zassert_true(r.body.config_dump.lorawan.has_devaddr, "devaddr on page1");
 
@@ -314,8 +315,8 @@ ZTEST(cmd, test_get_param_duplicate_field_deduped)
 	/* seq2 get_param{ lorawan_field=[6, 6, 6, 6] }, page 0. */
 	handle("08021a060a0406060606", &r);
 	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
-	zassert_equal(r.body.config_dump.page_count, 1, "duplicates inflated page_count to %u",
-		      r.body.config_dump.page_count);
+	/* #425: a single page carries no paging fields (absent = one frame). */
+	zassert_true(r.page_count <= 1, "duplicates inflated page_count to %u", r.page_count);
 	zassert_true(r.body.config_dump.lorawan.has_deveui, "deveui not dumped");
 }
 
@@ -406,9 +407,9 @@ ZTEST(cmd, test_build_config_status)
 
 	zassert_equal(r.which_body, Response_config_dump_tag, "expected ConfigDump, which=%d",
 		      r.which_body);
-	zassert_equal(r.body.config_dump.page_index, 0, "page_index");
-	zassert_equal(r.body.config_dump.page_count, 1, "page_count %u",
-		      r.body.config_dump.page_count);
+	/* #425: one page -> no paging fields in the envelope, none in the body. */
+	zassert_equal(r.page_count, 0, "page_count %u", r.page_count);
+	zassert_equal(r.body.config_dump.page_count, 0, "legacy page_count must not be set");
 
 	zassert_true(r.body.config_dump.has_application, "application section missing");
 	zassert_true(r.body.config_dump.application.has_interval_sample, "interval_sample missing");
@@ -1491,7 +1492,7 @@ ZTEST(cmd, test_get_config_streams_all_pages_over_lrw)
 	is = pb_istream_from_buffer(out + 1, out_len - 1);
 	zassert_true(pb_decode(&is, Response_fields, &r), "decode page 0");
 	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
-	uint32_t count = r.body.config_dump.page_count;
+	uint32_t count = r.page_count;
 	zassert_true(count > 1, "test needs a multi-page config, got %u", count);
 	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
 
@@ -1502,8 +1503,8 @@ ZTEST(cmd, test_get_config_streams_all_pages_over_lrw)
 		is = pb_istream_from_buffer(out + 1, out_len - 1);
 		zassert_true(pb_decode(&is, Response_fields, &r), "decode page %u", p);
 		zassert_equal(r.seq, 9, "seq %u on page %u", r.seq, p);
-		zassert_equal(r.body.config_dump.page_index, p, "page_index");
-		zassert_equal(r.body.config_dump.page_count, count, "page_count drift");
+		zassert_equal(r.page_index, p, "page_index");
+		zassert_equal(r.page_count, count, "page_count drift");
 	}
 	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "stream must end");
 

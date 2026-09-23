@@ -142,6 +142,34 @@ test("config_dump decodes w1_slot_type (packed, #412)", () => {
   assert.deepEqual(u.config_dump.w1_slot_type, ["machine-probe", "dallas", "empty", "empty"]);
 });
 
+// #425 universal paging: Response.page_index (12) / page_count (13) in the
+// envelope, the same for every response type. Each page decodes on its own —
+// the decoder keeps no state between uplinks.
+test("envelope paging: ConfigDump page 2/3 decodes alone (#425)", () => {
+  // seq 9, page_index 1, page_count 3, config_dump.application.interval_report 900
+  const d = codec.decodeUplink({ bytes: hex("0108092205220318840760016803"), fPort: 85 }).data;
+  assert.equal(d.seq, 9);
+  assert.equal(d.page_index, 1);
+  assert.equal(d.page_count, 3);
+  assert.equal(d.pages, "2/3");
+  assert.equal(d.config_dump.application.interval_report, 900);
+});
+
+test("envelope paging: HistoryFrame page 1/2 (page_index 0 omitted) (#425)", () => {
+  const d = codec.decodeUplink({
+    bytes: hex("01080a2a121880cae2d006220366085a280330840738016802"), fPort: 85,
+  }).data;
+  assert.equal(d.pages, "1/2");
+  assert.equal(d.history_frame.records.length, 1);
+  assert.equal(d.history_frame.records[0].temperature, 21.5);
+  assert.equal(d.history_frame.records[0].time, 1780000000);
+});
+
+test("envelope paging: an unpaged answer has no pages field (#425)", () => {
+  const d = codec.decodeUplink({ bytes: hex("01220810013a0402010000"), fPort: 85 }).data;
+  assert.equal(d.pages, undefined); // legacy page_count 1 = single frame
+});
+
 // An unknown/newer slot type from a future firmware must not break an older
 // decoder — it falls back to "type<N>" instead of undefined.
 test("config_dump w1_slot_type unknown value falls back to type<N> (#412)", () => {

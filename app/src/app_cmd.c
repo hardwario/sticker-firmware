@@ -304,6 +304,17 @@ static void make_error(Response *resp, Response_Error_Code code, const char *det
 	}
 }
 
+/* #425 universal paging: stamp page `index` of `count` on a Response — the one
+ * place that writes the envelope. Omitted for a single-frame answer (count <=
+ * 1), so an unpaged answer is unchanged. */
+static void set_page(Response *resp, uint32_t index, uint32_t count)
+{
+	if (count > 1) {
+		resp->page_index = index;
+		resp->page_count = count;
+	}
+}
+
 /* Command handlers share a uniform signature (transport, cmd, resp, action) so
  * the generated app_cmd_dispatch() switch can call any of them the same way; a
  * handler simply ignores the parameters it does not need. They fill `resp`
@@ -555,8 +566,7 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 
 	Response_ConfigDump *cd = &resp->body.config_dump;
 	resp->which_body = Response_config_dump_tag;
-	cd->page_index = page;
-	cd->page_count = page_count;
+	set_page(resp, page, page_count);
 
 	if (n[DUMP_SECTION_LORAWAN] > 0) {
 		cd->has_lorawan = true;
@@ -672,8 +682,7 @@ static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *c
 
 	Response_ConfigDump *cd = &resp->body.config_dump;
 	resp->which_body = Response_config_dump_tag;
-	cd->page_index = page;
-	cd->page_count = page_count;
+	set_page(resp, page, page_count);
 
 	if (out_n[DUMP_SECTION_LORAWAN] > 0) {
 		cd->has_lorawan = true;
@@ -1017,8 +1026,8 @@ static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Com
 						 &n_written, &next_ord);
 
 	resp->which_body = Response_history_frame_tag;
-	hf->frame_index = 0; /* informational only over NFC; the phone counts its own pages */
-	hf->frame_count = app_history_count_frames(from, to, cap); /* progress hint */
+	/* NFC history is cursor-paged (next_ord / has_more below): the phone drives
+	 * it by record ordinal, so no page_index/page_count here (#425). */
 	hf->t0_unix = t0;
 	hf->samples.size = written;
 	hf->present = present;
@@ -1416,18 +1425,14 @@ void app_cmd_stream_cancel(void)
 /* After a LoRaWAN GetConfig/GetParam: arm the stream when pages remain. */
 static bool page_stream_arm(const uint8_t *in, size_t in_len, const Response *resp)
 {
-	if (resp->which_body != Response_config_dump_tag || in_len > sizeof(m_page_stream.req)) {
-		return false;
-	}
-	const Response_ConfigDump *cd = &resp->body.config_dump;
-
-	if (cd->page_index + 1 >= cd->page_count) {
+	if (resp->which_body != Response_config_dump_tag || in_len > sizeof(m_page_stream.req) ||
+	    resp->page_index + 1 >= resp->page_count) {
 		return false;
 	}
 	memcpy(m_page_stream.req, in, in_len);
 	m_page_stream.req_len = in_len;
-	m_page_stream.next = cd->page_index + 1;
-	m_page_stream.count = cd->page_count;
+	m_page_stream.next = resp->page_index + 1;
+	m_page_stream.count = resp->page_count;
 	m_page_stream.active = true;
 	return true;
 }
@@ -1640,8 +1645,6 @@ int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len)
 	resp.which_body = Response_config_dump_tag;
 
 	Response_ConfigDump *cd = &resp.body.config_dump;
-	cd->page_index = 0;
-	cd->page_count = 1;
 
 	/* application: interval_sample, interval_report, history_enable */
 	static const uint32_t app_ids[] = {2, 3, 4};
@@ -1682,8 +1685,7 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 	resp.seq = seq;
 	resp.which_body = Response_history_frame_tag;
 	Response_HistoryFrame *hf = &resp.body.history_frame;
-	hf->frame_index = frame_index;
-	hf->frame_count = frame_count;
+	set_page(&resp, frame_index, frame_count);
 	hf->t0_unix = t0_unix;
 	hf->present = present;
 	hf->interval_s = interval_s;
@@ -1730,8 +1732,7 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 	resp.seq = seq;
 	resp.which_body = Response_history_frame_tag;
 	Response_HistoryFrame *hf = &resp.body.history_frame;
-	hf->frame_index = frame_index;
-	hf->frame_count = frame_count;
+	set_page(&resp, frame_index, frame_count);
 	hf->t0_unix = t0_unix;
 	hf->present = present;
 	hf->interval_s = interval_s;

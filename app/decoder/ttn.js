@@ -524,6 +524,9 @@ function decodeDownlinkResponse(bytes) {
     if (wire === 0) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (field === 1) resp.seq = v.value;
+      // #425 universal paging: page_index (12) / page_count (13) in the envelope.
+      else if (field === 12) resp.page_index = v.value;
+      else if (field === 13) resp.page_count = v.value;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var end = pos + len.value;
@@ -539,7 +542,28 @@ function decodeDownlinkResponse(bytes) {
       break;
     }
   }
+  _applyPages(resp);
   return resp;
+}
+
+// #425: every page is a complete message decoded on its own (no state between
+// uplinks — TTN / ChirpStack codecs are stateless). Label it "i/N" (1-based).
+// Older firmware numbered ConfigDump / HistoryFrame inside the body; use that
+// when the envelope has none.
+function _applyPages(resp) {
+  if (resp.page_count === undefined) {
+    if (resp.config_dump && resp.config_dump.page_count > 1) {
+      resp.page_index = resp.config_dump.page_index || 0;
+      resp.page_count = resp.config_dump.page_count;
+    } else if (resp.history_frame && resp.history_frame.frame_count > 1) {
+      resp.page_index = resp.history_frame.frame_index || 0;
+      resp.page_count = resp.history_frame.frame_count;
+    }
+  }
+  if (resp.page_count > 1) {
+    if (resp.page_index === undefined) resp.page_index = 0;
+    resp.pages = (resp.page_index + 1) + "/" + resp.page_count;
+  }
 }
 
 // Zig-zag decode for protobuf sint32.
