@@ -243,6 +243,8 @@ function _decodeConfigDump(bytes, start, end) {
       var v = _pbReadVarint(bytes, pos); pos = v.next;
       if (f === 1) cd.page_index = v.value;
       else if (f === 2) cd.page_count = v.value;
+      // field 7 = w1_slot_type, non-packed fallback (one varint per entry).
+      else if (f === 7) { (cd.w1_slot_type = cd.w1_slot_type || []).push(_W1_SLOT_TYPES[v.value] || ("type" + v.value)); }
     } else if (w === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       var e2 = pos + len.value;
@@ -250,6 +252,16 @@ function _decodeConfigDump(bytes, start, end) {
       else if (f === 4) cd.application = _decodeApplication(bytes, pos, e2);
       else if (f === 5) cd.sensors = _decodeSensors(bytes, pos, e2);
       else if (f === 6) cd.alarms = _decodeAlarms(bytes, pos, e2);
+      // field 7 = repeated uint32 w1_slot_type (#412), packed: detected 1-Wire
+      // slot type for slots 1..4. Names mirror enum app_w1_slot_type (FW).
+      else if (f === 7) {
+        cd.w1_slot_type = [];
+        var p = pos;
+        while (p < e2) {
+          var t = _pbReadVarint(bytes, p); p = t.next;
+          cd.w1_slot_type.push(_W1_SLOT_TYPES[t.value] || ("type" + t.value));
+        }
+      }
       pos = e2;
     } else { break; }
   }
@@ -520,8 +532,9 @@ function _pbZigzag(n) {
   return (n >>> 1) ^ -(n & 1);
 }
 
-// enum app_w1_slot_type → label (mirrors app_w1_slots.h).
-var _W1_SLOT_TYPES = { 1: "dallas", 2: "machine-probe" };
+// enum app_w1_slot_type → label (mirrors app_w1_slots.h). Shared by the fPort-2
+// telemetry per-slot type and the fPort-85 ConfigDump.w1_slot_type list (#412).
+var _W1_SLOT_TYPES = { 0: "empty", 1: "dallas", 2: "machine-probe" };
 
 // One SensorReading submessage (Telemetry field 27): slot=1 (1-based, matches
 // sensorN config / `w1 list`), type=2,

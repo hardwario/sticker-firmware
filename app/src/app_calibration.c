@@ -61,8 +61,8 @@ static int m_count_machine_probe;
 #endif /* defined(CONFIG_DS28E17) */
 static uint16_t m_battery_mv = BATTERY_INVALID_MV;
 
-/* #340 M22: lorawan_send() blocks on a MAC-confirm semaphore that can hang
- * forever (app_lrw.c's own documented hazard). app_calibration_run() IS the
+/* #340 M22: lorawan_send() blocks on a MAC-confirm semaphore - up to
+ * CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS since #181, forever before. app_calibration_run() IS the
  * whole calibration thread - if the send hung there directly, the loop could
  * never feed the watchdog, blink its status LED, or re-check its own
  * deadline-based clean reboot again. Running the send via

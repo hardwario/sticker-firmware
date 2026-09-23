@@ -359,6 +359,38 @@ on TTN.
 
 - [ ] Pass
 
+### L4b — Settings-info ConfigDump after boot (v1.5.0, #412)
+
+**Goal:** Right after the boot `Info`, the device autonomously pushes its key operating
+settings as a one-page `ConfigDump`, so the network learns the effective config without polling.
+**Observable:** A second fPort-85 uplink directly after the boot `Info` and before the first
+fPort-2 Telemetry. It decodes to `config_dump` with `page_count: 1`, `application`
+(`interval_sample`, `interval_report`, `history_enable`), all nine `sensors.cap_*` flags and,
+on a 1-Wire build, `w1_slot_type` (4 entries).
+
+**Prompt for Claude:**
+> Note the current `config show` values. Change at least one reported setting (e.g.
+> `config interval-sample 60`, `config cap-w1-sensors true`) and run `settings save`, which reboots
+> and re-joins. Watching the network server / gateway uplinks, confirm that the uplink after the
+> fPort-85 `Info` is a fPort-85 `ConfigDump` (page 0/1), sent before the first fPort-2 Telemetry.
+> Decode it with `app/decoder/ttn.js` and confirm every field matches `config show`, including
+> the change just made. On a `CONFIG_W1=y` image, confirm `w1_slot_type` has 4 entries matching the
+> attached 1-Wire sensors (`empty` / `dallas` / `machine-probe`). Report the frame size and DR.
+
+> **HW-verified (2026-09-22, debug build @ `4848a09`, EU868, local ChirpStack v4 + RAK5146 GW):**
+> on a factory-blank unit provisioned with an OTAA test identity, each join was followed by
+> FCnt 1 `Info` (21/24 B), FCnt 2 `ConfigDump` page 0/1, and FCnt 3 telemetry, all at DR0
+> (SF12). The dumped values matched `config show` exactly (`interval_sample 60`,
+> `interval_report 900`, `history_enable 0`, `cap_w1_sensors 1`, all other caps `0`). With plain
+> `debug.conf` (`CONFIG_W1=n`) the frame was 34 B and field 7 was absent, as expected. With
+> `-DCONFIG_W1=y` it was 40 B, ending in `3a 04 00 00 00 00`, which decodes as
+> `w1_slot_type: ["empty","empty","empty","empty"]`. **Not covered on HW:** the `dallas` /
+> `machine-probe` values, because the unit has no DS2484 (`ds2484: Device reset failed: -5`);
+> they are covered by `tests/cmd` + `ttn.test.js` only. Low DR on US915/AU915 was also not
+> covered: both boot frames are dropped whole there, see #418.
+
+- [x] Pass (EU868; `w1_slot_type` verified as all-`empty` only)
+
 ### L5 — Periodic telemetry
 
 **Goal:** Telemetry is sent on the configured interval.
@@ -566,6 +598,38 @@ conditions (release build masks-off: no `CONFIG_LOG`, `PM=y`).
 > `west flash` retry loop or power-cycle.) Report the highest f_cnt reached.
 
 - [ ] Pass
+
+### L17 — LoRaWAN glue: real join result, bounded confirm, MAC lock (v1.5.0, #421)
+
+**Goal:** A (re)join reports the result of *its own* JoinRequest (not a stale link-check / device-time
+confirm). A lost MAC confirm ends in `-ETIMEDOUT` instead of wedging `m_work_q`. Concurrent LoRaMac access
+from shell/NFC and the radio/timer handlers never deadlocks.
+**Observable:** After a join plus its DeviceTime/LinkCheck exchange, a shell `join` blocks until the RX
+windows (≈ 6–9 s at SF12) instead of returning at once. After a network outage, the first rejoin once the NS
+answers again succeeds. No watchdog reset in any of the steps.
+
+**Prompt for Claude:**
+> On a joined debug image, wait for the first telemetry with its LinkCheckAns, then run `join` and note how
+> long it takes to end in `HEALTHY` versus when the NS saw the JoinRequest/JoinAccept. Disable the device on
+> the NS (e.g. ChirpStack `isDisabled`), run `join` and confirm the failure is reported only after the RX windows.
+> Re-enable it and confirm the automatic rejoin succeeds on its first attempt. With `interval-report 60` +
+> `lrw-link-check-interval 1`, disable the device for ~10 min: expect WARNING → RECONNECT → failing rejoins,
+> then success on the first attempt after re-enabling. Optionally (temporary, uncommitted hooks) drop one
+> McpsConfirm / join confirm and confirm `-ETIMEDOUT` after `CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS` with no
+> wedge. Restore the config afterwards.
+
+> **HW-verified (2026-09-23, debug + release @ `545b679`, EU868, ChirpStack v4 + RAK5146 on the ProXimos Hub):**
+> - **T1 / T8:** first-attempt joins on debug and release, with Info, settings-info ConfigDump (release: `w1_slot_type` 4× `empty`) and telemetry.
+> - **T2:** a disabled-NS join failed only after RX2 (8.4 s), and the first rejoin after re-enabling succeeded.
+> - **T2b A/B** (temporary WRN timing log): `lorawan_join()` after the link-check / device-time confirms
+>   took **26 ms / 25 ms on v1.5.0** (stale result) versus **8305 ms with #421**.
+> - **T3:** 8 min at 1 uplink/min, 8/8 LinkCheckAns, no FCnt gaps.
+> - **T4:** GetConfig page 0, SetParam without save → Ack + staged, `settings_save` → boot ConfigDump 600, CLI `set-config` with commit → 900.
+> - **T5** (temporary hooks): a dropped McpsConfirm → `-ETIMEDOUT` exactly 20 s after the request, and the retry went out. A dropped join confirm → `ret=-116 after 20025 ms`, then MAC polling → `HEALTHY`. No watchdog reset in either case.
+> - **T6:** 3 × 25 s at ~900 locked `get_info`/MIB reads per second ran concurrently with 4 chained GetConfig downlinks; all were answered and nothing hung.
+> - **T7:** ~8.8 min of NS outage → WARNING → RECONNECT → rejoin 1 refused → rejoin 2 (the first after re-enabling) succeeded.
+
+- [x] Pass
 
 ---
 
