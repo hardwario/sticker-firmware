@@ -1085,6 +1085,13 @@ static bool should_request_link_check(void)
 	if (interval <= 0) {
 		return false;
 	}
+	/* WARNING: the link is suspect, so check on every report. Each failed check
+	 * takes one recovery-ladder rung (lrw_backoff_step) and counts towards the
+	 * rejoin budget; at the N-th-report cadence the default 900 s x 5 took
+	 * ~6 h to leave WARNING, all of it transmitting blind on the old DR. */
+	if ((enum app_lrw_state)atomic_get(&m_state) == APP_LRW_STATE_WARNING) {
+		return true;
+	}
 	int msg_num = m_message_count + 1;
 
 	if (msg_num == 1 || (msg_num % interval) == 0) {
