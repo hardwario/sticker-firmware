@@ -298,6 +298,11 @@ name next to `app_p2p_start_history_replay()` — the rename makes that a compil
 v1.5.0 ↔ feat-p2p merge instead of a silent true/false inversion; resolve by mapping
 `-EMSGSIZE` to `BUDGET_TOO_SMALL` there too.
 
+**Follow-up — universal paging in PR #425 (stacked on this PR):** one `Response.page_index /
+page_count` pair for every response type (and `AlarmReport`), device-driven page streams on
+LoRaWAN and P2P. It replaces `InfoLite` (3c) and the per-type numbering in `ConfigDump` /
+`HistoryFrame`; see `doc/plan/425 - Universal response paging.md`.
+
 **Also in this PR:** #419 — `DevStatusReq` after `LinkADRReq` (loramac-node `west patch`,
 `6d6215f`); **HW PASS 2026-09-23**.
 
