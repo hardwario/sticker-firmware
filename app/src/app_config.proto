@@ -198,7 +198,11 @@ message Command {
         optional uint32 page              = 5;
     }
 
-    message GetInfo      { }
+    // page (#425, NFC / vendor / shell): which page of an Info that does not fit
+    // one frame — the answer carries Response.page_index/page_count; the phone
+    // asks for pages 1..page_count-1 itself. Omitted/0 = first page. Ignored
+    // over LoRaWAN, where the device streams every page by itself.
+    message GetInfo      { optional uint32 page = 1; }
     message GetConfig    { optional uint32 page = 1; }
     message SettingsSave { }
     message Reboot       { }
@@ -244,7 +248,9 @@ message Command {
 
     // Enumerate the 1-Wire bus; the response (Response.W1Scan) returns the
     // discovered ROMs so the host can teach a slot via SetParam sensorN_rom.
-    message W1Scan { }
+    // page: as GetInfo.page — a result that does not fit one frame is paged by
+    // ROM; every page request rescans the bus (the order is deterministic).
+    message W1Scan { optional uint32 page = 1; }
 
     // Take a fresh sensor sample, send it as telemetry over LoRaWAN (fPort 2),
     // and — over NFC — return the same readings synchronously in Response.sample

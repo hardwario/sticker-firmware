@@ -13,6 +13,7 @@
 #include "app_sensor.h"
 
 #include <pb_decode.h>
+#include <pb_encode.h>
 #include "src/app_config.pb.h"
 
 #include <zephyr/ztest.h>
@@ -1663,6 +1664,169 @@ ZTEST(cmd, test_get_config_layout_and_11b_floor)
 	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code");
 	zassert_equal(r.seq, 9, "seq");
 	app_cmd_stream_cancel();
+}
+
+/* ---- #425 host-driven pages over NFC (GetInfo.page / W1Scan.page) ---------- */
+
+/* Send Command{seq, get_info{page}} over `tp` into a `cap`-byte reply. */
+static size_t nfc_get_info(enum app_cmd_transport tp, uint32_t seq, bool has_page, uint32_t page,
+			   uint8_t *out, size_t cap)
+{
+	Command cmd = Command_init_zero;
+	uint8_t in[32];
+	size_t out_len = 0;
+	enum app_cmd_action act = APP_CMD_ACTION_NONE;
+
+	cmd.seq = seq;
+	cmd.which_body = Command_get_info_tag;
+	cmd.body.get_info.has_page = has_page;
+	cmd.body.get_info.page = page;
+	pb_ostream_t os = pb_ostream_from_buffer(in, sizeof(in));
+
+	zassert_true(pb_encode(&os, Command_fields, &cmd), "encode GetInfo");
+	zassert_equal(app_cmd_handle(tp, in, os.bytes_written, out, cap, &out_len, &act), 0,
+		      "handle GetInfo page %u", page);
+	zassert_equal(act, APP_CMD_ACTION_NONE, "no stream / action over the host channel");
+	zassert_true(out_len <= cap, "page %u: %zu B > cap %zu", page, out_len, cap);
+	return out_len;
+}
+
+static void nfc_info_setup(size_t alarms)
+{
+	static const uint8_t token[16] = {0xA1, 0xB2, 0xC3, 0xD4, 5, 6, 7, 8,
+					  9,    10,   11,   12,   13, 14, 15, 16};
+	static const uint8_t deveui[8] = {0x58, 0x76, 0x07, 0x02, 0x3D, 0xD6, 0xFA, 0x91};
+
+	reset_cfg();
+	g_app_config.serial_number = 2162165682u;
+	memcpy(g_app_config.claim_token, token, sizeof(token));
+	memcpy(g_app_config.lrw_deveui, deveui, sizeof(deveui));
+	g_app_sensor_data.voltage = 3.3f;
+	test_set_active_alarm_count(alarms);
+}
+
+/* Read every page of an Info over `tp` at `cap` (page 0 without `page`, then
+ * GetInfo{page=i}); check the paging invariants and that every field and alarm
+ * arrives exactly once. Returns the page count. */
+static uint32_t nfc_read_info_pages(enum app_cmd_transport tp, size_t cap, size_t alarms)
+{
+	uint8_t out[256];
+	size_t len = nfc_get_info(tp, 7, false, 0, out, cap);
+	Response r = decode_resp(out, len);
+	uint32_t count = r.page_count ? r.page_count : 1;
+	size_t seen_alarms = 0;
+	int seen_serial = 0, seen_token = 0, seen_eui = 0, seen_battery = 0;
+
+	for (uint32_t p = 0; p < count; p++) {
+		if (p > 0) {
+			len = nfc_get_info(tp, 7, true, p, out, cap);
+			r = decode_resp(out, len);
+		}
+		zassert_equal(r.which_body, Response_info_tag, "page %u: Info expected (%d)", p,
+			      r.which_body);
+		zassert_equal(r.seq, 7, "page %u: seq", p);
+		if (count > 1) {
+			zassert_equal(r.page_index, p, "page_index %u != %u", r.page_index, p);
+			zassert_equal(r.page_count, count, "page_count drift on page %u", p);
+		}
+		seen_alarms += count_info_active_alarms(out, len);
+		seen_serial += r.body.info.serial_number == 2162165682u;
+		seen_token += r.body.info.has_claim_token;
+		seen_eui += r.body.info.has_dev_eui;
+		seen_battery += r.body.info.battery == 3300;
+	}
+	zassert_equal(seen_alarms, alarms, "%zu of %zu alarms", seen_alarms, alarms);
+	zassert_equal(seen_serial, 1, "serial on %d pages", seen_serial);
+	zassert_equal(seen_battery, 1, "battery on %d pages", seen_battery);
+	if (tp == APP_CMD_TRANSPORT_NFC) {
+		zassert_equal(seen_token, 1, "claim_token on %d pages", seen_token);
+		zassert_equal(seen_eui, 1, "dev_eui on %d pages", seen_eui);
+	}
+
+	/* One past the end: OUT_OF_RANGE on the page field. */
+	len = nfc_get_info(tp, 7, true, count, out, cap);
+	r = decode_resp(out, len);
+	zassert_equal(r.which_body, Response_error_tag, "past the end must be an error");
+	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.fault_field, 1, "fault_field = page");
+	return count;
+}
+
+/* An Info that fits the NFC frame is one unpaged answer, as before. */
+ZTEST(cmd, test_nfc_info_fits_unpaged)
+{
+	uint8_t out[256];
+
+	nfc_info_setup(5);
+	size_t len = nfc_get_info(APP_CMD_TRANSPORT_NFC, 7, false, 0, out, 231);
+	Response r = decode_resp(out, len);
+
+	zassert_equal(r.page_count, 0, "no page fields when it fits");
+	zassert_equal(count_info_active_alarms(out, len), 5, "all alarms");
+	zassert_equal(nfc_read_info_pages(APP_CMD_TRANSPORT_NFC, 231, 5), 1, "one page");
+}
+
+/* Every alarm active at the mailbox frame (231 B): paged instead of trimmed,
+ * host-driven, NFC-only fields included, nothing lost or duplicated. */
+ZTEST(cmd, test_nfc_info_paged_at_mailbox_frame)
+{
+	nfc_info_setup(25);
+	zassert_true(nfc_read_info_pages(APP_CMD_TRANSPORT_NFC, 231, 25) >= 2,
+		     "25 alarms must not fit one 231 B frame");
+}
+
+/* A much smaller buffer still delivers everything, just over more pages. */
+ZTEST(cmd, test_nfc_info_paged_small_frame)
+{
+	nfc_info_setup(10);
+	uint32_t n = nfc_read_info_pages(APP_CMD_TRANSPORT_NFC, 51, 10);
+
+	zassert_true(n >= 3, "expected several pages at 51 B, got %u", n);
+	/* Vendor channel pages the same way (no NFC-only fields there). */
+	nfc_read_info_pages(APP_CMD_TRANSPORT_VENDOR, 51, 10);
+}
+
+extern int test_w1_scan_host_page(const uint8_t roms[][8], size_t n, uint32_t seq, uint32_t page,
+				  uint8_t *out, size_t cap, size_t *out_len);
+
+/* W1Scan over the host channels: fits whole at the mailbox frame; at a small
+ * frame it is split by ROM, page by page, in bus order. */
+ZTEST(cmd, test_w1_scan_host_pages)
+{
+	const uint8_t roms[4][8] = {{0x28, 1}, {0x28, 2}, {0x28, 3}, {0x28, 4}};
+	uint8_t out[64];
+	size_t len = 0;
+
+	zassert_equal(test_w1_scan_host_page(roms, 4, 9, 0, out, 231, &len), 0, "231 B");
+	Response r = decode_resp(out, len);
+
+	zassert_equal(r.body.w1_scan.rom_count, 4, "all ROMs in one frame");
+	zassert_equal(r.page_count, 0, "unpaged");
+
+	zassert_equal(test_w1_scan_host_page(roms, 4, 9, 0, out, 30, &len), 0, "30 B page 0");
+	r = decode_resp(out, len);
+	uint32_t count = r.page_count;
+	uint8_t next = 1;
+
+	zassert_true(count >= 2, "expected pages at 30 B (count %u)", count);
+	for (uint32_t p = 0; p < count; p++) {
+		zassert_equal(test_w1_scan_host_page(roms, 4, 9, p, out, 30, &len), 0, "page %u", p);
+		zassert_true(len <= 30, "page %u: %zu B", p, len);
+		r = decode_resp(out, len);
+		zassert_equal(r.seq, 9, "seq");
+		zassert_equal(r.page_index, p, "page_index");
+		zassert_equal(r.page_count, count, "page_count");
+		for (pb_size_t i = 0; i < r.body.w1_scan.rom_count; i++) {
+			zassert_equal(r.body.w1_scan.rom[i].bytes[1], next, "ROM order");
+			next++;
+		}
+	}
+	zassert_equal(next, 5, "all 4 ROMs once");
+
+	zassert_equal(test_w1_scan_host_page(roms, 4, 9, count, out, 30, &len), 0, "past end");
+	r = decode_resp(out, len);
+	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "past the end");
 }
 
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);

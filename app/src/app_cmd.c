@@ -1382,6 +1382,15 @@ static int encode_response(const Response *resp, uint8_t *out, size_t out_cap, s
 	return 0;
 }
 
+/* Whether `resp` encodes (version byte + Response) into `cap` bytes — a nanopb
+ * sizing pass, so a page layout needs no scratch buffer of the frame's size. */
+static bool response_fits(const Response *resp, size_t cap)
+{
+	size_t size = 0;
+
+	return pb_get_encoded_size(&size, Response_fields, resp) && size + 1 <= cap;
+}
+
 /* #425 universal paging over a radio. An answer that does not fit the DR budget
  * is split into pages — each a complete Response with the same seq and
  * Response.page_index/page_count — and the device sends every page by itself.
@@ -1413,6 +1422,7 @@ struct info_snap {
 	Response_Info info;
 	uint8_t alarm[ACTIVE_ALARM_SNAPSHOT_MAX][3];
 	uint8_t n_alarms;
+	uint32_t seq; /* echoed on every page; part of the page size */
 };
 
 static struct {
@@ -1675,6 +1685,10 @@ enum {
 	INFO_U_BATTERY,
 	INFO_U_RESET_CAUSE,
 	INFO_U_DEVICE_STATUS,
+	/* NFC-only fields: never set in a LoRaWAN snapshot, so empty (skipped) there. */
+	INFO_U_LRW_STATE,
+	INFO_U_CLAIM_TOKEN,
+	INFO_U_DEV_EUI,
 	INFO_U_SCALARS,
 };
 
@@ -1710,7 +1724,7 @@ static void info_page_fill(Response *resp, const struct info_snap *snap, uint32_
 	Response_Info *pi = &resp->body.info;
 
 	*resp = (Response)Response_init_zero;
-	resp->seq = m_page_stream.seq;
+	resp->seq = snap->seq;
 	resp->which_body = Response_info_tag;
 	set_page(resp, page, count);
 
@@ -1725,6 +1739,18 @@ static void info_page_fill(Response *resp, const struct info_snap *snap, uint32_
 	pi->battery = (mask & BIT(INFO_U_BATTERY)) ? all->battery : 0;
 	pi->reset_cause = (mask & BIT(INFO_U_RESET_CAUSE)) ? all->reset_cause : 0;
 	pi->device_status = (mask & BIT(INFO_U_DEVICE_STATUS)) ? all->device_status : 0;
+	if (mask & BIT(INFO_U_LRW_STATE)) {
+		pi->has_lrw_state = all->has_lrw_state;
+		pi->lrw_state = all->lrw_state;
+	}
+	if (mask & BIT(INFO_U_CLAIM_TOKEN)) {
+		pi->has_claim_token = all->has_claim_token;
+		memcpy(pi->claim_token, all->claim_token, sizeof(pi->claim_token));
+	}
+	if (mask & BIT(INFO_U_DEV_EUI)) {
+		pi->has_dev_eui = all->has_dev_eui;
+		memcpy(pi->dev_eui, all->dev_eui, sizeof(pi->dev_eui));
+	}
 	if (rng->end > rng->start) {
 		pi->active_alarms.funcs.encode = encode_alarm_range;
 		pi->active_alarms.arg = rng;
@@ -1758,6 +1784,12 @@ static bool info_unit_empty(const Response_Info *in, size_t u)
 		return in->reset_cause == 0;
 	case INFO_U_DEVICE_STATUS:
 		return in->device_status == 0;
+	case INFO_U_LRW_STATE:
+		return !in->has_lrw_state;
+	case INFO_U_CLAIM_TOKEN:
+		return !in->has_claim_token;
+	case INFO_U_DEV_EUI:
+		return !in->has_dev_eui;
 	default:
 		return false;
 	}
@@ -1770,14 +1802,11 @@ static bool info_unit_empty(const Response_Info *in, size_t u)
 static int info_layout(const struct info_snap *snap, size_t cap, uint32_t want, uint32_t *mask_out,
 		       struct alarm_range *rng_out, uint32_t *count)
 {
-	uint8_t tmp[64];
-	size_t len;
 	Response r;
 	uint32_t cur = 0, mask = 0;
 	struct alarm_range rng = {.snap = snap, .start = 0, .end = 0};
 	size_t units = INFO_U_SCALARS + snap->n_alarms;
 
-	cap = MIN(cap, sizeof(tmp));
 	for (size_t u = 0; u < units; u++) {
 		bool is_alarm = u >= INFO_U_SCALARS;
 		uint8_t a = (uint8_t)(u - INFO_U_SCALARS);
@@ -1800,7 +1829,7 @@ static int info_layout(const struct info_snap *snap, size_t cap, uint32_t want, 
 
 		if (contiguous) {
 			info_page_fill(&r, snap, tmask, &trng, PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
-			if (encode_response(&r, tmp, cap, &len) == 0) {
+			if (response_fits(&r, cap)) {
 				mask = tmask;
 				rng = trng;
 				continue;
@@ -1816,7 +1845,7 @@ static int info_layout(const struct info_snap *snap, size_t cap, uint32_t want, 
 			arng.end = a + 1;
 		}
 		info_page_fill(&r, snap, amask, &arng, PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
-		if (encode_response(&r, tmp, cap, &len) != 0) {
+		if (!response_fits(&r, cap)) {
 			continue;
 		}
 		if (mask != 0 || rng.end != rng.start) {
@@ -1877,6 +1906,7 @@ static int info_paged(uint32_t seq, uint8_t *out, size_t cap, size_t *out_len, b
 		snap->alarm[i][2] = (uint8_t)list[i].type;
 	}
 	snap->n_alarms = (uint8_t)n;
+	snap->seq = seq;
 
 	m_page_stream.seq = seq;
 	m_page_stream.cap = cap;
@@ -1968,6 +1998,116 @@ int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
 	return 0;
 }
 
+/* ---- host-driven pages (NFC / vendor / shell) ----------------------------- */
+
+/* Over the phone channels the host asks for every page itself (GetInfo.page /
+ * W1Scan.page); nothing is streamed and nothing is kept between requests. Each
+ * page is laid out afresh from a new snapshot, so the pages of one read may
+ * differ by the few tenths of a second between the requests (accepted). The
+ * layout rules are the radio ones: greedy, a unit that does not fit alone is
+ * left out, and every page is a complete, independently decodable Response. */
+static bool host_paged(enum app_cmd_transport tp)
+{
+	return tp == APP_CMD_TRANSPORT_NFC || tp == APP_CMD_TRANSPORT_VENDOR ||
+	       tp == APP_CMD_TRANSPORT_SHELL_DEBUG;
+}
+
+/* The requested page does not exist: OUT_OF_RANGE, fault_field 1 (= page), as
+ * GetConfig answers. */
+static void page_out_of_range(Response *resp, uint32_t seq)
+{
+	*resp = (Response)Response_init_zero;
+	resp->seq = seq;
+	make_error(resp, Response_Error_Code_OUT_OF_RANGE, "page");
+	resp->body.error.fault_field = 1;
+}
+
+/* Page `page` of the Info for `cap`; `r` is scratch (the caller's Response). */
+static int info_host_page(enum app_cmd_transport tp, uint32_t seq, uint32_t page, Response *r,
+			  uint8_t *out, size_t cap, size_t *out_len)
+{
+	struct info_snap snap;
+	struct app_alarm_active list[ACTIVE_ALARM_SNAPSHOT_MAX];
+	size_t n = app_alarm_active_snapshot(list, ARRAY_SIZE(list));
+
+	memset(&snap, 0, sizeof(snap));
+	fill_info(tp, &snap.info, SIZE_MAX);
+	snap.info.active_alarms.funcs.encode = NULL;
+	for (size_t i = 0; i < n; i++) {
+		snap.alarm[i][0] = (uint8_t)list[i].source;
+		snap.alarm[i][1] = (uint8_t)list[i].quantity;
+		snap.alarm[i][2] = (uint8_t)list[i].type;
+	}
+	snap.n_alarms = (uint8_t)n;
+	snap.seq = seq;
+
+	uint32_t mask = 0, count = 0;
+	struct alarm_range rng = {.snap = &snap};
+	int ret = info_layout(&snap, cap, page, &mask, &rng, &count);
+
+	if (ret) {
+		return ret;
+	}
+	if (page >= count) {
+		page_out_of_range(r, seq);
+	} else {
+		info_page_fill(r, &snap, mask, &rng, page, count);
+	}
+	return encode_response(r, out, cap, out_len);
+}
+
+/* Page `page` of the W1Scan result in `r` (split by ROM) for `cap`. */
+static int w1_scan_host_page(Response *r, uint32_t page, uint8_t *out, size_t cap, size_t *out_len)
+{
+	const Response_W1Scan all = r->body.w1_scan;
+	pb_size_t n = all.rom_count;
+	pb_size_t k = n;
+
+	/* Most ROMs per page that still fit with (worst-case) page fields. */
+	for (; k > 0; k--) {
+		r->body.w1_scan.rom_count = k;
+		r->page_index = r->page_count = (k < n) ? PAGE_COUNT_BOUND : 0;
+		if (response_fits(r, cap)) {
+			break;
+		}
+	}
+	if (n > 0 && k == 0) {
+		return -EMSGSIZE; /* not even one ROM fits */
+	}
+
+	uint32_t count = (n == 0) ? 1 : (n + k - 1) / k;
+
+	r->page_index = r->page_count = 0;
+	if (page >= count) {
+		page_out_of_range(r, r->seq);
+		return encode_response(r, out, cap, out_len);
+	}
+	r->body.w1_scan.rom_count = 0;
+	for (size_t i = (size_t)page * k; i < n && i < ((size_t)page + 1) * k; i++) {
+		r->body.w1_scan.rom[r->body.w1_scan.rom_count++] = all.rom[i];
+	}
+	set_page(r, page, count);
+	return encode_response(r, out, cap, out_len);
+}
+
+#ifdef CONFIG_ZTEST
+/* Test hook: the host-driven W1Scan pages without a 1-Wire bus. */
+int test_w1_scan_host_page(const uint8_t roms[][8], size_t n, uint32_t seq, uint32_t page,
+			   uint8_t *out, size_t cap, size_t *out_len)
+{
+	Response r = Response_init_zero;
+
+	r.seq = seq;
+	r.which_body = Response_w1_scan_tag;
+	for (size_t i = 0; i < n && i < ARRAY_SIZE(r.body.w1_scan.rom); i++) {
+		r.body.w1_scan.rom[i].size = 8;
+		memcpy(r.body.w1_scan.rom[i].bytes, roms[i], 8);
+		r.body.w1_scan.rom_count++;
+	}
+	return w1_scan_host_page(&r, page, out, cap, out_len);
+}
+#endif
+
 int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len, uint8_t *out,
 		   size_t out_cap, size_t *out_len, enum app_cmd_action *action)
 {
@@ -2028,7 +2168,29 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		return 0;
 	}
 
-	int ret = encode_response(&resp, out, out_cap, out_len);
+	/* Host-driven pages (NFC / vendor / shell): GetInfo.page / W1Scan.page picks
+	 * the page; an Info / W1Scan that does not fit the frame answers page 0 of N
+	 * instead of being trimmed. */
+	uint32_t host_page = 0;
+
+	if (cmd.which_body == Command_get_info_tag && cmd.body.get_info.has_page) {
+		host_page = cmd.body.get_info.page;
+	} else if (cmd.which_body == Command_w1_scan_tag && cmd.body.w1_scan.has_page) {
+		host_page = cmd.body.w1_scan.page;
+	}
+	const bool host = host_paged(transport) && (resp.which_body == Response_info_tag ||
+						    resp.which_body == Response_w1_scan_tag);
+	int ret = -EMSGSIZE;
+
+	if (!host || host_page == 0) {
+		ret = encode_response(&resp, out, out_cap, out_len);
+	}
+	if (host && ret == -EMSGSIZE) {
+		ret = (resp.which_body == Response_info_tag)
+			      ? info_host_page(transport, resp.seq, host_page, &resp, out, out_cap,
+					       out_len)
+			      : w1_scan_host_page(&resp, host_page, out, out_cap, out_len);
+	}
 
 	if (ret == -EMSGSIZE && resp.which_body == Response_info_tag &&
 	    transport == APP_CMD_TRANSPORT_LRW) {
@@ -2043,9 +2205,9 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		}
 	}
 
-	/* An Info over NFC that overflows the buffer: drop active alarms one at a
-	 * time and re-encode before giving up — the rest of Info is worth far more
-	 * than the alarm list. */
+	/* Last resort for an Info that still overflows (not even one page fits):
+	 * drop active alarms one at a time and re-encode before giving up — the rest
+	 * of Info is worth far more than the alarm list. */
 	for (size_t max_alarms = ACTIVE_ALARM_SNAPSHOT_MAX;
 	     ret == -EMSGSIZE && resp.which_body == Response_info_tag && max_alarms-- > 0;) {
 		resp.body.info.active_alarms.arg = (void *)(uintptr_t)max_alarms;
