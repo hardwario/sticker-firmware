@@ -474,10 +474,10 @@ The device sends all pages by itself. Plan: `doc/plan/425 - Universal response p
 
 | Answer | Page unit |
 |---|---|
-| Info (join, clock-sync, GetInfo over LoRaWAN) | each field, then each active alarm (one snapshot for all pages) |
+| Info (join, clock-sync, GetInfo) | each field (NFC also `claim_token` / `lrw_state` / `dev_eui`), then each active alarm (radio: one snapshot for all pages; NFC: a fresh one per page) |
 | GetConfig / GetParam | config fields (fixed 30 B pages on LoRaWAN at any DR; not at the 11 B tier → `BUDGET_TOO_SMALL`) |
 | settings-info (#412) | each setting / the `w1_slot_type` block |
-| W1Scan | ROMs (scan result kept, no rescan per page) |
+| W1Scan | ROMs (radio: scan result kept, no rescan per page; NFC: rescan per page, bus order is deterministic) |
 | History replay (`req_history`) | records (as before, numbering now in the envelope) |
 | AlarmReport | events (every page keeps its own `base_time` / `total`) |
 
@@ -486,8 +486,16 @@ The device sends all pages by itself. Plan: `doc/plan/425 - Universal response p
   time (a new paged answer replaces a running one; a rejoin cancels it; the boot
   settings-info waits for the Info pages). A host missing a page re-sends the request
   with `page = <index>` — the stream then sends from that page on.
-- **Host-driven on NFC**: the phone asks for a page; only big config dumps page there.
-  NFC history keeps its cursor (`next_ord` / `has_more`), no envelope numbering.
+- **Host-driven on NFC** (also the vendor channel and the debug shell): the phone asks for
+  every page itself — `GetConfig.page` / `GetParam.page`, and `GetInfo.page` / `W1Scan.page`
+  for an Info or a W1Scan that does not fit the frame (page 0 is the plain request; an Info
+  that overflows is paged, no longer trimmed). Nothing is kept between requests: each page is
+  laid out from a fresh snapshot, so the pages of one read may differ by the few tenths of a
+  second between the requests (accepted). A page past the end → `Error OUT_OF_RANGE`
+  (`fault_field` 1). With the 256 B FTM mailbox frame (#414) an Info pages only with about 19+
+  simultaneously active alarms and a W1Scan (≤ 4 ROMs, 47 B) never — the rule keeps both
+  correct for any smaller frame. `GetInfo.page` / `W1Scan.page` are ignored over LoRaWAN (the
+  device streams). NFC history keeps its cursor (`next_ord` / `has_more`), no envelope numbering.
 - **Physical floor**: a unit that does not fit even alone is left out (at the 11 B tier
   e.g. the serial number, unix time, an alarm entry or rule); when nothing fits the
   answer is `Error BUDGET_TOO_SMALL`.
@@ -500,8 +508,9 @@ Nothing is buffered or merged in the decoder — a consumer that wants the whole
 merges pages by (DevEUI, fPort, `seq`), for `AlarmReport` by `base_time`. A consumer
 that ignores `pages` just sees several partial answers.
 
-**Host impact**: Manager-App NFC GetConfig must read the page count from
-`Response.page_count` (absent = 1); the proximos-v2 decoder should merge pages
+**Host impact**: Manager-App NFC GetConfig / GetParam / GetInfo / W1Scan must read the page
+count from `Response.page_count` (absent = 1) and ask for pages 1..N-1 with `page` — merge an
+Info's scalar fields and concatenate its `active_alarms`, concatenate W1Scan ROMs; the proximos-v2 decoder should merge pages
 (Hub side: proximos-v2#96; decoder parity: proximos-v2#90). **P2P** uses the same rule and format (driver in
 PR #426 on `feat-p2p`): an answer that does not fit one 0x55 RESPONSE (64 B) is streamed
 as pages with the same `seq`; the P2P central must accept several 0x55 with one `seq`.
