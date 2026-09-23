@@ -285,8 +285,8 @@ LNS silently kills all downlinks.
     send-time re-encode would need a whole `Response` per queue slot, no RAM for it)
 - [x] A6 — AS923 region — measured +2 536 B flash / +0 B RAM (release, on the synced base);
   AS923-1, release only (debug trims it); not HW-testable on the EU868 bench
-- [ ] A2 — RSSI/SNR in GetInfo — after #414
-- [ ] A4 — confirmed uplinks for alarms — heartbeat blocker resolved first
+- [→] A2 — RSSI/SNR in GetInfo — **moved to its own PR #423** (NFC only, with age; did not wait for #414)
+- [→] A4 — confirmed uplinks for alarms — **deferred to issue #422** (options + constraints incl. #421's 20 s confirm timeout)
 - [ ] A5b — AU915 HIL validation (needs an AU915-plan gateway)
 
 **Deferred / v2:** A7 (RX2 override).
