@@ -278,8 +278,9 @@ LNS silently kills all downlinks.
   - [x] 3b — alarms: N `AlarmReport` frames instead of trimming; alarm bits in telemetry (`3b0a97d`)
   - [x] 3c — `Info`-lite at the 11 B tier + deferred boot announce; `BUDGET_TOO_SMALL` (`6cbb4db`;
     `InfoLite` = `Response` field 11, since #414 claims 9/10)
-  - [ ] 3d — settings-info + GetConfig: DR-adaptive pages (≥ 51 B tier, low priority)
-  - [ ] 3e — GetParam / W1Scan: paging (≥ 51 B tier, low priority)
+  - [x] 3d/3e — GetConfig / GetParam over LoRaWAN stream all pages from one request (device-driven,
+    always automatic, page size kept at 30 B); settings-info and W1Scan left unsplit (no real budget
+    where splitting helps)
   - [x] 3f — HistoryFrame: real (not worst-case) overhead, defined floor (`790b8f9`)
   - [x] 3g — DR drop between queue and send: recover by frame kind (`c77f5ac`; narrowed — full
     send-time re-encode would need a whole `Response` per queue slot, no RAM for it)

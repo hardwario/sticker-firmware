@@ -336,6 +336,13 @@ fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *f
   instead of ~18 B). When records exist but not one fits the current DR, the answer is
   `Error BUDGET_TOO_SMALL` instead of `HISTORY_UNAVAILABLE`; a replay cut short by a DR
   drop ends with the same `Error` (request `seq`) instead of going silent.
+- **GetConfig / GetParam over LoRaWAN send every page by themselves.** One downlink
+  request is enough: the device answers with the requested page (0 unless `page` is
+  given) and then uplinks the remaining pages on its own — same `seq`, `page_index` /
+  `page_count` as before, paced by the duty cycle (at EU868 DR0 a full config takes
+  minutes). A new GetConfig/GetParam replaces a stream still running; a rejoin cancels
+  it. The page size stays 30 B. NFC is unchanged (the phone still asks page by page,
+  ~450 B pages).
 - **DR drop between queueing and sending.** A queued frame that no longer fits after
   ADR lowered the DR is recovered instead of dropped: the boot `Info` / settings-info
   are re-sent once the DR rises again, a command answer becomes `Error
