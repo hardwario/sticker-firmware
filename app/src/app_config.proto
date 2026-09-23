@@ -167,6 +167,7 @@ message Command {
         BuzzerPlay       buzzer_play       = 28;
         GetClaimInfo     get_claim_info    = 29;
         GetBasicInfo     get_basic_info    = 30;
+        GetSettings      get_settings      = 31;
     }
 // END GENERATED COMMANDS
 
@@ -313,6 +314,13 @@ message Command {
     // version a phone needs before its first encrypted command. Replaces the
     // plaintext hio.stck:inf NDEF record. plain_text / nfc / shell.
     message GetBasicInfo { }
+
+    // The boot settings-info ConfigDump (#412) on request: application
+    // interval_sample / interval_report / history_enable, the nine sensors
+    // cap_* flags and the runtime w1_slot_type. The answer carries this
+    // command's seq (the autonomous boot dump has seq 0); over LoRaWAN it is
+    // paged with the Response envelope (#425) when it does not fit one frame.
+    message GetSettings { }
 }
 
 message Response {

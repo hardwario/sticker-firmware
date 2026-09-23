@@ -1276,6 +1276,10 @@ static void app_cmd_handle_enter_calibration(enum app_cmd_transport tp, const Co
 #endif /* defined(CONFIG_APP_CALIBRATION) */
 }
 
+/* Defined next to the settings-info page builder it shares with the boot dump. */
+static void app_cmd_handle_get_settings(enum app_cmd_transport tp, const Command *cmd,
+					Response *resp, enum app_cmd_action *action);
+
 // BEGIN GENERATED DISPATCH
 static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 			     enum app_cmd_action *action)
@@ -1500,6 +1504,15 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		}
 		app_cmd_handle_get_basic_info(tp, cmd, resp, action);
 		break;
+	case Command_get_settings_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_get_settings(tp, cmd, resp, action);
+		break;
 	default:
 		/* L-54: an unknown command tag (e.g. a removed command like the old
 		 * enter_dfu/enter_mailbox 19/20/22 sent by an older app) is a distinct,
@@ -1647,11 +1660,13 @@ static const uint32_t cs_sensor_ids[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
 #endif
 
 /* Fill a settings-info ConfigDump with the items in `mask` (bit i = item i:
- * application ids, then sensor ids, then the w1_slot_type block). */
-static void config_status_fill(Response *resp, uint32_t mask, uint32_t page, uint32_t count)
+ * application ids, then sensor ids, then the w1_slot_type block). `seq` is 0 for
+ * the autonomous boot dump, the command's seq for a GetSettings answer. */
+static void config_status_fill(Response *resp, uint32_t seq, uint32_t mask, uint32_t page,
+			       uint32_t count)
 {
 	*resp = (Response)Response_init_zero;
-	resp->seq = 0;
+	resp->seq = seq;
 	resp->which_body = Response_config_dump_tag;
 	set_page(resp, page, count);
 
@@ -1702,25 +1717,30 @@ static void config_status_fill(Response *resp, uint32_t mask, uint32_t page, uin
 /* Greedy layout: pack items into as few pages as fit `cap` (measured by really
  * encoding each candidate page). An item that does not fit even alone is left
  * out (physical floor, #425); -EMSGSIZE only when no item fits at all. On
- * success mask[p] holds the items of page p and *count the pages. */
-static int config_status_layout(size_t cap, uint32_t mask[CS_ITEMS], uint32_t *count)
+ * success mask[p] holds the items of page p and *count the pages. `seq` is
+ * part of the measured size (a non-zero seq costs 2+ B). `scratch` is the
+ * caller's Response, reused for the trial encodes so no second ~600 B Response
+ * lands on the stack (the GetSettings path already holds app_cmd_handle()'s
+ * Command + Response). */
+static int config_status_layout(Response *scratch, size_t cap, uint32_t seq,
+				uint32_t mask[CS_ITEMS], uint32_t *count)
 {
 	uint8_t tmp[128];
 	size_t len;
-	Response r;
 	uint32_t cur = 0;
 
 	cap = MIN(cap, sizeof(tmp));
 	memset(mask, 0, sizeof(uint32_t) * CS_ITEMS);
 
 	for (size_t i = 0; i < CS_ITEMS; i++) {
-		config_status_fill(&r, mask[cur] | BIT(i), PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
-		if (encode_response(&r, tmp, cap, &len) == 0) {
+		config_status_fill(scratch, seq, mask[cur] | BIT(i), PAGE_COUNT_BOUND,
+				   PAGE_COUNT_BOUND);
+		if (encode_response(scratch, tmp, cap, &len) == 0) {
 			mask[cur] |= BIT(i);
 			continue;
 		}
-		config_status_fill(&r, BIT(i), PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
-		if (encode_response(&r, tmp, cap, &len) != 0) {
+		config_status_fill(scratch, seq, BIT(i), PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
+		if (encode_response(scratch, tmp, cap, &len) != 0) {
 			continue; /* too big even alone: left out */
 		}
 		cur++;
@@ -1733,12 +1753,13 @@ static int config_status_layout(size_t cap, uint32_t mask[CS_ITEMS], uint32_t *c
 	return 0;
 }
 
-static int config_status_page(size_t layout_cap, uint32_t page, uint8_t *out, size_t out_cap,
-			      size_t *out_len, uint32_t *count)
+/* Encode settings-info page `page` of the layout for `layout_cap`; `scratch`
+ * ends up holding that page. */
+static int config_status_page(Response *scratch, size_t layout_cap, uint32_t seq, uint32_t page,
+			      uint8_t *out, size_t out_cap, size_t *out_len, uint32_t *count)
 {
 	uint32_t mask[CS_ITEMS];
-	Response r;
-	int ret = config_status_layout(layout_cap, mask, count);
+	int ret = config_status_layout(scratch, layout_cap, seq, mask, count);
 
 	if (ret) {
 		return ret;
@@ -1746,8 +1767,41 @@ static int config_status_page(size_t layout_cap, uint32_t page, uint8_t *out, si
 	if (page >= *count) {
 		return -ENODATA;
 	}
-	config_status_fill(&r, mask[page], page, *count);
-	return encode_response(&r, out, out_cap, out_len);
+	config_status_fill(scratch, seq, mask[page], page, *count);
+	return encode_response(scratch, out, out_cap, out_len);
+}
+
+/* GetSettings: the boot settings-info content on request, with this command's
+ * seq (the autonomous boot dump keeps seq 0, so the host can tell them apart).
+ * Filled here as one frame with every item; app_cmd_handle() re-lays it out as
+ * pages over LoRaWAN when that does not fit the payload budget (#425). */
+static void app_cmd_handle_get_settings(enum app_cmd_transport tp, const Command *cmd,
+					Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(action);
+	config_status_fill(resp, cmd->seq, BIT(CS_ITEMS) - 1, 0, 1);
+}
+
+/* GetSettings over LoRaWAN that does not fit `cap`: page it like the boot dump.
+ * `resp` (app_cmd_handle()'s Response) is the layout scratch and ends up holding
+ * page 0, which is encoded into `out`; the rest follow via the page stream. */
+static int settings_paged(Response *resp, uint8_t *out, size_t cap, size_t *out_len, bool *streamed)
+{
+	uint32_t seq = resp->seq;
+	uint32_t count;
+	int ret;
+
+	app_cmd_stream_cancel();
+	ret = config_status_page(resp, cap, seq, 0, out, cap, out_len, &count);
+	if (ret) {
+		return ret;
+	}
+	*streamed = count > 1;
+	if (*streamed) {
+		page_stream_start(PAGE_STREAM_SETTINGS, seq, cap, count);
+	}
+	return 0;
 }
 
 /* ---- W1Scan pages -------------------------------------------------------- */
@@ -2137,10 +2191,13 @@ int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
 	case PAGE_STREAM_REQUEST:
 		ret = request_page(m_page_stream.next, out, out_cap, out_len);
 		break;
-	case PAGE_STREAM_SETTINGS:
-		ret = config_status_page(m_page_stream.cap, m_page_stream.next, out, out_cap,
-					 out_len, &count);
+	case PAGE_STREAM_SETTINGS: {
+		Response r;
+
+		ret = config_status_page(&r, m_page_stream.cap, m_page_stream.seq,
+					 m_page_stream.next, out, out_cap, out_len, &count);
 		break;
+	}
 	case PAGE_STREAM_W1SCAN:
 		ret = w1_scan_page(m_page_stream.next, out, out_cap, out_len);
 		break;
@@ -2391,6 +2448,18 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		}
 	}
 
+	if (ret == -EMSGSIZE && cmd_body == Command_get_settings_tag &&
+	    resp.which_body == Response_config_dump_tag && transport == APP_CMD_TRANSPORT_LRW) {
+		/* GetSettings that does not fit the budget: the same pages as the boot
+		 * settings-info (#425 envelope), carrying the command's seq. */
+		bool streamed = false;
+
+		ret = settings_paged(&resp, out, out_cap, out_len, &streamed);
+		if (ret == 0 && streamed) {
+			act = APP_CMD_ACTION_PAGE_STREAM;
+		}
+	}
+
 	/* Last resort for an Info that still overflows (not even one page fits):
 	 * drop active alarms one at a time and re-encode before giving up — the rest
 	 * of Info is worth far more than the alarm list. */
@@ -2469,6 +2538,7 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *more
 
 int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len, bool *more)
 {
+	Response r;
 	uint32_t count;
 
 	if (!out || !out_len || !more) {
@@ -2483,7 +2553,7 @@ int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len, b
 	 * serials are left out (GetParam sensors 11..14). #425: one page when it fits
 	 * out_cap (EU868 DR0 and up), else as many pages as the budget needs — page
 	 * 0 here, the rest via app_cmd_stream_next(). */
-	int ret = config_status_page(out_cap, 0, out, out_cap, out_len, &count);
+	int ret = config_status_page(&r, out_cap, 0, 0, out, out_cap, out_len, &count);
 
 	if (ret) {
 		return ret;

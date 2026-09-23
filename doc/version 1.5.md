@@ -20,8 +20,9 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN | **New** — AS923 region (#409 A6): `lrw-region as923`, channel plan AS923-1, release builds. |
 | LoRaWAN | **Improved** — faster link-loss recovery (#424): link check on every report while `WARNING`, a TX-power/data-rate step-down ladder before the rejoin (a moved device regains its gateway on a lower DR without losing the session), and US915/AU915 no longer lose the configured sub-band after repeated failed joins. |
 | LoRaWAN / P2P | **New** — universal response paging (#425): every answer that does not fit one frame is split into self-contained pages numbered `page_index`/`page_count` in the `Response` envelope (and in `AlarmReport`), sent by the device on its own; decoders label them `pages: "i/N"`. |
-| NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §13. |
-| NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §14. |
+| LoRaWAN / NFC | **New** — `GetSettings` command (#428): the boot settings-info `ConfigDump` (§4) on request, with the command's `seq`, so a host can refresh the key operating settings without a full multi-page `GetConfig`. |
+| NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §14. |
+| NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §15. |
 
 ---
 
@@ -208,8 +209,9 @@ config reply, bool fields decode as `0`/`1`):
   `ttn.js` `_decodeConfigDump()` already handle the config fields.
 - The **persisted 1-Wire slot ROM serials** are *not* in this frame (to keep it one
   DR0 uplink); a host that wants them reads `GetParam(sensors 11..14)`.
-- `w1_slot_type` is runtime state, filled **only** by this boot uplink — a plain
-  `GetConfig` / `GetParam` reply stays a pure config snapshot and never carries it.
+- `w1_slot_type` is runtime state, filled **only** by this boot uplink and by its
+  on-request twin `GetSettings` (§13) — a plain `GetConfig` / `GetParam` reply stays a
+  pure config snapshot and never carries it.
 
 **HW verification (2026-09-22, EU868, ChirpStack v4):** after every join the
 device sent `Info` (FCnt 1), then this `ConfigDump` page 0/1 (FCnt 2), then
@@ -546,7 +548,39 @@ Cost: release about +1.8 KB flash, +128 B RAM.
 
 ---
 
-## 13. NFC command channel: ST25DV Fast-Transfer-Mode mailbox (#313)
+## 13. `GetSettings` — settings-info on request (#428)
+
+The boot settings-info (§4) tells the network the effective configuration once per boot.
+A host that wants to refresh it later had only `GetConfig`: 38 keys in 6+ pages (one page
+per alarm rule on top), ~13 s of SF12 airtime at EU868 DR0. `GetSettings` returns exactly
+the §4 content on request.
+
+| | |
+|---|---|
+| Command | `get_settings` = `Command` field **31**, empty body (29/30 are taken by #414; 15 was `req_alarm_rules`, not reused) |
+| Downlink | fPort 85, e.g. `0807fa0100` (seq 7) |
+| Answer | `Response.config_dump` with the command's `seq`: `application` interval_sample / interval_report / history_enable, the nine `sensors.cap_*` flags, runtime `w1_slot_type` (1-Wire builds) |
+| Size | the boot dump + 2 B for the `seq` (34 B measured without 1-Wire, +6 B with the four `w1_slot_type` entries): one frame at EU868 DR0 and up |
+| Paging | over LoRaWAN the same pages as the boot dump (§12 envelope) when the budget is smaller; every page carries the `seq` |
+| Transports | all (LoRaWAN, NFC, vendor, shell) except the plaintext mailbox channel (#414); read-only, no secrets |
+
+The values are the **staged** config, like every `GetConfig` / `GetParam` answer (a change
+without `settings save` shows up at once). The boot dump keeps `seq` 0, so a host can tell
+the autonomous dump from an answer. Decoders need no change: the answer is a normal
+`config_dump`; `ttn.js` only learns the command name for `encodeDownlink`.
+
+**HW verification (2026-09-23, EU868, ProXimos Hub ChirpStack v4, PR #429):** downlink
+`0807fa0100` → one fPort-85 frame at DR5, 34 B, `Response{seq 7, config_dump}` whose
+`config_dump` bytes are identical to the boot settings-info of the same boot. See
+`doc/manual-test-plan.md` scenario **L4c**.
+Hub combined11 (proximos-v2 !91): the Portal "Refresh from device" button sends
+`GetSettings` and completes on the one-frame answer. A v1.5.0 image without this command
+answers `Error NOT_SUPPORTED` (code 7) with the `seq` kept, so the Hub's config is untouched.
+Not HW-tested: NFC, DR0 (34 B fits one frame there too) and the paged form (native tests only).
+
+---
+
+## 14. NFC command channel: ST25DV Fast-Transfer-Mode mailbox (#313)
 
 **Why.** In v1.4.0 the phone drove interactive commands by writing an NDEF
 `hio.stck:cmd` record into the ST25DV's user EEPROM and reading an `hio.stck:rsp`
@@ -708,12 +742,12 @@ page fits one 256 B mailbox frame.
 
 ---
 
-## 14. Plaintext command transport and explicit claiming (#415)
+## 15. Plaintext command transport and explicit claiming (#415)
 
 Prepares the claim flow for the NFC mailbox move (#313/#414) and tightens the
 claim window into something with no automatic behaviour.
 
-### 14.1 The `plain_text` transport
+### 15.1 The `plain_text` transport
 
 A new command transport, `plain_text`, carries a **raw `Command` protobuf** in and
 `0x01 || Response` out — no AES-CCM, no nonce, no response cache. It is the
@@ -730,7 +764,7 @@ transports **except** `plain_text`", so a command that does not name it — `get
 can never be answered without a key. **Rule for any command that opts in:
 read-only, and disclosing identity-class data only.**
 
-### 14.2 `get_claim_info` (proto 29)
+### 15.2 `get_claim_info` (proto 29)
 
 The first `plain_text` command (also allowed over `nfc` and `shell`). Empty request;
 returns `Response.claim_info { serial_number, claim_token }` — the same data the
@@ -740,7 +774,7 @@ token is provisioned, `NOT_READY "no claim token"`. Unlike the NDEF record it ne
 a **powered** device, so a shelf attacker can no longer read the token off an
 unpowered box.
 
-### 14.3 Explicit two-state claim window
+### 15.3 Explicit two-state claim window
 
 The claim window (`clm/state` in NVS) is now a two-state latch:
 
@@ -762,14 +796,14 @@ not control). Mutators are explicit only: `claim_done` / `ats claim done` →
 Upgrading from v1.4.x migrates the old tri-state in place: `unset`/`pending` →
 `active`, `consumed` → `done`.
 
-### 14.4 Command rename (wire-compatible)
+### 15.4 Command rename (wire-compatible)
 
 `clm_ack` → `claim_done` (id 25) and `clm_rearm` → `claim_active` (id 27); messages
 `ClmAck`/`ClmRearm` → `ClaimDone`/`ClaimActive`. The **field numbers do not move**,
 so already-deployed downlinks and vendored protos stay byte-compatible — only the
 generated names change (firmware, JS decoder, and the Manager-App's vendored proto).
 
-### 14.5 Bench
+### 15.5 Bench
 
 `ats cmd plain <hex>` injects a raw Command over the transport; `ats claim
 active|done|status` drives and prints the window state. Example:

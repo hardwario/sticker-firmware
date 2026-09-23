@@ -571,7 +571,7 @@ This key rename kept the protobuf field numbers; the user-facing keys and code i
 
 ## 10. Local NFC access (NEW)
 
-> **Superseded in v1.5.0 (#313).** Interactive commands move from these NDEF `hio.stck:cmd`/`:rsp`/`:vnd` records to the ST25DV Fast-Transfer-Mode mailbox (one tap, iOS == Android). The tag holds no NDEF at all — the identity record below is replaced by the mailbox `get_basic_info` command, and there is no tap-to-launch. Battery-less provisioning is dropped. See `doc/version 1.5.md` §13.
+> **Superseded in v1.5.0 (#313).** Interactive commands move from these NDEF `hio.stck:cmd`/`:rsp`/`:vnd` records to the ST25DV Fast-Transfer-Mode mailbox (one tap, iOS == Android). The tag holds no NDEF at all — the identity record below is replaced by the mailbox `get_basic_info` command, and there is no tap-to-launch. Battery-less provisioning is dropped. See `doc/version 1.5.md` §14.
 
 The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel — for reading the sticker's identity and for the same command protocol available over LoRaWAN, without a network connection.
 
@@ -952,7 +952,7 @@ The input-event LED is a **commissioning diagnostic**: it blinks only for the fi
 > **Superseded in v1.5.0 (#313/#414).** With the FTM mailbox the NFC LED shows: phone detected →
 > green ≤ 5 s, session running → green blink, session end → green + yellow 2 s (last exchange OK)
 > or red 2 s (last exchange failed); reboot-type commands show the result, then reboot (no
-> pre-reboot green ×10). See `doc/version 1.5.md` §13 "LED during a tap".
+> pre-reboot green ×10). See `doc/version 1.5.md` §14 "LED during a tap".
 
 An NFC exchange with a phone shows a four-step sequence so an operator can follow it:
 

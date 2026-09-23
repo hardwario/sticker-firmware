@@ -1493,7 +1493,7 @@ ZTEST(cmd, test_plain_text_rejects_every_command)
 		Command_sample_tag,         Command_factory_reset_tag,
 		Command_set_secret_key_tag, Command_claim_done_tag,
 		Command_vendor_reset_tag,   Command_claim_active_tag,
-		Command_buzzer_play_tag,
+		Command_buzzer_play_tag,    Command_get_settings_tag,
 	};
 
 	reset_cfg();
@@ -1799,6 +1799,88 @@ ZTEST(cmd, test_settings_info_paged_at_small_budget)
 	g_seen_cfg_fields = 0;
 	walk_pages(out, out_len, 16, 0, visit_settings_page);
 	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+}
+
+/* GetSettings: the boot settings-info content on request. At the EU868 DR0
+ * budget it is one frame, carries the command's seq (not the boot dump's 0) and
+ * the same 12 settings; no page fields, no stream. */
+ZTEST(cmd, test_get_settings_one_frame)
+{
+	uint8_t in[8], out[64], boot[64];
+	size_t in_len = unhex("0807fa0100", in, sizeof(in)); /* seq7 get_settings{} */
+	size_t out_len = 0, boot_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	bool more;
+
+	reset_cfg();
+	g_app_config.interval_sample = 60;
+	g_app_config.interval_report = 900;
+	g_app_config.cap_hall_left = true;
+
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 51, &out_len, &action),
+		      0, "handle");
+	zassert_equal(action, APP_CMD_ACTION_NONE, "one frame: no stream, action %d", action);
+	zassert_true(out_len <= 51, "%zu B > DR0", out_len);
+
+	Response r = decode_resp(out, out_len);
+	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
+	zassert_equal(r.seq, 7, "seq %u", r.seq);
+	zassert_equal(r.page_count, 0, "page_count %u", r.page_count);
+	zassert_equal(r.body.config_dump.application.interval_report, 900, "interval_report");
+	zassert_true(r.body.config_dump.sensors.cap_hall_left, "cap_hall_left");
+	g_seen_cfg_fields = 0;
+	visit_settings_page(out, out_len, &r);
+	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+
+	/* Same bytes as the autonomous boot dump apart from the seq field
+	 * (08 07 right after the version byte). */
+	zassert_equal(app_cmd_build_config_status(boot, sizeof(boot), &boot_len, &more), 0,
+		      "boot dump");
+	zassert_equal(out_len, boot_len + 2, "GetSettings %zu B vs boot %zu B", out_len, boot_len);
+	zassert_equal(out[1], 0x08, "seq tag");
+	zassert_equal(out[2], 0x07, "seq value");
+	zassert_mem_equal(out + 3, boot + 1, boot_len - 1, "body differs from the boot dump");
+}
+
+/* GetSettings over LoRaWAN that does not fit: the boot dump's pages, each with
+ * the command's seq, streamed like the boot settings-info. */
+ZTEST(cmd, test_get_settings_paged)
+{
+	uint8_t in[8], out[64];
+	size_t in_len = unhex("082afa0100", in, sizeof(in)); /* seq42 get_settings{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	reset_cfg();
+	g_app_config.interval_sample = 60;
+	g_app_config.interval_report = 900;
+
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 16, &out_len, &action),
+		      0, "handle");
+	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
+	g_seen_cfg_fields = 0;
+	walk_pages(out, out_len, 16, 42, visit_settings_page);
+	zassert_equal(g_seen_cfg_fields, 12, "%u of 12 settings", g_seen_cfg_fields);
+}
+
+/* GetSettings over NFC: one frame with the seq, never a radio page stream. */
+ZTEST(cmd, test_get_settings_nfc)
+{
+	uint8_t in[8], out[256];
+	size_t in_len = unhex("0805fa0100", in, sizeof(in)); /* seq5 get_settings{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	reset_cfg();
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, in, in_len, out, sizeof(out), &out_len,
+				     &action),
+		      0, "handle");
+	zassert_equal(action, APP_CMD_ACTION_NONE, "action %d", action);
+
+	Response r = decode_resp(out, out_len);
+	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
+	zassert_equal(r.seq, 5, "seq %u", r.seq);
+	zassert_equal(r.page_count, 0, "page_count %u", r.page_count);
 }
 
 extern int test_w1_scan_page0(const uint8_t roms[][8], size_t n, uint32_t seq, uint8_t *out,
