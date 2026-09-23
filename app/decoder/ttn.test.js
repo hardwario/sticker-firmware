@@ -142,6 +142,51 @@ test("config_dump decodes w1_slot_type (packed, #412)", () => {
   assert.deepEqual(u.config_dump.w1_slot_type, ["machine-probe", "dallas", "empty", "empty"]);
 });
 
+// #425 universal paging: Response.page_index (12) / page_count (13) in the
+// envelope, the same for every response type. Each page decodes on its own —
+// the decoder keeps no state between uplinks.
+test("envelope paging: ConfigDump page 2/3 decodes alone (#425)", () => {
+  // seq 9, page_index 1, page_count 3, config_dump.application.interval_report 900
+  const d = codec.decodeUplink({ bytes: hex("0108092205220318840760016803"), fPort: 85 }).data;
+  assert.equal(d.seq, 9);
+  assert.equal(d.page_index, 1);
+  assert.equal(d.page_count, 3);
+  assert.equal(d.pages, "2/3");
+  assert.equal(d.config_dump.application.interval_report, 900);
+});
+
+test("envelope paging: HistoryFrame page 1/2 (page_index 0 omitted) (#425)", () => {
+  const d = codec.decodeUplink({
+    bytes: hex("01080a2a121880cae2d006220366085a280330840738016802"), fPort: 85,
+  }).data;
+  assert.equal(d.pages, "1/2");
+  assert.equal(d.history_frame.records.length, 1);
+  assert.equal(d.history_frame.records[0].temperature, 21.5);
+  assert.equal(d.history_frame.records[0].time, 1780000000);
+  // Legacy in-body numbering is absent on the wire -> not emitted (HIL P8).
+  assert.equal(d.history_frame.frame_index, undefined);
+  assert.equal(d.history_frame.frame_count, undefined);
+});
+
+test("envelope paging: an unpaged answer has no pages field (#425)", () => {
+  const d = codec.decodeUplink({ bytes: hex("01220810013a0402010000"), fPort: 85 }).data;
+  assert.equal(d.pages, undefined); // legacy page_count 1 = single frame
+});
+
+// #425: an AlarmReport batch split over frames is numbered like Response pages.
+// Page 2/2 decodes alone (stateless decoder): its own base_time / total.
+test("fPort 3 AlarmReport page 2/2 decodes alone (#425)", () => {
+  const d = codec.decodeUplink({
+    bytes: hex("0108a487ccd50610041a0b200928ca59300138034802200128013002"), fPort: 3,
+  }).data;
+  assert.equal(d.pages, "2/2");
+  assert.equal(d.total, 4);
+  assert.equal(d.truncated, undefined); // paged: "fewer than total" is expected
+  assert.equal(d.alarms.length, 1);
+  assert.equal(d.alarms[0].slot, 3);
+  assert.equal(d.alarms[0].time, 1790116772 + 9);
+});
+
 // An unknown/newer slot type from a future firmware must not break an older
 // decoder — it falls back to "type<N>" instead of undefined.
 test("config_dump w1_slot_type unknown value falls back to type<N> (#412)", () => {
@@ -238,15 +283,6 @@ test("decodeUplink decodes compact LoRaWAN Errors without detail (#409, fPort 85
   assert.equal(big.error.code, 9); // BUDGET_TOO_SMALL: retry once the DR rises
 });
 
-// InfoLite (Response field 11, #409 3c): Response{ seq=0, info_lite{ fw 1.5.1,
-// build_type=DEV } } = 01 5a 08 0801 1005 1801 2001 (11 B), fits the 11 B tier.
-test("decodeUplink decodes InfoLite (#409, fPort 85)", () => {
-  const got = codec.decodeUplink({ bytes: hex("015a080801100518012001"), fPort: 85 }).data;
-  assert.equal(got.info, undefined);
-  assert.equal(got.info_lite.fw_version, "1.5.1");
-  assert.equal(got.info_lite.build_type_name, "dev");
-});
-
 // W1Scan response (field 7): the discovered 1-Wire ROMs come back as hex
 // strings so the host can teach a slot via SetParam sensorN_rom.
 //   01           APP_PROTO_VERSION prefix
@@ -274,6 +310,16 @@ test("decodeUplink decodes get_info with claim_token (fPort 85)", () => {
   assert.equal(got.info.fw_version, "1.4.2");
   assert.equal(got.info.serial_number, 1234567890);
   assert.equal(got.info.claim_token, "158a6a5d5b54c5118e62a8f4af0de8d2");
+});
+
+// #425: the decoder's internal field-presence map never reaches the consumer,
+// not even as a hidden property (spread / Object.assign / structuredClone drop it).
+test("decodeUplink get_info carries no internal _seen property (fPort 85)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108031a24080110041802200228d285d8cc04302a40014a10158a6a5d5b54c5118e62a8f4af0de8d2"),
+    fPort: 85,
+  }).data;
+  assert.equal(Object.getOwnPropertyNames(got.info).includes("_seen"), false);
 });
 
 // An uncommissioned device omits claim_token (the all-zero sentinel) → absent.

@@ -329,43 +329,58 @@ static void alarm_batch_flush(void)
 	}
 #endif
 
-	/* #409 3b: split the batch across as many AlarmReport frames as the budget
-	 * needs (each self-contained: same base_time/total/time_synced), instead of
-	 * trimming it to the first frame and losing the rest. Greedy: the largest
-	 * run of remaining events that fits goes out next. */
+	/* #409 3b / #425: split the batch across as many AlarmReport frames as the
+	 * budget needs (each self-contained: same base_time/total/time_synced) and
+	 * number them page_index/page_count like every other paged answer. Pass 1
+	 * lays the pages out greedily with worst-case (one-byte) page numbers, so the
+	 * real numbers in pass 2 never make a page grow. */
+#define ALARM_PAGE_BOUND 127
 	uint8_t buf[ALARM_FRAME_MAX];
-	uint8_t sent = 0;
+	uint8_t page_n[ALARM_BATCH_MAX];
+	uint8_t pages = 0;
+	uint8_t laid = 0;
 
-	while (sent < m_batch_count) {
+	while (laid < m_batch_count) {
 		size_t len = 0;
-		uint8_t n = m_batch_count - sent;
+		uint8_t n = m_batch_count - laid;
 		int ret = -EMSGSIZE;
 
 		while (n > 0) {
 			ret = app_cmd_build_alarm_report(m_window_base_unix, m_window_total, synced,
-							 &m_batch[sent], n, buf, cap, &len);
+							 &m_batch[laid], n, ALARM_PAGE_BOUND,
+							 ALARM_PAGE_BOUND, buf, cap, &len);
 			if (ret == 0) {
 				break;
 			}
 			n--;
 		}
-
 		if (ret != 0) {
 			/* Not even one event fits (the 11 B budget tier): no fPort 3
-			 * detail. The alarm state still reaches the LNS through the
-			 * alarm bits in every telemetry frame (system_flags). */
+			 * detail for the rest. The alarm state still reaches the LNS
+			 * through the alarm bits in every telemetry frame. */
 			LOG_WRN("Alarm detail skipped: %u event(s) do not fit %u B; state is "
 				"in telemetry system_flags",
-				m_batch_count - sent, (unsigned)cap);
+				m_batch_count - laid, (unsigned)cap);
 			break;
 		}
+		page_n[pages++] = n;
+		laid += n;
+	}
 
+	for (uint8_t p = 0, first = 0; p < pages; first += page_n[p], p++) {
+		size_t len = 0;
+		int ret = app_cmd_build_alarm_report(m_window_base_unix, m_window_total, synced,
+						     &m_batch[first], page_n[p], p, pages, buf, cap,
+						     &len);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_cmd_build_alarm_report", ret);
+			break;
+		}
 #if defined(CONFIG_LORAWAN)
 		(void)app_lrw_send_alarm(buf, len);
 #endif
-		LOG_INF("Alarm batch: events %u..%u of %u on fPort 3 (%u B)", sent + 1, sent + n,
-			m_window_total, (unsigned)len);
-		sent += n;
+		LOG_INF("Alarm batch page %u/%u: events %u..%u of %u on fPort 3 (%u B)", p + 1,
+			pages, first + 1, first + page_n[p], m_window_total, (unsigned)len);
 	}
 
 	m_batch_count = 0;
