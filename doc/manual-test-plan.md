@@ -72,6 +72,7 @@ byte is the `seq` and is echoed in the reply.
 | `clock_sync` | `08056200` |
 | `force_send` | `08064a00` |
 | `sample` | `0805aa0100` |
+| `get_settings` (boot settings-info on request) | `0807fa0100` |
 | `reboot` | `08083a00` |
 | `reset_counters` (hall-left + input-a) | `0807520408011801` |
 | `set_param`: ADR on, `interval_report`=120 s, `alarm_0`=onboard temp 5–30 °C (hyst 1) | `0801121d0a022001120218782a131a1100000100000000a0400000f0410000803f` |
@@ -391,7 +392,34 @@ on a 1-Wire build, `w1_slot_type` (4 entries).
 
 - [x] Pass (EU868; `w1_slot_type` verified as all-`empty` only)
 
-### L5 — Periodic telemetry
+### L4c — GetSettings: settings-info on request (v1.5.0, #428)
+
+**Goal:** A host can read the L4b settings-info content at any time with one small command,
+instead of a full multi-page `GetConfig`, and tell the answer apart from the boot dump.
+**Observable:** After the `get_settings` downlink (fPort 85, `0807fa0100` = seq 7), one fPort-85
+`ConfigDump` uplink with `seq: 7` and the same fields as the L4b boot dump (`application`
+interval_sample / interval_report / history_enable, nine `sensors.cap_*`, `w1_slot_type` on a
+1-Wire build). No `pages` at EU868 DR0 and up; the boot dump keeps seq 0.
+
+**Prompt for Claude:**
+> Queue `0807fa0100` on fPort 85 and force an uplink (`send`) so it is delivered. Decode the
+> fPort-85 answer with `app/decoder/ttn.js`: confirm `seq` 7, `config_dump` with the same values
+> as the boot settings-info (L4b) and `config show`, and no `pages` (one frame). Change one
+> setting over the shell **without** `settings save` and send `get_settings` again: the answer
+> shows the staged value, like `GetConfig`. Report the frame size and DR.
+
+> **HW-verified (2026-09-23, debug build @ `215808c` = #425 `5503d54` + #429, EU868, ProXimos Hub
+> combined10 / ChirpStack v4):** `0807fa0100` queued through the Hub CLI (`node-send --hex --fport 85`)
+> went out in the RX of a telemetry uplink; the answer followed 1 s later as one fPort-85 frame at
+> DR5, 34 B: `01 0807 221d2207103c18840720002a12080010001800200028003000380040014800`. The
+> `config_dump` part is byte-identical to that boot's settings-info (`221d…4800`); `ttn.js` decodes
+> `seq: 7` with `interval_sample 60`, `interval_report 900`, `history_enable 0`, `cap_w1_sensors 1`,
+> the other caps `0` (= `config show`), no `pages`. `CONFIG_W1=n`, so no `w1_slot_type`. **Not
+> covered on HW:** the paged form (below the EU868 DR0 budget, `tests/cmd` only) and the staged-value
+> step.
+
+- [x] Pass (EU868 one-frame answer)
+
 
 **Goal:** Telemetry is sent on the configured interval.
 **Observable:** fPort 2 uplinks every `interval_report` seconds; RTT `Snapshot complete; next
@@ -421,8 +449,8 @@ report in <N> s`.
 ### L7 — Link check
 
 **Goal:** LinkCheckReq is sent periodically and answered.
-**Observable:** Every 5th message carries a LinkCheckReq; LinkCheckAns within 10 s; visible in
-RTT LC logs.
+**Observable:** Every 5th message carries a LinkCheckReq (every message while `WARNING`, v1.5.0 #424);
+LinkCheckAns within 10 s of the uplink's RX windows closing; visible in RTT LC logs.
 
 **Prompt for Claude:**
 > With the device HEALTHY and a gateway in range, send several uplinks (or wait through several
@@ -436,16 +464,18 @@ RTT LC logs.
 
 **Goal:** Link-check failures escalate state correctly.
 **Observable:** RTT `LC FAIL in HEALTHY (streak: n/3)` → `State: HEALTHY -> WARNING` after 3
-consecutive fails; `LC FAIL in WARNING (total: n/5)` → `State: WARNING -> RECONNECT` after
-`lrw-link-check-fail-rejoin` fails; `ats lrw status` mirrors the counters.
+consecutive fails; `LC FAIL in WARNING (total: n/5[, ladder step])` → `State: WARNING -> RECONNECT` once
+`lrw-link-check-fail-rejoin` fails are reached **and** the recovery ladder is at its floor (v1.5.0 #424,
+see L18 — a device on a DR above the region minimum takes extra rungs first); `ats lrw status` mirrors
+the counters.
 
 **Prompt for Claude:**
 > On a debug build, drive the failures deterministically with `ats lrw lc fail` (space them ~2 s
 > apart — the hook reuses one work item, rapid injects coalesce); set
 > `config lrw-link-check-interval 0` + `settings save` first so real link-checks don't reset the
 > streak. Watching the RTT log / `ats lrw status`, confirm HEALTHY → WARNING (3 consecutive) →
-> RECONNECT (after `lrw-link-check-fail-rejoin` more). Then `ats lrw lc ok` and confirm one success
-> returns WARNING → HEALTHY. (Alternatively provoke real failures by taking the gateway out of
+> RECONNECT (after `lrw-link-check-fail-rejoin` more, counted until the L18 ladder reaches its floor —
+> note the start DR). Then `ats lrw lc ok` and confirm one success returns WARNING → HEALTHY. (Alternatively provoke real failures by taking the gateway out of
 > range — note the method.) Report the observed thresholds.
 
 - [ ] Pass
@@ -545,7 +575,9 @@ where M = `lrw-link-check-fail-rejoin`; a LinkCheckReq is sent every Nth uplink 
 > Set e.g. `config lrw-link-check-interval 1`, `config lrw-link-check-fail-rejoin 3`,
 > `settings save`. Confirm `ats lrw status` shows `warning->reconnect: n/3`. With interval 1,
 > confirm a link check rides every uplink; with interval 0, confirm none are requested. Then drive
-> failures (L8) and confirm RECONNECT now triggers after 3 (not 5) WARNING fails.
+> failures (L8) and confirm RECONNECT now triggers after 3 (not 5) WARNING fails — start from the
+> region minimum DR (e.g. just after a join, before the NS raised it), otherwise the L18 ladder adds
+> one failure per DR step first.
 
 - [ ] Pass
 
@@ -630,6 +662,64 @@ answers again succeeds. No watchdog reset in any of the steps.
 > - **T7:** ~8.8 min of NS outage → WARNING → RECONNECT → rejoin 1 refused → rejoin 2 (the first after re-enabling) succeeded.
 
 - [x] Pass
+
+### L18 — Link-recovery ladder: TX power / DR step-down before rejoin (v1.5.0, #424)
+
+**Goal:** In WARNING the device checks the link on every report and, per failed check, restores the default
+TX power and drops the DR one step; it rejoins only at the floor. A check that succeeds on a lower DR returns to
+HEALTHY with the same session.
+**Observable:** RTT `Link recovery: TX power <a> -> <b>, DR<x> -> DR<y> (payload <n> B)` on the transition
+into WARNING and on every later `LC FAIL in WARNING (total: n/m, ladder step)`; `ats lrw status` `datarate` /
+`tx power` follow; the LNS sees each later uplink on the lower DR (higher SF). At the region minimum DR the next
+failure(s) complete the budget → `State: WARNING -> RECONNECT`. EU868 from DR5: WARNING entry + 4 rungs, rejoin
+on the 5th WARNING failure.
+
+**Prompt for Claude:**
+> On a joined EU868 debug image with ADR on, wait until the NS has raised the DR (`ats lrw status` shows e.g.
+> DR5 and a tx power index > 0; ChirpStack can pin it via the device-profile ADR/DR settings). Set
+> `config interval-report 60`, `config lrw-link-check-interval 0` + `settings save` (no real link checks, so
+> the injects are deterministic). Inject `ats lrw lc fail` ~2 s apart: after the 3rd, confirm WARNING + the
+> first `Link recovery` rung (tx power → 0, DR5 → DR4); on each further inject one more DR step; let a periodic
+> uplink go out between steps and confirm its DR/SF on the LNS. At DR0 confirm the next inject reaches the
+> budget and ends in RECONNECT → rejoin (new DevAddr). Repeat, but inject `ats lrw lc ok` mid-ladder (e.g. at
+> DR3): confirm WARNING → HEALTHY with the **same** DevAddr and the uplinks staying on DR3 until the NS raises
+> the DR. Real-outage variant: `lrw-link-check-interval 1`, disable the device on the NS, confirm a link check
+> on every report in WARNING and one rung per report; re-enable it mid-ladder and confirm recovery on the lower
+> DR without a rejoin. Restore the config afterwards.
+
+> **HW-verified (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub, STICKER `5876070000000413`):**
+> - B-2/B-3 inject runs (ADR off, temporary `ats lrw setdr` hook to start from DR5): one rung per uplink
+>   DR5 → DR0 on air, with the TX-power rung visible as +8–9 dB RSSI.
+>   - Floor → rejoin (new DevAddr).
+>   - `lc ok` at DR1 → HEALTHY with the same DevAddr.
+> - B-4 real outage (ADR on, LC every report, device disabled on the NS, no injects): WARNING + rungs DR5 → DR2,
+>   then the NS was re-enabled and the device recovered on DR2 with the same DevAddr and no JoinRequest.
+> - C-2 on the image combined with #409: `lrw-datarate dr5` + ADR off, the ladder steps through
+>   `lorawan_set_datarate()`, and after the rejoin the pinned DR5 is back.
+> - Bench caveat: the Hub's ChirpStack has an effective `network.max_dr = 0`, so with ADR on it pulls every node to DR0.
+>   Start the ladder from a raised DR via the hook, or run with the NS disabled as in B-4.
+
+- [x] Pass
+
+### L19 — US915/AU915: sub-band survives repeated failed joins (v1.5.0, #424)
+
+**Goal:** With `lrw-sub-band` set, every JoinRequest stays on the configured sub-band even after the
+sub-band's 8 channels have all been used by failed joins and after each rejoin's MAC re-init.
+**Observable:** Gateway / NS raw frame log: all JoinRequests on the sub-band's 125 kHz channels (sub-band 2:
+903.9–905.3 MHz) or its 500 kHz channel (904.6 MHz); none elsewhere. RTT `Applied sub-band <n>` after each
+`MAC reinitialized`.
+
+**Prompt for Claude:**
+> On a US915 bench with an 8-channel (e.g. FSB2) gateway, set `config lrw-region us915`,
+> `config lrw-sub-band 2` + `settings save`. Make joins fail (device disabled on the NS or not registered)
+> and trigger ≥ 10 join attempts (shell `join` repeatedly, ~15 s apart for the duty cycle, or wait for the
+> backoff). From the gateway's frame log confirm every JoinRequest frequency lies in sub-band 2. Then
+> re-enable the device and confirm the next join succeeds. (On v1.5.0 before #424 the attempts after the 8th
+> spread over all eight sub-bands.)
+
+> **Not run yet (2026-09-23):** no US915 gateway, and no 902–928 MHz TX on the EU868 bench. Covered by code review only.
+
+- [ ] Pass
 
 ---
 
