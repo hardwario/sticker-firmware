@@ -716,6 +716,13 @@ static void visit_info_page(const uint8_t *buf, size_t len, const Response *r)
 	g_seen_battery |= r->body.info.battery == 3300;
 }
 
+static void visit_any_page(const uint8_t *buf, size_t len, const Response *r)
+{
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	ARG_UNUSED(r);
+}
+
 /* #425 (was #335 alarm trimming): an Info that does not fit the budget is paged,
  * not trimmed — every field and every active alarm arrives on some page. */
 ZTEST(cmd, test_build_info_pages_instead_of_trimming)
@@ -1706,6 +1713,26 @@ ZTEST(cmd, test_get_config_streams_all_pages_over_lrw)
 		      0, "nfc handle");
 	zassert_equal(action, APP_CMD_ACTION_NONE, "no stream over NFC");
 	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "no NFC stream");
+}
+
+/* #425 step 7: P2P pages exactly like LoRaWAN — a multi-page GetConfig over
+ * APP_CMD_TRANSPORT_P2P streams every page with the same seq, and the pages
+ * are dispatched on the P2P transport (same field gating). */
+ZTEST(cmd, test_get_config_streams_all_pages_over_p2p)
+{
+	uint8_t in[8], out[64];
+	size_t in_len = unhex("080b2a00", in, sizeof(in)); /* seq11 get_config{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	reset_cfg();
+	g_app_config.interval_report = 900;
+	g_app_config.interval_sample = 60;
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, sizeof(out), &out_len,
+				     &action),
+		      0, "handle");
+	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
+	zassert_true(walk_pages(out, out_len, sizeof(out), 11, visit_any_page) > 1, "paged");
 }
 
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);
