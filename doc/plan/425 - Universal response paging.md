@@ -190,11 +190,13 @@ storage between calls. The design must never need cross-uplink memory in the dec
 **Progress:** step 1 ✅ `0290f44` · steps 2+3 ✅ `b746288` (landed together: the Info
 stream and the generic stream share one code path) · step 5 ✅ `c6972bf` · step 6 ✅
 (folded into each step: envelope + `pages`, Info-page pruning, AlarmReport) · step 8 ✅
-(this commit) · **step 4:** numbering in the envelope done in step 1; unifying the LoRaWAN
-and P2P history replay drivers onto the stream moves to step 7 · **step 7 (P2P driver)**
-is follow-up work on `feat-p2p` (`app_p2p.c` lives there): budget
-`app_p2p_get_max_payload()`, same `app_cmd_stream_next()` loop over the P2P queue,
-paced by the B2 duty governor.
+· **step 4:** numbering in the envelope done in step 1; both history replays build their
+frames with `app_cmd_build_history_frame()`, so they carry it without a driver change —
+no further unification needed · **step 7 (P2P driver)** ✅ in PR #426 into `feat-p2p`
+(`app_p2p.c` lives there): paging enabled for both radio transports, `m_page_stream_work`
+queues one page per run over the P2P TX queue (P2P responses are ≤ 64 B, so GetConfig /
+Info with alarms / W1Scan do page there). The central must accept several 0x55 with one
+`seq` (proximos-v2 MR!30).
 
 **As built — physical floor refined:** a unit that does not fit even alone is left out
 (not `BUDGET_TOO_SMALL` for the whole answer); zero-valued Info fields are skipped;
