@@ -2149,7 +2149,7 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	}
 
 	if (ret == -EMSGSIZE && cmd_body == Command_get_settings_tag &&
-	    resp.which_body == Response_config_dump_tag && transport == APP_CMD_TRANSPORT_LRW) {
+	    resp.which_body == Response_config_dump_tag && radio_transport(transport)) {
 		/* GetSettings that does not fit the budget: the same pages as the boot
 		 * settings-info (#425 envelope), carrying the command's seq. */
 		bool streamed = false;
