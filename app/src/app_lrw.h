@@ -35,6 +35,7 @@ struct app_lrw_info {
 	uint32_t dev_addr; /* Device address (from OTAA or ABP) */
 	uint32_t fcnt_up;  /* Uplink frame counter */
 	int datarate;
+	int tx_power; /* LoRaMac TX power index: 0 = max EIRP, higher = weaker */
 	int16_t rssi;
 	int8_t snr;
 	uint8_t margin;
