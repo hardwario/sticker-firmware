@@ -154,8 +154,9 @@ storage between calls. The design must never need cross-uplink memory in the dec
   (proximos-v2, Rust decoder behind ChirpStack), a TTN integration, a backend — merges the
   decoded pages by (DevEUI, fPort, `seq`), for `AlarmReport` by `base_time`; complete when
   `page_count` distinct indices arrived. Nothing breaks for a consumer that ignores `pages`:
-  it just sees several partial answers. Issue for proximos-v2 to be filed (decoder-parity
-  tracking already exists: proximos-v2#90).
+  it just sees several partial answers. Hub side tracked in proximos-v2#96 (LoRaWAN merge
+  by `seq` / `base_time` with timeout + re-request of a missing `page`, P2P several 0x55
+  per `seq`, Rust decoder parity incl. error code 9; decoder parity: proximos-v2#90).
 - **Manager-App (NFC):** GetConfig/GetParam page count now comes from the envelope
   (`Response.page_count`, absent = 1) instead of `ConfigDump.page_count`; W1Scan / Info never
   page over NFC in practice. Coordinate with apps/manager before this lands.
@@ -192,11 +193,11 @@ stream and the generic stream share one code path) · step 5 ✅ `c6972bf` · st
 (folded into each step: envelope + `pages`, Info-page pruning, AlarmReport) · step 8 ✅
 · **step 4:** numbering in the envelope done in step 1; both history replays build their
 frames with `app_cmd_build_history_frame()`, so they carry it without a driver change —
-no further unification needed · **step 7 (P2P driver)** ✅ on `hynek/p2p-paging` (PR into
-`feat-p2p`): paging enabled for both radio transports, `m_page_stream_work` in
-`app_p2p.c` queues one page per run over the P2P TX queue (P2P responses are ≤ 64 B, so
-GetConfig / Info with alarms / W1Scan do page there). The central must accept several
-0x55 with one `seq` (proximos-v2 MR!30).
+no further unification needed · **step 7 (P2P driver)** ✅ in PR #426 into `feat-p2p`
+(`app_p2p.c` lives there): paging enabled for both radio transports, `m_page_stream_work`
+queues one page per run over the P2P TX queue (P2P responses are ≤ 64 B, so GetConfig /
+Info with alarms / W1Scan do page there). The central must accept several 0x55 with one
+`seq` (proximos-v2 MR!30).
 
 **As built — physical floor refined:** a unit that does not fit even alone is left out
 (not `BUDGET_TOO_SMALL` for the whole answer); zero-valued Info fields are skipped;
