@@ -632,11 +632,14 @@ settings save, `set_secret_key`, resets, …) ends the session and the action ru
 until it has run, so a follow-up command can neither see the unapplied state nor
 replace the action. After a non-rebooting action (e.g. `lrw_join`) the firmware
 resumes the hold, so the phone re-enables `MB_EN` (same ~1 s retry as step 2) and
-continues in the same tap; after a reboot it re-reads `get_basic_info`. A field
-already present at boot (the phone kept on the tag across an NFC-triggered reboot)
-is picked up as soon as the NFC poll thread starts, ~3 s after boot — the phone does
-not have to be lifted first. A unit whose mailbox is unavailable (see Production
-tester) does not hold the chip at all.
+continues in the same tap; after a reboot it re-reads `get_basic_info`. A phone
+kept on the tag across an NFC-triggered reboot does not have to be lifted: the
+NFC init (~1 s after boot) powers the chip, keeps it powered while the field is
+present, leaves a mailbox the phone enables right then alone (MB_EN is cleared at
+boot only with no field, or before a first-boot EEPROM write), and the poll thread,
+started right after the init, serves the phone's first request at once — while the
+boot LED carousel is still running, so the two LED patterns overlap. A unit whose
+mailbox is unavailable (see Production tester) does not hold the chip at all.
 
 The frame is `[channel 1 B][payload]`:
 
@@ -688,8 +691,9 @@ stall or wedge i2c1 — the poll thread now only ever serves the mailbox.
 
 ### Production tester
 
-Authorising FTM sets the static `MB_MODE` bit once at boot (inside the existing
-I2C-password session that already configures the GPO). A unit whose `MB_MODE`
+Authorising FTM sets the static `MB_MODE` bit once, at the first boot, together
+with the static GPO config (the I2C-password session and the EEPROM writes run only
+while one of those bits is still unset; later boots only read them). A unit whose `MB_MODE`
 cannot be set has **no interactive NFC channel** — a hardware/production defect,
 not something the firmware can work around. It is reported as
 `APP_DEVICE_STATUS_MAILBOX_DOWN` (device_status **bit 13**, `0x2000`) in the
@@ -734,7 +738,8 @@ RF/host handshake, the datasheet rule that every EEPROM write NACKs while
 `MB_EN=1`, and a password-failure mode) plus session ztests: boot authorisation
 + GPO config, the `MAILBOX_DOWN` flag on a password failure, a stuck `MB_EN`
 cleared on the next boot, a field present at boot served without a field change,
-owner- and vendor-command sessions that advance the nonce
+a mailbox session the phone opened during boot kept by the init (MB_EN kept, chip
+left powered) and served, owner- and vendor-command sessions that advance the nonce
 and leave the claim window active, a rejected channel prefix, a plaintext
 `get_basic_info`, and the session limits: a field held without traffic released
 after 120 s (restarted by an exchange), no hold when the mailbox is unavailable, a
