@@ -632,8 +632,11 @@ settings save, `set_secret_key`, resets, …) ends the session and the action ru
 until it has run, so a follow-up command can neither see the unapplied state nor
 replace the action. After a non-rebooting action (e.g. `lrw_join`) the firmware
 resumes the hold, so the phone re-enables `MB_EN` (same ~1 s retry as step 2) and
-continues in the same tap; after a reboot it re-reads `get_basic_info`. A unit
-whose mailbox is unavailable (see Production tester) does not hold the chip at all.
+continues in the same tap; after a reboot it re-reads `get_basic_info`. A field
+already present at boot (the phone kept on the tag across an NFC-triggered reboot)
+is picked up as soon as the NFC poll thread starts, ~3 s after boot — the phone does
+not have to be lifted first. A unit whose mailbox is unavailable (see Production
+tester) does not hold the chip at all.
 
 The frame is `[channel 1 B][payload]`:
 
@@ -730,7 +733,8 @@ command straight into `app_cmd_handle` for phone-free command-logic testing.
 RF/host handshake, the datasheet rule that every EEPROM write NACKs while
 `MB_EN=1`, and a password-failure mode) plus session ztests: boot authorisation
 + GPO config, the `MAILBOX_DOWN` flag on a password failure, a stuck `MB_EN`
-cleared on the next boot, owner- and vendor-command sessions that advance the nonce
+cleared on the next boot, a field present at boot served without a field change,
+owner- and vendor-command sessions that advance the nonce
 and leave the claim window active, a rejected channel prefix, a plaintext
 `get_basic_info`, and the session limits: a field held without traffic released
 after 120 s (restarted by an exchange), no hold when the mailbox is unavailable, a
