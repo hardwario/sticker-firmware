@@ -1468,4 +1468,52 @@ ZTEST(cmd, test_get_info_over_lrw_answers_info_lite_at_11b)
 	zassert_equal(r.body.info_lite.fw_major, APP_VERSION_MAJOR, "fw_major");
 }
 
+/* #409 3d/3e: a multi-page GetConfig over LoRaWAN is answered with page 0 and
+ * APP_CMD_ACTION_PAGE_STREAM; app_cmd_stream_next() then yields pages 1..N-1
+ * of the same request (same seq, consistent page_count), then -ENODATA. NFC
+ * keeps host-driven paging (no stream). */
+ZTEST(cmd, test_get_config_streams_all_pages_over_lrw)
+{
+	uint8_t in[8], out[64];
+	size_t in_len = unhex("08092a00", in, sizeof(in)); /* seq9 get_config{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	Response r;
+	pb_istream_t is;
+
+	reset_cfg();
+	g_app_config.interval_report = 900;
+	g_app_config.interval_sample = 60;
+
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 51, &out_len, &action),
+		      0, "handle");
+	r = (Response)Response_init_zero;
+	is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "decode page 0");
+	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
+	uint32_t count = r.body.config_dump.page_count;
+	zassert_true(count > 1, "test needs a multi-page config, got %u", count);
+	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
+
+	for (uint32_t p = 1; p < count; p++) {
+		zassert_equal(app_cmd_stream_next(out, 51, &out_len), 0, "page %u", p);
+		zassert_true(out_len <= 51, "page %u is %zu B", p, out_len);
+		r = (Response)Response_init_zero;
+		is = pb_istream_from_buffer(out + 1, out_len - 1);
+		zassert_true(pb_decode(&is, Response_fields, &r), "decode page %u", p);
+		zassert_equal(r.seq, 9, "seq %u on page %u", r.seq, p);
+		zassert_equal(r.body.config_dump.page_index, p, "page_index");
+		zassert_equal(r.body.config_dump.page_count, count, "page_count drift");
+	}
+	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "stream must end");
+
+	/* NFC: no stream, the host pages itself. */
+	action = APP_CMD_ACTION_NONE;
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, in, in_len, out, sizeof(out), &out_len,
+				     &action),
+		      0, "nfc handle");
+	zassert_equal(action, APP_CMD_ACTION_NONE, "no stream over NFC");
+	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "no NFC stream");
+}
+
 ZTEST_SUITE(cmd, NULL, NULL, NULL, NULL, NULL);

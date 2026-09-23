@@ -1395,6 +1395,85 @@ static int encode_info_lite(uint32_t seq, uint8_t *out, size_t out_cap, size_t *
 	return ret;
 }
 
+/* #409 3d/3e: LoRaWAN page stream state. The request is kept as raw bytes and
+ * re-dispatched with page = next for every following page, so each page comes
+ * from the exact handler + layout that produced page 0. Only touched from the
+ * LoRaWAN command path (m_work_q). */
+#define PAGE_STREAM_REQ_MAX 64
+static struct {
+	uint8_t req[PAGE_STREAM_REQ_MAX];
+	size_t req_len;
+	uint32_t next;
+	uint32_t count;
+	bool active;
+} m_page_stream;
+
+void app_cmd_stream_cancel(void)
+{
+	m_page_stream.active = false;
+}
+
+/* After a LoRaWAN GetConfig/GetParam: arm the stream when pages remain. */
+static bool page_stream_arm(const uint8_t *in, size_t in_len, const Response *resp)
+{
+	if (resp->which_body != Response_config_dump_tag || in_len > sizeof(m_page_stream.req)) {
+		return false;
+	}
+	const Response_ConfigDump *cd = &resp->body.config_dump;
+
+	if (cd->page_index + 1 >= cd->page_count) {
+		return false;
+	}
+	memcpy(m_page_stream.req, in, in_len);
+	m_page_stream.req_len = in_len;
+	m_page_stream.next = cd->page_index + 1;
+	m_page_stream.count = cd->page_count;
+	m_page_stream.active = true;
+	return true;
+}
+
+int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	if (!out || !out_len) {
+		return -EINVAL;
+	}
+	if (!m_page_stream.active || m_page_stream.next >= m_page_stream.count) {
+		m_page_stream.active = false;
+		return -ENODATA;
+	}
+
+	Command cmd = Command_init_zero;
+	Response resp = Response_init_zero;
+	enum app_cmd_action act = APP_CMD_ACTION_NONE;
+	pb_istream_t istream = pb_istream_from_buffer(m_page_stream.req, m_page_stream.req_len);
+
+	if (!pb_decode(&istream, Command_fields, &cmd)) {
+		m_page_stream.active = false;
+		return -EINVAL;
+	}
+	if (cmd.which_body == Command_get_config_tag) {
+		cmd.body.get_config.has_page = true;
+		cmd.body.get_config.page = m_page_stream.next;
+	} else if (cmd.which_body == Command_get_param_tag) {
+		cmd.body.get_param.has_page = true;
+		cmd.body.get_param.page = m_page_stream.next;
+	} else {
+		m_page_stream.active = false;
+		return -EINVAL;
+	}
+
+	app_cmd_dispatch(APP_CMD_TRANSPORT_LRW, &cmd, &resp, &act);
+	int ret = encode_response(&resp, out, out_cap, out_len);
+	if (ret) {
+		m_page_stream.active = false;
+		return ret;
+	}
+	if (++m_page_stream.next >= m_page_stream.count) {
+		m_page_stream.active = false;
+	}
+	return 0;
+}
+
 int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len, uint8_t *out,
 		   size_t out_cap, size_t *out_len, enum app_cmd_action *action)
 {
@@ -1415,6 +1494,18 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		make_error(&resp, Response_Error_Code_BAD_REQUEST, PB_GET_ERROR(&istream));
 	} else {
 		app_cmd_dispatch(transport, &cmd, &resp, &act);
+
+		/* #409 3d/3e: over LoRaWAN a multi-page GetConfig/GetParam streams
+		 * every remaining page by itself (the host sends one request). NFC keeps
+		 * its host-driven paging (big pages, read in one RF session). */
+		if (transport == APP_CMD_TRANSPORT_LRW &&
+		    (cmd.which_body == Command_get_config_tag ||
+		     cmd.which_body == Command_get_param_tag)) {
+			app_cmd_stream_cancel();
+			if (page_stream_arm(in, in_len, &resp)) {
+				act = APP_CMD_ACTION_PAGE_STREAM;
+			}
+		}
 	}
 
 	/* #409 3a: over LoRaWAN an Error carries code + fault_field only. The detail

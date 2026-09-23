@@ -152,6 +152,7 @@ static struct k_work m_lc_response_work;      /* deferred from link_check_callba
 static struct k_work m_force_lc_work;         /* arm a forced LC on the next telemetry */
 static struct k_work m_dl_request_work;       /* drains m_dl_msgq (port-85 commands) */
 static struct k_work_delayable m_post_cmd_work;
+static struct k_work_delayable m_page_stream_work; /* GetConfig/GetParam pages (#409) */
 static struct k_work_delayable m_join_complete_work;
 static struct k_work_delayable m_hist_work;
 static struct k_work_delayable
@@ -937,6 +938,43 @@ static void post_cmd_work_handler(struct k_work *work)
 	}
 }
 
+/* #409 3d/3e: queue the next ConfigDump page of a device-driven LoRaWAN page
+ * stream. One page per run, only while the response queue keeps a slot free
+ * for other answers; paced by the send path (duty cycle permitting). */
+#define PAGE_STREAM_PACE_SEC 2
+
+static void page_stream_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+
+	if (state != APP_LRW_STATE_HEALTHY && state != APP_LRW_STATE_WARNING) {
+		app_cmd_stream_cancel(); /* a rejoin starts from scratch */
+		return;
+	}
+
+	if (k_msgq_num_free_get(&m_response_msgq) < 2) {
+		k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+					  K_SECONDS(PAGE_STREAM_PACE_SEC));
+		return;
+	}
+
+	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
+	size_t len;
+	int ret = app_cmd_stream_next(buf, sizeof(buf), &len);
+
+	if (ret == -ENODATA) {
+		return; /* all pages queued */
+	}
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
+		return;
+	}
+	(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_CMD_RESPONSE);
+	k_work_schedule_for_queue(&m_work_q, &m_page_stream_work, K_SECONDS(PAGE_STREAM_PACE_SEC));
+}
+
 static void dl_request_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -968,6 +1006,13 @@ static void dl_request_work_handler(struct k_work *work)
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("app_lrw_queue_response", ret);
 			}
+		}
+
+		if (action == APP_CMD_ACTION_PAGE_STREAM) {
+			/* #409: the remaining ConfigDump pages follow page 0 by themselves. */
+			k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+						  K_SECONDS(PAGE_STREAM_PACE_SEC));
+			action = APP_CMD_ACTION_NONE;
 		}
 
 		/* Defer reboot/save so the Ack uplink + its RX window finish first.
@@ -2101,6 +2146,7 @@ int app_lrw_init(void)
 	k_work_init(&m_force_lc_work, force_lc_work_handler);
 	k_work_init(&m_dl_request_work, dl_request_work_handler);
 	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
+	k_work_init_delayable(&m_page_stream_work, page_stream_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
 	k_work_init_delayable(&m_tx_retry_work, tx_retry_work_handler);
 #if defined(CONFIG_SHELL)

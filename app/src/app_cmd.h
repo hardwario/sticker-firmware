@@ -75,6 +75,9 @@ enum app_cmd_action {
 	APP_CMD_ACTION_SECRET_KEY_SAVE, /* persist the new secret_key + reboot (#299, #322) */
 	APP_CMD_ACTION_CLM_REARM_SAVE,  /* persist new claim_token + reboot, then re-arm clm (#351)
 					 */
+	/* LoRaWAN GetConfig / GetParam answered with page 0 of N (#409 3d/3e): the
+	 * transport streams the remaining pages via app_cmd_stream_next(). */
+	APP_CMD_ACTION_PAGE_STREAM,
 };
 
 /* Plain-C device info snapshot (no protobuf dependency), filled by
@@ -147,6 +150,17 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *lite
  * budget dropped (e.g. a history replay mid-stream, #409). Returns 0, -EINVAL,
  * or -EMSGSIZE. */
 int app_cmd_build_budget_error(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len);
+
+/* Device-driven paging over LoRaWAN (#409 3d/3e). A GetConfig / GetParam that
+ * needs more than one ConfigDump page is answered with the requested page and
+ * APP_CMD_ACTION_PAGE_STREAM; each call here then encodes the next page of that
+ * same request (same seq, same page layout) into `out`. Returns 0 with *out_len
+ * set, -ENODATA when no stream is active or it has finished, or a negative
+ * errno (the stream is dropped). A new paged request replaces a running one. */
+int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len);
+
+/* Drop a running page stream (e.g. on rejoin). */
+void app_cmd_stream_cancel(void);
 
 /* Build an unsolicited settings-info frame (Response{ seq=0, config_dump=... },
  * one page, page_count=1) into `out`. Carries a fixed selection of the key
