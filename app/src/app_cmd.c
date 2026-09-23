@@ -1998,6 +1998,10 @@ static int request_page(uint32_t page, uint8_t *out, size_t out_cap, size_t *out
 	} else {
 		return -EINVAL;
 	}
+	/* Re-dispatched as LoRaWAN for P2P too: get_config/get_param only tell NFC
+	 * apart (NFC-only fields), so LRW and P2P produce the same pages. A constant
+	 * transport also keeps LTO's const-prop of app_cmd_dispatch() — a variable
+	 * one cost +2.4 KB of inlining in set_param. */
 	app_cmd_dispatch(APP_CMD_TRANSPORT_LRW, &cmd, &resp, &act);
 	return encode_response(&resp, out, out_cap, out_len);
 }
@@ -2046,6 +2050,13 @@ int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
 	return 0;
 }
 
+/* #425: the radio transports page their answers device-driven (LoRaWAN and
+ * P2P); NFC keeps host-driven paging. */
+static bool radio_transport(enum app_cmd_transport tp)
+{
+	return tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P;
+}
+
 /* Decode + dispatch in their own frame, so the ~550 B Command is gone again
  * before app_cmd_handle() encodes and pages the answer (HIL P5b: a paged GetInfo
  * overflowed the 4 KB m_work_q with the Command still on the stack). Returns the
@@ -2081,17 +2092,17 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	pb_size_t cmd_body = decode_and_dispatch(transport, in, in_len, &resp, &act);
 
 	if (cmd_body != 0) {
-		/* #409 3d/3e: over LoRaWAN a multi-page GetConfig/GetParam streams
-		 * every remaining page by itself (the host sends one request). NFC keeps
-		 * its host-driven paging (big pages, read in one RF session). */
-		if (transport == APP_CMD_TRANSPORT_LRW &&
+		/* #409 3d/3e, #425: over a radio transport (LoRaWAN, P2P) a multi-page
+		 * GetConfig/GetParam streams every remaining page by itself (the host
+		 * sends one request). NFC keeps its host-driven paging (big pages, read
+		 * in one RF session). */
+		if (radio_transport(transport) &&
 		    (cmd_body == Command_get_config_tag || cmd_body == Command_get_param_tag)) {
 			app_cmd_stream_cancel();
 			if (page_stream_arm(in, in_len, &resp)) {
 				act = APP_CMD_ACTION_PAGE_STREAM;
 			}
-		} else if (transport == APP_CMD_TRANSPORT_LRW &&
-			   resp.which_body == Response_w1_scan_tag) {
+		} else if (radio_transport(transport) && resp.which_body == Response_w1_scan_tag) {
 			/* #425: a scan that does not fit is paged by ROM. */
 			app_cmd_stream_cancel();
 			if (w1_scan_arm_pages(&resp, out_cap)) {
@@ -2124,7 +2135,7 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	bool info_paging = false;
 
 	if (ret == -EMSGSIZE && resp.which_body == Response_info_tag &&
-	    transport == APP_CMD_TRANSPORT_LRW) {
+	    radio_transport(transport)) {
 		/* #425: a GetInfo that does not fit the payload budget is paged —
 		 * fields and active alarms spread over self-contained Info pages —
 		 * instead of trimmed. `resp` is dead now and serves as the scratch. */
@@ -2138,7 +2149,7 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	}
 
 	if (ret == -EMSGSIZE && cmd_body == Command_get_settings_tag &&
-	    resp.which_body == Response_config_dump_tag && transport == APP_CMD_TRANSPORT_LRW) {
+	    resp.which_body == Response_config_dump_tag && radio_transport(transport)) {
 		/* GetSettings that does not fit the budget: the same pages as the boot
 		 * settings-info (#425 envelope), carrying the command's seq. */
 		bool streamed = false;

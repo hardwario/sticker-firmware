@@ -21,6 +21,7 @@
 
 #include <zephyr/toolchain.h>
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -159,6 +160,19 @@ int app_cmd_handle(int transport, const uint8_t *in, size_t in_len, uint8_t *out
 	}
 	ARG_UNUSED(action);
 	return 0;
+}
+
+/* #425 page stream (the P2P driver in app_p2p.c): no stream in these tests. */
+int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	ARG_UNUSED(out);
+	ARG_UNUSED(out_cap);
+	ARG_UNUSED(out_len);
+	return -ENODATA;
+}
+
+void app_cmd_stream_cancel(void)
+{
 }
 
 /* ---- app_settings, for p2p_join_adopt_sf's persist ---- */

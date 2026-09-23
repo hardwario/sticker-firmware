@@ -1696,6 +1696,46 @@ static void post_cmd_work_handler(struct k_work *work)
 	}
 }
 
+/* #425 step 7: the P2P driver of the universal page stream. An answer that
+ * does not fit one 0x55 RESPONSE (P2P_TX_BUF_SIZE) is sent as page 0 plus
+ * APP_CMD_ACTION_PAGE_STREAM; this work item then queues the remaining pages
+ * (same seq, Response.page_index/page_count) one per run, only while the TX
+ * queue is empty so alarms and other responses keep their slot, paced by the
+ * send path and the B2 duty governor. A lost pairing cancels the stream. */
+#define P2P_PAGE_STREAM_PACE_SEC 2
+
+static struct k_work_delayable m_page_stream_work;
+
+static void page_stream_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (m_link_state != P2P_LINK_PAIRED) {
+		app_cmd_stream_cancel();
+		return;
+	}
+	if (k_msgq_num_free_get(&m_tx_msgq) < P2P_TX_QUEUE_DEPTH) {
+		k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+					  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
+		return;
+	}
+
+	uint8_t buf[P2P_TX_BUF_SIZE];
+	size_t len;
+	int ret = app_cmd_stream_next(buf, sizeof(buf), &len);
+
+	if (ret == -ENODATA) {
+		return; /* all pages queued */
+	}
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
+		return;
+	}
+	(void)app_p2p_queue_response(0, buf, len);
+	k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+				  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
+}
+
 /* B4: dispatch a received 0x56 COMMAND (already decrypted into `body`) through
  * the transport-generic command handler and queue the 0x55 RESPONSE for the
  * next uplink. P2P reuses the LoRaWAN over-the-air writability gating --
@@ -1736,6 +1776,13 @@ static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
 
 	if (resp_len > 0) {
 		(void)app_p2p_queue_response(0, resp, resp_len);
+	}
+
+	if (action == APP_CMD_ACTION_PAGE_STREAM) {
+		/* #425: the remaining pages follow page 0 by themselves. */
+		k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+					  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
+		action = APP_CMD_ACTION_NONE;
 	}
 
 	/* Defer so the 0x55 uplink and its RX window finish first;
@@ -3023,6 +3070,7 @@ int app_p2p_init(void)
 	k_work_init_delayable(&m_join_work, join_work_handler);
 	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
 	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
+	k_work_init_delayable(&m_page_stream_work, page_stream_work_handler);
 	k_work_init_delayable(&m_hist_work, hist_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
