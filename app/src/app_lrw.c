@@ -230,7 +230,6 @@ static bool m_mac_started;          /* lorawan_start() succeeded; LoRaMac state 
 #define JOIN_BUSY_POLL_INTERVAL_MS 500
 #define JOIN_BUSY_MAX_POLLS        30
 
-static int m_current_dr;
 /* Application-payload budget (bytes), refreshed from lorawan_get_payload_sizes()
  * before each composing TX (MED-6: was cached only on DR-change/join). */
 static uint8_t m_max_next_payload;
@@ -414,7 +413,6 @@ static bool lrw_backoff_step(void)
 			new_dr = dr;
 		} else {
 			stepped = true;
-			m_current_dr = new_dr;
 		}
 	}
 
@@ -1730,7 +1728,6 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 	uint8_t max_next = 0, max_now = 0;
 
 	lorawan_get_payload_sizes(&max_next, &max_now);
-	m_current_dr = dr;
 	m_max_next_payload = max_next;
 	LOG_INF("New data rate: DR%d, Maximum payload size: %d", dr, max_now);
 }
@@ -2070,6 +2067,7 @@ int app_lrw_get_info(struct app_lrw_info *info)
 	if (info->state == APP_LRW_STATE_DISABLED || !m_mac_started) {
 		info->dev_addr = 0;
 		info->fcnt_up = 0;
+		info->datarate = 0;
 		info->tx_power = 0;
 	} else {
 		uint32_t fcnt_up;
@@ -2090,6 +2088,17 @@ int app_lrw_get_info(struct app_lrw_info *info)
 			info->fcnt_up = 0;
 		}
 
+		/* Live DR from the MAC, not a copy cached in the DR-changed callback:
+		 * Zephyr only fires that callback with ADR on (or on join), so an
+		 * ADR-off lorawan_set_datarate() (manual DR, recovery ladder) left
+		 * the reported DR stale. */
+		mib_req.Type = MIB_CHANNELS_DATARATE;
+		if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK) {
+			info->datarate = mib_req.Param.ChannelsDatarate;
+		} else {
+			info->datarate = 0;
+		}
+
 		mib_req.Type = MIB_CHANNELS_TX_POWER;
 		if (LoRaMacMibGetRequestConfirm(&mib_req) == LORAMAC_STATUS_OK) {
 			info->tx_power = mib_req.Param.ChannelsTxPower;
@@ -2099,7 +2108,6 @@ int app_lrw_get_info(struct app_lrw_info *info)
 		lorawan_mac_unlock();
 	}
 
-	info->datarate = m_current_dr;
 	info->rssi = m_last_rssi;
 	info->snr = m_last_snr;
 	info->margin = m_last_margin;
