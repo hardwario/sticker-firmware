@@ -134,7 +134,7 @@ var _ALM_HEX_ENC = {};
 // Names drop the `lrw_` prefix the YAML carries (region <- lrw_region, ...).
 var _LRW_NAMES = {
   1: "region", 2: "sub_band", 3: "network", 4: "adr", 5: "activation",
-  13: "link_check_interval", 14: "link_check_fail_rejoin", 15: "radio_mode"
+  13: "link_check_interval", 14: "link_check_fail_rejoin", 15: "radio_mode", 16: "datarate"
 };
 var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
 
@@ -143,10 +143,11 @@ var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
 // hides but which a downlink may legitimately set.
 var _LRW_HEX_ENC = { deveui: 6, joineui: 7, nwkkey: 8, appkey: 9, devaddr: 10, nwkskey: 11, appskey: 12 };
 var _LRW_ENUM = {
-  region: { EU868: 0, US915: 1, AU915: 2 },
+  region: { EU868: 0, US915: 1, AU915: 2, AS923: 3 },
   network: { PUBLIC: 0, PRIVATE: 1 },
   activation: { OTAA: 0, ABP: 1 },
-  radio_mode: { OFF: 0, LORAWAN: 1, P2P: 2 }
+  radio_mode: { OFF: 0, LORAWAN: 1, P2P: 2 },
+  datarate: { AUTO: 0, DR0: 1, DR1: 2, DR2: 3, DR3: 4, DR4: 5, DR5: 6, DR6: 7, DR7: 8 }
 };
 function _invert(map) {
   var out = {};
@@ -268,6 +269,17 @@ function _decodeConfigDump(bytes, start, end) {
   return cd;
 }
 
+// InfoLite (Response field 11, #409): firmware version (+ build type) only, sent
+// instead of Info at the 11 B budget tier. Fields 1..4 share Info's numbering.
+// The device follows up with the full Info once the data rate allows it.
+function _decodeInfoLite(bytes, start, end) {
+  var full = _decodeInfo(bytes, start, end);
+  return {
+    fw_major: full.fw_major, fw_minor: full.fw_minor, fw_patch: full.fw_patch,
+    fw_version: full.fw_version, build_type: full.build_type, build_type_name: full.build_type_name
+  };
+}
+
 function _decodeInfo(bytes, start, end) {
   var info = { fw_major: 0, fw_minor: 0, fw_patch: 0, build_type: 0, debug: false, device_status: 0, active_alarms: [] };
   var pos = start;
@@ -327,7 +339,9 @@ function _decodeInfo(bytes, start, end) {
 }
 
 function _decodeError(bytes, start, end) {
-  var err = {};
+  // code defaults to 0 (UNKNOWN): proto3 omits it, and over LoRaWAN the compact
+  // "response too large" Error (#409) is exactly that — an empty Error body.
+  var err = { code: 0 };
   var pos = start;
   while (pos < end && pos < bytes.length) {
     var tag = _pbReadVarint(bytes, pos); pos = tag.next;
@@ -519,6 +533,7 @@ function decodeDownlinkResponse(bytes) {
       else if (field === 5) resp.history_frame = _decodeHistoryFrame(bytes, pos, end);
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       else if (field === 7) resp.w1_scan = _decodeW1Scan(bytes, pos, end);
+      else if (field === 11) resp.info_lite = _decodeInfoLite(bytes, pos, end);
       pos = end;
     } else {
       break;
@@ -613,7 +628,13 @@ function decodeTelemetry(bytes) {
     switch (field) {
       // system
       case 1:  d.voltage = (v.value === 0) ? null : v.value / 50; break; // 0 = pre-sample sentinel (L-51)
-      case 2:  d.boot = (v.value & (1 << 0)) !== 0; break;     // system_flags (always sent)
+      case 2:  // system_flags (always sent): bit0 boot, bits 1..8 = device_status alarm byte (#409)
+        d.boot = (v.value & (1 << 0)) !== 0;
+        d.alarm_status = (v.value >>> 1) & 0xff;
+        d.alarm_status_flags = _DEVICE_STATUS
+          .filter(function (f) { return f[0] < (1 << 8) && (d.alarm_status & f[0]) !== 0; })
+          .map(function (f) { return f[1]; });
+        break;
       // internal (SHT4x) — sentinel → null (sensor enabled but no valid sample)
       case 3:  { var _t = _pbZigzag(v.value); d.temperature = (_t === _TM_S32_NA) ? null : _t / 100; break; }
       case 4:  d.humidity = (v.value === _TM_U32_NA) ? null : v.value / 2; break;
@@ -1126,7 +1147,10 @@ function decodeAlarmBatch(bytes) {
   for (var i = 0; i < out.alarms.length; i++) {
     out.alarms[i].time = out.time_synced ? ((out.base_time + rels[i]) >>> 0) : null;
   }
-  out.truncated = out.alarms.length < out.total; // some alarms dropped to fit the DR
+  // total counts every alarm in the window. Fewer events here means either some
+  // were dropped, or (#409) the batch was split across several fPort 3 frames —
+  // those share base_time and total, so group frames by base_time to rebuild it.
+  out.truncated = out.alarms.length < out.total;
   return out;
 }
 

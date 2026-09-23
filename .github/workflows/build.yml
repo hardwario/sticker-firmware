@@ -45,6 +45,10 @@ jobs:
           app-path: sticker
           toolchains: arm-zephyr-eabi
 
+      - name: Apply module patches
+        working-directory: sticker
+        run: west patch apply
+
       - name: Determine version
         id: version
         working-directory: sticker

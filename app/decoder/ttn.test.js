@@ -220,6 +220,33 @@ test("decodeUplink splits Error.fault_field group*100 + tag (#196, fPort 85)", (
   assert.equal(got.error.fault_field, 5);
 });
 
+// Compact LoRaWAN Errors (#409 3a): no detail string. An empty Error body
+// decodes as code 0 (UNKNOWN, omitted by proto3). The LoRaWAN "response too
+// large" fallback is Error{ code=9 BUDGET_TOO_SMALL } (#409 3c) -> 7 B.
+test("decodeUplink decodes compact LoRaWAN Errors without detail (#409, fPort 85)", () => {
+  const oor = codec.decodeUplink({ bytes: hex("0108033205080210cb01"), fPort: 85 }).data;
+  assert.equal(oor.error.code, 2);
+  assert.equal(oor.error.fault_group, 2);
+  assert.equal(oor.error.fault_field, 3);
+  assert.equal(oor.error.detail, undefined);
+
+  const empty = codec.decodeUplink({ bytes: hex("0108023200"), fPort: 85 }).data;
+  assert.equal(empty.seq, 2);
+  assert.equal(empty.error.code, 0);
+
+  const big = codec.decodeUplink({ bytes: hex("01080232020809"), fPort: 85 }).data;
+  assert.equal(big.error.code, 9); // BUDGET_TOO_SMALL: retry once the DR rises
+});
+
+// InfoLite (Response field 11, #409 3c): Response{ seq=0, info_lite{ fw 1.5.1,
+// build_type=DEV } } = 01 5a 08 0801 1005 1801 2001 (11 B), fits the 11 B tier.
+test("decodeUplink decodes InfoLite (#409, fPort 85)", () => {
+  const got = codec.decodeUplink({ bytes: hex("015a080801100518012001"), fPort: 85 }).data;
+  assert.equal(got.info, undefined);
+  assert.equal(got.info_lite.fw_version, "1.5.1");
+  assert.equal(got.info_lite.build_type_name, "dev");
+});
+
 // W1Scan response (field 7): the discovered 1-Wire ROMs come back as hex
 // strings so the host can teach a slot via SetParam sensorN_rom.
 //   01           APP_PROTO_VERSION prefix
@@ -398,6 +425,20 @@ test("decodeUplink fPort 2: real HW frame, system + enabled groups always presen
   assert.equal(got.hall_left_is_active, true);
   assert.equal(got.hall_right_count, 0);
   assert.equal(got.hall_right_is_active, true);
+});
+
+// #409 A5a: system_flags bits 1..8 carry the device_status alarm byte, so the
+// alarm state reaches the LNS even at the 11 B budget tier (no fPort 3 fits).
+// voltage=100, system_flags=0x07 = boot | alarm_any<<1 | alarm_threshold<<1.
+test("decodeUplink fPort 2: system_flags alarm bits (#409)", () => {
+  const got = codec.decodeUplink({ bytes: hex("0108641007"), fPort: 2 }).data;
+  assert.equal(got.boot, true);
+  assert.equal(got.alarm_status, 0x03);
+  assert.deepEqual(got.alarm_status_flags, ["alarm_any", "alarm_threshold"]);
+
+  const idle = codec.decodeUplink({ bytes: hex("0108641000"), fPort: 2 }).data;
+  assert.equal(idle.alarm_status, 0);
+  assert.deepEqual(idle.alarm_status_flags, []);
 });
 
 // #78: an enabled-sensor group is sent whole even when ALL its values are 0 —
@@ -905,6 +946,27 @@ test("set_param lorawan.radio_mode (enum) + link-check fields round-trip (#H2)",
   assert.equal(back.set_param.lorawan.radio_mode, 2); // P2P index
   assert.equal(back.set_param.lorawan.link_check_interval, 7);
   assert.equal(back.set_param.lorawan.link_check_fail_rejoin, 3);
+});
+
+// lrw_region AS923 (#409 A6) = 3 on the wire.
+test("set_param lorawan.region AS923 round-trips (#409)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 6, command: "set_param", set_param: { lorawan: { region: "AS923" } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.lorawan.region, 3);
+});
+
+// lrw_datarate (#409 A3): enum on the wire, AUTO = 0 and DRn = n + 1.
+test("set_param lorawan.datarate (enum) round-trips (#409)", () => {
+  const enc = codec.encodeDownlink({
+    data: { seq: 5, command: "set_param", set_param: { lorawan: { datarate: "DR3", adr: false } } },
+  });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
+  assert.equal(back.set_param.lorawan.datarate, 4); // DR3 -> wire value 4
+  assert.equal(back.set_param.lorawan.adr, 0);
 });
 
 test("encode surfaces an error on an unknown config field instead of a silent no-op (#H2)", () => {

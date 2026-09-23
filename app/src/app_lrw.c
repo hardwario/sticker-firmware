@@ -147,10 +147,12 @@ static struct k_work m_join_work;
 static struct k_work m_link_check_work;       /* LC timeout (from m_lc_timeout_timer) */
 static struct k_work m_downlink_success_work; /* deferred from downlink_callback */
 static struct k_work m_clock_sync_info_work;  /* deferred ClockSync Info uplink (#219) */
+static struct k_work m_announce_work;         /* deferred full Info / settings-info (#409) */
 static struct k_work m_lc_response_work;      /* deferred from link_check_callback */
 static struct k_work m_force_lc_work;         /* arm a forced LC on the next telemetry */
 static struct k_work m_dl_request_work;       /* drains m_dl_msgq (port-85 commands) */
 static struct k_work_delayable m_post_cmd_work;
+static struct k_work_delayable m_page_stream_work; /* GetConfig/GetParam pages (#409) */
 static struct k_work_delayable m_join_complete_work;
 static struct k_work_delayable m_hist_work;
 static struct k_work_delayable
@@ -203,6 +205,10 @@ static void tx_telemetry_frame(bool first_frame);
 static bool m_hist_active;
 static uint32_t m_hist_from, m_hist_to, m_hist_seq;
 static uint32_t m_hist_count;
+/* #409 3f: upper bound for frame_index/frame_count when sizing a frame (their
+ * varint width). UINT32_MAX = worst case; tightened to the first frame count at
+ * replay start, which buys ~8 B of samples per frame at low DRs. */
+static uint32_t m_hist_frame_bound = UINT32_MAX;
 static uint32_t m_hist_idx;
 static size_t m_hist_cursor;
 static uint32_t m_hist_present; /* shared sensor mask (uint32), snapshot at replay start */
@@ -264,11 +270,25 @@ static uint8_t m_lc_response_gw_count;
  * size is always far below the protobuf worst case. */
 BUILD_ASSERT(APP_LRW_REQUEST_BUF_SIZE >= 222, "request buffer below LoRaWAN MTU");
 
+/* What a queued frame is, so tx_send_queued() can recover it instead of just
+ * dropping it when a DR drop between queueing and sending leaves it over budget
+ * (#409 3g). Fits the padding byte after `port`, so the msgq slots do not grow. */
+enum lrw_tx_kind {
+	LRW_TX_OTHER = 0,    /* no recovery (shell-injected, error frames) */
+	LRW_TX_CMD_RESPONSE, /* answer to a downlink command: carries its seq */
+	LRW_TX_INFO,         /* autonomous Info (join / clock-sync / deferred) */
+	LRW_TX_SETTINGS,     /* autonomous settings-info (#412) */
+	LRW_TX_ALARM,        /* fPort 3 AlarmReport */
+};
+
 struct lrw_tx_msg {
 	uint8_t port;
+	uint8_t kind; /* enum lrw_tx_kind */
 	uint16_t len;
 	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
 };
+BUILD_ASSERT(sizeof(struct lrw_tx_msg) == 4 + APP_LRW_RESPONSE_BUF_SIZE,
+	     "lrw_tx_msg grew: kind must stay in the padding byte");
 struct lrw_dl_msg {
 	uint16_t len;
 	uint8_t buf[APP_LRW_REQUEST_BUF_SIZE];
@@ -278,6 +298,8 @@ K_MSGQ_DEFINE(m_response_msgq, sizeof(struct lrw_tx_msg), APP_LRW_TX_QUEUE_DEPTH
 K_MSGQ_DEFINE(m_alarm_msgq, sizeof(struct lrw_tx_msg), APP_LRW_TX_QUEUE_DEPTH, 4);
 K_MSGQ_DEFINE(m_dl_msgq, sizeof(struct lrw_dl_msg), APP_LRW_DL_QUEUE_DEPTH, 4);
 
+static int queue_tx_response(uint8_t port, const uint8_t *buf, size_t len, enum lrw_tx_kind kind);
+
 /* Deferred reboot/save requested by a command handler; runs after the Ack TX. */
 static enum app_cmd_action m_post_cmd_action;
 
@@ -286,6 +308,12 @@ static enum app_cmd_action m_post_cmd_action;
 /* #193: set from a command-handler thread, test-and-cleared in the LoRaMac
  * downlink callback (another context) — an atomic bit closes the lost-update race. */
 static atomic_t m_clock_sync_info_pending;
+/* #409 A5a: boot announce frames that did not fit the DR budget at join time
+ * (Info went out as InfoLite, settings-info was skipped). Re-sent from
+ * m_announce_work once a DR change makes room. */
+#define ANNOUNCE_INFO     0
+#define ANNOUNCE_SETTINGS 1
+static atomic_t m_announce_pending;
 
 /* Kicked on a link-ready edge (join success / history-replay finish) so
  * app_report can resume the report cadence with an immediate uplink. */
@@ -345,6 +373,24 @@ static uint8_t refresh_payload_budget(void)
 uint8_t app_lrw_get_max_payload(void)
 {
 	return m_max_next_payload;
+}
+
+size_t app_lrw_payload_cap(size_t buf_size)
+{
+	uint8_t budget = m_max_next_payload;
+
+	/* 0 = no budget known right now (before join, or pending MAC answers fill
+	 * the frame): encode against the buffer and let tx_send_queued() flush the
+	 * MAC and retry, instead of pretending the frame has no room at all. */
+	return (budget > 0 && budget < buf_size) ? budget : buf_size;
+}
+
+/* Same as app_lrw_payload_cap() but re-queries the stack first (MED-6). Only on
+ * m_work_q: lorawan_get_payload_sizes() calls into the non-thread-safe LoRaMac. */
+static size_t refresh_payload_cap(size_t buf_size)
+{
+	refresh_payload_budget();
+	return app_lrw_payload_cap(buf_size);
 }
 
 /* ======================================================================== */
@@ -462,16 +508,18 @@ static int queue_info_uplink(void)
 {
 	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t info_len;
+	bool lite = false;
 
-	uint8_t budget = refresh_payload_budget();
-	size_t cap = sizeof(info_buf);
-	if (budget > 0 && budget < cap) {
-		cap = budget;
-	}
-
-	int ret = app_cmd_build_info(info_buf, cap, &info_len);
+	int ret = app_cmd_build_info(info_buf, refresh_payload_cap(sizeof(info_buf)), &info_len,
+				     &lite);
 	if (ret == 0) {
-		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len);
+		(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len, LRW_TX_INFO);
+	}
+	/* #409: only InfoLite fit (or nothing) — send the full Info once the DR rises. */
+	if (ret != 0 || lite) {
+		atomic_set_bit(&m_announce_pending, ANNOUNCE_INFO);
+	} else {
+		atomic_clear_bit(&m_announce_pending, ANNOUNCE_INFO);
 	}
 	return ret;
 }
@@ -486,17 +534,74 @@ static int queue_settings_info_uplink(void)
 	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t len;
 
-	uint8_t budget = refresh_payload_budget();
-	size_t cap = sizeof(buf);
-	if (budget > 0 && budget < cap) {
-		cap = budget;
-	}
-
-	int ret = app_cmd_build_config_status(buf, cap, &len);
+	int ret = app_cmd_build_config_status(buf, refresh_payload_cap(sizeof(buf)), &len);
 	if (ret == 0) {
-		(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len);
+		(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_SETTINGS);
+		atomic_clear_bit(&m_announce_pending, ANNOUNCE_SETTINGS);
+	} else {
+		atomic_set_bit(&m_announce_pending, ANNOUNCE_SETTINGS); /* #409: retry later */
 	}
 	return ret;
+}
+
+/* #409 A5a: re-send the boot announce frames that did not fit at join time (full
+ * Info after an InfoLite, a skipped settings-info), once a DR change has made
+ * room. Only queues the full Info — never a second InfoLite — so a DR that is
+ * still too small leaves the flag set without extra airtime. */
+static void announce_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+
+	if (state != APP_LRW_STATE_HEALTHY && state != APP_LRW_STATE_WARNING) {
+		return; /* the next join re-announces from scratch */
+	}
+
+	if (atomic_test_bit(&m_announce_pending, ANNOUNCE_INFO)) {
+		uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
+		size_t len;
+		bool lite = false;
+		int ret = app_cmd_build_info(buf, refresh_payload_cap(sizeof(buf)), &len, &lite);
+
+		if (ret == 0 && !lite) {
+			LOG_INF("DR budget allows the full Info now: sending it");
+			(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_INFO);
+			atomic_clear_bit(&m_announce_pending, ANNOUNCE_INFO);
+		}
+	}
+
+	if (atomic_test_bit(&m_announce_pending, ANNOUNCE_SETTINGS)) {
+		(void)queue_settings_info_uplink();
+	}
+}
+
+/* Pin the uplink datarate from lrw-datarate (#409 A3, like twr-sdk AT$DR). Runs
+ * on every (re)join, after ADR is configured and before the payload budget is
+ * captured, so the budget reflects the pinned DR. lorawan_set_datarate() also
+ * becomes the DR of the next join request and is re-applied by the stack after
+ * each join while ADR is off. Validity is region/dwell dependent (e.g. AU915
+ * dwell=1 rejects DR0/DR1): an invalid DR is rejected by the MAC and the stack's
+ * own DR stays in use. Calibration pins its own DR and is left alone. */
+static void apply_manual_datarate(void)
+{
+	if (g_app_config.lrw_datarate == APP_CONFIG_LRW_DATARATE_AUTO || g_app_config.calibration) {
+		return;
+	}
+
+	int dr = (int)g_app_config.lrw_datarate - (int)APP_CONFIG_LRW_DATARATE_DR0;
+
+	if (g_app_config.lrw_adr) {
+		LOG_WRN("lrw-datarate DR%d ignored: ADR is on (set lrw-adr false)", dr);
+		return;
+	}
+
+	int ret = lorawan_set_datarate((enum lorawan_datarate)dr);
+	if (ret) {
+		LOG_ERR("lrw-datarate DR%d rejected in this region (%d); stack DR kept", dr, ret);
+		return;
+	}
+	LOG_INF("Uplink datarate pinned to DR%d (lrw-datarate)", dr);
 }
 
 static void on_join_success(void)
@@ -504,6 +609,7 @@ static void on_join_success(void)
 	LOG_INF("Join successful");
 	m_init_join = false; /* Next join will be a rejoin with MAC reset */
 	lorawan_enable_adr(g_app_config.lrw_adr);
+	apply_manual_datarate();
 
 	/* Capture the initial DR's payload budget; the DR-changed callback may not
 	 * fire on join. */
@@ -518,14 +624,15 @@ static void on_join_success(void)
 	/* Autonomous GetInfo on join: announce identity/firmware on fPort 85 before
 	 * the first telemetry. send_work drains queued responses first. */
 	if (queue_info_uplink() != 0) {
-		LOG_WRN("app_cmd_build_info failed; skipping GetInfo-on-join");
+		LOG_WRN("GetInfo-on-join does not fit the DR budget; deferred until the DR rises");
 	}
 
 	/* Follow the Info with an autonomous settings-info ConfigDump (#412) so the
 	 * network learns the effective config on join without a GetConfig poll. The
 	 * response queue drains FIFO, so this lands right after the Info above. */
 	if (queue_settings_info_uplink() != 0) {
-		LOG_WRN("app_cmd_build_config_status failed; skipping settings-info-on-join");
+		LOG_WRN("settings-info-on-join does not fit the DR budget; deferred until the DR "
+			"rises");
 	}
 
 	/* Kick app_report to start the report cadence with an immediate uplink (its
@@ -831,6 +938,43 @@ static void post_cmd_work_handler(struct k_work *work)
 	}
 }
 
+/* #409 3d/3e: queue the next ConfigDump page of a device-driven LoRaWAN page
+ * stream. One page per run, only while the response queue keeps a slot free
+ * for other answers; paced by the send path (duty cycle permitting). */
+#define PAGE_STREAM_PACE_SEC 2
+
+static void page_stream_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+
+	if (state != APP_LRW_STATE_HEALTHY && state != APP_LRW_STATE_WARNING) {
+		app_cmd_stream_cancel(); /* a rejoin starts from scratch */
+		return;
+	}
+
+	if (k_msgq_num_free_get(&m_response_msgq) < 2) {
+		k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+					  K_SECONDS(PAGE_STREAM_PACE_SEC));
+		return;
+	}
+
+	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
+	size_t len;
+	int ret = app_cmd_stream_next(buf, sizeof(buf), &len);
+
+	if (ret == -ENODATA) {
+		return; /* all pages queued */
+	}
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
+		return;
+	}
+	(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_CMD_RESPONSE);
+	k_work_schedule_for_queue(&m_work_q, &m_page_stream_work, K_SECONDS(PAGE_STREAM_PACE_SEC));
+}
+
 static void dl_request_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -847,11 +991,7 @@ static void dl_request_work_handler(struct k_work *work)
 		 * so an explicit GetInfo command gets the same active_alarms trimming as
 		 * the autonomous join/clock-sync uplink (queue_info_uplink()) instead of
 		 * tx_send_queued() dropping the whole response later. */
-		uint8_t budget = refresh_payload_budget();
-		size_t resp_cap = sizeof(resp);
-		if (budget > 0 && budget < resp_cap) {
-			resp_cap = budget;
-		}
+		size_t resp_cap = refresh_payload_cap(sizeof(resp));
 
 		int ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, msg.buf, msg.len, resp, resp_cap,
 					 &resp_len, &action);
@@ -861,10 +1001,18 @@ static void dl_request_work_handler(struct k_work *work)
 		}
 
 		if (resp_len) {
-			ret = app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, resp, resp_len);
+			ret = queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, resp, resp_len,
+						LRW_TX_CMD_RESPONSE);
 			if (ret) {
 				LOG_ERR_CALL_FAILED_INT("app_lrw_queue_response", ret);
 			}
+		}
+
+		if (action == APP_CMD_ACTION_PAGE_STREAM) {
+			/* #409: the remaining ConfigDump pages follow page 0 by themselves. */
+			k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+						  K_SECONDS(PAGE_STREAM_PACE_SEC));
+			action = APP_CMD_ACTION_NONE;
 		}
 
 		/* Defer reboot/save so the Ack uplink + its RX window finish first.
@@ -939,6 +1087,11 @@ static void join_complete_work_handler(struct k_work *work)
 	on_join_success();
 }
 
+/* A1 (#409): the stored lrw-region is not compiled into this image (e.g. a
+ * debug.conf build that trims US915/AU915). Set once in app_lrw_init() before
+ * any radio bring-up; the radio then stays silent like radio-mode OFF. */
+static bool m_region_unsupported;
+
 /* Radio disabled by the radio-mode config (#271). This replaces the old
  * DevEUI/DevAddr-zero radio-silent guard (#98/#175): whether the radio comes up
  * is now an explicit user choice, not inferred from a blank identifier. OFF is
@@ -949,6 +1102,9 @@ static void join_complete_work_handler(struct k_work *work)
  * disabling — provisioning problems surface instead of masquerading as OFF. */
 static bool radio_disabled(void)
 {
+	if (m_region_unsupported) {
+		return true;
+	}
 	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_P2P) {
 		LOG_WRN("radio-mode P2P not yet implemented (#118/#228) — radio stays off");
 		return true;
@@ -966,7 +1122,9 @@ static void join_work_handler(struct k_work *work)
 	 * back to LORAWAN + rebooted. */
 	if (radio_disabled()) {
 		if ((enum app_lrw_state)atomic_get(&m_state) != APP_LRW_STATE_DISABLED) {
-			LOG_WRN("radio-mode not LORAWAN: disabled (radio-silent)");
+			LOG_WRN("%s: disabled (radio-silent)",
+				m_region_unsupported ? "lrw-region not in this image"
+						     : "radio-mode not LORAWAN");
 			state_transition(APP_LRW_STATE_DISABLED);
 		}
 		return;
@@ -1257,15 +1415,95 @@ static void tx_jitter_work_handler(struct k_work *work)
  * duty-cycle retry (#93.1). Returns true if the message was consumed (sent or
  * dropped); false if it was requeued for a later retry (a backoff re-drain is
  * already scheduled, so the caller must not touch the timers). */
+/* seq of an encoded Response (version byte + protobuf): field 1 comes first
+ * when non-zero (nanopb encodes in field order); absent means seq 0. */
+static uint32_t response_seq(const struct lrw_tx_msg *tx)
+{
+	uint32_t seq = 0;
+
+	if (tx->len < 2 || tx->buf[1] != 0x08) {
+		return 0;
+	}
+	for (uint16_t i = 2, shift = 0; i < tx->len && shift < 32; i++, shift += 7) {
+		seq |= (uint32_t)(tx->buf[i] & 0x7f) << shift;
+		if (!(tx->buf[i] & 0x80)) {
+			break;
+		}
+	}
+	return seq;
+}
+
+/* #409 3g: a queued frame no longer fits because the DR dropped after it was
+ * encoded (ADR / LinkADRReq). Recover by kind instead of losing it silently:
+ * autonomous Info / settings-info are re-armed for the deferred announce (sent
+ * again once the DR rises); a command answer is replaced in place by
+ * Error BUDGET_TOO_SMALL carrying the command's seq (retry at a higher DR);
+ * an alarm is dropped, its state still rides in telemetry system_flags.
+ * Returns true when `tx` now holds a frame to send. */
+static bool recover_over_budget(struct lrw_tx_msg *tx, uint8_t budget)
+{
+	LOG_WRN("TX %u B over DR budget %u B (port %u, kind %u)", tx->len, budget, tx->port,
+		tx->kind);
+
+	switch ((enum lrw_tx_kind)tx->kind) {
+	case LRW_TX_INFO:
+		atomic_set_bit(&m_announce_pending, ANNOUNCE_INFO);
+		LOG_INF("Info re-armed for the deferred announce");
+		return false;
+	case LRW_TX_SETTINGS:
+		atomic_set_bit(&m_announce_pending, ANNOUNCE_SETTINGS);
+		LOG_INF("settings-info re-armed for the deferred announce");
+		return false;
+	case LRW_TX_CMD_RESPONSE: {
+		uint32_t seq = response_seq(tx);
+		size_t len;
+
+		if (app_cmd_build_budget_error(seq, tx->buf, MIN(budget, sizeof(tx->buf)), &len) ==
+		    0) {
+			tx->len = len;
+			tx->kind = LRW_TX_OTHER; /* never recover the error itself */
+			LOG_INF("Command answer (seq %u) replaced by BUDGET_TOO_SMALL", seq);
+			return true;
+		}
+		LOG_ERR("Command answer (seq %u) dropped: not even the Error fits", seq);
+		return false;
+	}
+	case LRW_TX_ALARM:
+		LOG_INF("Alarm frame dropped; alarm state stays in telemetry system_flags");
+		return false;
+	default:
+		LOG_ERR("Frame dropped");
+		return false;
+	}
+}
+
 static bool tx_send_queued(struct k_msgq *q, struct lrw_tx_msg *tx, uint8_t port)
 {
 	uint8_t budget = refresh_payload_budget();
 
-	if (tx->len > budget) {
+	if (budget == 0) {
+		/* #409 3a: pending MAC answers fill the whole frame (same H-1 condition
+		 * as the telemetry path). Dropping here lost responses/alarms during a
+		 * MAC-command flood. Flush the MAC with an empty uplink and keep the
+		 * payload for a retry once the budget recovers. */
+		LOG_WRN("TX budget 0 (MAC-command flood, port %u): empty uplink to flush MAC",
+			port);
+		int ret = lorawan_send(port, tx->buf, 0, LORAWAN_MSG_UNCONFIRMED);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("lorawan_send (MAC flush)", ret);
+		}
+		if (k_msgq_put(q, tx, K_NO_WAIT) != 0) {
+			LOG_WRN("TX requeue failed (port %u); dropped", port);
+			return true;
+		}
+		k_work_schedule_for_queue(&m_work_q, &m_tx_retry_work, K_SECONDS(FRAME_RETRY_SEC));
+		return false;
+	}
+
+	if (tx->len > budget && !recover_over_budget(tx, budget)) {
 		/* Won't fit at this DR — Zephyr's lorawan_send would transmit an empty
-		 * frame and drop the payload anyway, so drop it explicitly with a log
-		 * rather than burning airtime on an empty uplink. */
-		LOG_ERR("TX %u B over DR budget %u B (port %u); dropped", tx->len, budget, port);
+		 * frame and drop the payload anyway, so drop it explicitly (logged in
+		 * recover_over_budget()) rather than burning airtime on an empty uplink. */
 		return true;
 	}
 
@@ -1383,14 +1621,16 @@ static void send_work_handler(struct k_work *work)
 
 /* Max samples that fit one frame at the current DR. Uses the exact protobuf
  * envelope overhead (app_cmd_history_sample_capacity) instead of a fixed guess
- * that overflowed m_hist_tx_buf on DR3+ with a synced RTC (#89). Worst-case
- * (max-varint) frame_index/count/t0 give a stable per-replay lower bound. */
+ * that overflowed m_hist_tx_buf on DR3+ with a synced RTC (#89). frame_index /
+ * frame_count are sized with m_hist_frame_bound and t0 with the max varint, so
+ * the cap is a stable per-replay lower bound. */
 static size_t history_frame_cap(void)
 {
 	size_t out_cap = MIN((size_t)refresh_payload_budget(), sizeof(m_hist_tx_buf)); /* MED-6 */
 
-	return app_cmd_history_sample_capacity(m_hist_seq, UINT32_MAX, UINT32_MAX, UINT32_MAX,
-					       m_hist_present, m_hist_interval, out_cap);
+	return app_cmd_history_sample_capacity(m_hist_seq, m_hist_frame_bound, m_hist_frame_bound,
+					       UINT32_MAX, m_hist_present, m_hist_interval,
+					       out_cap);
 }
 
 static void history_replay_finish(void)
@@ -1418,6 +1658,12 @@ static void m_hist_work_handler(struct k_work *work)
 		return; /* the (re)join → HEALTHY entry / send path restarts cadence */
 	}
 
+	/* A DR drop mid-replay packs fewer records per frame, so frame_index can
+	 * outgrow the bound the cap was sized with: fall back to the worst case. */
+	if (m_hist_idx >= m_hist_frame_bound) {
+		m_hist_frame_bound = UINT32_MAX;
+	}
+
 	uint8_t samples[HISTORY_SAMPLES_MAX];
 	size_t cap = MIN(history_frame_cap(), sizeof(samples));
 	uint32_t t0 = 0;
@@ -1432,6 +1678,19 @@ static void m_hist_work_handler(struct k_work *work)
 	if (n == 0) {
 		LOG_WRN("History replay stop at frame %u/%u (cap=%uB)", (unsigned)m_hist_idx,
 			(unsigned)m_hist_count, (unsigned)cap);
+		if (m_hist_idx < m_hist_count) {
+			/* #409 3f: records remain but the DR dropped below one record per
+			 * frame. Tell the host instead of going silent mid-stream. */
+			uint8_t err[16];
+			size_t err_len;
+
+			if (app_cmd_build_budget_error(m_hist_seq, err,
+						       refresh_payload_cap(sizeof(err)),
+						       &err_len) == 0) {
+				(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, err,
+							     err_len);
+			}
+		}
 		history_replay_finish();
 		return;
 	}
@@ -1484,11 +1743,11 @@ static void m_hist_work_handler(struct k_work *work)
 	}
 }
 
-bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+int app_lrw_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
 {
 	if (!app_lrw_is_ready()) {
 		LOG_WRN("History replay requested but LRW not ready; ignoring");
-		return false;
+		return -EAGAIN;
 	}
 
 	/* Seed the snapshot fields the cap depends on (seq/present/interval) before
@@ -1499,12 +1758,28 @@ bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 	m_hist_present = app_history_get_mask();
 	m_hist_interval = app_history_get_interval();
 
+	/* #409 3f: size with the worst-case frame_index/count first, then tighten
+	 * the bound to that frame count and recount. A bigger cap never needs more
+	 * frames, so the final count stays within the bound and counting and
+	 * sending keep using one identical per-frame cap. */
+	m_hist_frame_bound = UINT32_MAX;
 	size_t cap = history_frame_cap();
 	uint32_t n = (cap > 0) ? app_history_count_frames(from_unix, to_unix, cap) : 0;
 
+	if (n > 0) {
+		m_hist_frame_bound = n;
+		n = app_history_count_frames(from_unix, to_unix, history_frame_cap());
+	}
+
 	if (n == 0) {
-		LOG_INF("History replay: no records in window (or DR too low)");
-		return false;
+		/* Empty window, or records exist but not one fits the current DR (the
+		 * 11 B budget tier)? Probe with the full frame buffer to tell apart. */
+		if (app_history_count_frames(from_unix, to_unix, sizeof(m_hist_tx_buf)) > 0) {
+			LOG_WRN("History replay: DR budget too small for one record");
+			return -EMSGSIZE;
+		}
+		LOG_INF("History replay: no records in window");
+		return -ENODATA;
 	}
 
 	m_hist_count = n;
@@ -1516,7 +1791,7 @@ bool app_lrw_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 
 	LOG_INF("History replay start: %u frames (window %u..%u)", (unsigned)n, from_unix, to_unix);
 	k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_NO_WAIT);
-	return true;
+	return 0;
 }
 
 /* ======================================================================== */
@@ -1621,6 +1896,11 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 	m_current_dr = dr;
 	m_max_next_payload = max_next;
 	LOG_INF("New data rate: DR%d, Maximum payload size: %d", dr, max_now);
+
+	/* #409: a higher DR may now fit the deferred full Info / settings-info. */
+	if (atomic_get(&m_announce_pending)) {
+		k_work_submit_to_queue(&m_work_q, &m_announce_work);
+	}
 }
 
 static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
@@ -1734,6 +2014,48 @@ static void heartbeat_work_handler(struct k_work *work)
 }
 #endif /* defined(CONFIG_WATCHDOG) */
 
+/* Map the stored lrw-region to a Zephyr region, but only if that region is
+ * compiled into this image (A1, #409). lorawan_set_region() returns -ENOTSUP for
+ * a region whose CONFIG_LORAMAC_REGION_* is off; resolving it here lets the
+ * caller go radio-silent instead of failing the whole LoRaWAN init. There is
+ * deliberately no fallback to another region: a device configured for US915 or
+ * AU915 must never transmit on 868 MHz (or vice versa). */
+static int resolve_region(enum lorawan_region *region)
+{
+	switch (g_app_config.lrw_region) {
+	case APP_CONFIG_LRW_REGION_EU868:
+		if (IS_ENABLED(CONFIG_LORAMAC_REGION_EU868)) {
+			*region = LORAWAN_REGION_EU868;
+			return 0;
+		}
+		break;
+	case APP_CONFIG_LRW_REGION_US915:
+		if (IS_ENABLED(CONFIG_LORAMAC_REGION_US915)) {
+			*region = LORAWAN_REGION_US915;
+			return 0;
+		}
+		break;
+	case APP_CONFIG_LRW_REGION_AU915:
+		if (IS_ENABLED(CONFIG_LORAMAC_REGION_AU915)) {
+			*region = LORAWAN_REGION_AU915;
+			return 0;
+		}
+		break;
+	case APP_CONFIG_LRW_REGION_AS923:
+		/* #409 A6: channel plan AS923-1 (loramac-node default); no sub-band. */
+		if (IS_ENABLED(CONFIG_LORAMAC_REGION_AS923)) {
+			*region = LORAWAN_REGION_AS923;
+			return 0;
+		}
+		break;
+	default:
+		LOG_ERR("Invalid lrw-region: %d", g_app_config.lrw_region);
+		return -EINVAL;
+	}
+
+	return -ENOTSUP;
+}
+
 int app_lrw_init(void)
 {
 	int ret;
@@ -1752,27 +2074,25 @@ int app_lrw_init(void)
 	 * lorawan_start() are never called — the SubGHz radio is never powered, so
 	 * there is no boot radio burst. (Replaces the #98/#175 DevEUI-zero guard: the
 	 * radio is now enabled/disabled explicitly, not inferred from a blank ID.) */
-	const bool radio_silent = radio_disabled();
+	enum lorawan_region region = LORAWAN_REGION_EU868;
+
+	/* A1 (#409): a stored region missing from this image (or an out-of-range
+	 * value) used to fail the whole init, leaving a device with no radio and no
+	 * diagnosable state. Go radio-silent instead: DISABLED (lrw_state, and the
+	 * lrw_disabled device_status bit) + a loud log; fix by setting a
+	 * compiled-in lrw-region or reflashing. */
+	bool radio_silent = radio_disabled();
+
+	if (!radio_silent && resolve_region(&region) != 0) {
+		LOG_ERR("lrw-region %d is not compiled into this image: radio-silent "
+			"(set a supported lrw-region or flash a full image)",
+			g_app_config.lrw_region);
+		m_region_unsupported = true;
+		radio_silent = true;
+	}
 
 	if (!radio_silent) {
 		clear_stale_lorawan_nvm();
-
-		enum lorawan_region region;
-
-		switch (g_app_config.lrw_region) {
-		case APP_CONFIG_LRW_REGION_EU868:
-			region = LORAWAN_REGION_EU868;
-			break;
-		case APP_CONFIG_LRW_REGION_US915:
-			region = LORAWAN_REGION_US915;
-			break;
-		case APP_CONFIG_LRW_REGION_AU915:
-			region = LORAWAN_REGION_AU915;
-			break;
-		default:
-			LOG_ERR("Invalid region: %d", g_app_config.lrw_region);
-			return -EINVAL;
-		}
 
 		ret = lorawan_set_region(region);
 		if (ret) {
@@ -1805,7 +2125,7 @@ int app_lrw_init(void)
 		lorawan_register_battery_level_callback(battery_level_callback);
 		lorawan_register_dr_changed_callback(datarate_changed_callback);
 		lorawan_register_link_check_ans_callback(link_check_callback);
-	} else {
+	} else if (!m_region_unsupported) {
 		LOG_WRN("radio-mode not LORAWAN: skipping LoRaWAN bring-up (radio-silent, #271)");
 	}
 
@@ -1821,10 +2141,12 @@ int app_lrw_init(void)
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
 	k_work_init(&m_clock_sync_info_work, clock_sync_info_work_handler);
+	k_work_init(&m_announce_work, announce_work_handler);
 	k_work_init(&m_lc_response_work, lc_response_work_handler);
 	k_work_init(&m_force_lc_work, force_lc_work_handler);
 	k_work_init(&m_dl_request_work, dl_request_work_handler);
 	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
+	k_work_init_delayable(&m_page_stream_work, page_stream_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
 	k_work_init_delayable(&m_tx_retry_work, tx_retry_work_handler);
 #if defined(CONFIG_SHELL)
@@ -1969,6 +2291,11 @@ int app_lrw_get_info(struct app_lrw_info *info)
 
 int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 {
+	return queue_tx_response(port, buf, len, LRW_TX_OTHER);
+}
+
+static int queue_tx_response(uint8_t port, const uint8_t *buf, size_t len, enum lrw_tx_kind kind)
+{
 	if (!buf || len == 0) {
 		return -EINVAL;
 	}
@@ -1980,6 +2307,7 @@ int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 	struct lrw_tx_msg msg;
 
 	msg.port = port;
+	msg.kind = kind;
 	msg.len = len;
 	memcpy(msg.buf, buf, len);
 
@@ -2013,6 +2341,7 @@ int app_lrw_send_alarm(const uint8_t *buf, size_t len)
 	struct lrw_tx_msg msg;
 
 	msg.port = APP_LRW_ALARM_PORT;
+	msg.kind = LRW_TX_ALARM;
 	msg.len = len;
 	memcpy(msg.buf, buf, len);
 
