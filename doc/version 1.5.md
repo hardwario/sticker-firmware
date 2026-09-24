@@ -589,6 +589,10 @@ DeviceTimeAns in the RX of the next uplink, then `Response{seq 25, info}` with t
 `unix_time` (`010819…`); `force_send` → uplink after 1.1–2.8 s, also right after a telemetry
 uplink; `send` + `force_send` back to back → one uplink after 1.2 s (before: only after the
 jitter); `w1_scan` on a debug image without 1-Wire → `Error{code 7}`.
+Re-run with the downlinks sent from the Hub CLI (`proximosctl control.radio node-send`), each
+answer paired on the Hub by its `seq`: `clock-sync` seq 45 → `Response{seq 45, info}` with the
+synced time; `force-send` seq 46 → extra fPort-2 uplink 1.16 s after the uplink that carried
+the downlink; `w1-scan` seq 47 → `Response{seq 47, error{code 7}}`.
 
 **Alarms after a reboot (checked, no change needed):** the alarm latches are plain RAM, so
 after any reboot (including `settings_save`) every condition that still holds activates
