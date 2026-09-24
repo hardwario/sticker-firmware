@@ -16,3 +16,4 @@ A plan is renamed if its PR is renamed, so the two stay in step.
 | `409 - LoRaWAN improvements - regions, datarate, diagnostics.md` | [#409](https://github.com/hardwario/sticker-firmware/pull/409) |
 | `410 - TOWER GFSK transport (radio-mode tower).md` | [#410](https://github.com/hardwario/sticker-firmware/pull/410) |
 | `425 - Universal response paging.md` | [#425](https://github.com/hardwario/sticker-firmware/pull/425) |
+| `431 - Sensor channel model for alarms.md` | [#431](https://github.com/hardwario/sticker-firmware/pull/431) |
