@@ -1833,7 +1833,9 @@ field on**, on Android and iOS alike. The phone bootstraps with the plaintext `g
     `mb: session end (deferred action)`);
   - a phone left on the tag without traffic is released after **120 s** (RTT `NFC: field held 120 s
     without mailbox traffic -> releasing the tag`, `VCC_ON` → 0), and the next tap works.
-- Reboot with the phone kept on the tag (save / reboot / resets): `VCC_ON` returns ~1 s after boot
+- Boot: NFC starts last, after the boot carousel and the whole init chain (~8 s after boot).
+  Until then a phone on the tag reads `VCC_ON = 0` and no command is served.
+- Reboot with the phone kept on the tag (save / reboot / resets): `VCC_ON` returns ~8 s after boot
   and the phone's first request is answered without a lift. RTT shows no `left enabled at boot`.
 - A unit whose `MB_MODE` cannot be set reports `MAILBOX_DOWN` (device_status bit 13) and
   `NFC mailbox: UNAVAILABLE` in `ats device info` (production tester).
@@ -1851,7 +1853,9 @@ field on**, on Android and iOS alike. The phone bootstraps with the plaintext `g
 > (5) `hold --hold 130` → RTT shows the 120 s release WRN ~120 s after the last exchange, `probe`
 > then reads `VCC_ON=0`, and a re-tap works again. (6) `sticker_mailbox_seq_b.py <current
 > interval_report>` (same value, so the config does not change): Ack → session end at once, device
-> back in ~6 s, and the first `get_basic_info` after the reboot answered without lifting the phone.
+> back ~13 s after the Ack (2 s result + NVS save + boot + ~8 s init chain), and the first
+> `get_basic_info` after the reboot answered without lifting the phone. With the phone on the tag
+> during the boot, `probe` keeps reading `VCC_ON=0` until the init chain is done.
 > (7) Debug build, phone removed: `nfc clear`, then `nfc read 0 512` stays all zero after a reboot
 > plus some uptime. Repeat (2)–(6) with an iPhone (Manager-App mailbox transport). Report results.
 
@@ -1864,6 +1868,8 @@ on the bench):
   answered +5.9 s (session at uptime 1.2 s);
 - on the earlier `3c537cd`, this step exposed the boot-time race fixed in `e2ce024` (RTT
   `left enabled at boot (MB_CTRL_Dyn=0x85)`);
+- these timings predate moving NFC to the end of the init chain (#414, 2026-09-24): from then on
+  the device is back ~8 s later — re-run (6);
 - the stale v1.4 `inf` record was wiped with `nfc clear`, and the EEPROM was still all zero 11 min
   after a reboot.
 
@@ -1979,8 +1985,9 @@ refused with `Error{BAD_REQUEST "zero key"}` — no save, no reboot.
   reboot: 2 s result LED + the NVS save, ~5 s in total.
 - A follow-up command sent in the same hold right after the `ack` gets **no reply**: the session is
   over and the action runs first.
-- With the phone kept on the tag, the next `get_basic_info` after the reboot is answered (~1 s after
-  boot). Its `nonce_counter` is **not** reset: every tier keeps it.
+- With the phone kept on the tag, the next `get_basic_info` after the reboot is answered once NFC
+  is up (~8 s after boot, at the end of the init chain). Its `nonce_counter` is **not** reset: every
+  tier keeps it.
 - `device_reset`: config and alarm defaults are restored. Kept: identity (serial, `secret_key`,
   nonce, claim token + window state, `vendor_token`) and the full LoRaWAN provisioning and session
   (G6).
@@ -2339,6 +2346,18 @@ over NFC while powered off, reboot, confirm ONLY hall_left is zeroed — the oth
 
 - [x] Pass — code-verified ordering + HIL-verified selective-reset behavior (see above); the
   exact at-boot race timing not independently reproduced without real RF/phone hardware
+
+> **v1.5.0 (#414):** the boot-staged path is gone (N7), but the same class came back through the
+> mailbox. The "3 s start delay closes the window" argument above did not hold: the boot LED
+> carousel (~7 s) runs **before** `app_counters_init()`, so a phone command could be served during
+> it. After `e2ce024` started the poll thread right after `app_nfc_init()`, that was already ~1 s
+> after boot. #414 now runs `app_nfc_init()` and starts the poll thread at the **end** of the init
+> chain, after `app_counters_init()` and just before `app_lrw_join()`. Until then the chip is
+> unpowered (`VCC_ON = 0`), so no command reaches an uninitialised component.
+>
+> Re-run on v1.5.0 with the phone on the tag during a reboot:
+> - `probe` must read `VCC_ON = 0` until ~8 s after boot;
+> - a `reset_counters{hall_left}` sent as soon as the mailbox comes up must zero only `hall_left`.
 
 ### X7 — M24: claim state locked against shell/poll races (was M3/M15/vendor-consume, superseded by #415)
 

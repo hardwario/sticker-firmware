@@ -726,13 +726,19 @@ settings save, `set_secret_key`, resets, …) ends the session and the action ru
 until it has run, so a follow-up command can neither see the unapplied state nor
 replace the action. After a non-rebooting action (e.g. `lrw_join`) the firmware
 resumes the hold, so the phone re-enables `MB_EN` (same ~1 s retry as step 2) and
-continues in the same tap; after a reboot it re-reads `get_basic_info`. A phone
-kept on the tag across an NFC-triggered reboot does not have to be lifted: the
-NFC init (~1 s after boot) powers the chip, keeps it powered while the field is
-present, leaves a mailbox the phone enables right then alone (MB_EN is cleared at
-boot only with no field, or before a first-boot EEPROM write), and the poll thread,
-started right after the init, serves the phone's first request at once — while the
-boot LED carousel is still running, so the two LED patterns overlap. A unit whose
+continues in the same tap; after a reboot it re-reads `get_basic_info`.
+
+**NFC starts last in the boot.** The NFC init and the poll thread run at the end
+of the init chain, after the boot LED carousel and every component a command can
+reach (clock, history, alarm rules, LoRaWAN, battery, sensors, counters) — ~8 s
+after boot — and just before the LoRaWAN join. Until then the chip stays
+unpowered (`VCC_ON = 0`), so no phone command can act on uninitialised state (the
+#340 M8 class: a `reset_counters` saved before the counters were restored wiped
+every totalizer). A phone kept on the tag across an NFC-triggered reboot does not
+have to be lifted: it waits for `VCC_ON`; the init then keeps the chip powered
+while the field is present, leaves a mailbox the phone enables right then alone
+(MB_EN is cleared at boot only with no field, or before a first-boot EEPROM
+write), and the poll thread serves the phone's first request at once. A unit whose
 mailbox is unavailable (see Production tester) does not hold the chip at all.
 
 The frame is `[channel 1 B][payload]`:
