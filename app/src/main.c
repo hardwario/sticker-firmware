@@ -258,9 +258,10 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 }
 
 /* Not started at boot (SYS_FOREVER_MS): main() starts it right after
- * app_nfc_init(), so a phone kept on the tag across an NFC-triggered reboot is
- * served within ~0.2 s of the chip powering up — not ~2 s later, past the
- * phone's reply timeout (a fixed 3 s start delay did that). */
+ * app_nfc_init(), at the end of the init chain, so no phone command runs before
+ * the components it reaches are up, and a phone kept on the tag across an
+ * NFC-triggered reboot is served within ~0.2 s of the chip powering up (a fixed
+ * start delay could do neither). */
 K_THREAD_DEFINE(nfc_poll_tid, NFC_POLL_THREAD_STACK_SIZE, nfc_poll_thread_fn, NULL, NULL, NULL,
 		NFC_POLL_THREAD_PRIO, 0, SYS_FOREVER_MS);
 
@@ -415,21 +416,6 @@ int main(void)
 
 	/* --- Normal mode --- */
 
-	/* The NFC tag (ST25DV) is non-essential: a broken tag must not brick an
-	 * otherwise-healthy device (radio + sensors fine) into a die() reboot loop
-	 * (#88). On init failure, log and continue with NFC disabled — the poll
-	 * thread self-exits (app_nfc_ready() stays false) and the boot config check is
-	 * skipped. die() stays reserved for wdog / LED / LRW init. */
-	ret = app_nfc_init();
-	if (ret) {
-		LOG_WRN("app_nfc_init failed: %d (NFC unavailable, continuing)", ret);
-	}
-	/* Also on failure: the thread then sees !app_nfc_ready() and exits. */
-	k_thread_start(nfc_poll_tid);
-	/* #313: the tag holds no NDEF record any more (mailbox-only), so there is
-	 * nothing to lay down or reconcile at boot — the phone reads identity via the
-	 * mailbox get_basic_info command. */
-
 #if defined(CONFIG_WATCHDOG)
 	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
@@ -498,6 +484,26 @@ int main(void)
 	if (ret) {
 		LOG_WRN("app_counters_init failed: %d (counter persistence unavailable)", ret);
 	}
+
+	/* NFC last, once every component a command can reach is up (#414): the poll
+	 * thread serves phone commands as soon as it starts, and one served before
+	 * app_counters_init() / app_history_init() / app_sensor_init() / ... would act
+	 * on uninitialised state (#340 M8: a reset_counters saved before the counters
+	 * were restored wiped every totalizer). Until then the chip stays unpowered,
+	 * so a phone on the tag just waits for VCC_ON. Before app_lrw_join(): the
+	 * claim state loaded here feeds the join Info.
+	 *
+	 * The NFC tag (ST25DV) is non-essential: a broken tag must not brick an
+	 * otherwise-healthy device (radio + sensors fine) into a die() reboot loop
+	 * (#88). On init failure, log and continue with NFC disabled — the poll
+	 * thread self-exits (app_nfc_ready() stays false). The tag holds no NDEF
+	 * record (#313, mailbox-only), so there is nothing to lay down at boot. */
+	ret = app_nfc_init();
+	if (ret) {
+		LOG_WRN("app_nfc_init failed: %d (NFC unavailable, continuing)", ret);
+	}
+	/* Also on failure: the thread then sees !app_nfc_ready() and exits. */
+	k_thread_start(nfc_poll_tid);
 
 #if defined(CONFIG_WATCHDOG)
 	app_wdog_feed();
