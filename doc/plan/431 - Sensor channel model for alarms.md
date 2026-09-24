@@ -187,7 +187,8 @@ RAM: 21×4 + 6×4 + 4×(10×4 + 4) ≈ 290 B, against today's `app_sensor_data`
 While a slot is in mismatch:
 
 - **Alarm:** an `AlarmEvent` with `Type = TYPE_SENSOR_MISMATCH` (5) on that slot:
-  - `source = N`, `sensor_type` = the **expected** type, `value` = the **detected** type id;
+  - `slot = N`, `rule` absent (watchdog event, today's `0xFF`),
+    `sensor_type` = the **expected** type, `value` = the **detected** type id;
   - an ACTIVATE edge when the mismatch appears, a DEACTIVATE edge when the right type is
     back, or when the slot is re-taught / cleared;
   - it comes from the same watchdog path as `TYPE_NO_DATA`, and the no-data watchdog for
@@ -201,12 +202,61 @@ While a slot is in mismatch:
 
 ### Rules
 
-- The 17 B `alarm_N` blob stays the same size:
-  - byte `[1]` = **slot** (0..4, was source),
-  - byte `[2]` = **channel** (was quantity).
-- `app_alarm_rule_valid(slot, ch)` checks the channel against the slot's type table:
-  - A rule on a 1-Wire slot needs `sensorN_type` set, otherwise `-EINVAL`. The order is:
-    provision the type, then the rules.
+An alarm is defined by three things:
+
+| Term | Meaning | Range |
+|---|---|---|
+| **rule** | the rule's storage position and stable identity (`alarm_0..alarm_15`) | 0..15 |
+| **slot** | where the sensor sits | 0 = motherboard, 1..4 = s1..s4 |
+| **channel** | which value of the slot's sensor type | per type table |
+
+The rule also carries the parameters for its channel's kind: lo/hi/dwell (threshold),
+from/to/dwell (state) or hi/dwell (rate). Kind and scale are not stored; they come from
+the channel descriptor.
+
+**Blob layout: 18 B** (was 17 B), little-endian:
+
+```
+[0]      flags        bit0 = present (slot occupied), bit1 = enabled
+[1]      slot         0 = motherboard, 1..4 = s1..s4
+[2]      channel      type-local channel number
+[3]      sensor_type  type the rule was written for (1 = motherboard, 2 = dallas, ...)
+[4]      from_state   STATE only
+[5]      to_state     STATE only
+[6..9]   lo           float
+[10..13] hi           float
+[14..17] dwell        float, seconds
+```
+
+An empty rule is 36 zero hex characters (`present = 0`).
+
+**Why `sensor_type` is stored in the rule:**
+
+- A channel number means different things on different types: ch2 is the TMP112
+  temperature on a machine-probe, and does not exist on a dallas.
+- With the type stored, the firmware can tell when a rule was written for a different
+  type than the slot now expects. Without it, such a rule would silently watch something
+  else after a `sensorN_type` change.
+- The Manager-App can show a rule ("s1 machine-probe temperature-aux") without also
+  reading `sensorN_type`.
+- `AlarmEvent.sensor_type` is taken straight from the rule.
+- The cost is 16 B of config (1 B per rule).
+
+For slot 0, `sensor_type` must be 1 (motherboard).
+
+**Validation.** `app_alarm_rule_valid(slot, ch, sensor_type)` checks the channel against
+the table of `sensor_type`:
+  - Slot 0 needs `sensor_type = 1`; slots 1..4 need a 1-Wire type.
+  - A rule whose `sensor_type` differs from the slot's current `sensorN_type` is
+    **stale**:
+    - it is kept (not cleared) but is inert;
+    - it counts as a sanitized/invalid rule in `app_alarm_rules_reload_from_config()`, so
+      a SetParam that changes `sensorN_type` under existing rules reports a fault instead
+      of a silent ACK;
+    - the shell lists it as `stale`, and the Manager-App flags it for the user to fix or
+      delete.
+  - A rule on a 1-Wire slot whose `sensorN_type` is not set is stale in the same way.
+    The order is: provision the type, then the rules.
   - A motherboard rule is accepted even while the channel's `cap` is off, as today's
     "provision before enable". It stays inert until the capability is on.
   - `kind: none` (orientation) and `alarm_only_watchdog` (battery) channels are not rule
@@ -219,9 +269,29 @@ While a slot is in mismatch:
   This replaces the hand-written `m_nodata_tab`: motherboard temperature, humidity,
   pressure and battery, and the primary temperature of each 1-Wire type.
 - The low-battery watchdog becomes the evaluator of motherboard ch20.
-- Shell: `alarm set <rule> <slot> <channel-name|number> ...` (e.g.
-  `alarm set 0 mb hall-left-count ...`, `alarm set 1 s2 temperature-aux ...`).
+- Shell: `alarm set <rule> <slot> <channel-name|number> ...`. The shell fills
+  `sensor_type` from the slot's current type.
   `sensor types` lists the tables.
+
+**Examples:**
+
+| rule | slot | channel | type | meaning |
+|---|---|---|---|---|
+| 0 | 0 | 0 | 1 | on-board SHT4x temperature outside 2–8 °C |
+| 1 | 0 | 6 | 1 | hall left: more than 100 pulses per interval |
+| 2 | 0 | 9 | 1 | input A: edge 0→1 |
+| 3 | 1 | 0 | 3 | s1 machine-probe: SHT temperature |
+| 4 | 1 | 2 | 3 | s1 machine-probe: TMP112 temperature (second temperature on the same probe) |
+| 5 | 2 | 0 | 2 | s2 dallas: temperature |
+
+Shell equivalents:
+
+```
+alarm set 0 mb temperature lo 2 hi 8 dwell 60
+alarm set 1 mb hall-left-count hi 100 dwell 0
+alarm set 2 mb input-a-state from 0 to 1 dwell 5
+alarm set 4 s1 temperature-aux lo -10 hi 60 dwell 30
+```
 
 ## History per channel (D3)
 
@@ -267,15 +337,19 @@ History becomes selectable per `(slot, channel)`. It replaces the fixed
 
 | Message | Change |
 |---|---|
-| `AlarmEvent` | `source = 1` is now the slot (0 = motherboard, 1..4 = s1..s4); `quantity = 6` → `reserved 6`; new `uint32 channel = 10`, `optional uint32 sensor_type = 11` |
+| `AlarmEvent` | field **renames** (numbers kept): `source = 1` → **`slot = 1`** (0 = motherboard, 1..4 = s1..s4), `slot = 7` → **`rule = 7`** (rule index, `0xFF` = watchdog); `quantity = 6` → `reserved 6`; new `uint32 channel = 10`, `optional uint32 sensor_type = 11` |
 | `AlarmEvent.Type` | new `TYPE_SENSOR_MISMATCH = 5` (value = detected type id) |
-| `Info.AlarmStatus` | `source = 1` = slot; `quantity = 2` → `reserved 2`; new `uint32 channel = 4`, `optional uint32 sensor_type = 5` |
+| `Info.AlarmStatus` | `source = 1` → **`slot = 1`**; `quantity = 2` → `reserved 2`; new `uint32 channel = 4`, `optional uint32 sensor_type = 5` |
 | `Info` | per-slot state (ok / absent / replaced / mismatch) |
 | `SensorReading.type`, `ConfigDump.w1_slot_type` | new type ids (2 dallas, 3 machine-probe) |
 | `SensorReading` | values per channel (D2); mismatch/absent = all values absent |
 | `HistoryFrame` | new `channels = 10`, `w1_types = 11` |
-| config | `alarm_N[1..2]` = slot/channel; new `sensorN_type`, `history_channels`; `history_sensors` removed |
+| config | `alarm_N` 17 → **18 B** (slot, channel, sensor_type); new `sensorN_type`, `history_channels`; `history_sensors` removed |
 
+- **Why the renames:** the old `AlarmEvent` had `source` (where) and `slot` (which rule),
+  so "slot" would have meant two different things. Renaming keeps every field number,
+  so the bytes are unchanged. Only the decoder's output keys change (`source` → `slot`,
+  `slot` → `rule`), which is fine in a non-migratable release.
 - In alarms, `sensor_type` is sent **only for slots 1..4**. Slot 0 is always
   `motherboard`, so on-board events stay as small as today. This matters for the 11 B
   tier (US915 DR0 / AU915 DR2) found in the uplink split audit.
@@ -307,8 +381,9 @@ Recommendation: **(b)**. This is D2, still open.
 3. **Expected slot type + mismatch.** `sensorN_type`, new type ids, rebind by type,
    `TYPE_SENSOR_MISMATCH`, null values in telemetry, Info slot state.
 4. **Rules + alarm wire.** Blob `[1..2]` = slot/channel, source enum removed,
-   validity/kind/scale/liveness/watchdogs from the registry, `AlarmEvent` /
-   `AlarmStatus` changes, `ttn.js`, shell, ATS.
+   18 B blob with `sensor_type`, stale-rule detection, validity/kind/scale/liveness/
+   watchdogs from the registry, `AlarmEvent` / `AlarmStatus` changes (incl. the
+   `slot` / `rule` renames), `ttn.js`, shell, ATS.
 5. **Telemetry `SensorReading` per channel** (D2).
 6. **History per channel.** `history_channels`, derived layout, `HistoryFrame`
    `channels` / `w1_types`, decoder.
@@ -327,6 +402,9 @@ Each step lands with its own tests, and `doc/` updates are the last commit of ea
   - slot rule rejected without `sensorN_type`,
   - channel out of range, `kind: none` or `alarm_only_watchdog`,
   - momentary edge-only rule from the descriptor,
+  - 18 B blob pack/unpack round-trip,
+  - a `sensorN_type` change turns the slot's rules stale (inert, reported by reload),
+  - slot 0 with `sensor_type != 1` rejected,
   - a motherboard rule on a cap-off channel is accepted but inert.
 - `tests/alarm_eval`:
   - two temperature channels on one machine-probe slot fire independently,
@@ -366,4 +444,6 @@ Each step lands with its own tests, and `doc/` updates are the last commit of ea
 | D3 | History per channel | **Decided:** yes, `history_channels` (see *History per channel*) |
 | D4 | Mismatch reporting | **Decided:** `TYPE_SENSOR_MISMATCH` alarm on the slot + values `null` in telemetry (and history) |
 | D5 | Where the Manager-App gets the registry | **Decided:** reads `app_w1_slots.yaml` directly |
+| D7 | Alarm rule identity | **Decided:** `(rule, slot, channel)`; `AlarmEvent` fields renamed `source` → `slot`, `slot` → `rule` (numbers kept) |
+| D8 | Store the sensor type in the rule | **Decided:** yes, blob 17 → 18 B; a rule with a type that differs from `sensorN_type` is stale (inert, reported) |
 | D6 | Max channels per type | **Decided:** 10 per 1-Wire type; the motherboard has its own limit of 32 (21 used), because it now carries every on-board sensor |
