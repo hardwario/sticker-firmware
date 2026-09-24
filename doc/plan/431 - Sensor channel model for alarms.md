@@ -152,48 +152,90 @@ test; plus the `tests/sensor_types` native ztest suite for the generated lookups
 
 ## Firmware changes
 
-### Readings → channels
+### Readings → channels (step 2, done)
 
 `struct app_w1_slot_reading` and the ad-hoc fields in `struct app_sensor_data`
-(temperature, humidity, pressure, illuminance, hall/input/motion counts and states,
-orientation, voltage) become channel vectors. The arrays are sized from the generated
-counts, not from the limits:
+(temperature, humidity, pressure, altitude, illuminance, hall/input/motion counts and
+states, orientation, voltage) are replaced by channel vectors (`app_sensor.h`):
 
 ```c
+union app_sensor_value { float f; uint32_t u; };   /* u for counter channels */
+
 struct app_sensor_mb {                     /* slot 0 */
 	uint32_t valid;                        /* bit ch = value present */
-	float v[APP_SENSOR_CH_MOTHERBOARD_COUNT]; /* 21 today; physical units, state = 0/1 */
-	uint32_t count[APP_SENSOR_MB_CNT_COUNT]; /* exact counters, indexed via descriptor */
+	union app_sensor_value v[APP_SENSOR_CH_MOTHERBOARD_COUNT]; /* 22 */
 };
 
 struct app_sensor_w1 {                     /* slots 1..4 */
-	uint8_t type;                          /* configured type id, 0 = none */
-	uint16_t valid;
-	float v[APP_SENSOR_W1_CH_MAX];         /* 10 */
+	uint8_t type;                          /* registry type id, 0 = none */
+	bool present;
+	uint32_t valid;
+	union app_sensor_value v[APP_SENSOR_W1_CH_MAX]; /* 10 */
 };
+
+struct app_sensor_data { struct app_sensor_mb mb; struct app_sensor_w1 w1[4]; };
 ```
 
-RAM: 21×4 + 6×4 + 4×(10×4 + 4) ≈ 290 B, against today's `app_sensor_data`
-≈ 190 B. The debug build is at ~99 % RAM, so the budget needs checking in step 2.
+**Channel values**
+- A counter channel (`counter: true`) uses `.u`, an exact `uint32_t`; a float would
+  round counts above 2^24.
+- Every other channel uses `.f` in the channel's unit. It is NaN when absent, and the
+  NaN always matches a cleared `valid` bit, so the existing `isnan()` checks keep working.
+- State channels are `0.0f` / `1.0f`.
+- Motherboard accessors: `APP_SENSOR_MB_F(d, NAME)` / `APP_SENSOR_MB_U(d, NAME)`.
 
-- Drivers fill channels by constant:
-  - `machine_probe_read()` also reads the TMP112 into ch2;
-  - the MPL3115A2 read fills motherboard ch4;
-  - hall, input, PIR and accel handlers write their state/count channels.
+**`app_sensor_channels.c`** holds the helpers, separate from the sampling loop so the
+host tests can link them:
+- `app_sensor_put_f()` stores a value and applies the registry range. Out of range or
+  non-finite → NaN.
+- `app_sensor_w1_clear()` resets a slot vector.
+- `app_sensor_w1_f()` is transitional: it reads a 1-Wire slot by its **machine-probe**
+  channel number for the readers that are still quantity-based (alarm rules, history,
+  ATS). Steps 4 and 6 remove it.
+  - A dallas slot answers only ch 0, the shared temperature;
+    `BUILD_ASSERT(DALLAS_TEMPERATURE == MACHINE_PROBE_TEMPERATURE)`.
+  - Every other channel reads NaN.
 
-  A sub-sensor that fails to respond leaves its bit clear, like today's NaN. A value
-  outside `range` is cleared too; this generalises the DS18B20 range check.
-- `read_threshold_value()`, `read_poll_state()` and `read_counter()` collapse into one
-  `app_sensor_get(slot, ch, &value)`. Counters (`counter: true`) are read from the exact
-  `uint32_t` store.
-- `app_alarm_event(source, active)` for discrete edges becomes
-  `app_alarm_event(ch, active)` on slot 0.
-- Callers of the old fields need to move to the channel view:
-  - `app_compose.c`,
-  - `app_ats.c` (sensor names become `<channel name>` / `sN-<channel name>`),
-  - `app_history.c`,
-  - the `sensor` / `w1` shell,
-  - `app_report.c`.
+**Unit change: pressure is now hPa everywhere inside the firmware.**
+- The MPL3115A2 reports kPa; `app_sensor_sample()` converts once when it fills the
+  channel.
+- The compose (×100 → ×10), alarm (×10 dropped) and history (×100 → ×10) conversions
+  were adjusted, so the wire values are unchanged.
+
+**New readings**
+- The machine-probe TMP112 is read into `temperature-aux` (ch 2).
+  - After 3 consecutive failures (older probe revisions have no TMP112) it is skipped
+    for that probe until the next rebind. This saves ~60 ms and an error log per sample.
+  - It is not on the wire yet: telemetry needs step 5, alarms step 4.
+- The MPL3115A2 temperature fills motherboard `temperature-baro` (ch 4).
+- Altitude, which telemetry already carries, was missing from the registry and was
+  appended as motherboard ch 21.
+
+**Ranges.** The registry ranges were aligned with the drivers' own plausibility gates:
+- SHT4x / machine-probe SHT: −45…130 °C;
+- battery: 0–6 V;
+- pressure: 0–2000 hPa;
+- altitude: unbounded, as before.
+
+So `app_sensor_put_f()` never drops a value that passed before.
+
+**Readers moved to the channel view:** `app_alarm.c`, `app_compose.c`, `app_history.c`
+(offsets into the channel vectors), `app_cmd.c`, the `w1` shell and `app_ats.c`.
+
+**ATS keeps its names and values.** The factory tester uses them: `pressure` stays kPa
+and the "Pa" label in `tester sensors print` is unchanged, even though the label is
+wrong. Renaming the ATS sensors to channel names is left for a later step.
+
+**Sizes vs `v1.5.0`:**
+
+| build | flash | RAM |
+|---|---|---|
+| release | +2 448 B (165 840 B, 77.86 %) | +128 B |
+| debug | +1 536 B (223 692 B, 91.02 %) | +64 B (94.43 %) |
+
+The flash growth is the descriptor tables (now referenced) and the TMP112 read.
+`app_compose.c` copies `app_sensor_data` onto the `m_work_q` stack as before; the struct
+grew by ~100 B.
 
 ### Expected type per 1-Wire slot
 
@@ -492,9 +534,10 @@ of every step.
    - No behaviour change: nothing references the tables yet, so release and debug
      images are byte-identical in size to `v1.5.0` (release 163 392 B flash /
      52 812 B RAM, debug 222 156 B / 61 820 B).
-2. **Readings → channels.** `struct app_sensor_mb` / `app_sensor_w1`, drivers fill
-   channels, the TMP112 and MPL3115A2 temperatures become readable, RAM check. Telemetry
-   and history are still encoded from the channel view into their current formats.
+2. ✅ **Readings → channels.** Channel vectors, `app_sensor_channels.c`, hPa pressure,
+   TMP112 + MPL3115A2 temperatures, altitude channel, all readers moved. Telemetry,
+   history and alarm wire formats are unchanged. Tests: `alarm_eval` (+4: machine-probe
+   / dallas slot channels, hPa pressure) and `sensor_types` (+4: channel helpers).
 3. **Expected slot type + mismatch.** `sensorN_type`, new type ids, rebind by type,
    `TYPE_SENSOR_MISMATCH`, null values in telemetry, Info slot state.
 4. **Rules + alarm wire.** Blob `[1..2]` = slot/channel, source enum removed,
