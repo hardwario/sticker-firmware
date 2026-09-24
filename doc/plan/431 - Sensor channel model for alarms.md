@@ -81,7 +81,9 @@ and `AlarmEvent.value`. Today the two differ for:
 - humidity: telemetry ×2, alarm ×100 → **×2** everywhere,
 - voltage: telemetry V×50, alarm ×100, #396 mV → **mV (×1000)** everywhere.
 
-History keeps its own fixed-width encoding per channel (`history: [enc, scale]`).
+History keeps its own fixed-width encoding per channel (`history: [enc, scale]`,
+enc = `u8 | i16 | u16 | i32 | u32`). `i32` is new, for high-resolution channels whose
+`range × scale` overflows `i16`.
 
 **No fixed number of types.**
 
@@ -119,7 +121,10 @@ CI (pytest, same pattern as the configen sync test):
 - ids and channels are append-only against the previous committed copy;
 - channel limits (32 motherboard / 10 per 1-Wire type), unique names per type;
 - every `cap` names an existing `app_config.yml` capability;
-- every `history`-capable channel has an encoding that fits its `range`.
+- `range × scale` fits the channel's `wire` type and its `history` encoding, with the
+  sentinel value kept free. For example, `range [-200, 850]` at ×1000 needs `i32` in
+  history, and CI rejects `i16`;
+- every channel has a `unit`, and a `range` if it is `kind: threshold`.
 
 ## Firmware changes
 
@@ -194,8 +199,8 @@ While a slot is in mismatch:
   - it comes from the same watchdog path as `TYPE_NO_DATA`, and the no-data watchdog for
     that slot is suppressed while mismatch is active, so there is one alarm, not two.
 - **Rules:** all rules on the slot are inert, because none of its channels are valid.
-- **Telemetry:** the slot's `SensorReading` is still sent with `type` = the expected type,
-  and every value is absent, so the decoder emits `null` for each channel.
+- **Telemetry:** the slot's `SensorReading` is still sent with `type` = the expected type
+  and `valid = 0`, so the decoder emits `null` for each channel.
 - **History:** the slot's recorded channels store the absent sentinel, and the decoder
   emits `null`.
 - **Info:** a per-slot state (ok / absent / replaced / mismatch) next to the slot type.
@@ -343,7 +348,7 @@ History becomes selectable per `(slot, channel)`. It replaces the fixed
 | `Info.AlarmStatus` | `source = 1` → **`slot = 1`**; `quantity = 2` → `reserved 2`; new `uint32 channel = 4`, `optional uint32 sensor_type = 5` |
 | `Info` | per-slot state (ok / absent / replaced / mismatch) |
 | `SensorReading.type`, `ConfigDump.w1_slot_type` | new type ids (2 dallas, 3 machine-probe) |
-| `SensorReading` | values per channel (D2); mismatch/absent = all values absent |
+| `SensorReading` | `reserved 3 to 10`; new `valid = 11` + `repeated sint32 value = 12 [packed]` (D2 = c); mismatch/absent = `valid = 0` |
 | `HistoryFrame` | new `channels = 10`, `w1_types = 11` |
 | config | `alarm_N` 17 → **18 B** (slot, channel, sensor_type); new `sensorN_type`, `history_channels`; `history_sensors` removed |
 
@@ -357,20 +362,97 @@ History becomes selectable per `(slot, channel)`. It replaces the fixed
 - The decoder stays stateless (#425 constraint): everything it needs is in the frame
   plus its generated table.
 
-**Telemetry.** `SensorReading` (field 27) already carries `slot` and `type`, but it has
-fixed per-quantity fields (3..10). There are two options:
+### Telemetry `SensorReading` (D2 = c)
 
-- **(a)** Keep the typed fields and add fields per new channel. This is simple, but each
-  new sensor edits the proto again.
-- **(b)** `repeated sint32 value = 11 [packed]`, indexed by channel and scaled by the
-  `wire` scale, with `INT32_MIN` meaning absent (`null` in the decoder). This is fully
-  generic and uses the same table as alarms and history.
+`SensorReading` (field 27) keeps `slot = 1` and `type = 2`. The fixed per-quantity fields
+3..10 (temperature, humidity, flags, illuminance, magnetic_field, accel_x/y/z) are
+replaced by a valid mask plus packed values:
 
-Recommendation: **(b)**. This is D2, still open.
+```proto
+message SensorReading {
+    reserved 3 to 10;                         // typed fields, replaced by the channel model (#430)
+    uint32 slot            = 1;               // 1..4 = s1..s4
+    uint32 type            = 2;               // sensor type id (app_w1_slots.yaml)
+    uint32 valid           = 11;              // bit ch = channel ch has a value
+    repeated sint32 value  = 12 [packed = true]; // values of the set bits only, ascending ch,
+                                              // each round(phys * wire.scale)
+}
+```
 
-- The motherboard's Telemetry groups (climate, hall, inputs, …) can keep their typed
-  fields for now, because the composer packs them by group priority.
-- Moving them to channel values too is a follow-up once D2 is settled.
+- **Absent costs nothing.** A channel without a value (sub-sensor not responding, cap
+  off, out of range) has its bit clear and no entry in `value`.
+- **Mismatch or absent probe:** `valid = 0` and no values. The decoder emits `null` for
+  every channel of `type`.
+- **Signedness:** all values are `sint32` (zigzag) on the wire, whatever the channel's
+  `wire` type. The decoder uses `wire` only for the scale and the range check.
+
+Options considered:
+
+- **(a)** Typed fields, plus a new field per new channel. This is the smallest on the
+  wire, but every sensor edits the proto and the decoder by hand. It also cannot carry a
+  per-channel scale (below).
+- **(b)** `repeated value` indexed by channel with an `INT32_MIN` "absent" sentinel. It
+  is generic, but the sentinel costs a 5 B varint per absent value, so a mismatched
+  machine-probe would send ~45 B of nulls. That is not usable at the 11 B tier.
+- **(c)** Valid mask + only the present values. **Chosen.**
+
+Approximate encoded size of one `SensorReading` (typical values: 23.45 °C, 45 %RH,
+300 lx, ~9.81 m/s²):
+
+| Case | (a) typed | (b) sentinel | (c) mask |
+|---|---|---|---|
+| dallas, temperature | ~9 B | ~10 B | ~12 B |
+| machine-probe, all 9 channels | ~30 B | ~24 B | ~27 B |
+| machine-probe, TMP112 missing | ~27 B | ~28 B | ~24 B |
+| slot in mismatch | ~6 B | ~51 B | ~8 B |
+| new sensor type | proto + decoder change | YAML only | YAML only |
+
+The motherboard's Telemetry groups (climate, hall, inputs, …) keep their typed fields in
+this release, because the composer packs them by group priority. Moving them to the same
+`valid` + `value` shape (one group per channel block) is a follow-up.
+
+### Units and scale per channel
+
+The unit and resolution are defined **per channel in the YAML**, not per quantity. A
+sensor that is atypical just declares a different `unit` / `scale`. For example:
+
+```yaml
+# high-resolution thermometer, 0.001 degC
+- {ch: 0, name: temperature, quantity: temperature, unit: degC, kind: threshold,
+   wire: [sint32, 1000], history: [i32, 1000], range: [-200.0, 850.0]}
+# sensor reporting in kelvin
+- {ch: 0, name: temperature, quantity: temperature, unit: K, kind: threshold,
+   wire: [uint32, 100], history: [u16, 100], range: [0.0, 600.0]}
+```
+
+- **Firmware:** keeps the value in the channel's physical unit and puts
+  `round(value × scale)` on the wire. Alarm `lo` / `hi` are in the channel's unit (K in
+  the second example). The Manager-App shows the unit from the YAML.
+- **Decoder:** divides by the channel's scale and **includes the unit** in its output:
+  ```json
+  {"slot": 1, "type": "machine-probe",
+   "values": {"temperature": 23.45, "temperature-aux": null},
+   "units":  {"temperature": "degC", "temperature-aux": "degC"}}
+  ```
+  The same quantity can now come in different units, so a bare number would be
+  ambiguous.
+- **Convention:** drivers convert to the **canonical unit of the quantity** unless there
+  is a reason not to:
+
+  | quantity | canonical unit |
+  |---|---|
+  | temperature | degC |
+  | humidity | %RH |
+  | pressure | hPa |
+  | voltage | V |
+  | illuminance | lx |
+  | magnetic_field | mT |
+  | acceleration | m/s2 |
+
+  Extra resolution is a matter of `scale`, not of the unit. A non-canonical unit (like K)
+  is allowed, but the Manager-App then cannot overlay that channel with other
+  temperatures without converting.
+- **Cost of resolution:** 23.456 °C at ×1000 is a 3 B varint instead of 2 B at ×100.
 
 ## Delivery (PR sequence)
 
@@ -385,7 +467,8 @@ Recommendation: **(b)**. This is D2, still open.
    18 B blob with `sensor_type`, stale-rule detection, validity/kind/scale/liveness/
    watchdogs from the registry, `AlarmEvent` / `AlarmStatus` changes (incl. the
    `slot` / `rule` renames), `ttn.js`, shell, ATS.
-5. **Telemetry `SensorReading` per channel** (D2).
+5. **Telemetry `SensorReading` per channel** (D2 = c). `valid` + packed values, decoder
+   output with units, `i32` history encoding.
 6. **History per channel.** `history_channels`, derived layout, `HistoryFrame`
    `channels` / `w1_types`, decoder.
 
@@ -417,7 +500,9 @@ Each step lands with its own tests, and `doc/` updates are the last commit of ea
 - `tests/compose`, `tests/cmd`:
   - `AlarmEvent` / `AlarmStatus` with and without `sensor_type`,
   - mismatched slot encoded with all values absent,
-  - byte budget at the 11 B tier.
+  - byte budget at the 11 B tier,
+  - `SensorReading` with a partial `valid` mask, `valid = 0` for mismatch, and a ×1000
+    channel.
 - `tests/history`:
   - layout from `history_channels` + slot types,
   - cap-off entry rejected,
@@ -427,6 +512,7 @@ Each step lands with its own tests, and `doc/` updates are the last commit of ea
 - `ttn.test.js`:
   - decode of every generated `(type, channel)` in telemetry, alarms and history,
   - `null` for absent values,
+  - units in the output, including a non-canonical unit (K),
   - an unknown type or channel falls back to `"t<type>c<ch>"`.
 - pytest: generator in sync, append-only numbering, channel limits, `cap` names exist.
 - HIL:
@@ -441,7 +527,7 @@ Each step lands with its own tests, and `doc/` updates are the last commit of ea
 | # | Question | Decision |
 |---|---|---|
 | D1 | Type id numbering | **Decided:** new ids, `1 = motherboard`, `2 = dallas`, `3 = machine-probe`; all on-board sources (hall, input, PIR, accel, battery) are motherboard channels, slot 0 |
-| D2 | Telemetry `SensorReading`: typed fields (a) or generic `repeated value` (b) | *Proposal:* (b) |
+| D2 | Telemetry `SensorReading` encoding | **Decided:** (c) valid mask + packed present values; unit and scale per channel in the YAML, decoder outputs units, `i32` history encoding, CI range check |
 | D3 | History per channel | **Decided:** yes, `history_channels` (see *History per channel*) |
 | D4 | Mismatch reporting | **Decided:** `TYPE_SENSOR_MISMATCH` alarm on the slot + values `null` in telemetry (and history) |
 | D5 | Where the Manager-App gets the registry | **Decided:** reads `app_w1_slots.yaml` directly |

@@ -23,15 +23,18 @@
 #   name      stable identifier (shell, ATS, decoder output key)
 #   label     human-readable name (Manager-App UI)
 #   quantity  physical quantity (UI grouping / icon only — NOT a rule key)
-#   unit      physical unit of the decoded value
+#   unit      physical unit of the value (FW, alarm lo/hi and decoder output). Prefer the
+#             quantity's canonical unit: degC, %RH, hPa, V, lx, mT, m/s2. Extra resolution
+#             is a matter of `scale`, not of the unit
 #   kind      threshold | state | rate | none   (none = not an alarm target)
 #   momentary true for pulse channels that only assert (state rules edge-only)
 #   counter   true = raw uint32 counter (rate rules / history use the exact integer)
 #   cap       app_config capability that enables the channel (absent = always on)
 #   wire      [type, scale]: value on the wire = round(phys * scale), type sint32|uint32;
-#             shared by telemetry and AlarmEvent.value
-#   history   [enc, scale]: fixed-width history encoding i16|u8|u16|u32
-#             (INT16_MAX / all-ones = absent); omitted = not recordable
+#             shared by telemetry (SensorReading.value, zigzag sint32) and AlarmEvent.value
+#   history   [enc, scale]: fixed-width history encoding u8|i16|u16|i32|u32
+#             (INT16_MAX / INT32_MAX / all-ones = absent); omitted = not recordable
+#             CI: range * scale must fit both `wire` and `history` (sentinel kept free)
 #   range     [min, max] valid physical range; a reading outside is absent
 #   liveness  true = channel watched by the no-data watchdog (mirrors today's m_nodata_tab)
 #   alarm_only_watchdog  true = evaluated by a built-in watchdog, not a rule target
