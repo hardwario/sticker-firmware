@@ -582,6 +582,7 @@ Found by the ProXimos Nodes test (Hub CLI + Portal against a STICKER, 2026-09-23
 | `clock_sync` (empty, LoRaWAN) | Answered by the Info that follows the DeviceTimeAns, but that Info had **seq 0**, so the Hub could not pair it with the request | The Info carries the **command's `seq`** (every page of it, when paged). The boot Info keeps seq 0. A newer `clock_sync` before the time lands takes over the seq; no answer at all means the network did not answer `DeviceTimeReq` |
 | `force_send`, `sample` (LoRaWAN) | The uplink went through the fleet pre-send jitter (up to 10 s). A request that arrived while a jittered report was pending **collapsed into it** (one uplink instead of two) | The uplink leaves **at once** (~1–3 s incl. the TX); a pending jittered report is folded into this send, so the host gets one fresh uplink right after its command. Periodic reports, alarms and the link-ready kick keep the jitter |
 | `w1_scan` on an image without 1-Wire | `NOT_READY` (3), indistinguishable from a bus that is not ready (over LoRaWAN the detail is stripped) | `NOT_SUPPORTED` (7), like other commands not built into the image |
+| Any command that fails to decode (truncated, corrupted) | `BAD_REQUEST` with **seq 0**: the host could not pair the error with its request | `BAD_REQUEST` with the **request's `seq`** whenever field 1 is readable before the damage (0 otherwise) — #435 |
 
 No wire-format change: the answers are the same messages. A host that already pairs by `seq`
 now also pairs `clock_sync`.
@@ -595,6 +596,8 @@ Re-run with the downlinks sent from the Hub CLI (`proximosctl control.radio node
 answer paired on the Hub by its `seq`: `clock-sync` seq 45 → `Response{seq 45, info}` with the
 synced time; `force-send` seq 46 → extra fPort-2 uplink 1.16 s after the uplink that carried
 the downlink; `w1-scan` seq 47 → `Response{seq 47, error{code 7}}`.
+A malformed downlink (seq 126, one byte too many in a `set_param`) → `Response{seq 126,
+error{code 1 BAD_REQUEST}}`, paired on the Hub (before: seq 0).
 
 **Alarms after a reboot (checked, no change needed):** the alarm latches are plain RAM, so
 after any reboot (including `settings_save`) every condition that still holds activates
