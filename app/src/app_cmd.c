@@ -442,38 +442,70 @@ static const struct {
 	uint8_t tag;
 	uint8_t size;
 	bool nfc_only; /* only dumped over NFC (e.g. LoRaWAN keys) — never over LoRaWAN */
+	bool lrw_skip; /* left out of a LoRaWAN get_config (`dump_lrw: false`, e.g. the
+			* 1-Wire slot ROMs); an explicit get_param still returns it */
 } DUMP_FIELDS[] = {
 	// BEGIN GENERATED DUMP_FIELDS
-	{DUMP_SECTION_LORAWAN, 1, 2, false},     {DUMP_SECTION_LORAWAN, 15, 2, false},
-	{DUMP_SECTION_LORAWAN, 2, 2, false},     {DUMP_SECTION_LORAWAN, 3, 2, false},
-	{DUMP_SECTION_LORAWAN, 4, 2, false},     {DUMP_SECTION_LORAWAN, 5, 2, false},
-	{DUMP_SECTION_LORAWAN, 6, 10, false},    {DUMP_SECTION_LORAWAN, 7, 10, false},
-	{DUMP_SECTION_LORAWAN, 8, 18, true},     {DUMP_SECTION_LORAWAN, 9, 18, true},
-	{DUMP_SECTION_LORAWAN, 10, 6, false},    {DUMP_SECTION_LORAWAN, 11, 18, true},
-	{DUMP_SECTION_LORAWAN, 12, 18, true},    {DUMP_SECTION_LORAWAN, 16, 3, false},
-	{DUMP_SECTION_LORAWAN, 13, 3, false},    {DUMP_SECTION_LORAWAN, 14, 3, false},
-	{DUMP_SECTION_APPLICATION, 1, 2, false}, {DUMP_SECTION_APPLICATION, 2, 3, false},
-	{DUMP_SECTION_APPLICATION, 3, 4, false}, {DUMP_SECTION_APPLICATION, 4, 2, false},
-	{DUMP_SECTION_APPLICATION, 5, 6, false}, {DUMP_SECTION_APPLICATION, 6, 3, false},
-	{DUMP_SECTION_APPLICATION, 7, 2, false}, {DUMP_SECTION_SENSORS, 1, 2, false},
-	{DUMP_SECTION_SENSORS, 2, 2, false},     {DUMP_SECTION_SENSORS, 3, 2, false},
-	{DUMP_SECTION_SENSORS, 4, 2, false},     {DUMP_SECTION_SENSORS, 5, 2, false},
-	{DUMP_SECTION_SENSORS, 6, 2, false},     {DUMP_SECTION_SENSORS, 7, 2, false},
-	{DUMP_SECTION_SENSORS, 19, 3, false},    {DUMP_SECTION_SENSORS, 8, 2, false},
-	{DUMP_SECTION_SENSORS, 9, 2, false},     {DUMP_SECTION_SENSORS, 10, 2, false},
-	{DUMP_SECTION_SENSORS, 11, 10, false},   {DUMP_SECTION_SENSORS, 12, 10, false},
-	{DUMP_SECTION_SENSORS, 13, 10, false},   {DUMP_SECTION_SENSORS, 14, 10, false},
-	{DUMP_SECTION_SENSORS, 15, 2, false},    {DUMP_SECTION_SENSORS, 16, 3, false},
-	{DUMP_SECTION_SENSORS, 17, 3, false},    {DUMP_SECTION_SENSORS, 18, 3, false},
-	{DUMP_SECTION_ALARMS, 1, 3, false},      {DUMP_SECTION_ALARMS, 3, 19, false},
-	{DUMP_SECTION_ALARMS, 4, 19, false},     {DUMP_SECTION_ALARMS, 5, 19, false},
-	{DUMP_SECTION_ALARMS, 6, 19, false},     {DUMP_SECTION_ALARMS, 7, 19, false},
-	{DUMP_SECTION_ALARMS, 8, 19, false},     {DUMP_SECTION_ALARMS, 9, 19, false},
-	{DUMP_SECTION_ALARMS, 10, 19, false},    {DUMP_SECTION_ALARMS, 11, 19, false},
-	{DUMP_SECTION_ALARMS, 12, 19, false},    {DUMP_SECTION_ALARMS, 13, 19, false},
-	{DUMP_SECTION_ALARMS, 14, 19, false},    {DUMP_SECTION_ALARMS, 15, 19, false},
-	{DUMP_SECTION_ALARMS, 16, 20, false},    {DUMP_SECTION_ALARMS, 17, 20, false},
-	{DUMP_SECTION_ALARMS, 18, 20, false},    {DUMP_SECTION_ALARMS, 20, 3, false},
+	{DUMP_SECTION_LORAWAN, 1, 2, false, false},
+	{DUMP_SECTION_LORAWAN, 15, 2, false, false},
+	{DUMP_SECTION_LORAWAN, 2, 2, false, false},
+	{DUMP_SECTION_LORAWAN, 3, 2, false, false},
+	{DUMP_SECTION_LORAWAN, 4, 2, false, false},
+	{DUMP_SECTION_LORAWAN, 5, 2, false, false},
+	{DUMP_SECTION_LORAWAN, 6, 10, false, false},
+	{DUMP_SECTION_LORAWAN, 7, 10, false, false},
+	{DUMP_SECTION_LORAWAN, 8, 18, true, false},
+	{DUMP_SECTION_LORAWAN, 9, 18, true, false},
+	{DUMP_SECTION_LORAWAN, 10, 6, false, false},
+	{DUMP_SECTION_LORAWAN, 11, 18, true, false},
+	{DUMP_SECTION_LORAWAN, 12, 18, true, false},
+	{DUMP_SECTION_LORAWAN, 16, 3, false, false},
+	{DUMP_SECTION_LORAWAN, 13, 3, false, false},
+	{DUMP_SECTION_LORAWAN, 14, 3, false, false},
+	{DUMP_SECTION_APPLICATION, 1, 2, false, false},
+	{DUMP_SECTION_APPLICATION, 2, 3, false, false},
+	{DUMP_SECTION_APPLICATION, 3, 4, false, false},
+	{DUMP_SECTION_APPLICATION, 4, 2, false, false},
+	{DUMP_SECTION_APPLICATION, 5, 6, false, false},
+	{DUMP_SECTION_APPLICATION, 6, 3, false, false},
+	{DUMP_SECTION_APPLICATION, 7, 2, false, false},
+	{DUMP_SECTION_SENSORS, 1, 2, false, false},
+	{DUMP_SECTION_SENSORS, 2, 2, false, false},
+	{DUMP_SECTION_SENSORS, 3, 2, false, false},
+	{DUMP_SECTION_SENSORS, 4, 2, false, false},
+	{DUMP_SECTION_SENSORS, 5, 2, false, false},
+	{DUMP_SECTION_SENSORS, 6, 2, false, false},
+	{DUMP_SECTION_SENSORS, 7, 2, false, false},
+	{DUMP_SECTION_SENSORS, 19, 3, false, false},
+	{DUMP_SECTION_SENSORS, 8, 2, false, false},
+	{DUMP_SECTION_SENSORS, 9, 2, false, false},
+	{DUMP_SECTION_SENSORS, 10, 2, false, false},
+	{DUMP_SECTION_SENSORS, 11, 10, false, true},
+	{DUMP_SECTION_SENSORS, 12, 10, false, true},
+	{DUMP_SECTION_SENSORS, 13, 10, false, true},
+	{DUMP_SECTION_SENSORS, 14, 10, false, true},
+	{DUMP_SECTION_SENSORS, 15, 2, false, false},
+	{DUMP_SECTION_SENSORS, 16, 3, false, false},
+	{DUMP_SECTION_SENSORS, 17, 3, false, false},
+	{DUMP_SECTION_SENSORS, 18, 3, false, false},
+	{DUMP_SECTION_ALARMS, 1, 3, false, false},
+	{DUMP_SECTION_ALARMS, 3, 19, false, false},
+	{DUMP_SECTION_ALARMS, 4, 19, false, false},
+	{DUMP_SECTION_ALARMS, 5, 19, false, false},
+	{DUMP_SECTION_ALARMS, 6, 19, false, false},
+	{DUMP_SECTION_ALARMS, 7, 19, false, false},
+	{DUMP_SECTION_ALARMS, 8, 19, false, false},
+	{DUMP_SECTION_ALARMS, 9, 19, false, false},
+	{DUMP_SECTION_ALARMS, 10, 19, false, false},
+	{DUMP_SECTION_ALARMS, 11, 19, false, false},
+	{DUMP_SECTION_ALARMS, 12, 19, false, false},
+	{DUMP_SECTION_ALARMS, 13, 19, false, false},
+	{DUMP_SECTION_ALARMS, 14, 19, false, false},
+	{DUMP_SECTION_ALARMS, 15, 19, false, false},
+	{DUMP_SECTION_ALARMS, 16, 20, false, false},
+	{DUMP_SECTION_ALARMS, 17, 20, false, false},
+	{DUMP_SECTION_ALARMS, 18, 20, false, false},
+	{DUMP_SECTION_ALARMS, 20, 3, false, false},
 	// END GENERATED DUMP_FIELDS
 };
 
@@ -532,6 +564,12 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 	uint32_t cur_page = 0, used = 0;
 	for (size_t i = 0; i < ARRAY_SIZE(DUMP_FIELDS); i++) {
 		if (DUMP_FIELDS[i].nfc_only && !allow_nfc_only) {
+			continue;
+		}
+		/* `dump_lrw: false` fields (the 1-Wire slot ROMs) only cost pages in a
+		 * LoRaWAN dump — the network has no use for them; get_param still reads
+		 * them on request, NFC/shell/vendor dumps keep them. */
+		if (DUMP_FIELDS[i].lrw_skip && tp == APP_CMD_TRANSPORT_LRW) {
 			continue;
 		}
 		/* Empty (all-zero) alarm slots are omitted by app_config_fill_alarms(),

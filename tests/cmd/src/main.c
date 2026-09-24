@@ -1747,6 +1747,70 @@ ZTEST(cmd, test_get_config_streams_all_pages_over_lrw)
 	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "no NFC stream");
 }
 
+/* The 1-Wire slot ROMs (sensors 11..14, `dump_lrw: false`) are left out of a
+ * LoRaWAN GetConfig — they only cost answer pages there — but an NFC GetConfig
+ * and an explicit GetParam still return them. */
+static bool rom_in_dump(const Response *r)
+{
+	const AppConfigMessage_Sensors *s = &r->body.config_dump.sensors;
+
+	return s->has_sensor1_rom || s->has_sensor2_rom || s->has_sensor3_rom || s->has_sensor4_rom;
+}
+
+ZTEST(cmd, test_get_config_skips_slot_roms_over_lrw)
+{
+	uint8_t in[16], out[256];
+	size_t in_len = unhex("08092a00", in, sizeof(in)); /* seq9 get_config{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	uint32_t count;
+	Response r;
+
+	reset_cfg();
+
+	/* LoRaWAN: no page of the stream carries a ROM. */
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 51, &out_len, &action),
+		      0, "handle");
+	r = decode_resp(out, out_len);
+	count = r.page_count ? r.page_count : 1;
+	zassert_false(rom_in_dump(&r), "ROM on LoRaWAN page 0");
+	for (uint32_t p = 1; p < count; p++) {
+		zassert_equal(app_cmd_stream_next(out, 51, &out_len), 0, "page %u", p);
+		r = decode_resp(out, out_len);
+		zassert_false(rom_in_dump(&r), "ROM on LoRaWAN page %u", p);
+		zassert_true(r.body.config_dump.has_sensors || r.body.config_dump.has_lorawan ||
+				     r.body.config_dump.has_application ||
+				     r.body.config_dump.has_alarms,
+			     "empty page %u", p);
+	}
+	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "stream must end");
+
+	/* NFC: the host pages itself; the ROMs are still there. */
+	bool nfc_rom = false;
+	uint32_t nfc_count = 1;
+
+	for (uint32_t p = 0; p < nfc_count; p++) {
+		/* seq9 get_config{page:p} */
+		const uint8_t cmd[] = {0x08, 0x09, 0x2a, 0x02, 0x08, (uint8_t)p};
+
+		zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, cmd, sizeof(cmd), out,
+					     sizeof(out), &out_len, &action),
+			      0, "NFC page %u", p);
+		r = decode_resp(out, out_len);
+		nfc_count = r.page_count ? r.page_count : 1;
+		nfc_rom |= rom_in_dump(&r);
+	}
+	zassert_true(nfc_rom, "NFC GetConfig must keep the ROMs");
+
+	/* LoRaWAN GetParam(sensors 11): an explicit request still reads it. */
+	in_len = unhex("08091a031a010b", in, sizeof(in)); /* seq9 get_param{sensors:[11]} */
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 51, &out_len, &action),
+		      0, "get_param");
+	r = decode_resp(out, out_len);
+	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
+	zassert_true(r.body.config_dump.sensors.has_sensor1_rom, "GetParam must return the ROM");
+}
+
 /* #425: a GetConfig over LoRaWAN keeps the fixed 30 B field pages at any DR, and
  * at the 11 B tier (US915 DR0, AU915/AS923 DR2) a paged ConfigDump cannot fit at
  * all (~13 B minimum), so the answer is a compact BUDGET_TOO_SMALL with the seq. */
