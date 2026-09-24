@@ -21,6 +21,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN | **Improved** — faster link-loss recovery (#424): link check on every report while `WARNING`, a TX-power/data-rate step-down ladder before the rejoin (a moved device regains its gateway on a lower DR without losing the session), and US915/AU915 no longer lose the configured sub-band after repeated failed joins. |
 | LoRaWAN / P2P | **New** — universal response paging (#425): every answer that does not fit one frame is split into self-contained pages numbered `page_index`/`page_count` in the `Response` envelope (and in `AlarmReport`), sent by the device on its own; decoders label them `pages: "i/N"`. |
 | LoRaWAN / NFC | **New** — `GetSettings` command (#428): the boot settings-info `ConfigDump` (§4) on request, with the command's `seq`, so a host can refresh the key operating settings without a full multi-page `GetConfig`. |
+| LoRaWAN | **Fix** — command answers from the ProXimos Nodes test (#432): the deferred `clock_sync` Info now carries the command's `seq`; `force_send` / `sample` leave at once (no fleet jitter, no silent merge into a pending report); `w1_scan` without 1-Wire answers `NOT_SUPPORTED`. |
 
 ---
 
@@ -566,6 +567,37 @@ Hub combined11 (proximos-v2 !91): the Portal "Refresh from device" button sends
 `GetSettings` and completes on the one-frame answer. A v1.5.0 image without this command
 answers `Error NOT_SUPPORTED` (code 7) with the `seq` kept, so the Hub's config is untouched.
 Not HW-tested: NFC, DR0 (34 B fits one frame there too) and the paged form (native tests only).
+
+
+---
+
+## 14. Command answers the Hub can pair (#432)
+
+Found by the ProXimos Nodes test (Hub CLI + Portal against a STICKER, 2026-09-23):
+
+| Command | Before | Now |
+|---|---|---|
+| `clock_sync` (empty, LoRaWAN) | Answered by the Info that follows the DeviceTimeAns, but that Info had **seq 0**, so the Hub could not pair it with the request | The Info carries the **command's `seq`** (every page of it, when paged). The boot Info keeps seq 0. A newer `clock_sync` before the time lands takes over the seq; no answer at all means the network did not answer `DeviceTimeReq` |
+| `force_send`, `sample` (LoRaWAN) | The uplink went through the fleet pre-send jitter (up to 10 s). A request that arrived while a jittered report was pending **collapsed into it** (one uplink instead of two) | The uplink leaves **at once** (~1–3 s incl. the TX); a pending jittered report is folded into this send, so the host gets one fresh uplink right after its command. Periodic reports, alarms and the link-ready kick keep the jitter |
+| `w1_scan` on an image without 1-Wire | `NOT_READY` (3), indistinguishable from a bus that is not ready (over LoRaWAN the detail is stripped) | `NOT_SUPPORTED` (7), like other commands not built into the image |
+
+No wire-format change: the answers are the same messages. A host that already pairs by `seq`
+now also pairs `clock_sync`.
+
+**HW verification (2026-09-24, EU868, ProXimos Hub ChirpStack v4):** ClockSync seq 25 → the
+DeviceTimeAns in the RX of the next uplink, then `Response{seq 25, info}` with the synced
+`unix_time` (`010819…`); `force_send` → uplink after 1.1–2.8 s, also right after a telemetry
+uplink; `send` + `force_send` back to back → one uplink after 1.2 s (before: only after the
+jitter); `w1_scan` on a debug image without 1-Wire → `Error{code 7}`.
+
+**Alarms after a reboot (checked, no change needed):** the alarm latches are plain RAM, so
+after any reboot (including `settings_save`) every condition that still holds activates
+again and is re-reported on fPort 3 once the device is joined: threshold rules on the first
+evaluation (after their dwell), level `state` rules after their dwell, low battery on the
+first valid measurement, no-data after 5 s of NaN. Edge/momentary/count rules are events and
+fire again only on a new event. A host detects the reboot from the rejoin, the boot `Info`
+(`reset_cause`, small `uptime`) or the first telemetry's `boot` flag, drops its open alarms
+and waits for them to activate again — the same way it already handles low battery.
 
 ---
 
