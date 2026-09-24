@@ -222,9 +222,10 @@ So `app_sensor_put_f()` never drops a value that passed before.
 **Readers moved to the channel view:** `app_alarm.c`, `app_compose.c`, `app_history.c`
 (offsets into the channel vectors), `app_cmd.c`, the `w1` shell and `app_ats.c`.
 
-**ATS keeps its names and values.** The factory tester uses them: `pressure` stays kPa
-and the "Pa" label in `tester sensors print` is unchanged, even though the label is
-wrong. Renaming the ATS sensors to channel names is left for a later step.
+**ATS keeps its names and values.** The factory tester uses them, so `pressure` stays
+kPa. The only visible change is that the pressure label in `tester sensors print` now
+reads "kPa" (it used to say "Pa", which was wrong). Renaming the ATS sensors to
+channel names is left for a later step.
 
 **Sizes vs `v1.5.0`:**
 

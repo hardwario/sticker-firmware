@@ -628,9 +628,8 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	print_float(shell, "voltage:", APP_SENSOR_MB_F(d, BATTERY_VOLTAGE), "V");
 	print_float(shell, "temperature:", APP_SENSOR_MB_F(d, TEMPERATURE), "C");
 	print_float(shell, "humidity:", APP_SENSOR_MB_F(d, HUMIDITY), "%");
-	/* kPa, as the tester has always read it (the channel itself is hPa). The
-	 * "Pa" label predates #430 and is kept so the tester output is unchanged. */
-	print_float(shell, "pressure:", APP_SENSOR_MB_F(d, PRESSURE) / 10.0f, "Pa");
+	/* kPa, as the tester has always read it (the channel itself is hPa). */
+	print_float(shell, "pressure:", APP_SENSOR_MB_F(d, PRESSURE) / 10.0f, "kPa");
 	print_float(shell, "altitude:", APP_SENSOR_MB_F(d, ALTITUDE), "m");
 	print_float(shell, "illuminance:", APP_SENSOR_MB_F(d, ILLUMINANCE), "lux");
 	/* orientation + raw axes are meaningful only with the accelerometer enabled;
