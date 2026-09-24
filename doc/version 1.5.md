@@ -22,6 +22,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P | **New** — universal response paging (#425): every answer that does not fit one frame is split into self-contained pages numbered `page_index`/`page_count` in the `Response` envelope (and in `AlarmReport`), sent by the device on its own; decoders label them `pages: "i/N"`. |
 | LoRaWAN / NFC | **New** — `GetSettings` command (#428): the boot settings-info `ConfigDump` (§4) on request, with the command's `seq`, so a host can refresh the key operating settings without a full multi-page `GetConfig`. |
 | LoRaWAN | **Fix** — command answers from the ProXimos Nodes test (#432): the deferred `clock_sync` Info now carries the command's `seq`; `force_send` / `sample` leave at once (no fleet jitter, no silent merge into a pending report); `w1_scan` without 1-Wire answers `NOT_SUPPORTED`. |
+| LoRaWAN | **Changed** — `GetConfig` over LoRaWAN leaves out the 1-Wire slot ROMs `sensor1_rom`..`sensor4_rom` (#433): 4 pages instead of 6 at EU868 DR0; NFC/shell GetConfig and an explicit `GetParam` still return them. |
 
 ---
 
@@ -541,7 +542,7 @@ Cost: release about +1.8 KB flash, +128 B RAM.
 ## 13. `GetSettings` — settings-info on request (#428)
 
 The boot settings-info (§4) tells the network the effective configuration once per boot.
-A host that wants to refresh it later had only `GetConfig`: 38 keys in 6+ pages (one page
+A host that wants to refresh it later had only `GetConfig`: 34 keys in 4+ pages over LoRaWAN (one page
 per alarm rule on top), ~13 s of SF12 airtime at EU868 DR0. `GetSettings` returns exactly
 the §4 content on request.
 
@@ -602,6 +603,32 @@ first valid measurement, no-data after 5 s of NaN. Edge/momentary/count rules ar
 fire again only on a new event. A host detects the reboot from the rejoin, the boot `Info`
 (`reset_cause`, small `uptime`) or the first telemetry's `boot` flag, drops its open alarms
 and waits for them to activate again — the same way it already handles low battery.
+
+
+---
+
+## 15. `GetConfig` over LoRaWAN without the slot ROMs (#433)
+
+The four 1-Wire slot ROMs (`sensors` 11..14, 8 B each) took two of the six pages of a
+LoRaWAN `GetConfig` at EU868 DR0, and the network has no use for them — the ProXimos
+Portal does not show them. They are now left out of a **LoRaWAN** `GetConfig`:
+
+| Read path | Slot ROMs |
+|---|---|
+| `GetConfig` over LoRaWAN | **left out** — 34 keys in 4 pages at DR0 (was 38 in 6) |
+| `GetConfig` over NFC / shell / vendor | included, as before |
+| `GetParam(sensors 11..14)` over any transport | included — an explicit request still reads them |
+| boot settings-info, `GetSettings` | never carried them |
+
+Mechanism: a new configen attribute `dump_lrw: false` keeps a field in `DUMP_FIELDS`
+but flags it `lrw_skip`; `app_cmd_handle_get_config()` skips such a field when the
+transport is LoRaWAN. A host that merges a complete `GetConfig` into its config copy
+therefore no longer sees `sensorN_rom` from LoRaWAN; a host that replaces its copy
+(ProXimos !91) drops them.
+
+**HW verification (2026-09-24, EU868, ProXimos Hub ChirpStack v4):** `get-config` from the
+Hub CLI → 4 pages at DR5 (was 6), no `sensor1_rom`..`sensor4_rom`, Hub config 34 keys;
+`GetParam(sensors [11])` seq 122 → `config_dump{sensors{sensor1_rom}}` in one frame.
 
 ---
 
