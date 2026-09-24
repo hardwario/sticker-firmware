@@ -174,6 +174,11 @@ const uint8_t *app_cmd_take_pending_vendor_secret_key(void);
  * or -EMSGSIZE if not even one Info field fits. */
 int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *more);
 
+/* Same as app_cmd_build_info(), but the Info (every page of it) carries `seq`:
+ * the deferred answer to a LoRaWAN ClockSync command, so the host can pair it
+ * with its request. app_cmd_build_info() is this with seq 0. */
+int app_cmd_build_info_seq(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len, bool *more);
+
 /* Build an unsolicited Response{ seq, error{ code=BUDGET_TOO_SMALL } } (no
  * detail, 5-7 B) into `out` — for a LoRaWAN answer that stopped because the DR
  * budget dropped (e.g. a history replay mid-stream, #409). Returns 0, -EINVAL,

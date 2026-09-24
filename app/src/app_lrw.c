@@ -310,6 +310,10 @@ static enum app_cmd_action m_post_cmd_action;
 /* #193: set from a command-handler thread, test-and-cleared in the LoRaMac
  * downlink callback (another context) — an atomic bit closes the lost-update race. */
 static atomic_t m_clock_sync_info_pending;
+/* seq of the ClockSync command the deferred Info answers (F13: without it the
+ * answer went out with seq 0 and the host could not pair it). Written by the
+ * command handler before the pending bit is set, read by the Info work item. */
+static atomic_t m_clock_sync_info_seq;
 /* #409 A5a / #425: boot announce frames not sent at join time — not even one
  * field fitted the budget, or settings-info waited for the Info pages to finish
  * (one page stream at a time). Sent from m_announce_work once a DR change makes
@@ -585,14 +589,14 @@ static void state_transition(enum app_lrw_state new_state)
  * buffer size: when the full Info does not fit, app_cmd_build_info() pages it
  * (#425) and the remaining pages follow via m_page_stream_work, instead of
  * tx_send_queued() silently dropping the whole uplink later. */
-static int queue_info_uplink(void)
+static int queue_info_uplink_seq(uint32_t seq)
 {
 	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t info_len;
 	bool more = false;
 
-	int ret = app_cmd_build_info(info_buf, refresh_payload_cap(sizeof(info_buf)), &info_len,
-				     &more);
+	int ret = app_cmd_build_info_seq(seq, info_buf, refresh_payload_cap(sizeof(info_buf)),
+					 &info_len, &more);
 	if (ret == 0) {
 		(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len, LRW_TX_INFO);
 		atomic_clear_bit(&m_announce_pending, ANNOUNCE_INFO);
@@ -606,6 +610,12 @@ static int queue_info_uplink(void)
 		atomic_set_bit(&m_announce_pending, ANNOUNCE_INFO);
 	}
 	return ret;
+}
+
+/* Autonomous Info (boot announce, deferred announce): seq 0. */
+static int queue_info_uplink(void)
+{
+	return queue_info_uplink_seq(0);
 }
 
 /* Build a settings-info ConfigDump and stage it on the command port, right after
@@ -922,7 +932,7 @@ static void downlink_success_work_handler(struct k_work *work)
 static void clock_sync_info_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	(void)queue_info_uplink();
+	(void)queue_info_uplink_seq((uint32_t)atomic_get(&m_clock_sync_info_seq));
 }
 
 static void lc_response_work_handler(struct k_work *work)
@@ -2367,6 +2377,17 @@ void app_lrw_send_telemetry(void)
 	k_work_reschedule_for_queue(&m_work_q, &m_tx_jitter_work, K_MSEC(delay_ms));
 }
 
+void app_lrw_send_telemetry_now(void)
+{
+	/* F14: a host-requested uplink targets this one device, so the fleet
+	 * de-correlation delay buys nothing. Rescheduling to zero also folds a
+	 * jittered report that is still pending into this send, instead of the
+	 * request collapsing into it seconds later (k_work_reschedule keeps a single
+	 * pending instance) — the host sees one fresh uplink right after its
+	 * command either way. */
+	k_work_reschedule_for_queue(&m_work_q, &m_tx_jitter_work, K_NO_WAIT);
+}
+
 void app_lrw_register_ready_cb(void (*cb)(void))
 {
 	m_ready_cb = cb;
@@ -2518,10 +2539,12 @@ static int queue_tx_response(uint8_t port, const uint8_t *buf, size_t len, enum 
 	return 0;
 }
 
-void app_lrw_send_info_on_clock_sync(void)
+void app_lrw_send_info_on_clock_sync(uint32_t seq)
 {
 	/* Arm the deferred Info; downlink_callback sends it once LORAWAN_TIME_UPDATED
-	 * arrives (the ClockSync command answer). */
+	 * arrives (the ClockSync command answer). The seq is stored before the bit is
+	 * set, so the Info work item never pairs a new request with a stale seq. */
+	atomic_set(&m_clock_sync_info_seq, (atomic_val_t)seq);
 	atomic_set_bit(&m_clock_sync_info_pending, 0);
 }
 

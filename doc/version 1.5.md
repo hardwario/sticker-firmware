@@ -21,8 +21,11 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN | **Improved** — faster link-loss recovery (#424): link check on every report while `WARNING`, a TX-power/data-rate step-down ladder before the rejoin (a moved device regains its gateway on a lower DR without losing the session), and US915/AU915 no longer lose the configured sub-band after repeated failed joins. |
 | LoRaWAN / P2P | **New** — universal response paging (#425): every answer that does not fit one frame is split into self-contained pages numbered `page_index`/`page_count` in the `Response` envelope (and in `AlarmReport`), sent by the device on its own; decoders label them `pages: "i/N"`. |
 | LoRaWAN / NFC | **New** — `GetSettings` command (#428): the boot settings-info `ConfigDump` (§4) on request, with the command's `seq`, so a host can refresh the key operating settings without a full multi-page `GetConfig`. |
-| NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §14. |
-| NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §15. |
+| LoRaWAN | **Fix** — command answers from the ProXimos Nodes test (#432): the deferred `clock_sync` Info now carries the command's `seq`; `force_send` / `sample` leave at once (no fleet jitter, no silent merge into a pending report); `w1_scan` without 1-Wire answers `NOT_SUPPORTED`. |
+| LoRaWAN | **Changed** — `GetConfig` over LoRaWAN leaves out the 1-Wire slot ROMs `sensor1_rom`..`sensor4_rom` (#433): 4 pages instead of 6 at EU868 DR0; NFC/shell GetConfig and an explicit `GetParam` still return them. |
+| LoRaWAN / NFC | **New** — `SetParam.alarms_replace` (#434): one message rewrites the whole alarm table — all rule slots are emptied before the message's `alarms` group is applied (or all cleared without one), rolled back with the batch on a fault. |
+| NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §17. |
+| NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §18. |
 | NFC | **New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2), so an installer with a phone can judge the link at the mounting spot. |
 
 ---
@@ -553,7 +556,7 @@ Cost: release about +1.8 KB flash, +128 B RAM.
 ## 13. `GetSettings` — settings-info on request (#428)
 
 The boot settings-info (§4) tells the network the effective configuration once per boot.
-A host that wants to refresh it later had only `GetConfig`: 38 keys in 6+ pages (one page
+A host that wants to refresh it later had only `GetConfig`: 34 keys in 4+ pages over LoRaWAN (one page
 per alarm rule on top), ~13 s of SF12 airtime at EU868 DR0. `GetSettings` returns exactly
 the §4 content on request.
 
@@ -580,9 +583,98 @@ Hub combined11 (proximos-v2 !91): the Portal "Refresh from device" button sends
 answers `Error NOT_SUPPORTED` (code 7) with the `seq` kept, so the Hub's config is untouched.
 Not HW-tested: NFC, DR0 (34 B fits one frame there too) and the paged form (native tests only).
 
+
 ---
 
-## 14. NFC command channel: ST25DV Fast-Transfer-Mode mailbox (#313)
+## 14. Command answers the Hub can pair (#432)
+
+Found by the ProXimos Nodes test (Hub CLI + Portal against a STICKER, 2026-09-23):
+
+| Command | Before | Now |
+|---|---|---|
+| `clock_sync` (empty, LoRaWAN) | Answered by the Info that follows the DeviceTimeAns, but that Info had **seq 0**, so the Hub could not pair it with the request | The Info carries the **command's `seq`** (every page of it, when paged). The boot Info keeps seq 0. A newer `clock_sync` before the time lands takes over the seq; no answer at all means the network did not answer `DeviceTimeReq` |
+| `force_send`, `sample` (LoRaWAN) | The uplink went through the fleet pre-send jitter (up to 10 s). A request that arrived while a jittered report was pending **collapsed into it** (one uplink instead of two) | The uplink leaves **at once** (~1–3 s incl. the TX); a pending jittered report is folded into this send, so the host gets one fresh uplink right after its command. Periodic reports, alarms and the link-ready kick keep the jitter |
+| `w1_scan` on an image without 1-Wire | `NOT_READY` (3), indistinguishable from a bus that is not ready (over LoRaWAN the detail is stripped) | `NOT_SUPPORTED` (7), like other commands not built into the image |
+
+No wire-format change: the answers are the same messages. A host that already pairs by `seq`
+now also pairs `clock_sync`.
+
+**HW verification (2026-09-24, EU868, ProXimos Hub ChirpStack v4):** ClockSync seq 25 → the
+DeviceTimeAns in the RX of the next uplink, then `Response{seq 25, info}` with the synced
+`unix_time` (`010819…`); `force_send` → uplink after 1.1–2.8 s, also right after a telemetry
+uplink; `send` + `force_send` back to back → one uplink after 1.2 s (before: only after the
+jitter); `w1_scan` on a debug image without 1-Wire → `Error{code 7}`.
+Re-run with the downlinks sent from the Hub CLI (`proximosctl control.radio node-send`), each
+answer paired on the Hub by its `seq`: `clock-sync` seq 45 → `Response{seq 45, info}` with the
+synced time; `force-send` seq 46 → extra fPort-2 uplink 1.16 s after the uplink that carried
+the downlink; `w1-scan` seq 47 → `Response{seq 47, error{code 7}}`.
+
+**Alarms after a reboot (checked, no change needed):** the alarm latches are plain RAM, so
+after any reboot (including `settings_save`) every condition that still holds activates
+again and is re-reported on fPort 3 once the device is joined: threshold rules on the first
+evaluation (after their dwell), level `state` rules after their dwell, low battery on the
+first valid measurement, no-data after 5 s of NaN. Edge/momentary/count rules are events and
+fire again only on a new event. A host detects the reboot from the rejoin, the boot `Info`
+(`reset_cause`, small `uptime`) or the first telemetry's `boot` flag, drops its open alarms
+and waits for them to activate again — the same way it already handles low battery.
+
+
+---
+
+## 15. `GetConfig` over LoRaWAN without the slot ROMs (#433)
+
+The four 1-Wire slot ROMs (`sensors` 11..14, 8 B each) took two of the six pages of a
+LoRaWAN `GetConfig` at EU868 DR0, and the network has no use for them — the ProXimos
+Portal does not show them. They are now left out of a **LoRaWAN** `GetConfig`:
+
+| Read path | Slot ROMs |
+|---|---|
+| `GetConfig` over LoRaWAN | **left out** — 34 keys in 4 pages at DR0 (was 38 in 6) |
+| `GetConfig` over NFC / shell / vendor | included, as before |
+| `GetParam(sensors 11..14)` over any transport | included — an explicit request still reads them |
+| boot settings-info, `GetSettings` | never carried them |
+
+Mechanism: a new configen attribute `dump_lrw: false` keeps a field in `DUMP_FIELDS`
+but flags it `lrw_skip`; `app_cmd_handle_get_config()` skips such a field when the
+transport is LoRaWAN. A host that merges a complete `GetConfig` into its config copy
+therefore no longer sees `sensorN_rom` from LoRaWAN; a host that replaces its copy
+(ProXimos !91) drops them.
+
+**HW verification (2026-09-24, EU868, ProXimos Hub ChirpStack v4):** `get-config` from the
+Hub CLI → 4 pages at DR5 (was 6), no `sensor1_rom`..`sensor4_rom`, Hub config 34 keys;
+`GetParam(sensors [11])` seq 122 → `config_dump{sensors{sensor1_rom}}` in one frame.
+
+
+---
+
+## 16. `SetParam.alarms_replace` — rewrite the whole alarm table (#434)
+
+A host that is the source of truth for the alarm rules (the ProXimos Portal) had no way to
+say "these are *all* the rules": a `SetParam` only sets the slots it carries, so a rule
+deleted in the host (or added over NFC in the meantime) stayed on the device.
+
+| | |
+|---|---|
+| Field | `Command.SetParam.alarms_replace` = **6** (`optional bool`, next to `save`) |
+| Effect | when `true`, every rule slot `alarm_0`..`alarm_15` is emptied in staging **before** this message's `alarms` group is applied, so exactly the rules it carries remain; without an `alarms` group it clears all slots. `alarm_limit` and `alarm_buzzer_mode` are kept |
+| Atomicity | part of the batch snapshot: on any fault (e.g. an invalid rule → `OUT_OF_RANGE`, `fault_field` 400) the whole batch rolls back, cleared slots included, and the rule cache is rebuilt |
+| Persistence | staged like any other key; `save` persists (+ reboot) |
+| Transports | LoRaWAN, NFC, shell (like `alarm_N`); refused over the vendor channel (`NOT_WRITABLE`, `fault_field` 400) |
+| Multi-frame table | `alarms_replace` on the **first** message only, `save` on the last |
+
+`ttn.js` encodes and decodes it (`set_param.alarms_replace: true`); e.g. seq 8 with no
+`alarms` group is `080812023001`.
+
+**HW verification (2026-09-24, EU868, ProXimos Hub ChirpStack v4, raw downlinks from the Hub
+CLI):** with rules [0], [1], [3] seeded, `set_param{alarms{alarm_5}, alarms_replace}` seq 123
+→ `Ack` and only [5] left; `set_param{alarms{alarm_2 = invalid}, alarms_replace}` seq 124 →
+`Error{OUT_OF_RANGE, fault_field 400}` and nothing changed; `set_param{alarms_replace}` seq 125
+→ `Ack` and 0 rules, `alarm_limit` kept. A malformed downlink (one byte too many) was answered
+`BAD_REQUEST` without touching the rules.
+
+---
+
+## 17. NFC command channel: ST25DV Fast-Transfer-Mode mailbox (#313)
 
 **Why.** In v1.4.0 the phone drove interactive commands by writing an NDEF
 `hio.stck:cmd` record into the ST25DV's user EEPROM and reading an `hio.stck:rsp`
@@ -753,7 +845,7 @@ page fits one 256 B mailbox frame.
 
 ---
 
-## 15. Plaintext command transport and explicit claiming (#415)
+## 18. Plaintext command transport and explicit claiming (#415)
 
 Prepares the claim flow for the NFC mailbox move (#313/#414) and tightens the
 claim window into something with no automatic behaviour.
@@ -824,7 +916,7 @@ returns `NOT_READY "transport not allowed"`.
 
 ---
 
-## 16. Last-downlink link quality in the NFC GetInfo (#409 A2)
+## 19. Last-downlink link quality in the NFC GetInfo (#409 A2)
 
 An installer with only a phone (Manager-App over NFC) has no view of the network
 server, so it could not tell whether the radio link is good where the device is
@@ -846,7 +938,7 @@ received**, as measured by the device:
 - **Omitted until the first downlink since boot**, so a missing value never reads as 0 dBm.
 - The same values are on the debug shell: `ats lrw status` (`rssi`, `snr`).
 - `ttn.js` decodes them as `last_dl_rssi`, `last_dl_snr`, `last_dl_age_s`.
-- **Paging (with §14):** in the host-driven NFC `GetInfo` paging the three fields form **one**
+- **Paging (with §17):** in the host-driven NFC `GetInfo` paging the three fields form **one**
   NFC-only Info unit (next to `lrw_state` / `claim_token` / `dev_eui`), so RSSI/SNR never
   travel on a page without their age; the unit is empty (not sent) until the first downlink.
 

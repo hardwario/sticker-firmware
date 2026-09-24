@@ -6,6 +6,8 @@
  * (so range validation is exercised); everything else app_cmd reaches is stubbed.
  */
 
+#include <string.h>
+
 #include "app_alarm.h"
 #include "app_alarm_rules.h"
 #include "app_buzzer.h"
@@ -205,8 +207,32 @@ int app_alarm_rules_clear(uint8_t slot)
 	return 0;
 }
 
+/* alarms_replace (SetParam field 6) empties the staged rule slots through this:
+ * mirror the real implementation's effect on the config so the tests can see
+ * which slots survive. */
+int test_alarm_clear_all_calls;
+
 void app_alarm_rules_clear_all(void)
 {
+	struct app_config *c = app_config();
+
+	test_alarm_clear_all_calls++;
+	memset(c->alarm_0, 0, sizeof(c->alarm_0));
+	memset(c->alarm_1, 0, sizeof(c->alarm_1));
+	memset(c->alarm_2, 0, sizeof(c->alarm_2));
+	memset(c->alarm_3, 0, sizeof(c->alarm_3));
+	memset(c->alarm_4, 0, sizeof(c->alarm_4));
+	memset(c->alarm_5, 0, sizeof(c->alarm_5));
+	memset(c->alarm_6, 0, sizeof(c->alarm_6));
+	memset(c->alarm_7, 0, sizeof(c->alarm_7));
+	memset(c->alarm_8, 0, sizeof(c->alarm_8));
+	memset(c->alarm_9, 0, sizeof(c->alarm_9));
+	memset(c->alarm_10, 0, sizeof(c->alarm_10));
+	memset(c->alarm_11, 0, sizeof(c->alarm_11));
+	memset(c->alarm_12, 0, sizeof(c->alarm_12));
+	memset(c->alarm_13, 0, sizeof(c->alarm_13));
+	memset(c->alarm_14, 0, sizeof(c->alarm_14));
+	memset(c->alarm_15, 0, sizeof(c->alarm_15));
 }
 
 /* handle_set_param refreshes the runtime rule cache from config after an apply;

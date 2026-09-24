@@ -852,24 +852,30 @@ parameters:
     proto_id: 11
     type: bytes
     size: 8
+    # Not in a LoRaWAN get_config (only costs answer pages; the network has no
+    # use for the ROM). get_param / NFC / shell still read it.
+    dump_lrw: false
     help: "Get/Set 1-Wire slot 1 ROM (16 hex digits; all-zero = empty)."
   - name: sensor2_rom
     proto_group: sensors
     proto_id: 12
     type: bytes
     size: 8
+    dump_lrw: false
     help: "Get/Set 1-Wire slot 2 ROM (16 hex digits; all-zero = empty)."
   - name: sensor3_rom
     proto_group: sensors
     proto_id: 13
     type: bytes
     size: 8
+    dump_lrw: false
     help: "Get/Set 1-Wire slot 3 ROM (16 hex digits; all-zero = empty)."
   - name: sensor4_rom
     proto_group: sensors
     proto_id: 14
     type: bytes
     size: 8
+    dump_lrw: false
     help: "Get/Set 1-Wire slot 4 ROM (16 hex digits; all-zero = empty)."
 
   # Pulse totalizer enables (#49) — a sensor feature, not an alarm. Grouped with

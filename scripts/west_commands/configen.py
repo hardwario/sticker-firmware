@@ -61,6 +61,9 @@ Access control (readable / writable):
     - readonly      <- shell readable but not writable
     - dump          <- readable over nfc or lrw
     - dump_nfc_only <- readable over nfc but not lrw (e.g. LoRaWAN keys)
+  An explicit `dump_lrw: false` leaves a field readable everywhere but out of a
+  LoRaWAN get_config (it only costs downlink-answer pages there, e.g. the 1-Wire
+  slot ROMs); an explicit get_param still returns it.
     - no_write_lrw/no_write_nfc/no_write_vendor <- lrw/nfc/vendor not in writable
       (per-field SetParam transport gate, M-3; shell has no such gate -- see
       normalize_access)
@@ -968,7 +971,9 @@ def build_dump_fields_model(config):
     A `dump_nfc_only: true` field is included with nfc_only=1; the handler only
     selects it when the transport is NFC, so it never enters a LoRaWAN response
     (e.g. the LoRaWAN crypto keys — readable over the encrypted NFC channel only).
-    A plain `dump: false` field stays excluded from every transport."""
+    A plain `dump: false` field stays excluded from every transport. A
+    `dump_lrw: false` field is included with lrw_skip=1: the get_config handler
+    leaves it out of a LoRaWAN dump (get_param still returns it on request)."""
     rows = []
     for section in DUMP_SECTIONS:
         macro = "DUMP_SECTION_" + section.upper()
@@ -979,7 +984,8 @@ def build_dump_fields_model(config):
             if p.get("dump") is False and not nfc_only:
                 continue
             rows.append({"section": macro, "tag": p["proto_id"],
-                         "size": _dump_field_size(p), "nfc_only": nfc_only})
+                         "size": _dump_field_size(p), "nfc_only": nfc_only,
+                         "lrw_skip": p.get("dump_lrw") is False})
     return {"dump_fields": rows}
 
 

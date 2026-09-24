@@ -1809,7 +1809,7 @@ vendor channel.
 
 **Rewritten for v1.5.0 (#414).** The mailbox channel removed in v1.4.0 (together with the NFC
 firmware-update path) is back as the **only** NFC command channel: the tag holds no NDEF at all
-(`doc/version 1.5.md` §14). Supersedes the NDEF-based parts of N1 / N4 / N5 / N8 for v1.5.0.
+(`doc/version 1.5.md` §17). Supersedes the NDEF-based parts of N1 / N4 / N5 / N8 for v1.5.0.
 
 **Goal:** every interactive NFC command runs through the ST25DV FTM mailbox in **one tap with the
 field on**, on Android and iOS alike. The phone bootstraps with the plaintext `get_basic_info`
@@ -1875,7 +1875,7 @@ on the bench):
 **Rewritten for v1.5.0 (#414).** v1.4.0's boot-staged provisioning (#147 / #250) is gone: a
 config / command record written to the tag of an **unpowered** unit used to be applied at the next
 boot. The mailbox needs the MCU running, and the firmware no longer reads or writes the user EEPROM
-on any path (`doc/version 1.5.md` §14 "What is removed"), so configuration and claiming need a
+on any path (`doc/version 1.5.md` §17 "What is removed"), so configuration and claiming need a
 powered device. What remains is a negative check.
 
 **Goal:** nothing written to the tag while the unit is unpowered is ever executed, and an unpowered
@@ -2095,7 +2095,7 @@ The shell part (reflash survival, `vendor_reset` reopen) is still to be re-run o
 ### N11 — NFC LED during a mailbox tap (#315, v1.5.0 #414)
 
 **Goal:** an operator holding the phone can tell a successful tap from a failed one by the LED
-alone (`doc/version 1.5.md` §14 "LED during a tap"). The firmware sends **no reply** to a frame it
+alone (`doc/version 1.5.md` §17 "LED during a tap"). The firmware sends **no reply** to a frame it
 cannot authenticate (wrong `secret_key` / `vendor_token`, stale or out-of-window `nonce_counter`,
 unknown channel), so without the LED a failed tap looks like a slow one.
 **Observable:**

@@ -1173,3 +1173,15 @@ test("decodeUplink (fPort 3, AlarmEvent) terminates on an over-length declared f
   assert.equal(got.data.alarms[0].source, "onboard");
   assert.equal(got.data.alarms[0].type, "none");
 });
+
+// --- set_param alarms_replace (field 6, WP8): empty every alarm slot before the
+// message's alarms group is applied (the host rewrites the whole table).
+test("set_param alarms_replace encodes field 6 and round-trips", () => {
+  const enc = codec.encodeDownlink({ data: { seq: 8, command: "set_param", set_param: { alarms_replace: true } } });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  // seq 8, set_param (field 2) len 2 { field 6 varint 1 }
+  assert.equal(toHex(enc.bytes), "080812023001");
+  const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes });
+  assert.equal(dec.data.command, "set_param");
+  assert.equal(dec.data.set_param.alarms_replace, true);
+});

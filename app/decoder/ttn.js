@@ -908,6 +908,9 @@ function encodeDownlinkCommand(cmd) {
     // save (field 3): persist + reboot after applying; set on the LAST message
     // of a multi-downlink batch only.
     if (b.save) body = body.concat(_encTag(3, 0)).concat(_encVarint(1));
+    // alarms_replace (field 6): empty all alarm slots before `alarms` is applied
+    // (the whole table in one message); on the FIRST message of a batch only.
+    if (b.alarms_replace) body = body.concat(_encTag(6, 0)).concat(_encVarint(1));
   } else if (name === "get_param") {
     // proto3 repeated scalars are packed (length-delimited) by default.
     var _packField = function (arr, tag) {
@@ -998,6 +1001,7 @@ function decodeDownlinkCommand(bytes) {
           } else if (w2 === 0) {
             var sv = _pbReadVarint(bytes, p); p = sv.next;
             if (f2 === 3) sp.save = sv.value !== 0; // persist + reboot after apply
+            else if (f2 === 6) sp.alarms_replace = sv.value !== 0; // clear all slots first
           } else { break; }
         }
         cmd.set_param = sp;

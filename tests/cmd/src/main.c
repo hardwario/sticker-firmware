@@ -223,6 +223,109 @@ ZTEST(cmd, test_set_param_alarm_rule_rollback_restores_snapshot)
 			  "invalid alarm rule bytes leaked into config after rollback");
 }
 
+/* WP8: SetParam.alarms_replace (field 6) empties every alarm slot in staging
+ * before the message's alarms group is applied, so one message rewrites the
+ * whole table; a fault rolls the whole batch back, slots included. */
+extern int test_alarm_clear_all_calls;
+
+static void seed_alarm_slots(void)
+{
+	memset(g_app_config.alarm_1, 0x11, sizeof(g_app_config.alarm_1));
+	memset(g_app_config.alarm_3, 0x33, sizeof(g_app_config.alarm_3));
+	memset(g_app_config.alarm_7, 0x77, sizeof(g_app_config.alarm_7));
+}
+
+static bool slot_is(const uint8_t *slot, size_t n, uint8_t v)
+{
+	for (size_t i = 0; i < n; i++) {
+		if (slot[i] != v) {
+			return false;
+		}
+	}
+	return true;
+}
+
+ZTEST(cmd, test_set_param_alarms_replace_keeps_only_sent_slots)
+{
+	Response r;
+	static const uint8_t rule_a[17] = {0x01, 0x00, 0x06};
+	static const uint8_t rule_b[17] = {0x01, 0x02, 0x03};
+
+	reset_cfg();
+	seed_alarm_slots();
+	test_alarm_clear_all_calls = 0;
+
+	/* seq7 set_param{ alarms{ alarm_2=rule_a, alarm_5=rule_b }, alarms_replace } */
+	enum app_cmd_action a = handle("0807122a2a262a110100060000000000000000000000000000421101020"
+				       "300000000000000000000000000003001",
+				       &r);
+
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no save requested");
+	zassert_equal(r.which_body, Response_ack_tag, "which=%d", r.which_body);
+	zassert_equal(test_alarm_clear_all_calls, 1, "slots must be cleared once");
+	zassert_mem_equal(g_app_config.alarm_2, rule_a, 17, "alarm_2");
+	zassert_mem_equal(g_app_config.alarm_5, rule_b, 17, "alarm_5");
+	zassert_true(slot_is(g_app_config.alarm_1, 17, 0), "old alarm_1 must be gone");
+	zassert_true(slot_is(g_app_config.alarm_3, 17, 0), "old alarm_3 must be gone");
+	zassert_true(slot_is(g_app_config.alarm_7, 17, 0), "old alarm_7 must be gone");
+}
+
+ZTEST(cmd, test_set_param_alarms_replace_without_alarms_clears_all)
+{
+	Response r;
+
+	reset_cfg();
+	seed_alarm_slots();
+	g_app_config.alarm_limit = 30;
+
+	handle("080812023001", &r); /* seq8 set_param{ alarms_replace } */
+	zassert_equal(r.which_body, Response_ack_tag, "which=%d", r.which_body);
+	zassert_true(slot_is(g_app_config.alarm_1, 17, 0), "alarm_1");
+	zassert_true(slot_is(g_app_config.alarm_3, 17, 0), "alarm_3");
+	zassert_true(slot_is(g_app_config.alarm_7, 17, 0), "alarm_7");
+	zassert_equal(g_app_config.alarm_limit, 30, "alarm_limit is not a rule slot");
+}
+
+ZTEST(cmd, test_set_param_alarms_replace_rolls_back)
+{
+	Response r;
+
+	reset_cfg();
+	seed_alarm_slots();
+
+	/* seq9 set_param{ alarms{ alarm_2 }, alarms_replace } with a rule the
+	 * (stubbed) reload reports as invalid: the whole batch rolls back, so the
+	 * cleared slots come back and the new rule does not stick. */
+	test_alarm_reload_dropped = 1;
+	handle("080912172a132a1101000600000000000000000000000000003001", &r);
+	test_alarm_reload_dropped = 0;
+
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.fault_field, 400, "fault_field %u", r.body.error.fault_field);
+	zassert_true(slot_is(g_app_config.alarm_1, 17, 0x11), "alarm_1 restored");
+	zassert_true(slot_is(g_app_config.alarm_3, 17, 0x33), "alarm_3 restored");
+	zassert_true(slot_is(g_app_config.alarm_7, 17, 0x77), "alarm_7 restored");
+	zassert_true(slot_is(g_app_config.alarm_2, 17, 0), "rejected alarm_2 must not stick");
+}
+
+ZTEST(cmd, test_set_param_alarms_replace_refused_over_vendor)
+{
+	Response r;
+
+	reset_cfg();
+	seed_alarm_slots();
+	test_alarm_clear_all_calls = 0;
+
+	handle_via(APP_CMD_TRANSPORT_VENDOR, "080812023001", &r);
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "code %d",
+		      r.body.error.code);
+	zassert_equal(test_alarm_clear_all_calls, 0, "vendor must not clear the table");
+	zassert_true(slot_is(g_app_config.alarm_1, 17, 0x11), "alarm_1 intact");
+}
+
 /* Two back-to-back SetParam calls: the first fails and rolls back, the second
  * is a fresh valid call. If m_set_param_lock were left held on the first
  * call's rollback exit path, this second call would hang forever on
@@ -849,6 +952,51 @@ ZTEST(cmd, test_build_info_pages_instead_of_trimming)
 	/* A cap too small for any single field still fails. */
 	zassert_equal(app_cmd_build_info(out, 2, &out_len, &more), -EMSGSIZE, "impossible cap");
 	app_cmd_set_reset_cause(0);
+}
+
+/* F13: the deferred ClockSync answer is an Info with the command's seq, so the
+ * host can pair it with its request; paged, every page carries it. The boot Info
+ * (app_cmd_build_info) keeps seq 0. */
+ZTEST(cmd, test_build_info_seq)
+{
+	uint8_t out[256];
+	size_t out_len = 0;
+	bool more = false;
+
+	reset_cfg();
+	g_app_config.serial_number = 1234567890;
+	g_app_sensor_data.voltage = 3.3f;
+	test_set_active_alarm_count(5);
+
+	zassert_equal(app_cmd_build_info_seq(25, out, sizeof(out), &out_len, &more), 0, "full");
+	zassert_false(more, "unpaged");
+	Response r = decode_resp(out, out_len);
+	zassert_equal(r.which_body, Response_info_tag, "which=%d", r.which_body);
+	zassert_equal(r.seq, 25, "seq %u", r.seq);
+
+	zassert_equal(app_cmd_build_info(out, sizeof(out), &out_len, &more), 0, "boot");
+	zassert_equal(decode_resp(out, out_len).seq, 0, "boot Info keeps seq 0");
+
+	zassert_equal(app_cmd_build_info_seq(25, out, 51, &out_len, &more), 0, "DR0");
+	zassert_true(more, "expected pages at 51 B");
+	g_seen_alarms = 0;
+	g_seen_serial = g_seen_battery = false;
+	walk_pages(out, out_len, 51, 25, visit_info_page);
+	zassert_equal(g_seen_alarms, 5, "%zu of 5 alarms", g_seen_alarms);
+	test_set_active_alarm_count(0);
+}
+
+/* F12: W1Scan on an image without 1-Wire answers NOT_SUPPORTED (not in this FW),
+ * not NOT_READY (bus not ready) — the tests build without CONFIG_W1. */
+ZTEST(cmd, test_w1_scan_not_built)
+{
+	Response r;
+
+	(void)handle("08097200", &r); /* seq 9, w1_scan{} */
+	zassert_equal(r.seq, 9, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_SUPPORTED, "code %d",
+		      r.body.error.code);
 }
 
 ZTEST(cmd, test_deferred_actions)
@@ -2017,6 +2165,70 @@ ZTEST(cmd, test_get_config_streams_all_pages_over_lrw)
 		      0, "nfc handle");
 	zassert_equal(action, APP_CMD_ACTION_NONE, "no stream over NFC");
 	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "no NFC stream");
+}
+
+/* The 1-Wire slot ROMs (sensors 11..14, `dump_lrw: false`) are left out of a
+ * LoRaWAN GetConfig — they only cost answer pages there — but an NFC GetConfig
+ * and an explicit GetParam still return them. */
+static bool rom_in_dump(const Response *r)
+{
+	const AppConfigMessage_Sensors *s = &r->body.config_dump.sensors;
+
+	return s->has_sensor1_rom || s->has_sensor2_rom || s->has_sensor3_rom || s->has_sensor4_rom;
+}
+
+ZTEST(cmd, test_get_config_skips_slot_roms_over_lrw)
+{
+	uint8_t in[16], out[256];
+	size_t in_len = unhex("08092a00", in, sizeof(in)); /* seq9 get_config{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	uint32_t count;
+	Response r;
+
+	reset_cfg();
+
+	/* LoRaWAN: no page of the stream carries a ROM. */
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 51, &out_len, &action),
+		      0, "handle");
+	r = decode_resp(out, out_len);
+	count = r.page_count ? r.page_count : 1;
+	zassert_false(rom_in_dump(&r), "ROM on LoRaWAN page 0");
+	for (uint32_t p = 1; p < count; p++) {
+		zassert_equal(app_cmd_stream_next(out, 51, &out_len), 0, "page %u", p);
+		r = decode_resp(out, out_len);
+		zassert_false(rom_in_dump(&r), "ROM on LoRaWAN page %u", p);
+		zassert_true(r.body.config_dump.has_sensors || r.body.config_dump.has_lorawan ||
+				     r.body.config_dump.has_application ||
+				     r.body.config_dump.has_alarms,
+			     "empty page %u", p);
+	}
+	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "stream must end");
+
+	/* NFC: the host pages itself; the ROMs are still there. */
+	bool nfc_rom = false;
+	uint32_t nfc_count = 1;
+
+	for (uint32_t p = 0; p < nfc_count; p++) {
+		/* seq9 get_config{page:p} */
+		const uint8_t cmd[] = {0x08, 0x09, 0x2a, 0x02, 0x08, (uint8_t)p};
+
+		zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, cmd, sizeof(cmd), out,
+					     sizeof(out), &out_len, &action),
+			      0, "NFC page %u", p);
+		r = decode_resp(out, out_len);
+		nfc_count = r.page_count ? r.page_count : 1;
+		nfc_rom |= rom_in_dump(&r);
+	}
+	zassert_true(nfc_rom, "NFC GetConfig must keep the ROMs");
+
+	/* LoRaWAN GetParam(sensors 11): an explicit request still reads it. */
+	in_len = unhex("08091a031a010b", in, sizeof(in)); /* seq9 get_param{sensors:[11]} */
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 51, &out_len, &action),
+		      0, "get_param");
+	r = decode_resp(out, out_len);
+	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
+	zassert_true(r.body.config_dump.sensors.has_sensor1_rom, "GetParam must return the ROM");
 }
 
 /* #425: a GetConfig over LoRaWAN keeps the fixed 30 B field pages at any DR, and
