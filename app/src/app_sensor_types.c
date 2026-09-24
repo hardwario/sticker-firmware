@@ -28,8 +28,8 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.cap_off = APP_SENSOR_NO_CAP,
 				.wire_scale = 100.0f,
 				.hist_scale = 100.0f,
-				.range_min = -40.0f,
-				.range_max = 125.0f,
+				.range_min = -45.0f,
+				.range_max = 130.0f,
 			},
 		[APP_SENSOR_CH_MOTHERBOARD_HUMIDITY] =
 			{
@@ -54,8 +54,8 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.cap_off = offsetof(struct app_config, cap_barometer),
 				.wire_scale = 10.0f,
 				.hist_scale = 10.0f,
-				.range_min = 200.0f,
-				.range_max = 1100.0f,
+				.range_min = 0.0f,
+				.range_max = 2000.0f,
 			},
 		[APP_SENSOR_CH_MOTHERBOARD_ILLUMINANCE] =
 			{
@@ -80,8 +80,8 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.cap_off = offsetof(struct app_config, cap_barometer),
 				.wire_scale = 100.0f,
 				.hist_scale = 100.0f,
-				.range_min = -40.0f,
-				.range_max = 85.0f,
+				.range_min = -55.0f,
+				.range_max = 125.0f,
 			},
 		[APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE] =
 			{
@@ -292,7 +292,20 @@ static const struct app_sensor_channel m_ch_motherboard[] =
 				.wire_scale = 1000.0f,
 				.hist_scale = 1000.0f,
 				.range_min = 0.0f,
-				.range_max = 4.0f,
+				.range_max = 6.0f,
+			},
+		[APP_SENSOR_CH_MOTHERBOARD_ALTITUDE] =
+			{
+				.name = "altitude",
+				.kind = APP_SENSOR_KIND_NONE,
+				.flags = 0,
+				.wire_type = APP_SENSOR_WIRE_SINT32,
+				.hist_enc = APP_SENSOR_HIST_NONE,
+				.cap_off = offsetof(struct app_config, cap_barometer),
+				.wire_scale = 10.0f,
+				.hist_scale = 0.0f,
+				.range_min = 0.0f,
+				.range_max = 0.0f,
 			},
 };
 
@@ -323,8 +336,8 @@ static const struct app_sensor_channel m_ch_machine_probe[] = {
 			.cap_off = APP_SENSOR_NO_CAP,
 			.wire_scale = 100.0f,
 			.hist_scale = 100.0f,
-			.range_min = -40.0f,
-			.range_max = 125.0f,
+			.range_min = -45.0f,
+			.range_max = 130.0f,
 		},
 	[APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY] =
 		{
@@ -349,8 +362,8 @@ static const struct app_sensor_channel m_ch_machine_probe[] = {
 			.cap_off = APP_SENSOR_NO_CAP,
 			.wire_scale = 100.0f,
 			.hist_scale = 100.0f,
-			.range_min = -40.0f,
-			.range_max = 125.0f,
+			.range_min = -45.0f,
+			.range_max = 130.0f,
 		},
 	[APP_SENSOR_CH_MACHINE_PROBE_ILLUMINANCE] =
 		{

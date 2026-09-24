@@ -61,11 +61,11 @@ types:
     slot: 0
     channels:
       # Climate / environment
-      - {ch: 0,  name: temperature,       label: "Temperature (SHT4x)",       quantity: temperature, unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100],  range: [-40.0, 125.0], liveness: true}
+      - {ch: 0,  name: temperature,       label: "Temperature (SHT4x)",       quantity: temperature, unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100],  range: [-45.0, 130.0], liveness: true}
       - {ch: 1,  name: humidity,          label: "Relative humidity (SHT4x)", quantity: humidity,    unit: "%RH", kind: threshold, wire: [uint32, 2],    history: [u8, 2],     range: [0.0, 100.0], liveness: true}
-      - {ch: 2,  name: pressure,          label: "Pressure (MPL3115A2)",      quantity: pressure,    unit: hPa,   kind: threshold, wire: [uint32, 10],   history: [u16, 10],   range: [200.0, 1100.0], cap: cap_barometer, liveness: true}
+      - {ch: 2,  name: pressure,          label: "Pressure (MPL3115A2)",      quantity: pressure,    unit: hPa,   kind: threshold, wire: [uint32, 10],   history: [u16, 10],   range: [0.0, 2000.0], cap: cap_barometer, liveness: true}
       - {ch: 3,  name: illuminance,       label: "Illuminance (OPT3001)",     quantity: illuminance, unit: lx,    kind: threshold, wire: [uint32, 1],    history: [u16, 0.5],  range: [0.0, 83865.6], cap: cap_light_sensor}
-      - {ch: 4,  name: temperature-baro,  label: "Temperature (MPL3115A2)",   quantity: temperature, unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100],  range: [-40.0, 85.0],  cap: cap_barometer}
+      - {ch: 4,  name: temperature-baro,  label: "Temperature (MPL3115A2)",   quantity: temperature, unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100],  range: [-55.0, 125.0],  cap: cap_barometer}
       # Hall switches
       - {ch: 5,  name: hall-left-state,   label: "Hall left — state",         quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], cap: cap_hall_left}
       - {ch: 6,  name: hall-left-count,   label: "Hall left — pulse count",   quantity: count,       unit: pulses, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_hall_left}
@@ -86,7 +86,9 @@ types:
       - {ch: 18, name: accel-count,       label: "Accelerometer — motion count", quantity: count,    unit: events, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_accelerometer}
       - {ch: 19, name: accel-orientation, label: "Accelerometer — orientation (1..6)", quantity: orientation, unit: enum, kind: none, wire: [uint32, 1], history: [u8, 1], cap: cap_accelerometer}
       # Supply rail — low-battery watchdog (battery_level), not a rule target
-      - {ch: 20, name: battery-voltage,   label: "Battery voltage",           quantity: voltage,     unit: V,      kind: threshold, alarm_only_watchdog: true, wire: [uint32, 1000], history: [u16, 1000], range: [0.0, 4.0], liveness: true}
+      - {ch: 20, name: battery-voltage,   label: "Battery voltage",           quantity: voltage,     unit: V,      kind: threshold, alarm_only_watchdog: true, wire: [uint32, 1000], history: [u16, 1000], range: [0.0, 6.0], liveness: true}
+      # Barometric altitude (MPL3115A2) — telemetry only today, not an alarm target
+      - {ch: 21, name: altitude,          label: "Altitude (MPL3115A2)",      quantity: altitude,    unit: m,      kind: none, wire: [sint32, 10], cap: cap_barometer}
 
   # -------------------------------------------------------------------------
   # Slots 1..4 — 1-Wire types (sensorN_type; detected by family code)
@@ -103,9 +105,9 @@ types:
     label: Machine probe (DS28E17 bridge)
     w1_family: 0x19
     channels:
-      - {ch: 0, name: temperature,     label: "Temperature (SHT)",          quantity: temperature,    unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-40.0, 125.0], liveness: true}
+      - {ch: 0, name: temperature,     label: "Temperature (SHT)",          quantity: temperature,    unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-45.0, 130.0], liveness: true}
       - {ch: 1, name: humidity,        label: "Relative humidity (SHT)",    quantity: humidity,       unit: "%RH", kind: threshold, wire: [uint32, 2],    history: [u8, 2],    range: [0.0, 100.0]}
-      - {ch: 2, name: temperature-aux, label: "Temperature (TMP112)",       quantity: temperature,    unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-40.0, 125.0]}
+      - {ch: 2, name: temperature-aux, label: "Temperature (TMP112)",       quantity: temperature,    unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-45.0, 130.0]}
       - {ch: 3, name: illuminance,     label: "Illuminance (OPT3001)",      quantity: illuminance,    unit: lx,    kind: threshold, wire: [uint32, 1],    history: [u16, 0.5], range: [0.0, 83865.6]}
       - {ch: 4, name: magnetic-field,  label: "Magnetic field (Si7210)",    quantity: magnetic_field, unit: mT,    kind: threshold, wire: [sint32, 1000], history: [i16, 100], range: [-204.7, 204.7]}
       - {ch: 5, name: tilt,            label: "Tilt alert (LIS2DH12)",      quantity: tilt,           unit: bool,  kind: state,     wire: [uint32, 1],    history: [u8, 1]}

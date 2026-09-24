@@ -219,7 +219,8 @@ var _SENSOR_TYPES = {
       { n: "accel-motion", u: "bool", k: "state", s: 1, h: null },
       { n: "accel-count", u: "events", k: "rate", s: 1, h: ["u32", 1] },
       { n: "accel-orientation", u: "enum", k: "none", s: 1, h: ["u8", 1] },
-      { n: "battery-voltage", u: "V", k: "threshold", s: 1000, h: ["u16", 1000] }
+      { n: "battery-voltage", u: "V", k: "threshold", s: 1000, h: ["u16", 1000] },
+      { n: "altitude", u: "m", k: "none", s: 10, h: null }
     ]
   },
   2: {
