@@ -136,8 +136,15 @@ struct app_sensor_channels {
 - New config keys `sensor1_type..sensor4_type` (enum of the 1-Wire type ids, 0 = none).
   - `teach` / `assign` set the key from the detected family.
   - Provisioning can set it before the probe is plugged in.
-- Rebind uses the expected type:
-  - A bound ROM whose family does not match `sensorN_type` puts the slot in **mismatch**.
+- Rebind uses the expected type. Slots are ROM-bound on one shared bus, so "something
+  else is connected" shows up as the slot's device missing plus a foreign device appearing:
+  - A slot with a configured ROM that is absent, while an unbound device of a
+    **different** type is on the bus and no free slot expects that type, goes to
+    **mismatch**. Today this is only flagged `replaced`, and only for a same-type device.
+  - A slot with `sensorN_type` set but no ROM yet (provisioned, not taught) goes to
+    mismatch when the only unbound device is of a different type.
+  - `teach` / `assign` of a device whose type differs from a set `sensorN_type` is
+    refused (`-EINVAL`) unless `sensorN_type` is cleared first.
   - Auto-enroll only fills a free slot whose `sensorN_type` is the detected type, or none.
 
 ### Mismatch behaviour (D4)
