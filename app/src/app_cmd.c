@@ -128,6 +128,10 @@ void app_cmd_get_info(struct app_cmd_info *info)
 #ifdef CONFIG_LORAWAN
 	info->lrw_state = (uint8_t)app_lrw_get_state();
 #endif
+#if defined(CONFIG_LORAWAN) || defined(CONFIG_ZTEST)
+	info->has_last_dl = app_lrw_last_downlink(&info->last_dl_rssi, &info->last_dl_snr,
+						  &info->last_dl_age_s);
+#endif
 
 	BUILD_ASSERT(sizeof(info->dev_eui) == sizeof(g_app_config.lrw_deveui),
 		     "dev_eui size mismatch");
@@ -163,6 +167,9 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	if (!app_nfc_ready()) {
 		status |= APP_DEVICE_STATUS_NFC_DOWN;
 	}
+	if (!app_nfc_mailbox_available()) {
+		status |= APP_DEVICE_STATUS_MAILBOX_DOWN;
+	}
 #ifdef APP_CMD_HAVE_HISTORY
 	if (!app_history_is_ready()) {
 		status |= APP_DEVICE_STATUS_HISTORY_DOWN;
@@ -176,6 +183,19 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	}
 	if (info->lrw_state == APP_LRW_STATE_DISABLED) {
 		status |= APP_DEVICE_STATUS_LRW_DISABLED;
+	}
+	/* Radio: OFF means the operator deliberately silenced it; otherwise, in
+	 * LoRaWAN mode, flag a link that is not alive (not healthy/warning = idle/
+	 * joining/reconnect/disabled). P2P has no LoRaWAN link, so it sets neither. */
+	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_OFF) {
+		status |= APP_DEVICE_STATUS_RADIO_OFF;
+	} else if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_LORAWAN &&
+		   info->lrw_state != APP_LRW_STATE_HEALTHY &&
+		   info->lrw_state != APP_LRW_STATE_WARNING) {
+		status |= APP_DEVICE_STATUS_RADIO_LINK_DOWN;
+	}
+	if (app_nfc_claim_state_get() == APP_NFC_CLAIM_ACTIVE) {
+		status |= APP_DEVICE_STATUS_CLAIM_ACTIVE;
 	}
 	info->device_status = status;
 }
@@ -255,6 +275,19 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info, size_t max
 		info->has_lrw_state = true;
 		info->lrw_state = (Response_Info_LrwState)i.lrw_state;
 
+		/* #409 A2: last-downlink link quality for an installer with only a
+		 * phone. NFC-only: the LNS already has uplink RSSI/SNR per gateway
+		 * and, since #419, DevStatusAns (downlink SNR margin + battery), so
+		 * it would only cost LoRaWAN payload. Always with its age. */
+		if (i.has_last_dl) {
+			info->has_last_dl_rssi = true;
+			info->last_dl_rssi = i.last_dl_rssi;
+			info->has_last_dl_snr = true;
+			info->last_dl_snr = i.last_dl_snr;
+			info->has_last_dl_age_s = true;
+			info->last_dl_age_s = i.last_dl_age_s;
+		}
+
 		for (size_t j = 0; j < sizeof(i.dev_eui); j++) {
 			if (i.dev_eui[j] != 0) {
 				info->has_dev_eui = true;
@@ -270,11 +303,11 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info, size_t max
 		 *
 		 * NFC-only: at 18 B on the wire this is the single largest
 		 * Info field, and it pushed the response past the EU868 DR0 application
-		 * payload budget (56 B vs 50 B). Info has no page_index/page_count (only
-		 * ConfigDump and HistoryFrame do), so an over-budget Info cannot be split
-		 * and tx_send_queued() simply drops it — leaving a downlink get_info, and
+		 * payload budget (56 B vs 50 B). Before #425 an Info could not be paged, so
+		 * an over-budget Info was dropped whole — leaving a downlink get_info, and
 		 * the device-info-on-join uplink, silently unanswered at DR0. Restricting
-		 * the token to NFC keeps the LoRaWAN Info inside the budget at every DR.
+		 * the token to NFC keeps the LoRaWAN Info small at every DR (over NFC it
+		 * is one more Info page unit, #425/#414).
 		 *
 		 * Trade-off (deliberate): a backend can no longer learn claim_token over
 		 * the air; claiming becomes an NFC-only flow. This reverses the LoRaWAN
@@ -539,19 +572,16 @@ static const struct {
  * two-byte tag). */
 #define DUMP_PAGE_BUDGET 30
 
-/* Over NFC the response lands in the ST25DV user memory, so config can page far
- * coarser than the tiny DR0 LoRaWAN frame — a whole snapshot in ~2 pages instead
- * of ~30, read in one RF session (GetConfig page 0..page_count-1, each rewritten
- * to the tag on request). Bounded by the encrypted-response buffer (m_resp_buf,
- * 512 B) AND the 512 B ST25DV user memory the rsp NDEF record is written into:
- * the on-tag record is ~22 B framing + encrypted(8 B header + plaintext + 16 B
- * tag), so encrypted <= 490 -> plaintext <= 466 -> minus version + the ~14 B
- * Response/ConfigDump wrapper leaves ~452 B for field payload. The budget is in
- * DUMP_FIELDS.size units, which over-estimate native byte fields ~2x (so real
- * bytes <= budget), hence 450 keeps the worst-case page on the tag with margin
- * (encrypted ~474 + 22 framing ~= 496 <= 512). LoRaWAN keeps the small budget
- * (DR0 MTU). */
-#define DUMP_PAGE_BUDGET_NFC 450
+/* Over NFC the response travels in the ST25DV Fast-Transfer-Mode mailbox, a
+ * 256 B frame: 1 B channel prefix + 8 B header (serial, nonce) + ciphertext +
+ * 16 B CCM tag -> at most 231 B of plaintext, i.e. version byte + Response.
+ * A ConfigDump page therefore gets roughly 231 - 1 (version) - ~14 B
+ * (Response/ConfigDump wrappers, page_index, page_count) ~= 216 B of field
+ * payload. The budget is in DUMP_FIELDS.size units, which over-estimate native
+ * byte fields ~2x (so real bytes <= budget), hence 200 keeps every page inside
+ * one mailbox frame with margin; a whole config snapshot is ~3-4 pages read in
+ * one RF session (#313). LoRaWAN keeps the small DR0 budget. */
+#define DUMP_PAGE_BUDGET_NFC 200
 
 /* Per-page budget for the given transport (NFC pages coarsely, LoRaWAN tightly). */
 static inline uint32_t dump_page_budget(enum app_cmd_transport tp)
@@ -825,53 +855,112 @@ static void app_cmd_handle_set_secret_key(enum app_cmd_transport tp, const Comma
 	resp->which_body = Response_ack_tag;
 }
 
-/* #308: explicit end of the claim window. Decrypting this command at all
- * already proves the caller holds secret_key, so app_nfc_clm_ack() does the
- * same narrow settings_save_one() persist the #247 delete-detection path
- * already does synchronously elsewhere in app_nfc.c — no deferred action, no
- * reboot. A no-op if the claim window isn't currently open (already consumed,
- * or claim_token never provisioned), so this is always safe to send. */
-static void app_cmd_handle_clm_ack(enum app_cmd_transport tp, const Command *cmd, Response *resp,
-				   enum app_cmd_action *action)
+/* #308/#415: explicit end of the claim window. app_nfc_claim_done() does the
+ * same narrow settings_save_one() persist app_nfc.c already does synchronously —
+ * no deferred action, no reboot. Idempotent (a no-op if already done), so it is
+ * always safe to send. With #415 this is the ONLY way the window closes (the
+ * implicit close on any decrypted command is gone), so the app must send it
+ * after storing the claimed keys. */
+static void app_cmd_handle_claim_done(enum app_cmd_transport tp, const Command *cmd, Response *resp,
+				      enum app_cmd_action *action)
 {
 	ARG_UNUSED(tp);
 	ARG_UNUSED(cmd);
 	ARG_UNUSED(action);
 
-	app_nfc_clm_ack();
+	app_nfc_claim_done();
 	resp->which_body = Response_ack_tag;
 }
 
-/* #351: re-open the claim window (symmetric counterpart to clm_ack's close).
- * Always deferred via APP_CMD_ACTION_CLM_REARM_SAVE — same restart-style
- * pattern as reboot/device_reset/set_secret_key: the Ack is written and
- * delivered to the phone first (app_nfc_take_cmd_action() only releases the
- * action once that round-trip completes, #242), and only then does main.c
- * flip the latch + reboot. This used to short-circuit to a synchronous
- * app_nfc_clm_reset() (no reboot) when no new_claim_token was given, on the
+/* #351/#415: re-open the claim window (symmetric counterpart to claim_done's
+ * close). Always deferred via APP_CMD_ACTION_CLAIM_ACTIVE_SAVE — same
+ * restart-style pattern as reboot/device_reset/set_secret_key: the Ack is
+ * written and delivered to the phone first (app_nfc_take_cmd_action() only
+ * releases the action once that round-trip completes, #242), and only then does
+ * main.c flip the latch + reboot. This used to short-circuit to a synchronous
+ * app_nfc_claim_active() (no reboot) when no new_claim_token was given, on the
  * reasoning that nothing in g_app_config was changing so there was nothing to
  * wait on — but that made the two branches behave differently for no
  * functional reason. Deferring both the same way costs one reboot in the
  * no-new-token case and buys consistent, predictable timing instead: the
  * phone can always assume "ack read -> reboot happens" regardless of which
- * branch it took, mirroring the non-new-token branch's rebuilt of
+ * branch it took, mirroring the non-new-token branch's rebuild of
  * app_config()->claim_token being a same-value no-op (h_commit just re-syncs
- * the value that's already live), so a plain re-arm still leaves
+ * the value that's already live), so a plain re-open still leaves
  * claim_token unchanged. */
-static void app_cmd_handle_clm_rearm(enum app_cmd_transport tp, const Command *cmd, Response *resp,
-				     enum app_cmd_action *action)
+static void app_cmd_handle_claim_active(enum app_cmd_transport tp, const Command *cmd,
+					Response *resp, enum app_cmd_action *action)
 {
 	ARG_UNUSED(tp);
-	const Command_ClmRearm *rearm = &cmd->body.clm_rearm;
+	const Command_ClaimActive *rearm = &cmd->body.claim_active;
 
 	if (rearm->has_new_claim_token &&
 	    !buffer_is_zero(rearm->new_claim_token, sizeof(rearm->new_claim_token))) {
 		memcpy(app_config()->claim_token, rearm->new_claim_token,
 		       sizeof(app_config()->claim_token));
 	}
-	*action = APP_CMD_ACTION_CLM_REARM_SAVE;
+	*action = APP_CMD_ACTION_CLAIM_ACTIVE_SAVE;
 
 	resp->which_body = Response_ack_tag;
+}
+
+/* #415: read the claim identity {serial_number, claim_token} over the
+ * unauthenticated plain_text transport (also nfc / shell). Returns
+ * Response.claim_info while the claim window is active; Error NOT_READY
+ * "claimed" once it is done, or "no claim token" when none was provisioned.
+ * Read-only, no side effects — the identity-class-only rule a plain_text command
+ * must obey. Discloses exactly what the plaintext hio.stck:clm record does
+ * today, but only on a powered unit while the window is open. */
+static void app_cmd_handle_get_claim_info(enum app_cmd_transport tp, const Command *cmd,
+					  Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(action);
+
+	if (app_nfc_claim_state_get() == APP_NFC_CLAIM_DONE) {
+		make_error(resp, Response_Error_Code_NOT_READY, "claimed");
+		return;
+	}
+	if (buffer_is_zero(g_app_config.claim_token, sizeof(g_app_config.claim_token))) {
+		make_error(resp, Response_Error_Code_NOT_READY, "no claim token");
+		return;
+	}
+
+	resp->which_body = Response_claim_info_tag;
+	resp->body.claim_info.serial_number = g_app_config.serial_number;
+	BUILD_ASSERT(sizeof(resp->body.claim_info.claim_token) == sizeof(g_app_config.claim_token),
+		     "ClaimInfo.claim_token size mismatch");
+	memcpy(resp->body.claim_info.claim_token, g_app_config.claim_token,
+	       sizeof(g_app_config.claim_token));
+}
+
+/* #415/#313: identity bootstrap over the mailbox. Everything a phone needs after
+ * a tap, before its first encrypted command, and none of it secret: the serial
+ * (to pick the cached secret_key), the nonce high-water (to send nonce+1 through
+ * the anti-replay window), the config version (is its cached config stale) and
+ * the FW version. Replaces the plaintext hio.stck:inf record. Read-only. Always
+ * answers (unlike get_claim_info it is not gated on the claim window). Identity
+ * only — no device_status: alarm / battery / radio / claim state stay owner-only
+ * (Info.device_status over the encrypted get_info), so an unauthenticated tap
+ * cannot tell e.g. that a security sensor's radio is off. */
+static void app_cmd_handle_get_basic_info(enum app_cmd_transport tp, const Command *cmd,
+					  Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(action);
+
+	resp->which_body = Response_basic_info_tag;
+	Response_BasicInfo *bi = &resp->body.basic_info;
+	bi->serial_number = g_app_config.serial_number;
+	/* Live high-water == what decrypt() checks against (what the old inf record
+	 * carried, now served here). */
+	bi->nonce_counter = app_config()->nonce_counter;
+	bi->config_version = g_app_config.config_version;
+	bi->fw_major = APP_VERSION_MAJOR;
+	bi->fw_minor = APP_VERSION_MINOR;
+	bi->fw_patch = APP_VERSION_PATCH;
 }
 
 /* #338: remote-triggered buzzer melody (NFC/LRW). kind selects one of the
@@ -1281,22 +1370,58 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 
 	switch (cmd->which_body) {
 	case Command_set_param_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_set_param(tp, cmd, resp, action);
 		break;
 	case Command_get_param_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_get_param(tp, cmd, resp, action);
 		break;
 	case Command_get_info_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_get_info(tp, cmd, resp, action);
 		break;
 	case Command_get_config_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_get_config(tp, cmd, resp, action);
 		break;
 	case Command_settings_save_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		*action = APP_CMD_ACTION_SETTINGS_SAVE;
 		resp->which_body = Response_ack_tag;
 		break;
 	case Command_reboot_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		*action = APP_CMD_ACTION_REBOOT;
 		resp->which_body = Response_ack_tag;
 		break;
@@ -1318,6 +1443,12 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_force_send(tp, cmd, resp, action);
 		break;
 	case Command_reset_counters_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_reset_counters(tp, cmd, resp, action);
 		break;
 	case Command_req_history_tag:
@@ -1345,12 +1476,30 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_clock_sync(tp, cmd, resp, action);
 		break;
 	case Command_w1_scan_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_w1_scan(tp, cmd, resp, action);
 		break;
 	case Command_lrw_reset_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_lrw_reset(tp, cmd, resp, action);
 		break;
 	case Command_lrw_join_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_lrw_join(tp, cmd, resp, action);
 		break;
 	case Command_enter_calibration_tag:
@@ -1387,13 +1536,13 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		}
 		app_cmd_handle_set_secret_key(tp, cmd, resp, action);
 		break;
-	case Command_clm_ack_tag:
+	case Command_claim_done_tag:
 		/* transports: [nfc, shell] — reject on any other transport */
 		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
-		app_cmd_handle_clm_ack(tp, cmd, resp, action);
+		app_cmd_handle_claim_done(tp, cmd, resp, action);
 		break;
 	case Command_vendor_reset_tag:
 		/* transports: [vendor] — reject on any other transport */
@@ -1403,13 +1552,13 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		}
 		app_cmd_handle_vendor_reset(tp, cmd, resp, action);
 		break;
-	case Command_clm_rearm_tag:
+	case Command_claim_active_tag:
 		/* transports: [nfc, shell] — reject on any other transport */
 		if (tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
-		app_cmd_handle_clm_rearm(tp, cmd, resp, action);
+		app_cmd_handle_claim_active(tp, cmd, resp, action);
 		break;
 	case Command_buzzer_play_tag:
 		/* transports: [lrw, nfc] — reject on any other transport */
@@ -1419,7 +1568,31 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		}
 		app_cmd_handle_buzzer_play(tp, cmd, resp, action);
 		break;
+	case Command_get_claim_info_tag:
+		/* transports: [plain_text, nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_PLAIN_TEXT && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_get_claim_info(tp, cmd, resp, action);
+		break;
+	case Command_get_basic_info_tag:
+		/* transports: [plain_text, nfc, shell] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_PLAIN_TEXT && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_get_basic_info(tp, cmd, resp, action);
+		break;
 	case Command_get_settings_tag:
+		/* transports: [lrw, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC &&
+		    tp != APP_CMD_TRANSPORT_SHELL_DEBUG && tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
 		app_cmd_handle_get_settings(tp, cmd, resp, action);
 		break;
 	default:
@@ -1461,6 +1634,15 @@ static int encode_response(const Response *resp, uint8_t *out, size_t out_cap, s
 	return 0;
 }
 
+/* Whether `resp` encodes (version byte + Response) into `cap` bytes — a nanopb
+ * sizing pass, so a page layout needs no scratch buffer of the frame's size. */
+static bool response_fits(const Response *resp, size_t cap)
+{
+	size_t size = 0;
+
+	return pb_get_encoded_size(&size, Response_fields, resp) && size + 1 <= cap;
+}
+
 /* #425 universal paging over a radio. An answer that does not fit the DR budget
  * is split into pages — each a complete Response with the same seq and
  * Response.page_index/page_count — and the device sends every page by itself.
@@ -1492,6 +1674,7 @@ struct info_snap {
 	Response_Info info;
 	uint8_t alarm[ACTIVE_ALARM_SNAPSHOT_MAX][3];
 	uint8_t n_alarms;
+	uint32_t seq; /* echoed on every page; part of the page size */
 };
 
 static struct {
@@ -1797,6 +1980,13 @@ enum {
 	INFO_U_BATTERY,
 	INFO_U_RESET_CAUSE,
 	INFO_U_DEVICE_STATUS,
+	/* NFC-only fields: never set in a LoRaWAN snapshot, so empty (skipped) there. */
+	INFO_U_LRW_STATE,
+	INFO_U_CLAIM_TOKEN,
+	INFO_U_DEV_EUI,
+	/* last_dl_rssi/snr/age_s (#423): one unit, so RSSI/SNR never travel on a page
+	 * without their age. */
+	INFO_U_LAST_DL,
 	INFO_U_SCALARS,
 };
 
@@ -1832,7 +2022,7 @@ static void info_page_fill(Response *resp, const struct info_snap *snap, uint32_
 	Response_Info *pi = &resp->body.info;
 
 	*resp = (Response)Response_init_zero;
-	resp->seq = m_page_stream.seq;
+	resp->seq = snap->seq;
 	resp->which_body = Response_info_tag;
 	set_page(resp, page, count);
 
@@ -1847,6 +2037,26 @@ static void info_page_fill(Response *resp, const struct info_snap *snap, uint32_
 	pi->battery = (mask & BIT(INFO_U_BATTERY)) ? all->battery : 0;
 	pi->reset_cause = (mask & BIT(INFO_U_RESET_CAUSE)) ? all->reset_cause : 0;
 	pi->device_status = (mask & BIT(INFO_U_DEVICE_STATUS)) ? all->device_status : 0;
+	if (mask & BIT(INFO_U_LRW_STATE)) {
+		pi->has_lrw_state = all->has_lrw_state;
+		pi->lrw_state = all->lrw_state;
+	}
+	if (mask & BIT(INFO_U_CLAIM_TOKEN)) {
+		pi->has_claim_token = all->has_claim_token;
+		memcpy(pi->claim_token, all->claim_token, sizeof(pi->claim_token));
+	}
+	if (mask & BIT(INFO_U_DEV_EUI)) {
+		pi->has_dev_eui = all->has_dev_eui;
+		memcpy(pi->dev_eui, all->dev_eui, sizeof(pi->dev_eui));
+	}
+	if (mask & BIT(INFO_U_LAST_DL)) {
+		pi->has_last_dl_rssi = all->has_last_dl_rssi;
+		pi->last_dl_rssi = all->last_dl_rssi;
+		pi->has_last_dl_snr = all->has_last_dl_snr;
+		pi->last_dl_snr = all->last_dl_snr;
+		pi->has_last_dl_age_s = all->has_last_dl_age_s;
+		pi->last_dl_age_s = all->last_dl_age_s;
+	}
 	if (rng->end > rng->start) {
 		pi->active_alarms.funcs.encode = encode_alarm_range;
 		pi->active_alarms.arg = rng;
@@ -1880,6 +2090,16 @@ static bool info_unit_empty(const Response_Info *in, size_t u)
 		return in->reset_cause == 0;
 	case INFO_U_DEVICE_STATUS:
 		return in->device_status == 0;
+	case INFO_U_LRW_STATE:
+		return !in->has_lrw_state;
+	case INFO_U_CLAIM_TOKEN:
+		return !in->has_claim_token;
+	case INFO_U_DEV_EUI:
+		return !in->has_dev_eui;
+	case INFO_U_LAST_DL:
+		/* Set together, and only after a downlink: RSSI/SNR can be 0 or negative,
+		 * so presence (not the value) decides. */
+		return !in->has_last_dl_age_s;
 	default:
 		return false;
 	}
@@ -1894,13 +2114,10 @@ static bool info_unit_empty(const Response_Info *in, size_t u)
 static int info_layout(const struct info_snap *snap, size_t cap, uint32_t want, uint32_t *mask_out,
 		       struct alarm_range *rng_out, uint32_t *count, Response *r)
 {
-	uint8_t tmp[64];
-	size_t len;
 	uint32_t cur = 0, mask = 0;
 	struct alarm_range rng = {.snap = snap, .start = 0, .end = 0};
 	size_t units = INFO_U_SCALARS + snap->n_alarms;
 
-	cap = MIN(cap, sizeof(tmp));
 	for (size_t u = 0; u < units; u++) {
 		bool is_alarm = u >= INFO_U_SCALARS;
 		uint8_t a = (uint8_t)(u - INFO_U_SCALARS);
@@ -1923,7 +2140,7 @@ static int info_layout(const struct info_snap *snap, size_t cap, uint32_t want, 
 
 		if (contiguous) {
 			info_page_fill(r, snap, tmask, &trng, PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
-			if (encode_response(r, tmp, cap, &len) == 0) {
+			if (response_fits(r, cap)) {
 				mask = tmask;
 				rng = trng;
 				continue;
@@ -1939,7 +2156,7 @@ static int info_layout(const struct info_snap *snap, size_t cap, uint32_t want, 
 			arng.end = a + 1;
 		}
 		info_page_fill(r, snap, amask, &arng, PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
-		if (encode_response(r, tmp, cap, &len) != 0) {
+		if (!response_fits(r, cap)) {
 			continue;
 		}
 		if (mask != 0 || rng.end != rng.start) {
@@ -2004,6 +2221,7 @@ static int info_paged(uint32_t seq, uint8_t *out, size_t cap, size_t *out_len, b
 		snap->alarm[i][2] = (uint8_t)list[i].type;
 	}
 	snap->n_alarms = (uint8_t)n;
+	snap->seq = seq;
 
 	m_page_stream.seq = seq;
 	m_page_stream.cap = cap;
@@ -2097,6 +2315,119 @@ int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
 	return 0;
 }
 
+/* ---- host-driven pages (NFC / vendor / shell) ----------------------------- */
+
+/* Over the phone channels the host asks for every page itself (GetInfo.page /
+ * W1Scan.page); nothing is streamed and nothing is kept between requests. Each
+ * page is laid out afresh from a new snapshot, so the pages of one read may
+ * differ by the few tenths of a second between the requests (accepted). The
+ * layout rules are the radio ones: greedy, a unit that does not fit alone is
+ * left out, and every page is a complete, independently decodable Response. */
+static bool host_paged(enum app_cmd_transport tp)
+{
+	return tp == APP_CMD_TRANSPORT_NFC || tp == APP_CMD_TRANSPORT_VENDOR ||
+	       tp == APP_CMD_TRANSPORT_SHELL_DEBUG;
+}
+
+/* The requested page does not exist: OUT_OF_RANGE, fault_field 1 (= page), as
+ * GetConfig answers. */
+static void page_out_of_range(Response *resp, uint32_t seq)
+{
+	*resp = (Response)Response_init_zero;
+	resp->seq = seq;
+	make_error(resp, Response_Error_Code_OUT_OF_RANGE, "page");
+	resp->body.error.fault_field = 1;
+}
+
+/* Page `page` of the Info for `cap`; `r` is the caller's dead Response, used as
+ * layout scratch and for the answer. Not inlined: the snapshot + alarm list stay
+ * off app_cmd_handle()'s frame (HIL P5b). */
+static __noinline int info_host_page(enum app_cmd_transport tp, uint32_t seq, uint32_t page,
+				     Response *r, uint8_t *out, size_t cap, size_t *out_len)
+{
+	struct info_snap snap;
+	struct app_alarm_active list[ACTIVE_ALARM_SNAPSHOT_MAX];
+	size_t n = app_alarm_active_snapshot(list, ARRAY_SIZE(list));
+
+	memset(&snap, 0, sizeof(snap));
+	fill_info(tp, &snap.info, SIZE_MAX);
+	snap.info.active_alarms.funcs.encode = NULL;
+	for (size_t i = 0; i < n; i++) {
+		snap.alarm[i][0] = (uint8_t)list[i].source;
+		snap.alarm[i][1] = (uint8_t)list[i].quantity;
+		snap.alarm[i][2] = (uint8_t)list[i].type;
+	}
+	snap.n_alarms = (uint8_t)n;
+	snap.seq = seq;
+
+	uint32_t mask = 0, count = 0;
+	struct alarm_range rng = {.snap = &snap};
+	int ret = info_layout(&snap, cap, page, &mask, &rng, &count, r);
+
+	if (ret) {
+		return ret;
+	}
+	if (page >= count) {
+		page_out_of_range(r, seq);
+	} else {
+		info_page_fill(r, &snap, mask, &rng, page, count);
+	}
+	return encode_response(r, out, cap, out_len);
+}
+
+/* Page `page` of the W1Scan result in `r` (split by ROM) for `cap`. */
+static __noinline int w1_scan_host_page(Response *r, uint32_t page, uint8_t *out, size_t cap,
+					size_t *out_len)
+{
+	const Response_W1Scan all = r->body.w1_scan;
+	pb_size_t n = all.rom_count;
+	pb_size_t k = n;
+
+	/* Most ROMs per page that still fit with (worst-case) page fields. */
+	for (; k > 0; k--) {
+		r->body.w1_scan.rom_count = k;
+		r->page_index = r->page_count = (k < n) ? PAGE_COUNT_BOUND : 0;
+		if (response_fits(r, cap)) {
+			break;
+		}
+	}
+	if (n > 0 && k == 0) {
+		return -EMSGSIZE; /* not even one ROM fits */
+	}
+
+	uint32_t count = (n == 0) ? 1 : (n + k - 1) / k;
+
+	r->page_index = r->page_count = 0;
+	if (page >= count) {
+		page_out_of_range(r, r->seq);
+		return encode_response(r, out, cap, out_len);
+	}
+	r->body.w1_scan.rom_count = 0;
+	for (size_t i = (size_t)page * k; i < n && i < ((size_t)page + 1) * k; i++) {
+		r->body.w1_scan.rom[r->body.w1_scan.rom_count++] = all.rom[i];
+	}
+	set_page(r, page, count);
+	return encode_response(r, out, cap, out_len);
+}
+
+#ifdef CONFIG_ZTEST
+/* Test hook: the host-driven W1Scan pages without a 1-Wire bus. */
+int test_w1_scan_host_page(const uint8_t roms[][8], size_t n, uint32_t seq, uint32_t page,
+			   uint8_t *out, size_t cap, size_t *out_len)
+{
+	Response r = Response_init_zero;
+
+	r.seq = seq;
+	r.which_body = Response_w1_scan_tag;
+	for (size_t i = 0; i < n && i < ARRAY_SIZE(r.body.w1_scan.rom); i++) {
+		r.body.w1_scan.rom[i].size = 8;
+		memcpy(r.body.w1_scan.rom[i].bytes, roms[i], 8);
+		r.body.w1_scan.rom_count++;
+	}
+	return w1_scan_host_page(&r, page, out, cap, out_len);
+}
+#endif
+
 /* A Command that fails to decode is still answered with its seq when the seq
  * itself is readable: walk the top-level fields up to the first malformed one
  * and pick up field 1 (varint). Without it the host cannot pair the BAD_REQUEST
@@ -2125,14 +2456,16 @@ static uint32_t peek_seq(const uint8_t *in, size_t in_len)
 /* Decode + dispatch in their own frame, so the ~550 B Command is gone again
  * before app_cmd_handle() encodes and pages the answer (HIL P5b: a paged GetInfo
  * overflowed the 4 KB m_work_q with the Command still on the stack). Returns the
- * command's body tag (0 on a decode error, answered BAD_REQUEST). */
+ * command's body tag (0 on a decode error, answered BAD_REQUEST); *host_page is
+ * the requested GetInfo.page / W1Scan.page (0 when absent). */
 static __noinline pb_size_t decode_and_dispatch(enum app_cmd_transport transport, const uint8_t *in,
 						size_t in_len, Response *resp,
-						enum app_cmd_action *act)
+						enum app_cmd_action *act, uint32_t *host_page)
 {
 	Command cmd = Command_init_zero;
 	pb_istream_t istream = pb_istream_from_buffer(in, in_len);
 
+	*host_page = 0;
 	if (!pb_decode(&istream, Command_fields, &cmd)) {
 		LOG_ERR_CALL_FAILED_STR("pb_decode", PB_GET_ERROR(&istream));
 		resp->seq = peek_seq(in, in_len);
@@ -2140,6 +2473,11 @@ static __noinline pb_size_t decode_and_dispatch(enum app_cmd_transport transport
 		return 0;
 	}
 	app_cmd_dispatch(transport, &cmd, resp, act);
+	if (cmd.which_body == Command_get_info_tag && cmd.body.get_info.has_page) {
+		*host_page = cmd.body.get_info.page;
+	} else if (cmd.which_body == Command_w1_scan_tag && cmd.body.w1_scan.has_page) {
+		*host_page = cmd.body.w1_scan.page;
+	}
 	return cmd.which_body;
 }
 
@@ -2154,7 +2492,8 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	enum app_cmd_action act = APP_CMD_ACTION_NONE;
 
 	Response resp = Response_init_zero;
-	pb_size_t cmd_body = decode_and_dispatch(transport, in, in_len, &resp, &act);
+	uint32_t host_page = 0;
+	pb_size_t cmd_body = decode_and_dispatch(transport, in, in_len, &resp, &act, &host_page);
 
 	if (cmd_body != 0) {
 		/* #409 3d/3e: over LoRaWAN a multi-page GetConfig/GetParam streams
@@ -2195,9 +2534,27 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		return 0;
 	}
 
-	int ret = encode_response(&resp, out, out_cap, out_len);
+	/* Host-driven pages (NFC / vendor / shell): GetInfo.page / W1Scan.page picks
+	 * the page; an Info / W1Scan that does not fit the frame answers page 0 of N
+	 * instead of being trimmed. */
 	const uint32_t seq = resp.seq;
 	bool info_paging = false;
+	const bool host = host_paged(transport) && (resp.which_body == Response_info_tag ||
+						    resp.which_body == Response_w1_scan_tag);
+	int ret = -EMSGSIZE;
+
+	if (!host || host_page == 0) {
+		ret = encode_response(&resp, out, out_cap, out_len);
+	}
+	if (host && ret == -EMSGSIZE) {
+		if (resp.which_body == Response_info_tag) {
+			info_paging = true; /* `resp` becomes page scratch */
+			ret = info_host_page(transport, seq, host_page, &resp, out, out_cap,
+					     out_len);
+		} else {
+			ret = w1_scan_host_page(&resp, host_page, out, out_cap, out_len);
+		}
+	}
 
 	if (ret == -EMSGSIZE && resp.which_body == Response_info_tag &&
 	    transport == APP_CMD_TRANSPORT_LRW) {
@@ -2225,9 +2582,9 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		}
 	}
 
-	/* An Info over NFC that overflows the buffer: drop active alarms one at a
-	 * time and re-encode before giving up — the rest of Info is worth far more
-	 * than the alarm list. */
+	/* Last resort for an Info that still overflows (not even one page fits):
+	 * drop active alarms one at a time and re-encode before giving up — the rest
+	 * of Info is worth far more than the alarm list. */
 	for (size_t max_alarms = ACTIVE_ALARM_SNAPSHOT_MAX;
 	     ret == -EMSGSIZE && resp.which_body == Response_info_tag && max_alarms-- > 0;) {
 		if (info_paging) {

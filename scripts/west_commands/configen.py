@@ -840,8 +840,15 @@ _TRANSPORT_ENUM = {
     "nfc": "APP_CMD_TRANSPORT_NFC",
     "shell": "APP_CMD_TRANSPORT_SHELL_DEBUG",
     "vendor": "APP_CMD_TRANSPORT_VENDOR",
+    "plain_text": "APP_CMD_TRANSPORT_PLAIN_TEXT",
 }
 _ALL_TRANSPORTS = set(_TRANSPORT_ENUM)
+# Transports a command answers on when it omits `transports:`. plain_text (#415)
+# is the unencrypted, unauthenticated channel, so it is NOT in the implicit
+# default — a command reaches plain_text only by listing it explicitly (opt-in).
+# Every other transport stays on by default (the historical "omitted = all"
+# rule, now "all except plain_text").
+_DEFAULT_TRANSPORTS = _ALL_TRANSPORTS - {"plain_text"}
 
 
 def build_commands_model(config):
@@ -874,18 +881,22 @@ def build_commands_model(config):
             log.die(f"action command '{name}' must set 'action'")
 
         transports = c.get("transports")
-        # Emit a transport guard for every command whose allow-list is a proper
-        # subset of all transports (#183): the dispatch must reject the command on
-        # any disallowed transport, not just the [lrw]-only case. `None` (omitted)
-        # means all transports → no guard.
+        # Emit a transport guard for every command not reachable on ALL transports
+        # (#183): the dispatch must reject the command on any disallowed transport,
+        # not just the [lrw]-only case. `None` (omitted) means the implicit default
+        # set (every transport except the opt-in plain_text, #415), so an
+        # omitted-transports command still gets a guard that rejects plain_text —
+        # get_info/set_param/... must never answer on the unauthenticated channel.
         transport_guard = None
         if transports is not None:
             unknown = [t for t in transports if t not in _TRANSPORT_ENUM]
             if unknown:
                 log.die(f"command '{name}' has unknown transport(s) {unknown} "
                         f"(expected any of {sorted(_TRANSPORT_ENUM)})")
-            if set(transports) != _ALL_TRANSPORTS:
-                transport_guard = [_TRANSPORT_ENUM[t] for t in transports]
+        allowed = transports if transports is not None else \
+            [t for t in _TRANSPORT_ENUM if t in _DEFAULT_TRANSPORTS]
+        if set(allowed) != _ALL_TRANSPORTS:
+            transport_guard = [_TRANSPORT_ENUM[t] for t in allowed]
         cmds.append({
             "name": name,
             "proto_id": pid,
@@ -894,6 +905,7 @@ def build_commands_model(config):
             "action": c.get("action"),
             "response": c.get("response", "ack"),
             "transports": transports,
+            "allowed_transports": allowed,
             "transport_guard": transport_guard,
             "lrw_only": transports == ["lrw"],
             "emits_response": c.get("response", "ack") not in COMMAND_RESPONSE_NONE,

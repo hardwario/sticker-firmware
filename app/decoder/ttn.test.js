@@ -432,6 +432,18 @@ test("decodeUplink get_info lrw_state=5 decodes as disabled (fPort 85)", () => {
   assert.equal(got.info.lrw_state_name, "disabled");
 });
 
+// Last-downlink link quality (#409 A2, NFC-only Info fields 16-18): fw 1.4.2,
+// last_dl_rssi=-97 dBm (sint32), last_dl_snr=-7 dB, last_dl_age_s=3600 s.
+test("decodeUplink decodes get_info last-downlink RSSI/SNR/age (#409)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108011a110801100418028001c10188010d9001901c"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.info.last_dl_rssi, -97);
+  assert.equal(got.info.last_dl_snr, -7);
+  assert.equal(got.info.last_dl_age_s, 3600);
+});
+
 // A healthy device omits device_status (0 -> proto3 drops it); decoder defaults to 0/[].
 test("decodeUplink get_info device_status defaults to 0 when absent (fPort 85)", () => {
   const got = codec.decodeUplink({
