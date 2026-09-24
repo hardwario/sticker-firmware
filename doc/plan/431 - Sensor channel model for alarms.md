@@ -100,25 +100,49 @@ enc = `u8 | i16 | u16 | i32 | u32`). `i32` is new, for high-resolution channels 
 The channel tables are written once, in **`app/src/app_w1_slots.yaml`**. That file is the
 only place they are edited.
 
-A new west command (`west sensorgen`, alongside `configen`) generates:
+The west command `west sensorgen app/src/app_w1_slots.yaml`
+(`scripts/west_commands/sensorgen.py`, alongside `configen`) validates the YAML and
+generates two things. Both are committed, like the configen output.
 
-- `app_sensor_types.c/.h`: descriptor tables, `APP_SENSOR_MB_CH_*` channel constants
-  (`APP_SENSOR_MB_CH_HALL_LEFT_STATE`, …) for drivers to fill by name, the per-type
-  channel counts, and lookups (`app_sensor_type_get(id)`, `app_sensor_type_of_slot()`,
-  `app_sensor_channel_get(type, ch)`, `app_sensor_channel_by_name()`).
-- A table block inside `ttn.js`. The decoder must stay one strict-ES5 file with no
-  `require()` (LNS sandboxes), so the generator rewrites the region between
-  `// BEGIN sensor_types` / `// END sensor_types` markers.
+- **`app_sensor_types.h` / `app_sensor_types.c`:**
+  - `enum app_sensor_type_id` (`APP_SENSOR_TYPE_MOTHERBOARD = 1`, …);
+  - one channel enum per type (`APP_SENSOR_CH_MOTHERBOARD_HALL_LEFT_STATE`,
+    `APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE_AUX`, …, `APP_SENSOR_CH_<TYPE>_COUNT`),
+    which drivers use to fill channels by name;
+  - the descriptor tables (`struct app_sensor_channel`: kind, `APP_SENSOR_F_*` flags,
+    wire type/scale, history encoding/scale, range, `cap_off` =
+    `offsetof(struct app_config, cap_*)`);
+  - lookups: `app_sensor_type_get(id)`, `app_sensor_type_by_family()`,
+    `app_sensor_type_by_name()`, `app_sensor_channel_get(type, ch)`,
+    `app_sensor_channel_by_name()`.
+
+  The slot → type mapping (`sensorN_type`) is runtime config and comes in step 3.
+- **The `// BEGIN GENERATED SENSOR_TYPES` region of `ttn.js`:** `_SENSOR_TYPES` (type
+  id → name + channels `{n, u, k, s, h}`) and `_SENSOR_MB_TYPE`. The decoder must stay
+  one strict-ES5 file with no `require()` (LNS sandboxes), so the table is written into
+  it rather than imported. It is exported as `sensorTypes` for tests.
+
+**`pending_caps`:** a capability that a channel references but that does not exist in
+`app_config.yml` yet (`cap_analog_a` / `_b` until #396 / PR #407 lands).
+- The generator accepts it and emits the channel ungated.
+- Validation fails once the cap appears in `app_config.yml`, so the entry is removed in
+  the PR that adds it.
+
+**Worktrees:** the west workspace resolves extension commands from the shared main
+checkout, so in a worktree the command is driven directly from Python, as the pytest
+suite does (`sensorgen.Sensorgen().do_run(...)`).
 
 The **Manager-App reads `app_w1_slots.yaml` directly** (D5), pinned to the firmware
 release tag it targets. It uses the file for labels, units, scales, valid rule kinds,
 capability gating and the history-capable channel list. Nothing extra is generated for
 it, and the device only ever sends ids.
 
-CI (pytest, same pattern as the configen sync test):
+CI (`scripts/west_commands/tests/test_sensorgen.py`, same pattern as the configen sync
+test; plus the `tests/sensor_types` native ztest suite for the generated lookups):
 
 - the generated C and the `ttn.js` block are in sync with the YAML;
-- ids and channels are append-only against the previous committed copy;
+- ids and channels are append-only: the generator parses the committed
+  `app_sensor_types.h` and refuses a renumbered or removed type/channel;
 - channel limits (32 motherboard / 10 per 1-Wire type), unique names per type;
 - every `cap` names an existing `app_config.yml` capability;
 - `range × scale` fits the channel's `wire` type and its `history` encoding, with the
@@ -138,7 +162,7 @@ counts, not from the limits:
 ```c
 struct app_sensor_mb {                     /* slot 0 */
 	uint32_t valid;                        /* bit ch = value present */
-	float v[APP_SENSOR_MB_CH_COUNT];       /* 21 today; physical units, state = 0/1 */
+	float v[APP_SENSOR_CH_MOTHERBOARD_COUNT]; /* 21 today; physical units, state = 0/1 */
 	uint32_t count[APP_SENSOR_MB_CNT_COUNT]; /* exact counters, indexed via descriptor */
 };
 
@@ -460,8 +484,14 @@ The implementation lands **incrementally in this PR (#431)**, one step after ano
 Each step is its own commit series with its own tests, and CI must be green at the end
 of every step.
 
-1. **Registry + generator.** `app_w1_slots.yaml` (this draft, frozen), `west sensorgen`,
-   generated C + `ttn.js` block, CI checks. No behaviour change.
+1. ✅ **Registry + generator.**
+   - `app_w1_slots.yaml`, `west sensorgen`, the generated `app_sensor_types.{c,h}` and
+     `ttn.js` region.
+   - `test_sensorgen.py` (sync, validation, append-only guard) and the
+     `tests/sensor_types` ztest.
+   - No behaviour change: nothing references the tables yet, so release and debug
+     images are byte-identical in size to `v1.5.0` (release 163 392 B flash /
+     52 812 B RAM, debug 222 156 B / 61 820 B).
 2. **Readings → channels.** `struct app_sensor_mb` / `app_sensor_w1`, drivers fill
    channels, the TMP112 and MPL3115A2 temperatures become readable, RAM check. Telemetry
    and history are still encoded from the channel view into their current formats.
