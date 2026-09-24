@@ -928,7 +928,9 @@ static void app_cmd_handle_force_send(enum app_cmd_transport tp, const Command *
 	ARG_UNUSED(resp);
 	ARG_UNUSED(action);
 #if defined(CONFIG_LORAWAN)
-	app_report_trigger();
+	/* F14: sent at once (no fleet jitter), so it can't silently fold into a
+	 * jittered report that happens to be pending. */
+	app_report_force();
 #endif
 	/* No ack — the triggered telemetry uplink IS the answer; an extra ack
 	 * would just cost a second uplink. Leave which_body == 0 (emit nothing). */
@@ -955,7 +957,7 @@ static void app_cmd_handle_sample(enum app_cmd_transport tp, const Command *cmd,
 	 * and a full Telemetry would not fit the 64-byte fPort-85 response buffer. */
 
 #if defined(CONFIG_LORAWAN)
-	app_report_trigger();
+	app_report_force(); /* host-requested, like force_send (F14) */
 #endif
 }
 
@@ -1102,9 +1104,10 @@ static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *
 #ifdef CONFIG_LORAWAN
 	/* Empty (LRW): re-sync from the network, then answer with an Info uplink
 	 * once the network time lands (carries the synced unix_time). No ack — see
-	 * app_lrw. */
+	 * app_lrw. The Info carries this command's seq, so the host can pair the
+	 * answer with its request (the boot Info keeps seq 0). */
 	app_clock_force_resync();
-	app_lrw_send_info_on_clock_sync();
+	app_lrw_send_info_on_clock_sync(cmd->seq);
 #else
 	resp->which_body = Response_ack_tag; /* no LRW: just confirm */
 #endif
@@ -1146,7 +1149,10 @@ static void app_cmd_handle_w1_scan(enum app_cmd_transport tp, const Command *cmd
 		make_error(resp, Response_Error_Code_NOT_READY, "1-wire scan");
 	}
 #else
-	make_error(resp, Response_Error_Code_NOT_READY, "no 1-wire");
+	/* 1-Wire is not built into this image (e.g. the lean debug.conf): NOT_SUPPORTED,
+	 * so a host can tell "not in this FW" from a bus that is not ready (NOT_READY) —
+	 * over LoRaWAN only the code survives, the detail is stripped (#409 3a). */
+	make_error(resp, Response_Error_Code_NOT_SUPPORTED, "no 1-wire");
 #endif
 }
 
@@ -2189,13 +2195,18 @@ int app_cmd_build_budget_error(uint32_t seq, uint8_t *out, size_t out_cap, size_
 
 int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *more)
 {
+	return app_cmd_build_info_seq(0, out, out_cap, out_len, more);
+}
+
+int app_cmd_build_info_seq(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len, bool *more)
+{
 	if (!out || !out_len || !more) {
 		return -EINVAL;
 	}
 	*more = false;
 
 	Response resp = Response_init_zero;
-	resp.seq = 0;
+	resp.seq = seq;
 	resp.which_body = Response_info_tag;
 	/* Autonomous GetInfo on join goes out over LoRaWAN, so dev_eui is omitted. */
 	fill_info(APP_CMD_TRANSPORT_LRW, &resp.body.info, SIZE_MAX);
@@ -2206,7 +2217,7 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *more
 	int ret = encode_response(&resp, out, out_cap, out_len);
 
 	if (ret == -EMSGSIZE) {
-		ret = info_paged(0, out, out_cap, out_len, more, &resp);
+		ret = info_paged(seq, out, out_cap, out_len, more, &resp);
 	}
 	return ret;
 }
