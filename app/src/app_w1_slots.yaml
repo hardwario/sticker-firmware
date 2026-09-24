@@ -1,9 +1,10 @@
 # Sensor type registry — channel model for alarms, telemetry and history (#430).
 #
-# DRAFT (PR #431): not consumed by the build yet. Step 1 (in this PR) adds
-# `west sensorgen`, which generates from this file:
+# Regenerate after every edit (from the repo root):
+#   west sensorgen app/src/app_w1_slots.yaml
+# which validates this file and generates:
 #   - app_sensor_types.c/.h  (channel descriptor tables + lookups)
-#   - the `// BEGIN sensor_types` .. `// END sensor_types` block in decoder/ttn.js
+#   - the `// BEGIN GENERATED SENSOR_TYPES` region in decoder/ttn.js
 # The Manager-App reads this file directly (D5), pinned to the firmware release tag.
 #
 # Sources (where a sensor sits) are just slots:
@@ -42,6 +43,13 @@
 version: 1
 max_channels: 32      # motherboard (valid mask = uint32)
 max_channels_w1: 10   # any 1-Wire type (D6)
+
+# Capabilities referenced below that are not in app_config.yml yet. sensorgen
+# accepts them (the channel is generated ungated) and fails once they appear in
+# app_config.yml, so the entry is removed when the owning PR lands.
+pending_caps:
+  - cap_analog_a   # #396 (PR #407)
+  - cap_analog_b   # #396 (PR #407)
 
 types:
   # -------------------------------------------------------------------------
