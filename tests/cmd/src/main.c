@@ -358,7 +358,7 @@ ZTEST(cmd, test_build_info)
 	test_battery_v = 3.3f;
 	test_battery_ret = 0;
 	/* get_info reads the cached sample voltage, not a fresh ADC read. */
-	g_app_sensor_data.voltage = 3.3f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.3f;
 
 	bool more;
 	int ret = app_cmd_build_info(out, sizeof(out), &out_len, &more);
@@ -699,7 +699,7 @@ ZTEST(cmd, test_build_info_pages_instead_of_trimming)
 	g_app_config.serial_number = 1234567890;
 	test_battery_v = 3.3f;
 	test_battery_ret = 0;
-	g_app_sensor_data.voltage = 3.3f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.3f;
 	test_set_active_alarm_count(5);
 
 	/* Plenty of room: one frame, all 5 alarms, no stream. */
@@ -749,7 +749,7 @@ ZTEST(cmd, test_build_info_seq)
 
 	reset_cfg();
 	g_app_config.serial_number = 1234567890;
-	g_app_sensor_data.voltage = 3.3f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.3f;
 	test_set_active_alarm_count(5);
 
 	zassert_equal(app_cmd_build_info_seq(25, out, sizeof(out), &out_len, &more), 0, "full");
@@ -1538,7 +1538,7 @@ ZTEST(cmd, test_get_info_over_lrw_is_paged)
 	g_app_config.serial_number = 1234567890;
 	test_battery_v = 3.3f;
 	test_battery_ret = 0;
-	g_app_sensor_data.voltage = 3.3f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE) = 3.3f;
 	test_set_active_alarm_count(2);
 	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len,
 				     &action),

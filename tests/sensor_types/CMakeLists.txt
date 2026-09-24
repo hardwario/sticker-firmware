@@ -8,10 +8,12 @@ project(test_app_sensor_types)
 
 set(APP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../app)
 
-# The generated registry is pure tables + lookups; it only needs the config
-# struct layout (offsetof of the cap_* gates) from app_config.h.
+# The generated registry is pure tables + lookups (plus the channel-vector
+# helpers); it only needs the config struct layout (offsetof of the cap_*
+# gates) from app_config.h.
 target_include_directories(app PRIVATE ${APP_DIR}/src)
 target_sources(app PRIVATE
   ${APP_DIR}/src/app_sensor_types.c
+  ${APP_DIR}/src/app_sensor_channels.c
   src/main.c
 )

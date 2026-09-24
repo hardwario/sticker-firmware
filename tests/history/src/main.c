@@ -47,8 +47,8 @@ static void setup(void)
 static void set_th(float t, float h)
 {
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.temperature = t;
-	g_app_sensor_data.humidity = h;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = t;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = h;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }
 
@@ -188,12 +188,14 @@ ZTEST(history, test_per_slot_w1_channels)
 	app_history_clear();
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.temperature = 20.0f;
-	g_app_sensor_data.humidity = 40.0f;
-	g_app_sensor_data.w1[0].temperature = 24.5f; /* s1: temp + hum (machine-probe) */
-	g_app_sensor_data.w1[0].humidity = 55.0f;
-	g_app_sensor_data.w1[2].temperature = 30.0f; /* s3: temp only (Dallas-like) */
-	g_app_sensor_data.w1[2].humidity = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 40.0f;
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE].f =
+		24.5f; /* s1: temp + hum (machine-probe) */
+	g_app_sensor_data.w1[0].v[APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY].f = 55.0f;
+	g_app_sensor_data.w1[2].v[APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE].f =
+		30.0f; /* s3: temp only (Dallas-like) */
+	g_app_sensor_data.w1[2].v[APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY].f = NAN;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 	app_history_capture();
 
@@ -226,10 +228,10 @@ ZTEST(history, test_pressure_illuminance_orientation_accel_channels)
 	app_history_clear();
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.pressure = 101.32f; /* kPa -> 1013.2 hPa on the wire */
-	g_app_sensor_data.illuminance = 450.0f;
-	g_app_sensor_data.orientation = 3;
-	g_app_sensor_data.accel_motion_count = 7;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = 1013.2f; /* hPa */
+	APP_SENSOR_MB_F(&g_app_sensor_data, ILLUMINANCE) = 450.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ACCEL_ORIENTATION) = 3.0f;
+	APP_SENSOR_MB_U(&g_app_sensor_data, ACCEL_COUNT) = 7;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 	app_history_capture();
 
@@ -248,12 +250,12 @@ ZTEST(history, test_pressure_illuminance_orientation_accel_channels)
 	zassert_within(r.value[APP_HISTORY_ACCEL_MOTION], 7.0, 0.01, "accel-motion %g",
 		       r.value[APP_HISTORY_ACCEL_MOTION]);
 
-	/* Absent sentinels: NaN pressure/illuminance, INT_MAX orientation (the
-	 * app_sensor_data default when the capability is off). */
+	/* Absent sentinels: NaN pressure/illuminance/orientation (the channel
+	 * default when the capability is off). */
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.pressure = NAN;
-	g_app_sensor_data.illuminance = NAN;
-	g_app_sensor_data.orientation = INT_MAX;
+	APP_SENSOR_MB_F(&g_app_sensor_data, PRESSURE) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ILLUMINANCE) = NAN;
+	APP_SENSOR_MB_F(&g_app_sensor_data, ACCEL_ORIENTATION) = NAN;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 	app_history_capture();
 
@@ -262,7 +264,7 @@ ZTEST(history, test_pressure_illuminance_orientation_accel_channels)
 	zassert_false(r.present & BIT16(APP_HISTORY_ILLUMINANCE),
 		      "illuminance absent (NaN sentinel)");
 	zassert_false(r.present & BIT16(APP_HISTORY_ORIENTATION),
-		      "orientation absent (INT_MAX sentinel)");
+		      "orientation absent (NaN sentinel)");
 }
 
 ZTEST_SUITE(history, NULL, NULL, NULL, NULL, NULL);

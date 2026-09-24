@@ -40,7 +40,7 @@ extern uint32_t test_clock_unix;
 static void set_temp(float t)
 {
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	g_app_sensor_data.temperature = t;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = t;
 	k_mutex_unlock(&g_app_sensor_data_lock);
 }
 
@@ -66,8 +66,8 @@ static void before(void *unused)
 	g_app_config.history_sensors = BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY);
 	g_app_config.interval_report = 60;
 	g_app_sensor_data = (struct app_sensor_data){0};
-	g_app_sensor_data.temperature = 20.0f;
-	g_app_sensor_data.humidity = 50.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, TEMPERATURE) = 20.0f;
+	APP_SENSOR_MB_F(&g_app_sensor_data, HUMIDITY) = 50.0f;
 	test_clock_has = false;
 
 	zassert_equal(app_history_init(), 0, "init failed");

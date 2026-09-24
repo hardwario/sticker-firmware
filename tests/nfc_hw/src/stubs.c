@@ -97,7 +97,8 @@ void app_clock_force_resync(void)
 }
 
 /* Battery (GetInfo battery field). */
-struct app_sensor_data g_app_sensor_data = {.voltage = NAN};
+struct app_sensor_data g_app_sensor_data = {
+	.mb = {.v = {[APP_SENSOR_CH_MOTHERBOARD_BATTERY_VOLTAGE] = {.f = NAN}}}};
 K_MUTEX_DEFINE(g_app_sensor_data_lock);
 
 int app_battery_measure(float *voltage)

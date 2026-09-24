@@ -51,9 +51,9 @@ enum hist_enc {
 	/* #311: same wire scale as the Telemetry message (app_compose.c) so a
 	 * consumer can share one conversion for both, just a fixed-width field
 	 * instead of a proto3-presence one. */
-	ENC_PRESSURE, /* float kPa -> uint16 hPa x10, sentinel 0xFFFF, 2 B */
+	ENC_PRESSURE, /* float hPa -> uint16 hPa x10, sentinel 0xFFFF, 2 B */
 	ENC_LUX,      /* float lux -> uint16 lux/2,   sentinel 0xFFFF, 2 B */
-	ENC_ORIENT,   /* int (INT_MAX=absent) -> uint8 raw & 0xf, sentinel 0xFF, 1 B */
+	ENC_ORIENT,   /* float 1..6 (NaN=absent) -> uint8 raw & 0xf, sentinel 0xFF, 1 B */
 };
 
 #define NO_CAP SIZE_MAX
@@ -66,51 +66,54 @@ struct hist_desc {
 	size_t cap_off; /* offset of bool capability in struct app_config, or NO_CAP */
 };
 
+/* Channel offsets in struct app_sensor_data (#430). A 1-Wire slot is addressed
+ * by the machine-probe channel numbers: a dallas slot fills only ch 0 (the
+ * shared temperature) and leaves humidity NaN, which encodes as the sentinel. */
+#define MB_OFF(NAME) offsetof(struct app_sensor_data, mb.v[APP_SENSOR_CH_MOTHERBOARD_##NAME])
+#define W1_OFF(S, NAME)                                                                            \
+	offsetof(struct app_sensor_data, w1[S].v[APP_SENSOR_CH_MACHINE_PROBE_##NAME])
+
 static const struct hist_desc m_desc[APP_HISTORY_SENSOR_COUNT] = {
-	[APP_HISTORY_TEMPERATURE] = {"temperature", offsetof(struct app_sensor_data, temperature),
-				     ENC_TEMP, 2, NO_CAP},
-	[APP_HISTORY_HUMIDITY] = {"humidity", offsetof(struct app_sensor_data, humidity), ENC_HUM,
-				  1, NO_CAP},
+	[APP_HISTORY_TEMPERATURE] = {"temperature", MB_OFF(TEMPERATURE), ENC_TEMP, 2, NO_CAP},
+	[APP_HISTORY_HUMIDITY] = {"humidity", MB_OFF(HUMIDITY), ENC_HUM, 1, NO_CAP},
 	/* 1-Wire ROM-bound slots s1..s4 (= telemetry slot model, w1[0..3]); each slot
 	 * stores temperature + humidity. A Dallas slot has no humidity → sentinel. */
-	[APP_HISTORY_S1_TEMP] = {"s1-temp", offsetof(struct app_sensor_data, w1[0].temperature),
-				 ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S1_HUM] = {"s1-hum", offsetof(struct app_sensor_data, w1[0].humidity), ENC_HUM,
-				1, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S2_TEMP] = {"s2-temp", offsetof(struct app_sensor_data, w1[1].temperature),
-				 ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S2_HUM] = {"s2-hum", offsetof(struct app_sensor_data, w1[1].humidity), ENC_HUM,
-				1, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S3_TEMP] = {"s3-temp", offsetof(struct app_sensor_data, w1[2].temperature),
-				 ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S3_HUM] = {"s3-hum", offsetof(struct app_sensor_data, w1[2].humidity), ENC_HUM,
-				1, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S4_TEMP] = {"s4-temp", offsetof(struct app_sensor_data, w1[3].temperature),
-				 ENC_TEMP, 2, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_S4_HUM] = {"s4-hum", offsetof(struct app_sensor_data, w1[3].humidity), ENC_HUM,
-				1, offsetof(struct app_config, cap_w1_sensors)},
-	[APP_HISTORY_HALL_LEFT] = {"hall-left", offsetof(struct app_sensor_data, hall_left_count),
-				   ENC_COUNT, 4, offsetof(struct app_config, cap_hall_left)},
-	[APP_HISTORY_HALL_RIGHT] = {"hall-right",
-				    offsetof(struct app_sensor_data, hall_right_count), ENC_COUNT,
-				    4, offsetof(struct app_config, cap_hall_right)},
-	[APP_HISTORY_INPUT_A] = {"input-a", offsetof(struct app_sensor_data, input_a_count),
-				 ENC_COUNT, 4, offsetof(struct app_config, cap_input_a)},
-	[APP_HISTORY_INPUT_B] = {"input-b", offsetof(struct app_sensor_data, input_b_count),
-				 ENC_COUNT, 4, offsetof(struct app_config, cap_input_b)},
-	[APP_HISTORY_MOTION] = {"motion", offsetof(struct app_sensor_data, motion_count), ENC_COUNT,
-				4, offsetof(struct app_config, cap_pir_detector)},
+	[APP_HISTORY_S1_TEMP] = {"s1-temp", W1_OFF(0, TEMPERATURE), ENC_TEMP, 2,
+				 offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S1_HUM] = {"s1-hum", W1_OFF(0, HUMIDITY), ENC_HUM, 1,
+				offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S2_TEMP] = {"s2-temp", W1_OFF(1, TEMPERATURE), ENC_TEMP, 2,
+				 offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S2_HUM] = {"s2-hum", W1_OFF(1, HUMIDITY), ENC_HUM, 1,
+				offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S3_TEMP] = {"s3-temp", W1_OFF(2, TEMPERATURE), ENC_TEMP, 2,
+				 offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S3_HUM] = {"s3-hum", W1_OFF(2, HUMIDITY), ENC_HUM, 1,
+				offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S4_TEMP] = {"s4-temp", W1_OFF(3, TEMPERATURE), ENC_TEMP, 2,
+				 offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_S4_HUM] = {"s4-hum", W1_OFF(3, HUMIDITY), ENC_HUM, 1,
+				offsetof(struct app_config, cap_w1_sensors)},
+	[APP_HISTORY_HALL_LEFT] = {"hall-left", MB_OFF(HALL_LEFT_COUNT), ENC_COUNT, 4,
+				   offsetof(struct app_config, cap_hall_left)},
+	[APP_HISTORY_HALL_RIGHT] = {"hall-right", MB_OFF(HALL_RIGHT_COUNT), ENC_COUNT, 4,
+				    offsetof(struct app_config, cap_hall_right)},
+	[APP_HISTORY_INPUT_A] = {"input-a", MB_OFF(INPUT_A_COUNT), ENC_COUNT, 4,
+				 offsetof(struct app_config, cap_input_a)},
+	[APP_HISTORY_INPUT_B] = {"input-b", MB_OFF(INPUT_B_COUNT), ENC_COUNT, 4,
+				 offsetof(struct app_config, cap_input_b)},
+	[APP_HISTORY_MOTION] = {"motion", MB_OFF(PIR_COUNT), ENC_COUNT, 4,
+				offsetof(struct app_config, cap_pir_detector)},
 	/* #311: barometer (MPL3115A2), light sensor (OPT3001), accelerometer
 	 * (LIS2DH) — all already sampled + in telemetry, newly recordable here. */
-	[APP_HISTORY_PRESSURE] = {"pressure", offsetof(struct app_sensor_data, pressure),
-				  ENC_PRESSURE, 2, offsetof(struct app_config, cap_barometer)},
-	[APP_HISTORY_ILLUMINANCE] = {"illuminance", offsetof(struct app_sensor_data, illuminance),
-				     ENC_LUX, 2, offsetof(struct app_config, cap_light_sensor)},
-	[APP_HISTORY_ORIENTATION] = {"orientation", offsetof(struct app_sensor_data, orientation),
-				     ENC_ORIENT, 1, offsetof(struct app_config, cap_accelerometer)},
-	[APP_HISTORY_ACCEL_MOTION] = {"accel-motion",
-				      offsetof(struct app_sensor_data, accel_motion_count),
-				      ENC_COUNT, 4, offsetof(struct app_config, cap_accelerometer)},
+	[APP_HISTORY_PRESSURE] = {"pressure", MB_OFF(PRESSURE), ENC_PRESSURE, 2,
+				  offsetof(struct app_config, cap_barometer)},
+	[APP_HISTORY_ILLUMINANCE] = {"illuminance", MB_OFF(ILLUMINANCE), ENC_LUX, 2,
+				     offsetof(struct app_config, cap_light_sensor)},
+	[APP_HISTORY_ORIENTATION] = {"orientation", MB_OFF(ACCEL_ORIENTATION), ENC_ORIENT, 1,
+				     offsetof(struct app_config, cap_accelerometer)},
+	[APP_HISTORY_ACCEL_MOTION] = {"accel-motion", MB_OFF(ACCEL_COUNT), ENC_COUNT, 4,
+				      offsetof(struct app_config, cap_accelerometer)},
 };
 
 #define TEMP_SENTINEL     0x7FFF
@@ -826,7 +829,7 @@ static size_t encode_value(uint8_t *p, int i)
 		float f;
 		memcpy(&f, src, sizeof(f));
 		uint16_t v = isnan(f) ? (uint16_t)PRESSURE_SENTINEL
-				      : (uint16_t)CLAMP(lroundf(f * 100.0f), 0, 65534);
+				      : (uint16_t)CLAMP(lroundf(f * 10.0f), 0, 65534);
 		sys_put_le16(v, p);
 		return 2;
 	}
@@ -839,9 +842,9 @@ static size_t encode_value(uint8_t *p, int i)
 		return 2;
 	}
 	case ENC_ORIENT: {
-		int iv;
-		memcpy(&iv, src, sizeof(iv));
-		p[0] = (iv == INT_MAX) ? ORIENT_SENTINEL : (uint8_t)(iv & 0xf);
+		float f;
+		memcpy(&f, src, sizeof(f));
+		p[0] = isnan(f) ? ORIENT_SENTINEL : (uint8_t)((int)f & 0xf);
 		return 1;
 	}
 	}

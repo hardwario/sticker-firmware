@@ -379,11 +379,11 @@ static int cmd_reset_sample(const struct shell *shell, size_t argc, char **argv)
 
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
 
-	g_app_sensor_data.motion_count = 0;
-	g_app_sensor_data.hall_left_count = 0;
-	g_app_sensor_data.hall_right_count = 0;
-	g_app_sensor_data.input_a_count = 0;
-	g_app_sensor_data.input_b_count = 0;
+	APP_SENSOR_MB_U(&g_app_sensor_data, PIR_COUNT) = 0;
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_LEFT_COUNT) = 0;
+	APP_SENSOR_MB_U(&g_app_sensor_data, HALL_RIGHT_COUNT) = 0;
+	APP_SENSOR_MB_U(&g_app_sensor_data, INPUT_A_COUNT) = 0;
+	APP_SENSOR_MB_U(&g_app_sensor_data, INPUT_B_COUNT) = 0;
 
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
@@ -426,75 +426,79 @@ static enum sval_kind resolve_sensor(const char *name, float *f, uint32_t *u, in
 {
 	const struct app_sensor_data *d = &g_app_sensor_data;
 
+	/* The tester-facing names and units are kept as they were before the
+	 * channel model (#430): pressure stays kPa, orientation an int. */
 	if (strcmp(name, "voltage") == 0) {
-		*f = d->voltage;
+		*f = APP_SENSOR_MB_F(d, BATTERY_VOLTAGE);
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "temperature") == 0) {
-		*f = d->temperature;
+		*f = APP_SENSOR_MB_F(d, TEMPERATURE);
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "humidity") == 0) {
-		*f = d->humidity;
+		*f = APP_SENSOR_MB_F(d, HUMIDITY);
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "illuminance") == 0) {
-		*f = d->illuminance;
+		*f = APP_SENSOR_MB_F(d, ILLUMINANCE);
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "altitude") == 0) {
-		*f = d->altitude;
+		*f = APP_SENSOR_MB_F(d, ALTITUDE);
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "pressure") == 0) {
-		*f = d->pressure;
+		*f = APP_SENSOR_MB_F(d, PRESSURE) / 10.0f; /* hPa -> kPa */
 		return SVAL_FLOAT;
 	} else if (strcmp(name, "orientation") == 0) {
-		*iv = d->orientation;
+		float o = APP_SENSOR_MB_F(d, ACCEL_ORIENTATION);
+
+		*iv = isnan(o) ? INT_MAX : (int)o;
 		return SVAL_INT;
 	} else if (strcmp(name, "motion-count") == 0) {
-		*u = d->motion_count;
+		*u = APP_SENSOR_MB_U(d, PIR_COUNT);
 		return SVAL_UINT;
 	} else if (strcmp(name, "hall-left-count") == 0) {
-		*u = d->hall_left_count;
+		*u = APP_SENSOR_MB_U(d, HALL_LEFT_COUNT);
 		return SVAL_UINT;
 	} else if (strcmp(name, "hall-right-count") == 0) {
-		*u = d->hall_right_count;
+		*u = APP_SENSOR_MB_U(d, HALL_RIGHT_COUNT);
 		return SVAL_UINT;
 	} else if (strcmp(name, "input-a-count") == 0) {
-		*u = d->input_a_count;
+		*u = APP_SENSOR_MB_U(d, INPUT_A_COUNT);
 		return SVAL_UINT;
 	} else if (strcmp(name, "input-b-count") == 0) {
-		*u = d->input_b_count;
+		*u = APP_SENSOR_MB_U(d, INPUT_B_COUNT);
 		return SVAL_UINT;
 	} else if (strcmp(name, "hall-left-is-active") == 0) {
-		*bv = d->hall_left_is_active;
+		*bv = APP_SENSOR_MB_F(d, HALL_LEFT_STATE) == 1.0f;
 		return SVAL_BOOL;
 	} else if (strcmp(name, "hall-right-is-active") == 0) {
-		*bv = d->hall_right_is_active;
+		*bv = APP_SENSOR_MB_F(d, HALL_RIGHT_STATE) == 1.0f;
 		return SVAL_BOOL;
 	} else if (strcmp(name, "input-a-is-active") == 0) {
-		*bv = d->input_a_is_active;
+		*bv = APP_SENSOR_MB_F(d, INPUT_A_STATE) == 1.0f;
 		return SVAL_BOOL;
 	} else if (strcmp(name, "input-b-is-active") == 0) {
-		*bv = d->input_b_is_active;
+		*bv = APP_SENSOR_MB_F(d, INPUT_B_STATE) == 1.0f;
 		return SVAL_BOOL;
 	}
 
 	/* Slot sensors: sN-<quantity>, N=1..4 -> w1[N-1]. */
 	if (name[0] == 's' && name[1] >= '1' && name[1] <= '4' && name[2] == '-') {
-		const struct app_w1_slot_reading *s = &d->w1[name[1] - '1'];
+		const struct app_sensor_w1 *s = &d->w1[name[1] - '1'];
 		const char *q = name + 3;
 
 		if (strcmp(q, "temperature") == 0) {
-			*f = s->temperature;
+			*f = app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE);
 			return SVAL_FLOAT;
 		} else if (strcmp(q, "humidity") == 0) {
-			*f = s->humidity;
+			*f = app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY);
 			return SVAL_FLOAT;
 		} else if (strcmp(q, "illuminance") == 0) {
-			*f = s->illuminance;
+			*f = app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_ILLUMINANCE);
 			return SVAL_FLOAT;
 		} else if (strcmp(q, "magnetic-field") == 0) {
-			*f = s->magnetic_field;
+			*f = app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_MAGNETIC_FIELD);
 			return SVAL_FLOAT;
 		} else if (strcmp(q, "tilt-alert") == 0) {
-			*bv = s->is_tilt_alert;
+			*bv = app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_TILT) == 1.0f;
 			return SVAL_BOOL;
 		}
 	}
@@ -621,18 +625,21 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 
 	/* On-device sensors + the device's own discrete inputs. */
 	shell_print(shell, "== Device ==");
-	print_float(shell, "voltage:", d->voltage, "V");
-	print_float(shell, "temperature:", d->temperature, "C");
-	print_float(shell, "humidity:", d->humidity, "%");
-	print_float(shell, "pressure:", d->pressure, "Pa");
-	print_float(shell, "altitude:", d->altitude, "m");
-	print_float(shell, "illuminance:", d->illuminance, "lux");
+	print_float(shell, "voltage:", APP_SENSOR_MB_F(d, BATTERY_VOLTAGE), "V");
+	print_float(shell, "temperature:", APP_SENSOR_MB_F(d, TEMPERATURE), "C");
+	print_float(shell, "humidity:", APP_SENSOR_MB_F(d, HUMIDITY), "%");
+	/* kPa, as the tester has always read it (the channel itself is hPa). The
+	 * "Pa" label predates #430 and is kept so the tester output is unchanged. */
+	print_float(shell, "pressure:", APP_SENSOR_MB_F(d, PRESSURE) / 10.0f, "Pa");
+	print_float(shell, "altitude:", APP_SENSOR_MB_F(d, ALTITUDE), "m");
+	print_float(shell, "illuminance:", APP_SENSOR_MB_F(d, ILLUMINANCE), "lux");
 	/* orientation + raw axes are meaningful only with the accelerometer enabled;
 	 * read live (the onboard accel x/y/z are not cached in g_app_sensor_data). */
 #if defined(CONFIG_LIS2DH)
 	if (g_app_config.cap_accelerometer) {
 		float ax = NAN, ay = NAN, az = NAN;
-		int ori = d->orientation;
+		float ori_f = APP_SENSOR_MB_F(d, ACCEL_ORIENTATION);
+		int ori = isnan(ori_f) ? INT_MAX : (int)ori_f;
 		(void)app_accel_read(&ax, &ay, &az, &ori);
 		shell_print(shell, "  %-16s %d", "orientation:", ori);
 		shell_print(shell, "  %-16s x=%s%d.%02d y=%s%d.%02d z=%s%d.%02d m/s^2",
@@ -643,16 +650,20 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 		shell_print(shell, "  %-16s nan", "orientation:");
 		shell_print(shell, "  %-16s nan", "accel:");
 	}
-	shell_print(shell, "  %-16s %u", "motion-count:", d->motion_count);
-	shell_print(shell, "  %-16s %u", "accel-motion:", d->accel_motion_count);
-	shell_print(shell, "  %-16s count=%u active=%s", "hall-left:", d->hall_left_count,
-		    d->hall_left_is_active ? "true" : "false");
-	shell_print(shell, "  %-16s count=%u active=%s", "hall-right:", d->hall_right_count,
-		    d->hall_right_is_active ? "true" : "false");
-	shell_print(shell, "  %-16s count=%u active=%s", "input-a:", d->input_a_count,
-		    d->input_a_is_active ? "true" : "false");
-	shell_print(shell, "  %-16s count=%u active=%s", "input-b:", d->input_b_count,
-		    d->input_b_is_active ? "true" : "false");
+	shell_print(shell, "  %-16s %u", "motion-count:", APP_SENSOR_MB_U(d, PIR_COUNT));
+	shell_print(shell, "  %-16s %u", "accel-motion:", APP_SENSOR_MB_U(d, ACCEL_COUNT));
+	shell_print(shell, "  %-16s count=%u active=%s",
+		    "hall-left:", APP_SENSOR_MB_U(d, HALL_LEFT_COUNT),
+		    APP_SENSOR_MB_F(d, HALL_LEFT_STATE) == 1.0f ? "true" : "false");
+	shell_print(shell, "  %-16s count=%u active=%s",
+		    "hall-right:", APP_SENSOR_MB_U(d, HALL_RIGHT_COUNT),
+		    APP_SENSOR_MB_F(d, HALL_RIGHT_STATE) == 1.0f ? "true" : "false");
+	shell_print(shell, "  %-16s count=%u active=%s",
+		    "input-a:", APP_SENSOR_MB_U(d, INPUT_A_COUNT),
+		    APP_SENSOR_MB_F(d, INPUT_A_STATE) == 1.0f ? "true" : "false");
+	shell_print(shell, "  %-16s count=%u active=%s",
+		    "input-b:", APP_SENSOR_MB_U(d, INPUT_B_COUNT),
+		    APP_SENSOR_MB_F(d, INPUT_B_STATE) == 1.0f ? "true" : "false");
 
 #if defined(CONFIG_W1)
 	/* 1-Wire ROM-bound slots s1..s4 — only the quantities the bound sensor
@@ -660,25 +671,28 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 	 * machine probe shows the full cluster). */
 	for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
 		enum app_w1_slot_type type = app_w1_slot_get_type(i);
-		const struct app_w1_slot_reading *s = &d->w1[i];
+		const struct app_sensor_w1 *s = &d->w1[i];
 
 		if (type == APP_W1_SLOT_EMPTY) {
 			shell_print(shell, "== s%d: empty ==", i + 1);
 			continue;
 		}
+#define W1(NAME) app_sensor_w1_f(s, APP_SENSOR_CH_MACHINE_PROBE_##NAME)
 		shell_print(shell, "== s%d: %s%s ==", i + 1, app_w1_slot_type_name(type),
 			    s->present ? "" : " (absent)");
-		print_float(shell, "temperature:", s->temperature, "C");
-		print_float(shell, "humidity:", s->humidity, "%");
-		print_float(shell, "illuminance:", s->illuminance, "lux");
-		print_float(shell, "magnetic-field:", s->magnetic_field, "mT");
-		if (!isnan(s->accel_x) || !isnan(s->accel_y) || !isnan(s->accel_z)) {
+		print_float(shell, "temperature:", W1(TEMPERATURE), "C");
+		print_float(shell, "temperature-aux:", W1(TEMPERATURE_AUX), "C");
+		print_float(shell, "humidity:", W1(HUMIDITY), "%");
+		print_float(shell, "illuminance:", W1(ILLUMINANCE), "lux");
+		print_float(shell, "magnetic-field:", W1(MAGNETIC_FIELD), "mT");
+		if (!isnan(W1(ACCEL_X)) || !isnan(W1(ACCEL_Y)) || !isnan(W1(ACCEL_Z))) {
 			shell_print(shell, "  %-16s x=%s%d.%02d y=%s%d.%02d z=%s%d.%02d m/s^2",
-				    "accel:", APP_FP2(s->accel_x), APP_FP2(s->accel_y),
-				    APP_FP2(s->accel_z));
+				    "accel:", APP_FP2(W1(ACCEL_X)), APP_FP2(W1(ACCEL_Y)),
+				    APP_FP2(W1(ACCEL_Z)));
 		}
 		shell_print(shell, "  %-16s %s",
-			    "tilt-alert:", s->is_tilt_alert ? "true" : "false");
+			    "tilt-alert:", W1(TILT) == 1.0f ? "true" : "false");
+#undef W1
 	}
 #endif /* defined(CONFIG_W1) */
 

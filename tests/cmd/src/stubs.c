@@ -93,11 +93,12 @@ void app_clock_force_resync(void)
 {
 }
 
-/* Battery (GetInfo battery field). get_info now reads the cached
- * g_app_sensor_data.voltage rather than a fresh app_battery_measure(), so the
- * test seeds the cache (see main.c setUp). The measure stub + test_battery_v are
- * kept for any caller that still measures directly. */
-struct app_sensor_data g_app_sensor_data = {.voltage = NAN};
+/* Battery (GetInfo battery field). get_info now reads the cached battery-voltage
+ * channel rather than a fresh app_battery_measure(), so the test seeds the cache
+ * (see main.c setUp). The measure stub + test_battery_v are kept for any caller
+ * that still measures directly. */
+struct app_sensor_data g_app_sensor_data = {
+	.mb = {.v = {[APP_SENSOR_CH_MOTHERBOARD_BATTERY_VOLTAGE] = {.f = NAN}}}};
 K_MUTEX_DEFINE(g_app_sensor_data_lock);
 
 float test_battery_v = 3.3f;

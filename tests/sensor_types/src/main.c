@@ -8,8 +8,10 @@
  */
 
 #include "app_config.h"
+#include "app_sensor.h"
 #include "app_sensor_types.h"
 
+#include <math.h>
 #include <stddef.h>
 
 #include <zephyr/ztest.h>
@@ -152,6 +154,80 @@ ZTEST(sensor_types, test_every_channel_is_consistent)
 			}
 		}
 	}
+}
+
+/* ---- channel-vector helpers (app_sensor_channels.c) ---------------------- */
+
+ZTEST(sensor_types, test_put_f_valid_and_range)
+{
+	struct app_sensor_mb mb = {.valid = 0};
+
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, mb.v, &mb.valid,
+			 APP_SENSOR_CH_MOTHERBOARD_HUMIDITY, 55.0f);
+	zassert_equal(mb.v[APP_SENSOR_CH_MOTHERBOARD_HUMIDITY].f, 55.0f);
+	zassert_true(mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY));
+
+	/* Out of the registry range [0, 100] %RH -> absent. */
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, mb.v, &mb.valid,
+			 APP_SENSOR_CH_MOTHERBOARD_HUMIDITY, 120.0f);
+	zassert_true(isnan(mb.v[APP_SENSOR_CH_MOTHERBOARD_HUMIDITY].f));
+	zassert_false(mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_HUMIDITY));
+
+	/* NaN / inf -> absent. */
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, mb.v, &mb.valid,
+			 APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE, NAN);
+	zassert_false(mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE));
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, mb.v, &mb.valid,
+			 APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE, INFINITY);
+	zassert_true(isnan(mb.v[APP_SENSOR_CH_MOTHERBOARD_TEMPERATURE].f));
+
+	/* A channel without a range (orientation) takes any finite value. */
+	app_sensor_put_f(APP_SENSOR_TYPE_MOTHERBOARD, mb.v, &mb.valid,
+			 APP_SENSOR_CH_MOTHERBOARD_ACCEL_ORIENTATION, 6.0f);
+	zassert_true(mb.valid & BIT(APP_SENSOR_CH_MOTHERBOARD_ACCEL_ORIENTATION));
+}
+
+ZTEST(sensor_types, test_put_f_unknown_channel_is_ignored)
+{
+	struct app_sensor_w1 w;
+
+	app_sensor_w1_clear(&w, APP_SENSOR_TYPE_DALLAS);
+	/* Dallas has only ch 0; ch 1 must not be written. */
+	app_sensor_put_f(APP_SENSOR_TYPE_DALLAS, w.v, &w.valid, 1, 42.0f);
+	zassert_true(isnan(w.v[1].f));
+	zassert_equal(w.valid, 0);
+}
+
+ZTEST(sensor_types, test_w1_clear)
+{
+	struct app_sensor_w1 w = {.type = 9, .present = true, .valid = 0xff};
+
+	app_sensor_w1_clear(&w, APP_SENSOR_TYPE_MACHINE_PROBE);
+	zassert_equal(w.type, APP_SENSOR_TYPE_MACHINE_PROBE);
+	zassert_false(w.present);
+	zassert_equal(w.valid, 0);
+	for (int ch = 0; ch < APP_SENSOR_W1_CH_MAX; ch++) {
+		zassert_true(isnan(w.v[ch].f), "ch %d", ch);
+	}
+}
+
+ZTEST(sensor_types, test_w1_f_maps_dallas_onto_machine_probe_numbers)
+{
+	struct app_sensor_w1 w;
+
+	app_sensor_w1_clear(&w, APP_SENSOR_TYPE_DALLAS);
+	w.v[APP_SENSOR_CH_DALLAS_TEMPERATURE].f = 21.5f;
+	w.v[1].f = 99.0f; /* stray value: dallas has no ch 1 */
+	zassert_equal(app_sensor_w1_f(&w, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE), 21.5f);
+	zassert_true(isnan(app_sensor_w1_f(&w, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY)));
+
+	app_sensor_w1_clear(&w, APP_SENSOR_TYPE_MACHINE_PROBE);
+	w.v[APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE_AUX].f = 19.25f;
+	zassert_equal(app_sensor_w1_f(&w, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE_AUX), 19.25f);
+	zassert_true(isnan(app_sensor_w1_f(&w, APP_SENSOR_CH_MACHINE_PROBE_COUNT)));
+
+	app_sensor_w1_clear(&w, APP_SENSOR_TYPE_NONE);
+	zassert_true(isnan(app_sensor_w1_f(&w, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE)));
 }
 
 ZTEST_SUITE(sensor_types, NULL, NULL, NULL, NULL, NULL);
