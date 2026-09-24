@@ -347,7 +347,22 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	 * SET path in app_alarm_rules.) */
 	struct app_config snapshot = *app_config();
 
-	if (sp->has_lorawan) {
+	/* alarms_replace: the host is the source of truth for the whole alarm table
+	 * (ProXimos Portal). Empty every rule slot in staging first, so the alarms
+	 * group below (if any) leaves exactly the rules this message sends; the
+	 * snapshot above undoes it with the rest of the batch on a fault. Writable
+	 * like alarm_N (LoRaWAN / NFC / shell), not over the vendor recovery channel. */
+	const bool alarms_replace = sp->has_alarms_replace && sp->alarms_replace;
+
+	if (alarms_replace) {
+		if (tp == APP_CMD_TRANSPORT_VENDOR) {
+			rc = -EACCES;
+			fault_group = 4;
+		} else {
+			app_alarm_rules_clear_all();
+		}
+	}
+	if (rc == 0 && sp->has_lorawan) {
 		rc = app_config_apply_lorawan(tp, &sp->lorawan, &fault);
 		fault_group = 1;
 	}
@@ -366,6 +381,11 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 
 	if (rc) {
 		*app_config() = snapshot; /* roll back the whole batch */
+		if (alarms_replace) {
+			/* clear_all also emptied the decoded rule cache: rebuild it from
+			 * the restored slots. */
+			(void)app_alarm_rules_reload_from_config();
+		}
 		/* M-3: a field not writable over this transport returns -EACCES → report
 		 * NOT_WRITABLE (the field exists but this transport may not set it — e.g.
 		 * the lorawan provisioning/identity group over a LoRaWAN downlink); a bad
@@ -383,7 +403,8 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 		 * reboot (whether or not this batch is persisted). reload sanitizes and
 		 * reports any rule that fails validation — surface that as a fault instead
 		 * of a misleading ACK for a rule that was silently dropped (H-10). */
-		if (sp->has_alarms && app_alarm_rules_reload_from_config() > 0) {
+		if ((sp->has_alarms || alarms_replace) &&
+		    app_alarm_rules_reload_from_config() > 0) {
 			*app_config() = snapshot;                   /* roll back the batch */
 			(void)app_alarm_rules_reload_from_config(); /* resync cache to it */
 			make_error(resp, Response_Error_Code_OUT_OF_RANGE, "invalid alarm rule");
