@@ -2097,6 +2097,31 @@ int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
 	return 0;
 }
 
+/* A Command that fails to decode is still answered with its seq when the seq
+ * itself is readable: walk the top-level fields up to the first malformed one
+ * and pick up field 1 (varint). Without it the host cannot pair the BAD_REQUEST
+ * with its request (a truncated or corrupted downlink). 0 when no seq comes
+ * before the damage — the same as a Command that has no seq at all. */
+static uint32_t peek_seq(const uint8_t *in, size_t in_len)
+{
+	pb_istream_t s = pb_istream_from_buffer(in, in_len);
+	pb_wire_type_t wt;
+	uint32_t tag;
+	bool eof;
+
+	while (pb_decode_tag(&s, &wt, &tag, &eof)) {
+		if (tag == Command_seq_tag && wt == PB_WT_VARINT) {
+			uint32_t seq;
+
+			return pb_decode_varint32(&s, &seq) ? seq : 0;
+		}
+		if (!pb_skip_field(&s, wt)) {
+			break;
+		}
+	}
+	return 0;
+}
+
 /* Decode + dispatch in their own frame, so the ~550 B Command is gone again
  * before app_cmd_handle() encodes and pages the answer (HIL P5b: a paged GetInfo
  * overflowed the 4 KB m_work_q with the Command still on the stack). Returns the
@@ -2110,7 +2135,7 @@ static __noinline pb_size_t decode_and_dispatch(enum app_cmd_transport transport
 
 	if (!pb_decode(&istream, Command_fields, &cmd)) {
 		LOG_ERR_CALL_FAILED_STR("pb_decode", PB_GET_ERROR(&istream));
-		resp->seq = 0;
+		resp->seq = peek_seq(in, in_len);
 		make_error(resp, Response_Error_Code_BAD_REQUEST, PB_GET_ERROR(&istream));
 		return 0;
 	}
