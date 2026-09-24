@@ -213,6 +213,109 @@ ZTEST(cmd, test_set_param_alarm_rule_rollback_restores_snapshot)
 			  "invalid alarm rule bytes leaked into config after rollback");
 }
 
+/* WP8: SetParam.alarms_replace (field 6) empties every alarm slot in staging
+ * before the message's alarms group is applied, so one message rewrites the
+ * whole table; a fault rolls the whole batch back, slots included. */
+extern int test_alarm_clear_all_calls;
+
+static void seed_alarm_slots(void)
+{
+	memset(g_app_config.alarm_1, 0x11, sizeof(g_app_config.alarm_1));
+	memset(g_app_config.alarm_3, 0x33, sizeof(g_app_config.alarm_3));
+	memset(g_app_config.alarm_7, 0x77, sizeof(g_app_config.alarm_7));
+}
+
+static bool slot_is(const uint8_t *slot, size_t n, uint8_t v)
+{
+	for (size_t i = 0; i < n; i++) {
+		if (slot[i] != v) {
+			return false;
+		}
+	}
+	return true;
+}
+
+ZTEST(cmd, test_set_param_alarms_replace_keeps_only_sent_slots)
+{
+	Response r;
+	static const uint8_t rule_a[17] = {0x01, 0x00, 0x06};
+	static const uint8_t rule_b[17] = {0x01, 0x02, 0x03};
+
+	reset_cfg();
+	seed_alarm_slots();
+	test_alarm_clear_all_calls = 0;
+
+	/* seq7 set_param{ alarms{ alarm_2=rule_a, alarm_5=rule_b }, alarms_replace } */
+	enum app_cmd_action a = handle("0807122a2a262a110100060000000000000000000000000000421101020"
+				       "300000000000000000000000000003001",
+				       &r);
+
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no save requested");
+	zassert_equal(r.which_body, Response_ack_tag, "which=%d", r.which_body);
+	zassert_equal(test_alarm_clear_all_calls, 1, "slots must be cleared once");
+	zassert_mem_equal(g_app_config.alarm_2, rule_a, 17, "alarm_2");
+	zassert_mem_equal(g_app_config.alarm_5, rule_b, 17, "alarm_5");
+	zassert_true(slot_is(g_app_config.alarm_1, 17, 0), "old alarm_1 must be gone");
+	zassert_true(slot_is(g_app_config.alarm_3, 17, 0), "old alarm_3 must be gone");
+	zassert_true(slot_is(g_app_config.alarm_7, 17, 0), "old alarm_7 must be gone");
+}
+
+ZTEST(cmd, test_set_param_alarms_replace_without_alarms_clears_all)
+{
+	Response r;
+
+	reset_cfg();
+	seed_alarm_slots();
+	g_app_config.alarm_limit = 30;
+
+	handle("080812023001", &r); /* seq8 set_param{ alarms_replace } */
+	zassert_equal(r.which_body, Response_ack_tag, "which=%d", r.which_body);
+	zassert_true(slot_is(g_app_config.alarm_1, 17, 0), "alarm_1");
+	zassert_true(slot_is(g_app_config.alarm_3, 17, 0), "alarm_3");
+	zassert_true(slot_is(g_app_config.alarm_7, 17, 0), "alarm_7");
+	zassert_equal(g_app_config.alarm_limit, 30, "alarm_limit is not a rule slot");
+}
+
+ZTEST(cmd, test_set_param_alarms_replace_rolls_back)
+{
+	Response r;
+
+	reset_cfg();
+	seed_alarm_slots();
+
+	/* seq9 set_param{ alarms{ alarm_2 }, alarms_replace } with a rule the
+	 * (stubbed) reload reports as invalid: the whole batch rolls back, so the
+	 * cleared slots come back and the new rule does not stick. */
+	test_alarm_reload_dropped = 1;
+	handle("080912172a132a1101000600000000000000000000000000003001", &r);
+	test_alarm_reload_dropped = 0;
+
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_OUT_OF_RANGE, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.fault_field, 400, "fault_field %u", r.body.error.fault_field);
+	zassert_true(slot_is(g_app_config.alarm_1, 17, 0x11), "alarm_1 restored");
+	zassert_true(slot_is(g_app_config.alarm_3, 17, 0x33), "alarm_3 restored");
+	zassert_true(slot_is(g_app_config.alarm_7, 17, 0x77), "alarm_7 restored");
+	zassert_true(slot_is(g_app_config.alarm_2, 17, 0), "rejected alarm_2 must not stick");
+}
+
+ZTEST(cmd, test_set_param_alarms_replace_refused_over_vendor)
+{
+	Response r;
+
+	reset_cfg();
+	seed_alarm_slots();
+	test_alarm_clear_all_calls = 0;
+
+	handle_via(APP_CMD_TRANSPORT_VENDOR, "080812023001", &r);
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "code %d",
+		      r.body.error.code);
+	zassert_equal(test_alarm_clear_all_calls, 0, "vendor must not clear the table");
+	zassert_true(slot_is(g_app_config.alarm_1, 17, 0x11), "alarm_1 intact");
+}
+
 /* Two back-to-back SetParam calls: the first fails and rolls back, the second
  * is a fresh valid call. If m_set_param_lock were left held on the first
  * call's rollback exit path, this second call would hang forever on

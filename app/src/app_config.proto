@@ -184,6 +184,14 @@ message Command {
         optional bool                         save        = 3;
         optional AppConfigMessage.Sensors     sensors     = 4;
         optional AppConfigMessage.Alarms      alarms      = 5;
+        // Empty all alarm rule slots (alarm_0..alarm_15) before this message's
+        // `alarms` group is applied, so one SetParam rewrites the whole table
+        // (the host is the source of truth for the rules). Without an `alarms`
+        // group it clears every slot. alarm_limit / alarm_buzzer_mode are kept.
+        // Staged like any other key (`save` persists); rolled back with the whole
+        // batch on a fault. A multi-downlink table sets it on the FIRST message
+        // only (and `save` on the last). LoRaWAN / NFC / shell, not vendor.
+        optional bool                         alarms_replace = 6;
     }
 
     // Read back selected non-secret config fields. Paged like GetConfig:
