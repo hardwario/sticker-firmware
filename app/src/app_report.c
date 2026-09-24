@@ -42,6 +42,7 @@ static struct k_timer m_report_timer; /* interval_report cadence */
  * shift the timer — history stays at exactly interval_report (#H1). */
 static struct k_work m_periodic_work; /* fixed-cadence cycle: sample + capture + send */
 static struct k_work m_trigger_work;  /* ad-hoc cycle: sample + send, no history capture */
+static struct k_work m_force_work;    /* host-requested cycle: like trigger, sent without jitter */
 
 #if defined(CONFIG_WATCHDOG)
 /* Liveness heartbeat (#182): mirror of the app_lrw guard for the report queue, so
@@ -83,7 +84,7 @@ static void schedule_next_report(void)
  * the cadence, so the history inter-record interval stays exactly
  * interval_report regardless of how many alarms / force_sends / samples fire in
  * between (#H1). */
-static void run_report(bool periodic)
+static void run_report(bool periodic, bool now)
 {
 	/* Re-arm the cadence up front (periodic path only) so a skipped cycle still
 	 * keeps ticking; a trigger must NOT restart it, or the next periodic record
@@ -131,20 +132,32 @@ static void run_report(bool periodic)
 
 	/* Hand off to the transport: app_lrw composes the snapshot and splits it
 	 * into DR-budget frames (LC piggyback + duty-cycle retry live there). */
-	app_lrw_send_telemetry();
+	if (now) {
+		app_lrw_send_telemetry_now();
+	} else {
+		app_lrw_send_telemetry();
+	}
+#else
+	ARG_UNUSED(now);
 #endif /* defined(CONFIG_LORAWAN) */
 }
 
 static void periodic_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	run_report(true);
+	run_report(true, false);
 }
 
 static void trigger_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	run_report(false);
+	run_report(false, false);
+}
+
+static void force_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	run_report(false, true);
 }
 
 static void report_timer_handler(struct k_timer *timer)
@@ -168,6 +181,11 @@ void app_report_trigger(void)
 	k_work_submit_to_queue(&m_work_q, &m_trigger_work);
 }
 
+void app_report_force(void)
+{
+	k_work_submit_to_queue(&m_work_q, &m_force_work);
+}
+
 void app_report_suspend(void)
 {
 	/* Stop the cadence so it can't fire and re-arm the radio during poweroff,
@@ -184,6 +202,7 @@ void app_report_suspend(void)
 	k_timer_stop(&m_report_timer);
 	k_work_cancel(&m_periodic_work);
 	k_work_cancel(&m_trigger_work);
+	k_work_cancel(&m_force_work);
 }
 
 int app_report_init(void)
@@ -194,6 +213,7 @@ int app_report_init(void)
 
 	k_work_init(&m_periodic_work, periodic_work_handler);
 	k_work_init(&m_trigger_work, trigger_work_handler);
+	k_work_init(&m_force_work, force_work_handler);
 	k_timer_init(&m_report_timer, report_timer_handler, NULL);
 
 #if defined(CONFIG_WATCHDOG)

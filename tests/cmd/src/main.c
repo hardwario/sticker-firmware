@@ -738,6 +738,51 @@ ZTEST(cmd, test_build_info_pages_instead_of_trimming)
 	app_cmd_set_reset_cause(0);
 }
 
+/* F13: the deferred ClockSync answer is an Info with the command's seq, so the
+ * host can pair it with its request; paged, every page carries it. The boot Info
+ * (app_cmd_build_info) keeps seq 0. */
+ZTEST(cmd, test_build_info_seq)
+{
+	uint8_t out[256];
+	size_t out_len = 0;
+	bool more = false;
+
+	reset_cfg();
+	g_app_config.serial_number = 1234567890;
+	g_app_sensor_data.voltage = 3.3f;
+	test_set_active_alarm_count(5);
+
+	zassert_equal(app_cmd_build_info_seq(25, out, sizeof(out), &out_len, &more), 0, "full");
+	zassert_false(more, "unpaged");
+	Response r = decode_resp(out, out_len);
+	zassert_equal(r.which_body, Response_info_tag, "which=%d", r.which_body);
+	zassert_equal(r.seq, 25, "seq %u", r.seq);
+
+	zassert_equal(app_cmd_build_info(out, sizeof(out), &out_len, &more), 0, "boot");
+	zassert_equal(decode_resp(out, out_len).seq, 0, "boot Info keeps seq 0");
+
+	zassert_equal(app_cmd_build_info_seq(25, out, 51, &out_len, &more), 0, "DR0");
+	zassert_true(more, "expected pages at 51 B");
+	g_seen_alarms = 0;
+	g_seen_serial = g_seen_battery = false;
+	walk_pages(out, out_len, 51, 25, visit_info_page);
+	zassert_equal(g_seen_alarms, 5, "%zu of 5 alarms", g_seen_alarms);
+	test_set_active_alarm_count(0);
+}
+
+/* F12: W1Scan on an image without 1-Wire answers NOT_SUPPORTED (not in this FW),
+ * not NOT_READY (bus not ready) — the tests build without CONFIG_W1. */
+ZTEST(cmd, test_w1_scan_not_built)
+{
+	Response r;
+
+	(void)handle("08097200", &r); /* seq 9, w1_scan{} */
+	zassert_equal(r.seq, 9, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_SUPPORTED, "code %d",
+		      r.body.error.code);
+}
+
 ZTEST(cmd, test_deferred_actions)
 {
 	Response r;
