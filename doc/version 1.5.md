@@ -23,6 +23,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / NFC | **New** — `GetSettings` command (#428): the boot settings-info `ConfigDump` (§4) on request, with the command's `seq`, so a host can refresh the key operating settings without a full multi-page `GetConfig`. |
 | LoRaWAN | **Fix** — command answers from the ProXimos Nodes test (#432): the deferred `clock_sync` Info now carries the command's `seq`; `force_send` / `sample` leave at once (no fleet jitter, no silent merge into a pending report); `w1_scan` without 1-Wire answers `NOT_SUPPORTED`. |
 | LoRaWAN | **Changed** — `GetConfig` over LoRaWAN leaves out the 1-Wire slot ROMs `sensor1_rom`..`sensor4_rom` (#433): 4 pages instead of 6 at EU868 DR0; NFC/shell GetConfig and an explicit `GetParam` still return them. |
+| LoRaWAN / NFC | **New** — `SetParam.alarms_replace` (#434): one message rewrites the whole alarm table — all rule slots are emptied before the message's `alarms` group is applied (or all cleared without one), rolled back with the batch on a fault. |
 
 ---
 
@@ -629,6 +630,34 @@ therefore no longer sees `sensorN_rom` from LoRaWAN; a host that replaces its co
 **HW verification (2026-09-24, EU868, ProXimos Hub ChirpStack v4):** `get-config` from the
 Hub CLI → 4 pages at DR5 (was 6), no `sensor1_rom`..`sensor4_rom`, Hub config 34 keys;
 `GetParam(sensors [11])` seq 122 → `config_dump{sensors{sensor1_rom}}` in one frame.
+
+
+---
+
+## 16. `SetParam.alarms_replace` — rewrite the whole alarm table (#434)
+
+A host that is the source of truth for the alarm rules (the ProXimos Portal) had no way to
+say "these are *all* the rules": a `SetParam` only sets the slots it carries, so a rule
+deleted in the host (or added over NFC in the meantime) stayed on the device.
+
+| | |
+|---|---|
+| Field | `Command.SetParam.alarms_replace` = **6** (`optional bool`, next to `save`) |
+| Effect | when `true`, every rule slot `alarm_0`..`alarm_15` is emptied in staging **before** this message's `alarms` group is applied, so exactly the rules it carries remain; without an `alarms` group it clears all slots. `alarm_limit` and `alarm_buzzer_mode` are kept |
+| Atomicity | part of the batch snapshot: on any fault (e.g. an invalid rule → `OUT_OF_RANGE`, `fault_field` 400) the whole batch rolls back, cleared slots included, and the rule cache is rebuilt |
+| Persistence | staged like any other key; `save` persists (+ reboot) |
+| Transports | LoRaWAN, NFC, shell (like `alarm_N`); refused over the vendor channel (`NOT_WRITABLE`, `fault_field` 400) |
+| Multi-frame table | `alarms_replace` on the **first** message only, `save` on the last |
+
+`ttn.js` encodes and decodes it (`set_param.alarms_replace: true`); e.g. seq 8 with no
+`alarms` group is `080812023001`.
+
+**HW verification (2026-09-24, EU868, ProXimos Hub ChirpStack v4, raw downlinks from the Hub
+CLI):** with rules [0], [1], [3] seeded, `set_param{alarms{alarm_5}, alarms_replace}` seq 123
+→ `Ack` and only [5] left; `set_param{alarms{alarm_2 = invalid}, alarms_replace}` seq 124 →
+`Error{OUT_OF_RANGE, fault_field 400}` and nothing changed; `set_param{alarms_replace}` seq 125
+→ `Ack` and 0 rules, `alarm_limit` kept. A malformed downlink (one byte too many) was answered
+`BAD_REQUEST` without touching the rules.
 
 ---
 
