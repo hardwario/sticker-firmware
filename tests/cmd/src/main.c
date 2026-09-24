@@ -1065,6 +1065,33 @@ ZTEST(cmd, test_factory_reset_nfc_shell_only)
 		      r.which_body);
 }
 
+/* A Command that fails to decode keeps its seq in the BAD_REQUEST when the seq
+ * is readable before the damage, so the host can pair the error with its
+ * request; without a readable seq the answer has seq 0. */
+ZTEST(cmd, test_bad_request_keeps_seq)
+{
+	Response r;
+
+	/* seq 123 set_param whose alarm blob has one byte too many (HIL typo). */
+	handle("087b12172a1342110300010000000000000000484200000000003001", &r);
+	zassert_equal(r.which_body, Response_error_tag, "which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.seq, 123, "seq %u", r.seq);
+
+	/* A truncated frame: seq 45, then a length that runs past the end. */
+	handle("082d12ff", &r);
+	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.seq, 45, "seq %u", r.seq);
+
+	/* Garbage with no readable seq: seq 0. */
+	handle("ff", &r);
+	zassert_equal(r.body.error.code, Response_Error_Code_BAD_REQUEST, "code %d",
+		      r.body.error.code);
+	zassert_equal(r.seq, 0, "seq %u", r.seq);
+}
+
 /* #299 set_secret_key (field 24): nfc/shell only (rejected over lrw, like
  * force_send/req_history are rejected the other way in
  * test_lrw_only_commands_rejected_over_nfc); applies the new key to staging
