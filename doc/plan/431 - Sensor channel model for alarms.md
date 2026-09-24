@@ -454,7 +454,11 @@ sensor that is atypical just declares a different `unit` / `scale`. For example:
   temperatures without converting.
 - **Cost of resolution:** 23.456 °C at ×1000 is a 3 B varint instead of 2 B at ×100.
 
-## Delivery (PR sequence)
+## Delivery (steps in this PR)
+
+The implementation lands **incrementally in this PR (#431)**, one step after another.
+Each step is its own commit series with its own tests, and CI must be green at the end
+of every step.
 
 1. **Registry + generator.** `app_w1_slots.yaml` (this draft, frozen), `west sensorgen`,
    generated C + `ttn.js` block, CI checks. No behaviour change.
@@ -477,7 +481,8 @@ Parallel work outside this repo:
 - Manager-App MR (rule editor + history selection from `app_w1_slots.yaml`) after step 4;
 - the ProXimos/Hub decoder with the same table.
 
-Each step lands with its own tests, and `doc/` updates are the last commit of each PR.
+Each step lands with its own tests. The `doc/` updates (release notes, `doc/` guides) are
+the last commit before the PR leaves draft.
 
 ## Verification
 

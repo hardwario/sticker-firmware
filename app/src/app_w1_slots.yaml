@@ -1,6 +1,6 @@
 # Sensor type registry — channel model for alarms, telemetry and history (#430).
 #
-# DRAFT (PR #431): not consumed by the build yet. Step 1 of the plan adds
+# DRAFT (PR #431): not consumed by the build yet. Step 1 (in this PR) adds
 # `west sensorgen`, which generates from this file:
 #   - app_sensor_types.c/.h  (channel descriptor tables + lookups)
 #   - the `// BEGIN sensor_types` .. `// END sensor_types` block in decoder/ttn.js
@@ -101,6 +101,6 @@ types:
       - {ch: 3, name: illuminance,     label: "Illuminance (OPT3001)",      quantity: illuminance,    unit: lx,    kind: threshold, wire: [uint32, 1],    history: [u16, 0.5], range: [0.0, 83865.6]}
       - {ch: 4, name: magnetic-field,  label: "Magnetic field (Si7210)",    quantity: magnetic_field, unit: mT,    kind: threshold, wire: [sint32, 1000], history: [i16, 100], range: [-204.7, 204.7]}
       - {ch: 5, name: tilt,            label: "Tilt alert (LIS2DH12)",      quantity: tilt,           unit: bool,  kind: state,     wire: [uint32, 1],    history: [u8, 1]}
-      - {ch: 6, name: accel-x,         label: "Acceleration X (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100]}
-      - {ch: 7, name: accel-y,         label: "Acceleration Y (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100]}
-      - {ch: 8, name: accel-z,         label: "Acceleration Z (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100]}
+      - {ch: 6, name: accel-x,         label: "Acceleration X (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-156.9, 156.9]}
+      - {ch: 7, name: accel-y,         label: "Acceleration Y (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-156.9, 156.9]}
+      - {ch: 8, name: accel-z,         label: "Acceleration Z (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-156.9, 156.9]}
