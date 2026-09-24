@@ -246,24 +246,25 @@ For slot 0, `sensor_type` must be 1 (motherboard).
 
 **Validation.** `app_alarm_rule_valid(slot, ch, sensor_type)` checks the channel against
 the table of `sensor_type`:
-  - Slot 0 needs `sensor_type = 1`; slots 1..4 need a 1-Wire type.
-  - A rule whose `sensor_type` differs from the slot's current `sensorN_type` is
-    **stale**:
-    - it is kept (not cleared) but is inert;
-    - it counts as a sanitized/invalid rule in `app_alarm_rules_reload_from_config()`, so
-      a SetParam that changes `sensorN_type` under existing rules reports a fault instead
-      of a silent ACK;
-    - the shell lists it as `stale`, and the Manager-App flags it for the user to fix or
-      delete.
-  - A rule on a 1-Wire slot whose `sensorN_type` is not set is stale in the same way.
-    The order is: provision the type, then the rules.
-  - A motherboard rule is accepted even while the channel's `cap` is off, as today's
-    "provision before enable". It stays inert until the capability is on.
-  - `kind: none` (orientation) and `alarm_only_watchdog` (battery) channels are not rule
-    targets.
-  - Kind, `momentary` (edge-only STATE) and `counter` come from the descriptor. This
-    replaces `app_alarm_quantity_kind()`, `source_is_momentary()` and the source lists
-    in `rule_state_shape_valid()` / `app_alarm_rule_valid()`.
+
+- Slot 0 needs `sensor_type = 1`; slots 1..4 need a 1-Wire type.
+- A rule whose `sensor_type` differs from the slot's current `sensorN_type` is
+  **stale**:
+  - it is kept (not cleared) but is inert;
+  - it counts as a sanitized/invalid rule in `app_alarm_rules_reload_from_config()`, so
+    a SetParam that changes `sensorN_type` under existing rules reports a fault instead
+    of a silent ACK;
+  - the shell lists it as `stale`, and the Manager-App flags it for the user to fix or
+    delete.
+- A rule on a 1-Wire slot whose `sensorN_type` is not set is stale in the same way.
+  The order is: provision the type, then the rules.
+- A motherboard rule is accepted even while the channel's `cap` is off, as today's
+  "provision before enable". It stays inert until the capability is on.
+- `kind: none` (orientation) and `alarm_only_watchdog` (battery) channels are not rule
+  targets.
+- Kind, `momentary` (edge-only STATE) and `counter` come from the descriptor. This
+  replaces `app_alarm_quantity_kind()`, `source_is_momentary()` and the source lists
+  in `rule_state_shape_valid()` / `app_alarm_rule_valid()`.
 - `alarm_scale()` becomes a lookup of the `wire` scale.
 - The no-data watchdog watches every `liveness` channel of an enabled/configured slot.
   This replaces the hand-written `m_nodata_tab`: motherboard temperature, humidity,
@@ -444,6 +445,6 @@ Each step lands with its own tests, and `doc/` updates are the last commit of ea
 | D3 | History per channel | **Decided:** yes, `history_channels` (see *History per channel*) |
 | D4 | Mismatch reporting | **Decided:** `TYPE_SENSOR_MISMATCH` alarm on the slot + values `null` in telemetry (and history) |
 | D5 | Where the Manager-App gets the registry | **Decided:** reads `app_w1_slots.yaml` directly |
+| D6 | Max channels per type | **Decided:** 10 per 1-Wire type; the motherboard has its own limit of 32 (21 used), because it now carries every on-board sensor |
 | D7 | Alarm rule identity | **Decided:** `(rule, slot, channel)`; `AlarmEvent` fields renamed `source` → `slot`, `slot` → `rule` (numbers kept) |
 | D8 | Store the sensor type in the rule | **Decided:** yes, blob 17 → 18 B; a rule with a type that differs from `sensorN_type` is stale (inert, reported) |
-| D6 | Max channels per type | **Decided:** 10 per 1-Wire type; the motherboard has its own limit of 32 (21 used), because it now carries every on-board sensor |
