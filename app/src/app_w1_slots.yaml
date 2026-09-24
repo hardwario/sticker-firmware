@@ -1,0 +1,316 @@
+# Sensor type registry — channel model for alarms, telemetry and history (#430).
+#
+# DRAFT (PR #431): not consumed by the build yet. Step 1 of the plan adds
+# `west sensorgen`, which generates from this file:
+#   - app_sensor_types.c/.h  (channel descriptor tables + lookups)
+#   - the `// BEGIN sensor_types` .. `// END sensor_types` block in decoder/ttn.js
+# The Manager-App reads this file directly (D5), pinned to the firmware release tag.
+#
+# Numbering rules (checked by CI against the previous release's copy):
+#   - type `id` and channel `ch` are append-only: never renumber, never reuse.
+#     A removed channel stays listed with `retired: true`.
+#   - 1-Wire type ids 1..63 keep the legacy enum app_w1_slot_type values
+#     (already on the wire in SensorReading.type / ConfigDump.w1_slot_type).
+#   - built-in type ids start at 64 (D1).
+#   - at most `max_channels` channels per type (D6).
+#
+# Channel fields:
+#   ch        type-local channel number (0..max_channels-1)
+#   name      stable identifier (shell, ATS, decoder output key)
+#   label     human-readable name (Manager-App UI)
+#   quantity  physical quantity (UI grouping / icon only — NOT a rule key)
+#   unit      physical unit of the decoded value
+#   kind      threshold | state | rate | none   (none = not an alarm target)
+#   momentary true for pulse sources that only assert (state rules edge-only)
+#   wire      {type: sint32|uint32, scale}: value on the wire = round(phys * scale),
+#             shared by telemetry (SensorReading / Telemetry) and AlarmEvent.value
+#   history   {enc: i16|u8|u16|u32, scale} fixed-width history encoding
+#             (all-ones / INT16_MAX sentinel = absent), or omitted = not recordable
+#   range     [min, max] valid physical range; a reading outside is absent
+#   liveness  true = channel watched by the no-data watchdog (one per type)
+#   counter   true = raw uint32 counter (rate rules use the exact integer delta)
+
+version: 1
+max_channels: 10
+
+# ---------------------------------------------------------------------------
+# 1-Wire slot types (configured per slot via sensorN_type; detected by family)
+# ---------------------------------------------------------------------------
+w1_types:
+  - id: 1
+    name: dallas
+    label: DS18B20 thermometer
+    w1_family: 0x28
+    channels:
+      - ch: 0
+        name: temperature
+        label: Temperature
+        quantity: temperature
+        unit: degC
+        kind: threshold
+        wire: {type: sint32, scale: 100}
+        history: {enc: i16, scale: 100}
+        range: [-55.0, 125.0]
+        liveness: true
+
+  - id: 2
+    name: machine-probe
+    label: Machine probe (DS28E17 bridge)
+    w1_family: 0x19
+    channels:
+      - ch: 0
+        name: temperature
+        label: Temperature (SHT)
+        quantity: temperature
+        unit: degC
+        kind: threshold
+        wire: {type: sint32, scale: 100}
+        history: {enc: i16, scale: 100}
+        range: [-40.0, 125.0]
+        liveness: true
+      - ch: 1
+        name: humidity
+        label: Relative humidity (SHT)
+        quantity: humidity
+        unit: "%RH"
+        kind: threshold
+        wire: {type: uint32, scale: 2}
+        history: {enc: u8, scale: 2}
+        range: [0.0, 100.0]
+      - ch: 2
+        name: temperature-aux
+        label: Temperature (TMP112)
+        quantity: temperature
+        unit: degC
+        kind: threshold
+        wire: {type: sint32, scale: 100}
+        history: {enc: i16, scale: 100}
+        range: [-40.0, 125.0]
+      - ch: 3
+        name: illuminance
+        label: Illuminance (OPT3001)
+        quantity: illuminance
+        unit: lx
+        kind: threshold
+        wire: {type: uint32, scale: 1}
+        history: {enc: u16, scale: 0.5}
+        range: [0.0, 83865.6]
+      - ch: 4
+        name: magnetic-field
+        label: Magnetic field (Si7210)
+        quantity: magnetic_field
+        unit: mT
+        kind: threshold
+        wire: {type: sint32, scale: 1000}
+        history: {enc: i16, scale: 100}
+        range: [-204.7, 204.7]
+      - ch: 5
+        name: tilt
+        label: Tilt alert (LIS2DH12)
+        quantity: tilt
+        unit: bool
+        kind: state
+        wire: {type: uint32, scale: 1}
+        history: {enc: u8, scale: 1}
+      - ch: 6
+        name: accel-x
+        label: Acceleration X (LIS2DH12)
+        quantity: acceleration
+        unit: m/s2
+        kind: threshold
+        wire: {type: sint32, scale: 100}
+        history: {enc: i16, scale: 100}
+      - ch: 7
+        name: accel-y
+        label: Acceleration Y (LIS2DH12)
+        quantity: acceleration
+        unit: m/s2
+        kind: threshold
+        wire: {type: sint32, scale: 100}
+        history: {enc: i16, scale: 100}
+      - ch: 8
+        name: accel-z
+        label: Acceleration Z (LIS2DH12)
+        quantity: acceleration
+        unit: m/s2
+        kind: threshold
+        wire: {type: sint32, scale: 100}
+        history: {enc: i16, scale: 100}
+
+# ---------------------------------------------------------------------------
+# Built-in types (fixed per source; the decoder derives the type from `source`)
+# ---------------------------------------------------------------------------
+builtin_types:
+  - id: 64
+    name: motherboard
+    label: STICKER on-board sensors
+    sources: [onboard]
+    channels:
+      - ch: 0
+        name: temperature
+        label: Temperature (SHT4x)
+        quantity: temperature
+        unit: degC
+        kind: threshold
+        wire: {type: sint32, scale: 100}
+        history: {enc: i16, scale: 100}
+        range: [-40.0, 125.0]
+        liveness: true
+      - ch: 1
+        name: humidity
+        label: Relative humidity (SHT4x)
+        quantity: humidity
+        unit: "%RH"
+        kind: threshold
+        wire: {type: uint32, scale: 2}
+        history: {enc: u8, scale: 2}
+        range: [0.0, 100.0]
+      - ch: 2
+        name: pressure
+        label: Pressure (MPL3115A2)
+        quantity: pressure
+        unit: hPa
+        kind: threshold
+        wire: {type: uint32, scale: 10}
+        history: {enc: u16, scale: 10}
+        range: [200.0, 1100.0]
+      - ch: 3
+        name: illuminance
+        label: Illuminance (OPT3001)
+        quantity: illuminance
+        unit: lx
+        kind: threshold
+        wire: {type: uint32, scale: 1}
+        history: {enc: u16, scale: 0.5}
+        range: [0.0, 83865.6]
+      - ch: 4
+        name: temperature-baro
+        label: Temperature (MPL3115A2)
+        quantity: temperature
+        unit: degC
+        kind: threshold
+        wire: {type: sint32, scale: 100}
+        history: {enc: i16, scale: 100}
+        range: [-40.0, 85.0]
+
+  - id: 65
+    name: hall
+    label: Hall switch
+    sources: [hall-left, hall-right]
+    channels:
+      - ch: 0
+        name: state
+        label: State
+        quantity: state
+        unit: bool
+        kind: state
+        wire: {type: uint32, scale: 1}
+      - ch: 1
+        name: count
+        label: Pulse count
+        quantity: count
+        unit: pulses
+        kind: rate
+        counter: true
+        wire: {type: uint32, scale: 1}
+        history: {enc: u32, scale: 1}
+
+  - id: 66
+    name: input
+    label: Discrete / analog input
+    sources: [input-a, input-b]
+    channels:
+      - ch: 0
+        name: state
+        label: State
+        quantity: state
+        unit: bool
+        kind: state
+        wire: {type: uint32, scale: 1}
+      - ch: 1
+        name: count
+        label: Pulse count
+        quantity: count
+        unit: pulses
+        kind: rate
+        counter: true
+        wire: {type: uint32, scale: 1}
+        history: {enc: u32, scale: 1}
+      - ch: 2
+        name: voltage
+        label: Voltage (analog, #396)
+        quantity: voltage
+        unit: V
+        kind: threshold
+        wire: {type: uint32, scale: 1000}
+        history: {enc: u16, scale: 1000}
+        range: [0.0, 30.0]
+
+  - id: 67
+    name: pir
+    label: PIR motion detector (PYQ1648)
+    sources: [pir]
+    channels:
+      - ch: 0
+        name: motion
+        label: Motion
+        quantity: state
+        unit: bool
+        kind: state
+        momentary: true
+        wire: {type: uint32, scale: 1}
+      - ch: 1
+        name: count
+        label: Motion count
+        quantity: count
+        unit: events
+        kind: rate
+        counter: true
+        wire: {type: uint32, scale: 1}
+        history: {enc: u32, scale: 1}
+
+  - id: 68
+    name: accel
+    label: On-board accelerometer (LIS2DH)
+    sources: [accel]
+    channels:
+      - ch: 0
+        name: motion
+        label: Motion
+        quantity: state
+        unit: bool
+        kind: state
+        momentary: true
+        wire: {type: uint32, scale: 1}
+      - ch: 1
+        name: count
+        label: Motion count
+        quantity: count
+        unit: events
+        kind: rate
+        counter: true
+        wire: {type: uint32, scale: 1}
+        history: {enc: u32, scale: 1}
+      - ch: 2
+        name: orientation
+        label: Orientation (1..6)
+        quantity: orientation
+        unit: enum
+        kind: none
+        wire: {type: uint32, scale: 1}
+        history: {enc: u8, scale: 1}
+
+  - id: 69
+    name: battery
+    label: Supply rail
+    sources: [battery]
+    channels:
+      - ch: 0
+        name: voltage
+        label: Supply voltage
+        quantity: voltage
+        unit: V
+        kind: threshold   # low-battery watchdog only (battery_level), not a rule target
+        wire: {type: uint32, scale: 1000}
+        history: {enc: u16, scale: 1000}
+        liveness: true
