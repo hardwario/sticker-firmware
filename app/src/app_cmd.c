@@ -442,38 +442,70 @@ static const struct {
 	uint8_t tag;
 	uint8_t size;
 	bool nfc_only; /* only dumped over NFC (e.g. LoRaWAN keys) — never over LoRaWAN */
+	bool lrw_skip; /* left out of a LoRaWAN get_config (`dump_lrw: false`, e.g. the
+			* 1-Wire slot ROMs); an explicit get_param still returns it */
 } DUMP_FIELDS[] = {
 	// BEGIN GENERATED DUMP_FIELDS
-	{DUMP_SECTION_LORAWAN, 1, 2, false},     {DUMP_SECTION_LORAWAN, 15, 2, false},
-	{DUMP_SECTION_LORAWAN, 2, 2, false},     {DUMP_SECTION_LORAWAN, 3, 2, false},
-	{DUMP_SECTION_LORAWAN, 4, 2, false},     {DUMP_SECTION_LORAWAN, 5, 2, false},
-	{DUMP_SECTION_LORAWAN, 6, 10, false},    {DUMP_SECTION_LORAWAN, 7, 10, false},
-	{DUMP_SECTION_LORAWAN, 8, 18, true},     {DUMP_SECTION_LORAWAN, 9, 18, true},
-	{DUMP_SECTION_LORAWAN, 10, 6, false},    {DUMP_SECTION_LORAWAN, 11, 18, true},
-	{DUMP_SECTION_LORAWAN, 12, 18, true},    {DUMP_SECTION_LORAWAN, 16, 3, false},
-	{DUMP_SECTION_LORAWAN, 13, 3, false},    {DUMP_SECTION_LORAWAN, 14, 3, false},
-	{DUMP_SECTION_APPLICATION, 1, 2, false}, {DUMP_SECTION_APPLICATION, 2, 3, false},
-	{DUMP_SECTION_APPLICATION, 3, 4, false}, {DUMP_SECTION_APPLICATION, 4, 2, false},
-	{DUMP_SECTION_APPLICATION, 5, 6, false}, {DUMP_SECTION_APPLICATION, 6, 3, false},
-	{DUMP_SECTION_APPLICATION, 7, 2, false}, {DUMP_SECTION_SENSORS, 1, 2, false},
-	{DUMP_SECTION_SENSORS, 2, 2, false},     {DUMP_SECTION_SENSORS, 3, 2, false},
-	{DUMP_SECTION_SENSORS, 4, 2, false},     {DUMP_SECTION_SENSORS, 5, 2, false},
-	{DUMP_SECTION_SENSORS, 6, 2, false},     {DUMP_SECTION_SENSORS, 7, 2, false},
-	{DUMP_SECTION_SENSORS, 19, 3, false},    {DUMP_SECTION_SENSORS, 8, 2, false},
-	{DUMP_SECTION_SENSORS, 9, 2, false},     {DUMP_SECTION_SENSORS, 10, 2, false},
-	{DUMP_SECTION_SENSORS, 11, 10, false},   {DUMP_SECTION_SENSORS, 12, 10, false},
-	{DUMP_SECTION_SENSORS, 13, 10, false},   {DUMP_SECTION_SENSORS, 14, 10, false},
-	{DUMP_SECTION_SENSORS, 15, 2, false},    {DUMP_SECTION_SENSORS, 16, 3, false},
-	{DUMP_SECTION_SENSORS, 17, 3, false},    {DUMP_SECTION_SENSORS, 18, 3, false},
-	{DUMP_SECTION_ALARMS, 1, 3, false},      {DUMP_SECTION_ALARMS, 3, 19, false},
-	{DUMP_SECTION_ALARMS, 4, 19, false},     {DUMP_SECTION_ALARMS, 5, 19, false},
-	{DUMP_SECTION_ALARMS, 6, 19, false},     {DUMP_SECTION_ALARMS, 7, 19, false},
-	{DUMP_SECTION_ALARMS, 8, 19, false},     {DUMP_SECTION_ALARMS, 9, 19, false},
-	{DUMP_SECTION_ALARMS, 10, 19, false},    {DUMP_SECTION_ALARMS, 11, 19, false},
-	{DUMP_SECTION_ALARMS, 12, 19, false},    {DUMP_SECTION_ALARMS, 13, 19, false},
-	{DUMP_SECTION_ALARMS, 14, 19, false},    {DUMP_SECTION_ALARMS, 15, 19, false},
-	{DUMP_SECTION_ALARMS, 16, 20, false},    {DUMP_SECTION_ALARMS, 17, 20, false},
-	{DUMP_SECTION_ALARMS, 18, 20, false},    {DUMP_SECTION_ALARMS, 20, 3, false},
+	{DUMP_SECTION_LORAWAN, 1, 2, false, false},
+	{DUMP_SECTION_LORAWAN, 15, 2, false, false},
+	{DUMP_SECTION_LORAWAN, 2, 2, false, false},
+	{DUMP_SECTION_LORAWAN, 3, 2, false, false},
+	{DUMP_SECTION_LORAWAN, 4, 2, false, false},
+	{DUMP_SECTION_LORAWAN, 5, 2, false, false},
+	{DUMP_SECTION_LORAWAN, 6, 10, false, false},
+	{DUMP_SECTION_LORAWAN, 7, 10, false, false},
+	{DUMP_SECTION_LORAWAN, 8, 18, true, false},
+	{DUMP_SECTION_LORAWAN, 9, 18, true, false},
+	{DUMP_SECTION_LORAWAN, 10, 6, false, false},
+	{DUMP_SECTION_LORAWAN, 11, 18, true, false},
+	{DUMP_SECTION_LORAWAN, 12, 18, true, false},
+	{DUMP_SECTION_LORAWAN, 16, 3, false, false},
+	{DUMP_SECTION_LORAWAN, 13, 3, false, false},
+	{DUMP_SECTION_LORAWAN, 14, 3, false, false},
+	{DUMP_SECTION_APPLICATION, 1, 2, false, false},
+	{DUMP_SECTION_APPLICATION, 2, 3, false, false},
+	{DUMP_SECTION_APPLICATION, 3, 4, false, false},
+	{DUMP_SECTION_APPLICATION, 4, 2, false, false},
+	{DUMP_SECTION_APPLICATION, 5, 6, false, false},
+	{DUMP_SECTION_APPLICATION, 6, 3, false, false},
+	{DUMP_SECTION_APPLICATION, 7, 2, false, false},
+	{DUMP_SECTION_SENSORS, 1, 2, false, false},
+	{DUMP_SECTION_SENSORS, 2, 2, false, false},
+	{DUMP_SECTION_SENSORS, 3, 2, false, false},
+	{DUMP_SECTION_SENSORS, 4, 2, false, false},
+	{DUMP_SECTION_SENSORS, 5, 2, false, false},
+	{DUMP_SECTION_SENSORS, 6, 2, false, false},
+	{DUMP_SECTION_SENSORS, 7, 2, false, false},
+	{DUMP_SECTION_SENSORS, 19, 3, false, false},
+	{DUMP_SECTION_SENSORS, 8, 2, false, false},
+	{DUMP_SECTION_SENSORS, 9, 2, false, false},
+	{DUMP_SECTION_SENSORS, 10, 2, false, false},
+	{DUMP_SECTION_SENSORS, 11, 10, false, true},
+	{DUMP_SECTION_SENSORS, 12, 10, false, true},
+	{DUMP_SECTION_SENSORS, 13, 10, false, true},
+	{DUMP_SECTION_SENSORS, 14, 10, false, true},
+	{DUMP_SECTION_SENSORS, 15, 2, false, false},
+	{DUMP_SECTION_SENSORS, 16, 3, false, false},
+	{DUMP_SECTION_SENSORS, 17, 3, false, false},
+	{DUMP_SECTION_SENSORS, 18, 3, false, false},
+	{DUMP_SECTION_ALARMS, 1, 3, false, false},
+	{DUMP_SECTION_ALARMS, 3, 19, false, false},
+	{DUMP_SECTION_ALARMS, 4, 19, false, false},
+	{DUMP_SECTION_ALARMS, 5, 19, false, false},
+	{DUMP_SECTION_ALARMS, 6, 19, false, false},
+	{DUMP_SECTION_ALARMS, 7, 19, false, false},
+	{DUMP_SECTION_ALARMS, 8, 19, false, false},
+	{DUMP_SECTION_ALARMS, 9, 19, false, false},
+	{DUMP_SECTION_ALARMS, 10, 19, false, false},
+	{DUMP_SECTION_ALARMS, 11, 19, false, false},
+	{DUMP_SECTION_ALARMS, 12, 19, false, false},
+	{DUMP_SECTION_ALARMS, 13, 19, false, false},
+	{DUMP_SECTION_ALARMS, 14, 19, false, false},
+	{DUMP_SECTION_ALARMS, 15, 19, false, false},
+	{DUMP_SECTION_ALARMS, 16, 20, false, false},
+	{DUMP_SECTION_ALARMS, 17, 20, false, false},
+	{DUMP_SECTION_ALARMS, 18, 20, false, false},
+	{DUMP_SECTION_ALARMS, 20, 3, false, false},
 	// END GENERATED DUMP_FIELDS
 };
 
@@ -532,6 +564,12 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 	uint32_t cur_page = 0, used = 0;
 	for (size_t i = 0; i < ARRAY_SIZE(DUMP_FIELDS); i++) {
 		if (DUMP_FIELDS[i].nfc_only && !allow_nfc_only) {
+			continue;
+		}
+		/* `dump_lrw: false` fields (the 1-Wire slot ROMs) only cost pages in a
+		 * LoRaWAN dump — the network has no use for them; get_param still reads
+		 * them on request, NFC/shell/vendor dumps keep them. */
+		if (DUMP_FIELDS[i].lrw_skip && tp == APP_CMD_TRANSPORT_LRW) {
 			continue;
 		}
 		/* Empty (all-zero) alarm slots are omitted by app_config_fill_alarms(),
@@ -928,7 +966,9 @@ static void app_cmd_handle_force_send(enum app_cmd_transport tp, const Command *
 	ARG_UNUSED(resp);
 	ARG_UNUSED(action);
 #if defined(CONFIG_LORAWAN)
-	app_report_trigger();
+	/* F14: sent at once (no fleet jitter), so it can't silently fold into a
+	 * jittered report that happens to be pending. */
+	app_report_force();
 #endif
 	/* No ack — the triggered telemetry uplink IS the answer; an extra ack
 	 * would just cost a second uplink. Leave which_body == 0 (emit nothing). */
@@ -955,7 +995,7 @@ static void app_cmd_handle_sample(enum app_cmd_transport tp, const Command *cmd,
 	 * and a full Telemetry would not fit the 64-byte fPort-85 response buffer. */
 
 #if defined(CONFIG_LORAWAN)
-	app_report_trigger();
+	app_report_force(); /* host-requested, like force_send (F14) */
 #endif
 }
 
@@ -1102,9 +1142,10 @@ static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *
 #ifdef CONFIG_LORAWAN
 	/* Empty (LRW): re-sync from the network, then answer with an Info uplink
 	 * once the network time lands (carries the synced unix_time). No ack — see
-	 * app_lrw. */
+	 * app_lrw. The Info carries this command's seq, so the host can pair the
+	 * answer with its request (the boot Info keeps seq 0). */
 	app_clock_force_resync();
-	app_lrw_send_info_on_clock_sync();
+	app_lrw_send_info_on_clock_sync(cmd->seq);
 #else
 	resp->which_body = Response_ack_tag; /* no LRW: just confirm */
 #endif
@@ -1146,7 +1187,10 @@ static void app_cmd_handle_w1_scan(enum app_cmd_transport tp, const Command *cmd
 		make_error(resp, Response_Error_Code_NOT_READY, "1-wire scan");
 	}
 #else
-	make_error(resp, Response_Error_Code_NOT_READY, "no 1-wire");
+	/* 1-Wire is not built into this image (e.g. the lean debug.conf): NOT_SUPPORTED,
+	 * so a host can tell "not in this FW" from a bus that is not ready (NOT_READY) —
+	 * over LoRaWAN only the code survives, the detail is stripped (#409 3a). */
+	make_error(resp, Response_Error_Code_NOT_SUPPORTED, "no 1-wire");
 #endif
 }
 
@@ -2189,13 +2233,18 @@ int app_cmd_build_budget_error(uint32_t seq, uint8_t *out, size_t out_cap, size_
 
 int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *more)
 {
+	return app_cmd_build_info_seq(0, out, out_cap, out_len, more);
+}
+
+int app_cmd_build_info_seq(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len, bool *more)
+{
 	if (!out || !out_len || !more) {
 		return -EINVAL;
 	}
 	*more = false;
 
 	Response resp = Response_init_zero;
-	resp.seq = 0;
+	resp.seq = seq;
 	resp.which_body = Response_info_tag;
 	/* Autonomous GetInfo on join goes out over LoRaWAN, so dev_eui is omitted. */
 	fill_info(APP_CMD_TRANSPORT_LRW, &resp.body.info, SIZE_MAX);
@@ -2206,7 +2255,7 @@ int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *more
 	int ret = encode_response(&resp, out, out_cap, out_len);
 
 	if (ret == -EMSGSIZE) {
-		ret = info_paged(0, out, out_cap, out_len, more, &resp);
+		ret = info_paged(seq, out, out_cap, out_len, more, &resp);
 	}
 	return ret;
 }
