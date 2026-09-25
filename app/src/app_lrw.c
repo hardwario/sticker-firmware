@@ -211,7 +211,13 @@ static uint32_t m_hist_count;
  * replay start, which buys ~8 B of samples per frame at low DRs. */
 static uint32_t m_hist_frame_bound = UINT32_MAX;
 static uint32_t m_hist_idx;
-static size_t m_hist_cursor;
+/* Absolute record ordinals (app_history_span()): next record to send and the end
+ * of the replay (exclusive), snapshot at start. Captures keep appending during a
+ * replay and the RAM ring may evict under it, but an absolute cursor names the
+ * same record throughout, so nothing is repeated or skipped; records captured
+ * after the start are left for the next replay. */
+static uint32_t m_hist_cursor;
+static uint32_t m_hist_end;
 static uint32_t m_hist_present; /* shared sensor mask (uint32), snapshot at replay start */
 static uint32_t m_hist_interval;
 static int m_hist_retries; /* consecutive lorawan_send failures on the current frame (#89) */
@@ -1814,12 +1820,12 @@ static void m_hist_work_handler(struct k_work *work)
 	size_t cap = MIN(history_frame_cap(), sizeof(samples));
 	uint32_t t0 = 0;
 	uint16_t n = 0;
-	size_t next = m_hist_cursor;
+	uint32_t next = m_hist_cursor;
 	size_t slen = 0;
 
 	if (cap > 0) {
-		slen = app_history_export_page(m_hist_from, m_hist_to, m_hist_cursor, samples, cap,
-					       &t0, &n, &next);
+		slen = app_history_export_abs(m_hist_from, m_hist_to, m_hist_cursor, m_hist_end,
+					      samples, cap, &t0, &n, &next);
 	}
 	if (n == 0) {
 		LOG_WRN("History replay stop at frame %u/%u (cap=%uB)", (unsigned)m_hist_idx,
@@ -1881,7 +1887,7 @@ static void m_hist_work_handler(struct k_work *work)
 	/* Terminate on cursor exhaustion, not frame_index == frame_count (#89): a DR
 	 * change mid-replay alters records-per-frame, so the up-front frame_count is
 	 * only an estimate. The host concatenates by frame_index. */
-	if (m_hist_cursor < app_history_count()) {
+	if (m_hist_cursor < m_hist_end) {
 		k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_SECONDS(FRAME_GAP_SEC));
 	} else {
 		LOG_INF("History replay complete: %u frames", (unsigned)m_hist_idx);
@@ -1930,10 +1936,12 @@ int app_lrw_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t 
 
 	m_hist_count = n;
 	m_hist_idx = 0;
-	m_hist_cursor = 0;
+	app_history_span(&m_hist_cursor, &m_hist_end);
 	m_hist_retries = 0;
 	m_hist_active = true;
-	app_history_set_replay_active(true); /* pause capture; app_report telemetry self-skips */
+	/* Capture goes on (absolute cursor); only the flash page rollover is held
+	 * off. app_report telemetry self-skips while the replay owns the radio. */
+	app_history_set_replay_active(true);
 
 	LOG_INF("History replay start: %u frames (window %u..%u)", (unsigned)n, from_unix, to_unix);
 	k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_NO_WAIT);

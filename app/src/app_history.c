@@ -134,9 +134,12 @@ static bool m_base_synced;
  * backend) — k_uptime_get() has since restarted at 0, so the additive sync fixup
  * is invalid; the next clock sync re-anchors instead. */
 static bool m_base_stale_uptime;
-static uint32_t m_interval;  /* interval_report (s) the buffer was recorded at; records
-			      * are periodic so per-record time = base + ord*interval */
-static bool m_replay_active; /* true while app_lrw streams a replay (capture self-skips, #126) */
+static uint32_t m_interval; /* interval_report (s) the buffer was recorded at; records
+			     * are periodic so per-record time = base + ord*interval */
+/* True while app_lrw streams a replay. Capture keeps running (the replay cursor
+ * is absolute, see app_history_export_abs()); only the flash backend's page
+ * rollover (a ~20 ms erase that stalls the CPU) is held off until it ends. */
+static bool m_replay_active;
 
 /* The ring self-persists: each record is durable once its double word flushes,
  * and page headers carry the base time / ordinal — so on reboot the count and
@@ -177,6 +180,9 @@ static uint32_t now_seconds(bool *synced)
  *   backend_append(rec,len,ev)   append one record; *ev = records evicted
  *   backend_read(idx,rec,len)    read logical record idx (0 = oldest)
  *   backend_stored()             current record count held by the ring
+ *   backend_first_abs()          absolute ordinal of the oldest record; it only
+ *                                grows (eviction, reset), so a replay cursor
+ *                                kept as an absolute ordinal never shifts
  *   backend_reset_logical()      drop all records without a full erase (layout
  *                                change); the next append starts a fresh run
  *   backend_erase()              wipe all storage (explicit `history clear`)
@@ -582,6 +588,14 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
 	}
 
 	if (m_nlive == 0 || m_head_full || (head_records() + 1) > rpp) {
+		/* A rollover erases a page (~20 ms CPU stall). Never inside a replay:
+		 * the stall could land in its RX windows. Writes within the current page
+		 * go on; a record that needs the next page is dropped (there is no RAM
+		 * for a deferred-record queue) and the next capture after the replay
+		 * opens the page. */
+		if (m_replay_active) {
+			return -EBUSY;
+		}
 		uint32_t adv_evicted = 0;
 		int ret = advance_page(&adv_evicted);
 		if (ret) {
@@ -655,6 +669,11 @@ static uint16_t backend_stored(void)
 	return m_nlive ? (uint16_t)(m_abs_ord - m_live[0].first_ord) : 0;
 }
 
+static uint32_t backend_first_abs(void)
+{
+	return m_nlive ? m_live[0].first_ord : m_abs_ord;
+}
+
 static void backend_reset_logical(void)
 {
 	/* Drop the live set without erasing. When the reset also changes the
@@ -669,9 +688,12 @@ static void backend_reset_logical(void)
 	 * on `cur.seq - h.seq == 1`, so after a reboot it reattaches that stale
 	 * page to the new one, producing an m_abs_ord/m_live[0].first_ord mismatch
 	 * that underflows backend_stored(). Burn one seq value so no future page
-	 * can ever land exactly 1 above the last pre-reset page's seq. */
+	 * can ever land exactly 1 above the last pre-reset page's seq.
+	 *
+	 * m_abs_ord is NOT rewound: absolute ordinals keep growing across a reset
+	 * so a replay cursor taken before it lands before the new oldest record and
+	 * the replay ends instead of streaming the new layout under the old one. */
 	m_nlive = 0;
-	m_abs_ord = 0;
 	m_head_dw = 0;
 	m_stage_len = 0;
 	m_head_full = false;
@@ -703,6 +725,7 @@ bool app_history_is_ready(void)
 static uint8_t __noinit m_ram[CONFIG_APP_HISTORY_BYTES];
 static uint16_t m_ram_start;
 static uint16_t m_ram_count;
+static uint32_t m_ram_first_abs; /* absolute ordinal of the oldest record (evicted total) */
 
 static int backend_init(void)
 {
@@ -712,6 +735,7 @@ static bool backend_mount(void)
 {
 	m_ram_start = 0;
 	m_ram_count = 0;
+	m_ram_first_abs = 0;
 	return false; /* RAM ring starts empty each boot */
 }
 static uint16_t backend_capacity(uint16_t sample_size)
@@ -726,6 +750,7 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
 	if (m_ram_count >= cap) {
 		slot = m_ram_start;
 		m_ram_start = (uint16_t)((m_ram_start + 1) % cap);
+		m_ram_first_abs++;
 		*evicted = 1;
 	} else {
 		slot = (uint16_t)((m_ram_start + m_ram_count) % cap);
@@ -745,15 +770,20 @@ static uint16_t backend_stored(void)
 {
 	return m_ram_count;
 }
+static uint32_t backend_first_abs(void)
+{
+	return m_ram_first_abs;
+}
 static void backend_reset_logical(void)
 {
+	/* Absolute ordinals keep growing across a reset (see the flash backend). */
+	m_ram_first_abs += m_ram_count;
 	m_ram_start = 0;
 	m_ram_count = 0;
 }
 static void backend_erase(void)
 {
-	m_ram_start = 0;
-	m_ram_count = 0;
+	backend_reset_logical();
 }
 
 bool app_history_is_ready(void)
@@ -928,12 +958,6 @@ void app_history_capture(void)
 		return;
 	}
 
-	/* A replay is streaming the buffer back; don't mutate it underneath. */
-	if (m_replay_active) {
-		LOG_DBG("history capture skipped: replay active");
-		return;
-	}
-
 	uint8_t rec[MAX_RECORD_SIZE];
 
 	k_mutex_lock(&m_lock, K_FOREVER);
@@ -976,7 +1000,13 @@ void app_history_capture(void)
 	/* Only advance the logical view if the write lands, so a failed flash write
 	 * leaves no phantom record (#96). */
 	uint32_t evicted = 0;
-	if (backend_append(rec, m_sample_size, &evicted) != 0) {
+	int ret = backend_append(rec, m_sample_size, &evicted);
+	if (ret == -EBUSY) {
+		LOG_WRN("history page rollover held off by a replay — record dropped");
+		k_mutex_unlock(&m_lock);
+		return;
+	}
+	if (ret != 0) {
 		LOG_WRN("history append failed — record dropped");
 		/* #340 L8: advance_page() may have already committed a real eviction
 		 * before the per-record write that actually failed (backend_append()
@@ -1086,20 +1116,36 @@ bool app_history_base_synced(void)
  * mask (m_mask) — so a wire frame carries the mask + interval once and each
  * record is just the raw stored bytes (sentinels mark absent values). Time is
  * implicit: ordinal `ord` is at base + ord*interval; records are time-ordered,
- * so the window filter can break once past `to_unix`. */
-size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
-			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord)
+ * so the window filter can break once past `to_unix`.
+ *
+ * Cursors here are absolute ordinals (backend_first_abs() + ord): a record keeps
+ * its absolute ordinal while newer records are appended and older ones evicted,
+ * so a replay that runs across captures neither repeats nor skips records. A
+ * cursor that has fallen out of the ring (its record evicted) resumes at the
+ * oldest record still stored. `end` bounds the scan (exclusive). */
+static size_t export_locked(uint32_t from_unix, uint32_t to_unix, uint32_t start, uint32_t end,
+			    uint8_t *buf, size_t cap, uint32_t *t0_out, uint16_t *n_written,
+			    uint32_t *next_out)
 {
-	k_mutex_lock(&m_lock, K_FOREVER);
-
+	uint32_t first = backend_first_abs();
+	uint32_t stop = first + m_count;
 	size_t pos = 0;
 	uint16_t written = 0;
 	uint32_t t0 = 0;
 	bool have_t0 = false;
-	size_t ord = start_ord;
 
-	for (; ord < m_count; ord++) {
-		uint32_t t = m_base_time + (uint32_t)ord * m_interval;
+	if (end > stop) {
+		end = stop;
+	}
+	if (start < first) {
+		start = first; /* evicted under the cursor: resume at the oldest record */
+	}
+
+	uint32_t abs = start;
+
+	for (; abs < end; abs++) {
+		uint32_t ord = abs - first;
+		uint32_t t = m_base_time + ord * m_interval;
 		if (m_base_synced) {
 			if (t > to_unix) {
 				break; /* monotonic time: no later record qualifies */
@@ -1120,12 +1166,12 @@ size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t star
 			 * record; otherwise skip it and keep looking for the frame's first good
 			 * record. (pos/written are not advanced, so the uninitialised bytes are
 			 * overwritten by the next good read — #96 still holds.) */
-			LOG_WRN("history record ord %zu read failed — skipping (M-13)", ord);
+			LOG_WRN("history record ord %u read failed — skipping (M-13)", ord);
 			if (written > 0) {
-				ord++; /* resume past the bad slot on the next page */
+				abs++; /* resume past the bad slot on the next page */
 				break;
 			}
-			continue; /* for-loop advances ord */
+			continue; /* for-loop advances abs */
 		}
 		if (!have_t0) {
 			t0 = t;
@@ -1141,10 +1187,53 @@ size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t star
 	if (n_written) {
 		*n_written = written;
 	}
+	if (next_out) {
+		*next_out = abs;
+	}
+	return pos;
+}
+
+size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
+			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+
+	uint32_t first = backend_first_abs();
+	uint32_t start = (start_ord < m_count) ? first + (uint32_t)start_ord : first + m_count;
+	uint32_t next = start;
+	size_t pos = export_locked(from_unix, to_unix, start, first + m_count, buf, cap, t0_out,
+				   n_written, &next);
+
 	if (next_ord) {
-		*next_ord = ord;
+		/* Past-the-end cursors are echoed back unchanged (has_more=false). */
+		*next_ord = (start_ord < m_count) ? (size_t)(next - first) : start_ord;
 	}
 
+	k_mutex_unlock(&m_lock);
+	return pos;
+}
+
+void app_history_span(uint32_t *first_abs, uint32_t *end_abs)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+	uint32_t first = backend_first_abs();
+
+	if (first_abs) {
+		*first_abs = first;
+	}
+	if (end_abs) {
+		*end_abs = first + m_count;
+	}
+	k_mutex_unlock(&m_lock);
+}
+
+size_t app_history_export_abs(uint32_t from_unix, uint32_t to_unix, uint32_t start_abs,
+			      uint32_t end_abs, uint8_t *buf, size_t cap, uint32_t *t0_out,
+			      uint16_t *n_written, uint32_t *next_abs)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+	size_t pos = export_locked(from_unix, to_unix, start_abs, end_abs, buf, cap, t0_out,
+				   n_written, next_abs);
 	k_mutex_unlock(&m_lock);
 	return pos;
 }

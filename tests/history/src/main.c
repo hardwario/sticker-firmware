@@ -12,6 +12,7 @@
 
 #include <zephyr/ztest.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
 
 #include <limits.h>
 #include <math.h>
@@ -263,6 +264,125 @@ ZTEST(history, test_pressure_illuminance_orientation_accel_channels)
 		      "illuminance absent (NaN sentinel)");
 	zassert_false(r.present & BIT16(APP_HISTORY_ORIENTATION),
 		      "orientation absent (INT_MAX sentinel)");
+}
+
+/* Temperature of the i-th record in an absolute-cursor export buffer (3 B
+ * temp+hum records: int16 LE x100 + uint8 x2). */
+static double rec_temp(const uint8_t *buf, int i)
+{
+	return (int16_t)sys_get_le16(&buf[i * 3]) / 100.0;
+}
+
+/* C (#126 follow-up): capture keeps running while a replay streams the ring.
+ * The replay cursor is an absolute ordinal, so records evicted underneath it do
+ * not shift it (no repeated / skipped record), a cursor that falls out of the
+ * ring resumes at the oldest record still stored, and the replay ends at its
+ * start snapshot even though newer records keep arriving. */
+ZTEST(history, test_capture_during_replay_absolute_cursor)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	size_t cap = app_history_capacity(); /* 64 B / 3 B = 21 */
+
+	for (size_t i = 0; i < cap; i++) {
+		set_th((float)i, 50.0f);
+		app_history_capture();
+	}
+
+	uint32_t first, end;
+	app_history_span(&first, &end);
+	zassert_equal(end - first, cap, "span %u..%u", first, end);
+
+	app_history_set_replay_active(true);
+
+	uint8_t buf[64];
+	uint32_t t0, t0_first, next;
+	uint16_t n;
+
+	/* Frame 1: records 0..4. */
+	zassert_equal(
+		app_history_export_abs(0, UINT32_MAX, first, end, buf, 15, &t0_first, &n, &next),
+		15);
+	zassert_equal(n, 5);
+	zassert_within(rec_temp(buf, 0), 0.0, 0.01);
+	zassert_equal(next, first + 5);
+
+	/* Three captures during the replay: not skipped, and they evict records 0..2
+	 * (already sent). */
+	for (int i = 0; i < 3; i++) {
+		set_th(100.0f + (float)i, 50.0f);
+		app_history_capture();
+	}
+	zassert_equal(app_history_count(), cap, "captures must not be skipped");
+	struct app_history_record r;
+	zassert_equal(app_history_get(cap - 1, &r), 0);
+	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 102.0, 0.01, "newest %g",
+		       r.value[APP_HISTORY_TEMPERATURE]);
+
+	/* Frame 2 continues exactly after record 4 despite the eviction. */
+	uint32_t cur = next;
+
+	zassert_equal(app_history_export_abs(0, UINT32_MAX, cur, end, buf, 15, &t0, &n, &next), 15);
+	zassert_equal(n, 5);
+	zassert_within(rec_temp(buf, 0), 5.0, 0.01, "frame 2 starts at %g", rec_temp(buf, 0));
+	zassert_equal(t0, t0_first + 5 * 60, "t0 %u", t0);
+
+	/* Ten more captures evict records 3..12 — past the cursor (10). */
+	for (int i = 0; i < 10; i++) {
+		app_history_capture();
+	}
+	cur = next;
+	zassert_equal(app_history_export_abs(0, UINT32_MAX, cur, end, buf, 15, &t0, &n, &next), 15);
+	zassert_within(rec_temp(buf, 0), 13.0, 0.01, "fell out: resume at the oldest, got %g",
+		       rec_temp(buf, 0));
+	zassert_equal(t0, t0_first + 13 * 60, "t0 %u", t0);
+
+	/* Drain: the replay stops at its start snapshot (record 20), the 13 records
+	 * captured meanwhile are left for the next replay. */
+	uint32_t sent = n;
+
+	while (next < end) {
+		cur = next;
+		(void)app_history_export_abs(0, UINT32_MAX, cur, end, buf, 15, &t0, &n, &next);
+		zassert_true(n > 0, "stalled at %u", cur);
+		sent += n;
+	}
+	zassert_equal(next, end);
+	zassert_within(rec_temp(buf, n - 1), 20.0, 0.01, "last sent %g", rec_temp(buf, n - 1));
+	zassert_equal(sent, 8, "records 13..20 in the last frames, got %u", sent);
+
+	app_history_set_replay_active(false);
+}
+
+/* A logical reset (clear / layout / interval change) during a replay: the stale
+ * cursor and end lie before the new oldest record, so the replay just ends
+ * instead of streaming new-layout records under the old frame header. */
+ZTEST(history, test_reset_during_replay_ends_it)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	for (int i = 0; i < 6; i++) {
+		app_history_capture();
+	}
+	uint32_t first, end;
+
+	app_history_span(&first, &end);
+	app_history_set_replay_active(true);
+	app_history_clear();
+	for (int i = 0; i < 4; i++) {
+		app_history_capture();
+	}
+
+	uint8_t buf[64];
+	uint32_t t0, next;
+	uint16_t n;
+
+	zassert_equal(
+		app_history_export_abs(0, UINT32_MAX, first, end, buf, sizeof(buf), &t0, &n, &next),
+		0);
+	zassert_equal(n, 0);
+	zassert_true(next >= end, "stale replay must be exhausted (next %u end %u)", next, end);
+	app_history_set_replay_active(false);
 }
 
 ZTEST_SUITE(history, NULL, NULL, NULL, NULL, NULL);

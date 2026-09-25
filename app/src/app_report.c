@@ -139,7 +139,8 @@ static void run_report(bool periodic, bool now)
 
 	/* Capture one history record — ONLY on the fixed cadence, so records are
 	 * spaced at exactly interval_report and replay's base + ord*interval time
-	 * reconstruction holds. Self-skips while a replay is active (#126). */
+	 * reconstruction holds. Also while a replay is streaming (its cursor is
+	 * absolute): a skipped tick would shift every later record's time. */
 	if (periodic) {
 		app_history_capture();
 	}

@@ -399,3 +399,20 @@ ZTEST(history_flash, test_f28_power_loss_shift)
 	zassert_equal(shift_get, -(int32_t)F28_OUTAGE, "F28 shift (get) %d", shift_get);
 	zassert_equal(shift_frame, -(int32_t)F28_OUTAGE, "F28 shift (frame) %d", shift_frame);
 }
+
+/* C: while a replay streams the ring, writes within the current page go on but
+ * the page rollover (a ~20 ms erase) is held off: a record that needs the next
+ * page is dropped, and the first capture after the replay opens it. */
+ZTEST(history_flash, test_replay_holds_off_page_rollover)
+{
+	size_t rpp = app_history_capacity() / 4; /* 4 pages in app.overlay */
+
+	capture_n(rpp - 2);
+	app_history_set_replay_active(true);
+	capture_n(5); /* 2 fill the head page, 3 would need the next one */
+	zassert_equal(app_history_count(), rpp, "count %zu want %zu", app_history_count(), rpp);
+	app_history_set_replay_active(false);
+
+	app_history_capture();
+	zassert_equal(app_history_count(), rpp + 1, "rollover after the replay");
+}

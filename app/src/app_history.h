@@ -65,12 +65,16 @@ struct app_history_record {
 int app_history_init(void);
 
 /* Capture one record from the current g_app_sensor_data (called once per
- * interval_report). No-op when history is disabled or while a replay is active. */
+ * interval_report). No-op when history is disabled. Keeps capturing while a
+ * replay streams records back (the replay cursor is absolute, see
+ * app_history_export_abs()). */
 void app_history_capture(void);
 
-/* Pause/resume history capture while a LoRaWAN replay is streaming records back
- * (#126). app_lrw sets it true at replay start and false at finish; capture
- * self-skips in between so the buffer it is replaying can't shift underneath it. */
+/* Tell history that a LoRaWAN replay is streaming records back (#126). app_lrw
+ * sets it true at replay start and false at finish. Capture goes on; only the
+ * flash backend holds off its page rollover (a ~20 ms erase that would stall
+ * the replay's RX windows) — a record that needs the next page meanwhile is
+ * dropped. */
 void app_history_set_replay_active(bool active);
 
 /* Fix up the buffer base time once the wall-clock becomes available, so all
@@ -121,6 +125,22 @@ bool app_history_base_synced(void);
  * (== app_history_count() when the scan is exhausted). */
 size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
 			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord);
+
+/* Absolute-ordinal span [*first_abs, *end_abs) of the stored records. An
+ * absolute ordinal names one record for as long as it is stored: appends don't
+ * move it, eviction only raises first_abs, and a logical reset (clear / layout /
+ * interval change) starts past every earlier end_abs. Either pointer may be
+ * NULL. */
+void app_history_span(uint32_t *first_abs, uint32_t *end_abs);
+
+/* app_history_export_page() on absolute ordinals, for the LoRaWAN replay:
+ * packs records from `start_abs` (clamped up to the oldest stored record when it
+ * was evicted meanwhile) up to `end_abs` (exclusive, clamped to the newest).
+ * *next_abs = cursor for the following frame; the scan is exhausted once it
+ * reaches `end_abs`. */
+size_t app_history_export_abs(uint32_t from_unix, uint32_t to_unix, uint32_t start_abs,
+			      uint32_t end_abs, uint8_t *buf, size_t cap, uint32_t *t0_out,
+			      uint16_t *n_written, uint32_t *next_abs);
 
 /* Number of frames the [from_unix, to_unix] window needs at `cap` bytes/frame
  * (whole records per frame). Mirrors export_page's packing so the replay can
