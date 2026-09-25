@@ -65,10 +65,20 @@ struct app_history_record {
  * Returns 0 on success or a negative errno. */
 int app_history_init(void);
 
-/* Capture one record from the current g_app_sensor_data (called once per
- * interval_report). No-op when history is disabled. Keeps capturing while a
- * replay streams records back (the replay cursor is absolute, see
- * app_history_export_abs()). */
+/* Capture one record from the current g_app_sensor_data on the report cadence:
+ * `slot` is the record's report slot (app_report's grid, see app_slot.h) in the
+ * clock domain `synced` says (unix when the RTC is set, else uptime seconds).
+ * A slot that continues the newest segment's grid (within half an interval) is
+ * appended to it; otherwise — missed slots (halt, stall, dropped record), an RTC
+ * step, a new boot — the record opens a new segment stamped `slot` (flash: the
+ * head page is closed early), so a gap in the data never shifts later times.
+ * No-op when history is disabled. Keeps capturing while a replay streams
+ * records back (the replay cursor is absolute, see app_history_export_abs()). */
+void app_history_capture_at(uint32_t slot, bool synced);
+
+/* Capture one record off the cadence (`history capture` shell / tests): it is
+ * stamped as the next slot of this boot's grid (or the clock now when there is
+ * none), without a discontinuity check. */
 void app_history_capture(void);
 
 /* Tell history that a LoRaWAN replay is streaming records back (#126). app_lrw

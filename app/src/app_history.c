@@ -190,10 +190,11 @@ static uint32_t now_seconds(bool *synced)
  *   backend_init()               probe the device
  *   backend_mount()              restore a prior ring (sets m_interval and the
  *                                segments); false = start empty
- *   backend_append(rec,len,base,synced,ev)
+ *   backend_append(rec,len,base,synced,split,ev)
  *                                append one record; if it opens a new segment
  *                                (flash: page) that segment's base is
- *                                base/synced; *ev = records evicted
+ *                                base/synced; `split` forces a new segment (a
+ *                                slot discontinuity); *ev = records evicted
  *   backend_read(abs,rec,len)    read the record at absolute ordinal abs
  *   backend_stored()             current record count held by the ring
  *   backend_first_abs()          absolute ordinal of the oldest record
@@ -675,7 +676,7 @@ static bool backend_mount(void)
 	return (m_abs_ord - m_live[0].first_ord) > 0;
 }
 
-static int backend_append(const uint8_t *rec, size_t len, uint32_t base, bool synced,
+static int backend_append(const uint8_t *rec, size_t len, uint32_t base, bool synced, bool split,
 			  uint32_t *evicted)
 {
 	*evicted = 0;
@@ -686,6 +687,14 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t base, bool sy
 	uint16_t rpp = records_per_page(m_sample_size);
 	if (rpp == 0) {
 		return -EINVAL;
+	}
+
+	/* A slot discontinuity (missed slots, clock step) closes the head page
+	 * early: the record opens a new page stamped with its own time. The rest of
+	 * the old page stays unused. */
+	if (split && m_nlive > 0 && !m_head_full) {
+		m_head_full = true;
+		(void)flush_stage_pad(); /* retried by advance_page() on failure */
 	}
 
 	if (m_nlive == 0 || m_head_full || (head_records() + 1) > rpp) {
@@ -911,9 +920,12 @@ static uint16_t backend_capacity(uint16_t sample_size)
 {
 	return (uint16_t)(sizeof(m_ram) / sample_size);
 }
-static int backend_append(const uint8_t *rec, size_t len, uint32_t base, bool synced,
+static int backend_append(const uint8_t *rec, size_t len, uint32_t base, bool synced, bool split,
 			  uint32_t *evicted)
 {
+	/* One segment only: a discontinuity cannot be represented, the record
+	 * continues the ring's grid. */
+	ARG_UNUSED(split);
 	uint16_t cap = backend_capacity(m_sample_size);
 	*evicted = 0;
 	if (m_ram_count == 0) {
@@ -1216,7 +1228,24 @@ static bool head_next_time(uint32_t *t, bool *synced)
 	return true;
 }
 
-void app_history_capture(void)
+/* Does a record for `slot` continue the head segment whose next record is due
+ * at `next`? Same clock domain and within half an interval: a timer that fired
+ * a little early or late, a small RTC correction, or the second or so between
+ * app_report's and history's uptime -> unix conversion. Anything else — missed
+ * slots (MCU halted or stalled, a dropped record), an RTC step — must not be
+ * folded into the grid. */
+static bool slot_continues(uint32_t next, bool next_synced, uint32_t slot, bool slot_synced)
+{
+	if (next_synced != slot_synced) {
+		return false;
+	}
+	int32_t d = (int32_t)(slot - next);
+	int32_t half = (int32_t)(m_interval / 2);
+
+	return d >= -half && d <= half;
+}
+
+static void capture(bool have_slot, uint32_t slot, bool slot_synced)
 {
 	if (!m_enabled || m_sample_size == 0 || m_capacity == 0) {
 		return;
@@ -1252,19 +1281,37 @@ void app_history_capture(void)
 	}
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	/* The base a new segment (flash: page) gets if this record opens one: the
-	 * continuation of this boot's grid, else the clock right now (RTC when set,
-	 * uptime otherwise). */
+	/* The base a new segment (flash: page) gets if this record opens one, and
+	 * whether it must open one. On the report cadence that is the record's
+	 * slot (RTC time), and a slot that doesn't continue this boot's grid splits
+	 * the ring. Off the cadence (`history capture`) it is the continuation of
+	 * this boot's grid, else the clock right now (RTC when set, else uptime). */
+	uint32_t next;
+	bool next_synced;
+	bool cont = head_next_time(&next, &next_synced);
 	uint32_t base;
 	bool synced;
-	if (!head_next_time(&base, &synced)) {
+	bool split = false;
+
+	if (have_slot) {
+		base = slot;
+		synced = slot_synced;
+		if (cont && !slot_continues(next, next_synced, slot, slot_synced)) {
+			LOG_WRN("history slot %u off the grid (next %u, %s): new segment", slot,
+				next, slot_synced == next_synced ? "same clock" : "clock changed");
+			split = true;
+		}
+	} else if (cont) {
+		base = next;
+		synced = next_synced;
+	} else {
 		base = now_seconds(&synced);
 	}
 
 	/* Only advance the logical view if the write lands, so a failed flash write
 	 * leaves no phantom record (#96). */
 	uint32_t evicted = 0;
-	int ret = backend_append(rec, m_sample_size, base, synced, &evicted);
+	int ret = backend_append(rec, m_sample_size, base, synced, split, &evicted);
 	if (ret == -EBUSY) {
 		LOG_WRN("history page rollover held off by a replay, record dropped");
 	} else if (ret != 0) {
@@ -1275,6 +1322,16 @@ void app_history_capture(void)
 	m_count = backend_stored();
 
 	k_mutex_unlock(&m_lock);
+}
+
+void app_history_capture(void)
+{
+	capture(false, 0, false);
+}
+
+void app_history_capture_at(uint32_t slot, bool synced)
+{
+	capture(true, slot, synced);
 }
 
 void app_history_on_clock_sync(uint32_t unix_now)

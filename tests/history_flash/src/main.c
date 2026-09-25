@@ -660,3 +660,111 @@ ZTEST(history_flash, test_v2_page_capacity)
 	zassert_equal(app_history_capacity(), 4 * (1757 / 3), "capacity %zu",
 		      app_history_capacity());
 }
+
+/* ---- Slot discontinuities (report cadence on RTC slots) ------------------ */
+
+/* Records on the report cadence carry their slot. A 6 min halt skips 6 slots:
+ * the head page is closed early and the next record opens a new page stamped
+ * with its own slot, so the gap is a hole in the data, not a shift (T2). */
+ZTEST(history_flash, test_missed_slots_split_page)
+{
+	uint32_t t = F28_T0;
+
+	for (int i = 0; i < 7; i++, t += 60) {
+		app_history_capture_at(t, true);
+	}
+	t += 6 * 60;                  /* MCU halted for six slots */
+	for (int i = 0; i < 7; i++) { /* 21 B: durable across the reboot below */
+		app_history_capture_at(t + i * 60, true);
+	}
+	zassert_equal(app_history_count(), 14);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(6, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 6 * 60);
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_equal(r.time_unix, t, "post-halt record %u want %u", r.time_unix, t);
+	zassert_equal(app_history_get(8, &r), 0);
+	zassert_equal(r.time_unix, t + 60);
+
+	uint8_t buf[64];
+	uint32_t t0;
+	uint16_t n;
+	size_t next;
+
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, sizeof(buf)), 2, "2 segments");
+	(void)app_history_export_page(0, UINT32_MAX, 0, buf, sizeof(buf), &t0, NULL, &n, &next);
+	zassert_equal(n, 7);
+	(void)app_history_export_page(0, UINT32_MAX, next, buf, sizeof(buf), &t0, NULL, &n, &next);
+	zassert_equal(n, 7);
+	zassert_equal(t0, t);
+
+	/* Survives a reboot: the split is a real page boundary. */
+	reboot();
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_equal(r.time_unix, t);
+}
+
+/* Timer jitter / a small RTC correction (< interval / 2) keeps the page and the
+ * grid; the record is stamped on the grid. */
+ZTEST(history_flash, test_slot_jitter_keeps_segment)
+{
+	app_history_capture_at(F28_T0, true);
+	app_history_capture_at(F28_T0 + 60 + 2, true);
+	app_history_capture_at(F28_T0 + 120 - 29, true);
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, 64), 1, "one segment");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(2, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 120);
+}
+
+/* The RTC set back by an hour (NFC clock set): a new segment, the old records
+ * keep their times. */
+ZTEST(history_flash, test_rtc_step_back_splits)
+{
+	app_history_capture_at(F28_T0, true);
+	app_history_capture_at(F28_T0 + 60, true);
+	app_history_capture_at(F28_T0 + 120 - 3600, true);
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, 64), 2);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(1, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 60);
+	zassert_equal(app_history_get(2, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 120 - 3600);
+}
+
+/* The first record after a boot always opens a page stamped with its slot, even
+ * when the slot happens to line up with the old page's grid. */
+ZTEST(history_flash, test_boot_page_from_slot)
+{
+	for (int i = 0; i < 7; i++) {
+		app_history_capture_at(F28_T0 + i * 60, true);
+	}
+	reboot();
+	app_history_capture_at(F28_T0 + 7 * 60, true);
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, 64), 2, "new page after boot");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 7 * 60);
+}
+
+/* A split during a replay would need a page rollover: held off, the record is
+ * dropped, and the next slot after the replay opens the page with its own time
+ * (a hole, not a shift). */
+ZTEST(history_flash, test_split_during_replay_drops_record)
+{
+	app_history_capture_at(F28_T0, true);
+	app_history_set_replay_active(true);
+	app_history_capture_at(F28_T0 + 600, true); /* gap -> needs a new page */
+	zassert_equal(app_history_count(), 1);
+	app_history_set_replay_active(false);
+	app_history_capture_at(F28_T0 + 660, true);
+	zassert_equal(app_history_count(), 2);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(1, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 660);
+}

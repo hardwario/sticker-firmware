@@ -73,7 +73,8 @@ static void heartbeat_work_handler(struct k_work *work)
  * doesn't get a second cycle stacked behind it.
  *
  * `periodic` = called from a cadence run (the run is the grid slot nearest to
- * now), false = arming at boot (first slot after now).
+ * now), false = arming at boot (first slot after now). Returns the slot of the
+ * run (the history record's time), *synced = its clock domain (unix / uptime).
  *
  * FIXED cadence, no jitter, on wall-clock slots (F27). This timer also drives
  * app_sensor_sample() and app_history_capture() below, and history replay
@@ -88,7 +89,7 @@ static void heartbeat_work_handler(struct k_work *work)
  * is instead a random *pre-send* delay applied in app_lrw
  * (app_lrw_send_telemetry), which shifts only the transmission, not the sample/
  * history-capture cadence (#267). */
-static void schedule_next_report(bool periodic)
+static uint32_t schedule_next_report(bool periodic, bool *slot_synced)
 {
 	uint32_t uptime_s = (uint32_t)(k_uptime_get() / 1000);
 	uint32_t unix_s;
@@ -100,6 +101,11 @@ static void schedule_next_report(bool periodic)
 
 	LOG_DBG("Report slot %u (%s), next in %u s", slot, synced ? "unix" : "uptime", delay);
 	k_timer_start(&m_report_timer, K_SECONDS(delay), K_FOREVER);
+
+	if (slot_synced) {
+		*slot_synced = synced;
+	}
+	return slot;
 }
 
 /* One report cycle. `periodic` is true only on the fixed-cadence timer path;
@@ -112,8 +118,11 @@ static void run_report(bool periodic, bool now)
 	/* Re-arm the cadence up front (periodic path only) so a skipped cycle still
 	 * keeps ticking; a trigger must NOT restart it, or the next periodic record
 	 * would land < interval_report after the previous one. */
+	uint32_t slot = 0;
+	bool slot_synced = false;
+
 	if (periodic) {
-		schedule_next_report(true);
+		slot = schedule_next_report(true, &slot_synced);
 	}
 
 	/* Persist the pulse totalizers at the report cadence (dirty-flagged, no-op
@@ -139,10 +148,12 @@ static void run_report(bool periodic, bool now)
 
 	/* Capture one history record — ONLY on the fixed cadence, so records are
 	 * spaced at exactly interval_report and replay's base + ord*interval time
-	 * reconstruction holds. Also while a replay is streaming (its cursor is
-	 * absolute): a skipped tick would shift every later record's time. */
+	 * reconstruction holds. It carries this run's slot: a slot off the history
+	 * grid (missed slots after a halt/stall, an RTC step) starts a new segment
+	 * instead of shifting every later record. Also while a replay is streaming
+	 * (its cursor is absolute). */
 	if (periodic) {
-		app_history_capture();
+		app_history_capture_at(slot, slot_synced);
 	}
 
 #if defined(CONFIG_LORAWAN)
@@ -258,7 +269,7 @@ int app_report_init(void)
 	 * joins — the worst-case lost-pulse window is interval_report regardless of
 	 * the link state. Reporting itself still self-skips at the link gate until
 	 * joined; app_lrw's ready kick re-arms with an immediate report on join. */
-	schedule_next_report(false);
+	(void)schedule_next_report(false, NULL);
 #if defined(CONFIG_LORAWAN)
 	app_lrw_register_ready_cb(report_kick);
 #endif /* defined(CONFIG_LORAWAN) */
