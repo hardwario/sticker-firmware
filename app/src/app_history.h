@@ -71,7 +71,9 @@ int app_history_init(void);
  * A slot that continues the newest segment's grid (within half an interval) is
  * appended to it; otherwise — missed slots (halt, stall, dropped record), an RTC
  * step, a new boot — the record opens a new segment stamped `slot` (flash: the
- * head page is closed early), so a gap in the data never shifts later times.
+ * head page is closed early; RAM ring: a new entry of its 4-segment table, the
+ * oldest segment and its records dropped when full), so a gap in the data never
+ * shifts later times.
  * No-op when history is disabled. Keeps capturing while a replay streams
  * records back (the replay cursor is absolute, see app_history_export_abs()). */
 void app_history_capture_at(uint32_t slot, bool synced);

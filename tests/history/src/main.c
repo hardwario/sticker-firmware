@@ -389,4 +389,120 @@ ZTEST(history, test_reset_during_replay_ends_it)
 	app_history_set_replay_active(false);
 }
 
+/* ---- RAM segment table (slot discontinuities) --------------------------- */
+
+#define T0 1750000000u
+
+static uint16_t frames_all(void)
+{
+	return app_history_count_frames(0, UINT32_MAX, 64);
+}
+
+/* A 6 min halt on the RTC-slot cadence: the RAM ring opens a second segment,
+ * the post-halt records keep their true times (T2). */
+ZTEST(history, test_ram_missed_slots_split)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	for (int i = 0; i < 5; i++) {
+		app_history_capture_at(T0 + i * 60, true);
+	}
+	uint32_t t = T0 + 4 * 60 + 7 * 60; /* six slots missed */
+
+	for (int i = 0; i < 3; i++) {
+		app_history_capture_at(t + i * 60, true);
+	}
+	zassert_equal(app_history_count(), 8);
+	zassert_equal(frames_all(), 2, "two segments -> two frames");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(4, &r), 0);
+	zassert_equal(r.time_unix, T0 + 4 * 60);
+	zassert_equal(app_history_get(5, &r), 0);
+	zassert_equal(r.time_unix, t, "post-halt %u want %u", r.time_unix, t);
+
+	uint8_t buf[64];
+	uint32_t t0;
+	uint16_t n;
+	size_t next;
+
+	(void)app_history_export_page(0, UINT32_MAX, 0, buf, sizeof(buf), &t0, NULL, &n, &next);
+	zassert_equal(n, 5);
+	zassert_equal(t0, T0);
+	(void)app_history_export_page(0, UINT32_MAX, next, buf, sizeof(buf), &t0, NULL, &n, &next);
+	zassert_equal(n, 3);
+	zassert_equal(t0, t);
+}
+
+/* Five discontinuities for a 4-entry table: the oldest segment is dropped with
+ * its records (T4). */
+ZTEST(history, test_ram_segment_table_overflow)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	for (int seg = 0; seg < 5; seg++) {
+		uint32_t base = T0 + seg * 3600;
+
+		app_history_capture_at(base, true);
+		app_history_capture_at(base + 60, true);
+	}
+	zassert_equal(app_history_count(), 8, "oldest segment dropped");
+	zassert_equal(frames_all(), 4);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_equal(r.time_unix, T0 + 3600, "oldest kept %u", r.time_unix);
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_equal(r.time_unix, T0 + 4 * 3600 + 60);
+}
+
+/* Wrapping the ring evicts the oldest segment record by record; once empty it
+ * leaves the table and the times of the rest are unchanged. */
+ZTEST(history, test_ram_eviction_retires_segment)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	size_t cap = app_history_capacity();
+
+	app_history_capture_at(T0, true);
+	app_history_capture_at(T0 + 60, true);
+	uint32_t t = T0 + 7200;
+
+	for (size_t i = 0; i < cap; i++) {
+		app_history_capture_at(t + i * 60, true);
+	}
+	zassert_equal(app_history_count(), cap);
+	zassert_equal(frames_all(), 1 + (cap * 3 - 1) / 64, "old segment gone");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_equal(r.time_unix, t);
+	zassert_equal(app_history_get(cap - 1, &r), 0);
+	zassert_equal(r.time_unix, t + (cap - 1) * 60);
+}
+
+/* Before the RTC is set the segments run on uptime; the clock sync re-bases
+ * every one of them. */
+ZTEST(history, test_ram_clock_sync_rebases_segments)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	app_history_capture_at(100, false);
+	app_history_capture_at(160, false);
+	app_history_capture_at(1000, false); /* stall on uptime -> second segment */
+	zassert_equal(frames_all(), 2);
+
+	uint32_t up = (uint32_t)(k_uptime_get() / 1000);
+
+	app_history_on_clock_sync(T0 + up);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(1, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, T0 + 160);
+	zassert_equal(app_history_get(2, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, T0 + 1000);
+}
+
 ZTEST_SUITE(history, NULL, NULL, NULL, NULL, NULL);

@@ -136,7 +136,8 @@ static uint32_t m_interval; /* interval_report (s) the buffer was recorded at; r
 static bool m_replay_active;
 
 /* Record time is implicit and periodic, but only within a SEGMENT: a run of
- * consecutive records stamped from one base (flash: one page; RAM: the ring).
+ * consecutive records stamped from one base (flash: one page; RAM: an entry of
+ * a 4-slot segment table).
  * The record at absolute ordinal `abs` of segment s is at
  *   s.base + (abs - s.origin) * m_interval
  * and a HistoryFrame never crosses a segment boundary, so the host's
@@ -900,10 +901,19 @@ static uint8_t __noinit m_ram[CONFIG_APP_HISTORY_BYTES];
 static uint16_t m_ram_start;
 static uint16_t m_ram_count;
 static uint32_t m_ram_first_abs; /* absolute ordinal of the oldest record (evicted total) */
-/* The RAM ring is one segment (cleared on every boot, so always this boot's). */
-static uint32_t m_ram_origin; /* absolute ordinal m_ram_base refers to */
-static uint32_t m_ram_base;
-static bool m_ram_synced;
+
+/* Segment table (32 B): the RAM ring has no pages, so a slot discontinuity
+ * (halt, stall, RTC step) starts a new entry here. The ring is cleared on every
+ * boot, so all segments are this boot's. When a fifth segment is needed the
+ * oldest one is dropped together with its records. */
+#define RAM_NSEG 4
+struct ram_seg {
+	uint32_t origin; /* absolute ordinal of the segment's first record */
+	uint32_t base;   /* its time: unix when synced, else uptime-s */
+};
+static struct ram_seg m_ram_seg[RAM_NSEG]; /* [0] = oldest */
+static uint8_t m_ram_nseg;
+static uint8_t m_ram_seg_synced; /* bit i: m_ram_seg[i].base is unix time */
 
 static int backend_init(void)
 {
@@ -914,31 +924,59 @@ static bool backend_mount(void)
 	m_ram_start = 0;
 	m_ram_count = 0;
 	m_ram_first_abs = 0;
+	m_ram_nseg = 0;
 	return false; /* RAM ring starts empty each boot */
 }
 static uint16_t backend_capacity(uint16_t sample_size)
 {
 	return (uint16_t)(sizeof(m_ram) / sample_size);
 }
+static void ram_seg_shift(void)
+{
+	for (uint8_t i = 1; i < m_ram_nseg; i++) {
+		m_ram_seg[i - 1] = m_ram_seg[i];
+	}
+	m_ram_seg_synced >>= 1;
+	m_ram_nseg--;
+}
 static int backend_append(const uint8_t *rec, size_t len, uint32_t base, bool synced, bool split,
 			  uint32_t *evicted)
 {
-	/* One segment only: a discontinuity cannot be represented, the record
-	 * continues the ring's grid. */
-	ARG_UNUSED(split);
 	uint16_t cap = backend_capacity(m_sample_size);
 	*evicted = 0;
+
 	if (m_ram_count == 0) {
-		m_ram_origin = m_ram_first_abs;
-		m_ram_base = base;
-		m_ram_synced = synced;
+		m_ram_nseg = 0;
 	}
+	if (m_ram_nseg == 0 || split) {
+		if (m_ram_nseg == RAM_NSEG) {
+			/* Table full: drop the oldest segment with its records. */
+			uint16_t n0 = (uint16_t)(m_ram_seg[1].origin - m_ram_first_abs);
+
+			m_ram_start = (uint16_t)((m_ram_start + n0) % cap);
+			m_ram_count -= n0;
+			m_ram_first_abs += n0;
+			*evicted += n0;
+			ram_seg_shift();
+		}
+		m_ram_seg[m_ram_nseg] = (struct ram_seg){
+			.origin = m_ram_first_abs + m_ram_count,
+			.base = base,
+		};
+		WRITE_BIT(m_ram_seg_synced, m_ram_nseg, synced);
+		m_ram_nseg++;
+	}
+
 	uint16_t slot;
 	if (m_ram_count >= cap) {
 		slot = m_ram_start;
 		m_ram_start = (uint16_t)((m_ram_start + 1) % cap);
 		m_ram_first_abs++;
-		*evicted = 1;
+		*evicted += 1;
+		/* Drop a segment whose records are all evicted now. */
+		while (m_ram_nseg > 1 && m_ram_seg[1].origin <= m_ram_first_abs) {
+			ram_seg_shift();
+		}
 	} else {
 		slot = (uint16_t)((m_ram_start + m_ram_count) % cap);
 		m_ram_count++;
@@ -966,23 +1004,21 @@ static uint32_t backend_first_abs(void)
 }
 static uint16_t backend_nseg(void)
 {
-	return m_ram_count ? 1 : 0;
+	return m_ram_count ? m_ram_nseg : 0;
 }
 static void backend_seg(uint16_t i, struct hist_seg *s)
 {
-	ARG_UNUSED(i);
-	s->origin = m_ram_origin;
-	s->first = m_ram_first_abs;
-	s->end = m_ram_first_abs + m_ram_count;
-	s->base = m_ram_base;
-	s->synced = m_ram_synced;
+	s->origin = m_ram_seg[i].origin;
+	s->first = (i == 0) ? m_ram_first_abs : m_ram_seg[i].origin;
+	s->end = (i + 1 < m_ram_nseg) ? m_ram_seg[i + 1].origin : m_ram_first_abs + m_ram_count;
+	s->base = m_ram_seg[i].base;
+	s->synced = (m_ram_seg_synced & BIT(i)) != 0;
 	s->cur_boot = true;
 }
 static bool backend_seg_sync(uint16_t i, uint32_t offset)
 {
-	ARG_UNUSED(i);
-	m_ram_base += offset;
-	m_ram_synced = true;
+	m_ram_seg[i].base += offset;
+	m_ram_seg_synced |= BIT(i);
 	return false; /* nothing to persist */
 }
 static void backend_flush_fixups(void)
@@ -994,6 +1030,7 @@ static void backend_reset_logical(void)
 	m_ram_first_abs += m_ram_count;
 	m_ram_start = 0;
 	m_ram_count = 0;
+	m_ram_nseg = 0;
 }
 static void backend_erase(void)
 {
