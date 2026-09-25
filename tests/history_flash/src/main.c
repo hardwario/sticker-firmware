@@ -653,6 +653,61 @@ ZTEST(history_flash, test_v1_pages_still_readable)
 	zassert_equal(app_history_count_frames(0, UINT32_MAX, 64), 3, "one frame per page");
 }
 
+/* Mount robustness (HIL 0413, 2026-09-25): a page that holds foreign data (code
+ * left over from a debug image whose code partition overlapped the release
+ * history partition) must be skipped, never erased at mount, and must not hide
+ * a valid chain that wraps physically around the end of the partition. It is
+ * reclaimed only when the ring needs that page for new records. */
+ZTEST(history_flash, test_mount_skips_garbage_keeps_wrapped_chain)
+{
+	const struct flash_area *fa;
+	uint8_t garbage[2048];
+	uint8_t readback[2048];
+
+	for (size_t i = 0; i < sizeof(garbage); i++) {
+		garbage[i] = (uint8_t)(0x3c + i * 7); /* code-like, never 0xFF magic */
+	}
+	zassert_equal(flash_area_open(FIXED_PARTITION_ID(history_partition), &fa), 0);
+	zassert_equal(flash_area_erase(fa, 1 * 2048, 2048), 0);
+	zassert_equal(flash_area_write(fa, 1 * 2048, garbage, sizeof(garbage)), 0);
+	flash_area_close(fa);
+
+	/* v1 chain seq 5..7 on phys 2, 3, 0: wraps from the last page to the first. */
+	write_v1_page(2, 5, 0, F28_T0, true, 7, 10);
+	write_v1_page(3, 6, 7, F28_T0 + 7 * 60, true, 7, 20);
+	write_v1_page(0, 7, 14, F28_T0 + 14 * 60, true, 7, 30);
+	reboot();
+
+	zassert_equal(app_history_count(), 21, "wrapped chain mounted: %zu", app_history_count());
+	struct app_history_record r;
+
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_equal(r.time_unix, F28_T0);
+	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 10.0, 0.01);
+	zassert_equal(app_history_get(20, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 20 * 60);
+	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 36.0, 0.01);
+
+	/* Mount left the foreign page alone. */
+	zassert_equal(flash_area_open(FIXED_PARTITION_ID(history_partition), &fa), 0);
+	zassert_equal(flash_area_read(fa, 1 * 2048, readback, sizeof(readback)), 0);
+	flash_area_close(fa);
+	zassert_mem_equal(readback, garbage, sizeof(garbage), "mount touched a foreign page");
+
+	/* The next page after the head (phys 1) is reclaimed for new records; the
+	 * old chain stays intact and keeps its times. */
+	test_clock_has = true;
+	test_clock_unix = F28_T0 + 3600;
+	app_history_on_clock_sync(test_clock_unix);
+	capture_n(3);
+	zassert_equal(app_history_count(), 24);
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_equal(r.time_unix, F28_T0);
+	zassert_equal(app_history_get(21, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, F28_T0 + 3600);
+}
+
 /* Header v2 costs one double word (7 data bytes) per page: 1757 B of records,
  * 585 temp+hum records instead of 588. */
 ZTEST(history_flash, test_v2_page_capacity)
