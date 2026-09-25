@@ -70,7 +70,21 @@ uint32_t app_slot_next(struct app_slot *s, uint32_t interval, uint32_t now, bool
 	uint32_t next;
 
 	if (periodic) {
-		/* This run is slot `cur` (fired early or late by < interval / 2). */
+		uint32_t tol =
+			(interval / 2 < APP_SLOT_TOLERANCE_S) ? interval / 2 : APP_SLOT_TOLERANCE_S;
+		int32_t off = (int32_t)(now - cur);
+
+		if (off > (int32_t)tol || off < -(int32_t)tol) {
+			/* Far off every slot (a halt or stall longer than the timer's
+			 * remaining time, an RTC step): labelling this run with the
+			 * nearest slot would stamp its record up to interval / 2 away
+			 * from when it was sampled. Re-lay the grid at now instead, so
+			 * the record keeps its true time (history opens a new segment
+			 * for the off-grid slot). */
+			s->anchor = now;
+			cur = now;
+		}
+		/* This run is slot `cur`. */
 		next = cur + interval;
 	} else {
 		/* Arm from outside the cadence: first slot strictly after now. */

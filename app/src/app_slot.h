@@ -33,6 +33,12 @@ struct app_slot {
 	bool valid;        /* false = no grid yet; the next call lays one at `now` */
 };
 
+/* How far (seconds) a cadence run may sit from its slot and still be labelled
+ * with it: covers work-queue latency (a blocking lorawan_send / join at DR0 is
+ * up to ~10 s). A run further off (debug halt, long stall, RTC step) re-lays the
+ * grid at its own time rather than borrowing a slot up to interval / 2 away. */
+#define APP_SLOT_TOLERANCE_S 15U
+
 /* Grid point `anchor + k * interval` nearest to `t` (k may be negative; ties
  * round up). interval 0 is treated as 1. */
 uint32_t app_slot_round(uint32_t anchor, uint32_t interval, uint32_t t);
@@ -46,9 +52,11 @@ uint32_t app_slot_round(uint32_t anchor, uint32_t interval, uint32_t t);
  * again (unix -> uptime) also lays a fresh grid.
  *
  * `periodic` = called from a cadence run: the run belongs to the grid slot
- * nearest to `now` (a timer that fired a little early or late still maps to the
- * slot it was armed for) and the next report is that slot + interval. Otherwise
- * (arming at boot) the next report is the first grid slot after `now`.
+ * nearest to `now` when it is within MIN(interval / 2, APP_SLOT_TOLERANCE_S)
+ * of it (a timer that fired a little early or late still maps to the slot it
+ * was armed for); a run further off re-anchors the grid at `now` and is its own
+ * slot. The next report is that slot + interval. Otherwise (arming at boot) the
+ * next report is the first grid slot after `now`.
  *
  * *slot_out = the slot of the current run (periodic) or the grid point nearest
  * to `now`. Returns the delay in seconds until the next slot, >= 1. */
