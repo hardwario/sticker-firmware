@@ -24,8 +24,12 @@
 
 #include <zephyr/ztest.h>
 #include <zephyr/kernel.h>
+#include <zephyr/storage/flash_map.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/crc.h>
 
 #include <math.h>
+#include <stddef.h>
 #include <string.h>
 
 struct app_config g_app_config;
@@ -69,6 +73,7 @@ static void before(void *unused)
 	g_app_sensor_data.temperature = 20.0f;
 	g_app_sensor_data.humidity = 50.0f;
 	test_clock_has = false;
+	app_history_set_work_queue(NULL);
 
 	zassert_equal(app_history_init(), 0, "init failed");
 	app_history_clear(); /* erase the whole partition → clean slate */
@@ -487,4 +492,171 @@ ZTEST(history_flash, test_replay_holds_off_page_rollover)
 
 	app_history_capture();
 	zassert_equal(app_history_count(), rpp + 1, "rollover after the replay");
+}
+
+/* ---- Page header v2: clock-sync fix-up double word ---------------------- */
+
+/* Power loss, then the post-boot page (uptime base) learns the unix time; the
+ * (unix - uptime) offset goes into the page's fix-up double word, written from
+ * the registered work queue (never from the downlink callback, #96), so the
+ * page's times survive the next reboot. */
+ZTEST(history_flash, test_fixup_dw_survives_reboot)
+{
+	f28_fill_before_outage();
+	reboot();
+
+	uint32_t t_capture = test_clock_unix + F28_OUTAGE;
+	test_clock_has = false;
+	capture_n(7); /* durable post-boot page on uptime */
+
+	app_history_set_work_queue(&k_sys_work_q);
+	k_sleep(K_SECONDS(30));
+	test_clock_has = true;
+	test_clock_unix = t_capture + 30;
+	app_history_on_clock_sync(test_clock_unix);
+	k_sleep(K_MSEC(10)); /* let the fix-up work run */
+	app_history_set_work_queue(NULL);
+
+	reboot();
+	zassert_equal(app_history_count(), 14);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_true(r.time_synced, "fix-up must survive the reboot");
+	zassert_equal(r.time_unix, t_capture, "time %u want %u", r.time_unix, t_capture);
+	zassert_equal(app_history_get(13, &r), 0);
+	zassert_equal(r.time_unix, t_capture + 6 * 60);
+	zassert_equal(app_history_get(6, &r), 0);
+	zassert_equal(r.time_unix, F28_T0 + 6 * 60, "old page untouched");
+
+	/* A second reboot re-reads the same fix-up. */
+	reboot();
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, t_capture);
+}
+
+/* No work queue registered: the next capture (report work queue in the app)
+ * writes the pending fix-up before appending. */
+ZTEST(history_flash, test_fixup_dw_written_by_next_capture)
+{
+	test_clock_has = false;
+	capture_n(7);
+	k_sleep(K_SECONDS(5));
+	test_clock_has = true;
+	test_clock_unix = F28_T0;
+	app_history_on_clock_sync(test_clock_unix);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_true(r.time_synced);
+	uint32_t t_first = r.time_unix;
+	zassert_true(t_first <= F28_T0 - 5 && t_first >= F28_T0 - 6 - 7 * 60, "t %u", t_first);
+
+	capture_n(7); /* writes the fix-up, then appends (grid continues in unix) */
+	reboot();
+	zassert_equal(app_history_count(), 14);
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_true(r.time_synced, "fix-up written by the capture");
+	zassert_equal(r.time_unix, t_first);
+	zassert_equal(app_history_get(13, &r), 0);
+	zassert_equal(r.time_unix, t_first + 13 * 60, "same page, same grid");
+}
+
+/* v1 pages (32 B header, firmware before the fix-up double word) written by the
+ * old firmware stay readable: same stream layout, own base per page. */
+struct v1_hdr {
+	uint32_t magic;
+	uint32_t seq;
+	uint32_t mask;
+	uint32_t interval;
+	uint32_t base_time;
+	uint32_t first_ord;
+	uint16_t sample_size;
+	uint8_t base_synced;
+	uint8_t rsv;
+	uint16_t crc;
+	uint16_t rsv2;
+} __packed;
+
+/* Write a v1 page with `n` temp+hum records (temp = t0 + i, hum 50 %). */
+static void write_v1_page(uint16_t phys, uint32_t seq, uint32_t first_ord, uint32_t base,
+			  bool synced, int n, int t0)
+{
+	const struct flash_area *fa;
+	off_t off = (off_t)phys * 2048;
+
+	zassert_equal(flash_area_open(FIXED_PARTITION_ID(history_partition), &fa), 0);
+	zassert_equal(flash_area_erase(fa, off, 2048), 0);
+
+	struct v1_hdr h = {
+		.magic = 0x48524e47,
+		.seq = seq,
+		.mask = BIT(APP_HISTORY_TEMPERATURE) | BIT(APP_HISTORY_HUMIDITY),
+		.interval = 60,
+		.base_time = base,
+		.first_ord = first_ord,
+		.sample_size = 3,
+		.base_synced = synced ? 1 : 0,
+	};
+	h.crc = crc16_ccitt(0xffff, (const uint8_t *)&h, offsetof(struct v1_hdr, crc));
+	zassert_equal(flash_area_write(fa, off, &h, sizeof(h)), 0);
+
+	uint8_t stream[7 * 3 * 4] = {0};
+	for (int i = 0; i < n; i++) {
+		sys_put_le16((uint16_t)((t0 + i) * 100), &stream[i * 3]);
+		stream[i * 3 + 2] = 100;
+	}
+	for (int dw = 0; dw < (n * 3) / 7; dw++) {
+		uint8_t buf[8];
+		memcpy(buf, &stream[dw * 7], 7);
+		buf[7] = 0xA5;
+		zassert_equal(flash_area_write(fa, off + 32 + dw * 8, buf, 8), 0);
+	}
+	flash_area_close(fa);
+}
+
+ZTEST(history_flash, test_v1_pages_still_readable)
+{
+	/* Old firmware: a synced page, then an unsynced one (power loss). */
+	write_v1_page(0, 5, 0, F28_T0, true, 7, 10);
+	write_v1_page(1, 6, 7, 500, false, 7, 20);
+	reboot();
+	zassert_equal(app_history_count(), 14, "v1 pages mounted");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, F28_T0);
+	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 10.0, 0.01);
+	zassert_equal(app_history_get(8, &r), 0);
+	zassert_false(r.time_synced);
+	zassert_equal(r.time_unix, 560);
+	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 21.0, 0.01);
+
+	/* A v1 page has no fix-up double word: an old-boot unsynced page stays so. */
+	test_clock_has = true;
+	test_clock_unix = F28_T0 + 3600;
+	app_history_on_clock_sync(test_clock_unix);
+	zassert_equal(app_history_get(8, &r), 0);
+	zassert_false(r.time_synced);
+
+	/* New pages continue the chain as v2 and everything survives a reboot. */
+	capture_n(7);
+	reboot();
+	zassert_equal(app_history_count(), 21);
+	zassert_equal(app_history_get(14, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, F28_T0 + 3600);
+	zassert_equal(app_history_get(13, &r), 0);
+	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 26.0, 0.01, "v1 tail record");
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, 64), 3, "one frame per page");
+}
+
+/* Header v2 costs one double word (7 data bytes) per page: 1757 B of records,
+ * 585 temp+hum records instead of 588. */
+ZTEST(history_flash, test_v2_page_capacity)
+{
+	zassert_equal(app_history_capacity(), 4 * (1757 / 3), "capacity %zu",
+		      app_history_capacity());
 }

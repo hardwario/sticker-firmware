@@ -84,6 +84,13 @@ void app_history_set_replay_active(bool active);
  * unsynced. Idempotent. */
 void app_history_on_clock_sync(uint32_t unix_now);
 
+/* Work queue for deferred history flash maintenance (the clock-sync fix-up
+ * double word, flash backend): app_report registers its own queue, the same
+ * context the captures (and their flash writes) run in. NULL = none; the next
+ * capture then writes pending fix-ups. */
+struct k_work_q;
+void app_history_set_work_queue(struct k_work_q *queue);
+
 /* Number of records currently stored (0..capacity). */
 size_t app_history_count(void);
 

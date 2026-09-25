@@ -235,6 +235,10 @@ int app_report_init(void)
 	k_work_queue_start(&m_work_q, m_work_stack, K_THREAD_STACK_SIZEOF(m_work_stack),
 			   K_LOWEST_APPLICATION_THREAD_PRIO, NULL);
 
+	/* History's deferred flash writes (clock-sync fix-up) run here too, never
+	 * in the LoRaWAN downlink callback (#96). */
+	app_history_set_work_queue(&m_work_q);
+
 	k_work_init(&m_periodic_work, periodic_work_handler);
 	k_work_init(&m_trigger_work, trigger_work_handler);
 	k_work_init(&m_force_work, force_work_handler);

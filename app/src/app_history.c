@@ -155,8 +155,9 @@ struct hist_seg {
 /* The ring self-persists: each record is durable once its double word flushes,
  * and page headers carry the base time / ordinal — so on reboot the count and
  * time base are recovered by scanning headers, no separate coalesced meta. A
- * clock-sync fixup of a page stamped before the RTC was set lives in RAM only:
- * after a reboot that page stays unsynced (its uptime epoch is gone). */
+ * clock-sync fixup of a page stamped before the RTC was set is persisted once in
+ * the page's fix-up double word (flash backend), written from the report work
+ * queue, so it survives the next reboot too. */
 
 static bool cap_on(size_t cap_off)
 {
@@ -199,7 +200,10 @@ static uint32_t now_seconds(bool *synced)
  *   backend_nseg(), backend_seg(i,s)
  *                                the segments, oldest first (struct hist_seg)
  *   backend_seg_sync(i,off)      re-base an unsynced segment of this boot by the
- *                                (unix - uptime) offset at clock sync
+ *                                (unix - uptime) offset at clock sync (flash:
+ *                                marks the page's fix-up double word pending)
+ *   backend_flush_fixups()       write pending fix-ups (never from the downlink
+ *                                callback, #96; the report work queue runs it)
  *   backend_reset_logical()      drop all records without a full erase (layout
  *                                change); the next append starts a fresh run
  *   backend_erase()              wipe all storage (explicit `history clear`)
@@ -215,17 +219,24 @@ static uint32_t now_seconds(bool *synced)
  * and writes packed records straight through the flash API.
  *
  * Layout: the partition is a ring of 2 KB erase pages. Each page opens with a
- * 32 B header (magic, monotonic sequence number, layout = mask/sample_size/
+ * 40 B header (v2: magic, monotonic sequence number, layout = mask/sample_size/
  * interval, clock time of the page's first record, absolute ordinal of that
- * record, CRC), followed by densely packed records. Records never cross a page
- * boundary. Newest page = highest sequence number; on mount we scan headers to
- * find head/tail — no separate meta entry.
+ * record, CRC — 32 B, then one fix-up double word), followed by densely packed
+ * records. Records never cross a page boundary. Newest page = highest sequence
+ * number; on mount we scan headers to find head/tail — no separate meta entry.
+ * v1 pages (32 B header, no fix-up double word; firmware before v1.5.0) are
+ * still mounted and read; new pages are always v2.
  *
  * Time: each page is one segment (struct hist_seg) — its header base_time is
  * the clock time of its first record (RTC when set, else uptime), NOT the
  * ordinal continuation of the page before it. After every boot the first
  * append opens a new page, so a reboot or power loss is a gap, not a shift of
- * every later record (F28).
+ * every later record (F28). A page opened before the RTC was set (power loss:
+ * no RTC until the network DeviceTimeAns) carries an uptime base with
+ * base_synced=0; its fix-up double word stays erased at page open and is
+ * programmed once, after the clock sync, with the (unix - uptime) offset, so
+ * the page's unix times survive later reboots too. The header itself can't be
+ * rewritten (NOR: no second program without an erase).
  *
  * Durability: STM32WL programs flash in 8 B double words, so records are staged
  * into 7 B data slices and flushed one double word at a time — 7 data bytes + a
@@ -235,20 +246,27 @@ static uint32_t now_seconds(bool *synced)
  * the raw data would be unsafe). At most the staged tail (< 7 B ≈ up to ~2
  * records) is lost on power failure. */
 
-#define PAGE_MAGIC    0x48524e47 /* "HRNG" — history ring */
-#define PAGE_SIZE     2048
-#define DW_SIZE       8 /* flash program unit (double word) */
-#define DW_DATA       7 /* payload bytes per double word (byte 7 = frame) */
-#define FRAME_BYTE    0xA5
-#define ERASED_BYTE   0xFF
-#define HIST_HDR_SIZE 32
-#define PAYLOAD_DW    ((PAGE_SIZE - HIST_HDR_SIZE) / DW_SIZE) /* 252 */
-#define PAGE_DATA     (PAYLOAD_DW * DW_DATA)                  /* 1764 B / page */
-#define HIST_NPAGES   (FIXED_PARTITION_SIZE(history_partition) / PAGE_SIZE)
+#define PAGE_MAGIC_V1    0x48524e47 /* "HRNG" — history ring, 32 B header */
+#define PAGE_MAGIC_V2    0x48524e32 /* "HRN2" — 40 B header with a fix-up DW */
+#define PAGE_SIZE        2048
+#define DW_SIZE          8 /* flash program unit (double word) */
+#define DW_DATA          7 /* payload bytes per double word (byte 7 = frame) */
+#define FRAME_BYTE       0xA5
+#define ERASED_BYTE      0xFF
+#define FIXUP_MARK       0x5A /* fix-up DW written (any value but 0xFF) */
+#define HIST_HDR_SIZE    32   /* common header (v1 and v2) */
+#define HIST_HDR_SIZE_V2 (HIST_HDR_SIZE + DW_SIZE)
+#define PAYLOAD_DW_V1    ((PAGE_SIZE - HIST_HDR_SIZE) / DW_SIZE)    /* 252 */
+#define PAYLOAD_DW_V2    ((PAGE_SIZE - HIST_HDR_SIZE_V2) / DW_SIZE) /* 251 */
+#define PAGE_DATA_V1     (PAYLOAD_DW_V1 * DW_DATA)                  /* 1764 B / page */
+#define PAGE_DATA_V2     (PAYLOAD_DW_V2 * DW_DATA)                  /* 1757 B / page */
+#define HIST_NPAGES      (FIXED_PARTITION_SIZE(history_partition) / PAGE_SIZE)
 
 BUILD_ASSERT(HIST_NPAGES >= 3, "history partition too small for a page ring");
-/* Worst case (1 B sample) record count must fit the uint16_t logical count. */
-BUILD_ASSERT((uint32_t)HIST_NPAGES *PAGE_DATA <= UINT16_MAX, "history ring exceeds uint16 count");
+/* Worst case (1 B sample, all pages v1) record count must fit the uint16_t
+ * logical count. */
+BUILD_ASSERT((uint32_t)HIST_NPAGES *PAGE_DATA_V1 <= UINT16_MAX,
+	     "history ring exceeds uint16 count");
 
 struct hist_page_hdr {
 	uint32_t magic;
@@ -266,6 +284,17 @@ struct hist_page_hdr {
 
 BUILD_ASSERT(sizeof(struct hist_page_hdr) == HIST_HDR_SIZE, "page header must be 32 B");
 
+/* v2 only: the double word right after the header. Erased (0xFF) until the page,
+ * opened with an uptime base, learns the unix time; then programmed once. */
+struct hist_page_fixup {
+	uint32_t offset; /* unix - uptime (s): add to the header base_time */
+	uint8_t mark;    /* FIXUP_MARK */
+	uint8_t rsv;     /* 0 */
+	uint16_t crc;    /* crc16-ccitt over offset..rsv, seeded with the header crc */
+} __packed;
+
+BUILD_ASSERT(sizeof(struct hist_page_fixup) == DW_SIZE, "fix-up must be one double word");
+
 static const struct flash_area *m_fa;
 static bool m_ready;
 
@@ -278,6 +307,8 @@ struct live_page {
 };
 #define LP_SYNCED   BIT(0) /* base_time is unix time */
 #define LP_CUR_BOOT BIT(1) /* opened during this boot (an uptime base is valid) */
+#define LP_V2       BIT(2) /* 40 B header with a fix-up double word */
+#define LP_FIXUP    BIT(3) /* fix-up double word still to be programmed */
 
 static struct live_page m_live[HIST_NPAGES]; /* [0] = tail (oldest) .. [n-1] = head */
 static uint16_t m_nlive;
@@ -294,9 +325,16 @@ static off_t page_off(uint16_t phys)
 	return (off_t)phys * PAGE_SIZE;
 }
 
+/* Records per page: new pages are always v2. */
 static uint16_t records_per_page(uint16_t sample_size)
 {
-	return sample_size ? (uint16_t)(PAGE_DATA / sample_size) : 0;
+	return sample_size ? (uint16_t)(PAGE_DATA_V2 / sample_size) : 0;
+}
+
+/* Offset of the record stream within a page of the given header version. */
+static off_t page_data_off(bool v2)
+{
+	return v2 ? HIST_HDR_SIZE_V2 : HIST_HDR_SIZE;
 }
 
 /* Head-page live record count = ordinals since the head page's first record. */
@@ -315,7 +353,7 @@ static void hdr_crc_set(struct hist_page_hdr *h)
 
 static bool hdr_valid(const struct hist_page_hdr *h)
 {
-	if (h->magic != PAGE_MAGIC) {
+	if (h->magic != PAGE_MAGIC_V1 && h->magic != PAGE_MAGIC_V2) {
 		return false;
 	}
 	uint16_t crc = crc16_ccitt(0xffff, (const uint8_t *)h, offsetof(struct hist_page_hdr, crc));
@@ -327,13 +365,32 @@ static int read_hdr(uint16_t phys, struct hist_page_hdr *h)
 	return flash_area_read(m_fa, page_off(phys), h, sizeof(*h));
 }
 
-/* Read `len` data-stream bytes starting at data offset `off` within a page,
- * skipping the per-double-word frame byte and pulling the still-staged tail of
- * the head page from RAM. */
-static int page_read_stream(uint16_t phys, size_t off, uint8_t *dst, size_t len)
+/* A v2 page's clock-sync fix-up: true (and *base = unix base) when written. */
+static bool fixup_read(uint16_t phys, const struct hist_page_hdr *h, uint32_t *base)
 {
+	struct hist_page_fixup f;
+
+	if (flash_area_read(m_fa, page_off(phys) + HIST_HDR_SIZE, &f, sizeof(f)) != 0 ||
+	    f.mark != FIXUP_MARK) {
+		return false;
+	}
+	if (crc16_ccitt(h->crc, (const uint8_t *)&f, offsetof(struct hist_page_fixup, crc)) !=
+	    f.crc) {
+		return false;
+	}
+	*base = h->base_time + f.offset;
+	return true;
+}
+
+/* Read `len` data-stream bytes starting at data offset `off` within live page
+ * `lp`, skipping the per-double-word frame byte and pulling the still-staged
+ * tail of the head page from RAM. */
+static int page_read_stream(const struct live_page *lp, size_t off, uint8_t *dst, size_t len)
+{
+	uint16_t phys = lp->phys;
 	bool is_head = (m_nlive > 0 && phys == m_live[m_nlive - 1].phys);
 	size_t flushed = (size_t)m_head_dw * DW_DATA;
+	off_t data = page_off(phys) + page_data_off(lp->flags & LP_V2);
 
 	for (size_t j = 0; j < len; j++) {
 		size_t d = off + j;
@@ -347,8 +404,7 @@ static int page_read_stream(uint16_t phys, size_t off, uint8_t *dst, size_t len)
 		}
 		size_t dw = d / DW_DATA;
 		size_t b = d % DW_DATA;
-		int ret = flash_area_read(m_fa, page_off(phys) + HIST_HDR_SIZE + dw * DW_SIZE + b,
-					  &dst[j], 1);
+		int ret = flash_area_read(m_fa, data + dw * DW_SIZE + b, &dst[j], 1);
 		if (ret) {
 			return ret;
 		}
@@ -373,9 +429,11 @@ static int flush_stage_pad(void)
 	memset(dw, 0, DW_DATA);
 	memcpy(dw, m_stage, m_stage_len);
 	dw[DW_DATA] = FRAME_BYTE;
-	uint16_t phys = m_live[m_nlive - 1].phys;
-	int ret = flash_area_write(
-		m_fa, page_off(phys) + HIST_HDR_SIZE + (off_t)m_head_dw * DW_SIZE, dw, DW_SIZE);
+	const struct live_page *head = &m_live[m_nlive - 1];
+	int ret = flash_area_write(m_fa,
+				   page_off(head->phys) + page_data_off(head->flags & LP_V2) +
+					   (off_t)m_head_dw * DW_SIZE,
+				   dw, DW_SIZE);
 	if (ret) {
 		return ret;
 	}
@@ -423,8 +481,10 @@ static int advance_page(uint32_t base, bool synced, uint32_t *evicted)
 		return ret;
 	}
 
+	/* v2: the 32 B common header; the fix-up double word after it stays erased
+	 * until a clock sync re-bases an uptime-stamped page. */
 	struct hist_page_hdr h = {
-		.magic = PAGE_MAGIC,
+		.magic = PAGE_MAGIC_V2,
 		.seq = m_next_seq,
 		.mask = m_mask,
 		.interval = m_interval,
@@ -453,7 +513,7 @@ static int advance_page(uint32_t base, bool synced, uint32_t *evicted)
 		.first_ord = m_abs_ord,
 		.base_time = base,
 		.phys = next,
-		.flags = (synced ? LP_SYNCED : 0) | LP_CUR_BOOT,
+		.flags = (synced ? LP_SYNCED : 0) | LP_CUR_BOOT | LP_V2,
 	};
 	m_nlive++;
 	m_head_dw = 0;
@@ -488,13 +548,15 @@ static int backend_init(void)
 }
 
 /* Count the written payload double words in a page (frame byte != 0xFF). */
-static uint16_t scan_written_dw(uint16_t phys)
+static uint16_t scan_written_dw(uint16_t phys, bool v2)
 {
 	uint16_t dw = 0;
-	for (; dw < PAYLOAD_DW; dw++) {
+	uint16_t payload_dw = v2 ? PAYLOAD_DW_V2 : PAYLOAD_DW_V1;
+	for (; dw < payload_dw; dw++) {
 		uint8_t frame = ERASED_BYTE;
 		if (flash_area_read(m_fa,
-				    page_off(phys) + HIST_HDR_SIZE + (off_t)dw * DW_SIZE + DW_DATA,
+				    page_off(phys) + page_data_off(v2) + (off_t)dw * DW_SIZE +
+					    DW_DATA,
 				    &frame, 1) != 0) {
 			break;
 		}
@@ -565,24 +627,33 @@ static bool backend_mount(void)
 	}
 
 	/* chain is head..tail; store as tail..head in m_live. Each page keeps its
-	 * own header time base; none is from this boot. */
+	 * own header time base (plus its clock-sync fix-up, if one was written);
+	 * none is from this boot. */
 	for (uint16_t i = 0; i < chain_len; i++) {
 		uint16_t phys = chain[chain_len - 1 - i];
 		struct hist_page_hdr h;
 		(void)read_hdr(phys, &h);
+		bool v2 = (h.magic == PAGE_MAGIC_V2);
+		uint32_t base = h.base_time;
+		bool synced = h.base_synced != 0;
+
+		if (v2 && !synced && fixup_read(phys, &h, &base)) {
+			synced = true;
+		}
 		m_live[i] = (struct live_page){
 			.first_ord = h.first_ord,
-			.base_time = h.base_time,
+			.base_time = base,
 			.phys = phys,
-			.flags = h.base_synced ? LP_SYNCED : 0,
+			.flags = (synced ? LP_SYNCED : 0) | (v2 ? LP_V2 : 0),
 		};
 	}
 	m_nlive = chain_len;
 
 	/* Recover the head page's committed record count by scanning its written
 	 * double words. The staged tail (< 7 B) from before the reboot is gone. */
-	uint16_t written = scan_written_dw(head_phys);
-	uint16_t rpp = records_per_page(m_sample_size);
+	bool head_v2 = (head_hdr.magic == PAGE_MAGIC_V2);
+	uint16_t written = scan_written_dw(head_phys, head_v2);
+	uint16_t rpp = (uint16_t)((head_v2 ? PAGE_DATA_V2 : PAGE_DATA_V1) / m_sample_size);
 	uint16_t hrecs = (uint16_t)(((size_t)written * DW_DATA) / m_sample_size);
 	if (hrecs > rpp) {
 		hrecs = rpp;
@@ -634,8 +705,9 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t base, bool sy
 		*evicted += adv_evicted;
 	}
 
-	/* Stream `len` bytes into the head page, flushing full double words. */
-	uint16_t phys = m_live[m_nlive - 1].phys;
+	/* Stream `len` bytes into the head page (always v2: pages recovered at
+	 * mount are closed), flushing full double words. */
+	off_t data = page_off(m_live[m_nlive - 1].phys) + HIST_HDR_SIZE_V2;
 	uint16_t start_head_dw = m_head_dw;
 	uint8_t start_stage_len = m_stage_len;
 	for (size_t i = 0; i < len; i++) {
@@ -644,9 +716,8 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t base, bool sy
 			uint8_t dw[DW_SIZE];
 			memcpy(dw, m_stage, DW_DATA);
 			dw[DW_DATA] = FRAME_BYTE;
-			int ret = flash_area_write(
-				m_fa, page_off(phys) + HIST_HDR_SIZE + (off_t)m_head_dw * DW_SIZE,
-				dw, DW_SIZE);
+			int ret = flash_area_write(m_fa, data + (off_t)m_head_dw * DW_SIZE, dw,
+						   DW_SIZE);
 			/* Drop the staged double word on error too -- leaving m_stage_len
 			 * stuck at DW_DATA would run this loop's next byte past the end of
 			 * m_stage[] on the following capture (C1). */
@@ -673,6 +744,11 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t base, bool sy
 	m_abs_ord++;
 	if (head_records() >= rpp) {
 		m_head_full = true;
+		/* Commit the full page's staged tail now rather than at the next
+		 * rollover (1757 B pages leave e.g. 5 B of 3 B records staged), so a
+		 * reboot doesn't cost its last records. One double word program; a
+		 * failure is retried by advance_page(). */
+		(void)flush_stage_pad();
 	}
 	return 0;
 }
@@ -690,7 +766,7 @@ static int backend_read(uint32_t abs, uint8_t *rec, size_t len)
 		p--;
 	}
 	size_t local = abs - m_live[p].first_ord;
-	return page_read_stream(m_live[p].phys, local * len, rec, len);
+	return page_read_stream(&m_live[p], local * len, rec, len);
 }
 
 static uint16_t backend_stored(void)
@@ -720,10 +796,47 @@ static void backend_seg(uint16_t i, struct hist_seg *s)
 	s->cur_boot = (lp->flags & LP_CUR_BOOT) != 0;
 }
 
-static void backend_seg_sync(uint16_t i, uint32_t offset)
+static bool backend_seg_sync(uint16_t i, uint32_t offset)
 {
 	m_live[i].base_time += offset;
 	m_live[i].flags |= LP_SYNCED;
+	if (m_live[i].flags & LP_V2) {
+		m_live[i].flags |= LP_FIXUP;
+		return true; /* a fix-up write is pending */
+	}
+	return false;
+}
+
+/* Program the fix-up double word of every page re-based at a clock sync. Each is
+ * programmed at most once (a failed program is not retried: re-programming a
+ * non-erased double word fails on the STM32WL anyway); the RAM view already has
+ * the unix times, only the persistence across the next reboot is lost. */
+static void backend_flush_fixups(void)
+{
+	for (uint16_t i = 0; i < m_nlive; i++) {
+		struct live_page *lp = &m_live[i];
+
+		if (!(lp->flags & LP_FIXUP)) {
+			continue;
+		}
+		lp->flags &= ~LP_FIXUP;
+
+		struct hist_page_hdr h;
+		if (read_hdr(lp->phys, &h) != 0 || !hdr_valid(&h) || h.base_synced) {
+			continue;
+		}
+		struct hist_page_fixup f = {
+			.offset = lp->base_time - h.base_time,
+			.mark = FIXUP_MARK,
+			.rsv = 0,
+		};
+		f.crc = crc16_ccitt(h.crc, (const uint8_t *)&f,
+				    offsetof(struct hist_page_fixup, crc));
+		int ret = flash_area_write(m_fa, page_off(lp->phys) + HIST_HDR_SIZE, &f, sizeof(f));
+		if (ret) {
+			LOG_WRN("history fix-up write failed: %d", ret);
+		}
+	}
 }
 
 static void backend_reset_logical(void)
@@ -853,11 +966,15 @@ static void backend_seg(uint16_t i, struct hist_seg *s)
 	s->synced = m_ram_synced;
 	s->cur_boot = true;
 }
-static void backend_seg_sync(uint16_t i, uint32_t offset)
+static bool backend_seg_sync(uint16_t i, uint32_t offset)
 {
 	ARG_UNUSED(i);
 	m_ram_base += offset;
 	m_ram_synced = true;
+	return false; /* nothing to persist */
+}
+static void backend_flush_fixups(void)
+{
 }
 static void backend_reset_logical(void)
 {
@@ -1057,6 +1174,27 @@ void app_history_set_replay_active(bool active)
 	m_replay_active = active;
 }
 
+/* Deferred clock-sync fix-up writes (flash backend). on_clock_sync() runs in
+ * the LoRaWAN downlink callback (system work queue, #96: no flash write there),
+ * so it only marks pages and submits this work to the queue registered with
+ * app_history_set_work_queue() (app_report's). The next capture flushes too. */
+static struct k_work_q *m_maint_q;
+
+static void fixup_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	k_mutex_lock(&m_lock, K_FOREVER);
+	backend_flush_fixups();
+	k_mutex_unlock(&m_lock);
+}
+
+static K_WORK_DEFINE(m_fixup_work, fixup_work_handler);
+
+void app_history_set_work_queue(struct k_work_q *queue)
+{
+	m_maint_q = queue;
+}
+
 /* Time the next record has when it continues the newest segment's grid. False
  * when there is none to continue: an empty ring, or a newest segment recorded
  * before this boot (flash) — its grid says nothing about how long the device
@@ -1087,6 +1225,10 @@ void app_history_capture(void)
 	uint8_t rec[MAX_RECORD_SIZE];
 
 	k_mutex_lock(&m_lock, K_FOREVER);
+
+	/* Clock-sync fix-ups not yet written (no work queue registered, or its work
+	 * still queued): this runs on the report work queue, a safe context. */
+	backend_flush_fixups();
 
 	/* Records are periodic at interval_report, so per-record time is implicit
 	 * (base + ord*interval). If the interval changed, that timebase no longer
@@ -1141,26 +1283,34 @@ void app_history_on_clock_sync(uint32_t unix_now)
 
 	/* Segments stamped on this boot's uptime (no RTC yet) become unix time by
 	 * the offset between the two clocks now. Segments from an earlier boot keep
-	 * base_synced=0: their uptime epoch ended with that boot and cannot be
-	 * recovered (#191 used to guess "newest record = now"; a wrong absolute time
-	 * is worse than an honest unsynced frame). Already-synced segments keep
+	 * base_synced=0 unless their fix-up double word was written: their uptime
+	 * epoch ended with that boot and cannot be recovered (#191 used to guess
+	 * "newest record = now"; a wrong absolute time is worse than an honest
+	 * unsynced frame). Already-synced segments keep
 	 * their times; an RTC step shows up as a slot discontinuity at the next
 	 * capture instead.
 	 *
 	 * No flash write here (#96): this runs inside the LoRaWAN downlink callback
-	 * (LoRaMacProcess on the system workqueue). */
+	 * (LoRaMacProcess on the system workqueue). The flash backend persists the
+	 * offset in each re-based page's fix-up double word from the report work
+	 * queue instead, so the unix times survive a later reboot. */
 	uint32_t off = unix_now - (uint32_t)(k_uptime_get() / 1000);
 	uint16_t n = backend_nseg();
+	bool pending = false;
 
 	for (uint16_t i = 0; i < n; i++) {
 		struct hist_seg s;
 
 		backend_seg(i, &s);
 		if (!s.synced && s.cur_boot) {
-			backend_seg_sync(i, off);
+			pending |= backend_seg_sync(i, off);
 		}
 	}
 	k_mutex_unlock(&m_lock);
+
+	if (pending && m_maint_q) {
+		(void)k_work_submit_to_queue(m_maint_q, &m_fixup_work);
+	}
 }
 
 size_t app_history_count(void)
