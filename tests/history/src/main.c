@@ -167,7 +167,8 @@ ZTEST(history, test_export)
 	uint32_t t0 = 0;
 	uint16_t n = 0;
 	size_t next = 0;
-	size_t bytes = app_history_export_page(0, 0xFFFFFFFF, 0, buf, sizeof(buf), &t0, &n, &next);
+	size_t bytes =
+		app_history_export_page(0, 0xFFFFFFFF, 0, buf, sizeof(buf), &t0, NULL, &n, &next);
 
 	zassert_equal(n, 3, "n_written %u", n);
 	zassert_equal(next, 3, "next_ord %zu", next);
@@ -300,9 +301,9 @@ ZTEST(history, test_capture_during_replay_absolute_cursor)
 	uint16_t n;
 
 	/* Frame 1: records 0..4. */
-	zassert_equal(
-		app_history_export_abs(0, UINT32_MAX, first, end, buf, 15, &t0_first, &n, &next),
-		15);
+	zassert_equal(app_history_export_abs(0, UINT32_MAX, first, end, buf, 15, &t0_first, NULL,
+					     &n, &next),
+		      15);
 	zassert_equal(n, 5);
 	zassert_within(rec_temp(buf, 0), 0.0, 0.01);
 	zassert_equal(next, first + 5);
@@ -322,7 +323,8 @@ ZTEST(history, test_capture_during_replay_absolute_cursor)
 	/* Frame 2 continues exactly after record 4 despite the eviction. */
 	uint32_t cur = next;
 
-	zassert_equal(app_history_export_abs(0, UINT32_MAX, cur, end, buf, 15, &t0, &n, &next), 15);
+	zassert_equal(
+		app_history_export_abs(0, UINT32_MAX, cur, end, buf, 15, &t0, NULL, &n, &next), 15);
 	zassert_equal(n, 5);
 	zassert_within(rec_temp(buf, 0), 5.0, 0.01, "frame 2 starts at %g", rec_temp(buf, 0));
 	zassert_equal(t0, t0_first + 5 * 60, "t0 %u", t0);
@@ -332,7 +334,8 @@ ZTEST(history, test_capture_during_replay_absolute_cursor)
 		app_history_capture();
 	}
 	cur = next;
-	zassert_equal(app_history_export_abs(0, UINT32_MAX, cur, end, buf, 15, &t0, &n, &next), 15);
+	zassert_equal(
+		app_history_export_abs(0, UINT32_MAX, cur, end, buf, 15, &t0, NULL, &n, &next), 15);
 	zassert_within(rec_temp(buf, 0), 13.0, 0.01, "fell out: resume at the oldest, got %g",
 		       rec_temp(buf, 0));
 	zassert_equal(t0, t0_first + 13 * 60, "t0 %u", t0);
@@ -343,7 +346,8 @@ ZTEST(history, test_capture_during_replay_absolute_cursor)
 
 	while (next < end) {
 		cur = next;
-		(void)app_history_export_abs(0, UINT32_MAX, cur, end, buf, 15, &t0, &n, &next);
+		(void)app_history_export_abs(0, UINT32_MAX, cur, end, buf, 15, &t0, NULL, &n,
+					     &next);
 		zassert_true(n > 0, "stalled at %u", cur);
 		sent += n;
 	}
@@ -377,9 +381,9 @@ ZTEST(history, test_reset_during_replay_ends_it)
 	uint32_t t0, next;
 	uint16_t n;
 
-	zassert_equal(
-		app_history_export_abs(0, UINT32_MAX, first, end, buf, sizeof(buf), &t0, &n, &next),
-		0);
+	zassert_equal(app_history_export_abs(0, UINT32_MAX, first, end, buf, sizeof(buf), &t0, NULL,
+					     &n, &next),
+		      0);
 	zassert_equal(n, 0);
 	zassert_true(next >= end, "stale replay must be exhausted (next %u end %u)", next, end);
 	app_history_set_replay_active(false);

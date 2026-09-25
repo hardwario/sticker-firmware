@@ -1170,10 +1170,11 @@ static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Com
 	cap = MIN(cap, sizeof(hf->samples.bytes));
 
 	uint32_t t0 = 0;
+	bool synced = false;
 	uint16_t n_written = 0;
 	size_t next_ord = start;
 	size_t written = app_history_export_page(from, to, start, hf->samples.bytes, cap, &t0,
-						 &n_written, &next_ord);
+						 &synced, &n_written, &next_ord);
 
 	resp->which_body = Response_history_frame_tag;
 	/* NFC history is cursor-paged (next_ord / has_more below): the phone drives
@@ -1183,7 +1184,7 @@ static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Com
 	hf->present = present;
 	hf->interval_s = interval;
 	hf->has_time_synced = true;
-	hf->time_synced = app_history_base_synced();
+	hf->time_synced = synced; /* per frame: a frame never spans two segments */
 	/* Authoritative cursor for the phone: pass next_ord back as start_ord. When a
 	 * page returns no records (buffer empty, cursor past the window/end) or no
 	 * ordinals remain, has_more=false stops the tap loop (no wedge, no infinite

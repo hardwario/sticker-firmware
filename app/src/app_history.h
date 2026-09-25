@@ -51,7 +51,8 @@ enum app_history_sensor {
 /* A decoded record handed to the shell. `value[i]` is valid only when
  * `present` has bit i set; counters are whole numbers, analog values are in
  * physical units (deg C, %RH). `time_unix` is absolute UTC when `time_synced`,
- * otherwise it is seconds relative to the buffer base (no wall-clock yet). */
+ * otherwise it is uptime seconds of the boot that recorded the record (no
+ * wall-clock yet). */
 struct app_history_record {
 	uint32_t time_unix;
 	bool time_synced;
@@ -77,8 +78,10 @@ void app_history_capture(void);
  * dropped. */
 void app_history_set_replay_active(bool active);
 
-/* Fix up the buffer base time once the wall-clock becomes available, so all
- * stored records gain correct absolute timestamps. Idempotent. */
+/* The RTC was set to `unix_now`: re-base the segments recorded on this boot's
+ * uptime (before the RTC was set) to unix time, so their records gain absolute
+ * timestamps. Segments of an earlier boot that never saw the clock stay
+ * unsynced. Idempotent. */
 void app_history_on_clock_sync(uint32_t unix_now);
 
 /* Number of records currently stored (0..capacity). */
@@ -109,22 +112,25 @@ void app_history_set_mask(uint32_t mask);
  * so a wire frame carries this once and per-record time = t0 + ord*interval. */
 uint32_t app_history_get_interval(void);
 
-/* True once the buffer's base time has been anchored to absolute UTC (the RTC
- * synced while records were held). Until then export_page's t0 is uptime-relative,
- * so the replay frame must carry time_synced=false (L-1/L-3). */
-bool app_history_base_synced(void);
-
-/* Pack one page of stored records into `buf` for a LoRaWAN replay (ReqHistory ->
- * HistoryFrame), starting at ordinal `start_ord` (0 = oldest), oldest-first, as
+/* Pack one HistoryFrame's worth of stored records into `buf` (NFC paged read,
+ * ReqHistoryPage), starting at ordinal `start_ord` (0 = oldest), oldest-first, as
  * many whole records as fit in `cap`. Each record is the raw stored bytes (values
  * only, fixed size = the sample size, sentinels mark absent values); the shared
- * present mask + interval travel in the frame header, not per record. Records in
- * [from_unix, to_unix] only (filter skipped until the clock is synced). Returns
- * bytes written; *t0_out = first packed record's absolute time, *n_written =
- * records packed, *next_ord = next ordinal to pass for the following page
- * (== app_history_count() when the scan is exhausted). */
+ * present mask + interval travel in the frame header, not per record.
+ *
+ * Record times are periodic within a segment (a flash page, stamped from the
+ * clock when it was opened), and a frame never crosses a segment boundary, so
+ * time(j) = t0 + j * interval holds for every frame. Records in [from_unix,
+ * to_unix] only; records whose segment was stamped before the RTC was set
+ * (unsynced) are returned only for an open window (0..UINT32_MAX) or while the
+ * device has no wall clock. Returns bytes written; *t0_out = first packed
+ * record's time, *synced_out = true when that time is unix (time_synced of the
+ * frame; false = uptime, L-1/L-3), *n_written = records packed, *next_ord = next
+ * ordinal to pass for the following page (== app_history_count() when the scan
+ * is exhausted). Output pointers may be NULL. */
 size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
-			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord);
+			       size_t cap, uint32_t *t0_out, bool *synced_out, uint16_t *n_written,
+			       size_t *next_ord);
 
 /* Absolute-ordinal span [*first_abs, *end_abs) of the stored records. An
  * absolute ordinal names one record for as long as it is stored: appends don't
@@ -140,11 +146,11 @@ void app_history_span(uint32_t *first_abs, uint32_t *end_abs);
  * reaches `end_abs`. */
 size_t app_history_export_abs(uint32_t from_unix, uint32_t to_unix, uint32_t start_abs,
 			      uint32_t end_abs, uint8_t *buf, size_t cap, uint32_t *t0_out,
-			      uint16_t *n_written, uint32_t *next_abs);
+			      bool *synced_out, uint16_t *n_written, uint32_t *next_abs);
 
 /* Number of frames the [from_unix, to_unix] window needs at `cap` bytes/frame
- * (whole records per frame). Mirrors export_page's packing so the replay can
- * announce frame_count up front. */
+ * (whole records per frame, one frame never spans two segments). Mirrors
+ * export_page's packing so the replay can announce frame_count up front. */
 uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t cap);
 
 /* Descriptor helpers for the shell. */

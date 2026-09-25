@@ -333,19 +333,17 @@ static uint32_t f28_frame_t0(size_t ord)
 	uint16_t n = 0;
 	size_t next = 0;
 
-	(void)app_history_export_page(0, UINT32_MAX, ord, buf, sizeof(buf), &t0, &n, &next);
+	(void)app_history_export_page(0, UINT32_MAX, ord, buf, sizeof(buf), &t0, NULL, &n, &next);
 	zassert_true(n > 0, "no record exported at ord %zu", ord);
 	return t0;
 }
 
 /* F28, RTC kept across the outage (backup domain, e.g. a watchdog reset): the
- * first record after the reboot is captured at T0 + 7 * 60 + outage.
- *
- * CHARACTERIZATION of the unfixed code: the new page's base is the ordinal
- * continuation of the old ring (m_base_time + (m_abs_ord - tail.first_ord) *
- * interval), so the record claims T0 + 7 * 60, i.e. it is shifted back by the
- * whole outage. The fix (RTC base per page) flips this assertion to 0. */
-ZTEST(history_flash, test_f28_reboot_rtc_kept_shift)
+ * first record after the reboot is captured at T0 + 7 * 60 + outage. The
+ * post-boot page is stamped from the RTC, not by ordinal continuation of the
+ * old ring (which put it at T0 + 7 * 60, -18000 s off before the fix), and the
+ * export splits at the page boundary so each frame's t0 is right. */
+ZTEST(history_flash, test_f28_reboot_rtc_kept)
 {
 	f28_fill_before_outage();
 	reboot();
@@ -362,18 +360,37 @@ ZTEST(history_flash, test_f28_reboot_rtc_kept_shift)
 
 	printk("F28 (RTC kept): record time shift %d s (get), %d s (frame t0), synced=%d\n",
 	       shift_get, shift_frame, r.time_synced);
-	zassert_equal(shift_get, -(int32_t)F28_OUTAGE, "F28 shift (get) %d", shift_get);
-	zassert_equal(shift_frame, -(int32_t)F28_OUTAGE, "F28 shift (frame) %d", shift_frame);
+	zassert_equal(shift_get, 0, "F28 shift (get) %d", shift_get);
+	zassert_equal(shift_frame, 0, "F28 shift (frame) %d", shift_frame);
+	zassert_true(r.time_synced, "RTC-stamped page is synced");
+
+	/* Pre-outage records keep their times. */
+	zassert_equal(app_history_get(6, &r), 0, "get(6)");
+	zassert_equal(r.time_unix, F28_T0 + 6 * 60, "pre-outage time %u", r.time_unix);
+
+	/* The whole window takes two frames: one per page, never across the gap. */
+	uint8_t buf[64];
+	uint32_t t0;
+	uint16_t n;
+	size_t next;
+
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, sizeof(buf)), 2, "frames");
+	(void)app_history_export_page(0, UINT32_MAX, 0, buf, sizeof(buf), &t0, NULL, &n, &next);
+	zassert_equal(n, 7, "first frame ends at the page boundary (%u)", n);
+	zassert_equal(t0, F28_T0);
+	zassert_equal(next, 7);
+
+	/* A window around the outage end finds the post-boot record. */
+	zassert_equal(app_history_count_frames(t_capture - 30, t_capture + 30, sizeof(buf)), 1);
 }
 
 /* F28, power loss: the RTC is unset after the reboot until the network
  * DeviceTimeAns (app_clock_set_unix -> app_history_on_clock_sync) arrives 30 s
- * after the first post-boot capture.
- *
- * CHARACTERIZATION of the unfixed code: the restored base is "synced" (from the
- * tail page), so the post-boot page is stamped synced by ordinal continuation
- * and on_clock_sync() leaves it alone -> shifted back by the outage. */
-ZTEST(history_flash, test_f28_power_loss_shift)
+ * after the first post-boot capture. The post-boot page is stamped on uptime
+ * (base_synced=0) and re-based by the (unix - uptime) offset at the sync, so the
+ * record lands at its capture time (before the fix: -18000 s and wrongly
+ * claimed synced). */
+ZTEST(history_flash, test_f28_power_loss)
 {
 	f28_fill_before_outage();
 	reboot();
@@ -383,21 +400,76 @@ ZTEST(history_flash, test_f28_power_loss_shift)
 	app_history_capture();
 	zassert_equal(app_history_count(), 8, "post-boot count");
 
+	struct app_history_record r;
+	zassert_equal(app_history_get(7, &r), 0, "get(7)");
+	zassert_false(r.time_synced, "no RTC yet: the post-boot page is unsynced");
+
 	k_sleep(K_SECONDS(30)); /* join + DeviceTimeAns */
 	test_clock_has = true;
 	test_clock_unix = t_capture + 30;
 	app_history_on_clock_sync(test_clock_unix);
 
-	struct app_history_record r;
 	zassert_equal(app_history_get(7, &r), 0, "get(7)");
 	int32_t shift_get = (int32_t)(r.time_unix - t_capture);
 	int32_t shift_frame = (int32_t)(f28_frame_t0(7) - t_capture);
 
 	printk("F28 (power loss): record time shift %d s (get), %d s (frame t0), synced=%d\n",
 	       shift_get, shift_frame, r.time_synced);
-	zassert_true(r.time_synced, "unfixed code claims the record synced");
-	zassert_equal(shift_get, -(int32_t)F28_OUTAGE, "F28 shift (get) %d", shift_get);
-	zassert_equal(shift_frame, -(int32_t)F28_OUTAGE, "F28 shift (frame) %d", shift_frame);
+	zassert_true(r.time_synced, "re-based at the clock sync");
+	zassert_equal(shift_get, 0, "F28 shift (get) %d", shift_get);
+	zassert_equal(shift_frame, 0, "F28 shift (frame) %d", shift_frame);
+
+	zassert_equal(app_history_get(6, &r), 0, "get(6)");
+	zassert_equal(r.time_unix, F28_T0 + 6 * 60, "pre-outage time %u", r.time_unix);
+}
+
+/* A page stamped on uptime that never saw a clock sync before the next reboot:
+ * its uptime epoch is gone, so it stays unsynced (time_synced=false frames)
+ * instead of the old "newest record = now" guess (#191). A bounded window on a
+ * synced device skips it; an open window still returns it. */
+ZTEST(history_flash, test_unsynced_page_from_earlier_boot_stays_unsynced)
+{
+	f28_fill_before_outage();
+	reboot();
+
+	test_clock_has = false;
+	capture_n(7); /* one durable post-boot page on uptime */
+	reboot();     /* power lost again before any DeviceTimeAns */
+
+	test_clock_has = true;
+	test_clock_unix = F28_T0 + 2 * F28_OUTAGE;
+	app_history_on_clock_sync(test_clock_unix);
+	capture_n(1);
+	zassert_equal(app_history_count(), 15);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_false(r.time_synced, "earlier-boot uptime page must stay unsynced");
+	zassert_equal(app_history_get(14, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, test_clock_unix, "new page from the RTC");
+
+	uint8_t buf[64];
+
+	/* Open window: all three pages, the unsynced one as its own frame. */
+	zassert_equal(app_history_count_frames(0, UINT32_MAX, sizeof(buf)), 3);
+	uint32_t t0;
+	bool synced = true;
+	uint16_t n;
+	size_t next;
+
+	(void)app_history_export_page(0, UINT32_MAX, 7, buf, sizeof(buf), &t0, &synced, &n, &next);
+	zassert_equal(n, 7);
+	zassert_false(synced, "frame of the unsynced page carries time_synced=false");
+	zassert_equal(next, 14);
+
+	/* Bounded window: only the synced pages qualify. */
+	zassert_equal(app_history_count_frames(F28_T0, test_clock_unix, sizeof(buf)), 2);
+	(void)app_history_export_page(F28_T0, test_clock_unix, 7, buf, sizeof(buf), &t0, &synced,
+				      &n, &next);
+	zassert_equal(n, 1);
+	zassert_true(synced);
+	zassert_equal(t0, test_clock_unix);
 }
 
 /* C: while a replay streams the ring, writes within the current page go on but

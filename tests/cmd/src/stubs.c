@@ -146,7 +146,8 @@ void app_input_reset_count(bool input_a, bool input_b)
  * pulls from these; the unit test has no history backend, so they report an empty
  * buffer (export writes nothing, next_ord stays at start_ord => has_more false). */
 size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
-			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord)
+			       size_t cap, uint32_t *t0_out, bool *synced_out, uint16_t *n_written,
+			       size_t *next_ord)
 {
 	(void)from_unix;
 	(void)to_unix;
@@ -154,6 +155,9 @@ size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t star
 	(void)cap;
 	if (t0_out) {
 		*t0_out = 0;
+	}
+	if (synced_out) {
+		*synced_out = false;
 	}
 	if (n_written) {
 		*n_written = 0;
@@ -185,11 +189,6 @@ uint32_t app_history_get_mask(void)
 uint32_t app_history_get_interval(void)
 {
 	return 0;
-}
-
-bool app_history_base_synced(void)
-{
-	return false;
 }
 
 /* Dynamic alarm rules — app_cmd's handle_alarm_rule mutates the list; the unit

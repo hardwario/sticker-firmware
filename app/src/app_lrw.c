@@ -1819,13 +1819,14 @@ static void m_hist_work_handler(struct k_work *work)
 	uint8_t samples[HISTORY_SAMPLES_MAX];
 	size_t cap = MIN(history_frame_cap(), sizeof(samples));
 	uint32_t t0 = 0;
+	bool synced = false;
 	uint16_t n = 0;
 	uint32_t next = m_hist_cursor;
 	size_t slen = 0;
 
 	if (cap > 0) {
 		slen = app_history_export_abs(m_hist_from, m_hist_to, m_hist_cursor, m_hist_end,
-					      samples, cap, &t0, &n, &next);
+					      samples, cap, &t0, &synced, &n, &next);
 	}
 	if (n == 0) {
 		LOG_WRN("History replay stop at frame %u/%u (cap=%uB)", (unsigned)m_hist_idx,
@@ -1848,10 +1849,11 @@ static void m_hist_work_handler(struct k_work *work)
 	}
 
 	size_t len;
+	/* time_synced is per frame: a frame never spans two history segments, and
+	 * each segment (flash page) knows whether its base is unix or uptime. */
 	int ret = app_cmd_build_history_frame(m_hist_seq, m_hist_idx, m_hist_count, t0,
-					      m_hist_present, m_hist_interval,
-					      app_history_base_synced(), samples, slen,
-					      m_hist_tx_buf, sizeof(m_hist_tx_buf), &len);
+					      m_hist_present, m_hist_interval, synced, samples,
+					      slen, m_hist_tx_buf, sizeof(m_hist_tx_buf), &len);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_cmd_build_history_frame", ret);
 		history_replay_finish();

@@ -127,13 +127,7 @@ static bool m_enabled;
 static uint32_t m_mask; /* selected & available sensors (bit i = enum app_history_sensor i) */
 static uint16_t m_sample_size;
 static uint16_t m_capacity;
-static uint16_t m_count;     /* logical record count (cached from the backend ring) */
-static uint32_t m_base_time; /* oldest record's time: uptime-s unsynced, unix synced */
-static bool m_base_synced;
-/* #191: m_base_time is an uptime base inherited from a previous boot (flash
- * backend) — k_uptime_get() has since restarted at 0, so the additive sync fixup
- * is invalid; the next clock sync re-anchors instead. */
-static bool m_base_stale_uptime;
+static uint16_t m_count;    /* logical record count (cached from the backend ring) */
 static uint32_t m_interval; /* interval_report (s) the buffer was recorded at; records
 			     * are periodic so per-record time = base + ord*interval */
 /* True while app_lrw streams a replay. Capture keeps running (the replay cursor
@@ -141,12 +135,28 @@ static uint32_t m_interval; /* interval_report (s) the buffer was recorded at; r
  * rollover (a ~20 ms erase that stalls the CPU) is held off until it ends. */
 static bool m_replay_active;
 
+/* Record time is implicit and periodic, but only within a SEGMENT: a run of
+ * consecutive records stamped from one base (flash: one page; RAM: the ring).
+ * The record at absolute ordinal `abs` of segment s is at
+ *   s.base + (abs - s.origin) * m_interval
+ * and a HistoryFrame never crosses a segment boundary, so the host's
+ * t0 + j * interval_s stays exact without a protocol change. A new segment
+ * starts with its own base from the clock, so a reboot / power loss becomes a
+ * gap in the data instead of shifting every later timestamp (F28). */
+struct hist_seg {
+	uint32_t origin; /* absolute ordinal `base` refers to (<= first) */
+	uint32_t first;  /* first record still stored */
+	uint32_t end;    /* one past the last record */
+	uint32_t base;   /* time of record `origin`: unix when synced, else uptime-s */
+	bool synced;     /* base is unix time */
+	bool cur_boot;   /* recorded during this boot (an uptime base is still valid) */
+};
+
 /* The ring self-persists: each record is durable once its double word flushes,
  * and page headers carry the base time / ordinal — so on reboot the count and
- * time base are recovered by scanning headers, no separate coalesced meta.
- * A clock-sync fixup to m_base_time (below) is only snapshotted into flash when
- * the next page is opened; a reboot before then re-anchors on the next sync
- * (#191), the same best-effort guarantee the old coalesced meta gave. */
+ * time base are recovered by scanning headers, no separate coalesced meta. A
+ * clock-sync fixup of a page stamped before the RTC was set lives in RAM only:
+ * after a reboot that page stays unsynced (its uptime epoch is gone). */
 
 static bool cap_on(size_t cap_off)
 {
@@ -172,23 +182,30 @@ static uint32_t now_seconds(bool *synced)
 /* ---- Storage backend ---------------------------------------------------- */
 
 /* The backend owns the physical storage ring. The upper layer keeps only the
- * logical view (m_count, m_base_time, m_interval, sync flags) and drives the
- * ring through this API — 0 = oldest record:
+ * logical view (m_count, m_interval) and drives the ring through this API.
+ * Records are addressed by ABSOLUTE ordinal: backend_first_abs() is the oldest
+ * record, and an absolute ordinal names one record for as long as it is stored
+ * (appends don't move it; eviction and logical resets only raise first_abs):
  *   backend_init()               probe the device
- *   backend_mount()              restore a prior ring (sets m_base_time /
- *                                m_base_synced / m_interval); false = start empty
- *   backend_append(rec,len,ev)   append one record; *ev = records evicted
- *   backend_read(idx,rec,len)    read logical record idx (0 = oldest)
+ *   backend_mount()              restore a prior ring (sets m_interval and the
+ *                                segments); false = start empty
+ *   backend_append(rec,len,base,synced,ev)
+ *                                append one record; if it opens a new segment
+ *                                (flash: page) that segment's base is
+ *                                base/synced; *ev = records evicted
+ *   backend_read(abs,rec,len)    read the record at absolute ordinal abs
  *   backend_stored()             current record count held by the ring
- *   backend_first_abs()          absolute ordinal of the oldest record; it only
- *                                grows (eviction, reset), so a replay cursor
- *                                kept as an absolute ordinal never shifts
+ *   backend_first_abs()          absolute ordinal of the oldest record
+ *   backend_nseg(), backend_seg(i,s)
+ *                                the segments, oldest first (struct hist_seg)
+ *   backend_seg_sync(i,off)      re-base an unsynced segment of this boot by the
+ *                                (unix - uptime) offset at clock sync
  *   backend_reset_logical()      drop all records without a full erase (layout
  *                                change); the next append starts a fresh run
  *   backend_erase()              wipe all storage (explicit `history clear`)
  *   backend_capacity(size)       max records for a given sample size
- * The backend reads m_sample_size / m_mask / m_interval / m_base_time /
- * m_base_synced directly (same translation unit) to stamp page headers. */
+ * The backend reads m_sample_size / m_mask / m_interval directly (same
+ * translation unit) to stamp page headers. */
 
 #if defined(CONFIG_APP_HISTORY_FLASH)
 
@@ -199,10 +216,16 @@ static uint32_t now_seconds(bool *synced)
  *
  * Layout: the partition is a ring of 2 KB erase pages. Each page opens with a
  * 32 B header (magic, monotonic sequence number, layout = mask/sample_size/
- * interval, base-time snapshot of the page's first record, absolute ordinal of
- * that record, CRC), followed by densely packed records. Records never cross a
- * page boundary. Newest page = highest sequence number; on mount we scan
- * headers to find head/tail — no separate meta entry.
+ * interval, clock time of the page's first record, absolute ordinal of that
+ * record, CRC), followed by densely packed records. Records never cross a page
+ * boundary. Newest page = highest sequence number; on mount we scan headers to
+ * find head/tail — no separate meta entry.
+ *
+ * Time: each page is one segment (struct hist_seg) — its header base_time is
+ * the clock time of its first record (RTC when set, else uptime), NOT the
+ * ordinal continuation of the page before it. After every boot the first
+ * append opens a new page, so a reboot or power loss is a gap, not a shift of
+ * every later record (F28).
  *
  * Durability: STM32WL programs flash in 8 B double words, so records are staged
  * into 7 B data slices and flushed one double word at a time — 7 data bytes + a
@@ -232,7 +255,7 @@ struct hist_page_hdr {
 	uint32_t seq;         /* monotonic; newest page has the highest seq */
 	uint32_t mask;        /* layout guard: must match the current selection */
 	uint32_t interval;    /* seconds between records when the page was written */
-	uint32_t base_time;   /* wall time of this page's first record (snapshot) */
+	uint32_t base_time;   /* clock time of this page's first record */
 	uint32_t first_ord;   /* absolute ordinal of this page's first record */
 	uint16_t sample_size; /* layout guard */
 	uint8_t base_synced;  /* 1 if base_time was a synced unix time */
@@ -248,9 +271,14 @@ static bool m_ready;
 
 /* In-RAM ring state (reconstructed on mount, maintained on append). */
 struct live_page {
-	uint16_t phys;      /* physical page index in the partition */
 	uint32_t first_ord; /* absolute ordinal of the page's first record */
+	uint32_t base_time; /* time of that record (header base, clock-sync fixed) */
+	uint16_t phys;      /* physical page index in the partition */
+	uint8_t flags;      /* LP_* */
 };
+#define LP_SYNCED   BIT(0) /* base_time is unix time */
+#define LP_CUR_BOOT BIT(1) /* opened during this boot (an uptime base is valid) */
+
 static struct live_page m_live[HIST_NPAGES]; /* [0] = tail (oldest) .. [n-1] = head */
 static uint16_t m_nlive;
 static uint32_t m_next_seq;      /* seq to assign to the next new page */
@@ -356,22 +384,17 @@ static int flush_stage_pad(void)
 	return 0;
 }
 
-/* Roll over to a fresh head page, evicting the tail page if the ring wraps onto
- * it. On success (0 returned) *evicted holds the number of records evicted and
- * all in-RAM ring state (m_live[], m_nlive, m_next_seq, m_last_phys, m_head_dw,
+/* Roll over to a fresh head page stamped `base`/`synced` (the clock time of the
+ * record about to open it), evicting the tail page if the ring wraps onto it.
+ * On success (0 returned) *evicted holds the number of records evicted and all
+ * in-RAM ring state (m_live[], m_nlive, m_next_seq, m_last_phys, m_head_dw,
  * m_stage_len, m_head_full) reflects the new head page. On failure, the flash
  * erase/write itself may or may not have partially completed, but no in-RAM
  * state is mutated — the caller can safely retry on the next append (the
  * candidate physical page is not yet claimed as live). */
-static int advance_page(uint32_t *evicted)
+static int advance_page(uint32_t base, bool synced, uint32_t *evicted)
 {
 	*evicted = 0;
-
-	/* Absolute wall time of the new page's first record, computed against the
-	 * CURRENT (pre-eviction) oldest record so it is unaffected by the eviction
-	 * below: base = oldest_time + records_before_new_page * interval. */
-	uint32_t new_base =
-		m_base_time + (m_nlive ? (m_abs_ord - m_live[0].first_ord) : 0) * m_interval;
 
 	/* Durably close the current head so its committed records survive. #384: a
 	 * failure here must abort the rollover (return early, no in-RAM state
@@ -405,10 +428,10 @@ static int advance_page(uint32_t *evicted)
 		.seq = m_next_seq,
 		.mask = m_mask,
 		.interval = m_interval,
-		.base_time = new_base,
+		.base_time = base,
 		.first_ord = m_abs_ord,
 		.sample_size = m_sample_size,
-		.base_synced = m_base_synced ? 1 : 0,
+		.base_synced = synced ? 1 : 0,
 	};
 	hdr_crc_set(&h);
 	ret = flash_area_write(m_fa, page_off(next), &h, sizeof(h));
@@ -426,8 +449,12 @@ static int advance_page(uint32_t *evicted)
 	}
 	m_next_seq++;
 	m_last_phys = next;
-	m_live[m_nlive].phys = next;
-	m_live[m_nlive].first_ord = m_abs_ord;
+	m_live[m_nlive] = (struct live_page){
+		.first_ord = m_abs_ord,
+		.base_time = base,
+		.phys = next,
+		.flags = (synced ? LP_SYNCED : 0) | LP_CUR_BOOT,
+	};
 	m_nlive++;
 	m_head_dw = 0;
 	m_stage_len = 0;
@@ -537,13 +564,18 @@ static bool backend_mount(void)
 		cur = h;
 	}
 
-	/* chain is head..tail; store as tail..head in m_live. */
+	/* chain is head..tail; store as tail..head in m_live. Each page keeps its
+	 * own header time base; none is from this boot. */
 	for (uint16_t i = 0; i < chain_len; i++) {
 		uint16_t phys = chain[chain_len - 1 - i];
 		struct hist_page_hdr h;
 		(void)read_hdr(phys, &h);
-		m_live[i].phys = phys;
-		m_live[i].first_ord = h.first_ord;
+		m_live[i] = (struct live_page){
+			.first_ord = h.first_ord,
+			.base_time = h.base_time,
+			.phys = phys,
+			.flags = h.base_synced ? LP_SYNCED : 0,
+		};
 	}
 	m_nlive = chain_len;
 
@@ -559,23 +591,21 @@ static bool backend_mount(void)
 	m_next_seq = head_hdr.seq + 1;
 	m_last_phys = head_phys;
 	/* Do not append into the recovered head page (its tail double word may hold
-	 * a partial record); treat it as finalized and roll over on the next append.
-	 * first_ord bookkeeping lets a short page carry fewer than rpp records. */
+	 * a partial record, and the device may have been off for any time since its
+	 * last record); treat it as finalized and roll over on the next append, which
+	 * stamps the new page from the clock. first_ord bookkeeping lets a short page
+	 * carry fewer than rpp records. */
 	m_head_full = true;
 	m_head_dw = written;
 	m_stage_len = 0;
 
-	/* Restore the logical time base from the tail (oldest) page. */
-	struct hist_page_hdr th;
-	(void)read_hdr(m_live[0].phys, &th);
-	m_base_time = th.base_time;
-	m_base_synced = th.base_synced ? true : false;
-	m_interval = th.interval;
+	m_interval = head_hdr.interval; /* the whole chain shares it */
 
 	return (m_abs_ord - m_live[0].first_ord) > 0;
 }
 
-static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
+static int backend_append(const uint8_t *rec, size_t len, uint32_t base, bool synced,
+			  uint32_t *evicted)
 {
 	*evicted = 0;
 	if (!m_ready) {
@@ -597,7 +627,7 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
 			return -EBUSY;
 		}
 		uint32_t adv_evicted = 0;
-		int ret = advance_page(&adv_evicted);
+		int ret = advance_page(base, synced, &adv_evicted);
 		if (ret) {
 			return ret;
 		}
@@ -647,13 +677,12 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
 	return 0;
 }
 
-static int backend_read(size_t index, uint8_t *rec, size_t len)
+static int backend_read(uint32_t abs, uint8_t *rec, size_t len)
 {
 	if (!m_ready || m_nlive == 0) {
 		return -EIO;
 	}
-	uint32_t abs = m_live[0].first_ord + (uint32_t)index;
-	if (abs >= m_abs_ord) {
+	if (abs < m_live[0].first_ord || abs >= m_abs_ord) {
 		return -EIO;
 	}
 	uint16_t p = m_nlive - 1;
@@ -672,6 +701,29 @@ static uint16_t backend_stored(void)
 static uint32_t backend_first_abs(void)
 {
 	return m_nlive ? m_live[0].first_ord : m_abs_ord;
+}
+
+static uint16_t backend_nseg(void)
+{
+	return m_nlive;
+}
+
+static void backend_seg(uint16_t i, struct hist_seg *s)
+{
+	const struct live_page *lp = &m_live[i];
+
+	s->origin = lp->first_ord;
+	s->first = lp->first_ord;
+	s->end = (i + 1 < m_nlive) ? m_live[i + 1].first_ord : m_abs_ord;
+	s->base = lp->base_time;
+	s->synced = (lp->flags & LP_SYNCED) != 0;
+	s->cur_boot = (lp->flags & LP_CUR_BOOT) != 0;
+}
+
+static void backend_seg_sync(uint16_t i, uint32_t offset)
+{
+	m_live[i].base_time += offset;
+	m_live[i].flags |= LP_SYNCED;
 }
 
 static void backend_reset_logical(void)
@@ -726,6 +778,10 @@ static uint8_t __noinit m_ram[CONFIG_APP_HISTORY_BYTES];
 static uint16_t m_ram_start;
 static uint16_t m_ram_count;
 static uint32_t m_ram_first_abs; /* absolute ordinal of the oldest record (evicted total) */
+/* The RAM ring is one segment (cleared on every boot, so always this boot's). */
+static uint32_t m_ram_origin; /* absolute ordinal m_ram_base refers to */
+static uint32_t m_ram_base;
+static bool m_ram_synced;
 
 static int backend_init(void)
 {
@@ -742,10 +798,16 @@ static uint16_t backend_capacity(uint16_t sample_size)
 {
 	return (uint16_t)(sizeof(m_ram) / sample_size);
 }
-static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
+static int backend_append(const uint8_t *rec, size_t len, uint32_t base, bool synced,
+			  uint32_t *evicted)
 {
 	uint16_t cap = backend_capacity(m_sample_size);
 	*evicted = 0;
+	if (m_ram_count == 0) {
+		m_ram_origin = m_ram_first_abs;
+		m_ram_base = base;
+		m_ram_synced = synced;
+	}
 	uint16_t slot;
 	if (m_ram_count >= cap) {
 		slot = m_ram_start;
@@ -759,10 +821,13 @@ static int backend_append(const uint8_t *rec, size_t len, uint32_t *evicted)
 	memcpy(&m_ram[(size_t)slot * m_sample_size], rec, len);
 	return 0;
 }
-static int backend_read(size_t index, uint8_t *rec, size_t len)
+static int backend_read(uint32_t abs, uint8_t *rec, size_t len)
 {
+	if (abs < m_ram_first_abs || abs - m_ram_first_abs >= m_ram_count) {
+		return -EIO;
+	}
 	uint16_t cap = backend_capacity(m_sample_size);
-	uint16_t slot = (uint16_t)((m_ram_start + index) % cap);
+	uint16_t slot = (uint16_t)((m_ram_start + (abs - m_ram_first_abs)) % cap);
 	memcpy(rec, &m_ram[(size_t)slot * m_sample_size], len);
 	return 0;
 }
@@ -773,6 +838,26 @@ static uint16_t backend_stored(void)
 static uint32_t backend_first_abs(void)
 {
 	return m_ram_first_abs;
+}
+static uint16_t backend_nseg(void)
+{
+	return m_ram_count ? 1 : 0;
+}
+static void backend_seg(uint16_t i, struct hist_seg *s)
+{
+	ARG_UNUSED(i);
+	s->origin = m_ram_origin;
+	s->first = m_ram_first_abs;
+	s->end = m_ram_first_abs + m_ram_count;
+	s->base = m_ram_base;
+	s->synced = m_ram_synced;
+	s->cur_boot = true;
+}
+static void backend_seg_sync(uint16_t i, uint32_t offset)
+{
+	ARG_UNUSED(i);
+	m_ram_base += offset;
+	m_ram_synced = true;
 }
 static void backend_reset_logical(void)
 {
@@ -792,6 +877,26 @@ bool app_history_is_ready(void)
 }
 
 #endif
+
+/* Time of the record at absolute ordinal `abs` in segment `s`. */
+static uint32_t seg_time(const struct hist_seg *s, uint32_t abs)
+{
+	return s->base + (abs - s->origin) * m_interval;
+}
+
+/* Segment holding absolute ordinal `abs` (which must be stored). */
+static void seg_of(uint32_t abs, struct hist_seg *s)
+{
+	uint16_t n = backend_nseg();
+
+	memset(s, 0, sizeof(*s));
+	for (uint16_t i = n; i-- > 0;) {
+		backend_seg(i, s);
+		if (s->first <= abs || i == 0) {
+			return;
+		}
+	}
+}
 
 /* ---- Mask / sizing ------------------------------------------------------ */
 
@@ -952,6 +1057,27 @@ void app_history_set_replay_active(bool active)
 	m_replay_active = active;
 }
 
+/* Time the next record has when it continues the newest segment's grid. False
+ * when there is none to continue: an empty ring, or a newest segment recorded
+ * before this boot (flash) — its grid says nothing about how long the device
+ * was off, so the record must open a new segment from the clock (F28). */
+static bool head_next_time(uint32_t *t, bool *synced)
+{
+	uint16_t n = backend_nseg();
+	struct hist_seg s;
+
+	if (n == 0) {
+		return false;
+	}
+	backend_seg(n - 1, &s);
+	if (!s.cur_boot) {
+		return false;
+	}
+	*t = seg_time(&s, s.end);
+	*synced = s.synced;
+	return true;
+}
+
 void app_history_capture(void)
 {
 	if (!m_enabled || m_sample_size == 0 || m_capacity == 0) {
@@ -970,13 +1096,6 @@ void app_history_capture(void)
 	 * mount-time continuity with the stale pages (#96, #265). */
 	if (m_interval != (uint32_t)g_app_config.interval_report) {
 		m_interval = (uint32_t)g_app_config.interval_report;
-		m_base_time = 0;
-		m_base_synced = false;
-		/* This is a fresh this-boot rebase, so the "base derived from a previous
-		 * boot's uptime" flag no longer applies — clear it like the other reset
-		 * paths (app_history_clear / app_history_set_mask) do, else a buffer
-		 * restored with it set keeps stamping the first new records as stale. */
-		m_base_stale_uptime = false;
 		backend_reset_logical();
 		m_count = 0;
 	}
@@ -991,35 +1110,26 @@ void app_history_capture(void)
 	}
 	k_mutex_unlock(&g_app_sensor_data_lock);
 
-	/* Set the time base before the first record so the page header snapshots it
-	 * (backend reads m_base_time when it opens a page). */
-	if (backend_stored() == 0) {
-		m_base_time = now_seconds(&m_base_synced);
+	/* The base a new segment (flash: page) gets if this record opens one: the
+	 * continuation of this boot's grid, else the clock right now (RTC when set,
+	 * uptime otherwise). */
+	uint32_t base;
+	bool synced;
+	if (!head_next_time(&base, &synced)) {
+		base = now_seconds(&synced);
 	}
 
 	/* Only advance the logical view if the write lands, so a failed flash write
 	 * leaves no phantom record (#96). */
 	uint32_t evicted = 0;
-	int ret = backend_append(rec, m_sample_size, &evicted);
+	int ret = backend_append(rec, m_sample_size, base, synced, &evicted);
 	if (ret == -EBUSY) {
-		LOG_WRN("history page rollover held off by a replay — record dropped");
-		k_mutex_unlock(&m_lock);
-		return;
-	}
-	if (ret != 0) {
+		LOG_WRN("history page rollover held off by a replay, record dropped");
+	} else if (ret != 0) {
 		LOG_WRN("history append failed — record dropped");
-		/* #340 L8: advance_page() may have already committed a real eviction
-		 * before the per-record write that actually failed (backend_append()
-		 * still reports it via *evicted) — apply the same base_time fixup here
-		 * too, or the oldest-record time base goes stale relative to the live
-		 * page set that was already shifted. */
-		m_base_time += evicted * m_interval;
-		k_mutex_unlock(&m_lock);
-		return;
 	}
-
-	/* Evicted records shift the oldest-record time base forward. */
-	m_base_time += evicted * m_interval;
+	/* #340 L8: advance_page() may have committed a real eviction before a
+	 * per-record write failed, so refresh the count on every path. */
 	m_count = backend_stored();
 
 	k_mutex_unlock(&m_lock);
@@ -1028,28 +1138,27 @@ void app_history_capture(void)
 void app_history_on_clock_sync(uint32_t unix_now)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
-	if (!m_base_synced && m_count > 0) {
-		if (m_base_stale_uptime) {
-			/* #191: the uptime base is from a previous boot; the additive
-			 * offset (unix_now - current uptime) would be wrong by the
-			 * pre-reboot uptime. We can't recover the records' true wall-clock
-			 * time, so re-anchor: place the newest record at ~now, preserving
-			 * the periodic spacing. Best available estimate after losing the
-			 * uptime continuity across the reboot. */
-			m_base_time = unix_now - (uint32_t)(m_count - 1) * m_interval;
-			m_base_stale_uptime = false;
-		} else {
-			uint32_t off = unix_now - (uint32_t)(k_uptime_get() / 1000);
-			m_base_time += off;
+
+	/* Segments stamped on this boot's uptime (no RTC yet) become unix time by
+	 * the offset between the two clocks now. Segments from an earlier boot keep
+	 * base_synced=0: their uptime epoch ended with that boot and cannot be
+	 * recovered (#191 used to guess "newest record = now"; a wrong absolute time
+	 * is worse than an honest unsynced frame). Already-synced segments keep
+	 * their times; an RTC step shows up as a slot discontinuity at the next
+	 * capture instead.
+	 *
+	 * No flash write here (#96): this runs inside the LoRaWAN downlink callback
+	 * (LoRaMacProcess on the system workqueue). */
+	uint32_t off = unix_now - (uint32_t)(k_uptime_get() / 1000);
+	uint16_t n = backend_nseg();
+
+	for (uint16_t i = 0; i < n; i++) {
+		struct hist_seg s;
+
+		backend_seg(i, &s);
+		if (!s.synced && s.cur_boot) {
+			backend_seg_sync(i, off);
 		}
-		m_base_synced = true;
-		/* No flash write here (#96): this runs inside the LoRaWAN downlink
-		 * callback (LoRaMacProcess on the system workqueue); a flash write there
-		 * stalls radio/timer handling. The fixed-up base is snapshotted into the
-		 * next page header the ring opens — if a reboot intervenes first, the next
-		 * clock sync re-fixes it (#191). */
-	} else if (m_count == 0) {
-		m_base_synced = true; /* next record will start absolute */
 	}
 	k_mutex_unlock(&m_lock);
 }
@@ -1069,9 +1178,6 @@ void app_history_clear(void)
 	k_mutex_lock(&m_lock, K_FOREVER);
 	backend_erase();
 	m_count = 0;
-	m_base_time = 0;
-	m_base_synced = false;
-	m_base_stale_uptime = false;
 	k_mutex_unlock(&m_lock);
 }
 
@@ -1083,19 +1189,21 @@ int app_history_get(size_t idx, struct app_history_record *out)
 		return -ENOENT;
 	}
 
-	/* Records are periodic: time = base + ord*interval (no per-record delta). */
+	/* Records are periodic within their segment: time = base + ord*interval. */
+	uint32_t abs = backend_first_abs() + (uint32_t)idx;
+	struct hist_seg s;
+	seg_of(abs, &s);
+	out->time_unix = seg_time(&s, abs);
+	out->time_synced = s.synced;
+
 	uint8_t rec[MAX_RECORD_SIZE];
-	if (backend_read(idx, rec, m_sample_size) != 0) {
+	if (backend_read(abs, rec, m_sample_size) != 0) {
 		/* Don't decode an uninitialised buffer (#96) — report all-absent. */
 		out->present = 0;
-		out->time_unix = m_base_time + (uint32_t)idx * m_interval;
-		out->time_synced = m_base_synced;
 		k_mutex_unlock(&m_lock);
 		return -EIO;
 	}
 	decode_record(rec, out);
-	out->time_unix = m_base_time + (uint32_t)idx * m_interval;
-	out->time_synced = m_base_synced;
 
 	k_mutex_unlock(&m_lock);
 	return 0;
@@ -1106,17 +1214,67 @@ uint32_t app_history_get_interval(void)
 	return m_interval;
 }
 
-bool app_history_base_synced(void)
+/* Whether records of an unsynced segment belong in the [from, to] window. Their
+ * time is uptime (or an ended boot's uptime), so a unix window cannot be applied:
+ * they are returned for an open window (from 0 to UINT32_MAX, what a host sends
+ * without bounds) and while the device itself has no wall clock (as before: the
+ * whole buffer until the clock is synced), never for a bounded window on a
+ * synced device — a Portal gap fill must not pull stale unsynced pages each
+ * time. The frame carries time_synced=false either way. */
+static bool window_takes_unsynced(uint32_t from_unix, uint32_t to_unix)
 {
-	/* Single aligned bool; a lock would only serialise an atomic read. */
-	return m_base_synced;
+	bool rtc;
+
+	(void)now_seconds(&rtc);
+	return !rtc || (from_unix == 0 && to_unix == UINT32_MAX);
+}
+
+/* Records of segment `s` inside the window: absolute ordinals [*lo, *hi). Times
+ * are monotonic within a segment, so this is one contiguous run. */
+static void seg_window(const struct hist_seg *s, uint32_t from_unix, uint32_t to_unix,
+		       bool take_unsynced, uint32_t *lo, uint32_t *hi)
+{
+	uint64_t a = s->first;
+	uint64_t b = s->end;
+
+	if (!s->synced) {
+		if (!take_unsynced) {
+			b = a;
+		}
+	} else if (m_interval == 0) {
+		if (s->base < from_unix || s->base > to_unix) {
+			b = a;
+		}
+	} else {
+		/* time(abs) = base + (abs - origin) * interval; a synced base is a
+		 * plausible unix time (>= 2024), so these differences fit uint32. */
+		if (from_unix > s->base) {
+			uint32_t d = from_unix - s->base;
+			uint32_t k = d / m_interval + ((d % m_interval) ? 1 : 0);
+
+			a = MAX(a, (uint64_t)s->origin + k);
+		}
+		if (to_unix < s->base) {
+			b = a;
+		} else {
+			uint32_t k = (to_unix - s->base) / m_interval;
+
+			b = MIN(b, (uint64_t)s->origin + k + 1);
+		}
+	}
+	if (a > b) {
+		a = b;
+	}
+	*lo = (uint32_t)a;
+	*hi = (uint32_t)b;
 }
 
 /* Records have a fixed size (m_sample_size, values only) and a shared present
  * mask (m_mask) — so a wire frame carries the mask + interval once and each
  * record is just the raw stored bytes (sentinels mark absent values). Time is
- * implicit: ordinal `ord` is at base + ord*interval; records are time-ordered,
- * so the window filter can break once past `to_unix`.
+ * implicit and periodic within a segment, so a frame never crosses a segment
+ * boundary: its t0 and time_synced are the segment's, and the host's
+ * t0 + j * interval_s holds.
  *
  * Cursors here are absolute ordinals (backend_first_abs() + ord): a record keeps
  * its absolute ordinal while newer records are appended and older ones evicted,
@@ -1124,15 +1282,16 @@ bool app_history_base_synced(void)
  * cursor that has fallen out of the ring (its record evicted) resumes at the
  * oldest record still stored. `end` bounds the scan (exclusive). */
 static size_t export_locked(uint32_t from_unix, uint32_t to_unix, uint32_t start, uint32_t end,
-			    uint8_t *buf, size_t cap, uint32_t *t0_out, uint16_t *n_written,
-			    uint32_t *next_out)
+			    uint8_t *buf, size_t cap, uint32_t *t0_out, bool *synced_out,
+			    uint16_t *n_written, uint32_t *next_out)
 {
 	uint32_t first = backend_first_abs();
 	uint32_t stop = first + m_count;
+	bool take_unsynced = window_takes_unsynced(from_unix, to_unix);
 	size_t pos = 0;
 	uint16_t written = 0;
 	uint32_t t0 = 0;
-	bool have_t0 = false;
+	bool synced = false;
 
 	if (end > stop) {
 		end = stop;
@@ -1142,47 +1301,66 @@ static size_t export_locked(uint32_t from_unix, uint32_t to_unix, uint32_t start
 	}
 
 	uint32_t abs = start;
+	uint16_t nseg = backend_nseg();
 
-	for (; abs < end; abs++) {
-		uint32_t ord = abs - first;
-		uint32_t t = m_base_time + ord * m_interval;
-		if (m_base_synced) {
-			if (t > to_unix) {
-				break; /* monotonic time: no later record qualifies */
-			}
-			if (t < from_unix) {
-				continue; /* not yet in window */
-			}
+	for (uint16_t i = 0; i < nseg && abs < end; i++) {
+		struct hist_seg s;
+		uint32_t lo, hi;
+		bool closed = false;
+
+		backend_seg(i, &s);
+		if (abs >= s.end) {
+			continue;
 		}
-		if (pos + m_sample_size > cap) {
-			break; /* this record spills to the next page */
+		seg_window(&s, from_unix, to_unix, take_unsynced, &lo, &hi);
+		if (hi > end) {
+			hi = end;
 		}
-		if (backend_read(ord, buf + pos, m_sample_size) != 0) {
-			/* M-13: a single unreadable record (flash read error on a corrupt
-			 * page) must not truncate the whole replay. Skip it instead of
-			 * ending the page — but never leave a gap *inside* a frame, since the
-			 * host reconstructs times as t0 + j*interval (contiguous). If we
-			 * already packed records, close this frame and resume AFTER the bad
-			 * record; otherwise skip it and keep looking for the frame's first good
-			 * record. (pos/written are not advanced, so the uninitialised bytes are
-			 * overwritten by the next good read — #96 still holds.) */
-			LOG_WRN("history record ord %u read failed — skipping (M-13)", ord);
-			if (written > 0) {
-				abs++; /* resume past the bad slot on the next page */
+		if (abs < lo) {
+			abs = lo;
+		}
+		for (; abs < hi; abs++) {
+			if (pos + m_sample_size > cap) {
+				closed = true; /* this record spills to the next frame */
 				break;
 			}
-			continue; /* for-loop advances abs */
+			if (backend_read(abs, buf + pos, m_sample_size) != 0) {
+				/* M-13: a single unreadable record (flash read error on a
+				 * corrupt page) must not truncate the whole replay. Skip it
+				 * instead of ending the frame — but never leave a gap *inside*
+				 * a frame, since the host reconstructs times as t0 +
+				 * j*interval (contiguous). If we already packed records, close
+				 * this frame and resume AFTER the bad record; otherwise skip it
+				 * and keep looking for the frame's first good record.
+				 * (pos/written are not advanced, so the uninitialised bytes are
+				 * overwritten by the next good read — #96 still holds.) */
+				LOG_WRN("history record %u read failed — skipping (M-13)", abs);
+				if (written > 0) {
+					abs++;
+					closed = true;
+					break;
+				}
+				continue;
+			}
+			if (written == 0) {
+				t0 = seg_time(&s, abs);
+				synced = s.synced;
+			}
+			pos += m_sample_size;
+			written++;
 		}
-		if (!have_t0) {
-			t0 = t;
-			have_t0 = true;
+		if (closed || written > 0) {
+			break; /* a frame never crosses a segment boundary */
 		}
-		pos += m_sample_size;
-		written++;
+		/* Nothing of this segment in the window: go on with the next one. */
+		abs = MIN(s.end, end);
 	}
 
 	if (t0_out) {
 		*t0_out = t0;
+	}
+	if (synced_out) {
+		*synced_out = synced;
 	}
 	if (n_written) {
 		*n_written = written;
@@ -1194,7 +1372,8 @@ static size_t export_locked(uint32_t from_unix, uint32_t to_unix, uint32_t start
 }
 
 size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
-			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord)
+			       size_t cap, uint32_t *t0_out, bool *synced_out, uint16_t *n_written,
+			       size_t *next_ord)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
 
@@ -1202,7 +1381,7 @@ size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t star
 	uint32_t start = (start_ord < m_count) ? first + (uint32_t)start_ord : first + m_count;
 	uint32_t next = start;
 	size_t pos = export_locked(from_unix, to_unix, start, first + m_count, buf, cap, t0_out,
-				   n_written, &next);
+				   synced_out, n_written, &next);
 
 	if (next_ord) {
 		/* Past-the-end cursors are echoed back unchanged (has_more=false). */
@@ -1229,41 +1408,41 @@ void app_history_span(uint32_t *first_abs, uint32_t *end_abs)
 
 size_t app_history_export_abs(uint32_t from_unix, uint32_t to_unix, uint32_t start_abs,
 			      uint32_t end_abs, uint8_t *buf, size_t cap, uint32_t *t0_out,
-			      uint16_t *n_written, uint32_t *next_abs)
+			      bool *synced_out, uint16_t *n_written, uint32_t *next_abs)
 {
 	k_mutex_lock(&m_lock, K_FOREVER);
 	size_t pos = export_locked(from_unix, to_unix, start_abs, end_abs, buf, cap, t0_out,
-				   n_written, next_abs);
+				   synced_out, n_written, next_abs);
 	k_mutex_unlock(&m_lock);
 	return pos;
 }
 
 /* Number of frames the [from,to] window needs at `cap` bytes/frame. Mirrors the
- * packing in export_page (fixed record size → whole records per frame). */
+ * packing in export_page (fixed record size → whole records per frame, a frame
+ * never crosses a segment boundary). */
 uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t cap)
 {
 	if (m_sample_size == 0 || cap < m_sample_size) {
 		return 0;
 	}
-	size_t per_frame = cap / m_sample_size;
+	uint32_t per_frame = (uint32_t)(cap / m_sample_size);
 
 	k_mutex_lock(&m_lock, K_FOREVER);
-	size_t matched = 0;
-	for (size_t ord = 0; ord < m_count; ord++) {
-		uint32_t t = m_base_time + (uint32_t)ord * m_interval;
-		if (m_base_synced) {
-			if (t > to_unix) {
-				break;
-			}
-			if (t < from_unix) {
-				continue;
-			}
-		}
-		matched++;
+	bool take_unsynced = window_takes_unsynced(from_unix, to_unix);
+	uint16_t nseg = backend_nseg();
+	uint32_t frames = 0;
+
+	for (uint16_t i = 0; i < nseg; i++) {
+		struct hist_seg s;
+		uint32_t lo, hi;
+
+		backend_seg(i, &s);
+		seg_window(&s, from_unix, to_unix, take_unsynced, &lo, &hi);
+		frames += (hi - lo + per_frame - 1) / per_frame;
 	}
 	k_mutex_unlock(&m_lock);
 
-	return (uint16_t)((matched + per_frame - 1) / per_frame);
+	return (uint16_t)MIN(frames, UINT16_MAX);
 }
 
 void app_history_set_enabled(bool enable)
@@ -1297,9 +1476,6 @@ void app_history_set_mask(uint32_t mask)
 	 * in their headers, so mount rejects them and the ring reclaims them as it
 	 * wraps — no full-partition erase stall. (`history clear` still erases.) */
 	m_count = 0;
-	m_base_time = 0;
-	m_base_synced = false;
-	m_base_stale_uptime = false;
 	recompute_sizing();
 	backend_reset_logical();
 	k_mutex_unlock(&m_lock);
@@ -1343,20 +1519,13 @@ int app_history_init(void)
 	recompute_sizing();
 
 	/* Restore a prior ring if its layout matches; else start clean. On success
-	 * backend_mount() sets m_base_time / m_base_synced / m_interval from the page
+	 * backend_mount() sets m_interval and each page's time base from the page
 	 * headers; m_interval = 0 otherwise forces the first capture to seed it from
 	 * interval_report. */
 	if (backend_mount()) {
 		m_count = backend_stored();
-		/* #191: an unsynced base restored from flash is uptime-based but its
-		 * uptime epoch ended at the reboot. Flag it so the next clock sync
-		 * re-anchors instead of applying the (now meaningless) additive offset. */
-		m_base_stale_uptime = (!m_base_synced && m_count > 0);
 	} else {
 		m_count = 0;
-		m_base_time = 0;
-		m_base_synced = false;
-		m_base_stale_uptime = false;
 		m_interval = 0;
 	}
 
@@ -1408,9 +1577,21 @@ static int cmd_history_info(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "sensors:   %s (%u ch, %u B/record)", list[0] ? list : "(none)",
 		    (unsigned)POPCOUNT(m_mask), m_sample_size);
 	shell_print(sh, "capacity:  %u records", m_capacity);
-	shell_print(sh, "stored:    %u / %u", m_count, m_capacity);
-	shell_print(sh, "base:      %u (%s)", m_base_time,
-		    m_base_synced ? "unix" : "uptime/no-rtc");
+
+	k_mutex_lock(&m_lock, K_FOREVER);
+	uint16_t count = m_count;
+	uint16_t nseg = backend_nseg();
+	struct hist_seg s = {0};
+	if (nseg > 0) {
+		backend_seg(0, &s);
+	}
+	k_mutex_unlock(&m_lock);
+
+	shell_print(sh, "stored:    %u / %u", count, m_capacity);
+	/* Oldest record's time; each segment (flash page) has its own base. */
+	shell_print(sh, "base:      %u (%s)", nseg ? seg_time(&s, s.first) : 0,
+		    s.synced ? "unix" : "uptime/no-rtc");
+	shell_print(sh, "segments:  %u", nseg);
 	return 0;
 }
 
@@ -1459,13 +1640,10 @@ static int cmd_history_read(const struct shell *sh, size_t argc, char **argv)
 				 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
 				 tm.tm_min, tm.tm_sec);
 		} else {
-			/* #340 L9: r.time_unix already folds in the m_base_time snapshotted
-			 * under m_lock at fetch time (base + k*m_interval); re-reading the
-			 * live m_base_time here instead can use a base that changed since
-			 * the fetch (or between rows of this same loop), producing a
-			 * mismatched/non-monotonic offset. idx==k and m_interval are both
-			 * already known and stable, so derive the offset directly. */
-			snprintf(tbuf, sizeof(tbuf), "+%us (no-rtc)", (unsigned)(k * m_interval));
+			/* #340 L9: use the time snapshotted under m_lock at fetch time, never
+			 * a live base. Unsynced = uptime seconds of the boot that recorded
+			 * the record's segment. */
+			snprintf(tbuf, sizeof(tbuf), "up %us (no-rtc)", (unsigned)r.time_unix);
 		}
 
 		char line[160];
