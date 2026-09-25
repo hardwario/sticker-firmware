@@ -145,8 +145,9 @@ uint32_t app_history_get_interval(void);
  * device has no wall clock. Returns bytes written; *t0_out = first packed
  * record's time, *synced_out = true when that time is unix (time_synced of the
  * frame; false = uptime, L-1/L-3), *n_written = records packed, *next_ord = next
- * ordinal to pass for the following page (== app_history_count() when the scan
- * is exhausted). Output pointers may be NULL. */
+ * ordinal to pass for the following page: the next record inside the window, or
+ * app_history_count() when none is left (the page that reaches the window end
+ * already says so). Output pointers may be NULL. */
 size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
 			       size_t cap, uint32_t *t0_out, bool *synced_out, uint16_t *n_written,
 			       size_t *next_ord);
@@ -161,8 +162,9 @@ void app_history_span(uint32_t *first_abs, uint32_t *end_abs);
 /* app_history_export_page() on absolute ordinals, for the LoRaWAN replay:
  * packs records from `start_abs` (clamped up to the oldest stored record when it
  * was evicted meanwhile) up to `end_abs` (exclusive, clamped to the newest).
- * *next_abs = cursor for the following frame; the scan is exhausted once it
- * reaches `end_abs`. */
+ * *next_abs = cursor for the following frame (the next record inside the
+ * window); the scan is exhausted once it is >= `end_abs`, which the frame that
+ * packs the window's last record already returns. */
 size_t app_history_export_abs(uint32_t from_unix, uint32_t to_unix, uint32_t start_abs,
 			      uint32_t end_abs, uint8_t *buf, size_t cap, uint32_t *t0_out,
 			      bool *synced_out, uint16_t *n_written, uint32_t *next_abs);

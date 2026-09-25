@@ -1187,9 +1187,9 @@ static void app_cmd_handle_req_history_page(enum app_cmd_transport tp, const Com
 	hf->time_synced = synced; /* per frame: a frame never spans two segments */
 	/* Authoritative cursor for the phone: pass next_ord back as start_ord. When a
 	 * page returns no records (buffer empty, cursor past the window/end) or no
-	 * ordinals remain, has_more=false stops the tap loop (no wedge, no infinite
-	 * loop). A page that fills at the to_unix boundary may cost one extra empty
-	 * tap, which then reports has_more=false. */
+	 * record of the window remains (next_ord == count: the export skips to the
+	 * next in-window record), has_more=false stops the tap loop (no wedge, no
+	 * infinite loop, no extra empty tap at the to_unix boundary). */
 	hf->has_next_ord = true;
 	hf->next_ord = (uint32_t)next_ord;
 	hf->has_has_more = true;

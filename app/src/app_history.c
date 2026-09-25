@@ -1380,9 +1380,8 @@ void app_history_on_clock_sync(uint32_t unix_now)
 	 * base_synced=0 unless their fix-up double word was written: their uptime
 	 * epoch ended with that boot and cannot be recovered (#191 used to guess
 	 * "newest record = now"; a wrong absolute time is worse than an honest
-	 * unsynced frame). Already-synced segments keep
-	 * their times; an RTC step shows up as a slot discontinuity at the next
-	 * capture instead.
+	 * unsynced frame). Already-synced segments keep their times; an RTC step
+	 * shows up as a slot discontinuity at the next capture instead.
 	 *
 	 * No flash write here (#96): this runs inside the LoRaWAN downlink callback
 	 * (LoRaMacProcess on the system workqueue). The flash backend persists the
@@ -1513,6 +1512,33 @@ static void seg_window(const struct hist_seg *s, uint32_t from_unix, uint32_t to
 	*hi = (uint32_t)b;
 }
 
+/* First record at or after `abs` (and before `end`) that lies in the window, or
+ * `end` (a value >= end) when none is left. */
+static uint32_t next_in_window(uint32_t abs, uint32_t end, uint32_t from_unix, uint32_t to_unix,
+			       bool take_unsynced)
+{
+	uint16_t nseg = backend_nseg();
+
+	for (uint16_t i = 0; i < nseg && abs < end; i++) {
+		struct hist_seg s;
+		uint32_t lo, hi;
+
+		backend_seg(i, &s);
+		if (abs >= s.end) {
+			continue;
+		}
+		seg_window(&s, from_unix, to_unix, take_unsynced, &lo, &hi);
+		if (abs < lo) {
+			abs = lo;
+		}
+		if (abs < hi) {
+			return MIN(abs, end);
+		}
+		abs = s.end;
+	}
+	return MAX(abs, end);
+}
+
 /* Records have a fixed size (m_sample_size, values only) and a shared present
  * mask (m_mask) — so a wire frame carries the mask + interval once and each
  * record is just the raw stored bytes (sentinels mark absent values). Time is
@@ -1524,7 +1550,11 @@ static void seg_window(const struct hist_seg *s, uint32_t from_unix, uint32_t to
  * its absolute ordinal while newer records are appended and older ones evicted,
  * so a replay that runs across captures neither repeats nor skips records. A
  * cursor that has fallen out of the ring (its record evicted) resumes at the
- * oldest record still stored. `end` bounds the scan (exclusive). */
+ * oldest record still stored. `end` bounds the scan (exclusive).
+ *
+ * *next_out is the next record IN THE WINDOW (records past to_unix or outside
+ * it are skipped), or >= end when none is left — so a caller knows after the
+ * last frame that the window is exhausted, without another empty frame (H-4). */
 static size_t export_locked(uint32_t from_unix, uint32_t to_unix, uint32_t start, uint32_t end,
 			    uint8_t *buf, size_t cap, uint32_t *t0_out, bool *synced_out,
 			    uint16_t *n_written, uint32_t *next_out)
@@ -1610,7 +1640,7 @@ static size_t export_locked(uint32_t from_unix, uint32_t to_unix, uint32_t start
 		*n_written = written;
 	}
 	if (next_out) {
-		*next_out = abs;
+		*next_out = next_in_window(abs, end, from_unix, to_unix, take_unsynced);
 	}
 	return pos;
 }

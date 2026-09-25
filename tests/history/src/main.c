@@ -505,4 +505,68 @@ ZTEST(history, test_ram_clock_sync_rebases_segments)
 	zassert_equal(r.time_unix, T0 + 1000);
 }
 
+/* E (H-4): the frame that packs the window's last record already reports the
+ * scan exhausted (next >= end / next_ord == count), so the replay ends without
+ * an extra empty frame and no "stop at frame N/N" warning; frame_count from
+ * count_frames() matches. A cap below one record still reports records left
+ * (the genuine budget-error case). */
+ZTEST(history, test_export_ends_at_window_end)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	for (int i = 0; i < 10; i++) {
+		set_th((float)i, 50.0f);
+		app_history_capture_at(T0 + i * 60, true);
+	}
+	test_clock_has = true; /* synced device: the window applies */
+	test_clock_unix = T0 + 600;
+
+	uint32_t from = T0 + 120, to = T0 + 300; /* records 2..5 */
+	uint32_t first, end;
+	uint8_t buf[64];
+	uint32_t t0, next;
+	uint16_t n;
+
+	app_history_span(&first, &end);
+	zassert_equal(app_history_count_frames(from, to, 6), 2);
+
+	zassert_equal(app_history_export_abs(from, to, first, end, buf, 6, &t0, NULL, &n, &next),
+		      6);
+	zassert_equal(n, 2);
+	zassert_equal(t0, T0 + 120);
+	zassert_equal(next, first + 4);
+
+	zassert_equal(app_history_export_abs(from, to, next, end, buf, 6, &t0, NULL, &n, &next), 6);
+	zassert_equal(n, 2);
+	zassert_equal(t0, T0 + 240);
+	zassert_true(next >= end, "window exhausted with records 6..9 left (next %u end %u)", next,
+		     end);
+
+	/* Same for the NFC paging cursor: next_ord == count -> has_more=false. */
+	size_t nord;
+
+	(void)app_history_export_page(from, to, 4, buf, 6, &t0, NULL, &n, &nord);
+	zassert_equal(n, 2);
+	zassert_equal(nord, app_history_count(), "next_ord %zu", nord);
+
+	/* Open window at the ring end (ord == count). */
+	(void)app_history_export_page(0, UINT32_MAX, 8, buf, 6, &t0, NULL, &n, &nord);
+	zassert_equal(n, 2);
+	zassert_equal(nord, 10);
+
+	/* A frame too small for one record: nothing packed, records remain. */
+	zassert_equal(app_history_export_abs(from, to, first, end, buf, 2, &t0, NULL, &n, &next),
+		      0);
+	zassert_equal(n, 0);
+	zassert_equal(next, first + 2, "budget case must leave the cursor on a record");
+
+	/* The window starts inside the ring: the first frame skips to it. */
+	zassert_equal(app_history_export_abs(T0 + 530, UINT32_MAX, first, end, buf, 64, &t0, NULL,
+					     &n, &next),
+		      3);
+	zassert_equal(t0, T0 + 540);
+	zassert_true(next >= end);
+	test_clock_has = false;
+}
+
 ZTEST_SUITE(history, NULL, NULL, NULL, NULL, NULL);

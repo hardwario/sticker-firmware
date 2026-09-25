@@ -1829,20 +1829,23 @@ static void m_hist_work_handler(struct k_work *work)
 					      samples, cap, &t0, &synced, &n, &next);
 	}
 	if (n == 0) {
+		if (next >= m_hist_end) {
+			/* Nothing left in the window: the records were evicted or the
+			 * ring was reset since the previous frame. */
+			LOG_INF("History replay complete: %u frames", (unsigned)m_hist_idx);
+			history_replay_finish();
+			return;
+		}
+		/* #409 3f: records remain but the DR dropped below one record per
+		 * frame. Tell the host instead of going silent mid-stream. */
 		LOG_WRN("History replay stop at frame %u/%u (cap=%uB)", (unsigned)m_hist_idx,
 			(unsigned)m_hist_count, (unsigned)cap);
-		if (m_hist_idx < m_hist_count) {
-			/* #409 3f: records remain but the DR dropped below one record per
-			 * frame. Tell the host instead of going silent mid-stream. */
-			uint8_t err[16];
-			size_t err_len;
+		uint8_t err[16];
+		size_t err_len;
 
-			if (app_cmd_build_budget_error(m_hist_seq, err,
-						       refresh_payload_cap(sizeof(err)),
-						       &err_len) == 0) {
-				(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, err,
-							     err_len);
-			}
+		if (app_cmd_build_budget_error(m_hist_seq, err, refresh_payload_cap(sizeof(err)),
+					       &err_len) == 0) {
+			(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, err, err_len);
 		}
 		history_replay_finish();
 		return;
@@ -1888,7 +1891,9 @@ static void m_hist_work_handler(struct k_work *work)
 
 	/* Terminate on cursor exhaustion, not frame_index == frame_count (#89): a DR
 	 * change mid-replay alters records-per-frame, so the up-front frame_count is
-	 * only an estimate. The host concatenates by frame_index. */
+	 * only an estimate. The host concatenates by frame_index. The export already
+	 * skips to the next record in the window, so the frame carrying the window's
+	 * last record ends the replay here — no trailing empty attempt (H-4). */
 	if (m_hist_cursor < m_hist_end) {
 		k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_SECONDS(FRAME_GAP_SEC));
 	} else {
