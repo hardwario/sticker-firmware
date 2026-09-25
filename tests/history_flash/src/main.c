@@ -305,3 +305,97 @@ ZTEST(history_flash, test_same_mask_reset_does_not_chain_stale_page)
 		       "(stale pre-reset page leaked in)",
 		       r.value[APP_HISTORY_TEMPERATURE]);
 }
+
+/* ---- F28: post-reboot record timestamps --------------------------------- */
+
+#define F28_T0     1750000000u  /* first record, RTC synced */
+#define F28_OUTAGE (5u * 3600u) /* device powered off for 5 h */
+
+/* Seven durable records (21 B = 3 double words) on the 60 s RTC cadence; returns
+ * with the clock at the next slot (T0 + 7 * 60). */
+static void f28_fill_before_outage(void)
+{
+	test_clock_has = true;
+	test_clock_unix = F28_T0;
+	for (int i = 0; i < 7; i++) {
+		app_history_capture();
+		test_clock_unix += 60;
+	}
+	zassert_equal(app_history_count(), 7, "pre-outage count");
+}
+
+/* Time the host reconstructs for record `ord`: the HistoryFrame t0 of an
+ * export starting at that record (time(j) = t0 + j * interval_s). */
+static uint32_t f28_frame_t0(size_t ord)
+{
+	uint8_t buf[64];
+	uint32_t t0 = 0;
+	uint16_t n = 0;
+	size_t next = 0;
+
+	(void)app_history_export_page(0, UINT32_MAX, ord, buf, sizeof(buf), &t0, &n, &next);
+	zassert_true(n > 0, "no record exported at ord %zu", ord);
+	return t0;
+}
+
+/* F28, RTC kept across the outage (backup domain, e.g. a watchdog reset): the
+ * first record after the reboot is captured at T0 + 7 * 60 + outage.
+ *
+ * CHARACTERIZATION of the unfixed code: the new page's base is the ordinal
+ * continuation of the old ring (m_base_time + (m_abs_ord - tail.first_ord) *
+ * interval), so the record claims T0 + 7 * 60, i.e. it is shifted back by the
+ * whole outage. The fix (RTC base per page) flips this assertion to 0. */
+ZTEST(history_flash, test_f28_reboot_rtc_kept_shift)
+{
+	f28_fill_before_outage();
+	reboot();
+
+	test_clock_unix += F28_OUTAGE;
+	uint32_t t_capture = test_clock_unix;
+	app_history_capture();
+	zassert_equal(app_history_count(), 8, "post-boot count");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(7, &r), 0, "get(7)");
+	int32_t shift_get = (int32_t)(r.time_unix - t_capture);
+	int32_t shift_frame = (int32_t)(f28_frame_t0(7) - t_capture);
+
+	printk("F28 (RTC kept): record time shift %d s (get), %d s (frame t0), synced=%d\n",
+	       shift_get, shift_frame, r.time_synced);
+	zassert_equal(shift_get, -(int32_t)F28_OUTAGE, "F28 shift (get) %d", shift_get);
+	zassert_equal(shift_frame, -(int32_t)F28_OUTAGE, "F28 shift (frame) %d", shift_frame);
+}
+
+/* F28, power loss: the RTC is unset after the reboot until the network
+ * DeviceTimeAns (app_clock_set_unix -> app_history_on_clock_sync) arrives 30 s
+ * after the first post-boot capture.
+ *
+ * CHARACTERIZATION of the unfixed code: the restored base is "synced" (from the
+ * tail page), so the post-boot page is stamped synced by ordinal continuation
+ * and on_clock_sync() leaves it alone -> shifted back by the outage. */
+ZTEST(history_flash, test_f28_power_loss_shift)
+{
+	f28_fill_before_outage();
+	reboot();
+
+	uint32_t t_capture = test_clock_unix + F28_OUTAGE;
+	test_clock_has = false; /* RTC lost with the supply */
+	app_history_capture();
+	zassert_equal(app_history_count(), 8, "post-boot count");
+
+	k_sleep(K_SECONDS(30)); /* join + DeviceTimeAns */
+	test_clock_has = true;
+	test_clock_unix = t_capture + 30;
+	app_history_on_clock_sync(test_clock_unix);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(7, &r), 0, "get(7)");
+	int32_t shift_get = (int32_t)(r.time_unix - t_capture);
+	int32_t shift_frame = (int32_t)(f28_frame_t0(7) - t_capture);
+
+	printk("F28 (power loss): record time shift %d s (get), %d s (frame t0), synced=%d\n",
+	       shift_get, shift_frame, r.time_synced);
+	zassert_true(r.time_synced, "unfixed code claims the record synced");
+	zassert_equal(shift_get, -(int32_t)F28_OUTAGE, "F28 shift (get) %d", shift_get);
+	zassert_equal(shift_frame, -(int32_t)F28_OUTAGE, "F28 shift (frame) %d", shift_frame);
+}
