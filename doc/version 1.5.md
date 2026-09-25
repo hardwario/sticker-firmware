@@ -985,8 +985,13 @@ bench (unit 0413) that failed in four ways:
   distance to the next one, re-read from the RTC, so kernel-clock drift and late
   runs never accumulate. Before the RTC is set the grid runs on uptime (as before);
   at the first sync the anchor is carried over by the `unix − uptime` offset, so
-  the phase is kept. A timer firing early or late by less than half an interval
-  keeps its slot; an `interval_report` change lays a new grid. Boot arming is
+  the phase is kept. A timer firing early or late by up to
+  `MIN(interval / 2, 15 s)` (`APP_SLOT_TOLERANCE_S`, covers work-queue latency)
+  keeps its slot. A run further off — a debug halt or a stall longer than the
+  timer's remaining time, an RTC step — re-lays the grid at its own time, so its
+  record keeps the true sampling time (and history opens a new segment) instead
+  of borrowing a slot up to half an interval away (HIL T4: a 150 s halt put the
+  run 30 s off the grid). An `interval_report` change lays a new grid. Boot arming is
   unchanged (first report one interval out) and the telemetry pre-send jitter
   (#267) stays in `app_lrw`.
 - **No capture skipped during a replay (C).** The replay cursor is an absolute
