@@ -1,6 +1,6 @@
 # P2P adaptive TX power (ADR parity with LoRaWAN)
 
-Status: **design only**, nothing implemented. Base: feat-p2p. Part of the LoRaWAN ↔ P2P parity goal (`doc/plan/439 - Radio transport layer.md`).
+Status: **design only**, nothing implemented (issue #442, PR #443). Base: feat-p2p. Part of the LoRaWAN ↔ P2P parity goal (`doc/plan/439 - Radio transport layer.md`).
 
 ## 1. Goal
 
