@@ -272,7 +272,8 @@ ZTEST(p2p_logic, test_build_frame_empty_body_roundtrip)
 	const uint32_t counter = 4242;
 
 	for (uint8_t i = 0; i < 2; i++) {
-		const uint8_t frame_type = i ? APP_RADIO_P2P_FRAME_REJOIN_REQUEST : APP_RADIO_P2P_FRAME_DETACH;
+		const uint8_t frame_type =
+			i ? APP_RADIO_P2P_FRAME_REJOIN_REQUEST : APP_RADIO_P2P_FRAME_DETACH;
 		uint8_t frame[P2P_HDR_LEN + P2P_TAG_LEN]; /* 15 B, no ciphertext */
 
 		zassert_ok(build_frame_keyed(net_id, dev_addr, k_session_key, frame_type, NULL, 0,
@@ -1418,6 +1419,57 @@ ZTEST(p2p_logic, test_session_key_matches_the_kat_fixture)
 	p2p_test_derive_session_key(7, 0x22222222, other);
 	zassert_true(memcmp(key, other, sizeof(key)) != 0,
 		     "the dev_eui must be an input to the KDF");
+}
+
+/* doc/plan/439 T1: the P2P link state in the common app_radio terms, which
+ * drive the status LED, Info.lrw_state and the device_status radio bits. */
+ZTEST(p2p_logic, test_radio_state_mapping)
+{
+	p2p_test_set_link(P2P_LINK_PAIRED, true, false, 0, false);
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_HEALTHY);
+	zassert_true(app_radio_p2p_is_ready());
+
+	p2p_test_set_link(P2P_LINK_PAIRED, true, false, 2, false);
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_HEALTHY,
+		      "two failed cycles are still healthy");
+	p2p_test_set_link(P2P_LINK_PAIRED, true, false, 3, false);
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_WARNING,
+		      "three failed cycles: session kept, link degraded");
+	zassert_true(app_radio_p2p_is_ready(), "WARNING still carries uplinks");
+
+	p2p_test_set_link(P2P_LINK_JOINING, false, false, 0, false);
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_JOINING, "boot / forced join");
+	zassert_false(app_radio_p2p_is_ready());
+
+	/* A self-heal / RejoinRequest join keeps m_started from the old session;
+	 * it must not report HEALTHY or accept uplinks (parity review 2026-09-26). */
+	p2p_test_set_link(P2P_LINK_JOINING, true, true, 0, false);
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_RECONNECT);
+	zassert_false(app_radio_p2p_is_ready(), "not ready while the session is replaced");
+
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_IDLE, "after a Detach");
+
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, true);
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_DISABLED,
+		      "unprovisioned: lrw_appkey / lrw_deveui all-zero");
+
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
+}
+
+/* The node-measured quality of the last downlink feeds GetInfo / NFC. */
+ZTEST(p2p_logic, test_last_downlink_recorded)
+{
+	int16_t rssi;
+	int8_t snr;
+	uint32_t age;
+
+	p2p_test_note_downlink(-65, 12);
+	zassert_true(app_radio_p2p_last_downlink(&rssi, &snr, &age));
+	zassert_equal(rssi, -65);
+	zassert_equal(snr, 12);
+	zassert_true(age <= 1, "just received");
+	zassert_false(app_radio_p2p_last_downlink(NULL, &snr, &age), "NULL out-param");
 }
 
 ZTEST_SUITE(p2p_logic, NULL, NULL, NULL, NULL, NULL);

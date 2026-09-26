@@ -198,8 +198,12 @@ int app_settings_save_p2p_spreading_factor(int sf)
 	return test_save_sf_ret;
 }
 
-int app_clock_set_unix(uint32_t unix_time)
+/* Last value handed to the network-time setter (0 = none), for the Ack time
+ * tail tests. */
+uint32_t g_test_network_time;
+
+int app_clock_set_network_time(uint32_t unix_time)
 {
-	ARG_UNUSED(unix_time);
+	g_test_network_time = unix_time;
 	return 0;
 }

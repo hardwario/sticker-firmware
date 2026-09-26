@@ -125,7 +125,7 @@ struct app_cmd_info {
 	uint8_t claim_token[16]; /* 128-bit device claim token (#170); all-zero = uncommissioned */
 	uint32_t battery_mv;     /* supply voltage in mV; 0 = measurement unavailable */
 	uint32_t reset_cause;   /* hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown */
-	uint8_t lrw_state;      /* current LoRaWAN state (enum app_radio_lrw_state) */
+	uint8_t lrw_state;      /* radio link state, LoRaWAN or P2P (enum app_radio_state) */
 	uint8_t dev_eui[8];     /* LoRaWAN DevEUI; all-zero = unset */
 	uint32_t device_status; /* aggregated status (APP_DEVICE_STATUS_* bitmask) */
 	bool has_last_dl;       /* a downlink was received since boot (#409 A2) */

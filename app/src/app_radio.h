@@ -7,8 +7,6 @@
 #ifndef APP_RADIO_H_
 #define APP_RADIO_H_
 
-#include "app_radio_lrw.h" /* enum app_radio_lrw_state */
-
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -16,6 +14,24 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Link state of the active radio, shared by both backends (doc/plan/439 T1).
+ * The values are the wire values of Info.lrw_state (app_config.proto), so keep
+ * the order. LoRaWAN: IDLE before the first join, JOINING, HEALTHY, WARNING
+ * while link checks fail, RECONNECT after the link was lost, DISABLED when the
+ * DevEUI is all-zero (#98). P2P: IDLE when unpaired and not joining (after a
+ * Detach), JOINING for a boot/forced join, HEALTHY when paired, WARNING after
+ * P2P_WARNING_FAIL_THRESHOLD failed confirmed cycles, RECONNECT for a
+ * self-heal/RejoinRequest join, DISABLED when lrw_appkey or lrw_deveui is
+ * all-zero. */
+enum app_radio_state {
+	APP_RADIO_STATE_IDLE,
+	APP_RADIO_STATE_JOINING,
+	APP_RADIO_STATE_HEALTHY,
+	APP_RADIO_STATE_WARNING,
+	APP_RADIO_STATE_RECONNECT,
+	APP_RADIO_STATE_DISABLED,
+};
 
 /* Radio facade (#118): one image links both the LoRaWAN stack (app_radio_lrw) and
  * the raw-LoRa P2P stack (app_radio_p2p, when CONFIG_RADIO_P2P=y). The active
@@ -57,9 +73,14 @@ void app_radio_rejoin(void);
 /* Which stack was selected at boot. */
 enum app_radio_kind app_radio_get_kind(void);
 
-/* Coarse link state for the status LED. P2P maps to HEALTHY once started so the
- * main loop's join/warning LED animations stay LoRaWAN-only. */
-enum app_radio_lrw_state app_radio_get_state(void);
+/* Link state of the active radio (see enum app_radio_state): drives the status
+ * LED, Info.lrw_state and the device_status radio bits for either backend. */
+enum app_radio_state app_radio_get_state(void);
+
+/* Link quality of the last downlink the node received (LoRaWAN: any downlink;
+ * P2P: the last authenticated Ack / command / link-control frame), as measured
+ * by the node, with its age in seconds. Returns false before the first one. */
+bool app_radio_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s);
 
 /* True when the link can carry an uplink now. */
 bool app_radio_is_ready(void);

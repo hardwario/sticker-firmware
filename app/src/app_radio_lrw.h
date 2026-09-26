@@ -7,6 +7,8 @@
 #ifndef APP_RADIO_LRW_H_
 #define APP_RADIO_LRW_H_
 
+#include "app_radio.h" /* enum app_radio_state */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -21,17 +23,8 @@
 extern "C" {
 #endif
 
-enum app_radio_lrw_state {
-	APP_RADIO_LRW_STATE_IDLE,
-	APP_RADIO_LRW_STATE_JOINING,
-	APP_RADIO_LRW_STATE_HEALTHY,
-	APP_RADIO_LRW_STATE_WARNING,
-	APP_RADIO_LRW_STATE_RECONNECT,
-	APP_RADIO_LRW_STATE_DISABLED, /* DevEUI all-zero: radio-silent, no join/TX (#98) */
-};
-
 struct app_radio_lrw_info {
-	enum app_radio_lrw_state state;
+	enum app_radio_state state;
 	uint32_t dev_addr; /* Device address (from OTAA or ABP) */
 	uint32_t fcnt_up;  /* Uplink frame counter */
 	int datarate;
@@ -54,7 +47,7 @@ struct app_radio_lrw_info {
 
 int app_radio_lrw_init(void);
 void app_radio_lrw_join(void);
-enum app_radio_lrw_state app_radio_lrw_get_state(void);
+enum app_radio_state app_radio_lrw_get_state(void);
 int app_radio_lrw_get_info(struct app_radio_lrw_info *info);
 bool app_radio_lrw_is_ready(void);
 

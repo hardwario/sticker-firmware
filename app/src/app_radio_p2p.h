@@ -7,6 +7,8 @@
 #ifndef APP_RADIO_P2P_H_
 #define APP_RADIO_P2P_H_
 
+#include "app_radio.h" /* enum app_radio_state */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -238,10 +240,19 @@ int app_radio_p2p_init(void);
  * succeeds. See app_radio_p2p_rejoin() below for forcing a fresh join on demand. */
 void app_radio_p2p_start(void);
 
-/* True once paired and started -- immediately if NVS already had a valid
- * pairing, otherwise only after the join handshake (#118 phase 2)
- * completes. */
+/* True while the data plane is live: paired and started -- immediately if NVS
+ * already had a valid pairing, otherwise only after the join handshake (#118
+ * phase 2) completes. False again while a self-heal / RejoinRequest join runs
+ * or after a Detach, so the report cadence skips instead of sending into a
+ * session that is being replaced. */
 bool app_radio_p2p_is_ready(void);
+
+/* Link state in the common app_radio terms (see enum app_radio_state). */
+enum app_radio_state app_radio_p2p_get_state(void);
+
+/* Node-measured RSSI/SNR of the last authenticated downlink (Ack, command or
+ * link-control frame) and its age in seconds; false before the first one. */
+bool app_radio_p2p_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s);
 
 /* Fixed application-payload budget for one frame (LoRa MTU minus the P2P
  * header and AES-CCM tag). app_compose() bin-packs telemetry groups against
@@ -395,6 +406,9 @@ void p2p_test_join_setup(int cfg_sf);
 void p2p_test_join_step(void);
 void p2p_test_join_arm_retry(int64_t ms);
 void p2p_test_set_paired(void);
+void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, uint16_t fails,
+		       bool disabled);
+void p2p_test_note_downlink(int16_t rssi, int8_t snr);
 void p2p_test_join_restart(void);
 int64_t p2p_test_join_pending_ms(void);
 void p2p_test_get_join(uint8_t *sf, uint8_t *step, uint8_t *attempts, bool *slow, uint8_t *rejoin,

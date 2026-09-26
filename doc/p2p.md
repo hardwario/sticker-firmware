@@ -570,7 +570,10 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   `flags(1) | rssi(i8) | snr(i8)`, optionally followed by the pending
   downlink's on-air length and a 4-byte big-endian Unix-time tail (B5 clock
   sync → `app_clock_set_unix()`). `rssi`/`snr` are the central's measurement
-  of the acknowledged uplink (B1), surfaced by `ats radio status`.
+  of the acknowledged uplink (B1), surfaced by `ats radio status`. The node's
+  own measurement of the received Ack (or `0x56` / link-control frame) is
+  logged as `dl_rssi`/`dl_snr` and feeds `app_radio_last_downlink()`, i.e. the
+  last-downlink fields of GetInfo / NFC Info (plan 439, T1).
 
   ```
   header | flags | rssi | snr | [pending_frame_len if bit0] | [unix_be32 if bit1] | tag
@@ -714,6 +717,17 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
 ---
 
 ## 7. Lifecycle: link loss, re-join, resets
+
+**Reported link state (plan 439, T1).** The node exposes its link through the
+common `enum app_radio_state`, the same values the LoRaWAN stack reports (and
+the wire values of Info `lrw_state`): `PAIRED` → HEALTHY, `PAIRED` with
+`P2P_WARNING_FAIL_THRESHOLD` (3) consecutive fully-failed cycles → WARNING
+(session kept, the LoRaWAN link-check WARNING's counterpart), a boot/forced
+join → JOINING, a self-heal or `RejoinRequest` join (slow policy) →
+RECONNECT, `UNPAIRED` and not joining (after `Detach`) → IDLE, and a refused
+start (`lrw_appkey` or `lrw_deveui` all-zero) → DISABLED. `app_radio_is_ready()`
+is true only while `PAIRED`, so the report cadence composes nothing while a
+re-join replaces the session.
 
 **RF outage never triggers a re-join.** The session is persisted on both
 sides; a node that loses coverage keeps transmitting on schedule (retries,
