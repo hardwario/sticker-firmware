@@ -692,20 +692,20 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 #if defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P)
 
 #if defined(CONFIG_LORAWAN)
-static const char *lrw_state_to_str(enum app_lrw_state state)
+static const char *lrw_state_to_str(enum app_radio_lrw_state state)
 {
 	switch (state) {
-	case APP_LRW_STATE_IDLE:
+	case APP_RADIO_LRW_STATE_IDLE:
 		return "IDLE";
-	case APP_LRW_STATE_JOINING:
+	case APP_RADIO_LRW_STATE_JOINING:
 		return "JOINING";
-	case APP_LRW_STATE_HEALTHY:
+	case APP_RADIO_LRW_STATE_HEALTHY:
 		return "HEALTHY";
-	case APP_LRW_STATE_WARNING:
+	case APP_RADIO_LRW_STATE_WARNING:
 		return "WARNING";
-	case APP_LRW_STATE_RECONNECT:
+	case APP_RADIO_LRW_STATE_RECONNECT:
 		return "RECONNECT";
-	case APP_LRW_STATE_DISABLED:
+	case APP_RADIO_LRW_STATE_DISABLED:
 		return "DISABLED";
 	default:
 		return "UNKNOWN";
@@ -741,9 +741,9 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 
 #if defined(CONFIG_RADIO_P2P)
 	if (app_radio_get_kind() == APP_RADIO_P2P) {
-		struct app_p2p_info info;
+		struct app_radio_p2p_info info;
 
-		app_p2p_get_info(&info);
+		app_radio_p2p_get_info(&info);
 
 		shell_print(shell, "kind: P2P");
 		shell_print(shell, "state: %s", p2p_state_to_str(info.link_state));
@@ -770,8 +770,8 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 	}
 #endif /* defined(CONFIG_RADIO_P2P) */
 #if defined(CONFIG_LORAWAN)
-	struct app_lrw_info info;
-	int ret = app_lrw_get_info(&info);
+	struct app_radio_lrw_info info;
+	int ret = app_radio_lrw_get_info(&info);
 
 	if (ret) {
 		shell_error(shell, "Failed to get LRW info: %d", ret);
@@ -804,7 +804,7 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 #if defined(CONFIG_LORAWAN)
 static int cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 {
-	app_lrw_force_link_check();
+	app_radio_lrw_force_link_check();
 	app_report_trigger();
 	shell_print(shell, "Sending data with link check request");
 	return 0;
@@ -815,7 +815,7 @@ static int cmd_lrw_reset(const struct shell *shell, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	int ret = app_lrw_reset_nvm();
+	int ret = app_radio_lrw_reset_nvm();
 	if (ret) {
 		shell_warn(shell, "NVM clear reported errors: %d", ret);
 	}
@@ -826,12 +826,12 @@ static int cmd_lrw_reset(const struct shell *shell, size_t argc, char **argv)
 }
 
 /* app_compose.c documents app_compose_ex()/app_compose_reset() as running
- * "solely on m_work_q" (owned by app_lrw.c) and mutating static state
+ * "solely on m_work_q" (owned by app_radio_lrw.c) and mutating static state
  * (m_active/m_pending/m_snapshot/a static frame buffer) with no lock on that
  * assumption. Calling app_compose_ex() directly from the shell thread below
  * would race the real telemetry TX path, which composes on m_work_q too. So
  * each frame is composed as a work item on m_work_q (via
- * app_lrw_run_on_work_q()); the shell thread blocks on it (k_work_flush),
+ * app_radio_lrw_run_on_work_q()); the shell thread blocks on it (k_work_flush),
  * prints that one frame, and loops for the next — mirroring the original
  * per-frame streaming print, one m_work_q round-trip per frame instead of
  * buffering the whole multi-frame report (which a full report can run to
@@ -887,7 +887,7 @@ static int cmd_lrw_compose(const struct shell *shell, size_t argc, char **argv)
 	while (more) {
 		res->budget = budget;
 
-		int sret = app_lrw_run_on_work_q(&m_compose_work);
+		int sret = app_radio_lrw_run_on_work_q(&m_compose_work);
 		if (sret < 0) {
 			shell_error(shell, "compose submit failed: %d", sret);
 			return sret;
@@ -932,7 +932,7 @@ static int cmd_lrw_lc(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	app_lrw_debug_inject_lc(ok);
+	app_radio_lrw_debug_inject_lc(ok);
 	shell_print(shell, "Injected link-check %s (see 'ats radio status')", argv[1]);
 	return 0;
 }
@@ -957,7 +957,7 @@ static int cmd_p2p_listen(const struct shell *shell, size_t argc, char **argv)
 		return -EINVAL;
 	}
 
-	int ret = app_p2p_listen(enable);
+	int ret = app_radio_p2p_listen(enable);
 	if (ret) {
 		shell_error(shell, "listen %s failed: %d", enable ? "on" : "off", ret);
 		return ret;
@@ -979,7 +979,7 @@ static int cmd_radio_unjoin(const struct shell *shell, size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	int ret = app_p2p_unjoin();
+	int ret = app_radio_p2p_unjoin();
 
 	if (ret) {
 		shell_warn(shell, "Unjoin reported errors: %d", ret);
@@ -1004,7 +1004,7 @@ static int cmd_radio_rx1_delay(const struct shell *shell, size_t argc, char **ar
 		return -EINVAL;
 	}
 
-	app_p2p_debug_set_rx1_delay((uint8_t)s);
+	app_radio_p2p_debug_set_rx1_delay((uint8_t)s);
 	shell_print(shell,
 		    "rx1_delay override -> %d s (not persisted; a real JoinAccept "
 		    "restores it)",
@@ -1025,7 +1025,7 @@ static int cmd_radio_ack_drop(const struct shell *shell, size_t argc, char **arg
 		return -EINVAL;
 	}
 
-	app_p2p_debug_drop_acks((uint32_t)n);
+	app_radio_p2p_debug_drop_acks((uint32_t)n);
 	shell_print(shell, "Next %d confirmed-uplink Ack(s) will appear dropped", n);
 	return 0;
 }
@@ -1046,10 +1046,10 @@ static int cmd_p2p_compose(const struct shell *shell, size_t argc, char **argv)
 
 	shell_print(shell, "P2P TELEMETRY frame preview:");
 	while (more) {
-		uint8_t buf[APP_P2P_FRAME_MAX_LEN];
+		uint8_t buf[APP_RADIO_P2P_FRAME_MAX_LEN];
 		size_t len = 0;
 
-		int ret = app_p2p_debug_compose(buf, sizeof(buf), &len, &more);
+		int ret = app_radio_p2p_debug_compose(buf, sizeof(buf), &len, &more);
 
 		if (ret == -ENOTCONN) {
 			shell_error(shell, "not paired yet");
@@ -1210,7 +1210,7 @@ static int cmd_cmd_inject(const struct shell *sh, enum app_cmd_transport transpo
 
 #if defined(CONFIG_LORAWAN)
 	if (transport == APP_CMD_TRANSPORT_LRW && out_len > 0) {
-		ret = app_lrw_queue_response(85, out, out_len);
+		ret = app_radio_lrw_queue_response(85, out, out_len);
 		if (ret) {
 			shell_warn(sh, "queue_response failed: %d", ret);
 		}

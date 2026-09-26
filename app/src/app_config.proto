@@ -400,7 +400,7 @@ message Response {
         }
         BuildType build_type = 4;
 
-        // LoRaWAN network state (mirrors app_lrw_state). Emitted over NFC only
+        // LoRaWAN network state (mirrors app_radio_lrw_state). Emitted over NFC only
         // (see lrw_state below).
         enum LrwState {
             IDLE      = 0;   // not joined / init

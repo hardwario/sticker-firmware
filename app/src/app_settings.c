@@ -275,7 +275,7 @@ int app_settings_save_p2p_spreading_factor(int sf)
 	 * updated first, under the config lock: app_config() hands out
 	 * m_app_config -- what the shell prints and what a full save exports --
 	 * while g_app_config is the read-mostly mirror the rest of the firmware
-	 * reads, app_p2p.c's sf_from_cfg() among them. Writing only one of them
+	 * reads, app_radio_p2p.c's sf_from_cfg() among them. Writing only one of them
 	 * would leave the device joining at an SF its own `config show` denies. */
 	app_config_lock();
 	app_config()->p2p_spreading_factor = sf;
@@ -328,12 +328,12 @@ static int clear_and_save_alarm_rules(void)
  * Deliberately NOT wired into a live SetParam key change (e.g. someone
  * changing lrw_nwkskey via NFC/shell without going through a reset tier) —
  * that would need a synchronous cross-module call from app_cmd.c into
- * app_lrw.c's NVM handling from an arbitrary caller thread, which is riskier
+ * app_radio_lrw.c's NVM handling from an arbitrary caller thread, which is riskier
  * and out of scope here. Left as a follow-up. */
 #if defined(CONFIG_LORAWAN)
 static void lrw_reset_nvm_before_reboot(void)
 {
-	app_lrw_reset_nvm();
+	app_radio_lrw_reset_nvm();
 }
 #else
 static void lrw_reset_nvm_before_reboot(void)

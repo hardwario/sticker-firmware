@@ -130,7 +130,7 @@ static uint16_t m_capacity;
 static uint16_t m_count;    /* logical record count (cached from the backend ring) */
 static uint32_t m_interval; /* interval_report (s) the buffer was recorded at; records
 			     * are periodic so per-record time = base + ord*interval */
-/* True while app_lrw streams a replay. Capture keeps running (the replay cursor
+/* True while app_radio_lrw streams a replay. Capture keeps running (the replay cursor
  * is absolute, see app_history_export_abs()); only the flash backend's page
  * rollover (a ~20 ms erase that stalls the CPU) is held off until it ends. */
 static bool m_replay_active;

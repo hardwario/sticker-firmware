@@ -37,7 +37,7 @@ int app_compose_ex(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t b
 /* As app_compose_ex(), but a REAL report path (#118 P2P transport, mirroring
  * app_compose()'s own LoRaWAN case): consumes the one-shot post-boot marker
  * like app_compose() does, just against an explicit budget instead of
- * app_lrw_get_max_payload(). Use this, never app_compose_ex(), for any
+ * app_radio_lrw_get_max_payload(). Use this, never app_compose_ex(), for any
  * non-debug transport whose payload budget isn't the LoRaWAN one. */
 int app_compose_budget(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget);
 

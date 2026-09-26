@@ -61,7 +61,7 @@ injector for the join/ACK handshake, and raw radio testing generally.
 
 ## Wire format
 
-Mirrors `app_p2p.c` exactly (kept in sync **by hand** — this is a deliberately
+Mirrors `app_radio_p2p.c` exactly (kept in sync **by hand** — this is a deliberately
 separate, minimal firmware, not a shared module):
 
 ```

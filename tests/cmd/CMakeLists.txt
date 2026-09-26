@@ -29,7 +29,7 @@ target_include_directories(app PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${APP_DIR}/sr
 # `#if defined(CONFIG_RADIO_P2P)` arm was not compiled natively at all before
 # this -- so the P2P dispatch path had no test. The real Kconfig symbol
 # `depends on LORA`, which this suite has no reason to pull in (it stubs
-# app_p2p_start_history_replay anyway), so the gate is set for this target
+# app_radio_p2p_start_history_replay anyway), so the gate is set for this target
 # directly. It selects which branch of app_cmd.c compiles; nothing else here
 # consults it.
 target_compile_definitions(app PRIVATE CONFIG_RADIO_P2P=1)

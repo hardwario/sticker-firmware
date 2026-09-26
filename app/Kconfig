@@ -35,7 +35,7 @@ config RADIO_P2P
 	default y
 	help
 	  App-level name for the raw-LoRa point-to-point transport
-	  (app_p2p.c, issue #118) — pairs with RADIO_LORAWAN above as the two
+	  (app_radio_p2p.c, issue #118) — pairs with RADIO_LORAWAN above as the two
 	  selectable radio transports. Reserved as an inert placeholder by
 	  #395 and wired up here when the P2P work merged; it was briefly
 	  named APP_LORA_P2P on the feat-p2p branch, so out-of-tree overlays

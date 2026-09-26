@@ -16,7 +16,7 @@ extern "C" {
 #endif
 
 /* Frame geometry (data plane), doc/p2p.md §3. Single source of truth, shared
- * by app_p2p.c and tests/p2p_logic. */
+ * by app_radio_p2p.c and tests/p2p_logic. */
 #define P2P_HDR_LEN   11
 #define P2P_TAG_LEN   4 /* data-plane (session_key) CCM tag length only */
 #define P2P_NONCE_LEN 13
@@ -32,7 +32,7 @@ extern "C" {
  *
  * The join frames carry a FULL 16 B plain AES-CMAC tag, not the data plane's
  * truncated 4 B CCM tag -- they have no ciphertext and no nonce at all (see
- * P2P_JOIN_TAG_LABEL in app_p2p.c).
+ * P2P_JOIN_TAG_LABEL in app_radio_p2p.c).
  *
  * JoinRequest body: product_type(1) | proto_version(1) | dev_eui(8, MSB-first)
  * | fw_version(4). It was 10 B with a serial_number(4 BE) until #417 / GitLab
@@ -134,7 +134,7 @@ struct p2p_ack_info {
  * bound exact instead of amortised.
  *
  * Defined here so tests/p2p_logic can declare one; the ledger functions are
- * internal to app_p2p.c (given external linkage only under CONFIG_ZTEST --
+ * internal to app_radio_p2p.c (given external linkage only under CONFIG_ZTEST --
  * see the block at the end of this header). */
 struct p2p_duty_entry {
 	uint32_t end_ms; /* uptime (ms, truncated) at which the frame finished */
@@ -148,16 +148,16 @@ struct p2p_duty {
 };
 
 /* Raw-LoRa point-to-point transport, phase 1 (#118, doc/p2p.md). A drop-in
- * alternative to app_lrw for deployments without LoRaWAN infrastructure,
+ * alternative to app_radio_lrw for deployments without LoRaWAN infrastructure,
  * selected at boot by `radio-mode p2p` via the app_radio facade. It
- * mirrors the slice of the app_lrw public surface the radio-agnostic
+ * mirrors the slice of the app_radio_lrw public surface the radio-agnostic
  * layers (app_report / app_compose / app_alarm) need, but talks raw LoRa via
  * the Zephyr drivers/lora API instead of LoRaMac -- no join, no network
  * server, no per-DR payload budget.
  *
  * The payload layer is reused unchanged: app_compose builds the protobuf
  * Telemetry snapshot exactly as for LoRaWAN; this module only frames it (an
- * 11 B cleartext header replacing the LoRaWAN fPort, see app_p2p.c) and
+ * 11 B cleartext header replacing the LoRaWAN fPort, see app_radio_p2p.c) and
  * AES-CCM encrypts+authenticates the body under the derived `session_key`
  * (doc/p2p.md §4, derived directly from the device's existing LoRaWAN OTAA
  * AppKey -- there is no manual p2p_key config parameter and no separate
@@ -170,7 +170,7 @@ struct p2p_duty {
  * pairing state, the device sends JoinRequest, opens a bounded RX1 window
  * for JoinAccept, and on success persists net_id/dev_addr/session_key/
  * rx1_delay to NVS and switches the data plane on to session_key
- * (doc/p2p.md §5.3). app_p2p_is_ready() (and therefore the report
+ * (doc/p2p.md §5.3). app_radio_p2p_is_ready() (and therefore the report
  * cadence) only goes true once paired -- a device still unpaired when its
  * boot join window closes (§5.2, 120 s) does not stop: it hands the
  * episode to the slow backoff curve (§7) and keeps sweeping the spreading
@@ -190,27 +190,27 @@ struct p2p_duty {
  * (§5.4/§7). Values are the wire contract shared with the central
  * (proximos-v2 control-radio, src/p2p/frame.rs::frame_type) -- never
  * renumber one without changing it there in the same release. */
-enum app_p2p_frame_type {
-	APP_P2P_FRAME_TELEMETRY = 2,
-	APP_P2P_FRAME_ALARM = 3,
-	APP_P2P_FRAME_RESPONSE = 85,
-	APP_P2P_FRAME_COMMAND = 86, /* inbound (RX): downlink command, dispatched (B4) */
-	APP_P2P_FRAME_JOIN_REQUEST = 0xF0,
-	APP_P2P_FRAME_JOIN_ACCEPT = 0xF1,
-	APP_P2P_FRAME_ACK = 0xFA,
+enum app_radio_p2p_frame_type {
+	APP_RADIO_P2P_FRAME_TELEMETRY = 2,
+	APP_RADIO_P2P_FRAME_ALARM = 3,
+	APP_RADIO_P2P_FRAME_RESPONSE = 85,
+	APP_RADIO_P2P_FRAME_COMMAND = 86, /* inbound (RX): downlink command, dispatched (B4) */
+	APP_RADIO_P2P_FRAME_JOIN_REQUEST = 0xF0,
+	APP_RADIO_P2P_FRAME_JOIN_ACCEPT = 0xF1,
+	APP_RADIO_P2P_FRAME_ACK = 0xFA,
 	/* Link control, both inbound (RX), both empty-bodied and authenticated
 	 * under session_key with the acknowledged uplink's counter (§5.4). */
-	APP_P2P_FRAME_DETACH = 0xFD,
-	APP_P2P_FRAME_REJOIN_REQUEST = 0xFE,
+	APP_RADIO_P2P_FRAME_DETACH = 0xFD,
+	APP_RADIO_P2P_FRAME_REJOIN_REQUEST = 0xFE,
 };
 
 /* LoRa PHY max payload -- the largest a single P2P wire frame (header + body
- * + tag) can ever be. Keep in sync with P2P_FRAME_MAX in app_p2p.c; sizes a
- * caller's dry-run compose buffer (app_p2p_debug_compose() below). */
-#define APP_P2P_FRAME_MAX_LEN 255
+ * + tag) can ever be. Keep in sync with P2P_FRAME_MAX in app_radio_p2p.c; sizes a
+ * caller's dry-run compose buffer (app_radio_p2p_debug_compose() below). */
+#define APP_RADIO_P2P_FRAME_MAX_LEN 255
 
 /* Join/session state (#118 phase 2, doc/p2p.md §5.3) -- public so `ats radio
- * status` can report it via struct app_p2p_info below. */
+ * status` can report it via struct app_radio_p2p_info below. */
 enum p2p_link_state {
 	P2P_LINK_UNPAIRED, /* no valid pairing in NVS; not currently joining */
 	P2P_LINK_JOINING,  /* join attempts in progress: boot window, then slow backoff */
@@ -219,7 +219,7 @@ enum p2p_link_state {
 
 /* Configure the radio from the p2p config group and set up the work queue.
  * Returns 0 or a negative errno. */
-int app_p2p_init(void);
+int app_radio_p2p_init(void);
 
 /* Boot-time bring-up. Refuses outright, and logs an error, if `lrw_appkey`
  * is all-zero: it is the root key for the whole transport, so an all-zero one
@@ -231,56 +231,56 @@ int app_p2p_init(void);
  *
  * Otherwise: if already paired (persisted NVS state from a prior
  * join), mark the radio ready and kick the report cadence immediately --
- * unlike app_lrw_join() on the radio facade, an existing pairing is treated
+ * unlike app_radio_lrw_join() on the radio facade, an existing pairing is treated
  * as sufficient, so a normal power cycle never wastes a JoinRequest
  * (doc/p2p.md §7). Otherwise starts the join handshake (#118 phase 2,
  * doc/p2p.md §5.3); the ready callback fires later, only once JoinAccept
- * succeeds. See app_p2p_rejoin() below for forcing a fresh join on demand. */
-void app_p2p_start(void);
+ * succeeds. See app_radio_p2p_rejoin() below for forcing a fresh join on demand. */
+void app_radio_p2p_start(void);
 
 /* True once paired and started -- immediately if NVS already had a valid
  * pairing, otherwise only after the join handshake (#118 phase 2)
  * completes. */
-bool app_p2p_is_ready(void);
+bool app_radio_p2p_is_ready(void);
 
 /* Fixed application-payload budget for one frame (LoRa MTU minus the P2P
  * header and AES-CCM tag). app_compose() bin-packs telemetry groups against
  * this. */
-uint8_t app_p2p_get_max_payload(void);
+uint8_t app_radio_p2p_get_max_payload(void);
 
 /* Compose + send a telemetry snapshot (frame type TELEMETRY) via
  * app_compose_budget(). Triggered by app_report after it samples + captures
- * history, same as app_lrw_send_telemetry(). */
-void app_p2p_send_telemetry(void);
+ * history, same as app_radio_lrw_send_telemetry(). */
+void app_radio_p2p_send_telemetry(void);
 
 /* Send a staged command response (frame type RESPONSE). */
-int app_p2p_queue_response(uint8_t port, const uint8_t *buf, size_t len);
+int app_radio_p2p_queue_response(uint8_t port, const uint8_t *buf, size_t len);
 
 /* Send an alarm-detail batch (frame type ALARM). */
-int app_p2p_send_alarm(const uint8_t *buf, size_t len);
+int app_radio_p2p_send_alarm(const uint8_t *buf, size_t len);
 
 /* Start a device-driven history replay over P2P (req_history, tag 11): stream
  * every stored record in [from_unix, to_unix] back as N HistoryFrame uplinks
  * (frame type RESPONSE / 0x55) sharing the command `seq`, on the P2P carrier.
- * The P2P counterpart of app_lrw_start_history_replay(); same app_history /
+ * The P2P counterpart of app_radio_lrw_start_history_replay(); same app_history /
  * app_cmd_build_history_frame engine, only the transmit path differs
  * (send_confirmed instead of lorawan_send). Returns true if a replay was
  * started (records matched), false on an empty window or P2P not ready (the
  * caller then answers HISTORY_UNAVAILABLE). */
-bool app_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
+bool app_radio_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
 
-/* Register the link-ready kick fired by app_p2p_start() so app_report can
+/* Register the link-ready kick fired by app_radio_p2p_start() so app_report can
  * begin the cadence. NULL clears it. */
-void app_p2p_register_ready_cb(void (*cb)(void));
+void app_radio_p2p_register_ready_cb(void (*cb)(void));
 
 /* Stop P2P radio activity ahead of a deep-sleep poweroff. */
-void app_p2p_suspend(void);
+void app_radio_p2p_suspend(void);
 
 /* Snapshot for `ats radio status` (#118) -- the P2P analogue of struct
- * app_lrw_info, but the raw-LoRa protocol has no per-frame link-quality
+ * app_radio_lrw_info, but the raw-LoRa protocol has no per-frame link-quality
  * feedback (no ADR/margin/gateway count), so this only surfaces
  * pairing/session state. */
-struct app_p2p_info {
+struct app_radio_p2p_info {
 	enum p2p_link_state link_state;
 	uint32_t net_id;   /* 0 pre-pairing */
 	uint16_t dev_addr; /* 0 pre-pairing */
@@ -304,54 +304,54 @@ struct app_p2p_info {
 	int8_t last_ack_snr;
 	bool last_ack_valid;
 	/* False means lrw_appkey is all-zero, i.e. the device has no root key
-	 * for P2P at all and app_p2p_start()/app_p2p_rejoin() refuse to bring
+	 * for P2P at all and app_radio_p2p_start()/app_radio_p2p_rejoin() refuse to bring
 	 * the radio up (doc/p2p.md §4). Without this, such a device is
 	 * indistinguishable from a plain UNPAIRED one on the bench. */
 	bool app_key_set;
 };
 
 /* Fill `info` with the current pairing/session snapshot. Always succeeds. */
-void app_p2p_get_info(struct app_p2p_info *info);
+void app_radio_p2p_get_info(struct app_radio_p2p_info *info);
 
 #if defined(CONFIG_SHELL)
 /* Bench-rig reference receiver (doc/p2p.md §14): enable=true reconfigures the
  * radio for continuous RX and starts async receive -- each frame is
  * filtered by net_id and logged with RSSI/SNR/frame_type/counter.
- * JoinRequest/JoinAccept bodies are cleartext (see app_p2p.c's
+ * JoinRequest/JoinAccept bodies are cleartext (see app_radio_p2p.c's
  * P2P_JOIN_TAG_LABEL comment) and are logged as-is; any other frame_type is
  * a session_key-encrypted data-plane frame this diagnostic listener has no
  * key for and cannot decode. enable=false stops it and returns to TX
  * config. Returns 0 or a negative errno. TX (send_telemetry/queue_response/
  * send_alarm) is refused with -EBUSY while listening. */
-int app_p2p_listen(bool enable);
+int app_radio_p2p_listen(bool enable);
 
 /* Force a fresh join handshake RIGHT NOW, even if currently PAIRED. Subject
- * to the same all-zero `lrw_appkey` refusal as app_p2p_start() -- the shell
+ * to the same all-zero `lrw_appkey` refusal as app_radio_p2p_start() -- the shell
  * is not a way around it --
- * unlike app_p2p_start(), an existing pairing is not treated as sufficient.
+ * unlike app_radio_p2p_start(), an existing pairing is not treated as sufficient.
  * A successful JoinAccept overwrites the old pairing via pairing_persist(),
- * so this never needs a reboot or NVS wipe (contrast with app_p2p_unjoin()
+ * so this never needs a reboot or NVS wipe (contrast with app_radio_p2p_unjoin()
  * below). This is what makes the shell's `join` command genuinely force a
  * fresh session on both radio stacks. */
-void app_p2p_rejoin(void);
+void app_radio_p2p_rejoin(void);
 
 /* Clear the persisted pairing (net_id/dev_addr/session_key/rx1_delay) so the
  * next boot starts a fresh JoinRequest. NEVER touches the dev_nonce
- * anti-replay counter -- see dnonce_persist()'s comment in app_p2p.c for why
+ * anti-replay counter -- see dnonce_persist()'s comment in app_radio_p2p.c for why
  * a re-join must never risk presenting a dev_nonce the central already saw.
- * Mirrors app_lrw_reset_nvm(): settings only, reboot required to take
+ * Mirrors app_radio_lrw_reset_nvm(): settings only, reboot required to take
  * effect. Returns 0 or a negative errno. */
-int app_p2p_unjoin(void);
+int app_radio_p2p_unjoin(void);
 
 /* Debug: override the live rx1_delay used for the next TX's RX window,
  * without persisting it or requiring a re-join (doc/p2p.md §13). A real
  * JoinAccept overwrites it back to the paired value. */
-void app_p2p_debug_set_rx1_delay(uint8_t rx1_delay_s);
+void app_radio_p2p_debug_set_rx1_delay(uint8_t rx1_delay_s);
 
 /* Debug: make the next `count` confirmed-uplink Acks appear dropped (as if
  * the central never replied), to exercise the retry path (doc/p2p.md §6)
  * deterministically without a real RF outage. 0 disables the injection. */
-void app_p2p_debug_drop_acks(uint32_t count);
+void app_radio_p2p_debug_drop_acks(uint32_t count);
 
 /* Debug: build (frame + encrypt) one TELEMETRY frame under the CURRENT
  * session state WITHOUT transmitting or advancing the frame counter -- lets
@@ -359,14 +359,14 @@ void app_p2p_debug_drop_acks(uint32_t count);
  * work queue like a real send (app_compose.c's "solely on m_work_q"
  * invariant, mirrored here for P2P's own queue). `*more` reports whether
  * app_compose has additional frames pending (call again to drain them, same
- * idiom as app_compose_ex()/app_lrw_run_on_work_q()). Returns 0, -ENOTCONN
+ * idiom as app_compose_ex()/app_radio_lrw_run_on_work_q()). Returns 0, -ENOTCONN
  * if not paired yet, -ENOMEM if `out_size` is too small, or a negative
  * errno. */
-int app_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, bool *more);
+int app_radio_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, bool *more);
 #endif
 
 #if defined(CONFIG_ZTEST)
-/* Pure decision-logic helpers, internal to app_p2p.c (static in the firmware),
+/* Pure decision-logic helpers, internal to app_radio_p2p.c (static in the firmware),
  * exposed with external linkage for tests/p2p_logic only. Not part of the
  * runtime API -- do not call from firmware. */
 uint32_t p2p_toa_ms(int sf, uint8_t payload_len);

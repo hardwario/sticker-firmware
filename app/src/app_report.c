@@ -51,7 +51,7 @@ static struct k_work m_trigger_work;  /* ad-hoc cycle: sample + send, no history
 static struct k_work m_force_work;    /* host-requested cycle: like trigger, sent without jitter */
 
 #if defined(CONFIG_WATCHDOG)
-/* Liveness heartbeat (#182): mirror of the app_lrw guard for the report queue, so
+/* Liveness heartbeat (#182): mirror of the app_radio_lrw guard for the report queue, so
  * a wedge in the sample/capture path is caught by the IWDG too. */
 #define REPORT_HEARTBEAT_PERIOD_SEC 5
 #define REPORT_HEARTBEAT_TIMEOUT_MS 30000
@@ -69,7 +69,7 @@ static void heartbeat_work_handler(struct k_work *work)
 #endif /* defined(CONFIG_WATCHDOG) */
 
 /* (Re)arm the periodic cadence for the next report. One-shot + manual restart
- * (like the old app_lrw m_send_timer) so a multi-frame snapshot in app_lrw
+ * (like the old app_radio_lrw m_send_timer) so a multi-frame snapshot in app_radio_lrw
  * doesn't get a second cycle stacked behind it.
  *
  * `periodic` = called from a cadence run (the run is the grid slot nearest to
@@ -86,8 +86,8 @@ static void heartbeat_work_handler(struct k_work *work)
  * old timer did; it keeps its phase when the clock switches to unix time.
  * Jittering the period would make the stored samples land at 60..66 s (for a
  * 60 s interval) while replay assumes exactly 60 s. Fleet-uplink de-correlation
- * is instead a random *pre-send* delay applied in app_lrw
- * (app_lrw_send_telemetry), which shifts only the transmission, not the sample/
+ * is instead a random *pre-send* delay applied in app_radio_lrw
+ * (app_radio_lrw_send_telemetry), which shifts only the transmission, not the sample/
  * history-capture cadence (#267). */
 static uint32_t schedule_next_report(bool periodic, bool *slot_synced)
 {
@@ -226,10 +226,10 @@ void app_report_suspend(void)
 	 * then cancel any report cycle already queued on m_work_q. Without this,
 	 * a cycle submitted just before suspend runs (report_timer_handler /
 	 * report_kick / app_report_trigger) would still dequeue afterward and
-	 * reach app_lrw_send_telemetry() (radio) while app_power_suspend() is
+	 * reach app_radio_lrw_send_telemetry() (radio) while app_power_suspend() is
 	 * tearing the radio down or after sys_poweroff() has been called.
 	 * Fire-and-forget, same as the other suspend/teardown cancels in this
-	 * codebase (state_transition() in app_lrw.c, app_ats.c's LED-cycle stop):
+	 * codebase (state_transition() in app_radio_lrw.c, app_ats.c's LED-cycle stop):
 	 * if a cycle is already RUNNING this can't un-run it, but that is no
 	 * worse than the previous behavior and the timer stop above prevents any
 	 * further cycles from being queued. */

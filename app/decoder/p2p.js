@@ -1,6 +1,6 @@
 // Reference receiver / decoder for the raw-LoRa P2P transport (#118, doc/p2p.md).
 //
-// Mirrors the on-air frame app_p2p.c produces:
+// Mirrors the on-air frame app_radio_p2p.c produces:
 //   [ net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | counter(4 BE) ]  11 B header
 //   [ AES-CCM ciphertext (= plaintext) ] [ AES-CCM tag (4 B) ]
 // The header is cleartext and fed as AAD; the body is AES-CCM (AES-128). The CCM
@@ -18,7 +18,7 @@
 // (app_key), which the central already knows from the OTAA/claim flow.
 // deriveSessionKey() below computes the data-plane key from app_key once
 // dev_nonce/central_nonce are known from a successful join -- mirrors
-// app_p2p.c's derive_session_key() exactly (same label, same big-endian field
+// app_radio_p2p.c's derive_session_key() exactly (same label, same big-endian field
 // encoding, same zero-padding).
 //
 // The decrypted data-plane body is the exact payload LoRaWAN would carry, so
@@ -39,7 +39,7 @@ const P2P_DIR_TX = 0x00;
 const P2P_DIR_RX = 0x01;
 
 // Join handshake constants (doc/p2p.md §4/§5.3) -- see the file header comment
-// and app_p2p.c's identical P2P_JOIN_TAG_LABEL/P2P_JOINACCEPT_TAG_LABEL/
+// and app_radio_p2p.c's identical P2P_JOIN_TAG_LABEL/P2P_JOINACCEPT_TAG_LABEL/
 // P2P_SESSION_KEY_LABEL comment for the full rationale.
 const P2P_JOIN_TAG_LEN = 16; // full CMAC output, NOT P2P_TAG_LEN
 const P2P_JOIN_TAG_LABEL = "HIO-P2P-JOIN"; // JoinRequest tag
@@ -155,7 +155,7 @@ function aes128Cmac(key, msg) {
 // (P2P_JOIN_TAG_LABEL or P2P_JOINACCEPT_TAG_LABEL); `headerAndBody` the
 // frame's 11 B header immediately followed by its (cleartext) body. Returns
 // the full 16-byte tag as a Buffer -- NOT truncated like the data plane's
-// P2P_TAG_LEN. Matches app_p2p.c's send_join_request()/recv_join_accept()
+// P2P_TAG_LEN. Matches app_radio_p2p.c's send_join_request()/recv_join_accept()
 // tag construction exactly.
 function joinTag(appKey, label, headerAndBody) {
   appKey = asKey(appKey);
@@ -182,7 +182,7 @@ function joinTag(appKey, label, headerAndBody) {
 // the hex string reads, deliberately NOT LoRaWAN's LSB-first on-air order
 // (decision D1). Returns the 16-byte session_key as a Buffer.
 //
-// Matches app_p2p.c's derive_session_key() exactly (same label, same
+// Matches app_radio_p2p.c's derive_session_key() exactly (same label, same
 // big-endian field encoding, same zero-padding to a 32 B/2-block message), and
 // is pinned against it by the shared fixture tests/ccm/p2p_join_kat.json.
 function deriveSessionKey(appKey, devNonce, centralNonce, devEui) {

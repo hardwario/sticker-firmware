@@ -193,7 +193,7 @@ static inline int64_t rule_hold_ms(const struct app_alarm_rule *rule)
  * NOT CONFIG_LORAWAN-gated. Regression found via #118 phase 2 HIL after
  * CONFIG_LORAWAN became toggleable on the P2P bench overlay: this stale
  * guard (a leftover from before app_report_trigger()/app_radio existed,
- * when this called app_lrw_* directly) compiled out ALL alarm TX on a
+ * when this called app_radio_lrw_* directly) compiled out ALL alarm TX on a
  * LoRaWAN-off build -- alarms are the highest-priority safety frame. */
 static void alarm_lrw_send(void)
 {

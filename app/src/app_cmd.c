@@ -129,11 +129,11 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	memcpy(info->claim_token, g_app_config.claim_token, sizeof(info->claim_token));
 
 #ifdef CONFIG_LORAWAN
-	info->lrw_state = (uint8_t)app_lrw_get_state();
+	info->lrw_state = (uint8_t)app_radio_lrw_get_state();
 #endif
 #if defined(CONFIG_LORAWAN) || defined(CONFIG_ZTEST)
-	info->has_last_dl = app_lrw_last_downlink(&info->last_dl_rssi, &info->last_dl_snr,
-						  &info->last_dl_age_s);
+	info->has_last_dl = app_radio_lrw_last_downlink(&info->last_dl_rssi, &info->last_dl_snr,
+							&info->last_dl_age_s);
 #endif
 
 	BUILD_ASSERT(sizeof(info->dev_eui) == sizeof(g_app_config.lrw_deveui),
@@ -184,7 +184,7 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	if (!info->has_unix_time) {
 		status |= APP_DEVICE_STATUS_TIME_UNSYNCED;
 	}
-	if (info->lrw_state == APP_LRW_STATE_DISABLED) {
+	if (info->lrw_state == APP_RADIO_LRW_STATE_DISABLED) {
 		status |= APP_DEVICE_STATUS_LRW_DISABLED;
 	}
 	/* Radio: OFF means the operator deliberately silenced it; otherwise, in
@@ -193,8 +193,8 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_OFF) {
 		status |= APP_DEVICE_STATUS_RADIO_OFF;
 	} else if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_LORAWAN &&
-		   info->lrw_state != APP_LRW_STATE_HEALTHY &&
-		   info->lrw_state != APP_LRW_STATE_WARNING) {
+		   info->lrw_state != APP_RADIO_LRW_STATE_HEALTHY &&
+		   info->lrw_state != APP_RADIO_LRW_STATE_WARNING) {
 		status |= APP_DEVICE_STATUS_RADIO_LINK_DOWN;
 	}
 	if (app_nfc_claim_state_get() == APP_NFC_CLAIM_ACTIVE) {
@@ -1142,12 +1142,12 @@ static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command 
 
 #if defined(CONFIG_LORAWAN)
 	if (tp == APP_CMD_TRANSPORT_LRW) {
-		ret = app_lrw_history_replay_start(from, to, cmd->seq);
+		ret = app_radio_lrw_history_replay_start(from, to, cmd->seq);
 	}
 #endif
 #if defined(CONFIG_RADIO_P2P)
 	if (tp == APP_CMD_TRANSPORT_P2P) {
-		ret = app_p2p_start_history_replay(from, to, cmd->seq) ? 0 : -ENODATA;
+		ret = app_radio_p2p_start_history_replay(from, to, cmd->seq) ? 0 : -ENODATA;
 	}
 #endif
 	if (ret == -EMSGSIZE) {
@@ -1277,10 +1277,10 @@ static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *
 #ifdef CONFIG_LORAWAN
 	/* Empty (LRW): re-sync from the network, then answer with an Info uplink
 	 * once the network time lands (carries the synced unix_time). No ack — see
-	 * app_lrw. The Info carries this command's seq, so the host can pair the
+	 * app_radio_lrw. The Info carries this command's seq, so the host can pair the
 	 * answer with its request (the boot Info keeps seq 0). */
 	app_clock_force_resync();
-	app_lrw_send_info_on_clock_sync(cmd->seq);
+	app_radio_lrw_send_info_on_clock_sync(cmd->seq);
 #else
 	resp->which_body = Response_ack_tag; /* no LRW: just confirm */
 #endif

@@ -2,11 +2,11 @@
  * Copyright (c) 2026 HARDWARIO a.s.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Native unit tests for app_p2p.c's pure decision logic: LoRa time-on-air, the
+ * Native unit tests for app_radio_p2p.c's pure decision logic: LoRa time-on-air, the
  * CCM nonce layout, the data-plane frame codec, and the token-bucket duty-cycle
- * governor (doc/plan/408 §7 Steps 1-2). app_p2p.c is compiled directly (with a
+ * governor (doc/plan/408 §7 Steps 1-2). app_radio_p2p.c is compiled directly (with a
  * no-op fake LoRa device, src/emul_lora.c, and thin stubs, src/stubs.c) and its
- * internal helpers are reached via the CONFIG_ZTEST hooks in app_p2p.h. Crypto
+ * internal helpers are reached via the CONFIG_ZTEST hooks in app_radio_p2p.h. Crypto
  * known-answer vectors live in tests/ccm; this suite is framing/timing/duty.
  */
 
@@ -32,7 +32,7 @@ extern int test_lora_send_ret;
 
 /* ---- p2p_frame_toa_ms ------------------------------------------------- */
 
-/* Documented reference point (app_p2p.c comment, doc/plan/408 §3): a full
+/* Documented reference point (app_radio_p2p.c comment, doc/plan/408 §3): a full
  * 255 B frame at SF10/BW125 is ~2.3 s of air. */
 ZTEST(p2p_logic, test_toa_sf10_max_frame_reference)
 {
@@ -272,7 +272,7 @@ ZTEST(p2p_logic, test_build_frame_empty_body_roundtrip)
 	const uint32_t counter = 4242;
 
 	for (uint8_t i = 0; i < 2; i++) {
-		const uint8_t frame_type = i ? APP_P2P_FRAME_REJOIN_REQUEST : APP_P2P_FRAME_DETACH;
+		const uint8_t frame_type = i ? APP_RADIO_P2P_FRAME_REJOIN_REQUEST : APP_RADIO_P2P_FRAME_DETACH;
 		uint8_t frame[P2P_HDR_LEN + P2P_TAG_LEN]; /* 15 B, no ciphertext */
 
 		zassert_ok(build_frame_keyed(net_id, dev_addr, k_session_key, frame_type, NULL, 0,
@@ -319,15 +319,15 @@ ZTEST(p2p_logic, test_build_frame_empty_body_roundtrip)
  * a renumbering here has to fail loudly rather than desync three code bases. */
 ZTEST(p2p_logic, test_frame_type_constants)
 {
-	zassert_equal(APP_P2P_FRAME_TELEMETRY, 0x02, "telemetry");
-	zassert_equal(APP_P2P_FRAME_ALARM, 0x03, "alarm");
-	zassert_equal(APP_P2P_FRAME_RESPONSE, 0x55, "response");
-	zassert_equal(APP_P2P_FRAME_COMMAND, 0x56, "command");
-	zassert_equal(APP_P2P_FRAME_JOIN_REQUEST, 0xF0, "join request");
-	zassert_equal(APP_P2P_FRAME_JOIN_ACCEPT, 0xF1, "join accept");
-	zassert_equal(APP_P2P_FRAME_ACK, 0xFA, "ack");
-	zassert_equal(APP_P2P_FRAME_DETACH, 0xFD, "detach");
-	zassert_equal(APP_P2P_FRAME_REJOIN_REQUEST, 0xFE, "rejoin request");
+	zassert_equal(APP_RADIO_P2P_FRAME_TELEMETRY, 0x02, "telemetry");
+	zassert_equal(APP_RADIO_P2P_FRAME_ALARM, 0x03, "alarm");
+	zassert_equal(APP_RADIO_P2P_FRAME_RESPONSE, 0x55, "response");
+	zassert_equal(APP_RADIO_P2P_FRAME_COMMAND, 0x56, "command");
+	zassert_equal(APP_RADIO_P2P_FRAME_JOIN_REQUEST, 0xF0, "join request");
+	zassert_equal(APP_RADIO_P2P_FRAME_JOIN_ACCEPT, 0xF1, "join accept");
+	zassert_equal(APP_RADIO_P2P_FRAME_ACK, 0xFA, "ack");
+	zassert_equal(APP_RADIO_P2P_FRAME_DETACH, 0xFD, "detach");
+	zassert_equal(APP_RADIO_P2P_FRAME_REJOIN_REQUEST, 0xFE, "rejoin request");
 }
 
 ZTEST(p2p_logic, test_build_frame_max_body)
@@ -900,7 +900,7 @@ ZTEST(p2p_logic, test_join_duty_block_does_not_advance_the_sweep)
 	zassert_equal(attempts, 0, "a duty bounce is not a sent attempt, got %u", attempts);
 }
 
-/* The SF a sweep lands on has to outlive the session: app_p2p_start()'s PAIRED
+/* The SF a sweep lands on has to outlive the session: app_radio_p2p_start()'s PAIRED
  * shortcut never joins, so a node that joined at a swept SF and rebooted would
  * come up on the stale configured one with nothing left to re-discover it.
  * Persisting an unchanged SF, on the other hand, is a pointless flash write on
@@ -990,9 +990,9 @@ ZTEST(p2p_logic, test_start_with_zero_deveui_keeps_a_paired_session)
 	p2p_test_set_paired();
 	memset(g_app_config.lrw_deveui, 0, sizeof(g_app_config.lrw_deveui));
 
-	app_p2p_start();
+	app_radio_p2p_start();
 
-	zassert_true(app_p2p_is_ready(),
+	zassert_true(app_radio_p2p_is_ready(),
 		     "a persisted session must survive an upgrade that added the DevEUI");
 
 	memcpy(g_app_config.lrw_deveui, saved, sizeof(saved));
@@ -1088,7 +1088,7 @@ ZTEST(p2p_logic, test_history_replay_start_is_not_reentrant)
 	p2p_test_replay_setup();
 	test_history_frame_count = 3;
 
-	zassert_true(app_p2p_start_history_replay(100, 200, 42),
+	zassert_true(app_radio_p2p_start_history_replay(100, 200, 42),
 		     "a replay with records available must start");
 	p2p_test_get_replay(&active, &seq, &cursor, &idx);
 	zassert_true(active, "the replay should be marked active");
@@ -1104,7 +1104,7 @@ ZTEST(p2p_logic, test_history_replay_start_is_not_reentrant)
 	 *
 	 * A retransmitted request is already being answered, so accept it and
 	 * change nothing. */
-	zassert_true(app_p2p_start_history_replay(900, 1000, 77),
+	zassert_true(app_radio_p2p_start_history_replay(900, 1000, 77),
 		     "a re-delivered request must be accepted, not refused");
 
 	p2p_test_get_replay(&active, &seq, &cursor, &idx);
@@ -1127,7 +1127,7 @@ ZTEST(p2p_logic, test_history_replay_cursor_is_absolute)
 	/* #436: the replay cursor is an absolute record ordinal (app_history_span()),
 	 * so a capture or an eviction during the stream moves nothing. A replay that
 	 * still started at ordinal 0 would re-read evicted records' slots. */
-	zassert_true(app_p2p_start_history_replay(0, UINT32_MAX, 5), "replay must start");
+	zassert_true(app_radio_p2p_start_history_replay(0, UINT32_MAX, 5), "replay must start");
 	p2p_test_get_replay(&active, &seq, &cursor, &idx);
 	zassert_true(active, "the replay should be marked active");
 	zassert_equal(cursor, 40u, "cursor must start at the oldest stored record, got %u", cursor);
@@ -1143,12 +1143,12 @@ ZTEST(p2p_logic, test_telemetry_does_not_interleave_with_a_history_replay)
 
 	/* Control: with no replay running, a telemetry request composes a frame. */
 	g_compose_budget_calls = 0;
-	app_p2p_send_telemetry();
+	app_radio_p2p_send_telemetry();
 	k_sleep(K_MSEC(50));
 	zassert_true(g_compose_budget_calls > 0,
 		     "with no replay running, telemetry must still be composed");
 
-	/* app_lrw.c gates its own send path on m_hist_active (MED-9); app_p2p.c's
+	/* app_radio_lrw.c gates its own send path on m_hist_active (MED-9); app_radio_p2p.c's
 	 * copy kept the "telemetry self-skips" comment but dropped the gate.
 	 * app_history_set_replay_active() only pauses history CAPTURE -- nothing
 	 * in the send path consults it -- so scheduled telemetry interleaved with
@@ -1156,7 +1156,7 @@ ZTEST(p2p_logic, test_telemetry_does_not_interleave_with_a_history_replay)
 	p2p_test_set_replay_active(true);
 
 	g_compose_budget_calls = 0;
-	app_p2p_send_telemetry();
+	app_radio_p2p_send_telemetry();
 	k_sleep(K_MSEC(50));
 	zassert_equal(g_compose_budget_calls, 0,
 		      "a replay owns the radio: telemetry must not be composed mid-stream");
