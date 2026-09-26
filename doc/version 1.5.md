@@ -1155,6 +1155,13 @@ cadence, stale without an excuse rejoins, streak tracking, duty-cycle hold,
 an old refusal does not hold, the hold is bounded by the window, recent-window
 at a 900 s interval).
 
+Hardware (bench unit, 2026-09-26, DR0 + ADR off, 60 s): the duty cycle refused
+every send from 07:21:46Z (the 1 h credit window started at the join, 07:14Z);
+M-2 logged the hold once at 07:25:43Z and did **not** rejoin; the uplinks
+resumed on the same session (same DevAddr) at 08:14:59Z, when the window
+rolled over. Before the fix the same run rejoined 4 intervals into the
+restriction and got fresh credits.
+
 ---
 
 *Applies to firmware v1.5.0. Reflects changes relative to v1.4.0 — see `doc/version 1.4.md` for the full v1.4.0 feature set this builds on.*
