@@ -1,4 +1,4 @@
-# 447 — RadioState: radio link state and diagnostics (NFC Info + GetRadioState)
+# 447 — RadioState: radio link state and diagnostics (GetRadioState)
 
 Issue: #446 · PR: #447 (into `feat-p2p`) · Related: #409 A2, #423, #439 (transport
 layer), #442/#443 (P2P ADR), #445 (24 h announce)
@@ -26,9 +26,11 @@ Goals:
    on both radios, in line with the transport-layer parity goal (#439).
 2. **Enough for analysis.** State, radio parameters, the quality of both link
    directions, session identity, failure streaks, duty cycle and counters since boot.
-3. **NFC always, radio on request only.** The phone gets it in every Info. Over the
-   radio it goes out only when a host asks with a new downlink command, never in the
-   boot or 24 h announce (#445). Airtime stays spent on data.
+3. **Its own command, not part of Info.** One new command, `get_radio_state`, on every
+   transport. The phone sends it over NFC next to `get_info`. Over the radio it goes
+   out only when a host asks, never in the boot or 24 h announce (#445), so airtime
+   stays spent on data. (A first draft put it in the NFC Info; decided on 2026-09-26
+   to keep Info free of it.)
 4. **Paging like every other answer** (#425).
 
 ## Decisions
@@ -36,8 +38,8 @@ Goals:
 | | |
 |---|---|
 | Name | `radio_state` (message `Response.RadioState`); the link-state enum is nested as `RadioState.State` |
-| NFC | `Info.radio_state` = field **19**, NFC-only, like `dev_eui` / `claim_token`; the LoRaWAN/P2P Info omits it |
-| Radio | new command `get_radio_state` = `Command` field **32**, body `GetRadioState { optional uint32 page = 1; }`; answer `Response.radio_state` = oneof field **12** (11 is reserved, was `info_lite`) |
+| Info | carries no link state any more; the phone reads it with `get_radio_state` over NFC |
+| Radio | new command `get_radio_state` = `Command` field **32**, body `GetRadioState { optional uint32 page = 1; }`; answer `Response.radio_state` = oneof field **14** (11 is reserved, was `info_lite`; 12/13 are `page_index`/`page_count`) |
 | Transports | all (LoRaWAN, P2P, NFC, vendor, shell); read-only, no secrets (DevAddr and FCnt travel in clear on every frame anyway) |
 | Retired | `Info.lrw_state` (12) and `Info.last_dl_rssi/snr/age_s` (16–18) become `reserved`. 12 shipped in v1.4.0; 16–18 exist only in unreleased v1.5.0, but they are reserved as well so that no app build decodes them as something else |
 | Paging, radio | #425 envelope. Units are single fields, except the groups that must travel together (below). A unit too big for the budget on its own is left out (physical floor, as in Info). The pages are streamed from a snapshot, so every page describes the same moment |
@@ -100,46 +102,54 @@ report events through `app_radio_count(APP_RADIO_CNT_*)`:
 
 - **Proto** (`app_config.proto`):
   - `Response.RadioState` message and nested `State` enum;
-  - `Info.radio_state = 19`, `reserved 12, 16, 17, 18`;
-  - `Response.radio_state = 12`;
+  - `Info`: `reserved 12, 16, 17, 18`;
+  - `Response.radio_state = 14`;
   - `Command.GetRadioState`;
   - `app_config.yml` entry `get_radio_state` (proto_id 32), from which configen
     regenerates the oneof, the dispatch case and the `ttn.js` command map.
 - **Common layer**:
-  - `struct app_radio_status` + `app_radio_get_status()` in `app_radio.c`. It fills the
-    state, the last downlink (+ unix time from the RTC), the counters and the PA cap,
-    then asks the backend: `app_radio_lrw_fill_status()` / `app_radio_p2p_fill_status()`.
-  - LoRaWAN reads DR / TX power / DevAddr / FCntUp from the MIB under `lorawan_mac_lock()`
-    (guarded by `m_mac_started`). It maps DR→SF and the TXPower index → dBm per region
-    (RP002 tables, integer math).
+  - `app_radio` owns the data (push model). Each backend reports the facts as they
+    happen, through `app_radio_note_downlink()`, `app_radio_set_params()`,
+    `app_radio_set_uplink_rssi()` / `_margin()`, `app_radio_set_session()`,
+    `app_radio_set_fail_streak()` / `_join_attempts()`, `app_radio_set_duty_held()`,
+    `app_radio_set_airtime()` and `app_radio_count()`.
+  - Readers take a spinlock-consistent snapshot with `app_radio_get_status()`, which
+    adds the state, the ages, the downlink's wall-clock time and the counters. Nobody
+    reads a backend directly.
+  - LoRaWAN pushes DR / TX power / DevAddr / FCntUp from the MIB after every sent
+    uplink and on entering HEALTHY (under `lorawan_mac_lock()`). It maps DR→SF and the
+    TXPower index → dBm per region (RP002 tables, integer math).
+  - P2P pushes SF / TX power / session after every transmission.
 - **app_cmd**:
-  - `fill_radio_state()` shared by Info (NFC) and `get_radio_state`;
+  - `fill_radio_state()` for the `get_radio_state` answer;
   - a field-mask page builder that clears the `has_` flags through nanopb's field
     iterator, so no per-field switch;
   - greedy layout as in Info;
   - `PAGE_STREAM_RADIO` with a snapshot for the radio;
   - `GetRadioState.page` host paging.
 - **Shell**: `ats device info` prints the state, signal and parameters lines.
-- **Decoder** (`ttn.js`): `radio_state` in Info and as a Response body;
-  `get_radio_state` in `encodeDownlink`; the retired fields removed.
+- **Decoder** (`ttn.js`): `radio_state` as a Response body (field 14);
+  `get_radio_state` in `encodeDownlink`; the retired Info fields removed.
 
 ## Verification
 
 - Native `tests/cmd`:
-  - NFC Info carries `radio_state`, the LoRaWAN Info does not;
+  - the last-downlink group appears only after a downlink;
   - `get_radio_state` over NFC is one frame;
-  - over LoRaWAN at 51 B it is paged, with seq and a consistent snapshot on every page;
+  - over LoRaWAN at 24 B it is paged: seq on every page, every one of the 25 fields
+    exactly once, the downlink group never split, pages == the NFC frame;
   - at 11 B it is paged with the groups left out;
   - host paging out of range → `OUT_OF_RANGE`.
-- Native `tests/p2p_logic`: the counters (tx / retry / fail / rx / join) across an
-  unacked cycle and a re-join.
-- `ttn.test.js`: `get_radio_state` encoder vector, answer decode, Info field 19 decode.
+- Native `tests/p2p_logic`: the backend pushes the downlink quality to app_radio.
+- `ttn.test.js`: `get_radio_state` encoder vectors (empty / page), paged answer decode,
+  state names.
 - HIL on 0413:
-  - NFC Info and `get_radio_state` over P2P and LoRaWAN;
+  - `get_radio_state` over NFC, P2P and LoRaWAN;
   - Hub-halt test: `fail_count` / `retry_count` / `fail_streak` match the RTT log.
 
 ## Compatibility
 
-- **Manager-App**: reads `Info.radio_state` (19) instead of `lrw_state` (12) and the
-  `last_dl_*` fields (16–18). Older app builds simply see those fields absent.
+- **Manager-App**: sends `get_radio_state` over NFC instead of reading `lrw_state` (12)
+  and the `last_dl_*` fields (16–18) from Info. Older app builds simply see those
+  fields absent. Told on 2026-09-26.
 - **Hub / Portal (proximos-v2)**: new optional command. Nothing changes unless it is used.
