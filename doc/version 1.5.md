@@ -28,6 +28,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §18. |
 | NFC | **New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2), so an installer with a phone can judge the link at the mounting spot. |
 | History | **Fix** — record timestamps follow the RTC (F27/F28, H-4): report cadence on wall-clock slots, no capture skipped during a replay, each flash page stamped from the RTC (a reboot / power loss / halt is a gap, not a shift), page header v2 keeps a clock-sync fix-up across reboots, the replay ends with the window's last frame. HistoryFrame protocol unchanged. See §20. |
+| LoRaWAN | **Fix** — the M-2 stale-uplink watchdog no longer forces a rejoin while the duty cycle is refusing sends (F29): a rejoin reset the band credits and let the device exceed the 1 % limit. See §21. |
 
 ---
 
@@ -1110,6 +1111,56 @@ Known and unchanged: a reset or power loss loses the ≤ 2 records still staged 
 RAM (one double word), and history is not preserved across a partition layout
 change (debug-history-flash ↔ release) — acceptable, history exists to bridge
 LoRaWAN outages, not as an archive across firmware updates.
+
+---
+
+## 21. M-2 watchdog respects the duty cycle (F29)
+
+The M-2 stale-uplink watchdog (`heartbeat_work_handler` in `app_lrw.c`) forces a
+MAC-reset rejoin when the device is joined but no telemetry uplink has left for
+4 × `interval_report`. That catches a mute station whose sends are perpetually
+skipped (budget 0 loop, retries exhausted) while the work queue and the IWDG
+stay healthy.
+
+It also fired when the sends were refused by the EU868 duty cycle
+(`lorawan_send()` → `-ECONNREFUSED`, `Duty-cycle restricted`). The MAC is alive
+then — only throttled until the 1 h observation window of the band credits rolls
+over — and the rejoin re-initialises LoRaMac, whose band credits live in RAM. The
+device got fresh credits and could exceed the 1 % limit (ETSI EN 300 220): on the
+bench at DR0 with a 60 s interval it rejoined twice in 91 min. A join does not
+entitle the device to new airtime; the duty cycle applies to the radio, not to
+the session.
+
+- Every uplink now goes through `lrw_send()`, which records the result in a
+  duty-cycle refusal streak (first and last refusal); a successful send or a join
+  clears it.
+- The decision is a pure function (`app_lrw_stale.c`): when the station is stale
+  but duty-cycle refusals keep coming (the last one within one report interval
+  + 3 min) and the streak is shorter than the credit window + margin (75 min),
+  M-2 holds and logs `... the duty cycle is refusing sends ...: no rejoin (M-2)`
+  once. Otherwise it rejoins exactly as before.
+- Link loss is still detected by the link-check ladder (3 fails → WARNING →
+  5 fails → RECONNECT), which is independent of M-2; a MAC stuck in
+  "restricted" beyond the window still ends in an M-2 rejoin.
+- Telemetry refused by the duty cycle is dropped after its retries as before;
+  the history ring keeps capturing, so the values are backfilled once the
+  credits return.
+
+At the default 900 s interval this never triggers (DR0 ≈ 4 uplinks/h ≈ 8 s of the
+36 s budget); it matters for short intervals at low data rates and long history
+replays at DR0.
+
+Tests: new `tests/lrw_stale` suite (7 cases: no decision without a clock or
+cadence, stale without an excuse rejoins, streak tracking, duty-cycle hold,
+an old refusal does not hold, the hold is bounded by the window, recent-window
+at a 900 s interval).
+
+Hardware (bench unit, 2026-09-26, DR0 + ADR off, 60 s): the duty cycle refused
+every send from 07:21:46Z (the 1 h credit window started at the join, 07:14Z);
+M-2 logged the hold once at 07:25:43Z and did **not** rejoin; the uplinks
+resumed on the same session (same DevAddr) at 08:14:59Z, when the window
+rolled over. Before the fix the same run rejoined 4 intervals into the
+restriction and got fresh credits.
 
 ---
 
