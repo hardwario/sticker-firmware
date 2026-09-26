@@ -414,36 +414,64 @@ ZTEST(p2p_logic, test_duty_expiry_after_hour)
 		      "the allowance must return when the entry leaves the window");
 }
 
-/* The ring is finite, so a node transmitting more frames per hour than it has
- * entries runs out of slots before it runs out of air-time budget. That is
- * safe -- it can only delay a frame, never permit one the budget forbids --
- * and this pins the direction of that conservatism. */
-ZTEST(p2p_logic, test_duty_ring_full_is_conservative)
+/* The ring is finite, but a full ring must not cap the frame count: the two
+ * oldest entries fold into one (F-P2P-1), so only the air-time budget limits.
+ * Before the fold a 60 s cadence went silent ~13 min of every hour. */
+ZTEST(p2p_logic, test_duty_ring_full_folds_instead_of_blocking)
 {
 	struct p2p_duty d;
 
 	p2p_duty_init(&d);
 
-	/* Fill every slot with a frame far too short to trouble the budget. */
-	for (int i = 0; i < P2P_DUTY_LEDGER_ENTRIES; i++) {
-		int64_t now = i * 10;
+	/* One small frame a minute for an hour: 60 frames, well above the ring
+	 * size, and only 60 x 70 ms = 4.2 s of the 36 s budget. */
+	for (int i = 0; i < 60; i++) {
+		int64_t now = (int64_t)i * 60000;
 
-		zassert_equal(p2p_duty_wait_ms(&d, now, 1), 0, "tiny frame %d must be admitted", i);
-		p2p_duty_charge(&d, now, 1);
+		zassert_equal(p2p_duty_wait_ms(&d, now, 70), 0,
+			      "frame %d must be admitted -- only air-time may refuse", i);
+		p2p_duty_charge(&d, now, 70);
 	}
 
-	/* Budget is barely touched, but there is no slot to record another
-	 * frame in, so the ledger waits for the oldest to expire rather than
-	 * forget a transmission it has already counted. */
-	int64_t wait = p2p_duty_wait_ms(&d, 1000, 1);
+	/* Folding never loses air: everything sent in the last hour is still
+	 * counted, so the budget stays exact. */
+	zassert_true(d.count <= P2P_DUTY_LEDGER_ENTRIES);
 
-	zassert_true(wait > 0, "a full ring must block even with budget to spare");
-	zassert_equal(wait, P2P_DUTY_WINDOW_MS - 1000,
-		      "the wait must be until the OLDEST entry expires, got %lld", wait);
+	uint32_t sum = 0;
 
-	/* And once it does, exactly one slot frees up. */
-	zassert_equal(p2p_duty_wait_ms(&d, P2P_DUTY_WINDOW_MS, 1), 0,
-		      "a freed slot must admit the next frame");
+	for (uint8_t i = 0; i < d.count; i++) {
+		sum += d.entries[(d.head + i) % P2P_DUTY_LEDGER_ENTRIES].air_ms;
+	}
+	zassert_equal(sum, 60u * 70u, "folded ledger must still hold all 60 frames' air");
+
+	/* And the budget still refuses a frame that would exceed it. */
+	zassert_true(p2p_duty_wait_ms(&d, 60 * 60000 - 1, P2P_DUTY_BUDGET_MS) > 0,
+		     "a frame over the remaining budget must still wait");
+}
+
+/* Folding may only over-count: the oldest entry's air leaves the window with
+ * its younger neighbour, never earlier. */
+ZTEST(p2p_logic, test_duty_fold_is_conservative)
+{
+	struct p2p_duty d;
+
+	p2p_duty_init(&d);
+	for (int i = 0; i < P2P_DUTY_LEDGER_ENTRIES; i++) {
+		p2p_duty_charge(&d, (int64_t)i * 1000, 10);
+	}
+	/* Full: the next admission folds entries 0 and 1 (end 0 ms and 1000 ms). */
+	zassert_equal(p2p_duty_wait_ms(&d, 50000, 10), 0);
+	p2p_duty_charge(&d, 50000, 10);
+
+	/* Just after entry 0's own expiry its 10 ms are still counted, because
+	 * they now leave with entry 1: all 49 frames (490 ms) are in the window,
+	 * so exactly the allowance minus 490 ms may still go. */
+	uint32_t remaining = P2P_DUTY_BUDGET_MS - (P2P_DUTY_LEDGER_ENTRIES + 1) * 10;
+
+	zassert_equal(p2p_duty_wait_ms(&d, P2P_DUTY_WINDOW_MS + 500, remaining), 0,
+		      "exactly the un-expired air must be counted");
+	zassert_true(p2p_duty_wait_ms(&d, P2P_DUTY_WINDOW_MS + 500, remaining + 1) > 0,
+		     "the folded older half must not have been released early");
 }
 
 /* Deterministic pseudo-random frame sizes: a failure has to be reproducible. */
@@ -882,14 +910,12 @@ ZTEST(p2p_logic, test_join_duty_block_does_not_advance_the_sweep)
 
 	p2p_test_join_setup(10);
 
-	/* Fill the sliding-hour ledger: p2p_duty_wait_ms() refuses as soon as the
-	 * 48-entry ring is full, whatever the air-time sum, so 48 one-ms charges
-	 * are enough to make send_join_request() return -EAGAIN. */
+	/* Exhaust the sliding-hour air-time budget so send_join_request() returns
+	 * -EAGAIN. (A full ring no longer refuses by itself -- it folds, F-P2P-1 --
+	 * so the budget is what has to run out.) */
 	struct p2p_duty *duty = p2p_test_get_duty();
 
-	for (int i = 0; i < P2P_DUTY_LEDGER_ENTRIES; i++) {
-		p2p_duty_charge(duty, k_uptime_get(), 1);
-	}
+	p2p_duty_charge(duty, k_uptime_get(), P2P_DUTY_BUDGET_MS);
 
 	p2p_test_join_step();
 

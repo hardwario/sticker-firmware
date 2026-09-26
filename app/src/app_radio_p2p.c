@@ -1023,6 +1023,21 @@ static void duty_expire(struct p2p_duty *d, uint32_t now)
 	}
 }
 
+/* Make room for one more entry by folding the two oldest into one: the
+ * younger keeps its end time and takes the older's air, so the pair leaves the
+ * window when the younger would have. Only ever over-counts air (the older
+ * half is held a little longer), so the 1 % bound holds (F-P2P-1). The sum
+ * fits: the ledger never holds more than P2P_DUTY_BUDGET_MS of air. */
+static void duty_fold_oldest(struct p2p_duty *d)
+{
+	struct p2p_duty_entry *oldest = &d->entries[d->head];
+	struct p2p_duty_entry *next = &d->entries[duty_slot(d, 1)];
+
+	next->air_ms = (uint16_t)MIN((uint32_t)next->air_ms + oldest->air_ms, UINT16_MAX);
+	d->head = duty_slot(d, 1);
+	d->count--;
+}
+
 /* Air-time recorded inside the current window. Caller must have expired
  * first. Cannot overflow: ENTRIES * UINT16_MAX is ~3.1e6, and the ledger
  * never admits a sum past P2P_DUTY_BUDGET_MS anyway. */
@@ -1055,18 +1070,10 @@ P2P_TESTABLE void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t a
 	duty_expire(d, now);
 
 	if (d->count >= P2P_DUTY_LEDGER_ENTRIES) {
-		/* Unreachable through the real call paths -- they charge only
-		 * after p2p_duty_wait_ms() returned 0, which requires a free
-		 * slot. If it ever happens, fold into the newest entry: the sum
-		 * stays truthful (never under-reports air already radiated) and
-		 * the window it occupies only grows, so the 1% bound holds.
-		 * Silently dropping the charge is the one outcome that could
-		 * breach it. */
-		struct p2p_duty_entry *newest = &d->entries[duty_slot(d, d->count - 1)];
-
-		newest->end_ms = now;
-		newest->air_ms = (uint16_t)MIN((uint32_t)newest->air_ms + air_ms, UINT16_MAX);
-		return;
+		/* p2p_duty_wait_ms() already folds before admitting, so the real
+		 * call paths never get here with a full ring; fold anyway rather
+		 * than drop a charge, the one outcome that could breach 1 %. */
+		duty_fold_oldest(d);
 	}
 
 	d->entries[duty_slot(d, d->count)] = (struct p2p_duty_entry){
@@ -1095,7 +1102,13 @@ P2P_TESTABLE int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32
 
 	duty_expire(d, now);
 
-	if (d->count < P2P_DUTY_LEDGER_ENTRIES && duty_used_ms(d) + air_ms <= P2P_DUTY_BUDGET_MS) {
+	/* F-P2P-1: a full ring folds its two oldest entries rather than making
+	 * the frame wait for a slot, so only the air-time budget can refuse it. */
+	if (d->count >= P2P_DUTY_LEDGER_ENTRIES) {
+		duty_fold_oldest(d);
+	}
+
+	if (duty_used_ms(d) + air_ms <= P2P_DUTY_BUDGET_MS) {
 		return 0;
 	}
 

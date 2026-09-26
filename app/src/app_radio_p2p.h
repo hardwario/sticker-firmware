@@ -61,14 +61,15 @@ extern "C" {
 #define P2P_DUTY_WINDOW_MS 3600000 /* the sliding window: one hour */
 #define P2P_DUTY_BUDGET_MS 36000   /* 1% of it -- the air-time allowance */
 
-/* Ring capacity. One entry per transmission still inside the window, so this
- * bounds how many frames an hour may contain before the LEDGER rather than
- * the air-time budget becomes the limit: at SF10 the smallest frame the node
- * sends is 17 B / 330 ms, so 36 000 ms buys ~109 of them and 48 entries bind
- * first above ~48 uplinks/hour. That is deliberately conservative -- it can
- * only ever delay a transmission, never permit one the budget forbids (see
- * p2p_duty_wait_ms) -- but it means a bench run wanting the air-time budget
- * to be the visible limit needs an interval above ~75 s. doc/p2p.md §6. */
+/* Ring capacity: one entry per transmission still inside the window. When
+ * the ring is full the two OLDEST entries are folded into one (summed air,
+ * the later end time) instead of making the frame wait for a slot, so the
+ * air-time budget, not the entry count, is the only limit (F-P2P-1). The
+ * folded entry leaves the window a little later than its older half would
+ * have, which can only over-count air, never under-count it: every sliding
+ * hour still stays within 1 %. Before the fold, 48 entries capped a node at
+ * 48 frames/hour whatever their air-time -- a 60 s report cadence went silent
+ * ~13 min of every hour. doc/p2p.md §6. */
 #define P2P_DUTY_LEDGER_ENTRIES 48
 
 /* Ack (0xFA) body layout, doc/p2p.md §6:
