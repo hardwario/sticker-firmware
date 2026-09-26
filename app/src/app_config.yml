@@ -920,14 +920,17 @@ parameters:
   # join-assigned (phase 2) and the link key (session_key) derives from the
   # device's existing LoRaWAN AppKey (lrw_appkey below, §4, #118 phase 2
   # revision) — never hand-typed, and there is no separate join_key/secret_key
-  # involved in P2P at all. shell-only (readable/writable) for this phase: no
-  # NFC/LRW SetParam/ConfigDump wiring yet, and changing radio params over the
-  # very link they configure would sever it (same #271 argument as radio_mode
-  # above).
+  # involved in P2P at all. LoRaWAN↔P2P parity (radio-parity goal, #446-area):
+  # `readable` is omitted (default, same as lrw_region/lrw_adr/lrw_datarate) so
+  # these radio-tuning fields come back over GetConfig/GetParam on every
+  # transport, including a LoRaWAN/P2P ConfigDump. `writable: [shell, nfc]`
+  # keeps them off both radio downlinks — changing radio params over the very
+  # link they configure would sever it (same #271 argument as radio_mode
+  # above) — and off vendor (M-3 recovery channel keeps a narrow write
+  # surface, like the other provisioning fields).
   - name: p2p_frequency
     proto_group: p2p
-    readable: [shell]
-    writable: [shell]
+    writable: [shell, nfc]
     proto_id: 1
     type: int
     default: 868100000
@@ -938,8 +941,7 @@ parameters:
 
   - name: p2p_spreading_factor
     proto_group: p2p
-    readable: [shell]
-    writable: [shell]
+    writable: [shell, nfc]
     proto_id: 2
     type: int
     default: 10
@@ -950,8 +952,7 @@ parameters:
 
   - name: p2p_tx_power
     proto_group: p2p
-    readable: [shell]
-    writable: [shell]
+    writable: [shell, nfc]
     proto_id: 3
     type: int
     default: 14

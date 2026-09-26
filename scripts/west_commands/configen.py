@@ -935,7 +935,7 @@ def build_commands_model(config):
 
 # get_config DUMP_FIELDS[] codegen ------------------------------------------
 # Section order MUST match the DUMP_SECTION_* enum in app_cmd.c.
-DUMP_SECTIONS = ["lorawan", "application", "sensors", "alarms"]
+DUMP_SECTIONS = ["lorawan", "application", "sensors", "alarms", "p2p"]
 
 
 def _varint_bytes(value):

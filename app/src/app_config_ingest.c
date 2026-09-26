@@ -871,9 +871,9 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 		*fault_field = 0;
 	}
 
-	/* M-3: this field is not writable over lrw/p2p/nfc/vendor. */
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
 	if (src->has_frequency && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
-				   tp == APP_CMD_TRANSPORT_NFC || tp == APP_CMD_TRANSPORT_VENDOR)) {
+				   tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(1);
 	} else if (src->has_frequency) {
 		int val = src->frequency;
@@ -884,10 +884,10 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 			FAULT(1);
 		}
 	}
-	/* M-3: this field is not writable over lrw/p2p/nfc/vendor. */
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
 	if (src->has_spreading_factor &&
 	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
-	     tp == APP_CMD_TRANSPORT_NFC || tp == APP_CMD_TRANSPORT_VENDOR)) {
+	     tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(2);
 	} else if (src->has_spreading_factor) {
 		int val = src->spreading_factor;
@@ -898,9 +898,9 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 			FAULT(2);
 		}
 	}
-	/* M-3: this field is not writable over lrw/p2p/nfc/vendor. */
+	/* M-3: this field is not writable over lrw/p2p/vendor. */
 	if (src->has_tx_power && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
-				  tp == APP_CMD_TRANSPORT_NFC || tp == APP_CMD_TRANSPORT_VENDOR)) {
+				  tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(3);
 	} else if (src->has_tx_power) {
 		int val = src->tx_power;
@@ -917,4 +917,17 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 void app_config_fill_p2p(AppConfigMessage_P2P *dst, const uint32_t *ids, size_t n)
 {
 	const struct app_config *c = app_config();
+
+	if (requested(ids, n, 1)) {
+		dst->has_frequency = true;
+		dst->frequency = c->p2p_frequency;
+	}
+	if (requested(ids, n, 2)) {
+		dst->has_spreading_factor = true;
+		dst->spreading_factor = c->p2p_spreading_factor;
+	}
+	if (requested(ids, n, 3)) {
+		dst->has_tx_power = true;
+		dst->tx_power = c->p2p_tx_power;
+	}
 }
