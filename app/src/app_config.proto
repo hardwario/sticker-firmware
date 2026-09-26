@@ -202,7 +202,7 @@ message Command {
         // batch on a fault. A multi-downlink table sets it on the FIRST message
         // only (and `save` on the last). LoRaWAN / NFC / shell, not vendor.
         optional bool                         alarms_replace = 6;
-        // P2P radio tuning (#446-area parity): shell/nfc only, never over a
+        // P2P radio tuning (doc/plan/439 parity): shell/nfc only, never over a
         // LoRaWAN or P2P downlink — see the p2p_* comment in app_config.yml.
         optional AppConfigMessage.P2P         p2p         = 7;
     }

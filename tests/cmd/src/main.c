@@ -495,7 +495,7 @@ ZTEST(cmd, test_get_param_keys_nfc_only)
 	zassert_false(r.body.config_dump.lorawan.has_nwkkey, "LRW: nwkkey leaked over LoRaWAN!");
 }
 
-/* LoRaWAN↔P2P parity (#446-area): p2p_frequency/spreading_factor/tx_power omit
+/* LoRaWAN↔P2P parity (doc/plan/439): p2p_frequency/spreading_factor/tx_power omit
  * `readable`, so they default to every transport like lrw_region/lrw_adr/
  * lrw_datarate — a GetParam(p2p_field) and a full GetConfig dump must return
  * them over NFC (and, unlike the LoRaWAN keys, over the radio transports too;
@@ -2001,7 +2001,7 @@ ZTEST(cmd, test_lrw_region_writable_excludes_vendor)
 		      r.body.error.code);
 }
 
-/* LoRaWAN↔P2P parity (#446-area): p2p_frequency/spreading_factor/tx_power are
+/* LoRaWAN↔P2P parity (doc/plan/439): p2p_frequency/spreading_factor/tx_power are
  * `writable: [shell, nfc]` — never over the very radio link they configure
  * (same #271 argument as radio_mode), and never over the vendor recovery
  * channel either. no_write_lrw also gates the raw-LoRa P2P transport (#118
@@ -2617,7 +2617,7 @@ static void rom_free_stream(enum app_cmd_transport tp, const uint8_t *in, size_t
 		r = decode_resp(out, out_len);
 		zassert_equal(r.page_index, p, "page_index %u != %u", r.page_index, p);
 		zassert_false(rom_in_dump(&r), "ROM on page %u (tp %d)", p, tp);
-		/* #446-area: a page may now be entirely the new p2p group (readable
+		/* doc/plan/439: a page may now be entirely the new p2p group (readable
 		 * over every transport like the LoRaWAN radio params). */
 		zassert_true(r.body.config_dump.has_sensors || r.body.config_dump.has_lorawan ||
 				     r.body.config_dump.has_application ||

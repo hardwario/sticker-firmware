@@ -148,7 +148,7 @@ var _LRW_NAMES = {
 var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
 
 // Names drop the `p2p_` prefix the YAML carries (frequency <- p2p_frequency, ...).
-// Radio-parity (#446-area): readable everywhere, like the LoRaWAN radio params above.
+// Radio parity (doc/plan/439): readable everywhere, like the LoRaWAN radio params above.
 var _P2P_NAMES = { 1: "frequency", 2: "spreading_factor", 3: "tx_power" };
 var _P2P_ENUMS = {};
 var _P2P_FLOAT = {};
@@ -284,7 +284,7 @@ function _decodeConfigDump(bytes, start, end) {
           cd.w1_slot_type.push(_W1_SLOT_TYPES[t.value] || ("type" + t.value));
         }
       }
-      // field 8 = p2p (radio-parity, #446-area): P2P radio tuning, readable
+      // field 8 = p2p (radio parity, doc/plan/439): P2P radio tuning, readable
       // over every transport like the LoRaWAN radio params.
       else if (f === 8) cd.p2p = _decodeP2P(bytes, pos, e2);
       pos = e2;
@@ -952,7 +952,7 @@ function encodeDownlinkCommand(cmd) {
     // alarms_replace (field 6): empty all alarm slots before `alarms` is applied
     // (the whole table in one message); on the FIRST message of a batch only.
     if (b.alarms_replace) body = body.concat(_encTag(6, 0)).concat(_encVarint(1));
-    // p2p (field 7, radio-parity #446-area): shell/nfc only — the device itself
+    // p2p (field 7, radio parity, doc/plan/439): shell/nfc only — the device itself
     // rejects this over a LoRaWAN/P2P downlink, but the builder does not
     // pre-filter by transport so a hand-crafted NFC payload can still use it.
     if (b.p2p) body = body.concat(_encLenDelim(7, _encP2P(b.p2p)));

@@ -920,7 +920,7 @@ parameters:
   # join-assigned (phase 2) and the link key (session_key) derives from the
   # device's existing LoRaWAN AppKey (lrw_appkey below, §4, #118 phase 2
   # revision) — never hand-typed, and there is no separate join_key/secret_key
-  # involved in P2P at all. LoRaWAN↔P2P parity (radio-parity goal, #446-area):
+  # involved in P2P at all. LoRaWAN↔P2P parity (doc/plan/439):
   # `readable` is omitted (default, same as lrw_region/lrw_adr/lrw_datarate) so
   # these radio-tuning fields come back over GetConfig/GetParam on every
   # transport, including a LoRaWAN/P2P ConfigDump. `writable: [shell, nfc]`
