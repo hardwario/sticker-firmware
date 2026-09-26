@@ -27,6 +27,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §17. |
 | NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §18. |
 | NFC | **New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2), so an installer with a phone can judge the link at the mounting spot. |
+| History | **Fix** — record timestamps follow the RTC (F27/F28, H-4): report cadence on wall-clock slots, no capture skipped during a replay, each flash page stamped from the RTC (a reboot / power loss / halt is a gap, not a shift), page header v2 keeps a clock-sync fix-up across reboots, the replay ends with the window's last frame. HistoryFrame protocol unchanged. See §20. |
 
 ---
 
@@ -952,6 +953,163 @@ received**, as measured by the device:
   travel on a page without their age; the unit is empty (not sent) until the first downlink.
 
 Cost: release +160 B flash, +0 B RAM.
+
+---
+
+## 20. History timestamps follow the RTC (F27, F28, H-4)
+
+A history record carries no time of its own: its time is implicit, `base +
+ordinal × interval_report`. v1.5.0 before this change assumed every record came
+exactly one interval after the previous one and none was ever missing. On the
+bench (unit 0413) that failed in four ways:
+
+| Cause | Effect (before) |
+|---|---|
+| Report cadence re-armed `interval_report` after each run on the kernel clock; the debug build's SysTick runs on the free-running MSI (~1.22 % slow, `CONFIG_PM=n`) | Debug timestamps lagged ~44 s/h, ~10 min after 6 h (F27) |
+| `app_history_capture()` returned early while a LoRaWAN replay was streaming (#126) | Every skipped tick shifted all newer records by −1 interval |
+| MCU halted / stalled for several intervals (H10: 6 min halt) | Records after the halt claimed times inside the halt (+358 s) |
+| Flash ring after a reboot / power loss: the first new page was stamped by *ordinal continuation* of the old ring | Post-boot records claimed the time the outage started — shifted by the whole outage, after a power loss even flagged synced (F28, reproduced in `tests/history_flash`: −18000 s after a 5 h outage) |
+
+### What changed
+
+- **Debug clock (A).** `app/debug.overlay` sets `msi-pll-mode` on `clk_msi`: the
+  MSI is trimmed by hardware against the 32.768 kHz LSE, so the debug kernel clock
+  (and every kernel timeout, LoRaWAN RX windows included) tracks the crystal.
+  `app/CMakeLists.txt` applies the overlay automatically whenever `debug.conf` is
+  in `EXTRA_CONF_FILE` (so also for `debug-history-flash`). Release is unchanged:
+  its tick already runs on LPTIM1/LSE, and MSI PLL mode was not validated there
+  across Stop2.
+- **Cadence on RTC slots (B).** The periodic report (sample + history capture +
+  telemetry) runs on a slot grid `anchor + k × interval_report` of the wall clock
+  (`app_slot.c`). Each run maps to the nearest slot and arms the timer for the
+  distance to the next one, re-read from the RTC, so kernel-clock drift and late
+  runs never accumulate. Before the RTC is set the grid runs on uptime (as before);
+  at the first sync the anchor is carried over by the `unix − uptime` offset, so
+  the phase is kept. A timer firing early or late by up to
+  `MIN(interval / 2, 15 s)` (`APP_SLOT_TOLERANCE_S`, covers work-queue latency)
+  keeps its slot. A run further off — a debug halt or a stall longer than the
+  timer's remaining time, an RTC step — re-lays the grid at its own time, so its
+  record keeps the true sampling time (and history opens a new segment) instead
+  of borrowing a slot up to half an interval away (HIL T4: a 150 s halt put the
+  run 30 s off the grid). An `interval_report` change lays a new grid. Boot arming is
+  unchanged (first report one interval out) and the telemetry pre-send jitter
+  (#267) stays in `app_lrw`.
+- **No capture skipped during a replay (C).** The replay cursor is an absolute
+  record ordinal (ring start + evicted total), so eviction under a running replay
+  moves nothing: no record is repeated or skipped, a cursor whose record was
+  evicted resumes at the oldest stored one, and the replay covers the records that
+  existed at its start (newer ones are left for the next replay). Flash backend:
+  writes within the current page go on, but the page rollover (a ~20 ms erase that
+  would stall the replay's RX windows) is held off until the replay ends — a record
+  that needs the next page meanwhile is dropped (a hole, no RAM for a queue).
+- **Segments with their own time base (D).** Record time is periodic only within a
+  *segment*, and a `HistoryFrame` never crosses a segment boundary, so the host's
+  `t0_unix + j × interval_s` stays exact without a protocol change:
+  - **flash ring (release):** segment = page. A page's `base_time` is the RTC time
+    of its first record's slot (uptime with `base_synced=0` while the RTC is unset),
+    never the continuation of the page before it. Every boot still starts a new
+    page, which now gets its real time — F28 is gone. A report slot that doesn't
+    continue the head page's grid (missed slots after a halt/stall or a dropped
+    record, an RTC step of more than half an interval) closes the page early and
+    opens a new one stamped with that slot; the rest of the old page stays unused.
+  - **page header v2** (`PAGE_MAGIC` "HRN2", 40 B = the 32 B v1 header + one double
+    word). The extra double word stays erased when the page is opened. A page opened
+    before the RTC was set (power loss, no RTC until the network `DeviceTimeAns`)
+    is re-based at the clock sync, and the `unix − uptime` offset (+ CRC) is
+    programmed into that double word once — from the report work queue, never from
+    the downlink callback (#96). Mount applies it, so the page keeps its unix times
+    after later reboots. This replaces the #191 "newest record = now" estimate: a
+    page of an earlier boot that never saw the clock stays **unsynced**
+    (`time_synced=false`) instead of getting a guessed time.
+  - **v1 pages** (32 B header, earlier firmware) stay mountable and readable in the
+    same chain, each with its own base; new pages are always v2, so the ring
+    migrates as it wraps.
+  - **RAM ring (debug):** a 4-entry segment table (32 B). A slot discontinuity
+    opens a new entry; a fifth one drops the oldest segment with its records.
+- **Replay end (E, H-4).** The export cursor skips to the next record *inside* the
+  window, so the frame that carries the window's last record ends the replay at
+  once — no extra empty attempt, no `WRN History replay stop at frame N/N`, ~3 s
+  earlier. The warning and the `BUDGET_TOO_SMALL` error stay for the real case
+  (records left but none fits the data rate). The NFC paged read uses the same
+  cursor: the page that reaches the window end already returns `has_more=false`.
+
+### Host-visible behaviour
+
+- **Wire format unchanged** (`HistoryFrame` fields, `ttn.js`, golden vectors).
+- **More frames:** one extra frame per segment boundary inside the requested window
+  (at most one per page: ~585 records per page vs. ~70 records per frame at DR5).
+  `frame_count` counts them.
+- **`time_synced` is per frame** now (it was one flag for the whole buffer): each
+  frame reports its segment's state.
+- **Unsynced records and the window.** A record of an unsynced segment has no unix
+  time, so a `[from_unix, to_unix]` window can't place it. It is returned for an
+  open window (`from_unix` 0, `to_unix` `UINT32_MAX` — what a host sends without
+  bounds) and while the device itself has no wall clock (unchanged: the whole
+  buffer until the clock is synced), but not for a bounded window on a synced
+  device, so a Portal gap fill doesn't drag stale uptime pages along every time.
+- Shell: `history info` adds `segments:`; `history read` prints an unsynced record's
+  time as `up <s> (no-rtc)` (uptime of the boot that recorded it).
+
+### Cost
+
+| | Before | After |
+|---|---|---|
+| Release FLASH / RAM | 163740 B / 52620 B | 165020 B (+1280) / 52684 B (+64, per-page base in RAM) |
+| Debug FLASH / RAM | 221448 B / 61628 B | 223160 B (+1712) / 61628 B (+0) |
+| `debug-history-flash` FLASH / RAM | 223712 B / 60668 B | 225440 B (+1728, 98.28 % of 224 KB) / 60732 B (+64) |
+| Flash ring, temp + humidity (3 B) | 588 records/page, 9408 total | 585 records/page, 9360 total (**−0.51 %**: 1764 → 1757 data bytes/page) |
+| Debug RAM ring | 341 records | 341 records |
+
+A split (halt, stall, RTC step) additionally leaves the rest of that page unused;
+reboots already did. Flash writes per record are unchanged; the fix-up double word
+is one extra program per page recorded without RTC.
+
+### Upgrade / downgrade
+
+Upgrading keeps the stored history (v1 pages are read as before). A **downgrade**
+to an earlier firmware does not recognise v2 pages: it mounts whatever v1 pages are
+left from before the upgrade (stale records) — run `history clear` after a
+downgrade.
+
+### Tests
+
+`tests/history_flash`: F28 (RTC kept across the reboot and power loss + sync:
+zero shift, first frame ends at the page boundary), unsynced page of an earlier
+boot, fix-up double word written from the work queue or the next capture and
+re-read after reboots, v1 pages mounted next to v2 pages, v2 page capacity,
+missed-slot page split, slot jitter, RTC step back, replay holding off the
+rollover (plain and split). `tests/history`: capture during a replay with eviction
+(absolute cursor), reset during a replay, RAM segment split / table overflow /
+retirement / clock-sync re-base, replay end at the window end. `tests/slot`: slot
+grid rounding, early/late runs, a 1.22 % slow kernel clock over 6 h, uptime → unix
+switch, RTC steps, interval change, and a run far off its slot re-anchoring.
+`tests/history_flash` also checks that a page of foreign data is skipped at
+mount (not erased) and does not hide a valid chain that wraps around the end of
+the partition.
+
+### Hardware acceptance (bench unit, 2026-09-25/26)
+
+Run on the bench STICKER against the ProXimos Hub (ChirpStack + Portal), on the
+debug RAM, debug-history-flash and release images:
+
+| Test | Result |
+|---|---|
+| F28 on the old code (debug-history-flash, 3 min halt + reset) | reproduced: post-boot records stamped −235 s |
+| Same with this change | post-boot records carry their real time |
+| v1 → v2 upgrade (same partition) | v1 pages mounted and exported next to new v2 pages |
+| Halt 6 min / 4 × 150 s (flash and RAM) | one new segment per halt, a hole instead of a shift; replay returns one frame per segment with the correct `t0`; the RAM segment table overflows cleanly |
+| Run 30 s off its slot after a halt | fixed during HIL: the record now carries its sampling time (was borrowing the nearest slot) |
+| Debug kernel drift, MSI PLL | −2 s over 6 h (1.22 % ≈ 267 s before); after 6 h the newest record is stamped within ~1 s of its sampling time, 340 consecutive 60 s steps in one segment |
+| DR0, 60 s, 91 min with duty-cycle restriction and forced rejoins | no re-anchor, no hole, no page closed early; replay at DR0 = 9 records per frame |
+| Release: 30 min ChirpStack outage + Portal auto backfill | one replay, 36 records at 60 s steps, times exact |
+| Release: `interval_report` change | history restarts at the new interval (unchanged, intended) |
+
+Not covered on hardware: the fix-up double word after a real power loss with the
+RTC unset (a J-Link reset keeps the RTC) — covered by `tests/history_flash`.
+Known and unchanged: a reset or power loss loses the ≤ 2 records still staged in
+RAM (one double word), and history is not preserved across a partition layout
+change (debug-history-flash ↔ release) — acceptable, history exists to bridge
+LoRaWAN outages, not as an archive across firmware updates.
 
 ---
 

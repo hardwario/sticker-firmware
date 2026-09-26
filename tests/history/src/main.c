@@ -12,6 +12,7 @@
 
 #include <zephyr/ztest.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
 
 #include <limits.h>
 #include <math.h>
@@ -166,7 +167,8 @@ ZTEST(history, test_export)
 	uint32_t t0 = 0;
 	uint16_t n = 0;
 	size_t next = 0;
-	size_t bytes = app_history_export_page(0, 0xFFFFFFFF, 0, buf, sizeof(buf), &t0, &n, &next);
+	size_t bytes =
+		app_history_export_page(0, 0xFFFFFFFF, 0, buf, sizeof(buf), &t0, NULL, &n, &next);
 
 	zassert_equal(n, 3, "n_written %u", n);
 	zassert_equal(next, 3, "next_ord %zu", next);
@@ -263,6 +265,308 @@ ZTEST(history, test_pressure_illuminance_orientation_accel_channels)
 		      "illuminance absent (NaN sentinel)");
 	zassert_false(r.present & BIT16(APP_HISTORY_ORIENTATION),
 		      "orientation absent (INT_MAX sentinel)");
+}
+
+/* Temperature of the i-th record in an absolute-cursor export buffer (3 B
+ * temp+hum records: int16 LE x100 + uint8 x2). */
+static double rec_temp(const uint8_t *buf, int i)
+{
+	return (int16_t)sys_get_le16(&buf[i * 3]) / 100.0;
+}
+
+/* C (#126 follow-up): capture keeps running while a replay streams the ring.
+ * The replay cursor is an absolute ordinal, so records evicted underneath it do
+ * not shift it (no repeated / skipped record), a cursor that falls out of the
+ * ring resumes at the oldest record still stored, and the replay ends at its
+ * start snapshot even though newer records keep arriving. */
+ZTEST(history, test_capture_during_replay_absolute_cursor)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	size_t cap = app_history_capacity(); /* 64 B / 3 B = 21 */
+
+	for (size_t i = 0; i < cap; i++) {
+		set_th((float)i, 50.0f);
+		app_history_capture();
+	}
+
+	uint32_t first, end;
+	app_history_span(&first, &end);
+	zassert_equal(end - first, cap, "span %u..%u", first, end);
+
+	app_history_set_replay_active(true);
+
+	uint8_t buf[64];
+	uint32_t t0, t0_first, next;
+	uint16_t n;
+
+	/* Frame 1: records 0..4. */
+	zassert_equal(app_history_export_abs(0, UINT32_MAX, first, end, buf, 15, &t0_first, NULL,
+					     &n, &next),
+		      15);
+	zassert_equal(n, 5);
+	zassert_within(rec_temp(buf, 0), 0.0, 0.01);
+	zassert_equal(next, first + 5);
+
+	/* Three captures during the replay: not skipped, and they evict records 0..2
+	 * (already sent). */
+	for (int i = 0; i < 3; i++) {
+		set_th(100.0f + (float)i, 50.0f);
+		app_history_capture();
+	}
+	zassert_equal(app_history_count(), cap, "captures must not be skipped");
+	struct app_history_record r;
+	zassert_equal(app_history_get(cap - 1, &r), 0);
+	zassert_within(r.value[APP_HISTORY_TEMPERATURE], 102.0, 0.01, "newest %g",
+		       r.value[APP_HISTORY_TEMPERATURE]);
+
+	/* Frame 2 continues exactly after record 4 despite the eviction. */
+	uint32_t cur = next;
+
+	zassert_equal(
+		app_history_export_abs(0, UINT32_MAX, cur, end, buf, 15, &t0, NULL, &n, &next), 15);
+	zassert_equal(n, 5);
+	zassert_within(rec_temp(buf, 0), 5.0, 0.01, "frame 2 starts at %g", rec_temp(buf, 0));
+	zassert_equal(t0, t0_first + 5 * 60, "t0 %u", t0);
+
+	/* Ten more captures evict records 3..12 — past the cursor (10). */
+	for (int i = 0; i < 10; i++) {
+		app_history_capture();
+	}
+	cur = next;
+	zassert_equal(
+		app_history_export_abs(0, UINT32_MAX, cur, end, buf, 15, &t0, NULL, &n, &next), 15);
+	zassert_within(rec_temp(buf, 0), 13.0, 0.01, "fell out: resume at the oldest, got %g",
+		       rec_temp(buf, 0));
+	zassert_equal(t0, t0_first + 13 * 60, "t0 %u", t0);
+
+	/* Drain: the replay stops at its start snapshot (record 20), the 13 records
+	 * captured meanwhile are left for the next replay. */
+	uint32_t sent = n;
+
+	while (next < end) {
+		cur = next;
+		(void)app_history_export_abs(0, UINT32_MAX, cur, end, buf, 15, &t0, NULL, &n,
+					     &next);
+		zassert_true(n > 0, "stalled at %u", cur);
+		sent += n;
+	}
+	zassert_equal(next, end);
+	zassert_within(rec_temp(buf, n - 1), 20.0, 0.01, "last sent %g", rec_temp(buf, n - 1));
+	zassert_equal(sent, 8, "records 13..20 in the last frames, got %u", sent);
+
+	app_history_set_replay_active(false);
+}
+
+/* A logical reset (clear / layout / interval change) during a replay: the stale
+ * cursor and end lie before the new oldest record, so the replay just ends
+ * instead of streaming new-layout records under the old frame header. */
+ZTEST(history, test_reset_during_replay_ends_it)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	for (int i = 0; i < 6; i++) {
+		app_history_capture();
+	}
+	uint32_t first, end;
+
+	app_history_span(&first, &end);
+	app_history_set_replay_active(true);
+	app_history_clear();
+	for (int i = 0; i < 4; i++) {
+		app_history_capture();
+	}
+
+	uint8_t buf[64];
+	uint32_t t0, next;
+	uint16_t n;
+
+	zassert_equal(app_history_export_abs(0, UINT32_MAX, first, end, buf, sizeof(buf), &t0, NULL,
+					     &n, &next),
+		      0);
+	zassert_equal(n, 0);
+	zassert_true(next >= end, "stale replay must be exhausted (next %u end %u)", next, end);
+	app_history_set_replay_active(false);
+}
+
+/* ---- RAM segment table (slot discontinuities) --------------------------- */
+
+#define T0 1750000000u
+
+static uint16_t frames_all(void)
+{
+	return app_history_count_frames(0, UINT32_MAX, 64);
+}
+
+/* A 6 min halt on the RTC-slot cadence: the RAM ring opens a second segment,
+ * the post-halt records keep their true times (T2). */
+ZTEST(history, test_ram_missed_slots_split)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	for (int i = 0; i < 5; i++) {
+		app_history_capture_at(T0 + i * 60, true);
+	}
+	uint32_t t = T0 + 4 * 60 + 7 * 60; /* six slots missed */
+
+	for (int i = 0; i < 3; i++) {
+		app_history_capture_at(t + i * 60, true);
+	}
+	zassert_equal(app_history_count(), 8);
+	zassert_equal(frames_all(), 2, "two segments -> two frames");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(4, &r), 0);
+	zassert_equal(r.time_unix, T0 + 4 * 60);
+	zassert_equal(app_history_get(5, &r), 0);
+	zassert_equal(r.time_unix, t, "post-halt %u want %u", r.time_unix, t);
+
+	uint8_t buf[64];
+	uint32_t t0;
+	uint16_t n;
+	size_t next;
+
+	(void)app_history_export_page(0, UINT32_MAX, 0, buf, sizeof(buf), &t0, NULL, &n, &next);
+	zassert_equal(n, 5);
+	zassert_equal(t0, T0);
+	(void)app_history_export_page(0, UINT32_MAX, next, buf, sizeof(buf), &t0, NULL, &n, &next);
+	zassert_equal(n, 3);
+	zassert_equal(t0, t);
+}
+
+/* Five discontinuities for a 4-entry table: the oldest segment is dropped with
+ * its records (T4). */
+ZTEST(history, test_ram_segment_table_overflow)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	for (int seg = 0; seg < 5; seg++) {
+		uint32_t base = T0 + seg * 3600;
+
+		app_history_capture_at(base, true);
+		app_history_capture_at(base + 60, true);
+	}
+	zassert_equal(app_history_count(), 8, "oldest segment dropped");
+	zassert_equal(frames_all(), 4);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_equal(r.time_unix, T0 + 3600, "oldest kept %u", r.time_unix);
+	zassert_equal(app_history_get(7, &r), 0);
+	zassert_equal(r.time_unix, T0 + 4 * 3600 + 60);
+}
+
+/* Wrapping the ring evicts the oldest segment record by record; once empty it
+ * leaves the table and the times of the rest are unchanged. */
+ZTEST(history, test_ram_eviction_retires_segment)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	size_t cap = app_history_capacity();
+
+	app_history_capture_at(T0, true);
+	app_history_capture_at(T0 + 60, true);
+	uint32_t t = T0 + 7200;
+
+	for (size_t i = 0; i < cap; i++) {
+		app_history_capture_at(t + i * 60, true);
+	}
+	zassert_equal(app_history_count(), cap);
+	zassert_equal(frames_all(), 1 + (cap * 3 - 1) / 64, "old segment gone");
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(0, &r), 0);
+	zassert_equal(r.time_unix, t);
+	zassert_equal(app_history_get(cap - 1, &r), 0);
+	zassert_equal(r.time_unix, t + (cap - 1) * 60);
+}
+
+/* Before the RTC is set the segments run on uptime; the clock sync re-bases
+ * every one of them. */
+ZTEST(history, test_ram_clock_sync_rebases_segments)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	app_history_capture_at(100, false);
+	app_history_capture_at(160, false);
+	app_history_capture_at(1000, false); /* stall on uptime -> second segment */
+	zassert_equal(frames_all(), 2);
+
+	uint32_t up = (uint32_t)(k_uptime_get() / 1000);
+
+	app_history_on_clock_sync(T0 + up);
+
+	struct app_history_record r;
+	zassert_equal(app_history_get(1, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, T0 + 160);
+	zassert_equal(app_history_get(2, &r), 0);
+	zassert_true(r.time_synced);
+	zassert_equal(r.time_unix, T0 + 1000);
+}
+
+/* E (H-4): the frame that packs the window's last record already reports the
+ * scan exhausted (next >= end / next_ord == count), so the replay ends without
+ * an extra empty frame and no "stop at frame N/N" warning; frame_count from
+ * count_frames() matches. A cap below one record still reports records left
+ * (the genuine budget-error case). */
+ZTEST(history, test_export_ends_at_window_end)
+{
+	setup();
+	g_app_config.interval_report = 60;
+	for (int i = 0; i < 10; i++) {
+		set_th((float)i, 50.0f);
+		app_history_capture_at(T0 + i * 60, true);
+	}
+	test_clock_has = true; /* synced device: the window applies */
+	test_clock_unix = T0 + 600;
+
+	uint32_t from = T0 + 120, to = T0 + 300; /* records 2..5 */
+	uint32_t first, end;
+	uint8_t buf[64];
+	uint32_t t0, next;
+	uint16_t n;
+
+	app_history_span(&first, &end);
+	zassert_equal(app_history_count_frames(from, to, 6), 2);
+
+	zassert_equal(app_history_export_abs(from, to, first, end, buf, 6, &t0, NULL, &n, &next),
+		      6);
+	zassert_equal(n, 2);
+	zassert_equal(t0, T0 + 120);
+	zassert_equal(next, first + 4);
+
+	zassert_equal(app_history_export_abs(from, to, next, end, buf, 6, &t0, NULL, &n, &next), 6);
+	zassert_equal(n, 2);
+	zassert_equal(t0, T0 + 240);
+	zassert_true(next >= end, "window exhausted with records 6..9 left (next %u end %u)", next,
+		     end);
+
+	/* Same for the NFC paging cursor: next_ord == count -> has_more=false. */
+	size_t nord;
+
+	(void)app_history_export_page(from, to, 4, buf, 6, &t0, NULL, &n, &nord);
+	zassert_equal(n, 2);
+	zassert_equal(nord, app_history_count(), "next_ord %zu", nord);
+
+	/* Open window at the ring end (ord == count). */
+	(void)app_history_export_page(0, UINT32_MAX, 8, buf, 6, &t0, NULL, &n, &nord);
+	zassert_equal(n, 2);
+	zassert_equal(nord, 10);
+
+	/* A frame too small for one record: nothing packed, records remain. */
+	zassert_equal(app_history_export_abs(from, to, first, end, buf, 2, &t0, NULL, &n, &next),
+		      0);
+	zassert_equal(n, 0);
+	zassert_equal(next, first + 2, "budget case must leave the cursor on a record");
+
+	/* The window starts inside the ring: the first frame skips to it. */
+	zassert_equal(app_history_export_abs(T0 + 530, UINT32_MAX, first, end, buf, 64, &t0, NULL,
+					     &n, &next),
+		      3);
+	zassert_equal(t0, T0 + 540);
+	zassert_true(next >= end);
+	test_clock_has = false;
 }
 
 ZTEST_SUITE(history, NULL, NULL, NULL, NULL, NULL);
