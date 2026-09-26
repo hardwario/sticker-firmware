@@ -428,8 +428,8 @@ Run these first in every session; they gate everything else. All `A`/host-only.
   only covers the static rule-validation layer. `buzzer` (#397) drives the real
   `app_buzzer.c` melody engine against a `gpio_emul`-backed fake GPIO: melody sequencing,
   abort ordering, queue-replace policy, and `buzzer_play` id bounds. `p2p_logic` (#118, PR
-  #408) compiles the real `app_p2p.c` against a no-op fake LoRa device (`src/emul_lora.c`) and
-  thin stubs, reaching its internal pure helpers via CONFIG_ZTEST hooks (`app_p2p.h`): LoRa
+  #408) compiles the real `app_radio_p2p.c` against a no-op fake LoRa device (`src/emul_lora.c`) and
+  thin stubs, reaching its internal pure helpers via CONFIG_ZTEST hooks (`app_radio_p2p.h`): LoRa
   time-on-air, the CCM nonce layout, the data-plane frame codec (round-trip + tamper), and the
   token-bucket duty-cycle governor (B2 — refill accrual, burst, cap, long-run ≤1%).
 - **Expect:** every suite prints `PROJECT EXECUTION SUCCESSFUL`.
@@ -694,7 +694,7 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 - **Expect:** mode changes only via shell/NFC (LRW SetParam refused — AT-CFG-03); each mode
   boots clean.
 - **Also covers the zero-`app_key` guard (#118, doc/p2p.md §4)** — no automated coverage
-  exists for it (`app_p2p.c` needs the LoRa driver, so no native_sim suite reaches it), so
+  exists for it (`app_radio_p2p.c` needs the LoRa driver, so no native_sim suite reaches it), so
   this is the only place it gets exercised. In `radio-mode p2p`, set
   `lrw-appkey 00000000000000000000000000000000` + save: expect `P2P not started: lrw_appkey
   is all-zero` in the boot log, `app_key: MISSING (radio refused to start)` from `ats radio
