@@ -54,15 +54,11 @@ bool app_radio_lrw_is_ready(void);
 /* Compose + split + send a telemetry snapshot (fPort 2) from the current sensor
  * data. app_radio_lrw builds the snapshot (app_compose), splits it into DR-budget
  * frames, piggybacks a LinkCheckReq on the first frame when the N-th-message
- * cadence is due, and retries on a duty-cycle backoff. Triggered by app_report
- * after it samples + captures history. No-op while joining/reconnecting, during
- * calibration or while a history replay owns the radio. */
+ * cadence is due, and retries on a duty-cycle backoff. Triggered by app_radio
+ * (after the #267 pre-send jitter, which app_radio takes for both radios) once
+ * app_report has sampled + captured history. No-op while joining/reconnecting,
+ * during calibration or while a history replay owns the radio. */
 void app_radio_lrw_send_telemetry(void);
-
-/* Same as app_radio_lrw_send_telemetry(), but without the random pre-send delay: the
- * host-requested uplink (force_send / sample over LoRaWAN) leaves at once. A
- * jittered report still pending is folded into this send (F14). */
-void app_radio_lrw_send_telemetry_now(void);
 
 /* Register a callback fired on a link-ready edge (join success / history-replay
  * finish) so app_report can resume the report cadence with an immediate uplink.

@@ -2179,6 +2179,29 @@ ZTEST(cmd, test_too_large_fallback_fits_11b_budget)
 		      r.body.error.code);
 }
 
+/* P2P parity: an answer that does not fit the P2P response budget is the same
+ * compact BUDGET_TOO_SMALL Error as over LoRaWAN (was UNKNOWN "response too
+ * large", which itself did not fit a small slot). */
+ZTEST(cmd, test_too_large_fallback_is_budget_error_over_p2p)
+{
+	uint8_t in[16], out[11];
+	size_t in_len = unhex("08021a040a020607", in, sizeof(in));
+	size_t out_len = 0;
+
+	reset_cfg();
+	int ret =
+		app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, sizeof(out), &out_len, NULL);
+	zassert_equal(ret, 0, "fallback Error must fit, ret %d", ret);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "Response decode failed");
+	zassert_equal(r.seq, 2, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code %d",
+		      r.body.error.code);
+}
+
 /* #409 3f: the unsolicited BUDGET_TOO_SMALL Error (history replay stopped by a
  * DR drop) keeps the request seq and fits the 11 B budget tier. */
 ZTEST(cmd, test_build_budget_error_fits_11b)

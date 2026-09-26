@@ -2880,9 +2880,10 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		LOG_WRN("Response too large for buffer; sending Error instead");
 		resp = (Response)Response_init_zero;
 		resp.seq = seq;
-		/* #409: over LoRaWAN the only reason is the DR payload budget, so say
-		 * so — the host should retry once ADR raises the DR. */
-		if (transport == APP_CMD_TRANSPORT_LRW) {
+		/* #409: over a radio the only reason is the payload budget (LoRaWAN:
+		 * the DR, P2P: the response slot), so say so — over LoRaWAN the host
+		 * should retry once ADR raises the DR. */
+		if (radio_transport(transport)) {
 			make_error(&resp, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
 		} else {
 			make_error(&resp, Response_Error_Code_UNKNOWN, "response too large");

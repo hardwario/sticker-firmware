@@ -1022,6 +1022,81 @@ ZTEST(p2p_logic, test_paired_boot_announces_through_app_radio)
 	zassert_equal(p2p_test_announce_calls, 1, "announce calls %d", p2p_test_announce_calls);
 }
 
+/* LoRaWAN #219 / #340 M6 parity: a telemetry frame the radio refuses is kept
+ * and re-sent as-is, P2P_FRAME_MAX_RETRIES (8) times, then the snapshot is
+ * reset so the next report does not continue a stale one. */
+extern size_t test_compose_len;
+extern int g_compose_reset_calls;
+extern int test_lora_send_ret;
+
+ZTEST(p2p_logic, test_refused_telemetry_frame_retried_then_snapshot_reset)
+{
+	p2p_test_join_setup(7);
+	p2p_test_set_paired();
+	p2p_test_tx_reset();
+	test_compose_len = 10;
+	test_lora_send_ret = -EIO;
+	g_compose_reset_calls = 0;
+
+	p2p_test_telemetry_send();
+	zassert_true(p2p_test_frame_pending(), "a refused frame is kept");
+	for (int i = 0; i < 7; i++) {
+		p2p_test_telemetry_send();
+		zassert_true(p2p_test_frame_pending(), "retry %d keeps it", i + 1);
+	}
+	zassert_equal(g_compose_reset_calls, 0, "no reset before the budget is spent");
+
+	p2p_test_telemetry_send(); /* 8th retry fails: abandon */
+	zassert_false(p2p_test_frame_pending(), "abandoned after 8 retries");
+	zassert_equal(g_compose_reset_calls, 1, "snapshot reset once");
+
+	test_lora_send_ret = 0;
+	test_compose_len = 0;
+	p2p_test_tx_reset();
+}
+
+/* F-P1-1: while a confirmed uplink's Ack retry is pending, no fresh-counter
+ * frame goes out (the central would reject the late retry as a replay); the
+ * waiting frame is neither sent nor counted as a failure. */
+ZTEST(p2p_logic, test_no_fresh_frame_while_an_ack_retry_is_pending)
+{
+	p2p_test_join_setup(7);
+	p2p_test_set_paired();
+	p2p_test_tx_reset();
+	test_compose_len = 10;
+	test_lora_send_ret = -EIO; /* would count as a failure if it were sent */
+	g_compose_reset_calls = 0;
+	p2p_test_put_ack_retry(2561);
+
+	for (int i = 0; i < 12; i++) {
+		p2p_test_telemetry_send();
+	}
+	zassert_true(p2p_test_frame_pending(), "the frame waits for the in-flight uplink");
+	zassert_equal(g_compose_reset_calls, 0, "waiting is not a failure");
+
+	test_lora_send_ret = 0;
+	test_compose_len = 0;
+	p2p_test_tx_reset();
+}
+
+/* LoRaWAN parity: a response / alarm queued while the node is not paired
+ * (joining, self-heal) stays queued instead of being dropped. */
+ZTEST(p2p_logic, test_frames_queued_while_unpaired_are_kept)
+{
+	const uint8_t resp[] = {0x01, 0x08, 0x05, 0x12, 0x00};
+
+	p2p_test_join_setup(7);
+	p2p_test_tx_reset();
+	p2p_test_set_link(P2P_LINK_JOINING, true, false, 0, false);
+
+	zassert_equal(app_radio_p2p_queue_response(0, resp, sizeof(resp)), 0, "queued");
+	k_sleep(K_MSEC(50)); /* let m_tx_work run */
+	zassert_equal(p2p_test_tx_waiting(), 1, "kept while unpaired (%u)", p2p_test_tx_waiting());
+
+	p2p_test_tx_reset();
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
+}
+
 /* R-06: the sweep advanced on ANY non-EAGAIN send result, so a radio that is
  * simply broken walked the whole SF order without transmitting once and then
  * charged a backoff step for the "pass" it never flew.

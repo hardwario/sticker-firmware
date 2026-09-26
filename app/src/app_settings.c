@@ -330,16 +330,12 @@ static int clear_and_save_alarm_rules(void)
  * that would need a synchronous cross-module call from app_cmd.c into
  * app_radio_lrw.c's NVM handling from an arbitrary caller thread, which is riskier
  * and out of scope here. Left as a follow-up. */
-#if defined(CONFIG_LORAWAN)
 static void lrw_reset_nvm_before_reboot(void)
 {
-	app_radio_lrw_reset_nvm();
+	/* Every stack: the LoRaWAN NVM and the P2P pairing (app_radio_reset_link()),
+	 * both built under the keys this tier just reset. */
+	app_radio_reset_link();
 }
-#else
-static void lrw_reset_nvm_before_reboot(void)
-{
-}
-#endif /* defined(CONFIG_LORAWAN) */
 
 int app_settings_device_reset(void)
 {

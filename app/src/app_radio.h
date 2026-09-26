@@ -163,13 +163,83 @@ bool app_radio_is_ready(void);
 /* Application-payload budget (bytes) for the next uplink. */
 uint8_t app_radio_get_max_payload(void);
 
-/* Compose + send a telemetry snapshot (triggered by app_report). */
+/* Compose + send a telemetry snapshot (triggered by app_report) after the fleet
+ * pre-send jitter (#267): a random delay of up to min(interval_report / 10,
+ * 10 s), the same policy for both radios. The jitter lives on the transmission,
+ * never on the report cadence (history timestamps follow the fixed cadence). */
 void app_radio_send_telemetry(void);
 
-/* Same, for a host-requested uplink (force_send / sample, F14): LoRaWAN skips
- * its fleet pre-send jitter (app_radio_lrw_send_telemetry_now()); P2P has no
- * pre-send jitter, so it is the plain app_radio_p2p_send_telemetry(). */
+/* Same, for a host-requested uplink (force_send / sample, F14): no jitter, and a
+ * jittered report still pending is folded into this send. */
 void app_radio_send_telemetry_now(void);
+
+/* Forget the network session on every radio stack before a reset-tier reboot
+ * (factory_reset / vendor_reset / lrw_reset): the LoRaWAN NVM (frame counters,
+ * DevNonce, session) and the P2P pairing. The P2P dev_nonce and frame counter
+ * are kept -- the central's replay protection needs them to keep advancing. */
+void app_radio_reset_link(void);
+
+/* ---- Stale-uplink watchdog policy (M-2, F29; shared by both radios) -------
+ * A joined station whose telemetry has not left for APP_RADIO_STALE_FACTOR x
+ * interval_report is mute although its work queue drains: force a rejoin.
+ * Unless the duty cycle explains it -- sends held by the duty cycle recently
+ * (within one interval + margin) and for no longer than the 1 h window plus a
+ * margin: the radio is alive and throttled, and a rejoin would only reset the
+ * LoRaMac band credits (F29). Pure, so both backends and the tests share it. */
+#define APP_RADIO_STALE_FACTOR              4
+#define APP_RADIO_STALE_DC_HOLD_MAX_MS      (75LL * 60 * 1000)
+#define APP_RADIO_STALE_DC_RECENT_MARGIN_MS (3LL * 60 * 1000)
+
+enum app_radio_stale {
+	APP_RADIO_STALE_OK = 0,  /* an uplink left recently enough (or no clock) */
+	APP_RADIO_STALE_HOLD_DC, /* stale, but the duty cycle explains it: wait */
+	APP_RADIO_STALE_REJOIN,  /* stale with no duty-cycle excuse: force rejoin */
+};
+
+/* Duty-cycle hold streak: first and most recent held send (uptime ms, 0 = none). */
+struct app_radio_stale_dc {
+	int64_t since_ms;
+	int64_t last_ms;
+};
+
+/* Record a send attempt: `held` = refused / deferred by the duty cycle extends the
+ * streak, `sent` clears it, anything else (a radio error) leaves it. */
+static inline void app_radio_stale_note(struct app_radio_stale_dc *dc, bool sent, bool held,
+					int64_t now_ms)
+{
+	if (sent) {
+		dc->since_ms = 0;
+		dc->last_ms = 0;
+	} else if (held) {
+		if (dc->since_ms == 0) {
+			dc->since_ms = now_ms;
+		}
+		dc->last_ms = now_ms;
+	}
+}
+
+/* `last_uplink_ms` = uptime of the last telemetry uplink (0 = none since the last
+ * (re)join: no decision), `interval_s` = interval_report (0: no decision). */
+static inline enum app_radio_stale app_radio_stale_check(int64_t now_ms, int64_t last_uplink_ms,
+							 const struct app_radio_stale_dc *dc,
+							 uint32_t interval_s)
+{
+	if (last_uplink_ms == 0 || interval_s == 0) {
+		return APP_RADIO_STALE_OK;
+	}
+
+	int64_t interval_ms = (int64_t)interval_s * 1000;
+
+	if (now_ms - last_uplink_ms <= interval_ms * APP_RADIO_STALE_FACTOR) {
+		return APP_RADIO_STALE_OK;
+	}
+	if (dc->since_ms != 0 && dc->last_ms != 0 &&
+	    now_ms - dc->last_ms <= interval_ms + APP_RADIO_STALE_DC_RECENT_MARGIN_MS &&
+	    now_ms - dc->since_ms < APP_RADIO_STALE_DC_HOLD_MAX_MS) {
+		return APP_RADIO_STALE_HOLD_DC;
+	}
+	return APP_RADIO_STALE_REJOIN;
+}
 
 /* The active radio retires a delivered command only on a matching answer: the
  * P2P central keeps a 0x56 at the head of its queue and re-delivers it until a
