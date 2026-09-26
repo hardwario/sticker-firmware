@@ -15,6 +15,8 @@
 #include "app_p2p.h"
 
 extern uint16_t test_history_frame_count;
+extern uint32_t test_history_first_abs;
+extern size_t test_history_count;
 extern int g_compose_budget_calls;
 /* tests/p2p_logic/src/stubs.c's app_settings_save_p2p_spreading_factor knobs. */
 extern int g_test_saved_sf;
@@ -1081,7 +1083,7 @@ ZTEST(p2p_logic, test_history_replay_start_is_not_reentrant)
 {
 	bool active;
 	uint32_t seq, idx;
-	size_t cursor;
+	uint32_t cursor;
 
 	p2p_test_replay_setup();
 	test_history_frame_count = 3;
@@ -1109,6 +1111,29 @@ ZTEST(p2p_logic, test_history_replay_start_is_not_reentrant)
 	zassert_true(active, "the replay must still be active");
 	zassert_equal(seq, 42u, "the in-flight stream's seq must not be replaced by the retry's");
 	zassert_equal(idx, 0u, "the frame index must not be rewound");
+}
+
+ZTEST(p2p_logic, test_history_replay_cursor_is_absolute)
+{
+	bool active;
+	uint32_t seq, idx, cursor;
+
+	p2p_test_replay_setup();
+	test_history_frame_count = 2;
+	/* The RAM ring has evicted 40 records: the stored span is [40, 45). */
+	test_history_first_abs = 40;
+	test_history_count = 45;
+
+	/* #436: the replay cursor is an absolute record ordinal (app_history_span()),
+	 * so a capture or an eviction during the stream moves nothing. A replay that
+	 * still started at ordinal 0 would re-read evicted records' slots. */
+	zassert_true(app_p2p_start_history_replay(0, UINT32_MAX, 5), "replay must start");
+	p2p_test_get_replay(&active, &seq, &cursor, &idx);
+	zassert_true(active, "the replay should be marked active");
+	zassert_equal(cursor, 40u, "cursor must start at the oldest stored record, got %u", cursor);
+
+	test_history_first_abs = 0;
+	test_history_count = 1;
 }
 
 ZTEST(p2p_logic, test_telemetry_does_not_interleave_with_a_history_replay)

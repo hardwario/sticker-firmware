@@ -168,10 +168,12 @@ message Command {
         Sample           sample            = 21;
         FactoryReset     factory_reset     = 23;
         SetSecretKey     set_secret_key    = 24;
-        ClmAck           clm_ack           = 25;
+        ClaimDone        claim_done        = 25;
         SetSecretKey     vendor_reset      = 26;
-        ClmRearm         clm_rearm         = 27;
+        ClaimActive      claim_active      = 27;
         BuzzerPlay       buzzer_play       = 28;
+        GetClaimInfo     get_claim_info    = 29;
+        GetBasicInfo     get_basic_info    = 30;
         GetSettings      get_settings      = 31;
     }
 // END GENERATED COMMANDS
@@ -191,6 +193,14 @@ message Command {
         optional bool                         save        = 3;
         optional AppConfigMessage.Sensors     sensors     = 4;
         optional AppConfigMessage.Alarms      alarms      = 5;
+        // Empty all alarm rule slots (alarm_0..alarm_15) before this message's
+        // `alarms` group is applied, so one SetParam rewrites the whole table
+        // (the host is the source of truth for the rules). Without an `alarms`
+        // group it clears every slot. alarm_limit / alarm_buzzer_mode are kept.
+        // Staged like any other key (`save` persists); rolled back with the whole
+        // batch on a fault. A multi-downlink table sets it on the FIRST message
+        // only (and `save` on the last). LoRaWAN / NFC / shell, not vendor.
+        optional bool                         alarms_replace = 6;
     }
 
     // Read back selected non-secret config fields. Paged like GetConfig:
@@ -206,7 +216,11 @@ message Command {
         optional uint32 page              = 5;
     }
 
-    message GetInfo      { }
+    // page (#425, NFC / vendor / shell): which page of an Info that does not fit
+    // one frame — the answer carries Response.page_index/page_count; the phone
+    // asks for pages 1..page_count-1 itself. Omitted/0 = first page. Ignored
+    // over LoRaWAN, where the device streams every page by itself.
+    message GetInfo      { optional uint32 page = 1; }
     message GetConfig    { optional uint32 page = 1; }
     message SettingsSave { }
     message Reboot       { }
@@ -252,7 +266,9 @@ message Command {
 
     // Enumerate the 1-Wire bus; the response (Response.W1Scan) returns the
     // discovered ROMs so the host can teach a slot via SetParam sensorN_rom.
-    message W1Scan { }
+    // page: as GetInfo.page — a result that does not fit one frame is paged by
+    // ROM; every page request rescans the bus (the order is deterministic).
+    message W1Scan { optional uint32 page = 1; }
 
     // Take a fresh sensor sample, send it as telemetry over LoRaWAN (fPort 2),
     // and — over NFC — return the same readings synchronously in Response.sample
@@ -271,15 +287,17 @@ message Command {
     // (secret_key stays proto_field:false — see AppConfigMessage.reserved).
     message SetSecretKey { optional bytes key = 1; }
 
-    // #308: explicit end of the claim window (companion to the #247 clm-record
-    // delete-detection). Empty — the token itself never travels on this command,
-    // only the fact that an authenticated caller sent it.
-    message ClmAck { }
+    // #308/#415: explicit end of the claim window (renamed from ClmAck, same
+    // wire id 25). Empty — the token itself never travels on this command, only
+    // the fact that an authenticated caller sent it. #415 D10: the only way the
+    // window closes (the implicit close on any decrypted command is gone).
+    message ClaimDone { }
 
-    // #351: symmetric counterpart to ClmAck — re-opens the claim window.
-    // new_claim_token omitted/zero re-arms with the existing token; a non-zero
-    // value replaces it (see app_cmd_handle_clm_rearm for the save+reboot path).
-    message ClmRearm { optional bytes new_claim_token = 1; }
+    // #351/#415: symmetric counterpart to ClaimDone (renamed from ClmRearm, same
+    // wire id 27) — re-opens the claim window. new_claim_token omitted/zero
+    // re-opens with the existing token; a non-zero value replaces it (see
+    // app_cmd_handle_claim_active for the save+reboot path).
+    message ClaimActive { optional bytes new_claim_token = 1; }
 
     // #338: remote-triggered buzzer melody (NFC/LRW). kind is a raw melody id,
     // deliberately NOT a proto enum: app_buzzer.c (MELODY_TABLE) is the only
@@ -298,6 +316,19 @@ message Command {
         optional uint32 kind     = 1; // melody id: 0 stop, 1-3 melodies, 4-15 reserved, >=16 -> 0
         optional uint32 repeat_s = 2; // 0 = no repeat; 1-999 = repeat interval (s)
     }
+
+    // #415: read the claim identity (serial_number + claim_token). Empty request.
+    // Answered with Response.claim_info while the claim window is active; Error
+    // NOT_READY "claimed" once done, or "no claim token" when none is
+    // provisioned. First command on the unauthenticated plain_text transport
+    // (also nfc / shell); never LoRaWAN.
+    message GetClaimInfo { }
+
+    // #415/#313: identity bootstrap over the mailbox (empty request). Answered
+    // with Response.basic_info — the serial + nonce high-water + config/FW
+    // version a phone needs before its first encrypted command. Replaces the
+    // plaintext hio.stck:inf NDEF record. plain_text / nfc / shell.
+    message GetBasicInfo { }
 
     // The boot settings-info ConfigDump (#412) on request: application
     // interval_sample / interval_report / history_enable, the nine sensors
@@ -318,7 +349,24 @@ message Response {
         Error          error            = 6;
         W1Scan         w1_scan          = 7;
         Telemetry      sample           = 8;   // Sample command: fresh readings (NFC)
-        // 9, 10 are claimed by claim_info / basic_info in #414 (mailbox) — keep free.
+        ClaimInfo      claim_info       = 9;   // get_claim_info: serial + claim_token (#415)
+        BasicInfo      basic_info       = 10;  // get_basic_info: identity bootstrap (#415/#313)
+    }
+
+    // #415/#313: plaintext identity bootstrap returned by get_basic_info — the
+    // minimum a phone needs before its first encrypted command, none of it
+    // secret. Identity only: the device status (alarms / battery / radio / claim
+    // window) is NOT disclosed unauthenticated — the owner reads it from
+    // Info.device_status via the encrypted get_info. The claim state a claiming
+    // app needs comes from get_claim_info (NOT_READY "claimed" once done).
+    message BasicInfo {
+        uint32 serial_number  = 1;
+        uint32 nonce_counter  = 2;  // anti-replay high-water; the phone sends nonce_counter + 1
+        uint32 config_version = 3;  // bump => the phone's cached config layout is stale
+        uint32 fw_major       = 4;
+        uint32 fw_minor       = 5;
+        uint32 fw_patch       = 6;
+        reserved 7;                 // was device_status — owner-only via get_info (#414)
     }
     reserved 11;  // was info_lite (#409 draft), replaced by Info pages (#425)
 
@@ -385,6 +433,15 @@ message Response {
         // enums as the alarm rules and the fPort 3 AlarmReport (app_alarm_source,
         // app_alarm_quantity, AlarmEvent.Type) — see AlarmStatus.
         repeated AlarmStatus active_alarms = 15;
+
+        // Link quality of the last downlink received, as measured by the device
+        // (#409 A2), with its age: on a Class A device it can be hours old.
+        // Emitted over NFC only (an installer with a phone has no LNS view; the
+        // LNS already has uplink RSSI/SNR and DevStatusAns), and omitted until the
+        // first downlink since boot.
+        optional sint32 last_dl_rssi  = 16;  // dBm
+        optional sint32 last_dl_snr   = 17;  // dB
+        optional uint32 last_dl_age_s = 18;  // seconds since that downlink
     }
 
     // A single active alarm as reported in Info.active_alarms. Same taxonomy as a
@@ -601,12 +658,12 @@ message SensorReading {
     optional sint32 accel_z        = 10; // m/s^2 x100
 }
 
-// Provisioning claim record (#247). Carried plaintext in the NFC `hio.stck:clm`
-// NDEF record during the factory -> first-claim window so the provisioning app
-// can claim the device (first-claim-wins). The phone deletes the record from the
-// ST25DV over RF once the server confirms the claim; the firmware never rewrites
-// it afterwards. Not carried over LoRaWAN (the owner reads claim_token via the
-// encrypted get_info Info instead).
+// Provisioning claim identity (#247/#415): {serial_number, claim_token}. Served
+// two ways while the claim window is active: laid plaintext in the NFC
+// `hio.stck:clm` NDEF record (removed by PR #414), and returned in
+// Response.claim_info by the get_claim_info command over the plain_text / nfc /
+// shell transports. Not carried over LoRaWAN (the owner also reads claim_token
+// via the encrypted get_info Info).
 message ClaimInfo {
     uint32 serial_number = 1;
     bytes  claim_token   = 2;  // 128-bit device claim token (#170)

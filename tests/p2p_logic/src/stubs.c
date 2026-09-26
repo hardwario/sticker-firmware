@@ -32,7 +32,9 @@ struct app_config g_app_config;
 
 /* How many frames app_history_count_frames() claims the window holds. */
 uint16_t test_history_frame_count;
-/* How many records still sit past the cursor (drives the replay's terminator). */
+/* The stored span app_history_span() reports, in absolute ordinals: first
+ * record and end (exclusive). The end drives the replay's terminator. */
+uint32_t test_history_first_abs;
 size_t test_history_count = 1;
 /* Counts every telemetry compose the P2P send path attempted. */
 int g_compose_budget_calls;
@@ -68,9 +70,14 @@ uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t c
 	return test_history_frame_count;
 }
 
-size_t app_history_count(void)
+void app_history_span(uint32_t *first_abs, uint32_t *end_abs)
 {
-	return test_history_count;
+	if (first_abs) {
+		*first_abs = test_history_first_abs;
+	}
+	if (end_abs) {
+		*end_abs = (uint32_t)test_history_count;
+	}
 }
 
 uint32_t app_history_get_mask(void)
@@ -83,31 +90,31 @@ uint32_t app_history_get_interval(void)
 	return 60;
 }
 
-bool app_history_base_synced(void)
-{
-	return true;
-}
-
 void app_history_set_replay_active(bool active)
 {
 	g_history_replay_active = active;
 }
 
-size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t cursor, uint8_t *out,
-			       size_t cap, uint32_t *t0, uint16_t *n, size_t *next)
+size_t app_history_export_abs(uint32_t from_unix, uint32_t to_unix, uint32_t start_abs,
+			      uint32_t end_abs, uint8_t *out, size_t cap, uint32_t *t0,
+			      bool *synced, uint16_t *n, uint32_t *next)
 {
 	ARG_UNUSED(from_unix);
 	ARG_UNUSED(to_unix);
+	ARG_UNUSED(end_abs);
 	ARG_UNUSED(out);
 	ARG_UNUSED(cap);
 	if (t0) {
 		*t0 = 0;
 	}
+	if (synced) {
+		*synced = true;
+	}
 	if (n) {
 		*n = 0; /* no records -- the replay terminates on the first pass */
 	}
 	if (next) {
-		*next = cursor;
+		*next = start_abs;
 	}
 	return 0;
 }

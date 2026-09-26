@@ -432,6 +432,18 @@ test("decodeUplink get_info lrw_state=5 decodes as disabled (fPort 85)", () => {
   assert.equal(got.info.lrw_state_name, "disabled");
 });
 
+// Last-downlink link quality (#409 A2, NFC-only Info fields 16-18): fw 1.4.2,
+// last_dl_rssi=-97 dBm (sint32), last_dl_snr=-7 dB, last_dl_age_s=3600 s.
+test("decodeUplink decodes get_info last-downlink RSSI/SNR/age (#409)", () => {
+  const got = codec.decodeUplink({
+    bytes: hex("0108011a110801100418028001c10188010d9001901c"),
+    fPort: 85,
+  }).data;
+  assert.equal(got.info.last_dl_rssi, -97);
+  assert.equal(got.info.last_dl_snr, -7);
+  assert.equal(got.info.last_dl_age_s, 3600);
+});
+
 // A healthy device omits device_status (0 -> proto3 drops it); decoder defaults to 0/[].
 test("decodeUplink get_info device_status defaults to 0 when absent (fPort 85)", () => {
   const got = codec.decodeUplink({
@@ -1160,4 +1172,16 @@ test("decodeUplink (fPort 3, AlarmEvent) terminates on an over-length declared f
   assert.equal(got.data.alarms.length, 1);
   assert.equal(got.data.alarms[0].source, "onboard");
   assert.equal(got.data.alarms[0].type, "none");
+});
+
+// --- set_param alarms_replace (field 6, WP8): empty every alarm slot before the
+// message's alarms group is applied (the host rewrites the whole table).
+test("set_param alarms_replace encodes field 6 and round-trips", () => {
+  const enc = codec.encodeDownlink({ data: { seq: 8, command: "set_param", set_param: { alarms_replace: true } } });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  // seq 8, set_param (field 2) len 2 { field 6 varint 1 }
+  assert.equal(toHex(enc.bytes), "080812023001");
+  const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes });
+  assert.equal(dec.data.command, "set_param");
+  assert.equal(dec.data.set_param.alarms_replace, true);
 });

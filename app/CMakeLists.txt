@@ -6,6 +6,15 @@
 
 cmake_minimum_required(VERSION 3.20.0)
 
+# Debug build (debug.conf in EXTRA_CONF_FILE): also apply debug.overlay, which
+# locks the MSI to the LSE (msi-pll-mode). debug.conf sets CONFIG_PM=n, so the
+# kernel tick is SysTick on the free-running MSI (~1.2 % off) instead of LPTIM
+# on the LSE. Kconfig cannot add a devicetree overlay, and Kconfig is not
+# parsed yet here, so key on the fragment name before find_package(Zephyr).
+if(EXTRA_CONF_FILE MATCHES "(^|;|/)debug\\.conf(;|$)")
+  list(APPEND EXTRA_DTC_OVERLAY_FILE ${CMAKE_CURRENT_SOURCE_DIR}/debug.overlay)
+endif()
+
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sticker)
 
@@ -119,4 +128,5 @@ target_sources_ifdef(CONFIG_APP_PYQ1648 app PRIVATE src/app_pyq1648.c)
 target_sources(app PRIVATE src/app_sensor.c)
 target_sources(app PRIVATE src/app_settings.c)
 target_sources(app PRIVATE src/app_radio.c)
+target_sources(app PRIVATE src/app_slot.c)
 target_sources(app PRIVATE src/main.c)

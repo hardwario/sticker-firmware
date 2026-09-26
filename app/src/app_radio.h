@@ -70,6 +70,11 @@ uint8_t app_radio_get_max_payload(void);
 /* Compose + send a telemetry snapshot (triggered by app_report). */
 void app_radio_send_telemetry(void);
 
+/* Same, for a host-requested uplink (force_send / sample, F14): LoRaWAN skips
+ * its fleet pre-send jitter (app_lrw_send_telemetry_now()); P2P has no
+ * pre-send jitter, so it is the plain app_p2p_send_telemetry(). */
+void app_radio_send_telemetry_now(void);
+
 /* Stage a command response for the next uplink. */
 int app_radio_queue_response(uint8_t port, const uint8_t *buf, size_t len);
 

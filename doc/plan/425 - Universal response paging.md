@@ -281,7 +281,7 @@ dead response reused as scratch.
 
 **Observations (open, not blockers):**
 - EU868 duty cycle at DR0: LoRaMac's credits reset only per hour, so ~36 DR0 frames can block every uplink for
-  ~50 min. Host guidance is in `doc/version 1.5.md` §12; the Hub limits requests (proximos-v2#96 / !99).
+  ~50 min. Host guidance is in `doc/version 1.5.md` §13; the Hub limits requests (proximos-v2#96 / !99).
 - Priority: an AlarmReport page waited ~37 s behind a 14-page GetConfig stream, because responses drain before
   alarms. "Alarms first" vs. leaving it to the host is an open decision.
 - A rejoin does not cancel pages already queued. They go out in the new session, possibly out of order. Consumers

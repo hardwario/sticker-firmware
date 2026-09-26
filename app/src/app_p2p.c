@@ -2687,7 +2687,13 @@ static void heartbeat_work_handler(struct k_work *work)
 static struct k_work_delayable m_hist_work;
 static uint32_t m_hist_from, m_hist_to, m_hist_seq;
 static uint32_t m_hist_count, m_hist_idx;
-static size_t m_hist_cursor;
+/* Absolute record ordinals (app_history_span()), as in app_lrw: next record to
+ * send and the end of the replay (exclusive), snapshot at start. Captures keep
+ * appending during a replay and the RAM ring may evict under it, but an
+ * absolute cursor names the same record throughout, so nothing is repeated or
+ * skipped; records captured after the start are left for the next replay. */
+static uint32_t m_hist_cursor;
+static uint32_t m_hist_end;
 static uint32_t m_hist_present, m_hist_interval; /* snapshot at replay start */
 static int m_hist_retries;
 static uint8_t m_hist_tx_buf[APP_CMD_HISTORY_FRAME_BUF_SIZE];
@@ -2735,26 +2741,36 @@ static void hist_work_handler(struct k_work *work)
 								 * the work-queue stack */
 	size_t cap = MIN(p2p_history_frame_cap(), sizeof(samples));
 	uint32_t t0 = 0;
+	bool synced = false;
 	uint16_t n = 0;
-	size_t next = m_hist_cursor;
+	uint32_t next = m_hist_cursor;
 	size_t slen = 0;
 
 	if (cap > 0) {
-		slen = app_history_export_page(m_hist_from, m_hist_to, m_hist_cursor, samples, cap,
-					       &t0, &n, &next);
+		slen = app_history_export_abs(m_hist_from, m_hist_to, m_hist_cursor, m_hist_end,
+					      samples, cap, &t0, &synced, &n, &next);
 	}
 	if (n == 0) {
-		LOG_INF("P2P history replay stop at frame %u (cap=%uB)", (unsigned)m_hist_idx,
-			(unsigned)cap);
+		if (next >= m_hist_end) {
+			/* Nothing left in the window: the records were evicted or the
+			 * ring was reset since the previous frame. */
+			LOG_INF("P2P history replay complete: %u frames", (unsigned)m_hist_idx);
+		} else {
+			/* Not reachable with the fixed P2P body budget (the cap never
+			 * shrinks mid-replay), unlike app_lrw's DR-driven one. */
+			LOG_WRN("P2P history replay stop at frame %u (cap=%uB)",
+				(unsigned)m_hist_idx, (unsigned)cap);
+		}
 		p2p_history_finish();
 		return;
 	}
 
 	size_t len;
+	/* time_synced is per frame: a frame never spans two history segments, and
+	 * each segment (flash page) knows whether its base is unix or uptime. */
 	int ret = app_cmd_build_history_frame(m_hist_seq, m_hist_idx, m_hist_count, t0,
-					      m_hist_present, m_hist_interval,
-					      app_history_base_synced(), samples, slen,
-					      m_hist_tx_buf, sizeof(m_hist_tx_buf), &len);
+					      m_hist_present, m_hist_interval, synced, samples,
+					      slen, m_hist_tx_buf, sizeof(m_hist_tx_buf), &len);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_cmd_build_history_frame", ret);
 		p2p_history_finish();
@@ -2788,8 +2804,11 @@ static void hist_work_handler(struct k_work *work)
 	m_hist_idx++;
 
 	/* Terminate on cursor exhaustion, not frame_index == frame_count: the
-	 * up-front count is only an estimate; the host concatenates by frame_index. */
-	if (m_hist_cursor < app_history_count()) {
+	 * up-front count is only an estimate; the host concatenates by frame_index.
+	 * The export already skips to the next record in the window, so the frame
+	 * carrying the window's last record ends the replay here — no trailing
+	 * empty attempt (H-4, as app_lrw). */
+	if (m_hist_cursor < m_hist_end) {
 		k_work_schedule_for_queue(&m_work_q, &m_hist_work,
 					  K_SECONDS(P2P_HIST_FRAME_GAP_SEC));
 	} else {
@@ -2841,11 +2860,12 @@ bool app_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 
 	m_hist_count = n;
 	m_hist_idx = 0;
-	m_hist_cursor = 0;
+	app_history_span(&m_hist_cursor, &m_hist_end);
 	m_hist_retries = 0;
 	m_hist_active = true;
-	/* Pauses history CAPTURE only -- nothing in the send path consults it. The
-	 * telemetry gate is m_hist_active, in send_work_handler(). */
+	/* Capture goes on (absolute cursor); only the flash page rollover is held
+	 * off -- nothing in the send path consults it. The telemetry gate is
+	 * m_hist_active, in send_work_handler(). */
 	app_history_set_replay_active(true);
 
 	LOG_INF("P2P history replay start: %u frames (window %u..%u, seq %u)", (unsigned)n,
@@ -2890,6 +2910,7 @@ void p2p_test_replay_setup(void)
 	m_hist_active = false;
 	m_hist_seq = 0;
 	m_hist_cursor = 0;
+	m_hist_end = 0;
 	m_hist_idx = 0;
 }
 
@@ -2993,7 +3014,7 @@ struct p2p_duty *p2p_test_get_duty(void)
 	return &m_duty;
 }
 
-void p2p_test_get_replay(bool *active, uint32_t *seq, size_t *cursor, uint32_t *idx)
+void p2p_test_get_replay(bool *active, uint32_t *seq, uint32_t *cursor, uint32_t *idx)
 {
 	if (active) {
 		*active = m_hist_active;

@@ -6,6 +6,8 @@
  * (so range validation is exercised); everything else app_cmd reaches is stubbed.
  */
 
+#include <string.h>
+
 #include "app_alarm.h"
 #include "app_alarm_rules.h"
 #include "app_buzzer.h"
@@ -144,7 +146,8 @@ void app_input_reset_count(bool input_a, bool input_b)
  * pulls from these; the unit test has no history backend, so they report an empty
  * buffer (export writes nothing, next_ord stays at start_ord => has_more false). */
 size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t start_ord, uint8_t *buf,
-			       size_t cap, uint32_t *t0_out, uint16_t *n_written, size_t *next_ord)
+			       size_t cap, uint32_t *t0_out, bool *synced_out, uint16_t *n_written,
+			       size_t *next_ord)
 {
 	(void)from_unix;
 	(void)to_unix;
@@ -152,6 +155,9 @@ size_t app_history_export_page(uint32_t from_unix, uint32_t to_unix, size_t star
 	(void)cap;
 	if (t0_out) {
 		*t0_out = 0;
+	}
+	if (synced_out) {
+		*synced_out = false;
 	}
 	if (n_written) {
 		*n_written = 0;
@@ -185,11 +191,6 @@ uint32_t app_history_get_interval(void)
 	return 0;
 }
 
-bool app_history_base_synced(void)
-{
-	return false;
-}
-
 /* Dynamic alarm rules — app_cmd's handle_alarm_rule mutates the list; the unit
  * test only checks the command path, so these are inert. */
 int app_alarm_rules_set(uint8_t slot, const struct app_alarm_rule *rule)
@@ -205,8 +206,32 @@ int app_alarm_rules_clear(uint8_t slot)
 	return 0;
 }
 
+/* alarms_replace (SetParam field 6) empties the staged rule slots through this:
+ * mirror the real implementation's effect on the config so the tests can see
+ * which slots survive. */
+int test_alarm_clear_all_calls;
+
 void app_alarm_rules_clear_all(void)
 {
+	struct app_config *c = app_config();
+
+	test_alarm_clear_all_calls++;
+	memset(c->alarm_0, 0, sizeof(c->alarm_0));
+	memset(c->alarm_1, 0, sizeof(c->alarm_1));
+	memset(c->alarm_2, 0, sizeof(c->alarm_2));
+	memset(c->alarm_3, 0, sizeof(c->alarm_3));
+	memset(c->alarm_4, 0, sizeof(c->alarm_4));
+	memset(c->alarm_5, 0, sizeof(c->alarm_5));
+	memset(c->alarm_6, 0, sizeof(c->alarm_6));
+	memset(c->alarm_7, 0, sizeof(c->alarm_7));
+	memset(c->alarm_8, 0, sizeof(c->alarm_8));
+	memset(c->alarm_9, 0, sizeof(c->alarm_9));
+	memset(c->alarm_10, 0, sizeof(c->alarm_10));
+	memset(c->alarm_11, 0, sizeof(c->alarm_11));
+	memset(c->alarm_12, 0, sizeof(c->alarm_12));
+	memset(c->alarm_13, 0, sizeof(c->alarm_13));
+	memset(c->alarm_14, 0, sizeof(c->alarm_14));
+	memset(c->alarm_15, 0, sizeof(c->alarm_15));
 }
 
 /* handle_set_param refreshes the runtime rule cache from config after an apply;
@@ -241,6 +266,23 @@ enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
 enum app_lrw_state app_lrw_get_state(void)
 {
 	return APP_LRW_STATE_HEALTHY;
+}
+
+/* Last-downlink link quality (#409 A2): tests set test_dl_valid + values. */
+bool test_dl_valid;
+int16_t test_dl_rssi;
+int8_t test_dl_snr;
+uint32_t test_dl_age_s;
+
+bool app_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+{
+	if (!test_dl_valid) {
+		return false;
+	}
+	*rssi = test_dl_rssi;
+	*snr = test_dl_snr;
+	*age_s = test_dl_age_s;
+	return true;
 }
 
 /* device_status inputs: app_cmd_get_info() aggregates these into the status
@@ -282,22 +324,36 @@ bool app_nfc_ready(void)
 	return true;
 }
 
-/* #308: call counter so the test can confirm clm_ack dispatch reached app_nfc
- * without linking the real app_nfc.c (its clm latch is HIL-verified, like the
- * rest of that file — see #247). */
-int g_clm_ack_calls;
-
-void app_nfc_clm_ack(void)
+bool app_nfc_mailbox_available(void)
 {
-	g_clm_ack_calls++;
+	return true;
 }
 
-/* #351: mirrors g_clm_ack_calls above, for clm_rearm's "no new token" branch. */
-int g_clm_rearm_calls;
+/* #308/#415: call counter so the test can confirm claim_done dispatch reached
+ * app_nfc without linking the real app_nfc.c (its claim latch is covered by
+ * tests/nfc_hw). */
+int g_claim_done_calls;
 
-void app_nfc_clm_reset(void)
+void app_nfc_claim_done(void)
 {
-	g_clm_rearm_calls++;
+	g_claim_done_calls++;
+}
+
+/* #351/#415: mirrors g_claim_done_calls above, for the claim_active command. */
+int g_claim_active_calls;
+
+void app_nfc_claim_active(void)
+{
+	g_claim_active_calls++;
+}
+
+/* #415: claim window state seen by app_cmd_handle_get_claim_info(); the test
+ * drives it (default ACTIVE, like a freshly provisioned unit). */
+uint8_t g_claim_state = APP_NFC_CLAIM_ACTIVE;
+
+uint8_t app_nfc_claim_state_get(void)
+{
+	return g_claim_state;
 }
 
 bool app_history_is_ready(void)

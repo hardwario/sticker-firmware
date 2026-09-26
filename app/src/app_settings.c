@@ -489,7 +489,7 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 		LOG_WRN_REBOOTING("vendor reset -- counter save failed");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
-	app_nfc_clm_reset();
+	app_nfc_claim_active();
 
 	/* History is a separate, non-NVS flash ring (its own on-flash format, not
 	 * settings-API-backed), so a raw erase here is safe — app_history_clear()

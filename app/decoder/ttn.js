@@ -67,18 +67,27 @@ var _BUILD_TYPES = ["main", "dev", "custom"];
 var _LRW_STATES = ["idle", "joining", "healthy", "warning", "reconnect", "disabled"];
 
 // device_status (Info field 14) bit -> name. Keep in sync with APP_DEVICE_STATUS_*.
+// Re-grouped for v1.5.0 (#415): alarms / radio / hardware / system. This layout
+// is v1.5.0-specific — a still-deployed 1.4.x unit used a different bit layout.
 var _DEVICE_STATUS = [
+  // Alarms (0-7)
   [1 << 0, "alarm_any"],
   [1 << 1, "alarm_threshold"],
   [1 << 2, "alarm_state"],
   [1 << 3, "alarm_rate"],
   [1 << 4, "alarm_no_data"],
   [1 << 5, "alarm_low_battery"],
-  [1 << 8, "nfc_down"],
-  [1 << 9, "history_down"],
-  [1 << 10, "i2c_wedged"],
-  [1 << 11, "time_unsynced"],
-  [1 << 12, "lrw_disabled"],
+  // Radio (8-11)
+  [1 << 8, "radio_off"],
+  [1 << 9, "lrw_disabled"],
+  [1 << 10, "radio_link_down"],
+  // Hardware / health (12-15); bit 13 = mailbox_down (added by PR #414)
+  [1 << 12, "nfc_down"],
+  [1 << 14, "i2c_wedged"],
+  [1 << 15, "history_down"],
+  // System (16-17)
+  [1 << 16, "time_unsynced"],
+  [1 << 17, "claim_active"],
 ];
 
 // reset_cause (Info field 11) bit -> name. Zephyr hwinfo RESET_* bitmask of the
@@ -181,10 +190,12 @@ var _CMD_NAMES = {
   21: "sample",
   23: "factory_reset",
   24: "set_secret_key",
-  25: "clm_ack",
+  25: "claim_done",
   26: "vendor_reset",
-  27: "clm_rearm",
+  27: "claim_active",
   28: "buzzer_play",
+  29: "get_claim_info",
+  30: "get_basic_info",
   31: "get_settings",
 };
 // END GENERATED COMMANDS
@@ -293,6 +304,11 @@ function _decodeInfo(bytes, start, end) {
       else if (field === 11) info.reset_cause = v.value; // hwinfo reset-cause bitmask of last boot (#88)
       else if (field === 12) info.lrw_state = v.value; // LoRaWAN network state; emitted over NFC only, absent from LoRaWAN uplinks
       else if (field === 14) info.device_status = v.value; // aggregated device status bitmask
+      // fields 16-18 (#409 A2, NFC only): last-downlink RSSI (dBm) / SNR (dB) as
+      // measured by the device, and the age of that reading in seconds.
+      else if (field === 16) info.last_dl_rssi = _pbZigzag(v.value);
+      else if (field === 17) info.last_dl_snr = _pbZigzag(v.value);
+      else if (field === 18) info.last_dl_age_s = v.value;
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       // field 9 = claim_token (#170): 128-bit device claim token, presented as
@@ -892,6 +908,9 @@ function encodeDownlinkCommand(cmd) {
     // save (field 3): persist + reboot after applying; set on the LAST message
     // of a multi-downlink batch only.
     if (b.save) body = body.concat(_encTag(3, 0)).concat(_encVarint(1));
+    // alarms_replace (field 6): empty all alarm slots before `alarms` is applied
+    // (the whole table in one message); on the FIRST message of a batch only.
+    if (b.alarms_replace) body = body.concat(_encTag(6, 0)).concat(_encVarint(1));
   } else if (name === "get_param") {
     // proto3 repeated scalars are packed (length-delimited) by default.
     var _packField = function (arr, tag) {
@@ -982,6 +1001,7 @@ function decodeDownlinkCommand(bytes) {
           } else if (w2 === 0) {
             var sv = _pbReadVarint(bytes, p); p = sv.next;
             if (f2 === 3) sp.save = sv.value !== 0; // persist + reboot after apply
+            else if (f2 === 6) sp.alarms_replace = sv.value !== 0; // clear all slots first
           } else { break; }
         }
         cmd.set_param = sp;

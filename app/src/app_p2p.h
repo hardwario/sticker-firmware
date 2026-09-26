@@ -402,7 +402,7 @@ void p2p_test_get_join(uint8_t *sf, uint8_t *step, uint8_t *attempts, bool *slow
 void p2p_test_set_join_started_at(int64_t at_ms);
 struct p2p_duty *p2p_test_get_duty(void);
 void p2p_test_set_replay_active(bool active);
-void p2p_test_get_replay(bool *active, uint32_t *seq, size_t *cursor, uint32_t *idx);
+void p2p_test_get_replay(bool *active, uint32_t *seq, uint32_t *cursor, uint32_t *idx);
 void p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN]);
 void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
 				 uint8_t out[P2P_KEY_LEN]);

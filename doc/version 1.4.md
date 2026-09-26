@@ -573,6 +573,8 @@ This key rename kept the protobuf field numbers; the user-facing keys and code i
 
 ## 10. Local NFC access (NEW)
 
+> **Superseded in v1.5.0 (#313).** Interactive commands move from these NDEF `hio.stck:cmd`/`:rsp`/`:vnd` records to the ST25DV Fast-Transfer-Mode mailbox (one tap, iOS == Android). The tag holds no NDEF at all — the identity record below is replaced by the mailbox `get_basic_info` command, and there is no tap-to-launch. Battery-less provisioning is dropped. See `doc/version 1.5.md` §18.
+
 The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel — for reading the sticker's identity and for the same command protocol available over LoRaWAN, without a network connection.
 
 **Identity record (always present).** When idle, the firmware keeps a small plaintext **info record** on the tag, so a phone learns the sticker identity and config-schema version the moment it taps — no decryption, no app required. Unlike the functional protocol (external `hio.stck:*` types), the info record is a **MIME media-type record** (`application/vnd.hardwario.sticker`) so Android can **tap-to-launch** the Manager-App via an intent-filter on that media type, and its payload is human-readable (#298). The payload is ASCII, colon-delimited — `<serial>:<config_ver>:<nonce>`, e.g. `0002162165:03:0000001A`: the **serial number** (10-digit decimal), the **config-schema version** (`APP_CONFIG_VERSION`, hex), and the **NFC anti-replay counter high-water** (the last accepted `nonce_counter`, hex). The `<serial>:<config_ver>` prefix is format-stable forever, so a phone of any generation reads those two fields and then knows how to parse the rest; `config_ver` doubles as the bootstrap "comms version" (the firmware bumps it on any breaking wire change, so the phone can detect an incompatible protocol). Firmware version, build type and debug flag are **not** on the tag — a phone reads them over the encrypted `get_info` channel (#293). The counter lets a phone **resync after a device reboot or response-cache miss** — it sets its next request counter to this value + 1 — without first needing a (chicken-and-egg) encrypted exchange; it is not secret (it already travels in plaintext in every command header) and changes only on an accepted command. The record is self-healing: it is laid down whenever the tag is empty, and it is **not** rewritten while it is already present (no needless EEPROM wear; HW-verified — a live `nfc dump` decoded byte-for-byte to the TNF/type/payload above, and three consecutive polls left the tag untouched). After a command/response exchange the response record is left on the tag (restoring the info record *immediately* would race the phone reading the reply, #144); instead the info record is **restored once the RF field has been quiet for ~10 s** (the phone has left), so a later tap always reads valid info rather than a stale response (#164).
@@ -940,7 +942,7 @@ The three yellow network states form a **severity scale**: radio-off (1× yellow
 | Pattern | Meaning |
 |---------|---------|
 | 🔴→🟡→🟢 carousel (once) | Boot self-test (exercises all three LEDs) |
-| 🟢 green ×10 | NFC config applied (success) |
+| 🟢 green ×10 | NFC config applied (success) — v1.4.0 only; v1.5.0 shows green + yellow 2 s before the reboot |
 | 🟠 orange ×5 | Entering calibration mode |
 | 🟠 orange, once/s | Calibration mode running |
 | 🟢 + 🟠 green and orange | **Input activity** — PIR / hall / digital input / accelerometer activation or release |
@@ -948,6 +950,11 @@ The three yellow network states form a **severity scale**: radio-off (1× yellow
 The input-event LED is a **commissioning diagnostic**: it blinks only for the first hour after power-up (rate-limited to 2/s), then goes quiet. It shows **green and orange together** (a two-colour blink, so it can't be mistaken for the single-yellow radio-off heartbeat). The firmware does drive the two colours in a different order for an activation (0→1) versus a release (1→0), but the order is **not visually distinguishable in practice** — treat any green+orange blink simply as "an input changed".
 
 **NFC interaction**
+
+> **Superseded in v1.5.0 (#313/#414).** With the FTM mailbox the NFC LED shows: phone detected →
+> green ≤ 5 s, session running → green blink, session end → green + yellow 2 s (last exchange OK)
+> or red 2 s (last exchange failed); reboot-type commands show the result, then reboot (no
+> pre-reboot green ×10). See `doc/version 1.5.md` §18 "LED during a tap".
 
 An NFC exchange with a phone shows a four-step sequence so an operator can follow it:
 

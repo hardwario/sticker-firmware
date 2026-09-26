@@ -162,6 +162,19 @@ void app_radio_send_telemetry(void)
 #endif
 }
 
+void app_radio_send_telemetry_now(void)
+{
+#if defined(CONFIG_RADIO_P2P)
+	if (is_p2p()) {
+		app_p2p_send_telemetry(); /* no pre-send jitter to skip */
+		return;
+	}
+#endif
+#if defined(CONFIG_LORAWAN)
+	app_lrw_send_telemetry_now();
+#endif
+}
+
 int app_radio_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 {
 #if defined(CONFIG_RADIO_P2P)

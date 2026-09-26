@@ -22,6 +22,13 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN | **Improved** — faster link-loss recovery (#424): link check on every report while `WARNING`, a TX-power/data-rate step-down ladder before the rejoin (a moved device regains its gateway on a lower DR without losing the session), and US915/AU915 no longer lose the configured sub-band after repeated failed joins. |
 | LoRaWAN / P2P | **New** — universal response paging (#425): every answer that does not fit one frame is split into self-contained pages numbered `page_index`/`page_count` in the `Response` envelope (and in `AlarmReport`), sent by the device on its own; decoders label them `pages: "i/N"`. |
 | LoRaWAN / NFC | **New** — `GetSettings` command (#428): the boot settings-info `ConfigDump` (§4) on request, with the command's `seq`, so a host can refresh the key operating settings without a full multi-page `GetConfig`. |
+| LoRaWAN | **Fix** — command answers from the ProXimos Nodes test (#432): the deferred `clock_sync` Info now carries the command's `seq`; `force_send` / `sample` leave at once (no fleet jitter, no silent merge into a pending report); `w1_scan` without 1-Wire answers `NOT_SUPPORTED`. |
+| LoRaWAN | **Changed** — `GetConfig` over LoRaWAN leaves out the 1-Wire slot ROMs `sensor1_rom`..`sensor4_rom` (#433): 4 pages instead of 6 at EU868 DR0; NFC/shell GetConfig and an explicit `GetParam` still return them. |
+| LoRaWAN / NFC | **New** — `SetParam.alarms_replace` (#434): one message rewrites the whole alarm table — all rule slots are emptied before the message's `alarms` group is applied (or all cleared without one), rolled back with the batch on a fault. |
+| NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §18. |
+| NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §19. |
+| NFC | **New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2), so an installer with a phone can judge the link at the mounting spot. |
+| History | **Fix** — record timestamps follow the RTC (F27/F28, H-4): report cadence on wall-clock slots, no capture skipped during a replay, each flash page stamped from the RTC (a reboot / power loss / halt is a gap, not a shift), page header v2 keeps a clock-sync fix-up across reboots, the replay ends with the window's last frame. HistoryFrame protocol unchanged. See §21. |
 
 ---
 
@@ -251,6 +258,7 @@ reads LoRaMac's still-uninitialised crypto context (it showed a garbage FCntUp).
 - **Rejoin:** after a network loss, the first rejoin once the network was back succeeded.
 
 See `doc/manual-test-plan.md` **L17** and `doc/plan/421 - LoRaWAN glue fixes in sticker-zephyr.md`.
+
 
 ---
 
@@ -535,10 +543,10 @@ The device sends all pages by itself. Plan: `doc/plan/425 - Universal response p
 
 | Answer | Page unit |
 |---|---|
-| Info (join, clock-sync, GetInfo over LoRaWAN) | each field, then each active alarm (one snapshot for all pages) |
+| Info (join, clock-sync, GetInfo) | each field (NFC also `claim_token` / `lrw_state` / `dev_eui`), then each active alarm (radio: one snapshot for all pages; NFC: a fresh one per page) |
 | GetConfig / GetParam | config fields (fixed 30 B pages on LoRaWAN at any DR; not at the 11 B tier → `BUDGET_TOO_SMALL`) |
 | settings-info (#412) | each setting / the `w1_slot_type` block |
-| W1Scan | ROMs (scan result kept, no rescan per page) |
+| W1Scan | ROMs (radio: scan result kept, no rescan per page; NFC: rescan per page, bus order is deterministic) |
 | History replay (`req_history`) | records (as before, numbering now in the envelope) |
 | AlarmReport | events (every page keeps its own `base_time` / `total`) |
 
@@ -547,8 +555,16 @@ The device sends all pages by itself. Plan: `doc/plan/425 - Universal response p
   time (a new paged answer replaces a running one; a rejoin cancels it; the boot
   settings-info waits for the Info pages). A host missing a page re-sends the request
   with `page = <index>` — the stream then sends from that page on.
-- **Host-driven on NFC**: the phone asks for a page; only big config dumps page there.
-  NFC history keeps its cursor (`next_ord` / `has_more`), no envelope numbering.
+- **Host-driven on NFC** (also the vendor channel and the debug shell): the phone asks for
+  every page itself — `GetConfig.page` / `GetParam.page`, and `GetInfo.page` / `W1Scan.page`
+  for an Info or a W1Scan that does not fit the frame (page 0 is the plain request; an Info
+  that overflows is paged, no longer trimmed). Nothing is kept between requests: each page is
+  laid out from a fresh snapshot, so the pages of one read may differ by the few tenths of a
+  second between the requests (accepted). A page past the end → `Error OUT_OF_RANGE`
+  (`fault_field` 1). With the 256 B FTM mailbox frame (#414) an Info pages only with about 19+
+  simultaneously active alarms and a W1Scan (≤ 4 ROMs, 47 B) never — the rule keeps both
+  correct for any smaller frame. `GetInfo.page` / `W1Scan.page` are ignored over LoRaWAN (the
+  device streams). NFC history keeps its cursor (`next_ord` / `has_more`), no envelope numbering.
 - **Physical floor**: a unit that does not fit even alone is left out (at the 11 B tier
   e.g. the serial number, unix time, an alarm entry or rule); when nothing fits the
   answer is `Error BUDGET_TOO_SMALL`.
@@ -561,8 +577,9 @@ Nothing is buffered or merged in the decoder — a consumer that wants the whole
 merges pages by (DevEUI, fPort, `seq`), for `AlarmReport` by `base_time`. A consumer
 that ignores `pages` just sees several partial answers.
 
-**Host impact**: Manager-App NFC GetConfig must read the page count from
-`Response.page_count` (absent = 1); the proximos-v2 decoder should merge pages
+**Host impact**: Manager-App NFC GetConfig / GetParam / GetInfo / W1Scan must read the page
+count from `Response.page_count` (absent = 1) and ask for pages 1..N-1 with `page` — merge an
+Info's scalar fields and concatenate its `active_alarms`, concatenate W1Scan ROMs; the proximos-v2 decoder should merge pages
 (Hub side: proximos-v2#96; decoder parity: proximos-v2#90). **P2P** uses the same rule and format (driver in
 PR #426 on `feat-p2p`): an answer that does not fit one 0x55 RESPONSE (64 B) is streamed
 as pages with the same `seq`; the P2P central must accept several 0x55 with one `seq`.
@@ -599,7 +616,7 @@ Cost: release about +1.8 KB flash, +128 B RAM.
 ## 14. `GetSettings` — settings-info on request (#428)
 
 The boot settings-info (§4) tells the network the effective configuration once per boot.
-A host that wants to refresh it later had only `GetConfig`: 38 keys in 6+ pages (one page
+A host that wants to refresh it later had only `GetConfig`: 34 keys in 4+ pages over LoRaWAN (one page
 per alarm rule on top), ~13 s of SF12 airtime at EU868 DR0. `GetSettings` returns exactly
 the §4 content on request.
 
@@ -610,7 +627,7 @@ the §4 content on request.
 | Answer | `Response.config_dump` with the command's `seq`: `application` interval_sample / interval_report / history_enable, the nine `sensors.cap_*` flags, runtime `w1_slot_type` (1-Wire builds) |
 | Size | the boot dump + 2 B for the `seq` (34 B measured without 1-Wire, +6 B with the four `w1_slot_type` entries): one frame at EU868 DR0 and up |
 | Paging | over LoRaWAN the same pages as the boot dump (§13 envelope) when the budget is smaller; every page carries the `seq` |
-| Transports | all (LoRaWAN, NFC, shell); read-only, no secrets |
+| Transports | all (LoRaWAN, P2P, NFC, vendor, shell) except the plaintext mailbox channel (#414); read-only, no secrets |
 
 The values are the **staged** config, like every `GetConfig` / `GetParam` answer (a change
 without `settings save` shows up at once). The boot dump keeps `seq` 0, so a host can tell
@@ -625,6 +642,537 @@ Hub combined11 (proximos-v2 !91): the Portal "Refresh from device" button sends
 `GetSettings` and completes on the one-frame answer. A v1.5.0 image without this command
 answers `Error NOT_SUPPORTED` (code 7) with the `seq` kept, so the Hub's config is untouched.
 Not HW-tested: NFC, DR0 (34 B fits one frame there too) and the paged form (native tests only).
+
+
+---
+
+## 15. Command answers the Hub can pair (#432)
+
+Found by the ProXimos Nodes test (Hub CLI + Portal against a STICKER, 2026-09-23):
+
+| Command | Before | Now |
+|---|---|---|
+| `clock_sync` (empty, LoRaWAN) | Answered by the Info that follows the DeviceTimeAns, but that Info had **seq 0**, so the Hub could not pair it with the request | The Info carries the **command's `seq`** (every page of it, when paged). The boot Info keeps seq 0. A newer `clock_sync` before the time lands takes over the seq; no answer at all means the network did not answer `DeviceTimeReq` |
+| `force_send`, `sample` (LoRaWAN) | The uplink went through the fleet pre-send jitter (up to 10 s). A request that arrived while a jittered report was pending **collapsed into it** (one uplink instead of two) | The uplink leaves **at once** (~1–3 s incl. the TX); a pending jittered report is folded into this send, so the host gets one fresh uplink right after its command. Periodic reports, alarms and the link-ready kick keep the jitter |
+| `w1_scan` on an image without 1-Wire | `NOT_READY` (3), indistinguishable from a bus that is not ready (over LoRaWAN the detail is stripped) | `NOT_SUPPORTED` (7), like other commands not built into the image |
+| Any command that fails to decode (truncated, corrupted) | `BAD_REQUEST` with **seq 0**: the host could not pair the error with its request | `BAD_REQUEST` with the **request's `seq`** whenever field 1 is readable before the damage (0 otherwise) — #435 |
+
+No wire-format change: the answers are the same messages. A host that already pairs by `seq`
+now also pairs `clock_sync`.
+
+**HW verification (2026-09-24, EU868, ProXimos Hub ChirpStack v4):** ClockSync seq 25 → the
+DeviceTimeAns in the RX of the next uplink, then `Response{seq 25, info}` with the synced
+`unix_time` (`010819…`); `force_send` → uplink after 1.1–2.8 s, also right after a telemetry
+uplink; `send` + `force_send` back to back → one uplink after 1.2 s (before: only after the
+jitter); `w1_scan` on a debug image without 1-Wire → `Error{code 7}`.
+Re-run with the downlinks sent from the Hub CLI (`proximosctl control.radio node-send`), each
+answer paired on the Hub by its `seq`: `clock-sync` seq 45 → `Response{seq 45, info}` with the
+synced time; `force-send` seq 46 → extra fPort-2 uplink 1.16 s after the uplink that carried
+the downlink; `w1-scan` seq 47 → `Response{seq 47, error{code 7}}`.
+A malformed downlink (seq 126, one byte too many in a `set_param`) → `Response{seq 126,
+error{code 1 BAD_REQUEST}}`, paired on the Hub (before: seq 0).
+
+**Alarms after a reboot (checked, no change needed):** the alarm latches are plain RAM, so
+after any reboot (including `settings_save`) every condition that still holds activates
+again and is re-reported on fPort 3 once the device is joined: threshold rules on the first
+evaluation (after their dwell), level `state` rules after their dwell, low battery on the
+first valid measurement, no-data after 5 s of NaN. Edge/momentary/count rules are events and
+fire again only on a new event. A host detects the reboot from the rejoin, the boot `Info`
+(`reset_cause`, small `uptime`) or the first telemetry's `boot` flag, drops its open alarms
+and waits for them to activate again — the same way it already handles low battery.
+
+
+---
+
+## 16. `GetConfig` over LoRaWAN without the slot ROMs (#433)
+
+The four 1-Wire slot ROMs (`sensors` 11..14, 8 B each) took two of the six pages of a
+LoRaWAN `GetConfig` at EU868 DR0, and the network has no use for them — the ProXimos
+Portal does not show them. They are now left out of a **LoRaWAN** `GetConfig`:
+
+| Read path | Slot ROMs |
+|---|---|
+| `GetConfig` over LoRaWAN | **left out** — 34 keys in 4 pages at DR0 (was 38 in 6) |
+| `GetConfig` over NFC / shell / vendor | included, as before |
+| `GetParam(sensors 11..14)` over any transport | included — an explicit request still reads them |
+| boot settings-info, `GetSettings` | never carried them |
+
+Mechanism: a new configen attribute `dump_lrw: false` keeps a field in `DUMP_FIELDS`
+but flags it `lrw_skip`; `app_cmd_handle_get_config()` skips such a field when the
+transport is LoRaWAN. A host that merges a complete `GetConfig` into its config copy
+therefore no longer sees `sensorN_rom` from LoRaWAN; a host that replaces its copy
+(ProXimos !91) drops them. A **P2P** `GetConfig` (§6) leaves them out too: P2P is
+budget-limited like LoRaWAN and its device-driven pages are laid out as LoRaWAN pages,
+so page 0 has to use the same layout.
+
+**HW verification (2026-09-24, EU868, ProXimos Hub ChirpStack v4):** `get-config` from the
+Hub CLI → 4 pages at DR5 (was 6), no `sensor1_rom`..`sensor4_rom`, Hub config 34 keys;
+`GetParam(sensors [11])` seq 122 → `config_dump{sensors{sensor1_rom}}` in one frame.
+
+
+---
+
+## 17. `SetParam.alarms_replace` — rewrite the whole alarm table (#434)
+
+A host that is the source of truth for the alarm rules (the ProXimos Portal) had no way to
+say "these are *all* the rules": a `SetParam` only sets the slots it carries, so a rule
+deleted in the host (or added over NFC in the meantime) stayed on the device.
+
+| | |
+|---|---|
+| Field | `Command.SetParam.alarms_replace` = **6** (`optional bool`, next to `save`) |
+| Effect | when `true`, every rule slot `alarm_0`..`alarm_15` is emptied in staging **before** this message's `alarms` group is applied, so exactly the rules it carries remain; without an `alarms` group it clears all slots. `alarm_limit` and `alarm_buzzer_mode` are kept |
+| Atomicity | part of the batch snapshot: on any fault (e.g. an invalid rule → `OUT_OF_RANGE`, `fault_field` 400) the whole batch rolls back, cleared slots included, and the rule cache is rebuilt |
+| Persistence | staged like any other key; `save` persists (+ reboot) |
+| Transports | LoRaWAN, NFC, shell (like `alarm_N`); refused over the vendor channel (`NOT_WRITABLE`, `fault_field` 400) |
+| Multi-frame table | `alarms_replace` on the **first** message only, `save` on the last |
+
+`ttn.js` encodes and decodes it (`set_param.alarms_replace: true`); e.g. seq 8 with no
+`alarms` group is `080812023001`.
+
+**HW verification (2026-09-24, EU868, ProXimos Hub ChirpStack v4, raw downlinks from the Hub
+CLI):** with rules [0], [1], [3] seeded, `set_param{alarms{alarm_5}, alarms_replace}` seq 123
+→ `Ack` and only [5] left; `set_param{alarms{alarm_2 = invalid}, alarms_replace}` seq 124 →
+`Error{OUT_OF_RANGE, fault_field 400}` and nothing changed; `set_param{alarms_replace}` seq 125
+→ `Ack` and 0 rules, `alarm_limit` kept. A malformed downlink (one byte too many) was answered
+`BAD_REQUEST` without touching the rules.
+
+---
+
+## 18. NFC command channel: ST25DV Fast-Transfer-Mode mailbox (#313)
+
+**Why.** In v1.4.0 the phone drove interactive commands by writing an NDEF
+`hio.stck:cmd` record into the ST25DV's user EEPROM and reading an `hio.stck:rsp`
+record back (v1.4.0 §10). That EEPROM is **single-port**: the firmware can only
+read the command and write the reply while the RF field is **off**, so the phone
+has to drop its field between the write and the read. Android reader mode can do
+that silently; **iOS Core NFC cannot**, so the iOS flow needed the operator to
+tap, lift for ~2 s, and tap again — two taps per command, two per config page,
+and frequently a stall. This is a platform + hardware limit, not app code.
+
+**What changed.** Interactive commands now travel through the ST25DV **Fast-
+Transfer-Mode (FTM) mailbox** — a 256-byte **dual-port** RAM that the RF reader
+and the I2C host exchange messages through **with the field on**, coordinated by
+a hardware handshake (`RF_PUT_MSG` / `HOST_PUT_MSG`). No field-off window is ever
+needed, so the whole exchange completes in **one tap with the phone held still**,
+on iOS exactly as on Android. HW-measured on the bench: ~0.1–0.3 s per exchange,
+a full multi-page `GetConfig` and a `SetParam`-with-save in a single hold.
+
+### Protocol (phone side)
+
+The mailbox is reached with standard ISO 15693 custom commands (manufacturer
+code `0x02`), the same on Android (`NfcV.transceive`) and iOS
+(`Iso15693.customCommand`, non-addressed):
+
+1. `0xAD` read `EH_CTRL_Dyn`: `VCC_ON` must be set (the device is powered — the
+   mailbox needs the MCU running; a battery-less unit has no mailbox and no NDEF,
+   so it reads as a blank tag).
+2. `0xAE` write `MB_CTRL_Dyn = MB_EN`, then `0xAD` read it back. If `MB_EN`
+   does not stick within ~1 s the unit is a legacy v1.4.x firmware (no mailbox)
+   — fall back to the NDEF flow (Android only).
+3. `0xAA`/`0xAB`/`0xAC` a **`[0x03] get_basic_info`** frame → serial + nonce
+   high-water + config/FW version. This is the identity bootstrap that replaces
+   the old plaintext inf record: the phone picks the cached `secret_key` by serial
+   and sends the next command's counter = nonce + 1. It is identity only — the
+   device status (alarms, battery, radio, claim window) is owner-only and read
+   from `Info.device_status` with the encrypted `GetInfo`.
+4. `0xAA` Write Message a **`[channel][payload]`** command frame, poll `0xAD` for
+   `HOST_PUT_MSG`, then `0xAB`/`0xAC` Read the reply (in ≤200 B chunks for iOS).
+5. Repeat for further commands; `0xAE` write `MB_EN = 0` (or just leave) when done.
+
+**Firmware session limits.** While the field is on the firmware keeps the chip
+powered (LPD low) and watches for `MB_EN`. One mailbox session lasts at most
+120 s and ends after 3 s without a request. A field held for **120 s without a
+served reply** (a phone left lying on the sticker, a fixed reader nearby) releases
+the chip until the field changes — every served exchange restarts that window, so
+a long exchange is never cut. A command that stages a deferred action (reboot,
+settings save, `set_secret_key`, resets, …) ends the session and the action runs
+**right away**, even if the phone still holds the field — nothing else is served
+until it has run, so a follow-up command can neither see the unapplied state nor
+replace the action. After a non-rebooting action (e.g. `lrw_join`) the firmware
+resumes the hold, so the phone re-enables `MB_EN` (same ~1 s retry as step 2) and
+continues in the same tap; after a reboot it re-reads `get_basic_info`.
+
+**NFC starts last in the boot.** The NFC init and the poll thread run at the end
+of the init chain, after the boot LED carousel and every component a command can
+reach (clock, history, alarm rules, LoRaWAN, battery, sensors, counters) — ~8 s
+after boot — and just before the LoRaWAN join. Until then the chip stays
+unpowered (`VCC_ON = 0`), so no phone command can act on uninitialised state (the
+#340 M8 class: a `reset_counters` saved before the counters were restored wiped
+every totalizer). A phone kept on the tag across an NFC-triggered reboot does not
+have to be lifted: it waits for `VCC_ON`; the init then keeps the chip powered
+while the field is present, leaves a mailbox the phone enables right then alone
+(MB_EN is cleared at boot only with no field, or before a first-boot EEPROM
+write), and the poll thread serves the phone's first request at once. A unit whose
+mailbox is unavailable (see Production tester) does not hold the chip at all.
+
+The frame is `[channel 1 B][payload]`:
+
+| Channel | Payload | Key |
+|:-:|---|---|
+| `0x01` | encrypted `Command` (request) / `Response` (reply), byte-identical to the old `hio.stck:cmd`/`hio.stck:rsp` content | `secret_key` |
+| `0x02` | same, vendor channel | `vendor_token` |
+| `0x03` | plaintext `Command` → `0x01 \|\| Response`, the unauthenticated allow-listed transport: `get_basic_info` (identity bootstrap) and `get_claim_info` (PR #415) | none |
+
+The AES-CCM envelope, the direction-separated nonce, the anti-replay window and
+the response cache are **unchanged** from v1.4.0 §10 — only the transport moved,
+so the phone's codec is the same. A mailbox frame is 256 B, leaving **231 B of
+plaintext** (256 − 1 channel − 8 header − 16 tag); `GetConfig`/`GetParam` and
+history now page to fit that (a full snapshot is a few pages read in one hold),
+and a `GetInfo` with more than ~17 simultaneously-active alarms drops the alarm
+list to fit, as it already does on a tight LoRaWAN frame.
+
+### Identity: no NDEF record — `get_basic_info` instead
+
+v1.5.0 removes the `hio.stck:inf` record too: the tag holds **no NDEF at all**.
+A phone reads the serial, the anti-replay nonce high-water and the config/FW
+version from the plaintext `get_basic_info` command over the mailbox (channel
+`0x03`), right after enabling it — so a generic NFC reader or a
+dead-battery unit now shows a **blank tag** rather than the serial (accepted,
+since configuration and claiming already need a powered device). Dropping the
+record removes the last EEPROM writer, and with it the field-off gate whose
+single-port RF/I2C contention was the whole reason the v1.4.0 NDEF channel could
+stall or wedge i2c1 — the poll thread now only ever serves the mailbox.
+
+### What is removed / breaking
+
+- **All NDEF records.** The command channel (`hio.stck:cmd` / `hio.stck:rsp` /
+  `hio.stck:ack`, the vendor `hio.stck:vnd`) AND the resting identity record
+  (`hio.stck:inf`) and the `hio.stck:clm` claim record are gone — the tag holds
+  no NDEF. Firmware v1.5.0 answers only over the mailbox; the Manager-App must
+  use it (lockstep release). An old app's `hio.stck:cmd` left on the tag is
+  ignored, never executed.
+- **Battery-less configuration / boot-staged provisioning** (v1.4.0 §10
+  "Provisioning while powered off", #147/#250). The mailbox needs the MCU
+  powered, so a command can no longer be staged into an unpowered unit and
+  applied at the next boot. Claiming likewise moves to a powered device; the
+  claim-window redesign and the plaintext `get_claim_info` are in **PR #415**.
+- **Android tap-to-launch** via the MIME identity record (#298).
+- **`nfc dump` and `nfc check|autocheck`** (v1.4.0 bench shell). The firmware no
+  longer touches the user EEPROM on any path. Enabling the mailbox does not
+  change the EEPROM either, so a unit reflashed from v1.4.x keeps its old NDEF
+  records (possibly a plaintext `clm` claim token) until they are wiped by hand —
+  `nfc clear` on a debug build (see Bench shell) or an RF erase (e.g. ST25 NFC Tap).
+
+### Production tester
+
+Authorising FTM sets the static `MB_MODE` bit once, at the first boot, together
+with the static GPO config (the I2C-password session and the EEPROM writes run only
+while one of those bits is still unset; later boots only read them). A unit whose `MB_MODE`
+cannot be set has **no interactive NFC channel** — a hardware/production defect,
+not something the firmware can work around. It is reported as
+`APP_DEVICE_STATUS_MAILBOX_DOWN` (device_status **bit 13**, `0x2000`) in the
+GetInfo response and as an `NFC mailbox: UNAVAILABLE` line in `ats device info`,
+so the production tester rejects it.
+
+### LED during a tap
+
+| What happens | LED |
+|---|---|
+| Phone detected (RF field), no mailbox session yet | green, at most 5 s |
+| Mailbox session running | green blink |
+| Session ended, **last** exchange OK | green + yellow, 2 s |
+| Session ended, last exchange failed | red, 2 s |
+| Otherwise / afterwards | off |
+
+"Failed" means the last request was rejected (wrong key or nonce, unknown channel — no reply
+is sent), its reply could not be written or was never read by the phone, or the session aborted
+on I2C errors; an authenticated `Response.error` counts as a valid reply. The last exchange
+decides, so an app that resyncs after a rejection and then succeeds ends green + yellow. A
+command that reboots the device (save, reboot, resets, `set_secret_key`, `claim_active`,
+calibration, `lrw_reset`) first lets the result finish, then reboots; the boot carousel follows.
+The v1.4.0 NDEF states (per-command processing blink, green + yellow "response waiting",
+immediate red blink per rejected frame, pre-reboot green NFC carousel) are gone.
+
+### Bench shell
+
+`nfc mb status` (dump the FTM registers), `nfc mb on|off` (drive `MB_EN` from the
+I2C side), and `nfc mb serve` (enable and serve the mailbox for a reader that
+cannot issue Write Dynamic Configuration itself); `nfc reg|regw` read/write a
+system or dynamic register. Debug build only: `nfc read <off> <len>`,
+`nfc write <off> <hex>` (≤ 64 B) and `nfc clear` (zero all 512 B) access the user
+EEPROM by hand, e.g. to wipe stale v1.4.x NDEF records; they refuse while an RF
+field is present (remove the phone) and clear `MB_EN` first (the chip refuses
+EEPROM writes while FTM is on). `ats cmd nfc` still injects a
+command straight into `app_cmd_handle` for phone-free command-logic testing.
+
+### Test coverage
+
+`tests/nfc_hw` gained a full ST25DV mailbox model (registers, 256 B RAM, the
+RF/host handshake, the datasheet rule that every EEPROM write NACKs while
+`MB_EN=1`, and a password-failure mode) plus session ztests: boot authorisation
++ GPO config, the `MAILBOX_DOWN` flag on a password failure, a stuck `MB_EN`
+cleared on the next boot, a field present at boot served without a field change,
+a mailbox session the phone opened during boot kept by the init (MB_EN kept, chip
+left powered) and served, owner- and vendor-command sessions that advance the nonce
+and leave the claim window active, a rejected channel prefix, a plaintext
+`get_basic_info`, and the session limits: a field held without traffic released
+after 120 s (restarted by an exchange), no hold when the mailbox is unavailable, a
+deferred action ending the poll while the phone still holds the field (a follow-up
+command is not served and cannot replace it), and `app_cmd_get_info()` — which
+`m_work_q` runs for the on-join / clock-sync / downlink `GetInfo` — never waiting
+on a tap (the claim state is read lock-free). `tests/cmd` checks every `GetConfig`
+page fits one 256 B mailbox frame.
+
+---
+
+## 19. Plaintext command transport and explicit claiming (#415)
+
+Prepares the claim flow for the NFC mailbox move (#313/#414) and tightens the
+claim window into something with no automatic behaviour.
+
+### 19.1 The `plain_text` transport
+
+A new command transport, `plain_text`, carries a **raw `Command` protobuf** in and
+`0x01 || Response` out — no AES-CCM, no nonce, no response cache. It is the
+unauthenticated, identity-disclosure channel a phone uses before it holds any key.
+It is reachable over the NFC mailbox channel `0x03` (added by #414) and, for the
+bench, the shell `ats cmd plain <hex>`; it is **never** reachable over LoRaWAN.
+
+The transport is **strictly opt-in**. A command answers on it only by listing
+`plain_text` in `app_config.yml`; every other command is rejected by the generated
+dispatch with `NOT_READY "transport not allowed"`. This is enforced in configen:
+the historical "omitted `transports:` = all transports" default now means "all
+transports **except** `plain_text`", so a command that does not name it — `get_info`
+(which would disclose `claim_token`), `set_param` (which would write config), … —
+can never be answered without a key. **Rule for any command that opts in:
+read-only, and disclosing identity-class data only.**
+
+### 19.2 `get_claim_info` (proto 29)
+
+The first `plain_text` command (also allowed over `nfc` and `shell`). Empty request;
+returns `Response.claim_info { serial_number, claim_token }` — the same data the
+plaintext `hio.stck:clm` NDEF record carries today — **while the claim window is
+active**. Once the window is `done` it returns `NOT_READY "claimed"`; before a
+token is provisioned, `NOT_READY "no claim token"`. Unlike the NDEF record it needs
+a **powered** device, so a shelf attacker can no longer read the token off an
+unpowered box.
+
+### 19.3 Explicit two-state claim window
+
+The claim window (`clm/state` in NVS) is now a two-state latch:
+
+| State | Meaning |
+|---|---|
+| `active` | factory default — the device may still be claimed: `get_claim_info` discloses the token |
+| `done` | claiming finished — `get_claim_info` → `NOT_READY "claimed"` |
+
+Removed relative to v1.4.0: the auto-arm (a provisioned token no longer lazily
+"arms" the record) and the **implicit close** — in v1.4.0 any successfully
+decrypted command closed the window (#308); now it closes **only** on an explicit
+`claim_done`. The app must therefore send `claim_done` after storing the claimed
+keys; a crash in between leaves the token readable on a powered unit (accepted:
+the backend refuses a second claim of the same serial, so only the token leaks,
+not control). Mutators are explicit only: `claim_done` / `ats claim done` →
+`done`; `claim_active` / `ats claim active` / `vendor_reset` → `active`.
+`device_reset` / `factory_reset` leave the state alone.
+
+Upgrading from v1.4.x migrates the old tri-state in place: `unset`/`pending` →
+`active`, `consumed` → `done`.
+
+### 19.4 Command rename (wire-compatible)
+
+`clm_ack` → `claim_done` (id 25) and `clm_rearm` → `claim_active` (id 27); messages
+`ClmAck`/`ClmRearm` → `ClaimDone`/`ClaimActive`. The **field numbers do not move**,
+so already-deployed downlinks and vendored protos stay byte-compatible — only the
+generated names change (firmware, JS decoder, and the Manager-App's vendored proto).
+
+### 19.5 Bench
+
+`ats cmd plain <hex>` injects a raw Command over the transport; `ats claim
+active|done|status` drives and prints the window state. Example:
+`ats claim status` on a freshly provisioned unit prints `claim window: active`;
+`ats cmd plain <GetClaimInfo>` returns the `ClaimInfo`; `ats cmd plain <GetInfo>`
+returns `NOT_READY "transport not allowed"`.
+
+---
+
+## 20. Last-downlink link quality in the NFC GetInfo (#409 A2)
+
+An installer with only a phone (Manager-App over NFC) has no view of the network
+server, so it could not tell whether the radio link is good where the device is
+mounted. The NFC `Info` now carries the link quality of the **last downlink the device
+received**, as measured by the device:
+
+| Field | Type | Meaning |
+|---|---|---|
+| 16 `last_dl_rssi` | sint32 | RSSI of the last downlink, dBm |
+| 17 `last_dl_snr` | sint32 | SNR of the last downlink, dB |
+| 18 `last_dl_age_s` | uint32 | seconds since that downlink was received |
+
+- **NFC only** — like `lrw_state` and `dev_eui`. The LoRaWAN `Info` does not carry them:
+  the network server already has the uplink RSSI/SNR per gateway and, with `DevStatusAns`
+  (#419), the device-side downlink SNR margin and battery.
+- **Always with its age.** A Class A device only receives a downlink when the network
+  sends one, so the reading can be hours old. The values reflect any downlink, including
+  MAC-only ones (ADR, DevStatusReq, LinkCheckAns).
+- **Omitted until the first downlink since boot**, so a missing value never reads as 0 dBm.
+- The same values are on the debug shell: `ats radio status` (`rssi`, `snr`).
+- `ttn.js` decodes them as `last_dl_rssi`, `last_dl_snr`, `last_dl_age_s`.
+- **Paging (with §18):** in the host-driven NFC `GetInfo` paging the three fields form **one**
+  NFC-only Info unit (next to `lrw_state` / `claim_token` / `dev_eui`), so RSSI/SNR never
+  travel on a page without their age; the unit is empty (not sent) until the first downlink.
+
+Cost: release +160 B flash, +0 B RAM.
+
+---
+
+## 21. History timestamps follow the RTC (F27, F28, H-4)
+
+A history record carries no time of its own: its time is implicit, `base +
+ordinal × interval_report`. v1.5.0 before this change assumed every record came
+exactly one interval after the previous one and none was ever missing. On the
+bench (unit 0413) that failed in four ways:
+
+| Cause | Effect (before) |
+|---|---|
+| Report cadence re-armed `interval_report` after each run on the kernel clock; the debug build's SysTick runs on the free-running MSI (~1.22 % slow, `CONFIG_PM=n`) | Debug timestamps lagged ~44 s/h, ~10 min after 6 h (F27) |
+| `app_history_capture()` returned early while a LoRaWAN replay was streaming (#126) | Every skipped tick shifted all newer records by −1 interval |
+| MCU halted / stalled for several intervals (H10: 6 min halt) | Records after the halt claimed times inside the halt (+358 s) |
+| Flash ring after a reboot / power loss: the first new page was stamped by *ordinal continuation* of the old ring | Post-boot records claimed the time the outage started — shifted by the whole outage, after a power loss even flagged synced (F28, reproduced in `tests/history_flash`: −18000 s after a 5 h outage) |
+
+### What changed
+
+- **Debug clock (A).** `app/debug.overlay` sets `msi-pll-mode` on `clk_msi`: the
+  MSI is trimmed by hardware against the 32.768 kHz LSE, so the debug kernel clock
+  (and every kernel timeout, LoRaWAN RX windows included) tracks the crystal.
+  `app/CMakeLists.txt` applies the overlay automatically whenever `debug.conf` is
+  in `EXTRA_CONF_FILE` (so also for `debug-history-flash`). Release is unchanged:
+  its tick already runs on LPTIM1/LSE, and MSI PLL mode was not validated there
+  across Stop2.
+- **Cadence on RTC slots (B).** The periodic report (sample + history capture +
+  telemetry) runs on a slot grid `anchor + k × interval_report` of the wall clock
+  (`app_slot.c`). Each run maps to the nearest slot and arms the timer for the
+  distance to the next one, re-read from the RTC, so kernel-clock drift and late
+  runs never accumulate. Before the RTC is set the grid runs on uptime (as before);
+  at the first sync the anchor is carried over by the `unix − uptime` offset, so
+  the phase is kept. A timer firing early or late by up to
+  `MIN(interval / 2, 15 s)` (`APP_SLOT_TOLERANCE_S`, covers work-queue latency)
+  keeps its slot. A run further off — a debug halt or a stall longer than the
+  timer's remaining time, an RTC step — re-lays the grid at its own time, so its
+  record keeps the true sampling time (and history opens a new segment) instead
+  of borrowing a slot up to half an interval away (HIL T4: a 150 s halt put the
+  run 30 s off the grid). An `interval_report` change lays a new grid. Boot arming is
+  unchanged (first report one interval out) and the telemetry pre-send jitter
+  (#267) stays in `app_lrw`.
+- **No capture skipped during a replay (C).** The replay cursor is an absolute
+  record ordinal (ring start + evicted total), so eviction under a running replay
+  moves nothing: no record is repeated or skipped, a cursor whose record was
+  evicted resumes at the oldest stored one, and the replay covers the records that
+  existed at its start (newer ones are left for the next replay). Flash backend:
+  writes within the current page go on, but the page rollover (a ~20 ms erase that
+  would stall the replay's RX windows) is held off until the replay ends — a record
+  that needs the next page meanwhile is dropped (a hole, no RAM for a queue).
+- **Segments with their own time base (D).** Record time is periodic only within a
+  *segment*, and a `HistoryFrame` never crosses a segment boundary, so the host's
+  `t0_unix + j × interval_s` stays exact without a protocol change:
+  - **flash ring (release):** segment = page. A page's `base_time` is the RTC time
+    of its first record's slot (uptime with `base_synced=0` while the RTC is unset),
+    never the continuation of the page before it. Every boot still starts a new
+    page, which now gets its real time — F28 is gone. A report slot that doesn't
+    continue the head page's grid (missed slots after a halt/stall or a dropped
+    record, an RTC step of more than half an interval) closes the page early and
+    opens a new one stamped with that slot; the rest of the old page stays unused.
+  - **page header v2** (`PAGE_MAGIC` "HRN2", 40 B = the 32 B v1 header + one double
+    word). The extra double word stays erased when the page is opened. A page opened
+    before the RTC was set (power loss, no RTC until the network `DeviceTimeAns`)
+    is re-based at the clock sync, and the `unix − uptime` offset (+ CRC) is
+    programmed into that double word once — from the report work queue, never from
+    the downlink callback (#96). Mount applies it, so the page keeps its unix times
+    after later reboots. This replaces the #191 "newest record = now" estimate: a
+    page of an earlier boot that never saw the clock stays **unsynced**
+    (`time_synced=false`) instead of getting a guessed time.
+  - **v1 pages** (32 B header, earlier firmware) stay mountable and readable in the
+    same chain, each with its own base; new pages are always v2, so the ring
+    migrates as it wraps.
+  - **RAM ring (debug):** a 4-entry segment table (32 B). A slot discontinuity
+    opens a new entry; a fifth one drops the oldest segment with its records.
+- **Replay end (E, H-4).** The export cursor skips to the next record *inside* the
+  window, so the frame that carries the window's last record ends the replay at
+  once — no extra empty attempt, no `WRN History replay stop at frame N/N`, ~3 s
+  earlier. The warning and the `BUDGET_TOO_SMALL` error stay for the real case
+  (records left but none fits the data rate). The NFC paged read uses the same
+  cursor: the page that reaches the window end already returns `has_more=false`.
+  The P2P replay (§6, B8) uses the same absolute cursor, per-frame `time_synced`
+  and end rule.
+
+### Host-visible behaviour
+
+- **Wire format unchanged** (`HistoryFrame` fields, `ttn.js`, golden vectors).
+- **More frames:** one extra frame per segment boundary inside the requested window
+  (at most one per page: ~585 records per page vs. ~70 records per frame at DR5).
+  `frame_count` counts them.
+- **`time_synced` is per frame** now (it was one flag for the whole buffer): each
+  frame reports its segment's state.
+- **Unsynced records and the window.** A record of an unsynced segment has no unix
+  time, so a `[from_unix, to_unix]` window can't place it. It is returned for an
+  open window (`from_unix` 0, `to_unix` `UINT32_MAX` — what a host sends without
+  bounds) and while the device itself has no wall clock (unchanged: the whole
+  buffer until the clock is synced), but not for a bounded window on a synced
+  device, so a Portal gap fill doesn't drag stale uptime pages along every time.
+- Shell: `history info` adds `segments:`; `history read` prints an unsynced record's
+  time as `up <s> (no-rtc)` (uptime of the boot that recorded it).
+
+### Cost
+
+| | Before | After |
+|---|---|---|
+| Release FLASH / RAM | 163740 B / 52620 B | 165020 B (+1280) / 52684 B (+64, per-page base in RAM) |
+| Debug FLASH / RAM | 221448 B / 61628 B | 223160 B (+1712) / 61628 B (+0) |
+| `debug-history-flash` FLASH / RAM | 223712 B / 60668 B | 225440 B (+1728, 98.28 % of 224 KB) / 60732 B (+64) |
+| Flash ring, temp + humidity (3 B) | 588 records/page, 9408 total | 585 records/page, 9360 total (**−0.51 %**: 1764 → 1757 data bytes/page) |
+| Debug RAM ring | 341 records | 341 records |
+
+A split (halt, stall, RTC step) additionally leaves the rest of that page unused;
+reboots already did. Flash writes per record are unchanged; the fix-up double word
+is one extra program per page recorded without RTC.
+
+### Upgrade / downgrade
+
+Upgrading keeps the stored history (v1 pages are read as before). A **downgrade**
+to an earlier firmware does not recognise v2 pages: it mounts whatever v1 pages are
+left from before the upgrade (stale records) — run `history clear` after a
+downgrade.
+
+### Tests
+
+`tests/history_flash`: F28 (RTC kept across the reboot and power loss + sync:
+zero shift, first frame ends at the page boundary), unsynced page of an earlier
+boot, fix-up double word written from the work queue or the next capture and
+re-read after reboots, v1 pages mounted next to v2 pages, v2 page capacity,
+missed-slot page split, slot jitter, RTC step back, replay holding off the
+rollover (plain and split). `tests/history`: capture during a replay with eviction
+(absolute cursor), reset during a replay, RAM segment split / table overflow /
+retirement / clock-sync re-base, replay end at the window end. `tests/slot`: slot
+grid rounding, early/late runs, a 1.22 % slow kernel clock over 6 h, uptime → unix
+switch, RTC steps, interval change, and a run far off its slot re-anchoring.
+`tests/history_flash` also checks that a page of foreign data is skipped at
+mount (not erased) and does not hide a valid chain that wraps around the end of
+the partition.
+
+### Hardware acceptance (bench unit, 2026-09-25/26)
+
+Run on the bench STICKER against the ProXimos Hub (ChirpStack + Portal), on the
+debug RAM, debug-history-flash and release images:
+
+| Test | Result |
+|---|---|
+| F28 on the old code (debug-history-flash, 3 min halt + reset) | reproduced: post-boot records stamped −235 s |
+| Same with this change | post-boot records carry their real time |
+| v1 → v2 upgrade (same partition) | v1 pages mounted and exported next to new v2 pages |
+| Halt 6 min / 4 × 150 s (flash and RAM) | one new segment per halt, a hole instead of a shift; replay returns one frame per segment with the correct `t0`; the RAM segment table overflows cleanly |
+| Run 30 s off its slot after a halt | fixed during HIL: the record now carries its sampling time (was borrowing the nearest slot) |
+| Debug kernel drift, MSI PLL | −2 s over 6 h (1.22 % ≈ 267 s before); after 6 h the newest record is stamped within ~1 s of its sampling time, 340 consecutive 60 s steps in one segment |
+| DR0, 60 s, 91 min with duty-cycle restriction and forced rejoins | no re-anchor, no hole, no page closed early; replay at DR0 = 9 records per frame |
+| Release: 30 min ChirpStack outage + Portal auto backfill | one replay, 36 records at 60 s steps, times exact |
+| Release: `interval_report` change | history restarts at the new interval (unchanged, intended) |
+
+Not covered on hardware: the fix-up double word after a real power loss with the
+RTC unset (a J-Link reset keeps the RTC) — covered by `tests/history_flash`.
+Known and unchanged: a reset or power loss loses the ≤ 2 records still staged in
+RAM (one double word), and history is not preserved across a partition layout
+change (debug-history-flash ↔ release) — acceptable, history exists to bridge
+LoRaWAN outages, not as an archive across firmware updates.
 
 ---
 

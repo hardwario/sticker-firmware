@@ -58,6 +58,13 @@ enum app_lrw_state app_lrw_get_state(void);
 int app_lrw_get_info(struct app_lrw_info *info);
 bool app_lrw_is_ready(void);
 
+/* Link quality of the last received downlink as measured by the device (RSSI in
+ * dBm, SNR in dB) and its age in seconds (#409 A2). Returns false before the
+ * first downlink since boot. Reads cached values only -- never touches LoRaMac,
+ * so it is safe from any thread. On a Class A device the values can be hours
+ * old; always report them together with age_s. */
+bool app_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s);
+
 /* Compose + split + send a telemetry snapshot (fPort 2) from the current sensor
  * data. app_lrw builds the snapshot (app_compose), splits it into DR-budget
  * frames, piggybacks a LinkCheckReq on the first frame when the N-th-message
@@ -65,6 +72,11 @@ bool app_lrw_is_ready(void);
  * after it samples + captures history. No-op while joining/reconnecting, during
  * calibration or while a history replay owns the radio. */
 void app_lrw_send_telemetry(void);
+
+/* Same as app_lrw_send_telemetry(), but without the random pre-send delay: the
+ * host-requested uplink (force_send / sample over LoRaWAN) leaves at once. A
+ * jittered report still pending is folded into this send (F14). */
+void app_lrw_send_telemetry_now(void);
 
 /* Register a callback fired on a link-ready edge (join success / history-replay
  * finish) so app_report can resume the report cadence with an immediate uplink.
@@ -94,9 +106,11 @@ size_t app_lrw_payload_cap(size_t buf_size);
 int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len);
 
 /* Arm a deferred GetInfo uplink to answer a ClockSync command: the next network
- * time-update (DeviceTimeAns) sends an Info carrying the synced unix_time. The
- * command itself does not ack (saves an uplink; a bare ack can't carry the time). */
-void app_lrw_send_info_on_clock_sync(void);
+ * time-update (DeviceTimeAns) sends an Info carrying the synced unix_time and the
+ * command's `seq`, so the host can pair it with the request. The command itself
+ * does not ack (saves an uplink; a bare ack can't carry the time). A newer
+ * ClockSync before the time lands takes over the seq. */
+void app_lrw_send_info_on_clock_sync(uint32_t seq);
 
 /* Stage an alarm-detail batch (issue #27) for the next uplink on fPort 3. Own
  * slot, drained after the command response and before telemetry, so it never

@@ -211,7 +211,13 @@ static uint32_t m_hist_count;
  * replay start, which buys ~8 B of samples per frame at low DRs. */
 static uint32_t m_hist_frame_bound = UINT32_MAX;
 static uint32_t m_hist_idx;
-static size_t m_hist_cursor;
+/* Absolute record ordinals (app_history_span()): next record to send and the end
+ * of the replay (exclusive), snapshot at start. Captures keep appending during a
+ * replay and the RAM ring may evict under it, but an absolute cursor names the
+ * same record throughout, so nothing is repeated or skipped; records captured
+ * after the start are left for the next replay. */
+static uint32_t m_hist_cursor;
+static uint32_t m_hist_end;
 static uint32_t m_hist_present; /* shared sensor mask (uint32), snapshot at replay start */
 static uint32_t m_hist_interval;
 static int m_hist_retries; /* consecutive lorawan_send failures on the current frame (#89) */
@@ -242,6 +248,8 @@ static bool m_mac_started;          /* lorawan_start() succeeded; LoRaMac state 
 static uint8_t m_max_next_payload;
 static int16_t m_last_rssi;
 static int8_t m_last_snr;
+/* Uptime (s) + 1 of the last received downlink; 0 = none since boot (#409 A2). */
+static atomic_t m_last_dl_s;
 static uint8_t m_last_margin;
 static uint8_t m_last_gw_count;
 static uint8_t m_lc_response_gw_count;
@@ -308,6 +316,10 @@ static enum app_cmd_action m_post_cmd_action;
 /* #193: set from a command-handler thread, test-and-cleared in the LoRaMac
  * downlink callback (another context) — an atomic bit closes the lost-update race. */
 static atomic_t m_clock_sync_info_pending;
+/* seq of the ClockSync command the deferred Info answers (F13: without it the
+ * answer went out with seq 0 and the host could not pair it). Written by the
+ * command handler before the pending bit is set, read by the Info work item. */
+static atomic_t m_clock_sync_info_seq;
 /* #409 A5a / #425: boot announce frames not sent at join time — not even one
  * field fitted the budget, or settings-info waited for the Info pages to finish
  * (one page stream at a time). Sent from m_announce_work once a DR change makes
@@ -583,14 +595,14 @@ static void state_transition(enum app_lrw_state new_state)
  * buffer size: when the full Info does not fit, app_cmd_build_info() pages it
  * (#425) and the remaining pages follow via m_page_stream_work, instead of
  * tx_send_queued() silently dropping the whole uplink later. */
-static int queue_info_uplink(void)
+static int queue_info_uplink_seq(uint32_t seq)
 {
 	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
 	size_t info_len;
 	bool more = false;
 
-	int ret = app_cmd_build_info(info_buf, refresh_payload_cap(sizeof(info_buf)), &info_len,
-				     &more);
+	int ret = app_cmd_build_info_seq(seq, info_buf, refresh_payload_cap(sizeof(info_buf)),
+					 &info_len, &more);
 	if (ret == 0) {
 		(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len, LRW_TX_INFO);
 		atomic_clear_bit(&m_announce_pending, ANNOUNCE_INFO);
@@ -604,6 +616,12 @@ static int queue_info_uplink(void)
 		atomic_set_bit(&m_announce_pending, ANNOUNCE_INFO);
 	}
 	return ret;
+}
+
+/* Autonomous Info (boot announce, deferred announce): seq 0. */
+static int queue_info_uplink(void)
+{
+	return queue_info_uplink_seq(0);
 }
 
 /* Build a settings-info ConfigDump and stage it on the command port, right after
@@ -920,7 +938,7 @@ static void downlink_success_work_handler(struct k_work *work)
 static void clock_sync_info_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	(void)queue_info_uplink();
+	(void)queue_info_uplink_seq((uint32_t)atomic_get(&m_clock_sync_info_seq));
 }
 
 static void lc_response_work_handler(struct k_work *work)
@@ -1801,39 +1819,44 @@ static void m_hist_work_handler(struct k_work *work)
 	uint8_t samples[HISTORY_SAMPLES_MAX];
 	size_t cap = MIN(history_frame_cap(), sizeof(samples));
 	uint32_t t0 = 0;
+	bool synced = false;
 	uint16_t n = 0;
-	size_t next = m_hist_cursor;
+	uint32_t next = m_hist_cursor;
 	size_t slen = 0;
 
 	if (cap > 0) {
-		slen = app_history_export_page(m_hist_from, m_hist_to, m_hist_cursor, samples, cap,
-					       &t0, &n, &next);
+		slen = app_history_export_abs(m_hist_from, m_hist_to, m_hist_cursor, m_hist_end,
+					      samples, cap, &t0, &synced, &n, &next);
 	}
 	if (n == 0) {
+		if (next >= m_hist_end) {
+			/* Nothing left in the window: the records were evicted or the
+			 * ring was reset since the previous frame. */
+			LOG_INF("History replay complete: %u frames", (unsigned)m_hist_idx);
+			history_replay_finish();
+			return;
+		}
+		/* #409 3f: records remain but the DR dropped below one record per
+		 * frame. Tell the host instead of going silent mid-stream. */
 		LOG_WRN("History replay stop at frame %u/%u (cap=%uB)", (unsigned)m_hist_idx,
 			(unsigned)m_hist_count, (unsigned)cap);
-		if (m_hist_idx < m_hist_count) {
-			/* #409 3f: records remain but the DR dropped below one record per
-			 * frame. Tell the host instead of going silent mid-stream. */
-			uint8_t err[16];
-			size_t err_len;
+		uint8_t err[16];
+		size_t err_len;
 
-			if (app_cmd_build_budget_error(m_hist_seq, err,
-						       refresh_payload_cap(sizeof(err)),
-						       &err_len) == 0) {
-				(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, err,
-							     err_len);
-			}
+		if (app_cmd_build_budget_error(m_hist_seq, err, refresh_payload_cap(sizeof(err)),
+					       &err_len) == 0) {
+			(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, err, err_len);
 		}
 		history_replay_finish();
 		return;
 	}
 
 	size_t len;
+	/* time_synced is per frame: a frame never spans two history segments, and
+	 * each segment (flash page) knows whether its base is unix or uptime. */
 	int ret = app_cmd_build_history_frame(m_hist_seq, m_hist_idx, m_hist_count, t0,
-					      m_hist_present, m_hist_interval,
-					      app_history_base_synced(), samples, slen,
-					      m_hist_tx_buf, sizeof(m_hist_tx_buf), &len);
+					      m_hist_present, m_hist_interval, synced, samples,
+					      slen, m_hist_tx_buf, sizeof(m_hist_tx_buf), &len);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_cmd_build_history_frame", ret);
 		history_replay_finish();
@@ -1868,8 +1891,10 @@ static void m_hist_work_handler(struct k_work *work)
 
 	/* Terminate on cursor exhaustion, not frame_index == frame_count (#89): a DR
 	 * change mid-replay alters records-per-frame, so the up-front frame_count is
-	 * only an estimate. The host concatenates by frame_index. */
-	if (m_hist_cursor < app_history_count()) {
+	 * only an estimate. The host concatenates by frame_index. The export already
+	 * skips to the next record in the window, so the frame carrying the window's
+	 * last record ends the replay here — no trailing empty attempt (H-4). */
+	if (m_hist_cursor < m_hist_end) {
 		k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_SECONDS(FRAME_GAP_SEC));
 	} else {
 		LOG_INF("History replay complete: %u frames", (unsigned)m_hist_idx);
@@ -1918,10 +1943,12 @@ int app_lrw_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t 
 
 	m_hist_count = n;
 	m_hist_idx = 0;
-	m_hist_cursor = 0;
+	app_history_span(&m_hist_cursor, &m_hist_end);
 	m_hist_retries = 0;
 	m_hist_active = true;
-	app_history_set_replay_active(true); /* pause capture; app_report telemetry self-skips */
+	/* Capture goes on (absolute cursor); only the flash page rollover is held
+	 * off. app_report telemetry self-skips while the replay owns the radio. */
+	app_history_set_replay_active(true);
 
 	LOG_INF("History replay start: %u frames (window %u..%u)", (unsigned)n, from_unix, to_unix);
 	k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_NO_WAIT);
@@ -1955,6 +1982,7 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 
 	m_last_rssi = rssi;
 	m_last_snr = snr;
+	atomic_set(&m_last_dl_s, (atomic_val_t)(k_uptime_get() / 1000) + 1);
 
 	if (data) {
 		LOG_HEXDUMP_INF(data, len, "Payload: ");
@@ -2364,6 +2392,17 @@ void app_lrw_send_telemetry(void)
 	k_work_reschedule_for_queue(&m_work_q, &m_tx_jitter_work, K_MSEC(delay_ms));
 }
 
+void app_lrw_send_telemetry_now(void)
+{
+	/* F14: a host-requested uplink targets this one device, so the fleet
+	 * de-correlation delay buys nothing. Rescheduling to zero also folds a
+	 * jittered report that is still pending into this send, instead of the
+	 * request collapsing into it seconds later (k_work_reschedule keeps a single
+	 * pending instance) — the host sees one fresh uplink right after its
+	 * command either way. */
+	k_work_reschedule_for_queue(&m_work_q, &m_tx_jitter_work, K_NO_WAIT);
+}
+
 void app_lrw_register_ready_cb(void (*cb)(void))
 {
 	m_ready_cb = cb;
@@ -2385,6 +2424,19 @@ void app_lrw_force_link_check(void)
 enum app_lrw_state app_lrw_get_state(void)
 {
 	return (enum app_lrw_state)atomic_get(&m_state);
+}
+
+bool app_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+{
+	atomic_val_t at = atomic_get(&m_last_dl_s);
+
+	if (at == 0 || !rssi || !snr || !age_s) {
+		return false;
+	}
+	*rssi = m_last_rssi;
+	*snr = m_last_snr;
+	*age_s = (uint32_t)(k_uptime_get() / 1000) + 1 - (uint32_t)at;
+	return true;
 }
 
 bool app_lrw_is_ready(void)
@@ -2502,10 +2554,12 @@ static int queue_tx_response(uint8_t port, const uint8_t *buf, size_t len, enum 
 	return 0;
 }
 
-void app_lrw_send_info_on_clock_sync(void)
+void app_lrw_send_info_on_clock_sync(uint32_t seq)
 {
 	/* Arm the deferred Info; downlink_callback sends it once LORAWAN_TIME_UPDATED
-	 * arrives (the ClockSync command answer). */
+	 * arrives (the ClockSync command answer). The seq is stored before the bit is
+	 * set, so the Info work item never pairs a new request with a stale seq. */
+	atomic_set(&m_clock_sync_info_seq, (atomic_val_t)seq);
 	atomic_set_bit(&m_clock_sync_info_pending, 0);
 }
 
