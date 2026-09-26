@@ -14,7 +14,6 @@
 #include "app_history.h"
 #include "app_log.h"
 #include "app_lrw.h"
-#include "app_lrw_stale.h"
 #include "app_settings.h"
 #include "app_wdog.h"
 
@@ -102,8 +101,7 @@ static struct k_work_q m_work_q;
 #define LRW_HEARTBEAT_PERIOD_SEC 5
 #define LRW_HEARTBEAT_TIMEOUT_MS 30000
 /* M-2: the #182 heartbeat only proves m_work_q drains, not that telemetry
- * actually leaves; the stale-uplink decision (APP_LRW_STALE_FACTOR report
- * intervals, duty-cycle hold) lives in app_lrw_stale.c. */
+ * actually leaves; see stale_check() for the stale-uplink decision. */
 
 /* A lost MAC confirm must end in -ETIMEDOUT from lorawan_send()/lorawan_join()
  * (#181) before the liveness channel goes stale and resets the SoC. */
@@ -117,20 +115,73 @@ static int m_wdog_channel = -1;
 static struct k_work_delayable m_heartbeat_work;
 #endif
 
+/* M-2 stale-uplink watchdog (F29 duty-cycle hold, #437).
+ *
+ * The watchdog forces a MAC-reset rejoin when joined but no telemetry uplink has
+ * left for LRW_STALE_FACTOR x interval_report: sends perpetually skipped
+ * (budget == 0 loop, retries exhausted) leave m_work_q live and the IWDG fed
+ * while the station is mute.
+ *
+ * A send refused by the EU868 duty cycle (lorawan_send() -> -ECONNREFUSED,
+ * LORAMAC_STATUS_DUTYCYCLE_RESTRICTED) is not a mute station: the MAC is alive
+ * and throttled, and the band credits come back when the 1 h observation window
+ * rolls over. A rejoin there only re-initialises the MAC, which resets the band
+ * credits kept in RAM -- the device would bypass the 1 % limit (F29, HIL
+ * 2026-09-25: DR0 at 60 s, two forced rejoins in 91 min). So the watchdog holds
+ * while refusals keep coming, bounded by LRW_STALE_DC_HOLD_MAX_MS so a MAC stuck
+ * in "restricted" still ends in a rejoin. */
+
+/* Report intervals without a telemetry uplink before M-2 forces a rejoin. */
+#define LRW_STALE_FACTOR              4
+/* Longest duty-cycle streak M-2 waits out: the 1 h observation window of the
+ * LoRaMac band credits plus a margin. */
+#define LRW_STALE_DC_HOLD_MAX_MS      (75LL * 60 * 1000)
+/* A refusal counts as "recent" within one report interval plus this margin (the
+ * telemetry retry chain after a report is 8 x 15 s). */
+#define LRW_STALE_DC_RECENT_MARGIN_MS (3LL * 60 * 1000)
+
+enum stale_verdict {
+	STALE_OK = 0,  /* an uplink left recently enough (or no clock) */
+	STALE_HOLD_DC, /* stale, but the duty cycle explains it: wait */
+	STALE_REJOIN,  /* stale with no duty-cycle excuse: force rejoin */
+};
+
+/* Duty-cycle refusal streak: first and most recent refusal (uptime ms, 0 =
+ * none). Cleared by a successful send. */
+struct stale_dc {
+	int64_t since_ms;
+	int64_t last_ms;
+};
+
 /* Uptime (ms) of the last successful telemetry uplink; 0 = none since the last
  * (re)join. Drives the M-2 stale-uplink watchdog in heartbeat_work_handler. */
 static int64_t m_last_uplink_ms;
 /* Duty-cycle refusal streak (F29): lets M-2 wait out a throttled MAC instead of
  * rejoining, which would reset the band credits. Only touched on m_work_q. */
-static struct app_lrw_stale_dc m_dc;
+static struct stale_dc m_dc;
 static bool m_dc_hold_logged;
+
+/* Record a lorawan_send() result: 0 clears the streak, -ECONNREFUSED (duty
+ * cycle) extends it, anything else leaves it unchanged. */
+static void stale_note_send(struct stale_dc *dc, int ret, int64_t now_ms)
+{
+	if (ret == 0) {
+		dc->since_ms = 0;
+		dc->last_ms = 0;
+	} else if (ret == -ECONNREFUSED) {
+		if (dc->since_ms == 0) {
+			dc->since_ms = now_ms;
+		}
+		dc->last_ms = now_ms;
+	}
+}
 
 /* Every uplink goes through here, so the duty-cycle streak sees each result. */
 static int lrw_send(uint8_t port, uint8_t *data, uint8_t len, enum lorawan_message_type type)
 {
 	int ret = lorawan_send(port, data, len, type);
 
-	app_lrw_stale_note_send(&m_dc, ret, k_uptime_get());
+	stale_note_send(&m_dc, ret, k_uptime_get());
 	if (ret == 0) {
 		m_dc_hold_logged = false;
 	}
@@ -573,7 +624,7 @@ static void state_transition(enum app_lrw_state new_state)
 		m_rejoin_attempts = 0;
 		m_link_check_pending = false;
 		m_last_uplink_ms = k_uptime_get(); /* M-2: start the stale-uplink clock */
-		m_dc = (struct app_lrw_stale_dc){0};
+		m_dc = (struct stale_dc){0};
 		m_dc_hold_logged = false;
 		break;
 
@@ -2192,6 +2243,33 @@ void app_lrw_suspend(void)
 }
 
 #if defined(CONFIG_WATCHDOG)
+/* Decide the watchdog action. `last_uplink_ms` = uptime of the last successful
+ * telemetry uplink (0 = none since the last (re)join: no decision), `interval_s`
+ * = interval_report (0 = no cadence: no decision). Hold only while refusals keep
+ * coming (the MAC is alive and throttled) and the streak is no longer than the
+ * duty-cycle window. */
+static enum stale_verdict stale_check(int64_t now_ms, int64_t last_uplink_ms,
+				      const struct stale_dc *dc, uint32_t interval_s)
+{
+	if (last_uplink_ms == 0 || interval_s == 0) {
+		return STALE_OK;
+	}
+
+	int64_t interval_ms = (int64_t)interval_s * 1000;
+
+	if (now_ms - last_uplink_ms <= interval_ms * LRW_STALE_FACTOR) {
+		return STALE_OK;
+	}
+
+	if (dc->since_ms != 0 && dc->last_ms != 0 &&
+	    now_ms - dc->last_ms <= interval_ms + LRW_STALE_DC_RECENT_MARGIN_MS &&
+	    now_ms - dc->since_ms < LRW_STALE_DC_HOLD_MAX_MS) {
+		return STALE_HOLD_DC;
+	}
+
+	return STALE_REJOIN;
+}
+
 static void heartbeat_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -2201,7 +2279,7 @@ static void heartbeat_work_handler(struct k_work *work)
 	/* M-2: stale-uplink watchdog. The ping above only proves m_work_q drains; if
 	 * telemetry is perpetually skipped (budget==0, retries exhausted) the station
 	 * is mute while the IWDG stays fed. When joined but no successful uplink has
-	 * left for APP_LRW_STALE_FACTOR × interval_report, force a MAC-reset rejoin
+	 * left for LRW_STALE_FACTOR × interval_report, force a MAC-reset rejoin
 	 * (same escalation the link-check failure path uses) — unless the sends are
 	 * being refused by the duty cycle (F29): the MAC is alive then, and a rejoin
 	 * would only reset the band credits. Runs on m_work_q, so state_transition()
@@ -2210,20 +2288,20 @@ static void heartbeat_work_handler(struct k_work *work)
 	if (st == APP_LRW_STATE_HEALTHY || st == APP_LRW_STATE_WARNING) {
 		int64_t now = k_uptime_get();
 
-		switch (app_lrw_stale_check(now, m_last_uplink_ms, &m_dc,
-					    (uint32_t)g_app_config.interval_report)) {
-		case APP_LRW_STALE_HOLD_DC:
+		switch (stale_check(now, m_last_uplink_ms, &m_dc,
+				    (uint32_t)g_app_config.interval_report)) {
+		case STALE_HOLD_DC:
 			if (!m_dc_hold_logged) {
 				LOG_WRN("No telemetry uplink for >%d report intervals, but the "
 					"duty cycle is refusing sends (%d s): no rejoin (M-2)",
-					APP_LRW_STALE_FACTOR, (int)((now - m_dc.since_ms) / 1000));
+					LRW_STALE_FACTOR, (int)((now - m_dc.since_ms) / 1000));
 				m_dc_hold_logged = true;
 			}
 			break;
-		case APP_LRW_STALE_REJOIN:
+		case STALE_REJOIN:
 			LOG_WRN("No telemetry uplink for >%d report intervals - forcing rejoin "
 				"(M-2)",
-				APP_LRW_STALE_FACTOR);
+				LRW_STALE_FACTOR);
 			m_last_uplink_ms = now; /* don't re-trigger every tick */
 			state_transition(APP_LRW_STATE_RECONNECT);
 			break;

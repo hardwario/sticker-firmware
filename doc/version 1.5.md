@@ -1197,7 +1197,7 @@ the session.
 - Every uplink now goes through `lrw_send()`, which records the result in a
   duty-cycle refusal streak (first and last refusal); a successful send or a join
   clears it.
-- The decision is a pure function (`app_lrw_stale.c`): when the station is stale
+- The decision is `stale_check()` in `app_lrw.c`: when the station is stale
   but duty-cycle refusals keep coming (the last one within one report interval
   + 3 min) and the streak is shorter than the credit window + margin (75 min),
   M-2 holds and logs `... the duty cycle is refusing sends ...: no rejoin (M-2)`
@@ -1213,10 +1213,10 @@ At the default 900 s interval this never triggers (DR0 ≈ 4 uplinks/h ≈ 8 s o
 36 s budget); it matters for short intervals at low data rates and long history
 replays at DR0.
 
-Tests: new `tests/lrw_stale` suite (7 cases: no decision without a clock or
-cadence, stale without an excuse rejoins, streak tracking, duty-cycle hold,
-an old refusal does not hold, the hold is bounded by the window, recent-window
-at a 900 s interval).
+Tests: the decision first shipped as its own module with a `tests/lrw_stale`
+suite (7 cases). It was folded back into `app_lrw.c` so the transport code stays
+in the transport modules; the unit tests return with the common `app_radio`
+layer on feat-p2p. The hardware run below covers the behaviour.
 
 Hardware (bench unit, 2026-09-26, DR0 + ADR off, 60 s): the duty cycle refused
 every send from 07:21:46Z (the 1 h credit window started at the join, 07:14Z);
