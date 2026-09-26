@@ -66,8 +66,8 @@ app_report  app_alarm  app_cmd  app_history  main/LED  NFC Info  shell
 | Step | Content | Parity items |
 |---|---|---|
 | T0 | Sync v1.5.0 → feat-p2p (#437) | done (63c285a) |
-| **T1a** | Rename `app_lrw`/`app_p2p` → `app_radio_lrw`/`app_radio_p2p` (files, symbols, log modules, docs), with a v1.5.0 sync (#438). No behaviour change. | — |
-| T1 | Generic link state + events + last downlink + clock check through `app_radio`. GetInfo, NFC, LED, `device_status` and `ats device info` all go through the layer. Fix P2P readiness during a re-join. The TX path is unchanged. | readiness, LED, RADIO_LINK_DOWN, Info last_dl, clock check |
+| **T1a** (#439, merged 5f1ed63) | Rename `app_lrw`/`app_p2p` → `app_radio_lrw`/`app_radio_p2p` (files, symbols, log modules, docs), with a v1.5.0 sync (#438). No behaviour change. | — |
+| **T1** (#440) | Generic link state + events + last downlink + clock check through `app_radio`. GetInfo, NFC, LED, `device_status` and `ats device info` all go through the layer. Fix P2P readiness during a re-join. The TX path is unchanged. | readiness, LED, RADIO_LINK_DOWN, Info last_dl, clock check |
 | T2 | Common TX scheduler + queues + result codes + retry ladder; `send()` in both backends; jitter, compose reset, parking on not-connected; one work queue. | telemetry drop, frame drop, jitter |
 | T3 | Common announce (Info + settings-info) + common stale watchdog (from `app_radio_lrw.c`). | boot announce, M-2 in P2P |
 | T4 | Common downlink path, post-cmd actions, paging, history replay; `radio` command allow-list; oversize → BUDGET_TOO_SMALL. | command parity |
