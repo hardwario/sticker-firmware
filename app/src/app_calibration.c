@@ -10,7 +10,7 @@
 #include "app_ds18b20.h"
 #include "app_led.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_machine_probe.h"
 #include "app_settings.h"
 #include "app_sht4x.h"
@@ -66,8 +66,8 @@ static uint16_t m_battery_mv = BATTERY_INVALID_MV;
  * whole calibration thread - if the send hung there directly, the loop could
  * never feed the watchdog, blink its status LED, or re-check its own
  * deadline-based clean reboot again. Running the send via
- * app_lrw_run_on_work_q() (app_lrw.c's own m_work_q, mode is mutually
- * exclusive with normal app_lrw operation so there's no contention) decouples
+ * app_radio_lrw_run_on_work_q() (app_radio_lrw.c's own m_work_q, mode is mutually
+ * exclusive with normal app_radio_lrw operation so there's no contention) decouples
  * the main loop's liveness from whether the send ever completes, at no extra
  * RAM cost - m_work_q's own existing heartbeat/wdog liveness channel
  * (#181/#182) already forces a fast IWDG reset if it wedges, instead of
@@ -153,7 +153,7 @@ void app_calibration_check_trigger(void)
 	 * operator would have had to release both magnets first, then re-present
 	 * them, to clear magnet_expired before this branch was ever reachable). */
 	if (left && right) {
-		LOG_WRN("Both magnets detected — rebooting into calibration mode");
+		LOG_WRN_REBOOTING("both magnets detected -- entering calibration mode");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 
@@ -290,8 +290,8 @@ static void compose_calibration_payload(uint8_t *buf)
 }
 
 /* #340 M22: runs the actual (possibly-hanging) lorawan_send() off the
- * calibration thread, on app_lrw.c's m_work_q - see the comment above
- * m_cal_send_work. app_lrw_is_ready() is checked here rather than by the
+ * calibration thread, on app_radio_lrw.c's m_work_q - see the comment above
+ * m_cal_send_work. app_radio_lrw_is_ready() is checked here rather than by the
  * caller so the readiness snapshot is taken as close as possible to the
  * actual send attempt. */
 static void cal_send_work_handler(struct k_work *work)
@@ -299,7 +299,7 @@ static void cal_send_work_handler(struct k_work *work)
 	ARG_UNUSED(work);
 
 #if defined(CONFIG_LORAWAN)
-	if (app_lrw_is_ready()) {
+	if (app_radio_lrw_is_ready()) {
 		lorawan_send(CALIBRATION_PORT, m_cal_tx_buf, PAYLOAD_SIZE, LORAWAN_MSG_UNCONFIRMED);
 	}
 #endif /* defined(CONFIG_LORAWAN) */
@@ -312,7 +312,7 @@ int app_calibration_init(void)
 	/* One-shot: clear the persisted calibration flag in NVS without
 	 * rebooting, so the next boot (after the 2 h deadline, watchdog,
 	 * brown-out, etc.) lands in normal mode. g_app_config.calibration
-	 * stays true for the rest of this boot so app_lrw blocks normal TX. */
+	 * stays true for the rest of this boot so app_radio_lrw blocks normal TX. */
 	app_config()->calibration = false;
 	ret = app_settings_save(false);
 	if (ret) {
@@ -337,19 +337,19 @@ int app_calibration_init(void)
 
 	/* Init LoRaWAN */
 #if defined(CONFIG_LORAWAN)
-	ret = app_lrw_init();
+	ret = app_radio_lrw_init();
 	if (ret) {
 		return ret;
 	}
 
-	app_lrw_join();
+	app_radio_lrw_join();
 
 	lorawan_enable_adr(false);
 	ret = lorawan_set_datarate(LORAWAN_DR_5);
 #endif /* defined(CONFIG_LORAWAN) */
 
-	/* #340 M22: work item for the calibration TX send, run on app_lrw.c's
-	 * m_work_q via app_lrw_run_on_work_q() - see cal_send_work_handler()'s
+	/* #340 M22: work item for the calibration TX send, run on app_radio_lrw.c's
+	 * m_work_q via app_radio_lrw_run_on_work_q() - see cal_send_work_handler()'s
 	 * comment. */
 	k_work_init(&m_cal_send_work, cal_send_work_handler);
 
@@ -427,6 +427,7 @@ void app_calibration_run(void)
 
 	for (;;) {
 		if (k_uptime_get() >= deadline) {
+			LOG_WRN_REBOOTING("calibration window elapsed");
 			sys_reboot(SYS_REBOOT_COLD);
 		}
 
@@ -438,12 +439,12 @@ void app_calibration_run(void)
 			counter = 0;
 
 			/* #340 M22: compose here (fast, bounded I2C/1-Wire reads), but
-			 * submit the actual send to app_lrw.c's m_work_q instead of
+			 * submit the actual send to app_radio_lrw.c's m_work_q instead of
 			 * calling the potentially-hanging lorawan_send() directly on
 			 * this thread - see cal_send_work_handler(). */
 			compose_calibration_payload(m_cal_tx_buf);
 #if defined(CONFIG_LORAWAN)
-			app_lrw_run_on_work_q(&m_cal_send_work);
+			app_radio_lrw_run_on_work_q(&m_cal_send_work);
 #endif /* defined(CONFIG_LORAWAN) */
 
 			if (++battery_tx_counter >= BATTERY_REMEASURE_TX_COUNT) {

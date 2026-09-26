@@ -13,7 +13,7 @@
 #include "app_counters.h"
 #include "app_history.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_settings.h"
 #include "app_wdog.h"
 
@@ -41,7 +41,7 @@
 #include <stdint.h>
 #include <string.h>
 
-LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(app_radio_lrw, LOG_LEVEL_DBG);
 
 /*
  * State-machine refactor (#71).
@@ -61,11 +61,11 @@ LOG_MODULE_REGISTER(app_lrw, LOG_LEVEL_DBG);
  *   - m_rejoin_timer      : rejoin backoff only
  *
  * The periodic report cadence lives in app_report (#126): it samples, captures
- * history and triggers app_lrw_send_telemetry(). app_lrw stays transport — it
+ * history and triggers app_radio_lrw_send_telemetry(). app_radio_lrw stays transport — it
  * composes the snapshot (app_compose), splits it into DR-budget frames, sends
  * them with the LinkCheckReq piggyback + duty-cycle retry, drains the
  * response/alarm queues and streams a history replay. On a link-ready edge (join
- * success / replay finish) app_lrw kicks app_report via the registered callback.
+ * success / replay finish) app_radio_lrw kicks app_report via the registered callback.
  */
 
 /* Link check configuration constants.
@@ -293,7 +293,7 @@ static uint8_t m_hist_tx_buf[APP_CMD_HISTORY_FRAME_BUF_SIZE];
 static void m_hist_work_handler(struct k_work *work);
 
 /* --- State machine --- */
-static atomic_t m_state = ATOMIC_INIT(APP_LRW_STATE_IDLE);
+static atomic_t m_state = ATOMIC_INIT(APP_RADIO_STATE_IDLE);
 static int m_consecutive_lc_fail;   /* LC failures in a row (HEALTHY) */
 static int m_consecutive_lc_ok;     /* LC successes in a row (WARNING) */
 static int m_warning_lc_fail_total; /* Total LC failures in WARNING */
@@ -320,28 +320,28 @@ static uint8_t m_last_gw_count;
 static uint8_t m_lc_response_gw_count;
 
 /* --- TX queues (MED-7/8: were single overwrite-able slots) --- */
-#define APP_LRW_RESPONSE_BUF_SIZE 64
+#define APP_RADIO_LRW_RESPONSE_BUF_SIZE 64
 /* Incoming command buffer. The network can deliver up to the LoRaWAN MTU
  * (~222 B at the highest DR) on a single downlink; a realistic SetParam with
  * deveui+joineui+appkey encodes to ~90 B. 224 covers the full MTU so large
  * commands are never silently dropped (#93.4 — was 64, which dropped them with
  * only a LOG_WRN and the host never learned the command wasn't processed). */
-#define APP_LRW_REQUEST_BUF_SIZE  224
-#define APP_LRW_DOWNLINK_CMD_PORT 85
-#define APP_LRW_ALARM_PORT        3
-#define APP_LRW_TX_QUEUE_DEPTH    4
+#define APP_RADIO_LRW_REQUEST_BUF_SIZE  224
+#define APP_RADIO_LRW_DOWNLINK_CMD_PORT 85
+#define APP_RADIO_LRW_ALARM_PORT        3
+#define APP_RADIO_LRW_TX_QUEUE_DEPTH    4
 /* Downlink-command FIFO. Each slot is a full-MTU lrw_dl_msg (~228 B), and the
  * network delivers at most one port-85 command per RX window, drained promptly by
  * m_dl_request_work. Depth 2 absorbs a back-to-back pair while halving the buffer
  * vs the old depth 4 (saves ~456 B RAM, #221.4). */
-#define APP_LRW_DL_QUEUE_DEPTH    2
+#define APP_RADIO_LRW_DL_QUEUE_DEPTH    2
 
 /* The request buffer must hold a full-MTU downlink so the largest command the
  * network can deliver still fits (#93.4/#93.7). Response/frame buffers are
  * deliberately NOT asserted against the nanopb *_size bounds: those frames are
  * DR-budget-limited and paged (get_config/get_param/history), so the on-air
  * size is always far below the protobuf worst case. */
-BUILD_ASSERT(APP_LRW_REQUEST_BUF_SIZE >= 222, "request buffer below LoRaWAN MTU");
+BUILD_ASSERT(APP_RADIO_LRW_REQUEST_BUF_SIZE >= 222, "request buffer below LoRaWAN MTU");
 
 /* What a queued frame is, so tx_send_queued() can recover it instead of just
  * dropping it when a DR drop between queueing and sending leaves it over budget
@@ -358,18 +358,18 @@ struct lrw_tx_msg {
 	uint8_t port;
 	uint8_t kind; /* enum lrw_tx_kind */
 	uint16_t len;
-	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
+	uint8_t buf[APP_RADIO_LRW_RESPONSE_BUF_SIZE];
 };
-BUILD_ASSERT(sizeof(struct lrw_tx_msg) == 4 + APP_LRW_RESPONSE_BUF_SIZE,
+BUILD_ASSERT(sizeof(struct lrw_tx_msg) == 4 + APP_RADIO_LRW_RESPONSE_BUF_SIZE,
 	     "lrw_tx_msg grew: kind must stay in the padding byte");
 struct lrw_dl_msg {
 	uint16_t len;
-	uint8_t buf[APP_LRW_REQUEST_BUF_SIZE];
+	uint8_t buf[APP_RADIO_LRW_REQUEST_BUF_SIZE];
 };
 
-K_MSGQ_DEFINE(m_response_msgq, sizeof(struct lrw_tx_msg), APP_LRW_TX_QUEUE_DEPTH, 4);
-K_MSGQ_DEFINE(m_alarm_msgq, sizeof(struct lrw_tx_msg), APP_LRW_TX_QUEUE_DEPTH, 4);
-K_MSGQ_DEFINE(m_dl_msgq, sizeof(struct lrw_dl_msg), APP_LRW_DL_QUEUE_DEPTH, 4);
+K_MSGQ_DEFINE(m_response_msgq, sizeof(struct lrw_tx_msg), APP_RADIO_LRW_TX_QUEUE_DEPTH, 4);
+K_MSGQ_DEFINE(m_alarm_msgq, sizeof(struct lrw_tx_msg), APP_RADIO_LRW_TX_QUEUE_DEPTH, 4);
+K_MSGQ_DEFINE(m_dl_msgq, sizeof(struct lrw_dl_msg), APP_RADIO_LRW_DL_QUEUE_DEPTH, 4);
 
 static int queue_tx_response(uint8_t port, const uint8_t *buf, size_t len, enum lrw_tx_kind kind);
 
@@ -404,7 +404,7 @@ static void on_lc_success(void);
 static void on_lc_failure(void);
 static void on_lc_timeout(void);
 static void on_downlink_received(void);
-static void state_transition(enum app_lrw_state new_state);
+static void state_transition(enum app_radio_state new_state);
 static bool should_request_link_check(void);
 static void force_lc_work_handler(struct k_work *work);
 static int apply_channel_plan(void);
@@ -449,7 +449,7 @@ static uint8_t refresh_payload_budget(void)
 	return max_next;
 }
 
-uint8_t app_lrw_get_max_payload(void)
+uint8_t app_radio_lrw_get_max_payload(void)
 {
 	return m_max_next_payload;
 }
@@ -531,7 +531,7 @@ static bool lrw_backoff_step(void)
 	return stepped;
 }
 
-size_t app_lrw_payload_cap(size_t buf_size)
+size_t app_radio_lrw_payload_cap(size_t buf_size)
 {
 	uint8_t budget = m_max_next_payload;
 
@@ -541,32 +541,32 @@ size_t app_lrw_payload_cap(size_t buf_size)
 	return (budget > 0 && budget < buf_size) ? budget : buf_size;
 }
 
-/* Same as app_lrw_payload_cap() but re-queries the stack first (MED-6). Only on
+/* Same as app_radio_lrw_payload_cap() but re-queries the stack first (MED-6). Only on
  * m_work_q: lorawan_get_payload_sizes() calls into the non-thread-safe LoRaMac. */
 static size_t refresh_payload_cap(size_t buf_size)
 {
 	refresh_payload_budget();
-	return app_lrw_payload_cap(buf_size);
+	return app_radio_lrw_payload_cap(buf_size);
 }
 
 /* ======================================================================== */
 /* State machine                                                            */
 /* ======================================================================== */
 
-static const char *state_name(enum app_lrw_state s)
+static const char *state_name(enum app_radio_state s)
 {
 	switch (s) {
-	case APP_LRW_STATE_IDLE:
+	case APP_RADIO_STATE_IDLE:
 		return "IDLE";
-	case APP_LRW_STATE_JOINING:
+	case APP_RADIO_STATE_JOINING:
 		return "JOINING";
-	case APP_LRW_STATE_HEALTHY:
+	case APP_RADIO_STATE_HEALTHY:
 		return "HEALTHY";
-	case APP_LRW_STATE_WARNING:
+	case APP_RADIO_STATE_WARNING:
 		return "WARNING";
-	case APP_LRW_STATE_RECONNECT:
+	case APP_RADIO_STATE_RECONNECT:
 		return "RECONNECT";
-	case APP_LRW_STATE_DISABLED:
+	case APP_RADIO_STATE_DISABLED:
 		return "DISABLED";
 	default:
 		return "?";
@@ -575,21 +575,21 @@ static const char *state_name(enum app_lrw_state s)
 
 /* The ONLY place m_state changes. Runs exit action of the old state then entry
  * action of the new state. Must be called on m_work_q. */
-static void state_transition(enum app_lrw_state new_state)
+static void state_transition(enum app_radio_state new_state)
 {
-	enum app_lrw_state old = (enum app_lrw_state)atomic_get(&m_state);
+	enum app_radio_state old = (enum app_radio_state)atomic_get(&m_state);
 
 	/* --- Exit actions --- */
 	switch (old) {
-	case APP_LRW_STATE_JOINING:
+	case APP_RADIO_STATE_JOINING:
 		k_work_cancel_delayable(&m_join_complete_work);
 		break;
-	case APP_LRW_STATE_HEALTHY:
-	case APP_LRW_STATE_WARNING:
+	case APP_RADIO_STATE_HEALTHY:
+	case APP_RADIO_STATE_WARNING:
 		k_timer_stop(&m_lc_timeout_timer);
 		m_link_check_pending = false;
 		break;
-	case APP_LRW_STATE_RECONNECT:
+	case APP_RADIO_STATE_RECONNECT:
 		k_timer_stop(&m_rejoin_timer);
 		break;
 	default:
@@ -601,21 +601,21 @@ static void state_transition(enum app_lrw_state new_state)
 
 	/* --- Entry actions --- */
 	switch (new_state) {
-	case APP_LRW_STATE_IDLE:
-	case APP_LRW_STATE_DISABLED:
+	case APP_RADIO_STATE_IDLE:
+	case APP_RADIO_STATE_DISABLED:
 		/* Radio-silent: no link-check, no rejoin. (The report cadence is
-		 * app_report's; it self-pauses while not app_lrw_is_ready().) */
+		 * app_report's; it self-pauses while not app_radio_lrw_is_ready().) */
 		k_timer_stop(&m_lc_timeout_timer);
 		k_timer_stop(&m_rejoin_timer);
 		break;
 
-	case APP_LRW_STATE_JOINING:
+	case APP_RADIO_STATE_JOINING:
 		/* Drop any in-flight history replay across (re)join. */
 		m_hist_active = false;
 		app_history_set_replay_active(false);
 		break;
 
-	case APP_LRW_STATE_HEALTHY:
+	case APP_RADIO_STATE_HEALTHY:
 		/* Link confirmed: clear all LC/recovery state. */
 		m_consecutive_lc_fail = 0;
 		m_consecutive_lc_ok = 0;
@@ -628,13 +628,13 @@ static void state_transition(enum app_lrw_state new_state)
 		m_dc_hold_logged = false;
 		break;
 
-	case APP_LRW_STATE_WARNING:
+	case APP_RADIO_STATE_WARNING:
 		m_consecutive_lc_ok = 0;
 		m_warning_lc_fail_total = 0;
 		m_force_lc_remaining = 0;
 		break;
 
-	case APP_LRW_STATE_RECONNECT: {
+	case APP_RADIO_STATE_RECONNECT: {
 		/* Single, consistent rejoin policy (HIGH-4): always escalate the
 		 * backoff and arm the rejoin timer here — never reset attempts. */
 		uint32_t backoff = calculate_rejoin_backoff(m_rejoin_attempts);
@@ -664,14 +664,15 @@ static void state_transition(enum app_lrw_state new_state)
  * tx_send_queued() silently dropping the whole uplink later. */
 static int queue_info_uplink_seq(uint32_t seq)
 {
-	uint8_t info_buf[APP_LRW_RESPONSE_BUF_SIZE];
+	uint8_t info_buf[APP_RADIO_LRW_RESPONSE_BUF_SIZE];
 	size_t info_len;
 	bool more = false;
 
 	int ret = app_cmd_build_info_seq(seq, info_buf, refresh_payload_cap(sizeof(info_buf)),
 					 &info_len, &more);
 	if (ret == 0) {
-		(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, info_buf, info_len, LRW_TX_INFO);
+		(void)queue_tx_response(APP_RADIO_LRW_DOWNLINK_CMD_PORT, info_buf, info_len,
+					LRW_TX_INFO);
 		atomic_clear_bit(&m_announce_pending, ANNOUNCE_INFO);
 		if (more) {
 			/* #425: the remaining Info pages follow page 0 by themselves. */
@@ -698,7 +699,7 @@ static int queue_info_uplink(void)
  * above so a low DR trims via -EMSGSIZE rather than a later silent drop. */
 static int queue_settings_info_uplink(void)
 {
-	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
+	uint8_t buf[APP_RADIO_LRW_RESPONSE_BUF_SIZE];
 	size_t len;
 	bool more = false;
 
@@ -711,7 +712,7 @@ static int queue_settings_info_uplink(void)
 
 	int ret = app_cmd_build_config_status(buf, refresh_payload_cap(sizeof(buf)), &len, &more);
 	if (ret == 0) {
-		(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_SETTINGS);
+		(void)queue_tx_response(APP_RADIO_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_SETTINGS);
 		atomic_clear_bit(&m_announce_pending, ANNOUNCE_SETTINGS);
 		if (more) {
 			k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
@@ -731,9 +732,9 @@ static void announce_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
-	if (state != APP_LRW_STATE_HEALTHY && state != APP_LRW_STATE_WARNING) {
+	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
 		return; /* the next join re-announces from scratch */
 	}
 
@@ -795,7 +796,7 @@ static void on_join_success(void)
 	 * fire on join. */
 	refresh_payload_budget();
 
-	state_transition(APP_LRW_STATE_HEALTHY); /* resets all counters + attempts */
+	state_transition(APP_RADIO_STATE_HEALTHY); /* resets all counters + attempts */
 	m_message_count = 0;
 
 	/* Request network time once joined; the answer sets the RTC asynchronously. */
@@ -816,7 +817,7 @@ static void on_join_success(void)
 	}
 
 	/* Kick app_report to start the report cadence with an immediate uplink (its
-	 * cycle samples, captures and triggers app_lrw_send_telemetry; the first
+	 * cycle samples, captures and triggers app_radio_lrw_send_telemetry; the first
 	 * telemetry frame carries LC, msg #1). The queued GetInfo above drains first
 	 * via m_send_work. */
 	fire_ready_cb();
@@ -827,31 +828,31 @@ static void on_join_failure(void)
 	/* MAC activation failure (start/join error or not-activated). Applies to
 	 * both OTAA and ABP — this is about getting the MAC session up, not link
 	 * health. The RECONNECT entry action arms the backoff. */
-	state_transition(APP_LRW_STATE_RECONNECT);
+	state_transition(APP_RADIO_STATE_RECONNECT);
 }
 
 static void on_lc_failure(void)
 {
-	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
 	k_timer_stop(&m_lc_timeout_timer);
 	m_link_check_pending = false;
 	m_consecutive_lc_ok = 0;
 
 	switch (state) {
-	case APP_LRW_STATE_HEALTHY:
+	case APP_RADIO_STATE_HEALTHY:
 		m_consecutive_lc_fail++;
 		LOG_WRN("LC FAIL in HEALTHY (streak: %d/%d)", m_consecutive_lc_fail,
 			FAIL_THRESHOLD_WARNING);
 		if (m_consecutive_lc_fail >= FAIL_THRESHOLD_WARNING) {
-			state_transition(APP_LRW_STATE_WARNING);
+			state_transition(APP_RADIO_STATE_WARNING);
 			/* The failures that got us here already show the current TX
 			 * power / DR no longer reach a gateway: take the first rung now. */
 			(void)lrw_backoff_step();
 		}
 		break;
 
-	case APP_LRW_STATE_WARNING: {
+	case APP_RADIO_STATE_WARNING: {
 		/* Try the next rung before the rejoin budget is consulted: a rejoin
 		 * only fires once the ladder is exhausted, so it is never spent while a
 		 * lower DR is still untried (it would reset the MAC to the join DR
@@ -864,7 +865,7 @@ static void on_lc_failure(void)
 		if (!stepped &&
 		    m_warning_lc_fail_total >= g_app_config.lrw_link_check_fail_rejoin) {
 			if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA) {
-				state_transition(APP_LRW_STATE_RECONNECT);
+				state_transition(APP_RADIO_STATE_RECONNECT);
 			} else {
 				/* ABP cannot rejoin (no OTA). Stay in WARNING and keep
 				 * trying the per-report link check; recover if the link
@@ -884,24 +885,24 @@ static void on_lc_failure(void)
 
 static void on_lc_success(void)
 {
-	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
 	k_timer_stop(&m_lc_timeout_timer);
 	m_link_check_pending = false;
 	m_consecutive_lc_fail = 0;
 
 	switch (state) {
-	case APP_LRW_STATE_HEALTHY:
+	case APP_RADIO_STATE_HEALTHY:
 		LOG_INF("LC OK in HEALTHY");
 		m_force_lc_remaining = 0;
 		break;
 
-	case APP_LRW_STATE_WARNING:
+	case APP_RADIO_STATE_WARNING:
 		m_consecutive_lc_ok++;
 		LOG_INF("LC OK in WARNING (streak: %d/%d)", m_consecutive_lc_ok,
 			OK_THRESHOLD_HEALTHY);
 		if (m_consecutive_lc_ok >= OK_THRESHOLD_HEALTHY) {
-			state_transition(APP_LRW_STATE_HEALTHY);
+			state_transition(APP_RADIO_STATE_HEALTHY);
 		} else {
 			m_force_lc_remaining = 1; /* force LC on next message */
 		}
@@ -915,9 +916,9 @@ static void on_lc_success(void)
 
 static void on_lc_timeout(void)
 {
-	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
-	if (state != APP_LRW_STATE_HEALTHY && state != APP_LRW_STATE_WARNING) {
+	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
 		return;
 	}
 	if (m_link_check_pending) {
@@ -930,9 +931,9 @@ static void on_lc_timeout(void)
 
 static void on_downlink_received(void)
 {
-	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
-	if (state != APP_LRW_STATE_HEALTHY && state != APP_LRW_STATE_WARNING) {
+	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
 		return;
 	}
 	if (m_link_check_pending) {
@@ -946,7 +947,7 @@ static void on_downlink_received(void)
 
 #if defined(CONFIG_SHELL)
 /* Debug: inject a synthetic link-check outcome onto m_work_q so the state
- * machine can be driven deterministically from the shell (`ats lrw lc ...`)
+ * machine can be driven deterministically from the shell (`ats radio lc ...`)
  * without a real RF outage — including the late-LC-in-RECONNECT case (#71
  * HIGH-1), which is otherwise practically impossible to trigger on the bench.
  * The handlers themselves are state-guarded, so an injected event in
@@ -964,7 +965,7 @@ static void dbg_lc_work_handler(struct k_work *work)
 	}
 }
 
-void app_lrw_debug_inject_lc(bool ok)
+void app_radio_lrw_debug_inject_lc(bool ok)
 {
 	m_dbg_lc_ok = ok;
 	k_work_submit_to_queue(&m_work_q, &m_dbg_lc_work);
@@ -972,13 +973,13 @@ void app_lrw_debug_inject_lc(bool ok)
 #endif /* CONFIG_SHELL */
 
 /* #340 M22: not CONFIG_SHELL-gated (unlike the debug helpers above) - lets a
- * caller outside app_lrw.c run its own work serialized with the real
+ * caller outside app_radio_lrw.c run its own work serialized with the real
  * telemetry TX path on m_work_q, without standing up a second queue+stack of
- * its own. Originally shell-only (`ats lrw compose`); calibration mode's
+ * its own. Originally shell-only (`ats radio compose`); calibration mode's
  * send path needs the same thing in Release builds, where CONFIG_SHELL is
  * off. Returns k_work_submit_to_queue()'s result: >=0 queued/running, a
  * negative errno if the queue rejected it. */
-int app_lrw_run_on_work_q(struct k_work *work)
+int app_radio_lrw_run_on_work_q(struct k_work *work)
 {
 	return k_work_submit_to_queue(&m_work_q, work);
 }
@@ -1012,11 +1013,11 @@ static void lc_response_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
 	/* HIGH-3: ignore a stale/late LC answer outside HEALTHY/WARNING so it can
 	 * never cancel the rejoin timer or mutate counters in JOINING/RECONNECT. */
-	if (state != APP_LRW_STATE_HEALTHY && state != APP_LRW_STATE_WARNING) {
+	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
 		LOG_DBG("LC answer in %s ignored", state_name(state));
 		return;
 	}
@@ -1092,7 +1093,7 @@ static void post_cmd_work_handler(struct k_work *work)
 		app_settings_save(true);
 		break;
 	case APP_CMD_ACTION_REBOOT:
-		LOG_INF("Command: reboot");
+		LOG_WRN_REBOOTING("command");
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
 	case APP_CMD_ACTION_ENTER_CALIBRATION:
@@ -1107,16 +1108,16 @@ static void post_cmd_work_handler(struct k_work *work)
 	case APP_CMD_ACTION_LRW_RESET:
 		/* Wipe the LoRaWAN NVM (frame counters + DevNonce + session), then cold
 		 * reboot so the MAC re-initialises from a clean NVM (#109). Same path as
-		 * `ats lrw reset`. The Ack uplink has already left (drain-waited above). */
-		LOG_INF("Command: LoRaWAN reset (NVM wipe) + reboot");
-		app_lrw_reset_nvm();
+		 * `ats radio reset`. The Ack uplink has already left (drain-waited above). */
+		app_radio_lrw_reset_nvm();
+		LOG_WRN_REBOOTING("command: LoRaWAN NVM wipe");
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
 	case APP_CMD_ACTION_LRW_JOIN:
 		/* Force a (re)join now instead of waiting for the next attempt (#109).
-		 * No reboot — app_lrw_join() just queues a join work item. */
+		 * No reboot — app_radio_lrw_join() just queues a join work item. */
 		LOG_INF("Command: forced LoRaWAN join");
-		app_lrw_join();
+		app_radio_lrw_join();
 		break;
 	case APP_CMD_ACTION_COUNTERS_SAVE:
 		/* Persist the (reset) pulse totalizers, no reboot. Deferred for the
@@ -1137,9 +1138,9 @@ static void page_stream_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
-	if (state != APP_LRW_STATE_HEALTHY && state != APP_LRW_STATE_WARNING) {
+	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
 		app_cmd_stream_cancel(); /* a rejoin starts from scratch */
 		return;
 	}
@@ -1150,7 +1151,7 @@ static void page_stream_work_handler(struct k_work *work)
 		return;
 	}
 
-	uint8_t buf[APP_LRW_RESPONSE_BUF_SIZE];
+	uint8_t buf[APP_RADIO_LRW_RESPONSE_BUF_SIZE];
 	size_t len;
 	int ret = app_cmd_stream_next(buf, sizeof(buf), &len);
 
@@ -1168,7 +1169,7 @@ static void page_stream_work_handler(struct k_work *work)
 		}
 		return;
 	}
-	(void)queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_CMD_RESPONSE);
+	(void)queue_tx_response(APP_RADIO_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_CMD_RESPONSE);
 	k_work_schedule_for_queue(&m_work_q, &m_page_stream_work, K_SECONDS(PAGE_STREAM_PACE_SEC));
 }
 
@@ -1180,7 +1181,7 @@ static void dl_request_work_handler(struct k_work *work)
 
 	/* Drain every queued command (MED-7: was a single overwrite-able slot). */
 	while (k_msgq_get(&m_dl_msgq, &msg, K_NO_WAIT) == 0) {
-		static uint8_t resp[APP_LRW_RESPONSE_BUF_SIZE];
+		static uint8_t resp[APP_RADIO_LRW_RESPONSE_BUF_SIZE];
 		size_t resp_len = 0;
 		enum app_cmd_action action = APP_CMD_ACTION_NONE;
 
@@ -1198,10 +1199,10 @@ static void dl_request_work_handler(struct k_work *work)
 		}
 
 		if (resp_len) {
-			ret = queue_tx_response(APP_LRW_DOWNLINK_CMD_PORT, resp, resp_len,
+			ret = queue_tx_response(APP_RADIO_LRW_DOWNLINK_CMD_PORT, resp, resp_len,
 						LRW_TX_CMD_RESPONSE);
 			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_lrw_queue_response", ret);
+				LOG_ERR_CALL_FAILED_INT("app_radio_lrw_queue_response", ret);
 			}
 		}
 
@@ -1238,7 +1239,7 @@ static void join_complete_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	if ((enum app_lrw_state)atomic_get(&m_state) != APP_LRW_STATE_JOINING) {
+	if ((enum app_radio_state)atomic_get(&m_state) != APP_RADIO_STATE_JOINING) {
 		LOG_DBG("Join complete handler: not JOINING, ignoring");
 		return;
 	}
@@ -1285,25 +1286,25 @@ static void join_complete_work_handler(struct k_work *work)
 }
 
 /* A1 (#409): the stored lrw-region is not compiled into this image (e.g. a
- * debug.conf build that trims US915/AU915). Set once in app_lrw_init() before
+ * debug.conf build that trims US915/AU915). Set once in app_radio_lrw_init() before
  * any radio bring-up; the radio then stays silent like radio-mode OFF. */
 static bool m_region_unsupported;
 
 /* Radio disabled by the radio-mode config (#271). This replaces the old
  * DevEUI/DevAddr-zero radio-silent guard (#98/#175): whether the radio comes up
  * is now an explicit user choice, not inferred from a blank identifier. OFF is
- * radio-silent (sensor/history still run); P2P is reserved until the raw-LoRa
- * transport lands (#118/#228) and falls back to OFF with a warning; LORAWAN
- * (default) brings the stack up normally. A LORAWAN device with an all-zero
- * DevEUI therefore now attempts to join and fails loudly instead of silently
- * disabling — provisioning problems surface instead of masquerading as OFF. */
+ * radio-silent (sensor/history still run); LORAWAN (default) brings the stack
+ * up normally. A LORAWAN device with an all-zero DevEUI therefore attempts to
+ * join and fails loudly instead of silently disabling — provisioning problems
+ * surface instead of masquerading as OFF.
+ *
+ * radio_mode == P2P never reaches this function at all (#118): the
+ * app_radio facade routes it to app_radio_p2p_init()/app_radio_p2p_join() instead of
+ * app_radio_lrw_init()/app_radio_lrw_join(), so app_radio_lrw.c's own state machine never runs
+ * in that mode. */
 static bool radio_disabled(void)
 {
 	if (m_region_unsupported) {
-		return true;
-	}
-	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_P2P) {
-		LOG_WRN("radio-mode P2P not yet implemented (#118/#228) — radio stays off");
 		return true;
 	}
 	return g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_OFF;
@@ -1318,22 +1319,22 @@ static void join_work_handler(struct k_work *work)
 	 * power on join requests. Enter DISABLED and stay there until radio-mode is set
 	 * back to LORAWAN + rebooted. */
 	if (radio_disabled()) {
-		if ((enum app_lrw_state)atomic_get(&m_state) != APP_LRW_STATE_DISABLED) {
+		if ((enum app_radio_state)atomic_get(&m_state) != APP_RADIO_STATE_DISABLED) {
 			LOG_WRN("%s: disabled (radio-silent)",
 				m_region_unsupported ? "lrw-region not in this image"
 						     : "radio-mode not LORAWAN");
-			state_transition(APP_LRW_STATE_DISABLED);
+			state_transition(APP_RADIO_STATE_DISABLED);
 		}
 		return;
 	}
 
 	/* MED-10: ignore re-entry while a join is already in progress. */
-	if ((enum app_lrw_state)atomic_get(&m_state) == APP_LRW_STATE_JOINING) {
+	if ((enum app_radio_state)atomic_get(&m_state) == APP_RADIO_STATE_JOINING) {
 		LOG_WRN("Join already in progress, ignoring request");
 		return;
 	}
 
-	state_transition(APP_LRW_STATE_JOINING); /* stops send timer, drops history */
+	state_transition(APP_RADIO_STATE_JOINING); /* stops send timer, drops history */
 
 	/* Discard any in-progress telemetry snapshot: a rejoin must not resume a
 	 * pre-outage snapshot with stale sensor data and no indication (#93.5). */
@@ -1391,7 +1392,7 @@ static void join_work_handler(struct k_work *work)
 		config.abp.app_skey = g_app_config.lrw_appskey;
 	} else {
 		LOG_ERR("Invalid activation mode: %d", g_app_config.lrw_activation);
-		state_transition(APP_LRW_STATE_IDLE);
+		state_transition(APP_RADIO_STATE_IDLE);
 		return;
 	}
 
@@ -1453,7 +1454,7 @@ static bool should_request_link_check(void)
 	 * takes one recovery-ladder rung (lrw_backoff_step) and counts towards the
 	 * rejoin budget; at the N-th-report cadence the default 900 s x 5 took
 	 * ~6 h to leave WARNING, all of it transmitting blind on the old DR. */
-	if ((enum app_lrw_state)atomic_get(&m_state) == APP_LRW_STATE_WARNING) {
+	if ((enum app_radio_state)atomic_get(&m_state) == APP_RADIO_STATE_WARNING) {
 		return true;
 	}
 	int msg_num = m_message_count + 1;
@@ -1602,9 +1603,9 @@ static void frame_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
-	if (state == APP_LRW_STATE_JOINING || state == APP_LRW_STATE_RECONNECT) {
+	if (state == APP_RADIO_STATE_JOINING || state == APP_RADIO_STATE_RECONNECT) {
 		LOG_WRN("Frame continuation aborted: %s", state_name(state));
 		return;
 	}
@@ -1757,14 +1758,14 @@ static void send_work_handler(struct k_work *work)
 		return;
 	}
 
-	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
 	/* Radio-silent (#98/#175): the stack was never started, never transmit. */
-	if (state == APP_LRW_STATE_DISABLED) {
+	if (state == APP_RADIO_STATE_DISABLED) {
 		return;
 	}
 
-	if (state == APP_LRW_STATE_JOINING || state == APP_LRW_STATE_RECONNECT) {
+	if (state == APP_RADIO_STATE_JOINING || state == APP_RADIO_STATE_RECONNECT) {
 		LOG_WRN("TX blocked: %s", state_name(state));
 		return;
 	}
@@ -1795,7 +1796,7 @@ static void send_work_handler(struct k_work *work)
 		 * natural "queues empty" path below uses, instead of returning and
 		 * silently losing this interval's report. */
 	} else if (k_msgq_get(&m_alarm_msgq, &tx, K_NO_WAIT) == 0) {
-		if (!tx_send_queued(&m_alarm_msgq, &tx, APP_LRW_ALARM_PORT)) {
+		if (!tx_send_queued(&m_alarm_msgq, &tx, APP_RADIO_LRW_ALARM_PORT)) {
 			return; /* requeued; a backoff retry is scheduled */
 		}
 		if (k_msgq_num_used_get(&m_alarm_msgq)) {
@@ -1868,9 +1869,9 @@ static void m_hist_work_handler(struct k_work *work)
 		return;
 	}
 
-	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
-	if (state == APP_LRW_STATE_JOINING || state == APP_LRW_STATE_RECONNECT) {
+	if (state == APP_RADIO_STATE_JOINING || state == APP_RADIO_STATE_RECONNECT) {
 		LOG_WRN("History replay aborted: %s", state_name(state));
 		m_hist_active = false;
 		app_history_set_replay_active(false);
@@ -1912,7 +1913,8 @@ static void m_hist_work_handler(struct k_work *work)
 
 		if (app_cmd_build_budget_error(m_hist_seq, err, refresh_payload_cap(sizeof(err)),
 					       &err_len) == 0) {
-			(void)app_lrw_queue_response(APP_LRW_DOWNLINK_CMD_PORT, err, err_len);
+			(void)app_radio_lrw_queue_response(APP_RADIO_LRW_DOWNLINK_CMD_PORT, err,
+							   err_len);
 		}
 		history_replay_finish();
 		return;
@@ -1930,7 +1932,8 @@ static void m_hist_work_handler(struct k_work *work)
 		return;
 	}
 
-	ret = lrw_send(APP_LRW_DOWNLINK_CMD_PORT, m_hist_tx_buf, len, LORAWAN_MSG_UNCONFIRMED);
+	ret = lrw_send(APP_RADIO_LRW_DOWNLINK_CMD_PORT, m_hist_tx_buf, len,
+		       LORAWAN_MSG_UNCONFIRMED);
 	if (ret) {
 		/* Duty-cycle / MAC busy — retry the same frame, don't advance. Bounded
 		 * so a persistently rejected frame cannot wedge the replay (and the
@@ -1969,9 +1972,9 @@ static void m_hist_work_handler(struct k_work *work)
 	}
 }
 
-int app_lrw_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+int app_radio_lrw_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
 {
-	if (!app_lrw_is_ready()) {
+	if (!app_radio_lrw_is_ready()) {
 		LOG_WRN("History replay requested but LRW not ready; ignoring");
 		return -EAGAIN;
 	}
@@ -2068,8 +2071,8 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 		k_work_submit_to_queue(&m_work_q, &m_clock_sync_info_work);
 	}
 
-	if (port == APP_LRW_DOWNLINK_CMD_PORT && data && len > 0) {
-		if (len <= APP_LRW_REQUEST_BUF_SIZE) {
+	if (port == APP_RADIO_LRW_DOWNLINK_CMD_PORT && data && len > 0) {
+		if (len <= APP_RADIO_LRW_REQUEST_BUF_SIZE) {
 			struct lrw_dl_msg msg;
 
 			msg.len = len;
@@ -2082,7 +2085,7 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 			}
 		} else {
 			LOG_WRN("Port %u payload too large: %u B (max %d)", port, len,
-				APP_LRW_REQUEST_BUF_SIZE);
+				APP_RADIO_LRW_REQUEST_BUF_SIZE);
 		}
 	}
 
@@ -2231,7 +2234,7 @@ static int apply_channel_plan(void)
 /* Public API                                                               */
 /* ======================================================================== */
 
-void app_lrw_suspend(void)
+void app_radio_lrw_suspend(void)
 {
 	/* Stop every LRW timer so nothing re-arms the radio after this point; the
 	 * caller is about to power the MCU off (deep sleep). Pending works on
@@ -2284,8 +2287,8 @@ static void heartbeat_work_handler(struct k_work *work)
 	 * being refused by the duty cycle (F29): the MAC is alive then, and a rejoin
 	 * would only reset the band credits. Runs on m_work_q, so state_transition()
 	 * and the duty-cycle streak are single-threaded here. */
-	enum app_lrw_state st = (enum app_lrw_state)atomic_get(&m_state);
-	if (st == APP_LRW_STATE_HEALTHY || st == APP_LRW_STATE_WARNING) {
+	enum app_radio_state st = (enum app_radio_state)atomic_get(&m_state);
+	if (st == APP_RADIO_STATE_HEALTHY || st == APP_RADIO_STATE_WARNING) {
 		int64_t now = k_uptime_get();
 
 		switch (stale_check(now, m_last_uplink_ms, &m_dc,
@@ -2303,7 +2306,7 @@ static void heartbeat_work_handler(struct k_work *work)
 				"(M-2)",
 				LRW_STALE_FACTOR);
 			m_last_uplink_ms = now; /* don't re-trigger every tick */
-			state_transition(APP_LRW_STATE_RECONNECT);
+			state_transition(APP_RADIO_STATE_RECONNECT);
 			break;
 		default:
 			break;
@@ -2357,7 +2360,7 @@ static int resolve_region(enum lorawan_region *region)
 	return -ENOTSUP;
 }
 
-int app_lrw_init(void)
+int app_radio_lrw_init(void)
 {
 	int ret;
 
@@ -2370,7 +2373,7 @@ int app_lrw_init(void)
 
 	/* #271: when radio-mode is OFF (or reserved P2P) skip the entire LoRaMac/radio
 	 * bring-up. The work queue, works and timers below are still set up so the
-	 * public API stays safe (app_lrw_join / send hit the DISABLED guard and
+	 * public API stays safe (app_radio_lrw_join / send hit the DISABLED guard and
 	 * no-op), but clear_stale_lorawan_nvm() / lorawan_set_region() /
 	 * lorawan_start() are never called — the SubGHz radio is never powered, so
 	 * there is no boot radio burst. (Replaces the #98/#175 DevEUI-zero guard: the
@@ -2466,18 +2469,18 @@ int app_lrw_init(void)
 	k_work_schedule_for_queue(&m_work_q, &m_heartbeat_work, K_NO_WAIT);
 #endif /* defined(CONFIG_WATCHDOG) */
 
-	atomic_set(&m_state, radio_silent ? APP_LRW_STATE_DISABLED : APP_LRW_STATE_IDLE);
+	atomic_set(&m_state, radio_silent ? APP_RADIO_STATE_DISABLED : APP_RADIO_STATE_IDLE);
 	m_init_join = true;
 
 	return 0;
 }
 
-void app_lrw_join(void)
+void app_radio_lrw_join(void)
 {
 	k_work_submit_to_queue(&m_work_q, &m_join_work);
 }
 
-void app_lrw_send_telemetry(void)
+void app_radio_lrw_send_telemetry(void)
 {
 	/* Compose + split + send a telemetry snapshot from the current sensor data.
 	 * Runs on m_work_q; send_work_handler drains response/alarm first, then falls
@@ -2500,7 +2503,7 @@ void app_lrw_send_telemetry(void)
 	k_work_reschedule_for_queue(&m_work_q, &m_tx_jitter_work, K_MSEC(delay_ms));
 }
 
-void app_lrw_send_telemetry_now(void)
+void app_radio_lrw_send_telemetry_now(void)
 {
 	/* F14: a host-requested uplink targets this one device, so the fleet
 	 * de-correlation delay buys nothing. Rescheduling to zero also folds a
@@ -2511,7 +2514,7 @@ void app_lrw_send_telemetry_now(void)
 	k_work_reschedule_for_queue(&m_work_q, &m_tx_jitter_work, K_NO_WAIT);
 }
 
-void app_lrw_register_ready_cb(void (*cb)(void))
+void app_radio_lrw_register_ready_cb(void (*cb)(void))
 {
 	m_ready_cb = cb;
 }
@@ -2524,17 +2527,17 @@ static void force_lc_work_handler(struct k_work *work)
 	m_force_lc_remaining = 1;
 }
 
-void app_lrw_force_link_check(void)
+void app_radio_lrw_force_link_check(void)
 {
 	k_work_submit_to_queue(&m_work_q, &m_force_lc_work);
 }
 
-enum app_lrw_state app_lrw_get_state(void)
+enum app_radio_state app_radio_lrw_get_state(void)
 {
-	return (enum app_lrw_state)atomic_get(&m_state);
+	return (enum app_radio_state)atomic_get(&m_state);
 }
 
-bool app_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+bool app_radio_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
 {
 	atomic_val_t at = atomic_get(&m_last_dl_s);
 
@@ -2547,14 +2550,14 @@ bool app_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
 	return true;
 }
 
-bool app_lrw_is_ready(void)
+bool app_radio_lrw_is_ready(void)
 {
-	enum app_lrw_state state = (enum app_lrw_state)atomic_get(&m_state);
+	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
-	return state == APP_LRW_STATE_HEALTHY || state == APP_LRW_STATE_WARNING;
+	return state == APP_RADIO_STATE_HEALTHY || state == APP_RADIO_STATE_WARNING;
 }
 
-int app_lrw_get_info(struct app_lrw_info *info)
+int app_radio_lrw_get_info(struct app_radio_lrw_info *info)
 {
 	MibRequestConfirm_t mib_req;
 
@@ -2562,15 +2565,15 @@ int app_lrw_get_info(struct app_lrw_info *info)
 		return -EINVAL;
 	}
 
-	info->state = (enum app_lrw_state)atomic_get(&m_state);
+	info->state = (enum app_radio_state)atomic_get(&m_state);
 
 	/* #340 L3: radio-mode OFF/P2P (#271) never calls lorawan_start(), so
 	 * LoRaMac's own state (incl. CryptoNvm) was never initialized -- querying
 	 * it here would deref a NULL CryptoNvm. Zero-fill instead of touching
 	 * LoRaMac's MIB/crypto API when the MAC was never started. The same holds
-	 * for the boot window before app_lrw_init() has run lorawan_start(): the
+	 * for the boot window before app_radio_lrw_init() has run lorawan_start(): the
 	 * state is already IDLE then (HW-seen: shell showed FCntUp 0x080232D6). */
-	if (info->state == APP_LRW_STATE_DISABLED || !m_mac_started) {
+	if (info->state == APP_RADIO_STATE_DISABLED || !m_mac_started) {
 		info->dev_addr = 0;
 		info->fcnt_up = 0;
 		info->datarate = 0;
@@ -2630,7 +2633,7 @@ int app_lrw_get_info(struct app_lrw_info *info)
 	return 0;
 }
 
-int app_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len)
+int app_radio_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 {
 	return queue_tx_response(port, buf, len, LRW_TX_OTHER);
 }
@@ -2640,8 +2643,8 @@ static int queue_tx_response(uint8_t port, const uint8_t *buf, size_t len, enum 
 	if (!buf || len == 0) {
 		return -EINVAL;
 	}
-	if (len > APP_LRW_RESPONSE_BUF_SIZE) {
-		LOG_ERR("Response too large: %zu B (max %d)", len, APP_LRW_RESPONSE_BUF_SIZE);
+	if (len > APP_RADIO_LRW_RESPONSE_BUF_SIZE) {
+		LOG_ERR("Response too large: %zu B (max %d)", len, APP_RADIO_LRW_RESPONSE_BUF_SIZE);
 		return -EMSGSIZE;
 	}
 
@@ -2662,7 +2665,7 @@ static int queue_tx_response(uint8_t port, const uint8_t *buf, size_t len, enum 
 	return 0;
 }
 
-void app_lrw_send_info_on_clock_sync(uint32_t seq)
+void app_radio_lrw_send_info_on_clock_sync(uint32_t seq)
 {
 	/* Arm the deferred Info; downlink_callback sends it once LORAWAN_TIME_UPDATED
 	 * arrives (the ClockSync command answer). The seq is stored before the bit is
@@ -2671,19 +2674,20 @@ void app_lrw_send_info_on_clock_sync(uint32_t seq)
 	atomic_set_bit(&m_clock_sync_info_pending, 0);
 }
 
-int app_lrw_send_alarm(const uint8_t *buf, size_t len)
+int app_radio_lrw_send_alarm(const uint8_t *buf, size_t len)
 {
 	if (!buf || len == 0) {
 		return -EINVAL;
 	}
-	if (len > APP_LRW_RESPONSE_BUF_SIZE) {
-		LOG_ERR("Alarm batch too large: %zu B (max %d)", len, APP_LRW_RESPONSE_BUF_SIZE);
+	if (len > APP_RADIO_LRW_RESPONSE_BUF_SIZE) {
+		LOG_ERR("Alarm batch too large: %zu B (max %d)", len,
+			APP_RADIO_LRW_RESPONSE_BUF_SIZE);
 		return -EMSGSIZE;
 	}
 
 	struct lrw_tx_msg msg;
 
-	msg.port = APP_LRW_ALARM_PORT;
+	msg.port = APP_RADIO_LRW_ALARM_PORT;
 	msg.kind = LRW_TX_ALARM;
 	msg.len = len;
 	memcpy(msg.buf, buf, len);
@@ -2697,7 +2701,7 @@ int app_lrw_send_alarm(const uint8_t *buf, size_t len)
 	return 0;
 }
 
-int app_lrw_reset_nvm(void)
+int app_radio_lrw_reset_nvm(void)
 {
 	static const char *const keys[] = {
 		"lorawan/nvm/Crypto",        "lorawan/nvm/MacGroup1",    "lorawan/nvm/MacGroup2",

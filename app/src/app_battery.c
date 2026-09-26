@@ -36,6 +36,22 @@ static const struct device *m_dev = DEVICE_DT_GET(DT_NODELABEL(adc1));
 static float m_last_voltage = NAN;
 static K_MUTEX_DEFINE(m_last_voltage_lock);
 
+/* Serializes the whole RESUME -> adc_read -> SUSPEND critical section below.
+ * pm_device_action_run() is the raw, non-refcounted PM API (deliberately, to
+ * avoid pulling in full PM-device runtime bookkeeping for a single ADC) --
+ * it does NOT queue or block a concurrent caller against another in-flight
+ * RESUME/SUSPEND pair. Two callers interleaving (e.g. app_sensor_init()'s
+ * boot-time sample vs. a P2P instant ready-kick's inline sample, #118) can
+ * have one thread's SUSPEND land between the other's RESUME and its
+ * set_sequencer(), powering the ADC down right as the second thread starts
+ * a conversion -- the STM32 ADC driver's CCRDY wait is an unbounded busy-spin
+ * on a powered-down ADC, hanging that thread (and whatever work queue it
+ * runs on) forever. Confirmed via a live GDB backtrace during #118 HIL
+ * testing: LoRaWAN never triggers this (first report is seconds after join,
+ * well clear of boot-time sampler races), P2P's instant ready-kick reliably
+ * does. */
+static K_MUTEX_DEFINE(m_measure_lock);
+
 static const struct adc_channel_cfg m_channel_cfg = {
 	.gain = ADC_GAIN_1,
 	.reference = ADC_REF_INTERNAL,
@@ -79,10 +95,13 @@ int app_battery_measure(float *voltage)
 		return -ENODEV;
 	}
 
+	k_mutex_lock(&m_measure_lock, K_FOREVER);
+
 #if defined(CONFIG_PM_DEVICE)
 	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_RESUME);
 	if (ret && ret != -EALREADY) {
 		LOG_ERR_CALL_FAILED_INT("pm_device_action_run", ret);
+		k_mutex_unlock(&m_measure_lock);
 		return ret;
 	}
 #endif /* defined(CONFIG_PM_DEVICE) */
@@ -130,10 +149,12 @@ suspend:
 	ret = pm_device_action_run(m_dev, PM_DEVICE_ACTION_SUSPEND);
 	if (ret && ret != -EALREADY) {
 		LOG_ERR_CALL_FAILED_INT("pm_device_action_run", ret);
+		k_mutex_unlock(&m_measure_lock);
 		return res ? res : ret;
 	}
 #endif /* defined(CONFIG_PM_DEVICE) */
 
+	k_mutex_unlock(&m_measure_lock);
 	return res;
 }
 

@@ -15,12 +15,13 @@
 #include "app_version.h"
 #include "app_led.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_nfc.h"
 #include "app_power.h"
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_settings.h"
+#include "app_radio.h"
 #include "app_wdog.h"
 
 /* Zephyr includes */
@@ -132,6 +133,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			break;
 		case APP_CMD_ACTION_REBOOT:
 			nfc_result_before_reboot();
+			LOG_WRN_REBOOTING("NFC command");
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
 		case APP_CMD_ACTION_DEVICE_RESET:
@@ -184,6 +186,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			nfc_result_before_reboot();
 			app_nfc_claim_active();
 			if (app_settings_save(true)) {
+				LOG_WRN_REBOOTING("claim-token save failed");
 				sys_reboot(SYS_REBOOT_COLD);
 			}
 			break;
@@ -198,14 +201,22 @@ static void nfc_run_deferred_cmd_actions(void)
 			break;
 #if defined(CONFIG_LORAWAN)
 		case APP_CMD_ACTION_LRW_RESET:
-			/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). */
+			/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). Only
+			 * reachable via a LoRaWAN-specific NFC command, so a no-op when
+			 * LoRaWAN itself isn't compiled in (#118 phase 2 flash budget). */
 			nfc_result_before_reboot();
-			app_lrw_reset_nvm();
+#if defined(CONFIG_LORAWAN)
+			app_radio_lrw_reset_nvm();
+#endif /* defined(CONFIG_LORAWAN) */
+			LOG_WRN_REBOOTING("LoRaWAN NVM reset");
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
 		case APP_CMD_ACTION_LRW_JOIN:
-			/* Force a (re)join now, no reboot (#109). */
-			app_lrw_join();
+			/* Force a (re)join now, no reboot (#109). Same LoRaWAN-only
+			 * reachability note as above. */
+#if defined(CONFIG_LORAWAN)
+			app_radio_lrw_join();
+#endif /* defined(CONFIG_LORAWAN) */
 			break;
 #endif /* defined(CONFIG_LORAWAN) */
 		case APP_CMD_ACTION_COUNTERS_SAVE:
@@ -443,22 +454,22 @@ int main(void)
 		LOG_WRN("app_alarm_rules_init failed: %d (alarms unavailable)", ret);
 	}
 
-#if defined(CONFIG_LORAWAN)
-	ret = app_lrw_init();
+	/* Radio (#118): bring up the stack selected by `radio_mode` (LoRaWAN or
+	 * raw-LoRa P2P). Both are linked; only the chosen one is started. */
+	ret = app_radio_init();
 	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_lrw_init", ret);
+		LOG_ERR_CALL_FAILED_INT("app_radio_init", ret);
 		die();
 	}
 
 	/* Report orchestration (#126): owns the interval_report cadence and hands
-	 * telemetry frames to app_lrw. Register before the join so the link-ready
-	 * kick is wired when on_join_success fires. */
+	 * telemetry frames to the radio. Register before the start so the
+	 * link-ready kick is wired when the radio comes up. */
 	ret = app_report_init();
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_report_init", ret);
 		die();
 	}
-#endif /* defined(CONFIG_LORAWAN) */
 
 	/* A failed battery monitor must not brick an otherwise-healthy device into a
 	 * die() reboot loop (#88): the radio and sensors work without it. Degrade
@@ -490,8 +501,8 @@ int main(void)
 	 * app_counters_init() / app_history_init() / app_sensor_init() / ... would act
 	 * on uninitialised state (#340 M8: a reset_counters saved before the counters
 	 * were restored wiped every totalizer). Until then the chip stays unpowered,
-	 * so a phone on the tag just waits for VCC_ON. Before app_lrw_join(): the
-	 * claim state loaded here feeds the join Info.
+	 * so a phone on the tag just waits for VCC_ON. Before app_radio_start()
+	 * (the LoRaWAN join): the claim state loaded here feeds the join Info.
 	 *
 	 * The NFC tag (ST25DV) is non-essential: a broken tag must not brick an
 	 * otherwise-healthy device (radio + sensors fine) into a die() reboot loop
@@ -509,9 +520,7 @@ int main(void)
 	app_wdog_feed();
 #endif /* defined(CONFIG_WATCHDOG) */
 
-#if defined(CONFIG_LORAWAN)
-	app_lrw_join();
-#endif /* defined(CONFIG_LORAWAN) */
+	app_radio_start();
 
 	app_alarm_set_event_callback(event_led_handler, NULL);
 
@@ -572,13 +581,15 @@ int main(void)
 			led_handled = true;
 		}
 
-#if defined(CONFIG_LORAWAN)
-		enum app_lrw_state lrw_state = app_lrw_get_state();
+		/* Status LED reflects the active radio, LoRaWAN or P2P, through the
+		 * common app_radio state (a P2P join, self-heal or link-check-like
+		 * WARNING animates exactly like its LoRaWAN counterpart). */
+		enum app_radio_state lrw_state = app_radio_get_state();
 
 		if (led_handled) {
 			/* NFC interaction (or a higher-priority indicator) owns the LED. */
-		} else if (lrw_state == APP_LRW_STATE_JOINING ||
-			   lrw_state == APP_LRW_STATE_RECONNECT) {
+		} else if (lrw_state == APP_RADIO_STATE_JOINING ||
+			   lrw_state == APP_RADIO_STATE_RECONNECT) {
 			/* Not on the network — initial join or a rejoin after the link was
 			 * lost (#278). This is the SEVERE LoRaWAN state (worse than WARNING,
 			 * which keeps its session), so it carries a red accent: one yellow
@@ -601,7 +612,7 @@ int main(void)
 				.repetitions = 1};
 			app_led_play(&req);
 			led_handled = true;
-		} else if (lrw_state == APP_LRW_STATE_WARNING) {
+		} else if (lrw_state == APP_RADIO_STATE_WARNING) {
 			/* Link-check streak failing but the session is still up (#278) — the
 			 * MILD network state. Two yellow blinks, no red (one step above
 			 * radio-off's single yellow, one below joining's yellow+red). */
@@ -611,10 +622,10 @@ int main(void)
 							.repetitions = 2};
 			app_led_blink(&req);
 			led_handled = true;
-		} else if (lrw_state == APP_LRW_STATE_DISABLED) {
-			/* Radio disabled by radio-mode (#271/#278): a single yellow blink — the
-			 * lowest rung of the yellow severity scale, since this is a deliberate
-			 * operator choice (radio-mode off/p2p), not a network fault. */
+		} else if (lrw_state == APP_RADIO_STATE_DISABLED) {
+			/* Radio disabled (#271/#278): a single yellow blink — the lowest rung
+			 * of the yellow severity scale. LoRaWAN: DevEUI all-zero; P2P:
+			 * lrw_appkey or lrw_deveui all-zero (device not provisioned). */
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
 							.duration = 5,
 							.space = 0,
@@ -622,7 +633,6 @@ int main(void)
 			app_led_blink(&req);
 			led_handled = true;
 		}
-#endif /* defined(CONFIG_LORAWAN) */
 
 		/* Always evaluate alarms — do NOT short-circuit on led_handled. The poll
 		 * is the only place thresholds/state/count rules, the no-data watchdog and
@@ -676,17 +686,32 @@ int main(void)
 	return 0;
 }
 
-#if defined(CONFIG_SHELL) && defined(CONFIG_LORAWAN)
+#if defined(CONFIG_SHELL) && (defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P))
 
+/* app_radio_rejoin() is transport-agnostic (routes through app_radio, #118)
+ * and, unlike app_radio_start() (boot-time bring-up), always forces a fresh
+ * join attempt even if the radio already has a live session/pairing --
+ * LoRaWAN already worked that way unconditionally; P2P needed the explicit
+ * rejoin entry point since app_radio_p2p_start() intentionally treats an existing
+ * pairing as sufficient (a session persists across a normal power cycle,
+ * doc/p2p.md §7). Mirrors the `send` fix below -- this used to call
+ * app_radio_lrw_join() directly and was compiled out on P2P-only builds. */
 static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 {
-	app_lrw_join();
+	app_radio_rejoin();
 
 	shell_print(shell, "command succeeded");
 
 	return 0;
 }
 
+SHELL_CMD_REGISTER(join, NULL, "Force a fresh (re)join, even if already joined/paired.", cmd_join);
+
+/* app_report_trigger() is transport-agnostic too (routes through app_radio,
+ * #118 phase 2), so it stays available on a P2P-only (CONFIG_LORAWAN=n) build
+ * just like `join` above. Regression found via #118 phase 2 HIL after
+ * CONFIG_LORAWAN became toggleable: this command was silently compiled out on
+ * the P2P bench overlay. */
 static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 {
 	app_report_trigger();
@@ -696,7 +721,6 @@ static int cmd_send(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-SHELL_CMD_REGISTER(join, NULL, "Join LoRaWAN network.", cmd_join);
-SHELL_CMD_REGISTER(send, NULL, "Send LoRaWAN data.", cmd_send);
+SHELL_CMD_REGISTER(send, NULL, "Trigger an ad-hoc report send.", cmd_send);
 
-#endif /* defined(CONFIG_SHELL) && defined(CONFIG_LORAWAN) */
+#endif /* defined(CONFIG_SHELL) && (defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P)) */

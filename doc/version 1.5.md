@@ -10,6 +10,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 |---|---|
 | Buzzer | **New** — alarm-driven melodies (#397, Phase 2 of #338): the buzzer HW variant now sounds automatically while any alarm is active, gated on a new global `alarm-buzzer-mode` config key |
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
+| Radio: P2P | **New** — the raw-LoRa point-to-point transport is complete on the node (#118): `radio-mode p2p` pairs with a Proximos `Control.radio.P2P` central over a FIBER modem, with an acknowledged data plane, downlink commands, network-initiated pairing control, per-node TX power, and strict EU868 duty compliance. LoRaWAN is unaffected — both stacks link into the same image and the choice is made at boot. |
 | LED | **New** — HW-PWM-backed LED primitives (#301): `app_led_fade()` / `app_led_heartbeat()` and a runtime idle-indicator config, exposed via debug-build shell (`ats led fade\|heartbeat\|idle`). The boot carousel now fades red/green (yellow unchanged); the LoRaWAN-off idle blink is unchanged (unvalidated power cost, see §3). |
 | LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
 | LoRaWAN | **Fixed** — LoRaWAN glue in the Zephyr fork (`sticker-zephyr` `v4.3.0-sticker2-branch`, #421): a (re)join no longer returns the stale result of an earlier link-check / device-time confirm (L-7, #241); MAC-confirm waits are bounded (`-ETIMEDOUT` instead of a wedged `m_work_q`, #181); all LoRaMac access is serialised by one MAC lock (#241). |
@@ -24,11 +25,11 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN | **Fix** — command answers from the ProXimos Nodes test (#432): the deferred `clock_sync` Info now carries the command's `seq`; `force_send` / `sample` leave at once (no fleet jitter, no silent merge into a pending report); `w1_scan` without 1-Wire answers `NOT_SUPPORTED`. |
 | LoRaWAN | **Changed** — `GetConfig` over LoRaWAN leaves out the 1-Wire slot ROMs `sensor1_rom`..`sensor4_rom` (#433): 4 pages instead of 6 at EU868 DR0; NFC/shell GetConfig and an explicit `GetParam` still return them. |
 | LoRaWAN / NFC | **New** — `SetParam.alarms_replace` (#434): one message rewrites the whole alarm table — all rule slots are emptied before the message's `alarms` group is applied (or all cleared without one), rolled back with the batch on a fault. |
-| NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §17. |
-| NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §18. |
+| NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §18. |
+| NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §19. |
 | NFC | **New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2), so an installer with a phone can judge the link at the mounting spot. |
-| History | **Fix** — record timestamps follow the RTC (F27/F28, H-4): report cadence on wall-clock slots, no capture skipped during a replay, each flash page stamped from the RTC (a reboot / power loss / halt is a gap, not a shift), page header v2 keeps a clock-sync fix-up across reboots, the replay ends with the window's last frame. HistoryFrame protocol unchanged. See §20. |
-| LoRaWAN | **Fix** — the M-2 stale-uplink watchdog no longer forces a rejoin while the duty cycle is refusing sends (F29): a rejoin reset the band credits and let the device exceed the 1 % limit. See §21. |
+| History | **Fix** — record timestamps follow the RTC (F27/F28, H-4): report cadence on wall-clock slots, no capture skipped during a replay, each flash page stamped from the RTC (a reboot / power loss / halt is a gap, not a shift), page header v2 keeps a clock-sync fix-up across reboots, the replay ends with the window's last frame. HistoryFrame protocol unchanged. See §21. |
+| LoRaWAN | **Fix** — the M-2 stale-uplink watchdog no longer forces a rejoin while the duty cycle is refusing sends (F29): a rejoin reset the band credits and let the device exceed the 1 % limit. See §22. |
 
 ---
 
@@ -76,7 +77,7 @@ Eight subsystems are now independently toggleable via Kconfig — Release (`prj.
 
 | Toggle | Flash saved | RAM saved | What it drops | Default in `debug.conf` |
 |---|---:|---:|---|:-:|
-| `CONFIG_RADIO_LORAWAN=n` | ~41.0 KB | ~15.1 KB | LoRaMac stack + radio HAL + `app_lrw.c` — disables **all** radio transmission (telemetry/alarm sampling and history capture keep running locally, just never sent) | **ON** |
+| `CONFIG_RADIO_LORAWAN=n` | ~41.0 KB | ~15.1 KB | LoRaMac stack + radio HAL + `app_radio_lrw.c` — disables **all** radio transmission (telemetry/alarm sampling and history capture keep running locally, just never sent) | **ON** |
 | `CONFIG_W1=n` | ~20.3 KB | ~0.5 KB | 1-Wire bus: DS18B20, DS28E17 machine-probe bridge, ROM-bound slot registry | OFF |
 | `CONFIG_LIS2DH=n` | ~7.6 KB | ~0.3 KB | Accelerometer (orientation, motion, free-fall) | OFF |
 | `CONFIG_APP_BUZZER=n` | ~2.3 KB | ~0.8 KB | Buzzer/melody HW variant (#338/#397) + its shell/remote-command surface | OFF |
@@ -159,7 +160,7 @@ it actively polled with `GetParam` / `GetConfig` downlinks — so after any loca
 reconfiguration (shell / NFC), the LNS copy stayed stale until someone asked.
 
 This adds a **second autonomous fPort-85 uplink right after the boot `Info`**: a
-`Response.ConfigDump` (one frame when it fits, paged otherwise — §12) carrying a
+`Response.ConfigDump` (one frame when it fits, paged otherwise — §13) carrying a
 fixed selection of the key operating settings. Because `settings save` cold-reboots
 and every boot re-joins, this **re-announces the effective config automatically**
 after every persisted change — no diff-tracking, no extra state.
@@ -205,7 +206,7 @@ config reply, bool fields decode as `0`/`1`):
   field 7), 40 B with the four `w1_slot_type` entries, up to ~46 B with large
   interval values. It fits the EU868 DR0 budget (51 B) and the 64 B response buffer.
 - **Low DR outside EU868 (#418, resolved by #409 / #425):** below the EU868 DR0
-  budget the settings-info is paged (§12); a setting that does not fit even alone is
+  budget the settings-info is paged (§13); a setting that does not fit even alone is
   left out, and when nothing fits the device sends it once a DR change makes room.
 - The lean debug default (`debug.conf`, #395) builds with `CONFIG_W1=n`, so a
   debug image omits `w1_slot_type`. Build with `-DCONFIG_W1=y` to exercise it.
@@ -216,7 +217,7 @@ config reply, bool fields decode as `0`/`1`):
 - The **persisted 1-Wire slot ROM serials** are *not* in this frame (to keep it one
   DR0 uplink); a host that wants them reads `GetParam(sensors 11..14)`.
 - `w1_slot_type` is runtime state, filled **only** by this boot uplink and by its
-  on-request twin `GetSettings` (§13) — a plain `GetConfig` / `GetParam` reply stays a
+  on-request twin `GetSettings` (§14) — a plain `GetConfig` / `GetParam` reply stays a
   pure config snapshot and never carries it.
 
 **HW verification (2026-09-22, EU868, ChirpStack v4):** after every join the
@@ -239,7 +240,7 @@ carry these commits over.
 |---|---|---|
 | **Stale join result** (L-7, #241) | Every link-check / device-time MLME confirm left a token in the join semaphore, so the next (re)join returned right after TX with the *previous* result. A stale failure made the app drop a session the MAC had actually joined, then back off. | Only the join confirm signals the join waiter; the semaphore is drained before each join. |
 | **Bounded confirm wait** (#181) | `lorawan_send()` / `lorawan_join()` waited forever for the MAC confirm; a lost confirm wedged `m_work_q` until the #182 watchdog reset the SoC. | `CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS` (20 s, `BUILD_ASSERT` < the 30 s liveness window). A lost confirm returns `-ETIMEDOUT` and the normal bounded retry path takes over. |
-| **MAC lock** (#241) | LoRaMac (not thread-safe) was entered from `m_work_q`, shell/NFC and the system work queue (timer + radio events) without a shared lock. | One recursive `lorawan_mac_lock()` around every LoRaMac entry, never held across a confirm wait. `app_lrw.c` wraps its direct LoRaMac calls. |
+| **MAC lock** (#241) | LoRaMac (not thread-safe) was entered from `m_work_q`, shell/NFC and the system work queue (timer + radio events) without a shared lock. | One recursive `lorawan_mac_lock()` around every LoRaMac entry, never held across a confirm wait. `app_radio_lrw.c` wraps its direct LoRaMac calls. |
 
 Also fixed: `ats lrw status` / NFC info during the boot window before `lorawan_start()` no longer
 reads LoRaMac's still-uninitialised crypto context (it showed a garbage FCntUp).
@@ -262,19 +263,78 @@ See `doc/manual-test-plan.md` **L17** and `doc/plan/421 - LoRaWAN glue fixes in 
 
 ---
 
-## 6. LoRaWAN region guard (#409 A1)
+## 6. Raw-LoRa P2P transport (#118)
+
+A second radio transport, selectable at boot with `config radio-mode p2p`, for
+deployments with no LoRaWAN infrastructure: the STICKER talks directly to a
+HARDWARIO FIBER acting as a modem, and a Proximos `Control.radio.P2P` central
+behind it owns the network. The payload layer is unchanged — `app_compose`
+builds the same protobuf snapshots and `app_report` owns the same
+`interval_report` cadence — so telemetry, alarms and history behave as they do
+over LoRaWAN. Full design in `doc/p2p.md`; the acceptance matrix is
+`doc/p2p-e2e-test-plan.md`.
+
+**Setup** is three commands and a save. `lrw_appkey` is the root of the whole
+transport (there is no separate P2P key — the central already has it from
+ordinary OTAA provisioning), and an all-zero one makes the radio refuse to
+start rather than join under a publicly known key. `lrw_deveui` is the node's
+on-air identity (#417): an all-zero DevEUI refuses a new join likewise:
+
+```
+config lrw-appkey <32 hex>
+config radio-mode p2p
+settings save                    # persists + reboots
+ats radio status                 # kind: P2P, app_key: set, state: JOINING|PAIRED
+config show                      # lrw-deveui: the DevEUI the central registers
+```
+
+The three radio parameters (`p2p-frequency`, `p2p-spreading-factor`,
+`p2p-tx-power`) must match the Hub's and are shell-only by design — see
+`doc/p2p.md` §2.
+
+**What the node does:**
+
+| Area | Behaviour |
+|---|---|
+| Pairing | On-air join handshake (JoinRequest/JoinAccept, 16 B AES-CMAC tags under `app_key`); the JoinRequest identifies the node by its DevEUI (8 B, MSB-first, #417 — the serial number is no longer on the P2P air). Fast retries for the 120 s boot window, then a slow backoff (≈ one attempt pass per hour) instead of falling silent; each pass sweeps the spreading factors nearest-first, so a node finds a Hub that moved the network SF. Session persisted to NVS so a power cycle never costs a re-join. `join` forces a fresh session; `ats radio unjoin` simulates a never-paired boot. |
+| Data plane | AES-CCM under a derived `session_key`, 4 B tag, per-frame counter persisted with a reservation window so a reboot can never reuse a nonce. Confirmed uplinks with up to 3 retransmissions of the byte-identical frame. |
+| Link quality | Each Ack carries the RSSI/SNR the central measured on that uplink, surfaced by `ats radio status`. The node's own measurement of each received Ack/command is logged as `dl_rssi`/`dl_snr` and fills the last-downlink fields of GetInfo / NFC Info, as on LoRaWAN. |
+| Link state | The node reports its link in the same terms as LoRaWAN (`app_radio` state): paired = healthy, 3+ failed confirmed cycles = warning, boot join = joining, self-heal / RejoinRequest join = reconnect, detached = idle, unprovisioned = disabled. The status LED, Info `lrw_state` and `device_status` (`RADIO_LINK_DOWN`) follow it; no uplinks are composed while a re-join replaces the session. |
+| Clock | The Ack can carry a Unix-time tail, so a node with no RTC gets wall time from the central — no `clock_sync` command needed. The tail is checked against the same plausibility window as the LoRaWAN DeviceTimeAns (2024–2100, L-5). |
+| Downlink commands | `0x56` carries the same protobuf `Command` as LoRaWAN fPort 85, dispatched through the shared handler and answered with a `0x55`. Deferred actions (`settings_save`, `reboot`) execute only **after** that answer has been acknowledged, so a commanded reboot cannot swallow its own response. |
+| RX window | The announcing Ack states the pending command's exact on-air length, so the receiver stays on for that frame instead of a 255 B worst case — 548 ms instead of 2514 ms for a short command at SF10. The window keeps a fixed 120 ms after the expected frame (F-P2P-2), so a central's constant Ack lateness cannot cut off an Ack at SF7. |
+| Pairing control | The central can end a pairing (`Detach`) or ask for a rekey (`RejoinRequest`); both are authenticated and empty-bodied. A detached node goes quiet and stays quiet — no automatic re-join — until a reboot or an explicit `join`. |
+| Radio assignment | JoinAccept can assign this node's TX power (2..22 dBm), applied and persisted with the pairing; `ats radio status` shows `assigned` versus `config`. Channel and SF stay network-wide: the modem has one receiver. |
+| Duty cycle | Raw LoRa bypasses LoRaMac's enforcement, so the node keeps its own exact sliding-hour ledger: **every** rolling hour stays within EU868's 1 %, not merely the long-run average. |
+| History replay | A central-requested history replay works over P2P too (B8): a device-driven stream of history frames, each acknowledged, with telemetry paused for the duration. |
+| Self-healing | Eight consecutive fully-failed uplink cycles start a re-join with exponential backoff (60 s → 1 h), so a node survives a central DB restore or a long outage without a site visit. |
+
+**Not in this release:** listen-before-talk (CAD) — the Zephyr LoRa driver API
+has no CAD entry point yet, so it is a follow-up (`doc/plan/`); bulk history
+region support beyond EU868; and NFC
+configuration of the P2P radio parameters or an NFC `p2p_join` trigger, both of
+which need a coordinated Manager-App release.
+
+**Build note:** both radio stacks link into the same image, gated by
+`CONFIG_RADIO_P2P` (default `y`) and `CONFIG_RADIO_LORAWAN`. The flash-tight
+`debug.conf` overlay drops P2P; `debug.conf;debug_p2p_bench.conf` is the only
+debug image containing it, and it pays for that by dropping LoRaWAN.
+
+---
+
+## 7. LoRaWAN region guard (#409 A1)
 
 `lorawan_set_region()` returns `-ENOTSUP` for a region whose
-`CONFIG_LORAMAC_REGION_*` is not compiled in. Until now that made `app_lrw_init()`
+`CONFIG_LORAMAC_REGION_*` is not compiled in. Until now that made `app_radio_lrw_init()`
 fail, leaving a device with **no radio and no diagnosable state** — a real case,
 because `debug.conf` trims US915/AU915, so a device configured for `us915` that is
 flashed with a debug image (or any trimmed build) went dead.
 
-Now `app_lrw_init()` resolves the stored region against the regions in the image
+Now `app_radio_lrw_init()` resolves the stored region against the regions in the image
 first. If it is missing (or out of range):
 
 - the radio stays **silent** through the existing radio-mode OFF path
-  (`APP_LRW_STATE_DISABLED`, no LoRaMac bring-up, join/send are no-ops);
+  (`APP_RADIO_LRW_STATE_DISABLED`, no LoRaMac bring-up, join/send are no-ops);
 - an error is logged: `lrw-region <n> is not compiled into this image: radio-silent`;
 - over NFC the device reports `lrw_state` DISABLED and the existing `device_status`
   bit 12 `lrw_disabled` (no dedicated bit — `config show` shows the stored region).
@@ -288,7 +348,7 @@ Cost: a few dozen bytes of flash, +0 B RAM.
 
 ---
 
-## 7. Manual uplink datarate `lrw-datarate` (#409 A3)
+## 8. Manual uplink datarate `lrw-datarate` (#409 A3)
 
 New config key, modelled on twr-sdk's `AT$DR`:
 
@@ -326,7 +386,7 @@ Cost: release +408 B flash, +0 B RAM.
 
 ---
 
-## 8. Low-DR delivery, part 1 (#409 A5a)
+## 9. Low-DR delivery, part 1 (#409 A5a)
 
 At the smallest LoRaWAN budget tier — **11 B** on US915 DR0 and AU915 / AS923 DR2 — most
 fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *floor*
@@ -337,7 +397,7 @@ fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *f
   UNKNOWN, which proto3 omits). The LoRaWAN "response too large" fallback is a 7 B
   `Error{ code = 9 BUDGET_TOO_SMALL }` — "retry once ADR raises the DR" — so a command
   that cannot be answered in full still gets an answer. NFC keeps `UNKNOWN` + detail.
-- **Info at a small budget** is paged (§12) — the join / clock-sync `Info` and a
+- **Info at a small budget** is paged (§13) — the join / clock-sync `Info` and a
   LoRaWAN `GetInfo`. (An interim `InfoLite` message from the #409 draft was replaced by
   this before release; `Response` field 11 is reserved.)
 - **Deferred boot announce.** If not even one field of the join `Info` or the #412
@@ -351,7 +411,7 @@ fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *f
 - **GetConfig / GetParam over LoRaWAN send every page by themselves.** One downlink
   request is enough: the device answers with the requested page (0 unless `page` is
   given) and then uplinks the remaining pages on its own — same `seq`, numbered as in
-  §12, paced by the duty cycle (at EU868 DR0 a full config takes minutes). A new paged
+  §13, paced by the duty cycle (at EU868 DR0 a full config takes minutes). A new paged
   request replaces a stream still running; a rejoin cancels it. The page size stays
   30 B. NFC is unchanged (the phone still asks page by page, ~450 B pages).
 - **DR drop between queueing and sending.** A queued frame that no longer fits after
@@ -370,7 +430,7 @@ fPort 85 / fPort 3 messages cannot fit even one field. Policy: this tier is a *f
   `alarm_status_flags` (e.g. `["alarm_any", "alarm_threshold"]`). Additive — older decoders
   ignore the extra bits.
 
-## 9. `DevStatusReq` after `LinkADRReq` answered (#419)
+## 10. `DevStatusReq` after `LinkADRReq` answered (#419)
 
 LoRaMac-node's MAC-command parser skipped a `DevStatusReq` that is the last FOpts byte
 right after a `LinkADRReq` block — exactly how ChirpStack bundles them — so `DevStatusAns`
@@ -395,7 +455,7 @@ next uplink carries `DevStatusAns`, and ChirpStack shows the device's battery / 
 
 ---
 
-## 10. AS923 region (#409 A6)
+## 11. AS923 region (#409 A6)
 
 `lrw-region` accepts `as923` (wire value 3 in `AppConfigMessage.Lorawan.region`):
 
@@ -409,26 +469,26 @@ settings save
   groups (AS923-2/-3/-4) would be separate build variants.
 - **No sub-band** — `lrw-sub-band` applies to US915/AU915 only.
 - **Dwell time on by default:** DR0/DR1 carry 0 B and DR2 carries 11 B, so AS923 at its
-  lowest DR is the 11 B budget tier handled by §8 and §12 (paged answers, compact
+  lowest DR is the 11 B budget tier handled by §9 and §13 (paged answers, compact
   `Error`, alarm state in telemetry, deferred boot announce). `lrw-datarate dr0` / `dr1` are rejected by
   the MAC and logged; the stack's DR stays in use.
 - **Release builds only.** `debug.conf` trims AS923 together with AU915/US915; a stored
-  `as923` on a debug image leaves the radio silent (§6), never on another band.
+  `as923` on a debug image leaves the radio silent (§7), never on another band.
 - `ttn.js` encodes `region: "AS923"` in `set_param`.
 
 Cost: release +2 536 B flash, +0 B RAM (loramac-node channel structures are already
 sized for US915's 72 channels). Not tested on HW — the bench gateway is EU868 only.
 
 **HW verification of #409 (2026-09-23, EU868, ChirpStack v4 on the ProXimos Hub, STICKER DevEUI `5876070000000413`):**
-the region guard (§6), `lrw-datarate` (§7), compact `Error`, alarm split and alarm bits, GetConfig/GetParam page
-streaming (§8), `DevStatusAns` (§9) and the release image with AS923 compiled in all PASS. Not HW-tested (no
-US915/AU915/AS923 gateway): the 11 B budget tier of §8 and AS923 on air. See the HIL records in
+the region guard (§7), `lrw-datarate` (§8), compact `Error`, alarm split and alarm bits, GetConfig/GetParam page
+streaming (§9), `DevStatusAns` (§10) and the release image with AS923 compiled in all PASS. Not HW-tested (no
+US915/AU915/AS923 gateway): the 11 B budget tier of §9 and AS923 on air. See the HIL records in
 `doc/plan/409 - LoRaWAN improvements - regions, datarate, diagnostics.md`.
 
 
 ---
 
-## 11. Faster link-loss recovery (#424)
+## 12. Faster link-loss recovery (#424)
 
 When the network disappears (gateway off, or the device moved out of reach of its ADR-optimised data rate), v1.5.0 recovers faster and, where possible, without a rejoin.
 
@@ -445,7 +505,7 @@ When the network disappears (gateway off, or the device moved out of reach of it
 - New log lines: `Link recovery: TX power <a> -> <b>, DR<x> -> DR<y> (payload <n> B)` and `LC FAIL in WARNING (total: n/m, ladder step)`. `ats lrw status` also prints `tx power: <index> (0 = max)`.
 - After a ladder recovery the device stays on the lower DR. With ADR on, the network raises it again from the uplinks it receives. A lower DR means a smaller payload budget (EU868 DR0–2: 51 B), so telemetry may take more frames until then.
 - The link-check timeout now starts after the uplink's RX windows closed. It no longer races a LinkCheckAns at DR0/SF12 with a 5 s RX1 delay.
-- Works together with `lrw-datarate` (§7): a pinned DR is stepped down by the ladder like any other, and the next join re-pins it.
+- Works together with `lrw-datarate` (§8): a pinned DR is stepped down by the ladder like any other, and the next join re-pins it.
 - `ats lrw status` now reports the live DR from the MAC. Before, it showed a stale value after an ADR-off DR change (`lrw-datarate`, a ladder rung).
 - Cost: +272 B flash release, +744 B debug, +0 B RAM.
 
@@ -461,7 +521,7 @@ See `doc/manual-test-plan.md` **L18**/**L19** and `doc/plan/424 - Faster link-lo
 
 ---
 
-## 12. Universal response paging (#425)
+## 13. Universal response paging (#425)
 
 One paging rule for every answer the device sends over a radio. When a response does
 not fit one frame, it is split into **pages**; each page is a complete, independently
@@ -555,7 +615,7 @@ Cost: release about +1.8 KB flash, +128 B RAM.
 
 ---
 
-## 13. `GetSettings` — settings-info on request (#428)
+## 14. `GetSettings` — settings-info on request (#428)
 
 The boot settings-info (§4) tells the network the effective configuration once per boot.
 A host that wants to refresh it later had only `GetConfig`: 34 keys in 4+ pages over LoRaWAN (one page
@@ -568,8 +628,8 @@ the §4 content on request.
 | Downlink | fPort 85, e.g. `0807fa0100` (seq 7) |
 | Answer | `Response.config_dump` with the command's `seq`: `application` interval_sample / interval_report / history_enable, the nine `sensors.cap_*` flags, runtime `w1_slot_type` (1-Wire builds) |
 | Size | the boot dump + 2 B for the `seq` (34 B measured without 1-Wire, +6 B with the four `w1_slot_type` entries): one frame at EU868 DR0 and up |
-| Paging | over LoRaWAN the same pages as the boot dump (§12 envelope) when the budget is smaller; every page carries the `seq` |
-| Transports | all (LoRaWAN, NFC, vendor, shell) except the plaintext mailbox channel (#414); read-only, no secrets |
+| Paging | over LoRaWAN the same pages as the boot dump (§13 envelope) when the budget is smaller; every page carries the `seq` |
+| Transports | all (LoRaWAN, P2P, NFC, vendor, shell) except the plaintext mailbox channel (#414); read-only, no secrets |
 
 The values are the **staged** config, like every `GetConfig` / `GetParam` answer (a change
 without `settings save` shows up at once). The boot dump keeps `seq` 0, so a host can tell
@@ -588,7 +648,7 @@ Not HW-tested: NFC, DR0 (34 B fits one frame there too) and the paged form (nati
 
 ---
 
-## 14. Command answers the Hub can pair (#432)
+## 15. Command answers the Hub can pair (#432)
 
 Found by the ProXimos Nodes test (Hub CLI + Portal against a STICKER, 2026-09-23):
 
@@ -626,7 +686,7 @@ and waits for them to activate again — the same way it already handles low bat
 
 ---
 
-## 15. `GetConfig` over LoRaWAN without the slot ROMs (#433)
+## 16. `GetConfig` over LoRaWAN without the slot ROMs (#433)
 
 The four 1-Wire slot ROMs (`sensors` 11..14, 8 B each) took two of the six pages of a
 LoRaWAN `GetConfig` at EU868 DR0, and the network has no use for them — the ProXimos
@@ -643,7 +703,9 @@ Mechanism: a new configen attribute `dump_lrw: false` keeps a field in `DUMP_FIE
 but flags it `lrw_skip`; `app_cmd_handle_get_config()` skips such a field when the
 transport is LoRaWAN. A host that merges a complete `GetConfig` into its config copy
 therefore no longer sees `sensorN_rom` from LoRaWAN; a host that replaces its copy
-(ProXimos !91) drops them.
+(ProXimos !91) drops them. A **P2P** `GetConfig` (§6) leaves them out too: P2P is
+budget-limited like LoRaWAN and its device-driven pages are laid out as LoRaWAN pages,
+so page 0 has to use the same layout.
 
 **HW verification (2026-09-24, EU868, ProXimos Hub ChirpStack v4):** `get-config` from the
 Hub CLI → 4 pages at DR5 (was 6), no `sensor1_rom`..`sensor4_rom`, Hub config 34 keys;
@@ -652,7 +714,7 @@ Hub CLI → 4 pages at DR5 (was 6), no `sensor1_rom`..`sensor4_rom`, Hub config 
 
 ---
 
-## 16. `SetParam.alarms_replace` — rewrite the whole alarm table (#434)
+## 17. `SetParam.alarms_replace` — rewrite the whole alarm table (#434)
 
 A host that is the source of truth for the alarm rules (the ProXimos Portal) had no way to
 say "these are *all* the rules": a `SetParam` only sets the slots it carries, so a rule
@@ -679,7 +741,7 @@ CLI):** with rules [0], [1], [3] seeded, `set_param{alarms{alarm_5}, alarms_repl
 
 ---
 
-## 17. NFC command channel: ST25DV Fast-Transfer-Mode mailbox (#313)
+## 18. NFC command channel: ST25DV Fast-Transfer-Mode mailbox (#313)
 
 **Why.** In v1.4.0 the phone drove interactive commands by writing an NDEF
 `hio.stck:cmd` record into the ST25DV's user EEPROM and reading an `hio.stck:rsp`
@@ -856,12 +918,12 @@ page fits one 256 B mailbox frame.
 
 ---
 
-## 18. Plaintext command transport and explicit claiming (#415)
+## 19. Plaintext command transport and explicit claiming (#415)
 
 Prepares the claim flow for the NFC mailbox move (#313/#414) and tightens the
 claim window into something with no automatic behaviour.
 
-### 15.1 The `plain_text` transport
+### 19.1 The `plain_text` transport
 
 A new command transport, `plain_text`, carries a **raw `Command` protobuf** in and
 `0x01 || Response` out — no AES-CCM, no nonce, no response cache. It is the
@@ -878,7 +940,7 @@ transports **except** `plain_text`", so a command that does not name it — `get
 can never be answered without a key. **Rule for any command that opts in:
 read-only, and disclosing identity-class data only.**
 
-### 15.2 `get_claim_info` (proto 29)
+### 19.2 `get_claim_info` (proto 29)
 
 The first `plain_text` command (also allowed over `nfc` and `shell`). Empty request;
 returns `Response.claim_info { serial_number, claim_token }` — the same data the
@@ -888,7 +950,7 @@ token is provisioned, `NOT_READY "no claim token"`. Unlike the NDEF record it ne
 a **powered** device, so a shelf attacker can no longer read the token off an
 unpowered box.
 
-### 15.3 Explicit two-state claim window
+### 19.3 Explicit two-state claim window
 
 The claim window (`clm/state` in NVS) is now a two-state latch:
 
@@ -910,14 +972,14 @@ not control). Mutators are explicit only: `claim_done` / `ats claim done` →
 Upgrading from v1.4.x migrates the old tri-state in place: `unset`/`pending` →
 `active`, `consumed` → `done`.
 
-### 15.4 Command rename (wire-compatible)
+### 19.4 Command rename (wire-compatible)
 
 `clm_ack` → `claim_done` (id 25) and `clm_rearm` → `claim_active` (id 27); messages
 `ClmAck`/`ClmRearm` → `ClaimDone`/`ClaimActive`. The **field numbers do not move**,
 so already-deployed downlinks and vendored protos stay byte-compatible — only the
 generated names change (firmware, JS decoder, and the Manager-App's vendored proto).
 
-### 15.5 Bench
+### 19.5 Bench
 
 `ats cmd plain <hex>` injects a raw Command over the transport; `ats claim
 active|done|status` drives and prints the window state. Example:
@@ -927,7 +989,7 @@ returns `NOT_READY "transport not allowed"`.
 
 ---
 
-## 19. Last-downlink link quality in the NFC GetInfo (#409 A2)
+## 20. Last-downlink link quality in the NFC GetInfo (#409 A2)
 
 An installer with only a phone (Manager-App over NFC) has no view of the network
 server, so it could not tell whether the radio link is good where the device is
@@ -947,9 +1009,9 @@ received**, as measured by the device:
   sends one, so the reading can be hours old. The values reflect any downlink, including
   MAC-only ones (ADR, DevStatusReq, LinkCheckAns).
 - **Omitted until the first downlink since boot**, so a missing value never reads as 0 dBm.
-- The same values are on the debug shell: `ats lrw status` (`rssi`, `snr`).
+- The same values are on the debug shell: `ats radio status` (`rssi`, `snr`).
 - `ttn.js` decodes them as `last_dl_rssi`, `last_dl_snr`, `last_dl_age_s`.
-- **Paging (with §17):** in the host-driven NFC `GetInfo` paging the three fields form **one**
+- **Paging (with §18):** in the host-driven NFC `GetInfo` paging the three fields form **one**
   NFC-only Info unit (next to `lrw_state` / `claim_token` / `dev_eui`), so RSSI/SNR never
   travel on a page without their age; the unit is empty (not sent) until the first downlink.
 
@@ -957,7 +1019,7 @@ Cost: release +160 B flash, +0 B RAM.
 
 ---
 
-## 20. History timestamps follow the RTC (F27, F28, H-4)
+## 21. History timestamps follow the RTC (F27, F28, H-4)
 
 A history record carries no time of its own: its time is implicit, `base +
 ordinal × interval_report`. v1.5.0 before this change assumed every record came
@@ -994,7 +1056,7 @@ bench (unit 0413) that failed in four ways:
   of borrowing a slot up to half an interval away (HIL T4: a 150 s halt put the
   run 30 s off the grid). An `interval_report` change lays a new grid. Boot arming is
   unchanged (first report one interval out) and the telemetry pre-send jitter
-  (#267) stays in `app_lrw`.
+  (#267) stays in `app_radio_lrw`.
 - **No capture skipped during a replay (C).** The replay cursor is an absolute
   record ordinal (ring start + evicted total), so eviction under a running replay
   moves nothing: no record is repeated or skipped, a cursor whose record was
@@ -1033,6 +1095,8 @@ bench (unit 0413) that failed in four ways:
   earlier. The warning and the `BUDGET_TOO_SMALL` error stay for the real case
   (records left but none fits the data rate). The NFC paged read uses the same
   cursor: the page that reaches the window end already returns `has_more=false`.
+  The P2P replay (§6, B8) uses the same absolute cursor, per-frame `time_synced`
+  and end rule.
 
 ### Host-visible behaviour
 
@@ -1114,9 +1178,9 @@ LoRaWAN outages, not as an archive across firmware updates.
 
 ---
 
-## 21. M-2 watchdog respects the duty cycle (F29)
+## 22. M-2 watchdog respects the duty cycle (F29)
 
-The M-2 stale-uplink watchdog (`heartbeat_work_handler` in `app_lrw.c`) forces a
+The M-2 stale-uplink watchdog (`heartbeat_work_handler` in `app_radio_lrw.c`) forces a
 MAC-reset rejoin when the device is joined but no telemetry uplink has left for
 4 × `interval_report`. That catches a mute station whose sends are perpetually
 skipped (budget 0 loop, retries exhausted) while the work queue and the IWDG
@@ -1134,7 +1198,7 @@ the session.
 - Every uplink now goes through `lrw_send()`, which records the result in a
   duty-cycle refusal streak (first and last refusal); a successful send or a join
   clears it.
-- The decision is `stale_check()` in `app_lrw.c`: when the station is stale
+- The decision is `stale_check()` in `app_radio_lrw.c`: when the station is stale
   but duty-cycle refusals keep coming (the last one within one report interval
   + 3 min) and the streak is shorter than the credit window + margin (75 min),
   M-2 holds and logs `... the duty cycle is refusing sends ...: no rejoin (M-2)`
@@ -1151,7 +1215,7 @@ At the default 900 s interval this never triggers (DR0 ≈ 4 uplinks/h ≈ 8 s o
 replays at DR0.
 
 Tests: the decision first shipped as its own module with a `tests/lrw_stale`
-suite (7 cases). It was folded back into `app_lrw.c` so the transport code stays
+suite (7 cases). It was folded back into `app_radio_lrw.c` so the transport code stays
 in the transport modules; the unit tests return with the common `app_radio`
 layer on feat-p2p. The hardware run below covers the behaviour.
 

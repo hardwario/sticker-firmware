@@ -146,23 +146,12 @@ void app_clock_handle_downlink(uint8_t flags)
 	}
 
 	uint32_t unix_time = gps_time + GPS_UNIX_EPOCH_OFFSET - GPS_UTC_LEAP_SECONDS;
-
-	/* L-5: sanity-bound the network time the same way the NFC clock_sync path
-	 * does. A bogus DeviceTimeAns (or a GPS→Unix conversion underflow) would
-	 * otherwise be written to the RTC and skew every history/alarm timestamp. */
-	if (unix_time < APP_CLOCK_UNIX_MIN || unix_time > APP_CLOCK_UNIX_MAX) {
-		LOG_WRN("Network time %u out of range - ignored (L-5)", unix_time);
-		return;
-	}
-
-	ret = app_clock_set_unix(unix_time);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_clock_set_unix", ret);
-		return;
-	}
-
 	bool first_sync = !m_time_synced;
-	m_time_synced = true;
+
+	/* A GPS→Unix conversion underflow lands outside the L-5 window too. */
+	if (app_clock_set_network_time(unix_time)) {
+		return;
+	}
 	LOG_INF("RTC synced from network: unix=%u", unix_time);
 
 	/* Arm the periodic re-sync once, after the first successful network sync. */
@@ -173,6 +162,27 @@ void app_clock_handle_downlink(uint8_t flags)
 #else
 	ARG_UNUSED(flags);
 #endif /* defined(CONFIG_LORAWAN) */
+}
+
+int app_clock_set_network_time(uint32_t unix_s)
+{
+	/* L-5: sanity-bound the network time the same way the NFC clock_sync path
+	 * does. A bogus network time would otherwise be written to the RTC and
+	 * skew every history/alarm timestamp. */
+	if (unix_s < APP_CLOCK_UNIX_MIN || unix_s > APP_CLOCK_UNIX_MAX) {
+		LOG_WRN("Network time %u out of range - ignored (L-5)", unix_s);
+		return -ERANGE;
+	}
+
+	int ret = app_clock_set_unix(unix_s);
+
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_clock_set_unix", ret);
+		return ret;
+	}
+
+	m_time_synced = true;
+	return 0;
 }
 
 int app_clock_get_unix(uint32_t *unix_s)

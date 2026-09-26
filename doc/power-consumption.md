@@ -127,7 +127,7 @@ SMPS low-power mode cannot be used.
 | Boot bring-up burst | ~6 mA mean / ~28 mA peak over ~1 s | every boot |
 
 Setting `lrw-deveui` to all-zero puts LoRaWAN into the **radio-silent DISABLED** state
-(#98): no join, no uplinks. Note that `app_lrw_init()` still runs `lorawan_start()` at boot
+(#98): no join, no uplinks. Note that `app_radio_lrw_init()` still runs `lorawan_start()` at boot
 before entering DISABLED, so a one-time boot radio burst remains — tracked as **#175** (skip
 the whole LoRaWAN bring-up when the DevEUI is zero).
 

@@ -55,6 +55,10 @@ static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 }
 
 /* Run app_cmd_handle on a hex command over `transport`; decode the Response. */
+extern int g_p2p_start_history_replay_calls;
+extern uint32_t g_p2p_start_history_replay_seq;
+extern bool test_p2p_start_history_replay_ret;
+
 static enum app_cmd_action handle_via(enum app_cmd_transport transport, const char *hex,
 				      Response *resp)
 {
@@ -73,6 +77,31 @@ static enum app_cmd_action handle_via(enum app_cmd_transport transport, const ch
 	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
 	zassert_true(pb_decode(&is, Response_fields, resp), "Response decode failed");
 	return action;
+}
+
+/* Like handle_via, but for commands that legitimately answer with NOTHING: a
+ * started history replay emits no Response body, because the first HistoryFrame
+ * uplink IS the reply (B8). Returns the emitted length so a test can assert on
+ * the silence itself. */
+static size_t handle_via_maybe_silent(enum app_cmd_transport transport, const char *hex,
+				      Response *resp)
+{
+	uint8_t in[64], out[128];
+	size_t in_len = unhex(hex, in, sizeof(in));
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	int ret = app_cmd_handle(transport, in, in_len, out, sizeof(out), &out_len, &action);
+	zassert_equal(ret, 0, "app_cmd_handle ret %d", ret);
+
+	*resp = (Response)Response_init_zero;
+	if (out_len == 0) {
+		return 0;
+	}
+	zassert_equal(out[0], APP_PROTO_VERSION, "bad version 0x%02x", out[0]);
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, resp), "Response decode failed");
+	return out_len;
 }
 
 /* Most tests exercise the LoRaWAN transport. */
@@ -903,6 +932,13 @@ static void visit_info_page(const uint8_t *buf, size_t len, const Response *r)
 	g_seen_battery |= r->body.info.battery == 3300;
 }
 
+static void visit_any_page(const uint8_t *buf, size_t len, const Response *r)
+{
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	ARG_UNUSED(r);
+}
+
 /* #425 (was #335 alarm trimming): an Info that does not fit the budget is paged,
  * not trimmed — every field and every active alarm arrives on some page. */
 ZTEST(cmd, test_build_info_pages_instead_of_trimming)
@@ -1492,6 +1528,65 @@ ZTEST(cmd, test_lrw_only_commands_rejected_over_nfc)
 		      r.which_body);
 }
 
+/* B8: req_history is answered over P2P by streaming the window back as N
+ * HistoryFrame uplinks, so the transport allow-list is [lrw, p2p] and the
+ * handler routes on `tp`. Until CONFIG_RADIO_P2P was set for this suite the
+ * whole `#if defined(CONFIG_RADIO_P2P)` arm was not even compiled natively. */
+ZTEST(cmd, test_req_history_over_p2p_starts_a_replay)
+{
+	Response r;
+
+	/* A stream was started: the first HistoryFrame IS the reply, so the
+	 * response body must stay unset (which_body == 0) rather than add a
+	 * redundant Ack the host would have to ignore. */
+	reset_cfg();
+	g_p2p_start_history_replay_calls = 0;
+	test_p2p_start_history_replay_ret = true;
+	size_t emitted = handle_via_maybe_silent(APP_CMD_TRANSPORT_P2P, "08075a00", &r);
+
+	zassert_equal(g_p2p_start_history_replay_calls, 1,
+		      "the P2P arm should have started a replay (calls=%d)",
+		      g_p2p_start_history_replay_calls);
+	zassert_equal(g_p2p_start_history_replay_seq, 7u, "the stream must answer the request seq");
+	zassert_equal(emitted, 0,
+		      "a started replay must emit nothing -- the first HistoryFrame is the reply, "
+		      "and an extra Ack would cost a second uplink (emitted %zu B)",
+		      emitted);
+	zassert_equal(r.which_body, 0, "no response body (which=%d)", r.which_body);
+
+	/* Nothing in the window: the host still needs a definitive answer. */
+	reset_cfg();
+	g_p2p_start_history_replay_calls = 0;
+	test_p2p_start_history_replay_ret = false;
+	handle_via(APP_CMD_TRANSPORT_P2P, "08075a00", &r);
+	zassert_equal(g_p2p_start_history_replay_calls, 1, "the handler should still have tried");
+	zassert_equal(r.which_body, Response_error_tag, "expected an Error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_HISTORY_UNAVAILABLE, "code %d",
+		      r.body.error.code);
+	zassert_str_equal(r.body.error.detail, "no records", "message `%s`", r.body.error.detail);
+}
+
+/* The allow-list widened to [lrw, p2p] — not to everything. NFC must still be
+ * refused by the generated dispatch, before the handler is reached. */
+ZTEST(cmd, test_req_history_still_rejected_over_nfc)
+{
+	Response r;
+
+	reset_cfg();
+	g_p2p_start_history_replay_calls = 0;
+	test_p2p_start_history_replay_ret = true;
+	handle_via(APP_CMD_TRANSPORT_NFC, "08075a00", &r);
+	zassert_equal(g_p2p_start_history_replay_calls, 0,
+		      "the dispatch guard must refuse before the handler runs");
+	zassert_equal(r.which_body, Response_error_tag, "expected an Error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_READY, "code %d",
+		      r.body.error.code);
+	zassert_str_equal(r.body.error.detail, "transport not allowed", "message `%s`",
+			  r.body.error.detail);
+}
+
 /* #107: clock_sync carrying unix_time sets the RTC directly (NFC time bootstrap).
  * A bare clock_sync over NFC just acks here — there is no LoRaWAN in this build
  * to query for network time. */
@@ -1560,7 +1655,7 @@ ZTEST(cmd, test_history_sample_capacity_is_exact)
 
 	memset(samples, 0x5A, sizeof(samples));
 
-	/* Worst-case varints, mirroring history_frame_cap() in app_lrw.c. cap is
+	/* Worst-case varints, mirroring history_frame_cap() in app_radio_lrw.c. cap is
 	 * bounded by out_cap minus the frame envelope and by the samples field size
 	 * (440 B, #260) — for this out_cap the buffer, not the field, binds. */
 	size_t cap = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,
@@ -2194,6 +2289,26 @@ ZTEST(cmd, test_get_config_streams_all_pages_over_lrw)
 	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "no NFC stream");
 }
 
+/* #425 step 7: P2P pages exactly like LoRaWAN — a multi-page GetConfig over
+ * APP_CMD_TRANSPORT_P2P streams every page with the same seq, and the pages
+ * are dispatched on the P2P transport (same field gating). */
+ZTEST(cmd, test_get_config_streams_all_pages_over_p2p)
+{
+	uint8_t in[8], out[64];
+	size_t in_len = unhex("080b2a00", in, sizeof(in)); /* seq11 get_config{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	reset_cfg();
+	g_app_config.interval_report = 900;
+	g_app_config.interval_sample = 60;
+	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, sizeof(out), &out_len,
+				     &action),
+		      0, "handle");
+	zassert_equal(action, APP_CMD_ACTION_PAGE_STREAM, "action %d", action);
+	zassert_true(walk_pages(out, out_len, sizeof(out), 11, visit_any_page) > 1, "paged");
+}
+
 /* The 1-Wire slot ROMs (sensors 11..14, `dump_lrw: false`) are left out of a
  * LoRaWAN GetConfig — they only cost answer pages there — but an NFC GetConfig
  * and an explicit GetParam still return them. */
@@ -2204,33 +2319,46 @@ static bool rom_in_dump(const Response *r)
 	return s->has_sensor1_rom || s->has_sensor2_rom || s->has_sensor3_rom || s->has_sensor4_rom;
 }
 
-ZTEST(cmd, test_get_config_skips_slot_roms_over_lrw)
+/* Run a GetConfig over a radio transport at the 51 B budget and walk the whole
+ * device-driven page stream: no page carries a ROM, none is empty, and the
+ * stream ends right after the announced page_count. */
+static void rom_free_stream(enum app_cmd_transport tp, const uint8_t *in, size_t in_len)
 {
-	uint8_t in[16], out[256];
-	size_t in_len = unhex("08092a00", in, sizeof(in)); /* seq9 get_config{} */
+	uint8_t out[256];
 	size_t out_len = 0;
 	enum app_cmd_action action = APP_CMD_ACTION_NONE;
 	uint32_t count;
 	Response r;
 
-	reset_cfg();
-
-	/* LoRaWAN: no page of the stream carries a ROM. */
-	zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, 51, &out_len, &action),
-		      0, "handle");
+	zassert_equal(app_cmd_handle(tp, in, in_len, out, 51, &out_len, &action), 0, "handle");
 	r = decode_resp(out, out_len);
 	count = r.page_count ? r.page_count : 1;
-	zassert_false(rom_in_dump(&r), "ROM on LoRaWAN page 0");
+	zassert_false(rom_in_dump(&r), "ROM on page 0 (tp %d)", tp);
 	for (uint32_t p = 1; p < count; p++) {
 		zassert_equal(app_cmd_stream_next(out, 51, &out_len), 0, "page %u", p);
 		r = decode_resp(out, out_len);
-		zassert_false(rom_in_dump(&r), "ROM on LoRaWAN page %u", p);
+		zassert_equal(r.page_index, p, "page_index %u != %u", r.page_index, p);
+		zassert_false(rom_in_dump(&r), "ROM on page %u (tp %d)", p, tp);
 		zassert_true(r.body.config_dump.has_sensors || r.body.config_dump.has_lorawan ||
 				     r.body.config_dump.has_application ||
 				     r.body.config_dump.has_alarms,
 			     "empty page %u", p);
 	}
 	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "stream must end");
+}
+
+ZTEST(cmd, test_get_config_skips_slot_roms_over_lrw)
+{
+	uint8_t in[16], out[256];
+	size_t in_len = unhex("08092a00", in, sizeof(in)); /* seq9 get_config{} */
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	Response r;
+
+	reset_cfg();
+
+	/* LoRaWAN: no page of the stream carries a ROM. */
+	rom_free_stream(APP_CMD_TRANSPORT_LRW, in, in_len);
 
 	/* NFC: the host pages itself; the ROMs are still there. */
 	bool nfc_rom = false;
@@ -2256,6 +2384,18 @@ ZTEST(cmd, test_get_config_skips_slot_roms_over_lrw)
 	r = decode_resp(out, out_len);
 	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
 	zassert_true(r.body.config_dump.sensors.has_sensor1_rom, "GetParam must return the ROM");
+}
+
+/* P2P is budget-limited like LoRaWAN, and request_page() lays its streamed
+ * pages out as LoRaWAN, so page 0 must skip the ROMs as well — otherwise its
+ * page_count (and layout) would disagree with the pages that follow. */
+ZTEST(cmd, test_get_config_skips_slot_roms_over_p2p)
+{
+	uint8_t in[16];
+	size_t in_len = unhex("08092a00", in, sizeof(in)); /* seq9 get_config{} */
+
+	reset_cfg();
+	rom_free_stream(APP_CMD_TRANSPORT_P2P, in, in_len);
 }
 
 /* #425: a GetConfig over LoRaWAN keeps the fixed 30 B field pages at any DR, and

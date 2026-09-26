@@ -2,6 +2,8 @@
 
 This document lists **only the changes introduced in firmware v1.4.0** relative to the v1.3.x series — new features, new messages, new commands and new configuration options. Existing v1.3.x behaviour (basic telemetry, LoRaWAN keys, alarm thresholds, counters, corrections, calibration mode) is unchanged unless noted.
 
+> **Frozen historical record.** Shell commands below are named as they were in v1.4.0. The `ats lrw ...` group was later unified with the P2P debug commands into `ats radio ...` (#118) — e.g. `ats lrw reset`/`ats lrw status`/`ats lrw lc` are now `ats radio reset`/`ats radio status`/`ats radio lc`. Do not use this page as a live shell reference; see `doc/manual-test-plan.md` instead.
+
 ---
 
 ## Overview of changes
@@ -571,7 +573,7 @@ This key rename kept the protobuf field numbers; the user-facing keys and code i
 
 ## 10. Local NFC access (NEW)
 
-> **Superseded in v1.5.0 (#313).** Interactive commands move from these NDEF `hio.stck:cmd`/`:rsp`/`:vnd` records to the ST25DV Fast-Transfer-Mode mailbox (one tap, iOS == Android). The tag holds no NDEF at all — the identity record below is replaced by the mailbox `get_basic_info` command, and there is no tap-to-launch. Battery-less provisioning is dropped. See `doc/version 1.5.md` §17.
+> **Superseded in v1.5.0 (#313).** Interactive commands move from these NDEF `hio.stck:cmd`/`:rsp`/`:vnd` records to the ST25DV Fast-Transfer-Mode mailbox (one tap, iOS == Android). The tag holds no NDEF at all — the identity record below is replaced by the mailbox `get_basic_info` command, and there is no tap-to-launch. Battery-less provisioning is dropped. See `doc/version 1.5.md` §18.
 
 The device now uses its **ST25DV NFC tag** as a local, phone-tappable channel — for reading the sticker's identity and for the same command protocol available over LoRaWAN, without a network connection.
 
@@ -952,7 +954,7 @@ The input-event LED is a **commissioning diagnostic**: it blinks only for the fi
 > **Superseded in v1.5.0 (#313/#414).** With the FTM mailbox the NFC LED shows: phone detected →
 > green ≤ 5 s, session running → green blink, session end → green + yellow 2 s (last exchange OK)
 > or red 2 s (last exchange failed); reboot-type commands show the result, then reboot (no
-> pre-reboot green ×10). See `doc/version 1.5.md` §17 "LED during a tap".
+> pre-reboot green ×10). See `doc/version 1.5.md` §18 "LED during a tap".
 
 An NFC exchange with a phone shows a four-step sequence so an operator can follow it:
 

@@ -70,6 +70,13 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key);
  * Returns 0 or a negative errno. */
 int app_settings_save_nonce_counter(void);
 
+/* Persist only the P2P spreading factor to NVS as a single settings key, and
+ * make it live in both config copies first. Called when a join sweep lands on
+ * an SF the network moved to (app_radio_p2p.c): without it the node re-joins at the
+ * swept SF now but boots back onto the stale configured one, where nothing can
+ * hear it. Returns 0 or a negative errno. */
+int app_settings_save_p2p_spreading_factor(int sf);
+
 #ifdef __cplusplus
 }
 #endif

@@ -12,7 +12,8 @@
 #include "app_hall.h"
 #include "app_history.h"
 #include "app_input.h"
-#include "app_lrw.h"
+#include "app_log.h"
+#include "app_radio_lrw.h"
 #include "app_nfc.h"
 
 /* Zephyr includes */
@@ -49,6 +50,7 @@ static int save(bool reboot)
 	}
 
 	if (reboot) {
+		LOG_WRN_REBOOTING("settings saved");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 
@@ -115,6 +117,7 @@ static int erase(bool reboot)
 	}
 
 	if (reboot) {
+		LOG_WRN_REBOOTING("settings storage erased");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 
@@ -266,6 +269,23 @@ int app_settings_save_nonce_counter(void)
 				 sizeof(app_config()->nonce_counter));
 }
 
+int app_settings_save_p2p_spreading_factor(int sf)
+{
+	/* Same single-key rationale as nonce_counter above. BOTH live copies are
+	 * updated first, under the config lock: app_config() hands out
+	 * m_app_config -- what the shell prints and what a full save exports --
+	 * while g_app_config is the read-mostly mirror the rest of the firmware
+	 * reads, app_radio_p2p.c's sf_from_cfg() among them. Writing only one of them
+	 * would leave the device joining at an SF its own `config show` denies. */
+	app_config_lock();
+	app_config()->p2p_spreading_factor = sf;
+	g_app_config.p2p_spreading_factor = sf;
+	app_config_unlock();
+
+	return settings_save_one("config/p2p-spreading-factor", &app_config()->p2p_spreading_factor,
+				 sizeof(app_config()->p2p_spreading_factor));
+}
+
 /* Persist only secret_key to NVS as a single settings key — same single-key
  * rationale as nonce_counter above. Internal to vendor_reset below: the
  * set_secret_key command (#299) used to persist through here too, but a narrow
@@ -308,12 +328,12 @@ static int clear_and_save_alarm_rules(void)
  * Deliberately NOT wired into a live SetParam key change (e.g. someone
  * changing lrw_nwkskey via NFC/shell without going through a reset tier) —
  * that would need a synchronous cross-module call from app_cmd.c into
- * app_lrw.c's NVM handling from an arbitrary caller thread, which is riskier
+ * app_radio_lrw.c's NVM handling from an arbitrary caller thread, which is riskier
  * and out of scope here. Left as a follow-up. */
 #if defined(CONFIG_LORAWAN)
 static void lrw_reset_nvm_before_reboot(void)
 {
-	app_lrw_reset_nvm();
+	app_radio_lrw_reset_nvm();
 }
 #else
 static void lrw_reset_nvm_before_reboot(void)
@@ -346,6 +366,7 @@ int app_settings_device_reset(void)
 	 * atomicity note in app_settings.h). */
 	clear_and_save_alarm_rules();
 
+	LOG_WRN_REBOOTING("device reset");
 	sys_reboot(SYS_REBOOT_COLD);
 
 	return 0;
@@ -374,6 +395,7 @@ int app_settings_factory_reset(void)
 	clear_and_save_alarm_rules();
 
 	lrw_reset_nvm_before_reboot();
+	LOG_WRN_REBOOTING("factory reset");
 	sys_reboot(SYS_REBOOT_COLD);
 
 	return 0;
@@ -449,6 +471,7 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 	if (ret) {
 		LOG_ERR("Call `save_secret_key` failed: %d", ret);
 		lrw_reset_nvm_before_reboot();
+		LOG_WRN_REBOOTING("vendor reset -- secret key save failed");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 
@@ -463,6 +486,7 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 	if (ret) {
 		LOG_ERR("Call `app_counters_save` failed: %d", ret);
 		lrw_reset_nvm_before_reboot();
+		LOG_WRN_REBOOTING("vendor reset -- counter save failed");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 	app_nfc_claim_active();
@@ -477,10 +501,12 @@ int app_settings_vendor_reset(const uint8_t *new_secret_key)
 	if (ret) {
 		LOG_ERR("Call `app_alarm_rules_save` failed: %d", ret);
 		lrw_reset_nvm_before_reboot();
+		LOG_WRN_REBOOTING("vendor reset -- alarm rule save failed");
 		sys_reboot(SYS_REBOOT_COLD);
 	}
 
 	lrw_reset_nvm_before_reboot();
+	LOG_WRN_REBOOTING("vendor reset");
 	sys_reboot(SYS_REBOOT_COLD);
 
 	return 0;

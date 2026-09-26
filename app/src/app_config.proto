@@ -7,6 +7,7 @@ message AppConfigMessage {
     optional Application application = 6;
     optional Sensors sensors = 7;
     optional Alarms alarms = 8;
+    optional P2P p2p = 11;
 
     message Lorawan {
         enum Region {
@@ -134,6 +135,12 @@ message AppConfigMessage {
         optional bytes alarm_15 = 18;
         optional AlarmBuzzerMode alarm_buzzer_mode = 20;
     }
+
+    message P2P {
+        optional uint32 frequency = 1;
+        optional uint32 spreading_factor = 2;
+        optional uint32 tx_power = 3;
+    }
 }
 // END GENERATED CONFIG
 
@@ -227,7 +234,7 @@ message Command {
     // settings_save). One-shot: app_calibration_init() clears the flag on entry.
     message EnterCalibration { }
     // Reset the LoRaWAN NVM (frame counters + DevNonce + session) and reboot,
-    // equivalent of `ats lrw reset`. Used during (re)commissioning after re-keying
+    // equivalent of `ats radio reset`. Used during (re)commissioning after re-keying
     // or moving the device to another network/session (#109).
     message LrwReset     { }
     // Trigger a forced (re)join immediately instead of waiting for the next
@@ -393,8 +400,9 @@ message Response {
         }
         BuildType build_type = 4;
 
-        // LoRaWAN network state (mirrors app_lrw_state). Emitted over NFC only
-        // (see lrw_state below).
+        // Radio link state of the active radio, LoRaWAN or P2P (mirrors
+        // enum app_radio_state; the field keeps its historical name). Emitted
+        // over NFC only (see lrw_state below).
         enum LrwState {
             IDLE      = 0;   // not joined / init
             JOINING   = 1;   // join/rejoin in progress
@@ -415,7 +423,7 @@ message Response {
         optional bytes claim_token = 9;
         uint32 battery       = 10;  // supply voltage in mV (0 = unavailable)
         uint32 reset_cause   = 11;  // hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown
-        optional LrwState lrw_state = 12;  // current LoRaWAN network state; emitted over NFC only
+        optional LrwState lrw_state = 12;  // current radio link state (LoRaWAN or P2P); emitted over NFC only
         optional bytes dev_eui = 13;  // 8-byte DevEUI; emitted over NFC only, omitted if unset
         uint32 device_status = 14;  // aggregated device status (APP_DEVICE_STATUS_* bitmask); 0 = all OK
 

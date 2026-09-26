@@ -9,7 +9,7 @@
 #include "app_counters.h"
 #include "app_history.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_radio.h"
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_slot.h"
@@ -51,7 +51,7 @@ static struct k_work m_trigger_work;  /* ad-hoc cycle: sample + send, no history
 static struct k_work m_force_work;    /* host-requested cycle: like trigger, sent without jitter */
 
 #if defined(CONFIG_WATCHDOG)
-/* Liveness heartbeat (#182): mirror of the app_lrw guard for the report queue, so
+/* Liveness heartbeat (#182): mirror of the app_radio_lrw guard for the report queue, so
  * a wedge in the sample/capture path is caught by the IWDG too. */
 #define REPORT_HEARTBEAT_PERIOD_SEC 5
 #define REPORT_HEARTBEAT_TIMEOUT_MS 30000
@@ -69,7 +69,7 @@ static void heartbeat_work_handler(struct k_work *work)
 #endif /* defined(CONFIG_WATCHDOG) */
 
 /* (Re)arm the periodic cadence for the next report. One-shot + manual restart
- * (like the old app_lrw m_send_timer) so a multi-frame snapshot in app_lrw
+ * (like the old app_radio_lrw m_send_timer) so a multi-frame snapshot in app_radio_lrw
  * doesn't get a second cycle stacked behind it.
  *
  * `periodic` = called from a cadence run (the run is the grid slot nearest to
@@ -86,8 +86,8 @@ static void heartbeat_work_handler(struct k_work *work)
  * old timer did; it keeps its phase when the clock switches to unix time.
  * Jittering the period would make the stored samples land at 60..66 s (for a
  * 60 s interval) while replay assumes exactly 60 s. Fleet-uplink de-correlation
- * is instead a random *pre-send* delay applied in app_lrw
- * (app_lrw_send_telemetry), which shifts only the transmission, not the sample/
+ * is instead a random *pre-send* delay applied in app_radio_lrw
+ * (app_radio_lrw_send_telemetry), which shifts only the transmission, not the sample/
  * history-capture cadence (#267). */
 static uint32_t schedule_next_report(bool periodic, bool *slot_synced)
 {
@@ -156,25 +156,24 @@ static void run_report(bool periodic, bool now)
 		app_history_capture_at(slot, slot_synced);
 	}
 
-#if defined(CONFIG_LORAWAN)
 	/* State-gated cadence: skip the UPLINK while the link is joining/
-	 * reconnecting/disabled. app_lrw kicks us (report_kick) on the link-ready
-	 * edge to resume promptly and drain the buffered history. */
-	if (!app_lrw_is_ready()) {
-		LOG_DBG("Report skipped: link not ready (%d)", app_lrw_get_state());
+	 * reconnecting/disabled. The transport kicks us (report_kick) on the
+	 * link-ready edge to resume promptly and drain the buffered history. */
+	if (!app_radio_is_ready()) {
+		LOG_DBG("Report skipped: link not ready (%d)", app_radio_get_state());
 		return;
 	}
 
-	/* Hand off to the transport: app_lrw composes the snapshot and splits it
-	 * into DR-budget frames (LC piggyback + duty-cycle retry live there). */
+	/* Hand off to the transport: it composes the snapshot and splits it into
+	 * budget frames (DR-budget + LC piggyback + duty-cycle retry for LoRaWAN;
+	 * fixed MTU + app-side duty-cycle for P2P). app_radio dispatches, and
+	 * handles a build with neither transport compiled in. A host-requested
+	 * cycle (`now`) skips the LoRaWAN fleet pre-send jitter (F14). */
 	if (now) {
-		app_lrw_send_telemetry_now();
+		app_radio_send_telemetry_now();
 	} else {
-		app_lrw_send_telemetry();
+		app_radio_send_telemetry();
 	}
-#else
-	ARG_UNUSED(now);
-#endif /* defined(CONFIG_LORAWAN) */
 }
 
 static void periodic_work_handler(struct k_work *work)
@@ -201,15 +200,15 @@ static void report_timer_handler(struct k_timer *timer)
 	k_work_submit_to_queue(&m_work_q, &m_periodic_work);
 }
 
-#if defined(CONFIG_LORAWAN)
 /* Link-ready edge from the transport (join success / history-replay finish):
  * send an immediate report to drain the buffered history, but leave the fixed
- * cadence (and its history capture) untouched. */
+ * cadence (and its history capture) untouched. Registered via app_radio, so
+ * this is needed on a P2P-only build too -- it must not be CONFIG_LORAWAN
+ * gated (as it was before #118's app_radio facade). */
 static void report_kick(void)
 {
 	k_work_submit_to_queue(&m_work_q, &m_trigger_work);
 }
-#endif /* defined(CONFIG_LORAWAN) */
 
 void app_report_trigger(void)
 {
@@ -227,10 +226,10 @@ void app_report_suspend(void)
 	 * then cancel any report cycle already queued on m_work_q. Without this,
 	 * a cycle submitted just before suspend runs (report_timer_handler /
 	 * report_kick / app_report_trigger) would still dequeue afterward and
-	 * reach app_lrw_send_telemetry() (radio) while app_power_suspend() is
+	 * reach app_radio_lrw_send_telemetry() (radio) while app_power_suspend() is
 	 * tearing the radio down or after sys_poweroff() has been called.
 	 * Fire-and-forget, same as the other suspend/teardown cancels in this
-	 * codebase (state_transition() in app_lrw.c, app_ats.c's LED-cycle stop):
+	 * codebase (state_transition() in app_radio_lrw.c, app_ats.c's LED-cycle stop):
 	 * if a cycle is already RUNNING this can't un-run it, but that is no
 	 * worse than the previous behavior and the timer stop above prevents any
 	 * further cycles from being queued. */
@@ -268,11 +267,10 @@ int app_report_init(void)
 	 * app_counters_save before the link gate) fires even on a device that never
 	 * joins — the worst-case lost-pulse window is interval_report regardless of
 	 * the link state. Reporting itself still self-skips at the link gate until
-	 * joined; app_lrw's ready kick re-arms with an immediate report on join. */
+	 * joined; the transport's ready kick re-arms with an immediate report on
+	 * join (LoRaWAN) or start (P2P). */
 	(void)schedule_next_report(false, NULL);
-#if defined(CONFIG_LORAWAN)
-	app_lrw_register_ready_cb(report_kick);
-#endif /* defined(CONFIG_LORAWAN) */
+	app_radio_register_ready_cb(report_kick);
 
 	return 0;
 }

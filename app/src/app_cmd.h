@@ -26,6 +26,10 @@ enum app_cmd_transport {
 	APP_CMD_TRANSPORT_LRW,
 	APP_CMD_TRANSPORT_NFC,
 	APP_CMD_TRANSPORT_SHELL_DEBUG,
+	/* Raw-LoRa P2P downlink command (0x56), dispatched by app_radio_p2p.c (#118 B4).
+	 * Same generic Command/Response dispatch and writability gating as the
+	 * LoRaWAN transport -- P2P is the network-server-less equivalent. */
+	APP_CMD_TRANSPORT_P2P,
 	/* NFC hio.stck:vnd record, authenticated with vendor_token instead of
 	 * secret_key (#316). Runs the same generic Command/Response dispatch; gates
 	 * the vendor-only command (vendor_reset) and writable:[vendor] fields. */
@@ -121,7 +125,7 @@ struct app_cmd_info {
 	uint8_t claim_token[16]; /* 128-bit device claim token (#170); all-zero = uncommissioned */
 	uint32_t battery_mv;     /* supply voltage in mV; 0 = measurement unavailable */
 	uint32_t reset_cause;   /* hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown */
-	uint8_t lrw_state;      /* current LoRaWAN state (enum app_lrw_state) */
+	uint8_t lrw_state;      /* radio link state, LoRaWAN or P2P (enum app_radio_state) */
 	uint8_t dev_eui[8];     /* LoRaWAN DevEUI; all-zero = unset */
 	uint32_t device_status; /* aggregated status (APP_DEVICE_STATUS_* bitmask) */
 	bool has_last_dl;       /* a downlink was received since boot (#409 A2) */
@@ -232,7 +236,7 @@ size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint3
 
 /* Build one history-replay frame (Response{ seq, history_frame={...} }) into
  * `out`. `samples` holds values-only records (the shared `present` mask +
- * `interval_s` describe their layout/timing). Used by the app_lrw replay state
+ * `interval_s` describe their layout/timing). Used by the app_radio_lrw replay state
  * machine to stream a ReqHistory window as N frames. Returns 0 with *out_len
  * set, -EINVAL on a NULL/oversized argument, or -EMSGSIZE if it won't encode.
  * `time_synced` reports whether `t0_unix` is absolute UTC (L-1/L-3). */
