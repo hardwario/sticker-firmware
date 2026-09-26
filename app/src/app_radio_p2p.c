@@ -267,10 +267,23 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  * on-time-per-the-sender's-own-radio-trace Ack). Bumped from 8 to 25 ms as
  * a quick app-level absorption of that latency; the precise fix (anchor
  * tx_end_ms on a TxDone IRQ/callback instead of the blocking call's return)
- * would need driver-level changes, tracked as a follow-up, not done here. */
+ * would need driver-level changes, tracked as a follow-up, not done here.
+ *
+ * HW finding #3 (F-P2P-2, ProXimos Hub bench 2026-09-26): the window must also
+ * absorb a FIXED lateness of the central, which the SF-scaled terms do not
+ * cover at low SF. Measured against a Northbridge central: its Ack starts
+ * 65..78 ms after the nominal RX1 instant (aim margin + TX-start latency +
+ * RxDone stamp latency), and the window's timeout itself only starts ~22 ms
+ * after the formula (radio wake from sleep, 5 ms TCXO start-up, two
+ * SetRxConfig calls). With a 40 ms trailing margin the end slack was +15 ms
+ * at SF9, +5 ms at SF8 and -12 ms at SF7 -- every SF7 Ack was cut off
+ * mid-reception ("Receive timeout" + retries), and a mid-packet abort can
+ * also wedge the radio (F-P2P-3). A fixed 120 ms trailing margin keeps SF7
+ * working for a central up to ~100 ms late, independent of its aim, for about
+ * 80 ms more receiver-on per confirmed uplink (a few mA for 0.08 s). */
 #define P2P_RX1_OPEN_MARGIN_MS     25
 #define P2P_RX1_WINDOW_SYMBOLS     12
-#define P2P_RX1_TRAILING_MARGIN_MS 40
+#define P2P_RX1_TRAILING_MARGIN_MS 120
 #define P2P_RX1_DELAY_DEFAULT_S    1
 
 /* Confirmed uplink (§6): the Ack (0xFA) body (B1/B5, PR #408, matches the
