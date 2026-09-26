@@ -17,6 +17,7 @@
 
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_radio.h"
 #include "app_settings.h"
 
 #include <zephyr/toolchain.h>
@@ -224,4 +225,66 @@ int app_radio_send_info(uint32_t seq)
 	p2p_test_send_info_calls++;
 	p2p_test_send_info_seq = seq;
 	return 0;
+}
+
+/* RadioState push API (app_radio.c is not built here): record what the backend
+ * reports so tests can check it (#446). */
+int16_t p2p_test_dl_rssi;
+int8_t p2p_test_dl_snr;
+int p2p_test_dl_calls;
+uint32_t p2p_test_fail_streak;
+uint32_t p2p_test_join_attempts;
+uint32_t p2p_test_cnt[APP_RADIO_CNT_COUNT];
+
+void app_radio_count(enum app_radio_counter c)
+{
+	if (c < APP_RADIO_CNT_COUNT) {
+		p2p_test_cnt[c]++;
+	}
+}
+
+void app_radio_note_downlink(int16_t rssi, int8_t snr)
+{
+	p2p_test_dl_rssi = rssi;
+	p2p_test_dl_snr = snr;
+	p2p_test_dl_calls++;
+}
+
+void app_radio_set_params(uint8_t sf, int datarate, int8_t tx_power_dbm)
+{
+	ARG_UNUSED(sf);
+	ARG_UNUSED(datarate);
+	ARG_UNUSED(tx_power_dbm);
+}
+
+void app_radio_set_uplink_rssi(int16_t rssi, int8_t snr)
+{
+	ARG_UNUSED(rssi);
+	ARG_UNUSED(snr);
+}
+
+void app_radio_set_session(uint32_t dev_addr, uint32_t fcnt_up)
+{
+	ARG_UNUSED(dev_addr);
+	ARG_UNUSED(fcnt_up);
+}
+
+void app_radio_set_fail_streak(uint32_t n)
+{
+	p2p_test_fail_streak = n;
+}
+
+void app_radio_set_join_attempts(uint32_t n)
+{
+	p2p_test_join_attempts = n;
+}
+
+void app_radio_set_duty_held(bool held)
+{
+	ARG_UNUSED(held);
+}
+
+void app_radio_set_airtime(uint32_t ms)
+{
+	ARG_UNUSED(ms);
 }

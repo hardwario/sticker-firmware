@@ -237,12 +237,10 @@ enum app_radio_state app_radio_get_state(void)
 	return APP_RADIO_STATE_HEALTHY;
 }
 
-bool app_radio_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+void app_radio_get_status(struct app_radio_status *st)
 {
-	(void)rssi;
-	(void)snr;
-	(void)age_s;
-	return false;
+	*st = (struct app_radio_status){0};
+	st->state = app_radio_get_state();
 }
 
 uint32_t app_alarm_status_flags(void)

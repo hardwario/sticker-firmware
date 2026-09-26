@@ -197,6 +197,7 @@ var _CMD_NAMES = {
   29: "get_claim_info",
   30: "get_basic_info",
   31: "get_settings",
+  32: "get_radio_state",
 };
 // END GENERATED COMMANDS
 var _CMD_TAGS = _invert(_CMD_NAMES);
@@ -302,13 +303,9 @@ function _decodeInfo(bytes, start, end) {
       else if (field === 8) info.debug = v.value !== 0;
       else if (field === 10) info.battery = v.value; // supply voltage in mV (0/absent = unavailable)
       else if (field === 11) info.reset_cause = v.value; // hwinfo reset-cause bitmask of last boot (#88)
-      else if (field === 12) info.lrw_state = v.value; // LoRaWAN network state; emitted over NFC only, absent from LoRaWAN uplinks
       else if (field === 14) info.device_status = v.value; // aggregated device status bitmask
-      // fields 16-18 (#409 A2, NFC only): last-downlink RSSI (dBm) / SNR (dB) as
-      // measured by the device, and the age of that reading in seconds.
-      else if (field === 16) info.last_dl_rssi = _pbZigzag(v.value);
-      else if (field === 17) info.last_dl_snr = _pbZigzag(v.value);
-      else if (field === 18) info.last_dl_age_s = v.value;
+      // 12 (lrw_state) and 16-18 (last_dl_*) are retired: the link state and
+      // quality are read with get_radio_state (Response.radio_state, #446).
     } else if (wire === 2) {
       var len = _pbReadVarint(bytes, pos); pos = len.next;
       // field 9 = claim_token (#170): 128-bit device claim token, presented as
@@ -320,6 +317,7 @@ function _decodeInfo(bytes, start, end) {
       // field 15 = repeated AlarmStatus active_alarms (#288): one entry per alarm
       // latched active when Info was built. Same enums as the fPort 3 AlarmReport.
       else if (field === 15) info.active_alarms.push(_decodeAlarmStatus(bytes, pos, pos + len.value));
+
       // else: skip unknown length-delimited fields (forward compatibility).
       pos += len.value;
     } else {
@@ -328,11 +326,6 @@ function _decodeInfo(bytes, start, end) {
   }
   info.fw_version = info.fw_major + "." + info.fw_minor + "." + info.fw_patch;
   info.build_type_name = _BUILD_TYPES[info.build_type] || "unknown";
-  // lrw_state is NFC-only, so it is absent from LoRaWAN uplinks — only name it
-  // when the field was actually present (leave both undefined otherwise).
-  if (info.lrw_state !== undefined) {
-    info.lrw_state_name = _LRW_STATES[info.lrw_state] || "unknown";
-  }
   info.device_status_flags = _DEVICE_STATUS
     .filter(function (f) { return (info.device_status & f[0]) !== 0; })
     .map(function (f) { return f[1]; });
@@ -354,9 +347,8 @@ function _decodeInfo(bytes, start, end) {
 var _INFO_FIELD_KEYS = {
   1: ["fw_major"], 2: ["fw_minor"], 3: ["fw_patch"], 4: ["build_type", "build_type_name"],
   5: ["serial_number"], 6: ["uptime_s"], 7: ["unix_time"], 8: ["debug"], 9: ["claim_token"],
-  10: ["battery"], 11: ["reset_cause", "reset_cause_flags"], 12: ["lrw_state", "lrw_state_name"],
-  13: ["dev_eui"], 14: ["device_status", "device_status_flags"], 15: ["active_alarms"],
-  16: ["last_dl_rssi"], 17: ["last_dl_snr"], 18: ["last_dl_age_s"]
+  10: ["battery"], 11: ["reset_cause", "reset_cause_flags"],
+  13: ["dev_eui"], 14: ["device_status", "device_status_flags"], 15: ["active_alarms"]
 };
 function _pruneInfoPage(info) {
   var seen = info._seen || {};
@@ -368,6 +360,42 @@ function _pruneInfoPage(info) {
   var out = {};
   for (var k in info) { if (info.hasOwnProperty(k) && keep[k]) out[k] = info[k]; }
   return out;
+}
+
+// #446 RadioState: [name, zigzag] per field number. Every field is optional —
+// a paged get_radio_state answer (#425) carries only some of them, so absent
+// fields stay absent (never defaulted).
+var _RADIO_STATE_FIELDS = {
+  1: ["state", false], 2: ["sf", false], 3: ["datarate", false], 4: ["tx_power_dbm", true],
+  5: ["dl_rssi", true], 6: ["dl_snr", true], 7: ["dl_age_s", false], 8: ["dl_unix_time", false],
+  9: ["ul_rssi", true], 10: ["ul_snr", true], 11: ["ul_margin", false], 12: ["ul_gw_count", false],
+  13: ["dev_addr", false], 14: ["fcnt_up", false], 15: ["fail_streak", false],
+  16: ["join_attempts", false], 17: ["duty_blocked_s", false], 18: ["airtime_hour_ms", false],
+  19: ["uptime_s", false], 20: ["tx_count", false], 21: ["rx_count", false],
+  22: ["retry_count", false], 23: ["fail_count", false], 24: ["tx_err_count", false],
+  25: ["join_count", false]
+};
+
+function _decodeRadioState(bytes, start, end) {
+  var rs = {};
+  var pos = start;
+  while (pos < end && pos < bytes.length) {
+    var tag = _pbReadVarint(bytes, pos); pos = tag.next;
+    var field = tag.value >>> 3;
+    var wire = tag.value & 0x7;
+    if (wire === 0) {
+      var v = _pbReadVarint(bytes, pos); pos = v.next;
+      var f = _RADIO_STATE_FIELDS[field];
+      if (f) rs[f[0]] = f[1] ? _pbZigzag(v.value) : v.value;
+    } else if (wire === 2) {
+      var len = _pbReadVarint(bytes, pos); pos = len.next + len.value;
+    } else {
+      break;
+    }
+  }
+  if (rs.state !== undefined) rs.state_name = _LRW_STATES[rs.state] || "unknown";
+  if (rs.dev_addr !== undefined) rs.dev_addr_hex = ("0000000" + rs.dev_addr.toString(16)).slice(-8);
+  return rs;
 }
 
 function _decodeError(bytes, start, end) {
@@ -571,6 +599,7 @@ function decodeDownlinkResponse(bytes) {
       else if (field === 5) resp.history_frame = _decodeHistoryFrame(bytes, pos, end);
       else if (field === 6) resp.error = _decodeError(bytes, pos, end);
       else if (field === 7) resp.w1_scan = _decodeW1Scan(bytes, pos, end);
+      else if (field === 14) resp.radio_state = _decodeRadioState(bytes, pos, end); // get_radio_state (#446)
       pos = end;
     } else {
       break;
@@ -946,6 +975,10 @@ function encodeDownlinkCommand(cmd) {
     if (b.from_unix) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.from_unix));
     if (b.to_unix) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.to_unix));
     if (b.start_ord) body = body.concat(_encTag(3, 0)).concat(_encVarint(b.start_ord));
+  } else if (name === "get_radio_state") {
+    // #446: page (field 1) for host-driven paging; over LoRaWAN / P2P the device
+    // streams every page by itself, so the page is normally omitted.
+    if (b.page) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.page));
   } else if (name === "buzzer_play") {
     if (b.kind) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.kind));
     if (b.repeat_s) body = body.concat(_encTag(2, 0)).concat(_encVarint(b.repeat_s));

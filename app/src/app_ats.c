@@ -1628,8 +1628,8 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	const char *bt = info.build_type < ARRAY_SIZE(build_type_name)
 				 ? build_type_name[info.build_type]
 				 : "unknown";
-	const char *ls = info.lrw_state < ARRAY_SIZE(radio_state_name)
-				 ? radio_state_name[info.lrw_state]
+	const char *ls = info.radio_state < ARRAY_SIZE(radio_state_name)
+				 ? radio_state_name[info.radio_state]
 				 : "unknown";
 
 	shell_print(sh, "FW version:    %u.%u.%u", info.fw_major, info.fw_minor, info.fw_patch);
@@ -1637,6 +1637,24 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "Serial number: %u", info.serial_number);
 	shell_print(sh, "Uptime:        %u s", info.uptime_s);
 	shell_print(sh, "Radio state:   %s", ls);
+
+	struct app_radio_status rs;
+
+	app_radio_get_status(&rs);
+	if (rs.has_dl) {
+		shell_print(sh, "Radio signal:  last downlink %d dBm / SNR %d dB, %u s ago",
+			    rs.dl_rssi, rs.dl_snr, rs.dl_age_s);
+	} else {
+		shell_print(sh, "Radio signal:  no downlink since boot");
+	}
+	shell_print(sh, "Radio params:  SF%u%s%u, TX %d dBm", rs.sf, rs.has_datarate ? " DR" : "",
+		    rs.has_datarate ? rs.datarate : 0, rs.has_tx_power ? rs.tx_power_dbm : 0);
+	shell_print(sh, "Radio link:    fail streak %u, join attempts %u, duty hold %u s",
+		    rs.fail_streak, rs.join_attempts, rs.duty_blocked_s);
+	shell_print(sh, "Radio counts:  tx %u rx %u retry %u fail %u tx_err %u join %u",
+		    rs.cnt[APP_RADIO_CNT_TX], rs.cnt[APP_RADIO_CNT_RX], rs.cnt[APP_RADIO_CNT_RETRY],
+		    rs.cnt[APP_RADIO_CNT_FAIL], rs.cnt[APP_RADIO_CNT_TX_ERR],
+		    rs.cnt[APP_RADIO_CNT_JOIN]);
 	if (info.battery_mv) {
 		shell_print(sh, "Battery:       %u mV", info.battery_mv);
 	} else {

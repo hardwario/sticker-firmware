@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_clock.h"
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_log.h"
@@ -14,6 +15,8 @@
 #include "app_radio_p2p.h"
 #endif
 
+#include <zephyr/devicetree.h>
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
@@ -122,21 +125,150 @@ enum app_radio_state app_radio_get_state(void)
 #endif
 }
 
-bool app_radio_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
-{
-#if defined(CONFIG_RADIO_P2P)
-	if (is_p2p()) {
-		return app_radio_p2p_last_downlink(rssi, snr, age_s);
-	}
-#endif
-#if defined(CONFIG_LORAWAN)
-	return app_radio_lrw_last_downlink(rssi, snr, age_s);
+/* The PA caps whatever a backend asks for: the STICKER RFO_LP path tops out at
+ * rfo-lp-max-power (14 dBm), so report what actually goes out. */
+#if DT_NODE_HAS_PROP(DT_NODELABEL(lora), rfo_lp_max_power)
+#define RADIO_PA_MAX_DBM DT_PROP(DT_NODELABEL(lora), rfo_lp_max_power)
 #else
-	ARG_UNUSED(rssi);
-	ARG_UNUSED(snr);
-	ARG_UNUSED(age_s);
-	return false;
+#define RADIO_PA_MAX_DBM 22
 #endif
+
+/* RadioState data pushed by the backends (#446). m_st holds the pushed fields
+ * only; state, ages, wall-clock time, counters and uptime are filled in by
+ * app_radio_get_status(). Writers run on the backend work queues and the MAC
+ * callbacks, readers on NFC / shell / m_work_q: the spinlock keeps a snapshot
+ * consistent. */
+static struct k_spinlock m_st_lock;
+static struct app_radio_status m_st;
+static int64_t m_dl_ms;         /* uptime of the last downlink, 0 = none */
+static int64_t m_duty_since_ms; /* start of the current duty-cycle hold, 0 = none */
+static atomic_t m_cnt[APP_RADIO_CNT_COUNT];
+
+void app_radio_count(enum app_radio_counter c)
+{
+	if (c < APP_RADIO_CNT_COUNT) {
+		atomic_inc(&m_cnt[c]);
+	}
+}
+
+void app_radio_note_downlink(int16_t rssi, int8_t snr)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_st_lock);
+
+	m_st.has_dl = true;
+	m_st.dl_rssi = rssi;
+	m_st.dl_snr = snr;
+	m_dl_ms = MAX(k_uptime_get(), 1);
+	k_spin_unlock(&m_st_lock, key);
+	app_radio_count(APP_RADIO_CNT_RX);
+}
+
+void app_radio_set_params(uint8_t sf, int datarate, int8_t tx_power_dbm)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_st_lock);
+
+	m_st.sf = sf;
+	m_st.has_datarate = datarate >= 0;
+	m_st.datarate = datarate >= 0 ? (uint8_t)datarate : 0;
+	m_st.has_tx_power = true;
+	m_st.tx_power_dbm = MIN(tx_power_dbm, RADIO_PA_MAX_DBM);
+	k_spin_unlock(&m_st_lock, key);
+}
+
+void app_radio_set_uplink_rssi(int16_t rssi, int8_t snr)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_st_lock);
+
+	m_st.has_ul_rssi = true;
+	m_st.ul_rssi = rssi;
+	m_st.ul_snr = snr;
+	k_spin_unlock(&m_st_lock, key);
+}
+
+void app_radio_set_uplink_margin(uint8_t margin, uint8_t gw_count)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_st_lock);
+
+	m_st.has_ul_margin = true;
+	m_st.ul_margin = margin;
+	m_st.ul_gw_count = gw_count;
+	k_spin_unlock(&m_st_lock, key);
+}
+
+void app_radio_set_session(uint32_t dev_addr, uint32_t fcnt_up)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_st_lock);
+
+	m_st.has_session = true;
+	m_st.dev_addr = dev_addr;
+	m_st.fcnt_up = fcnt_up;
+	k_spin_unlock(&m_st_lock, key);
+}
+
+void app_radio_set_fail_streak(uint32_t n)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_st_lock);
+
+	m_st.fail_streak = n;
+	k_spin_unlock(&m_st_lock, key);
+}
+
+void app_radio_set_join_attempts(uint32_t n)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_st_lock);
+
+	m_st.join_attempts = n;
+	k_spin_unlock(&m_st_lock, key);
+}
+
+void app_radio_set_duty_held(bool held)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_st_lock);
+
+	if (!held) {
+		m_duty_since_ms = 0;
+	} else if (m_duty_since_ms == 0) {
+		m_duty_since_ms = MAX(k_uptime_get(), 1);
+	}
+	k_spin_unlock(&m_st_lock, key);
+}
+
+void app_radio_set_airtime(uint32_t ms)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_st_lock);
+
+	m_st.has_airtime = true;
+	m_st.airtime_hour_ms = ms;
+	k_spin_unlock(&m_st_lock, key);
+}
+
+void app_radio_get_status(struct app_radio_status *st)
+{
+	int64_t now = k_uptime_get();
+	k_spinlock_key_t key = k_spin_lock(&m_st_lock);
+
+	*st = m_st;
+	if (st->has_dl) {
+		st->dl_age_s = (uint32_t)((now - m_dl_ms) / 1000);
+	}
+	if (m_duty_since_ms != 0) {
+		st->duty_blocked_s = MAX(1U, (uint32_t)((now - m_duty_since_ms) / 1000));
+	}
+	k_spin_unlock(&m_st_lock, key);
+
+	st->state = app_radio_get_state();
+	st->uptime_s = (uint32_t)(now / 1000);
+	for (size_t i = 0; i < APP_RADIO_CNT_COUNT; i++) {
+		st->cnt[i] = (uint32_t)atomic_get(&m_cnt[i]);
+	}
+	if (st->has_dl) {
+		uint32_t unix_now;
+
+		if (app_clock_get_unix(&unix_now) == 0 && unix_now > st->dl_age_s) {
+			st->has_dl_unix = true;
+			st->dl_unix_time = unix_now - st->dl_age_s;
+		}
+	}
 }
 
 bool app_radio_is_ready(void)

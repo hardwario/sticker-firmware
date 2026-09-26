@@ -289,6 +289,12 @@ commands:
     # proto_id 31 (not 29/30): those are claimed by get_claim_info/get_basic_info
     # in #414. 15 is also free on the wire but was req_alarm_rules — not reused.
     - {name: get_settings, proto_id: 31, body: GetSettings, kind: handler, response: config_dump}
+    # get_radio_state (#446): link state + diagnostics of the active radio
+    # (Response.radio_state). The only way to read them -- not part of Info, so
+    # never in the boot / 24 h announce either. Paged like every answer (#425): streamed over LoRaWAN/P2P,
+    # GetRadioState.page over NFC/vendor/shell. Read-only, non-secret -- all
+    # transports.
+    - {name: get_radio_state, proto_id: 32, body: GetRadioState, kind: handler, response: radio_state}
 parameters:
   # Root identity fields (secret_key / serial_number / nonce_counter / claim_token /
   # vendor_token) are OFF the config wire (`proto_field: false`, #250 Part B): configen

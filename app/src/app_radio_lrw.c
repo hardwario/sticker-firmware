@@ -176,14 +176,21 @@ static void stale_note_send(struct stale_dc *dc, int ret, int64_t now_ms)
 	}
 }
 
+static void publish_mac(void);
+
 /* Every uplink goes through here, so the duty-cycle streak sees each result. */
 static int lrw_send(uint8_t port, uint8_t *data, uint8_t len, enum lorawan_message_type type)
 {
 	int ret = lorawan_send(port, data, len, type);
 
+	app_radio_count(ret == 0 ? APP_RADIO_CNT_TX : APP_RADIO_CNT_TX_ERR);
 	stale_note_send(&m_dc, ret, k_uptime_get());
 	if (ret == 0) {
 		m_dc_hold_logged = false;
+		app_radio_set_duty_held(false);
+		publish_mac();
+	} else if (ret == -ECONNREFUSED) {
+		app_radio_set_duty_held(true);
 	}
 	return ret;
 }
@@ -301,6 +308,7 @@ static int m_force_lc_remaining;    /* Remaining forced LC messages */
 static bool m_link_check_pending;   /* Waiting for LC response */
 static int m_message_count;         /* Message counter for N-th LC */
 static int m_rejoin_attempts;       /* Rejoin attempt counter for backoff */
+static uint32_t m_lc_fail_streak;   /* LC failures since the last success (RadioState) */
 static int m_join_busy_polls;       /* Counter for MAC busy polling */
 static bool m_init_join;            /* True for first join after boot */
 static bool m_mac_started;          /* lorawan_start() succeeded; LoRaMac state is valid */
@@ -313,8 +321,6 @@ static bool m_mac_started;          /* lorawan_start() succeeded; LoRaMac state 
 static uint8_t m_max_next_payload;
 static int16_t m_last_rssi;
 static int8_t m_last_snr;
-/* Uptime (s) + 1 of the last received downlink; 0 = none since boot (#409 A2). */
-static atomic_t m_last_dl_s;
 static uint8_t m_last_margin;
 static uint8_t m_last_gw_count;
 static uint8_t m_lc_response_gw_count;
@@ -611,10 +617,14 @@ static void state_transition(enum app_radio_state new_state)
 	case APP_RADIO_STATE_HEALTHY:
 		/* Link confirmed: clear all LC/recovery state. */
 		m_consecutive_lc_fail = 0;
+		m_lc_fail_streak = 0;
+		app_radio_set_fail_streak(0);
 		m_consecutive_lc_ok = 0;
 		m_warning_lc_fail_total = 0;
 		m_force_lc_remaining = 0;
 		m_rejoin_attempts = 0;
+		app_radio_set_join_attempts(0);
+		publish_mac();
 		m_link_check_pending = false;
 		m_last_uplink_ms = k_uptime_get(); /* M-2: start the stale-uplink clock */
 		m_dc = (struct stale_dc){0};
@@ -633,6 +643,7 @@ static void state_transition(enum app_radio_state new_state)
 		uint32_t backoff = calculate_rejoin_backoff(m_rejoin_attempts);
 
 		m_rejoin_attempts++;
+		app_radio_set_join_attempts((uint32_t)m_rejoin_attempts);
 		LOG_WRN("Rejoin in %u s (attempt %d)", backoff, m_rejoin_attempts);
 		k_timer_start(&m_rejoin_timer, K_SECONDS(backoff), K_FOREVER);
 		break;
@@ -728,6 +739,8 @@ static void on_lc_failure(void)
 {
 	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
 
+	app_radio_count(APP_RADIO_CNT_FAIL);
+	app_radio_set_fail_streak(++m_lc_fail_streak);
 	k_timer_stop(&m_lc_timeout_timer);
 	m_link_check_pending = false;
 	m_consecutive_lc_ok = 0;
@@ -783,6 +796,8 @@ static void on_lc_success(void)
 	k_timer_stop(&m_lc_timeout_timer);
 	m_link_check_pending = false;
 	m_consecutive_lc_fail = 0;
+	m_lc_fail_streak = 0;
+	app_radio_set_fail_streak(0);
 
 	switch (state) {
 	case APP_RADIO_STATE_HEALTHY:
@@ -1291,6 +1306,7 @@ static void join_work_handler(struct k_work *work)
 
 	m_join_busy_polls = 0;
 
+	app_radio_count(APP_RADIO_CNT_JOIN);
 	ret = lorawan_join(&config);
 	if (ret && ret != -ETIMEDOUT) {
 		LOG_ERR("Join failed: %d", ret);
@@ -1459,6 +1475,7 @@ static void tx_telemetry_frame(bool first_frame)
 			return;
 		}
 		m_frame_resend = true;
+		app_radio_count(APP_RADIO_CNT_RETRY);
 		k_work_schedule_for_queue(&m_work_q, &m_frame_work, K_SECONDS(FRAME_RETRY_SEC));
 		return;
 	}
@@ -1633,6 +1650,7 @@ static bool tx_send_queued(struct k_msgq *q, struct lrw_tx_msg *tx, uint8_t port
 		LOG_WRN("TX requeue failed (port %u); dropped", port);
 		return true;
 	}
+	app_radio_count(APP_RADIO_CNT_RETRY);
 	k_work_schedule_for_queue(&m_work_q, &m_tx_retry_work, K_SECONDS(FRAME_RETRY_SEC));
 	return false;
 }
@@ -1838,6 +1856,7 @@ static void m_hist_work_handler(struct k_work *work)
 			history_replay_finish();
 			return;
 		}
+		app_radio_count(APP_RADIO_CNT_RETRY);
 		k_work_schedule_for_queue(&m_work_q, &m_hist_work, K_SECONDS(FRAME_RETRY_SEC));
 		return;
 	}
@@ -1945,7 +1964,7 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 
 	m_last_rssi = rssi;
 	m_last_snr = snr;
-	atomic_set(&m_last_dl_s, (atomic_val_t)(k_uptime_get() / 1000) + 1);
+	app_radio_note_downlink(rssi, snr);
 
 	if (data) {
 		LOG_HEXDUMP_INF(data, len, "Payload: ");
@@ -2033,6 +2052,7 @@ static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
 
 	m_last_margin = demod_margin;
 	m_last_gw_count = nb_gateways;
+	app_radio_set_uplink_margin(demod_margin, nb_gateways);
 	m_lc_response_gw_count = nb_gateways;
 
 	k_work_submit_to_queue(&m_work_q, &m_lc_response_work);
@@ -2430,17 +2450,80 @@ enum app_radio_state app_radio_lrw_get_state(void)
 	return (enum app_radio_state)atomic_get(&m_state);
 }
 
-bool app_radio_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+/* Uplink SF of LoRaWAN data rate `dr` in the configured region (LoRa DRs only;
+ * 0 for an FSK or unknown DR). Pure -- the regional DR tables of RP002. */
+static uint8_t region_dr_sf(int dr)
 {
-	atomic_val_t at = atomic_get(&m_last_dl_s);
-
-	if (at == 0 || !rssi || !snr || !age_s) {
-		return false;
+	switch (g_app_config.lrw_region) {
+	case APP_CONFIG_LRW_REGION_US915:
+		/* DR0..DR3 = SF10..SF7 BW125, DR4 = SF8 BW500 */
+		return dr >= 0 && dr <= 3 ? (uint8_t)(10 - dr) : (dr == 4 ? 8 : 0);
+	case APP_CONFIG_LRW_REGION_AU915:
+		/* DR0..DR5 = SF12..SF7 BW125, DR6 = SF8 BW500 */
+		return dr >= 0 && dr <= 5 ? (uint8_t)(12 - dr) : (dr == 6 ? 8 : 0);
+	default:
+		/* EU868 / AS923: DR0..DR5 = SF12..SF7 BW125, DR6 = SF7 BW250, DR7 FSK */
+		return dr >= 0 && dr <= 5 ? (uint8_t)(12 - dr) : (dr == 6 ? 7 : 0);
 	}
-	*rssi = m_last_rssi;
-	*snr = m_last_snr;
-	*age_s = (uint32_t)(k_uptime_get() / 1000) + 1 - (uint32_t)at;
-	return true;
+}
+
+/* Conducted TX power (dBm) LoRaMac derives from TXPower index `idx`:
+ * floor(max EIRP - 2 * idx - antenna gain), the region defaults of
+ * RegionCommonComputeTxPower() (US915 uses max ERP 30 without antenna gain).
+ * Integer centi-dB, no libm. */
+static int8_t region_tx_power_dbm(int idx)
+{
+	int max_cdb = 1600;
+	int gain_cdb = 215;
+
+	switch (g_app_config.lrw_region) {
+	case APP_CONFIG_LRW_REGION_US915:
+		max_cdb = 3000;
+		gain_cdb = 0;
+		break;
+	case APP_CONFIG_LRW_REGION_AU915:
+		max_cdb = 3000;
+		break;
+	default:
+		break;
+	}
+
+	int v = max_cdb - 200 * idx - gain_cdb;
+
+	return (int8_t)(v >= 0 ? v / 100 : -((-v + 99) / 100));
+}
+
+/* Push the MAC's radio parameters and session to app_radio (RadioState, #446):
+ * DR / SF / TX power as the next uplink uses them, DevAddr and FCntUp. Called
+ * on m_work_q after every sent uplink and on entering HEALTHY, so the snapshot
+ * follows ADR and the ladder. */
+static void publish_mac(void)
+{
+	MibRequestConfirm_t mib;
+	uint32_t fcnt_up;
+
+	/* LoRaMac's MIB is only valid once lorawan_start() has run. */
+	if (!m_mac_started) {
+		return;
+	}
+
+	lorawan_mac_lock();
+	mib.Type = MIB_CHANNELS_DATARATE;
+	if (LoRaMacMibGetRequestConfirm(&mib) == LORAMAC_STATUS_OK) {
+		int dr = mib.Param.ChannelsDatarate;
+
+		mib.Type = MIB_CHANNELS_TX_POWER;
+		if (LoRaMacMibGetRequestConfirm(&mib) == LORAMAC_STATUS_OK) {
+			app_radio_set_params(region_dr_sf(dr), dr,
+					     region_tx_power_dbm(mib.Param.ChannelsTxPower));
+		}
+	}
+	mib.Type = MIB_DEV_ADDR;
+	if (LoRaMacMibGetRequestConfirm(&mib) == LORAMAC_STATUS_OK && mib.Param.DevAddr != 0 &&
+	    LoRaMacCryptoGetFCntUp(&fcnt_up) == LORAMAC_CRYPTO_SUCCESS) {
+		app_radio_set_session(mib.Param.DevAddr, fcnt_up);
+	}
+	lorawan_mac_unlock();
 }
 
 bool app_radio_lrw_is_ready(void)
