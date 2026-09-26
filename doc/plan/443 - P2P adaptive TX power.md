@@ -91,7 +91,8 @@ A new, separate P2P parameter, as the owner asked. `lrw_adr` stays untouched: no
 - On **LoRaWAN** the window lives on the network side: ChirpStack's ADR uses the maximum SNR of the last 20 uplinks, and the STICKER firmware has none.
 - On **P2P** the node decides, so the window is in the firmware and applies to P2P only. It is 20 for identical behaviour.
 - The window only sets how fast the power goes **down** (the energy saving): one decision per 20 uplinks, i.e. 20 min at a 60 s report interval and 5 h at 900 s.
-- A sudden degradation does not wait for it: the WARNING rung (§3.3) restores the ceiling after 3 failed cycles. A smaller window would save energy sooner but oscillate more. Recommendation: keep 20.
+- A sudden degradation does not wait for it: the WARNING rung (§3.3) restores the ceiling after 3 failed cycles. A smaller window would save energy sooner but oscillate more.
+- **Decision (owner, 2026-09-26): 20, the same as LoRaWAN.**
 
 ## 7. Open points
 
