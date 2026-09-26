@@ -42,6 +42,13 @@ int app_clock_get_unix(uint32_t *unix_s);
  * 0 on success or a negative errno from the RTC driver. */
 int app_clock_set_unix(uint32_t unix_s);
 
+/* Apply a wall-clock time received from the network: the LoRaWAN DeviceTimeAns
+ * or the P2P Ack time tail. Rejects a value outside the plausible window
+ * (2024-01-01 .. 2100-01-01, L-5) instead of skewing every history/alarm
+ * timestamp. Returns 0, -ERANGE for an implausible time, or the
+ * app_clock_set_unix() error. */
+int app_clock_set_network_time(uint32_t unix_s);
+
 #ifdef __cplusplus
 }
 #endif

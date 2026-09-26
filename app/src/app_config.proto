@@ -400,8 +400,9 @@ message Response {
         }
         BuildType build_type = 4;
 
-        // LoRaWAN network state (mirrors app_radio_lrw_state). Emitted over NFC only
-        // (see lrw_state below).
+        // Radio link state of the active radio, LoRaWAN or P2P (mirrors
+        // enum app_radio_state; the field keeps its historical name). Emitted
+        // over NFC only (see lrw_state below).
         enum LrwState {
             IDLE      = 0;   // not joined / init
             JOINING   = 1;   // join/rejoin in progress
@@ -422,7 +423,7 @@ message Response {
         optional bytes claim_token = 9;
         uint32 battery       = 10;  // supply voltage in mV (0 = unavailable)
         uint32 reset_cause   = 11;  // hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown
-        optional LrwState lrw_state = 12;  // current LoRaWAN network state; emitted over NFC only
+        optional LrwState lrw_state = 12;  // current radio link state (LoRaWAN or P2P); emitted over NFC only
         optional bytes dev_eui = 13;  // 8-byte DevEUI; emitted over NFC only, omitted if unset
         uint32 device_status = 14;  // aggregated device status (APP_DEVICE_STATUS_* bitmask); 0 = all OK
 

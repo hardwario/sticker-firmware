@@ -107,18 +107,34 @@ enum app_radio_kind app_radio_get_kind(void)
 #endif
 }
 
-enum app_radio_lrw_state app_radio_get_state(void)
+enum app_radio_state app_radio_get_state(void)
 {
 #if defined(CONFIG_RADIO_P2P)
 	if (is_p2p()) {
-		return app_radio_p2p_is_ready() ? APP_RADIO_LRW_STATE_HEALTHY
-						: APP_RADIO_LRW_STATE_IDLE;
+		return app_radio_p2p_get_state();
 	}
 #endif
 #if defined(CONFIG_LORAWAN)
 	return app_radio_lrw_get_state();
 #else
-	return APP_RADIO_LRW_STATE_IDLE;
+	return APP_RADIO_STATE_IDLE;
+#endif
+}
+
+bool app_radio_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+{
+#if defined(CONFIG_RADIO_P2P)
+	if (is_p2p()) {
+		return app_radio_p2p_last_downlink(rssi, snr, age_s);
+	}
+#endif
+#if defined(CONFIG_LORAWAN)
+	return app_radio_lrw_last_downlink(rssi, snr, age_s);
+#else
+	ARG_UNUSED(rssi);
+	ARG_UNUSED(snr);
+	ARG_UNUSED(age_s);
+	return false;
 #endif
 }
 

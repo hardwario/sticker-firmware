@@ -581,15 +581,15 @@ int main(void)
 			led_handled = true;
 		}
 
-#if defined(CONFIG_LORAWAN)
-		/* Status LED reflects the active radio: P2P maps to HEALTHY (no
-		 * join), so the join/warning animations below stay LoRaWAN-only. */
-		enum app_radio_lrw_state lrw_state = app_radio_get_state();
+		/* Status LED reflects the active radio, LoRaWAN or P2P, through the
+		 * common app_radio state (a P2P join, self-heal or link-check-like
+		 * WARNING animates exactly like its LoRaWAN counterpart). */
+		enum app_radio_state lrw_state = app_radio_get_state();
 
 		if (led_handled) {
 			/* NFC interaction (or a higher-priority indicator) owns the LED. */
-		} else if (lrw_state == APP_RADIO_LRW_STATE_JOINING ||
-			   lrw_state == APP_RADIO_LRW_STATE_RECONNECT) {
+		} else if (lrw_state == APP_RADIO_STATE_JOINING ||
+			   lrw_state == APP_RADIO_STATE_RECONNECT) {
 			/* Not on the network — initial join or a rejoin after the link was
 			 * lost (#278). This is the SEVERE LoRaWAN state (worse than WARNING,
 			 * which keeps its session), so it carries a red accent: one yellow
@@ -612,7 +612,7 @@ int main(void)
 				.repetitions = 1};
 			app_led_play(&req);
 			led_handled = true;
-		} else if (lrw_state == APP_RADIO_LRW_STATE_WARNING) {
+		} else if (lrw_state == APP_RADIO_STATE_WARNING) {
 			/* Link-check streak failing but the session is still up (#278) — the
 			 * MILD network state. Two yellow blinks, no red (one step above
 			 * radio-off's single yellow, one below joining's yellow+red). */
@@ -622,10 +622,10 @@ int main(void)
 							.repetitions = 2};
 			app_led_blink(&req);
 			led_handled = true;
-		} else if (lrw_state == APP_RADIO_LRW_STATE_DISABLED) {
-			/* Radio disabled by radio-mode (#271/#278): a single yellow blink — the
-			 * lowest rung of the yellow severity scale, since this is a deliberate
-			 * operator choice (radio-mode off/p2p), not a network fault. */
+		} else if (lrw_state == APP_RADIO_STATE_DISABLED) {
+			/* Radio disabled (#271/#278): a single yellow blink — the lowest rung
+			 * of the yellow severity scale. LoRaWAN: DevEUI all-zero; P2P:
+			 * lrw_appkey or lrw_deveui all-zero (device not provisioned). */
 			struct app_led_blink_req req = {.color = APP_LED_CHANNEL_Y,
 							.duration = 5,
 							.space = 0,
@@ -633,7 +633,6 @@ int main(void)
 			app_led_blink(&req);
 			led_handled = true;
 		}
-#endif /* defined(CONFIG_LORAWAN) */
 
 		/* Always evaluate alarms — do NOT short-circuit on led_handled. The poll
 		 * is the only place thresholds/state/count rules, the no-data watchdog and

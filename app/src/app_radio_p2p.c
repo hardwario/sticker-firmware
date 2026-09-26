@@ -234,7 +234,11 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  * policy ever gives up -- so it starts straight on exponential backoff
  * (base -> x2 -> cap) instead of the tight boot-window jitter, to keep the duty
  * budget and battery sane over a long outage. */
-#define P2P_REJOIN_FAIL_THRESHOLD  8       /* consecutive failed uplink cycles */
+#define P2P_REJOIN_FAIL_THRESHOLD  8 /* consecutive failed uplink cycles */
+/* Consecutive fully-failed cycles after which a PAIRED node reports
+ * APP_RADIO_STATE_WARNING (the session is kept): the P2P counterpart of the
+ * LoRaWAN link-check ladder's WARNING step, below the self-heal threshold. */
+#define P2P_WARNING_FAIL_THRESHOLD 3
 #define P2P_REJOIN_BACKOFF_BASE_MS 60000   /* first re-join round: 60 s */
 #define P2P_REJOIN_BACKOFF_MAX_MS  3600000 /* cap: 1 h */
 
@@ -362,7 +366,16 @@ static struct k_work_delayable m_heartbeat_work;
 #endif
 
 static bool m_started;
+/* app_radio_p2p_start() refused to run: lrw_appkey or lrw_deveui is all-zero.
+ * Reported as APP_RADIO_STATE_DISABLED. */
+static bool m_disabled;
 static bool m_listening;
+/* Node-measured link quality of the last authenticated downlink, for
+ * app_radio_last_downlink() (GetInfo / NFC, #409 A2). m_last_dl_ms == 0 means
+ * none yet. */
+static int16_t m_last_dl_rssi;
+static int8_t m_last_dl_snr;
+static int64_t m_last_dl_ms;
 static struct p2p_duty m_duty; /* exact sliding-hour duty ledger (B2/D1) */
 static void (*m_ready_cb)(void);
 
@@ -795,10 +808,11 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
  * Shared by the `ats radio unjoin` shell path (which reboots afterwards
  * anyway) and the Detach downlink (§5.4), which must take effect immediately
  * -- the central has already dropped the session, so every further uplink
- * would be shouting at a network that is no longer listening. Clearing
- * m_started is what stops the report cadence: app_report.c::run_report gates
- * the uplink on app_radio_is_ready() -> app_radio_p2p_is_ready() -> m_started, so
- * the cadence timer keeps running harmlessly while nothing is transmitted.
+ * would be shouting at a network that is no longer listening. Dropping to
+ * UNPAIRED (and clearing m_started) is what stops the report cadence:
+ * app_report.c::run_report gates the uplink on app_radio_is_ready() ->
+ * app_radio_p2p_is_ready() (paired and started), so the cadence timer keeps
+ * running harmlessly while nothing is transmitted.
  *
  * The queues are purged because their frames are encrypted -- or about to be
  * -- under a session_key that no longer has a peer; a queued response or
@@ -1821,6 +1835,18 @@ static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
  *  - Command (0x56, B4): only when a pending downlink was announced -- decrypt,
  *    dispatch (dispatch_p2p_command), and treat as an implicit Ack.
  * Returns true iff a valid, matching downlink was received. */
+/* Remember the node-measured quality of an authenticated downlink for
+ * app_radio_last_downlink() (GetInfo / NFC). */
+static void note_downlink(int16_t rssi, int8_t snr)
+{
+	m_last_dl_rssi = rssi;
+	m_last_dl_snr = snr;
+	m_last_dl_ms = k_uptime_get();
+	if (m_last_dl_ms == 0) {
+		m_last_dl_ms = 1; /* 0 means "none yet" */
+	}
+}
+
 static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 {
 #if defined(CONFIG_SHELL)
@@ -1905,6 +1931,8 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 			return false;
 		}
 
+		note_downlink(rssi, snr);
+
 		if (frame_type == APP_RADIO_P2P_FRAME_DETACH) {
 			LOG_WRN("Detach received (counter %u): pairing cleared, radio idle "
 				"until reboot or `join`",
@@ -1949,7 +1977,9 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 			return false;
 		}
 
-		LOG_INF("Command received (counter %u, %zu B)", counter, body_len);
+		note_downlink(rssi, snr);
+		LOG_INF("Command received (counter %u, %zu B) dl_rssi=%d dl_snr=%d", counter,
+			body_len, rssi, snr);
 		dispatch_p2p_command(body, body_len);
 
 		/* The command replaced this uplink's Ack; receiving it confirms the
@@ -1990,6 +2020,7 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	m_last_ack_rssi = ack.rssi;
 	m_last_ack_snr = ack.snr;
 	m_last_ack_valid = true;
+	note_downlink(rssi, snr);
 
 	/* B4/D2: remember whether -- and how large -- to size the NEXT uplink's
 	 * window. Clamp defensively: a corrupt-but-authentic byte below a bare
@@ -2001,19 +2032,23 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 						       P2P_HDR_LEN + P2P_TAG_LEN, P2P_FRAME_MAX)
 				      : 0;
 
-	/* B5: apply the wall-clock time tail if present. */
+	/* B5: apply the wall-clock time tail if present, with the same sanity
+	 * bounds as the LoRaWAN DeviceTimeAns (L-5). */
 	if (ack.time_present) {
-		(void)app_clock_set_unix(ack.unix_time);
+		(void)app_clock_set_network_time(ack.unix_time);
 	}
 
+	/* rssi/snr = the central's measurement of the uplink (Ack body, B1);
+	 * dl_rssi/dl_snr = this node's measurement of the Ack itself. */
 	if (m_pending_frame_len != 0) {
-		LOG_INF("Ack (counter %u) rssi=%d snr=%d [pending] pending_len=%u%s", counter,
-			m_last_ack_rssi, m_last_ack_snr, m_pending_frame_len,
+		LOG_INF("Ack (counter %u) rssi=%d snr=%d dl_rssi=%d dl_snr=%d [pending] "
+			"pending_len=%u%s",
+			counter, m_last_ack_rssi, m_last_ack_snr, rssi, snr, m_pending_frame_len,
 			ack.time_present ? " [time]" : "");
 	} else {
-		LOG_INF("Ack (counter %u) rssi=%d snr=%d%s%s", counter, m_last_ack_rssi,
-			m_last_ack_snr, m_downlink_pending ? " [pending]" : "",
-			ack.time_present ? " [time]" : "");
+		LOG_INF("Ack (counter %u) rssi=%d snr=%d dl_rssi=%d dl_snr=%d%s%s", counter,
+			m_last_ack_rssi, m_last_ack_snr, rssi, snr,
+			m_downlink_pending ? " [pending]" : "", ack.time_present ? " [time]" : "");
 	}
 	return true;
 }
@@ -2907,6 +2942,8 @@ void p2p_test_replay_setup(void)
 	 * way p2p_test_join_step() drops the join retry, so the work-queue thread
 	 * cannot run a stream underneath the next test's assertions. */
 	(void)k_work_cancel_delayable(&m_hist_work);
+	/* A replay runs on a live data plane: paired and started (is_ready()). */
+	m_link_state = P2P_LINK_PAIRED;
 	m_started = true;
 	m_hist_active = false;
 	m_hist_seq = 0;
@@ -2949,6 +2986,25 @@ void p2p_test_join_step(void)
 {
 	join_work_handler(&m_join_work.work);
 	(void)k_work_cancel_delayable(&m_join_work);
+}
+
+/* Force the link-state inputs of app_radio_p2p_get_state()/is_ready(), so the
+ * mapping to the common app_radio state can be checked without driving a join
+ * or a run of failed uplinks through the radio. */
+void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, uint16_t fails,
+		       bool disabled)
+{
+	m_link_state = state;
+	m_started = started;
+	m_join_slow = slow;
+	m_consec_uplink_fail = fails;
+	m_disabled = disabled;
+}
+
+/* Record a downlink as recv_ack() does after authenticating one. */
+void p2p_test_note_downlink(int16_t rssi, int8_t snr)
+{
+	note_downlink(rssi, snr);
 }
 
 /* Put the link where a node that was paired under older firmware boots: PAIRED
@@ -3130,6 +3186,7 @@ void app_radio_p2p_start(void)
 	if (!app_key_is_set()) {
 		LOG_ERR("P2P not started: lrw_appkey is all-zero (device unprovisioned). "
 			"Set lrw-appkey over NFC or shell, then reboot.");
+		m_disabled = true;
 		return;
 	}
 
@@ -3152,6 +3209,7 @@ void app_radio_p2p_start(void)
 	if (!dev_eui_is_set()) {
 		LOG_ERR("P2P not started: lrw_deveui is all-zero (device unprovisioned). "
 			"Set lrw-deveui over NFC or shell, then reboot.");
+		m_disabled = true;
 		return;
 	}
 
@@ -3163,7 +3221,44 @@ void app_radio_p2p_start(void)
 
 bool app_radio_p2p_is_ready(void)
 {
-	return m_started;
+	/* m_started alone stayed true through a self-heal / RejoinRequest join, so
+	 * the node reported HEALTHY and kept composing telemetry into a session
+	 * that was being replaced (parity review 2026-09-26). */
+	return m_started && m_link_state == P2P_LINK_PAIRED;
+}
+
+enum app_radio_state app_radio_p2p_get_state(void)
+{
+	if (m_disabled) {
+		return APP_RADIO_STATE_DISABLED;
+	}
+
+	switch (m_link_state) {
+	case P2P_LINK_PAIRED:
+		if (!m_started) {
+			return APP_RADIO_STATE_IDLE;
+		}
+		return m_consec_uplink_fail >= P2P_WARNING_FAIL_THRESHOLD ? APP_RADIO_STATE_WARNING
+									  : APP_RADIO_STATE_HEALTHY;
+	case P2P_LINK_JOINING:
+		/* The slow policy runs for a self-heal / RejoinRequest episode and
+		 * after an unanswered boot window: a reconnect with backoff. */
+		return m_join_slow ? APP_RADIO_STATE_RECONNECT : APP_RADIO_STATE_JOINING;
+	case P2P_LINK_UNPAIRED:
+	default:
+		return APP_RADIO_STATE_IDLE;
+	}
+}
+
+bool app_radio_p2p_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+{
+	if (m_last_dl_ms == 0 || !rssi || !snr || !age_s) {
+		return false;
+	}
+	*rssi = m_last_dl_rssi;
+	*snr = m_last_dl_snr;
+	*age_s = (uint32_t)((k_uptime_get() - m_last_dl_ms) / 1000);
+	return true;
 }
 
 uint8_t app_radio_p2p_get_max_payload(void)

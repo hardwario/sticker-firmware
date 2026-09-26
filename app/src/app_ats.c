@@ -692,20 +692,20 @@ static int cmd_print_sample(const struct shell *shell, size_t argc, char **argv)
 #if defined(CONFIG_LORAWAN) || defined(CONFIG_RADIO_P2P)
 
 #if defined(CONFIG_LORAWAN)
-static const char *lrw_state_to_str(enum app_radio_lrw_state state)
+static const char *lrw_state_to_str(enum app_radio_state state)
 {
 	switch (state) {
-	case APP_RADIO_LRW_STATE_IDLE:
+	case APP_RADIO_STATE_IDLE:
 		return "IDLE";
-	case APP_RADIO_LRW_STATE_JOINING:
+	case APP_RADIO_STATE_JOINING:
 		return "JOINING";
-	case APP_RADIO_LRW_STATE_HEALTHY:
+	case APP_RADIO_STATE_HEALTHY:
 		return "HEALTHY";
-	case APP_RADIO_LRW_STATE_WARNING:
+	case APP_RADIO_STATE_WARNING:
 		return "WARNING";
-	case APP_RADIO_LRW_STATE_RECONNECT:
+	case APP_RADIO_STATE_RECONNECT:
 		return "RECONNECT";
-	case APP_RADIO_LRW_STATE_DISABLED:
+	case APP_RADIO_STATE_DISABLED:
 		return "DISABLED";
 	default:
 		return "UNKNOWN";
@@ -1619,8 +1619,8 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 
 	static const char *const build_type_name[] = {"main", "dev", "custom"};
-	static const char *const lrw_state_name[] = {"idle",    "joining",   "healthy",
-						     "warning", "reconnect", "disabled"};
+	static const char *const radio_state_name[] = {"idle",    "joining",   "healthy",
+						       "warning", "reconnect", "disabled"};
 
 	struct app_cmd_info info;
 	app_cmd_get_info(&info);
@@ -1628,15 +1628,15 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	const char *bt = info.build_type < ARRAY_SIZE(build_type_name)
 				 ? build_type_name[info.build_type]
 				 : "unknown";
-	const char *ls = info.lrw_state < ARRAY_SIZE(lrw_state_name)
-				 ? lrw_state_name[info.lrw_state]
+	const char *ls = info.lrw_state < ARRAY_SIZE(radio_state_name)
+				 ? radio_state_name[info.lrw_state]
 				 : "unknown";
 
 	shell_print(sh, "FW version:    %u.%u.%u", info.fw_major, info.fw_minor, info.fw_patch);
 	shell_print(sh, "Build type:    %s (%s)", bt, info.debug ? "debug" : "release");
 	shell_print(sh, "Serial number: %u", info.serial_number);
 	shell_print(sh, "Uptime:        %u s", info.uptime_s);
-	shell_print(sh, "LRW state:     %s", ls);
+	shell_print(sh, "Radio state:   %s", ls);
 	if (info.battery_mv) {
 		shell_print(sh, "Battery:       %u mV", info.battery_mv);
 	} else {
