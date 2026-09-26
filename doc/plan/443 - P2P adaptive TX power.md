@@ -68,6 +68,12 @@ A new, separate P2P parameter, as the owner asked. `lrw_adr` stays untouched: no
 - The ADR power is kept in RAM only. After a reboot the node starts at the ceiling and re-adapts after 20 uplinks, the safe direction.
 - `ats radio status` shows `tx power: <n> dBm (adr, ceiling <c>)`, alongside today's `(config)` / `(assigned)`.
 - Each change logs `P2P ADR: tx power <a> -> <b> dBm (max snr <s> dB, margin <m> dB)`. A WARNING reset logs `P2P ADR: link degraded, back to <c> dBm`.
+- **GetInfo / NFC Info report the radio parameters for both transports** (owner, 2026-09-26). New optional Info fields:
+  - `radio_sf`: current SF. P2P: the network SF. LoRaWAN: the SF of the current DR in the region.
+  - `lrw_datarate`: LoRaWAN DR index, absent on P2P.
+  - `tx_power_dbm`: the conducted TX power actually in use. P2P: the ADR, assigned or config value. LoRaWAN: max EIRP − 2 × TXPower index − antenna gain.
+
+  These are NFC-only like `lrw_state` if the LoRaWAN Info budget requires it. They are added through the common `app_radio` layer (plan 439), not per backend.
 
 ## 4. Cost and benefit
 
@@ -80,7 +86,13 @@ A new, separate P2P parameter, as the owner asked. `lrw_adr` stays untouched: no
 - `tests/p2p_logic`: the step computation per SF, the floor and ceiling, history clearing, the WARNING reset, assigned-power precedence, and ADR off.
 - HIL on the bench: a strong link steps 14 → 2 dBm within 2 × 20 uplinks. `ats radio ack_drop 12` (three failed cycles) forces WARNING, which must return the node to the ceiling at once.
 
-## 6. Open points
+## 6. History window
 
-- `P2P_ADR_HISTORY` of 20 means one decision per 20 min at a 60 s interval but one per 5 h at 900 s. A smaller window (10) or a time bound may suit P2P better; to be decided with the owner.
-- Whether GetInfo should report the current TX power (a new field) or `ats radio status` is enough.
+- On **LoRaWAN** the window lives on the network side: ChirpStack's ADR uses the maximum SNR of the last 20 uplinks, and the STICKER firmware has none.
+- On **P2P** the node decides, so the window is in the firmware and applies to P2P only. It is 20 for identical behaviour.
+- The window only sets how fast the power goes **down** (the energy saving): one decision per 20 uplinks, i.e. 20 min at a 60 s report interval and 5 h at 900 s.
+- A sudden degradation does not wait for it: the WARNING rung (§3.3) restores the ceiling after 3 failed cycles. A smaller window would save energy sooner but oscillate more. Recommendation: keep 20.
+
+## 7. Open points
+
+- `p2p_adr` as a separate parameter (§3.5): the owner has not decided yet.
