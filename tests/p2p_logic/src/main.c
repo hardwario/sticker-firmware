@@ -49,9 +49,9 @@ ZTEST(p2p_logic, test_toa_sf10_max_frame_reference)
  *
  * The window a caller actually opens is
  * rx1_preamble_catch_ms() + frame_toa_ms(len) + P2P_RX1_TRAILING_MARGIN_MS,
- * i.e. a fixed 138 ms at SF10 (12 symbols = 98 ms, plus 40 ms) on top of the
- * figures below: 468 ms for a 2 B command, 509 ms for a bare Ack, 2434 ms for
- * the 255 B worst case D2 removes. Those two helpers are static and not part
+ * i.e. a fixed 218 ms at SF10 (12 symbols = 98 ms, plus 120 ms, F-P2P-2) on
+ * top of the figures below: 548 ms for a 2 B command, 589 ms for a bare Ack,
+ * 2514 ms for the 255 B worst case D2 removes. Those two helpers are static and not part
  * of this suite's surface, so the ToA terms are what get pinned here. */
 ZTEST(p2p_logic, test_toa_sf10_documented_airtimes)
 {
@@ -123,11 +123,17 @@ ZTEST(p2p_logic, test_toa_small_frame_bounded)
 ZTEST(p2p_logic, test_rx1_timeout_scales_with_the_tried_sf)
 {
 	/* JoinAccept is 42 B on air. Computed from the formula
-	 * rx1_preamble_catch_ms(sf) + p2p_toa_ms(sf, 42) + 40 ms trailing margin:
-	 * SF10 = 98 + 535 + 40, SF12 = 393 + 2138 + 40. */
-	zassert_equal(p2p_rx1_timeout_ms(10, 42), 673u, "SF10 JoinAccept window should be 673 ms");
-	zassert_equal(p2p_rx1_timeout_ms(12, 42), 2571u,
-		      "SF12 JoinAccept window should be 2571 ms");
+	 * rx1_preamble_catch_ms(sf) + p2p_toa_ms(sf, 42) + 120 ms trailing margin
+	 * (F-P2P-2): SF10 = 98 + 535 + 120, SF12 = 393 + 2138 + 120. */
+	zassert_equal(p2p_rx1_timeout_ms(10, 42), 753u, "SF10 JoinAccept window should be 753 ms");
+	zassert_equal(p2p_rx1_timeout_ms(12, 42), 2651u,
+		      "SF12 JoinAccept window should be 2651 ms");
+
+	/* F-P2P-2: a fixed trailing margin, not SF-scaled, so a central that is a
+	 * constant ~80 ms late still fits at SF7 (the 22 ms timeout-start delay on
+	 * top is not part of this formula). */
+	zassert_true(p2p_rx1_timeout_ms(7, 23) >= p2p_toa_ms(7, 23) + 100,
+		     "SF7 Ack window must leave >= 100 ms after the frame");
 
 	uint32_t prev = p2p_rx1_timeout_ms(7, 42);
 
