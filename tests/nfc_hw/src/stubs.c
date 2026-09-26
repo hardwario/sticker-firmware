@@ -96,6 +96,15 @@ void app_clock_force_resync(void)
 {
 }
 
+void app_radio_clock_sync(uint32_t seq)
+{
+	ARG_UNUSED(seq);
+}
+
+void app_report_force(void)
+{
+}
+
 /* Battery (GetInfo battery field). */
 struct app_sensor_data g_app_sensor_data = {.voltage = NAN};
 K_MUTEX_DEFINE(g_app_sensor_data_lock);

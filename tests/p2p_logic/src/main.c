@@ -1005,6 +1005,23 @@ ZTEST(p2p_logic, test_start_with_zero_deveui_keeps_a_paired_session)
 	memcpy(g_app_config.lrw_deveui, saved, sizeof(saved));
 }
 
+/* doc/plan/439 T3: a P2P link coming up announces Info + settings-info through
+ * the common app_radio path, exactly like a LoRaWAN join -- the boot with a
+ * persisted pairing included, which never sends a JoinRequest. */
+extern int p2p_test_announce_calls;
+
+ZTEST(p2p_logic, test_paired_boot_announces_through_app_radio)
+{
+	p2p_test_join_setup(10);
+	p2p_test_set_paired();
+	p2p_test_announce_calls = 0;
+
+	app_radio_p2p_start();
+
+	zassert_true(app_radio_p2p_is_ready(), "paired boot must be ready");
+	zassert_equal(p2p_test_announce_calls, 1, "announce calls %d", p2p_test_announce_calls);
+}
+
 /* R-06: the sweep advanced on ANY non-EAGAIN send result, so a radio that is
  * simply broken walked the whole SF order without transmitting once and then
  * charged a backoff step for the "pass" it never flew.

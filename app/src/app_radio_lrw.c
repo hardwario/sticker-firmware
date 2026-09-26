@@ -385,13 +385,6 @@ static atomic_t m_clock_sync_info_pending;
  * answer went out with seq 0 and the host could not pair it). Written by the
  * command handler before the pending bit is set, read by the Info work item. */
 static atomic_t m_clock_sync_info_seq;
-/* #409 A5a / #425: boot announce frames not sent at join time — not even one
- * field fitted the budget, or settings-info waited for the Info pages to finish
- * (one page stream at a time). Sent from m_announce_work once a DR change makes
- * room or the running page stream ends. */
-#define ANNOUNCE_INFO     0
-#define ANNOUNCE_SETTINGS 1
-static atomic_t m_announce_pending;
 
 /* Kicked on a link-ready edge (join success / history-replay finish) so
  * app_report can resume the report cadence with an immediate uplink. */
@@ -654,106 +647,13 @@ static void state_transition(enum app_radio_state new_state)
 /* Event handlers (run on m_work_q)                                         */
 /* ======================================================================== */
 
-/* Build a GetInfo response and stage it on the command port. Shared by the
- * on-join announce and the deferred clock-sync uplink so the encode buffer and
- * queue call live in one place (#220.F). Returns the app_cmd_build_info() result.
- *
- * Encodes against the current DR's payload budget, not just the software
- * buffer size: when the full Info does not fit, app_cmd_build_info() pages it
- * (#425) and the remaining pages follow via m_page_stream_work, instead of
- * tx_send_queued() silently dropping the whole uplink later. */
-static int queue_info_uplink_seq(uint32_t seq)
-{
-	uint8_t info_buf[APP_RADIO_LRW_RESPONSE_BUF_SIZE];
-	size_t info_len;
-	bool more = false;
-
-	int ret = app_cmd_build_info_seq(seq, info_buf, refresh_payload_cap(sizeof(info_buf)),
-					 &info_len, &more);
-	if (ret == 0) {
-		(void)queue_tx_response(APP_RADIO_LRW_DOWNLINK_CMD_PORT, info_buf, info_len,
-					LRW_TX_INFO);
-		atomic_clear_bit(&m_announce_pending, ANNOUNCE_INFO);
-		if (more) {
-			/* #425: the remaining Info pages follow page 0 by themselves. */
-			k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
-						  K_SECONDS(PAGE_STREAM_PACE_SEC));
-		}
-	} else {
-		/* Not even one Info field fits: send it once the DR rises. */
-		atomic_set_bit(&m_announce_pending, ANNOUNCE_INFO);
-	}
-	return ret;
-}
-
-/* Autonomous Info (boot announce, deferred announce): seq 0. */
-static int queue_info_uplink(void)
-{
-	return queue_info_uplink_seq(0);
-}
-
-/* Build a settings-info ConfigDump and stage it on the command port, right after
- * the on-join GetInfo. Announces the effective config (key application settings,
- * sensor capabilities, detected 1-Wire slot types) so the network stays in sync
- * without polling (#412). Encoded against the current DR budget like the Info
- * above so a low DR trims via -EMSGSIZE rather than a later silent drop. */
-static int queue_settings_info_uplink(void)
-{
-	uint8_t buf[APP_RADIO_LRW_RESPONSE_BUF_SIZE];
-	size_t len;
-	bool more = false;
-
-	/* #425: one page stream at a time — while the Info pages are still going
-	 * out, settings-info waits and is sent when that stream ends. */
-	if (app_cmd_stream_active()) {
-		atomic_set_bit(&m_announce_pending, ANNOUNCE_SETTINGS);
-		return -EBUSY;
-	}
-
-	int ret = app_cmd_build_config_status(buf, refresh_payload_cap(sizeof(buf)), &len, &more);
-	if (ret == 0) {
-		(void)queue_tx_response(APP_RADIO_LRW_DOWNLINK_CMD_PORT, buf, len, LRW_TX_SETTINGS);
-		atomic_clear_bit(&m_announce_pending, ANNOUNCE_SETTINGS);
-		if (more) {
-			k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
-						  K_SECONDS(PAGE_STREAM_PACE_SEC));
-		}
-	} else {
-		atomic_set_bit(&m_announce_pending, ANNOUNCE_SETTINGS); /* #409: retry later */
-	}
-	return ret;
-}
-
-/* #409 A5a / #425: send the boot announce frames that were not sent at join time
- * (no field fitted, or settings-info waited for the Info pages), once a DR
- * change has made room or the running page stream has ended. A budget that is
- * still too small leaves the flags set without extra airtime. */
+/* The boot/join announce itself lives in app_radio (one path for both radios,
+ * doc/plan/439 T3); this runs its pending frames on m_work_q whenever room may
+ * have appeared: after the join, on a DR rise and when a page stream ends. */
 static void announce_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-
-	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
-
-	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
-		return; /* the next join re-announces from scratch */
-	}
-
-	if (app_cmd_stream_active()) {
-		return; /* re-kicked when the running page stream ends */
-	}
-
-	if (atomic_test_bit(&m_announce_pending, ANNOUNCE_INFO)) {
-		if (queue_info_uplink() == 0) {
-			LOG_INF("Deferred Info sent");
-		}
-		if (app_cmd_stream_active()) {
-			return; /* settings-info follows once these pages are out */
-		}
-	}
-
-	if (atomic_test_bit(&m_announce_pending, ANNOUNCE_SETTINGS)) {
-		(void)queue_settings_info_uplink();
-	}
+	(void)app_radio_announce_run();
 }
 
 /* Pin the uplink datarate from lrw-datarate (#409 A3, like twr-sdk AT$DR). Runs
@@ -802,19 +702,12 @@ static void on_join_success(void)
 	/* Request network time once joined; the answer sets the RTC asynchronously. */
 	app_clock_request_sync();
 
-	/* Autonomous GetInfo on join: announce identity/firmware on fPort 85 before
-	 * the first telemetry. send_work drains queued responses first. */
-	if (queue_info_uplink() != 0) {
-		LOG_WRN("GetInfo-on-join does not fit the DR budget; deferred until the DR rises");
-	}
-
-	/* Follow the Info with an autonomous settings-info ConfigDump (#412) so the
-	 * network learns the effective config on join without a GetConfig poll. The
-	 * response queue drains FIFO, so this lands right after the Info above. */
-	if (queue_settings_info_uplink() != 0) {
-		LOG_WRN("settings-info-on-join does not fit the DR budget; deferred until the DR "
-			"rises");
-	}
+	/* Autonomous Info + settings-info ConfigDump (#412) on join, through the
+	 * common announce (app_radio): identity/firmware and the effective config on
+	 * fPort 85 before the first telemetry. m_announce_work is queued on m_work_q
+	 * ahead of the telemetry kicked below, and send_work drains queued
+	 * responses first. */
+	app_radio_announce();
 
 	/* Kick app_report to start the report cadence with an immediate uplink (its
 	 * cycle samples, captures and triggers app_radio_lrw_send_telemetry; the first
@@ -1006,7 +899,7 @@ static void downlink_success_work_handler(struct k_work *work)
 static void clock_sync_info_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	(void)queue_info_uplink_seq((uint32_t)atomic_get(&m_clock_sync_info_seq));
+	(void)app_radio_send_info((uint32_t)atomic_get(&m_clock_sync_info_seq));
 }
 
 static void lc_response_work_handler(struct k_work *work)
@@ -1117,7 +1010,7 @@ static void post_cmd_work_handler(struct k_work *work)
 		/* Force a (re)join now instead of waiting for the next attempt (#109).
 		 * No reboot — app_radio_lrw_join() just queues a join work item. */
 		LOG_INF("Command: forced LoRaWAN join");
-		app_radio_lrw_join();
+		app_radio_rejoin();
 		break;
 	case APP_CMD_ACTION_COUNTERS_SAVE:
 		/* Persist the (reset) pulse totalizers, no reboot. Deferred for the
@@ -1157,14 +1050,14 @@ static void page_stream_work_handler(struct k_work *work)
 
 	if (ret == -ENODATA) {
 		/* All pages queued; a boot announce frame may have waited for them. */
-		if (atomic_get(&m_announce_pending)) {
+		if (app_radio_announce_pending()) {
 			k_work_submit_to_queue(&m_work_q, &m_announce_work);
 		}
 		return;
 	}
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
-		if (atomic_get(&m_announce_pending)) {
+		if (app_radio_announce_pending()) {
 			k_work_submit_to_queue(&m_work_q, &m_announce_work);
 		}
 		return;
@@ -1187,7 +1080,7 @@ static void dl_request_work_handler(struct k_work *work)
 
 		/* Cap to the current DR's payload budget, not just the software buffer,
 		 * so an explicit GetInfo command gets the same active_alarms trimming as
-		 * the autonomous join/clock-sync uplink (queue_info_uplink()) instead of
+		 * the autonomous join/clock-sync uplink (app_radio_send_info()) instead of
 		 * tx_send_queued() dropping the whole response later. */
 		size_t resp_cap = refresh_payload_cap(sizeof(resp));
 
@@ -1667,11 +1560,11 @@ static bool recover_over_budget(struct lrw_tx_msg *tx, uint8_t budget)
 
 	switch ((enum lrw_tx_kind)tx->kind) {
 	case LRW_TX_INFO:
-		atomic_set_bit(&m_announce_pending, ANNOUNCE_INFO);
+		app_radio_announce_rearm(false);
 		LOG_INF("Info re-armed for the deferred announce");
 		return false;
 	case LRW_TX_SETTINGS:
-		atomic_set_bit(&m_announce_pending, ANNOUNCE_SETTINGS);
+		app_radio_announce_rearm(true);
 		LOG_INF("settings-info re-armed for the deferred announce");
 		return false;
 	case LRW_TX_CMD_RESPONSE: {
@@ -2129,7 +2022,7 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 	LOG_INF("New data rate: DR%d, Maximum payload size: %d", dr, max_now);
 
 	/* #409: a higher DR may now fit the deferred full Info / settings-info. */
-	if (atomic_get(&m_announce_pending)) {
+	if (app_radio_announce_pending()) {
 		k_work_submit_to_queue(&m_work_q, &m_announce_work);
 	}
 }
@@ -2672,6 +2565,33 @@ void app_radio_lrw_send_info_on_clock_sync(uint32_t seq)
 	 * set, so the Info work item never pairs a new request with a stale seq. */
 	atomic_set(&m_clock_sync_info_seq, (atomic_val_t)seq);
 	atomic_set_bit(&m_clock_sync_info_pending, 0);
+}
+
+void app_radio_lrw_clock_sync(uint32_t seq)
+{
+	app_clock_force_resync();
+	app_radio_lrw_send_info_on_clock_sync(seq);
+}
+
+void app_radio_lrw_announce_kick(void)
+{
+	k_work_submit_to_queue(&m_work_q, &m_announce_work);
+}
+
+size_t app_radio_lrw_response_cap(size_t buf_size)
+{
+	return refresh_payload_cap(buf_size);
+}
+
+int app_radio_lrw_queue_announce(bool settings, const uint8_t *buf, size_t len)
+{
+	return queue_tx_response(APP_RADIO_LRW_DOWNLINK_CMD_PORT, buf, len,
+				 settings ? LRW_TX_SETTINGS : LRW_TX_INFO);
+}
+
+void app_radio_lrw_page_stream_kick(void)
+{
+	k_work_schedule_for_queue(&m_work_q, &m_page_stream_work, K_SECONDS(PAGE_STREAM_PACE_SEC));
 }
 
 int app_radio_lrw_send_alarm(const uint8_t *buf, size_t len)

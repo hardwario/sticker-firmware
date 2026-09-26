@@ -59,16 +59,15 @@ int app_radio_init(void);
  * boot-time app_radio_p2p_start() must not waste a JoinRequest on every reboot. */
 void app_radio_start(void);
 
-#if defined(CONFIG_SHELL)
 /* Force a fresh join attempt RIGHT NOW, regardless of current state --
  * unlike app_radio_start(), an existing P2P pairing is not treated as
  * sufficient. LoRaWAN already behaves this way unconditionally (every
  * app_radio_lrw_join() call deinits and rejoins); this is what makes `join`
- * genuinely symmetric across both stacks for the interactive shell command.
- * A successful P2P JoinAccept simply overwrites the old pairing via
- * pairing_persist(), so this never needs a reboot or NVS wipe. */
+ * genuinely symmetric across both stacks -- the shell command and the lrw_join
+ * command (NFC / downlink). A successful P2P JoinAccept simply overwrites the
+ * old pairing via pairing_persist(), so this never needs a reboot or NVS
+ * wipe. */
 void app_radio_rejoin(void);
-#endif
 
 /* Which stack was selected at boot. */
 enum app_radio_kind app_radio_get_kind(void);
@@ -107,6 +106,37 @@ void app_radio_register_ready_cb(void (*cb)(void));
 
 /* Stop radio activity ahead of a deep-sleep poweroff. */
 void app_radio_suspend(void);
+
+/* ---- Boot/join announce (#412, #409 A5a, #425; doc/plan/439 T3) ----------
+ * One path for both radios. When the link comes up (LoRaWAN join, P2P paired
+ * at boot or by a JoinAccept) the backend calls app_radio_announce(); app_radio
+ * then sends the Info (seq 0) followed by the settings-info ConfigDump, each
+ * paged for the current budget. A frame that does not fit yet, or that waits
+ * for a running page stream, stays pending and goes out on a later
+ * app_radio_announce_run(): the backend runs it on its work queue whenever
+ * room may have appeared (link up, DR rise, page stream end, queue space). */
+void app_radio_announce(void);
+
+/* Something of the announce is still to be sent. */
+bool app_radio_announce_pending(void);
+
+/* Backend: a queued announce frame had to be dropped (the budget fell under
+ * it); arm it again for the next run. */
+void app_radio_announce_rearm(bool settings);
+
+/* Backend work queue only: send what is pending while the link is up. Returns
+ * true while something stays pending that a later run can send. */
+bool app_radio_announce_run(void);
+
+/* Backend work queue only: an Info carrying `seq` (the clock_sync answer),
+ * paged like the announce. When not even page 0 can go now, the seq-0
+ * announce Info is armed instead. Returns 0 or a negative errno. */
+int app_radio_send_info(uint32_t seq);
+
+/* clock_sync with an empty body: re-sync the RTC from the network and answer
+ * with an Info carrying `seq` once the time has landed. LoRaWAN asks with
+ * DeviceTimeReq; P2P sends an uplink now and uses the time tail of its Ack. */
+void app_radio_clock_sync(uint32_t seq);
 
 #ifdef __cplusplus
 }

@@ -211,14 +211,12 @@ static void nfc_run_deferred_cmd_actions(void)
 			LOG_WRN_REBOOTING("LoRaWAN NVM reset");
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
+#endif /* defined(CONFIG_LORAWAN) */
 		case APP_CMD_ACTION_LRW_JOIN:
-			/* Force a (re)join now, no reboot (#109). Same LoRaWAN-only
-			 * reachability note as above. */
-#if defined(CONFIG_LORAWAN)
-			app_radio_lrw_join();
-#endif /* defined(CONFIG_LORAWAN) */
+			/* Force a (re)join now, no reboot (#109), on whichever radio runs:
+			 * a LoRaWAN join or a fresh P2P join handshake. */
+			app_radio_rejoin();
 			break;
-#endif /* defined(CONFIG_LORAWAN) */
 		case APP_CMD_ACTION_COUNTERS_SAVE:
 			/* Persist the (reset) pulse totalizers, no reboot. */
 			app_counters_save(true);

@@ -1086,11 +1086,10 @@ static void app_cmd_handle_force_send(enum app_cmd_transport tp, const Command *
 	ARG_UNUSED(cmd);
 	ARG_UNUSED(resp);
 	ARG_UNUSED(action);
-#if defined(CONFIG_LORAWAN)
 	/* F14: sent at once (no fleet jitter), so it can't silently fold into a
-	 * jittered report that happens to be pending. */
+	 * jittered report that happens to be pending. Radio-agnostic: app_report
+	 * sends through app_radio. */
 	app_report_force();
-#endif
 	/* No ack — the triggered telemetry uplink IS the answer; an extra ack
 	 * would just cost a second uplink. Leave which_body == 0 (emit nothing). */
 }
@@ -1112,12 +1111,10 @@ static void app_cmd_handle_sample(enum app_cmd_transport tp, const Command *cmd,
 		resp->which_body = Response_sample_tag;
 		app_compose_snapshot(&resp->body.sample);
 	}
-	/* Over LoRaWAN leave which_body == 0: the fPort-2 frame below is the answer,
-	 * and a full Telemetry would not fit the 64-byte fPort-85 response buffer. */
+	/* Over a radio leave which_body == 0: the telemetry frame below is the
+	 * answer, and a full Telemetry would not fit the 64-byte response buffer. */
 
-#if defined(CONFIG_LORAWAN)
 	app_report_force(); /* host-requested, like force_send (F14) */
-#endif
 }
 
 static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command *cmd,
@@ -1252,7 +1249,6 @@ static int w1_scan_cb(struct w1_rom rom, void *user_data)
 static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				      enum app_cmd_action *action)
 {
-	ARG_UNUSED(tp);
 	ARG_UNUSED(action);
 #ifdef APP_CMD_HAVE_CLOCK
 	/* unix_time set (NFC): the phone supplies the wall-clock time; set the RTC
@@ -1272,17 +1268,18 @@ static void app_cmd_handle_clock_sync(enum app_cmd_transport tp, const Command *
 		fill_info(tp, &resp->body.info, SIZE_MAX);
 		return;
 	}
-#ifdef CONFIG_LORAWAN
-	/* Empty (LRW): re-sync from the network, then answer with an Info uplink
-	 * once the network time lands (carries the synced unix_time). No ack — see
-	 * app_radio_lrw. The Info carries this command's seq, so the host can pair the
-	 * answer with its request (the boot Info keeps seq 0). */
-	app_clock_force_resync();
-	app_radio_lrw_send_info_on_clock_sync(cmd->seq);
+	/* Empty: re-sync from the network, then answer with an Info uplink once the
+	 * network time lands (carries the synced unix_time) -- LoRaWAN DeviceTimeReq
+	 * or the P2P Ack time tail, app_radio's business. No radio ack. The Info carries
+	 * this command's seq, so the host can pair the answer with its request (the
+	 * boot Info keeps seq 0). Over NFC the phone still gets an immediate ack --
+	 * the synced Info goes out over the radio. */
+	app_radio_clock_sync(cmd->seq);
+	if (tp == APP_CMD_TRANSPORT_NFC) {
+		resp->which_body = Response_ack_tag;
+	}
 #else
-	resp->which_body = Response_ack_tag; /* no LRW: just confirm */
-#endif
-#else
+	ARG_UNUSED(tp);
 	ARG_UNUSED(cmd);
 	resp->which_body = Response_ack_tag; /* no clock: just confirm */
 #endif
@@ -1464,8 +1461,8 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		resp->which_body = Response_ack_tag;
 		break;
 	case Command_force_send_tag:
-		/* transports: [lrw] — reject on any other transport */
-		if (tp != APP_CMD_TRANSPORT_LRW) {
+		/* transports: [lrw, p2p] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_P2P) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
@@ -1498,8 +1495,9 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_req_history_page(tp, cmd, resp, action);
 		break;
 	case Command_clock_sync_tag:
-		/* transports: [lrw, nfc] — reject on any other transport */
-		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC) {
+		/* transports: [lrw, p2p, nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_P2P &&
+		    tp != APP_CMD_TRANSPORT_NFC) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
@@ -1544,8 +1542,9 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_enter_calibration(tp, cmd, resp, action);
 		break;
 	case Command_sample_tag:
-		/* transports: [lrw, nfc] — reject on any other transport */
-		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC) {
+		/* transports: [lrw, p2p, nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_P2P &&
+		    tp != APP_CMD_TRANSPORT_NFC) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
@@ -1594,8 +1593,9 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		app_cmd_handle_claim_active(tp, cmd, resp, action);
 		break;
 	case Command_buzzer_play_tag:
-		/* transports: [lrw, nfc] — reject on any other transport */
-		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_NFC) {
+		/* transports: [lrw, p2p, nfc] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_P2P &&
+		    tp != APP_CMD_TRANSPORT_NFC) {
 			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
 			break;
 		}
