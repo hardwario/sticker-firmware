@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef APP_LRW_H_
-#define APP_LRW_H_
+#ifndef APP_RADIO_LRW_H_
+#define APP_RADIO_LRW_H_
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -161,4 +161,4 @@ int app_lrw_run_on_work_q(struct k_work *work);
 }
 #endif
 
-#endif /* APP_LRW_H_ */
+#endif /* APP_RADIO_LRW_H_ */

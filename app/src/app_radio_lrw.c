@@ -13,7 +13,7 @@
 #include "app_counters.h"
 #include "app_history.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_settings.h"
 #include "app_wdog.h"
 

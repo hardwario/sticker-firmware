@@ -15,7 +15,7 @@
 #include "app_version.h"
 #include "app_led.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_nfc.h"
 #include "app_power.h"
 #include "app_report.h"

@@ -16,7 +16,7 @@
 #include "app_config.h"
 #include "app_history.h"
 #include "app_led.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_sensor.h"
 #include "app_settings.h"
 

@@ -10,7 +10,7 @@
 #include "app_ds18b20.h"
 #include "app_led.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_machine_probe.h"
 #include "app_settings.h"
 #include "app_sht4x.h"

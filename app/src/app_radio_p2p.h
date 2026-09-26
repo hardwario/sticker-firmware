@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef APP_P2P_H_
-#define APP_P2P_H_
+#ifndef APP_RADIO_P2P_H_
+#define APP_RADIO_P2P_H_
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -415,4 +415,4 @@ int p2p_test_fcnt_next(uint32_t *counter_out);
 }
 #endif
 
-#endif /* APP_P2P_H_ */
+#endif /* APP_RADIO_P2P_H_ */

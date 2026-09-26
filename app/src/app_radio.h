@@ -7,7 +7,7 @@
 #ifndef APP_RADIO_H_
 #define APP_RADIO_H_
 
-#include "app_lrw.h" /* enum app_lrw_state */
+#include "app_radio_lrw.h" /* enum app_lrw_state */
 
 #include <stdbool.h>
 #include <stddef.h>

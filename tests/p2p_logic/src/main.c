@@ -12,7 +12,7 @@
 
 #include "app_ccm.h"
 #include "app_config.h"
-#include "app_p2p.h"
+#include "app_radio_p2p.h"
 
 extern uint16_t test_history_frame_count;
 extern uint32_t test_history_first_abs;

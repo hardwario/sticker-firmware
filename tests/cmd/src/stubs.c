@@ -13,7 +13,7 @@
 #include "app_buzzer.h"
 #include "app_config.h"
 #include "app_history.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_nfc.h"
 #include "app_sensor.h"
 

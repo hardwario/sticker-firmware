@@ -14,10 +14,10 @@
 #include "app_hall.h"
 #include "app_input.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_nfc.h"
 #if defined(CONFIG_RADIO_P2P)
-#include "app_p2p.h"
+#include "app_radio_p2p.h"
 #endif
 #include "app_report.h"
 #include "app_sensor.h"
