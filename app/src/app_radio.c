@@ -193,6 +193,15 @@ void app_radio_send_telemetry_now(void)
 #endif
 }
 
+bool app_radio_needs_command_answer(void)
+{
+#if defined(CONFIG_RADIO_P2P)
+	return is_p2p();
+#else
+	return false;
+#endif
+}
+
 int app_radio_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 {
 #if defined(CONFIG_RADIO_P2P)

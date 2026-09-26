@@ -1084,20 +1084,23 @@ static void app_cmd_handle_force_send(enum app_cmd_transport tp, const Command *
 {
 	ARG_UNUSED(tp);
 	ARG_UNUSED(cmd);
-	ARG_UNUSED(resp);
 	ARG_UNUSED(action);
 	/* F14: sent at once (no fleet jitter), so it can't silently fold into a
 	 * jittered report that happens to be pending. Radio-agnostic: app_report
 	 * sends through app_radio. */
 	app_report_force();
-	/* No ack — the triggered telemetry uplink IS the answer; an extra ack
-	 * would just cost a second uplink. Leave which_body == 0 (emit nothing). */
+	/* The triggered uplink IS the answer on LoRaWAN; a radio that retires a
+	 * command only on a matching answer (P2P, F-P1-2) gets an Ack with the seq,
+	 * or it would re-deliver the command -- and re-measure -- forever. */
+	if (app_radio_needs_command_answer()) {
+		resp->which_body = Response_ack_tag;
+	}
 }
 
-/* sample (transports: [lrw, nfc]): take a fresh reading, push it out as
- * telemetry on fPort 2, and — over NFC — return the same readings synchronously
- * so the phone can show them. Over LoRaWAN the fPort-2 uplink is the answer
- * (no fPort-85 body, like force_send). */
+/* sample (transports: [lrw, p2p, nfc]): take a fresh reading, push it out as
+ * telemetry, and — over NFC — return the same readings synchronously so the
+ * phone can show them. Over a radio the telemetry uplink is the answer (no
+ * response body, like force_send; P2P adds the Ack it needs, F-P1-2). */
 static void app_cmd_handle_sample(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 				  enum app_cmd_action *action)
 {
@@ -1110,9 +1113,13 @@ static void app_cmd_handle_sample(enum app_cmd_transport tp, const Command *cmd,
 	if (tp == APP_CMD_TRANSPORT_NFC) {
 		resp->which_body = Response_sample_tag;
 		app_compose_snapshot(&resp->body.sample);
+	} else if (app_radio_needs_command_answer()) {
+		/* Over a radio the telemetry frame below is the answer (a full
+		 * Telemetry would not fit the 64-byte response buffer): nothing more
+		 * on LoRaWAN, an Ack with the seq where the radio needs one to retire
+		 * the command (P2P, F-P1-2, see force_send). */
+		resp->which_body = Response_ack_tag;
 	}
-	/* Over a radio leave which_body == 0: the telemetry frame below is the
-	 * answer, and a full Telemetry would not fit the 64-byte response buffer. */
 
 	app_report_force(); /* host-requested, like force_send (F14) */
 }

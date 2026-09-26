@@ -38,6 +38,7 @@ extern bool test_dl_valid;
 extern int16_t test_dl_rssi;
 extern int8_t test_dl_snr;
 extern uint32_t test_dl_age_s;
+extern bool test_radio_needs_answer;
 extern int g_buzzer_play_calls;
 extern uint32_t g_buzzer_play_last_kind;
 extern uint16_t g_buzzer_play_last_repeat_s;
@@ -120,6 +121,7 @@ static void reset_cfg(void)
 	g_claim_active_calls = 0;
 	g_claim_state = APP_NFC_CLAIM_ACTIVE;
 	test_dl_valid = false;
+	test_radio_needs_answer = false;
 	g_buzzer_play_calls = 0;
 	g_buzzer_play_last_kind = 0;
 	g_buzzer_play_last_repeat_s = 0;
@@ -667,6 +669,26 @@ ZTEST(cmd, test_sample_over_lrw_emits_no_body)
 	zassert_equal(out_len, 0, "LoRaWAN sample must emit no fPort-85 body, out_len=%zu",
 		      out_len);
 	zassert_equal(action, APP_CMD_ACTION_NONE, "no deferred action");
+}
+
+/* F-P1-2: over P2P the central retires a command only on a matching 0x55, so
+ * force_send and sample answer with an Ack carrying the seq (their telemetry
+ * uplink follows); LoRaWAN stays without a body (see above). */
+ZTEST(cmd, test_force_send_and_sample_ack_over_p2p)
+{
+	Response r;
+
+	reset_cfg();
+	test_radio_needs_answer = true;
+	handle_via(APP_CMD_TRANSPORT_P2P, "080f4a00", &r); /* force_send, seq 15 */
+	zassert_equal(r.which_body, Response_ack_tag, "force_send/P2P -> Ack (which=%d)",
+		      r.which_body);
+	zassert_equal(r.seq, 15, "seq %u", r.seq);
+
+	handle_via(APP_CMD_TRANSPORT_P2P, "0810aa0100", &r); /* sample, seq 16 */
+	zassert_equal(r.which_body, Response_ack_tag, "sample/P2P -> Ack (which=%d)", r.which_body);
+	zassert_equal(r.seq, 16, "seq %u", r.seq);
+	test_radio_needs_answer = false;
 }
 
 /* #170: claim_token is NFC-only. app_cmd_build_info() is the
@@ -2470,7 +2492,7 @@ static size_t nfc_get_info(enum app_cmd_transport tp, uint32_t seq, bool has_pag
 
 static void nfc_info_setup(size_t alarms)
 {
-	static const uint8_t token[16] = {0xA1, 0xB2, 0xC3, 0xD4, 5, 6, 7, 8,
+	static const uint8_t token[16] = {0xA1, 0xB2, 0xC3, 0xD4, 5,  6,  7,  8,
 					  9,    10,   11,   12,   13, 14, 15, 16};
 	static const uint8_t deveui[8] = {0x58, 0x76, 0x07, 0x02, 0x3D, 0xD6, 0xFA, 0x91};
 
@@ -2608,7 +2630,8 @@ ZTEST(cmd, test_w1_scan_host_pages)
 
 	zassert_true(count >= 2, "expected pages at 30 B (count %u)", count);
 	for (uint32_t p = 0; p < count; p++) {
-		zassert_equal(test_w1_scan_host_page(roms, 4, 9, p, out, 30, &len), 0, "page %u", p);
+		zassert_equal(test_w1_scan_host_page(roms, 4, 9, p, out, 30, &len), 0, "page %u",
+			      p);
 		zassert_true(len <= 30, "page %u: %zu B", p, len);
 		r = decode_resp(out, len);
 		zassert_equal(r.seq, 9, "seq");

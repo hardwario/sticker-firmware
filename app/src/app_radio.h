@@ -95,6 +95,13 @@ void app_radio_send_telemetry(void);
  * pre-send jitter, so it is the plain app_radio_p2p_send_telemetry(). */
 void app_radio_send_telemetry_now(void);
 
+/* The active radio retires a delivered command only on a matching answer: the
+ * P2P central keeps a 0x56 at the head of its queue and re-delivers it until a
+ * 0x55 with the same seq arrives (doc/p2p.md B4/S3). LoRaWAN downlinks are
+ * unconfirmed, so a command whose answer is an uplink of its own (force_send,
+ * sample) needs no reply there. */
+bool app_radio_needs_command_answer(void);
+
 /* Stage a command response for the next uplink. */
 int app_radio_queue_response(uint8_t port, const uint8_t *buf, size_t len);
 
