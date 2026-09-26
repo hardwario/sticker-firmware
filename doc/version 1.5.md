@@ -1082,10 +1082,34 @@ rollover (plain and split). `tests/history`: capture during a replay with evicti
 (absolute cursor), reset during a replay, RAM segment split / table overflow /
 retirement / clock-sync re-base, replay end at the window end. `tests/slot`: slot
 grid rounding, early/late runs, a 1.22 % slow kernel clock over 6 h, uptime → unix
-switch, RTC steps, interval change. Hardware acceptance (T1–T7 of the design
-proposal: 6 h debug drift, halt, replay across a capture tick, ring overflow,
-30 min power loss + DeviceTime, Portal gap fill, decoder parity) is still to be
-run on the bench.
+switch, RTC steps, interval change, and a run far off its slot re-anchoring.
+`tests/history_flash` also checks that a page of foreign data is skipped at
+mount (not erased) and does not hide a valid chain that wraps around the end of
+the partition.
+
+### Hardware acceptance (bench unit, 2026-09-25/26)
+
+Run on the bench STICKER against the ProXimos Hub (ChirpStack + Portal), on the
+debug RAM, debug-history-flash and release images:
+
+| Test | Result |
+|---|---|
+| F28 on the old code (debug-history-flash, 3 min halt + reset) | reproduced: post-boot records stamped −235 s |
+| Same with this change | post-boot records carry their real time |
+| v1 → v2 upgrade (same partition) | v1 pages mounted and exported next to new v2 pages |
+| Halt 6 min / 4 × 150 s (flash and RAM) | one new segment per halt, a hole instead of a shift; replay returns one frame per segment with the correct `t0`; the RAM segment table overflows cleanly |
+| Run 30 s off its slot after a halt | fixed during HIL: the record now carries its sampling time (was borrowing the nearest slot) |
+| Debug kernel drift, MSI PLL | −2 s over 6 h (1.22 % ≈ 267 s before); after 6 h the newest record is stamped within ~1 s of its sampling time, 340 consecutive 60 s steps in one segment |
+| DR0, 60 s, 91 min with duty-cycle restriction and forced rejoins | no re-anchor, no hole, no page closed early; replay at DR0 = 9 records per frame |
+| Release: 30 min ChirpStack outage + Portal auto backfill | one replay, 36 records at 60 s steps, times exact |
+| Release: `interval_report` change | history restarts at the new interval (unchanged, intended) |
+
+Not covered on hardware: the fix-up double word after a real power loss with the
+RTC unset (a J-Link reset keeps the RTC) — covered by `tests/history_flash`.
+Known and unchanged: a reset or power loss loses the ≤ 2 records still staged in
+RAM (one double word), and history is not preserved across a partition layout
+change (debug-history-flash ↔ release) — acceptable, history exists to bridge
+LoRaWAN outages, not as an archive across firmware updates.
 
 ---
 
