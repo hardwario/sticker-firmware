@@ -593,8 +593,14 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   frame or a real command is aborted mid-reception (§3.3) — which is why the
   pre-D2 node had to open for a 255 B worst case whenever anything was
   pending. At SF10 a 2 B GetInfo (17 B on air) drops the receiver-on from
-  **2434 ms to 468 ms**. With nothing pending the window is 23 B, sized for a
+  **2514 ms to 548 ms**. With nothing pending the window is 23 B, sized for a
   fully-extended ACK.
+  The window is 12 symbols (preamble catch) + the expected frame's ToA + a
+  **fixed 120 ms** trailing margin (F-P2P-2, bench 2026-09-26): the central's
+  lateness is a constant (a Northbridge Ack starts 65..78 ms after nominal
+  RX1, and the timeout starts ~22 ms late after the radio wake), so an
+  SF-scaled margin alone cut every SF7 Ack off mid-reception; 120 ms keeps
+  SF7 working for a central up to ~100 ms late.
 - **Retries**: unacknowledged uplinks retransmit **the same counter value**
   (byte-identical frame) up to 3 times with randomized backoff. The central
   treats `counter == high-water` as a duplicate: re-ACK, don't re-process.
