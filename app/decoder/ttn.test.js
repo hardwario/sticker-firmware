@@ -357,7 +357,7 @@ test("decodeUplink decodes get_info reset_cause_flags (fPort 85)", () => {
   assert.deepEqual(got.info.reset_cause_flags, ["pin", "power_on"]);
 });
 
-// Info carries lrw_state (field 12, mirrors app_lrw_state) and dev_eui (field 13,
+// Info carries lrw_state (field 12, mirrors app_radio_lrw_state) and dev_eui (field 13,
 // 8 bytes). Both are emitted over NFC only. Inner Info: fw 1.4.2,
 // lrw_state=2 (HEALTHY), dev_eui=0102030405060708.
 test("decodeUplink decodes get_info lrw_state + dev_eui (NFC)", () => {

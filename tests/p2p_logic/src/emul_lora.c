@@ -2,8 +2,8 @@
  * Copyright (c) 2026 HARDWARIO a.s.
  * SPDX-License-Identifier: Apache-2.0
  *
- * No-op fake LoRa driver so app_p2p.c links and DEVICE_DT_GET(DT_ALIAS(lora0))
- * resolves on native_sim. tests/p2p_logic exercises app_p2p.c's pure helpers
+ * No-op fake LoRa driver so app_radio_p2p.c links and DEVICE_DT_GET(DT_ALIAS(lora0))
+ * resolves on native_sim. tests/p2p_logic exercises app_radio_p2p.c's pure helpers
  * (framing, time-on-air, the duty governor), never the radio -- so every entry
  * point just returns success.
  */

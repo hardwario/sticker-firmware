@@ -15,7 +15,7 @@
 #include "app_version.h"
 #include "app_led.h"
 #include "app_log.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_nfc.h"
 #include "app_power.h"
 #include "app_report.h"
@@ -206,7 +206,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			 * LoRaWAN itself isn't compiled in (#118 phase 2 flash budget). */
 			nfc_result_before_reboot();
 #if defined(CONFIG_LORAWAN)
-			app_lrw_reset_nvm();
+			app_radio_lrw_reset_nvm();
 #endif /* defined(CONFIG_LORAWAN) */
 			LOG_WRN_REBOOTING("LoRaWAN NVM reset");
 			sys_reboot(SYS_REBOOT_COLD);
@@ -215,7 +215,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			/* Force a (re)join now, no reboot (#109). Same LoRaWAN-only
 			 * reachability note as above. */
 #if defined(CONFIG_LORAWAN)
-			app_lrw_join();
+			app_radio_lrw_join();
 #endif /* defined(CONFIG_LORAWAN) */
 			break;
 #endif /* defined(CONFIG_LORAWAN) */
@@ -584,12 +584,12 @@ int main(void)
 #if defined(CONFIG_LORAWAN)
 		/* Status LED reflects the active radio: P2P maps to HEALTHY (no
 		 * join), so the join/warning animations below stay LoRaWAN-only. */
-		enum app_lrw_state lrw_state = app_radio_get_state();
+		enum app_radio_lrw_state lrw_state = app_radio_get_state();
 
 		if (led_handled) {
 			/* NFC interaction (or a higher-priority indicator) owns the LED. */
-		} else if (lrw_state == APP_LRW_STATE_JOINING ||
-			   lrw_state == APP_LRW_STATE_RECONNECT) {
+		} else if (lrw_state == APP_RADIO_LRW_STATE_JOINING ||
+			   lrw_state == APP_RADIO_LRW_STATE_RECONNECT) {
 			/* Not on the network — initial join or a rejoin after the link was
 			 * lost (#278). This is the SEVERE LoRaWAN state (worse than WARNING,
 			 * which keeps its session), so it carries a red accent: one yellow
@@ -612,7 +612,7 @@ int main(void)
 				.repetitions = 1};
 			app_led_play(&req);
 			led_handled = true;
-		} else if (lrw_state == APP_LRW_STATE_WARNING) {
+		} else if (lrw_state == APP_RADIO_LRW_STATE_WARNING) {
 			/* Link-check streak failing but the session is still up (#278) — the
 			 * MILD network state. Two yellow blinks, no red (one step above
 			 * radio-off's single yellow, one below joining's yellow+red). */
@@ -622,7 +622,7 @@ int main(void)
 							.repetitions = 2};
 			app_led_blink(&req);
 			led_handled = true;
-		} else if (lrw_state == APP_LRW_STATE_DISABLED) {
+		} else if (lrw_state == APP_RADIO_LRW_STATE_DISABLED) {
 			/* Radio disabled by radio-mode (#271/#278): a single yellow blink — the
 			 * lowest rung of the yellow severity scale, since this is a deliberate
 			 * operator choice (radio-mode off/p2p), not a network fault. */
@@ -693,10 +693,10 @@ int main(void)
  * and, unlike app_radio_start() (boot-time bring-up), always forces a fresh
  * join attempt even if the radio already has a live session/pairing --
  * LoRaWAN already worked that way unconditionally; P2P needed the explicit
- * rejoin entry point since app_p2p_start() intentionally treats an existing
+ * rejoin entry point since app_radio_p2p_start() intentionally treats an existing
  * pairing as sufficient (a session persists across a normal power cycle,
  * doc/p2p.md §7). Mirrors the `send` fix below -- this used to call
- * app_lrw_join() directly and was compiled out on P2P-only builds. */
+ * app_radio_lrw_join() directly and was compiled out on P2P-only builds. */
 static int cmd_join(const struct shell *shell, size_t argc, char **argv)
 {
 	app_radio_rejoin();

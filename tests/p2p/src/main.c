@@ -13,9 +13,9 @@
  * via shell each bench session (a deliberate simplification -- this is a
  * bench tool, not a deployable image).
  *
- * Wire format mirrors app_p2p.c exactly. Kept in sync BY HAND -- this is a
+ * Wire format mirrors app_radio_p2p.c exactly. Kept in sync BY HAND -- this is a
  * deliberately separate, minimal firmware (only app_ccm.c is shared), not a
- * common module, so a wire-format change in app_p2p.c must be mirrored here:
+ * common module, so a wire-format change in app_radio_p2p.c must be mirrored here:
  *
  *   header:  net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | counter(4 BE)
  *
@@ -32,7 +32,7 @@
  * as AAD, nonce = counter(4 BE) | dev_addr(2 BE) | frame_type(1) |
  * direction(1) | 0*5. `p2p session <dev_nonce> <central_nonce>` derives
  * session_key from app_key + those nonces + dev_eui (see
- * derive_session_key() below, identical to app_p2p.c's) -- read
+ * derive_session_key() below, identical to app_radio_p2p.c's) -- read
  * dev_nonce/central_nonce off the join exchange this sim observed or
  * crafted; this sim does not track a join state machine itself.
  */
@@ -68,7 +68,7 @@ LOG_MODULE_REGISTER(p2p_gw_sim, LOG_LEVEL_INF);
 #define FRAME_MAX (HDR_LEN + MAX_BODY + TAG_LEN)
 
 /* Join handshake constants -- see the file header comment above and
- * app_p2p.c's identical P2P_JOIN_TAG_LABEL/P2P_JOINACCEPT_TAG_LABEL/
+ * app_radio_p2p.c's identical P2P_JOIN_TAG_LABEL/P2P_JOINACCEPT_TAG_LABEL/
  * P2P_SESSION_KEY_LABEL comment for the full rationale. */
 #define JOIN_TAG_LEN         16             /* full CMAC output; NOT TAG_LEN */
 #define JOIN_TAG_LABEL       "HIO-P2P-JOIN" /* 12 B -- JoinRequest tag */
@@ -86,7 +86,7 @@ static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 
 /* Radio config, applied by `p2p radio` and on every listen/tx toggle. Defaults
  * match the main app's p2p config group defaults (app_config.yml). BW125/CR4-5
- * are fixed, same as app_p2p.c -- the DUT and this sim must always agree. */
+ * are fixed, same as app_radio_p2p.c -- the DUT and this sim must always agree. */
 static uint32_t m_freq = 868100000;
 static uint8_t m_sf = SF_10;
 static int8_t m_tx_power = 14;
@@ -118,7 +118,7 @@ K_MSGQ_DEFINE(m_rx_msgq, sizeof(struct rx_msg), 4, 4);
 static struct k_work m_rx_work;
 
 /* Constant-time 16 B tag compare (mirrors app_ccm.c's app_ccm_auth_decrypt()
- * and app_p2p.c's p2p_tag_eq()) -- a short-circuiting memcmp() would leak
+ * and app_radio_p2p.c's p2p_tag_eq()) -- a short-circuiting memcmp() would leak
  * how many leading bytes matched via timing. Not a hard security boundary
  * for THIS bench tool (it isn't a protocol participant an attacker targets),
  * but kept constant-time anyway for consistency with the code it mirrors. */
@@ -153,7 +153,7 @@ static void cmac_tag(const char *label, const uint8_t *hdr_body, size_t hdr_body
 
 /* session_key = AES128-CMAC(app_key, "HIO-P2P-SES" || 0x01 || dev_nonce(4 BE)
  * || central_nonce(4 BE) || dev_eui(8, MSB-first) || zero-pad to 32 B) --
- * identical derivation to app_p2p.c's derive_session_key(). The last field was
+ * identical derivation to app_radio_p2p.c's derive_session_key(). The last field was
  * serial_number(4 BE) until #417 / GitLab #73. */
 static void derive_session_key(uint32_t dev_nonce, uint32_t central_nonce, uint8_t out[KEY_LEN])
 {

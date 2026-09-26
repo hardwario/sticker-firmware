@@ -16,7 +16,7 @@
 #include "app_config.h"
 #include "app_history.h"
 #include "app_led.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_sensor.h"
 #include "app_settings.h"
 
@@ -218,12 +218,12 @@ enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
 	return APP_ALARM_KIND_THRESHOLD;
 }
 
-enum app_lrw_state app_lrw_get_state(void)
+enum app_radio_lrw_state app_radio_lrw_get_state(void)
 {
-	return APP_LRW_STATE_HEALTHY;
+	return APP_RADIO_LRW_STATE_HEALTHY;
 }
 
-bool app_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+bool app_radio_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
 {
 	(void)rssi;
 	(void)snr;

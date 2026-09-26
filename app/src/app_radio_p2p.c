@@ -12,8 +12,8 @@
 #include "app_counters.h"
 #include "app_history.h"
 #include "app_log.h"
-#include "app_lrw.h"
-#include "app_p2p.h"
+#include "app_radio_lrw.h"
+#include "app_radio_p2p.h"
 #include "app_settings.h"
 #include "app_version.h"
 #include "app_wdog.h"
@@ -37,12 +37,12 @@
 #include <stdint.h>
 #include <string.h>
 
-LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 
 /* Internal helpers are `static` in the firmware but given external linkage
  * under CONFIG_ZTEST so tests/p2p_logic can unit-test the pure decision logic
  * (framing, time-on-air, the duty-cycle governor) directly, without a bench.
- * Same idiom as app_cmd.c's CONFIG_ZTEST test hook. See app_p2p.h. */
+ * Same idiom as app_cmd.c's CONFIG_ZTEST test hook. See app_radio_p2p.h. */
 #if defined(CONFIG_ZTEST)
 #define P2P_TESTABLE
 #else
@@ -86,7 +86,7 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * nothing to encrypt in either handshake frame, only to authenticate.
  */
 /* P2P_HDR_LEN / P2P_TAG_LEN / P2P_NONCE_LEN / P2P_KEY_LEN / P2P_DIR_TX /
- * P2P_DIR_RX / P2P_LORA_MTU / P2P_MAX_BODY / P2P_FRAME_MAX are in app_p2p.h
+ * P2P_DIR_RX / P2P_LORA_MTU / P2P_MAX_BODY / P2P_FRAME_MAX are in app_radio_p2p.h
  * (shared with tests/p2p_logic). */
 
 /* Pre-join fixed value (§5.3): both header fields are 0 until JoinAccept
@@ -114,7 +114,7 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 #define P2P_JOIN_TAG_LABEL       "HIO-P2P-JOIN" /* 12 B -- JoinRequest tag */
 #define P2P_JOINACCEPT_TAG_LABEL "HIO-P2P-ACC"  /* 11 B -- JoinAccept tag */
 /* P2P_JOIN_TAG_LEN (the full CMAC output; NOT P2P_TAG_LEN), and the join body
- * and frame lengths, live in app_p2p.h -- tests/p2p_logic shares them. */
+ * and frame lengths, live in app_radio_p2p.h -- tests/p2p_logic shares them. */
 
 /* session_key = AES128-CMAC(app_key, "HIO-P2P-SES" || 0x01 || dev_nonce(4 BE)
  * || central_nonce(4 BE) || dev_eui(8 B, MSB-first) || zero-pad to 32 B),
@@ -156,7 +156,7 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * count per hour -- see the header, and doc/p2p.md §6/§11 for both.
  */
 /* P2P_DUTY_WINDOW_MS / P2P_DUTY_BUDGET_MS / P2P_DUTY_LEDGER_ENTRIES are in
- * app_p2p.h (shared with tests). */
+ * app_radio_p2p.h (shared with tests). */
 
 #define P2P_FCNT_SUBTREE "p2pfc"
 #define P2P_FCNT_KEY     "p2pfc/base"
@@ -209,14 +209,14 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * generalization). */
 #define P2P_PRODUCT_TYPE_STICKER 1
 
-/* JoinAccept body (§5.3, in app_p2p.h): net_id(4 BE) | dev_addr(2 BE) |
+/* JoinAccept body (§5.3, in app_radio_p2p.h): net_id(4 BE) | dev_addr(2 BE) |
  * central_nonce(4 BE) | rx1_delay_s(1) | reserved(4) -- reserved is the v2
  * data-channel assignment hook (§11), unused/ignored today. Unchanged by
  * #417: the JoinAccept carries no identity field at all. */
 
 /* P2P_JOIN_BOOT_WINDOW_MS (§5.2, the unpaired retry deadline) and
  * P2P_JOIN_RETRY_JITTER_MS (§5.3, so devices booting together don't collide on
- * retry) live in app_p2p.h -- tests/p2p_logic checks the wait against them. */
+ * retry) live in app_radio_p2p.h -- tests/p2p_logic checks the wait against them. */
 
 /* SF range the join sweep tries when the configured SF finds no Hub (B-2). The
  * SF is network-wide and the Hub owns it, so a Hub that changed it leaves every
@@ -281,7 +281,7 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
  * self-describing: the node derives the body length from the received frame
  * length, so no wire version is needed (P2P is pre-deployment). */
 /* P2P_ACK_FLAG_PENDING / P2P_ACK_FLAG_TIME / P2P_ACK_BODY_BASE_LEN /
- * P2P_ACK_TIME_LEN / P2P_ACK_BODY_MAX_LEN are in app_p2p.h (shared with the
+ * P2P_ACK_TIME_LEN / P2P_ACK_BODY_MAX_LEN are in app_radio_p2p.h (shared with the
  * pure p2p_parse_ack_body() helper and tests/p2p_logic). */
 
 /* Unacknowledged uplinks retransmit the SAME counter (byte-identical frame)
@@ -313,7 +313,7 @@ LOG_MODULE_REGISTER(app_p2p, LOG_LEVEL_INF);
 
 static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 
-/* 4096 B, the same as app_lrw.c's own m_work_q -- and for the same reason: both
+/* 4096 B, the same as app_radio_lrw.c's own m_work_q -- and for the same reason: both
  * queues run app_cmd_handle().
  *
  * This was 2048 B while the queue only did raw lora_send()/lora_config(),
@@ -371,7 +371,7 @@ static uint32_t m_fcnt;          /* next counter value to use */
 static uint32_t m_fcnt_reserved; /* persisted high-water; m_fcnt < this is durable */
 
 /* --- Join/session state (#118 phase 2, doc/p2p.md §5.3) --- */
-/* enum p2p_link_state is public (app_p2p.h) so app_p2p_get_info() can report it. */
+/* enum p2p_link_state is public (app_radio_p2p.h) so app_radio_p2p_get_info() can report it. */
 static enum p2p_link_state m_link_state = P2P_LINK_UNPAIRED;
 static uint32_t m_net_id;   /* 0 (pre-join) until PAIRED */
 static uint16_t m_dev_addr; /* 0 (pre-join) until PAIRED */
@@ -390,7 +390,7 @@ static int64_t m_join_started_at; /* uptime ms; start of the current boot join w
  * must read THIS rather than the config, or the two drift apart mid-join.
  * Initialised to the app_config.yml default rather than left at 0, so the
  * 2^SF arithmetic in p2p_toa_ms()/rx1_preamble_catch_ms() can never run on a
- * zero SF if anything reads it before app_p2p_init() gets past its settings
+ * zero SF if anything reads it before app_radio_p2p_init() gets past its settings
  * loads to the seeding line. */
 static uint8_t m_sf = SF_10;
 
@@ -510,8 +510,8 @@ K_MSGQ_DEFINE(m_rx_msgq, sizeof(struct p2p_rx_msg), P2P_RX_QUEUE_DEPTH, 4);
  * earlier join_key-rooted design could always fall back on).
  *
  * So the radio must not come up at all until the device is provisioned --
- * see app_p2p_start()/app_p2p_rejoin(). Refusing loudly rather than silently
- * idling follows radio_disabled()'s rule in app_lrw.c (#271/#98): a
+ * see app_radio_p2p_start()/app_radio_p2p_rejoin(). Refusing loudly rather than silently
+ * idling follows radio_disabled()'s rule in app_radio_lrw.c (#271/#98): a
  * provisioning problem should surface, not masquerade as a radio that is
  * merely off. */
 static bool app_key_is_set(void)
@@ -529,7 +529,7 @@ static bool app_key_is_set(void)
  * session-key KDF, so an all-zero one is not a cosmetic gap.
  *
  * All-zero is a legitimate state today -- it is what an unprovisioned device
- * has, and app_lrw.c treats it as a reason to stay radio-silent rather than an
+ * has, and app_radio_lrw.c treats it as a reason to stay radio-silent rather than an
  * error. Without this guard a P2P node would happily transmit JoinRequests
  * carrying eight zero bytes, which no central can have registered, and the
  * only symptom would be a node that joins forever. Refuse for the same reason
@@ -797,7 +797,7 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
  * -- the central has already dropped the session, so every further uplink
  * would be shouting at a network that is no longer listening. Clearing
  * m_started is what stops the report cadence: app_report.c::run_report gates
- * the uplink on app_radio_is_ready() -> app_p2p_is_ready() -> m_started, so
+ * the uplink on app_radio_is_ready() -> app_radio_p2p_is_ready() -> m_started, so
  * the cadence timer keeps running harmlessly while nothing is transmitted.
  *
  * The queues are purged because their frames are encrypted -- or about to be
@@ -1232,7 +1232,7 @@ P2P_TESTABLE int64_t p2p_join_slow_jitter_ms(int64_t wait_ms, int64_t duty_wait_
 	return MAX(jittered, duty_wait_ms > 0 ? duty_wait_ms : 0);
 }
 
-/* Parse a decrypted Ack body (app_p2p.h): flags|rssi|snr, optionally followed
+/* Parse a decrypted Ack body (app_radio_p2p.h): flags|rssi|snr, optionally followed
  * by the pending 0x56's on-air length (D2) and/or a big-endian Unix time tail.
  *
  * The LENGTH decides the shape and the flags only refine it, never the other
@@ -1292,7 +1292,7 @@ P2P_TESTABLE bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struc
 	return true;
 }
 
-/* Parse JoinAccept's reserved(4) radio assignment (D3, app_p2p.h):
+/* Parse JoinAccept's reserved(4) radio assignment (D3, app_radio_p2p.h):
  * channel_idx | sf | tx_power | flags. Every unsupported or out-of-range field
  * is warned about and ignored rather than refused -- a JoinAccept is otherwise
  * valid and authenticated, and refusing to pair over a byte this release
@@ -1402,7 +1402,7 @@ static bool join_sweep_advance(void)
 }
 
 /* Persist the SF a JoinAccept actually arrived on, when it is not the one the
- * config names. app_p2p_start()'s PAIRED shortcut never joins, so without this
+ * config names. app_radio_p2p_start()'s PAIRED shortcut never joins, so without this
  * a node that swept its way onto the network would come up on the stale
  * configured SF after a reboot with nothing left to re-discover it; persisting
  * an UNCHANGED SF, on the other hand, is a pointless flash write on every
@@ -1432,12 +1432,12 @@ P2P_TESTABLE int p2p_join_adopt_sf(uint8_t joined_sf)
  * which retry policy join_work_handler() opens with: the fast one runs with
  * tight jitter until the 120 s boot window closes and then hands over to the
  * slow policy (§5.2); the slow one starts there directly, on exponential
- * backoff (§7). Neither gives up. Shared by app_p2p_start(), app_p2p_rejoin()
+ * backoff (§7). Neither gives up. Shared by app_radio_p2p_start(), app_radio_p2p_rejoin()
  * (shell), and the self-heal trigger below. */
 static void start_join_episode(bool slow)
 {
 	/* The sweep state and m_sf are seeded by join_work_handler instead, on
-	 * m_work_q: app_p2p_rejoin() reaches here from the shell thread, which
+	 * m_work_q: app_radio_p2p_rejoin() reaches here from the shell thread, which
 	 * may be running while m_work_q sits blocked in lora_recv(), and a
 	 * retune from under it would leave the radio and m_sf disagreeing. */
 	m_join_episode_fresh = true;
@@ -1547,7 +1547,7 @@ static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len,
 		return -EMSGSIZE;
 	}
 	if (m_link_state != P2P_LINK_PAIRED) {
-		/* Callers gate on app_p2p_is_ready(), so this should never happen --
+		/* Callers gate on app_radio_p2p_is_ready(), so this should never happen --
 		 * defensive only (no session_key to encrypt the data plane under
 		 * yet). */
 		LOG_ERR("TX skipped: not paired (#118 phase 2)");
@@ -1614,7 +1614,7 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, ui
  * settings save must not have it happen before the 0x55 RESPONSE has actually
  * left and been acknowledged, or the operator gets no answer and (for
  * settings_save) the staged config is lost. Same problem and same shape as
- * app_lrw.c's post_cmd_work_handler(); the log strings are deliberately
+ * app_radio_lrw.c's post_cmd_work_handler(); the log strings are deliberately
  * identical so one bench anchor matches both transports.
  *
  * The wait is bounded: a permanently failing TX must not postpone the
@@ -1634,7 +1634,7 @@ static enum app_cmd_action m_post_cmd_action;
 static uint8_t m_post_cmd_deferrals;
 static struct k_work_delayable m_post_cmd_work;
 
-/* Kept in lockstep with app_lrw.c::post_cmd_work_handler() and main.c's NFC
+/* Kept in lockstep with app_radio_lrw.c::post_cmd_work_handler() and main.c's NFC
  * equivalent so the three dispatch tables cannot drift. Only the actions a
  * 0x56 can actually reach appear here (app_cmd.c::app_cmd_dispatch leaves
  * exactly these ungated for APP_CMD_TRANSPORT_P2P); everything else is
@@ -1676,7 +1676,7 @@ static void post_cmd_work_handler(struct k_work *work)
 		 * so honour it where the stack exists, and say so where it does
 		 * not (the bench image builds with CONFIG_RADIO_LORAWAN=n). */
 #if defined(CONFIG_LORAWAN)
-		app_lrw_reset_nvm();
+		app_radio_lrw_reset_nvm();
 		LOG_WRN_REBOOTING("command: LoRaWAN NVM wipe");
 		sys_reboot(SYS_REBOOT_COLD);
 #else
@@ -1731,7 +1731,7 @@ static void page_stream_work_handler(struct k_work *work)
 		LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
 		return;
 	}
-	(void)app_p2p_queue_response(0, buf, len);
+	(void)app_radio_p2p_queue_response(0, buf, len);
 	k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
 				  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
 }
@@ -1775,7 +1775,7 @@ static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
 	}
 
 	if (resp_len > 0) {
-		(void)app_p2p_queue_response(0, resp, resp_len);
+		(void)app_radio_p2p_queue_response(0, resp, resp_len);
 	}
 
 	if (action == APP_CMD_ACTION_PAGE_STREAM) {
@@ -1800,7 +1800,7 @@ static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
 
 #if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
 	/* The deepest thing this queue ever does (see m_work_stack's comment),
-	 * so this is where its real high-water shows. Same probe app_lrw.c keeps
+	 * so this is where its real high-water shows. Same probe app_radio_lrw.c keeps
 	 * at the end of its own command handler. */
 	size_t unused;
 
@@ -1875,7 +1875,8 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	size_t body_len = (size_t)len - P2P_HDR_LEN - P2P_TAG_LEN;
 
 	/* --- Link control (§5.4): Detach (0xFD) / RejoinRequest (0xFE) --- */
-	if (frame_type == APP_P2P_FRAME_DETACH || frame_type == APP_P2P_FRAME_REJOIN_REQUEST) {
+	if (frame_type == APP_RADIO_P2P_FRAME_DETACH ||
+	    frame_type == APP_RADIO_P2P_FRAME_REJOIN_REQUEST) {
 		if (body_len != 0) {
 			return false; /* both are empty-bodied on the wire */
 		}
@@ -1904,7 +1905,7 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 			return false;
 		}
 
-		if (frame_type == APP_P2P_FRAME_DETACH) {
+		if (frame_type == APP_RADIO_P2P_FRAME_DETACH) {
 			LOG_WRN("Detach received (counter %u): pairing cleared, radio idle "
 				"until reboot or `join`",
 				counter);
@@ -1934,7 +1935,7 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	}
 
 	/* --- B4: a 0x56 COMMAND takes this window instead of the Ack --- */
-	if (frame_type == APP_P2P_FRAME_COMMAND) {
+	if (frame_type == APP_RADIO_P2P_FRAME_COMMAND) {
 		uint8_t nonce[P2P_NONCE_LEN];
 		uint8_t body[P2P_MAX_BODY];
 
@@ -1961,7 +1962,7 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	/* --- Ack (0xFA): rssi/snr + optional pending length and time tail --- */
 	/* Bound the body before spending a decrypt; p2p_parse_ack_body() below
 	 * does the exact 3/4/7/8 validation once the plaintext is in hand. */
-	if (frame_type != APP_P2P_FRAME_ACK || body_len < P2P_ACK_BODY_BASE_LEN ||
+	if (frame_type != APP_RADIO_P2P_FRAME_ACK || body_len < P2P_ACK_BODY_BASE_LEN ||
 	    body_len > P2P_ACK_BODY_MAX_LEN) {
 		return false;
 	}
@@ -2152,7 +2153,7 @@ static void send_work_handler(struct k_work *work)
 		return;
 	}
 
-	/* MED-9, the P2P twin of app_lrw.c's gate: a history replay owns the radio,
+	/* MED-9, the P2P twin of app_radio_lrw.c's gate: a history replay owns the radio,
 	 * so don't inject telemetry into the middle of it. Interleaved frames burn
 	 * the duty ledger and the confirmed-uplink Ack slot that the replay's own
 	 * retries need, and they break the run of frames the host is reassembling.
@@ -2182,7 +2183,7 @@ static void send_work_handler(struct k_work *work)
 		if (len == 0) {
 			return; /* nothing to report */
 		}
-		if (send_confirmed(APP_P2P_FRAME_TELEMETRY, buf, len) != 0) {
+		if (send_confirmed(APP_RADIO_P2P_FRAME_TELEMETRY, buf, len) != 0) {
 			return; /* duty cycle / unacked / radio error — drop the rest of the
 				 * snapshot */
 		}
@@ -2264,8 +2265,8 @@ static void rx_work_handler(struct k_work *work)
 		 * this listen mode has no peer's session_key to try, and there is no
 		 * longer a join_key fallback either (#118 phase 2 revision), so such
 		 * a frame can never be decoded here and is just noted. */
-		if (frame_type == APP_P2P_FRAME_JOIN_REQUEST ||
-		    frame_type == APP_P2P_FRAME_JOIN_ACCEPT) {
+		if (frame_type == APP_RADIO_P2P_FRAME_JOIN_REQUEST ||
+		    frame_type == APP_RADIO_P2P_FRAME_JOIN_ACCEPT) {
 			if (msg.len < P2P_HDR_LEN + P2P_JOIN_TAG_LEN) {
 				LOG_WRN("RX runt join frame (%u B)", msg.len);
 				continue;
@@ -2275,8 +2276,8 @@ static void rx_work_handler(struct k_work *work)
 
 			LOG_INF("RX %s from addr %u, ctr %u (RSSI %d dBm, SNR %d dB, %zu B "
 				"body)",
-				frame_type == APP_P2P_FRAME_JOIN_REQUEST ? "JoinRequest"
-									 : "JoinAccept",
+				frame_type == APP_RADIO_P2P_FRAME_JOIN_REQUEST ? "JoinRequest"
+									       : "JoinAccept",
 				dev_addr, counter, msg.rssi, msg.snr, body_len);
 			LOG_HEXDUMP_INF(&msg.buf[P2P_HDR_LEN], body_len,
 					"P2P join body (cleartext, tag not verified):");
@@ -2309,7 +2310,7 @@ static void p2p_recv_cb(const struct device *dev, uint8_t *data, uint16_t size, 
 	k_work_submit_to_queue(&m_work_q, &m_rx_work);
 }
 
-int app_p2p_listen(bool enable)
+int app_radio_p2p_listen(bool enable)
 {
 	if (enable == m_listening) {
 		return 0;
@@ -2374,14 +2375,14 @@ static void join_request_build(uint32_t nonce_val, uint8_t frame[P2P_JOIN_REQ_LE
 {
 	sys_put_be32(P2P_PREJOIN_NET_ID, &frame[0]);
 	sys_put_be16(P2P_PREJOIN_DEV_ADDR, &frame[4]);
-	frame[6] = APP_P2P_FRAME_JOIN_REQUEST;
+	frame[6] = APP_RADIO_P2P_FRAME_JOIN_REQUEST;
 	sys_put_be32(nonce_val, &frame[7]);
 
 	uint8_t *body = &frame[P2P_HDR_LEN];
 
 	body[0] = P2P_PRODUCT_TYPE_STICKER;
 	body[1] = APP_PROTO_VERSION;
-	/* MSB-first -- see P2P_JOIN_REQ_BODY_LEN in app_p2p.h for why this is a
+	/* MSB-first -- see P2P_JOIN_REQ_BODY_LEN in app_radio_p2p.h for why this is a
 	 * plain memcpy and not LoRaMac's OTAA byte order. */
 	memcpy(&body[2], g_app_config.lrw_deveui, sizeof(g_app_config.lrw_deveui));
 	body[10] = APP_VERSION_MAJOR;
@@ -2493,7 +2494,7 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	uint32_t counter = sys_get_be32(&buf[7]);
 
 	if (net_id_hdr != P2P_PREJOIN_NET_ID || dev_addr_hdr != P2P_PREJOIN_DEV_ADDR ||
-	    frame_type != APP_P2P_FRAME_JOIN_ACCEPT || counter != dev_nonce) {
+	    frame_type != APP_RADIO_P2P_FRAME_JOIN_ACCEPT || counter != dev_nonce) {
 		LOG_WRN("JoinAccept: header mismatch (type %u, ctr %u, want ctr %u)", frame_type,
 			counter, dev_nonce);
 		return -EBADMSG;
@@ -2659,7 +2660,7 @@ static void join_work_handler(struct k_work *work)
 }
 
 /* ======================================================================== */
-/* Watchdog heartbeat (mirrors app_lrw.c's m_work_q liveness pattern)        */
+/* Watchdog heartbeat (mirrors app_radio_lrw.c's m_work_q liveness pattern)        */
 /* ======================================================================== */
 
 #if defined(CONFIG_WATCHDOG)
@@ -2674,7 +2675,7 @@ static void heartbeat_work_handler(struct k_work *work)
 
 /* ======================================================================== */
 /* History replay (req_history, tag 11) -- P2P device-driven HistoryFrame    */
-/* stream; mirror of app_lrw's replay state machine, transmit path only.     */
+/* stream; mirror of app_radio_lrw's replay state machine, transmit path only.     */
 /* ======================================================================== */
 
 /* One frame per work invocation, rescheduled FRAME_GAP apart so the exact
@@ -2687,7 +2688,7 @@ static void heartbeat_work_handler(struct k_work *work)
 static struct k_work_delayable m_hist_work;
 static uint32_t m_hist_from, m_hist_to, m_hist_seq;
 static uint32_t m_hist_count, m_hist_idx;
-/* Absolute record ordinals (app_history_span()), as in app_lrw: next record to
+/* Absolute record ordinals (app_history_span()), as in app_radio_lrw: next record to
  * send and the end of the replay (exclusive), snapshot at start. Captures keep
  * appending during a replay and the RAM ring may evict under it, but an
  * absolute cursor names the same record throughout, so nothing is repeated or
@@ -2727,7 +2728,7 @@ static void hist_work_handler(struct k_work *work)
 	if (!m_hist_active) {
 		return;
 	}
-	if (!app_p2p_is_ready()) {
+	if (!app_radio_p2p_is_ready()) {
 		LOG_WRN("History replay aborted: P2P not ready");
 		/* Via p2p_history_finish() like every other exit: clearing the two
 		 * flags by hand skipped the m_ready_cb() kick, so the report cadence
@@ -2757,7 +2758,7 @@ static void hist_work_handler(struct k_work *work)
 			LOG_INF("P2P history replay complete: %u frames", (unsigned)m_hist_idx);
 		} else {
 			/* Not reachable with the fixed P2P body budget (the cap never
-			 * shrinks mid-replay), unlike app_lrw's DR-driven one. */
+			 * shrinks mid-replay), unlike app_radio_lrw's DR-driven one. */
 			LOG_WRN("P2P history replay stop at frame %u (cap=%uB)",
 				(unsigned)m_hist_idx, (unsigned)cap);
 		}
@@ -2777,7 +2778,7 @@ static void hist_work_handler(struct k_work *work)
 		return;
 	}
 
-	ret = send_confirmed(APP_P2P_FRAME_RESPONSE, m_hist_tx_buf, len);
+	ret = send_confirmed(APP_RADIO_P2P_FRAME_RESPONSE, m_hist_tx_buf, len);
 	if (ret == -EAGAIN) {
 		/* Duty-cycle blocked: retry the SAME frame, bounded so a persistently
 		 * rejected frame cannot wedge the replay forever. */
@@ -2807,7 +2808,7 @@ static void hist_work_handler(struct k_work *work)
 	 * up-front count is only an estimate; the host concatenates by frame_index.
 	 * The export already skips to the next record in the window, so the frame
 	 * carrying the window's last record ends the replay here — no trailing
-	 * empty attempt (H-4, as app_lrw). */
+	 * empty attempt (H-4, as app_radio_lrw). */
 	if (m_hist_cursor < m_hist_end) {
 		k_work_schedule_for_queue(&m_work_q, &m_hist_work,
 					  K_SECONDS(P2P_HIST_FRAME_GAP_SEC));
@@ -2817,9 +2818,9 @@ static void hist_work_handler(struct k_work *work)
 	}
 }
 
-bool app_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+bool app_radio_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
 {
-	if (!app_p2p_is_ready()) {
+	if (!app_radio_p2p_is_ready()) {
 		LOG_WRN("History replay requested but P2P not ready; ignoring");
 		return false;
 	}
@@ -2876,11 +2877,11 @@ bool app_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t
 
 #if defined(CONFIG_ZTEST)
 /* Test hooks for the B8 history replay: start the work queue and the replay work
- * item the way app_p2p_init() does, mark P2P ready, and read back the replay
+ * item the way app_radio_p2p_init() does, mark P2P ready, and read back the replay
  * cursor so a test can see whether a second start disturbed a stream already in
  * flight. */
 /* Bring up the work queue and its work items once per test binary, the way
- * app_p2p_init() does. Shared by every setup hook below: k_work_queue_start()
+ * app_radio_p2p_init() does. Shared by every setup hook below: k_work_queue_start()
  * on an already-running queue is undefined, and the suite runs many tests. */
 static void test_queue_start_once(void)
 {
@@ -3035,7 +3036,7 @@ void p2p_test_get_replay(bool *active, uint32_t *seq, uint32_t *cursor, uint32_t
 /* Public API                                                                */
 /* ======================================================================== */
 
-int app_p2p_init(void)
+int app_radio_p2p_init(void)
 {
 	if (!device_is_ready(m_lora_dev)) {
 		LOG_ERR("LoRa device not ready");
@@ -3069,7 +3070,7 @@ int app_p2p_init(void)
 
 	/* The configured SF is also the discovered one: a join that swept onto a
 	 * different SF persisted it here (p2p_join_adopt_sf), so a PAIRED boot --
-	 * which app_p2p_start() takes without joining -- comes up on the SF the
+	 * which app_radio_p2p_start() takes without joining -- comes up on the SF the
 	 * network is actually using. If that persist had failed, this boots on the
 	 * stale value, the uplinks go unacknowledged, and the self-heal episode's
 	 * sweep re-discovers it after P2P_REJOIN_FAIL_THRESHOLD cycles: slow
@@ -3112,7 +3113,7 @@ int app_p2p_init(void)
 	return 0;
 }
 
-void app_p2p_start(void)
+void app_radio_p2p_start(void)
 {
 	/* No usable root key -- see app_key_is_set() above for why this refuses
 	 * outright instead of trying.
@@ -3155,22 +3156,22 @@ void app_p2p_start(void)
 	}
 
 	/* Unpaired: kick off the boot-window join handshake (#118 phase 2,
-	 * §5.2). app_p2p_is_ready() only goes true once JoinAccept lands
+	 * §5.2). app_radio_p2p_is_ready() only goes true once JoinAccept lands
 	 * (mark_ready(), called from join_work_handler()). */
 	start_join_episode(false);
 }
 
-bool app_p2p_is_ready(void)
+bool app_radio_p2p_is_ready(void)
 {
 	return m_started;
 }
 
-uint8_t app_p2p_get_max_payload(void)
+uint8_t app_radio_p2p_get_max_payload(void)
 {
 	return P2P_MAX_BODY;
 }
 
-void app_p2p_send_telemetry(void)
+void app_radio_p2p_send_telemetry(void)
 {
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
 }
@@ -3199,31 +3200,31 @@ static int queue_frame(uint8_t type, const uint8_t *buf, size_t len)
 	return 0;
 }
 
-int app_p2p_queue_response(uint8_t port, const uint8_t *buf, size_t len)
+int app_radio_p2p_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 {
 	ARG_UNUSED(port); /* P2P has no fPort; frame_type carries the equivalent */
-	return queue_frame(APP_P2P_FRAME_RESPONSE, buf, len);
+	return queue_frame(APP_RADIO_P2P_FRAME_RESPONSE, buf, len);
 }
 
-int app_p2p_send_alarm(const uint8_t *buf, size_t len)
+int app_radio_p2p_send_alarm(const uint8_t *buf, size_t len)
 {
-	return queue_frame(APP_P2P_FRAME_ALARM, buf, len);
+	return queue_frame(APP_RADIO_P2P_FRAME_ALARM, buf, len);
 }
 
-void app_p2p_register_ready_cb(void (*cb)(void))
+void app_radio_p2p_register_ready_cb(void (*cb)(void))
 {
 	m_ready_cb = cb;
 }
 
-void app_p2p_suspend(void)
+void app_radio_p2p_suspend(void)
 {
 	/* Nothing queued survives a poweroff -- the work queue itself (including
 	 * any pending m_join_work retry, #118 phase 2) is torn down with the
-	 * reboot that follows deep-sleep entry, same as app_lrw_suspend() relies
+	 * reboot that follows deep-sleep entry, same as app_radio_lrw_suspend() relies
 	 * on for its own timers. No-op today; kept as an explicit facade hook. */
 }
 
-void app_p2p_get_info(struct app_p2p_info *info)
+void app_radio_p2p_get_info(struct app_radio_p2p_info *info)
 {
 	info->link_state = m_link_state;
 	info->net_id = m_net_id;
@@ -3248,9 +3249,9 @@ void app_p2p_get_info(struct app_p2p_info *info)
 
 #if defined(CONFIG_SHELL)
 
-void app_p2p_rejoin(void)
+void app_radio_p2p_rejoin(void)
 {
-	/* Same gate as app_p2p_start() -- the shell must not be a way around it
+	/* Same gate as app_radio_p2p_start() -- the shell must not be a way around it
 	 * (a JoinRequest tagged under an all-zero app_key is forgeable by
 	 * anyone; see app_key_is_set()). */
 	if (!app_key_is_set()) {
@@ -3266,7 +3267,7 @@ void app_p2p_rejoin(void)
 	start_join_episode(false);
 }
 
-int app_p2p_unjoin(void)
+int app_radio_p2p_unjoin(void)
 {
 	int ret = pairing_clear();
 
@@ -3277,13 +3278,13 @@ int app_p2p_unjoin(void)
 	return 0;
 }
 
-void app_p2p_debug_set_rx1_delay(uint8_t rx1_delay_s)
+void app_radio_p2p_debug_set_rx1_delay(uint8_t rx1_delay_s)
 {
 	m_rx1_delay_s = rx1_delay_s;
 	LOG_WRN("Debug: rx1_delay override -> %u s (not persisted)", rx1_delay_s);
 }
 
-void app_p2p_debug_drop_acks(uint32_t count)
+void app_radio_p2p_debug_drop_acks(uint32_t count)
 {
 	m_debug_drop_acks = count;
 	LOG_WRN("Debug: forcing next %u Ack(s) to appear dropped", count);
@@ -3320,11 +3321,11 @@ static void debug_compose_work_handler(struct k_work *work)
 		return;
 	}
 
-	res->ret = build_frame(APP_P2P_FRAME_TELEMETRY, body, body_len, m_fcnt, res->frame);
+	res->ret = build_frame(APP_RADIO_P2P_FRAME_TELEMETRY, body, body_len, m_fcnt, res->frame);
 	res->frame_len = P2P_HDR_LEN + body_len + P2P_TAG_LEN;
 }
 
-int app_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, bool *more)
+int app_radio_p2p_debug_compose(uint8_t *out, size_t out_size, size_t *out_len, bool *more)
 {
 	struct p2p_compose_result *res = &m_debug_compose_result;
 

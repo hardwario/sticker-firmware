@@ -281,7 +281,7 @@ ZTEST(ccm, test_cmac_rfc4493_vectors)
 /* #417 / GitLab #73: known-answer vector for the P2P transport's session_key
  * = AES128-CMAC(app_key, "HIO-P2P-SES" || 0x01 || dev_nonce(4 BE) ||
  * central_nonce(4 BE) || dev_eui(8 B, MSB-first) || zero-pad to 32 B) -- pins
- * app_p2p.c's derive_session_key() construction. The last field was
+ * app_radio_p2p.c's derive_session_key() construction. The last field was
  * serial_number(4 BE) until #417 took the serial off the air; the input went
  * 24 -> 28 octets and is still padded to 32, so it is still two CMAC blocks.
  *
@@ -311,8 +311,8 @@ ZTEST(ccm, test_session_key_known_answer)
 
 /* #417 / GitLab #73: known-answer vectors for the JoinRequest/JoinAccept
  * plain-CMAC handshake tags -- tag = AES128-CMAC(app_key, label || header ||
- * body), pins app_p2p.c's join_request_build()/recv_join_accept() tag
- * construction (deliberately NOT AES-CCM -- see app_p2p.c's
+ * body), pins app_radio_p2p.c's join_request_build()/recv_join_accept() tag
+ * construction (deliberately NOT AES-CCM -- see app_radio_p2p.c's
  * P2P_JOIN_TAG_LABEL comment).
  *
  * Same fixture as test_session_key_known_answer above:

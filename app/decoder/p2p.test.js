@@ -2,9 +2,9 @@
 // Run: `node --test` (Node >= 18, zero dependencies).
 //
 // The frame format and AES-CCM nonce/AAD layout here are the wire contract with
-// app_p2p.c -- a round-trip through encode/decode pins them so the firmware and
+// app_radio_p2p.c -- a round-trip through encode/decode pins them so the firmware and
 // the reference receiver can never silently drift apart. Same for the
-// deriveSessionKey()/joinTag() known-answer vectors against app_p2p.c's
+// deriveSessionKey()/joinTag() known-answer vectors against app_radio_p2p.c's
 // derive_session_key() and send_join_request()/recv_join_accept() (#118
 // phase 2 revision, proximos-v2 MR!7 §7).
 

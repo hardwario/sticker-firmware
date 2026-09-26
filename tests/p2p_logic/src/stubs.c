@@ -2,12 +2,12 @@
  * Copyright (c) 2026 HARDWARIO a.s.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Minimal stubs so app_p2p.c links on native_sim: the global config it reads
+ * Minimal stubs so app_radio_p2p.c links on native_sim: the global config it reads
  * and the app_compose entry points it calls. The pure-logic tests never drive
  * a real send/compose, so these can be trivial. app_ccm.c is the REAL source
  * (linked in CMakeLists) -- the frame codec tests need genuine CCM.
  *
- * The B8 history-replay tests reference app_p2p_start_history_replay, which
+ * The B8 history-replay tests reference app_radio_p2p_start_history_replay, which
  * makes the whole replay call graph live (it is otherwise dropped by
  * --gc-sections, which is why this file used to need only three stubs). Hence
  * the app_history and app_cmd set below: inert by default, with a couple of
@@ -169,7 +169,7 @@ int app_cmd_handle(int transport, const uint8_t *in, size_t in_len, uint8_t *out
 	return 0;
 }
 
-/* #425 page stream (the P2P driver in app_p2p.c): no stream in these tests. */
+/* #425 page stream (the P2P driver in app_radio_p2p.c): no stream in these tests. */
 int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
 {
 	ARG_UNUSED(out);

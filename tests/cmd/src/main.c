@@ -1655,7 +1655,7 @@ ZTEST(cmd, test_history_sample_capacity_is_exact)
 
 	memset(samples, 0x5A, sizeof(samples));
 
-	/* Worst-case varints, mirroring history_frame_cap() in app_lrw.c. cap is
+	/* Worst-case varints, mirroring history_frame_cap() in app_radio_lrw.c. cap is
 	 * bounded by out_cap minus the frame envelope and by the samples field size
 	 * (440 B, #260) — for this out_cap the buffer, not the field, binds. */
 	size_t cap = app_cmd_history_sample_capacity(200, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0x7,

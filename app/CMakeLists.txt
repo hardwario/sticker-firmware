@@ -67,11 +67,10 @@ include(nanopb)
 zephyr_nanopb_sources(app src/app_config.proto)
 
 target_sources_ifdef(CONFIG_ADC app PRIVATE src/app_battery.c)
-target_sources_ifdef(CONFIG_RADIO_P2P app PRIVATE src/app_p2p.c)
+target_sources_ifdef(CONFIG_RADIO_P2P app PRIVATE src/app_radio_p2p.c)
 target_sources_ifdef(CONFIG_DS28E17 app PRIVATE src/app_machine_probe.c)
 target_sources_ifdef(CONFIG_LIS2DH app PRIVATE src/app_accel.c)
-target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw.c)
-target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_lrw_stale.c)
+target_sources_ifdef(CONFIG_LORAWAN app PRIVATE src/app_radio_lrw.c)
 # app_report.c owns the periodic sample/history cadence via app_radio, not
 # just the LoRaWAN uplink -- compiled unconditionally so sampling,
 # history capture and store-and-forward keep working with no radio linked in

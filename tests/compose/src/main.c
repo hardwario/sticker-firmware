@@ -372,7 +372,7 @@ ZTEST(compose, test_budget_unknown_pre_join)
 
 	set_clean();
 	g_app_sensor_data.temperature = 20.0f;
-	test_budget = 0; /* app_lrw_get_max_payload() == 0 -> pre-join */
+	test_budget = 0; /* app_radio_lrw_get_max_payload() == 0 -> pre-join */
 	int ret = app_compose(buf, sizeof(buf), &len, &more);
 
 	zassert_equal(ret, -EAGAIN, "expected -EAGAIN, got %d", ret);
@@ -386,7 +386,7 @@ ZTEST(compose, test_reset_after_abandon_forces_fresh_snapshot)
 	size_t len;
 	bool more;
 
-	/* #340 M6: app_lrw.c's tx_telemetry_frame() abandons a telemetry frame
+	/* #340 M6: app_radio_lrw.c's tx_telemetry_frame() abandons a telemetry frame
 	 * after FRAME_MAX_RETRIES failed lorawan_send() attempts. Before the fix
 	 * it cleared only its own m_frame_* state and left app_compose.c's
 	 * in-progress snapshot (m_active/m_pending/m_w1_sent) untouched, so the

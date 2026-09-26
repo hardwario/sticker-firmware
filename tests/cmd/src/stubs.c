@@ -13,7 +13,7 @@
 #include "app_buzzer.h"
 #include "app_config.h"
 #include "app_history.h"
-#include "app_lrw.h"
+#include "app_radio_lrw.h"
 #include "app_nfc.h"
 #include "app_sensor.h"
 
@@ -263,9 +263,9 @@ enum app_alarm_kind app_alarm_quantity_kind(enum app_alarm_quantity q)
 	return APP_ALARM_KIND_THRESHOLD;
 }
 
-enum app_lrw_state app_lrw_get_state(void)
+enum app_radio_lrw_state app_radio_lrw_get_state(void)
 {
-	return APP_LRW_STATE_HEALTHY;
+	return APP_RADIO_LRW_STATE_HEALTHY;
 }
 
 /* Last-downlink link quality (#409 A2): tests set test_dl_valid + values. */
@@ -274,7 +274,7 @@ int16_t test_dl_rssi;
 int8_t test_dl_snr;
 uint32_t test_dl_age_s;
 
-bool app_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+bool app_radio_lrw_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
 {
 	if (!test_dl_valid) {
 		return false;
@@ -376,7 +376,7 @@ uint32_t g_p2p_start_history_replay_seq;
  * nothing to replay, so the handler must emit HISTORY_UNAVAILABLE instead. */
 bool test_p2p_start_history_replay_ret;
 
-bool app_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+bool app_radio_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
 {
 	g_p2p_start_history_replay_calls++;
 	g_p2p_start_history_replay_from = from_unix;

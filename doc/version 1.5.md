@@ -77,7 +77,7 @@ Eight subsystems are now independently toggleable via Kconfig — Release (`prj.
 
 | Toggle | Flash saved | RAM saved | What it drops | Default in `debug.conf` |
 |---|---:|---:|---|:-:|
-| `CONFIG_RADIO_LORAWAN=n` | ~41.0 KB | ~15.1 KB | LoRaMac stack + radio HAL + `app_lrw.c` — disables **all** radio transmission (telemetry/alarm sampling and history capture keep running locally, just never sent) | **ON** |
+| `CONFIG_RADIO_LORAWAN=n` | ~41.0 KB | ~15.1 KB | LoRaMac stack + radio HAL + `app_radio_lrw.c` — disables **all** radio transmission (telemetry/alarm sampling and history capture keep running locally, just never sent) | **ON** |
 | `CONFIG_W1=n` | ~20.3 KB | ~0.5 KB | 1-Wire bus: DS18B20, DS28E17 machine-probe bridge, ROM-bound slot registry | OFF |
 | `CONFIG_LIS2DH=n` | ~7.6 KB | ~0.3 KB | Accelerometer (orientation, motion, free-fall) | OFF |
 | `CONFIG_APP_BUZZER=n` | ~2.3 KB | ~0.8 KB | Buzzer/melody HW variant (#338/#397) + its shell/remote-command surface | OFF |
@@ -240,7 +240,7 @@ carry these commits over.
 |---|---|---|
 | **Stale join result** (L-7, #241) | Every link-check / device-time MLME confirm left a token in the join semaphore, so the next (re)join returned right after TX with the *previous* result. A stale failure made the app drop a session the MAC had actually joined, then back off. | Only the join confirm signals the join waiter; the semaphore is drained before each join. |
 | **Bounded confirm wait** (#181) | `lorawan_send()` / `lorawan_join()` waited forever for the MAC confirm; a lost confirm wedged `m_work_q` until the #182 watchdog reset the SoC. | `CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS` (20 s, `BUILD_ASSERT` < the 30 s liveness window). A lost confirm returns `-ETIMEDOUT` and the normal bounded retry path takes over. |
-| **MAC lock** (#241) | LoRaMac (not thread-safe) was entered from `m_work_q`, shell/NFC and the system work queue (timer + radio events) without a shared lock. | One recursive `lorawan_mac_lock()` around every LoRaMac entry, never held across a confirm wait. `app_lrw.c` wraps its direct LoRaMac calls. |
+| **MAC lock** (#241) | LoRaMac (not thread-safe) was entered from `m_work_q`, shell/NFC and the system work queue (timer + radio events) without a shared lock. | One recursive `lorawan_mac_lock()` around every LoRaMac entry, never held across a confirm wait. `app_radio_lrw.c` wraps its direct LoRaMac calls. |
 
 Also fixed: `ats lrw status` / NFC info during the boot window before `lorawan_start()` no longer
 reads LoRaMac's still-uninitialised crypto context (it showed a garbage FCntUp).
@@ -324,16 +324,16 @@ debug image containing it, and it pays for that by dropping LoRaWAN.
 ## 7. LoRaWAN region guard (#409 A1)
 
 `lorawan_set_region()` returns `-ENOTSUP` for a region whose
-`CONFIG_LORAMAC_REGION_*` is not compiled in. Until now that made `app_lrw_init()`
+`CONFIG_LORAMAC_REGION_*` is not compiled in. Until now that made `app_radio_lrw_init()`
 fail, leaving a device with **no radio and no diagnosable state** — a real case,
 because `debug.conf` trims US915/AU915, so a device configured for `us915` that is
 flashed with a debug image (or any trimmed build) went dead.
 
-Now `app_lrw_init()` resolves the stored region against the regions in the image
+Now `app_radio_lrw_init()` resolves the stored region against the regions in the image
 first. If it is missing (or out of range):
 
 - the radio stays **silent** through the existing radio-mode OFF path
-  (`APP_LRW_STATE_DISABLED`, no LoRaMac bring-up, join/send are no-ops);
+  (`APP_RADIO_LRW_STATE_DISABLED`, no LoRaMac bring-up, join/send are no-ops);
 - an error is logged: `lrw-region <n> is not compiled into this image: radio-silent`;
 - over NFC the device reports `lrw_state` DISABLED and the existing `device_status`
   bit 12 `lrw_disabled` (no dedicated bit — `config show` shows the stored region).
@@ -1055,7 +1055,7 @@ bench (unit 0413) that failed in four ways:
   of borrowing a slot up to half an interval away (HIL T4: a 150 s halt put the
   run 30 s off the grid). An `interval_report` change lays a new grid. Boot arming is
   unchanged (first report one interval out) and the telemetry pre-send jitter
-  (#267) stays in `app_lrw`.
+  (#267) stays in `app_radio_lrw`.
 - **No capture skipped during a replay (C).** The replay cursor is an absolute
   record ordinal (ring start + evicted total), so eviction under a running replay
   moves nothing: no record is repeated or skipped, a cursor whose record was
@@ -1179,7 +1179,7 @@ LoRaWAN outages, not as an archive across firmware updates.
 
 ## 22. M-2 watchdog respects the duty cycle (F29)
 
-The M-2 stale-uplink watchdog (`heartbeat_work_handler` in `app_lrw.c`) forces a
+The M-2 stale-uplink watchdog (`heartbeat_work_handler` in `app_radio_lrw.c`) forces a
 MAC-reset rejoin when the device is joined but no telemetry uplink has left for
 4 × `interval_report`. That catches a mute station whose sends are perpetually
 skipped (budget 0 loop, retries exhausted) while the work queue and the IWDG
@@ -1197,7 +1197,7 @@ the session.
 - Every uplink now goes through `lrw_send()`, which records the result in a
   duty-cycle refusal streak (first and last refusal); a successful send or a join
   clears it.
-- The decision is a pure function (`app_lrw_stale.c`): when the station is stale
+- The decision is `stale_check()` in `app_radio_lrw.c`: when the station is stale
   but duty-cycle refusals keep coming (the last one within one report interval
   + 3 min) and the streak is shorter than the credit window + margin (75 min),
   M-2 holds and logs `... the duty cycle is refusing sends ...: no rejoin (M-2)`
@@ -1213,10 +1213,10 @@ At the default 900 s interval this never triggers (DR0 ≈ 4 uplinks/h ≈ 8 s o
 36 s budget); it matters for short intervals at low data rates and long history
 replays at DR0.
 
-Tests: new `tests/lrw_stale` suite (7 cases: no decision without a clock or
-cadence, stale without an excuse rejoins, streak tracking, duty-cycle hold,
-an old refusal does not hold, the hold is bounded by the window, recent-window
-at a 900 s interval).
+Tests: the decision first shipped as its own module with a `tests/lrw_stale`
+suite (7 cases). It was folded back into `app_radio_lrw.c` so the transport code stays
+in the transport modules; the unit tests return with the common `app_radio`
+layer on feat-p2p. The hardware run below covers the behaviour.
 
 Hardware (bench unit, 2026-09-26, DR0 + ADR off, 60 s): the duty cycle refused
 every send from 07:21:46Z (the 1 h credit window started at the join, 07:14Z);

@@ -635,15 +635,15 @@ rejoin timer; on a power trace (PPK2, J-Link detached) **no boot radio burst** i
 **Prompt for Claude:**
 > Set `config lrw-deveui 0000000000000000`, `settings save`. After reboot confirm the boot RTT log
 > shows `skipping LoRaWAN bring-up (radio-silent, #98/#175)` (debug build) and **no** region /
-> `lorawan_start` / join lines follow — `app_lrw_init` takes the radio-silent path. Confirm
+> `lorawan_start` / join lines follow — `app_radio_lrw_init` takes the radio-silent path. Confirm
 > `ats radio status` = `DISABLED`. Restore a real DevEUI + `settings save` and confirm it joins again.
 
 - [ ] Pass
 
 > **HW-verified (2026-06-23, #175):** debug build on Base Compact, `lrw-deveui = 00…00` — RTT showed
 > `skipping LoRaWAN bring-up (radio-silent, #98/#175)`, no radio/region/join logs, `ats radio status`
-> = DISABLED. The `DIAG_NO_RADIO` build (skips the whole `app_lrw_init` call) confirmed via a
-> sentinel log that `app_lrw_init` is never even entered.
+> = DISABLED. The `DIAG_NO_RADIO` build (skips the whole `app_radio_lrw_init` call) confirmed via a
+> sentinel log that `app_radio_lrw_init` is never even entered.
 
 ### L16 — Release-FW sustained TX (TX-stop regression, decisive)
 
@@ -2309,7 +2309,7 @@ over NFC while powered off, reboot, confirm ONLY hall_left is zeroed — the oth
 
 > **Code-verified (2026-08-17)**: confirmed in `main.c` at the `5d14b24` tip that
 > `nfc_run_deferred_cmd_actions()` is called at line 548, after `app_sensor_init()`/
-> `app_counters_init()` (lines 532/539) and before `app_lrw_join()` (line 555) — the exact ordering
+> `app_counters_init()` (lines 532/539) and before `app_radio_lrw_join()` (line 555) — the exact ordering
 > the fix describes.
 >
 > **HIL-verified selectivity, decisive (2026-08-18, SN 2162199999)**: with a real magnet, got
@@ -2352,7 +2352,7 @@ over NFC while powered off, reboot, confirm ONLY hall_left is zeroed — the oth
 > carousel (~7 s) runs **before** `app_counters_init()`, so a phone command could be served during
 > it. After `e2ce024` started the poll thread right after `app_nfc_init()`, that was already ~1 s
 > after boot. #414 now runs `app_nfc_init()` and starts the poll thread at the **end** of the init
-> chain, after `app_counters_init()` and just before `app_lrw_join()`. Until then the chip is
+> chain, after `app_counters_init()` and just before `app_radio_lrw_join()`. Until then the chip is
 > unpowered (`VCC_ON = 0`), so no command reaches an uninitialised component.
 >
 > Re-run on v1.5.0 with the phone on the tag during a reboot:
@@ -2600,7 +2600,7 @@ also increment `m_consecutive_lc_ok` a second time (`ats radio status` consecuti
 > `m_consecutive_lc_ok`, so +1 vs. a buggy +2 lands on the same visible `0/1` — the counter
 > magnitude cannot distinguish the two on this config, and `debug.conf`'s
 > `CONFIG_LOG_MAX_LEVEL=2` compiles out the guard's `LOG_DBG` line. The guard itself
-> (`app_lrw.c` `lc_response_work_handler()`, `if (!m_link_check_pending) return;`) is
+> (`app_radio_lrw.c` `lc_response_work_handler()`, `if (!m_link_check_pending) return;`) is
 > statically confirmed; no anomaly was observable on hardware with the race forced.
 
 ### X17 — M17: `app_report_suspend()` cancels pending report work
@@ -2695,7 +2695,7 @@ ends via its own deadline reboot rather than an unexplained hang/IWDG reset.
 > **Partially HW-verified (2026-08-17, sticker SN 2162199999, debug build @ `5d14b24`):**
 > `config calibration true` + `settings save` rebooted cleanly into calibration mode (temporary
 > calibration DevEUI `02403b84fd451f37`, `Device status: nfc-down` as expected, `LRW state:
-> healthy`) — the decoupled `app_lrw_run_on_work_q()` send path works with no hang on the normal
+> healthy`) — the decoupled `app_radio_lrw_run_on_work_q()` send path works with no hang on the normal
 > (non-stalled) path, and a plain `ats device reboot` cleanly exited back to normal
 > (`app_calibration_init()` auto-clears the flag). **Not yet confirmed:** the actual regression
 > target — a forced MAC-confirm stall — needs reproducible radio silence (e.g. detach antenna or
@@ -2846,7 +2846,7 @@ read back shifted/garbage (sibling of the #384 rollover bug, one layer deeper).
 fresh page and the stream re-aligns; a no-bytes-lost failure keeps the page open. Blast radius
 shrinks from "rest of the page" to "at most the failed record".
 
-### FR-3 — command Ack lost when a duty-cycle backoff outlives the reboot deferral (`app_lrw.c`)
+### FR-3 — command Ack lost when a duty-cycle backoff outlives the reboot deferral (`app_radio_lrw.c`)
 
 The post-command action (reboot/save/reset over the fPort-85 downlink port) fired at a fixed
 8 s, but a failed `lorawan_send()` requeues the Ack with a 15 s retry backoff — the reboot always
