@@ -636,16 +636,16 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   Two costs, both deliberate:
   - **384 B of RAM** — `P2P_DUTY_LEDGER_ENTRIES` (48) × 8 B, replacing the
     bucket's 16 B.
-  - **A bounded frame count per hour.** One entry per transmission still
-    inside the window means the *ledger* rather than the air-time budget
-    becomes the limit above 48 uplinks/hour. At SF10 the smallest frame the
-    node sends is 17 B / 330 ms, so the 36 000 ms allowance would otherwise
-    buy ~109. The direction is safe — a full ring can only *delay* a frame,
-    never permit one the budget forbids — but a bench run that wants the
-    air-time budget to be the visible limit needs `interval-report` above
-    ~75 s. Raising the ring, or folding the two oldest entries together when
-    it fills, would remove the limit at any SF; neither is needed for the
-    cadences this product ships with.
+  - **No frame-count limit (F-P2P-1, fixed).** One entry per transmission
+    still inside the window; when the 48-entry ring is full the two *oldest*
+    entries are folded into one (summed air, the later end time) instead of
+    making the frame wait for a slot. The folded pair leaves the window when
+    its younger half would have, so air is only ever over-counted, never
+    under-counted, and every sliding hour stays within 1 %. Before the fold the
+    ring capped a node at 48 frames/hour whatever their air-time: on the
+    ProXimos bench (2026-09-26, 60 s reports at SF7, 67 ms frames) the node
+    went silent ~13 min of every hour, and 44 min after a run of failed
+    cycles, with the air-time budget barely touched.
 
   The ledger is **RAM-only**: a reboot forgets the hour just transmitted, so a
   reboot loop can still exceed 1 %. In other words it enforces 1 % per
