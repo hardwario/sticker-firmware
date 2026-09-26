@@ -1,0 +1,116 @@
+# Sensor type registry — channel model for alarms, telemetry and history (#430).
+#
+# Regenerate after every edit (from the repo root):
+#   west sensorgen app/src/app_w1_slots.yaml
+# which validates this file and generates:
+#   - app_sensor_types.c/.h  (channel descriptor tables + lookups)
+#   - the `// BEGIN GENERATED SENSOR_TYPES` region in decoder/ttn.js
+# The Manager-App reads this file directly (D5), pinned to the firmware release tag.
+#
+# Sources (where a sensor sits) are just slots:
+#   slot 0      = the STICKER motherboard, always type 1 (`motherboard`)
+#   slot 1..4   = 1-Wire slots s1..s4, type configured per slot (sensorN_type)
+#
+# Numbering rules (checked by CI against the previous release's copy):
+#   - type `id` and channel `ch` are append-only: never renumber, never reuse.
+#     A removed channel stays listed with `retired: true`.
+#   - id 0 = none / empty slot. Ids are new in this (non-migratable) release:
+#     the legacy app_w1_slot_type values (1 dallas, 2 machine-probe) are dropped.
+#   - channel limit: `max_channels` for the motherboard, `max_channels_w1` for
+#     1-Wire types (D6).
+#
+# Channel fields:
+#   ch        type-local channel number
+#   name      stable identifier (shell, ATS, decoder output key)
+#   label     human-readable name (Manager-App UI)
+#   quantity  physical quantity (UI grouping / icon only — NOT a rule key)
+#   unit      physical unit of the value (FW, alarm lo/hi and decoder output). Prefer the
+#             quantity's canonical unit: degC, %RH, hPa, V, lx, mT, m/s2. Extra resolution
+#             is a matter of `scale`, not of the unit
+#   kind      threshold | state | rate | none   (none = not an alarm target)
+#   momentary true for pulse channels that only assert (state rules edge-only)
+#   counter   true = raw uint32 counter (rate rules / history use the exact integer)
+#   cap       app_config capability that enables the channel (absent = always on)
+#   wire      [type, scale]: value on the wire = round(phys * scale), type sint32|uint32;
+#             shared by telemetry (SensorReading.value, zigzag sint32) and AlarmEvent.value
+#   history   [enc, scale]: fixed-width history encoding u8|i16|u16|i32|u32
+#             (INT16_MAX / INT32_MAX / all-ones = absent); omitted = not recordable
+#             CI: range * scale must fit both `wire` and `history` (sentinel kept free)
+#   range     [min, max] valid physical range; a reading outside is absent
+#   liveness  true = channel watched by the no-data watchdog (mirrors today's m_nodata_tab)
+#   alarm_only_watchdog  true = evaluated by a built-in watchdog, not a rule target
+
+version: 1
+max_channels: 32      # motherboard (valid mask = uint32)
+max_channels_w1: 10   # any 1-Wire type (D6)
+
+# Capabilities referenced below that are not in app_config.yml yet. sensorgen
+# accepts them (the channel is generated ungated) and fails once they appear in
+# app_config.yml, so the entry is removed when the owning PR lands.
+pending_caps:
+  - cap_analog_a   # #396 (PR #407)
+  - cap_analog_b   # #396 (PR #407)
+
+types:
+  # -------------------------------------------------------------------------
+  # Slot 0 — motherboard (fixed)
+  # -------------------------------------------------------------------------
+  - id: 1
+    name: motherboard
+    label: STICKER motherboard
+    slot: 0
+    channels:
+      # Climate / environment
+      - {ch: 0,  name: temperature,       label: "Temperature (SHT4x)",       quantity: temperature, unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100],  range: [-45.0, 130.0], liveness: true}
+      - {ch: 1,  name: humidity,          label: "Relative humidity (SHT4x)", quantity: humidity,    unit: "%RH", kind: threshold, wire: [uint32, 2],    history: [u8, 2],     range: [0.0, 100.0], liveness: true}
+      - {ch: 2,  name: pressure,          label: "Pressure (MPL3115A2)",      quantity: pressure,    unit: hPa,   kind: threshold, wire: [uint32, 10],   history: [u16, 10],   range: [0.0, 2000.0], cap: cap_barometer, liveness: true}
+      - {ch: 3,  name: illuminance,       label: "Illuminance (OPT3001)",     quantity: illuminance, unit: lx,    kind: threshold, wire: [uint32, 1],    history: [u16, 0.5],  range: [0.0, 83865.6], cap: cap_light_sensor}
+      - {ch: 4,  name: temperature-baro,  label: "Temperature (MPL3115A2)",   quantity: temperature, unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100],  range: [-55.0, 125.0],  cap: cap_barometer}
+      # Hall switches
+      - {ch: 5,  name: hall-left-state,   label: "Hall left — state",         quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], cap: cap_hall_left}
+      - {ch: 6,  name: hall-left-count,   label: "Hall left — pulse count",   quantity: count,       unit: pulses, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_hall_left}
+      - {ch: 7,  name: hall-right-state,  label: "Hall right — state",        quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], cap: cap_hall_right}
+      - {ch: 8,  name: hall-right-count,  label: "Hall right — pulse count",  quantity: count,       unit: pulses, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_hall_right}
+      # Inputs GP_A / GP_B (digital or analog, #396)
+      - {ch: 9,  name: input-a-state,     label: "Input A — state",           quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], cap: cap_input_a}
+      - {ch: 10, name: input-a-count,     label: "Input A — pulse count",     quantity: count,       unit: pulses, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_input_a}
+      - {ch: 11, name: input-a-voltage,   label: "Input A — voltage",         quantity: voltage,     unit: V,      kind: threshold, wire: [uint32, 1000], history: [u16, 1000], range: [0.0, 30.0], cap: cap_analog_a}
+      - {ch: 12, name: input-b-state,     label: "Input B — state",           quantity: state,       unit: bool,   kind: state, wire: [uint32, 1], cap: cap_input_b}
+      - {ch: 13, name: input-b-count,     label: "Input B — pulse count",     quantity: count,       unit: pulses, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_input_b}
+      - {ch: 14, name: input-b-voltage,   label: "Input B — voltage",         quantity: voltage,     unit: V,      kind: threshold, wire: [uint32, 1000], history: [u16, 1000], range: [0.0, 30.0], cap: cap_analog_b}
+      # PIR motion detector (PYQ1648)
+      - {ch: 15, name: pir-motion,        label: "PIR — motion",              quantity: state,       unit: bool,   kind: state, momentary: true, wire: [uint32, 1], cap: cap_pir_detector}
+      - {ch: 16, name: pir-count,         label: "PIR — motion count",        quantity: count,       unit: events, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_pir_detector}
+      # Accelerometer (LIS2DH)
+      - {ch: 17, name: accel-motion,      label: "Accelerometer — motion",    quantity: state,       unit: bool,   kind: state, momentary: true, wire: [uint32, 1], cap: cap_accelerometer}
+      - {ch: 18, name: accel-count,       label: "Accelerometer — motion count", quantity: count,    unit: events, kind: rate,  counter: true, wire: [uint32, 1], history: [u32, 1], cap: cap_accelerometer}
+      - {ch: 19, name: accel-orientation, label: "Accelerometer — orientation (1..6)", quantity: orientation, unit: enum, kind: none, wire: [uint32, 1], history: [u8, 1], cap: cap_accelerometer}
+      # Supply rail — low-battery watchdog (battery_level), not a rule target
+      - {ch: 20, name: battery-voltage,   label: "Battery voltage",           quantity: voltage,     unit: V,      kind: threshold, alarm_only_watchdog: true, wire: [uint32, 1000], history: [u16, 1000], range: [0.0, 6.0], liveness: true}
+      # Barometric altitude (MPL3115A2) — telemetry only today, not an alarm target
+      - {ch: 21, name: altitude,          label: "Altitude (MPL3115A2)",      quantity: altitude,    unit: m,      kind: none, wire: [sint32, 10], cap: cap_barometer}
+
+  # -------------------------------------------------------------------------
+  # Slots 1..4 — 1-Wire types (sensorN_type; detected by family code)
+  # -------------------------------------------------------------------------
+  - id: 2
+    name: dallas
+    label: DS18B20 thermometer
+    w1_family: 0x28
+    channels:
+      - {ch: 0, name: temperature, label: "Temperature", quantity: temperature, unit: degC, kind: threshold, wire: [sint32, 100], history: [i16, 100], range: [-55.0, 125.0], liveness: true}
+
+  - id: 3
+    name: machine-probe
+    label: Machine probe (DS28E17 bridge)
+    w1_family: 0x19
+    channels:
+      - {ch: 0, name: temperature,     label: "Temperature (SHT)",          quantity: temperature,    unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-45.0, 130.0], liveness: true}
+      - {ch: 1, name: humidity,        label: "Relative humidity (SHT)",    quantity: humidity,       unit: "%RH", kind: threshold, wire: [uint32, 2],    history: [u8, 2],    range: [0.0, 100.0]}
+      - {ch: 2, name: temperature-aux, label: "Temperature (TMP112)",       quantity: temperature,    unit: degC,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-45.0, 130.0]}
+      - {ch: 3, name: illuminance,     label: "Illuminance (OPT3001)",      quantity: illuminance,    unit: lx,    kind: threshold, wire: [uint32, 1],    history: [u16, 0.5], range: [0.0, 83865.6]}
+      - {ch: 4, name: magnetic-field,  label: "Magnetic field (Si7210)",    quantity: magnetic_field, unit: mT,    kind: threshold, wire: [sint32, 1000], history: [i16, 100], range: [-204.7, 204.7]}
+      - {ch: 5, name: tilt,            label: "Tilt alert (LIS2DH12)",      quantity: tilt,           unit: bool,  kind: state,     wire: [uint32, 1],    history: [u8, 1]}
+      - {ch: 6, name: accel-x,         label: "Acceleration X (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-156.9, 156.9]}
+      - {ch: 7, name: accel-y,         label: "Acceleration Y (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-156.9, 156.9]}
+      - {ch: 8, name: accel-z,         label: "Acceleration Z (LIS2DH12)",  quantity: acceleration,   unit: m/s2,  kind: threshold, wire: [sint32, 100],  history: [i16, 100], range: [-156.9, 156.9]}

@@ -518,35 +518,35 @@ static bool read_threshold_value(uint8_t source, uint8_t quantity, float *out)
 	if (source == APP_ALARM_SRC_ONBOARD) {
 		switch (quantity) {
 		case APP_ALARM_Q_TEMPERATURE:
-			*out = d->temperature;
+			*out = APP_SENSOR_MB_F(d, TEMPERATURE);
 			return true;
 		case APP_ALARM_Q_HUMIDITY:
-			*out = d->humidity;
+			*out = APP_SENSOR_MB_F(d, HUMIDITY);
 			return true;
 		case APP_ALARM_Q_PRESSURE:
-			*out = d->pressure * 10.0f; /* kPa -> hPa (config thresholds are hPa) */
+			*out = APP_SENSOR_MB_F(d, PRESSURE); /* hPa, like the config thresholds */
 			return true;
 		case APP_ALARM_Q_ILLUMINANCE:
-			*out = d->illuminance; /* on-board OPT3001 (lux) */
+			*out = APP_SENSOR_MB_F(d, ILLUMINANCE); /* on-board OPT3001 (lux) */
 			return true;
 		default:
 			return false;
 		}
 	}
 	if (source >= APP_ALARM_SRC_SLOT1 && source <= APP_ALARM_SRC_SLOT4) {
-		const struct app_w1_slot_reading *r = &d->w1[source - APP_ALARM_SRC_SLOT1];
+		const struct app_sensor_w1 *r = &d->w1[source - APP_ALARM_SRC_SLOT1];
 		switch (quantity) {
 		case APP_ALARM_Q_TEMPERATURE:
-			*out = r->temperature;
+			*out = app_sensor_w1_f(r, APP_SENSOR_CH_MACHINE_PROBE_TEMPERATURE);
 			return true;
 		case APP_ALARM_Q_HUMIDITY:
-			*out = r->humidity;
+			*out = app_sensor_w1_f(r, APP_SENSOR_CH_MACHINE_PROBE_HUMIDITY);
 			return true;
 		case APP_ALARM_Q_ILLUMINANCE:
-			*out = r->illuminance;
+			*out = app_sensor_w1_f(r, APP_SENSOR_CH_MACHINE_PROBE_ILLUMINANCE);
 			return true;
 		case APP_ALARM_Q_MAGNETIC_FIELD:
-			*out = r->magnetic_field;
+			*out = app_sensor_w1_f(r, APP_SENSOR_CH_MACHINE_PROBE_MAGNETIC_FIELD);
 			return true;
 		default:
 			return false;
@@ -556,7 +556,7 @@ static bool read_threshold_value(uint8_t source, uint8_t quantity, float *out)
 	 * leaves voltage NaN, so a dead battery monitor raises a no_data alarm like
 	 * any other sensor instead of silently never firing. */
 	if (source == APP_ALARM_SRC_BATTERY && quantity == APP_ALARM_Q_VOLTAGE) {
-		*out = d->voltage;
+		*out = APP_SENSOR_MB_F(d, BATTERY_VOLTAGE);
 		return true;
 	}
 	return false;
@@ -568,22 +568,22 @@ static bool read_counter(uint8_t source, uint32_t *out)
 	const struct app_sensor_data *d = &g_app_sensor_data;
 	switch (source) {
 	case APP_ALARM_SRC_HALL_LEFT:
-		*out = d->hall_left_count;
+		*out = APP_SENSOR_MB_U(d, HALL_LEFT_COUNT);
 		return true;
 	case APP_ALARM_SRC_HALL_RIGHT:
-		*out = d->hall_right_count;
+		*out = APP_SENSOR_MB_U(d, HALL_RIGHT_COUNT);
 		return true;
 	case APP_ALARM_SRC_INPUT_A:
-		*out = d->input_a_count;
+		*out = APP_SENSOR_MB_U(d, INPUT_A_COUNT);
 		return true;
 	case APP_ALARM_SRC_INPUT_B:
-		*out = d->input_b_count;
+		*out = APP_SENSOR_MB_U(d, INPUT_B_COUNT);
 		return true;
 	case APP_ALARM_SRC_PIR:
-		*out = d->motion_count;
+		*out = APP_SENSOR_MB_U(d, PIR_COUNT);
 		return true;
 	case APP_ALARM_SRC_ACCEL:
-		*out = d->accel_motion_count;
+		*out = APP_SENSOR_MB_U(d, ACCEL_COUNT);
 		return true;
 	default:
 		return false;
@@ -605,15 +605,16 @@ static bool read_counter(uint8_t source, uint32_t *out)
  * not g_app_sensor_data: that cache is only refreshed by app_sensor_sample(),
  * which runs on the interval_sample timer (started only if interval_sample != 0,
  * app_sensor.c) or a manual sample/`alarm poll` — with interval_sample == 0 (a
- * valid, common config) g_app_sensor_data.hall_*_is_active would stay frozen at
- * its boot-time value between app_alarm_poll() calls, silently defeating this
+ * valid, common config) the hall/input state channels would stay frozen at
+ * their boot-time value between app_alarm_poll() calls, silently defeating this
  * exact re-evaluation. app_hall.c/app_input.c run their own independent 100 ms
  * GPIO timer regardless of interval_sample, so their getters are always fresh. */
 static bool read_poll_state(uint8_t source, uint8_t quantity, bool *out)
 {
 	if (quantity == APP_ALARM_Q_TILT && source >= APP_ALARM_SRC_SLOT1 &&
 	    source <= APP_ALARM_SRC_SLOT4) {
-		*out = g_app_sensor_data.w1[source - APP_ALARM_SRC_SLOT1].is_tilt_alert;
+		*out = app_sensor_w1_f(&g_app_sensor_data.w1[source - APP_ALARM_SRC_SLOT1],
+				       APP_SENSOR_CH_MACHINE_PROBE_TILT) == 1.0f;
 		return true;
 	}
 	if (quantity == APP_ALARM_Q_STATE) {
@@ -1023,7 +1024,7 @@ static void nodata_poll(int64_t now, bool *should_send)
  * alarm drives the red LED via app_alarm_poll (it is an alarm). */
 static void battery_poll(bool *should_send)
 {
-	float v = g_app_sensor_data.voltage;
+	float v = APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE);
 	float threshold = g_app_config.battery_level / 1000.0f; /* mV -> V */
 
 	/* Skip until a plausible measurement exists (0/NaN before the first
@@ -1108,7 +1109,7 @@ bool app_alarm_poll(void)
 	 * must run before the sensor-data lock is dropped (#205). */
 	nodata_poll(now, &should_send);
 
-	/* Low-battery watchdog (#210). Reads g_app_sensor_data.voltage, so it must
+	/* Low-battery watchdog (#210). Reads the battery-voltage channel, so it must
 	 * also run before the sensor-data lock is dropped. */
 	battery_poll(&should_send);
 

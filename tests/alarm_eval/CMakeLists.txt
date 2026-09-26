@@ -25,6 +25,8 @@ target_include_directories(app PRIVATE ${APP_DIR}/src)
 target_sources(app PRIVATE
   ${APP_DIR}/src/app_alarm.c
   ${APP_DIR}/src/app_alarm_rules.c
+  ${APP_DIR}/src/app_sensor_channels.c
+  ${APP_DIR}/src/app_sensor_types.c
   src/main.c
   src/stubs.c
 )

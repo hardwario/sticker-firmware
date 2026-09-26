@@ -146,7 +146,7 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	 * holds a real reading by the time DeviceInfo is sent. 0/NaN before the first
 	 * sample -> proto omits it and the host treats battery as "unknown". */
 	k_mutex_lock(&g_app_sensor_data_lock, K_FOREVER);
-	float v = g_app_sensor_data.voltage;
+	float v = APP_SENSOR_MB_F(&g_app_sensor_data, BATTERY_VOLTAGE);
 	k_mutex_unlock(&g_app_sensor_data_lock);
 	info->battery_mv = (isfinite(v) && v > 0.f) ? (uint32_t)(v * 1000.0f) : 0;
 

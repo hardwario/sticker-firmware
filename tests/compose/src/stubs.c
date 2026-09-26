@@ -7,6 +7,7 @@
 
 #include "app_hall.h"
 #include "app_input.h"
+#include "app_sensor.h"
 #include "app_w1_slots.h"
 
 #include "src/app_config.pb.h"
@@ -34,40 +35,42 @@ enum app_w1_slot_type app_w1_slot_get_type(int slot)
 
 /* Mirror the real per-type encode (app_w1_slots.c dallas_encode/machine_probe_
  * encode) so the composer test exercises the same SensorReading shaping. */
-void app_w1_slot_encode(int slot, const struct app_w1_slot_reading *r, SensorReading *sr)
+void app_w1_slot_encode(int slot, const struct app_sensor_w1 *r, SensorReading *sr)
 {
+#define MP(NAME) (r->v[APP_SENSOR_CH_MACHINE_PROBE_##NAME].f)
 	if (slot < 0 || slot >= APP_W1_SLOT_COUNT || r == NULL || sr == NULL) {
 		return;
 	}
-	if (!isnan(r->temperature)) {
+	if (!isnan(MP(TEMPERATURE))) {
 		sr->has_temperature = true;
-		sr->temperature = (int32_t)(r->temperature * 100.0f);
+		sr->temperature = (int32_t)(MP(TEMPERATURE) * 100.0f);
 	}
 	if (test_w1_types[slot] != APP_W1_SLOT_MACHINE_PROBE) {
 		return;
 	}
-	if (!isnan(r->humidity)) {
+	if (!isnan(MP(HUMIDITY))) {
 		sr->has_humidity = true;
-		sr->humidity = (uint32_t)(r->humidity * 2.0f);
+		sr->humidity = (uint32_t)(MP(HUMIDITY) * 2.0f);
 	}
 	sr->has_flags = true;
-	sr->flags = r->is_tilt_alert ? MP_FLAG_TILT : 0;
-	if (!isnan(r->illuminance)) {
+	sr->flags = MP(TILT) == 1.0f ? MP_FLAG_TILT : 0;
+	if (!isnan(MP(ILLUMINANCE))) {
 		sr->has_illuminance = true;
-		sr->illuminance = (uint32_t)r->illuminance;
+		sr->illuminance = (uint32_t)MP(ILLUMINANCE);
 	}
-	if (!isnan(r->magnetic_field)) {
+	if (!isnan(MP(MAGNETIC_FIELD))) {
 		sr->has_magnetic_field = true;
-		sr->magnetic_field = (int32_t)(r->magnetic_field * 1000.0f);
+		sr->magnetic_field = (int32_t)(MP(MAGNETIC_FIELD) * 1000.0f);
 	}
-	if (!isnan(r->accel_x) && !isnan(r->accel_y) && !isnan(r->accel_z)) {
+	if (!isnan(MP(ACCEL_X)) && !isnan(MP(ACCEL_Y)) && !isnan(MP(ACCEL_Z))) {
 		sr->has_accel_x = true;
-		sr->accel_x = (int32_t)(r->accel_x * 100.0f);
+		sr->accel_x = (int32_t)(MP(ACCEL_X) * 100.0f);
 		sr->has_accel_y = true;
-		sr->accel_y = (int32_t)(r->accel_y * 100.0f);
+		sr->accel_y = (int32_t)(MP(ACCEL_Y) * 100.0f);
 		sr->has_accel_z = true;
-		sr->accel_z = (int32_t)(r->accel_z * 100.0f);
+		sr->accel_z = (int32_t)(MP(ACCEL_Z) * 100.0f);
 	}
+#undef MP
 }
 
 uint8_t app_lrw_get_max_payload(void)
