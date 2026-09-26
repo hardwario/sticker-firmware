@@ -48,19 +48,13 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
  * and the initial info-record write is done once at boot before the wait loop.
  * (Was a 30 s periodic fallback, which on the release build meant a Stop2 wake
  * every 30 s for nothing.) */
-#define NFC_EVENT_FALLBACK_MS        (-1)
-/* #164: once a response record is left on the tag, poll this often so the info
- * record is restored ~10 s after the phone leaves (no GPO events in this window
- * = field lost). The debounce avoids the #144 race with the phone still reading
- * the reply. */
-#define NFC_INFO_RESTORE_DEBOUNCE_MS 10000
-#define NFC_POLL_START_DELAY_MS      3000
+#define NFC_EVENT_FALLBACK_MS      (-1)
 /* Sized for the deepest NFC command run on this thread: a GetConfig/GetParam
  * over NFC packs DUMP_FIELDS tags into a flat ids[] (#176), builds a Response
  * (union sized to ConfigDump), and runs PSA AES-CCM decrypt/encrypt + nanopb —
  * far more than a short GetInfo. 3072 B overflowed on the longer commands. */
-#define NFC_POLL_THREAD_STACK_SIZE   6144
-#define NFC_POLL_THREAD_PRIO         K_LOWEST_APPLICATION_THREAD_PRIO
+#define NFC_POLL_THREAD_STACK_SIZE 6144
+#define NFC_POLL_THREAD_PRIO       K_LOWEST_APPLICATION_THREAD_PRIO
 
 #define APP_ALARM_ORANGE_RATE_LIMIT_MS 500
 #define APP_ALARM_ORANGE_AUTO_OFF_MS   (60 * 60 * 1000)
@@ -92,69 +86,68 @@ static void die(void)
 
 static void play_carousel_boot(void)
 {
-	struct app_led_play_req req = {
-		.commands = {{.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_ON}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 500},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_R, APP_LED_OFF}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 250},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_ON}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 500},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_Y, APP_LED_OFF}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 250},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_ON}},
-			     {.type = APP_LED_CMD_DELAY, .duration = 1500},
-			     {.type = APP_LED_CMD_SET, .set = {APP_LED_CHANNEL_G, APP_LED_OFF}},
-			     {.type = APP_LED_CMD_END}},
-		.repetitions = 1};
+	/* Red and green are HW PWM: fade in/hold/fade out instead of a hard blink
+	 * (#301). Yellow (PA4) has no timer channel and stays a plain GPIO blink,
+	 * same timing as before. Durations match the old hard-blink carousel
+	 * (500/250/500/250/1500 ms) so the overall boot animation length is
+	 * unchanged. */
+	app_led_fade(APP_LED_CHANNEL_R, 0, 100, 150);
+	k_sleep(K_MSEC(200));
+	app_led_fade(APP_LED_CHANNEL_R, 100, 0, 150);
+	k_sleep(K_MSEC(250));
 
-	app_led_play(&req);
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_ON);
+	k_sleep(K_MSEC(500));
+	app_led_set(APP_LED_CHANNEL_Y, APP_LED_OFF);
+	k_sleep(K_MSEC(250));
+
+	app_led_fade(APP_LED_CHANNEL_G, 0, 100, 300);
+	k_sleep(K_MSEC(900));
+	app_led_fade(APP_LED_CHANNEL_G, 100, 0, 300);
+
 	k_sleep(K_MSEC(5000));
 }
 
-static void play_carousel_nfc(void)
+/* #414: before an NFC-triggered reboot, let the mailbox session's result finish
+ * on the LED (green + yellow = applied, red = the last exchange failed, 2 s) so
+ * the operator sees it; the boot carousel follows the reboot. Replaces the
+ * pre-reboot green NFC carousel (#278). */
+static void nfc_result_before_reboot(void)
 {
-	/* #278: green (was yellow) — an applied NFC config is a SUCCESS, so it reads
-	 * as green rather than joining the overloaded set of yellow signals. */
-	struct app_led_blink_req req = {
-		.color = APP_LED_CHANNEL_G, .duration = 100, .space = 100, .repetitions = 10};
-	app_led_blink(&req);
-	k_sleep(K_MSEC(10 * 200 - 100));
+	app_nfc_led_result_wait();
 }
 
 /* Run any deferred action queued by an NFC command (reboot/save/factory-reset/
- * ...). app_nfc_take_cmd_action() returns an action only once its response has
- * been delivered to the phone — the phone acked the reply and the info record was
- * restored, or the quiet backstop restored it — so a reboot/save fires *after*
- * the phone has read the response instead of racing a blind fixed delay. */
+ * ...). app_nfc_take_cmd_action() returns an action only once its mailbox
+ * session has delivered the reply (the phone read it, or had a second to) and
+ * closed, so a reboot/save fires *after* the phone has read the response. */
 static void nfc_run_deferred_cmd_actions(void)
 {
 	enum app_cmd_action cmd_action = app_nfc_take_cmd_action();
 	while (cmd_action != APP_CMD_ACTION_NONE) {
 		switch (cmd_action) {
 		case APP_CMD_ACTION_SETTINGS_SAVE:
-			/* #250: green NFC carousel (#278) as operator feedback that an
-			 * (offline-)staged config was applied — was previously only
-			 * shown for the retired hio.stck:cfg record. */
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_settings_save(true);
 			break;
 		case APP_CMD_ACTION_REBOOT:
+			nfc_result_before_reboot();
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
 		case APP_CMD_ACTION_DEVICE_RESET:
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_settings_device_reset();
 			break;
 		case APP_CMD_ACTION_FACTORY_RESET:
 			/* #299, narrower than device_reset above: drops LoRaWAN too. */
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_settings_factory_reset();
 			break;
 		case APP_CMD_ACTION_VENDOR_RESET:
 			/* #299/#316, narrowest tier: set by the vendor_reset Command over the
 			 * NFC hio.stck:vnd (vendor-token) channel — never reachable over
 			 * LoRaWAN. The replacement secret_key travelled in the same request. */
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_settings_vendor_reset(app_cmd_take_pending_vendor_secret_key());
 			break;
 		case APP_CMD_ACTION_SECRET_KEY_SAVE:
@@ -165,31 +158,31 @@ static void nfc_run_deferred_cmd_actions(void)
 			 * reboot. The Ack the phone already read was encrypted with that old
 			 * key — deliberately: this action only runs once the response has
 			 * been delivered (#242), so the reply is never cut off. */
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_settings_save(true);
 			break;
-		case APP_CMD_ACTION_CLM_REARM_SAVE:
-			/* #351: flip the clm latch to UNSET and persist+reboot together,
-			 * always (both the same-token and new-token clm_rearm cases run
-			 * this action, see app_cmd_handle_clm_rearm) so the phone can
+		case APP_CMD_ACTION_CLAIM_ACTIVE_SAVE:
+			/* #351/#415: flip the claim window back to ACTIVE and persist+reboot
+			 * together, always (both the same-token and new-token claim_active
+			 * cases run this action, see app_cmd_handle_claim_active) so the phone can
 			 * always assume "ack read -> reboot" regardless of which case it
 			 * took. When a new token was staged, this also ensures
 			 * g_app_config.claim_token becomes live (h_commit) in the same
-			 * breath the latch clears — no window where a poll could
+			 * breath the latch flips — no window where a poll could
 			 * re-expose the OLD token; when no new token was given this is a
 			 * same-value no-op re-persist.
 			 *
-			 * #340 M15: app_nfc_clm_reset() already persisted clm/state=UNSET
+			 * #340 M15: app_nfc_claim_active() already persisted clm/state=ACTIVE
 			 * to flash by the time app_settings_save() runs. If that save
-			 * then fails, don't keep running live with the clm latch reset
+			 * then fails, don't keep running live with the latch reopened
 			 * but the (possibly new) claim_token never persisted - mirrors
 			 * app_settings.c's post-destructive-step convention (34a1ed8):
 			 * force a reboot so the device re-reads whatever DID actually
 			 * get persisted, instead of a silent, un-rebooted return leaving
 			 * flash and live state out of sync until some later, unrelated
 			 * reboot. */
-			play_carousel_nfc();
-			app_nfc_clm_reset();
+			nfc_result_before_reboot();
+			app_nfc_claim_active();
 			if (app_settings_save(true)) {
 				sys_reboot(SYS_REBOOT_COLD);
 			}
@@ -199,12 +192,14 @@ static void nfc_run_deferred_cmd_actions(void)
 			 * calibration mode (app_calibration_init() clears it).
 			 * Write the staging config (settings_save persists that,
 			 * not the boot-time g_app_config copy). */
-			play_carousel_nfc();
+			nfc_result_before_reboot();
 			app_config()->calibration = true;
 			app_settings_save(true);
 			break;
+#if defined(CONFIG_LORAWAN)
 		case APP_CMD_ACTION_LRW_RESET:
 			/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). */
+			nfc_result_before_reboot();
 			app_lrw_reset_nvm();
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
@@ -212,6 +207,7 @@ static void nfc_run_deferred_cmd_actions(void)
 			/* Force a (re)join now, no reboot (#109). */
 			app_lrw_join();
 			break;
+#endif /* defined(CONFIG_LORAWAN) */
 		case APP_CMD_ACTION_COUNTERS_SAVE:
 			/* Persist the (reset) pulse totalizers, no reboot. */
 			app_counters_save(true);
@@ -225,7 +221,7 @@ static void nfc_run_deferred_cmd_actions(void)
 
 /* Dedicated NFC poll thread: independent of the LED blink loop. Each cycle does
  * the cheap gated poll (1-byte IT_STS_Dyn; full read only on RF activity) and
- * applies a consumed config. Started after a delay so app_nfc_init() has run. */
+ * applies a consumed config. main() starts it right after app_nfc_init(). */
 static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1);
@@ -234,76 +230,44 @@ static void nfc_poll_thread_fn(void *p1, void *p2, void *p3)
 
 	/* NFC init failed at boot (#88): the tag is unusable, so exit instead of
 	 * polling a dead ST25DV (which would error every wake and keep the CPU busy).
-	 * The thread starts after NFC_POLL_START_DELAY_MS, so main() has already run
-	 * app_nfc_init() by now. */
+	 * main() starts this thread only after app_nfc_init() has run. */
 	if (!app_nfc_ready()) {
 		LOG_WRN("NFC unavailable; poll thread not started");
 		return;
 	}
 
-	/* Lay down the plaintext info record once at boot. The wait loop below is
-	 * event-driven (waits forever on the GPO when idle), so without this initial
-	 * check a freshly-booted tag would keep whatever was on it — or stay blank —
-	 * until the first phone tap. */
-	if (app_nfc_periodic_enabled()) {
-		int ret = app_nfc_poll();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_nfc_poll", ret);
-		}
-	}
-
 	for (;;) {
-		/* Sleep until the GPO interrupt fires (phone touched the tag) or the
-		 * fallback elapses. While a response is mid-write or a stale response
-		 * record is on the tag (#164), use a short ~10 s fallback so we retry the
-		 * deferred write / restore the info record soon; otherwise wait forever
-		 * (event-driven — only the GPO wakes us). */
-		bool nfc_busy = app_nfc_info_restore_pending() || app_nfc_resp_write_pending();
-		int fallback = nfc_busy ? NFC_INFO_RESTORE_DEBOUNCE_MS : NFC_EVENT_FALLBACK_MS;
-		int wret = app_nfc_wait_event(fallback);
+		/* Sleep until the GPO interrupt fires (phone's field appeared / a mailbox
+		 * message landed). Event-driven: with no phone around the thread waits
+		 * forever and the device stays in Stop2. */
+		(void)app_nfc_wait_event(NFC_EVENT_FALLBACK_MS);
 
-		if (!app_nfc_periodic_enabled()) {
-			continue;
-		}
-
-		/* A response write was deferred (RF field was up): fall through to
-		 * app_nfc_poll(), which rewrites the cached reply in this field-off window
-		 * — do NOT restore the info record (it would clobber the pending reply). */
-		if (wret == -EAGAIN && !app_nfc_resp_write_pending() &&
-		    app_nfc_info_restore_pending()) {
-			/* #164: the fallback elapsed with a response record still on the tag
-			 * and no GPO event in the debounce window → the RF field has been
-			 * quiet (phone gone), so it is safe to restore the info record without
-			 * racing the phone reading the reply (the #144 hazard). */
-			int ret = app_nfc_restore_info();
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_nfc_restore_info", ret);
-			}
-			/* The backstop restore releases any deferred action (the phone left
-			 * without acking) — run it now instead of waiting for the next wake. */
-			nfc_run_deferred_cmd_actions();
-			continue;
-		}
-
+		/* Serve the mailbox while the phone holds its field (#313). The tag holds
+		 * no NDEF record any more, so there is nothing else to reconcile. */
 		int ret = app_nfc_poll();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_nfc_poll", ret);
 		}
 
-		/* Deferred action from an NFC command (reboot/save/factory-reset/...) —
-		 * the unified provisioning path (#250). Gated: only runs once the phone has
-		 * read the response (see nfc_run_deferred_cmd_actions / app_nfc_take_cmd_action).
-		 * play_carousel_nfc() is driven from inside the SETTINGS_SAVE/RESET cases if
-		 * needed; here we just release the staged action. */
+		/* Deferred action from a mailbox command (reboot/save/factory-reset/...):
+		 * the session has already delivered the reply and closed, so it is safe to
+		 * run now. Reboot-type actions first let the session result finish on the
+		 * LED (nfc_result_before_reboot). */
 		nfc_run_deferred_cmd_actions();
 	}
 }
 
+/* Not started at boot (SYS_FOREVER_MS): main() starts it right after
+ * app_nfc_init(), at the end of the init chain, so no phone command runs before
+ * the components it reaches are up, and a phone kept on the tag across an
+ * NFC-triggered reboot is served within ~0.2 s of the chip powering up (a fixed
+ * start delay could do neither). */
 K_THREAD_DEFINE(nfc_poll_tid, NFC_POLL_THREAD_STACK_SIZE, nfc_poll_thread_fn, NULL, NULL, NULL,
-		NFC_POLL_THREAD_PRIO, 0, NFC_POLL_START_DELAY_MS);
+		NFC_POLL_THREAD_PRIO, 0, SYS_FOREVER_MS);
 
 static enum app_mode detect_mode(void)
 {
+#if defined(CONFIG_APP_CALIBRATION)
 	if (app_calibration_detect_magnets()) {
 		LOG_WRN("Both magnets detected at boot — entering calibration mode");
 		return APP_MODE_CALIBRATION;
@@ -313,6 +277,7 @@ static enum app_mode detect_mode(void)
 		LOG_WRN("Calibration flag set in config — entering calibration mode");
 		return APP_MODE_CALIBRATION;
 	}
+#endif /* defined(CONFIG_APP_CALIBRATION) */
 
 	return APP_MODE_NORMAL;
 }
@@ -434,14 +399,15 @@ int main(void)
 
 	switch (mode) {
 	case APP_MODE_CALIBRATION:
+#if defined(CONFIG_APP_CALIBRATION)
 		ret = app_calibration_init();
 		if (ret) {
 			LOG_ERR_CALL_FAILED_INT("app_calibration_init", ret);
 			die();
 		}
-
 		app_calibration_run();
 		/* Never reached */
+#endif /* defined(CONFIG_APP_CALIBRATION) */
 		break;
 
 	case APP_MODE_NORMAL:
@@ -449,34 +415,6 @@ int main(void)
 	}
 
 	/* --- Normal mode --- */
-
-	/* The NFC tag (ST25DV) is non-essential: a broken tag must not brick an
-	 * otherwise-healthy device (radio + sensors fine) into a die() reboot loop
-	 * (#88). On init failure, log and continue with NFC disabled — the poll
-	 * thread self-exits (app_nfc_ready() stays false) and the boot config check is
-	 * skipped. die() stays reserved for wdog / LED / LRW init. */
-	ret = app_nfc_init();
-	if (ret) {
-		LOG_WRN("app_nfc_init failed: %d (NFC unavailable, continuing)", ret);
-	} else {
-		/* A stale/replay command left on the tag makes app_nfc_check() fail
-		 * (anti-replay) on every boot. Do NOT die() here — that would brick the
-		 * device into a reboot loop. Log and continue, like the periodic check
-		 * in the main loop does. */
-		ret = app_nfc_check();
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_nfc_check", ret);
-		}
-
-		/* Open deferred-action gate: restore the info record after apply check.
-		 * The phone that staged the command is gone (device was powered off). */
-		if (app_nfc_info_restore_pending()) {
-			ret = app_nfc_restore_info();
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_nfc_restore_info", ret);
-			}
-		}
-	}
 
 #if defined(CONFIG_WATCHDOG)
 	app_wdog_feed();
@@ -547,11 +485,25 @@ int main(void)
 		LOG_WRN("app_counters_init failed: %d (counter persistence unavailable)", ret);
 	}
 
-	/* Run deferred NFC command actions. Must occur after counters_init and
-	 * sensor_init so selective resets (COUNTERS_SAVE) don't persist zero
-	 * counters. Rebooting actions still fire before app_lrw_join(), keeping
-	 * staged LoRaWAN keys in place (#147, #250). */
-	nfc_run_deferred_cmd_actions();
+	/* NFC last, once every component a command can reach is up (#414): the poll
+	 * thread serves phone commands as soon as it starts, and one served before
+	 * app_counters_init() / app_history_init() / app_sensor_init() / ... would act
+	 * on uninitialised state (#340 M8: a reset_counters saved before the counters
+	 * were restored wiped every totalizer). Until then the chip stays unpowered,
+	 * so a phone on the tag just waits for VCC_ON. Before app_lrw_join(): the
+	 * claim state loaded here feeds the join Info.
+	 *
+	 * The NFC tag (ST25DV) is non-essential: a broken tag must not brick an
+	 * otherwise-healthy device (radio + sensors fine) into a die() reboot loop
+	 * (#88). On init failure, log and continue with NFC disabled — the poll
+	 * thread self-exits (app_nfc_ready() stays false). The tag holds no NDEF
+	 * record (#313, mailbox-only), so there is nothing to lay down at boot. */
+	ret = app_nfc_init();
+	if (ret) {
+		LOG_WRN("app_nfc_init failed: %d (NFC unavailable, continuing)", ret);
+	}
+	/* Also on failure: the thread then sees !app_nfc_ready() and exits. */
+	k_thread_start(nfc_poll_tid);
 
 #if defined(CONFIG_WATCHDOG)
 	app_wdog_feed();
@@ -584,10 +536,12 @@ int main(void)
 
 		/* NFC is polled on its own thread (nfc_poll_thread_fn), not here. */
 
+#if defined(CONFIG_APP_CALIBRATION)
 		/* Detect magnet on BOTH Hall sensors → reboot into calibration mode */
 		if (k_uptime_get() < (int64_t)APP_CALIBRATION_ACTIVATION_WINDOW_MIN * 60 * 1000) {
 			app_calibration_check_trigger();
 		}
+#endif /* defined(CONFIG_APP_CALIBRATION) */
 
 		/* While a phone is interacting over NFC, the NFC interaction LED (app_nfc.c)
 		 * owns the indicator — suppress the periodic status/heartbeat blinks below so

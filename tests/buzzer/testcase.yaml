@@ -1,0 +1,5 @@
+common:
+  tags: sticker buzzer
+  platform_allow: native_sim
+tests:
+  sticker.buzzer: {}

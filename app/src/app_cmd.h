@@ -30,28 +30,53 @@ enum app_cmd_transport {
 	 * secret_key (#316). Runs the same generic Command/Response dispatch; gates
 	 * the vendor-only command (vendor_reset) and writable:[vendor] fields. */
 	APP_CMD_TRANSPORT_VENDOR,
+	/* Unencrypted, unauthenticated command channel (#415): a raw Command
+	 * protobuf in, 0x01||Response out, no CCM/nonce/cache. Reachable over the
+	 * NFC mailbox channel 0x03 and the `ats cmd plain` shell. A command answers
+	 * on it ONLY by listing `plain_text` in app_config.yml (opt-in) — the
+	 * implicit "omitted = all transports" default deliberately excludes it, so a
+	 * command reaches plain_text only after a reviewed one-line yml change. The
+	 * rule for such a command: read-only, disclosing identity-class data only
+	 * (first user: get_claim_info). */
+	APP_CMD_TRANSPORT_PLAIN_TEXT,
 };
 
 /* Aggregated device status reported in Device Info (device_status, fPort 85 +
- * NFC). uint32 bitmask; proto3 omits a 0 so an empty field means "all OK /
- * nothing active". Low bits are alarm categories (derived read-only from the
- * alarm latches, no side effects), high bits are health/degradation. The raw
- * LoRaWAN link state is NOT duplicated here (it has its own lrw_state field);
- * only the derived LRW_DISABLED bit is included. Bit positions are stable --
- * never renumber; new states take new bits. Plain (1u << n), not zephyr BIT(),
- * so this header stays free of zephyr includes. */
+ * NFC) and the plaintext get_basic_info. uint32 bitmask; proto3 omits a 0 so an
+ * empty field means "all OK / nothing active". A set bit is always the notable /
+ * active / degraded state (never "healthy"), so the empty field stays meaningful.
+ * Bits are grouped by category (alarms / radio / hardware / system) with a
+ * reserved tail in each group for future states.
+ *
+ * The layout was re-grouped for v1.5.0 (#415) — a clean break the mailbox move
+ * already forced. device_status carries no per-frame layout version, so the
+ * decoder is v1.5.0-specific; a still-deployed 1.4.x unit used a different layout
+ * (distinguishable only by the Info fw_* version). Stable from v1.5.0 on — never
+ * renumber again; new states take the reserved bits. Plain (1u << n), not zephyr
+ * BIT(), so this header stays free of zephyr includes. */
+/* Alarms (0-7) — derived read-only from the alarm latches, no side effects. */
 #define APP_DEVICE_STATUS_ALARM_ANY       (1u << 0) /* any alarm latched active */
 #define APP_DEVICE_STATUS_ALARM_THRESHOLD (1u << 1) /* analog threshold rule active */
 #define APP_DEVICE_STATUS_ALARM_STATE     (1u << 2) /* discrete state rule active */
 #define APP_DEVICE_STATUS_ALARM_RATE      (1u << 3) /* counter-rate rule active */
 #define APP_DEVICE_STATUS_ALARM_NO_DATA   (1u << 4) /* no-data watchdog latched */
 #define APP_DEVICE_STATUS_ALARM_LOW_BATT  (1u << 5) /* low-battery watchdog latched (#210) */
-/* bits 6..7 reserved for future alarm categories */
-#define APP_DEVICE_STATUS_NFC_DOWN        (1u << 8)  /* NFC (ST25DV) init failed, degraded */
-#define APP_DEVICE_STATUS_HISTORY_DOWN    (1u << 9)  /* history flash mount failed */
-#define APP_DEVICE_STATUS_I2C_WEDGED      (1u << 10) /* I2C bus wedged (fail streak >= threshold) */
-#define APP_DEVICE_STATUS_TIME_UNSYNCED   (1u << 11) /* RTC not synced (no wall-clock) */
-#define APP_DEVICE_STATUS_LRW_DISABLED    (1u << 12) /* radio-silent: DevEUI all-zero (#98) */
+/* bits 6-7 reserved (alarms) */
+/* Radio (8-11). */
+#define APP_DEVICE_STATUS_RADIO_OFF    (1u << 8) /* radio_mode == off: deliberately silent (#350) */
+#define APP_DEVICE_STATUS_LRW_DISABLED (1u << 9) /* radio-silent: DevEUI all-zero (#98) */
+#define APP_DEVICE_STATUS_RADIO_LINK_DOWN                                                          \
+	(1u << 10) /* LoRaWAN link not healthy/warning (not alive) */
+/* bit 11 reserved (radio) */
+/* Hardware / health (12-15). */
+#define APP_DEVICE_STATUS_NFC_DOWN      (1u << 12) /* NFC (ST25DV) init failed, degraded */
+#define APP_DEVICE_STATUS_MAILBOX_DOWN  (1u << 13) /* ST25DV FTM mailbox not authorised (#414) */
+#define APP_DEVICE_STATUS_I2C_WEDGED    (1u << 14) /* I2C bus wedged (fail streak >= threshold) */
+#define APP_DEVICE_STATUS_HISTORY_DOWN  (1u << 15) /* history flash mount failed */
+/* System (16-17). */
+#define APP_DEVICE_STATUS_TIME_UNSYNCED (1u << 16) /* RTC not synced (no wall-clock) */
+#define APP_DEVICE_STATUS_CLAIM_ACTIVE                                                             \
+	(1u << 17) /* claim window open (claimable); clear = claimed (#415) */
 
 /* Action the caller must perform AFTER the response has been sent (so the Ack
  * leaves before the device reboots). Set by app_cmd_handle(). */
@@ -73,8 +98,11 @@ enum app_cmd_action {
 	APP_CMD_ACTION_LRW_JOIN,        /* trigger a forced (re)join, no reboot (#109) */
 	APP_CMD_ACTION_COUNTERS_SAVE,   /* persist pulse totalizers (no reboot) */
 	APP_CMD_ACTION_SECRET_KEY_SAVE, /* persist the new secret_key + reboot (#299, #322) */
-	APP_CMD_ACTION_CLM_REARM_SAVE,  /* persist new claim_token + reboot, then re-arm clm (#351)
-					 */
+	APP_CMD_ACTION_CLAIM_ACTIVE_SAVE, /* persist new claim_token + reboot, then re-open the
+					   * claim window (#351/#415, ex-CLM_REARM_SAVE) */
+	/* LoRaWAN GetConfig / GetParam answered with page 0 of N (#409 3d/3e): the
+	 * transport streams the remaining pages via app_cmd_stream_next(). */
+	APP_CMD_ACTION_PAGE_STREAM,
 };
 
 /* Plain-C device info snapshot (no protobuf dependency), filled by
@@ -96,6 +124,10 @@ struct app_cmd_info {
 	uint8_t lrw_state;      /* current LoRaWAN state (enum app_lrw_state) */
 	uint8_t dev_eui[8];     /* LoRaWAN DevEUI; all-zero = unset */
 	uint32_t device_status; /* aggregated status (APP_DEVICE_STATUS_* bitmask) */
+	bool has_last_dl;       /* a downlink was received since boot (#409 A2) */
+	int16_t last_dl_rssi;   /* its RSSI (dBm) */
+	int8_t last_dl_snr;     /* its SNR (dB) */
+	uint32_t last_dl_age_s; /* seconds since it was received */
 };
 
 /* Cache the hwinfo reset-cause bitmask read once at boot (RESET_* flags from
@@ -134,11 +166,49 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
  * encrypted channel usable (see app_settings_vendor_reset). */
 const uint8_t *app_cmd_take_pending_vendor_secret_key(void);
 
-/* Build an unsolicited device Info frame (Response{ seq=0, info=... },
- * the same payload a GetInfo command returns) into `out`. Used to send an
- * autonomous GetInfo uplink on join. Returns 0 with *out_len set, -EINVAL on a
- * NULL argument, or -EMSGSIZE if `out_cap` is too small. */
-int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len);
+/* Build an unsolicited device Info frame (Response{ seq=0, info=... }, the
+ * same payload a GetInfo command returns) into `out`. Used to send an autonomous
+ * GetInfo uplink on join. When the full Info does not fit `out_cap` it is paged
+ * (#425): page 0 goes into `out` and *more is set; the remaining pages come from
+ * app_cmd_stream_next(). Returns 0 with *out_len set, -EINVAL on a NULL argument,
+ * or -EMSGSIZE if not even one Info field fits. */
+int app_cmd_build_info(uint8_t *out, size_t out_cap, size_t *out_len, bool *more);
+
+/* Same as app_cmd_build_info(), but the Info (every page of it) carries `seq`:
+ * the deferred answer to a LoRaWAN ClockSync command, so the host can pair it
+ * with its request. app_cmd_build_info() is this with seq 0. */
+int app_cmd_build_info_seq(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len, bool *more);
+
+/* Build an unsolicited Response{ seq, error{ code=BUDGET_TOO_SMALL } } (no
+ * detail, 5-7 B) into `out` — for a LoRaWAN answer that stopped because the DR
+ * budget dropped (e.g. a history replay mid-stream, #409). Returns 0, -EINVAL,
+ * or -EMSGSIZE. */
+int app_cmd_build_budget_error(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len);
+
+/* Device-driven paging over a radio (#425). An answer that needs more than one
+ * page (GetConfig / GetParam, GetInfo, W1Scan, the autonomous Info and
+ * settings-info) is sent as page 0 plus APP_CMD_ACTION_PAGE_STREAM (or `more`);
+ * each call here then encodes the next page of that same answer (same seq, same
+ * layout, Response.page_index/page_count) into `out`. Returns 0 with *out_len
+ * set, -ENODATA when no stream is active or it has finished, or a negative
+ * errno (the stream is dropped). A new paged request replaces a running one. */
+int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len);
+
+/* Drop a running page stream (e.g. on rejoin). */
+void app_cmd_stream_cancel(void);
+
+/* True while pages of an answer are still waiting to be sent. */
+bool app_cmd_stream_active(void);
+
+/* Build an unsolicited settings-info frame (Response{ seq=0, config_dump=... })
+ * into `out`: a fixed selection of the key operating settings — application
+ * interval_sample/interval_report/history_enable, the sensor cap_* capabilities
+ * and (when 1-Wire is present) the detected per-slot w1_slot_type — so the
+ * network learns the effective config on join without polling (#412). When it
+ * does not fit `out_cap` it is paged (#425): page 0 into `out`, *more set, the
+ * rest from app_cmd_stream_next(). Returns 0 with *out_len set, -EINVAL on a NULL
+ * argument, or -EMSGSIZE if not even one setting fits. */
+int app_cmd_build_config_status(uint8_t *out, size_t out_cap, size_t *out_len, bool *more);
 
 /* Staging buffer for one LoRaWAN history-replay frame (version byte + Response{
  * seq, history_frame } protobuf). Sized to exceed the largest EU868 payload (242 B
@@ -188,13 +258,14 @@ struct app_cmd_alarm_event {
 
 /* Build an alarm-detail batch (AlarmReport) for fPort 3 (#27) into `out`.
  * `events[0..n_events)` are encoded (capped to the message's 8-event array);
- * `total` is the true window count and may exceed the encoded events when the
- * caller trimmed to fit the data rate. Returns 0 with *out_len set, -EINVAL on
- * a NULL argument, or -EMSGSIZE if it won't fit `out_cap`. `time_synced` reports
- * whether `base_time` is absolute UTC (L-3/L-4). */
+ * `total` is the true window count. A batch split over several reports numbers
+ * them page_index 0..page_count-1 (#425; omitted when page_count <= 1). Returns
+ * 0 with *out_len set, -EINVAL on a NULL argument, or -EMSGSIZE if it won't fit
+ * `out_cap`. `time_synced` reports whether `base_time` is absolute UTC (L-3/L-4). */
 int app_cmd_build_alarm_report(uint32_t base_time, uint32_t total, bool time_synced,
 			       const struct app_cmd_alarm_event *events, size_t n_events,
-			       uint8_t *out, size_t out_cap, size_t *out_len);
+			       uint32_t page_index, uint32_t page_count, uint8_t *out,
+			       size_t out_cap, size_t *out_len);
 
 #ifdef __cplusplus
 }

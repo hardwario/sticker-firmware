@@ -143,6 +143,14 @@ Fetch all modules:
 west update
 ```
 
+Apply the STICKER patches to west-managed modules (listed in `zephyr/patches.yml`;
+re-run after every `west update`). A LoRaWAN build refuses to configure while a
+patch is missing:
+
+```bash
+west patch apply
+```
+
 Export Zephyr CMake package:
 
 ```bash

@@ -5,6 +5,7 @@
  */
 
 #include "app_compose.h"
+#include "app_alarm.h"
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_hall.h"
@@ -40,12 +41,18 @@ LOG_MODULE_REGISTER(app_compose, LOG_LEVEL_DBG);
 #define TM_U32_NA UINT32_MAX /* uint32 fields: humidity, pressure, illuminance */
 
 /* Per-group flag bit positions (mirrored in ttn.js). */
-#define SYSTEM_FLAG_BOOT BIT(0)
+#define SYSTEM_FLAG_BOOT        BIT(0)
+/* Bits 1..8: the device_status alarm byte (APP_DEVICE_STATUS_ALARM_*, bits 0..7)
+ * shifted up by one (#409 A5a). Telemetry is the only uplink that still gets
+ * through at the 11 B budget tier, where no fPort 3 AlarmReport fits, so the
+ * alarm state rides here. Bits 1..6 are in use today (varint stays 1 B). */
+#define SYSTEM_FLAG_ALARM_SHIFT 1
+#define SYSTEM_FLAG_ALARM_MASK  0xFFu
 /* MP_FLAG_TILT moved to app_w1_slots.c with the per-type SensorReading encode. */
 /* Counter flag bits 0/1 (notify act/deact) retired with the dynamic-alarms
  * migration — notify is now an alarm rule, not a per-counter telemetry flag.
  * ACTIVE stays at bit 2 to keep the wire bit position stable. */
-#define CNT_FLAG_ACTIVE  BIT(2)
+#define CNT_FLAG_ACTIVE         BIT(2)
 
 /* Sensor groups, in priority order (packed into frames first → last). A group
  * is the atomic unit: all its fields go into one frame, or none. */
@@ -151,6 +158,9 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	memset(t, 0, sizeof(*t));
 	uint32_t system_flags = boot ? SYSTEM_FLAG_BOOT : 0;
 
+	system_flags |= (app_alarm_status_flags() & SYSTEM_FLAG_ALARM_MASK)
+			<< SYSTEM_FLAG_ALARM_SHIFT;
+
 	struct app_hall_data hall;
 	struct app_input_data input;
 	app_hall_get_data(&hall);
@@ -226,6 +236,7 @@ static void fill_telemetry(Telemetry *t, bool boot)
 	 * vtable (app_w1_slot_encode), so adding a sensor type needs no change here.
 	 * type travels with the reading; the composer may split the list across
 	 * frames (each reading is indivisible). Absent quantities stay omitted. */
+#if defined(CONFIG_W1)
 	if (g_app_config.cap_w1_sensors) {
 		for (int i = 0; i < APP_W1_SLOT_COUNT; i++) {
 			enum app_w1_slot_type type = app_w1_slot_get_type(i);
@@ -243,6 +254,7 @@ static void fill_telemetry(Telemetry *t, bool boot)
 			t->w1_sensors_count++;
 		}
 	}
+#endif /* defined(CONFIG_W1) */
 
 	/* hall left / right */
 	if (g_app_config.cap_hall_left) {

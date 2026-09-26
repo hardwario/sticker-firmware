@@ -1,0 +1,21 @@
+/*
+ * Copyright (c) 2026 HARDWARIO a.s.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Debug-build devicetree overlay, applied automatically whenever debug.conf is
+ * in EXTRA_CONF_FILE (see app/CMakeLists.txt).
+ *
+ * debug.conf sets CONFIG_PM=n, so the kernel tick is the Cortex-M SysTick
+ * clocked from the 48 MHz MSI instead of LPTIM1 on the LSE crystal (release).
+ * A free-running MSI was measured ~1.22 % slow on the bench, and every kernel
+ * timeout (report cadence, LoRaWAN RX windows, retries) drifts with it. MSI PLL
+ * mode lets the hardware trim the MSI continuously against the 32.768 kHz LSE,
+ * so the debug kernel clock tracks the crystal like the release build.
+ *
+ * Not applied to release: its tick already runs from the LSE (LPTIM1), and the
+ * MSI PLL mode has not been validated there across Stop2 entry/exit.
+ */
+
+&clk_msi {
+	msi-pll-mode;
+};

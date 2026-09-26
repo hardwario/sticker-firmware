@@ -58,6 +58,22 @@ struct app_alarm_active {
  * evaluation / expiry / send). Returns the number of entries written (<= max). */
 size_t app_alarm_active_snapshot(struct app_alarm_active *out, size_t max);
 
+/* Per-alarm active bitmask as of the most recent app_alarm_poll() (#397).
+ * Bits 0..APP_ALARM_SLOT_COUNT-1 are the rule slots; the bits above them are
+ * the internal watchdogs (the no-data entries, then low-battery) — treat
+ * anything above the slot bits as opaque "a watchdog is active", their count
+ * and order may grow. Read-only (no evaluation / expiry / send). */
+uint32_t app_alarm_active_mask(void);
+
+/* Monotonic activation sequence (#397): incremented once by every
+ * app_alarm_poll() that latched at least one NEWLY activated alarm (a bit
+ * that was clear in the previous poll's mask) — deactivations never bump it.
+ * A reader detects "a new alarm fired since I last looked" by comparing
+ * against its own saved copy (compare with !=, it wraps) — non-destructive,
+ * so any number of independent readers can watch it. This is the same edge
+ * the alarm-driven buzzer melody replays on. */
+uint32_t app_alarm_activation_seq(void);
+
 #ifdef __cplusplus
 }
 #endif

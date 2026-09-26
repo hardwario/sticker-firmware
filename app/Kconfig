@@ -6,6 +6,40 @@
 
 menu "Application"
 
+config RADIO_LORAWAN
+	bool "LoRaWAN radio transport"
+	default y
+	select LORAWAN if LORA
+	help
+	  App-level name for the LoRaWAN transport (issue #395) — pairs with
+	  RADIO_P2P below as the two selectable radio transports. `select
+	  LORAWAN if LORA` only forces the underlying Zephyr subsystem ON
+	  when this is y AND the LORA radio driver is present (native_sim
+	  test builds have neither — `select` on a symbol whose own
+	  dependencies aren't met is a hard Kconfig error, not a silent
+	  no-op, hence the `if LORA` guard); turning this off on real HW
+	  (nothing else in this tree selects LORAWAN) leaves it at its own
+	  default (off), disabling all radio transmission. Telemetry/alarm
+	  sampling and history capture keep working with no radio
+	  (app_report.c owns that cadence, not the uplink) — only the actual
+	  send is skipped.
+
+	  ~41 KB flash / ~15 KB RAM when off (issue #395) — the single
+	  biggest lever of any toggle in this tree, but also the biggest
+	  behavioral change (no radio at all), which is why it stays on by
+	  default rather than joining debug.conf's OFF-by-default set.
+
+config RADIO_P2P
+	bool "Raw-LoRa P2P radio transport (reserved, not yet implemented)"
+	default n
+	help
+	  Reserved app-level name for the raw-LoRa P2P transport (issue
+	  #118), pairing with RADIO_LORAWAN above. The P2P implementation
+	  is not merged yet — this option currently has no effect (nothing
+	  depends on or selects anything from it). Wire it to the P2P
+	  transport's own Kconfig once that work merges, mirroring how
+	  RADIO_LORAWAN wraps CONFIG_LORAWAN.
+
 config APP_VERBOSE_LOGGING
 	bool "Enable verbose parameter logging"
 	default y
@@ -111,6 +145,40 @@ config APP_HISTORY_BYTES
 	help
 	  Size of the in-RAM history ring used when CONFIG_APP_HISTORY_FLASH=n.
 	  Record size is variable (5-33 B) depending on the enabled sensor set.
+
+config APP_CALIBRATION
+	bool "Factory calibration mode (magnet-triggered)"
+	default y
+	help
+	  Compile in the magnet-triggered factory calibration mode
+	  (app_calibration.c): boots into a dedicated LED/LoRaWAN test loop
+	  that reads every enabled sensor and reports over a fixed uplink,
+	  instead of normal application behavior.
+
+	  Disable for bench sessions that don't need to calibrate hardware
+	  (e.g. a pure radio/transport test) to free flash/RAM for what IS
+	  under test — see app/debug.conf's variant table.
+
+config APP_PYQ1648
+	bool "PIR motion sensor (PYQ1648)"
+	default y
+	help
+	  Compile in the PIR motion-detector driver wrapper (app_pyq1648.c).
+	  Default y to match shipped behavior — both this and
+	  CONFIG_APP_BUZZER stay compiled in on a normal build, since which
+	  one is actually active is a runtime, per-unit choice
+	  (cap_pir_detector / cap_buzzer config, they share pins, #90/#338).
+	  Disable only for a bench session that knows it needs neither.
+
+config APP_BUZZER
+	bool "Buzzer / melody output (#338)"
+	default y
+	help
+	  Compile in the buzzer/melody driver wrapper (app_buzzer.c) and its
+	  shell (`ats buzz ...`) and remote-command (NFC/LoRaWAN play-melody)
+	  surfaces. Default y to match shipped behavior (see
+	  CONFIG_APP_PYQ1648 above) — disable only for a bench session that
+	  knows it needs neither PIR nor buzzer.
 
 endmenu
 
