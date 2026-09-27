@@ -34,7 +34,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P / NFC | **New** — `get_radio_state` (#446): one `RadioState` for both radios — link state, radio parameters, both link directions, session, failure streak, duty cycle, counters since boot — on request only, paged like every answer. Info no longer carries `lrw_state` / `last_dl_*`. See §24. |
 | Radio: P2P | **Fix / New** — LoRaWAN ↔ P2P parity, part 2 (#449): frames leave in counter order (F-P1-1: one confirmed uplink in flight + 1 s gap), queues survive an unpaired phase, refused telemetry is retried then reset, the fleet jitter and the M-2 watchdog policy are shared, reset tiers clear the P2P pairing, `BUDGET_TOO_SMALL` over P2P, `p2p-*` readable via GetConfig/GetParam. See §25. |
 | Radio: P2P / LoRaWAN | **New** — P2P retry backoff and a per-node uplink phase: retry n waits a random 1..2^n s (was a fixed ~2.3 s rhythm), and a periodic report is sent at a stable DevEUI-derived offset inside min(interval − jitter − 1 s, 60 s), on both radios, so nodes rebooted together no longer collide every interval (F-P2P-4 / F-P2P-5). See §27. |
-| LoRaWAN / P2P | **Renamed** — `lrw-link-check-interval` / `lrw-link-check-fail-rejoin` → `radio-link-check-interval` / `radio-link-check-fail-rejoin`: link supervision is shared by both radios. Wire-compatible (same `lorawan` group fields 13/14); a stored value migrates on the first boot. See §26. |
+| LoRaWAN / P2P | **Renamed** — `lrw-link-check-interval` / `lrw-link-check-fail-rejoin` → `radio-link-check-interval` / `radio-link-check-fail-rejoin`: link supervision is shared by both radios. Wire-compatible (same `lorawan` group fields 13/14); a value stored under the old name is not carried over (defaults 5 / 5). See §26. |
 
 ---
 
@@ -1384,12 +1384,10 @@ prefix (ProXimos decision #22):
   device (v1.4.x included, same field numbers); an integration or Portal mapping
   that reads the decoded keys must follow. The encoder still accepts the old
   `link_check_interval` / `link_check_fail_rejoin` in a SetParam for one release.
-- **Stored value migrates.** configen gained `legacy_names:` in
-  `app_config.yml`: on the first boot after the update, a value stored under the
-  old settings key is loaded into the renamed field, saved under the new key and
-  the old key is deleted (`Migrated legacy setting config/lrw-link-check-...`
-  in the log). Later boots find nothing to migrate. A downgrade to v1.4.x reads
-  the defaults for both parameters.
+- **No NVS migration.** A value stored under the old settings key is not
+  carried over: after the update both parameters run on their defaults (5 / 5)
+  until set again, and the old key stays unused in NVS. A downgrade to v1.4.x
+  likewise reads its defaults.
 
 ## 27. P2P retry backoff and a per-node uplink phase (F-P2P-4 / F-P2P-5)
 
