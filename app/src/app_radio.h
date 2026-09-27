@@ -11,7 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <zephyr/sys/util_macro.h>
+#include <zephyr/sys/util.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,11 +20,11 @@ extern "C" {
 /* Link state of the active radio, shared by both backends (doc/plan/439 T1).
  * The values are the wire values of Response.RadioState.State
  * (app_config.proto), so keep the order. LoRaWAN: IDLE before the first join, JOINING, HEALTHY,
- * WARNING while link checks fail, RECONNECT after the link was lost, DISABLED when the DevEUI is
- * all-zero (#98). P2P: IDLE when unpaired and not joining (after a Detach), JOINING for a
- * boot/forced join, HEALTHY when paired, WARNING after P2P_WARNING_FAIL_THRESHOLD failed confirmed
- * cycles, RECONNECT for a self-heal/RejoinRequest join, DISABLED when lrw_appkey or lrw_deveui is
- * all-zero. */
+ * RECONNECT after the link was lost, DISABLED when the DevEUI is all-zero (#98). P2P: IDLE when
+ * unpaired and not joining (after a Detach), JOINING for a boot/forced join, HEALTHY when paired,
+ * RECONNECT for a self-heal/RejoinRequest join, DISABLED when lrw_appkey or lrw_deveui is
+ * all-zero. WARNING is app_radio's on either radio: HEALTHY after
+ * APP_RADIO_LINK_WARNING_THRESHOLD failed link checks in a row (app_radio_link_result()). */
 enum app_radio_state {
 	APP_RADIO_STATE_IDLE,
 	APP_RADIO_STATE_JOINING,
@@ -159,8 +159,8 @@ void app_radio_set_uplink_rssi(int16_t rssi, int8_t snr);
 void app_radio_set_uplink_margin(uint8_t margin, uint8_t gw_count);
 /* The session's address and next uplink frame counter. */
 void app_radio_set_session(uint32_t dev_addr, uint32_t fcnt_up);
-/* Consecutive unconfirmed uplinks, and the step of the current (re)join episode. */
-void app_radio_set_fail_streak(uint32_t n);
+/* The step of the current (re)join episode. (The failure streak is app_radio's
+ * own: app_radio_link_result().) */
 void app_radio_set_join_attempts(uint32_t n);
 /* Sends are (true) / are no longer (false) held by the duty cycle; the hold
  * time runs from the first `true`. */
@@ -258,6 +258,34 @@ static inline enum app_radio_stale app_radio_stale_check(int64_t now_ms, int64_t
 	return APP_RADIO_STALE_REJOIN;
 }
 
+/* ---- Rejoin backoff (F2; shared by both radios) ---------------------------
+ * A lost link is joined again after APP_RADIO_REJOIN_BACKOFF_BASE_MS, doubling
+ * per attempt up to APP_RADIO_REJOIN_BACKOFF_MAX_MS; `attempt` counts from 0.
+ * The caller spreads it with app_radio_backoff_jitter_ms(). Pure. */
+#define APP_RADIO_REJOIN_BACKOFF_BASE_MS 60000U   /* first rejoin round: 60 s */
+#define APP_RADIO_REJOIN_BACKOFF_MAX_MS  3600000U /* cap: 1 h */
+
+static inline uint32_t app_radio_rejoin_backoff_ms(uint32_t attempt)
+{
+	uint32_t ms = APP_RADIO_REJOIN_BACKOFF_BASE_MS;
+
+	for (uint32_t i = 0; i < attempt && ms < APP_RADIO_REJOIN_BACKOFF_MAX_MS; i++) {
+		ms *= 2;
+	}
+	return MIN(ms, APP_RADIO_REJOIN_BACKOFF_MAX_MS);
+}
+
+/* +/-25 % of `base_ms` around `wait_ms` (M-1): a fleet that lost its link
+ * together (a gateway or Hub outage) must not rejoin in lockstep. Never under
+ * `floor_ms` (P2P: the duty-cycle wait the jitter may not undercut). */
+static inline int64_t app_radio_backoff_jitter_ms(int64_t wait_ms, int64_t floor_ms,
+						  uint32_t base_ms, uint32_t rand32)
+{
+	int64_t jittered = wait_ms - (int64_t)(base_ms / 4) + (int64_t)(rand32 % (base_ms / 2 + 1));
+
+	return MAX(jittered, floor_ms > 0 ? floor_ms : 0);
+}
+
 /* ---- Link-check cadence (PF-1, decision #23; shared by both radios) ---------
  * The report with 0-based index `report_idx` since the last link-up is a link
  * check when it is the first one or every `interval`-th after it (0, N, 2N ...),
@@ -339,13 +367,25 @@ struct app_radio_backend {
 	uint8_t (*budget)(void);
 	/* The link carries uplinks now; false keeps every frame waiting. */
 	bool (*tx_ready)(void);
-	/* A report starts: its APP_RADIO_FRAME_CONFIRMED / _LINK_CHECK flags. A
-	 * link check rides the first frame only. */
-	uint8_t (*report_flags)(void);
-	/* The last frame of a report left. */
-	void (*report_done)(void);
+	/* A report starts: its APP_RADIO_FRAME_CONFIRMED / _LINK_CHECK flags.
+	 * `due`: app_radio's cadence makes this report a link check (LoRaWAN
+	 * rides a LinkCheckReq on it, P2P sends it confirmed). A link check rides
+	 * the first frame only. */
+	uint8_t (*report_flags)(bool due);
 	/* A history replay owns the radio: no report starts. */
 	bool (*replay_active)(void);
+	/* Link state of the backend (enum app_radio_state), never WARNING:
+	 * app_radio lays its link supervision over HEALTHY. */
+	enum app_radio_state (*get_state)(void);
+	/* WARNING's recovery rung, one per failed link check: LoRaWAN restores
+	 * the default TX power, then steps one DR down; P2P steps the TX power up
+	 * towards p2p-tx-power. Returns false at the floor. */
+	bool (*warning_step)(void);
+	/* Give the session up and join again with backoff. `forced`: the M-2
+	 * stale-uplink watchdog (LoRaWAN ABP re-activates too); otherwise the
+	 * WARNING budget ran out. Returns 0, or -ENOTSUP when this node cannot
+	 * rejoin (LoRaWAN ABP, P2P unprovisioned). */
+	int (*rejoin)(bool forced);
 	/* The kinds sent confirmed, BIT(enum app_radio_frame_kind). */
 	uint8_t confirm_kinds;
 	/* Pause between the frames of one report (covers the receive windows). */
@@ -371,11 +411,66 @@ uint32_t app_radio_tx_answer_free(void);
  * `buf_size` and APP_RADIO_TX_SLOT_SIZE. */
 size_t app_radio_tx_answer_cap(size_t buf_size);
 
+/* ---- Link supervision (doc/plan/460 §2.4, F2; decision #22 §3.4) ---------
+ * One machine for both radios. A link check is a report the cadence picked
+ * (app_radio_link_check_due()): LoRaWAN rides a LinkCheckReq on it, P2P sends
+ * it confirmed; the backend reports its outcome, and any authenticated
+ * downlink counts as a success. APP_RADIO_LINK_WARNING_THRESHOLD failures in
+ * a row -> WARNING: the session is kept, every report is a link check, and
+ * each failed one takes the backend's recovery rung (warning_step). Once the
+ * rungs are exhausted, radio-link-check-fail-rejoin failures in WARNING give
+ * the session up (rejoin). One success -> HEALTHY. */
+#define APP_RADIO_LINK_WARNING_THRESHOLD 3
+
+struct app_radio_link {
+	uint32_t reports;       /* reports sent since the link-up (the cadence index) */
+	uint32_t fail_streak;   /* failed link checks in a row */
+	uint32_t warning_fails; /* failures in WARNING towards radio-link-check-fail-rejoin */
+	bool warning;
+};
+
+/* Radio work queue: the link came up (LoRaWAN join, P2P paired): supervision
+ * and the M-2 stale-uplink clock start afresh. */
+void app_radio_link_up(void);
+
+/* Radio work queue: a link check succeeded (`ok`, or any authenticated
+ * downlink) or failed (P2P: a confirmed frame unacknowledged after all its
+ * retries; LoRaWAN: no LinkCheckAns / no gateway). Counts APP_RADIO_CNT_FAIL;
+ * ignored unless the backend is HEALTHY. */
+void app_radio_link_result(bool ok);
+
+/* Any thread: the next report is a link check whatever the cadence. */
+void app_radio_force_link_check(void);
+
+/* Snapshot of the supervision counters (shell). */
+void app_radio_get_link(struct app_radio_link *link);
+
+/* Radio work queue, M-2: a send left (`sent`) or was refused by the duty cycle
+ * (`duty_held`); anything else (a radio error) leaves the hold streak. */
+void app_radio_note_send(bool sent, bool duty_held);
+
+/* Radio work queue, M-2: an uplink that owns the radio left (a history frame:
+ * a replay holds telemetry back, so its frames prove the channel instead). */
+void app_radio_note_uplink(void);
+
+/* Start the radio work queue's liveness heartbeat (#182) and, on it, the M-2
+ * stale-uplink watchdog. From each backend's init (calibration brings
+ * LoRaWAN up without app_radio_init()); a second call does nothing. */
+void app_radio_heartbeat_start(void);
+
+/* Radio work queue: a step that blocks it for long (a P2P receive window)
+ * feeds the liveness channel itself, as the heartbeat cannot run meanwhile. */
+void app_radio_heartbeat_feed(void);
+
 #if defined(CONFIG_ZTEST)
 /* Run the common TX path on `be` (tests/radio_common). */
 void app_radio_test_set_backend(const struct app_radio_backend *be);
 /* Drop every queued frame and the report in progress. */
 void app_radio_test_tx_reset(void);
+/* Forget the supervision state and the M-2 clock. */
+void app_radio_test_link_reset(void);
+/* One M-2 stale-uplink check at uptime `now_ms`, as the heartbeat runs it. */
+void app_radio_test_stale_tick(int64_t now_ms);
 #endif
 
 /* Stage a command response for the next uplink. */

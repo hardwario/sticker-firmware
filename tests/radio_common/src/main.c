@@ -7,7 +7,9 @@
  * LoRaWAN-like backend (nothing sent confirmed, 3 s between the frames of a
  * report, 51 B budget) and once with a P2P-like one (answers, alarms and
  * history confirmed, no frame gap, 239 B budget) -- one implementation, the
- * same behaviour on either radio (decision #23).
+ * same behaviour on either radio (decision #23). Link supervision (F2) runs
+ * the same way: the fake reports link-check outcomes and records the rungs and
+ * rejoins app_radio asks for.
  */
 
 #include "stubs.h"
@@ -45,9 +47,16 @@ static struct {
 	uint8_t budget;
 	bool ready;
 	bool replay;
-	uint8_t report_flags;
+	uint8_t report_flags; /* flags of every report, on top of the due flag */
+	bool suppress_due;    /* LoRaWAN: a LinkCheckReq is already pending */
 	int report_flags_calls;
-	int report_done_calls;
+	/* Link supervision: */
+	enum app_radio_state state;
+	int steps_left; /* warning_step() rungs left */
+	int step_calls;
+	int rejoin_ret;
+	int rejoin_calls;
+	bool rejoin_forced;
 	/* After this many send() calls (0 = never): */
 	size_t drop_link_after;
 	size_t zero_budget_after;
@@ -105,15 +114,41 @@ static bool fake_tx_ready(void)
 	return fk.ready;
 }
 
-static uint8_t fake_report_flags(void)
+struct profile {
+	const struct app_radio_backend *be;
+	uint8_t budget;
+	uint8_t queued_flags; /* flags of a queued answer or alarm */
+	uint8_t due_flag;     /* how a link check rides a report */
+};
+
+static const struct profile *m_prof;
+
+static uint8_t fake_report_flags(bool due)
 {
 	fk.report_flags_calls++;
-	return fk.report_flags;
+	return fk.report_flags | ((due && !fk.suppress_due) ? m_prof->due_flag : 0);
 }
 
-static void fake_report_done(void)
+static enum app_radio_state fake_get_state(void)
 {
-	fk.report_done_calls++;
+	return fk.state;
+}
+
+static bool fake_warning_step(void)
+{
+	fk.step_calls++;
+	if (fk.steps_left > 0) {
+		fk.steps_left--;
+		return true;
+	}
+	return false;
+}
+
+static int fake_rejoin(bool forced)
+{
+	fk.rejoin_calls++;
+	fk.rejoin_forced = forced;
+	return fk.rejoin_ret;
 }
 
 static bool fake_replay_active(void)
@@ -126,8 +161,10 @@ static const struct app_radio_backend be_lrw = {
 	.budget = fake_budget,
 	.tx_ready = fake_tx_ready,
 	.report_flags = fake_report_flags,
-	.report_done = fake_report_done,
 	.replay_active = fake_replay_active,
+	.get_state = fake_get_state,
+	.warning_step = fake_warning_step,
+	.rejoin = fake_rejoin,
 	.confirm_kinds = 0,
 	.frame_gap_ms = 3000,
 };
@@ -137,22 +174,18 @@ static const struct app_radio_backend be_p2p = {
 	.budget = fake_budget,
 	.tx_ready = fake_tx_ready,
 	.report_flags = fake_report_flags,
-	.report_done = fake_report_done,
 	.replay_active = fake_replay_active,
+	.get_state = fake_get_state,
+	.warning_step = fake_warning_step,
+	.rejoin = fake_rejoin,
 	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_ALARM) |
 			 BIT(APP_RADIO_FRAME_HISTORY),
 	.frame_gap_ms = 0,
 };
 
-struct profile {
-	const struct app_radio_backend *be;
-	uint8_t budget;
-	uint8_t queued_flags; /* flags of a queued answer or alarm */
-};
-
-static const struct profile PROFILE_LRW = {&be_lrw, 51, 0};
-static const struct profile PROFILE_P2P = {&be_p2p, 239, APP_RADIO_FRAME_CONFIRMED};
-static const struct profile *m_prof;
+static const struct profile PROFILE_LRW = {&be_lrw, 51, 0, APP_RADIO_FRAME_LINK_CHECK};
+static const struct profile PROFILE_P2P = {&be_p2p, 239, APP_RADIO_FRAME_CONFIRMED,
+					   APP_RADIO_FRAME_CONFIRMED};
 
 static void use_profile(const struct profile *p)
 {
@@ -214,6 +247,16 @@ static uint32_t retries(void)
 	return st.cnt[APP_RADIO_CNT_RETRY];
 }
 
+/* Reports completed since the last link-up (app_radio counts them for the
+ * link-check cadence after a report's last frame). */
+static uint32_t reports_done(void)
+{
+	struct app_radio_link l;
+
+	app_radio_get_link(&l);
+	return l.reports;
+}
+
 static void assert_spacing(size_t from, size_t to, int64_t min_ms)
 {
 	for (size_t i = from + 1; i <= to; i++) {
@@ -227,9 +270,11 @@ static void before(void *f)
 {
 	ARG_UNUSED(f);
 	app_radio_test_tx_reset();
+	app_radio_test_link_reset();
 	stubs_reset();
 	memset(&fk, 0, sizeof(fk));
 	fk.ready = true;
+	fk.state = APP_RADIO_STATE_HEALTHY;
 	memset(&g_app_config, 0, sizeof(g_app_config));
 	g_app_config.interval_report = 60;
 	use_profile(&PROFILE_LRW);
@@ -241,6 +286,7 @@ static void after(void *f)
 	fk.ready = false;
 	k_sleep(K_MSEC(10)); /* a report request still on the system work queue */
 	app_radio_test_tx_reset();
+	app_radio_test_link_reset();
 }
 
 ZTEST_SUITE(radio_common, NULL, NULL, before, after, NULL);
@@ -278,7 +324,7 @@ static void order_answer_alarm_telemetry(void)
 	zassert_equal(fk.log[2].flags, 0);
 	zassert_equal(g_compose_last_budget, m_prof->budget);
 	zassert_equal(fk.report_flags_calls, 1);
-	zassert_equal(fk.report_done_calls, 1);
+	zassert_equal(reports_done(), 1);
 }
 BOTH_PROFILES(order_answer_alarm_telemetry)
 
@@ -302,7 +348,7 @@ static void answer_goes_between_report_frames(void)
 	zassert_equal(fk.log[2].head[1], 1);
 	zassert_equal(fk.log[2].flags, 0);
 	zassert_equal(fk.report_flags_calls, 1);
-	zassert_equal(fk.report_done_calls, 1);
+	zassert_equal(reports_done(), 1);
 }
 BOTH_PROFILES(answer_goes_between_report_frames)
 
@@ -549,8 +595,8 @@ ZTEST(radio_common, test_other_frames_over_budget_are_dropped)
 
 /* A report is composed frame by frame against the budget of the moment: the
  * link check rides the first frame only, MORE marks all but the last, the
- * backend's frame gap separates them, and report_flags() / report_done() run
- * once per report. */
+ * backend's frame gap separates them, report_flags() runs once per report and
+ * the report counts once, after its last frame. */
 static void report_frames_and_flags(void)
 {
 	const size_t lens[] = {20, 20, 10};
@@ -572,7 +618,7 @@ static void report_frames_and_flags(void)
 	}
 	assert_spacing(0, 2, m_prof->be->frame_gap_ms);
 	zassert_equal(fk.report_flags_calls, 1);
-	zassert_equal(fk.report_done_calls, 1);
+	zassert_equal(reports_done(), 1);
 	zassert_equal(g_compose_reset_calls, 0);
 }
 BOTH_PROFILES(report_frames_and_flags)
@@ -592,7 +638,7 @@ ZTEST(radio_common, test_requests_fold_into_one_report)
 	app_radio_tx_kick();
 	k_sleep(K_SECONDS(10));
 	zassert_equal(fk.n, 1);
-	zassert_equal(fk.report_done_calls, 1);
+	zassert_equal(reports_done(), 1);
 }
 
 /* A request that arrives while a report is on the air is a report of its own,
@@ -611,7 +657,7 @@ static void request_during_a_report_follows_it(void)
 	zassert_equal(fk.log[2].head[0], 1);
 	zassert_equal(fk.log[3].head[0], 1);
 	zassert_equal(fk.report_flags_calls, 2);
-	zassert_equal(fk.report_done_calls, 2);
+	zassert_equal(reports_done(), 2);
 }
 BOTH_PROFILES(request_during_a_report_follows_it)
 
@@ -630,13 +676,13 @@ static void telemetry_error_abandons_the_report(void)
 	assert_spacing(0, 8, RETRY_MS);
 	zassert_equal(retries(), base + 8);
 	zassert_equal(g_compose_reset_calls, 1);
-	zassert_equal(fk.report_done_calls, 0);
+	zassert_equal(reports_done(), 0);
 
 	app_radio_send_telemetry_now();
 	k_sleep(K_SECONDS(1));
 	zassert_equal(fk.n, 10);
 	zassert_ok(fk.log[9].ret);
-	zassert_equal(fk.report_done_calls, 1);
+	zassert_equal(reports_done(), 1);
 }
 BOTH_PROFILES(telemetry_error_abandons_the_report)
 
@@ -656,7 +702,7 @@ static void telemetry_duty_hold_counts(void)
 	assert_spacing(0, 8, 1000);
 	zassert_equal(retries(), base + 8);
 	zassert_equal(g_compose_reset_calls, 1);
-	zassert_equal(fk.report_done_calls, 0);
+	zassert_equal(reports_done(), 0);
 }
 BOTH_PROFILES(telemetry_duty_hold_counts)
 
@@ -673,13 +719,13 @@ static void telemetry_over_budget_frame_is_skipped(void)
 	k_sleep(K_SECONDS(30));
 	zassert_equal(fk.n, 3);
 	zassert_equal(fk.log[2].head[1], 2);
-	zassert_equal(fk.report_done_calls, 1);
+	zassert_equal(reports_done(), 1);
 	zassert_equal(g_compose_reset_calls, 0);
 }
 BOTH_PROFILES(telemetry_over_budget_frame_is_skipped)
 
-/* ... the last frame included: no report_done() for a report that did not
- * fully leave, but no snapshot reset either. */
+/* ... the last frame included: a report that did not fully leave does not
+ * count, but no snapshot reset either. */
 ZTEST(radio_common, test_telemetry_over_budget_last_frame)
 {
 	const size_t lens[] = {20, 30};
@@ -690,7 +736,7 @@ ZTEST(radio_common, test_telemetry_over_budget_last_frame)
 	app_radio_send_telemetry_now();
 	k_sleep(K_SECONDS(30));
 	zassert_equal(fk.n, 2);
-	zassert_equal(fk.report_done_calls, 0);
+	zassert_equal(reports_done(), 0);
 	zassert_equal(g_compose_reset_calls, 0);
 }
 
@@ -708,7 +754,7 @@ static void budget_zero_sends_an_empty_frame(void)
 	zassert_equal(fk.log[0].kind, APP_RADIO_FRAME_TELEMETRY);
 	zassert_equal(fk.log[0].len, 0);
 	zassert_equal(fk.report_flags_calls, 0);
-	zassert_equal(fk.report_done_calls, 0);
+	zassert_equal(reports_done(), 0);
 	zassert_equal(g_compose_reset_calls, 0, "nothing of the snapshot left yet");
 
 	fk.budget = m_prof->budget;
@@ -716,7 +762,7 @@ static void budget_zero_sends_an_empty_frame(void)
 	k_sleep(K_SECONDS(1));
 	zassert_equal(fk.n, 2);
 	zassert_equal(fk.log[1].len, 20);
-	zassert_equal(fk.report_done_calls, 1);
+	zassert_equal(reports_done(), 1);
 }
 BOTH_PROFILES(budget_zero_sends_an_empty_frame)
 
@@ -732,7 +778,7 @@ ZTEST(radio_common, test_budget_zero_mid_report_resets_the_snapshot)
 	zassert_equal(fk.n, 2);
 	zassert_equal(fk.log[1].len, 0);
 	zassert_equal(g_compose_reset_calls, 1);
-	zassert_equal(fk.report_done_calls, 0);
+	zassert_equal(reports_done(), 0);
 }
 
 /* A history replay owns the radio: the report waits for its end (the kick),
@@ -769,7 +815,7 @@ static void link_loss_mid_report_resets_the_snapshot(void)
 	k_sleep(K_SECONDS(30));
 	zassert_equal(fk.n, 1);
 	zassert_equal(g_compose_reset_calls, 1);
-	zassert_equal(fk.report_done_calls, 0);
+	zassert_equal(reports_done(), 0);
 
 	fk.ready = true;
 	app_radio_tx_kick();
@@ -781,7 +827,7 @@ static void link_loss_mid_report_resets_the_snapshot(void)
 	zassert_equal(fk.n, 4);
 	zassert_equal(fk.log[1].head[0], 1, "not a fresh snapshot");
 	zassert_equal(fk.log[1].head[1], 0);
-	zassert_equal(fk.report_done_calls, 1);
+	zassert_equal(reports_done(), 1);
 }
 BOTH_PROFILES(link_loss_mid_report_resets_the_snapshot)
 
@@ -800,7 +846,7 @@ static void telemetry_busy_waits_notconn_abandons(void)
 	app_radio_tx_kick();
 	k_sleep(K_SECONDS(1));
 	zassert_equal(fk.n, 2);
-	zassert_equal(fk.report_done_calls, 1);
+	zassert_equal(reports_done(), 1);
 
 	fk.n = 0;
 	script(notconn, 1);
@@ -811,7 +857,7 @@ static void telemetry_busy_waits_notconn_abandons(void)
 	app_radio_tx_kick();
 	k_sleep(K_SECONDS(1));
 	zassert_equal(fk.n, 1);
-	zassert_equal(fk.report_done_calls, 1);
+	zassert_equal(reports_done(), 1);
 }
 BOTH_PROFILES(telemetry_busy_waits_notconn_abandons)
 
@@ -860,4 +906,348 @@ ZTEST(radio_common, test_calibration_sends_nothing)
 	app_radio_send_telemetry_now();
 	k_sleep(K_SECONDS(5));
 	zassert_equal(fk.n, 0);
+}
+
+/* ---- Link supervision (doc/plan/460 §2.4, F2) ------------------------------ */
+
+static void fail_n(int n)
+{
+	for (int i = 0; i < n; i++) {
+		app_radio_link_result(false);
+	}
+}
+
+static uint32_t fails(void)
+{
+	struct app_radio_status st;
+
+	app_radio_get_status(&st);
+	return st.cnt[APP_RADIO_CNT_FAIL];
+}
+
+static struct app_radio_link link(void)
+{
+	struct app_radio_link l;
+
+	app_radio_get_link(&l);
+	return l;
+}
+
+/* Three failed link checks in a row: WARNING, session kept, and the first
+ * recovery rung taken at once. */
+static void warning_after_three_failures(void)
+{
+	struct app_radio_status st;
+	uint32_t f0 = fails();
+
+	fk.steps_left = 5;
+	app_radio_link_up();
+	fail_n(2);
+	zassert_equal(app_radio_get_state(), APP_RADIO_STATE_HEALTHY, "2 failures: healthy");
+	zassert_equal(fk.step_calls, 0, "no rung before WARNING");
+	zassert_equal(link().fail_streak, 2);
+
+	fail_n(1);
+	zassert_equal(app_radio_get_state(), APP_RADIO_STATE_WARNING, "3 failures: WARNING");
+	zassert_true(link().warning);
+	zassert_equal(fk.step_calls, 1, "entering WARNING takes the first rung");
+	zassert_equal(fk.rejoin_calls, 0, "the session is kept");
+
+	app_radio_get_status(&st);
+	zassert_equal(st.state, APP_RADIO_STATE_WARNING, "status carries WARNING");
+	zassert_equal(st.cnt[APP_RADIO_CNT_FAIL] - f0, 3, "every failure is counted");
+	zassert_equal(st.fail_streak, 3, "status carries the streak");
+}
+BOTH_PROFILES(warning_after_three_failures)
+
+/* One passed check anywhere: back to HEALTHY, streak cleared. */
+static void success_ends_warning(void)
+{
+	app_radio_link_up();
+	fail_n(4);
+	zassert_equal(app_radio_get_state(), APP_RADIO_STATE_WARNING);
+	app_radio_link_result(true);
+	zassert_equal(app_radio_get_state(), APP_RADIO_STATE_HEALTHY);
+	zassert_equal(link().fail_streak, 0);
+	zassert_equal(link().warning_fails, 0);
+	zassert_false(link().warning);
+
+	/* A success also resets a streak short of WARNING. */
+	fail_n(2);
+	app_radio_link_result(true);
+	fail_n(2);
+	zassert_equal(app_radio_get_state(), APP_RADIO_STATE_HEALTHY, "streak restarted");
+}
+BOTH_PROFILES(success_ends_warning)
+
+/* No rung left: radio-link-check-fail-rejoin more failures in WARNING, then a
+ * rejoin (not forced -- the backend may refuse it). */
+static void rejoin_after_the_budget(void)
+{
+	g_app_config.radio_link_check_fail_rejoin = 3;
+	app_radio_link_up();
+	fail_n(3);
+	zassert_equal(app_radio_get_state(), APP_RADIO_STATE_WARNING);
+	fail_n(2);
+	zassert_equal(fk.rejoin_calls, 0, "2 of 3 in WARNING: kept");
+	zassert_equal(link().warning_fails, 2);
+	fail_n(1);
+	zassert_equal(fk.rejoin_calls, 1, "3 of 3 in WARNING: rejoin");
+	zassert_false(fk.rejoin_forced);
+
+	/* A budget of 0 still takes one failure in WARNING. */
+	app_radio_test_link_reset();
+	fk.rejoin_calls = 0;
+	g_app_config.radio_link_check_fail_rejoin = 0;
+	app_radio_link_up();
+	fail_n(3);
+	zassert_equal(fk.rejoin_calls, 0);
+	fail_n(1);
+	zassert_equal(fk.rejoin_calls, 1, "budget 0 counts as 1");
+}
+BOTH_PROFILES(rejoin_after_the_budget)
+
+/* A rejoin is never spent while a rung is still untried. */
+static void rung_defers_the_rejoin(void)
+{
+	g_app_config.radio_link_check_fail_rejoin = 1;
+	fk.steps_left = 3;
+	app_radio_link_up();
+	fail_n(3); /* WARNING, rung 1 */
+	fail_n(2); /* rungs 2 and 3 */
+	zassert_equal(fk.step_calls, 3);
+	zassert_equal(fk.rejoin_calls, 0, "rungs left: no rejoin");
+	fail_n(1);
+	zassert_equal(fk.step_calls, 4, "the rung is tried first");
+	zassert_equal(fk.rejoin_calls, 1, "no rung left: rejoin");
+}
+BOTH_PROFILES(rung_defers_the_rejoin)
+
+/* A backend that cannot rejoin (LoRaWAN ABP, P2P unprovisioned) stays in
+ * WARNING, checks every report and tries again after the next budget. */
+static void refused_rejoin_stays_warning(void)
+{
+	g_app_config.radio_link_check_fail_rejoin = 2;
+	fk.rejoin_ret = -ENOTSUP;
+	app_radio_link_up();
+	fail_n(5);
+	zassert_equal(fk.rejoin_calls, 1);
+	zassert_equal(app_radio_get_state(), APP_RADIO_STATE_WARNING, "kept in WARNING");
+	zassert_equal(link().warning_fails, 0, "the budget starts again");
+	fail_n(1);
+	zassert_equal(fk.rejoin_calls, 1);
+	fail_n(1);
+	zassert_equal(fk.rejoin_calls, 2, "the next budget asks again");
+}
+BOTH_PROFILES(refused_rejoin_stays_warning)
+
+/* Outcomes while the backend (re)joins belong to no session: ignored, but a
+ * failure still counts. WARNING is an overlay on HEALTHY only. */
+static void results_ignored_unless_healthy(void)
+{
+	uint32_t f0 = fails();
+
+	app_radio_link_up();
+	fail_n(3);
+	fk.state = APP_RADIO_STATE_RECONNECT;
+	zassert_equal(app_radio_get_state(), APP_RADIO_STATE_RECONNECT, "no WARNING overlay");
+	fail_n(10);
+	zassert_equal(fk.rejoin_calls, 0, "no rejoin during a rejoin");
+	zassert_equal(fk.step_calls, 1, "only the WARNING entry's rung");
+	zassert_equal(link().fail_streak, 3, "streak kept until the link-up");
+	zassert_equal(fails() - f0, 13, "every failure counted");
+
+	fk.state = APP_RADIO_STATE_HEALTHY;
+	app_radio_link_up();
+	zassert_equal(app_radio_get_state(), APP_RADIO_STATE_HEALTHY, "a link-up starts afresh");
+	zassert_equal(link().fail_streak, 0);
+	zassert_equal(link().reports, 0);
+}
+BOTH_PROFILES(results_ignored_unless_healthy)
+
+/* One single-frame report; returns whether it rode as a link check. */
+static bool report_is_check(void)
+{
+	size_t n = fk.n;
+	const size_t lens[] = {20};
+
+	frames(lens, 1);
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(4)); /* past the LoRaWAN-like frame gap */
+	zassert_equal(fk.n, n + 1, "one frame per report");
+	return (fk.log[n].flags & m_prof->due_flag) != 0;
+}
+
+/* The cadence (PF-1): report #1 after a link-up, then every N-th; none with
+ * N = 0; the count restarts at the next link-up. */
+static void link_check_cadence(void)
+{
+	g_app_config.radio_link_check_interval = 3;
+	app_radio_link_up();
+	for (int i = 0; i < 7; i++) {
+		zassert_equal(report_is_check(), (i % 3) == 0, "N = 3, report %d", i);
+	}
+	app_radio_link_up();
+	zassert_true(report_is_check(), "the first report after a link-up");
+
+	g_app_config.radio_link_check_interval = 0;
+	app_radio_link_up();
+	for (int i = 0; i < 3; i++) {
+		zassert_false(report_is_check(), "N = 0, report %d", i);
+	}
+}
+BOTH_PROFILES(link_check_cadence)
+
+/* §3.4 / LoRaWAN #424: while WARNING every report is a link check. */
+static void every_report_checks_in_warning(void)
+{
+	g_app_config.radio_link_check_interval = 0;
+	app_radio_link_up();
+	fail_n(3);
+	for (int i = 0; i < 3; i++) {
+		zassert_true(report_is_check(), "WARNING, report %d", i);
+	}
+	app_radio_link_result(true);
+	zassert_false(report_is_check(), "HEALTHY again: back to the cadence");
+}
+BOTH_PROFILES(every_report_checks_in_warning)
+
+/* `ats lrw check` / a forced check: the next report, once -- kept until one
+ * actually rode (a LoRaWAN LinkCheckReq already pending carries none). */
+static void forced_check_rides_once(void)
+{
+	g_app_config.radio_link_check_interval = 0;
+	app_radio_link_up();
+	app_radio_force_link_check();
+	fk.suppress_due = true;
+	zassert_false(report_is_check(), "no check could ride");
+	fk.suppress_due = false;
+	zassert_true(report_is_check(), "the forced check rides the next report");
+	zassert_false(report_is_check(), "used up");
+}
+BOTH_PROFILES(forced_check_rides_once)
+
+ZTEST(radio_common, test_link_check_due_rule)
+{
+	for (uint32_t i = 0; i < 12; i++) {
+		zassert_equal(app_radio_link_check_due(i, 5, false), (i % 5) == 0, "N = 5, idx %u",
+			      i);
+		zassert_true(app_radio_link_check_due(i, 1, false), "N = 1, idx %u", i);
+		zassert_false(app_radio_link_check_due(i, 0, false), "N = 0, idx %u", i);
+		zassert_false(app_radio_link_check_due(i, -1, false), "N < 0, idx %u", i);
+		zassert_true(app_radio_link_check_due(i, 0, true), "WARNING, N = 0, idx %u", i);
+		zassert_true(app_radio_link_check_due(i, 5, true), "WARNING, N = 5, idx %u", i);
+	}
+}
+
+/* ---- M-2 stale-uplink watchdog (F29), common to both radios ------------------ */
+
+#define STALE_MS ((int64_t)APP_RADIO_STALE_FACTOR * 60 * 1000) /* interval_report 60 s */
+
+/* No telemetry for > APP_RADIO_STALE_FACTOR report intervals: forced rejoin. */
+static void stale_uplink_rejoins(void)
+{
+	app_radio_link_up();
+	int64_t t0 = k_uptime_get();
+
+	app_radio_test_stale_tick(t0 + STALE_MS - 1000);
+	zassert_equal(fk.rejoin_calls, 0, "not stale yet");
+	app_radio_test_stale_tick(t0 + STALE_MS + 1000);
+	zassert_equal(fk.rejoin_calls, 1, "stale: rejoin");
+	zassert_true(fk.rejoin_forced, "an M-2 rejoin is forced");
+	app_radio_test_stale_tick(t0 + STALE_MS + 2000);
+	zassert_equal(fk.rejoin_calls, 1, "not again on the next tick");
+
+	/* Not HEALTHY (already rejoining): nothing. */
+	fk.state = APP_RADIO_STATE_RECONNECT;
+	app_radio_test_stale_tick(t0 + 3 * STALE_MS);
+	zassert_equal(fk.rejoin_calls, 1);
+}
+BOTH_PROFILES(stale_uplink_rejoins)
+
+/* The duty cycle explains a mute node: no rejoin. */
+static void stale_duty_hold_waits(void)
+{
+	app_radio_link_up();
+	int64_t t0 = k_uptime_get();
+
+	k_sleep(K_SECONDS(1));
+	app_radio_note_send(false, true);
+	app_radio_test_stale_tick(k_uptime_get() + STALE_MS - 500);
+	zassert_equal(fk.rejoin_calls, 0, "duty hold: no rejoin");
+
+	app_radio_note_send(true, false);
+	app_radio_test_stale_tick(t0 + 2 * STALE_MS);
+	zassert_equal(fk.rejoin_calls, 1, "a send ended the hold: rejoin");
+}
+BOTH_PROFILES(stale_duty_hold_waits)
+
+/* A telemetry report that left, or a history frame, refreshes the clock. */
+static void uplinks_refresh_the_stale_clock(void)
+{
+	app_radio_link_up();
+	k_sleep(K_SECONDS(30));
+	(void)report_is_check();
+	int64_t t1 = k_uptime_get();
+
+	app_radio_test_stale_tick(t1 + STALE_MS - 5000); /* sent 4 s before t1 */
+	zassert_equal(fk.rejoin_calls, 0, "the report refreshed it");
+
+	k_sleep(K_SECONDS(30));
+	app_radio_note_uplink();
+	int64_t t2 = k_uptime_get();
+
+	app_radio_test_stale_tick(t2 + STALE_MS - 1000);
+	zassert_equal(fk.rejoin_calls, 0, "a history uplink refreshed it");
+	app_radio_test_stale_tick(t2 + STALE_MS + 1000);
+	zassert_equal(fk.rejoin_calls, 1);
+
+	/* No link-up yet: no clock, no rejoin. */
+	app_radio_test_link_reset();
+	app_radio_test_stale_tick(t2 + 10 * STALE_MS);
+	zassert_equal(fk.rejoin_calls, 1);
+}
+BOTH_PROFILES(uplinks_refresh_the_stale_clock)
+
+/* ---- Rejoin backoff (common) ------------------------------------------------ */
+
+ZTEST(radio_common, test_rejoin_backoff_doubles_then_caps)
+{
+	/* base, 2x, 4x, ... capped at 1 h. */
+	zassert_equal(app_radio_rejoin_backoff_ms(0), 60000u, "attempt 0 should be the 60 s base");
+	zassert_equal(app_radio_rejoin_backoff_ms(1), 120000u, "attempt 1 should double to 120 s");
+	zassert_equal(app_radio_rejoin_backoff_ms(2), 240000u, "attempt 2 should be 240 s");
+	zassert_equal(app_radio_rejoin_backoff_ms(3), 480000u, "attempt 3 should be 480 s");
+
+	/* Monotonic non-decreasing, and never above the 1 h cap, for any attempt. */
+	uint32_t prev = 0;
+
+	for (int a = 0; a <= 255; a++) {
+		uint32_t ms = app_radio_rejoin_backoff_ms((uint32_t)a);
+
+		zassert_true(ms >= prev, "backoff not monotonic at attempt %d (%u < %u)", a, ms,
+			     prev);
+		zassert_true(ms <= 3600000u, "backoff %u at attempt %d exceeds the 1 h cap", ms, a);
+		prev = ms;
+	}
+	zassert_equal(app_radio_rejoin_backoff_ms(255), 3600000u,
+		      "a large attempt must saturate at 1 h");
+}
+
+/* +/-25 % of the backoff around the wait, never under the floor. */
+ZTEST(radio_common, test_backoff_jitter_spreads_and_keeps_the_floor)
+{
+	const uint32_t base = app_radio_rejoin_backoff_ms(0);
+
+	zassert_equal(app_radio_backoff_jitter_ms(base, 0, base, 0), base - base / 4);
+	zassert_equal(app_radio_backoff_jitter_ms(base, 0, base, base / 2), base + base / 4);
+	for (uint32_t r = 0; r < 4 * base; r += 997) {
+		int64_t d = app_radio_backoff_jitter_ms(base, 0, base, r);
+
+		zassert_true(d >= base - base / 4 && d <= base + base / 4, "draw %u: %lld", r,
+			     (long long)d);
+	}
+	zassert_equal(app_radio_backoff_jitter_ms(base, 70000, base, 0), 70000,
+		      "the floor wins over a negative draw");
+	zassert_equal(app_radio_backoff_jitter_ms(1000, 0, base, 0), 0, "never negative");
 }

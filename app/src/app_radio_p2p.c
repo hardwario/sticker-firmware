@@ -16,7 +16,6 @@
 #include "app_radio_p2p.h"
 #include "app_settings.h"
 #include "app_version.h"
-#include "app_wdog.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -170,11 +169,6 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  * and getting -EAGAIN again right back. */
 #define P2P_TX_RETRY_MARGIN_MS 50
 
-#if defined(CONFIG_WATCHDOG)
-#define P2P_HEARTBEAT_PERIOD_SEC 5
-#define P2P_HEARTBEAT_TIMEOUT_MS 30000
-#endif
-
 /* ---- Join/session persistence (#118 phase 2, doc/p2p.md §5.3) ---- */
 
 #define P2P_JOIN_SUBTREE    "p2pjoin"
@@ -225,21 +219,16 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 #define P2P_JOIN_SWEEP_SF_MIN   7
 #define P2P_JOIN_SWEEP_SF_MAX   12
 
-/* Link supervision (decision #22 §3.4), LoRaWAN's machine with the same two
- * parameters. A failed link check is a CONFIRMED frame with no Ack (or 0x56)
- * after its P2P_ACK_MAX_RETRIES retries; any authenticated downlink is a
- * success. P2P_WARNING_FAIL_THRESHOLD failures in a row -> WARNING (the
- * session is kept, every report goes confirmed, and each failed check steps
- * the TX power up towards p2p-tx-power); radio-link-check-fail-rejoin further
- * failures in WARNING -> a self-healing re-join on the configured SF. Unlike
- * the never-paired boot join (§5.2), that re-join skips the 120 s fast phase
- * and starts straight on exponential backoff (base -> x2 -> cap), to keep the
- * duty budget and battery sane over a long outage. This replaces the former
- * "8 failed cycles -> re-join" rule. */
-#define P2P_WARNING_FAIL_THRESHOLD   3
+/* Link supervision (decision #22 §3.4) is app_radio's, one machine for both
+ * radios (doc/plan/460 F2). A failed link check is a CONFIRMED frame with no
+ * Ack (or 0x56) after its P2P_ACK_MAX_RETRIES retries; any authenticated
+ * downlink is a success. WARNING's rung here is the TX power: each failed
+ * check steps it up towards p2p-tx-power (warning_tx_power_step()). A rejoin
+ * is a self-healing re-join on the configured SF which, unlike the
+ * never-paired boot join (§5.2), skips the 120 s fast phase and starts
+ * straight on the common exponential backoff (app_radio_rejoin_backoff_ms()),
+ * to keep the duty budget and battery sane over a long outage. */
 #define P2P_WARNING_TX_POWER_STEP_DB 2
-#define P2P_REJOIN_BACKOFF_BASE_MS   60000   /* first re-join round: 60 s */
-#define P2P_REJOIN_BACKOFF_MAX_MS    3600000 /* cap: 1 h */
 
 /* RX1 window (§6, reused for JoinAccept per §5.3): opened this many ms
  * before the nominal rx1_delay deadline to absorb node-side timing error
@@ -349,22 +338,6 @@ static struct k_work_delayable m_join_work;     /* JoinRequest attempt + retry (
 static struct k_work_delayable m_announce_work; /* common Info + settings-info announce */
 static void announce_work_handler(struct k_work *work);
 
-/* Decision #22 §3.2: the reports sent since link-up (picks the N-th, which goes
- * CONFIRMED). The uplink queues and the report split live in app_radio
- * (doc/plan/460 F4). */
-static uint32_t m_report_count;
-/* Link supervision (§3.4): the node is in WARNING (session kept) and the
- * failed confirmed frames counted there towards radio-link-check-fail-rejoin. */
-static bool m_warning;
-static uint16_t m_warning_fails;
-
-/* M-2 stale-uplink watchdog (app_radio_stale_check(), shared with LoRaWAN):
- * uptime of the last telemetry uplink (0 = none since the last join) and the
- * duty-cycle hold streak. Radio work queue only. */
-static int64_t m_last_uplink_ms;
-static struct app_radio_stale_dc m_dc;
-static bool m_dc_hold_logged;
-
 /* F-P1-1: the central keeps a strict counter high-water, so frames must leave
  * in counter order. Two rules keep them there, as on LoRaWAN (a confirmed
  * uplink's retransmissions finish before the next uplink):
@@ -396,11 +369,6 @@ struct p2p_compose_result {
 static struct p2p_compose_result m_debug_compose_result; /* ats radio compose dry-run */
 static struct k_work m_debug_compose_work;
 static void debug_compose_work_handler(struct k_work *work); /* defined near EOF */
-#endif
-
-#if defined(CONFIG_WATCHDOG)
-static int m_wdog_channel = -1;
-static struct k_work_delayable m_heartbeat_work;
 #endif
 
 static bool m_started;
@@ -443,9 +411,8 @@ static uint8_t m_sf = SF_7;
  * not what triggered it: the slow policy is exponential backoff with no
  * boot-window cap; the fast one is the 120 s boot window with tight jitter.
  * A self-heal is the only thing that selects the slow policy today. */
-static uint16_t m_consec_uplink_fail; /* consecutive fully-failed uplink cycles */
-static bool m_join_slow;              /* current JOINING episode uses the slow policy */
-static uint8_t m_rejoin_attempt;      /* backoff step within a slow-policy episode */
+static bool m_join_slow;         /* current JOINING episode uses the slow policy */
+static uint8_t m_rejoin_attempt; /* backoff step within a slow-policy episode */
 
 /* Join SF sweep state (B-2). An episode walks passes; a pass is
  * P2P_JOIN_SF_ATTEMPTS sent JoinRequests at p2p_join_sweep_sf(cfg, 0) -- the
@@ -458,14 +425,8 @@ static int64_t m_join_sweep_epoch; /* uptime ms since which no last-resort sweep
 static uint8_t m_join_sf_attempts; /* SENT attempts already made at that step */
 static bool m_join_episode_fresh;  /* the handler has not opened this episode yet */
 
-/* RadioState (#446): every change of the failure streak and the backoff step is
- * pushed to app_radio, which is where readers take them from. */
-static void set_consec_fail(uint32_t n)
-{
-	m_consec_uplink_fail = (uint16_t)MIN(n, UINT16_MAX);
-	app_radio_set_fail_streak(m_consec_uplink_fail);
-}
-
+/* RadioState (#446): every change of the backoff step is pushed to app_radio,
+ * which is where readers take it from. */
 static void set_rejoin_attempt(uint32_t n)
 {
 	m_rejoin_attempt = (uint8_t)MIN(n, UINT8_MAX);
@@ -1050,7 +1011,7 @@ P2P_TESTABLE uint32_t p2p_rx1_timeout_ms(int sf, uint8_t expected_frame_len)
  * the radio work queue like everything else here; the whole call blocks that queue for
  * up to ~rx1_delay_s (dominant) + the frame's ToA (#118 phase 2 HW finding,
  * see p2p_rx1_timeout_ms()) -- an explicit watchdog feed covers this (and
- * any caller's own backoff sleep) since the periodic heartbeat_work_handler
+ * any caller's own backoff sleep) since app_radio's periodic heartbeat
  * can't run until this returns (the radio work queue is single-threaded). Restores TX radio
  * config before returning either way. Returns the received length (>=0) or a
  * negative errno (notably a timeout if nothing arrived within the window). */
@@ -1060,9 +1021,7 @@ static int p2p_rx_window(int64_t tx_end_ms, uint8_t rx1_delay_s, uint8_t expecte
 	int64_t open_at = tx_end_ms + (int64_t)rx1_delay_s * 1000 - P2P_RX1_OPEN_MARGIN_MS;
 	int64_t sleep_ms = open_at - k_uptime_get();
 
-#if defined(CONFIG_WATCHDOG)
-	app_wdog_ping(m_wdog_channel);
-#endif
+	app_radio_heartbeat_feed();
 
 	if (sleep_ms > 0) {
 		k_sleep(K_MSEC(sleep_ms));
@@ -1259,19 +1218,6 @@ P2P_TESTABLE int p2p_join_sweep_sf(int cfg_sf, uint8_t step)
 	return -1;
 }
 
-/* Exponential backoff (ms) for self-healing re-join round `attempt` (0-based):
- * BASE, 2*BASE, 4*BASE, ... capped at MAX. Pure -- exposed to tests/p2p_logic.
- * The caller adds jitter. */
-P2P_TESTABLE uint32_t p2p_rejoin_backoff_ms(uint8_t attempt)
-{
-	uint32_t ms = P2P_REJOIN_BACKOFF_BASE_MS;
-
-	for (uint8_t i = 0; i < attempt && ms < P2P_REJOIN_BACKOFF_MAX_MS; i++) {
-		ms *= 2;
-	}
-	return MIN(ms, (uint32_t)P2P_REJOIN_BACKOFF_MAX_MS);
-}
-
 /* How long to wait before the next JoinRequest, or < 0 for "the boot window is
  * over" -- which hands the episode to the slow policy rather than ending it
  * (join_window_expired). Pure -- exposed to tests/p2p_logic. The caller adds
@@ -1321,27 +1267,6 @@ P2P_TESTABLE int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int6
 		return remaining;
 	}
 	return wait;
-}
-
-/* Apply the slow policy's +/-25%-of-backoff jitter to `wait_ms`, never letting
- * the result fall below `duty_wait_ms`. `rand32` is a raw sys_rand32_get()
- * draw. Pure -- exposed to tests/p2p_logic.
- *
- * The jitter stops a fleet that lost the same central from re-joining in
- * lockstep, and it is scaled to the backoff. But `wait_ms` may be the DUTY wait
- * instead -- p2p_join_retry_delay_ms returns the longer of the two -- and the
- * two are unrelated magnitudes. A negative draw of base/4 (15 s at the 60 s
- * base, 15 min at the 1 h cap) would then wake the node before the ledger has
- * cleared: send_join_request() is refused again, and the round has still spent
- * a backoff step on a frame that never went out, which is the waste the duty
- * wait exists to stop. So the duty wait is a floor -- jitter may push the wait
- * up past it, never back through it. */
-P2P_TESTABLE int64_t p2p_join_slow_jitter_ms(int64_t wait_ms, int64_t duty_wait_ms, uint32_t base,
-					     uint32_t rand32)
-{
-	int64_t jittered = wait_ms - (int64_t)(base / 4) + (int64_t)(rand32 % (base / 2 + 1));
-
-	return MAX(jittered, duty_wait_ms > 0 ? duty_wait_ms : 0);
 }
 
 /* Parse a decrypted Ack body (app_radio_p2p.h): flags|rssi|snr, optionally followed
@@ -1584,9 +1509,6 @@ static void start_join_episode(bool slow)
 	m_join_episode_fresh = true;
 	m_join_slow = slow;
 	set_rejoin_attempt(0);
-	set_consec_fail(0);
-	m_warning = false;
-	m_warning_fails = 0;
 	m_link_state = P2P_LINK_JOINING;
 	m_join_started_at = k_uptime_get();
 	/* reschedule, not schedule: a slow-backoff retry may be pending for up to
@@ -1596,28 +1518,23 @@ static void start_join_episode(bool slow)
 	k_work_reschedule_for_queue(app_radio_work_q(), &m_join_work, K_NO_WAIT);
 }
 
-/* A confirmed-uplink cycle completed successfully (Ack received) -- clear the
- * self-healing failure streak. */
+/* A link check succeeded: an Ack or any other authenticated downlink. */
 static void note_uplink_acked(void)
 {
-	set_consec_fail(0);
-	if (m_warning) {
-		LOG_INF("P2P link check OK in WARNING: back to HEALTHY");
-	}
-	m_warning = false;
-	m_warning_fails = 0;
+	app_radio_link_result(true);
 }
 
-/* WARNING's action (§3.4): with a fixed SF the P2P counterpart of LoRaWAN's
- * DR / TX ladder is the TX power -- a session the central assigned a lower
- * power steps back up towards the node's own p2p-tx-power, per failed check.
- * Runtime only; the next JoinAccept assigns afresh. */
-static void warning_tx_power_step(void)
+/* WARNING's rung (struct app_radio_backend.warning_step): with a fixed SF the
+ * P2P counterpart of LoRaWAN's DR / TX ladder is the TX power -- a session the
+ * central assigned a lower power steps back up towards the node's own
+ * p2p-tx-power, per failed check. Runtime only; the next JoinAccept assigns
+ * afresh. Returns false once at the node's own power. */
+static bool warning_tx_power_step(void)
 {
 	int8_t cap = (int8_t)g_app_config.p2p_tx_power;
 
 	if (!m_session_tx_power_assigned || m_session_tx_power_dbm >= cap) {
-		return; /* already at the node's own power */
+		return false; /* already at the node's own power */
 	}
 
 	int8_t from = m_session_tx_power_dbm;
@@ -1626,48 +1543,35 @@ static void warning_tx_power_step(void)
 	(void)radio_configure(true);
 	publish_link();
 	LOG_WRN("P2P WARNING: TX power %d -> %d dBm", from, m_session_tx_power_dbm);
+	return true;
 }
 
 /* A link check failed: a confirmed frame got no Ack after all its retries.
- * Only counts while PAIRED, so once a self-heal is under way further give-ups
- * do not re-trigger it. */
+ * app_radio counts it only while the session is up, so once a self-heal is
+ * under way further give-ups do not re-trigger it. */
 static void note_uplink_cycle_failed(void)
 {
-	app_radio_count(APP_RADIO_CNT_FAIL);
-	if (m_link_state != P2P_LINK_PAIRED) {
-		return; /* already re-joining (or never paired) */
-	}
-	set_consec_fail(m_consec_uplink_fail + 1);
-	if (!m_warning) {
-		if (m_consec_uplink_fail >= P2P_WARNING_FAIL_THRESHOLD) {
-			m_warning = true;
-			m_warning_fails = 0;
-			LOG_WRN("P2P: %u failed link checks -- WARNING", m_consec_uplink_fail);
-			warning_tx_power_step();
-		}
-		return;
-	}
-	warning_tx_power_step();
-	if (++m_warning_fails < (uint16_t)MAX(g_app_config.radio_link_check_fail_rejoin, 1)) {
-		LOG_WRN("P2P link check failed in WARNING (%u/%d)", m_warning_fails,
-			g_app_config.radio_link_check_fail_rejoin);
-		return;
-	}
+	app_radio_link_result(false);
+}
+
+/* struct app_radio_backend.rejoin: the self-healing re-join (§7) on the slow
+ * policy. Refused while unprovisioned: no JoinRequest can succeed under an
+ * all-zero app_key (§4) or DevEUI (#417). */
+static int p2p_tx_rejoin(bool forced)
+{
+	ARG_UNUSED(forced);
+
 	if (!app_key_is_set()) {
-		/* Can't re-join under an all-zero app_key (§4); stay put and keep
-		 * counting so a later re-provision + success resets the streak. */
 		LOG_ERR("P2P self-heal refused: lrw_appkey is all-zero (unprovisioned)");
-		return;
+		return -ENOTSUP;
 	}
 	if (!dev_eui_is_set()) {
-		/* Same for the DevEUI (#417): a JoinRequest carrying eight zero
-		 * bytes is one no central can have registered. */
 		LOG_ERR("P2P self-heal refused: lrw_deveui is all-zero (unprovisioned)");
-		return;
+		return -ENOTSUP;
 	}
-	LOG_WRN("P2P: %u failed link checks in WARNING -- self-healing re-join (§7)",
-		m_warning_fails);
+	LOG_WRN("P2P: self-healing re-join (§7)");
 	start_join_episode(true);
+	return 0;
 }
 
 /* The 12 B header (app_radio_p2p.h, decision #22), written and read in one
@@ -1801,8 +1705,7 @@ static int tx_frame_at(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, s
 	/* Charge the just-sent air-time against the 1% budget. */
 	duty_charge(air);
 	app_radio_count(APP_RADIO_CNT_TX);
-	app_radio_stale_note(&m_dc, true, false, k_uptime_get());
-	m_dc_hold_logged = false;
+	app_radio_note_send(true, false);
 	publish_link();
 
 	LOG_INF("TX type %u%s, %zu B (counter %u, %u ms air)", frame_type,
@@ -1826,7 +1729,7 @@ static int tx_frame(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, size
 
 	if (wait > 0) {
 		LOG_WRN("TX duty-cycle blocked for %lld ms", wait);
-		app_radio_stale_note(&m_dc, false, true, k_uptime_get());
+		app_radio_note_send(false, true);
 		return -EAGAIN;
 	}
 
@@ -2448,13 +2351,12 @@ static int send_confirmed(uint8_t frame_type, const uint8_t *body, size_t body_l
 	return send_uplink(frame_type, body, body_len, true);
 }
 
-/* Decision #22 §3.2: telemetry is unconfirmed and sent once, except the N-th
- * report since link-up (N = radio-link-check-interval), which is CONFIRMED and
- * so the P2P link check -- the first report after a link-up included, as on
- * LoRaWAN. While WARNING every report is confirmed (LoRaWAN #424); N = 0 turns
- * the periodic check off (alarms and answers stay confirmed and judge the
- * link on their own). Decided once per snapshot, kept for all its frames. */
-static bool telemetry_report_confirmed(void)
+/* Decision #22 §3.2: telemetry is unconfirmed and sent once, except a report
+ * app_radio's cadence picked as a link check (`due`: the first after a link-up
+ * and every radio-link-check-interval-th, every one in WARNING), which is
+ * CONFIRMED -- alarms and answers are always confirmed and judge the link on
+ * their own. Decided once per snapshot, kept for all its frames. */
+static bool telemetry_report_confirmed(bool due)
 {
 	/* A pending clock_sync also rides a confirmed report: the time comes in the
 	 * Ack's tail, as LoRaWAN's DeviceTimeReq rides the next uplink (PF-2). */
@@ -2462,8 +2364,7 @@ static bool telemetry_report_confirmed(void)
 	    atomic_inc(&m_clock_sync_reports) < P2P_CLOCK_SYNC_REPORTS_MAX) {
 		return true;
 	}
-	return app_radio_link_check_due(m_report_count, g_app_config.radio_link_check_interval,
-					m_warning);
+	return due;
 }
 
 /* ---- TX backend: app_radio schedules, this sends one frame (doc/plan/460 F4) ---- */
@@ -2493,9 +2394,6 @@ static int p2p_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 
 	switch (ret) {
 	case 0:
-		if (f->kind == APP_RADIO_FRAME_TELEMETRY) {
-			m_last_uplink_ms = k_uptime_get(); /* M-2: telemetry went out */
-		}
 		break;
 	case -EAGAIN:
 		/* Duty cycle: again the moment the ledger has room for this frame. */
@@ -2520,14 +2418,9 @@ static uint8_t p2p_tx_budget(void)
 }
 
 /* Once per report, at its first frame, kept for all its frames. */
-static uint8_t p2p_tx_report_flags(void)
+static uint8_t p2p_tx_report_flags(bool due)
 {
-	return telemetry_report_confirmed() ? APP_RADIO_FRAME_CONFIRMED : 0;
-}
-
-static void p2p_tx_report_done(void)
-{
-	m_report_count++;
+	return telemetry_report_confirmed(due) ? APP_RADIO_FRAME_CONFIRMED : 0;
 }
 
 /* MED-9: a history replay owns the radio; telemetry waits. Interleaved frames
@@ -2544,8 +2437,10 @@ const struct app_radio_backend app_radio_p2p_backend = {
 	.budget = p2p_tx_budget,
 	.tx_ready = app_radio_p2p_is_ready,
 	.report_flags = p2p_tx_report_flags,
-	.report_done = p2p_tx_report_done,
 	.replay_active = p2p_tx_replay_active,
+	.get_state = app_radio_p2p_get_state,
+	.warning_step = warning_tx_power_step,
+	.rejoin = p2p_tx_rejoin,
 	/* §6: answers, alarms and history frames are confirmed; telemetry only
 	 * the N-th report (report_flags). */
 	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_ALARM) |
@@ -2675,14 +2570,9 @@ int app_radio_p2p_listen(bool enable)
 
 static void mark_ready(void)
 {
-	/* Paired: back to the fast policy and clear the failure streak. */
+	/* Paired: back to the fast policy. */
 	m_join_slow = false;
 	set_rejoin_attempt(0);
-	set_consec_fail(0);
-	m_warning = false;
-	m_warning_fails = 0;
-	/* The first report of the session is the link check (§3.2). */
-	m_report_count = 0;
 
 	/* Fresh session: last Ack's link quality and any pending-downlink hint
 	 * from the old session no longer apply. */
@@ -2691,6 +2581,9 @@ static void mark_ready(void)
 	m_pending_frame_len = 0;
 
 	m_started = true;
+	/* Link supervision and the M-2 clock start afresh; the first report of
+	 * the session is the link check (§3.2). */
+	app_radio_link_up();
 	/* The TX power assignment is NOT reset here: pairing_persist() has
 	 * already installed this session's value (or cleared it), and
 	 * mark_ready() also runs on the already-PAIRED boot shortcut, where the
@@ -2702,7 +2595,6 @@ static void mark_ready(void)
 	app_radio_announce();
 	/* Frames parked while unpaired leave now, under this session. */
 	app_radio_tx_kick();
-	m_last_uplink_ms = k_uptime_get(); /* M-2: start the stale-uplink clock */
 	if (m_ready_cb) {
 		m_ready_cb();
 	}
@@ -3003,7 +2895,7 @@ static void join_work_handler(struct k_work *work)
 		 * once an hour. The curve is charged between passes instead, which
 		 * is the only place the two policies differ. */
 		if (pass_end) {
-			base = p2p_rejoin_backoff_ms(m_rejoin_attempt);
+			base = app_radio_rejoin_backoff_ms(m_rejoin_attempt);
 		}
 		wait_ms = p2p_join_retry_delay_ms(true, 0, duty_wait_ms, base,
 						  P2P_JOIN_RETRY_JITTER_MS);
@@ -3013,62 +2905,18 @@ static void join_work_handler(struct k_work *work)
 		/* Exponential backoff between passes, +/-25% jitter. A duty-cycle-
 		 * blocked (-EAGAIN) round waits for the ledger instead when that is
 		 * the longer of the two (p2p_join_retry_delay_ms), and the jitter
-		 * may not undercut it (p2p_join_slow_jitter_ms). */
+		 * may not undercut it (app_radio_backoff_jitter_ms). */
 		if (m_rejoin_attempt < UINT8_MAX) {
 			set_rejoin_attempt(m_rejoin_attempt + 1);
 		}
-		wait_ms = p2p_join_slow_jitter_ms(wait_ms, duty_wait_ms, base, sys_rand32_get());
+		wait_ms =
+			app_radio_backoff_jitter_ms(wait_ms, duty_wait_ms, base, sys_rand32_get());
 	} else {
 		wait_ms += sys_rand32_get() % P2P_JOIN_RETRY_JITTER_MS;
 	}
 
 	k_work_reschedule_for_queue(app_radio_work_q(), dwork, K_MSEC(wait_ms));
 }
-
-/* ======================================================================== */
-/* Watchdog heartbeat (mirrors app_radio_lrw.c's queue liveness pattern)    */
-/* ======================================================================== */
-
-#if defined(CONFIG_WATCHDOG)
-static void heartbeat_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	app_wdog_ping(m_wdog_channel);
-
-	/* M-2, as on LoRaWAN: the ping only proves the radio work queue drains. Paired but no
-	 * telemetry out for APP_RADIO_STALE_FACTOR report intervals -> the station is
-	 * mute: re-join (self-heal policy), unless the duty cycle explains it. */
-	if (m_started && m_link_state == P2P_LINK_PAIRED) {
-		int64_t now = k_uptime_get();
-
-		switch (app_radio_stale_check(now, m_last_uplink_ms, &m_dc,
-					      (uint32_t)g_app_config.interval_report)) {
-		case APP_RADIO_STALE_HOLD_DC:
-			if (!m_dc_hold_logged) {
-				LOG_WRN("No telemetry uplink for >%d report intervals, but the "
-					"duty cycle holds sends (%d s): no rejoin (M-2)",
-					APP_RADIO_STALE_FACTOR,
-					(int)((now - m_dc.since_ms) / 1000));
-				m_dc_hold_logged = true;
-			}
-			break;
-		case APP_RADIO_STALE_REJOIN:
-			LOG_WRN("No telemetry uplink for >%d report intervals - re-joining (M-2)",
-				APP_RADIO_STALE_FACTOR);
-			m_last_uplink_ms = now; /* don't re-trigger every tick */
-			if (app_key_is_set() && dev_eui_is_set()) {
-				start_join_episode(true);
-			}
-			break;
-		default:
-			break;
-		}
-	}
-
-	k_work_schedule_for_queue(app_radio_work_q(), &m_heartbeat_work,
-				  K_SECONDS(P2P_HEARTBEAT_PERIOD_SEC));
-}
-#endif /* defined(CONFIG_WATCHDOG) */
 
 /* ======================================================================== */
 /* History replay (req_history, tag 11) -- P2P device-driven HistoryFrame    */
@@ -3212,7 +3060,7 @@ static void hist_work_handler(struct k_work *work)
 	/* M-2: a replay gates telemetry, so its frames are the uplinks -- as in
 	 * app_radio_lrw.c. Without this a replay longer than the stale window
 	 * re-joined mid-stream (review of #400). */
-	m_last_uplink_ms = k_uptime_get();
+	app_radio_note_uplink();
 
 	LOG_INF("P2P history frame %u/%u sent (%u rec, %zu B)", (unsigned)(m_hist_idx + 1),
 		(unsigned)m_hist_count, (unsigned)n, len);
@@ -3350,7 +3198,6 @@ void p2p_test_join_setup(int cfg_sf)
 	m_link_state = P2P_LINK_JOINING;
 	m_join_slow = false;
 	set_rejoin_attempt(0);
-	set_consec_fail(0);
 	m_join_started_at = k_uptime_get();
 	m_join_episode_fresh = false;
 	m_join_sweep_step = 0;
@@ -3359,26 +3206,11 @@ void p2p_test_join_setup(int cfg_sf)
 	join_set_sf(p2p_join_sweep_sf(cfg_sf, 0));
 }
 
-/* Link supervision hooks (decision #22 §3.4). */
+/* A pending clock_sync forces confirmed reports (PF-2). */
 void p2p_test_link_reset(void)
 {
-	m_warning = false;
-	m_warning_fails = 0;
-	m_report_count = 0;
-	set_consec_fail(0);
-	/* A pending clock_sync forces confirmed reports (PF-2). */
 	atomic_clear(&m_clock_sync_pending);
 	atomic_clear(&m_clock_sync_reports);
-}
-
-void p2p_test_link_check_failed(void)
-{
-	note_uplink_cycle_failed();
-}
-
-void p2p_test_link_ok(void)
-{
-	note_uplink_acked();
 }
 
 /* Stop a join episode a case started, waiting out an attempt in progress. */
@@ -3414,15 +3246,11 @@ void p2p_test_join_step(void)
 /* Force the link-state inputs of app_radio_p2p_get_state()/is_ready(), so the
  * mapping to the common app_radio state can be checked without driving a join
  * or a run of failed uplinks through the radio. */
-void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, uint16_t fails,
-		       bool disabled)
+void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, bool disabled)
 {
 	m_link_state = state;
 	m_started = started;
 	m_join_slow = slow;
-	set_consec_fail(fails);
-	m_warning = fails >= P2P_WARNING_FAIL_THRESHOLD;
-	m_warning_fails = 0;
 	m_disabled = disabled;
 }
 
@@ -3610,14 +3438,8 @@ int app_radio_p2p_init(void)
 	k_work_init(&m_debug_compose_work, debug_compose_work_handler);
 #endif
 
-#if defined(CONFIG_WATCHDOG)
-	m_wdog_channel = app_wdog_register(P2P_HEARTBEAT_TIMEOUT_MS);
-	if (m_wdog_channel < 0) {
-		LOG_ERR_CALL_FAILED_INT("app_wdog_register", m_wdog_channel);
-	}
-	k_work_init_delayable(&m_heartbeat_work, heartbeat_work_handler);
-	k_work_schedule_for_queue(app_radio_work_q(), &m_heartbeat_work, K_NO_WAIT);
-#endif /* defined(CONFIG_WATCHDOG) */
+	/* The radio work queue's liveness heartbeat and the M-2 watchdog (#182). */
+	app_radio_heartbeat_start();
 
 	app_compose_reset();
 
@@ -3690,7 +3512,7 @@ enum app_radio_state app_radio_p2p_get_state(void)
 		if (!m_started) {
 			return APP_RADIO_STATE_IDLE;
 		}
-		return m_warning ? APP_RADIO_STATE_WARNING : APP_RADIO_STATE_HEALTHY;
+		return APP_RADIO_STATE_HEALTHY; /* app_radio adds WARNING */
 	case P2P_LINK_JOINING:
 		/* The slow policy runs for a self-heal / RejoinRequest episode and
 		 * after an unanswered boot window: a reconnect with backoff. */

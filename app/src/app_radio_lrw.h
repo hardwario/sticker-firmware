@@ -33,16 +33,14 @@ struct app_radio_lrw_info {
 	int8_t snr;
 	uint8_t margin;
 	uint8_t gw_count;
-	/* State machine counters */
-	int consecutive_lc_fail;   /* LC failures in a row (HEALTHY) */
-	int consecutive_lc_ok;     /* LC successes in a row (WARNING) */
-	int warning_lc_fail_total; /* Total LC failures in WARNING */
-	int message_count;         /* Messages sent since boot/rejoin */
+	/* Link supervision (app_radio's, struct app_radio_link) */
+	int consecutive_lc_fail;   /* LC failures in a row */
+	int warning_lc_fail_total; /* LC failures in WARNING towards the rejoin */
+	int message_count;         /* Reports sent since the join */
 	/* Thresholds for display */
-	int thresh_warning;      /* FAIL_THRESHOLD_WARNING */
-	int thresh_healthy;      /* OK_THRESHOLD_HEALTHY */
-	int thresh_reconnect;    /* FAIL_THRESHOLD_RECONNECT */
-	int link_check_interval; /* Every N-th message has LC */
+	int thresh_warning;      /* APP_RADIO_LINK_WARNING_THRESHOLD */
+	int thresh_reconnect;    /* radio-link-check-fail-rejoin */
+	int link_check_interval; /* Every N-th report has LC */
 };
 
 int app_radio_lrw_init(void);
@@ -61,10 +59,6 @@ extern const struct app_radio_backend app_radio_lrw_backend;
  * finish) so app_report can resume the report cadence with an immediate uplink.
  * NULL clears it. Called once from app_report_init(). */
 void app_radio_lrw_register_ready_cb(void (*cb)(void));
-
-/* Arm a forced LinkCheckReq on the next telemetry first-frame (shell/test path;
- * pair with app_report_trigger() to actually emit the uplink). */
-void app_radio_lrw_force_link_check(void);
 
 /* Current application-payload budget (bytes) for the next uplink, taken from the
  * LoRaWAN stack (lorawan_get_payload_sizes) and refreshed on every DR change and

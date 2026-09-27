@@ -791,7 +791,6 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "messages: %d", info.message_count);
 	shell_print(shell, "healthy->warning: %d/%d", info.consecutive_lc_fail,
 		    info.thresh_warning);
-	shell_print(shell, "warning->healthy: %d/%d", info.consecutive_lc_ok, info.thresh_healthy);
 	shell_print(shell, "warning->reconnect: %d/%d", info.warning_lc_fail_total,
 		    info.thresh_reconnect);
 
@@ -804,7 +803,7 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 #if defined(CONFIG_LORAWAN)
 static int cmd_lrw_check(const struct shell *shell, size_t argc, char **argv)
 {
-	app_radio_lrw_force_link_check();
+	app_radio_force_link_check();
 	app_report_trigger();
 	shell_print(shell, "Sending data with link check request");
 	return 0;

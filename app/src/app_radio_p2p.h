@@ -432,12 +432,9 @@ int build_frame_keyed(uint32_t net_id, uint16_t dev_addr, const uint8_t session_
 void p2p_duty_init(struct p2p_duty *d);
 void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
-uint32_t p2p_rejoin_backoff_ms(uint8_t attempt);
 int p2p_join_sweep_sf(int cfg_sf, uint8_t step);
 int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait_ms,
 				uint32_t backoff_ms, uint32_t jitter_ms);
-int64_t p2p_join_slow_jitter_ms(int64_t wait_ms, int64_t duty_wait_ms, uint32_t base,
-				uint32_t rand32);
 uint32_t p2p_ack_retry_backoff_ms(int attempt, uint32_t rand32);
 bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
 void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter, int16_t rssi, int8_t snr);
@@ -448,8 +445,6 @@ void p2p_test_replay_setup(void);
 void p2p_test_join_setup(int cfg_sf);
 void p2p_test_allow_join_sweep(void);
 void p2p_test_link_reset(void);
-void p2p_test_link_check_failed(void);
-void p2p_test_link_ok(void);
 void p2p_test_join_stop(void);
 void p2p_test_set_session_tx_power(bool assigned, int8_t dbm);
 void p2p_test_join_step(void);
@@ -460,8 +455,7 @@ void p2p_test_put_ack_retry(uint32_t counter);
 void p2p_test_put_ack_retry_frame(uint8_t type, const uint8_t *body, size_t len, uint32_t counter);
 uint32_t p2p_test_ack_retry_count(void);
 void p2p_test_drop_old_session(void);
-void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, uint16_t fails,
-		       bool disabled);
+void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, bool disabled);
 void p2p_test_note_downlink(int16_t rssi, int8_t snr);
 void p2p_test_join_restart(void);
 int64_t p2p_test_join_pending_ms(void);

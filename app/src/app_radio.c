@@ -16,6 +16,9 @@
 #if defined(CONFIG_RADIO_P2P)
 #include "app_radio_p2p.h"
 #endif
+#if defined(CONFIG_WATCHDOG)
+#include "app_wdog.h"
+#endif
 
 #include <zephyr/devicetree.h>
 #include <zephyr/init.h>
@@ -171,18 +174,18 @@ enum app_radio_kind app_radio_get_kind(void)
 #endif
 }
 
+/* Link supervision (doc/plan/460 §2.4, F2): radio work queue only, except the
+ * forced-check flag (any thread) and `warning`, read by app_radio_get_state()
+ * from any thread (a bool). */
+static struct app_radio_link m_link;
+static atomic_t m_link_forced;
+
 enum app_radio_state app_radio_get_state(void)
 {
-#if defined(CONFIG_RADIO_P2P)
-	if (is_p2p()) {
-		return app_radio_p2p_get_state();
-	}
-#endif
-#if defined(CONFIG_LORAWAN)
-	return app_radio_lrw_get_state();
-#else
-	return APP_RADIO_STATE_IDLE;
-#endif
+	enum app_radio_state state = m_be ? m_be->get_state() : APP_RADIO_STATE_IDLE;
+
+	return (state == APP_RADIO_STATE_HEALTHY && m_link.warning) ? APP_RADIO_STATE_WARNING
+								    : state;
 }
 
 /* The PA caps whatever a backend asks for: the STICKER RFO_LP path tops out at
@@ -265,7 +268,7 @@ void app_radio_set_session(uint32_t dev_addr, uint32_t fcnt_up)
 	k_spin_unlock(&m_st_lock, key);
 }
 
-void app_radio_set_fail_streak(uint32_t n)
+static void set_fail_streak(uint32_t n)
 {
 	k_spinlock_key_t key = k_spin_lock(&m_st_lock);
 
@@ -600,6 +603,225 @@ static bool tx_queued_step(void)
 	return true;
 }
 
+/* ---- Link supervision (doc/plan/460 §2.4, F2) -----------------------------
+ * The machine both radios ran on their own (LoRaWAN #71, P2P decision #22
+ * §3.4), in one place: the cadence of link checks, WARNING with its recovery
+ * rungs, and the rejoin once they are exhausted. The backend only says how a
+ * link check rides (report_flags), reports its outcome (app_radio_link_result)
+ * and carries out a rung or a rejoin. */
+
+/* M-2 stale-uplink watchdog: uptime of the last telemetry uplink (0 = none
+ * since the last link-up) and the duty-cycle hold streak. Radio work queue. */
+static int64_t m_last_uplink_ms;
+static struct app_radio_stale_dc m_dc;
+static bool m_dc_hold_logged;
+
+static void link_set_streak(uint32_t n)
+{
+	m_link.fail_streak = n;
+	set_fail_streak(n);
+}
+
+static void link_clear(void)
+{
+	link_set_streak(0);
+	m_link.warning = false;
+	m_link.warning_fails = 0;
+}
+
+void app_radio_link_up(void)
+{
+	link_clear();
+	m_link.reports = 0; /* the first report of the session is a link check */
+	atomic_clear(&m_link_forced);
+	m_last_uplink_ms = MAX(k_uptime_get(), 1);
+	m_dc = (struct app_radio_stale_dc){0};
+	m_dc_hold_logged = false;
+}
+
+void app_radio_link_result(bool ok)
+{
+	if (!ok) {
+		app_radio_count(APP_RADIO_CNT_FAIL);
+	}
+	if (m_be == NULL || m_be->get_state() != APP_RADIO_STATE_HEALTHY) {
+		return; /* (re)joining: the next link-up starts afresh */
+	}
+	if (ok) {
+		if (m_link.warning) {
+			LOG_INF("Link check OK in WARNING: back to HEALTHY");
+		}
+		link_clear();
+		return;
+	}
+
+	link_set_streak(m_link.fail_streak + 1);
+	if (!m_link.warning) {
+		LOG_WRN("Link check failed (streak %u/%d)", m_link.fail_streak,
+			APP_RADIO_LINK_WARNING_THRESHOLD);
+		if (m_link.fail_streak >= APP_RADIO_LINK_WARNING_THRESHOLD) {
+			m_link.warning = true;
+			m_link.warning_fails = 0;
+			LOG_WRN("Link WARNING: session kept, every report checks the link");
+			/* The failures that got here already show the link no longer
+			 * reaches: take the first rung now. */
+			(void)m_be->warning_step();
+		}
+		return;
+	}
+
+	/* The next rung before the rejoin budget: a rejoin is never spent while a
+	 * rung is still untried (it costs the session and, on LoRaWAN, a DevNonce). */
+	bool stepped = m_be->warning_step();
+	int budget = MAX(g_app_config.radio_link_check_fail_rejoin, 1);
+
+	m_link.warning_fails++;
+	LOG_WRN("Link check failed in WARNING (%u/%d%s)", m_link.warning_fails, budget,
+		stepped ? ", recovery step" : "");
+	if (stepped || m_link.warning_fails < (uint32_t)budget) {
+		return;
+	}
+	if (m_be->rejoin(false) != 0) {
+		/* Cannot rejoin (LoRaWAN ABP, P2P unprovisioned): stay in WARNING
+		 * and keep checking every report; recover when the link returns. */
+		LOG_WRN("Cannot rejoin: staying in WARNING");
+		m_link.warning_fails = 0;
+		return;
+	}
+	LOG_WRN("Link lost after %u failed checks in WARNING: rejoin", m_link.warning_fails);
+}
+
+void app_radio_force_link_check(void)
+{
+	atomic_set(&m_link_forced, 1);
+}
+
+void app_radio_get_link(struct app_radio_link *link)
+{
+	*link = m_link;
+}
+
+void app_radio_note_send(bool sent, bool duty_held)
+{
+	app_radio_stale_note(&m_dc, sent, duty_held, k_uptime_get());
+	if (sent) {
+		m_dc_hold_logged = false;
+	}
+}
+
+void app_radio_note_uplink(void)
+{
+	m_last_uplink_ms = MAX(k_uptime_get(), 1);
+}
+
+/* A report starts: is it a link check? The first report after a link-up and
+ * every N-th after it, every report while WARNING, and the next one after
+ * app_radio_force_link_check(). A forced check is used up once one rode. */
+static uint8_t report_flags(void)
+{
+	bool forced = atomic_get(&m_link_forced) != 0;
+	bool due = forced ||
+		   app_radio_link_check_due(m_link.reports, g_app_config.radio_link_check_interval,
+					    m_link.warning);
+	uint8_t flags = m_be->report_flags(due);
+
+	if (forced && (flags & (APP_RADIO_FRAME_LINK_CHECK | APP_RADIO_FRAME_CONFIRMED))) {
+		atomic_clear(&m_link_forced);
+	}
+	return flags;
+}
+
+/* M-2 (F29): a joined node whose telemetry has not left for
+ * APP_RADIO_STALE_FACTOR x interval_report is mute although the radio work
+ * queue drains (sends perpetually skipped, retries exhausted): rejoin --
+ * unless the duty cycle explains it (app_radio_stale_check()). */
+#if defined(CONFIG_WATCHDOG) || defined(CONFIG_ZTEST)
+static void stale_tick(int64_t now)
+{
+	if (m_be == NULL || m_be->get_state() != APP_RADIO_STATE_HEALTHY) {
+		return;
+	}
+
+	switch (app_radio_stale_check(now, m_last_uplink_ms, &m_dc,
+				      (uint32_t)g_app_config.interval_report)) {
+	case APP_RADIO_STALE_HOLD_DC:
+		if (!m_dc_hold_logged) {
+			LOG_WRN("No telemetry uplink for >%d report intervals, but the duty cycle "
+				"holds sends (%d s): no rejoin (M-2)",
+				APP_RADIO_STALE_FACTOR, (int)((now - m_dc.since_ms) / 1000));
+			m_dc_hold_logged = true;
+		}
+		break;
+	case APP_RADIO_STALE_REJOIN:
+		LOG_WRN("No telemetry uplink for >%d report intervals: rejoin (M-2)",
+			APP_RADIO_STALE_FACTOR);
+		m_last_uplink_ms = now; /* don't re-trigger every tick */
+		(void)m_be->rejoin(true);
+		break;
+	default:
+		break;
+	}
+}
+#endif
+
+#if defined(CONFIG_WATCHDOG)
+/* Liveness heartbeat (#182): a self-rearming work item proves the radio work
+ * queue still drains. If it wedges, the channel goes stale and app_wdog stops
+ * feeding the IWDG -> SoC reset and a fresh join. The timeout is far above
+ * the longest legitimate single send (~7 s on TTN with a 5 s RX1 delay; a
+ * P2P confirmed uplink and its RX1), so only a true wedge trips it. */
+#define HEARTBEAT_PERIOD_SEC 5
+#define HEARTBEAT_TIMEOUT_MS 30000
+
+/* A lost MAC confirm must end in -ETIMEDOUT from lorawan_send()/lorawan_join()
+ * (#181) before the liveness channel goes stale and resets the SoC. */
+#if defined(CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS)
+BUILD_ASSERT(CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS > 0 &&
+		     CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS < HEARTBEAT_TIMEOUT_MS,
+	     "LoRaWAN confirm timeout must be bounded and below the work-queue heartbeat");
+#endif
+
+static int m_wdog_channel = -1;
+static bool m_heartbeat_started;
+
+static void heartbeat_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(m_heartbeat_work, heartbeat_work_handler);
+
+static void heartbeat_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	app_wdog_ping(m_wdog_channel);
+	stale_tick(k_uptime_get());
+	k_work_schedule_for_queue(app_radio_work_q(), &m_heartbeat_work,
+				  K_SECONDS(HEARTBEAT_PERIOD_SEC));
+}
+#endif /* defined(CONFIG_WATCHDOG) */
+
+void app_radio_heartbeat_start(void)
+{
+#if defined(CONFIG_WATCHDOG)
+	if (m_heartbeat_started) {
+		return;
+	}
+	m_heartbeat_started = true;
+	/* Registered even when radio-silent: the queue still runs, and a wedge
+	 * there should still recover. */
+	m_wdog_channel = app_wdog_register(HEARTBEAT_TIMEOUT_MS);
+	if (m_wdog_channel < 0) {
+		LOG_ERR_CALL_FAILED_INT("app_wdog_register", m_wdog_channel);
+	}
+	k_work_schedule_for_queue(app_radio_work_q(), &m_heartbeat_work, K_NO_WAIT);
+#endif
+}
+
+void app_radio_heartbeat_feed(void)
+{
+#if defined(CONFIG_WATCHDOG)
+	app_wdog_ping(m_wdog_channel);
+#endif
+}
+
 static void tlm_close(bool reset_snapshot)
 {
 	if (reset_snapshot) {
@@ -653,9 +875,8 @@ static void tlm_step(void)
 			return;
 		}
 		if (m_tlm_first) {
-			/* Once per report: the link-check decision advances its cadence,
-			 * so a resend must not ask again (#188). */
-			m_tlm_flags = m_be->report_flags();
+			/* Once per report: a resend must not ask again (#188). */
+			m_tlm_flags = report_flags();
 		}
 		m_tlm_frame = true;
 		m_tlm_retries = 0;
@@ -681,6 +902,7 @@ static void tlm_step(void)
 
 	switch (ret) {
 	case 0:
+		m_last_uplink_ms = k_uptime_get(); /* M-2: telemetry went out */
 		break;
 	case -EMSGSIZE:
 		/* M-10: app_compose sends one group or 1-Wire reading that is bigger
@@ -717,7 +939,7 @@ static void tlm_step(void)
 	}
 	if (ret == 0) {
 		/* Reports, not frames, drive the link-check cadence (#267). */
-		m_be->report_done();
+		m_link.reports++;
 		LOG_INF("Snapshot complete");
 	}
 	tlm_close(false);
@@ -766,6 +988,20 @@ void app_radio_test_tx_reset(void)
 	atomic_clear(&m_tlm_requested);
 	m_tlm_open = false;
 	m_tlm_frame = false;
+}
+
+void app_radio_test_link_reset(void)
+{
+	m_link = (struct app_radio_link){0};
+	atomic_clear(&m_link_forced);
+	m_last_uplink_ms = 0;
+	m_dc = (struct app_radio_stale_dc){0};
+	m_dc_hold_logged = false;
+}
+
+void app_radio_test_stale_tick(int64_t now_ms)
+{
+	stale_tick(now_ms);
 }
 #endif
 

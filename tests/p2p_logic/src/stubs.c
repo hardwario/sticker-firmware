@@ -260,7 +260,9 @@ SYS_INIT(radio_wq_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 int16_t p2p_test_dl_rssi;
 int8_t p2p_test_dl_snr;
 int p2p_test_dl_calls;
-uint32_t p2p_test_fail_streak;
+int p2p_test_link_ups;
+int p2p_test_link_ok_calls;
+int p2p_test_link_fail_calls;
 uint32_t p2p_test_join_attempts;
 uint32_t p2p_test_cnt[APP_RADIO_CNT_COUNT];
 
@@ -297,9 +299,38 @@ void app_radio_set_session(uint32_t dev_addr, uint32_t fcnt_up)
 	ARG_UNUSED(fcnt_up);
 }
 
-void app_radio_set_fail_streak(uint32_t n)
+/* Link supervision lives in app_radio (tests/radio_common); the backend only
+ * reports what it saw. */
+void app_radio_link_up(void)
 {
-	p2p_test_fail_streak = n;
+	p2p_test_link_ups++;
+}
+
+void app_radio_link_result(bool ok)
+{
+	if (ok) {
+		p2p_test_link_ok_calls++;
+	} else {
+		p2p_test_link_fail_calls++;
+	}
+}
+
+void app_radio_note_send(bool sent, bool duty_held)
+{
+	ARG_UNUSED(sent);
+	ARG_UNUSED(duty_held);
+}
+
+void app_radio_note_uplink(void)
+{
+}
+
+void app_radio_heartbeat_start(void)
+{
+}
+
+void app_radio_heartbeat_feed(void)
+{
 }
 
 void app_radio_set_join_attempts(uint32_t n)
