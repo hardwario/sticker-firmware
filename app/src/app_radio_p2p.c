@@ -163,13 +163,11 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 #define P2P_FCNT_KEY     "p2pfc/base"
 #define P2P_FCNT_RESERVE 256u
 
-#define P2P_TX_BUF_SIZE    64
-#define P2P_TX_QUEUE_DEPTH 2
 #define P2P_RX_QUEUE_DEPTH 1
 
-/* Small margin added on top of the exact remaining duty-cycle block when
- * rescheduling a deferred response/alarm frame (#118) -- avoids retrying a
- * few ms too early and getting -EAGAIN again right back. */
+/* Small margin added on top of the exact remaining duty-cycle block when a
+ * frame waits out the duty cycle (#118) -- avoids retrying a few ms too early
+ * and getting -EAGAIN again right back. */
 #define P2P_TX_RETRY_MARGIN_MS 50
 
 #if defined(CONFIG_WATCHDOG)
@@ -347,36 +345,18 @@ static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 /* All work runs on the radio work queue, app_radio_work_q() (doc/plan/439 T2a). Its
  * 4096 B stack is sized for this module's deepest path, a 0x56 command:
  * recv_ack() -> dispatch_p2p_command() -> app_cmd_handle() and nanopb (app_radio.c). */
-static struct k_work m_send_work;               /* compose + send telemetry */
-static struct k_work_delayable m_tx_work;       /* drain response/alarm queue, retries on -EAGAIN */
 static struct k_work_delayable m_join_work;     /* JoinRequest attempt + retry (#118 phase 2) */
 static struct k_work_delayable m_announce_work; /* common Info + settings-info announce */
 static void announce_work_handler(struct k_work *work);
-static struct k_work_delayable m_frame_work; /* retry of a refused telemetry frame */
-static void frame_work_handler(struct k_work *work);
-static void telemetry_send(void);
 
-/* Refused-frame retry (LoRaWAN #219): a telemetry frame the radio refused is
- * kept here and re-sent as-is, P2P_FRAME_MAX_RETRIES times at most. */
-#define P2P_FRAME_RETRY_SEC   15
-#define P2P_FRAME_MAX_RETRIES 8
-static uint8_t m_frame_buf[P2P_MAX_BODY];
-static size_t m_frame_len;
-static bool m_frame_more;
-static bool m_frame_pending;
-static int m_frame_retries;
-/* Decision #22 §3.2: whether the snapshot being sent goes CONFIRMED, fixed at
- * its first frame, and the reports sent since link-up (picks the N-th). */
-static bool m_snapshot_open;
-static bool m_snapshot_confirmed;
+/* Decision #22 §3.2: the reports sent since link-up (picks the N-th, which goes
+ * CONFIRMED). The uplink queues and the report split live in app_radio
+ * (doc/plan/460 F4). */
 static uint32_t m_report_count;
 /* Link supervision (§3.4): the node is in WARNING (session kept) and the
  * failed confirmed frames counted there towards radio-link-check-fail-rejoin. */
 static bool m_warning;
 static uint16_t m_warning_fails;
-/* A report waits for the TX queue (answers, alarms) to drain first -- the
- * P2P side of LoRaWAN's priority drain. Radio work queue only. */
-static bool m_telemetry_after_tx;
 
 /* M-2 stale-uplink watchdog (app_radio_stale_check(), shared with LoRaWAN):
  * uptime of the last telemetry uplink (0 = none since the last join) and the
@@ -397,8 +377,8 @@ static int64_t m_link_idle_at; /* uptime before which no TX starts */
 static void kick_waiting_uplinks(void);
 
 /* B8 history replay in progress. Declared up here, ahead of the rest of the
- * replay state further down, because send_work_handler() gates telemetry on it
- * (MED-9) and runs earlier in the file. */
+ * replay state further down, because the TX backend reports it to app_radio,
+ * which holds telemetry back meanwhile (MED-9), earlier in the file. */
 static bool m_hist_active;
 #if defined(CONFIG_SHELL)
 static struct k_work m_rx_work; /* drain received frames (listen) */
@@ -531,34 +511,15 @@ static bool m_downlink_pending;
  * the pre-D2 3/7-byte Ack body; both fall back to P2P_FRAME_MAX. */
 static uint8_t m_pending_frame_len;
 
-struct p2p_tx_msg {
-	uint8_t type;
-	uint16_t len;
-	uint8_t buf[P2P_TX_BUF_SIZE];
-};
-
-K_MSGQ_DEFINE(m_tx_msgq, sizeof(struct p2p_tx_msg), P2P_TX_QUEUE_DEPTH, 4);
-
-/* A frame that tx_frame() bounced with -EAGAIN (duty-cycle blocked): already
- * dequeued from m_tx_msgq, so it must be retried explicitly instead of
- * dropped, or the response/alarm frame is lost outright (#118 -- confirmed
- * on real HW: the default alarm-limit batch window is shorter than a single
- * SF10 frame's duty-cycle block, so every alarm detail frame was silently
- * dropped). Single slot: tx_work_handler() only ever defers the one message
- * it was mid-send on, then stops draining until that retry succeeds. */
-static struct p2p_tx_msg m_tx_deferred;
-static bool m_tx_deferred_valid;
-
 /* §6 Ack-retry state: a frame that was TRANSMITTED but not yet Acked,
  * awaiting an asynchronous retry once the duty cycle clears (see
- * schedule_ack_retry()). Distinct from m_tx_deferred above -- that one is a
- * frame that never even got a first TX attempt (duty-cycle blocked before
- * sending); this one already went out at least once and is waiting on a
- * confirmation retry.
+ * schedule_ack_retry()). Distinct from a frame app_radio keeps while the duty
+ * cycle blocks its first TX attempt; this one already went out at least once
+ * and is waiting on a confirmation retry.
  *
- * A QUEUE, not a single slot (#118 phase 2 HIL finding): telemetry (its own
- * send_work_handler loop) and the alarm/response queue (tx_work_handler) are
- * independent call paths that can each have one frame awaiting an Ack retry
+ * A QUEUE, not a single slot (#118 phase 2 HIL finding): telemetry and the
+ * alarm/response frames, and the history replay, can each have one frame
+ * awaiting an Ack retry
  * at the same time (e.g. an alarm firing during the same window a telemetry
  * chunk went unacked) -- a single slot would silently drop whichever one
  * schedule_ack_retry() overwrote. Depth 3 covers telemetry + alarm +
@@ -857,8 +818,6 @@ static int dnonce_persist(uint32_t v)
  * PAIRED. Resets the data-plane frame counter to 0 -- safe because
  * session_key is fresh (see derive_session_key()'s comment) and keeps the
  * on-air counter values small. */
-static int queue_frame(uint8_t type, const uint8_t *buf, size_t len);
-
 /* A new session_key restarts the counter at 0 (pairing_persist()), so an Ack
  * retry left over from the old session must never go out: its old counter
  * under the new key would reuse a (key, nonce) pair once m_fcnt reaches it, and
@@ -872,11 +831,13 @@ static void ack_retry_drop_old_session(void)
 
 	(void)k_work_cancel_delayable(&m_ack_retry_work);
 	while (k_msgq_get(&m_ack_retry_msgq, &st, K_NO_WAIT) == 0) {
-		bool keep = (st.frame_type == APP_RADIO_P2P_FRAME_RESPONSE ||
-			     st.frame_type == APP_RADIO_P2P_FRAME_ALARM) &&
-			    st.body_len <= P2P_TX_BUF_SIZE;
+		bool alarm = st.frame_type == APP_RADIO_P2P_FRAME_ALARM;
+		bool keep = (alarm || st.frame_type == APP_RADIO_P2P_FRAME_RESPONSE) &&
+			    st.body_len <= APP_RADIO_TX_SLOT_SIZE;
 
-		if (keep && queue_frame(st.frame_type, st.body, st.body_len) == 0) {
+		if (keep &&
+		    app_radio_tx_queue(alarm ? APP_RADIO_FRAME_ALARM : APP_RADIO_FRAME_ANSWER,
+				       APP_RADIO_TAG_OTHER, 0, st.body, st.body_len) == 0) {
 			LOG_INF("Old-session uplink (type %u, counter %u) re-queued for the new "
 				"session",
 				st.frame_type, st.counter);
@@ -939,9 +900,10 @@ static int pairing_persist(uint32_t net_id, uint16_t dev_addr,
  * app_radio_p2p_is_ready() (paired and started), so the cadence timer keeps
  * running harmlessly while nothing is transmitted.
  *
- * The queues are purged because their frames are encrypted -- or about to be
- * -- under a session_key that no longer has a peer; a queued response or
- * alarm from the dead session is not worth carrying into the next one.
+ * The Ack retries are purged because their frames are encrypted under a
+ * session_key that no longer has a peer. The answers and alarms app_radio
+ * still queues are plaintext and wait for the next session, as over LoRaWAN
+ * across a rejoin.
  *
  * NEVER touches m_dev_nonce (see dnonce_persist()) or m_fcnt: the nonce is
  * the central's JoinRequest replay handle and must keep advancing across
@@ -967,9 +929,7 @@ static int pairing_clear(void)
 	m_last_ack_valid = false;
 	m_downlink_pending = false;
 	m_pending_frame_len = 0;
-	m_tx_deferred_valid = false;
 	k_msgq_purge(&m_ack_retry_msgq);
-	k_msgq_purge(&m_tx_msgq);
 
 	return ret;
 }
@@ -1231,7 +1191,7 @@ P2P_TESTABLE void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t a
  * When blocked, the answer is the time until the OLDEST entry leaves the
  * window. That is a lower bound, not necessarily enough on its own -- freeing
  * one entry may still leave the sum too high -- but every caller re-checks
- * and reschedules (tx_work_handler, reschedule_ack_retry_work,
+ * and reschedules (app_radio's TX scheduler, reschedule_ack_retry_work,
  * join_work_handler), so the wait converges instead of needing an exact
  * answer here. Returning the true wait would mean solving for the smallest
  * prefix of expiries that frees enough budget, for no behavioural gain. */
@@ -1897,11 +1857,9 @@ static int tx_frame(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, size
  * a duty-cycle-blocked first attempt reschedules on a longer timer than that,
  * which is why the handler re-checks instead of firing once.
  *
- * P2P has to watch four "not delivered yet" signals where LoRaWAN watches two,
- * because its response can be parked in three different places: still queued
- * (m_tx_msgq), dequeued but bounced by the duty cycle (m_tx_deferred), or
- * transmitted and awaiting a confirmation retry (m_ack_retry_msgq). The
- * m_tx_work check catches the window between a reschedule and its fire. */
+ * P2P watches one more "not delivered yet" signal than LoRaWAN: besides the
+ * answer app_radio still holds (queued, or waiting out the duty cycle), one
+ * transmitted and awaiting a confirmation retry (m_ack_retry_msgq). */
 #define POST_CMD_DRAIN_WAIT_SEC      8
 #define POST_CMD_DRAIN_MAX_DEFERRALS 6
 
@@ -1918,9 +1876,7 @@ static void post_cmd_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	if ((k_msgq_num_used_get(&m_tx_msgq) > 0 || m_tx_deferred_valid ||
-	     k_msgq_num_used_get(&m_ack_retry_msgq) > 0 ||
-	     k_work_delayable_is_pending(&m_tx_work)) &&
+	if ((app_radio_tx_answer_pending() || k_msgq_num_used_get(&m_ack_retry_msgq) > 0) &&
 	    m_post_cmd_deferrals < POST_CMD_DRAIN_MAX_DEFERRALS) {
 		m_post_cmd_deferrals++;
 		LOG_WRN("Post-command action %d deferred: Ack still undelivered (%u/%u)",
@@ -1966,11 +1922,11 @@ static void post_cmd_work_handler(struct k_work *work)
 }
 
 /* #425 step 7: the P2P driver of the universal page stream. An answer that
- * does not fit one 0x55 RESPONSE (P2P_TX_BUF_SIZE) is sent as page 0 plus
- * APP_CMD_ACTION_PAGE_STREAM; this work item then queues the remaining pages
- * (same seq, Response.page_index/page_count) one per run, only while the TX
- * queue is empty so alarms and other responses keep their slot, paced by the
- * send path and the B2 duty governor. A lost pairing cancels the stream. */
+ * does not fit one 0x55 RESPONSE (APP_RADIO_TX_SLOT_SIZE) is sent as page 0
+ * plus APP_CMD_ACTION_PAGE_STREAM; this work item then queues the remaining
+ * pages (same seq, Response.page_index/page_count) one per run, only while the
+ * answer queue keeps a slot free for other answers, paced by the send path and
+ * the B2 duty governor. A lost pairing cancels the stream. */
 #define P2P_PAGE_STREAM_PACE_SEC 2
 
 static struct k_work_delayable m_page_stream_work;
@@ -1983,13 +1939,13 @@ static void page_stream_work_handler(struct k_work *work)
 		app_cmd_stream_cancel();
 		return;
 	}
-	if (k_msgq_num_free_get(&m_tx_msgq) < P2P_TX_QUEUE_DEPTH) {
+	if (app_radio_tx_answer_free() < 2) {
 		k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
 					  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
 		return;
 	}
 
-	uint8_t buf[P2P_TX_BUF_SIZE];
+	uint8_t buf[APP_RADIO_TX_SLOT_SIZE];
 	size_t len;
 	int ret = app_cmd_stream_next(buf, sizeof(buf), &len);
 
@@ -2004,7 +1960,7 @@ static void page_stream_work_handler(struct k_work *work)
 		}
 		return;
 	}
-	(void)app_radio_p2p_queue_response(0, buf, len);
+	(void)app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_CMD_RESPONSE, 0, buf, len);
 	k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
 				  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
 }
@@ -2036,19 +1992,20 @@ static void page_stream_work_handler(struct k_work *work)
  * flight (doc/p2p.md §6). */
 static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
 {
-	uint8_t resp[P2P_TX_BUF_SIZE];
+	uint8_t resp[APP_RADIO_TX_SLOT_SIZE];
 	size_t resp_len = 0;
 	enum app_cmd_action action = APP_CMD_ACTION_NONE;
 
-	int ret = app_cmd_handle(APP_CMD_TRANSPORT_P2P, body, body_len, resp, sizeof(resp),
-				 &resp_len, &action);
+	int ret = app_cmd_handle(APP_CMD_TRANSPORT_P2P, body, body_len, resp,
+				 app_radio_tx_answer_cap(sizeof(resp)), &resp_len, &action);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_cmd_handle(p2p)", ret);
 		return;
 	}
 
 	if (resp_len > 0) {
-		(void)app_radio_p2p_queue_response(0, resp, resp_len);
+		(void)app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_CMD_RESPONSE, 0,
+					 resp, resp_len);
 	}
 
 	if (action == APP_CMD_ACTION_PAGE_STREAM) {
@@ -2455,7 +2412,7 @@ static void ack_retry_work_handler(struct k_work *work)
  * unacknowledged, hand off to schedule_ack_retry() instead of blocking here
  * -- returns 0 either way (the frame WAS transmitted; confirmation, if a
  * retry is needed, continues asynchronously on m_ack_retry_work). Callers
- * (send_work_handler/tx_work_handler) move on immediately rather than
+ * (the TX backend, the history replay) move on immediately rather than
  * waiting for the eventual outcome. Returns -EAGAIN only if the FIRST send
  * itself was duty-cycle blocked (unchanged pre-existing semantics, same as
  * tx_frame()), or a hard errno from that first send. */
@@ -2491,39 +2448,6 @@ static int send_confirmed(uint8_t frame_type, const uint8_t *body, size_t body_l
 	return send_uplink(frame_type, body, body_len, true);
 }
 
-static void send_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	if (g_app_config.calibration) {
-		return;
-	}
-
-	/* MED-9, the P2P twin of app_radio_lrw.c's gate: a history replay owns the radio,
-	 * so don't inject telemetry into the middle of it. Interleaved frames burn
-	 * the duty ledger and the confirmed-uplink Ack slot that the replay's own
-	 * retries need, and they break the run of frames the host is reassembling.
-	 *
-	 * Only telemetry is gated. Alarms reach the radio through queue_frame() and
-	 * tx_work_handler(), and are deliberately left free: a replay can run for
-	 * minutes, and an alarm is the one thing that must not wait for it. */
-	if (m_hist_active) {
-		return;
-	}
-
-	/* A refused frame still waiting for its retry goes first (this attempt
-	 * counts as one): the snapshot continues where it stopped. */
-	(void)k_work_cancel_delayable(&m_frame_work);
-	telemetry_send();
-}
-
-/* Send the snapshot frame by frame (LoRaWAN's #219 / #340 M6 policy): a frame
- * the radio refuses (duty cycle, radio error) is kept and retried as-is every
- * P2P_FRAME_RETRY_SEC -- or once the duty ledger clears -- up to
- * P2P_FRAME_MAX_RETRIES times; then the rest of the snapshot is abandoned with
- * app_compose_reset(), so the next report starts a fresh one instead of
- * continuing a stale one. Without a session it is abandoned at once: the next
- * JoinAccept kicks a fresh report. Radio work queue only. */
 /* Decision #22 §3.2: telemetry is unconfirmed and sent once, except the N-th
  * report since link-up (N = radio-link-check-interval), which is CONFIRMED and
  * so the P2P link check -- the first report after a link-up included, as on
@@ -2542,160 +2466,92 @@ static bool telemetry_report_confirmed(void)
 					m_warning);
 }
 
-static void telemetry_send(void)
+/* ---- TX backend: app_radio schedules, this sends one frame (doc/plan/460 F4) ---- */
+
+/* struct app_radio_backend.send. Answers, alarms and history frames go out as
+ * 0x55 RESPONSE / 0x57 ALARM, telemetry as 0x52. Radio work queue only. */
+static int p2p_tx_send(const struct app_radio_frame *f, struct app_radio_tx_result *res)
 {
-	/* Queued answers and alarms leave first, as over LoRaWAN: after a link-up
-	 * that keeps Info -> settings-info -> telemetry in order on the air even
-	 * when an announce frame needs a retry. tx_work sends the report once
-	 * the queue is empty. */
-	if (m_tx_deferred_valid || k_msgq_num_used_get(&m_tx_msgq) > 0) {
-		m_telemetry_after_tx = true;
-		return;
+	uint8_t type;
+
+	switch (f->kind) {
+	case APP_RADIO_FRAME_TELEMETRY:
+		type = APP_RADIO_P2P_FRAME_TELEMETRY;
+		break;
+	case APP_RADIO_FRAME_ALARM:
+		type = APP_RADIO_P2P_FRAME_ALARM;
+		break;
+	default:
+		type = APP_RADIO_P2P_FRAME_RESPONSE;
+		break;
+	}
+	if (f->len == 0) {
+		return -EINVAL; /* no MAC to flush: the P2P budget is never 0 */
 	}
 
-	for (;;) {
-		if (!m_frame_pending) {
-			int ret = app_compose_budget(m_frame_buf, sizeof(m_frame_buf), &m_frame_len,
-						     &m_frame_more, P2P_MAX_BODY);
+	int ret = send_uplink(type, f->buf, f->len, (f->flags & APP_RADIO_FRAME_CONFIRMED) != 0);
 
-			if (ret == -EAGAIN) {
-				LOG_DBG("Telemetry budget unavailable, skipping TX");
-				return;
-			}
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_compose_budget", ret);
-				return;
-			}
-			if (m_frame_len == 0) {
-				return; /* nothing to report */
-			}
-			if (!m_snapshot_open) {
-				m_snapshot_open = true;
-				m_snapshot_confirmed = telemetry_report_confirmed();
-			}
-			m_frame_pending = true;
-			m_frame_retries = 0;
-		}
-
-		int ret = send_uplink(APP_RADIO_P2P_FRAME_TELEMETRY, m_frame_buf, m_frame_len,
-				      m_snapshot_confirmed);
-
-		if (ret == -EBUSY) {
-			return; /* kicked when the in-flight uplink is done */
-		}
-		if (ret == 0) {
-			m_frame_pending = false;
+	switch (ret) {
+	case 0:
+		if (f->kind == APP_RADIO_FRAME_TELEMETRY) {
 			m_last_uplink_ms = k_uptime_get(); /* M-2: telemetry went out */
-			if (!m_frame_more) {
-				m_snapshot_open = false;
-				m_report_count++;
-				return;
-			}
-			continue;
 		}
-		if (ret == -ENOTCONN || ++m_frame_retries > P2P_FRAME_MAX_RETRIES) {
-			LOG_WRN("Telemetry frame abandoned (%d, %d retries); snapshot reset", ret,
-				m_frame_retries - 1);
-			m_frame_pending = false;
-			m_snapshot_open = false;
-			app_compose_reset();
-			return;
-		}
-
-		int64_t delay_ms = (int64_t)P2P_FRAME_RETRY_SEC * 1000;
-
-		if (ret == -EAGAIN) {
-			delay_ms = duty_wait_ms_for(P2P_HDR_LEN + m_frame_len + P2P_TAG_LEN) +
-				   P2P_TX_RETRY_MARGIN_MS;
-		}
-		k_work_reschedule_for_queue(app_radio_work_q(), &m_frame_work, K_MSEC(delay_ms));
-		return;
+		break;
+	case -EAGAIN:
+		/* Duty cycle: again the moment the ledger has room for this frame. */
+		res->wait_ms = (uint32_t)duty_wait_ms_for(P2P_HDR_LEN + f->len + P2P_TAG_LEN) +
+			       P2P_TX_RETRY_MARGIN_MS;
+		break;
+	case -EMSGSIZE:
+		res->budget = P2P_MAX_BODY;
+		break;
+	default:
+		/* -EBUSY: a confirmed uplink is in flight or the radio listens
+		 * (kicked when it ends); -ENOTCONN: no session (kicked at the next
+		 * JoinAccept); other: a radio fault. */
+		break;
 	}
+	return ret;
 }
 
-static void frame_work_handler(struct k_work *work)
+static uint8_t p2p_tx_budget(void)
 {
-	ARG_UNUSED(work);
-	if (!m_frame_pending) {
-		return;
-	}
-	if (m_hist_active || g_app_config.calibration) {
-		/* The radio is busy with a replay / calibration: try again later
-		 * rather than leave the frame stranded. */
-		k_work_reschedule_for_queue(app_radio_work_q(), &m_frame_work,
-					    K_SECONDS(P2P_FRAME_RETRY_SEC));
-		return;
-	}
-	telemetry_send();
+	return P2P_MAX_BODY;
 }
 
-/* The TX queue is empty: a boot/join announce waiting for it releases its data
- * (app_radio_announce_run()), and a report that waited goes now. */
-static void tx_drained(void)
+/* Once per report, at its first frame, kept for all its frames. */
+static uint8_t p2p_tx_report_flags(void)
 {
-	if (app_radio_announce_pending()) {
-		app_radio_p2p_announce_kick();
-	}
-	if (m_telemetry_after_tx) {
-		m_telemetry_after_tx = false;
-		k_work_submit_to_queue(app_radio_work_q(), &m_send_work);
-	}
+	return telemetry_report_confirmed() ? APP_RADIO_FRAME_CONFIRMED : 0;
 }
 
-static void tx_work_handler(struct k_work *work)
+static void p2p_tx_report_done(void)
 {
-	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
-	struct p2p_tx_msg msg;
-
-	/* Not paired (joining, self-heal): responses and alarms stay queued, like
-	 * LoRaWAN's queues survive JOINING; mark_ready() drains them under the new
-	 * session. */
-	if (m_link_state != P2P_LINK_PAIRED) {
-		return;
-	}
-
-	if (m_tx_deferred_valid) {
-		msg = m_tx_deferred;
-		m_tx_deferred_valid = false;
-	} else if (k_msgq_get(&m_tx_msgq, &msg, K_NO_WAIT) != 0) {
-		tx_drained();
-		return;
-	}
-
-	for (;;) {
-		int ret = send_confirmed(msg.type, msg.buf, msg.len);
-
-		if (ret == -EAGAIN) {
-			/* Only the FIRST send attempt returns -EAGAIN (send_confirmed()'s
-			 * own Ack-retry loop never re-raises it, see its cap). Stash and
-			 * retry this exact frame once the duty-cycle window clears,
-			 * instead of dropping it — see m_tx_deferred's comment. Stop
-			 * draining the rest of the queue until this one is sent, so
-			 * frames stay in order. */
-			m_tx_deferred = msg;
-			m_tx_deferred_valid = true;
-
-			int64_t delay_ms = duty_wait_ms_for(P2P_HDR_LEN + msg.len + P2P_TAG_LEN);
-
-			k_work_reschedule_for_queue(app_radio_work_q(), dwork,
-						    K_MSEC(delay_ms + P2P_TX_RETRY_MARGIN_MS));
-			return;
-		}
-		if (ret == -ENOTCONN || ret == -EBUSY) {
-			/* The session went away mid-drain, or a confirmed uplink is
-			 * still in flight: park this frame (kicked when it is done /
-			 * by the next JoinAccept). */
-			m_tx_deferred = msg;
-			m_tx_deferred_valid = true;
-			return;
-		}
-
-		if (k_msgq_get(&m_tx_msgq, &msg, K_NO_WAIT) != 0) {
-			tx_drained();
-			return;
-		}
-	}
+	m_report_count++;
 }
+
+/* MED-9: a history replay owns the radio; telemetry waits. Interleaved frames
+ * would burn the duty ledger and the confirmed-uplink Ack slot the replay's own
+ * retries need, and break the run of frames the host is reassembling. Alarms
+ * are left free: a replay can run for minutes, and an alarm must not wait. */
+static bool p2p_tx_replay_active(void)
+{
+	return m_hist_active;
+}
+
+const struct app_radio_backend app_radio_p2p_backend = {
+	.send = p2p_tx_send,
+	.budget = p2p_tx_budget,
+	.tx_ready = app_radio_p2p_is_ready,
+	.report_flags = p2p_tx_report_flags,
+	.report_done = p2p_tx_report_done,
+	.replay_active = p2p_tx_replay_active,
+	/* §6: answers, alarms and history frames are confirmed; telemetry only
+	 * the N-th report (report_flags). */
+	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_ALARM) |
+			 BIT(APP_RADIO_FRAME_HISTORY),
+	.frame_gap_ms = 0, /* P2P_TX_GAP_MS after an Ack window is taken in tx_frame_at() */
+};
 
 /* ======================================================================== */
 /* Frame RX (reference receiver / diagnostics, CONFIG_SHELL)                */
@@ -2807,6 +2663,7 @@ int app_radio_p2p_listen(bool enable)
 		m_listening = false;
 		(void)radio_configure(true);
 		LOG_INF("P2P listen: OFF");
+		app_radio_tx_kick(); /* frames the listen mode bounced with -EBUSY */
 	}
 	return 0;
 }
@@ -2826,7 +2683,6 @@ static void mark_ready(void)
 	m_warning_fails = 0;
 	/* The first report of the session is the link check (§3.2). */
 	m_report_count = 0;
-	m_snapshot_open = false;
 
 	/* Fresh session: last Ack's link quality and any pending-downlink hint
 	 * from the old session no longer apply. */
@@ -2845,7 +2701,7 @@ static void mark_ready(void)
 	 * the radio work queue ahead of the telemetry the ready callback kicks. */
 	app_radio_announce();
 	/* Frames parked while unpaired leave now, under this session. */
-	k_work_schedule_for_queue(app_radio_work_q(), &m_tx_work, K_NO_WAIT);
+	app_radio_tx_kick();
 	m_last_uplink_ms = k_uptime_get(); /* M-2: start the stale-uplink clock */
 	if (m_ready_cb) {
 		m_ready_cb();
@@ -3233,10 +3089,7 @@ static struct k_work_delayable m_hist_work;
  * waiting (duty cycle, replay pace) at its own time. */
 static void kick_waiting_uplinks(void)
 {
-	k_work_schedule_for_queue(app_radio_work_q(), &m_tx_work, K_NO_WAIT);
-	if (m_frame_pending) {
-		k_work_schedule_for_queue(app_radio_work_q(), &m_frame_work, K_NO_WAIT);
-	}
+	app_radio_tx_kick();
 	if (m_hist_active) {
 		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work, K_NO_WAIT);
 	}
@@ -3428,7 +3281,7 @@ bool app_radio_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, ui
 	m_hist_active = true;
 	/* Capture goes on (absolute cursor); only the flash page rollover is held
 	 * off -- nothing in the send path consults it. The telemetry gate is
-	 * m_hist_active, in send_work_handler(). */
+	 * m_hist_active, reported to app_radio by p2p_tx_replay_active(). */
 	app_history_set_replay_active(true);
 
 	LOG_INF("P2P history replay start: %u frames (window %u..%u, seq %u)", (unsigned)n,
@@ -3453,10 +3306,7 @@ static void test_queue_start_once(void)
 		return;
 	}
 	k_work_init_delayable(&m_hist_work, hist_work_handler);
-	k_work_init(&m_send_work, send_work_handler);
 	k_work_init_delayable(&m_join_work, join_work_handler);
-	k_work_init_delayable(&m_tx_work, tx_work_handler);
-	k_work_init_delayable(&m_frame_work, frame_work_handler);
 	k_work_init_delayable(&m_announce_work, announce_work_handler);
 	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
 	started = true;
@@ -3515,7 +3365,6 @@ void p2p_test_link_reset(void)
 	m_warning = false;
 	m_warning_fails = 0;
 	m_report_count = 0;
-	m_snapshot_open = false;
 	set_consec_fail(0);
 	/* A pending clock_sync forces confirmed reports (PF-2). */
 	atomic_clear(&m_clock_sync_pending);
@@ -3591,31 +3440,9 @@ void p2p_test_set_paired(void)
 	m_started = false;
 }
 
-/* One telemetry send attempt (the send / retry work body), synchronously. */
-void p2p_test_telemetry_send(void)
-{
-	telemetry_send();
-}
-
-bool p2p_test_frame_pending(void)
-{
-	return m_frame_pending;
-}
-
-/* Frames waiting for the radio: the TX queue plus a parked / deferred one. */
-uint32_t p2p_test_tx_waiting(void)
-{
-	return k_msgq_num_used_get(&m_tx_msgq) + (m_tx_deferred_valid ? 1U : 0U);
-}
-
 void p2p_test_tx_reset(void)
 {
-	k_work_cancel_delayable(&m_frame_work);
 	k_work_cancel_delayable(&m_ack_retry_work);
-	m_frame_pending = false;
-	m_telemetry_after_tx = false;
-	m_tx_deferred_valid = false;
-	k_msgq_purge(&m_tx_msgq);
 	k_msgq_purge(&m_ack_retry_msgq);
 	m_link_idle_at = 0;
 }
@@ -3772,14 +3599,11 @@ int app_radio_p2p_init(void)
 		return ret;
 	}
 
-	k_work_init(&m_send_work, send_work_handler);
-	k_work_init_delayable(&m_tx_work, tx_work_handler);
 	k_work_init_delayable(&m_join_work, join_work_handler);
 	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
 	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
 	k_work_init_delayable(&m_page_stream_work, page_stream_work_handler);
 	k_work_init_delayable(&m_announce_work, announce_work_handler);
-	k_work_init_delayable(&m_frame_work, frame_work_handler);
 	k_work_init_delayable(&m_hist_work, hist_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
@@ -3882,46 +3706,6 @@ uint8_t app_radio_p2p_get_max_payload(void)
 	return P2P_MAX_BODY;
 }
 
-void app_radio_p2p_send_telemetry(void)
-{
-	k_work_submit_to_queue(app_radio_work_q(), &m_send_work);
-}
-
-static int queue_frame(uint8_t type, const uint8_t *buf, size_t len)
-{
-	if (!buf || len == 0) {
-		return -EINVAL;
-	}
-	if (len > P2P_TX_BUF_SIZE) {
-		LOG_ERR("Frame %zu B over queue slot %d B", len, P2P_TX_BUF_SIZE);
-		return -EMSGSIZE;
-	}
-
-	struct p2p_tx_msg msg = {.type = type, .len = (uint16_t)len};
-
-	memcpy(msg.buf, buf, len);
-	if (k_msgq_put(&m_tx_msgq, &msg, K_NO_WAIT) != 0) {
-		LOG_WRN("TX queue full (type %u); dropping", type);
-		return -ENOMEM;
-	}
-	/* If a retry is already scheduled (deferred frame waiting out a duty-cycle
-	 * block), this is a no-op — the queue drains in order once that retry
-	 * fires, same as an immediate submit would have. */
-	k_work_schedule_for_queue(app_radio_work_q(), &m_tx_work, K_NO_WAIT);
-	return 0;
-}
-
-int app_radio_p2p_queue_response(uint8_t port, const uint8_t *buf, size_t len)
-{
-	ARG_UNUSED(port); /* P2P has no fPort; frame_type carries the equivalent */
-	return queue_frame(APP_RADIO_P2P_FRAME_RESPONSE, buf, len);
-}
-
-int app_radio_p2p_send_alarm(const uint8_t *buf, size_t len)
-{
-	return queue_frame(APP_RADIO_P2P_FRAME_ALARM, buf, len);
-}
-
 void app_radio_p2p_register_ready_cb(void (*cb)(void))
 {
 	m_ready_cb = cb;
@@ -3995,25 +3779,9 @@ static void announce_work_handler(struct k_work *work)
 	}
 }
 
-bool app_radio_p2p_tx_idle(void)
-{
-	return !m_tx_deferred_valid && k_msgq_num_used_get(&m_tx_msgq) == 0;
-}
-
 void app_radio_p2p_announce_kick(void)
 {
 	k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work, K_NO_WAIT);
-}
-
-size_t app_radio_p2p_response_cap(size_t buf_size)
-{
-	return MIN(buf_size, (size_t)MIN(P2P_TX_BUF_SIZE, app_radio_p2p_get_max_payload()));
-}
-
-int app_radio_p2p_queue_announce(bool settings, const uint8_t *buf, size_t len)
-{
-	ARG_UNUSED(settings);
-	return queue_frame(APP_RADIO_P2P_FRAME_RESPONSE, buf, len);
 }
 
 void app_radio_p2p_page_stream_kick(void)
@@ -4079,9 +3847,9 @@ static void debug_compose_work_handler(struct k_work *work)
 		return;
 	}
 	if (body_len == 0) {
-		/* Nothing to report -- mirror send_work_handler()'s own `len == 0`
-		 * skip, so the preview never shows a frame the real send path
-		 * would not actually transmit. */
+		/* Nothing to report -- mirror app_radio's own `len == 0` skip, so
+		 * the preview never shows a frame the real send path would not
+		 * actually transmit. */
 		res->frame_len = 0;
 		return;
 	}

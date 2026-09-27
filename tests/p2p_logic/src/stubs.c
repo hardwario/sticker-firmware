@@ -331,6 +331,45 @@ bool app_radio_announce_pending(void)
 	return false;
 }
 
+/* Common TX core (app_radio.c is not built here, doc/plan/460 F4): record what
+ * the backend queues and how often it kicks the scheduler; its queues, retries
+ * and report split are tested in tests/radio_common. */
+int p2p_test_tx_queue_calls;
+int p2p_test_tx_kick_calls;
+enum app_radio_frame_kind p2p_test_tx_queue_kind;
+
+int app_radio_tx_queue(enum app_radio_frame_kind kind, enum app_radio_frame_tag tag, uint8_t port,
+		       const uint8_t *buf, size_t len)
+{
+	ARG_UNUSED(tag);
+	ARG_UNUSED(port);
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	p2p_test_tx_queue_calls++;
+	p2p_test_tx_queue_kind = kind;
+	return 0;
+}
+
+void app_radio_tx_kick(void)
+{
+	p2p_test_tx_kick_calls++;
+}
+
+bool app_radio_tx_answer_pending(void)
+{
+	return false;
+}
+
+uint32_t app_radio_tx_answer_free(void)
+{
+	return APP_RADIO_TX_QUEUE_DEPTH;
+}
+
+size_t app_radio_tx_answer_cap(size_t buf_size)
+{
+	return MIN(buf_size, (size_t)APP_RADIO_TX_SLOT_SIZE);
+}
+
 /* ---- settings: a RAM stub store (CONFIG_SETTINGS_CUSTOM). Saves succeed unless
  * a case sets test_settings_save_ret; nothing is kept or loaded back. ---- */
 

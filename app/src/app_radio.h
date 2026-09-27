@@ -11,6 +11,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <zephyr/sys/util_macro.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -272,6 +274,109 @@ static inline bool app_radio_link_check_due(uint32_t report_idx, int interval, b
 	}
 	return (report_idx % (uint32_t)interval) == 0U;
 }
+
+/* ---- Uplink frames, queues and scheduler (doc/plan/460 §2.2, F4) ----------
+ * One TX path for both radios. Answers (command responses, Info,
+ * settings-info) and alarm batches wait in two queues of
+ * APP_RADIO_TX_QUEUE_DEPTH; telemetry is a request composed at send time.
+ * One work item on the radio work queue sends them one frame per run in the
+ * order answer > alarm > telemetry and applies one rule to every send result
+ * (struct app_radio_backend.send). Frames wait while the link is down. */
+
+enum app_radio_frame_kind {
+	APP_RADIO_FRAME_ANSWER,
+	APP_RADIO_FRAME_ALARM,
+	APP_RADIO_FRAME_TELEMETRY,
+	APP_RADIO_FRAME_HISTORY,
+};
+
+/* What a queued answer is, for the over-budget recovery (#409 3g). */
+enum app_radio_frame_tag {
+	APP_RADIO_TAG_OTHER = 0,    /* no recovery (shell-injected, error frames) */
+	APP_RADIO_TAG_CMD_RESPONSE, /* answer to a downlink command: carries its seq */
+	APP_RADIO_TAG_INFO,         /* autonomous Info (announce / clock_sync) */
+	APP_RADIO_TAG_SETTINGS,     /* autonomous settings-info (#412) */
+};
+
+#define APP_RADIO_FRAME_CONFIRMED  BIT(0) /* P2P: FCtrl CONFIRMED, wait for the Ack */
+#define APP_RADIO_FRAME_LINK_CHECK BIT(1) /* LoRaWAN: ride a LinkCheckReq on it */
+#define APP_RADIO_FRAME_MORE       BIT(2) /* telemetry: more frames of this report follow */
+
+/* Slot size of the answer and alarm queues. */
+#define APP_RADIO_TX_SLOT_SIZE   64
+#define APP_RADIO_TX_QUEUE_DEPTH 4
+
+struct app_radio_frame {
+	uint8_t kind;  /* enum app_radio_frame_kind */
+	uint8_t tag;   /* enum app_radio_frame_tag */
+	uint8_t port;  /* LoRaWAN fPort of an answer (0 = the command port) */
+	uint8_t flags; /* APP_RADIO_FRAME_* */
+	uint16_t len;  /* 0 = no payload: LoRaWAN flushes its pending MAC answers */
+	uint8_t *buf;
+};
+
+/* What a send left for the scheduler besides its return value. */
+struct app_radio_tx_result {
+	uint32_t wait_ms; /* -EAGAIN: when to try again (0 = the default 15 s) */
+	uint8_t budget;   /* -EMSGSIZE: the budget the frame did not fit */
+};
+
+/* The part of a backend the common TX path drives. Selected once by
+ * app_radio_init() from radio_mode. Every hook runs on the radio work queue. */
+struct app_radio_backend {
+	/* Send one frame now; blocks for the TX and its receive windows. Returns
+	 * 0 when it was transmitted, or:
+	 *   -EAGAIN   duty-cycle held (or a LoRaWAN MAC flush went instead): try
+	 *             again after res->wait_ms, not counted as a failure
+	 *   -EBUSY    a confirmed uplink is in flight: wait, the backend kicks
+	 *             app_radio_tx_kick() when it ends
+	 *   -ENOTCONN no session: wait for the next link-up
+	 *   -EMSGSIZE over res->budget: recovered by kind
+	 *   other     radio / MAC error: retried after 15 s, 8 times at most */
+	int (*send)(const struct app_radio_frame *f, struct app_radio_tx_result *res);
+	/* Payload budget of the next uplink; 0 = none now (pending LoRaWAN MAC
+	 * answers fill the frame). */
+	uint8_t (*budget)(void);
+	/* The link carries uplinks now; false keeps every frame waiting. */
+	bool (*tx_ready)(void);
+	/* A report starts: its APP_RADIO_FRAME_CONFIRMED / _LINK_CHECK flags. A
+	 * link check rides the first frame only. */
+	uint8_t (*report_flags)(void);
+	/* The last frame of a report left. */
+	void (*report_done)(void);
+	/* A history replay owns the radio: no report starts. */
+	bool (*replay_active)(void);
+	/* The kinds sent confirmed, BIT(enum app_radio_frame_kind). */
+	uint8_t confirm_kinds;
+	/* Pause between the frames of one report (covers the receive windows). */
+	uint16_t frame_gap_ms;
+};
+
+/* Queue an answer or an alarm batch (any thread). Returns 0, -EINVAL, -EMSGSIZE
+ * (over APP_RADIO_TX_SLOT_SIZE) or -ENOMEM (queue full). */
+int app_radio_tx_queue(enum app_radio_frame_kind kind, enum app_radio_frame_tag tag, uint8_t port,
+		       const uint8_t *buf, size_t len);
+
+/* Radio work queue: run the scheduler now (link-up, the in-flight confirmed
+ * uplink ended). A send already waiting for its time keeps it. */
+void app_radio_tx_kick(void);
+
+/* An answer is still queued or being sent (the post-command drain). */
+bool app_radio_tx_answer_pending(void);
+
+/* Free answer slots (a page stream leaves two for other answers). */
+uint32_t app_radio_tx_answer_free(void);
+
+/* Radio work queue: payload room (bytes) of the next answer, at most
+ * `buf_size` and APP_RADIO_TX_SLOT_SIZE. */
+size_t app_radio_tx_answer_cap(size_t buf_size);
+
+#if defined(CONFIG_ZTEST)
+/* Run the common TX path on `be` (tests/radio_common). */
+void app_radio_test_set_backend(const struct app_radio_backend *be);
+/* Drop every queued frame and the report in progress. */
+void app_radio_test_tx_reset(void);
+#endif
 
 /* Stage a command response for the next uplink. */
 int app_radio_queue_response(uint8_t port, const uint8_t *buf, size_t len);

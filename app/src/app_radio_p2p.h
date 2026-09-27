@@ -287,16 +287,11 @@ bool app_radio_p2p_get_radio_params(uint8_t *sf, int8_t *tx_power_dbm);
  * this. */
 uint8_t app_radio_p2p_get_max_payload(void);
 
-/* Compose + send a telemetry snapshot (frame type TELEMETRY) via
- * app_compose_budget(). Triggered by app_report after it samples + captures
- * history, same as app_radio_lrw_send_telemetry(). */
-void app_radio_p2p_send_telemetry(void);
-
-/* Send a staged command response (frame type RESPONSE). */
-int app_radio_p2p_queue_response(uint8_t port, const uint8_t *buf, size_t len);
-
-/* Send an alarm-detail batch (frame type ALARM). */
-int app_radio_p2p_send_alarm(const uint8_t *buf, size_t len);
+/* The P2P TX backend of the common scheduler (app_radio, doc/plan/460 F4):
+ * sends one frame -- answers as 0x55 RESPONSE, alarms as 0x57 ALARM, both
+ * confirmed; telemetry as 0x52, confirmed on the N-th report -- under the duty
+ * ledger and the one-confirmed-uplink-in-flight rule (F-P1-1). */
+extern const struct app_radio_backend app_radio_p2p_backend;
 
 /* Start a device-driven history replay over P2P (req_history, tag 11): stream
  * every stored record in [from_unix, to_unix] back as N HistoryFrame uplinks
@@ -374,13 +369,8 @@ void app_radio_p2p_forget_pairing(void);
 void app_radio_p2p_clock_sync(uint32_t seq);
 
 /* Hooks of the common boot/join announce (app_radio_announce_run(),
- * doc/plan/439 T3): run it on m_work_q, the response budget, queue an announce
- * frame (a 0x55 RESPONSE with seq 0), start the page stream. */
+ * doc/plan/439 T3): run it on the radio work queue, start the page stream. */
 void app_radio_p2p_announce_kick(void);
-/* Nothing is queued or parked for the radio (answers, alarms). */
-bool app_radio_p2p_tx_idle(void);
-size_t app_radio_p2p_response_cap(size_t buf_size);
-int app_radio_p2p_queue_announce(bool settings, const uint8_t *buf, size_t len);
 void app_radio_p2p_page_stream_kick(void);
 
 #if defined(CONFIG_SHELL)
@@ -465,9 +455,6 @@ void p2p_test_set_session_tx_power(bool assigned, int8_t dbm);
 void p2p_test_join_step(void);
 void p2p_test_join_arm_retry(int64_t ms);
 void p2p_test_set_paired(void);
-void p2p_test_telemetry_send(void);
-bool p2p_test_frame_pending(void);
-uint32_t p2p_test_tx_waiting(void);
 void p2p_test_tx_reset(void);
 void p2p_test_put_ack_retry(uint32_t counter);
 void p2p_test_put_ack_retry_frame(uint8_t type, const uint8_t *body, size_t len, uint32_t counter);

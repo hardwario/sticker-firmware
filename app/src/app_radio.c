@@ -7,6 +7,7 @@
 #include "app_alarm.h"
 #include "app_clock.h"
 #include "app_cmd.h"
+#include "app_compose.h"
 #include "app_config.h"
 #include "app_log.h"
 #include "app_radio_lrw.h"
@@ -25,6 +26,7 @@
 #include <zephyr/sys/util.h>
 
 #include <errno.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(app_radio, LOG_LEVEL_INF);
 
@@ -87,11 +89,21 @@ static inline bool is_p2p(void)
 }
 #endif
 
+/* The backend the common TX path drives (doc/plan/460 §2.1). LoRaWAN until
+ * app_radio_init() picks P2P, as m_kind: calibration mode brings LoRaWAN up
+ * without app_radio_init(). */
+#if defined(CONFIG_LORAWAN)
+static const struct app_radio_backend *m_be = &app_radio_lrw_backend;
+#else
+static const struct app_radio_backend *m_be;
+#endif
+
 int app_radio_init(void)
 {
 #if defined(CONFIG_RADIO_P2P)
 	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_P2P) {
 		m_kind = APP_RADIO_P2P;
+		m_be = &app_radio_p2p_backend;
 		LOG_INF("Radio: P2P (raw LoRa)");
 		return app_radio_p2p_init();
 	}
@@ -347,6 +359,416 @@ uint8_t app_radio_get_max_payload(void)
 #endif
 }
 
+/* ---- Uplink frames, queues and scheduler (doc/plan/460 §2.2, F4) ----------
+ * One TX path for both radios (decision #23). app_radio owns the answer and
+ * alarm queues and the report being sent; the backend only sends one frame
+ * when asked (struct app_radio_backend.send) and kicks app_radio_tx_kick() when
+ * the link comes up or its confirmed uplink ends. One work item on the radio
+ * work queue sends one frame per run: the frame a retry is waiting for, then
+ * answers, then alarms, and telemetry only when both queues are empty -- so
+ * after a link-up the Info and settings-info stay ahead of the held alarms and
+ * the first report on the air, on either radio. */
+
+/* A frame the radio refused is retried after TX_RETRY_MS, TX_MAX_RETRIES times
+ * at most (LoRaWAN #219): then it is dropped, and the report's snapshot is
+ * reset (#340 M6) so the next report takes a fresh reading instead of packing
+ * the abandoned one's data. A queued answer or alarm held by the duty cycle
+ * (-EAGAIN) is not failing: it waits as long as the hold lasts. */
+#define TX_RETRY_MS    15000
+#define TX_MAX_RETRIES 8
+
+/* Sized for the largest LoRaWAN payload (EU868 DR4-6 / US915 DR4 = 242 B; P2P
+ * takes up to 239 B). A smaller buffer split a report into more uplinks than
+ * the data rate needs -- more TX, receive windows, duty cycle and battery (#267). */
+#define TLM_BUF_SIZE 242
+
+struct tx_slot {
+	uint8_t tag; /* enum app_radio_frame_tag */
+	uint8_t port;
+	uint16_t len;
+	uint8_t buf[APP_RADIO_TX_SLOT_SIZE];
+};
+
+K_MSGQ_DEFINE(m_answer_q, sizeof(struct tx_slot), APP_RADIO_TX_QUEUE_DEPTH, 4);
+K_MSGQ_DEFINE(m_alarm_q, sizeof(struct tx_slot), APP_RADIO_TX_QUEUE_DEPTH, 4);
+
+/* The queued frame being sent: off its queue and kept here until it left or
+ * was given up, so a retry keeps the order. Radio work queue only. */
+static struct tx_slot m_cur;
+static uint8_t m_cur_kind;
+static bool m_cur_valid;
+static uint8_t m_cur_retries;
+
+/* Telemetry: a request (any thread; one pending request, as a second report
+ * before the first left carries the same data) and the report being sent
+ * (radio work queue only). */
+static atomic_t m_tlm_requested;
+static bool m_tlm_open;  /* a report is being sent */
+static bool m_tlm_frame; /* m_tlm_buf holds its next frame (a retry resends it) */
+static bool m_tlm_first; /* ... the report's first */
+static bool m_tlm_more;
+static uint8_t m_tlm_flags; /* report_flags(), fixed at the first frame */
+static uint8_t m_tlm_retries;
+static size_t m_tlm_len;
+static uint8_t m_tlm_buf[TLM_BUF_SIZE];
+
+static void tx_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(m_tx_work, tx_work_handler);
+
+/* From the scheduler itself: the next run at this time. */
+static void tx_schedule(uint32_t delay_ms)
+{
+	k_work_reschedule_for_queue(app_radio_work_q(), &m_tx_work, K_MSEC(delay_ms));
+}
+
+void app_radio_tx_kick(void)
+{
+	/* k_work_schedule: a run already waiting (duty hold, retry, frame gap)
+	 * keeps its time. */
+	k_work_schedule_for_queue(app_radio_work_q(), &m_tx_work, K_NO_WAIT);
+}
+
+static void tx_request_telemetry(void)
+{
+	atomic_set(&m_tlm_requested, 1);
+	app_radio_tx_kick();
+}
+
+int app_radio_tx_queue(enum app_radio_frame_kind kind, enum app_radio_frame_tag tag, uint8_t port,
+		       const uint8_t *buf, size_t len)
+{
+	bool alarm = kind == APP_RADIO_FRAME_ALARM;
+
+	if (!buf || len == 0 || (!alarm && kind != APP_RADIO_FRAME_ANSWER)) {
+		return -EINVAL;
+	}
+	if (len > APP_RADIO_TX_SLOT_SIZE) {
+		LOG_ERR("%s %zu B over the %d B slot", alarm ? "Alarm batch" : "Answer", len,
+			APP_RADIO_TX_SLOT_SIZE);
+		return -EMSGSIZE;
+	}
+
+	struct tx_slot slot = {.tag = (uint8_t)tag, .port = port, .len = (uint16_t)len};
+
+	memcpy(slot.buf, buf, len);
+	if (k_msgq_put(alarm ? &m_alarm_q : &m_answer_q, &slot, K_NO_WAIT) != 0) {
+		LOG_WRN("%s queue full; dropped", alarm ? "Alarm" : "Answer");
+		return -ENOMEM;
+	}
+	app_radio_tx_kick();
+	return 0;
+}
+
+bool app_radio_tx_answer_pending(void)
+{
+	return k_msgq_num_used_get(&m_answer_q) > 0 ||
+	       (m_cur_valid && m_cur_kind == APP_RADIO_FRAME_ANSWER);
+}
+
+uint32_t app_radio_tx_answer_free(void)
+{
+	return k_msgq_num_free_get(&m_answer_q);
+}
+
+size_t app_radio_tx_answer_cap(size_t buf_size)
+{
+	size_t cap = MIN(buf_size, (size_t)APP_RADIO_TX_SLOT_SIZE);
+	uint8_t budget = m_be ? m_be->budget() : 0;
+
+	/* 0 = no budget known now (pending MAC answers fill the frame): encode
+	 * against the slot and let the send flush the MAC and retry, instead of
+	 * pretending the frame has no room at all. */
+	return (budget > 0 && budget < cap) ? budget : cap;
+}
+
+/* seq of an encoded Response (version byte + protobuf): field 1 comes first
+ * when non-zero (nanopb encodes in field order); absent means seq 0. */
+static uint32_t response_seq(const struct tx_slot *tx)
+{
+	uint32_t seq = 0;
+
+	if (tx->len < 2 || tx->buf[1] != 0x08) {
+		return 0;
+	}
+	for (uint16_t i = 2, shift = 0; i < tx->len && shift < 32; i++, shift += 7) {
+		seq |= (uint32_t)(tx->buf[i] & 0x7f) << shift;
+		if (!(tx->buf[i] & 0x80)) {
+			break;
+		}
+	}
+	return seq;
+}
+
+/* #409 3g: a queued frame no longer fits because the budget fell after it was
+ * encoded (LoRaWAN ADR / LinkADRReq; the P2P budget is fixed). Recover by kind
+ * instead of losing it silently: the announce Info / settings-info is re-armed
+ * (sent again once it fits); a command answer is replaced in place by Error
+ * BUDGET_TOO_SMALL carrying the command's seq (the host retries at a higher
+ * DR); an alarm is dropped, its state still rides in telemetry system_flags.
+ * Returns true when `tx` now holds a frame to send. */
+static bool recover_over_budget(struct tx_slot *tx, uint8_t kind, uint8_t budget)
+{
+	LOG_WRN("TX %u B over budget %u B (kind %u, tag %u)", tx->len, budget, kind, tx->tag);
+
+	if (kind == APP_RADIO_FRAME_ALARM) {
+		LOG_INF("Alarm frame dropped; alarm state stays in telemetry system_flags");
+		return false;
+	}
+	switch ((enum app_radio_frame_tag)tx->tag) {
+	case APP_RADIO_TAG_INFO:
+		app_radio_announce_rearm(false);
+		LOG_INF("Info re-armed for the deferred announce");
+		return false;
+	case APP_RADIO_TAG_SETTINGS:
+		app_radio_announce_rearm(true);
+		LOG_INF("settings-info re-armed for the deferred announce");
+		return false;
+	case APP_RADIO_TAG_CMD_RESPONSE: {
+		uint32_t seq = response_seq(tx);
+		size_t len;
+
+		if (app_cmd_build_budget_error(seq, tx->buf, MIN(budget, sizeof(tx->buf)), &len) ==
+		    0) {
+			tx->len = (uint16_t)len;
+			tx->tag = APP_RADIO_TAG_OTHER; /* never recover the error itself */
+			LOG_INF("Command answer (seq %u) replaced by BUDGET_TOO_SMALL", seq);
+			return true;
+		}
+		LOG_ERR("Command answer (seq %u) dropped: not even the Error fits", seq);
+		return false;
+	}
+	default:
+		LOG_ERR("Frame dropped");
+		return false;
+	}
+}
+
+/* Send the queued frame in progress, or the next one. Returns false when both
+ * queues are empty (the run goes on to telemetry). */
+static bool tx_queued_step(void)
+{
+	if (!m_cur_valid) {
+		if (k_msgq_get(&m_answer_q, &m_cur, K_NO_WAIT) == 0) {
+			m_cur_kind = APP_RADIO_FRAME_ANSWER;
+		} else if (k_msgq_get(&m_alarm_q, &m_cur, K_NO_WAIT) == 0) {
+			m_cur_kind = APP_RADIO_FRAME_ALARM;
+		} else {
+			return false;
+		}
+		m_cur_valid = true;
+		m_cur_retries = 0;
+	}
+
+	struct app_radio_frame f = {
+		.kind = m_cur_kind,
+		.tag = m_cur.tag,
+		.port = m_cur.port,
+		.flags = (m_be->confirm_kinds & BIT(m_cur_kind)) ? APP_RADIO_FRAME_CONFIRMED : 0,
+		.len = m_cur.len,
+		.buf = m_cur.buf,
+	};
+	struct app_radio_tx_result res = {0};
+	int ret = m_be->send(&f, &res);
+
+	switch (ret) {
+	case 0:
+		m_cur_valid = false;
+		break;
+	case -EMSGSIZE:
+		if (!recover_over_budget(&m_cur, m_cur_kind, res.budget)) {
+			m_cur_valid = false;
+		}
+		break;
+	case -EBUSY:
+	case -ENOTCONN:
+		return true; /* waits for app_radio_tx_kick() */
+	case -EAGAIN:
+		tx_schedule(res.wait_ms ? res.wait_ms : TX_RETRY_MS);
+		return true;
+	default:
+		if (++m_cur_retries > TX_MAX_RETRIES) {
+			LOG_ERR("Frame (kind %u, %u B) abandoned after %d retries", m_cur_kind,
+				m_cur.len, TX_MAX_RETRIES);
+			m_cur_valid = false;
+			break;
+		}
+		app_radio_count(APP_RADIO_CNT_RETRY);
+		tx_schedule(TX_RETRY_MS);
+		return true;
+	}
+	tx_schedule(0); /* the next frame */
+	return true;
+}
+
+static void tlm_close(bool reset_snapshot)
+{
+	if (reset_snapshot) {
+		app_compose_reset();
+	}
+	m_tlm_open = false;
+	m_tlm_frame = false;
+}
+
+/* Send the report frame by frame, composed at send time against the budget
+ * of that moment. */
+static void tlm_step(void)
+{
+	if (!m_tlm_open) {
+		/* MED-9: a history replay owns the radio; the request waits (the
+		 * replay's end kicks a fresh report anyway). */
+		if (!atomic_get(&m_tlm_requested) || m_be->replay_active()) {
+			return;
+		}
+		atomic_clear(&m_tlm_requested);
+		m_tlm_open = true;
+		m_tlm_first = true;
+		m_tlm_frame = false;
+	}
+
+	if (!m_tlm_frame) {
+		int ret = app_compose_budget(m_tlm_buf, sizeof(m_tlm_buf), &m_tlm_len, &m_tlm_more,
+					     m_be->budget());
+
+		if (ret == -EAGAIN) {
+			/* Budget 0: pending MAC answers (an ADR / channel batch from the
+			 * LNS) fill the frame, so no telemetry fits. Stopping here
+			 * deadlocks (H-1): no uplink -> the MAC answers never leave ->
+			 * the budget stays 0 and the node goes mute. Send an empty frame
+			 * so the MAC drains them; the budget is back for the next report. */
+			struct app_radio_frame f = {.kind = APP_RADIO_FRAME_TELEMETRY,
+						    .buf = m_tlm_buf};
+			struct app_radio_tx_result res;
+
+			(void)m_be->send(&f, &res);
+			tlm_close(!m_tlm_first);
+			return;
+		}
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_compose_budget", ret);
+			tlm_close(false);
+			return;
+		}
+		if (m_tlm_len == 0) {
+			tlm_close(false); /* nothing to report (e.g. no sample yet) */
+			return;
+		}
+		if (m_tlm_first) {
+			/* Once per report: the link-check decision advances its cadence,
+			 * so a resend must not ask again (#188). */
+			m_tlm_flags = m_be->report_flags();
+		}
+		m_tlm_frame = true;
+		m_tlm_retries = 0;
+	}
+
+	uint8_t flags = m_tlm_flags;
+
+	if (!m_tlm_first) {
+		flags &= ~APP_RADIO_FRAME_LINK_CHECK;
+	}
+	if (m_tlm_more) {
+		flags |= APP_RADIO_FRAME_MORE;
+	}
+
+	struct app_radio_frame f = {
+		.kind = APP_RADIO_FRAME_TELEMETRY,
+		.flags = flags,
+		.len = (uint16_t)m_tlm_len,
+		.buf = m_tlm_buf,
+	};
+	struct app_radio_tx_result res = {0};
+	int ret = m_be->send(&f, &res);
+
+	switch (ret) {
+	case 0:
+		break;
+	case -EMSGSIZE:
+		/* M-10: app_compose sends one group or 1-Wire reading that is bigger
+		 * than the budget on its own (US915/AU915 DR0, 11 B, with a machine
+		 * probe of ~25-30 B). Retrying it burns the retries every report on
+		 * data that cannot fit: drop it and go on with the rest of the report;
+		 * it fits again once the DR rises. */
+		LOG_ERR("Telemetry frame %zu B over budget %u B; dropped (raise DR)", m_tlm_len,
+			res.budget);
+		break;
+	case -EBUSY:
+		return; /* kicked when the in-flight uplink is done */
+	case -ENOTCONN:
+		LOG_WRN("Report abandoned: no session; snapshot reset");
+		tlm_close(true);
+		return;
+	default:
+		if (++m_tlm_retries > TX_MAX_RETRIES) {
+			LOG_ERR("Telemetry frame abandoned after %d retries; snapshot reset",
+				TX_MAX_RETRIES);
+			tlm_close(true);
+			return;
+		}
+		app_radio_count(APP_RADIO_CNT_RETRY);
+		tx_schedule((ret == -EAGAIN && res.wait_ms) ? res.wait_ms : TX_RETRY_MS);
+		return;
+	}
+
+	m_tlm_frame = false;
+	m_tlm_first = false;
+	if (m_tlm_more) {
+		tx_schedule(m_be->frame_gap_ms);
+		return;
+	}
+	if (ret == 0) {
+		/* Reports, not frames, drive the link-check cadence (#267). */
+		m_be->report_done();
+		LOG_INF("Snapshot complete");
+	}
+	tlm_close(false);
+	if (atomic_get(&m_tlm_requested)) {
+		tx_schedule(m_be->frame_gap_ms); /* a report requested meanwhile */
+	}
+}
+
+static void tx_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	/* Calibration mode transmits through its own path (app_calibration). */
+	if (g_app_config.calibration || m_be == NULL) {
+		return;
+	}
+	if (!m_be->tx_ready()) {
+		if (m_tlm_open) {
+			/* A (re)join starts from scratch: the report of the old
+			 * session is not continued with stale data (#93.5). */
+			LOG_WRN("Report abandoned: link down; snapshot reset");
+			tlm_close(true);
+		}
+		return; /* everything waits for the link-up kick */
+	}
+	if (tx_queued_step()) {
+		return;
+	}
+	tlm_step();
+}
+
+#if defined(CONFIG_ZTEST)
+void app_radio_test_set_backend(const struct app_radio_backend *be)
+{
+	m_be = be;
+}
+
+void app_radio_test_tx_reset(void)
+{
+	struct k_work_sync sync;
+
+	(void)k_work_cancel_delayable_sync(&m_tx_work, &sync);
+	k_msgq_purge(&m_answer_q);
+	k_msgq_purge(&m_alarm_q);
+	m_cur_valid = false;
+	atomic_clear(&m_tlm_requested);
+	m_tlm_open = false;
+	m_tlm_frame = false;
+}
+#endif
+
 /* Boot/join order (Hynek, 2026-09-27): after a link-up the node sends the Info,
  * then the settings-info, then its first telemetry -- always in that order.
  * The announce spread moves the start of the whole sequence, never one frame
@@ -364,21 +786,6 @@ uint8_t app_radio_get_max_payload(void)
 
 static atomic_t m_seq_closed;     /* the boot/join sequence is still announcing */
 static atomic_t m_telemetry_held; /* a report waits for the announce */
-
-/* The backend's queued answers have left. P2P shares one small TX queue
- * between answers and alarms, so data is released only once the announce
- * frames are out of it -- an alarm queued behind them was dropped as "TX queue
- * full" (HIL 2026-09-27). LoRaWAN queues alarms separately and drains answers
- * first, so it needs no wait. */
-static bool backend_tx_idle(void)
-{
-#if defined(CONFIG_RADIO_P2P)
-	if (is_p2p()) {
-		return app_radio_p2p_tx_idle();
-	}
-#endif
-	return true;
-}
 
 /* ms the boot/join sequence still holds data (0 = none): the time left to its
  * fallback deadline, at least 1 while it is closed. */
@@ -425,21 +832,13 @@ static void seq_deadline_work_handler(struct k_work *work)
 	}
 }
 
-/* The backend composes and sends at once; the delay was taken here. */
+/* The report is composed and sent at once; the delay was taken here. */
 static void jitter_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
 	atomic_clear(&m_telemetry_held);
-#if defined(CONFIG_RADIO_P2P)
-	if (is_p2p()) {
-		app_radio_p2p_send_telemetry();
-		return;
-	}
-#endif
-#if defined(CONFIG_LORAWAN)
-	app_radio_lrw_send_telemetry();
-#endif
+	tx_request_telemetry();
 }
 
 /* Uplink phase (O9, p2p_link_check.md §3.7, Hynek 2026-09-27): the report
@@ -531,30 +930,12 @@ void app_radio_reset_link(void)
 
 int app_radio_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 {
-#if defined(CONFIG_RADIO_P2P)
-	if (is_p2p()) {
-		return app_radio_p2p_queue_response(port, buf, len);
-	}
-#endif
-#if defined(CONFIG_LORAWAN)
-	return app_radio_lrw_queue_response(port, buf, len);
-#else
-	return -ENODEV;
-#endif
+	return app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, port, buf, len);
 }
 
 int app_radio_send_alarm(const uint8_t *buf, size_t len)
 {
-#if defined(CONFIG_RADIO_P2P)
-	if (is_p2p()) {
-		return app_radio_p2p_send_alarm(buf, len);
-	}
-#endif
-#if defined(CONFIG_LORAWAN)
-	return app_radio_lrw_send_alarm(buf, len);
-#else
-	return -ENODEV;
-#endif
+	return app_radio_tx_queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 0, buf, len);
 }
 
 void app_radio_register_ready_cb(void (*cb)(void))
@@ -588,10 +969,6 @@ void app_radio_suspend(void)
 #define ANNOUNCE_INFO     BIT(0)
 #define ANNOUNCE_SETTINGS BIT(1)
 
-/* The response buffers of both backends are 64 B (APP_RADIO_LRW_RESPONSE_BUF_SIZE,
- * P2P_TX_BUF_SIZE); the budget below caps the page size further. */
-#define ANNOUNCE_BUF_SIZE 64
-
 static atomic_t m_announce;
 /* 1 while the fleet jitter of app_radio_announce() runs: the announce does not
  * start before m_announce_jitter_work fires. A flag, not an uptime, so a
@@ -609,38 +986,6 @@ static void announce_kick(void)
 #endif
 #if defined(CONFIG_LORAWAN)
 	app_radio_lrw_announce_kick();
-#endif
-}
-
-/* Payload budget (bytes) of the next response frame, at most `buf_size`. */
-static size_t response_cap(size_t buf_size)
-{
-#if defined(CONFIG_RADIO_P2P)
-	if (is_p2p()) {
-		return app_radio_p2p_response_cap(buf_size);
-	}
-#endif
-#if defined(CONFIG_LORAWAN)
-	return app_radio_lrw_response_cap(buf_size);
-#else
-	return 0;
-#endif
-}
-
-static int queue_announce(bool settings, const uint8_t *buf, size_t len)
-{
-#if defined(CONFIG_RADIO_P2P)
-	if (is_p2p()) {
-		return app_radio_p2p_queue_announce(settings, buf, len);
-	}
-#endif
-#if defined(CONFIG_LORAWAN)
-	return app_radio_lrw_queue_announce(settings, buf, len);
-#else
-	ARG_UNUSED(settings);
-	ARG_UNUSED(buf);
-	ARG_UNUSED(len);
-	return -ENODEV;
 #endif
 }
 
@@ -662,8 +1007,8 @@ static void page_stream_kick(void)
  * page stream when more pages follow. */
 static int announce_frame(bool settings, uint32_t seq)
 {
-	uint8_t buf[ANNOUNCE_BUF_SIZE];
-	size_t cap = response_cap(sizeof(buf));
+	uint8_t buf[APP_RADIO_TX_SLOT_SIZE];
+	size_t cap = app_radio_tx_answer_cap(sizeof(buf));
 	size_t len;
 	bool more = false;
 	int ret = settings ? app_cmd_build_config_status(buf, cap, &len, &more)
@@ -672,7 +1017,9 @@ static int announce_frame(bool settings, uint32_t seq)
 	if (ret) {
 		return ret;
 	}
-	ret = queue_announce(settings, buf, len);
+	ret = app_radio_tx_queue(APP_RADIO_FRAME_ANSWER,
+				 settings ? APP_RADIO_TAG_SETTINGS : APP_RADIO_TAG_INFO, 0, buf,
+				 len);
 	if (ret) {
 		if (more) {
 			app_cmd_stream_cancel(); /* page 0 never left */
@@ -753,9 +1100,6 @@ bool app_radio_announce_run(void)
 	}
 	if (app_cmd_stream_active()) {
 		return true; /* settings-info pages still streaming */
-	}
-	if (!backend_tx_idle()) {
-		return true; /* the backend runs us again once its queue drained */
 	}
 	seq_release(); /* the announce is out: alarms, then the first telemetry */
 	return false;

@@ -18,7 +18,6 @@
 extern uint16_t test_history_frame_count;
 extern uint32_t test_history_first_abs;
 extern size_t test_history_count;
-extern int g_compose_budget_calls;
 /* tests/p2p_logic/src/stubs.c's app_settings_save_p2p_spreading_factor knobs. */
 extern int g_test_saved_sf;
 extern int g_test_save_sf_calls;
@@ -1096,60 +1095,80 @@ ZTEST(p2p_logic, test_paired_boot_announces_through_app_radio)
 	zassert_equal(p2p_test_announce_calls, 1, "announce calls %d", p2p_test_announce_calls);
 }
 
-/* LoRaWAN #219 / #340 M6 parity: a telemetry frame the radio refuses is kept
- * and re-sent as-is, P2P_FRAME_MAX_RETRIES (8) times, then the snapshot is
- * reset so the next report does not continue a stale one. */
-extern size_t test_compose_len;
-extern int g_compose_reset_calls;
+/* The P2P TX backend (doc/plan/460 F4): app_radio owns the queues, the retries
+ * and the report split (tests/radio_common); the backend sends the one frame it
+ * is handed and says why it did not. */
 extern int test_lora_send_ret;
+extern uint32_t test_lora_send_count;
+extern int p2p_test_tx_queue_calls;
+extern int p2p_test_tx_kick_calls;
+extern enum app_radio_frame_kind p2p_test_tx_queue_kind;
 
-ZTEST(p2p_logic, test_refused_telemetry_frame_retried_then_snapshot_reset)
+/* One 10 B frame through the backend, the way app_radio's scheduler sends it. */
+static int backend_send(enum app_radio_frame_kind kind, uint8_t flags,
+			struct app_radio_tx_result *res)
 {
+	static uint8_t body[10];
+	struct app_radio_frame f = {.kind = kind, .flags = flags, .len = sizeof(body), .buf = body};
+
+	return app_radio_p2p_backend.send(&f, res);
+}
+
+/* A radio fault is reported as one (app_radio retries it, LoRaWAN #219); the
+ * duty cycle as -EAGAIN with the time until the ledger has room. */
+ZTEST(p2p_logic, test_backend_send_result_mapping)
+{
+	struct app_radio_tx_result res = {0};
+	uint32_t sends;
+
 	p2p_test_join_setup(7);
 	p2p_test_set_paired();
 	p2p_test_tx_reset();
-	test_compose_len = 10;
+
 	test_lora_send_ret = -EIO;
-	g_compose_reset_calls = 0;
-
-	p2p_test_telemetry_send();
-	zassert_true(p2p_test_frame_pending(), "a refused frame is kept");
-	for (int i = 0; i < 7; i++) {
-		p2p_test_telemetry_send();
-		zassert_true(p2p_test_frame_pending(), "retry %d keeps it", i + 1);
-	}
-	zassert_equal(g_compose_reset_calls, 0, "no reset before the budget is spent");
-
-	p2p_test_telemetry_send(); /* 8th retry fails: abandon */
-	zassert_false(p2p_test_frame_pending(), "abandoned after 8 retries");
-	zassert_equal(g_compose_reset_calls, 1, "snapshot reset once");
-
+	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, &res), -EIO, "radio fault");
 	test_lora_send_ret = 0;
-	test_compose_len = 0;
+	p2p_test_tx_reset();
+
+	sends = test_lora_send_count;
+	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, &res), 0, "sent");
+	zassert_equal(test_lora_send_count, sends + 1, "one frame on the air");
+	p2p_test_tx_reset();
+
+	/* A full hour of air: the next frame has to wait for it to age out. */
+	p2p_duty_charge(p2p_test_get_duty(), k_uptime_get(), P2P_DUTY_BUDGET_MS);
+	sends = test_lora_send_count;
+	zassert_equal(backend_send(APP_RADIO_FRAME_ALARM, APP_RADIO_FRAME_CONFIRMED, &res),
+		      -EAGAIN, "duty-cycle held");
+	zassert_true(res.wait_ms > P2P_DUTY_WINDOW_MS / 2, "waits for the window (%u ms)",
+		     res.wait_ms);
+	zassert_equal(test_lora_send_count, sends, "nothing on the air");
+
+	p2p_duty_init(p2p_test_get_duty());
 	p2p_test_tx_reset();
 }
 
 /* F-P1-1: while a confirmed uplink's Ack retry is pending, no fresh-counter
  * frame goes out (the central would reject the late retry as a replay); the
- * waiting frame is neither sent nor counted as a failure. */
+ * backend answers -EBUSY, which app_radio waits out uncounted until the Ack
+ * retry ends and kicks it. */
 ZTEST(p2p_logic, test_no_fresh_frame_while_an_ack_retry_is_pending)
 {
+	struct app_radio_tx_result res = {0};
+	uint32_t sends = test_lora_send_count;
+
 	p2p_test_join_setup(7);
 	p2p_test_set_paired();
 	p2p_test_tx_reset();
-	test_compose_len = 10;
 	test_lora_send_ret = -EIO; /* would count as a failure if it were sent */
-	g_compose_reset_calls = 0;
 	p2p_test_put_ack_retry(2561);
 
-	for (int i = 0; i < 12; i++) {
-		p2p_test_telemetry_send();
-	}
-	zassert_true(p2p_test_frame_pending(), "the frame waits for the in-flight uplink");
-	zassert_equal(g_compose_reset_calls, 0, "waiting is not a failure");
+	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, &res), -EBUSY, "telemetry waits");
+	zassert_equal(backend_send(APP_RADIO_FRAME_ALARM, APP_RADIO_FRAME_CONFIRMED, &res),
+		      -EBUSY, "an alarm waits too");
+	zassert_equal(test_lora_send_count, sends, "nothing on the air");
 
 	test_lora_send_ret = 0;
-	test_compose_len = 0;
 	p2p_test_tx_reset();
 }
 
@@ -1161,27 +1180,32 @@ ZTEST(p2p_logic, test_clock_sync_forces_no_uplink)
 	p2p_test_join_setup(7);
 	p2p_test_set_paired();
 	p2p_test_tx_reset();
-	int calls = g_compose_budget_calls;
+	uint32_t sends = test_lora_send_count;
+	int kicks = p2p_test_tx_kick_calls;
 
 	app_radio_p2p_clock_sync(17);
-	k_sleep(K_MSEC(50)); /* a forced send would run on m_work_q by now */
-	zassert_equal(g_compose_budget_calls, calls, "clock_sync must not compose an uplink");
+	k_sleep(K_MSEC(50)); /* a forced send would run on the radio work queue by now */
+	zassert_equal(test_lora_send_count, sends, "clock_sync must not send an uplink");
+	zassert_equal(p2p_test_tx_kick_calls, kicks, "nor ask app_radio for one");
 	p2p_test_link_reset(); /* the pending clock_sync would confirm later reports */
 }
 
-/* LoRaWAN parity: a response / alarm queued while the node is not paired
- * (joining, self-heal) stays queued instead of being dropped. */
-ZTEST(p2p_logic, test_frames_queued_while_unpaired_are_kept)
+/* LoRaWAN parity: answers and alarms stay queued in app_radio while the node is
+ * not paired (joining, self-heal) -- the backend is not ready -- and the link-up
+ * kicks them out under the new session. */
+ZTEST(p2p_logic, test_not_ready_while_unpaired_and_link_up_kicks)
 {
-	const uint8_t resp[] = {0x01, 0x08, 0x05, 0x12, 0x00};
-
 	p2p_test_join_setup(7);
 	p2p_test_tx_reset();
 	p2p_test_set_link(P2P_LINK_JOINING, true, false, 0, false);
+	zassert_false(app_radio_p2p_backend.tx_ready(), "frames wait while joining");
 
-	zassert_equal(app_radio_p2p_queue_response(0, resp, sizeof(resp)), 0, "queued");
-	k_sleep(K_MSEC(50)); /* let m_tx_work run */
-	zassert_equal(p2p_test_tx_waiting(), 1, "kept while unpaired (%u)", p2p_test_tx_waiting());
+	int kicks = p2p_test_tx_kick_calls;
+
+	p2p_test_set_paired();
+	app_radio_p2p_start();
+	zassert_true(app_radio_p2p_backend.tx_ready(), "ready once paired");
+	zassert_true(p2p_test_tx_kick_calls > kicks, "the link-up sends what waited");
 
 	p2p_test_tx_reset();
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
@@ -1189,51 +1213,26 @@ ZTEST(p2p_logic, test_frames_queued_while_unpaired_are_kept)
 
 /* Review of #400 (H1): a new session restarts the counter at 0 under a new key,
  * so an Ack retry of the old session must never go out with its old counter.
- * The alarm goes back to the TX queue for a fresh counter; the telemetry frame
- * is dropped (the next report covers it). */
+ * The alarm goes back to app_radio's queue for a fresh counter; the telemetry
+ * frame is dropped (the next report covers it). */
 ZTEST(p2p_logic, test_new_session_drops_old_ack_retries)
 {
 	const uint8_t body[] = {0x01, 0x0a, 0x00};
 
 	p2p_test_join_setup(7);
 	p2p_test_tx_reset();
-	p2p_test_set_link(P2P_LINK_JOINING, true, false, 0, false); /* tx_work parks */
+	p2p_test_set_link(P2P_LINK_JOINING, true, false, 0, false);
 	p2p_test_put_ack_retry_frame(APP_RADIO_P2P_FRAME_TELEMETRY, body, sizeof(body), 5000);
 	p2p_test_put_ack_retry_frame(APP_RADIO_P2P_FRAME_ALARM, body, sizeof(body), 5001);
 
+	int calls = p2p_test_tx_queue_calls;
+
 	p2p_test_drop_old_session();
-	k_sleep(K_MSEC(50));
 
 	zassert_equal(p2p_test_ack_retry_count(), 0, "no old-session retry may remain");
-	zassert_equal(p2p_test_tx_waiting(), 1, "the alarm waits for a fresh counter (%u)",
-		      p2p_test_tx_waiting());
+	zassert_equal(p2p_test_tx_queue_calls, calls + 1, "only the alarm is re-queued");
+	zassert_equal(p2p_test_tx_queue_kind, APP_RADIO_FRAME_ALARM, "as an alarm");
 
-	p2p_test_tx_reset();
-	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
-}
-
-/* Queued answers and alarms leave before telemetry, as with LoRaWAN's priority
- * drain: after a link-up the Info and settings-info stay ahead of the first
- * report even when one of them waits for a retry (#452, boot order). */
-ZTEST(p2p_logic, test_telemetry_waits_for_queued_answers)
-{
-	const uint8_t resp[] = {0x01, 0x08, 0x05, 0x12, 0x00};
-
-	p2p_test_join_setup(7);
-	p2p_test_tx_reset();
-	p2p_test_set_link(P2P_LINK_JOINING, true, false, 0, false);
-	zassert_equal(app_radio_p2p_queue_response(0, resp, sizeof(resp)), 0, "queued");
-	k_sleep(K_MSEC(50)); /* m_tx_work runs and keeps it (not paired) */
-	zassert_equal(p2p_test_tx_waiting(), 1, "the answer waits");
-
-	int calls = g_compose_budget_calls;
-
-	test_compose_len = 10;
-	p2p_test_telemetry_send();
-	zassert_equal(g_compose_budget_calls, calls, "no report composed while an answer waits");
-	zassert_false(p2p_test_frame_pending(), "nothing half-sent");
-
-	test_compose_len = 0;
 	p2p_test_tx_reset();
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
 }
@@ -1379,27 +1378,16 @@ ZTEST(p2p_logic, test_history_replay_cursor_is_absolute)
 ZTEST(p2p_logic, test_telemetry_does_not_interleave_with_a_history_replay)
 {
 	p2p_test_replay_setup();
-	test_history_frame_count = 3;
-
-	/* Control: with no replay running, a telemetry request composes a frame. */
-	g_compose_budget_calls = 0;
-	app_radio_p2p_send_telemetry();
-	k_sleep(K_MSEC(50));
-	zassert_true(g_compose_budget_calls > 0,
-		     "with no replay running, telemetry must still be composed");
 
 	/* app_radio_lrw.c gates its own send path on m_hist_active (MED-9); app_radio_p2p.c's
-	 * copy kept the "telemetry self-skips" comment but dropped the gate.
-	 * app_history_set_replay_active() only pauses history CAPTURE -- nothing
-	 * in the send path consults it -- so scheduled telemetry interleaved with
-	 * the history frames and competed for the same duty ledger and Ack slot. */
+	 * copy kept the "telemetry self-skips" comment but dropped the gate. Both
+	 * backends now report the replay to app_radio, which holds telemetry back
+	 * (tests/radio_common). */
+	zassert_false(app_radio_p2p_backend.replay_active(), "no replay: telemetry goes");
 	p2p_test_set_replay_active(true);
-
-	g_compose_budget_calls = 0;
-	app_radio_p2p_send_telemetry();
-	k_sleep(K_MSEC(50));
-	zassert_equal(g_compose_budget_calls, 0,
-		      "a replay owns the radio: telemetry must not be composed mid-stream");
+	zassert_true(app_radio_p2p_backend.replay_active(),
+		     "a replay owns the radio: telemetry must wait");
+	p2p_test_set_replay_active(false);
 }
 
 /* ---- Frame-counter fail-closed / saturation (B9) ---------------------- */
@@ -1832,18 +1820,26 @@ ZTEST(p2p_logic, test_data_kat_ack_opens)
 
 extern uint8_t test_lora_last_frame[255];
 extern uint32_t test_lora_last_len;
-extern uint32_t test_lora_send_count;
 
-/* Send one telemetry report and return whether it went CONFIRMED (FCtrl bit 0
- * of the frame on the air); clears the retry state it leaves behind. */
+/* Send one single-frame telemetry report the way app_radio does (report_flags
+ * at its first frame, report_done after its last) and return whether it went
+ * CONFIRMED (FCtrl bit 0 of the frame on the air); clears the retry state it
+ * leaves behind. */
 static bool send_report_confirmed(void)
 {
+	const struct app_radio_backend *be = &app_radio_p2p_backend;
+	struct app_radio_tx_result res = {0};
 	uint32_t sends = test_lora_send_count;
+	uint8_t flags = be->report_flags();
 
-	p2p_test_telemetry_send();
+	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, flags, &res), 0, "sent");
+	be->report_done();
 	zassert_equal(test_lora_send_count, sends + 1, "one frame on the air per report");
 
 	bool confirmed = (test_lora_last_frame[P2P_HDR_OFF_FCTRL] & P2P_FCTRL_CONFIRMED) != 0;
+
+	zassert_equal(confirmed, (flags & APP_RADIO_FRAME_CONFIRMED) != 0,
+		      "the report's flag reaches the air");
 
 	zassert_equal(p2p_test_ack_retry_count(), confirmed ? 1u : 0u,
 		      "an unacked confirmed report waits for a retry, an unconfirmed one never");
@@ -1859,7 +1855,6 @@ ZTEST(p2p_logic, test_every_nth_report_is_the_confirmed_link_check)
 	p2p_test_set_paired();
 	p2p_test_tx_reset();
 	p2p_test_link_reset();
-	test_compose_len = 10;
 	g_app_config.radio_link_check_interval = 5;
 
 	for (int i = 0; i < 11; i++) {
@@ -1874,7 +1869,6 @@ ZTEST(p2p_logic, test_every_nth_report_is_the_confirmed_link_check)
 	}
 
 	g_app_config.radio_link_check_interval = 5;
-	test_compose_len = 0;
 	p2p_test_link_reset();
 }
 
@@ -1885,7 +1879,6 @@ ZTEST(p2p_logic, test_every_report_is_confirmed_in_warning)
 	p2p_test_set_paired();
 	p2p_test_tx_reset();
 	p2p_test_link_reset();
-	test_compose_len = 10;
 	g_app_config.radio_link_check_interval = 5;
 	p2p_test_set_link(P2P_LINK_PAIRED, true, false, 3, false); /* WARNING */
 
@@ -1893,7 +1886,6 @@ ZTEST(p2p_logic, test_every_report_is_confirmed_in_warning)
 		zassert_true(send_report_confirmed(), "WARNING, report %d", i);
 	}
 
-	test_compose_len = 0;
 	p2p_test_link_reset();
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
 }
@@ -1931,7 +1923,6 @@ ZTEST(p2p_logic, test_clock_sync_confirms_at_most_three_reports)
 	p2p_test_set_paired();
 	p2p_test_tx_reset();
 	p2p_test_link_reset();
-	test_compose_len = 10;
 	g_app_config.radio_link_check_interval = 0;
 
 	app_radio_p2p_clock_sync(21);
@@ -1948,7 +1939,6 @@ ZTEST(p2p_logic, test_clock_sync_confirms_at_most_three_reports)
 	zassert_equal(p2p_test_send_info_seq, 21u);
 
 	g_app_config.radio_link_check_interval = 5;
-	test_compose_len = 0;
 	p2p_test_link_reset();
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
 }

@@ -1209,7 +1209,7 @@ static int cmd_cmd_inject(const struct shell *sh, enum app_cmd_transport transpo
 
 #if defined(CONFIG_LORAWAN)
 	if (transport == APP_CMD_TRANSPORT_LRW && out_len > 0) {
-		ret = app_radio_lrw_queue_response(85, out, out_len);
+		ret = app_radio_queue_response(85, out, out_len);
 		if (ret) {
 			shell_warn(sh, "queue_response failed: %d", ret);
 		}

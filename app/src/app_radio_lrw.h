@@ -51,14 +51,11 @@ enum app_radio_state app_radio_lrw_get_state(void);
 int app_radio_lrw_get_info(struct app_radio_lrw_info *info);
 bool app_radio_lrw_is_ready(void);
 
-/* Compose + split + send a telemetry snapshot (fPort 2) from the current sensor
- * data. app_radio_lrw builds the snapshot (app_compose), splits it into DR-budget
- * frames, piggybacks a LinkCheckReq on the first frame when the N-th-message
- * cadence is due, and retries on a duty-cycle backoff. Triggered by app_radio
- * (after the #267 pre-send jitter, which app_radio takes for both radios) once
- * app_report has sampled + captured history. No-op while joining/reconnecting,
- * during calibration or while a history replay owns the radio. */
-void app_radio_lrw_send_telemetry(void);
+/* The LoRaWAN TX backend of the common scheduler (app_radio, doc/plan/460 F4):
+ * sends one frame against the live DR budget -- telemetry on fPort 2, alarms on
+ * fPort 3, answers on their port (85) -- with the LinkCheckReq piggyback and
+ * the empty MAC-flush uplink at budget 0. All unconfirmed. */
+extern const struct app_radio_backend app_radio_lrw_backend;
 
 /* Register a callback fired on a link-ready edge (join success / history-replay
  * finish) so app_report can resume the report cadence with an immediate uplink.
@@ -75,18 +72,6 @@ void app_radio_lrw_force_link_check(void);
  * decide how many telemetry fields fit. */
 uint8_t app_radio_lrw_get_max_payload(void);
 
-/* Encode cap for a frame built into a `buf_size` buffer: the current payload
- * budget when known and smaller, else `buf_size` (budget 0 = unknown right now;
- * the send path flushes pending MAC answers and retries). Uses the cached budget,
- * so it is safe off m_work_q. Shared by every fPort 85 / fPort 3 encoder (#409). */
-size_t app_radio_lrw_payload_cap(size_t buf_size);
-
-/* Stage a serialized response (e.g. Response on port 85) for the next
- * uplink. send_work_handler() drains this slot before composing telemetry, so
- * the response leaves at the next jitter window. Single-slot, overwritten with
- * a warning if a prior response hasn't been transmitted yet. */
-int app_radio_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len);
-
 /* Arm a deferred GetInfo uplink to answer a ClockSync command: the next network
  * time-update (DeviceTimeAns) sends an Info carrying the synced unix_time and the
  * command's `seq`, so the host can pair it with the request. The command itself
@@ -99,18 +84,9 @@ void app_radio_lrw_send_info_on_clock_sync(uint32_t seq);
 void app_radio_lrw_clock_sync(uint32_t seq);
 
 /* Hooks of the common boot/join announce (app_radio_announce_run(),
- * doc/plan/439 T3): run it on m_work_q, the current DR's response budget,
- * queue an announce frame (recovered by the over-budget path, #409), start the
- * page stream. */
+ * doc/plan/439 T3): run it on the radio work queue, start the page stream. */
 void app_radio_lrw_announce_kick(void);
-size_t app_radio_lrw_response_cap(size_t buf_size);
-int app_radio_lrw_queue_announce(bool settings, const uint8_t *buf, size_t len);
 void app_radio_lrw_page_stream_kick(void);
-
-/* Stage an alarm-detail batch (issue #27) for the next uplink on fPort 3. Own
- * slot, drained after the command response and before telemetry, so it never
- * collides with app_radio_lrw_queue_response(). Returns 0, -EINVAL, or -EMSGSIZE. */
-int app_radio_lrw_send_alarm(const uint8_t *buf, size_t len);
 
 /* Start a device-driven history replay (issue #52): stream every stored record
  * in [from_unix, to_unix] back as N HistoryFrame uplinks on the command port,
