@@ -2415,9 +2415,13 @@ static void frame_work_handler(struct k_work *work)
 	telemetry_send();
 }
 
-/* The TX queue is empty: a report that waited for it goes now. */
+/* The TX queue is empty: a boot/join announce waiting for it releases its data
+ * (app_radio_announce_run()), and a report that waited goes now. */
 static void tx_drained(void)
 {
+	if (app_radio_announce_pending()) {
+		app_radio_p2p_announce_kick();
+	}
 	if (m_telemetry_after_tx) {
 		m_telemetry_after_tx = false;
 		k_work_submit_to_queue(&m_work_q, &m_send_work);
@@ -3682,6 +3686,11 @@ static void announce_work_handler(struct k_work *work)
 		k_work_reschedule_for_queue(&m_work_q, &m_announce_work,
 					    K_SECONDS(P2P_ANNOUNCE_RETRY_SEC));
 	}
+}
+
+bool app_radio_p2p_tx_idle(void)
+{
+	return !m_tx_deferred_valid && k_msgq_num_used_get(&m_tx_msgq) == 0;
 }
 
 void app_radio_p2p_announce_kick(void)

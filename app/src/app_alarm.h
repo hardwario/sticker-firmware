@@ -74,6 +74,10 @@ uint32_t app_alarm_active_mask(void);
  * the alarm-driven buzzer melody replays on. */
 uint32_t app_alarm_activation_seq(void);
 
+/* app_radio: the boot/join announce is out -- send an alarm batch that waited
+ * for it (app_radio_data_hold_ms()). No-op when nothing is held. */
+void app_alarm_flush_held(void);
+
 #ifdef __cplusplus
 }
 #endif

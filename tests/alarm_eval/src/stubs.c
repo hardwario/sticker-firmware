@@ -95,6 +95,15 @@ uint8_t app_radio_get_max_payload(void)
 	return 51;
 }
 
+/* Boot/join order hold (app_radio_data_hold_ms()): 0 = send, -1 = link down,
+ * > 0 = announce still going out. Cases set it; default 0. */
+int32_t test_radio_data_hold_ms;
+
+int32_t app_radio_data_hold_ms(void)
+{
+	return test_radio_data_hold_ms;
+}
+
 int app_radio_send_alarm(const uint8_t *buf, size_t len)
 {
 	(void)buf;

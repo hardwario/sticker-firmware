@@ -277,6 +277,13 @@ bool app_radio_announce_pending(void);
  * it); arm it again for the next run. */
 void app_radio_announce_rearm(bool settings);
 
+/* Boot/join order for data (Info -> settings-info -> data): how long a data
+ * frame (alarm batch) must still wait. 0 = send now; > 0 = ms until the
+ * announce's fallback deadline (the announce normally releases it earlier via
+ * app_alarm_flush_held()); -1 = the link is down, the next link-up's announce
+ * releases it. */
+int32_t app_radio_data_hold_ms(void);
+
 /* Backend work queue only: send what is pending while the link is up. Returns
  * true while something stays pending that a later run can send. */
 bool app_radio_announce_run(void);

@@ -173,6 +173,9 @@ static uint32_t m_window_base_unix;
 static bool m_window_base_synced; /* m_window_base_unix is absolute UTC, not uptime */
 static int64_t m_window_start_ms;
 static bool m_window_open;
+/* The batch waits for the radio: link down, or the boot/join announce is
+ * still going out (Info -> settings-info -> data, 2026-09-27). m_lock. */
+static bool m_batch_held;
 static struct k_work_delayable m_alarm_batch_work;
 
 /* Per-rule dwell/hold duration in ms (#348): `dwell` is a plain duration in
@@ -313,6 +316,27 @@ static void alarm_batch_flush(void)
 		return;
 	}
 
+	/* Boot/join order (Hynek, 2026-09-27): Info -> settings-info -> data, and
+	 * an alarm is data. While the link is down or the announce is still going
+	 * out the batch waits with its window held open, so later edges join it;
+	 * app_radio flushes it once the announce is queued (app_alarm_flush_held()),
+	 * and the timer covers the announce's fallback deadline. */
+	int32_t hold_ms = app_radio_data_hold_ms();
+
+	if (hold_ms != 0) {
+		if (!m_batch_held) {
+			LOG_INF("Alarm batch held: %s",
+				hold_ms < 0 ? "link down" : "boot/join announce first");
+		}
+		m_batch_held = true;
+		m_window_open = true;
+		if (hold_ms > 0) {
+			k_work_reschedule(&m_alarm_batch_work, K_MSEC(hold_ms));
+		}
+		return;
+	}
+	m_batch_held = false;
+
 	size_t cap = ALARM_FRAME_MAX;
 	/* Transport-agnostic (app_radio_get_max_payload(), unconditionally
 	 * compiled) -- see alarm_lrw_send()'s comment on the stale CONFIG_LORAWAN
@@ -404,6 +428,18 @@ static void alarm_batch_work_handler(struct k_work *work)
 	k_mutex_unlock(&m_lock);
 }
 
+void app_alarm_flush_held(void)
+{
+	k_mutex_lock(&m_lock, K_FOREVER);
+
+	bool held = m_batch_held;
+
+	k_mutex_unlock(&m_lock);
+	if (held) {
+		k_work_reschedule(&m_alarm_batch_work, K_NO_WAIT);
+	}
+}
+
 /* Record one alarm edge for the fPort-3 detail batch. Caller does NOT hold
  * m_lock (this takes it). */
 /* Queue one built alarm event into the rate-limit window (or flush immediately
@@ -417,10 +453,18 @@ static void alarm_queue(struct app_cmd_alarm_event ev)
 	k_mutex_lock(&m_lock, K_FOREVER);
 
 	if (limit <= 0) {
-		m_window_base_unix = now_seconds(&m_window_base_synced);
-		m_window_total = 1;
-		m_batch_count = 1;
-		m_batch[0] = ev;
+		/* Normally a batch of one; a batch held for the radio (see
+		 * alarm_batch_flush()) collects the edges until it can go. */
+		if (m_batch_count == 0) {
+			m_window_start_ms = now;
+			m_window_base_unix = now_seconds(&m_window_base_synced);
+			m_window_total = 0;
+		}
+		m_window_total++;
+		if (m_batch_count < ALARM_BATCH_MAX) {
+			ev.rel_s = (uint32_t)MIN((now - m_window_start_ms) / 1000, 0xFFFF);
+			m_batch[m_batch_count++] = ev;
+		}
 		alarm_batch_flush();
 		k_mutex_unlock(&m_lock);
 		return;

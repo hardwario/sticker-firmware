@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_alarm.h"
 #include "app_clock.h"
 #include "app_cmd.h"
 #include "app_config.h"
@@ -317,22 +318,62 @@ uint8_t app_radio_get_max_payload(void)
  * then the settings-info, then its first telemetry -- always in that order.
  * The announce spread moves the start of the whole sequence, never one frame
  * of it. From app_radio_announce() until every announce page has been handed
- * to the backend (m_seq_closed), a report is held and leaves right after the
- * announce, with no jitter of its own; each backend sends its queued answers
- * ahead of telemetry, so the air order follows. A held report goes anyway
- * once ANNOUNCE_HOLD_MAX_MS pass after the spread, so an announce that cannot
- * get out (no budget, no room) never silences the telemetry. */
+ * to the backend (m_seq_closed), data waits: a report is held and leaves right
+ * after the announce with no jitter of its own, and app_alarm holds its batch
+ * (app_radio_data_hold_ms()) until seq_release() flushes it, ahead of the
+ * report. Each backend sends queued answers and alarms before telemetry, so
+ * the air order follows. Held data goes anyway once ANNOUNCE_HOLD_MAX_MS pass
+ * after the spread, so an announce that cannot get out (no budget, no room)
+ * never silences the node. */
 #define ANNOUNCE_HOLD_MAX_MS 60000
 
 static atomic_t m_seq_closed;     /* the boot/join sequence is still announcing */
 static atomic_t m_seq_deadline;   /* uptime (ms, u32) after which a held report goes */
 static atomic_t m_telemetry_held; /* a report waits for the announce */
 
+/* The backend's queued answers have left. P2P shares one small TX queue
+ * between answers and alarms, so data is released only once the announce
+ * frames are out of it -- an alarm queued behind them was dropped as "TX queue
+ * full" (HIL 2026-09-27). LoRaWAN queues alarms separately and drains answers
+ * first, so it needs no wait. */
+static bool backend_tx_idle(void)
+{
+#if defined(CONFIG_RADIO_P2P)
+	if (is_p2p()) {
+		return app_radio_p2p_tx_idle();
+	}
+#endif
+	return true;
+}
+
+/* ms the boot/join sequence still holds data (0 = none). */
+static int32_t seq_hold_ms(void)
+{
+	if (!atomic_get(&m_seq_closed)) {
+		return 0;
+	}
+
+	int32_t left = (int32_t)((uint32_t)atomic_get(&m_seq_deadline) - (uint32_t)k_uptime_get());
+
+	return MAX(left, 0);
+}
+
+int32_t app_radio_data_hold_ms(void)
+{
+	if (!app_radio_is_ready()) {
+		return -1; /* the next link-up's announce releases it */
+	}
+	return seq_hold_ms();
+}
+
 static void seq_release(void)
 {
 	if (!atomic_cas(&m_seq_closed, 1, 0)) {
 		return;
 	}
+	/* Alarms first, then the report: both work items run on the system work
+	 * queue in this order. */
+	app_alarm_flush_held();
 	if (atomic_cas(&m_telemetry_held, 1, 0)) {
 		k_work_reschedule(&m_jitter_work, K_NO_WAIT);
 	}
@@ -369,17 +410,14 @@ static uint32_t fleet_jitter_ms(void)
 
 void app_radio_send_telemetry(void)
 {
-	if (atomic_get(&m_seq_closed)) {
-		int32_t left =
-			(int32_t)((uint32_t)atomic_get(&m_seq_deadline) - (uint32_t)k_uptime_get());
+	int32_t hold_ms = seq_hold_ms();
 
-		if (left > 0) {
-			/* Follows the announce (seq_release()); the timer is the
-			 * fallback only. */
-			atomic_set(&m_telemetry_held, 1);
-			k_work_reschedule(&m_jitter_work, K_MSEC(left));
-			return;
-		}
+	if (hold_ms > 0) {
+		/* Follows the announce (seq_release()); the timer is the fallback
+		 * only. */
+		atomic_set(&m_telemetry_held, 1);
+		k_work_reschedule(&m_jitter_work, K_MSEC(hold_ms));
+		return;
 	}
 	k_work_reschedule(&m_jitter_work, K_MSEC(fleet_jitter_ms()));
 }
@@ -642,7 +680,10 @@ bool app_radio_announce_run(void)
 	if (app_cmd_stream_active()) {
 		return true; /* settings-info pages still streaming */
 	}
-	seq_release(); /* every announce page is queued: the first telemetry follows */
+	if (!backend_tx_idle()) {
+		return true; /* the backend runs us again once its queue drained */
+	}
+	seq_release(); /* the announce is out: alarms, then the first telemetry */
 	return false;
 }
 

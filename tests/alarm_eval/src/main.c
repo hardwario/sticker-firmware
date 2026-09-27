@@ -485,6 +485,42 @@ ZTEST(alarm_eval, test_alarm_detail_skipped_when_no_event_fits)
 	test_alarm_max_events = SIZE_MAX;
 }
 
+/* Boot/join order (2026-09-27): Info -> settings-info -> data. While the radio
+ * holds data (link down, or its announce still going out) the alarm batch
+ * waits and collects later edges; app_alarm_flush_held() sends it once the
+ * announce is out. */
+extern int32_t test_radio_data_hold_ms;
+
+ZTEST(alarm_eval, test_alarm_batch_waits_for_the_boot_announce)
+{
+	g_app_config.alarm_limit = 0; /* would flush synchronously inside poll */
+	test_alarm_event_count = 0;
+	test_radio_data_hold_ms = -1; /* link down / announce pending */
+
+	activate_threshold_slot0();
+	zassert_equal(test_alarm_event_count, 0, "no alarm frame before the announce, got %zu",
+		      test_alarm_event_count);
+
+	/* A second edge while held joins the same batch instead of replacing it. */
+	zassert_equal(app_alarm_rules_clear(0), 0, "rule clear rejected");
+	app_alarm_poll();
+	zassert_equal(test_alarm_event_count, 0, "still held");
+
+	test_radio_data_hold_ms = 0; /* the announce is out */
+	app_alarm_flush_held();
+	k_sleep(K_MSEC(20)); /* the flush runs on the system work queue */
+
+	zassert_equal(test_alarm_event_count, 2, "both held edges sent, got %zu",
+		      test_alarm_event_count);
+	zassert_equal(test_alarm_events[0].edge, 0, "activate edge first");
+	zassert_equal(test_alarm_events[1].edge, 1, "then the deactivate edge");
+
+	/* Nothing held: a no-op. */
+	app_alarm_flush_held();
+	k_sleep(K_MSEC(20));
+	zassert_equal(test_alarm_event_count, 2, "no extra frame");
+}
+
 ZTEST(alarm_eval, test_clearing_active_rule_emits_deactivate_edge)
 {
 	g_app_config.alarm_limit = 0; /* flush synchronously inside poll */
