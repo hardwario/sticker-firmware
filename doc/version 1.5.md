@@ -510,6 +510,7 @@ When the network disappears (gateway off, or the device moved out of reach of it
 - New log lines: `Link recovery: TX power <a> -> <b>, DR<x> -> DR<y> (payload <n> B)` and `LC FAIL in WARNING (total: n/m, ladder step)`. `ats lrw status` (now `ats radio status`) also prints `tx power: <index> (0 = max)`.
 - After a ladder recovery the device stays on the lower DR. With ADR on, the network raises it again from the uplinks it receives. A lower DR means a smaller payload budget (EU868 DR0–2: 51 B), so telemetry may take more frames until then.
 - The link-check timeout now starts after the uplink's RX windows closed. It no longer races a LinkCheckAns at DR0/SF12 with a 5 s RX1 delay.
+- **Any authenticated downlink is a link-check success** (2026-09-27, parity with P2P, §28): a command, an ADR or DevStatus request or an Ack clears the fail streak and, in `WARNING`, returns the device to `HEALTHY` — not only a LinkCheckAns while a check is outstanding. A device the network is visibly reaching no longer walks down the ladder towards a rejoin. Log: `Link confirmed via downlink`.
 - Works together with `lrw-datarate` (§8): a pinned DR is stepped down by the ladder like any other, and the next join re-pins it.
 - `ats lrw status` (now `ats radio status`) reports the live DR from the MAC. Before, it showed a stale value after an ADR-off DR change (`lrw-datarate`, a ladder rung).
 - Cost: +272 B flash release, +744 B debug, +0 B RAM.
