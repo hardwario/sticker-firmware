@@ -347,9 +347,11 @@ static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
  * Command/Response structs wrote past the guard and the node halted. */
 static K_THREAD_STACK_DEFINE(m_work_stack, 4096);
 static struct k_work_q m_work_q;
-static struct k_work m_send_work;           /* compose + send telemetry */
-static struct k_work_delayable m_tx_work;   /* drain response/alarm queue, retries on -EAGAIN */
-static struct k_work_delayable m_join_work; /* JoinRequest attempt + retry (#118 phase 2) */
+static struct k_work m_send_work;               /* compose + send telemetry */
+static struct k_work_delayable m_tx_work;       /* drain response/alarm queue, retries on -EAGAIN */
+static struct k_work_delayable m_join_work;     /* JoinRequest attempt + retry (#118 phase 2) */
+static struct k_work_delayable m_announce_work; /* common Info + settings-info announce */
+static void announce_work_handler(struct k_work *work);
 
 /* B8 history replay in progress. Declared up here, ahead of the rest of the
  * replay state further down, because send_work_handler() gates telemetry on it
@@ -440,6 +442,11 @@ static bool m_join_episode_fresh;  /* the handler has not opened this episode ye
 
 /* B1: RSSI/SNR the central reported in the last Ack (its measurement of our
  * uplink). m_last_ack_valid is false until the first Ack of this session. */
+/* clock_sync (app_radio_p2p_clock_sync()): answer with an Info carrying this
+ * seq once the next Ack (and its time tail) has been processed. Set from a
+ * command thread, consumed on m_work_q. */
+static atomic_t m_clock_sync_pending;
+static atomic_t m_clock_sync_seq;
 static int8_t m_last_ack_rssi;
 static int8_t m_last_ack_snr;
 static bool m_last_ack_valid;
@@ -1724,12 +1731,11 @@ static void post_cmd_work_handler(struct k_work *work)
 #endif /* defined(CONFIG_LORAWAN) */
 		break;
 	case APP_CMD_ACTION_LRW_JOIN:
-		/* Same ungated-command story, but this one is meaningless here
-		 * whatever the build: the radio is busy being a P2P node, and a
-		 * LoRaWAN join would need it. Refuse loudly rather than half-do
-		 * it -- to move a node between stacks, set `radio-mode` and
-		 * reboot. */
-		LOG_WRN("Command: LoRaWAN join ignored (radio-mode is p2p)");
+		/* lrw_join = "join the network again now" on whichever radio runs
+		 * (app_radio_rejoin()): here a fresh P2P join handshake, no reboot,
+		 * the same as after a LoRaWAN lrw_join. The Ack has already left. */
+		LOG_INF("Command: forced P2P rejoin");
+		app_radio_rejoin();
 		break;
 	default:
 		break;
@@ -1764,11 +1770,15 @@ static void page_stream_work_handler(struct k_work *work)
 	size_t len;
 	int ret = app_cmd_stream_next(buf, sizeof(buf), &len);
 
-	if (ret == -ENODATA) {
-		return; /* all pages queued */
-	}
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
+	if (ret == -ENODATA || ret) {
+		if (ret != -ENODATA) {
+			LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
+		}
+		/* All pages queued (or the stream died): an announce frame may have
+		 * waited for it. */
+		if (app_radio_announce_pending()) {
+			app_radio_p2p_announce_kick();
+		}
 		return;
 	}
 	(void)app_radio_p2p_queue_response(0, buf, len);
@@ -2062,6 +2072,9 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	 * bounds as the LoRaWAN DeviceTimeAns (L-5). */
 	if (ack.time_present) {
 		(void)app_clock_set_network_time(ack.unix_time);
+	}
+	if (atomic_cas(&m_clock_sync_pending, 1, 0)) {
+		(void)app_radio_send_info((uint32_t)atomic_get(&m_clock_sync_seq));
 	}
 
 	/* rssi/snr = the central's measurement of the uplink (Ack body, B1);
@@ -2422,6 +2435,11 @@ static void mark_ready(void)
 	 * already installed this session's value (or cleared it), and
 	 * mark_ready() also runs on the already-PAIRED boot shortcut, where the
 	 * value restored from NVS is the one to keep. */
+
+	/* Link up (boot with a persisted pairing, or a fresh JoinAccept): the
+	 * common Info + settings-info announce, as after a LoRaWAN join. Queued on
+	 * m_work_q ahead of the telemetry the ready callback kicks. */
+	app_radio_announce();
 	if (m_ready_cb) {
 		m_ready_cb();
 	}
@@ -3175,6 +3193,7 @@ int app_radio_p2p_init(void)
 	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
 	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
 	k_work_init_delayable(&m_page_stream_work, page_stream_work_handler);
+	k_work_init_delayable(&m_announce_work, announce_work_handler);
 	k_work_init_delayable(&m_hist_work, hist_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
@@ -3368,8 +3387,6 @@ void app_radio_p2p_get_info(struct app_radio_p2p_info *info)
 /* Debug / bench helpers (ats radio ..., #118, CONFIG_SHELL)                */
 /* ======================================================================== */
 
-#if defined(CONFIG_SHELL)
-
 void app_radio_p2p_rejoin(void)
 {
 	/* Same gate as app_radio_p2p_start() -- the shell must not be a way around it
@@ -3387,6 +3404,52 @@ void app_radio_p2p_rejoin(void)
 	/* Explicit operator-forced fresh join: boot-window policy, not self-heal. */
 	start_join_episode(false);
 }
+
+/* ---- Boot/join announce and clock_sync hooks (app_radio, doc/plan/439 T3) --- */
+
+/* Retry pace while the announce waits for TX-queue room or a page stream. */
+#define P2P_ANNOUNCE_RETRY_SEC 5
+
+static void announce_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	if (app_radio_announce_run()) {
+		k_work_reschedule_for_queue(&m_work_q, &m_announce_work,
+					    K_SECONDS(P2P_ANNOUNCE_RETRY_SEC));
+	}
+}
+
+void app_radio_p2p_announce_kick(void)
+{
+	k_work_reschedule_for_queue(&m_work_q, &m_announce_work, K_NO_WAIT);
+}
+
+size_t app_radio_p2p_response_cap(size_t buf_size)
+{
+	return MIN(buf_size, (size_t)MIN(P2P_TX_BUF_SIZE, app_radio_p2p_get_max_payload()));
+}
+
+int app_radio_p2p_queue_announce(bool settings, const uint8_t *buf, size_t len)
+{
+	ARG_UNUSED(settings);
+	return queue_frame(APP_RADIO_P2P_FRAME_RESPONSE, buf, len);
+}
+
+void app_radio_p2p_page_stream_kick(void)
+{
+	k_work_schedule_for_queue(&m_work_q, &m_page_stream_work,
+				  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
+}
+
+void app_radio_p2p_clock_sync(uint32_t seq)
+{
+	/* seq before the flag, so the Ack path never pairs a stale seq. */
+	atomic_set(&m_clock_sync_seq, (atomic_val_t)seq);
+	atomic_set(&m_clock_sync_pending, 1);
+	app_radio_p2p_send_telemetry();
+}
+
+#if defined(CONFIG_SHELL)
 
 int app_radio_p2p_unjoin(void)
 {

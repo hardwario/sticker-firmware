@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_cmd.h"
 #include "app_config.h"
 #include "app_log.h"
 #include "app_radio_lrw.h"
@@ -14,6 +15,8 @@
 #endif
 
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
+#include <zephyr/sys/util.h>
 
 #include <errno.h>
 
@@ -83,7 +86,6 @@ void app_radio_start(void)
 #endif
 }
 
-#if defined(CONFIG_SHELL)
 void app_radio_rejoin(void)
 {
 #if defined(CONFIG_RADIO_P2P)
@@ -96,7 +98,6 @@ void app_radio_rejoin(void)
 	app_radio_lrw_join(); /* already unconditional -- see app_radio_start() above */
 #endif
 }
-#endif /* defined(CONFIG_SHELL) */
 
 enum app_radio_kind app_radio_get_kind(void)
 {
@@ -192,6 +193,15 @@ void app_radio_send_telemetry_now(void)
 #endif
 }
 
+bool app_radio_needs_command_answer(void)
+{
+#if defined(CONFIG_RADIO_P2P)
+	return is_p2p();
+#else
+	return false;
+#endif
+}
+
 int app_radio_queue_response(uint8_t port, const uint8_t *buf, size_t len)
 {
 #if defined(CONFIG_RADIO_P2P)
@@ -243,5 +253,174 @@ void app_radio_suspend(void)
 #endif
 #if defined(CONFIG_LORAWAN)
 	app_radio_lrw_suspend();
+#endif
+}
+
+/* ---- Boot/join announce --------------------------------------------------- */
+
+#define ANNOUNCE_INFO     BIT(0)
+#define ANNOUNCE_SETTINGS BIT(1)
+
+/* The response buffers of both backends are 64 B (APP_RADIO_LRW_RESPONSE_BUF_SIZE,
+ * P2P_TX_BUF_SIZE); the budget below caps the page size further. */
+#define ANNOUNCE_BUF_SIZE 64
+
+static atomic_t m_announce;
+
+/* Have the backend call app_radio_announce_run() on its work queue. */
+static void announce_kick(void)
+{
+#if defined(CONFIG_RADIO_P2P)
+	if (is_p2p()) {
+		app_radio_p2p_announce_kick();
+		return;
+	}
+#endif
+#if defined(CONFIG_LORAWAN)
+	app_radio_lrw_announce_kick();
+#endif
+}
+
+/* Payload budget (bytes) of the next response frame, at most `buf_size`. */
+static size_t response_cap(size_t buf_size)
+{
+#if defined(CONFIG_RADIO_P2P)
+	if (is_p2p()) {
+		return app_radio_p2p_response_cap(buf_size);
+	}
+#endif
+#if defined(CONFIG_LORAWAN)
+	return app_radio_lrw_response_cap(buf_size);
+#else
+	return 0;
+#endif
+}
+
+static int queue_announce(bool settings, const uint8_t *buf, size_t len)
+{
+#if defined(CONFIG_RADIO_P2P)
+	if (is_p2p()) {
+		return app_radio_p2p_queue_announce(settings, buf, len);
+	}
+#endif
+#if defined(CONFIG_LORAWAN)
+	return app_radio_lrw_queue_announce(settings, buf, len);
+#else
+	ARG_UNUSED(settings);
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	return -ENODEV;
+#endif
+}
+
+/* Page 0 went out and more pages follow: start the backend's page stream. */
+static void page_stream_kick(void)
+{
+#if defined(CONFIG_RADIO_P2P)
+	if (is_p2p()) {
+		app_radio_p2p_page_stream_kick();
+		return;
+	}
+#endif
+#if defined(CONFIG_LORAWAN)
+	app_radio_lrw_page_stream_kick();
+#endif
+}
+
+/* Queue page 0 of an Info (settings = false) or settings-info, and start the
+ * page stream when more pages follow. */
+static int announce_frame(bool settings, uint32_t seq)
+{
+	uint8_t buf[ANNOUNCE_BUF_SIZE];
+	size_t cap = response_cap(sizeof(buf));
+	size_t len;
+	bool more = false;
+	int ret = settings ? app_cmd_build_config_status(buf, cap, &len, &more)
+			   : app_cmd_build_info_seq(seq, buf, cap, &len, &more);
+
+	if (ret) {
+		return ret;
+	}
+	ret = queue_announce(settings, buf, len);
+	if (ret) {
+		if (more) {
+			app_cmd_stream_cancel(); /* page 0 never left */
+		}
+		return ret;
+	}
+	if (more) {
+		page_stream_kick();
+	}
+	return 0;
+}
+
+void app_radio_announce(void)
+{
+	atomic_or(&m_announce, ANNOUNCE_INFO | ANNOUNCE_SETTINGS);
+	announce_kick();
+}
+
+bool app_radio_announce_pending(void)
+{
+	return atomic_get(&m_announce) != 0;
+}
+
+void app_radio_announce_rearm(bool settings)
+{
+	atomic_or(&m_announce, settings ? ANNOUNCE_SETTINGS : ANNOUNCE_INFO);
+}
+
+bool app_radio_announce_run(void)
+{
+	enum app_radio_state state = app_radio_get_state();
+
+	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
+		return false; /* the next link-up re-announces from scratch */
+	}
+	if (app_cmd_stream_active()) {
+		return true; /* run again when the running page stream ends */
+	}
+
+	if (atomic_get(&m_announce) & ANNOUNCE_INFO) {
+		if (announce_frame(false, 0) == 0) {
+			atomic_and(&m_announce, ~ANNOUNCE_INFO);
+			LOG_INF("Info announced");
+		}
+		if (app_cmd_stream_active()) {
+			return true; /* settings-info follows once these pages are out */
+		}
+	}
+	if (atomic_get(&m_announce) & ANNOUNCE_SETTINGS) {
+		if (announce_frame(true, 0) == 0) {
+			atomic_and(&m_announce, ~ANNOUNCE_SETTINGS);
+			LOG_INF("Settings-info announced");
+		}
+	}
+	return atomic_get(&m_announce) != 0;
+}
+
+int app_radio_send_info(uint32_t seq)
+{
+	int ret = announce_frame(false, seq);
+
+	if (ret) {
+		/* Not even one Info field fits now: the announce Info goes later. */
+		atomic_or(&m_announce, ANNOUNCE_INFO);
+	}
+	return ret;
+}
+
+void app_radio_clock_sync(uint32_t seq)
+{
+#if defined(CONFIG_RADIO_P2P)
+	if (is_p2p()) {
+		app_radio_p2p_clock_sync(seq);
+		return;
+	}
+#endif
+#if defined(CONFIG_LORAWAN)
+	app_radio_lrw_clock_sync(seq);
+#else
+	ARG_UNUSED(seq);
 #endif
 }

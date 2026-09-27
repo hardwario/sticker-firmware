@@ -325,6 +325,29 @@ struct app_radio_p2p_info {
 /* Fill `info` with the current pairing/session snapshot. Always succeeds. */
 void app_radio_p2p_get_info(struct app_radio_p2p_info *info);
 
+/* Force a fresh join handshake RIGHT NOW, even if currently PAIRED. Subject
+ * to the same all-zero `lrw_appkey` refusal as app_radio_p2p_start() -- the shell
+ * is not a way around it --
+ * unlike app_radio_p2p_start(), an existing pairing is not treated as sufficient.
+ * A successful JoinAccept overwrites the old pairing via pairing_persist(),
+ * so this never needs a reboot or NVS wipe (contrast with app_radio_p2p_unjoin()
+ * below). This is what makes `join` (shell) and lrw_join (NFC / downlink,
+ * via app_radio_rejoin()) genuinely force a fresh session on both radio stacks. */
+void app_radio_p2p_rejoin(void);
+
+/* app_radio_clock_sync() on P2P: send an uplink now and, once its Ack has been
+ * processed (the Ack time tail sets the RTC), answer with an Info carrying
+ * `seq`. A newer request before that Ack takes over the seq. */
+void app_radio_p2p_clock_sync(uint32_t seq);
+
+/* Hooks of the common boot/join announce (app_radio_announce_run(),
+ * doc/plan/439 T3): run it on m_work_q, the response budget, queue an announce
+ * frame (a 0x55 RESPONSE with seq 0), start the page stream. */
+void app_radio_p2p_announce_kick(void);
+size_t app_radio_p2p_response_cap(size_t buf_size);
+int app_radio_p2p_queue_announce(bool settings, const uint8_t *buf, size_t len);
+void app_radio_p2p_page_stream_kick(void);
+
 #if defined(CONFIG_SHELL)
 /* Bench-rig reference receiver (doc/p2p.md §14): enable=true reconfigures the
  * radio for continuous RX and starts async receive -- each frame is
@@ -336,16 +359,6 @@ void app_radio_p2p_get_info(struct app_radio_p2p_info *info);
  * config. Returns 0 or a negative errno. TX (send_telemetry/queue_response/
  * send_alarm) is refused with -EBUSY while listening. */
 int app_radio_p2p_listen(bool enable);
-
-/* Force a fresh join handshake RIGHT NOW, even if currently PAIRED. Subject
- * to the same all-zero `lrw_appkey` refusal as app_radio_p2p_start() -- the shell
- * is not a way around it --
- * unlike app_radio_p2p_start(), an existing pairing is not treated as sufficient.
- * A successful JoinAccept overwrites the old pairing via pairing_persist(),
- * so this never needs a reboot or NVS wipe (contrast with app_radio_p2p_unjoin()
- * below). This is what makes the shell's `join` command genuinely force a
- * fresh session on both radio stacks. */
-void app_radio_p2p_rejoin(void);
 
 /* Clear the persisted pairing (net_id/dev_addr/session_key/rx1_delay) so the
  * next boot starts a fresh JoinRequest. NEVER touches the dev_nonce

@@ -105,6 +105,19 @@ int app_radio_lrw_queue_response(uint8_t port, const uint8_t *buf, size_t len);
  * ClockSync before the time lands takes over the seq. */
 void app_radio_lrw_send_info_on_clock_sync(uint32_t seq);
 
+/* app_radio_clock_sync() on LoRaWAN: force a DeviceTimeReq and answer with the
+ * seq-carrying Info once the time lands. */
+void app_radio_lrw_clock_sync(uint32_t seq);
+
+/* Hooks of the common boot/join announce (app_radio_announce_run(),
+ * doc/plan/439 T3): run it on m_work_q, the current DR's response budget,
+ * queue an announce frame (recovered by the over-budget path, #409), start the
+ * page stream. */
+void app_radio_lrw_announce_kick(void);
+size_t app_radio_lrw_response_cap(size_t buf_size);
+int app_radio_lrw_queue_announce(bool settings, const uint8_t *buf, size_t len);
+void app_radio_lrw_page_stream_kick(void);
+
 /* Stage an alarm-detail batch (issue #27) for the next uplink on fPort 3. Own
  * slot, drained after the command response and before telemetry, so it never
  * collides with app_radio_lrw_queue_response(). Returns 0, -EINVAL, or -EMSGSIZE. */

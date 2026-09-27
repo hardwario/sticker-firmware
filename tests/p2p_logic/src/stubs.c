@@ -207,3 +207,21 @@ int app_clock_set_network_time(uint32_t unix_time)
 	g_test_network_time = unix_time;
 	return 0;
 }
+
+/* Common announce / clock-sync answer (app_radio.c is not built here): count
+ * the calls so tests can check that the backend hands them to app_radio. */
+int p2p_test_announce_calls;
+int p2p_test_send_info_calls;
+uint32_t p2p_test_send_info_seq;
+
+void app_radio_announce(void)
+{
+	p2p_test_announce_calls++;
+}
+
+int app_radio_send_info(uint32_t seq)
+{
+	p2p_test_send_info_calls++;
+	p2p_test_send_info_seq = seq;
+	return 0;
+}

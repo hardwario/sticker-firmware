@@ -95,6 +95,23 @@ void app_clock_force_resync(void)
 {
 }
 
+/* The active radio needs an answer for every command (P2P); tests set it. */
+bool test_radio_needs_answer;
+
+bool app_radio_needs_command_answer(void)
+{
+	return test_radio_needs_answer;
+}
+
+void app_radio_clock_sync(uint32_t seq)
+{
+	ARG_UNUSED(seq);
+}
+
+void app_report_force(void)
+{
+}
+
 /* Battery (GetInfo battery field). get_info now reads the cached
  * g_app_sensor_data.voltage rather than a fresh app_battery_measure(), so the
  * test seeds the cache (see main.c setUp). The measure stub + test_battery_v are

@@ -564,7 +564,9 @@ def test_build_commands_model_shape():
     assert by_name["reboot"]["action"] == "REBOOT"
     assert by_name["set_param"]["kind"] == "handler"
     # transport gating + no-immediate-response flags
-    assert by_name["force_send"]["lrw_only"] is True
+    # force_send is radio-agnostic since P2P parity (was [lrw] only).
+    assert by_name["force_send"]["lrw_only"] is False
+    assert by_name["force_send"]["transports"] == ["lrw", "p2p"]
     assert by_name["force_send"]["emits_response"] is False
     assert by_name["clock_sync"]["emits_response"] is False  # info_deferred
     assert by_name["set_param"]["lrw_only"] is False
