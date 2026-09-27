@@ -14,6 +14,8 @@
 #include <zephyr/drivers/lora.h>
 #include <zephyr/kernel.h>
 
+#include <string.h>
+
 static int emul_config(const struct device *dev, struct lora_modem_config *config)
 {
 	ARG_UNUSED(dev);
@@ -24,12 +26,20 @@ static int emul_config(const struct device *dev, struct lora_modem_config *confi
 /* What emul_send() returns. 0 (a sent frame) unless a test is exercising a radio
  * fault; the test resets it. Same shape as test_save_sf_ret in stubs.c. */
 int test_lora_send_ret;
+/* The last frame handed to the radio and the number of sends, for cases that
+ * check what went on the air (e.g. the FCtrl CONFIRMED bit). */
+uint8_t test_lora_last_frame[255];
+uint32_t test_lora_last_len;
+uint32_t test_lora_send_count;
 
 static int emul_send(const struct device *dev, uint8_t *data, uint32_t data_len)
 {
 	ARG_UNUSED(dev);
-	ARG_UNUSED(data);
-	ARG_UNUSED(data_len);
+	if (test_lora_send_ret == 0) {
+		test_lora_last_len = MIN(data_len, sizeof(test_lora_last_frame));
+		memcpy(test_lora_last_frame, data, test_lora_last_len);
+		test_lora_send_count++;
+	}
 	return test_lora_send_ret;
 }
 

@@ -906,6 +906,7 @@ ZTEST(p2p_logic, test_join_sweep_walks_the_order_and_wraps)
 	enum p2p_link_state state;
 
 	p2p_test_join_setup(10);
+	p2p_test_allow_join_sweep(); /* the last-resort pass, decision #22 §3.1 */
 
 	for (size_t i = 0; i < ARRAY_SIZE(expect); i++) {
 		p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
@@ -927,6 +928,25 @@ ZTEST(p2p_logic, test_join_sweep_walks_the_order_and_wraps)
 	zassert_false(slow, "an episode inside its boot window must stay on the fast policy");
 	zassert_equal(rejoin, 0, "the fast policy must not spend backoff steps, got %u", rejoin);
 	zassert_equal(state, P2P_LINK_JOINING, "a sweeping episode is still JOINING");
+}
+
+/* Decision #22 §3.1: the join stays on the configured SF -- no sweep until the
+ * last resort (a day without a JoinAccept). A pass is then just the
+ * P2P_JOIN_SF_ATTEMPTS JoinRequests at the configured SF. */
+ZTEST(p2p_logic, test_join_stays_on_the_configured_sf_without_last_resort)
+{
+	uint8_t sf, step, attempts, rejoin;
+	bool slow;
+	enum p2p_link_state state;
+
+	p2p_test_join_setup(7);
+
+	for (int i = 0; i < 3 * P2P_JOIN_SF_ATTEMPTS; i++) {
+		p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
+		zassert_equal(sf, 7, "attempt %d must go out on the configured SF7, got SF%u", i, sf);
+		zassert_equal(step, 0, "attempt %d: no sweep step, got %u", i, step);
+		p2p_test_join_step();
+	}
 }
 
 /* A JoinRequest the duty ledger refuses never reaches the air, so it tried no
@@ -1003,6 +1023,7 @@ ZTEST(p2p_logic, test_join_window_expiry_switches_to_slow_policy_not_silence)
 	enum p2p_link_state state;
 
 	p2p_test_join_setup(10);
+	p2p_test_allow_join_sweep(); /* a full sweep pass, so the pass has 7 attempts */
 	p2p_test_set_join_started_at(k_uptime_get() - P2P_JOIN_BOOT_WINDOW_MS - 1);
 
 	p2p_test_join_step();
@@ -1800,6 +1821,147 @@ ZTEST(p2p_logic, test_data_kat_ack_opens)
 					&ack[P2P_HDR_LEN + sizeof(want_pt)], P2P_TAG_LEN, pt),
 		   "the KAT Ack must open under the RX nonce");
 	zassert_mem_equal(pt, want_pt, sizeof(want_pt));
+}
+
+/* ---- decision #22: confirmed policy and link supervision ---------------- */
+
+extern uint8_t test_lora_last_frame[255];
+extern uint32_t test_lora_last_len;
+extern uint32_t test_lora_send_count;
+
+/* Send one telemetry report and return whether it went CONFIRMED (FCtrl bit 0
+ * of the frame on the air); clears the retry state it leaves behind. */
+static bool send_report_confirmed(void)
+{
+	uint32_t sends = test_lora_send_count;
+
+	p2p_test_telemetry_send();
+	zassert_equal(test_lora_send_count, sends + 1, "one frame on the air per report");
+
+	bool confirmed = (test_lora_last_frame[P2P_HDR_OFF_FCTRL] & P2P_FCTRL_CONFIRMED) != 0;
+
+	zassert_equal(p2p_test_ack_retry_count(), confirmed ? 1u : 0u,
+		      "an unacked confirmed report waits for a retry, an unconfirmed one never");
+	p2p_test_tx_reset();
+	return confirmed;
+}
+
+/* §3.2: the first report after link-up and every N-th after it is CONFIRMED
+ * (the P2P link check), the others go unconfirmed and once. */
+ZTEST(p2p_logic, test_every_nth_report_is_the_confirmed_link_check)
+{
+	p2p_test_join_setup(7);
+	p2p_test_set_paired();
+	p2p_test_tx_reset();
+	p2p_test_link_reset();
+	test_compose_len = 10;
+	g_app_config.radio_link_check_interval = 5;
+
+	for (int i = 0; i < 11; i++) {
+		zassert_equal(send_report_confirmed(), (i % 5) == 0, "report %d", i);
+	}
+
+	/* N = 0: no periodic check, every report unconfirmed. */
+	p2p_test_link_reset();
+	g_app_config.radio_link_check_interval = 0;
+	for (int i = 0; i < 3; i++) {
+		zassert_false(send_report_confirmed(), "N = 0, report %d", i);
+	}
+
+	g_app_config.radio_link_check_interval = 5;
+	test_compose_len = 0;
+	p2p_test_link_reset();
+}
+
+/* §3.4 / LoRaWAN #424: while WARNING every report is a link check. */
+ZTEST(p2p_logic, test_every_report_is_confirmed_in_warning)
+{
+	p2p_test_join_setup(7);
+	p2p_test_set_paired();
+	p2p_test_tx_reset();
+	p2p_test_link_reset();
+	test_compose_len = 10;
+	g_app_config.radio_link_check_interval = 5;
+	p2p_test_set_link(P2P_LINK_PAIRED, true, false, 3, false); /* WARNING */
+
+	for (int i = 0; i < 4; i++) {
+		zassert_true(send_report_confirmed(), "WARNING, report %d", i);
+	}
+
+	test_compose_len = 0;
+	p2p_test_link_reset();
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
+}
+
+/* §3.4: 3 failed link checks -> WARNING (session kept); any authenticated
+ * downlink -> HEALTHY; radio-link-check-fail-rejoin more failures in WARNING
+ * -> a self-healing re-join. */
+ZTEST(p2p_logic, test_link_supervision_warning_then_rejoin)
+{
+	memset(g_app_config.lrw_appkey, 0x11, sizeof(g_app_config.lrw_appkey));
+	memset(g_app_config.lrw_deveui, 0x22, sizeof(g_app_config.lrw_deveui));
+	g_app_config.radio_link_check_fail_rejoin = 5;
+	p2p_test_join_setup(7);
+	p2p_test_set_link(P2P_LINK_PAIRED, true, false, 0, false);
+
+	p2p_test_link_check_failed();
+	p2p_test_link_check_failed();
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_HEALTHY, "2 failures: healthy");
+	p2p_test_link_check_failed();
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_WARNING, "3 failures: WARNING");
+
+	p2p_test_link_ok();
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_HEALTHY,
+		      "any authenticated downlink is a success");
+
+	for (int i = 0; i < 3; i++) {
+		p2p_test_link_check_failed();
+	}
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_WARNING);
+	for (int i = 0; i < 4; i++) {
+		p2p_test_link_check_failed();
+		zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_WARNING,
+			      "failure %d of 5 in WARNING keeps the session", i + 1);
+	}
+	p2p_test_link_check_failed();
+	zassert_equal(app_radio_p2p_get_state(), APP_RADIO_STATE_RECONNECT,
+		      "the 5th failure in WARNING re-joins (slow policy)");
+
+	p2p_test_join_stop();
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
+	p2p_test_link_reset();
+}
+
+/* §3.4: WARNING's action with a fixed SF -- the TX power steps back up towards
+ * the node's own p2p-tx-power, per failed check, never above it. */
+ZTEST(p2p_logic, test_warning_steps_tx_power_up_to_the_config)
+{
+	struct app_radio_p2p_info info;
+
+	memset(g_app_config.lrw_appkey, 0x11, sizeof(g_app_config.lrw_appkey));
+	memset(g_app_config.lrw_deveui, 0x22, sizeof(g_app_config.lrw_deveui));
+	g_app_config.radio_link_check_fail_rejoin = 5;
+	g_app_config.p2p_tx_power = 14;
+	p2p_test_join_setup(7);
+	p2p_test_set_link(P2P_LINK_PAIRED, true, false, 0, false);
+	p2p_test_set_session_tx_power(true, 10);
+
+	for (int i = 0; i < 3; i++) {
+		p2p_test_link_check_failed();
+	}
+	app_radio_p2p_get_info(&info);
+	zassert_equal(info.tx_power_dbm, 12, "entering WARNING takes one 2 dB step, got %d",
+		      info.tx_power_dbm);
+	p2p_test_link_check_failed();
+	app_radio_p2p_get_info(&info);
+	zassert_equal(info.tx_power_dbm, 14, "next failure: 14 dBm, got %d", info.tx_power_dbm);
+	p2p_test_link_check_failed();
+	app_radio_p2p_get_info(&info);
+	zassert_equal(info.tx_power_dbm, 14, "capped at p2p-tx-power, got %d", info.tx_power_dbm);
+
+	p2p_test_set_session_tx_power(false, 0);
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
+	p2p_test_link_reset();
 }
 
 ZTEST_SUITE(p2p_logic, NULL, NULL, NULL, NULL, NULL);

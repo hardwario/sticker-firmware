@@ -223,25 +223,25 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  * SF is network-wide and the Hub owns it, so a Hub that changed it leaves every
  * node deaf until the node re-discovers it. SF6 is configurable but excluded:
  * it needs the implicit-header mode this PHY does not use. */
-#define P2P_JOIN_SWEEP_SF_MIN 7
-#define P2P_JOIN_SWEEP_SF_MAX 12
+#define P2P_JOIN_LAST_RESORT_MS (24LL * 60 * 60 * 1000)
+#define P2P_JOIN_SWEEP_SF_MIN   7
+#define P2P_JOIN_SWEEP_SF_MAX   12
 
-/* Self-healing re-join (B3, doc/p2p.md §7): after this many CONSECUTIVE
- * fully-failed confirmed-uplink cycles (all P2P_ACK_MAX_RETRIES exhausted with
- * no Ack), an already-PAIRED node concludes its session is stale (central DB
- * loss/restore, key change, lost sync) and starts re-join attempts on its own.
- * Unlike the never-paired boot join (§5.2), this one skips the 120 s fast phase
- * entirely -- the window only selects which policy runs first, and neither
- * policy ever gives up -- so it starts straight on exponential backoff
- * (base -> x2 -> cap) instead of the tight boot-window jitter, to keep the duty
- * budget and battery sane over a long outage. */
-#define P2P_REJOIN_FAIL_THRESHOLD  8 /* consecutive failed uplink cycles */
-/* Consecutive fully-failed cycles after which a PAIRED node reports
- * APP_RADIO_STATE_WARNING (the session is kept): the P2P counterpart of the
- * LoRaWAN link-check ladder's WARNING step, below the self-heal threshold. */
-#define P2P_WARNING_FAIL_THRESHOLD 3
-#define P2P_REJOIN_BACKOFF_BASE_MS 60000   /* first re-join round: 60 s */
-#define P2P_REJOIN_BACKOFF_MAX_MS  3600000 /* cap: 1 h */
+/* Link supervision (decision #22 §3.4), LoRaWAN's machine with the same two
+ * parameters. A failed link check is a CONFIRMED frame with no Ack (or 0x56)
+ * after its P2P_ACK_MAX_RETRIES retries; any authenticated downlink is a
+ * success. P2P_WARNING_FAIL_THRESHOLD failures in a row -> WARNING (the
+ * session is kept, every report goes confirmed, and each failed check steps
+ * the TX power up towards p2p-tx-power); radio-link-check-fail-rejoin further
+ * failures in WARNING -> a self-healing re-join on the configured SF. Unlike
+ * the never-paired boot join (§5.2), that re-join skips the 120 s fast phase
+ * and starts straight on exponential backoff (base -> x2 -> cap), to keep the
+ * duty budget and battery sane over a long outage. This replaces the former
+ * "8 failed cycles -> re-join" rule. */
+#define P2P_WARNING_FAIL_THRESHOLD   3
+#define P2P_WARNING_TX_POWER_STEP_DB 2
+#define P2P_REJOIN_BACKOFF_BASE_MS   60000   /* first re-join round: 60 s */
+#define P2P_REJOIN_BACKOFF_MAX_MS    3600000 /* cap: 1 h */
 
 /* RX1 window (§6, reused for JoinAccept per §5.3): opened this many ms
  * before the nominal rx1_delay deadline to absorb node-side timing error
@@ -312,6 +312,11 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  * §6's "retransmit ... up to 3 times". */
 #define P2P_ACK_MAX_RETRIES 3
 
+/* RX1 window size when no longer downlink is announced (decision #22 §3.3, O7
+ * interim): a 0x56 of up to this many bytes on the air may arrive in the RX1 of
+ * any uplink. Covers the fully-extended Ack (24 B) too. */
+#define P2P_RX1_CMD_INTERIM_LEN 64
+
 /* Retry backoff (decision #22 §3.2, Hynek 2026-09-27): retry n (1-based) waits
  * a random 1..2^n s on top of any remaining duty-cycle block, like LoRaWAN's
  * ACK_TIMEOUT (2 +/- 1 s). The fixed ~2.3 s rhythm it replaces (1 s gap + RX1 +
@@ -374,6 +379,15 @@ static size_t m_frame_len;
 static bool m_frame_more;
 static bool m_frame_pending;
 static int m_frame_retries;
+/* Decision #22 §3.2: whether the snapshot being sent goes CONFIRMED, fixed at
+ * its first frame, and the reports sent since link-up (picks the N-th). */
+static bool m_snapshot_open;
+static bool m_snapshot_confirmed;
+static uint32_t m_report_count;
+/* Link supervision (§3.4): the node is in WARNING (session kept) and the
+ * failed confirmed frames counted there towards radio-link-check-fail-rejoin. */
+static bool m_warning;
+static uint16_t m_warning_fails;
 /* A report waits for the TX queue (answers, alarms) to drain first -- the
  * P2P side of LoRaWAN's priority drain. m_work_q only. */
 static bool m_telemetry_after_tx;
@@ -457,7 +471,7 @@ static int64_t m_join_started_at; /* uptime ms; start of the current boot join w
  * 2^SF arithmetic in p2p_toa_ms()/rx1_preamble_catch_ms() can never run on a
  * zero SF if anything reads it before app_radio_p2p_init() gets past its settings
  * loads to the seeding line. */
-static uint8_t m_sf = SF_10;
+static uint8_t m_sf = SF_7;
 
 /* Self-healing re-join state (B3, §7). m_join_slow names the retry POLICY,
  * not what triggered it: the slow policy is exponential backoff with no
@@ -474,6 +488,7 @@ static uint8_t m_rejoin_attempt;      /* backoff step within a slow-policy episo
  * the per-episode seeding: the shell `join` command calls start_join_episode()
  * from its own thread, and every m_sf write has to happen on m_work_q. */
 static uint8_t m_join_sweep_step;  /* sweep step the next JoinRequest uses */
+static int64_t m_join_sweep_epoch; /* uptime ms since which no last-resort sweep ran */
 static uint8_t m_join_sf_attempts; /* SENT attempts already made at that step */
 static bool m_join_episode_fresh;  /* the handler has not opened this episode yet */
 
@@ -1521,7 +1536,19 @@ static void join_episode_begin(void)
 	m_join_episode_fresh = false;
 	m_join_sweep_step = 0;
 	m_join_sf_attempts = 0;
+	m_join_sweep_epoch = k_uptime_get();
 	join_set_sf(p2p_join_sweep_sf(sf_from_cfg(), 0));
+}
+
+/* Decision #22 §3.1: a join / rejoin stays on the configured SF -- one network
+ * default on both ends (7), moved only on purpose. The sweep over SF7..12 is a
+ * last resort: a node without a JoinAccept for P2P_JOIN_LAST_RESORT_MS makes
+ * one pass, then returns to the configured SF for another such period. It
+ * saves a truck roll after a network SF change or a mis-provisioned unit; it
+ * is not the normal join path. */
+static bool join_sweep_allowed(void)
+{
+	return k_uptime_get() - m_join_sweep_epoch >= P2P_JOIN_LAST_RESORT_MS;
 }
 
 /* Account for one JoinRequest that actually reached the air and, when the step
@@ -1542,12 +1569,18 @@ static bool join_sweep_advance(void)
 
 	m_join_sf_attempts = 0;
 
-	int next = p2p_join_sweep_sf(sf_from_cfg(), m_join_sweep_step + 1);
+	int next = (m_join_sweep_step == 0 && !join_sweep_allowed())
+			   ? -1
+			   : p2p_join_sweep_sf(sf_from_cfg(), m_join_sweep_step + 1);
 
 	if (next < 0) {
 		/* Pass exhausted: back to the configured SF, which is both step 0
 		 * of the next pass and the SF the data plane would use if a join
-		 * landed some other way. */
+		 * landed some other way. A last-resort sweep that ran restarts the
+		 * wait for the next one. */
+		if (m_join_sweep_step > 0) {
+			m_join_sweep_epoch = k_uptime_get();
+		}
 		m_join_sweep_step = 0;
 		join_set_sf(sf_from_cfg());
 		return true;
@@ -1601,6 +1634,8 @@ static void start_join_episode(bool slow)
 	m_join_slow = slow;
 	set_rejoin_attempt(0);
 	set_consec_fail(0);
+	m_warning = false;
+	m_warning_fails = 0;
 	m_link_state = P2P_LINK_JOINING;
 	m_join_started_at = k_uptime_get();
 	/* reschedule, not schedule: a slow-backoff retry may be pending for up to
@@ -1615,12 +1650,36 @@ static void start_join_episode(bool slow)
 static void note_uplink_acked(void)
 {
 	set_consec_fail(0);
+	if (m_warning) {
+		LOG_INF("P2P link check OK in WARNING: back to HEALTHY");
+	}
+	m_warning = false;
+	m_warning_fails = 0;
 }
 
-/* A confirmed-uplink cycle failed completely (all retries exhausted, no Ack).
- * After P2P_REJOIN_FAIL_THRESHOLD consecutive such failures an already-PAIRED
- * node self-heals by re-joining (B3, §7). Only fires while PAIRED, so once a
- * self-heal is under way further give-ups don't re-trigger it. */
+/* WARNING's action (§3.4): with a fixed SF the P2P counterpart of LoRaWAN's
+ * DR / TX ladder is the TX power -- a session the central assigned a lower
+ * power steps back up towards the node's own p2p-tx-power, per failed check.
+ * Runtime only; the next JoinAccept assigns afresh. */
+static void warning_tx_power_step(void)
+{
+	int8_t cap = (int8_t)g_app_config.p2p_tx_power;
+
+	if (!m_session_tx_power_assigned || m_session_tx_power_dbm >= cap) {
+		return; /* already at the node's own power */
+	}
+
+	int8_t from = m_session_tx_power_dbm;
+
+	m_session_tx_power_dbm = (int8_t)MIN(from + P2P_WARNING_TX_POWER_STEP_DB, cap);
+	(void)radio_configure(true);
+	publish_link();
+	LOG_WRN("P2P WARNING: TX power %d -> %d dBm", from, m_session_tx_power_dbm);
+}
+
+/* A link check failed: a confirmed frame got no Ack after all its retries.
+ * Only counts while PAIRED, so once a self-heal is under way further give-ups
+ * do not re-trigger it. */
 static void note_uplink_cycle_failed(void)
 {
 	app_radio_count(APP_RADIO_CNT_FAIL);
@@ -1628,7 +1687,19 @@ static void note_uplink_cycle_failed(void)
 		return; /* already re-joining (or never paired) */
 	}
 	set_consec_fail(m_consec_uplink_fail + 1);
-	if (m_consec_uplink_fail < P2P_REJOIN_FAIL_THRESHOLD) {
+	if (!m_warning) {
+		if (m_consec_uplink_fail >= P2P_WARNING_FAIL_THRESHOLD) {
+			m_warning = true;
+			m_warning_fails = 0;
+			LOG_WRN("P2P: %u failed link checks -- WARNING", m_consec_uplink_fail);
+			warning_tx_power_step();
+		}
+		return;
+	}
+	warning_tx_power_step();
+	if (++m_warning_fails < (uint16_t)MAX(g_app_config.radio_link_check_fail_rejoin, 1)) {
+		LOG_WRN("P2P link check failed in WARNING (%u/%d)", m_warning_fails,
+			g_app_config.radio_link_check_fail_rejoin);
 		return;
 	}
 	if (!app_key_is_set()) {
@@ -1643,8 +1714,8 @@ static void note_uplink_cycle_failed(void)
 		LOG_ERR("P2P self-heal refused: lrw_deveui is all-zero (unprovisioned)");
 		return;
 	}
-	LOG_WRN("P2P: %u consecutive failed uplinks -- self-healing re-join (§7)",
-		m_consec_uplink_fail);
+	LOG_WRN("P2P: %u failed link checks in WARNING -- self-healing re-join (§7)",
+		m_warning_fails);
 	start_join_episode(true);
 }
 
@@ -2067,8 +2138,13 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	 * the pre-D2 behaviour. */
 	uint8_t want_max;
 
+	/* Decision #22 §3.3 (O7 interim): the central may put a queued 0x56 of up
+	 * to P2P_RX1_CMD_INTERIM_LEN into the RX1 of ANY uplink, confirmed or not,
+	 * without announcing it first, so every window is sized for that; only a
+	 * longer command is still announced (pending bit + length) and sizes the
+	 * next window exactly. */
 	if (!m_downlink_pending) {
-		want_max = (uint8_t)(P2P_HDR_LEN + P2P_ACK_BODY_MAX_LEN + P2P_TAG_LEN);
+		want_max = P2P_RX1_CMD_INTERIM_LEN;
 	} else if (m_pending_frame_len != 0) {
 		want_max = m_pending_frame_len;
 	} else {
@@ -2378,27 +2454,36 @@ static void ack_retry_work_handler(struct k_work *work)
  * waiting for the eventual outcome. Returns -EAGAIN only if the FIRST send
  * itself was duty-cycle blocked (unchanged pre-existing semantics, same as
  * tx_frame()), or a hard errno from that first send. */
-static int send_confirmed(uint8_t frame_type, const uint8_t *body, size_t body_len)
+static int send_uplink(uint8_t frame_type, const uint8_t *body, size_t body_len, bool confirmed)
 {
 	uint32_t counter;
 	int64_t tx_end;
 
-	int ret = tx_frame(frame_type, P2P_FCTRL_CONFIRMED, body, body_len, &counter, &tx_end);
+	int ret = tx_frame(frame_type, confirmed ? P2P_FCTRL_CONFIRMED : 0, body, body_len,
+			   &counter, &tx_end);
 
 	if (ret) {
 		return ret;
 	}
 
-	bool acked = recv_ack(counter, tx_end);
+	/* The RX1 opens after every uplink: an unconfirmed one gets no Ack, but a
+	 * queued 0x56 (or a Detach / RejoinRequest) may still arrive in it. */
+	bool heard = recv_ack(counter, tx_end);
 
 	m_link_idle_at = k_uptime_get() + P2P_TX_GAP_MS;
-	if (acked) {
-		note_uplink_acked();
-	} else {
+	if (heard) {
+		note_uplink_acked(); /* any authenticated downlink is a link success */
+	} else if (confirmed) {
 		schedule_ack_retry(frame_type, body, body_len, counter, 0);
 	}
+	/* An unconfirmed frame is sent once (decision #22 §3.2, NbTrans 1). */
 
 	return 0;
+}
+
+static int send_confirmed(uint8_t frame_type, const uint8_t *body, size_t body_len)
+{
+	return send_uplink(frame_type, body, body_len, true);
 }
 
 static void send_work_handler(struct k_work *work)
@@ -2434,6 +2519,25 @@ static void send_work_handler(struct k_work *work)
  * app_compose_reset(), so the next report starts a fresh one instead of
  * continuing a stale one. Without a session it is abandoned at once: the next
  * JoinAccept kicks a fresh report. m_work_q only. */
+/* Decision #22 §3.2: telemetry is unconfirmed and sent once, except the N-th
+ * report since link-up (N = radio-link-check-interval), which is CONFIRMED and
+ * so the P2P link check -- the first report after a link-up included, as on
+ * LoRaWAN. While WARNING every report is confirmed (LoRaWAN #424); N = 0 turns
+ * the periodic check off (alarms and answers stay confirmed and judge the
+ * link on their own). Decided once per snapshot, kept for all its frames. */
+static bool telemetry_report_confirmed(void)
+{
+	int n = g_app_config.radio_link_check_interval;
+
+	if (m_warning) {
+		return true;
+	}
+	if (n <= 0) {
+		return false;
+	}
+	return (m_report_count % (uint32_t)n) == 0U;
+}
+
 static void telemetry_send(void)
 {
 	/* Queued answers and alarms leave first, as over LoRaWAN: after a link-up
@@ -2461,11 +2565,16 @@ static void telemetry_send(void)
 			if (m_frame_len == 0) {
 				return; /* nothing to report */
 			}
+			if (!m_snapshot_open) {
+				m_snapshot_open = true;
+				m_snapshot_confirmed = telemetry_report_confirmed();
+			}
 			m_frame_pending = true;
 			m_frame_retries = 0;
 		}
 
-		int ret = send_confirmed(APP_RADIO_P2P_FRAME_TELEMETRY, m_frame_buf, m_frame_len);
+		int ret = send_uplink(APP_RADIO_P2P_FRAME_TELEMETRY, m_frame_buf, m_frame_len,
+				      m_snapshot_confirmed);
 
 		if (ret == -EBUSY) {
 			return; /* kicked when the in-flight uplink is done */
@@ -2474,6 +2583,8 @@ static void telemetry_send(void)
 			m_frame_pending = false;
 			m_last_uplink_ms = k_uptime_get(); /* M-2: telemetry went out */
 			if (!m_frame_more) {
+				m_snapshot_open = false;
+				m_report_count++;
 				return;
 			}
 			continue;
@@ -2482,6 +2593,7 @@ static void telemetry_send(void)
 			LOG_WRN("Telemetry frame abandoned (%d, %d retries); snapshot reset", ret,
 				m_frame_retries - 1);
 			m_frame_pending = false;
+			m_snapshot_open = false;
 			app_compose_reset();
 			return;
 		}
@@ -2706,6 +2818,11 @@ static void mark_ready(void)
 	m_join_slow = false;
 	set_rejoin_attempt(0);
 	set_consec_fail(0);
+	m_warning = false;
+	m_warning_fails = 0;
+	/* The first report of the session is the link check (§3.2). */
+	m_report_count = 0;
+	m_snapshot_open = false;
 
 	/* Fresh session: last Ack's link quality and any pending-downlink hint
 	 * from the old session no longer apply. */
@@ -3339,6 +3456,7 @@ static void test_queue_start_once(void)
 	k_work_init_delayable(&m_tx_work, tx_work_handler);
 	k_work_init_delayable(&m_frame_work, frame_work_handler);
 	k_work_init_delayable(&m_announce_work, announce_work_handler);
+	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
 	started = true;
 }
 
@@ -3385,7 +3503,49 @@ void p2p_test_join_setup(int cfg_sf)
 	m_join_episode_fresh = false;
 	m_join_sweep_step = 0;
 	m_join_sf_attempts = 0;
+	m_join_sweep_epoch = k_uptime_get();
 	join_set_sf(p2p_join_sweep_sf(cfg_sf, 0));
+}
+
+/* Link supervision hooks (decision #22 §3.4). */
+void p2p_test_link_reset(void)
+{
+	m_warning = false;
+	m_warning_fails = 0;
+	m_report_count = 0;
+	m_snapshot_open = false;
+	set_consec_fail(0);
+}
+
+void p2p_test_link_check_failed(void)
+{
+	note_uplink_cycle_failed();
+}
+
+void p2p_test_link_ok(void)
+{
+	note_uplink_acked();
+}
+
+/* Stop a join episode a case started, waiting out an attempt in progress. */
+void p2p_test_join_stop(void)
+{
+	struct k_work_sync sync;
+
+	m_link_state = P2P_LINK_UNPAIRED;
+	(void)k_work_cancel_delayable_sync(&m_join_work, &sync);
+}
+
+void p2p_test_set_session_tx_power(bool assigned, int8_t dbm)
+{
+	m_session_tx_power_assigned = assigned;
+	m_session_tx_power_dbm = dbm;
+}
+
+/* Put the last-resort sweep in reach (a day without a JoinAccept). */
+void p2p_test_allow_join_sweep(void)
+{
+	m_join_sweep_epoch = k_uptime_get() - P2P_JOIN_LAST_RESORT_MS;
 }
 
 /* Run exactly one join_work_handler iteration on the caller's thread and cancel
@@ -3407,6 +3567,8 @@ void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, uint1
 	m_started = started;
 	m_join_slow = slow;
 	set_consec_fail(fails);
+	m_warning = fails >= P2P_WARNING_FAIL_THRESHOLD;
+	m_warning_fails = 0;
 	m_disabled = disabled;
 }
 
@@ -3444,6 +3606,7 @@ uint32_t p2p_test_tx_waiting(void)
 void p2p_test_tx_reset(void)
 {
 	k_work_cancel_delayable(&m_frame_work);
+	k_work_cancel_delayable(&m_ack_retry_work);
 	m_frame_pending = false;
 	m_telemetry_after_tx = false;
 	m_tx_deferred_valid = false;
@@ -3705,8 +3868,7 @@ enum app_radio_state app_radio_p2p_get_state(void)
 		if (!m_started) {
 			return APP_RADIO_STATE_IDLE;
 		}
-		return m_consec_uplink_fail >= P2P_WARNING_FAIL_THRESHOLD ? APP_RADIO_STATE_WARNING
-									  : APP_RADIO_STATE_HEALTHY;
+		return m_warning ? APP_RADIO_STATE_WARNING : APP_RADIO_STATE_HEALTHY;
 	case P2P_LINK_JOINING:
 		/* The slow policy runs for a self-heal / RejoinRequest episode and
 		 * after an unanswered boot window: a reconnect with backoff. */

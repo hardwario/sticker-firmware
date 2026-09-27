@@ -955,11 +955,11 @@ parameters:
     writable: [shell]
     proto_id: 2
     type: int
-    default: 10
+    default: 7  # decision #22 §3.1: one network default on Node and Hub; no sweep on join
     min: 6
     max: 12
     persistent: [device_reset]
-    help: "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate)."
+    help: "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate). Must match the Hub; a join stays on it (a last-resort sweep after 24 h without a JoinAccept)."
 
   - name: p2p_tx_power
     proto_group: p2p

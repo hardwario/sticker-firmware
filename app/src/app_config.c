@@ -50,7 +50,7 @@ static const struct app_config m_app_config_defaults = {
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 868100000,
-	.p2p_spreading_factor = 10,
+	.p2p_spreading_factor = 7,
 	.p2p_tx_power = 14,
 };
 
@@ -85,7 +85,7 @@ static struct app_config m_app_config = {
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 868100000,
-	.p2p_spreading_factor = 10,
+	.p2p_spreading_factor = 7,
 	.p2p_tx_power = 14,
 };
 
@@ -2019,7 +2019,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_p2p_frequency, 1, 1),
 
 	SHELL_CMD_ARG(p2p-spreading-factor, NULL,
-	              "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate).",
+	              "Get/Set P2P spreading factor (6-12; higher = longer range, lower rate). Must match the Hub; a join stays on it (a last-resort sweep after 24 h without a JoinAccept).",
 	              cmd_p2p_spreading_factor, 1, 1),
 
 	SHELL_CMD_ARG(p2p-tx-power, NULL,
