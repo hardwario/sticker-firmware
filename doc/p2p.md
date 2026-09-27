@@ -90,7 +90,9 @@ config radio-mode p2p        # off / lorawan / p2p
 settings save                # persists + reboots
 ```
 
-The three radio parameters are configured the same way, and are
+The three radio parameters are configured the same way, are **readable** over
+every transport (GetConfig / GetParam group `p2p` = ConfigDump field 8, like
+`lrw_region` / `lrw_adr` / `lrw_datarate`, #449), and are
 **`writable: [shell]` only — deliberately, not by omission**:
 
 ```
@@ -699,7 +701,9 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   whichever radio runs (`app_radio_rejoin()`, #448): on P2P a fresh join
   handshake without a reboot, exactly like the shell `join`; the new session
   announces itself (below). `lrw_reset` is honoured where the LoRaWAN stack is
-  compiled in and logged-and-ignored where it is not.
+  compiled in and logged-and-ignored where it is not. Since #449 `lrw_reset`
+  forgets the session on every stack (`app_radio_reset_link()`: the LoRaWAN
+  NVM *and* the P2P pairing) and reboots, so a P2P node joins afresh.
 - **Commands on P2P (#448):** `force_send`, `sample`, `buzzer_play` and
   `clock_sync` are allowed over P2P like over LoRaWAN; the handlers were
   already radio-agnostic (`app_report` sends through `app_radio`). An empty
@@ -730,6 +734,24 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   `set_param` with an unchanged value is a no-op, and the deferred actions
   above run only after the response was acknowledged, so a redelivered
   command cannot reboot a node whose answer was already in flight.
+- **Frame order and pacing (F-P1-1, #449):** the central keeps a strict
+  counter high-water (like a LoRaWAN NS), so frames must leave in counter
+  order. A back-to-back frame sent right after an Ack went unheard (the
+  Northbridge needs ~90 ms to re-arm RX after its TX, NB-3), and its
+  asynchronous Ack retry then came *after* the next fresh frame and was
+  rejected as a replay (night test 2026-09-26: the boot settings-info on every
+  reboot, a command ack after a rejoin). Two rules keep the order:
+  **one confirmed uplink in flight** — a fresh-counter frame waits (`-EBUSY`,
+  not a failure) while an Ack retry is pending and is kicked when it is done,
+  as LoRaWAN retransmissions finish before the next uplink — and
+  **`P2P_TX_GAP_MS` (1 s)** between an Ack window and the next TX.
+- **Queues and retries (#449):** responses and alarms queued while the node is
+  not paired (joining, self-heal) stay queued and leave on the next link-up
+  (they used to be dropped with `-ENOTCONN`). A telemetry frame the radio
+  refuses is kept and re-sent as-is (every 15 s or once the duty ledger clears,
+  8 times at most), then the snapshot is reset (`app_compose_reset()`) — the
+  LoRaWAN #219 / #340 M6 policy. The fleet pre-send jitter (#267,
+  min(interval_report / 10, 10 s)) is taken in `app_radio` for both radios.
 - **Dedup across gateways**: every gateway that hears a frame forwards it;
   the central keys dedup on `(dev_addr, counter)` and records per-gateway
   RSSI/SNR (which also feeds ACK routing).
@@ -771,7 +793,8 @@ isn't):
 | Trigger | Behavior |
 |---|---|
 | `lrw_appkey` change (`set_param`/`config`, e.g. re-provisioning) | `session_key` on the *next* join changes; an already-`PAIRED` session is unaffected until something else forces a re-join (unlike `secret_key` rotation on the NFC channel, which forces a reboot, #322 — changing `app_key` does not by itself). The central must have the new `app_key` registered before the node's next JoinRequest will authenticate. |
-| `factory_reset` | **A P2P node stops being a P2P node.** `radio_mode` is `persistent: [device_reset]` only and is absent from `app_config_factory_reset()`'s preserve list, so it reverts to its `OFF` default (#350): `app_radio_init()` brings no radio up and `app_radio_p2p_start()` is never called at all. Two leftovers survive and matter later. (a) **The P2P pairing is NOT cleared** (doc/code mismatch found 2026-08-24: the `p2pjoin/*` subtree is registered entirely inside `app_radio_p2p.c` and `app_settings_factory_reset()` never references it) — inert while `radio_mode` is not `p2p`, but `join_settings_set()` still restores it straight to `PAIRED` the moment someone sets `radio_mode p2p` again. (b) **`app_key` (`lrw_appkey`) IS wiped** — also `persistent: [device_reset]` only and also absent from that preserve list, unlike `secret_key`, which the earlier `join_key`-rooted design could always fall back on. So re-enabling P2P after a `factory_reset` without re-provisioning `lrw_appkey` would otherwise resume a pairing the operator explicitly reset, under a root key that is now all-zero and therefore public; §4's zero-`app_key` guard refuses to start in exactly that state, which is why it is checked *before* `app_radio_p2p_start()`'s already-`PAIRED` shortcut. The old design's self-healing property — the device could always re-derive its way back on its own — is gone regardless. Bench levers: the top-level `join` (v1.5.0) forces a fresh join live, no reboot needed (the same command on both radio stacks -- `app_radio_rejoin()` dispatches it); `ats radio unjoin` (v1.5.0; clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears the pairing. |
+| `factory_reset` | **A P2P node stops being a P2P node.** `radio_mode` is `persistent: [device_reset]` only and is absent from `app_config_factory_reset()`'s preserve list, so it reverts to its `OFF` default (#350): `app_radio_init()` brings no radio up and `app_radio_p2p_start()` is never called at all. (a) **The P2P pairing is cleared** since #449: every reset tier that resets the keys (`factory_reset`, `vendor_reset`, and `lrw_reset`) calls `app_radio_reset_link()`, which wipes the LoRaWAN NVM and the `p2pjoin/state` pairing (the `dev_nonce` anti-replay counter and the frame counter are kept). Before #449 the pairing survived (doc/code mismatch found 2026-08-24) and `join_settings_set()` restored it straight to `PAIRED` the moment someone set `radio_mode p2p` again. (b) **`app_key` (`lrw_appkey`) IS wiped** — also `persistent: [device_reset]` only and also absent from that preserve list, unlike `secret_key`, which the earlier `join_key`-rooted design could always fall back on. So re-enabling P2P after a `factory_reset` without re-provisioning `lrw_appkey` would otherwise resume a pairing the operator explicitly reset, under a root key that is now all-zero and therefore public; §4's zero-`app_key` guard refuses to start in exactly that state, which is why it is checked *before* `app_radio_p2p_start()`'s already-`PAIRED` shortcut. The old design's self-healing property — the device could always re-derive its way back on its own — is gone regardless. Bench levers: the top-level `join` (v1.5.0) forces a fresh join live, no reboot needed (the same command on both radio stacks -- `app_radio_rejoin()` dispatches it); `ats radio unjoin` (v1.5.0; clears `p2pjoin/state`, leaves the `dev_nonce` anti-replay counter untouched, reboot required) simulates a cold, never-paired boot. Otherwise only a whole-NVS `settings erase` clears the pairing. |
+| Mute station (TX path wedged, telemetry perpetually skipped) | **M-2 on P2P too (#449):** paired but no telemetry uplink for 4 × `interval_report` → a self-heal re-join, unless the duty ledger has been holding sends (then it waits, up to 75 min). The policy (`app_radio_stale_check()`) is shared with LoRaWAN's M-2 (F29). Runs from the watchdog heartbeat, so builds without `CONFIG_WATCHDOG` (the debug bench) have no M-2 on either radio. |
 | Central DB loss/restore | Node's uplinks stop being ACKed (or ACK under an unknown session fails authentication). Self-healing: after **N consecutive fully-failed uplink cycles** (default 8) the node starts re-join attempts with exponential backoff. Known devices' re-joins are accepted outside the pairing window. **Implemented (B3, PR #408, v1.5.0):** `P2P_REJOIN_FAIL_THRESHOLD = 8`; a fully-failed cycle = all `P2P_ACK_MAX_RETRIES` exhausted with no Ack; any Ack resets the streak. The re-join runs the slow policy from the start (§5.2) and sweeps the SF like any join episode (§5.3); it backs off `60 s → ×2 → 3600 s` cap, ±25 % jitter. Same `app_key`-set guard as the boot join. |
 | Explicit `Detach` / `RejoinRequest` downlink | Authenticated; immediate. **Implemented (v1.5.0)** — see §5.4 for both. `Detach` clears the pairing and leaves the node silent with no automatic re-join; `RejoinRequest` is the network-initiated rekey lever (counter hygiene, key rotation policy) and starts a self-heal-policy join episode. Before v1.5.0 the node parsed neither, so a `node-remove` left it retrying into a session the central had dropped until the self-heal threshold turned it into a rejoin loop against an unregistered device. |
 | Firmware upgrade that changes the pairing record | `join_settings_set()` accepts only a `p2pjoin/state` record of exactly the current length, so any release that changes the layout invalidates the stored pairing: the node boots `UNPAIRED` and re-joins once, automatically. v1.5.0 does this (the `reserved(4)` TX-power byte, §5.3). Deliberate, and cheap pre-deployment — the re-join is what populates the new field. Note it costs one `dev_nonce` and resets `fcnt` to 0 under a freshly derived `session_key`, both of which the central already tolerates. |

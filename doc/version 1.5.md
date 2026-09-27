@@ -32,6 +32,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN | **Fix** — the M-2 stale-uplink watchdog no longer forces a rejoin while the duty cycle is refusing sends (F29): a rejoin reset the band credits and let the device exceed the 1 % limit. See §22. |
 | Radio: P2P | **New** — LoRaWAN ↔ P2P parity, part 1 (#448): the boot / join `Info` + settings-info announce is one `app_radio` path for both radios (P2P announced nothing before); `force_send` / `sample` / `buzzer_play` / `clock_sync` work over P2P; `lrw_join` re-joins P2P without a reboot; every P2P command gets a `0x55` answer. See §23. |
 | LoRaWAN / P2P / NFC | **New** — `get_radio_state` (#446): one `RadioState` for both radios — link state, radio parameters, both link directions, session, failure streak, duty cycle, counters since boot — on request only, paged like every answer. Info no longer carries `lrw_state` / `last_dl_*`. See §24. |
+| Radio: P2P | **Fix / New** — LoRaWAN ↔ P2P parity, part 2 (#449): frames leave in counter order (F-P1-1: one confirmed uplink in flight + 1 s gap), queues survive an unpaired phase, refused telemetry is retried then reset, the fleet jitter and the M-2 watchdog policy are shared, reset tiers clear the P2P pairing, `BUDGET_TOO_SMALL` over P2P, `p2p-*` readable via GetConfig/GetParam. See §25. |
 
 ---
 
@@ -1303,6 +1304,40 @@ page }`), answered with **`Response.radio_state` = field 14**, on every transpor
 
 Breaking for Manager-App: read the link state with `get_radio_state` instead of
 Info fields 12 / 16–18 (older app builds simply see those fields absent).
+
+
+## 25. LoRaWAN ↔ P2P parity, part 2 (#449)
+
+The rest of the parity list (doc/plan/439 T2–T5 subset), all through
+`app_radio`:
+
+- **Frames in counter order (F-P1-1).** The P2P central keeps a strict counter
+  high-water. A frame sent right after an Ack went unheard (Northbridge RX
+  re-arm ~90 ms, NB-3), and its asynchronous Ack retry then came after the
+  next fresh frame and was rejected as a replay — on every reboot the
+  settings-info was lost, and after a rejoin a command answer, so the Hub
+  re-delivered a config. Now **one confirmed uplink is in flight** (a fresh
+  frame waits while an Ack retry is pending, not counted as a failure) and
+  **1 s separates an Ack window from the next TX** (`P2P_TX_GAP_MS`).
+- **Queue while unpaired.** Responses / alarms queued while joining or
+  self-healing stay queued and leave on the next link-up (were dropped).
+- **Refused telemetry** is re-sent as-is, 8× at most (15 s, or once the duty
+  ledger clears), then `app_compose_reset()` — LoRaWAN #219 / #340 M6.
+- **Fleet pre-send jitter (#267)** is one `app_radio` policy for both radios
+  (P2P had none); force_send / sample still skip it (F14).
+- **M-2 stale-uplink watchdog on P2P**, sharing LoRaWAN's policy (F29 duty
+  hold) through `app_radio_stale_check()`.
+- **Reset tiers:** factory_reset / vendor_reset / lrw_reset call
+  `app_radio_reset_link()` — LoRaWAN NVM *and* P2P pairing (the P2P dev_nonce
+  and frame counter are kept).
+- **`BUDGET_TOO_SMALL` over P2P** for an answer that does not fit, as over
+  LoRaWAN (was `UNKNOWN "response too large"`).
+- **`p2p-frequency` / `p2p-spreading-factor` / `p2p-tx-power` readable** via
+  GetConfig / GetParam on every transport (ConfigDump field 8, GetParam
+  `p2p_field` 6); still `writable: [shell]` only (doc/p2p.md §2).
+
+Hardware (0413, 2026-09-27): boot announce Info / settings-info / telemetry and a
+live `join` announce each acked on the first try, ~1.1 s apart; no replay.
 
 ---
 
