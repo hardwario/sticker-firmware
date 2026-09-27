@@ -417,13 +417,206 @@ void app_radio_set_duty_held(bool held)
 	k_spin_unlock(&m_st_lock, key);
 }
 
-void app_radio_set_airtime(uint32_t ms)
-{
-	k_spinlock_key_t key = k_spin_lock(&m_st_lock);
+/* ---- Duty-cycle ledger (doc/plan/460 §2.7, T2d) ------------------------------
+ *
+ * EU868 duty cycle, enforced app-side with an exact sliding-hour ledger (B2,
+ * decision D1; common to both radios since T2d). Raw LoRa (P2P) has no duty
+ * enforcement of its own. LoRaMac has one, but its credits come back only when
+ * a fixed hour since the band's last refill has run out, so the MAC used to
+ * refuse frames that app_radio then retried blindly every 15 s.
+ *
+ * Two models preceded it on P2P. The first blocked the radio for air*99 ms
+ * after EVERY frame, so an alarm queued behind a long telemetry frame waited
+ * minutes. The second (PR #408) was a token bucket refilling at 1% of wall
+ * time and capped at the full hourly allowance: that fixed the latency and
+ * held the long-run average at 1%, but a node idle for an hour could then
+ * burst the whole 36 s of air at once, which means a worst-case SLIDING hour
+ * of ~2%. Amortised compliance, not compliance.
+ *
+ * The ledger records (end time, air-time) per transmission and admits a frame
+ * only if the air already inside the trailing hour plus this frame fits the
+ * allowance -- so every sliding hour sums to <= the limit, with no burst hole
+ * to argue about in a certification review. A frame goes the moment there is
+ * room, rather than serving a fixed post-frame penalty.
+ *
+ * LoRaWAN: the MAC's fixed hour started at most an hour ago, so the air it
+ * counts in it is never more than the trailing hour of the ledger. With the
+ * same air per frame (app_radio_lora_toa_ms() is the MAC's formula) and the
+ * JoinRequests charged too, a frame the ledger admits the MAC admits as well:
+ * the ledger is the conservative one of the two, and its wait is exact. It
+ * sums all bands into one 1 % allowance; the MAC counts 1 % per band. Two
+ * edges remain, both caught by the MAC's own check (-ECONNREFUSED, duty hold):
+ * an ADR step inside a send is charged at the DR before it, and the MAC wants
+ * its credits strictly above the cost where the ledger admits an exact fit.
+ *
+ * An empty ledger at boot: never blocked, as the full token bucket was not. A
+ * reboot therefore forgets the hour just transmitted. That hole is accepted:
+ * the ledger is RAM-only, and persisting it would cost an NVS write per frame.
+ * doc/p2p.md §6 records it. Cost: 392 B of RAM.
+ */
+#if defined(CONFIG_ZTEST)
+#define DUTY_TESTABLE
+#else
+#define DUTY_TESTABLE static
+#endif
 
-	m_st.has_airtime = true;
-	m_st.airtime_hour_ms = ms;
-	k_spin_unlock(&m_st_lock, key);
+static struct app_radio_duty m_duty;
+static struct k_spinlock m_duty_lock; /* the radio work queue writes, readers take status */
+static bool m_duty_on;                /* a backend set the ledger up */
+
+/* Index of the i-th oldest entry. */
+static inline uint8_t duty_slot(const struct app_radio_duty *d, uint8_t i)
+{
+	return (uint8_t)((d->head + i) % APP_RADIO_DUTY_LEDGER_ENTRIES);
+}
+
+/* Drop every entry that has fallen out of the trailing window.
+ *
+ * `now` and `end_ms` are uptime truncated to 32 bits and compared as an
+ * unsigned difference, which stays correct across the ~49.7-day wrap: an
+ * entry only ever lives APP_RADIO_DUTY_WINDOW_MS, four orders of magnitude
+ * short of the wrap distance, so `now - end_ms` can never alias. */
+static void duty_expire(struct app_radio_duty *d, uint32_t now)
+{
+	while (d->count > 0 && (now - d->entries[d->head].end_ms) >= APP_RADIO_DUTY_WINDOW_MS) {
+		d->head = duty_slot(d, 1);
+		d->count--;
+	}
+}
+
+/* Make room for one more entry by folding the two oldest into one: the
+ * younger keeps its end time and takes the older's air, so the pair leaves the
+ * window when the younger would have. Only ever over-counts air (the older
+ * half is held a little longer), so the bound holds (F-P2P-1). */
+static void duty_fold_oldest(struct app_radio_duty *d)
+{
+	struct app_radio_duty_entry *oldest = &d->entries[d->head];
+	struct app_radio_duty_entry *next = &d->entries[duty_slot(d, 1)];
+
+	next->air_ms += oldest->air_ms;
+	d->head = duty_slot(d, 1);
+	d->count--;
+}
+
+/* Air recorded inside the window that ends at `now_ms`. Reads only, so a
+ * status reader needs no expiry first. */
+DUTY_TESTABLE uint32_t app_radio_ledger_used_ms(const struct app_radio_duty *d, int64_t now_ms)
+{
+	uint32_t now = (uint32_t)now_ms;
+	uint32_t used = 0;
+
+	for (uint8_t i = 0; i < d->count; i++) {
+		const struct app_radio_duty_entry *e = &d->entries[duty_slot(d, i)];
+
+		if (now - e->end_ms < APP_RADIO_DUTY_WINDOW_MS) {
+			used += e->air_ms;
+		}
+	}
+	return used;
+}
+
+DUTY_TESTABLE void app_radio_ledger_init(struct app_radio_duty *d, uint32_t budget_ms)
+{
+	d->budget_ms = budget_ms;
+	d->head = 0;
+	d->count = 0;
+}
+
+/* Record `air_ms` of air that finished at `now_ms`. */
+DUTY_TESTABLE void app_radio_ledger_charge(struct app_radio_duty *d, int64_t now_ms,
+					   uint32_t air_ms)
+{
+	uint32_t now = (uint32_t)now_ms;
+
+	duty_expire(d, now);
+	if (d->count >= APP_RADIO_DUTY_LEDGER_ENTRIES) {
+		/* app_radio_ledger_wait_ms() already folds before admitting, so
+		 * the real call paths never get here with a full ring; fold anyway
+		 * rather than drop a charge, the one outcome that could breach the
+		 * limit. */
+		duty_fold_oldest(d);
+	}
+	d->entries[duty_slot(d, d->count)] = (struct app_radio_duty_entry){
+		.end_ms = now,
+		.air_ms = air_ms,
+	};
+	d->count++;
+}
+
+/* How many ms to wait before `air_ms` of air may be transmitted -- 0 if now.
+ *
+ * The guarantee is exact rather than amortised: a frame is admitted only when
+ * the air already recorded in the trailing hour plus this frame fits inside
+ * the budget, so EVERY sliding one-hour window stays within it. When blocked,
+ * the answer is the time until enough of the oldest entries have left the
+ * window for the frame to fit, so one wait is always enough. */
+DUTY_TESTABLE int64_t app_radio_ledger_wait_ms(struct app_radio_duty *d, int64_t now_ms,
+					       uint32_t air_ms)
+{
+	uint32_t now = (uint32_t)now_ms;
+
+	duty_expire(d, now);
+
+	/* F-P2P-1: a full ring folds its two oldest entries rather than making
+	 * the frame wait for a slot, so only the air-time budget can refuse it. */
+	if (d->count >= APP_RADIO_DUTY_LEDGER_ENTRIES) {
+		duty_fold_oldest(d);
+	}
+
+	uint32_t used = app_radio_ledger_used_ms(d, now_ms);
+
+	if (d->budget_ms == 0 || used + air_ms <= d->budget_ms || d->count == 0) {
+		/* No limit, room now -- or an empty ledger: only a frame whose own
+		 * air exceeds the whole allowance gets here, and refusing it for
+		 * ever would be worse than sending it. */
+		return 0;
+	}
+
+	uint32_t over = used + air_ms - d->budget_ms;
+	uint32_t freed = 0;
+	uint8_t i = 0;
+
+	/* The oldest entries until they free `over`, or all of them (the frame
+	 * alone is over the allowance: it goes once the ledger is empty).
+	 * duty_expire() keeps every entry inside the window, so the wait is in
+	 * (0, APP_RADIO_DUTY_WINDOW_MS]. */
+	for (; i < d->count - 1; i++) {
+		freed += d->entries[duty_slot(d, i)].air_ms;
+		if (freed >= over) {
+			break;
+		}
+	}
+	return (int64_t)(APP_RADIO_DUTY_WINDOW_MS - (now - d->entries[duty_slot(d, i)].end_ms));
+}
+
+void app_radio_duty_init(uint32_t budget_ms)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_duty_lock);
+
+	app_radio_ledger_init(&m_duty, budget_ms);
+	m_duty_on = true;
+	k_spin_unlock(&m_duty_lock, key);
+}
+
+int64_t app_radio_duty_wait_ms(uint32_t air_ms)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_duty_lock);
+	int64_t wait = app_radio_ledger_wait_ms(&m_duty, k_uptime_get(), air_ms);
+
+	k_spin_unlock(&m_duty_lock, key);
+	if (wait > 0) {
+		app_radio_set_duty_held(true);
+	}
+	return wait;
+}
+
+void app_radio_duty_charge(uint32_t air_ms)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_duty_lock);
+
+	app_radio_ledger_charge(&m_duty, k_uptime_get(), air_ms);
+	k_spin_unlock(&m_duty_lock, key);
+	app_radio_set_duty_held(false);
 }
 
 void app_radio_get_status(struct app_radio_status *st)
@@ -439,6 +632,11 @@ void app_radio_get_status(struct app_radio_status *st)
 		st->duty_blocked_s = MAX(1U, (uint32_t)((now - m_duty_since_ms) / 1000));
 	}
 	k_spin_unlock(&m_st_lock, key);
+
+	key = k_spin_lock(&m_duty_lock);
+	st->has_airtime = m_duty_on;
+	st->airtime_hour_ms = m_duty_on ? app_radio_ledger_used_ms(&m_duty, k_uptime_get()) : 0;
+	k_spin_unlock(&m_duty_lock, key);
 
 	st->state = app_radio_get_state();
 	st->uptime_s = (uint32_t)(now / 1000);
@@ -570,7 +768,10 @@ static void tx_request_telemetry(void)
  * keeps a strict counter high-water), LoRaWAN under a new FCnt. Given up, it
  * is a failed link check, and the frame counts as sent: it went out. A new
  * session starts it afresh. Radio work queue only. */
-#define TX_ACK_RETRY 1 /* tx_send(): no Ack; sent again after res->wait_ms */
+#define TX_ACK_RETRY      1 /* tx_send(): no Ack; sent again after res->wait_ms */
+/* On top of a duty-cycle wait: a frame woken a few ms early would be held
+ * again at once (#118). */
+#define TX_DUTY_MARGIN_MS 50
 
 static bool m_ack_pending;    /* a confirmed frame waits for its retry */
 static uint8_t m_ack_kind;    /* ... of this kind: the path holding it */
@@ -624,7 +825,19 @@ static int tx_send(struct app_radio_frame *f, struct app_radio_tx_result *res)
 	}
 	f->attempt = m_ack_retries;
 
-	int ret = m_be->send(f, res);
+	/* doc/plan/460 §2.7 (T2d): the frame waits for the duty ledger, exactly
+	 * as long as it takes to fit, on either radio. */
+	int64_t hold = app_radio_duty_wait_ms(m_be->airtime_ms(f->len));
+	int ret;
+
+	if (hold > 0) {
+		LOG_WRN("TX duty-cycle blocked for %lld ms", hold);
+		app_radio_note_send(false, true);
+		res->wait_ms = (uint32_t)hold + TX_DUTY_MARGIN_MS;
+		ret = -EAGAIN;
+	} else {
+		ret = m_be->send(f, res);
+	}
 
 	if (retry && (ret == 0 || ret == -ETIMEDOUT)) {
 		app_radio_count(APP_RADIO_CNT_RETRY);
@@ -1552,6 +1765,7 @@ void app_radio_test_tx_reset(void)
 	m_hist_active = false;
 	m_ack_pending = false;
 	m_ready_cb = NULL;
+	app_radio_duty_init(0); /* no limit unless a test sets one */
 }
 
 void app_radio_test_link_reset(void)
@@ -1566,6 +1780,14 @@ void app_radio_test_link_reset(void)
 void app_radio_test_stale_tick(int64_t now_ms)
 {
 	stale_tick(now_ms);
+}
+
+void app_radio_test_duty_charge_at(int64_t end_ms, uint32_t air_ms)
+{
+	k_spinlock_key_t key = k_spin_lock(&m_duty_lock);
+
+	app_radio_ledger_charge(&m_duty, end_ms, air_ms);
+	k_spin_unlock(&m_duty_lock, key);
 }
 #endif
 

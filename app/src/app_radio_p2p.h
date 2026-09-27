@@ -76,7 +76,7 @@ struct p2p_hdr {
  *
  * The window is a deadline, not a hint: the retry wait is capped against it
  * (p2p_join_retry_delay_ms), because the duty-cycle wait it competes with can
- * be as long as P2P_DUTY_WINDOW_MS. */
+ * be as long as APP_RADIO_DUTY_WINDOW_MS. */
 #define P2P_JOIN_BOOT_WINDOW_MS  (120 * 1000)
 #define P2P_JOIN_RETRY_JITTER_MS 2000
 
@@ -85,21 +85,6 @@ struct p2p_hdr {
  * likely answer, so it is worth a second shot at a lost frame before paying a
  * whole pass, but a third would just delay finding a Hub that really has moved. */
 #define P2P_JOIN_SF_ATTEMPTS 2
-
-/* Duty-cycle ledger tuning (B2 / decision D1), shared with tests/p2p_logic. */
-#define P2P_DUTY_WINDOW_MS 3600000 /* the sliding window: one hour */
-#define P2P_DUTY_BUDGET_MS 36000   /* 1% of it -- the air-time allowance */
-
-/* Ring capacity: one entry per transmission still inside the window. When
- * the ring is full the two OLDEST entries are folded into one (summed air,
- * the later end time) instead of making the frame wait for a slot, so the
- * air-time budget, not the entry count, is the only limit (F-P2P-1). The
- * folded entry leaves the window a little later than its older half would
- * have, which can only over-count air, never under-count it: every sliding
- * hour still stays within 1 %. Before the fold, 48 entries capped a node at
- * 48 frames/hour whatever their air-time -- a 60 s report cadence went silent
- * ~13 min of every hour. doc/p2p.md §6. */
-#define P2P_DUTY_LEDGER_ENTRIES 48
 
 /* Ack (0xFA) body layout, doc/p2p.md §6:
  *
@@ -153,28 +138,6 @@ struct p2p_ack_info {
 	 * node then falls back to the old worst case (doc/p2p.md §6). */
 	bool pending_len_present;
 	uint8_t pending_frame_len;
-};
-
-/* Exact sliding-hour duty ledger (B2, decision D1) -- one entry per
- * transmission that is still inside the window. Replaces the earlier token
- * bucket, which refilled at 1% of wall time and capped at the full hourly
- * allowance: that held the long-run average at 1% but let a node idle for an
- * hour and then burst 36 s of air in one go, so the worst-case SLIDING hour
- * reached ~2%. Summing the real window costs 384 B of RAM and makes the
- * bound exact instead of amortised.
- *
- * Defined here so tests/p2p_logic can declare one; the ledger functions are
- * internal to app_radio_p2p.c (given external linkage only under CONFIG_ZTEST --
- * see the block at the end of this header). */
-struct p2p_duty_entry {
-	uint32_t end_ms; /* uptime (ms, truncated) at which the frame finished */
-	uint16_t air_ms; /* its time-on-air; a 255 B SF12 frame is ~9.2 s, so u16 fits */
-};
-
-struct p2p_duty {
-	struct p2p_duty_entry entries[P2P_DUTY_LEDGER_ENTRIES];
-	uint8_t head;  /* index of the oldest entry */
-	uint8_t count; /* entries in use */
 };
 
 /* Raw-LoRa point-to-point transport, phase 1 (#118, doc/p2p.md). A drop-in
@@ -408,9 +371,6 @@ void p2p_hdr_get(const uint8_t *frame, struct p2p_hdr *h);
 int build_frame_keyed(uint32_t net_id, uint16_t dev_addr, const uint8_t session_key[16],
 		      uint8_t frame_type, uint8_t fctrl, const uint8_t *body, size_t body_len,
 		      uint32_t counter, uint8_t *frame);
-void p2p_duty_init(struct p2p_duty *d);
-void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
-int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 int p2p_join_sweep_sf(int cfg_sf, uint8_t step);
 int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait_ms,
 				uint32_t backoff_ms, uint32_t jitter_ms);
@@ -435,7 +395,6 @@ int64_t p2p_test_join_pending_ms(void);
 void p2p_test_get_join(uint8_t *sf, uint8_t *step, uint8_t *attempts, bool *slow, uint8_t *rejoin,
 		       enum p2p_link_state *state);
 void p2p_test_set_join_started_at(int64_t at_ms);
-struct p2p_duty *p2p_test_get_duty(void);
 void p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN]);
 void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
 				 uint8_t out[P2P_KEY_LEN]);

@@ -11,6 +11,7 @@
  * confirmed frame without its Ack (T2c), alarms confirmed by radio-alarm-ack. Link supervision (F2)
  * runs the same way: the fake reports link-check outcomes and records the rungs and rejoins
  * app_radio asks for; so does the history replay (F3c), over a stub store of fixed-size records.
+ * The duty ledger (T2d) is tested pure, and through the fake's air per frame.
  */
 
 #include "stubs.h"
@@ -70,6 +71,7 @@ static struct {
 	int replay_ret;       /* what that nested start returned */
 	uint8_t flush_budget; /* an empty frame (MAC flush) sets the budget to it */
 	int time_requests;    /* time_request() calls (a clock_sync asked for a time) */
+	uint32_t air_ms;      /* airtime_ms() of every frame, charged when it goes */
 	struct sent log[LOG_MAX];
 	size_t n;
 } fk;
@@ -99,6 +101,9 @@ static int fake_send(const struct app_radio_frame *f, struct app_radio_tx_result
 	fk.n++;
 	res->wait_ms = fk.wait_ms;
 	res->budget = fk.res_budget;
+	if (ret == 0 || ret == -ETIMEDOUT) {
+		app_radio_duty_charge(fk.air_ms); /* as the backends do, at the physical TX */
+	}
 
 	if (fk.n == fk.drop_link_after) {
 		fk.ready = false;
@@ -180,6 +185,12 @@ static void fake_time_request(void)
 	fk.time_requests++;
 }
 
+static uint32_t fake_airtime_ms(size_t len)
+{
+	ARG_UNUSED(len);
+	return fk.air_ms;
+}
+
 static const struct app_radio_backend be_lrw = {
 	.send = fake_send,
 	.budget = fake_budget,
@@ -189,6 +200,7 @@ static const struct app_radio_backend be_lrw = {
 	.warning_step = fake_warning_step,
 	.rejoin = fake_rejoin,
 	.time_request = fake_time_request,
+	.airtime_ms = fake_airtime_ms,
 	.confirm_kinds = 0,
 	.frame_gap_ms = 3000,
 	.cmd_transport = APP_CMD_TRANSPORT_LRW,
@@ -203,6 +215,7 @@ static const struct app_radio_backend be_p2p = {
 	.warning_step = fake_warning_step,
 	.rejoin = fake_rejoin,
 	.time_request = fake_time_request,
+	.airtime_ms = fake_airtime_ms,
 	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_HISTORY),
 	.frame_gap_ms = 0,
 	.cmd_transport = APP_CMD_TRANSPORT_P2P,
@@ -2258,3 +2271,410 @@ ZTEST(radio_common, test_work_queue_writes_never_wait_for_the_air)
 	zassert_true(m_wq_write_at >= t0 && m_wq_write_at <= t0 + 40, "system queue wrote at once");
 	app_radio_air_end();
 }
+
+/* ---- Duty ledger (T2d) ---------------------------------------------------- */
+
+/* The property under test is stronger than a token bucket's: not "the
+ * long-run average is 1%" but "EVERY sliding one-hour window stays within the
+ * allowance". The pure tests drive a ledger on a virtual clock, so an hour
+ * costs no time. */
+
+#define WINDOW APP_RADIO_DUTY_WINDOW_MS
+#define PCT1   APP_RADIO_DUTY_1PCT_MS
+
+ZTEST(radio_common, test_duty_empty_ledger_admits)
+{
+	struct app_radio_duty d;
+
+	app_radio_ledger_init(&d, PCT1);
+
+	/* Boot is never blocked, and the whole allowance is available at once. */
+	zassert_equal(app_radio_ledger_wait_ms(&d, 0, 1), 0,
+		      "an empty ledger admits a small frame");
+	zassert_equal(app_radio_ledger_wait_ms(&d, 0, PCT1), 0,
+		      "an empty ledger admits the whole hourly allowance");
+}
+
+ZTEST(radio_common, test_duty_sum_enforced)
+{
+	struct app_radio_duty d;
+	const uint32_t air = PCT1 / 4; /* 9 s: four fill the hour */
+
+	app_radio_ledger_init(&d, PCT1);
+	for (int i = 0; i < 4; i++) {
+		int64_t now = i * 1000;
+
+		zassert_equal(app_radio_ledger_wait_ms(&d, now, air), 0, "frame %d is admitted", i);
+		app_radio_ledger_charge(&d, now, air);
+	}
+
+	/* The allowance is exactly spent -- not one further millisecond of air. */
+	zassert_true(app_radio_ledger_wait_ms(&d, 4000, 1) > 0,
+		     "1 ms of air is refused once the allowance is spent");
+	zassert_equal(app_radio_ledger_wait_ms(&d, 4000, 0), 0, "no air is always affordable");
+	zassert_equal(app_radio_ledger_used_ms(&d, 4000), PCT1);
+}
+
+ZTEST(radio_common, test_duty_expiry_after_hour)
+{
+	struct app_radio_duty d;
+
+	app_radio_ledger_init(&d, PCT1);
+	app_radio_ledger_charge(&d, 0, PCT1); /* spend it all at t=0 */
+
+	zassert_true(app_radio_ledger_wait_ms(&d, 1000, 1) > 0, "still held one second in");
+
+	/* One ms before the entry leaves the window: still held, and the wait
+	 * is exactly the time left. */
+	int64_t wait = app_radio_ledger_wait_ms(&d, WINDOW - 1, 1);
+
+	zassert_equal(wait, 1, "wait is 1 ms at the window edge, got %lld", wait);
+
+	/* The instant it does, the full allowance is back. */
+	zassert_equal(app_radio_ledger_wait_ms(&d, WINDOW, PCT1), 0,
+		      "the allowance returns when the entry leaves the window");
+	zassert_equal(app_radio_ledger_used_ms(&d, WINDOW), 0);
+}
+
+/* A status read does not expire entries first (it only reads), so used_ms()
+ * itself must leave out the ones the window has passed. */
+ZTEST(radio_common, test_duty_used_skips_expired_without_expiry)
+{
+	struct app_radio_duty d;
+
+	app_radio_ledger_init(&d, PCT1);
+	app_radio_ledger_charge(&d, 0, 700);
+	app_radio_ledger_charge(&d, 2000, 300);
+
+	zassert_equal(app_radio_ledger_used_ms(&d, WINDOW - 1), 1000);
+	zassert_equal(app_radio_ledger_used_ms(&d, WINDOW), 300, "the first entry has left");
+	zassert_equal(app_radio_ledger_used_ms(&d, WINDOW + 2000), 0, "both have left");
+	zassert_equal(d.count, 2, "a read never drops entries");
+}
+
+/* The wait frees just enough: the oldest entries until the frame fits, so
+ * the frame goes on its first wake-up, and not one ms earlier. */
+ZTEST(radio_common, test_duty_wait_is_exact)
+{
+	struct app_radio_duty d;
+
+	app_radio_ledger_init(&d, PCT1);
+	for (int i = 0; i < 3; i++) {
+		app_radio_ledger_charge(&d, i * 1000, 10000); /* 30 s used, 6 s left */
+	}
+
+	/* 16 s of air is 10 s over: the oldest entry alone frees that. */
+	int64_t w1 = app_radio_ledger_wait_ms(&d, 3000, 16000);
+
+	zassert_equal(w1, WINDOW - 3000, "waits for the oldest entry, got %lld", w1);
+
+	/* 26 s is 20 s over: the two oldest, so until the second leaves. */
+	int64_t w2 = app_radio_ledger_wait_ms(&d, 3000, 26000);
+
+	zassert_equal(w2, WINDOW - 2000, "waits for the second entry, got %lld", w2);
+	zassert_true(app_radio_ledger_wait_ms(&d, 3000 + w2 - 1, 26000) > 0, "not a ms early");
+	zassert_equal(app_radio_ledger_wait_ms(&d, 3000 + w2, 26000), 0, "one wait is enough");
+}
+
+/* A frame alone over the allowance (no supported PHY setting makes one at
+ * 1 %) waits until the ledger is empty, then goes: never held for ever. */
+ZTEST(radio_common, test_duty_frame_over_allowance_waits_for_empty)
+{
+	struct app_radio_duty d;
+
+	app_radio_ledger_init(&d, PCT1);
+	app_radio_ledger_charge(&d, 0, 1000);
+	app_radio_ledger_charge(&d, 5000, 1000);
+
+	int64_t wait = app_radio_ledger_wait_ms(&d, 6000, PCT1 + 1);
+
+	zassert_equal(wait, WINDOW - 1000, "waits for the newest entry, got %lld", wait);
+	zassert_equal(app_radio_ledger_wait_ms(&d, 5000 + WINDOW, PCT1 + 1), 0,
+		      "an empty ledger lets it go");
+}
+
+/* The ring is finite, but a full ring does not cap the frame count: the two
+ * oldest entries fold into one (F-P2P-1), so only the air-time limits. Before
+ * the fold a 60 s cadence went silent ~13 min of every hour. */
+ZTEST(radio_common, test_duty_ring_full_folds_instead_of_blocking)
+{
+	struct app_radio_duty d;
+
+	app_radio_ledger_init(&d, PCT1);
+
+	/* One small frame a minute for an hour: 60 frames, above the ring size,
+	 * and only 60 x 70 ms = 4.2 s of the 36 s allowance. */
+	for (int i = 0; i < 60; i++) {
+		int64_t now = (int64_t)i * 60000;
+
+		zassert_equal(app_radio_ledger_wait_ms(&d, now, 70), 0,
+			      "frame %d is admitted -- only air-time may refuse", i);
+		app_radio_ledger_charge(&d, now, 70);
+	}
+
+	/* Folding never loses air: everything of the last hour still counts. */
+	zassert_true(d.count <= APP_RADIO_DUTY_LEDGER_ENTRIES);
+	zassert_equal(app_radio_ledger_used_ms(&d, 59 * 60000), 60u * 70u,
+		      "the folded ledger still holds all 60 frames' air");
+	zassert_true(app_radio_ledger_wait_ms(&d, 60 * 60000 - 1, PCT1) > 0,
+		     "a frame over the remaining allowance still waits");
+}
+
+/* Folding may only over-count: the oldest entry's air leaves the window with
+ * its younger neighbour, never earlier. */
+ZTEST(radio_common, test_duty_fold_is_conservative)
+{
+	struct app_radio_duty d;
+
+	app_radio_ledger_init(&d, PCT1);
+	for (int i = 0; i < APP_RADIO_DUTY_LEDGER_ENTRIES; i++) {
+		app_radio_ledger_charge(&d, (int64_t)i * 1000, 10);
+	}
+	/* Full: the next admission folds entries 0 and 1 (end 0 ms and 1000 ms). */
+	zassert_equal(app_radio_ledger_wait_ms(&d, 50000, 10), 0);
+	app_radio_ledger_charge(&d, 50000, 10);
+
+	/* Just after entry 0's own expiry its 10 ms still count, as they now
+	 * leave with entry 1: all 49 frames (490 ms) are in the window. */
+	uint32_t remaining = PCT1 - (APP_RADIO_DUTY_LEDGER_ENTRIES + 1) * 10;
+
+	zassert_equal(app_radio_ledger_wait_ms(&d, WINDOW + 500, remaining), 0,
+		      "exactly the unexpired air counts");
+	zassert_true(app_radio_ledger_wait_ms(&d, WINDOW + 500, remaining + 1) > 0,
+		     "the folded older half is not released early");
+}
+
+/* A fold on a 10 % sub-band sums past 65 s in one entry: no clamp, or the
+ * ledger would forget air. */
+ZTEST(radio_common, test_duty_fold_10pct_keeps_all_air)
+{
+	struct app_radio_duty d;
+	const uint32_t budget = app_radio_duty_budget_ms(869525000);
+
+	zassert_equal(budget, 10 * PCT1);
+	app_radio_ledger_init(&d, budget);
+
+	/* 62 frames of 5 s: 14 folds make the oldest entry 75 s of air. */
+	for (int i = 0; i < 62; i++) {
+		zassert_equal(app_radio_ledger_wait_ms(&d, i * 100, 5000), 0, "frame %d", i);
+		app_radio_ledger_charge(&d, i * 100, 5000);
+	}
+	zassert_equal(d.entries[d.head].air_ms, 75000u, "the folded oldest entry holds 75 s");
+	zassert_equal(app_radio_ledger_used_ms(&d, 6200), 62u * 5000u, "no air is lost");
+
+	/* 1 ms over the allowance: the folded oldest entry has to leave. The
+	 * full ring folds once more first, so it is 80 s ending at 1.5 s. */
+	uint32_t over = budget - 62u * 5000u + 1;
+
+	zassert_equal(app_radio_ledger_wait_ms(&d, 6200, over), WINDOW - (6200 - 1500),
+		      "waits for the folded entry (end 1.5 s)");
+	zassert_equal(d.entries[d.head].air_ms, 80000u);
+}
+
+/* Deterministic pseudo-random frame sizes: a failure has to be reproducible. */
+static uint32_t duty_rand(uint32_t *state)
+{
+	uint32_t x = *state;
+
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	*state = x;
+	return x;
+}
+
+/* Static, not on the stack: hours of sends are a few thousand records. */
+static struct {
+	uint32_t end_ms;
+	uint32_t air_ms;
+} m_sent[4096];
+
+/* Hammer a ledger for `hours` simulated hours, always trying to send frames
+ * of 330..2296 ms (the SF10 range), and check every sliding hour against the
+ * record rather than the ledger's own arithmetic. */
+static void duty_hammer(uint32_t budget, int hours)
+{
+	struct app_radio_duty d;
+	uint32_t state = 0xC0FFEEu;
+	size_t n = 0;
+
+	app_radio_ledger_init(&d, budget);
+	for (int64_t now = 0; now <= hours * (int64_t)WINDOW; now += 1000) {
+		uint32_t air = 330 + (duty_rand(&state) % 1967);
+
+		while (app_radio_ledger_wait_ms(&d, now, air) == 0) {
+			app_radio_ledger_charge(&d, now, air);
+			zassert_true(n < ARRAY_SIZE(m_sent), "test record overflow");
+			m_sent[n].end_ms = (uint32_t)now;
+			m_sent[n].air_ms = air;
+			n++;
+			air = 330 + (duty_rand(&state) % 1967);
+		}
+	}
+	zassert_true(n > 100, "the simulation sent plenty, got %zu", n);
+
+	/* For every transmission, the air of the hour ending at it -- itself
+	 * included -- is within the allowance. */
+	for (size_t j = 0; j < n; j++) {
+		uint32_t sum = 0;
+
+		for (size_t i = 0; i <= j; i++) {
+			if (m_sent[j].end_ms - m_sent[i].end_ms < WINDOW) {
+				sum += m_sent[i].air_ms;
+			}
+		}
+		zassert_true(sum <= budget,
+			     "the hour ending at send %zu (t=%u) radiated %u ms > %u", j,
+			     m_sent[j].end_ms, sum, budget);
+	}
+}
+
+ZTEST(radio_common, test_duty_sliding_hour_never_exceeds_1pct)
+{
+	duty_hammer(PCT1, 24);
+}
+
+ZTEST(radio_common, test_duty_sliding_hour_never_exceeds_10pct)
+{
+	duty_hammer(10 * PCT1, 6);
+}
+
+/* Uptime is truncated to 32 bits in the ledger, so entries survive the
+ * ~49.7-day wrap: a `now >= end_ms + WINDOW` formulation breaks here, the
+ * unsigned-difference one does not. */
+ZTEST(radio_common, test_duty_wrap_safe)
+{
+	struct app_radio_duty d;
+	const int64_t t = 0xFFFFFF00LL; /* 256 ms before the u32 wrap */
+
+	app_radio_ledger_init(&d, PCT1);
+	app_radio_ledger_charge(&d, t, PCT1);
+
+	int64_t wait = app_radio_ledger_wait_ms(&d, t + 1000, 1);
+
+	zassert_equal(wait, WINDOW - 1000, "wait across the wrap: %lld", wait);
+	zassert_equal(app_radio_ledger_wait_ms(&d, t + WINDOW, PCT1), 0,
+		      "the entry expires on schedule across the wrap");
+}
+
+/* No limit (budget 0: LoRaWAN outside EU868) never holds, and still counts. */
+ZTEST(radio_common, test_duty_no_limit_counts_only)
+{
+	struct app_radio_duty d;
+
+	app_radio_ledger_init(&d, 0);
+	app_radio_ledger_charge(&d, 0, 10 * WINDOW / 100);
+	zassert_equal(app_radio_ledger_wait_ms(&d, 1000, PCT1), 0);
+	zassert_equal(app_radio_ledger_used_ms(&d, 1000), 10 * WINDOW / 100);
+}
+
+/* The EU868 sub-bands of LoRaMac's RegionEU868 (ETSI EN 300 220). */
+ZTEST(radio_common, test_duty_budget_by_sub_band)
+{
+	static const struct {
+		uint32_t hz;
+		uint32_t ms;
+	} t[] = {
+		{863000000, 3600},   {864999999, 3600},  {865000000, 36000},  {867100000, 36000},
+		{868100000, 36000},  {868600000, 36000}, {868650000, 3600},   {868700000, 3600},
+		{869200000, 3600},   {869300000, 3600},  {869400000, 360000}, {869525000, 360000},
+		{869650000, 360000}, {869700000, 36000}, {870000000, 36000},  {870000001, 3600},
+		{915000000, 3600},
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(t); i++) {
+		zassert_equal(app_radio_duty_budget_ms(t[i].hz), t[i].ms, "%u Hz: %u ms, want %u",
+			      t[i].hz, app_radio_duty_budget_ms(t[i].hz), t[i].ms);
+	}
+}
+
+/* LoRaMac's time on air (RadioTimeOnAir), which both radios charge. */
+ZTEST(radio_common, test_lora_time_on_air)
+{
+	zassert_equal(app_radio_lora_toa_ms(12, 125000, 23), 1483, "EU868 DR0 JoinRequest");
+	zassert_equal(app_radio_lora_toa_ms(7, 125000, 23), 62, "EU868 DR5 JoinRequest");
+	zassert_equal(app_radio_lora_toa_ms(7, 250000, 23), 31, "EU868 DR6");
+	zassert_equal(app_radio_lora_toa_ms(8, 500000, 23), 29, "US915 DR4");
+	zassert_equal(app_radio_lora_toa_ms(12, 125000, 64), 2794, "DR0, a 51 B payload");
+	zassert_equal(app_radio_lora_toa_ms(12, 125000, 255), 9020, "SF12 maximum");
+	zassert_equal(app_radio_lora_toa_ms(10, 125000, 56), 658, "P2P SF10, 40 B body");
+	zassert_equal(app_radio_lora_toa_ms(6, 125000, 20), 34, "SF6: 12 symbol preamble");
+	zassert_equal(app_radio_lora_toa_ms(12, 125000, 300), 9020, "over 255 B: capped");
+}
+
+/* A frame the ledger has no room for is held until it fits, then sent: no
+ * send on the backend meanwhile, no retry counted, and the status shows it. */
+static void duty_hold_sends_when_it_fits(void)
+{
+	struct app_radio_status st;
+	uint32_t base = retries();
+
+	app_radio_duty_init(PCT1);
+	fk.air_ms = 1000;
+	/* A full hour's allowance that leaves the window in 2 s. */
+	app_radio_test_duty_charge_at(k_uptime_get() - WINDOW + 2000, PCT1);
+
+	int64_t t0 = k_uptime_get();
+
+	queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 8, 0xd1);
+	k_sleep(K_MSEC(1000));
+	zassert_equal(fk.n, 0, "held: the backend sends nothing");
+	app_radio_get_status(&st);
+	zassert_true(st.duty_blocked_s > 0, "the hold is visible");
+	zassert_equal(st.airtime_hour_ms, PCT1, "the full hour is shown");
+
+	k_sleep(K_MSEC(1500));
+	zassert_equal(fk.n, 1, "sent once it fits");
+	zassert_equal(fk.log[0].head[0], 0xd1);
+	zassert_true(fk.log[0].at_ms - t0 >= 2000, "not before the entry left (%lld ms)",
+		     fk.log[0].at_ms - t0);
+	zassert_equal(retries(), base, "a hold is not a retry");
+
+	app_radio_get_status(&st);
+	zassert_true(st.has_airtime);
+	zassert_equal(st.airtime_hour_ms, 1000, "the old hour left, the new frame counts");
+	zassert_equal(st.duty_blocked_s, 0, "the send ended the hold");
+}
+BOTH_PROFILES(duty_hold_sends_when_it_fits)
+
+/* The report path is held the same way, and its frames are charged. */
+static void duty_hold_report(void)
+{
+	const size_t lens[] = {10, 10};
+
+	app_radio_duty_init(PCT1);
+	fk.air_ms = 1000;
+	app_radio_test_duty_charge_at(k_uptime_get() - WINDOW + 2000, PCT1 - 500);
+
+	/* 500 ms left: the first frame (1000 ms) waits for the old entry. */
+	frames(lens, 2);
+	app_radio_send_telemetry_now();
+	k_sleep(K_MSEC(1500));
+	zassert_equal(fk.n, 0, "the report is held");
+	k_sleep(K_MSEC(5000));
+	zassert_equal(fk.n, 2, "both frames went once the old air left");
+
+	struct app_radio_status st;
+
+	app_radio_get_status(&st);
+	zassert_equal(st.airtime_hour_ms, 2000, "both frames are charged");
+}
+BOTH_PROFILES(duty_hold_report)
+
+/* Without a limit nothing is held, whatever the air. */
+static void duty_no_limit_never_holds(void)
+{
+	app_radio_duty_init(0);
+	fk.air_ms = PCT1;
+	for (int i = 0; i < 3; i++) {
+		queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 8, 0xe0 + i);
+	}
+	k_sleep(K_SECONDS(12));
+	zassert_equal(fk.n, 3, "all three went");
+
+	struct app_radio_status st;
+
+	app_radio_get_status(&st);
+	zassert_equal(st.airtime_hour_ms, 3 * PCT1, "the air is still shown");
+}
+BOTH_PROFILES(duty_no_limit_never_holds)

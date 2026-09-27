@@ -211,9 +211,28 @@ void app_radio_set_duty_held(bool held)
 	ARG_UNUSED(held);
 }
 
-void app_radio_set_airtime(uint32_t ms)
+/* The common duty ledger (app_radio.c, T2d), stubbed: a settable hold for the
+ * join path, and a record of what the backend charged. */
+int64_t test_duty_wait_ms;
+uint32_t test_duty_charges;
+uint64_t test_duty_charged_ms;
+uint32_t test_duty_budget_ms;
+
+void app_radio_duty_init(uint32_t budget_ms)
 {
-	ARG_UNUSED(ms);
+	test_duty_budget_ms = budget_ms;
+}
+
+int64_t app_radio_duty_wait_ms(uint32_t air_ms)
+{
+	ARG_UNUSED(air_ms);
+	return test_duty_wait_ms;
+}
+
+void app_radio_duty_charge(uint32_t air_ms)
+{
+	test_duty_charges++;
+	test_duty_charged_ms += air_ms;
 }
 
 void app_radio_reset_link(void)

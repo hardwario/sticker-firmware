@@ -78,6 +78,7 @@ LOG_MODULE_REGISTER(app_radio_lrw, LOG_LEVEL_DBG);
  * link-check outcomes and carries out a recovery rung or a rejoin. */
 
 static void publish_mac(void);
+static uint32_t lrw_tx_airtime_ms(size_t len);
 
 /* Every uplink goes through here, so the M-2 duty-cycle streak sees each result.
  * A send refused by the EU868 duty cycle (-ECONNREFUSED,
@@ -85,6 +86,9 @@ static void publish_mac(void);
  * rejoin would only reset the band credits kept in RAM (F29). */
 static int lrw_send(uint8_t port, uint8_t *data, uint8_t len, enum lorawan_message_type type)
 {
+	/* Its air at the DR and FOpts it goes out with, taken before the send. */
+	uint32_t air = lrw_tx_airtime_ms(len);
+
 	/* lorawan_send() returns once the RX windows closed: the whole exchange
 	 * is clear of flash writes (app_radio_air_begin()). */
 	app_radio_air_begin();
@@ -98,8 +102,12 @@ static int lrw_send(uint8_t port, uint8_t *data, uint8_t len, enum lorawan_messa
 
 	app_radio_count(sent ? APP_RADIO_CNT_TX : APP_RADIO_CNT_TX_ERR);
 	app_radio_note_send(sent, ret == -ECONNREFUSED);
+	if (sent || ret == -ETIMEDOUT) {
+		/* -ETIMEDOUT unconfirmed: the confirm never came, the frame may
+		 * have gone. Over-counting only errs towards the limit. */
+		app_radio_duty_charge(air);
+	}
 	if (sent) {
-		app_radio_set_duty_held(false);
 		publish_mac();
 	} else if (ret == -ECONNREFUSED) {
 		app_radio_set_duty_held(true);
@@ -131,6 +139,7 @@ static int m_rejoin_attempts;     /* Rejoin attempt counter for backoff */
 static int m_join_busy_polls;     /* Counter for MAC busy polling */
 static bool m_init_join;          /* True for first join after boot */
 static bool m_mac_started;        /* lorawan_start() succeeded; LoRaMac state is valid */
+static enum lorawan_region m_region = LORAWAN_REGION_EU868; /* set in app_radio_lrw_init() */
 
 #define JOIN_BUSY_POLL_INTERVAL_MS 500
 #define JOIN_BUSY_MAX_POLLS        30
@@ -215,6 +224,93 @@ static uint8_t refresh_payload_budget(void)
 uint8_t app_radio_lrw_get_max_payload(void)
 {
 	return m_max_next_payload;
+}
+
+/* PHY payload around the application bytes: MHDR 1, FHDR 7 (+ FOpts), FPort 1,
+ * MIC 4. A JoinRequest is 23 B. */
+#define LRW_PHY_OVERHEAD     13
+#define LRW_JOIN_REQUEST_LEN 23
+
+/* The FSK DR7 of EU868/AS923: 50 kbit/s, preamble 5 B, sync word 3 B, length
+ * 1 B and CRC 2 B around the PHY payload -- LoRaMac's own GFSK formula. */
+#define LRW_FSK_BPS      50000U
+#define LRW_FSK_OVERHEAD (5 + 3 + 1 + 2)
+
+/* Time on air (ms) of a `phy_len`-byte PHY payload at uplink `dr` in
+ * m_region, by LoRaMac's own formula. */
+static uint32_t lrw_toa_ms(int dr, size_t phy_len)
+{
+	uint32_t bw = 125000U;
+	uint32_t sf;
+
+	switch (m_region) {
+	case LORAWAN_REGION_US915:
+		/* DR0-3 SF10..7/125 kHz, DR4 SF8/500 kHz. */
+		if (dr == 4) {
+			sf = 8;
+			bw = 500000U;
+		} else {
+			sf = 10 - CLAMP(dr, 0, 3);
+		}
+		break;
+	case LORAWAN_REGION_AU915:
+		/* DR0-5 SF12..7/125 kHz, DR6 SF8/500 kHz. */
+		if (dr == 6) {
+			sf = 8;
+			bw = 500000U;
+		} else {
+			sf = 12 - CLAMP(dr, 0, 5);
+		}
+		break;
+	default:
+		/* EU868, AS923: DR0-5 SF12..7/125 kHz, DR6 SF7/250 kHz, DR7 FSK. */
+		if (dr == 7) {
+			return DIV_ROUND_UP(8U * (LRW_FSK_OVERHEAD + phy_len) * MSEC_PER_SEC,
+					    LRW_FSK_BPS);
+		}
+		if (dr == 6) {
+			sf = 7;
+			bw = 250000U;
+		} else {
+			sf = 12 - CLAMP(dr, 0, 5);
+		}
+		break;
+	}
+	return app_radio_lora_toa_ms(sf, bw, phy_len);
+}
+
+static int lrw_mib_datarate(void)
+{
+	MibRequestConfirm_t mib = {.Type = MIB_CHANNELS_DATARATE};
+
+	lorawan_mac_lock();
+	LoRaMacMibGetRequestConfirm(&mib);
+	lorawan_mac_unlock();
+	return mib.Param.ChannelsDatarate;
+}
+
+/* struct app_radio_backend.airtime_ms: a `len`-byte payload on air as the next
+ * uplink, the pending MAC answers in its FOpts included. The DR is the MAC's
+ * (ADR's, or the configured one, which lorawan_send() also writes there). An
+ * ADR backoff step taken inside the send itself is not seen: that one frame is
+ * charged at the DR before the step, and the MAC's own duty cycle still guards
+ * it. 0 before lorawan_start(). */
+static uint32_t lrw_tx_airtime_ms(size_t len)
+{
+	if (!m_mac_started) {
+		return 0;
+	}
+
+	uint8_t max_next = 0, max_now = 0;
+	int dr = lrw_mib_datarate();
+
+	lorawan_get_payload_sizes(&max_next, &max_now);
+	if (max_next == 0) {
+		/* MAC answers fill the frame: Zephyr's flush may go at the lowest
+		 * DR, so charge that. */
+		dr = lorawan_get_min_datarate();
+	}
+	return lrw_toa_ms(dr, LRW_PHY_OVERHEAD + (max_now - max_next) + len);
 }
 
 /* Link-recovery ladder, one rung per failed link check in WARNING. LoRaMac's own
@@ -784,6 +880,13 @@ static void join_work_handler(struct k_work *work)
 	/* The join exchange ends when JOINING is left (state_transition()). */
 	app_radio_air_begin();
 	ret = lorawan_join(&config);
+	if (config.mode == LORAWAN_ACT_OTAA && ret != -EBUSY && ret != -ECONNREFUSED &&
+	    ret != -ENOTCONN) {
+		/* Unless the MAC refused it, the JoinRequest went out (a missing
+		 * JoinAccept is -EINVAL or -ETIMEDOUT), at the DR the MAC took for it.
+		 * The ledger does not hold a join; the MAC's join backoff does. */
+		app_radio_duty_charge(lrw_toa_ms(lrw_mib_datarate(), LRW_JOIN_REQUEST_LEN));
+	}
 	if (ret && ret != -ETIMEDOUT) {
 		LOG_ERR("Join failed: %d", ret);
 		on_join_failure();
@@ -977,6 +1080,7 @@ const struct app_radio_backend app_radio_lrw_backend = {
 	/* A DeviceTimeReq rides the next uplink; its answer raises
 	 * LORAWAN_TIME_UPDATED in downlink_callback(). */
 	.time_request = app_clock_force_resync,
+	.airtime_ms = lrw_tx_airtime_ms,
 	/* Unconfirmed: the link check is the liveness probe; alarms as
 	 * radio-alarm-ack says (app_radio). */
 	.confirm_kinds = 0,
@@ -1291,6 +1395,10 @@ int app_radio_lrw_init(void)
 			return ret;
 		}
 		m_mac_started = true;
+		m_region = region;
+		/* EU868: one 1 % allowance over all bands (the MAC's own duty cycle
+		 * still runs per band). Elsewhere no limit, the air is still shown. */
+		app_radio_duty_init(region == LORAWAN_REGION_EU868 ? APP_RADIO_DUTY_1PCT_MS : 0);
 
 		ret = apply_channel_plan();
 		if (ret) {

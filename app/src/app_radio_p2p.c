@@ -130,41 +130,11 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  * tests/ccm/p2p_join_kat.json. */
 #define P2P_SESSION_KEY_LABEL "HIO-P2P-SES"
 
-/*
- * EU868 1% duty cycle, enforced app-side (raw LoRa bypasses LoRaMac's own duty
- * enforcement) with an exact sliding-hour ledger (B2, decision D1).
- *
- * Two models preceded it. The first blocked the radio for air*99 ms after
- * EVERY frame, so an alarm queued behind a long telemetry frame waited
- * minutes. The second (PR #408) was a token bucket refilling at 1% of wall
- * time and capped at the full hourly allowance: that fixed the latency and
- * held the long-run average at 1%, but a node idle for an hour could then
- * burst the whole 36 s of air at once, which means a worst-case SLIDING hour
- * of ~2%. Amortised compliance, not compliance.
- *
- * The ledger records (end time, air-time) per transmission and admits a frame
- * only if the air already inside the trailing hour plus this frame fits the
- * allowance -- so every sliding hour sums to <= 1%, with no burst hole to
- * argue about in a certification review. It keeps the bucket's latency
- * behaviour: a frame goes the moment there is room, rather than serving a
- * fixed post-frame penalty.
- *
- * Cost is 384 B of RAM (P2P_DUTY_LEDGER_ENTRIES entries) and a bounded frame
- * count per hour -- see the header, and doc/p2p.md §6/§11 for both.
- */
-/* P2P_DUTY_WINDOW_MS / P2P_DUTY_BUDGET_MS / P2P_DUTY_LEDGER_ENTRIES are in
- * app_radio_p2p.h (shared with tests). */
-
 #define P2P_FCNT_SUBTREE "p2pfc"
 #define P2P_FCNT_KEY     "p2pfc/base"
 #define P2P_FCNT_RESERVE 256u
 
 #define P2P_RX_QUEUE_DEPTH 1
-
-/* Small margin added on top of the exact remaining duty-cycle block when a
- * frame waits out the duty cycle (#118) -- avoids retrying a few ms too early
- * and getting -EAGAIN again right back. */
-#define P2P_TX_RETRY_MARGIN_MS 50
 
 /* ---- Join/session persistence (#118 phase 2, doc/p2p.md §5.3) ---- */
 
@@ -338,7 +308,6 @@ static bool m_started;
  * Reported as APP_RADIO_STATE_DISABLED. */
 static bool m_disabled;
 static bool m_listening;
-static struct p2p_duty m_duty; /* exact sliding-hour duty ledger (B2/D1) */
 static void (*m_ready_cb)(void);
 
 /* --- Persistent frame counter (nonce uniqueness across reboots) --- */
@@ -817,8 +786,7 @@ static int pairing_clear(void)
  * receiver must match these. Frequency / SF / TX power stay configurable. */
 #define P2P_BANDWIDTH    BW_125_KHZ
 #define P2P_BANDWIDTH_HZ 125000u
-#define P2P_CODING_RATE  CR_4_5
-#define P2P_CR_DENOM     1 /* CR_4_5 contributes (CR_DENOM + 4) symbols in ToA */
+#define P2P_CODING_RATE  CR_4_5 /* app_radio_lora_toa_ms() assumes 4/5 */
 
 static int sf_from_cfg(void)
 {
@@ -856,35 +824,13 @@ static int radio_configure(bool tx)
 	return ret;
 }
 
-/* LoRa time-on-air in ms (Semtech AN1200.13) for spreading factor `sf`,
- * integer-only to avoid pulling in the soft-float/libm code on this
- * Cortex-M4-no-FPU part. Fixed PHY: BW 125 kHz, CR 4/5, preamble 8 symbols,
- * explicit header (doc/p2p.md §3.3). Pure -- exposed to tests/p2p_logic. */
+/* LoRa time-on-air in ms for spreading factor `sf` on the fixed P2P PHY: BW
+ * 125 kHz, CR 4/5, preamble 8 symbols, explicit header (doc/p2p.md §3.3). The
+ * common formula of app_radio, so the duty ledger charges both radios alike.
+ * Pure -- exposed to tests/p2p_logic. */
 P2P_TESTABLE uint32_t p2p_toa_ms(int sf, uint8_t payload_len)
 {
-	uint32_t bw = P2P_BANDWIDTH_HZ;
-	int cr = P2P_CR_DENOM;
-	int de = (sf >= 11 && bw == 125000) ? 1 : 0;
-
-	/* Symbol period in microseconds: Tsym = 2^SF / BW. */
-	uint64_t tsym_us = ((uint64_t)(1u << sf) * 1000000ULL) / bw;
-
-	/* Payload symbol count: 8 + max(ceil((8*PL - 4*SF + 28 + 16) / (4*(SF-2*DE)))
-	 * * (CR+4), 0). H = 0 (explicit header). */
-	int32_t num = 8 * (int32_t)payload_len - 4 * sf + 28 + 16;
-	int32_t den = 4 * (sf - 2 * de);
-	int32_t extra = 0;
-
-	if (num > 0) {
-		extra = ((num + den - 1) / den) * (cr + 4); /* ceil division */
-	}
-	uint32_t n_sym = 8 + (uint32_t)(extra > 0 ? extra : 0);
-
-	/* Preamble = (8 + 4.25) symbols = 49/4 symbols. */
-	uint64_t t_preamble_us = tsym_us * 49 / 4;
-	uint64_t t_payload_us = tsym_us * n_sym;
-
-	return (uint32_t)((t_preamble_us + t_payload_us + 500) / 1000);
+	return app_radio_lora_toa_ms((uint32_t)sf, P2P_BANDWIDTH_HZ, payload_len);
 }
 
 /* Time-on-air at the SF the radio is currently tuned to. */
@@ -974,131 +920,6 @@ P2P_TESTABLE void build_nonce(uint8_t nonce[P2P_NONCE_LEN], uint32_t counter, ui
 	nonce[7] = dir;
 }
 
-/* ---- Exact sliding-hour duty ledger (B2/D1, see the header comment) ------ */
-
-/* Index of the i-th oldest entry. */
-static inline uint8_t duty_slot(const struct p2p_duty *d, uint8_t i)
-{
-	return (uint8_t)((d->head + i) % P2P_DUTY_LEDGER_ENTRIES);
-}
-
-/* Drop every entry that has fallen out of the trailing window.
- *
- * `now` and `end_ms` are uptime truncated to 32 bits and compared as an
- * unsigned difference, which stays correct across the ~49.7-day wrap: an
- * entry only ever lives P2P_DUTY_WINDOW_MS, four orders of magnitude short of
- * the wrap distance, so `now - end_ms` can never alias. */
-static void duty_expire(struct p2p_duty *d, uint32_t now)
-{
-	while (d->count > 0 && (now - d->entries[d->head].end_ms) >= P2P_DUTY_WINDOW_MS) {
-		d->head = duty_slot(d, 1);
-		d->count--;
-	}
-}
-
-/* Make room for one more entry by folding the two oldest into one: the
- * younger keeps its end time and takes the older's air, so the pair leaves the
- * window when the younger would have. Only ever over-counts air (the older
- * half is held a little longer), so the 1 % bound holds (F-P2P-1). The sum
- * fits: the ledger never holds more than P2P_DUTY_BUDGET_MS of air. */
-static void duty_fold_oldest(struct p2p_duty *d)
-{
-	struct p2p_duty_entry *oldest = &d->entries[d->head];
-	struct p2p_duty_entry *next = &d->entries[duty_slot(d, 1)];
-
-	next->air_ms = (uint16_t)MIN((uint32_t)next->air_ms + oldest->air_ms, UINT16_MAX);
-	d->head = duty_slot(d, 1);
-	d->count--;
-}
-
-/* Air-time recorded inside the current window. Caller must have expired
- * first. Cannot overflow: ENTRIES * UINT16_MAX is ~3.1e6, and the ledger
- * never admits a sum past P2P_DUTY_BUDGET_MS anyway. */
-static uint32_t duty_used_ms(const struct p2p_duty *d)
-{
-	uint32_t used = 0;
-
-	for (uint8_t i = 0; i < d->count; i++) {
-		used += d->entries[duty_slot(d, i)].air_ms;
-	}
-	return used;
-}
-
-/* Empty ledger: boot is never blocked, exactly as the full token bucket was
- * not. A reboot therefore forgets the hour just transmitted -- the same hole
- * the bucket had (it restarted full), and accepted for the same reason: the
- * ledger is RAM-only, and persisting it would cost an NVS write per frame.
- * doc/p2p.md §6 records it. */
-P2P_TESTABLE void p2p_duty_init(struct p2p_duty *d)
-{
-	d->head = 0;
-	d->count = 0;
-}
-
-/* Record `air_ms` of air that finished at `now_ms`. */
-P2P_TESTABLE void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms)
-{
-	uint32_t now = (uint32_t)now_ms;
-
-	duty_expire(d, now);
-
-	if (d->count >= P2P_DUTY_LEDGER_ENTRIES) {
-		/* p2p_duty_wait_ms() already folds before admitting, so the real
-		 * call paths never get here with a full ring; fold anyway rather
-		 * than drop a charge, the one outcome that could breach 1 %. */
-		duty_fold_oldest(d);
-	}
-
-	d->entries[duty_slot(d, d->count)] = (struct p2p_duty_entry){
-		.end_ms = now,
-		.air_ms = (uint16_t)MIN(air_ms, (uint32_t)UINT16_MAX),
-	};
-	d->count++;
-}
-
-/* How many ms to wait before `air_ms` of air may be transmitted -- 0 if now.
- *
- * The guarantee is exact rather than amortised: a frame is admitted only when
- * the air already recorded in the trailing hour plus this frame fits inside
- * P2P_DUTY_BUDGET_MS, so EVERY sliding one-hour window sums to <= 1%.
- *
- * When blocked, the answer is the time until the OLDEST entry leaves the
- * window. That is a lower bound, not necessarily enough on its own -- freeing
- * one entry may still leave the sum too high -- but every caller re-checks
- * and reschedules (app_radio's TX scheduler, join_work_handler), so the wait
- * converges instead of needing an exact answer here. Returning the true wait
- * would mean solving for the smallest prefix of expiries that frees enough
- * budget, for no behavioural gain. */
-P2P_TESTABLE int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms)
-{
-	uint32_t now = (uint32_t)now_ms;
-
-	duty_expire(d, now);
-
-	/* F-P2P-1: a full ring folds its two oldest entries rather than making
-	 * the frame wait for a slot, so only the air-time budget can refuse it. */
-	if (d->count >= P2P_DUTY_LEDGER_ENTRIES) {
-		duty_fold_oldest(d);
-	}
-
-	if (duty_used_ms(d) + air_ms <= P2P_DUTY_BUDGET_MS) {
-		return 0;
-	}
-
-	if (d->count == 0) {
-		/* Nothing to wait for. Only reachable if one frame's own air
-		 * exceeded the whole hourly allowance, which no supported
-		 * PHY setting can produce (worst case ~9.2 s at SF12 vs a
-		 * 36 s budget) -- refusing forever would be worse than
-		 * sending it. */
-		return 0;
-	}
-
-	/* duty_expire() guarantees the oldest entry is still inside the
-	 * window, so this is in (0, P2P_DUTY_WINDOW_MS]. */
-	return (int64_t)(P2P_DUTY_WINDOW_MS - (now - d->entries[d->head].end_ms));
-}
-
 /* The SF to try on join sweep step `step` (0-based) when the device is
  * configured for `cfg_sf`. Step 0 is always the configured SF -- it is the
  * likeliest answer and the only one a Hub that never moved will ever accept.
@@ -1148,10 +969,11 @@ P2P_TESTABLE int p2p_join_sweep_sf(int cfg_sf, uint8_t step)
  *
  * The fast policy (a boot join, §5.2) has a 120 s deadline, and that deadline
  * has to bound the wait as well as the retrying. `duty_wait_ms` is whatever
- * p2p_duty_wait_ms returned, which is "time until the oldest ledger entry
- * leaves the sliding hour" -- up to P2P_DUTY_WINDOW_MS, a full hour, once the
- * 48-entry ring is full. 48 JoinRequests at 494 ms fill that ring well inside
- * 120 s, so the unclamped wait routinely landed hours past the deadline: the
+ * app_radio_duty_wait_ms returned, which is "time until enough of the oldest
+ * ledger entries leave the sliding hour" -- up to a full hour
+ * (APP_RADIO_DUTY_WINDOW_MS). 48 JoinRequests at 494 ms filled the ring of
+ * then (no fold yet) well inside 120 s, so the unclamped wait routinely landed
+ * hours past the deadline: the
  * episode's own deadline check ran, but not until long after
  * the window had closed. Measured on the bench 2026-09-10 (§9): still
  * `state: JOINING` 7 m 38 s into a 120 s window, with a reconstructed duty
@@ -1285,28 +1107,12 @@ P2P_TESTABLE void p2p_parse_join_accept_reserved(const uint8_t reserved[4],
 	}
 }
 
-/* Duty-cycle budget (ms) still needed before a `wire_len`-byte frame can be
- * sent at the current SF -- 0 if it can go now. */
+/* Duty-cycle wait (ms) of the common ledger before a `wire_len`-byte frame can
+ * be sent at the current SF -- 0 if it can go now. Only the join asks here:
+ * app_radio checks every data frame before it calls p2p_tx_send(). */
 static int64_t duty_wait_ms_for(size_t wire_len)
 {
-	int64_t wait = p2p_duty_wait_ms(&m_duty, k_uptime_get(), frame_toa_ms((uint8_t)wire_len));
-
-	if (wait > 0) {
-		app_radio_set_duty_held(true);
-	}
-	return wait;
-}
-
-/* Charge `air_ms` of just-transmitted air-time against the budget; the send
- * went out, so the duty cycle no longer holds anything. */
-static void duty_charge(uint32_t air_ms)
-{
-	int64_t now = k_uptime_get();
-
-	p2p_duty_charge(&m_duty, now, air_ms);
-	duty_expire(&m_duty, (uint32_t)now);
-	app_radio_set_duty_held(false);
-	app_radio_set_airtime(duty_used_ms(&m_duty));
+	return app_radio_duty_wait_ms(frame_toa_ms((uint8_t)wire_len));
 }
 
 /* Retune the radio to `sf` for the next JoinRequest. Radio work queue ONLY: it writes
@@ -1550,7 +1356,8 @@ static int build_frame(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, s
  * must resend a byte-identical frame under the SAME counter: CCM under a fixed (key,
  * nonce, plaintext) is deterministic, so reusing the counter alone
  * reproduces the exact same ciphertext, no cached buffer needed). Caller
- * must have already checked the duty-cycle budget (duty_wait_ms_for). Returns
+ * must have already checked the duty ledger (app_radio's tx_send, or the join
+ * path's duty_wait_ms_for). Returns
  * 0 or errno; on success reports the send-completion time via `tx_end_ms`
  * (uptime ms, for the caller's RX1/Ack wait) and charges the duty budget. */
 /* lora_send() failed. The driver reports a TX timeout as -EAGAIN and a busy
@@ -1562,7 +1369,7 @@ static int build_frame(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, s
 static int tx_send_failed(uint8_t wire_len)
 {
 	app_radio_count(APP_RADIO_CNT_TX_ERR);
-	duty_charge(frame_toa_ms(wire_len));
+	app_radio_duty_charge(frame_toa_ms(wire_len));
 	return -EIO;
 }
 
@@ -1613,8 +1420,8 @@ static int tx_frame_at(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, s
 	int64_t end = k_uptime_get();
 	uint32_t air = frame_toa_ms((uint8_t)wire_len);
 
-	/* Charge the just-sent air-time against the 1% budget. */
-	duty_charge(air);
+	/* Charge the just-sent air-time against the duty ledger. */
+	app_radio_duty_charge(air);
 	app_radio_count(APP_RADIO_CNT_TX);
 	app_radio_note_send(true, false);
 	publish_link();
@@ -1626,20 +1433,12 @@ static int tx_frame_at(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, s
 	return 0;
 }
 
-/* Frame + encrypt + transmit one body under a FRESH counter. Returns 0,
- * -EAGAIN (duty cycle), or errno; on success reports the counter used and
- * the send-completion time via the out-params (see tx_frame_at()). */
+/* Frame + encrypt + transmit one body under a FRESH counter. Returns 0 or
+ * errno; on success reports the counter used and the send-completion time via
+ * the out-params (see tx_frame_at()). */
 static int tx_frame(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, size_t body_len,
 		    uint32_t *counter_out, int64_t *tx_end_ms)
 {
-	int64_t wait = duty_wait_ms_for(P2P_HDR_LEN + body_len + P2P_TAG_LEN);
-
-	if (wait > 0) {
-		LOG_WRN("TX duty-cycle blocked for %lld ms", wait);
-		app_radio_note_send(false, true);
-		return -EAGAIN;
-	}
-
 	uint32_t counter;
 	int ret = fcnt_next(&counter);
 
@@ -1906,7 +1705,8 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
  * counter (a byte-identical frame, so the central's strict high-water holds,
  * F-P1-1) -- or under a fresh one if the session changed meanwhile. Returns 0
  * (sent; confirmed: acknowledged, or any authenticated downlink heard),
- * -ETIMEDOUT (confirmed, no Ack in RX1), -EAGAIN (duty cycle), or errno. */
+ * -ETIMEDOUT (confirmed, no Ack in RX1), or errno. app_radio has checked the
+ * duty ledger for it. */
 static int send_uplink(uint8_t frame_type, const uint8_t *body, size_t body_len, bool confirmed,
 		       uint8_t attempt)
 {
@@ -1916,10 +1716,6 @@ static int send_uplink(uint8_t frame_type, const uint8_t *body, size_t body_len,
 	int ret;
 
 	if (resend) {
-		if (duty_wait_ms_for(P2P_HDR_LEN + body_len + P2P_TAG_LEN) > 0) {
-			app_radio_note_send(false, true);
-			return -EAGAIN;
-		}
 		counter = m_retry_counter;
 		ret = tx_frame_at(frame_type, P2P_FCTRL_CONFIRMED, body, body_len, counter,
 				  &tx_end);
@@ -2006,11 +1802,6 @@ static int p2p_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 	switch (ret) {
 	case 0:
 		break;
-	case -EAGAIN:
-		/* Duty cycle: again the moment the ledger has room for this frame. */
-		res->wait_ms = (uint32_t)duty_wait_ms_for(P2P_HDR_LEN + f->len + P2P_TAG_LEN) +
-			       P2P_TX_RETRY_MARGIN_MS;
-		break;
 	case -EMSGSIZE:
 		res->budget = P2P_MAX_BODY;
 		break;
@@ -2028,6 +1819,13 @@ static uint8_t p2p_tx_budget(void)
 	return P2P_MAX_BODY;
 }
 
+/* struct app_radio_backend.airtime_ms: a `len`-byte body on air at the current
+ * SF, header and tag included. */
+static uint32_t p2p_tx_airtime_ms(size_t len)
+{
+	return frame_toa_ms((uint8_t)MIN(P2P_HDR_LEN + len + P2P_TAG_LEN, (size_t)UINT8_MAX));
+}
+
 /* Once per report, at its first frame, kept for all its frames. */
 static uint8_t p2p_tx_report_flags(bool due)
 {
@@ -2043,6 +1841,7 @@ const struct app_radio_backend app_radio_p2p_backend = {
 	.warning_step = warning_tx_power_step,
 	.rejoin = p2p_tx_rejoin,
 	.time_request = p2p_time_request,
+	.airtime_ms = p2p_tx_airtime_ms,
 	/* §6: answers and history frames are confirmed; telemetry only the N-th
 	 * report (report_flags); alarms as radio-alarm-ack says (app_radio). */
 	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_HISTORY),
@@ -2303,7 +2102,7 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 	int64_t end = k_uptime_get();
 	uint32_t air = frame_toa_ms(sizeof(frame));
 
-	duty_charge(air);
+	app_radio_duty_charge(air);
 	app_radio_count(APP_RADIO_CNT_JOIN);
 	publish_link();
 
@@ -2545,7 +2344,7 @@ void p2p_test_join_setup(int cfg_sf)
 {
 	test_queue_start_once();
 	g_app_config.p2p_spreading_factor = cfg_sf;
-	p2p_duty_init(&m_duty);
+	app_radio_duty_init(app_radio_duty_budget_ms(g_app_config.p2p_frequency));
 	m_link_state = P2P_LINK_JOINING;
 	m_join_slow = false;
 	set_rejoin_attempt(0);
@@ -2679,13 +2478,6 @@ void p2p_test_set_join_started_at(int64_t at_ms)
 	m_join_started_at = at_ms;
 }
 
-/* The live duty ledger, so a test can fill it and make send_join_request()
- * return -EAGAIN for real rather than through a stub. */
-struct p2p_duty *p2p_test_get_duty(void)
-{
-	return &m_duty;
-}
-
 #endif /* defined(CONFIG_ZTEST) */
 
 /* ======================================================================== */
@@ -2699,7 +2491,9 @@ int app_radio_p2p_init(void)
 		return -ENODEV;
 	}
 
-	p2p_duty_init(&m_duty);
+	/* The allowance of the EU868 sub-band the channel is in: 1 % on the
+	 * default 868.1 MHz, 0.1 % or 10 % on others (app_radio_duty_budget_ms). */
+	app_radio_duty_init(app_radio_duty_budget_ms(g_app_config.p2p_frequency));
 
 	int ret = settings_register(&m_fcnt_sh);
 

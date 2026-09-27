@@ -25,6 +25,10 @@ extern int p2p_test_time_events;
 extern int p2p_test_air_begins;
 extern int p2p_test_air_ends;
 extern uint32_t g_test_network_time;
+extern int64_t test_duty_wait_ms;
+extern uint32_t test_duty_charges;
+extern uint64_t test_duty_charged_ms;
+extern uint32_t test_duty_budget_ms;
 
 #include <zephyr/ztest.h>
 #include <zephyr/sys/byteorder.h>
@@ -68,7 +72,8 @@ ZTEST(p2p_logic, test_toa_sf10_documented_airtimes)
 		{24, 371},  /* fully-extended Ack (D2 max) */
 		{42, 535},  /* JoinRequest (#417 DevEUI + #22 FCtrl) */
 		{43, 535},  /* JoinAccept */
-		{56, 657},  /* the 40 B command in the P2E-20 bench row */
+		{56, 658},  /* the 40 B command in the P2E-20 bench row (657 before
+			     * T2d: LoRaMac's formula rounds up) */
 		{255, 2296} /* PHY maximum */
 	};
 
@@ -128,11 +133,12 @@ ZTEST(p2p_logic, test_rx1_timeout_scales_with_the_tried_sf)
 {
 	/* JoinAccept is 43 B on air. Computed from the formula
 	 * rx1_preamble_catch_ms(sf) + p2p_toa_ms(sf, 43) + 120 ms trailing margin
-	 * (F-P2P-2): SF10 = 98 + 535 + 120, SF12 = 393 + 2138 + 120. */
+	 * (F-P2P-2): SF10 = 98 + 535 + 120, SF12 = 393 + 2139 + 120 (2138 before
+	 * T2d: the time on air rounds up). */
 	zassert_equal(p2p_rx1_timeout_ms(10, P2P_JOIN_ACCEPT_LEN), 753u,
 		      "SF10 JoinAccept window should be 753 ms");
-	zassert_equal(p2p_rx1_timeout_ms(12, P2P_JOIN_ACCEPT_LEN), 2651u,
-		      "SF12 JoinAccept window should be 2651 ms");
+	zassert_equal(p2p_rx1_timeout_ms(12, P2P_JOIN_ACCEPT_LEN), 2652u,
+		      "SF12 JoinAccept window should be 2652 ms");
 
 	/* F-P2P-2: a fixed trailing margin, not SF-scaled, so a central that is a
 	 * constant ~80 ms late still fits at SF7 (the 22 ms timeout-start delay on
@@ -388,209 +394,8 @@ ZTEST(p2p_logic, test_build_frame_max_body)
 	zassert_mem_equal(pt, body, sizeof(body), "max-body recovered mismatch");
 }
 
-/* ---- Exact sliding-hour duty ledger (B2, decision D1) ----------------- */
-
-/* The property under test is stronger than the token bucket's: not "the
- * long-run average is 1%" but "EVERY sliding one-hour window sums to <= 1%".
- * These tests drive the ledger on a virtual clock, so an hour costs no time. */
-
-ZTEST(p2p_logic, test_duty_empty_ledger_admits)
-{
-	struct p2p_duty d;
-
-	p2p_duty_init(&d);
-
-	/* Boot is never blocked, and the whole allowance is available at once. */
-	zassert_equal(p2p_duty_wait_ms(&d, 0, 1), 0, "an empty ledger must admit a small frame");
-	zassert_equal(p2p_duty_wait_ms(&d, 0, P2P_DUTY_BUDGET_MS), 0,
-		      "an empty ledger must admit the whole hourly allowance");
-}
-
-ZTEST(p2p_logic, test_duty_sum_enforced)
-{
-	struct p2p_duty d;
-	const uint32_t air = P2P_DUTY_BUDGET_MS / 4; /* 9 s: four fill the hour */
-
-	p2p_duty_init(&d);
-
-	for (int i = 0; i < 4; i++) {
-		int64_t now = i * 1000;
-
-		zassert_equal(p2p_duty_wait_ms(&d, now, air), 0, "frame %d must be admitted", i);
-		p2p_duty_charge(&d, now, air);
-	}
-
-	/* The allowance is exactly spent -- not one further millisecond of air. */
-	zassert_true(p2p_duty_wait_ms(&d, 4000, 1) > 0,
-		     "1 ms of air must be refused once the hour's allowance is spent");
-	zassert_equal(p2p_duty_wait_ms(&d, 4000, 0), 0, "a zero-length frame is always affordable");
-}
-
-ZTEST(p2p_logic, test_duty_expiry_after_hour)
-{
-	struct p2p_duty d;
-
-	p2p_duty_init(&d);
-	p2p_duty_charge(&d, 0, P2P_DUTY_BUDGET_MS); /* spend it all at t=0 */
-
-	zassert_true(p2p_duty_wait_ms(&d, 1000, 1) > 0, "still blocked one second in");
-
-	/* One ms before the entry leaves the window: still blocked, and the
-	 * reported wait is exactly the time remaining. */
-	int64_t wait = p2p_duty_wait_ms(&d, P2P_DUTY_WINDOW_MS - 1, 1);
-
-	zassert_equal(wait, 1, "wait should be 1 ms at the window edge, got %lld", wait);
-
-	/* The instant it does, the full allowance is available again. */
-	zassert_equal(p2p_duty_wait_ms(&d, P2P_DUTY_WINDOW_MS, P2P_DUTY_BUDGET_MS), 0,
-		      "the allowance must return when the entry leaves the window");
-}
-
-/* The ring is finite, but a full ring must not cap the frame count: the two
- * oldest entries fold into one (F-P2P-1), so only the air-time budget limits.
- * Before the fold a 60 s cadence went silent ~13 min of every hour. */
-ZTEST(p2p_logic, test_duty_ring_full_folds_instead_of_blocking)
-{
-	struct p2p_duty d;
-
-	p2p_duty_init(&d);
-
-	/* One small frame a minute for an hour: 60 frames, well above the ring
-	 * size, and only 60 x 70 ms = 4.2 s of the 36 s budget. */
-	for (int i = 0; i < 60; i++) {
-		int64_t now = (int64_t)i * 60000;
-
-		zassert_equal(p2p_duty_wait_ms(&d, now, 70), 0,
-			      "frame %d must be admitted -- only air-time may refuse", i);
-		p2p_duty_charge(&d, now, 70);
-	}
-
-	/* Folding never loses air: everything sent in the last hour is still
-	 * counted, so the budget stays exact. */
-	zassert_true(d.count <= P2P_DUTY_LEDGER_ENTRIES);
-
-	uint32_t sum = 0;
-
-	for (uint8_t i = 0; i < d.count; i++) {
-		sum += d.entries[(d.head + i) % P2P_DUTY_LEDGER_ENTRIES].air_ms;
-	}
-	zassert_equal(sum, 60u * 70u, "folded ledger must still hold all 60 frames' air");
-
-	/* And the budget still refuses a frame that would exceed it. */
-	zassert_true(p2p_duty_wait_ms(&d, 60 * 60000 - 1, P2P_DUTY_BUDGET_MS) > 0,
-		     "a frame over the remaining budget must still wait");
-}
-
-/* Folding may only over-count: the oldest entry's air leaves the window with
- * its younger neighbour, never earlier. */
-ZTEST(p2p_logic, test_duty_fold_is_conservative)
-{
-	struct p2p_duty d;
-
-	p2p_duty_init(&d);
-	for (int i = 0; i < P2P_DUTY_LEDGER_ENTRIES; i++) {
-		p2p_duty_charge(&d, (int64_t)i * 1000, 10);
-	}
-	/* Full: the next admission folds entries 0 and 1 (end 0 ms and 1000 ms). */
-	zassert_equal(p2p_duty_wait_ms(&d, 50000, 10), 0);
-	p2p_duty_charge(&d, 50000, 10);
-
-	/* Just after entry 0's own expiry its 10 ms are still counted, because
-	 * they now leave with entry 1: all 49 frames (490 ms) are in the window,
-	 * so exactly the allowance minus 490 ms may still go. */
-	uint32_t remaining = P2P_DUTY_BUDGET_MS - (P2P_DUTY_LEDGER_ENTRIES + 1) * 10;
-
-	zassert_equal(p2p_duty_wait_ms(&d, P2P_DUTY_WINDOW_MS + 500, remaining), 0,
-		      "exactly the un-expired air must be counted");
-	zassert_true(p2p_duty_wait_ms(&d, P2P_DUTY_WINDOW_MS + 500, remaining + 1) > 0,
-		     "the folded older half must not have been released early");
-}
-
-/* Deterministic pseudo-random frame sizes: a failure has to be reproducible. */
-static uint32_t duty_rand(uint32_t *state)
-{
-	uint32_t x = *state;
-
-	x ^= x << 13;
-	x ^= x >> 17;
-	x ^= x << 5;
-	*state = x;
-	return x;
-}
-
-/* Static, not on the stack: 24 simulated hours of sends is a few thousand
- * records and this runs on native_sim. */
-static struct {
-	uint32_t end_ms;
-	uint32_t air_ms;
-} m_sent[4096];
-
-ZTEST(p2p_logic, test_duty_sliding_hour_never_exceeds_1pct)
-{
-	struct p2p_duty d;
-	uint32_t state = 0xC0FFEEu;
-	size_t n = 0;
-
-	p2p_duty_init(&d);
-
-	/* Hammer the ledger for 24 simulated hours, always trying to send, with
-	 * frame air-times spanning the real SF10 range (330..2296 ms). */
-	for (int64_t now = 0; now <= 24 * (int64_t)P2P_DUTY_WINDOW_MS; now += 1000) {
-		uint32_t air = 330 + (duty_rand(&state) % 1967);
-
-		while (p2p_duty_wait_ms(&d, now, air) == 0) {
-			p2p_duty_charge(&d, now, air);
-			zassert_true(n < ARRAY_SIZE(m_sent), "test record overflow");
-			m_sent[n].end_ms = (uint32_t)now;
-			m_sent[n].air_ms = air;
-			n++;
-			air = 330 + (duty_rand(&state) % 1967);
-		}
-	}
-
-	zassert_true(n > 100, "the simulation should have sent plenty, got %zu", n);
-
-	/* The guarantee, checked directly against the record rather than the
-	 * ledger's own arithmetic: for every transmission, the air radiated in
-	 * the hour ending at it -- itself included -- is within the allowance. */
-	for (size_t j = 0; j < n; j++) {
-		uint32_t sum = 0;
-
-		for (size_t i = 0; i <= j; i++) {
-			if (m_sent[j].end_ms - m_sent[i].end_ms < P2P_DUTY_WINDOW_MS) {
-				sum += m_sent[i].air_ms;
-			}
-		}
-		zassert_true(sum <= P2P_DUTY_BUDGET_MS,
-			     "sliding hour ending at send %zu (t=%u) radiated %u ms, over the "
-			     "%d ms allowance",
-			     j, m_sent[j].end_ms, sum, P2P_DUTY_BUDGET_MS);
-	}
-}
-
-/* Uptime is truncated to 32 bits in the ledger, so entries have to survive the
- * ~49.7-day wrap. A `now >= end_ms + WINDOW` formulation breaks here; the
- * unsigned-difference one does not. */
-ZTEST(p2p_logic, test_duty_wrap_safe)
-{
-	struct p2p_duty d;
-	const int64_t t = 0xFFFFFF00LL; /* 256 ms before the u32 wrap */
-
-	p2p_duty_init(&d);
-	p2p_duty_charge(&d, t, P2P_DUTY_BUDGET_MS);
-
-	/* Straddling the wrap, still inside the window: must stay blocked. */
-	zassert_true(p2p_duty_wait_ms(&d, t + 1000, 1) > 0,
-		     "an entry must still count after the uptime counter wraps");
-
-	int64_t wait = p2p_duty_wait_ms(&d, t + 1000, 1);
-
-	zassert_equal(wait, P2P_DUTY_WINDOW_MS - 1000, "wait wrong across the wrap: %lld", wait);
-
-	/* And expire correctly on the far side of it. */
-	zassert_equal(p2p_duty_wait_ms(&d, t + P2P_DUTY_WINDOW_MS, P2P_DUTY_BUDGET_MS), 0,
-		      "the entry must expire on schedule across the wrap");
-}
+/* The duty ledger itself is app_radio's since T2d: tests/radio_common. This
+ * suite stubs it (stubs.c) and checks what the backend asks and charges. */
 
 /* ---- JoinAccept reserved(4) radio assignment (D3) --------------------- */
 
@@ -683,8 +488,8 @@ ZTEST(p2p_logic, test_join_retry_stays_inside_the_boot_window)
 {
 	const uint32_t jitter = P2P_JOIN_RETRY_JITTER_MS;
 
-	/* The defect: p2p_duty_wait_ms returns "time until the oldest ledger entry
-	 * leaves the sliding hour" -- up to P2P_DUTY_WINDOW_MS when the 48-entry
+	/* The defect: app_radio_duty_wait_ms returns "time until the oldest ledger entry
+	 * leaves the sliding hour" -- up to APP_RADIO_DUTY_WINDOW_MS when the 48-entry
 	 * ring is full. A boot join that waited that long would be answered long
 	 * after its 120 s window closed, which is how a 120 s window was still
 	 * JOINING 7 m 38 s in on the bench (2026-09-10 §9). The wait is capped at
@@ -746,16 +551,16 @@ ZTEST(p2p_logic, test_slow_retry_waits_for_duty_and_stays_bounded)
 	/* The worst case the ledger can produce: a full 48-entry ring puts the
 	 * wait within a second of the whole sliding hour, three orders of
 	 * magnitude past the first backoff step. The duty wait has to come
-	 * through intact, and it is still bounded -- p2p_duty_wait_ms never
+	 * through intact, and it is still bounded -- app_radio_duty_wait_ms never
 	 * returns more than the window, and the backoff caps at the same value,
 	 * so their maximum is bounded too and the slow policy never oversleeps. */
-	int64_t d = p2p_join_retry_delay_ms(true, 999999, P2P_DUTY_WINDOW_MS - 1000,
+	int64_t d = p2p_join_retry_delay_ms(true, 999999, APP_RADIO_DUTY_WINDOW_MS - 1000,
 					    app_radio_rejoin_backoff_ms(0), jitter);
 
-	zassert_equal(d, P2P_DUTY_WINDOW_MS - 1000,
+	zassert_equal(d, APP_RADIO_DUTY_WINDOW_MS - 1000,
 		      "a near-window duty wait must survive a 60 s backoff, got %lld ms",
 		      (long long)d);
-	zassert_true(d <= P2P_DUTY_WINDOW_MS,
+	zassert_true(d <= APP_RADIO_DUTY_WINDOW_MS,
 		     "a slow retry wait of %lld ms must stay inside the sliding hour",
 		     (long long)d);
 }
@@ -851,23 +656,23 @@ ZTEST(p2p_logic, test_join_sweep_pass_air_fits_the_duty_budget)
 		total += (step == 0 ? P2P_JOIN_SF_ATTEMPTS : 1) * p2p_toa_ms(sf, join_req_len);
 	}
 
-	/* 2 x 535 (SF10) + 1151 + 288 + 2138 + 154 + 87. */
-	zassert_equal(total, 4888u, "a cfg-SF10 sweep pass should be 4888 ms of air, got %u ms",
+	/* 2 x 535 (SF10) + 1151 + 288 + 2139 + 155 + 88 (rounded up since T2d). */
+	zassert_equal(total, 4891u, "a cfg-SF10 sweep pass should be 4891 ms of air, got %u ms",
 		      total);
-	zassert_true(total < P2P_DUTY_BUDGET_MS / 4,
+	zassert_true(total < APP_RADIO_DUTY_1PCT_MS / 4,
 		     "a sweep pass (%u ms) must stay well inside the hourly budget", total);
 
-	/* The other edge of the same budget: SF12 JoinRequests are 2138 ms each
+	/* The other edge of the same budget: SF12 JoinRequests are 2139 ms each
 	 * at 42 B (as at 41 B), so the hour holds 16 of them and no more -- it was
 	 * 18 at 37 B, which is what the four extra identity bytes cost (#417). A sweep that
 	 * retried at SF12 more often than that would be blocked by the duty
 	 * ledger, not by its own policy. */
 	uint32_t sf12 = p2p_toa_ms(12, join_req_len);
 
-	zassert_true(16 * sf12 <= P2P_DUTY_BUDGET_MS, "16 SF12 joins (%u ms) must fit the hour",
+	zassert_true(16 * sf12 <= APP_RADIO_DUTY_1PCT_MS, "16 SF12 joins (%u ms) must fit the hour",
 		     16 * sf12);
-	zassert_true(17 * sf12 > P2P_DUTY_BUDGET_MS, "17 SF12 joins (%u ms) must not fit the hour",
-		     17 * sf12);
+	zassert_true(17 * sf12 > APP_RADIO_DUTY_1PCT_MS,
+		     "17 SF12 joins (%u ms) must not fit the hour", 17 * sf12);
 }
 
 /* ---- join episode: walking the sweep ---------------------------------- */
@@ -941,14 +746,11 @@ ZTEST(p2p_logic, test_join_duty_block_does_not_advance_the_sweep)
 
 	p2p_test_join_setup(10);
 
-	/* Exhaust the sliding-hour air-time budget so send_join_request() returns
-	 * -EAGAIN. (A full ring no longer refuses by itself -- it folds, F-P2P-1 --
-	 * so the budget is what has to run out.) */
-	struct p2p_duty *duty = p2p_test_get_duty();
-
-	p2p_duty_charge(duty, k_uptime_get(), P2P_DUTY_BUDGET_MS);
-
+	/* The common ledger (stubbed) holds the JoinRequest, so send_join_request()
+	 * returns -EAGAIN. */
+	test_duty_wait_ms = APP_RADIO_DUTY_WINDOW_MS / 2;
 	p2p_test_join_step();
+	test_duty_wait_ms = 0;
 
 	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
 	zassert_equal(sf, 10, "a duty bounce tried no SF, so the radio must stay on SF10, got SF%u",
@@ -1092,8 +894,9 @@ static int backend_send(enum app_radio_frame_kind kind, uint8_t flags,
 	return app_radio_p2p_backend.send(&f, res);
 }
 
-/* A radio fault is reported as one (app_radio retries it, LoRaWAN #219); the
- * duty cycle as -EAGAIN with the time until the ledger has room. */
+/* A radio fault is reported as one (app_radio retries it, LoRaWAN #219). The
+ * duty cycle is app_radio's (T2d): the backend charges every frame's air to
+ * the ledger, a failed TX too (the PA may have keyed). */
 ZTEST(p2p_logic, test_backend_send_result_mapping)
 {
 	struct app_radio_tx_result res = {0};
@@ -1103,26 +906,31 @@ ZTEST(p2p_logic, test_backend_send_result_mapping)
 	p2p_test_set_paired();
 	p2p_test_tx_reset();
 
+	/* 10 B body + 12 B header + 4 B tag at SF7, what airtime_ms() tells app_radio. */
+	const uint32_t air = p2p_toa_ms(7, 26);
+	uint32_t charges = test_duty_charges;
+	uint64_t charged = test_duty_charged_ms;
+
+	zassert_equal(app_radio_p2p_backend.airtime_ms(10), air, "airtime of a 10 B body");
+
 	test_lora_send_ret = -EIO;
 	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, &res), -EIO, "radio fault");
 	test_lora_send_ret = 0;
+	zassert_equal(test_duty_charges, charges + 1, "a failed TX is charged");
 	p2p_test_tx_reset();
 
 	sends = test_lora_send_count;
 	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, &res), 0, "sent");
 	zassert_equal(test_lora_send_count, sends + 1, "one frame on the air");
-	p2p_test_tx_reset();
+	zassert_equal(test_duty_charges, charges + 2, "the sent frame is charged");
+	zassert_equal(test_duty_charged_ms - charged, 2 * air, "both at their air");
 
-	/* A full hour of air: the next frame has to wait for it to age out. */
-	p2p_duty_charge(p2p_test_get_duty(), k_uptime_get(), P2P_DUTY_BUDGET_MS);
+	/* A held ledger is app_radio's to honour: the backend sends what it gets. */
+	test_duty_wait_ms = APP_RADIO_DUTY_WINDOW_MS / 2;
 	sends = test_lora_send_count;
-	zassert_equal(backend_send(APP_RADIO_FRAME_ALARM, APP_RADIO_FRAME_CONFIRMED, &res), -EAGAIN,
-		      "duty-cycle held");
-	zassert_true(res.wait_ms > P2P_DUTY_WINDOW_MS / 2, "waits for the window (%u ms)",
-		     res.wait_ms);
-	zassert_equal(test_lora_send_count, sends, "nothing on the air");
-
-	p2p_duty_init(p2p_test_get_duty());
+	(void)backend_send(APP_RADIO_FRAME_ALARM, APP_RADIO_FRAME_CONFIRMED, &res);
+	zassert_equal(test_lora_send_count, sends + 1, "the backend does not check the ledger");
+	test_duty_wait_ms = 0;
 	p2p_test_tx_reset();
 }
 

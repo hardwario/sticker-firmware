@@ -149,9 +149,9 @@ struct app_radio_status {
 	/* Link health now. */
 	uint32_t fail_streak;
 	uint32_t join_attempts;
-	uint32_t duty_blocked_s; /* 0 = not held by the duty cycle */
-	bool has_airtime;        /* P2P */
-	uint32_t airtime_hour_ms;
+	uint32_t duty_blocked_s;  /* 0 = not held by the duty cycle */
+	bool has_airtime;         /* the ledger runs (T2d: both radios) */
+	uint32_t airtime_hour_ms; /* air of the trailing hour */
 	/* Counters since boot (enum app_radio_counter) and their time base. */
 	uint32_t uptime_s;
 	uint32_t cnt[APP_RADIO_CNT_COUNT];
@@ -180,9 +180,6 @@ void app_radio_set_join_attempts(uint32_t n);
 /* Sends are (true) / are no longer (false) held by the duty cycle; the hold
  * time runs from the first `true`. */
 void app_radio_set_duty_held(bool held);
-/* P2P: airtime used in the sliding hour (duty ledger). */
-void app_radio_set_airtime(uint32_t ms);
-
 /* True when the link can carry an uplink now. */
 bool app_radio_is_ready(void);
 
@@ -335,6 +332,96 @@ static inline bool app_radio_link_check_due(uint32_t report_idx, int interval, b
 	return (report_idx % (uint32_t)interval) == 0U;
 }
 
+/* ---- Time on air (doc/plan/460 §2.7, T2d; shared by both radios) ------------
+ * Air time in ms of a LoRa frame with `len` PHY-payload bytes at `sf` and
+ * `bw_hz`: CR 4/5, an 8-symbol preamble (12 at SF5/SF6, which the SX126x driver
+ * forces), explicit header, CRC on. The arithmetic and the rounding up are
+ * LoRaMac's RadioTimeOnAir(), so the duty ledger charges a LoRaWAN frame
+ * exactly what the MAC charges its band. Integer-only (no FPU). Pure. */
+static inline uint32_t app_radio_lora_toa_ms(uint32_t sf, uint32_t bw_hz, size_t len)
+{
+	bool low_dr = (bw_hz == 125000U && sf >= 11) || (bw_hz == 250000U && sf == 12);
+	int32_t num = 8 * (int32_t)MIN(len, 255U) + 16 - 4 * (int32_t)sf + 20;
+	int32_t den = 4 * (int32_t)sf;
+	/* Preamble + 12 (4 sync symbols and the 8 base payload symbols); the 1/4
+	 * sync symbol is added below. */
+	uint32_t n_sym = 8 + 12;
+
+	if (sf <= 6) {
+		n_sym = 12 + 12 + 2; /* SF5/SF6: the longer preamble, 2 symbols more */
+	} else {
+		num += 8;
+		den = low_dr ? 4 * ((int32_t)sf - 2) : den;
+	}
+	n_sym += (uint32_t)((MAX(num, 0) + den - 1) / den) * 5;
+
+	/* (n_sym + 1/4) symbols of 2^sf / bw_hz s, in ms, rounded up. */
+	uint64_t num_ms = (uint64_t)(4 * n_sym + 1) * (1U << (sf - 2)) * 1000U;
+
+	return (uint32_t)((num_ms + bw_hz - 1) / bw_hz);
+}
+
+/* ---- Duty cycle (doc/plan/460 §2.7, T2d; shared by both radios) -------------
+ * One exact sliding-hour ledger in app_radio for the running radio: every
+ * frame is charged with its time on air when it leaves, and app_radio sends a
+ * frame only when the air of the trailing hour plus this frame fits the
+ * limit. A held frame waits exactly until it fits (-EAGAIN with that wait). */
+#define APP_RADIO_DUTY_WINDOW_MS 3600000U /* the sliding window: one hour */
+#define APP_RADIO_DUTY_1PCT_MS   36000U   /* 1 % of it */
+
+/* The allowance per sliding hour of the EU868 sub-band `freq_hz` is in, by the
+ * band plan of LoRaMac's RegionEU868 (ETSI EN 300 220): 863-865 MHz 0.1 %,
+ * 865-868.6 MHz 1 %, 868.7-869.2 MHz 0.1 %, 869.4-869.65 MHz 10 %, 869.7-870 MHz
+ * 1 %. A frequency in a gap or outside the band gets the strictest, 0.1 %. Pure. */
+static inline uint32_t app_radio_duty_budget_ms(uint32_t freq_hz)
+{
+	if ((freq_hz >= 865000000U && freq_hz <= 868600000U) ||
+	    (freq_hz >= 869700000U && freq_hz <= 870000000U)) {
+		return APP_RADIO_DUTY_1PCT_MS;
+	}
+	if (freq_hz >= 869400000U && freq_hz <= 869650000U) {
+		return APP_RADIO_DUTY_1PCT_MS * 10;
+	}
+	return APP_RADIO_DUTY_1PCT_MS / 10;
+}
+
+/* Ring capacity: one entry per transmission still inside the window. When the
+ * ring is full the two OLDEST entries are folded into one (summed air, the
+ * later end time) instead of making the frame wait for a slot, so the air-time
+ * budget, not the entry count, is the only limit (F-P2P-1). The folded entry
+ * leaves the window a little later than its older half would have, which can
+ * only over-count air, never under-count it: every sliding hour still stays
+ * within the limit. doc/p2p.md §6. */
+#define APP_RADIO_DUTY_LEDGER_ENTRIES 48
+
+struct app_radio_duty_entry {
+	uint32_t end_ms; /* uptime (ms, truncated) at which the frame finished */
+	uint32_t air_ms; /* its time on air; a folded entry holds the sum of two */
+};
+
+struct app_radio_duty {
+	struct app_radio_duty_entry entries[APP_RADIO_DUTY_LEDGER_ENTRIES];
+	uint32_t budget_ms; /* air allowed per sliding hour; 0 = no limit */
+	uint8_t head;       /* index of the oldest entry */
+	uint8_t count;      /* entries in use */
+};
+
+/* The running radio's limit per sliding hour (app_radio_duty_budget_ms(); 0 =
+ * none, a LoRaWAN region without a duty cycle, where the air is still counted
+ * for RadioState). Empties the ledger. From the backend's init. */
+void app_radio_duty_init(uint32_t budget_ms);
+
+/* Radio work queue: how long `air_ms` of air must still wait, 0 = it may go
+ * now. While it waits, the sends count as duty-held (RadioState
+ * duty_blocked_s). app_radio checks every frame it sends; a backend checks
+ * only a frame of its own (a P2P JoinRequest). */
+int64_t app_radio_duty_wait_ms(uint32_t air_ms);
+
+/* Radio work queue: `air_ms` of air just went out (or may have: a failed TX
+ * that keyed the PA). Charged to the ledger; the duty cycle holds nothing
+ * now. */
+void app_radio_duty_charge(uint32_t air_ms);
+
 /* ---- Uplink frames, queues and scheduler (doc/plan/460 §2.2, F4) ----------
  * One TX path for both radios. Answers (command responses, Info,
  * settings-info) and alarm batches wait in two queues of
@@ -427,6 +514,10 @@ struct app_radio_backend {
 	 * uplink of its own. The backend calls app_radio_time_event() when the
 	 * time lands. */
 	void (*time_request)(void);
+	/* Time on air (ms) of an uplink carrying `len` payload bytes now, for the
+	 * duty ledger: P2P at its SF with header and tag, LoRaWAN at its DR with
+	 * the frame header and the pending MAC answers (T2d). */
+	uint32_t (*airtime_ms)(size_t len);
 	/* The kinds sent confirmed, BIT(enum app_radio_frame_kind). Alarms are
 	 * not the backend's: radio-alarm-ack decides them on both radios. */
 	uint8_t confirm_kinds;
@@ -548,6 +639,13 @@ void app_radio_test_cmd_reset(void);
 void app_radio_test_air_reset(void);
 /* Cancel the clock_sync work items and forget a pending request. */
 void app_radio_test_clock_sync_reset(void);
+/* The pure ledger under app_radio_duty_*() (tests/radio_common). */
+void app_radio_ledger_init(struct app_radio_duty *d, uint32_t budget_ms);
+void app_radio_ledger_charge(struct app_radio_duty *d, int64_t now_ms, uint32_t air_ms);
+int64_t app_radio_ledger_wait_ms(struct app_radio_duty *d, int64_t now_ms, uint32_t air_ms);
+uint32_t app_radio_ledger_used_ms(const struct app_radio_duty *d, int64_t now_ms);
+/* Charge the running ledger with `air_ms` of air that ended at uptime `end_ms`. */
+void app_radio_test_duty_charge_at(int64_t end_ms, uint32_t air_ms);
 #endif
 
 /* Stage a command response for the next uplink. */
