@@ -595,8 +595,8 @@ parameters:
   # Today only LoRaWAN reads them; P2P keeps its own fixed thresholds until its
   # link-health machine lands. proto_group/proto_id are UNCHANGED (wire-compatible with the
   # deployed LoRaWAN fleet; Hub/Portal only use field numbers on the wire).
-  # legacy_names covers the one-shot NVS migration (old settings key ->
-  # new field) generated into h_set()/init() -- see config.c.j2.
+  # No NVS migration: a value stored under the old name is not carried over
+  # (the defaults 5 / 5 apply).
   - name: radio_link_check_interval
     proto_group: lorawan
     writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
@@ -605,7 +605,6 @@ parameters:
     default: 5
     min: 0
     max: 255
-    legacy_names: [lrw_link_check_interval]
     help: "Get/Set link-check cadence: request a LoRaWAN LinkCheckReq every N-th uplink (0 = disabled). P2P does not use it yet."
 
   - name: radio_link_check_fail_rejoin
@@ -616,7 +615,6 @@ parameters:
     default: 5
     min: 1
     max: 255
-    legacy_names: [lrw_link_check_fail_rejoin]
     help: "Get/Set link-check failures (while degraded) before a LoRaWAN OTAA rejoin is attempted. P2P does not use it yet."
 
   - name: cap_hall_left
