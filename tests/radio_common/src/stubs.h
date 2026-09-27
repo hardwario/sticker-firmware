@@ -26,6 +26,21 @@ extern size_t g_budget_error_cap;
 extern int g_budget_error_calls;
 extern int g_alarm_flush_calls;
 
+/* app_cmd, scripted for the downlink path (F3): app_cmd_handle() answers
+ * g_cmd_resp_len bytes {0xa0, request byte 0, ...} with g_cmd_action; a page
+ * stream has g_stream_pages pages {0xc0, page index} left. */
+extern int g_cmd_handle_calls;
+extern int g_cmd_transport;
+extern size_t g_cmd_out_cap;
+extern size_t g_cmd_resp_len;
+extern int g_cmd_action;
+extern int g_stream_pages;
+extern int g_stream_next_calls;
+extern int g_stream_cancel_calls;
+extern int g_run_action_calls;
+extern int g_run_action_last;
+extern int64_t g_run_action_at_ms;
+
 void stubs_reset(void);
 
 #endif /* STUBS_H_ */

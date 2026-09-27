@@ -77,11 +77,6 @@ void app_radio_lrw_send_info_on_clock_sync(uint32_t seq);
  * seq-carrying Info once the time lands. */
 void app_radio_lrw_clock_sync(uint32_t seq);
 
-/* Hooks of the common boot/join announce (app_radio_announce_run(),
- * doc/plan/439 T3): run it on the radio work queue, start the page stream. */
-void app_radio_lrw_announce_kick(void);
-void app_radio_lrw_page_stream_kick(void);
-
 /* Start a device-driven history replay (issue #52): stream every stored record
  * in [from_unix, to_unix] back as N HistoryFrame uplinks on the command port,
  * back-to-back ASAP (duty-cycle permitting), echoing `seq`. Returns 0 when a

@@ -386,8 +386,14 @@ struct app_radio_backend {
 	 * WARNING budget ran out. Returns 0, or -ENOTSUP when this node cannot
 	 * rejoin (LoRaWAN ABP, P2P unprovisioned). */
 	int (*rejoin)(bool forced);
+	/* A transmitted confirmed frame still waits for its Ack or a retry, so a
+	 * post-command reboot must wait too. NULL: never (LoRaWAN's send blocks
+	 * for the whole confirmed exchange). */
+	bool (*in_flight)(void);
 	/* The kinds sent confirmed, BIT(enum app_radio_frame_kind). */
 	uint8_t confirm_kinds;
+	/* enum app_cmd_transport of this radio's command downlinks. */
+	uint8_t cmd_transport;
 	/* Pause between the frames of one report (covers the receive windows). */
 	uint16_t frame_gap_ms;
 };
@@ -410,6 +416,18 @@ uint32_t app_radio_tx_answer_free(void);
 /* Radio work queue: payload room (bytes) of the next answer, at most
  * `buf_size` and APP_RADIO_TX_SLOT_SIZE. */
 size_t app_radio_tx_answer_cap(size_t buf_size);
+
+/* ---- Downlink commands (doc/plan/460 §2.5, F3) ----------------------------
+ * One path for both radios. The backend hands over an authenticated command
+ * downlink; app_radio runs it through app_cmd_handle(), queues the answer, and
+ * streams the remaining pages of an answer that does not fit (one page every
+ * 2 s while two answer slots stay free). A deferred action (save, reboot,
+ * reset, rejoin) runs through app_cmd_run_action() only once the answer was
+ * delivered: re-checked every 8 s while an answer is queued or a confirmed
+ * frame is in flight, at most 6 times. */
+
+/* Radio work queue: dispatch a command downlink. */
+void app_radio_downlink(const uint8_t *buf, size_t len);
 
 /* ---- Link supervision (doc/plan/460 §2.4, F2; decision #22 §3.4) ---------
  * One machine for both radios. A link check is a report the cadence picked
@@ -471,6 +489,8 @@ void app_radio_test_tx_reset(void);
 void app_radio_test_link_reset(void);
 /* One M-2 stale-uplink check at uptime `now_ms`, as the heartbeat runs it. */
 void app_radio_test_stale_tick(int64_t now_ms);
+/* Cancel the downlink and announce work items and clear their state. */
+void app_radio_test_cmd_reset(void);
 #endif
 
 /* Stage a command response for the next uplink. */
@@ -494,10 +514,14 @@ void app_radio_suspend(void);
  * current budget, and only then the first telemetry (held until every page is
  * queued; 60 s after the spread at the latest). A frame that does not fit
  * yet, or that waits for a running page stream, stays pending and goes out on
- * a later
- * app_radio_announce_run(): the backend runs it on its work queue whenever
- * room may have appeared (link up, DR rise, page stream end, queue space). */
+ * a later run on the radio work queue: when a page stream ends, when the
+ * backend reports room (app_radio_announce_kick()), and every 5 s while
+ * something stays pending. */
 void app_radio_announce(void);
+
+/* Backend: room may have appeared (LoRaWAN DR rise); run a pending announce
+ * now. No-op when nothing is pending. */
+void app_radio_announce_kick(void);
 
 /* Something of the announce is still to be sent, or its last pages are still
  * streaming (the held first telemetry waits for the run after the stream). */
@@ -513,10 +537,6 @@ void app_radio_announce_rearm(bool settings);
  * app_alarm_flush_held()); -1 = the link is down, the next link-up's announce
  * releases it. */
 int32_t app_radio_data_hold_ms(void);
-
-/* Backend work queue only: send what is pending while the link is up. Returns
- * true while something stays pending that a later run can send. */
-bool app_radio_announce_run(void);
 
 /* Backend work queue only: an Info carrying `seq` (the clock_sync answer),
  * paged like the announce. When not even page 0 can go now, the seq-0

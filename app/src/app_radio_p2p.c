@@ -9,7 +9,6 @@
 #include "app_cmd.h"
 #include "app_compose.h"
 #include "app_config.h"
-#include "app_counters.h"
 #include "app_history.h"
 #include "app_log.h"
 #include "app_radio_lrw.h"
@@ -26,7 +25,6 @@
 #include <zephyr/random/random.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
-#include <zephyr/sys/reboot.h>
 #include <zephyr/sys/util.h>
 
 /* Standard includes */
@@ -333,10 +331,8 @@ static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 
 /* All work runs on the radio work queue, app_radio_work_q() (doc/plan/439 T2a). Its
  * 4096 B stack is sized for this module's deepest path, a 0x56 command:
- * recv_ack() -> dispatch_p2p_command() -> app_cmd_handle() and nanopb (app_radio.c). */
-static struct k_work_delayable m_join_work;     /* JoinRequest attempt + retry (#118 phase 2) */
-static struct k_work_delayable m_announce_work; /* common Info + settings-info announce */
-static void announce_work_handler(struct k_work *work);
+ * recv_ack() -> app_radio_downlink() -> app_cmd_handle() and nanopb (app_radio.c). */
+static struct k_work_delayable m_join_work; /* JoinRequest attempt + retry (#118 phase 2) */
 
 /* F-P1-1: the central keeps a strict counter high-water, so frames must leave
  * in counter order. Two rules keep them there, as on LoRaWAN (a confirmed
@@ -1748,202 +1744,6 @@ static int tx_frame(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, size
 	return ret;
 }
 
-/* B4 deferred command actions. A command handler that asks for a reboot or a
- * settings save must not have it happen before the 0x55 RESPONSE has actually
- * left and been acknowledged, or the operator gets no answer and (for
- * settings_save) the staged config is lost. Same problem and same shape as
- * app_radio_lrw.c's post_cmd_work_handler(); the log strings are deliberately
- * identical so one bench anchor matches both transports.
- *
- * The wait is bounded: a permanently failing TX must not postpone the
- * commanded action forever. 8 s covers a successful send plus its RX1 window;
- * a duty-cycle-blocked first attempt reschedules on a longer timer than that,
- * which is why the handler re-checks instead of firing once.
- *
- * P2P watches one more "not delivered yet" signal than LoRaWAN: besides the
- * answer app_radio still holds (queued, or waiting out the duty cycle), one
- * transmitted and awaiting a confirmation retry (m_ack_retry_msgq). */
-#define POST_CMD_DRAIN_WAIT_SEC      8
-#define POST_CMD_DRAIN_MAX_DEFERRALS 6
-
-static enum app_cmd_action m_post_cmd_action;
-static uint8_t m_post_cmd_deferrals;
-static struct k_work_delayable m_post_cmd_work;
-
-/* Kept in lockstep with app_radio_lrw.c::post_cmd_work_handler() and main.c's NFC
- * equivalent so the three dispatch tables cannot drift. Only the actions a
- * 0x56 can actually reach appear here (app_cmd.c::app_cmd_dispatch leaves
- * exactly these ungated for APP_CMD_TRANSPORT_P2P); everything else is
- * rejected before it ever produces an action, so it falls to `default`. */
-static void post_cmd_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	if ((app_radio_tx_answer_pending() || k_msgq_num_used_get(&m_ack_retry_msgq) > 0) &&
-	    m_post_cmd_deferrals < POST_CMD_DRAIN_MAX_DEFERRALS) {
-		m_post_cmd_deferrals++;
-		LOG_WRN("Post-command action %d deferred: Ack still undelivered (%u/%u)",
-			(int)m_post_cmd_action, (unsigned)m_post_cmd_deferrals,
-			(unsigned)POST_CMD_DRAIN_MAX_DEFERRALS);
-		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
-					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
-		return;
-	}
-
-	switch (m_post_cmd_action) {
-	case APP_CMD_ACTION_SETTINGS_SAVE:
-		LOG_INF("Command: saving settings + reboot");
-		app_settings_save(true);
-		break;
-	case APP_CMD_ACTION_REBOOT:
-		LOG_WRN_REBOOTING("command");
-		sys_reboot(SYS_REBOOT_COLD);
-		break;
-	case APP_CMD_ACTION_COUNTERS_SAVE:
-		LOG_INF("Command: saving counters");
-		app_counters_save(true);
-		break;
-	case APP_CMD_ACTION_LRW_RESET:
-		/* lrw_reset = "forget the network session" on every stack
-		 * (app_radio_reset_link()): the P2P pairing -- the next boot joins
-		 * afresh, like a LoRaWAN node after its NVM wipe -- and the LoRaWAN
-		 * NVM where that stack is built. The Ack has already left. */
-		app_radio_reset_link();
-		LOG_WRN_REBOOTING("command: radio session reset");
-		sys_reboot(SYS_REBOOT_COLD);
-		break;
-	case APP_CMD_ACTION_LRW_JOIN:
-		/* lrw_join = "join the network again now" on whichever radio runs
-		 * (app_radio_rejoin()): here a fresh P2P join handshake, no reboot,
-		 * the same as after a LoRaWAN lrw_join. The Ack has already left. */
-		LOG_INF("Command: forced P2P rejoin");
-		app_radio_rejoin();
-		break;
-	default:
-		break;
-	}
-}
-
-/* #425 step 7: the P2P driver of the universal page stream. An answer that
- * does not fit one 0x55 RESPONSE (APP_RADIO_TX_SLOT_SIZE) is sent as page 0
- * plus APP_CMD_ACTION_PAGE_STREAM; this work item then queues the remaining
- * pages (same seq, Response.page_index/page_count) one per run, only while the
- * answer queue keeps a slot free for other answers, paced by the send path and
- * the B2 duty governor. A lost pairing cancels the stream. */
-#define P2P_PAGE_STREAM_PACE_SEC 2
-
-static struct k_work_delayable m_page_stream_work;
-
-static void page_stream_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	if (m_link_state != P2P_LINK_PAIRED) {
-		app_cmd_stream_cancel();
-		return;
-	}
-	if (app_radio_tx_answer_free() < 2) {
-		k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
-					  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
-		return;
-	}
-
-	uint8_t buf[APP_RADIO_TX_SLOT_SIZE];
-	size_t len;
-	int ret = app_cmd_stream_next(buf, sizeof(buf), &len);
-
-	if (ret == -ENODATA || ret) {
-		if (ret != -ENODATA) {
-			LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
-		}
-		/* All pages queued (or the stream died): an announce frame may have
-		 * waited for it. */
-		if (app_radio_announce_pending()) {
-			app_radio_p2p_announce_kick();
-		}
-		return;
-	}
-	(void)app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_CMD_RESPONSE, 0, buf, len);
-	k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
-				  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
-}
-
-/* B4: dispatch a received 0x56 COMMAND (already decrypted into `body`) through
- * the transport-generic command handler and queue the 0x55 RESPONSE for the
- * next uplink. P2P reuses the LoRaWAN over-the-air writability gating --
- * APP_CMD_TRANSPORT_P2P shares the M-3 no_write_lrw field gate (configen), and
- * the command-level allow-lists reject P2P for every LRW/NFC/vendor-only
- * command (positive `tp == ...` checks), so the commands that run here are
- * exactly those carrying no `transports:` guard at all: set_param, get_param,
- * get_info, get_config, settings_save, reboot, reset_counters, w1_scan,
- * lrw_reset and lrw_join -- the last two are LoRaWAN-specific yet ungated, so
- * a 0x56 does reach them.
- *
- * A deferred command action is handed to post_cmd_work_handler() above, which
- * waits for the 0x55 to be delivered and acknowledged before executing it.
- *
- * `seq` correlation is already in place and needs nothing here: the central
- * stamps every structured Command with a nonzero `seq` from its per-node
- * allocator, and the generated app_cmd_dispatch() copies it onto the Response
- * unconditionally. The central clears its queue head only on a Response whose
- * `seq` matches, and re-announces the same bytes after three further uplinks
- * without one -- so a lost 0x55 costs a retry, never a silently dropped
- * command. Node-side idempotency is what makes that safe: get_* are pure,
- * set_param with an unchanged value is a no-op, and settings_save/reboot run
- * only after the response was acknowledged (or the bounded drain expired), so
- * a redelivered command cannot reboot a node whose answer was already in
- * flight (doc/p2p.md §6). */
-static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
-{
-	uint8_t resp[APP_RADIO_TX_SLOT_SIZE];
-	size_t resp_len = 0;
-	enum app_cmd_action action = APP_CMD_ACTION_NONE;
-
-	int ret = app_cmd_handle(APP_CMD_TRANSPORT_P2P, body, body_len, resp,
-				 app_radio_tx_answer_cap(sizeof(resp)), &resp_len, &action);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_cmd_handle(p2p)", ret);
-		return;
-	}
-
-	if (resp_len > 0) {
-		(void)app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_CMD_RESPONSE, 0,
-					 resp, resp_len);
-	}
-
-	if (action == APP_CMD_ACTION_PAGE_STREAM) {
-		/* #425: the remaining pages follow page 0 by themselves. */
-		k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
-					  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
-		action = APP_CMD_ACTION_NONE;
-	}
-
-	/* Defer so the 0x55 uplink and its RX window finish first;
-	 * post_cmd_work_handler() extends the wait (bounded) while the response
-	 * is still queued or retrying, so a duty-cycle backoff cannot lose it to
-	 * a reboot. */
-	if (action != APP_CMD_ACTION_NONE) {
-		m_post_cmd_action = action;
-		m_post_cmd_deferrals = 0;
-		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
-					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
-		LOG_INF("Post-command action %d scheduled in %ds", (int)action,
-			POST_CMD_DRAIN_WAIT_SEC);
-	}
-
-#if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
-	/* The deepest thing the radio work queue does on P2P (see the comment
-	 * on RADIO_WQ_STACK_SIZE in app_radio.c), so this is where its real
-	 * high-water shows. Same probe app_radio_lrw.c keeps
-	 * at the end of its own command handler. */
-	size_t unused;
-
-	if (k_thread_stack_space_get(k_current_get(), &unused) == 0) {
-		LOG_INF("Radio work queue stack: %zu B unused after cmd handle", unused);
-	}
-#endif /* defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO) */
-}
-
 /* Report the node-measured quality of an authenticated downlink to app_radio
  * (RadioState, #446). */
 static void note_downlink(int16_t rssi, int8_t snr)
@@ -2009,7 +1809,7 @@ P2P_TESTABLE void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter
  *    length (self-describing). The pending flag (bit 0) sizes the NEXT uplink's
  *    window for a command (B4).
  *  - Command (0x56, B4): only when a pending downlink was announced -- decrypt,
- *    dispatch (dispatch_p2p_command), and treat as an implicit Ack.
+ *    dispatch (app_radio_downlink), and treat as an implicit Ack.
  * Returns true iff a valid, matching downlink was received. */
 static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 {
@@ -2151,7 +1951,7 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 		note_downlink(rssi, snr);
 		LOG_INF("Command received (counter %u, %zu B) dl_rssi=%d dl_snr=%d", counter,
 			body_len, rssi, snr);
-		dispatch_p2p_command(body, body_len);
+		app_radio_downlink(body, body_len);
 
 		/* The command replaced this uplink's Ack; receiving it confirms the
 		 * uplink reached the central. The 0x55 response is now queued; the
@@ -2432,6 +2232,13 @@ static bool p2p_tx_replay_active(void)
 	return m_hist_active;
 }
 
+/* struct app_radio_backend.in_flight: a transmitted confirmed frame still waits
+ * for its Ack retries (m_ack_retry_msgq), so a post-command reboot waits too. */
+static bool p2p_tx_in_flight(void)
+{
+	return k_msgq_num_used_get(&m_ack_retry_msgq) > 0;
+}
+
 const struct app_radio_backend app_radio_p2p_backend = {
 	.send = p2p_tx_send,
 	.budget = p2p_tx_budget,
@@ -2441,11 +2248,13 @@ const struct app_radio_backend app_radio_p2p_backend = {
 	.get_state = app_radio_p2p_get_state,
 	.warning_step = warning_tx_power_step,
 	.rejoin = p2p_tx_rejoin,
+	.in_flight = p2p_tx_in_flight,
 	/* §6: answers, alarms and history frames are confirmed; telemetry only
 	 * the N-th report (report_flags). */
 	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_ALARM) |
 			 BIT(APP_RADIO_FRAME_HISTORY),
 	.frame_gap_ms = 0, /* P2P_TX_GAP_MS after an Ack window is taken in tx_frame_at() */
+	.cmd_transport = APP_CMD_TRANSPORT_P2P,
 };
 
 /* ======================================================================== */
@@ -3090,7 +2899,7 @@ bool app_radio_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, ui
 
 	/* A request we are already answering. Over P2P this arrives from inside the
 	 * replay's own call stack -- hist_work_handler -> send_confirmed ->
-	 * recv_ack -> dispatch_p2p_command -> app_cmd_handle ->
+	 * recv_ack -> app_radio_downlink -> app_cmd_handle ->
 	 * app_cmd_handle_req_history -> here -- because the node dispatches the
 	 * 0x56 it receives while waiting for its own frame's Ack. Re-seeding the
 	 * cursor here would leave the outer hist_work_handler to write its stale
@@ -3155,7 +2964,6 @@ static void test_queue_start_once(void)
 	}
 	k_work_init_delayable(&m_hist_work, hist_work_handler);
 	k_work_init_delayable(&m_join_work, join_work_handler);
-	k_work_init_delayable(&m_announce_work, announce_work_handler);
 	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
 	started = true;
 }
@@ -3429,9 +3237,6 @@ int app_radio_p2p_init(void)
 
 	k_work_init_delayable(&m_join_work, join_work_handler);
 	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
-	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
-	k_work_init_delayable(&m_page_stream_work, page_stream_work_handler);
-	k_work_init_delayable(&m_announce_work, announce_work_handler);
 	k_work_init_delayable(&m_hist_work, hist_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
@@ -3587,30 +3392,7 @@ void app_radio_p2p_rejoin(void)
 	start_join_episode(false);
 }
 
-/* ---- Boot/join announce and clock_sync hooks (app_radio, doc/plan/439 T3) --- */
-
-/* Retry pace while the announce waits for TX-queue room or a page stream. */
-#define P2P_ANNOUNCE_RETRY_SEC 5
-
-static void announce_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	if (app_radio_announce_run()) {
-		k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work,
-					    K_SECONDS(P2P_ANNOUNCE_RETRY_SEC));
-	}
-}
-
-void app_radio_p2p_announce_kick(void)
-{
-	k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work, K_NO_WAIT);
-}
-
-void app_radio_p2p_page_stream_kick(void)
-{
-	k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
-				  K_SECONDS(P2P_PAGE_STREAM_PACE_SEC));
-}
+/* ---- clock_sync hook (app_radio, doc/plan/439 T3) -------------------------- */
 
 void app_radio_p2p_clock_sync(uint32_t seq)
 {

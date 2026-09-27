@@ -14,6 +14,7 @@
 
 #include "stubs.h"
 
+#include "app_cmd.h"
 #include "app_config.h"
 #include "app_radio.h"
 
@@ -57,6 +58,7 @@ static struct {
 	int rejoin_ret;
 	int rejoin_calls;
 	bool rejoin_forced;
+	bool in_flight; /* a confirmed frame waits for its Ack retries (P2P) */
 	/* After this many send() calls (0 = never): */
 	size_t drop_link_after;
 	size_t zero_budget_after;
@@ -119,6 +121,7 @@ struct profile {
 	uint8_t budget;
 	uint8_t queued_flags; /* flags of a queued answer or alarm */
 	uint8_t due_flag;     /* how a link check rides a report */
+	int transport;        /* enum app_cmd_transport of its downlinks */
 };
 
 static const struct profile *m_prof;
@@ -156,6 +159,11 @@ static bool fake_replay_active(void)
 	return fk.replay;
 }
 
+static bool fake_in_flight(void)
+{
+	return fk.in_flight;
+}
+
 static const struct app_radio_backend be_lrw = {
 	.send = fake_send,
 	.budget = fake_budget,
@@ -167,6 +175,7 @@ static const struct app_radio_backend be_lrw = {
 	.rejoin = fake_rejoin,
 	.confirm_kinds = 0,
 	.frame_gap_ms = 3000,
+	.cmd_transport = APP_CMD_TRANSPORT_LRW,
 };
 
 static const struct app_radio_backend be_p2p = {
@@ -178,14 +187,17 @@ static const struct app_radio_backend be_p2p = {
 	.get_state = fake_get_state,
 	.warning_step = fake_warning_step,
 	.rejoin = fake_rejoin,
+	.in_flight = fake_in_flight,
 	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_ALARM) |
 			 BIT(APP_RADIO_FRAME_HISTORY),
 	.frame_gap_ms = 0,
+	.cmd_transport = APP_CMD_TRANSPORT_P2P,
 };
 
-static const struct profile PROFILE_LRW = {&be_lrw, 51, 0, APP_RADIO_FRAME_LINK_CHECK};
+static const struct profile PROFILE_LRW = {&be_lrw, 51, 0, APP_RADIO_FRAME_LINK_CHECK,
+					   APP_CMD_TRANSPORT_LRW};
 static const struct profile PROFILE_P2P = {&be_p2p, 239, APP_RADIO_FRAME_CONFIRMED,
-					   APP_RADIO_FRAME_CONFIRMED};
+					   APP_RADIO_FRAME_CONFIRMED, APP_CMD_TRANSPORT_P2P};
 
 static void use_profile(const struct profile *p)
 {
@@ -271,6 +283,7 @@ static void before(void *f)
 	ARG_UNUSED(f);
 	app_radio_test_tx_reset();
 	app_radio_test_link_reset();
+	app_radio_test_cmd_reset();
 	stubs_reset();
 	memset(&fk, 0, sizeof(fk));
 	fk.ready = true;
@@ -285,6 +298,7 @@ static void after(void *f)
 	ARG_UNUSED(f);
 	fk.ready = false;
 	k_sleep(K_MSEC(10)); /* a report request still on the system work queue */
+	app_radio_test_cmd_reset();
 	app_radio_test_tx_reset();
 	app_radio_test_link_reset();
 }
@@ -1251,3 +1265,222 @@ ZTEST(radio_common, test_backoff_jitter_spreads_and_keeps_the_floor)
 		      "the floor wins over a negative draw");
 	zassert_equal(app_radio_backoff_jitter_ms(1000, 0, base, 0), 0, "never negative");
 }
+
+/* ---- Downlink commands (F3) ------------------------------------------------ */
+
+static const uint8_t m_cmd[] = {0x42, 0x01};
+
+/* A command runs through app_cmd with the radio's own transport, capped to the
+ * uplink budget, and its answer goes on the command port. */
+static void downlink_answer_rides_the_command_path(void)
+{
+	g_cmd_resp_len = 10;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_SECONDS(1));
+	zassert_equal(g_cmd_handle_calls, 1);
+	zassert_equal(g_cmd_transport, m_prof->transport, "the radio's own transport");
+	zassert_equal(g_cmd_out_cap, MIN(m_prof->budget, APP_RADIO_TX_SLOT_SIZE),
+		      "capped to the uplink budget");
+	zassert_equal(fk.n, 1);
+	zassert_equal(fk.log[0].kind, APP_RADIO_FRAME_ANSWER);
+	zassert_equal(fk.log[0].tag, APP_RADIO_TAG_CMD_RESPONSE);
+	zassert_equal(fk.log[0].port, 0, "the command port");
+	zassert_equal(fk.log[0].len, 10);
+	zassert_equal(fk.log[0].head[0], 0xa0);
+	zassert_equal(fk.log[0].head[1], 0x42);
+	zassert_equal(fk.log[0].flags, m_prof->queued_flags);
+	k_sleep(K_SECONDS(9));
+	zassert_equal(g_run_action_calls, 0, "no deferred action");
+}
+BOTH_PROFILES(downlink_answer_rides_the_command_path)
+
+/* A deferred action waits for its answer: held by the duty cycle for 10 s, the
+ * answer misses the first 8 s check and the action runs at the next one. */
+static void action_runs_after_the_answer_left(void)
+{
+	const int r[] = {-EAGAIN};
+	int64_t t0 = k_uptime_get();
+
+	script(r, ARRAY_SIZE(r));
+	fk.wait_ms = 10000;
+	g_cmd_resp_len = 10;
+	g_cmd_action = APP_CMD_ACTION_SETTINGS_SAVE;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_SECONDS(12));
+	zassert_equal(fk.n, 2, "the answer left on its second try");
+	zassert_equal(fk.log[1].ret, 0);
+	zassert_equal(g_run_action_calls, 0, "deferred past the first check");
+	k_sleep(K_SECONDS(6));
+	zassert_equal(g_run_action_calls, 1);
+	zassert_equal(g_run_action_last, APP_CMD_ACTION_SETTINGS_SAVE);
+	zassert_true(g_run_action_at_ms > fk.log[1].at_ms, "after the answer");
+	zassert_within(g_run_action_at_ms - t0, 16000, 500, "at the second check (%lld ms)",
+		       (long long)(g_run_action_at_ms - t0));
+}
+BOTH_PROFILES(action_runs_after_the_answer_left)
+
+/* An answer that never leaves postpones the action six times at most. */
+static void action_waits_six_times_at_most(void)
+{
+	int64_t t0 = k_uptime_get();
+
+	script_fill(-EAGAIN, LOG_MAX);
+	fk.wait_ms = 5000;
+	g_cmd_resp_len = 10;
+	g_cmd_action = APP_CMD_ACTION_REBOOT;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_SECONDS(50));
+	zassert_equal(g_run_action_calls, 0, "still deferring");
+	k_sleep(K_SECONDS(10));
+	zassert_equal(g_run_action_calls, 1, "ran after the last deferral");
+	zassert_within(g_run_action_at_ms - t0, 56000, 500, "8 s + 6 x 8 s (%lld ms)",
+		       (long long)(g_run_action_at_ms - t0));
+}
+BOTH_PROFILES(action_waits_six_times_at_most)
+
+/* A confirmed frame still retrying holds the action where the backend has
+ * one in flight (P2P); LoRaWAN's send covers the whole exchange. */
+static void action_waits_for_a_frame_in_flight(void)
+{
+	bool waits = m_prof->be->in_flight != NULL;
+
+	fk.in_flight = true;
+	g_cmd_action = APP_CMD_ACTION_COUNTERS_SAVE;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_SECONDS(9));
+	zassert_equal(g_run_action_calls, waits ? 0 : 1);
+	fk.in_flight = false;
+	k_sleep(K_SECONDS(8));
+	zassert_equal(g_run_action_calls, 1);
+	zassert_equal(g_run_action_last, APP_CMD_ACTION_COUNTERS_SAVE);
+}
+BOTH_PROFILES(action_waits_for_a_frame_in_flight)
+
+/* The pages of an answer that did not fit follow page 0 by themselves, one
+ * every 2 s; the stream is no action to run. */
+static void page_stream_follows_page_0(void)
+{
+	g_cmd_resp_len = 10;
+	g_cmd_action = APP_CMD_ACTION_PAGE_STREAM;
+	g_stream_pages = 3;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_SECONDS(9));
+	zassert_equal(fk.n, 4, "page 0 and three more");
+	zassert_equal(fk.log[0].head[0], 0xa0);
+	for (size_t i = 1; i < 4; i++) {
+		zassert_equal(fk.log[i].kind, APP_RADIO_FRAME_ANSWER);
+		zassert_equal(fk.log[i].tag, APP_RADIO_TAG_CMD_RESPONSE);
+		zassert_equal(fk.log[i].head[0], 0xc0);
+		zassert_equal(fk.log[i].head[1], i - 1);
+	}
+	assert_spacing(0, 3, 2000);
+	zassert_equal(g_stream_cancel_calls, 0);
+	k_sleep(K_SECONDS(8));
+	zassert_equal(g_run_action_calls, 0, "PAGE_STREAM is not run");
+}
+BOTH_PROFILES(page_stream_follows_page_0)
+
+/* The stream never takes the last two answer slots: an alarm answer and
+ * another answer must always fit between its pages. */
+static void page_stream_leaves_two_answer_slots(void)
+{
+	fk.ready = false;
+	queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 8, 0xb1);
+	queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 8, 0xb2);
+	g_cmd_resp_len = 10;
+	g_cmd_action = APP_CMD_ACTION_PAGE_STREAM;
+	g_stream_pages = 2;
+	app_radio_downlink(m_cmd, sizeof(m_cmd)); /* page 0: one slot left */
+	k_sleep(K_SECONDS(6));
+	zassert_equal(g_stream_next_calls, 0, "no page while fewer than two slots are free");
+	zassert_equal(app_radio_tx_answer_free(), 1);
+
+	fk.ready = true;
+	app_radio_tx_kick();
+	k_sleep(K_SECONDS(8));
+	zassert_equal(fk.n, 5, "the queue drained, then both pages");
+	zassert_equal(fk.log[3].head[0], 0xc0);
+	zassert_equal(fk.log[4].head[0], 0xc0);
+}
+BOTH_PROFILES(page_stream_leaves_two_answer_slots)
+
+/* A lost link ends the stream: the next link-up starts from scratch. */
+static void page_stream_cancelled_by_a_lost_link(void)
+{
+	g_cmd_resp_len = 10;
+	g_cmd_action = APP_CMD_ACTION_PAGE_STREAM;
+	g_stream_pages = 3;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	k_sleep(K_MSEC(500));
+	fk.state = APP_RADIO_STATE_JOINING;
+	k_sleep(K_SECONDS(4));
+	zassert_equal(g_stream_cancel_calls, 1);
+	zassert_equal(g_stream_next_calls, 0);
+	zassert_equal(fk.n, 1, "only page 0 left");
+}
+BOTH_PROFILES(page_stream_cancelled_by_a_lost_link)
+
+/* ---- Boot/join announce (F3) ----------------------------------------------- */
+
+/* Info, then settings-info, then the first telemetry that waited for them. */
+static void announce_leads_the_first_report(void)
+{
+	const size_t lens[] = {20};
+
+	frames(lens, 1);
+	g_app_config.interval_report = 2; /* announce spread < 1 s */
+	app_radio_announce();
+	app_radio_send_telemetry(false);
+	k_sleep(K_SECONDS(5));
+	zassert_equal(fk.n, 3);
+	zassert_equal(fk.log[0].tag, APP_RADIO_TAG_INFO);
+	zassert_equal(fk.log[1].tag, APP_RADIO_TAG_SETTINGS);
+	zassert_equal(fk.log[2].kind, APP_RADIO_FRAME_TELEMETRY);
+	zassert_equal(g_alarm_flush_calls, 1, "held alarms released before the report");
+	zassert_false(app_radio_announce_pending());
+}
+BOTH_PROFILES(announce_leads_the_first_report)
+
+/* An announce that meets a running page stream waits for its end, then goes
+ * at once (the stream's end kicks it, not the 5 s retry). */
+static void announce_waits_for_a_page_stream(void)
+{
+	g_app_config.interval_report = 2;
+	g_cmd_resp_len = 10;
+	g_cmd_action = APP_CMD_ACTION_PAGE_STREAM;
+	g_stream_pages = 2;
+	app_radio_downlink(m_cmd, sizeof(m_cmd));
+	app_radio_announce();
+	k_sleep(K_SECONDS(8));
+	zassert_equal(fk.n, 5, "page 0, two pages, Info, settings-info");
+	zassert_equal(fk.log[1].head[0], 0xc0);
+	zassert_equal(fk.log[2].head[0], 0xc0);
+	zassert_equal(fk.log[3].tag, APP_RADIO_TAG_INFO);
+	zassert_equal(fk.log[4].tag, APP_RADIO_TAG_SETTINGS);
+	zassert_true(fk.log[3].at_ms - fk.log[2].at_ms < 2500,
+		     "the stream's end kicked the announce (%lld ms)",
+		     (long long)(fk.log[3].at_ms - fk.log[2].at_ms));
+}
+BOTH_PROFILES(announce_waits_for_a_page_stream)
+
+/* A frame the answer queue refused goes on the 5 s retry. */
+static void announce_retries_when_the_queue_is_full(void)
+{
+	g_app_config.interval_report = 2;
+	fk.ready = false;
+	for (uint8_t i = 0; i < APP_RADIO_TX_QUEUE_DEPTH; i++) {
+		queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 8, 0xb0 + i);
+	}
+	app_radio_announce();
+	k_sleep(K_SECONDS(3));
+	zassert_true(app_radio_announce_pending(), "nothing fit yet");
+
+	fk.ready = true;
+	app_radio_tx_kick();
+	k_sleep(K_SECONDS(7));
+	zassert_equal(fk.n, APP_RADIO_TX_QUEUE_DEPTH + 2, "the answers, then the announce");
+	zassert_equal(fk.log[APP_RADIO_TX_QUEUE_DEPTH].tag, APP_RADIO_TAG_INFO);
+	zassert_equal(fk.log[APP_RADIO_TX_QUEUE_DEPTH + 1].tag, APP_RADIO_TAG_SETTINGS);
+	zassert_false(app_radio_announce_pending());
+}
+BOTH_PROFILES(announce_retries_when_the_queue_is_full)

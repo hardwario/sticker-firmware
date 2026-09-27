@@ -1314,7 +1314,7 @@ ZTEST(p2p_logic, test_history_replay_start_is_not_reentrant)
 
 	/* Over P2P a re-delivered req_history is dispatched from inside the
 	 * replay's OWN call stack -- hist_work_handler -> send_confirmed ->
-	 * recv_ack -> dispatch_p2p_command -> app_cmd_handle ->
+	 * recv_ack -> app_radio_downlink -> app_cmd_handle ->
 	 * app_cmd_handle_req_history -> here. Without a guard this resets
 	 * cursor/idx/seq, and control then returns into the outer handler, which
 	 * writes its stale cursor back and schedules the work a second time. The

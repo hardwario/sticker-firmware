@@ -77,6 +77,14 @@ static K_WORK_DELAYABLE_DEFINE(m_announce_jitter_work, announce_jitter_work_hand
 /* Releases the boot/join data hold at its fallback deadline (below). */
 static void seq_deadline_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(m_seq_deadline_work, seq_deadline_work_handler);
+/* The downlink path and the announce frames run on the radio work queue
+ * (doc/plan/460 §2.5, F3). */
+static void announce_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(m_announce_work, announce_work_handler);
+static void page_stream_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(m_page_stream_work, page_stream_work_handler);
+static void post_cmd_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(m_post_cmd_work, post_cmd_work_handler);
 
 /* Kept out of a static entirely when CONFIG_RADIO_P2P=n: with P2P not even
  * compiled in, the radio is always running LoRaWAN by construction (radio_mode's
@@ -1211,32 +1219,167 @@ static atomic_t m_announce;
  * re-armed Info months later is never mistaken for one still in the spread. */
 static atomic_t m_announce_spreading;
 
-/* Have the backend call app_radio_announce_run() on its work queue. */
-static void announce_kick(void)
+/* Retry pace while something of the announce stays pending: a frame the
+ * answer queue or the budget refused, or pages still streaming. A retry only
+ * re-checks for room; with ADR off or a pinned DR nothing else would come to
+ * retry, and the held alarms and first report wait for the announce. */
+#define ANNOUNCE_RETRY_SEC 5
+
+static bool announce_run(void);
+
+static void announce_work_handler(struct k_work *work)
 {
-#if defined(CONFIG_RADIO_P2P)
-	if (is_p2p()) {
-		app_radio_p2p_announce_kick();
-		return;
+	ARG_UNUSED(work);
+	if (announce_run()) {
+		k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work,
+					    K_SECONDS(ANNOUNCE_RETRY_SEC));
 	}
-#endif
-#if defined(CONFIG_LORAWAN)
-	app_radio_lrw_announce_kick();
-#endif
 }
 
-/* Page 0 went out and more pages follow: start the backend's page stream. */
-static void page_stream_kick(void)
+/* Run the pending announce frames now, on the radio work queue. */
+static void announce_kick(void)
 {
-#if defined(CONFIG_RADIO_P2P)
-	if (is_p2p()) {
-		app_radio_p2p_page_stream_kick();
+	k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work, K_NO_WAIT);
+}
+
+void app_radio_announce_kick(void)
+{
+	if (app_radio_announce_pending()) {
+		announce_kick();
+	}
+}
+
+/* #409 3d/3e, #425: the page stream of an answer that did not fit one frame.
+ * One page per run, paced, and only while the answer queue keeps two slots
+ * free, so an alarm and another answer always fit between the pages. A lost
+ * link cancels it: a rejoin starts from scratch. */
+#define PAGE_STREAM_PACE_SEC 2
+
+static void page_stream_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (m_be == NULL || m_be->get_state() != APP_RADIO_STATE_HEALTHY) {
+		app_cmd_stream_cancel();
 		return;
 	}
-#endif
-#if defined(CONFIG_LORAWAN)
-	app_radio_lrw_page_stream_kick();
-#endif
+	if (app_radio_tx_answer_free() < 2) {
+		k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
+					  K_SECONDS(PAGE_STREAM_PACE_SEC));
+		return;
+	}
+
+	uint8_t buf[APP_RADIO_TX_SLOT_SIZE];
+	size_t len;
+	int ret = app_cmd_stream_next(buf, sizeof(buf), &len);
+
+	if (ret) {
+		if (ret != -ENODATA) {
+			LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
+		}
+		/* All pages queued (or the stream died): an announce may have waited
+		 * for it. */
+		app_radio_announce_kick();
+		return;
+	}
+	(void)app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_CMD_RESPONSE, 0, buf, len);
+	k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
+				  K_SECONDS(PAGE_STREAM_PACE_SEC));
+}
+
+/* Page 0 went out and more pages follow: start the page stream. */
+static void page_stream_kick(void)
+{
+	k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
+				  K_SECONDS(PAGE_STREAM_PACE_SEC));
+}
+
+/* ---- Downlink commands (doc/plan/460 §2.5, F3) ---------------------------- */
+
+/* A deferred action waits for its answer: 8 s covers a send and its receive
+ * windows; a duty-cycle-held or retrying answer takes longer, so the wait is
+ * re-checked, at most POST_CMD_DRAIN_MAX_DEFERRALS times -- a TX that keeps
+ * failing must not postpone the commanded action forever. */
+#define POST_CMD_DRAIN_WAIT_SEC      8
+#define POST_CMD_DRAIN_MAX_DEFERRALS 6
+
+static enum app_cmd_action m_post_cmd_action;
+static uint8_t m_post_cmd_deferrals;
+
+static bool answer_undelivered(void)
+{
+	return app_radio_tx_answer_pending() ||
+	       (m_be != NULL && m_be->in_flight != NULL && m_be->in_flight());
+}
+
+static void post_cmd_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (answer_undelivered() && m_post_cmd_deferrals < POST_CMD_DRAIN_MAX_DEFERRALS) {
+		m_post_cmd_deferrals++;
+		LOG_WRN("Post-command action %d deferred: Ack still undelivered (%u/%u)",
+			(int)m_post_cmd_action, (unsigned)m_post_cmd_deferrals,
+			(unsigned)POST_CMD_DRAIN_MAX_DEFERRALS);
+		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
+					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
+		return;
+	}
+	app_cmd_run_action(m_post_cmd_action);
+}
+
+void app_radio_downlink(const uint8_t *buf, size_t len)
+{
+	/* Radio work queue only, so one static buffer serves both radios and
+	 * keeps the answer off the deepest stack (P2P runs this from inside its
+	 * receive path). */
+	static uint8_t resp[APP_RADIO_TX_SLOT_SIZE];
+	size_t resp_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+	if (m_be == NULL) {
+		return;
+	}
+
+	/* Cap to the payload budget of the next uplink, not just the buffer, so
+	 * a GetInfo command gets the same trimming as the autonomous Info
+	 * (#409 3g); an answer that still does not fit is paged. */
+	int ret = app_cmd_handle((enum app_cmd_transport)m_be->cmd_transport, buf, len, resp,
+				 app_radio_tx_answer_cap(sizeof(resp)), &resp_len, &action);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
+		return;
+	}
+
+	if (resp_len > 0) {
+		ret = app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_CMD_RESPONSE, 0,
+					 resp, resp_len);
+		if (ret) {
+			LOG_ERR_CALL_FAILED_INT("app_radio_tx_queue", ret);
+		}
+	}
+
+	if (action == APP_CMD_ACTION_PAGE_STREAM) {
+		/* #409/#425: the remaining pages follow page 0 by themselves. */
+		page_stream_kick();
+	} else if (action != APP_CMD_ACTION_NONE) {
+		m_post_cmd_action = action;
+		m_post_cmd_deferrals = 0;
+		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
+					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
+		LOG_INF("Post-command action %d scheduled in %ds", (int)action,
+			POST_CMD_DRAIN_WAIT_SEC);
+	}
+
+#if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
+	/* The deepest thing the radio work queue does (see RADIO_WQ_STACK_SIZE),
+	 * so this is where its real high-water shows. */
+	size_t unused;
+
+	if (k_thread_stack_space_get(k_current_get(), &unused) == 0) {
+		LOG_INF("Radio work queue stack: %zu B unused after cmd handle", unused);
+	}
+#endif /* defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO) */
 }
 
 /* Queue page 0 of an Info (settings = false) or settings-info, and start the
@@ -1302,7 +1445,7 @@ void app_radio_announce_rearm(bool settings)
 	atomic_or(&m_announce, settings ? ANNOUNCE_SETTINGS : ANNOUNCE_INFO);
 }
 
-bool app_radio_announce_run(void)
+static bool announce_run(void)
 {
 	enum app_radio_state state = app_radio_get_state();
 
@@ -1351,6 +1494,26 @@ int app_radio_send_info(uint32_t seq)
 	}
 	return ret;
 }
+
+#if defined(CONFIG_ZTEST)
+void app_radio_test_cmd_reset(void)
+{
+	struct k_work_sync sync;
+
+	(void)k_work_cancel_delayable_sync(&m_post_cmd_work, &sync);
+	(void)k_work_cancel_delayable_sync(&m_page_stream_work, &sync);
+	(void)k_work_cancel_delayable_sync(&m_announce_work, &sync);
+	(void)k_work_cancel_delayable_sync(&m_announce_jitter_work, &sync);
+	(void)k_work_cancel_delayable_sync(&m_seq_deadline_work, &sync);
+	(void)k_work_cancel_delayable_sync(&m_jitter_work, &sync);
+	m_post_cmd_action = APP_CMD_ACTION_NONE;
+	m_post_cmd_deferrals = 0;
+	atomic_clear(&m_announce);
+	atomic_clear(&m_announce_spreading);
+	atomic_clear(&m_seq_closed);
+	atomic_clear(&m_telemetry_held);
+}
+#endif
 
 /* A network time younger than this answers a clock_sync at once (PF-2). The
  * same span as app_clock's forced-resync cooldown (#340 L11): on LoRaWAN a

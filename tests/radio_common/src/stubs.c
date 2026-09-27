@@ -15,6 +15,8 @@
 #include "app_compose.h"
 #include "app_config.h"
 
+#include <zephyr/kernel.h>
+
 #include <errno.h>
 #include <string.h>
 
@@ -34,6 +36,19 @@ size_t g_budget_error_cap;
 int g_budget_error_calls;
 int g_alarm_flush_calls;
 
+int g_cmd_handle_calls;
+int g_cmd_transport;
+size_t g_cmd_out_cap;
+size_t g_cmd_resp_len;
+int g_cmd_action;
+int g_stream_pages;
+int g_stream_next_calls;
+int g_stream_cancel_calls;
+int g_run_action_calls;
+int g_run_action_last;
+int64_t g_run_action_at_ms;
+static uint8_t m_stream_idx;
+
 void stubs_reset(void)
 {
 	memset(g_compose_frames, 0, sizeof(g_compose_frames));
@@ -48,6 +63,18 @@ void stubs_reset(void)
 	g_budget_error_cap = 0;
 	g_budget_error_calls = 0;
 	g_alarm_flush_calls = 0;
+	g_cmd_handle_calls = 0;
+	g_cmd_transport = -1;
+	g_cmd_out_cap = 0;
+	g_cmd_resp_len = 0;
+	g_cmd_action = APP_CMD_ACTION_NONE;
+	g_stream_pages = 0;
+	g_stream_next_calls = 0;
+	g_stream_cancel_calls = 0;
+	g_run_action_calls = 0;
+	g_run_action_last = APP_CMD_ACTION_NONE;
+	g_run_action_at_ms = 0;
+	m_stream_idx = 0;
 }
 
 int app_compose_budget(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)
@@ -91,13 +118,57 @@ void app_compose_reset(void)
 	}
 }
 
+int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t in_len, uint8_t *out,
+		   size_t out_cap, size_t *out_len, enum app_cmd_action *action)
+{
+	g_cmd_handle_calls++;
+	g_cmd_transport = (int)transport;
+	g_cmd_out_cap = out_cap;
+
+	size_t n = MIN(g_cmd_resp_len, out_cap);
+
+	memset(out, 0x77, n);
+	if (n >= 2) {
+		out[0] = 0xa0;
+		out[1] = in_len > 0 ? in[0] : 0;
+	}
+	*out_len = n;
+	*action = (enum app_cmd_action)g_cmd_action;
+	return 0;
+}
+
+void app_cmd_run_action(enum app_cmd_action action)
+{
+	g_run_action_calls++;
+	g_run_action_last = (int)action;
+	g_run_action_at_ms = k_uptime_get();
+}
+
 bool app_cmd_stream_active(void)
 {
-	return false;
+	return g_stream_pages > 0;
+}
+
+int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	g_stream_next_calls++;
+	if (g_stream_pages <= 0) {
+		return -ENODATA;
+	}
+	if (out_cap < 2) {
+		return -ENOSPC;
+	}
+	out[0] = 0xc0;
+	out[1] = m_stream_idx++;
+	*out_len = 2;
+	g_stream_pages--;
+	return 0;
 }
 
 void app_cmd_stream_cancel(void)
 {
+	g_stream_cancel_calls++;
+	g_stream_pages = 0;
 }
 
 int app_cmd_build_info_seq(uint32_t seq, uint8_t *out, size_t out_cap, size_t *out_len, bool *more)

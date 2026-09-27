@@ -10,11 +10,9 @@
 #include "app_clock.h"
 #include "app_compose.h"
 #include "app_config.h"
-#include "app_counters.h"
 #include "app_history.h"
 #include "app_log.h"
 #include "app_radio_lrw.h"
-#include "app_settings.h"
 
 /* Zephyr includes */
 #include <zephyr/device.h>
@@ -26,7 +24,6 @@
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
-#include <zephyr/sys/reboot.h>
 
 /* LoRaMac includes */
 #include <LoRaMac.h>
@@ -108,15 +105,11 @@ static struct k_timer m_rejoin_timer;
 
 /* --- Works --- */
 static struct k_work m_join_work;
-static struct k_work m_link_check_work;         /* LC timeout (from m_lc_timeout_timer) */
-static struct k_work m_downlink_success_work;   /* deferred from downlink_callback */
-static struct k_work m_clock_sync_info_work;    /* deferred ClockSync Info uplink (#219) */
-static struct k_work_delayable m_announce_work; /* deferred full Info / settings-info (#409) */
-static struct k_work m_lc_response_work;        /* deferred from link_check_callback */
-static struct k_work m_dl_request_work;         /* drains m_dl_msgq (port-85 commands) */
-static struct k_work_delayable m_post_cmd_work;
-static struct k_work_delayable m_page_stream_work; /* paged answers (#409 3d/3e, #425) */
-#define PAGE_STREAM_PACE_SEC 2
+static struct k_work m_link_check_work;       /* LC timeout (from m_lc_timeout_timer) */
+static struct k_work m_downlink_success_work; /* deferred from downlink_callback */
+static struct k_work m_clock_sync_info_work;  /* deferred ClockSync Info uplink (#219) */
+static struct k_work m_lc_response_work;      /* deferred from link_check_callback */
+static struct k_work m_dl_request_work;       /* drains m_dl_msgq (port-85 commands) */
 static struct k_work_delayable m_join_complete_work;
 static struct k_work_delayable m_hist_work;
 
@@ -208,9 +201,6 @@ struct lrw_dl_msg {
 };
 
 K_MSGQ_DEFINE(m_dl_msgq, sizeof(struct lrw_dl_msg), APP_RADIO_LRW_DL_QUEUE_DEPTH, 4);
-
-/* Deferred reboot/save requested by a command handler; runs after the Ack TX. */
-static enum app_cmd_action m_post_cmd_action;
 
 /* Set by a ClockSync command; the next network time-update sends an Info uplink
  * (with the synced unix_time) instead of the command acking immediately. */
@@ -449,24 +439,6 @@ static void state_transition(enum app_radio_state new_state)
 /* Event handlers (run on the radio work queue)                             */
 /* ======================================================================== */
 
-/* Retry pace while the announce stays pending (review of #400): with ADR off or
- * a pinned DR no DR change comes to retry a frame the response queue or the
- * budget refused, and the held alarms and first report wait for the announce. */
-#define LRW_ANNOUNCE_RETRY_SEC 15
-
-/* The boot/join announce itself lives in app_radio (one path for both radios,
- * doc/plan/439 T3); this runs its pending frames on the radio work queue whenever room may
- * have appeared: after the join, on a DR rise, when a page stream ends, and
- * every LRW_ANNOUNCE_RETRY_SEC while something stays pending. */
-static void announce_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	if (app_radio_announce_run()) {
-		k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work,
-					    K_SECONDS(LRW_ANNOUNCE_RETRY_SEC));
-	}
-}
-
 /* Pin the uplink datarate from lrw-datarate (#409 A3, like twr-sdk AT$DR). Runs
  * after every (re)join, after ADR is configured and before the payload budget is
  * captured, so the budget reflects the pinned DR. It does NOT set the join DR:
@@ -683,139 +655,8 @@ static void lc_response_work_handler(struct k_work *work)
 	}
 }
 
-/* Bound on how long the post-command action defers to an undelivered Ack: the
- * initial 8 s covers the successful-send RX windows, but a duty-cycle/MAC-busy
- * lorawan_send() failure retries the Ack after a 15 s backoff (app_radio) —
- * longer than the deferral itself — so without waiting for the drain the
- * reboot would drop the RAM-only queued Ack every time the first send attempt
- * fails. Cap the extra wait so a permanently failing TX cannot postpone the
- * commanded action forever. */
-#define POST_CMD_DRAIN_WAIT_SEC      8
-#define POST_CMD_DRAIN_MAX_DEFERRALS 6
-
-static uint8_t m_post_cmd_deferrals;
-
-static void post_cmd_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	if (app_radio_tx_answer_pending() && m_post_cmd_deferrals < POST_CMD_DRAIN_MAX_DEFERRALS) {
-		m_post_cmd_deferrals++;
-		LOG_WRN("Post-command action %d deferred: Ack still undelivered (%u/%u)",
-			(int)m_post_cmd_action, (unsigned)m_post_cmd_deferrals,
-			(unsigned)POST_CMD_DRAIN_MAX_DEFERRALS);
-		k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
-					  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
-		return;
-	}
-
-	switch (m_post_cmd_action) {
-	case APP_CMD_ACTION_SETTINGS_SAVE:
-		LOG_INF("Command: saving settings + reboot");
-		app_settings_save(true);
-		break;
-	case APP_CMD_ACTION_DEVICE_RESET:
-		LOG_INF("Command: device reset (keep identity + LoRaWAN) + reboot");
-		app_settings_device_reset();
-		break;
-	case APP_CMD_ACTION_FACTORY_RESET:
-		/* #299, narrower than device_reset above: drops LoRaWAN too. */
-		LOG_INF("Command: factory reset (keep identity only) + reboot");
-		app_settings_factory_reset();
-		break;
-	case APP_CMD_ACTION_SECRET_KEY_SAVE:
-		/* #322: persist the staged new secret_key + reboot, so it goes live now
-		 * instead of at the next unrelated reboot. Unreachable over LoRaWAN today
-		 * (set_secret_key is transports: [nfc, shell]) — kept in lockstep with
-		 * main.c so the two dispatch tables cannot drift. */
-		LOG_INF("Command: saving new secret_key + reboot");
-		app_settings_save(true);
-		break;
-	case APP_CMD_ACTION_REBOOT:
-		LOG_WRN_REBOOTING("command");
-		sys_reboot(SYS_REBOOT_COLD);
-		break;
-	case APP_CMD_ACTION_ENTER_CALIBRATION:
-		/* Persist calibration=true + reboot; main() enters calibration
-		 * mode on the next boot (app_calibration_init() clears the flag).
-		 * Write the staging config (app_config()) — that is what settings_save
-		 * persists; g_app_config is only the boot-time read copy. */
-		LOG_INF("Command: entering calibration mode + reboot");
-		app_config()->calibration = true;
-		app_settings_save(true);
-		break;
-	case APP_CMD_ACTION_LRW_RESET:
-		/* Wipe the LoRaWAN NVM (frame counters + DevNonce + session), then cold
-		 * reboot so the MAC re-initialises from a clean NVM (#109). Same path as
-		 * `ats radio reset`. The Ack uplink has already left (drain-waited above). */
-		app_radio_reset_link();
-		LOG_WRN_REBOOTING("command: LoRaWAN NVM wipe");
-		sys_reboot(SYS_REBOOT_COLD);
-		break;
-	case APP_CMD_ACTION_LRW_JOIN:
-		/* Force a (re)join now instead of waiting for the next attempt (#109).
-		 * No reboot — app_radio_lrw_join() just queues a join work item. */
-		LOG_INF("Command: forced LoRaWAN join");
-		app_radio_rejoin();
-		break;
-	case APP_CMD_ACTION_COUNTERS_SAVE:
-		/* Persist the (reset) pulse totalizers, no reboot. Deferred for the
-		 * same stack reason as the alarm-rule save above. */
-		LOG_INF("Command: saving counters");
-		app_counters_save(true);
-		break;
-	default:
-		break;
-	}
-}
-
-/* #409 3d/3e, #425: queue the next page of a device-driven page stream (any
- * paged answer). One page per run, only while the response queue keeps a slot
- * free for other answers; paced by the send path (duty cycle permitting). */
-
-static void page_stream_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
-
-	if (state != APP_RADIO_STATE_HEALTHY) {
-		app_cmd_stream_cancel(); /* a rejoin starts from scratch */
-		return;
-	}
-
-	if (app_radio_tx_answer_free() < 2) {
-		k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
-					  K_SECONDS(PAGE_STREAM_PACE_SEC));
-		return;
-	}
-
-	uint8_t buf[APP_RADIO_TX_SLOT_SIZE];
-	size_t len;
-	int ret = app_cmd_stream_next(buf, sizeof(buf), &len);
-
-	if (ret == -ENODATA) {
-		/* All pages queued; a boot announce frame may have waited for them. */
-		if (app_radio_announce_pending()) {
-			k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work,
-						    K_NO_WAIT);
-		}
-		return;
-	}
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
-		if (app_radio_announce_pending()) {
-			k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work,
-						    K_NO_WAIT);
-		}
-		return;
-	}
-	(void)app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_CMD_RESPONSE,
-				 APP_RADIO_LRW_DOWNLINK_CMD_PORT, buf, len);
-	k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
-				  K_SECONDS(PAGE_STREAM_PACE_SEC));
-}
-
+/* Commands arrive in the MAC's receive callback: dispatch them on the radio
+ * work queue through the common downlink path (doc/plan/460 §2.5). */
 static void dl_request_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -824,58 +665,8 @@ static void dl_request_work_handler(struct k_work *work)
 
 	/* Drain every queued command (MED-7: was a single overwrite-able slot). */
 	while (k_msgq_get(&m_dl_msgq, &msg, K_NO_WAIT) == 0) {
-		static uint8_t resp[APP_RADIO_TX_SLOT_SIZE];
-		size_t resp_len = 0;
-		enum app_cmd_action action = APP_CMD_ACTION_NONE;
-
-		/* Cap to the current DR's payload budget, not just the software buffer,
-		 * so an explicit GetInfo command gets the same active_alarms trimming as
-		 * the autonomous join/clock-sync uplink (app_radio_send_info()) instead of
-		 * the send recovering the whole response later (#409 3g). */
-		size_t resp_cap = app_radio_tx_answer_cap(sizeof(resp));
-
-		int ret = app_cmd_handle(APP_CMD_TRANSPORT_LRW, msg.buf, msg.len, resp, resp_cap,
-					 &resp_len, &action);
-		if (ret) {
-			LOG_ERR_CALL_FAILED_INT("app_cmd_handle", ret);
-			continue;
-		}
-
-		if (resp_len) {
-			ret = app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_CMD_RESPONSE,
-						 APP_RADIO_LRW_DOWNLINK_CMD_PORT, resp, resp_len);
-			if (ret) {
-				LOG_ERR_CALL_FAILED_INT("app_radio_tx_queue", ret);
-			}
-		}
-
-		if (action == APP_CMD_ACTION_PAGE_STREAM) {
-			/* #409: the remaining ConfigDump pages follow page 0 by themselves. */
-			k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
-						  K_SECONDS(PAGE_STREAM_PACE_SEC));
-			action = APP_CMD_ACTION_NONE;
-		}
-
-		/* Defer reboot/save so the Ack uplink + its RX window finish first.
-		 * post_cmd_work_handler() extends the wait (bounded) while the Ack is
-		 * still queued/retrying, so a duty-cycle backoff cannot silently drop
-		 * it on reboot. */
-		if (action != APP_CMD_ACTION_NONE) {
-			m_post_cmd_action = action;
-			m_post_cmd_deferrals = 0;
-			k_work_schedule_for_queue(app_radio_work_q(), &m_post_cmd_work,
-						  K_SECONDS(POST_CMD_DRAIN_WAIT_SEC));
-			LOG_INF("Post-command action %d scheduled in %ds", (int)action,
-				POST_CMD_DRAIN_WAIT_SEC);
-		}
+		app_radio_downlink(msg.buf, msg.len);
 	}
-
-#if defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO)
-	size_t unused;
-	if (k_thread_stack_space_get(k_current_get(), &unused) == 0) {
-		LOG_INF("Radio work queue stack: %zu B unused after cmd handle", unused);
-	}
-#endif
 }
 
 static void join_complete_work_handler(struct k_work *work)
@@ -1228,7 +1019,9 @@ const struct app_radio_backend app_radio_lrw_backend = {
 	.get_state = app_radio_lrw_get_state,
 	.warning_step = lrw_backoff_step,
 	.rejoin = lrw_tx_rejoin,
+	.in_flight = NULL,  /* lorawan_send() blocks for the whole confirmed exchange */
 	.confirm_kinds = 0, /* unconfirmed: the link check is the liveness probe */
+	.cmd_transport = APP_CMD_TRANSPORT_LRW,
 	.frame_gap_ms = FRAME_GAP_SEC * MSEC_PER_SEC,
 };
 
@@ -1529,9 +1322,7 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 	LOG_INF("New data rate: DR%d, Maximum payload size: %d", dr, max_now);
 
 	/* #409: a higher DR may now fit the deferred full Info / settings-info. */
-	if (app_radio_announce_pending()) {
-		k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work, K_NO_WAIT);
-	}
+	app_radio_announce_kick();
 }
 
 static void link_check_callback(uint8_t demod_margin, uint8_t nb_gateways)
@@ -1763,11 +1554,8 @@ int app_radio_lrw_init(void)
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
 	k_work_init(&m_clock_sync_info_work, clock_sync_info_work_handler);
-	k_work_init_delayable(&m_announce_work, announce_work_handler);
 	k_work_init(&m_lc_response_work, lc_response_work_handler);
 	k_work_init(&m_dl_request_work, dl_request_work_handler);
-	k_work_init_delayable(&m_post_cmd_work, post_cmd_work_handler);
-	k_work_init_delayable(&m_page_stream_work, page_stream_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_dbg_lc_work, dbg_lc_work_handler);
@@ -1974,17 +1762,6 @@ void app_radio_lrw_clock_sync(uint32_t seq)
 {
 	app_clock_force_resync();
 	app_radio_lrw_send_info_on_clock_sync(seq);
-}
-
-void app_radio_lrw_announce_kick(void)
-{
-	k_work_reschedule_for_queue(app_radio_work_q(), &m_announce_work, K_NO_WAIT);
-}
-
-void app_radio_lrw_page_stream_kick(void)
-{
-	k_work_schedule_for_queue(app_radio_work_q(), &m_page_stream_work,
-				  K_SECONDS(PAGE_STREAM_PACE_SEC));
 }
 
 int app_radio_lrw_reset_nvm(void)

@@ -368,11 +368,6 @@ void app_radio_p2p_forget_pairing(void);
  * forced. A newer request before that Ack takes over the seq. */
 void app_radio_p2p_clock_sync(uint32_t seq);
 
-/* Hooks of the common boot/join announce (app_radio_announce_run(),
- * doc/plan/439 T3): run it on the radio work queue, start the page stream. */
-void app_radio_p2p_announce_kick(void);
-void app_radio_p2p_page_stream_kick(void);
-
 #if defined(CONFIG_SHELL)
 /* Bench-rig reference receiver (doc/p2p.md §14): enable=true reconfigures the
  * radio for continuous RX and starts async receive -- each frame is

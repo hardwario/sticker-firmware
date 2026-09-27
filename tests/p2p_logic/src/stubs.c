@@ -163,34 +163,6 @@ int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t fra
 	return 0;
 }
 
-int app_cmd_handle(int transport, const uint8_t *in, size_t in_len, uint8_t *out, size_t out_cap,
-		   size_t *out_len, int *action)
-{
-	ARG_UNUSED(transport);
-	ARG_UNUSED(in);
-	ARG_UNUSED(in_len);
-	ARG_UNUSED(out);
-	ARG_UNUSED(out_cap);
-	if (out_len) {
-		*out_len = 0;
-	}
-	ARG_UNUSED(action);
-	return 0;
-}
-
-/* #425 page stream (the P2P driver in app_radio_p2p.c): no stream in these tests. */
-int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
-{
-	ARG_UNUSED(out);
-	ARG_UNUSED(out_cap);
-	ARG_UNUSED(out_len);
-	return -ENODATA;
-}
-
-void app_cmd_stream_cancel(void)
-{
-}
-
 /* ---- app_settings, for p2p_join_adopt_sf's persist ---- */
 
 /* The SF the last call was asked to persist. */
@@ -352,14 +324,15 @@ void app_radio_reset_link(void)
 {
 }
 
-bool app_radio_announce_run(void)
-{
-	return false;
-}
+/* Common downlink path (app_radio.c, doc/plan/460 F3): a received 0x56 is
+ * handed over here; its dispatch is tested in tests/radio_common. */
+int p2p_test_downlinks;
 
-bool app_radio_announce_pending(void)
+void app_radio_downlink(const uint8_t *buf, size_t len)
 {
-	return false;
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	p2p_test_downlinks++;
 }
 
 /* Common TX core (app_radio.c is not built here, doc/plan/460 F4): record what

@@ -11,6 +11,7 @@
 #include "app_buzzer.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_counters.h"
 #include "app_hall.h"
 #include "app_input.h"
 #include "app_log.h"
@@ -22,6 +23,7 @@
 #endif
 #include "app_report.h"
 #include "app_sensor.h"
+#include "app_settings.h"
 #include "app_config_ingest.h"
 
 /* Wall-clock source (PR #41, branch lrw-rtc-time). Until that lands on this
@@ -57,6 +59,7 @@
 /* Zephyr includes */
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/sys/util.h>
 
 /* Standard includes */
@@ -1147,6 +1150,107 @@ static void app_cmd_handle_vendor_reset(enum app_cmd_transport tp, const Command
 const uint8_t *app_cmd_take_pending_vendor_secret_key(void)
 {
 	return m_pending_vendor_secret_key;
+}
+
+bool app_cmd_action_reboots(enum app_cmd_action action)
+{
+	switch (action) {
+	case APP_CMD_ACTION_SETTINGS_SAVE:
+	case APP_CMD_ACTION_REBOOT:
+	case APP_CMD_ACTION_DEVICE_RESET:
+	case APP_CMD_ACTION_FACTORY_RESET:
+	case APP_CMD_ACTION_VENDOR_RESET:
+	case APP_CMD_ACTION_ENTER_CALIBRATION:
+	case APP_CMD_ACTION_LRW_RESET:
+	case APP_CMD_ACTION_SECRET_KEY_SAVE:
+	case APP_CMD_ACTION_CLAIM_ACTIVE_SAVE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/* The one executor of a deferred command action (#460 F3), for NFC, LoRaWAN and
+ * P2P alike: each transport only decides WHEN (NFC after the mailbox reply was
+ * read and the LED result shown, a radio after its answer left), never WHAT.
+ * Which actions a transport can produce at all is settled by the configen
+ * transport lists before app_cmd_handle() returns one. */
+void app_cmd_run_action(enum app_cmd_action action)
+{
+	switch (action) {
+	case APP_CMD_ACTION_SETTINGS_SAVE:
+		LOG_INF("Command: saving settings + reboot");
+		app_settings_save(true);
+		break;
+	case APP_CMD_ACTION_REBOOT:
+		LOG_WRN_REBOOTING("command");
+		sys_reboot(SYS_REBOOT_COLD);
+		break;
+	case APP_CMD_ACTION_DEVICE_RESET:
+		LOG_INF("Command: device reset (keep identity + LoRaWAN) + reboot");
+		app_settings_device_reset();
+		break;
+	case APP_CMD_ACTION_FACTORY_RESET:
+		/* #299, narrower than device_reset above: drops LoRaWAN too. */
+		LOG_INF("Command: factory reset (keep identity only) + reboot");
+		app_settings_factory_reset();
+		break;
+	case APP_CMD_ACTION_VENDOR_RESET:
+		/* #299/#316, narrowest tier: only the NFC hio.stck:vnd (vendor-token)
+		 * channel reaches it. The replacement secret_key travelled in the same
+		 * request. */
+		LOG_INF("Command: vendor reset (keep serial + vendor token) + reboot");
+		app_settings_vendor_reset(app_cmd_take_pending_vendor_secret_key());
+		break;
+	case APP_CMD_ACTION_SECRET_KEY_SAVE:
+		/* #322: persist the staged new secret_key and reboot, so the rotated key
+		 * is live right away. The reply was encrypted with the OLD key on
+		 * purpose: this runs only once it was delivered (#242). */
+		LOG_INF("Command: saving new secret_key + reboot");
+		app_settings_save(true);
+		break;
+	case APP_CMD_ACTION_CLAIM_ACTIVE_SAVE:
+		/* #351/#415: flip the claim window back to ACTIVE and persist+reboot
+		 * together, so a staged claim_token goes live in the same breath as the
+		 * latch. #340 M15: app_nfc_claim_active() has already persisted the
+		 * latch; if the save then fails, reboot anyway so live state follows
+		 * whatever DID get persisted. */
+		LOG_INF("Command: claim window active + reboot");
+		app_nfc_claim_active();
+		if (app_settings_save(true)) {
+			LOG_WRN_REBOOTING("claim-token save failed");
+			sys_reboot(SYS_REBOOT_COLD);
+		}
+		break;
+	case APP_CMD_ACTION_ENTER_CALIBRATION:
+		/* Persist calibration=true + reboot; main() enters calibration mode on
+		 * the next boot (app_calibration_init() clears the flag). Write the
+		 * staging config: that is what settings_save persists. */
+		LOG_INF("Command: entering calibration mode + reboot");
+		app_config()->calibration = true;
+		app_settings_save(true);
+		break;
+	case APP_CMD_ACTION_LRW_RESET:
+		/* Forget the network session (#109) on every stack, then reboot: the
+		 * LoRaWAN NVM (counters + DevNonce) and the P2P pairing. */
+		app_radio_reset_link();
+		LOG_WRN_REBOOTING("command: radio session reset");
+		sys_reboot(SYS_REBOOT_COLD);
+		break;
+	case APP_CMD_ACTION_LRW_JOIN:
+		/* Join again now on whichever radio runs (#109), no reboot. */
+		LOG_INF("Command: forced rejoin");
+		app_radio_rejoin();
+		break;
+	case APP_CMD_ACTION_COUNTERS_SAVE:
+		/* Persist the (reset) pulse totalizers, no reboot. */
+		LOG_INF("Command: saving counters");
+		app_counters_save(true);
+		break;
+	default:
+		/* NONE, and PAGE_STREAM, which the radio's page stream consumes. */
+		break;
+	}
 }
 
 /* force_send is LRW-only (transports: [lrw] in the YAML); the generated dispatch
