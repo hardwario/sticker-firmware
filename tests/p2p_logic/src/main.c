@@ -1506,19 +1506,20 @@ ZTEST(p2p_logic, test_radio_state_mapping)
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
 }
 
-/* The node-measured quality of the last downlink feeds GetInfo / NFC. */
+/* The node-measured quality of the last downlink is pushed to app_radio, where
+ * get_radio_state reads it (#446). */
+extern int16_t p2p_test_dl_rssi;
+extern int8_t p2p_test_dl_snr;
+extern int p2p_test_dl_calls;
+
 ZTEST(p2p_logic, test_last_downlink_recorded)
 {
-	int16_t rssi;
-	int8_t snr;
-	uint32_t age;
+	int calls = p2p_test_dl_calls;
 
 	p2p_test_note_downlink(-65, 12);
-	zassert_true(app_radio_p2p_last_downlink(&rssi, &snr, &age));
-	zassert_equal(rssi, -65);
-	zassert_equal(snr, 12);
-	zassert_true(age <= 1, "just received");
-	zassert_false(app_radio_p2p_last_downlink(NULL, &snr, &age), "NULL out-param");
+	zassert_equal(p2p_test_dl_calls, calls + 1, "pushed once");
+	zassert_equal(p2p_test_dl_rssi, -65);
+	zassert_equal(p2p_test_dl_snr, 12);
 }
 
 ZTEST_SUITE(p2p_logic, NULL, NULL, NULL, NULL, NULL);

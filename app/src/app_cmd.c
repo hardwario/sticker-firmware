@@ -49,6 +49,7 @@
 #endif
 
 /* Nanopb includes */
+#include <pb_common.h>
 #include <pb_decode.h>
 #include <pb_encode.h>
 #include "src/app_config.pb.h"
@@ -130,10 +131,8 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	memcpy(info->claim_token, g_app_config.claim_token, sizeof(info->claim_token));
 
 	/* Through the common radio layer, so a P2P node reports its own link state
-	 * and last-downlink quality instead of the idle LoRaWAN module's. */
-	info->lrw_state = (uint8_t)app_radio_get_state();
-	info->has_last_dl = app_radio_last_downlink(&info->last_dl_rssi, &info->last_dl_snr,
-						    &info->last_dl_age_s);
+	 * instead of the idle LoRaWAN module's. */
+	info->radio_state = (uint8_t)app_radio_get_state();
 
 	BUILD_ASSERT(sizeof(info->dev_eui) == sizeof(g_app_config.lrw_deveui),
 		     "dev_eui size mismatch");
@@ -183,7 +182,7 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	if (!info->has_unix_time) {
 		status |= APP_DEVICE_STATUS_TIME_UNSYNCED;
 	}
-	if (info->lrw_state == APP_RADIO_STATE_DISABLED) {
+	if (info->radio_state == APP_RADIO_STATE_DISABLED) {
 		status |= APP_DEVICE_STATUS_LRW_DISABLED;
 	}
 	/* Radio: OFF means the operator deliberately silenced it; otherwise flag a
@@ -191,8 +190,8 @@ void app_cmd_get_info(struct app_cmd_info *info)
 	 * disabled), for the LoRaWAN and the P2P radio alike. */
 	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_OFF) {
 		status |= APP_DEVICE_STATUS_RADIO_OFF;
-	} else if (info->lrw_state != APP_RADIO_STATE_HEALTHY &&
-		   info->lrw_state != APP_RADIO_STATE_WARNING) {
+	} else if (info->radio_state != APP_RADIO_STATE_HEALTHY &&
+		   info->radio_state != APP_RADIO_STATE_WARNING) {
 		status |= APP_DEVICE_STATUS_RADIO_LINK_DOWN;
 	}
 	if (app_nfc_claim_state_get() == APP_NFC_CLAIM_ACTIVE) {
@@ -236,10 +235,73 @@ static bool encode_active_alarms(pb_ostream_t *stream, const pb_field_t *field, 
 	return true;
 }
 
+#define RS_SET(rs, f, v)                                                                           \
+	do {                                                                                       \
+		(rs)->has_##f = true;                                                              \
+		(rs)->f = (v);                                                                     \
+	} while (0)
+
+/* Response.RadioState from the app_radio snapshot (#446), the get_radio_state
+ * answer on every transport. Values the active radio has not reported stay
+ * absent. */
+static void fill_radio_state(Response_RadioState *rs)
+{
+	struct app_radio_status st;
+
+	app_radio_get_status(&st);
+	*rs = (Response_RadioState)Response_RadioState_init_zero;
+
+	RS_SET(rs, state, (Response_RadioState_State)st.state);
+	if (st.sf != 0) {
+		RS_SET(rs, sf, st.sf);
+	}
+	if (st.has_datarate) {
+		RS_SET(rs, datarate, st.datarate);
+	}
+	if (st.has_tx_power) {
+		RS_SET(rs, tx_power_dbm, st.tx_power_dbm);
+	}
+	if (st.has_dl) {
+		RS_SET(rs, dl_rssi, st.dl_rssi);
+		RS_SET(rs, dl_snr, st.dl_snr);
+		RS_SET(rs, dl_age_s, st.dl_age_s);
+		if (st.has_dl_unix) {
+			RS_SET(rs, dl_unix_time, st.dl_unix_time);
+		}
+	}
+	if (st.has_ul_rssi) {
+		RS_SET(rs, ul_rssi, st.ul_rssi);
+		RS_SET(rs, ul_snr, st.ul_snr);
+	}
+	if (st.has_ul_margin) {
+		RS_SET(rs, ul_margin, st.ul_margin);
+		RS_SET(rs, ul_gw_count, st.ul_gw_count);
+	}
+	if (st.has_session) {
+		RS_SET(rs, dev_addr, st.dev_addr);
+		RS_SET(rs, fcnt_up, st.fcnt_up);
+	}
+	RS_SET(rs, fail_streak, st.fail_streak);
+	RS_SET(rs, join_attempts, st.join_attempts);
+	if (st.duty_blocked_s != 0) {
+		RS_SET(rs, duty_blocked_s, st.duty_blocked_s);
+	}
+	if (st.has_airtime) {
+		RS_SET(rs, airtime_hour_ms, st.airtime_hour_ms);
+	}
+	RS_SET(rs, uptime_s, st.uptime_s);
+	RS_SET(rs, tx_count, st.cnt[APP_RADIO_CNT_TX]);
+	RS_SET(rs, rx_count, st.cnt[APP_RADIO_CNT_RX]);
+	RS_SET(rs, retry_count, st.cnt[APP_RADIO_CNT_RETRY]);
+	RS_SET(rs, fail_count, st.cnt[APP_RADIO_CNT_FAIL]);
+	RS_SET(rs, tx_err_count, st.cnt[APP_RADIO_CNT_TX_ERR]);
+	RS_SET(rs, join_count, st.cnt[APP_RADIO_CNT_JOIN]);
+}
+
 /* Map the plain-C info snapshot onto the protobuf Response_Info. The transport
  * splits the Info: a LoRaWAN uplink carries only the fields the network side needs
  * (firmware / serial / uptime / battery / reset-cause / clock), while the NFC
- * (commissioning) channel additionally gets lrw_state and dev_eui — see the
+ * (commissioning) channel additionally gets dev_eui — see the
  * NFC-only block below. max_alarms caps Response_AlarmStatus entries encoded
  * into active_alarms (field 15) — pass SIZE_MAX for "no cap"; a caller that hit
  * -EMSGSIZE at the current DR budget retries with a smaller value so the alarm
@@ -270,25 +332,9 @@ static void fill_info(enum app_cmd_transport tp, Response_Info *info, size_t max
 
 	/* NFC-only Info fields. The phone/commissioning channel gets the full picture;
 	 * a LoRaWAN uplink omits them — dev_eui would leak the identity onto the air
-	 * (and the LNS already knows it), and lrw_state is redundant on a frame the
-	 * network just received. dev_eui is further omitted when unset (all-zero). */
+	 * (and the LNS already knows it). dev_eui is further omitted when unset
+	 * (all-zero). The radio link state lives in get_radio_state (#446). */
 	if (tp == APP_CMD_TRANSPORT_NFC) {
-		info->has_lrw_state = true;
-		info->lrw_state = (Response_Info_LrwState)i.lrw_state;
-
-		/* #409 A2: last-downlink link quality for an installer with only a
-		 * phone. NFC-only: the LNS already has uplink RSSI/SNR per gateway
-		 * and, since #419, DevStatusAns (downlink SNR margin + battery), so
-		 * it would only cost LoRaWAN payload. Always with its age. */
-		if (i.has_last_dl) {
-			info->has_last_dl_rssi = true;
-			info->last_dl_rssi = i.last_dl_rssi;
-			info->has_last_dl_snr = true;
-			info->last_dl_snr = i.last_dl_snr;
-			info->has_last_dl_age_s = true;
-			info->last_dl_age_s = i.last_dl_age_s;
-		}
-
 		for (size_t j = 0; j < sizeof(i.dev_eui); j++) {
 			if (i.dev_eui[j] != 0) {
 				info->has_dev_eui = true;
@@ -1389,6 +1435,18 @@ static void app_cmd_handle_enter_calibration(enum app_cmd_transport tp, const Co
 static void app_cmd_handle_get_settings(enum app_cmd_transport tp, const Command *cmd,
 					Response *resp, enum app_cmd_action *action);
 
+/* get_radio_state (#446): the whole RadioState; app_cmd_handle() pages it when
+ * it does not fit (streamed over a radio, GetRadioState.page otherwise). */
+static void app_cmd_handle_get_radio_state(enum app_cmd_transport tp, const Command *cmd,
+					   Response *resp, enum app_cmd_action *action)
+{
+	ARG_UNUSED(tp);
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(action);
+	resp->which_body = Response_radio_state_tag;
+	fill_radio_state(&resp->body.radio_state);
+}
+
 // BEGIN GENERATED DISPATCH
 static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Response *resp,
 			     enum app_cmd_action *action)
@@ -1636,6 +1694,16 @@ static void app_cmd_dispatch(enum app_cmd_transport tp, const Command *cmd, Resp
 		}
 		app_cmd_handle_get_settings(tp, cmd, resp, action);
 		break;
+	case Command_get_radio_state_tag:
+		/* transports: [lrw, p2p, nfc, shell, vendor] — reject on any other transport */
+		if (tp != APP_CMD_TRANSPORT_LRW && tp != APP_CMD_TRANSPORT_P2P &&
+		    tp != APP_CMD_TRANSPORT_NFC && tp != APP_CMD_TRANSPORT_SHELL_DEBUG &&
+		    tp != APP_CMD_TRANSPORT_VENDOR) {
+			make_error(resp, Response_Error_Code_NOT_READY, "transport not allowed");
+			break;
+		}
+		app_cmd_handle_get_radio_state(tp, cmd, resp, action);
+		break;
 	default:
 		/* L-54: an unknown command tag (e.g. a removed command like the old
 		 * enter_dfu/enter_mailbox 19/20/22 sent by an older app) is a distinct,
@@ -1707,6 +1775,7 @@ enum page_stream_kind {
 	PAGE_STREAM_SETTINGS,
 	PAGE_STREAM_W1SCAN,
 	PAGE_STREAM_INFO,
+	PAGE_STREAM_RADIO,
 };
 
 /* Info snapshot for paging: the LoRaWAN view of the scalars plus the active
@@ -1734,6 +1803,7 @@ static struct {
 			uint8_t per_page;
 		} w1;
 		struct info_snap info;
+		Response_RadioState rs; /* get_radio_state snapshot (#446) */
 	} u;
 } m_page_stream;
 
@@ -2022,12 +2092,8 @@ enum {
 	INFO_U_RESET_CAUSE,
 	INFO_U_DEVICE_STATUS,
 	/* NFC-only fields: never set in a LoRaWAN snapshot, so empty (skipped) there. */
-	INFO_U_LRW_STATE,
 	INFO_U_CLAIM_TOKEN,
 	INFO_U_DEV_EUI,
-	/* last_dl_rssi/snr/age_s (#423): one unit, so RSSI/SNR never travel on a page
-	 * without their age. */
-	INFO_U_LAST_DL,
 	INFO_U_SCALARS,
 };
 
@@ -2078,10 +2144,6 @@ static void info_page_fill(Response *resp, const struct info_snap *snap, uint32_
 	pi->battery = (mask & BIT(INFO_U_BATTERY)) ? all->battery : 0;
 	pi->reset_cause = (mask & BIT(INFO_U_RESET_CAUSE)) ? all->reset_cause : 0;
 	pi->device_status = (mask & BIT(INFO_U_DEVICE_STATUS)) ? all->device_status : 0;
-	if (mask & BIT(INFO_U_LRW_STATE)) {
-		pi->has_lrw_state = all->has_lrw_state;
-		pi->lrw_state = all->lrw_state;
-	}
 	if (mask & BIT(INFO_U_CLAIM_TOKEN)) {
 		pi->has_claim_token = all->has_claim_token;
 		memcpy(pi->claim_token, all->claim_token, sizeof(pi->claim_token));
@@ -2089,14 +2151,6 @@ static void info_page_fill(Response *resp, const struct info_snap *snap, uint32_
 	if (mask & BIT(INFO_U_DEV_EUI)) {
 		pi->has_dev_eui = all->has_dev_eui;
 		memcpy(pi->dev_eui, all->dev_eui, sizeof(pi->dev_eui));
-	}
-	if (mask & BIT(INFO_U_LAST_DL)) {
-		pi->has_last_dl_rssi = all->has_last_dl_rssi;
-		pi->last_dl_rssi = all->last_dl_rssi;
-		pi->has_last_dl_snr = all->has_last_dl_snr;
-		pi->last_dl_snr = all->last_dl_snr;
-		pi->has_last_dl_age_s = all->has_last_dl_age_s;
-		pi->last_dl_age_s = all->last_dl_age_s;
 	}
 	if (rng->end > rng->start) {
 		pi->active_alarms.funcs.encode = encode_alarm_range;
@@ -2131,16 +2185,10 @@ static bool info_unit_empty(const Response_Info *in, size_t u)
 		return in->reset_cause == 0;
 	case INFO_U_DEVICE_STATUS:
 		return in->device_status == 0;
-	case INFO_U_LRW_STATE:
-		return !in->has_lrw_state;
 	case INFO_U_CLAIM_TOKEN:
 		return !in->has_claim_token;
 	case INFO_U_DEV_EUI:
 		return !in->has_dev_eui;
-	case INFO_U_LAST_DL:
-		/* Set together, and only after a downlink: RSSI/SNR can be 0 or negative,
-		 * so presence (not the value) decides. */
-		return !in->has_last_dl_age_s;
 	default:
 		return false;
 	}
@@ -2286,6 +2334,149 @@ static int info_paged(uint32_t seq, uint8_t *out, size_t cap, size_t *out_len, b
 	return 0;
 }
 
+/* ---- RadioState pages (#446) --------------------------------------------- */
+
+/* Page unit of RadioState field `tag` (bit `unit` of a page mask): the downlink
+ * RSSI/SNR travel with their age, the uplink values in pairs, every other field
+ * alone. */
+static uint32_t rs_unit(uint32_t tag)
+{
+	switch (tag) {
+	case Response_RadioState_dl_snr_tag:
+	case Response_RadioState_dl_age_s_tag:
+		return Response_RadioState_dl_rssi_tag;
+	case Response_RadioState_ul_snr_tag:
+		return Response_RadioState_ul_rssi_tag;
+	case Response_RadioState_ul_gw_count_tag:
+		return Response_RadioState_ul_margin_tag;
+	default:
+		return tag;
+	}
+}
+
+/* Clear every present field of `rs` whose unit is not in `mask` (keep = false),
+ * or collect the units that have a present field (keep = true, returned). */
+static uint32_t rs_units(Response_RadioState *rs, uint32_t mask, bool keep)
+{
+	pb_field_iter_t it;
+	uint32_t present = 0;
+
+	if (!pb_field_iter_begin(&it, Response_RadioState_fields, rs)) {
+		return 0;
+	}
+	do {
+		bool *has = (bool *)it.pSize;
+
+		if (PB_HTYPE(it.type) != PB_HTYPE_OPTIONAL || !has || !*has) {
+			continue;
+		}
+		uint32_t u = rs_unit(it.tag);
+
+		present |= BIT(u);
+		if (!keep && !(mask & BIT(u))) {
+			*has = false;
+		}
+	} while (pb_field_iter_next(&it));
+	return present;
+}
+
+static void rs_page_fill(Response *r, const Response_RadioState *all, uint32_t seq, uint32_t mask,
+			 uint32_t page, uint32_t count)
+{
+	*r = (Response)Response_init_zero;
+	r->seq = seq;
+	r->which_body = Response_radio_state_tag;
+	r->body.radio_state = *all;
+	(void)rs_units(&r->body.radio_state, mask, false);
+	set_page(r, page, count);
+}
+
+/* Greedy layout of the units of `all` for `cap` (as info_layout()): the mask of
+ * page `want` and the page count. A unit too big alone is left out (physical
+ * floor, #425); -EMSGSIZE only when none fits. `r` is scratch. */
+static int rs_layout(const Response_RadioState *all, uint32_t seq, size_t cap, uint32_t want,
+		     uint32_t *mask_out, uint32_t *count, Response *r)
+{
+	Response_RadioState tmp = *all;
+	uint32_t present = rs_units(&tmp, 0, true);
+	uint32_t cur = 0, mask = 0;
+
+	for (uint32_t u = 1; u < 32; u++) {
+		if (!(present & BIT(u))) {
+			continue;
+		}
+		rs_page_fill(r, all, seq, mask | BIT(u), PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
+		if (response_fits(r, cap)) {
+			mask |= BIT(u);
+			continue;
+		}
+		rs_page_fill(r, all, seq, BIT(u), PAGE_COUNT_BOUND, PAGE_COUNT_BOUND);
+		if (!response_fits(r, cap)) {
+			continue; /* too big even alone: left out */
+		}
+		if (mask != 0) {
+			if (cur == want) {
+				*mask_out = mask;
+			}
+			cur++;
+		}
+		mask = BIT(u);
+	}
+	if (mask == 0) {
+		return -EMSGSIZE;
+	}
+	if (cur == want) {
+		*mask_out = mask;
+	}
+	*count = cur + 1;
+	return 0;
+}
+
+static int radio_state_page(uint32_t page, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	uint32_t mask = 0, count;
+	Response r;
+	int ret = rs_layout(&m_page_stream.u.rs, m_page_stream.seq, m_page_stream.cap, page, &mask,
+			    &count, &r);
+
+	if (ret) {
+		return ret;
+	}
+	if (page >= count) {
+		return -ENODATA;
+	}
+	rs_page_fill(&r, &m_page_stream.u.rs, m_page_stream.seq, mask, page, count);
+	return encode_response(&r, out, out_cap, out_len);
+}
+
+/* A radio get_radio_state that does not fit `cap`: snapshot the answer in
+ * `resp`, encode page 0 and arm the stream when more follow. `resp` ends up as
+ * page scratch. */
+static int radio_state_paged(Response *resp, uint8_t *out, size_t cap, size_t *out_len,
+			     bool *streamed)
+{
+	uint32_t seq = resp->seq;
+	uint32_t mask = 0, count;
+	int ret;
+
+	app_cmd_stream_cancel();
+	m_page_stream.u.rs = resp->body.radio_state;
+	ret = rs_layout(&m_page_stream.u.rs, seq, cap, 0, &mask, &count, resp);
+	if (ret) {
+		return ret;
+	}
+	rs_page_fill(resp, &m_page_stream.u.rs, seq, mask, 0, count);
+	ret = encode_response(resp, out, cap, out_len);
+	if (ret) {
+		return ret;
+	}
+	*streamed = count > 1;
+	if (*streamed) {
+		page_stream_start(PAGE_STREAM_RADIO, seq, cap, count);
+	}
+	return 0;
+}
+
 /* ---- stream driver -------------------------------------------------------- */
 
 static int request_page(uint32_t page, uint8_t *out, size_t out_cap, size_t *out_len)
@@ -2345,6 +2536,9 @@ int app_cmd_stream_next(uint8_t *out, size_t out_cap, size_t *out_len)
 		break;
 	case PAGE_STREAM_INFO:
 		ret = info_page(m_page_stream.next, out, out_cap, out_len);
+		break;
+	case PAGE_STREAM_RADIO:
+		ret = radio_state_page(m_page_stream.next, out, out_cap, out_len);
 		break;
 	default:
 		ret = -EINVAL;
@@ -2416,6 +2610,26 @@ static __noinline int info_host_page(enum app_cmd_transport tp, uint32_t seq, ui
 		page_out_of_range(r, seq);
 	} else {
 		info_page_fill(r, &snap, mask, &rng, page, count);
+	}
+	return encode_response(r, out, cap, out_len);
+}
+
+/* Page `page` of a host-driven get_radio_state for `cap`, laid out afresh from
+ * the answer already in `r` (its RadioState is the snapshot). */
+static __noinline int radio_state_host_page(uint32_t seq, uint32_t page, Response *r, uint8_t *out,
+					    size_t cap, size_t *out_len)
+{
+	Response_RadioState all = r->body.radio_state;
+	uint32_t mask = 0, count = 0;
+	int ret = rs_layout(&all, seq, cap, page, &mask, &count, r);
+
+	if (ret) {
+		return ret;
+	}
+	if (page >= count) {
+		page_out_of_range(r, seq);
+	} else {
+		rs_page_fill(r, &all, seq, mask, page, count);
 	}
 	return encode_response(r, out, cap, out_len);
 }
@@ -2522,6 +2736,9 @@ static __noinline pb_size_t decode_and_dispatch(enum app_cmd_transport transport
 		*host_page = cmd.body.get_info.page;
 	} else if (cmd.which_body == Command_w1_scan_tag && cmd.body.w1_scan.has_page) {
 		*host_page = cmd.body.w1_scan.page;
+	} else if (cmd.which_body == Command_get_radio_state_tag &&
+		   cmd.body.get_radio_state.has_page) {
+		*host_page = cmd.body.get_radio_state.page;
 	}
 	return cmd.which_body;
 }
@@ -2585,7 +2802,8 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 	const uint32_t seq = resp.seq;
 	bool info_paging = false;
 	const bool host = host_paged(transport) && (resp.which_body == Response_info_tag ||
-						    resp.which_body == Response_w1_scan_tag);
+						    resp.which_body == Response_w1_scan_tag ||
+						    resp.which_body == Response_radio_state_tag);
 	int ret = -EMSGSIZE;
 
 	if (!host || host_page == 0) {
@@ -2596,6 +2814,8 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 			info_paging = true; /* `resp` becomes page scratch */
 			ret = info_host_page(transport, seq, host_page, &resp, out, out_cap,
 					     out_len);
+		} else if (resp.which_body == Response_radio_state_tag) {
+			ret = radio_state_host_page(seq, host_page, &resp, out, out_cap, out_len);
 		} else {
 			ret = w1_scan_host_page(&resp, host_page, out, out_cap, out_len);
 		}
@@ -2610,6 +2830,18 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 
 		info_paging = true;
 		ret = info_paged(seq, out, out_cap, out_len, &streamed, &resp);
+		if (ret == 0 && streamed) {
+			act = APP_CMD_ACTION_PAGE_STREAM;
+		}
+	}
+
+	if (ret == -EMSGSIZE && resp.which_body == Response_radio_state_tag &&
+	    radio_transport(transport)) {
+		/* #446: a RadioState that does not fit the budget is paged field by
+		 * field from one snapshot (#425 envelope). */
+		bool streamed = false;
+
+		ret = radio_state_paged(&resp, out, out_cap, out_len, &streamed);
 		if (ret == 0 && streamed) {
 			act = APP_CMD_ACTION_PAGE_STREAM;
 		}

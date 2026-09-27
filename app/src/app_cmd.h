@@ -8,6 +8,7 @@
 #define APP_CMD_H_
 
 /* Standard includes */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -125,13 +126,9 @@ struct app_cmd_info {
 	uint8_t claim_token[16]; /* 128-bit device claim token (#170); all-zero = uncommissioned */
 	uint32_t battery_mv;     /* supply voltage in mV; 0 = measurement unavailable */
 	uint32_t reset_cause;   /* hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown */
-	uint8_t lrw_state;      /* radio link state, LoRaWAN or P2P (enum app_radio_state) */
+	uint8_t radio_state;    /* radio link state, LoRaWAN or P2P (enum app_radio_state) */
 	uint8_t dev_eui[8];     /* LoRaWAN DevEUI; all-zero = unset */
 	uint32_t device_status; /* aggregated status (APP_DEVICE_STATUS_* bitmask) */
-	bool has_last_dl;       /* a downlink was received since boot (#409 A2) */
-	int16_t last_dl_rssi;   /* its RSSI (dBm) */
-	int8_t last_dl_snr;     /* its SNR (dB) */
-	uint32_t last_dl_age_s; /* seconds since it was received */
 };
 
 /* Cache the hwinfo reset-cause bitmask read once at boot (RESET_* flags from

@@ -16,13 +16,12 @@ extern "C" {
 #endif
 
 /* Link state of the active radio, shared by both backends (doc/plan/439 T1).
- * The values are the wire values of Info.lrw_state (app_config.proto), so keep
- * the order. LoRaWAN: IDLE before the first join, JOINING, HEALTHY, WARNING
- * while link checks fail, RECONNECT after the link was lost, DISABLED when the
- * DevEUI is all-zero (#98). P2P: IDLE when unpaired and not joining (after a
- * Detach), JOINING for a boot/forced join, HEALTHY when paired, WARNING after
- * P2P_WARNING_FAIL_THRESHOLD failed confirmed cycles, RECONNECT for a
- * self-heal/RejoinRequest join, DISABLED when lrw_appkey or lrw_deveui is
+ * The values are the wire values of Response.RadioState.State
+ * (app_config.proto), so keep the order. LoRaWAN: IDLE before the first join, JOINING, HEALTHY,
+ * WARNING while link checks fail, RECONNECT after the link was lost, DISABLED when the DevEUI is
+ * all-zero (#98). P2P: IDLE when unpaired and not joining (after a Detach), JOINING for a
+ * boot/forced join, HEALTHY when paired, WARNING after P2P_WARNING_FAIL_THRESHOLD failed confirmed
+ * cycles, RECONNECT for a self-heal/RejoinRequest join, DISABLED when lrw_appkey or lrw_deveui is
  * all-zero. */
 enum app_radio_state {
 	APP_RADIO_STATE_IDLE,
@@ -73,13 +72,90 @@ void app_radio_rejoin(void);
 enum app_radio_kind app_radio_get_kind(void);
 
 /* Link state of the active radio (see enum app_radio_state): drives the status
- * LED, Info.lrw_state and the device_status radio bits for either backend. */
+ * LED, RadioState.state and the device_status radio bits for either backend. */
 enum app_radio_state app_radio_get_state(void);
 
-/* Link quality of the last downlink the node received (LoRaWAN: any downlink;
- * P2P: the last authenticated Ack / command / link-control frame), as measured
- * by the node, with its age in seconds. Returns false before the first one. */
-bool app_radio_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s);
+/* Link state and diagnostics of the active radio (Response.RadioState, #446),
+ * one shape for LoRaWAN and P2P. app_radio owns the data: each backend pushes
+ * the facts as they happen through the app_radio_note_* / app_radio_set_* /
+ * app_radio_count() calls below, and every reader (Info, get_radio_state, the
+ * shell) takes a snapshot with app_radio_get_status() -- nobody reads a
+ * backend directly. The has_* flags mark values the active radio has
+ * reported. */
+
+/* Link events counted since boot, with the same meaning on both radios. */
+enum app_radio_counter {
+	APP_RADIO_CNT_TX,     /* uplink transmission (retransmissions in, joins out) */
+	APP_RADIO_CNT_RX,     /* downlink received (counted by app_radio_note_downlink) */
+	APP_RADIO_CNT_RETRY,  /* retransmission */
+	APP_RADIO_CNT_FAIL,   /* uplink never confirmed (P2P Ack / LoRaWAN LinkCheck) */
+	APP_RADIO_CNT_TX_ERR, /* send refused by the MAC or failed in the radio */
+	APP_RADIO_CNT_JOIN,   /* join attempt */
+	APP_RADIO_CNT_COUNT,
+};
+
+struct app_radio_status {
+	enum app_radio_state state;
+	/* Radio parameters of the uplinks now (app_radio_set_params). */
+	uint8_t sf;          /* spreading factor, 0 = unknown */
+	bool has_datarate;   /* LoRaWAN */
+	uint8_t datarate;    /* DR index */
+	bool has_tx_power;   /* tx_power_dbm valid */
+	int8_t tx_power_dbm; /* conducted TX power (dBm), capped by the PA */
+	/* Last downlink as measured by the node (app_radio_note_downlink). */
+	bool has_dl;
+	int16_t dl_rssi;
+	int8_t dl_snr;
+	uint32_t dl_age_s;
+	bool has_dl_unix; /* the RTC is synced */
+	uint32_t dl_unix_time;
+	/* Last uplink as received by the other side. */
+	bool has_ul_rssi; /* P2P: RSSI/SNR the Hub reported in the last Ack */
+	int16_t ul_rssi;
+	int8_t ul_snr;
+	bool has_ul_margin; /* LoRaWAN: last LinkCheckAns */
+	uint8_t ul_margin;
+	uint8_t ul_gw_count;
+	/* Current or last session (app_radio_set_session). */
+	bool has_session;
+	uint32_t dev_addr;
+	uint32_t fcnt_up; /* next uplink frame counter */
+	/* Link health now. */
+	uint32_t fail_streak;
+	uint32_t join_attempts;
+	uint32_t duty_blocked_s; /* 0 = not held by the duty cycle */
+	bool has_airtime;        /* P2P */
+	uint32_t airtime_hour_ms;
+	/* Counters since boot (enum app_radio_counter) and their time base. */
+	uint32_t uptime_s;
+	uint32_t cnt[APP_RADIO_CNT_COUNT];
+};
+
+/* Snapshot for a reader: the pushed values plus the link state, the ages and
+ * the downlink's wall-clock time computed now. */
+void app_radio_get_status(struct app_radio_status *st);
+
+/* Backend push API. Callable from any thread (spinlock inside). */
+void app_radio_count(enum app_radio_counter c);
+/* An authenticated downlink was received: its node-measured RSSI (dBm) and SNR
+ * (dB); also counts APP_RADIO_CNT_RX. */
+void app_radio_note_downlink(int16_t rssi, int8_t snr);
+/* Radio parameters now; datarate < 0 = none (P2P). TX power is capped by the PA. */
+void app_radio_set_params(uint8_t sf, int datarate, int8_t tx_power_dbm);
+/* P2P: the RSSI/SNR the Hub measured on the last acknowledged uplink. */
+void app_radio_set_uplink_rssi(int16_t rssi, int8_t snr);
+/* LoRaWAN: the last LinkCheckAns. */
+void app_radio_set_uplink_margin(uint8_t margin, uint8_t gw_count);
+/* The session's address and next uplink frame counter. */
+void app_radio_set_session(uint32_t dev_addr, uint32_t fcnt_up);
+/* Consecutive unconfirmed uplinks, and the step of the current (re)join episode. */
+void app_radio_set_fail_streak(uint32_t n);
+void app_radio_set_join_attempts(uint32_t n);
+/* Sends are (true) / are no longer (false) held by the duty cycle; the hold
+ * time runs from the first `true`. */
+void app_radio_set_duty_held(bool held);
+/* P2P: airtime used in the sliding hour (duty ledger). */
+void app_radio_set_airtime(uint32_t ms);
 
 /* True when the link can carry an uplink now. */
 bool app_radio_is_ready(void);

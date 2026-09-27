@@ -175,6 +175,7 @@ message Command {
         GetClaimInfo     get_claim_info    = 29;
         GetBasicInfo     get_basic_info    = 30;
         GetSettings      get_settings      = 31;
+        GetRadioState    get_radio_state   = 32;
     }
 // END GENERATED COMMANDS
 
@@ -336,6 +337,12 @@ message Command {
     // command's seq (the autonomous boot dump has seq 0); over LoRaWAN it is
     // paged with the Response envelope (#425) when it does not fit one frame.
     message GetSettings { }
+
+    // Link state and diagnostics of the active radio (#446): answered with
+    // Response.radio_state. Over a radio the device streams the pages itself
+    // (#425); over NFC / vendor / shell the host asks for page 1..page_count-1
+    // with `page` (omitted/0 = first page), as GetInfo.page.
+    message GetRadioState { optional uint32 page = 1; }
 }
 
 message Response {
@@ -351,6 +358,7 @@ message Response {
         Telemetry      sample           = 8;   // Sample command: fresh readings (NFC)
         ClaimInfo      claim_info       = 9;   // get_claim_info: serial + claim_token (#415)
         BasicInfo      basic_info       = 10;  // get_basic_info: identity bootstrap (#415/#313)
+        RadioState     radio_state      = 14;  // get_radio_state: link state + diagnostics (#446)
     }
 
     // #415/#313: plaintext identity bootstrap returned by get_basic_info — the
@@ -384,10 +392,10 @@ message Response {
 
     message Info {
         // Firmware version (semver components). board is omitted on purpose —
-        // the LNS already knows it from the device context. lrw_state and dev_eui
-        // are emitted over NFC only (see below) — a LoRaWAN uplink omits them: the
-        // LNS already knows the DevEUI, and the link state is redundant on a frame
-        // it just received.
+        // the LNS already knows it from the device context. dev_eui is emitted
+        // over NFC only (see below) — the network already knows the DevEUI. The
+        // radio link state and diagnostics are not part of Info: a host asks
+        // for them with get_radio_state on any transport (#446).
         uint32 fw_major = 1;
         uint32 fw_minor = 2;
         uint32 fw_patch = 3;
@@ -400,18 +408,6 @@ message Response {
         }
         BuildType build_type = 4;
 
-        // Radio link state of the active radio, LoRaWAN or P2P (mirrors
-        // enum app_radio_state; the field keeps its historical name). Emitted
-        // over NFC only (see lrw_state below).
-        enum LrwState {
-            IDLE      = 0;   // not joined / init
-            JOINING   = 1;   // join/rejoin in progress
-            HEALTHY   = 2;   // joined, link OK
-            WARNING   = 3;   // joined, link check failing
-            RECONNECT = 4;   // reconnecting with backoff
-            DISABLED  = 5;   // DevEUI all-zero: radio-silent, no join/TX (#98)
-        }
-
         uint32 serial_number = 5;
         uint32 uptime_s      = 6;   // seconds since boot
         uint32 unix_time     = 7;   // wall-clock (UTC); 0/absent until RTC synced
@@ -423,7 +419,8 @@ message Response {
         optional bytes claim_token = 9;
         uint32 battery       = 10;  // supply voltage in mV (0 = unavailable)
         uint32 reset_cause   = 11;  // hwinfo reset-cause bitmask of the last boot (#88); 0 = unknown
-        optional LrwState lrw_state = 12;  // current radio link state (LoRaWAN or P2P); emitted over NFC only
+        // 12 was lrw_state (v1.4.0); the link state is in get_radio_state (#446).
+        reserved 12;
         optional bytes dev_eui = 13;  // 8-byte DevEUI; emitted over NFC only, omitted if unset
         uint32 device_status = 14;  // aggregated device status (APP_DEVICE_STATUS_* bitmask); 0 = all OK
 
@@ -435,14 +432,60 @@ message Response {
         // app_alarm_quantity, AlarmEvent.Type) — see AlarmStatus.
         repeated AlarmStatus active_alarms = 15;
 
-        // Link quality of the last downlink received, as measured by the device
-        // (#409 A2), with its age: on a Class A device it can be hours old.
-        // Emitted over NFC only (an installer with a phone has no LNS view; the
-        // LNS already has uplink RSSI/SNR and DevStatusAns), and omitted until the
-        // first downlink since boot.
-        optional sint32 last_dl_rssi  = 16;  // dBm
-        optional sint32 last_dl_snr   = 17;  // dB
-        optional uint32 last_dl_age_s = 18;  // seconds since that downlink
+        // 16..18 were last_dl_rssi / last_dl_snr / last_dl_age_s (#423), moved
+        // to get_radio_state before v1.5.0 shipped (#446).
+        reserved 16, 17, 18;
+    }
+
+    // Link state and diagnostics of the active radio, the same message and the
+    // same meaning for LoRaWAN and P2P (#446): the answer to get_radio_state on
+    // every transport (paged, #425); not part of Info. A
+    // snapshot at request time; every field is optional and absent means
+    // unknown or not applicable to the active radio (marked LoRaWAN / P2P).
+    // The counters run since boot (uptime_s is their time base), are not
+    // persisted and wrap at 2^32.
+    message RadioState {
+        // Link state (mirrors enum app_radio_state).
+        enum State {
+            IDLE      = 0;   // not joined / init
+            JOINING   = 1;   // join/rejoin in progress
+            HEALTHY   = 2;   // joined, link OK
+            WARNING   = 3;   // joined, uplinks going unconfirmed
+            RECONNECT = 4;   // reconnecting with backoff
+            DISABLED  = 5;   // DevEUI all-zero: radio-silent, no join/TX (#98)
+        }
+        optional State  state           = 1;
+        // Radio parameters of the uplinks now.
+        optional uint32 sf              = 2;   // spreading factor (7..12)
+        optional uint32 datarate        = 3;   // LoRaWAN: data rate index (DR)
+        optional sint32 tx_power_dbm    = 4;   // conducted TX power, dBm (capped by the PA)
+        // Last downlink as measured by the node; omitted until the first one
+        // since boot. On a Class A device it can be hours old.
+        optional sint32 dl_rssi         = 5;   // dBm
+        optional sint32 dl_snr          = 6;   // dB
+        optional uint32 dl_age_s        = 7;   // seconds since it
+        optional uint32 dl_unix_time    = 8;   // its wall-clock time (UTC); omitted while the RTC is unsynced
+        // Last uplink as received by the other side.
+        optional sint32 ul_rssi         = 9;   // P2P: RSSI the Hub reported in the last Ack, dBm
+        optional sint32 ul_snr          = 10;  // P2P: SNR the Hub reported in the last Ack, dB
+        optional uint32 ul_margin       = 11;  // LoRaWAN: last LinkCheckAns demodulation margin, dB
+        optional uint32 ul_gw_count     = 12;  // LoRaWAN: last LinkCheckAns gateway count
+        // Session.
+        optional uint32 dev_addr        = 13;  // LoRaWAN DevAddr / P2P node address; omitted when not joined
+        optional uint32 fcnt_up         = 14;  // next uplink frame counter
+        // Link health now.
+        optional uint32 fail_streak     = 15;  // consecutive unconfirmed uplinks (LoRaWAN LinkCheck, P2P Ack)
+        optional uint32 join_attempts   = 16;  // attempts in the current (re)join episode
+        optional uint32 duty_blocked_s  = 17;  // sends held by the duty cycle for this long; absent = not held
+        optional uint32 airtime_hour_ms = 18;  // P2P: airtime in the sliding hour (duty ledger)
+        // Counters since boot.
+        optional uint32 uptime_s        = 19;  // their time base (= Info.uptime_s)
+        optional uint32 tx_count        = 20;  // uplink transmissions, retransmissions included, joins excluded
+        optional uint32 rx_count        = 21;  // downlinks received
+        optional uint32 retry_count     = 22;  // retransmissions
+        optional uint32 fail_count      = 23;  // uplinks never confirmed
+        optional uint32 tx_err_count    = 24;  // sends refused by the MAC or failed in the radio
+        optional uint32 join_count      = 25;  // join attempts
     }
 
     // A single active alarm as reported in Info.active_alarms. Same taxonomy as a

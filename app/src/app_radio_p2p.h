@@ -251,9 +251,9 @@ bool app_radio_p2p_is_ready(void);
 /* Link state in the common app_radio terms (see enum app_radio_state). */
 enum app_radio_state app_radio_p2p_get_state(void);
 
-/* Node-measured RSSI/SNR of the last authenticated downlink (Ack, command or
- * link-control frame) and its age in seconds; false before the first one. */
-bool app_radio_p2p_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s);
+/* Current network SF and TX power (dBm; the central's assignment if any, else
+ * p2p-tx-power). Always true. */
+bool app_radio_p2p_get_radio_params(uint8_t *sf, int8_t *tx_power_dbm);
 
 /* Fixed application-payload budget for one frame (LoRa MTU minus the P2P
  * header and AES-CCM tag). app_compose() bin-packs telemetry groups against

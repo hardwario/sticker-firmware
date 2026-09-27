@@ -357,31 +357,28 @@ test("decodeUplink decodes get_info reset_cause_flags (fPort 85)", () => {
   assert.deepEqual(got.info.reset_cause_flags, ["pin", "power_on"]);
 });
 
-// Info carries lrw_state (field 12, mirrors enum app_radio_state) and dev_eui (field 13,
-// 8 bytes). Both are emitted over NFC only. Inner Info: fw 1.4.2,
-// lrw_state=2 (HEALTHY), dev_eui=0102030405060708.
-test("decodeUplink decodes get_info lrw_state + dev_eui (NFC)", () => {
+// Info carries dev_eui (field 13, 8 bytes), emitted over NFC only. The radio
+// link state is not part of Info (#446: get_radio_state). Inner Info: fw 1.4.2,
+// dev_eui=0102030405060708.
+test("decodeUplink decodes get_info dev_eui (NFC)", () => {
   const got = codec.decodeUplink({
-    bytes: hex("0108031a1208011004180260026a080102030405060708"),
+    bytes: hex("0108031a100801100418026a080102030405060708"),
     fPort: 85,
   }).data;
   assert.equal(got.seq, 3);
-  assert.equal(got.info.lrw_state, 2);
-  assert.equal(got.info.lrw_state_name, "healthy");
   assert.equal(got.info.dev_eui, "0102030405060708");
+  assert.equal(got.info.radio_state, undefined);
 });
 
-// Over LoRaWAN the device omits BOTH lrw_state and dev_eui (NFC-only fields):
-// the LNS already knows the DevEUI, and the link state is redundant on a frame it
-// just received. Inner Info: fw 1.4.2 only.
-test("decodeUplink get_info omits lrw_state + dev_eui over LoRaWAN (fPort 85)", () => {
+// Over LoRaWAN the device omits dev_eui (NFC-only): the LNS already knows the
+// DevEUI. Inner Info: fw 1.4.2 only.
+test("decodeUplink get_info omits dev_eui over LoRaWAN (fPort 85)", () => {
   const got = codec.decodeUplink({
     bytes: hex("0108031a06080110041802"),
     fPort: 85,
   }).data;
   assert.equal(got.seq, 3);
-  assert.equal(got.info.lrw_state, undefined);
-  assert.equal(got.info.lrw_state_name, undefined);
+  assert.equal(got.info.radio_state, undefined);
   assert.equal(got.info.dev_eui, undefined);
 });
 
@@ -422,26 +419,12 @@ test("decodeUplink get_info active_alarms defaults to [] when absent (fPort 85)"
   assert.deepEqual(got.info.active_alarms, []);
 });
 
-// lrw_state = 5 decodes to "disabled" (DevEUI all-zero radio-silent, #98).
-test("decodeUplink get_info lrw_state=5 decodes as disabled (fPort 85)", () => {
-  const got = codec.decodeUplink({
-    bytes: hex("0108031a080801100418026005"),
-    fPort: 85,
-  }).data;
-  assert.equal(got.info.lrw_state, 5);
-  assert.equal(got.info.lrw_state_name, "disabled");
-});
-
-// Last-downlink link quality (#409 A2, NFC-only Info fields 16-18): fw 1.4.2,
-// last_dl_rssi=-97 dBm (sint32), last_dl_snr=-7 dB, last_dl_age_s=3600 s.
-test("decodeUplink decodes get_info last-downlink RSSI/SNR/age (#409)", () => {
-  const got = codec.decodeUplink({
-    bytes: hex("0108011a110801100418028001c10188010d9001901c"),
-    fPort: 85,
-  }).data;
-  assert.equal(got.info.last_dl_rssi, -97);
-  assert.equal(got.info.last_dl_snr, -7);
-  assert.equal(got.info.last_dl_age_s, 3600);
+// get_radio_state answer: radio_state.state = 5 decodes to "disabled" (DevEUI
+// all-zero radio-silent, #98). version 01, seq 3, radio_state (14) { state 5 }.
+test("get_radio_state answer state=5 decodes as disabled", () => {
+  const got = codec.decodeUplink({ bytes: hex("01080372020805"), fPort: 85 }).data;
+  assert.equal(got.radio_state.state, 5);
+  assert.equal(got.radio_state.state_name, "disabled");
 });
 
 // A healthy device omits device_status (0 -> proto3 drops it); decoder defaults to 0/[].
@@ -1135,6 +1118,39 @@ test("get_settings answer decodes as a ConfigDump with its seq", () => {
   assert.equal(r.data.config_dump.application.interval_sample, 60);
   assert.equal(r.data.config_dump.application.interval_report, 900);
   assert.equal(r.data.pages, undefined, "one frame: no pages");
+});
+
+// --- get_radio_state (#446): Command field 32, optional page; the answer is
+// Response.radio_state (field 14), paged field by field over a radio (#425).
+test("get_radio_state encodes field 32 (empty / with page) and round-trips", () => {
+  const enc = codec.encodeDownlink({ data: { seq: 7, command: "get_radio_state" } });
+  assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
+  assert.equal(enc.fPort, 85);
+  // tag (32<<3)|2 = 258 = 0x82 0x02 as a varint, length 0.
+  assert.equal(toHex(enc.bytes), "0807820200");
+  const dec = codec.decodeDownlink({ fPort: 85, bytes: enc.bytes });
+  assert.equal(dec.data.command, "get_radio_state");
+  assert.equal(dec.data.seq, 7);
+  const paged = codec.encodeDownlink({
+    data: { seq: 7, command: "get_radio_state", get_radio_state: { page: 2 } },
+  });
+  assert.equal(toHex(paged.bytes), "08078202020802");
+});
+
+test("get_radio_state answer page decodes only the fields it carries", () => {
+  // version 01, seq 7, radio_state (14) { state 2, sf 7, tx_power_dbm 14,
+  // ul_rssi -58, ul_snr 12, retry_count 15, fail_count 5 }, page 0 of 2.
+  const r = codec.decodeUplink({
+    fPort: 85,
+    bytes: [...hex("010807721008021007201c48735018b0010fb8010560006802")],
+  });
+  assert.equal(r.errors.length, 0, "decode errors: " + r.errors);
+  assert.equal(r.data.seq, 7);
+  assert.equal(r.data.pages, "1/2");
+  assert.deepEqual(r.data.radio_state, {
+    state: 2, state_name: "healthy", sf: 7, tx_power_dbm: 14, ul_rssi: -58, ul_snr: 12,
+    retry_count: 15, fail_count: 5,
+  });
 });
 
 // --- Fix for a systemic decoder hang: _pbReadVarint(bytes, offset) with

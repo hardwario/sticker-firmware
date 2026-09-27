@@ -385,12 +385,6 @@ static bool m_started;
  * Reported as APP_RADIO_STATE_DISABLED. */
 static bool m_disabled;
 static bool m_listening;
-/* Node-measured link quality of the last authenticated downlink, for
- * app_radio_last_downlink() (GetInfo / NFC, #409 A2). m_last_dl_ms == 0 means
- * none yet. */
-static int16_t m_last_dl_rssi;
-static int8_t m_last_dl_snr;
-static int64_t m_last_dl_ms;
 static struct p2p_duty m_duty; /* exact sliding-hour duty ledger (B2/D1) */
 static void (*m_ready_cb)(void);
 
@@ -439,6 +433,32 @@ static uint8_t m_rejoin_attempt;      /* backoff step within a slow-policy episo
 static uint8_t m_join_sweep_step;  /* sweep step the next JoinRequest uses */
 static uint8_t m_join_sf_attempts; /* SENT attempts already made at that step */
 static bool m_join_episode_fresh;  /* the handler has not opened this episode yet */
+
+/* RadioState (#446): every change of the failure streak and the backoff step is
+ * pushed to app_radio, which is where readers take them from. */
+static void set_consec_fail(uint32_t n)
+{
+	m_consec_uplink_fail = (uint16_t)MIN(n, UINT16_MAX);
+	app_radio_set_fail_streak(m_consec_uplink_fail);
+}
+
+static void set_rejoin_attempt(uint32_t n)
+{
+	m_rejoin_attempt = (uint8_t)MIN(n, UINT8_MAX);
+	app_radio_set_join_attempts(m_rejoin_attempt);
+}
+
+/* After a transmission: the parameters it went out with (the same precedence
+ * as build_modem_config()) and, when paired, the session. */
+static void publish_link(void)
+{
+	app_radio_set_params(m_sf, -1,
+			     m_session_tx_power_assigned ? m_session_tx_power_dbm
+							 : (int8_t)g_app_config.p2p_tx_power);
+	if (m_link_state == P2P_LINK_PAIRED) {
+		app_radio_set_session(m_dev_addr, m_fcnt);
+	}
+}
 
 /* B1: RSSI/SNR the central reported in the last Ack (its measurement of our
  * uplink). m_last_ack_valid is false until the first Ack of this session. */
@@ -1384,13 +1404,24 @@ P2P_TESTABLE void p2p_parse_join_accept_reserved(const uint8_t reserved[4],
  * sent at the current SF -- 0 if it can go now. */
 static int64_t duty_wait_ms_for(size_t wire_len)
 {
-	return p2p_duty_wait_ms(&m_duty, k_uptime_get(), frame_toa_ms((uint8_t)wire_len));
+	int64_t wait = p2p_duty_wait_ms(&m_duty, k_uptime_get(), frame_toa_ms((uint8_t)wire_len));
+
+	if (wait > 0) {
+		app_radio_set_duty_held(true);
+	}
+	return wait;
 }
 
-/* Charge `air_ms` of just-transmitted air-time against the budget. */
+/* Charge `air_ms` of just-transmitted air-time against the budget; the send
+ * went out, so the duty cycle no longer holds anything. */
 static void duty_charge(uint32_t air_ms)
 {
-	p2p_duty_charge(&m_duty, k_uptime_get(), air_ms);
+	int64_t now = k_uptime_get();
+
+	p2p_duty_charge(&m_duty, now, air_ms);
+	duty_expire(&m_duty, (uint32_t)now);
+	app_radio_set_duty_held(false);
+	app_radio_set_airtime(duty_used_ms(&m_duty));
 }
 
 /* Retune the radio to `sf` for the next JoinRequest. m_work_q ONLY: it writes
@@ -1489,8 +1520,8 @@ static void start_join_episode(bool slow)
 	 * retune from under it would leave the radio and m_sf disagreeing. */
 	m_join_episode_fresh = true;
 	m_join_slow = slow;
-	m_rejoin_attempt = 0;
-	m_consec_uplink_fail = 0;
+	set_rejoin_attempt(0);
+	set_consec_fail(0);
 	m_link_state = P2P_LINK_JOINING;
 	m_join_started_at = k_uptime_get();
 	/* reschedule, not schedule: a slow-backoff retry may be pending for up to
@@ -1504,7 +1535,7 @@ static void start_join_episode(bool slow)
  * self-healing failure streak. */
 static void note_uplink_acked(void)
 {
-	m_consec_uplink_fail = 0;
+	set_consec_fail(0);
 }
 
 /* A confirmed-uplink cycle failed completely (all retries exhausted, no Ack).
@@ -1513,10 +1544,12 @@ static void note_uplink_acked(void)
  * self-heal is under way further give-ups don't re-trigger it. */
 static void note_uplink_cycle_failed(void)
 {
+	app_radio_count(APP_RADIO_CNT_FAIL);
 	if (m_link_state != P2P_LINK_PAIRED) {
 		return; /* already re-joining (or never paired) */
 	}
-	if (++m_consec_uplink_fail < P2P_REJOIN_FAIL_THRESHOLD) {
+	set_consec_fail(m_consec_uplink_fail + 1);
+	if (m_consec_uplink_fail < P2P_REJOIN_FAIL_THRESHOLD) {
 		return;
 	}
 	if (!app_key_is_set()) {
@@ -1614,6 +1647,7 @@ static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len,
 	ret = lora_send(m_lora_dev, frame, wire_len);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lora_send", ret);
+		app_radio_count(APP_RADIO_CNT_TX_ERR);
 		return ret;
 	}
 
@@ -1622,6 +1656,8 @@ static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len,
 
 	/* Charge the just-sent air-time against the 1% budget. */
 	duty_charge(air);
+	app_radio_count(APP_RADIO_CNT_TX);
+	publish_link();
 
 	LOG_INF("TX type %u, %zu B (counter %u, %u ms air)", frame_type, wire_len, counter, air);
 
@@ -1871,16 +1907,11 @@ static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
  *  - Command (0x56, B4): only when a pending downlink was announced -- decrypt,
  *    dispatch (dispatch_p2p_command), and treat as an implicit Ack.
  * Returns true iff a valid, matching downlink was received. */
-/* Remember the node-measured quality of an authenticated downlink for
- * app_radio_last_downlink() (GetInfo / NFC). */
+/* Report the node-measured quality of an authenticated downlink to app_radio
+ * (RadioState, #446). */
 static void note_downlink(int16_t rssi, int8_t snr)
 {
-	m_last_dl_rssi = rssi;
-	m_last_dl_snr = snr;
-	m_last_dl_ms = k_uptime_get();
-	if (m_last_dl_ms == 0) {
-		m_last_dl_ms = 1; /* 0 means "none yet" */
-	}
+	app_radio_note_downlink(rssi, snr);
 }
 
 static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
@@ -2056,6 +2087,7 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	m_last_ack_rssi = ack.rssi;
 	m_last_ack_snr = ack.snr;
 	m_last_ack_valid = true;
+	app_radio_set_uplink_rssi(ack.rssi, ack.snr);
 	note_downlink(rssi, snr);
 
 	/* B4/D2: remember whether -- and how large -- to size the NEXT uplink's
@@ -2129,6 +2161,7 @@ static void schedule_ack_retry(uint8_t frame_type, const uint8_t *body, size_t b
 
 	if (k_msgq_put(&m_ack_retry_msgq, &st, K_NO_WAIT) != 0) {
 		LOG_WRN("Ack retry queue full; giving up on counter %u", counter);
+		app_radio_count(APP_RADIO_CNT_FAIL);
 		return;
 	}
 
@@ -2162,6 +2195,7 @@ static void ack_retry_work_handler(struct k_work *work)
 	} else {
 		LOG_INF("Uplink retry %d/%d sent (counter %u)", st.attempt + 1, P2P_ACK_MAX_RETRIES,
 			st.counter);
+		app_radio_count(APP_RADIO_CNT_RETRY);
 
 		if (recv_ack(st.counter, tx_end)) {
 			note_uplink_acked();
@@ -2421,8 +2455,8 @@ static void mark_ready(void)
 {
 	/* Paired: back to the fast policy and clear the failure streak. */
 	m_join_slow = false;
-	m_rejoin_attempt = 0;
-	m_consec_uplink_fail = 0;
+	set_rejoin_attempt(0);
+	set_consec_fail(0);
 
 	/* Fresh session: last Ack's link quality and any pending-downlink hint
 	 * from the old session no longer apply. */
@@ -2528,6 +2562,7 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 	int ret = lora_send(m_lora_dev, frame, sizeof(frame));
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lora_send", ret);
+		app_radio_count(APP_RADIO_CNT_TX_ERR);
 		return ret;
 	}
 
@@ -2535,6 +2570,8 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 	uint32_t air = frame_toa_ms(sizeof(frame));
 
 	duty_charge(air);
+	app_radio_count(APP_RADIO_CNT_JOIN);
+	publish_link();
 
 	LOG_INF("JoinRequest sent (dev_nonce %u, %u ms air)", nonce_val, air);
 
@@ -2649,7 +2686,7 @@ static void join_window_expired(void)
 		"on slow backoff",
 		P2P_JOIN_BOOT_WINDOW_MS / 1000);
 	m_join_slow = true;
-	m_rejoin_attempt = 0;
+	set_rejoin_attempt(0);
 }
 
 static void join_work_handler(struct k_work *work)
@@ -2728,7 +2765,7 @@ static void join_work_handler(struct k_work *work)
 		 * the longer of the two (p2p_join_retry_delay_ms), and the jitter
 		 * may not undercut it (p2p_join_slow_jitter_ms). */
 		if (m_rejoin_attempt < UINT8_MAX) {
-			m_rejoin_attempt++;
+			set_rejoin_attempt(m_rejoin_attempt + 1);
 		}
 		wait_ms = p2p_join_slow_jitter_ms(wait_ms, duty_wait_ms, base, sys_rand32_get());
 	} else {
@@ -3014,8 +3051,8 @@ void p2p_test_join_setup(int cfg_sf)
 	p2p_duty_init(&m_duty);
 	m_link_state = P2P_LINK_JOINING;
 	m_join_slow = false;
-	m_rejoin_attempt = 0;
-	m_consec_uplink_fail = 0;
+	set_rejoin_attempt(0);
+	set_consec_fail(0);
 	m_join_started_at = k_uptime_get();
 	m_join_episode_fresh = false;
 	m_join_sweep_step = 0;
@@ -3041,7 +3078,7 @@ void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, uint1
 	m_link_state = state;
 	m_started = started;
 	m_join_slow = slow;
-	m_consec_uplink_fail = fails;
+	set_consec_fail(fails);
 	m_disabled = disabled;
 }
 
@@ -3293,17 +3330,6 @@ enum app_radio_state app_radio_p2p_get_state(void)
 	default:
 		return APP_RADIO_STATE_IDLE;
 	}
-}
-
-bool app_radio_p2p_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
-{
-	if (m_last_dl_ms == 0 || !rssi || !snr || !age_s) {
-		return false;
-	}
-	*rssi = m_last_dl_rssi;
-	*snr = m_last_dl_snr;
-	*age_s = (uint32_t)((k_uptime_get() - m_last_dl_ms) / 1000);
-	return true;
 }
 
 uint8_t app_radio_p2p_get_max_payload(void)

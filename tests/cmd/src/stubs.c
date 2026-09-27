@@ -285,21 +285,51 @@ enum app_radio_state app_radio_get_state(void)
 	return APP_RADIO_STATE_HEALTHY;
 }
 
-/* Last-downlink link quality (#409 A2): tests set test_dl_valid + values. */
+/* RadioState source (#446): tests set test_dl_valid + values for the last
+ * downlink, and test_radio_full for every other group. */
 bool test_dl_valid;
 int16_t test_dl_rssi;
 int8_t test_dl_snr;
 uint32_t test_dl_age_s;
+bool test_radio_full;
 
-bool app_radio_last_downlink(int16_t *rssi, int8_t *snr, uint32_t *age_s)
+void app_radio_get_status(struct app_radio_status *st)
 {
-	if (!test_dl_valid) {
-		return false;
+	*st = (struct app_radio_status){0};
+	st->state = app_radio_get_state();
+	st->uptime_s = 86400;
+	if (test_dl_valid) {
+		st->has_dl = true;
+		st->dl_rssi = test_dl_rssi;
+		st->dl_snr = test_dl_snr;
+		st->dl_age_s = test_dl_age_s;
 	}
-	*rssi = test_dl_rssi;
-	*snr = test_dl_snr;
-	*age_s = test_dl_age_s;
-	return true;
+	if (test_radio_full) {
+		st->sf = 7;
+		st->has_datarate = true;
+		st->datarate = 5;
+		st->has_tx_power = true;
+		st->tx_power_dbm = 14;
+		st->has_dl_unix = test_dl_valid;
+		st->dl_unix_time = 1790449436u;
+		st->has_ul_rssi = true;
+		st->ul_rssi = -58;
+		st->ul_snr = 12;
+		st->has_ul_margin = true;
+		st->ul_margin = 20;
+		st->ul_gw_count = 2;
+		st->has_session = true;
+		st->dev_addr = 0x260B1234u;
+		st->fcnt_up = 2334;
+		st->fail_streak = 3;
+		st->join_attempts = 1;
+		st->duty_blocked_s = 120;
+		st->has_airtime = true;
+		st->airtime_hour_ms = 3456;
+		for (size_t i = 0; i < APP_RADIO_CNT_COUNT; i++) {
+			st->cnt[i] = 100 + (uint32_t)i;
+		}
+	}
 }
 
 /* device_status inputs: app_cmd_get_info() aggregates these into the status
