@@ -694,9 +694,24 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   raced its own answer. The wait is bounded on purpose: a permanently failing
   TX must not postpone a commanded action forever, so after 6 deferrals it
   runs anyway — the same bargain LoRaWAN makes (`app_radio_lrw.c`, identical
-  constants and log strings). `lrw_join` is refused in P2P mode (the radio is
-  busy being a P2P node); `lrw_reset` is honoured where the LoRaWAN stack is
+  constants and log strings). `lrw_join` means "join the network again now" on
+  whichever radio runs (`app_radio_rejoin()`, #448): on P2P a fresh join
+  handshake without a reboot, exactly like the shell `join`; the new session
+  announces itself (below). `lrw_reset` is honoured where the LoRaWAN stack is
   compiled in and logged-and-ignored where it is not.
+- **Commands on P2P (#448):** `force_send`, `sample`, `buzzer_play` and
+  `clock_sync` are allowed over P2P like over LoRaWAN; the handlers were
+  already radio-agnostic (`app_report` sends through `app_radio`). An empty
+  `clock_sync` sends an uplink at once and answers with an Info carrying the
+  command's `seq` as soon as that uplink's Ack (with its Unix-time tail, B5) has
+  been processed -- the P2P counterpart of LoRaWAN's DeviceTimeReq.
+- **Boot / join announce (#448, plan 439 T3):** when the link comes up -- a
+  boot with a persisted pairing (no JoinRequest) or any JoinAccept -- the node
+  sends its `Info` (seq 0) and the #412 settings-info `ConfigDump` (seq 0) as
+  unsolicited `0x55` frames, paged for the 64 B response slot (#425), before
+  the first telemetry. This is one path in `app_radio` shared with LoRaWAN's
+  join announce; the central decodes an unsolicited `0x55` (its correlation
+  keeps the queue head when the seq does not match).
 - **Command correlation (`seq`)**: the `0x56` body is the same fPort-85
   `Command` protobuf, and the central stamps every structured one with a
   nonzero `seq` from its per-node allocator. The node echoes it without doing
@@ -705,6 +720,11 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   `0x55` whose `Response.seq` matches the head's, and after three further
   uplinks without one it re-announces and re-delivers the *same* bytes. A lost
   response therefore costs a redelivery, never a silently dropped command.
+  Hence **every `0x56` gets a `0x55`**: a command whose answer on LoRaWAN is an
+  uplink of its own (`force_send`, `sample` -- the telemetry frame) answers on
+  P2P with an Ack carrying the `seq` as well (`app_radio_needs_command_answer()`,
+  F-P1-2, #448); without it the central re-delivered it, and the node
+  re-measured, forever (night test 2026-09-26).
   What makes redelivery safe is node-side idempotency: `get_*` are pure,
   `set_param` with an unchanged value is a no-op, and the deferred actions
   above run only after the response was acknowledged, so a redelivered
@@ -1024,11 +1044,11 @@ Deliberately out of scope for v1:
 
 - **No mesh / multi-hop** — star topology only (gateways are not repeaters).
 - **No history replay / link check** over P2P (both LoRaWAN-specific;
-  `req_history` and `clock_sync` carry `transports:` guards that reject P2P,
-  and history replay is excluded from v1 by design — `plan.md` §5 keeps it
+  history replay is excluded from v1 by design — `plan.md` §5 keeps it
   LoRaWAN-only). **Clock sync is no longer on this list:** B5 shipped it as
   the Ack's optional Unix-time tail (§6), so a node with no RTC gets wall
-  time from the central without a `clock_sync` command at all.
+  time from the central without a `clock_sync` command at all; since #448 an
+  explicit `clock_sync` is also answered over P2P (§6).
 - **BW / CR fixed** at 125 kHz / 4-5.
 - **Single shared channel** (multi-channel via JoinAccept reserved field is
   the v2 hook).

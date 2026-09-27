@@ -30,6 +30,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | NFC | **New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2), so an installer with a phone can judge the link at the mounting spot. |
 | History | **Fix** — record timestamps follow the RTC (F27/F28, H-4): report cadence on wall-clock slots, no capture skipped during a replay, each flash page stamped from the RTC (a reboot / power loss / halt is a gap, not a shift), page header v2 keeps a clock-sync fix-up across reboots, the replay ends with the window's last frame. HistoryFrame protocol unchanged. See §21. |
 | LoRaWAN | **Fix** — the M-2 stale-uplink watchdog no longer forces a rejoin while the duty cycle is refusing sends (F29): a rejoin reset the band credits and let the device exceed the 1 % limit. See §22. |
+| Radio: P2P | **New** — LoRaWAN ↔ P2P parity, part 1 (#448): the boot / join `Info` + settings-info announce is one `app_radio` path for both radios (P2P announced nothing before); `force_send` / `sample` / `buzzer_play` / `clock_sync` work over P2P; `lrw_join` re-joins P2P without a reboot; every P2P command gets a `0x55` answer. See §23. |
 
 ---
 
@@ -1225,6 +1226,39 @@ M-2 logged the hold once at 07:25:43Z and did **not** rejoin; the uplinks
 resumed on the same session (same DevAddr) at 08:14:59Z, when the window
 rolled over. Before the fix the same run rejoined 4 intervals into the
 restriction and got fresh credits.
+
+
+## 23. LoRaWAN ↔ P2P parity, part 1 (#448)
+
+Goal (doc/plan/439): the STICKER behaves the same on LoRaWAN and P2P, and the
+application layers reach the radio only through `app_radio`.
+
+- **Boot / join announce, one path.** The Info (seq 0) and the #412
+  settings-info `ConfigDump` (seq 0), paged for the budget (#425), with the
+  pending / deferred logic (DR rise, page-stream end, over-budget re-arm), now
+  live in `app_radio` (`app_radio_announce()` / `_run()` / `app_radio_send_info()`).
+  LoRaWAN calls it on join success, P2P on every link-up — a boot with a
+  persisted pairing and every JoinAccept. P2P used to announce nothing, so the
+  Hub never learned the device info / config of a P2P node without polling.
+- **Commands on P2P.** `force_send`, `sample`, `buzzer_play` and `clock_sync`
+  are allowed over P2P (only the transport gates stood in the way).
+  `clock_sync` goes through `app_radio_clock_sync(seq)`: LoRaWAN keeps
+  DeviceTimeReq + the deferred Info; P2P sends an uplink now and answers with
+  the seq-carrying Info once its Ack (time tail) has been processed. A bare
+  `clock_sync` over NFC still acks the phone.
+- **`lrw_join` = `app_radio_rejoin()`** on every path (NFC action, LoRaWAN and
+  P2P post-command): on P2P a fresh join handshake without a reboot instead of
+  "ignored".
+- **Every P2P command gets a `0x55` (F-P1-2).** The P2P central retires a
+  delivered `0x56` only on a `0x55` with the same seq; `force_send` / `sample`
+  answered with their telemetry only, so they were re-delivered and
+  re-measured forever. `app_radio_needs_command_answer()` (P2P yes, LoRaWAN
+  no) makes them answer with an Ack carrying the seq; LoRaWAN is unchanged.
+
+Hardware (0413, P2P night test 2026-09-26/27, Hub c43+): `clock_sync` seq 17 →
+Info seq 17 with a synced time; `lrw_join` seq 18 → Ack, JoinRequest, new
+session, Info + settings-info announced, no reboot. The boot announce lost
+the settings-info to a counter-order replay (F-P1-1) — fixed in #449.
 
 ---
 
