@@ -141,9 +141,13 @@ var _ALM_HEX_ENC = {};
 })();
 
 // Names drop the `lrw_` prefix the YAML carries (region <- lrw_region, ...).
+// Exception: fields 13/14 are named radio_link_check_* in the YAML (2026-09-27
+// rename, shared by both radios via app_radio) -- no `lrw_` prefix to strip, so
+// they carry their full name on the wire, same as radio_mode/13-16 below.
 var _LRW_NAMES = {
   1: "region", 2: "sub_band", 3: "network", 4: "adr", 5: "activation",
-  13: "link_check_interval", 14: "link_check_fail_rejoin", 15: "radio_mode", 16: "datarate"
+  13: "radio_link_check_interval", 14: "radio_link_check_fail_rejoin", 15: "radio_mode",
+  16: "datarate"
 };
 var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
 

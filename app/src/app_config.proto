@@ -57,8 +57,8 @@ message AppConfigMessage {
         optional bytes devaddr = 10;
         optional bytes nwkskey = 11;
         optional bytes appskey = 12;
-        optional uint32 link_check_interval = 13;
-        optional uint32 link_check_fail_rejoin = 14;
+        optional uint32 radio_link_check_interval = 13;
+        optional uint32 radio_link_check_fail_rejoin = 14;
         optional RadioMode radio_mode = 15;
         optional Datarate datarate = 16;
     }

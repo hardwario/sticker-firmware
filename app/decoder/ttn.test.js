@@ -979,14 +979,18 @@ test("set_param lorawan.radio_mode (enum) + link-check fields round-trip (#H2)",
   const enc = codec.encodeDownlink({
     data: {
       seq: 3, command: "set_param",
-      set_param: { lorawan: { radio_mode: "P2P", link_check_interval: 7, link_check_fail_rejoin: 3 } },
+      set_param: {
+        lorawan: {
+          radio_mode: "P2P", radio_link_check_interval: 7, radio_link_check_fail_rejoin: 3,
+        },
+      },
     },
   });
   assert.equal(enc.errors.length, 0, "encode errors: " + enc.errors);
   const back = codec.decodeDownlink({ bytes: enc.bytes, fPort: 85 }).data;
   assert.equal(back.set_param.lorawan.radio_mode, 2); // P2P index
-  assert.equal(back.set_param.lorawan.link_check_interval, 7);
-  assert.equal(back.set_param.lorawan.link_check_fail_rejoin, 3);
+  assert.equal(back.set_param.lorawan.radio_link_check_interval, 7);
+  assert.equal(back.set_param.lorawan.radio_link_check_fail_rejoin, 3);
 });
 
 // lrw_region AS923 (#409 A6) = 3 on the wire.

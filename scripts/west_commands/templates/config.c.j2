@@ -377,6 +377,11 @@ int {{ module.name }}_{{ op }}(void)
 #include <stdlib.h>
 #include <string.h>
 
+{% set legacy_params = parameters | selectattr('legacy_names', 'defined') | list %}
+{% if legacy_params %}
+#include <zephyr/sys/util.h> /* ARRAY_SIZE, for the legacy-key migration table below */
+
+{% endif %}
 LOG_MODULE_REGISTER({{ module.log_module | default(module.name) }}, LOG_LEVEL_DBG);
 
 #define SETTINGS_PFX "{{ module.settings_prefix | default(module.name | replace('_', '-')) }}"
@@ -432,6 +437,29 @@ void {{ module.name }}_unlock(void)
 	k_mutex_unlock(&m_{{ module.name }}_lock);
 }
 
+{% if legacy_params %}
+/* One-shot migration table for renamed config fields (`legacy_names:` in
+ * app_config.yml). Each entry pairs the full NVS path of a pre-rename settings
+ * key with a flag h_set() sets below when that old key is found while loading.
+ * {{ module.name }}_init() checks the table right after settings_load_subtree():
+ * if any entry was seen, the (already-migrated-in-RAM) config is persisted
+ * under the new key(s) and the old NVS entries are deleted, so a device
+ * upgrading from before the rename picks up its stored value transparently,
+ * on the first boot only. */
+struct {{ module.name }}_legacy_key {
+	const char *path; /* full "SETTINGS_PFX/old-key" path, ready for settings_delete() */
+	bool seen;
+};
+
+static struct {{ module.name }}_legacy_key m_{{ module.name }}_legacy_keys[] = {
+{% for param in legacy_params %}
+{% for legacy in param.legacy_names %}
+	{ SETTINGS_PFX "/" "{{ legacy | settings_key }}", false },
+{% endfor %}
+{% endfor %}
+};
+
+{% endif %}
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	int ret;
@@ -455,10 +483,35 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 		}                                                                                  \
 	} while (0)
 
+{% if legacy_params %}
+/* Same match as SETTINGS_SET, for an old (pre-rename) key name: also flags the
+ * matching m_{{ module.name }}_legacy_keys[] entry as seen, so
+ * {{ module.name }}_init() knows to persist + delete it after settings_load_subtree(). */
+#define SETTINGS_SET_LEGACY(_key, _var, _size, _idx)                                              \
+	do {                                                                                       \
+		if (settings_name_steq(key, _key, &next) && !next) {                               \
+			if (len != _size) {                                                        \
+				return -EINVAL;                                                    \
+			}                                                                          \
+                                                                                                   \
+			ret = read_cb(cb_arg, _var, len);                                          \
+                                                                                                   \
+			if (ret < 0) {                                                             \
+				LOG_ERR("Call `read_cb` failed: %d", ret);                         \
+				return ret;                                                        \
+			}                                                                          \
+                                                                                                   \
+			m_{{ module.name }}_legacy_keys[_idx].seen = true;                          \
+			return 0;                                                                  \
+		}                                                                                  \
+	} while (0)
+
+{% endif %}
 {% if module.version is defined %}
 	SETTINGS_SET("config-version", &m_{{ module.name }}.config_version,
 		     sizeof(m_{{ module.name }}.config_version));
 {% endif %}
+{% set ns = namespace(legacy_idx=0) %}
 {% for param in parameters %}
 {% if param.type == 'bytes' or param.type == 'string' %}
 	SETTINGS_SET("{{ param.name | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
@@ -466,9 +519,23 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("{{ param.name | settings_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
 		     sizeof(m_{{ module.name }}.{{ param.name | c_name }}));
 {% endif %}
+{% if param.legacy_names is defined %}
+{% for legacy in param.legacy_names %}
+{% if param.type == 'bytes' or param.type == 'string' %}
+	SETTINGS_SET_LEGACY("{{ legacy | settings_key }}", m_{{ module.name }}.{{ param.name | c_name }}, sizeof(m_{{ module.name }}.{{ param.name | c_name }}), {{ ns.legacy_idx }});
+{% else %}
+	SETTINGS_SET_LEGACY("{{ legacy | settings_key }}", &m_{{ module.name }}.{{ param.name | c_name }},
+			     sizeof(m_{{ module.name }}.{{ param.name | c_name }}), {{ ns.legacy_idx }});
+{% endif %}
+{% set ns.legacy_idx = ns.legacy_idx + 1 %}
+{% endfor %}
+{% endif %}
 {% endfor %}
 
 #undef SETTINGS_SET
+{% if legacy_params %}
+#undef SETTINGS_SET_LEGACY
+{% endif %}
 
 	return -ENOENT;
 }
@@ -880,6 +947,43 @@ static int {{ module.name }}_init(void)
 		m_{{ module.name }}_load_failed = true;
 	}
 
+{% if legacy_params %}
+	/* One-shot legacy-key migration (see m_{{ module.name }}_legacy_keys[] above):
+	 * h_set() already flagged every old key found while loading, and h_commit()
+	 * already copied the migrated value into g_{{ module.name }}. Persist it under
+	 * the new key(s) and drop the old NVS entries so this runs only once. */
+	bool legacy_seen = false;
+
+	for (size_t i = 0; i < ARRAY_SIZE(m_{{ module.name }}_legacy_keys); i++) {
+		if (m_{{ module.name }}_legacy_keys[i].seen) {
+			legacy_seen = true;
+			break;
+		}
+	}
+
+	if (legacy_seen) {
+		ret = settings_save_subtree(SETTINGS_PFX);
+		if (ret) {
+			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		}
+
+		for (size_t i = 0; i < ARRAY_SIZE(m_{{ module.name }}_legacy_keys); i++) {
+			if (!m_{{ module.name }}_legacy_keys[i].seen) {
+				continue;
+			}
+
+			int del_ret = settings_delete(m_{{ module.name }}_legacy_keys[i].path);
+			if (del_ret) {
+				LOG_ERR("Call `settings_delete` failed for %s: %d",
+					m_{{ module.name }}_legacy_keys[i].path, del_ret);
+			} else {
+				LOG_INF("Migrated legacy setting %s to its new key",
+					m_{{ module.name }}_legacy_keys[i].path);
+			}
+		}
+	}
+
+{% endif %}
 {% if module.version is defined %}
 	if (m_{{ module.name }}_migrated) {
 		m_{{ module.name }}_migrated = false;

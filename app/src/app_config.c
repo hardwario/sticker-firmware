@@ -26,6 +26,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <zephyr/sys/util.h> /* ARRAY_SIZE, for the legacy-key migration table below */
+
 LOG_MODULE_REGISTER(app_config, LOG_LEVEL_DBG);
 
 #define SETTINGS_PFX "config"
@@ -43,8 +45,8 @@ static const struct app_config m_app_config_defaults = {
 	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
 	.lrw_adr = true,
-	.lrw_link_check_interval = 5,
-	.lrw_link_check_fail_rejoin = 5,
+	.radio_link_check_interval = 5,
+	.radio_link_check_fail_rejoin = 5,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 868100000,
@@ -78,8 +80,8 @@ static struct app_config m_app_config = {
 	.radio_mode = APP_CONFIG_RADIO_MODE_OFF,
 	.lrw_sub_band = 2,
 	.lrw_adr = true,
-	.lrw_link_check_interval = 5,
-	.lrw_link_check_fail_rejoin = 5,
+	.radio_link_check_interval = 5,
+	.radio_link_check_fail_rejoin = 5,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 868100000,
@@ -103,6 +105,28 @@ void app_config_unlock(void)
 	k_mutex_unlock(&m_app_config_lock);
 }
 
+/* One-shot migration table for renamed config fields (`legacy_names:` in
+ * app_config.yml). Each entry pairs the full NVS path of a pre-rename settings
+ * key with a flag h_set() sets below when that old key is found while loading.
+ * app_config_init() checks the table right after settings_load_subtree():
+ * if any entry was seen, the (already-migrated-in-RAM) config is persisted
+ * under the new key(s) and the old NVS entries are deleted, so a device
+ * upgrading from before the rename picks up its stored value transparently,
+ * on the first boot only. */
+struct app_config_legacy_key {
+	const char *path; /* full "SETTINGS_PFX/old-key" path, ready for settings_delete() */
+	bool seen;
+};
+
+static struct app_config_legacy_key m_app_config_legacy_keys[] = {
+	{SETTINGS_PFX "/"
+		      "lrw-link-check-interval",
+	 false},
+	{SETTINGS_PFX "/"
+		      "lrw-link-check-fail-rejoin",
+	 false},
+};
+
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	int ret;
@@ -122,6 +146,28 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 				return ret;                                                        \
 			}                                                                          \
                                                                                                    \
+			return 0;                                                                  \
+		}                                                                                  \
+	} while (0)
+
+/* Same match as SETTINGS_SET, for an old (pre-rename) key name: also flags the
+ * matching m_app_config_legacy_keys[] entry as seen, so
+ * app_config_init() knows to persist + delete it after settings_load_subtree(). */
+#define SETTINGS_SET_LEGACY(_key, _var, _size, _idx)                                               \
+	do {                                                                                       \
+		if (settings_name_steq(key, _key, &next) && !next) {                               \
+			if (len != _size) {                                                        \
+				return -EINVAL;                                                    \
+			}                                                                          \
+                                                                                                   \
+			ret = read_cb(cb_arg, _var, len);                                          \
+                                                                                                   \
+			if (ret < 0) {                                                             \
+				LOG_ERR("Call `read_cb` failed: %d", ret);                         \
+				return ret;                                                        \
+			}                                                                          \
+                                                                                                   \
+			m_app_config_legacy_keys[_idx].seen = true;                                \
 			return 0;                                                                  \
 		}                                                                                  \
 	} while (0)
@@ -164,10 +210,15 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	SETTINGS_SET("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
 	SETTINGS_SET("lrw-datarate", &m_app_config.lrw_datarate, sizeof(m_app_config.lrw_datarate));
-	SETTINGS_SET("lrw-link-check-interval", &m_app_config.lrw_link_check_interval,
-		     sizeof(m_app_config.lrw_link_check_interval));
-	SETTINGS_SET("lrw-link-check-fail-rejoin", &m_app_config.lrw_link_check_fail_rejoin,
-		     sizeof(m_app_config.lrw_link_check_fail_rejoin));
+	SETTINGS_SET("radio-link-check-interval", &m_app_config.radio_link_check_interval,
+		     sizeof(m_app_config.radio_link_check_interval));
+	SETTINGS_SET_LEGACY("lrw-link-check-interval", &m_app_config.radio_link_check_interval,
+			    sizeof(m_app_config.radio_link_check_interval), 0);
+	SETTINGS_SET("radio-link-check-fail-rejoin", &m_app_config.radio_link_check_fail_rejoin,
+		     sizeof(m_app_config.radio_link_check_fail_rejoin));
+	SETTINGS_SET_LEGACY("lrw-link-check-fail-rejoin",
+			    &m_app_config.radio_link_check_fail_rejoin,
+			    sizeof(m_app_config.radio_link_check_fail_rejoin), 1);
 	SETTINGS_SET("cap-hall-left", &m_app_config.cap_hall_left,
 		     sizeof(m_app_config.cap_hall_left));
 	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
@@ -224,6 +275,7 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("p2p-tx-power", &m_app_config.p2p_tx_power, sizeof(m_app_config.p2p_tx_power));
 
 #undef SETTINGS_SET
+#undef SETTINGS_SET_LEGACY
 
 	return -ENOENT;
 }
@@ -328,17 +380,17 @@ static int h_commit(void)
 	if ((int)m_app_config.lrw_datarate < 0 || (int)m_app_config.lrw_datarate > 8) {
 		m_app_config.lrw_datarate = 0;
 	}
-	if (m_app_config.lrw_link_check_interval < 0) {
-		m_app_config.lrw_link_check_interval = 0;
+	if (m_app_config.radio_link_check_interval < 0) {
+		m_app_config.radio_link_check_interval = 0;
 	}
-	if (m_app_config.lrw_link_check_interval > 255) {
-		m_app_config.lrw_link_check_interval = 255;
+	if (m_app_config.radio_link_check_interval > 255) {
+		m_app_config.radio_link_check_interval = 255;
 	}
-	if (m_app_config.lrw_link_check_fail_rejoin < 1) {
-		m_app_config.lrw_link_check_fail_rejoin = 1;
+	if (m_app_config.radio_link_check_fail_rejoin < 1) {
+		m_app_config.radio_link_check_fail_rejoin = 1;
 	}
-	if (m_app_config.lrw_link_check_fail_rejoin > 255) {
-		m_app_config.lrw_link_check_fail_rejoin = 255;
+	if (m_app_config.radio_link_check_fail_rejoin > 255) {
+		m_app_config.radio_link_check_fail_rejoin = 255;
 	}
 	if ((int)m_app_config.alarm_buzzer_mode < 0 || (int)m_app_config.alarm_buzzer_mode > 7) {
 		m_app_config.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF;
@@ -413,10 +465,10 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("lrw-nwkskey", m_app_config.lrw_nwkskey, sizeof(m_app_config.lrw_nwkskey));
 	EXPORT_FUNC("lrw-appskey", m_app_config.lrw_appskey, sizeof(m_app_config.lrw_appskey));
 	EXPORT_FUNC("lrw-datarate", &m_app_config.lrw_datarate, sizeof(m_app_config.lrw_datarate));
-	EXPORT_FUNC("lrw-link-check-interval", &m_app_config.lrw_link_check_interval,
-		    sizeof(m_app_config.lrw_link_check_interval));
-	EXPORT_FUNC("lrw-link-check-fail-rejoin", &m_app_config.lrw_link_check_fail_rejoin,
-		    sizeof(m_app_config.lrw_link_check_fail_rejoin));
+	EXPORT_FUNC("radio-link-check-interval", &m_app_config.radio_link_check_interval,
+		    sizeof(m_app_config.radio_link_check_interval));
+	EXPORT_FUNC("radio-link-check-fail-rejoin", &m_app_config.radio_link_check_fail_rejoin,
+		    sizeof(m_app_config.radio_link_check_fail_rejoin));
 	EXPORT_FUNC("cap-hall-left", &m_app_config.cap_hall_left,
 		    sizeof(m_app_config.cap_hall_left));
 	EXPORT_FUNC("cap-hall-right", &m_app_config.cap_hall_right,
@@ -859,16 +911,16 @@ static void print_lrw_datarate(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " lrw-datarate %s", str);
 }
 
-static void print_lrw_link_check_interval(const struct shell *shell)
+static void print_radio_link_check_interval(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " lrw-link-check-interval %d",
-		    m_app_config.lrw_link_check_interval);
+	shell_print(shell, SETTINGS_PFX " radio-link-check-interval %d",
+		    m_app_config.radio_link_check_interval);
 }
 
-static void print_lrw_link_check_fail_rejoin(const struct shell *shell)
+static void print_radio_link_check_fail_rejoin(const struct shell *shell)
 {
-	shell_print(shell, SETTINGS_PFX " lrw-link-check-fail-rejoin %d",
-		    m_app_config.lrw_link_check_fail_rejoin);
+	shell_print(shell, SETTINGS_PFX " radio-link-check-fail-rejoin %d",
+		    m_app_config.radio_link_check_fail_rejoin);
 }
 
 static void print_cap_hall_left(const struct shell *shell)
@@ -1082,8 +1134,8 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_lrw_nwkskey(shell);
 	print_lrw_appskey(shell);
 	print_lrw_datarate(shell);
-	print_lrw_link_check_interval(shell);
-	print_lrw_link_check_fail_rejoin(shell);
+	print_radio_link_check_interval(shell);
+	print_radio_link_check_fail_rejoin(shell);
 	print_cap_hall_left(shell);
 	print_cap_hall_right(shell);
 	print_cap_input_a(shell);
@@ -1538,16 +1590,16 @@ static int cmd_lrw_datarate(const struct shell *shell, size_t argc, char **argv)
 	return 0;
 }
 
-static int cmd_lrw_link_check_interval(const struct shell *shell, size_t argc, char **argv)
+static int cmd_radio_link_check_interval(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_int(shell, argc, argv, &m_app_config.lrw_link_check_interval, 0, 255,
-		       print_lrw_link_check_interval);
+	return cmd_int(shell, argc, argv, &m_app_config.radio_link_check_interval, 0, 255,
+		       print_radio_link_check_interval);
 }
 
-static int cmd_lrw_link_check_fail_rejoin(const struct shell *shell, size_t argc, char **argv)
+static int cmd_radio_link_check_fail_rejoin(const struct shell *shell, size_t argc, char **argv)
 {
-	return cmd_int(shell, argc, argv, &m_app_config.lrw_link_check_fail_rejoin, 1, 255,
-		       print_lrw_link_check_fail_rejoin);
+	return cmd_int(shell, argc, argv, &m_app_config.radio_link_check_fail_rejoin, 1, 255,
+		       print_radio_link_check_fail_rejoin);
 }
 
 static int cmd_cap_hall_left(const struct shell *shell, size_t argc, char **argv)
@@ -1874,13 +1926,13 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              "Get/Set manual uplink datarate (auto, dr0-dr7). Applied after join, only with ADR off; auto = stack default.",
 	              cmd_lrw_datarate, 1, 1),
 
-	SHELL_CMD_ARG(lrw-link-check-interval, NULL,
-	              "Get/Set link-check cadence: request a LinkCheckReq every N-th uplink (0 = disabled).",
-	              cmd_lrw_link_check_interval, 1, 1),
+	SHELL_CMD_ARG(radio-link-check-interval, NULL,
+	              "Get/Set link-check cadence, shared by both radios: request a LoRaWAN LinkCheckReq (or a confirmed P2P link-check uplink) every N-th uplink (0 = disabled).",
+	              cmd_radio_link_check_interval, 1, 1),
 
-	SHELL_CMD_ARG(lrw-link-check-fail-rejoin, NULL,
-	              "Get/Set link-check failures (while degraded) before an OTAA rejoin is attempted.",
-	              cmd_lrw_link_check_fail_rejoin, 1, 1),
+	SHELL_CMD_ARG(radio-link-check-fail-rejoin, NULL,
+	              "Get/Set link-check failures (while degraded) before the radio link is re-established -- a LoRaWAN OTAA rejoin, or the P2P equivalent. Shared by both radios.",
+	              cmd_radio_link_check_fail_rejoin, 1, 1),
 
 	SHELL_CMD_ARG(cap-hall-left, NULL,
 	              "Get/Set hall left capability (true/false).",
@@ -2155,6 +2207,41 @@ static int app_config_init(void)
 		 * running rather than dead. */
 		LOG_ERR("Call `settings_load_subtree` failed: %d — booting on defaults", ret);
 		m_app_config_load_failed = true;
+	}
+
+	/* One-shot legacy-key migration (see m_app_config_legacy_keys[] above):
+	 * h_set() already flagged every old key found while loading, and h_commit()
+	 * already copied the migrated value into g_app_config. Persist it under
+	 * the new key(s) and drop the old NVS entries so this runs only once. */
+	bool legacy_seen = false;
+
+	for (size_t i = 0; i < ARRAY_SIZE(m_app_config_legacy_keys); i++) {
+		if (m_app_config_legacy_keys[i].seen) {
+			legacy_seen = true;
+			break;
+		}
+	}
+
+	if (legacy_seen) {
+		ret = settings_save_subtree(SETTINGS_PFX);
+		if (ret) {
+			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
+		}
+
+		for (size_t i = 0; i < ARRAY_SIZE(m_app_config_legacy_keys); i++) {
+			if (!m_app_config_legacy_keys[i].seen) {
+				continue;
+			}
+
+			int del_ret = settings_delete(m_app_config_legacy_keys[i].path);
+			if (del_ret) {
+				LOG_ERR("Call `settings_delete` failed for %s: %d",
+					m_app_config_legacy_keys[i].path, del_ret);
+			} else {
+				LOG_INF("Migrated legacy setting %s to its new key",
+					m_app_config_legacy_keys[i].path);
+			}
+		}
 	}
 
 	if (m_app_config_migrated) {

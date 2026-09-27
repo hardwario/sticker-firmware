@@ -590,7 +590,13 @@ parameters:
     persistent: [device_reset]
     help: "Get/Set manual uplink datarate (auto, dr0-dr7). Applied after join, only with ADR off; auto = stack default."
 
-  - name: lrw_link_check_interval
+  # 2026-09-27: renamed from lrw_link_check_* -- link-check is shared by both
+  # radios through app_radio (LoRaWAN LinkCheckReq / P2P confirmed link-check
+  # uplink). proto_group/proto_id are UNCHANGED (wire-compatible with the
+  # deployed LoRaWAN fleet; Hub/Portal only use field numbers on the wire).
+  # legacy_names covers the one-shot NVS migration (old settings key ->
+  # new field) generated into h_set()/init() -- see config.c.j2.
+  - name: radio_link_check_interval
     proto_group: lorawan
     writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 13
@@ -598,9 +604,10 @@ parameters:
     default: 5
     min: 0
     max: 255
-    help: "Get/Set link-check cadence: request a LinkCheckReq every N-th uplink (0 = disabled)."
+    legacy_names: [lrw_link_check_interval]
+    help: "Get/Set link-check cadence, shared by both radios: request a LoRaWAN LinkCheckReq (or a confirmed P2P link-check uplink) every N-th uplink (0 = disabled)."
 
-  - name: lrw_link_check_fail_rejoin
+  - name: radio_link_check_fail_rejoin
     proto_group: lorawan
     writable: [shell, nfc]  # provisioning/identity group: never writable over a LoRaWAN downlink (H-3)
     proto_id: 14
@@ -608,7 +615,8 @@ parameters:
     default: 5
     min: 1
     max: 255
-    help: "Get/Set link-check failures (while degraded) before an OTAA rejoin is attempted."
+    legacy_names: [lrw_link_check_fail_rejoin]
+    help: "Get/Set link-check failures (while degraded) before the radio link is re-established -- a LoRaWAN OTAA rejoin, or the P2P equivalent. Shared by both radios."
 
   - name: cap_hall_left
     proto_group: sensors

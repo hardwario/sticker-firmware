@@ -101,8 +101,8 @@ struct app_config {
 	uint8_t lrw_nwkskey[16];
 	uint8_t lrw_appskey[16];
 	enum app_config_lrw_datarate lrw_datarate;
-	int lrw_link_check_interval;
-	int lrw_link_check_fail_rejoin;
+	int radio_link_check_interval;
+	int radio_link_check_fail_rejoin;
 	bool cap_hall_left;
 	bool cap_hall_right;
 	bool cap_input_a;
