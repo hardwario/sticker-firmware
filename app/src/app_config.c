@@ -1927,11 +1927,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_lrw_datarate, 1, 1),
 
 	SHELL_CMD_ARG(radio-link-check-interval, NULL,
-	              "Get/Set link-check cadence: request a LoRaWAN LinkCheckReq every N-th uplink (0 = disabled). P2P does not use it yet.",
+	              "Get/Set link-check cadence, both radios: every N-th report is the link check -- a LoRaWAN LinkCheckReq, a confirmed P2P telemetry (0 = disabled).",
 	              cmd_radio_link_check_interval, 1, 1),
 
 	SHELL_CMD_ARG(radio-link-check-fail-rejoin, NULL,
-	              "Get/Set link-check failures (while degraded) before a LoRaWAN OTAA rejoin is attempted. P2P does not use it yet.",
+	              "Get/Set link-check failures (while degraded) before the link is re-established: a LoRaWAN OTAA rejoin, a P2P re-join.",
 	              cmd_radio_link_check_fail_rejoin, 1, 1),
 
 	SHELL_CMD_ARG(cap-hall-left, NULL,
