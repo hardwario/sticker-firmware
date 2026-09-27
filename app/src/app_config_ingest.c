@@ -202,29 +202,29 @@ int app_config_apply_lorawan(enum app_cmd_transport tp, const AppConfigMessage_L
 			memcpy(config->lrw_appskey, src->appskey, sizeof(config->lrw_appskey));
 		}
 	/* M-3: this field is not writable over lrw/p2p/vendor. */
-	if (src->has_link_check_interval &&
+	if (src->has_radio_link_check_interval &&
 	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
 	     tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(13);
-	} else if (src->has_link_check_interval) {
-		int val = src->link_check_interval;
+	} else if (src->has_radio_link_check_interval) {
+		int val = src->radio_link_check_interval;
 
 		if ((val >= 0 && val <= 255)) {
-			config->lrw_link_check_interval = val;
+			config->radio_link_check_interval = val;
 		} else {
 			FAULT(13);
 		}
 	}
 	/* M-3: this field is not writable over lrw/p2p/vendor. */
-	if (src->has_link_check_fail_rejoin &&
+	if (src->has_radio_link_check_fail_rejoin &&
 	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
 	     tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(14);
-	} else if (src->has_link_check_fail_rejoin) {
-		int val = src->link_check_fail_rejoin;
+	} else if (src->has_radio_link_check_fail_rejoin) {
+		int val = src->radio_link_check_fail_rejoin;
 
 		if ((val >= 1 && val <= 255)) {
-			config->lrw_link_check_fail_rejoin = val;
+			config->radio_link_check_fail_rejoin = val;
 		} else {
 			FAULT(14);
 		}
@@ -307,12 +307,12 @@ void app_config_fill_lorawan(AppConfigMessage_Lorawan *dst, const uint32_t *ids,
 		memcpy(dst->appskey, c->lrw_appskey, sizeof(c->lrw_appskey));
 	}
 	if (requested(ids, n, 13)) {
-		dst->has_link_check_interval = true;
-		dst->link_check_interval = c->lrw_link_check_interval;
+		dst->has_radio_link_check_interval = true;
+		dst->radio_link_check_interval = c->radio_link_check_interval;
 	}
 	if (requested(ids, n, 14)) {
-		dst->has_link_check_fail_rejoin = true;
-		dst->link_check_fail_rejoin = c->lrw_link_check_fail_rejoin;
+		dst->has_radio_link_check_fail_rejoin = true;
+		dst->radio_link_check_fail_rejoin = c->radio_link_check_fail_rejoin;
 	}
 	if (requested(ids, n, 15)) {
 		dst->has_radio_mode = true;

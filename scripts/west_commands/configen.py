@@ -1415,3 +1415,15 @@ class Configen(WestCommand):
                 log.die(f"Parameter '{name}' has invalid persistent op(s) {invalid}. Valid: {RESET_OPS}")
             if len(set(persistent)) != len(persistent):
                 log.die(f"Parameter '{name}' has duplicate entries in 'persistent'")
+
+        # One-shot NVS migration (config field rename, see config.c.j2): each
+        # entry is a pre-rename YAML param name whose settings key h_set() must
+        # still accept on load, migrating it to this param's new key.
+        legacy_names = param.get("legacy_names")
+        if legacy_names is not None:
+            if not isinstance(legacy_names, list) or not all(isinstance(n, str) for n in legacy_names):
+                log.die(f"Parameter '{name}' 'legacy_names' must be a list of strings")
+            if len(set(legacy_names)) != len(legacy_names):
+                log.die(f"Parameter '{name}' has duplicate entries in 'legacy_names'")
+            if name in legacy_names:
+                log.die(f"Parameter '{name}' lists its own current name in 'legacy_names'")

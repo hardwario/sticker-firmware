@@ -70,9 +70,10 @@ LOG_MODULE_REGISTER(app_radio_lrw, LOG_LEVEL_DBG);
 
 /* Link check configuration constants.
  * The LC cadence (every N-th uplink) and the failures-before-rejoin threshold
- * are runtime-configurable: g_app_config.lrw_link_check_interval and
- * lrw_link_check_fail_rejoin (config keys lrw-link-check-interval /
- * lrw-link-check-fail-rejoin). */
+ * are runtime-configurable: g_app_config.radio_link_check_interval and
+ * radio_link_check_fail_rejoin (config keys radio-link-check-interval /
+ * radio-link-check-fail-rejoin), shared by both radios via app_radio (2026-09-27
+ * rename from lrw_link_check_*; the LoRaWAN proto_id/proto_group are unchanged). */
 #define LINK_CHECK_TIMEOUT_SEC 10 /* LC answer timeout, from lorawan_send() return */
 
 /* State machine thresholds  */
@@ -725,9 +726,9 @@ static void on_lc_failure(void)
 
 		m_warning_lc_fail_total++;
 		LOG_WRN("LC FAIL in WARNING (total: %d/%d%s)", m_warning_lc_fail_total,
-			g_app_config.lrw_link_check_fail_rejoin, stepped ? ", ladder step" : "");
+			g_app_config.radio_link_check_fail_rejoin, stepped ? ", ladder step" : "");
 		if (!stepped &&
-		    m_warning_lc_fail_total >= g_app_config.lrw_link_check_fail_rejoin) {
+		    m_warning_lc_fail_total >= g_app_config.radio_link_check_fail_rejoin) {
 			if (g_app_config.lrw_activation == APP_CONFIG_LRW_ACTIVATION_OTAA) {
 				state_transition(APP_RADIO_STATE_RECONNECT);
 			} else {
@@ -1308,7 +1309,7 @@ static void join_work_handler(struct k_work *work)
 
 static bool should_request_link_check(void)
 {
-	int interval = g_app_config.lrw_link_check_interval;
+	int interval = g_app_config.radio_link_check_interval;
 
 	if (m_force_lc_remaining > 0) {
 		m_force_lc_remaining--;
@@ -1450,7 +1451,7 @@ static void tx_telemetry_frame(bool first_frame)
 	m_frame_resend = false;
 	m_frame_retries = 0;
 	/* Count reports, not frames (#267): m_message_count drives the link-check
-	 * cadence (should_request_link_check: msg_num % lrw_link_check_interval), which
+	 * cadence (should_request_link_check: msg_num % radio_link_check_interval), which
 	 * is meant to be "every N reports". Advancing it on every frame made a
 	 * multi-frame snapshot count as N messages, so the LC cadence drifted with the
 	 * payload size. Advance once per report, on the final frame. */
@@ -2512,8 +2513,8 @@ int app_radio_lrw_get_info(struct app_radio_lrw_info *info)
 	info->message_count = m_message_count;
 	info->thresh_warning = FAIL_THRESHOLD_WARNING;
 	info->thresh_healthy = OK_THRESHOLD_HEALTHY;
-	info->thresh_reconnect = g_app_config.lrw_link_check_fail_rejoin;
-	info->link_check_interval = g_app_config.lrw_link_check_interval;
+	info->thresh_reconnect = g_app_config.radio_link_check_fail_rejoin;
+	info->link_check_interval = g_app_config.radio_link_check_interval;
 
 	return 0;
 }
