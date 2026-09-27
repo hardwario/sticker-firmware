@@ -34,6 +34,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P / NFC | **New** — `get_radio_state` (#446): one `RadioState` for both radios — link state, radio parameters, both link directions, session, failure streak, duty cycle, counters since boot — on request only, paged like every answer. Info no longer carries `lrw_state` / `last_dl_*`. See §24. |
 | Radio: P2P | **Fix / New** — LoRaWAN ↔ P2P parity, part 2 (#449): frames leave in counter order (F-P1-1: one confirmed uplink in flight + 1 s gap), queues survive an unpaired phase, refused telemetry is retried then reset, the fleet jitter and the M-2 watchdog policy are shared, reset tiers clear the P2P pairing, `BUDGET_TOO_SMALL` over P2P, `p2p-*` readable via GetConfig/GetParam. See §25. |
 | Radio: P2P / LoRaWAN | **New** — P2P retry backoff and a per-node uplink phase: retry n waits a random 1..2^n s (was a fixed ~2.3 s rhythm), and a periodic report is sent at a stable DevEUI-derived offset inside min(interval − jitter − 1 s, 60 s), on both radios, so nodes rebooted together no longer collide every interval (F-P2P-4 / F-P2P-5). See §27. |
+| Radio: P2P | **Changed (wire, flag day)** — decision #22: a `FCtrl` byte in the header (11 → 12 B); telemetry is **unconfirmed and sent once**, except the link check (first report after link-up and every `radio-link-check-interval`-th, every report while WARNING); alarms / answers / history stay confirmed; the RX1 opens after every uplink for a `0x56` of up to 64 B; LoRaWAN-like link supervision (WARNING after 3 failed checks, TX-power step, re-join after `radio-link-check-fail-rejoin`); `p2p-spreading-factor` default 7, join without an SF sweep (last resort after 24 h). See §28. |
 | LoRaWAN / P2P | **Renamed** — `lrw-link-check-interval` / `lrw-link-check-fail-rejoin` → `radio-link-check-interval` / `radio-link-check-fail-rejoin`: link supervision is shared by both radios. Wire-compatible (same `lorawan` group fields 13/14); a stored value migrates on the first boot. See §26. |
 
 ---
@@ -1376,9 +1377,8 @@ prefix (ProXimos decision #22):
   address fields by number need no change; the TTN decoder uses the new names.
   Same writability as before (`shell`, `nfc`; never over a radio downlink).
 - **Shell:** `config radio-link-check-interval <n>`; the old command names are gone.
-- **Scope today:** the parameters drive LoRaWAN link supervision (§12). P2P
-  adopts the same two parameters with its link-health machine (follow-up
-  change); until then P2P ignores them.
+- **Scope:** the parameters drive the link supervision of both radios —
+  LoRaWAN (§12) and, since decision #22, P2P (§28).
 - **Decoded JSON keys renamed.** The TTN decoder emits
   `lorawan.radio_link_check_interval` / `radio_link_check_fail_rejoin` for every
   device (v1.4.x included, same field numbers); an integration or Portal mapping
@@ -1410,6 +1410,39 @@ all three retries of both colliding). Two causes, two fixes (decision #22
   and the first report after the boot / join announce take no phase. At a
   60 s interval the bench Nodes 0413 / 5722 send at +2.0 s / +51.0 s. On
   LoRaWAN a periodic report now leaves up to 60 s after its slot (was ≤ 10 s).
+
+## 28. P2P: unconfirmed telemetry, FCtrl header, link supervision (decision #22)
+
+Hynek, 2026-09-27: "zrušíme pro p2p potvrzování telemetrie ihned". With every
+uplink confirmed, the Hub's ACK traffic alone (57 ms per ACK at SF7, 1 % duty)
+capped a 60 s network at ~10 Nodes; LoRaWAN confirms nothing but its link
+checks. Design: ProXimos `plan/control/radio/p2p_link_check.md` §3.1–3.4.
+
+- **Header:** `net_id | dev_addr | frame_type | FCtrl | counter` = 12 B, all
+  of it AAD. `FCtrl` bit 0 CONFIRMED (uplink), bit 4 FPending and bit 5 ACK
+  (downlink); join frames carry 0. Payload budget 239 B. Shared KAT fixtures
+  `tests/ccm/p2p_join_kat.json` / `p2p_data_kat.json`
+  (`tests/ccm/p2p_join_kat.py`). Protocol v1 is changed in place: Nodes and
+  Hub update together (flag day).
+- **Confirmed policy:** CONFIRMED are the link check — the first telemetry
+  report after a link-up and every N-th after it (N =
+  `radio-link-check-interval`, default 5; 0 = none), every report while
+  WARNING — and every alarm, answer / announce and history frame. Other
+  telemetry is unconfirmed and sent once; the history backfill covers a lost
+  one.
+- **RX1 after every uplink**, sized for a `0x56` of up to 64 B that the central
+  may send unannounced (interim; a longer one is still announced by the Ack's
+  pending bit). Any authenticated downlink is a link success.
+- **Link supervision** as on LoRaWAN, same parameters: 3 failed link checks in
+  a row → WARNING (session kept, every report confirmed, a central-assigned TX
+  power steps 2 dB per failed check up to `p2p-tx-power`);
+  `radio-link-check-fail-rejoin` failures in WARNING → self-healing re-join.
+  Replaces "8 failed cycles → re-join". With the defaults at 900 s: a link
+  check every 75 min, WARNING after ~3.75 h of silence, re-join ~1.25 h later.
+- **SF:** `p2p-spreading-factor` defaults to 7 (was 10), the network default on
+  both ends. A join / re-join stays on it; the SF7..12 sweep runs only as a last
+  resort, one pass after 24 h without a JoinAccept.
+- Updates `radio-link-check-*` (§26): P2P reads them now too.
 
 ---
 
