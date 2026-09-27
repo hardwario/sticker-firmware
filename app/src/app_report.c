@@ -168,11 +168,12 @@ static void run_report(bool periodic, bool now)
 	 * budget frames (DR-budget + LC piggyback + duty-cycle retry for LoRaWAN;
 	 * fixed MTU + app-side duty-cycle for P2P). app_radio dispatches, and
 	 * handles a build with neither transport compiled in. A host-requested
-	 * cycle (`now`) skips the LoRaWAN fleet pre-send jitter (F14). */
+	 * cycle (`now`) skips the LoRaWAN fleet pre-send jitter (F14); only the
+	 * periodic one, on its wall-clock slot, takes the per-node uplink phase. */
 	if (now) {
 		app_radio_send_telemetry_now();
 	} else {
-		app_radio_send_telemetry();
+		app_radio_send_telemetry(periodic);
 	}
 }
 

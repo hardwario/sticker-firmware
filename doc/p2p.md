@@ -609,7 +609,10 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   SF-scaled margin alone cut every SF7 Ack off mid-reception; 120 ms keeps
   SF7 working for a central up to ~100 ms late.
 - **Retries**: unacknowledged uplinks retransmit **the same counter value**
-  (byte-identical frame) up to 3 times with randomized backoff. The central
+  (byte-identical frame) up to 3 times with randomized backoff: retry n waits a
+  random 1..2^n s (1..2, 1..4, 1..8 s) on top of any duty-cycle block, like
+  LoRaWAN's `ACK_TIMEOUT` (2026-09-27; the fixed ~2.3 s rhythm before let two
+  nodes rebooted together retry in lock-step into each other's RX1, F-P2P-4). The central
   treats `counter == high-water` as a duplicate: re-ACK, don't re-process.
   Retry/timeout budgets must be sized against the 1 % duty cycle on *both*
   ends — see the GLOBECOM 2017 finding in §10 (100 % ACK traffic collapses
@@ -771,6 +774,14 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   8 times at most), then the snapshot is reset (`app_compose_reset()`) — the
   LoRaWAN #219 / #340 M6 policy. The fleet pre-send jitter (#267,
   min(interval_report / 10, 10 s)) is taken in `app_radio` for both radios.
+- **Uplink phase (O9, 2026-09-27):** the report cadence runs on wall-clock
+  slots, so on the one P2P channel a fleet would otherwise send in the same few
+  seconds of every interval (two bench nodes rebooted together collided every
+  minute, F-P2P-5). A periodic report first waits the node's stable phase,
+  FNV-1a(DevEUI) mod min(interval_report − fleet jitter − 1 s, 60 s), then the
+  fleet jitter; the history records keep their slots, only the transmission
+  moves. force_send / sample, ad-hoc reports and the first report after the
+  boot / join announce take no phase. Both radios, one `app_radio` policy.
 - **Dedup across gateways**: every gateway that hears a frame forwards it;
   the central keys dedup on `(dev_addr, counter)` and records per-gateway
   RSSI/SNR (which also feeds ACK routing).
