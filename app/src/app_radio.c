@@ -313,10 +313,40 @@ uint8_t app_radio_get_max_payload(void)
 #endif
 }
 
+/* Boot/join order (Hynek, 2026-09-27): after a link-up the node sends the Info,
+ * then the settings-info, then its first telemetry -- always in that order.
+ * The announce spread moves the start of the whole sequence, never one frame
+ * of it. From app_radio_announce() until every announce page has been handed
+ * to the backend (m_seq_closed), a report is held and leaves right after the
+ * announce, with no jitter of its own; each backend sends its queued answers
+ * ahead of telemetry, so the air order follows. A held report goes anyway
+ * once ANNOUNCE_HOLD_MAX_MS pass after the spread, so an announce that cannot
+ * get out (no budget, no room) never silences the telemetry. */
+#define ANNOUNCE_HOLD_MAX_MS 60000
+
+static atomic_t m_seq_closed;     /* the boot/join sequence is still announcing */
+static atomic_t m_seq_deadline;   /* uptime (ms, u32) after which a held report goes */
+static atomic_t m_telemetry_held; /* a report waits for the announce */
+
+static void seq_release(void)
+{
+	if (!atomic_cas(&m_seq_closed, 1, 0)) {
+		return;
+	}
+	if (atomic_cas(&m_telemetry_held, 1, 0)) {
+		k_work_reschedule(&m_jitter_work, K_NO_WAIT);
+	}
+}
+
 /* The backend composes and sends at once; the delay was taken here. */
 static void jitter_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
+
+	if (atomic_cas(&m_telemetry_held, 1, 0) && atomic_get(&m_seq_closed)) {
+		LOG_WRN("Announce not out after %d s: telemetry goes first",
+			ANNOUNCE_HOLD_MAX_MS / 1000);
+	}
 #if defined(CONFIG_RADIO_P2P)
 	if (is_p2p()) {
 		app_radio_p2p_send_telemetry();
@@ -339,6 +369,18 @@ static uint32_t fleet_jitter_ms(void)
 
 void app_radio_send_telemetry(void)
 {
+	if (atomic_get(&m_seq_closed)) {
+		int32_t left =
+			(int32_t)((uint32_t)atomic_get(&m_seq_deadline) - (uint32_t)k_uptime_get());
+
+		if (left > 0) {
+			/* Follows the announce (seq_release()); the timer is the
+			 * fallback only. */
+			atomic_set(&m_telemetry_held, 1);
+			k_work_reschedule(&m_jitter_work, K_MSEC(left));
+			return;
+		}
+	}
 	k_work_reschedule(&m_jitter_work, K_MSEC(fleet_jitter_ms()));
 }
 
@@ -543,15 +585,20 @@ void app_radio_announce(void)
 	 * settings-info at the same moment and collide on the channel (Northbridge
 	 * "Busy", P2P 2026-09-27). */
 	uint32_t delay_ms = announce_jitter_ms();
+	uint32_t now = (uint32_t)k_uptime_get();
 
-	atomic_set(&m_announce_not_before, (atomic_val_t)((uint32_t)k_uptime_get() + delay_ms));
+	atomic_set(&m_announce_not_before, (atomic_val_t)(now + delay_ms));
+	atomic_set(&m_seq_deadline, (atomic_val_t)(now + delay_ms + ANNOUNCE_HOLD_MAX_MS));
+	atomic_set(&m_seq_closed, 1);
 	atomic_or(&m_announce, ANNOUNCE_INFO | ANNOUNCE_SETTINGS);
 	k_work_reschedule(&m_announce_jitter_work, K_MSEC(delay_ms));
 }
 
 bool app_radio_announce_pending(void)
 {
-	return atomic_get(&m_announce) != 0;
+	/* Also while the last announce pages are still streaming: the run that
+	 * follows the stream's end releases the held telemetry. */
+	return atomic_get(&m_announce) != 0 || atomic_get(&m_seq_closed) != 0;
 }
 
 void app_radio_announce_rearm(bool settings)
@@ -589,7 +636,14 @@ bool app_radio_announce_run(void)
 			LOG_INF("Settings-info announced");
 		}
 	}
-	return atomic_get(&m_announce) != 0;
+	if (atomic_get(&m_announce) != 0) {
+		return true;
+	}
+	if (app_cmd_stream_active()) {
+		return true; /* settings-info pages still streaming */
+	}
+	seq_release(); /* every announce page is queued: the first telemetry follows */
+	return false;
 }
 
 int app_radio_send_info(uint32_t seq)

@@ -1138,6 +1138,32 @@ ZTEST(p2p_logic, test_frames_queued_while_unpaired_are_kept)
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
 }
 
+/* Queued answers and alarms leave before telemetry, as with LoRaWAN's priority
+ * drain: after a link-up the Info and settings-info stay ahead of the first
+ * report even when one of them waits for a retry (#452, boot order). */
+ZTEST(p2p_logic, test_telemetry_waits_for_queued_answers)
+{
+	const uint8_t resp[] = {0x01, 0x08, 0x05, 0x12, 0x00};
+
+	p2p_test_join_setup(7);
+	p2p_test_tx_reset();
+	p2p_test_set_link(P2P_LINK_JOINING, true, false, 0, false);
+	zassert_equal(app_radio_p2p_queue_response(0, resp, sizeof(resp)), 0, "queued");
+	k_sleep(K_MSEC(50)); /* m_tx_work runs and keeps it (not paired) */
+	zassert_equal(p2p_test_tx_waiting(), 1, "the answer waits");
+
+	int calls = g_compose_budget_calls;
+
+	test_compose_len = 10;
+	p2p_test_telemetry_send();
+	zassert_equal(g_compose_budget_calls, calls, "no report composed while an answer waits");
+	zassert_false(p2p_test_frame_pending(), "nothing half-sent");
+
+	test_compose_len = 0;
+	p2p_test_tx_reset();
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
+}
+
 /* R-06: the sweep advanced on ANY non-EAGAIN send result, so a radio that is
  * simply broken walked the whole SF order without transmitting once and then
  * charged a backoff step for the "pass" it never flew.

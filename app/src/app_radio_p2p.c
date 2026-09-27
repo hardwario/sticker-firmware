@@ -365,6 +365,9 @@ static size_t m_frame_len;
 static bool m_frame_more;
 static bool m_frame_pending;
 static int m_frame_retries;
+/* A report waits for the TX queue (answers, alarms) to drain first -- the
+ * P2P side of LoRaWAN's priority drain. m_work_q only. */
+static bool m_telemetry_after_tx;
 
 /* M-2 stale-uplink watchdog (app_radio_stale_check(), shared with LoRaWAN):
  * uptime of the last telemetry uplink (0 = none since the last join) and the
@@ -2335,6 +2338,15 @@ static void send_work_handler(struct k_work *work)
  * JoinAccept kicks a fresh report. m_work_q only. */
 static void telemetry_send(void)
 {
+	/* Queued answers and alarms leave first, as over LoRaWAN: after a link-up
+	 * that keeps Info -> settings-info -> telemetry in order on the air even
+	 * when an announce frame needs a retry. tx_work sends the report once
+	 * the queue is empty. */
+	if (m_tx_deferred_valid || k_msgq_num_used_get(&m_tx_msgq) > 0) {
+		m_telemetry_after_tx = true;
+		return;
+	}
+
 	for (;;) {
 		if (!m_frame_pending) {
 			int ret = app_compose_budget(m_frame_buf, sizeof(m_frame_buf), &m_frame_len,
@@ -2403,6 +2415,15 @@ static void frame_work_handler(struct k_work *work)
 	telemetry_send();
 }
 
+/* The TX queue is empty: a report that waited for it goes now. */
+static void tx_drained(void)
+{
+	if (m_telemetry_after_tx) {
+		m_telemetry_after_tx = false;
+		k_work_submit_to_queue(&m_work_q, &m_send_work);
+	}
+}
+
 static void tx_work_handler(struct k_work *work)
 {
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
@@ -2419,6 +2440,7 @@ static void tx_work_handler(struct k_work *work)
 		msg = m_tx_deferred;
 		m_tx_deferred_valid = false;
 	} else if (k_msgq_get(&m_tx_msgq, &msg, K_NO_WAIT) != 0) {
+		tx_drained();
 		return;
 	}
 
@@ -2451,6 +2473,7 @@ static void tx_work_handler(struct k_work *work)
 		}
 
 		if (k_msgq_get(&m_tx_msgq, &msg, K_NO_WAIT) != 0) {
+			tx_drained();
 			return;
 		}
 	}
@@ -3291,6 +3314,7 @@ void p2p_test_tx_reset(void)
 {
 	k_work_cancel_delayable(&m_frame_work);
 	m_frame_pending = false;
+	m_telemetry_after_tx = false;
 	m_tx_deferred_valid = false;
 	k_msgq_purge(&m_tx_msgq);
 	k_msgq_purge(&m_ack_retry_msgq);

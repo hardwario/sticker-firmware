@@ -166,7 +166,9 @@ uint8_t app_radio_get_max_payload(void);
 /* Compose + send a telemetry snapshot (triggered by app_report) after the fleet
  * pre-send jitter (#267): a random delay of up to min(interval_report / 10,
  * 10 s), the same policy for both radios. The jitter lives on the transmission,
- * never on the report cadence (history timestamps follow the fixed cadence). */
+ * never on the report cadence (history timestamps follow the fixed cadence).
+ * After a link-up the first report waits for the announce instead and leaves
+ * right after it, without jitter: Info, settings-info, telemetry. */
 void app_radio_send_telemetry(void);
 
 /* Same, for a host-requested uplink (force_send / sample, F14): no jitter, and a
@@ -259,13 +261,16 @@ void app_radio_suspend(void);
  * then sends -- after a random spread of up to min(interval_report / 2, 30 s),
  * so that nodes rebooted together do not all transmit at once -- the Info
  * (seq 0) followed by the settings-info ConfigDump, each paged for the
- * current budget. A frame that does not fit yet, or that waits
- * for a running page stream, stays pending and goes out on a later
+ * current budget, and only then the first telemetry (held until every page is
+ * queued; 60 s after the spread at the latest). A frame that does not fit
+ * yet, or that waits for a running page stream, stays pending and goes out on
+ * a later
  * app_radio_announce_run(): the backend runs it on its work queue whenever
  * room may have appeared (link up, DR rise, page stream end, queue space). */
 void app_radio_announce(void);
 
-/* Something of the announce is still to be sent. */
+/* Something of the announce is still to be sent, or its last pages are still
+ * streaming (the held first telemetry waits for the run after the stream). */
 bool app_radio_announce_pending(void);
 
 /* Backend: a queued announce frame had to be dropped (the budget fell under
