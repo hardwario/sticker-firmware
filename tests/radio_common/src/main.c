@@ -5,12 +5,12 @@
  * The common uplink path of app_radio.c (doc/plan/460 F4) against a fake
  * backend. The scenarios that both radios share run twice: once with a
  * LoRaWAN-like backend (nothing sent confirmed, 3 s between the frames of a
- * report, 51 B budget) and once with a P2P-like one (answers, alarms and
- * history confirmed, no frame gap, 239 B budget) -- one implementation, the
- * same behaviour on either radio (decision #23). Link supervision (F2) runs
- * the same way: the fake reports link-check outcomes and records the rungs and
- * rejoins app_radio asks for; so does the history replay (F3c), over a stub
- * store of fixed-size records.
+ * report, 51 B budget) and once with a P2P-like one (answers and history
+ * confirmed, no frame gap, 239 B budget) -- one implementation, the same
+ * behaviour on either radio (decision #23); so does the retry ladder of a
+ * confirmed frame without its Ack (T2c), alarms confirmed by radio-alarm-ack. Link supervision (F2)
+ * runs the same way: the fake reports link-check outcomes and records the rungs and rejoins
+ * app_radio asks for; so does the history replay (F3c), over a stub store of fixed-size records.
  */
 
 #include "stubs.h"
@@ -34,6 +34,7 @@ struct sent {
 	uint8_t port;
 	uint8_t flags;
 	uint16_t len;
+	uint8_t attempt;
 	uint8_t head[8];
 	int ret;
 	int64_t at_ms;
@@ -58,7 +59,6 @@ static struct {
 	int rejoin_ret;
 	int rejoin_calls;
 	bool rejoin_forced;
-	bool in_flight; /* a confirmed frame waits for its Ack retries (P2P) */
 	/* After this many send() calls (0 = never): */
 	size_t drop_link_after;
 	size_t zero_budget_after;
@@ -78,6 +78,11 @@ static int fake_send(const struct app_radio_frame *f, struct app_radio_tx_result
 {
 	int ret = fk.n < fk.n_script ? fk.script[fk.n] : 0;
 
+	/* The send contract: no Ack is missing where none was asked for. */
+	if (ret == -ETIMEDOUT && !(f->flags & APP_RADIO_FRAME_CONFIRMED)) {
+		ret = 0;
+	}
+
 	if (fk.n < LOG_MAX) {
 		struct sent *s = &fk.log[fk.n];
 
@@ -86,6 +91,7 @@ static int fake_send(const struct app_radio_frame *f, struct app_radio_tx_result
 		s->port = f->port;
 		s->flags = f->flags;
 		s->len = f->len;
+		s->attempt = f->attempt;
 		memcpy(s->head, f->buf, MIN(f->len, sizeof(s->head)));
 		s->ret = ret;
 		s->at_ms = k_uptime_get();
@@ -134,7 +140,7 @@ static bool fake_tx_ready(void)
 struct profile {
 	const struct app_radio_backend *be;
 	uint8_t budget;
-	uint8_t queued_flags; /* flags of a queued answer or alarm */
+	uint8_t queued_flags; /* flags of a queued answer and a history frame */
 	uint8_t due_flag;     /* how a link check rides a report */
 	int transport;        /* enum app_cmd_transport of its downlinks */
 };
@@ -169,11 +175,6 @@ static int fake_rejoin(bool forced)
 	return fk.rejoin_ret;
 }
 
-static bool fake_in_flight(void)
-{
-	return fk.in_flight;
-}
-
 static void fake_time_request(void)
 {
 	fk.time_requests++;
@@ -201,10 +202,8 @@ static const struct app_radio_backend be_p2p = {
 	.get_state = fake_get_state,
 	.warning_step = fake_warning_step,
 	.rejoin = fake_rejoin,
-	.in_flight = fake_in_flight,
 	.time_request = fake_time_request,
-	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_ALARM) |
-			 BIT(APP_RADIO_FRAME_HISTORY),
+	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_HISTORY),
 	.frame_gap_ms = 0,
 	.cmd_transport = APP_CMD_TRANSPORT_P2P,
 };
@@ -360,7 +359,7 @@ static void order_answer_alarm_telemetry(void)
 	zassert_equal(fk.log[0].flags, m_prof->queued_flags);
 	zassert_equal(fk.log[1].kind, APP_RADIO_FRAME_ALARM);
 	zassert_equal(fk.log[1].head[0], 0xa1);
-	zassert_equal(fk.log[1].flags, m_prof->queued_flags);
+	zassert_equal(fk.log[1].flags, 0, "alarms unconfirmed unless radio-alarm-ack");
 	zassert_equal(fk.log[2].kind, APP_RADIO_FRAME_TELEMETRY);
 	zassert_equal(fk.log[2].len, 20);
 	zassert_equal(fk.log[2].flags, 0);
@@ -448,8 +447,8 @@ static void park_until_kick(int err)
 	zassert_equal(retries(), base, "a wait is not a retry");
 }
 
-/* -EBUSY (a confirmed uplink in flight) and -ENOTCONN (no session) keep the
- * frame until the backend kicks. */
+/* -EBUSY (the MAC busy) and -ENOTCONN (no session) keep the frame until the
+ * backend kicks. */
 static void busy_and_notconn_wait_for_the_kick(void)
 {
 	park_until_kick(-EBUSY);
@@ -543,6 +542,159 @@ ZTEST(radio_common, test_answer_pending_while_retried)
 	zassert_equal(fk.n, 2);
 	zassert_false(app_radio_tx_answer_pending());
 }
+
+/* ---- Confirmed frames (doc/plan/460 §2.6, T2c) --------------------------- */
+
+/* The spread before retry n is a random [1, 2^n) s -- LoRaWAN's ACK_TIMEOUT
+ * window, doubled per retry so that nodes which lost the same Ack part. */
+ZTEST(radio_common, test_ack_backoff_spreads_within_its_window)
+{
+	for (uint32_t n = 1; n <= APP_RADIO_ACK_MAX_RETRIES; n++) {
+		uint32_t max_ms = APP_RADIO_ACK_BACKOFF_MIN_MS << n;
+
+		zassert_equal(app_radio_ack_backoff_ms(n, 0), APP_RADIO_ACK_BACKOFF_MIN_MS);
+		zassert_equal(
+			app_radio_ack_backoff_ms(n, max_ms - APP_RADIO_ACK_BACKOFF_MIN_MS - 1),
+			max_ms - 1);
+		zassert_true(app_radio_ack_backoff_ms(n, UINT32_MAX) < max_ms, "retry %u", n);
+	}
+	zassert_equal(app_radio_ack_backoff_ms(0, 777), app_radio_ack_backoff_ms(1, 777));
+	zassert_equal(app_radio_ack_backoff_ms(9, 12345),
+		      app_radio_ack_backoff_ms(APP_RADIO_ACK_MAX_RETRIES, 12345), "capped");
+}
+
+/* A confirmed frame without its Ack goes again, confirmed and byte for byte,
+ * after the spread; the backend learns the attempt (P2P resends its counter).
+ * Every other frame waits: the report asked for meanwhile goes after the Ack. */
+static void confirmed_alarm_retried_until_acked(void)
+{
+	const int r[] = {-ETIMEDOUT, -ETIMEDOUT, 0};
+	const size_t lens[] = {20};
+	uint32_t base = retries();
+	struct app_radio_link l;
+
+	g_app_config.radio_alarm_ack = true;
+	frames(lens, 1);
+	script(r, ARRAY_SIZE(r));
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa1);
+	k_sleep(K_MSEC(100));
+	zassert_equal(fk.n, 1);
+	zassert_true(app_radio_ack_pending());
+	app_radio_send_telemetry_now();
+	k_sleep(K_SECONDS(8));
+	zassert_equal(fk.n, 4, "2 retries, then the report");
+	for (size_t i = 0; i < 3; i++) {
+		zassert_equal(fk.log[i].kind, APP_RADIO_FRAME_ALARM, "attempt %zu", i);
+		zassert_equal(fk.log[i].head[0], 0xa1);
+		zassert_equal(fk.log[i].len, 8);
+		zassert_equal(fk.log[i].flags, APP_RADIO_FRAME_CONFIRMED);
+		zassert_equal(fk.log[i].attempt, i);
+	}
+	zassert_within(fk.log[1].at_ms - fk.log[0].at_ms, 1500, 510, "retry 1 after %lld ms",
+		       (long long)(fk.log[1].at_ms - fk.log[0].at_ms));
+	zassert_within(fk.log[2].at_ms - fk.log[1].at_ms, 2500, 1510, "retry 2 after %lld ms",
+		       (long long)(fk.log[2].at_ms - fk.log[1].at_ms));
+	zassert_equal(fk.log[3].kind, APP_RADIO_FRAME_TELEMETRY, "the report waited for the Ack");
+	zassert_equal(retries(), base + 2);
+	zassert_false(app_radio_ack_pending());
+	app_radio_get_link(&l);
+	zassert_equal(l.fail_streak, 0, "acknowledged: no failed link check");
+}
+BOTH_PROFILES(confirmed_alarm_retried_until_acked)
+
+/* Unacknowledged after its retries, the frame is given up as sent -- it went
+ * out -- and is a failed link check; the next frame goes then. */
+static void confirmed_frame_given_up_after_its_retries(void)
+{
+	struct app_radio_link l;
+
+	g_app_config.radio_alarm_ack = true;
+	script_fill(-ETIMEDOUT, 1 + APP_RADIO_ACK_MAX_RETRIES);
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa1);
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa2);
+	k_sleep(K_SECONDS(20)); /* > 2 + 4 + 8 s of spread */
+	zassert_equal(fk.n, 2 + APP_RADIO_ACK_MAX_RETRIES);
+	for (size_t i = 0; i <= APP_RADIO_ACK_MAX_RETRIES; i++) {
+		zassert_equal(fk.log[i].head[0], 0xa1, "attempt %zu", i);
+		zassert_equal(fk.log[i].attempt, i);
+	}
+	zassert_equal(fk.log[4].head[0], 0xa2, "the next alarm once the first is given up");
+	zassert_equal(fk.log[4].attempt, 0);
+	zassert_false(app_radio_ack_pending());
+	app_radio_get_link(&l);
+	zassert_equal(l.fail_streak, 1, "a failed link check");
+}
+BOTH_PROFILES(confirmed_frame_given_up_after_its_retries)
+
+/* A duty-cycle hold of a retry takes a fresh spread on top of its wait, or the
+ * nodes it held would retry together again; the held send is no retry. */
+static void retry_held_by_the_duty_cycle_spreads_again(void)
+{
+	const int r[] = {-ETIMEDOUT, -EAGAIN, 0};
+	uint32_t base = retries();
+
+	g_app_config.radio_alarm_ack = true;
+	script(r, ARRAY_SIZE(r));
+	fk.wait_ms = 5000;
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa1);
+	k_sleep(K_SECONDS(12));
+	zassert_equal(fk.n, 3);
+	zassert_equal(fk.log[1].attempt, 1);
+	zassert_equal(fk.log[2].attempt, 1, "the same retry, sent now");
+	zassert_within(fk.log[2].at_ms - fk.log[1].at_ms, 6500, 510, "held %lld ms",
+		       (long long)(fk.log[2].at_ms - fk.log[1].at_ms));
+	zassert_equal(retries(), base + 1);
+}
+BOTH_PROFILES(retry_held_by_the_duty_cycle_spreads_again)
+
+/* A new session starts the frame afresh -- P2P: a new counter under the new
+ * key, never a retry of the old session's. */
+static void link_up_starts_a_waiting_retry_afresh(void)
+{
+	const int r[] = {-ETIMEDOUT};
+	uint32_t base = retries();
+
+	g_app_config.radio_alarm_ack = true;
+	script(r, ARRAY_SIZE(r));
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa1);
+	k_sleep(K_MSEC(100));
+	zassert_true(app_radio_ack_pending());
+	app_radio_link_up();
+	k_sleep(K_SECONDS(3));
+	zassert_equal(fk.n, 2);
+	zassert_equal(fk.log[1].head[0], 0xa1);
+	zassert_equal(fk.log[1].attempt, 0, "a new frame");
+	zassert_equal(retries(), base);
+}
+BOTH_PROFILES(link_up_starts_a_waiting_retry_afresh)
+
+/* A confirmed report frame without its Ack goes again before the report's
+ * next frame and before any queued one. */
+static void report_frame_retried_before_the_next(void)
+{
+	const int r[] = {-ETIMEDOUT};
+	const size_t lens[] = {20, 12};
+
+	fk.report_flags = APP_RADIO_FRAME_CONFIRMED;
+	frames(lens, 2);
+	script(r, ARRAY_SIZE(r));
+	app_radio_send_telemetry_now();
+	k_sleep(K_MSEC(100));
+	zassert_equal(fk.n, 1);
+	queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 8, 0xb1);
+	k_sleep(K_SECONDS(10));
+	zassert_equal(fk.n, 4);
+	zassert_equal(fk.log[1].kind, APP_RADIO_FRAME_TELEMETRY, "the retry goes first");
+	zassert_equal(fk.log[1].len, 20);
+	zassert_equal(fk.log[1].attempt, 1);
+	zassert_mem_equal(fk.log[1].head, fk.log[0].head, sizeof(fk.log[0].head));
+	zassert_equal(fk.log[2].head[0], 0xb1, "then the queued answer");
+	zassert_equal(fk.log[3].kind, APP_RADIO_FRAME_TELEMETRY);
+	zassert_equal(fk.log[3].len, 12);
+	zassert_equal(fk.log[3].attempt, 0);
+	zassert_equal(reports_done(), 1);
+}
+BOTH_PROFILES(report_frame_retried_before_the_next)
 
 /* ---- Over-budget recovery (#409 3g) --------------------------------------- */
 
@@ -1344,23 +1496,29 @@ static void action_waits_six_times_at_most(void)
 }
 BOTH_PROFILES(action_waits_six_times_at_most)
 
-/* A confirmed frame still retrying holds the action where the backend has
- * one in flight (P2P); LoRaWAN's send covers the whole exchange. */
-static void action_waits_for_a_frame_in_flight(void)
+/* An action also waits for its answer's Ack where answers are confirmed (P2P):
+ * held by the duty cycle on its retry, the answer is acknowledged at ~22 s and
+ * the action runs at the next 8 s check. LoRaWAN sends answers unconfirmed:
+ * the action runs at the first check. */
+static void action_waits_for_the_answer_ack(void)
 {
-	bool waits = m_prof->be->in_flight != NULL;
+	const int r[] = {-ETIMEDOUT, -EAGAIN};
+	bool confirmed = (m_prof->queued_flags & APP_RADIO_FRAME_CONFIRMED) != 0;
 
-	fk.in_flight = true;
+	script(r, ARRAY_SIZE(r));
+	fk.wait_ms = 20000;
+	g_cmd_resp_len = 10;
 	g_cmd_action = APP_CMD_ACTION_COUNTERS_SAVE;
 	app_radio_downlink(m_cmd, sizeof(m_cmd));
 	k_sleep(K_SECONDS(9));
-	zassert_equal(g_run_action_calls, waits ? 0 : 1);
-	fk.in_flight = false;
-	k_sleep(K_SECONDS(8));
+	zassert_equal(g_run_action_calls, confirmed ? 0 : 1);
+	k_sleep(K_SECONDS(25));
 	zassert_equal(g_run_action_calls, 1);
 	zassert_equal(g_run_action_last, APP_CMD_ACTION_COUNTERS_SAVE);
+	zassert_equal(fk.n, confirmed ? 3 : 1);
+	zassert_true(g_run_action_at_ms > fk.log[fk.n - 1].at_ms, "after the answer left");
 }
-BOTH_PROFILES(action_waits_for_a_frame_in_flight)
+BOTH_PROFILES(action_waits_for_the_answer_ack)
 
 /* The pages of an answer that did not fit follow page 0 by themselves, one
  * every 2 s; the stream is no action to run. */
@@ -1660,6 +1818,53 @@ static void replay_frame_retried_then_abandoned(void)
 	zassert_equal(m_ready_calls, 1);
 }
 BOTH_PROFILES(replay_frame_retried_then_abandoned)
+
+/* A confirmed history frame (P2P) without its Ack goes again as it was -- the
+ * same records, not rebuilt from the store -- before the stream goes on;
+ * LoRaWAN sends the stream unconfirmed. */
+static void replay_frame_resent_as_it_was(void)
+{
+	const int r[] = {-ETIMEDOUT};
+	bool confirmed = (m_prof->queued_flags & APP_RADIO_FRAME_CONFIRMED) != 0;
+	uint32_t n = hist_fill(0);
+	size_t from = confirmed ? 1 : 0;
+
+	script(r, ARRAY_SIZE(r));
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(30));
+	zassert_equal(fk.n, from + 3);
+	if (confirmed) {
+		zassert_equal(fk.log[1].len, fk.log[0].len);
+		zassert_mem_equal(fk.log[1].head, fk.log[0].head, sizeof(fk.log[0].head));
+		zassert_equal(fk.log[1].attempt, 1);
+	}
+	assert_stream(from, 3, 42, 0, n);
+	zassert_false(g_hist_replay_active);
+	zassert_equal(m_ready_calls, 1);
+}
+BOTH_PROFILES(replay_frame_resent_as_it_was)
+
+/* One confirmed frame in flight across both paths: while an alarm waits for
+ * its Ack retry, the replay's next frame waits too (-EBUSY), and goes once
+ * the alarm is acknowledged. */
+static void replay_waits_for_a_confirmed_alarm(void)
+{
+	const int r[] = {-ETIMEDOUT};
+
+	g_app_config.radio_alarm_ack = true;
+	hist_fill(0);
+	script(r, ARRAY_SIZE(r));
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa1);
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(15));
+	zassert_equal(fk.n, 5);
+	zassert_equal(fk.log[0].kind, APP_RADIO_FRAME_ALARM);
+	zassert_equal(fk.log[1].kind, APP_RADIO_FRAME_ALARM, "the retry before any history frame");
+	zassert_equal(fk.log[1].attempt, 1);
+	zassert_equal(fk.log[2].kind, APP_RADIO_FRAME_HISTORY);
+	zassert_true(fk.log[2].at_ms >= fk.log[1].at_ms);
+}
+BOTH_PROFILES(replay_waits_for_a_confirmed_alarm)
 
 /* A duty-cycle hold waits res->wait_ms, then the same frame goes. */
 static void replay_duty_hold_waits(void)

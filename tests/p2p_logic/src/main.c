@@ -1166,28 +1166,49 @@ ZTEST(p2p_logic, test_every_exchange_ends_its_air_window)
 	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "a failed JoinRequest ends at once");
 }
 
-/* F-P1-1: while a confirmed uplink's Ack retry is pending, no fresh-counter
- * frame goes out (the central would reject the late retry as a replay); the
- * backend answers -EBUSY, which app_radio waits out uncounted until the Ack
- * retry ends and kicks it. */
-ZTEST(p2p_logic, test_no_fresh_frame_while_an_ack_retry_is_pending)
+extern uint8_t test_lora_last_frame[255];
+extern uint32_t test_lora_last_len;
+
+/* §6 / F-P1-1: a confirmed frame without its Ack is -ETIMEDOUT, and app_radio's
+ * retry of it (attempt > 0) goes byte for byte under the SAME counter, so the
+ * central's strict high-water holds; the next fresh frame takes the next
+ * counter. When and how often is app_radio's (tests/radio_common). */
+ZTEST(p2p_logic, test_retry_resends_the_same_counter)
 {
+	static uint8_t body[10] = {0x10, 0x11, 0x12};
+	struct app_radio_frame f = {.kind = APP_RADIO_FRAME_ANSWER,
+				    .flags = APP_RADIO_FRAME_CONFIRMED,
+				    .len = sizeof(body),
+				    .buf = body};
 	struct app_radio_tx_result res = {0};
-	uint32_t sends = test_lora_send_count;
+	uint8_t first[255];
+	uint32_t first_len;
 
 	p2p_test_join_setup(7);
 	p2p_test_set_paired();
+	p2p_test_set_fcnt(100, 200);
 	p2p_test_tx_reset();
-	test_lora_send_ret = -EIO; /* would count as a failure if it were sent */
-	p2p_test_put_ack_retry(2561);
 
-	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, &res), -EBUSY, "telemetry waits");
-	zassert_equal(backend_send(APP_RADIO_FRAME_ALARM, APP_RADIO_FRAME_CONFIRMED, &res), -EBUSY,
-		      "an alarm waits too");
-	zassert_equal(test_lora_send_count, sends, "nothing on the air");
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT, "no Ack in its RX1");
+	first_len = test_lora_last_len;
+	memcpy(first, test_lora_last_frame, first_len);
+	zassert_equal(sys_get_be32(&first[P2P_HDR_OFF_COUNTER]), 100);
 
-	test_lora_send_ret = 0;
+	f.attempt = 1;
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT, "the retry, no Ack either");
+	zassert_equal(test_lora_last_len, first_len);
+	zassert_mem_equal(test_lora_last_frame, first, first_len, "the same frame on the air");
+
+	f.attempt = 0;
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
+	zassert_equal(sys_get_be32(&test_lora_last_frame[P2P_HDR_OFF_COUNTER]), 101,
+		      "a new frame, the next counter");
+
+	f.flags = 0;
+	f.kind = APP_RADIO_FRAME_TELEMETRY;
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), 0, "unconfirmed: sent once, done");
 	p2p_test_tx_reset();
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
 }
 
 /* LoRaWAN parity: an empty clock_sync forces no uplink -- like LoRaWAN's
@@ -1232,26 +1253,31 @@ ZTEST(p2p_logic, test_not_ready_while_unpaired_and_link_up_kicks)
 }
 
 /* Review of #400 (H1): a new session restarts the counter at 0 under a new key,
- * so an Ack retry of the old session must never go out with its old counter.
- * The alarm goes back to app_radio's queue for a fresh counter; the telemetry
- * frame is dropped (the next report covers it). */
-ZTEST(p2p_logic, test_new_session_drops_old_ack_retries)
+ * so a retry must never go out with a counter of the old session: after the
+ * session changed, a retry takes a fresh counter (app_radio also starts the
+ * frame afresh at the link-up). */
+ZTEST(p2p_logic, test_new_session_never_resends_an_old_counter)
 {
-	const uint8_t body[] = {0x01, 0x0a, 0x00};
+	static uint8_t body[10] = {0x20};
+	struct app_radio_frame f = {.kind = APP_RADIO_FRAME_ALARM,
+				    .flags = APP_RADIO_FRAME_CONFIRMED,
+				    .len = sizeof(body),
+				    .buf = body};
+	struct app_radio_tx_result res = {0};
 
 	p2p_test_join_setup(7);
+	p2p_test_set_paired();
+	p2p_test_set_fcnt(300, 400);
 	p2p_test_tx_reset();
-	p2p_test_set_link(P2P_LINK_JOINING, true, false, false);
-	p2p_test_put_ack_retry_frame(APP_RADIO_P2P_FRAME_TELEMETRY, body, sizeof(body), 5000);
-	p2p_test_put_ack_retry_frame(APP_RADIO_P2P_FRAME_ALARM, body, sizeof(body), 5001);
 
-	int calls = p2p_test_tx_queue_calls;
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
+	zassert_equal(sys_get_be32(&test_lora_last_frame[P2P_HDR_OFF_COUNTER]), 300);
 
 	p2p_test_drop_old_session();
-
-	zassert_equal(p2p_test_ack_retry_count(), 0, "no old-session retry may remain");
-	zassert_equal(p2p_test_tx_queue_calls, calls + 1, "only the alarm is re-queued");
-	zassert_equal(p2p_test_tx_queue_kind, APP_RADIO_FRAME_ALARM, "as an alarm");
+	f.attempt = 1;
+	zassert_equal(app_radio_p2p_backend.send(&f, &res), -ETIMEDOUT);
+	zassert_equal(sys_get_be32(&test_lora_last_frame[P2P_HDR_OFF_COUNTER]), 301,
+		      "a fresh counter, never the old session's");
 
 	p2p_test_tx_reset();
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
@@ -1658,33 +1684,6 @@ ZTEST(p2p_logic, test_last_downlink_recorded)
 	zassert_equal(p2p_test_dl_snr, 12);
 }
 
-/* Decision #22 §3.2 / F-P2P-4: retry n waits a random 1..2^n s, so two nodes
- * that lost a frame to each other fall out of step instead of retrying in
- * lock-step. Pin the bounds for every retry and both rand extremes. */
-ZTEST(p2p_logic, test_ack_retry_backoff_grows_and_stays_random)
-{
-	static const uint32_t max_ms[] = {2000, 4000, 8000};
-
-	for (int attempt = 0; attempt < 3; attempt++) {
-		uint32_t lo = p2p_ack_retry_backoff_ms(attempt, 0);
-		uint32_t hi = p2p_ack_retry_backoff_ms(attempt, UINT32_MAX);
-
-		zassert_equal(lo, 1000u, "retry %d: at least 1 s (the TX gap), got %u", attempt + 1,
-			      lo);
-		zassert_true(hi < max_ms[attempt], "retry %d: below %u ms, got %u", attempt + 1,
-			     max_ms[attempt], hi);
-		for (uint32_t r = 0; r < 5000; r += 7) {
-			uint32_t v = p2p_ack_retry_backoff_ms(attempt, r * 2654435761u);
-
-			zassert_between_inclusive(v, 1000u, max_ms[attempt] - 1, "retry %d: %u",
-						  attempt + 1, v);
-		}
-	}
-	/* Out-of-range attempts clamp instead of shifting past the table. */
-	zassert_true(p2p_ack_retry_backoff_ms(99, UINT32_MAX) < 8000u, "clamped to the 3rd retry");
-	zassert_true(p2p_ack_retry_backoff_ms(-1, UINT32_MAX) < 2000u, "clamped to the 1st retry");
-}
-
 /* ---- the shared data-frame KAT (decision #22) ----------------------------- */
 
 /* tests/ccm/p2p_data_kat.json, sha256
@@ -1749,10 +1748,8 @@ ZTEST(p2p_logic, test_data_kat_ack_opens)
 
 /* ---- decision #22: confirmed policy and link supervision ---------------- */
 
-extern uint8_t test_lora_last_frame[255];
 extern int p2p_test_link_ok_calls;
 extern int p2p_test_link_fail_calls;
-extern uint32_t test_lora_last_len;
 
 /* Send one single-frame telemetry report the way app_radio does (report_flags
  * at its first frame, with app_radio's cadence verdict `due`) and return
@@ -1766,16 +1763,15 @@ static bool send_report_confirmed(bool due)
 	uint8_t flags = be->report_flags(due);
 	int ret = backend_send(APP_RADIO_FRAME_TELEMETRY, flags, &res);
 
-	zassert_equal(ret, 0, "sent, got %d", ret);
+	/* No Ack in the test's RX1: a confirmed report waits for app_radio's
+	 * retry, an unconfirmed one is done. */
+	zassert_equal(ret, (flags & APP_RADIO_FRAME_CONFIRMED) ? -ETIMEDOUT : 0, "got %d", ret);
 	zassert_equal(test_lora_send_count, sends + 1, "one frame on the air per report");
 
 	bool confirmed = (test_lora_last_frame[P2P_HDR_OFF_FCTRL] & P2P_FCTRL_CONFIRMED) != 0;
 
 	zassert_equal(confirmed, (flags & APP_RADIO_FRAME_CONFIRMED) != 0,
 		      "the report's flag reaches the air");
-
-	zassert_equal(p2p_test_ack_retry_count(), confirmed ? 1u : 0u,
-		      "an unacked confirmed report waits for a retry, an unconfirmed one never");
 	p2p_test_tx_reset();
 	return confirmed;
 }
@@ -1860,10 +1856,10 @@ ZTEST(p2p_logic, test_clock_sync_time_event_only_with_the_time_tail)
 	zassert_equal(g_test_network_time, 1790000200u, "later tails still set the clock");
 }
 
-/* §3.4: the backend only reports what it saw -- an Ack is a passed link check,
- * a confirmed frame given up after all its retries a failed one; app_radio
- * keeps the streak and WARNING (tests/radio_common). A first try that went
- * unheard is neither: its retry cycle decides. */
+/* §3.4: the backend only reports what it saw -- an Ack is a passed link check;
+ * a confirmed frame given up after all its retries is a failed one, and that is
+ * app_radio's ladder, as are the streak and WARNING (tests/radio_common). An
+ * unheard try is neither here. */
 ZTEST(p2p_logic, test_unheard_first_try_is_no_link_result)
 {
 	int ok = p2p_test_link_ok_calls;

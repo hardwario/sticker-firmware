@@ -320,7 +320,7 @@ struct app_radio_p2p_info {
 	int8_t tx_power_dbm;
 	uint32_t fcnt;              /* next data-plane TX counter */
 	uint32_t dev_nonce;         /* JoinRequest anti-replay counter, never resets */
-	uint32_t ack_retry_pending; /* frames currently awaiting an Ack retry */
+	uint32_t ack_retry_pending; /* 1: a confirmed frame awaits its Ack retry (app_radio) */
 	/* B1: RSSI/SNR the central reported in the last Ack (its measurement of
 	 * this device's uplink). last_ack_valid is false until the first Ack of
 	 * the current session. */
@@ -414,7 +414,6 @@ int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 int p2p_join_sweep_sf(int cfg_sf, uint8_t step);
 int64_t p2p_join_retry_delay_ms(bool slow, int64_t elapsed_ms, int64_t duty_wait_ms,
 				uint32_t backoff_ms, uint32_t jitter_ms);
-uint32_t p2p_ack_retry_backoff_ms(int attempt, uint32_t rand32);
 bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
 void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter, int16_t rssi, int8_t snr);
 void p2p_parse_join_accept_reserved(const uint8_t reserved[4], struct p2p_radio_assign *out);
@@ -428,9 +427,6 @@ void p2p_test_join_step(void);
 void p2p_test_join_arm_retry(int64_t ms);
 void p2p_test_set_paired(void);
 void p2p_test_tx_reset(void);
-void p2p_test_put_ack_retry(uint32_t counter);
-void p2p_test_put_ack_retry_frame(uint8_t type, const uint8_t *body, size_t len, uint32_t counter);
-uint32_t p2p_test_ack_retry_count(void);
 void p2p_test_drop_old_session(void);
 void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, bool disabled);
 void p2p_test_note_downlink(int16_t rssi, int8_t snr);

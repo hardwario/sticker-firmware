@@ -301,6 +301,23 @@ static inline int64_t app_radio_backoff_jitter_ms(int64_t wait_ms, int64_t floor
 	return MAX(jittered, floor_ms > 0 ? floor_ms : 0);
 }
 
+/* ---- Confirmed uplinks (doc/plan/460 §2.6, T2c; shared by both radios) ------
+ * A confirmed frame the backend sent without an Ack goes again after a random
+ * 1..2^n s (n = the retry, 1-based) on top of any duty-cycle wait, like
+ * LoRaWAN's ACK_TIMEOUT (2 +/- 1 s), APP_RADIO_ACK_MAX_RETRIES times at most.
+ * The spread keeps two nodes rebooted together from locking into each other's
+ * RX1 (F-P2P-4). Pure. */
+#define APP_RADIO_ACK_MAX_RETRIES    3
+#define APP_RADIO_ACK_BACKOFF_MIN_MS 1000U
+
+static inline uint32_t app_radio_ack_backoff_ms(uint32_t retry, uint32_t rand32)
+{
+	uint32_t n = CLAMP(retry, 1U, (uint32_t)APP_RADIO_ACK_MAX_RETRIES);
+	uint32_t max_ms = APP_RADIO_ACK_BACKOFF_MIN_MS << n;
+
+	return APP_RADIO_ACK_BACKOFF_MIN_MS + rand32 % (max_ms - APP_RADIO_ACK_BACKOFF_MIN_MS);
+}
+
 /* ---- Link-check cadence (PF-1, decision #23; shared by both radios) ---------
  * The report with 0-based index `report_idx` since the last link-up is a link
  * check when it is the first one or every `interval`-th after it (0, N, 2N ...),
@@ -341,7 +358,7 @@ enum app_radio_frame_tag {
 	APP_RADIO_TAG_SETTINGS,     /* autonomous settings-info (#412) */
 };
 
-#define APP_RADIO_FRAME_CONFIRMED  BIT(0) /* P2P: FCtrl CONFIRMED, wait for the Ack */
+#define APP_RADIO_FRAME_CONFIRMED  BIT(0) /* wait for the Ack: P2P FCtrl, LoRaWAN MType */
 #define APP_RADIO_FRAME_LINK_CHECK BIT(1) /* LoRaWAN: ride a LinkCheckReq on it */
 #define APP_RADIO_FRAME_MORE       BIT(2) /* telemetry: more frames of this report follow */
 
@@ -354,7 +371,10 @@ struct app_radio_frame {
 	uint8_t tag;   /* enum app_radio_frame_tag */
 	uint8_t port;  /* LoRaWAN fPort of an answer (0 = the command port) */
 	uint8_t flags; /* APP_RADIO_FRAME_* */
-	uint16_t len;  /* 0 = no payload: LoRaWAN flushes its pending MAC answers */
+	/* Retries of a confirmed frame so far (0 = its first TX). On a retry P2P
+	 * sends the same counter again; LoRaWAN takes a new FCnt. */
+	uint8_t attempt;
+	uint16_t len; /* 0 = no payload: LoRaWAN flushes its pending MAC answers */
 	uint8_t *buf;
 };
 
@@ -371,8 +391,10 @@ struct app_radio_backend {
 	 * 0 when it was transmitted, or:
 	 *   -EAGAIN   duty-cycle held (or a LoRaWAN MAC flush went instead): try
 	 *             again after res->wait_ms, not counted as a failure
-	 *   -EBUSY    a confirmed uplink is in flight: wait, the backend kicks
-	 *             app_radio_tx_kick() when it ends
+	 *   -ETIMEDOUT a confirmed frame went out, but no Ack came: app_radio
+	 *             sends it again (T2c), nothing else in between
+	 *   -EBUSY    the radio cannot send now (P2P listen mode): wait, the
+	 *             backend kicks app_radio_tx_kick() when it can
 	 *   -ENOTCONN no session: wait for the next link-up
 	 *   -EMSGSIZE over res->budget: recovered by kind
 	 *   other     radio / MAC error: retried after 15 s, 8 times at most */
@@ -399,17 +421,14 @@ struct app_radio_backend {
 	 * WARNING budget ran out. Returns 0, or -ENOTSUP when this node cannot
 	 * rejoin (LoRaWAN ABP, P2P unprovisioned). */
 	int (*rejoin)(bool forced);
-	/* A transmitted confirmed frame still waits for its Ack or a retry, so a
-	 * post-command reboot must wait too. NULL: never (LoRaWAN's send blocks
-	 * for the whole confirmed exchange). */
-	bool (*in_flight)(void);
 	/* A clock_sync waits for a network time (app_radio_clock_sync()): LoRaWAN
 	 * forces a DeviceTimeReq onto the next uplink, P2P sends its next reports
 	 * (at most 3) confirmed so an Ack brings the time tail. Neither sends an
 	 * uplink of its own. The backend calls app_radio_time_event() when the
 	 * time lands. */
 	void (*time_request)(void);
-	/* The kinds sent confirmed, BIT(enum app_radio_frame_kind). */
+	/* The kinds sent confirmed, BIT(enum app_radio_frame_kind). Alarms are
+	 * not the backend's: radio-alarm-ack decides them on both radios. */
 	uint8_t confirm_kinds;
 	/* enum app_cmd_transport of this radio's command downlinks. */
 	uint8_t cmd_transport;
@@ -422,12 +441,16 @@ struct app_radio_backend {
 int app_radio_tx_queue(enum app_radio_frame_kind kind, enum app_radio_frame_tag tag, uint8_t port,
 		       const uint8_t *buf, size_t len);
 
-/* Radio work queue: run the scheduler now (link-up, the in-flight confirmed
- * uplink ended). A send already waiting for its time keeps it. */
+/* Radio work queue: run the scheduler now (link-up, the radio can send again).
+ * A send already waiting for its time keeps it. */
 void app_radio_tx_kick(void);
 
 /* An answer is still queued or being sent (the post-command drain). */
 bool app_radio_tx_answer_pending(void);
+
+/* A confirmed frame went out without its Ack and waits for a retry: nothing
+ * else is sent meanwhile, and a post-command reboot waits too (T2c). */
+bool app_radio_ack_pending(void);
 
 /* Free answer slots (a page stream leaves two for other answers). */
 uint32_t app_radio_tx_answer_free(void);
@@ -471,9 +494,9 @@ struct app_radio_link {
 void app_radio_link_up(void);
 
 /* Radio work queue: a link check succeeded (`ok`, or any authenticated
- * downlink) or failed (P2P: a confirmed frame unacknowledged after all its
- * retries; LoRaWAN: no LinkCheckAns / no gateway). Counts APP_RADIO_CNT_FAIL;
- * ignored unless the backend is HEALTHY. */
+ * downlink) or failed (a confirmed frame unacknowledged after all its retries,
+ * app_radio's own; LoRaWAN: no LinkCheckAns / no gateway). Counts
+ * APP_RADIO_CNT_FAIL; ignored unless the backend is HEALTHY. */
 void app_radio_link_result(bool ok);
 
 /* Any thread: the next report is a link check whatever the cadence. */

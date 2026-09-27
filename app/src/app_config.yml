@@ -854,6 +854,16 @@ parameters:
     default: "off"
     help: "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap_buzzer."
 
+  # doc/plan/460 §2.6 (T2c): one setting for both radios. false = LoRaWAN's
+  # behaviour so far, and P2P follows it (decision #22 §3.2 amended).
+  - name: radio_alarm_ack
+    proto_group: alarms
+    proto_id: 21
+    type: bool
+    default: false
+    writable: [shell, nfc, radio]
+    help: "Get/Set confirmed alarm uplinks, both radios (true/false): true = each alarm waits for the network's Ack and is sent again up to 3 times."
+
   - name: accel_motion_sensitivity
     proto_group: sensors
     proto_id: 10

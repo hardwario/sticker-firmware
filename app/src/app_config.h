@@ -130,6 +130,7 @@ struct app_config {
 	uint8_t alarm_14[17];
 	uint8_t alarm_15[17];
 	enum app_config_alarm_buzzer_mode alarm_buzzer_mode;
+	bool radio_alarm_ack;
 	enum app_config_motion_sensitivity accel_motion_sensitivity;
 	uint8_t sensor1_rom[8];
 	uint8_t sensor2_rom[8];

@@ -561,6 +561,117 @@ static void tx_request_telemetry(void)
 	app_radio_tx_kick();
 }
 
+/* ---- Confirmed uplinks (doc/plan/460 §2.6, T2c) ---------------------------
+ * One confirmed frame in flight on either radio (P2P's F-P1-1 made common). A
+ * frame the backend sent without an Ack (-ETIMEDOUT) stays with its path -- the
+ * queued frame, the report's frame or the replay's -- and goes again after
+ * app_radio_ack_backoff_ms(), APP_RADIO_ACK_MAX_RETRIES times at most; every
+ * other send waits meanwhile. P2P sends it under the same counter (the central
+ * keeps a strict counter high-water), LoRaWAN under a new FCnt. Given up, it
+ * is a failed link check, and the frame counts as sent: it went out. A new
+ * session starts it afresh. Radio work queue only. */
+#define TX_ACK_RETRY 1 /* tx_send(): no Ack; sent again after res->wait_ms */
+
+static bool m_ack_pending;    /* a confirmed frame waits for its retry */
+static uint8_t m_ack_kind;    /* ... of this kind: the path holding it */
+static uint8_t m_ack_retries; /* ... retries sent so far */
+
+static bool kind_confirmed(uint8_t kind)
+{
+	if (kind == APP_RADIO_FRAME_ALARM) {
+		return g_app_config.radio_alarm_ack; /* both radios alike */
+	}
+	return (m_be->confirm_kinds & BIT(kind)) != 0;
+}
+
+/* The path is done with its frame (sent, dropped, the replay ended): the
+ * frames that waited go now. Only the other path waits for the kick (-EBUSY);
+ * the releasing one schedules its own next step, and a kick of it would run
+ * it at once, cutting its frame gap short (a delayable work submitted with
+ * K_NO_WAIT stays queued through the reschedule that follows). */
+static void ack_release(uint8_t kind)
+{
+	if (!m_ack_pending || m_ack_kind != kind) {
+		return;
+	}
+	m_ack_pending = false;
+	if (kind == APP_RADIO_FRAME_HISTORY) {
+		k_work_schedule_for_queue(app_radio_work_q(), &m_tx_work, K_NO_WAIT);
+	} else if (m_hist_active) {
+		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work, K_NO_WAIT);
+	}
+}
+
+bool app_radio_ack_pending(void)
+{
+	return m_ack_pending;
+}
+
+/* m_be->send() under the confirmed ladder. Returns the backend's result, or
+ * TX_ACK_RETRY: the caller keeps the frame, byte for byte, and sends it again
+ * after res->wait_ms. */
+static int tx_send(struct app_radio_frame *f, struct app_radio_tx_result *res)
+{
+	bool retry = m_ack_pending && m_ack_kind == f->kind;
+
+	if (m_ack_pending && !retry) {
+		return -EBUSY; /* kicked by ack_release() */
+	}
+	if (retry) {
+		f->flags |= APP_RADIO_FRAME_CONFIRMED; /* a retry stays confirmed */
+	} else {
+		m_ack_retries = 0;
+	}
+	f->attempt = m_ack_retries;
+
+	int ret = m_be->send(f, res);
+
+	if (retry && (ret == 0 || ret == -ETIMEDOUT)) {
+		app_radio_count(APP_RADIO_CNT_RETRY);
+	}
+	switch (ret) {
+	case 0:
+		if (retry) {
+			LOG_INF("Confirmed frame (kind %u) acknowledged on retry %u", f->kind,
+				m_ack_retries);
+		}
+		ack_release(f->kind);
+		return 0;
+	case -ETIMEDOUT:
+		if (!(f->flags & APP_RADIO_FRAME_CONFIRMED)) {
+			return -EIO; /* no Ack was asked for: a radio / MAC error */
+		}
+		if (m_ack_retries >= APP_RADIO_ACK_MAX_RETRIES) {
+			LOG_WRN("Confirmed frame (kind %u) unacknowledged after %d retries; given "
+				"up",
+				f->kind, APP_RADIO_ACK_MAX_RETRIES);
+			ack_release(f->kind);
+			app_radio_link_result(false);
+			return 0;
+		}
+		m_ack_pending = true;
+		m_ack_kind = f->kind;
+		m_ack_retries++;
+		res->wait_ms = app_radio_ack_backoff_ms(m_ack_retries, sys_rand32_get());
+		LOG_WRN("Confirmed frame (kind %u) unacknowledged: retry %u/%d in %u ms", f->kind,
+			m_ack_retries, APP_RADIO_ACK_MAX_RETRIES, res->wait_ms);
+		return TX_ACK_RETRY;
+	case -EAGAIN:
+		if (retry) {
+			/* The duty cycle holds the retry: the spread comes on top of
+			 * it, or two held nodes would retry together again. */
+			res->wait_ms = (res->wait_ms ? res->wait_ms : TX_RETRY_MS) +
+				       app_radio_ack_backoff_ms(m_ack_retries, sys_rand32_get());
+		}
+		return ret;
+	case -EMSGSIZE:
+		ack_release(f->kind); /* recovered by its kind: a new frame */
+		return ret;
+	default:
+		return ret;
+	}
+}
+
 int app_radio_tx_queue(enum app_radio_frame_kind kind, enum app_radio_frame_tag tag, uint8_t port,
 		       const uint8_t *buf, size_t len)
 {
@@ -674,6 +785,10 @@ static bool recover_over_budget(struct tx_slot *tx, uint8_t kind, uint8_t budget
  * queues are empty (the run goes on to telemetry). */
 static bool tx_queued_step(void)
 {
+	/* A report frame waits for its Ack retry: it goes before any queued one. */
+	if (m_ack_pending && m_ack_kind == APP_RADIO_FRAME_TELEMETRY) {
+		return false;
+	}
 	if (!m_cur_valid) {
 		if (k_msgq_get(&m_answer_q, &m_cur, K_NO_WAIT) == 0) {
 			m_cur_kind = APP_RADIO_FRAME_ANSWER;
@@ -690,12 +805,12 @@ static bool tx_queued_step(void)
 		.kind = m_cur_kind,
 		.tag = m_cur.tag,
 		.port = m_cur.port,
-		.flags = (m_be->confirm_kinds & BIT(m_cur_kind)) ? APP_RADIO_FRAME_CONFIRMED : 0,
+		.flags = kind_confirmed(m_cur_kind) ? APP_RADIO_FRAME_CONFIRMED : 0,
 		.len = m_cur.len,
 		.buf = m_cur.buf,
 	};
 	struct app_radio_tx_result res = {0};
-	int ret = m_be->send(&f, &res);
+	int ret = tx_send(&f, &res);
 
 	switch (ret) {
 	case 0:
@@ -712,11 +827,15 @@ static bool tx_queued_step(void)
 	case -EAGAIN:
 		tx_schedule(res.wait_ms ? res.wait_ms : TX_RETRY_MS);
 		return true;
+	case TX_ACK_RETRY:
+		tx_schedule(res.wait_ms);
+		return true;
 	default:
 		if (++m_cur_retries > TX_MAX_RETRIES) {
 			LOG_ERR("Frame (kind %u, %u B) abandoned after %d retries", m_cur_kind,
 				m_cur.len, TX_MAX_RETRIES);
 			m_cur_valid = false;
+			ack_release(m_cur_kind);
 			break;
 		}
 		app_radio_count(APP_RADIO_CNT_RETRY);
@@ -760,6 +879,9 @@ void app_radio_link_up(void)
 	/* A replay does not outlive its session: its frame waiting for the retry
 	 * would go out under the new one. The host asks again. */
 	hist_drop();
+	/* A frame waiting for its Ack retry goes afresh under the new session
+	 * (P2P: a new counter, never the old one under the new key). */
+	m_ack_pending = false;
 	link_clear();
 	m_link.reports = 0; /* the first report of the session is a link check */
 	atomic_clear(&m_link_forced);
@@ -958,6 +1080,7 @@ static void tlm_close(bool reset_snapshot)
 	}
 	m_tlm_open = false;
 	m_tlm_frame = false;
+	ack_release(APP_RADIO_FRAME_TELEMETRY);
 }
 
 /* Send the report frame by frame, composed at send time against the budget
@@ -990,7 +1113,9 @@ static void tlm_step(void)
 						    .buf = m_tlm_buf};
 			struct app_radio_tx_result res;
 
-			(void)m_be->send(&f, &res);
+			if (tx_send(&f, &res) == -EBUSY) {
+				return; /* kicked when the confirmed frame is done */
+			}
 			tlm_close(!m_tlm_first);
 			return;
 		}
@@ -1027,7 +1152,7 @@ static void tlm_step(void)
 		.buf = m_tlm_buf,
 	};
 	struct app_radio_tx_result res = {0};
-	int ret = m_be->send(&f, &res);
+	int ret = tx_send(&f, &res);
 
 	switch (ret) {
 	case 0:
@@ -1047,6 +1172,9 @@ static void tlm_step(void)
 	case -ENOTCONN:
 		LOG_WRN("Report abandoned: no session; snapshot reset");
 		tlm_close(true);
+		return;
+	case TX_ACK_RETRY:
+		tx_schedule(res.wait_ms);
 		return;
 	default:
 		if (++m_tlm_retries > TX_MAX_RETRIES) {
@@ -1130,6 +1258,12 @@ static uint32_t m_hist_end;
 static uint32_t m_hist_present; /* sensor mask, snapshot at the start */
 static uint32_t m_hist_interval;
 static uint8_t m_hist_retries; /* failed sends of the current frame (#89) */
+/* The frame built last: its length, record count and the cursor after it. A
+ * confirmed retry sends it again as built -- rebuilt, it could differ (an
+ * eviction, a DR change), and P2P resends it under the same counter. */
+static uint16_t m_hist_len;
+static uint16_t m_hist_n;
+static uint32_t m_hist_next;
 /* The encoded frame (version byte + Response) and its raw samples; static,
  * 512 B off the radio work queue stack. */
 static uint8_t m_hist_buf[APP_CMD_HISTORY_FRAME_BUF_SIZE];
@@ -1150,6 +1284,7 @@ static void hist_end(void)
 {
 	m_hist_active = false;
 	app_history_set_replay_active(false);
+	ack_release(APP_RADIO_FRAME_HISTORY);
 }
 
 /* The replay is over (done or given up): the telemetry it held may go, and
@@ -1247,32 +1382,34 @@ static void hist_work_handler(struct k_work *work)
 		return;
 	}
 
-	uint8_t budget = m_be->budget();
 	struct app_radio_frame f = {
 		.kind = APP_RADIO_FRAME_HISTORY,
-		.flags = (m_be->confirm_kinds & BIT(APP_RADIO_FRAME_HISTORY))
-				 ? APP_RADIO_FRAME_CONFIRMED
-				 : 0,
+		.flags = kind_confirmed(APP_RADIO_FRAME_HISTORY) ? APP_RADIO_FRAME_CONFIRMED : 0,
 		.buf = m_hist_buf,
 	};
-	uint32_t next = m_hist_cursor;
-	uint16_t n = 0;
 
-	/* Budget 0: pending LoRaWAN MAC answers fill the frame (H-1). The empty
-	 * frame lets the MAC drain them; the send answers -EAGAIN and the frame is
-	 * built again for the budget that comes back. */
-	if (budget > 0) {
+	if (!(m_ack_pending && m_ack_kind == APP_RADIO_FRAME_HISTORY)) {
+		uint8_t budget = m_be->budget();
 		size_t len = 0;
 
-		n = hist_build(budget, &len, &next);
-		if (n == 0) {
-			return;
+		m_hist_len = 0;
+		m_hist_n = 0;
+		m_hist_next = m_hist_cursor;
+		/* Budget 0: pending LoRaWAN MAC answers fill the frame (H-1). The
+		 * empty frame lets the MAC drain them; the send answers -EAGAIN and
+		 * the frame is built again for the budget that comes back. */
+		if (budget > 0) {
+			m_hist_n = hist_build(budget, &len, &m_hist_next);
+			if (m_hist_n == 0) {
+				return;
+			}
+			m_hist_len = (uint16_t)len;
 		}
-		f.len = (uint16_t)len;
 	}
+	f.len = m_hist_len;
 
 	struct app_radio_tx_result res = {0};
-	int ret = m_be->send(&f, &res);
+	int ret = tx_send(&f, &res);
 
 	if (ret == 0 && f.len == 0) {
 		ret = -EAGAIN; /* only the MAC flush went */
@@ -1285,6 +1422,9 @@ static void hist_work_handler(struct k_work *work)
 	case -ENOTCONN:
 		LOG_WRN("History replay aborted: no session");
 		hist_finish();
+		return;
+	case TX_ACK_RETRY:
+		k_work_reschedule_for_queue(app_radio_work_q(), &m_hist_work, K_MSEC(res.wait_ms));
 		return;
 	default:
 		/* Duty cycle, MAC busy, a budget that fell under the frame: the
@@ -1306,8 +1446,9 @@ static void hist_work_handler(struct k_work *work)
 	/* M-2: the replay holds telemetry back, so its frames prove the channel;
 	 * without this a long replay tripped the stale-uplink rejoin mid-stream. */
 	app_radio_note_uplink();
-	LOG_INF("History frame %u/%u sent (%u rec, %u B)", m_hist_idx + 1, m_hist_count, n, f.len);
-	m_hist_cursor = next;
+	LOG_INF("History frame %u/%u sent (%u rec, %u B)", m_hist_idx + 1, m_hist_count, m_hist_n,
+		f.len);
+	m_hist_cursor = m_hist_next;
 	m_hist_idx++;
 
 	/* The export skips to the next record in the window, so the frame
@@ -1409,6 +1550,7 @@ void app_radio_test_tx_reset(void)
 	m_tlm_open = false;
 	m_tlm_frame = false;
 	m_hist_active = false;
+	m_ack_pending = false;
 	m_ready_cb = NULL;
 }
 
@@ -1723,8 +1865,7 @@ static uint8_t m_post_cmd_deferrals;
 
 static bool answer_undelivered(void)
 {
-	return app_radio_tx_answer_pending() ||
-	       (m_be != NULL && m_be->in_flight != NULL && m_be->in_flight());
+	return app_radio_tx_answer_pending() || app_radio_ack_pending();
 }
 
 static void post_cmd_work_handler(struct k_work *work)

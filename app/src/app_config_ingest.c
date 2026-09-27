@@ -734,6 +734,12 @@ int app_config_apply_alarms(enum app_cmd_transport tp, const AppConfigMessage_Al
 			FAULT(20);
 		}
 	}
+	/* M-3: this field is not writable over vendor. */
+	if (src->has_radio_alarm_ack && (tp == APP_CMD_TRANSPORT_VENDOR)) {
+		FAULT_TRANSPORT(21);
+	} else if (src->has_radio_alarm_ack) {
+		config->radio_alarm_ack = src->radio_alarm_ack;
+	}
 	return ret;
 }
 
@@ -813,6 +819,10 @@ void app_config_fill_alarms(AppConfigMessage_Alarms *dst, const uint32_t *ids, s
 		dst->has_alarm_buzzer_mode = true;
 		dst->alarm_buzzer_mode =
 			(AppConfigMessage_Alarms_AlarmBuzzerMode)c->alarm_buzzer_mode;
+	}
+	if (requested(ids, n, 21)) {
+		dst->has_radio_alarm_ack = true;
+		dst->radio_alarm_ack = c->radio_alarm_ack;
 	}
 }
 

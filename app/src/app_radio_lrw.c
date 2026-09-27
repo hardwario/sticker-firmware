@@ -91,9 +91,14 @@ static int lrw_send(uint8_t port, uint8_t *data, uint8_t len, enum lorawan_messa
 	int ret = lorawan_send(port, data, len, type);
 
 	app_radio_air_end();
-	app_radio_count(ret == 0 ? APP_RADIO_CNT_TX : APP_RADIO_CNT_TX_ERR);
-	app_radio_note_send(ret == 0, ret == -ECONNREFUSED);
-	if (ret == 0) {
+
+	/* A confirmed uplink whose RX windows closed without the Ack went out all
+	 * the same (McpsConfirm RX2_TIMEOUT -> -ETIMEDOUT): app_radio retries it. */
+	bool sent = ret == 0 || (type == LORAWAN_MSG_CONFIRMED && ret == -ETIMEDOUT);
+
+	app_radio_count(sent ? APP_RADIO_CNT_TX : APP_RADIO_CNT_TX_ERR);
+	app_radio_note_send(sent, ret == -ECONNREFUSED);
+	if (sent) {
 		app_radio_set_duty_held(false);
 		publish_mac();
 	} else if (ret == -ECONNREFUSED) {
@@ -886,9 +891,21 @@ static int lrw_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 			(f->flags & APP_RADIO_FRAME_MORE) ? "more pending" : "last frame");
 	}
 
+	bool confirmed = (f->flags & APP_RADIO_FRAME_CONFIRMED) != 0;
+
 	ret = lrw_send(port, f->buf, (uint8_t)f->len,
-		       (f->flags & APP_RADIO_FRAME_CONFIRMED) ? LORAWAN_MSG_CONFIRMED
-							      : LORAWAN_MSG_UNCONFIRMED);
+		       confirmed ? LORAWAN_MSG_CONFIRMED : LORAWAN_MSG_UNCONFIRMED);
+	if (confirmed && ret == -ETIMEDOUT) {
+		/* Sent under a new FCnt on every attempt; the LC timer, if one
+		 * rode, runs as for any sent frame. */
+		LOG_WRN("Confirmed uplink on port %u unacknowledged (attempt %u)", port,
+			f->attempt);
+		if (with_link_check) {
+			k_timer_start(&m_lc_timeout_timer, K_SECONDS(LINK_CHECK_TIMEOUT_SEC),
+				      K_FOREVER);
+		}
+		return -ETIMEDOUT;
+	}
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lorawan_send", ret);
 		if (with_link_check) {
@@ -957,11 +974,12 @@ const struct app_radio_backend app_radio_lrw_backend = {
 	.get_state = app_radio_lrw_get_state,
 	.warning_step = lrw_backoff_step,
 	.rejoin = lrw_tx_rejoin,
-	.in_flight = NULL, /* lorawan_send() blocks for the whole confirmed exchange */
 	/* A DeviceTimeReq rides the next uplink; its answer raises
 	 * LORAWAN_TIME_UPDATED in downlink_callback(). */
 	.time_request = app_clock_force_resync,
-	.confirm_kinds = 0, /* unconfirmed: the link check is the liveness probe */
+	/* Unconfirmed: the link check is the liveness probe; alarms as
+	 * radio-alarm-ack says (app_radio). */
+	.confirm_kinds = 0,
 	.cmd_transport = APP_CMD_TRANSPORT_LRW,
 	.frame_gap_ms = FRAME_GAP_SEC * MSEC_PER_SEC,
 };

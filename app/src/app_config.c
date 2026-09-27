@@ -46,6 +46,7 @@ static const struct app_config m_app_config_defaults = {
 	.radio_link_check_interval = 5,
 	.radio_link_check_fail_rejoin = 5,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
+	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 868100000,
 	.p2p_spreading_factor = 7,
@@ -81,6 +82,7 @@ static struct app_config m_app_config = {
 	.radio_link_check_interval = 5,
 	.radio_link_check_fail_rejoin = 5,
 	.alarm_buzzer_mode = APP_CONFIG_ALARM_BUZZER_MODE_OFF,
+	.radio_alarm_ack = false,
 	.accel_motion_sensitivity = APP_CONFIG_MOTION_SENSITIVITY_OFF,
 	.p2p_frequency = 868100000,
 	.p2p_spreading_factor = 7,
@@ -203,6 +205,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
 	SETTINGS_SET("alarm-buzzer-mode", &m_app_config.alarm_buzzer_mode,
 		     sizeof(m_app_config.alarm_buzzer_mode));
+	SETTINGS_SET("radio-alarm-ack", &m_app_config.radio_alarm_ack,
+		     sizeof(m_app_config.radio_alarm_ack));
 	SETTINGS_SET("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		     sizeof(m_app_config.accel_motion_sensitivity));
 	SETTINGS_SET("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -452,6 +456,8 @@ static int h_export(int (*export_func)(const char *name, const void *val, size_t
 	EXPORT_FUNC("alarm-15", m_app_config.alarm_15, sizeof(m_app_config.alarm_15));
 	EXPORT_FUNC("alarm-buzzer-mode", &m_app_config.alarm_buzzer_mode,
 		    sizeof(m_app_config.alarm_buzzer_mode));
+	EXPORT_FUNC("radio-alarm-ack", &m_app_config.radio_alarm_ack,
+		    sizeof(m_app_config.radio_alarm_ack));
 	EXPORT_FUNC("accel-motion-sensitivity", &m_app_config.accel_motion_sensitivity,
 		    sizeof(m_app_config.accel_motion_sensitivity));
 	EXPORT_FUNC("sensor1-rom", m_app_config.sensor1_rom, sizeof(m_app_config.sensor1_rom));
@@ -966,6 +972,12 @@ static void print_alarm_buzzer_mode(const struct shell *shell)
 	shell_print(shell, SETTINGS_PFX " alarm-buzzer-mode %s", str);
 }
 
+static void print_radio_alarm_ack(const struct shell *shell)
+{
+	shell_print(shell, SETTINGS_PFX " radio-alarm-ack %s",
+		    m_app_config.radio_alarm_ack ? "true" : "false");
+}
+
 static void print_accel_motion_sensitivity(const struct shell *shell)
 {
 	const char *str;
@@ -1095,6 +1107,7 @@ static int cmd_show(const struct shell *shell, size_t argc, char **argv)
 	print_cap_w1_sensors(shell);
 	print_cap_accelerometer(shell);
 	print_alarm_buzzer_mode(shell);
+	print_radio_alarm_ack(shell);
 	print_accel_motion_sensitivity(shell);
 	print_sensor1_rom(shell);
 	print_sensor2_rom(shell);
@@ -1646,6 +1659,11 @@ static int cmd_alarm_buzzer_mode(const struct shell *shell, size_t argc, char **
 	return 0;
 }
 
+static int cmd_radio_alarm_ack(const struct shell *shell, size_t argc, char **argv)
+{
+	return cmd_bool(shell, argc, argv, &m_app_config.radio_alarm_ack, print_radio_alarm_ack);
+}
+
 static int cmd_accel_motion_sensitivity(const struct shell *shell, size_t argc, char **argv)
 {
 	if (argc == 1) {
@@ -1925,6 +1943,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(alarm-buzzer-mode, NULL,
 	              "Get/Set buzzer alarm indication mode: every non-off mode beeps immediately on each newly activated alarm, then repeats while any alarm stays active — once = no repeat, slow/normal/fast = every 120/30/10 s, continuous = back-to-back (reserved6/7 behave like normal). Requires cap_buzzer.",
 	              cmd_alarm_buzzer_mode, 1, 1),
+
+	SHELL_CMD_ARG(radio-alarm-ack, NULL,
+	              "Get/Set confirmed alarm uplinks, both radios (true/false): true = each alarm waits for the network's Ack and is sent again up to 3 times.",
+	              cmd_radio_alarm_ack, 1, 1),
 
 	SHELL_CMD_ARG(accel-motion-sensitivity, NULL,
 	              "Get/Set accelerometer motion detection sensitivity (off/low/medium/high).",

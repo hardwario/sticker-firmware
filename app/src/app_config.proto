@@ -134,6 +134,7 @@ message AppConfigMessage {
         optional bytes alarm_14 = 17;
         optional bytes alarm_15 = 18;
         optional AlarmBuzzerMode alarm_buzzer_mode = 20;
+        optional bool radio_alarm_ack = 21;
     }
 
     message P2P {

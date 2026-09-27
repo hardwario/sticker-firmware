@@ -218,7 +218,7 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 
 /* Link supervision (decision #22 §3.4) is app_radio's, one machine for both
  * radios (doc/plan/460 F2). A failed link check is a CONFIRMED frame with no
- * Ack (or 0x56) after its P2P_ACK_MAX_RETRIES retries; any authenticated
+ * Ack (or 0x56) after its APP_RADIO_ACK_MAX_RETRIES retries; any authenticated
  * downlink is a success. WARNING's rung here is the TX power: each failed
  * check steps it up towards p2p-tx-power (warning_tx_power_step()). A rejoin
  * is a self-healing re-join on the configured SF which, unlike the
@@ -290,41 +290,14 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  * P2P_ACK_TIME_LEN / P2P_ACK_BODY_MAX_LEN are in app_radio_p2p.h (shared with the
  * pure p2p_parse_ack_body() helper and tests/p2p_logic). */
 
-/* Unacknowledged uplinks retransmit the SAME counter (byte-identical frame)
- * up to this many times (§6) -- interpreted as retries AFTER the first send
- * (so up to 1 + P2P_ACK_MAX_RETRIES total transmissions), matching doc/p2p.md
- * §6's "retransmit ... up to 3 times". */
-#define P2P_ACK_MAX_RETRIES 3
+/* An unacknowledged confirmed uplink goes again under the SAME counter
+ * (byte-identical frame, §6): app_radio's confirmed ladder decides when and how
+ * often (doc/plan/460 §2.6, T2c), this module only resends. */
 
 /* RX1 window size when no longer downlink is announced (decision #22 §3.3, O7
  * interim): a 0x56 of up to this many bytes on the air may arrive in the RX1 of
  * any uplink. Covers the fully-extended Ack (24 B) too. */
 #define P2P_RX1_CMD_INTERIM_LEN 64
-
-/* Retry backoff (decision #22 §3.2, Hynek 2026-09-27): retry n (1-based) waits
- * a random 1..2^n s on top of any remaining duty-cycle block, like LoRaWAN's
- * ACK_TIMEOUT (2 +/- 1 s). The fixed ~2.3 s rhythm it replaces (1 s gap + RX1 +
- * 0..1 s) locked two nodes rebooted together ~1 s apart, each transmitting into
- * the other's RX1 until both gave up (F-P2P-4). */
-#define P2P_ACK_RETRY_BACKOFF_MIN_MS 1000
-
-/* HW-informed finding (#118 phase 2 HIL): under the OLD "block for air*99 ms
- * after every frame" model a single MAX-size telemetry frame blocked the
- * radio for ~227 s (240 B body, SF10/BW125 -- frame_toa_ms(255) ~=2296 ms);
- * a real SF10 send blocked ~39-45 s even for smaller frames. The token-bucket
- * governor (B2) replaces that fixed post-frame block, so a retry now waits
- * only until enough budget has re-accrued for ITS frame -- but the wait can
- * still be long once the bucket is drained, so the async design below still
- * matters. An earlier design capped how long a retry would wait for duty-cycle
- * clearance and gave up past the cap -- but any workable cap short enough to
- * be safe on a shared work queue is *always* shorter than a real SF10 duty-
- * cycle block, making "retry up to 3 times" silently never retry in
- * practice (found via HIL, not reasoning -- the whole point of testing on
- * real silicon). Fixed by making the wait itself ASYNCHRONOUS instead of
- * capped: schedule_ack_retry() reschedules a dedicated work item
- * (m_ack_retry_work) for whenever the duty cycle actually clears, however
- * long that is, rather than blocking the radio work queue with a k_sleep(). No cap
- * needed because nothing blocks while waiting -- see send_confirmed(). */
 
 static const struct device *const m_lora_dev = DEVICE_DT_GET(DT_ALIAS(lora0));
 
@@ -456,36 +429,13 @@ static bool m_downlink_pending;
  * the pre-D2 3/7-byte Ack body; both fall back to P2P_FRAME_MAX. */
 static uint8_t m_pending_frame_len;
 
-/* §6 Ack-retry state: a frame that was TRANSMITTED but not yet Acked,
- * awaiting an asynchronous retry once the duty cycle clears (see
- * schedule_ack_retry()). Distinct from a frame app_radio keeps while the duty
- * cycle blocks its first TX attempt; this one already went out at least once
- * and is waiting on a confirmation retry.
- *
- * A QUEUE, not a single slot (#118 phase 2 HIL finding): telemetry and the
- * alarm/response frames, and the history replay, can each have one frame
- * awaiting an Ack retry
- * at the same time (e.g. an alarm firing during the same window a telemetry
- * chunk went unacked) -- a single slot would silently drop whichever one
- * schedule_ack_retry() overwrote. Depth 3 covers telemetry + alarm +
- * response each having one in flight; the shared duty-cycle gate still only
- * lets one physical TX happen at a time, so ack_retry_work_handler() drains
- * this FIFO one entry per fire, re-queueing (to the tail, so multiple
- * pending frames get serviced round-robin, not starved) whichever one still
- * needs another attempt. */
-#define P2P_ACK_RETRY_QUEUE_DEPTH 3
-
-struct p2p_ack_retry_state {
-	uint8_t frame_type;
-	uint8_t body[P2P_MAX_BODY];
-	uint16_t body_len;
-	uint32_t counter;
-	int attempt; /* retries already sent; 0 on the first scheduled retry */
-};
-
-static struct k_work_delayable m_ack_retry_work;
-
-K_MSGQ_DEFINE(m_ack_retry_msgq, sizeof(struct p2p_ack_retry_state), P2P_ACK_RETRY_QUEUE_DEPTH, 4);
+/* §6: the counter of the confirmed uplink that went out without its Ack, for
+ * app_radio's retry of it (attempt > 0). Valid for this session only: under a
+ * new session_key the counter restarts at 0, so an old one resent would reuse a
+ * (key, nonce) pair once m_fcnt reaches it (review of #400, H1). Radio work
+ * queue only. */
+static uint32_t m_retry_counter;
+static bool m_retry_valid;
 
 #if defined(CONFIG_SHELL)
 struct p2p_rx_msg {
@@ -763,34 +713,13 @@ static int dnonce_persist(uint32_t v)
  * PAIRED. Resets the data-plane frame counter to 0 -- safe because
  * session_key is fresh (see derive_session_key()'s comment) and keeps the
  * on-air counter values small. */
-/* A new session_key restarts the counter at 0 (pairing_persist()), so an Ack
- * retry left over from the old session must never go out: its old counter
- * under the new key would reuse a (key, nonce) pair once m_fcnt reaches it, and
- * a central that accepted it would jump its high-water ahead (review of #400,
- * H1). Answers and alarms go back to the TX queue for a fresh counter under
- * the new session; a telemetry or history frame is dropped (the next report /
- * the replay's own retry covers it). Radio work queue only. */
-static void ack_retry_drop_old_session(void)
+/* A new session_key restarts the counter at 0 (pairing_persist()): the counter
+ * a retry waited for belongs to the old session and never goes out again.
+ * app_radio_link_up() starts that frame afresh -- an answer or an alarm under a
+ * new counter; a report or a replay does not outlive the session. */
+static void retry_drop_old_session(void)
 {
-	struct p2p_ack_retry_state st;
-
-	(void)k_work_cancel_delayable(&m_ack_retry_work);
-	while (k_msgq_get(&m_ack_retry_msgq, &st, K_NO_WAIT) == 0) {
-		bool alarm = st.frame_type == APP_RADIO_P2P_FRAME_ALARM;
-		bool keep = (alarm || st.frame_type == APP_RADIO_P2P_FRAME_RESPONSE) &&
-			    st.body_len <= APP_RADIO_TX_SLOT_SIZE;
-
-		if (keep &&
-		    app_radio_tx_queue(alarm ? APP_RADIO_FRAME_ALARM : APP_RADIO_FRAME_ANSWER,
-				       APP_RADIO_TAG_OTHER, 0, st.body, st.body_len) == 0) {
-			LOG_INF("Old-session uplink (type %u, counter %u) re-queued for the new "
-				"session",
-				st.frame_type, st.counter);
-		} else {
-			LOG_WRN("Old-session uplink (type %u, counter %u) dropped at re-join",
-				st.frame_type, st.counter);
-		}
-	}
+	m_retry_valid = false;
 }
 
 static int pairing_persist(uint32_t net_id, uint16_t dev_addr,
@@ -829,7 +758,7 @@ static int pairing_persist(uint32_t net_id, uint16_t dev_addr,
 	 * m_fcnt catches up to it. */
 	m_fcnt = 0;
 	(void)fcnt_reserve(P2P_FCNT_RESERVE);
-	ack_retry_drop_old_session();
+	retry_drop_old_session();
 	return 0;
 }
 
@@ -874,7 +803,7 @@ static int pairing_clear(void)
 	m_last_ack_valid = false;
 	m_downlink_pending = false;
 	m_pending_frame_len = 0;
-	k_msgq_purge(&m_ack_retry_msgq);
+	m_retry_valid = false;
 
 	return ret;
 }
@@ -1136,10 +1065,10 @@ P2P_TESTABLE void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t a
  * When blocked, the answer is the time until the OLDEST entry leaves the
  * window. That is a lower bound, not necessarily enough on its own -- freeing
  * one entry may still leave the sum too high -- but every caller re-checks
- * and reschedules (app_radio's TX scheduler, reschedule_ack_retry_work,
- * join_work_handler), so the wait converges instead of needing an exact
- * answer here. Returning the true wait would mean solving for the smallest
- * prefix of expiries that frees enough budget, for no behavioural gain. */
+ * and reschedules (app_radio's TX scheduler, join_work_handler), so the wait
+ * converges instead of needing an exact answer here. Returning the true wait
+ * would mean solving for the smallest prefix of expiries that frees enough
+ * budget, for no behavioural gain. */
 P2P_TESTABLE int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms)
 {
 	uint32_t now = (uint32_t)now_ms;
@@ -1532,14 +1461,6 @@ static bool warning_tx_power_step(void)
 	return true;
 }
 
-/* A link check failed: a confirmed frame got no Ack after all its retries.
- * app_radio counts it only while the session is up, so once a self-heal is
- * under way further give-ups do not re-trigger it. */
-static void note_uplink_cycle_failed(void)
-{
-	app_radio_link_result(false);
-}
-
 /* struct app_radio_backend.rejoin: the self-healing re-join (§7) on the slow
  * policy. Refused while unprovisioned: no JoinRequest can succeed under an
  * all-zero app_key (§4) or DevEUI (#417). */
@@ -1625,8 +1546,8 @@ static int build_frame(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, s
 
 /* Frame + encrypt + transmit one body under an EXPLICIT counter (no
  * fcnt_next() call) -- shared by the first send (tx_frame(), below, picks a
- * fresh counter) and a §6 Ack retry (send_confirmed(), which must resend a
- * byte-identical frame under the SAME counter: CCM under a fixed (key,
+ * fresh counter) and a §6 Ack retry (send_uplink() with attempt > 0, which
+ * must resend a byte-identical frame under the SAME counter: CCM under a fixed (key,
  * nonce, plaintext) is deterministic, so reusing the counter alone
  * reproduces the exact same ciphertext, no cached buffer needed). Caller
  * must have already checked the duty-cycle budget (duty_wait_ms_for). Returns
@@ -1711,10 +1632,6 @@ static int tx_frame_at(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, s
 static int tx_frame(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, size_t body_len,
 		    uint32_t *counter_out, int64_t *tx_end_ms)
 {
-	if (k_msgq_num_used_get(&m_ack_retry_msgq) > 0) {
-		return -EBUSY; /* one confirmed uplink in flight (F-P1-1) */
-	}
-
 	int64_t wait = duty_wait_ms_for(P2P_HDR_LEN + body_len + P2P_TAG_LEN);
 
 	if (wait > 0) {
@@ -1984,146 +1901,38 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	return true;
 }
 
-/* (Re)schedule m_ack_retry_work for whenever the duty cycle clears (plus
- * jitter), if the queue has anything pending -- a no-op otherwise. Called
- * after every enqueue/dequeue so the timer always reflects the current
- * queue state and duty-cycle estimate. The wait is sized for the frame at the
- * head of the queue (peeked, not dequeued). */
-/* The wait before the next retry of a frame that has had `attempt` retries (0
- * before the first): a random P2P_ACK_RETRY_BACKOFF_MIN_MS..2^(attempt+1) s, so
- * 1..2 s, 1..4 s, 1..8 s. Pure -- exposed to tests/p2p_logic. */
-P2P_TESTABLE uint32_t p2p_ack_retry_backoff_ms(int attempt, uint32_t rand32)
+/* One uplink and its RX1 (§6). `attempt` > 0: app_radio's retry of the
+ * confirmed frame that went out last without its Ack, resent under the same
+ * counter (a byte-identical frame, so the central's strict high-water holds,
+ * F-P1-1) -- or under a fresh one if the session changed meanwhile. Returns 0
+ * (sent; confirmed: acknowledged, or any authenticated downlink heard),
+ * -ETIMEDOUT (confirmed, no Ack in RX1), -EAGAIN (duty cycle), or errno. */
+static int send_uplink(uint8_t frame_type, const uint8_t *body, size_t body_len, bool confirmed,
+		       uint8_t attempt)
 {
-	int n = CLAMP(attempt + 1, 1, P2P_ACK_MAX_RETRIES);
-	uint32_t max_ms = (uint32_t)P2P_ACK_RETRY_BACKOFF_MIN_MS << n;
-
-	return P2P_ACK_RETRY_BACKOFF_MIN_MS + rand32 % (max_ms - P2P_ACK_RETRY_BACKOFF_MIN_MS);
-}
-
-static void reschedule_ack_retry_work(void)
-{
-	struct p2p_ack_retry_state head;
-
-	if (k_msgq_peek(&m_ack_retry_msgq, &head) != 0) {
-		return; /* queue empty */
-	}
-
-	int64_t wait_ms = duty_wait_ms_for(P2P_HDR_LEN + head.body_len + P2P_TAG_LEN);
-	uint32_t backoff = p2p_ack_retry_backoff_ms(head.attempt, sys_rand32_get());
-
-	k_work_reschedule_for_queue(app_radio_work_q(), &m_ack_retry_work,
-				    K_MSEC(wait_ms + backoff));
-}
-
-/* Queue an asynchronous Ack retry for `counter` (doc/p2p.md §6) -- NOT a
- * blocking wait, so no cap is needed (see the comment after
- * P2P_ACK_RETRY_BACKOFF_MIN_MS for why an earlier capped-sleep design was wrong).
- * `attempt` is how many retries have already been sent (0 for the first). */
-static void schedule_ack_retry(uint8_t frame_type, const uint8_t *body, size_t body_len,
-			       uint32_t counter, int attempt)
-{
-	struct p2p_ack_retry_state st = {
-		.frame_type = frame_type,
-		.body_len = (uint16_t)body_len,
-		.counter = counter,
-		.attempt = attempt,
-	};
-
-	memcpy(st.body, body, body_len);
-
-	if (k_msgq_put(&m_ack_retry_msgq, &st, K_NO_WAIT) != 0) {
-		LOG_WRN("Ack retry queue full; giving up on counter %u", counter);
-		app_radio_count(APP_RADIO_CNT_FAIL);
-		return;
-	}
-
-	reschedule_ack_retry_work();
-}
-
-static void ack_retry_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	struct p2p_ack_retry_state st;
-
-	if (k_msgq_peek(&m_ack_retry_msgq, &st) != 0) {
-		return; /* queue empty */
-	}
-
-	if (duty_wait_ms_for(P2P_HDR_LEN + st.body_len + P2P_TAG_LEN) > 0) {
-		reschedule_ack_retry_work();
-		return;
-	}
-
-	/* Committed to sending st now -- actually dequeue it (peek() above only
-	 * looked, so a still-blocked duty cycle above leaves it in place). */
-	(void)k_msgq_get(&m_ack_retry_msgq, &st, K_NO_WAIT);
-
-	int64_t tx_end;
-	int ret = tx_frame_at(st.frame_type, P2P_FCTRL_CONFIRMED, st.body, st.body_len, st.counter,
-			      &tx_end);
-
-	if (ret) {
-		LOG_WRN("Ack retry (counter %u) send failed: %d", st.counter, ret);
-	} else {
-		LOG_INF("Uplink retry %d/%d sent (counter %u)", st.attempt + 1, P2P_ACK_MAX_RETRIES,
-			st.counter);
-		app_radio_count(APP_RADIO_CNT_RETRY);
-
-		bool acked = recv_ack(st.counter, tx_end);
-
-		m_link_idle_at = k_uptime_get() + P2P_TX_GAP_MS;
-		if (acked) {
-			note_uplink_acked();
-		} else {
-			if (st.attempt + 1 < P2P_ACK_MAX_RETRIES) {
-				st.attempt++;
-				/* Re-queue at the TAIL (not retried in place): with more
-				 * than one frame pending, this services them round-robin
-				 * instead of one starving the others. */
-				if (k_msgq_put(&m_ack_retry_msgq, &st, K_NO_WAIT) != 0) {
-					LOG_WRN("Ack retry queue full re-queueing counter %u; "
-						"giving up",
-						st.counter);
-					note_uplink_cycle_failed();
-				}
-			} else {
-				LOG_WRN("Uplink counter %u unacked after %d retries; giving "
-					"up",
-					st.counter, P2P_ACK_MAX_RETRIES);
-				note_uplink_cycle_failed();
-			}
-		}
-	}
-
-	/* Whether this entry is done, gave up, or got re-queued, other frames
-	 * may still be waiting -- keep the timer aligned with the queue. */
-	reschedule_ack_retry_work();
-	if (k_msgq_num_used_get(&m_ack_retry_msgq) == 0) {
-		/* The in-flight uplink is done: the frames that bounced with -EBUSY
-		 * (the TX path, the history replay) go now. */
-		app_radio_tx_kick();
-	}
-}
-
-/* Confirmed uplink (§6): send one frame and wait once for its Ack. If
- * unacknowledged, hand off to schedule_ack_retry() instead of blocking here
- * -- returns 0 either way (the frame WAS transmitted; confirmation, if a
- * retry is needed, continues asynchronously on m_ack_retry_work). Callers
- * (the TX backend, the history replay) move on immediately rather than
- * waiting for the eventual outcome. Returns -EAGAIN only if the FIRST send
- * itself was duty-cycle blocked (unchanged pre-existing semantics, same as
- * tx_frame()), or a hard errno from that first send. */
-static int send_uplink(uint8_t frame_type, const uint8_t *body, size_t body_len, bool confirmed)
-{
+	bool resend = confirmed && attempt > 0 && m_retry_valid;
 	uint32_t counter;
 	int64_t tx_end;
+	int ret;
 
-	int ret = tx_frame(frame_type, confirmed ? P2P_FCTRL_CONFIRMED : 0, body, body_len,
-			   &counter, &tx_end);
-
+	if (resend) {
+		if (duty_wait_ms_for(P2P_HDR_LEN + body_len + P2P_TAG_LEN) > 0) {
+			app_radio_note_send(false, true);
+			return -EAGAIN;
+		}
+		counter = m_retry_counter;
+		ret = tx_frame_at(frame_type, P2P_FCTRL_CONFIRMED, body, body_len, counter,
+				  &tx_end);
+	} else {
+		ret = tx_frame(frame_type, confirmed ? P2P_FCTRL_CONFIRMED : 0, body, body_len,
+			       &counter, &tx_end);
+	}
 	if (ret) {
 		return ret;
+	}
+	if (resend) {
+		LOG_INF("Uplink retry %u/%d sent (counter %u)", attempt, APP_RADIO_ACK_MAX_RETRIES,
+			counter);
 	}
 
 	/* The RX1 opens after every uplink: an unconfirmed one gets no Ack, but a
@@ -2132,18 +1941,17 @@ static int send_uplink(uint8_t frame_type, const uint8_t *body, size_t body_len,
 
 	m_link_idle_at = k_uptime_get() + P2P_TX_GAP_MS;
 	if (heard) {
+		m_retry_valid = false;
 		note_uplink_acked(); /* any authenticated downlink is a link success */
-	} else if (confirmed) {
-		schedule_ack_retry(frame_type, body, body_len, counter, 0);
+		return 0;
+	}
+	if (confirmed) {
+		m_retry_counter = counter;
+		m_retry_valid = true;
+		return -ETIMEDOUT;
 	}
 	/* An unconfirmed frame is sent once (decision #22 §3.2, NbTrans 1). */
-
 	return 0;
-}
-
-static int send_confirmed(uint8_t frame_type, const uint8_t *body, size_t body_len)
-{
-	return send_uplink(frame_type, body, body_len, true);
 }
 
 /* Decision #22 §3.2: telemetry is unconfirmed and sent once, except a report
@@ -2192,7 +2000,8 @@ static int p2p_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 		return -EINVAL; /* no MAC to flush: the P2P budget is never 0 */
 	}
 
-	int ret = send_uplink(type, f->buf, f->len, (f->flags & APP_RADIO_FRAME_CONFIRMED) != 0);
+	int ret = send_uplink(type, f->buf, f->len, (f->flags & APP_RADIO_FRAME_CONFIRMED) != 0,
+			      f->attempt);
 
 	switch (ret) {
 	case 0:
@@ -2206,7 +2015,7 @@ static int p2p_tx_send(const struct app_radio_frame *f, struct app_radio_tx_resu
 		res->budget = P2P_MAX_BODY;
 		break;
 	default:
-		/* -EBUSY: a confirmed uplink is in flight or the radio listens
+		/* -ETIMEDOUT: no Ack (app_radio retries); -EBUSY: the radio listens
 		 * (kicked when it ends); -ENOTCONN: no session (kicked at the next
 		 * JoinAccept); other: a radio fault. */
 		break;
@@ -2225,13 +2034,6 @@ static uint8_t p2p_tx_report_flags(bool due)
 	return telemetry_report_confirmed(due) ? APP_RADIO_FRAME_CONFIRMED : 0;
 }
 
-/* struct app_radio_backend.in_flight: a transmitted confirmed frame still waits
- * for its Ack retries (m_ack_retry_msgq), so a post-command reboot waits too. */
-static bool p2p_tx_in_flight(void)
-{
-	return k_msgq_num_used_get(&m_ack_retry_msgq) > 0;
-}
-
 const struct app_radio_backend app_radio_p2p_backend = {
 	.send = p2p_tx_send,
 	.budget = p2p_tx_budget,
@@ -2240,12 +2042,10 @@ const struct app_radio_backend app_radio_p2p_backend = {
 	.get_state = app_radio_p2p_get_state,
 	.warning_step = warning_tx_power_step,
 	.rejoin = p2p_tx_rejoin,
-	.in_flight = p2p_tx_in_flight,
 	.time_request = p2p_time_request,
-	/* §6: answers, alarms and history frames are confirmed; telemetry only
-	 * the N-th report (report_flags). */
-	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_ALARM) |
-			 BIT(APP_RADIO_FRAME_HISTORY),
+	/* §6: answers and history frames are confirmed; telemetry only the N-th
+	 * report (report_flags); alarms as radio-alarm-ack says (app_radio). */
+	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_HISTORY),
 	.frame_gap_ms = 0, /* P2P_TX_GAP_MS after an Ack window is taken in tx_frame_at() */
 	.cmd_transport = APP_CMD_TRANSPORT_P2P,
 };
@@ -2734,7 +2534,6 @@ static void test_queue_start_once(void)
 		return;
 	}
 	k_work_init_delayable(&m_join_work, join_work_handler);
-	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
 	started = true;
 }
 
@@ -2821,37 +2620,14 @@ void p2p_test_set_paired(void)
 
 void p2p_test_tx_reset(void)
 {
-	k_work_cancel_delayable(&m_ack_retry_work);
-	k_msgq_purge(&m_ack_retry_msgq);
+	m_retry_valid = false;
 	m_link_idle_at = 0;
 }
 
-/* Stand in for a confirmed uplink whose Ack retry is still pending (F-P1-1). */
-void p2p_test_put_ack_retry(uint32_t counter)
-{
-	struct p2p_ack_retry_state st = {.counter = counter};
-
-	(void)k_msgq_put(&m_ack_retry_msgq, &st, K_NO_WAIT);
-}
-
-void p2p_test_put_ack_retry_frame(uint8_t type, const uint8_t *body, size_t len, uint32_t counter)
-{
-	struct p2p_ack_retry_state st = {
-		.frame_type = type, .body_len = (uint16_t)len, .counter = counter};
-
-	memcpy(st.body, body, len);
-	(void)k_msgq_put(&m_ack_retry_msgq, &st, K_NO_WAIT);
-}
-
-uint32_t p2p_test_ack_retry_count(void)
-{
-	return k_msgq_num_used_get(&m_ack_retry_msgq);
-}
-
-/* What pairing_persist() does to the retry queue when a session is replaced. */
+/* What pairing_persist() does to a pending retry when a session is replaced. */
 void p2p_test_drop_old_session(void)
 {
-	ack_retry_drop_old_session();
+	retry_drop_old_session();
 }
 
 /* Arm the join retry with a known delay, standing in for a slow-phase pass end
@@ -2964,7 +2740,6 @@ int app_radio_p2p_init(void)
 	}
 
 	k_work_init_delayable(&m_join_work, join_work_handler);
-	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
 	k_work_init(&m_debug_compose_work, debug_compose_work_handler);
@@ -3085,7 +2860,7 @@ void app_radio_p2p_get_info(struct app_radio_p2p_info *info)
 							 : (int8_t)g_app_config.p2p_tx_power;
 	info->fcnt = m_fcnt;
 	info->dev_nonce = m_dev_nonce;
-	info->ack_retry_pending = k_msgq_num_used_get(&m_ack_retry_msgq);
+	info->ack_retry_pending = app_radio_ack_pending() ? 1 : 0;
 	info->last_ack_rssi = m_last_ack_rssi;
 	info->last_ack_snr = m_last_ack_snr;
 	info->last_ack_valid = m_last_ack_valid;
