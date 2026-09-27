@@ -68,7 +68,7 @@ Taken after the LoRaWAN vs P2P code comparison of feat-p2p `f852668` + #457 + #4
 6. **Unify everything:** every policy that exists in both backends moves into `app_radio`. A backend keeps only what the medium forces (§2).
 7. **LoRaWAN keeps its rejoin on every boot.** The session is deliberately not kept across a reboot. Pulling the batteries is the field recovery for a broken link, and it must always end in a fresh join.
 8. **LoRaWAN gets duty-cycle tracking.** The exact sliding-hour ledger of P2P becomes common. LoRaWAN uses it to wait exactly until its frame fits, instead of the blind 8 × 15 s retries that end in an abandoned frame when the EU868 band credit is spent (DR0: ~50 min).
-9. **Confirmed alarms are a config option on both radios:** `radio-alarm-ack` (bool, default false). With false, alarm frames go unconfirmed, as LoRaWAN does today. On P2P this reverses decision #22 §3.2, where alarms are always confirmed. With true they go confirmed on both radios, through the common ACK retry ladder (decision 3).
+9. **Confirmed alarms are a config option on both radios:** `radio-alarm-ack` (bool, default false). With false, alarm frames go unconfirmed, as LoRaWAN does today. On P2P this reverses decision #22 §3.2, where alarms are always confirmed. With true they go confirmed on both radios, through the common ACK retry ladder (decision 3). The option is writable over shell, NFC and the radio itself (not the vendor channel).
 10. **Per-kind TX queues on both radios:** answers, alarms, telemetry and history each get their own queue and priority, as LoRaWAN has today. P2P shares one 2-slot queue for answers and alarms today.
 11. **Unchanged:** P2P stays EU868-only, and its session survives a reboot (the pairing is in NVS).
 
@@ -88,7 +88,7 @@ Taken after the LoRaWAN vs P2P code comparison of feat-p2p `f852668` + #457 + #4
 | T4 | Common downlink path: command dispatch and answer, the post-command executor (drain-wait on the common queues), the page stream, the history replay state machine (cursor, frame cap, retry, finish) and the deferred clock_sync Info. `radio` command allow-list; oversize → BUDGET_TOO_SMALL. | command parity |
 | T5 | Rejoin/reset API (NFC, cmd, settings, reset tiers); `p2p-*` readable in GetConfig/NFC; shell sub-commands only for the active backend. P2P suspend stops its timers. The `ats radio rx1_delay` shell setter gets the JoinAccept guard of 1..15 s. | reset tiers, config, shell |
 
-Each step is a PR into feat-p2p with native_sim tests of the moved logic (a fake backend) and HIL on both radios before its merge. The backends shrink with each step; T2b–T4 are expected to remove ~800–1200 lines.
+T2b, T2c, T2d, T3 and T4 are implemented together in #460 (decision #23, one implementation per function), planned in `460 - One implementation per function in app_radio.md`. Each step is a PR into feat-p2p with native_sim tests of the moved logic (a fake backend) and HIL on both radios before its merge. The backends shrink with each step; T2b–T4 are expected to remove ~800–1200 lines.
 
 In parallel, outside the refactor (bench findings from 2026-09-26):
 - F-P2P-3: `SX126xWaitOnBusy()` has no timeout. A hang after an RX timeout mid-packet was reproduced on hardware. The bug is in the Zephyr driver, so it also affects LoRaWAN.
