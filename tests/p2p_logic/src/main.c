@@ -1138,6 +1138,31 @@ ZTEST(p2p_logic, test_frames_queued_while_unpaired_are_kept)
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
 }
 
+/* Review of #400 (H1): a new session restarts the counter at 0 under a new key,
+ * so an Ack retry of the old session must never go out with its old counter.
+ * The alarm goes back to the TX queue for a fresh counter; the telemetry frame
+ * is dropped (the next report covers it). */
+ZTEST(p2p_logic, test_new_session_drops_old_ack_retries)
+{
+	const uint8_t body[] = {0x01, 0x0a, 0x00};
+
+	p2p_test_join_setup(7);
+	p2p_test_tx_reset();
+	p2p_test_set_link(P2P_LINK_JOINING, true, false, 0, false); /* tx_work parks */
+	p2p_test_put_ack_retry_frame(APP_RADIO_P2P_FRAME_TELEMETRY, body, sizeof(body), 5000);
+	p2p_test_put_ack_retry_frame(APP_RADIO_P2P_FRAME_ALARM, body, sizeof(body), 5001);
+
+	p2p_test_drop_old_session();
+	k_sleep(K_MSEC(50));
+
+	zassert_equal(p2p_test_ack_retry_count(), 0, "no old-session retry may remain");
+	zassert_equal(p2p_test_tx_waiting(), 1, "the alarm waits for a fresh counter (%u)",
+		      p2p_test_tx_waiting());
+
+	p2p_test_tx_reset();
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
+}
+
 /* Queued answers and alarms leave before telemetry, as with LoRaWAN's priority
  * drain: after a link-up the Info and settings-info stay ahead of the first
  * report even when one of them waits for a retry (#452, boot order). */

@@ -840,6 +840,36 @@ static void dnonce_persist(uint32_t v)
  * PAIRED. Resets the data-plane frame counter to 0 -- safe because
  * session_key is fresh (see derive_session_key()'s comment) and keeps the
  * on-air counter values small. */
+static int queue_frame(uint8_t type, const uint8_t *buf, size_t len);
+
+/* A new session_key restarts the counter at 0 (pairing_persist()), so an Ack
+ * retry left over from the old session must never go out: its old counter
+ * under the new key would reuse a (key, nonce) pair once m_fcnt reaches it, and
+ * a central that accepted it would jump its high-water ahead (review of #400,
+ * H1). Answers and alarms go back to the TX queue for a fresh counter under
+ * the new session; a telemetry or history frame is dropped (the next report /
+ * the replay's own retry covers it). m_work_q only. */
+static void ack_retry_drop_old_session(void)
+{
+	struct p2p_ack_retry_state st;
+
+	(void)k_work_cancel_delayable(&m_ack_retry_work);
+	while (k_msgq_get(&m_ack_retry_msgq, &st, K_NO_WAIT) == 0) {
+		bool keep = (st.frame_type == APP_RADIO_P2P_FRAME_RESPONSE ||
+			     st.frame_type == APP_RADIO_P2P_FRAME_ALARM) &&
+			    st.body_len <= P2P_TX_BUF_SIZE;
+
+		if (keep && queue_frame(st.frame_type, st.body, st.body_len) == 0) {
+			LOG_INF("Old-session uplink (type %u, counter %u) re-queued for the new "
+				"session",
+				st.frame_type, st.counter);
+		} else {
+			LOG_WRN("Old-session uplink (type %u, counter %u) dropped at re-join",
+				st.frame_type, st.counter);
+		}
+	}
+}
+
 static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
 			    const uint8_t session_key[P2P_KEY_LEN], uint8_t rx1_delay_s,
 			    const struct p2p_radio_assign *assign)
@@ -874,6 +904,7 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
 	 * m_fcnt catches up to it. */
 	m_fcnt = 0;
 	(void)fcnt_reserve(P2P_FCNT_RESERVE);
+	ack_retry_drop_old_session();
 }
 
 /* Tear the pairing down: drop the persisted session and return the module to
@@ -3331,6 +3362,26 @@ void p2p_test_put_ack_retry(uint32_t counter)
 	struct p2p_ack_retry_state st = {.counter = counter};
 
 	(void)k_msgq_put(&m_ack_retry_msgq, &st, K_NO_WAIT);
+}
+
+void p2p_test_put_ack_retry_frame(uint8_t type, const uint8_t *body, size_t len, uint32_t counter)
+{
+	struct p2p_ack_retry_state st = {
+		.frame_type = type, .body_len = (uint16_t)len, .counter = counter};
+
+	memcpy(st.body, body, len);
+	(void)k_msgq_put(&m_ack_retry_msgq, &st, K_NO_WAIT);
+}
+
+uint32_t p2p_test_ack_retry_count(void)
+{
+	return k_msgq_num_used_get(&m_ack_retry_msgq);
+}
+
+/* What pairing_persist() does to the retry queue when a session is replaced. */
+void p2p_test_drop_old_session(void)
+{
+	ack_retry_drop_old_session();
 }
 
 /* Arm the join retry with a known delay, standing in for a slow-phase pass end
