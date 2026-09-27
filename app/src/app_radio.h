@@ -256,8 +256,10 @@ void app_radio_suspend(void);
 /* ---- Boot/join announce (#412, #409 A5a, #425; doc/plan/439 T3) ----------
  * One path for both radios. When the link comes up (LoRaWAN join, P2P paired
  * at boot or by a JoinAccept) the backend calls app_radio_announce(); app_radio
- * then sends the Info (seq 0) followed by the settings-info ConfigDump, each
- * paged for the current budget. A frame that does not fit yet, or that waits
+ * then sends -- after a random spread of up to min(interval_report / 2, 30 s),
+ * so that nodes rebooted together do not all transmit at once -- the Info
+ * (seq 0) followed by the settings-info ConfigDump, each paged for the
+ * current budget. A frame that does not fit yet, or that waits
  * for a running page stream, stays pending and goes out on a later
  * app_radio_announce_run(): the backend runs it on its work queue whenever
  * room may have appeared (link up, DR rise, page stream end, queue space). */

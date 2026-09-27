@@ -32,6 +32,9 @@ LOG_MODULE_REGISTER(app_radio, LOG_LEVEL_INF);
 
 static struct k_work_delayable m_jitter_work;
 static void jitter_work_handler(struct k_work *work);
+/* The boot/join announce waits out the same fleet jitter (below). */
+static struct k_work_delayable m_announce_jitter_work;
+static void announce_jitter_work_handler(struct k_work *work);
 
 /* Kept out of a static entirely when CONFIG_RADIO_P2P=n: with P2P not even
  * compiled in, the radio is always running LoRaWAN by construction (radio_mode's
@@ -50,6 +53,7 @@ static inline bool is_p2p(void)
 int app_radio_init(void)
 {
 	k_work_init_delayable(&m_jitter_work, jitter_work_handler);
+	k_work_init_delayable(&m_announce_jitter_work, announce_jitter_work_handler);
 
 #if defined(CONFIG_RADIO_P2P)
 	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_P2P) {
@@ -324,14 +328,33 @@ static void jitter_work_handler(struct k_work *work)
 #endif
 }
 
-void app_radio_send_telemetry(void)
+/* A random delay of up to min(interval_report / 10, TX_JITTER_MAX_SEC). */
+static uint32_t fleet_jitter_ms(void)
 {
 	uint32_t span_ms = (uint32_t)g_app_config.interval_report * 100U; /* interval/10 */
 
 	span_ms = MIN(span_ms, (uint32_t)TX_JITTER_MAX_SEC * 1000U);
-	uint32_t delay_ms = span_ms ? (sys_rand32_get() % span_ms) : 0U;
+	return span_ms ? (sys_rand32_get() % span_ms) : 0U;
+}
 
-	k_work_reschedule(&m_jitter_work, K_MSEC(delay_ms));
+void app_radio_send_telemetry(void)
+{
+	k_work_reschedule(&m_jitter_work, K_MSEC(fleet_jitter_ms()));
+}
+
+/* The boot/join announce is a burst (Info + settings-info pages + the first
+ * telemetry, ~4 frames / ~5 s on P2P), so it spreads wider than one uplink:
+ * up to min(interval_report / 2, ANNOUNCE_JITTER_MAX_SEC). The 6 s of the
+ * telemetry jitter at a 60 s interval still let two Nodes rebooted together
+ * overlap and starve each other's retries (F-P2P-4, 2026-09-27). */
+#define ANNOUNCE_JITTER_MAX_SEC 30
+
+static uint32_t announce_jitter_ms(void)
+{
+	uint32_t span_ms = (uint32_t)g_app_config.interval_report * 500U; /* interval/2 */
+
+	span_ms = MIN(span_ms, (uint32_t)ANNOUNCE_JITTER_MAX_SEC * 1000U);
+	return span_ms ? (sys_rand32_get() % span_ms) : 0U;
 }
 
 void app_radio_send_telemetry_now(void)
@@ -416,6 +439,9 @@ void app_radio_suspend(void)
 #define ANNOUNCE_BUF_SIZE 64
 
 static atomic_t m_announce;
+/* Uptime (ms, truncated to 32 bits) before which the announce does not start:
+ * the fleet jitter of app_radio_announce(). */
+static atomic_t m_announce_not_before;
 
 /* Have the backend call app_radio_announce_run() on its work queue. */
 static void announce_kick(void)
@@ -504,10 +530,23 @@ static int announce_frame(bool settings, uint32_t seq)
 	return 0;
 }
 
+static void announce_jitter_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	announce_kick();
+}
+
 void app_radio_announce(void)
 {
+	/* Fleet de-correlation for the announce too: nodes rebooted by one batch
+	 * of commands, or by a power outage, would otherwise all send their Info +
+	 * settings-info at the same moment and collide on the channel (Northbridge
+	 * "Busy", P2P 2026-09-27). */
+	uint32_t delay_ms = announce_jitter_ms();
+
+	atomic_set(&m_announce_not_before, (atomic_val_t)((uint32_t)k_uptime_get() + delay_ms));
 	atomic_or(&m_announce, ANNOUNCE_INFO | ANNOUNCE_SETTINGS);
-	announce_kick();
+	k_work_reschedule(&m_announce_jitter_work, K_MSEC(delay_ms));
 }
 
 bool app_radio_announce_pending(void)
@@ -526,6 +565,10 @@ bool app_radio_announce_run(void)
 
 	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
 		return false; /* the next link-up re-announces from scratch */
+	}
+	if ((int32_t)((uint32_t)atomic_get(&m_announce_not_before) - (uint32_t)k_uptime_get()) >
+	    0) {
+		return true; /* still in the fleet jitter; its work item kicks us */
 	}
 	if (app_cmd_stream_active()) {
 		return true; /* run again when the running page stream ends */
