@@ -48,19 +48,19 @@ Everything stays in the three existing files (decision 4 of plan 439: no helper 
 
 ### 2.1 Backend ops
 
-A small const struct, selected once at `app_radio_init()` from `radio-mode`:
+A small const struct, selected once at `app_radio_init()` from `radio-mode`. F4 brings the TX part; F2, T2c and T2d add their ops (`request_check`, `warning_step`, `rejoin`, `airtime_ms`) when they land:
 
 ```c
 struct app_radio_backend {
-	int (*send)(const struct app_radio_frame *f, uint8_t attempt,
-		    struct app_radio_tx_result *res);    /* blocking, radio WQ */
-	size_t (*budget)(void);                          /* current max payload */
-	uint32_t (*min_gap_ms)(void);                    /* LRW 3 s, P2P 1 s */
-	void (*request_check)(void);                     /* LinkCheckReq / FCtrl CONFIRMED */
-	void (*warning_step)(void);                      /* #424 ladder / +2 dB */
-	int (*rejoin)(bool slow);                        /* -ENOTSUP for ABP */
-	uint32_t (*airtime_ms)(size_t len);              /* T2d */
-	/* existing: init, start, suspend, get_state, reset_link, ... */
+	int (*send)(const struct app_radio_frame *f,
+		    struct app_radio_tx_result *res); /* blocking, radio WQ */
+	uint8_t (*budget)(void);        /* payload budget of the next uplink, 0 = none now */
+	bool (*tx_ready)(void);         /* the link carries uplinks now */
+	uint8_t (*report_flags)(void);  /* a report starts: CONFIRMED / LINK_CHECK */
+	void (*report_done)(void);      /* the last frame of a report left */
+	bool (*replay_active)(void);    /* a history replay owns the radio */
+	uint8_t confirm_kinds;          /* kinds sent confirmed: LRW none, P2P answer/alarm/history */
+	uint16_t frame_gap_ms;          /* between the frames of a report: LRW 3 s, P2P 0 */
 };
 ```
 
@@ -68,32 +68,38 @@ struct app_radio_backend {
 
 | Result | Meaning | Common reaction |
 |---|---|---|
-| `0` | transmitted; `res->acked` for a confirmed frame | dequeue; ACK ladder when confirmed and not acked |
-| `-EAGAIN` + `res->wait_ms` | duty-blocked or the medium is busy with its own traffic (the LoRaWAN MAC-flush uplink) | keep the frame and retry at `wait_ms`; a MAC flush does not count as a retry |
-| `-EBUSY` | a confirmed frame is in flight | park; kicked when it ends |
-| `-ENOTCONN` | not joined / not paired | park, don't count; kicked on the `joined` event |
-| `-EMSGSIZE` | over the current budget | over-budget recovery by kind (§2.3) |
-| other | I/O error | retry after 15 s, counted |
+| `0` | transmitted | the next frame; `report_done()` after the last frame of a report |
+| `-EAGAIN` + `res->wait_ms` | duty-held, or LoRaWAN sent a MAC flush instead (`-ECONNREFUSED`, budget 0) | resend at `wait_ms` (0 = 15 s). Not counted for an answer or alarm, which waits as long as the hold lasts; counted for telemetry, whose data ages |
+| `-EBUSY` | a confirmed uplink is in flight (P2P ack retry, listen window) | park; the backend kicks `app_radio_tx_kick()` when it ends |
+| `-ENOTCONN` | not joined / not paired | park, don't count; kicked on link-up. Telemetry abandons the report (snapshot reset) |
+| `-EMSGSIZE` + `res->budget` | over the current budget | over-budget recovery by kind (§2.3); a telemetry frame is dropped and the report goes on (M-10) |
+| other | radio / MAC error | retry after 15 s, counted in `RETRY`; dropped after 8 retries |
+
+Each refused send is counted in `TX_ERR` by the backend. A kick never cuts short a wait that is already scheduled (retry, duty hold, frame gap).
 
 A backend reports upward through events: `joined`, `join_failed`, `link_result(ok)`, `downlink(bytes, rssi, snr)` and `time(unix)`. They are all called on the radio work queue.
 
 ### 2.2 Frames and queues (F4 = T2b)
 
 ```c
-enum app_radio_kind { ANSWER, ALARM, TELEMETRY, HISTORY };
-struct app_radio_frame { uint8_t kind, tag, port; bool confirmed; uint16_t len; uint8_t buf[64]; };
+enum app_radio_frame_kind { ANSWER, ALARM, TELEMETRY, HISTORY };  /* app_radio_kind is LoRaWAN/P2P */
+struct app_radio_frame { uint8_t kind, tag, port, flags; uint16_t len; uint8_t *buf; };
+/* flags: CONFIRMED (P2P FCtrl), LINK_CHECK (LoRaWAN LinkCheckReq), MORE (report frames follow) */
 ```
 
-- `tag` is OTHER / INFO / SETTINGS, and it drives the announce recovery. `port` is the LoRaWAN fPort. P2P maps each kind to its frame type.
-- **Queues:** answers 4, alarms 4 (decision 10: "4+4"). Answers go before alarms.
-- **Telemetry** stays a coalescing flag (#340 M5), composed at send time with the backend budget.
-- **History** is the replay state machine (§2.5). It owns the radio while it runs, but it never holds answers or alarms.
-- **One scheduler work item** decides the order: answer > alarm > history > telemetry. The telemetry gate is kept while a replay or an announce is open.
-- **Refused-frame rule:** at most 8 counted retries. After that the frame is abandoned. An abandoned telemetry frame always calls `app_compose_reset()`. An abandoned answer or alarm is logged and counted in `TX_ERR`.
+- `tag` is OTHER / CMD_RESPONSE / INFO / SETTINGS, and it drives the over-budget recovery. `port` is the LoRaWAN fPort of an answer (0 = the command port). P2P maps each kind to its frame type.
+- **Queues:** answers 4, alarms 4, 64 B slots (decision 10: "4+4"), in `app_radio.c`. The frame being sent is taken off its queue and kept until it left or was given up, so a retry keeps the order. A page stream leaves two answer slots free.
+- **Telemetry** stays a coalescing request (#340 M5): requests before the report left fold into it; a request that arrives while a report is on the air is a new report after it. It is composed frame by frame at send time against the budget of that moment; `report_flags()` is asked once per report, and the link check rides the first frame only (#188).
+- **Budget 0** (pending LoRaWAN MAC answers fill the frame, H-1): an empty telemetry frame flushes the MAC; mid-report the report ends with a snapshot reset.
+- **History** stays the backends' replay state machine until F3 (§2.5). It holds telemetry while it runs, never answers or alarms.
+- **One scheduler work item** on the radio work queue sends one frame per run: the frame a retry waits for, then answer > alarm > telemetry (> history after F3). The first report after a link-up therefore follows the Info, settings-info and held alarms on either radio.
+- **Refused-frame rule:** at most 8 counted retries, 15 s apart. After that the frame is abandoned; an abandoned telemetry frame always calls `app_compose_reset()`.
   - This fixes the P2P drop on a hard error, and P2P's missing `app_compose_reset()`.
-- **Parking:** frames wait while the radio is not connected. They are not dropped, which fixes the P2P drop while unpaired.
+  - LoRaWAN no longer requeues a failing answer at the tail of its queue forever.
+- **Parking:** frames wait while the radio is not connected. They are not dropped, which fixes the P2P drop while unpaired; `pairing_clear` purges only the P2P ack-retry queue. A link lost mid-report abandons that report with a snapshot reset (#93.5).
+- **seq_release** (the boot/join hold of #452) no longer waits for the backend to go idle: the held alarms and the first report are queued behind the announce frames and the scheduler order keeps them there.
 
-P2P loses `m_tx_msgq`, `m_tx_deferred` and the telemetry wait-for-queue logic. LoRaWAN loses `m_response_msgq`, `m_alarm_msgq`, `send_work_handler` and `tx_send_queued`. The downlink queue stays in the LoRaWAN backend, because P2P receives inside `send()`.
+P2P loses `m_tx_msgq`, `m_tx_deferred`, its frame retry state and the telemetry wait-for-queue logic. LoRaWAN loses `m_response_msgq`, `m_alarm_msgq`, `send_work_handler`, `tx_send_queued` and its frame/telemetry work items. The downlink queue stays in the LoRaWAN backend, because P2P receives inside `send()`.
 
 ### 2.3 Over-budget recovery (common)
 
@@ -160,8 +166,8 @@ On P2P the budget is fixed, so these paths are dead but harmless.
 - **New native suite `tests/radio_common`:**
   - It compiles `app_radio.c` with a fake backend that implements the ops struct.
   - There are two backend profiles:
-    - LoRaWAN-like: DR-driven budget, 3 s gap, unconfirmed by default, ABP option.
-    - P2P-like: 64 B, 1 s gap, confirmed via ack.
+    - LoRaWAN-like: 51 B budget (DR-driven in the scenarios that need it), 3 s gap between report frames, nothing confirmed.
+    - P2P-like: 239 B budget (`P2P_MAX_BODY`), no frame gap, answers/alarms/history confirmed.
   - Every scenario runs once per profile.
 - **Scenarios:**
   - priority answer > alarm > history > telemetry;
