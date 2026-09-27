@@ -12,6 +12,7 @@
 
 #include "app_ccm.h"
 #include "app_config.h"
+#include "app_radio.h"
 #include "app_radio_p2p.h"
 
 extern uint16_t test_history_frame_count;
@@ -23,6 +24,9 @@ extern int g_test_saved_sf;
 extern int g_test_save_sf_calls;
 extern int test_save_sf_ret;
 extern int test_lora_send_ret;
+extern int p2p_test_send_info_calls;
+extern uint32_t p2p_test_send_info_seq;
+extern uint32_t g_test_network_time;
 
 #include <zephyr/ztest.h>
 #include <zephyr/sys/byteorder.h>
@@ -1162,6 +1166,7 @@ ZTEST(p2p_logic, test_clock_sync_forces_no_uplink)
 	app_radio_p2p_clock_sync(17);
 	k_sleep(K_MSEC(50)); /* a forced send would run on m_work_q by now */
 	zassert_equal(g_compose_budget_calls, calls, "clock_sync must not compose an uplink");
+	p2p_test_link_reset(); /* the pending clock_sync would confirm later reports */
 }
 
 /* LoRaWAN parity: a response / alarm queued while the node is not paired
@@ -1891,6 +1896,86 @@ ZTEST(p2p_logic, test_every_report_is_confirmed_in_warning)
 	test_compose_len = 0;
 	p2p_test_link_reset();
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
+}
+
+/* PF-1: one link-check cadence for both radios -- reports #1, #N+1, #2N+1, ...
+ * (report_idx counts from 0), none with N = 0, and every report in WARNING. */
+ZTEST(p2p_logic, test_link_check_due_rule)
+{
+	for (uint32_t i = 0; i < 12; i++) {
+		zassert_equal(app_radio_link_check_due(i, 5, false), (i % 5) == 0, "N = 5, idx %u",
+			      i);
+		zassert_true(app_radio_link_check_due(i, 1, false), "N = 1, idx %u", i);
+		zassert_false(app_radio_link_check_due(i, 0, false), "N = 0, idx %u", i);
+		zassert_false(app_radio_link_check_due(i, -1, false), "N < 0, idx %u", i);
+		zassert_true(app_radio_link_check_due(i, 0, true), "WARNING, N = 0, idx %u", i);
+		zassert_true(app_radio_link_check_due(i, 5, true), "WARNING, N = 5, idx %u", i);
+	}
+}
+
+/* An Ack of the given shape, as p2p_parse_ack_body() would leave it. */
+static void apply_ack(bool with_time, uint32_t unix_time)
+{
+	struct p2p_ack_info ack = {
+		.rssi = -60, .snr = 7, .time_present = with_time, .unix_time = unix_time};
+
+	p2p_apply_ack(&ack, 1, -70, 5);
+}
+
+/* PF-2: a pending clock_sync makes the next reports CONFIRMED so an Ack (and
+ * its time tail) comes back even with the periodic check off -- at most
+ * P2P_CLOCK_SYNC_REPORTS_MAX (3) of them, then the node stops paying for it. */
+ZTEST(p2p_logic, test_clock_sync_confirms_at_most_three_reports)
+{
+	p2p_test_join_setup(7);
+	p2p_test_set_paired();
+	p2p_test_tx_reset();
+	p2p_test_link_reset();
+	test_compose_len = 10;
+	g_app_config.radio_link_check_interval = 0;
+
+	app_radio_p2p_clock_sync(21);
+	for (int i = 0; i < 3; i++) {
+		zassert_true(send_report_confirmed(), "clock_sync report %d", i);
+	}
+	zassert_false(send_report_confirmed(), "the 4th report is back to the cadence");
+
+	/* A time tail still answers it, and ends the forcing. */
+	int calls = p2p_test_send_info_calls;
+
+	apply_ack(true, 1790000000u);
+	zassert_equal(p2p_test_send_info_calls, calls + 1, "the Info answers the clock_sync");
+	zassert_equal(p2p_test_send_info_seq, 21u);
+
+	g_app_config.radio_link_check_interval = 5;
+	test_compose_len = 0;
+	p2p_test_link_reset();
+	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, 0, false);
+}
+
+/* PF-2: the clock_sync Info goes only once the network time came -- an Ack
+ * without the time tail leaves it pending; the first tail answers it once,
+ * with the command's seq. */
+ZTEST(p2p_logic, test_clock_sync_answered_only_with_the_time_tail)
+{
+	int calls = p2p_test_send_info_calls;
+
+	g_test_network_time = 0;
+	app_radio_p2p_clock_sync(33);
+
+	apply_ack(false, 0);
+	zassert_equal(p2p_test_send_info_calls, calls, "no time tail, no answer");
+	zassert_equal(g_test_network_time, 0u);
+
+	apply_ack(true, 1790000100u);
+	zassert_equal(p2p_test_send_info_calls, calls + 1, "the time tail answers it");
+	zassert_equal(p2p_test_send_info_seq, 33u);
+	zassert_equal(g_test_network_time, 1790000100u, "the tail sets the clock");
+
+	apply_ack(true, 1790000200u);
+	zassert_equal(p2p_test_send_info_calls, calls + 1, "answered once");
+	zassert_equal(g_test_network_time, 1790000200u, "later tails still set the clock");
+	p2p_test_link_reset();
 }
 
 /* §3.4: 3 failed link checks -> WARNING (session kept); any authenticated

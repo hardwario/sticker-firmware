@@ -1331,9 +1331,9 @@ static bool should_request_link_check(void)
 	 * recovery-ladder rung (lrw_backoff_step) and counts towards the rejoin
 	 * budget (#424). Reports #1, #N+1, #2N+1 ...; before, LoRaWAN checked
 	 * #1, #N, #2N and P2P #1, #N+1, #2N+1. */
-	return app_radio_link_check_due(
-		(uint32_t)m_message_count, interval,
-		(enum app_radio_state)atomic_get(&m_state) == APP_RADIO_STATE_WARNING);
+	return app_radio_link_check_due((uint32_t)m_message_count, interval,
+					(enum app_radio_state)atomic_get(&m_state) ==
+						APP_RADIO_STATE_WARNING);
 }
 
 /* Send one telemetry frame on fPort 2. */

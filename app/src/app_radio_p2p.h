@@ -450,6 +450,7 @@ int64_t p2p_join_slow_jitter_ms(int64_t wait_ms, int64_t duty_wait_ms, uint32_t 
 				uint32_t rand32);
 uint32_t p2p_ack_retry_backoff_ms(int attempt, uint32_t rand32);
 bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
+void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter, int16_t rssi, int8_t snr);
 void p2p_parse_join_accept_reserved(const uint8_t reserved[4], struct p2p_radio_assign *out);
 size_t p2p_history_frame_cap(void);
 int p2p_join_adopt_sf(uint8_t joined_sf);

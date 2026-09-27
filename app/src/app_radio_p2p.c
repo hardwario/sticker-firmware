@@ -2084,6 +2084,62 @@ static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
 #endif /* defined(CONFIG_INIT_STACKS) && defined(CONFIG_THREAD_STACK_INFO) */
 }
 
+/* Report the node-measured quality of an authenticated downlink to app_radio
+ * (RadioState, #446). */
+static void note_downlink(int16_t rssi, int8_t snr)
+{
+	app_radio_note_downlink(rssi, snr);
+}
+
+/* Apply an authenticated, parsed Ack of this uplink's window: the central's
+ * uplink RSSI/SNR, the pending-downlink flag and the time tail. Split out of
+ * recv_ack() so tests/p2p_logic can drive it without CCM framing. */
+P2P_TESTABLE void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter, int16_t rssi,
+				int8_t snr)
+{
+	/* B1: the RSSI/SNR the central measured on this uplink. */
+	m_last_ack_rssi = ack->rssi;
+	m_last_ack_snr = ack->snr;
+	m_last_ack_valid = true;
+	app_radio_set_uplink_rssi(ack->rssi, ack->snr);
+	note_downlink(rssi, snr);
+
+	/* B4/D2: remember whether -- and how large -- to size the NEXT uplink's
+	 * window. Clamp defensively: a corrupt-but-authentic byte below a bare
+	 * header+tag or above the PHY limit would otherwise produce a window
+	 * that cannot hold any frame at all. */
+	m_downlink_pending = (ack->flags & P2P_ACK_FLAG_PENDING) != 0;
+	m_pending_frame_len = ack->pending_len_present
+				      ? (uint8_t)CLAMP(ack->pending_frame_len,
+						       P2P_HDR_LEN + P2P_TAG_LEN, P2P_FRAME_MAX)
+				      : 0;
+
+	/* B5: apply the wall-clock time tail if present, with the same sanity
+	 * bounds as the LoRaWAN DeviceTimeAns (L-5). */
+	if (ack->time_present) {
+		(void)app_clock_set_network_time(ack->unix_time);
+	}
+	/* A pending clock_sync is answered once the network time came (PF-2, as
+	 * LoRaWAN waits for LORAWAN_TIME_UPDATED): an Ack without the tail, or a
+	 * 0x56 in its place, leaves it pending for the next confirmed uplink. */
+	if (ack->time_present && atomic_cas(&m_clock_sync_pending, 1, 0)) {
+		(void)app_radio_send_info((uint32_t)atomic_get(&m_clock_sync_seq));
+	}
+
+	/* rssi/snr = the central's measurement of the uplink (Ack body, B1);
+	 * dl_rssi/dl_snr = this node's measurement of the Ack itself. */
+	if (m_pending_frame_len != 0) {
+		LOG_INF("Ack (counter %u) rssi=%d snr=%d dl_rssi=%d dl_snr=%d [pending] "
+			"pending_len=%u%s",
+			counter, m_last_ack_rssi, m_last_ack_snr, rssi, snr, m_pending_frame_len,
+			ack->time_present ? " [time]" : "");
+	} else {
+		LOG_INF("Ack (counter %u) rssi=%d snr=%d dl_rssi=%d dl_snr=%d%s%s", counter,
+			m_last_ack_rssi, m_last_ack_snr, rssi, snr,
+			m_downlink_pending ? " [pending]" : "", ack->time_present ? " [time]" : "");
+	}
+}
+
 /* Wait for and validate the RX1 downlink for `counter` after `tx_end_ms`
  * (doc/p2p.md §6): header must match (net_id/dev_addr/counter echo), then
  * AES-CCM decrypt under session_key, direction=RX. Two frame types are
@@ -2095,13 +2151,6 @@ static void dispatch_p2p_command(const uint8_t *body, size_t body_len)
  *  - Command (0x56, B4): only when a pending downlink was announced -- decrypt,
  *    dispatch (dispatch_p2p_command), and treat as an implicit Ack.
  * Returns true iff a valid, matching downlink was received. */
-/* Report the node-measured quality of an authenticated downlink to app_radio
- * (RadioState, #446). */
-static void note_downlink(int16_t rssi, int8_t snr)
-{
-	app_radio_note_downlink(rssi, snr);
-}
-
 static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 {
 #if defined(CONFIG_SHELL)
@@ -2278,47 +2327,7 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 		return false;
 	}
 
-	/* B1: the RSSI/SNR the central measured on this uplink. */
-	m_last_ack_rssi = ack.rssi;
-	m_last_ack_snr = ack.snr;
-	m_last_ack_valid = true;
-	app_radio_set_uplink_rssi(ack.rssi, ack.snr);
-	note_downlink(rssi, snr);
-
-	/* B4/D2: remember whether -- and how large -- to size the NEXT uplink's
-	 * window. Clamp defensively: a corrupt-but-authentic byte below a bare
-	 * header+tag or above the PHY limit would otherwise produce a window
-	 * that cannot hold any frame at all. */
-	m_downlink_pending = (ack.flags & P2P_ACK_FLAG_PENDING) != 0;
-	m_pending_frame_len = ack.pending_len_present
-				      ? (uint8_t)CLAMP(ack.pending_frame_len,
-						       P2P_HDR_LEN + P2P_TAG_LEN, P2P_FRAME_MAX)
-				      : 0;
-
-	/* B5: apply the wall-clock time tail if present, with the same sanity
-	 * bounds as the LoRaWAN DeviceTimeAns (L-5). */
-	if (ack.time_present) {
-		(void)app_clock_set_network_time(ack.unix_time);
-	}
-	/* A pending clock_sync is answered once the network time came (PF-2, as
-	 * LoRaWAN waits for LORAWAN_TIME_UPDATED): an Ack without the tail, or a
-	 * 0x56 in its place, leaves it pending for the next confirmed uplink. */
-	if (ack.time_present && atomic_cas(&m_clock_sync_pending, 1, 0)) {
-		(void)app_radio_send_info((uint32_t)atomic_get(&m_clock_sync_seq));
-	}
-
-	/* rssi/snr = the central's measurement of the uplink (Ack body, B1);
-	 * dl_rssi/dl_snr = this node's measurement of the Ack itself. */
-	if (m_pending_frame_len != 0) {
-		LOG_INF("Ack (counter %u) rssi=%d snr=%d dl_rssi=%d dl_snr=%d [pending] "
-			"pending_len=%u%s",
-			counter, m_last_ack_rssi, m_last_ack_snr, rssi, snr, m_pending_frame_len,
-			ack.time_present ? " [time]" : "");
-	} else {
-		LOG_INF("Ack (counter %u) rssi=%d snr=%d dl_rssi=%d dl_snr=%d%s%s", counter,
-			m_last_ack_rssi, m_last_ack_snr, rssi, snr,
-			m_downlink_pending ? " [pending]" : "", ack.time_present ? " [time]" : "");
-	}
+	p2p_apply_ack(&ack, counter, rssi, snr);
 	return true;
 }
 
@@ -3508,6 +3517,9 @@ void p2p_test_link_reset(void)
 	m_report_count = 0;
 	m_snapshot_open = false;
 	set_consec_fail(0);
+	/* A pending clock_sync forces confirmed reports (PF-2). */
+	atomic_clear(&m_clock_sync_pending);
+	atomic_clear(&m_clock_sync_reports);
 }
 
 void p2p_test_link_check_failed(void)
@@ -3793,15 +3805,12 @@ void app_radio_p2p_start(void)
 	/* No usable root key -- see app_key_is_set() above for why this refuses
 	 * outright instead of trying.
 	 *
-	 * Deliberately checked BEFORE the PAIRED branch. factory_reset does not
-	 * clear the p2pjoin/* subtree (doc/p2p.md §7), so a device that is set
-	 * back to `radio-mode p2p` after one boots with join_settings_set()
-	 * having already restored the old pairing to PAIRED -- and would take
-	 * that shortcut and resume transmitting under a session the operator
-	 * explicitly reset, with a root key it can never re-derive. Note this
-	 * needs the explicit re-enable: factory_reset also reverts radio_mode to
-	 * its OFF default (app_config.yml, #350), so it does not by itself leave
-	 * a live P2P node in this state. */
+	 * Deliberately checked BEFORE the PAIRED branch. The reset tiers that drop
+	 * the network session (factory_reset, vendor_reset, lrw_reset) clear the
+	 * pairing through app_radio_reset_link(), but a pairing restored by
+	 * join_settings_set() survives device_reset and a config write that zeroes
+	 * lrw_appkey. Such a node would take the PAIRED shortcut and resume
+	 * transmitting under a session it can never re-derive. */
 	if (!app_key_is_set()) {
 		LOG_ERR("P2P not started: lrw_appkey is all-zero (device unprovisioned). "
 			"Set lrw-appkey over NFC or shell, then reboot.");
