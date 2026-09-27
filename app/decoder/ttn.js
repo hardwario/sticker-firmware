@@ -952,7 +952,7 @@ function encodeDownlinkCommand(cmd) {
     // alarms_replace (field 6): empty all alarm slots before `alarms` is applied
     // (the whole table in one message); on the FIRST message of a batch only.
     if (b.alarms_replace) body = body.concat(_encTag(6, 0)).concat(_encVarint(1));
-    // p2p (field 7, radio parity, doc/plan/439): shell/nfc only — the device itself
+    // p2p (field 7, radio parity, doc/plan/439): shell only (doc/p2p.md §2) — the device itself
     // rejects this over a LoRaWAN/P2P downlink, but the builder does not
     // pre-filter by transport so a hand-crafted NFC payload can still use it.
     if (b.p2p) body = body.concat(_encLenDelim(7, _encP2P(b.p2p)));

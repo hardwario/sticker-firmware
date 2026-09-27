@@ -499,7 +499,7 @@ ZTEST(cmd, test_get_param_keys_nfc_only)
  * `readable`, so they default to every transport like lrw_region/lrw_adr/
  * lrw_datarate — a GetParam(p2p_field) and a full GetConfig dump must return
  * them over NFC (and, unlike the LoRaWAN keys, over the radio transports too;
- * see test_set_param_p2p_rejected_over_radio for the write side). */
+ * see test_set_param_p2p_rejected_over_radio for the write side, shell-only). */
 ZTEST(cmd, test_get_param_and_get_config_p2p_over_nfc)
 {
 	Response r;
@@ -2002,11 +2002,11 @@ ZTEST(cmd, test_lrw_region_writable_excludes_vendor)
 }
 
 /* LoRaWAN↔P2P parity (doc/plan/439): p2p_frequency/spreading_factor/tx_power are
- * `writable: [shell, nfc]` — never over the very radio link they configure
- * (same #271 argument as radio_mode), and never over the vendor recovery
- * channel either. no_write_lrw also gates the raw-LoRa P2P transport (#118
- * B4), so both radio downlinks must reject the write; only NFC (and shell,
- * untested here — SHELL_DEBUG has no per-field gate) applies it. */
+ * readable everywhere but stay `writable: [shell]` — never over the very radio
+ * link they configure (same #271 argument as radio_mode), and not over NFC
+ * until the Manager-App / Hub side is agreed (doc/p2p.md §2). no_write_lrw also
+ * gates the raw-LoRa P2P transport (#118 B4). SHELL_DEBUG (untested here) has no
+ * per-field gate. */
 ZTEST(cmd, test_set_param_p2p_rejected_over_radio)
 {
 	Response r;
@@ -2018,16 +2018,19 @@ ZTEST(cmd, test_set_param_p2p_rejected_over_radio)
 	 *               08 e0e9849e03    .frequency (P2P field1) = 868300000
 	 */
 	const char *hex = "080112083a0608e0e9849e03";
+	enum app_cmd_action a;
 
-	/* Control: nfc is IN writable -> correctly accepted. */
+	/* nfc is NOT in writable:[shell] either -> rejected. */
 	reset_cfg();
-	enum app_cmd_action a = handle_via(APP_CMD_TRANSPORT_NFC, hex, &r);
+	a = handle_via(APP_CMD_TRANSPORT_NFC, hex, &r);
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
-	zassert_equal(r.which_body, Response_ack_tag, "nfc write should ack (which=%d)",
+	zassert_equal(r.which_body, Response_error_tag, "nfc write should error (which=%d)",
 		      r.which_body);
-	zassert_equal(g_app_config.p2p_frequency, 868300000, "frequency not applied over nfc");
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "nfc code %d",
+		      r.body.error.code);
+	zassert_not_equal(g_app_config.p2p_frequency, 868300000, "frequency applied over nfc");
 
-	/* lrw is NOT in writable:[shell,nfc] -> must be rejected. */
+	/* lrw is NOT in writable:[shell] -> must be rejected. */
 	reset_cfg();
 	a = handle_via(APP_CMD_TRANSPORT_LRW, hex, &r);
 	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
@@ -2038,7 +2041,7 @@ ZTEST(cmd, test_set_param_p2p_rejected_over_radio)
 	zassert_equal(r.body.error.fault_field, 501, "fault_field %u (want 501 = p2p frequency)",
 		      r.body.error.fault_field);
 	zassert_not_equal(g_app_config.p2p_frequency, 868300000,
-			  "frequency applied over LRW despite writable:[shell,nfc]");
+			  "frequency applied over LRW despite writable:[shell]");
 
 	/* p2p (raw-LoRa) mirrors lrw: not in writable either -> must be rejected. */
 	reset_cfg();
@@ -2051,7 +2054,7 @@ ZTEST(cmd, test_set_param_p2p_rejected_over_radio)
 	zassert_equal(r.body.error.fault_field, 501, "fault_field %u (want 501 = p2p frequency)",
 		      r.body.error.fault_field);
 	zassert_not_equal(g_app_config.p2p_frequency, 868300000,
-			  "frequency applied over raw P2P despite writable:[shell,nfc]");
+			  "frequency applied over raw P2P despite writable:[shell]");
 }
 
 /* #415 C1/K2: the plain_text transport is opt-in — a command answers on it only

@@ -923,14 +923,14 @@ parameters:
   # involved in P2P at all. LoRaWAN↔P2P parity (doc/plan/439):
   # `readable` is omitted (default, same as lrw_region/lrw_adr/lrw_datarate) so
   # these radio-tuning fields come back over GetConfig/GetParam on every
-  # transport, including a LoRaWAN/P2P ConfigDump. `writable: [shell, nfc]`
-  # keeps them off both radio downlinks — changing radio params over the very
-  # link they configure would sever it (same #271 argument as radio_mode
-  # above) — and off vendor (M-3 recovery channel keeps a narrow write
-  # surface, like the other provisioning fields).
+  # transport, including a LoRaWAN/P2P ConfigDump. `writable: [shell]` stays:
+  # over a radio downlink a change would sever the very link carrying it (same
+  # #271 argument as radio_mode above), and over NFC it is a cross-project
+  # commitment (shared schema with the Manager-App, and the Hub must change in
+  # the same breath) that is still pending agreement -- doc/p2p.md §2.
   - name: p2p_frequency
     proto_group: p2p
-    writable: [shell, nfc]
+    writable: [shell]
     proto_id: 1
     type: int
     default: 868100000
@@ -941,7 +941,7 @@ parameters:
 
   - name: p2p_spreading_factor
     proto_group: p2p
-    writable: [shell, nfc]
+    writable: [shell]
     proto_id: 2
     type: int
     default: 10
@@ -952,7 +952,7 @@ parameters:
 
   - name: p2p_tx_power
     proto_group: p2p
-    writable: [shell, nfc]
+    writable: [shell]
     proto_id: 3
     type: int
     default: 14

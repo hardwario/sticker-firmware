@@ -871,9 +871,9 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 		*fault_field = 0;
 	}
 
-	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	/* M-3: this field is not writable over lrw/p2p/nfc/vendor. */
 	if (src->has_frequency && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
-				   tp == APP_CMD_TRANSPORT_VENDOR)) {
+				   tp == APP_CMD_TRANSPORT_NFC || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(1);
 	} else if (src->has_frequency) {
 		int val = src->frequency;
@@ -884,10 +884,10 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 			FAULT(1);
 		}
 	}
-	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	/* M-3: this field is not writable over lrw/p2p/nfc/vendor. */
 	if (src->has_spreading_factor &&
 	    (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
-	     tp == APP_CMD_TRANSPORT_VENDOR)) {
+	     tp == APP_CMD_TRANSPORT_NFC || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(2);
 	} else if (src->has_spreading_factor) {
 		int val = src->spreading_factor;
@@ -898,9 +898,9 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 			FAULT(2);
 		}
 	}
-	/* M-3: this field is not writable over lrw/p2p/vendor. */
+	/* M-3: this field is not writable over lrw/p2p/nfc/vendor. */
 	if (src->has_tx_power && (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P ||
-				  tp == APP_CMD_TRANSPORT_VENDOR)) {
+				  tp == APP_CMD_TRANSPORT_NFC || tp == APP_CMD_TRANSPORT_VENDOR)) {
 		FAULT_TRANSPORT(3);
 	} else if (src->has_tx_power) {
 		int val = src->tx_power;
