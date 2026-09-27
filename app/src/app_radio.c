@@ -772,8 +772,33 @@ int app_radio_send_info(uint32_t seq)
 	return ret;
 }
 
+/* A network time younger than this answers a clock_sync at once (PF-2). The
+ * same span as app_clock's forced-resync cooldown (#340 L11): on LoRaWAN a
+ * second clock_sync inside it queued no DeviceTimeReq, so its answer waited
+ * for the next time that landed -- up to the weekly re-sync. */
+#define CLOCK_SYNC_FRESH_MS (60 * 1000)
+
+static atomic_t m_clock_sync_now_seq;
+
+static void clock_sync_now_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	(void)app_radio_send_info((uint32_t)atomic_get(&m_clock_sync_now_seq));
+}
+
+static K_WORK_DEFINE(m_clock_sync_now_work, clock_sync_now_work_handler);
+
 void app_radio_clock_sync(uint32_t seq)
 {
+	int64_t landed_ms = app_clock_network_time_at_ms();
+
+	if (landed_ms != 0 && k_uptime_get() - landed_ms < CLOCK_SYNC_FRESH_MS) {
+		/* The clock is fresh from the network: answer now, on the radio work
+		 * queue like every other Info. */
+		atomic_set(&m_clock_sync_now_seq, (atomic_val_t)seq);
+		k_work_submit_to_queue(app_radio_work_q(), &m_clock_sync_now_work);
+		return;
+	}
 #if defined(CONFIG_RADIO_P2P)
 	if (is_p2p()) {
 		app_radio_p2p_clock_sync(seq);

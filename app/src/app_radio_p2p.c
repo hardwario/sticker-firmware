@@ -511,6 +511,11 @@ static void publish_link(void)
  * command thread, consumed on the radio work queue. */
 static atomic_t m_clock_sync_pending;
 static atomic_t m_clock_sync_seq;
+/* Reports sent CONFIRMED for the pending clock_sync so far (PF-2): at most
+ * P2P_CLOCK_SYNC_REPORTS_MAX, so a central that sends no time tail cannot keep
+ * every report confirmed; the request then waits for the next link check. */
+#define P2P_CLOCK_SYNC_REPORTS_MAX 3
+static atomic_t m_clock_sync_reports;
 static int8_t m_last_ack_rssi;
 static int8_t m_last_ack_snr;
 static bool m_last_ack_valid;
@@ -2295,7 +2300,10 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 	if (ack.time_present) {
 		(void)app_clock_set_network_time(ack.unix_time);
 	}
-	if (atomic_cas(&m_clock_sync_pending, 1, 0)) {
+	/* A pending clock_sync is answered once the network time came (PF-2, as
+	 * LoRaWAN waits for LORAWAN_TIME_UPDATED): an Ack without the tail, or a
+	 * 0x56 in its place, leaves it pending for the next confirmed uplink. */
+	if (ack.time_present && atomic_cas(&m_clock_sync_pending, 1, 0)) {
 		(void)app_radio_send_info((uint32_t)atomic_get(&m_clock_sync_seq));
 	}
 
@@ -2515,15 +2523,14 @@ static void send_work_handler(struct k_work *work)
  * link on their own). Decided once per snapshot, kept for all its frames. */
 static bool telemetry_report_confirmed(void)
 {
-	int n = g_app_config.radio_link_check_interval;
-
-	if (m_warning) {
+	/* A pending clock_sync also rides a confirmed report: the time comes in the
+	 * Ack's tail, as LoRaWAN's DeviceTimeReq rides the next uplink (PF-2). */
+	if (atomic_get(&m_clock_sync_pending) &&
+	    atomic_inc(&m_clock_sync_reports) < P2P_CLOCK_SYNC_REPORTS_MAX) {
 		return true;
 	}
-	if (n <= 0) {
-		return false;
-	}
-	return (m_report_count % (uint32_t)n) == 0U;
+	return app_radio_link_check_due(m_report_count, g_app_config.radio_link_check_interval,
+					m_warning);
 }
 
 static void telemetry_send(void)
@@ -4010,6 +4017,7 @@ void app_radio_p2p_clock_sync(uint32_t seq)
 {
 	/* seq before the flag, so the Ack path never pairs a stale seq. */
 	atomic_set(&m_clock_sync_seq, (atomic_val_t)seq);
+	atomic_clear(&m_clock_sync_reports);
 	atomic_set(&m_clock_sync_pending, 1);
 }
 

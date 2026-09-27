@@ -256,6 +256,23 @@ static inline enum app_radio_stale app_radio_stale_check(int64_t now_ms, int64_t
 	return APP_RADIO_STALE_REJOIN;
 }
 
+/* ---- Link-check cadence (PF-1, decision #23; shared by both radios) ---------
+ * The report with 0-based index `report_idx` since the last link-up is a link
+ * check when it is the first one or every `interval`-th after it (0, N, 2N ...),
+ * and every report is one while the link is WARNING (#424). `interval` <= 0
+ * turns the periodic check off. LoRaWAN rides a LinkCheckReq on the report,
+ * P2P sends it CONFIRMED. Pure, so both backends and the tests share it. */
+static inline bool app_radio_link_check_due(uint32_t report_idx, int interval, bool warning)
+{
+	if (warning) {
+		return true;
+	}
+	if (interval <= 0) {
+		return false;
+	}
+	return (report_idx % (uint32_t)interval) == 0U;
+}
+
 /* Stage a command response for the next uplink. */
 int app_radio_queue_response(uint8_t port, const uint8_t *buf, size_t len);
 
@@ -308,9 +325,10 @@ int app_radio_send_info(uint32_t seq);
 
 /* clock_sync with an empty body: re-sync the RTC from the network and answer
  * with an Info carrying `seq` once the time has landed -- the same shape on
- * both radios, no extra uplink forced: LoRaWAN's DeviceTimeReq rides on the
- * next uplink and the answer comes in its downlink; P2P uses the time tail of
- * the next uplink's Ack. */
+ * both radios, no extra uplink: LoRaWAN's DeviceTimeReq rides on the next
+ * uplink and the answer comes in its downlink; P2P sends its next report
+ * CONFIRMED (at most 3 of them) and the time comes in the Ack's tail. A network
+ * time that landed less than 60 s ago is fresh: the Info goes at once (PF-2). */
 void app_radio_clock_sync(uint32_t seq);
 
 #ifdef __cplusplus

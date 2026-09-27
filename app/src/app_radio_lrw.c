@@ -1325,22 +1325,15 @@ static bool should_request_link_check(void)
 		m_force_lc_remaining--;
 		return true;
 	}
-	if (interval <= 0) {
-		return false;
-	}
-	/* WARNING: the link is suspect, so check on every report. Each failed check
-	 * takes one recovery-ladder rung (lrw_backoff_step) and counts towards the
-	 * rejoin budget; at the N-th-report cadence the default 900 s x 5 took
-	 * ~6 h to leave WARNING, all of it transmitting blind on the old DR. */
-	if ((enum app_radio_state)atomic_get(&m_state) == APP_RADIO_STATE_WARNING) {
-		return true;
-	}
-	int msg_num = m_message_count + 1;
-
-	if (msg_num == 1 || (msg_num % interval) == 0) {
-		return true;
-	}
-	return false;
+	/* The rule both radios share (PF-1): the first report after the join and
+	 * every N-th after it, and every report while WARNING -- the link is
+	 * suspect, so each report checks it; each failed check takes one
+	 * recovery-ladder rung (lrw_backoff_step) and counts towards the rejoin
+	 * budget (#424). Reports #1, #N+1, #2N+1 ...; before, LoRaWAN checked
+	 * #1, #N, #2N and P2P #1, #N+1, #2N+1. */
+	return app_radio_link_check_due(
+		(uint32_t)m_message_count, interval,
+		(enum app_radio_state)atomic_get(&m_state) == APP_RADIO_STATE_WARNING);
 }
 
 /* Send one telemetry frame on fPort 2. */

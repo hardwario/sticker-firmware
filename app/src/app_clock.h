@@ -49,6 +49,10 @@ int app_clock_set_unix(uint32_t unix_s);
  * app_clock_set_unix() error. */
 int app_clock_set_network_time(uint32_t unix_s);
 
+/* Uptime (ms) at which the last network time was applied by
+ * app_clock_set_network_time(), or 0 if none has been since boot. */
+int64_t app_clock_network_time_at_ms(void);
+
 #ifdef __cplusplus
 }
 #endif
