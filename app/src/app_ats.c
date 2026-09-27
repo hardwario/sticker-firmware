@@ -1647,8 +1647,13 @@ static int cmd_device_info(const struct shell *sh, size_t argc, char **argv)
 	} else {
 		shell_print(sh, "Radio signal:  no downlink since boot");
 	}
-	shell_print(sh, "Radio params:  SF%u%s%u, TX %d dBm", rs.sf, rs.has_datarate ? " DR" : "",
-		    rs.has_datarate ? rs.datarate : 0, rs.has_tx_power ? rs.tx_power_dbm : 0);
+	if (rs.has_datarate) {
+		shell_print(sh, "Radio params:  SF%u DR%u, TX %d dBm", rs.sf, rs.datarate,
+			    rs.has_tx_power ? rs.tx_power_dbm : 0);
+	} else {
+		shell_print(sh, "Radio params:  SF%u, TX %d dBm", rs.sf,
+			    rs.has_tx_power ? rs.tx_power_dbm : 0);
+	}
 	shell_print(sh, "Radio link:    fail streak %u, join attempts %u, duty hold %u s",
 		    rs.fail_streak, rs.join_attempts, rs.duty_blocked_s);
 	shell_print(sh, "Radio counts:  tx %u rx %u retry %u fail %u tx_err %u join %u",
