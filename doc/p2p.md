@@ -753,9 +753,13 @@ v1 was **confirmed-uplink**: after every data TX the node opens one RX window
   already radio-agnostic (`app_report` sends through `app_radio`), and they
   answer exactly as over LoRaWAN: `force_send` / `sample` with their telemetry
   uplink only, an empty `clock_sync` with an Info carrying the command's `seq`
-  once the *next regular* uplink's Ack (with its Unix-time tail, B5) has been
-  processed -- no uplink is forced, the P2P counterpart of LoRaWAN's
-  DeviceTimeReq riding on the next uplink.
+  once an Ack with the Unix-time tail (B5) has been processed. No uplink is
+  forced, the P2P counterpart of LoRaWAN's DeviceTimeReq riding on the next
+  uplink. The next reports, at most 3, go confirmed so that an Ack comes
+  back. A network time that landed less than 60 s ago answers at once (#460
+  PF-2). Since #460 F3d the pending request and its answer live in
+  `app_radio` for both radios; the backend only reports the landed time
+  (`app_radio_time_event()`).
 - **Boot / join announce (#448, plan 439 T3):** when the link comes up -- a
   boot with a persisted pairing (no JoinRequest) or any JoinAccept -- the node
   sends its `Info` (seq 0) and the #412 settings-info `ConfigDump` (seq 0) as

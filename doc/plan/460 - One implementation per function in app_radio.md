@@ -25,7 +25,7 @@ Base: `hynek/radio-t2` (#459, T2a: one radio work queue), which is stacked on #4
 | Post-command actions | 9 actions, drain-wait 8 s × 6 on 2 signals | 5 actions, drain-wait on 4 signals; NFC has a third table in `main.c` |
 | Page stream | ≥ 2 free answer slots, 2 s pace | empty TX queue, 2 s pace |
 | History replay | cursor/cap/8 retries/3 s gap/15 s retry, DR-driven cap | same machine copied, fixed cap — **one machine since F3c** |
-| clock_sync answer | Info on `LORAWAN_TIME_UPDATED` | Info on an Ack with the time tail — **common entry since F1** |
+| clock_sync answer | Info on `LORAWAN_TIME_UPDATED` | Info on an Ack with the time tail — **common entry since F1, one pending request since F3d** |
 | M-2 stale watchdog + duty hold | heartbeat in the backend | own copy |
 | Announce retry | 15 s | 5 s |
 | Duty cycle | LoRaMac's hourly band credits, blind 8 × 15 s retries | exact sliding-hour ledger, one 1 % band |
@@ -56,12 +56,19 @@ struct app_radio_backend {
 		    struct app_radio_tx_result *res); /* blocking, radio WQ */
 	uint8_t (*budget)(void);        /* payload budget of the next uplink, 0 = none now */
 	bool (*tx_ready)(void);         /* the link carries uplinks now */
-	uint8_t (*report_flags)(void);  /* a report starts: CONFIRMED / LINK_CHECK */
-	void (*report_done)(void);      /* the last frame of a report left */
+	uint8_t (*report_flags)(bool due); /* a report starts: CONFIRMED / LINK_CHECK */
+	enum app_radio_state (*get_state)(void); /* F2: never WARNING */
+	bool (*warning_step)(void);     /* F2: WARNING's recovery rung */
+	int (*rejoin)(bool forced);     /* F2: give the session up, join again */
+	bool (*in_flight)(void);        /* F3: a confirmed frame awaits its Ack (P2P) */
+	void (*time_request)(void);     /* F3d: a clock_sync wants a network time */
 	uint8_t confirm_kinds;          /* kinds sent confirmed: LRW none, P2P answer/alarm/history */
+	uint8_t cmd_transport;          /* F3: enum app_cmd_transport of its downlinks */
 	uint16_t frame_gap_ms;          /* between the frames of a report: LRW 3 s, P2P 0 */
 };
 ```
+
+The struct as of F3d. F4 also had `report_done` and `replay_active`; F2 removed the first (0af2552) and F3c the second.
 
 `send()` returns one result set. The common layer handles each result the same way whichever radio is running:
 
@@ -145,7 +152,7 @@ Implemented in `app_radio.c` ("Link supervision" block); tests in `tests/radio_c
 
 ### 2.5 Downlink path (F3 = T4)
 
-F3a/F3b are implemented (39cb04a), F3c too; F3d is next.
+F3a/F3b are implemented (39cb04a), F3c and F3d too.
 
 - **Commands:** a backend hands each authenticated command to `app_radio_downlink(buf, len)` on the radio work queue. LoRaWAN drains `m_dl_msgq`; P2P calls it from `recv_ack()`.
   - It calls `app_cmd_handle(transport, cap)`. The transport comes from the backend op `cmd_transport` (`APP_CMD_TRANSPORT_LRW` / `_P2P`), and the cap from `app_radio_tx_answer_cap()`.
@@ -185,7 +192,14 @@ F3a/F3b are implemented (39cb04a), F3c too; F3d is next.
   | bench, P2P only | 216768 B (+616) | 56272 B (±0) |
 
   The debug RAM growth is the 256 B sample buffer, which LoRaWAN kept on the work-queue stack and the common code keeps static, as P2P did. The P2P-only image gains the LoRaWAN parts it lacked: the tightened bound, the budget error, the budget-0 flush and the retries.
-- **Next, F3d:** clock_sync as a backend `time(unix)` event (LoRaWAN `LORAWAN_TIME_UPDATED`, the P2P Ack time tail). The "landed < 60 s ago" fast path is F1.
+- **clock_sync (F3d):** the request, its seq and its answer are one path in `app_radio`.
+  - `app_radio_clock_sync(seq)` stores the seq and runs on the radio work queue. A network time younger than 60 s answers at once (F1). Otherwise the request is pending, and the backend op `time_request()` asks for a time.
+    - LoRaWAN: `app_clock_force_resync()`, so a DeviceTimeReq rides the next uplink.
+    - P2P: the next reports, at most 3, go confirmed.
+  - The backend reports a landed time with `app_radio_time_event()`: LoRaWAN on `LORAWAN_TIME_UPDATED`, P2P on an Ack time tail. A pending request is answered once, with the newest seq.
+  - The clock itself is still set in the backend's own path: GPS epoch from the MAC on LoRaWAN, a Unix tail on P2P. So the event carries no time; the plan's `time(unix)` became `time_event()`.
+  - A fresh-time answer also ends an older pending request, so a late time event does not answer twice. Before, LoRaWAN could send a second Info with the older seq.
+  - Footprint against F3c: release 181700 B (−16) / 55808 B, debug 234952 B (+8) / 63388 B, bench 216808 B (+40) / 56272 B.
 - **Footprint (release):** 180872 B flash / 55104 B RAM, against 179528 / 55232 for F2. About 2 KB of the flash growth is LTO inlining into `app_cmd_handle_set_param`.
 
 ### 2.6 Confirmed uplinks (T2c) and `radio-alarm-ack`
