@@ -35,7 +35,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Radio: P2P | **Fix / New** — LoRaWAN ↔ P2P parity, part 2 (#449): frames leave in counter order (F-P1-1: one confirmed uplink in flight + 1 s gap), queues survive an unpaired phase, refused telemetry is retried then reset, the fleet jitter and the M-2 watchdog policy are shared, reset tiers clear the P2P pairing, `BUDGET_TOO_SMALL` over P2P, `p2p-*` readable via GetConfig/GetParam. See §25. |
 | Radio: P2P / LoRaWAN | **New** — P2P retry backoff and a per-node uplink phase: retry n waits a random 1..2^n s (was a fixed ~2.3 s rhythm), and a periodic report is sent at a stable DevEUI-derived offset inside min(interval − jitter − 1 s, 60 s), on both radios, so nodes rebooted together no longer collide every interval (F-P2P-4 / F-P2P-5). See §27. |
 | Radio: P2P | **Changed (wire, flag day)** — decision #22: a `FCtrl` byte in the header (11 → 12 B); telemetry is **unconfirmed and sent once**, except the link check (first report after link-up and every `radio-link-check-interval`-th, every report while WARNING); alarms / answers / history stay confirmed; the RX1 opens after every uplink for a `0x56` of up to 64 B; LoRaWAN-like link supervision (WARNING after 3 failed checks, TX-power step, re-join after `radio-link-check-fail-rejoin`); `p2p-spreading-factor` default 7, join without an SF sweep (last resort after 24 h). See §28. |
-| LoRaWAN / P2P | **Renamed** — `lrw-link-check-interval` / `lrw-link-check-fail-rejoin` → `radio-link-check-interval` / `radio-link-check-fail-rejoin`: link supervision is shared by both radios. Wire-compatible (same `lorawan` group fields 13/14); a stored value migrates on the first boot. See §26. |
+| LoRaWAN / P2P | **Renamed** — `lrw-link-check-interval` / `lrw-link-check-fail-rejoin` → `radio-link-check-interval` / `radio-link-check-fail-rejoin`: link supervision is shared by both radios. Wire-compatible (same `lorawan` group fields 13/14); a value stored under the old name is not carried over (defaults 5 / 5). See §26. |
 
 ---
 
@@ -511,6 +511,7 @@ When the network disappears (gateway off, or the device moved out of reach of it
 - New log lines: `Link recovery: TX power <a> -> <b>, DR<x> -> DR<y> (payload <n> B)` and `LC FAIL in WARNING (total: n/m, ladder step)`. `ats lrw status` (now `ats radio status`) also prints `tx power: <index> (0 = max)`.
 - After a ladder recovery the device stays on the lower DR. With ADR on, the network raises it again from the uplinks it receives. A lower DR means a smaller payload budget (EU868 DR0–2: 51 B), so telemetry may take more frames until then.
 - The link-check timeout now starts after the uplink's RX windows closed. It no longer races a LinkCheckAns at DR0/SF12 with a 5 s RX1 delay.
+- **Any authenticated downlink is a link-check success** (2026-09-27, parity with P2P, §28): a command, an ADR or DevStatus request or an Ack clears the fail streak and, in `WARNING`, returns the device to `HEALTHY` — not only a LinkCheckAns while a check is outstanding. A device the network is visibly reaching no longer walks down the ladder towards a rejoin. Log: `Link confirmed via downlink`.
 - Works together with `lrw-datarate` (§8): a pinned DR is stepped down by the ladder like any other, and the next join re-pins it.
 - `ats lrw status` (now `ats radio status`) reports the live DR from the MAC. Before, it showed a stale value after an ADR-off DR change (`lrw-datarate`, a ladder rung).
 - Cost: +272 B flash release, +744 B debug, +0 B RAM.
@@ -1384,12 +1385,10 @@ prefix (ProXimos decision #22):
   device (v1.4.x included, same field numbers); an integration or Portal mapping
   that reads the decoded keys must follow. The encoder still accepts the old
   `link_check_interval` / `link_check_fail_rejoin` in a SetParam for one release.
-- **Stored value migrates.** configen gained `legacy_names:` in
-  `app_config.yml`: on the first boot after the update, a value stored under the
-  old settings key is loaded into the renamed field, saved under the new key and
-  the old key is deleted (`Migrated legacy setting config/lrw-link-check-...`
-  in the log). Later boots find nothing to migrate. A downgrade to v1.4.x reads
-  the defaults for both parameters.
+- **No NVS migration.** A value stored under the old settings key is not
+  carried over: after the update both parameters run on their defaults (5 / 5)
+  until set again, and the old key stays unused in NVS. A downgrade to v1.4.x
+  likewise reads its defaults.
 
 ## 27. P2P retry backoff and a per-node uplink phase (F-P2P-4 / F-P2P-5)
 

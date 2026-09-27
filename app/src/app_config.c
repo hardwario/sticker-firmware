@@ -26,8 +26,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <zephyr/sys/util.h> /* ARRAY_SIZE, for the legacy-key migration table below */
-
 LOG_MODULE_REGISTER(app_config, LOG_LEVEL_DBG);
 
 #define SETTINGS_PFX "config"
@@ -105,28 +103,6 @@ void app_config_unlock(void)
 	k_mutex_unlock(&m_app_config_lock);
 }
 
-/* One-shot migration table for renamed config fields (`legacy_names:` in
- * app_config.yml). Each entry pairs the full NVS path of a pre-rename settings
- * key with a flag h_set() sets below when that old key is found while loading.
- * app_config_init() checks the table right after settings_load_subtree():
- * if any entry was seen, the (already-migrated-in-RAM) config is persisted
- * under the new key(s) and the old NVS entries are deleted, so a device
- * upgrading from before the rename picks up its stored value transparently,
- * on the first boot only. */
-struct app_config_legacy_key {
-	const char *path; /* full "SETTINGS_PFX/old-key" path, ready for settings_delete() */
-	bool seen;
-};
-
-static struct app_config_legacy_key m_app_config_legacy_keys[] = {
-	{SETTINGS_PFX "/"
-		      "lrw-link-check-interval",
-	 false},
-	{SETTINGS_PFX "/"
-		      "lrw-link-check-fail-rejoin",
-	 false},
-};
-
 static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	int ret;
@@ -146,28 +122,6 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 				return ret;                                                        \
 			}                                                                          \
                                                                                                    \
-			return 0;                                                                  \
-		}                                                                                  \
-	} while (0)
-
-/* Same match as SETTINGS_SET, for an old (pre-rename) key name: also flags the
- * matching m_app_config_legacy_keys[] entry as seen, so
- * app_config_init() knows to persist + delete it after settings_load_subtree(). */
-#define SETTINGS_SET_LEGACY(_key, _var, _size, _idx)                                               \
-	do {                                                                                       \
-		if (settings_name_steq(key, _key, &next) && !next) {                               \
-			if (len != _size) {                                                        \
-				return -EINVAL;                                                    \
-			}                                                                          \
-                                                                                                   \
-			ret = read_cb(cb_arg, _var, len);                                          \
-                                                                                                   \
-			if (ret < 0) {                                                             \
-				LOG_ERR("Call `read_cb` failed: %d", ret);                         \
-				return ret;                                                        \
-			}                                                                          \
-                                                                                                   \
-			m_app_config_legacy_keys[_idx].seen = true;                                \
 			return 0;                                                                  \
 		}                                                                                  \
 	} while (0)
@@ -212,13 +166,8 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("lrw-datarate", &m_app_config.lrw_datarate, sizeof(m_app_config.lrw_datarate));
 	SETTINGS_SET("radio-link-check-interval", &m_app_config.radio_link_check_interval,
 		     sizeof(m_app_config.radio_link_check_interval));
-	SETTINGS_SET_LEGACY("lrw-link-check-interval", &m_app_config.radio_link_check_interval,
-			    sizeof(m_app_config.radio_link_check_interval), 0);
 	SETTINGS_SET("radio-link-check-fail-rejoin", &m_app_config.radio_link_check_fail_rejoin,
 		     sizeof(m_app_config.radio_link_check_fail_rejoin));
-	SETTINGS_SET_LEGACY("lrw-link-check-fail-rejoin",
-			    &m_app_config.radio_link_check_fail_rejoin,
-			    sizeof(m_app_config.radio_link_check_fail_rejoin), 1);
 	SETTINGS_SET("cap-hall-left", &m_app_config.cap_hall_left,
 		     sizeof(m_app_config.cap_hall_left));
 	SETTINGS_SET("cap-hall-right", &m_app_config.cap_hall_right,
@@ -275,7 +224,6 @@ static int h_set(const char *key, size_t len, settings_read_cb read_cb, void *cb
 	SETTINGS_SET("p2p-tx-power", &m_app_config.p2p_tx_power, sizeof(m_app_config.p2p_tx_power));
 
 #undef SETTINGS_SET
-#undef SETTINGS_SET_LEGACY
 
 	return -ENOENT;
 }
@@ -2207,43 +2155,6 @@ static int app_config_init(void)
 		 * running rather than dead. */
 		LOG_ERR("Call `settings_load_subtree` failed: %d — booting on defaults", ret);
 		m_app_config_load_failed = true;
-	}
-
-	/* One-shot legacy-key migration (see m_app_config_legacy_keys[] above):
-	 * h_set() already flagged every old key found while loading, and h_commit()
-	 * already copied the migrated value into g_app_config. Persist it under
-	 * the new key(s) and drop the old NVS entries so this runs only once. */
-	bool legacy_seen = false;
-
-	for (size_t i = 0; i < ARRAY_SIZE(m_app_config_legacy_keys); i++) {
-		if (m_app_config_legacy_keys[i].seen) {
-			legacy_seen = true;
-			break;
-		}
-	}
-
-	if (legacy_seen) {
-		ret = settings_save_subtree(SETTINGS_PFX);
-		if (ret) {
-			/* Keep the old keys: the next boot migrates again rather
-			 * than losing the stored value to the default. */
-			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
-		}
-
-		for (size_t i = 0; ret == 0 && i < ARRAY_SIZE(m_app_config_legacy_keys); i++) {
-			if (!m_app_config_legacy_keys[i].seen) {
-				continue;
-			}
-
-			int del_ret = settings_delete(m_app_config_legacy_keys[i].path);
-			if (del_ret) {
-				LOG_ERR("Call `settings_delete` failed for %s: %d",
-					m_app_config_legacy_keys[i].path, del_ret);
-			} else {
-				LOG_INF("Migrated legacy setting %s to its new key",
-					m_app_config_legacy_keys[i].path);
-			}
-		}
 	}
 
 	if (m_app_config_migrated) {
