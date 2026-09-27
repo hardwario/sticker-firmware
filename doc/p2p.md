@@ -123,8 +123,9 @@ On boot the firmware brings up **only** the selected stack — the SX126x radio
 is shared between LoRaMac and raw LoRa, so there is no live switch. The
 payload layer is unchanged: `app_compose` builds the same protobuf snapshots
 and `app_report` owns the `interval_report` cadence for both transports,
-behind an `app_radio` facade (shape carried over from PR #228; mainline
-has ~40 direct `app_radio_lrw_*` call sites that the facade must absorb).
+behind an `app_radio` facade (shape carried over from PR #228; the direct
+`app_radio_lrw_*` call sites of the application layers moved behind it in
+doc/plan/439 T1/T1a).
 
 Build: dual-stack image gated by `CONFIG_RADIO_P2P` (default `y` on
 release; `n` on the flash-tight debug overlay). `CONFIG_LORA=y` (Zephyr raw
