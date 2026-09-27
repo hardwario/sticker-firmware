@@ -66,15 +66,15 @@ static uint16_t m_battery_mv = BATTERY_INVALID_MV;
  * whole calibration thread - if the send hung there directly, the loop could
  * never feed the watchdog, blink its status LED, or re-check its own
  * deadline-based clean reboot again. Running the send via
- * app_radio_lrw_run_on_work_q() (app_radio_lrw.c's own m_work_q, mode is mutually
+ * app_radio_lrw_run_on_work_q() (the radio work queue, mode is mutually
  * exclusive with normal app_radio_lrw operation so there's no contention) decouples
  * the main loop's liveness from whether the send ever completes, at no extra
- * RAM cost - m_work_q's own existing heartbeat/wdog liveness channel
+ * RAM cost - the radio work queue's own existing heartbeat/wdog liveness channel
  * (#181/#182) already forces a fast IWDG reset if it wedges, instead of
  * silently waiting out the full multi-hour calibration deadline. A dedicated
  * queue+stack for this was considered and rejected: it cost ~2.3 KB of static
  * RAM the debug build budget can't absorb (confirmed by CI), for protection
- * m_work_q's existing heartbeat already provides. */
+ * the radio work queue's existing heartbeat already provides. */
 static struct k_work m_cal_send_work;
 static uint8_t m_cal_tx_buf[PAYLOAD_SIZE];
 
@@ -290,7 +290,7 @@ static void compose_calibration_payload(uint8_t *buf)
 }
 
 /* #340 M22: runs the actual (possibly-hanging) lorawan_send() off the
- * calibration thread, on app_radio_lrw.c's m_work_q - see the comment above
+ * calibration thread, on the radio work queue - see the comment above
  * m_cal_send_work. app_radio_lrw_is_ready() is checked here rather than by the
  * caller so the readiness snapshot is taken as close as possible to the
  * actual send attempt. */
@@ -349,7 +349,7 @@ int app_calibration_init(void)
 #endif /* defined(CONFIG_LORAWAN) */
 
 	/* #340 M22: work item for the calibration TX send, run on app_radio_lrw.c's
-	 * m_work_q via app_radio_lrw_run_on_work_q() - see cal_send_work_handler()'s
+	 * the radio work queue via app_radio_lrw_run_on_work_q() - see cal_send_work_handler()'s
 	 * comment. */
 	k_work_init(&m_cal_send_work, cal_send_work_handler);
 
@@ -439,7 +439,7 @@ void app_calibration_run(void)
 			counter = 0;
 
 			/* #340 M22: compose here (fast, bounded I2C/1-Wire reads), but
-			 * submit the actual send to app_radio_lrw.c's m_work_q instead of
+			 * submit the actual send to the radio work queue instead of
 			 * calling the potentially-hanging lorawan_send() directly on
 			 * this thread - see cal_send_work_handler(). */
 			compose_calibration_payload(m_cal_tx_buf);

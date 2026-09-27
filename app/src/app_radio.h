@@ -46,6 +46,15 @@ enum app_radio_kind {
 	APP_RADIO_P2P,
 };
 
+struct k_work_q;
+
+/* The radio work queue (doc/plan/439 T2a): one queue for whichever backend runs.
+ * Both backends do all their TX, RX windows, state changes and command handling
+ * on it, so each backend's state is touched by one thread only. Started before
+ * main() (SYS_INIT), so calibration mode, which brings LoRaWAN up without
+ * app_radio_init(), gets it too. */
+struct k_work_q *app_radio_work_q(void);
+
 /* Read `radio_mode` from config and bring up the chosen stack (app_radio_lrw_init or
  * app_radio_p2p_init). Falls back to LoRaWAN if P2P is selected but not compiled in.
  * `radio_mode == off` also routes to app_radio_lrw_init(), which its own
