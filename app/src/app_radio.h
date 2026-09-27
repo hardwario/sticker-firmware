@@ -165,11 +165,15 @@ uint8_t app_radio_get_max_payload(void);
 
 /* Compose + send a telemetry snapshot (triggered by app_report) after the fleet
  * pre-send jitter (#267): a random delay of up to min(interval_report / 10,
- * 10 s), the same policy for both radios. The jitter lives on the transmission,
- * never on the report cadence (history timestamps follow the fixed cadence).
- * After a link-up the first report waits for the announce instead and leaves
- * right after it, without jitter: Info, settings-info, telemetry. */
-void app_radio_send_telemetry(void);
+ * 10 s), the same policy for both radios. A `periodic` report (its wall-clock
+ * slot) first waits the node's stable uplink phase, derived from its DevEUI
+ * within min(interval_report - jitter - 1 s, 60 s) (O9), so a fleet does not
+ * send in the same seconds of every interval. Phase and jitter live on the
+ * transmission, never on the report cadence (history timestamps follow the
+ * fixed cadence). After a link-up the first report waits for the announce
+ * instead and leaves right after it, without phase or jitter: Info,
+ * settings-info, telemetry. */
+void app_radio_send_telemetry(bool periodic);
 
 /* Same, for a host-requested uplink (force_send / sample, F14): no jitter, and a
  * jittered report still pending is folded into this send. */

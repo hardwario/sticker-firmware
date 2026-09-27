@@ -311,8 +311,12 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  * §6's "retransmit ... up to 3 times". */
 #define P2P_ACK_MAX_RETRIES 3
 
-/* Jitter added to a retry's wait, on top of any remaining duty-cycle block. */
-#define P2P_ACK_RETRY_JITTER_MS 1000
+/* Retry backoff (decision #22 §3.2, Hynek 2026-09-27): retry n (1-based) waits
+ * a random 1..2^n s on top of any remaining duty-cycle block, like LoRaWAN's
+ * ACK_TIMEOUT (2 +/- 1 s). The fixed ~2.3 s rhythm it replaces (1 s gap + RX1 +
+ * 0..1 s) locked two nodes rebooted together ~1 s apart, each transmitting into
+ * the other's RX1 until both gave up (F-P2P-4). */
+#define P2P_ACK_RETRY_BACKOFF_MIN_MS 1000
 
 /* HW-informed finding (#118 phase 2 HIL): under the OLD "block for air*99 ms
  * after every frame" model a single MAX-size telemetry frame blocked the
@@ -2222,6 +2226,17 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
  * after every enqueue/dequeue so the timer always reflects the current
  * queue state and duty-cycle estimate. The wait is sized for the frame at the
  * head of the queue (peeked, not dequeued). */
+/* The wait before the next retry of a frame that has had `attempt` retries (0
+ * before the first): a random P2P_ACK_RETRY_BACKOFF_MIN_MS..2^(attempt+1) s, so
+ * 1..2 s, 1..4 s, 1..8 s. Pure -- exposed to tests/p2p_logic. */
+P2P_TESTABLE uint32_t p2p_ack_retry_backoff_ms(int attempt, uint32_t rand32)
+{
+	int n = CLAMP(attempt + 1, 1, P2P_ACK_MAX_RETRIES);
+	uint32_t max_ms = (uint32_t)P2P_ACK_RETRY_BACKOFF_MIN_MS << n;
+
+	return P2P_ACK_RETRY_BACKOFF_MIN_MS + rand32 % (max_ms - P2P_ACK_RETRY_BACKOFF_MIN_MS);
+}
+
 static void reschedule_ack_retry_work(void)
 {
 	struct p2p_ack_retry_state head;
@@ -2231,14 +2246,14 @@ static void reschedule_ack_retry_work(void)
 	}
 
 	int64_t wait_ms = duty_wait_ms_for(P2P_HDR_LEN + head.body_len + P2P_TAG_LEN);
-	uint32_t jitter = sys_rand32_get() % P2P_ACK_RETRY_JITTER_MS;
+	uint32_t backoff = p2p_ack_retry_backoff_ms(head.attempt, sys_rand32_get());
 
-	k_work_reschedule_for_queue(&m_work_q, &m_ack_retry_work, K_MSEC(wait_ms + jitter));
+	k_work_reschedule_for_queue(&m_work_q, &m_ack_retry_work, K_MSEC(wait_ms + backoff));
 }
 
 /* Queue an asynchronous Ack retry for `counter` (doc/p2p.md §6) -- NOT a
- * blocking wait, so no cap is needed (see the P2P_ACK_RETRY_JITTER_MS
- * #define comment for why an earlier capped-sleep design was wrong).
+ * blocking wait, so no cap is needed (see the comment after
+ * P2P_ACK_RETRY_BACKOFF_MIN_MS for why an earlier capped-sleep design was wrong).
  * `attempt` is how many retries have already been sent (0 for the first). */
 static void schedule_ack_retry(uint8_t frame_type, const uint8_t *body, size_t body_len,
 			       uint32_t counter, int attempt)

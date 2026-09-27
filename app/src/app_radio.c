@@ -413,16 +413,45 @@ static void jitter_work_handler(struct k_work *work)
 #endif
 }
 
+/* Uplink phase (O9, p2p_link_check.md §3.7, Hynek 2026-09-27): the report
+ * cadence runs on wall-clock slots (F27), so without it a whole fleet sends in
+ * the same few seconds of every interval -- on P2P's one channel two nodes
+ * rebooted together collided every minute (F-P2P-5). Each node therefore sends
+ * at a stable offset derived from its DevEUI, inside
+ * min(interval_report - fleet jitter - 1 s, UPLINK_PHASE_MAX_SEC); the fleet
+ * jitter still comes on top. The history records keep their slots; only the
+ * transmission moves. Both radios, one policy. */
+#define UPLINK_PHASE_MAX_SEC 60
+
 /* A random delay of up to min(interval_report / 10, TX_JITTER_MAX_SEC). */
-static uint32_t fleet_jitter_ms(void)
+static uint32_t fleet_jitter_span_ms(void)
 {
 	uint32_t span_ms = (uint32_t)g_app_config.interval_report * 100U; /* interval/10 */
 
-	span_ms = MIN(span_ms, (uint32_t)TX_JITTER_MAX_SEC * 1000U);
+	return MIN(span_ms, (uint32_t)TX_JITTER_MAX_SEC * 1000U);
+}
+
+static uint32_t uplink_phase_ms(void)
+{
+	uint32_t interval_ms = (uint32_t)g_app_config.interval_report * 1000U;
+	uint32_t room_ms = interval_ms - MIN(interval_ms, fleet_jitter_span_ms() + 1000U);
+	uint32_t span_ms = MIN(room_ms, (uint32_t)UPLINK_PHASE_MAX_SEC * 1000U);
+	uint32_t h = 2166136261U; /* FNV-1a over the DevEUI */
+
+	for (size_t i = 0; i < sizeof(g_app_config.lrw_deveui); i++) {
+		h = (h ^ g_app_config.lrw_deveui[i]) * 16777619U;
+	}
+	return span_ms ? (h % span_ms) : 0U;
+}
+
+static uint32_t fleet_jitter_ms(void)
+{
+	uint32_t span_ms = fleet_jitter_span_ms();
+
 	return span_ms ? (sys_rand32_get() % span_ms) : 0U;
 }
 
-void app_radio_send_telemetry(void)
+void app_radio_send_telemetry(bool periodic)
 {
 	/* Flag first, then look: a seq_release() in between either sees the
 	 * flag and kicks the report, or has already opened the sequence. */
@@ -433,7 +462,9 @@ void app_radio_send_telemetry(void)
 	if (!atomic_cas(&m_telemetry_held, 1, 0)) {
 		return; /* seq_release() just kicked it */
 	}
-	k_work_reschedule(&m_jitter_work, K_MSEC(fleet_jitter_ms()));
+	uint32_t phase_ms = periodic ? uplink_phase_ms() : 0U;
+
+	k_work_reschedule(&m_jitter_work, K_MSEC(phase_ms + fleet_jitter_ms()));
 }
 
 /* The boot/join announce is a burst (Info + settings-info pages + the first

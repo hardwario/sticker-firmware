@@ -1694,4 +1694,31 @@ ZTEST(p2p_logic, test_last_downlink_recorded)
 	zassert_equal(p2p_test_dl_snr, 12);
 }
 
+/* Decision #22 §3.2 / F-P2P-4: retry n waits a random 1..2^n s, so two nodes
+ * that lost a frame to each other fall out of step instead of retrying in
+ * lock-step. Pin the bounds for every retry and both rand extremes. */
+ZTEST(p2p_logic, test_ack_retry_backoff_grows_and_stays_random)
+{
+	static const uint32_t max_ms[] = {2000, 4000, 8000};
+
+	for (int attempt = 0; attempt < 3; attempt++) {
+		uint32_t lo = p2p_ack_retry_backoff_ms(attempt, 0);
+		uint32_t hi = p2p_ack_retry_backoff_ms(attempt, UINT32_MAX);
+
+		zassert_equal(lo, 1000u, "retry %d: at least 1 s (the TX gap), got %u", attempt + 1,
+			      lo);
+		zassert_true(hi < max_ms[attempt], "retry %d: below %u ms, got %u", attempt + 1,
+			     max_ms[attempt], hi);
+		for (uint32_t r = 0; r < 5000; r += 7) {
+			uint32_t v = p2p_ack_retry_backoff_ms(attempt, r * 2654435761u);
+
+			zassert_between_inclusive(v, 1000u, max_ms[attempt] - 1, "retry %d: %u",
+						  attempt + 1, v);
+		}
+	}
+	/* Out-of-range attempts clamp instead of shifting past the table. */
+	zassert_true(p2p_ack_retry_backoff_ms(99, UINT32_MAX) < 8000u, "clamped to the 3rd retry");
+	zassert_true(p2p_ack_retry_backoff_ms(-1, UINT32_MAX) < 2000u, "clamped to the 1st retry");
+}
+
 ZTEST_SUITE(p2p_logic, NULL, NULL, NULL, NULL, NULL);
