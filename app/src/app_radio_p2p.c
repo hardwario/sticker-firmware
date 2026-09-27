@@ -3687,7 +3687,6 @@ void app_radio_p2p_clock_sync(uint32_t seq)
 	/* seq before the flag, so the Ack path never pairs a stale seq. */
 	atomic_set(&m_clock_sync_seq, (atomic_val_t)seq);
 	atomic_set(&m_clock_sync_pending, 1);
-	app_radio_p2p_send_telemetry();
 }
 
 #if defined(CONFIG_SHELL)

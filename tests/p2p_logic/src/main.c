@@ -1105,6 +1105,21 @@ ZTEST(p2p_logic, test_no_fresh_frame_while_an_ack_retry_is_pending)
 	p2p_test_tx_reset();
 }
 
+/* LoRaWAN parity: an empty clock_sync forces no uplink -- like LoRaWAN's
+ * DeviceTimeReq it waits for the next regular uplink, whose Ack time tail then
+ * sets the RTC and triggers the Info with the command's seq. */
+ZTEST(p2p_logic, test_clock_sync_forces_no_uplink)
+{
+	p2p_test_join_setup(7);
+	p2p_test_set_paired();
+	p2p_test_tx_reset();
+	int calls = g_compose_budget_calls;
+
+	app_radio_p2p_clock_sync(17);
+	k_sleep(K_MSEC(50)); /* a forced send would run on m_work_q by now */
+	zassert_equal(g_compose_budget_calls, calls, "clock_sync must not compose an uplink");
+}
+
 /* LoRaWAN parity: a response / alarm queued while the node is not paired
  * (joining, self-heal) stays queued instead of being dropped. */
 ZTEST(p2p_logic, test_frames_queued_while_unpaired_are_kept)

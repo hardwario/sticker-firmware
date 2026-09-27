@@ -30,7 +30,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | NFC | ~~**New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2)~~ — superseded before release by `get_radio_state` (#446, §24): the fields moved out of Info. |
 | History | **Fix** — record timestamps follow the RTC (F27/F28, H-4): report cadence on wall-clock slots, no capture skipped during a replay, each flash page stamped from the RTC (a reboot / power loss / halt is a gap, not a shift), page header v2 keeps a clock-sync fix-up across reboots, the replay ends with the window's last frame. HistoryFrame protocol unchanged. See §21. |
 | LoRaWAN | **Fix** — the M-2 stale-uplink watchdog no longer forces a rejoin while the duty cycle is refusing sends (F29): a rejoin reset the band credits and let the device exceed the 1 % limit. See §22. |
-| Radio: P2P | **New** — LoRaWAN ↔ P2P parity, part 1 (#448): the boot / join `Info` + settings-info announce is one `app_radio` path for both radios (P2P announced nothing before); `force_send` / `sample` / `buzzer_play` / `clock_sync` work over P2P; `lrw_join` re-joins P2P without a reboot; every P2P command gets a `0x55` answer. See §23. |
+| Radio: P2P | **New** — LoRaWAN ↔ P2P parity, part 1 (#448): the boot / join `Info` + settings-info announce is one `app_radio` path for both radios (P2P announced nothing before); `force_send` / `sample` / `buzzer_play` / `clock_sync` work over P2P and answer as over LoRaWAN; `lrw_join` re-joins P2P without a reboot. See §23. |
 | LoRaWAN / P2P / NFC | **New** — `get_radio_state` (#446): one `RadioState` for both radios — link state, radio parameters, both link directions, session, failure streak, duty cycle, counters since boot — on request only, paged like every answer. Info no longer carries `lrw_state` / `last_dl_*`. See §24. |
 | Radio: P2P | **Fix / New** — LoRaWAN ↔ P2P parity, part 2 (#449): frames leave in counter order (F-P1-1: one confirmed uplink in flight + 1 s gap), queues survive an unpaired phase, refused telemetry is retried then reset, the fleet jitter and the M-2 watchdog policy are shared, reset tiers clear the P2P pairing, `BUDGET_TOO_SMALL` over P2P, `p2p-*` readable via GetConfig/GetParam. See §25. |
 
@@ -1250,17 +1250,18 @@ application layers reach the radio only through `app_radio`.
 - **Commands on P2P.** `force_send`, `sample`, `buzzer_play` and `clock_sync`
   are allowed over P2P (only the transport gates stood in the way).
   `clock_sync` goes through `app_radio_clock_sync(seq)`: LoRaWAN keeps
-  DeviceTimeReq + the deferred Info; P2P sends an uplink now and answers with
-  the seq-carrying Info once its Ack (time tail) has been processed. A bare
-  `clock_sync` over NFC still acks the phone.
+  DeviceTimeReq + the deferred Info; P2P likewise forces no uplink and answers
+  with the seq-carrying Info once the next regular uplink's Ack (time tail) has
+  been processed. A bare `clock_sync` over NFC still acks the phone.
 - **`lrw_join` = `app_radio_rejoin()`** on every path (NFC action, LoRaWAN and
   P2P post-command): on P2P a fresh join handshake without a reboot instead of
   "ignored".
-- **Every P2P command gets a `0x55` (F-P1-2).** The P2P central retires a
-  delivered `0x56` only on a `0x55` with the same seq; `force_send` / `sample`
-  answered with their telemetry only, so they were re-delivered and
-  re-measured forever. `app_radio_needs_command_answer()` (P2P yes, LoRaWAN
-  no) makes them answer with an Ack carrying the seq; LoRaWAN is unchanged.
+- **Answers as over LoRaWAN.** `force_send` / `sample` answer with their
+  telemetry uplink only, on both radios. The P2P central retires a delivered
+  `0x56` on a `0x55` with the same seq, and a command with no command-port
+  answer on the node's next uplink (proximos PN-4, Hub c43+). Before PN-4 such
+  a command was re-delivered and re-measured forever (F-P1-2); the interim
+  node-side Ack was dropped again for LoRaWAN parity.
 
 Hardware (0413, P2P night test 2026-09-26/27, Hub c43+): `clock_sync` seq 17 →
 Info seq 17 with a synced time; `lrw_join` seq 18 → Ack, JoinRequest, new
