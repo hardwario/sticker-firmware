@@ -24,7 +24,7 @@ Base: `hynek/radio-t2` (#459, T2a: one radio work queue), which is stacked on #4
 | Downlink = success | any downlink (#458) | any Ack |
 | Post-command actions | 9 actions, drain-wait 8 s × 6 on 2 signals | 5 actions, drain-wait on 4 signals; NFC has a third table in `main.c` |
 | Page stream | ≥ 2 free answer slots, 2 s pace | empty TX queue, 2 s pace |
-| History replay | cursor/cap/8 retries/3 s gap/15 s retry, DR-driven cap | same machine copied, fixed cap |
+| History replay | cursor/cap/8 retries/3 s gap/15 s retry, DR-driven cap | same machine copied, fixed cap — **one machine since F3c** |
 | clock_sync answer | Info on `LORAWAN_TIME_UPDATED` | Info on an Ack with the time tail — **common entry since F1** |
 | M-2 stale watchdog + duty hold | heartbeat in the backend | own copy |
 | Announce retry | 15 s | 5 s |
@@ -58,7 +58,6 @@ struct app_radio_backend {
 	bool (*tx_ready)(void);         /* the link carries uplinks now */
 	uint8_t (*report_flags)(void);  /* a report starts: CONFIRMED / LINK_CHECK */
 	void (*report_done)(void);      /* the last frame of a report left */
-	bool (*replay_active)(void);    /* a history replay owns the radio */
 	uint8_t confirm_kinds;          /* kinds sent confirmed: LRW none, P2P answer/alarm/history */
 	uint16_t frame_gap_ms;          /* between the frames of a report: LRW 3 s, P2P 0 */
 };
@@ -91,7 +90,7 @@ struct app_radio_frame { uint8_t kind, tag, port, flags; uint16_t len; uint8_t *
 - **Queues:** answers 4, alarms 4, 64 B slots (decision 10: "4+4"), in `app_radio.c`. The frame being sent is taken off its queue and kept until it left or was given up, so a retry keeps the order. A page stream leaves two answer slots free.
 - **Telemetry** stays a coalescing request (#340 M5): requests before the report left fold into it; a request that arrives while a report is on the air is a new report after it. It is composed frame by frame at send time against the budget of that moment; `report_flags()` is asked once per report, and the link check rides the first frame only (#188).
 - **Budget 0** (pending LoRaWAN MAC answers fill the frame, H-1): an empty telemetry frame flushes the MAC; mid-report the report ends with a snapshot reset.
-- **History** stays the backends' replay state machine until F3 (§2.5). It holds telemetry while it runs, never answers or alarms.
+- **History** is one replay state machine in `app_radio` since F3c (§2.5). It holds telemetry while it runs, never answers or alarms.
 - **One scheduler work item** on the radio work queue sends one frame per run: the frame a retry waits for, then answer > alarm > telemetry (> history after F3). The first report after a link-up therefore follows the Info, settings-info and held alarms on either radio.
 - **Refused-frame rule:** at most 8 counted retries, 15 s apart. After that the frame is abandoned; an abandoned telemetry frame always calls `app_compose_reset()`.
   - This fixes the P2P drop on a hard error, and P2P's missing `app_compose_reset()`.
@@ -146,7 +145,7 @@ Implemented in `app_radio.c` ("Link supervision" block); tests in `tests/radio_c
 
 ### 2.5 Downlink path (F3 = T4)
 
-F3a/F3b are implemented (39cb04a); F3c and F3d are next.
+F3a/F3b are implemented (39cb04a), F3c too; F3d is next.
 
 - **Commands:** a backend hands each authenticated command to `app_radio_downlink(buf, len)` on the radio work queue. LoRaWAN drains `m_dl_msgq`; P2P calls it from `recv_ack()`.
   - It calls `app_cmd_handle(transport, cap)`. The transport comes from the backend op `cmd_transport` (`APP_CMD_TRANSPORT_LRW` / `_P2P`), and the cap from `app_radio_tx_answer_cap()`.
@@ -161,7 +160,31 @@ F3a/F3b are implemented (39cb04a); F3c and F3d are next.
 - **Announce:** Info → settings-info → first telemetry (#452), now in `app_radio`.
   - A retry every 5 s only re-checks queue room, and the announce waits for a running page stream.
   - The backends only call `app_radio_announce_kick()`; LoRaWAN does so on a DR change.
-- **Next, F3c:** history replay as one state machine (cursor, per-frame cap from `budget()`, 8 retries, 3 s gap / 15 s retry, finish → report kick). The re-entrancy guard from P2P B8 stays.
+- **History replay (F3c):** `app_radio_history_replay_start(from, to, seq)` is the only entry; `app_cmd` calls it for ReqHistory over either radio.
+  - One frame per run of the radio work queue, 3 s apart, confirmed where the backend confirms `APP_RADIO_FRAME_HISTORY` (P2P).
+  - An absolute cursor from `app_history_span()`, so a ring rollover under a running replay neither repeats nor skips records.
+  - The frame cap comes from `budget()` per frame. The frame count is taken twice (#409 3f): once unbounded, then with the bound set to that count, so the header varints of the first frame match the rest.
+  - A refused frame is retried 15 s later (or after the backend's duty wait), at most 8 times; then the replay is abandoned. `-EBUSY` waits for the scheduler kick, `-ENOTCONN` abandons.
+  - Budget 0 (MAC answers fill the frame, H-1) sends an empty frame to flush the MAC and retries the same frame.
+  - Records left but none fits the budget: `Error BUDGET_TOO_SMALL` with the request's seq, then the end.
+  - It ends on cursor exhaustion (#89 / H-4), then kicks the scheduler and the ready callback, so the held telemetry goes out.
+  - Each frame refreshes the M-2 stale-uplink clock. A link-up (`app_radio_link_up()`) drops a running replay: the new session starts clean.
+  - One stream at a time: a request while one runs gets 0 and changes nothing. This also covers the P2P 0x56 re-delivered from inside a frame's own send (the B8 guard).
+- **F3c behaviour changes:**
+  - LoRaWAN ignores a new ReqHistory while a replay runs; it used to restart it.
+  - P2P retries a refused frame 8 times instead of abandoning the replay, and uses the tightened frame bound.
+  - Abandoning a replay always kicks the report; LoRaWAN did not.
+  - A LoRaWAN MAC flood mid-replay flushes and retries the frame; it used to end the replay.
+  - The LoRaWAN drop on entering JOINING is replaced by the `tx_ready()` check and the drop on link-up.
+- **F3c footprint** (against 4962c83):
+
+  | Image | Flash | RAM |
+  |---|---|---|
+  | release, both radios | 181716 B (−560) | 55808 B (−384) |
+  | debug, LoRaWAN only | 234944 B (+192) | 63388 B (+256) |
+  | bench, P2P only | 216768 B (+616) | 56272 B (±0) |
+
+  The debug RAM growth is the 256 B sample buffer, which LoRaWAN kept on the work-queue stack and the common code keeps static, as P2P did. The P2P-only image gains the LoRaWAN parts it lacked: the tightened bound, the budget error, the budget-0 flush and the retries.
 - **Next, F3d:** clock_sync as a backend `time(unix)` event (LoRaWAN `LORAWAN_TIME_UPDATED`, the P2P Ack time tail). The "landed < 60 s ago" fast path is F1.
 - **Footprint (release):** 180872 B flash / 55104 B RAM, against 179528 / 55232 for F2. About 2 KB of the flash growth is LTO inlining into `app_cmd_handle_set_param`.
 
