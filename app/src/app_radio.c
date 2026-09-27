@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "app_alarm.h"
 #include "app_clock.h"
 #include "app_cmd.h"
 #include "app_config.h"
@@ -32,6 +33,9 @@ LOG_MODULE_REGISTER(app_radio, LOG_LEVEL_INF);
 
 static struct k_work_delayable m_jitter_work;
 static void jitter_work_handler(struct k_work *work);
+/* The boot/join announce waits out the same fleet jitter (below). */
+static struct k_work_delayable m_announce_jitter_work;
+static void announce_jitter_work_handler(struct k_work *work);
 
 /* Kept out of a static entirely when CONFIG_RADIO_P2P=n: with P2P not even
  * compiled in, the radio is always running LoRaWAN by construction (radio_mode's
@@ -50,6 +54,7 @@ static inline bool is_p2p(void)
 int app_radio_init(void)
 {
 	k_work_init_delayable(&m_jitter_work, jitter_work_handler);
+	k_work_init_delayable(&m_announce_jitter_work, announce_jitter_work_handler);
 
 #if defined(CONFIG_RADIO_P2P)
 	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_P2P) {
@@ -309,10 +314,80 @@ uint8_t app_radio_get_max_payload(void)
 #endif
 }
 
+/* Boot/join order (Hynek, 2026-09-27): after a link-up the node sends the Info,
+ * then the settings-info, then its first telemetry -- always in that order.
+ * The announce spread moves the start of the whole sequence, never one frame
+ * of it. From app_radio_announce() until every announce page has been handed
+ * to the backend (m_seq_closed), data waits: a report is held and leaves right
+ * after the announce with no jitter of its own, and app_alarm holds its batch
+ * (app_radio_data_hold_ms()) until seq_release() flushes it, ahead of the
+ * report. Each backend sends queued answers and alarms before telemetry, so
+ * the air order follows. Held data goes anyway once ANNOUNCE_HOLD_MAX_MS pass
+ * after the spread, so an announce that cannot get out (no budget, no room)
+ * never silences the node. */
+#define ANNOUNCE_HOLD_MAX_MS 60000
+
+static atomic_t m_seq_closed;     /* the boot/join sequence is still announcing */
+static atomic_t m_seq_deadline;   /* uptime (ms, u32) after which a held report goes */
+static atomic_t m_telemetry_held; /* a report waits for the announce */
+
+/* The backend's queued answers have left. P2P shares one small TX queue
+ * between answers and alarms, so data is released only once the announce
+ * frames are out of it -- an alarm queued behind them was dropped as "TX queue
+ * full" (HIL 2026-09-27). LoRaWAN queues alarms separately and drains answers
+ * first, so it needs no wait. */
+static bool backend_tx_idle(void)
+{
+#if defined(CONFIG_RADIO_P2P)
+	if (is_p2p()) {
+		return app_radio_p2p_tx_idle();
+	}
+#endif
+	return true;
+}
+
+/* ms the boot/join sequence still holds data (0 = none). */
+static int32_t seq_hold_ms(void)
+{
+	if (!atomic_get(&m_seq_closed)) {
+		return 0;
+	}
+
+	int32_t left = (int32_t)((uint32_t)atomic_get(&m_seq_deadline) - (uint32_t)k_uptime_get());
+
+	return MAX(left, 0);
+}
+
+int32_t app_radio_data_hold_ms(void)
+{
+	if (!app_radio_is_ready()) {
+		return -1; /* the next link-up's announce releases it */
+	}
+	return seq_hold_ms();
+}
+
+static void seq_release(void)
+{
+	if (!atomic_cas(&m_seq_closed, 1, 0)) {
+		return;
+	}
+	/* Alarms first, then the report: both work items run on the system work
+	 * queue in this order. */
+	app_alarm_flush_held();
+	if (atomic_cas(&m_telemetry_held, 1, 0)) {
+		k_work_reschedule(&m_jitter_work, K_NO_WAIT);
+	}
+}
+
 /* The backend composes and sends at once; the delay was taken here. */
 static void jitter_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
+
+	if (atomic_cas(&m_telemetry_held, 1, 0) && atomic_get(&m_seq_closed)) {
+		LOG_WRN("Announce not out after %d s: telemetry goes first",
+			ANNOUNCE_HOLD_MAX_MS / 1000);
+	}
 #if defined(CONFIG_RADIO_P2P)
 	if (is_p2p()) {
 		app_radio_p2p_send_telemetry();
@@ -324,14 +399,42 @@ static void jitter_work_handler(struct k_work *work)
 #endif
 }
 
-void app_radio_send_telemetry(void)
+/* A random delay of up to min(interval_report / 10, TX_JITTER_MAX_SEC). */
+static uint32_t fleet_jitter_ms(void)
 {
 	uint32_t span_ms = (uint32_t)g_app_config.interval_report * 100U; /* interval/10 */
 
 	span_ms = MIN(span_ms, (uint32_t)TX_JITTER_MAX_SEC * 1000U);
-	uint32_t delay_ms = span_ms ? (sys_rand32_get() % span_ms) : 0U;
+	return span_ms ? (sys_rand32_get() % span_ms) : 0U;
+}
 
-	k_work_reschedule(&m_jitter_work, K_MSEC(delay_ms));
+void app_radio_send_telemetry(void)
+{
+	int32_t hold_ms = seq_hold_ms();
+
+	if (hold_ms > 0) {
+		/* Follows the announce (seq_release()); the timer is the fallback
+		 * only. */
+		atomic_set(&m_telemetry_held, 1);
+		k_work_reschedule(&m_jitter_work, K_MSEC(hold_ms));
+		return;
+	}
+	k_work_reschedule(&m_jitter_work, K_MSEC(fleet_jitter_ms()));
+}
+
+/* The boot/join announce is a burst (Info + settings-info pages + the first
+ * telemetry, ~4 frames / ~5 s on P2P), so it spreads wider than one uplink:
+ * up to min(interval_report / 2, ANNOUNCE_JITTER_MAX_SEC). The 6 s of the
+ * telemetry jitter at a 60 s interval still let two Nodes rebooted together
+ * overlap and starve each other's retries (F-P2P-4, 2026-09-27). */
+#define ANNOUNCE_JITTER_MAX_SEC 30
+
+static uint32_t announce_jitter_ms(void)
+{
+	uint32_t span_ms = (uint32_t)g_app_config.interval_report * 500U; /* interval/2 */
+
+	span_ms = MIN(span_ms, (uint32_t)ANNOUNCE_JITTER_MAX_SEC * 1000U);
+	return span_ms ? (sys_rand32_get() % span_ms) : 0U;
 }
 
 void app_radio_send_telemetry_now(void)
@@ -416,6 +519,9 @@ void app_radio_suspend(void)
 #define ANNOUNCE_BUF_SIZE 64
 
 static atomic_t m_announce;
+/* Uptime (ms, truncated to 32 bits) before which the announce does not start:
+ * the fleet jitter of app_radio_announce(). */
+static atomic_t m_announce_not_before;
 
 /* Have the backend call app_radio_announce_run() on its work queue. */
 static void announce_kick(void)
@@ -504,15 +610,33 @@ static int announce_frame(bool settings, uint32_t seq)
 	return 0;
 }
 
+static void announce_jitter_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	announce_kick();
+}
+
 void app_radio_announce(void)
 {
+	/* Fleet de-correlation for the announce too: nodes rebooted by one batch
+	 * of commands, or by a power outage, would otherwise all send their Info +
+	 * settings-info at the same moment and collide on the channel (Northbridge
+	 * "Busy", P2P 2026-09-27). */
+	uint32_t delay_ms = announce_jitter_ms();
+	uint32_t now = (uint32_t)k_uptime_get();
+
+	atomic_set(&m_announce_not_before, (atomic_val_t)(now + delay_ms));
+	atomic_set(&m_seq_deadline, (atomic_val_t)(now + delay_ms + ANNOUNCE_HOLD_MAX_MS));
+	atomic_set(&m_seq_closed, 1);
 	atomic_or(&m_announce, ANNOUNCE_INFO | ANNOUNCE_SETTINGS);
-	announce_kick();
+	k_work_reschedule(&m_announce_jitter_work, K_MSEC(delay_ms));
 }
 
 bool app_radio_announce_pending(void)
 {
-	return atomic_get(&m_announce) != 0;
+	/* Also while the last announce pages are still streaming: the run that
+	 * follows the stream's end releases the held telemetry. */
+	return atomic_get(&m_announce) != 0 || atomic_get(&m_seq_closed) != 0;
 }
 
 void app_radio_announce_rearm(bool settings)
@@ -526,6 +650,10 @@ bool app_radio_announce_run(void)
 
 	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
 		return false; /* the next link-up re-announces from scratch */
+	}
+	if ((int32_t)((uint32_t)atomic_get(&m_announce_not_before) - (uint32_t)k_uptime_get()) >
+	    0) {
+		return true; /* still in the fleet jitter; its work item kicks us */
 	}
 	if (app_cmd_stream_active()) {
 		return true; /* run again when the running page stream ends */
@@ -546,7 +674,17 @@ bool app_radio_announce_run(void)
 			LOG_INF("Settings-info announced");
 		}
 	}
-	return atomic_get(&m_announce) != 0;
+	if (atomic_get(&m_announce) != 0) {
+		return true;
+	}
+	if (app_cmd_stream_active()) {
+		return true; /* settings-info pages still streaming */
+	}
+	if (!backend_tx_idle()) {
+		return true; /* the backend runs us again once its queue drained */
+	}
+	seq_release(); /* the announce is out: alarms, then the first telemetry */
+	return false;
 }
 
 int app_radio_send_info(uint32_t seq)

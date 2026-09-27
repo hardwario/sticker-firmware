@@ -715,10 +715,24 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
 - **Boot / join announce (#448, plan 439 T3):** when the link comes up -- a
   boot with a persisted pairing (no JoinRequest) or any JoinAccept -- the node
   sends its `Info` (seq 0) and the #412 settings-info `ConfigDump` (seq 0) as
-  unsolicited `0x55` frames, paged for the 64 B response slot (#425), before
-  the first telemetry. This is one path in `app_radio` shared with LoRaWAN's
-  join announce; the central decodes an unsolicited `0x55` (its correlation
-  keeps the queue head when the seq does not match).
+  unsolicited `0x55` frames, paged for the 64 B response slot (#425), after a
+  random spread of up to min(interval_report / 2, 30 s) so that nodes rebooted
+  together -- by one config batch or a power outage -- do not all transmit at
+  once (two Nodes rebooted within a second starved each other's retries,
+  F-P2P-4, 2026-09-27). **The order is fixed: Info, settings-info, then data**
+  (alarms, then the first telemetry). The spread moves the start of the whole
+  sequence, never one frame of it: an alarm batch (a latched alarm re-raised
+  after the reboot included) and the first report are held until every
+  announce page has left the TX queue (the queue holds two frames; an alarm
+  queued behind the announce was dropped) -- alarms also while the link is
+  down -- and then leave at once, the alarm first and the report without a
+  jitter of its own.
+  Held data goes 60 s after the spread at the latest, so a stuck announce
+  never silences the node. Queued answers and alarms always go before
+  telemetry, as LoRaWAN's priority drain does, so an announce frame that needs
+  a retry keeps its place. This is one path in `app_radio`
+  shared with LoRaWAN's join announce; the central decodes an unsolicited
+  `0x55` (its correlation keeps the queue head when the seq does not match).
 - **Command correlation (`seq`)**: the `0x56` body is the same fPort-85
   `Command` protobuf, and the central stamps every structured one with a
   nonzero `seq` from its per-node allocator. The node echoes it without doing

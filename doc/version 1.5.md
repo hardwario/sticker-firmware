@@ -1245,7 +1245,14 @@ application layers reach the radio only through `app_radio`.
   pending / deferred logic (DR rise, page-stream end, over-budget re-arm), now
   live in `app_radio` (`app_radio_announce()` / `_run()` / `app_radio_send_info()`).
   LoRaWAN calls it on join success, P2P on every link-up — a boot with a
-  persisted pairing and every JoinAccept. P2P used to announce nothing, so the
+  persisted pairing and every JoinAccept. The announce is spread randomly over
+  up to min(interval_report / 2, 30 s), so nodes rebooted together do not all
+  transmit at once; the spread moves the whole sequence, whose order is fixed on
+  both radios: **Info → settings-info → data**. An alarm batch (a latched alarm
+  re-raised after the reboot included) and the first report wait for the
+  announce — alarms also while the link is down — then the alarm goes first and
+  the report without a jitter of its own (60 s after the spread at the latest);
+  P2P sends queued answers and alarms before telemetry like LoRaWAN. P2P used to announce nothing, so the
   Hub never learned the device info / config of a P2P node without polling.
 - **Commands on P2P.** `force_send`, `sample`, `buzzer_play` and `clock_sync`
   are allowed over P2P (only the transport gates stood in the way).

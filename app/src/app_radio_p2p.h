@@ -350,6 +350,8 @@ void app_radio_p2p_clock_sync(uint32_t seq);
  * doc/plan/439 T3): run it on m_work_q, the response budget, queue an announce
  * frame (a 0x55 RESPONSE with seq 0), start the page stream. */
 void app_radio_p2p_announce_kick(void);
+/* Nothing is queued or parked for the radio (answers, alarms). */
+bool app_radio_p2p_tx_idle(void);
 size_t app_radio_p2p_response_cap(size_t buf_size);
 int app_radio_p2p_queue_announce(bool settings, const uint8_t *buf, size_t len);
 void app_radio_p2p_page_stream_kick(void);

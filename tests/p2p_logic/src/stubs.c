@@ -302,3 +302,8 @@ bool app_radio_announce_run(void)
 {
 	return false;
 }
+
+bool app_radio_announce_pending(void)
+{
+	return false;
+}
