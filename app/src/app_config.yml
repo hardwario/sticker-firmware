@@ -293,7 +293,7 @@ commands:
     - {name: get_settings, proto_id: 31, body: GetSettings, kind: handler, response: config_dump}
     # get_radio_state (#446): link state + diagnostics of the active radio
     # (Response.radio_state). The only way to read them -- not part of Info, so
-    # never in the boot / 24 h announce either. Paged like every answer (#425): streamed over LoRaWAN/P2P,
+    # never in the boot / join announce either. Paged like every answer (#425): streamed over LoRaWAN/P2P,
     # GetRadioState.page over NFC/vendor/shell. Read-only, non-secret -- all
     # transports.
     - {name: get_radio_state, proto_id: 32, body: GetRadioState, kind: handler, response: radio_state}
@@ -590,9 +590,10 @@ parameters:
     persistent: [device_reset]
     help: "Get/Set manual uplink datarate (auto, dr0-dr7). Applied after join, only with ADR off; auto = stack default."
 
-  # 2026-09-27: renamed from lrw_link_check_* -- link-check is shared by both
-  # radios through app_radio (LoRaWAN LinkCheckReq / P2P confirmed link-check
-  # uplink). proto_group/proto_id are UNCHANGED (wire-compatible with the
+  # 2026-09-27: renamed from lrw_link_check_* -- carrier-neutral names for the
+  # link supervision both radios are to share through app_radio (decision #22).
+  # Today only LoRaWAN reads them; P2P keeps its own fixed thresholds until its
+  # link-health machine lands. proto_group/proto_id are UNCHANGED (wire-compatible with the
   # deployed LoRaWAN fleet; Hub/Portal only use field numbers on the wire).
   # legacy_names covers the one-shot NVS migration (old settings key ->
   # new field) generated into h_set()/init() -- see config.c.j2.
@@ -605,7 +606,7 @@ parameters:
     min: 0
     max: 255
     legacy_names: [lrw_link_check_interval]
-    help: "Get/Set link-check cadence, shared by both radios: request a LoRaWAN LinkCheckReq (or a confirmed P2P link-check uplink) every N-th uplink (0 = disabled)."
+    help: "Get/Set link-check cadence: request a LoRaWAN LinkCheckReq every N-th uplink (0 = disabled). P2P does not use it yet."
 
   - name: radio_link_check_fail_rejoin
     proto_group: lorawan
@@ -616,7 +617,7 @@ parameters:
     min: 1
     max: 255
     legacy_names: [lrw_link_check_fail_rejoin]
-    help: "Get/Set link-check failures (while degraded) before the radio link is re-established -- a LoRaWAN OTAA rejoin, or the P2P equivalent. Shared by both radios."
+    help: "Get/Set link-check failures (while degraded) before a LoRaWAN OTAA rejoin is attempted. P2P does not use it yet."
 
   - name: cap_hall_left
     proto_group: sensors

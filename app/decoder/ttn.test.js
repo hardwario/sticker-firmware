@@ -1205,3 +1205,15 @@ test("set_param alarms_replace encodes field 6 and round-trips", () => {
   assert.equal(dec.data.command, "set_param");
   assert.equal(dec.data.set_param.alarms_replace, true);
 });
+
+test("lorawan link-check fields: old names still encode (v1.5.0 rename alias)", () => {
+  const oldEnc = codec.encodeDownlink({ data: { command: "set_param", seq: 3,
+    set_param: { lorawan: { link_check_interval: 7, link_check_fail_rejoin: 4 } } } });
+  const newEnc = codec.encodeDownlink({ data: { command: "set_param", seq: 3,
+    set_param: { lorawan: { radio_link_check_interval: 7, radio_link_check_fail_rejoin: 4 } } } });
+  assert.deepEqual(oldEnc.errors || [], []);
+  assert.deepEqual(oldEnc.bytes, newEnc.bytes, "same tags 13/14 on the wire");
+  const dec = codec.decodeDownlink({ fPort: 85, bytes: newEnc.bytes }).data;
+  assert.equal(dec.set_param.lorawan.radio_link_check_interval, 7);
+  assert.equal(dec.set_param.lorawan.radio_link_check_fail_rejoin, 4);
+});

@@ -1927,11 +1927,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	              cmd_lrw_datarate, 1, 1),
 
 	SHELL_CMD_ARG(radio-link-check-interval, NULL,
-	              "Get/Set link-check cadence, shared by both radios: request a LoRaWAN LinkCheckReq (or a confirmed P2P link-check uplink) every N-th uplink (0 = disabled).",
+	              "Get/Set link-check cadence: request a LoRaWAN LinkCheckReq every N-th uplink (0 = disabled). P2P does not use it yet.",
 	              cmd_radio_link_check_interval, 1, 1),
 
 	SHELL_CMD_ARG(radio-link-check-fail-rejoin, NULL,
-	              "Get/Set link-check failures (while degraded) before the radio link is re-established -- a LoRaWAN OTAA rejoin, or the P2P equivalent. Shared by both radios.",
+	              "Get/Set link-check failures (while degraded) before a LoRaWAN OTAA rejoin is attempted. P2P does not use it yet.",
 	              cmd_radio_link_check_fail_rejoin, 1, 1),
 
 	SHELL_CMD_ARG(cap-hall-left, NULL,
@@ -2225,10 +2225,12 @@ static int app_config_init(void)
 	if (legacy_seen) {
 		ret = settings_save_subtree(SETTINGS_PFX);
 		if (ret) {
+			/* Keep the old keys: the next boot migrates again rather
+			 * than losing the stored value to the default. */
 			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
 		}
 
-		for (size_t i = 0; i < ARRAY_SIZE(m_app_config_legacy_keys); i++) {
+		for (size_t i = 0; ret == 0 && i < ARRAY_SIZE(m_app_config_legacy_keys); i++) {
 			if (!m_app_config_legacy_keys[i].seen) {
 				continue;
 			}
