@@ -807,13 +807,16 @@ static void on_downlink_received(void)
 	if (state != APP_RADIO_STATE_HEALTHY && state != APP_RADIO_STATE_WARNING) {
 		return;
 	}
-	if (m_link_check_pending) {
-		/* A received downlink also confirms the link is alive. */
-		on_lc_success();
-		LOG_INF("Connection confirmed via downlink (LC pending)");
-	} else {
-		LOG_INF("Downlink received (no LC pending)");
-	}
+	/* Any authenticated downlink proves the link, as on P2P (decision #22
+	 * §3.4, Hynek 2026-09-27): it counts as a link-check success whether or
+	 * not a LinkCheckReq is outstanding -- the fail streak is cleared and, in
+	 * WARNING, it counts towards the return to HEALTHY. A pending check is
+	 * resolved by it; its late LinkCheckAns then finds nothing pending
+	 * (lc_response_work_handler). Before, a downlink without a pending check
+	 * was only logged, so a WARNING node receiving commands or ADR requests
+	 * stayed in WARNING until its next own link check. */
+	LOG_INF("Link confirmed via downlink%s", m_link_check_pending ? " (LC pending)" : "");
+	on_lc_success();
 }
 
 #if defined(CONFIG_SHELL)
