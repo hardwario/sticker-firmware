@@ -114,18 +114,35 @@ On P2P the budget is fixed, so these paths are dead but harmless.
 
 ### 2.4 Link supervision (F2 = T3)
 
-- **State:** HEALTHY / WARNING / RECONNECT live in `app_radio`. JOINING / IDLE / DISABLED still come from the backend.
-- **Cadence:** `app_radio_link_check_due()`, common since F1. When a check is due, the scheduler calls `request_check()` before the telemetry send.
-- **Outcome:**
-  - The backend reports `link_result(ok)`. It keeps its own answer timeout: LoRaWAN 10 s, P2P the RX1 window.
-  - Any authenticated downlink counts as a success, but only once per uplink cycle. This fixes the #458 double count of a LinkCheckAns.
-- **Thresholds:** 3 failures → WARNING, 1 success → HEALTHY.
+Implemented in `app_radio.c` ("Link supervision" block); tests in `tests/radio_common` (both profiles).
+
+- **State:** WARNING is app_radio's overlay on the backend's HEALTHY: `app_radio_get_state()` returns WARNING while the backend says HEALTHY and the link is degraded. JOINING / RECONNECT / IDLE / DISABLED stay backend states (join and MAC are per carrier).
+- **Backend ops:**
+  - `report_flags(due)`: how a due link check rides a report. LoRaWAN adds a LinkCheckReq unless one is still pending; P2P sends the report CONFIRMED, and a pending clock_sync forces up to 3 reports confirmed.
+  - `get_state()`.
+  - `warning_step()`: one recovery rung. LoRaWAN takes the DR / TX-power ladder; P2P raises TX power 2 dB towards `p2p-tx-power`. Returns false once no rung is left.
+  - `rejoin(forced)`: returns `-ENOTSUP` when it cannot rejoin (LoRaWAN ABP unless forced, P2P unprovisioned).
+- **Outcome:** the backend reports `app_radio_link_result(ok)` and keeps its own answer timeout (LoRaWAN 10 s, P2P the RX1 window plus retries).
+  - Any authenticated downlink counts as a success. Successes are idempotent, so a downlink followed by its LinkCheckAns cannot double count.
+  - While the backend is not HEALTHY, results are ignored (the next `app_radio_link_up()` starts afresh). `APP_RADIO_CNT_FAIL` still counts every failure.
+- **Cadence:** `app_radio_link_check_due(reports, N, warning)`, common since F1. app_radio counts completed reports, resets the count at `app_radio_link_up()`, and passes `due` to `report_flags()`.
+  - `app_radio_force_link_check()` (`ats lrw check`) makes the next report due. It stays armed until a check actually rode.
+- **Thresholds:** 3 failures in a row → WARNING, which takes the first rung at once. 1 success → HEALTHY.
 - **In WARNING:**
-  - every further failure → `warning_step()`;
-  - after `radio-link-check-fail-rejoin` failures → `rejoin(slow = true)` → RECONNECT;
-  - reconnect backoff 60 s ×2 up to 1 h, ±25 % jitter, on both radios;
-  - ABP (`rejoin` returns `-ENOTSUP`) stays in WARNING.
-- **M-2:** the stale-uplink heartbeat and the F29 duty-cycle hold move out of both backends. `app_radio_stale_check()` / `_note()` are already common.
+  - every report is a link check;
+  - every failure first tries `warning_step()`;
+  - a rejoin is never spent while a rung is untried. After `MAX(radio-link-check-fail-rejoin, 1)` failures in WARNING, a failure with no rung left calls `rejoin(false)`;
+  - `-ENOTSUP` stays in WARNING and restarts the budget.
+- **Backoff:** `app_radio_rejoin_backoff_ms()` (60 s ×2, capped at 1 h) and `app_radio_backoff_jitter_ms()` (±25 % of the backoff, never under a floor; P2P passes its duty-cycle wait as the floor). Common to both radios.
+- **M-2:** the stale-uplink watchdog is common:
+  - `app_radio_note_send(sent, duty_held)` feeds the F29 duty hold;
+  - a sent telemetry report, a history frame (`app_radio_note_uplink()`) and a link-up refresh the clock;
+  - staleness calls `rejoin(true)`.
+  - The liveness heartbeat (#182, 5 s tick, 30 s wdog) runs on the radio work queue. Either backend starts it with `app_radio_heartbeat_start()`; P2P feeds it inside its RX window.
+- **Semantic changes:**
+  - P2P now keeps LoRaWAN's rule of no rejoin while a rung is left. Before, it rejoined after `fail-rejoin` failures in WARNING even while TX power was still rising.
+  - P2P keeps the fail streak during RECONNECT until the next link-up, as LoRaWAN does.
+  - LoRaWAN takes the first rung on entering WARNING, and counts its fail streak in `app_radio` (RadioState / `ats radio status`).
 
 ### 2.5 Downlink path (F3 = T4)
 
