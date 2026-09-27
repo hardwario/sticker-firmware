@@ -1367,13 +1367,16 @@ ZTEST(p2p_logic, test_fcnt_normal_advance)
 	zassert_equal(p2p_test_get_fcnt(), 101u, "counter not advanced");
 }
 
+extern int test_settings_save_ret;
+
 ZTEST(p2p_logic, test_fcnt_fail_closed_on_reserve_failure)
 {
 	uint32_t c = 0xDEADBEEF;
 
-	/* At the window edge a durable reserve is required; with CONFIG_SETTINGS_NONE
-	 * the save fails, so fcnt_next must refuse rather than hand out an
+	/* At the window edge a durable reserve is required; with the stub store
+	 * failing its saves, fcnt_next must refuse rather than hand out an
 	 * unreserved counter -- and must NOT advance the counter. */
+	test_settings_save_ret = -EIO;
 	p2p_test_set_fcnt(200, 200);
 	zassert_true(p2p_test_fcnt_next(&c) != 0,
 		     "fcnt_next must fail closed when the reservation can't be persisted");
@@ -1393,6 +1396,34 @@ ZTEST(p2p_logic, test_fcnt_fail_closed_on_reserve_failure)
 		     "not durable, so the window must not be treated as extended");
 	zassert_equal(p2p_test_get_fcnt(), 200u, "counter advanced on the second refusal");
 	zassert_equal(c, 0xDEADBEEFu, "counter_out written on the second refusal");
+	test_settings_save_ret = 0;
+}
+
+/* Review of #400 (M4): the next dev_nonce is persisted BEFORE the JoinRequest
+ * leaves, fail-closed. A dev_nonce the flash does not hold would be presented
+ * again after a reboot, and a recorded JoinAccept for it replayed. */
+ZTEST(p2p_logic, test_join_request_not_sent_without_a_durable_dev_nonce)
+{
+	struct app_radio_p2p_info before, after;
+
+	p2p_test_join_setup(7);
+	app_radio_p2p_get_info(&before);
+
+	test_settings_save_ret = -EIO;
+	p2p_test_join_step();
+	test_settings_save_ret = 0;
+
+	app_radio_p2p_get_info(&after);
+	zassert_equal(after.dev_nonce, before.dev_nonce,
+		      "dev_nonce advanced although it was never persisted");
+
+	uint8_t sf, step, attempts, rejoin;
+	bool slow;
+	enum p2p_link_state state;
+
+	p2p_test_get_join(&sf, &step, &attempts, &slow, &rejoin, &state);
+	zassert_equal(attempts, 0, "a JoinRequest that never left must not use an attempt");
+	p2p_test_join_step(); /* leave nothing armed for the next test */
 }
 
 ZTEST(p2p_logic, test_fcnt_saturates_no_wrap)
