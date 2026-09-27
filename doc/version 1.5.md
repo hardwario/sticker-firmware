@@ -33,6 +33,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Radio: P2P | **New** — LoRaWAN ↔ P2P parity, part 1 (#448): the boot / join `Info` + settings-info announce is one `app_radio` path for both radios (P2P announced nothing before); `force_send` / `sample` / `buzzer_play` / `clock_sync` work over P2P and answer as over LoRaWAN; `lrw_join` re-joins P2P without a reboot. See §23. |
 | LoRaWAN / P2P / NFC | **New** — `get_radio_state` (#446): one `RadioState` for both radios — link state, radio parameters, both link directions, session, failure streak, duty cycle, counters since boot — on request only, paged like every answer. Info no longer carries `lrw_state` / `last_dl_*`. See §24. |
 | Radio: P2P | **Fix / New** — LoRaWAN ↔ P2P parity, part 2 (#449): frames leave in counter order (F-P1-1: one confirmed uplink in flight + 1 s gap), queues survive an unpaired phase, refused telemetry is retried then reset, the fleet jitter and the M-2 watchdog policy are shared, reset tiers clear the P2P pairing, `BUDGET_TOO_SMALL` over P2P, `p2p-*` readable via GetConfig/GetParam. See §25. |
+| LoRaWAN / P2P | **Renamed** — `lrw-link-check-interval` / `lrw-link-check-fail-rejoin` → `radio-link-check-interval` / `radio-link-check-fail-rejoin`: link supervision is shared by both radios. Wire-compatible (same `lorawan` group fields 13/14); a stored value migrates on the first boot. See §26. |
 
 ---
 
@@ -497,9 +498,9 @@ When the network disappears (gateway off, or the device moved out of reach of it
 
 | | Before | After |
 |---|---|---|
-| Link check in `WARNING` | every `lrw-link-check-interval`-th report | **every report** (`lrw-link-check-interval 0` still disables link checks) |
+| Link check in `WARNING` | every `radio-link-check-interval`-th report | **every report** (`radio-link-check-interval 0` still disables link checks) |
 | DR fallback | only through the OTAA rejoin (MAC reset to the join DR). LoRaMac's own ADR backoff needs 128 unanswered uplinks for its first step (~32 h at 900 s) | **Recovery ladder**: entering `WARNING` and every later failed check restore the default (max) TX power and drop the DR by one step. A check that succeeds on the lower DR returns to `HEALTHY` with the same session. |
-| Rejoin | after `lrw-link-check-fail-rejoin` failures in `WARNING` | after that many failures **and** once the ladder is at the floor (region minimum DR, default TX power) |
+| Rejoin | after `radio-link-check-fail-rejoin` failures in `WARNING` | after that many failures **and** once the ladder is at the floor (region minimum DR, default TX power) |
 | Link loss → rejoin (EU868 from DR5, defaults 900 s / LC 5 / 5) | ≈ 9–10 h | ≈ 4–5 h |
 | US915/AU915 sub-band | set only as the active channel mask at boot. After ~8 failed joins, JoinRequests spread over all 8 sub-bands (~1 in 8 hit an 8-channel gateway). | also set as the LoRaMac **default** mask and re-applied after each rejoin's MAC re-init |
 
@@ -1340,6 +1341,34 @@ The rest of the parity list (doc/plan/439 T2–T5 subset), all through
 
 Hardware (0413, 2026-09-27): boot announce Info / settings-info / telemetry and a
 live `join` announce each acked on the first try, ~1.1 s apart; no replay.
+
+## 26. Link-check parameters renamed to `radio-link-check-*`
+
+Link supervision (periodic link check, `WARNING` after 3 misses, re-link after
+N more) is one policy for both radios, so its two parameters drop the `lrw-`
+prefix (ProXimos decision #22):
+
+| Before (v1.4.x) | v1.5.0 | Default | Meaning |
+|---|---|---|---|
+| `lrw-link-check-interval` | `radio-link-check-interval` | 5 | Link check every N-th report (0 = off) |
+| `lrw-link-check-fail-rejoin` | `radio-link-check-fail-rejoin` | 5 | Failures while `WARNING` before the link is re-established (LoRaWAN: OTAA rejoin) |
+
+- **Wire-compatible.** Still `lorawan` group fields **13 / 14** in
+  `AppConfigMessage`; only the proto field names change
+  (`link_check_interval` → `radio_link_check_interval`,
+  `link_check_fail_rejoin` → `radio_link_check_fail_rejoin`). Hosts that
+  address fields by number need no change; the TTN decoder uses the new names.
+  Same writability as before (`shell`, `nfc`; never over a radio downlink).
+- **Shell:** `config radio-link-check-interval <n>`; the old command names are gone.
+- **Scope today:** the parameters drive LoRaWAN link supervision (§12). P2P
+  adopts the same two parameters with its link-health machine (follow-up
+  change); until then P2P ignores them.
+- **Stored value migrates.** configen gained `legacy_names:` in
+  `app_config.yml`: on the first boot after the update, a value stored under the
+  old settings key is loaded into the renamed field, saved under the new key and
+  the old key is deleted (`Migrated legacy setting config/lrw-link-check-...`
+  in the log). Later boots find nothing to migrate. A downgrade to v1.4.x reads
+  the defaults for both parameters.
 
 ---
 

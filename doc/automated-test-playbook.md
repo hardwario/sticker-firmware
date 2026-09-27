@@ -250,7 +250,7 @@ incl. `decoded_payload` from `ttn.js`), `mcp__tts__send_downlink` (`f_port`, hex
   `LinkCheckAns` (margin 26 dB, 2 gateways), and the session then held **HEALTHY on the same
   DevAddr for 438 s / 9 uplinks with zero link-check failures** (`healthy->warning: 0/3`
   throughout). **On the same bench, ChirpStack (`hm-sticker-otaa-cs`) showed the opposite**: a
-  freshly release-flashed device with stock `lrw-link-check-interval`/`lrw-link-check-fail-rejoin`
+  freshly release-flashed device with stock `radio-link-check-interval`/`radio-link-check-fail-rejoin`
   defaults (both `5`, per `app_config.yml`) rejoined OTAA (fresh DevAddr each time) roughly every
   5-16 minutes, with device uptime climbing continuously across rejoins (confirmed via
   `unix_time - uptime_s` staying self-consistent — this is LoRaWAN-layer RECONNECT churn, not
@@ -558,7 +558,7 @@ source of truth — read it before testing so parameter names/ranges are current
 ### AT-CFG-01 — shell round-trip on a representative sample (D, A; maps C8)
 - **Steps:** for each of: `interval-report` (int, 60–86400), `interval-sample` (5–3600 or 0),
   `battery-level` (1000–3600), `history-enable` (bool), `accel-motion-sensitivity` (enum),
-  `lrw-adr` (bool), `lrw-link-check-interval` (0–255): set a non-default valid value →
+  `lrw-adr` (bool), `radio-link-check-interval` (0–255): set a non-default valid value →
   read back → `settings save` (reboots) → read back again.
 - **Expect:** staged value visible before save; persisted after reboot.
 - **Cleanup:** restore defaults, save.
@@ -674,8 +674,8 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
   functional suite.
 
 ### AT-LRW-07 — link-check state machine (D, A; maps L7, L8, L13)
-- **Pre:** ChirpStack (answers LinkCheckReq); `lrw-link-check-interval 5`,
-  `lrw-link-check-fail-rejoin 5` or run-plan values.
+- **Pre:** ChirpStack (answers LinkCheckReq); `radio-link-check-interval 5`,
+  `radio-link-check-fail-rejoin 5` or run-plan values.
 - **Steps:** `ats radio check` (real LC); then drive the FSM synthetically: `ats radio lc fail`
   × N → status via `ats radio status` after each; then `ats radio lc ok`.
 - **Expect:** HEALTHY → WARNING (with 🟡2× LED per §16) → RECONNECT (rejoin with backoff)

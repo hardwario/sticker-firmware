@@ -494,16 +494,16 @@ LinkCheckAns within 10 s of the uplink's RX windows closing; visible in RTT LC l
 **Goal:** Link-check failures escalate state correctly.
 **Observable:** RTT `LC FAIL in HEALTHY (streak: n/3)` → `State: HEALTHY -> WARNING` after 3
 consecutive fails; `LC FAIL in WARNING (total: n/5[, ladder step])` → `State: WARNING -> RECONNECT` once
-`lrw-link-check-fail-rejoin` fails are reached **and** the recovery ladder is at its floor (v1.5.0 #424,
+`radio-link-check-fail-rejoin` fails are reached **and** the recovery ladder is at its floor (v1.5.0 #424,
 see L18 — a device on a DR above the region minimum takes extra rungs first); `ats radio status` mirrors
 the counters.
 
 **Prompt for Claude:**
 > On a debug build, drive the failures deterministically with `ats radio lc fail` (space them ~2 s
 > apart — the hook reuses one work item, rapid injects coalesce); set
-> `config lrw-link-check-interval 0` + `settings save` first so real link-checks don't reset the
+> `config radio-link-check-interval 0` + `settings save` first so real link-checks don't reset the
 > streak. Watching the RTT log / `ats radio status`, confirm HEALTHY → WARNING (3 consecutive) →
-> RECONNECT (after `lrw-link-check-fail-rejoin` more, counted until the L18 ladder reaches its floor —
+> RECONNECT (after `radio-link-check-fail-rejoin` more, counted until the L18 ladder reaches its floor —
 > note the start DR). Then `ats radio lc ok` and confirm one success returns WARNING → HEALTHY. (Alternatively provoke real failures by taking the gateway out of
 > range — note the method.) Report the observed thresholds.
 
@@ -596,12 +596,12 @@ check; `ats radio reset` resets counters + DevNonce and reboots.
 
 ### L13 — Configurable link-check cadence & rejoin threshold
 
-**Goal:** `lrw-link-check-interval` and `lrw-link-check-fail-rejoin` drive the state machine.
+**Goal:** `radio-link-check-interval` and `radio-link-check-fail-rejoin` drive the state machine.
 **Observable:** `ats radio status` reports `healthy->warning: n/3` and `warning->reconnect: n/M`
-where M = `lrw-link-check-fail-rejoin`; a LinkCheckReq is sent every Nth uplink (0 = none).
+where M = `radio-link-check-fail-rejoin`; a LinkCheckReq is sent every Nth uplink (0 = none).
 
 **Prompt for Claude:**
-> Set e.g. `config lrw-link-check-interval 1`, `config lrw-link-check-fail-rejoin 3`,
+> Set e.g. `config radio-link-check-interval 1`, `config radio-link-check-fail-rejoin 3`,
 > `settings save`. Confirm `ats radio status` shows `warning->reconnect: n/3`. With interval 1,
 > confirm a link check rides every uplink; with interval 0, confirm none are requested. Then drive
 > failures (L8) and confirm RECONNECT now triggers after 3 (not 5) WARNING fails — start from the
@@ -650,10 +650,10 @@ rejoin timer; on a power trace (PPK2, J-Link detached) **no boot radio burst** i
 **Goal:** The original *"TX stops after 4–5 messages"* bug stays fixed under its exact repro
 conditions (release build masks-off: no `CONFIG_LOG`, `PM=y`).
 **Observable:** On the LNS, f_cnt climbs continuously well past 5 (≥10–15) with link-check active
-(`lrw-link-check-interval 5`), no stall — including across the msg-5/10 link-checks.
+(`radio-link-check-interval 5`), no stall — including across the msg-5/10 link-checks.
 
 **Prompt for Claude:**
-> Provision OTAA, `config lrw-link-check-interval 5`, `settings save`. Flash the **plain release**
+> Provision OTAA, `config radio-link-check-interval 5`, `settings save`. Flash the **plain release**
 > build (no debug overlay) and let it run. Watch the LNS uplinks (TTS/ChirpStack) and confirm f_cnt
 > climbs continuously past ~13 with no stop. (Release has PM=y → SWD sleeps; reflash via a
 > `west flash` retry loop or power-cycle.) Report the highest f_cnt reached.
@@ -674,7 +674,7 @@ answers again succeeds. No watchdog reset in any of the steps.
 > long it takes to end in `HEALTHY` versus when the NS saw the JoinRequest/JoinAccept. Disable the device on
 > the NS (e.g. ChirpStack `isDisabled`), run `join` and confirm the failure is reported only after the RX windows.
 > Re-enable it and confirm the automatic rejoin succeeds on its first attempt. With `interval-report 60` +
-> `lrw-link-check-interval 1`, disable the device for ~10 min: expect WARNING → RECONNECT → failing rejoins,
+> `radio-link-check-interval 1`, disable the device for ~10 min: expect WARNING → RECONNECT → failing rejoins,
 > then success on the first attempt after re-enabling. Optionally (temporary, uncommitted hooks) drop one
 > McpsConfirm / join confirm and confirm `-ETIMEDOUT` after `CONFIG_LORAWAN_CONFIRM_TIMEOUT_MS` with no
 > wedge. Restore the config afterwards.
@@ -706,13 +706,13 @@ on the 5th WARNING failure.
 **Prompt for Claude:**
 > On a joined EU868 debug image with ADR on, wait until the NS has raised the DR (`ats radio status` shows e.g.
 > DR5 and a tx power index > 0; ChirpStack can pin it via the device-profile ADR/DR settings). Set
-> `config interval-report 60`, `config lrw-link-check-interval 0` + `settings save` (no real link checks, so
+> `config interval-report 60`, `config radio-link-check-interval 0` + `settings save` (no real link checks, so
 > the injects are deterministic). Inject `ats radio lc fail` ~2 s apart: after the 3rd, confirm WARNING + the
 > first `Link recovery` rung (tx power → 0, DR5 → DR4); on each further inject one more DR step; let a periodic
 > uplink go out between steps and confirm its DR/SF on the LNS. At DR0 confirm the next inject reaches the
 > budget and ends in RECONNECT → rejoin (new DevAddr). Repeat, but inject `ats radio lc ok` mid-ladder (e.g. at
 > DR3): confirm WARNING → HEALTHY with the **same** DevAddr and the uplinks staying on DR3 until the NS raises
-> the DR. Real-outage variant: `lrw-link-check-interval 1`, disable the device on the NS, confirm a link check
+> the DR. Real-outage variant: `radio-link-check-interval 1`, disable the device on the NS, confirm a link check
 > on every report in WARNING and one rung per report; re-enable it mid-ladder and confirm recovery on the lower
 > DR without a rejoin. Restore the config afterwards.
 
