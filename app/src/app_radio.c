@@ -61,6 +61,111 @@ static int radio_wq_init(void)
 
 SYS_INIT(radio_wq_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
+/* ---- Flash writes vs radio exchanges ---------------------------------------
+ * The STM32WLE5 has one flash bank: a program or page erase stalls every
+ * instruction fetch, interrupt handlers included -- ~22 ms per page erase, an
+ * NVS garbage collection several of them. Landing between TX done and the RX1
+ * opening, it makes the receiver miss the Ack or the JoinAccept (F4 HIL
+ * 2026-09-27: an `alarm new` save lost three P2P Acks). So a backend marks
+ * each exchange, TX start until its receive windows closed, and every flash
+ * writer holds the flash around its write: a writer waits for a running
+ * exchange, an exchange waits for a running write and for writers already
+ * waiting, so a busy radio cannot starve them. Both waits are capped; past the
+ * cap the write or the TX goes ahead (logged) -- nothing is dropped. */
+#define FLASH_WAIT_AIR_MAX_MS 10000 /* LoRaWAN DR0 join: JoinAccept in RX2 at 6 s */
+#define AIR_WAIT_FLASH_MAX_MS 1000  /* a history clear, 16 page erases */
+
+static K_MUTEX_DEFINE(m_air_mutex);
+static K_CONDVAR_DEFINE(m_air_cv);
+static bool m_on_air;
+static uint8_t m_flash_writers;
+static uint8_t m_flash_waiting;
+
+/* The exchange itself runs on the radio work queue, LoRaMacProcess() and the
+ * SX126x DIO1 work on the system one: a writer there must never block on the
+ * exchange it would hold up. It still counts, so no TX starts mid-write. */
+static bool flash_writer_may_wait(void)
+{
+	if (k_is_in_isr()) {
+		return false;
+	}
+
+	k_tid_t self = k_current_get();
+
+	return self != k_work_queue_thread_get(&m_wq) &&
+	       self != k_work_queue_thread_get(&k_sys_work_q);
+}
+
+static bool air_idle(void)
+{
+	return !m_on_air;
+}
+
+static bool flash_idle(void)
+{
+	return m_flash_writers == 0 && m_flash_waiting == 0;
+}
+
+/* m_air_mutex held: wait on m_air_cv until `done`; false once `max_ms` ran out. */
+static bool air_wait(bool (*done)(void), int32_t max_ms)
+{
+	int64_t deadline = k_uptime_get() + max_ms;
+
+	while (!done()) {
+		int64_t left = deadline - k_uptime_get();
+
+		if (left <= 0) {
+			return false;
+		}
+		(void)k_condvar_wait(&m_air_cv, &m_air_mutex, K_MSEC(left));
+	}
+	return true;
+}
+
+void app_radio_flash_hold(void)
+{
+	k_mutex_lock(&m_air_mutex, K_FOREVER);
+	if (m_on_air && flash_writer_may_wait()) {
+		m_flash_waiting++;
+		if (!air_wait(air_idle, FLASH_WAIT_AIR_MAX_MS)) {
+			LOG_WRN("Flash write waited %d ms for the radio; writing anyway",
+				FLASH_WAIT_AIR_MAX_MS);
+		}
+		m_flash_waiting--;
+	}
+	m_flash_writers++;
+	k_mutex_unlock(&m_air_mutex);
+}
+
+void app_radio_flash_release(void)
+{
+	k_mutex_lock(&m_air_mutex, K_FOREVER);
+	if (m_flash_writers > 0) {
+		m_flash_writers--;
+	}
+	k_condvar_broadcast(&m_air_cv);
+	k_mutex_unlock(&m_air_mutex);
+}
+
+void app_radio_air_begin(void)
+{
+	k_mutex_lock(&m_air_mutex, K_FOREVER);
+	if (!air_wait(flash_idle, AIR_WAIT_FLASH_MAX_MS)) {
+		LOG_WRN("Radio waited %d ms for a flash write; sending anyway",
+			AIR_WAIT_FLASH_MAX_MS);
+	}
+	m_on_air = true;
+	k_mutex_unlock(&m_air_mutex);
+}
+
+void app_radio_air_end(void)
+{
+	k_mutex_lock(&m_air_mutex, K_FOREVER);
+	m_on_air = false;
+	k_condvar_broadcast(&m_air_cv);
+	k_mutex_unlock(&m_air_mutex);
+}
+
 /* Fleet pre-send jitter (#267), one policy for both radios. The cap keeps a
  * long interval_report (e.g. 900 s) from delaying a report by 90 s. */
 #define TX_JITTER_MAX_SEC 10
@@ -1512,6 +1617,16 @@ void app_radio_test_cmd_reset(void)
 	atomic_clear(&m_announce_spreading);
 	atomic_clear(&m_seq_closed);
 	atomic_clear(&m_telemetry_held);
+}
+
+void app_radio_test_air_reset(void)
+{
+	k_mutex_lock(&m_air_mutex, K_FOREVER);
+	m_on_air = false;
+	m_flash_writers = 0;
+	m_flash_waiting = 0;
+	k_condvar_broadcast(&m_air_cv);
+	k_mutex_unlock(&m_air_mutex);
 }
 #endif
 

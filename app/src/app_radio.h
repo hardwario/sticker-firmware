@@ -57,6 +57,21 @@ struct k_work_q;
  * app_radio_init(), gets it too. */
 struct k_work_q *app_radio_work_q(void);
 
+/* Flash writes vs radio exchanges. The STM32WLE5 stalls on every flash
+ * program/erase (interrupts included), which lands a TX's receive windows late
+ * and loses the Ack or the JoinAccept. A backend brackets each exchange -- TX
+ * start until its receive windows closed -- with app_radio_air_begin()/_end();
+ * every flash writer (NVS settings, history ring) brackets its write with
+ * app_radio_flash_hold()/_release(). A writer waits for a running exchange (at
+ * most 10 s), an exchange for a running or waiting writer (at most 1 s); past
+ * the cap either goes ahead. Writers on the radio or the system work queue
+ * never wait (the exchange and LoRaMacProcess() run there). */
+void app_radio_flash_hold(void);
+void app_radio_flash_release(void);
+/* Radio work queue. */
+void app_radio_air_begin(void);
+void app_radio_air_end(void);
+
 /* Read `radio_mode` from config and bring up the chosen stack (app_radio_lrw_init or
  * app_radio_p2p_init). Falls back to LoRaWAN if P2P is selected but not compiled in.
  * `radio_mode == off` also routes to app_radio_lrw_init(), which its own
@@ -491,6 +506,8 @@ void app_radio_test_link_reset(void);
 void app_radio_test_stale_tick(int64_t now_ms);
 /* Cancel the downlink and announce work items and clear their state. */
 void app_radio_test_cmd_reset(void);
+/* Forget any exchange and flash writer the gate still counts. */
+void app_radio_test_air_reset(void);
 #endif
 
 /* Stage a command response for the next uplink. */

@@ -1026,6 +1026,7 @@ static int p2p_rx_window(int64_t tx_end_ms, uint8_t rx1_delay_s, uint8_t expecte
 	int ret = radio_configure(false);
 
 	if (ret) {
+		app_radio_air_end();
 		return ret;
 	}
 
@@ -1033,6 +1034,7 @@ static int p2p_rx_window(int64_t tx_end_ms, uint8_t rx1_delay_s, uint8_t expecte
 			K_MSEC(p2p_rx1_timeout_ms(m_sf, expected_frame_len)), rssi, snr);
 
 	(void)radio_configure(true);
+	app_radio_air_end(); /* the exchange tx_frame_at() began */
 
 	return ret;
 }
@@ -1689,8 +1691,12 @@ static int tx_frame_at(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, s
 
 	size_t wire_len = P2P_HDR_LEN + body_len + P2P_TAG_LEN;
 
+	/* The exchange runs to the end of its RX1 window (p2p_rx_window()): no
+	 * flash write may stall the CPU in between (app_radio_air_begin()). */
+	app_radio_air_begin();
 	ret = lora_send(m_lora_dev, frame, wire_len);
 	if (ret) {
+		app_radio_air_end();
 		LOG_ERR_CALL_FAILED_INT("lora_send", ret);
 		return tx_send_failed((uint8_t)wire_len);
 	}
@@ -1818,6 +1824,7 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 		m_debug_drop_acks--;
 		LOG_WRN("Debug: dropping Ack (counter %u), %u drop(s) left", counter,
 			m_debug_drop_acks);
+		app_radio_air_end(); /* no RX1 window this time */
 		return false;
 	}
 #endif /* defined(CONFIG_SHELL) */
@@ -2499,8 +2506,10 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 
 	join_request_build(nonce_val, frame);
 
+	app_radio_air_begin(); /* until the JoinAccept window closed */
 	int ret = lora_send(m_lora_dev, frame, sizeof(frame));
 	if (ret) {
+		app_radio_air_end();
 		LOG_ERR_CALL_FAILED_INT("lora_send", ret);
 		return tx_send_failed(sizeof(frame));
 	}

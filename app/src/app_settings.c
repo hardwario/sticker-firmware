@@ -13,6 +13,7 @@
 #include "app_history.h"
 #include "app_input.h"
 #include "app_log.h"
+#include "app_radio.h"
 #include "app_radio_lrw.h"
 #include "app_nfc.h"
 
@@ -43,7 +44,9 @@ static int save(bool reboot)
 	 * config keys (dynamic-alarms migration); alarm rules validate on their own
 	 * SET path in app_alarm_rules, so there is nothing to pre-check here. */
 
+	app_radio_flash_hold();
 	ret = settings_save();
+	app_radio_flash_release();
 	if (ret) {
 		LOG_ERR("Call `settings_save` failed: %d", ret);
 		return ret;
@@ -255,6 +258,15 @@ SHELL_CMD_REGISTER(settings, &sub_settings, "Settings commands.", print_help);
 
 #endif /* defined(CONFIG_SHELL) */
 
+/* One key, clear of any radio exchange (app_radio_flash_hold()). */
+static int save_one(const char *key, const void *value, size_t len)
+{
+	app_radio_flash_hold();
+	int ret = settings_save_one(key, value, len);
+	app_radio_flash_release();
+	return ret;
+}
+
 int app_settings_save(bool reboot)
 {
 	return save(reboot);
@@ -265,8 +277,8 @@ int app_settings_save_nonce_counter(void)
 	/* Single-key write to the "config" settings subtree (see SETTINGS_PFX in the
 	 * generated app_config.c). Persisting just this key keeps the NFC accept path
 	 * cheap and avoids rewriting the whole config blob. */
-	return settings_save_one("config/nonce-counter", &app_config()->nonce_counter,
-				 sizeof(app_config()->nonce_counter));
+	return save_one("config/nonce-counter", &app_config()->nonce_counter,
+			sizeof(app_config()->nonce_counter));
 }
 
 int app_settings_save_p2p_spreading_factor(int sf)
@@ -282,8 +294,8 @@ int app_settings_save_p2p_spreading_factor(int sf)
 	g_app_config.p2p_spreading_factor = sf;
 	app_config_unlock();
 
-	return settings_save_one("config/p2p-spreading-factor", &app_config()->p2p_spreading_factor,
-				 sizeof(app_config()->p2p_spreading_factor));
+	return save_one("config/p2p-spreading-factor", &app_config()->p2p_spreading_factor,
+			sizeof(app_config()->p2p_spreading_factor));
 }
 
 /* Persist only secret_key to NVS as a single settings key — same single-key
@@ -294,8 +306,8 @@ int app_settings_save_p2p_spreading_factor(int sf)
  * full app_settings_save(true) save+reboot instead (#322). */
 static int save_secret_key(void)
 {
-	return settings_save_one("config/secret-key", app_config()->secret_key,
-				 sizeof(app_config()->secret_key));
+	return save_one("config/secret-key", app_config()->secret_key,
+			sizeof(app_config()->secret_key));
 }
 
 /* Shared by every reset-ladder tier: clear the decoded alarm-rule cache so the

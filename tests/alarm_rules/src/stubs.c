@@ -6,6 +6,7 @@
  * alarm_N slot fields live here) and a no-op settings_save().
  */
 
+#include "app_radio.h"
 #include "app_config.h"
 
 static struct app_config m_test_config;
@@ -18,4 +19,13 @@ struct app_config *app_config(void)
 int settings_save(void)
 {
 	return 0;
+}
+
+/* app_radio's flash/exchange gate: nothing is on air here. */
+void app_radio_flash_hold(void)
+{
+}
+
+void app_radio_flash_release(void)
+{
 }

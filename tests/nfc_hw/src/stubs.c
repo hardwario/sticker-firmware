@@ -339,3 +339,12 @@ FUNC_NORETURN void sys_reboot(int type)
 		k_sleep(K_FOREVER);
 	}
 }
+
+/* app_radio's flash/exchange gate: nothing is on air here. */
+void app_radio_flash_hold(void)
+{
+}
+
+void app_radio_flash_release(void)
+{
+}

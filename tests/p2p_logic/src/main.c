@@ -25,6 +25,8 @@ extern int test_save_sf_ret;
 extern int test_lora_send_ret;
 extern int p2p_test_send_info_calls;
 extern uint32_t p2p_test_send_info_seq;
+extern int p2p_test_air_begins;
+extern int p2p_test_air_ends;
 extern uint32_t g_test_network_time;
 
 #include <zephyr/ztest.h>
@@ -1125,6 +1127,46 @@ ZTEST(p2p_logic, test_backend_send_result_mapping)
 
 	p2p_duty_init(p2p_test_get_duty());
 	p2p_test_tx_reset();
+}
+
+/* Every exchange a TX begins ends again -- after its RX1 window, or at once when
+ * the frame never reached the air -- or flash writers would wait for a radio
+ * that is long idle (app_radio_air_begin()). */
+ZTEST(p2p_logic, test_every_exchange_ends_its_air_window)
+{
+	struct app_radio_tx_result res = {0};
+	int begins = p2p_test_air_begins;
+
+	p2p_test_join_setup(7);
+	p2p_test_set_paired();
+	p2p_test_tx_reset();
+
+	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, &res), 0, "sent");
+	zassert_equal(p2p_test_air_begins, begins + 1, "the uplink is one exchange");
+	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "ended after its RX1 window");
+	p2p_test_tx_reset();
+
+	test_lora_send_ret = -EIO;
+	zassert_equal(backend_send(APP_RADIO_FRAME_TELEMETRY, 0, &res), -EIO, "radio fault");
+	test_lora_send_ret = 0;
+	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "a failed send ends at once");
+	p2p_test_tx_reset();
+
+	begins = p2p_test_air_begins;
+	p2p_test_join_setup(7);
+	p2p_test_join_step(); /* JoinRequest, no JoinAccept */
+	zassert_equal(p2p_test_air_begins, begins + 1, "the JoinRequest is one exchange");
+	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "ended after the JoinAccept window");
+	p2p_test_join_step(); /* leave nothing armed for the next test */
+	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "balanced");
+
+	begins = p2p_test_air_begins;
+	test_lora_send_ret = -EIO;
+	p2p_test_join_setup(7);
+	p2p_test_join_step(); /* the JoinRequest never reached the air */
+	test_lora_send_ret = 0;
+	zassert_equal(p2p_test_air_begins, begins + 1);
+	zassert_equal(p2p_test_air_ends, p2p_test_air_begins, "a failed JoinRequest ends at once");
 }
 
 /* F-P1-1: while a confirmed uplink's Ack retry is pending, no fresh-counter

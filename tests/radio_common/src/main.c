@@ -284,6 +284,7 @@ static void before(void *f)
 	app_radio_test_tx_reset();
 	app_radio_test_link_reset();
 	app_radio_test_cmd_reset();
+	app_radio_test_air_reset();
 	stubs_reset();
 	memset(&fk, 0, sizeof(fk));
 	fk.ready = true;
@@ -301,6 +302,7 @@ static void after(void *f)
 	app_radio_test_cmd_reset();
 	app_radio_test_tx_reset();
 	app_radio_test_link_reset();
+	app_radio_test_air_reset();
 }
 
 ZTEST_SUITE(radio_common, NULL, NULL, before, after, NULL);
@@ -1484,3 +1486,149 @@ static void announce_retries_when_the_queue_is_full(void)
 	zassert_false(app_radio_announce_pending());
 }
 BOTH_PROFILES(announce_retries_when_the_queue_is_full)
+
+/* ---- Flash writes vs radio exchanges ----------------------------------------
+ * A writer thread (shell, NFC, report queue in the firmware) holds the flash
+ * for `hold_ms`; the test thread plays the radio work queue's exchanges. */
+
+static K_THREAD_STACK_DEFINE(m_writer_stack, 1024);
+static struct k_thread m_writer;
+static volatile int64_t m_writer_held_at;
+static volatile int64_t m_writer_released_at;
+static int32_t m_writer_hold_ms;
+
+static void writer_fn(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+	app_radio_flash_hold();
+	m_writer_held_at = k_uptime_get();
+	if (m_writer_hold_ms > 0) {
+		k_sleep(K_MSEC(m_writer_hold_ms));
+	}
+	m_writer_released_at = k_uptime_get();
+	app_radio_flash_release();
+}
+
+static void writer_start(int32_t hold_ms)
+{
+	m_writer_held_at = -1;
+	m_writer_released_at = -1;
+	m_writer_hold_ms = hold_ms;
+	k_thread_create(&m_writer, m_writer_stack, K_THREAD_STACK_SIZEOF(m_writer_stack), writer_fn,
+			NULL, NULL, NULL, K_PRIO_PREEMPT(5), 0, K_NO_WAIT);
+}
+
+static void writer_join(void)
+{
+	zassert_ok(k_thread_join(&m_writer, K_SECONDS(30)), "writer thread stuck");
+}
+
+ZTEST(radio_common, test_flash_write_waits_for_the_exchange)
+{
+	app_radio_air_begin();
+	int64_t t0 = k_uptime_get();
+
+	writer_start(0);
+	k_sleep(K_MSEC(500));
+	zassert_equal(m_writer_held_at, -1, "no write while the radio is on air");
+
+	app_radio_air_end();
+	k_sleep(K_MSEC(10));
+	zassert_true(m_writer_held_at >= t0 + 500, "the write follows the exchange");
+	writer_join();
+}
+
+ZTEST(radio_common, test_exchange_waits_for_a_running_write)
+{
+	writer_start(300);
+	k_sleep(K_MSEC(10));
+	zassert_not_equal(m_writer_held_at, -1, "an idle radio lets the write go at once");
+
+	app_radio_air_begin();
+	zassert_not_equal(m_writer_released_at, -1, "no TX before the write ended");
+	zassert_true(k_uptime_get() >= m_writer_held_at + 300);
+	app_radio_air_end();
+	writer_join();
+}
+
+/* A busy radio cannot starve a writer: the next exchange lets the one already
+ * waiting write first. */
+ZTEST(radio_common, test_waiting_write_goes_before_the_next_exchange)
+{
+	app_radio_air_begin();
+	writer_start(100);
+	k_sleep(K_MSEC(50));
+	app_radio_air_end();
+
+	app_radio_air_begin(); /* the next frame, straight away */
+	zassert_not_equal(m_writer_released_at, -1, "the waiting write went first");
+	app_radio_air_end();
+	writer_join();
+}
+
+ZTEST(radio_common, test_flash_write_waits_10_s_at_most)
+{
+	app_radio_air_begin();
+	int64_t t0 = k_uptime_get();
+
+	writer_start(0);
+	k_sleep(K_MSEC(9900));
+	zassert_equal(m_writer_held_at, -1, "still waiting at 9.9 s");
+	k_sleep(K_MSEC(200));
+	zassert_true(m_writer_held_at >= t0 + 10000 && m_writer_held_at <= t0 + 10100,
+		     "the write goes ahead at 10 s (%lld ms)", m_writer_held_at - t0);
+	app_radio_air_end();
+	writer_join();
+}
+
+ZTEST(radio_common, test_exchange_waits_1_s_at_most)
+{
+	writer_start(5000);
+	k_sleep(K_MSEC(10));
+
+	int64_t t0 = k_uptime_get();
+
+	app_radio_air_begin();
+
+	int64_t waited = k_uptime_get() - t0;
+
+	zassert_true(waited >= 1000 && waited <= 1100, "TX goes ahead at 1 s (%lld ms)", waited);
+	zassert_equal(m_writer_released_at, -1, "the write is still running");
+	app_radio_air_end();
+	writer_join();
+}
+
+/* The radio work queue runs the exchange itself, the system one LoRaMacProcess()
+ * and the DIO1 work: a write there goes ahead even on air. */
+static volatile int64_t m_wq_write_at;
+
+static void wq_write_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	app_radio_flash_hold();
+	m_wq_write_at = k_uptime_get();
+	app_radio_flash_release();
+}
+
+static K_WORK_DEFINE(m_radio_wq_write, wq_write_handler);
+static K_WORK_DEFINE(m_sys_wq_write, wq_write_handler);
+
+ZTEST(radio_common, test_work_queue_writes_never_wait_for_the_air)
+{
+	app_radio_air_begin();
+
+	int64_t t0 = k_uptime_get();
+
+	m_wq_write_at = -1;
+	k_work_submit_to_queue(app_radio_work_q(), &m_radio_wq_write);
+	k_sleep(K_MSEC(20));
+	zassert_true(m_wq_write_at >= t0 && m_wq_write_at <= t0 + 20, "radio queue wrote at once");
+
+	m_wq_write_at = -1;
+	k_work_submit(&m_sys_wq_write);
+	k_sleep(K_MSEC(20));
+	zassert_true(m_wq_write_at >= t0 && m_wq_write_at <= t0 + 40, "system queue wrote at once");
+	app_radio_air_end();
+}

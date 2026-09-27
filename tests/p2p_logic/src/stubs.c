@@ -418,3 +418,18 @@ static int stub_settings_init(void)
 }
 
 SYS_INIT(stub_settings_init, APPLICATION, 0);
+
+/* app_radio's flash/exchange gate: counted, so a test can check that every
+ * exchange a TX began is ended again. */
+int p2p_test_air_begins;
+int p2p_test_air_ends;
+
+void app_radio_air_begin(void)
+{
+	p2p_test_air_begins++;
+}
+
+void app_radio_air_end(void)
+{
+	p2p_test_air_ends++;
+}

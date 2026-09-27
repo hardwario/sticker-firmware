@@ -86,8 +86,12 @@ static void publish_mac(void);
  * rejoin would only reset the band credits kept in RAM (F29). */
 static int lrw_send(uint8_t port, uint8_t *data, uint8_t len, enum lorawan_message_type type)
 {
+	/* lorawan_send() returns once the RX windows closed: the whole exchange
+	 * is clear of flash writes (app_radio_air_begin()). */
+	app_radio_air_begin();
 	int ret = lorawan_send(port, data, len, type);
 
+	app_radio_air_end();
 	app_radio_count(ret == 0 ? APP_RADIO_CNT_TX : APP_RADIO_CNT_TX_ERR);
 	app_radio_note_send(ret == 0, ret == -ECONNREFUSED);
 	if (ret == 0) {
@@ -378,6 +382,7 @@ static void state_transition(enum app_radio_state new_state)
 	switch (old) {
 	case APP_RADIO_STATE_JOINING:
 		k_work_cancel_delayable(&m_join_complete_work);
+		app_radio_air_end(); /* the join exchange join_work_handler() began */
 		break;
 	case APP_RADIO_STATE_HEALTHY:
 		k_timer_stop(&m_lc_timeout_timer);
@@ -833,6 +838,8 @@ static void join_work_handler(struct k_work *work)
 	m_join_busy_polls = 0;
 
 	app_radio_count(APP_RADIO_CNT_JOIN);
+	/* The join exchange ends when JOINING is left (state_transition()). */
+	app_radio_air_begin();
 	ret = lorawan_join(&config);
 	if (ret && ret != -ETIMEDOUT) {
 		LOG_ERR("Join failed: %d", ret);

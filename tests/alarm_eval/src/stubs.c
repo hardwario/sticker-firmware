@@ -171,3 +171,12 @@ int app_buzzer_play_repeating(uint32_t kind, uint16_t repeat_s)
 	g_buzzer_play_last_repeat_s = repeat_s;
 	return 0;
 }
+
+/* app_radio's flash/exchange gate: nothing is on air here. */
+void app_radio_flash_hold(void)
+{
+}
+
+void app_radio_flash_release(void)
+{
+}
