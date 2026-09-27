@@ -27,10 +27,11 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / NFC | **New** — `SetParam.alarms_replace` (#434): one message rewrites the whole alarm table — all rule slots are emptied before the message's `alarms` group is applied (or all cleared without one), rolled back with the batch on a fault. |
 | NFC | **Changed (breaking)** — all interactive NFC commands (`GetInfo` / `GetConfig` / `SetParam` / vendor) move from NDEF records to the **ST25DV Fast-Transfer-Mode mailbox** (#313): one tap, phone held still, iOS at parity with Android. The tag now holds **no NDEF record at all** — even the identity record is gone; the phone reads identity via the mailbox `get_basic_info` command. Battery-less configuration is dropped; claiming moves to a powered device (see also PR #415). See §18. |
 | NFC claiming | **Changed (breaking for provisioning)** — new unauthenticated `plain_text` command transport with a compile-time allow-list, first command `get_claim_info` (#415); the claim window becomes an explicit two-state latch (`active`/`done`) with the auto-arm and the implicit close removed; commands `clm_ack`/`clm_rearm` renamed to `claim_done`/`claim_active` (same wire ids 25/27). See §19. |
-| NFC | **New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2), so an installer with a phone can judge the link at the mounting spot. |
+| NFC | ~~**New** — last-downlink RSSI / SNR and their age in the NFC `GetInfo` (#409 A2)~~ — superseded before release by `get_radio_state` (#446, §24): the fields moved out of Info. |
 | History | **Fix** — record timestamps follow the RTC (F27/F28, H-4): report cadence on wall-clock slots, no capture skipped during a replay, each flash page stamped from the RTC (a reboot / power loss / halt is a gap, not a shift), page header v2 keeps a clock-sync fix-up across reboots, the replay ends with the window's last frame. HistoryFrame protocol unchanged. See §21. |
 | LoRaWAN | **Fix** — the M-2 stale-uplink watchdog no longer forces a rejoin while the duty cycle is refusing sends (F29): a rejoin reset the band credits and let the device exceed the 1 % limit. See §22. |
 | Radio: P2P | **New** — LoRaWAN ↔ P2P parity, part 1 (#448): the boot / join `Info` + settings-info announce is one `app_radio` path for both radios (P2P announced nothing before); `force_send` / `sample` / `buzzer_play` / `clock_sync` work over P2P; `lrw_join` re-joins P2P without a reboot; every P2P command gets a `0x55` answer. See §23. |
+| LoRaWAN / P2P / NFC | **New** — `get_radio_state` (#446): one `RadioState` for both radios — link state, radio parameters, both link directions, session, failure streak, duty cycle, counters since boot — on request only, paged like every answer. Info no longer carries `lrw_state` / `last_dl_*`. See §24. |
 
 ---
 
@@ -992,6 +993,11 @@ returns `NOT_READY "transport not allowed"`.
 
 ## 20. Last-downlink link quality in the NFC GetInfo (#409 A2)
 
+> **Superseded before v1.5.0 shipped (#446, §24).** The three fields below and
+> `lrw_state` (12) are no longer part of Info (all four are `reserved`); the
+> same data, and much more, is read with the `get_radio_state` command. The
+> section is kept for the history of the design.
+
 An installer with only a phone (Manager-App over NFC) has no view of the network
 server, so it could not tell whether the radio link is good where the device is
 mounted. The NFC `Info` now carries the link quality of the **last downlink the device
@@ -1259,6 +1265,44 @@ Hardware (0413, P2P night test 2026-09-26/27, Hub c43+): `clock_sync` seq 17 →
 Info seq 17 with a synced time; `lrw_join` seq 18 → Ack, JoinRequest, new
 session, Info + settings-info announced, no reboot. The boot announce lost
 the settings-info to a counter-order replay (F-P1-1) — fixed in #449.
+
+
+## 24. `get_radio_state` — radio link state and diagnostics (#446)
+
+The link information used to be scattered (Info `lrw_state`, Info `last_dl_*`,
+the `ats lrw|radio status` dumps on a debug build) and LoRaWAN-flavoured. Now
+one message, `Response.RadioState`, carries it for both radios, and a host asks
+for it: **Command `get_radio_state` = field 32** (`GetRadioState { optional uint32
+page }`), answered with **`Response.radio_state` = field 14**, on every transport
+(read-only, no secrets). Design and field table: `doc/plan/447 - RadioState.md`.
+
+| Group | Fields |
+|---|---|
+| State | 1 `state` (IDLE / JOINING / HEALTHY / WARNING / RECONNECT / DISABLED) |
+| Radio parameters now | 2 `sf`, 3 `datarate` (LoRaWAN), 4 `tx_power_dbm` (conducted, PA-capped) |
+| Last downlink (node-measured) | 5 `dl_rssi`, 6 `dl_snr`, 7 `dl_age_s`, 8 `dl_unix_time` |
+| Last uplink as heard by the peer | 9 `ul_rssi`, 10 `ul_snr` (P2P Ack), 11 `ul_margin`, 12 `ul_gw_count` (LoRaWAN LinkCheckAns) |
+| Session | 13 `dev_addr`, 14 `fcnt_up` |
+| Link health | 15 `fail_streak`, 16 `join_attempts`, 17 `duty_blocked_s`, 18 `airtime_hour_ms` (P2P) |
+| Counters since boot | 19 `uptime_s`, 20 `tx_count`, 21 `rx_count`, 22 `retry_count`, 23 `fail_count`, 24 `tx_err_count`, 25 `join_count` |
+
+- **Not part of Info, never announced.** Info `lrw_state` (12) and
+  `last_dl_rssi/snr/age_s` (16–18) are `reserved`. The phone sends
+  `get_radio_state` over NFC next to `get_info`; nothing of it goes into the boot
+  or 24 h announce, so it costs airtime only when a host asks.
+- **Paging (#425).** Over a radio the answer is streamed from one snapshot, field
+  by field (the downlink group and the uplink pairs travel together; a unit too
+  big for the 11 B tier alone is left out); over NFC / vendor / shell the host
+  asks with `page`. Normally one frame over NFC and from EU868 DR3 up.
+- **Push model.** `app_radio` owns the data: both radio backends report every
+  fact as it happens, and every reader takes a consistent snapshot with
+  `app_radio_get_status()`. `ats device info` prints the signal, parameters,
+  link health and counters.
+- `ttn.js` decodes the answer (`radio_state` with `state_name`, `dev_addr_hex`)
+  and encodes the command.
+
+Breaking for Manager-App: read the link state with `get_radio_state` instead of
+Info fields 12 / 16–18 (older app builds simply see those fields absent).
 
 ---
 

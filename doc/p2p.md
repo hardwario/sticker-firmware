@@ -572,8 +572,9 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   sync → `app_clock_set_unix()`). `rssi`/`snr` are the central's measurement
   of the acknowledged uplink (B1), surfaced by `ats radio status`. The node's
   own measurement of the received Ack (or `0x56` / link-control frame) is
-  logged as `dl_rssi`/`dl_snr` and feeds `app_radio_last_downlink()`, i.e. the
-  last-downlink fields of GetInfo / NFC Info (plan 439, T1).
+  logged as `dl_rssi`/`dl_snr`. Both are pushed to `app_radio`
+  (`app_radio_note_downlink()` / `app_radio_set_uplink_rssi()`) and read back
+  with `get_radio_state` as `dl_rssi`/`dl_snr` and `ul_rssi`/`ul_snr` (#446).
 
   ```
   header | flags | rssi | snr | [pending_frame_len if bit0] | [unix_be32 if bit1] | tag
@@ -746,7 +747,7 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
 
 **Reported link state (plan 439, T1).** The node exposes its link through the
 common `enum app_radio_state`, the same values the LoRaWAN stack reports (and
-the wire values of Info `lrw_state`): `PAIRED` → HEALTHY, `PAIRED` with
+the wire values of `get_radio_state`'s `RadioState.state`, #446): `PAIRED` → HEALTHY, `PAIRED` with
 `P2P_WARNING_FAIL_THRESHOLD` (3) consecutive fully-failed cycles → WARNING
 (session kept, the LoRaWAN link-check WARNING's counterpart), a boot/forced
 join → JOINING, a self-heal or `RejoinRequest` join (slow policy) →
