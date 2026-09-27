@@ -31,11 +31,15 @@ LOG_MODULE_REGISTER(app_radio, LOG_LEVEL_INF);
  * long interval_report (e.g. 900 s) from delaying a report by 90 s. */
 #define TX_JITTER_MAX_SEC 10
 
-static struct k_work_delayable m_jitter_work;
+/* Both work items are defined statically, not in app_radio_init(): calibration
+ * mode brings LoRaWAN up through app_radio_lrw_init() alone, and its join still
+ * reaches app_radio_announce() -- a delayable armed before its init faults on
+ * a NULL handler (review of #400, 2026-09-27). */
 static void jitter_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(m_jitter_work, jitter_work_handler);
 /* The boot/join announce waits out the same fleet jitter (below). */
-static struct k_work_delayable m_announce_jitter_work;
 static void announce_jitter_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(m_announce_jitter_work, announce_jitter_work_handler);
 
 /* Kept out of a static entirely when CONFIG_RADIO_P2P=n: with P2P not even
  * compiled in, the radio is always running LoRaWAN by construction (radio_mode's
@@ -53,9 +57,6 @@ static inline bool is_p2p(void)
 
 int app_radio_init(void)
 {
-	k_work_init_delayable(&m_jitter_work, jitter_work_handler);
-	k_work_init_delayable(&m_announce_jitter_work, announce_jitter_work_handler);
-
 #if defined(CONFIG_RADIO_P2P)
 	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_P2P) {
 		m_kind = APP_RADIO_P2P;
