@@ -241,13 +241,6 @@ static inline enum app_radio_stale app_radio_stale_check(int64_t now_ms, int64_t
 	return APP_RADIO_STALE_REJOIN;
 }
 
-/* The active radio retires a delivered command only on a matching answer: the
- * P2P central keeps a 0x56 at the head of its queue and re-delivers it until a
- * 0x55 with the same seq arrives (doc/p2p.md B4/S3). LoRaWAN downlinks are
- * unconfirmed, so a command whose answer is an uplink of its own (force_send,
- * sample) needs no reply there. */
-bool app_radio_needs_command_answer(void);
-
 /* Stage a command response for the next uplink. */
 int app_radio_queue_response(uint8_t port, const uint8_t *buf, size_t len);
 
@@ -287,8 +280,10 @@ bool app_radio_announce_run(void);
 int app_radio_send_info(uint32_t seq);
 
 /* clock_sync with an empty body: re-sync the RTC from the network and answer
- * with an Info carrying `seq` once the time has landed. LoRaWAN asks with
- * DeviceTimeReq; P2P sends an uplink now and uses the time tail of its Ack. */
+ * with an Info carrying `seq` once the time has landed -- the same shape on
+ * both radios, no extra uplink forced: LoRaWAN's DeviceTimeReq rides on the
+ * next uplink and the answer comes in its downlink; P2P uses the time tail of
+ * the next uplink's Ack. */
 void app_radio_clock_sync(uint32_t seq);
 
 #ifdef __cplusplus

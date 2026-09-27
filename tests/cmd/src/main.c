@@ -39,7 +39,6 @@ extern bool test_dl_valid;
 extern int16_t test_dl_rssi;
 extern int8_t test_dl_snr;
 extern uint32_t test_dl_age_s;
-extern bool test_radio_needs_answer;
 extern bool test_radio_full;
 extern int g_buzzer_play_calls;
 extern uint32_t g_buzzer_play_last_kind;
@@ -123,7 +122,6 @@ static void reset_cfg(void)
 	g_claim_active_calls = 0;
 	g_claim_state = APP_NFC_CLAIM_ACTIVE;
 	test_dl_valid = false;
-	test_radio_needs_answer = false;
 	test_radio_full = false;
 	g_buzzer_play_calls = 0;
 	g_buzzer_play_last_kind = 0;
@@ -744,24 +742,29 @@ ZTEST(cmd, test_sample_over_lrw_emits_no_body)
 	zassert_equal(action, APP_CMD_ACTION_NONE, "no deferred action");
 }
 
-/* F-P1-2: over P2P the central retires a command only on a matching 0x55, so
- * force_send and sample answer with an Ack carrying the seq (their telemetry
- * uplink follows); LoRaWAN stays without a body (see above). */
-ZTEST(cmd, test_force_send_and_sample_ack_over_p2p)
+/* LoRaWAN parity: over P2P force_send and sample answer exactly as over
+ * LoRaWAN -- with their telemetry uplink only, no command-port body (the P2P
+ * central retires them on the next uplink by itself, proximos PN-4). */
+ZTEST(cmd, test_force_send_and_sample_emit_no_body_over_p2p)
 {
-	Response r;
+	uint8_t in[16], out[128];
+	size_t out_len;
+	enum app_cmd_action action;
+	const char *cmds[] = {"080f4a00", "0810aa0100"}; /* force_send seq 15, sample seq 16 */
 
-	reset_cfg();
-	test_radio_needs_answer = true;
-	handle_via(APP_CMD_TRANSPORT_P2P, "080f4a00", &r); /* force_send, seq 15 */
-	zassert_equal(r.which_body, Response_ack_tag, "force_send/P2P -> Ack (which=%d)",
-		      r.which_body);
-	zassert_equal(r.seq, 15, "seq %u", r.seq);
+	for (size_t i = 0; i < ARRAY_SIZE(cmds); i++) {
+		size_t in_len = unhex(cmds[i], in, sizeof(in));
 
-	handle_via(APP_CMD_TRANSPORT_P2P, "0810aa0100", &r); /* sample, seq 16 */
-	zassert_equal(r.which_body, Response_ack_tag, "sample/P2P -> Ack (which=%d)", r.which_body);
-	zassert_equal(r.seq, 16, "seq %u", r.seq);
-	test_radio_needs_answer = false;
+		reset_cfg();
+		out_len = 123;
+		action = APP_CMD_ACTION_NONE;
+		zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, sizeof(out),
+					     &out_len, &action),
+			      0, "cmd %zu ret", i);
+		zassert_equal(out_len, 0, "cmd %zu: P2P must emit no body, out_len=%zu", i,
+			      out_len);
+		zassert_equal(action, APP_CMD_ACTION_NONE, "cmd %zu: no deferred action", i);
+	}
 }
 
 /* #170: claim_token is NFC-only. app_cmd_build_info() is the

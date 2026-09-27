@@ -340,9 +340,10 @@ void app_radio_p2p_rejoin(void);
  * app_radio_p2p_unjoin()). */
 void app_radio_p2p_forget_pairing(void);
 
-/* app_radio_clock_sync() on P2P: send an uplink now and, once its Ack has been
- * processed (the Ack time tail sets the RTC), answer with an Info carrying
- * `seq`. A newer request before that Ack takes over the seq. */
+/* app_radio_clock_sync() on P2P: once the next uplink's Ack has been processed
+ * (its time tail sets the RTC), answer with an Info carrying `seq` -- like
+ * LoRaWAN, whose DeviceTimeReq waits for the next uplink too; no uplink is
+ * forced. A newer request before that Ack takes over the seq. */
 void app_radio_p2p_clock_sync(uint32_t seq);
 
 /* Hooks of the common boot/join announce (app_radio_announce_run(),
