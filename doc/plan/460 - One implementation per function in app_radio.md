@@ -231,11 +231,38 @@ Implemented in T2c.
 
 ### 2.7 Duty-cycle ledger (T2d)
 
-- P2P's exact sliding-hour ledger (with folding) moves into `app_radio`. Each frame is charged with `airtime_ms(len)`.
-- The limit comes from an EU868 sub-band table (0.1 / 1 / 10 %) keyed by frequency. P2P charges its real band.
-- LoRaWAN checks the ledger before `lorawan_send()` and returns `-EAGAIN` with the exact wait, instead of burning retries.
-- **Open:** LoRaMac keeps its own hourly credits, which reset only after the hour. To stop the two disagreeing, either take the MAC's `DutyCycleWaitTime` through the sticker-zephyr glue, or keep the ledger conservative. To be decided in T2d from a bench measurement.
-- RadioState airtime is filled for LoRaWAN too.
+- **One ledger in `app_radio`.** P2P's exact sliding-hour ledger, folding included, moves out of `app_radio_p2p.c` unchanged in behaviour:
+  - A frame is admitted only if the air recorded in the trailing hour plus its own air fits the budget, so every sliding hour stays within it.
+  - The wait is exact: the time until enough of the oldest entries have left the window. A frame that alone exceeds the budget waits for an empty ledger.
+  - A full ring (48 entries) folds its two oldest entries into one. Air is only ever over-counted.
+  - 392 B of RAM (48 × 8 B + budget, head, count). It stays RAM-only, as before (doc/p2p.md).
+- **Backend op `airtime_ms(len)`** gives the air of the next frame of `len` app bytes. `tx_send()` checks the ledger before `send()`. A frame that does not fit is not sent: `-EAGAIN` with the exact wait plus 50 ms, the duty hold is set, and the frame waits on its path as any duty hold does (§2.6 for a retry).
+- **The backend charges what it sent.** A charge clears the duty hold.
+  - LoRaWAN charges a frame that went out (`sent`, and `-ETIMEDOUT` of a confirmed frame without its Ack), and an OTAA JoinRequest unless `lorawan_join()` refused it before TX (`-EBUSY`, `-ECONNREFUSED`, `-ENOTCONN`).
+  - P2P charges every TX, a failed one included, and the JoinRequest. Its join still checks the ledger itself, as it has no `tx_send()` in front.
+- **Time on air** is one pure helper, `app_radio_lora_toa_ms()`. It is LoRaMac's `RadioTimeOnAir()` in integer arithmetic, rounded up (CR 4/5, preamble 8 or 12 at SF ≤ 6, LDRO at BW125 SF ≥ 11 and BW250 SF12). P2P values move by at most 1 ms against the old helper, which rounded to nearest.
+  - LoRaWAN: the PHY payload is 13 B of overhead + the pending MAC answers (`max_now − max_next` from `lorawan_get_payload_sizes()`) + `len`, at the MIB data rate. When the MAC answers fill the frame (`max_next == 0`), the stack flushes them at the lowest DR, so the lowest DR is charged. The DR → SF/BW map covers EU868-like regions, US915 and AU915; EU868 DR7 (FSK 50 kbps) has its own formula.
+- **Budget per EU868 sub-band** (`app_radio_duty_budget_ms(freq)`): 1 % at 865–868.6 MHz and 869.7–870 MHz, 10 % at 869.4–869.65 MHz, 0.1 % anywhere else (863–865, 868.6–869.4, the gaps, outside the band).
+  - P2P takes the budget of `p2p-frequency` (the 868.1 MHz default: 1 %). **Change:** 863–865 MHz used to get 1 %, now 0.1 %.
+  - LoRaWAN EU868 takes 1 % over all its channels. That is stricter than the MAC, which counts each band apart: the default channels 868.1/.3/.5 share one band anyway, and RX2/869.525 carries no uplink.
+  - LoRaWAN outside EU868 gets budget 0: no limit, but every frame is still charged, so RadioState shows its airtime.
+- **Decision on LoRaMac's own credits** (the open point of the first draft): keep the ledger conservative, no change in the sticker-zephyr glue.
+  - LoRaMac refills its band credits to the full hour once an hour has passed since the last refill, and never in between (`UpdateTimeCredits()` in `RegionCommon.c`). Every frame the MAC counted since the last refill is in the ledger too, charged a little later (after its RX windows). So if the ledger admits a frame, the MAC has credits for it, and an uplink does not end in "Duty-cycle restricted".
+  - Rejoin re-initialises the MAC and resets its credits (F29), while the ledger survives. That only makes the ledger stricter.
+  - **Caveats**, both harmless because the MAC still checks and a refusal (`-ECONNREFUSED`) takes the existing duty hold:
+    - An ADR backoff step that the MAC takes inside a send is charged at the DR read before it, one frame long.
+    - The MAC needs its credits strictly above the cost; the ledger admits a frame that fills the hour exactly.
+  - The ledger does not hold a LoRaWAN join; the MAC's join backoff (1 %, then 0.1 % after the first hour, 0.01 % after 11 h) is stricter. The JoinRequest is still charged.
+  - To be confirmed on HIL: a DR0 stream on EU868 must reach a duty hold before any "Duty-cycle restricted" from the MAC.
+- **RadioState** fills `airtime_hour_ms` from the ledger on both radios now (`has_airtime`).
+- Gone from P2P: `struct p2p_duty`, its ledger functions and test hooks, the duty checks in `tx_frame()` and the resend, the `-EAGAIN` case of `p2p_tx_send()`, `P2P_TX_RETRY_MARGIN_MS` and `P2P_CR_DENOM`.
+- **Tests:**
+  - The pure ledger tests move from `p2p_logic` to `radio_common` (window sum, expiry, exact wait, frame over the allowance, ring fold, fold conservativeness, wrap, the 24 h and 6 h hammers at 1 % and 10 %, no-limit counting), plus the sub-band table and ToA reference values.
+  - New on both profiles: a duty-held frame goes out once it fits, is not a retry, and clears the hold; a report waits for its second frame; budget 0 never holds.
+  - `p2p_logic` checks the backend's airtime op and that it charges both a sent and a failed TX without checking the ledger.
+  - `radio_common` has 167 cases (+21), `p2p_logic` 62 (−7 moved).
+  - Mutation check: 15 mutants, all caught. The expiry inside `used_ms()` (a status read expires nothing first) survived at first; `test_duty_used_skips_expired_without_expiry` was added for it.
+- **Footprint** against T2c: release 182708 B (+712) / 54988 B (±0), debug 237832 B (+1328, 96.77 %) / 63772 B (+384, 97.31 %), bench 217240 B (+208) / 55452 B (±0). The ledger's RAM was already in the P2P images; the LoRaWAN-only debug image gains it.
 
 ### 2.8 Flash writes vs radio exchanges (fix from the F4 HIL)
 

@@ -482,7 +482,7 @@ message Response {
         optional uint32 fail_streak     = 15;  // consecutive unconfirmed uplinks (LoRaWAN LinkCheck, P2P Ack)
         optional uint32 join_attempts   = 16;  // attempts in the current (re)join episode
         optional uint32 duty_blocked_s  = 17;  // sends held by the duty cycle for this long; absent = not held
-        optional uint32 airtime_hour_ms = 18;  // P2P: airtime in the sliding hour (duty ledger)
+        optional uint32 airtime_hour_ms = 18;  // airtime in the sliding hour (duty ledger, both radios)
         // Counters since boot.
         optional uint32 uptime_s        = 19;  // their time base (= Info.uptime_s)
         optional uint32 tx_count        = 20;  // uplink transmissions, retransmissions included, joins excluded

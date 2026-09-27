@@ -38,6 +38,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | LoRaWAN / P2P | **Renamed** — `lrw-link-check-interval` / `lrw-link-check-fail-rejoin` → `radio-link-check-interval` / `radio-link-check-fail-rejoin`: link supervision is shared by both radios. Wire-compatible (same `lorawan` group fields 13/14); a value stored under the old name is not carried over (defaults 5 / 5). See §26. |
 | LoRaWAN / P2P | **Changed (internal)** — one radio work queue in `app_radio` for both backends (doc/plan/439 T2a): release RAM −4.3 KB, no behaviour change (§29). |
 | LoRaWAN / P2P | **New / Changed** — `radio-alarm-ack` (#460 T2c): alarms are confirmed on both radios when true. The default, false, sends them unconfirmed on both, which changes P2P, where §28 confirmed every alarm. The Ack retry ladder of a confirmed frame (3 retries, random 1..2^n s) is one `app_radio` path for both radios. See §30. |
+| LoRaWAN / P2P | **New / Changed** — one duty-cycle ledger for both radios (#460 T2d): LoRaWAN holds a frame the sliding hour has no room for and sends it the moment it fits, instead of retrying into the MAC's refusal; P2P takes its budget from the EU868 sub-band of `p2p-frequency` (863–865 MHz: 0.1 %, was 1 %). `airtime_hour_ms` in `RadioState` on both radios. See §31. |
 
 ---
 
@@ -1299,7 +1300,7 @@ page }`), answered with **`Response.radio_state` = field 14**, on every transpor
 | Last downlink (node-measured) | 5 `dl_rssi`, 6 `dl_snr`, 7 `dl_age_s`, 8 `dl_unix_time` |
 | Last uplink as heard by the peer | 9 `ul_rssi`, 10 `ul_snr` (P2P Ack), 11 `ul_margin`, 12 `ul_gw_count` (LoRaWAN LinkCheckAns) |
 | Session | 13 `dev_addr`, 14 `fcnt_up` |
-| Link health | 15 `fail_streak`, 16 `join_attempts`, 17 `duty_blocked_s`, 18 `airtime_hour_ms` (P2P) |
+| Link health | 15 `fail_streak`, 16 `join_attempts`, 17 `duty_blocked_s`, 18 `airtime_hour_ms` (P2P; both radios since §31) |
 | Counters since boot | 19 `uptime_s`, 20 `tx_count`, 21 `rx_count`, 22 `retry_count`, 23 `fail_count`, 24 `tx_err_count`, 25 `join_count` |
 
 - **Not part of Info, never announced.** Info `lrw_state` (12) and
@@ -1473,6 +1474,20 @@ Part of `doc/plan/460 - One implementation per function in app_radio.md` §2.6.
   - A deferred command action (reboot, settings save) waits for a pending retry on either radio.
 - Answers and history frames stay confirmed on P2P and unconfirmed on LoRaWAN; telemetry is unchanged.
 - The P2P bench image needs 820 B less RAM, because the P2P retry queue is gone.
+
+## 31. One duty-cycle ledger for both radios (#460 T2d)
+
+Part of `doc/plan/460 - One implementation per function in app_radio.md` §2.7.
+
+- **One exact sliding-hour ledger** in `app_radio` for both radios, the one P2P had (doc/p2p.md §6). A frame goes out only if the air of the trailing hour plus its own fits the budget; otherwise it waits exactly until it fits and goes then. The log line stays `TX duty-cycle blocked for N ms`.
+- **LoRaWAN** now checks the ledger before `lorawan_send()`.
+  - Before, a frame went to LoRaMac, which refused it ("Duty-cycle restricted") until its fixed hourly credits came back, and the send was retried every 15 s meanwhile.
+  - LoRaWAN EU868 gets 1 % over all channels, stricter than the MAC's 1 % per band, so a frame the ledger admits the MAC admits too. Other regions get no limit, but the airtime is still counted.
+  - Frames and OTAA JoinRequests are charged their air at the DR they go at: 13 B of LoRaWAN overhead plus pending MAC answers plus the payload.
+- **P2P** takes the budget of the EU868 sub-band of `p2p-frequency`: 1 % at 865–868.6 and 869.7–870 MHz (the 868.1 MHz default), 10 % at 869.4–869.65 MHz, 0.1 % anywhere else. **Changed:** 863–865 MHz and 868.6–869.4 MHz got 1 % before.
+- Time on air follows LoRaMac's formula, rounded up; some P2P values are 1 ms longer than before (SF12 42 B: 2139 ms).
+- `RadioState.airtime_hour_ms` (§24) is filled on both radios.
+- RAM: the LoRaWAN-only debug image needs 384 B more (the ledger); the images with P2P are unchanged.
 
 ---
 

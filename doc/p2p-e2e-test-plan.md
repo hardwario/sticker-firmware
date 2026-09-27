@@ -88,7 +88,7 @@ central that predates it.
 | P2E-13 | RejoinRequest obeyed *(F7)* | make the session `RejoinPending` (re-register the serial, or the rekey-threshold hook) | `RejoinRequest received (counter N): re-joining` → `JoinRequest sent (dev_nonce N+1 …)` within 60 s + jitter → `Joined: …` | `TX_SCHEDULE ok: RejoinRequest …` then `JoinAccept -> serial=…` for the same serial |
 | P2E-14 | Deferred action after the 0x55 | `node-send` a `SetParam{application.interval_report=120, save=true}` | `Command received …` → `TX type 85 …` → `Ack (counter …)` → `Post-command action 1 scheduled in 8s` → ≥8 s later `Command: saving settings + reboot` → reboot banner → `state: PAIRED`, `config interval-report` reads 120 | `response decrypted+authenticated`, `0x55 RESPONSE cleared …`; telemetry resumes after the reboot with no re-join |
 | P2E-15 | Exact RX window *(F4)* | queue a 2 B GetInfo (`2200`) | announcing `Ack (counter …) [pending] pending_len=17`; next cycle `Command received (counter …, 2 B)`; the window is ~548 ms, never the ~2514 ms it used to be | `TX_SCHEDULE ok: ACK … flags=0x01 (4 B body)` then `COMMAND(0x56) … (2 B body)` |
-| P2E-16 | Sliding-hour duty ledger | run ≥ 70 min with a burst at t≈0. **Use `config interval-report 120`** — see the note below | `TX duty-cycle blocked for %lld ms` appears only when the trailing hour's air would exceed 36 000 ms; no hour in the log sums above it (script the `%u ms air` values) | frames arrive with the predicted gaps |
+| P2E-16 | Sliding-hour duty ledger | run ≥ 70 min with a burst at t≈0, any `interval-report` (see the note below) | `TX duty-cycle blocked for %lld ms` appears only when the trailing hour's air would exceed 36 000 ms (1 % sub-band); no hour in the log sums above it (script the `%u ms air` values) | frames arrive with the predicted gaps |
 | P2E-17 | TX-power assignment *(F5)* | Hub `node_tx_power_dbm: 8`, then re-join | `Joined: …` then `Session TX power assigned: 8 dBm (config 14 dBm)`; `ats radio status` → `tx power: 8 dBm (assigned)`, and it survives a reboot | `JoinAccept -> … tx_power=8`; subsequent `EVT_RX … rssi=` lower at fixed geometry |
 | P2E-18 | CAD / listen-before-talk | — | **BLOCKED — not implemented in this PR.** The Zephyr LoRa driver API has no CAD entry point; see the plan doc's S8 section | — |
 | P2E-19 | Persistence cleared | `settings erase`, re-provision | `JoinRequest sent (dev_nonce 0 …)` then `JoinAccept not received/invalid …` until the boot window expires | `JoinRequest dev_nonce 0 not accepted for … (replay or implausible jump) — dropping`. Documents the lockout; `node-remove` + `node-add` clears it |
@@ -97,11 +97,10 @@ central that predates it.
 | P2E-22 | Tampered / replayed downlink | rig B (DUT + `tests/p2p` gw-sim, FIBER idle): inject a corrupted-tag JoinAccept, a stale-counter Ack, and a tampered Ack body | `JoinAccept: auth failed`; stale counter silently ignored then `Uplink retry 1/3 sent`; tampered body → `Ack auth failed (counter N)`. A tampered Detach/RejoinRequest gives `Detach/RejoinRequest auth failed (counter N)` and the pairing survives | — (the central's own replay logic is a separate F-row) |
 
 **P2E-16 cadence.** The ledger holds one entry per transmission still inside the
-hour, `P2P_DUTY_LEDGER_ENTRIES` = 48. Above ~48 uplinks/hour the *entry count*
-becomes the binding constraint rather than the air-time budget, so at
-`interval-report 60` the duty blocks you see are slot exhaustion, not the 1 %
-limit, and the row's stated criterion will not hold. Run it at 120 s (30
-frames/hour). doc/p2p.md §6 records the limitation.
+hour, `APP_RADIO_DUTY_LEDGER_ENTRIES` = 48. Since F-P2P-1 a full ring folds its
+two oldest entries instead of blocking, so the entry count no longer limits the
+frame rate and any `interval-report` works; only the air-time budget of the
+`p2p-frequency` sub-band holds frames. doc/p2p.md §6 describes the ledger.
 
 ### 3.2 Added for B8 — device-driven history replay over P2P
 

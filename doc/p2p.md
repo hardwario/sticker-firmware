@@ -674,12 +674,17 @@ v1 was **confirmed-uplink**: after every data TX the node opens one RX window
   surgery), but no reason to leave a second unbounded `>` check in the same
   design.
 - **Device-side duty cycle** (B2, decision D1, **v1.5.0**): raw LoRa bypasses
-  LoRaMac's duty enforcement, so the node enforces the EU868 1 % limit itself
-  with an **exact sliding-hour ledger** (`struct p2p_duty` in `app_radio_p2p.c`).
-  Every TX (data, ACK retry, JoinRequest) is charged its measured air-time; a
-  frame is admitted only when the air already recorded in the trailing hour
-  plus that frame fits `P2P_DUTY_BUDGET_MS` (36 000 ms), so **every** sliding
-  one-hour window sums to ≤ 1 %.
+  LoRaMac's duty enforcement, so the node enforces the EU868 limit itself
+  with an **exact sliding-hour ledger** (`struct app_radio_duty` in
+  `app_radio.c`; common to both radios since #460 T2d, plan 460 §2.7).
+  Every TX (data, ACK retry, JoinRequest, a failed TX too) is charged its
+  air-time from `app_radio_lora_toa_ms()`; a frame is admitted only when the
+  air already recorded in the trailing hour plus that frame fits the budget,
+  so **every** sliding one-hour window stays within the limit. The budget
+  follows the EU868 sub-band of `p2p-frequency`
+  (`app_radio_duty_budget_ms()`): 1 % (36 000 ms) at 865–868.6 and
+  869.7–870 MHz — the 868.1 MHz default —, 10 % at 869.4–869.65 MHz, 0.1 %
+  anywhere else. Before T2d every frequency got 1 %, 863–865 MHz included.
 
   This is the third model. The first blocked the radio for air×99 ms after
   every frame, which made an alarm queued behind a long telemetry frame wait
@@ -691,14 +696,14 @@ v1 was **confirmed-uplink**: after every data TX the node opens one RX window
   as an accepted trade-off; D1 withdraws it, because "amortised" is not what
   the regulation asks and not what a certification review will accept. The
   ledger keeps the bucket's latency behaviour (a frame goes the moment there is
-  room) and drops the burst hole. `tests/p2p_logic`'s
+  room) and drops the burst hole. `tests/radio_common`'s
   `test_duty_sliding_hour_never_exceeds_1pct` simulates 24 h and checks the
   window ending at *every* transmission; it fails against the old bucket and
   passes against the ledger.
 
   Two costs, both deliberate:
-  - **384 B of RAM** — `P2P_DUTY_LEDGER_ENTRIES` (48) × 8 B, replacing the
-    bucket's 16 B.
+  - **392 B of RAM** — `APP_RADIO_DUTY_LEDGER_ENTRIES` (48) × 8 B plus the
+    budget and the ring indices, replacing the bucket's 16 B.
   - **No frame-count limit (F-P2P-1, fixed).** One entry per transmission
     still inside the window; when the 48-entry ring is full the two *oldest*
     entries are folded into one (summed air, the later end time) instead of
@@ -1043,8 +1048,8 @@ phone app step is needed for P2P at all, one-time or otherwise.
   no network server, §1). **RESOLVED (B2 + decision D1, v1.5.0):** the node
   enforces its own limit over all TX (data, ACK retry, JoinRequest) with an
   exact sliding-hour ledger — every sliding hour ≤ 1 %, not merely a 1 %
-  long-run average — at a cost of 384 B of RAM and a bounded frame count per
-  hour. See §6 for both, and for the token bucket this replaced. §6/§8's
+  long-run average — at a cost of 392 B of RAM (since #460 T2d shared with
+  LoRaWAN, with a per-sub-band budget). See §6 for both, and for the token bucket this replaced. §6/§8's
   central/gateway-side duty *bookkeeping* is a separate concern and still
   applies.
 - **RX2-equivalent downlink fallback** — v1 is RX1-only (§6): a missed
