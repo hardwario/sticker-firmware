@@ -56,6 +56,9 @@ extern uint32_t g_hist_end;
 extern bool g_hist_replay_active;
 extern int g_hist_replay_active_calls;
 
+/* app_clock_network_time_at_ms(): uptime a network time landed at, 0 = never. */
+extern int64_t g_network_time_at_ms;
+
 size_t stub_hist_overhead(uint32_t frame_index_bound);
 
 void stubs_reset(void);

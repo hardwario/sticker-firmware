@@ -20,8 +20,8 @@ extern int g_test_saved_sf;
 extern int g_test_save_sf_calls;
 extern int test_save_sf_ret;
 extern int test_lora_send_ret;
-extern int p2p_test_send_info_calls;
-extern uint32_t p2p_test_send_info_seq;
+extern bool p2p_test_clock_sync_pending;
+extern int p2p_test_time_events;
 extern int p2p_test_air_begins;
 extern int p2p_test_air_ends;
 extern uint32_t g_test_network_time;
@@ -1201,10 +1201,12 @@ ZTEST(p2p_logic, test_clock_sync_forces_no_uplink)
 	uint32_t sends = test_lora_send_count;
 	int kicks = p2p_test_tx_kick_calls;
 
-	app_radio_p2p_clock_sync(17);
+	p2p_test_clock_sync_pending = true;
+	app_radio_p2p_backend.time_request();
 	k_sleep(K_MSEC(50)); /* a forced send would run on the radio work queue by now */
 	zassert_equal(test_lora_send_count, sends, "clock_sync must not send an uplink");
 	zassert_equal(p2p_test_tx_kick_calls, kicks, "nor ask app_radio for one");
+	p2p_test_clock_sync_pending = false;
 	p2p_test_link_reset(); /* the pending clock_sync would confirm later reports */
 }
 
@@ -1815,47 +1817,47 @@ ZTEST(p2p_logic, test_clock_sync_confirms_at_most_three_reports)
 	p2p_test_link_reset();
 	g_app_config.radio_link_check_interval = 0;
 
-	app_radio_p2p_clock_sync(21);
+	p2p_test_clock_sync_pending = true;
+	app_radio_p2p_backend.time_request();
 	for (int i = 0; i < 3; i++) {
 		zassert_true(send_report_confirmed(false), "clock_sync report %d", i);
 	}
 	zassert_false(send_report_confirmed(false), "the 4th report is back to the cadence");
 
-	/* A time tail still answers it, and ends the forcing. */
-	int calls = p2p_test_send_info_calls;
+	/* A new request gets its own three. */
+	app_radio_p2p_backend.time_request();
+	zassert_true(send_report_confirmed(false), "a new clock_sync confirms again");
 
-	apply_ack(true, 1790000000u);
-	zassert_equal(p2p_test_send_info_calls, calls + 1, "the Info answers the clock_sync");
-	zassert_equal(p2p_test_send_info_seq, 21u);
+	/* Answered (app_radio clears the flag): back to the cadence at once. */
+	p2p_test_link_reset();
+	app_radio_p2p_backend.time_request();
+	p2p_test_clock_sync_pending = false;
+	zassert_false(send_report_confirmed(false), "nothing pending, the cadence");
 
 	g_app_config.radio_link_check_interval = 5;
 	p2p_test_link_reset();
 	p2p_test_set_link(P2P_LINK_UNPAIRED, false, false, false);
 }
 
-/* PF-2: the clock_sync Info goes only once the network time came -- an Ack
- * without the time tail leaves it pending; the first tail answers it once,
- * with the command's seq. */
-ZTEST(p2p_logic, test_clock_sync_answered_only_with_the_time_tail)
+/* PF-2: only an Ack time tail is a network time -- it sets the clock and
+ * reports the time event app_radio answers a pending clock_sync on (F3d); an
+ * Ack without it reports nothing. */
+ZTEST(p2p_logic, test_clock_sync_time_event_only_with_the_time_tail)
 {
-	int calls = p2p_test_send_info_calls;
+	int events = p2p_test_time_events;
 
 	g_test_network_time = 0;
-	app_radio_p2p_clock_sync(33);
-
 	apply_ack(false, 0);
-	zassert_equal(p2p_test_send_info_calls, calls, "no time tail, no answer");
+	zassert_equal(p2p_test_time_events, events, "no time tail, no time event");
 	zassert_equal(g_test_network_time, 0u);
 
 	apply_ack(true, 1790000100u);
-	zassert_equal(p2p_test_send_info_calls, calls + 1, "the time tail answers it");
-	zassert_equal(p2p_test_send_info_seq, 33u);
+	zassert_equal(p2p_test_time_events, events + 1, "the time tail is a time event");
 	zassert_equal(g_test_network_time, 1790000100u, "the tail sets the clock");
 
 	apply_ack(true, 1790000200u);
-	zassert_equal(p2p_test_send_info_calls, calls + 1, "answered once");
+	zassert_equal(p2p_test_time_events, events + 2, "every tail is one");
 	zassert_equal(g_test_network_time, 1790000200u, "later tails still set the clock");
-	p2p_test_link_reset();
 }
 
 /* §3.4: the backend only reports what it saw -- an Ack is a passed link check,

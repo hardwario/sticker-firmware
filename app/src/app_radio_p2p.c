@@ -436,12 +436,7 @@ static void publish_link(void)
 
 /* B1: RSSI/SNR the central reported in the last Ack (its measurement of our
  * uplink). m_last_ack_valid is false until the first Ack of this session. */
-/* clock_sync (app_radio_p2p_clock_sync()): answer with an Info carrying this
- * seq once the next Ack (and its time tail) has been processed. Set from a
- * command thread, consumed on the radio work queue. */
-static atomic_t m_clock_sync_pending;
-static atomic_t m_clock_sync_seq;
-/* Reports sent CONFIRMED for the pending clock_sync so far (PF-2): at most
+/* Reports sent CONFIRMED for a pending clock_sync so far (PF-2): at most
  * P2P_CLOCK_SYNC_REPORTS_MAX, so a central that sends no time tail cannot keep
  * every report confirmed; the request then waits for the next link check. */
 #define P2P_CLOCK_SYNC_REPORTS_MAX 3
@@ -1775,14 +1770,12 @@ P2P_TESTABLE void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter
 
 	/* B5: apply the wall-clock time tail if present, with the same sanity
 	 * bounds as the LoRaWAN DeviceTimeAns (L-5). */
+	/* The time landed: app_radio answers a pending clock_sync (PF-2, as
+	 * LoRaWAN on LORAWAN_TIME_UPDATED). An Ack without the tail, or a 0x56 in
+	 * its place, leaves it pending for the next confirmed uplink. */
 	if (ack->time_present) {
 		(void)app_clock_set_network_time(ack->unix_time);
-	}
-	/* A pending clock_sync is answered once the network time came (PF-2, as
-	 * LoRaWAN waits for LORAWAN_TIME_UPDATED): an Ack without the tail, or a
-	 * 0x56 in its place, leaves it pending for the next confirmed uplink. */
-	if (ack->time_present && atomic_cas(&m_clock_sync_pending, 1, 0)) {
-		(void)app_radio_send_info((uint32_t)atomic_get(&m_clock_sync_seq));
+		app_radio_time_event();
 	}
 
 	/* rssi/snr = the central's measurement of the uplink (Ack body, B1);
@@ -2162,11 +2155,18 @@ static bool telemetry_report_confirmed(bool due)
 {
 	/* A pending clock_sync also rides a confirmed report: the time comes in the
 	 * Ack's tail, as LoRaWAN's DeviceTimeReq rides the next uplink (PF-2). */
-	if (atomic_get(&m_clock_sync_pending) &&
+	if (app_radio_clock_sync_pending() &&
 	    atomic_inc(&m_clock_sync_reports) < P2P_CLOCK_SYNC_REPORTS_MAX) {
 		return true;
 	}
 	return due;
+}
+
+/* struct app_radio_backend.time_request: a new clock_sync gets its own
+ * P2P_CLOCK_SYNC_REPORTS_MAX confirmed reports. */
+static void p2p_time_request(void)
+{
+	atomic_clear(&m_clock_sync_reports);
 }
 
 /* ---- TX backend: app_radio schedules, this sends one frame (doc/plan/460 F4) ---- */
@@ -2241,6 +2241,7 @@ const struct app_radio_backend app_radio_p2p_backend = {
 	.warning_step = warning_tx_power_step,
 	.rejoin = p2p_tx_rejoin,
 	.in_flight = p2p_tx_in_flight,
+	.time_request = p2p_time_request,
 	/* §6: answers, alarms and history frames are confirmed; telemetry only
 	 * the N-th report (report_flags). */
 	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_ALARM) |
@@ -2760,7 +2761,6 @@ void p2p_test_join_setup(int cfg_sf)
 /* A pending clock_sync forces confirmed reports (PF-2). */
 void p2p_test_link_reset(void)
 {
-	atomic_clear(&m_clock_sync_pending);
 	atomic_clear(&m_clock_sync_reports);
 }
 
@@ -3117,16 +3117,6 @@ void app_radio_p2p_rejoin(void)
 
 	/* Explicit operator-forced fresh join: boot-window policy, not self-heal. */
 	start_join_episode(false);
-}
-
-/* ---- clock_sync hook (app_radio, doc/plan/439 T3) -------------------------- */
-
-void app_radio_p2p_clock_sync(uint32_t seq)
-{
-	/* seq before the flag, so the Ack path never pairs a stale seq. */
-	atomic_set(&m_clock_sync_seq, (atomic_val_t)seq);
-	atomic_clear(&m_clock_sync_reports);
-	atomic_set(&m_clock_sync_pending, 1);
 }
 
 #if defined(CONFIG_SHELL)

@@ -66,9 +66,10 @@ static struct {
 	size_t queue_after;
 	size_t budget_after; /* ... the budget becomes budget_to */
 	uint8_t budget_to;
-	size_t replay_after; /* ... a ReqHistory (seq 77) arrives mid-send */
-	int replay_ret;      /* what that nested start returned */
+	size_t replay_after;  /* ... a ReqHistory (seq 77) arrives mid-send */
+	int replay_ret;       /* what that nested start returned */
 	uint8_t flush_budget; /* an empty frame (MAC flush) sets the budget to it */
+	int time_requests;    /* time_request() calls (a clock_sync asked for a time) */
 	struct sent log[LOG_MAX];
 	size_t n;
 } fk;
@@ -173,6 +174,11 @@ static bool fake_in_flight(void)
 	return fk.in_flight;
 }
 
+static void fake_time_request(void)
+{
+	fk.time_requests++;
+}
+
 static const struct app_radio_backend be_lrw = {
 	.send = fake_send,
 	.budget = fake_budget,
@@ -181,6 +187,7 @@ static const struct app_radio_backend be_lrw = {
 	.get_state = fake_get_state,
 	.warning_step = fake_warning_step,
 	.rejoin = fake_rejoin,
+	.time_request = fake_time_request,
 	.confirm_kinds = 0,
 	.frame_gap_ms = 3000,
 	.cmd_transport = APP_CMD_TRANSPORT_LRW,
@@ -195,6 +202,7 @@ static const struct app_radio_backend be_p2p = {
 	.warning_step = fake_warning_step,
 	.rejoin = fake_rejoin,
 	.in_flight = fake_in_flight,
+	.time_request = fake_time_request,
 	.confirm_kinds = BIT(APP_RADIO_FRAME_ANSWER) | BIT(APP_RADIO_FRAME_ALARM) |
 			 BIT(APP_RADIO_FRAME_HISTORY),
 	.frame_gap_ms = 0,
@@ -299,6 +307,7 @@ static void before(void *f)
 	app_radio_test_link_reset();
 	app_radio_test_cmd_reset();
 	app_radio_test_air_reset();
+	app_radio_test_clock_sync_reset();
 	stubs_reset();
 	memset(&fk, 0, sizeof(fk));
 	fk.ready = true;
@@ -319,6 +328,7 @@ static void after(void *f)
 	app_radio_test_tx_reset();
 	app_radio_test_link_reset();
 	app_radio_test_air_reset();
+	app_radio_test_clock_sync_reset();
 }
 
 ZTEST_SUITE(radio_common, NULL, NULL, before, after, NULL);
@@ -1782,7 +1792,7 @@ static void replay_frames_refresh_the_stale_clock(void)
 
 	app_radio_link_up();
 	g_hist_first = 0;
-	g_hist_end = 40 * per; /* 40 frames, 3 s apart: 2 min */
+	g_hist_end = 40 * per;             /* 40 frames, 3 s apart: 2 min */
 	g_app_config.interval_report = 20; /* stale after 3 x 20 s */
 	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
 	k_sleep(K_SECONDS(110));
@@ -1790,6 +1800,113 @@ static void replay_frames_refresh_the_stale_clock(void)
 	zassert_equal(fk.rejoin_calls, 0, "rejoined mid-replay");
 }
 BOTH_PROFILES(replay_frames_refresh_the_stale_clock)
+
+/* ---- clock_sync (F3d) --------------------------------------------------------
+ * An Info answers it: {0x01, seq} from the app_cmd_build_info_seq() stub. */
+
+static size_t info_frames(uint8_t seq)
+{
+	size_t n = 0;
+
+	for (size_t i = 0; i < fk.n && i < LOG_MAX; i++) {
+		n += (fk.log[i].tag == APP_RADIO_TAG_INFO && fk.log[i].head[1] == seq) ? 1 : 0;
+	}
+	return n;
+}
+
+/* No fresh time: the backend is asked for one, nothing goes on air, and the
+ * time event answers once with the request's seq. */
+static void clock_sync_waits_for_the_time(void)
+{
+	app_radio_clock_sync(21);
+	k_sleep(K_SECONDS(1));
+	zassert_equal(fk.time_requests, 1, "the backend is asked for a time");
+	zassert_true(app_radio_clock_sync_pending());
+	zassert_equal(fk.n, 0, "no uplink of its own");
+
+	app_radio_time_event();
+	k_sleep(K_SECONDS(5));
+	zassert_equal(info_frames(21), 1, "the time answers it");
+	zassert_false(app_radio_clock_sync_pending());
+
+	app_radio_time_event();
+	k_sleep(K_SECONDS(5));
+	zassert_equal(fk.n, 1, "answered once");
+}
+BOTH_PROFILES(clock_sync_waits_for_the_time)
+
+/* A network time younger than 60 s answers at once, without asking (PF-2). */
+static void clock_sync_fresh_time_answers_at_once(void)
+{
+	g_network_time_at_ms = k_uptime_get();
+	app_radio_clock_sync(33);
+	k_sleep(K_SECONDS(5));
+	zassert_equal(info_frames(33), 1);
+	zassert_equal(fk.time_requests, 0, "a fresh time needs no request");
+	zassert_false(app_radio_clock_sync_pending());
+}
+BOTH_PROFILES(clock_sync_fresh_time_answers_at_once)
+
+/* An older time is not fresh: the request waits for a new one. */
+static void clock_sync_stale_time_asks(void)
+{
+	if (k_uptime_get() < 62 * MSEC_PER_SEC) {
+		k_sleep(K_SECONDS(62));
+	}
+	g_network_time_at_ms = k_uptime_get() - 61 * MSEC_PER_SEC;
+	app_radio_clock_sync(34);
+	k_sleep(K_SECONDS(5));
+	zassert_equal(fk.time_requests, 1);
+	zassert_equal(fk.n, 0, "a 61 s old time does not answer");
+	zassert_true(app_radio_clock_sync_pending());
+}
+BOTH_PROFILES(clock_sync_stale_time_asks)
+
+/* A request answered from a fresh time also ends an older pending one, so the
+ * time event that follows (a LoRaWAN DeviceTimeAns lands in the callback
+ * before app_radio_time_event() runs) answers nothing twice. */
+static void clock_sync_fresh_answer_ends_a_pending_one(void)
+{
+	app_radio_clock_sync(7);
+	k_sleep(K_MSEC(100));
+	zassert_true(app_radio_clock_sync_pending());
+
+	g_network_time_at_ms = k_uptime_get();
+	app_radio_clock_sync(8);
+	k_sleep(K_SECONDS(5));
+	zassert_equal(info_frames(8), 1, "the fresh time answers the newer request");
+	zassert_false(app_radio_clock_sync_pending(), "and ends the older one");
+
+	app_radio_time_event();
+	k_sleep(K_SECONDS(5));
+	zassert_equal(fk.n, 1, "no second answer");
+}
+BOTH_PROFILES(clock_sync_fresh_answer_ends_a_pending_one)
+
+/* A newer request before the time lands takes over the seq: one answer. */
+static void clock_sync_newer_request_takes_over(void)
+{
+	app_radio_clock_sync(5);
+	k_sleep(K_MSEC(100));
+	app_radio_clock_sync(6);
+	k_sleep(K_MSEC(100));
+	zassert_equal(fk.time_requests, 2, "each request asks the backend");
+
+	app_radio_time_event();
+	k_sleep(K_SECONDS(5));
+	zassert_equal(fk.n, 1, "one answer");
+	zassert_equal(info_frames(6), 1, "with the newer seq");
+}
+BOTH_PROFILES(clock_sync_newer_request_takes_over)
+
+/* A time with nothing pending answers nothing. */
+static void time_event_without_a_request(void)
+{
+	app_radio_time_event();
+	k_sleep(K_SECONDS(5));
+	zassert_equal(fk.n, 0);
+}
+BOTH_PROFILES(time_event_without_a_request)
 
 /* ---- Flash writes vs radio exchanges ----------------------------------------
  * A writer thread (shell, NFC, report queue in the firmware) holds the flash

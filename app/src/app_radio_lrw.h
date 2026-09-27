@@ -66,17 +66,6 @@ void app_radio_lrw_register_ready_cb(void (*cb)(void));
  * decide how many telemetry fields fit. */
 uint8_t app_radio_lrw_get_max_payload(void);
 
-/* Arm a deferred GetInfo uplink to answer a ClockSync command: the next network
- * time-update (DeviceTimeAns) sends an Info carrying the synced unix_time and the
- * command's `seq`, so the host can pair it with the request. The command itself
- * does not ack (saves an uplink; a bare ack can't carry the time). A newer
- * ClockSync before the time lands takes over the seq. */
-void app_radio_lrw_send_info_on_clock_sync(uint32_t seq);
-
-/* app_radio_clock_sync() on LoRaWAN: force a DeviceTimeReq and answer with the
- * seq-carrying Info once the time lands. */
-void app_radio_lrw_clock_sync(uint32_t seq);
-
 /* Erase the persisted LoRaWAN NVM context (frame counters, DevNonce, session).
  * Used when re-provisioning credentials so a new ABP/OTAA identity starts from
  * a clean state. The caller must reboot afterwards for the MAC to re-init from

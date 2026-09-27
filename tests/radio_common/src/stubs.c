@@ -57,6 +57,7 @@ int g_hist_replay_active_calls;
 
 void stubs_reset(void)
 {
+	g_network_time_at_ms = 0;
 	memset(g_compose_frames, 0, sizeof(g_compose_frames));
 	g_compose_n_frames = 0;
 	g_compose_calls = 0;
@@ -228,9 +229,11 @@ int app_clock_get_unix(uint32_t *unix_time)
 	return -EAGAIN;
 }
 
+int64_t g_network_time_at_ms;
+
 int64_t app_clock_network_time_at_ms(void)
 {
-	return 0;
+	return g_network_time_at_ms;
 }
 
 void app_alarm_flush_held(void)

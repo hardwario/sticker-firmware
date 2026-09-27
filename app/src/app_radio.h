@@ -403,6 +403,12 @@ struct app_radio_backend {
 	 * post-command reboot must wait too. NULL: never (LoRaWAN's send blocks
 	 * for the whole confirmed exchange). */
 	bool (*in_flight)(void);
+	/* A clock_sync waits for a network time (app_radio_clock_sync()): LoRaWAN
+	 * forces a DeviceTimeReq onto the next uplink, P2P sends its next reports
+	 * (at most 3) confirmed so an Ack brings the time tail. Neither sends an
+	 * uplink of its own. The backend calls app_radio_time_event() when the
+	 * time lands. */
+	void (*time_request)(void);
 	/* The kinds sent confirmed, BIT(enum app_radio_frame_kind). */
 	uint8_t confirm_kinds;
 	/* enum app_cmd_transport of this radio's command downlinks. */
@@ -517,6 +523,8 @@ void app_radio_test_stale_tick(int64_t now_ms);
 void app_radio_test_cmd_reset(void);
 /* Forget any exchange and flash writer the gate still counts. */
 void app_radio_test_air_reset(void);
+/* Cancel the clock_sync work items and forget a pending request. */
+void app_radio_test_clock_sync_reset(void);
 #endif
 
 /* Stage a command response for the next uplink. */
@@ -574,8 +582,17 @@ int app_radio_send_info(uint32_t seq);
  * both radios, no extra uplink: LoRaWAN's DeviceTimeReq rides on the next
  * uplink and the answer comes in its downlink; P2P sends its next report
  * CONFIRMED (at most 3 of them) and the time comes in the Ack's tail. A network
- * time that landed less than 60 s ago is fresh: the Info goes at once (PF-2). */
+ * time that landed less than 60 s ago is fresh: the Info goes at once (PF-2).
+ * A newer request before the time lands takes over the seq. Any thread. */
 void app_radio_clock_sync(uint32_t seq);
+
+/* Backend, any context: a network time has landed and gone to app_clock (the
+ * LoRaWAN DeviceTimeAns, the P2P Ack time tail). A pending clock_sync is
+ * answered with its Info, on the radio work queue (F3d). */
+void app_radio_time_event(void);
+
+/* A clock_sync waits for a network time (P2P confirms reports meanwhile). */
+bool app_radio_clock_sync_pending(void);
 
 #ifdef __cplusplus
 }

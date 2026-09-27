@@ -1946,36 +1946,69 @@ void app_radio_test_air_reset(void)
  * for the next time that landed -- up to the weekly re-sync. */
 #define CLOCK_SYNC_FRESH_MS (60 * 1000)
 
-static atomic_t m_clock_sync_now_seq;
+/* The seq the clock_sync Info answers, and whether it waits for a network
+ * time. Set from any thread; the answer goes on the radio work queue. */
+static atomic_t m_clock_sync_seq;
+static atomic_t m_clock_sync_pending;
 
-static void clock_sync_now_work_handler(struct k_work *work)
+static void clock_sync_answer_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	(void)app_radio_send_info((uint32_t)atomic_get(&m_clock_sync_now_seq));
+	(void)app_radio_send_info((uint32_t)atomic_get(&m_clock_sync_seq));
 }
 
-static K_WORK_DEFINE(m_clock_sync_now_work, clock_sync_now_work_handler);
+static K_WORK_DEFINE(m_clock_sync_answer_work, clock_sync_answer_work_handler);
 
-void app_radio_clock_sync(uint32_t seq)
+/* Radio work queue: a fresh network time answers at once, otherwise the
+ * backend is asked for one and the request waits for app_radio_time_event().
+ * On the queue, so a time landing between the request and this check makes
+ * it fresh instead of being missed. */
+static void clock_sync_work_handler(struct k_work *work)
 {
+	ARG_UNUSED(work);
+
 	int64_t landed_ms = app_clock_network_time_at_ms();
 
 	if (landed_ms != 0 && k_uptime_get() - landed_ms < CLOCK_SYNC_FRESH_MS) {
-		/* The clock is fresh from the network: answer now, on the radio work
-		 * queue like every other Info. */
-		atomic_set(&m_clock_sync_now_seq, (atomic_val_t)seq);
-		k_work_submit_to_queue(app_radio_work_q(), &m_clock_sync_now_work);
+		atomic_clear(&m_clock_sync_pending);
+		(void)app_radio_send_info((uint32_t)atomic_get(&m_clock_sync_seq));
 		return;
 	}
-#if defined(CONFIG_RADIO_P2P)
-	if (is_p2p()) {
-		app_radio_p2p_clock_sync(seq);
-		return;
+	atomic_set(&m_clock_sync_pending, 1);
+	if (m_be && m_be->time_request) {
+		m_be->time_request();
 	}
-#endif
-#if defined(CONFIG_LORAWAN)
-	app_radio_lrw_clock_sync(seq);
-#else
-	ARG_UNUSED(seq);
-#endif
 }
+
+static K_WORK_DEFINE(m_clock_sync_work, clock_sync_work_handler);
+
+void app_radio_clock_sync(uint32_t seq)
+{
+	/* seq before the work, so an answer never pairs a stale seq. */
+	atomic_set(&m_clock_sync_seq, (atomic_val_t)seq);
+	k_work_submit_to_queue(app_radio_work_q(), &m_clock_sync_work);
+}
+
+void app_radio_time_event(void)
+{
+	if (atomic_cas(&m_clock_sync_pending, 1, 0)) {
+		k_work_submit_to_queue(app_radio_work_q(), &m_clock_sync_answer_work);
+	}
+}
+
+bool app_radio_clock_sync_pending(void)
+{
+	return atomic_get(&m_clock_sync_pending) != 0;
+}
+
+#if defined(CONFIG_ZTEST)
+void app_radio_test_clock_sync_reset(void)
+{
+	struct k_work_sync sync;
+
+	k_work_cancel_sync(&m_clock_sync_work, &sync);
+	k_work_cancel_sync(&m_clock_sync_answer_work, &sync);
+	atomic_clear(&m_clock_sync_pending);
+	atomic_clear(&m_clock_sync_seq);
+}
+#endif

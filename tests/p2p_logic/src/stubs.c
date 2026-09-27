@@ -79,22 +79,28 @@ int app_clock_set_network_time(uint32_t unix_time)
 	return 0;
 }
 
-/* Common announce / clock-sync answer (app_radio.c is not built here): count
- * the calls so tests can check that the backend hands them to app_radio. */
+/* Common announce (app_radio.c is not built here): count the calls so tests
+ * can check that the backend hands it to app_radio. */
 int p2p_test_announce_calls;
-int p2p_test_send_info_calls;
-uint32_t p2p_test_send_info_seq;
 
 void app_radio_announce(void)
 {
 	p2p_test_announce_calls++;
 }
 
-int app_radio_send_info(uint32_t seq)
+/* The common clock_sync state (F3d): the backend reads the pending flag and
+ * reports a landed time; tests drive the one and count the other. */
+bool p2p_test_clock_sync_pending;
+int p2p_test_time_events;
+
+bool app_radio_clock_sync_pending(void)
 {
-	p2p_test_send_info_calls++;
-	p2p_test_send_info_seq = seq;
-	return 0;
+	return p2p_test_clock_sync_pending;
+}
+
+void app_radio_time_event(void)
+{
+	p2p_test_time_events++;
 }
 
 /* The radio work queue app_radio.c owns (doc/plan/439 T2a), started before the

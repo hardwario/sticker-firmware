@@ -110,7 +110,6 @@ static struct k_timer m_rejoin_timer;
 static struct k_work m_join_work;
 static struct k_work m_link_check_work;       /* LC timeout (from m_lc_timeout_timer) */
 static struct k_work m_downlink_success_work; /* deferred from downlink_callback */
-static struct k_work m_clock_sync_info_work;  /* deferred ClockSync Info uplink (#219) */
 static struct k_work m_lc_response_work;      /* deferred from link_check_callback */
 static struct k_work m_dl_request_work;       /* drains m_dl_msgq (port-85 commands) */
 static struct k_work_delayable m_join_complete_work;
@@ -169,16 +168,6 @@ struct lrw_dl_msg {
 };
 
 K_MSGQ_DEFINE(m_dl_msgq, sizeof(struct lrw_dl_msg), APP_RADIO_LRW_DL_QUEUE_DEPTH, 4);
-
-/* Set by a ClockSync command; the next network time-update sends an Info uplink
- * (with the synced unix_time) instead of the command acking immediately. */
-/* #193: set from a command-handler thread, test-and-cleared in the LoRaMac
- * downlink callback (another context) — an atomic bit closes the lost-update race. */
-static atomic_t m_clock_sync_info_pending;
-/* seq of the ClockSync command the deferred Info answers (F13: without it the
- * answer went out with seq 0 and the host could not pair it). Written by the
- * command handler before the pending bit is set, read by the Info work item. */
-static atomic_t m_clock_sync_info_seq;
 
 /* Kicked on a link-ready edge (join success) so
  * app_report can resume the report cadence with an immediate uplink. */
@@ -576,15 +565,6 @@ static void downlink_success_work_handler(struct k_work *work)
 	on_downlink_received();
 }
 
-/* Deferred from downlink_callback (#219): the nanopb Info encode + queue must not
- * run on the LoRaMac/system-WQ callback stack, whose depth is not ours to assume.
- * Runs on the radio work queue like every other TX-side work item. */
-static void clock_sync_info_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	(void)app_radio_send_info((uint32_t)atomic_get(&m_clock_sync_info_seq));
-}
-
 static void lc_response_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -977,7 +957,10 @@ const struct app_radio_backend app_radio_lrw_backend = {
 	.get_state = app_radio_lrw_get_state,
 	.warning_step = lrw_backoff_step,
 	.rejoin = lrw_tx_rejoin,
-	.in_flight = NULL,  /* lorawan_send() blocks for the whole confirmed exchange */
+	.in_flight = NULL, /* lorawan_send() blocks for the whole confirmed exchange */
+	/* A DeviceTimeReq rides the next uplink; its answer raises
+	 * LORAWAN_TIME_UPDATED in downlink_callback(). */
+	.time_request = app_clock_force_resync,
 	.confirm_kinds = 0, /* unconfirmed: the link check is the liveness probe */
 	.cmd_transport = APP_CMD_TRANSPORT_LRW,
 	.frame_gap_ms = FRAME_GAP_SEC * MSEC_PER_SEC,
@@ -1019,14 +1002,10 @@ static void downlink_callback(uint8_t port, uint8_t flags, int16_t rssi, int8_t 
 	/* Set the RTC from the network if this downlink carried a DeviceTimeAns. */
 	app_clock_handle_downlink(flags);
 
-	/* Deferred answer to a ClockSync command: once the network time actually
-	 * lands, send an Info uplink carrying the freshly-synced unix_time (the
-	 * command itself does not ack — saves an uplink, and a bare ack couldn't
-	 * carry the synced time yet). The Info encode is pushed to the radio work queue so it
-	 * never runs on the callback stack (#219). */
-	if ((flags & LORAWAN_TIME_UPDATED) &&
-	    atomic_test_and_clear_bit(&m_clock_sync_info_pending, 0)) {
-		k_work_submit_to_queue(app_radio_work_q(), &m_clock_sync_info_work);
+	/* The time landed: app_radio answers a pending clock_sync, on its work
+	 * queue, never on this callback stack (#219). */
+	if (flags & LORAWAN_TIME_UPDATED) {
+		app_radio_time_event();
 	}
 
 	if (port == APP_RADIO_LRW_DOWNLINK_CMD_PORT && data && len > 0) {
@@ -1317,7 +1296,6 @@ int app_radio_lrw_init(void)
 	k_work_init(&m_join_work, join_work_handler);
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
-	k_work_init(&m_clock_sync_info_work, clock_sync_info_work_handler);
 	k_work_init(&m_lc_response_work, lc_response_work_handler);
 	k_work_init(&m_dl_request_work, dl_request_work_handler);
 	k_work_init_delayable(&m_join_complete_work, join_complete_work_handler);
@@ -1511,21 +1489,6 @@ int app_radio_lrw_get_info(struct app_radio_lrw_info *info)
 	info->link_check_interval = g_app_config.radio_link_check_interval;
 
 	return 0;
-}
-
-void app_radio_lrw_send_info_on_clock_sync(uint32_t seq)
-{
-	/* Arm the deferred Info; downlink_callback sends it once LORAWAN_TIME_UPDATED
-	 * arrives (the ClockSync command answer). The seq is stored before the bit is
-	 * set, so the Info work item never pairs a new request with a stale seq. */
-	atomic_set(&m_clock_sync_info_seq, (atomic_val_t)seq);
-	atomic_set_bit(&m_clock_sync_info_pending, 0);
-}
-
-void app_radio_lrw_clock_sync(uint32_t seq)
-{
-	app_clock_force_resync();
-	app_radio_lrw_send_info_on_clock_sync(seq);
 }
 
 int app_radio_lrw_reset_nvm(void)
