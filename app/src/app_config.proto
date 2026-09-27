@@ -202,6 +202,9 @@ message Command {
         // batch on a fault. A multi-downlink table sets it on the FIRST message
         // only (and `save` on the last). LoRaWAN / NFC / shell, not vendor.
         optional bool                         alarms_replace = 6;
+        // P2P radio tuning (doc/plan/439 parity): shell only (doc/p2p.md §2), never over a
+        // LoRaWAN or P2P downlink — see the p2p_* comment in app_config.yml.
+        optional AppConfigMessage.P2P         p2p         = 7;
     }
 
     // Read back selected non-secret config fields. Paged like GetConfig:
@@ -215,6 +218,7 @@ message Command {
         repeated uint32 sensors_field     = 3;
         repeated uint32 alarms_field      = 4;
         optional uint32 page              = 5;
+        repeated uint32 p2p_field         = 6;
     }
 
     // page (#425, NFC / vendor / shell): which page of an Info that does not fit
@@ -516,6 +520,7 @@ message Response {
         // (those stay a pure config snapshot). The persisted slot ROM serials are
         // read separately via GetParam(sensors 11..14).
         repeated uint32 w1_slot_type = 7;
+        optional AppConfigMessage.P2P p2p = 8;
     }
 
     message HistoryFrame {
@@ -559,7 +564,7 @@ message Response {
         // Offending field, encoded as group*100 + tag (#196). SetParam applies
         // groups in a fixed order and stops at the first failing one; the tag
         // alone is ambiguous across groups, so the group is folded in:
-        // group 1=lorawan, 2=application, 3=sensors, 4=alarms; 0 = not group-scoped
+        // group 1=lorawan, 2=application, 3=sensors, 4=alarms, 5=p2p; 0 = not group-scoped
         // (tags stay < 100). Host decodes: group = fault_field / 100, tag = % 100.
         uint32 fault_field  = 2;
         string detail       = 3;

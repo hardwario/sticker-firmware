@@ -104,8 +104,8 @@ var _RESET_CAUSES = [
 ];
 
 // Config submessage maps: proto field tag -> name. The flat C struct is split
-// across submessages lorawan/application/sensors/alarms; device identity stays
-// at the AppConfigMessage root (not addressable via SetParam/GetConfig).
+// across submessages lorawan/application/sensors/alarms/p2p; device identity
+// stays at the AppConfigMessage root (not addressable via SetParam/GetConfig).
 // proto_ids are contiguous 1..N per submessage (aligned in #166).
 var _APP_NAMES = {
   1: "calibration", 2: "interval_sample", 3: "interval_report",
@@ -147,6 +147,12 @@ var _LRW_NAMES = {
 };
 var _LRW_HEX = { 6: "deveui", 7: "joineui", 10: "devaddr" };
 
+// Names drop the `p2p_` prefix the YAML carries (frequency <- p2p_frequency, ...).
+// Radio parity (doc/plan/439): readable everywhere, like the LoRaWAN radio params above.
+var _P2P_NAMES = { 1: "frequency", 2: "spreading_factor", 3: "tx_power" };
+var _P2P_ENUMS = {};
+var _P2P_FLOAT = {};
+
 // Reverse maps (name -> tag) for encoding SetParam. The LoRaWAN hex set adds the
 // secret keys (nwkkey/appkey/nwkskey/appskey) which the decoder deliberately
 // hides but which a downlink may legitimately set.
@@ -167,6 +173,7 @@ var _APP_TAGS = _invert(_APP_NAMES);
 var _SEN_TAGS = _invert(_SEN_NAMES);
 var _ALM_TAGS = _invert(_ALM_NAMES);
 var _LRW_TAGS = _invert(_LRW_NAMES);
+var _P2P_TAGS = _invert(_P2P_NAMES);
 
 // proto field tag -> command name in the DownlinkCommand body oneof.
 // BEGIN GENERATED COMMANDS
@@ -247,6 +254,7 @@ function _decodeCfgGroup(bytes, start, end, NAMES, ENUMS, HEX) {
 function _decodeApplication(b, s, e) { return _decodeCfgGroup(b, s, e, _APP_NAMES, _APP_ENUMS, null); }
 function _decodeSensors(b, s, e) { return _decodeCfgGroup(b, s, e, _SEN_NAMES, _SEN_ENUMS, _SEN_HEX); }
 function _decodeAlarms(b, s, e) { return _decodeCfgGroup(b, s, e, _ALM_NAMES, _ALM_ENUMS, _ALM_HEX); }
+function _decodeP2P(b, s, e) { return _decodeCfgGroup(b, s, e, _P2P_NAMES, _P2P_ENUMS, null); }
 
 function _decodeConfigDump(bytes, start, end) {
   var cd = {}, pos = start;
@@ -276,6 +284,9 @@ function _decodeConfigDump(bytes, start, end) {
           cd.w1_slot_type.push(_W1_SLOT_TYPES[t.value] || ("type" + t.value));
         }
       }
+      // field 8 = p2p (radio parity, doc/plan/439): P2P radio tuning, readable
+      // over every transport like the LoRaWAN radio params.
+      else if (f === 8) cd.p2p = _decodeP2P(bytes, pos, e2);
       pos = e2;
     } else { break; }
   }
@@ -912,6 +923,7 @@ function _encCfgGroup(obj, TAGS, FLOAT, ENUMS, HEXENC) {
 function _encApplication(a) { return _encCfgGroup(a, _APP_TAGS, _APP_FLOAT, _APP_ENUMS, null); }
 function _encSensors(s) { return _encCfgGroup(s, _SEN_TAGS, _SEN_FLOAT, _SEN_ENUMS, _SEN_HEX_ENC); }
 function _encAlarms(a) { return _encCfgGroup(a, _ALM_TAGS, _ALM_FLOAT, _ALM_ENUMS, _ALM_HEX_ENC); }
+function _encP2P(p) { return _encCfgGroup(p, _P2P_TAGS, _P2P_FLOAT, _P2P_ENUMS, null); }
 
 function encodeDownlinkCommand(cmd) {
   var out = [];
@@ -940,6 +952,10 @@ function encodeDownlinkCommand(cmd) {
     // alarms_replace (field 6): empty all alarm slots before `alarms` is applied
     // (the whole table in one message); on the FIRST message of a batch only.
     if (b.alarms_replace) body = body.concat(_encTag(6, 0)).concat(_encVarint(1));
+    // p2p (field 7, radio parity, doc/plan/439): shell only (doc/p2p.md §2) — the device itself
+    // rejects this over a LoRaWAN/P2P downlink, but the builder does not
+    // pre-filter by transport so a hand-crafted NFC payload can still use it.
+    if (b.p2p) body = body.concat(_encLenDelim(7, _encP2P(b.p2p)));
   } else if (name === "get_param") {
     // proto3 repeated scalars are packed (length-delimited) by default.
     var _packField = function (arr, tag) {
@@ -954,6 +970,7 @@ function encodeDownlinkCommand(cmd) {
     _packField(b.alarms_field, 4);
     // page (field 5, #93.3): request page N of an over-budget field list.
     if (b.page) body = body.concat(_encTag(5, 0)).concat(_encVarint(b.page));
+    _packField(b.p2p_field, 6);
   } else if (name === "get_config") {
     if (b.page) body = body.concat(_encTag(1, 0)).concat(_encVarint(b.page));
   } else if (name === "reset_counters") {
@@ -1030,6 +1047,7 @@ function decodeDownlinkCommand(bytes) {
             else if (f2 === 2) sp.application = _decodeApplication(bytes, p, p + l2.value);
             else if (f2 === 4) sp.sensors = _decodeSensors(bytes, p, p + l2.value);
             else if (f2 === 5) sp.alarms = _decodeAlarms(bytes, p, p + l2.value);
+            else if (f2 === 7) sp.p2p = _decodeP2P(bytes, p, p + l2.value);
             p += l2.value;
           } else if (w2 === 0) {
             var sv = _pbReadVarint(bytes, p); p = sv.next;
@@ -1039,13 +1057,15 @@ function decodeDownlinkCommand(bytes) {
         }
         cmd.set_param = sp;
       } else if (field === 3) { // get_param (repeated uint32, packed or not)
-        var gp = { lorawan_field: [], application_field: [], sensors_field: [], alarms_field: [] },
+        var gp = { lorawan_field: [], application_field: [], sensors_field: [], alarms_field: [],
+                   p2p_field: [] },
             q = pos;
         while (q < end && q < bytes.length) {
           var t3 = _pbReadVarint(bytes, q); q = t3.next;
           var f3 = t3.value >>> 3, w3 = t3.value & 0x7;
           var dst = (f3 === 1) ? gp.lorawan_field : (f3 === 2) ? gp.application_field
-                  : (f3 === 3) ? gp.sensors_field : (f3 === 4) ? gp.alarms_field : null;
+                  : (f3 === 3) ? gp.sensors_field : (f3 === 4) ? gp.alarms_field
+                  : (f3 === 6) ? gp.p2p_field : null;
           if (w3 === 0) {
             var v3 = _pbReadVarint(bytes, q); q = v3.next;
             if (f3 === 5) gp.page = v3.value; // #93.3 pagination cursor
@@ -1056,7 +1076,7 @@ function decodeDownlinkCommand(bytes) {
             while (q < e3 && q < bytes.length) { var pv = _pbReadVarint(bytes, q); q = pv.next; if (dst) dst.push(pv.value); }
           } else { break; }
         }
-        ["lorawan_field", "application_field", "sensors_field", "alarms_field"].forEach(
+        ["lorawan_field", "application_field", "sensors_field", "alarms_field", "p2p_field"].forEach(
           function (k) { if (gp[k].length === 0) delete gp[k]; });
         cmd.get_param = gp;
       } else if (field === 5) { // get_config

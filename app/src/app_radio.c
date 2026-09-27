@@ -18,12 +18,20 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
 #include <errno.h>
 
 LOG_MODULE_REGISTER(app_radio, LOG_LEVEL_INF);
+
+/* Fleet pre-send jitter (#267), one policy for both radios. The cap keeps a
+ * long interval_report (e.g. 900 s) from delaying a report by 90 s. */
+#define TX_JITTER_MAX_SEC 10
+
+static struct k_work_delayable m_jitter_work;
+static void jitter_work_handler(struct k_work *work);
 
 /* Kept out of a static entirely when CONFIG_RADIO_P2P=n: with P2P not even
  * compiled in, the radio is always running LoRaWAN by construction (radio_mode's
@@ -41,6 +49,8 @@ static inline bool is_p2p(void)
 
 int app_radio_init(void)
 {
+	k_work_init_delayable(&m_jitter_work, jitter_work_handler);
+
 #if defined(CONFIG_RADIO_P2P)
 	if (g_app_config.radio_mode == APP_CONFIG_RADIO_MODE_P2P) {
 		m_kind = APP_RADIO_P2P;
@@ -299,8 +309,10 @@ uint8_t app_radio_get_max_payload(void)
 #endif
 }
 
-void app_radio_send_telemetry(void)
+/* The backend composes and sends at once; the delay was taken here. */
+static void jitter_work_handler(struct k_work *work)
 {
+	ARG_UNUSED(work);
 #if defined(CONFIG_RADIO_P2P)
 	if (is_p2p()) {
 		app_radio_p2p_send_telemetry();
@@ -312,16 +324,31 @@ void app_radio_send_telemetry(void)
 #endif
 }
 
+void app_radio_send_telemetry(void)
+{
+	uint32_t span_ms = (uint32_t)g_app_config.interval_report * 100U; /* interval/10 */
+
+	span_ms = MIN(span_ms, (uint32_t)TX_JITTER_MAX_SEC * 1000U);
+	uint32_t delay_ms = span_ms ? (sys_rand32_get() % span_ms) : 0U;
+
+	k_work_reschedule(&m_jitter_work, K_MSEC(delay_ms));
+}
+
 void app_radio_send_telemetry_now(void)
 {
-#if defined(CONFIG_RADIO_P2P)
-	if (is_p2p()) {
-		app_radio_p2p_send_telemetry(); /* no pre-send jitter to skip */
-		return;
-	}
-#endif
+	/* F14: a host-requested uplink targets this one device, so the fleet
+	 * de-correlation buys nothing. Rescheduling to zero also folds a jittered
+	 * report still pending into this send (a single pending instance). */
+	k_work_reschedule(&m_jitter_work, K_NO_WAIT);
+}
+
+void app_radio_reset_link(void)
+{
 #if defined(CONFIG_LORAWAN)
-	app_radio_lrw_send_telemetry_now();
+	app_radio_lrw_reset_nvm();
+#endif
+#if defined(CONFIG_RADIO_P2P)
+	app_radio_p2p_forget_pairing();
 #endif
 }
 

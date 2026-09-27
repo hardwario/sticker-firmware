@@ -917,4 +917,17 @@ int app_config_apply_p2p(enum app_cmd_transport tp, const AppConfigMessage_P2P *
 void app_config_fill_p2p(AppConfigMessage_P2P *dst, const uint32_t *ids, size_t n)
 {
 	const struct app_config *c = app_config();
+
+	if (requested(ids, n, 1)) {
+		dst->has_frequency = true;
+		dst->frequency = c->p2p_frequency;
+	}
+	if (requested(ids, n, 2)) {
+		dst->has_spreading_factor = true;
+		dst->spreading_factor = c->p2p_spreading_factor;
+	}
+	if (requested(ids, n, 3)) {
+		dst->has_tx_power = true;
+		dst->tx_power = c->p2p_tx_power;
+	}
 }

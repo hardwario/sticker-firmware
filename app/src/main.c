@@ -199,19 +199,14 @@ static void nfc_run_deferred_cmd_actions(void)
 			app_config()->calibration = true;
 			app_settings_save(true);
 			break;
-#if defined(CONFIG_LORAWAN)
 		case APP_CMD_ACTION_LRW_RESET:
-			/* Wipe LoRaWAN NVM (counters + DevNonce) + reboot (#109). Only
-			 * reachable via a LoRaWAN-specific NFC command, so a no-op when
-			 * LoRaWAN itself isn't compiled in (#118 phase 2 flash budget). */
+			/* Forget the network session (#109) on every stack + reboot: the
+			 * LoRaWAN NVM (counters + DevNonce) and the P2P pairing. */
 			nfc_result_before_reboot();
-#if defined(CONFIG_LORAWAN)
-			app_radio_lrw_reset_nvm();
-#endif /* defined(CONFIG_LORAWAN) */
-			LOG_WRN_REBOOTING("LoRaWAN NVM reset");
+			app_radio_reset_link();
+			LOG_WRN_REBOOTING("radio session reset");
 			sys_reboot(SYS_REBOOT_COLD);
 			break;
-#endif /* defined(CONFIG_LORAWAN) */
 		case APP_CMD_ACTION_LRW_JOIN:
 			/* Force a (re)join now, no reboot (#109), on whichever radio runs:
 			 * a LoRaWAN join or a fresh P2P join handshake. */

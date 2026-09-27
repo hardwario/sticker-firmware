@@ -39,6 +39,10 @@ uint32_t test_history_first_abs;
 size_t test_history_count = 1;
 /* Counts every telemetry compose the P2P send path attempted. */
 int g_compose_budget_calls;
+/* Frame length the compose stub reports (0 = nothing to send), and how many
+ * times the P2P send path reset the snapshot. */
+size_t test_compose_len;
+int g_compose_reset_calls;
 /* Tracks the last app_history_set_replay_active() argument. */
 bool g_history_replay_active;
 
@@ -49,7 +53,7 @@ int app_compose_budget(uint8_t *buf, size_t size, size_t *len, bool *more, uint8
 	ARG_UNUSED(budget);
 	g_compose_budget_calls++;
 	if (len) {
-		*len = 0;
+		*len = test_compose_len < size ? test_compose_len : size;
 	}
 	if (more) {
 		*more = false;
@@ -59,6 +63,7 @@ int app_compose_budget(uint8_t *buf, size_t size, size_t *len, bool *more, uint8
 
 void app_compose_reset(void)
 {
+	g_compose_reset_calls++;
 }
 
 /* ---- app_history / app_cmd, for the B8 replay call graph ---- */
@@ -287,4 +292,13 @@ void app_radio_set_duty_held(bool held)
 void app_radio_set_airtime(uint32_t ms)
 {
 	ARG_UNUSED(ms);
+}
+
+void app_radio_reset_link(void)
+{
+}
+
+bool app_radio_announce_run(void)
+{
+	return false;
 }

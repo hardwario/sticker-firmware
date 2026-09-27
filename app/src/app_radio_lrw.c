@@ -101,7 +101,7 @@ static struct k_work_q m_work_q;
 #define LRW_HEARTBEAT_PERIOD_SEC 5
 #define LRW_HEARTBEAT_TIMEOUT_MS 30000
 /* M-2: the #182 heartbeat only proves m_work_q drains, not that telemetry
- * actually leaves; see stale_check() for the stale-uplink decision. */
+ * actually leaves; see app_radio_stale_check() for the stale-uplink decision. */
 
 /* A lost MAC confirm must end in -ETIMEDOUT from lorawan_send()/lorawan_join()
  * (#181) before the liveness channel goes stale and resets the SoC. */
@@ -118,7 +118,7 @@ static struct k_work_delayable m_heartbeat_work;
 /* M-2 stale-uplink watchdog (F29 duty-cycle hold, #437).
  *
  * The watchdog forces a MAC-reset rejoin when joined but no telemetry uplink has
- * left for LRW_STALE_FACTOR x interval_report: sends perpetually skipped
+ * left for APP_RADIO_STALE_FACTOR x interval_report: sends perpetually skipped
  * (budget == 0 loop, retries exhausted) leave m_work_q live and the IWDG fed
  * while the station is mute.
  *
@@ -128,53 +128,17 @@ static struct k_work_delayable m_heartbeat_work;
  * rolls over. A rejoin there only re-initialises the MAC, which resets the band
  * credits kept in RAM -- the device would bypass the 1 % limit (F29, HIL
  * 2026-09-25: DR0 at 60 s, two forced rejoins in 91 min). So the watchdog holds
- * while refusals keep coming, bounded by LRW_STALE_DC_HOLD_MAX_MS so a MAC stuck
- * in "restricted" still ends in a rejoin. */
-
-/* Report intervals without a telemetry uplink before M-2 forces a rejoin. */
-#define LRW_STALE_FACTOR              4
-/* Longest duty-cycle streak M-2 waits out: the 1 h observation window of the
- * LoRaMac band credits plus a margin. */
-#define LRW_STALE_DC_HOLD_MAX_MS      (75LL * 60 * 1000)
-/* A refusal counts as "recent" within one report interval plus this margin (the
- * telemetry retry chain after a report is 8 x 15 s). */
-#define LRW_STALE_DC_RECENT_MARGIN_MS (3LL * 60 * 1000)
-
-enum stale_verdict {
-	STALE_OK = 0,  /* an uplink left recently enough (or no clock) */
-	STALE_HOLD_DC, /* stale, but the duty cycle explains it: wait */
-	STALE_REJOIN,  /* stale with no duty-cycle excuse: force rejoin */
-};
-
-/* Duty-cycle refusal streak: first and most recent refusal (uptime ms, 0 =
- * none). Cleared by a successful send. */
-struct stale_dc {
-	int64_t since_ms;
-	int64_t last_ms;
-};
+ * while refusals keep coming, bounded by APP_RADIO_STALE_DC_HOLD_MAX_MS so a MAC
+ * stuck in "restricted" still ends in a rejoin. The decision itself is the policy
+ * shared with P2P (app_radio_stale_check(), app_radio.h). */
 
 /* Uptime (ms) of the last successful telemetry uplink; 0 = none since the last
  * (re)join. Drives the M-2 stale-uplink watchdog in heartbeat_work_handler. */
 static int64_t m_last_uplink_ms;
 /* Duty-cycle refusal streak (F29): lets M-2 wait out a throttled MAC instead of
  * rejoining, which would reset the band credits. Only touched on m_work_q. */
-static struct stale_dc m_dc;
+static struct app_radio_stale_dc m_dc;
 static bool m_dc_hold_logged;
-
-/* Record a lorawan_send() result: 0 clears the streak, -ECONNREFUSED (duty
- * cycle) extends it, anything else leaves it unchanged. */
-static void stale_note_send(struct stale_dc *dc, int ret, int64_t now_ms)
-{
-	if (ret == 0) {
-		dc->since_ms = 0;
-		dc->last_ms = 0;
-	} else if (ret == -ECONNREFUSED) {
-		if (dc->since_ms == 0) {
-			dc->since_ms = now_ms;
-		}
-		dc->last_ms = now_ms;
-	}
-}
 
 static void publish_mac(void);
 
@@ -184,7 +148,8 @@ static int lrw_send(uint8_t port, uint8_t *data, uint8_t len, enum lorawan_messa
 	int ret = lorawan_send(port, data, len, type);
 
 	app_radio_count(ret == 0 ? APP_RADIO_CNT_TX : APP_RADIO_CNT_TX_ERR);
-	stale_note_send(&m_dc, ret, k_uptime_get());
+	/* -ECONNREFUSED: refused by the duty cycle (F29). */
+	app_radio_stale_note(&m_dc, ret == 0, ret == -ECONNREFUSED, k_uptime_get());
 	if (ret == 0) {
 		m_dc_hold_logged = false;
 		app_radio_set_duty_held(false);
@@ -202,13 +167,13 @@ static struct k_timer m_rejoin_timer;
 /* --- Works --- */
 static struct k_work m_send_work;            /* drains response/alarm, then composes telemetry */
 static struct k_work_delayable m_frame_work; /* multi-frame snapshot continuation */
-static struct k_work_delayable m_tx_jitter_work; /* #267: random pre-send delay (fleet de-corr) */
+static struct k_work m_telemetry_work; /* compose request; the #267 jitter is taken in app_radio */
 
 /* #340 M5: m_send_work is shared between the response/alarm drain and the
  * telemetry-compose trigger. k_work_submit() coalesces a re-submit while the
  * item is already pending, so a telemetry trigger arriving mid-drain can
  * collapse into that same run and never reach tx_telemetry_frame(). This flag
- * survives the coalescing: tx_jitter_work_handler() sets it whenever it asks
+ * survives the coalescing: telemetry_work_handler() sets it whenever it asks
  * for a compose, and send_work_handler() checks/clears it after a drain
  * leaves both queues empty, so the request is honored on this same pass
  * instead of being silently dropped. Plain bool is safe without atomics: both
@@ -236,13 +201,6 @@ static struct k_work_delayable
 #define FRAME_GAP_SEC   3
 #define FRAME_RETRY_SEC 15
 
-/* Fleet-uplink de-correlation: cap on the random pre-send jitter (#267). The
- * window is min(interval_report/10, this) — 10% for short intervals, but an
- * absolute ceiling so a long interval_report (e.g. 900 s) doesn't push the jitter
- * to 90 s (excessive spread + telemetry staleness). 10 s already de-correlates a
- * fleet well vs. the ~sub-second per-uplink airtime, and keeps the added staleness
- * negligible even at long report intervals. */
-#define TX_JITTER_MAX_SEC 10
 /* Duty-cycle/MAC-busy retries before abandoning a telemetry frame (#219); mirrors
  * HISTORY_MAX_RETRIES so a permanent TX error can't be retried forever. */
 #define FRAME_MAX_RETRIES 8
@@ -627,7 +585,7 @@ static void state_transition(enum app_radio_state new_state)
 		publish_mac();
 		m_link_check_pending = false;
 		m_last_uplink_ms = k_uptime_get(); /* M-2: start the stale-uplink clock */
-		m_dc = (struct stale_dc){0};
+		m_dc = (struct app_radio_stale_dc){0};
 		m_dc_hold_logged = false;
 		break;
 
@@ -1017,7 +975,7 @@ static void post_cmd_work_handler(struct k_work *work)
 		/* Wipe the LoRaWAN NVM (frame counters + DevNonce + session), then cold
 		 * reboot so the MAC re-initialises from a clean NVM (#109). Same path as
 		 * `ats radio reset`. The Ack uplink has already left (drain-waited above). */
-		app_radio_lrw_reset_nvm();
+		app_radio_reset_link();
 		LOG_WRN_REBOOTING("command: LoRaWAN NVM wipe");
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
@@ -1528,13 +1486,14 @@ static void tx_retry_work_handler(struct k_work *work)
 	k_work_submit_to_queue(&m_work_q, &m_send_work);
 }
 
-/* Fires after the random pre-send delay (#267): kick the normal send path.
- * This is the sole trigger for a telemetry compose, so set the pending flag
+/* A telemetry compose request (app_radio took the #267 pre-send jitter): kick
+ * the normal send path. This is the sole trigger for a telemetry compose, so set
+ * the pending flag
  * BEFORE submitting (#340 M5) — if m_send_work is already pending because of
  * an in-flight response/alarm drain, the submit below coalesces into that
  * run instead of scheduling a new one, and the flag is what lets that run
  * still honor the request. */
-static void tx_jitter_work_handler(struct k_work *work)
+static void telemetry_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 	m_telemetry_pending = true;
@@ -2159,33 +2118,6 @@ void app_radio_lrw_suspend(void)
 }
 
 #if defined(CONFIG_WATCHDOG)
-/* Decide the watchdog action. `last_uplink_ms` = uptime of the last successful
- * telemetry uplink (0 = none since the last (re)join: no decision), `interval_s`
- * = interval_report (0 = no cadence: no decision). Hold only while refusals keep
- * coming (the MAC is alive and throttled) and the streak is no longer than the
- * duty-cycle window. */
-static enum stale_verdict stale_check(int64_t now_ms, int64_t last_uplink_ms,
-				      const struct stale_dc *dc, uint32_t interval_s)
-{
-	if (last_uplink_ms == 0 || interval_s == 0) {
-		return STALE_OK;
-	}
-
-	int64_t interval_ms = (int64_t)interval_s * 1000;
-
-	if (now_ms - last_uplink_ms <= interval_ms * LRW_STALE_FACTOR) {
-		return STALE_OK;
-	}
-
-	if (dc->since_ms != 0 && dc->last_ms != 0 &&
-	    now_ms - dc->last_ms <= interval_ms + LRW_STALE_DC_RECENT_MARGIN_MS &&
-	    now_ms - dc->since_ms < LRW_STALE_DC_HOLD_MAX_MS) {
-		return STALE_HOLD_DC;
-	}
-
-	return STALE_REJOIN;
-}
-
 static void heartbeat_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
@@ -2195,7 +2127,7 @@ static void heartbeat_work_handler(struct k_work *work)
 	/* M-2: stale-uplink watchdog. The ping above only proves m_work_q drains; if
 	 * telemetry is perpetually skipped (budget==0, retries exhausted) the station
 	 * is mute while the IWDG stays fed. When joined but no successful uplink has
-	 * left for LRW_STALE_FACTOR × interval_report, force a MAC-reset rejoin
+	 * left for APP_RADIO_STALE_FACTOR × interval_report, force a MAC-reset rejoin
 	 * (same escalation the link-check failure path uses) — unless the sends are
 	 * being refused by the duty cycle (F29): the MAC is alive then, and a rejoin
 	 * would only reset the band credits. Runs on m_work_q, so state_transition()
@@ -2204,20 +2136,21 @@ static void heartbeat_work_handler(struct k_work *work)
 	if (st == APP_RADIO_STATE_HEALTHY || st == APP_RADIO_STATE_WARNING) {
 		int64_t now = k_uptime_get();
 
-		switch (stale_check(now, m_last_uplink_ms, &m_dc,
-				    (uint32_t)g_app_config.interval_report)) {
-		case STALE_HOLD_DC:
+		switch (app_radio_stale_check(now, m_last_uplink_ms, &m_dc,
+					      (uint32_t)g_app_config.interval_report)) {
+		case APP_RADIO_STALE_HOLD_DC:
 			if (!m_dc_hold_logged) {
 				LOG_WRN("No telemetry uplink for >%d report intervals, but the "
 					"duty cycle is refusing sends (%d s): no rejoin (M-2)",
-					LRW_STALE_FACTOR, (int)((now - m_dc.since_ms) / 1000));
+					APP_RADIO_STALE_FACTOR,
+					(int)((now - m_dc.since_ms) / 1000));
 				m_dc_hold_logged = true;
 			}
 			break;
-		case STALE_REJOIN:
+		case APP_RADIO_STALE_REJOIN:
 			LOG_WRN("No telemetry uplink for >%d report intervals - forcing rejoin "
 				"(M-2)",
-				LRW_STALE_FACTOR);
+				APP_RADIO_STALE_FACTOR);
 			m_last_uplink_ms = now; /* don't re-trigger every tick */
 			state_transition(APP_RADIO_STATE_RECONNECT);
 			break;
@@ -2350,7 +2283,7 @@ int app_radio_lrw_init(void)
 	k_work_init(&m_join_work, join_work_handler);
 	k_work_init(&m_send_work, send_work_handler);
 	k_work_init_delayable(&m_frame_work, frame_work_handler);
-	k_work_init_delayable(&m_tx_jitter_work, tx_jitter_work_handler);
+	k_work_init(&m_telemetry_work, telemetry_work_handler);
 	k_work_init_delayable(&m_hist_work, m_hist_work_handler);
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
@@ -2395,36 +2328,12 @@ void app_radio_lrw_join(void)
 
 void app_radio_lrw_send_telemetry(void)
 {
-	/* Compose + split + send a telemetry snapshot from the current sensor data.
-	 * Runs on m_work_q; send_work_handler drains response/alarm first, then falls
-	 * through to the telemetry compose when both queues are empty.
-	 *
-	 * De-correlate fleet uplinks with a random PRE-SEND delay (#267). The jitter
-	 * lives here, on the transmission — NOT on the report timer in app_report, which
-	 * must stay a fixed interval so the history-capture cadence matches the fixed
-	 * interval that replay reconstructs (base + ord*interval_report); jittering the
-	 * period would drift every stored sample's timestamp. A fixed cadence also means
-	 * a report is never emitted early. send_work_handler still drains queued
-	 * responses/alarms first.
-	 *
-	 * Window = min(interval_report/10, TX_JITTER_MAX_SEC): 10% for short intervals,
-	 * but capped absolutely so a long interval (e.g. 900 s) doesn't yield a 90 s
-	 * delay (excessive spread + stale telemetry). */
-	uint32_t span_ms = (uint32_t)g_app_config.interval_report * 100U; /* interval/10, in ms */
-	span_ms = MIN(span_ms, (uint32_t)TX_JITTER_MAX_SEC * 1000U);
-	uint32_t delay_ms = span_ms ? (sys_rand32_get() % span_ms) : 0U;
-	k_work_reschedule_for_queue(&m_work_q, &m_tx_jitter_work, K_MSEC(delay_ms));
-}
-
-void app_radio_lrw_send_telemetry_now(void)
-{
-	/* F14: a host-requested uplink targets this one device, so the fleet
-	 * de-correlation delay buys nothing. Rescheduling to zero also folds a
-	 * jittered report that is still pending into this send, instead of the
-	 * request collapsing into it seconds later (k_work_reschedule keeps a single
-	 * pending instance) — the host sees one fresh uplink right after its
-	 * command either way. */
-	k_work_reschedule_for_queue(&m_work_q, &m_tx_jitter_work, K_NO_WAIT);
+	/* Compose + split + send a telemetry snapshot from the current sensor data,
+	 * now: app_radio already applied the fleet pre-send jitter (#267), or skipped
+	 * it for a host-requested uplink (F14). Runs on m_work_q; send_work_handler
+	 * drains response/alarm first, then falls through to the telemetry compose
+	 * when both queues are empty. */
+	k_work_submit_to_queue(&m_work_q, &m_telemetry_work);
 }
 
 void app_radio_lrw_register_ready_cb(void (*cb)(void))

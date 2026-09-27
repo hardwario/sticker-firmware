@@ -335,6 +335,11 @@ void app_radio_p2p_get_info(struct app_radio_p2p_info *info);
  * via app_radio_rejoin()) genuinely force a fresh session on both radio stacks. */
 void app_radio_p2p_rejoin(void);
 
+/* app_radio_reset_link() on P2P: clear the persisted pairing (RAM + NVS) ahead
+ * of a reset-tier reboot; the dev_nonce and frame counter are kept (see
+ * app_radio_p2p_unjoin()). */
+void app_radio_p2p_forget_pairing(void);
+
 /* app_radio_clock_sync() on P2P: send an uplink now and, once its Ack has been
  * processed (the Ack time tail sets the RTC), answer with an Info carrying
  * `seq`. A newer request before that Ack takes over the seq. */
@@ -420,6 +425,11 @@ void p2p_test_join_setup(int cfg_sf);
 void p2p_test_join_step(void);
 void p2p_test_join_arm_retry(int64_t ms);
 void p2p_test_set_paired(void);
+void p2p_test_telemetry_send(void);
+bool p2p_test_frame_pending(void);
+uint32_t p2p_test_tx_waiting(void);
+void p2p_test_tx_reset(void);
+void p2p_test_put_ack_retry(uint32_t counter);
 void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, uint16_t fails,
 		       bool disabled);
 void p2p_test_note_downlink(int16_t rssi, int8_t snr);

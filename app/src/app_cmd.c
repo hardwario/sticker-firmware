@@ -407,7 +407,7 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	uint32_t fault = 0;
 	/* Group that produced the fault, folded into fault_field as group*100 + tag so
 	 * the host can disambiguate the tag across groups (#196): 1=lorawan
-	 * 2=application 3=sensors 4=alarms. */
+	 * 2=application 3=sensors 4=alarms 5=p2p. */
 	uint32_t fault_group = 0;
 	int rc = 0;
 
@@ -457,6 +457,10 @@ static void app_cmd_handle_set_param(enum app_cmd_transport tp, const Command *c
 	if (rc == 0 && sp->has_alarms) {
 		rc = app_config_apply_alarms(tp, &sp->alarms, &fault);
 		fault_group = 4;
+	}
+	if (rc == 0 && sp->has_p2p) {
+		rc = app_config_apply_p2p(tp, &sp->p2p, &fault);
+		fault_group = 5;
 	}
 
 	if (rc) {
@@ -537,6 +541,7 @@ static void app_cmd_handle_get_info(enum app_cmd_transport tp, const Command *cm
 #define DUMP_SECTION_APPLICATION 1
 #define DUMP_SECTION_SENSORS     2
 #define DUMP_SECTION_ALARMS      3
+#define DUMP_SECTION_P2P         4
 
 static const struct {
 	uint8_t section;
@@ -607,6 +612,9 @@ static const struct {
 	{DUMP_SECTION_ALARMS, 17, 20, false, false},
 	{DUMP_SECTION_ALARMS, 18, 20, false, false},
 	{DUMP_SECTION_ALARMS, 20, 3, false, false},
+	{DUMP_SECTION_P2P, 1, 6, false, false},
+	{DUMP_SECTION_P2P, 2, 2, false, false},
+	{DUMP_SECTION_P2P, 3, 2, false, false},
 	// END GENERATED DUMP_FIELDS
 };
 
@@ -662,7 +670,7 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 	 * table (one NFC page can hold every field) — a per-section [4][N] matrix
 	 * would cost ~4x the stack and overflowed the handler thread (#176). */
 	uint32_t ids[ARRAY_SIZE(DUMP_FIELDS)];
-	size_t off[4] = {0}, n[4] = {0};
+	size_t off[5] = {0}, n[5] = {0};
 	size_t total = 0;
 
 	/* Single greedy pass: pack fields into pages by DUMP_PAGE_BUDGET, collect
@@ -734,6 +742,10 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 		app_config_fill_alarms(&cd->alarms, &ids[off[DUMP_SECTION_ALARMS]],
 				       n[DUMP_SECTION_ALARMS]);
 	}
+	if (n[DUMP_SECTION_P2P] > 0) {
+		cd->has_p2p = true;
+		app_config_fill_p2p(&cd->p2p, &ids[off[DUMP_SECTION_P2P]], n[DUMP_SECTION_P2P]);
+	}
 }
 
 /* Encoded-size bound for a (section, tag) from DUMP_FIELDS. Returns false for a
@@ -762,24 +774,26 @@ static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *c
 	const bool allow_nfc_only = (tp == APP_CMD_TRANSPORT_NFC);
 
 	/* Requested ids per section, in ConfigDump section order. DUMP_SECTION_*
-	 * equals the index here (0..3). */
-	const uint32_t *req_ids[4] = {gp->lorawan_field, gp->application_field, gp->sensors_field,
-				      gp->alarms_field};
-	const size_t req_n[4] = {gp->lorawan_field_count, gp->application_field_count,
-				 gp->sensors_field_count, gp->alarms_field_count};
+	 * equals the index here (0..4). */
+	const uint32_t *req_ids[5] = {gp->lorawan_field, gp->application_field, gp->sensors_field,
+				      gp->alarms_field, gp->p2p_field};
+	const size_t req_n[5] = {gp->lorawan_field_count, gp->application_field_count,
+				 gp->sensors_field_count, gp->alarms_field_count,
+				 gp->p2p_field_count};
 
 	/* Collected ids for the requested page, one buffer per section sized to its
 	 * own request array (the page can't hold more than was requested). */
 	uint32_t lw[ARRAY_SIZE(gp->lorawan_field)], ap[ARRAY_SIZE(gp->application_field)],
-		se[ARRAY_SIZE(gp->sensors_field)], al[ARRAY_SIZE(gp->alarms_field)];
-	uint32_t *out_ids[4] = {lw, ap, se, al};
-	size_t out_n[4] = {0};
+		se[ARRAY_SIZE(gp->sensors_field)], al[ARRAY_SIZE(gp->alarms_field)],
+		p2[ARRAY_SIZE(gp->p2p_field)];
+	uint32_t *out_ids[5] = {lw, ap, se, al, p2};
+	size_t out_n[5] = {0};
 
 	/* One greedy pass over all requested (dumpable) ids, continuous across
 	 * sections like get_config: pack into DR0-sized pages by DUMP_PAGE_BUDGET
 	 * and collect the requested page's tags per section. */
 	uint32_t cur_page = 0, used = 0;
-	for (uint8_t s = 0; s < 4; s++) {
+	for (uint8_t s = 0; s < 5; s++) {
 		for (size_t j = 0; j < req_n[s]; j++) {
 			/* Skip a field id already requested earlier in this section: a
 			 * duplicate would otherwise be counted twice against the page budget
@@ -845,6 +859,10 @@ static void app_cmd_handle_get_param(enum app_cmd_transport tp, const Command *c
 	if (out_n[DUMP_SECTION_ALARMS] > 0) {
 		cd->has_alarms = true;
 		app_config_fill_alarms(&cd->alarms, al, out_n[DUMP_SECTION_ALARMS]);
+	}
+	if (out_n[DUMP_SECTION_P2P] > 0) {
+		cd->has_p2p = true;
+		app_config_fill_p2p(&cd->p2p, p2, out_n[DUMP_SECTION_P2P]);
 	}
 }
 
@@ -2880,9 +2898,10 @@ int app_cmd_handle(enum app_cmd_transport transport, const uint8_t *in, size_t i
 		LOG_WRN("Response too large for buffer; sending Error instead");
 		resp = (Response)Response_init_zero;
 		resp.seq = seq;
-		/* #409: over LoRaWAN the only reason is the DR payload budget, so say
-		 * so — the host should retry once ADR raises the DR. */
-		if (transport == APP_CMD_TRANSPORT_LRW) {
+		/* #409: over a radio the only reason is the payload budget (LoRaWAN:
+		 * the DR, P2P: the response slot), so say so — over LoRaWAN the host
+		 * should retry once ADR raises the DR. */
+		if (radio_transport(transport)) {
 			make_error(&resp, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
 		} else {
 			make_error(&resp, Response_Error_Code_UNKNOWN, "response too large");

@@ -495,6 +495,76 @@ ZTEST(cmd, test_get_param_keys_nfc_only)
 	zassert_false(r.body.config_dump.lorawan.has_nwkkey, "LRW: nwkkey leaked over LoRaWAN!");
 }
 
+/* LoRaWAN↔P2P parity (doc/plan/439): p2p_frequency/spreading_factor/tx_power omit
+ * `readable`, so they default to every transport like lrw_region/lrw_adr/
+ * lrw_datarate — a GetParam(p2p_field) and a full GetConfig dump must return
+ * them over NFC (and, unlike the LoRaWAN keys, over the radio transports too;
+ * see test_set_param_p2p_rejected_over_radio for the write side, shell-only). */
+ZTEST(cmd, test_get_param_and_get_config_p2p_over_nfc)
+{
+	Response r;
+
+	reset_cfg();
+	g_app_config.p2p_frequency = 868300000;
+	g_app_config.p2p_spreading_factor = 9;
+	g_app_config.p2p_tx_power = 20;
+
+	/* seq2 get_param{ p2p_field=[1 frequency, 2 spreading_factor, 3 tx_power] } */
+	const char *gp_hex = "08021a053203010203";
+
+	handle_via(APP_CMD_TRANSPORT_NFC, gp_hex, &r);
+	zassert_equal(r.which_body, Response_config_dump_tag, "which=%d", r.which_body);
+	zassert_true(r.body.config_dump.has_p2p, "p2p section missing");
+	zassert_true(r.body.config_dump.p2p.has_frequency, "frequency not dumped");
+	zassert_equal(r.body.config_dump.p2p.frequency, 868300000, "frequency value");
+	zassert_true(r.body.config_dump.p2p.has_spreading_factor, "spreading_factor not dumped");
+	zassert_equal(r.body.config_dump.p2p.spreading_factor, 9, "spreading_factor value");
+	zassert_true(r.body.config_dump.p2p.has_tx_power, "tx_power not dumped");
+	zassert_equal(r.body.config_dump.p2p.tx_power, 20, "tx_power value");
+
+	/* A plain GetConfig{} dump (no field selection) covers the p2p group too.
+	 * Walk every page at the NFC mailbox cap (as test_get_config_pages_fit_
+	 * mailbox_frame does) — a full snapshot page can approach the 200 B NFC
+	 * field budget, which would not fit handle_via()'s 128 B buffer. */
+	const size_t mailbox_plain_cap = 256 - 1 - 8 - 16;
+	uint8_t in[16], out[mailbox_plain_cap];
+	bool found_p2p = false;
+	uint32_t page = 0, page_count = 1;
+
+	reset_cfg();
+	g_app_config.p2p_frequency = 868300000;
+	g_app_config.p2p_spreading_factor = 9;
+	g_app_config.p2p_tx_power = 20;
+
+	/* Bounded like test_get_config_pages_fit_mailbox_frame's page loop, so the
+	 * compiler can prove %02x never truncates in the hex[] buffer below. */
+	for (; page < page_count && page < 32; page++) {
+		char hex[16];
+		size_t out_len = 0;
+		enum app_cmd_action action = APP_CMD_ACTION_NONE;
+
+		/* seq9 get_config{page} */
+		snprintf(hex, sizeof(hex), "08092a0208%02x", (unsigned)page);
+		size_t in_len = unhex(hex, in, sizeof(in));
+
+		zassert_equal(app_cmd_handle(APP_CMD_TRANSPORT_NFC, in, in_len, out, sizeof(out),
+					     &out_len, &action),
+			      0, "page %u: handle", page);
+		r = (Response)Response_init_zero;
+		pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+		zassert_true(pb_decode(&is, Response_fields, &r), "page %u: decode", page);
+		zassert_equal(r.which_body, Response_config_dump_tag, "page %u: which=%d", page,
+			      r.which_body);
+		page_count = r.page_count ? r.page_count : 1;
+		if (r.body.config_dump.has_p2p) {
+			found_p2p = true;
+			zassert_true(r.body.config_dump.p2p.has_frequency, "gc frequency missing");
+			zassert_equal(r.body.config_dump.p2p.frequency, 868300000, "gc frequency");
+		}
+	}
+	zassert_true(found_p2p, "GetConfig over NFC never dumped the p2p group");
+}
+
 /* #313: over NFC the reply travels in the 256 B ST25DV mailbox frame — 1 B
  * channel prefix + 8 B header + 16 B CCM tag leave 231 B of plaintext (version
  * byte + Response). Every get_config page must fit that when the caller passes
@@ -1931,6 +2001,62 @@ ZTEST(cmd, test_lrw_region_writable_excludes_vendor)
 		      r.body.error.code);
 }
 
+/* LoRaWAN↔P2P parity (doc/plan/439): p2p_frequency/spreading_factor/tx_power are
+ * readable everywhere but stay `writable: [shell]` — never over the very radio
+ * link they configure (same #271 argument as radio_mode), and not over NFC
+ * until the Manager-App / Hub side is agreed (doc/p2p.md §2). no_write_lrw also
+ * gates the raw-LoRa P2P transport (#118 B4). SHELL_DEBUG (untested here) has no
+ * per-field gate. */
+ZTEST(cmd, test_set_param_p2p_rejected_over_radio)
+{
+	Response r;
+
+	/* seq1 set_param{ p2p{ frequency = 868300000 } }
+	 * Command:  08 01                seq=1
+	 *           12 08                set_param, len 8
+	 *             3a 06              .p2p (SetParam field7), len 6
+	 *               08 e0e9849e03    .frequency (P2P field1) = 868300000
+	 */
+	const char *hex = "080112083a0608e0e9849e03";
+	enum app_cmd_action a;
+
+	/* nfc is NOT in writable:[shell] either -> rejected. */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_NFC, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_error_tag, "nfc write should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "nfc code %d",
+		      r.body.error.code);
+	zassert_not_equal(g_app_config.p2p_frequency, 868300000, "frequency applied over nfc");
+
+	/* lrw is NOT in writable:[shell] -> must be rejected. */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_LRW, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_error_tag, "lrw write should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "lrw code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.fault_field, 501, "fault_field %u (want 501 = p2p frequency)",
+		      r.body.error.fault_field);
+	zassert_not_equal(g_app_config.p2p_frequency, 868300000,
+			  "frequency applied over LRW despite writable:[shell]");
+
+	/* p2p (raw-LoRa) mirrors lrw: not in writable either -> must be rejected. */
+	reset_cfg();
+	a = handle_via(APP_CMD_TRANSPORT_P2P, hex, &r);
+	zassert_equal(a, APP_CMD_ACTION_NONE, "no deferred action");
+	zassert_equal(r.which_body, Response_error_tag, "p2p write should error (which=%d)",
+		      r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_NOT_WRITABLE, "p2p code %d",
+		      r.body.error.code);
+	zassert_equal(r.body.error.fault_field, 501, "fault_field %u (want 501 = p2p frequency)",
+		      r.body.error.fault_field);
+	zassert_not_equal(g_app_config.p2p_frequency, 868300000,
+			  "frequency applied over raw P2P despite writable:[shell]");
+}
+
 /* #415 C1/K2: the plain_text transport is opt-in — a command answers on it only
  * by listing `plain_text` in app_config.yml. No command does yet (get_claim_info
  * arrives in a later commit), so EVERY command must be rejected with NOT_READY
@@ -2169,6 +2295,29 @@ ZTEST(cmd, test_too_large_fallback_fits_11b_budget)
 		app_cmd_handle(APP_CMD_TRANSPORT_LRW, in, in_len, out, sizeof(out), &out_len, NULL);
 	zassert_equal(ret, 0, "fallback Error must fit 11 B, ret %d", ret);
 	zassert_true(out_len >= 1 && out_len <= sizeof(out), "out_len %zu", out_len);
+
+	Response r = Response_init_zero;
+	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
+	zassert_true(pb_decode(&is, Response_fields, &r), "Response decode failed");
+	zassert_equal(r.seq, 2, "seq %u", r.seq);
+	zassert_equal(r.which_body, Response_error_tag, "expected Error, which=%d", r.which_body);
+	zassert_equal(r.body.error.code, Response_Error_Code_BUDGET_TOO_SMALL, "code %d",
+		      r.body.error.code);
+}
+
+/* P2P parity: an answer that does not fit the P2P response budget is the same
+ * compact BUDGET_TOO_SMALL Error as over LoRaWAN (was UNKNOWN "response too
+ * large", which itself did not fit a small slot). */
+ZTEST(cmd, test_too_large_fallback_is_budget_error_over_p2p)
+{
+	uint8_t in[16], out[11];
+	size_t in_len = unhex("08021a040a020607", in, sizeof(in));
+	size_t out_len = 0;
+
+	reset_cfg();
+	int ret =
+		app_cmd_handle(APP_CMD_TRANSPORT_P2P, in, in_len, out, sizeof(out), &out_len, NULL);
+	zassert_equal(ret, 0, "fallback Error must fit, ret %d", ret);
 
 	Response r = Response_init_zero;
 	pb_istream_t is = pb_istream_from_buffer(out + 1, out_len - 1);
@@ -2471,9 +2620,11 @@ static void rom_free_stream(enum app_cmd_transport tp, const uint8_t *in, size_t
 		r = decode_resp(out, out_len);
 		zassert_equal(r.page_index, p, "page_index %u != %u", r.page_index, p);
 		zassert_false(rom_in_dump(&r), "ROM on page %u (tp %d)", p, tp);
+		/* doc/plan/439: a page may now be entirely the new p2p group (readable
+		 * over every transport like the LoRaWAN radio params). */
 		zassert_true(r.body.config_dump.has_sensors || r.body.config_dump.has_lorawan ||
 				     r.body.config_dump.has_application ||
-				     r.body.config_dump.has_alarms,
+				     r.body.config_dump.has_alarms || r.body.config_dump.has_p2p,
 			     "empty page %u", p);
 	}
 	zassert_equal(app_cmd_stream_next(out, 51, &out_len), -ENODATA, "stream must end");
