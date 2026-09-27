@@ -293,16 +293,6 @@ uint8_t app_radio_p2p_get_max_payload(void);
  * ledger and the one-confirmed-uplink-in-flight rule (F-P1-1). */
 extern const struct app_radio_backend app_radio_p2p_backend;
 
-/* Start a device-driven history replay over P2P (req_history, tag 11): stream
- * every stored record in [from_unix, to_unix] back as N HistoryFrame uplinks
- * (frame type RESPONSE / 0x55) sharing the command `seq`, on the P2P carrier.
- * The P2P counterpart of app_radio_lrw_start_history_replay(); same app_history /
- * app_cmd_build_history_frame engine, only the transmit path differs
- * (send_confirmed instead of lorawan_send). Returns true if a replay was
- * started (records matched), false on an empty window or P2P not ready (the
- * caller then answers HISTORY_UNAVAILABLE). */
-bool app_radio_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
-
 /* Register the link-ready kick fired by app_radio_p2p_start() so app_report can
  * begin the cadence. NULL clears it. */
 void app_radio_p2p_register_ready_cb(void (*cb)(void));
@@ -434,9 +424,7 @@ uint32_t p2p_ack_retry_backoff_ms(int attempt, uint32_t rand32);
 bool p2p_parse_ack_body(const uint8_t *body, size_t body_len, struct p2p_ack_info *out);
 void p2p_apply_ack(const struct p2p_ack_info *ack, uint32_t counter, int16_t rssi, int8_t snr);
 void p2p_parse_join_accept_reserved(const uint8_t reserved[4], struct p2p_radio_assign *out);
-size_t p2p_history_frame_cap(void);
 int p2p_join_adopt_sf(uint8_t joined_sf);
-void p2p_test_replay_setup(void);
 void p2p_test_join_setup(int cfg_sf);
 void p2p_test_allow_join_sweep(void);
 void p2p_test_link_reset(void);
@@ -458,8 +446,6 @@ void p2p_test_get_join(uint8_t *sf, uint8_t *step, uint8_t *attempts, bool *slow
 		       enum p2p_link_state *state);
 void p2p_test_set_join_started_at(int64_t at_ms);
 struct p2p_duty *p2p_test_get_duty(void);
-void p2p_test_set_replay_active(bool active);
-void p2p_test_get_replay(bool *active, uint32_t *seq, uint32_t *cursor, uint32_t *idx);
 void p2p_test_build_join_request(uint32_t dev_nonce, uint8_t out[P2P_JOIN_REQ_LEN]);
 void p2p_test_derive_session_key(uint32_t dev_nonce, uint32_t central_nonce,
 				 uint8_t out[P2P_KEY_LEN]);

@@ -8,6 +8,7 @@
 
 #include <zephyr/sys/util.h>
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -40,6 +41,22 @@ extern int g_stream_cancel_calls;
 extern int g_run_action_calls;
 extern int g_run_action_last;
 extern int64_t g_run_action_at_ms;
+
+/* app_history + the HistoryFrame codec, for the replay (F3c). The store holds
+ * the records [g_hist_first, g_hist_end) (absolute ordinals), each
+ * STUB_HIST_REC_SIZE bytes, every one in the replay window. A frame's envelope
+ * costs 6 B plus 2 x the varint width of the frame_index bound
+ * (app_cmd_history_sample_capacity), so the #409 3f bound tightening shows.
+ * A built frame is {0x01, seq, frame_index, frame_count, samples...} and each
+ * sample record starts with its ordinal. */
+#define STUB_HIST_REC_SIZE 10
+
+extern uint32_t g_hist_first;
+extern uint32_t g_hist_end;
+extern bool g_hist_replay_active;
+extern int g_hist_replay_active_calls;
+
+size_t stub_hist_overhead(uint32_t frame_index_bound);
 
 void stubs_reset(void);
 

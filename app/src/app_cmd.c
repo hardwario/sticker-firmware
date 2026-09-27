@@ -16,11 +16,7 @@
 #include "app_input.h"
 #include "app_log.h"
 #include "app_radio.h"
-#include "app_radio_lrw.h"
 #include "app_nfc.h"
-#if defined(CONFIG_RADIO_P2P)
-#include "app_radio_p2p.h"
-#endif
 #include "app_report.h"
 #include "app_sensor.h"
 #include "app_settings.h"
@@ -1314,16 +1310,9 @@ static void app_cmd_handle_req_history(enum app_cmd_transport tp, const Command 
 	 * higher DR), else HISTORY_UNAVAILABLE (empty window / transport not ready). */
 	int ret = -ENODATA;
 
-#if defined(CONFIG_LORAWAN)
-	if (tp == APP_CMD_TRANSPORT_LRW) {
-		ret = app_radio_lrw_history_replay_start(from, to, cmd->seq);
+	if (tp == APP_CMD_TRANSPORT_LRW || tp == APP_CMD_TRANSPORT_P2P) {
+		ret = app_radio_history_replay_start(from, to, cmd->seq);
 	}
-#endif
-#if defined(CONFIG_RADIO_P2P)
-	if (tp == APP_CMD_TRANSPORT_P2P) {
-		ret = app_radio_p2p_start_history_replay(from, to, cmd->seq) ? 0 : -ENODATA;
-	}
-#endif
 	if (ret == -EMSGSIZE) {
 		make_error(resp, Response_Error_Code_BUDGET_TOO_SMALL, NULL);
 	} else if (ret != 0) {

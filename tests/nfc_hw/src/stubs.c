@@ -105,6 +105,15 @@ void app_radio_clock_sync(uint32_t seq)
 	ARG_UNUSED(seq);
 }
 
+/* ReqHistory over a radio: never reached here (every request arrives over NFC). */
+int app_radio_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+{
+	ARG_UNUSED(from_unix);
+	ARG_UNUSED(to_unix);
+	ARG_UNUSED(seq);
+	return -EAGAIN;
+}
+
 void app_report_force(void)
 {
 }

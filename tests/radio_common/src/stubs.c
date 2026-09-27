@@ -14,6 +14,7 @@
 #include "app_cmd.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_history.h"
 
 #include <zephyr/kernel.h>
 
@@ -49,6 +50,11 @@ int g_run_action_last;
 int64_t g_run_action_at_ms;
 static uint8_t m_stream_idx;
 
+uint32_t g_hist_first;
+uint32_t g_hist_end;
+bool g_hist_replay_active;
+int g_hist_replay_active_calls;
+
 void stubs_reset(void)
 {
 	memset(g_compose_frames, 0, sizeof(g_compose_frames));
@@ -75,6 +81,10 @@ void stubs_reset(void)
 	g_run_action_last = APP_CMD_ACTION_NONE;
 	g_run_action_at_ms = 0;
 	m_stream_idx = 0;
+	g_hist_first = 0;
+	g_hist_end = 0;
+	g_hist_replay_active = false;
+	g_hist_replay_active_calls = 0;
 }
 
 int app_compose_budget(uint8_t *buf, size_t size, size_t *len, bool *more, uint8_t budget)
@@ -226,4 +236,117 @@ int64_t app_clock_network_time_at_ms(void)
 void app_alarm_flush_held(void)
 {
 	g_alarm_flush_calls++;
+}
+
+/* ---- app_history and the HistoryFrame codec (F3c) ---- */
+
+static size_t varint_len(uint32_t v)
+{
+	size_t n = 1;
+
+	while (v >= 0x80) {
+		v >>= 7;
+		n++;
+	}
+	return n;
+}
+
+size_t stub_hist_overhead(uint32_t frame_index_bound)
+{
+	return 6 + 2 * varint_len(frame_index_bound);
+}
+
+uint32_t app_history_get_mask(void)
+{
+	return 0x01;
+}
+
+uint32_t app_history_get_interval(void)
+{
+	return 60;
+}
+
+void app_history_set_replay_active(bool active)
+{
+	g_hist_replay_active = active;
+	g_hist_replay_active_calls++;
+}
+
+void app_history_span(uint32_t *first_abs, uint32_t *end_abs)
+{
+	*first_abs = g_hist_first;
+	*end_abs = g_hist_end;
+}
+
+uint16_t app_history_count_frames(uint32_t from_unix, uint32_t to_unix, size_t cap)
+{
+	ARG_UNUSED(from_unix);
+	ARG_UNUSED(to_unix);
+
+	size_t per = cap / STUB_HIST_REC_SIZE;
+	uint32_t n = g_hist_end - g_hist_first;
+
+	return (per == 0 || n == 0) ? 0 : (uint16_t)((n + per - 1) / per);
+}
+
+size_t app_history_export_abs(uint32_t from_unix, uint32_t to_unix, uint32_t start_abs,
+			      uint32_t end_abs, uint8_t *buf, size_t cap, uint32_t *t0_out,
+			      bool *synced_out, uint16_t *n_written, uint32_t *next_abs)
+{
+	ARG_UNUSED(from_unix);
+	ARG_UNUSED(to_unix);
+
+	uint32_t start = MAX(start_abs, g_hist_first);
+	uint32_t end = MIN(end_abs, g_hist_end);
+	uint16_t n = 0;
+
+	while (start + n < end && (size_t)(n + 1) * STUB_HIST_REC_SIZE <= cap) {
+		uint8_t *rec = &buf[n * STUB_HIST_REC_SIZE];
+
+		memset(rec, 0x5a, STUB_HIST_REC_SIZE);
+		rec[0] = (uint8_t)(start + n);
+		n++;
+	}
+	*t0_out = 1000 + start;
+	*synced_out = true;
+	*n_written = n;
+	*next_abs = start + n;
+	return (size_t)n * STUB_HIST_REC_SIZE;
+}
+
+size_t app_cmd_history_sample_capacity(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
+				       uint32_t t0_unix, uint32_t present, uint32_t interval_s,
+				       size_t out_cap)
+{
+	ARG_UNUSED(seq);
+	ARG_UNUSED(frame_count);
+	ARG_UNUSED(t0_unix);
+	ARG_UNUSED(present);
+	ARG_UNUSED(interval_s);
+
+	size_t over = stub_hist_overhead(frame_index);
+
+	return out_cap > over ? out_cap - over : 0;
+}
+
+int app_cmd_build_history_frame(uint32_t seq, uint32_t frame_index, uint32_t frame_count,
+				uint32_t t0_unix, uint32_t present, uint32_t interval_s,
+				bool time_synced, const uint8_t *samples, size_t samples_len,
+				uint8_t *out, size_t out_cap, size_t *out_len)
+{
+	ARG_UNUSED(t0_unix);
+	ARG_UNUSED(present);
+	ARG_UNUSED(interval_s);
+	ARG_UNUSED(time_synced);
+
+	if (4 + samples_len > out_cap) {
+		return -EMSGSIZE;
+	}
+	out[0] = 0x01;
+	out[1] = (uint8_t)seq;
+	out[2] = (uint8_t)frame_index;
+	out[3] = (uint8_t)frame_count;
+	memcpy(&out[4], samples, samples_len);
+	*out_len = 4 + samples_len;
+	return 0;
 }

@@ -10,7 +10,6 @@
 #include "app_clock.h"
 #include "app_compose.h"
 #include "app_config.h"
-#include "app_history.h"
 #include "app_log.h"
 #include "app_radio_lrw.h"
 
@@ -59,9 +58,9 @@ LOG_MODULE_REGISTER(app_radio_lrw, LOG_LEVEL_DBG);
  * The periodic report cadence lives in app_report (#126). The uplink queues,
  * the scheduler and the report split live in app_radio (doc/plan/460 F4); this
  * backend sends the one frame app_radio asks for (lrw_tx_send(): DR budget,
- * LinkCheckReq piggyback, MAC flush) and streams a history replay. On a
- * link-ready edge (join success / replay finish) app_radio_lrw kicks the TX
- * scheduler and app_report via the registered callback.
+ * LinkCheckReq piggyback, MAC flush). On a link-ready edge (join success)
+ * app_radio_lrw kicks the TX scheduler and app_report via the registered
+ * callback.
  */
 
 /* Link check configuration constants.
@@ -115,46 +114,11 @@ static struct k_work m_clock_sync_info_work;  /* deferred ClockSync Info uplink 
 static struct k_work m_lc_response_work;      /* deferred from link_check_callback */
 static struct k_work m_dl_request_work;       /* drains m_dl_msgq (port-85 commands) */
 static struct k_work_delayable m_join_complete_work;
-static struct k_work_delayable m_hist_work;
 
 /* Gap before the next frame of a multi-frame uplink (covers the RX1/RX2 windows)
  * and backoff when a send is refused (duty cycle / MAC busy). */
 #define FRAME_GAP_SEC   3
 #define FRAME_RETRY_SEC 15
-
-/* History replay (#52): one ReqHistory streams all matching records back as N
- * HistoryFrame uplinks on the command port, ASAP. */
-/* Staging buffer for the raw sample bytes of one HistoryFrame before it is
- * protobuf-encoded into m_hist_tx_buf. history_frame_cap() bounds the export to
- * MIN(DR budget, sizeof(m_hist_tx_buf)), so this must be at least as large as
- * m_hist_tx_buf — a fixed 48 B (the pre-#260 nanopb bound) under-sized it and let
- * app_history_export_page() overrun the stack on any DR whose budget exceeds 48 B. */
-#define HISTORY_SAMPLES_MAX APP_CMD_HISTORY_FRAME_BUF_SIZE
-#define HISTORY_MAX_RETRIES 8 /* duty-cycle/MAC-busy retries before aborting a frame (#89) */
-
-static bool m_hist_active;
-static uint32_t m_hist_from, m_hist_to, m_hist_seq;
-static uint32_t m_hist_count;
-/* #409 3f: upper bound for frame_index/frame_count when sizing a frame (their
- * varint width). UINT32_MAX = worst case; tightened to the first frame count at
- * replay start, which buys ~8 B of samples per frame at low DRs. */
-static uint32_t m_hist_frame_bound = UINT32_MAX;
-static uint32_t m_hist_idx;
-/* Absolute record ordinals (app_history_span()): next record to send and the end
- * of the replay (exclusive), snapshot at start. Captures keep appending during a
- * replay and the RAM ring may evict under it, but an absolute cursor names the
- * same record throughout, so nothing is repeated or skipped; records captured
- * after the start are left for the next replay. */
-static uint32_t m_hist_cursor;
-static uint32_t m_hist_end;
-static uint32_t m_hist_present; /* shared sensor mask (uint32), snapshot at replay start */
-static uint32_t m_hist_interval;
-static int m_hist_retries; /* consecutive lorawan_send failures on the current frame (#89) */
-/* Full encoded HistoryFrame Response + version byte; the old 64 B overflowed
- * once samples filled (frame ~70-90 B) so replay silently died on DR3+ (#89). */
-static uint8_t m_hist_tx_buf[APP_CMD_HISTORY_FRAME_BUF_SIZE];
-
-static void m_hist_work_handler(struct k_work *work);
 
 /* --- State machine --- */
 static atomic_t m_state = ATOMIC_INIT(APP_RADIO_STATE_IDLE);
@@ -216,7 +180,7 @@ static atomic_t m_clock_sync_info_pending;
  * command handler before the pending bit is set, read by the Info work item. */
 static atomic_t m_clock_sync_info_seq;
 
-/* Kicked on a link-ready edge (join success / history-replay finish) so
+/* Kicked on a link-ready edge (join success) so
  * app_report can resume the report cadence with an immediate uplink. */
 static void (*m_ready_cb)(void);
 
@@ -406,12 +370,6 @@ static void state_transition(enum app_radio_state new_state)
 		 * app_report's; it self-pauses while not app_radio_lrw_is_ready().) */
 		k_timer_stop(&m_lc_timeout_timer);
 		k_timer_stop(&m_rejoin_timer);
-		break;
-
-	case APP_RADIO_STATE_JOINING:
-		/* Drop any in-flight history replay across (re)join. */
-		m_hist_active = false;
-		app_history_set_replay_active(false);
 		break;
 
 	case APP_RADIO_STATE_HEALTHY:
@@ -773,7 +731,7 @@ static void join_work_handler(struct k_work *work)
 		return;
 	}
 
-	state_transition(APP_RADIO_STATE_JOINING); /* stops send timer, drops history */
+	state_transition(APP_RADIO_STATE_JOINING);
 
 	/* Discard any in-progress telemetry snapshot: a rejoin must not resume a
 	 * pre-outage snapshot with stale sensor data and no indication (#93.5). */
@@ -1011,18 +969,11 @@ static int lrw_tx_rejoin(bool forced)
 	return 0;
 }
 
-/* MED-9: a history replay owns the radio; telemetry waits. */
-static bool lrw_tx_replay_active(void)
-{
-	return m_hist_active;
-}
-
 const struct app_radio_backend app_radio_lrw_backend = {
 	.send = lrw_tx_send,
 	.budget = lrw_tx_budget,
 	.tx_ready = app_radio_lrw_is_ready,
 	.report_flags = lrw_tx_report_flags,
-	.replay_active = lrw_tx_replay_active,
 	.get_state = app_radio_lrw_get_state,
 	.warning_step = lrw_backoff_step,
 	.rejoin = lrw_tx_rejoin,
@@ -1031,199 +982,6 @@ const struct app_radio_backend app_radio_lrw_backend = {
 	.cmd_transport = APP_CMD_TRANSPORT_LRW,
 	.frame_gap_ms = FRAME_GAP_SEC * MSEC_PER_SEC,
 };
-
-/* ======================================================================== */
-/* History replay                                                           */
-/* ======================================================================== */
-
-/* Max samples that fit one frame at the current DR. Uses the exact protobuf
- * envelope overhead (app_cmd_history_sample_capacity) instead of a fixed guess
- * that overflowed m_hist_tx_buf on DR3+ with a synced RTC (#89). frame_index /
- * frame_count are sized with m_hist_frame_bound and t0 with the max varint, so
- * the cap is a stable per-replay lower bound. */
-static size_t history_frame_cap(void)
-{
-	size_t out_cap = MIN((size_t)refresh_payload_budget(), sizeof(m_hist_tx_buf)); /* MED-6 */
-
-	return app_cmd_history_sample_capacity(m_hist_seq, m_hist_frame_bound, m_hist_frame_bound,
-					       UINT32_MAX, m_hist_present, m_hist_interval,
-					       out_cap);
-}
-
-static void history_replay_finish(void)
-{
-	m_hist_active = false;
-	app_history_set_replay_active(false);
-	/* Hand the report cadence back to app_report with an immediate uplink. */
-	fire_ready_cb();
-}
-
-static void m_hist_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	if (!m_hist_active) {
-		return;
-	}
-
-	enum app_radio_state state = (enum app_radio_state)atomic_get(&m_state);
-
-	if (state == APP_RADIO_STATE_JOINING || state == APP_RADIO_STATE_RECONNECT) {
-		LOG_WRN("History replay aborted: %s", state_name(state));
-		m_hist_active = false;
-		app_history_set_replay_active(false);
-		return; /* the (re)join → HEALTHY entry / send path restarts cadence */
-	}
-
-	/* A DR drop mid-replay packs fewer records per frame, so frame_index can
-	 * outgrow the bound the cap was sized with: fall back to the worst case. */
-	if (m_hist_idx >= m_hist_frame_bound) {
-		m_hist_frame_bound = UINT32_MAX;
-	}
-
-	uint8_t samples[HISTORY_SAMPLES_MAX];
-	size_t cap = MIN(history_frame_cap(), sizeof(samples));
-	uint32_t t0 = 0;
-	bool synced = false;
-	uint16_t n = 0;
-	uint32_t next = m_hist_cursor;
-	size_t slen = 0;
-
-	if (cap > 0) {
-		slen = app_history_export_abs(m_hist_from, m_hist_to, m_hist_cursor, m_hist_end,
-					      samples, cap, &t0, &synced, &n, &next);
-	}
-	if (n == 0) {
-		if (next >= m_hist_end) {
-			/* Nothing left in the window: the records were evicted or the
-			 * ring was reset since the previous frame. */
-			LOG_INF("History replay complete: %u frames", (unsigned)m_hist_idx);
-			history_replay_finish();
-			return;
-		}
-		/* #409 3f: records remain but the DR dropped below one record per
-		 * frame. Tell the host instead of going silent mid-stream. */
-		LOG_WRN("History replay stop at frame %u/%u (cap=%uB)", (unsigned)m_hist_idx,
-			(unsigned)m_hist_count, (unsigned)cap);
-		uint8_t err[16];
-		size_t err_len;
-
-		if (app_cmd_build_budget_error(m_hist_seq, err, refresh_payload_cap(sizeof(err)),
-					       &err_len) == 0) {
-			(void)app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER,
-						 APP_RADIO_LRW_DOWNLINK_CMD_PORT, err, err_len);
-		}
-		history_replay_finish();
-		return;
-	}
-
-	size_t len;
-	/* time_synced is per frame: a frame never spans two history segments, and
-	 * each segment (flash page) knows whether its base is unix or uptime. */
-	int ret = app_cmd_build_history_frame(m_hist_seq, m_hist_idx, m_hist_count, t0,
-					      m_hist_present, m_hist_interval, synced, samples,
-					      slen, m_hist_tx_buf, sizeof(m_hist_tx_buf), &len);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_cmd_build_history_frame", ret);
-		history_replay_finish();
-		return;
-	}
-
-	ret = lrw_send(APP_RADIO_LRW_DOWNLINK_CMD_PORT, m_hist_tx_buf, len,
-		       LORAWAN_MSG_UNCONFIRMED);
-	if (ret) {
-		/* Duty-cycle / MAC busy — retry the same frame, don't advance. Bounded
-		 * so a persistently rejected frame cannot wedge the replay (and the
-		 * paused telemetry timer) forever (#89). */
-		LOG_ERR_CALL_FAILED_INT("lorawan_send(history)", ret);
-		if (++m_hist_retries > HISTORY_MAX_RETRIES) {
-			LOG_ERR("History frame %u/%u abandoned after %d retries",
-				(unsigned)m_hist_idx, (unsigned)m_hist_count, m_hist_retries - 1);
-			history_replay_finish();
-			return;
-		}
-		app_radio_count(APP_RADIO_CNT_RETRY);
-		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work,
-					  K_SECONDS(FRAME_RETRY_SEC));
-		return;
-	}
-	m_hist_retries = 0;
-	/* M-2: a history frame on air proves the channel is alive just as a telemetry
-	 * frame does. Without this, a long replay (which pauses telemetry) can trip the
-	 * stale-uplink watchdog and rejoin a perfectly healthy session mid-replay. */
-	app_radio_note_uplink();
-
-	LOG_INF("History frame %u/%u sent (%u rec, %zu B)", (unsigned)(m_hist_idx + 1),
-		(unsigned)m_hist_count, (unsigned)n, len);
-	m_hist_cursor = next;
-	m_hist_idx++;
-
-	/* Terminate on cursor exhaustion, not frame_index == frame_count (#89): a DR
-	 * change mid-replay alters records-per-frame, so the up-front frame_count is
-	 * only an estimate. The host concatenates by frame_index. The export already
-	 * skips to the next record in the window, so the frame carrying the window's
-	 * last record ends the replay here — no trailing empty attempt (H-4). */
-	if (m_hist_cursor < m_hist_end) {
-		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work,
-					  K_SECONDS(FRAME_GAP_SEC));
-	} else {
-		LOG_INF("History replay complete: %u frames", (unsigned)m_hist_idx);
-		history_replay_finish();
-	}
-}
-
-int app_radio_lrw_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
-{
-	if (!app_radio_lrw_is_ready()) {
-		LOG_WRN("History replay requested but LRW not ready; ignoring");
-		return -EAGAIN;
-	}
-
-	/* Seed the snapshot fields the cap depends on (seq/present/interval) before
-	 * sizing a frame, so counting and sending use an identical per-frame cap. */
-	m_hist_from = from_unix;
-	m_hist_to = to_unix;
-	m_hist_seq = seq;
-	m_hist_present = app_history_get_mask();
-	m_hist_interval = app_history_get_interval();
-
-	/* #409 3f: size with the worst-case frame_index/count first, then tighten
-	 * the bound to that frame count and recount. A bigger cap never needs more
-	 * frames, so the final count stays within the bound and counting and
-	 * sending keep using one identical per-frame cap. */
-	m_hist_frame_bound = UINT32_MAX;
-	size_t cap = history_frame_cap();
-	uint32_t n = (cap > 0) ? app_history_count_frames(from_unix, to_unix, cap) : 0;
-
-	if (n > 0) {
-		m_hist_frame_bound = n;
-		n = app_history_count_frames(from_unix, to_unix, history_frame_cap());
-	}
-
-	if (n == 0) {
-		/* Empty window, or records exist but not one fits the current DR (the
-		 * 11 B budget tier)? Probe with the full frame buffer to tell apart. */
-		if (app_history_count_frames(from_unix, to_unix, sizeof(m_hist_tx_buf)) > 0) {
-			LOG_WRN("History replay: DR budget too small for one record");
-			return -EMSGSIZE;
-		}
-		LOG_INF("History replay: no records in window");
-		return -ENODATA;
-	}
-
-	m_hist_count = n;
-	m_hist_idx = 0;
-	app_history_span(&m_hist_cursor, &m_hist_end);
-	m_hist_retries = 0;
-	m_hist_active = true;
-	/* Capture goes on (absolute cursor); only the flash page rollover is held
-	 * off. app_report telemetry self-skips while the replay owns the radio. */
-	app_history_set_replay_active(true);
-
-	LOG_INF("History replay start: %u frames (window %u..%u)", (unsigned)n, from_unix, to_unix);
-	k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work, K_NO_WAIT);
-	return 0;
-}
 
 /* ======================================================================== */
 /* Timer ISR handlers (thin: enqueue the right work, no state decisions)    */
@@ -1557,7 +1315,6 @@ int app_radio_lrw_init(void)
 	}
 
 	k_work_init(&m_join_work, join_work_handler);
-	k_work_init_delayable(&m_hist_work, m_hist_work_handler);
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
 	k_work_init(&m_clock_sync_info_work, clock_sync_info_work_handler);

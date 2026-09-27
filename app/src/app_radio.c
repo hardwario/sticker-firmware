@@ -9,6 +9,7 @@
 #include "app_cmd.h"
 #include "app_compose.h"
 #include "app_config.h"
+#include "app_history.h"
 #include "app_log.h"
 #include "app_radio_lrw.h"
 #include "app_radio.h"
@@ -190,6 +191,13 @@ static void page_stream_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(m_page_stream_work, page_stream_work_handler);
 static void post_cmd_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(m_post_cmd_work, post_cmd_work_handler);
+/* The history replay (F3c): one frame per run. */
+static void hist_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(m_hist_work, hist_work_handler);
+/* A replay is streaming: telemetry waits (MED-9). Radio work queue only. */
+static bool m_hist_active;
+/* app_report's link-ready kick, also fired when a replay ends. */
+static void (*m_ready_cb)(void);
 
 /* Kept out of a static entirely when CONFIG_RADIO_P2P=n: with P2P not even
  * compiled in, the radio is always running LoRaWAN by construction (radio_mode's
@@ -542,6 +550,9 @@ void app_radio_tx_kick(void)
 	/* k_work_schedule: a run already waiting (duty hold, retry, frame gap)
 	 * keeps its time. */
 	k_work_schedule_for_queue(app_radio_work_q(), &m_tx_work, K_NO_WAIT);
+	if (m_hist_active) {
+		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work, K_NO_WAIT);
+	}
 }
 
 static void tx_request_telemetry(void)
@@ -742,8 +753,13 @@ static void link_clear(void)
 	m_link.warning_fails = 0;
 }
 
+static void hist_drop(void);
+
 void app_radio_link_up(void)
 {
+	/* A replay does not outlive its session: its frame waiting for the retry
+	 * would go out under the new one. The host asks again. */
+	hist_drop();
 	link_clear();
 	m_link.reports = 0; /* the first report of the session is a link check */
 	atomic_clear(&m_link_forced);
@@ -951,7 +967,7 @@ static void tlm_step(void)
 	if (!m_tlm_open) {
 		/* MED-9: a history replay owns the radio; the request waits (the
 		 * replay's end kicks a fresh report anyway). */
-		if (!atomic_get(&m_tlm_requested) || m_be->replay_active()) {
+		if (!atomic_get(&m_tlm_requested) || m_hist_active) {
 			return;
 		}
 		atomic_clear(&m_tlm_requested);
@@ -1084,6 +1100,296 @@ static void tx_work_handler(struct k_work *work)
 	tlm_step();
 }
 
+/* ---- History replay (doc/plan/460 §2.5, F3c) ------------------------------
+ * ReqHistory (#52) streams the matching records back as HistoryFrame answers,
+ * one frame per run of the radio work queue, HIST_FRAME_GAP_MS apart -- the
+ * machine both radios ran on their own. Each frame is sized for the budget of
+ * its moment, so a LoRaWAN DR change packs more or fewer records into it; the
+ * replay ends when its cursor reaches the end, not after the up-front frame
+ * count (#89), which is only an estimate (the host concatenates by
+ * frame_index). Telemetry waits for the end (MED-9): frames in between would
+ * spend the duty cycle and, on P2P, the confirmed-uplink slot the replay needs,
+ * and break the run of frames the host reassembles. Alarms and answers do not
+ * wait: a replay can run for minutes. */
+#define HIST_FRAME_GAP_MS 3000
+
+static uint32_t m_hist_from, m_hist_to, m_hist_seq;
+static uint32_t m_hist_count; /* frame_count: the estimate at the start */
+static uint32_t m_hist_idx;   /* frame_index of the next frame */
+/* #409 3f: upper bound for frame_index / frame_count when sizing a frame (their
+ * varint width). UINT32_MAX = worst case; tightened to the frame count at the
+ * start, which buys ~8 B of samples per frame at low DRs. */
+static uint32_t m_hist_frame_bound = UINT32_MAX;
+/* Absolute record ordinals (app_history_span()): the next record to send and
+ * the end of the replay (exclusive), snapshot at the start. Captures go on
+ * during a replay and the RAM ring may evict under it, but an absolute cursor
+ * names the same record throughout, so nothing is repeated or skipped; records
+ * captured after the start are left for the next replay. */
+static uint32_t m_hist_cursor;
+static uint32_t m_hist_end;
+static uint32_t m_hist_present; /* sensor mask, snapshot at the start */
+static uint32_t m_hist_interval;
+static uint8_t m_hist_retries; /* failed sends of the current frame (#89) */
+/* The encoded frame (version byte + Response) and its raw samples; static,
+ * 512 B off the radio work queue stack. */
+static uint8_t m_hist_buf[APP_CMD_HISTORY_FRAME_BUF_SIZE];
+static uint8_t m_hist_samples[APP_CMD_HISTORY_FRAME_BUF_SIZE];
+
+/* Samples one frame holds within `budget`: the exact envelope overhead of this
+ * replay's fields (#89), frame_index / frame_count sized by m_hist_frame_bound
+ * and t0 by the widest varint -- a lower bound for every frame, so counting
+ * and sending use the same cap. */
+static size_t hist_frame_cap(uint8_t budget)
+{
+	return app_cmd_history_sample_capacity(m_hist_seq, m_hist_frame_bound, m_hist_frame_bound,
+					       UINT32_MAX, m_hist_present, m_hist_interval,
+					       MIN((size_t)budget, sizeof(m_hist_buf)));
+}
+
+static void hist_end(void)
+{
+	m_hist_active = false;
+	app_history_set_replay_active(false);
+}
+
+/* The replay is over (done or given up): the telemetry it held may go, and
+ * app_report takes its cadence back with an immediate report. */
+static void hist_finish(void)
+{
+	hist_end();
+	app_radio_tx_kick();
+	if (m_ready_cb) {
+		m_ready_cb();
+	}
+}
+
+static void hist_drop(void)
+{
+	if (m_hist_active) {
+		LOG_WRN("History replay dropped: new session");
+		(void)k_work_cancel_delayable(&m_hist_work);
+		hist_end();
+	}
+}
+
+/* #409 3f: records remain, but not one fits the budget now (a LoRaWAN DR
+ * drop). Tell the host instead of going silent mid-stream; it asks again at a
+ * higher DR. */
+static void hist_budget_error(void)
+{
+	uint8_t err[16];
+	size_t len;
+
+	if (app_cmd_build_budget_error(m_hist_seq, err, app_radio_tx_answer_cap(sizeof(err)),
+				       &len) == 0) {
+		(void)app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 0, err, len);
+	}
+}
+
+/* Build the next frame into m_hist_buf for `budget`. Returns its record
+ * count, 0 once the replay is over (hist_finish() done). */
+static uint16_t hist_build(uint8_t budget, size_t *len, uint32_t *next)
+{
+	/* A DR drop packs fewer records per frame, so frame_index can outgrow the
+	 * bound the cap was sized with: back to the worst case. */
+	if (m_hist_idx >= m_hist_frame_bound) {
+		m_hist_frame_bound = UINT32_MAX;
+	}
+
+	size_t cap = MIN(hist_frame_cap(budget), sizeof(m_hist_samples));
+	uint32_t t0 = 0;
+	bool synced = false;
+	uint16_t n = 0;
+	size_t slen = 0;
+
+	*next = m_hist_cursor;
+	if (cap > 0) {
+		slen = app_history_export_abs(m_hist_from, m_hist_to, m_hist_cursor, m_hist_end,
+					      m_hist_samples, cap, &t0, &synced, &n, next);
+	}
+	if (n == 0) {
+		if (*next >= m_hist_end) {
+			/* Nothing left in the window: the records were evicted or
+			 * the ring was reset since the previous frame. */
+			LOG_INF("History replay complete: %u frames", m_hist_idx);
+		} else {
+			LOG_WRN("History replay stop at frame %u/%u (cap %zu B)", m_hist_idx,
+				m_hist_count, cap);
+			hist_budget_error();
+		}
+		hist_finish();
+		return 0;
+	}
+
+	/* time_synced is per frame: a frame never spans two history segments,
+	 * and each segment (flash page) knows whether its base is unix or uptime. */
+	int ret = app_cmd_build_history_frame(
+		m_hist_seq, m_hist_idx, m_hist_count, t0, m_hist_present, m_hist_interval, synced,
+		m_hist_samples, slen, m_hist_buf, sizeof(m_hist_buf), len);
+	if (ret) {
+		LOG_ERR_CALL_FAILED_INT("app_cmd_build_history_frame", ret);
+		hist_finish();
+		return 0;
+	}
+	return n;
+}
+
+static void hist_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (!m_hist_active || m_be == NULL) {
+		return;
+	}
+	if (!m_be->tx_ready()) {
+		LOG_WRN("History replay aborted: link down");
+		hist_finish();
+		return;
+	}
+
+	uint8_t budget = m_be->budget();
+	struct app_radio_frame f = {
+		.kind = APP_RADIO_FRAME_HISTORY,
+		.flags = (m_be->confirm_kinds & BIT(APP_RADIO_FRAME_HISTORY))
+				 ? APP_RADIO_FRAME_CONFIRMED
+				 : 0,
+		.buf = m_hist_buf,
+	};
+	uint32_t next = m_hist_cursor;
+	uint16_t n = 0;
+
+	/* Budget 0: pending LoRaWAN MAC answers fill the frame (H-1). The empty
+	 * frame lets the MAC drain them; the send answers -EAGAIN and the frame is
+	 * built again for the budget that comes back. */
+	if (budget > 0) {
+		size_t len = 0;
+
+		n = hist_build(budget, &len, &next);
+		if (n == 0) {
+			return;
+		}
+		f.len = (uint16_t)len;
+	}
+
+	struct app_radio_tx_result res = {0};
+	int ret = m_be->send(&f, &res);
+
+	if (ret == 0 && f.len == 0) {
+		ret = -EAGAIN; /* only the MAC flush went */
+	}
+	switch (ret) {
+	case 0:
+		break;
+	case -EBUSY:
+		return; /* kicked when the in-flight uplink is done */
+	case -ENOTCONN:
+		LOG_WRN("History replay aborted: no session");
+		hist_finish();
+		return;
+	default:
+		/* Duty cycle, MAC busy, a budget that fell under the frame: the
+		 * same frame again, a bounded number of times (#89). */
+		if (++m_hist_retries > TX_MAX_RETRIES) {
+			LOG_ERR("History frame %u/%u abandoned after %d retries", m_hist_idx + 1,
+				m_hist_count, TX_MAX_RETRIES);
+			hist_finish();
+			return;
+		}
+		app_radio_count(APP_RADIO_CNT_RETRY);
+		k_work_reschedule_for_queue(
+			app_radio_work_q(), &m_hist_work,
+			K_MSEC((ret == -EAGAIN && res.wait_ms) ? res.wait_ms : TX_RETRY_MS));
+		return;
+	}
+
+	m_hist_retries = 0;
+	/* M-2: the replay holds telemetry back, so its frames prove the channel;
+	 * without this a long replay tripped the stale-uplink rejoin mid-stream. */
+	app_radio_note_uplink();
+	LOG_INF("History frame %u/%u sent (%u rec, %u B)", m_hist_idx + 1, m_hist_count, n, f.len);
+	m_hist_cursor = next;
+	m_hist_idx++;
+
+	/* The export skips to the next record in the window, so the frame
+	 * carrying the window's last record ends the replay here: no trailing
+	 * empty attempt (H-4). */
+	if (m_hist_cursor < m_hist_end) {
+		k_work_reschedule_for_queue(app_radio_work_q(), &m_hist_work,
+					    K_MSEC(HIST_FRAME_GAP_MS));
+	} else {
+		LOG_INF("History replay complete: %u frames", m_hist_idx);
+		hist_finish();
+	}
+}
+
+int app_radio_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+{
+	if (m_be == NULL || !m_be->tx_ready()) {
+		LOG_WRN("History replay requested but the link is down; ignoring");
+		return -EAGAIN;
+	}
+
+	/* One stream at a time. The request being answered can arrive again from
+	 * inside the stream's own call stack: P2P dispatches the 0x56 it receives
+	 * while waiting for a frame's Ack (hist_work_handler -> send -> ... ->
+	 * app_cmd_handle_req_history -> here). Re-seeding the cursor there would
+	 * have the outer run write its stale values back over it and answer one
+	 * request with two interleaved streams. The stream is the answer, so the
+	 * caller sends no error either. */
+	if (m_hist_active) {
+		LOG_INF("History replay already streaming (seq %u); request (seq %u) ignored",
+			m_hist_seq, seq);
+		return 0;
+	}
+
+	/* The fields the cap depends on first, so counting and sending size the
+	 * frames alike. */
+	m_hist_from = from_unix;
+	m_hist_to = to_unix;
+	m_hist_seq = seq;
+	m_hist_present = app_history_get_mask();
+	m_hist_interval = app_history_get_interval();
+
+	/* #409 3f: count with the worst-case bound, then tighten the bound to that
+	 * count and count again. A bigger cap never needs more frames, so the
+	 * count stays within the bound. */
+	uint8_t budget = m_be->budget();
+
+	m_hist_frame_bound = UINT32_MAX;
+
+	size_t cap = hist_frame_cap(budget);
+	uint32_t n = cap > 0 ? app_history_count_frames(from_unix, to_unix, cap) : 0;
+
+	if (n > 0) {
+		m_hist_frame_bound = n;
+		n = app_history_count_frames(from_unix, to_unix, hist_frame_cap(budget));
+	}
+	if (n == 0) {
+		/* An empty window, or records not one of which fits the budget
+		 * (the 11 B LoRaWAN tier)? The whole frame buffer tells them apart. */
+		if (app_history_count_frames(from_unix, to_unix, sizeof(m_hist_buf)) > 0) {
+			LOG_WRN("History replay: budget %u B too small for one record", budget);
+			return -EMSGSIZE;
+		}
+		LOG_INF("History replay: no records in window");
+		return -ENODATA;
+	}
+
+	m_hist_count = n;
+	m_hist_idx = 0;
+	app_history_span(&m_hist_cursor, &m_hist_end);
+	m_hist_retries = 0;
+	m_hist_active = true;
+	/* Capture goes on (absolute cursor); only the flash page rollover is held
+	 * off. */
+	app_history_set_replay_active(true);
+
+	LOG_INF("History replay start: %u frames (window %u..%u, seq %u)", n, from_unix, to_unix,
+		seq);
+	k_work_reschedule_for_queue(app_radio_work_q(), &m_hist_work, K_NO_WAIT);
+	return 0;
+}
+
 #if defined(CONFIG_ZTEST)
 void app_radio_test_set_backend(const struct app_radio_backend *be)
 {
@@ -1097,10 +1403,13 @@ void app_radio_test_tx_reset(void)
 	(void)k_work_cancel_delayable_sync(&m_tx_work, &sync);
 	k_msgq_purge(&m_answer_q);
 	k_msgq_purge(&m_alarm_q);
+	(void)k_work_cancel_delayable_sync(&m_hist_work, &sync);
 	m_cur_valid = false;
 	atomic_clear(&m_tlm_requested);
 	m_tlm_open = false;
 	m_tlm_frame = false;
+	m_hist_active = false;
+	m_ready_cb = NULL;
 }
 
 void app_radio_test_link_reset(void)
@@ -1289,6 +1598,7 @@ int app_radio_send_alarm(const uint8_t *buf, size_t len)
 
 void app_radio_register_ready_cb(void (*cb)(void))
 {
+	m_ready_cb = cb;
 #if defined(CONFIG_RADIO_P2P)
 	if (is_p2p()) {
 		app_radio_p2p_register_ready_cb(cb);

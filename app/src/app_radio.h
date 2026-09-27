@@ -40,7 +40,7 @@ enum app_radio_state {
  * and never changes at runtime (the SX126x radio is shared). The
  * radio-agnostic layers (app_report, app_compose, app_alarm, main) call
  * through this facade; the few LoRaWAN-only operations (join NVM reset, link
- * check, history replay, calibration's ABP join, …) stay direct app_radio_lrw_* calls
+ * check, calibration's ABP join, …) stay direct app_radio_lrw_* calls
  * guarded by CONFIG_LORAWAN, unaffected by radio_mode. */
 
 enum app_radio_kind {
@@ -387,8 +387,6 @@ struct app_radio_backend {
 	 * rides a LinkCheckReq on it, P2P sends it confirmed). A link check rides
 	 * the first frame only. */
 	uint8_t (*report_flags)(bool due);
-	/* A history replay owns the radio: no report starts. */
-	bool (*replay_active)(void);
 	/* Link state of the backend (enum app_radio_state), never WARNING:
 	 * app_radio lays its link supervision over HEALTHY. */
 	enum app_radio_state (*get_state)(void);
@@ -485,6 +483,17 @@ void app_radio_note_send(bool sent, bool duty_held);
 /* Radio work queue, M-2: an uplink that owns the radio left (a history frame:
  * a replay holds telemetry back, so its frames prove the channel instead). */
 void app_radio_note_uplink(void);
+
+/* History replay (ReqHistory, doc/plan/460 §2.5, F3c): stream the records of
+ * [from_unix, to_unix] back as HistoryFrame answers carrying `seq`, one frame
+ * per run of the radio work queue, 3 s apart (confirmed where the backend
+ * confirms APP_RADIO_FRAME_HISTORY). Telemetry waits for the end; alarms and
+ * answers do not. Radio work queue (the command path). Returns 0 when the
+ * stream started -- or one is already running: it answers the request, which
+ * P2P can re-deliver from inside a frame's own Ack wait -- -EAGAIN when the
+ * link is down, -EMSGSIZE when records exist but not one fits the budget, or
+ * -ENODATA for an empty window. */
+int app_radio_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
 
 /* Start the radio work queue's liveness heartbeat (#182) and, on it, the M-2
  * stale-uplink watchdog. From each backend's init (calibration brings

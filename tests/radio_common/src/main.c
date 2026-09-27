@@ -9,7 +9,8 @@
  * history confirmed, no frame gap, 239 B budget) -- one implementation, the
  * same behaviour on either radio (decision #23). Link supervision (F2) runs
  * the same way: the fake reports link-check outcomes and records the rungs and
- * rejoins app_radio asks for.
+ * rejoins app_radio asks for; so does the history replay (F3c), over a stub
+ * store of fixed-size records.
  */
 
 #include "stubs.h"
@@ -33,7 +34,7 @@ struct sent {
 	uint8_t port;
 	uint8_t flags;
 	uint16_t len;
-	uint8_t head[4];
+	uint8_t head[8];
 	int ret;
 	int64_t at_ms;
 };
@@ -47,7 +48,6 @@ static struct {
 	uint8_t res_budget; /* res->budget of every send */
 	uint8_t budget;
 	bool ready;
-	bool replay;
 	uint8_t report_flags; /* flags of every report, on top of the due flag */
 	bool suppress_due;    /* LoRaWAN: a LinkCheckReq is already pending */
 	int report_flags_calls;
@@ -64,6 +64,11 @@ static struct {
 	size_t zero_budget_after;
 	size_t request_after;
 	size_t queue_after;
+	size_t budget_after; /* ... the budget becomes budget_to */
+	uint8_t budget_to;
+	size_t replay_after; /* ... a ReqHistory (seq 77) arrives mid-send */
+	int replay_ret;      /* what that nested start returned */
+	uint8_t flush_budget; /* an empty frame (MAC flush) sets the budget to it */
 	struct sent log[LOG_MAX];
 	size_t n;
 } fk;
@@ -102,6 +107,15 @@ static int fake_send(const struct app_radio_frame *f, struct app_radio_tx_result
 
 		(void)app_radio_tx_queue(APP_RADIO_FRAME_ANSWER, APP_RADIO_TAG_OTHER, 0, b,
 					 sizeof(b));
+	}
+	if (fk.n == fk.budget_after) {
+		fk.budget = fk.budget_to;
+	}
+	if (fk.n == fk.replay_after) {
+		fk.replay_ret = app_radio_history_replay_start(900, 1000, 77);
+	}
+	if (f->len == 0 && fk.flush_budget) {
+		fk.budget = fk.flush_budget;
 	}
 	return ret;
 }
@@ -154,11 +168,6 @@ static int fake_rejoin(bool forced)
 	return fk.rejoin_ret;
 }
 
-static bool fake_replay_active(void)
-{
-	return fk.replay;
-}
-
 static bool fake_in_flight(void)
 {
 	return fk.in_flight;
@@ -169,7 +178,6 @@ static const struct app_radio_backend be_lrw = {
 	.budget = fake_budget,
 	.tx_ready = fake_tx_ready,
 	.report_flags = fake_report_flags,
-	.replay_active = fake_replay_active,
 	.get_state = fake_get_state,
 	.warning_step = fake_warning_step,
 	.rejoin = fake_rejoin,
@@ -183,7 +191,6 @@ static const struct app_radio_backend be_p2p = {
 	.budget = fake_budget,
 	.tx_ready = fake_tx_ready,
 	.report_flags = fake_report_flags,
-	.replay_active = fake_replay_active,
 	.get_state = fake_get_state,
 	.warning_step = fake_warning_step,
 	.rejoin = fake_rejoin,
@@ -278,6 +285,13 @@ static void assert_spacing(size_t from, size_t to, int64_t min_ms)
 	}
 }
 
+static int m_ready_calls;
+
+static void count_ready(void)
+{
+	m_ready_calls++;
+}
+
 static void before(void *f)
 {
 	ARG_UNUSED(f);
@@ -292,6 +306,8 @@ static void before(void *f)
 	memset(&g_app_config, 0, sizeof(g_app_config));
 	g_app_config.interval_report = 60;
 	use_profile(&PROFILE_LRW);
+	m_ready_calls = 0;
+	app_radio_register_ready_cb(count_ready);
 }
 
 static void after(void *f)
@@ -796,28 +812,6 @@ ZTEST(radio_common, test_budget_zero_mid_report_resets_the_snapshot)
 	zassert_equal(g_compose_reset_calls, 1);
 	zassert_equal(reports_done(), 0);
 }
-
-/* A history replay owns the radio: the report waits for its end (the kick),
- * alarms do not. */
-static void replay_holds_telemetry_not_alarms(void)
-{
-	const size_t lens[] = {20};
-
-	frames(lens, 1);
-	fk.replay = true;
-	app_radio_send_telemetry_now();
-	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa1);
-	k_sleep(K_SECONDS(10));
-	zassert_equal(fk.n, 1);
-	zassert_equal(fk.log[0].kind, APP_RADIO_FRAME_ALARM);
-
-	fk.replay = false;
-	app_radio_tx_kick();
-	k_sleep(K_SECONDS(1));
-	zassert_equal(fk.n, 2);
-	zassert_equal(fk.log[1].kind, APP_RADIO_FRAME_TELEMETRY);
-}
-BOTH_PROFILES(replay_holds_telemetry_not_alarms)
 
 /* A link lost mid-report abandons it with a snapshot reset (#93.5); the next
  * report starts from its first frame. */
@@ -1486,6 +1480,316 @@ static void announce_retries_when_the_queue_is_full(void)
 	zassert_false(app_radio_announce_pending());
 }
 BOTH_PROFILES(announce_retries_when_the_queue_is_full)
+
+/* ---- History replay (F3c) --------------------------------------------------- */
+
+#define HIST_GAP_MS 3000 /* app_radio.c HIST_FRAME_GAP_MS */
+
+/* Records one frame holds on this profile once the frame_index bound is
+ * tightened (frame counts below 128: a one-byte varint). */
+static uint32_t hist_per_frame(void)
+{
+	return (m_prof->budget - stub_hist_overhead(0)) / STUB_HIST_REC_SIZE;
+}
+
+/* A store of 2 full frames and a short third one: [first, first + n). */
+static uint32_t hist_fill(uint32_t first)
+{
+	uint32_t n = 2 * hist_per_frame() + 3;
+
+	g_hist_first = first;
+	g_hist_end = first + n;
+	return n;
+}
+
+static uint32_t hist_recs(const struct sent *s)
+{
+	return (s->len - 4) / STUB_HIST_REC_SIZE;
+}
+
+/* The frames of one stream: kind, confirmation, seq, consecutive frame_index,
+ * the records in order without a gap, the frame gap, and the stream's end. */
+static void assert_stream(size_t from, size_t frames, uint8_t seq, uint32_t first, uint32_t n)
+{
+	uint32_t next = first;
+
+	for (size_t i = from; i < from + frames; i++) {
+		const struct sent *s = &fk.log[i];
+
+		zassert_equal(s->kind, APP_RADIO_FRAME_HISTORY, "attempt %zu kind %u", i, s->kind);
+		zassert_equal(s->flags, m_prof->queued_flags, "attempt %zu flags", i);
+		zassert_equal(s->head[1], seq, "attempt %zu seq %u", i, s->head[1]);
+		zassert_equal(s->head[2], i - from, "attempt %zu frame_index %u", i, s->head[2]);
+		zassert_equal(s->head[3], frames, "attempt %zu frame_count %u", i, s->head[3]);
+		zassert_equal(s->head[4], (uint8_t)next, "attempt %zu starts at record %u, want %u",
+			      i, s->head[4], next);
+		zassert_true(s->len <= m_prof->budget, "attempt %zu over the budget", i);
+		next += hist_recs(s);
+	}
+	zassert_equal(next, first + n, "records sent up to %u, want %u", next, first + n);
+	assert_spacing(from, from + frames - 1, HIST_GAP_MS);
+	zassert_false(g_hist_replay_active, "the replay still holds the history ring");
+	zassert_equal(m_ready_calls, 1, "the end kicks the report cadence once");
+}
+
+/* The window streams in order, frame_count sized with the tightened bound
+ * (#409 3f: the worst-case bound would pack fewer records per frame), and the
+ * frame with the last record ends it (H-4). */
+static void replay_streams_the_window(void)
+{
+	uint32_t base = retries();
+	uint32_t n = hist_fill(0);
+
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	zassert_true(g_hist_replay_active, "the ring rollover is held during a replay");
+	k_sleep(K_SECONDS(30));
+	zassert_equal(fk.n, 3);
+	zassert_equal(hist_recs(&fk.log[0]), hist_per_frame(), "a full first frame");
+	assert_stream(0, 3, 42, 0, n);
+	zassert_equal(retries(), base);
+}
+BOTH_PROFILES(replay_streams_the_window)
+
+/* The cursor is an absolute ordinal (#436): a ring that evicted its oldest
+ * records starts the stream at the oldest one still stored. */
+static void replay_cursor_is_absolute(void)
+{
+	uint32_t n = hist_fill(40);
+
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 5));
+	k_sleep(K_SECONDS(30));
+	zassert_equal(fk.n, 3);
+	assert_stream(0, 3, 5, 40, n);
+}
+BOTH_PROFILES(replay_cursor_is_absolute)
+
+/* One stream at a time: a request while one runs is answered by it (0) and
+ * changes nothing -- also when it arrives from inside a frame's own send, as a
+ * re-delivered P2P 0x56 does while the node waits for its Ack. */
+static void replay_start_is_not_reentrant(void)
+{
+	uint32_t n = hist_fill(0);
+
+	fk.replay_after = 1;
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	zassert_ok(app_radio_history_replay_start(900, 1000, 77), "a second request is answered");
+	k_sleep(K_SECONDS(30));
+	zassert_equal(fk.replay_ret, 0, "the nested request is answered by the stream");
+	zassert_equal(fk.n, 3, "one stream, not two interleaved");
+	assert_stream(0, 3, 42, 0, n);
+}
+BOTH_PROFILES(replay_start_is_not_reentrant)
+
+/* Nothing starts on a link down, an empty window, or records not one of which
+ * fits the budget; nothing is sent then. */
+static void replay_refused(void)
+{
+	fk.ready = false;
+	hist_fill(0);
+	zassert_equal(app_radio_history_replay_start(0, UINT32_MAX, 1), -EAGAIN);
+
+	fk.ready = true;
+	g_hist_end = g_hist_first;
+	zassert_equal(app_radio_history_replay_start(0, UINT32_MAX, 1), -ENODATA);
+
+	hist_fill(0);
+	fk.budget = stub_hist_overhead(UINT32_MAX) + STUB_HIST_REC_SIZE - 1;
+	zassert_equal(app_radio_history_replay_start(0, UINT32_MAX, 1), -EMSGSIZE);
+
+	k_sleep(K_SECONDS(10));
+	zassert_equal(fk.n, 0);
+	zassert_false(g_hist_replay_active);
+	zassert_equal(m_ready_calls, 0);
+}
+BOTH_PROFILES(replay_refused)
+
+/* The replay owns the radio: the report waits for its end, alarms do not. */
+static void replay_holds_telemetry_not_alarms(void)
+{
+	const size_t lens[] = {20};
+
+	frames(lens, 1);
+	hist_fill(0);
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	app_radio_send_telemetry_now();
+	queue(APP_RADIO_FRAME_ALARM, APP_RADIO_TAG_OTHER, 8, 0xa1);
+	k_sleep(K_SECONDS(30));
+	zassert_equal(fk.n, 5);
+
+	size_t alarm = LOG_MAX;
+	size_t last_hist = 0;
+
+	for (size_t i = 0; i < fk.n; i++) {
+		if (fk.log[i].kind == APP_RADIO_FRAME_ALARM) {
+			alarm = i;
+		} else if (fk.log[i].kind == APP_RADIO_FRAME_HISTORY) {
+			last_hist = i;
+		}
+	}
+	zassert_true(alarm < last_hist, "the alarm waited for the replay (at %zu)", alarm);
+	zassert_equal(fk.log[4].kind, APP_RADIO_FRAME_TELEMETRY, "the report goes after it");
+}
+BOTH_PROFILES(replay_holds_telemetry_not_alarms)
+
+/* A refused frame is sent again, the same one, 8 times at most (#89); then
+ * the replay is given up and the cadence handed back. */
+static void replay_frame_retried_then_abandoned(void)
+{
+	uint32_t base = retries();
+	hist_fill(0);
+	script_fill(-EIO, LOG_MAX);
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(200));
+	zassert_equal(fk.n, 9, "1 + 8 retries, got %zu", fk.n);
+	for (size_t i = 0; i < fk.n; i++) {
+		zassert_equal(fk.log[i].head[2], 0, "attempt %zu is not frame 0", i);
+	}
+	assert_spacing(0, 8, RETRY_MS);
+	zassert_equal(retries(), base + 8);
+	zassert_false(g_hist_replay_active);
+	zassert_equal(m_ready_calls, 1);
+}
+BOTH_PROFILES(replay_frame_retried_then_abandoned)
+
+/* A duty-cycle hold waits res->wait_ms, then the same frame goes. */
+static void replay_duty_hold_waits(void)
+{
+	uint32_t base = retries();
+	const int r[] = {0, -EAGAIN};
+	uint32_t n = hist_fill(0);
+
+	script(r, ARRAY_SIZE(r));
+	fk.wait_ms = 5000;
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(30));
+	zassert_equal(fk.n, 4);
+	zassert_equal(fk.log[2].head[2], fk.log[1].head[2], "the held frame again");
+	zassert_true(fk.log[2].at_ms - fk.log[1].at_ms >= 5000);
+	zassert_true(fk.log[2].at_ms - fk.log[1].at_ms < RETRY_MS, "not the default wait");
+	zassert_equal(retries(), base + 1);
+
+	/* The stream as sent: the held attempt left out. */
+	fk.log[1] = fk.log[2];
+	fk.log[2] = fk.log[3];
+	assert_stream(0, 3, 42, 0, n);
+}
+BOTH_PROFILES(replay_duty_hold_waits)
+
+/* -EBUSY (a confirmed uplink in flight) waits for the kick, not a timer. */
+static void replay_busy_waits_for_the_kick(void)
+{
+	uint32_t base = retries();
+	const int r[] = {-EBUSY};
+
+	hist_fill(0);
+	script(r, ARRAY_SIZE(r));
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(60));
+	zassert_equal(fk.n, 1, "retried without the kick");
+
+	app_radio_tx_kick();
+	k_sleep(K_SECONDS(30));
+	zassert_equal(fk.n, 4);
+	zassert_equal(fk.log[1].head[2], 0, "frame 0 again");
+	zassert_equal(retries(), base, "a wait is not a failure");
+}
+BOTH_PROFILES(replay_busy_waits_for_the_kick)
+
+/* The budget falls under one record mid-stream (a LoRaWAN DR drop, #409 3f):
+ * the host gets BUDGET_TOO_SMALL with the request's seq instead of silence. */
+static void replay_budget_drop_answers_budget_error(void)
+{
+	hist_fill(0);
+	fk.budget_after = 1;
+	fk.budget_to = stub_hist_overhead(0) + STUB_HIST_REC_SIZE - 1;
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(30));
+	zassert_equal(fk.n, 2);
+	zassert_equal(fk.log[0].kind, APP_RADIO_FRAME_HISTORY);
+	zassert_equal(fk.log[1].kind, APP_RADIO_FRAME_ANSWER);
+	zassert_equal(g_budget_error_seq, 42);
+	zassert_equal(fk.log[1].head[2], 42, "the Error carries the seq");
+	zassert_false(g_hist_replay_active);
+	zassert_equal(m_ready_calls, 1);
+}
+BOTH_PROFILES(replay_budget_drop_answers_budget_error)
+
+/* Budget 0 (LoRaWAN MAC answers fill the frame, H-1): an empty frame flushes
+ * the MAC and the stream goes on once the budget is back -- it used to end. */
+ZTEST(radio_common, test_replay_budget_zero_flushes_and_goes_on)
+{
+	uint32_t base = retries();
+	uint32_t n = hist_fill(0);
+
+	fk.budget_after = 1;
+	fk.budget_to = 0;
+	fk.flush_budget = PROFILE_LRW.budget;
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(60));
+	zassert_equal(fk.n, 4);
+	zassert_equal(fk.log[1].kind, APP_RADIO_FRAME_HISTORY);
+	zassert_equal(fk.log[1].len, 0, "the flush is an empty frame");
+	zassert_equal(retries(), base + 1);
+
+	fk.log[1] = fk.log[2];
+	fk.log[2] = fk.log[3];
+	assert_stream(0, 3, 42, 0, n);
+}
+
+/* A link lost mid-stream ends the replay (and hands the cadence back); a
+ * link-up drops one still waiting to retry -- its frame would go under the
+ * new session -- and leaves the kick to the link-up. */
+static void replay_ends_with_the_link(void)
+{
+	const int r[] = {0, -ENOTCONN};
+
+	hist_fill(0);
+	fk.drop_link_after = 1;
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(30));
+	zassert_equal(fk.n, 1);
+	zassert_false(g_hist_replay_active);
+	zassert_equal(m_ready_calls, 1);
+
+	fk.ready = true;
+	fk.n = 0;
+	fk.drop_link_after = 0;
+	script(r, ARRAY_SIZE(r));
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 43));
+	k_sleep(K_SECONDS(30));
+	zassert_equal(fk.n, 2, "no session ends it too");
+	zassert_false(g_hist_replay_active);
+	zassert_equal(m_ready_calls, 2);
+
+	fk.n = 0;
+	script_fill(-EIO, 1);
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 44));
+	k_sleep(K_SECONDS(1));
+	zassert_equal(fk.n, 1);
+	app_radio_link_up();
+	zassert_false(g_hist_replay_active);
+	k_sleep(K_SECONDS(60));
+	zassert_equal(fk.n, 1, "the dropped replay's retry went out");
+	zassert_equal(m_ready_calls, 2, "the link-up kicks the cadence, not the drop");
+}
+BOTH_PROFILES(replay_ends_with_the_link)
+
+/* M-2: a replay holds telemetry back, so its frames refresh the stale-uplink
+ * clock; a long replay does not rejoin a healthy session. */
+static void replay_frames_refresh_the_stale_clock(void)
+{
+	uint32_t per = hist_per_frame();
+
+	app_radio_link_up();
+	g_hist_first = 0;
+	g_hist_end = 40 * per; /* 40 frames, 3 s apart: 2 min */
+	g_app_config.interval_report = 20; /* stale after 3 x 20 s */
+	zassert_ok(app_radio_history_replay_start(0, UINT32_MAX, 42));
+	k_sleep(K_SECONDS(110));
+	app_radio_test_stale_tick(k_uptime_get());
+	zassert_equal(fk.rejoin_calls, 0, "rejoined mid-replay");
+}
+BOTH_PROFILES(replay_frames_refresh_the_stale_clock)
 
 /* ---- Flash writes vs radio exchanges ----------------------------------------
  * A writer thread (shell, NFC, report queue in the firmware) holds the flash

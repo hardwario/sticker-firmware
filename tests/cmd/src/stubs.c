@@ -410,23 +410,24 @@ bool app_sensor_i2c_wedged(void)
 	return false;
 }
 
-/* ---- B8: the P2P history-replay entry point app_cmd_handle_req_history calls ---- */
+/* ---- The history-replay entry point app_cmd_handle_req_history calls ---- */
 
-int g_p2p_start_history_replay_calls;
-uint32_t g_p2p_start_history_replay_from;
-uint32_t g_p2p_start_history_replay_to;
-uint32_t g_p2p_start_history_replay_seq;
-/* What the stub reports: true = a stream was started and IS the answer, false =
- * nothing to replay, so the handler must emit HISTORY_UNAVAILABLE instead. */
-bool test_p2p_start_history_replay_ret;
+int g_history_replay_start_calls;
+uint32_t g_history_replay_start_from;
+uint32_t g_history_replay_start_to;
+uint32_t g_history_replay_start_seq;
+/* What the stub reports, as app_radio_history_replay_start(): 0 = a stream runs
+ * and IS the answer; -EMSGSIZE / -ENODATA / -EAGAIN = the handler answers an
+ * Error instead. */
+int test_history_replay_start_ret;
 
-bool app_radio_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
+int app_radio_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
 {
-	g_p2p_start_history_replay_calls++;
-	g_p2p_start_history_replay_from = from_unix;
-	g_p2p_start_history_replay_to = to_unix;
-	g_p2p_start_history_replay_seq = seq;
-	return test_p2p_start_history_replay_ret;
+	g_history_replay_start_calls++;
+	g_history_replay_start_from = from_unix;
+	g_history_replay_start_to = to_unix;
+	g_history_replay_start_seq = seq;
+	return test_history_replay_start_ret;
 }
 
 /* ---- #460 F3: what the one executor, app_cmd_run_action(), drives ---- */

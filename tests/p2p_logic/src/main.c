@@ -15,9 +15,6 @@
 #include "app_radio.h"
 #include "app_radio_p2p.h"
 
-extern uint16_t test_history_frame_count;
-extern uint32_t test_history_first_abs;
-extern size_t test_history_count;
 /* tests/p2p_logic/src/stubs.c's app_settings_save_p2p_spreading_factor knobs. */
 extern int g_test_saved_sf;
 extern int g_test_save_sf_calls;
@@ -1321,94 +1318,6 @@ ZTEST(p2p_logic, test_shell_join_preempts_a_pending_slow_retry)
 
 	/* Leave nothing armed for the next test. */
 	p2p_test_join_step();
-}
-
-/* ---- B8 history replay ------------------------------------------------ */
-
-ZTEST(p2p_logic, test_history_frame_cap_is_bounded_by_the_p2p_body)
-{
-	p2p_test_replay_setup();
-
-	/* m_hist_tx_buf is APP_CMD_HISTORY_FRAME_BUF_SIZE (256 B), sized for the
-	 * LoRaWAN frame; over P2P the binding limit is the 239 B body a single
-	 * frame can carry (P2P_MAX_BODY = 255 MTU - 12 header - 4 tag). Sizing a
-	 * frame off the buffer instead would build pages the radio cannot send. */
-	zassert_equal(p2p_history_frame_cap(), (size_t)P2P_MAX_BODY,
-		      "the per-frame cap must be the P2P body budget (%u), not the 256 B buffer",
-		      (unsigned)P2P_MAX_BODY);
-	zassert_equal((size_t)P2P_MAX_BODY, 239u, "P2P_MAX_BODY drifted from 239");
-}
-
-ZTEST(p2p_logic, test_history_replay_start_is_not_reentrant)
-{
-	bool active;
-	uint32_t seq, idx;
-	uint32_t cursor;
-
-	p2p_test_replay_setup();
-	test_history_frame_count = 3;
-
-	zassert_true(app_radio_p2p_start_history_replay(100, 200, 42),
-		     "a replay with records available must start");
-	p2p_test_get_replay(&active, &seq, &cursor, &idx);
-	zassert_true(active, "the replay should be marked active");
-	zassert_equal(seq, 42u, "the stream answers the requesting seq");
-
-	/* Over P2P a re-delivered req_history is dispatched from inside the
-	 * replay's OWN call stack -- hist_work_handler -> send_confirmed ->
-	 * recv_ack -> app_radio_downlink -> app_cmd_handle ->
-	 * app_cmd_handle_req_history -> here. Without a guard this resets
-	 * cursor/idx/seq, and control then returns into the outer handler, which
-	 * writes its stale cursor back and schedules the work a second time. The
-	 * node ends up answering one request with two interleaved streams.
-	 *
-	 * A retransmitted request is already being answered, so accept it and
-	 * change nothing. */
-	zassert_true(app_radio_p2p_start_history_replay(900, 1000, 77),
-		     "a re-delivered request must be accepted, not refused");
-
-	p2p_test_get_replay(&active, &seq, &cursor, &idx);
-	zassert_true(active, "the replay must still be active");
-	zassert_equal(seq, 42u, "the in-flight stream's seq must not be replaced by the retry's");
-	zassert_equal(idx, 0u, "the frame index must not be rewound");
-}
-
-ZTEST(p2p_logic, test_history_replay_cursor_is_absolute)
-{
-	bool active;
-	uint32_t seq, idx, cursor;
-
-	p2p_test_replay_setup();
-	test_history_frame_count = 2;
-	/* The RAM ring has evicted 40 records: the stored span is [40, 45). */
-	test_history_first_abs = 40;
-	test_history_count = 45;
-
-	/* #436: the replay cursor is an absolute record ordinal (app_history_span()),
-	 * so a capture or an eviction during the stream moves nothing. A replay that
-	 * still started at ordinal 0 would re-read evicted records' slots. */
-	zassert_true(app_radio_p2p_start_history_replay(0, UINT32_MAX, 5), "replay must start");
-	p2p_test_get_replay(&active, &seq, &cursor, &idx);
-	zassert_true(active, "the replay should be marked active");
-	zassert_equal(cursor, 40u, "cursor must start at the oldest stored record, got %u", cursor);
-
-	test_history_first_abs = 0;
-	test_history_count = 1;
-}
-
-ZTEST(p2p_logic, test_telemetry_does_not_interleave_with_a_history_replay)
-{
-	p2p_test_replay_setup();
-
-	/* app_radio_lrw.c gates its own send path on m_hist_active (MED-9); app_radio_p2p.c's
-	 * copy kept the "telemetry self-skips" comment but dropped the gate. Both
-	 * backends now report the replay to app_radio, which holds telemetry back
-	 * (tests/radio_common). */
-	zassert_false(app_radio_p2p_backend.replay_active(), "no replay: telemetry goes");
-	p2p_test_set_replay_active(true);
-	zassert_true(app_radio_p2p_backend.replay_active(),
-		     "a replay owns the radio: telemetry must wait");
-	p2p_test_set_replay_active(false);
 }
 
 /* ---- Frame-counter fail-closed / saturation (B9) ---------------------- */

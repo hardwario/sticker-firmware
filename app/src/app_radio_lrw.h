@@ -55,9 +55,9 @@ bool app_radio_lrw_is_ready(void);
  * the empty MAC-flush uplink at budget 0. All unconfirmed. */
 extern const struct app_radio_backend app_radio_lrw_backend;
 
-/* Register a callback fired on a link-ready edge (join success / history-replay
- * finish) so app_report can resume the report cadence with an immediate uplink.
- * NULL clears it. Called once from app_report_init(). */
+/* Register a callback fired on a link-ready edge (join success) so app_report
+ * can resume the report cadence with an immediate uplink. NULL clears it.
+ * Called once from app_report_init(). */
 void app_radio_lrw_register_ready_cb(void (*cb)(void));
 
 /* Current application-payload budget (bytes) for the next uplink, taken from the
@@ -76,17 +76,6 @@ void app_radio_lrw_send_info_on_clock_sync(uint32_t seq);
 /* app_radio_clock_sync() on LoRaWAN: force a DeviceTimeReq and answer with the
  * seq-carrying Info once the time lands. */
 void app_radio_lrw_clock_sync(uint32_t seq);
-
-/* Start a device-driven history replay (issue #52): stream every stored record
- * in [from_unix, to_unix] back as N HistoryFrame uplinks on the command port,
- * back-to-back ASAP (duty-cycle permitting), echoing `seq`. Returns 0 when a
- * replay was armed (the first frame is the reply, so the caller should NOT also
- * send an Ack), -EAGAIN if the link isn't ready, -ENODATA if the window is
- * empty, or -EMSGSIZE if records exist but not one fits the current DR budget
- * (the 11 B tier, #409). Renamed from the bool app_radio_lrw_start_history_replay()
- * so a caller written for the old API (true = started) fails to compile
- * instead of silently inverting on 0 = success. */
-int app_radio_lrw_history_replay_start(uint32_t from_unix, uint32_t to_unix, uint32_t seq);
 
 /* Erase the persisted LoRaWAN NVM context (frame counters, DevNonce, session).
  * Used when re-provisioning credentials so a new ABP/OTAA identity starts from

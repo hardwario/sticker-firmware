@@ -9,7 +9,6 @@
 #include "app_cmd.h"
 #include "app_compose.h"
 #include "app_config.h"
-#include "app_history.h"
 #include "app_log.h"
 #include "app_radio_lrw.h"
 #include "app_radio_p2p.h"
@@ -343,12 +342,6 @@ static struct k_work_delayable m_join_work; /* JoinRequest attempt + retry (#118
  *    back in RX after sending its Ack (a back-to-back frame went unheard). */
 #define P2P_TX_GAP_MS 1000
 static int64_t m_link_idle_at; /* uptime before which no TX starts */
-static void kick_waiting_uplinks(void);
-
-/* B8 history replay in progress. Declared up here, ahead of the rest of the
- * replay state further down, because the TX backend reports it to app_radio,
- * which holds telemetry back meanwhile (MED-9), earlier in the file. */
-static bool m_hist_active;
 #if defined(CONFIG_SHELL)
 static struct k_work m_rx_work; /* drain received frames (listen) */
 
@@ -2114,7 +2107,9 @@ static void ack_retry_work_handler(struct k_work *work)
 	 * may still be waiting -- keep the timer aligned with the queue. */
 	reschedule_ack_retry_work();
 	if (k_msgq_num_used_get(&m_ack_retry_msgq) == 0) {
-		kick_waiting_uplinks(); /* the in-flight uplink is done */
+		/* The in-flight uplink is done: the frames that bounced with -EBUSY
+		 * (the TX path, the history replay) go now. */
+		app_radio_tx_kick();
 	}
 }
 
@@ -2230,15 +2225,6 @@ static uint8_t p2p_tx_report_flags(bool due)
 	return telemetry_report_confirmed(due) ? APP_RADIO_FRAME_CONFIRMED : 0;
 }
 
-/* MED-9: a history replay owns the radio; telemetry waits. Interleaved frames
- * would burn the duty ledger and the confirmed-uplink Ack slot the replay's own
- * retries need, and break the run of frames the host is reassembling. Alarms
- * are left free: a replay can run for minutes, and an alarm must not wait. */
-static bool p2p_tx_replay_active(void)
-{
-	return m_hist_active;
-}
-
 /* struct app_radio_backend.in_flight: a transmitted confirmed frame still waits
  * for its Ack retries (m_ack_retry_msgq), so a post-command reboot waits too. */
 static bool p2p_tx_in_flight(void)
@@ -2251,7 +2237,6 @@ const struct app_radio_backend app_radio_p2p_backend = {
 	.budget = p2p_tx_budget,
 	.tx_ready = app_radio_p2p_is_ready,
 	.report_flags = p2p_tx_report_flags,
-	.replay_active = p2p_tx_replay_active,
 	.get_state = app_radio_p2p_get_state,
 	.warning_step = warning_tx_power_step,
 	.rejoin = p2p_tx_rejoin,
@@ -2736,231 +2721,7 @@ static void join_work_handler(struct k_work *work)
 	k_work_reschedule_for_queue(app_radio_work_q(), dwork, K_MSEC(wait_ms));
 }
 
-/* ======================================================================== */
-/* History replay (req_history, tag 11) -- P2P device-driven HistoryFrame    */
-/* stream; mirror of app_radio_lrw's replay state machine, transmit path only.     */
-/* ======================================================================== */
-
-/* One frame per work invocation, rescheduled FRAME_GAP apart so the exact
- * sliding-hour duty ledger (B2) paces the burst; each frame goes out as a
- * confirmed 0x55 RESPONSE sharing m_hist_seq. */
-#define P2P_HIST_FRAME_GAP_SEC   3
-#define P2P_HIST_FRAME_RETRY_SEC 15
-#define P2P_HIST_MAX_RETRIES     8 /* duty-cycle retries before abandoning a frame */
-
-static struct k_work_delayable m_hist_work;
-
-/* The in-flight confirmed uplink finished (acked or given up): let the frames
- * that bounced with -EBUSY go. k_work_schedule() leaves an item that is already
- * waiting (duty cycle, replay pace) at its own time. */
-static void kick_waiting_uplinks(void)
-{
-	app_radio_tx_kick();
-	if (m_hist_active) {
-		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work, K_NO_WAIT);
-	}
-}
-static uint32_t m_hist_from, m_hist_to, m_hist_seq;
-static uint32_t m_hist_count, m_hist_idx;
-/* Absolute record ordinals (app_history_span()), as in app_radio_lrw: next record to
- * send and the end of the replay (exclusive), snapshot at start. Captures keep
- * appending during a replay and the RAM ring may evict under it, but an
- * absolute cursor names the same record throughout, so nothing is repeated or
- * skipped; records captured after the start are left for the next replay. */
-static uint32_t m_hist_cursor;
-static uint32_t m_hist_end;
-static uint32_t m_hist_present, m_hist_interval; /* snapshot at replay start */
-static int m_hist_retries;
-static uint8_t m_hist_tx_buf[APP_CMD_HISTORY_FRAME_BUF_SIZE];
-
-/* Per-frame sample capacity: the exact protobuf envelope overhead for these
- * frame fields, clamped to the P2P body budget and the tx buffer. Worst-case
- * (max-varint) index/count/t0 give a stable lower bound for the whole replay,
- * so counting and sending use an identical per-frame cap. */
-P2P_TESTABLE size_t p2p_history_frame_cap(void)
-{
-	size_t out_cap = MIN((size_t)P2P_MAX_BODY, sizeof(m_hist_tx_buf));
-
-	return app_cmd_history_sample_capacity(m_hist_seq, UINT32_MAX, UINT32_MAX, UINT32_MAX,
-					       m_hist_present, m_hist_interval, out_cap);
-}
-
-static void p2p_history_finish(void)
-{
-	m_hist_active = false;
-	app_history_set_replay_active(false);
-	/* Hand the report cadence back to app_report with an immediate kick. */
-	if (m_ready_cb) {
-		m_ready_cb();
-	}
-}
-
-static void hist_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	if (!m_hist_active) {
-		return;
-	}
-	if (!app_radio_p2p_is_ready()) {
-		LOG_WRN("History replay aborted: P2P not ready");
-		/* Via p2p_history_finish() like every other exit: clearing the two
-		 * flags by hand skipped the m_ready_cb() kick, so the report cadence
-		 * was never handed back and telemetry stayed silent until something
-		 * else restarted it. */
-		p2p_history_finish();
-		return;
-	}
-
-	static uint8_t samples[APP_CMD_HISTORY_FRAME_BUF_SIZE]; /* static: 256 B off
-								 * the work-queue stack */
-	size_t cap = MIN(p2p_history_frame_cap(), sizeof(samples));
-	uint32_t t0 = 0;
-	bool synced = false;
-	uint16_t n = 0;
-	uint32_t next = m_hist_cursor;
-	size_t slen = 0;
-
-	if (cap > 0) {
-		slen = app_history_export_abs(m_hist_from, m_hist_to, m_hist_cursor, m_hist_end,
-					      samples, cap, &t0, &synced, &n, &next);
-	}
-	if (n == 0) {
-		if (next >= m_hist_end) {
-			/* Nothing left in the window: the records were evicted or the
-			 * ring was reset since the previous frame. */
-			LOG_INF("P2P history replay complete: %u frames", (unsigned)m_hist_idx);
-		} else {
-			/* Not reachable with the fixed P2P body budget (the cap never
-			 * shrinks mid-replay), unlike app_radio_lrw's DR-driven one. */
-			LOG_WRN("P2P history replay stop at frame %u (cap=%uB)",
-				(unsigned)m_hist_idx, (unsigned)cap);
-		}
-		p2p_history_finish();
-		return;
-	}
-
-	size_t len;
-	/* time_synced is per frame: a frame never spans two history segments, and
-	 * each segment (flash page) knows whether its base is unix or uptime. */
-	int ret = app_cmd_build_history_frame(m_hist_seq, m_hist_idx, m_hist_count, t0,
-					      m_hist_present, m_hist_interval, synced, samples,
-					      slen, m_hist_tx_buf, sizeof(m_hist_tx_buf), &len);
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("app_cmd_build_history_frame", ret);
-		p2p_history_finish();
-		return;
-	}
-
-	ret = send_confirmed(APP_RADIO_P2P_FRAME_RESPONSE, m_hist_tx_buf, len);
-	if (ret == -EBUSY) {
-		return; /* kicked when the in-flight uplink is done */
-	}
-	if (ret == -EAGAIN) {
-		/* Duty-cycle blocked: retry the SAME frame, bounded so a persistently
-		 * rejected frame cannot wedge the replay forever. */
-		if (++m_hist_retries > P2P_HIST_MAX_RETRIES) {
-			LOG_ERR("P2P history frame %u abandoned after %d retries",
-				(unsigned)m_hist_idx, m_hist_retries - 1);
-			p2p_history_finish();
-			return;
-		}
-		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work,
-					  K_SECONDS(P2P_HIST_FRAME_RETRY_SEC));
-		return;
-	}
-	if (ret) {
-		LOG_ERR_CALL_FAILED_INT("send_confirmed(history)", ret);
-		p2p_history_finish();
-		return;
-	}
-	m_hist_retries = 0;
-	/* M-2: a replay gates telemetry, so its frames are the uplinks -- as in
-	 * app_radio_lrw.c. Without this a replay longer than the stale window
-	 * re-joined mid-stream (review of #400). */
-	app_radio_note_uplink();
-
-	LOG_INF("P2P history frame %u/%u sent (%u rec, %zu B)", (unsigned)(m_hist_idx + 1),
-		(unsigned)m_hist_count, (unsigned)n, len);
-	m_hist_cursor = next;
-	m_hist_idx++;
-
-	/* Terminate on cursor exhaustion, not frame_index == frame_count: the
-	 * up-front count is only an estimate; the host concatenates by frame_index.
-	 * The export already skips to the next record in the window, so the frame
-	 * carrying the window's last record ends the replay here — no trailing
-	 * empty attempt (H-4, as app_radio_lrw). */
-	if (m_hist_cursor < m_hist_end) {
-		k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work,
-					  K_SECONDS(P2P_HIST_FRAME_GAP_SEC));
-	} else {
-		LOG_INF("P2P history replay complete: %u frames", (unsigned)m_hist_idx);
-		p2p_history_finish();
-	}
-}
-
-bool app_radio_p2p_start_history_replay(uint32_t from_unix, uint32_t to_unix, uint32_t seq)
-{
-	if (!app_radio_p2p_is_ready()) {
-		LOG_WRN("History replay requested but P2P not ready; ignoring");
-		return false;
-	}
-
-	/* A request we are already answering. Over P2P this arrives from inside the
-	 * replay's own call stack -- hist_work_handler -> send_confirmed ->
-	 * recv_ack -> app_radio_downlink -> app_cmd_handle ->
-	 * app_cmd_handle_req_history -> here -- because the node dispatches the
-	 * 0x56 it receives while waiting for its own frame's Ack. Re-seeding the
-	 * cursor here would leave the outer hist_work_handler to write its stale
-	 * values back over the top and schedule m_hist_work a second time, so one
-	 * request would be answered by two interleaved streams.
-	 *
-	 * `true` rather than `false`: the stream IS the answer, so the caller must
-	 * not also emit a HISTORY_UNAVAILABLE error for it. */
-	if (m_hist_active) {
-		LOG_INF("P2P history replay already streaming (seq %u); ignoring the re-delivered "
-			"request (seq %u)",
-			m_hist_seq, seq);
-		return true;
-	}
-
-	/* Seed the snapshot fields the cap depends on (seq/present/interval) before
-	 * sizing a frame, so counting and sending use an identical per-frame cap. */
-	m_hist_from = from_unix;
-	m_hist_to = to_unix;
-	m_hist_seq = seq;
-	m_hist_present = app_history_get_mask();
-	m_hist_interval = app_history_get_interval();
-
-	size_t cap = p2p_history_frame_cap();
-	uint32_t n = (cap > 0) ? app_history_count_frames(from_unix, to_unix, cap) : 0;
-
-	if (n == 0) {
-		LOG_INF("P2P history replay: no records in window");
-		return false;
-	}
-
-	m_hist_count = n;
-	m_hist_idx = 0;
-	app_history_span(&m_hist_cursor, &m_hist_end);
-	m_hist_retries = 0;
-	m_hist_active = true;
-	/* Capture goes on (absolute cursor); only the flash page rollover is held
-	 * off -- nothing in the send path consults it. The telemetry gate is
-	 * m_hist_active, reported to app_radio by p2p_tx_replay_active(). */
-	app_history_set_replay_active(true);
-
-	LOG_INF("P2P history replay start: %u frames (window %u..%u, seq %u)", (unsigned)n,
-		from_unix, to_unix, seq);
-	k_work_schedule_for_queue(app_radio_work_q(), &m_hist_work, K_NO_WAIT);
-	return true;
-}
-
 #if defined(CONFIG_ZTEST)
-/* Test hooks for the B8 history replay: start the work queue and the replay work
- * item the way app_radio_p2p_init() does, mark P2P ready, and read back the replay
- * cursor so a test can see whether a second start disturbed a stream already in
- * flight. */
 /* Initialise the work items once per test binary, the way app_radio_p2p_init()
  * does; the suite's stub of app_radio_work_q() provides the queue. Shared by
  * every setup hook below, as the suite runs many tests. */
@@ -2971,36 +2732,9 @@ static void test_queue_start_once(void)
 	if (started) {
 		return;
 	}
-	k_work_init_delayable(&m_hist_work, hist_work_handler);
 	k_work_init_delayable(&m_join_work, join_work_handler);
 	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
 	started = true;
-}
-
-void p2p_test_replay_setup(void)
-{
-	test_queue_start_once();
-	/* A previous test may have left the replay work queued -- notably
-	 * test_history_replay_start_is_not_reentrant, which asserts on the
-	 * re-entrancy guard and never drives the stream to its end. Drop it the
-	 * way p2p_test_join_step() drops the join retry, so the work-queue thread
-	 * cannot run a stream underneath the next test's assertions. */
-	(void)k_work_cancel_delayable(&m_hist_work);
-	/* A replay runs on a live data plane: paired and started (is_ready()). */
-	m_link_state = P2P_LINK_PAIRED;
-	m_started = true;
-	m_hist_active = false;
-	m_hist_seq = 0;
-	m_hist_cursor = 0;
-	m_hist_end = 0;
-	m_hist_idx = 0;
-}
-
-/* Hold the replay flag directly, so the telemetry gate can be tested without
- * driving a whole stream through the radio path and racing its completion. */
-void p2p_test_set_replay_active(bool active)
-{
-	m_hist_active = active;
 }
 
 /* Put the module into a fresh boot-policy JOINING episode configured for
@@ -3176,21 +2910,6 @@ struct p2p_duty *p2p_test_get_duty(void)
 	return &m_duty;
 }
 
-void p2p_test_get_replay(bool *active, uint32_t *seq, uint32_t *cursor, uint32_t *idx)
-{
-	if (active) {
-		*active = m_hist_active;
-	}
-	if (seq) {
-		*seq = m_hist_seq;
-	}
-	if (cursor) {
-		*cursor = m_hist_cursor;
-	}
-	if (idx) {
-		*idx = m_hist_idx;
-	}
-}
 #endif /* defined(CONFIG_ZTEST) */
 
 /* ======================================================================== */
@@ -3246,7 +2965,6 @@ int app_radio_p2p_init(void)
 
 	k_work_init_delayable(&m_join_work, join_work_handler);
 	k_work_init_delayable(&m_ack_retry_work, ack_retry_work_handler);
-	k_work_init_delayable(&m_hist_work, hist_work_handler);
 #if defined(CONFIG_SHELL)
 	k_work_init(&m_rx_work, rx_work_handler);
 	k_work_init(&m_debug_compose_work, debug_compose_work_handler);
