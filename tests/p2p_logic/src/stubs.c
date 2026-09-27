@@ -20,6 +20,8 @@
 #include "app_radio.h"
 #include "app_settings.h"
 
+#include <zephyr/init.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/toolchain.h>
 
 #include <errno.h>
@@ -307,3 +309,48 @@ bool app_radio_announce_pending(void)
 {
 	return false;
 }
+
+/* ---- settings: a RAM stub store (CONFIG_SETTINGS_CUSTOM). Saves succeed unless
+ * a case sets test_settings_save_ret; nothing is kept or loaded back. ---- */
+
+int test_settings_save_ret;
+
+static int stub_store_load(struct settings_store *cs, const struct settings_load_arg *arg)
+{
+	ARG_UNUSED(cs);
+	ARG_UNUSED(arg);
+	return 0;
+}
+
+static int stub_store_save(struct settings_store *cs, const char *name, const char *value,
+			   size_t val_len)
+{
+	ARG_UNUSED(cs);
+	ARG_UNUSED(name);
+	ARG_UNUSED(value);
+	ARG_UNUSED(val_len);
+	return test_settings_save_ret;
+}
+
+static const struct settings_store_itf stub_store_itf = {
+	.csi_load = stub_store_load,
+	.csi_save = stub_store_save,
+};
+
+static struct settings_store stub_store = {.cs_itf = &stub_store_itf};
+
+int settings_backend_init(void)
+{
+	settings_dst_register(&stub_store);
+	settings_src_register(&stub_store);
+	return 0;
+}
+
+/* Nothing in this suite runs main(): bring the settings subsystem up here so
+ * the stub store is the save destination. */
+static int stub_settings_init(void)
+{
+	return settings_subsys_init();
+}
+
+SYS_INIT(stub_settings_init, APPLICATION, 0);

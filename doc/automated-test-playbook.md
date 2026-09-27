@@ -631,7 +631,8 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 ### AT-LRW-04 — GetInfo-on-join + device_status (DR, A; maps L4, G4)
 - **Steps:** force a rejoin (`lrw_join 08018a0100` via downlink or `ats cmd lrw`); capture
   the fPort-85 info frame; decode.
-- **Expect:** serial, fw version, config version, battery mV, lrw_state, device_status
+- **Expect:** serial, fw version, config version, battery mV, device_status (the link state is
+  `get_radio_state.state` since v1.5.0, no longer in Info)
   bitmask present and plausible (e.g. low-battery bit clear at {PPK2_MV}=3000).
 
 ### AT-LRW-05 — periodic + multi-frame telemetry (DR, A; maps L5, L6)
@@ -694,8 +695,8 @@ documented `set_param` example. The leading byte is `seq`, echoed in the respons
 - **Expect:** mode changes only via shell/NFC (LRW SetParam refused — AT-CFG-03); each mode
   boots clean.
 - **Also covers the zero-`app_key` guard (#118, doc/p2p.md §4)** — no automated coverage
-  exists for it (`app_radio_p2p.c` needs the LoRa driver, so no native_sim suite reaches it), so
-  this is the only place it gets exercised. In `radio-mode p2p`, set
+  exists for it (the `p2p_logic` native_sim suite drives `app_radio_p2p.c` on a fake LoRa
+  device, but not this start-up guard), so this is the only place it gets exercised. In `radio-mode p2p`, set
   `lrw-appkey 00000000000000000000000000000000` + save: expect `P2P not started: lrw_appkey
   is all-zero` in the boot log, `app_key: MISSING (radio refused to start)` from `ats radio
   status`, no JoinRequest on air, and `join` refused rather than transmitting.
@@ -795,7 +796,7 @@ phone JSON response AND (debug FW) RTT log of the NFC transaction.
 ### AT-NFC-02 — encrypted GetInfo round-trip (DR, SA; maps N4)
 - **Steps:** `POST /comms` (encrypted, key from store or `{STICKER_KEY}`) → `POST /command
   {"op":"getinfo"}`.
-- **Expect:** decoded info equals AT-NFC-01 + NFC-only fields (lrw_state, dev_eui,
+- **Expect:** decoded info equals AT-NFC-01 + NFC-only fields (dev_eui,
   device_status); nonce advanced by the transaction.
 
 ### AT-NFC-03 — setparam → save → reboot → verify (DR, SA; maps N1, K6)

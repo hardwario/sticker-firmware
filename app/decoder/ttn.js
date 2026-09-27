@@ -142,8 +142,9 @@ var _ALM_HEX_ENC = {};
 
 // Names drop the `lrw_` prefix the YAML carries (region <- lrw_region, ...).
 // Exception: fields 13/14 are named radio_link_check_* in the YAML (2026-09-27
-// rename, shared by both radios via app_radio) -- no `lrw_` prefix to strip, so
-// they carry their full name on the wire, same as radio_mode/13-16 below.
+// rename, carrier-neutral) -- no `lrw_` prefix to strip, so they carry their
+// full name, same as radio_mode/13-16 below. The encoder also accepts the names
+// before the rename (_LRW_TAG_ALIASES) for one release.
 var _LRW_NAMES = {
   1: "region", 2: "sub_band", 3: "network", 4: "adr", 5: "activation",
   13: "radio_link_check_interval", 14: "radio_link_check_fail_rejoin", 15: "radio_mode",
@@ -177,6 +178,13 @@ var _APP_TAGS = _invert(_APP_NAMES);
 var _SEN_TAGS = _invert(_SEN_NAMES);
 var _ALM_TAGS = _invert(_ALM_NAMES);
 var _LRW_TAGS = _invert(_LRW_NAMES);
+// v1.5.0 renamed lorawan fields 13/14 (same tags on the wire). SetParam JSON
+// still written with the old names keeps encoding instead of failing as an
+// unknown field; the decoder emits only the new names.
+var _LRW_TAG_ALIASES = { link_check_interval: 13, link_check_fail_rejoin: 14 };
+for (var _a in _LRW_TAG_ALIASES) {
+  if (_LRW_TAG_ALIASES.hasOwnProperty(_a)) _LRW_TAGS[_a] = _LRW_TAG_ALIASES[_a];
+}
 var _P2P_TAGS = _invert(_P2P_NAMES);
 
 // proto field tag -> command name in the DownlinkCommand body oneof.

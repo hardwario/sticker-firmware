@@ -289,6 +289,10 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 #define P2P_RX1_WINDOW_SYMBOLS     12
 #define P2P_RX1_TRAILING_MARGIN_MS 120
 #define P2P_RX1_DELAY_DEFAULT_S    1
+/* A JoinAccept's rx1_delay_s outside 1..P2P_RX1_DELAY_MAX_S is refused (review
+ * of #400): p2p_rx_window() sleeps it on m_work_q, and one near the 30 s
+ * watchdog would reset the node on every uplink -- persisted, a boot loop. */
+#define P2P_RX1_DELAY_MAX_S        15
 
 /* Confirmed uplink (§6): the Ack (0xFA) body (B1/B5, PR #408, matches the
  * central in proximos-v2 MR!30). Base body is flags(1) | rssi(i8) | snr(i8) --
@@ -800,7 +804,7 @@ static int join_settings_set(const char *name, size_t len, settings_read_cb read
 			m_net_id = sys_get_be32(&buf[0]);
 			m_dev_addr = sys_get_be16(&buf[4]);
 			memcpy(m_session_key, &buf[6], P2P_KEY_LEN);
-			m_rx1_delay_s = buf[6 + P2P_KEY_LEN];
+			m_rx1_delay_s = CLAMP(buf[6 + P2P_KEY_LEN], 1, P2P_RX1_DELAY_MAX_S);
 			/* 0 = the session carried no assignment. Range-check on
 			 * the way back in too, so a corrupt record cannot push
 			 * the PA outside its configured envelope. */
@@ -826,23 +830,55 @@ static struct settings_handler m_join_sh = {
  * #118 phase 2 review). Never resets across pairings -- it is the central's
  * JoinRequest replay-protection handle (§5.3), so re-joining must never
  * present a dev_nonce the central could have already seen. */
-static void dnonce_persist(uint32_t v)
+static int dnonce_persist(uint32_t v)
 {
-	m_dev_nonce = v;
 	int ret = settings_save_one(P2P_JOIN_DNONCE_KEY, &v, sizeof(v));
 
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("settings_save_one(p2pjoin/dnonce)", ret);
+		return ret;
 	}
+	m_dev_nonce = v;
+	return 0;
 }
 
 /* Persist a successful JoinAccept's pairing state and switch the module to
  * PAIRED. Resets the data-plane frame counter to 0 -- safe because
  * session_key is fresh (see derive_session_key()'s comment) and keeps the
  * on-air counter values small. */
-static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
-			    const uint8_t session_key[P2P_KEY_LEN], uint8_t rx1_delay_s,
-			    const struct p2p_radio_assign *assign)
+static int queue_frame(uint8_t type, const uint8_t *buf, size_t len);
+
+/* A new session_key restarts the counter at 0 (pairing_persist()), so an Ack
+ * retry left over from the old session must never go out: its old counter
+ * under the new key would reuse a (key, nonce) pair once m_fcnt reaches it, and
+ * a central that accepted it would jump its high-water ahead (review of #400,
+ * H1). Answers and alarms go back to the TX queue for a fresh counter under
+ * the new session; a telemetry or history frame is dropped (the next report /
+ * the replay's own retry covers it). m_work_q only. */
+static void ack_retry_drop_old_session(void)
+{
+	struct p2p_ack_retry_state st;
+
+	(void)k_work_cancel_delayable(&m_ack_retry_work);
+	while (k_msgq_get(&m_ack_retry_msgq, &st, K_NO_WAIT) == 0) {
+		bool keep = (st.frame_type == APP_RADIO_P2P_FRAME_RESPONSE ||
+			     st.frame_type == APP_RADIO_P2P_FRAME_ALARM) &&
+			    st.body_len <= P2P_TX_BUF_SIZE;
+
+		if (keep && queue_frame(st.frame_type, st.body, st.body_len) == 0) {
+			LOG_INF("Old-session uplink (type %u, counter %u) re-queued for the new "
+				"session",
+				st.frame_type, st.counter);
+		} else {
+			LOG_WRN("Old-session uplink (type %u, counter %u) dropped at re-join",
+				st.frame_type, st.counter);
+		}
+	}
+}
+
+static int pairing_persist(uint32_t net_id, uint16_t dev_addr,
+			   const uint8_t session_key[P2P_KEY_LEN], uint8_t rx1_delay_s,
+			   const struct p2p_radio_assign *assign)
 {
 	uint8_t buf[P2P_JOIN_STATE_LEN];
 
@@ -855,8 +891,10 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
 	int ret = settings_save_one(P2P_JOIN_STATE_KEY, buf, sizeof(buf));
 
 	if (ret) {
+		/* The join is retried: a session only in RAM would leave the node
+		 * JOINING with nothing scheduled (review of #400). */
 		LOG_ERR_CALL_FAILED_INT("settings_save_one(p2pjoin/state)", ret);
-		return;
+		return ret;
 	}
 
 	m_net_id = net_id;
@@ -874,6 +912,8 @@ static void pairing_persist(uint32_t net_id, uint16_t dev_addr,
 	 * m_fcnt catches up to it. */
 	m_fcnt = 0;
 	(void)fcnt_reserve(P2P_FCNT_RESERVE);
+	ack_retry_drop_old_session();
+	return 0;
 }
 
 /* Tear the pairing down: drop the persisted session and return the module to
@@ -1649,6 +1689,19 @@ static int build_frame(uint8_t frame_type, const uint8_t *body, size_t body_len,
  * must have already checked the duty-cycle budget (duty_wait_ms_for). Returns
  * 0 or errno; on success reports the send-completion time via `tx_end_ms`
  * (uptime ms, for the caller's RX1/Ack wait) and charges the duty budget. */
+/* lora_send() failed. The driver reports a TX timeout as -EAGAIN and a busy
+ * modem as -EBUSY, which this module reads as "duty cycle refused" and "uplink
+ * in flight": a dead or wedged modem was then retried every few ms and never
+ * advanced the join sweep (review of #400). A radio fault is -EIO here. The PA
+ * may have been keyed, so its air is charged to the ledger (over-counting only
+ * errs towards compliance). */
+static int tx_send_failed(uint8_t wire_len)
+{
+	app_radio_count(APP_RADIO_CNT_TX_ERR);
+	duty_charge(frame_toa_ms(wire_len));
+	return -EIO;
+}
+
 static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t counter,
 		       int64_t *tx_end_ms)
 {
@@ -1686,8 +1739,7 @@ static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len,
 	ret = lora_send(m_lora_dev, frame, wire_len);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lora_send", ret);
-		app_radio_count(APP_RADIO_CNT_TX_ERR);
-		return ret;
+		return tx_send_failed((uint8_t)wire_len);
 	}
 
 	int64_t end = k_uptime_get();
@@ -2703,7 +2755,12 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 
 	uint32_t nonce_val = m_dev_nonce;
 
-	dnonce_persist(nonce_val + 1);
+	/* Fail closed (review of #400): a dev_nonce the flash does not hold would
+	 * be presented again after a reboot, and a recorded JoinAccept for it
+	 * replayed -- the old session key back with the counter at 0. */
+	if (dnonce_persist(nonce_val + 1) != 0) {
+		return -EIO;
+	}
 
 	uint8_t frame[P2P_JOIN_REQ_LEN]; /* 41 B */
 
@@ -2712,8 +2769,7 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 	int ret = lora_send(m_lora_dev, frame, sizeof(frame));
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("lora_send", ret);
-		app_radio_count(APP_RADIO_CNT_TX_ERR);
-		return ret;
+		return tx_send_failed(sizeof(frame));
 	}
 
 	int64_t end = k_uptime_get();
@@ -2791,6 +2847,12 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	uint32_t central_nonce = sys_get_be32(&body[6]);
 	uint8_t rx1_delay_s = body[10];
 
+	if (rx1_delay_s < 1 || rx1_delay_s > P2P_RX1_DELAY_MAX_S) {
+		LOG_WRN("JoinAccept: rx1_delay %u s outside 1..%u, refused", rx1_delay_s,
+			P2P_RX1_DELAY_MAX_S);
+		return -EBADMSG;
+	}
+
 	/* body[11..14] = reserved(4): the central's radio assignment (D3). */
 	struct p2p_radio_assign assign;
 
@@ -2807,7 +2869,12 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	uint8_t session_key[P2P_KEY_LEN];
 
 	derive_session_key(dev_nonce, central_nonce, session_key);
-	pairing_persist(net_id, dev_addr, session_key, rx1_delay_s, &assign);
+
+	int ret = pairing_persist(net_id, dev_addr, session_key, rx1_delay_s, &assign);
+
+	if (ret) {
+		return ret;
+	}
 	/* The sweep may have landed this join on an SF the config does not name;
 	 * record it before anything else can reboot us into the stale one. */
 	(void)p2p_join_adopt_sf(m_sf);
@@ -3112,6 +3179,10 @@ static void hist_work_handler(struct k_work *work)
 		return;
 	}
 	m_hist_retries = 0;
+	/* M-2: a replay gates telemetry, so its frames are the uplinks -- as in
+	 * app_radio_lrw.c. Without this a replay longer than the stale window
+	 * re-joined mid-stream (review of #400). */
+	m_last_uplink_ms = k_uptime_get();
 
 	LOG_INF("P2P history frame %u/%u sent (%u rec, %zu B)", (unsigned)(m_hist_idx + 1),
 		(unsigned)m_hist_count, (unsigned)n, len);
@@ -3331,6 +3402,26 @@ void p2p_test_put_ack_retry(uint32_t counter)
 	struct p2p_ack_retry_state st = {.counter = counter};
 
 	(void)k_msgq_put(&m_ack_retry_msgq, &st, K_NO_WAIT);
+}
+
+void p2p_test_put_ack_retry_frame(uint8_t type, const uint8_t *body, size_t len, uint32_t counter)
+{
+	struct p2p_ack_retry_state st = {
+		.frame_type = type, .body_len = (uint16_t)len, .counter = counter};
+
+	memcpy(st.body, body, len);
+	(void)k_msgq_put(&m_ack_retry_msgq, &st, K_NO_WAIT);
+}
+
+uint32_t p2p_test_ack_retry_count(void)
+{
+	return k_msgq_num_used_get(&m_ack_retry_msgq);
+}
+
+/* What pairing_persist() does to the retry queue when a session is replaced. */
+void p2p_test_drop_old_session(void)
+{
+	ack_retry_drop_old_session();
 }
 
 /* Arm the join retry with a known delay, standing in for a slow-phase pass end

@@ -964,10 +964,12 @@ static int {{ module.name }}_init(void)
 	if (legacy_seen) {
 		ret = settings_save_subtree(SETTINGS_PFX);
 		if (ret) {
+			/* Keep the old keys: the next boot migrates again rather
+			 * than losing the stored value to the default. */
 			LOG_ERR("Call `settings_save_subtree` failed: %d", ret);
 		}
 
-		for (size_t i = 0; i < ARRAY_SIZE(m_{{ module.name }}_legacy_keys); i++) {
+		for (size_t i = 0; ret == 0 && i < ARRAY_SIZE(m_{{ module.name }}_legacy_keys); i++) {
 			if (!m_{{ module.name }}_legacy_keys[i].seen) {
 				continue;
 			}

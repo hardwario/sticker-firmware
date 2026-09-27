@@ -688,6 +688,16 @@ static void app_cmd_handle_get_config(enum app_cmd_transport tp, const Command *
 		if (DUMP_FIELDS[i].lrw_skip && radio_transport(tp)) {
 			continue;
 		}
+		/* The P2P radio parameters mean nothing to a LoRaWAN network: a radio
+		 * get_config on a device not in radio-mode p2p leaves them out, so a
+		 * LoRaWAN DR0 dump keeps the v1.5.0 page count (review of #400). Gated
+		 * on the mode, not the transport: request_page() re-dispatches P2P
+		 * stream pages as LoRaWAN, and every page must share one layout. NFC
+		 * keeps them, and get_param p2p_field reads them on every transport. */
+		if (DUMP_FIELDS[i].section == DUMP_SECTION_P2P && radio_transport(tp) &&
+		    g_app_config.radio_mode != APP_CONFIG_RADIO_MODE_P2P) {
+			continue;
+		}
 		/* Empty (all-zero) alarm slots are omitted by app_config_fill_alarms(),
 		 * so they take no page budget and no tag — an unprovisioned device pages
 		 * its whole config into far fewer frames (page_count stays exact). */

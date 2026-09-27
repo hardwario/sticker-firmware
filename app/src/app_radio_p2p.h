@@ -433,6 +433,9 @@ bool p2p_test_frame_pending(void);
 uint32_t p2p_test_tx_waiting(void);
 void p2p_test_tx_reset(void);
 void p2p_test_put_ack_retry(uint32_t counter);
+void p2p_test_put_ack_retry_frame(uint8_t type, const uint8_t *body, size_t len, uint32_t counter);
+uint32_t p2p_test_ack_retry_count(void);
+void p2p_test_drop_old_session(void);
 void p2p_test_set_link(enum p2p_link_state state, bool started, bool slow, uint16_t fails,
 		       bool disabled);
 void p2p_test_note_downlink(int16_t rssi, int8_t snr);

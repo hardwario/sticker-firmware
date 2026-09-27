@@ -182,13 +182,13 @@ static struct k_work m_telemetry_work; /* compose request; the #267 jitter is ta
  * threaded m_work_q, never concurrently with each other. */
 static bool m_telemetry_pending;
 static struct k_work m_join_work;
-static struct k_work m_link_check_work;       /* LC timeout (from m_lc_timeout_timer) */
-static struct k_work m_downlink_success_work; /* deferred from downlink_callback */
-static struct k_work m_clock_sync_info_work;  /* deferred ClockSync Info uplink (#219) */
-static struct k_work m_announce_work;         /* deferred full Info / settings-info (#409) */
-static struct k_work m_lc_response_work;      /* deferred from link_check_callback */
-static struct k_work m_force_lc_work;         /* arm a forced LC on the next telemetry */
-static struct k_work m_dl_request_work;       /* drains m_dl_msgq (port-85 commands) */
+static struct k_work m_link_check_work;         /* LC timeout (from m_lc_timeout_timer) */
+static struct k_work m_downlink_success_work;   /* deferred from downlink_callback */
+static struct k_work m_clock_sync_info_work;    /* deferred ClockSync Info uplink (#219) */
+static struct k_work_delayable m_announce_work; /* deferred full Info / settings-info (#409) */
+static struct k_work m_lc_response_work;        /* deferred from link_check_callback */
+static struct k_work m_force_lc_work;           /* arm a forced LC on the next telemetry */
+static struct k_work m_dl_request_work;         /* drains m_dl_msgq (port-85 commands) */
 static struct k_work_delayable m_post_cmd_work;
 static struct k_work_delayable m_page_stream_work; /* paged answers (#409 3d/3e, #425) */
 #define PAGE_STREAM_PACE_SEC 2
@@ -617,13 +617,22 @@ static void state_transition(enum app_radio_state new_state)
 /* Event handlers (run on m_work_q)                                         */
 /* ======================================================================== */
 
+/* Retry pace while the announce stays pending (review of #400): with ADR off or
+ * a pinned DR no DR change comes to retry a frame the response queue or the
+ * budget refused, and the held alarms and first report wait for the announce. */
+#define LRW_ANNOUNCE_RETRY_SEC 15
+
 /* The boot/join announce itself lives in app_radio (one path for both radios,
  * doc/plan/439 T3); this runs its pending frames on m_work_q whenever room may
- * have appeared: after the join, on a DR rise and when a page stream ends. */
+ * have appeared: after the join, on a DR rise, when a page stream ends, and
+ * every LRW_ANNOUNCE_RETRY_SEC while something stays pending. */
 static void announce_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	(void)app_radio_announce_run();
+	if (app_radio_announce_run()) {
+		k_work_reschedule_for_queue(&m_work_q, &m_announce_work,
+					    K_SECONDS(LRW_ANNOUNCE_RETRY_SEC));
+	}
 }
 
 /* Pin the uplink datarate from lrw-datarate (#409 A3, like twr-sdk AT$DR). Runs
@@ -1025,14 +1034,14 @@ static void page_stream_work_handler(struct k_work *work)
 	if (ret == -ENODATA) {
 		/* All pages queued; a boot announce frame may have waited for them. */
 		if (app_radio_announce_pending()) {
-			k_work_submit_to_queue(&m_work_q, &m_announce_work);
+			k_work_reschedule_for_queue(&m_work_q, &m_announce_work, K_NO_WAIT);
 		}
 		return;
 	}
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_cmd_stream_next", ret);
 		if (app_radio_announce_pending()) {
-			k_work_submit_to_queue(&m_work_q, &m_announce_work);
+			k_work_reschedule_for_queue(&m_work_q, &m_announce_work, K_NO_WAIT);
 		}
 		return;
 	}
@@ -2002,7 +2011,7 @@ static void datarate_changed_callback(enum lorawan_datarate dr)
 
 	/* #409: a higher DR may now fit the deferred full Info / settings-info. */
 	if (app_radio_announce_pending()) {
-		k_work_submit_to_queue(&m_work_q, &m_announce_work);
+		k_work_reschedule_for_queue(&m_work_q, &m_announce_work, K_NO_WAIT);
 	}
 }
 
@@ -2289,7 +2298,7 @@ int app_radio_lrw_init(void)
 	k_work_init(&m_link_check_work, link_check_work_handler);
 	k_work_init(&m_downlink_success_work, downlink_success_work_handler);
 	k_work_init(&m_clock_sync_info_work, clock_sync_info_work_handler);
-	k_work_init(&m_announce_work, announce_work_handler);
+	k_work_init_delayable(&m_announce_work, announce_work_handler);
 	k_work_init(&m_lc_response_work, lc_response_work_handler);
 	k_work_init(&m_force_lc_work, force_lc_work_handler);
 	k_work_init(&m_dl_request_work, dl_request_work_handler);
@@ -2568,7 +2577,7 @@ void app_radio_lrw_clock_sync(uint32_t seq)
 
 void app_radio_lrw_announce_kick(void)
 {
-	k_work_submit_to_queue(&m_work_q, &m_announce_work);
+	k_work_reschedule_for_queue(&m_work_q, &m_announce_work, K_NO_WAIT);
 }
 
 size_t app_radio_lrw_response_cap(size_t buf_size)

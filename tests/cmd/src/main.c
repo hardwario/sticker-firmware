@@ -2672,6 +2672,45 @@ ZTEST(cmd, test_get_config_skips_slot_roms_over_lrw)
 	zassert_true(r.body.config_dump.sensors.has_sensor1_rom, "GetParam must return the ROM");
 }
 
+/* Review of #400: the P2P radio parameters are left out of a LoRaWAN device's
+ * radio get_config (its DR0 dump keeps the v1.5.0 page count), kept on a P2P
+ * device and over NFC. */
+static bool radio_dump_has_p2p(enum app_cmd_transport tp)
+{
+	uint8_t out[256];
+	size_t out_len = 0;
+	enum app_cmd_action action = APP_CMD_ACTION_NONE;
+	bool found = false;
+	uint32_t count = 1;
+
+	for (uint32_t p = 0; p < count && p < 32; p++) {
+		/* seq9 get_config{page:p} */
+		const uint8_t cmd[] = {0x08, 0x09, 0x2a, 0x02, 0x08, (uint8_t)p};
+
+		zassert_equal(app_cmd_handle(tp, cmd, sizeof(cmd), out, sizeof(out), &out_len,
+					     &action),
+			      0, "page %u", p);
+		Response r = decode_resp(out, out_len);
+
+		count = r.page_count ? r.page_count : 1;
+		found |= r.body.config_dump.has_p2p;
+	}
+	return found;
+}
+
+ZTEST(cmd, test_get_config_p2p_group_only_on_a_p2p_device)
+{
+	reset_cfg();
+	g_app_config.radio_mode = APP_CONFIG_RADIO_MODE_LORAWAN;
+	zassert_false(radio_dump_has_p2p(APP_CMD_TRANSPORT_LRW),
+		      "a LoRaWAN device's LoRaWAN GetConfig must leave the p2p group out");
+	zassert_true(radio_dump_has_p2p(APP_CMD_TRANSPORT_NFC), "NFC GetConfig keeps it");
+
+	g_app_config.radio_mode = APP_CONFIG_RADIO_MODE_P2P;
+	zassert_true(radio_dump_has_p2p(APP_CMD_TRANSPORT_P2P), "a P2P device dumps it over P2P");
+	reset_cfg();
+}
+
 /* P2P is budget-limited like LoRaWAN, and request_page() lays its streamed
  * pages out as LoRaWAN, so page 0 must skip the ROMs as well — otherwise its
  * page_count (and layout) would disagree with the pages that follow. */
