@@ -706,10 +706,12 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   NVM *and* the P2P pairing) and reboots, so a P2P node joins afresh.
 - **Commands on P2P (#448):** `force_send`, `sample`, `buzzer_play` and
   `clock_sync` are allowed over P2P like over LoRaWAN; the handlers were
-  already radio-agnostic (`app_report` sends through `app_radio`). An empty
-  `clock_sync` sends an uplink at once and answers with an Info carrying the
-  command's `seq` as soon as that uplink's Ack (with its Unix-time tail, B5) has
-  been processed -- the P2P counterpart of LoRaWAN's DeviceTimeReq.
+  already radio-agnostic (`app_report` sends through `app_radio`), and they
+  answer exactly as over LoRaWAN: `force_send` / `sample` with their telemetry
+  uplink only, an empty `clock_sync` with an Info carrying the command's `seq`
+  once the *next regular* uplink's Ack (with its Unix-time tail, B5) has been
+  processed -- no uplink is forced, the P2P counterpart of LoRaWAN's
+  DeviceTimeReq riding on the next uplink.
 - **Boot / join announce (#448, plan 439 T3):** when the link comes up -- a
   boot with a persisted pairing (no JoinRequest) or any JoinAccept -- the node
   sends its `Info` (seq 0) and the #412 settings-info `ConfigDump` (seq 0) as
@@ -725,11 +727,12 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   `0x55` whose `Response.seq` matches the head's, and after three further
   uplinks without one it re-announces and re-delivers the *same* bytes. A lost
   response therefore costs a redelivery, never a silently dropped command.
-  Hence **every `0x56` gets a `0x55`**: a command whose answer on LoRaWAN is an
-  uplink of its own (`force_send`, `sample` -- the telemetry frame) answers on
-  P2P with an Ack carrying the `seq` as well (`app_radio_needs_command_answer()`,
-  F-P1-2, #448); without it the central re-delivered it, and the node
-  re-measured, forever (night test 2026-09-26).
+  The exception are commands whose answer is an uplink of their own
+  (`force_send`, `sample` -- the telemetry frame, no `0x55`, exactly as over
+  LoRaWAN): the central retires them on the node's next uplink by itself
+  (proximos PN-4). Before PN-4 such a command was re-delivered, and the node
+  re-measured, forever (F-P1-2, night test 2026-09-26); the interim node-side
+  Ack (#448) was dropped again for LoRaWAN parity.
   What makes redelivery safe is node-side idempotency: `get_*` are pure,
   `set_param` with an unchanged value is a no-op, and the deferred actions
   above run only after the response was acknowledged, so a redelivered
