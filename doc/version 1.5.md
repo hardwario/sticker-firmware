@@ -33,6 +33,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Radio: P2P | **New** — LoRaWAN ↔ P2P parity, part 1 (#448): the boot / join `Info` + settings-info announce is one `app_radio` path for both radios (P2P announced nothing before); `force_send` / `sample` / `buzzer_play` / `clock_sync` work over P2P and answer as over LoRaWAN; `lrw_join` re-joins P2P without a reboot. See §23. |
 | LoRaWAN / P2P / NFC | **New** — `get_radio_state` (#446): one `RadioState` for both radios — link state, radio parameters, both link directions, session, failure streak, duty cycle, counters since boot — on request only, paged like every answer. Info no longer carries `lrw_state` / `last_dl_*`. See §24. |
 | Radio: P2P | **Fix / New** — LoRaWAN ↔ P2P parity, part 2 (#449): frames leave in counter order (F-P1-1: one confirmed uplink in flight + 1 s gap), queues survive an unpaired phase, refused telemetry is retried then reset, the fleet jitter and the M-2 watchdog policy are shared, reset tiers clear the P2P pairing, `BUDGET_TOO_SMALL` over P2P, `p2p-*` readable via GetConfig/GetParam. See §25. |
+| Radio: P2P / LoRaWAN | **New** — P2P retry backoff and a per-node uplink phase: retry n waits a random 1..2^n s (was a fixed ~2.3 s rhythm), and a periodic report is sent at a stable DevEUI-derived offset inside min(interval − jitter − 1 s, 60 s), on both radios, so nodes rebooted together no longer collide every interval (F-P2P-4 / F-P2P-5). See §27. |
 | LoRaWAN / P2P | **Renamed** — `lrw-link-check-interval` / `lrw-link-check-fail-rejoin` → `radio-link-check-interval` / `radio-link-check-fail-rejoin`: link supervision is shared by both radios. Wire-compatible (same `lorawan` group fields 13/14); a stored value migrates on the first boot. See §26. |
 
 ---
@@ -1389,6 +1390,26 @@ prefix (ProXimos decision #22):
   the old key is deleted (`Migrated legacy setting config/lrw-link-check-...`
   in the log). Later boots find nothing to migrate. A downgrade to v1.4.x reads
   the defaults for both parameters.
+
+## 27. P2P retry backoff and a per-node uplink phase (F-P2P-4 / F-P2P-5)
+
+Two Nodes rebooted together ran in lock-step on the one P2P channel and lost
+frames to each other every interval (bench 2026-09-27: telemetry 40 ms apart,
+all three retries of both colliding). Two causes, two fixes (decision #22
+§3.2 and O9, pulled ahead of the rest of #22 by Hynek):
+
+- **Retry backoff (P2P).** Retry n of a confirmed uplink waits a random
+  1..2^n s — 1..2 s, 1..4 s, 1..8 s — on top of any duty-cycle block, like
+  LoRaWAN's `ACK_TIMEOUT`. The fixed ~2.3 s rhythm before (1 s gap + RX1 +
+  0..1 s) kept two colliding nodes colliding.
+- **Uplink phase (both radios).** The report cadence stays on wall-clock slots
+  (F27), but a periodic report is now sent at a stable offset derived from the
+  DevEUI: FNV-1a(DevEUI) mod min(interval_report − fleet jitter − 1 s, 60 s),
+  then the #267 fleet jitter. History records keep their slots; only the
+  transmission moves. force_send / sample, ad-hoc reports (an alarm trigger)
+  and the first report after the boot / join announce take no phase. At a
+  60 s interval the bench Nodes 0413 / 5722 send at +2.0 s / +51.0 s. On
+  LoRaWAN a periodic report now leaves up to 60 s after its slot (was ≤ 10 s).
 
 ---
 
