@@ -146,19 +146,24 @@ Implemented in `app_radio.c` ("Link supervision" block); tests in `tests/radio_c
 
 ### 2.5 Downlink path (F3 = T4)
 
-- **Commands:**
-  - `downlink(bytes)` → `app_cmd_handle(transport, cap = budget())`.
-  - The answer is queued as ANSWER, and a page stream starts when the answer does not fit.
-  - The transport stays `APP_CMD_TRANSPORT_LRW` / `_P2P` (app_cmd already gates both with `radio_transport()`).
+F3a/F3b are implemented (39cb04a); F3c and F3d are next.
+
+- **Commands:** a backend hands each authenticated command to `app_radio_downlink(buf, len)` on the radio work queue. LoRaWAN drains `m_dl_msgq`; P2P calls it from `recv_ack()`.
+  - It calls `app_cmd_handle(transport, cap)`. The transport comes from the backend op `cmd_transport` (`APP_CMD_TRANSPORT_LRW` / `_P2P`), and the cap from `app_radio_tx_answer_cap()`.
+  - The answer is queued as `CMD_RESPONSE` on port 0.
+  - A `PAGE_STREAM` result starts the page stream. Any other action goes to the post-command executor.
 - **One post-command executor:** `app_cmd_run_action(action)` in `app_cmd.c`.
-  - It holds the union of today's three tables: `main.c` NFC, LoRaWAN and P2P.
-  - NFC calls it after its LED result hook.
-  - `app_radio` calls it after a drain-wait on the common queues: the answer queue is empty and no confirmed frame is in flight, checked every 8 s, at most 6 deferrals.
-  - Which actions a transport can reach is still decided by the configen transport lists, not by the executor.
-- **Page stream:** paced at 2 s. It runs only while ≥ 2 answer slots are free, so an alarm and another answer always fit.
-- **History replay:** one state machine (cursor, per-frame cap from `budget()`, 8 retries, 3 s gap / 15 s retry, finish → report kick). The re-entrancy guard from P2P B8 (a request re-delivered from inside the replay's own Ack) stays.
-- **clock_sync:** the backend reports `time(unix)` (LoRaWAN `LORAWAN_TIME_UPDATED`, P2P Ack time tail). A pending clock_sync then answers with the Info. The "landed < 60 s ago" fast path is F1.
-- **Announce:** Info → settings → first telemetry (decision from #452), with one retry pace of 5 s. A retry only re-checks queue room, so it does not send anything.
+  - It is the union of the three old tables (NFC in `main.c`, LoRaWAN, P2P): settings save + reboot, reboot, device / factory / vendor reset, secret-key save, claim-active save, enter calibration, radio session reset, forced rejoin, counters save.
+  - `app_cmd_action_reboots()` tells NFC which actions reboot, so it publishes its result first.
+  - `app_radio` runs the action once the answer has left. While an answer is queued, or a confirmed frame still awaits its Ack (backend op `in_flight`, P2P only), it re-checks every 8 s, at most 6 times, then runs the action anyway.
+  - Which actions a transport can reach is still decided by the configen transport lists.
+- **Page stream:** one page every 2 s, and only while ≥ 2 answer slots are free. It stops when the link leaves HEALTHY, and kicks the announce when it ends.
+- **Announce:** Info → settings-info → first telemetry (#452), now in `app_radio`.
+  - A retry every 5 s only re-checks queue room, and the announce waits for a running page stream.
+  - The backends only call `app_radio_announce_kick()`; LoRaWAN does so on a DR change.
+- **Next, F3c:** history replay as one state machine (cursor, per-frame cap from `budget()`, 8 retries, 3 s gap / 15 s retry, finish → report kick). The re-entrancy guard from P2P B8 stays.
+- **Next, F3d:** clock_sync as a backend `time(unix)` event (LoRaWAN `LORAWAN_TIME_UPDATED`, the P2P Ack time tail). The "landed < 60 s ago" fast path is F1.
+- **Footprint (release):** 180872 B flash / 55104 B RAM, against 179528 / 55232 for F2. About 2 KB of the flash growth is LTO inlining into `app_cmd_handle_set_param`.
 
 ### 2.6 Confirmed uplinks (T2c) and `radio-alarm-ack`
 
@@ -177,6 +182,45 @@ Implemented in `app_radio.c` ("Link supervision" block); tests in `tests/radio_c
 - LoRaWAN checks the ledger before `lorawan_send()` and returns `-EAGAIN` with the exact wait, instead of burning retries.
 - **Open:** LoRaMac keeps its own hourly credits, which reset only after the hour. To stop the two disagreeing, either take the MAC's `DutyCycleWaitTime` through the sticker-zephyr glue, or keep the ledger conservative. To be decided in T2d from a bench measurement.
 - RadioState airtime is filled for LoRaWAN too.
+
+### 2.8 Flash writes vs radio exchanges (fix from the F4 HIL)
+
+- **Problem:** the STM32WLE5 has one flash bank.
+  - A program or page erase stalls every instruction fetch, interrupt handlers included. A page erase takes ~22 ms, and an NVS garbage collection takes several.
+  - A stall between TX done and the RX1 opening makes the receiver miss the downlink. In the F4 HIL on 2026-09-27, an `alarm new` save lost three P2P Acks, and a LoRaWAN JoinAccept can be lost the same way.
+  - The writers run on other threads: shell, NFC, the app_report work queue (history, counters) and the sensor work queue (counters).
+- **Gate in `app_radio`:**
+  - Backends bracket each exchange, from TX start until its receive windows close, with `app_radio_air_begin()` / `_end()`:
+    - `lorawan_send()`;
+    - a LoRaWAN join, until JOINING is left;
+    - P2P `lora_send()` through its RX1 window (`p2p_rx_window()`);
+    - the P2P JoinRequest through the JoinAccept window.
+  - Writers bracket each write with `app_radio_flash_hold()` / `_release()`:
+    - `app_settings` save and single-key saves (nonce counter, secret key, P2P SF);
+    - alarm rules;
+    - counters;
+    - the NFC claim state;
+    - every history program and erase.
+- **Waits:**
+  - A writer waits for a running exchange, at most 10 s (a LoRaWAN DR0 join).
+  - An exchange waits for a running write and for writers already waiting, at most 1 s, so a busy radio cannot starve them.
+  - Past either cap the write or the TX goes ahead with a warning. Nothing is dropped.
+  - Writers on the radio or the system work queue never wait: the exchange itself runs on the radio work queue, and `LoRaMacProcess()` and the DIO1 work run on the system work queue. They still count as writers, so no TX starts mid-write.
+- **Not gated:**
+  - LoRaMac's own NVM saves (system work queue). They run after the MAC is done with the RX windows.
+  - Resets that erase the storage and then reboot.
+- **Tests:**
+  - `tests/radio_common`: the writer waits for the exchange, the exchange waits for the write, a waiting writer goes before the next exchange, both caps, and work-queue writers never wait.
+  - `tests/p2p_logic`: every exchange ends its air window, failed sends included.
+- **Footprint (release):** +780 B flash, +64 B RAM (181652 / 55168).
+- **Save time (found in the gate HIL):**
+  - A full `settings_save()` walked every NVS name record for every key: a median 3.4 s of CPU per alarm rule save.
+  - That is longer than the 1 s an exchange waits, so the TX went ahead mid-save. The saving shell thread shares priority 14 with the radio work queue and a 20 ms timeslice, so the P2P RX1 window opened late: 5 of 8 alarm frames needed retries.
+  - `CONFIG_NVS_LOOKUP_CACHE` and `CONFIG_SETTINGS_NVS_NAME_CACHE` bring the same save to a median 0.10 s, for +1024 B RAM and +624 B flash (release 182276 / 56192).
+- **HIL (2026-09-27, 0413 + 5722, Hub c55):**
+  - Rule saves back to back through 8 alarm uplinks: every confirmed frame acked at the first try, no gate timeout.
+  - 3 fresh P2P joins with rule saves inside the JoinAccept window: each joined on the first JoinRequest, and the save waited for the window to close.
+  - Downlink get-info, get-settings, set-config and reboot on the F3 path: every answer acked.
 
 ## 3. Same-scenario tests
 
@@ -214,6 +258,7 @@ Implemented in `app_radio.c` ("Link supervision" block); tests in `tests/radio_c
 | **F4 = T2b** | Frame model, per-kind queues 4+4, one scheduler, refused-frame rule, parking, over-budget recovery; backend `send()` result set | decision 10, frame drop, compose reset |
 | **F2 = T3** | Common link supervision, reconnect backoff with jitter, downlink-once-per-cycle, M-2 + duty hold out of the backends | link health |
 | **F3 = T4** | Downlink dispatch, `app_cmd_run_action()` for LoRaWAN/P2P/NFC, page stream, history replay, clock_sync `time` event, announce pace | command parity |
+| **Fix** | Flash-write gate around radio exchanges plus the NVS lookup caches (§2.8), found in the F4 HIL | RX1 / JoinAccept loss |
 | **T2c** | Confirmed ladder in `app_radio`; `radio-alarm-ack` (configen, proto, docs; apps/manager#143) | decision 9 |
 | **T2d** | Common duty ledger with the EU868 sub-band table; LoRaWAN exact wait; RadioState airtime | decision 8 |
 
