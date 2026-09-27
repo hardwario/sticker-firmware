@@ -390,18 +390,6 @@ static bool lrw_backoff_step(void)
 	return stepped;
 }
 
-/* The DR budget capped to `buf_size`, re-queried from the stack (MED-6). 0 = no
- * budget known right now (before join, or pending MAC answers fill the frame):
- * encode against the buffer and let the send flush the MAC and retry. Only on
- * the radio work queue: lorawan_get_payload_sizes() calls into the
- * non-thread-safe LoRaMac. */
-static size_t refresh_payload_cap(size_t buf_size)
-{
-	uint8_t budget = refresh_payload_budget();
-
-	return (budget > 0 && budget < buf_size) ? budget : buf_size;
-}
-
 /* ======================================================================== */
 /* State machine                                                            */
 /* ======================================================================== */
