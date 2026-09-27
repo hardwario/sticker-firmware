@@ -117,20 +117,20 @@ def test_normalize_access_derives_internal_flags():
          "readable": ["shell"], "writable": ["shell"]},
         # claim: readable everywhere, write-once shell only; root bytes -> callback
         {"name": "claim_token", "proto_group": "root", "type": "bytes",
-         "readable": ["shell", "nfc", "lrw"], "writable": ["shell"]},
+         "readable": ["shell", "nfc", "radio"], "writable": ["shell"]},
         # key: NFC-readable only (never over LoRaWAN), writable everywhere
         {"name": "lrw_nwkkey", "proto_group": "lorawan", "type": "bytes",
          "readable": ["shell", "nfc"]},
         # packed slot: no shell entry, air read/write only
         {"name": "alarm_0", "proto_group": "alarms", "type": "bytes",
-         "readable": ["nfc", "lrw"], "writable": ["nfc", "lrw"]},
-        # lorawan provisioning field: readable everywhere, write blocked over lrw
-        # (writable:[shell,nfc]) -> no_write_lrw only (M-3)
+         "readable": ["nfc", "radio"], "writable": ["nfc", "radio"]},
+        # lorawan provisioning field: readable everywhere, write blocked over radio
+        # (writable:[shell,nfc]) -> no_write_lrw (the radio gate) only (M-3)
         {"name": "lrw_region", "proto_group": "lorawan", "type": "int",
          "writable": ["shell", "nfc"]},
         # plain param: lists omitted -> all transports, normal flags
         {"name": "interval_report", "proto_group": "application", "type": "int"},
-        # #316 vendor-only writable: writable:[vendor] blocks lrw+nfc writes and,
+        # #316 vendor-only writable: writable:[vendor] blocks radio+nfc writes and,
         # since shell is not in writable, makes the shell setter read-only; still
         # readable (dumpable) everywhere because readable defaults to all.
         {"name": "vendor_reset_allow", "proto_group": "application", "type": "bool",
@@ -164,7 +164,7 @@ def test_normalize_access_derives_internal_flags():
     assert "no_write_lrw" not in by["interval_report"]  # writable everywhere
     assert "no_write_nfc" not in by["interval_report"]
 
-    # #316 vendor-only write gate: writable:[vendor] blocks lrw + nfc (leaving only
+    # #316 vendor-only write gate: writable:[vendor] blocks radio + nfc (leaving only
     # the vendor transport in the negative-flag model) and, since shell is not in
     # writable, makes the shell setter read-only; still air-readable (dump).
     assert by["vendor_reset_allow"]["no_write_lrw"] is True
@@ -664,10 +664,10 @@ def test_dispatch_template_routes_every_command():
     assert "tp != APP_CMD_TRANSPORT_VENDOR" in ssk
 
 
-def test_dump_lrw_false_marks_lrw_skip_rows():
-    """`dump_lrw: false` keeps a field in DUMP_FIELDS (NFC/shell/vendor dumps and
-    get_param still read it) but flags it lrw_skip, so a LoRaWAN get_config leaves
-    it out — the 1-Wire slot ROMs are the committed users of it."""
+def test_dump_radio_false_marks_lrw_skip_rows():
+    """`dump_radio: false` keeps a field in DUMP_FIELDS (NFC/shell/vendor dumps and
+    get_param still read it) but flags it lrw_skip, so a radio (LoRaWAN / P2P)
+    get_config leaves it out — the 1-Wire slot ROMs are the committed users of it."""
     cfg = _load_config()
     configen.normalize_access(cfg)
     rows = configen.build_dump_fields_model(cfg)["dump_fields"]

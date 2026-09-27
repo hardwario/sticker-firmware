@@ -702,9 +702,10 @@ Portal does not show them. They are now left out of a **LoRaWAN** `GetConfig`:
 | `GetParam(sensors 11..14)` over any transport | included — an explicit request still reads them |
 | boot settings-info, `GetSettings` | never carried them |
 
-Mechanism: a new configen attribute `dump_lrw: false` keeps a field in `DUMP_FIELDS`
-but flags it `lrw_skip`; `app_cmd_handle_get_config()` skips such a field when the
-transport is LoRaWAN. A host that merges a complete `GetConfig` into its config copy
+Mechanism: a new configen attribute `dump_radio: false` (first named `dump_lrw`; renamed
+with the yml `radio` transport token) keeps a field in `DUMP_FIELDS` but flags it
+`lrw_skip`; `app_cmd_handle_get_config()` skips such a field when the transport is a
+radio (LoRaWAN or P2P). A host that merges a complete `GetConfig` into its config copy
 therefore no longer sees `sensorN_rom` from LoRaWAN; a host that replaces its copy
 (ProXimos !91) drops them. A **P2P** `GetConfig` (§6) leaves them out too: P2P is
 budget-limited like LoRaWAN and its device-driven pages are laid out as LoRaWAN pages,

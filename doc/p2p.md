@@ -682,8 +682,9 @@ v1 is **confirmed-uplink**: after every data TX the node opens one RX window
   command as an implicit Ack of that uplink. **Security:** the P2P transport
   reuses the LoRaWAN over-the-air gating — the per-command allow-lists reject
   P2P for every LRW/NFC/vendor-only command, and the M-3 field gate denies P2P
-  writes of any field not writable over LoRaWAN (configen `no_write_lrw` also
-  denies `p2p`), so a `0x56` `set_param` cannot touch region/keys/`radio_mode`.
+  writes of any field not writable over the radio (the yml access token is
+  `radio`, covering LoRaWAN and P2P; configen's `no_write_lrw` flag denies
+  both), so a `0x56` `set_param` cannot touch region/keys/`radio_mode`.
   **Deferred actions (v1.5.0):** a command whose handler returns an action
   (`settings_save`, `reboot`, `reset_counters`, and — because they carry no
   `transports:` guard — `lrw_reset`/`lrw_join`) does not execute inline. It is
