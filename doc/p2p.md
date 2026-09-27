@@ -571,7 +571,7 @@ the central, so neither schedules an Ack retry.
 
 | Frame | Node behaviour |
 |---|---|
-| `Detach` (`0xFD`) | `pairing_clear()`: delete `p2pjoin/state`, drop to `UNPAIRED`, purge the response/alarm and Ack-retry queues, and stop the uplink cadence (`app_radio_p2p_is_ready()` goes false, so `app_report.c::run_report` skips the send while its timer keeps running). **No automatic re-join** — the operator removed this node deliberately, so it stays silent until a reboot or an explicit `join`. `dev_nonce` is untouched, so if it is re-registered later its next JoinRequest is still accepted. Log: `Detach received (counter %u): pairing cleared, radio idle until reboot or `join``. |
+| `Detach` (`0xFD`) | `pairing_clear()`: delete `p2pjoin/state`, drop to `UNPAIRED`, forget the counter a pending Ack retry would resend (app_radio starts that frame afresh on the next link-up), and stop the uplink cadence (`app_radio_p2p_is_ready()` goes false, so `app_report.c::run_report` skips the send while its timer keeps running). **No automatic re-join** — the operator removed this node deliberately, so it stays silent until a reboot or an explicit `join`. `dev_nonce` is untouched, so if it is re-registered later its next JoinRequest is still accepted. Log: `Detach received (counter %u): pairing cleared, radio idle until reboot or `join``. |
 | `RejoinRequest` (`0xFE`) | `start_join_episode(true)` — a self-heal-policy join (§7): exempt from §5.2's 120 s boot window and backed off 60 s → ×2 → 1 h, because a paired node asked to rekey must keep trying for its whole life; it starts directly on the slow policy instead of the boot join's 120 s fast phase, and stays on the configured SF like any join episode (§5.3, last-resort sweep after 24 h). The old session stays usable until the new JoinAccept replaces it. Log: `RejoinRequest received (counter %u): re-joining`. |
 
 The management API's `nodes/remove` issues the Detach (best-effort — a sleeping
@@ -591,9 +591,13 @@ v1 was **confirmed-uplink**: after every data TX the node opens one RX window
 - **Which uplinks are CONFIRMED** (`FCtrl` bit 0): the first telemetry report
   after a link-up and every N-th after it (N = `radio-link-check-interval`,
   default 5; 0 = no periodic check) — that frame *is* the P2P link check;
-  every report while WARNING; every alarm (`0x03`), answer / announce (`0x55`)
-  and history frame. All other telemetry goes **unconfirmed, once** (NbTrans 1,
-  no retry); lost telemetry is covered by the history backfill.
+  every report while WARNING; every answer / announce (`0x55`) and history
+  frame. All other telemetry goes **unconfirmed, once** (NbTrans 1, no retry);
+  lost telemetry is covered by the history backfill.
+- **Alarms** (`0x57`) follow `radio-alarm-ack`, one setting for both radios
+  (plan 460 §2.6, T2c, 2026-09-28): default false = unconfirmed, once, as on
+  LoRaWAN; true = confirmed, with the retries below. This amends #22 §3.2,
+  which confirmed every alarm on P2P.
 - **The RX1 opens after every uplink**, confirmed or not: the central may put a
   queued `0x56` of up to 64 B (`P2P_RX1_CMD_INTERIM_LEN`) into the RX1 of any
   uplink without announcing it (O7 interim; header detection in the driver is
@@ -648,7 +652,11 @@ v1 was **confirmed-uplink**: after every data TX the node opens one RX window
   SF-scaled margin alone cut every SF7 Ack off mid-reception; 120 ms keeps
   SF7 working for a central up to ~100 ms late.
 - **Retries**: unacknowledged uplinks retransmit **the same counter value**
-  (byte-identical frame) up to 3 times with randomized backoff: retry n waits a
+  (byte-identical frame) up to 3 times with randomized backoff. Since T2c this
+  ladder is `app_radio`'s, common to both radios: the backend returns
+  `-ETIMEDOUT` for a confirmed frame without its Ack, and its `send()` sees
+  `attempt > 0` on a retry (LoRaWAN takes a new FCnt there). Given up after
+  the 3rd retry, the frame counts as sent and as a failed link check. Retry n waits a
   random 1..2^n s (1..2, 1..4, 1..8 s) on top of any duty-cycle block, like
   LoRaWAN's `ACK_TIMEOUT` (2026-09-27; the fixed ~2.3 s rhythm before let two
   nodes rebooted together retry in lock-step into each other's RX1, F-P2P-4). The central
@@ -734,8 +742,8 @@ v1 was **confirmed-uplink**: after every data TX the node opens one RX window
   handed to `post_cmd_work_handler()`, which fires
   `POST_CMD_DRAIN_WAIT_SEC` (8 s) later and re-defers, up to
   `POST_CMD_DRAIN_MAX_DEFERRALS` (6) times, while the `0x55` is still queued
-  (`m_tx_msgq`), duty-cycle-parked (`m_tx_deferred`) or awaiting a
-  confirmation retry (`m_ack_retry_msgq`). So a `Reboot` reboots only after
+  or duty-cycle-parked (`app_radio_tx_answer_pending()`), or a confirmed
+  frame awaits its Ack retry (`app_radio_ack_pending()`, T2c). So a `Reboot` reboots only after
   its response has actually been acknowledged, and a
   `SetParam{…, save=true}` cannot lose the staged config to a reboot that
   raced its own answer. The wait is bounded on purpose: a permanently failing
@@ -808,7 +816,8 @@ v1 was **confirmed-uplink**: after every data TX the node opens one RX window
   reboot, a command ack after a rejoin). Two rules keep the order:
   **one confirmed uplink in flight** — a fresh-counter frame waits (`-EBUSY`,
   not a failure) while an Ack retry is pending and is kicked when it is done,
-  as LoRaWAN retransmissions finish before the next uplink — and
+  as LoRaWAN retransmissions finish before the next uplink; since T2c the
+  retry is `app_radio`'s and the rule holds on both radios — and
   **`P2P_TX_GAP_MS` (1 s)** between an Ack window and the next TX.
 - **Queues and retries (#449):** responses and alarms queued while the node is
   not paired (joining, self-heal) stay queued and leave on the next link-up

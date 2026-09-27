@@ -37,6 +37,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Radio: P2P | **Changed (wire, flag day)** — decision #22: a `FCtrl` byte in the header (11 → 12 B); telemetry is **unconfirmed and sent once**, except the link check (first report after link-up and every `radio-link-check-interval`-th, every report while WARNING); alarms / answers / history stay confirmed; the RX1 opens after every uplink for a `0x56` of up to 64 B; LoRaWAN-like link supervision (WARNING after 3 failed checks, TX-power step, re-join after `radio-link-check-fail-rejoin`); `p2p-spreading-factor` default 7, join without an SF sweep (last resort after 24 h). See §28. |
 | LoRaWAN / P2P | **Renamed** — `lrw-link-check-interval` / `lrw-link-check-fail-rejoin` → `radio-link-check-interval` / `radio-link-check-fail-rejoin`: link supervision is shared by both radios. Wire-compatible (same `lorawan` group fields 13/14); a value stored under the old name is not carried over (defaults 5 / 5). See §26. |
 | LoRaWAN / P2P | **Changed (internal)** — one radio work queue in `app_radio` for both backends (doc/plan/439 T2a): release RAM −4.3 KB, no behaviour change (§29). |
+| LoRaWAN / P2P | **New / Changed** — `radio-alarm-ack` (#460 T2c): alarms are confirmed on both radios when true. The default, false, sends them unconfirmed on both, which changes P2P, where §28 confirmed every alarm. The Ack retry ladder of a confirmed frame (3 retries, random 1..2^n s) is one `app_radio` path for both radios. See §30. |
 
 ---
 
@@ -1457,6 +1458,21 @@ First step of moving the policy both radios share into `app_radio`
 - No behaviour change. The release image, which has both radios, needs 4352 B
   less RAM (60 296 → 55 944 B, 92.0 → 85.4 %). The debug and P2P bench images
   have only one radio each, so they stay the same.
+
+## 30. Confirmed uplinks on both radios, `radio-alarm-ack` (#460 T2c)
+
+Part of `doc/plan/460 - One implementation per function in app_radio.md` §2.6.
+
+- **New config `radio-alarm-ack`** (bool, default `false`; proto group `alarms`, field 21; writable over shell, NFC and radio).
+  - `false` sends alarms unconfirmed, once, on both radios. LoRaWAN did so already. On P2P this amends decision #22 (§28), which confirmed every alarm.
+  - `true` sends alarms confirmed on both radios. On LoRaWAN that is a confirmed uplink, retried as below.
+- **One retry ladder** in `app_radio`:
+  - A confirmed frame without its Ack goes again after a random 1..2^n s (n = the retry), on top of any duty-cycle wait, at most 3 times. Nothing else is sent meanwhile.
+  - Given up, the frame counts as sent and as a failed link check (link supervision, §28).
+  - P2P resends the same counter (a byte-identical frame). LoRaWAN takes a new FCnt, with LoRaMac NbTrans left at 1.
+  - A deferred command action (reboot, settings save) waits for a pending retry on either radio.
+- Answers and history frames stay confirmed on P2P and unconfirmed on LoRaWAN; telemetry is unchanged.
+- The P2P bench image needs 820 B less RAM, because the P2P retry queue is gone.
 
 ---
 
