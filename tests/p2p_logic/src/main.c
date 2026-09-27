@@ -59,12 +59,14 @@ ZTEST(p2p_logic, test_toa_sf10_documented_airtimes)
 		uint8_t len;
 		uint32_t ms;
 	} cases[] = {
-		{17, 330},  /* 2 B command / minimum data frame */
-		{22, 371},  /* time-extended Ack (pre-D2 max) */
-		{23, 371},  /* fully-extended Ack (D2 max) */
-		{41, 535},  /* JoinRequest (#417: 37 B before the DevEUI) */
-		{42, 535},  /* JoinAccept (unchanged) */
-		{55, 657},  /* the 40 B command in the P2E-20 bench row */
+		/* Lengths with the 12 B header (decision #22 FCtrl); every row has
+		 * the same SF10 airtime as its 11 B predecessor. */
+		{18, 330},  /* 2 B command / minimum data frame */
+		{23, 371},  /* time-extended Ack (pre-D2 max) */
+		{24, 371},  /* fully-extended Ack (D2 max) */
+		{42, 535},  /* JoinRequest (#417 DevEUI + #22 FCtrl) */
+		{43, 535},  /* JoinAccept */
+		{56, 657},  /* the 40 B command in the P2E-20 bench row */
 		{255, 2296} /* PHY maximum */
 	};
 
@@ -122,17 +124,18 @@ ZTEST(p2p_logic, test_toa_small_frame_bounded)
  * scale with SF, so they take it as an argument. */
 ZTEST(p2p_logic, test_rx1_timeout_scales_with_the_tried_sf)
 {
-	/* JoinAccept is 42 B on air. Computed from the formula
-	 * rx1_preamble_catch_ms(sf) + p2p_toa_ms(sf, 42) + 120 ms trailing margin
+	/* JoinAccept is 43 B on air. Computed from the formula
+	 * rx1_preamble_catch_ms(sf) + p2p_toa_ms(sf, 43) + 120 ms trailing margin
 	 * (F-P2P-2): SF10 = 98 + 535 + 120, SF12 = 393 + 2138 + 120. */
-	zassert_equal(p2p_rx1_timeout_ms(10, 42), 753u, "SF10 JoinAccept window should be 753 ms");
-	zassert_equal(p2p_rx1_timeout_ms(12, 42), 2651u,
+	zassert_equal(p2p_rx1_timeout_ms(10, P2P_JOIN_ACCEPT_LEN), 753u,
+		      "SF10 JoinAccept window should be 753 ms");
+	zassert_equal(p2p_rx1_timeout_ms(12, P2P_JOIN_ACCEPT_LEN), 2651u,
 		      "SF12 JoinAccept window should be 2651 ms");
 
 	/* F-P2P-2: a fixed trailing margin, not SF-scaled, so a central that is a
 	 * constant ~80 ms late still fits at SF7 (the 22 ms timeout-start delay on
 	 * top is not part of this formula). */
-	zassert_true(p2p_rx1_timeout_ms(7, 23) >= p2p_toa_ms(7, 23) + 100,
+	zassert_true(p2p_rx1_timeout_ms(7, 24) >= p2p_toa_ms(7, 24) + 100,
 		     "SF7 Ack window must leave >= 100 ms after the frame");
 
 	uint32_t prev = p2p_rx1_timeout_ms(7, 42);
@@ -205,15 +208,25 @@ ZTEST(p2p_logic, test_build_frame_roundtrip)
 
 	uint8_t frame[P2P_FRAME_MAX];
 
-	zassert_ok(build_frame_keyed(net_id, dev_addr, k_session_key, frame_type, body, body_len,
-				     counter, frame),
+	zassert_ok(build_frame_keyed(net_id, dev_addr, k_session_key, frame_type,
+				     P2P_FCTRL_CONFIRMED, body, body_len, counter, frame),
 		   "build_frame failed");
 
 	/* Cleartext header is the AAD, in the clear. */
 	zassert_equal(sys_get_be32(&frame[0]), net_id, "net_id header wrong");
 	zassert_equal(sys_get_be16(&frame[4]), dev_addr, "dev_addr header wrong");
 	zassert_equal(frame[6], frame_type, "frame_type header wrong");
-	zassert_equal(sys_get_be32(&frame[7]), counter, "counter header wrong");
+	zassert_equal(frame[7], P2P_FCTRL_CONFIRMED, "FCtrl header wrong");
+	zassert_equal(sys_get_be32(&frame[8]), counter, "counter header wrong");
+
+	struct p2p_hdr hdr;
+
+	p2p_hdr_get(frame, &hdr);
+	zassert_equal(hdr.net_id, net_id);
+	zassert_equal(hdr.dev_addr, dev_addr);
+	zassert_equal(hdr.frame_type, frame_type);
+	zassert_equal(hdr.fctrl, P2P_FCTRL_CONFIRMED);
+	zassert_equal(hdr.counter, counter);
 
 	/* Decrypt the body with an independently built RX-direction nonce and
 	 * the header as AAD — proves the frame is a valid CCM sealing. */
@@ -240,8 +253,8 @@ ZTEST(p2p_logic, test_build_frame_tag_detects_tamper)
 
 	uint8_t frame[P2P_FRAME_MAX];
 
-	zassert_ok(build_frame_keyed(1, dev_addr, k_session_key, frame_type, body, body_len,
-				     counter, frame),
+	zassert_ok(build_frame_keyed(1, dev_addr, k_session_key, frame_type, P2P_FCTRL_CONFIRMED,
+				     body, body_len, counter, frame),
 		   "build_frame failed");
 
 	uint8_t nonce[P2P_NONCE_LEN];
@@ -264,11 +277,20 @@ ZTEST(p2p_logic, test_build_frame_tag_detects_tamper)
 					   &frame[P2P_HDR_LEN], body_len,
 					   &frame[P2P_HDR_LEN + body_len], P2P_TAG_LEN, pt),
 		      -EBADMSG, "tampered AAD accepted");
+	frame[0] ^= 0x80; /* restore */
+
+	/* FCtrl is AAD too: an unconfirmed frame cannot be turned into a
+	 * confirmed one (or back) on the air. */
+	frame[P2P_HDR_OFF_FCTRL] ^= P2P_FCTRL_CONFIRMED;
+	zassert_equal(app_ccm_auth_decrypt(k_session_key, nonce, P2P_NONCE_LEN, frame, P2P_HDR_LEN,
+					   &frame[P2P_HDR_LEN], body_len,
+					   &frame[P2P_HDR_LEN + body_len], P2P_TAG_LEN, pt),
+		      -EBADMSG, "tampered FCtrl accepted");
 }
 
 /* Detach (0xFD) and RejoinRequest (0xFE) are empty-bodied on the wire, so
  * recv_ack()'s link-control branch (§5.4) authenticates a zero-length CCM
- * message whose tag covers only the nonce and the 11 B header AAD. Nothing
+ * message whose tag covers only the nonce and the 12 B header AAD. Nothing
  * else in the transport exercises that shape -- pin it here, both directions
  * of the verdict, since the central relies on it. */
 ZTEST(p2p_logic, test_build_frame_empty_body_roundtrip)
@@ -280,16 +302,17 @@ ZTEST(p2p_logic, test_build_frame_empty_body_roundtrip)
 	for (uint8_t i = 0; i < 2; i++) {
 		const uint8_t frame_type =
 			i ? APP_RADIO_P2P_FRAME_REJOIN_REQUEST : APP_RADIO_P2P_FRAME_DETACH;
-		uint8_t frame[P2P_HDR_LEN + P2P_TAG_LEN]; /* 15 B, no ciphertext */
+		uint8_t frame[P2P_HDR_LEN + P2P_TAG_LEN]; /* 16 B, no ciphertext */
 
-		zassert_ok(build_frame_keyed(net_id, dev_addr, k_session_key, frame_type, NULL, 0,
-					     counter, frame),
+		zassert_ok(build_frame_keyed(net_id, dev_addr, k_session_key, frame_type,
+					     P2P_FCTRL_ACK, NULL, 0, counter, frame),
 			   "empty-body build failed for type 0x%02x", frame_type);
 
 		zassert_equal(sys_get_be32(&frame[0]), net_id, "net_id header wrong");
 		zassert_equal(sys_get_be16(&frame[4]), dev_addr, "dev_addr header wrong");
 		zassert_equal(frame[6], frame_type, "frame_type header wrong");
-		zassert_equal(sys_get_be32(&frame[7]), counter, "counter header wrong");
+		zassert_equal(frame[7], P2P_FCTRL_ACK, "FCtrl header wrong");
+		zassert_equal(sys_get_be32(&frame[8]), counter, "counter header wrong");
 
 		uint8_t nonce[P2P_NONCE_LEN];
 		uint8_t empty[1];
@@ -347,7 +370,7 @@ ZTEST(p2p_logic, test_build_frame_max_body)
 
 	uint8_t frame[P2P_FRAME_MAX];
 
-	zassert_ok(build_frame_keyed(1, 2, k_session_key, 0x02, body, sizeof(body), 99, frame),
+	zassert_ok(build_frame_keyed(1, 2, k_session_key, 0x02, 0, body, sizeof(body), 99, frame),
 		   "build_frame failed at max body");
 
 	uint8_t nonce[P2P_NONCE_LEN];
@@ -836,7 +859,7 @@ ZTEST(p2p_logic, test_join_sweep_order_is_nearest_first_higher_first)
  * retries it feeds would be duty-blocked before the pass even finished. */
 ZTEST(p2p_logic, test_join_sweep_pass_air_fits_the_duty_budget)
 {
-	const uint8_t join_req_len = P2P_JOIN_REQ_LEN; /* 41 B, see the ToA table above */
+	const uint8_t join_req_len = P2P_JOIN_REQ_LEN; /* 42 B, see the ToA table above */
 	uint32_t total = 0;
 
 	for (uint8_t step = 0;; step++) {
@@ -855,8 +878,8 @@ ZTEST(p2p_logic, test_join_sweep_pass_air_fits_the_duty_budget)
 		     "a sweep pass (%u ms) must stay well inside the hourly budget", total);
 
 	/* The other edge of the same budget: SF12 JoinRequests are 2138 ms each
-	 * at 41 B, so the hour holds 16 of them and no more -- it was 18 at 37 B,
-	 * which is what the four extra identity bytes cost (#417). A sweep that
+	 * at 42 B (as at 41 B), so the hour holds 16 of them and no more -- it was
+	 * 18 at 37 B, which is what the four extra identity bytes cost (#417). A sweep that
 	 * retried at SF12 more often than that would be blocked by the duty
 	 * ledger, not by its own policy. */
 	uint32_t sf12 = p2p_toa_ms(12, join_req_len);
@@ -1261,13 +1284,13 @@ ZTEST(p2p_logic, test_history_frame_cap_is_bounded_by_the_p2p_body)
 	p2p_test_replay_setup();
 
 	/* m_hist_tx_buf is APP_CMD_HISTORY_FRAME_BUF_SIZE (256 B), sized for the
-	 * LoRaWAN frame; over P2P the binding limit is the 240 B body a single
-	 * frame can carry (P2P_MAX_BODY = 255 MTU - 11 header - 4 tag). Sizing a
+	 * LoRaWAN frame; over P2P the binding limit is the 239 B body a single
+	 * frame can carry (P2P_MAX_BODY = 255 MTU - 12 header - 4 tag). Sizing a
 	 * frame off the buffer instead would build pages the radio cannot send. */
 	zassert_equal(p2p_history_frame_cap(), (size_t)P2P_MAX_BODY,
 		      "the per-frame cap must be the P2P body budget (%u), not the 256 B buffer",
 		      (unsigned)P2P_MAX_BODY);
-	zassert_equal((size_t)P2P_MAX_BODY, 240u, "P2P_MAX_BODY drifted from 240");
+	zassert_equal((size_t)P2P_MAX_BODY, 239u, "P2P_MAX_BODY drifted from 239");
 }
 
 ZTEST(p2p_logic, test_history_replay_start_is_not_reentrant)
@@ -1574,7 +1597,8 @@ ZTEST(p2p_logic, test_ack_body_bad_length_rejected)
 /* ---- the shared join KAT fixture (#417 / GitLab #73) ------------------- */
 
 /* tests/ccm/p2p_join_kat.json, sha256
- * 14c4efbd40520d2a48ab3004ba07411e91a4775c87fb93f4663dccf92a8361a5 -- the
+ * 9269a529618d4a3bbf27d70e3e28db616a5d10f4e4ece8fbdf1c8a2bf1f1bb64 (12 B
+ * header with FCtrl since decision #22; regenerated by p2p_join_kat.py) -- the
  * fixture shared byte-for-byte with proximos-v2 control-radio and the
  * NorthBridge Python replica, generated by an independent PyCryptodome oracle.
  *
@@ -1600,19 +1624,19 @@ static void kat_provision(void)
 ZTEST(p2p_logic, test_join_request_bytes_match_the_kat_fixture)
 {
 	static const uint8_t expected[P2P_JOIN_REQ_LEN] = {
-		/* header: net_id=0 | dev_addr=0 | 0xF0 | counter=dev_nonce=7 */
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0x00, 0x07,
+		/* header: net_id=0 | dev_addr=0 | 0xF0 | FCtrl=0 | counter=dev_nonce=7 */
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x07,
 		/* body: product_type=1 | proto_version=1 | dev_eui(8) | fw 1.4.0.0 */
 		0x01, 0x01, 0x70, 0xb3, 0xd5, 0x7e, 0xd0, 0x00, 0x0a, 0xbe, 0x01, 0x04, 0x00, 0x00,
 		/* tag: CMAC(app_key, "HIO-P2P-JOIN" || header || body) */
-		0x68, 0x97, 0x96, 0x7e, 0x0f, 0xb2, 0x6f, 0xf1, 0xf5, 0x96, 0x1f, 0xf4, 0x35, 0x7f,
-		0x29, 0x19};
+		0xfb, 0xab, 0x37, 0xb9, 0x7c, 0x7d, 0xeb, 0xb4, 0xef, 0xc2, 0x81, 0x1f, 0x47, 0x3c,
+		0xc3, 0x7f};
 	uint8_t frame[P2P_JOIN_REQ_LEN];
 
 	kat_provision();
 	p2p_test_build_join_request(7, frame);
 
-	zassert_equal(sizeof(frame), 41, "the JoinRequest is 41 B on the air since #417");
+	zassert_equal(sizeof(frame), 42, "the JoinRequest is 42 B on the air since decision #22");
 	zassert_mem_equal(frame, expected, sizeof(expected),
 			  "JoinRequest bytes differ from the "
 			  "shared KAT fixture");
@@ -1719,6 +1743,63 @@ ZTEST(p2p_logic, test_ack_retry_backoff_grows_and_stays_random)
 	/* Out-of-range attempts clamp instead of shifting past the table. */
 	zassert_true(p2p_ack_retry_backoff_ms(99, UINT32_MAX) < 8000u, "clamped to the 3rd retry");
 	zassert_true(p2p_ack_retry_backoff_ms(-1, UINT32_MAX) < 2000u, "clamped to the 1st retry");
+}
+
+/* ---- the shared data-frame KAT (decision #22) ----------------------------- */
+
+/* tests/ccm/p2p_data_kat.json, sha256
+ * 1215e877f37fc053119a9c2b9c2f0d17d4ffba1d95da9ff85969c9e2187cb01f --
+ * generated by p2p_join_kat.py --data (pycryptodome) and shared with the
+ * central. Pins the 12 B header with FCtrl through build_frame_keyed(), the
+ * builder the radio path runs, under a fixed key independent of the join. */
+ZTEST(p2p_logic, test_data_frame_bytes_match_the_kat_fixture)
+{
+	static const uint8_t key[P2P_KEY_LEN] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+						 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+	static const uint8_t body[] = {0x01, 0x02, 0x03, 0x04};
+	/* net_id 0x6d249662 | dev_addr 2 | 0x02 | FCtrl CONFIRMED | counter 16 | ct | tag */
+	static const uint8_t confirmed[] = {0x6d, 0x24, 0x96, 0x62, 0x00, 0x02, 0x02, 0x01, 0x00, 0x00, 0x00, 0x10, 0x47, 0x25, 0x9c, 0xc8, 0x4d, 0x88, 0xa9, 0x9a};
+	/* the same frame unconfirmed: same ciphertext (FCtrl is not in the nonce),
+	 * another tag (it is in the AAD) */
+	static const uint8_t unconfirmed[] = {0x6d, 0x24, 0x96, 0x62, 0x00, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00, 0x10, 0x47, 0x25, 0x9c, 0xc8, 0xab, 0x58, 0x3d, 0x27};
+	uint8_t frame[P2P_HDR_LEN + sizeof(body) + P2P_TAG_LEN];
+
+	zassert_ok(build_frame_keyed(0x6d249662u, 2, key, APP_RADIO_P2P_FRAME_TELEMETRY,
+				     P2P_FCTRL_CONFIRMED, body, sizeof(body), 16, frame));
+	zassert_mem_equal(frame, confirmed, sizeof(confirmed),
+			  "confirmed telemetry differs from the shared data KAT");
+
+	zassert_ok(build_frame_keyed(0x6d249662u, 2, key, APP_RADIO_P2P_FRAME_TELEMETRY, 0, body,
+				     sizeof(body), 16, frame));
+	zassert_mem_equal(frame, unconfirmed, sizeof(unconfirmed),
+			  "unconfirmed telemetry differs from the shared data KAT");
+}
+
+/* The downlink side of the same KAT: an Ack with FCtrl.ACK opens under the RX
+ * nonce, and the header decodes to the fields the central wrote. */
+ZTEST(p2p_logic, test_data_kat_ack_opens)
+{
+	static const uint8_t key[P2P_KEY_LEN] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+						 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+	static const uint8_t ack[] = {0x6d, 0x24, 0x96, 0x62, 0x00, 0x02, 0xfa, 0x20, 0x00, 0x00, 0x00, 0x10, 0x1c, 0x6f, 0x06, 0x30, 0x1b, 0x76, 0xb6};
+	static const uint8_t want_pt[] = {0x00, 0xc4, 0x07};
+	struct p2p_hdr hdr;
+	uint8_t nonce[P2P_NONCE_LEN];
+	uint8_t pt[sizeof(want_pt)];
+
+	p2p_hdr_get(ack, &hdr);
+	zassert_equal(hdr.net_id, 0x6d249662u);
+	zassert_equal(hdr.dev_addr, 2);
+	zassert_equal(hdr.frame_type, APP_RADIO_P2P_FRAME_ACK);
+	zassert_equal(hdr.fctrl, P2P_FCTRL_ACK);
+	zassert_equal(hdr.counter, 16);
+
+	build_nonce(nonce, hdr.counter, hdr.dev_addr, hdr.frame_type, P2P_DIR_RX);
+	zassert_ok(app_ccm_auth_decrypt(key, nonce, P2P_NONCE_LEN, ack, P2P_HDR_LEN,
+					&ack[P2P_HDR_LEN], sizeof(want_pt),
+					&ack[P2P_HDR_LEN + sizeof(want_pt)], P2P_TAG_LEN, pt),
+		   "the KAT Ack must open under the RX nonce");
+	zassert_mem_equal(pt, want_pt, sizeof(want_pt));
 }
 
 ZTEST_SUITE(p2p_logic, NULL, NULL, NULL, NULL, NULL);

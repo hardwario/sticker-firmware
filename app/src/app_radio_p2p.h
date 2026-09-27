@@ -18,15 +18,42 @@ extern "C" {
 #endif
 
 /* Frame geometry (data plane), doc/p2p.md §3. Single source of truth, shared
- * by app_radio_p2p.c and tests/p2p_logic. */
-#define P2P_HDR_LEN   11
+ * by app_radio_p2p.c and tests/p2p_logic.
+ *
+ * Header, all of it the CCM AAD (decision #22 added FCtrl, 11 -> 12 B):
+ *   net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | FCtrl(1) | counter(4 BE)
+ * frame_type says what the body is; FCtrl says what the frame asks for or
+ * carries (LoRaWAN's MType / FCtrl split). The join frames carry the same
+ * header with FCtrl = 0. */
+#define P2P_HDR_OFF_NET_ID   0
+#define P2P_HDR_OFF_DEV_ADDR 4
+#define P2P_HDR_OFF_TYPE     6
+#define P2P_HDR_OFF_FCTRL    7
+#define P2P_HDR_OFF_COUNTER  8
+#define P2P_HDR_LEN          12
+
+/* FCtrl bits. Reserved / RFU bits are sent as 0 and ignored on receipt; bits 7
+ * (ADR) and 6 (ADRACKReq) are kept for phase 2. */
+#define P2P_FCTRL_CONFIRMED 0x01 /* uplink: the node wants an ACK in RX1 */
+#define P2P_FCTRL_FPENDING  0x10 /* downlink: more is queued for this node */
+#define P2P_FCTRL_ACK       0x20 /* downlink: acknowledges the confirmed uplink */
+
+/* The header, decoded. */
+struct p2p_hdr {
+	uint32_t net_id;
+	uint16_t dev_addr;
+	uint8_t frame_type;
+	uint8_t fctrl;
+	uint32_t counter;
+};
+
 #define P2P_TAG_LEN   4 /* data-plane (session_key) CCM tag length only */
 #define P2P_NONCE_LEN 13
 #define P2P_KEY_LEN   16
 #define P2P_DIR_TX    0x00
 #define P2P_DIR_RX    0x01
 #define P2P_LORA_MTU  255
-#define P2P_MAX_BODY  (P2P_LORA_MTU - P2P_HDR_LEN - P2P_TAG_LEN) /* 240 */
+#define P2P_MAX_BODY  (P2P_LORA_MTU - P2P_HDR_LEN - P2P_TAG_LEN) /* 239 */
 #define P2P_FRAME_MAX (P2P_HDR_LEN + P2P_MAX_BODY + P2P_TAG_LEN)
 
 /* Join frame geometry (§5.3), shared with tests/p2p_logic so the time-on-air
@@ -120,7 +147,7 @@ struct p2p_ack_info {
 	bool time_present;  /* a valid Unix time tail was present */
 	uint32_t unix_time; /* wall-clock seconds (valid iff time_present) */
 	/* Total on-air length of the NEXT 0x56 the central will deliver
-	 * (11 B header + ciphertext + 4 B tag), so the node can size its RX1
+	 * (12 B header + ciphertext + 4 B tag), so the node can size its RX1
 	 * window exactly instead of opening for a 255 B worst case. False when
 	 * the central is still on the pre-announcement 3/7-byte body -- the
 	 * node then falls back to the old worst case (doc/p2p.md §6). */
@@ -159,8 +186,8 @@ struct p2p_duty {
  * server, no per-DR payload budget.
  *
  * The payload layer is reused unchanged: app_compose builds the protobuf
- * Telemetry snapshot exactly as for LoRaWAN; this module only frames it (an
- * 11 B cleartext header replacing the LoRaWAN fPort, see app_radio_p2p.c) and
+ * Telemetry snapshot exactly as for LoRaWAN; this module only frames it (a
+ * 12 B cleartext header replacing the LoRaWAN fPort, see app_radio_p2p.c) and
  * AES-CCM encrypts+authenticates the body under the derived `session_key`
  * (doc/p2p.md §4, derived directly from the device's existing LoRaWAN OTAA
  * AppKey -- there is no manual p2p_key config parameter and no separate
@@ -407,9 +434,11 @@ uint32_t rx1_preamble_catch_ms(int sf);
 uint32_t p2p_rx1_timeout_ms(int sf, uint8_t expected_frame_len);
 void build_nonce(uint8_t nonce[13], uint32_t counter, uint16_t dev_addr, uint8_t frame_type,
 		 uint8_t dir);
+void p2p_hdr_put(uint8_t *frame, const struct p2p_hdr *h);
+void p2p_hdr_get(const uint8_t *frame, struct p2p_hdr *h);
 int build_frame_keyed(uint32_t net_id, uint16_t dev_addr, const uint8_t session_key[16],
-		      uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t counter,
-		      uint8_t *frame);
+		      uint8_t frame_type, uint8_t fctrl, const uint8_t *body, size_t body_len,
+		      uint32_t counter, uint8_t *frame);
 void p2p_duty_init(struct p2p_duty *d);
 void p2p_duty_charge(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);
 int64_t p2p_duty_wait_ms(struct p2p_duty *d, int64_t now_ms, uint32_t air_ms);

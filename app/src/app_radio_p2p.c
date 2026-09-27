@@ -55,7 +55,8 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  * Data plane (telemetry/alarm/response/ack, always PAIRED -- see
  * tx_frame_at()'s P2P_LINK_PAIRED gate):
  *
- *   [ net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | counter(4 BE) ]  11 B header
+ *   [ net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | FCtrl(1) | counter(4 BE) ]  12 B
+ *   header (FCtrl since decision #22: P2P_FCTRL_* in app_radio_p2p.h)
  *   [ AES-CCM ciphertext (= plaintext length) ]
  *   [ AES-CCM tag (4 B) ]
  *
@@ -72,7 +73,7 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
  * reuses a (key, nonce) pair. The direction byte separates TX from RX keystream.
  *
  * Join handshake (JoinRequest/JoinAccept, §5.3; net_id=dev_addr=0 always,
- * see P2P_PREJOIN_NET_ID/P2P_PREJOIN_DEV_ADDR below): the SAME 11 B header,
+ * see P2P_PREJOIN_NET_ID/P2P_PREJOIN_DEV_ADDR below): the SAME 12 B header, FCtrl 0,
  * but the body is CLEARTEXT (not AES-CCM'd -- neither frame carries an
  * actual secret: JoinRequest is the device's own public identity,
  * JoinAccept is the assigned net_id/dev_addr/central_nonce; only `app_key`
@@ -192,7 +193,7 @@ LOG_MODULE_REGISTER(app_radio_p2p, LOG_LEVEL_INF);
 #define P2P_JOIN_STATE_LEN  (4 + 2 + P2P_KEY_LEN + 1 + 1)
 
 /* JoinRequest body (§5.3): product_type(1) | proto_version(1) |
- * dev_eui(8, MSB-first) | fw_version(4) -- 14 B, so 41 B on the air.
+ * dev_eui(8, MSB-first) | fw_version(4) -- 14 B, so 42 B on the air.
  *
  * The identity field was serial_number(4 BE) until #417 / GitLab #73: the
  * serial is off the air entirely now, and stays only as the number printed on
@@ -1647,19 +1648,45 @@ static void note_uplink_cycle_failed(void)
 	start_join_episode(true);
 }
 
+/* The 12 B header (app_radio_p2p.h, decision #22), written and read in one
+ * place so no path can disagree on where FCtrl sits. */
+P2P_TESTABLE void p2p_hdr_put(uint8_t *frame, const struct p2p_hdr *h)
+{
+	sys_put_be32(h->net_id, &frame[P2P_HDR_OFF_NET_ID]);
+	sys_put_be16(h->dev_addr, &frame[P2P_HDR_OFF_DEV_ADDR]);
+	frame[P2P_HDR_OFF_TYPE] = h->frame_type;
+	frame[P2P_HDR_OFF_FCTRL] = h->fctrl;
+	sys_put_be32(h->counter, &frame[P2P_HDR_OFF_COUNTER]);
+}
+
+P2P_TESTABLE void p2p_hdr_get(const uint8_t *frame, struct p2p_hdr *h)
+{
+	h->net_id = sys_get_be32(&frame[P2P_HDR_OFF_NET_ID]);
+	h->dev_addr = sys_get_be16(&frame[P2P_HDR_OFF_DEV_ADDR]);
+	h->frame_type = frame[P2P_HDR_OFF_TYPE];
+	h->fctrl = frame[P2P_HDR_OFF_FCTRL];
+	h->counter = sys_get_be32(&frame[P2P_HDR_OFF_COUNTER]);
+}
+
 /* Build header+encrypt one frame into `frame` (>= P2P_HDR_LEN + body_len +
  * P2P_TAG_LEN bytes) under an explicit net_id/dev_addr/session_key. Pure --
  * no radio/queue/counter side effects. Exposed to tests/p2p_logic; the
- * firmware calls it through build_frame() with the live pairing state. */
+ * firmware calls it through build_frame() with the live pairing state.
+ * FCtrl is in the AAD, not in the nonce. */
 P2P_TESTABLE int build_frame_keyed(uint32_t net_id, uint16_t dev_addr,
 				   const uint8_t session_key[P2P_KEY_LEN], uint8_t frame_type,
-				   const uint8_t *body, size_t body_len, uint32_t counter,
-				   uint8_t *frame)
+				   uint8_t fctrl, const uint8_t *body, size_t body_len,
+				   uint32_t counter, uint8_t *frame)
 {
-	sys_put_be32(net_id, &frame[0]);
-	sys_put_be16(dev_addr, &frame[4]);
-	frame[6] = frame_type;
-	sys_put_be32(counter, &frame[7]);
+	const struct p2p_hdr h = {
+		.net_id = net_id,
+		.dev_addr = dev_addr,
+		.frame_type = frame_type,
+		.fctrl = fctrl,
+		.counter = counter,
+	};
+
+	p2p_hdr_put(frame, &h);
 
 	uint8_t nonce[P2P_NONCE_LEN];
 
@@ -1673,11 +1700,11 @@ P2P_TESTABLE int build_frame_keyed(uint32_t net_id, uint16_t dev_addr,
 /* Build one frame with the live pairing state (m_net_id/m_dev_addr/
  * m_session_key). Shared by the real TX path (tx_frame_at) and the
  * `ats radio compose` dry-run (debug_compose_work_handler). */
-static int build_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t counter,
-		       uint8_t *frame)
+static int build_frame(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, size_t body_len,
+		       uint32_t counter, uint8_t *frame)
 {
-	int ret = build_frame_keyed(m_net_id, m_dev_addr, m_session_key, frame_type, body, body_len,
-				    counter, frame);
+	int ret = build_frame_keyed(m_net_id, m_dev_addr, m_session_key, frame_type, fctrl, body,
+				    body_len, counter, frame);
 	if (ret) {
 		LOG_ERR_CALL_FAILED_INT("app_ccm_encrypt_and_tag", ret);
 	}
@@ -1706,8 +1733,8 @@ static int tx_send_failed(uint8_t wire_len)
 	return -EIO;
 }
 
-static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t counter,
-		       int64_t *tx_end_ms)
+static int tx_frame_at(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, size_t body_len,
+		       uint32_t counter, int64_t *tx_end_ms)
 {
 	if (m_listening) {
 		LOG_WRN("TX skipped: radio in listen mode");
@@ -1732,7 +1759,7 @@ static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len,
 
 	uint8_t frame[P2P_FRAME_MAX];
 
-	int ret = build_frame(frame_type, body, body_len, counter, frame);
+	int ret = build_frame(frame_type, fctrl, body, body_len, counter, frame);
 
 	if (ret) {
 		return ret;
@@ -1756,7 +1783,8 @@ static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len,
 	m_dc_hold_logged = false;
 	publish_link();
 
-	LOG_INF("TX type %u, %zu B (counter %u, %u ms air)", frame_type, wire_len, counter, air);
+	LOG_INF("TX type %u%s, %zu B (counter %u, %u ms air)", frame_type,
+		(fctrl & P2P_FCTRL_CONFIRMED) ? " confirmed" : "", wire_len, counter, air);
 
 	*tx_end_ms = end;
 	return 0;
@@ -1765,8 +1793,8 @@ static int tx_frame_at(uint8_t frame_type, const uint8_t *body, size_t body_len,
 /* Frame + encrypt + transmit one body under a FRESH counter. Returns 0,
  * -EAGAIN (duty cycle), or errno; on success reports the counter used and
  * the send-completion time via the out-params (see tx_frame_at()). */
-static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, uint32_t *counter_out,
-		    int64_t *tx_end_ms)
+static int tx_frame(uint8_t frame_type, uint8_t fctrl, const uint8_t *body, size_t body_len,
+		    uint32_t *counter_out, int64_t *tx_end_ms)
 {
 	if (k_msgq_num_used_get(&m_ack_retry_msgq) > 0) {
 		return -EBUSY; /* one confirmed uplink in flight (F-P1-1) */
@@ -1787,7 +1815,7 @@ static int tx_frame(uint8_t frame_type, const uint8_t *body, size_t body_len, ui
 		return ret; /* fail-closed: no durably-reserved counter available */
 	}
 
-	ret = tx_frame_at(frame_type, body, body_len, counter, tx_end_ms);
+	ret = tx_frame_at(frame_type, fctrl, body, body_len, counter, tx_end_ms);
 
 	if (ret == 0) {
 		*counter_out = counter;
@@ -2053,12 +2081,14 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 		return false; /* timeout or too short to hold a header + tag */
 	}
 
-	uint32_t net_id_hdr = sys_get_be32(&buf[0]);
-	uint16_t dev_addr_hdr = sys_get_be16(&buf[4]);
-	uint8_t frame_type = buf[6];
-	uint32_t ctr = sys_get_be32(&buf[7]);
+	struct p2p_hdr hdr;
 
-	if (net_id_hdr != m_net_id || dev_addr_hdr != m_dev_addr || ctr != counter) {
+	p2p_hdr_get(buf, &hdr);
+
+	uint8_t frame_type = hdr.frame_type;
+	uint32_t ctr = hdr.counter;
+
+	if (hdr.net_id != m_net_id || hdr.dev_addr != m_dev_addr || ctr != counter) {
 		return false;
 	}
 
@@ -2080,7 +2110,7 @@ static bool recv_ack(uint32_t counter, int64_t tx_end_ms)
 		build_nonce(nonce, ctr, m_dev_addr, frame_type, P2P_DIR_RX);
 
 		/* An empty message is a legitimate CCM input: the tag still
-		 * covers the nonce and the 11 B header AAD, which is what
+		 * covers the nonce and the 12 B header AAD, which is what
 		 * authenticates this frame (app_ccm.c::params_ok constrains the
 		 * nonce/AAD/tag lengths only, not the payload; RFC 3610 allows
 		 * an empty message). Together with the counter echo checked
@@ -2296,7 +2326,8 @@ static void ack_retry_work_handler(struct k_work *work)
 	(void)k_msgq_get(&m_ack_retry_msgq, &st, K_NO_WAIT);
 
 	int64_t tx_end;
-	int ret = tx_frame_at(st.frame_type, st.body, st.body_len, st.counter, &tx_end);
+	int ret = tx_frame_at(st.frame_type, P2P_FCTRL_CONFIRMED, st.body, st.body_len, st.counter,
+			      &tx_end);
 
 	if (ret) {
 		LOG_WRN("Ack retry (counter %u) send failed: %d", st.counter, ret);
@@ -2352,7 +2383,7 @@ static int send_confirmed(uint8_t frame_type, const uint8_t *body, size_t body_l
 	uint32_t counter;
 	int64_t tx_end;
 
-	int ret = tx_frame(frame_type, body, body_len, &counter, &tx_end);
+	int ret = tx_frame(frame_type, P2P_FCTRL_CONFIRMED, body, body_len, &counter, &tx_end);
 
 	if (ret) {
 		return ret;
@@ -2567,10 +2598,14 @@ static void rx_work_handler(struct k_work *work)
 			continue;
 		}
 
-		uint32_t net_id = sys_get_be32(&msg.buf[0]);
-		uint16_t dev_addr = sys_get_be16(&msg.buf[4]);
-		uint8_t frame_type = msg.buf[6];
-		uint32_t counter = sys_get_be32(&msg.buf[7]);
+		struct p2p_hdr hdr;
+
+		p2p_hdr_get(msg.buf, &hdr);
+
+		uint32_t net_id = hdr.net_id;
+		uint16_t dev_addr = hdr.dev_addr;
+		uint8_t frame_type = hdr.frame_type;
+		uint32_t counter = hdr.counter;
 
 		if (net_id != m_net_id) {
 			LOG_DBG("RX foreign net_id %u; ignored", net_id);
@@ -2703,10 +2738,15 @@ static void mark_ready(void)
  * are then the same code, not two spellings of it. */
 static void join_request_build(uint32_t nonce_val, uint8_t frame[P2P_JOIN_REQ_LEN])
 {
-	sys_put_be32(P2P_PREJOIN_NET_ID, &frame[0]);
-	sys_put_be16(P2P_PREJOIN_DEV_ADDR, &frame[4]);
-	frame[6] = APP_RADIO_P2P_FRAME_JOIN_REQUEST;
-	sys_put_be32(nonce_val, &frame[7]);
+	const struct p2p_hdr h = {
+		.net_id = P2P_PREJOIN_NET_ID,
+		.dev_addr = P2P_PREJOIN_DEV_ADDR,
+		.frame_type = APP_RADIO_P2P_FRAME_JOIN_REQUEST,
+		.fctrl = 0, /* join frames carry FCtrl 0 (decision #22) */
+		.counter = nonce_val,
+	};
+
+	p2p_hdr_put(frame, &h);
 
 	uint8_t *body = &frame[P2P_HDR_LEN];
 
@@ -2777,7 +2817,7 @@ static int send_join_request(uint32_t *used_nonce, int64_t *tx_end_ms)
 		return -EIO;
 	}
 
-	uint8_t frame[P2P_JOIN_REQ_LEN]; /* 41 B */
+	uint8_t frame[P2P_JOIN_REQ_LEN]; /* 42 B */
 
 	join_request_build(nonce_val, frame);
 
@@ -2811,7 +2851,7 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 	uint8_t buf[P2P_FRAME_MAX];
 	int16_t rssi;
 	int8_t snr;
-	size_t want = P2P_JOIN_ACCEPT_LEN; /* 42 B, unchanged by #417 */
+	size_t want = P2P_JOIN_ACCEPT_LEN; /* 43 B (12 B header since decision #22) */
 
 	int len = p2p_rx_window(tx_end_ms, P2P_RX1_DELAY_DEFAULT_S, (uint8_t)want, buf, sizeof(buf),
 				&rssi, &snr);
@@ -2825,15 +2865,16 @@ static int recv_join_accept(uint32_t dev_nonce, int64_t tx_end_ms)
 		return -EBADMSG;
 	}
 
-	uint32_t net_id_hdr = sys_get_be32(&buf[0]);
-	uint16_t dev_addr_hdr = sys_get_be16(&buf[4]);
-	uint8_t frame_type = buf[6];
-	uint32_t counter = sys_get_be32(&buf[7]);
+	struct p2p_hdr hdr;
 
-	if (net_id_hdr != P2P_PREJOIN_NET_ID || dev_addr_hdr != P2P_PREJOIN_DEV_ADDR ||
-	    frame_type != APP_RADIO_P2P_FRAME_JOIN_ACCEPT || counter != dev_nonce) {
-		LOG_WRN("JoinAccept: header mismatch (type %u, ctr %u, want ctr %u)", frame_type,
-			counter, dev_nonce);
+	p2p_hdr_get(buf, &hdr);
+
+	/* FCtrl is not checked: RFU bits are ignored on receipt, and the tag
+	 * below covers the whole header anyway. */
+	if (hdr.net_id != P2P_PREJOIN_NET_ID || hdr.dev_addr != P2P_PREJOIN_DEV_ADDR ||
+	    hdr.frame_type != APP_RADIO_P2P_FRAME_JOIN_ACCEPT || hdr.counter != dev_nonce) {
+		LOG_WRN("JoinAccept: header mismatch (type %u, ctr %u, want ctr %u)",
+			hdr.frame_type, hdr.counter, dev_nonce);
 		return -EBADMSG;
 	}
 
@@ -3884,7 +3925,8 @@ static void debug_compose_work_handler(struct k_work *work)
 		return;
 	}
 
-	res->ret = build_frame(APP_RADIO_P2P_FRAME_TELEMETRY, body, body_len, m_fcnt, res->frame);
+	res->ret = build_frame(APP_RADIO_P2P_FRAME_TELEMETRY, P2P_FCTRL_CONFIRMED, body, body_len,
+			       m_fcnt, res->frame);
 	res->frame_len = P2P_HDR_LEN + body_len + P2P_TAG_LEN;
 }
 

@@ -65,7 +65,7 @@ Mirrors `app_radio_p2p.c` exactly (kept in sync **by hand** — this is a delibe
 separate, minimal firmware, not a shared module):
 
 ```
-header:     net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | counter(4 BE)   11 B
+header:     net_id(4 BE) | dev_addr(2 BE) | frame_type(1) | FCtrl(1) | counter(4 BE)   12 B
 
 join handshake (0xF0/0xF1, doc/p2p.md §5.3):
   body:     cleartext (JoinRequest 10 B, JoinAccept 15 B)
@@ -74,7 +74,7 @@ join handshake (0xF0/0xF1, doc/p2p.md §5.3):
 
 data plane (telemetry/alarm/response/ack, doc/p2p.md §3.1):
   nonce:    counter(4 BE) | dev_addr(2 BE) | frame_type(1) | direction(1) | 0*5
-  crypto:   AES-CCM (AES-128, 4 B tag) under session_key, 11 B header as AAD
+  crypto:   AES-CCM (AES-128, 4 B tag) under session_key, 12 B header as AAD
 ```
 
 The join handshake always runs at the pre-join `net_id`/`dev_addr` of `0`
