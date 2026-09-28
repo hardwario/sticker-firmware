@@ -121,8 +121,12 @@ From `tower-firmware/src/radio/frame.rs` and `crates/tower-net-core`:
   - TX counter reservation: keep the existing NVS reservation (`p2pfc`, +256 per boot).
   - The counter is spent **right after sealing, before TX** on every send path (TOWER's
     `afa_send` violates this — upstream fix U1, §11).
-  - Downlink replay lane on the node is persisted on **every** accept (downlinks are rare;
-    TOWER's lazy `P = 32` leaves a replay window after a reboot).
+  - Downlink replay lane on the node is **RAM only**, reset per session and on reboot (P1
+    D-d). This is replay-safe without persistence: the node listens only right after its own
+    uplink, and accepts a gateway frame only after an authenticated ACK whose `acked` equals
+    the counter it just spent. The TX counter is NVS-reserved and never reused, so no
+    recorded ACK can match. That ACK lifts the lane above every older gateway frame before
+    the DL window opens. TOWER's lazy `P = 32` persistence is not needed.
   - Duty: the existing sliding-hour ledger (`struct app_radio_duty`), not TOWER's token bucket.
 
 Everything in this section is covered by KAT vectors **generated from the Rust reference**

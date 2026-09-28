@@ -1,7 +1,7 @@
 # 447 — RadioState: radio link state and diagnostics (GetRadioState)
 
 Issue: #446 · PR: #447 (into `feat-p2p`) · Related: #409 A2, #423, #439 (transport
-layer), #442/#443 (P2P ADR), #445 (24 h announce)
+layer), #445 (24 h announce)
 
 ## Why
 
