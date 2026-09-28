@@ -163,15 +163,16 @@ gone now:
 - The init chain runs while the carousel plays. On the debug P2P bench, NFC serves a phone
   **1.19 s** after reset instead of 6.19 s, which matters most for a phone kept on the tag
   across an NFC-triggered reboot.
-- The periodic status and heartbeat blinks start after the carousel ends. They no longer
-  queue behind it, which caused a stale drop and a `k_msgq_put` error.
+- A heartbeat or status blink requested during the carousel goes stale behind it and is
+  dropped silently; the next one follows within 3 s. `app_led` no longer logs stale drops or
+  a full queue: every request is a periodic or best-effort indication.
 - `app_led_hold()` hands the pins to the NFC interaction LED:
   - In every lit NFC state (detected, session, result), `app_nfc.c` takes the hold.
   - It releases the hold once the LED is off and the keep-awake window has closed.
   - While held, the LED thread writes no pin, cuts a running carousel or blink short, and
     drops requests: new ones return `-EBUSY`, and queued ones are discarded.
   - The result: the carousel, heartbeat, status and alarm blinks never mix into a tap.
-- Cost: +408 B flash and +24 B RAM on release.
+- Cost: +336 B flash and +24 B RAM on release.
 
 ---
 
