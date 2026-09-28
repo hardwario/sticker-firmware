@@ -11,7 +11,7 @@ This document lists **only the changes introduced in firmware v1.5.0** relative 
 | Buzzer | **New** — alarm-driven melodies (#397, Phase 2 of #338): the buzzer HW variant now sounds automatically while any alarm is active, gated on a new global `alarm-buzzer-mode` config key |
 | Debug builds | **New** — 8 independently Kconfig-toggleable subsystems (#395): `debug.conf` ships a lean default (W1, accelerometer, buzzer, PIR off) with real flash/RAM headroom instead of a maximally-squeezed image; `CONFIG_RADIO_LORAWAN=n` disables all radio for bench work. Release builds unaffected. |
 | Radio: P2P | **New** — the raw-LoRa point-to-point transport is complete on the node (#118): `radio-mode p2p` pairs with a Proximos `Control.radio.P2P` central over a FIBER modem, with an acknowledged data plane, downlink commands, network-initiated pairing control, per-node TX power, and strict EU868 duty compliance. LoRaWAN is unaffected — both stacks link into the same image and the choice is made at boot. |
-| LED | **Changed** — red and green are plain GPIO again, as in v1.4.0. The PWM path from #301 is removed, mainly to save ~2 KB of flash; it also froze in Stop mode on release builds, so the heartbeat and the boot fades were broken. The boot carousel is the v1.4.0 hard blink and no longer holds up the boot; the NFC interaction LED holds the indicator (§3). |
+| LED | **Changed** — red and green are plain GPIO again, as in v1.4.0. The PWM path from #301 is removed, mainly to save ~2 KB of flash; it also froze in Stop mode on release builds, so the heartbeat and the boot fades were broken. The boot carousel is the v1.4.0 hard blink and no longer holds up the boot; the NFC interaction LED holds the indicator (#467, §3). |
 | LoRaWAN | **New** — autonomous settings-info uplink after boot (#412): right after the join `Info`, the device pushes a one-page `ConfigDump` on fPort 85 with its key operating settings + detected 1-Wire slot types, so the network learns the effective config without polling. |
 | LoRaWAN | **Fixed** — LoRaWAN glue in the Zephyr fork (`sticker-zephyr` `v4.3.0-sticker2-branch`, #421): a (re)join no longer returns the stale result of an earlier link-check / device-time confirm (L-7, #241); MAC-confirm waits are bounded (`-ETIMEDOUT` instead of a wedged `m_work_q`, #181); all LoRaMac access is serialised by one MAC lock (#241). |
 | LoRaWAN | **Fix** — region guard (#409 A1): a stored `lrw-region` that is not compiled into the image no longer kills LoRaWAN init silently — the radio stays silent (never falls back to another band), reported as `lrw_disabled` plus an error log. |
@@ -155,7 +155,7 @@ removed again. All three LEDs are plain GPIO, as in v1.4.0.
 - The heartbeat is the v1.4.0 one again: a 5 ms green blink every 3 s at full brightness
   (#390: about +6 µA average, accepted).
 
-### Boot carousel no longer blocks; NFC holds the indicator
+### Boot carousel no longer blocks; NFC holds the indicator (#467)
 
 `main()` used to sleep 5 s after queueing the 3 s carousel. The sleep came with the move of
 the LED to its own thread (`847327f7`); before that the carousel blocked for its own 3 s. It is
@@ -174,6 +174,18 @@ gone now:
     drops requests: new ones return `-EBUSY`, and queued ones are discarded.
   - The result: the carousel, heartbeat, status and alarm blinks never mix into a tap.
 - Cost: +336 B flash and +24 B RAM on release.
+- **HW-verified 2026-09-28** (`ffd1002`, debug P2P bench, SN 2162190413, reboot with RTT
+  attached):
+  - `NFC: GPO IRQ on PB12 ready` at 1.236 s;
+  - no WRN / ERR in the first ~25 s, and nothing from `app_led`;
+  - P2P Info + settings-info announced at 1.88 s, first ACK at 3.09 s;
+  - visually (release + debug), the full carousel plays at boot and the first heartbeat follows
+    it.
+
+  Still to run with a phone:
+  - a phone kept on the tag across an NFC-triggered reboot (the carousel is cut, the NFC LED
+    clean);
+  - an alarm during a `getinfo` loop (no alarm blink while the NFC LED holds).
 
 ---
 

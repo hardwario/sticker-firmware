@@ -114,7 +114,12 @@ after reset. The init chain runs meanwhile, and the first heartbeat follows only
 > in the boot log it starts, so I can confirm the carousel visually. Collect the boot log to
 > correlate timing.
 
-- [ ] Pass
+- [x] Pass — #467, 2026-09-28 (release + debug)
+
+> **HW-verified 2026-09-28** (#467, `ffd1002`):
+> - the full carousel plays at boot, and the first heartbeat follows it (visual, release + debug);
+> - boot log (debug P2P bench, SN 2162190413): no `app_led` WRN / ERR, NFC ready at 1.236 s;
+>   the init chain no longer waits for the carousel.
 
 ### G3 — Shell reachable over RTT
 
