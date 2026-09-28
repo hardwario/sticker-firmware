@@ -692,34 +692,13 @@ rollback to 0.2.2-rxsens when the node runs end.
 **H2 — Northbridge ↔ Hub link (D5, decided 2026-09-28).** Our own protocol, internal to
 the Hub: today's HDLC/CRC16 framing on ttyAMA3, extended with the TOWER gateway messages
 below. TOWER compatibility is required only on air, so this link has no upstream dependency
-and no planned switch to the tower console. The whole link (framing, v1 + v2 messages,
-state machine, recovery, event delivery) is in
-[470 - Northbridge-Hub link protocol.md](470%20-%20Northbridge-Hub%20link%20protocol.md). The NB announces
-`proto_version = 2` in `EVT_BOOT` / `GET_INFO`; the central picks the TOWER adapter by it.
-Frozen message set (full text: proximos-v2 `plan/control/radio/p2p_tower_gateway.md` §2),
-LE, response = `0x40 | cmd` + status (new: 6 `NO_SPACE`, 7 `NOT_FOUND`):
-
-| Dir | Cmd | Message |
-|---|---|---|
-| → NB | 0x02 | `SET_RADIO_CONFIG` (existing; `lora` only) |
-| → NB | 0x05 | `TX_SCHEDULE` (existing; JoinAccept only, sealed by the central) |
-| → NB | 0x10 | `TWR_START {net_id u32, turnaround_ms u8, dl_gap_ms u8, flags}` |
-| → NB | 0x11 | `TWR_NODE_ADD {addr u32, session_key[16], last_seen u32, flags: bit0 HOME}` |
-| → NB | 0x12 | `TWR_NODE_REMOVE {addr}` |
-| → NB | 0x13 | `TWR_CTR_BLOCK {first u32, last u32}` |
-| → NB | 0x14 | `TWR_QUEUE_PUSH {addr, item u16, ttl_s u16, flags: bit0 CONFIRMED, len, plaintext ≤ 78}` |
-| → NB | 0x15 | `TWR_QUEUE_DROP {addr, item \| 0}` |
-| → NB | 0x16 | `TWR_GET_STATS` (u32 list, append-only) |
-| → NB | 0x17 | `TWR_NODE_LIST {start u16}` → paged `{addr, last_seen, flags}`, no keys |
-| NB → | 0x80 | `EVT_BOOT` (existing; proto 2, empty table → the central restores) |
-| NB → | 0x81 | `EVT_RX` (existing raw frame: `dest = 0` or unknown `src`; `t_ms, rssi, snr_q, frame`) |
-| NB → | 0x84 | `EVT_TWR_UPLINK {t_ms u64, rssi i16, snr_q i8, frame_flags, addr, counter, ack (0 none / 1 sent / 2 +PENDING / 3 late / 4 no counter), len, plaintext}` — fresh frames only |
-| NB → | 0x85 | `EVT_TWR_TX {addr, item, outcome (DELIVERED / SENT / NOT_DELIVERED / EXPIRED / RADIO_ERR / NO_COUNTER), gw_counter, node_ack_counter, ack_rssi}` |
-| NB → | 0x86 | `EVT_TWR_CTR_LOW {next, last}` below 25 % left; fail-closed when exhausted |
-
-The legacy proto-1 central path stays (selected by the NB image, TOWER sessions stored
-apart) until P8, so the bench can still roll back to the legacy NB. The address collision
-check runs at `node-add` **and** at join.
+and no planned switch to the tower console. **Flag day** (Hynek 2026-09-28): the NB image
+and the Hub software are flashed together — no version negotiation, no capability bits, no
+legacy (proto-1) path in the central; rollback = both previous images. The whole link
+(framing, messages, `GET_INFO` status, state machine, recovery, event delivery) is in
+[470 - Northbridge-Hub link protocol.md](470%20-%20Northbridge-Hub%20link%20protocol.md);
+the message tables live only there. The address collision check runs at `node-add`
+**and** at join.
 
 **H3 — Central** (proximos-v2 `control-radio`, `p2p/`):
 

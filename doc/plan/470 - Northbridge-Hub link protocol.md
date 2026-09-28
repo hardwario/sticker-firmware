@@ -1,4 +1,4 @@
-# Northbridge ↔ Hub link protocol v2 (TOWER gateway)
+# Northbridge ↔ Hub link protocol (TOWER gateway)
 
 *Type: design · Status: draft · Date: 2026-09-28 · Parent: #470 plan §9.4, §13.2 H2, D5*
 
@@ -8,9 +8,9 @@ is **our own protocol**, internal to the Hub. It does not follow the tower-proto
 and has no upstream dependency (D5, Hynek 2026-09-28).
 
 This document is the whole link in one place:
-- the transport and framing, unchanged from v1 (proximos-v2
+- the transport and framing, taken over from today's link (proximos-v2
   `plan/system/lora/design.md` §3);
-- the v1 commands that stay;
+- the commands of today's link that stay;
 - the gateway messages frozen in H2 (proximos-v2 `plan/control/radio/p2p_tower_gateway.md`
   §2, Hub controller);
 - the state machine and the recovery rules;
@@ -33,7 +33,7 @@ this file points there.
 The split follows from T3/D15: the time-critical part (ACK, `PENDING`, DL timing) is on
 the MCU, and everything durable is in the central.
 
-## 2. Transport and framing (unchanged from v1)
+## 2. Transport and framing (taken over from today's link)
 
 - UART `ttyAMA3`, 115200 8N1. Bench: the same byte stream over J-Link RTT
   (`BENCH_RTT_BRIDGE`).
@@ -59,47 +59,52 @@ the MCU, and everything durable is in the central.
   | 5 | `INTERNAL` |
   | 6 | `NO_SPACE` |
   | 7 | `NOT_FOUND` |
-  | 8 | `UNSUPPORTED` (unknown command; the host also accepts `BAD_PARAM` or a timeout from a v1 image) |
+  | 8 | `UNSUPPORTED` (unknown command) |
 
 - Command timeout on the host: 500 ms.
 - Retransmission of commands: only for idempotent commands (§5, *Idempotent* column).
 - Bad CRC: drop the frame, resync on the next `0x7E`, count `crc_err`.
 
 **Throughput check.** At 115200 bd one byte takes ~87 µs.
-- The largest v2 message is `EVT_TWR_UPLINK` with 78 B plaintext, ~100 B framed. That is
+- The largest message is `EVT_TWR_UPLINK` with 78 B plaintext, ~100 B framed. That is
   ~9 ms on the wire.
 - A LoRa SF7 frame is on air for ≥ 40 ms, so the link is never the bottleneck. This holds
   even for a full peer-table restore (256 × `TWR_NODE_ADD` ≈ 256 × 34 B ≈ 0.8 s).
 - The ACK is sent from the MCU and does not wait for the UART. Events are sent only after
   the ACK is scheduled.
 
-## 3. Versioning and capabilities
+## 3. Flag day — no versioning (Hynek 2026-09-28)
 
-- `EVT_BOOT` and `GET_INFO` carry `proto_version`:
-  - `1` = today's keyless modem (legacy P2P);
-  - `2` = the TOWER gateway (this document).
-- The central picks the adapter by that byte, so the NB image is the switch and flashing
-  the previous image is the rollback.
-- `GET_INFO` already carries the modem clock (`now_ms u64` after the version bytes, the
-  `TimeAns` clock anchor). The v2 response appends, after the existing diag and turnaround
-  tails:
+The NB firmware and the Hub software are flashed together. There is no version
+negotiation, no capability bits and no backward compatibility:
+- no legacy (keyless P2P modem) path in the central;
+- no rules for older or newer images;
+- rollback = flashing the previous NB image **and** the previous Hub image together.
 
-  ```
-  caps u32            (bit0 TWR gateway, bit1 EVT_ACK delivery §4.1, bit2 KEEP_NEWER §4.2,
-                       bit3 FSK (P5), bit4 multi-gateway HOME handling (P7))
-  peers_max u16, queue_max u16, evt_ring u8
-  ```
+`fw_ver` in `EVT_BOOT` / `GET_INFO` is for diagnostics only. The central logs a mismatch
+against the image it was built with, but never switches behaviour by it.
 
-- **Compatibility rule:**
-  - Bodies only grow at the end, and a receiver ignores trailing bytes it does not know.
-  - A new behaviour is used only when the matching `caps` bit is set.
-  - An unknown command gets the `UNSUPPORTED` status. An unknown event is ignored and
-    counted.
+### 3.1 `GET_INFO` — the NB status
 
-## 4. Additions to the frozen H2 set (proposed, additive)
+`GET_INFO` returns everything about the NB in one response (it also replaces a separate
+stats command):
 
-Both of these close gaps that come from the NB **ACKing locally**. Neither changes the
-body of any frozen message; both are gated by `caps`.
+| Group | Fields |
+|---|---|
+| Identity | `fw_ver u8[3]`, `git_sha u32`, `reset_cause u8`, `build_flags u8` (b0 debug, b1 RTT bridge) |
+| Clock | `uptime_ms u64`, `now_ms u64` (modem clock at RSP build = the `TimeAns` anchor) |
+| State | `state u8` (0 `BOOT`, 1 `CONFIGURED`, 2 `GATEWAY`), `net_id u32`, `turnaround_ms u8`, `dl_gap_ms u8` |
+| Radio | `modulation u8` (0 lora), `freq_hz u32`, `sf u8`, `bw u8`, `cr u8`, `preamble u16`, `tx_power_dbm i8`, `radio_flags u8` |
+| Counters (u32, since boot) | `rx_total`, `rx_fresh`, `rx_dup`, `rx_replay`, `rx_mic_fail`, `rx_unknown_src`, `rx_join_fwd`, `rx_not_for_us`, `rx_bad_hdr`, `tx_total`, `acks_sent`, `acks_late`, `acks_suppressed`, `dl_sent`, `dl_delivered`, `dl_not_delivered`, `dl_expired`, `link_crc_err`, `evt_resent` |
+| Duty | `airtime_ms_last_hour u32` |
+| Resources | `peers u16`, `peers_max u16`, `queue_used u16`, `queue_max u16`, `evt_ring_used u8`, `evt_ring_max u8`, `ctr_next u32`, `ctr_last u32` |
+
+The layout is fixed for the image (flag day). The field order above is the byte order on
+the link.
+
+## 4. Additions to the frozen H2 set
+
+Both of these close gaps that come from the NB **ACKing locally**.
 
 ### 4.1 Reliable delivery of uplink events (`EVT_ACK`)
 
@@ -150,37 +155,35 @@ sends `last_seen = 0` without the flag.
 
 ### 5.1 Commands (host → NB)
 
-| ID | Name | Body | v | Idempotent | Note |
-|---|---|---|---|---|---|
-| `0x01` | `GET_INFO` | — | 1 | yes | RSP: `proto_version, fw_ver[3], uptime_ms, rx_count, tx_count, crc_err`, radio config echo; v2 appends §3 |
-| `0x02` | `SET_RADIO_CONFIG` | `freq_hz u32, sf u8, bw u8, cr u8, preamble u16, tx_power_dbm i8, flags u8` (b0 public sync word, b1 IQ inverted) | 1 | yes | v2: `lora` only; not allowed in `GATEWAY` (`INVALID_STATE`), stop first |
-| `0x03` | `RX_START` | — | 1 | yes | legacy mode only; in v2 `TWR_START` enters RX |
-| `0x04` | `RX_STOP` | — | 1 | yes | leaves `GATEWAY`, keeps the table, queue and counter |
-| `0x05` | `TX_SCHEDULE` | `tx_id u8, t_ms u64, len u8, frame[len]` | 1 | no | v2: **JoinAccept only** (sealed by the central); one slot; collision with an ACK/DL → `BUSY` or `EVT_TX_DONE LATE` |
-| `0x06` | `TX_CANCEL` | `tx_id u8` | 1 | yes | |
-| `0x10` | `TWR_START` | `net_id u32, turnaround_ms u8 (20..60), dl_gap_ms u8 (20..60), flags u8` (b0 `ACK_ENABLED`) | 2 | yes | needs a config and a counter block, otherwise `INVALID_STATE` |
-| `0x11` | `TWR_NODE_ADD` | `addr u32, session_key[16], last_seen u32, flags u8` (b0 `HOME`, b1 `KEEP_NEWER` §4.2) | 2 | yes | upsert; a new key drops the node's queue; `BAD_PARAM` for addr `0` / `0xFFFFFFFF` / `net_id`; `NO_SPACE` |
-| `0x12` | `TWR_NODE_REMOVE` | `addr u32` | 2 | yes (`NOT_FOUND` = done) | drops the peer and its queue |
-| `0x13` | `TWR_CTR_BLOCK` | `first u32, last u32` | 2 | yes | replaces the block; the NB never goes below the old `next` (a block with `last < next` → `BAD_PARAM`) |
-| `0x14` | `TWR_QUEUE_PUSH` | `addr u32, item u16 ≠ 0, ttl_s u16, flags u8` (b0 `CONFIRMED`), `len u8, plaintext ≤ 78` | 2 | **yes, by `(addr, item)`**: the same item already queued → `OK` without a duplicate | plaintext = the whole `0x81…` / `0x91…` envelope; sealed at TX time |
-| `0x15` | `TWR_QUEUE_DROP` | `addr u32, item u16` (0 = all) | 2 | yes | no `EVT_TWR_TX` for dropped items |
-| `0x16` | `TWR_GET_STATS` | — | 2 | yes | append-only `u32` list (HC §2.1) + `acks_suppressed, evt_resent, evt_ring_used` |
-| `0x17` | `TWR_NODE_LIST` | `start u16` | 2 | yes | paged `{addr, last_seen, flags}`, max 24 per RSP, **never keys** |
-| `0x18` | `TWR_EVT_ACK` | `seq u8` | 2 (§4.1) | yes | cumulative; no RSP (saves the link) |
+| ID | Name | Body | Idempotent | Note |
+|---|---|---|---|---|
+| `0x01` | `GET_INFO` | — | yes | RSP: the NB status, §3.1 |
+| `0x02` | `SET_RADIO_CONFIG` | `freq_hz u32, sf u8, bw u8, cr u8, preamble u16, tx_power_dbm i8, flags u8` (b0 public sync word, b1 IQ inverted) | yes | `lora` only; not allowed in `GATEWAY` (`INVALID_STATE`), stop first |
+| `0x04` | `RX_STOP` | — | yes | leaves `GATEWAY`, keeps the table, queue and counter |
+| `0x05` | `TX_SCHEDULE` | `tx_id u8, t_ms u64, len u8, frame[len]` | no | **JoinAccept only** (sealed by the central); one slot; collision with an ACK/DL → `BUSY` or `EVT_TX_DONE LATE` |
+| `0x06` | `TX_CANCEL` | `tx_id u8` | yes | |
+| `0x10` | `TWR_START` | `net_id u32, turnaround_ms u8 (20..60), dl_gap_ms u8 (20..60), flags u8` (b0 `ACK_ENABLED`) | yes | needs a config and a counter block, otherwise `INVALID_STATE` |
+| `0x11` | `TWR_NODE_ADD` | `addr u32, session_key[16], last_seen u32, flags u8` (b0 `HOME`, b1 `KEEP_NEWER` §4.2) | yes | upsert; a new key drops the node's queue; `BAD_PARAM` for addr `0` / `0xFFFFFFFF` / `net_id`; `NO_SPACE` |
+| `0x12` | `TWR_NODE_REMOVE` | `addr u32` | yes (`NOT_FOUND` = done) | drops the peer and its queue |
+| `0x13` | `TWR_CTR_BLOCK` | `first u32, last u32` | yes | replaces the block; the NB never goes below the old `next` (a block with `last < next` → `BAD_PARAM`) |
+| `0x14` | `TWR_QUEUE_PUSH` | `addr u32, item u16 ≠ 0, ttl_s u16, flags u8` (b0 `CONFIRMED`), `len u8, plaintext ≤ 78` | **yes, by `(addr, item)`**: the same item already queued → `OK` without a duplicate | plaintext = the whole `0x81…` / `0x91…` envelope; sealed at TX time |
+| `0x15` | `TWR_QUEUE_DROP` | `addr u32, item u16` (0 = all) | yes | no `EVT_TWR_TX` for dropped items |
+| `0x17` | `TWR_NODE_LIST` | `start u16` | yes | paged `{addr, last_seen, flags}`, max 24 per RSP, **never keys** |
+| `0x18` | `TWR_EVT_ACK` | `seq u8` | yes | cumulative; no RSP (saves the link) |
 
 ### 5.2 Events (NB → host)
 
 | ID | Name | Body | Delivery | Note |
 |---|---|---|---|---|
-| `0x80` | `EVT_BOOT` | `proto_version, fw_ver[3], reset_cause` | best-effort | the table, queue and block are empty; the host runs §6.2 |
-| `0x81` | `EVT_RX` | `t_ms u64, rssi i16, snr i8, reserved u8, len u8, frame[len]` | ring | v2: `dest == 0` (JoinReq) or an unknown `src`; no ACK |
+| `0x80` | `EVT_BOOT` | `fw_ver[3], git_sha u32, reset_cause` | best-effort | the table, queue and block are empty; the host runs §6.2 |
+| `0x81` | `EVT_RX` | `t_ms u64, rssi i16, snr i8, reserved u8, len u8, frame[len]` | ring | `dest == 0` (JoinReq) or an unknown `src`; no ACK |
 | `0x82` | `EVT_TX_DONE` | `tx_id, status, t_actual_ms` | best-effort | the `TX_SCHEDULE` outcome only |
 | `0x83` | `EVT_LOG` | ASCII | best-effort | debug builds only |
 | `0x84` | `EVT_TWR_UPLINK` | `t_ms u64, rssi i16, snr i8, frame_flags u8, addr u32, counter u32, ack u8, len u8, plaintext` | ring | fresh frames only; `ack`: 0 none, 1 sent, 2 sent + `PENDING`, 3 late, 4 no counter, **5 suppressed (ring full, §4.1)** |
 | `0x85` | `EVT_TWR_TX` | `addr, item, outcome, gw_counter, node_ack_counter, ack_rssi` | ring | outcome `DELIVERED / SENT / NOT_DELIVERED / EXPIRED / RADIO_ERR / NO_COUNTER` |
 | `0x86` | `EVT_TWR_CTR_LOW` | `next u32, last u32` | best-effort, repeated every 10 s until a new block | below 25 % left; fail-closed when the block is used up |
 
-SNR in whole dB (the Zephyr driver reports whole dB; v1's "quarter-dB" note does not hold).
+SNR in whole dB (the Zephyr driver reports whole dB).
 
 ## 6. State machine and sequences
 
@@ -199,7 +202,7 @@ BOOT ──SET_RADIO_CONFIG──▶ CONFIGURED ──TWR_CTR_BLOCK + TWR_START�
 
 ### 6.2 NB boot (restore)
 
-`EVT_BOOT` → `GET_INFO` (proto, caps, clock anchor) → `SET_RADIO_CONFIG` → `TWR_CTR_BLOCK`
+`EVT_BOOT` → `GET_INFO` (status, clock anchor) → `SET_RADIO_CONFIG` → `TWR_CTR_BLOCK`
 (a new block, persisted **before** it is sent) → `TWR_NODE_ADD` for every joined node
 (exact `last_seen`, `HOME`, `KEEP_NEWER`) → `TWR_START` → `TWR_QUEUE_PUSH` of every DL
 without an outcome.
@@ -244,10 +247,10 @@ central (proximos-v2 `p2p_tower_gateway.md` §3.2).
 - Session keys go over the UART **in plaintext**. The UART is a trace on the Hub board,
   inside the enclosure. Accepted, same class as the key in NB RAM (T3). The threat is
   physical access to the Hub, which leads to rejoin / new AppKeys (#470 §6.6).
-- No command reads a key back (`TWR_NODE_LIST` has none, `GET_STATS` has none). The
+- No command reads a key back (`TWR_NODE_LIST` and `GET_INFO` have none). The
   debug `EVT_LOG` must never print keys or plaintext.
-- `/dev/ttyAMA3` only for `control-radio` (`DeviceAllow=`, opened after landlock, as in
-  v1).
+- `/dev/ttyAMA3` only for `control-radio` (`DeviceAllow=`, opened after landlock, as
+  today).
 - The NB never persists keys, counters or the queue (D15). RDP on in production.
 
 ## 8. Toward multi-gateway (P7, not now)
@@ -292,8 +295,9 @@ Hubs):
 
 Everything in HC's frozen set holds. §4 adds:
 - NB: an event ring + resend, the `acks_suppressed` backpressure, the `KEEP_NEWER` merge,
-  `UNSUPPORTED`, the v2 tail of `GET_INFO`;
-- central: the `TWR_EVT_ACK` send after persisting, `KEEP_NEWER` on restore, dedup by
+  `UNSUPPORTED`, `GET_INFO` per §3.1 (replaces `TWR_GET_STATS`), no `RX_START`;
+- central: no legacy proto-1 path and no `proto_version` switch (§3), the `TWR_EVT_ACK`
+  send after persisting, `KEEP_NEWER` on restore, dedup by
   delivery `seq`.
 
 Reviewed by the Hub controller 2026-09-28: §4.1 and §4.2 are agreed with the fixes above,
